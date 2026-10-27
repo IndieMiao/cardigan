@@ -1,9 +1,10 @@
 # Cardigan · 多 Agent 协作开发系统开发方案
 
-- 版本：v0.3（2026-10-27）
+- 版本：v0.4（2026-10-27）
+  - v0.4：D2 决定技术栈：TypeScript（Node 24 LTS）+ pnpm workspace + SQLite（WAL）+ React（Vite，纯 SPA）；§20.4 明确 DeepSeek 通过 Pi 实现，并记录项目级 Pi 插件。
   - v0.3：项目定名 Cardigan；D1 决定自研看板，不依赖 Gitea 等外部看板；Git 改为"主机发起"模型（§12）；新增 §8.7 看板第一版范围和 §20 仓库规划。
   - v0.2：新增附录 C（看板工具评估）。
-- 用途：后续开发的指导文档。设计已基本收敛；技术栈与若干决策仍待定，见 §15。
+- 用途：后续开发的指导文档。设计已基本收敛；技术栈已确定（D2），其余若干决策仍待定，见 §15。
 - 来源：本目录下三份讨论记录（见附录 B）。凡是"已核实"的外部能力，均来自 2026-10-24 查阅的官方文档或源码。
 
 ---
@@ -948,7 +949,7 @@ RuntimeRef = {machine_id, herdr_machine, workspace_id, pane_id, agent_name,
 | 编号 | 决策 | 选项 / 建议 |
 |---|---|---|
 | D1 | 看板层 | **已决定（2026-10-27）：自研看板**，不依赖 Gitea 等外部看板。理由：数据只在控制面一处，不需要同步层；端到端测试不依赖外部服务；商业化不受上游约束。第一版范围见 §8.7；外部看板的评估保留在附录 C 作参考 |
-| D2 | 控制面技术栈 | 建议 TypeScript（Node LTS）：官方 MCP SDK 成熟，Web 可以同语言，OpenCode / Pi 的 SDK 也是 TS，便于以后做直连适配器。Herdr 通过 CLI 子进程调用，与语言无关。数据库第一版用 SQLite（WAL，单写入进程），需要多写入时再迁移到 Postgres |
+| D2 | 技术栈 | **已决定（2026-10-27）**：TypeScript（Node 24 LTS）+ pnpm workspace；数据库第一版用 SQLite（WAL，单写入进程），需要多写入时再迁移到 Postgres；Web 前端用 React + Vite，纯 SPA，静态文件由 `apps/server` 提供，不用 SSR。理由：官方 MCP SDK 成熟，Web 可以同语言，OpenCode / Pi 的 SDK 也是 TS，便于以后做直连适配器；实现由 AI 完成，React 生成的代码最稳定。Herdr 通过 CLI 子进程调用，与语言无关。HTTP 框架、SQLite 驱动、测试框架等细节在骨架任务的计划中确定 |
 | D3 | 每个角色用哪个 Harness 和模型 | 先每个角色选一种，避免第一版同时深度适配多种 |
 | D4 | 卡片 Done 条件 | 设计走查、测试验收、PM 验收中，哪些必须通过；建议按卡片模板配置 |
 | D5 | Session 策略 | 默认：Session 跟随 Assignment，跨 Run 复用；失联或上下文过长时替换。请确认 |
@@ -1020,7 +1021,7 @@ RuntimeRef = {machine_id, herdr_machine, workspace_id, pane_id, agent_name,
 
 | 阶段 | 粗估 | 主要不确定性 |
 |---|---|---|
-| Phase 0 | 1–2 周 | 技术栈（D2）尚未确认 |
+| Phase 0 | 1–2 周 | Herdr 多机预研（0.3）和各 Harness 接入 MCP（0.4）的结果 |
 | Phase 1 | 4–8 周（含自研看板，偏上限） | Agent 是否稳定遵守 MCP 协议；Herdr 状态检测的可靠性；看板范围膨胀 |
 | Phase 2 | 3–5 周（遵守 §13.3 时） | 工作机环境初始化，尤其移动端构建和真机测试 |
 | Phase 3 | 4–8 周以上 | 按需取舍 |
@@ -1074,7 +1075,7 @@ RuntimeRef = {machine_id, herdr_machine, workspace_id, pane_id, agent_name,
 
 ### 20.1 主仓库结构
 
-技术栈按 D2 建议的 TypeScript + pnpm workspace 设计；如果换语言，目录划分和依赖方向的规则不变。
+技术栈见 D2：TypeScript + pnpm workspace。
 
 ```
 cardigan/
@@ -1091,7 +1092,7 @@ cardigan/
 │   └── roles/           # 默认角色包 + 各 Agent CLI 的启动配置
 ├── apps/
 │   ├── server/          # 把各包组装起来的主进程，跑在主机上
-│   ├── web/             # 工作台 + 自研看板（§8）
+│   ├── web/             # 工作台 + 自研看板（§8）：React + Vite SPA
 │   └── cli/             # 管理命令：添加机器、指派、自检
 ├── e2e/                 # 端到端测试：SQLite + 本地 bare 仓库 + 模拟 Agent，跑附录 A
 └── deploy/examples/     # 通用部署示例（不含任何真实环境信息）
@@ -1118,10 +1119,21 @@ cardigan/
 | 角色 | 模型 / 工具 | 职责 |
 |---|---|---|
 | 规划 | Claude | 写各阶段的任务级计划 |
-| 实现 | Codex（Codex CLI）、DeepSeek（OpenCode 或 Pi） | 实现功能，附带单元测试 |
+| 实现 | Codex（Codex CLI）、DeepSeek（Pi） | 实现功能，附带单元测试 |
 | 验收测试 | 另一个实现模型（交叉） | 根据计划写验收测试和契约测试 |
 | 审核 | Claude | 只审核、提修改意见，不提交代码 |
 | 合并 | Claude 准备，你确认 | 冲突退回实现者修复 |
+
+DeepSeek 的 Pi 环境：
+
+- 插件在项目级声明（`.pi/settings.json`），不写用户级配置：
+  - `pi-subagents`：子 Agent（scout / worker / reviewer 等）；
+  - `pi-web-access`：查文档和资料，默认无需 API key；
+  - `cc-safety-net`：拦截破坏性命令（如 `git reset --hard`、`git push --force`、危险的 `rm -rf`）和读取密钥文件。Pi 执行工具前不会逐条确认，所以需要这层防护。
+- 首次在本仓库启动 Pi 时需要信任项目，否则以上插件不加载。
+- 本项目不加载用户级的 lark skill（与开发 Cardigan 无关，只会增加提示词）。Pi 的项目级排除规则管不到用户级目录，所以 `.pi/settings.json` 先显式列出 `~/.agents/skills`，再排除 `lark-*`（Pi 1.4.0 实测有效）。
+- 模型密钥用 Pi 的 `/login` 保存到 `~/.pi/agent/auth.json`（权限 600），不放进环境变量，也不写进仓库。这样 Pi 启动的子进程不会从环境变量继承到密钥。
+- Pi 每个目录只读第一个找到的上下文文件，顺序为 `AGENTS.override.md`、`AGENTS.md`、`CLAUDE.md`。因此在本仓库中 Pi 读 `AGENTS.md`，不会读到 Claude 的角色说明。
 
 ---
 

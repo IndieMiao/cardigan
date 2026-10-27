@@ -22,3 +22,6 @@ coverage/
 .idea/
 .vscode/
 *.swp
+
+# pi (project-level packages are installed here; only .pi/settings.json is tracked)
+.pi/npm/
