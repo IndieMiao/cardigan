@@ -14,7 +14,7 @@
 
 ## 状态
 
-Phase 0（预研与零代码验证）。技术栈尚未最终确认（见开发方案 §15 D2）。
+Phase 0（预研与零代码验证）。技术栈已确定：TypeScript + pnpm workspace + SQLite + React（见开发方案 §15 D2）。
 
 ## 文档
 

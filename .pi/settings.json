@@ -1,0 +1,11 @@
+{
+  "packages": [
+    "npm:pi-subagents",
+    "npm:pi-web-access",
+    "npm:cc-safety-net"
+  ],
+  "skills": [
+    "~/.agents/skills",
+    "!~/.agents/skills/lark-*/SKILL.md"
+  ]
+}
