@@ -1,6 +1,7 @@
 # Cardigan · 多 Agent 协作开发系统开发方案
 
-- 版本：v0.4（2026-10-27）
+- 版本：v0.5（2026-10-27）
+  - v0.5：§16 Phase 0 新增 0.7（代码骨架）和 0.8（同类产品对比、名字检查），0.6 改为敲定 D3–D8；新增任务级计划 `docs/plans/phase-0.md`。
   - v0.4：D2 决定技术栈：TypeScript（Node 24 LTS）+ pnpm workspace + SQLite（WAL）+ React（Vite，纯 SPA）；§20.4 明确 DeepSeek 通过 Pi 实现，并记录项目级 Pi 插件。
   - v0.3：项目定名 Cardigan；D1 决定自研看板，不依赖 Gitea 等外部看板；Git 改为"主机发起"模型（§12）；新增 §8.7 看板第一版范围和 §20 仓库规划。
   - v0.2：新增附录 C（看板工具评估）。
@@ -972,7 +973,11 @@ RuntimeRef = {machine_id, herdr_machine, workspace_id, pane_id, agent_name,
 | 0.3 | Herdr 预研：一台本机 + 一台远程机，验证 `--machine` 下的 worktree create / remove、agent prompt、agent wait、agent list；断线和门铃失败的表现 | 一页结论，包含确切的命令参数 |
 | 0.4 | MCP 预研：每个选定的 Harness 都能连上一个带 Bearer Token 的 Streamable HTTP MCP 测试服务 | 产出各 Harness 的 Launch Profile 草稿 |
 | 0.5 | 评估 herdr-projects；预研主机发起的 Git 模型：从工作机拉取 commit、推送基线、模拟断线后接管（1–2 天） | 给出 D8 的结论；Git 模型跑通 |
-| 0.6 | 敲定 D2–D7 | 更新本文档 |
+| 0.6 | 敲定 D3–D8（D2 已于 v0.4 决定） | 更新本文档 |
+| 0.7 | 代码骨架：pnpm workspace、§20.1 的全部包、依赖方向检查 | 全新 clone 上 build / test / lint / 依赖检查全部通过；故意违反依赖方向会被拦住 |
+| 0.8 | 同类产品对比、名字收尾检查（非开发） | 给出差异点和名字风险的结论 |
+
+任务级计划见 [`docs/plans/phase-0.md`](plans/phase-0.md)。
 
 ### Phase 1 · 单机 MVP（4–8 周）
 
