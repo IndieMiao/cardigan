@@ -281,14 +281,28 @@ test("pm, coder and reviewer walk a dev card from creation to done", async () =>
   }
 
   // --- coder: comment, then delivery D-1 -----------------------------------
-  await coder.callTool({
-    name: "post_comment",
-    arguments: {
-      idempotency_key: "e2e-comment",
-      card_id: card.id,
-      body: "fictional progress note",
-    },
-  });
+  const commentArgs = {
+    idempotency_key: "e2e-comment",
+    card_id: card.id,
+    body: "fictional progress note",
+  };
+  await coder.callTool({ name: "post_comment", arguments: commentArgs });
+  const commentSeq = payload(
+    await coder.callTool({
+      name: "get_updates",
+      arguments: { card_id: card.id },
+    }),
+  ) as { latest_seq: number; timeline: unknown[] };
+  // Replaying the comment key must not append a second timeline entry.
+  await coder.callTool({ name: "post_comment", arguments: commentArgs });
+  const commentReplay = payload(
+    await coder.callTool({
+      name: "get_updates",
+      arguments: { card_id: card.id },
+    }),
+  ) as { latest_seq: number; timeline: unknown[] };
+  expect(commentReplay.latest_seq).toBe(commentSeq.latest_seq);
+  expect(commentReplay.timeline).toHaveLength(commentSeq.timeline.length);
   const coderRun = provisionRun(assigned.coder ?? "");
   const d1 = payload(
     await coder.callTool({
@@ -445,13 +459,29 @@ test("pm, coder and reviewer walk a dev card from creation to done", async () =>
       arguments: completionArgs,
     }),
   ) as { id: string };
+  const beforeReplay = payload(
+    await coder.callTool({
+      name: "get_updates",
+      arguments: { card_id: card.id },
+    }),
+  ) as { latest_seq: number; events: unknown[]; timeline: unknown[] };
   const replay = payload(
     await coder.callTool({
       name: "submit_delivery",
       arguments: completionArgs,
     }),
   ) as { id: string };
+  // A replayed idempotency key returns the same delivery and writes nothing.
   expect(replay.id).toBe(completion.id);
+  const afterReplay = payload(
+    await coder.callTool({
+      name: "get_updates",
+      arguments: { card_id: card.id },
+    }),
+  ) as { latest_seq: number; events: unknown[]; timeline: unknown[] };
+  expect(afterReplay.latest_seq).toBe(beforeReplay.latest_seq);
+  expect(afterReplay.events).toHaveLength(beforeReplay.events.length);
+  expect(afterReplay.timeline).toHaveLength(beforeReplay.timeline.length);
 
   // --- pm acceptance turns the card done -----------------------------------
   const acceptanceRun = provisionRun(assigned.pm ?? "");
@@ -483,16 +513,6 @@ test("pm, coder and reviewer walk a dev card from creation to done", async () =>
   ) as { card: { status: string; resolution?: string } };
   expect(finalView.card.status).toBe("done");
   expect(finalView.card.resolution).toBe("done");
-
-  // Replaying a completed request adds no events: the timeline is unchanged.
-  const before = payload(
-    await pm.callTool({ name: "get_updates", arguments: { card_id: card.id } }),
-  ) as { latest_seq: number };
-  await coder.callTool({ name: "submit_delivery", arguments: completionArgs });
-  const after = payload(
-    await pm.callTool({ name: "get_updates", arguments: { card_id: card.id } }),
-  ) as { latest_seq: number };
-  expect(after.latest_seq).toBe(before.latest_seq);
 
   // --- the host can re-issue a token, which revokes the previous one ------
   resetOutput();
