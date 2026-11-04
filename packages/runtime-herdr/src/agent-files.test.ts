@@ -15,10 +15,12 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
   type AgentExecution,
+  clearAgentSentinel,
   prepareAgentProject,
   scrubAgentLaunch,
   secureDataDirectory,
   writeAgentLaunch,
+  writeAgentSentinel,
 } from "./agent-files.js";
 import { executionPaths } from "./execution.js";
 
@@ -92,6 +94,26 @@ describe.skipIf(process.platform !== "linux")("shared launch files", () => {
     await scrubAgentLaunch(config, "project", "A-1");
     expect(await readdir(runDir)).toEqual(["codex", "launch.sh"]);
   });
+  test("the dispatch sentinel never follows a planted link or hardlink", async () => {
+    await prepareAgentProject(config, "project", "A-1");
+    const outside = join(config.dataDir, "host-file");
+    await writeFile(outside, "host-private");
+    // An Agent of another Assignment shares this writable directory.
+    await symlink(outside, join(runDir, "start"));
+    await writeAgentSentinel(config, "project", "A-1");
+    // The link itself was replaced, and the host file it pointed at is intact.
+    expect((await stat(join(runDir, "start"))).isFile()).toBe(true);
+    expect(await readFile(outside, "utf8")).toBe("host-private");
+    expect(await mode(join(runDir, "start"))).toBe(0o660);
+
+    // A stale sentinel is removed as a link, never by following it.
+    await clearAgentSentinel(config, "project", "A-1");
+    expect(await readdir(runDir)).not.toContain("start");
+    expect(await readFile(outside, "utf8")).toBe("host-private");
+    // Clearing twice is a no-op.
+    await clearAgentSentinel(config, "project", "A-1");
+  });
+
   test("atomic replacement never follows a credential symlink or modifies a hardlink target", async () => {
     await prepareAgentProject(config, "project", "A-1");
     const outside = join(config.dataDir, "untouched");

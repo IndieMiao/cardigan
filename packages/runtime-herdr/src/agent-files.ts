@@ -17,6 +17,8 @@ import {
 } from "./execution.js";
 
 export type AgentExecution = Extract<ExecutionConfig, { mode: "agent-ssh" }>;
+/** The dispatch sentinel: written after `dispatchRun` commits (M2 §4 step 5–8). */
+export const START_FILE_NAME = "start";
 export interface LaunchFile {
   readonly path: string;
   readonly content: string;
@@ -199,7 +201,7 @@ async function writeAt(
   name: string,
   content: string,
   mode: number,
-  config: AgentExecution,
+  gid: number | undefined,
 ) {
   const temporary = `.cardigan-${randomUUID()}`;
   const file = await open(
@@ -212,7 +214,7 @@ async function writeAt(
   );
   try {
     await file.writeFile(content);
-    await file.chown(process.getuid?.() ?? -1, config.gid);
+    if (gid !== undefined) await file.chown(process.getuid?.() ?? -1, gid);
     await file.chmod(mode);
     // Replaces a destination link itself, never its target. The parent FD is pinned.
     await rename(at(parent, temporary), at(parent, name));
@@ -258,7 +260,7 @@ export async function writeAgentLaunch(
           name,
           file.content,
           file.mode & 0o111 ? permissions.executable : permissions.file,
-          config,
+          config.gid,
         );
       } finally {
         if (parent !== root) await parent.close();
@@ -281,11 +283,72 @@ export async function scrubAgentLaunch(
     throw error;
   }
   try {
-    for (const name of ["token", "secrets.env"])
+    for (const name of ["token", "secrets.env", START_FILE_NAME])
       await unlink(at(root, name)).catch((error) => {
         if (code(error) !== "ENOENT") throw error;
       });
   } finally {
     await root.close();
+  }
+}
+
+/**
+ * Open the run directory without following a symlink, then write or remove the
+ * dispatch sentinel through that pinned descriptor. Both modes need this: in
+ * agent-ssh the directory is writable by the shared Agent account, and in local
+ * mode the Agent runs as the same user, so either could plant `start` as a link
+ * to a host file and have the host follow it.
+ */
+async function openRunDirectory(
+  config: ExecutionConfig,
+  project: string,
+  assignment: string,
+): Promise<FileHandle> {
+  const { runDir } = executionPaths(config, project, assignment);
+  if (config.mode === "agent-ssh")
+    return runDirectory(config, project, assignment);
+  return open(runDir, directoryFlags);
+}
+
+/** Write the sentinel without ever following a link at that name. */
+export async function writeAgentSentinel(
+  config: ExecutionConfig,
+  project: string,
+  assignment: string,
+): Promise<void> {
+  const permissions = executionPermissions(config);
+  const dir = await openRunDirectory(config, project, assignment);
+  try {
+    await writeAt(
+      dir,
+      START_FILE_NAME,
+      "",
+      permissions.file,
+      config.mode === "agent-ssh" ? config.gid : undefined,
+    );
+  } finally {
+    await dir.close();
+  }
+}
+
+/** Remove a stale sentinel (and the link itself, never its target). */
+export async function clearAgentSentinel(
+  config: ExecutionConfig,
+  project: string,
+  assignment: string,
+): Promise<void> {
+  let dir: FileHandle;
+  try {
+    dir = await openRunDirectory(config, project, assignment);
+  } catch (error) {
+    if (code(error) === "ENOENT") return;
+    throw error;
+  }
+  try {
+    await unlink(at(dir, START_FILE_NAME)).catch((error) => {
+      if (code(error) !== "ENOENT") throw error;
+    });
+  } finally {
+    await dir.close();
   }
 }

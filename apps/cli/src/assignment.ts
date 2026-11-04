@@ -34,6 +34,7 @@ import {
   scrubAgentLaunch,
   secureDataDirectory,
   writeAgentLaunch,
+  writeAgentSentinel,
 } from "@cardigan/runtime-herdr";
 import { getRoleVersion, Store, writeRole } from "@cardigan/store";
 import { AgentGitTransport } from "./agent-git.js";
@@ -562,7 +563,7 @@ async function startAssignmentSteps(
   });
 
   // The Run is dispatched: let the wrapper start the Agent (M2 §4 step 8).
-  await writeFile(join(dirs.runDir, START_FILE_NAME), "", { mode: 0o600 });
+  await writeAgentSentinel(progress.execution, project_id, assignment.id);
 
   const started = requireAssignment(
     store,
