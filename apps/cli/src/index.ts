@@ -1,12 +1,23 @@
 import { spawn, spawnSync } from "node:child_process";
 import { LaunchConfigError } from "@cardigan/roles";
 import { runAdminCommand } from "./admin.js";
+import { runAssignmentCommand } from "./assignment.js";
 import { CliError, EXIT } from "./errors.js";
 import type { CliIo } from "./io.js";
 import { runLaunchCommand } from "./launch.js";
 import { runWorkflowCommand } from "./workflow.js";
 
 export { parseAdminArgs, runAdminCommand } from "./admin.js";
+export {
+  agentNameFor,
+  attachAssignment,
+  projectSegment,
+  projectShortCode,
+  runAssignmentCommand,
+  runDirectory,
+  startAssignment,
+  stopAssignment,
+} from "./assignment.js";
 export { CliError, EXIT } from "./errors.js";
 export {
   humanActor,
@@ -39,6 +50,7 @@ const TOP_LEVEL_USAGE = [
   "  assign           建 Assignment 并在同一事务里签发 Token",
   "  token issue      给已有 active Assignment 重新签发 Token（先作废旧 Token）",
   "  human-action done 标记人已执行完 h(n)",
+  "  assignment start|stop|attach  一键启动/停止/接管 Assignment 的运行时（M2）",
   "  launch           按启动配置启动 Agent CLI（见 cardigan launch --help）",
 ].join("\n");
 
@@ -118,6 +130,9 @@ export async function main(
     }
     if (command === "init" || command === "project" || command === "role") {
       return await runAdminCommand([command, ...rest], io);
+    }
+    if (command === "assignment") {
+      return await runAssignmentCommand(rest, io);
     }
     if (
       command === "card" ||

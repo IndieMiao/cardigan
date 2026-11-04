@@ -6,6 +6,7 @@ import {
   parseId,
 } from "@cardigan/domain";
 import { openStore as openCardiganStore, type Store } from "@cardigan/store";
+import { startAssignmentById } from "./assignment.js";
 import { CliError, EXIT } from "./errors.js";
 import {
   humanActor,
@@ -21,7 +22,7 @@ import type { CliIo } from "./io.js";
 const USAGE = [
   "用法：",
   "  cardigan card create --template dev --title <标题> --goal <目标> --acceptance <标准1;标准2> --repo <仓库> [--base-branch main] [--project <p>]",
-  "  cardigan assign <W-n> --role <角色> [--machine local] [--project <p>]",
+  "  cardigan assign <W-n> --role <角色> [--machine local] [--start] [--project <p>]",
   "  cardigan token issue <A-n> [--project <p>]",
   "  cardigan pm create --office|--ops [--project <p>]",
   "  cardigan human-action done <h(n)> --text <结果> [--project <p>]",
@@ -131,7 +132,7 @@ export async function runWorkflowCommand(
     case "card":
       return cardCreate(rest, io);
     case "assign":
-      return assignWorkItem(rest, io);
+      return await assignWorkItem(rest, io);
     case "token":
       return tokenIssue(rest, io);
     case "pm":
@@ -204,8 +205,16 @@ function cardCreate(args: readonly string[], io: CliIo): number {
   }
 }
 
-function assignWorkItem(args: readonly string[], io: CliIo): number {
-  const parsed = parseArgs(args, []);
+async function assignWorkItem(
+  args: readonly string[],
+  io: CliIo,
+): Promise<number> {
+  // `--start` takes no value: assign and start the Assignment in one step.
+  const start = args.includes("--start");
+  const parsed = parseArgs(
+    args.filter((argument) => argument !== "--start"),
+    [],
+  );
   const workItemId = parseWorkItem(parsed.positionals[0]);
   const roleId = required(parsed.flags, "role");
   const machine = optional(parsed.flags, "machine");
@@ -256,7 +265,24 @@ function assignWorkItem(args: readonly string[], io: CliIo): number {
       throw new CliError("签发 Token 失败", EXIT.failure);
     }
     printToken(io, issued);
-    return EXIT.ok;
+    if (!start) return EXIT.ok;
+    // One command from card to a running Agent (M2.6); the printed token is
+    // revoked by `startAssignment` and replaced by the one in the run directory.
+    return await startAssignmentById({
+      store,
+      io,
+      project_id,
+      assignment_id: assignment.id,
+      ...(optional(parsed.flags, "data-dir") === undefined
+        ? {}
+        : { dataDir: optional(parsed.flags, "data-dir") as string }),
+      ...(optional(parsed.flags, "mcp-url") === undefined
+        ? {}
+        : { mcpUrl: optional(parsed.flags, "mcp-url") as string }),
+      ...(optional(parsed.flags, "hc-session") === undefined
+        ? {}
+        : { session: optional(parsed.flags, "hc-session") as string }),
+    });
   } finally {
     store.close();
   }
