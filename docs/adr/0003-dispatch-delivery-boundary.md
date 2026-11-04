@@ -23,3 +23,9 @@ SQLite 事务不能原子包含 Runtime.wake / 新终端启动。调用失败、
 ## 分批交付
 
 先交付投递意图的最小 store API，再用 M3.3 的按流游标接入 Router 消费/投递、ACK/退避与看门狗/运行时事件。store 层不做 Runtime IO，也不自行决定重发、取消 Run 或接管机器。server 的组装与 PM 常驻启动仍归 M3.5。
+
+## 进程中断与关闭验证
+
+真实子进程在持久化意图后进入 Runtime.wake，父进程确认已到达外部调用再发送 SIGKILL。接着分别启动新进程验证：租期内不抢占；租期过后按 delivery_failed 升级且 Run 编号不变；再次重启无第二次 wake、无第二个 Run、无重复失败事件。进程间只共享 SQLite，不沿用 Dispatcher 的内存状态。测试用假 Runtime 表达调用结果不确定，不依赖真实 Agent。
+
+正常关闭通过 startDispatchLoop.stop() 停止调度并等待当前 tick 结算，再 abort／清理订阅。M3.5 的 SIGTERM 处理必须等待该 Promise 后才关闭 Store。没有强制超时后再重发的路径；外部调用的截止时间仍由 Runtime／主机启动适配器负责。
