@@ -21,7 +21,7 @@ export const ackEventsTool = defineTool({
   handler: ({ card_id, up_to_seq }, { store, identity }) => {
     const project_id = identity.actor.project_id;
     const cardId = card_id as CardId;
-    requireCard(store, project_id, cardId);
+    requireCard(store, identity, cardId);
 
     const result = store.ackEvents({
       project_id,

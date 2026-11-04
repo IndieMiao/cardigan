@@ -21,7 +21,7 @@ export const getUpdatesTool = defineTool({
     const project_id = identity.actor.project_id;
     const cardId = card_id === undefined ? undefined : (card_id as CardId);
     if (cardId !== undefined) {
-      requireCard(store, project_id, cardId);
+      requireCard(store, identity, cardId);
     }
 
     const updates = store.getUpdates({

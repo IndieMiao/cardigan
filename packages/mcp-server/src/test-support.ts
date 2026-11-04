@@ -18,7 +18,7 @@ export const card_id = "C-1" as CardId;
 
 const NOW = "2026-01-01T00:00:00.000Z";
 
-export const cards: Card = {
+export const serverCard: Card = {
   id: card_id,
   project_id,
   title: "Fictional card",
@@ -70,6 +70,7 @@ export interface Fixture {
   readonly dataDir: string;
   readonly token: string;
   readonly assignment: Assignment;
+  readonly workItem: WorkItem;
   readonly events: readonly Event[];
   readonly timeline: readonly TimelineEntry[];
   close(): void;
@@ -96,7 +97,7 @@ export function seedFixture(options: FixtureOptions = {}): Fixture {
   const timeline: TimelineEntry[] = [];
 
   store.uow.run((tx) => {
-    tx.cards.put(project_id, cards);
+    tx.cards.put(project_id, serverCard);
     tx.work_items.put(project_id, workItems);
     tx.assignments.put(project_id, assignment);
     tx.roles.put(project_id, {
@@ -162,6 +163,7 @@ export function seedFixture(options: FixtureOptions = {}): Fixture {
     dataDir,
     token: issued.token,
     assignment,
+    workItem: workItems,
     events,
     timeline,
     close: () => {
