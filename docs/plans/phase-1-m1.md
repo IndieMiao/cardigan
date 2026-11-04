@@ -1,6 +1,7 @@
 # Phase 1 · M1 任务计划：领域模型、事件存储、Card MCP
 
-- 版本：v4（2026-11-04）：新增 M1.4b，M1.7 拆成 M1.7a、M1.7b，记录审核中的后续事项
+- 版本：v5（2026-11-04）：新增 M1.2b（卡片的三个派生字段）
+- v4（2026-11-04）：新增 M1.4b，M1.7 拆成 M1.7a、M1.7b，记录审核中的后续事项
 - v3（2026-11-04）：调整分工，M1.5 改由 Pi 做
 - v2（2026-11-04）：新增 M1.8（提前做的 `cardigan launch`）
 - v1（2026-11-04）
@@ -18,6 +19,7 @@
 | M1.4 | store：SQLite、迁移、事件存储、游标、幂等 | Pi | Codex（M1.T2） | M1.1 | `feat/m1-store` |
 | M1.5 | mcp-server：传输、认证、只读工具 | Pi | Codex（M1.T3） | M1.2、M1.4 | `feat/m1-mcp-core` |
 | M1.6 | mcp-server：写入类工具 | Codex | Codex 不能验收自己的实现，由 Pi 补充 M1.T3 中写入类工具的用例 | M1.3、M1.5 | `feat/m1-mcp-tools` |
+| M1.2b | domain：卡片的 `waiting_on`、`next_owners`、`why` 三个派生字段；`get_card` 返回它们 | Pi | Codex 审读 | M1.2 | `feat/m1-card-derived` |
 | M1.4b | store：只读事务，读操作不占写锁 | Pi | — | M1.4 | `feat/m1-store-read` |
 | M1.7a | apps/server 组装；cli 的 `init`、`project create`、`role add` | Pi | Codex 审读 | M1.5 | `feat/m1-server-base` |
 | M1.7b | cli 的 `card create`、`assign`、`human-action done`；端到端流程 | Pi | Codex 审读 | M1.6、M1.7a | `feat/m1-server-cli` |
@@ -187,6 +189,34 @@ domain 只提供纯函数：输入"当前状态 + 调用者身份 + 参数"，�
 
 验收：每个工具至少一个正常调用测试；domain 的每类错误码都能从 MCP 层原样拿到；同一个 `idempotency_key` 重放不会产生第二个交付或第二条事件。
 
+### M1.2b 卡片的三个派生字段（Pi）
+
+来源：M1.5 审核时记下的后续事项。纯函数，放在 domain 的派生计算里（单独一个文件，避免和 M1.3 的改动冲突），然后让 mcp-server 的 `get_card` 返回这三个字段。
+
+输入：卡片、它的工作项、Assignment、交付、审核、Decision、HumanAction。规则：
+
+- `waiting_on[]`：卡片现在在等什么。每项 `{kind, ref, label}`：
+  - 未解决且 `blocking` 的 Decision：`{kind: "decision", ref: "q(n)"}`；
+  - 未完成的 HumanAction：`{kind: "human_action", ref: "h(n)"}`；
+  - 当前版本交付还没给出结论的验证项：`{kind: "review", ref: "W-n"}`；
+  - 处于 `blocked` 的工作项：`{kind: "blocked", ref: "W-n"}`。
+- `next_owners[]`：下一步该谁做，每项 `{kind: "assignment" | "role" | "human", ref}`：
+  - 阻塞性 Decision 的 `decider`，以及未完成 HumanAction 指向的人；
+  - 处于 `ready`、`in_progress`、`changes_requested` 的工作项的 Assignment；还没有 Assignment 的，给它的角色（交给 PM 分配）；
+  - 已提交、尚未审核的完成申请：卡片模板指定的审核者。
+  - 去重，顺序按上面的优先级。
+- `why`：一句话原因，不超过 40 字，按下面的优先级取第一条：
+  1. 等你拍板 `q(n)`（有多条时写"等你拍板 q(n) 等 k 项"）；
+  2. 等你执行 `h(n)`；
+  3. 等待完成审核；
+  4. 等待 `<角色>` 审核 `D-n`；
+  5. `<角色>` 返工中；
+  6. 进行中；
+  7. 待规划（`backlog`、`todo`）；
+  8. 已完成 / 已取消。
+
+验收：每条规则至少一个测试；`why` 永远不超过 40 字；`get_card` 的测试断言返回了这三个字段。
+
 ### M1.4b store：只读事务（Pi）
 
 审核 M1.5 时发现：store 的仓储只能通过 `uow.run` 拿到，而 `uow.run` 用的是 `BEGIN IMMEDIATE`，所以读操作也会占用写锁。
@@ -303,7 +333,7 @@ M1.7 中不依赖 M1.3 的部分，先做：
 | 来源 | 事项 | 处理 |
 |---|---|---|
 | M1.5 审核 | 读操作也走 `BEGIN IMMEDIATE`，会占用写锁 | M1.4b |
-| M1.5 审核 | `get_card` 还没有 `waiting_on`、`next_owners`、`why` 三个派生字段 | 在 domain 的派生计算里补上，M5 之前完成；具体放进哪个任务，由 M2 计划决定 |
+| M1.5 审核 | `get_card` 还没有 `waiting_on`、`next_owners`、`why` 三个派生字段 | M1.2b |
 | M1.8 审核 | `cardigan launch` 还没有用真实的接入点完整跑过一次会话 | 等用户迁移配置后验证 |
 
 ## 7. M1 完成的标准
