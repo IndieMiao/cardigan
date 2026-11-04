@@ -1,6 +1,8 @@
 # Cardigan · 多 Agent 协作开发系统开发方案
 
-- 版本：v0.6.11（2026-11-04）
+- 版本：v0.6.12（2026-11-04）
+  - v0.6.12：M1.6b 接入协作和 PM 工具；Token 与 Assignment 同事务签发，明文仅首次响应返回，不进入幂等缓存。
+  - v0.6.11（2026-11-04）
   - v0.6.11：报告的阻塞保存为 WorkItem.reported_blocker；PM／人确认与实际恢复分开，支持与 Decision / HumanAction 独立解除，避免相互等待。
   - v0.6.10（2026-11-04）
   - v0.6.10：M1.6a 明确 MCP 命令的一致快照、缓存优先预检、幂等事务及失败回滚边界；后续工具分依赖 PR 接入。
@@ -763,6 +765,7 @@ Agent 只通过 Card MCP 读写，看板界面只服务你一个人，所以第�
 - 写类工具接受 `idempotency_key`；同一个键配不同的请求内容判为错误，而不是覆盖。
 - Token 绑定 `(assignment_id, role_version, allowed_tools)`，Session 被替换时作废。
   - 纯函数 assign 输出 Assignment 和 Token 签发意图（含项目内唯一责任引用、Role 版本、工具集合）；Token 的随机材料、哈希及同事务存储由适配层处理，不进入 domain 输入或输出。
+  - M1.6b 使用事务内的 issueToken，Assignment、Token 哈希、事件、时间线和幂等结果一起提交或回滚。首次成功的 assign 响应在 Assignment 字段外附加 issued_tokens（assignment_id、token_id、token）；明文在提交后才加入响应，数据库、日志和幂等缓存均不保存它。重放或重复指派只返回 Assignment，不重发 Token；首次响应丢失时不能从缓存恢复明文，重新签发须走受控的凭据管理流程，不自动重发。
 - 模型 Provider 的认证和 MCP 认证相互独立；接入是否成功，以实际调用 `whoami` 的结果为准（0.4）。
 - 第一版可以用无状态的 Streamable HTTP：每个请求独立认证，写操作重试依靠 `idempotency_key`。
 - 服务只监听局域网接口，不对公网开放；不信任的网络环境加 TLS 或走 Tailscale 之类的通道。

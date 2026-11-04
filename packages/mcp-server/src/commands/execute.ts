@@ -8,9 +8,8 @@ import type {
   Repository,
   Result,
   ToolName,
-  TransactionContext,
 } from "@cardigan/domain";
-import type { McpReadContext } from "../backend.js";
+import type { McpReadContext, McpWriteContext } from "../backend.js";
 import type { ToolContext } from "../tools/types.js";
 
 export function unwrap<T>(result: Result<T>): T {
@@ -45,13 +44,10 @@ export function loadCommandState(
 }
 
 function persist(
-  tx: TransactionContext,
+  tx: McpWriteContext,
   project: ProjectId,
   effect: CommandEffect<unknown>,
 ) {
-  // Assignment issuance is added with M1.6b; never silently drop an intent.
-  if (effect.token_requests.length)
-    throw new Error("Token issuance is not wired yet");
   for (const change of effect.changes) {
     // EntityChange preserves the collection/entity correlation across this union.
     const repository = tx[change.collection] as Pick<
@@ -60,8 +56,25 @@ function persist(
     >;
     repository.put(project, change.entity);
   }
+  const issued = effect.token_requests.map((request) => {
+    const { token } = tx.issueToken({
+      id: request.token_id,
+      project_id: project,
+      assignment_id: request.assignment_id,
+      role: {
+        role_version: request.role_version,
+        allowed_tools: request.allowed_tools,
+      },
+    });
+    return {
+      assignment_id: request.assignment_id,
+      token_id: request.token_id,
+      token,
+    };
+  });
   for (const event of effect.events) tx.events.append(project, event);
   for (const entry of effect.timeline) tx.timeline.put(project, entry);
+  return issued;
 }
 
 const invocation = (
@@ -94,7 +107,8 @@ export function executeCommand<P, T>(
     identity: { actor },
   } = context;
   context.revalidateToken?.();
-  return unwrap(
+  let issued: ReturnType<typeof persist> = [];
+  const result = unwrap(
     store.runIdempotent(invocation(context, tool, key, params), (tx) => {
       context.revalidateToken?.();
       const effect = unwrap(
@@ -103,10 +117,14 @@ export function executeCommand<P, T>(
           ids: tx.ids,
         }),
       );
-      persist(tx, actor.project_id, effect);
+      issued = persist(tx, actor.project_id, effect);
       return effect.data;
     }),
-  ).value;
+  );
+  // Secrets are added only after COMMIT and never enter the cached response.
+  return !result.replayed && issued.length
+    ? { ...result.value, issued_tokens: issued }
+    : result.value;
 }
 
 export async function executePreparedCommand<P, Prepared, T>(

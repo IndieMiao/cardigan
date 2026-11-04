@@ -33,6 +33,7 @@ export {
   type ProjectRecord,
   Store,
   type StoreOptions,
+  type StoreTransactionContext,
   type StoreUnitOfWork,
   type TokenRecord,
 } from "./store.js";

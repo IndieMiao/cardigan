@@ -34,8 +34,13 @@ import {
 
 export const DEFAULT_DB_FILE = "cardigan.db";
 
+export interface StoreTransactionContext extends TransactionContext {
+  issueToken(input: IssueTokenInput): IssuedToken;
+}
+
 /** `UnitOfWork` plus read-only transactions. */
 export interface StoreUnitOfWork extends UnitOfWork {
+  run<T>(operation: (transaction: StoreTransactionContext) => T): T;
   /**
    * Run `operation` in a `BEGIN DEFERRED` transaction with read-only
    * repositories. In WAL mode this does not take the write lock, so it keeps
@@ -176,23 +181,28 @@ export class Store {
 
   get uow(): StoreUnitOfWork {
     return {
-      run: <T>(operation: (transaction: TransactionContext) => T): T =>
+      run: <T>(operation: (transaction: StoreTransactionContext) => T): T =>
         this.#run(operation),
       read: <T>(operation: (transaction: ReadRepositories) => T): T =>
         this.#read(operation),
     };
   }
 
-  #run<T>(operation: (transaction: TransactionContext) => T): T {
+  #run<T>(operation: (transaction: StoreTransactionContext) => T): T {
     if (this.#inTransaction) {
       throw new Error("nested UnitOfWork is not supported");
     }
     this.#db.exec("BEGIN IMMEDIATE");
     this.#inTransaction = true;
+    let active = true;
     try {
       const result = operation({
         ...createRepositories(this.#db),
         ids: createIdAllocator(this.#db),
+        issueToken: (input) => {
+          if (!active) throw new Error("Token transaction has ended");
+          return issueToken(this.#db, input, () => this.#clock.now());
+        },
       });
       this.#db.exec("COMMIT");
       return result;
@@ -200,6 +210,7 @@ export class Store {
       this.#db.exec("ROLLBACK");
       throw error;
     } finally {
+      active = false;
       this.#inTransaction = false;
     }
   }
@@ -296,7 +307,7 @@ export class Store {
    */
   runIdempotent<T>(
     params: IdempotentParams<unknown>,
-    operation: (tx: TransactionContext) => T,
+    operation: (tx: StoreTransactionContext) => T,
   ): Result<IdempotentResult<T>> {
     const request_hash = hashRequest(params.request);
     // The lookup, the operation and the row that records it share one

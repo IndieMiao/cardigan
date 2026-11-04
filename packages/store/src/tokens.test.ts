@@ -112,3 +112,37 @@ test("different tokens never collide in the stored hash", () => {
     ).toThrow(/UNIQUE/i);
   });
 });
+
+test("transactional issuance rolls back with its assignment and cannot escape the transaction", () => {
+  withTempStore((store) => {
+    const input = {
+      project_id,
+      assignment_id: assignment().id,
+      id: "tok_transaction",
+      role: { role_version: 1, allowed_tools: [] },
+      token: fictionalToken,
+    };
+    expect(() =>
+      store.uow.run((tx) => {
+        tx.assignments.put(project_id, assignment());
+        tx.issueToken(input);
+        throw new Error("rollback fixture");
+      }),
+    ).toThrow("rollback fixture");
+    expect(store.verifyToken(fictionalToken)).toBeUndefined();
+    expect(store.uow.read((tx) => tx.assignments.list(project_id))).toEqual([]);
+    let escaped: typeof store.issueToken | undefined;
+    const issued = store.uow.run((tx) => {
+      escaped = tx.issueToken;
+      tx.assignments.put(project_id, assignment());
+      return tx.issueToken(input);
+    });
+    expect(store.verifyToken(issued.token)).toEqual(issued.record);
+    expect(() =>
+      store.uow.run(() => {
+        if (!escaped) throw new Error("Missing issuer");
+        escaped({ ...input, id: "tok_late", token: "fictional-late-token" });
+      }),
+    ).toThrow("Token transaction has ended");
+  });
+});
