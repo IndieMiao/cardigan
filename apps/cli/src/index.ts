@@ -46,10 +46,12 @@ const TOP_LEVEL_USAGE = [
   "  project create   创建项目",
   "  role add         写入角色定义（allowed_tools、capabilities）",
   "  pm create        建常驻 PM Assignment 并签发 Token（--office / --ops）",
+  "  pm start         一键启动 PM Office 与 PM Ops（已在运行就跳过）",
   "  card create      按 dev 模板建卡",
   "  assign           建 Assignment 并在同一事务里签发 Token",
   "  token issue      给已有 active Assignment 重新签发 Token（先作废旧 Token）",
   "  human-action done 标记人已执行完 h(n)",
+  "  needs-you        看待你拍板和待你执行的事项",
   "  assignment start|stop|attach  一键启动/停止/接管 Assignment 的运行时（M2）",
   "  launch           按启动配置启动 Agent CLI（见 cardigan launch --help）",
 ].join("\n");
@@ -140,6 +142,7 @@ export async function main(
       command === "assign" ||
       command === "token" ||
       command === "pm" ||
+      command === "needs-you" ||
       command === "human-action"
     ) {
       return await runWorkflowCommand([command, ...rest], io, hooks);

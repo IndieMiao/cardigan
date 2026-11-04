@@ -363,6 +363,53 @@ describe("default role pack", () => {
     expect(prompt).toContain("finish_run(outcome=blocked)");
   });
 
+  // M3 plan §3.4 / development plan §7.1 and §7.3, again written from the plan.
+  const PM_MODES = [
+    {
+      name: "Office",
+      phrases: ["PM Office（前台）", "和人讨论需求", "阶段总结"],
+    },
+    {
+      name: "Ops",
+      phrases: ["PM Ops（后台）", "重新规划", "升级"],
+    },
+    {
+      name: "how to tell the mode",
+      phrases: ["`whoami`", "record_decision", "前台"],
+    },
+    {
+      name: "bells",
+      phrases: ["Needs You", "Router 升级上来的事件", "合并"],
+    },
+    {
+      name: "interruption rule",
+      phrases: ["需要人做决定", "明显损失", "不要往对话里写汇报"],
+    },
+    {
+      name: "Office records the human's words",
+      phrases: ["`record_decision`", "`raw_quote`", "原话", "pm_office_chat"],
+    },
+  ] as const;
+
+  test("the pm Core Prompt explains both contexts and the interruption rules", () => {
+    const prompt = corePromptFor("pm");
+    for (const mode of PM_MODES) {
+      for (const phrase of mode.phrases) {
+        expect(prompt, `${mode.name} is missing: ${phrase}`).toContain(phrase);
+      }
+    }
+    // The two contexts must be presented side by side, not one after the other.
+    expect(prompt).toContain("| | PM Office（前台） | PM Ops（后台） |");
+  });
+
+  test("the coder and reviewer prompts stay free of PM instructions", () => {
+    for (const role of ["coder", "reviewer"] as const) {
+      const prompt = corePromptFor(role);
+      expect(prompt).not.toContain("PM Office");
+      expect(prompt).not.toContain("`record_decision`");
+    }
+  });
+
   test("defaultRoles builds the three roles from the given harness mappings", () => {
     const roles = defaultRoles({
       pm: {
