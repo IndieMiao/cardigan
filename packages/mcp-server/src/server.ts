@@ -8,6 +8,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { MAX_MCP_BODY_BYTES } from "./attachments.js";
 import { authenticate, bearerToken, type Identity } from "./auth.js";
 import type { McpBackend } from "./backend.js";
+import { acknowledgeDispatchedRun } from "./commands/acknowledge.js";
 import {
   type DeliveryToolOptions,
   deliveryTools,
@@ -33,6 +34,8 @@ export interface McpServerOptions
   readonly port?: number;
   readonly log?: Logger;
   readonly tools?: readonly ToolDefinition[];
+  /** `false` disables the M2.6 acknowledge hook (tests of pure tool routing). */
+  readonly acknowledgeRuns?: boolean;
 }
 
 export interface RunningServer {
@@ -123,6 +126,24 @@ export async function startMcpServer(
         }),
       );
       return;
+    }
+
+    // M2.6 step 8: the first authenticated tool call acknowledges the Run and
+    // starts the caller's work item. It is a no-op once the Run is running.
+    if (options.acknowledgeRuns !== false) {
+      try {
+        acknowledgeDispatchedRun(options.store, identity.value);
+      } catch (error) {
+        log({
+          event: "tool",
+          method: req.method,
+          assignment_id: identity.value.actor.assignment_id,
+          code:
+            typeof error === "object" && error !== null && "code" in error
+              ? String((error as { code: unknown }).code)
+              : "acknowledge_failed",
+        });
+      }
     }
 
     if (req.method !== "POST") {
