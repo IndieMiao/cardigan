@@ -59,6 +59,9 @@ importers:
       '@cardigan/mcp-server':
         specifier: workspace:*
         version: link:../../packages/mcp-server
+      '@cardigan/runtime-herdr':
+        specifier: workspace:*
+        version: link:../../packages/runtime-herdr
       '@cardigan/store':
         specifier: workspace:*
         version: link:../../packages/store

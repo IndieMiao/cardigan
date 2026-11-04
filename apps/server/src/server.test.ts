@@ -12,14 +12,23 @@ import { type CardiganServer, startCardiganServer } from "./server.js";
 let dataDir: string;
 let store: Store;
 let server: CardiganServer;
+let warnings: string[];
 
 beforeEach(async () => {
+  warnings = [];
   dataDir = mkdtempSync(join(tmpdir(), "cardigan-server-"));
   store = Store.open({ dataDir });
   server = await startCardiganServer({
     config: { dataDir, host: "127.0.0.1", port: 0 },
     store,
+    warn: (message) => warnings.push(message),
   });
+});
+
+test("local server startup visibly warns that the Agent account is not isolated", () => {
+  expect(warnings).toHaveLength(1);
+  expect(warnings[0]).toContain("没有 Agent 账号隔离");
+  expect(warnings[0]).toContain("agent-ssh");
 });
 
 afterEach(async () => {

@@ -10,6 +10,7 @@ export const LOCAL_ONLY_HINT =
 export const DEFAULT_MCP_PORT = 3004;
 
 export interface ServerConfig {
+  readonly execution?: ExecutionConfig;
   readonly dataDir: string;
   /** Loopback by default; the MCP endpoint is never exposed publicly (§14). */
   readonly host: string;
@@ -17,7 +18,7 @@ export interface ServerConfig {
   readonly port: number;
 }
 
-export interface ServerEnv {
+export interface ServerEnv extends ExecutionEnv {
   readonly CARDIGAN_DATA_DIR?: string | undefined;
   readonly CARDIGAN_MCP_HOST?: string | undefined;
   readonly CARDIGAN_MCP_PORT?: string | undefined;
@@ -35,8 +36,10 @@ export function resolveServerConfig(env: ServerEnv): ServerConfig {
       `CARDIGAN_MCP_PORT must be an integer between 0 and 65535, got ${JSON.stringify(portText)}`,
     );
   }
+  const dataDir = nonEmpty(env.CARDIGAN_DATA_DIR) ?? DEFAULT_DATA_DIR;
   return {
-    dataDir: nonEmpty(env.CARDIGAN_DATA_DIR) ?? DEFAULT_DATA_DIR,
+    dataDir,
+    execution: resolveExecutionConfig({ ...env, CARDIGAN_DATA_DIR: dataDir }),
     host: resolveHost(env.CARDIGAN_MCP_HOST),
     port,
   };
@@ -59,3 +62,9 @@ function resolveHost(value: string | undefined): string {
     `CARDIGAN_MCP_HOST=${JSON.stringify(requested)} 不受支持。${LOCAL_ONLY_HINT}`,
   );
 }
+
+import {
+  type ExecutionConfig,
+  type ExecutionEnv,
+  resolveExecutionConfig,
+} from "@cardigan/runtime-herdr";
