@@ -25,6 +25,8 @@ export const TOKEN_ENV_VAR = "MCP_TOKEN";
 /** The token file the wrapper reads and removes before starting the CLI. */
 export const TOKEN_FILE_NAME = "token";
 export const LAUNCH_SCRIPT_NAME = "launch.sh";
+/** Provider credentials for one launch; sourced and deleted by `launch.sh`. */
+export const SECRETS_FILE_NAME = "secrets.env";
 
 export interface AssignmentRoleInput {
   readonly role_id: string;
@@ -76,8 +78,18 @@ export interface CompiledAssignmentLaunch {
   /** Command `launch.sh` starts, e.g. `claude`. */
   readonly command: string;
   readonly args: readonly string[];
-  /** Environment for the CLI; the token is added by `launch.sh`, never here. */
+  /**
+   * Non-secret environment for the CLI. Provider credentials are NOT here (see
+   * `secret_env`); the MCP token is added by `launch.sh` at runtime.
+   */
   readonly env: Readonly<Record<string, string>>;
+  /**
+   * Provider credentials taken from `secrets.env`. They are written only to the
+   * run directory's `secrets.env` (0600), which `launch.sh` sources and deletes
+   * before starting the CLI. Callers must not print them, log them, or copy
+   * them anywhere else (§10.2, §14).
+   */
+  readonly secret_env: Readonly<Record<string, string>>;
   /** Everything the host writes, including `launch.sh`. */
   readonly files: readonly CompiledFile[];
   /** The wrapper the runtime starts. */
@@ -194,8 +206,61 @@ export function compileAssignmentLaunch(
   }
 
   const args = [...base.args, ...harnessArgs];
-  const env: Record<string, string> = { ...base.env, ...harnessEnv };
   const command = base.command;
+
+  // Provider credentials never travel in `env` or in a long-lived file: they go
+  // to `secrets.env` (0600), which launch.sh sources and deletes before exec.
+  const secretKeys = new Set(base.secretEnvKeys);
+  const env: Record<string, string> = {};
+  const secretEnv: Record<string, string> = {};
+  for (const [name, value] of Object.entries({ ...base.env, ...harnessEnv })) {
+    if (secretKeys.has(name)) secretEnv[name] = value;
+    else env[name] = value;
+  }
+  // Claude Code keeps provider settings in its settings file instead of the
+  // process environment, so collect those credentials from the file too.
+  for (const file of base.files) {
+    let parsed: { env?: Record<string, string> };
+    try {
+      parsed = JSON.parse(file.content) as { env?: Record<string, string> };
+    } catch {
+      continue;
+    }
+    for (const [name, value] of Object.entries(parsed.env ?? {})) {
+      if (secretKeys.has(name) && secretEnv[name] === undefined) {
+        secretEnv[name] = value;
+      }
+    }
+  }
+  const strippedBaseFiles = base.files.map((file) => {
+    if (secretKeys.size === 0) return file;
+    try {
+      const parsed = JSON.parse(file.content) as {
+        env?: Record<string, string>;
+      };
+      if (parsed.env === undefined) return file;
+      const keptEnv = Object.fromEntries(
+        Object.entries(parsed.env).filter(([name]) => !secretKeys.has(name)),
+      );
+      return {
+        ...file,
+        content: `${JSON.stringify({ ...parsed, env: keptEnv }, null, 2)}\n`,
+      };
+    } catch {
+      return file;
+    }
+  });
+  const secretsFile = join(input.run_dir, SECRETS_FILE_NAME);
+  const secretsFiles: CompiledFile[] =
+    Object.keys(secretEnv).length === 0
+      ? []
+      : [
+          {
+            path: secretsFile,
+            content: secretsFileContent(secretEnv),
+            mode: 0o600,
+          },
+        ];
 
   return {
     harness: input.role.harness,
@@ -204,6 +269,7 @@ export function compileAssignmentLaunch(
     command,
     args,
     env,
+    secret_env: secretEnv,
     files: [
       {
         path: coreFile,
@@ -215,11 +281,18 @@ export function compileAssignmentLaunch(
         content: withTrailingNewline(input.first_prompt),
         mode: 0o600,
       },
-      ...base.files,
+      ...strippedBaseFiles,
       ...harnessFiles,
+      ...secretsFiles,
       {
         path: launchScript,
-        content: launchScriptContent({ tokenFile, command, args, env }),
+        content: launchScriptContent({
+          tokenFile,
+          secretsFile: secretsFiles.length === 0 ? undefined : secretsFile,
+          command,
+          args,
+          env,
+        }),
         mode: 0o700,
       },
     ],
@@ -273,6 +346,7 @@ function codexConfig(
  */
 function launchScriptContent(options: {
   readonly tokenFile: string;
+  readonly secretsFile: string | undefined;
   readonly command: string;
   readonly args: readonly string[];
   readonly env: Readonly<Record<string, string>>;
@@ -283,9 +357,23 @@ function launchScriptContent(options: {
     .map(([name, value]) => `export ${name}=${quote(value)}`)
     .join("\n");
   const args = options.args.map(quote).join(" ");
+  const credentials =
+    options.secretsFile === undefined
+      ? ""
+      : `secrets_file=${quote(options.secretsFile)}
+if [ ! -f "$secrets_file" ]; then
+  echo "cardigan: secrets file is missing: $secrets_file" >&2
+  exit 78
+fi
+# Source with export-all, then delete the credentials before the CLI starts.
+set -a
+. "$secrets_file"
+set +a
+rm -f "$secrets_file"
+`;
   return `#!/bin/sh
-# Generated by Cardigan. Reads the Assignment token, deletes it, then starts the
-# agent CLI with MCP_TOKEN in its environment.
+# Generated by Cardigan. Reads the Assignment token and provider credentials,
+# deletes both files, then starts the agent CLI. No credential is written here.
 set -eu
 token_file=${quote(options.tokenFile)}
 if [ ! -f "$token_file" ]; then
@@ -299,9 +387,18 @@ if [ -z "$MCP_TOKEN" ]; then
   exit 78
 fi
 export MCP_TOKEN
-${exports}
+${credentials}${exports}
 exec ${quote(options.command)}${args ? ` ${args}` : ""}
 `;
+}
+
+/** `NAME='value'` lines, safe to source; the file is deleted by launch.sh. */
+function secretsFileContent(secrets: Readonly<Record<string, string>>): string {
+  const quote = (value: string): string =>
+    `'${value.replaceAll("'", `'\\''`)}'`;
+  return `${Object.entries(secrets)
+    .map(([name, value]) => `${name}=${quote(value)}`)
+    .join("\n")}\n`;
 }
 
 export type { CompiledLaunch, LaunchProfileDefinition };

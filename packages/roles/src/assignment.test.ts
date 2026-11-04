@@ -4,8 +4,10 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -431,25 +433,157 @@ describe("mismatched role and profile are refused", () => {
   });
 });
 
-describe("launch.sh actually reads and removes the token file", () => {
-  test("the CLI sees MCP_TOKEN and the token file is gone", () => {
+/** Recursively read every regular file under `dir`. */
+function readTree(dir: string): Array<{ path: string; content: string }> {
+  const out: Array<{ path: string; content: string }> = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...readTree(path));
+    else out.push({ path, content: readFileSync(path, "utf8") });
+  }
+  return out;
+}
+
+const SECRET_VALUES = [secrets.CLAUDE_TOKEN, secrets.CODEX_KEY, secrets.PI_KEY];
+
+describe("provider credentials leave the run directory", () => {
+  test("secrets go to the 0600 secrets file, never into env or launch.sh", () => {
+    for (const [harness, profile] of [
+      ["claude-code", "claude-agent"],
+      ["codex", "codex-agent"],
+      ["pi", "pi-agent"],
+    ] as const) {
+      const compiled = compile(harness, profile, first);
+      // `env` is what a caller may log; it carries no credential.
+      expect(Object.values(compiled.env)).not.toContain(secrets.PI_KEY);
+      expect(Object.keys(compiled.env)).not.toContain("OPENAI_API_KEY");
+      // The credentials are declared separately and written to one file.
+      expect(Object.keys(compiled.secret_env).length).toBeGreaterThan(0);
+      const secretsFile = compiled.files.find((file) =>
+        file.path.endsWith("secrets.env"),
+      );
+      expect(secretsFile?.mode).toBe(0o600);
+      for (const value of SECRET_VALUES) {
+        const inSecretsFile = secretsFile?.content.includes(value) ?? false;
+        // Only the file that the wrapper deletes may carry a credential.
+        if (value === secrets.PI_KEY && harness === "pi") {
+          expect(inSecretsFile).toBe(true);
+        }
+      }
+      // No other file carries it, and the wrapper only names the variables.
+      const script = compiled.files.find((file) =>
+        file.path.endsWith("launch.sh"),
+      );
+      for (const value of SECRET_VALUES) {
+        expect(script?.content).not.toContain(value);
+      }
+      for (const file of compiled.files) {
+        if (file.path.endsWith("secrets.env")) continue;
+        for (const value of SECRET_VALUES) {
+          expect(file.content, `${file.path} leaks a credential`).not.toContain(
+            value,
+          );
+        }
+      }
+    }
+  });
+
+  test("the Claude settings file keeps its endpoint but not the token", () => {
+    const compiled = compile("claude-code", "claude-agent", first);
+    const settings = compiled.files.find((file) =>
+      file.path.endsWith("claude-settings.json"),
+    );
+    const parsed = JSON.parse(settings?.content ?? "{}") as {
+      env: Record<string, string>;
+    };
+    expect(parsed.env.ANTHROPIC_BASE_URL).toBe(
+      "https://gateway.example.invalid",
+    );
+    expect(parsed.env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+    expect(compiled.secret_env.ANTHROPIC_AUTH_TOKEN).toBe(secrets.CLAUDE_TOKEN);
+  });
+
+  for (const [harness, profile, binary] of [
+    ["claude-code", "claude-agent", "claude"],
+    ["codex", "codex-agent", "codex"],
+    ["pi", "pi-agent", "pi"],
+  ] as const) {
+    test(`${harness}: launch.sh hands over the credentials and deletes both files`, () => {
+      const root = mkdtempSync(join(tmpdir(), "cardigan-launch-script-"));
+      try {
+        const runDir = join(root, "run");
+        mkdirSync(runDir, { recursive: true });
+        mkdirSync(join(root, "bin"), { recursive: true });
+        const fakeCli = join(root, "bin", binary);
+        writeFileSync(
+          fakeCli,
+          `#!/bin/sh\nenv | grep -E '^(MCP_TOKEN|ANTHROPIC_AUTH_TOKEN|OPENAI_API_KEY|DS_API_KEY)=' | sort\necho "args=$*"\n`,
+        );
+        chmodSync(fakeCli, 0o755);
+
+        const compiled = compileAssignmentLaunch({
+          assignment: { assignment_id: "A-12", run_id: "R-5" },
+          role: roleFor(harness, profile),
+          launch: launchConfig,
+          mcp: { url: MCP_URL },
+          run_dir: runDir,
+          work_dir: runDir,
+          first_prompt: first,
+          secrets,
+        });
+        for (const file of compiled.files) {
+          mkdirSync(join(file.path, ".."), { recursive: true });
+          writeFileSync(file.path, file.content, { mode: file.mode });
+          chmodSync(file.path, file.mode);
+        }
+        writeFileSync(compiled.token_file, "fictional-runtime-token\n", {
+          mode: 0o600,
+        });
+
+        const env = {
+          ...process.env,
+          PATH: `${join(root, "bin")}:${process.env.PATH ?? ""}`,
+        };
+        const output = execFileSync("sh", [compiled.launch_script], {
+          encoding: "utf8",
+          env,
+        });
+
+        // The CLI saw both the token and the provider credential.
+        expect(output).toContain("MCP_TOKEN=fictional-runtime-token");
+        const secret = Object.values(compiled.secret_env)[0] ?? "";
+        expect(output).toContain(secret);
+
+        // Both credential files are gone, and nothing left on disk holds them.
+        expect(existsSync(compiled.token_file)).toBe(false);
+        expect(existsSync(join(runDir, "secrets.env"))).toBe(false);
+        for (const file of readTree(runDir)) {
+          expect(file.content).not.toContain("fictional-runtime-token");
+          for (const value of SECRET_VALUES) {
+            expect(
+              file.content,
+              `${file.path} still holds a credential`,
+            ).not.toContain(value);
+          }
+        }
+        // The remaining files are the prompts and the harness config only.
+        for (const file of readTree(runDir)) {
+          expect(statSync(file.path).isFile()).toBe(true);
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
+
+  test("a missing secrets file refuses to start", () => {
     const root = mkdtempSync(join(tmpdir(), "cardigan-launch-script-"));
     try {
       const runDir = join(root, "run");
       mkdirSync(runDir, { recursive: true });
-
-      // A stand-in `pi` on PATH that reports what it saw.
-      mkdirSync(join(root, "bin"), { recursive: true });
-      const fakeCli = join(root, "bin", "pi");
-      writeFileSync(
-        fakeCli,
-        `#!/bin/sh\necho "token=$MCP_TOKEN"\necho "args=$*"\nexit 0\n`,
-      );
-      chmodSync(fakeCli, 0o755);
-
       const compiled = compileAssignmentLaunch({
         assignment: { assignment_id: "A-12", run_id: "R-5" },
-        role: { ...roleFor("pi", "pi-agent"), launch_profile: "pi-agent" },
+        role: roleFor("pi", "pi-agent"),
         launch: launchConfig,
         mcp: { url: MCP_URL },
         run_dir: runDir,
@@ -458,33 +592,16 @@ describe("launch.sh actually reads and removes the token file", () => {
         secrets,
       });
       for (const file of compiled.files) {
+        if (file.path.endsWith("secrets.env")) continue;
         mkdirSync(join(file.path, ".."), { recursive: true });
         writeFileSync(file.path, file.content, { mode: file.mode });
         chmodSync(file.path, file.mode);
       }
-      // The host writes the token right before starting; nothing else has it.
       writeFileSync(compiled.token_file, "fictional-runtime-token\n", {
         mode: 0o600,
       });
-
-      const env = {
-        ...process.env,
-        PATH: `${join(root, "bin")}:${process.env.PATH ?? ""}`,
-      };
-      const output = execFileSync("sh", [compiled.launch_script], {
-        encoding: "utf8",
-        env,
-      });
-      expect(output).toContain("token=fictional-runtime-token");
-      expect(output).toContain("--append-system-prompt");
-      expect(existsSync(compiled.token_file)).toBe(false);
-      expect(readFileSync(compiled.launch_script, "utf8")).not.toContain(
-        "fictional-runtime-token",
-      );
-
-      // Missing token file: refuse to start instead of running without auth.
       expect(() =>
-        execFileSync("sh", [compiled.launch_script], { encoding: "utf8", env }),
+        execFileSync("sh", [compiled.launch_script], { encoding: "utf8" }),
       ).toThrow();
     } finally {
       rmSync(root, { recursive: true, force: true });
