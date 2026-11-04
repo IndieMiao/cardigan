@@ -1,8 +1,10 @@
 import type {
+  Assignment,
   Card,
   CardId,
   Decision,
   Delivery,
+  HumanAction,
   ProjectId,
   Review,
   WorkItem,
@@ -56,9 +58,11 @@ function inScope(identity: Identity, work_items: readonly WorkItem[]): boolean {
 }
 
 export interface CardReadings {
+  readonly assignments: readonly Assignment[];
   readonly deliveries: readonly Delivery[];
   readonly reviews: readonly Review[];
   readonly decisions: readonly Decision[];
+  readonly human_actions: readonly HumanAction[];
 }
 
 /** Project rows needed to assemble a card view, narrowed to one card. */
@@ -75,6 +79,21 @@ export function readCardRelations(
       .filter((delivery) => workItemIds.has(delivery.work_item_id));
     const deliveryIds = new Set(deliveries.map((delivery) => delivery.id));
     return {
+      assignments: tx.assignments
+        .list(project_id)
+        .filter(
+          (assignment) =>
+            assignment.scope === "work_item" &&
+            workItemIds.has(assignment.work_item_id),
+        ),
+      human_actions: tx.human_actions
+        .list(project_id)
+        .filter(
+          (action) =>
+            action.status === "open" &&
+            (action.card_id === card_id ||
+              action.blocked_work_items.some((id) => workItemIds.has(id))),
+        ),
       deliveries,
       reviews: tx.reviews
         .list(project_id)
