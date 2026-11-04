@@ -1,6 +1,7 @@
 # Phase 1 · M3 任务计划：Event Router、门铃、ACK、重发、PM Office / Ops
 
-- 版本：v1（2026-11-05）
+- 版本：v2（2026-11-05）：M3.2 改由 Pi 实现（Codex 还在做 M2 收尾），交叉验收相应对调；补充 M3.1 的后续事项
+- v1（2026-11-05）
 - 对应：开发方案 §16 Phase 1 M3；§6 消息、路由与门铃协议；§7 PM 前后台与 Event Router；§13.9 故障处理
 - M3 的验收（开发方案 §16）：**路由规则表全覆盖的测试；重复门铃不产生重复 Run；同一 Assignment 的多条事件合并。**
 - 只做 `machine_id=local`。M3 不做：Git 拉取交付和合并（M4）、Web 界面和 Needs You 页面（M5，M3 只提供数据和 CLI 查看）、多机接管（Phase 2）。
@@ -11,18 +12,18 @@
 | 任务 | 内容 | 实现 | 验收测试 | 依赖 | 分支 |
 |---|---|---|---|---|---|
 | M3.1 | router：§6.4 路由规则、§6.5 @提及解析、§7.2 升级规则、§6.7 合并（纯函数） | Pi | Codex（M3.T2） | 无 | `feat/m3-router` |
-| M3.2 | domain：门铃触发的 Run、通知与升级的状态机 | Codex | Pi（M3.T1） | 无 | `feat/m3-domain-notify` |
+| M3.2 | domain：门铃触发的 Run、通知与升级的状态机 | Pi | Codex（M3.T2） | 无 | `feat/m3-domain-notify` |
 | M3.3 | store：通知收件箱、Router 游标、迁移 | Pi | Codex（M3.T2） | M3.2 | `feat/m3-store-inbox` |
 | M3.4 | Dispatcher：投递、ACK、重发、失败、看门狗、运行时事件 | Codex | Pi（M3.T1） | M3.1–M3.3 | `feat/m3-dispatcher` |
 | M3.5 | PM Office / Ops 与 server 组装 | Pi | Codex（M3.T2） | M3.4 | `feat/m3-pm-office-ops` |
-| M3.T1 | 交叉验收：domain 通知状态机、Dispatcher | Pi | — | M3.2、M3.4 | `test/m3-dispatch` |
-| M3.T2 | 交叉验收：路由规则表、收件箱、PM 前后台 | Codex | — | M3.1、M3.3、M3.5 | `test/m3-routing` |
+| M3.T1 | 交叉验收：Dispatcher | Pi | — | M3.4 | `test/m3-dispatch` |
+| M3.T2 | 交叉验收：路由规则表、通知状态机、收件箱、PM 前后台 | Codex | — | M3.1、M3.2、M3.3、M3.5 | `test/m3-routing` |
 | M3.S | 真实 Agent 冒烟：coder（Codex）+ reviewer（Claude Code）+ PM Ops 走一轮交付、驳回、返工、通过 | Claude | — | M3.5、M2.S | — |
 
 ```
 M3.1（Pi，可立即开始） ─────────────┐
-M3.2（Codex） ─ M3.3（Pi） ──────────┼─ M3.4（Codex） ─ M3.5（Pi） ─ M3.T2（Codex） ─ M3.S
-                                    └─ M3.T1（Pi）：M3.2、M3.4 合并后
+M3.2（Pi） ─ M3.3（Pi） ────────────┼─ M3.4（Codex） ─ M3.5（Pi） ─ M3.T2（Codex） ─ M3.S
+                                    └─ M3.T1（Pi）：M3.4 合并后
 ```
 
 ## 2. 通用约定
@@ -111,8 +112,8 @@ Claude Code、Codex 不通过 OSC 7501 上报状态（§6.8），M3 不加状态
 
 ### M3.T1、M3.T2 交叉验收
 
-- **M3.T1（Pi）**：M3.2 的通知状态机和 Run 种类；M3.4 的投递规则、ACK、重发退避、失败、看门狗、重启后的一致性。
-- **M3.T2（Codex）**：M3.1 的路由规则表（逐行）和 @提及；M3.3 的收件箱唯一性和游标；M3.5 的 PM 前后台分工和打断规则。
+- **M3.T1（Pi）**：M3.4 的投递规则、ACK、重发退避、失败、看门狗、重启后的一致性。
+- **M3.T2（Codex）**：M3.1 的路由规则表（逐行）和 @提及；M3.2 的通知状态机和 Run 种类；M3.3 的收件箱唯一性和游标；M3.5 的 PM 前后台分工和打断规则。
 
 ### M3.S 真实 Agent 冒烟（Claude）
 
@@ -125,6 +126,7 @@ Claude Code、Codex 不通过 OSC 7501 上报状态（§6.8），M3 不加状态
 | 按会话 ID 恢复 Agent（D5），而不是新开会话 | 以后在 Runtime 的 `resume_or_replace` 里接各家 CLI 的恢复参数 |
 | Claude Code、Codex 的状态转换层（把它们的事件转成 OSC 7501） | 等 M3.S 看实际需要再定 |
 | Needs You 页面 | M5 |
+| M3.1 的完成申请按"卡上第一个 pm 验证项"找审核者；更准确的做法是用完成申请自己的 `requested_verifiers` | M3.4 接入时顺手改 |
 
 ## 6. M3 完成的标准
 
