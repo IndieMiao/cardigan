@@ -1,12 +1,13 @@
 # Cardigan · 多 Agent 协作开发系统开发方案
 
-- 版本：v0.5.1（2026-11-04）
+- 版本：v0.6（2026-11-04）
+  - v0.6：Phase 0 完成。D3–D9 全部敲定（§15）；按 `docs/research/` 中各份预研报告修订 §2.1、§4.3–§4.5、§5.2、§6、§8.2、§8.4、§8.7、§9、§10、§11（重写）、§12、§13、§14、§16–§18 和附录 A、B；新增 ADR 0001（运行时基线）。
   - v0.5.1：新增 D9（运行时基线），0.3 增加 Herdr 换代评估，0.6 改为敲定 D3–D9。
   - v0.5：§16 Phase 0 新增 0.7（代码骨架）和 0.8（同类产品对比、名字检查），0.6 改为敲定 D3–D8；0.2 从"试行评论模板"改为"回溯现有看板项目"，0.1 是否试行看 0.2 的结论；新增任务级计划 `docs/plans/phase-0.md`。
   - v0.4：D2 决定技术栈：TypeScript（Node 24 LTS）+ pnpm workspace + SQLite（WAL）+ React（Vite，纯 SPA）；§20.4 明确 DeepSeek 通过 Pi 实现，并记录项目级 Pi 插件。
   - v0.3：项目定名 Cardigan；D1 决定自研看板，不依赖 Gitea 等外部看板；Git 改为"主机发起"模型（§12）；新增 §8.7 看板第一版范围和 §20 仓库规划。
   - v0.2：新增附录 C（看板工具评估）。
-- 用途：后续开发的指导文档。设计已基本收敛；技术栈已确定（D2），其余若干决策仍待定，见 §15。
+- 用途：后续开发的指导文档。Phase 0 已完成，决策 D1–D9 全部敲定（§15），各项预研结论见 `docs/research/`。
 - 来源：本目录下三份讨论记录（见附录 B）。凡是"已核实"的外部能力，均来自 2026-10-24 查阅的官方文档或源码。
 
 ---
@@ -17,7 +18,7 @@
 
 **架构一句话**：
 
-> 自研控制面（唯一事实来源，含自研看板） + Herdr（Agent 运行时和人工接管层） + 可插拔 Agent CLI（Claude Code / OpenCode / Pi / Codex 等）。Agent 通过 Card MCP 读写事实；Herdr 只负责"按门铃"；所有 Git 网络操作都由主机发起。
+> 自研控制面（唯一事实来源，含自研看板） + Herdr（Agent 运行时和人工接管层，基线为 herdr-core，见 D9） + 可插拔 Agent CLI（Claude Code / OpenCode / Pi / Codex 等）。Agent 通过 Card MCP 读写事实；Herdr 只负责"按门铃"；所有 Git 网络操作都由主机发起。
 
 **模型一句话**：
 
@@ -108,8 +109,8 @@
 | OpenCode (sst/opencode) | 产品化的多模型 Coding Agent；Custom Agents、Server/SDK、worktree API | MIT | 执行层候选；可作为岗位 Agent 运行，或作为将来直连 SDK 适配器的对象 |
 | Pi (earendil-works/pi) | 极简可改造 Harness；会话树、TS SDK、内置 MCP | MIT | 执行层候选；适合深度定制的岗位 Agent |
 | DeepSeek Harness | 全插件化 Agent Runtime（Cordis） | MIT | Developer Preview，官方明确未经安全审计；只跟踪，不押注 |
-| **Herdr** (herdrdev/herdr) | Agent 终端运行时：Server/Client、Pane、Socket API、worktree、SSH 多机 | Apache-2.0 | **采用为运行时和人工接管层** |
-| herdr-projects | Herdr 插件：本地看板、Coordinator、每任务 worktree、Review、人工批准合并 | MIT | 与本方案高度相似；Phase 0 评估其数据模型，决定借鉴还是 fork |
+| **Herdr**（herdrdev/herdr、herdr-core、herdr-app） | Agent 终端运行时。0.9.x 是带界面的终端工具：Server/Client、Pane、Socket API、worktree、SSH 多机。herdr-core 是 2026-10 新出的无界面运行时，提供带兼容承诺的 API 和事件推送；herdr-app 是它的桌面客户端 | Apache-2.0 | **采用为运行时和人工接管层**；基线为 herdr-core，Herdr 0.9.x 作为回退（D9） |
+| herdr-projects（现名 Shepherdr） | 先后做过 Herdr 插件、独立 Web 应用、herdr-app 布局三种形态：本地看板、Coordinator、每任务 worktree、Review、人工批准合并 | MIT | 与本方案高度相似。已评估（0.5a）：**不 fork，借鉴设计**；它让工作机自己 push，我们不采用 |
 | herdr-mesh | 把 Herdr 的 Agent/Pane 操作包装成 MCP | — | 仍是终端 Prompt 注入；不提供持久消息，不采用 |
 | block/buzz、berd、builderbot | 协作工作区 / 企业桌面壳 / 审查工作台（ACP 生态） | Apache-2.0 / MIT | 背景参考；Staged 的 diff 审查交互可作为 UI 参考 |
 
@@ -145,7 +146,7 @@
 
 - Herdr 为 Apache-2.0：保留 LICENSE / NOTICE；修改过的文件要注明；不得使用其商标。
 - OpenCode、Pi 为 MIT：保留版权声明即可。
-- 如果 fork herdr-projects（MIT），保留版权声明。
+- herdr-projects（MIT）不 fork；如果参照其文档措辞或代码片段，保留其版权声明，不使用其名称和标识。
 
 ---
 
@@ -200,7 +201,7 @@
    - 调用 `get_updates` 读到驳回意见，再调用 `ack_events(seq=31)`；
    - 在原 worktree 修复并 commit（不 push）；
    - 调用 `submit_delivery` 生成 D-10，最后调用 `finish_run`。
-6. 主机从该工作机把 D-10 的 commit 拉进中心仓库（拉取成功即完成校验），然后：
+6. 主机从该工作机拉取 D-10 的 commit，按 §12.3 校验后固定到中心仓库，然后：
    - D-9 标记为 `superseded`；
    - 设计走查和测试验收两个工作项回到 `ready`，并分别唤醒它们的 Assignment。
 7. 整个过程完全由规则处理：PM Ops 不被唤醒，你与 PM Office 的对话不受打扰。
@@ -255,11 +256,13 @@ Standing Assignment (scope=project): PM Office, PM Ops — not tied to a WorkIte
 
 **Card**
 
-- 基本信息：`id`、`project_id`、`title`、`goal`、`acceptance_criteria`
+- 基本信息：`id`、`project_id`、`title`、`goal`、`acceptance_criteria`（由卡片模板强制）
+- 来龙去脉：`source`（起因：用户原话，或指向某个 Decision）、`out_of_scope`、`deadline?`、`related_cards[]`
 - 代码基线：`repo`、`base_branch`
-- 管理字段：`priority`、`status`、`template`（决定默认生成哪些工作项，以及哪些是必需的）
+- 管理字段：`priority`、`status`（见 §4.4：中间状态由工作项推导，`done` 要走完成申请）、`resolution?`（`done | superseded | duplicate | wontdo`）、`template`（决定默认生成哪些工作项，以及哪些是必需的）
 - 审计：`created_by`、`created_at`
-- 派生字段（不存储，实时计算）：`waiting_on[]`、`next_owners[]`、`open_decisions[]`
+- 派生字段（不存储，实时计算）：`waiting_on[]`、`next_owners[]`、`open_decisions[]`、`review_matrix`（每个交付 × 每个验证方 → 对当前 SHA 的结论）、`why`（一句话原因，≤40 字，见 §8.2）
+- 负责人和审核人不写进描述正文；改派作为事件进时间线。
 
 **WorkItem**
 
@@ -276,7 +279,7 @@ Standing Assignment (scope=project): PM Office, PM Ops — not tied to a WorkIte
 - 标识：`id`、`scope`（`work_item` | `standing`）、`work_item_id?`
 - 角色：`role_id`、`role_version`
 - 状态：`status`（业务状态）、`runtime_state`（运行状态）
-- 运行位置：`machine_id`、`runtime_ref`（JSON，见 §11.1）、`session_ref?`
+- 运行位置：`machine_id`、`runtime_ref`（JSON，见 §11.1）、`session_ref?`（Agent CLI 的会话 ID，由控制面记录，恢复时使用，见 D5）、`eta?`
 - 代码：`worktree_path?`、`branch?`、`base_sha?`
 - 凭据：`mcp_token_id`
 - 时间：`created_at`、`released_at?`
@@ -291,39 +294,60 @@ Standing Assignment (scope=project): PM Office, PM Ops — not tied to a WorkIte
 
 **TimelineEntry**
 
-- `id`、`card_id`、`event_seq`
-- `type`：`comment` | `instruction` | `delivery` | `review` | `decision_request` | `decision_resolved` | `status_change` | `system`
-- `author`：`human` | `assignment:<id>` | `system`
-- 关联：`work_item_id?`、`delivery_id?`、`decision_id?`、`run_id?`
+- `id`、`short_id`（人类可读、可引用，例如 `C-12#7`）、`card_id`、`event_seq`
+- `type`：`comment` | `instruction` | `delivery` | `review` | `decision_request` | `decision_resolved` | `human_action` | `handoff` | `status_change` | `system`
+- `author`：`human` | `assignment:<id>` | `system`。由身份决定，不信正文里的署名；需要时记 `on_behalf_of`（例如 PM 转述你的话）
+- 关联：`work_item_id?`、`delivery_id?`、`decision_id?`、`human_action_id?`、`run_id?`
+- 引用：`reply_to?`、`refs[]`（可以跨卡，指向条目、拍板、卡片、PR）、`supersedes?`、`retracted`。正文里出现的编号由服务端识别并写入 `refs[]`
 - 内容：`body`（Markdown）、`mentions[]`、`created_at`
+- 一条 Agent 消息同时包含多种结构化内容时（例如交付里附带请求拍板），由 MCP 拆成同一事件下的多个条目。
+- 巡检、签收、ETA、等待说明不进时间线，改由运行状态和派生视图表达（0.2 回溯：这类内容约占普通评论的 58%）。
 
 **Delivery**
 
 - `id`、`work_item_id`、`run_id`
-- `kind`：`code` | `design` | `doc` | `test_report` | `other`
-- `summary`
-- 代码定位：`branch?`、`commit_sha?`、`pr_url?`
-- `test_results?`、`attachments[]`
-- `requested_verifiers[]`
-- `status`：`submitted` | `accepted` | `rejected` | `superseded`
+- `kind`：`code` | `design` | `doc` | `test_report` | `card_completion` | `other`。`card_completion` 即卡片的完成申请（§4.4）
+- `summary`：面向人，≤160 字，超长拒绝；细节放附件或正文
+- `subject`（必填）：`{kind: git_head | artifact_sha256 | doc_version, value}`。代码交付以 commit SHA 定位，`branch?`、`pr_url?` 只作参考
+- `evidence[]`：由控制面生成（commit、diff 统计、测试命令与结果、附件 id），和 Agent 的自述分开
+- `test_results?`、`attachments[]`、`known_gaps[]`
+- `requested_verifiers[]`（必填，由服务端校验，不接受"A 或 B"）
+- `supersedes?`：同一工作项的新交付自动让旧交付变为 `superseded`
+- `status`：`submitted` | `accepted` | `rejected` | `superseded`。合并（含 merge SHA）和部署（含环境）作为事件记录，不是交付状态
 
 **Review**
 
-- `id`、`delivery_id`、`work_item_id`（验证型工作项）、`run_id`
-- `kind`：`design` | `code` | `test` | `product`
-- `verdict`：`pass` | `reject` | `conditional`
-- `issues[]`：每项包含 `{severity, description, must_fix}`
+- `id`、`delivery_id`、`target_sha`（必填，必须等于交付的 `subject`）、`work_item_id`（验证型工作项）、`run_id`
+- `kind`：`code` | `design` | `test` | `replay` | `product` | `user`
+- `issues[]`：每项 `{severity, description, must_fix, pre_existing, proof?}`，`must_fix` 必填
+- `verdict`（`pass` | `reject` | `conditional`）和 `blocking` 由服务端按规则计算，审核者只描述问题（0.5a §9.2）：
+  - 有 `must_fix` 的问题就是驳回；
+  - `critical` 没有 `proof` 时按 `major` 处理；
+  - `pre_existing` 的问题不触发返工，只列出。
+- `recheck_required`：有条件通过时是否需要复审
+- `stale`（派生）：目标交付有了新版本时为真，旧结论不再算数
+- 第二轮起只复查上一轮的问题是否修好、修复有没有引入新问题；要新开问题，必须是 `critical` 并带 `proof`
 - `attachments[]`
-- `blocking`：是否阻塞整卡完成
 
 **Decision**
 
-- `id`、`card_id`、`raised_by`
-- 内容：`question`、`context`、`options[]`（每项 `{key, description, impact}`）、`recommended`
-- 影响：`affected_work_items[]`、`blocking`
-- `decider`：`human` | `role:<id>`
-- `status`
-- `resolution?`：`{option, rationale, resolved_by, via: needs_you|pm_office_chat, human_quote?, at}`
+- `id`、`key`（人类可读的编号，例如 `q(280)`。由 Cardigan 生成，项目内唯一、不复用；文档里引用这个编号）、`card_id?`（为空表示项目级决定）、`raised_by`
+- `kind`：`choose`（在选项中选择）| `approve`（批准某个对象，绑定到交付或 SHA）
+- 内容：`question`、`context`、`options[]`（每项 `{key, description, impact}`）、`recommended`、`latest_by?`、`preconditions?`
+- 影响：`affected_cards[]`（可以跨卡）、`affected_work_items[]`、`blocking`
+- `decider`（必填）：`human` | `role:<id>`。花钱、账号、权限、删除数据这几类只能由人拍板
+- `doc_refs[]`：拍板记录在哪份文档的哪个位置（路径、commit、锚点）
+- `status`：见 §4.4
+- `resolution?`：`{option, rationale, resolved_by, via: needs_you | pm_office_chat | external, raw_quote, via_chain[], external_ref?, batch?, proxy_authority?, at}`。由人拍板时 `raw_quote` 必填；在 Needs You 里作答时自动记录原文
+- `amends?`、`superseded_by?`
+
+**HumanAction**（待你执行的操作）
+
+- `id`、`key`、`card_id?`、`requested_by`
+- 内容：`instructions`（要执行的命令或操作，写完整）、`why_human`（为什么只能你做：权限、账号、实体设备等）、`expected_return`（做完回传什么）、`due?`
+- 影响：`blocked_work_items[]`
+- `status`：`open` | `done` | `cancelled`；`result?`：`{text, attachments[], at}`
+- 来源：0.2 回溯中，需要你介入的门铃有一半是只有你能做的操作，而不是拍板
 
 **Event**
 
@@ -345,15 +369,19 @@ Standing Assignment (scope=project): PM Office, PM Ops — not tied to a WorkIte
 **Attachment**
 
 - `id`、`sha256`、`mime`、`size`、`card_id`、`uploaded_by`、`storage_path`
+- `attach_to`：具体的时间线条目或交付，不只挂在卡上
+- `kind`：`artifact`（设计稿、规格、导出文档、构建产物）| `evidence`（测试截图、日志等）
+- `basis?`：所依据或所等待的 Decision `key`。`artifact` 必填，服务端拒绝缺少 `basis` 的上传
+- `approval_status`（派生）：`pending | approved | revoked`，由 `basis` 指向的拍板状态推导
+- `supersedes?`：取代旧附件时，旧附件显示为"已取代"
 
 ### 4.4 状态机
 
 **Card**：`backlog → todo → in_progress → review → done`；任意状态都可以转为 `cancelled`。
-Card 进入 Done 的条件：
 
-- 所有 `required` 工作项都处于成功终态；
-- 没有 open 且 `blocking` 的 Decision；
-- PM 验收（或你本人验收）通过。
+- `backlog`、`todo` 属于规划，由 PM 设置；`in_progress`、`review` 由工作项推导，规则自动更新（D4）。
+- **`done` 不由规则自动触发**：主产出工作项的负责人提交完成申请（`kind=card_completion` 的交付），写明逐条验收标准的对照、证据和已知遗留；卡片模板指定的审核者（默认 PM，可以配置为你）审核通过后，才变为 `done`。
+- 规则只做两件事：所有必需工作项都通过后，提醒负责人可以申请；收到申请时校验前置条件（所有 `required` 工作项处于成功终态；没有 open 且 `blocking` 的 Decision），并把结果展示给审核者。未满足的条件必须列为已知遗留，并关联后续卡片。
 
 **WorkItem（produce，产出型）**
 
@@ -372,6 +400,8 @@ todo --target delivered--> ready --> in_progress --pass--> passed (terminal)
 in_progress --reject--> failed --target redelivered--> ready
 ```
 
+审核轮次上限是控制面字段，只有 PM Ops 或你能放宽，放宽动作记在 Run 上。超过上限时，工作项进入 `waiting_decision`，并生成一条 Decision（0.5a §9.3）。
+
 **Assignment**
 
 - 业务状态：`active` | `suspended` | `released`
@@ -381,7 +411,9 @@ in_progress --reject--> failed --target redelivered--> ready
 
 **Delivery**：`submitted → accepted | rejected | superseded`。
 
-**Decision**：`open → resolved | withdrawn | superseded`。
+**Decision**：`open → resolved | provisional | withdrawn | superseded`；`provisional → resolved | revoked`；`resolved → revoked | superseded`。代批属于 `resolved`，由 `resolution.proxy_authority` 记录授权来源。
+
+**HumanAction**：`open → done | cancelled`。
 
 **Machine**：`online | degraded | offline | draining`。
 
@@ -398,7 +430,9 @@ in_progress --reject--> failed --target redelivered--> ready
 9. 交付只引用 commit SHA，由主机拉取进中心仓库后才生效；附件必须上传，不能写本地路径。
 10. 不是每条评论都是 Run。Run 是有限执行：遇到 Decision 就结束，拍板后再创建新 Run。
 11. 状态迁移和权限由服务端校验，不依赖 Agent 自觉遵守。
-12. Run 记录所用的 Role 版本和模型，保证可复现。
+12. Run 记录所用的 Role 版本、模型和 Agent CLI 版本，保证可复现。
+13. 卡片的 `done` 必须经过完成申请和审核，规则不能自动把卡片置为 `done`。
+14. 交付和审核绑定到版本（SHA）：交付有新版本后，针对旧版本的审核结论自动失效。产物类附件必须带 `basis`（对应的拍板编号）。
 
 ---
 
@@ -416,10 +450,12 @@ in_progress --reject--> failed --target redelivered--> ready
 |---|---|---|---|
 | comment | 任何人 | — | 关联工作项时，通知该工作项的 Assignment |
 | instruction | PM / 人 | 关联 WorkItem | 创建或唤醒对应 Assignment 的 Run |
-| delivery | 产出型 Assignment | Delivery | 唤醒对应的验证型工作项 |
+| delivery | 产出型 Assignment | Delivery | 唤醒对应的验证型工作项；`card_completion` 唤醒卡片的审核者 |
 | review | 验证型 Assignment | Review | 驳回时为产出方创建返工 Run |
 | decision_request | 任何 Agent | Decision | 进入 Needs You；受影响工作项变为 `waiting_decision` |
 | decision_resolved | 人（或 PM Office 代为记录） | Decision.resolution | 为受阻 Assignment 创建新 Run |
+| human_action | 任何 Agent | HumanAction | 进入 Needs You 的"待你执行"；受影响的工作项变为 `blocked`；你完成后为受阻的 Assignment 创建新 Run |
+| handoff | 系统或交接的 Assignment | — | 记录换会话、换模型时的交接内容和遗留项；新 Session 必须先确认遗留项（D5） |
 | status_change / system | 系统 | Event | 按规则处理 |
 
 ### 5.3 业务拍板与工具审批的区别
@@ -451,7 +487,11 @@ in_progress --reject--> failed --target redelivered--> ready
 → 请调用 card.get_updates 读取详情
 ```
 
-门铃不带正文。它只是提示，可能丢失，也可能重复。
+门铃不带正文。它只是提示，可能丢失，可能重复；Agent 忙碌时，门铃还会并进它当前的回合（0.3 实测）。所以：
+
+- 门铃里必须带 `seq`。Agent 收到后先查这个 `seq` 是否已经处理过，处理过就忽略。
+- 同一 Assignment 的同一 `seq` 不重复按门铃；派生状态没有变化也不按门铃。
+- PM Ops 没有新信息时保持静默，不发言。
 
 ### 6.3 Agent 侧协议（写进每个角色的 Core Prompt）
 
@@ -475,7 +515,10 @@ in_progress --reject--> failed --target redelivered--> ready
 | Decision 请求 | 决策人：人则进入 Needs You，并给 PM Office 一条简短提示 |
 | Decision 已解决 | 所有被它阻塞的 Assignment（新 Run）；PM Ops 收摘要 |
 | 依赖完成 | 下游工作项的 Assignment；没有 Assignment 时交给 PM Ops |
-| 整卡满足 Done 条件 | PM 验收工作项 |
+| 所有必需工作项都已通过 | 提醒主产出工作项的负责人提交完成申请（不自动关卡） |
+| 完成申请 | 卡片模板指定的审核者（默认 PM） |
+| 请求你执行操作 | Needs You 的"待你执行"，并给 PM Office 一条简短提示 |
+| 门铃发送失败 | 标记 `delivery_failed`，交给 PM Ops，不静默重试 |
 | Run 结束但没有交付、阻塞或决策 | PM Ops（异常） |
 | Agent 空闲超过宽限期仍未调用 `finish_run` | PM Ops（`needs_attention`） |
 | 运行环境失联超过宽限期 | Needs You（是否接管由你决定） |
@@ -513,8 +556,11 @@ in_progress --reject--> failed --target redelivered--> ready
 - `done` 只表示"进入空闲且尚未被查看"，不是卡片完成。
 - `blocked` 来自界面识别，不覆盖所有业务阻塞。
 - `agent.wait` 返回不代表业务成功。如果 Agent 原本就在工作，等到的可能是上一个回合结束。
-- Prompt 超时不代表没送达，直接重试可能重复执行，所以必须依靠 Run 幂等。
-- Claude Code、Codex 的状态主要靠终端画面检测，可能误判；OpenCode、Pi 可以主动上报状态。
+- **任何调用方失败都不代表没送达**：超时、客户端被杀、SSH 断开、`agent_prompt_stalled`，prompt 都可能已经送达并执行（0.3 实测）。所以必须依靠 Run 幂等和门铃里的 `seq`。
+- Agent 忙碌时再发 prompt，不会排成独立的回合，而是并进当前回合。
+- `agent wait` 超时也不代表没完成：实测超时返回后，任务其实已经完成。
+- CLI 退出码为 0 不代表 MCP 可用：Token 错误时，三个 Harness 都可能正常退出（0.4 实测）。连接是否可用，以 `whoami` 的调用结果为准。
+- 状态来源因运行时而异：Herdr 0.9.x 对 Claude Code、Codex 主要靠画面检测，可能误判；herdr-core 只认程序主动上报（OSC 7501），Pi 原生支持，Claude Code、Codex 目前不支持。业务状态一律以 MCP 为准。
 
 ---
 
@@ -559,6 +605,8 @@ in_progress --reject--> failed --target redelivered--> ready
 
 > 只有"需要你做决定"或"继续执行可能造成明显损失"的信息，才允许打断主对话。
 
+0.2 回溯的数据：14 天里 PM 收到门铃 3918 条，你自己的消息只有 464 条；PM 因门铃往你的对话里写了 3853 段汇报。随机抽 300 条逐条判断，82.7% 属于 PM 内部调度或一般进展汇报，不需要你做任何事；需要立即提醒你的只有 6%。
+
 ### 7.4 新需求与拍板
 
 **新需求**：你在 PM Office 中提出需求后，PM Office：
@@ -587,7 +635,10 @@ in_progress --reject--> failed --target redelivered--> ready
 
 ### 8.2 Needs You（常驻）
 
-- 待你拍板的 Decision、只有你能解决的阻塞、待你验收的交付、高风险操作确认、需要你决定是否接管的失联 Assignment。
+- 待你拍板的 Decision、**待你执行的操作（HumanAction）**、待你验收的交付（包括由你审核的完成申请）、高风险操作确认、需要你决定是否接管的失联 Assignment。待你执行的操作和待拍板分开显示。
+- 每一项只显示一句原因（≤40 字，来自标准原因或 Agent 原问题的裁剪），全文留在卡片页（0.5a §9.1）。
+- 不紧急的拍板合并成批次呈现；阻塞性的拍板和风险立即提醒（0.2 回溯：需要你介入的事项中，72% 可以合并或延后）。
+- 在 Needs You 里作答时，系统自动记录你的原话。
 - 显示已等待多久。
 - 可以直接操作：选方案、批准 / 驳回、要求补充信息、查看关联卡片、让 PM 解释后果。
 
@@ -610,6 +661,8 @@ PM Office 回答"项目现在怎么样"时，查询的就是这份快照，而�
 5. 最终由谁验收、依据是什么？
 
 工作项清单可以折叠显示，每项包含负责人、状态和交付。
+
+卡片页顶部有"关联"区：列出这张卡关联的拍板（例如 `q(280)` 待批 / 已批 / 已撤回）、卡片和 PR（打开 / 已合并 / 已部署），每项显示编号和当前状态，点击即可跳转。时间线和描述里出现的编号由服务端识别后自动变成链接。附件缩略图上显示所依据的拍板编号和状态，已取代的附件折叠显示。
 
 ### 8.5 执行视图（调试和运维）
 
@@ -641,6 +694,7 @@ Agent 只通过 Card MCP 读写，看板界面只服务你一个人，所以第�
   - 时间线，评论、指令、交付、审核、决策用不同样式显示；
   - 评论输入框，支持 @提及、Markdown、粘贴图片和附件。
 - 决策卡直接在页面上操作：选方案、批准或驳回、要求补充。
+- 卡片页的关联区：拍板、卡片、PR 的编号和状态，点击跳转；时间线里的编号自动变成链接；附件显示所依据的拍板状态（§8.4）。
 - 界面实时刷新：按控制面的事件序号，通过 SSE 推送。
 - 认证：第一版只有你一个人用账号登录，Agent 用 Token。
 
@@ -655,7 +709,10 @@ Agent 只通过 Card MCP 读写，看板界面只服务你一个人，所以第�
 - 使用 Streamable HTTP，不用 stdio。单机也这样做，因为这是多机的前提。
 - 每个 Assignment 签发一个 Bearer Token，作用域为：它的卡片、工作项和角色允许的工具。
 - 写操作的身份由 Token 决定，不信 Agent 在参数里自报的身份。
-- 写类工具接受 `idempotency_key`。
+- 写类工具接受 `idempotency_key`；同一个键配不同的请求内容判为错误，而不是覆盖。
+- Token 绑定 `(assignment_id, role_version, allowed_tools)`，Session 被替换时作废。
+- 模型 Provider 的认证和 MCP 认证相互独立；接入是否成功，以实际调用 `whoami` 的结果为准（0.4）。
+- 第一版可以用无状态的 Streamable HTTP：每个请求独立认证，写操作重试依靠 `idempotency_key`。
 - 服务只监听局域网接口，不对公网开放；不信任的网络环境加 TLS 或走 Tailscale 之类的通道。
 
 ### 9.2 工具清单（初版）
@@ -666,27 +723,32 @@ Agent 只通过 Card MCP 读写，看板界面只服务你一个人，所以第�
 | `get_card(card_id)` | 全部 | 卡片、工作项、开放的 Decision、最近的交付摘要 |
 | `get_updates(card_id?, since_seq?)` | 全部 | 游标之后的事件和条目 |
 | `ack_events(card_id, up_to_seq)` | 全部 | 推进游标 |
-| `post_comment(card_id, body, work_item_id?, mentions[])` | 全部 | 发评论 |
+| `post_comment(card_id, body, work_item_id?, mentions[], reply_to?, refs[], supersedes?)` | 全部 | 发评论；正文里的编号由服务端自动识别 |
 | `report_blocker(work_item_id, reason, needs: role\|human)` | 全部 | 报告阻塞 |
-| `request_decision(card_id, question, context, options[], recommended, affected_work_items[], blocking, decider)` | 全部 | 发起拍板 |
-| `upload_attachment(file) → attachment_id` | 全部 | 上传截图、录屏、设计稿 |
+| `request_human_action(card_id, instructions, why_human, expected_return, blocked_work_items[], due?) → key` | 全部 | 请求你执行只有你能做的操作，进入 Needs You |
+| `request_decision(card_id?, kind, question, context, options[], recommended, affected_cards[], affected_work_items[], blocking, decider) → key` | 全部 | 发起拍板，返回编号 |
+| `upload_attachment(file, kind, attach_to, basis?) → attachment_id` | 全部 | 上传附件；`kind=artifact` 时 `basis` 必填 |
 | `heartbeat(run_id, note?)` | 全部 | 心跳 |
 | `finish_run(run_id, outcome: completed\|blocked\|failed, summary)` | 全部 | 结束本次 Run |
-| `submit_delivery(work_item_id, kind, summary, branch?, commit_sha?, pr_url?, test_results?, attachments[], request_verify[])` | 产出型角色 | 提交交付 |
-| `submit_review(delivery_id, kind, verdict, issues[], attachments[], blocking)` | 验证型角色 | 提交审核结论 |
+| `submit_delivery(work_item_id, kind, summary, subject, request_verify[], branch?, pr_url?, test_results?, attachments[], known_gaps[], supersedes?)` | 产出型角色 | 提交交付。`kind=card_completion` 即卡片的完成申请，只有主产出工作项的负责人可以提交 |
+| `submit_review(delivery_id, target_sha, kind, issues[], attachments[], recheck_required?)` | 验证型角色 | 提交审核结论；`verdict` 和 `blocking` 由服务端计算 |
 | `create_card` / `update_card` / `create_work_item` / `update_work_item` | PM | 管理卡片与工作项 |
 | `assign(work_item_id, role_id, machine_id?)` | PM | 指派（第一版手动指定机器） |
 | `project_snapshot()` / `list_needs_you()` | PM | 项目快照和待你处理的事项 |
-| `record_decision(decision_id, option, rationale, human_quote)` | 仅 PM Office | 记录你在对话中做出的决定 |
+| `record_decision(decision_id, option, rationale, raw_quote, via_chain[]?, batch?)` | 仅 PM Office | 记录你在对话中做出的决定，`raw_quote` 为你的原话 |
 
 你在 Web 界面上的操作走 Workbench Web API，不经过 MCP。
 
 ### 9.3 服务端校验（不依赖 Agent 自觉）
 
 - 状态迁移必须符合 §4.4 的状态机。
-- `submit_delivery` 时，主机从该 Assignment 所在机器拉取 `commit_sha`；拉取失败，或该 SHA 不在该 Assignment 的分支上，则拒绝。
+- `submit_delivery` 时，主机按 §12.3 拉取并校验 `subject` 指定的 SHA；拉取失败或校验不通过则拒绝，被拒的请求不会覆盖已接受的交付。
+- `submit_review` 的 `target_sha` 必须等于目标交付的 `subject`；交付有新版本后，旧的审核结论自动失效。
+- 卡片的完成申请只接受主产出工作项负责人的提交，并附上前置条件的校验结果（§4.4）。
+- 产物类附件缺少 `basis` 时拒绝上传。
+- 审核轮次超过上限时，不再创建返工 Run，转为 Decision；只有 PM Ops 或你能放宽上限。
 - 只有验证型工作项的 Assignment 能对其目标交付调用 `submit_review`。
-- `record_decision` 仅限 PM Office，并且必须带 `human_quote`。
+- `record_decision` 仅限 PM Office，并且必须带 `raw_quote`。
 
 ---
 
@@ -697,7 +759,7 @@ Agent 只通过 Card MCP 读写，看板界面只服务你一个人，所以第�
 - 标识：`role_id`、`version`、`display_name`
 - `kind`：`standing` | `work`
 - 提示：`core_prompt`（包含 §6.3 的协议）、`project_rules_ref`
-- 能力：`capabilities`（可承担的产出型 / 验证型工作项种类）
+- 能力：`capabilities`（可承担的产出型 / 验证型工作项种类），以及 `abilities`（例如 `vision`：能否看图）。验证型工作项可以声明所需能力，路由时检查（0.2 回溯：出现过"我看不到图，画面请你判断"）
 - 执行：`harness`（`claude-code` | `opencode` | `pi` | `codex` | …）、`provider`、`model`、`reasoning_effort`
 - MCP：`mcp_servers[]`（Card MCP 必选，其余如设计工具 MCP）
 - 权限：`permissions`，包括 MCP 作用域、Git 推送范围、是否需要 worktree
@@ -715,7 +777,19 @@ Role 修改后版本号递增，Run 记录所用版本。
 - 如何注入 Core Prompt（CLI 参数、配置文件或 Agent 定义）；
 - 如何写入 MCP 配置（含该 Assignment 的 Token）；
 - Herdr 如何识别状态（主动上报还是画面检测）；
-- 恢复会话的命令。
+- 恢复会话的命令（按会话 ID，不用"继续上一次"）；
+- 确切的 CLI 版本，以及**关闭自动更新**的方法（0.4 实测：Claude Code 在测试中途自动升级了一个小版本）；
+- 工具许可：MCP 工具必须显式放行（Codex 默认的审批策略会拒绝调用）；
+- 可用性检查：启动后调用 `whoami`，不以退出码判断；
+- 超时设置。
+
+三种 Harness 的接入方式（0.4 实测，详见 `docs/research/0.4-mcp-harness.md`）：
+
+| Harness | MCP 配置 | 注意 |
+|---|---|---|
+| Claude Code | `--mcp-config <仓库外的文件>`，Token 用 `${MCP_TOKEN}` 引用 | 关闭自动更新；按 session_id 恢复 |
+| Codex | 独立的配置目录（`CODEX_HOME`），`bearer_token_env_var` | 显式放行 MCP 工具；按 thread_id 恢复 |
+| Pi | `PI_CODING_AGENT_DIR` 指向独立目录，Header 引用环境变量 | 不能用 `--no-extensions`（会关掉内置 MCP）；原生上报状态（OSC 7501） |
 
 注入的提示词、MCP 配置和 Token 一律写在 worktree 之外的 Assignment 运行目录，或者已被 git 忽略的路径，**绝不提交进仓库**。
 
@@ -726,56 +800,68 @@ Role 修改后版本号递增，Run 记录所用版本。
 
 ### 10.4 初始角色建议
 
-| 角色 | 类型 | worktree | 主要权限 |
-|---|---|---|---|
-| pm-office | standing | 不需要（可选只读 clone） | PM 工具 + `record_decision` |
-| pm-ops | standing | 不需要 | PM 工具（不能记录人的决定） |
-| designer | work | 按需 | 设计相关产出与走查；设计工具 MCP；截图 |
-| coder | work | 需要 | 代码产出；只在本地 commit，没有任何推送权限 |
-| reviewer | work | 只读（按 SHA 检出） | 代码审核 |
-| tester | work | 只读（按 SHA 检出） | 测试验收；需要带对应能力标签的机器（如真机） |
+| 角色 | 类型 | worktree | 主要权限 | Harness 和模型（D3） |
+|---|---|---|---|---|
+| pm-office | standing | 不需要（可选只读 clone） | PM 工具 + `record_decision` | Claude Code（Opus） |
+| pm-ops | standing | 不需要 | PM 工具（不能记录人的决定） | Claude Code（Opus） |
+| designer | work | 按需 | 设计相关产出与走查；设计工具 MCP；截图 | 接入移动端项目时再定 |
+| coder | work | 需要 | 代码产出；只在本地 commit，没有任何推送权限 | Codex（GPT-6-Astra） |
+| reviewer | work | 只读（按 SHA 检出） | 代码审核 | Claude Code（和 coder 用不同模型，交叉检查） |
+| tester | work | 只读（按 SHA 检出） | 测试验收；需要带对应能力标签的机器（如真机） | 接入移动端项目时再定 |
 
 ---
 
-## 11. Runtime Adapter（Herdr 实现）
+## 11. Runtime Adapter
 
-### 11.1 接口（与具体语言无关）
+控制面只通过 §11.1 的接口使用运行时，Herdr 的 workspace、tab、pane 等概念不进入 domain。基线是 herdr-core，Herdr 0.9.x 作为回退（D9，见 [`docs/adr/0001-runtime-baseline.md`](adr/0001-runtime-baseline.md)）。
+
+### 11.1 接口（与具体实现无关）
 
 ```
 provision(assignment, role, machine) -> RuntimeRef
-wake(ref, doorbell) -> {sent: bool, error?}
-status(ref) -> {process: alive|exited|unknown, agent: working|blocked|done|idle|unknown, observed_at}
+wake(ref, doorbell) -> {sent: bool, error?}   # sent=false 也可能已经送达，见 §6.8
+status(ref) -> {process: alive|exited|unknown,
+                agent: working|blocked|done|idle|error|unknown, observed_seq}
 interrupt(ref)
 resume_or_replace(ref) -> RuntimeRef
-human_entry(ref) -> string            # 人工打开方式：机器名 + workspace
-release(ref, {force}) -> result       # worktree 有未提交修改时拒绝，除非 force
+human_entry(ref) -> string                    # 人工打开的方式
+release(ref, {force}) -> result               # 只结束运行时侧的终端；worktree 清理归 §12
 
-RuntimeRef = {machine_id, herdr_machine, workspace_id, pane_id, agent_name,
-              worktree_path?, branch?}
+RuntimeRef = {machine_id, runtime_machine, terminal_ref, agent_name,
+              agent_session_id?, worktree_path?, branch?}
 ```
 
-### 11.2 与 Herdr 的映射
+- `observed_seq` 取自运行时的事件序号，不用本地时钟。
+- `agent_session_id` 是 Agent CLI 自己的会话 ID，由控制面记录（D5）。herdr-core 不追踪它，Herdr 0.9.x 会上报。
 
-具体参数以所用版本的 CLI reference 为准，Phase 0 核实。
+### 11.2 两种实现的映射（0.3 实测）
 
-| 接口 | Herdr |
-|---|---|
-| provision | `herdr [--machine M] worktree create --cwd <base_clone> --branch <branch>` → 作为 Workspace 打开 → 在根 Pane 按 Launch Profile 启动 Agent |
-| wake | `herdr [--machine M] agent prompt <pane> "<doorbell>"` |
-| status | `herdr [--machine M] agent list` / `api snapshot` |
-| release | `herdr [--machine M] worktree remove`（有删除保护，需要时显式 force） |
-| human_entry | Herdr 客户端里的机器名 + workspace |
+| 接口 | herdr-core 0.1.x（基线） | Herdr 0.9.x（回退） |
+|---|---|---|
+| provision | 控制面先按 §12 建 worktree，再 `hc run --bg --name <全局唯一名> --cwd <worktree> --on <machine> --label assignment=<id> <启动命令>` | `worktree create --cwd <base_clone> --branch <branch> --path <§12 约定的目录>`，再 `agent start <全局唯一名> --kind <kind> --pane <root_pane>`。必须显式给 `--path`，不用 Herdr 的默认目录 |
+| wake | `hc send <t> <门铃> [--if idle]`；`--wait` 等的是这次发送开启的回合 | `agent prompt <target> <门铃>`；Agent 处于 blocked 时拒绝，5 秒内没进入工作状态则报 `agent_prompt_stalled` |
+| status | `hc events` 订阅：快照、增量事件、15 秒心跳；单次查询用 `hc get` | 只能轮询，以 `api snapshot` 为主（一次拿全） |
+| interrupt | `hc interrupt <t>` | 没有独立命令，用 `agent send-keys <target> esc` |
+| resume_or_replace | `hc run --keep`，加 Agent CLI 自己的恢复参数（按会话 ID） | 在同一 worktree 里重新 `agent start`，恢复参数透传给 Agent CLI |
+| human_entry | `hc attach <machine>/<t>`（`--observe` 只看不动），或在 herdr-app 里打开 | Herdr 客户端里的机器名 + workspace |
+| release | `hc kill` / `hc rm`；worktree 由 §12 清理 | `worktree remove --workspace <id> [--force]`；有未提交修改时报 `dirty_worktree_requires_force` |
+
+状态来源：herdr-core 只认程序主动上报的状态（OSC 7501）。Pi 原生支持；Claude Code 和 Codex 目前不支持，第一版依靠 Agent 通过 MCP 调用 `finish_run`、`heartbeat` 报告，需要时在 Launch Profile 里加一个状态转换层。业务状态一律以 MCP 为准（§6.8）。
 
 本机也当作一台机器处理（`machine_id=local`），代码路径和多机一致。
 
-### 11.3 已知限制（已核实）
+### 11.3 已知限制（0.3 实测）
 
-- Pane、Workspace 编号和 Agent 名字只在单台 Herdr server 内唯一。所以 Agent 名要全局唯一，例如 `coder-c123-w4`，并且始终配合 `machine_id` 使用。
-- `--machine` 支持的命令：workspace、worktree、tab、pane、notification、agent（`attach` 除外）、api snapshot、status server，以及基于 API 的插件命令。列表里没有事件订阅，所以远程状态靠轮询加 MCP 心跳。
-- 没有跨机器的 Agent 间消息。门铃统一由 Dispatcher 发。
-- 断线时 Herdr 界面上显示的是变灰的缓存状态，不能用来判断 Agent 是否存活。
-- Socket API 只在本机可用，没有按 Agent 区分的身份或权限控制。
-- 多机连接支持 Linux / macOS / Windows 客户端，连接 Linux / macOS（x86_64、aarch64）或 Windows x86_64 server。
+- **门铃送达无法从调用方判断**：调用失败、客户端被杀、SSH 断开时，prompt 都可能已经送达并执行。Run 幂等和门铃里的 `seq` 是硬要求（§6.2）。
+- Agent 忙碌时再发 prompt，会并进它当前的回合，不能假设"一条 prompt 等于一个回合"。
+- 名字只在单个运行时实例内唯一，所以 Agent 名要全局唯一（例如 `coder-c123-w4`），并始终配合 `machine_id` 使用。Herdr 0.9.x 的 `state_change_seq` 是 server 级计数，不是单个 Agent 的计数。
+- Herdr 0.9.x 专有：
+  - `--machine` 不能和 `--session` 一起用，远程只能操作该机器保存的那个 session；
+  - 没有事件订阅；
+  - `pane run` / `pane send-text` 写进的是 pane 里的 Agent 界面，不是 shell。控制面不能用它执行命令或读写文件（herdr-core 用 `machine.exec`、`file.*`）。
+- 断线时，命令行调用直接失败，没有缓存；界面上变灰的缓存状态也不能用来判断存活。
+- 运行时的 socket 没有按客户端区分的身份或权限控制；同一台机器上的 Agent 能互相操作，影响范围限于这台机器（§14）。
+- 多机连接只验证过 Linux 连 macOS，其他组合没有复核。
 
 ---
 
@@ -786,25 +872,27 @@ RuntimeRef = {machine_id, herdr_machine, workspace_id, pane_id, agent_name,
 - 中心仓库是主机上的 bare 仓库：`/srv/cardigan/repos/<project>.git`。
 - 工作机和 Agent **不持有任何 Git 凭据，不能 push**。主机通过已有的单向 SSH 从工作机拉取，并向工作机推送基线。
 - 项目如果托管在 GitHub / GitLab，只有主机持有其凭据，合并后由主机推送上去。
+- 参照实现（herdr-projects / Shepherdr）让工作机自己 push 到 origin，我们不采用：工作机不持有凭据，这一点不可协商。
 - 单机时用同一套代码，拉取直接走本地文件路径（`git-transport` 的本地实现）。
 
 ### 12.2 布局与命名
 
 - 每台机器每个项目一个基础 clone：`/srv/agent/repos/<project>`
-- worktree：`/srv/agent/worktrees/<assignment_id>`
+- worktree：`/srv/agent/worktrees/<assignment_id>`。由主机的 Git 服务创建，不使用运行时的默认目录（两台机器上 Herdr 的默认目录并不一致，0.3 实测）
 - 分支：`agent/<card_id>/<work_item_id>`
 - provision 时记录 `base_sha`。
-- 基线同步：主机把中心仓库的 main 推到各工作机基础 clone 的 `refs/remotes/origin/main`，不碰工作机当前检出的分支。
+- 基线同步：主机把中心仓库的 main 推到各工作机基础 clone 的 `refs/remotes/origin/main`，不碰工作机当前检出的分支；工作项显式从记录的基线建 worktree。不要通过关闭 `receive.denyCurrentBranch` 来同步工作目录（0.5b 实测）。
 - 只有 PM Ops 或 Router 明确要求时才 rebase 到最新基线，避免意外改动。
 
 ### 12.3 交付
 
 1. Agent 在 worktree 里 commit，不 push。
 2. 调用 `submit_delivery`，带上 SHA。
-3. 主机从该 Assignment 所在机器拉取这个 SHA，存入中心仓库的 `refs/cardigan/deliveries/<delivery_id>`，并更新对应的 `agent/*` 分支。
-   - 拉取成功即完成校验；
-   - 拉取失败，或该 SHA 不在该 Assignment 的分支上，则拒绝交付。
-4. 主机定期（建议每 10 分钟）拉取各工作机的 `agent/*` 分支，作为半成品备份，供接管使用。
+3. 主机校验并固定交付（0.5b 实测）：
+   - 先把该 Assignment 的分支拉到临时 ref，例如 `refs/cardigan/incoming/<delivery_id>`；
+   - 检查这个 SHA 是一个 commit，并且在该分支的历史上（`git merge-base --is-ancestor`）；
+   - 两项都通过，才把 `refs/cardigan/deliveries/<delivery_id>` 固定到这个 SHA。拉取失败或校验不通过则拒绝，并且不覆盖已接受的交付。
+4. 主机定期（建议每 10 分钟）用一条 refspec 拉取各工作机的 `agent/*` 分支，作为半成品备份，供接管使用：`+refs/heads/agent/*:refs/cardigan/backups/<machine_id>/agent/*`。按机器分开存放，避免同名分支互相覆盖。传输失败不推进备份进度，也不据此判定任务失败或完成。
 
 ### 12.4 验证
 
@@ -833,7 +921,7 @@ RuntimeRef = {machine_id, herdr_machine, workspace_id, pane_id, agent_name,
 
 ### 13.1 单机（Phase 1）
 
-所有组件都在一台常开机器上：控制面、数据库、Card MCP（HTTP，监听 localhost 或局域网）、Herdr server、所有 Agent。
+所有组件都在一台机器上：控制面、数据库、Card MCP（HTTP，监听 localhost 或局域网）、运行时、所有 Agent。按 D6，Phase 1 先在工作机（Linux 笔记本）上开发和运行。
 单机也必须遵守 §13.3 的约定。
 
 ### 13.2 多机拓扑（Phase 2）
@@ -907,6 +995,7 @@ RuntimeRef = {machine_id, herdr_machine, workspace_id, pane_id, agent_name,
 - 端口：每个 Assignment 分配一段端口范围，通过环境变量传入，避免并行 worktree 的开发服务器冲突。
 - 磁盘：每个 worktree 都有自己的依赖和编译缓存，要有清理策略；同一机器上尽量共享包缓存。
 - 订阅制 CLI（Claude Code、Codex）需要在每台机器上分别登录。
+- Agent CLI 关闭自动更新，Run 记录所用的 CLI 版本（0.4 实测：测试中途 Claude Code 自动升级了一个小版本）。
 
 ### 13.7 模型凭据
 
@@ -922,7 +1011,7 @@ RuntimeRef = {machine_id, herdr_machine, workspace_id, pane_id, agent_name,
 
 ### 13.9 故障处理
 
-1. 心跳超时：Assignment 运行状态变为 `unknown`，**不立即换机器重跑**，因为旧机器可能只是暂时断网，仍在改代码。
+1. 心跳超时：Assignment 运行状态变为 `unknown`，**不立即换机器重跑**，因为旧机器可能只是暂时断网，仍在改代码。失联判断不依据 CLI 的退出码，而看运行时的事件序号是否还在推进；SSH 设置连接超时（0.5b 用 3 秒验证），外层命令另设截止时间。
 2. 宽限期（建议 5–10 分钟，可配置）后仍失联：变为 `lost`，进入 Needs You，由你选择等待或接管。
 3. 接管：从主机最后一次拉取到的 SHA 在另一台机器新建 worktree 和 Session，用时间线生成交接摘要。原机器恢复后，它的 worktree 进入清理流程。
 4. 为了让接管不丢工作：Agent 在检查点 commit；主机按 §12.3 定期拉取 `agent/*` 分支。
@@ -943,22 +1032,24 @@ RuntimeRef = {machine_id, herdr_machine, workspace_id, pane_id, agent_name,
 | 注入的提示词和 Token | 写在 worktree 外，或已被 git 忽略的路径 |
 | 仓库内容中的提示注入 | Agent 没有 sudo；高风险操作走工具审批；业务变更走 Decision |
 | 主机单点 | 定期备份数据库；第一版接受单点 |
+| 运行时 | herdr-app 默认开启使用遥测，部署时必须关闭；herdr-core 的状态目录含终端输出和屏幕存档，按机密目录处理 |
+| 运行目录和凭据副本 | 权限 700 / 600；日志脱敏；release 时清理 |
 
 ---
 
-## 15. 待定决策（Phase 0 内敲定）
+## 15. 决策（Phase 0 已全部敲定）
 
-| 编号 | 决策 | 选项 / 建议 |
+| 编号 | 决策 | 结论 |
 |---|---|---|
-| D1 | 看板层 | **已决定（2026-10-27）：自研看板**，不依赖 Gitea 等外部看板。理由：数据只在控制面一处，不需要同步层；端到端测试不依赖外部服务；商业化不受上游约束。第一版范围见 §8.7；外部看板的评估保留在附录 C 作参考 |
+| D1 | 看板层 | **已决定（2026-10-27）**：自研看板，不依赖 Gitea 等外部看板。理由：数据只在控制面一处，不需要同步层；端到端测试不依赖外部服务；商业化不受上游约束。第一版范围见 §8.7；外部看板的评估保留在附录 C |
 | D2 | 技术栈 | **已决定（2026-10-27）**：TypeScript（Node 24 LTS）+ pnpm workspace；数据库第一版用 SQLite（WAL，单写入进程），需要多写入时再迁移到 Postgres；Web 前端用 React + Vite，纯 SPA，静态文件由 `apps/server` 提供，不用 SSR。理由：官方 MCP SDK 成熟，Web 可以同语言，OpenCode / Pi 的 SDK 也是 TS，便于以后做直连适配器；实现由 AI 完成，React 生成的代码最稳定。Herdr 通过 CLI 子进程调用，与语言无关。HTTP 框架、SQLite 驱动、测试框架等细节在骨架任务的计划中确定 |
-| D3 | 每个角色用哪个 Harness 和模型 | 先每个角色选一种，避免第一版同时深度适配多种 |
-| D4 | 卡片 Done 条件 | 设计走查、测试验收、PM 验收中，哪些必须通过；建议按卡片模板配置 |
-| D5 | Session 策略 | 默认：Session 跟随 Assignment，跨 Run 复用；失联或上下文过长时替换。请确认 |
-| D6 | 机器清单 | 哪台常开做主机，哪台接测试真机，各自的系统和架构 |
-| D7 | "core memo"的含义 | 固定角色说明（第一版实现），还是持续演进的记忆（Phase 3） |
-| D8 | 是否借鉴或 fork herdr-projects | 看完它的数据模型和扩展接口后决定 |
-| D9 | 运行时基线：Herdr 0.9.x 还是 herdr-core / herdr-app | 2026-11 发现 Herdr 正在换代；由 0.3 给出建议。无论选哪一代，§11 的 Runtime Adapter 接口都保持不变 |
+| D3 | 每个角色用哪个 Harness 和模型 | **已决定（2026-11-04）**：第一版只深度适配 Claude Code 和 Codex。pm-office、pm-ops 用 Claude Code（Opus）；coder 用 Codex（GPT-6-Astra）；reviewer 用 Claude Code，写代码和审代码由不同模型交叉检查。Pi 保留启动配置，不作为默认。designer、tester 接入移动端项目时再定。Phase 1 完成后，Cardigan 先用来管理它自己的开发 |
+| D4 | 卡片完成条件 | **已决定（2026-10-29、11-04）**：完成由主产出工作项的负责人申请，默认 PM 审核，卡片模板可以改为你审核（§4.4）。哪些工作项是必需的，由卡片模板配置；第一版只提供"开发卡"模板，必需项为开发、代码审核、PM 验收 |
+| D5 | Session 策略 | **已决定（2026-11-04）**：Session 跟随 Assignment，跨 Run 复用；失联或上下文过长时替换，替换时必须写交接记录（§5.2 的 `handoff`）。Agent CLI 的会话 ID 由控制面记录，恢复时用各 CLI 自带的恢复参数 |
+| D6 | 机器清单 | **已决定（2026-11-04）**：第一版两台机器：一台常开的 macOS arm64 台式机做主机，一台 Linux x86_64 笔记本做工作机；Phase 1 的单机 MVP 先在笔记本上开发和运行。具体清单放在 `cardigan-deploy`。开发 Cardigan 本身不需要测试真机 |
+| D7 | "core memo"的含义 | **已决定（2026-11-04）**：第一版只做固定的角色说明（Role Registry，有版本号）；演进式记忆放到 Phase 3 |
+| D8 | 是否借鉴或 fork herdr-projects | **已决定（2026-11-04）**：不 fork，借鉴设计（`docs/research/0.5a-herdr-projects.md` §9） |
+| D9 | 运行时基线 | **已决定（2026-11-04）**：暂定 herdr-core 0.1.x（锁版本），Herdr 0.9.5 作为回退；M2 开工前复核。见 `docs/adr/0001-runtime-baseline.md` |
 
 ---
 
@@ -979,15 +1070,15 @@ RuntimeRef = {machine_id, herdr_machine, workspace_id, pane_id, agent_name,
 | 0.7 | 代码骨架：pnpm workspace、§20.1 的全部包、依赖方向检查 | 全新 clone 上 build / test / lint / 依赖检查全部通过；故意违反依赖方向会被拦住 |
 | 0.8 | 同类产品对比、名字收尾检查（非开发） | 给出差异点和名字风险的结论 |
 
-任务级计划见 [`docs/plans/phase-0.md`](plans/phase-0.md)。
+任务级计划见 [`docs/plans/phase-0.md`](plans/phase-0.md)。Phase 0 已于 2026-11-04 完成，各项结论见 `docs/research/`；0.1 没有单独试行，PM 前台和后台改在 Phase 1 M3 实现。
 
 ### Phase 1 · 单机 MVP（4–8 周）
 
 | 里程碑 | 内容 | 验收 |
 |---|---|---|
 | M1 | 领域模型、状态机、事件存储（seq / 游标）、Card MCP（HTTP + Token） | 状态机和不变量的单元测试；MCP 契约测试；伪造身份、非法状态迁移会被拒绝 |
-| M2 | Role Registry、Launch Profile、Herdr Runtime Adapter（`machine=local`） | 从卡片一键创建 coder 的 Assignment：worktree 建好，Agent 启动并通过 `whoami` / `get_card` 读到任务 |
-| M3 | Event Router、门铃、ACK、重发、PM Office / Ops | 路由规则表全覆盖的测试；重复门铃不产生重复 Run；同一 Assignment 的多条事件合并 |
+| M2 | Role Registry、Launch Profile、Runtime Adapter（herdr-core，`machine=local`；开工前按 D9 复核） | 从卡片一键创建 coder 的 Assignment：worktree 建好，Agent 启动并通过 `whoami` / `get_card` 读到任务 |
+| M3 | Event Router、门铃、ACK、重发、PM Office / Ops（PM 前台和后台在此实现，替代 0.1 的试行） | 路由规则表全覆盖的测试；重复门铃不产生重复 Run；同一 Assignment 的多条事件合并 |
 | M4 | Git 服务：主机拉取交付、验证 worktree、中心合并、清理、对账 | 伪造的或不在该分支上的 SHA 被拒；有未提交修改的 worktree 不被静默删除；孤儿 worktree 能被发现 |
 | M5 | Workbench + 自研看板（§8.7）：卡片列表和看板视图、卡片时间线、Needs You、项目快照、执行视图 | 附录 A 场景完整跑通 |
 
@@ -1006,7 +1097,7 @@ RuntimeRef = {machine_id, herdr_machine, workspace_id, pane_id, agent_name,
 
 验收场景：
 
-1. coder 在工作机 A，tester 在带真机的工作机 B，PM 在主机。
+1. coder 在工作机 A，tester 在带能力标签（例如 `android-device`）的工作机 B，PM 在主机。验收时可以用模拟的测试 Agent，不要求接真机。
 2. 执行中拔掉 A 的网线：Assignment 进入 `unknown`，宽限期后进入 Needs You。
 3. 你选择接管：从主机最后拉取到的 SHA 在机器 C 继续执行。
 4. A 恢复后，它的旧 worktree 进入清理流程。
@@ -1028,7 +1119,7 @@ RuntimeRef = {machine_id, herdr_machine, workspace_id, pane_id, agent_name,
 
 | 阶段 | 粗估 | 主要不确定性 |
 |---|---|---|
-| Phase 0 | 1–2 周 | Herdr 多机预研（0.3）和各 Harness 接入 MCP（0.4）的结果 |
+| Phase 0 | 已完成（2026-10-27 至 11-04） | — |
 | Phase 1 | 4–8 周（含自研看板，偏上限） | Agent 是否稳定遵守 MCP 协议；Herdr 状态检测的可靠性；看板范围膨胀 |
 | Phase 2 | 3–5 周（遵守 §13.3 时） | 工作机环境初始化，尤其移动端构建和真机测试 |
 | Phase 3 | 4–8 周以上 | 按需取舍 |
@@ -1043,7 +1134,8 @@ RuntimeRef = {machine_id, herdr_machine, workspace_id, pane_id, agent_name,
 |---|---|---|
 | Agent 不遵守协议（忘记 ACK、不调用 `finish_run`、只在终端说"做完了"） | 卡片状态停滞 | 协议写进 Core Prompt；Router 超时检测，标记 `needs_attention`；交付必须经过服务端校验 |
 | Herdr 状态误判（画面检测） | 门铃重发不当 | 业务状态以 MCP 为准；Herdr 状态只作提示 |
-| Herdr 版本快速变化 | Adapter 失效 | 固定版本；Adapter 隔离所有 CLI 调用；对 Adapter 做契约测试 |
+| 运行时换代：herdr-core 仍是预览版，Herdr 0.9.x 和它并行 | Adapter 失效、接口变动 | 锁版本；Adapter 只暴露 §11.1 的接口，并做契约测试；M2 开工前复核 D9，满足回退条件就退回 Herdr 0.9.5 |
+| Agent CLI 自动更新 | 执行中途行为改变，结果无法复现 | Launch Profile 关闭自动更新；Run 记录 CLI 版本 |
 | 门铃丢失或重复 | 漏处理或重复执行 | seq + 游标 + Run 幂等 + Agent 自查更新 |
 | PM 上下文膨胀 | 判断质量下降 | 前后台分离；PM Ops 定期重建会话；用快照代替历史 |
 | Decision 泛滥 | 你被频繁打扰 | 只有阻塞性问题才能创建；PM Office 合并呈现 |
@@ -1155,14 +1247,14 @@ DeepSeek 的 Pi 环境：
    - 测试验收（verify→开发，tester，required）
    - PM 验收（verify，PM，required）
 2. 产品确认完成后，开发工作项变为 `ready`。PM Ops 指派 coder，系统建立 Assignment、worktree 和分支，并按门铃。
-3. coder 读取卡片，实现、推送，提交 Delivery D-1（附带前后对比的附件）。
+3. coder 读取卡片，实现并在本地提交（不 push），提交 Delivery D-1（附带前后对比的附件，附件带上对应的拍板编号）。
 4. 设计走查和测试验收自动进入 `ready`，两个 Assignment 被唤醒。全程不打扰你。
 5. 设计走查提交 `pass`；测试验收提交 `reject`（例如真机上起飞有空白帧）。
 6. 系统为原 coder 的 Assignment 创建返工 Run，复用原 Session 和 worktree；D-2 提交后，D-1 标记为 `superseded`。
 7. 返工中 coder 发现需要改变产品行为，调用 `request_decision`，本次 Run 以 `blocked` 结束。
 8. Needs You 出现该 Decision，PM Office 给你一句话提示。你在对话里说"按方案 A"，PM Office 调用 `record_decision` 记录。
 9. 系统为 coder 创建 `decision_resumed` Run，产出 D-3；设计走查和测试验收复核通过。
-10. 所有必需项满足后，PM 验收工作项被唤醒并通过；卡片进入 Done，并合并到主干（需要你确认）。
+10. 所有必需项都通过后，系统提醒 coder 提交完成申请；PM 审核通过，卡片进入 Done，并合并到主干（需要你确认）。
 11. worktree 被清理，时间线完整记录全过程。
 12. 你随后问"现在整体怎么样"，PM Office 查询项目快照作答，不需要重放门铃历史。
 
@@ -1177,10 +1269,11 @@ DeepSeek 的 Pi 环境：
 ## 附录 B · 讨论来源
 
 - `2026-10-24-220532-httpsgithubcomblockbuzzgit-httpsgithub.txt`：调研、选型、数据模型、PM 前后台
-- `2026-10-24-231212-homezhangshaojiprojectsnewcc2026-10-24-22.txt`：多机部署
+- `2026-10-24-231212-….txt`：多机部署
 - `kimi-export-session_-20261024-151119.md`：另一个 Agent 的多机评估（已合并：专用用户、手动指定机器、`unknown` + 宽限期）
 - 2026-10-25 至 10-27 的会话（尚未导出）：看板工具评估（附录 C）、定名、仓库规划、自研看板、主机发起的 Git 模型
-- 以上讨论记录不在本仓库中，存放在 `~/projects/newcc/`。
+- 2026-10-27 至 11-04 的 Phase 0 预研结论见 `docs/research/`。
+- 以上讨论记录不在本仓库中。
 
 ---
 
