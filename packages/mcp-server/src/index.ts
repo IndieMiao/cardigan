@@ -12,6 +12,10 @@ export type {
   McpUpdates,
 } from "./backend.js";
 export {
+  type DeliveryToolOptions,
+  deliveryTools,
+} from "./commands/delivery-tools.js";
+export {
   ERROR_CODES,
   ToolError,
   toDomainError,

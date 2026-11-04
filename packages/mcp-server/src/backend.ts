@@ -97,6 +97,16 @@ export interface McpReadContext {
  * pass in. Only `domain` types appear in this surface.
  */
 export interface McpBackend {
+  /** Cache lookup, command and response recording share one write transaction. */
+  runIdempotent<T>(
+    params: {
+      readonly project_id: ProjectId;
+      readonly assignment_id: AssignmentId;
+      readonly key: string;
+      readonly request: unknown;
+    },
+    operation: (tx: TransactionContext) => T,
+  ): Result<{ readonly value: T; readonly replayed: boolean }>;
   /** Resolve a token by its stored hash; revoked tokens resolve to `undefined`. */
   verifyToken(token: string): McpToken | undefined;
   /**
