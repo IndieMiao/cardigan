@@ -44,7 +44,8 @@ export function loadCommandState(
   };
 }
 
-function persist(
+/** Persist a command effect inside an open transaction (shared with the CLI). */
+export function persistEffect(
   tx: TransactionContext,
   project: ProjectId,
   effect: CommandEffect<unknown>,
@@ -101,7 +102,7 @@ export function executeCommand<P, T>(
           ids: tx.ids,
         }),
       );
-      persist(tx, actor.project_id, effect);
+      persistEffect(tx, actor.project_id, effect);
       return effect.data;
     }),
   ).value;

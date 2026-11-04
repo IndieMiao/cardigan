@@ -4,9 +4,17 @@ import { runAdminCommand } from "./admin.js";
 import { CliError, EXIT } from "./errors.js";
 import type { CliIo } from "./io.js";
 import { runLaunchCommand } from "./launch.js";
+import { runWorkflowCommand } from "./workflow.js";
 
 export { parseAdminArgs, runAdminCommand } from "./admin.js";
 export { CliError, EXIT } from "./errors.js";
+export {
+  humanActor,
+  issueTokenForAssignment,
+  resolveDataDir,
+  resolveProject,
+  runCommand,
+} from "./host.js";
 export type {
   CapturedOutput,
   CaptureOptions,
@@ -15,6 +23,7 @@ export type {
 } from "./io.js";
 export { parseLaunchArgs, runLaunchCommand } from "./launch.js";
 export { type LaunchPaths, resolveLaunchPaths } from "./paths.js";
+export { runWorkflowCommand } from "./workflow.js";
 
 const TOP_LEVEL_USAGE = [
   "cardigan — 卡片式多 Agent 协作开发系统",
@@ -25,9 +34,12 @@ const TOP_LEVEL_USAGE = [
   "  init             建库并执行迁移",
   "  project create   创建项目",
   "  role add         写入角色定义（allowed_tools、capabilities）",
+  "  pm create        建常驻 PM Assignment 并签发 Token（--office / --ops）",
+  "  card create      按 dev 模板建卡",
+  "  assign           建 Assignment 并在同一事务里签发 Token",
+  "  token issue      给已有 active Assignment 重新签发 Token（先作废旧 Token）",
+  "  human-action done 标记人已执行完 h(n)",
   "  launch           按启动配置启动 Agent CLI（见 cardigan launch --help）",
-  "",
-  "更多命令（card / assign / human-action）在 M1 后续任务里加入。",
 ].join("\n");
 
 /** Real IO: process streams, real spawning, real filesystem. */
@@ -106,6 +118,15 @@ export async function main(
     }
     if (command === "init" || command === "project" || command === "role") {
       return await runAdminCommand([command, ...rest], io);
+    }
+    if (
+      command === "card" ||
+      command === "assign" ||
+      command === "token" ||
+      command === "pm" ||
+      command === "human-action"
+    ) {
+      return await runWorkflowCommand([command, ...rest], io);
     }
     io.stderr(`不认识的命令：${command}\n\n${TOP_LEVEL_USAGE}`);
     return EXIT.usage;

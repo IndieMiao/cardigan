@@ -79,6 +79,21 @@ export function issueToken(
   };
 }
 
+/** All token rows of an assignment, oldest first (no hashes in the record). */
+export function tokensForAssignment(
+  db: DatabaseSync,
+  project_id: ProjectId,
+  assignment_id: AssignmentId,
+): TokenRecord[] {
+  return db
+    .prepare(
+      "SELECT id, project_id, assignment_id, role_version, allowed_tools, created_at, revoked_at " +
+        "FROM tokens WHERE project_id = ? AND assignment_id = ? ORDER BY created_at, id",
+    )
+    .all(project_id, assignment_id)
+    .map((row) => tokenRecord(row as Record<string, unknown>));
+}
+
 /** Look up a token by its hash; returns the record even when revoked. */
 export function findTokenByHash(
   db: DatabaseSync,
@@ -90,9 +105,10 @@ export function findTokenByHash(
         "FROM tokens WHERE token_hash = ?",
     )
     .get(hash) as Record<string, unknown> | undefined;
-  if (row === undefined) {
-    return undefined;
-  }
+  return row === undefined ? undefined : tokenRecord(row);
+}
+
+function tokenRecord(row: Record<string, unknown>): TokenRecord {
   return {
     id: String(row.id),
     project_id: String(row.project_id),

@@ -43,6 +43,7 @@ export {
   issueToken,
   revokeToken,
   tokenMatchesHash,
+  tokensForAssignment,
   verifyToken,
 } from "./tokens.js";
 export { newUlid } from "./ulid.js";

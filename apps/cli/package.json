@@ -16,6 +16,7 @@
     "@cardigan/domain": "workspace:*",
     "@cardigan/roles": "workspace:*",
     "@cardigan/store": "workspace:*",
-    "yaml": "^2.9.1"
+    "yaml": "^2.9.1",
+    "@cardigan/mcp-server": "workspace:*"
   }
 }
