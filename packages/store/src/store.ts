@@ -10,6 +10,7 @@ import type {
   Clock,
   Cursor,
   Event,
+  NotificationStatus,
   ProjectId,
   Result,
   TimelineEntry,
@@ -18,6 +19,18 @@ import type {
   UnitOfWork,
 } from "@cardigan/domain";
 import { createIdAllocator, PROJECT_EVENT_STREAM } from "./ids.js";
+import {
+  acknowledgeNotifications,
+  advanceRouterCursor,
+  listNotifications,
+  type MoveNotificationInput,
+  moveNotification,
+  type NotificationQuery,
+  notificationsByRecipient,
+  type RecordNotificationInput,
+  recordNotification,
+  routerCursor,
+} from "./inbox.js";
 import { type AppliedMigration, migrate } from "./migrate.js";
 import {
   createReadRepositories,
@@ -542,6 +555,72 @@ export class Store {
     return revokeToken(this.#db, id, () => this.#clock.now());
   }
 
+  /** M3.3: insert an inbox row unless (event, recipient) already exists. */
+  recordNotification(input: RecordNotificationInput) {
+    return this.#run(() =>
+      recordNotification(this.#db, input, () => this.#clock.now()),
+    );
+  }
+
+  listNotifications(query: NotificationQuery) {
+    return listNotifications(this.#db, query);
+  }
+
+  /** Pending and belled notifications grouped by recipient (§3.2). */
+  notificationsByRecipient(
+    project_id: ProjectId,
+    statuses?: readonly NotificationStatus[],
+  ) {
+    return notificationsByRecipient(this.#db, project_id, statuses);
+  }
+
+  /** Apply a notification event through the domain transition table. */
+  moveNotification(input: MoveNotificationInput) {
+    return this.#run(() =>
+      moveNotification(this.#db, input, () => this.#clock.now()),
+    );
+  }
+
+  /** §3.2: confirm everything the Assignment's ACK cursor already covers. */
+  acknowledgeNotifications(
+    project_id: ProjectId,
+    assignment_id: AssignmentId,
+  ): number {
+    return this.#run(() =>
+      acknowledgeNotifications(
+        this.#db,
+        project_id,
+        assignment_id,
+        this.#clock.now(),
+      ),
+    );
+  }
+
+  /**
+   * The Router's position in one stream: a card id, or
+   * `PROJECT_EVENT_STREAM` for project-level events. Seqs are per stream.
+   */
+  routerCursor(project_id: ProjectId, stream: string): number {
+    return routerCursor(this.#db, project_id, stream);
+  }
+
+  /** Monotonic per stream: a stale consumer can never move a cursor back. */
+  advanceRouterCursor(
+    project_id: ProjectId,
+    stream: string,
+    last_seq: number,
+  ): number {
+    return this.#run(() =>
+      advanceRouterCursor(
+        this.#db,
+        project_id,
+        stream,
+        last_seq,
+        this.#clock.now(),
+      ),
+    );
+  }
+
   /**
    * M3.2: record that the Assignment just called the MCP endpoint. The
    * watchdog of M3 plan §3.3 uses it to tell a busy Agent from a stuck one.
@@ -562,13 +641,14 @@ export class Store {
       if (assignment.status !== "active") return false;
       this.#db
         .prepare(
-          "UPDATE assignments SET doc = ? WHERE project_id = ? AND id = ?",
+          "UPDATE assignments SET doc = ?, last_mcp_activity_at = ? WHERE project_id = ? AND id = ?",
         )
         .run(
           JSON.stringify({
             ...assignment,
             last_mcp_activity_at: at,
           } satisfies Assignment),
+          at,
           project_id,
           assignment_id,
         );
