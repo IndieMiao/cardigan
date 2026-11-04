@@ -131,6 +131,7 @@ interface WorkItemFields {
   readonly depends_on: readonly WorkItemId[];
   readonly completion_criteria: readonly string[];
   readonly assignment_id?: AssignmentId;
+  readonly template_key?: string;
 }
 export type WorkItem = WorkItemFields &
   (
@@ -191,6 +192,14 @@ export interface Run {
   readonly finished_at?: Timestamp;
   readonly outcome: RunOutcome | null;
   readonly summary: string;
+  readonly heartbeat_at?: Timestamp;
+  readonly heartbeat_note?: string;
+  readonly review_limit_changes?: readonly {
+    readonly event_id: EventId;
+    readonly max_review_rounds: number;
+    readonly actor: Author;
+    readonly at: Timestamp;
+  }[];
 }
 export interface TimelineEntry {
   readonly id: TimelineEntryId;
@@ -255,6 +264,7 @@ export interface Delivery {
   readonly known_gaps: readonly {
     readonly description: string;
     readonly followup_card_id?: CardId;
+    readonly precondition?: string;
   }[];
   readonly requested_verifiers: readonly WorkItemId[];
   readonly supersedes?: DeliveryId;
@@ -300,6 +310,12 @@ interface DecisionFields {
   readonly key: DecisionId;
   readonly card_id?: CardId;
   readonly raised_by: Author;
+  readonly category?:
+    | "general"
+    | "spending"
+    | "account"
+    | "permission"
+    | "data_deletion";
   readonly question: string;
   readonly context: string;
   readonly options: readonly {

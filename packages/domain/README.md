@@ -1,6 +1,8 @@
-# Domain · M1.1–M1.2
+# Domain · M1.1–M1.3
 
 公开入口是 `@cardigan/domain`。提供 M1.1 的实体类型、编号、端口和开发卡模板，以及 M1.2 的状态迁移与派生计算；对应 `docs/plans/phase-1-m1.md`。
+
+M1.3 的纯函数命令、事务和预检边界见 [命令契约](COMMANDS.md)。
 
 ## 编号
 
