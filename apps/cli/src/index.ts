@@ -3,6 +3,7 @@ import { LaunchConfigError } from "@cardigan/roles";
 import { runAdminCommand } from "./admin.js";
 import { runAssignmentCommand } from "./assignment.js";
 import { CliError, EXIT } from "./errors.js";
+import { attentionCommand, inboxCommand } from "./inbox.js";
 import type { CliIo } from "./io.js";
 import { runLaunchCommand } from "./launch.js";
 import { type CliHooks, runWorkflowCommand } from "./workflow.js";
@@ -26,6 +27,7 @@ export {
   resolveProject,
   runCommand,
 } from "./host.js";
+export { attentionCommand, inboxCommand } from "./inbox.js";
 export type {
   CapturedOutput,
   CaptureOptions,
@@ -52,6 +54,8 @@ const TOP_LEVEL_USAGE = [
   "  token issue      给已有 active Assignment 重新签发 Token（先作废旧 Token）",
   "  human-action done 标记人已执行完 h(n)",
   "  needs-you        看待你拍板和待你执行的事项",
+  "  inbox            待投递和投递失败的通知（--assignment A-n 只看一个）",
+  "  attention        升级通知与失联的 Assignment",
   "  assignment start|stop|attach  一键启动/停止/接管 Assignment 的运行时（M2）",
   "  launch           按启动配置启动 Agent CLI（见 cardigan launch --help）",
 ].join("\n");
@@ -137,6 +141,8 @@ export async function main(
     if (command === "assignment") {
       return await runAssignmentCommand(rest, io);
     }
+    if (command === "inbox") return inboxCommand(rest, io);
+    if (command === "attention") return attentionCommand(rest, io);
     if (
       command === "card" ||
       command === "assign" ||
