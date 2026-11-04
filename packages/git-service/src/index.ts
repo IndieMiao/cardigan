@@ -60,7 +60,7 @@ export class GitWorktreeService {
     if (role.worktree === "none") return undefined;
     if (
       !parseId("assignment", a.id).ok ||
-      !/^[a-zA-Z0-9_-][a-zA-Z0-9._-]*$/u.test(input.project_id)
+      !/^[a-zA-Z0-9_][a-zA-Z0-9._-]*$/u.test(input.project_id)
     )
       throw new Error("Invalid project or Assignment path component");
     if (
@@ -83,7 +83,7 @@ export class GitWorktreeService {
       !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/iu.test(input.target_sha ?? "")
     )
       throw new Error("Readonly worktree requires a delivery commit SHA");
-    const path = join(this.worktrees, a.id),
+    const path = join(this.worktrees, input.project_id, a.id),
       repository = join(this.repositories, input.project_id);
     const branch = readonly ? undefined : `agent/${card.id}/${item.id}`;
     if (a.worktree_path && resolve(a.worktree_path) !== path)

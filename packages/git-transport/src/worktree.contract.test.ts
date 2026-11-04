@@ -145,7 +145,7 @@ test.each(["checkout", "bare"])(
     const before = await git(source, "show-ref");
     const created = placement(await service.ensureWorktree(input));
     expect(created).toEqual({
-      worktree_path: join(dataDir, "agent", "worktrees", "A-1"),
+      worktree_path: join(dataDir, "agent", "worktrees", "fixture", "A-1"),
       branch: "agent/C-1/W-1",
       base_sha: head,
     });
@@ -268,11 +268,11 @@ test("worktree=none skips Git and configured roots override the defaults", async
     worktreesRoot: join(root, "trees"),
   });
   expect(placement(await custom.ensureWorktree(input)).worktree_path).toBe(
-    join(root, "trees", "A-1"),
+    join(root, "trees", "fixture", "A-1"),
   );
 });
 
-test("non-local sources, path traversal, ownership mismatches and missing readonly SHAs are rejected", async () => {
+test("non-local sources, ownership mismatches and missing readonly SHAs are rejected", async () => {
   for (const source_repo of [
     "relative",
     "https://example.invalid/repo",
@@ -281,9 +281,6 @@ test("non-local sources, path traversal, ownership mismatches and missing readon
     await expect(
       service.ensureWorktree({ ...input, source_repo }),
     ).rejects.toThrow(/absolute local/);
-  await expect(
-    service.ensureWorktree({ ...input, project_id: "../outside" }),
-  ).rejects.toThrow(/path component/);
   await expect(
     service.ensureWorktree({
       ...input,
@@ -307,8 +304,27 @@ test("non-local sources, path traversal, ownership mismatches and missing readon
   ).rejects.toThrow(/commit SHA/);
 });
 
+test.each([
+  "",
+  ".",
+  "..",
+  "../outside",
+  "nested/project",
+  "/absolute",
+  "-project",
+  "back\\slash",
+])(
+  "unsafe project path component %j is rejected before creating directories",
+  async (project_id) => {
+    await expect(
+      service.ensureWorktree({ ...input, project_id }),
+    ).rejects.toThrow(/path component/);
+    await expect(access(dataDir)).rejects.toThrow();
+  },
+);
+
 test("existing foreign paths, branches and source repositories are never overwritten", async () => {
-  const path = join(dataDir, "agent", "worktrees", "A-1");
+  const path = join(dataDir, "agent", "worktrees", "fixture", "A-1");
   await mkdir(path, { recursive: true });
   await writeFile(join(path, "keep"), "private");
   await expect(service.ensureWorktree(input)).rejects.toThrow(/already exists/);
@@ -332,23 +348,55 @@ test("existing foreign paths, branches and source repositories are never overwri
   );
 });
 
-test("a reused Assignment ID in another project fails safely; callers can select a separate worktree root", async () => {
-  const first = placement(await service.ensureWorktree(input));
+test("two projects with A-1 have simultaneous independent worktrees under the default root", async () => {
   if (!input.card) throw new Error("Missing fixture");
   const other = {
     ...input,
     project_id: "other",
     card: { ...input.card, project_id: "other" },
   };
-  await expect(service.ensureWorktree(other)).rejects.toThrow(/already exists/);
-  const separate = new GitWorktreeService(transport, {
-    dataDir,
-    worktreesRoot: join(root, "other-worktrees"),
-  });
-  expect(
-    placement(await separate.ensureWorktree(other)).worktree_path,
-  ).not.toBe(first.worktree_path);
-  expect(await git(first.worktree_path, "rev-parse", "HEAD")).toBe(
-    first.base_sha,
+  const [first, second] = (
+    await Promise.all([
+      service.ensureWorktree(input),
+      service.ensureWorktree(other),
+    ])
+  ).map(placement);
+  if (!first || !second) throw new Error("Missing placements");
+  expect(first.worktree_path).toBe(
+    join(dataDir, "agent", "worktrees", "fixture", "A-1"),
   );
+  expect(second.worktree_path).toBe(
+    join(dataDir, "agent", "worktrees", "other", "A-1"),
+  );
+  const [firstHead, secondHead] = await Promise.all([
+    commit(first.worktree_path, "First project"),
+    commit(second.worktree_path, "Second project"),
+  ]);
+  expect(firstHead).not.toBe(secondHead);
+  await writeFile(
+    join(first.worktree_path, "tracked.txt"),
+    "First project pending",
+  );
+  expect(await service.isDirty(first.worktree_path)).toBe(true);
+  expect(await service.isDirty(second.worktree_path)).toBe(false);
+  expect(
+    await service.ensureWorktree({
+      ...input,
+      assignment: { ...input.assignment, ...first },
+    }),
+  ).toEqual(first);
+  expect(
+    await service.ensureWorktree({
+      ...other,
+      assignment: { ...other.assignment, ...second },
+    }),
+  ).toEqual(second);
+  expect(await git(first.worktree_path, "rev-parse", "HEAD")).toBe(firstHead);
+  expect(await git(second.worktree_path, "rev-parse", "HEAD")).toBe(secondHead);
+  expect(await readFile(join(first.worktree_path, "tracked.txt"), "utf8")).toBe(
+    "First project pending",
+  );
+  expect(
+    await readFile(join(second.worktree_path, "tracked.txt"), "utf8"),
+  ).toBe("Second project");
 });
