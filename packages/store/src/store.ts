@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
+import * as Path from "node:path";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type {
@@ -58,6 +59,22 @@ export interface StoreUnitOfWork extends UnitOfWork {
   read<T>(operation: (transaction: ReadRepositories) => T): T;
 }
 
+function projectRecord(row: {
+  id: string;
+  name: string;
+  created_at: string;
+  repo_path: string | null;
+  base_branch: string | null;
+}): ProjectRecord {
+  return {
+    id: row.id as ProjectId,
+    name: row.name,
+    created_at: row.created_at,
+    repo_path: row.repo_path,
+    base_branch: row.base_branch,
+  };
+}
+
 export interface StoreOptions {
   /** Directory that holds `cardigan.db`; defaults to `$CARDIGAN_DATA_DIR` or `.data`. */
   readonly dataDir?: string;
@@ -105,6 +122,10 @@ export interface ProjectRecord {
   readonly id: ProjectId;
   readonly name: string;
   readonly created_at: string;
+  /** Local repository the base clone is made from (§12.2); M4 adds the bare repo. */
+  readonly repo_path: string | null;
+  /** Branch a worktree starts from when the card does not say otherwise. */
+  readonly base_branch: string | null;
 }
 
 export interface ProjectCreateInput {
@@ -400,6 +421,8 @@ export class Store {
       id: input.id,
       name: input.name ?? input.id,
       created_at: this.#clock.now(),
+      repo_path: null,
+      base_branch: null,
     };
     this.#db
       .prepare("INSERT INTO projects (id, name, created_at) VALUES (?, ?, ?)")
@@ -409,27 +432,95 @@ export class Store {
 
   getProject(id: ProjectId): ProjectRecord | undefined {
     const row = this.#db
-      .prepare("SELECT id, name, created_at FROM projects WHERE id = ?")
-      .get(id) as { id: string; name: string; created_at: string } | undefined;
-    return row === undefined
-      ? undefined
-      : { id: row.id as ProjectId, name: row.name, created_at: row.created_at };
+      .prepare(
+        "SELECT id, name, created_at, repo_path, base_branch FROM projects WHERE id = ?",
+      )
+      .get(id) as
+      | {
+          id: string;
+          name: string;
+          created_at: string;
+          repo_path: string | null;
+          base_branch: string | null;
+        }
+      | undefined;
+    return row === undefined ? undefined : projectRecord(row);
   }
 
   listProjects(): ProjectRecord[] {
     return this.#db
       .prepare(
-        "SELECT id, name, created_at FROM projects ORDER BY created_at, id",
+        "SELECT id, name, created_at, repo_path, base_branch FROM projects ORDER BY created_at, id",
       )
       .all()
-      .map((row) => {
-        const record = row as { id: string; name: string; created_at: string };
-        return {
-          id: record.id as ProjectId,
-          name: record.name,
-          created_at: record.created_at,
-        };
-      });
+      .map((row) =>
+        projectRecord(
+          row as {
+            id: string;
+            name: string;
+            created_at: string;
+            repo_path: string | null;
+            base_branch: string | null;
+          },
+        ),
+      );
+  }
+
+  /**
+   * Register the project's local repository and default base branch (M2.2).
+   * `repo_path` must be absolute; the branch must be a plain Git ref.
+   */
+  setProjectRepo(input: {
+    readonly project_id: ProjectId;
+    readonly repo_path: string;
+    readonly base_branch?: string;
+  }): Result<ProjectRecord> {
+    if (!Path.isAbsolute(input.repo_path)) {
+      return {
+        ok: false,
+        error: {
+          code: "validation_failed",
+          message: "repo_path must be absolute",
+          details: { repo_path: input.repo_path },
+        },
+      };
+    }
+    const branch = input.base_branch ?? "main";
+    if (!/^[A-Za-z0-9._/-]+$/u.test(branch) || branch.startsWith("-")) {
+      return {
+        ok: false,
+        error: {
+          code: "validation_failed",
+          message: "base_branch is not a valid branch name",
+          details: { base_branch: branch },
+        },
+      };
+    }
+    const changed = this.#db
+      .prepare(
+        "UPDATE projects SET repo_path = ?, base_branch = ? WHERE id = ?",
+      )
+      .run(input.repo_path, branch, input.project_id);
+    if (Number(changed.changes) === 0) {
+      return {
+        ok: false,
+        error: {
+          code: "not_found",
+          message: `project ${input.project_id} not found`,
+        },
+      };
+    }
+    const project = this.getProject(input.project_id);
+    if (project === undefined) {
+      return {
+        ok: false,
+        error: {
+          code: "not_found",
+          message: `project ${input.project_id} not found`,
+        },
+      };
+    }
+    return { ok: true, value: project };
   }
 
   issueToken(input: IssueTokenInput): IssuedToken {

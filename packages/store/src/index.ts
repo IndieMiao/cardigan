@@ -18,6 +18,18 @@ export {
   type TableSpec,
 } from "./repositories.js";
 export {
+  getRoleVersion,
+  listRoleVersions,
+  nextRoleVersion,
+  type RoleDocument,
+  RoleVersionError,
+  type RoleVersionSummary,
+  type RoleWriteResult,
+  roleDocument,
+  roleFromDocument,
+  writeRole,
+} from "./roles.js";
+export {
   type AckEventsParams,
   type AckEventsResult,
   DEFAULT_DB_FILE,
