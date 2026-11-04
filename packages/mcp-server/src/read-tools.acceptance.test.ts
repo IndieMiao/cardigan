@@ -410,7 +410,7 @@ test("R10: the default server binds loopback and refuses a foreign Host header",
 
 // §9.2 promises updates after the cursor. With card_id present but since_seq omitted,
 // the current server returns seq 1..3 even after ACK 2. Keep this as a regression.
-test.fails("R11: get_updates without since_seq starts after the caller's saved ACK", async () => {
+test("R11: get_updates without since_seq starts after the caller's saved ACK", async () => {
   await ok(caller, "ack_events", { card_id: own, up_to_seq: 2 });
   const updates = await ok<{ events: Event[]; timeline: TimelineEntry[] }>(
     caller,
