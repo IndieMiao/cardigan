@@ -1,6 +1,8 @@
 # Cardigan · 多 Agent 协作开发系统开发方案
 
-- 版本：v0.6.1（2026-11-04）
+- 版本：v0.6.2（2026-11-04）
+  - v0.6.2：§20.4 合并规则改为常规 PR 由 Claude 合并并给出 brief；§10.4 改正 PM 角色的写法（前台、后台是同一个角色的两个 Assignment）。
+  - v0.6.1（2026-11-04）
   - v0.6.1：§10.2 新增"接入点 + 启动配置"两层设计，以及供人手动启动的 `cardigan launch`。
   - v0.6（2026-11-04）
   - v0.6：Phase 0 完成。D3–D9 全部敲定（§15）；按 `docs/research/` 中各份预研报告修订 §2.1、§4.3–§4.5、§5.2、§6、§8.2、§8.4、§8.7、§9、§10、§11（重写）、§12、§13、§14、§16–§18 和附录 A、B；新增 ADR 0001（运行时基线）。
@@ -819,12 +821,14 @@ Role 修改后版本号递增，Run 记录所用版本。
 
 | 角色 | 类型 | worktree | 主要权限 | Harness 和模型（D3） |
 |---|---|---|---|---|
-| pm-office | standing | 不需要（可选只读 clone） | PM 工具 + `record_decision` | Claude Code（Opus） |
-| pm-ops | standing | 不需要 | PM 工具（不能记录人的决定） | Claude Code（Opus） |
+| pm（office） | standing | 不需要（可选只读 clone） | PM 工具 + `record_decision` | Claude Code（Opus） |
+| pm（ops） | standing | 不需要 | PM 工具（不能记录人的决定） | Claude Code（Opus） |
 | designer | work | 按需 | 设计相关产出与走查；设计工具 MCP；截图 | 接入移动端项目时再定 |
 | coder | work | 需要 | 代码产出；只在本地 commit，没有任何推送权限 | Codex（GPT-6-Astra） |
 | reviewer | work | 只读（按 SHA 检出） | 代码审核 | Claude Code（和 coder 用不同模型，交叉检查） |
 | tester | work | 只读（按 SHA 检出） | 测试验收；需要带对应能力标签的机器（如真机） | 接入移动端项目时再定 |
+
+`pm（office）` 和 `pm（ops）` 是同一个角色 `pm` 的两个常驻 Assignment（§7.1）：共用角色说明和项目规则，权限按 Assignment 区分，只有 office 能调用 `record_decision`。
 
 ---
 
@@ -1238,7 +1242,7 @@ cardigan/
 | 实现 | Codex（Codex CLI）、DeepSeek（Pi） | 实现功能，附带单元测试 |
 | 验收测试 | 另一个实现模型（交叉） | 根据计划写验收测试和契约测试 |
 | 审核 | Claude | 只审核、提修改意见，不提交代码 |
-| 合并 | Claude 准备，你确认 | 冲突退回实现者修复 |
+| 合并 | Claude | 常规 PR 审核通过后由 Claude 合并，并给用户一份合并 brief；涉及需要用户拍板的事项（产品或架构决策、范围变化、安全取舍、对外发布、花钱）时，由用户决定后再合并；冲突退回实现者修复 |
 
 DeepSeek 的 Pi 环境：
 
