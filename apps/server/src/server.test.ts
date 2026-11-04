@@ -1,4 +1,5 @@
 import { mkdtempSync, rmSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "@cardigan/store";
@@ -185,4 +186,38 @@ test("SIGTERM triggers shutdown through the installed handler", () => {
   expect(seen).toEqual(["SIGTERM"]);
   // Handlers are removed, so a second signal does not run shutdown twice.
   expect(handlers.size).toBe(0);
+});
+
+/** Some environments have no IPv6 loopback; skip the ::1 test there. */
+const supportsIpv6Loopback = await new Promise<boolean>((resolve) => {
+  const probe = createServer();
+  probe.once("error", () => resolve(false));
+  probe.listen(0, "::1", () => probe.close(() => resolve(true)));
+});
+
+test.skipIf(!supportsIpv6Loopback)(
+  "listens on the IPv6 loopback and still answers the Host check",
+  async () => {
+    const v6Store = Store.open({ dataDir });
+    const v6 = await startCardiganServer({
+      config: { dataDir, host: "::1", port: 0 },
+      store: v6Store,
+    });
+    try {
+      expect(v6.url).toContain("http://[::1]:");
+      const client = await connect(seed(v6Store));
+      const result = await client.callTool({ name: "whoami", arguments: {} });
+      expect(textOf(result)).toMatchObject({ assignment_id: "A-1" });
+    } finally {
+      await v6.close();
+      v6Store.close();
+    }
+  },
+);
+
+test("a non-loopback host is refused before anything starts", async () => {
+  const env = { CARDIGAN_DATA_DIR: dataDir, CARDIGAN_MCP_HOST: "0.0.0.0" };
+  await expect(startCardiganServer({ env })).rejects.toThrow(
+    /M1 只支持本机监听/,
+  );
 });
