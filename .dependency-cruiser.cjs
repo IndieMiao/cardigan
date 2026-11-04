@@ -62,7 +62,7 @@ module.exports = {
       from: { path: "^packages/domain/" },
       to: {
         dependencyTypes: ["core"],
-        path: "^(node:)?(fs|child_process|cluster|dgram|dns|http|http2|https|inspector|net|readline|repl|sqlite|tls|tty|worker_threads)(/|$)",
+        path: "^(node:)?(child_process|cluster|console|dgram|dns|fs|http|http2|https|inspector|module|net|os|process|readline|repl|sqlite|stream|tls|trace_events|tty|v8|worker_threads)(/|$)",
       },
     },
   ],
