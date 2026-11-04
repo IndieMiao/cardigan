@@ -5,6 +5,7 @@ import {
 } from "node:http";
 import type { AddressInfo } from "node:net";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { MAX_MCP_BODY_BYTES } from "./attachments.js";
 import { authenticate, bearerToken, type Identity } from "./auth.js";
 import type { McpBackend } from "./backend.js";
 import {
@@ -12,13 +13,19 @@ import {
   deliveryTools,
 } from "./commands/delivery-tools.js";
 import { managementTools } from "./commands/management-tools.js";
+import {
+  type SupportToolOptions,
+  supportTools,
+} from "./commands/support-tools.js";
 import { ToolError } from "./errors.js";
 import { type Logger, stdoutLogger } from "./log.js";
 import { createMcpServer } from "./tool-server.js";
 import { readOnlyTools } from "./tools/index.js";
 import type { ToolDefinition } from "./tools/types.js";
 
-export interface McpServerOptions extends DeliveryToolOptions {
+export interface McpServerOptions
+  extends DeliveryToolOptions,
+    SupportToolOptions {
   readonly store: McpBackend;
   /** Loopback only; M1 never binds a public interface (§9.1, §14). */
   readonly host?: string;
@@ -57,6 +64,7 @@ export async function startMcpServer(
     ...readOnlyTools,
     ...deliveryTools(options),
     ...managementTools(options.clock),
+    ...supportTools(options),
   ];
 
   // Filled in once the socket is bound; the DNS rebinding check needs the port.
@@ -194,6 +202,7 @@ async function serveMcp(
   const transport = new StreamableHTTPServerTransport({
     // No sessionIdGenerator: stateless, one transport per request.
     enableJsonResponse: true,
+    maxRequestBodySize: MAX_MCP_BODY_BYTES,
     enableDnsRebindingProtection: true,
     // The Host header must name the loopback address we listen on.
     // Include the bracketed IPv6 form (`[::1]:3004`) as well.

@@ -48,6 +48,7 @@ export async function startCardiganServer(
       // The store satisfies McpBackend structurally; this keeps mcp-server
       // depending on domain only (§20.2).
       store: store as McpBackend,
+      dataDir: config.dataDir,
       host: config.host,
       port: config.port,
       ...(options.log === undefined ? {} : { log: options.log }),
