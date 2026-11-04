@@ -1,6 +1,7 @@
 # Phase 0 任务计划
 
-- 版本：v2（2026-11-04）：0.3 增加 Herdr 换代评估和 D9
+- 版本：v3（2026-11-04）：0.5b 的 SSH 部分改用本机专用用户
+- v2（2026-11-04）：0.3 增加 Herdr 换代评估和 D9
 - 原版本：v1（2026-10-27）
 - 对应：开发方案 v0.5 §16 Phase 0
 - 目标：先在现有实践里验证"PM 前后台 + 结构化条目"这套模式；把 Herdr、MCP、Git 三个外部依赖的实际表现查清楚；敲定剩余决策（D3–D8）；搭好代码骨架。Phase 0 结束后，Phase 1 M1 可以直接开工。
@@ -14,7 +15,7 @@
 | 0.3 | Herdr 多机预研与运行时基线（含 herdr-core / herdr-app 换代评估，给出 D9 建议） | DeepSeek（Pi） | 你确认可以用那台已保存的远程机器，并且 SSH 已连通 | `docs/research/0.3-herdr-machine.md` | `docs/p0-herdr-machine` |
 | 0.4 | 各 Harness 接入 MCP 的预研 | Codex | 无 | `docs/research/0.4-mcp-harness.md` + `spikes/0.4-mcp/` | `docs/p0-mcp-harness` |
 | 0.5a | 评估 herdr-projects | DeepSeek（Pi） | 无 | `docs/research/0.5a-herdr-projects.md` | `docs/p0-herdr-projects` |
-| 0.5b | 主机发起的 Git 模型预研 | Codex | 无（本地部分）；SSH 部分同 0.3 | `docs/research/0.5b-git-model.md` + `spikes/0.5-git/` | `docs/p0-git-model` |
+| 0.5b | 主机发起的 Git 模型预研 | Codex | 无（本地部分）；SSH 部分需要你先在本机建好专用用户 `cardigan-agent`（见 0.5b） | `docs/research/0.5b-git-model.md` + `spikes/0.5-git/` | `docs/p0-git-model` |
 | 0.6 | 敲定 D3–D9 | Claude 汇总，你拍板 | 0.3、0.4、0.5a、0.5b 已合并；你提供机器清单（D6） | 开发方案 v0.6 | `docs/p0-decisions` |
 | 0.7 | 代码骨架 | Codex | 无 | `package.json`、`packages/*`、`apps/*` 骨架 | `feat/p0-skeleton` |
 | 0.8 | 同类产品对比、名字收尾检查（非开发） | Claude | 无 | `docs/research/0.8-market-and-name.md` | `docs/p0-market-name` |
@@ -223,7 +224,29 @@ OpenCode 本机没有安装，这次不测。等 D3 选定它时再补。
 
 相关章节：开发方案 §12、§13.2、§13.9。
 
-步骤：在 `spikes/0.5-git/` 写一个可以重复执行的脚本。`hub` 和 `worker` 先用本机的两个目录模拟，走本地路径；全部跑通后，再把 `worker` 换成 `worker-a`，走 SSH。
+SSH 部分的做法（2026-11-04 修订）：不连远程机器，而是在本机建一个专用用户 `cardigan-agent` 当作"工作机"，`hub`（你当前的用户）通过 `ssh cardigan-agent@localhost` 访问它。这和开发方案 §13.4 的 `agent` 用户一致：没有 sudo，不持有任何 SSH 密钥和 Git 凭据；SSH 方向只有 hub → worker。这样走的是和真实多机相同的 SSH 代码路径，但不碰任何正在使用的机器。
+
+前置条件（由你执行，需要 sudo；实现者不要自己建用户、不要用 sudo）：
+
+```bash
+# 1. 建专用用户：有自己的 home，没有 sudo，没有可用的登录密码
+sudo useradd -m -s /bin/bash cardigan-agent
+# 2. 生成一把只用于本次预研的密钥（放在 hub 用户这边）
+ssh-keygen -t ed25519 -N "" -C "cardigan-spike" -f ~/.ssh/cardigan_spike_ed25519
+# 3. 授权：只允许从本机登录，禁止各种转发
+sudo install -d -m 700 -o cardigan-agent -g cardigan-agent /home/cardigan-agent/.ssh
+echo "from=\"127.0.0.1,::1\",no-port-forwarding,no-agent-forwarding,no-X11-forwarding $(cat ~/.ssh/cardigan_spike_ed25519.pub)" \
+  | sudo tee /home/cardigan-agent/.ssh/authorized_keys >/dev/null
+sudo chown cardigan-agent:cardigan-agent /home/cardigan-agent/.ssh/authorized_keys
+sudo chmod 600 /home/cardigan-agent/.ssh/authorized_keys
+# 4. 验证（应输出 cardigan-agent 和 git 版本）
+ssh -i ~/.ssh/cardigan_spike_ed25519 -o IdentitiesOnly=yes cardigan-agent@localhost 'whoami; git --version'
+# 如果第 4 步被拒绝登录，可能是账户被标为锁定，执行：sudo usermod -p '*' cardigan-agent
+```
+
+脚本里一律用 `-i ~/.ssh/cardigan_spike_ed25519 -o IdentitiesOnly=yes` 显式指定密钥（可以通过 `GIT_SSH_COMMAND` 传入），不要修改 `~/.ssh/config`。预研结束后的清理（由你决定是否执行）：`sudo userdel -r cardigan-agent`，并删除 `~/.ssh/cardigan_spike_ed25519*`。
+
+步骤：在 `spikes/0.5-git/` 写一个可以重复执行的脚本。`hub` 和 `worker` 先用本机的两个目录模拟，走本地路径；全部跑通后，再把 `worker` 换成 `cardigan-agent@localhost`，走 SSH。
 
 1. `hub`：建中心 bare 仓库和集成 clone。
 2. 基线：`hub` 把 main 推到 `worker` 基础 clone 的 `refs/remotes/origin/main`，并确认不影响 `worker` 当前检出的分支。
@@ -233,9 +256,9 @@ OpenCode 本机没有安装，这次不测。等 D3 选定它时再补。
    - 伪造的 SHA：拒绝；
    - 存在、但不在该分支上的 SHA：拒绝。
 5. 定期拉取：用一条 refspec 拉取 `worker` 上全部 `agent/*` 分支。
-6. 断线与接管：让 `worker` 不可达，记录拉取失败的耗时和报错（SSH 设置 `ConnectTimeout`）；然后从 `hub` 最后拉取到的 SHA，在第三个目录（模拟另一台机器）建 worktree 继续开发。
+6. 断线与接管：让 `worker` 不可达，记录拉取失败的耗时和报错（SSH 设置 `ConnectTimeout`）。不可达用两种方式模拟，都只改这一次调用的参数：连一个不存在的地址（例如保留的测试地址 `203.0.113.1`，观察超时），以及连一个没有服务的端口（观察连接被拒）。然后从 `hub` 最后拉取到的 SHA，在第三个目录（模拟另一台机器）建 worktree 继续开发。
 7. 合并：在 `hub` 的集成 clone 合并，并更新中心仓库的 main。
-8. 记录：`worker` 一侧全程不需要任何 Git 凭据。
+8. 记录：`worker` 一侧全程不需要任何 Git 凭据；`cardigan-agent` 的 home 里只有 `authorized_keys`，没有私钥。
 
 产出：`docs/research/0.5b-git-model.md`，写明每一步的确切 git 命令、refspec、超时设置和失败表现，以及对 §12 的修改建议；`spikes/0.5-git/`。
 
