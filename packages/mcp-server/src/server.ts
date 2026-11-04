@@ -195,15 +195,18 @@ async function serveMcp(
     identity,
     tools,
     log,
-    // The acknowledge hook belongs to the tool call, not to the connection:
-    // `initialize` and `tools/list` must not start the Run (§4 step 8).
-    ...(options.acknowledgeRuns === false
-      ? {}
-      : {
-          onToolCall: () => {
-            acknowledgeDispatchedRun(options.store, identity);
-          },
-        }),
+    // The hooks belong to the tool call, not to the connection: `initialize`
+    // and `tools/list` must not start the Run (§4 step 8) or make an idle Agent
+    // look busy (M3 plan §3.3).
+    onToolCall: () => {
+      options.store.touchAssignmentActivity?.(
+        identity.actor.project_id,
+        identity.actor.assignment_id,
+      );
+      if (options.acknowledgeRuns !== false) {
+        acknowledgeDispatchedRun(options.store, identity);
+      }
+    },
     revalidateToken: () => {
       const token = bearerToken(req.headers.authorization);
       if (!token || options.store.verifyToken(token)?.id !== identity.token.id)

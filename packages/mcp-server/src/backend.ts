@@ -110,6 +110,15 @@ export interface McpBackend {
   /** Resolve a token by its stored hash; revoked tokens resolve to `undefined`. */
   verifyToken(token: string): McpToken | undefined;
   /**
+   * M3.2: record the last authenticated MCP call for the watchdog (§3.3).
+   * Optional so pure routing tests can use a bare backend.
+   */
+  touchAssignmentActivity?(
+    project_id: ProjectId,
+    assignment_id: AssignmentId,
+    at?: string,
+  ): boolean;
+  /**
    * Transactions. Read-only paths use `read` (`BEGIN DEFERRED`), so they do not
    * take the write lock and keep working while another process writes.
    */
