@@ -1,0 +1,610 @@
+import { execFileSync } from "node:child_process";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, test } from "vitest";
+import {
+  AGENT_PROTOCOL,
+  type AssignmentRoleInput,
+  type CompiledAssignmentLaunch,
+  compileAssignmentLaunch,
+  corePromptFor,
+  defaultRoles,
+  firstPrompt,
+  type Harness,
+  parseLaunchConfig,
+} from "./index.js";
+
+/**
+ * M2.4: compile "start this Assignment" for the three harnesses.
+ *
+ * The assignment's MCP token is a fixture value that only ever appears in the
+ * run directory's `token` file at runtime; no generated file may contain it.
+ */
+const TOKEN = "fictional-assignment-token-never-written-to-a-file";
+const RUN_DIR = "/srv/cardigan/runs/A-12";
+const WORK_DIR = "/srv/agent/worktrees/A-12";
+const MCP_URL = "http://127.0.0.1:3004/mcp";
+
+const launchConfig = parseLaunchConfig({
+  providers: {
+    gateway: {
+      harness: "claude-code",
+      env: { ANTHROPIC_BASE_URL: "https://gateway.example.invalid" },
+      secret_env: { ANTHROPIC_AUTH_TOKEN: "CLAUDE_TOKEN" },
+    },
+    "codex-gateway": {
+      harness: "codex",
+      env: { OPENAI_BASE_URL: "https://codex.example.invalid/v1" },
+      secret_env: { OPENAI_API_KEY: "CODEX_KEY" },
+    },
+    pi: { harness: "pi", secret_env: { DS_API_KEY: "PI_KEY" } },
+  },
+  profiles: {
+    "claude-agent": {
+      harness: "claude-code",
+      provider: "gateway",
+      model: "opus",
+    },
+    "codex-agent": {
+      harness: "codex",
+      provider: "codex-gateway",
+      model: "gpt-6-astra",
+    },
+    "pi-agent": {
+      harness: "pi",
+      provider: "pi",
+      provider_flag: "deepseek",
+      model: "deepseek-flash",
+    },
+  },
+});
+
+const secrets = {
+  CLAUDE_TOKEN: "fictional-claude-credential",
+  CODEX_KEY: "fictional-codex-credential",
+  PI_KEY: "fictional-pi-credential",
+};
+
+const TOOLS = [
+  "whoami",
+  "get_card",
+  "get_updates",
+  "ack_events",
+  "submit_delivery",
+];
+
+function roleFor(harness: Harness, profile: string): AssignmentRoleInput {
+  return {
+    role_id: "coder",
+    harness,
+    launch_profile: profile,
+    worktree: "write",
+    allowed_tools: TOOLS,
+    core_prompt: corePromptFor("coder"),
+  };
+}
+
+function compile(
+  harness: Harness,
+  profile: string,
+  first: string,
+): CompiledAssignmentLaunch {
+  return compileAssignmentLaunch({
+    assignment: {
+      assignment_id: "A-12",
+      run_id: "R-5",
+      card_id: "C-3",
+      work_item_id: "W-7",
+      project_id: "p-demo",
+    },
+    role: roleFor(harness, profile),
+    launch: launchConfig,
+    mcp: { url: MCP_URL },
+    run_dir: RUN_DIR,
+    work_dir: WORK_DIR,
+    first_prompt: first,
+    secrets,
+  });
+}
+
+/** Every byte the host would write, plus the argv and env the CLI receives. */
+function surface(compiled: CompiledAssignmentLaunch): string {
+  return [
+    compiled.command,
+    ...compiled.args,
+    ...Object.entries(compiled.env).map(([k, v]) => `${k}=${v}`),
+    ...compiled.files.map((file) => `${file.path}\n${file.content}`),
+  ].join("\n");
+}
+
+const first = firstPrompt({
+  card_id: "C-3",
+  work_item_id: "W-7",
+  assignment_id: "A-12",
+  run_id: "R-5",
+});
+
+describe("snapshot: claude-code", () => {
+  const compiled = compile("claude-code", "claude-agent", first);
+
+  test("command, arguments and files", () => {
+    expect({
+      command: compiled.command,
+      args: compiled.args,
+      env: compiled.env,
+      files: compiled.files.map((file) => ({
+        path: file.path,
+        mode: file.mode.toString(8),
+        content: file.content,
+      })),
+    }).toMatchSnapshot();
+  });
+
+  test("wires the Card MCP server through --mcp-config and the Core Prompt", () => {
+    const mcp = compiled.files.find((file) => file.path.endsWith("mcp.json"));
+    expect(mcp?.mode).toBe(0o600);
+    const config = JSON.parse(mcp?.content ?? "{}") as {
+      mcpServers: Record<
+        string,
+        { url: string; headers: Record<string, string> }
+      >;
+    };
+    expect(config.mcpServers.card?.url).toBe(MCP_URL);
+    // The literal placeholder Claude Code expands at runtime, not a value.
+    expect(config.mcpServers.card?.headers.Authorization).toMatch(
+      /^Bearer \$\{MCP_TOKEN\}$/,
+    );
+
+    expect(compiled.args).toContain("--strict-mcp-config");
+    expect(compiled.args).toContain("--mcp-config");
+    expect(compiled.args).toContain(`${RUN_DIR}/core.md`);
+    const toolsIndex = compiled.args.indexOf("--allowedTools");
+    expect(compiled.args[toolsIndex + 1]).toContain(
+      "mcp__card__submit_delivery",
+    );
+    expect(compiled.env.DISABLE_AUTOUPDATER).toBe("1");
+  });
+
+  test("the Core Prompt and the first prompt are written into the run directory", () => {
+    const core = compiled.files.find(
+      (file) => file.path === `${RUN_DIR}/core.md`,
+    );
+    const opening = compiled.files.find(
+      (file) => file.path === `${RUN_DIR}/first.md`,
+    );
+    expect(core?.content).toContain("# 角色：coder");
+    expect(opening?.content).toContain(
+      "[bell] card=C-3 wi=W-7 asg=A-12 run=R-5",
+    );
+  });
+});
+
+describe("snapshot: codex", () => {
+  const compiled = compile("codex", "codex-agent", first);
+
+  test("command, arguments and files", () => {
+    expect({
+      command: compiled.command,
+      args: compiled.args,
+      env: compiled.env,
+      files: compiled.files.map((file) => ({
+        path: file.path,
+        mode: file.mode.toString(8),
+        content: file.content,
+      })),
+    }).toMatchSnapshot();
+  });
+
+  test("points CODEX_HOME at the run directory and approves the Card tools", () => {
+    expect(compiled.env.CODEX_HOME).toBe(`${RUN_DIR}/codex`);
+    const config = compiled.files.find(
+      (file) => file.path === `${RUN_DIR}/codex/config.toml`,
+    );
+    expect(config?.content).toContain("[mcp_servers.card]");
+    expect(config?.content).toContain(`url = "${MCP_URL}"`);
+    expect(config?.content).toContain('bearer_token_env_var = "MCP_TOKEN"');
+    expect(config?.content).toContain(
+      "[mcp_servers.card.tools.submit_delivery]",
+    );
+    expect(config?.content).toContain('approval_mode = "approve"');
+  });
+
+  test("the Core Prompt is the model instruction file", () => {
+    const config = compiled.files.find(
+      (file) => file.path === `${RUN_DIR}/codex/config.toml`,
+    );
+    // Codex replaces its own instructions with model_instructions_file, so the
+    // Core Prompt has to be reachable from the config we write.
+    expect(config?.content).toMatch(/model_instructions_file|core\.md/);
+  });
+});
+
+describe("snapshot: pi", () => {
+  const compiled = compile("pi", "pi-agent", first);
+
+  test("command, arguments and files", () => {
+    expect({
+      command: compiled.command,
+      args: compiled.args,
+      env: compiled.env,
+      files: compiled.files.map((file) => ({
+        path: file.path,
+        mode: file.mode.toString(8),
+        content: file.content,
+      })),
+    }).toMatchSnapshot();
+  });
+
+  test("uses PI_CODING_AGENT_DIR and appends the Core Prompt without disabling extensions", () => {
+    expect(compiled.env.PI_CODING_AGENT_DIR).toBe(`${RUN_DIR}/pi`);
+    expect(compiled.args).toContain("--append-system-prompt");
+    expect(compiled.args).toContain(`${RUN_DIR}/core.md`);
+    expect(compiled.args).not.toContain("--no-extensions");
+    const mcp = compiled.files.find(
+      (file) => file.path === `${RUN_DIR}/pi/mcp.json`,
+    );
+    expect(JSON.parse(mcp?.content ?? "{}")).toMatchObject({
+      mcpServers: { card: { url: MCP_URL } },
+    });
+    expect(mcp?.content).toMatch(/Authorization\W+Bearer \$\{MCP_TOKEN\}/);
+  });
+});
+
+describe("the token never reaches a generated file", () => {
+  for (const [harness, profile] of [
+    ["claude-code", "claude-agent"],
+    ["codex", "codex-agent"],
+    ["pi", "pi-agent"],
+  ] as const) {
+    test(`${harness}: no plaintext token in files, argv or env`, () => {
+      const compiled = compile(harness, profile, first);
+      const text = surface(compiled);
+      expect(text).not.toContain(TOKEN);
+      // Only the variable reference appears.
+      expect(text).toContain("MCP_TOKEN");
+      // The wrapper never receives the token as an argument.
+      expect(compiled.args.join(" ")).not.toContain("token=");
+      expect(Object.keys(compiled.env)).not.toContain("MCP_TOKEN");
+    });
+  }
+
+  test("launch.sh reads the token file, deletes it and exports MCP_TOKEN", () => {
+    const compiled = compile("pi", "pi-agent", first);
+    const script = compiled.files.find((file) =>
+      file.path.endsWith("launch.sh"),
+    );
+    expect(script?.mode).toBe(0o700);
+    const content = script?.content ?? "";
+    expect(content).toContain("token_file=");
+    expect(content).toContain(`cat "$token_file"`);
+    expect(content).toContain('rm -f "$token_file"');
+    expect(content).toContain("export MCP_TOKEN");
+    expect(content).toContain("exec 'pi'");
+    // Reading before deleting, and failing loudly when the file is gone.
+    expect(content.indexOf('cat "$token_file"')).toBeLessThan(
+      content.indexOf('rm -f "$token_file"'),
+    );
+    expect(content).toContain("exit 78");
+    expect(compiled.token_file).toBe(`${RUN_DIR}/token`);
+    expect(compiled.launch_script).toBe(`${RUN_DIR}/launch.sh`);
+  });
+});
+
+describe("default role pack", () => {
+  // §6.3 as written in the plan, independent of the exported constant, so
+  // deleting a rule from the role pack cannot delete the expectation too.
+  const SPEC_RULES = [
+    {
+      name: "开始读更新",
+      phrases: ["每次 Run 开始时调用 `get_updates`", "结束前再调用一次"],
+    },
+    { name: "ACK", phrases: ["`ack_events`"] },
+    {
+      name: "结构化产出",
+      phrases: ["`submit_delivery` 或 `submit_review`", "不能只在终端里说"],
+    },
+    {
+      name: "请求拍板",
+      phrases: ["`request_decision`", "finish_run(outcome=blocked)"],
+    },
+    { name: "结束 Run", phrases: ["本次 Run 结束必须调用 `finish_run`"] },
+    { name: "空闲自查", phrases: ["空闲时", "`get_updates` 自查", "防止漏铃"] },
+  ] as const;
+
+  test("the exported protocol is the six §6.3 rules", () => {
+    expect(AGENT_PROTOCOL).toHaveLength(SPEC_RULES.length);
+    const joined = AGENT_PROTOCOL.join("\n");
+    for (const rule of SPEC_RULES) {
+      for (const phrase of rule.phrases) {
+        expect(joined, `${rule.name} is missing: ${phrase}`).toContain(phrase);
+      }
+    }
+  });
+
+  test("every role's Core Prompt carries all of §6.3", () => {
+    const titles = { pm: "PM", coder: "coder", reviewer: "reviewer" } as const;
+    for (const role of ["pm", "coder", "reviewer"] as const) {
+      const prompt = corePromptFor(role);
+      for (const rule of SPEC_RULES) {
+        for (const phrase of rule.phrases) {
+          expect(
+            prompt,
+            `${role} is missing ${rule.name}: ${phrase}`,
+          ).toContain(phrase);
+        }
+      }
+      expect(prompt).toContain(`# 角色：${titles[role]}`);
+    }
+  });
+
+  test("the protocol names the MCP tools the agent must call", () => {
+    const prompt = corePromptFor("coder");
+    for (const tool of [
+      "get_updates",
+      "ack_events",
+      "submit_delivery",
+      "submit_review",
+      "request_decision",
+      "finish_run",
+    ]) {
+      expect(prompt).toContain(tool);
+    }
+    expect(prompt).toContain("finish_run(outcome=blocked)");
+  });
+
+  test("defaultRoles builds the three roles from the given harness mappings", () => {
+    const roles = defaultRoles({
+      pm: {
+        harness: "claude-code",
+        launch_profile: "claude-agent",
+        worktree: "none",
+        allowed_tools: ["whoami"],
+      },
+      coder: {
+        harness: "codex",
+        launch_profile: "codex-agent",
+        worktree: "write",
+        allowed_tools: TOOLS,
+      },
+      reviewer: {
+        harness: "claude-code",
+        launch_profile: "claude-agent",
+        worktree: "readonly",
+        allowed_tools: ["submit_review"],
+      },
+    });
+
+    expect(roles.map((role) => role.role_id)).toEqual([
+      "pm",
+      "coder",
+      "reviewer",
+    ]);
+    expect(roles.map((role) => role.worktree)).toEqual([
+      "none",
+      "write",
+      "readonly",
+    ]);
+    for (const role of roles) {
+      for (const rule of AGENT_PROTOCOL) {
+        expect(role.core_prompt).toContain(rule);
+      }
+      // Same §6.3 phrases as above, so a role cannot ship a trimmed protocol.
+      expect(role.core_prompt).toContain("本次 Run 结束必须调用 `finish_run`");
+      expect(role.core_prompt).toContain("防止漏铃");
+    }
+  });
+
+  test("firstPrompt is a bell, not a brief", () => {
+    expect(first).toContain(
+      "[bell] card=C-3 wi=W-7 asg=A-12 run=R-5 kind=initial",
+    );
+    expect(first).toContain("whoami");
+    expect(first).toContain("get_card");
+    expect(first).toContain("get_updates");
+    expect(first).not.toContain("请实现");
+  });
+});
+
+describe("mismatched role and profile are refused", () => {
+  test("a codex role cannot use a claude profile", () => {
+    expect(() =>
+      compileAssignmentLaunch({
+        assignment: { assignment_id: "A-1", run_id: "R-1" },
+        role: { ...roleFor("codex", "claude-agent") },
+        launch: launchConfig,
+        mcp: { url: MCP_URL },
+        run_dir: RUN_DIR,
+        work_dir: WORK_DIR,
+        first_prompt: "hello",
+        secrets,
+      }),
+    ).toThrow(/claude-code/);
+  });
+});
+
+/** Recursively read every regular file under `dir`. */
+function readTree(dir: string): Array<{ path: string; content: string }> {
+  const out: Array<{ path: string; content: string }> = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...readTree(path));
+    else out.push({ path, content: readFileSync(path, "utf8") });
+  }
+  return out;
+}
+
+const SECRET_VALUES = [secrets.CLAUDE_TOKEN, secrets.CODEX_KEY, secrets.PI_KEY];
+
+describe("provider credentials leave the run directory", () => {
+  test("secrets go to the 0600 secrets file, never into env or launch.sh", () => {
+    for (const [harness, profile] of [
+      ["claude-code", "claude-agent"],
+      ["codex", "codex-agent"],
+      ["pi", "pi-agent"],
+    ] as const) {
+      const compiled = compile(harness, profile, first);
+      // `env` is what a caller may log; it carries no credential.
+      expect(Object.values(compiled.env)).not.toContain(secrets.PI_KEY);
+      expect(Object.keys(compiled.env)).not.toContain("OPENAI_API_KEY");
+      // The credentials are declared separately and written to one file.
+      expect(Object.keys(compiled.secret_env).length).toBeGreaterThan(0);
+      const secretsFile = compiled.files.find((file) =>
+        file.path.endsWith("secrets.env"),
+      );
+      expect(secretsFile?.mode).toBe(0o600);
+      for (const value of SECRET_VALUES) {
+        const inSecretsFile = secretsFile?.content.includes(value) ?? false;
+        // Only the file that the wrapper deletes may carry a credential.
+        if (value === secrets.PI_KEY && harness === "pi") {
+          expect(inSecretsFile).toBe(true);
+        }
+      }
+      // No other file carries it, and the wrapper only names the variables.
+      const script = compiled.files.find((file) =>
+        file.path.endsWith("launch.sh"),
+      );
+      for (const value of SECRET_VALUES) {
+        expect(script?.content).not.toContain(value);
+      }
+      for (const file of compiled.files) {
+        if (file.path.endsWith("secrets.env")) continue;
+        for (const value of SECRET_VALUES) {
+          expect(file.content, `${file.path} leaks a credential`).not.toContain(
+            value,
+          );
+        }
+      }
+    }
+  });
+
+  test("the Claude settings file keeps its endpoint but not the token", () => {
+    const compiled = compile("claude-code", "claude-agent", first);
+    const settings = compiled.files.find((file) =>
+      file.path.endsWith("claude-settings.json"),
+    );
+    const parsed = JSON.parse(settings?.content ?? "{}") as {
+      env: Record<string, string>;
+    };
+    expect(parsed.env.ANTHROPIC_BASE_URL).toBe(
+      "https://gateway.example.invalid",
+    );
+    expect(parsed.env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+    expect(compiled.secret_env.ANTHROPIC_AUTH_TOKEN).toBe(secrets.CLAUDE_TOKEN);
+  });
+
+  for (const [harness, profile, binary] of [
+    ["claude-code", "claude-agent", "claude"],
+    ["codex", "codex-agent", "codex"],
+    ["pi", "pi-agent", "pi"],
+  ] as const) {
+    test(`${harness}: launch.sh hands over the credentials and deletes both files`, () => {
+      const root = mkdtempSync(join(tmpdir(), "cardigan-launch-script-"));
+      try {
+        const runDir = join(root, "run");
+        mkdirSync(runDir, { recursive: true });
+        mkdirSync(join(root, "bin"), { recursive: true });
+        const fakeCli = join(root, "bin", binary);
+        writeFileSync(
+          fakeCli,
+          `#!/bin/sh\nenv | grep -E '^(MCP_TOKEN|ANTHROPIC_AUTH_TOKEN|OPENAI_API_KEY|DS_API_KEY)=' | sort\necho "args=$*"\n`,
+        );
+        chmodSync(fakeCli, 0o755);
+
+        const compiled = compileAssignmentLaunch({
+          assignment: { assignment_id: "A-12", run_id: "R-5" },
+          role: roleFor(harness, profile),
+          launch: launchConfig,
+          mcp: { url: MCP_URL },
+          run_dir: runDir,
+          work_dir: runDir,
+          first_prompt: first,
+          secrets,
+        });
+        for (const file of compiled.files) {
+          mkdirSync(join(file.path, ".."), { recursive: true });
+          writeFileSync(file.path, file.content, { mode: file.mode });
+          chmodSync(file.path, file.mode);
+        }
+        writeFileSync(compiled.token_file, "fictional-runtime-token\n", {
+          mode: 0o600,
+        });
+
+        const env = {
+          ...process.env,
+          PATH: `${join(root, "bin")}:${process.env.PATH ?? ""}`,
+        };
+        const output = execFileSync("sh", [compiled.launch_script], {
+          encoding: "utf8",
+          env,
+        });
+
+        // The CLI saw both the token and the provider credential.
+        expect(output).toContain("MCP_TOKEN=fictional-runtime-token");
+        const secret = Object.values(compiled.secret_env)[0] ?? "";
+        expect(output).toContain(secret);
+
+        // Both credential files are gone, and nothing left on disk holds them.
+        expect(existsSync(compiled.token_file)).toBe(false);
+        expect(existsSync(join(runDir, "secrets.env"))).toBe(false);
+        for (const file of readTree(runDir)) {
+          expect(file.content).not.toContain("fictional-runtime-token");
+          for (const value of SECRET_VALUES) {
+            expect(
+              file.content,
+              `${file.path} still holds a credential`,
+            ).not.toContain(value);
+          }
+        }
+        // The remaining files are the prompts and the harness config only.
+        for (const file of readTree(runDir)) {
+          expect(statSync(file.path).isFile()).toBe(true);
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
+
+  test("a missing secrets file refuses to start", () => {
+    const root = mkdtempSync(join(tmpdir(), "cardigan-launch-script-"));
+    try {
+      const runDir = join(root, "run");
+      mkdirSync(runDir, { recursive: true });
+      const compiled = compileAssignmentLaunch({
+        assignment: { assignment_id: "A-12", run_id: "R-5" },
+        role: roleFor("pi", "pi-agent"),
+        launch: launchConfig,
+        mcp: { url: MCP_URL },
+        run_dir: runDir,
+        work_dir: runDir,
+        first_prompt: first,
+        secrets,
+      });
+      for (const file of compiled.files) {
+        if (file.path.endsWith("secrets.env")) continue;
+        mkdirSync(join(file.path, ".."), { recursive: true });
+        writeFileSync(file.path, file.content, { mode: file.mode });
+        chmodSync(file.path, file.mode);
+      }
+      writeFileSync(compiled.token_file, "fictional-runtime-token\n", {
+        mode: 0o600,
+      });
+      expect(() =>
+        execFileSync("sh", [compiled.launch_script], { encoding: "utf8" }),
+      ).toThrow();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
