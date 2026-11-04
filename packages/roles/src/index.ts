@@ -7,6 +7,7 @@ export {
   compileAssignmentLaunch,
   LAUNCH_SCRIPT_NAME,
   MCP_SERVER_NAME,
+  SECRETS_FILE_NAME,
   TOKEN_ENV_VAR,
   TOKEN_FILE_NAME,
 } from "./assignment.js";

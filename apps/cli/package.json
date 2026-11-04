@@ -17,6 +17,9 @@
     "@cardigan/roles": "workspace:*",
     "@cardigan/store": "workspace:*",
     "yaml": "^2.9.1",
-    "@cardigan/mcp-server": "workspace:*"
+    "@cardigan/mcp-server": "workspace:*",
+    "@cardigan/runtime-herdr": "workspace:*",
+    "@cardigan/git-service": "workspace:*",
+    "@cardigan/git-transport": "workspace:*"
   }
 }

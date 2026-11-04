@@ -6,6 +6,7 @@ import {
   parseId,
 } from "@cardigan/domain";
 import { openStore as openCardiganStore, type Store } from "@cardigan/store";
+import { type StartById, startAssignmentById } from "./assignment.js";
 import { CliError, EXIT } from "./errors.js";
 import {
   humanActor,
@@ -21,7 +22,7 @@ import type { CliIo } from "./io.js";
 const USAGE = [
   "用法：",
   "  cardigan card create --template dev --title <标题> --goal <目标> --acceptance <标准1;标准2> --repo <仓库> [--base-branch main] [--project <p>]",
-  "  cardigan assign <W-n> --role <角色> [--machine local] [--project <p>]",
+  "  cardigan assign <W-n> --role <角色> [--machine local] [--start] [--project <p>]",
   "  cardigan token issue <A-n> [--project <p>]",
   "  cardigan pm create --office|--ops [--project <p>]",
   "  cardigan human-action done <h(n)> --text <结果> [--project <p>]",
@@ -122,16 +123,22 @@ function parseHumanAction(raw: string | undefined): HumanActionId {
 }
 
 /** Entry point for `card`, `assign`, `token`, `pm` and `human-action`. */
+/** Injected by tests; production uses `startAssignmentById`. */
+export interface CliHooks {
+  readonly start?: StartById;
+}
+
 export async function runWorkflowCommand(
   args: readonly string[],
   io: CliIo,
+  hooks: CliHooks = {},
 ): Promise<number> {
   const [command, ...rest] = args;
   switch (command) {
     case "card":
       return cardCreate(rest, io);
     case "assign":
-      return assignWorkItem(rest, io);
+      return await assignWorkItem(rest, io, hooks);
     case "token":
       return tokenIssue(rest, io);
     case "pm":
@@ -204,8 +211,17 @@ function cardCreate(args: readonly string[], io: CliIo): number {
   }
 }
 
-function assignWorkItem(args: readonly string[], io: CliIo): number {
-  const parsed = parseArgs(args, []);
+async function assignWorkItem(
+  args: readonly string[],
+  io: CliIo,
+  hooks: CliHooks,
+): Promise<number> {
+  // `--start` takes no value: assign and start the Assignment in one step.
+  const start = args.includes("--start");
+  const parsed = parseArgs(
+    args.filter((argument) => argument !== "--start"),
+    [],
+  );
   const workItemId = parseWorkItem(parsed.positionals[0]);
   const roleId = required(parsed.flags, "role");
   const machine = optional(parsed.flags, "machine");
@@ -232,7 +248,10 @@ function assignWorkItem(args: readonly string[], io: CliIo): number {
           },
           ports,
         ),
+      // `--start` issues the only token inside `startAssignment`, into the run
+      // directory; issuing one here would print a token that is revoked at once.
       after: (tx, created) => {
+        if (start) return;
         issued = issueTokenForAssignment(
           tx,
           project_id,
@@ -252,6 +271,25 @@ function assignWorkItem(args: readonly string[], io: CliIo): number {
         `已指派 ${workItemId} → ${assignment.id}（${assignment.role_id} v${assignment.role_version}）`,
       ].join("\n"),
     );
+    if (start) {
+      // One command from card to a running Agent (M2.6). No token is printed:
+      // it lives in the run directory and is deleted by launch.sh.
+      return await (hooks.start ?? startAssignmentById)({
+        store,
+        io,
+        project_id,
+        assignment_id: assignment.id,
+        ...(optional(parsed.flags, "data-dir") === undefined
+          ? {}
+          : { dataDir: optional(parsed.flags, "data-dir") as string }),
+        ...(optional(parsed.flags, "mcp-url") === undefined
+          ? {}
+          : { mcpUrl: optional(parsed.flags, "mcp-url") as string }),
+        ...(optional(parsed.flags, "hc-session") === undefined
+          ? {}
+          : { session: optional(parsed.flags, "hc-session") as string }),
+      });
+    }
     if (issued === undefined) {
       throw new CliError("签发 Token 失败", EXIT.failure);
     }

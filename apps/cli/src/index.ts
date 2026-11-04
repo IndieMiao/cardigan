@@ -1,12 +1,23 @@
 import { spawn, spawnSync } from "node:child_process";
 import { LaunchConfigError } from "@cardigan/roles";
 import { runAdminCommand } from "./admin.js";
+import { runAssignmentCommand } from "./assignment.js";
 import { CliError, EXIT } from "./errors.js";
 import type { CliIo } from "./io.js";
 import { runLaunchCommand } from "./launch.js";
-import { runWorkflowCommand } from "./workflow.js";
+import { type CliHooks, runWorkflowCommand } from "./workflow.js";
 
 export { parseAdminArgs, runAdminCommand } from "./admin.js";
+export {
+  agentNameFor,
+  attachAssignment,
+  projectSegment,
+  projectShortCode,
+  runAssignmentCommand,
+  runDirectory,
+  startAssignment,
+  stopAssignment,
+} from "./assignment.js";
 export { CliError, EXIT } from "./errors.js";
 export {
   humanActor,
@@ -23,7 +34,7 @@ export type {
 } from "./io.js";
 export { parseLaunchArgs, runLaunchCommand } from "./launch.js";
 export { type LaunchPaths, resolveLaunchPaths } from "./paths.js";
-export { runWorkflowCommand } from "./workflow.js";
+export { type CliHooks, runWorkflowCommand } from "./workflow.js";
 
 const TOP_LEVEL_USAGE = [
   "cardigan — 卡片式多 Agent 协作开发系统",
@@ -39,6 +50,7 @@ const TOP_LEVEL_USAGE = [
   "  assign           建 Assignment 并在同一事务里签发 Token",
   "  token issue      给已有 active Assignment 重新签发 Token（先作废旧 Token）",
   "  human-action done 标记人已执行完 h(n)",
+  "  assignment start|stop|attach  一键启动/停止/接管 Assignment 的运行时（M2）",
   "  launch           按启动配置启动 Agent CLI（见 cardigan launch --help）",
 ].join("\n");
 
@@ -105,6 +117,7 @@ export function createProcessIo(): CliIo {
 export async function main(
   argv: readonly string[],
   io: CliIo = createProcessIo(),
+  hooks: CliHooks = {},
 ): Promise<number> {
   const [command, ...rest] = argv;
 
@@ -119,6 +132,9 @@ export async function main(
     if (command === "init" || command === "project" || command === "role") {
       return await runAdminCommand([command, ...rest], io);
     }
+    if (command === "assignment") {
+      return await runAssignmentCommand(rest, io);
+    }
     if (
       command === "card" ||
       command === "assign" ||
@@ -126,7 +142,7 @@ export async function main(
       command === "pm" ||
       command === "human-action"
     ) {
-      return await runWorkflowCommand([command, ...rest], io);
+      return await runWorkflowCommand([command, ...rest], io, hooks);
     }
     io.stderr(`不认识的命令：${command}\n\n${TOP_LEVEL_USAGE}`);
     return EXIT.usage;

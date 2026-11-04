@@ -20,6 +20,15 @@
     },
     {
       "path": "../../packages/mcp-server"
+    },
+    {
+      "path": "../../packages/runtime-herdr"
+    },
+    {
+      "path": "../../packages/git-service"
+    },
+    {
+      "path": "../../packages/git-transport"
     }
   ]
 }
