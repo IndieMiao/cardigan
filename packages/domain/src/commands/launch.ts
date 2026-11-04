@@ -10,6 +10,7 @@ import {
   text,
   unwrap,
 } from "./core.js";
+import { activeWork } from "./workflow.js";
 
 const unfinished = (run: Run) =>
   !["completed", "failed", "cancelled"].includes(run.status);
@@ -200,6 +201,69 @@ export function dispatchRun(
     d.emit("run_dispatched", cardId(d, assignment), {
       run_id: run.id,
       assignment_id: assignment.id,
+    });
+    return next;
+  });
+}
+
+export function acknowledgeRun(
+  state: CommandState,
+  actor: Actor,
+  p: { run_id: RunId },
+  ports: CommandPorts,
+) {
+  return command(state, actor, "acknowledge_run", ports, (d) => {
+    const run = d.ownRun(p.run_id);
+    if (run.status === "running") return run;
+    const assignment = target(d, run.assignment_id);
+    exclusive(d, assignment, run.id);
+    let status: Run["status"] = run.status;
+    if (status !== "acked")
+      status = unwrap(transition("run", status, "acknowledge"));
+    status = unwrap(transition("run", status, "start"));
+    const next = { ...run, status, started_at: d.now };
+    d.put("runs", next);
+    if (assignment.scope === "work_item") {
+      const item = d.ownWork(assignment.work_item_id);
+      const active = activeWork(d, item);
+      if (active.status !== item.status) d.put("work_items", active);
+    }
+    d.emit("run_started", cardId(d, assignment), {
+      run_id: run.id,
+      assignment_id: assignment.id,
+    });
+    return next;
+  });
+}
+
+export function abortDispatch(
+  state: CommandState,
+  actor: Actor,
+  p: { run_id: RunId; reason: string },
+  ports: CommandPorts,
+) {
+  return command(state, actor, "abort_dispatch", ports, (d) => {
+    text(p.reason, "reason");
+    const run = d.get("runs", p.run_id);
+    if (run.status === "cancelled") return run;
+    const next: Run = {
+      ...run,
+      status: unwrap(transition("run", run.status, "cancel")),
+      outcome: "failed",
+      summary: p.reason,
+      finished_at: d.now,
+    };
+    const assignment = d.get("assignments", run.assignment_id);
+    if (assignment.runtime_state === "running")
+      d.put("assignments", {
+        ...assignment,
+        runtime_state: unwrap(transition("runtime", "running", "run_finished")),
+        runtime_ref: null,
+      });
+    d.put("runs", next);
+    d.emit("run_dispatch_aborted", cardId(d, assignment), {
+      run_id: run.id,
+      reason: p.reason,
     });
     return next;
   });
