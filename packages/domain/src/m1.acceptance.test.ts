@@ -2088,16 +2088,21 @@ describe("PM tool boundaries and decision recording", () => {
   });
 
   test.fails("§4.4: two blockers on one work item must both clear before it resumes", () => {
-    // Development plan §4.4 (v0.6.7): when a HumanAction and a blocking
-    // Decision hold the same work item, clearing only one must not resume it;
-    // it resumes when the last blocker is cleared.
+    // Development plan §4.4: "只有剩余轮次大于零且无其他 open / provisional
+    // 阻塞 Decision、open HumanAction，才经 decision_resolved 回到 ready ...
+    // 多个阻塞由最后解除者触发恢复" — so two blockers on one work item must
+    // both clear before it resumes.
     //
-    // Current behaviour: the second blocker cannot even be created. After the
-    // HumanAction sets the item to `blocked`, requesting a blocking Decision on
-    // it is refused with `illegal_transition`
-    // ("Cannot pause work item W-1 (produce:blocked); work is not in progress"),
-    // so the "do not resume early" rule is unreachable. Remove `test.fails`
-    // once stacking is supported.
+    // Current behaviour: the second blocker cannot be created at all. After a
+    // HumanAction sets the item to `blocked`, a blocking Decision on it is
+    // refused; with the Decision first, the HumanAction is refused instead:
+    //   illegal_transition: Cannot pause work item W-1 (produce:blocked);
+    //                       work is not in progress
+    //   illegal_transition: Cannot pause work item W-1
+    //                       (produce:waiting_decision); work is not in progress
+    // So the "do not resume early" rule is unreachable. Remove `test.fails`
+    // once stacking is supported (the test then fails as "expected to fail",
+    // which is the reminder to drop the marker).
     const s = scenario();
     startRun(s.h, s.coder);
 
