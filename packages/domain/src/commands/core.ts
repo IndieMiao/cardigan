@@ -50,7 +50,12 @@ export interface CommandEffect<T> {
 class Rejection {
   constructor(readonly error: DomainError) {}
 }
-type CommandName = E.ToolName | "queue_run" | "dispatch_run";
+type CommandName =
+  | E.ToolName
+  | "queue_run"
+  | "dispatch_run"
+  | "acknowledge_run"
+  | "abort_dispatch";
 export function ensure(
   condition: unknown,
   code: ErrorCode,
@@ -110,7 +115,9 @@ export class CommandDraft {
     tool: CommandName,
     readonly ports?: CommandPorts,
   ) {
-    const hostOnly = ["queue_run", "dispatch_run"].includes(tool);
+    const hostOnly = ["queue_run", "dispatch_run", "abort_dispatch"].includes(
+      tool,
+    );
     ensure(
       actor.project_id === state.project_id &&
         (actor.kind !== "system" || hostOnly),
@@ -147,8 +154,10 @@ export class CommandDraft {
           r.role_id === actor.role_id && r.role_version === actor.role_version,
       );
       ensure(
-        role?.allowed_tools.includes(tool as E.ToolName) &&
-          actor.allowed_tools.includes(tool as E.ToolName),
+        role &&
+          (tool === "acknowledge_run" ||
+            (role.allowed_tools.includes(tool as E.ToolName) &&
+              actor.allowed_tools.includes(tool as E.ToolName))),
         "forbidden_tool",
         `Tool ${tool} is not allowed`,
       );

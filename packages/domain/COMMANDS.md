@@ -2,11 +2,13 @@
 
 本任务分为两个依赖 PR：第一部分为公共命令内核、交付、审核及完成申请；第二部分补齐协作、PM、附件、Run 和查询工具。公共入口为 `@cardigan/domain`。
 
-## M2.1 启动命令（分两部分交付）
+## M2.1 启动命令
 
 - queueRun / dispatchRun 只接受同项目 human/system Actor，不是 MCP 工具。queueRun 输入 assignment_id、model、agent_cli_version，生成 initial/queued Run 和 run_queued 事件（同时作为触发事件），快照固定的 Role 版本；拒绝 inactive Assignment、闭卡、归属变化和已有未结束 Run。
 - dispatchRun 输入 run_id、runtime_ref、可选 base_sha；RuntimeRef 携带 worktree_path / branch / agent_session_id，归约记录到 Assignment，工作目录存在时必须有有效基线 SHA。旧 worktree/branch 必须复用，同机器共享路径上有未结束 Run 时保守拒绝；所有状态变更走 transition。第一次派发从 not_provisioned 经 provisioning/idle 到 running；旧 Run 已结束时可把遗留 running 经 run_finished 归到 idle 再派发。unknown/lost/released 需另行恢复，不能跳过。
-- Runtime 的编译输入、端口错误与业务 Result 分开；domain 不启动终端、写文件或签发 Token。命令的快照读取、编号、实体和事件仍需外层同一事务提交。第二部分接 acknowledgeRun / abortDispatch 和完整启动流程测试。
+- acknowledgeRun 输入 run_id，仅接受拥有该 Run 的 active Assignment Actor，供 MCP 认证后内部调用，无独立 MCP 工具名。dispatched 经 acknowledge/start 到 running（兼容 acked），写 started_at 和 run_started；复用 activeWork 检查依赖/审核预算并激活自己的可执行工作项，其他工作项不动。等待目标、暂停或已交付的工作项保持原状态。重复确认 running Run 无变更/事件；检查失败时不返回部分效果。
+- abortDispatch 输入 run_id/reason，只允许 human/system，经 cancel 标记 cancelled/outcome=failed、记录原因和结束时间。已 cancelled 可重试；completed/failed 拒绝。运行状态为 running 时经 run_finished 到 idle 并清空 runtime_ref，保留工作目录和 Session 元数据，允许后续排新 Run；不倒退工作项、不删除 worktree。外层负责 release 终端和撤销 Token，此命令不替代 IO 清理。
+- Runtime 的编译输入、端口错误与业务 Result 分开；domain 不启动终端、写文件或签发 Token。命令的快照读取、编号、实体和事件仍需外层同一事务提交；M2.6 接入真实启动和首次 MCP 调用。
 
 ## 调用和持久化边界
 
