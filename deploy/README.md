@@ -24,3 +24,22 @@ sudo python3 deploy/install-agent.py --host-user <主机用户名> \
 重复执行时保留专用私钥、复用托管账号和组，重设托管目录/授权文件的权限并验证 hc。工作区内容不会被递归清理。前置检查失败不做安装改动；真正执行系统命令时的 IO 失败或新建账号后的复核失败仍可能留下部分托管状态，可修正原因后用相同参数重跑。
 
 本 PR 不执行 sudo。用户安装后再验证：agent 无 sudo、不能访问主机 home 和 Cardigan data；专用密钥可从 localhost 登录，其他密钥不能登录；agent-ssh 启动的终端 UID 为 agent；token/secrets 只由主机和 agent 读取并在启动后删除。
+
+
+## 使用隔离模式启动 Assignment
+
+安装并重新登录后，在启动 server 和 CLI 的两个主机终端都加载安装器生成的 runtime.env（按安装器打印的路径；用 `set -a` / `. <runtime.env>` / `set +a` 导出）。随后沿用已登记的项目、Role 和 launch.yaml：
+
+```sh
+pnpm --filter @cardigan/server exec cardigan-server
+# 另一主机终端：
+pnpm --filter @cardigan/cli exec cardigan assignment start A-1 --project p-demo
+pnpm --filter @cardigan/cli exec cardigan assignment attach A-1 --project p-demo
+pnpm --filter @cardigan/cli exec cardigan assignment stop A-1 --project p-demo
+```
+
+`cardigan assign W-1 --role coder --start` 同样使用该模式。CLI 版本在 agent 账号下查询；模型 CLI 必须已经装到该账号的 PATH 中，不会回退主机版本。运行目录是 agent-root/runs/project/assignment，Git 路径使用 agent-root/repos/project 和 worktrees/project/assignment。主机私有源仓库通过只读 bundle 提供基线，无需让 agent 进入主机 home。
+
+启动失败会撤销新 Token、取消 Run、尝试释放已知终端，并清理 token/secrets.env；stop 也清理凭据，worktree 保留。共享文件权限为 0660、目录 2770、脚本 0770，父层 2750。成功启动后包装脚本读取凭据即删除文件，输出不打印 Token 或模型密钥。若清理报错，按提示人工检查；没有得到终端引用的 provision 超时不能证明没有创建终端，仍需按标签核查。
+
+`CARDIGAN_RUNTIME_MODE=local` 保留开发用途，使用当前账号及 data/runs，server 会明确提示没有隔离。请勿把它作为隔离模式失败时的自动回退。

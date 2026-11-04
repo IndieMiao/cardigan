@@ -5,6 +5,10 @@ import {
   createCard,
   parseId,
 } from "@cardigan/domain";
+import {
+  resolveExecutionConfig,
+  secureDataDirectory,
+} from "@cardigan/runtime-herdr";
 import { openStore as openCardiganStore, type Store } from "@cardigan/store";
 import { type StartById, startAssignmentById } from "./assignment.js";
 import { CliError, EXIT } from "./errors.js";
@@ -225,6 +229,17 @@ async function assignWorkItem(
   const workItemId = parseWorkItem(parsed.positionals[0]);
   const roleId = required(parsed.flags, "role");
   const machine = optional(parsed.flags, "machine");
+
+  if (start)
+    await secureDataDirectory(
+      resolveExecutionConfig({
+        ...io.env,
+        CARDIGAN_DATA_DIR: resolveDataDir(
+          io,
+          optional(parsed.flags, "data-dir"),
+        ),
+      }),
+    );
 
   const store = openStoreFrom(io, parsed.flags);
   try {
