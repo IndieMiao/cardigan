@@ -1,6 +1,8 @@
 # Cardigan · 多 Agent 协作开发系统开发方案
 
-- 版本：v0.6.14（2026-11-04）
+- 版本：v0.6.15（2026-11-05）
+  - v0.6.15：M2 开工前复核 D9，维持 herdr-core 并锁定 0.1.18；多机实测更新到 §11.3；§10.4 明确 PM 验收由每张卡单独的工作项级 pm Assignment 完成（用户确认）。M2 任务计划见 `docs/plans/phase-1-m2.md`。
+  - v0.6.14（2026-11-04）
   - v0.6.14：M1.6c 接入附件、Run 和项目查询；明确 base64/摘要校验、内容寻址落盘、事务失败保留文件及只读快照边界。
   - v0.6.13（2026-11-04）
   - v0.6.13：M1.6b 安全修订：MCP 只登记 Assignment，不签发或返回 Token；签发与 Assignment 校验由主机在同一事务完成。
@@ -896,6 +898,8 @@ Role 修改后版本号递增，Run 记录所用版本。
 
 `pm（office）` 和 `pm（ops）` 是同一个角色 `pm` 的两个常驻 Assignment（§7.1）：共用角色说明和项目规则，权限按 Assignment 区分，只有 office 能调用 `record_decision`。
 
+每张卡的 PM 验收工作项单独指派一个工作项级的 `pm` Assignment，开独立会话完成验收，不交给常驻的 PM Ops。这样验收会话只装这张卡的上下文，也符合 §9.3"只有验证型工作项的 Assignment 能提交审核"（2026-11-05 用户确认：效果优先，可以多开 PM 会话）。
+
 ---
 
 ## 11. Runtime Adapter
@@ -948,7 +952,8 @@ RuntimeRef = {machine_id, runtime_machine, terminal_ref, agent_name,
   - `pane run` / `pane send-text` 写进的是 pane 里的 Agent 界面，不是 shell。控制面不能用它执行命令或读写文件（herdr-core 用 `machine.exec`、`file.*`）。
 - 断线时，命令行调用直接失败，没有缓存；界面上变灰的缓存状态也不能用来判断存活。
 - 运行时的 socket 没有按客户端区分的身份或权限控制；同一台机器上的 Agent 能互相操作，影响范围限于这台机器（§14）。
-- 多机连接只验证过 Linux 连 macOS，其他组合没有复核。
+- 多机连接：Herdr 0.9.x 验证过 Linux 连 macOS（0.3）；herdr-core 0.1.18 验证过 Linux 上的 core 管理 macOS 工作机（2026-11-05，ADR 0001 复核记录）。macOS 上的 core 管理 Linux 工作机尚未实测，Phase 2 开工前补测。
+- herdr-core 的 `hc run` 选项必须写在程序名前面；没有传环境变量的选项；终端名限制为 1–32 个 `a-z 0-9 - _`。
 
 ---
 
@@ -1137,7 +1142,7 @@ RuntimeRef = {machine_id, runtime_machine, terminal_ref, agent_name,
 | D6 | 机器清单 | **已决定（2026-11-04）**：第一版两台机器：一台常开的 macOS arm64 台式机做主机，一台 Linux x86_64 笔记本做工作机；Phase 1 的单机 MVP 先在笔记本上开发和运行。具体清单放在 `cardigan-deploy`。开发 Cardigan 本身不需要测试真机 |
 | D7 | "core memo"的含义 | **已决定（2026-11-04）**：第一版只做固定的角色说明（Role Registry，有版本号）；演进式记忆放到 Phase 3 |
 | D8 | 是否借鉴或 fork herdr-projects | **已决定（2026-11-04）**：不 fork，借鉴设计（`docs/research/0.5a-herdr-projects.md` §9） |
-| D9 | 运行时基线 | **已决定（2026-11-04）**：暂定 herdr-core 0.1.x（锁版本），Herdr 0.9.5 作为回退；M2 开工前复核。见 `docs/adr/0001-runtime-baseline.md` |
+| D9 | 运行时基线 | **已决定（2026-11-04），2026-11-05 复核维持**：herdr-core，锁定 0.1.18；Herdr 0.9.5 作为回退。见 `docs/adr/0001-runtime-baseline.md` 的复核记录 |
 
 ---
 
