@@ -1,7 +1,7 @@
 # Cardigan · 多 Agent 协作开发系统开发方案
 
 - 版本：v0.6.20（2026-11-05）
-  - v0.6.20：M2.7 确定 agent 专用账号、主机私有数据、两账号共享工作组和专用 loopback SSH 入口，安装器与后续运行时接线分批交付；见 ADR 0002。
+  - v0.6.20：M2.7 确定 agent 专用账号、主机私有数据、cardigan-share 两账号共享组和专用 loopback SSH 入口；安装器先做只读 preflight，提供 --check，后续运行时接线分批交付；见 ADR 0002。
   - v0.6.19（2026-11-05）
   - v0.6.19：M2.5 实现本地独立 clone、worktree 创建/复用和脏文件查询，明确 detached 目标和路径冲突的拒绝边界；Assignment 编号按项目分配，worktree 路径按项目分层，project_id 入路径前校验为安全片段。
   - v0.6.18（2026-11-05）

@@ -14,11 +14,11 @@
 
 ## 账号与安装
 
-提供 Linux 安装器 `deploy/install-agent.py`。先 dry-run，再由用户用 sudo 执行；实现 Agent 不执行安装步骤。
+提供 Linux 安装器 `deploy/install-agent.py`。先 dry-run，再由用户用 sudo 执行 `--check`，通过后正式安装；实现 Agent 不执行 sudo。`--check` 和正式安装共用只读 preflight，所有不依赖新账号存在的检查在第一次写入之前完成，前置检查失败不做安装改动。
 
-1. 检查绝对路径和互不嵌套的数据/工作根目录；检查 Linux、主机用户和工具依赖。下载固定 hc 0.1.18 归档，使用代码中固定的官方 sha256 校验，只提取 regular file `herdr-core`。支持传入离线归档，仍校验摘要。
-2. 新建系统用户 agent、锁定密码；已有账号必须有 root 持有的安装标记且配置匹配，否则拒绝接管。拒绝 sudo 权限和额外组成员。专用组 cardigan-agent 只能包含主机用户和 agent，两者加入该组。
-3. 检查 agent 无法遍历主机 home；若现有权限允许访问则拒绝，由用户先处理，不替用户修改 home 权限。读取 sshd 的有效配置，拒绝外部授权命令、CA、hostbased、交互或 GSSAPI 等替代认证来源，不改 sshd 配置。
+1. 只读检查绝对路径、目录占用及互不嵌套的数据/工作根；检查 Linux、主机用户、sudo 可用性和所有工具依赖。提前检查共享组是否含其他成员或被其他用户用作主组，已有 agent 是否托管、无 sudo/额外组；直接检查主机 home 的 other-x 位与计划加入组的访问权限。读取 sshd 有效配置，验证授权来源和 ed25519 主机公钥；校验已有专用密钥权限。最后下载并校验固定 hc 0.1.18 归档，只取 regular file `herdr-core`，也支持离线归档。上述检查均不写配置或创建账号。
+2. 检查全部通过后，新建系统用户 agent、锁定密码；专用组 cardigan-share 只能包含主机用户和 agent，两者加入该组。不接管不匹配的现有账号，不使用旧测试账号的 cardigan-agent 主组。
+3. 新账号/组就绪后复核 sudo 和实际 home 访问能力。不替用户修改 home 权限或 sshd 配置；实际系统命令失败不等同于前置检查失败，部分托管状态允许修正后重跑。
 4. agent home、`.ssh` 和 hc 二进制目录由 root 持有，agent 不能替换 authorized_keys 或添加第二个授权入口；`.config`、`.cache` 和 `.local/state` 等目录归 agent。hc/herdr-core 安装到该账号的 `.local/bin`，校验安装后的版本。
 5. 在主机用户的 `.config/cardigan/agent-ssh/`（0700）生成专用 ed25519 私钥（0600）；重复运行复用同一把密钥，拒绝错误属主/权限。只写这把公钥到 agent 的 authorized_keys，限制来源为 loopback，禁止 forwarding、PTY、user rc 等 SSH 扩展。
 6. 从本机 sshd 的 ed25519 公钥生成专用 known_hosts（0600）。SSH 使用 `-F /dev/null`、`IdentitiesOnly=yes`、`IdentityAgent=none`、`ForwardAgent=no`、严格 host key 校验和专用文件；不使用/修改用户的 SSH config，也不启用 trust-on-first-use。
