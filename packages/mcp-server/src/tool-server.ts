@@ -21,6 +21,12 @@ export interface ToolServerOptions {
   readonly tools: readonly ToolDefinition[];
   readonly log: Logger;
   readonly revalidateToken?: () => void;
+  /**
+   * M2 plan §4 step 8: runs on `tools/call`, never on `initialize` or
+   * `tools/list`. A client that connects but has not acted must not make the
+   * Run look started.
+   */
+  readonly onToolCall?: () => void;
 }
 
 /**
@@ -55,6 +61,24 @@ export function createMcpServer(options: ToolServerOptions): Server {
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const toolName = request.params.name;
     const startedAt = Date.now();
+    // Any tool call counts as the Agent having started (even a forbidden one):
+    // this is the first moment the Assignment proves it is awake.
+    if (options.onToolCall !== undefined) {
+      try {
+        options.onToolCall();
+      } catch (error) {
+        log({
+          event: "tool",
+          method: "tools/call",
+          tool: toolName,
+          assignment_id: identity.actor.assignment_id,
+          code:
+            typeof error === "object" && error !== null && "code" in error
+              ? String((error as { code: unknown }).code)
+              : "acknowledge_failed",
+        });
+      }
+    }
     const definition = tools.find((tool) => tool.name === toolName);
 
     const finish = (code: string, result: CallToolResult): CallToolResult => {

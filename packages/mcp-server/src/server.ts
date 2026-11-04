@@ -8,6 +8,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { MAX_MCP_BODY_BYTES } from "./attachments.js";
 import { authenticate, bearerToken, type Identity } from "./auth.js";
 import type { McpBackend } from "./backend.js";
+import { acknowledgeDispatchedRun } from "./commands/acknowledge.js";
 import {
   type DeliveryToolOptions,
   deliveryTools,
@@ -33,6 +34,8 @@ export interface McpServerOptions
   readonly port?: number;
   readonly log?: Logger;
   readonly tools?: readonly ToolDefinition[];
+  /** `false` disables the M2.6 acknowledge hook (tests of pure tool routing). */
+  readonly acknowledgeRuns?: boolean;
 }
 
 export interface RunningServer {
@@ -192,6 +195,15 @@ async function serveMcp(
     identity,
     tools,
     log,
+    // The acknowledge hook belongs to the tool call, not to the connection:
+    // `initialize` and `tools/list` must not start the Run (§4 step 8).
+    ...(options.acknowledgeRuns === false
+      ? {}
+      : {
+          onToolCall: () => {
+            acknowledgeDispatchedRun(options.store, identity);
+          },
+        }),
     revalidateToken: () => {
       const token = bearerToken(req.headers.authorization);
       if (!token || options.store.verifyToken(token)?.id !== identity.token.id)
