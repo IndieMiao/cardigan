@@ -55,6 +55,14 @@ export const states = {
   machine: ["online", "degraded", "offline", "draining"],
   approval: ["pending", "approved", "revoked"],
   verdict: ["pass", "reject", "conditional"],
+  // M3.2: one inbox row per (event, recipient); see development plan §4.4.
+  notification: [
+    "pending",
+    "belled",
+    "acked",
+    "delivery_failed",
+    "needs_attention",
+  ],
 } as const;
 export type CardStatus = (typeof states.card)[number];
 export type ProduceStatus = (typeof states.produce)[number];
@@ -62,6 +70,7 @@ export type VerifyStatus = (typeof states.verify)[number];
 export type AssignmentStatus = (typeof states.assignment)[number];
 export type RuntimeState = (typeof states.runtime)[number];
 export type RunStatus = (typeof states.run)[number];
+export type NotificationStatus = (typeof states.notification)[number];
 export type DeliveryStatus = (typeof states.delivery)[number];
 export type DecisionStatus = (typeof states.decision)[number];
 export type HumanActionStatus = (typeof states.human_action)[number];

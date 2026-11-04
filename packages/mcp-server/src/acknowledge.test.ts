@@ -256,6 +256,24 @@ describe("the HTTP layer", () => {
       .then(() => client);
   }
 
+  test("only a tool call records the Assignment's last MCP activity", async () => {
+    const activity = () =>
+      store.uow.read((tx) => tx.assignments.get(project_id, assignment.id))
+        ?.last_mcp_activity_at;
+    expect(activity()).toBeUndefined();
+
+    const client = await connect();
+    try {
+      await client.listTools();
+      // Connecting and listing tools is not activity: the Agent has not acted.
+      expect(activity()).toBeUndefined();
+      await client.callTool({ name: "whoami", arguments: {} });
+      expect(activity()).toBeDefined();
+    } finally {
+      await client.close();
+    }
+  });
+
   test("connecting and listing tools does not acknowledge the Run", async () => {
     const client = await connect();
     // connect() already sent initialize; list the tools as a real client does.

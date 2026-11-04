@@ -18,6 +18,7 @@ export * from "./entities.js";
 export * from "./errors.js";
 export * from "./git-port.js";
 export * from "./ids.js";
+export * from "./notification.js";
 export * from "./ports.js";
 export * from "./role.js";
 export * from "./runtime-port.js";

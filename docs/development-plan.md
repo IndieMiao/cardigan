@@ -481,6 +481,22 @@ todo / ready / in_progress / failed / blocked / waiting_decision --cancel--> can
 
 **Run**：`queued → dispatched → acked → running → completed | failed | cancelled`；运行环境失联时进入 `unknown`；确认重新连通时 `unknown --reconnected--> running`。重连不表示业务完成，已结束的 Run 不通过 reconnected 恢复。
 
+**Notification（M3.2）**：一条 `(event, recipient)` 一条通知（store 唯一约束，M3.3），生命周期：
+
+```
+pending --bell--> belled --ack--> acked
+pending --ack--> acked
+belled --retry--> pending          （指数退避重发，§3.3）
+pending / belled / delivery_failed --ack--> acked     （失败也可能已送达，§6.8）
+pending / belled --deliver_failed--> delivery_failed  （wake 失败，交 PM Ops，不静默重试）
+pending / belled / delivery_failed --needs_attention--> needs_attention
+```
+
+- `acked` 与 `needs_attention` 是终态：已确认或被升级的通知不再按铃、不再重发、不再改为失败。
+- `delivery_failed` 不是终态（PM Ops 可能让它重新进入关注流程），但不允许回到 `pending` 或重新按铃，避免把"调用失败"当成"没送达"（§6.8）。
+- 通知在 Assignment 对该卡的 ACK 游标 ≥ 通知的 `seq` 时也视为已确认（§3.2），此时同样经 `ack` 进入 `acked`。
+- 升级（`needs_attention`）与投递失败（`delivery_failed`）都要给 PM Ops 一条通知；两者都不是新的 Run。
+
 M2.1 的 queueRun / dispatchRun 是主机内部命令，只接受同项目 human/system Actor，不加入 MCP 工具清单。queueRun 创建 initial/queued Run，以自身 run_queued 事件作为 trigger_event_id，固定 Assignment 的 Role 版本及主机提供的 model / agent_cli_version；同 Assignment 已有任何未结束 Run（含 unknown）则拒绝。dispatchRun 只允许 queued → dispatched，验证 machine_id=local 和工作目录/分支/基线元数据，Assignment 经 provision、provisioned、run_started 到 running。已结束旧 Run 遗留的 runtime.running 先经 run_finished 到 idle；unknown/lost/released 不因新派发自动恢复。已登记的 worktree/branch 必须复用；同机器同路径被其他未结束 Run 占用时拒绝（当前快照只有 RoleReference，保守串行所有共享路径）。派发不推进工作项，首次 MCP 确认时才推进。
 
 acknowledgeRun 只接受 Run 所属 Assignment 的 Actor，由 MCP 认证后在内部调用，不增加工具许可名称。它经 acknowledge/start 将 dispatched（也兼容已 acked）推进到 running，写 started_at 和 run_started 事件，再复用 activeWork：todo 产出先检查依赖，ready 或返工项开始执行；ready 验证项检查剩余审核预算。等待目标、已交付、终态和暂停项保持原工作状态，不把启动当作解除阻塞；失败返回无部分效果。已 running 的同一 Run 在身份/快照校验后无操作，即使卡片后来已取消也不重新激活工作项。

@@ -178,6 +178,8 @@ interface AssignmentFields {
   readonly mcp_token_id: string;
   readonly created_at: Timestamp;
   readonly released_at?: Timestamp;
+  /** Last authenticated MCP call (M3.2); the watchdog of §3.3 reads it. */
+  readonly last_mcp_activity_at?: Timestamp;
 }
 export type Assignment = AssignmentFields &
   (

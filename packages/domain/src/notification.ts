@@ -1,0 +1,79 @@
+import type { Timestamp } from "./entities.js";
+import { type Result, validationFailed } from "./errors.js";
+import type { AssignmentId, CardId, EventId, ProjectId, RunId } from "./ids.js";
+import type { NotificationStatus } from "./states.js";
+import { transition } from "./transitions.js";
+
+/**
+ * M3.2: the notification (and escalation) state machine.
+ *
+ * One row per (event, recipient) — the uniqueness belongs to the store (M3.3) —
+ * with the lifecycle of development plan §4.4:
+ *
+ * ```
+ * pending ──bell──▶ belled ──ack──▶ acked
+ *    │                 │
+ *    ├────ack──────────┘
+ *    ├──deliver_failed──▶ delivery_failed ──ack──▶ acked
+ *    └──needs_attention─▶ needs_attention
+ * ```
+ *
+ * `needs_attention` and `acked` are terminal: a notification that was answered
+ * or escalated never rings again. `retry` (back to `pending`) is what the
+ * dispatcher uses for the exponential re-send of §3.3.
+ */
+export type NotificationEvent =
+  | "bell"
+  | "ack"
+  | "retry"
+  | "deliver_failed"
+  | "needs_attention";
+
+/** Who a notification is for (mirrors the router's recipient kinds). */
+export type NotificationRecipient =
+  | { readonly kind: "assignment"; readonly assignment_id: AssignmentId }
+  | { readonly kind: "pm_ops" }
+  | { readonly kind: "pm_office" }
+  | { readonly kind: "needs_you" };
+
+export interface Notification {
+  /** Opaque id; the store assigns it (M3.3). */
+  readonly id: string;
+  readonly project_id: ProjectId;
+  /** The event that produced this notification. */
+  readonly event_id: EventId;
+  /** Unique per (event_id, recipient) in the store (M3.3). */
+  readonly recipient: NotificationRecipient;
+  readonly card_id?: CardId;
+  /** Seq of the producing event, so an ACK cursor can confirm it (§3.2). */
+  readonly seq: number;
+  /** Notification kind from `@cardigan/router`. */
+  readonly kind: string;
+  readonly status: NotificationStatus;
+  /** How many bells were sent (used by the exponential backoff of §3.3). */
+  readonly attempts: number;
+  readonly next_attempt_at?: Timestamp;
+  /** The bell text of the last successful merge (§3.2). */
+  readonly bell?: string;
+  readonly run_id?: RunId;
+  readonly created_at: Timestamp;
+  readonly updated_at: Timestamp;
+}
+
+/** Apply one notification event through the shared transition table. */
+export function nextNotificationStatus(
+  from: NotificationStatus,
+  event: NotificationEvent,
+): Result<NotificationStatus> {
+  const result = transition("notification", from, event);
+  if (result.ok) return result;
+  return validationFailed(`Cannot apply ${event} to notification:${from}`);
+}
+
+/** Terminal states never ring again, whatever the dispatcher retries. */
+export const isTerminalNotification = (status: NotificationStatus): boolean =>
+  status === "acked" || status === "needs_attention";
+
+/** Human readable reason for the two escalation states (§3.3). */
+export const isEscalatedNotification = (status: NotificationStatus): boolean =>
+  status === "needs_attention" || status === "delivery_failed";

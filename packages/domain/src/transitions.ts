@@ -5,6 +5,7 @@ import type {
   DecisionStatus,
   DeliveryStatus,
   HumanActionStatus,
+  NotificationStatus,
   ProduceStatus,
   RunStatus,
   RuntimeState,
@@ -21,6 +22,7 @@ interface MachineStates {
   assignment: AssignmentStatus;
   runtime: RuntimeState;
   card: CardStatus;
+  notification: NotificationStatus;
 }
 type Table<S extends string> = Readonly<
   Partial<Record<S, Readonly<Record<string, S>>>>
@@ -143,6 +145,25 @@ export const transitionTables: {
       connection_lost: "unknown",
     },
     unknown: { reconnected: "running", cancel: "cancelled" },
+  },
+  notification: {
+    pending: {
+      bell: "belled",
+      ack: "acked",
+      deliver_failed: "delivery_failed",
+      needs_attention: "needs_attention",
+    },
+    belled: {
+      ack: "acked",
+      retry: "pending",
+      deliver_failed: "delivery_failed",
+      needs_attention: "needs_attention",
+    },
+    // A failed wake may still have landed (§6.8): the Agent can ack it later.
+    delivery_failed: { ack: "acked", needs_attention: "needs_attention" },
+    // Terminal: an acked or escalated notification never rings again.
+    acked: {},
+    needs_attention: {},
   },
   card: {
     backlog: { set_todo: "todo", cancel: "cancelled" },

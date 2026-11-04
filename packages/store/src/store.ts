@@ -4,6 +4,7 @@ import * as Path from "node:path";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type {
+  Assignment,
   AssignmentId,
   CardId,
   Clock,
@@ -539,6 +540,40 @@ export class Store {
 
   revokeToken(id: string): boolean {
     return revokeToken(this.#db, id, () => this.#clock.now());
+  }
+
+  /**
+   * M3.2: record that the Assignment just called the MCP endpoint. The
+   * watchdog of M3 plan §3.3 uses it to tell a busy Agent from a stuck one.
+   * Unknown or unreleased Assignments are silently ignored, so a tool call can
+   * never fail because of this bookkeeping.
+   */
+  touchAssignmentActivity(
+    project_id: ProjectId,
+    assignment_id: AssignmentId,
+    at: string = this.#clock.now(),
+  ): boolean {
+    return this.#run(() => {
+      const row = this.#db
+        .prepare("SELECT doc FROM assignments WHERE project_id = ? AND id = ?")
+        .get(project_id, assignment_id) as { doc: string } | undefined;
+      if (row === undefined) return false;
+      const assignment = JSON.parse(row.doc) as Assignment;
+      if (assignment.status !== "active") return false;
+      this.#db
+        .prepare(
+          "UPDATE assignments SET doc = ? WHERE project_id = ? AND id = ?",
+        )
+        .run(
+          JSON.stringify({
+            ...assignment,
+            last_mcp_activity_at: at,
+          } satisfies Assignment),
+          project_id,
+          assignment_id,
+        );
+      return true;
+    });
   }
 
   #timelineAfter(

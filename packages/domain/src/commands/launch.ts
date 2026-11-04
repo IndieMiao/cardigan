@@ -1,5 +1,5 @@
 import type { Actor, Assignment, Run, RuntimeRef } from "../entities.js";
-import type { AssignmentId, RunId } from "../ids.js";
+import type { AssignmentId, EventId, RunId } from "../ids.js";
 import { transition } from "../transitions.js";
 import {
   type CommandDraft,
@@ -91,27 +91,61 @@ function snapshot(run: Run, a: Assignment) {
   );
 }
 
+/** M3.2: every bell-triggered Run keeps its cause in `kind`. */
+export type RunKind = Run["kind"];
+
+export interface QueueRunParams {
+  readonly assignment_id: AssignmentId;
+  readonly model: string;
+  readonly agent_cli_version: string;
+  /** Defaults to `initial` (a host-started Assignment). */
+  readonly kind?: RunKind;
+  /**
+   * The event that triggered this Run. Providing it makes the Run idempotent
+   * per (Assignment, event): the store has a unique index and the domain
+   * rejects the replay here, so a repeated bell never queues a second Run.
+   */
+  readonly trigger_event_id?: EventId;
+}
+
 export function queueRun(
   state: CommandState,
   actor: Actor,
-  p: { assignment_id: AssignmentId; model: string; agent_cli_version: string },
+  p: QueueRunParams,
   ports: CommandPorts,
 ) {
   return command(state, actor, "queue_run", ports, (d) => {
     const assignment = target(d, p.assignment_id);
     text(p.model, "model");
     text(p.agent_cli_version, "agent_cli_version");
+    if (p.trigger_event_id !== undefined) {
+      ensure(
+        !d
+          .list("runs")
+          .some(
+            (run) =>
+              run.assignment_id === assignment.id &&
+              run.trigger_event_id === p.trigger_event_id,
+          ),
+        "idempotency_conflict",
+        "A Run already exists for this trigger event",
+      );
+    }
     exclusive(d, assignment);
     const id = d.ids.next(state.project_id, "run");
     const event = d.emit("run_queued", cardId(d, assignment), {
       run_id: id,
       assignment_id: assignment.id,
+      kind: p.kind ?? "initial",
+      ...(p.trigger_event_id === undefined
+        ? {}
+        : { trigger_event_id: p.trigger_event_id }),
     });
     const run: Run = {
       id,
       assignment_id: assignment.id,
-      trigger_event_id: event.id,
-      kind: "initial",
+      trigger_event_id: p.trigger_event_id ?? event.id,
+      kind: p.kind ?? "initial",
       status: "queued",
       role_version: assignment.role_version,
       model: p.model,
@@ -126,7 +160,11 @@ export function queueRun(
 
 export interface DispatchRunParams {
   readonly run_id: RunId;
-  readonly runtime_ref: RuntimeRef;
+  /**
+   * M3.2: omit it to dispatch on the Assignment's existing terminal — the
+   * bell-triggered path reuses one session, it never provisions a second one.
+   */
+  readonly runtime_ref?: RuntimeRef;
   readonly base_sha?: string;
 }
 export function dispatchRun(
@@ -140,7 +178,12 @@ export function dispatchRun(
     const assignment = target(d, run.assignment_id);
     snapshot(run, assignment);
     const status = unwrap(transition("run", run.status, "dispatch"));
-    const ref = p.runtime_ref;
+    const ref = p.runtime_ref ?? assignment.runtime_ref;
+    ensure(
+      ref !== null,
+      "validation_failed",
+      "A new terminal is needed: this Assignment has no runtime to reuse",
+    );
     ensure(
       ref.machine_id === assignment.machine_id,
       "validation_failed",
