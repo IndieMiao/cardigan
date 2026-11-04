@@ -1,4 +1,4 @@
-// Vocabulary only. Transition tables and derived calculations belong to M1.2.
+// Shared vocabulary for entity types and the transition tables.
 export const states = {
   card: ["backlog", "todo", "in_progress", "review", "done", "cancelled"],
   produce: [
