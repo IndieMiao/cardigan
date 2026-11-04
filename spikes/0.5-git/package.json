@@ -1,0 +1,10 @@
+{
+  "name": "cardigan-p0-git-spike",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "spike": "node git-model.mjs",
+    "test": "node --test git-model.test.mjs",
+    "test:ssh": "GIT_SPIKE_MODE=ssh node --test git-model.test.mjs"
+  }
+}
