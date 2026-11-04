@@ -484,9 +484,10 @@ if(process.argv.includes('--version')) { console.log('pi acceptance-1'); process
   40_000,
 );
 
-// S04 deviation: all three generated wrappers omit the first task message from argv/stdin.
-// M2 §4 step 7 requires the CLI to receive it; first.md alone does not trigger an Agent turn.
-test.fails.each(["claude-code", "codex", "pi"] as const)(
+// M2 §4 step 7: the wrapper must hand the first task message to the CLI, because
+// first.md alone does not trigger an Agent turn. All three harnesses take it as
+// the last positional argument of their interactive invocation.
+test.each(["claude-code", "codex", "pi"] as const)(
   "S04 %s passes the first task message to the launched CLI",
   async (harness) => {
     const message = firstPrompt({

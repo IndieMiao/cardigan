@@ -288,6 +288,7 @@ export function compileAssignmentLaunch(
         path: launchScript,
         content: launchScriptContent({
           tokenFile,
+          firstPromptFile: firstFile,
           secretsFile: secretsFiles.length === 0 ? undefined : secretsFile,
           command,
           args,
@@ -346,6 +347,7 @@ function codexConfig(
  */
 function launchScriptContent(options: {
   readonly tokenFile: string;
+  readonly firstPromptFile: string;
   readonly secretsFile: string | undefined;
   readonly command: string;
   readonly args: readonly string[];
@@ -388,7 +390,18 @@ if [ -z "$MCP_TOKEN" ]; then
 fi
 export MCP_TOKEN
 ${credentials}${exports}
-exec ${quote(options.command)}${args ? ` ${args}` : ""}
+# The first task message is the last positional argument: claude, codex and pi
+# all start an interactive session with one (see the harness table below). It is
+# read here, never embedded in this script, and kept verbatim: the x sentinel
+# preserves trailing newlines that command substitution would otherwise drop.
+first_file=${quote(options.firstPromptFile)}
+if [ ! -f "$first_file" ]; then
+  echo "cardigan: first prompt file is missing: $first_file" >&2
+  exit 78
+fi
+first_message=$(cat "$first_file"; printf x)
+first_message=\${first_message%x}
+exec ${quote(options.command)}${args ? ` ${args}` : ""} "$first_message"
 `;
 }
 

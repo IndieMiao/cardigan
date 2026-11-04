@@ -118,7 +118,18 @@ set -a
 set +a
 rm -f "$secrets_file"
 export DISABLE_AUTOUPDATER='1'
-exec 'claude' '--settings' '/srv/cardigan/runs/A-12/cardigan-assignment.claude-agent.claude-settings.json' '--model' 'opus' '--strict-mcp-config' '--mcp-config' '/srv/cardigan/runs/A-12/mcp.json' '--append-system-prompt-file' '/srv/cardigan/runs/A-12/core.md' '--allowedTools' 'mcp__card__whoami,mcp__card__get_card,mcp__card__get_updates,mcp__card__ack_events,mcp__card__submit_delivery'
+# The first task message is the last positional argument: claude, codex and pi
+# all start an interactive session with one (see the harness table below). It is
+# read here, never embedded in this script, and kept verbatim: the x sentinel
+# preserves trailing newlines that command substitution would otherwise drop.
+first_file='/srv/cardigan/runs/A-12/first.md'
+if [ ! -f "$first_file" ]; then
+  echo "cardigan: first prompt file is missing: $first_file" >&2
+  exit 78
+fi
+first_message=$(cat "$first_file"; printf x)
+first_message=\${first_message%x}
+exec 'claude' '--settings' '/srv/cardigan/runs/A-12/cardigan-assignment.claude-agent.claude-settings.json' '--model' 'opus' '--strict-mcp-config' '--mcp-config' '/srv/cardigan/runs/A-12/mcp.json' '--append-system-prompt-file' '/srv/cardigan/runs/A-12/core.md' '--allowedTools' 'mcp__card__whoami,mcp__card__get_card,mcp__card__get_updates,mcp__card__ack_events,mcp__card__submit_delivery' "$first_message"
 ",
       "mode": "700",
       "path": "/srv/cardigan/runs/A-12/launch.sh",
@@ -242,7 +253,18 @@ set +a
 rm -f "$secrets_file"
 export OPENAI_BASE_URL='https://codex.example.invalid/v1'
 export CODEX_HOME='/srv/cardigan/runs/A-12/codex'
-exec 'codex' '--profile' 'codex-gateway' '-m' 'gpt-6-astra'
+# The first task message is the last positional argument: claude, codex and pi
+# all start an interactive session with one (see the harness table below). It is
+# read here, never embedded in this script, and kept verbatim: the x sentinel
+# preserves trailing newlines that command substitution would otherwise drop.
+first_file='/srv/cardigan/runs/A-12/first.md'
+if [ ! -f "$first_file" ]; then
+  echo "cardigan: first prompt file is missing: $first_file" >&2
+  exit 78
+fi
+first_message=$(cat "$first_file"; printf x)
+first_message=\${first_message%x}
+exec 'codex' '--profile' 'codex-gateway' '-m' 'gpt-6-astra' "$first_message"
 ",
       "mode": "700",
       "path": "/srv/cardigan/runs/A-12/launch.sh",
@@ -353,7 +375,18 @@ set -a
 set +a
 rm -f "$secrets_file"
 export PI_CODING_AGENT_DIR='/srv/cardigan/runs/A-12/pi'
-exec 'pi' '--provider' 'deepseek' '--model' 'deepseek-flash' '--append-system-prompt' '/srv/cardigan/runs/A-12/core.md'
+# The first task message is the last positional argument: claude, codex and pi
+# all start an interactive session with one (see the harness table below). It is
+# read here, never embedded in this script, and kept verbatim: the x sentinel
+# preserves trailing newlines that command substitution would otherwise drop.
+first_file='/srv/cardigan/runs/A-12/first.md'
+if [ ! -f "$first_file" ]; then
+  echo "cardigan: first prompt file is missing: $first_file" >&2
+  exit 78
+fi
+first_message=$(cat "$first_file"; printf x)
+first_message=\${first_message%x}
+exec 'pi' '--provider' 'deepseek' '--model' 'deepseek-flash' '--append-system-prompt' '/srv/cardigan/runs/A-12/core.md' "$first_message"
 ",
       "mode": "700",
       "path": "/srv/cardigan/runs/A-12/launch.sh",
