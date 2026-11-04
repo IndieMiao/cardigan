@@ -116,7 +116,11 @@ importers:
 
   packages/router: {}
 
-  packages/runtime-herdr: {}
+  packages/runtime-herdr:
+    dependencies:
+      '@cardigan/domain':
+        specifier: workspace:*
+        version: link:../domain
 
   packages/store:
     dependencies:
