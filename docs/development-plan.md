@@ -1,6 +1,7 @@
 # Cardigan · 多 Agent 协作开发系统开发方案
 
-- 版本：v0.5（2026-10-27）
+- 版本：v0.5.1（2026-11-04）
+  - v0.5.1：新增 D9（运行时基线），0.3 增加 Herdr 换代评估，0.6 改为敲定 D3–D9。
   - v0.5：§16 Phase 0 新增 0.7（代码骨架）和 0.8（同类产品对比、名字检查），0.6 改为敲定 D3–D8；0.2 从"试行评论模板"改为"回溯现有看板项目"，0.1 是否试行看 0.2 的结论；新增任务级计划 `docs/plans/phase-0.md`。
   - v0.4：D2 决定技术栈：TypeScript（Node 24 LTS）+ pnpm workspace + SQLite（WAL）+ React（Vite，纯 SPA）；§20.4 明确 DeepSeek 通过 Pi 实现，并记录项目级 Pi 插件。
   - v0.3：项目定名 Cardigan；D1 决定自研看板，不依赖 Gitea 等外部看板；Git 改为"主机发起"模型（§12）；新增 §8.7 看板第一版范围和 §20 仓库规划。
@@ -957,6 +958,7 @@ RuntimeRef = {machine_id, herdr_machine, workspace_id, pane_id, agent_name,
 | D6 | 机器清单 | 哪台常开做主机，哪台接测试真机，各自的系统和架构 |
 | D7 | "core memo"的含义 | 固定角色说明（第一版实现），还是持续演进的记忆（Phase 3） |
 | D8 | 是否借鉴或 fork herdr-projects | 看完它的数据模型和扩展接口后决定 |
+| D9 | 运行时基线：Herdr 0.9.x 还是 herdr-core / herdr-app | 2026-11 发现 Herdr 正在换代；由 0.3 给出建议。无论选哪一代，§11 的 Runtime Adapter 接口都保持不变 |
 
 ---
 
@@ -970,10 +972,10 @@ RuntimeRef = {machine_id, herdr_machine, workspace_id, pane_id, agent_name,
 |---|---|---|
 | 0.1 | 在现有 Herdr 实践中把 zhangliang 拆成 `zhangliang-office` 和 `zhangliang-ops`，所有门铃改发给 ops | 连续一周，主对话只被拍板和重大风险打断，ops 仍能正常调度 |
 | 0.2 | 回溯现有看板项目的卡片和评论时间线：评论按 §5.2 归类；交付、审核、拍板实际写了哪些信息；PM 在哪里靠猜决定下一步 | 修订 §4.3 的字段和 §9.2 的工具参数；给出是否试行 0.1 的建议 |
-| 0.3 | Herdr 预研：一台本机 + 一台远程机，验证 `--machine` 下的 worktree create / remove、agent prompt、agent wait、agent list；断线和门铃失败的表现 | 一页结论，包含确切的命令参数 |
+| 0.3 | Herdr 预研：评估 herdr-core / herdr-app 换代，给出运行时基线（D9）的建议；一台本机 + 一台远程机，验证 `--machine` 下的 worktree create / remove、agent prompt、agent wait、agent list；断线和门铃失败的表现 | 一页结论，包含 D9 建议和确切的命令参数 |
 | 0.4 | MCP 预研：每个选定的 Harness 都能连上一个带 Bearer Token 的 Streamable HTTP MCP 测试服务 | 产出各 Harness 的 Launch Profile 草稿 |
 | 0.5 | 评估 herdr-projects；预研主机发起的 Git 模型：从工作机拉取 commit、推送基线、模拟断线后接管（1–2 天） | 给出 D8 的结论；Git 模型跑通 |
-| 0.6 | 敲定 D3–D8（D2 已于 v0.4 决定） | 更新本文档 |
+| 0.6 | 敲定 D3–D9（D2 已于 v0.4 决定） | 更新本文档 |
 | 0.7 | 代码骨架：pnpm workspace、§20.1 的全部包、依赖方向检查 | 全新 clone 上 build / test / lint / 依赖检查全部通过；故意违反依赖方向会被拦住 |
 | 0.8 | 同类产品对比、名字收尾检查（非开发） | 给出差异点和名字风险的结论 |
 
