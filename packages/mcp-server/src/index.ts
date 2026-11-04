@@ -3,6 +3,14 @@ export {
   bearerToken,
   type Identity,
 } from "./auth.js";
+export type {
+  McpAckResult,
+  McpBackend,
+  McpReadContext,
+  McpReadRepository,
+  McpToken,
+  McpUpdates,
+} from "./backend.js";
 export {
   ERROR_CODES,
   ToolError,
@@ -23,6 +31,7 @@ export { createMcpServer, type ToolServerOptions } from "./tool-server.js";
 export {
   ackEventsTool,
   defineTool,
+  getCardTool,
   getUpdatesTool,
   readOnlyTools,
   type ToolContext,

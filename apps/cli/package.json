@@ -13,7 +13,9 @@
     }
   },
   "dependencies": {
+    "@cardigan/domain": "workspace:*",
     "@cardigan/roles": "workspace:*",
+    "@cardigan/store": "workspace:*",
     "yaml": "^2.9.1"
   }
 }

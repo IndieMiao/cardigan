@@ -29,14 +29,31 @@ importers:
 
   apps/cli:
     dependencies:
+      '@cardigan/domain':
+        specifier: workspace:*
+        version: link:../../packages/domain
       '@cardigan/roles':
         specifier: workspace:*
         version: link:../../packages/roles
+      '@cardigan/store':
+        specifier: workspace:*
+        version: link:../../packages/store
       yaml:
         specifier: ^2.9.1
         version: 2.9.1
 
-  apps/server: {}
+  apps/server:
+    dependencies:
+      '@cardigan/mcp-server':
+        specifier: workspace:*
+        version: link:../../packages/mcp-server
+      '@cardigan/store':
+        specifier: workspace:*
+        version: link:../../packages/store
+    devDependencies:
+      '@modelcontextprotocol/sdk':
+        specifier: 1.32.2
+        version: 1.32.2(zod@4.6.7)
 
   apps/web:
     dependencies:

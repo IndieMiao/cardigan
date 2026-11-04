@@ -29,6 +29,8 @@ export {
   type IssuedToken,
   type IssueTokenInput,
   openStore,
+  type ProjectCreateInput,
+  type ProjectRecord,
   Store,
   type StoreOptions,
   type StoreUnitOfWork,

@@ -8,5 +8,9 @@
   },
   "include": ["src"],
   "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx"],
-  "references": [{ "path": "../../packages/roles" }]
+  "references": [
+    { "path": "../../packages/roles" },
+    { "path": "../../packages/store" },
+    { "path": "../../packages/domain" }
+  ]
 }

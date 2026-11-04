@@ -8,5 +8,15 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     }
+  },
+  "bin": {
+    "cardigan-server": "./dist/bin.js"
+  },
+  "dependencies": {
+    "@cardigan/mcp-server": "workspace:*",
+    "@cardigan/store": "workspace:*"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2"
   }
 }
