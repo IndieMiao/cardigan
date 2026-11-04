@@ -1,5 +1,16 @@
 export { createIdAllocator, PROJECT_EVENT_STREAM } from "./ids.js";
 export {
+  acknowledgeNotifications,
+  advanceRouterCursor,
+  type MoveNotificationInput,
+  moveNotification,
+  type NotificationQuery,
+  notificationsByRecipient,
+  type RecordNotificationInput,
+  recordNotification,
+  routerCursor,
+} from "./inbox.js";
+export {
   type AppliedMigration,
   defaultMigrationsDir,
   listMigrations,
