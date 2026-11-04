@@ -317,17 +317,18 @@ export function updateWorkItem(
     d.pm();
     const item = d.work(p.work_item_id);
     const resume = item.status === "blocked" && p.status === "in_progress";
+    const confirmReported =
+      p.status === "in_progress" &&
+      item.reported_blocker !== undefined &&
+      ["blocked", "waiting_decision"].includes(item.status);
     ensure(
-      p.status === undefined || p.status === item.status || resume,
+      p.status === undefined ||
+        p.status === item.status ||
+        resume ||
+        confirmReported,
       "illegal_transition",
       "Work item progress must follow its workflow events",
     );
-    if (resume)
-      ensure(
-        canResume(d, item),
-        "illegal_transition",
-        "Work item still has unresolved blockers or an exhausted review limit",
-      );
     if (p.title !== undefined) text(p.title, "title");
     const card = d.card(item.card_id);
     ensure(
@@ -373,9 +374,20 @@ export function updateWorkItem(
         ? { max_review_rounds: p.max_review_rounds }
         : {}),
     };
+    if (confirmReported) {
+      const { reported_blocker: _confirmed, ...remaining } = result;
+      result = remaining;
+    }
+    if (resume && !confirmReported)
+      ensure(
+        canResume(d, result),
+        "illegal_transition",
+        "Work item still has unresolved blockers or an exhausted review limit",
+      );
     d.put("work_items", result);
     const resumed =
       resume ||
+      confirmReported ||
       (item.status === "waiting_decision" &&
         item.kind === "verify" &&
         p.max_review_rounds !== undefined &&
@@ -389,6 +401,7 @@ export function updateWorkItem(
       {
         work_item_id: item.id,
         resume_work_items: resumed ? [item.id] : [],
+        ...(confirmReported ? { reported_blocker_cleared: true } : {}),
         ...(p.max_review_rounds !== undefined
           ? { max_review_rounds: p.max_review_rounds }
           : {}),

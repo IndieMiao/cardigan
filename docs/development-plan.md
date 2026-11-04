@@ -1,6 +1,8 @@
 # Cardigan · 多 Agent 协作开发系统开发方案
 
-- 版本：v0.6.10（2026-11-04）
+- 版本：v0.6.11（2026-11-04）
+  - v0.6.11：报告的阻塞保存为 WorkItem.reported_blocker；PM／人确认与实际恢复分开，支持与 Decision / HumanAction 独立解除，避免相互等待。
+  - v0.6.10（2026-11-04）
   - v0.6.10：M1.6a 明确 MCP 命令的一致快照、缓存优先预检、幂等事务及失败回滚边界；后续工具分依赖 PR 接入。
   - v0.6.9（2026-11-04）
   - v0.6.9：§4.4 验证型工作项补上 `in_progress → blocked / waiting_decision` 和 `blocked → in_progress`（报阻塞、发起阻塞拍板、解除阻塞；`waiting_decision` 仍回到 `ready`）；M1.T1 审核时发现规格漏写，实现早已支持。
@@ -294,6 +296,7 @@ Standing Assignment (scope=project): PM Office, PM Ops — not tied to a WorkIte
 - `target_work_item_id?`：仅 verify 类型，表示验证哪个产出型工作项
 - `completion_criteria`、`status`、`assignment_id?`
 - `template_key?`：模板生成工作项的稳定键，用来识别主产出和本次完成申请的审核项。
+- `reported_blocker?`：`{reason, needs: role | human, reported_by, reported_at}`。报告者来自 Actor，时间来自 Clock；它是独立阻塞原因，其他阻塞解除不能清除它。重复上报更新当前报告，历史保留在时间线。
 
 **Assignment**
 
@@ -420,7 +423,7 @@ in_progress <--> blocked / waiting_decision
 any --> cancelled
 ```
 
-普通 `report_blocker` 由 PM（或人）确认解除：调用 `update_work_item(status=in_progress)`，仅允许从 `blocked` 经 `resume` 恢复；关联此工作项的 open / provisional 阻塞 Decision 或 open HumanAction 未解除时拒绝。验证项还须有剩余审核轮次。此入口不允许直接设定其他进度或完成状态。现有 Run 尚未结束时继续复用；旧 Run 已以 blocked 结束且没有其他未结束 Run 时，沿用执行快照生成新的 queued / followup Run。
+普通 `report_blocker` 将原因记入 `reported_blocker`，由 PM（或人）调用 `update_work_item(status=in_progress)` 确认解除。确认先清掉这一标记；若还有关联的 open / provisional 阻塞 Decision、open HumanAction 或审核轮次用尽，确认仍成功，工作项保持原暂停状态，不排 Run。反过来先解除 Decision / HumanAction 时，未确认的报告仍阻止恢复。只有最后一个阻塞解除、且审核预算允许，才按当前暂停状态经 `resume` 或 `decision_resolved` 恢复，并输出实际 `resume_work_items`；确认事件另记 `reported_blocker_cleared=true`。已有 Run 尚未结束时继续复用，已结束则按现有快照规则排一个新 Run。没有报告标记时，此入口仍只接受既有 blocked → in_progress 的受控恢复，不得直接设置其他进度或完成状态。
 
 M1 的外层启动只推进 Run。`report_blocker`、阻塞 `request_decision` 和包含自身工作项的 `request_human_action` 在暂停调用者自身工作项前，复用交付/审核的启动校验：必须有当前 running Run；produce 的 todo 在依赖成功后经 dependencies_met 到 ready，再经 run_started 到 in_progress，ready / changes_requested 直接经 run_started；verify 的 ready 仅在审核预算未用尽时经 run_started 到 in_progress。其他人的工作项不会被代为启动，不能暂停时错误包含编号、类型和当前状态。
 

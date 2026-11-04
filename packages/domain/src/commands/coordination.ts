@@ -175,6 +175,15 @@ export function reportBlocker(
       "Unknown blocker owner",
     );
     paused(d, item, "blocked");
+    d.put("work_items", {
+      ...d.work(item.id),
+      reported_blocker: {
+        reason: p.reason,
+        needs: p.needs,
+        reported_by: d.author,
+        reported_at: d.now,
+      },
+    });
     d.emit(
       "blocker_reported",
       item.card_id,

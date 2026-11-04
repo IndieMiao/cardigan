@@ -4,6 +4,7 @@ import { reviewRound } from "./workflow.js";
 
 export function canResume(d: CommandDraft, item: WorkItem): boolean {
   return !(
+    item.reported_blocker ||
     d
       .list("decisions")
       .some(
