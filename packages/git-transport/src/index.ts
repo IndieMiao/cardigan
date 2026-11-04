@@ -11,36 +11,41 @@ const exists = (path: string) =>
     () => false,
   );
 
+/** Execute workspace Git as the workspace owner (for isolated Agent accounts). */
+export interface WorkspaceGit {
+  run(args: readonly string[]): Promise<string>;
+  prepareWorktree?(path: string): Promise<void>;
+}
+
 /** All fetches use a verified local path, never a configured network remote. */
 export class LocalGitTransport implements GitWorktreePort {
   constructor(
     private readonly binary = "git",
     private readonly timeoutMs = 30000,
+    private readonly workspace?: WorkspaceGit,
   ) {}
   private async git(repository: string | undefined, args: string[]) {
     const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
     for (const key of Object.keys(env))
       if (key.startsWith("GIT_") && key !== "GIT_TERMINAL_PROMPT")
         delete env[key];
-    const { stdout } = await exec(
-      this.binary,
-      [
-        "-c",
-        "protocol.allow=never",
-        "-c",
-        "protocol.file.allow=always",
-        "-c",
-        "core.hooksPath=/dev/null",
-        ...(repository ? ["-C", repository] : []),
-        ...args,
-      ],
-      {
-        env,
-        timeout: this.timeoutMs,
-        killSignal: "SIGKILL",
-        maxBuffer: 4 * 1024 * 1024,
-      },
-    );
+    const command = [
+      "-c",
+      "protocol.allow=never",
+      "-c",
+      "protocol.file.allow=always",
+      "-c",
+      "core.hooksPath=/dev/null",
+      ...(repository ? ["-C", repository] : []),
+      ...args,
+    ];
+    if (this.workspace) return (await this.workspace.run(command)).trimEnd();
+    const { stdout } = await exec(this.binary, command, {
+      env,
+      timeout: this.timeoutMs,
+      killSignal: "SIGKILL",
+      maxBuffer: 4 * 1024 * 1024,
+    });
     return stdout.trimEnd();
   }
   private async source(path: string) {
@@ -131,6 +136,7 @@ export class LocalGitTransport implements GitWorktreePort {
     if (await exists(path))
       throw new Error("Worktree path already exists outside this clone");
     await mkdir(dirname(path), { recursive: true });
+    await this.workspace?.prepareWorktree?.(path);
     if (branch) {
       await this.git(repository, ["check-ref-format", "--branch", branch]);
       const branches = await this.git(repository, [
