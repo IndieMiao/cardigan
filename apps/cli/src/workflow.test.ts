@@ -1,7 +1,13 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type HumanAction, requestHumanAction } from "@cardigan/domain";
+import {
+  type HumanAction,
+  queueRun,
+  recordDecision,
+  requestDecision,
+  requestHumanAction,
+} from "@cardigan/domain";
 import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { runCommand } from "./host.js";
@@ -441,4 +447,246 @@ test("assign --start hands off without printing a token", async () => {
   } finally {
     store.close();
   }
+});
+
+/** Create the two standing PM assignments (Office and Ops). */
+async function createPmPair(): Promise<void> {
+  await run(["init"]);
+  await run(["project", "create", "p-work"]);
+  await run([
+    "role",
+    "add",
+    "p-work",
+    "pm",
+    "--allowed-tools",
+    "create_card,assign,record_decision",
+  ]);
+  expect(await run(["pm", "create", "--office", "--project", "p-work"])).toBe(
+    0,
+  );
+  expect(await run(["pm", "create", "--ops", "--project", "p-work"])).toBe(0);
+}
+
+test("pm start launches Office and Ops through the one-command start", async () => {
+  await createPmPair();
+
+  const calls: string[] = [];
+  const code = await main(["pm", "start", "--project", "p-work"], io, {
+    start: async (options) => {
+      calls.push(options.assignment_id);
+      options.io.stdout(`started ${options.assignment_id}`);
+      return 0;
+    },
+  });
+
+  expect(code).toBe(0);
+  // Both standing assignments, in creation order.
+  expect(calls).toEqual(["A-1", "A-2"]);
+  expect(printed()).toContain("已启动 2 个常驻 PM");
+  expect(printed()).toContain("started A-1");
+  expect(printed()).toContain("started A-2");
+});
+
+test("pm start skips a PM that already has an unfinished Run", async () => {
+  await createPmPair();
+  const store = Store.open({ dataDir });
+  try {
+    runCommand(store, {
+      project_id: "p-work" as never,
+      actor: { kind: "human", project_id: "p-work" as never },
+      reduce: (state, actor, ports) =>
+        queueRun(
+          state,
+          actor,
+          {
+            assignment_id: "A-1" as never,
+            model: "fixture-model",
+            agent_cli_version: "pi 1.5.0",
+          },
+          ports,
+        ),
+    });
+  } finally {
+    store.close();
+  }
+
+  const calls: string[] = [];
+  const code = await main(["pm", "start", "--project", "p-work"], io, {
+    start: async (options) => {
+      calls.push(options.assignment_id);
+      return 0;
+    },
+  });
+
+  expect(code).toBe(0);
+  expect(calls).toEqual(["A-2"]);
+  expect(printed()).toContain("PM Office（A-1）已在运行，跳过");
+});
+
+test("pm start can start one mode and refuses when no PM exists", async () => {
+  await createPmPair();
+
+  const calls: string[] = [];
+  expect(
+    await main(["pm", "start", "--ops", "--project", "p-work"], io, {
+      start: async (options) => {
+        calls.push(options.assignment_id);
+        return 0;
+      },
+    }),
+  ).toBe(0);
+  expect(calls).toEqual(["A-2"]);
+
+  // A fresh project has no standing PM assignments yet.
+  expect(await run(["project", "create", "p-other"])).toBe(0);
+  expect(await run(["pm", "start", "--project", "p-other"])).toBe(2);
+  expect(errors.join("\n")).toContain("pm create");
+});
+
+test("needs-you lists open human decisions and pending human actions", async () => {
+  await bootstrap();
+  await run([
+    "card",
+    "create",
+    "--template",
+    "dev",
+    "--title",
+    "T",
+    "--goal",
+    "G",
+    "--acceptance",
+    "A",
+    "--repo",
+    "r/x",
+  ]);
+  await run(["assign", "W-1", "--role", "coder"]);
+  // Recording a decision is PM Office's job (§10.4), so the test needs one.
+  await run(["pm", "create", "--office", "--project", "p-work"]);
+
+  const store = Store.open({ dataDir });
+  try {
+    const human = { kind: "human", project_id: "p-work" as never } as const;
+    const office = store.uow.read((tx) =>
+      tx.assignments
+        .list("p-work" as never)
+        .find((candidate) => candidate.scope === "standing"),
+    );
+    if (office === undefined) throw new Error("no PM Office assignment");
+    const decision = runCommand(store, {
+      project_id: "p-work" as never,
+      actor: human,
+      reduce: (state, actor, ports) =>
+        requestDecision(
+          state,
+          actor,
+          {
+            card_id: "C-1" as never,
+            category: "general",
+            kind: "choose",
+            question: "Which shape should the API take?",
+            context: "Two options look reasonable",
+            options: [
+              { key: "a", description: "REST", impact: "Simpler" },
+              { key: "b", description: "RPC", impact: "Faster" },
+            ],
+            recommended: "a",
+            affected_cards: ["C-1" as never],
+            affected_work_items: ["W-1" as never],
+            blocking: false,
+            decider: "human",
+          },
+          ports,
+        ),
+    });
+    const action = runCommand(store, {
+      project_id: "p-work" as never,
+      actor: human,
+      reduce: (state, actor, ports) =>
+        requestHumanAction(
+          state,
+          actor,
+          {
+            card_id: "C-1" as never,
+            instructions: "Connect the device",
+            why_human: "Only a human has hands",
+            expected_return: "a photo",
+            blocked_work_items: [],
+          },
+          ports,
+        ),
+    });
+    // A decision for a role never shows up here.
+    runCommand(store, {
+      project_id: "p-work" as never,
+      actor: human,
+      reduce: (state, actor, ports) =>
+        requestDecision(
+          state,
+          actor,
+          {
+            card_id: "C-1" as never,
+            category: "general",
+            kind: "choose",
+            question: "Internal choice",
+            context: "PM decides",
+            options: [
+              { key: "a", description: "Do it", impact: "Faster" },
+              { key: "b", description: "Skip", impact: "Cheaper" },
+            ],
+            recommended: "a",
+            affected_cards: ["C-1" as never],
+            affected_work_items: [],
+            blocking: false,
+            decider: "role:pm",
+          },
+          ports,
+        ),
+    });
+
+    expect(await run(["needs-you", "--project", "p-work"])).toBe(0);
+    const text = printed();
+    expect(text).toContain(decision.id);
+    expect(text).toContain("Which shape should the API take?");
+    expect(text).toContain(action.id);
+    expect(text).toContain("Connect the device");
+    expect(text).toContain("Only a human has hands");
+    expect(text).toContain("a photo");
+    expect(text).not.toContain("Internal choice");
+
+    // Answering the decision clears it from the view; only Office may record it.
+    runCommand(store, {
+      project_id: "p-work" as never,
+      actor: {
+        kind: "assignment",
+        project_id: "p-work" as never,
+        assignment_id: office.id,
+        role_id: office.role_id,
+        role_version: office.role_version,
+        allowed_tools: ["record_decision"],
+      } as never,
+      reduce: (state, actor, ports) =>
+        recordDecision(
+          state,
+          actor,
+          {
+            decision_id: decision.id,
+            option: "a",
+            rationale: "REST is simpler",
+            raw_quote: "选 A",
+          },
+          ports,
+        ),
+    });
+    expect(await run(["needs-you", "--project", "p-work"])).toBe(0);
+    expect(printed()).not.toContain("Which shape should the API take?");
+    expect(printed()).toContain("Connect the device");
+  } finally {
+    store.close();
+  }
+});
+
+test("needs-you says so when nothing is waiting for the human", async () => {
+  await bootstrap();
+  expect(await run(["needs-you", "--project", "p-work"])).toBe(0);
+  expect(printed()).toContain("Needs You 是空的");
 });

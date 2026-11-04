@@ -1,4 +1,9 @@
-import type { Assignment, HumanActionId, WorkItemId } from "@cardigan/domain";
+import type {
+  Assignment,
+  HumanActionId,
+  ProjectId,
+  WorkItemId,
+} from "@cardigan/domain";
 import {
   assign,
   completeHumanAction,
@@ -29,6 +34,8 @@ const USAGE = [
   "  cardigan assign <W-n> --role <角色> [--machine local] [--start] [--project <p>]",
   "  cardigan token issue <A-n> [--project <p>]",
   "  cardigan pm create --office|--ops [--project <p>]",
+  "  cardigan pm start [--office] [--ops] [--project <p>]  一键启动常驻 PM（已在运行就跳过）",
+  "  cardigan needs-you [--project <p>]                   看待你拍板和待你执行的事项",
   "  cardigan human-action done <h(n)> --text <结果> [--project <p>]",
   "",
   "通用：--project 省略时取 CARDIGAN_PROJECT，再取数据库里唯一的项目；",
@@ -146,7 +153,9 @@ export async function runWorkflowCommand(
     case "token":
       return tokenIssue(rest, io);
     case "pm":
-      return pmCreate(rest, io);
+      return await pmCommand(rest, io, hooks);
+    case "needs-you":
+      return needsYou(rest, io);
     case "human-action":
       return humanActionDone(rest, io);
     default:
@@ -360,6 +369,200 @@ function tokenIssue(args: readonly string[], io: CliIo): number {
       `已为 ${assignmentId} 签发新 Token（该 Assignment 之前的有效 Token 已作废）`,
     );
     printToken(io, issued);
+    return EXIT.ok;
+  } finally {
+    store.close();
+  }
+}
+
+/** `cardigan pm create|start`: the two standing PM assignments (§7.1). */
+async function pmCommand(
+  args: readonly string[],
+  io: CliIo,
+  hooks: CliHooks,
+): Promise<number> {
+  const [sub] = args;
+  if (sub === "start") return await pmStart(args.slice(1), io, hooks);
+  return pmCreate(args, io);
+}
+
+interface StandingPm {
+  readonly assignment: Assignment;
+  readonly office: boolean;
+}
+
+/** Standing pm Assignments, told apart by the tools of their newest token. */
+function standingPmAssignments(
+  store: Store,
+  project_id: ProjectId,
+): readonly StandingPm[] {
+  // The newest token's tool list is the only place Office and Ops differ, and
+  // it is readable through the write transaction context.
+  return store.uow.run((tx) =>
+    tx.assignments
+      .list(project_id)
+      .filter(
+        (candidate) =>
+          candidate.scope === "standing" &&
+          candidate.role_id === "pm" &&
+          candidate.status === "active",
+      )
+      .map((assignment) => ({
+        assignment,
+        office: (
+          tx.tokensForAssignment(project_id, assignment.id).at(-1)
+            ?.allowed_tools ?? []
+        ).includes("record_decision"),
+      })),
+  );
+}
+
+/** An Assignment with an unfinished Run is already being served. */
+function hasUnfinishedRun(
+  store: Store,
+  project_id: ProjectId,
+  id: Assignment["id"],
+): boolean {
+  return store.uow.read((tx) =>
+    tx.runs
+      .list(project_id)
+      .some(
+        (run) =>
+          run.assignment_id === id &&
+          !["completed", "failed", "cancelled"].includes(run.status),
+      ),
+  );
+}
+
+/**
+ * `cardigan pm start` — M3.5: bring both standing PM assignments up through the
+ * M2.6 one-command start, skipping any that is already serving a Run.
+ */
+async function pmStart(
+  args: readonly string[],
+  io: CliIo,
+  hooks: CliHooks,
+): Promise<number> {
+  const parsed = parseArgs(args, ["office", "ops"]);
+  const onlyOffice = parsed.flags.office === true;
+  const onlyOps = parsed.flags.ops === true;
+
+  const store = openStoreFrom(io, parsed.flags);
+  try {
+    const project_id = resolveProject(
+      store,
+      io,
+      optional(parsed.flags, "project"),
+    );
+    const standing = standingPmAssignments(store, project_id);
+    const wanted = standing.filter(
+      (entry) =>
+        (onlyOffice && entry.office) ||
+        (onlyOps && !entry.office) ||
+        (!onlyOffice && !onlyOps),
+    );
+    if (wanted.length === 0) {
+      throw new CliError(
+        "还没有常驻 PM Assignment，先运行 cardigan pm create --office 与 --ops",
+        EXIT.usage,
+        [USAGE],
+      );
+    }
+
+    let started = 0;
+    for (const entry of wanted) {
+      const label = entry.office ? "PM Office" : "PM Ops";
+      if (hasUnfinishedRun(store, project_id, entry.assignment.id)) {
+        io.stdout(`${label}（${entry.assignment.id}）已在运行，跳过`);
+        continue;
+      }
+      const result = await (hooks.start ?? startAssignmentById)({
+        store,
+        io,
+        project_id,
+        assignment_id: entry.assignment.id,
+        ...(optional(parsed.flags, "data-dir") === undefined
+          ? {}
+          : { dataDir: optional(parsed.flags, "data-dir") as string }),
+        ...(optional(parsed.flags, "mcp-url") === undefined
+          ? {}
+          : { mcpUrl: optional(parsed.flags, "mcp-url") as string }),
+        ...(optional(parsed.flags, "hc-session") === undefined
+          ? {}
+          : { session: optional(parsed.flags, "hc-session") as string }),
+      });
+      if (result !== 0) return result;
+      started += 1;
+    }
+    io.stdout(
+      started === 0 ? "没有需要启动的 PM" : `已启动 ${started} 个常驻 PM`,
+    );
+    return EXIT.ok;
+  } finally {
+    store.close();
+  }
+}
+
+/**
+ * `cardigan needs-you` — M3.5 read-only view until M5 builds the page
+ * (development plan §7.3): open human decisions and pending human actions.
+ */
+function needsYou(args: readonly string[], io: CliIo): number {
+  const parsed = parseArgs(args, []);
+  const store = openStoreFrom(io, parsed.flags);
+  try {
+    const project_id = resolveProject(
+      store,
+      io,
+      optional(parsed.flags, "project"),
+    );
+    const { decisions, actions } = store.uow.read((tx) => ({
+      decisions: tx.decisions
+        .list(project_id)
+        .filter(
+          (decision) =>
+            decision.decider === "human" &&
+            ["open", "provisional"].includes(decision.status),
+        ),
+      actions: tx.human_actions
+        .list(project_id)
+        .filter((action) => action.status === "open"),
+    }));
+
+    if (decisions.length === 0 && actions.length === 0) {
+      io.stdout("Needs You 是空的：没有待你拍板的事项，也没有待你执行的操作。");
+      return EXIT.ok;
+    }
+    const lines: string[] = [];
+    if (decisions.length > 0) {
+      lines.push(`待你拍板（${decisions.length}）`);
+      for (const decision of decisions) {
+        lines.push(
+          [
+            `  ${decision.id}${decision.card_id === undefined ? "" : `  ${decision.card_id}`}`,
+            `    ${decision.question}`,
+            ...(decision.status === "provisional"
+              ? ["    状态：等待确认（条件性拍板）"]
+              : []),
+          ].join("\n"),
+        );
+      }
+    }
+    if (actions.length > 0) {
+      lines.push(`待你执行（${actions.length}）`);
+      for (const action of actions) {
+        lines.push(
+          [
+            `  ${action.id}${action.card_id === undefined ? "" : `  ${action.card_id}`}`,
+            `    ${action.instructions}`,
+            `    为什么需要你：${action.why_human}`,
+            `    期望返回：${action.expected_return}`,
+            ...(action.due === undefined ? [] : [`    截止：${action.due}`]),
+          ].join("\n"),
+        );
+      }
+    }
+    io.stdout(lines.join("\n"));
     return EXIT.ok;
   } finally {
     store.close();
