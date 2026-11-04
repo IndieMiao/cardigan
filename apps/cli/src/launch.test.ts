@@ -1,4 +1,11 @@
-import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
@@ -115,7 +122,7 @@ async function makeHarness(options?: {
   secretsMode?: number;
   withSecretsFile?: boolean;
 }): Promise<Harness> {
-  const root = await mkdtemp(join(tmpdir(), "cardigan-cli-fake-"));
+  const root = await makeTempDir("cardigan-cli-fake-");
   const configDir = join(root, "config");
   const runtimeDir = join(root, "run");
   const binDir = join(root, "bin");
@@ -220,13 +227,25 @@ async function listRuntimeFiles(dir: string): Promise<string[]> {
 }
 
 let harness: Harness;
+/** Every temp directory a test creates, removed again in `afterEach`. */
+const tempRoots: string[] = [];
+
+/** `mkdtemp` that also registers the directory for cleanup. */
+async function makeTempDir(prefix: string): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), prefix));
+  tempRoots.push(dir);
+  return dir;
+}
 
 beforeEach(async () => {
   harness = await makeHarness();
 });
 
-afterEach(() => {
-  // Temp directories are left for the OS to reap; nothing outside them is touched.
+afterEach(async () => {
+  // Tests must not leave thousands of directories in /tmp.
+  for (const dir of tempRoots.splice(0)) {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 describe("cardigan (top level)", () => {
@@ -431,7 +450,7 @@ describe("cardigan launch <profile>", () => {
   });
 
   test("reports a missing launch.yaml", async () => {
-    const root = await mkdtemp(join(tmpdir(), "cardigan-cli-empty-"));
+    const root = await makeTempDir("cardigan-cli-empty-");
     harness.io.env.CARDIGAN_CONFIG_DIR = join(root, "config");
     expect(await harness.run(["launch", "--list"])).toBe(2);
     expect(harness.err.join("\n")).toContain("找不到启动配置");
@@ -510,7 +529,7 @@ describe("cardigan launch import-claude-settings", () => {
       "utf8",
     );
 
-    const fresh = await mkdtemp(join(tmpdir(), "cardigan-cli-import-"));
+    const fresh = await makeTempDir("cardigan-cli-import-");
     harness.io.env.CARDIGAN_CONFIG_DIR = join(fresh, "config");
 
     expect(

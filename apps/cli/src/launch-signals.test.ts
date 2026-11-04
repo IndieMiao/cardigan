@@ -5,6 +5,7 @@ import {
   mkdtemp,
   readdir,
   readFile,
+  rm,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -199,6 +200,8 @@ describe.skipIf(process.platform === "win32")("launch signal handling", () => {
       if (isAlive(parentPid)) {
         process.kill(-parentPid, "SIGKILL");
       }
+      // Do not leave the fixture directory behind.
+      await rm(root, { recursive: true, force: true });
     }
   }, 60000);
 });
