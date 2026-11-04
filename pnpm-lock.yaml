@@ -81,7 +81,11 @@ importers:
 
   packages/runtime-herdr: {}
 
-  packages/store: {}
+  packages/store:
+    dependencies:
+      '@cardigan/domain':
+        specifier: workspace:*
+        version: link:../domain
 
 packages:
 
