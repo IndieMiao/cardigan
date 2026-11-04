@@ -1,6 +1,3 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type {
   Assignment,
   Card,
@@ -11,12 +8,19 @@ import type {
   ToolName,
   WorkItem,
 } from "@cardigan/domain";
-import { Store } from "@cardigan/store";
+import type { McpBackend } from "./backend.js";
+
+/**
+ * Domain-only fixtures for the MCP tests.
+ *
+ * This helper deliberately depends on nothing but `domain` and the local
+ * `McpBackend` port: the concrete `Store` is opened by the test files, which
+ * the dependency rules exempt. Production code never imports it.
+ */
 
 export const project_id = "p-fictional" as ProjectId;
 export const card_id = "C-1" as CardId;
-
-const NOW = "2026-01-01T00:00:00.000Z";
+export const NOW = "2026-01-01T00:00:00.000Z";
 
 export const serverCard: Card = {
   id: card_id,
@@ -65,30 +69,26 @@ export const assignments: Assignment = {
   base_sha: "abc123",
 };
 
-export interface Fixture {
-  readonly store: Store;
-  readonly dataDir: string;
-  readonly token: string;
-  readonly assignment: Assignment;
-  readonly workItem: WorkItem;
-  readonly events: readonly Event[];
-  readonly timeline: readonly TimelineEntry[];
-  close(): void;
-}
-
-export interface FixtureOptions {
+export interface SeedOptions {
   readonly allowed_tools?: readonly ToolName[];
   readonly role_version?: number;
 }
 
-/**
- * Seed a temp database with one project, card, work item, assignment, token and
- * three events with timeline entries. Everything is fictional.
- */
-export function seedFixture(options: FixtureOptions = {}): Fixture {
-  const dataDir = mkdtempSync(join(tmpdir(), "cardigan-mcp-"));
-  const store = Store.open({ dataDir });
+export interface SeededRows {
+  readonly assignment: Assignment;
+  readonly events: readonly Event[];
+  readonly timeline: readonly TimelineEntry[];
+}
 
+/**
+ * Write one project, one card, one work item, one assignment, one role and
+ * three events with timeline entries. The caller keeps ownership of the
+ * backend (and of the token, which the store issues).
+ */
+export function seedProject(
+  backend: McpBackend,
+  options: SeedOptions = {},
+): SeededRows {
   const assignment: Assignment = {
     ...assignments,
     role_version: options.role_version ?? 1,
@@ -96,7 +96,7 @@ export function seedFixture(options: FixtureOptions = {}): Fixture {
   const events: Event[] = [];
   const timeline: TimelineEntry[] = [];
 
-  store.uow.run((tx) => {
+  backend.uow.run((tx) => {
     tx.cards.put(project_id, serverCard);
     tx.work_items.put(project_id, workItems);
     tx.assignments.put(project_id, assignment);
@@ -144,31 +144,5 @@ export function seedFixture(options: FixtureOptions = {}): Fixture {
     }
   });
 
-  const issued = store.issueToken({
-    project_id,
-    assignment_id: assignment.id,
-    role: {
-      role_version: assignment.role_version,
-      allowed_tools: options.allowed_tools ?? [
-        "whoami",
-        "get_updates",
-        "ack_events",
-      ],
-    },
-    token: "fictional-token-value",
-  });
-
-  return {
-    store,
-    dataDir,
-    token: issued.token,
-    assignment,
-    workItem: workItems,
-    events,
-    timeline,
-    close: () => {
-      store.close();
-      rmSync(dataDir, { recursive: true, force: true });
-    },
-  };
+  return { assignment, events, timeline };
 }

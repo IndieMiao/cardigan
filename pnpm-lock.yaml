@@ -71,15 +71,16 @@ importers:
       '@cardigan/domain':
         specifier: workspace:*
         version: link:../domain
-      '@cardigan/store':
-        specifier: workspace:*
-        version: link:../store
       '@modelcontextprotocol/sdk':
         specifier: 1.32.2
         version: 1.32.2(zod@4.6.7)
       zod:
         specifier: ^4.6.7
         version: 4.6.7
+    devDependencies:
+      '@cardigan/store':
+        specifier: workspace:*
+        version: link:../store
 
   packages/roles:
     dependencies:

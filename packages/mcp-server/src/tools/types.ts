@@ -1,11 +1,11 @@
 import type { ToolName } from "@cardigan/domain";
-import type { Store } from "@cardigan/store";
 import type { z } from "zod";
 import type { Identity } from "../auth.js";
+import type { McpBackend } from "../backend.js";
 
 /** What a tool handler may use. */
 export interface ToolContext {
-  readonly store: Store;
+  readonly store: McpBackend;
   readonly identity: Identity;
 }
 

@@ -5,7 +5,7 @@ import type {
   Result,
   RoleReference,
 } from "@cardigan/domain";
-import type { Store, TokenRecord } from "@cardigan/store";
+import type { McpBackend, McpToken } from "./backend.js";
 
 /** MCP callers are always assignments: a token belongs to one assignment. */
 export type AssignmentActor = Extract<Actor, { readonly kind: "assignment" }>;
@@ -13,7 +13,7 @@ export type AssignmentActor = Extract<Actor, { readonly kind: "assignment" }>;
 /** Everything authenticated tool handlers are allowed to know about the caller. */
 export interface Identity {
   readonly actor: AssignmentActor;
-  readonly token: TokenRecord;
+  readonly token: McpToken;
   readonly assignment: Assignment;
   readonly role: RoleReference;
 }
@@ -31,7 +31,7 @@ const unauthorized = (message: string): Result<never> => ({
  * Unknown, revoked and orphaned tokens are indistinguishable to the caller.
  */
 export function authenticate(
-  store: Store,
+  store: McpBackend,
   token: string | undefined,
 ): Result<Identity> {
   if (token === undefined || token.length === 0) {

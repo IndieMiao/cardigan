@@ -11,8 +11,10 @@
   },
   "dependencies": {
     "@cardigan/domain": "workspace:*",
-    "@cardigan/store": "workspace:*",
     "@modelcontextprotocol/sdk": "1.32.2",
     "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@cardigan/store": "workspace:*"
   }
 }

@@ -1,10 +1,15 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type {
   Card,
   Decision,
   Delivery,
   Review,
+  ToolName,
   WorkItem,
 } from "@cardigan/domain";
+import { Store } from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
@@ -12,13 +17,47 @@ import { memoryLogger } from "./log.js";
 import { type RunningServer, startMcpServer } from "./server.js";
 import {
   card_id,
-  type Fixture,
   project_id,
-  seedFixture,
+  type SeededRows,
+  seedProject,
   serverCard,
+  workItems,
 } from "./test-support.js";
 
 const allowed = ["whoami", "get_card", "get_updates", "ack_events"] as const;
+
+interface Fixture extends SeededRows {
+  readonly store: Store;
+  readonly token: string;
+  readonly workItem: WorkItem;
+  readonly dataDir: string;
+}
+
+/** Tests may open the real store; dependency rules exempt test files. */
+function seedFixture(
+  options: { allowed_tools?: readonly ToolName[] } = {},
+): Fixture {
+  const dataDir = mkdtempSync(join(tmpdir(), "cardigan-mcp-card-"));
+  const store = Store.open({ dataDir });
+  const tools = options.allowed_tools ?? allowed;
+  const seeded = seedProject(store, { allowed_tools: tools });
+  const issued = store.issueToken({
+    project_id,
+    assignment_id: seeded.assignment.id,
+    role: {
+      role_version: seeded.assignment.role_version,
+      allowed_tools: tools,
+    },
+    token: "fictional-card-token",
+  });
+  return {
+    ...seeded,
+    store,
+    token: issued.token,
+    workItem: workItems,
+    dataDir,
+  };
+}
 
 let fixture: Fixture;
 let server: RunningServer;
@@ -63,11 +102,14 @@ function seedCardRelations(): void {
     max_review_rounds: 2,
   };
   const otherSide: WorkItem = {
-    ...produce,
     id: "W-3" as never,
     card_id: "C-2" as never,
+    title: "Other card work",
     kind: "produce",
     role_id: "coder",
+    required: true,
+    depends_on: [],
+    completion_criteria: [],
     status: "todo",
   };
   const delivery: Delivery = {
@@ -137,7 +179,8 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await server.close();
-  fixture.close();
+  fixture.store.close();
+  rmSync(fixture.dataDir, { recursive: true, force: true });
 });
 
 describe("get_card", () => {

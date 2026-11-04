@@ -7,8 +7,8 @@ import type {
   Review,
   WorkItem,
 } from "@cardigan/domain";
-import type { Store } from "@cardigan/store";
 import type { Identity } from "../auth.js";
+import type { McpBackend } from "../backend.js";
 import { ToolError } from "../errors.js";
 
 /**
@@ -20,7 +20,7 @@ import { ToolError } from "../errors.js";
  * does not leak which cards exist.
  */
 export function requireCard(
-  store: Store,
+  store: McpBackend,
   identity: Identity,
   card_id: CardId,
 ): { readonly card: Card; readonly work_items: readonly WorkItem[] } {
@@ -63,7 +63,7 @@ export interface CardReadings {
 
 /** Project rows needed to assemble a card view, narrowed to one card. */
 export function readCardRelations(
-  store: Store,
+  store: McpBackend,
   project_id: ProjectId,
   card_id: CardId,
   work_items: readonly WorkItem[],

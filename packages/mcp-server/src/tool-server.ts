@@ -1,4 +1,3 @@
-import type { Store } from "@cardigan/store";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { toJsonSchemaCompat } from "@modelcontextprotocol/sdk/server/zod-json-schema-compat.js";
 import {
@@ -7,6 +6,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import type { Identity } from "./auth.js";
+import type { McpBackend } from "./backend.js";
 import { ToolError, toDomainError } from "./errors.js";
 import type { Logger } from "./log.js";
 import {
@@ -16,7 +16,7 @@ import {
 } from "./tools/types.js";
 
 export interface ToolServerOptions {
-  readonly store: Store;
+  readonly store: McpBackend;
   readonly identity: Identity;
   readonly tools: readonly ToolDefinition[];
   readonly log: Logger;

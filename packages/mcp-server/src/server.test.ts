@@ -1,9 +1,80 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { request } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { Assignment, ToolName, WorkItem } from "@cardigan/domain";
+import { Store } from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  expectTypeOf,
+  test,
+} from "vitest";
+import type { McpBackend } from "./backend.js";
 import { type LogEntry, memoryLogger } from "./log.js";
 import { type RunningServer, startMcpServer } from "./server.js";
-import { card_id, type Fixture, seedFixture } from "./test-support.js";
+import {
+  card_id,
+  project_id,
+  type SeededRows,
+  seedProject,
+  workItems,
+} from "./test-support.js";
+
+// Compile-time proof that the real store satisfies the MCP port, so production
+// code can depend on `domain` only (§20.2).
+expectTypeOf<Store>().toMatchTypeOf<McpBackend>();
+
+interface Fixture extends SeededRows {
+  readonly store: Store;
+  readonly token: string;
+  readonly workItem: WorkItem;
+  readonly assignment: Assignment;
+  close(): void;
+}
+
+interface FixtureOptions {
+  readonly allowed_tools?: readonly ToolName[];
+}
+
+/**
+ * Open a real store in a temp directory and seed it. Test files may use the
+ * store directly: the dependency rules exempt tests.
+ */
+function seedFixture(options: FixtureOptions = {}): Fixture {
+  const dataDir = mkdtempSync(join(tmpdir(), "cardigan-mcp-"));
+  const store = Store.open({ dataDir });
+  const allowed = options.allowed_tools ?? [
+    "whoami",
+    "get_updates",
+    "ack_events",
+  ];
+  const seeded = seedProject(store, { allowed_tools: allowed });
+  const issued = store.issueToken({
+    project_id,
+    assignment_id: seeded.assignment.id,
+    role: {
+      role_version: seeded.assignment.role_version,
+      allowed_tools: allowed,
+    },
+    token: "fictional-token-value",
+  });
+
+  return {
+    ...seeded,
+    store,
+    workItem: workItems,
+    token: issued.token,
+    close: () => {
+      store.close();
+      rmSync(dataDir, { recursive: true, force: true });
+    },
+  };
+}
 
 let fixture: Fixture;
 let server: RunningServer;
@@ -12,10 +83,9 @@ let entries: LogEntry[];
 async function connect(token: string | undefined): Promise<Client> {
   const client = new Client({ name: "fictional-client", version: "0.0.0" });
   const transport = new StreamableHTTPClientTransport(new URL(server.url), {
-    requestInit:
-      token === undefined
-        ? undefined
-        : { headers: { Authorization: `Bearer ${token}` } },
+    ...(token === undefined
+      ? {}
+      : { requestInit: { headers: { Authorization: `Bearer ${token}` } } }),
   });
   await client.connect(transport);
   return client;
@@ -317,6 +387,45 @@ describe("logging", () => {
   });
 });
 
+/** POST with an explicit Host header (fetch would not let us spoof it). */
+function postWithHost(
+  url: string,
+  host: string,
+  token: string,
+  body: string,
+): Promise<{ status: number; body: string }> {
+  const target = new URL(url);
+  return new Promise((resolve, reject) => {
+    const req = request(
+      {
+        hostname: target.hostname,
+        port: target.port,
+        path: target.pathname,
+        method: "POST",
+        headers: {
+          Host: host,
+          Authorization: `Bearer ${token}`,
+          Accept: "application/json, text/event-stream",
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(body),
+        },
+      },
+      (res) => {
+        let data = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => {
+          data += chunk;
+        });
+        res.on("end", () =>
+          resolve({ status: res.statusCode ?? 0, body: data }),
+        );
+      },
+    );
+    req.on("error", reject);
+    req.end(body);
+  });
+}
+
 describe("transport", () => {
   test("only /mcp is served, and only on loopback", async () => {
     const response = await fetch(server.url.replace("/mcp", "/other"), {
@@ -324,6 +433,49 @@ describe("transport", () => {
     });
     expect(response.status).toBe(404);
     expect(server.host).toBe("127.0.0.1");
+  });
+
+  test("a foreign Host header is rejected and the tool does not run", async () => {
+    const body = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: {
+        name: "ack_events",
+        arguments: { card_id: card_id, up_to_seq: 3 },
+      },
+    });
+
+    const rejected = await postWithHost(
+      server.url,
+      "evil.example",
+      fixture.token,
+      body,
+    );
+    // The transport answers 403 for a Host header it does not allow.
+    expect(rejected.status).toBe(403);
+    expect(rejected.body).toMatch(/host/i);
+
+    // The request never reached a tool: no cursor row, no tool log entry.
+    const cursors = fixture.store.database
+      .prepare("SELECT COUNT(*) AS n FROM cursors")
+      .get();
+    expect(Number(cursors?.n)).toBe(0);
+    expect(entries.some((entry) => entry.event === "tool")).toBe(false);
+
+    // The same call with the loopback Host works, proving the rejection was
+    // the Host check and not the tool itself.
+    const accepted = await postWithHost(
+      server.url,
+      `127.0.0.1:${server.port}`,
+      fixture.token,
+      body,
+    );
+    expect(accepted.status).toBe(200);
+    const after = fixture.store.database
+      .prepare("SELECT COUNT(*) AS n FROM cursors")
+      .get();
+    expect(Number(after?.n)).toBe(1);
   });
 
   test("GET on /mcp is rejected in stateless mode", async () => {

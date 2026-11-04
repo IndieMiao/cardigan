@@ -4,16 +4,16 @@ import {
   type ServerResponse,
 } from "node:http";
 import type { AddressInfo } from "node:net";
-import type { Store } from "@cardigan/store";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { authenticate, bearerToken, type Identity } from "./auth.js";
+import type { McpBackend } from "./backend.js";
 import { type Logger, stdoutLogger } from "./log.js";
 import { createMcpServer } from "./tool-server.js";
 import { readOnlyTools } from "./tools/index.js";
 import type { ToolDefinition } from "./tools/types.js";
 
 export interface McpServerOptions {
-  readonly store: Store;
+  readonly store: McpBackend;
   /** Loopback only; M1 never binds a public interface (§9.1, §14). */
   readonly host?: string;
   /** `0` picks a free port (tests). */
