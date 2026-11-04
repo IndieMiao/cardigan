@@ -74,6 +74,9 @@ importers:
       '@cardigan/store':
         specifier: workspace:*
         version: link:../../packages/store
+      yaml:
+        specifier: ^2.9.1
+        version: 2.9.1
     devDependencies:
       '@cardigan/cli':
         specifier: workspace:*

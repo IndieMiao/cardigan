@@ -1,7 +1,9 @@
 import { stdoutLogger } from "@cardigan/mcp-server";
-import type { ServerEnv } from "./config.js";
+import { Store } from "@cardigan/store";
+import { resolveServerConfig, type ServerEnv } from "./config.js";
+import { createHostWiring } from "./host.js";
 import { installShutdownHandlers } from "./lifecycle.js";
-import { startCardiganServer } from "./server.js";
+import { type CardiganServer, startCardiganServer } from "./server.js";
 
 export interface RunServerOptions {
   readonly env?: ServerEnv;
@@ -20,7 +22,43 @@ export async function runServer(
   const env = options.env ?? process.env;
   const write =
     options.log ?? ((line: string) => process.stdout.write(`${line}\n`));
-  const server = await startCardiganServer({ env, log: stdoutLogger });
+  const config = resolveServerConfig(env);
+  // One Store for the endpoint, the router and the dispatcher: they share the
+  // same write lock and see each other's commits immediately.
+  const store = Store.open({ dataDir: config.dataDir });
+  let server: CardiganServer;
+  try {
+    const host = await createHostWiring({
+      env,
+      store,
+      dataDir: config.dataDir,
+      ...(config.execution === undefined
+        ? {}
+        : { execution: config.execution }),
+    });
+    server = await startCardiganServer({
+      config,
+      env,
+      store,
+      log: stdoutLogger,
+      dispatcher: {
+        runtime: host.runtime,
+        snapshot: host.snapshot,
+        startRun: host.startRun,
+        standing: host.standing,
+        onError: (error) =>
+          write(
+            JSON.stringify({
+              dispatch_error:
+                error instanceof Error ? error.message : String(error),
+            }),
+          ),
+      },
+    });
+  } catch (error) {
+    store.close();
+    throw error;
+  }
 
   write(JSON.stringify({ ready: true, url: server.url }));
 
@@ -28,9 +66,13 @@ export async function runServer(
     installShutdownHandlers(process, (signal) => {
       write(JSON.stringify({ shutting_down: signal }));
       void server.close().then(
-        () => resolve(0),
+        () => {
+          store.close();
+          resolve(0);
+        },
         (error: unknown) => {
           write(JSON.stringify({ shutdown_failed: String(error) }));
+          store.close();
           resolve(1);
         },
       );
