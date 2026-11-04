@@ -11,6 +11,11 @@ import {
 } from "@cardigan/runtime-herdr";
 import { Store } from "@cardigan/store";
 import {
+  type ControlPlane,
+  type ControlPlaneOptions,
+  startControlPlane,
+} from "./assembly.js";
+import {
   resolveServerConfig,
   type ServerConfig,
   type ServerEnv,
@@ -23,6 +28,11 @@ export interface StartServerOptions {
   readonly store?: Store;
   readonly log?: Logger;
   readonly warn?: (message: string) => void;
+  /**
+   * M3.5: the Dispatcher and RuntimeMonitor loops. Omitted in tests that only
+   * need the MCP endpoint; `runServer` always provides it.
+   */
+  readonly dispatcher?: Omit<ControlPlaneOptions, "store">;
 }
 
 export interface CardiganServer {
@@ -77,12 +87,31 @@ export async function startCardiganServer(
     throw error;
   }
 
+  // The control plane runs beside the endpoint; a failure here closes the
+  // endpoint again instead of leaving a half-started server.
+  let plane: ControlPlane | undefined;
+  if (options.dispatcher !== undefined) {
+    try {
+      plane = startControlPlane({
+        ...options.dispatcher,
+        store,
+      });
+    } catch (error) {
+      await mcp.close();
+      if (ownsStore) store.close();
+      throw error;
+    }
+  }
+
   return {
     url: mcp.url,
     host: mcp.host,
     port: mcp.port,
     store,
     close: async () => {
+      // Order matters: stop scheduling and drain the current delivery first,
+      // then stop accepting tool calls, then close the database.
+      await plane?.stop();
       await mcp.close();
       if (ownsStore) {
         store.close();
