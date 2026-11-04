@@ -581,6 +581,8 @@ M3.4 重发策略：首次成功投递之外最多再重发 4 次，等待间隔
 
 MCP 看门狗只观察 running Run，按本次 started_at 与 Assignment 最近任意 MCP 调用时间的较晚者计算，默认 15 分钟（inactivityGraceMs 可配置）；超时产生 needs_attention 通知并交 PM Ops，每个 Run 用持久事件去重，不改变 Run 的业务结果。PM Ops 自身的投递失败、重发用尽或活跃度告警转交 Needs You，并给 PM Office 一条简短提示；PM Office 自身失败只进入 Needs You，避免两边循环升级。
 
+M3.4 主机循环通过 startDispatchLoop 启动：默认每轮结束后等待 1 秒，串行执行 reconcile → Dispatcher.tick → reconcile，不堆积并发 tick。失败通过必填 onError 回调报告，下个间隔再试；回调抛出则停止并清理订阅。stop() 幂等，也可由 AbortSignal 触发：先停止调度和清除等待计时器，再等待本轮外部投递及意图结算，最后停止运行时订阅；done 返回相同的完成结果。M3.5 将它接到 server 的 SIGTERM／关闭流程，必须先 await stop() 再关闭 Store 等主机资源；本接口不注册全局信号、不关闭 Agent 终端。
+
 ### 6.2 门铃格式
 
 ```

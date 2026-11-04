@@ -51,6 +51,11 @@ export {
   type StandingResolver,
 } from "./dispatch-inbox.js";
 export {
+  type DispatchLoop,
+  type DispatchLoopOptions,
+  startDispatchLoop,
+} from "./dispatch-loop.js";
+export {
   type RuntimeEventSource,
   RuntimeMonitor,
   type RuntimeMonitorOptions,
