@@ -116,9 +116,17 @@ test("delivery intent survives reopening and excludes a competing sender for the
       expect(unfinishedBellAttempts(other.database, project_id)).toEqual([
         { ...intent, finished_at: null, outcome: null },
       ]);
+      const second = other.recordNotification({
+        ...input,
+        recipient: { kind: "pm_ops" },
+      }).notification;
       expect(() =>
         other.uow.run(() =>
-          beginBellAttempt(other.database, { ...intent, id: "attempt-2" }),
+          beginBellAttempt(other.database, {
+            ...intent,
+            id: "attempt-2",
+            notification_ids: [second.id],
+          }),
         ),
       ).toThrow(/UNIQUE/);
       expect(
@@ -189,5 +197,59 @@ test("invalid claims are rejected before any receipt is persisted", () => {
       store.uow.run(() => beginBellAttempt(store.database, claim(n.id))),
     ).toThrow(/deliverable/);
     expect(unfinishedBellAttempts(store.database, project_id)).toEqual([]);
+  });
+});
+
+test("a logical PM notification cannot be claimed by another Assignment while delivery is in flight", () => {
+  withTempStore((store) => {
+    const fact = append(store);
+    store.uow.run((tx) => {
+      for (const suffix of [1, 2]) {
+        const assignment_id = `A-${suffix}` as Run["assignment_id"];
+        tx.assignments.put(project_id, {
+          id: assignment_id,
+          scope: "standing",
+          role_id: "pm",
+          role_version: 1,
+          status: "active",
+          runtime_state: "not_provisioned",
+          machine_id: "local",
+          runtime_ref: null,
+          mcp_token_id: `fixture-${suffix}`,
+          created_at: at,
+        });
+        tx.runs.put(project_id, {
+          id: `R-${suffix}` as Run["id"],
+          assignment_id,
+          trigger_event_id: fact.id,
+          kind: "followup",
+          status: "queued",
+          role_version: 1,
+          model: "fixture",
+          agent_cli_version: "fixture",
+          outcome: null,
+          summary: "",
+        });
+      }
+    });
+    const note = store.recordNotification({
+      project_id,
+      event_id: fact.id,
+      seq: fact.seq,
+      recipient: { kind: "pm_ops" },
+      kind: "escalation",
+      at,
+    }).notification;
+    store.uow.run(() => beginBellAttempt(store.database, claim(note.id)));
+    expect(() =>
+      store.uow.run(() =>
+        beginBellAttempt(store.database, {
+          ...claim(note.id),
+          id: "attempt-other-owner",
+          assignment_id: "A-2" as Run["assignment_id"],
+          run_id: "R-2" as Run["id"],
+        }),
+      ),
+    ).toThrow(/already in flight/);
   });
 });

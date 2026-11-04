@@ -56,9 +56,15 @@ importers:
 
   apps/server:
     dependencies:
+      '@cardigan/domain':
+        specifier: workspace:*
+        version: link:../../packages/domain
       '@cardigan/mcp-server':
         specifier: workspace:*
         version: link:../../packages/mcp-server
+      '@cardigan/router':
+        specifier: workspace:*
+        version: link:../../packages/router
       '@cardigan/runtime-herdr':
         specifier: workspace:*
         version: link:../../packages/runtime-herdr
@@ -69,9 +75,6 @@ importers:
       '@cardigan/cli':
         specifier: workspace:*
         version: link:../cli
-      '@cardigan/domain':
-        specifier: workspace:*
-        version: link:../../packages/domain
       '@modelcontextprotocol/sdk':
         specifier: 1.32.2
         version: 1.32.2(zod@4.6.7)

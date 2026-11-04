@@ -43,5 +43,11 @@ export {
   type ServerConfig,
   type ServerEnv,
 } from "./config.js";
+export {
+  acknowledgeInbox,
+  routeProjectEvents,
+  routeStreamEvents,
+  type StandingResolver,
+} from "./dispatch-inbox.js";
 export { installShutdownHandlers, SHUTDOWN_SIGNALS } from "./lifecycle.js";
 export { type CardiganServer, startCardiganServer } from "./server.js";

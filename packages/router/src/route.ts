@@ -9,6 +9,10 @@ import type {
   WorkItemId,
 } from "@cardigan/domain";
 import {
+  developmentCardTemplate,
+  PM_ACCEPTANCE_WORK_ITEM_KEY,
+} from "@cardigan/domain";
+import {
   payloadString,
   payloadStrings,
   type Recipient,
@@ -30,7 +34,10 @@ import {
  * "everyone on the card" — and never notify the author about its own action.
  */
 
-const DONE_WORK_ITEM_STATUSES: readonly string[] = ["verifiers_passed", "done"];
+const succeeded = (item: WorkItem) =>
+  item.kind === "produce"
+    ? item.status === "accepted"
+    : item.status === "passed";
 
 const isActive = (assignment: Assignment): boolean =>
   assignment.status === "active";
@@ -376,22 +383,20 @@ function routeDelivery(input: RouteInput, draft: Draft): void {
   );
 }
 
-/** §6.4: a completion request goes to the template's reviewer (default pm). */
+/** §6.4: notify this completion delivery's explicitly requested verifiers. */
 function routeCompletionRequest(
   input: RouteInput,
   draft: Draft,
   delivery_id: string,
 ): void {
-  const reviewers = input.snapshot.completion_reviewer_roles ?? [
-    "pm" as RoleId,
-  ];
-  const item = input.snapshot.work_items.find(
-    (candidate) =>
-      candidate.card_id === input.event.card_id &&
-      candidate.kind === "verify" &&
-      reviewers.includes(candidate.role_id),
+  const delivery = input.snapshot.deliveries.find((d) => d.id === delivery_id);
+  const items = input.snapshot.work_items.filter(
+    (item) =>
+      item.card_id === input.event.card_id &&
+      item.kind === "verify" &&
+      delivery?.requested_verifiers.includes(item.id),
   );
-  if (item === undefined) {
+  if (items.length === 0) {
     note(
       input,
       draft,
@@ -402,14 +407,15 @@ function routeCompletionRequest(
     );
     return;
   }
-  noteAssignment(
-    input,
-    draft,
-    item,
-    "completion",
-    "6.4/completion request",
-    `completion request ${delivery_id} is waiting for ${item.id}`,
-  );
+  for (const item of items)
+    noteAssignment(
+      input,
+      draft,
+      item,
+      "completion",
+      "6.4/completion request",
+      `completion request ${delivery_id} is waiting for ${item.id}`,
+    );
 }
 
 /** §6.4: a passed review wakes nobody; it only advances derived checks. */
@@ -429,15 +435,27 @@ function routeReview(input: RouteInput, draft: Draft): void {
     // §6.4: all required work items passed → remind the producer to apply for
     // completion; the card is not closed automatically.
     const card_id = input.event.card_id;
+    if (
+      input.snapshot.cards.some(
+        (c) => c.id === card_id && ["done", "cancelled"].includes(c.status),
+      )
+    )
+      return;
     const items = input.snapshot.work_items.filter(
       (item) => item.card_id === card_id,
     );
-    const required = items.filter((item) => item.required);
-    const allPassed =
-      required.length > 0 &&
-      required.every((item) => DONE_WORK_ITEM_STATUSES.includes(item.status));
+    const required = items.filter(
+      (item) =>
+        item.required && item.template_key !== PM_ACCEPTANCE_WORK_ITEM_KEY,
+    );
+    const allPassed = required.length > 0 && required.every(succeeded);
     if (!allPassed) return;
-    const producer = items.find((item) => item.kind === "produce") ?? items[0];
+    const producer =
+      items.find(
+        (item) =>
+          item.kind === "produce" &&
+          item.template_key === developmentCardTemplate.primary_work_item_key,
+      ) ?? items.find((item) => item.kind === "produce");
     if (producer === undefined) return;
     noteAssignment(
       input,
@@ -558,7 +576,7 @@ function routeDecisionResolved(input: RouteInput, draft: Draft): void {
 function routeWorkItemUpdate(input: RouteInput, draft: Draft): void {
   const item_id = payloadString(input.event.payload, "work_item_id");
   const item = itemOf(input, item_id as WorkItemId | undefined);
-  if (item === undefined || !DONE_WORK_ITEM_STATUSES.includes(item.status)) {
+  if (item === undefined || !succeeded(item)) {
     return;
   }
   const downstream = input.snapshot.work_items.filter((candidate) =>

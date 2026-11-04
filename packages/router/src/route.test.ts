@@ -142,11 +142,11 @@ test("§6.4 all required work items passed reminds the producer, without closing
       deliveries: [delivery("D-1")],
       reviews: [review("pass")],
       work_items: [
-        workItem("W-1", { status: "verifiers_passed", assignment_id: "A-1" }),
+        workItem("W-1", { status: "accepted", assignment_id: "A-1" }),
         workItem("W-2", {
           kind: "verify",
           role_id: "reviewer",
-          status: "done",
+          status: "passed",
           assignment_id: "A-2",
         }),
       ],
@@ -206,7 +206,7 @@ test("§6.4 dependency completed notifies the downstream Assignment", () => {
     event: event("work_item_updated", { work_item_id: "W-1" }),
     snapshot: snapshot({
       work_items: [
-        workItem("W-1", { status: "done" }),
+        workItem("W-1", { status: "accepted" }),
         workItem("W-2", {
           kind: "verify",
           role_id: "reviewer",
@@ -226,7 +226,7 @@ test("§6.4 dependency completed with no downstream Assignment goes to PM Ops", 
     event: event("work_item_updated", { work_item_id: "W-1" }),
     snapshot: snapshot({
       work_items: [
-        workItem("W-1", { status: "done" }),
+        workItem("W-1", { status: "accepted" }),
         workItem("W-3", {
           kind: "verify",
           role_id: "reviewer",
@@ -253,7 +253,7 @@ test("§6.4 completion request notifies the card template's reviewer", () => {
         }),
       ],
       work_items: [
-        workItem("W-1", { status: "delivery_submitted" }),
+        workItem("W-1", { status: "delivered" }),
         workItem("W-2", {
           kind: "verify",
           role_id: "pm",
@@ -455,4 +455,74 @@ test("§7.2 delivery rejected twice escalates to PM Ops for re-planning", () => 
   });
   expect(rules(result)).toContain("7.2/delivery rejected twice");
   expect(recipients(result)).toContain("pm_ops");
+});
+
+test("M3.4 completion routing uses requested verifiers rather than the first PM item", () => {
+  const result = routeEvent({
+    event: event("delivery_submitted", { delivery_id: "D-1" }),
+    snapshot: snapshot({
+      deliveries: [
+        delivery("D-1", {
+          kind: "card_completion",
+          requested_verifiers: ["W-4"],
+        }),
+      ],
+      work_items: [
+        workItem("W-3", {
+          kind: "verify",
+          role_id: "pm",
+          assignment_id: "A-3",
+        }),
+        workItem("W-4", {
+          kind: "verify",
+          role_id: "pm",
+          assignment_id: "A-4",
+        }),
+      ],
+      assignments: [
+        assignment("A-3", { role_id: "pm", work_item_id: "W-3" }),
+        assignment("A-4", { role_id: "pm", work_item_id: "W-4" }),
+      ],
+    }),
+  });
+  expect(recipients(result)).toEqual(["assignment:A-4"]);
+});
+test("M3.4 real success states remind the primary producer without waiting for its completion approval", () => {
+  const state = snapshot({
+    work_items: [
+      workItem("W-8", {
+        status: "accepted",
+        assignment_id: "A-2",
+        required: false,
+      }),
+      workItem("W-1", {
+        status: "accepted",
+        assignment_id: "A-1",
+        template_key: "development",
+      }),
+      workItem("W-2", { kind: "verify", status: "passed" }),
+      workItem("W-3", {
+        kind: "verify",
+        role_id: "pm",
+        status: "todo",
+        template_key: "pm_acceptance",
+      }),
+    ],
+  });
+  const input = {
+    event: event("review_submitted", { verdict: "pass", delivery_id: "D-1" }),
+    snapshot: state,
+  };
+  expect(recipients(routeEvent(input))).toEqual(["assignment:A-1"]);
+  expect(
+    recipients(
+      routeEvent({
+        ...input,
+        snapshot: {
+          ...state,
+          cards: state.cards.map((c) => ({ ...c, status: "done" })),
+        },
+      }),
+    ),
+  ).toEqual([]);
 });

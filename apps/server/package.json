@@ -15,11 +15,12 @@
   "dependencies": {
     "@cardigan/runtime-herdr": "workspace:*",
     "@cardigan/mcp-server": "workspace:*",
-    "@cardigan/store": "workspace:*"
+    "@cardigan/store": "workspace:*",
+    "@cardigan/domain": "workspace:*",
+    "@cardigan/router": "workspace:*"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "1.32.2",
-    "@cardigan/cli": "workspace:*",
-    "@cardigan/domain": "workspace:*"
+    "@cardigan/cli": "workspace:*"
   }
 }
