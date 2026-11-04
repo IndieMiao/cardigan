@@ -16,6 +16,7 @@ export * from "./commands/runtime.js";
 export * from "./derived.js";
 export * from "./entities.js";
 export * from "./errors.js";
+export * from "./git-port.js";
 export * from "./ids.js";
 export * from "./ports.js";
 export * from "./role.js";
