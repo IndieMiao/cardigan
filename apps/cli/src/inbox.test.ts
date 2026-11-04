@@ -1,0 +1,185 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { moveNotification, recordNotification, Store } from "@cardigan/store";
+import { afterEach, beforeEach, expect, test } from "vitest";
+import { attentionCommand, inboxCommand } from "./inbox.js";
+import type { CliIo } from "./io.js";
+
+/** M3.5 read-only views over the inbox and the escalations. */
+
+let dataDir: string;
+let store: Store;
+let output: string[];
+let io: CliIo;
+const project = "p-inbox";
+
+const coder = {
+  id: "A-1",
+  scope: "work_item",
+  work_item_id: "W-1",
+  role_id: "coder",
+  role_version: 1,
+  status: "active",
+  runtime_state: "running",
+  machine_id: "local",
+  runtime_ref: {
+    machine_id: "local",
+    runtime_machine: "local",
+    terminal_ref: "t1",
+    agent_name: "coder-1",
+  },
+  mcp_token_id: "fixture",
+  created_at: "2030-01-01T00:00:00.000Z",
+};
+
+const card = {
+  id: "C-1",
+  project_id: project,
+  title: "Routing card",
+  template: "dev",
+  status: "in_progress",
+};
+
+function seed(): void {
+  store.createProject({ id: project as never, name: "Inbox" });
+  store.uow.run((tx) => {
+    tx.cards.put(project as never, card as never);
+    tx.assignments.put(project as never, coder as never);
+    // Each notification needs its own event: (event, recipient) is unique.
+    for (let seq = 1; seq <= 6; seq += 1)
+      tx.events.append(
+        project as never,
+        {
+          id: `01J0000000000000000000000${seq}`,
+          card_id: "C-1",
+          seq,
+          type: "comment_posted",
+          actor: { kind: "human", project_id: project },
+          payload: { body: "hi" },
+          created_at: "2030-01-01T00:00:00.000Z",
+        } as never,
+      );
+  });
+}
+
+let nextSeq = 1;
+const note = (
+  status: "pending" | "belled" | "needs_attention" | "delivery_failed",
+  recipient: never = {
+    kind: "assignment",
+    assignment_id: coder.id,
+  } as never,
+) => {
+  const seq = nextSeq++;
+  const created = recordNotification(store.database, {
+    project_id: project as never,
+    event_id: `01J0000000000000000000000${seq}` as never,
+    card_id: "C-1" as never,
+    seq,
+    kind: "comment",
+    recipient,
+    at: "2030-01-01T00:00:00.000Z",
+  }).notification;
+  if (status === "pending") return created;
+  const event =
+    status === "belled"
+      ? "bell"
+      : status === "delivery_failed"
+        ? "deliver_failed"
+        : "needs_attention";
+  return moveNotification(store.database, {
+    project_id: project as never,
+    id: created.id,
+    event,
+    at: "2030-01-01T00:00:00.000Z",
+  });
+};
+
+beforeEach(() => {
+  dataDir = mkdtempSync(join(tmpdir(), "cardigan-inbox-"));
+  store = Store.open({ dataDir });
+  output = [];
+  io = {
+    env: { CARDIGAN_DATA_DIR: dataDir },
+    cwd: dataDir,
+    platform: "linux",
+    stdout: (line) => output.push(line),
+    stderr: (line) => output.push(line),
+    signals: { on: () => undefined, off: () => undefined },
+    spawnInherit: () => {
+      throw new Error("read-only commands must not spawn");
+    },
+    captureCommand: async () => ({ code: 1, stdout: "", stderr: "" }),
+  };
+  seed();
+  nextSeq = 1;
+});
+
+afterEach(() => {
+  store.close();
+  rmSync(dataDir, { recursive: true, force: true });
+});
+
+const printed = () => output.join("\n");
+
+test("inbox lists pending, belled and failed notifications grouped by recipient", () => {
+  note("pending");
+  note("belled");
+  note("delivery_failed", { kind: "pm_ops" } as never);
+  // Answered and escalated rows are not "to deliver".
+  note("needs_attention");
+
+  expect(inboxCommand([], io)).toBe(0);
+  const text = printed();
+  expect(text).toContain(`assignment:${coder.id}（2）`);
+  expect(text).toContain("pm_ops（1）");
+  expect(text).toContain("pending");
+  expect(text).toContain("belled");
+  expect(text).toContain("delivery_failed");
+  expect(text).not.toContain("needs_attention");
+});
+
+test("inbox can be narrowed to one Assignment", () => {
+  note("pending");
+  note("pending", { kind: "pm_ops" } as never);
+
+  expect(inboxCommand(["--assignment", coder.id], io)).toBe(0);
+  expect(printed()).toContain(`assignment:${coder.id}`);
+  expect(printed()).not.toContain("pm_ops");
+});
+
+test("inbox says so when nothing is waiting", () => {
+  expect(inboxCommand([], io)).toBe(0);
+  expect(printed()).toContain("收件箱是空的");
+});
+
+test("attention lists escalated notifications and lost Assignments", () => {
+  note("needs_attention");
+  note("delivery_failed", { kind: "pm_ops" } as never);
+  store.uow.run((tx) =>
+    tx.assignments.put(
+      project as never,
+      { ...coder, id: "A-9", runtime_state: "lost" } as never,
+    ),
+  );
+
+  expect(attentionCommand([], io)).toBe(0);
+  const text = printed();
+  expect(text).toContain("升级通知（2）");
+  expect(text).toContain("needs_attention");
+  expect(text).toContain("delivery_failed");
+  expect(text).toContain("失联 / 状态未知的 Assignment（1）");
+  expect(text).toContain("A-9");
+});
+
+test("attention is quiet when everything is healthy", () => {
+  note("pending");
+  expect(attentionCommand([], io)).toBe(0);
+  expect(printed()).toContain("没有需要关注的项");
+});
+
+test("an unknown flag is a usage error", () => {
+  // `main` turns the CliError into exit code 2.
+  expect(() => inboxCommand(["--nope", "x"], io)).toThrow(/不认识的参数/);
+});
