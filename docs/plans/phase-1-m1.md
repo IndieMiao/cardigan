@@ -1,6 +1,7 @@
 # Phase 1 · M1 任务计划：领域模型、事件存储、Card MCP
 
-- 版本：v2（2026-11-04）：新增 M1.8（提前做的 `cardigan launch`）
+- 版本：v3（2026-11-04）：调整分工，M1.5 改由 Pi 做
+- v2（2026-11-04）：新增 M1.8（提前做的 `cardigan launch`）
 - v1（2026-11-04）
 - 对应：开发方案 v0.6 §16 Phase 1 M1
 - M1 的验收（开发方案 §16）：状态机和不变量的单元测试；MCP 契约测试；伪造身份、非法状态迁移会被拒绝。
@@ -14,12 +15,12 @@
 | M1.2 | domain：状态机与派生计算 | Codex | Pi（M1.T1） | M1.1 | `feat/m1-domain-states` |
 | M1.3 | domain：命令与不变量 | Codex | Pi（M1.T1） | M1.2 | `feat/m1-domain-commands` |
 | M1.4 | store：SQLite、迁移、事件存储、游标、幂等 | Pi | Codex（M1.T2） | M1.1 | `feat/m1-store` |
-| M1.5 | mcp-server：传输、认证、只读工具 | Codex | Pi（M1.T3） | M1.3、M1.4 | `feat/m1-mcp-core` |
-| M1.6 | mcp-server：写入类工具 | Codex | Pi（M1.T3） | M1.5 | `feat/m1-mcp-tools` |
+| M1.5 | mcp-server：传输、认证、只读工具 | Pi | Codex（M1.T3） | M1.2、M1.4 | `feat/m1-mcp-core` |
+| M1.6 | mcp-server：写入类工具 | Codex | Codex 不能验收自己的实现，由 Pi 补充 M1.T3 中写入类工具的用例 | M1.3、M1.5 | `feat/m1-mcp-tools` |
 | M1.7 | apps/server、apps/cli 组装，端到端流程 | Pi | Codex 审读 | M1.6 | `feat/m1-server-cli` |
 | M1.T1 | domain 契约测试（§4.4、§4.5） | Pi | — | M1.3 | `test/m1-domain-contract` |
 | M1.T2 | store 验收测试 | Codex | — | M1.4 | `test/m1-store` |
-| M1.T3 | MCP 契约测试 | Pi | — | M1.6 | `test/m1-mcp-contract` |
+| M1.T3 | MCP 契约测试 | Codex（M1.5 部分）、Pi（M1.6 部分） | — | M1.6 | `test/m1-mcp-contract` |
 | M1.8 | 接入点、启动配置和 `cardigan launch`（提前做） | Pi | Claude 审核 | 无 | `feat/m1-launch` |
 
 建议顺序：
@@ -32,6 +33,8 @@ M1.1 ──┬─ M1.2 ─ M1.3 ─┬─ M1.T1（Pi）
 ```
 
 M1.2 和 M1.4 可以并行：Codex 做 M1.2，Pi 做 M1.4。
+
+分工调整（v3，2026-11-04）：M1.4 合并后 Pi 会空闲，所以 M1.5 改由 Pi 做，依赖从 M1.3 放宽到 M1.2（只读工具不需要 M1.3 的命令），`heartbeat` 挪到 M1.6。M1.T3 按"实现和验收测试由不同模型完成"拆开：M1.5 的契约测试由 Codex 写，M1.6 的由 Pi 写。
 
 M1.8 不依赖其他任务，用户要求提前做：Pi 在 Codex 做 M1.1 时先做 M1.8，做完再接 M1.4。
 
@@ -161,21 +164,21 @@ domain 只提供纯函数：输入"当前状态 + 调用者身份 + 参数"，�
 
 验收：从空库迁移成功、重复执行不出错；事务中途失败时没有任何写入残留；同一张卡片连续写入时 `seq` 连续且不重复；游标不能后退；幂等的三种情况（首次、相同重放、冲突）都有测试。
 
-### M1.5 mcp-server：传输、认证、只读工具（Codex）
+### M1.5 mcp-server：传输、认证、只读工具（Pi）
 
 范围：
 
 - 无状态的 Streamable HTTP 端点 `/mcp`，只监听 `127.0.0.1`，开启 DNS 重绑定防护；可以参考 `spikes/0.4-mcp/server.ts`。
 - Bearer Token 认证：用常量时间比较；缺少或错误时返回 401；Token 已作废时同样返回 401。认证通过后得到 `Actor`（`assignment_id`、角色、允许的工具）。
 - 按角色注册工具：不在 `allowed_tools` 里的工具，既不出现在工具列表里，调用时也返回 `forbidden_tool`。
-- 只读工具：`whoami`、`get_card`、`get_updates`、`ack_events`、`heartbeat`。
+- 只读工具：`whoami`、`get_card`、`get_updates`、`ack_events`。`get_card` 里的卡片状态等派生字段用 M1.2 的派生计算；`ack_events` 直接调用 store。
 - 日志里不记录 Token 和请求正文，只记方法、工具名、调用者和结果码。
 
 验收：缺少 Token、Token 错误、Token 已作废三种情况都返回 401；参数里自报的身份被忽略，`whoami` 只返回 Token 对应的身份；角色没有权限的工具调用不了。
 
 ### M1.6 mcp-server：写入类工具（Codex）
 
-范围：把 M1.3 的全部命令接成 MCP 工具，参数用 zod 描述；写入类工具都接受 `idempotency_key`；`upload_attachment` 第一版用 base64 传文件内容，单个文件不超过 10MB，内容写入 `AttachmentStore`。
+范围：把 M1.3 的全部命令（含 `heartbeat`）接成 MCP 工具，参数用 zod 描述；写入类工具都接受 `idempotency_key`；`upload_attachment` 第一版用 base64 传文件内容，单个文件不超过 10MB，内容写入 `AttachmentStore`。
 
 验收：每个工具至少一个正常调用测试；domain 的每类错误码都能从 MCP 层原样拿到；同一个 `idempotency_key` 重放不会产生第二个交付或第二条事件。
 
@@ -265,7 +268,7 @@ domain 只提供纯函数：输入"当前状态 + 调用者身份 + 参数"，�
 
 - **M1.T1（Pi）**：domain 的契约测试，覆盖 §4.4 每张迁移表和 M1 要覆盖的每条不变量。
 - **M1.T2（Codex）**：store 的验收测试，覆盖 M1.4 的全部验收项，另加并发写入下 `seq` 不重复。
-- **M1.T3（Pi）**：MCP 的契约测试，覆盖 M1.5 和 M1.6 的全部验收项，以及开发方案 §16 M1 的验收："伪造身份、非法状态迁移会被拒绝"。
+- **M1.T3**：MCP 的契约测试，覆盖 M1.5 和 M1.6 的全部验收项，以及开发方案 §16 M1 的验收："伪造身份、非法状态迁移会被拒绝"。M1.5 的部分由 Codex 写，M1.6 的部分由 Pi 写。
 
 ## 6. M1 完成的标准
 
