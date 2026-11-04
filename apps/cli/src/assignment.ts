@@ -24,8 +24,18 @@ import {
   SECRETS_FILE_NAME,
   TOKEN_FILE_NAME,
 } from "@cardigan/roles";
-import { HerdrRuntime } from "@cardigan/runtime-herdr";
+import {
+  type ExecutionConfig,
+  executionPaths,
+  HerdrRuntime,
+  prepareAgentProject,
+  resolveExecutionConfig,
+  scrubAgentLaunch,
+  secureDataDirectory,
+  writeAgentLaunch,
+} from "@cardigan/runtime-herdr";
 import { getRoleVersion, Store, writeRole } from "@cardigan/store";
+import { AgentGitTransport } from "./agent-git.js";
 import { loadConfig, loadSecrets } from "./config.js";
 import { CliError, EXIT } from "./errors.js";
 import {
@@ -108,13 +118,14 @@ export function runDirectory(input: {
   readonly project_id: ProjectId;
   readonly assignment_id: string;
   readonly worktreePath?: string;
+  readonly execution?: ExecutionConfig;
 }): RunDirectory {
-  const root = join(resolve(input.dataDir), "runs");
-  const runDir = join(
-    root,
+  const { runDir } = executionPaths(
+    input.execution ?? { mode: "local", dataDir: resolve(input.dataDir) },
     projectSegment(input.project_id),
     input.assignment_id,
   );
+  const root = dirname(dirname(runDir));
   return { root, runDir, workDir: input.worktreePath ?? runDir };
 }
 
@@ -137,6 +148,9 @@ export type WorktreeProvider = (
   request: WorktreeRequest,
 ) => Promise<PreparedWorktree | undefined>;
 
+export type LaunchRuntime = Runtime &
+  Partial<Pick<HerdrRuntime, "captureAgent">>;
+
 export interface StartOptions {
   readonly store: Store;
   readonly io: CliIo;
@@ -147,7 +161,7 @@ export interface StartOptions {
     readonly secrets: Readonly<Record<string, string>>;
   };
   readonly mcpUrl: string;
-  readonly runtime: Runtime;
+  readonly runtime: LaunchRuntime;
   readonly dataDir: string;
   readonly worktree?: WorktreeProvider;
 }
@@ -252,9 +266,93 @@ async function scrubRunDirectory(runDir: string): Promise<void> {
   }
 }
 
-/** Run the M2 plan §4 flow; throws `CliError` when a step fails. */
+interface StartProgress {
+  execution: ExecutionConfig;
+  step: string;
+  runId?: string;
+  tokenId?: string;
+  ref?: RuntimeRef;
+}
+const executionFor = (io: CliIo, dataDir: string) =>
+  resolveExecutionConfig({
+    ...io.env,
+    CARDIGAN_DATA_DIR: resolveDataDir(io, dataDir),
+  });
+async function agentCapture(
+  runtime: LaunchRuntime,
+  command: "git" | "claude" | "codex" | "pi",
+  args: readonly string[],
+) {
+  if (!runtime.captureAgent)
+    throw new CliError("agent-ssh 启动需要 Agent 执行入口", EXIT.failure);
+  const result = await runtime.captureAgent(command, args);
+  if (!result.ok)
+    throw new CliError(`Agent 命令失败：${result.error.code}`, EXIT.failure);
+  return result.value;
+}
+async function scrubExecution(
+  config: ExecutionConfig,
+  project: ProjectId,
+  assignment: string,
+) {
+  if (config.mode === "agent-ssh")
+    await scrubAgentLaunch(config, project, assignment);
+  else
+    await scrubRunDirectory(executionPaths(config, project, assignment).runDir);
+}
+/** Run the M2 plan §4 flow, compensating every step after a successful queue. */
 export async function startAssignment(
   options: StartOptions,
+): Promise<StartedAssignment> {
+  const progress: StartProgress = {
+    execution: executionFor(options.io, options.dataDir),
+    step: "preflight",
+  };
+  await secureDataDirectory(progress.execution);
+  try {
+    return await startAssignmentSteps(options, progress);
+  } catch (error) {
+    if (progress.runId) {
+      // Cleanup failures must not skip token revocation or Run cancellation.
+      if (progress.ref) {
+        try {
+          const released = await options.runtime.release(progress.ref, {
+            force: true,
+          });
+          if (!released.ok)
+            options.io.stderr(`终端回收失败：${released.error.code}`);
+        } catch {
+          options.io.stderr("终端回收失败，需要人工检查");
+        }
+      }
+      try {
+        await scrubExecution(
+          progress.execution,
+          options.project_id,
+          options.assignment_id,
+        );
+      } catch {
+        options.io.stderr("凭据文件清理失败，需要人工检查");
+      }
+      try {
+        if (progress.tokenId && !options.store.revokeToken(progress.tokenId))
+          options.io.stderr("Token 作废失败，需要人工检查");
+      } catch {
+        options.io.stderr("Token 作废失败，需要人工检查");
+      }
+      abort(
+        options.store,
+        options.project_id,
+        progress.runId,
+        `${progress.step} failed`,
+      );
+    }
+    throw error;
+  }
+}
+async function startAssignmentSteps(
+  options: StartOptions,
+  progress: StartProgress,
 ): Promise<StartedAssignment> {
   const { store, io, project_id } = options;
   const { assignment, role, card, workItem } = requireAssignment(
@@ -282,7 +380,13 @@ export async function startAssignment(
     );
   }
   const binary = role.harness === "claude-code" ? "claude" : role.harness;
-  const version = await cliVersion(io, binary);
+  const version =
+    progress.execution.mode === "local"
+      ? await cliVersion(io, binary)
+      : (await agentCapture(options.runtime, binary, ["--version"]))
+          .trim()
+          .split("\n")[0];
+  if (!version) throw new CliError("Agent CLI 没有返回版本", EXIT.usage);
   const run = runCommand(store, {
     project_id,
     actor: host(project_id),
@@ -299,7 +403,13 @@ export async function startAssignment(
       ),
   });
 
+  progress.runId = run.id;
+  progress.step = "directory preparation";
+  if (progress.execution.mode === "agent-ssh")
+    await prepareAgentProject(progress.execution, project_id, assignment.id);
+
   // 3. worktree (roles that do not need one skip it).
+  progress.step = "worktree preparation";
   let worktree: PreparedWorktree | undefined;
   if (role.worktree !== "none") {
     if (options.worktree === undefined) {
@@ -332,18 +442,21 @@ export async function startAssignment(
 
   const dirs = runDirectory({
     dataDir: options.dataDir,
+    execution: progress.execution,
     project_id,
     assignment_id: assignment.id,
     ...(worktree === undefined ? {} : { worktreePath: worktree.path }),
   });
 
   // 4. token + run directory.
+  progress.step = "launch compilation";
   const issued = store.uow.run((tx) =>
     issueTokenForAssignment(tx, project_id, assignment.id, {
       role_version: role.version,
       allowed_tools: role.allowed_tools,
     }),
   );
+  progress.tokenId = issued.record.id;
   const compiled = compileAssignmentLaunch({
     assignment: {
       assignment_id: assignment.id,
@@ -372,16 +485,19 @@ export async function startAssignment(
     }),
     secrets: options.launch.secrets,
   });
-  try {
-    await writeCompiledFiles(compiled, issued.token);
-  } catch (error) {
-    await scrubRunDirectory(dirs.runDir);
-    store.revokeToken(issued.record.id);
-    abort(store, project_id, run.id, "run directory could not be written");
-    throw error;
-  }
+  progress.step = "run directory write";
+  if (progress.execution.mode === "agent-ssh")
+    await writeAgentLaunch(
+      progress.execution,
+      project_id,
+      assignment.id,
+      compiled.files,
+      issued.token,
+    );
+  else await writeCompiledFiles(compiled, issued.token);
 
   // 5. provision the terminal.
+  progress.step = "runtime provision";
   const agentName = agentNameFor({
     role_id: role.role_id,
     project_id,
@@ -408,23 +524,16 @@ export async function startAssignment(
     launchDesc,
   );
   if (!provisioned.ok) {
-    // launch.sh never ran, so its token and secrets files are still on disk.
-    await scrubRunDirectory(dirs.runDir);
-    store.revokeToken(issued.record.id);
-    abort(
-      store,
-      project_id,
-      run.id,
-      `runtime provision failed: ${provisioned.error.code}`,
-    );
     throw new CliError(
       `启动终端失败：${provisioned.error.code} ${provisioned.error.message}`,
       EXIT.failure,
     );
   }
   const ref = provisioned.value;
+  progress.ref = ref;
 
   // 6. dispatch the Run with the runtime and worktree facts.
+  progress.step = "dispatch";
   // The worktree is the host's fact, not the runtime's: hand it to dispatch
   // through the ref so the assignment records path, branch and base SHA.
   const dispatchRef: RuntimeRef =
@@ -435,32 +544,21 @@ export async function startAssignment(
           worktree_path: worktree.path,
           ...(worktree.branch === undefined ? {} : { branch: worktree.branch }),
         };
-  try {
-    runCommand(store, {
-      project_id,
-      actor: host(project_id),
-      reduce: (state, actor, ports) =>
-        dispatchRun(
-          state,
-          actor,
-          {
-            run_id: run.id,
-            runtime_ref: dispatchRef,
-            ...(worktree === undefined ? {} : { base_sha: worktree.base_sha }),
-          },
-          ports,
-        ),
-    });
-  } catch (error) {
-    // §4 step 9: release the terminal first, because abortDispatch clears the
-    // assignment's runtime_ref.
-    await options.runtime.release(ref, { force: true });
-    // The terminal may have been killed before launch.sh read them.
-    await scrubRunDirectory(dirs.runDir);
-    store.revokeToken(issued.record.id);
-    abort(store, project_id, run.id, "dispatch failed");
-    throw error;
-  }
+  runCommand(store, {
+    project_id,
+    actor: host(project_id),
+    reduce: (state, actor, ports) =>
+      dispatchRun(
+        state,
+        actor,
+        {
+          run_id: run.id,
+          runtime_ref: dispatchRef,
+          ...(worktree === undefined ? {} : { base_sha: worktree.base_sha }),
+        },
+        ports,
+      ),
+  });
 
   const started = requireAssignment(
     store,
@@ -517,6 +615,7 @@ export async function stopAssignment(input: {
   readonly project_id: ProjectId;
   readonly assignment_id: Assignment["id"];
   readonly runtime: Runtime;
+  readonly execution?: ExecutionConfig;
 }): Promise<{ released: boolean; aborted: boolean }> {
   const { assignment } = requireAssignment(
     input.store,
@@ -560,6 +659,12 @@ export async function stopAssignment(input: {
   if (revoked.some((ok) => !ok)) {
     throw new CliError("作废 Token 失败", EXIT.failure);
   }
+  if (input.execution)
+    await scrubExecution(
+      input.execution,
+      input.project_id,
+      input.assignment_id,
+    );
   return { released: true, aborted: unfinished !== undefined };
 }
 
@@ -640,13 +745,15 @@ export async function runAssignmentCommand(
   io: CliIo,
 ): Promise<number> {
   const { sub, assignmentId, flags } = parseArgs(args);
-  const dataDir = flags["data-dir"] ?? io.env.CARDIGAN_DATA_DIR ?? ".data";
+  const dataDir = resolveDataDir(io, flags["data-dir"]);
+  const execution = executionFor(io, dataDir);
+  await secureDataDirectory(execution);
   const store = Store.open({ dataDir });
   try {
     const project_id = resolveProject(store, io, flags.project);
     const session =
       flags["hc-session"] ?? io.env.CARDIGAN_HC_SESSION ?? "cardigan";
-    const created = await HerdrRuntime.create({ session });
+    const created = await HerdrRuntime.create({ session, execution });
     if (!created.ok) {
       throw new CliError(
         `运行时不可用：${created.error.code} ${created.error.message}`,
@@ -661,6 +768,7 @@ export async function runAssignmentCommand(
         project_id,
         assignment_id: assignmentId,
         runtime,
+        execution,
       });
       io.stdout(
         `已释放 ${assignmentId} 的终端${result.aborted ? "，未结束的 Run 已取消" : ""}（worktree 保留）`,
@@ -697,7 +805,7 @@ export interface StartCommandOptions {
   readonly io: CliIo;
   readonly project_id: ProjectId;
   readonly assignment_id: Assignment["id"];
-  readonly runtime: Runtime;
+  readonly runtime: LaunchRuntime;
   readonly dataDir: string;
   readonly mcpUrl?: string;
 }
@@ -709,8 +817,17 @@ export async function startAssignmentCommand(
   const { store, io, project_id, assignment_id, runtime } = options;
   const paths = resolveLaunchPaths(io.env);
   const dataDir = resolveDataDir(io, options.dataDir);
-  const gitService = new GitWorktreeService(new LocalGitTransport(), {
+  const execution = executionFor(io, dataDir);
+  const locations = executionPaths(execution, project_id, assignment_id);
+  const transport =
+    execution.mode === "local"
+      ? new LocalGitTransport()
+      : new AgentGitTransport(execution, project_id, assignment_id, (args) =>
+          agentCapture(runtime, "git", args),
+        );
+  const gitService = new GitWorktreeService(transport, {
     dataDir,
+    ...locations,
   });
 
   const started = await startAssignment({
@@ -774,7 +891,11 @@ export type StartById = (options: StartByIdOptions) => Promise<number>;
 export async function startAssignmentById(
   options: StartByIdOptions,
 ): Promise<number> {
+  const dataDir = resolveDataDir(options.io, options.dataDir);
+  const execution = executionFor(options.io, dataDir);
+  await secureDataDirectory(execution);
   const created = await HerdrRuntime.create({
+    execution,
     session:
       options.session ?? options.io.env.CARDIGAN_HC_SESSION ?? "cardigan",
   });
@@ -787,6 +908,6 @@ export async function startAssignmentById(
   return await startAssignmentCommand({
     ...options,
     runtime: created.value,
-    dataDir: options.dataDir ?? options.io.env.CARDIGAN_DATA_DIR ?? ".data",
+    dataDir,
   });
 }

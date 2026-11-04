@@ -317,7 +317,8 @@ test("10 MiB passes through HTTP; oversized, malformed and checksum-mismatched c
     }),
   });
   expect(response.status).toBe(413);
-});
+  // Full-suite CPU load can exceed 5 seconds while encoding and checking 10 MiB bodies.
+}, 30_000);
 
 test("late transaction failure retains blobs, rolls back all DB writes, and can be retried", async () => {
   const shared = await ok<Attachment>(coder, "upload_attachment", upload);
