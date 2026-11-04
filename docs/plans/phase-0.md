@@ -1,6 +1,7 @@
 # Phase 0 任务计划
 
-- 版本：v1（2026-10-27）
+- 版本：v2（2026-11-04）：0.3 增加 Herdr 换代评估和 D9
+- 原版本：v1（2026-10-27）
 - 对应：开发方案 v0.5 §16 Phase 0
 - 目标：先在现有实践里验证"PM 前后台 + 结构化条目"这套模式；把 Herdr、MCP、Git 三个外部依赖的实际表现查清楚；敲定剩余决策（D3–D8）；搭好代码骨架。Phase 0 结束后，Phase 1 M1 可以直接开工。
 
@@ -10,11 +11,11 @@
 |---|---|---|---|---|---|
 | 0.1 | PM 拆成前台、后台（试行） | 你 + zhangliang | 看 0.2 的结论再决定是否试行 | 一周的打断记录 | 不涉及仓库 |
 | 0.2 | 回溯两个现有看板项目的卡片和时间线 | Claude | 你确认是哪两个项目 | `docs/research/0.2-board-retrospective.md` | `docs/p0-board-retrospective` |
-| 0.3 | Herdr 多机预研 | DeepSeek（Pi） | 你确认可以用那台已保存的远程机器 | `docs/research/0.3-herdr-machine.md` | `docs/p0-herdr-machine` |
+| 0.3 | Herdr 多机预研与运行时基线（含 herdr-core / herdr-app 换代评估，给出 D9 建议） | DeepSeek（Pi） | 你确认可以用那台已保存的远程机器，并且 SSH 已连通 | `docs/research/0.3-herdr-machine.md` | `docs/p0-herdr-machine` |
 | 0.4 | 各 Harness 接入 MCP 的预研 | Codex | 无 | `docs/research/0.4-mcp-harness.md` + `spikes/0.4-mcp/` | `docs/p0-mcp-harness` |
 | 0.5a | 评估 herdr-projects | DeepSeek（Pi） | 无 | `docs/research/0.5a-herdr-projects.md` | `docs/p0-herdr-projects` |
 | 0.5b | 主机发起的 Git 模型预研 | Codex | 无（本地部分）；SSH 部分同 0.3 | `docs/research/0.5b-git-model.md` + `spikes/0.5-git/` | `docs/p0-git-model` |
-| 0.6 | 敲定 D3–D8 | Claude 汇总，你拍板 | 0.3、0.4、0.5a、0.5b 已合并；你提供机器清单（D6） | 开发方案 v0.6 | `docs/p0-decisions` |
+| 0.6 | 敲定 D3–D9 | Claude 汇总，你拍板 | 0.3、0.4、0.5a、0.5b 已合并；你提供机器清单（D6） | 开发方案 v0.6 | `docs/p0-decisions` |
 | 0.7 | 代码骨架 | Codex | 无 | `package.json`、`packages/*`、`apps/*` 骨架 | `feat/p0-skeleton` |
 | 0.8 | 同类产品对比、名字收尾检查（非开发） | Claude | 无 | `docs/research/0.8-market-and-name.md` | `docs/p0-market-name` |
 
@@ -114,14 +115,27 @@
 - §4.3 中 Delivery、Review、Decision 的每个字段都有"实际用到 / 用不到 / 缺失"的结论；
 - 给出"是否值得试行 0.1"的明确建议。
 
-### 0.3 Herdr 多机预研（DeepSeek）
+### 0.3 Herdr 多机预研与运行时基线（DeepSeek）
 
-相关章节：开发方案 §6.8、§11、§13.9。
+相关章节：开发方案 §6.8、§11、§13.9；0.5a 报告第 1.2 节和第 10 节。
+
+背景（2026-11-04 补充）：Herdr 正在换代。官方新出了 `herdr-core` 和 `herdr-app`（0.1.x），0.5a 评估的 herdr-projects 已经迁移过去；而我们锁定的是 Herdr 0.9.3，0.9.x 的最新版是 0.9.5。所以 0.3 分两部分：A 部分评估换代，给出运行时基线的建议（新增决策 D9）；B 部分在 0.9.x 上做原定的多机验证。
 
 前置条件：
 
-- 你确认可以使用那台已保存的远程机器（下称 `worker-a`）。
+- 你确认可以使用那台已保存的远程机器（下称 `worker-a`），并且已经从 `local` 用 SSH 连通它。它的地址变过，SSH 配置和 Herdr 保存的机器需要先更新，由你来改。
 - 在 `local` 和 `worker-a` 上各准备一个临时 Git 仓库：`git init` 后提交一个文件即可，不要用真实项目。
+
+**不能动用户正在使用的 Herdr**：不升级、不替换、不重启用户的 Herdr 0.9.3，不操作用户已有的 session、workspace 和 pane。需要试用 herdr-core 或 herdr-app 时，只能装在临时目录、以独立进程运行，用完删除；做不到隔离就只读文档和源码。
+
+#### A 部分：换代评估（只读为主）
+
+1. 查清 `herdr-core`、`herdr-app` 是什么，和 Herdr 0.9.x 是什么关系：是后继、并行的两条产品线，还是底层拆分出来的组件？0.9.x 会不会停止维护，有没有迁移指南？列出版本节奏和许可证。
+2. 对照开发方案 §11.1 的运行时接口（provision、wake、status、interrupt、resume_or_replace、human_entry、release），逐项写出 Herdr 0.9.x 和 herdr-core / herdr-app 各用什么命令或 API 实现；不支持的写"不支持"。重点看：多机（`--machine` 的等价物）、建删 worktree、按门铃、等待、Agent 状态识别、以 socket 还是 RPC 访问。
+3. 0.9.3 到 0.9.5 之间有没有影响 §11 的改动。
+4. 如果能在临时目录隔离运行 herdr-core，就做一次最小的本机试用：启动、开一个终端、发一条 prompt、读回状态。
+
+#### B 部分：Herdr 0.9.x 多机验证
 
 步骤：
 
@@ -147,13 +161,18 @@
    - Agent 正在工作时连续发两次 prompt。
 4. 逐行核对开发方案 §11.2 的映射表和 §11.3 的已知限制：哪些成立，哪些需要改。
 
-产出：`docs/research/0.3-herdr-machine.md`。第一页是结论，包括：一张"命令 → 确切参数 → 关键输出字段"表，一张故障表现表，以及对 §11 的修改建议。
+产出：`docs/research/0.3-herdr-machine.md`。第一页是结论，包括：
+
+- D9 的建议：Cardigan 的运行时以哪一代为基线（Herdr 0.9.x，还是 herdr-core / herdr-app），理由，以及 Runtime Adapter 要怎样隔离才能以后平滑切换；
+- §11.1 接口在两代上的对照表；
+- B 部分的"命令 → 确切参数 → 关键输出字段"表和故障表现表；
+- 对 §11 的修改建议。
 
 验收：
 
-- 第 2 步表中每一行都有实测结果；
-- 第 3 步每种故障都有观察到的表现；
-- 预研创建的对象全部清理干净。
+- A 部分：§11.1 的每个接口在两代上都有结论（可以是"不支持"）；D9 的建议有明确理由；
+- B 部分：第 2 步表中每一行都有实测结果，第 3 步每种故障都有观察到的表现；
+- 用户的 Herdr 版本没变，用户已有的 session 没受影响；预研创建的对象全部清理干净。
 
 ### 0.4 各 Harness 接入 MCP 的预研（Codex）
 
@@ -226,13 +245,13 @@ OpenCode 本机没有安装，这次不测。等 D3 选定它时再补。
 - 两种错误的 SHA 都被拒绝；
 - 接管后能继续提交，并被 `hub` 拉取。
 
-### 0.6 敲定 D3–D8（Claude 汇总，你拍板）
+### 0.6 敲定 D3–D9（Claude 汇总，你拍板）
 
 前置条件：0.2、0.3、0.4、0.5a、0.5b 已合并；你提供机器清单（D6）：哪台常开做主机、哪台接测试真机，各自的系统和架构。
 
 步骤：
 
-1. Claude 根据预研结论，为 D3（每个角色的 Harness 和模型）、D4（Done 条件）、D5（Session 策略）、D7（core memo）、D8（herdr-projects）各给一条建议和理由。
+1. Claude 根据预研结论，为 D3（每个角色的 Harness 和模型）、D4（Done 条件）、D5（Session 策略）、D7（core memo）、D8（herdr-projects）、D9（运行时基线，依据 0.3）各给一条建议和理由。
 2. 你逐条拍板。
 3. Claude 更新开发方案：§15 全部标为已决定；按预研的修改建议修订 §4.3、§9.2、§11、§12；版本升到 v0.6。D8 如果决定 fork，另写 ADR。
 4. Claude 写 Phase 1 M1 的任务计划 `docs/plans/phase-1-m1.md`。
