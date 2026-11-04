@@ -1,6 +1,8 @@
 # Cardigan · 多 Agent 协作开发系统开发方案
 
-- 版本：v0.6.8（2026-11-04）
+- 版本：v0.6.9（2026-11-04）
+  - v0.6.9：§4.4 验证型工作项补上 `in_progress → blocked / waiting_decision` 和 `blocked → in_progress`（报阻塞、发起阻塞拍板、解除阻塞；`waiting_decision` 仍回到 `ready`）；M1.T1 审核时发现规格漏写，实现早已支持。
+  - v0.6.8（2026-11-04）
   - v0.6.8：M1.3 二轮审核：暂停自身工作项前复用交付/审核的启动校验；明确 delivered / accepted 的等待行为；新交付到达时检查累计审核预算，用尽则转上限拍板。
   - v0.6.7（2026-11-04）
   - v0.6.7：M1.3 审核修订：PM 受控解除普通阻塞；阻塞拍板包含请求者工作项；审核上限的暂停/放宽与恢复条件分离；四个 M1.5 只读工具由 mcp-server 单独维护。
@@ -432,6 +434,8 @@ ready --next review round exceeds limit--> waiting_decision
 in_progress / passed / failed --target redelivered--> ready
 ready / in_progress / failed / passed --target_withdrawn--> todo
 waiting_decision --decision resolved + review budget available + no other blocker--> ready
+in_progress --report_blocker / blocking request_decision--> blocked / waiting_decision
+blocked --resume--> in_progress
 todo / ready / in_progress / failed / blocked / waiting_decision --cancel--> cancelled
 ```
 
