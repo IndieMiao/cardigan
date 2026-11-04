@@ -1,12 +1,35 @@
 import type {
+  Assignment,
   AssignmentId,
+  Attachment,
+  AttachmentId,
+  Card,
   CardId,
+  Cursor,
+  Decision,
+  DecisionId,
+  Delivery,
+  DeliveryId,
   Event,
+  EventRepository,
+  HumanAction,
+  HumanActionId,
+  Machine,
+  MachineId,
   ProjectId,
+  Repository,
   Result,
+  Review,
+  ReviewId,
+  RoleReference,
+  Run,
+  RunId,
   TimelineEntry,
+  TimelineEntryId,
   ToolName,
   TransactionContext,
+  WorkItem,
+  WorkItemId,
 } from "@cardigan/domain";
 
 /**
@@ -36,6 +59,36 @@ export interface McpAckResult {
   readonly changed: boolean;
 }
 
+/** A repository as seen inside a read transaction: reads only. */
+export type McpReadRepository<Entity, Key> = Pick<
+  Repository<Entity, Key>,
+  "get" | "list"
+>;
+
+/** What a read transaction hands to its callback. */
+export interface McpReadContext {
+  readonly cards: McpReadRepository<Card, CardId>;
+  readonly work_items: McpReadRepository<WorkItem, WorkItemId>;
+  readonly assignments: McpReadRepository<Assignment, AssignmentId>;
+  readonly runs: McpReadRepository<Run, RunId>;
+  readonly timeline: McpReadRepository<TimelineEntry, TimelineEntryId>;
+  readonly deliveries: McpReadRepository<Delivery, DeliveryId>;
+  readonly reviews: McpReadRepository<Review, ReviewId>;
+  readonly decisions: McpReadRepository<Decision, DecisionId>;
+  readonly human_actions: McpReadRepository<HumanAction, HumanActionId>;
+  readonly attachments: McpReadRepository<Attachment, AttachmentId>;
+  readonly roles: McpReadRepository<
+    RoleReference,
+    Pick<RoleReference, "role_id" | "role_version">
+  >;
+  readonly machines: McpReadRepository<Machine, MachineId>;
+  readonly cursors: McpReadRepository<
+    Cursor,
+    Pick<Cursor, "assignment_id" | "card_id">
+  >;
+  readonly events: Pick<EventRepository, "listAfter">;
+}
+
 /**
  * Everything the MCP layer needs from the control plane's store.
  *
@@ -46,9 +99,13 @@ export interface McpAckResult {
 export interface McpBackend {
   /** Resolve a token by its stored hash; revoked tokens resolve to `undefined`. */
   verifyToken(token: string): McpToken | undefined;
-  /** Run a read (or write) against the repositories in one transaction. */
+  /**
+   * Transactions. Read-only paths use `read` (`BEGIN DEFERRED`), so they do not
+   * take the write lock and keep working while another process writes.
+   */
   readonly uow: {
     run<T>(operation: (transaction: TransactionContext) => T): T;
+    read<T>(operation: (transaction: McpReadContext) => T): T;
   };
   getUpdates(params: {
     readonly project_id: ProjectId;

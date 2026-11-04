@@ -25,7 +25,7 @@ export function requireCard(
   card_id: CardId,
 ): { readonly card: Card; readonly work_items: readonly WorkItem[] } {
   const project_id = identity.actor.project_id;
-  const found = store.uow.run((tx) => {
+  const found = store.uow.read((tx) => {
     const card = tx.cards.get(project_id, card_id);
     if (card === undefined) {
       return undefined;
@@ -69,7 +69,7 @@ export function readCardRelations(
   work_items: readonly WorkItem[],
 ): CardReadings {
   const workItemIds = new Set(work_items.map((item) => item.id));
-  return store.uow.run((tx) => {
+  return store.uow.read((tx) => {
     const deliveries = tx.deliveries
       .list(project_id)
       .filter((delivery) => workItemIds.has(delivery.work_item_id));

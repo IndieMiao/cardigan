@@ -7,8 +7,13 @@ export {
   migrate,
 } from "./migrate.js";
 export {
+  createReadRepositories,
   createRepositories,
   jsonRepository,
+  type ReadEventRepository,
+  ReadOnlyTransactionError,
+  type ReadRepositories,
+  type ReadRepository,
   type SqlValue,
   type TableSpec,
 } from "./repositories.js";
@@ -26,6 +31,7 @@ export {
   openStore,
   Store,
   type StoreOptions,
+  type StoreUnitOfWork,
   type TokenRecord,
 } from "./store.js";
 export {

@@ -17,7 +17,11 @@ import type {
 } from "@cardigan/domain";
 import { createIdAllocator, PROJECT_EVENT_STREAM } from "./ids.js";
 import { type AppliedMigration, migrate } from "./migrate.js";
-import { createRepositories } from "./repositories.js";
+import {
+  createReadRepositories,
+  createRepositories,
+  type ReadRepositories,
+} from "./repositories.js";
 import {
   findTokenByHash,
   type IssuedToken,
@@ -29,6 +33,16 @@ import {
 } from "./tokens.js";
 
 export const DEFAULT_DB_FILE = "cardigan.db";
+
+/** `UnitOfWork` plus read-only transactions. */
+export interface StoreUnitOfWork extends UnitOfWork {
+  /**
+   * Run `operation` in a `BEGIN DEFERRED` transaction with read-only
+   * repositories. In WAL mode this does not take the write lock, so it keeps
+   * working while another process is writing.
+   */
+  read<T>(operation: (transaction: ReadRepositories) => T): T;
+}
 
 export interface StoreOptions {
   /** Directory that holds `cardigan.db`; defaults to `$CARDIGAN_DATA_DIR` or `.data`. */
@@ -149,10 +163,12 @@ export class Store {
     this.#db.close();
   }
 
-  get uow(): UnitOfWork {
+  get uow(): StoreUnitOfWork {
     return {
       run: <T>(operation: (transaction: TransactionContext) => T): T =>
         this.#run(operation),
+      read: <T>(operation: (transaction: ReadRepositories) => T): T =>
+        this.#read(operation),
     };
   }
 
@@ -167,6 +183,29 @@ export class Store {
         ...createRepositories(this.#db),
         ids: createIdAllocator(this.#db),
       });
+      this.#db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      this.#db.exec("ROLLBACK");
+      throw error;
+    } finally {
+      this.#inTransaction = false;
+    }
+  }
+
+  /**
+   * Read-only counterpart of `#run`: `BEGIN DEFERRED` plus repositories that
+   * only expose `get`/`list` (and `events.listAfter`). A write attempt throws
+   * `ReadOnlyTransactionError`.
+   */
+  #read<T>(operation: (transaction: ReadRepositories) => T): T {
+    if (this.#inTransaction) {
+      throw new Error("nested UnitOfWork is not supported");
+    }
+    this.#db.exec("BEGIN DEFERRED");
+    this.#inTransaction = true;
+    try {
+      const result = operation(createReadRepositories(this.#db));
       this.#db.exec("COMMIT");
       return result;
     } catch (error) {
