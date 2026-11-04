@@ -524,6 +524,85 @@ setInterval(() => {}, 1000);
       store2.close();
     }
   }, 120000);
+
+  test("a token stops working once the Assignment is stopped", async () => {
+    const store = Store.open({ dataDir });
+    let assignment:
+      | { runtime_ref?: { terminal_ref: string } | null }
+      | undefined;
+    // Issue a token while the Agent runs: the one in the run directory is
+    // already gone, because launch.sh deletes it.
+    const issued = await cardigan([
+      "token",
+      "issue",
+      "A-1",
+      "--project",
+      "p-one",
+    ]);
+    expect(issued.code, issued.err).toBe(0);
+    const lines = issued.out.split("\n").map((line) => line.trim());
+    const token =
+      lines[
+        lines.indexOf(
+          "Token（只显示这一次，复制后请自行保存，不要写进仓库）：",
+        ) + 1
+      ];
+    expect(token).toBeDefined();
+    try {
+      expect(store.verifyToken(token as string)?.assignment_id).toBe("A-1");
+    } finally {
+      store.close();
+    }
+
+    // Stopping revokes the Assignment's tokens (§9.1).
+    const stopped = await cardigan([
+      "assignment",
+      "stop",
+      "A-1",
+      "--project",
+      "p-one",
+    ]);
+    expect(stopped.code, stopped.err).toBe(0);
+    started.splice(
+      started.findIndex(
+        (entry) => entry.project === "p-one" && entry.assignment === "A-1",
+      ),
+      1,
+    );
+
+    const reopened = Store.open({ dataDir });
+    try {
+      expect(reopened.verifyToken(token as string)).toBeUndefined();
+      assignment = reopened.uow.read((tx) =>
+        tx.assignments.get("p-one" as never, "A-1" as never),
+      ) as unknown as { runtime_ref?: { terminal_ref: string } | null };
+    } finally {
+      reopened.close();
+    }
+    expect(assignment?.runtime_ref).toBeNull();
+
+    // The same token over HTTP is a 401 now.
+    const response = await fetch(server.url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "stopped-agent", version: "0" },
+        },
+      }),
+    });
+    expect(response.status).toBe(401);
+    await response.body?.cancel();
+  }, 60000);
 });
 
 if (!available) {
