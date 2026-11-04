@@ -1,6 +1,8 @@
 # Cardigan · 多 Agent 协作开发系统开发方案
 
-- 版本：v0.6.4（2026-11-04）
+- 版本：v0.6.5（2026-11-04）
+  - v0.6.5：M1.3 审核修订：最后一轮 reject / conditional 均转阻塞拍板；完成申请目标失效后验证项回到 todo；supersedes 只指向同类上一版，审核事件先于拍板请求。
+  - v0.6.4（2026-11-04）
   - v0.6.4：M1.3 交付命令：完成申请前置检查排除本次完成审核工作项（用户确认），区分产出与完成申请版本，明确事务外校验/事务内归约和结构化遗留依据。
   - v0.6.3（2026-11-04）
   - v0.6.3：按 M1.2 审核意见补齐 §4.4 的新交付重开、在审版本失效、验证项取消及 unknown 重连迁移；§13.9 明确暂时失联后的恢复路径。
@@ -322,7 +324,7 @@ Standing Assignment (scope=project): PM Office, PM Ops — not tied to a WorkIte
 - `test_results?`、`attachments[]`、`known_gaps[]`
 - 完成申请的遗留项以 `precondition`（`work_item:<id>` 或 `decision:<id>`）对应未满足的检查，必须带非空说明和 `followup_card_id`；检查结果由控制面写入 evidence。
 - `requested_verifiers[]`（必填，由服务端校验，不接受"A 或 B"）
-- `supersedes?`：同一工作项的新产出交付让旧产出及旧完成申请失效；完成申请只替代旧完成申请，不使其依据的产出和代码审核失效。完成申请的 subject 必须匹配当前产出版本。
+- `supersedes?`：指向同一工作项、同类版本流（产出或完成申请）的上一版；显式传入时也必须满足此条件。同一工作项的新产出交付让旧产出及旧完成申请失效；完成申请只替代旧完成申请，不使其依据的产出和代码审核失效。完成申请的 subject 必须匹配当前产出版本。
 - `status`：`submitted` | `accepted` | `rejected` | `superseded`。合并（含 merge SHA）和部署（含环境）作为事件记录，不是交付状态
 
 **Review**
@@ -409,14 +411,16 @@ any --> cancelled
 ```
 todo --target delivered--> ready --> in_progress --pass--> passed (terminal)
 in_progress --reject--> failed
-failed --next review round exceeds limit--> waiting_decision
+in_progress / failed --review_limit_exceeded (non-pass at last allowed round)--> waiting_decision
+ready --next review round exceeds limit--> waiting_decision
 in_progress / passed / failed --target redelivered--> ready
+ready / in_progress / failed / passed --target_withdrawn--> todo
 todo / ready / in_progress / failed / blocked / waiting_decision --cancel--> cancelled
 ```
 
-批准绑定到交付版本：产出项已交付或已验收后仍可提交新版本，回到 `delivered`；正在审核、已通过或已驳回的验证项遇到新版本时回到 `ready`。旧交付的 supersede 和旧审核失效由命令层更新。验证项只有非终态可取消，`passed` / `cancelled` 不接受 cancel；`passed` 可由新版本重新打开。
+批准绑定到交付版本：产出项已交付或已验收后仍可提交新版本，回到 `delivered`；正在审核、已通过或已驳回的验证项遇到新版本时回到 `ready`。新产出使旧完成申请失效时，PM 验收尚无新目标，通过 `target_withdrawn` 回到 `todo`，等待新的完成申请后才进入 `ready`，避免误列为下一处理人。该迁移不解除 `blocked` / `waiting_decision`，也不重开 `cancelled`。旧交付的 supersede 和旧审核失效由命令层更新。验证项只有非终态可取消，`passed` / `cancelled` 不接受 cancel；`passed` 可因新版本或目标撤回重新打开。
 
-审核轮次上限是控制面字段，只有 PM Ops 或你能放宽，放宽动作记在 Run 上。超过上限时，工作项进入 `waiting_decision`，并生成一条 Decision（0.5a §9.3）。
+审核轮次上限是控制面字段，只有 PM Ops 或你能放宽，放宽动作记在 Run 上。最后一轮仍未通过（`reject` 或 `conditional`）时，在下一轮开始前让工作项进入 `waiting_decision`，生成阻塞 Decision，并以 `blocked` 结束当前审核 Run（0.5a §9.3）。先记录 `review_submitted`（`rework_allowed=false`），再记录 `decision_requested`；换新 Run 不能绕过轮次上限。最后一轮 `pass` 仍正常通过。
 
 **Assignment**
 
@@ -763,7 +767,7 @@ Agent 只通过 Card MCP 读写，看板界面只服务你一个人，所以第�
 - `submit_review` 的 `target_sha` 必须等于目标交付的 `subject`；交付有新版本后，旧的审核结论自动失效。
 - 卡片的完成申请只接受主产出工作项负责人的提交，并附上前置条件的校验结果（§4.4）。
 - 产物类附件缺少 `basis` 时拒绝上传。
-- 审核轮次超过上限时，不再创建返工 Run，转为 Decision；只有 PM Ops 或你能放宽上限。
+- 审核最后一轮仍为 reject 或 conditional 时，不再创建返工 Run，转为阻塞 Decision 并结束当前 Run（§4.4）；只有 PM Ops 或你能放宽上限。
 - 只有验证型工作项的 Assignment 能对其目标交付调用 `submit_review`。
 - `record_decision` 仅限 PM Office，并且必须带 `raw_quote`。
 

@@ -53,10 +53,13 @@ export const transitionTables: {
     ready: {
       run_started: "in_progress",
       review_limit_exceeded: "waiting_decision",
+      target_withdrawn: "todo",
       cancel: "cancelled",
     },
     in_progress: {
       target_redelivered: "ready",
+      target_withdrawn: "todo",
+      review_limit_exceeded: "waiting_decision",
       review_passed: "passed",
       review_rejected: "failed",
       block: "blocked",
@@ -65,10 +68,11 @@ export const transitionTables: {
     },
     failed: {
       target_redelivered: "ready",
+      target_withdrawn: "todo",
       review_limit_exceeded: "waiting_decision",
       cancel: "cancelled",
     },
-    passed: { target_redelivered: "ready" },
+    passed: { target_redelivered: "ready", target_withdrawn: "todo" },
     blocked: { resume: "in_progress", cancel: "cancelled" },
     waiting_decision: { decision_resolved: "ready", cancel: "cancelled" },
   },

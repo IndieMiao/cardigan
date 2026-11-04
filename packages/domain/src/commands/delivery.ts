@@ -11,7 +11,10 @@ import type {
 } from "../entities.js";
 import type { Result } from "../errors.js";
 import type { DeliveryVerifier } from "../ports.js";
-import { developmentCardTemplate } from "../templates.js";
+import {
+  developmentCardTemplate,
+  PM_ACCEPTANCE_WORK_ITEM_KEY,
+} from "../templates.js";
 import {
   beginReviewRound,
   DEFAULT_MAX_REVIEW_ROUNDS,
@@ -112,7 +115,7 @@ function inspect(d: CommandDraft, p: SubmitDeliveryParams) {
         w.card_id === card.id &&
         w.kind === "verify" &&
         (completion
-          ? w.role_id === "pm" && w.template_key === "pm_acceptance"
+          ? w.role_id === "pm" && w.template_key === PM_ACCEPTANCE_WORK_ITEM_KEY
           : w.target_work_item_id === item.id),
     ),
     "invariant_violation",
@@ -126,7 +129,7 @@ function inspect(d: CommandDraft, p: SubmitDeliveryParams) {
         w.kind === "verify" &&
         w.required &&
         (completion
-          ? w.template_key === "pm_acceptance"
+          ? w.template_key === PM_ACCEPTANCE_WORK_ITEM_KEY
           : w.target_work_item_id === item.id),
     );
   ensure(
@@ -255,11 +258,16 @@ export function submitDelivery(
           v.status !== "superseded" &&
           (!completion || v.kind === "card_completion"),
       );
-    ensure(
-      !p.supersedes || previous.some((v) => v.id === p.supersedes),
-      "stale_target",
-      "supersedes is not a current delivery",
+    const predecessors = previous.filter(
+      (v) => (v.kind === "card_completion") === completion,
     );
+    ensure(
+      !p.supersedes || predecessors.some((v) => v.id === p.supersedes),
+      "stale_target",
+      "supersedes must be a current delivery in the same stream",
+    );
+    const predecessor =
+      predecessors.find((v) => v.id === p.supersedes) ?? predecessors[0];
     const checks: { key: string; passed: boolean }[] = [];
     if (completion) {
       const product = d
@@ -321,11 +329,11 @@ export function submitDelivery(
       });
     for (const verifier of verifiers)
       d.put("work_items", readyVerifier(d, verifier));
-    // Superseding a pending completion also invalidates its PM review target.
+    // A new product withdraws the old completion target until a new request arrives.
     for (const old of previous.filter((v) => v.kind === "card_completion"))
       for (const id of old.requested_verifiers) {
         if (!p.requested_verifiers.includes(id))
-          d.put("work_items", readyVerifier(d, d.work(id)));
+          d.put("work_items", d.move(d.work(id), "target_withdrawn"));
       }
     if (!completion)
       d.put(
@@ -357,7 +365,7 @@ export function submitDelivery(
       ...(p.branch ? { branch: p.branch } : {}),
       ...(p.pr_url ? { pr_url: p.pr_url } : {}),
       ...(p.test_results ? { test_results: p.test_results } : {}),
-      ...(previous[0] ? { supersedes: previous[0].id } : {}),
+      ...(predecessor ? { supersedes: predecessor.id } : {}),
     };
     d.put("deliveries", value);
     const status = completion
@@ -413,7 +421,8 @@ export function submitReview(
       item.kind === "verify" &&
         target.requested_verifiers.includes(item.id) &&
         (target.kind === "card_completion"
-          ? item.template_key === "pm_acceptance" && item.role_id === "pm"
+          ? item.template_key === PM_ACCEPTANCE_WORK_ITEM_KEY &&
+            item.role_id === "pm"
           : item.target_work_item_id === producer.id),
       "unauthorized",
       "Assignment is not a verifier for this delivery",
@@ -568,11 +577,28 @@ export function submitReview(
         );
     }
     const limitReached =
-      value.blocking &&
+      value.verdict !== "pass" &&
       round >=
         (item.kind === "verify"
           ? item.max_review_rounds
           : DEFAULT_MAX_REVIEW_ROUNDS);
+    d.emit(
+      "review_submitted",
+      card.id,
+      {
+        review_id: value.id,
+        delivery_id: target.id,
+        verdict: value.verdict,
+        rework_allowed: value.blocking && !limitReached,
+      },
+      {
+        type: "review",
+        body: value.verdict,
+        delivery_id: target.id,
+        work_item_id: item.id,
+        run_id: run.id,
+      },
+    );
     if (limitReached) {
       d.put("work_items", d.move(item, "review_limit_exceeded"));
       const id = d.ids.next(state.project_id, "decision");
@@ -626,23 +652,6 @@ export function submitReview(
         },
       );
     }
-    d.emit(
-      "review_submitted",
-      card.id,
-      {
-        review_id: value.id,
-        delivery_id: target.id,
-        verdict: value.verdict,
-        rework_allowed: value.blocking && !limitReached,
-      },
-      {
-        type: "review",
-        body: value.verdict,
-        delivery_id: target.id,
-        work_item_id: item.id,
-        run_id: run.id,
-      },
-    );
     return value;
   });
 }

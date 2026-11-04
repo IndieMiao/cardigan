@@ -1,6 +1,8 @@
 import { beforeEach, expect, test } from "vitest";
 import type { Actor, Delivery, Review } from "../entities.js";
 import {
+  type CommandState,
+  deriveCardFields,
   prepareDelivery,
   type SubmitDeliveryParams,
   type SubmitReviewParams,
@@ -434,3 +436,167 @@ test("invariants 10, 11, 12: reaching the review limit pauses verification and e
     decider: "human",
   });
 });
+
+test.each(["reject", "conditional", "pass"] as const)(
+  "invariants 10, 11, 12: final review round with %s either passes or requests a decision",
+  async (verdict) => {
+    const initial = fixture();
+    let state: CommandState = {
+      ...initial,
+      work_items: initial.work_items.map((w) =>
+        w.kind === "verify" ? { ...w, max_review_rounds: 1 } : w,
+      ),
+    };
+    const product = value(await deliver(state));
+    state = apply(state, product);
+    const result = value(
+      submitReview(
+        state,
+        actor(2, "reviewer"),
+        {
+          ...reviewParams(product.data),
+          recheck_required: verdict === "conditional",
+          issues:
+            verdict === "reject"
+              ? [
+                  {
+                    severity: "major",
+                    description: "Bug",
+                    must_fix: true,
+                    pre_existing: false,
+                  },
+                ]
+              : [],
+        },
+        io,
+      ),
+    );
+    expect(result.data.verdict).toBe(verdict);
+    state = apply(state, result);
+    expect(
+      state.work_items.find((w) => w.id === id("work_item", 2))?.status,
+    ).toBe(verdict === "pass" ? "passed" : "waiting_decision");
+    expect(result.events.map((event) => event.type)).toEqual(
+      verdict === "pass"
+        ? ["review_submitted"]
+        : ["review_submitted", "decision_requested"],
+    );
+    expect(result.events[0]?.payload).toMatchObject({ rework_allowed: false });
+    if (verdict === "pass") {
+      expect(state.decisions).toHaveLength(0);
+      return;
+    }
+    expect(result.timeline.map((entry) => entry.type)).toEqual([
+      "review",
+      "decision_request",
+    ]);
+    expect(state.decisions).toHaveLength(1);
+    expect(state.decisions[0]).toMatchObject({
+      status: "open",
+      blocking: true,
+      affected_work_items: [id("work_item", 2)],
+    });
+    expect(state.runs.find((r) => r.id === id("run", 2))).toMatchObject({
+      status: "completed",
+      outcome: "blocked",
+      role_version: 1,
+      model: "fixture-model",
+      agent_cli_version: "1.0",
+    });
+    expect(state.runs).toHaveLength(initial.runs.length);
+    state = {
+      ...state,
+      runs: [...state.runs, { ...run(2), id: id("run", 99) }],
+    };
+    expect(
+      submitReview(state, actor(2, "reviewer"), reviewParams(product.data), io),
+    ).toMatchObject({ ok: false, error: { code: "illegal_transition" } });
+  },
+);
+
+test.each(["pending", "conditional", "rejected"] as const)(
+  "invariants 13, 14: a new product withdraws a %s completion target and its next owner",
+  async (status) => {
+    let state = fixture();
+    const product = value(await deliver(state));
+    state = apply(state, product);
+    state = apply(
+      state,
+      value(
+        submitReview(
+          state,
+          actor(2, "reviewer"),
+          reviewParams(product.data),
+          io,
+        ),
+      ),
+    );
+    const completion = value(
+      await deliver(state, {
+        ...p,
+        kind: "card_completion",
+        requested_verifiers: [id("work_item", 3)],
+      }),
+    );
+    state = apply(state, completion);
+    if (status !== "pending")
+      state = apply(
+        state,
+        value(
+          submitReview(
+            state,
+            actor(3, "pm"),
+            {
+              ...reviewParams(completion.data),
+              recheck_required: status === "conditional",
+              issues:
+                status === "rejected"
+                  ? [
+                      {
+                        severity: "major",
+                        description: "Not ready",
+                        must_fix: true,
+                        pre_existing: false,
+                      },
+                    ]
+                  : [],
+            },
+            io,
+          ),
+        ),
+      );
+    // Deliberately put the completion first: entity order must not choose the predecessor.
+    state = { ...state, deliveries: [...state.deliveries].reverse() };
+    const params = { ...p, subject: { ...subject, value: "b".repeat(40) } };
+    expect(
+      await deliver(state, { ...params, supersedes: completion.data.id }),
+    ).toMatchObject({ ok: false, error: { code: "stale_target" } });
+    expect(
+      value(await deliver(state, { ...params, supersedes: product.data.id }))
+        .data.supersedes,
+    ).toBe(product.data.id);
+    const next = value(await deliver(state, params));
+    expect(next.data.supersedes).toBe(product.data.id);
+    state = apply(state, next);
+    expect(
+      state.deliveries.find((d) => d.id === completion.data.id)?.status,
+    ).toBe("superseded");
+    expect(state.deliveries.find((d) => d.id === product.data.id)?.status).toBe(
+      "superseded",
+    );
+    expect(
+      state.work_items.find((w) => w.id === id("work_item", 3))?.status,
+    ).toBe("todo");
+    expect(
+      state.work_items.find((w) => w.id === id("work_item", 2))?.status,
+    ).toBe("ready");
+    const card = state.cards.find((c) => c.id === id("card", 1));
+    if (!card) throw new Error("Missing card");
+    expect(deriveCardFields({ ...state, card }).next_owners).toEqual([
+      { kind: "assignment", ref: id("assignment", 2) },
+    ]);
+    expect(
+      submitReview(state, actor(3, "pm"), reviewParams(completion.data), io),
+    ).toMatchObject({ ok: false, error: { code: "stale_target" } });
+  },
+);

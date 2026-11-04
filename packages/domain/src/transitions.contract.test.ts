@@ -245,6 +245,36 @@ test("review rounds allow the limit, stop before the next round, and honor an ex
   }
 });
 
+test.each(["in_progress", "failed"] as const)(
+  "invariants 10, 11: verify:%s reaches the review limit and waits for a decision",
+  (from) => {
+    expect(transition("verify", from, "review_limit_exceeded")).toEqual({
+      ok: true,
+      value: "waiting_decision",
+    });
+  },
+);
+
+test.each(["ready", "in_progress", "failed", "passed"] as const)(
+  "invariant 14: verify:%s waits for a target after withdrawal",
+  (from) => {
+    expect(transition("verify", from, "target_withdrawn")).toEqual({
+      ok: true,
+      value: "todo",
+    });
+  },
+);
+
+test.each(["blocked", "waiting_decision", "cancelled"] as const)(
+  "invariants 11, 14: target withdrawal cannot bypass verify:%s",
+  (from) => {
+    expect(transition("verify", from, "target_withdrawn")).toMatchObject({
+      ok: false,
+      error: { code: "illegal_transition" },
+    });
+  },
+);
+
 test("transition lookup rejects inherited object properties", () => {
   expect(transition("produce", "__proto__" as ProduceStatus, "cancel").ok).toBe(
     false,

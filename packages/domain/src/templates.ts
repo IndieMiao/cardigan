@@ -18,6 +18,8 @@ export interface CardTemplate {
   readonly completion_reviewer: Decider;
   readonly work_items: readonly TemplateWorkItem[];
 }
+export const PM_ACCEPTANCE_WORK_ITEM_KEY = "pm_acceptance";
+
 export const developmentCardTemplate = {
   id: "dev",
   title: "开发卡",
@@ -41,7 +43,7 @@ export const developmentCardTemplate = {
       target_work_item_key: "development",
     },
     {
-      key: "pm_acceptance",
+      key: PM_ACCEPTANCE_WORK_ITEM_KEY,
       title: "PM 验收",
       kind: "verify",
       role_id: "pm",

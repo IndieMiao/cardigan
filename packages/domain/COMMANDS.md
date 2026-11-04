@@ -15,12 +15,12 @@
 
 - `prepareDelivery` / `submitDelivery`：只允许产出工作项当前 Assignment，并要求恰好一个 running Run。摘要按 Unicode 码点限制 160；subject 必填，git_head 接受 40/64 位十六进制，artifact_sha256 接受 64 位，doc_version 为非空字符串。
 - requested_verifiers 必须是明确、不同的验证 WorkItemId，覆盖所有必需验证方，不能用“角色 A 或 B”绕过验证。证据来自预检，参数中的 evidence/author/run_id 不作为可信字段。
-- 新产出替代该工作项的旧产出和旧完成申请，并重置相关验证项。完成申请只替代旧完成申请，绑定当前产出的相同 subject，保留已经通过的代码审核。
+- 新产出替代该工作项的旧产出和旧完成申请：产出验证项回到 ready，失去完成申请目标的 PM 验收项回到 todo，等新完成申请再 ready。supersedes 只指向同类上一版（产出 / 完成申请），显式传入时也校验类型。完成申请只替代旧完成申请，绑定当前产出的相同 subject，保留已经通过的代码审核。
 - 主产出及 PM 验收项通过模板稳定键识别。按用户确认，前置条件排除本次 PM 验收项；其余未满足项必须有精确 precondition 键、说明及同项目后续卡片。检查结果加入 evidence，不能由调用者伪造“已通过”。
 - `submitReview`：只允许该交付请求的验证 Assignment；SHA/交付版本过期拒绝。verdict/blocking 通过 M1.2 计算，忽略客户端同名字段；普通审核使产出被接受或返工，完成审核才改变 Card.done。
 - conditional 不算必需验证通过。已终结的交付不能继续改结论，需要新交付版本；每个 Run 只提交一次审核，请求重放由外层幂等处理。
 - 第二轮起沿用问题描述（去除首尾空白）作为复查匹配依据；新增非 pre_existing 问题必须 critical 且有 proof。此处不做语义相似度判定。
-- 达到上限且仍驳回时，在下一轮开始前生成阻塞 Decision、验证项进入 waiting_decision，当前审核 Run 以 blocked 结束；review_submitted 携带 rework_allowed=false，不创建返工 Run。不存在用户可写的“自动通过”开关。
+- 达到上限且仍为 reject 或 conditional 时，在下一轮开始前生成阻塞 Decision、验证项进入 waiting_decision，当前审核 Run 以 blocked 结束；先发 review_submitted（rework_allowed=false），再发 decision_requested，不创建返工 Run。最后一轮 pass 正常通过；换新 Run 不能绕过上限。不存在用户可写的“自动通过”开关。
 
 ## 验证与边界
 
