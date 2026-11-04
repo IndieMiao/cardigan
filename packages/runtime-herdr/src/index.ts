@@ -10,9 +10,25 @@ import type {
   RuntimeRef,
   RuntimeResult,
 } from "@cardigan/domain";
+import { registerAgentMachine } from "./agent-ssh.js";
 import { fail, type HcClient, processClient, result } from "./client.js";
+import {
+  type ExecutionConfig,
+  resolveExecutionConfig,
+  within,
+} from "./execution.js";
+
+export {
+  type ExecutionConfig,
+  type ExecutionEnv,
+  executionPaths,
+  executionPermissions,
+  LOCAL_RUNTIME_WARNING,
+  resolveExecutionConfig,
+} from "./execution.js";
 
 export interface HerdrOptions {
+  readonly execution?: ExecutionConfig;
   readonly binary?: string;
   readonly session?: string;
   readonly socketPath?: string;
@@ -59,6 +75,7 @@ export class HerdrRuntime implements Runtime {
     readonly socketPath: string,
     private binary: string,
     private client: HcClient,
+    private execution: ExecutionConfig,
   ) {}
   static async create(
     options: HerdrOptions = {},
@@ -69,6 +86,9 @@ export class HerdrRuntime implements Runtime {
       if (!/^[a-zA-Z0-9_-]{1,48}$/u.test(session))
         fail("invalid_launch", "Invalid hc session name");
       const binary = options.binary ?? "hc";
+      const execution =
+        options.execution ??
+        resolveExecutionConfig({ ...process.env, ...options.env });
       const socket =
         options.socketPath ??
         join(
@@ -93,12 +113,12 @@ export class HerdrRuntime implements Runtime {
           socket,
           timeout,
         );
-      if (
-        (await client.exec(["--version"])).trim() !==
-        `hc ${options.version ?? "0.1.18"}`
-      )
+      const version = options.version ?? "0.1.18";
+      if ((await client.exec(["--version"])).trim() !== `hc ${version}`)
         fail("version_mismatch", "Unsupported hc version");
-      return new HerdrRuntime(session, socket, binary, client);
+      if (execution.mode === "agent-ssh")
+        await registerAgentMachine(client, execution, session, version);
+      return new HerdrRuntime(session, socket, binary, client, execution);
     });
   }
   private async live() {
@@ -110,12 +130,23 @@ export class HerdrRuntime implements Runtime {
     return JSON.parse(await this.client.exec([...args, "--json"]));
   }
   private checkRef(ref: RuntimeRef) {
+    const machine =
+      this.execution.mode === "local" ? "local" : this.execution.machine;
+    const terminal =
+      machine === "local"
+        ? ref.terminal_ref
+        : ref.terminal_ref.startsWith(`${machine}/`)
+          ? ref.terminal_ref.slice(machine.length + 1)
+          : "";
     if (
       ref.machine_id !== "local" ||
-      ref.runtime_machine !== "local" ||
-      !/^t[a-z0-9]+$/u.test(ref.terminal_ref)
+      ref.runtime_machine !== machine ||
+      !/^t[a-z0-9]+$/u.test(terminal)
     )
-      fail("invalid_launch", "M2 requires a local terminal reference");
+      fail(
+        "invalid_launch",
+        "Terminal must belong to the configured runtime machine",
+      );
   }
   private validateLaunch(launch: RuntimeLaunch) {
     if (
@@ -127,11 +158,19 @@ export class HerdrRuntime implements Runtime {
       (launch.args.length === 0 && !/^[\w./+-]+$/u.test(launch.command))
     )
       fail("invalid_launch", "Invalid runtime launch description");
+    if (
+      this.execution.mode === "agent-ssh" &&
+      !within(this.execution.agentRoot, launch.cwd)
+    )
+      fail("invalid_launch", "Agent cwd must be inside its work root");
   }
   private async launch(launch: RuntimeLaunch, keep: boolean) {
     this.validateLaunch(launch);
     const args = [
       "run",
+      ...(this.execution.mode === "agent-ssh"
+        ? ["--on", this.execution.machine]
+        : []),
       "--bg",
       "--json",
       "--no-parent",
@@ -179,9 +218,10 @@ export class HerdrRuntime implements Runtime {
         },
         false,
       );
-      return {
+      const ref: RuntimeRef = {
         machine_id: machine.id,
-        runtime_machine: "local",
+        runtime_machine:
+          this.execution.mode === "local" ? "local" : this.execution.machine,
         terminal_ref,
         agent_name: launch.agent_name,
         ...(assignment.worktree_path
@@ -189,6 +229,8 @@ export class HerdrRuntime implements Runtime {
           : {}),
         ...(assignment.branch ? { branch: assignment.branch } : {}),
       };
+      this.checkRef(ref);
+      return ref;
     });
   }
   wake(
@@ -208,6 +250,32 @@ export class HerdrRuntime implements Runtime {
         doorbell,
       ]);
       return { sent: true };
+    });
+  }
+  /** Host orchestration only: run Git or inspect an installed Agent CLI as agent. */
+  captureAgent(
+    command: "git" | "claude" | "codex" | "pi",
+    args: readonly string[],
+  ) {
+    return result(async () => {
+      if (
+        this.execution.mode !== "agent-ssh" ||
+        !["git", "claude", "codex", "pi"].includes(command)
+      )
+        fail(
+          "invalid_launch",
+          "Agent command requires the configured SSH runtime",
+        );
+      await this.live();
+      // hc exec emits program stdout and propagates its exit status, unlike JSON control calls.
+      return this.client.exec([
+        "exec",
+        "--on",
+        this.execution.machine,
+        "--",
+        command,
+        ...args,
+      ]);
     });
   }
   async *events(

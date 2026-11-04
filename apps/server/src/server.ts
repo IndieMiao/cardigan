@@ -4,6 +4,10 @@ import {
   type RunningServer,
   startMcpServer,
 } from "@cardigan/mcp-server";
+import {
+  LOCAL_RUNTIME_WARNING,
+  resolveExecutionConfig,
+} from "@cardigan/runtime-herdr";
 import { Store } from "@cardigan/store";
 import {
   resolveServerConfig,
@@ -17,6 +21,7 @@ export interface StartServerOptions {
   /** Inject a store (tests); otherwise one is opened from the config. */
   readonly store?: Store;
   readonly log?: Logger;
+  readonly warn?: (message: string) => void;
 }
 
 export interface CardiganServer {
@@ -37,6 +42,16 @@ export async function startCardiganServer(
 ): Promise<CardiganServer> {
   const config =
     options.config ?? resolveServerConfig(options.env ?? process.env);
+  const execution =
+    config.execution ??
+    resolveExecutionConfig({
+      ...(options.env ?? process.env),
+      CARDIGAN_DATA_DIR: config.dataDir,
+    });
+  if (execution.mode === "local")
+    (options.warn ?? ((message) => process.stderr.write(`${message}\n`)))(
+      LOCAL_RUNTIME_WARNING,
+    );
   const store = options.store ?? Store.open({ dataDir: config.dataDir });
   const ownsStore = options.store === undefined;
 

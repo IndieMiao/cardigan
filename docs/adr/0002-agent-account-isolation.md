@@ -43,7 +43,7 @@ project_id/assignment_id 在参与路径构造前验证。agent-root 必须在 d
 
 hc 0.1.18 的 run/exec 支持 `--on <machine>`，get/send/events/interrupt/kill/rm 则使用 `<machine>/<terminal>` 地址；向这些命令添加不存在的 --on 参数会失败。适配器在两种语法下都只能选择配置的隔离 machine；其他 machine 引用直接拒绝。
 
-host 侧 hc core 仍负责控制面聚合，Agent 终端及远端 hc 在 agent 账号运行。注册通过 `hc machine add agent@localhost --via <专用 ssh 命令> --name <配置名> --session <专用远端 session>`，不执行 --install，也不替其他机器配置 SSH。读状态前继续检查 host core socket；实际连接和完整启动需用户安装后验收。
+host 侧 hc core 仍负责控制面聚合，Agent 终端及远端 hc 在 agent 账号运行。注册通过 `hc machine add --via <专用 ssh 命令，目标为 agent@localhost> --name <配置名> --session <专用远端 session>`，不执行 --install，也不替其他机器配置 SSH。已有同名 machine 的连接参数或 session 不符时拒绝覆盖；主机和 agent 的 hc 版本都要匹配锁定版本。读状态前继续检查 host core socket；实际连接和完整启动需用户安装后验收。
 
 ## 分批交付和验证
 

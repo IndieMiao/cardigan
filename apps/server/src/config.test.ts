@@ -9,6 +9,7 @@ import {
 test("defaults to the loopback address, port 3004 and .data", () => {
   expect(resolveServerConfig({})).toEqual({
     dataDir: ".data",
+    execution: { mode: "local", dataDir: resolve(".data") },
     host: DEFAULT_MCP_HOST,
     port: DEFAULT_MCP_PORT,
   });
@@ -67,7 +68,12 @@ test("reads data dir and port from the environment", () => {
       CARDIGAN_DATA_DIR: "/srv/cardigan/data",
       CARDIGAN_MCP_PORT: "0",
     }),
-  ).toEqual({ dataDir: "/srv/cardigan/data", host: DEFAULT_MCP_HOST, port: 0 });
+  ).toEqual({
+    dataDir: "/srv/cardigan/data",
+    execution: { mode: "local", dataDir: "/srv/cardigan/data" },
+    host: DEFAULT_MCP_HOST,
+    port: 0,
+  });
 });
 
 test("rejects an invalid port", () => {
@@ -77,3 +83,21 @@ test("rejects an invalid port", () => {
     );
   }
 });
+
+test("server parses agent-ssh settings and refuses unknown runtime modes", () => {
+  expect(
+    resolveServerConfig({
+      CARDIGAN_RUNTIME_MODE: "agent-ssh",
+      CARDIGAN_DATA_DIR: "/fixture/private",
+      CARDIGAN_AGENT_ROOT: "/fixture/agent",
+      CARDIGAN_AGENT_GID: "2001",
+      CARDIGAN_AGENT_IDENTITY: "/fixture/key",
+      CARDIGAN_AGENT_KNOWN_HOSTS: "/fixture/known_hosts",
+    }).execution,
+  ).toMatchObject({ mode: "agent-ssh", machine: "cardigan-agent" });
+  expect(() =>
+    resolveServerConfig({ CARDIGAN_RUNTIME_MODE: "remote" }),
+  ).toThrow(/local or agent-ssh/);
+});
+
+import { resolve } from "node:path";

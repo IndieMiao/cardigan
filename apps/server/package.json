@@ -13,6 +13,7 @@
     "cardigan-server": "./dist/bin.js"
   },
   "dependencies": {
+    "@cardigan/runtime-herdr": "workspace:*",
     "@cardigan/mcp-server": "workspace:*",
     "@cardigan/store": "workspace:*"
   },
