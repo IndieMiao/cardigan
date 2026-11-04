@@ -21,6 +21,7 @@ import {
 } from "./core.js";
 
 import { queueResumedRun, resumeWork } from "./resumption.js";
+import { activeWork } from "./workflow.js";
 
 export function extractReferences(body: string): readonly Reference[] {
   const refs: Reference[] = [];
@@ -119,11 +120,20 @@ function paused(
   item: WorkItem,
   kind: "blocked" | "waiting_decision",
 ) {
-  if (item.status !== kind)
-    d.put(
-      "work_items",
-      d.move(item, kind === "blocked" ? "block" : "request_decision"),
-    );
+  if (item.status === kind) return;
+  const next =
+    d.assignment?.scope === "work_item" && d.assignment.work_item_id === item.id
+      ? activeWork(d, item)
+      : item;
+  ensure(
+    next.status === "in_progress",
+    "illegal_transition",
+    `Cannot pause work item ${item.id} (${item.kind}:${item.status}); work is not in progress`,
+  );
+  d.put(
+    "work_items",
+    d.move(next, kind === "blocked" ? "block" : "request_decision"),
+  );
 }
 function endForDecision(
   d: CommandDraft,
@@ -131,9 +141,10 @@ function endForDecision(
   items: readonly WorkItem[],
 ) {
   const assignments = new Set(
-    [d.assignment?.id, ...items.map((w) => w.assignment_id)].filter(
-      (id) => id !== undefined,
-    ),
+    [
+      ...(d.assignment?.scope === "standing" ? [d.assignment.id] : []),
+      ...items.map((w) => w.assignment_id),
+    ].filter((id) => id !== undefined),
   );
   for (const run of d
     .list("runs")
@@ -264,12 +275,16 @@ export function requestDecision(
         );
       }
     }
+    const own =
+      p.blocking && d.assignment?.scope === "work_item"
+        ? d.ownWork(d.assignment.work_item_id)
+        : undefined;
+    const waitingForOthers =
+      own?.kind === "produce" && ["delivered", "accepted"].includes(own.status);
     const items = [
       ...new Set([
         ...p.affected_work_items,
-        ...(p.blocking && d.assignment?.scope === "work_item"
-          ? [d.ownWork(d.assignment.work_item_id).id]
-          : []),
+        ...(own && !waitingForOthers ? [own.id] : []),
       ]),
     ].map((id) => d.work(id));
     const cards = [

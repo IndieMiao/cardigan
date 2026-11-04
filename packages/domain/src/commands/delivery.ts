@@ -2,7 +2,6 @@ import { deriveCardStatus, deriveReview, isReviewStale } from "../derived.js";
 import type {
   Actor,
   Assignment,
-  Decision,
   Delivery,
   DeliveryEvidence,
   DeliverySubject,
@@ -15,11 +14,7 @@ import {
   developmentCardTemplate,
   PM_ACCEPTANCE_WORK_ITEM_KEY,
 } from "../templates.js";
-import {
-  beginReviewRound,
-  DEFAULT_MAX_REVIEW_ROUNDS,
-  transition,
-} from "../transitions.js";
+import { DEFAULT_MAX_REVIEW_ROUNDS, transition } from "../transitions.js";
 import {
   attempt,
   CommandDraft,
@@ -30,6 +25,9 @@ import {
   text,
   unwrap,
 } from "./core.js";
+
+import { pendingReviewLimit, requestReviewLimit } from "./review-limit.js";
+import { activeWork, reviewRound, workCompleted } from "./workflow.js";
 
 export type SubmitDeliveryParams = Pick<
   Delivery,
@@ -48,10 +46,6 @@ export type SubmitDeliveryParams = Pick<
   >;
 const sameSubject = (a: DeliverySubject, b: DeliverySubject) =>
   a.kind === b.kind && a.value === b.value;
-const completed = (item: WorkItem) =>
-  item.kind === "produce"
-    ? item.status === "accepted"
-    : item.status === "passed";
 function inspect(d: CommandDraft, p: SubmitDeliveryParams) {
   const item = d.ownWork(p.work_item_id);
   ensure(
@@ -215,25 +209,15 @@ export async function prepareDelivery(
 }
 
 function readyVerifier(d: CommandDraft, item: WorkItem): WorkItem {
-  if (item.status === "ready") return item;
+  if (
+    item.status === "ready" ||
+    (item.status === "waiting_decision" && pendingReviewLimit(d, item))
+  )
+    return item;
   return d.move(
     item,
     item.status === "todo" ? "target_delivered" : "target_redelivered",
   );
-}
-function activeProducer(d: CommandDraft, item: WorkItem): WorkItem {
-  let next = item;
-  if (next.status === "todo") {
-    ensure(
-      next.depends_on.every((id) => completed(d.work(id))),
-      "invariant_violation",
-      "Dependencies are not complete",
-    );
-    next = d.move(next, "dependencies_met");
-  }
-  return next.status === "ready" || next.status === "changes_requested"
-    ? d.move(next, "run_started")
-    : next;
 }
 export function submitDelivery(
   state: CommandState,
@@ -292,7 +276,7 @@ export function submitDelivery(
               w.required &&
               !p.requested_verifiers.includes(w.id),
           )
-          .map((w) => ({ key: `work_item:${w.id}`, passed: completed(w) })),
+          .map((w) => ({ key: `work_item:${w.id}`, passed: workCompleted(w) })),
       );
       checks.push(
         ...d
@@ -336,10 +320,7 @@ export function submitDelivery(
           d.put("work_items", d.move(d.work(id), "target_withdrawn"));
       }
     if (!completion)
-      d.put(
-        "work_items",
-        d.move(activeProducer(d, item), "delivery_submitted"),
-      );
+      d.put("work_items", d.move(activeWork(d, item), "delivery_submitted"));
     const value: Delivery = {
       id: d.ids.next(state.project_id, "delivery"),
       work_item_id: item.id,
@@ -387,6 +368,14 @@ export function submitDelivery(
         run_id: run.id,
       },
     );
+    for (const verifier of verifiers) {
+      const current = d.work(verifier.id);
+      if (
+        current.kind === "verify" &&
+        reviewRound(d, current) > current.max_review_rounds
+      )
+        requestReviewLimit(d, current);
+    }
     return value;
   });
 }
@@ -472,8 +461,7 @@ export function submitReview(
       "invariant_violation",
       "A Run may submit only one review",
     );
-    const round =
-      d.list("reviews").filter((r) => r.work_item_id === item.id).length + 1;
+    const round = reviewRound(d, item);
     ensure(
       round <= item.max_review_rounds,
       "illegal_transition",
@@ -496,17 +484,7 @@ export function submitReview(
         "validation_failed",
         "New findings after round one require critical severity and proof",
       );
-    if (item.status === "ready")
-      item = {
-        ...item,
-        status: unwrap(
-          beginReviewRound(
-            item.status,
-            round,
-            item.max_review_rounds ?? DEFAULT_MAX_REVIEW_ROUNDS,
-          ),
-        ),
-      };
+    item = activeWork(d, item);
     ensure(
       item.status === "in_progress",
       "illegal_transition",
@@ -599,60 +577,7 @@ export function submitReview(
         run_id: run.id,
       },
     );
-    if (limitReached) {
-      d.put("work_items", d.move(item, "review_limit_exceeded"));
-      const id = d.ids.next(state.project_id, "decision");
-      const decision: Decision = {
-        id,
-        key: id,
-        card_id: card.id,
-        raised_by: d.author,
-        kind: "choose",
-        category: "general",
-        question: `Review limit reached for ${item.id}`,
-        trigger: "review_limit",
-        context: "A decision is required before another review round",
-        options: [
-          {
-            key: "raise_limit",
-            description: "Ask PM Ops or the human to raise the review limit",
-            impact: "Allows another round",
-          },
-          {
-            key: "pause",
-            description: "Keep the work paused",
-            impact: "No rework run is requested",
-          },
-        ],
-        recommended: "pause",
-        affected_cards: [card.id],
-        affected_work_items: [item.id],
-        blocking: true,
-        decider: "human",
-        doc_refs: [],
-        status: "open",
-      };
-      d.put("decisions", decision);
-      d.put("runs", {
-        ...run,
-        status: unwrap(transition("run", run.status, "complete")),
-        outcome: "blocked",
-        summary: decision.question,
-        finished_at: d.now,
-      });
-      d.emit(
-        "decision_requested",
-        card.id,
-        { decision_id: id, affected_work_items: [item.id] },
-        {
-          type: "decision_request",
-          body: decision.question,
-          decision_id: id,
-          work_item_id: item.id,
-          run_id: run.id,
-        },
-      );
-    }
+    if (limitReached) requestReviewLimit(d, item);
     return value;
   });
 }

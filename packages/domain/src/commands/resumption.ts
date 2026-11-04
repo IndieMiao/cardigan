@@ -1,5 +1,6 @@
 import type { Event, WorkItem } from "../entities.js";
 import { type CommandDraft, ensure } from "./core.js";
+import { reviewRound } from "./workflow.js";
 
 export function canResume(d: CommandDraft, item: WorkItem): boolean {
   return !(
@@ -16,9 +17,7 @@ export function canResume(d: CommandDraft, item: WorkItem): boolean {
       .some(
         (h) => h.status === "open" && h.blocked_work_items.includes(item.id),
       ) ||
-    (item.kind === "verify" &&
-      d.list("reviews").filter((r) => r.work_item_id === item.id).length >=
-        item.max_review_rounds)
+    (item.kind === "verify" && reviewRound(d, item) > item.max_review_rounds)
   );
 }
 
@@ -48,8 +47,25 @@ export function queueResumedRun(d: CommandDraft, item: WorkItem, event: Event) {
     runs.some((r) => !["completed", "failed", "cancelled"].includes(r.status))
   )
     return;
+  // A new delivery can hit the limit after the previous review Run already completed.
+  const reviewLimit =
+    item.status === "waiting_decision" &&
+    d
+      .list("decisions")
+      .some(
+        (q) =>
+          q.trigger === "review_limit" &&
+          q.status === "resolved" &&
+          q.affected_work_items.includes(item.id),
+      );
   const previous = runs
-    .filter((r) => r.outcome === "blocked")
+    .filter(
+      (r) =>
+        r.outcome === "blocked" ||
+        (reviewLimit &&
+          r.status === "completed" &&
+          d.list("reviews").some((review) => review.run_id === r.id)),
+    )
     .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
   if (!previous) return;
   ensure(

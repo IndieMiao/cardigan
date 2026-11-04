@@ -14,6 +14,7 @@
 ## 交付、审核和完成申请
 
 - `prepareDelivery` / `submitDelivery`：只允许产出工作项当前 Assignment，并要求恰好一个 running Run。摘要按 Unicode 码点限制 160；subject 必填，git_head 接受 40/64 位十六进制，artifact_sha256 接受 64 位，doc_version 为非空字符串。
+- 交付、审核和暂停自身工作项共用 activeWork：todo 产出先校验依赖再启动，ready / changes_requested 产出走 run_started；ready 验证项在有剩余轮次时才启动。启动要求当前 running Run，不把 Run 启动等同于工作项已经 in_progress。
 - requested_verifiers 必须是明确、不同的验证 WorkItemId，覆盖所有必需验证方，不能用“角色 A 或 B”绕过验证。证据来自预检，参数中的 evidence/author/run_id 不作为可信字段。
 - 新产出替代该工作项的旧产出和旧完成申请：产出验证项回到 ready，失去完成申请目标的 PM 验收项回到 todo，等新完成申请再 ready。supersedes 只指向同类上一版（产出 / 完成申请），显式传入时也校验类型。完成申请只替代旧完成申请，绑定当前产出的相同 subject，保留已经通过的代码审核。
 - 主产出及 PM 验收项通过模板稳定键识别。按用户确认，前置条件排除本次 PM 验收项；其余未满足项必须有精确 precondition 键、说明及同项目后续卡片。检查结果加入 evidence，不能由调用者伪造“已通过”。
@@ -21,6 +22,7 @@
 - conditional 不算必需验证通过。已终结的交付不能继续改结论，需要新交付版本；每个 Run 只提交一次审核，请求重放由外层幂等处理。
 - 第二轮起沿用问题描述（去除首尾空白）作为复查匹配依据；新增非 pre_existing 问题必须 critical 且有 proof。此处不做语义相似度判定。
 - 达到上限且仍为 reject 或 conditional 时，在下一轮开始前生成阻塞 Decision、验证项进入 waiting_decision，当前审核 Run 以 blocked 结束；先发 review_submitted（rework_allowed=false），再发 decision_requested，不创建返工 Run。最后一轮 pass 正常通过；换新 Run 不能绕过上限。不存在用户可写的“自动通过”开关。
+- 最后一轮 pass 后，新交付同样检查累计预算；已用尽时立即从 ready 经 review_limit_exceeded 进入 waiting_decision，生成 trigger=review_limit 的 Decision，先发 delivery_submitted 再发 decision_requested。仅结束验证方正在运行的 Run，保留已结束 Run 和产出者 Run；后续交付保留并复用现有 open / provisional 上限 Decision。恢复可从最近已完成审核 Run 取快照创建新 Run，无需把旧 Run 改写为 blocked。
 - 上限 Decision 带控制面写入的 trigger=review_limit；普通 requestDecision 不接受该标记。Office 记录 pause 时用 provisional 保持阻塞，发 decision_provisionally_resolved，不恢复或排 Run；之后可在同一 Decision 上确认 raise_limit。raise_limit 不直接改上限：审核轮次仍用尽时继续等待，直到 Ops／人用 updateWorkItem 放宽且没有其他阻塞，才 ready 并排新 decision_resumed Run。先放宽后拍板同样可恢复。reject 后仍需新交付；conditional 可继续审核原交付。
 
 ## 验证与边界
@@ -48,7 +50,8 @@
 - Office/Operations 共用 pm 角色：Office 是常驻 PM 且 Token 允许 record_decision；Ops 是不具备该工具许可的常驻 PM。工作项级 PM 验收 Assignment 不能代替 Office。实际 Token 授权仍由认证层核实。
 - reportBlocker 的普通阻塞由 PM／人用 updateWorkItem(status=in_progress) 确认解除，仅从 blocked 经 resume 迁移。关联此工作项的 open / provisional 阻塞 Decision、open HumanAction 或用尽的审核轮次都会阻止恢复；不能用此入口改写其他状态。已有 Run 保持运行，若之前以 blocked 结束且无其他未结束 Run，则排新的 queued / followup Run。
 - category 的准确性由上层受控输入/策略保证；已标记为敏感类别的请求只能选择 human，本实现不做自然语言意图分类。batch 是批次标识，多条决定以同一标识关联，未增加批量 RPC。
-- 工作项级 Assignment 请求阻塞拍板时，自动将自身工作项去重并入 affected_work_items，再结束相关 running Run；解决最后一个阻塞原因且审核预算充足后，已有执行历史的责任上下文生成新的 queued Run，复用 Assignment／Session 和最近 blocked Run 的版本快照。没有历史快照时只返回触发事件，后续调度负责初始配置；不启动 Harness、不按门铃。
+- reportBlocker、阻塞 requestDecision 和包含自身工作项的 requestHumanAction 在暂停自身之前调用共用启动校验；不会代为启动其他 Assignment 的工作项。不能暂停时错误包含工作项编号、类型和状态。
+- 工作项级 Assignment 请求阻塞拍板时，自动将自身可执行工作项去重并入 affected_work_items，再结束相关 running Run；produce 已 delivered / accepted 时不自动并入也不结束自身 Run，显式暂停则拒绝。解决最后一个阻塞原因且审核预算充足后，已有执行历史的责任上下文生成新的 queued Run，复用 Assignment／Session 和最近 blocked Run 的版本快照（上限拍板也可沿用已完成的审核 Run）。没有历史快照时只返回触发事件，后续调度负责初始配置；不启动 Harness、不按门铃。
 - 多个 Decision/HumanAction 同时阻塞同一工作项时，不因其中一项完成就提前恢复；恢复事件的 resume_work_items（包括 completeHumanAction）只列实际恢复项。对同一个已自动结束的 blocked Run 再 finish_run(blocked) 为无副作用确认。
 - 评论识别 C-n、C-n#m、q(n)、h(n)、D-n 以及 GitHub 风格 pull / GitLab merge_requests 链接；跨卡引用不会授予跨卡修改权限。引用解析不发网络请求。
 - token_requests 只有签发所需元数据，token_id 包含项目和 Assignment，不含随机 Token 值。调用方须将签发和 Assignment 记录作为同一提交单元组装；现有 store 的独立签发 API 如何接入事务由后续组装处理，本 PR 不改 store。
