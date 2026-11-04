@@ -1,4 +1,6 @@
 export * from "./card-derived.js";
+export * from "./commands/attachments.js";
+export * from "./commands/coordination.js";
 export type {
   CommandEffect,
   CommandPorts,
@@ -7,6 +9,9 @@ export type {
   TokenRequest,
 } from "./commands/core.js";
 export * from "./commands/delivery.js";
+export * from "./commands/pm.js";
+export * from "./commands/queries.js";
+export * from "./commands/runtime.js";
 export * from "./derived.js";
 export * from "./entities.js";
 export * from "./errors.js";

@@ -1,6 +1,8 @@
 # Cardigan · 多 Agent 协作开发系统开发方案
 
-- 版本：v0.6.5（2026-11-04）
+- 版本：v0.6.6（2026-11-04）
+  - v0.6.6：M1.3 协作命令：明确敏感决策分类、Run 心跳/上限审计、阻塞后新建 queued Run、PM Office 权限来源及 Token 签发意图；不启动运行时。
+  - v0.6.5（2026-11-04）
   - v0.6.5：M1.3 审核修订：最后一轮 reject / conditional 均转阻塞拍板；完成申请目标失效后验证项回到 todo；supersedes 只指向同类上一版，审核事件先于拍板请求。
   - v0.6.4（2026-11-04）
   - v0.6.4：M1.3 交付命令：完成申请前置检查排除本次完成审核工作项（用户确认），区分产出与完成申请版本，明确事务外校验/事务内归约和结构化遗留依据。
@@ -301,6 +303,8 @@ Standing Assignment (scope=project): PM Office, PM Ops — not tied to a WorkIte
 - `kind`：`initial` | `rework` | `decision_resumed` | `followup` | `fix`
 - `status`、`model`
 - `started_at?`、`finished_at?`、`outcome`、`summary`
+- `heartbeat_at?`、`heartbeat_note?`：仅更新运行记录，不生成时间线巡检消息。
+- `review_limit_changes[]?`：记录 `event_id`、新上限、操作者和时间；存在历史 Run 时，放宽动作记在该 Assignment 最近的 Run 上。
 - 约束：`UNIQUE(assignment_id, trigger_event_id)`，用于幂等
 
 **TimelineEntry**
@@ -345,6 +349,7 @@ Standing Assignment (scope=project): PM Office, PM Ops — not tied to a WorkIte
 
 - `id`、`key`（人类可读的编号，例如 `q(280)`。由 Cardigan 生成，项目内唯一、不复用；文档里引用这个编号）、`card_id?`（为空表示项目级决定）、`raised_by`
 - `kind`：`choose`（在选项中选择）| `approve`（批准某个对象，绑定到交付或 SHA）
+- `category?`：`general | spending | account | permission | data_deletion`。创建命令要求显式分类，后四类只能由 human 拍板；domain 不从自由文本猜测分类。
 - 内容：`question`、`context`、`options[]`（每项 `{key, description, impact}`）、`recommended`、`latest_by?`、`preconditions?`
 - 影响：`affected_cards[]`（可以跨卡）、`affected_work_items[]`、`blocking`
 - `decider`（必填）：`human` | `role:<id>`。花钱、账号、权限、删除数据这几类只能由人拍板
@@ -493,6 +498,7 @@ todo / ready / in_progress / failed / blocked / waiting_decision --cancel--> can
 
 1. 控制面持久化条目和 Event，分配卡片内序号 `seq`。
 2. Router 计算受影响的 Assignment，必要时创建 Run（`UNIQUE(assignment_id, trigger_event_id)` 保证幂等）。
+   - M1 的阻塞拍板会结束受影响的 running Run；解决最后一个阻塞原因时，可从最近的 blocked Run 快照生成新的 `decision_resumed` / queued 记录，沿用同一 Assignment 的 Role、模型和 CLI 版本。Router 复用已有的 `(assignment_id, trigger_event_id)`，不重复创建；没有历史执行快照时由后续调度器提供初始配置。
 3. Dispatcher 通过 Runtime Adapter 发送门铃。
 4. Agent 调用 `get_updates` 读取完整内容，再调用 `ack_events` 推进游标。
 5. 没有 ACK 时：
@@ -731,6 +737,7 @@ Agent 只通过 Card MCP 读写，看板界面只服务你一个人，所以第�
 - 写操作的身份由 Token 决定，不信 Agent 在参数里自报的身份。
 - 写类工具接受 `idempotency_key`；同一个键配不同的请求内容判为错误，而不是覆盖。
 - Token 绑定 `(assignment_id, role_version, allowed_tools)`，Session 被替换时作废。
+  - 纯函数 assign 输出 Assignment 和 Token 签发意图（含项目内唯一责任引用、Role 版本、工具集合）；Token 的随机材料、哈希及同事务存储由适配层处理，不进入 domain 输入或输出。
 - 模型 Provider 的认证和 MCP 认证相互独立；接入是否成功，以实际调用 `whoami` 的结果为准（0.4）。
 - 第一版可以用无状态的 Streamable HTTP：每个请求独立认证，写操作重试依靠 `idempotency_key`。
 - 服务只监听局域网接口，不对公网开放；不信任的网络环境加 TLS 或走 Tailscale 之类的通道。
