@@ -1,4 +1,16 @@
 export {
+  type AssignmentIdentity,
+  type AssignmentMcpEndpoint,
+  type AssignmentRoleInput,
+  type CompileAssignmentInput,
+  type CompiledAssignmentLaunch,
+  compileAssignmentLaunch,
+  LAUNCH_SCRIPT_NAME,
+  MCP_SERVER_NAME,
+  TOKEN_ENV_VAR,
+  TOKEN_FILE_NAME,
+} from "./assignment.js";
+export {
   type CompiledFile,
   type CompiledLaunch,
   type CompileLaunchInput,
@@ -20,6 +32,14 @@ export {
   importClaudeSettings,
 } from "./import-claude-settings.js";
 export { REDACTED, redactLaunch } from "./redact.js";
+export {
+  AGENT_PROTOCOL,
+  corePromptFor,
+  type DefaultRoleId,
+  type DefaultRoleOptions,
+  defaultRoles,
+  firstPrompt,
+} from "./role-pack.js";
 export {
   type LaunchConfig,
   type LaunchProfileDefinition,
