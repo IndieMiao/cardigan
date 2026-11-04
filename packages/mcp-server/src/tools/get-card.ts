@@ -1,4 +1,4 @@
-import type { CardId, CardStatus, Delivery } from "@cardigan/domain";
+import type { CardId, CardStatus, CardView, Delivery } from "@cardigan/domain";
 import {
   deriveCardFields,
   deriveCardStatus,
@@ -47,16 +47,19 @@ export const getCardTool = defineTool({
       completion,
     );
 
-    const derived = deriveCardFields({
-      card,
-      work_items,
-      assignments,
-      deliveries,
-      reviews,
-      decisions,
-      human_actions,
-      status,
-    });
+    // Typed against CardView so the tool cannot drift from the domain's
+    // derived-field types (M1.2b).
+    const derived: Pick<CardView, "waiting_on" | "next_owners" | "why"> =
+      deriveCardFields({
+        card,
+        work_items,
+        assignments,
+        deliveries,
+        reviews,
+        decisions,
+        human_actions,
+        status,
+      });
 
     return {
       card: {

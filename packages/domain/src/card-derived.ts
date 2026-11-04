@@ -1,3 +1,4 @@
+import type { NextOwnerItem, WaitingOnItem } from "./card-derived-types.js";
 import { deriveCardStatus } from "./derived.js";
 import type {
   Assignment,
@@ -12,6 +13,8 @@ import type {
 import type { CardStatus, DecisionStatus } from "./states.js";
 import { type CardTemplate, developmentCardTemplate } from "./templates.js";
 
+export type { NextOwnerItem, WaitingOnItem } from "./card-derived-types.js";
+
 /**
  * Card fields that are computed from the card's items rather than stored
  * (`waiting_on`, `next_owners`, `why`, §4.3). Kept in its own file so the
@@ -24,19 +27,6 @@ import { type CardTemplate, developmentCardTemplate } from "./templates.js";
 
 /** `why` is shown in a single list row, so it stays short (§8.2). */
 export const WHY_MAX_LENGTH = 40;
-
-export interface WaitingOnItem {
-  readonly kind: "decision" | "human_action" | "review" | "blocked";
-  /** The referenced entity: `q(1)`, `h(2)`, `W-3`, `C-4#5`. */
-  readonly ref: string;
-  /** Short human label, e.g. `等你拍板 q(1)`. */
-  readonly label: string;
-}
-
-export interface NextOwnerItem {
-  readonly kind: "assignment" | "role" | "human";
-  readonly ref: string;
-}
 
 export interface CardDerivedFields {
   readonly waiting_on: readonly WaitingOnItem[];
