@@ -9,6 +9,7 @@ export type {
   TokenRequest,
 } from "./commands/core.js";
 export * from "./commands/delivery.js";
+export * from "./commands/launch.js";
 export * from "./commands/pm.js";
 export * from "./commands/queries.js";
 export * from "./commands/runtime.js";
@@ -17,6 +18,8 @@ export * from "./entities.js";
 export * from "./errors.js";
 export * from "./ids.js";
 export * from "./ports.js";
+export * from "./role.js";
+export * from "./runtime-port.js";
 export * from "./states.js";
 export * from "./templates.js";
 export * from "./transitions.js";

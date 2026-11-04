@@ -50,6 +50,7 @@ export interface CommandEffect<T> {
 class Rejection {
   constructor(readonly error: DomainError) {}
 }
+type CommandName = E.ToolName | "queue_run" | "dispatch_run";
 export function ensure(
   condition: unknown,
   code: ErrorCode,
@@ -106,18 +107,25 @@ export class CommandDraft {
   constructor(
     readonly state: CommandState,
     readonly actor: E.Actor,
-    tool: E.ToolName,
+    tool: CommandName,
     readonly ports?: CommandPorts,
   ) {
+    const hostOnly = ["queue_run", "dispatch_run"].includes(tool);
     ensure(
-      actor.project_id === state.project_id && actor.kind !== "system",
+      actor.project_id === state.project_id &&
+        (actor.kind !== "system" || hostOnly),
       "unauthorized",
       "Actor cannot access this project",
+    );
+    ensure(
+      !hostOnly || actor.kind !== "assignment",
+      "unauthorized",
+      "Only the host can manage launch runs",
     );
     this.author =
       actor.kind === "assignment"
         ? `assignment:${actor.assignment_id}`
-        : "human";
+        : actor.kind;
     if (actor.kind === "assignment") {
       this.assignment = state.assignments.find(
         (a) => a.id === actor.assignment_id,
@@ -139,8 +147,8 @@ export class CommandDraft {
           r.role_id === actor.role_id && r.role_version === actor.role_version,
       );
       ensure(
-        role?.allowed_tools.includes(tool) &&
-          actor.allowed_tools.includes(tool),
+        role?.allowed_tools.includes(tool as E.ToolName) &&
+          actor.allowed_tools.includes(tool as E.ToolName),
         "forbidden_tool",
         `Tool ${tool} is not allowed`,
       );
@@ -312,7 +320,7 @@ export class CommandDraft {
 export function command<T>(
   state: CommandState,
   actor: E.Actor,
-  tool: E.ToolName,
+  tool: CommandName,
   ports: CommandPorts | undefined,
   operation: (draft: CommandDraft) => T,
 ): Result<CommandEffect<T>> {
