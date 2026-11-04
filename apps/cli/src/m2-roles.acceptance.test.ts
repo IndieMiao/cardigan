@@ -12,6 +12,7 @@ import {
   firstPrompt,
   type Harness,
   parseLaunchConfig,
+  START_FILE_NAME,
 } from "@cardigan/roles";
 import {
   getRoleVersion,
@@ -340,6 +341,8 @@ test.each(harnesses)(
       JSON.stringify({ args: output.args, env: output.env }),
     ).not.toContain(secret);
     await writeFile(output.token_file, token, { mode: 0o600 });
+    // The wrapper waits for the dispatch sentinel (see START_FILE_NAME).
+    await writeFile(join(root, "run", START_FILE_NAME), "", { mode: 0o600 });
     const bin = join(root, "bin");
     await mkdir(bin);
     await writeFile(

@@ -22,6 +22,7 @@ import {
   type LaunchConfig,
   resolveProfile,
   SECRETS_FILE_NAME,
+  START_FILE_NAME,
   TOKEN_FILE_NAME,
 } from "@cardigan/roles";
 import {
@@ -261,7 +262,7 @@ async function writeCompiledFiles(
  * removed from the run directory even if `launch.sh` never ran.
  */
 async function scrubRunDirectory(runDir: string): Promise<void> {
-  for (const name of [TOKEN_FILE_NAME, SECRETS_FILE_NAME]) {
+  for (const name of [TOKEN_FILE_NAME, SECRETS_FILE_NAME, START_FILE_NAME]) {
     await rm(join(runDir, name), { force: true });
   }
 }
@@ -559,6 +560,9 @@ async function startAssignmentSteps(
         ports,
       ),
   });
+
+  // The Run is dispatched: let the wrapper start the Agent (M2 §4 step 8).
+  await writeFile(join(dirs.runDir, START_FILE_NAME), "", { mode: 0o600 });
 
   const started = requireAssignment(
     store,

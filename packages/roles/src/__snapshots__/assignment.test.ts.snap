@@ -129,6 +129,20 @@ if [ ! -f "$first_file" ]; then
 fi
 first_message=$(cat "$first_file"; printf x)
 first_message=\${first_message%x}
+# Wait for the host to dispatch this Run (see START_FILE_NAME). The sentinel is
+# written only after the Run is dispatched, so the Agent can never talk to the
+# project before there is a Run to acknowledge.
+start_file='/srv/cardigan/runs/A-12/start'
+waited=0
+while [ ! -f "$start_file" ]; do
+  if [ "$waited" -ge 1200 ]; then
+    echo "cardigan: the host never dispatched this Run: $start_file" >&2
+    exit 75
+  fi
+  sleep 0.1
+  waited=$((waited + 1))
+done
+rm -f "$start_file"
 exec 'claude' '--settings' '/srv/cardigan/runs/A-12/cardigan-assignment.claude-agent.claude-settings.json' '--model' 'opus' '--strict-mcp-config' '--mcp-config' '/srv/cardigan/runs/A-12/mcp.json' '--append-system-prompt-file' '/srv/cardigan/runs/A-12/core.md' '--allowedTools' 'mcp__card__whoami,mcp__card__get_card,mcp__card__get_updates,mcp__card__ack_events,mcp__card__submit_delivery' "$first_message"
 ",
       "mode": "700",
@@ -264,6 +278,20 @@ if [ ! -f "$first_file" ]; then
 fi
 first_message=$(cat "$first_file"; printf x)
 first_message=\${first_message%x}
+# Wait for the host to dispatch this Run (see START_FILE_NAME). The sentinel is
+# written only after the Run is dispatched, so the Agent can never talk to the
+# project before there is a Run to acknowledge.
+start_file='/srv/cardigan/runs/A-12/start'
+waited=0
+while [ ! -f "$start_file" ]; do
+  if [ "$waited" -ge 1200 ]; then
+    echo "cardigan: the host never dispatched this Run: $start_file" >&2
+    exit 75
+  fi
+  sleep 0.1
+  waited=$((waited + 1))
+done
+rm -f "$start_file"
 exec 'codex' '--profile' 'codex-gateway' '-m' 'gpt-6-astra' "$first_message"
 ",
       "mode": "700",
@@ -386,6 +414,20 @@ if [ ! -f "$first_file" ]; then
 fi
 first_message=$(cat "$first_file"; printf x)
 first_message=\${first_message%x}
+# Wait for the host to dispatch this Run (see START_FILE_NAME). The sentinel is
+# written only after the Run is dispatched, so the Agent can never talk to the
+# project before there is a Run to acknowledge.
+start_file='/srv/cardigan/runs/A-12/start'
+waited=0
+while [ ! -f "$start_file" ]; do
+  if [ "$waited" -ge 1200 ]; then
+    echo "cardigan: the host never dispatched this Run: $start_file" >&2
+    exit 75
+  fi
+  sleep 0.1
+  waited=$((waited + 1))
+done
+rm -f "$start_file"
 exec 'pi' '--provider' 'deepseek' '--model' 'deepseek-flash' '--append-system-prompt' '/srv/cardigan/runs/A-12/core.md' "$first_message"
 ",
       "mode": "700",

@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -87,6 +88,11 @@ process.stdout.write(JSON.stringify({
         env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
         stdio: ["ignore", "pipe", "pipe"],
       });
+      // The host writes the sentinel after dispatchRun commits; the wrapper
+      // waits for it before starting the CLI.
+      setTimeout(() => {
+        void writeFile(join(root, "run", "start"), "");
+      }, 150);
       let out = "";
       let err = "";
       child.stdout.on("data", (chunk: Buffer) => {
@@ -168,6 +174,64 @@ test("the message is read from first.md at start, not embedded in the script", a
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("the wrapper waits for the dispatch sentinel before starting the CLI", async () => {
+  const harness = "pi" as const;
+  const root = await mkdtemp(join(tmpdir(), "cardigan-first-prompt-"));
+  try {
+    const compiled = compileAssignmentLaunch({
+      assignment: { assignment_id: "A-1", run_id: "R-1" },
+      role: {
+        role_id: "coder",
+        harness,
+        launch_profile: profileFor[harness],
+        core_prompt: "Core prompt.",
+        allowed_tools: ["whoami"],
+        worktree: "none",
+      },
+      launch,
+      mcp: { url: "http://127.0.0.1:3004/mcp" },
+      run_dir: join(root, "run"),
+      work_dir: root,
+      first_prompt: message,
+      secrets: {},
+    });
+    for (const file of compiled.files) {
+      await mkdir(dirname(file.path), { recursive: true });
+      await writeFile(file.path, file.content, { mode: file.mode });
+    }
+    await writeFile(compiled.token_file, "fictional-token\n", { mode: 0o600 });
+    const bin = join(root, "bin");
+    await mkdir(bin);
+    // The stand-in CLI announces itself; the wrapper must not run it yet.
+    const marker = join(root, "ran");
+    await writeFile(
+      join(bin, compiled.command),
+      `#!/usr/bin/env node\nrequire("node:fs").writeFileSync(${JSON.stringify(marker)}, "ran");\n`,
+      { mode: 0o700 },
+    );
+
+    const child = spawn(compiled.launch_script, [], {
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      // No dispatch yet: the Agent has not been started, so it cannot call the
+      // project before its Run exists.
+      expect(existsSync(marker)).toBe(false);
+
+      // The host dispatched the Run.
+      await writeFile(join(root, "run", "start"), "");
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      expect(existsSync(marker)).toBe(true);
+    } finally {
+      child.kill("SIGKILL");
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}, 20_000);
 
 test("a missing first.md fails the start instead of launching an idle CLI", async () => {
   const harness = "codex" as const;
