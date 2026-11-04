@@ -43,7 +43,7 @@ export function authenticate(
     return unauthorized("invalid bearer token");
   }
 
-  const lookup = store.uow.run((tx) => {
+  const lookup = store.uow.read((tx) => {
     const assignment = tx.assignments.get(
       record.project_id,
       record.assignment_id,

@@ -16,7 +16,7 @@ export const whoamiTool = defineTool({
     const { assignment, actor, role } = identity;
     const work_item =
       assignment.scope === "work_item"
-        ? store.uow.run((tx) =>
+        ? store.uow.read((tx) =>
             tx.work_items.get(actor.project_id, assignment.work_item_id),
           )
         : undefined;
