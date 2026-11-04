@@ -3,6 +3,9 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "scripts": {
+    "test:types": "tsc -p tsconfig.test.json"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
