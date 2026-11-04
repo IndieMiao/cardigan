@@ -49,9 +49,15 @@ process.stdout.write("released\\n");
 `;
 }
 
-export function withTempStore<T>(run: (store: Store, dataDir: string) => T): T {
+export function withTempStore<T>(
+  run: (store: Store, dataDir: string) => T,
+  options: { readonly clock?: { now(): string } } = {},
+): T {
   const dataDir = mkdtempSync(join(tmpdir(), "cardigan-store-"));
-  const store = Store.open({ dataDir });
+  const store = Store.open({
+    dataDir,
+    ...(options.clock === undefined ? {} : { clock: options.clock }),
+  });
   try {
     return run(store, dataDir);
   } finally {

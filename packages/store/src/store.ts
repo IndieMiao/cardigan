@@ -87,6 +87,17 @@ export interface IdempotentParams<Request> {
   readonly request: Request;
 }
 
+export interface ProjectRecord {
+  readonly id: ProjectId;
+  readonly name: string;
+  readonly created_at: string;
+}
+
+export interface ProjectCreateInput {
+  readonly id: ProjectId;
+  readonly name?: string;
+}
+
 export interface IdempotentResult<T> {
   readonly value: T;
   /** True when the stored response was returned instead of running again. */
@@ -339,6 +350,58 @@ export class Store {
         value: { value, replayed: false },
       } satisfies Result<IdempotentResult<T>>;
     });
+  }
+
+  /**
+   * Record a project id. Fails instead of overwriting an existing project, so a
+   * typo in `project create` is visible rather than silently rebranding.
+   */
+  createProject(input: ProjectCreateInput): Result<ProjectRecord> {
+    const existing = this.getProject(input.id);
+    if (existing !== undefined) {
+      return {
+        ok: false,
+        error: {
+          code: "validation_failed",
+          message: `project ${input.id} already exists`,
+          details: { project_id: input.id },
+        },
+      };
+    }
+    const record: ProjectRecord = {
+      id: input.id,
+      name: input.name ?? input.id,
+      created_at: this.#clock.now(),
+    };
+    this.#db
+      .prepare("INSERT INTO projects (id, name, created_at) VALUES (?, ?, ?)")
+      .run(record.id, record.name, record.created_at);
+    return { ok: true, value: record };
+  }
+
+  getProject(id: ProjectId): ProjectRecord | undefined {
+    const row = this.#db
+      .prepare("SELECT id, name, created_at FROM projects WHERE id = ?")
+      .get(id) as { id: string; name: string; created_at: string } | undefined;
+    return row === undefined
+      ? undefined
+      : { id: row.id as ProjectId, name: row.name, created_at: row.created_at };
+  }
+
+  listProjects(): ProjectRecord[] {
+    return this.#db
+      .prepare(
+        "SELECT id, name, created_at FROM projects ORDER BY created_at, id",
+      )
+      .all()
+      .map((row) => {
+        const record = row as { id: string; name: string; created_at: string };
+        return {
+          id: record.id as ProjectId,
+          name: record.name,
+          created_at: record.created_at,
+        };
+      });
   }
 
   issueToken(input: IssueTokenInput): IssuedToken {

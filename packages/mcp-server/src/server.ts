@@ -31,6 +31,11 @@ export interface RunningServer {
 
 const MCP_PATH = "/mcp";
 
+/** IPv6 literals need brackets in a URL and in a Host header. */
+function bracket(host: string): string {
+  return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+}
+
 /**
  * Stateless Streamable HTTP MCP endpoint with Bearer Token auth (§9.1).
  *
@@ -145,7 +150,7 @@ export async function startMcpServer(
   return {
     host,
     port: address.port,
-    url: `http://${host}:${address.port}${MCP_PATH}`,
+    url: `http://${bracket(host)}:${address.port}${MCP_PATH}`,
     close: () =>
       new Promise<void>((resolve, reject) => {
         http.close((error) => (error ? reject(error) : resolve()));
@@ -176,7 +181,15 @@ async function serveMcp(
     enableJsonResponse: true,
     enableDnsRebindingProtection: true,
     // The Host header must name the loopback address we listen on.
-    allowedHosts: [host, `${host}:${port}`, "localhost", `localhost:${port}`],
+    // Include the bracketed IPv6 form (`[::1]:3004`) as well.
+    allowedHosts: [
+      host,
+      `${host}:${port}`,
+      bracket(host),
+      `${bracket(host)}:${port}`,
+      "localhost",
+      `localhost:${port}`,
+    ],
   });
 
   res.on("close", () => {
