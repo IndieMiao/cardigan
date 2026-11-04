@@ -1,0 +1,114 @@
+import { type Result, validationFailed } from "./errors.js";
+
+declare const idBrand: unique symbol;
+export type Id<Kind extends string> = string & { readonly [idBrand]: Kind };
+const formats = {
+  card: ["C-", ""],
+  work_item: ["W-", ""],
+  assignment: ["A-", ""],
+  run: ["R-", ""],
+  delivery: ["D-", ""],
+  review: ["V-", ""],
+  decision: ["q(", ")"],
+  human_action: ["h(", ")"],
+} as const;
+export type ReadableIdKind = keyof typeof formats;
+export type CardId = Id<"card">;
+export type WorkItemId = Id<"work_item">;
+export type AssignmentId = Id<"assignment">;
+export type RunId = Id<"run">;
+export type DeliveryId = Id<"delivery">;
+export type ReviewId = Id<"review">;
+export type DecisionId = Id<"decision">;
+export type HumanActionId = Id<"human_action">;
+export type TimelineEntryId = Id<"timeline_entry">;
+export type EventId = Id<"event">;
+// These identifiers have no textual format specified in M1.1.
+export type ProjectId = string;
+export type RoleId = string;
+export type AttachmentId = string;
+export type MachineId = string;
+
+const positiveInteger = (value: number) =>
+  Number.isSafeInteger(value) && value > 0;
+const decimal = (value: string) =>
+  /^[1-9][0-9]*$/u.test(value) &&
+  positiveInteger(Number(value)) &&
+  String(Number(value)) === value;
+
+export function formatId<K extends ReadableIdKind>(
+  kind: K,
+  sequence: number,
+): Result<Id<K>> {
+  if (!Object.hasOwn(formats, kind)) return validationFailed("Unknown ID kind");
+  if (!positiveInteger(sequence))
+    return validationFailed("ID sequence must be a positive safe integer");
+  const [prefix, suffix] = formats[kind];
+  return { ok: true, value: `${prefix}${sequence}${suffix}` as Id<K> };
+}
+
+export function parseId<K extends ReadableIdKind>(
+  kind: K,
+  input: unknown,
+): Result<{ id: Id<K>; sequence: number }> {
+  if (!Object.hasOwn(formats, kind)) return validationFailed("Unknown ID kind");
+  if (typeof input !== "string") return validationFailed("ID must be a string");
+  const [prefix, suffix] = formats[kind];
+  const digits = input.slice(
+    prefix.length,
+    suffix ? -suffix.length : undefined,
+  );
+  if (
+    !input.startsWith(prefix) ||
+    !input.endsWith(suffix) ||
+    !decimal(digits)
+  ) {
+    return validationFailed(`Invalid ${kind} ID`);
+  }
+  return { ok: true, value: { id: input as Id<K>, sequence: Number(digits) } };
+}
+
+export function formatTimelineEntryId(
+  card_id: CardId,
+  sequence: number,
+): Result<TimelineEntryId> {
+  if (!parseId("card", card_id).ok || !positiveInteger(sequence))
+    return validationFailed("Invalid timeline entry ID components");
+  return { ok: true, value: `${card_id}#${sequence}` as TimelineEntryId };
+}
+
+export function parseTimelineEntryId(
+  input: unknown,
+): Result<{ id: TimelineEntryId; card_id: CardId; sequence: number }> {
+  if (typeof input !== "string")
+    return validationFailed("Timeline entry ID must be a string");
+  const parts = input.split("#");
+  const card = parseId("card", parts[0]);
+  const sequence = parts[1];
+  if (
+    parts.length !== 2 ||
+    !card.ok ||
+    sequence === undefined ||
+    !decimal(sequence)
+  ) {
+    return validationFailed("Invalid timeline entry ID");
+  }
+  return {
+    ok: true,
+    value: {
+      id: input as TimelineEntryId,
+      card_id: card.value.id,
+      sequence: Number(sequence),
+    },
+  };
+}
+
+// Canonical uppercase Crockford Base32; the first digit prevents 128-bit overflow.
+// Generation (time/randomness) belongs to the allocator adapter, never this package.
+export function parseEventId(input: unknown): Result<EventId> {
+  return typeof input === "string" &&
+    input.length === 26 &&
+    /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/u.test(input)
+    ? { ok: true, value: input as EventId }
+    : validationFailed("Event ID must be a canonical ULID");
+}
