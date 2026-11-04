@@ -4,6 +4,7 @@ import { CliError, EXIT } from "./errors.js";
 import { findExecutable } from "./fs-io.js";
 import type { CliIo } from "./io.js";
 import type { LaunchPaths } from "./paths.js";
+import { scanSettingsFiles } from "./runtime-files.js";
 
 export async function checkProfile(
   paths: LaunchPaths,
@@ -60,6 +61,18 @@ export async function checkProfile(
     lines.push(`CLI：${executable}`);
     const version = await probeVersion(executable, io);
     lines.push(`版本：${version ?? "（无法获取，可忽略）"}`);
+  }
+
+  // Settings files whose owner process is gone cannot be trusted to disappear
+  // on their own; the next launch removes them.
+  const { stale } = await scanSettingsFiles(paths.runtimeDir);
+  lines.push(
+    stale.length === 0
+      ? "残留的临时 settings 文件：（无）"
+      : `残留的临时 settings 文件：${stale.length} 个（下一次 cardigan launch 会自动清理）`,
+  );
+  for (const path of stale) {
+    lines.push(`  ${path}`);
   }
 
   io.stdout(lines.join("\n"));

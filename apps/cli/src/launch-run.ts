@@ -6,8 +6,10 @@ import {
 import { loadConfig, loadSecrets } from "./config.js";
 import { CliError, EXIT } from "./errors.js";
 import { removeFileIfExists, writeFileWithMode } from "./fs-io.js";
-import type { CliIo } from "./io.js";
+import type { CliIo, SpawnedChild } from "./io.js";
 import type { LaunchPaths } from "./paths.js";
+import { newInstanceId, removeStaleSettingsFiles } from "./runtime-files.js";
+import { forwardSignals } from "./signals.js";
 
 export interface RunOptions {
   readonly profile: string;
@@ -16,19 +18,31 @@ export interface RunOptions {
   readonly extra: readonly string[];
 }
 
+export interface RunDeps {
+  /** Owner pid of this launch; embedded in generated file names. */
+  readonly pid?: number;
+  /** Random suffix for generated file names; defaults to 8 random bytes. */
+  readonly randomHex?: string;
+  /** Liveness probe used to find settings files of dead launches. */
+  readonly isAlive?: (pid: number) => boolean;
+}
+
 export async function runProfile(
   paths: LaunchPaths,
   io: CliIo,
   parsed: RunOptions,
+  deps: RunDeps = {},
 ): Promise<number> {
   const config = await loadConfig(paths);
   const secrets = await loadSecrets(paths, io);
+  const instanceId = newInstanceId(deps.pid ?? process.pid, deps.randomHex);
   const compiled = compileLaunch({
     config,
     profile: parsed.profile,
     secrets,
     runtimeDir: paths.runtimeDir,
     extraArgs: parsed.extra,
+    instanceId,
   });
 
   if (parsed.printOnly) {
@@ -36,7 +50,13 @@ export async function runProfile(
     return EXIT.ok;
   }
 
-  return launchCompiled(compiled, io, parsed.cwd ?? io.cwd);
+  return launchCompiled(
+    compiled,
+    io,
+    parsed.cwd ?? io.cwd,
+    paths.runtimeDir,
+    deps,
+  );
 }
 
 function formatCompiled(compiled: CompiledLaunch): string {
@@ -72,6 +92,8 @@ async function launchCompiled(
   compiled: CompiledLaunch,
   io: CliIo,
   cwd: string,
+  runtimeDir: string,
+  deps: RunDeps,
 ): Promise<number> {
   const env: Record<string, string> = {};
   for (const [name, value] of Object.entries(io.env)) {
@@ -81,24 +103,51 @@ async function launchCompiled(
   }
   Object.assign(env, compiled.env);
 
+  // A previous launch killed with SIGKILL cannot clean up after itself; do it
+  // here so its settings file cannot hold secrets on disk indefinitely.
+  if (compiled.files.length > 0) {
+    await removeStaleSettingsFiles(runtimeDir, deps.isAlive);
+  }
+
+  for (const file of compiled.files) {
+    await writeFileWithMode(file.path, file.content, file.mode);
+  }
+
+  let child: SpawnedChild;
   try {
-    for (const file of compiled.files) {
-      await writeFileWithMode(file.path, file.content, file.mode);
-    }
-    return await io.spawnInherit(compiled.command, compiled.args, { cwd, env });
+    child = io.spawnInherit(compiled.command, compiled.args, { cwd, env });
   } catch (error) {
-    if (isEnoent(error)) {
-      throw new CliError(
-        `没有找到 ${compiled.command}，先安装它（cardigan launch check ${compiled.profile} 会显示缺什么）`,
-        EXIT.notInstalled,
-      );
+    for (const file of compiled.files) {
+      await removeFileIfExists(file.path);
     }
-    throw error;
+    throw spawnFailure(compiled, error);
+  }
+
+  // Handlers are installed synchronously right after spawn, so no signal can be
+  // dispatched in between. Then the child owns the terminal: the parent ignores
+  // SIGINT/SIGQUIT (the terminal sends them to the child too), forwards
+  // SIGTERM/SIGHUP, and keeps waiting so the settings file outlives the CLI.
+  const disposeSignals = forwardSignals(child, io.signals);
+  try {
+    return await child.exit;
+  } catch (error) {
+    throw spawnFailure(compiled, error);
   } finally {
+    disposeSignals();
     for (const file of compiled.files) {
       await removeFileIfExists(file.path);
     }
   }
+}
+
+function spawnFailure(compiled: CompiledLaunch, error: unknown): unknown {
+  if (isEnoent(error)) {
+    return new CliError(
+      `没有找到 ${compiled.command}，先安装它（cardigan launch check ${compiled.profile} 会显示缺什么）`,
+      EXIT.notInstalled,
+    );
+  }
+  return error;
 }
 
 function isEnoent(error: unknown): boolean {

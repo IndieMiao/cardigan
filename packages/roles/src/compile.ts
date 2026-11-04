@@ -30,6 +30,13 @@ export interface CompileLaunchInput {
   readonly secrets: Readonly<Record<string, string>>;
   /** Directory for temporary files; the caller decides the location. */
   readonly runtimeDir: string;
+  /**
+   * Unique per launch, embedded in generated file names so two concurrent
+   * launches never share a file. The CLI passes `<pid>-<random hex>`; tests
+   * pass a fixed value. Defaults to `static` for callers that only inspect the
+   * compiled output (e.g. a dry run).
+   */
+  readonly instanceId?: string;
   /** Arguments after `--`, passed through to the harness CLI. */
   readonly extraArgs?: readonly string[];
 }
@@ -85,9 +92,11 @@ export function compileLaunch(input: CompileLaunchInput): CompiledLaunch {
     // that file outside the repository, with 0600, and deletes it after exit.
     // Provider env (including resolved secrets) lives in the file, not in the
     // process environment, so the gateway token is not visible in `ps e`.
+    // `<pid>-<random>` in the name keeps concurrent launches apart, and lets
+    // the next launch find files left behind by a process that no longer runs.
     const settingsPath = join(
       input.runtimeDir,
-      `${resolved.name}.claude-settings.json`,
+      `cardigan-${input.instanceId ?? "static"}.${resolved.name}.claude-settings.json`,
     );
     const settings = {
       env: { ...providerEnv, ...secretEnv },

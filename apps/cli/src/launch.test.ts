@@ -73,6 +73,42 @@ profiles:
     agent_dir: /srv/cardigan/pi-home
 `;
 
+/** A child process that exits with a fixed code and records kill() calls. */
+function fakeChild(
+  code: number,
+  options?: { pid?: number; kills?: NodeJS.Signals[] },
+): SpawnedChild {
+  return {
+    pid: options?.pid ?? 4242,
+    exit: Promise.resolve(code),
+    kill: (signal) => {
+      options?.kills?.push(signal);
+    },
+  };
+}
+
+/** Records installed signal handlers so tests can fire them by hand. */
+function fakeSignalHost(): SignalHost & { fire(signal: NodeJS.Signals): void } {
+  const handlers = new Map<NodeJS.Signals, Set<() => void>>();
+  return {
+    on: (signal, listener) => {
+      const set = handlers.get(signal) ?? new Set();
+      set.add(listener);
+      handlers.set(signal, set);
+      return set;
+    },
+    off: (signal, listener) => {
+      handlers.get(signal)?.delete(listener);
+      return handlers.get(signal);
+    },
+    fire: (signal) => {
+      for (const listener of [...(handlers.get(signal) ?? [])]) {
+        listener();
+      }
+    },
+  };
+}
+
 async function makeHarness(options?: {
   launchYaml?: string;
   secrets?: Record<string, string>;
@@ -121,20 +157,33 @@ async function makeHarness(options?: {
     },
     cwd: root,
     platform: "linux",
+    signals: fakeSignalHost(),
     stdout: (text) => out.push(text),
     stderr: (text) => err.push(text),
-    spawnInherit: async (command, args, spawnOptions) => {
-      const filesDuringSpawn = [];
-      for (const file of await listRuntimeFiles(join(runtimeDir, "cardigan"))) {
-        const info = await stat(file);
-        filesDuringSpawn.push({
-          path: file,
-          mode: info.mode & 0o777,
-          content: await readFile(file, "utf8"),
-        });
-      }
+    spawnInherit: (command, args, spawnOptions) => {
+      const filesDuringSpawn: Array<{
+        path: string;
+        mode: number;
+        content: string;
+      }> = [];
       spawns.push({ command, args, options: spawnOptions, filesDuringSpawn });
-      return 0;
+      return {
+        pid: 4242,
+        exit: (async () => {
+          for (const file of await listRuntimeFiles(
+            join(runtimeDir, "cardigan"),
+          )) {
+            const info = await stat(file);
+            filesDuringSpawn.push({
+              path: file,
+              mode: info.mode & 0o777,
+              content: await readFile(file, "utf8"),
+            });
+          }
+          return 0;
+        })(),
+        kill: () => {},
+      };
     },
     captureCommand: async (): Promise<CapturedOutput> => ({
       code: 0,
@@ -249,22 +298,29 @@ describe("cardigan launch --print", () => {
 describe("cardigan launch <profile>", () => {
   test("writes the settings file with 0600, then deletes it", async () => {
     const seen: Array<{ mode: number; content: string }> = [];
-    harness.io.spawnInherit = async (command, args, options) => {
+    override(harness, "spawnInherit", (command, args, options) => {
       expect(command).toBe("claude");
-      expect(args.slice(0, 2)).toEqual([
-        "--settings",
-        join(runtimeDirOf(harness), "claude-of.claude-settings.json"),
-      ]);
-      for (const file of await listRuntimeFiles(runtimeDirOf(harness))) {
-        const info = await stat(file);
-        seen.push({
-          mode: info.mode & 0o777,
-          content: await readFile(file, "utf8"),
-        });
-      }
+      expect(args[0]).toBe("--settings");
+      // The name carries this launch's pid and a random suffix, so two
+      // concurrent launches cannot share a file.
+      expect(args[1]).toMatch(
+        new RegExp(
+          `^${runtimeDirOf(harness)}/cardigan-${process.pid}-[0-9a-f]{8}\\.claude-of\\.claude-settings\\.json$`,
+        ),
+      );
       expect(options.env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
-      return 0;
-    };
+      const inspect = (async () => {
+        for (const file of await listRuntimeFiles(runtimeDirOf(harness))) {
+          const info = await stat(file);
+          seen.push({
+            mode: info.mode & 0o777,
+            content: await readFile(file, "utf8"),
+          });
+        }
+        return 0;
+      })();
+      return { pid: 4242, exit: inspect, kill: () => {} };
+    });
 
     expect(await harness.run(["launch", "claude-of"])).toBe(0);
 
@@ -281,18 +337,18 @@ describe("cardigan launch <profile>", () => {
   });
 
   test("returns the CLI exit code", async () => {
-    harness.io.spawnInherit = async () => 7;
+    override(harness, "spawnInherit", () => fakeChild(7));
     expect(await harness.run(["launch", "claude-of"])).toBe(7);
   });
 
   test("passes provider env and extra args for codex", async () => {
     let captured: SpawnInheritOptions | undefined;
     let capturedArgs: readonly string[] = [];
-    harness.io.spawnInherit = async (_command, args, options) => {
+    override(harness, "spawnInherit", (_command, args, options) => {
       capturedArgs = args;
       captured = options;
-      return 0;
-    };
+      return fakeChild(0);
+    });
 
     expect(
       await harness.run(["launch", "codex-yolo", "--", "exec", "do it"]),
@@ -314,10 +370,10 @@ describe("cardigan launch <profile>", () => {
 
   test("honours --cwd", async () => {
     let captured: SpawnInheritOptions | undefined;
-    harness.io.spawnInherit = async (_command, _args, options) => {
+    override(harness, "spawnInherit", (_command, _args, options) => {
       captured = options;
-      return 0;
-    };
+      return fakeChild(0);
+    });
     expect(await harness.run(["launch", "pi-deepseek", "--cwd", "/tmp"])).toBe(
       0,
     );
@@ -325,13 +381,9 @@ describe("cardigan launch <profile>", () => {
   });
 
   test("reports a missing CLI binary as exit 127", async () => {
-    harness.io.spawnInherit = async () => {
-      const error = new Error("spawn claude ENOENT") as Error & {
-        code: string;
-      };
-      error.code = "ENOENT";
-      throw error;
-    };
+    override(harness, "spawnInherit", () => {
+      throw enoentError("claude");
+    });
     expect(await harness.run(["launch", "claude-of"])).toBe(127);
     expect(harness.err.join("\n")).toContain("没有找到 claude");
     // The temp file is still removed after a failed spawn.
@@ -369,7 +421,7 @@ describe("cardigan launch <profile>", () => {
       launchYaml: "profiles:\n  pi-plain:\n    harness: pi\n",
       withSecretsFile: false,
     });
-    harness.io.spawnInherit = async () => 0;
+    override(harness, "spawnInherit", () => fakeChild(0));
     expect(await harness.run(["launch", "pi-plain"])).toBe(0);
   });
 
@@ -408,6 +460,31 @@ describe("cardigan launch check", () => {
     const code = await harness.run(["launch", "check", "claude-of"]);
     expect(harness.out.join("\n")).toContain("版本：1.2.3-fictional");
     expect(code).toBe(0);
+  });
+
+  test("reports settings files left behind by dead launches", async () => {
+    const runtime = runtimeDirOf(harness);
+    await mkdir(runtime, { recursive: true });
+    // A pid that has certainly exited: spawn a trivial process and wait for it.
+    const deadPid = await exitedPid();
+    await writeFile(
+      join(runtime, `cardigan-${deadPid}-deadbeef.fake.claude-settings.json`),
+      "{}\n",
+    );
+    await writeFile(
+      join(
+        runtime,
+        `cardigan-${process.pid}-cafebabe.fake.claude-settings.json`,
+      ),
+      "{}\n",
+    );
+
+    const code = await harness.run(["launch", "check", "claude-of"]);
+    const output = harness.out.join("\n");
+    expect(output).toContain("残留的临时 settings 文件：1 个");
+    expect(output).toContain(`cardigan-${deadPid}-deadbeef`);
+    expect(output).not.toContain("cafebabe");
+    expect(code).toBe(1); // still fails: no CLI on PATH, secret missing
   });
 
   test("fails on a secrets file with 0644 permissions", async () => {
@@ -494,3 +571,32 @@ describe("cardigan launch import-claude-settings", () => {
     expect(harness.err.join("\n")).toContain("--provider");
   });
 });
+
+function override(
+  harness: Harness,
+  key: "spawnInherit",
+  value: CliIo["spawnInherit"],
+): void {
+  Object.defineProperty(harness.io, key, {
+    value,
+    configurable: true,
+    writable: true,
+  });
+}
+
+function enoentError(command: string): Error & { code: string } {
+  const error = new Error(`spawn ${command} ENOENT`) as Error & {
+    code: string;
+  };
+  error.code = "ENOENT";
+  return error;
+}
+
+/** Run a process that exits immediately and return its (now dead) pid. */
+async function exitedPid(): Promise<number> {
+  const { spawn } = await import("node:child_process");
+  const child = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+  const pid = child.pid ?? 0;
+  await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+  return pid;
+}

@@ -37,13 +37,17 @@ export function createProcessIo(): CliIo {
     stderr: (text) => {
       process.stderr.write(`${text}\n`);
     },
-    spawnInherit: (command, args, options) =>
-      new Promise<number>((resolve, reject) => {
-        const child = spawn(command, args, {
-          cwd: options.cwd,
-          env: options.env,
-          stdio: "inherit",
-        });
+    signals: {
+      on: (signal, listener) => process.on(signal, listener),
+      off: (signal, listener) => process.off(signal, listener),
+    },
+    spawnInherit: (command, args, options) => {
+      const child = spawn(command, args, {
+        cwd: options.cwd,
+        env: options.env,
+        stdio: "inherit",
+      });
+      const exit = new Promise<number>((resolve, reject) => {
         child.once("error", reject);
         child.once("exit", (code, signal) => {
           if (signal !== null) {
@@ -52,7 +56,15 @@ export function createProcessIo(): CliIo {
           }
           resolve(code ?? EXIT.failure);
         });
-      }),
+      });
+      return {
+        pid: child.pid,
+        exit,
+        kill: (signal) => {
+          child.kill(signal);
+        },
+      };
+    },
     captureCommand: (command, args, options) => {
       const result = spawnSync(command, args, {
         cwd: options.cwd,

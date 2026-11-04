@@ -115,12 +115,21 @@ alias cardigan="node /path/to/cardigan/apps/cli/dist/bin.js"
 
 | Harness | 生成方式 |
 |---|---|
-| Claude Code | 在 `$XDG_RUNTIME_DIR/cardigan/`（没有就用 `~/.cache/cardigan/run/`）生成 `<启动配置>.claude-settings.json`，权限 600，用 `--settings` 传入，CLI 退出后删除。接入点的 `env` 和解析后的密钥写进该文件的 `env`，不放进进程环境 |
+| Claude Code | 在 `$XDG_RUNTIME_DIR/cardigan/`（没有就用 `~/.cache/cardigan/run/`）生成 `cardigan-<pid>-<随机8位>.<启动配置>.claude-settings.json`，权限 600，用 `--settings` 传入，CLI 退出后删除。接入点的 `env` 和解析后的密钥写进该文件的 `env`，不放进进程环境 |
 | Codex | 只拼参数：`--profile <接入点>`、`-c key=value`（来自 `config`）、`-m <模型>`、`args`、`--` 之后的参数；不改 `~/.codex` |
 | Pi | 拼 `--provider`、`--model`、`args`；需要时设 `PI_CODING_AGENT_DIR`；不改 `~/.pi` |
 
 `cardigan launch` 从不写 `~/.claude`、`~/.codex`、`~/.pi`，也不改 shell 配置、
 不写数据库、不注入 MCP 配置（后者在 M2）。
+
+### 信号、并发与残留文件
+
+- 文件名带 pid 和随机后缀，同一个启动配置并发启动多次不会互相覆盖，也不会删掉对方正在用的文件。
+- CLI 运行期间父进程忽略 `SIGINT`/`SIGQUIT`（Ctrl+C、Ctrl+\ 由终端同时发给 CLI 自己），收到
+  `SIGTERM`/`SIGHUP` 时转发给 CLI；CLI 退出后父进程才删除临时文件，并原样返回 CLI 的退出码。
+  所以 Ctrl+C 只打断 CLI，不会让 shell 提前拿回提示符。
+- 每次 `launch` 开始前会清理运行目录里属主进程已经不存在的临时文件（例如上次被 `SIGKILL`）；
+  `cardigan launch check <启动配置>` 会报告残留文件数量。
 
 ### 从现有的 shell 别名迁移
 

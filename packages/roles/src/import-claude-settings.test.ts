@@ -110,6 +110,32 @@ describe("importClaudeSettings", () => {
     );
   });
 
+  test("treats PASSWORD, PASSWD, CREDENTIAL and AUTH names as secrets", () => {
+    const result = importClaudeSettings({
+      settings: {
+        env: {
+          ANTHROPIC_BASE_URL: "https://gateway.example.invalid",
+          DB_PASSWORD: "fictional-password",
+          SUDO_PASSWD: "fictional-passwd",
+          SERVICE_CREDENTIAL: "fictional-credential",
+          ANTHROPIC_AUTH_TOKEN: "fictional-auth-token",
+          PLAIN_SETTING: "kept",
+        },
+      },
+      providerName: "widened",
+    });
+
+    expect(result.envKeys).toEqual(["ANTHROPIC_BASE_URL", "PLAIN_SETTING"]);
+    expect(result.secretKeys).toEqual([
+      "DB_PASSWORD",
+      "SUDO_PASSWD",
+      "SERVICE_CREDENTIAL",
+      "ANTHROPIC_AUTH_TOKEN",
+    ]);
+    expect(result.launchYaml).not.toContain("fictional-password");
+    expect(result.launchYaml).not.toContain("fictional-auth-token");
+  });
+
   test("refuses to overwrite an existing provider", () => {
     const result = importClaudeSettings({
       settings: fictionalSettings,

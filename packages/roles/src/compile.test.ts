@@ -77,13 +77,14 @@ describe("compileLaunch: claude-code", () => {
       profile: "claude-of",
       secrets,
       runtimeDir,
+      instanceId: "4242-deadbeef",
     });
 
     expect(compiled.command).toBe("claude");
     expect(compiled.harness).toBe("claude-code");
     expect(compiled.args).toEqual([
       "--settings",
-      `${runtimeDir}/claude-of.claude-settings.json`,
+      `${runtimeDir}/cardigan-4242-deadbeef.claude-of.claude-settings.json`,
       "--model",
       "opus",
       "--permission-mode",
@@ -99,7 +100,9 @@ describe("compileLaunch: claude-code", () => {
 
     expect(compiled.files).toHaveLength(1);
     const file = compiled.files[0];
-    expect(file?.path).toBe(`${runtimeDir}/claude-of.claude-settings.json`);
+    expect(file?.path).toBe(
+      `${runtimeDir}/cardigan-4242-deadbeef.claude-of.claude-settings.json`,
+    );
     expect(file?.mode).toBe(0o600);
     expect(JSON.parse(file?.content ?? "{}")).toEqual({
       env: {
@@ -140,8 +143,32 @@ describe("compileLaunch: claude-code", () => {
     });
     expect(compiled.args).toEqual([
       "--settings",
-      `${runtimeDir}/p.claude-settings.json`,
+      `${runtimeDir}/cardigan-static.p.claude-settings.json`,
     ]);
+  });
+});
+
+describe("compileLaunch: concurrent instances", () => {
+  test("gives each launch a different settings file", () => {
+    const first = compileLaunch({
+      config,
+      profile: "claude-of",
+      secrets,
+      runtimeDir,
+      instanceId: "1111-aaaaaaaa",
+    });
+    const second = compileLaunch({
+      config,
+      profile: "claude-of",
+      secrets,
+      runtimeDir,
+      instanceId: "2222-bbbbbbbb",
+    });
+
+    expect(first.files[0]?.path).not.toBe(second.files[0]?.path);
+    expect(first.args[1]).not.toBe(second.args[1]);
+    expect(first.files[0]?.path).toContain("1111-aaaaaaaa");
+    expect(second.files[0]?.path).toContain("2222-bbbbbbbb");
   });
 });
 

@@ -4,7 +4,8 @@ import type { ProviderDefinition } from "./schema.js";
 import { parseSecretsText } from "./schema.js";
 
 /** Name → value, in the order the settings file listed them. */
-const SECRET_NAME_PATTERN = /(TOKEN|KEY|SECRET)/i;
+const SECRET_NAME_PATTERN =
+  /(TOKEN|KEY|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)/i;
 
 export interface ImportClaudeSettingsInput {
   /** Parsed JSON content of an existing Claude Code settings file. */
@@ -32,8 +33,9 @@ export interface ImportClaudeSettingsResult {
  * Convert an existing Claude Code settings file into a provider definition.
  *
  * Pure: takes and returns file contents. Variables whose name contains TOKEN,
- * KEY or SECRET become secret references in `launch.yaml` and values in
- * `secrets.env`; everything else stays in `launch.yaml`. Existing content of
+ * KEY, SECRET, PASSWORD, PASSWD, CREDENTIAL or AUTH become secret references
+ * in `launch.yaml` and values in `secrets.env`; everything else stays in
+ * `launch.yaml`. Existing content of
  * both files is preserved.
  */
 export function importClaudeSettings(
