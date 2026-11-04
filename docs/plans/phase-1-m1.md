@@ -1,6 +1,7 @@
 # Phase 1 · M1 任务计划：领域模型、事件存储、Card MCP
 
-- 版本：v6（2026-11-04）：记录 M1.3 审核中的后续事项；M1.6 起 PR 拆成每个约 800 行以内的依赖 PR
+- 版本：v7（2026-11-04）：M1.7b 补充主机侧 Token 签发和常驻 PM 的创建；M1.T3 拆成两个分支
+- v6（2026-11-04）：记录 M1.3 审核中的后续事项；M1.6 起 PR 拆成每个约 800 行以内的依赖 PR
 - v5（2026-11-04）：新增 M1.2b（卡片的三个派生字段）
 - v4（2026-11-04）：新增 M1.4b，M1.7 拆成 M1.7a、M1.7b，记录审核中的后续事项
 - v3（2026-11-04）：调整分工，M1.5 改由 Pi 做
@@ -248,6 +249,14 @@ M1.7 中不依赖 M1.3 的部分，先做：
 
 依赖 M1.6。范围是下面"M1.7"一节里的 `card create`、`assign`、`human-action done` 和端到端测试。
 
+补充（v7，M1.6b 审核后）：MCP 的 `assign` 只建 Assignment，不签发 Token（响应里 `token_status=pending_host_issuance`），Token 一律由主机侧签发。因此 M1.7b 还要包括：
+
+- `cardigan assign`（人执行）：建 Assignment，并在同一个事务里签发 Token；
+- `cardigan token issue <A-n>`：给已有的 active Assignment 签发 Token（例如 PM 通过 MCP 指派出来的），已有未作废的 Token 时先作废旧的（对应"Session 替换时作废"）；
+- `cardigan pm create --office | --ops`：建常驻 PM Assignment 并签发 Token；`--ops` 的 Token 不含 `record_decision`；
+- 以上命令签发的 Token 都只在终端打印一次，不写入任何文件、不进日志；数据库只存哈希；
+- 端到端流程第 1 步改为：pm 通过 MCP 建卡并指派，再由主机侧（测试里扮演人的 CLI 调用）给 coder、reviewer 签发 Token。
+
 ### M1.7 apps/server、apps/cli 组装，端到端流程（Pi，已拆为 M1.7a 和 M1.7b）
 
 范围：
@@ -334,7 +343,7 @@ M1.7 中不依赖 M1.3 的部分，先做：
 
 - **M1.T1（Pi）**：domain 的契约测试，覆盖 §4.4 每张迁移表和 M1 要覆盖的每条不变量。
 - **M1.T2（Codex）**：store 的验收测试，覆盖 M1.4 的全部验收项，另加并发写入下 `seq` 不重复。
-- **M1.T3**：MCP 的契约测试，覆盖 M1.5 和 M1.6 的全部验收项，以及开发方案 §16 M1 的验收："伪造身份、非法状态迁移会被拒绝"。M1.5 的部分由 Codex 写，M1.6 的部分由 Pi 写。
+- **M1.T3**：MCP 的契约测试，覆盖 M1.5 和 M1.6 的全部验收项，以及开发方案 §16 M1 的验收："伪造身份、非法状态迁移会被拒绝"。M1.5 的部分由 Codex 写，M1.6 的部分由 Pi 写。分支分开：Codex 用 `test/m1-mcp-contract-read`，Pi 用 `test/m1-mcp-contract-write`。
 
 ## 6. 审核中记下的后续事项
 
