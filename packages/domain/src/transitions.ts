@@ -63,7 +63,11 @@ export const transitionTables: {
       request_decision: "waiting_decision",
       cancel: "cancelled",
     },
-    failed: { target_redelivered: "ready", cancel: "cancelled" },
+    failed: {
+      target_redelivered: "ready",
+      review_limit_exceeded: "waiting_decision",
+      cancel: "cancelled",
+    },
     passed: { target_redelivered: "ready" },
     blocked: { resume: "in_progress", cancel: "cancelled" },
     waiting_decision: { decision_resolved: "ready", cancel: "cancelled" },

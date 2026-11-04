@@ -1,3 +1,11 @@
+export type {
+  CommandEffect,
+  CommandPorts,
+  CommandState,
+  EntityChange,
+  TokenRequest,
+} from "./commands/core.js";
+export * from "./commands/delivery.js";
 export * from "./derived.js";
 export * from "./entities.js";
 export * from "./errors.js";
