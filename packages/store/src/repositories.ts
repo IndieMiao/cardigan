@@ -32,6 +32,46 @@ import type {
 
 export type SqlValue = string | number | null;
 
+/** Thrown when a write method is called on a read-only transaction. */
+export class ReadOnlyTransactionError extends Error {
+  constructor(what: string) {
+    super(`${what} is not allowed in a read transaction`);
+    this.name = "ReadOnlyTransactionError";
+  }
+}
+
+/** A repository as seen from `uow.read`: reads only. */
+export type ReadRepository<Entity, Key> = Pick<
+  Repository<Entity, Key>,
+  "get" | "list"
+>;
+
+export type ReadEventRepository = Pick<EventRepository, "listAfter">;
+
+/** Everything `uow.read` hands to its callback. */
+export interface ReadRepositories {
+  readonly cards: ReadRepository<Card, CardId>;
+  readonly work_items: ReadRepository<WorkItem, WorkItemId>;
+  readonly assignments: ReadRepository<Assignment, AssignmentId>;
+  readonly runs: ReadRepository<Run, RunId>;
+  readonly timeline: ReadRepository<TimelineEntry, TimelineEntryId>;
+  readonly deliveries: ReadRepository<Delivery, DeliveryId>;
+  readonly reviews: ReadRepository<Review, ReviewId>;
+  readonly decisions: ReadRepository<Decision, DecisionId>;
+  readonly human_actions: ReadRepository<HumanAction, HumanActionId>;
+  readonly attachments: ReadRepository<Attachment, AttachmentId>;
+  readonly roles: ReadRepository<
+    RoleReference,
+    Pick<RoleReference, "role_id" | "role_version">
+  >;
+  readonly machines: ReadRepository<Machine, MachineId>;
+  readonly cursors: ReadRepository<
+    Cursor,
+    Pick<Cursor, "assignment_id" | "card_id">
+  >;
+  readonly events: ReadEventRepository;
+}
+
 export interface TableSpec<Entity> {
   readonly table: string;
   /** Primary-key columns, in order, after project_id. */
@@ -51,6 +91,7 @@ const placeholders = (count: number): string =>
 export function jsonRepository<Entity, Key>(
   db: DatabaseSync,
   spec: TableSpec<Entity>,
+  mode: "read" | "write" = "write",
 ): Repository<Entity, Key> {
   const keyMatch = spec.key.map((column) => `${column} = ?`).join(" AND ");
   const selectByKey = db.prepare(
@@ -64,11 +105,14 @@ export function jsonRepository<Entity, Key>(
     .map((column) => `${column} = excluded.${column}`)
     .concat("doc = excluded.doc")
     .join(", ");
-  const upsert = db.prepare(
-    `INSERT INTO ${spec.table} (project_id, ${spec.columns.join(", ")}, doc) ` +
-      `VALUES (?, ${placeholders(spec.columns.length)}, ?) ` +
-      `ON CONFLICT (project_id, ${spec.key.join(", ")}) DO UPDATE SET ${updates}`,
-  );
+  const upsert =
+    mode === "write"
+      ? db.prepare(
+          `INSERT INTO ${spec.table} (project_id, ${spec.columns.join(", ")}, doc) ` +
+            `VALUES (?, ${placeholders(spec.columns.length)}, ?) ` +
+            `ON CONFLICT (project_id, ${spec.key.join(", ")}) DO UPDATE SET ${updates}`,
+        )
+      : undefined;
 
   const decode = (row: unknown): Entity =>
     JSON.parse((row as { doc: string }).doc) as Entity;
@@ -80,6 +124,9 @@ export function jsonRepository<Entity, Key>(
     },
     list: (project_id) => selectAll.all(project_id).map(decode),
     put: (project_id, entity) => {
+      if (upsert === undefined) {
+        throw new ReadOnlyTransactionError(`${spec.table}.put`);
+      }
       upsert.run(project_id, ...spec.values(entity), JSON.stringify(entity));
     },
   };
@@ -107,17 +154,26 @@ function keyColumns(
 }
 
 /** Event store: per-stream monotonic seq, enforced by a unique index. */
-export function eventRepository(db: DatabaseSync): EventRepository {
-  const insert = db.prepare(
-    "INSERT INTO events (project_id, id, card_id, stream, seq, type, doc) " +
-      "VALUES (?, ?, ?, ?, ?, ?, ?)",
-  );
+export function eventRepository(
+  db: DatabaseSync,
+  mode: "read" | "write" = "write",
+): EventRepository {
+  const insert =
+    mode === "write"
+      ? db.prepare(
+          "INSERT INTO events (project_id, id, card_id, stream, seq, type, doc) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+      : undefined;
   const after = db.prepare(
     "SELECT doc FROM events WHERE project_id = ? AND stream = ? AND seq > ? ORDER BY seq",
   );
 
   return {
     append: (project_id, event) => {
+      if (insert === undefined) {
+        throw new ReadOnlyTransactionError("events.append");
+      }
       insert.run(
         project_id,
         event.id,
@@ -218,31 +274,57 @@ const cursorSpec: TableSpec<Cursor> = {
   values: (cursor) => [cursor.assignment_id, cursor.card_id, cursor.acked_seq],
 };
 
-/** All repositories of one connection. */
+/** Write-capable repositories of one connection (inside `uow.run`). */
 export function createRepositories(db: DatabaseSync): Repositories {
+  return create(db, "write") as Repositories;
+}
+
+/** Read-only repositories of one connection (inside `uow.read`). */
+export function createReadRepositories(db: DatabaseSync): ReadRepositories {
+  return create(db, "read");
+}
+
+function create(
+  db: DatabaseSync,
+  mode: "read" | "write",
+): Repositories & ReadRepositories {
   return {
-    cards: jsonRepository<Card, CardId>(db, cardSpec),
-    work_items: jsonRepository<WorkItem, WorkItemId>(db, workItemSpec),
-    assignments: jsonRepository<Assignment, AssignmentId>(db, assignmentSpec),
-    runs: jsonRepository<Run, RunId>(db, runSpec),
-    timeline: jsonRepository<TimelineEntry, TimelineEntryId>(db, timelineSpec),
-    deliveries: jsonRepository<Delivery, DeliveryId>(db, deliverySpec),
-    reviews: jsonRepository<Review, ReviewId>(db, reviewSpec),
-    decisions: jsonRepository<Decision, DecisionId>(db, decisionSpec),
+    cards: jsonRepository<Card, CardId>(db, cardSpec, mode),
+    work_items: jsonRepository<WorkItem, WorkItemId>(db, workItemSpec, mode),
+    assignments: jsonRepository<Assignment, AssignmentId>(
+      db,
+      assignmentSpec,
+      mode,
+    ),
+    runs: jsonRepository<Run, RunId>(db, runSpec, mode),
+    timeline: jsonRepository<TimelineEntry, TimelineEntryId>(
+      db,
+      timelineSpec,
+      mode,
+    ),
+    deliveries: jsonRepository<Delivery, DeliveryId>(db, deliverySpec, mode),
+    reviews: jsonRepository<Review, ReviewId>(db, reviewSpec, mode),
+    decisions: jsonRepository<Decision, DecisionId>(db, decisionSpec, mode),
     human_actions: jsonRepository<HumanAction, HumanActionId>(
       db,
       humanActionSpec,
+      mode,
     ),
-    attachments: jsonRepository<Attachment, AttachmentId>(db, attachmentSpec),
+    attachments: jsonRepository<Attachment, AttachmentId>(
+      db,
+      attachmentSpec,
+      mode,
+    ),
     roles: jsonRepository<
       RoleReference,
       Pick<RoleReference, "role_id" | "role_version">
-    >(db, roleSpec),
-    machines: jsonRepository<Machine, MachineId>(db, machineSpec),
+    >(db, roleSpec, mode),
+    machines: jsonRepository<Machine, MachineId>(db, machineSpec, mode),
     cursors: jsonRepository<Cursor, Pick<Cursor, "assignment_id" | "card_id">>(
       db,
       cursorSpec,
+      mode,
     ),
-    events: eventRepository(db),
+    events: eventRepository(db, mode),
   };
 }

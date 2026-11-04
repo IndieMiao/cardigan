@@ -1,6 +1,8 @@
 # Phase 1 · M1 任务计划：领域模型、事件存储、Card MCP
 
-- 版本：v3（2026-11-04）：调整分工，M1.5 改由 Pi 做
+- 版本：v5（2026-11-04）：新增 M1.2b（卡片的三个派生字段）
+- v4（2026-11-04）：新增 M1.4b，M1.7 拆成 M1.7a、M1.7b，记录审核中的后续事项
+- v3（2026-11-04）：调整分工，M1.5 改由 Pi 做
 - v2（2026-11-04）：新增 M1.8（提前做的 `cardigan launch`）
 - v1（2026-11-04）
 - 对应：开发方案 v0.6 §16 Phase 1 M1
@@ -17,7 +19,10 @@
 | M1.4 | store：SQLite、迁移、事件存储、游标、幂等 | Pi | Codex（M1.T2） | M1.1 | `feat/m1-store` |
 | M1.5 | mcp-server：传输、认证、只读工具 | Pi | Codex（M1.T3） | M1.2、M1.4 | `feat/m1-mcp-core` |
 | M1.6 | mcp-server：写入类工具 | Codex | Codex 不能验收自己的实现，由 Pi 补充 M1.T3 中写入类工具的用例 | M1.3、M1.5 | `feat/m1-mcp-tools` |
-| M1.7 | apps/server、apps/cli 组装，端到端流程 | Pi | Codex 审读 | M1.6 | `feat/m1-server-cli` |
+| M1.2b | domain：卡片的 `waiting_on`、`next_owners`、`why` 三个派生字段；`get_card` 返回它们 | Pi | Codex 审读 | M1.2 | `feat/m1-card-derived` |
+| M1.4b | store：只读事务，读操作不占写锁 | Pi | — | M1.4 | `feat/m1-store-read` |
+| M1.7a | apps/server 组装；cli 的 `init`、`project create`、`role add` | Pi | Codex 审读 | M1.5 | `feat/m1-server-base` |
+| M1.7b | cli 的 `card create`、`assign`、`human-action done`；端到端流程 | Pi | Codex 审读 | M1.6、M1.7a | `feat/m1-server-cli` |
 | M1.T1 | domain 契约测试（§4.4、§4.5） | Pi | — | M1.3 | `test/m1-domain-contract` |
 | M1.T2 | store 验收测试 | Codex | — | M1.4 | `test/m1-store` |
 | M1.T3 | MCP 契约测试 | Codex（M1.5 部分）、Pi（M1.6 部分） | — | M1.6 | `test/m1-mcp-contract` |
@@ -33,6 +38,8 @@ M1.1 ──┬─ M1.2 ─ M1.3 ─┬─ M1.T1（Pi）
 ```
 
 M1.2 和 M1.4 可以并行：Codex 做 M1.2，Pi 做 M1.4。
+
+分工调整（v4，2026-11-04）：M1.5 合并后 Pi 又会空闲，所以新增 M1.4b，并把 M1.7 拆成不依赖 M1.3 的 M1.7a 和依赖 M1.6 的 M1.7b。
 
 分工调整（v3，2026-11-04）：M1.4 合并后 Pi 会空闲，所以 M1.5 改由 Pi 做，依赖从 M1.3 放宽到 M1.2（只读工具不需要 M1.3 的命令），`heartbeat` 挪到 M1.6。M1.T3 按"实现和验收测试由不同模型完成"拆开：M1.5 的契约测试由 Codex 写，M1.6 的由 Pi 写。
 
@@ -182,7 +189,58 @@ domain 只提供纯函数：输入"当前状态 + 调用者身份 + 参数"，�
 
 验收：每个工具至少一个正常调用测试；domain 的每类错误码都能从 MCP 层原样拿到；同一个 `idempotency_key` 重放不会产生第二个交付或第二条事件。
 
-### M1.7 apps/server、apps/cli 组装，端到端流程（Pi）
+### M1.2b 卡片的三个派生字段（Pi）
+
+来源：M1.5 审核时记下的后续事项。纯函数，放在 domain 的派生计算里（单独一个文件，避免和 M1.3 的改动冲突），然后让 mcp-server 的 `get_card` 返回这三个字段。
+
+输入：卡片、它的工作项、Assignment、交付、审核、Decision、HumanAction。规则：
+
+- `waiting_on[]`：卡片现在在等什么。每项 `{kind, ref, label}`：
+  - 未解决且 `blocking` 的 Decision：`{kind: "decision", ref: "q(n)"}`；
+  - 未完成的 HumanAction：`{kind: "human_action", ref: "h(n)"}`；
+  - 当前版本交付还没给出结论的验证项：`{kind: "review", ref: "W-n"}`；
+  - 处于 `blocked` 的工作项：`{kind: "blocked", ref: "W-n"}`。
+- `next_owners[]`：下一步该谁做，每项 `{kind: "assignment" | "role" | "human", ref}`：
+  - 阻塞性 Decision 的 `decider`，以及未完成 HumanAction 指向的人；
+  - 处于 `ready`、`in_progress`、`changes_requested` 的工作项的 Assignment；还没有 Assignment 的，给它的角色（交给 PM 分配）；
+  - 已提交、尚未审核的完成申请：卡片模板指定的审核者。
+  - 去重，顺序按上面的优先级。
+- `why`：一句话原因，不超过 40 字，按下面的优先级取第一条：
+  1. 等你拍板 `q(n)`（有多条时写"等你拍板 q(n) 等 k 项"）；
+  2. 等你执行 `h(n)`；
+  3. 等待完成审核；
+  4. 等待 `<角色>` 审核 `D-n`；
+  5. `<角色>` 返工中；
+  6. 进行中；
+  7. 待规划（`backlog`、`todo`）；
+  8. 已完成 / 已取消。
+
+验收：每条规则至少一个测试；`why` 永远不超过 40 字；`get_card` 的测试断言返回了这三个字段。
+
+### M1.4b store：只读事务（Pi）
+
+审核 M1.5 时发现：store 的仓储只能通过 `uow.run` 拿到，而 `uow.run` 用的是 `BEGIN IMMEDIATE`，所以读操作也会占用写锁。
+
+范围：
+
+- store 增加 `uow.read(operation)`：用 `BEGIN DEFERRED`（或者不开事务）执行，回调里拿到的仓储只有读方法，调用写方法直接报错。
+- mcp-server 的只读路径（认证、`get_card`、`get_updates`）改用 `read`，并相应修改 mcp-server 的 `McpBackend` 接口。
+
+验收：读事务里调用写方法会报错；一个写事务进行中时，另一个进程的读操作不会被阻塞（用两个进程测试）；`pnpm test` 全部通过。
+
+### M1.7a apps/server 组装；cli 的基础命令（Pi）
+
+M1.7 中不依赖 M1.3 的部分，先做：
+
+- `apps/server`：读取配置，打开 store，组装 mcp-server（通过 `McpBackend` 传入 store），启动 MCP 服务；收到 SIGTERM 时正常关闭。
+- `apps/cli`：`cardigan init`（建库、执行迁移）、`cardigan project create`、`cardigan role add`（`allowed_tools`、`capabilities`）。
+- 冒烟测试：启动 server，用 MCP SDK 的客户端调用 `whoami`。Token 由测试直接调用 store 签发，`assign` 在 M1.7b 做。
+
+### M1.7b cli 的其余命令和端到端流程（Pi）
+
+依赖 M1.6。范围是下面"M1.7"一节里的 `card create`、`assign`、`human-action done` 和端到端测试。
+
+### M1.7 apps/server、apps/cli 组装，端到端流程（Pi，已拆为 M1.7a 和 M1.7b）
 
 范围：
 
@@ -270,8 +328,16 @@ domain 只提供纯函数：输入"当前状态 + 调用者身份 + 参数"，�
 - **M1.T2（Codex）**：store 的验收测试，覆盖 M1.4 的全部验收项，另加并发写入下 `seq` 不重复。
 - **M1.T3**：MCP 的契约测试，覆盖 M1.5 和 M1.6 的全部验收项，以及开发方案 §16 M1 的验收："伪造身份、非法状态迁移会被拒绝"。M1.5 的部分由 Codex 写，M1.6 的部分由 Pi 写。
 
-## 6. M1 完成的标准
+## 6. 审核中记下的后续事项
 
-- M1.1–M1.8、M1.T1–M1.T3 全部合并。
+| 来源 | 事项 | 处理 |
+|---|---|---|
+| M1.5 审核 | 读操作也走 `BEGIN IMMEDIATE`，会占用写锁 | M1.4b |
+| M1.5 审核 | `get_card` 还没有 `waiting_on`、`next_owners`、`why` 三个派生字段 | M1.2b |
+| M1.8 审核 | `cardigan launch` 还没有用真实的接入点完整跑过一次会话 | 等用户迁移配置后验证 |
+
+## 7. M1 完成的标准
+
+- M1.1–M1.8（含 M1.4b、M1.7a、M1.7b）、M1.T1–M1.T3 全部合并。
 - 开发方案 §16 M1 的验收项都有对应的测试。
 - Claude 根据 M1 的实际情况，写 M2 的任务计划；M2 开工前按 D9 复核运行时基线（ADR 0001）。

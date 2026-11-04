@@ -1,3 +1,4 @@
+export * from "./card-derived.js";
 export type {
   CommandEffect,
   CommandPorts,

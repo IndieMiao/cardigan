@@ -1,9 +1,11 @@
 import { spawn, spawnSync } from "node:child_process";
 import { LaunchConfigError } from "@cardigan/roles";
+import { runAdminCommand } from "./admin.js";
 import { CliError, EXIT } from "./errors.js";
 import type { CliIo } from "./io.js";
 import { runLaunchCommand } from "./launch.js";
 
+export { parseAdminArgs, runAdminCommand } from "./admin.js";
 export { CliError, EXIT } from "./errors.js";
 export type {
   CapturedOutput,
@@ -20,9 +22,12 @@ const TOP_LEVEL_USAGE = [
   "用法：cardigan <命令>",
   "",
   "命令：",
-  "  launch    按启动配置启动 Agent CLI（见 cardigan launch --help）",
+  "  init             建库并执行迁移",
+  "  project create   创建项目",
+  "  role add         写入角色定义（allowed_tools、capabilities）",
+  "  launch           按启动配置启动 Agent CLI（见 cardigan launch --help）",
   "",
-  "更多命令（init / project / role / card / assign）在 M1 后续任务里加入。",
+  "更多命令（card / assign / human-action）在 M1 后续任务里加入。",
 ].join("\n");
 
 /** Real IO: process streams, real spawning, real filesystem. */
@@ -98,6 +103,9 @@ export async function main(
     }
     if (command === "launch") {
       return await runLaunchCommand(rest, io);
+    }
+    if (command === "init" || command === "project" || command === "role") {
+      return await runAdminCommand([command, ...rest], io);
     }
     io.stderr(`不认识的命令：${command}\n\n${TOP_LEVEL_USAGE}`);
     return EXIT.usage;

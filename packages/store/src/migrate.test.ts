@@ -13,7 +13,7 @@ test("migrates an empty database and creates every M1 table", () => {
   const store = Store.open({ dataDir });
   try {
     expect(existsSync(join(dataDir, "cardigan.db"))).toBe(true);
-    expect(store.schemaVersion()).toBe(1);
+    expect(store.schemaVersion()).toBe(2);
 
     const tables = store.database
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
@@ -38,6 +38,7 @@ test("migrates an empty database and creates every M1 table", () => {
       "cursors",
       "idempotency",
       "tokens",
+      "projects",
       "schema_version",
     ]) {
       expect(tables, table).toContain(table);
@@ -59,7 +60,7 @@ test("re-running migrations is a no-op and keeps data", () => {
       .run("p", "card", 7);
 
     expect(store.migrate()).toEqual([]);
-    expect(store.schemaVersion()).toBe(1);
+    expect(store.schemaVersion()).toBe(2);
     const row = store.database
       .prepare(
         "SELECT value FROM id_counters WHERE project_id = ? AND kind = ?",

@@ -17,7 +17,11 @@ import type {
 } from "@cardigan/domain";
 import { createIdAllocator, PROJECT_EVENT_STREAM } from "./ids.js";
 import { type AppliedMigration, migrate } from "./migrate.js";
-import { createRepositories } from "./repositories.js";
+import {
+  createReadRepositories,
+  createRepositories,
+  type ReadRepositories,
+} from "./repositories.js";
 import {
   findTokenByHash,
   type IssuedToken,
@@ -29,6 +33,16 @@ import {
 } from "./tokens.js";
 
 export const DEFAULT_DB_FILE = "cardigan.db";
+
+/** `UnitOfWork` plus read-only transactions. */
+export interface StoreUnitOfWork extends UnitOfWork {
+  /**
+   * Run `operation` in a `BEGIN DEFERRED` transaction with read-only
+   * repositories. In WAL mode this does not take the write lock, so it keeps
+   * working while another process is writing.
+   */
+  read<T>(operation: (transaction: ReadRepositories) => T): T;
+}
 
 export interface StoreOptions {
   /** Directory that holds `cardigan.db`; defaults to `$CARDIGAN_DATA_DIR` or `.data`. */
@@ -71,6 +85,17 @@ export interface IdempotentParams<Request> {
   readonly assignment_id: AssignmentId;
   readonly key: string;
   readonly request: Request;
+}
+
+export interface ProjectRecord {
+  readonly id: ProjectId;
+  readonly name: string;
+  readonly created_at: string;
+}
+
+export interface ProjectCreateInput {
+  readonly id: ProjectId;
+  readonly name?: string;
 }
 
 export interface IdempotentResult<T> {
@@ -149,10 +174,12 @@ export class Store {
     this.#db.close();
   }
 
-  get uow(): UnitOfWork {
+  get uow(): StoreUnitOfWork {
     return {
       run: <T>(operation: (transaction: TransactionContext) => T): T =>
         this.#run(operation),
+      read: <T>(operation: (transaction: ReadRepositories) => T): T =>
+        this.#read(operation),
     };
   }
 
@@ -167,6 +194,29 @@ export class Store {
         ...createRepositories(this.#db),
         ids: createIdAllocator(this.#db),
       });
+      this.#db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      this.#db.exec("ROLLBACK");
+      throw error;
+    } finally {
+      this.#inTransaction = false;
+    }
+  }
+
+  /**
+   * Read-only counterpart of `#run`: `BEGIN DEFERRED` plus repositories that
+   * only expose `get`/`list` (and `events.listAfter`). A write attempt throws
+   * `ReadOnlyTransactionError`.
+   */
+  #read<T>(operation: (transaction: ReadRepositories) => T): T {
+    if (this.#inTransaction) {
+      throw new Error("nested UnitOfWork is not supported");
+    }
+    this.#db.exec("BEGIN DEFERRED");
+    this.#inTransaction = true;
+    try {
+      const result = operation(createReadRepositories(this.#db));
       this.#db.exec("COMMIT");
       return result;
     } catch (error) {
@@ -300,6 +350,58 @@ export class Store {
         value: { value, replayed: false },
       } satisfies Result<IdempotentResult<T>>;
     });
+  }
+
+  /**
+   * Record a project id. Fails instead of overwriting an existing project, so a
+   * typo in `project create` is visible rather than silently rebranding.
+   */
+  createProject(input: ProjectCreateInput): Result<ProjectRecord> {
+    const existing = this.getProject(input.id);
+    if (existing !== undefined) {
+      return {
+        ok: false,
+        error: {
+          code: "validation_failed",
+          message: `project ${input.id} already exists`,
+          details: { project_id: input.id },
+        },
+      };
+    }
+    const record: ProjectRecord = {
+      id: input.id,
+      name: input.name ?? input.id,
+      created_at: this.#clock.now(),
+    };
+    this.#db
+      .prepare("INSERT INTO projects (id, name, created_at) VALUES (?, ?, ?)")
+      .run(record.id, record.name, record.created_at);
+    return { ok: true, value: record };
+  }
+
+  getProject(id: ProjectId): ProjectRecord | undefined {
+    const row = this.#db
+      .prepare("SELECT id, name, created_at FROM projects WHERE id = ?")
+      .get(id) as { id: string; name: string; created_at: string } | undefined;
+    return row === undefined
+      ? undefined
+      : { id: row.id as ProjectId, name: row.name, created_at: row.created_at };
+  }
+
+  listProjects(): ProjectRecord[] {
+    return this.#db
+      .prepare(
+        "SELECT id, name, created_at FROM projects ORDER BY created_at, id",
+      )
+      .all()
+      .map((row) => {
+        const record = row as { id: string; name: string; created_at: string };
+        return {
+          id: record.id as ProjectId,
+          name: record.name,
+          created_at: record.created_at,
+        };
+      });
   }
 
   issueToken(input: IssueTokenInput): IssuedToken {
