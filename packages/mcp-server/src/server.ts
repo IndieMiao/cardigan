@@ -11,6 +11,7 @@ import {
   type DeliveryToolOptions,
   deliveryTools,
 } from "./commands/delivery-tools.js";
+import { managementTools } from "./commands/management-tools.js";
 import { ToolError } from "./errors.js";
 import { type Logger, stdoutLogger } from "./log.js";
 import { createMcpServer } from "./tool-server.js";
@@ -52,7 +53,11 @@ export async function startMcpServer(
 ): Promise<RunningServer> {
   const host = options.host ?? "127.0.0.1";
   const log = options.log ?? stdoutLogger;
-  const tools = options.tools ?? [...readOnlyTools, ...deliveryTools(options)];
+  const tools = options.tools ?? [
+    ...readOnlyTools,
+    ...deliveryTools(options),
+    ...managementTools(options.clock),
+  ];
 
   // Filled in once the socket is bound; the DNS rebinding check needs the port.
   let boundPort = 0;

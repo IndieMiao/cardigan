@@ -49,9 +49,6 @@ function persist(
   project: ProjectId,
   effect: CommandEffect<unknown>,
 ) {
-  // Assignment issuance is added with M1.6b; never silently drop an intent.
-  if (effect.token_requests.length)
-    throw new Error("Token issuance is not wired yet");
   for (const change of effect.changes) {
     // EntityChange preserves the collection/entity correlation across this union.
     const repository = tx[change.collection] as Pick<
@@ -60,6 +57,7 @@ function persist(
     >;
     repository.put(project, change.entity);
   }
+  // Token requests reserve metadata for host provisioning; MCP never fulfills them.
   for (const event of effect.events) tx.events.append(project, event);
   for (const entry of effect.timeline) tx.timeline.put(project, entry);
 }

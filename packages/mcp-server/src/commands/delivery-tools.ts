@@ -1,9 +1,7 @@
 import {
   type Clock,
   type DeliveryVerifier,
-  parseId,
   prepareDelivery,
-  type ReadableIdKind,
   type SubmitDeliveryParams,
   type SubmitReviewParams,
   submitDelivery,
@@ -13,17 +11,9 @@ import { z } from "zod";
 import { defineTool } from "../tools/types.js";
 import { executeCommand, executePreparedCommand, unwrap } from "./execute.js";
 
-const id = <K extends ReadableIdKind>(kind: K) =>
-  z
-    .string()
-    .refine((s) => parseId(kind, s).ok, `Invalid ${kind} ID`)
-    .transform((s) => unwrap(parseId(kind, s)).id);
+import { id, idempotency_key } from "./schemas.js";
+
 const attachments = z.array(z.string().min(1)).optional();
-const idempotency_key = z
-  .string()
-  .min(1)
-  .max(200)
-  .refine((key) => key.trim().length > 0, "Idempotency key must not be blank");
 const deliveryInput = z.object({
   idempotency_key,
   work_item_id: id("work_item"),
