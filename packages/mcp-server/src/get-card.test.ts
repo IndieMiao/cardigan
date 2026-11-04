@@ -5,6 +5,7 @@ import type {
   Card,
   Decision,
   Delivery,
+  HumanAction,
   Review,
   ToolName,
   WorkItem,
@@ -205,6 +206,9 @@ describe("get_card", () => {
         target_sha: string;
         verdict: string | null;
       }>;
+      waiting_on: unknown[];
+      next_owners: unknown[];
+      why: string;
     };
 
     // Inferred from the work items (M1.2), not read from the stored status.
@@ -229,6 +233,66 @@ describe("get_card", () => {
         review_id: "V-1",
       },
     ]);
+
+    // Nothing is pending here, so the derived fields are empty but present.
+    expect(payload.waiting_on).toEqual([]);
+    expect(payload.next_owners).toEqual([]);
+    expect(payload.why).toBe("进行中");
+  });
+
+  test("returns waiting_on, next_owners and why from the domain", async () => {
+    const blocking: Decision = {
+      id: "q(2)" as never,
+      key: "q(2)" as never,
+      kind: "choose",
+      card_id,
+      raised_by: "human",
+      question: "fictional blocking question",
+      context: "",
+      options: [],
+      recommended: "a",
+      affected_cards: [],
+      affected_work_items: [],
+      blocking: true,
+      decider: "role:pm",
+      doc_refs: [],
+      status: "open",
+    };
+    const action: HumanAction = {
+      id: "h(1)" as never,
+      key: "h(1)" as never,
+      card_id,
+      requested_by: "human",
+      instructions: "run the fictional command",
+      why_human: "needs credentials",
+      expected_return: "the output",
+      blocked_work_items: [],
+      status: "open",
+    };
+    fixture.store.uow.run((tx) => {
+      tx.decisions.put(project_id, blocking);
+      tx.human_actions.put(project_id, action);
+    });
+
+    const client = await connect(fixture.token);
+    const payload = textOf(
+      await client.callTool({ name: "get_card", arguments: { card_id } }),
+    ) as {
+      waiting_on: Array<{ kind: string; ref: string; label: string }>;
+      next_owners: Array<{ kind: string; ref: string }>;
+      why: string;
+    };
+
+    expect(payload.waiting_on).toEqual([
+      { kind: "decision", ref: "q(2)", label: "等你拍板 q(2)" },
+      { kind: "human_action", ref: "h(1)", label: "等你执行 h(1)" },
+    ]);
+    expect(payload.next_owners).toEqual([
+      { kind: "role", ref: "pm" },
+      { kind: "human", ref: "human" },
+    ]);
+    expect(payload.why).toBe("等你拍板 q(2)");
+    expect(Array.from(payload.why).length).toBeLessThanOrEqual(40);
   });
 
   test("rejected completion keeps the card in progress", async () => {
