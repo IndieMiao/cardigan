@@ -1,6 +1,7 @@
 # Phase 1 · M2 任务计划：Role Registry、Launch Profile、Runtime Adapter
 
-- 版本：v1（2026-11-05）
+- 版本：v2（2026-11-05）：终端名、运行目录、worktree 路径都按项目区分（Assignment、卡片、工作项的编号按项目分配，不同项目会重号）
+- v1（2026-11-05）
 - 对应：开发方案 v0.6.15 §16 Phase 1 M2；§10 Role Registry 与 Agent 启动；§11 Runtime Adapter；§12.2 worktree 布局；§13.3–§13.4 约定与运行环境
 - M2 的验收（开发方案 §16）：**从卡片一键创建 coder 的 Assignment：worktree 建好，Agent 启动并通过 `whoami` / `get_card` 读到任务。**
 - 运行时基线：herdr-core（`hc`）**0.1.18**，锁版本。2026-11-05 已按 ADR 0001 复核 D9，结论是维持 herdr-core（见 ADR 0001 的"复核记录"）。
@@ -50,11 +51,11 @@ M2.1 ──┬─ M2.2（Pi） ─────────┐
 | 调用 herdr-core 的方式 | 子进程调用 `hc … --json`（参数数组，不经过 shell）；事件用 `hc events --json` 的逐行输出 | CLI 的 JSON 输出就是 OpenRPC API 的结果；子进程实现简单、易于在契约测试里替换。以后换成直连 socket 只改适配器 |
 | hc session | Cardigan 专用，默认 `cardigan`，可配置（`CARDIGAN_HC_SESSION`） | 不和用户自己的 hc 终端混在一起 |
 | 版本锁定 | 适配器启动时检查 `hc --version` 等于配置的版本（默认 0.1.18），不等就拒绝启动 | herdr-core 是预览版，升级频繁（ADR 0001） |
-| 终端名（agent_name） | `<role>-<card>-<work_item>-<assignment>` 的小写形式，例如 `coder-c3-w7-a12`；超出 32 字符时截断前缀并保留 assignment 编号 | hc 要求 1–32 个 `a-z 0-9 - _`，且全局唯一（§11.3） |
+| 终端名（agent_name） | `<role>-<项目短码>-<card>-<work_item>-<assignment>` 的小写形式，例如 `coder-1a2b3c4d-c3-w7-a12`；项目短码取 sha256(project_id) 的前 8 位十六进制；超出 32 字符时截断 role，保留项目短码和编号 | hc 要求 1–32 个 `a-z 0-9 - _`，且在所有活着的终端里唯一（§11.3）；编号按项目分配，不同项目会重号，必须带上项目 |
 | 标签 | `cardigan=1`、`project=<id>`、`assignment=<id>`、`run=<id>` | 对账和过滤靠标签，不靠名字 |
-| 运行目录 | `<CARDIGAN_DATA_DIR>/runs/<assignment_id>/`，目录 0700、文件 0600，在 worktree 之外 | §10.2：注入的提示词、MCP 配置和 Token 不进仓库 |
+| 运行目录 | `<CARDIGAN_DATA_DIR>/runs/<project_id>/<assignment_id>/`，目录 0700、文件 0600，在 worktree 之外 | §10.2：注入的提示词、MCP 配置和 Token 不进仓库 |
 | Token 交给 Agent | 每次启动由主机签发新 Token（旧的作废），写入运行目录的 `token` 文件；包装脚本 `launch.sh` 读出后**立即删除文件**，以环境变量 `MCP_TOKEN` 启动 CLI | `hc run` 没有传环境变量的选项；读后即删，减少明文停留 |
-| worktree 根目录 | 可配置；默认 `<CARDIGAN_DATA_DIR>/agent/repos/<project>`（基础 clone）和 `<CARDIGAN_DATA_DIR>/agent/worktrees/<assignment_id>`；生产按 §12.2 用 `/srv/agent/...` | 开发机上不需要 root |
+| worktree 根目录 | 可配置；默认 `<CARDIGAN_DATA_DIR>/agent/repos/<project_id>`（基础 clone）和 `<CARDIGAN_DATA_DIR>/agent/worktrees/<project_id>/<assignment_id>`；生产按 §12.2 用 `/srv/agent/...`；`project_id` 进路径前要校验成安全的路径片段 | 开发机上不需要 root；编号按项目分配，路径必须按项目分层 |
 | 分支 | `agent/<card_id>/<work_item_id>`，从卡片的 `base_branch` 建，记录 `base_sha` | §12.2 |
 | 项目仓库 | M2 给项目登记一个本地 Git 仓库路径（`cardigan project set-repo`），作为基础 clone 的来源；中心 bare 仓库在 M4 | 单机先走本地路径（§12.1 最后一条） |
 
