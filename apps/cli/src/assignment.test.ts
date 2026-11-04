@@ -1,9 +1,13 @@
 import {
   existsSync,
+  lstatSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -316,6 +320,9 @@ describe("startAssignment", () => {
     for (const file of ["launch.sh", "core.md", "first.md", "token"]) {
       expect(statSync(join(runDir, file)).isFile(), file).toBe(true);
     }
+    // The dispatch sentinel lets the wrapper start the Agent only after the Run
+    // exists (M2 §4 step 5–8), so the first tool call has something to ack.
+    expect(existsSync(join(runDir, "start"))).toBe(true);
     expect(statSync(join(runDir, "launch.sh")).mode & 0o777).toBe(0o700);
     expect(statSync(join(runDir, "token")).mode & 0o777).toBe(0o600);
     const token = readFileSync(join(runDir, "token"), "utf8").trim();
@@ -327,6 +334,34 @@ describe("startAssignment", () => {
       "get_updates",
     );
     expect(started.token_id.length).toBeGreaterThan(0);
+  });
+
+  test("a planted start symlink never lets the host overwrite another file", async () => {
+    const assignment = assignWorkItem("none");
+    // The Agent of another Assignment can write here and plants a link; the
+    // host must replace the link, not write through it.
+    const runDir = join(dataDir, "runs", "p-one", assignment.id);
+    mkdirSync(runDir, { recursive: true, mode: 0o700 });
+    const target = join(dataDir, "host-file");
+    writeFileSync(target, "host-private");
+    symlinkSync(target, join(runDir, "start"));
+
+    await startAssignment({
+      store,
+      io,
+      project_id,
+      assignment_id: assignment.id,
+      launch: {
+        config: launchConfig,
+        secrets: { provider: "sk-fictional-secret" },
+      },
+      mcpUrl: "http://127.0.0.1:3004/mcp",
+      runtime: new FakeRuntime(),
+      dataDir,
+    });
+
+    expect(readFileSync(target, "utf8")).toBe("host-private");
+    expect(lstatSync(join(runDir, "start")).isSymbolicLink()).toBe(false);
   });
 
   test("a role that needs a worktree uses the provider and records the facts", async () => {
@@ -429,6 +464,8 @@ describe("startAssignment", () => {
     const runDir = join(dataDir, "runs", "p-one", assignment.id);
     expect(existsSync(join(runDir, "token"))).toBe(false);
     expect(existsSync(join(runDir, "secrets.env"))).toBe(false);
+    // No dispatch happened, so the Agent was never allowed to start.
+    expect(existsSync(join(runDir, "start"))).toBe(false);
   });
 
   test("a dispatch failure releases the terminal and cancels the Run", async () => {

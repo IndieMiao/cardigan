@@ -88,7 +88,10 @@ function ports(tx: TransactionContext): CommandPorts {
 }
 
 /** A card with one coder assignment, dispatched with a runtime ref. */
-function dispatchedRun(worktree: Role["worktree"] = "none") {
+function dispatchedRun(
+  worktree: Role["worktree"] = "none",
+  options: { readonly dispatch?: boolean } = {},
+) {
   if (worktree !== "none") {
     store.uow.run((tx) =>
       writeRole(
@@ -137,6 +140,8 @@ function dispatchedRun(worktree: Role["worktree"] = "none") {
   ).changes.find((change) => change.collection === "runs")?.entity as {
     id: string;
   };
+  if (options.dispatch === false)
+    return { assignment, item, run_id: run.id, card };
   apply((state, actor, p) =>
     dispatchRun(
       state,
@@ -215,6 +220,42 @@ describe("acknowledgeDispatchedRun", () => {
     expect(read(run_id)?.status).toBe("dispatched");
     expect(itemOf(item.id)?.status).not.toBe("in_progress");
   });
+});
+
+test("a tool call before dispatch acknowledges nothing, and the next call recovers", () => {
+  // The wrapper starts the CLI during provision, so a fast Agent can reach the
+  // MCP endpoint while its Run is still queued. There is nothing to acknowledge
+  // then — and the Run must not be left behind once it is dispatched.
+  const unqueued = dispatchedRun("none", { dispatch: false });
+  expect(read(unqueued.run_id)?.status).toBe("queued");
+
+  // The first call finds no dispatched Run: it must not throw.
+  acknowledgeDispatchedRun(store, identity(unqueued.assignment), () => NOW);
+  expect(read(unqueued.run_id)?.status).toBe("queued");
+
+  // The host dispatches the Run, and the Agent's next call acknowledges it.
+  apply(
+    (state, actor, ports) =>
+      dispatchRun(
+        state,
+        actor,
+        {
+          run_id: unqueued.run_id as never,
+          runtime_ref: {
+            machine_id: "local",
+            runtime_machine: "local",
+            terminal_ref: "t1",
+            agent_name: "coder-abcdef12-c-1-w-1-a-1",
+          },
+        },
+        ports,
+      ),
+    human,
+  );
+  expect(read(unqueued.run_id)?.status).toBe("dispatched");
+  acknowledgeDispatchedRun(store, identity(unqueued.assignment), () => NOW);
+  expect(read(unqueued.run_id)?.status).toBe("running");
+  expect(itemOf(unqueued.item.id)?.status).toBe("in_progress");
 });
 
 describe("the HTTP layer", () => {

@@ -23,6 +23,7 @@ import {
   firstPrompt,
   type Harness,
   parseLaunchConfig,
+  START_FILE_NAME,
 } from "./index.js";
 
 /**
@@ -586,6 +587,8 @@ describe("provider credentials leave the run directory", () => {
         writeFileSync(compiled.token_file, "fictional-runtime-token\n", {
           mode: 0o600,
         });
+        // The wrapper waits for the host to dispatch the Run first.
+        writeFileSync(join(runDir, START_FILE_NAME), "");
 
         const env = {
           ...process.env,

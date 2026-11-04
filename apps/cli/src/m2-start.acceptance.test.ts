@@ -21,6 +21,7 @@ import {
   corePromptFor,
   firstPrompt,
   parseLaunchConfig,
+  START_FILE_NAME,
 } from "@cardigan/roles";
 import { HerdrRuntime } from "@cardigan/runtime-herdr";
 import { Store, writeRole } from "@cardigan/store";
@@ -426,12 +427,29 @@ if(process.argv.includes('--version')) { console.log('pi acceptance-1'); process
           secretsGone: true,
           keyPresent: true,
         });
+      // The acknowledge hook runs on the Agent's first tool call, so give it a
+      // moment instead of reading the row exactly once: a slow machine must not
+      // turn a correct Run into a failure.
+      await expect
+        .poll(() => records().runs[0]?.status, { timeout: 5000 })
+        .toBe("running");
       expect(records().runs[0]).toMatchObject({
         status: "running",
         role_version: 1,
         model: "fixture-model",
         agent_cli_version: "pi acceptance-1",
       });
+      // The status is not the only evidence: run_started is what moves the work
+      // item, and it must be on the timeline of the card.
+      expect(
+        store
+          .getUpdates({
+            project_id: project_id as never,
+            card_id: card.id,
+            since_seq: 0,
+          })
+          .events.map((event) => event.type),
+      ).toContain("run_started");
       expect(
         store.uow.read((tx) => tx.work_items.get(project_id, item.id))?.status,
       ).toBe("in_progress");
@@ -520,6 +538,8 @@ test.each(["claude-code", "codex", "pi"] as const)(
       await writeFile(file.path, file.content, { mode: file.mode });
     }
     await writeFile(launch.token_file, "fixture-token", { mode: 0o600 });
+    // The wrapper waits for the dispatch sentinel (see START_FILE_NAME).
+    await writeFile(join(root, "run", START_FILE_NAME), "", { mode: 0o600 });
     const bin = join(root, "bin");
     await mkdir(bin);
     await writeFile(

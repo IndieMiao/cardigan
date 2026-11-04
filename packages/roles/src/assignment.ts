@@ -27,6 +27,13 @@ export const TOKEN_FILE_NAME = "token";
 export const LAUNCH_SCRIPT_NAME = "launch.sh";
 /** Provider credentials for one launch; sourced and deleted by `launch.sh`. */
 export const SECRETS_FILE_NAME = "secrets.env";
+/**
+ * The host writes this sentinel after `dispatchRun` commits; `launch.sh` waits
+ * for it before starting the CLI. Without it a fast Agent can call the MCP
+ * endpoint while its Run is still `queued`, and the "first tool call
+ * acknowledges the Run" hook would have nothing to acknowledge (M2 §4 step 5–8).
+ */
+export const START_FILE_NAME = "start";
 
 export interface AssignmentRoleInput {
   readonly role_id: string;
@@ -250,6 +257,7 @@ export function compileAssignmentLaunch(
       return file;
     }
   });
+  const startFile = join(input.run_dir, START_FILE_NAME);
   const secretsFile = join(input.run_dir, SECRETS_FILE_NAME);
   const secretsFiles: CompiledFile[] =
     Object.keys(secretEnv).length === 0
@@ -289,6 +297,7 @@ export function compileAssignmentLaunch(
         content: launchScriptContent({
           tokenFile,
           firstPromptFile: firstFile,
+          startFile,
           secretsFile: secretsFiles.length === 0 ? undefined : secretsFile,
           command,
           args,
@@ -348,6 +357,7 @@ function codexConfig(
 function launchScriptContent(options: {
   readonly tokenFile: string;
   readonly firstPromptFile: string;
+  readonly startFile: string;
   readonly secretsFile: string | undefined;
   readonly command: string;
   readonly args: readonly string[];
@@ -401,6 +411,20 @@ if [ ! -f "$first_file" ]; then
 fi
 first_message=$(cat "$first_file"; printf x)
 first_message=\${first_message%x}
+# Wait for the host to dispatch this Run (see START_FILE_NAME). The sentinel is
+# written only after the Run is dispatched, so the Agent can never talk to the
+# project before there is a Run to acknowledge.
+start_file=${quote(options.startFile)}
+waited=0
+while [ ! -f "$start_file" ]; do
+  if [ "$waited" -ge 1200 ]; then
+    echo "cardigan: the host never dispatched this Run: $start_file" >&2
+    exit 75
+  fi
+  sleep 0.1
+  waited=$((waited + 1))
+done
+rm -f "$start_file"
 exec ${quote(options.command)}${args ? ` ${args}` : ""} "$first_message"
 `;
 }

@@ -21,11 +21,14 @@ import {
 
 export {
   type AgentExecution,
+  clearAgentSentinel,
   type LaunchFile,
   prepareAgentProject,
+  START_FILE_NAME,
   scrubAgentLaunch,
   secureDataDirectory,
   writeAgentLaunch,
+  writeAgentSentinel,
 } from "./agent-files.js";
 
 export {

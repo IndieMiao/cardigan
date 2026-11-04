@@ -22,6 +22,7 @@ import {
   type LaunchConfig,
   resolveProfile,
   SECRETS_FILE_NAME,
+  START_FILE_NAME,
   TOKEN_FILE_NAME,
 } from "@cardigan/roles";
 import {
@@ -33,6 +34,7 @@ import {
   scrubAgentLaunch,
   secureDataDirectory,
   writeAgentLaunch,
+  writeAgentSentinel,
 } from "@cardigan/runtime-herdr";
 import { getRoleVersion, Store, writeRole } from "@cardigan/store";
 import { AgentGitTransport } from "./agent-git.js";
@@ -261,7 +263,7 @@ async function writeCompiledFiles(
  * removed from the run directory even if `launch.sh` never ran.
  */
 async function scrubRunDirectory(runDir: string): Promise<void> {
-  for (const name of [TOKEN_FILE_NAME, SECRETS_FILE_NAME]) {
+  for (const name of [TOKEN_FILE_NAME, SECRETS_FILE_NAME, START_FILE_NAME]) {
     await rm(join(runDir, name), { force: true });
   }
 }
@@ -559,6 +561,9 @@ async function startAssignmentSteps(
         ports,
       ),
   });
+
+  // The Run is dispatched: let the wrapper start the Agent (M2 §4 step 8).
+  await writeAgentSentinel(progress.execution, project_id, assignment.id);
 
   const started = requireAssignment(
     store,
