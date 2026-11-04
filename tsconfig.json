@@ -1,0 +1,38 @@
+{
+  "files": [],
+  "references": [
+    {
+      "path": "packages/domain"
+    },
+    {
+      "path": "packages/store"
+    },
+    {
+      "path": "packages/mcp-server"
+    },
+    {
+      "path": "packages/router"
+    },
+    {
+      "path": "packages/git-service"
+    },
+    {
+      "path": "packages/git-transport"
+    },
+    {
+      "path": "packages/runtime-herdr"
+    },
+    {
+      "path": "packages/roles"
+    },
+    {
+      "path": "apps/server"
+    },
+    {
+      "path": "apps/web"
+    },
+    {
+      "path": "apps/cli"
+    }
+  ]
+}
