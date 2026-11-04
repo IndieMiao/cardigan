@@ -8,5 +8,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     }
+  },
+  "dependencies": {
+    "@cardigan/domain": "workspace:*",
+    "@cardigan/store": "workspace:*",
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "zod": "^4.6.7"
   }
 }

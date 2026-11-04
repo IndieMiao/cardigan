@@ -1,11 +1,17 @@
+// Lower layers first. A layer may only depend on layers above it in this list.
+// mcp-server and router sit above store because they serve the domain through
+// the store (development plan §20.2 lists them as peers of store; M1.5 needs
+// mcp-server -> store for token verification and read queries).
 const layers = [
   ["domain"],
-  ["store", "router", "mcp-server", "git-service", "roles"],
+  ["store", "git-service", "roles"],
+  ["router", "mcp-server"],
   ["runtime-herdr", "git-transport"],
   ["server", "web", "cli"],
 ];
-const location = (name, layer) =>
-  `${layer === 3 ? "apps" : "packages"}/${name}`;
+const appNames = new Set(["server", "web", "cli"]);
+const location = (name) =>
+  `${appNames.has(name) ? "apps" : "packages"}/${name}`;
 
 module.exports = {
   forbidden: [
@@ -36,7 +42,7 @@ module.exports = {
         return {
           name: `${name}-only-lower-layers`,
           severity: "error",
-          from: { path: `^${location(name, layer)}/` },
+          from: { path: `^${location(name)}/` },
           to: { path: `^(${forbidden.join("|")})(/|$)` },
         };
       }),
