@@ -43,6 +43,7 @@ export {
   type ServerConfig,
   type ServerEnv,
 } from "./config.js";
+export { Dispatcher, type DispatcherOptions } from "./dispatch.js";
 export {
   acknowledgeInbox,
   routeProjectEvents,
