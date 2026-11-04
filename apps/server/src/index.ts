@@ -50,5 +50,10 @@ export {
   routeStreamEvents,
   type StandingResolver,
 } from "./dispatch-inbox.js";
+export {
+  type RuntimeEventSource,
+  RuntimeMonitor,
+  type RuntimeMonitorOptions,
+} from "./dispatch-monitor.js";
 export { installShutdownHandlers, SHUTDOWN_SIGNALS } from "./lifecycle.js";
 export { type CardiganServer, startCardiganServer } from "./server.js";
