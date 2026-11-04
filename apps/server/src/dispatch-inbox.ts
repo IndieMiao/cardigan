@@ -13,6 +13,7 @@ import {
   projectEvents,
   recordNotification,
   type Store,
+  unfinishedBellAttempts,
 } from "@cardigan/store";
 
 export const dispatcherClock: Clock = { now: () => new Date().toISOString() };
@@ -98,7 +99,9 @@ export function notificationOwner(
   const sent = note.run_id && state.runs.find((r) => r.id === note.run_id);
   if (sent) return sent.assignment_id;
   const id = standing?.(state.project_id, note.recipient.kind, state);
-  return state.assignments.some((a) => a.id === id && a.scope === "standing")
+  return state.assignments.some(
+    (a) => a.id === id && a.scope === "standing" && a.status === "active",
+  )
     ? id
     : undefined;
 }
@@ -111,6 +114,7 @@ export function acknowledgeInbox(
 ): number {
   return store.uow.run((tx) => {
     const state = loadCommandState(tx, project);
+    const attempts = unfinishedBellAttempts(store.database, project);
     let count = 0;
     for (const note of store.listNotifications({ project_id: project })) {
       if (
@@ -118,7 +122,9 @@ export function acknowledgeInbox(
         !["pending", "belled", "delivery_failed"].includes(note.status)
       )
         continue;
-      const owner = notificationOwner(note, state, standing);
+      const owner =
+        attempts.find((a) => a.notification_ids.includes(note.id))
+          ?.assignment_id ?? notificationOwner(note, state, standing);
       if (!owner) continue;
       const cursor = tx.cursors.get(project, {
         assignment_id: owner,

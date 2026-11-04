@@ -43,6 +43,12 @@ export function beginBellAttempt(
     new Set(input.notification_ids).size !== input.notification_ids.length
   )
     throw new Error("Invalid bell attempt");
+  if (
+    unfinishedBellAttempts(db, input.project_id).some((a) =>
+      a.notification_ids.some((id) => input.notification_ids.includes(id)),
+    )
+  )
+    throw new Error("Bell notification is already in flight");
   const row = db
     .prepare("SELECT doc FROM runs WHERE project_id = ? AND id = ?")
     .get(input.project_id, input.run_id);

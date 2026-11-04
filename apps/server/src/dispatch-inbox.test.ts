@@ -1,5 +1,11 @@
-import { postComment } from "@cardigan/domain";
-import { projectEvents, Store } from "@cardigan/store";
+import { postComment, queueRun } from "@cardigan/domain";
+import {
+  beginBellAttempt,
+  getRoleVersion,
+  projectEvents,
+  Store,
+  writeRole,
+} from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { dispatchFixture } from "../test-support/dispatch.js";
 import { acknowledgeInbox, routeProjectEvents } from "./dispatch-inbox.js";
@@ -125,4 +131,82 @@ test("unresolved routing is retained as an Ops escalation instead of silently ad
       status: "pending",
     }),
   ]);
+});
+
+test("logical PM ACK uses the in-flight receiver even if the configured PM changes", () => {
+  const target = f.create();
+  f.apply((s, a, p) =>
+    postComment(s, a, { card_id: target.card.id, body: "For Ops" }, p),
+  );
+  routeProjectEvents(f.store, f.project);
+  const note = notes().find((n) => n.recipient.kind === "pm_ops");
+  if (!note) throw new Error("Missing PM notification");
+  const owners = f.store.uow.run((tx) => {
+    const role = getRoleVersion(tx, f.project, "coder");
+    if (!role) throw new Error("Missing role");
+    writeRole(
+      tx,
+      f.project,
+      { ...role, role_id: "pm", kind: "standing", capabilities: ["manage"] },
+      { mode: "add" },
+    );
+    return [0, 1].map(() => {
+      const id = tx.ids.next(f.project, "assignment");
+      tx.assignments.put(f.project, {
+        id,
+        scope: "standing",
+        role_id: "pm",
+        role_version: 1,
+        status: "active",
+        runtime_state: "not_provisioned",
+        runtime_ref: null,
+        machine_id: "local",
+        mcp_token_id: `reserved:${id}`,
+        created_at: f.clock.now(),
+      });
+      return id;
+    });
+  });
+  const original = owners[0],
+    replacement = owners[1];
+  if (!original || !replacement) throw new Error("Missing PMs");
+  const run = f.apply((s, a, p) =>
+    queueRun(
+      s,
+      a,
+      {
+        assignment_id: original,
+        trigger_event_id: note.event_id,
+        model: "fixture",
+        agent_cli_version: "fixture",
+      },
+      p,
+    ),
+  );
+  f.store.uow.run(() =>
+    beginBellAttempt(f.store.database, {
+      id: "in-flight",
+      project_id: f.project,
+      assignment_id: original,
+      run_id: run.id,
+      notification_ids: [note.id],
+      started_at: f.clock.now(),
+      lease_until: "2030-01-01T00:01:00.000Z",
+    }),
+  );
+  f.store.ackEvents({
+    project_id: f.project,
+    assignment_id: replacement,
+    card_id: target.card.id,
+    up_to_seq: note.seq,
+  });
+  expect(acknowledgeInbox(f.store, f.project, () => replacement)).toBe(0);
+  f.store.ackEvents({
+    project_id: f.project,
+    assignment_id: original,
+    card_id: target.card.id,
+    up_to_seq: note.seq,
+  });
+  expect(acknowledgeInbox(f.store, f.project, () => replacement)).toBe(1);
+  expect(notes().find((n) => n.id === note.id)?.status).toBe("acked");
 });
