@@ -3,7 +3,6 @@ import type {
   Assignment,
   Clock,
   CommandState,
-  Event,
   Notification,
   ProjectId,
   Run,
@@ -14,6 +13,7 @@ import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import {
   mergeNotifications,
   type NotificationKind,
+  payloadString,
   summarizeNotifications,
 } from "@cardigan/router";
 import {
@@ -21,11 +21,15 @@ import {
   beginBellAttempt,
   finishBellAttempt,
   moveNotification,
-  recordNotification,
   type Store,
   type StoreTransactionContext,
   unfinishedBellAttempts,
 } from "@cardigan/store";
+import {
+  alertAudience,
+  dispatchAlert,
+  unfinishedRun,
+} from "./dispatch-alert.js";
 import {
   acknowledgeInbox,
   dispatcherClock,
@@ -40,6 +44,10 @@ export interface DispatcherOptions {
   readonly clock?: Clock;
   readonly standing?: StandingResolver;
   readonly deliveryLeaseMs?: number;
+  readonly retryBaseMs?: number;
+  /** Retries after the initial send; zero disables retries. */
+  readonly maxRetries?: number;
+  readonly inactivityGraceMs?: number;
   /** Snapshot for a NEW terminal; an existing session keeps its previous Run's snapshot. */
   readonly snapshot: (
     assignment: Assignment,
@@ -53,8 +61,6 @@ export interface DispatcherOptions {
     bell: string;
   }) => Promise<void>;
 }
-const unfinished = (r: Run) =>
-  !["completed", "failed", "cancelled"].includes(r.status);
 const sameRef = (a: Assignment, b: Assignment) =>
   JSON.stringify(a.runtime_ref) === JSON.stringify(b.runtime_ref);
 const covered = (n: Notification, s: CommandState, owner: Assignment["id"]) =>
@@ -76,9 +82,26 @@ export class Dispatcher {
   readonly clock: Clock;
   private serial: Promise<void> = Promise.resolve();
   private readonly leaseMs: number;
+  private readonly retryBaseMs: number;
+  private readonly maxRetries: number;
+  private readonly inactivityGraceMs: number;
   constructor(readonly options: DispatcherOptions) {
     this.clock = options.clock ?? dispatcherClock;
     this.leaseMs = options.deliveryLeaseMs ?? 60_000;
+    this.retryBaseMs = options.retryBaseMs ?? 60_000;
+    this.maxRetries = options.maxRetries ?? 4;
+    this.inactivityGraceMs = options.inactivityGraceMs ?? 15 * 60_000;
+    if (
+      !Number.isSafeInteger(this.maxRetries) ||
+      this.maxRetries < 0 ||
+      this.maxRetries > 30 ||
+      ![
+        this.retryBaseMs,
+        this.inactivityGraceMs,
+        this.retryDelay(this.maxRetries + 1),
+      ].every((n) => Number.isSafeInteger(n) && n > 0)
+    )
+      throw new Error("Invalid dispatcher retry/watchdog settings");
     if (!Number.isFinite(this.leaseMs) || this.leaseMs <= 0)
       throw new Error("Invalid delivery lease");
   }
@@ -106,6 +129,7 @@ export class Dispatcher {
     for (const attempt of unfinishedBellAttempts(store.database, project))
       if (attempt.lease_until <= this.clock.now())
         this.settle(attempt, false, "interrupted_delivery");
+    this.maintenance(project);
     const claimed = new Set(
       unfinishedBellAttempts(store.database, project).flatMap(
         (a) => a.notification_ids,
@@ -120,7 +144,7 @@ export class Dispatcher {
       if (claimed.has(n.id)) continue;
       const owner = this.owner(n, state);
       if (!owner) continue;
-      const key = `${owner}/${n.card_id ?? ""}`;
+      const key = `${owner}/${n.card_id ?? ""}/${n.attempts ? n.run_id : ""}`;
       groups.set(key, [...(groups.get(key) ?? []), n]);
     }
     for (const group of groups.values()) await this.deliver(project, group);
@@ -146,7 +170,8 @@ export class Dispatcher {
   ) {
     const queued = this.queued(state, a, notes);
     return state.runs.some(
-      (r) => r.assignment_id === a.id && unfinished(r) && r.id !== queued?.id,
+      (r) =>
+        r.assignment_id === a.id && unfinishedRun(r) && r.id !== queued?.id,
     );
   }
   private async deliver(project: ProjectId, notes: readonly Notification[]) {
@@ -388,7 +413,7 @@ export class Dispatcher {
             ...(sent && n.card_id
               ? {
                   next_attempt_at: new Date(
-                    Date.parse(at) + 60_000,
+                    Date.parse(at) + this.retryDelay(n.attempts + 1),
                   ).toISOString(),
                 }
               : {}),
@@ -430,30 +455,95 @@ export class Dispatcher {
     assignment: Assignment["id"],
     reason: string,
   ) {
-    if (notes.every((n) => n.recipient.kind === "pm_ops")) return; // Never recursively escalate a broken Ops bell to itself.
-    const card_id = notes[0]?.card_id;
-    const event: Event = {
-      id: tx.ids.nextEventId(),
-      seq: tx.ids.nextEventSequence(project, card_id),
-      ...(card_id ? { card_id } : {}),
+    const state = loadCommandState(tx, project);
+    const a = state.assignments.find((a) => a.id === assignment);
+    if (!a) return;
+    dispatchAlert(tx, this.options.store, state, this.clock.now(), {
+      assignment: a,
       type: "bell_delivery_failed",
-      actor: { kind: "system", project_id: project },
-      payload: {
-        assignment_id: assignment,
-        reason,
-        notification_ids: notes.map((n) => n.id),
-      },
-      created_at: this.clock.now(),
-    };
-    tx.events.append(project, event);
-    recordNotification(this.options.store.database, {
-      project_id: project,
-      event_id: event.id,
-      card_id,
-      seq: event.seq,
-      recipient: { kind: "pm_ops" },
-      kind: "escalation",
-      at: event.created_at,
+      reason,
+      audience: alertAudience(a, state, this.options.standing, notes),
+      card_id: notes[0]?.card_id,
+      notification_ids: notes.map((n) => n.id),
+    });
+  }
+  private retryDelay(attempts: number) {
+    return (
+      this.retryBaseMs *
+      2 ** Math.max(0, Math.min(attempts - 1, this.maxRetries - 1))
+    );
+  }
+  private maintenance(project: ProjectId) {
+    const { store, standing } = this.options;
+    store.uow.run((tx) => {
+      const state = loadCommandState(tx, project),
+        at = this.clock.now();
+      const attempts = unfinishedBellAttempts(store.database, project);
+      for (const n of store.listNotifications({
+        project_id: project,
+        status: "belled",
+      })) {
+        if (!n.card_id || !n.next_attempt_at || n.next_attempt_at > at)
+          continue;
+        const owner = this.owner(n, state),
+          a = state.assignments.find((a) => a.id === owner);
+        if (
+          !a ||
+          state.runs.some(
+            (r) => r.assignment_id === a.id && unfinishedRun(r),
+          ) ||
+          attempts.some(
+            (t) =>
+              t.assignment_id === a.id || t.notification_ids.includes(n.id),
+          )
+        )
+          continue;
+        const exhausted = n.attempts >= this.maxRetries + 1;
+        moveNotification(store.database, {
+          project_id: project,
+          id: n.id,
+          event: exhausted ? "needs_attention" : "retry",
+          at,
+        });
+        if (exhausted)
+          dispatchAlert(tx, store, state, at, {
+            assignment: a,
+            type: "bell_retry_exhausted",
+            reason: "ack_retry_limit",
+            audience: alertAudience(a, state, standing, [n]),
+            card_id: n.card_id,
+            run_id: n.run_id,
+            notification_ids: [n.id],
+          });
+      }
+      for (const r of state.runs) {
+        if (r.status !== "running") continue;
+        const a = state.assignments.find((a) => a.id === r.assignment_id);
+        if (a?.status !== "active") continue;
+        const last = Math.max(
+          Date.parse(r.started_at ?? a.created_at),
+          Date.parse(a.last_mcp_activity_at ?? a.created_at),
+        );
+        if (
+          Date.parse(at) - last < this.inactivityGraceMs ||
+          state.events.some(
+            (e) =>
+              e.type === "run_inactive" &&
+              payloadString(e.payload, "run_id") === r.id,
+          )
+        )
+          continue;
+        dispatchAlert(tx, store, state, at, {
+          assignment: a,
+          type: "run_inactive",
+          reason: "mcp_inactivity",
+          mark: true,
+          audience: alertAudience(a, state, standing),
+          run_id: r.id,
+          card_id: state.work_items.find((w) => w.id === a.work_item_id)
+            ?.card_id,
+        });
+      }
     });
   }
 }
