@@ -1,0 +1,23 @@
+/**
+ * Shapes of the two reference lists a {@link CardView} derives
+ * (`waiting_on`, `next_owners`).
+ *
+ * They live in their own leaf module so `entities.ts` can type `CardView` with
+ * them without a type-only import cycle (`card-derived.ts` imports the entity
+ * types, and `entities.ts` imports these two interfaces). `card-derived.ts`
+ * re-exports them, so callers can keep importing from there or from the package
+ * entry point.
+ */
+
+export interface WaitingOnItem {
+  readonly kind: "decision" | "human_action" | "review" | "blocked";
+  /** The referenced entity: `q(1)`, `h(2)`, `W-3`, `C-4#5`. */
+  readonly ref: string;
+  /** Short human label, e.g. `等你拍板 q(1)`. */
+  readonly label: string;
+}
+
+export interface NextOwnerItem {
+  readonly kind: "assignment" | "role" | "human";
+  readonly ref: string;
+}

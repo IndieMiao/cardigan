@@ -1,12 +1,14 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, expectTypeOf, test } from "vitest";
 import {
   type Assignment,
   type Card,
   type CardDerivedInput,
+  type CardView,
   type Decision,
   type Delivery,
   deriveCardFields,
   deriveNextOwners,
+  deriveReviewMatrix,
   deriveWaitingOn,
   deriveWhy,
   type HumanAction,
@@ -609,5 +611,50 @@ describe("deriveCardFields", () => {
       next_owners: [],
       why: "待规划",
     });
+  });
+});
+
+describe("CardView types", () => {
+  test("the derived fields compose into a CardView", () => {
+    const work_items = [
+      produce("delivered"),
+      verify("W-2", "ready", { target_work_item_id: "W-1" as never }),
+    ];
+    const deliveries = [delivery("D-1")];
+    const reviews = [review("D-1", "W-2")];
+    const fields = deriveCardFields(input({ work_items, deliveries, reviews }));
+
+    // Type level: `CardView.waiting_on` / `next_owners` are the item shapes
+    // from card-derived.ts, so the derived output fits without a cast.
+    expectTypeOf(fields.waiting_on).toMatchTypeOf<CardView["waiting_on"]>();
+    expectTypeOf(fields.next_owners).toMatchTypeOf<CardView["next_owners"]>();
+
+    const view: CardView = {
+      ...card,
+      ...fields,
+      open_decisions: [],
+      review_matrix: deriveReviewMatrix(deliveries, work_items, reviews),
+    };
+
+    expect(view.waiting_on).toEqual(fields.waiting_on);
+    expect(view.next_owners).toEqual(fields.next_owners);
+    expect(view.why).toBe(fields.why);
+  });
+
+  test("CardView no longer accepts bare id arrays", () => {
+    const fields = deriveCardFields(input());
+    const legacy = {
+      ...card,
+      ...fields,
+      // The old shape (an array of ids) must not typecheck as CardView.
+      // @ts-expect-error waiting_on is WaitingOnItem[], not string[].
+      waiting_on: ["q(1)"],
+      // @ts-expect-error next_owners is NextOwnerItem[], not string[].
+      next_owners: ["A-1"],
+      open_decisions: [],
+      review_matrix: [],
+    } satisfies CardView;
+
+    expect(legacy.waiting_on).toEqual(["q(1)"]);
   });
 });

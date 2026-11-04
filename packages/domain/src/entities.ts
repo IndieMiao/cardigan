@@ -1,3 +1,4 @@
+import type { NextOwnerItem, WaitingOnItem } from "./card-derived-types.js";
 import type {
   AssignmentId,
   AttachmentId,
@@ -107,8 +108,10 @@ export interface Card {
   readonly created_at: Timestamp;
 }
 export interface CardView extends Card {
-  readonly waiting_on: readonly (WorkItemId | DecisionId | HumanActionId)[];
-  readonly next_owners: readonly (AssignmentId | Decider)[];
+  /** Derived by `deriveWaitingOn` in `card-derived.ts`. */
+  readonly waiting_on: readonly WaitingOnItem[];
+  /** Derived by `deriveNextOwners` in `card-derived.ts`. */
+  readonly next_owners: readonly NextOwnerItem[];
   readonly open_decisions: readonly DecisionId[];
   readonly review_matrix: readonly {
     readonly delivery_id: DeliveryId;
