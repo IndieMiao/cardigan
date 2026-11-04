@@ -1,5 +1,6 @@
 import type {
   AssignmentId,
+  CardId,
   Clock,
   CommandState,
   Notification,
@@ -10,7 +11,7 @@ import { type RoutedNotification, routeEvent } from "@cardigan/router";
 import {
   advanceRouterCursor,
   moveNotification,
-  projectEvents,
+  PROJECT_EVENT_STREAM,
   recordNotification,
   type Store,
   unfinishedBellAttempts,
@@ -41,23 +42,29 @@ export function recordRoute(
         : { kind: note.recipient.kind },
   });
 }
-/** Commit each page and its cursor together, including events from different cards. */
-export function routeProjectEvents(
+interface RoutePageOptions {
+  clock?: Clock;
+  batchSize?: number;
+}
+/** Each stream owns its transaction and seq cursor; no cross-card ordering is imposed. */
+export function routeStreamEvents(
   store: Store,
   project: ProjectId,
-  options: { clock?: Clock; batchSize?: number } = {},
+  stream: string,
+  options: RoutePageOptions = {},
 ): number {
+  const size = options.batchSize ?? 100;
+  if (!Number.isSafeInteger(size) || size < 1 || size > 1000)
+    throw new Error("Invalid routing page size");
+  const card = stream === PROJECT_EVENT_STREAM ? undefined : (stream as CardId);
   return store.uow.run((tx) => {
-    const events = projectEvents(
-      store.database,
-      project,
-      store.routerCursor(project),
-      options.batchSize ?? 100,
-    );
+    const events = tx.events
+      .listAfter(project, card, store.routerCursor(project, stream))
+      .slice(0, size);
     if (events.length === 0) return 0;
     const snapshot = loadCommandState(tx, project),
       at = (options.clock ?? dispatcherClock).now();
-    for (const { position, event } of events) {
+    for (const event of events) {
       const routed = routeEvent({ event, snapshot });
       // Ambiguous/unresolved routing must remain visible to Ops, even if no
       // concrete Assignment could be chosen. The source event retains details.
@@ -78,10 +85,25 @@ export function routeProjectEvents(
         );
       for (const note of routed.notifications)
         recordRoute(store, project, note, at);
-      advanceRouterCursor(store.database, project, position, at);
+      advanceRouterCursor(store.database, project, stream, event.seq, at);
     }
     return events.length;
   });
+}
+/** Discover card streams on every pass, so newly created cards start at their own cursor. */
+export function routeProjectEvents(
+  store: Store,
+  project: ProjectId,
+  options: RoutePageOptions = {},
+): number {
+  const streams = store.uow.read((tx) => [
+    PROJECT_EVENT_STREAM,
+    ...tx.cards.list(project).map((card) => card.id),
+  ]);
+  let count = 0;
+  for (const stream of streams)
+    count += routeStreamEvents(store, project, stream, options);
+  return count;
 }
 export type StandingResolver = (
   project: ProjectId,

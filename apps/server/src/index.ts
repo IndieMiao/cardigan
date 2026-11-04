@@ -46,6 +46,7 @@ export {
 export {
   acknowledgeInbox,
   routeProjectEvents,
+  routeStreamEvents,
   type StandingResolver,
 } from "./dispatch-inbox.js";
 export { installShutdownHandlers, SHUTDOWN_SIGNALS } from "./lifecycle.js";

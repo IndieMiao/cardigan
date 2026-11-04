@@ -1,20 +1,28 @@
 import { postComment, queueRun } from "@cardigan/domain";
+import * as router from "@cardigan/router";
 import {
   beginBellAttempt,
   getRoleVersion,
-  projectEvents,
+  PROJECT_EVENT_STREAM,
   Store,
   writeRole,
 } from "@cardigan/store";
-import { afterEach, beforeEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { dispatchFixture } from "../test-support/dispatch.js";
-import { acknowledgeInbox, routeProjectEvents } from "./dispatch-inbox.js";
+import {
+  acknowledgeInbox,
+  routeProjectEvents,
+  routeStreamEvents,
+} from "./dispatch-inbox.js";
 
 let f: ReturnType<typeof dispatchFixture>;
 beforeEach(() => {
   f = dispatchFixture();
 });
-afterEach(() => f.close());
+afterEach(() => {
+  vi.restoreAllMocks();
+  f.close();
+});
 const comment = (target: ReturnType<typeof f.create>, body = "Please check") =>
   f.apply((s, a, p) =>
     postComment(
@@ -26,26 +34,44 @@ const comment = (target: ReturnType<typeof f.create>, body = "Please check") =>
   );
 const notes = () => f.store.listNotifications({ project_id: f.project });
 
-test("consumes all card streams through the project cursor and is restart-idempotent", () => {
-  const a = f.create(),
-    b = f.create();
-  comment(a);
-  comment(b);
-  comment(a);
-  const events = projectEvents(f.store.database, f.project, 0);
-  while (
-    routeProjectEvents(f.store, f.project, { clock: f.clock, batchSize: 2 })
-  ) {
-    /* bounded pages */
+test("high card seq does not hide a new card or project events, including after restart", () => {
+  const older = f.create();
+  for (let i = 0; i < 12; i++) comment(older, `older ${i}`);
+  routeProjectEvents(f.store, f.project);
+  const high = f.store.routerCursor(f.project, older.card.id);
+  const newer = f.create();
+  comment(newer, "new card");
+  const projectEvent = f.store.uow.run((tx) => {
+    const event = {
+      id: tx.ids.nextEventId(),
+      seq: tx.ids.nextEventSequence(f.project),
+      type: "delivery_submitted",
+      actor: { kind: "human" as const, project_id: f.project },
+      payload: { delivery_id: "D-missing" },
+      created_at: f.clock.now(),
+    };
+    tx.events.append(f.project, event);
+    return event;
+  });
+  while (routeProjectEvents(f.store, f.project, { batchSize: 1 })) {
+    /* one event per stream */
   }
-  expect(notes().map((n) => n.recipient)).toEqual(
-    expect.arrayContaining([
-      { kind: "assignment", assignment_id: a.assignment.id },
-      { kind: "assignment", assignment_id: b.assignment.id },
-    ]),
+  expect(f.store.routerCursor(f.project, older.card.id)).toBe(high);
+  const latest = f.store.getUpdates({
+    project_id: f.project,
+    card_id: newer.card.id,
+  }).latest_seq;
+  expect(f.store.routerCursor(f.project, newer.card.id)).toBe(latest);
+  expect(latest).toBeLessThan(high);
+  expect(f.store.routerCursor(f.project, PROJECT_EVENT_STREAM)).toBe(
+    projectEvent.seq,
   );
-  expect(notes()).toHaveLength(3);
-  expect(f.store.routerCursor(f.project)).toBe(events.at(-1)?.position);
+  expect(notes().filter((n) => n.card_id === newer.card.id)).toHaveLength(1);
+  expect(notes().find((n) => n.event_id === projectEvent.id)).toMatchObject({
+    recipient: { kind: "pm_ops" },
+    seq: 1,
+  });
+  expect(notes().filter((n) => n.card_id === older.card.id)).toHaveLength(12);
   const reopened = Store.open({ dataDir: f.dataDir });
   try {
     expect(routeProjectEvents(reopened, f.project)).toBe(0);
@@ -59,7 +85,7 @@ test("consumes all card streams through the project cursor and is restart-idempo
 test("a failed inbox write rolls back the whole page and its cursor", () => {
   const target = f.create();
   routeProjectEvents(f.store, f.project);
-  const before = f.store.routerCursor(f.project);
+  const before = f.store.routerCursor(f.project, target.card.id);
   comment(target, "one");
   comment(target, "two");
   f.store.database.exec(`CREATE TEMP TRIGGER fail_page BEFORE INSERT ON notifications
@@ -68,7 +94,7 @@ test("a failed inbox write rolls back the whole page and its cursor", () => {
     /inbox unavailable/,
   );
   expect(notes()).toEqual([]);
-  expect(f.store.routerCursor(f.project)).toBe(before);
+  expect(f.store.routerCursor(f.project, target.card.id)).toBe(before);
   f.store.database.exec("DROP TRIGGER fail_page");
   routeProjectEvents(f.store, f.project);
   expect(notes()).toHaveLength(2);
@@ -209,4 +235,40 @@ test("logical PM ACK uses the in-flight receiver even if the configured PM chang
   });
   expect(acknowledgeInbox(f.store, f.project, () => replacement)).toBe(1);
   expect(notes().find((n) => n.id === note.id)?.status).toBe("acked");
+});
+
+test("stream pages commit independently and preserve seq order inside each stream", () => {
+  const routed = vi.spyOn(router, "routeEvent");
+  const a = f.create(),
+    b = f.create();
+  comment(b, "B1");
+  comment(a, "A1");
+  comment(b, "B2");
+  comment(a, "A2");
+  routeStreamEvents(f.store, f.project, b.card.id);
+  const bSeqs = routed.mock.calls.map(([input]) => input.event.seq);
+  expect(bSeqs).toEqual([...bSeqs].sort((x, y) => x - y));
+  expect(f.store.routerCursor(f.project, a.card.id)).toBe(0);
+  const bCursor = f.store.routerCursor(f.project, b.card.id);
+  f.store.database.exec(`CREATE TEMP TRIGGER fail_stream BEFORE INSERT ON notifications
+    WHEN NEW.card_id != '${b.card.id}' AND (SELECT count(*) FROM notifications WHERE card_id = NEW.card_id) >= 1
+    BEGIN SELECT RAISE(ABORT, 'stream unavailable'); END;`);
+  expect(() => routeStreamEvents(f.store, f.project, a.card.id)).toThrow(
+    /stream unavailable/,
+  );
+  expect(f.store.routerCursor(f.project, a.card.id)).toBe(0);
+  expect(f.store.routerCursor(f.project, b.card.id)).toBe(bCursor);
+  expect(notes()).toHaveLength(2);
+  f.store.database.exec("DROP TRIGGER fail_stream");
+  routed.mockClear();
+  routeStreamEvents(f.store, f.project, a.card.id);
+  const aSeqs = routed.mock.calls.map(([input]) => input.event.seq);
+  expect(aSeqs).toEqual([...aSeqs].sort((x, y) => x - y));
+  for (const { card } of [a, b]) {
+    const seqs = notes()
+      .filter((n) => n.card_id === card.id)
+      .map((n) => n.seq);
+    expect(seqs).toEqual([...seqs].sort((x, y) => x - y));
+    expect(f.store.routerCursor(f.project, card.id)).toBe(seqs.at(-1));
+  }
 });
