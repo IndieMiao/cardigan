@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -48,6 +48,12 @@ function textOf(result: unknown): Record<string, unknown> {
 
 /** Seed one project, card, work item, assignment and token. */
 function seed(store: Store): string {
+  const allowed_tools = [
+    "whoami",
+    "get_card",
+    "post_comment",
+    "upload_attachment",
+  ] as const;
   const project_id = "p-smoke" as never;
   store.createProject({ id: project_id, name: "Smoke" });
   store.uow.run((tx) => {
@@ -95,7 +101,7 @@ function seed(store: Store): string {
     tx.roles.put(project_id, {
       role_id: "coder",
       role_version: 1,
-      allowed_tools: ["whoami", "get_card"],
+      allowed_tools,
       capabilities: ["code"],
     });
   });
@@ -104,7 +110,7 @@ function seed(store: Store): string {
   return store.issueToken({
     project_id,
     assignment_id: "A-1" as never,
-    role: { role_version: 1, allowed_tools: ["whoami", "get_card"] },
+    role: { role_version: 1, allowed_tools },
     token: "fictional-smoke-token",
   }).token;
 }
@@ -138,6 +144,39 @@ test("the assembled server still rejects requests without a token", async () => 
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
   });
   expect(response.status).toBe(401);
+});
+
+test("uploads use the assembled server's configured data directory", async () => {
+  const client = await connect(seed(store));
+  try {
+    const comment = textOf(
+      await client.callTool({
+        name: "post_comment",
+        arguments: {
+          idempotency_key: "comment",
+          card_id: "C-1",
+          body: "Attach here",
+        },
+      }),
+    );
+    const result = await client.callTool({
+      name: "upload_attachment",
+      arguments: {
+        idempotency_key: "upload",
+        card_id: "C-1",
+        file: "aGk=",
+        mime: "text/plain",
+        kind: "evidence",
+        attach_to: { kind: "timeline_entry", id: comment.id },
+      },
+    });
+    expect(result.isError).not.toBe(true);
+    expect(
+      readFileSync(join(dataDir, String(textOf(result).storage_path)), "utf8"),
+    ).toBe("hi");
+  } finally {
+    await client.close();
+  }
 });
 
 test("close() closes the MCP endpoint and the store it owns", async () => {
