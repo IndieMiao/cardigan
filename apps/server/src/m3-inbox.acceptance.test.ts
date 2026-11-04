@@ -119,7 +119,7 @@ test("[S05] M3.3 ACK only confirms this Assignment/card through the acknowledged
     expect(notes().find((v) => v.id === n.id)?.status).toBe("pending");
 });
 // §4.4 makes needs_attention terminal; ACK reconciliation should skip it. The current API tries ack and throws.
-test.fails("[S06] M3.3 ACK reconciliation leaves escalated terminal notifications unchanged", () => {
+test("[S06] M3.3 ACK reconciliation leaves escalated terminal notifications unchanged", () => {
   const e = f.comment(),
     n = f.store.recordNotification(input(e)).notification;
   f.store.moveNotification({

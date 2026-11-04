@@ -167,5 +167,6 @@ export const snapshot = (
     human_actions: [],
     runs: [],
     timeline: [],
+    events: [],
     ...overrides,
   }) as unknown as RouterSnapshot;
