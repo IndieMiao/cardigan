@@ -288,17 +288,19 @@ function tokenIssue(args: readonly string[], io: CliIo): number {
           EXIT.usage,
         );
       }
-      return issueTokenForAssignment(
+      const role = roleInTransaction(
         tx,
         project_id,
-        assignment.id,
-        roleInTransaction(
-          tx,
-          project_id,
-          assignment.role_id,
-          assignment.role_version,
-        ),
+        assignment.role_id,
+        assignment.role_version,
       );
+      // A rotation keeps the assignment's own tool scope: re-issuing the Ops
+      // token must not hand it record_decision (that would silently promote it).
+      const previous = tx.tokensForAssignment(project_id, assignment.id).at(-1);
+      return issueTokenForAssignment(tx, project_id, assignment.id, {
+        role_version: role.role_version,
+        allowed_tools: previous?.allowed_tools ?? role.allowed_tools,
+      });
     });
 
     io.stdout(
@@ -349,16 +351,25 @@ function pmCreate(args: readonly string[], io: CliIo): number {
         );
       }
 
-      const existing = tx.assignments
+      // §7.1 / §10.4: Office and Ops are two standing assignments of the same
+      // pm role. They are told apart by the tools their newest token carries,
+      // which is the only place the distinction lives (no domain field for it).
+      const standing = tx.assignments
         .list(project_id)
-        .find(
+        .filter(
           (candidate) =>
             candidate.scope === "standing" &&
             candidate.role_id === "pm" &&
             candidate.status === "active",
         );
-      // A standing PM assignment has no domain command; it is project
-      // bootstrap data, like the project row itself.
+      const isOffice = (id: Parameters<typeof tx.tokensForAssignment>[1]) =>
+        (
+          tx.tokensForAssignment(project_id, id).at(-1)?.allowed_tools ?? []
+        ).includes("record_decision");
+      const existing = standing.find(
+        (candidate) => isOffice(candidate.id) === office,
+      );
+
       const assignment: Assignment = existing ?? {
         id: tx.ids.next(project_id, "assignment"),
         scope: "standing",
@@ -368,7 +379,9 @@ function pmCreate(args: readonly string[], io: CliIo): number {
         runtime_state: "not_provisioned",
         machine_id: "local",
         runtime_ref: null,
-        mcp_token_id: "host-issued",
+        // A standing PM assignment has no domain command; it is project
+        // bootstrap data, like the project row itself.
+        mcp_token_id: office ? "pm-office" : "pm-ops",
         created_at: new Date().toISOString(),
       };
       if (existing === undefined) {

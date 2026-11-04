@@ -213,6 +213,67 @@ test("token issue validates the assignment and its state", async () => {
   expect(errors.join("\n")).toContain("不合法");
 });
 
+test("office and ops are separate standing assignments with independent tokens", async () => {
+  await bootstrap();
+  expect(await run(["pm", "create", "--office"])).toBe(0);
+  const officeToken = tokenFromOutput();
+  expect(printed()).toContain("已创建常驻 PM Office：A-1");
+
+  // Ops is a second standing assignment of the same pm role, not a downgrade
+  // of the Office one (§7.1, §10.4).
+  expect(await run(["pm", "create", "--ops"])).toBe(0);
+  const opsToken = tokenFromOutput();
+  expect(printed()).toContain("已创建常驻 PM Ops：A-2");
+
+  const store = Store.open({ dataDir });
+  try {
+    const standing = store.uow.read((tx) =>
+      tx.assignments
+        .list("p-work" as never)
+        .filter((a) => a.scope === "standing"),
+    );
+    expect(standing.map((a) => a.id).sort()).toEqual(["A-1", "A-2"]);
+    expect(store.verifyToken(officeToken)?.allowed_tools).toContain(
+      "record_decision",
+    );
+    expect(store.verifyToken(opsToken)?.allowed_tools ?? []).not.toContain(
+      "record_decision",
+    );
+  } finally {
+    store.close();
+  }
+
+  // Re-issuing the Office token leaves the Ops token alone, and vice versa.
+  expect(await run(["token", "issue", "A-1"])).toBe(0);
+  const rotatedOffice = tokenFromOutput();
+  const reopened = Store.open({ dataDir });
+  try {
+    expect(reopened.verifyToken(officeToken)).toBeUndefined();
+    expect(reopened.verifyToken(rotatedOffice)).toBeDefined();
+    expect(reopened.verifyToken(opsToken)).toBeDefined();
+  } finally {
+    reopened.close();
+  }
+
+  expect(await run(["token", "issue", "A-2"])).toBe(0);
+  const rotatedOps = tokenFromOutput();
+  const again = Store.open({ dataDir });
+  try {
+    expect(again.verifyToken(opsToken)).toBeUndefined();
+    expect(again.verifyToken(rotatedOffice)).toBeDefined();
+    expect(again.verifyToken(rotatedOps)).toBeDefined();
+    expect(again.verifyToken(rotatedOps)?.allowed_tools ?? []).not.toContain(
+      "record_decision",
+    );
+  } finally {
+    again.close();
+  }
+
+  // Asking for --ops again reuses the Ops assignment instead of adding a third.
+  expect(await run(["pm", "create", "--ops"])).toBe(0);
+  expect(printed()).toContain("复用常驻 PM Ops：A-2");
+});
+
 test("pm create --ops drops record_decision and needs the role to have it", async () => {
   expect(await run(["init"])).toBe(0);
   await run(["project", "create", "p-work"]);
