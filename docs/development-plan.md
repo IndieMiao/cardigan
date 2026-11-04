@@ -575,6 +575,8 @@ abortDispatch 只允许同项目 human/system，须带非空 reason，将未结�
    - Agent 空闲就重发门铃，并按指数退避控制间隔；
    - 超过阈值仍无 ACK，标记 `needs_attention` 交给 PM Ops。
 
+M3.4 的持久化边界见 [ADR 0003](adr/0003-dispatch-delivery-boundary.md)：复用 M3.3 的 `(project_id, stream)` 游标，卡片流以卡片 ID 标识，项目级流用 PROJECT_EVENT_STREAM；每条流只消费自身游标之后的事件并按流内 seq 串行处理，不要求跨卡片的全局顺序。通知、门铃和 ACK 继续使用流内 seq。每次外部投递前先把 Assignment、Run、通知集合及租期写成持久意图，同一 Assignment 最多一个未结束意图。重启后不抢占未过租期的意图，过期且结果不确定时按 delivery_failed 升级 PM Ops，不新建第二个 Run 或静默重复调用；迟到 ACK 仍可确认失败通知。
+
 ### 6.2 门铃格式
 
 ```
