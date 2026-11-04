@@ -15,10 +15,13 @@ import type {
 } from "@cardigan/domain";
 import { assign, createCard, dispatchRun, queueRun } from "@cardigan/domain";
 import { Store, writeRole } from "@cardigan/store";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import type { Identity } from "./auth.js";
 import { acknowledgeDispatchedRun } from "./commands/acknowledge.js";
 import { loadCommandState, persistEffect } from "./commands/execute.js";
+import { type RunningServer, startMcpServer } from "./server.js";
 
 const project_id = "p-ack" as ProjectId;
 const NOW = "2026-01-01T00:00:00.000Z";
@@ -211,5 +214,63 @@ describe("acknowledgeDispatchedRun", () => {
 
     expect(read(run_id)?.status).toBe("dispatched");
     expect(itemOf(item.id)?.status).not.toBe("in_progress");
+  });
+});
+
+describe("the HTTP layer", () => {
+  let running: RunningServer;
+  let token: string;
+  let assignment: Assignment;
+
+  beforeEach(async () => {
+    const seeded = dispatchedRun();
+    assignment = seeded.assignment;
+    token = store.issueToken({
+      project_id,
+      assignment_id: seeded.assignment.id,
+      role: {
+        role_version: seeded.assignment.role_version,
+        allowed_tools: ["whoami", "get_card"],
+      },
+    }).token;
+    running = await startMcpServer({
+      store,
+      host: "127.0.0.1",
+      port: 0,
+      log: () => undefined,
+    });
+  });
+
+  afterEach(async () => {
+    await running.close();
+  });
+
+  function connect() {
+    const client = new Client({ name: "fictional-client", version: "0.0.0" });
+    return client
+      .connect(
+        new StreamableHTTPClientTransport(new URL(running.url), {
+          requestInit: { headers: { Authorization: `Bearer ${token}` } },
+        }),
+      )
+      .then(() => client);
+  }
+
+  test("connecting and listing tools does not acknowledge the Run", async () => {
+    const client = await connect();
+    // connect() already sent initialize; list the tools as a real client does.
+    const listed = await client.listTools();
+    expect(listed.tools.map((tool) => tool.name)).toContain("whoami");
+
+    expect(
+      read(store.uow.read((tx) => tx.runs.list(project_id))[0]?.id as string)
+        ?.status,
+    ).toBe("dispatched");
+
+    // The first tool call is what starts the Run.
+    await client.callTool({ name: "whoami", arguments: {} });
+    const run = store.uow.read((tx) => tx.runs.list(project_id)[0]);
+    expect(run?.status).toBe("running");
+    expect(assignment.id).toBe(run?.assignment_id);
   });
 });

@@ -128,24 +128,6 @@ export async function startMcpServer(
       return;
     }
 
-    // M2.6 step 8: the first authenticated tool call acknowledges the Run and
-    // starts the caller's work item. It is a no-op once the Run is running.
-    if (options.acknowledgeRuns !== false) {
-      try {
-        acknowledgeDispatchedRun(options.store, identity.value);
-      } catch (error) {
-        log({
-          event: "tool",
-          method: req.method,
-          assignment_id: identity.value.actor.assignment_id,
-          code:
-            typeof error === "object" && error !== null && "code" in error
-              ? String((error as { code: unknown }).code)
-              : "acknowledge_failed",
-        });
-      }
-    }
-
     if (req.method !== "POST") {
       // Stateless mode: no server-initiated streams, no session teardown.
       log({
@@ -213,6 +195,15 @@ async function serveMcp(
     identity,
     tools,
     log,
+    // The acknowledge hook belongs to the tool call, not to the connection:
+    // `initialize` and `tools/list` must not start the Run (§4 step 8).
+    ...(options.acknowledgeRuns === false
+      ? {}
+      : {
+          onToolCall: () => {
+            acknowledgeDispatchedRun(options.store, identity);
+          },
+        }),
     revalidateToken: () => {
       const token = bearerToken(req.headers.authorization);
       if (!token || options.store.verifyToken(token)?.id !== identity.token.id)
