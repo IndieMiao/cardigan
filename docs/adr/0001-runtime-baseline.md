@@ -1,6 +1,6 @@
 # ADR 0001：运行时基线采用 herdr-core，Herdr 0.9.x 作为回退
 
-- 状态：已接受（暂定，M2 开工前复核）
+- 状态：已接受；2026-11-05 按回退条件复核，维持（见文末"复核记录"）
 - 日期：2026-11-04
 - 对应决策：开发方案 §15 D9
 - 依据：`docs/research/0.3-herdr-machine.md`、`docs/research/0.5a-herdr-projects.md`
@@ -49,3 +49,23 @@ M2 开工前复核。出现以下任一情况，就改用 Herdr 0.9.5（锁版�
 - 开发方案 §11 按"接口 + 两种实现"重写；§3、§13、§14、§18 相应修订。
 - M2 的任务计划按 herdr-core 编写，并为 Runtime Adapter 写契约测试，保证两种实现都能通过同一套测试。
 - Herdr 0.9.x 的多机实测结果（0.3 的 B 部分）保留，作为回退实现的依据。
+
+## 复核记录（2026-11-05，M2 开工前）
+
+按"回退条件"逐条检查，三条都不成立，**维持 herdr-core，锁定 0.1.18**。
+
+| 回退条件 | 结果 | 依据 |
+|---|---|---|
+| `run`、`send`、`events` 出现破坏性变更，或长时间停止更新 | 不成立 | 0.1.17（2026-11-02）→ 0.1.18（2026-11-04），协议代号仍为 1；两版 `schema/hc.openrpc.json` 的差异全部是新增：`terminal.run` 增加可选参数 `display`、`size`，终端记录增加可选字段 `first_message`，新增能力标记 `automatic_input`。没有删除或改变已有方法、参数。两天内 39 个提交，仍在活跃更新 |
+| 用户要求 Claude Code、Codex 的状态识别不做任何改造即可使用 | 不成立 | 用户没有提出；业务状态以 MCP 为准（§6.8） |
+| macOS arm64 主机与 Linux x86_64 工作机之间的多机连接不可用 | 部分验证，不成立 | 见下 |
+
+多机实测（独立 session `d9`，测完已清理）：
+
+- 安装：Linux 用发布清单里的 sha256 校验后装到 `~/.local/bin`；macmini（macOS 26.5.2，arm64）用官方 `distribution/install.sh`（v0.1.18，读过全文），它会校验 sha256 和 Apple 签名，装成 `Herdr Core.app`。从 Linux 执行 `hc machine add --install` 不能替 macOS 安装（报 `install_failed`：没有可下载的版本），要在 Mac 上自己装。
+- **Linux 上的 core 管理 macOS 工作机：通过。** `hc machine add macmini --session d9` 后状态 `connected`；`hc exec --on macmini`、`hc run --bg --on macmini`、`hc send`、`hc read`、按标签过滤 `hc ls --label` 都正常；远程假 Agent 按 OSC 7501 上报 working → blocked → idle，`hc get` 读到的状态一致；远程终端的 `created`、`foreground`、`status`、`turn` 事件进入本地同一条 `hc events` 流，`seq` 单调递增，并有心跳。
+- **macOS 上的 core 管理 Linux 工作机：未完成。** 网络双向可达（macmini 到 Linux 的 22 端口通），但 0.5b 留下的测试账号 `cardigan-agent` 已不接受那把测试密钥，没有 sudo 无法重新授权。按 §13.1，Phase 1 是单机部署，M2 只做 `machine=local`，所以这一项挪到 Phase 2 开工前补测。
+- 注意事项：
+  - `hc run` 的选项必须写在程序名前面，否则会被当成程序的参数（实测把 `--json` 传给了 bash）。
+  - `hc run` 没有传环境变量的选项；终端名限制为 1–32 个 `a-z 0-9 - _`。
+  - 0.1.18 起 macOS 上的 core 是独立的 App，第一次访问局域网时系统会弹窗请求权限，无界面的 Mac 主机需要有人在屏幕前确认一次。

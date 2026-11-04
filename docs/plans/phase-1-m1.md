@@ -352,7 +352,7 @@ M1.7 中不依赖 M1.3 的部分，先做：
 | M1.5 审核 | 读操作也走 `BEGIN IMMEDIATE`，会占用写锁 | M1.4b |
 | M1.5 审核 | `get_card` 还没有 `waiting_on`、`next_owners`、`why` 三个派生字段 | M1.2b |
 | M1.8 审核 | `cardigan launch` 还没有用真实的接入点完整跑过一次会话 | 等用户迁移配置后验证 |
-| M1.3 审核 | PM 验收工作项要单独指派一个工作项级的 PM Assignment，而开发方案 §10.4 里 PM 只有两个常驻 Assignment，意味着每张卡可能多开一个 PM 会话 | 写 M2 计划时定 |
+| M1.3 审核 | PM 验收工作项要单独指派一个工作项级的 PM Assignment，而开发方案 §10.4 里 PM 只有两个常驻 Assignment，意味着每张卡可能多开一个 PM 会话 | **已定（2026-11-05）**：保留每张卡单独的 PM 验收 Assignment（用户确认效果优先），见 M2 计划 §6 |
 | M1.3 审核 | M1 没有在 Run 开始时推进工作项状态的命令，目前由交付、审核、报阻塞等命令顺带把调用者自己的工作项推进到 `in_progress` | M2 的 Runtime Adapter / Dispatcher 在 Run 开始时应用 `run_started` |
 | M1.3 审核 | 每条命令都需要整个项目的快照（`CommandState`，含全部事件和时间线） | M1.6 在 PR 里说明加载方式；数据量变大时再优化 |
 | M1.3 审核 | 完成审核因轮次上限等待拍板时，产出方提交新代码会被拒绝，返回的 `illegal_transition` 信息不直观 | 后续改进错误信息 |
