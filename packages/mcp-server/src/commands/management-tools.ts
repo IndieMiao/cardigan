@@ -154,6 +154,23 @@ const schemas = {
   },
 };
 
+function assignPending(...args: Parameters<typeof assign>) {
+  const result = assign(...args);
+  if (!result.ok) return result;
+  return {
+    ok: true as const,
+    value: {
+      ...result.value,
+      data: {
+        ...result.value.data,
+        token_status: result.value.token_requests.length
+          ? "pending_host_issuance"
+          : "host_managed",
+      },
+    },
+  };
+}
+
 export function managementTools(clock?: Clock) {
   function wire<P, T>(
     name: keyof typeof schemas & ToolName,
@@ -212,8 +229,8 @@ export function managementTools(clock?: Clock) {
     ),
     wire(
       "assign",
-      "Assign work and return newly issued credentials once.",
-      assign,
+      "Assign work; credentials must be provisioned by the host.",
+      assignPending,
     ),
   ];
 }

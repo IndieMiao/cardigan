@@ -17,20 +17,38 @@ import { type RunningServer, startMcpServer } from "./server.js";
 const project = "management-fixture";
 let store: Store, server: RunningServer, office: Client, card: Card;
 let clients: Client[], sequence: number;
+let secrets: string[], responses: unknown[];
+type AssignmentReply = Assignment & {
+  token_status: "pending_host_issuance" | "host_managed";
+};
 let logger: ReturnType<typeof memoryLogger>;
-async function connect(assignment: Assignment, ops = false, token?: string) {
-  const issued = token
-    ? { token }
-    : store.issueToken({
-        project_id: project,
-        assignment_id: assignment.id,
-        role: {
-          role_version: 1,
-          allowed_tools: ops
-            ? toolNames.filter((t) => t !== "record_decision")
-            : toolNames,
-        },
-      });
+async function connect(assignment: Assignment, ops = false) {
+  // Simulate the trusted host, not an MCP call: validate and issue in one transaction.
+  const issued = store.uow.run((tx) => {
+    const current = tx.assignments.get(project, assignment.id);
+    if (
+      current?.status !== "active" ||
+      current.role_version !== assignment.role_version
+    )
+      throw new Error("Assignment cannot be provisioned");
+    const role = tx.roles.get(project, {
+      role_id: current.role_id,
+      role_version: current.role_version,
+    });
+    if (!role) throw new Error("Missing role version");
+    return tx.issueToken({
+      id: ops ? `${current.mcp_token_id}:ops` : current.mcp_token_id,
+      project_id: project,
+      assignment_id: current.id,
+      role: {
+        role_version: role.role_version,
+        allowed_tools: ops
+          ? role.allowed_tools.filter((t) => t !== "record_decision")
+          : role.allowed_tools,
+      },
+    });
+  });
+  secrets.push(issued.token);
   const client = new Client({ name: "management-test", version: "1" });
   clients.push(client);
   await client.connect(
@@ -40,12 +58,19 @@ async function connect(assignment: Assignment, ops = false, token?: string) {
   );
   return client;
 }
-const raw = (
+const raw = async (
   client: Client,
   name: string,
   args: object,
   key = `request-${++sequence}`,
-) => client.callTool({ name, arguments: { idempotency_key: key, ...args } });
+) => {
+  const response = await client.callTool({
+    name,
+    arguments: { idempotency_key: key, ...args },
+  });
+  responses.push(response);
+  return response;
+};
 async function ok<T>(
   client: Client,
   name: string,
@@ -70,6 +95,8 @@ const rows = () => ({
 beforeEach(async () => {
   store = Store.open({ dbPath: ":memory:" });
   clients = [];
+  secrets = [];
+  responses = [];
   sequence = 0;
   logger = memoryLogger();
   const standing = store.uow.run((tx): Assignment => {
@@ -107,6 +134,12 @@ beforeEach(async () => {
   });
 });
 afterEach(async () => {
+  const persisted = store.database.prepare("SELECT * FROM idempotency").all();
+  for (const secret of secrets) {
+    for (const output of [responses, persisted, logger.entries])
+      expect(JSON.stringify(output)).not.toContain(secret);
+  }
+  expect(JSON.stringify(responses)).not.toContain('"issued_tokens"');
   await Promise.all(clients.map((c) => c.close()));
   await server.close();
   store.close();
@@ -121,9 +154,11 @@ const work = (role: string) => {
   return found;
 };
 async function coder() {
-  const assignment = await ok<
-    Assignment & { issued_tokens: { token: string }[] }
-  >(office, "assign", { work_item_id: work("coder").id, role_id: "coder" });
+  const assignment = await ok<AssignmentReply>(office, "assign", {
+    work_item_id: work("coder").id,
+    role_id: "coder",
+  });
+  expect(assignment.token_status).toBe("pending_host_issuance");
   store.uow.run((tx) =>
     tx.runs.put(project, {
       id: tx.ids.next(project, "run"),
@@ -138,12 +173,10 @@ async function coder() {
       summary: "",
     }),
   );
-  const credential = assignment.issued_tokens[0];
-  if (!credential) throw new Error("Missing one-time credential");
-  return connect(assignment, false, credential.token);
+  return connect(assignment);
 }
 
-test("PM tools create/update cards and work, assign atomically and replay without extra credentials", async () => {
+test("MCP assign creates pending Assignments without credentials on initial calls, concurrency or replay", async () => {
   const updated = await ok<Card>(office, "update_card", {
     card_id: card.id,
     title: "Renamed",
@@ -166,33 +199,43 @@ test("PM tools create/update cards and work, assign atomically and replay withou
     ).title,
   ).toBe("Extra work");
   const params = { work_item_id: added.id, role_id: "coder" };
-  type Reply = Assignment & { issued_tokens?: { token: string }[] };
+  const before = rows();
   const replies = await Promise.all(
-    [0, 1].map(() => ok<Reply>(office, "assign", params, "assign-once")),
+    [0, 1].map(() =>
+      ok<AssignmentReply>(office, "assign", params, "assign-once"),
+    ),
   );
-  expect(replies.filter((reply) => reply.issued_tokens)).toHaveLength(1);
-  const first = replies.find((reply) => reply.issued_tokens);
-  if (!first?.issued_tokens) throw new Error("Missing one-time credential");
-  const { issued_tokens, ...assignment } = first;
-  const credential = issued_tokens?.[0];
-  if (!credential) throw new Error("Missing one-time credential");
-  expect(store.verifyToken(credential.token)?.assignment_id).toBe(
-    assignment.id,
-  );
-  const after = rows();
-  expect(await ok(office, "assign", params, "assign-once")).toEqual(assignment);
-  expect(await ok(office, "assign", params, "assign-another-key")).toEqual(
-    assignment,
-  );
-  expect(rows()).toEqual(after);
-  const stored = store.database
-    .prepare("SELECT * FROM tokens WHERE id = ?")
-    .get(assignment.mcp_token_id);
-  expect(stored).toMatchObject({
-    assignment_id: assignment.id,
-    role_version: 1,
+  const pending = replies[0];
+  if (!pending) throw new Error("Missing assignment");
+  expect(pending.token_status).toBe("pending_host_issuance");
+  expect(replies[1]).toEqual(pending);
+  expect(await ok(office, "assign", params, "assign-once")).toEqual(pending);
+  const { token_status: _pending, ...assignment } = pending;
+  expect(await ok(office, "assign", params, "assign-another-key")).toEqual({
+    ...assignment,
+    token_status: "host_managed",
   });
-  expect(stored?.token_hash).toMatch(/^[a-f0-9]{64}$/u);
+  expect(rows()).toEqual({
+    assignments: before.assignments + 1,
+    events: before.events + 1,
+    tokens: before.tokens,
+  });
+  expect(
+    store.database
+      .prepare(
+        "SELECT * FROM tokens WHERE project_id = ? AND assignment_id = ?",
+      )
+      .all(project, assignment.id),
+  ).toEqual([]);
+  const response = await fetch(server.url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${assignment.mcp_token_id}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+  });
+  expect(response.status).toBe(401);
   const cached = JSON.parse(
     String(
       store.database
@@ -200,18 +243,9 @@ test("PM tools create/update cards and work, assign atomically and replay withou
         .get()?.response,
     ),
   );
-  expect(cached).toEqual(assignment);
+  expect(cached).toEqual(pending);
   expect(cached).not.toHaveProperty("issued_tokens");
-  expect(
-    JSON.stringify(store.database.prepare("SELECT * FROM tokens").all()),
-  ).not.toContain(credential.token);
-  expect(
-    JSON.stringify(store.database.prepare("SELECT * FROM idempotency").all()),
-  ).not.toContain(credential.token);
-  expect(JSON.stringify(logger.entries)).not.toContain(credential.token);
-  expect(JSON.stringify(logger.entries)).not.toContain(
-    String(stored?.token_hash),
-  );
+  expect(cached).not.toHaveProperty("token");
 });
 
 test("collaboration tools use domain commands and preserve reviewable identities and decision quotes", async () => {
@@ -344,7 +378,7 @@ test("Ops and Office permissions and schema validation remain effective over MCP
   ).toMatchObject({ error: { code: "validation_failed" } });
 });
 
-test("a failure after credential issuance rolls back the Assignment, token, events, counters and cache", async () => {
+test("a failed pending assignment rolls back entities, events, counters and cache without issuing credentials", async () => {
   const params = { work_item_id: work("coder").id, role_id: "coder" };
   const before = rows();
   store.database.exec(
@@ -365,7 +399,7 @@ test("a failure after credential issuance rolls back the Assignment, token, even
   expect(assigned.id).toBe("A-2");
   expect(rows()).toEqual({
     assignments: before.assignments + 1,
-    tokens: before.tokens + 1,
+    tokens: before.tokens,
     events: before.events + 1,
   });
 });

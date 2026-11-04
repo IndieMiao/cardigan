@@ -59,16 +59,6 @@ export interface McpAckResult {
   readonly changed: boolean;
 }
 
-/** Issuance participates in the command transaction; only metadata is cached. */
-export interface McpWriteContext extends TransactionContext {
-  issueToken(input: {
-    readonly id: string;
-    readonly project_id: ProjectId;
-    readonly assignment_id: AssignmentId;
-    readonly role: Pick<RoleReference, "role_version" | "allowed_tools">;
-  }): { readonly token: string; readonly record: McpToken };
-}
-
 /** A repository as seen inside a read transaction: reads only. */
 export type McpReadRepository<Entity, Key> = Pick<
   Repository<Entity, Key>,
@@ -115,7 +105,7 @@ export interface McpBackend {
       readonly key: string;
       readonly request: unknown;
     },
-    operation: (tx: McpWriteContext) => T,
+    operation: (tx: TransactionContext) => T,
   ): Result<{ readonly value: T; readonly replayed: boolean }>;
   /** Resolve a token by its stored hash; revoked tokens resolve to `undefined`. */
   verifyToken(token: string): McpToken | undefined;

@@ -10,7 +10,6 @@ export type {
   McpReadRepository,
   McpToken,
   McpUpdates,
-  McpWriteContext,
 } from "./backend.js";
 export {
   type DeliveryToolOptions,

@@ -1,7 +1,9 @@
 # Cardigan · 多 Agent 协作开发系统开发方案
 
-- 版本：v0.6.12（2026-11-04）
-  - v0.6.12：M1.6b 接入协作和 PM 工具；Token 与 Assignment 同事务签发，明文仅首次响应返回，不进入幂等缓存。
+- 版本：v0.6.13（2026-11-04）
+  - v0.6.13：M1.6b 安全修订：MCP 只登记 Assignment，不签发或返回 Token；签发与 Assignment 校验由主机在同一事务完成。
+  - v0.6.12（2026-11-04）
+  - v0.6.12：M1.6b 接入协作和 PM 工具，增加 store 的事务内 Token 签发能力；MCP 凭据边界由 v0.6.13 修订。
   - v0.6.11（2026-11-04）
   - v0.6.11：报告的阻塞保存为 WorkItem.reported_blocker；PM／人确认与实际恢复分开，支持与 Decision / HumanAction 独立解除，避免相互等待。
   - v0.6.10（2026-11-04）
@@ -760,12 +762,13 @@ Agent 只通过 Card MCP 读写，看板界面只服务你一个人，所以第�
 ### 9.1 传输与认证
 
 - 使用 Streamable HTTP，不用 stdio。单机也这样做，因为这是多机的前提。
-- 每个 Assignment 签发一个 Bearer Token，作用域为：它的卡片、工作项和角色允许的工具。
+- 启动前由主机为 Assignment 签发 Bearer Token，作用域为：它的卡片、工作项和角色允许的工具。
 - 写操作的身份由 Token 决定，不信 Agent 在参数里自报的身份。
 - 写类工具接受 `idempotency_key`；同一个键配不同的请求内容判为错误，而不是覆盖。
 - Token 绑定 `(assignment_id, role_version, allowed_tools)`，Session 被替换时作废。
   - 纯函数 assign 输出 Assignment 和 Token 签发意图（含项目内唯一责任引用、Role 版本、工具集合）；Token 的随机材料、哈希及同事务存储由适配层处理，不进入 domain 输入或输出。
-  - M1.6b 使用事务内的 issueToken，Assignment、Token 哈希、事件、时间线和幂等结果一起提交或回滚。首次成功的 assign 响应在 Assignment 字段外附加 issued_tokens（assignment_id、token_id、token）；明文在提交后才加入响应，数据库、日志和幂等缓存均不保存它。重放或重复指派只返回 Assignment，不重发 Token；首次响应丢失时不能从缓存恢复明文，重新签发须走受控的凭据管理流程，不自动重发。
+  - MCP 路径下 assign 仅登记 Assignment、保留 mcp_token_id 元数据，不执行 token_requests，不签发可用 Token。新建响应标记 token_status=pending_host_issuance；重复指派已存在的 Assignment 标记 host_managed，仅说明凭据归主机管理，不表示已签发。任何 MCP 响应（含重放）、幂等缓存和日志均不得携带 Token 明文。
+  - 实际签发由 M1.7b 中人执行的 CLI 或 M2 启动流程负责：在同一主机侧事务里校验当前 Assignment、Role 版本及工具许可，再调用事务内 issueToken，数据库只存哈希。明文只交给人或写入目标 Assignment 自己的 MCP 配置（worktree 外），不交给 PM 或其他 Agent；Session 替换时撤销旧 Token。
 - 模型 Provider 的认证和 MCP 认证相互独立；接入是否成功，以实际调用 `whoami` 的结果为准（0.4）。
 - 第一版可以用无状态的 Streamable HTTP：每个请求独立认证，写操作重试依靠 `idempotency_key`。
 - 服务只监听局域网接口，不对公网开放；不信任的网络环境加 TLS 或走 Tailscale 之类的通道。
@@ -788,7 +791,7 @@ Agent 只通过 Card MCP 读写，看板界面只服务你一个人，所以第�
 | `submit_delivery(work_item_id, kind, summary, subject, request_verify[], branch?, pr_url?, test_results?, attachments[], known_gaps[], supersedes?)` | 产出型角色 | 提交交付。`kind=card_completion` 即卡片的完成申请，只有主产出工作项的负责人可以提交 |
 | `submit_review(delivery_id, target_sha, kind, issues[], attachments[], recheck_required?)` | 验证型角色 | 提交审核结论；`verdict` 和 `blocking` 由服务端计算 |
 | `create_card` / `update_card` / `create_work_item` / `update_work_item` | PM | 管理卡片与工作项 |
-| `assign(work_item_id, role_id, machine_id?)` | PM | 指派（第一版手动指定机器） |
+| `assign(work_item_id, role_id, machine_id?)` | PM | 登记指派（第一版手动指定机器），Token 待主机侧签发 |
 | `project_snapshot()` / `list_needs_you()` | PM | 项目快照和待你处理的事项 |
 | `record_decision(decision_id, option, rationale, raw_quote, via_chain[]?, batch?)` | 仅 PM Office | 记录你在对话中做出的决定，`raw_quote` 为你的原话 |
 
@@ -1103,11 +1106,11 @@ RuntimeRef = {machine_id, runtime_machine, terminal_ref, agent_name,
 | 主机到各工作机的 SSH 密钥 | 只由主机上的 `orchestrator` 用户持有，单向 |
 | 机器间已有的互相授权 | Agent 运行在没有密钥的 `agent` 用户下 |
 | Herdr Socket（无 ACL） | 接受同机 Agent 可互相操作；影响范围限于单台机器 |
-| Card MCP | 每个 Assignment 一个作用域 Token；身份由 Token 决定；服务端校验状态迁移 |
+| Card MCP | Token 仅由主机侧签发；MCP 不签发或返回明文，PM 不能借 assign 获取其他 Assignment 的凭据；身份和状态迁移由服务端校验 |
 | Web Workbench | 即使在局域网也要登录；只监听局域网接口 |
 | Git | 工作机和 Agent 不持有任何 Git 凭据；拉取和推送都由主机发起；只在中心合并；外部托管平台的凭据只在主机 |
 | 模型密钥 | 只放在环境变量或网关；不写进数据库、评论和仓库 |
-| 注入的提示词和 Token | 写在 worktree 外，或已被 git 忽略的路径 |
+| 注入的提示词和 Token | 主机写入目标 Assignment 自己的 MCP 配置，放在 worktree 外；不进入其他 Agent 的对话记录，Session 替换时作废旧 Token |
 | 仓库内容中的提示注入 | Agent 没有 sudo；高风险操作走工具审批；业务变更走 Decision |
 | 主机单点 | 定期备份数据库；第一版接受单点 |
 | 运行时 | herdr-app 默认开启使用遥测，部署时必须关闭；herdr-core 的状态目录含终端输出和屏幕存档，按机密目录处理 |

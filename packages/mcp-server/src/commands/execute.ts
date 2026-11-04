@@ -8,8 +8,9 @@ import type {
   Repository,
   Result,
   ToolName,
+  TransactionContext,
 } from "@cardigan/domain";
-import type { McpReadContext, McpWriteContext } from "../backend.js";
+import type { McpReadContext } from "../backend.js";
 import type { ToolContext } from "../tools/types.js";
 
 export function unwrap<T>(result: Result<T>): T {
@@ -44,7 +45,7 @@ export function loadCommandState(
 }
 
 function persist(
-  tx: McpWriteContext,
+  tx: TransactionContext,
   project: ProjectId,
   effect: CommandEffect<unknown>,
 ) {
@@ -56,25 +57,9 @@ function persist(
     >;
     repository.put(project, change.entity);
   }
-  const issued = effect.token_requests.map((request) => {
-    const { token } = tx.issueToken({
-      id: request.token_id,
-      project_id: project,
-      assignment_id: request.assignment_id,
-      role: {
-        role_version: request.role_version,
-        allowed_tools: request.allowed_tools,
-      },
-    });
-    return {
-      assignment_id: request.assignment_id,
-      token_id: request.token_id,
-      token,
-    };
-  });
+  // Token requests reserve metadata for host provisioning; MCP never fulfills them.
   for (const event of effect.events) tx.events.append(project, event);
   for (const entry of effect.timeline) tx.timeline.put(project, entry);
-  return issued;
 }
 
 const invocation = (
@@ -107,8 +92,7 @@ export function executeCommand<P, T>(
     identity: { actor },
   } = context;
   context.revalidateToken?.();
-  let issued: ReturnType<typeof persist> = [];
-  const result = unwrap(
+  return unwrap(
     store.runIdempotent(invocation(context, tool, key, params), (tx) => {
       context.revalidateToken?.();
       const effect = unwrap(
@@ -117,14 +101,10 @@ export function executeCommand<P, T>(
           ids: tx.ids,
         }),
       );
-      issued = persist(tx, actor.project_id, effect);
+      persist(tx, actor.project_id, effect);
       return effect.data;
     }),
-  );
-  // Secrets are added only after COMMIT and never enter the cached response.
-  return !result.replayed && issued.length
-    ? { ...result.value, issued_tokens: issued }
-    : result.value;
+  ).value;
 }
 
 export async function executePreparedCommand<P, Prepared, T>(

@@ -54,6 +54,6 @@
 - 工作项级 Assignment 请求阻塞拍板时，自动将自身可执行工作项去重并入 affected_work_items，再结束相关 running Run；produce 已 delivered / accepted 时不自动并入也不结束自身 Run，显式暂停则拒绝。解决最后一个阻塞原因且审核预算充足后，已有执行历史的责任上下文生成新的 queued Run，复用 Assignment／Session 和最近 blocked Run 的版本快照（上限拍板也可沿用已完成的审核 Run）。没有历史快照时只返回触发事件，后续调度负责初始配置；不启动 Harness、不按门铃。
 - reported_blocker、多个 Decision/HumanAction 同时阻塞同一工作项时，不因其中一项完成就提前恢复；恢复事件的 resume_work_items（包括 completeHumanAction）只列实际恢复项。对同一个已自动结束的 blocked Run 再 finish_run(blocked) 为无副作用确认。
 - 评论识别 C-n、C-n#m、q(n)、h(n)、D-n 以及 GitHub 风格 pull / GitLab merge_requests 链接；跨卡引用不会授予跨卡修改权限。引用解析不发网络请求。
-- token_requests 只有签发所需元数据，token_id 包含项目和 Assignment，不含随机 Token 值。M1.6b 适配层通过 store 的事务内 issueToken，将签发、Assignment、事件和幂等结果一并提交；首次成功的 assign 响应附加 issued_tokens 数组（assignment_id、token_id、token），明文只在提交后加入响应，不入库、不入缓存或日志。重放或重复指派不重发，首次响应丢失时需要受控重签，不能从哈希恢复。
+- token_requests 只有签发所需元数据，token_id 包含项目和 Assignment，不含随机 Token 值。MCP 适配层只登记 Assignment，不执行签发、不返回 Token 明文；新建响应为 token_status=pending_host_issuance，重复指派为 host_managed（不保证已签发）。M1.7b 的人用 CLI 和 M2 启动流程负责在主机事务内校验 Assignment / Role 版本 / 工具许可并调用 issueToken；明文只交给人或写入该 Assignment 自己的 MCP 配置（worktree 外），Session 替换时撤销旧 Token。MCP 响应、幂等缓存和日志不携带明文。
 - 附件哈希验证、文件落盘、失败后的内容清理和传输大小上限由 M1.6 适配层负责。prepareAttachment 需在认证之后调用，上传元数据拒绝不会自动删除已准备的内容。
 - whoami / get_card / get_updates / ack_events 由 M1.5 的 mcp-server 工具与测试单独维护，domain 删除对应重复实现。projectSnapshot / listNeedsYou 仍要求一致且完整的项目快照，卡片状态及 waiting_on/next_owners/why 复用已合并的派生函数。
