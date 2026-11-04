@@ -1,6 +1,8 @@
 # Cardigan · 多 Agent 协作开发系统开发方案
 
-- 版本：v0.6.21（2026-11-05）
+- 版本：v0.6.22（2026-11-05）
+  - v0.6.22：M2.7 补充共享 Git 的账号边界：主机仅读取登记源并生成只读 bundle，共享 clone/worktree 的 Git 操作均在 agent 账号执行。
+  - v0.6.21（2026-11-05）
   - v0.6.21：M2.7 实际写入共享运行目录与凭据权限；固定目录描述符防止共享目录链接覆盖主机文件；server 打开数据库前验证私有数据目录。
   - v0.6.20（2026-11-05）
   - v0.6.20：M2.7 确定 agent 专用账号、主机私有数据、cardigan-share 两账号共享组和专用 loopback SSH 入口；安装器先做只读 preflight，提供 --check，后续运行时接线分批交付；见 ADR 0002。
@@ -1006,6 +1008,8 @@ M2.5 的 GitWorktreeService 经 domain 的 GitWorktreePort 调用 LocalGitTransp
 write 工作项从 fetch 后的 origin/<base_branch> 当前提交创建 agent/<card>/<work_item>；返回 worktree_path、branch、base_sha 供 M2.6 持久化到 Assignment。既有目录必须是该基础 clone 登记的 worktree 且分支匹配，复用时不 reset、不重建、不移动工作项自己的提交或未提交文件；有已记录 base_sha 时保留它，尚未记录时返回现有 HEAD。readonly 必须提供目标提交 SHA，创建 detached worktree；旧目录目标不一致则拒绝，M2 不自动切换已存在的审核目录。detached 表示不挂分支，不等于文件系统只读权限。
 
 worktree=none 跳过 Git。isDirty 包含已跟踪、暂存和未跟踪改动，仅查询。GitWorktreePort 不暴露 push 或 worktree 删除；外部目录、错误分支、错误来源一律拒绝覆盖。不同项目的同号 Assignment 可以在同一个 worktrees 根目录下并存，各自使用独立的基础 clone 和项目子目录，提交和未提交文件互不影响。
+
+agent-ssh 模式中，主机不能执行 Agent 可修改仓库的 Git 配置。主机从共享工作根之外的登记源生成 bundle，在受保护的 inputs/<project_id> 父层发布 0640 的 source.bundle；它不是新的远端或 Git 凭据。基础 clone 从该 bundle 创建，后续 fetch 同一 bundle；所有共享仓库的 Git 操作通过配置好的 Agent 执行入口运行。repos 和 worktrees 的父层保持 2750，主机预建 2770 叶子供 Agent 写入。失败的非空临时 clone 不由主机递归删除，留待 M4 显式清理。
 
 ### 12.3 交付
 

@@ -41,6 +41,12 @@ project_id/assignment_id 在参与路径构造前验证。agent-root 必须在 d
 
 Linux 写入通过 O_NOFOLLOW 逐级打开并固定目录描述符，用 /proc/self/fd 下的相对路径操作；拒绝权限/属组不符的现有目录，不替它们放宽权限。编译文件先写独占临时文件，再通过描述符设置共享 GID 和权限，最后原子替换目标文件名（不修改原软链接或硬链接的目标）；token 最后写。失败清理只在同样固定的运行目录里 unlink token/secrets.env。server 在打开数据库前验证 agent-ssh 的数据目录已归主机且为 0700；local 模式创建或收紧为 0700。
 
+## 共享 Git 的身份边界
+
+共享仓库的 .git/config、过滤器和工作文件都可被 Agent 修改；主机即使只做 git status/fetch 也可能执行其中的程序。因此主机只在用户登记、且位于 agent-root 之外的可信源上执行 Git，导出 bundle 到主机独占临时目录，再发布为 inputs/project/source.bundle（0640）。来源绑定记录在主机独占的 source.path；不允许同项目静默换来源。Agent 执行入口从 bundle 创建和更新 clone，所有共享仓库查询和 worktree 创建都由 agent 执行。Git 仅允许 file 协议、禁 hooks，safe.directory 只放行该项目的指定路径；不向 Agent 交 Git 凭据。
+
+主机预建共享叶子并持有命名空间父层，agent 不可用时拒绝而不回退主机执行。初始 clone 在独立叶子中由 agent 完成后再由主机发布。失败留下的非空临时 clone 只含源码，后续 M4 显式清理；主机不递归删除 Agent 可修改的树。真实不同 UID 和默认 ACL 的验证仍留给用户安装后的验收。
+
 ## Runtime 路由
 
 hc 0.1.18 的 run/exec 支持 `--on <machine>`，get/send/events/interrupt/kill/rm 则使用 `<machine>/<terminal>` 地址；向这些命令添加不存在的 --on 参数会失败。适配器在两种语法下都只能选择配置的隔离 machine；其他 machine 引用直接拒绝。
