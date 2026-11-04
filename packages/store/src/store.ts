@@ -29,13 +29,22 @@ import {
   issueToken,
   revokeToken,
   type TokenRecord,
+  tokensForAssignment,
   verifyToken,
 } from "./tokens.js";
 
 export const DEFAULT_DB_FILE = "cardigan.db";
 
 export interface StoreTransactionContext extends TransactionContext {
+  /** Issue a token inside this transaction (assignment and token commit together). */
   issueToken(input: IssueTokenInput): IssuedToken;
+  /** Every token row of an assignment, newest last; values are never exposed. */
+  tokensForAssignment(
+    project_id: ProjectId,
+    assignment_id: AssignmentId,
+  ): readonly TokenRecord[];
+  /** Revoke one token inside this transaction. */
+  revokeToken(id: string): boolean;
 }
 
 /** `UnitOfWork` plus read-only transactions. */
@@ -202,6 +211,14 @@ export class Store {
         issueToken: (input) => {
           if (!active) throw new Error("Token transaction has ended");
           return issueToken(this.#db, input, () => this.#clock.now());
+        },
+        tokensForAssignment: (project_id, assignment_id) => {
+          if (!active) throw new Error("Token transaction has ended");
+          return tokensForAssignment(this.#db, project_id, assignment_id);
+        },
+        revokeToken: (id) => {
+          if (!active) throw new Error("Token transaction has ended");
+          return revokeToken(this.#db, id, () => this.#clock.now());
         },
       });
       this.#db.exec("COMMIT");

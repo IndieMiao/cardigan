@@ -43,6 +43,49 @@ pnpm check:deps
 `pnpm check:deps` 检查生产源码，只允许引用更低层的内部包，并禁止领域包
 引入外部包或 Node IO 模块。测试文件不受生产源码的依赖规则约束。
 
+## 本地启动（M1 控制面）
+
+单机跑通一条卡片流程需要三个进程：数据库、控制面 server、Agent。数据库和 Token
+都在主机侧（你自己的终端）管理，Agent 只拿到 Token。
+
+```bash
+pnpm build
+
+# 1. 数据库、项目、角色（角色定义 allowed_tools 和 capabilities）
+pnpm --filter @cardigan/cli exec cardigan init
+pnpm --filter @cardigan/cli exec cardigan project create p-demo
+pnpm --filter @cardigan/cli exec cardigan role add p-demo pm \
+  --allowed-tools create_card,update_card,create_work_item,update_work_item,assign,submit_review,record_decision,post_comment,request_decision,request_human_action,project_snapshot,list_needs_you,get_card,get_updates,ack_events,whoami,heartbeat,finish_run \
+  --capabilities manage
+pnpm --filter @cardigan/cli exec cardigan role add p-demo coder \
+  --allowed-tools submit_delivery,post_comment,request_decision,report_blocker,get_card,get_updates,ack_events,whoami,heartbeat,finish_run \
+  --capabilities code
+pnpm --filter @cardigan/cli exec cardigan role add p-demo reviewer \
+  --allowed-tools submit_review,post_comment,get_card,get_updates,ack_events,whoami,heartbeat,finish_run \
+  --capabilities review
+
+# 2. 常驻 PM（--office 可记录拍板；--ops 的 Token 不含 record_decision）
+pnpm --filter @cardigan/cli exec cardigan pm create --office   # 打印 Token，只显示一次
+
+# 3. 建卡、指派、签发 Token（Token 只在终端打印一次，数据库只存哈希）
+pnpm --filter @cardigan/cli exec cardigan card create --template dev \
+  --title "示例卡" --goal "跑通一条流程" --acceptance "测试通过" --repo example/repo
+pnpm --filter @cardigan/cli exec cardigan assign W-1 --role coder
+pnpm --filter @cardigan/cli exec cardigan token issue A-1   # 已有 Token 会先作废
+
+# 4. 启动 MCP 端点（只监听 127.0.0.1，默认 3004）
+pnpm --filter @cardigan/server exec cardigan-server
+# 或者：CARDIGAN_DATA_DIR=.data CARDIGAN_MCP_PORT=3004 node apps/server/dist/bin.js
+```
+
+Agent 侧把 MCP 端点指到 `http://127.0.0.1:3004/mcp`，用 `Authorization: Bearer <Token>`
+认证；`whoami` 可以确认身份与允许的工具。`cardigan human-action done h(n) --text "结果"`
+用来代替 M5 之前的 Needs You 界面。
+
+`--project` 省略时取 `CARDIGAN_PROJECT`，再取数据库里唯一的项目；`--data-dir` 省略时取
+`CARDIGAN_DATA_DIR`，再取 `.data`。Token 不写文件、不进日志、不进幂等缓存，只在签发时
+打印一次，丢了就用 `cardigan token issue <A-n>` 重新签发（旧 Token 立即作废）。
+
 ## 启动配置与 `cardigan launch`（替代 shell 别名）
 
 人和 Agent 用同一套配置启动 Agent CLI：接入点（Provider）描述 Harness 和地址，
