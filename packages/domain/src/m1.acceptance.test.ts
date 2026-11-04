@@ -12,6 +12,7 @@ import { describe, expect, expectTypeOf, test } from "vitest";
 import {
   type Actor,
   type Assignment,
+  type AttachmentStore,
   assign,
   type CardId,
   type Clock,
@@ -20,6 +21,7 @@ import {
   type CommandState,
   completeHumanAction,
   createCard,
+  createWorkItem,
   type DeliveryVerifier,
   type DomainError,
   finishRun,
@@ -29,6 +31,7 @@ import {
   type IdAllocator,
   type ProjectId,
   postComment,
+  prepareAttachment,
   prepareDelivery,
   type ReadableIdKind,
   type Result,
@@ -231,8 +234,11 @@ function newHarness(): Harness {
   };
 }
 
-/** The store would already hold a standing PM assignment for the project. */
-function seatPmOffice(h: Harness): Assignment {
+/**
+ * The store would already hold a standing PM assignment for the project.
+ * Its token scope is decided by the caller (Office vs Ops).
+ */
+function seatStandingPm(h: Harness): Assignment {
   const id = h.ports.ids.next(project_id, "assignment");
   const assignment: Assignment = {
     id,
@@ -249,6 +255,8 @@ function seatPmOffice(h: Harness): Assignment {
   h.state = { ...h.state, assignments: [...h.state.assignments, assignment] };
   return assignment;
 }
+
+const seatPmOffice = seatStandingPm;
 
 function actorFor(
   h: Harness,
@@ -323,6 +331,24 @@ const verifier: DeliveryVerifier = {
 };
 
 const sha = (letter: string): string => letter.repeat(40);
+
+/**
+ * The adapter hashes the content before the preflight; the domain only checks
+ * the digest shape, so a fixed 64-hex digest is enough for the port stub.
+ */
+const contentDigest = "a".repeat(64);
+
+/** In-memory AttachmentStore port implementation for the artifact test. */
+const attachmentStore = (): AttachmentStore => {
+  const files = new Map<string, Uint8Array>();
+  return {
+    put: async (digest, content) => {
+      files.set(digest, content);
+      return { storage_path: `fictional/${digest.slice(0, 8)}` };
+    },
+    get: async (digest) => files.get(digest),
+  };
+};
 
 interface DeliveryInput {
   readonly summary?: string;
@@ -1122,26 +1148,103 @@ describe("inventory of §4.5 invariants", () => {
     expect(reworkRun.assignment_id).toBe(s.coder.id);
   });
 
-  test("invariant 14: an artifact attachment requires a decision basis", () => {
+  test("invariant 14: an artifact attachment requires a decision basis", async () => {
     const s = scenario();
-    const receipt = {
-      sha256: "a".repeat(64),
-      size: 3,
-      storage_path: "attachments/fictional",
-    } as never;
-    const result = uploadAttachment(
+    // A real receipt comes from prepareAttachment (in-memory AttachmentStore).
+    const content = new Uint8Array([1, 2, 3]);
+    const prepared = await prepareAttachment(
+      contentDigest,
+      content,
+      attachmentStore(),
+    );
+    if (!prepared.ok) throw new Error("attachment preflight failed");
+    const receipt = prepared.value;
+
+    const coderRun = startRun(s.h, s.coder);
+    const delivery = await deliver(s.h, s.coderActor, s.development.id, {
+      verifiers: [s.codeReview.id],
+      subject: sha("a"),
+    });
+    endRun(s.h, s.coderActor, coderRun);
+
+    const attachTo = { kind: "delivery" as const, id: delivery as never };
+    const withoutBasis = uploadAttachment(
       s.h.state,
       s.coderActor,
       {
         card_id: s.card,
         mime: "image/png",
         kind: "artifact",
-        attach_to: { kind: "timeline_entry", id: "C-1#1" as never },
+        attach_to: attachTo,
       },
       receipt,
       s.h.ports,
     );
-    expect(errorOf(result).code).toBe("validation_failed");
+    expect(errorOf(withoutBasis).code).toBe("validation_failed");
+    expect(errorOf(withoutBasis).message).toMatch(/basis/i);
+
+    // Contrast: the same receipt and target are accepted for evidence.
+    const evidence = commit(
+      s.h,
+      uploadAttachment(
+        s.h.state,
+        s.coderActor,
+        {
+          card_id: s.card,
+          mime: "image/png",
+          kind: "evidence",
+          attach_to: attachTo,
+        },
+        receipt,
+        s.h.ports,
+      ),
+    );
+    expect(evidence.kind).toBe("evidence");
+    expect(evidence.basis).toBeUndefined();
+
+    // And an artifact is accepted once a real decision basis exists.
+    const decision = commit(
+      s.h,
+      requestDecision(
+        s.h.state,
+        s.coderActor,
+        {
+          card_id: s.card,
+          kind: "choose",
+          category: "general",
+          question: "Fictional artifact basis?",
+          context: "Fictional context",
+          options: [
+            { key: "a", description: "Option A", impact: "none" },
+            { key: "b", description: "Option B", impact: "none" },
+          ],
+          recommended: "a",
+          affected_cards: [s.card],
+          affected_work_items: [],
+          blocking: false,
+          decider: "human",
+        },
+        s.h.ports,
+      ),
+    );
+    const artifact = commit(
+      s.h,
+      uploadAttachment(
+        s.h.state,
+        s.coderActor,
+        {
+          card_id: s.card,
+          mime: "image/png",
+          kind: "artifact",
+          attach_to: attachTo,
+          basis: decision.key,
+        },
+        receipt,
+        s.h.ports,
+      ),
+    );
+    expect(artifact.kind).toBe("artifact");
+    expect(artifact.basis).toBe(decision.key);
   });
 });
 
@@ -1527,23 +1630,49 @@ describe("blockers, human actions and Run limits", () => {
     });
     endRun(s.h, s.coderActor, coderRun);
 
+    // A conditional review leaves the delivery `submitted`, so the second call
+    // reaches the one-review-per-Run rule instead of tripping over the status.
     const reviewRun = startRun(s.h, s.reviewer);
-    commit(
+    const conditional = commit(
+      s.h,
+      submitReview(
+        s.h.state,
+        s.reviewerActor,
+        {
+          delivery_id: delivery as never,
+          target_sha: sha("a"),
+          kind: "code",
+          issues: [],
+          recheck_required: true,
+        },
+        s.h.ports,
+      ),
+    );
+    expect(conditional.verdict).toBe("conditional");
+    expect(s.h.state.deliveries.find((d) => d.id === delivery)?.status).toBe(
+      "submitted",
+    );
+
+    const second = review(s.h, s.reviewerActor, {
+      delivery_id: delivery,
+      target_sha: sha("a"),
+    });
+    const error = errorOf(second);
+    expect(error.code).toBe("invariant_violation");
+    expect(error.message).toMatch(/one review/i);
+
+    // A fresh Run may review the same submitted delivery again.
+    endRun(s.h, s.reviewerActor, reviewRun);
+    startRun(s.h, s.reviewer, { kind: "followup" });
+    const passed = commit(
       s.h,
       review(s.h, s.reviewerActor, {
         delivery_id: delivery,
         target_sha: sha("a"),
       }),
     );
-    const second = review(s.h, s.reviewerActor, {
-      delivery_id: delivery,
-      target_sha: sha("a"),
-    });
-    // A reviewed delivery is no longer `submitted`, and a Run may review once.
-    expect(["illegal_transition", "invariant_violation"]).toContain(
-      errorOf(second).code,
-    );
-    expect(reviewRun.status).toBe("running");
+    expect(passed.verdict).toBe("pass");
+    expect(workItem(s.h, s.codeReview.id).status).toBe("passed");
   });
 
   test("a delivery needs exactly one running Run", async () => {
@@ -1568,6 +1697,25 @@ describe("blockers, human actions and Run limits", () => {
 
   test("deliveries require every required verifier and a short summary", async () => {
     const s = scenario();
+    // A second required verifier that really targets the development item.
+    const extraVerifier = commit(
+      s.h,
+      createWorkItem(
+        s.h.state,
+        s.pmOfficeActor,
+        {
+          card_id: s.card,
+          title: "Fictional second review",
+          kind: "verify",
+          role_id: "reviewer",
+          required: true,
+          completion_criteria: [],
+          target_work_item_id: s.development.id,
+        },
+        s.h.ports,
+      ),
+    );
+
     startRun(s.h, s.coder);
     const missingVerifier = await prepareDelivery(
       s.h.state,
@@ -1577,7 +1725,7 @@ describe("blockers, human actions and Run limits", () => {
         kind: "code",
         summary: "fictional delivery",
         subject: { kind: "git_head", value: sha("a") },
-        requested_verifiers: [s.acceptance.id],
+        requested_verifiers: [s.codeReview.id],
       },
       verifier,
     );
@@ -1585,6 +1733,24 @@ describe("blockers, human actions and Run limits", () => {
     expect(missingVerifier.ok === false && missingVerifier.error.code).toBe(
       "invariant_violation",
     );
+    expect(
+      missingVerifier.ok === false && missingVerifier.error.message,
+    ).toMatch(/required verifiers/i);
+
+    // Requesting both required verifiers succeeds.
+    const complete = await prepareDelivery(
+      s.h.state,
+      s.coderActor,
+      {
+        work_item_id: s.development.id,
+        kind: "code",
+        summary: "fictional delivery",
+        subject: { kind: "git_head", value: sha("a") },
+        requested_verifiers: [s.codeReview.id, extraVerifier.id],
+      },
+      verifier,
+    );
+    expect(complete.ok).toBe(true);
 
     const longSummary = await prepareDelivery(
       s.h.state,
@@ -1766,5 +1932,246 @@ describe("review outcomes the plan distinguishes", () => {
     expect(
       s.h.state.decisions.filter((d) => d.trigger === "review_limit"),
     ).toHaveLength(1);
+  });
+});
+
+describe("PM tool boundaries and decision recording", () => {
+  /** A non-blocking decision the office can record. */
+  function openDecision(s: Scenario): { readonly id: string } {
+    return commit(
+      s.h,
+      requestDecision(
+        s.h.state,
+        s.coderActor,
+        {
+          card_id: s.card,
+          kind: "choose",
+          category: "general",
+          question: "Fictional recorded decision?",
+          context: "Fictional context",
+          options: [
+            { key: "a", description: "Option A", impact: "none" },
+            { key: "b", description: "Option B", impact: "none" },
+          ],
+          recommended: "a",
+          affected_cards: [s.card],
+          affected_work_items: [],
+          blocking: false,
+          decider: "human",
+        },
+        s.h.ports,
+      ),
+    );
+  }
+
+  test("record_decision is only for the standing PM Office", () => {
+    const s = scenario();
+    const decision = openDecision(s);
+
+    // A work-item PM assignment cannot record decisions, even with the tool.
+    const workItemPm = recordDecision(
+      s.h.state,
+      s.pmAcceptanceActor,
+      {
+        decision_id: decision.id as never,
+        option: "a",
+        rationale: "fictional rationale",
+        raw_quote: "fictional quote",
+      },
+      s.h.ports,
+    );
+    expect(errorOf(workItemPm).code).toBe("forbidden_tool");
+
+    // A standing PM Ops assignment whose token lacks the tool is refused too.
+    const ops = seatStandingPm(s.h);
+    const opsActor = actorFor(
+      s.h,
+      ops.id,
+      "pm",
+      pmTools.filter((tool) => tool !== "record_decision"),
+    );
+    const byOps = recordDecision(
+      s.h.state,
+      opsActor,
+      {
+        decision_id: decision.id as never,
+        option: "a",
+        rationale: "fictional rationale",
+        raw_quote: "fictional quote",
+      },
+      s.h.ports,
+    );
+    expect(errorOf(byOps).code).toBe("forbidden_tool");
+
+    // The Office records it with the original words.
+    const recorded = commit(
+      s.h,
+      recordDecision(
+        s.h.state,
+        s.pmOfficeActor,
+        {
+          decision_id: decision.id as never,
+          option: "a",
+          rationale: "fictional rationale",
+          raw_quote: "fictional quote",
+        },
+        s.h.ports,
+      ),
+    );
+    expect(recorded.status).toBe("resolved");
+    expect(recorded.resolution?.raw_quote).toBe("fictional quote");
+    // The decider is the human; the Office only records the words.
+    expect(recorded.resolution?.resolved_by).toBe("human");
+  });
+
+  test("record_decision requires the human's original words", () => {
+    const s = scenario();
+    const decision = openDecision(s);
+    const missing = recordDecision(
+      s.h.state,
+      s.pmOfficeActor,
+      {
+        decision_id: decision.id as never,
+        option: "a",
+        rationale: "fictional rationale",
+        raw_quote: "   ",
+      },
+      s.h.ports,
+    );
+    expect(errorOf(missing).code).toBe("validation_failed");
+    expect(s.h.state.decisions[0]?.status).toBe("open");
+  });
+
+  test("PM tools stay PM-only even when the role and token allow them", () => {
+    const s = scenario();
+    const widened: readonly ToolName[] = [
+      ...coderTools,
+      "create_card",
+      "update_card",
+      "create_work_item",
+      "assign",
+    ];
+    s.h.state = {
+      ...s.h.state,
+      roles: s.h.state.roles.map((role) =>
+        role.role_id === "coder"
+          ? { ...role, allowed_tools: [...widened] }
+          : role,
+      ),
+    };
+    const coder = actorFor(s.h, s.coder.id, "coder", widened);
+
+    const card = createCard(
+      s.h.state,
+      coder,
+      {
+        title: "Fictional card",
+        goal: "should be refused",
+        acceptance_criteria: ["x"],
+        source: { kind: "quote", text: "x" },
+        repo: "example/repo",
+        base_branch: "main",
+      },
+      s.h.ports,
+    );
+    expect(errorOf(card).code).toBe("forbidden_tool");
+    expect(errorOf(card).message).toMatch(/PM or the human/i);
+
+    const assignment = assign(
+      s.h.state,
+      coder,
+      { work_item_id: s.development.id, role_id: "coder" },
+      s.h.ports,
+    );
+    expect(errorOf(assignment).code).toBe("forbidden_tool");
+    expect(errorOf(assignment).message).toMatch(/PM or the human/i);
+  });
+
+  test.fails("§4.4: two blockers on one work item must both clear before it resumes", () => {
+    // Development plan §4.4 (v0.6.7): when a HumanAction and a blocking
+    // Decision hold the same work item, clearing only one must not resume it;
+    // it resumes when the last blocker is cleared.
+    //
+    // Current behaviour: the second blocker cannot even be created. After the
+    // HumanAction sets the item to `blocked`, requesting a blocking Decision on
+    // it is refused with `illegal_transition`
+    // ("Cannot pause work item W-1 (produce:blocked); work is not in progress"),
+    // so the "do not resume early" rule is unreachable. Remove `test.fails`
+    // once stacking is supported.
+    const s = scenario();
+    startRun(s.h, s.coder);
+
+    commit(
+      s.h,
+      requestHumanAction(
+        s.h.state,
+        s.coderActor,
+        {
+          card_id: s.card,
+          instructions: "Fictional manual step",
+          why_human: "needs a credential",
+          expected_return: "confirmation",
+          blocked_work_items: [s.development.id],
+        },
+        s.h.ports,
+      ),
+    );
+    expect(workItem(s.h, s.development.id).status).toBe("blocked");
+
+    const decision = commit(
+      s.h,
+      requestDecision(
+        s.h.state,
+        s.coderActor,
+        {
+          card_id: s.card,
+          kind: "choose",
+          category: "general",
+          question: "Fictional stacked decision?",
+          context: "Fictional context",
+          options: [
+            { key: "a", description: "Option A", impact: "none" },
+            { key: "b", description: "Option B", impact: "none" },
+          ],
+          recommended: "a",
+          affected_cards: [s.card],
+          affected_work_items: [s.development.id],
+          blocking: true,
+          decider: "human",
+        },
+        s.h.ports,
+      ),
+    );
+
+    // Clearing only the human action leaves the decision blocking the item.
+    const action = s.h.state.human_actions[0];
+    if (action === undefined) throw new Error("no human action");
+    commit(
+      s.h,
+      completeHumanAction(
+        s.h.state,
+        human,
+        { human_action_id: action.id, text: "done" },
+        s.h.ports,
+      ),
+    );
+    expect(workItem(s.h, s.development.id).status).not.toBe("in_progress");
+
+    // Clearing the decision resumes it.
+    commit(
+      s.h,
+      recordDecision(
+        s.h.state,
+        s.pmOfficeActor,
+        {
+          decision_id: decision.id as never,
+          option: "a",
+          rationale: "fictional rationale",
+          raw_quote: "fictional quote",
+        },
+        s.h.ports,
+      ),
+    );
+    expect(workItem(s.h, s.development.id).status).toBe("in_progress");
   });
 });
