@@ -7,6 +7,8 @@ import type { McpBackend } from "../backend.js";
 export interface ToolContext {
   readonly store: McpBackend;
   readonly identity: Identity;
+  /** Write handlers recheck revocation after asynchronous preflight. */
+  readonly revalidateToken?: () => void;
 }
 
 export interface ToolDefinition {

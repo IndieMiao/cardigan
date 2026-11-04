@@ -7,12 +7,17 @@ import type { AddressInfo } from "node:net";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { authenticate, bearerToken, type Identity } from "./auth.js";
 import type { McpBackend } from "./backend.js";
+import {
+  type DeliveryToolOptions,
+  deliveryTools,
+} from "./commands/delivery-tools.js";
+import { ToolError } from "./errors.js";
 import { type Logger, stdoutLogger } from "./log.js";
 import { createMcpServer } from "./tool-server.js";
 import { readOnlyTools } from "./tools/index.js";
 import type { ToolDefinition } from "./tools/types.js";
 
-export interface McpServerOptions {
+export interface McpServerOptions extends DeliveryToolOptions {
   readonly store: McpBackend;
   /** Loopback only; M1 never binds a public interface (§9.1, §14). */
   readonly host?: string;
@@ -47,7 +52,7 @@ export async function startMcpServer(
 ): Promise<RunningServer> {
   const host = options.host ?? "127.0.0.1";
   const log = options.log ?? stdoutLogger;
-  const tools = options.tools ?? readOnlyTools;
+  const tools = options.tools ?? [...readOnlyTools, ...deliveryTools(options)];
 
   // Filled in once the socket is bound; the DNS rebinding check needs the port.
   let boundPort = 0;
@@ -174,6 +179,11 @@ async function serveMcp(
     identity,
     tools,
     log,
+    revalidateToken: () => {
+      const token = bearerToken(req.headers.authorization);
+      if (!token || options.store.verifyToken(token)?.id !== identity.token.id)
+        throw new ToolError("unauthorized", "Token is no longer valid");
+    },
   });
 
   const transport = new StreamableHTTPServerTransport({

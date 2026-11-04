@@ -190,6 +190,13 @@ domain 只提供纯函数：输入"当前状态 + 调用者身份 + 参数"，�
 
 验收：每个工具至少一个正常调用测试；domain 的每类错误码都能从 MCP 层原样拿到；同一个 `idempotency_key` 重放不会产生第二个交付或第二条事件。
 
+实现拆分（2026-11-04，按审核意见，每个依赖 PR 尽量不超过 800 行，先提交 M1.6a）：
+
+- **M1.6a**：公共命令接线、一致项目快照、幂等/回滚、submit_delivery 和 submit_review（包含完成申请）。
+- **M1.6b**：协作、PM 工具；assign 的 token_requests 与 Assignment 在同一事务签发。
+- **M1.6c**：upload_attachment（base64，≤10MB，CARDIGAN_DATA_DIR/attachments）、heartbeat / finish_run、project_snapshot / list_needs_you。
+- 四个 M1.5 工具不重写；completeHumanAction 保留给 M1.7b CLI。a 不单独宣称 M1.6 完成。
+
 ### M1.2b 卡片的三个派生字段（Pi）
 
 来源：M1.5 审核时记下的后续事项。纯函数，放在 domain 的派生计算里（单独一个文件，避免和 M1.3 的改动冲突），然后让 mcp-server 的 `get_card` 返回这三个字段。

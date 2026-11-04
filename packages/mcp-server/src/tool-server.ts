@@ -20,6 +20,7 @@ export interface ToolServerOptions {
   readonly identity: Identity;
   readonly tools: readonly ToolDefinition[];
   readonly log: Logger;
+  readonly revalidateToken?: () => void;
 }
 
 /**
@@ -30,7 +31,13 @@ export interface ToolServerOptions {
 export function createMcpServer(options: ToolServerOptions): Server {
   const { store, identity, tools, log } = options;
   const visible = allowedTools(tools, identity);
-  const context: ToolContext = { store, identity };
+  const context: ToolContext = {
+    store,
+    identity,
+    ...(options.revalidateToken
+      ? { revalidateToken: options.revalidateToken }
+      : {}),
+  };
 
   const server = new Server(
     { name: "cardigan", version: "0.0.0" },
