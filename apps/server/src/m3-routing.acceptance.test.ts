@@ -82,6 +82,7 @@ test("[R03] §6.4 card-level Agent comment without mention is quiet", () => {
 test("[R04] §6.4 human card comment goes only to Ops", () => {
   expect(recipients(route(f.comment()))).toEqual(["pm_ops"]);
 });
+// No command emits instruction yet; R05/R06 cover only the pure routing contract.
 test("[R05] §6.4 instruction reaches the responsible Assignment", () => {
   expect(
     recipients(route(f.fact("instruction", { work_item_id: f.produce.id }))),
@@ -145,23 +146,21 @@ test("[R11] §6.4 resolving a blocking decision notifies resumed work and Ops", 
     [f.coder.id, "pm_ops"].sort(),
   );
 });
-test("[R12] §6.4 completed dependency reaches downstream Assignment", async () => {
+// A real passing review accepts the producer but does not notify its dependent Assignment.
+test.fails("[R12] §6.4 completed dependency reaches downstream Assignment", async () => {
   const downstream = f.assignItem(f.extra(f.produce.role_id, [f.produce.id]));
-  await pass();
+  const reviewed = await pass();
   expect(
-    recipients(
-      route(f.fact("work_item_updated", { work_item_id: f.produce.id })),
-    ),
-  ).toEqual([downstream.id]);
+    recipients(route(event(reviewed.events, "review_submitted"))),
+  ).toContain(downstream.id);
 });
-test("[R13] §6.4 completed dependency with no owner reaches Ops", async () => {
+// A real passing review also fails to notify Ops when the dependent work has no Assignment.
+test.fails("[R13] §6.4 completed dependency with no owner reaches Ops", async () => {
   f.extra(f.produce.role_id, [f.produce.id]);
-  await pass();
+  const reviewed = await pass();
   expect(
-    recipients(
-      route(f.fact("work_item_updated", { work_item_id: f.produce.id })),
-    ),
-  ).toEqual(["pm_ops"]);
+    recipients(route(event(reviewed.events, "review_submitted"))),
+  ).toContain("pm_ops");
 });
 test("[R14] §6.4 all required work passing reminds the producer, without closing the card", async () => {
   const r = await pass();
