@@ -1,0 +1,739 @@
+import type {
+  Assignment,
+  AssignmentId,
+  CardId,
+  EventId,
+  RoleId,
+  TimelineEntry,
+  WorkItem,
+  WorkItemId,
+} from "@cardigan/domain";
+import {
+  payloadString,
+  payloadStrings,
+  type Recipient,
+  type RouteCheck,
+  type RoutedNotification,
+  type RouteInput,
+  type RouteProblem,
+  type RouteResult,
+  type RuleId,
+  recipient,
+} from "./types.js";
+
+/**
+ * M3.1 routing rules: development plan §6.4 (every row), §6.5 (all four mention
+ * cases) and §7.2 (all five escalations), plus the §3.3 pipeline conditions of
+ * the M3 plan (`docs/plans/phase-1-m3.md`).
+ *
+ * The principle (§6.4): notify whoever's next step this event changed — never
+ * "everyone on the card" — and never notify the author about its own action.
+ */
+
+const DONE_WORK_ITEM_STATUSES: readonly string[] = ["verifiers_passed", "done"];
+
+const isActive = (assignment: Assignment): boolean =>
+  assignment.status === "active";
+
+const actorAssignmentId = (input: RouteInput): AssignmentId | undefined =>
+  input.event.actor.kind === "assignment"
+    ? input.event.actor.assignment_id
+    : undefined;
+
+/** The timeline entry of this event, which carries the mentions and work item. */
+const entryOf = (input: RouteInput): TimelineEntry | undefined =>
+  input.snapshot.timeline.find(
+    (entry) =>
+      entry.event_seq === input.event.seq &&
+      entry.card_id === input.event.card_id,
+  );
+
+const itemOf = (input: RouteInput, id: WorkItemId | undefined) =>
+  id === undefined
+    ? undefined
+    : input.snapshot.work_items.find((item) => item.id === id);
+
+const assignmentOf = (input: RouteInput, id: AssignmentId | undefined) =>
+  id === undefined
+    ? undefined
+    : input.snapshot.assignments.find((candidate) => candidate.id === id);
+
+/** Assignments that serve a role on this card (standing ones always count). */
+const assignmentsForRole = (
+  input: RouteInput,
+  role_id: string,
+  card_id: CardId | undefined,
+): readonly Assignment[] =>
+  input.snapshot.assignments.filter((candidate) => {
+    if (candidate.role_id !== role_id || !isActive(candidate)) return false;
+    if (candidate.scope === "standing") return true;
+    const item = input.snapshot.work_items.find(
+      (work_item) => work_item.id === candidate.work_item_id,
+    );
+    return item === undefined ? true : item.card_id === card_id;
+  });
+
+const recipientKey = (to: Recipient): string =>
+  `${to.kind}:${to.assignment_id ?? ""}`;
+
+interface Draft {
+  notifications: RoutedNotification[];
+  checks: RouteCheck[];
+  problems: RouteProblem[];
+}
+
+function note(
+  input: RouteInput,
+  draft: Draft,
+  to: Recipient,
+  kind: RoutedNotification["kind"],
+  rule: RuleId,
+  summary: string,
+  extra: { work_item_id?: WorkItemId } = {},
+): void {
+  // Never notify an Assignment about its own action (§6.4).
+  if (
+    to.kind === "assignment" &&
+    to.assignment_id === actorAssignmentId(input)
+  ) {
+    return;
+  }
+  // One event produces at most one notification per recipient (M3.3 unique
+  // constraint), so a comment that also mentions its own owner rings once.
+  const key = `${to.kind}:${to.assignment_id ?? ""}`;
+  if (
+    draft.notifications.some(
+      (existing) => recipientKey(existing.recipient) === key,
+    )
+  ) {
+    return;
+  }
+  draft.notifications.push({
+    recipient: to,
+    kind,
+    rule,
+    event_id: input.event.id,
+    seq: input.event.seq,
+    card_id: input.event.card_id,
+    work_item_id: extra.work_item_id,
+    summary,
+  });
+}
+
+function problem(
+  draft: Draft,
+  rule: RuleId,
+  code: RouteProblem["code"],
+  detail: string,
+): void {
+  draft.problems.push({ rule, code, detail });
+}
+
+function noteAssignment(
+  input: RouteInput,
+  draft: Draft,
+  item: WorkItem | undefined,
+  kind: RoutedNotification["kind"],
+  rule: RuleId,
+  summary: string,
+): void {
+  const assignment = assignmentOf(input, item?.assignment_id);
+  if (item === undefined || assignment === undefined || !isActive(assignment)) {
+    // Nobody can be woken: the PM Ops decides whether to create an Assignment.
+    note(input, draft, recipient.pm_ops(), kind, rule, summary);
+    return;
+  }
+  note(input, draft, recipient.assignment(assignment.id), kind, rule, summary, {
+    work_item_id: item.id,
+  });
+}
+
+const subject = (input: RouteInput): string =>
+  input.event.card_id ?? "the project";
+
+/** §6.4: a comment on a work item wakes that work item's Assignment. */
+function routeComment(input: RouteInput, draft: Draft): void {
+  const entry = entryOf(input);
+  const work_item_id =
+    entry?.work_item_id ?? payloadString(input.event.payload, "work_item_id");
+  const mentions =
+    entry?.mentions ?? payloadStrings(input.event.payload, "mentions");
+  const item = itemOf(input, work_item_id as WorkItemId | undefined);
+
+  if (item !== undefined) {
+    noteAssignment(
+      input,
+      draft,
+      item,
+      "comment",
+      "6.4/work-item comment",
+      `new comment on ${item.id}`,
+    );
+  }
+
+  if (mentions.length > 0) {
+    routeMentions(input, draft, mentions, item?.card_id);
+    return;
+  }
+  if (item !== undefined) return;
+
+  // §6.4: a card-level comment without a mention never rings a bell, but the
+  // human's words are merged into the next PM Ops bell.
+  if (input.event.actor.kind === "human") {
+    note(
+      input,
+      draft,
+      recipient.pm_ops(),
+      "comment",
+      "6.4/card comment without mention",
+      `comment from the human on ${subject(input)}`,
+    );
+  }
+}
+
+/** §6.5: the four @mention cases. */
+function routeMentions(
+  input: RouteInput,
+  draft: Draft,
+  mentions: readonly string[],
+  card_id: CardId | undefined,
+): void {
+  for (const mention of mentions) {
+    const text = mention.replace(/^@/u, "");
+    const explicit = /^([AW])-(\d+)$/u.exec(text);
+    if (explicit !== null) {
+      if (explicit[1] === "A") {
+        const target = assignmentOf(input, text as AssignmentId);
+        if (target === undefined || !isActive(target)) {
+          draft.problems.push({
+            rule: "6.5/explicit assignment or work item",
+            code: "unknown_mention",
+            detail: `@${text} is not an active Assignment`,
+          });
+          continue;
+        }
+        note(
+          input,
+          draft,
+          recipient.assignment(target.id),
+          "comment",
+          "6.5/explicit assignment or work item",
+          `mentioned in a comment on ${subject(input)}`,
+        );
+        continue;
+      }
+      const item = itemOf(input, text as WorkItemId);
+      if (item === undefined) {
+        problem(
+          draft,
+          "6.5/explicit assignment or work item",
+          "unknown_mention",
+          `@${text} is not a work item of this card`,
+        );
+        continue;
+      }
+      if (item.assignment_id === undefined) {
+        // Explicitly named, but the work item has no one to wake.
+        problem(
+          draft,
+          "6.5/explicit assignment or work item",
+          "mentioned_work_item_unassigned",
+          `@${text} has no Assignment yet`,
+        );
+        note(
+          input,
+          draft,
+          recipient.pm_ops(),
+          "comment",
+          "6.5/no assignment for the role",
+          `mention of the unassigned ${item.id}`,
+        );
+        continue;
+      }
+      noteAssignment(
+        input,
+        draft,
+        item,
+        "comment",
+        "6.5/explicit assignment or work item",
+        `mentioned in a comment on ${subject(input)}`,
+      );
+      continue;
+    }
+
+    // A role mention has to resolve to exactly one Assignment.
+    if (!/^[a-z0-9][a-z0-9._-]*$/u.test(text)) {
+      problem(
+        draft,
+        "6.5/single assignment for the role",
+        "unknown_mention",
+        `@${text} is not a role, Assignment or work item`,
+      );
+      continue;
+    }
+    const candidates = assignmentsForRole(
+      input,
+      text as RoleId,
+      card_id ?? input.event.card_id,
+    );
+    if (candidates.length === 1) {
+      const only = candidates[0] as Assignment;
+      note(
+        input,
+        draft,
+        recipient.assignment(only.id),
+        "comment",
+        "6.5/single assignment for the role",
+        `mentioned as ${text} in a comment on ${subject(input)}`,
+      );
+      continue;
+    }
+    if (candidates.length === 0) {
+      note(
+        input,
+        draft,
+        recipient.pm_ops(),
+        "comment",
+        "6.5/no assignment for the role",
+        `mentioned ${text}, but no Assignment has that role`,
+      );
+      continue;
+    }
+    // Several candidates: do not broadcast; the speaker must name a work item.
+    draft.problems.push({
+      rule: "6.5/several assignments for the role",
+      code: "ambiguous_role_mention",
+      detail: `@${text} matches ${candidates
+        .map((candidate) => candidate.id)
+        .join(", ")}; name the work item instead`,
+    });
+  }
+}
+
+/** §6.4: an instruction goes to the work item's Assignment, else PM Ops. */
+function routeInstruction(input: RouteInput, draft: Draft): void {
+  const work_item_id = payloadString(input.event.payload, "work_item_id");
+  const item = itemOf(input, work_item_id as WorkItemId | undefined);
+  if (item === undefined) {
+    note(
+      input,
+      draft,
+      recipient.pm_ops(),
+      "instruction",
+      "6.4/instruction",
+      `instruction without a work item on ${subject(input)}`,
+    );
+    return;
+  }
+  noteAssignment(
+    input,
+    draft,
+    item,
+    "instruction",
+    "6.4/instruction",
+    `new instruction on ${item.id}`,
+  );
+}
+
+/** §6.4: deliveries go to the verifying Assignments; PM Ops gets a summary. */
+function routeDelivery(input: RouteInput, draft: Draft): void {
+  const delivery_id = payloadString(input.event.payload, "delivery_id");
+  const delivery = input.snapshot.deliveries.find(
+    (candidate) => candidate.id === delivery_id,
+  );
+  if (delivery === undefined) {
+    problem(
+      draft,
+      "6.4/delivery submitted",
+      "unknown_mention",
+      `delivery ${delivery_id ?? "(none)"} was not found`,
+    );
+    return;
+  }
+  if (delivery.kind === "card_completion") {
+    routeCompletionRequest(input, draft, delivery.id);
+    return;
+  }
+  for (const verifier_id of delivery.requested_verifiers) {
+    const verifier = itemOf(input, verifier_id);
+    if (verifier === undefined) continue;
+    noteAssignment(
+      input,
+      draft,
+      verifier,
+      "delivery",
+      "6.4/delivery submitted",
+      `${delivery.id} is waiting for ${verifier.id}`,
+    );
+  }
+  note(
+    input,
+    draft,
+    recipient.pm_ops(),
+    "delivery",
+    "6.4/delivery submitted",
+    `${delivery.id} submitted on ${subject(input)}`,
+  );
+}
+
+/** §6.4: a completion request goes to the template's reviewer (default pm). */
+function routeCompletionRequest(
+  input: RouteInput,
+  draft: Draft,
+  delivery_id: string,
+): void {
+  const reviewers = input.snapshot.completion_reviewer_roles ?? [
+    "pm" as RoleId,
+  ];
+  const item = input.snapshot.work_items.find(
+    (candidate) =>
+      candidate.card_id === input.event.card_id &&
+      candidate.kind === "verify" &&
+      reviewers.includes(candidate.role_id),
+  );
+  if (item === undefined) {
+    note(
+      input,
+      draft,
+      recipient.pm_ops(),
+      "completion",
+      "6.4/completion request",
+      `completion request ${delivery_id} has no reviewer on ${subject(input)}`,
+    );
+    return;
+  }
+  noteAssignment(
+    input,
+    draft,
+    item,
+    "completion",
+    "6.4/completion request",
+    `completion request ${delivery_id} is waiting for ${item.id}`,
+  );
+}
+
+/** §6.4: a passed review wakes nobody; it only advances derived checks. */
+function routeReview(input: RouteInput, draft: Draft): void {
+  const verdict = payloadString(input.event.payload, "verdict");
+  const delivery_id = payloadString(input.event.payload, "delivery_id");
+  const reviews = input.snapshot.reviews.filter(
+    (review) => review.delivery_id === delivery_id,
+  );
+
+  if (verdict === "pass") {
+    draft.checks.push({
+      rule: "6.4/review passed",
+      card_id: input.event.card_id,
+      detail: "check whether every delivery passed and the card is done",
+    });
+    // §6.4: all required work items passed → remind the producer to apply for
+    // completion; the card is not closed automatically.
+    const card_id = input.event.card_id;
+    const items = input.snapshot.work_items.filter(
+      (item) => item.card_id === card_id,
+    );
+    const required = items.filter((item) => item.required);
+    const allPassed =
+      required.length > 0 &&
+      required.every((item) => DONE_WORK_ITEM_STATUSES.includes(item.status));
+    if (!allPassed) return;
+    const producer = items.find((item) => item.kind === "produce") ?? items[0];
+    if (producer === undefined) return;
+    noteAssignment(
+      input,
+      draft,
+      producer,
+      "completion",
+      "6.4/all required work items passed",
+      `all required work items passed; ${producer.id} may apply for completion`,
+    );
+    return;
+  }
+
+  if (verdict === "conditional") return;
+
+  // §6.4: a rejection produces a rework Run for the delivery's Assignment.
+  const delivery = input.snapshot.deliveries.find(
+    (candidate) => candidate.id === delivery_id,
+  );
+  const item = itemOf(input, delivery?.work_item_id);
+  noteAssignment(
+    input,
+    draft,
+    item,
+    "review",
+    "6.4/review rejected",
+    `${delivery_id ?? "the delivery"} was rejected; rework is needed`,
+  );
+
+  // §7.2: a delivery rejected twice needs re-planning, not another rework.
+  const rejections = reviews.filter((review) => review.verdict === "reject");
+  if (rejections.length >= 2) {
+    draft.notifications.push(
+      escalation(
+        input,
+        "delivery rejected twice",
+        `${delivery_id} was rejected ${rejections.length} times`,
+      ),
+    );
+  }
+}
+
+/** §6.4: a decision for the human becomes Needs You plus a PM Office brief. */
+function routeDecisionRequested(input: RouteInput, draft: Draft): void {
+  const decision_id = payloadString(input.event.payload, "decision_id");
+  const decision = input.snapshot.decisions.find(
+    (candidate) => candidate.id === decision_id,
+  );
+  if (decision === undefined) {
+    problem(
+      draft,
+      "6.4/decision requested",
+      "unknown_mention",
+      `decision ${decision_id ?? "(none)"} was not found`,
+    );
+    return;
+  }
+  if (decision.decider === "human") {
+    note(
+      input,
+      draft,
+      recipient.needs_you(),
+      "needs_you",
+      "6.4/decision requested",
+      `${decision.id}: ${decision.question}`,
+    );
+    note(
+      input,
+      draft,
+      recipient.pm_office(),
+      "decision",
+      "6.4/decision requested",
+      `${decision.id} needs the human's decision`,
+    );
+    return;
+  }
+  for (const assignment of assignmentsForRole(
+    input,
+    decision.decider.replace(/^role:/u, ""),
+    input.event.card_id,
+  )) {
+    note(
+      input,
+      draft,
+      recipient.assignment(assignment.id),
+      "decision",
+      "6.4/decision requested",
+      `${decision.id} is waiting for your decision`,
+    );
+  }
+}
+
+/** §6.4: a resolved decision wakes every Assignment it had blocked. */
+function routeDecisionResolved(input: RouteInput, draft: Draft): void {
+  const decision_id = payloadString(input.event.payload, "decision_id");
+  const resolved = payloadStrings(input.event.payload, "resume_work_items");
+  for (const id of resolved) {
+    const item = itemOf(input, id as WorkItemId);
+    noteAssignment(
+      input,
+      draft,
+      item,
+      "decision",
+      "6.4/decision resolved",
+      `${decision_id ?? "the decision"} was resolved; continue ${id}`,
+    );
+  }
+  note(
+    input,
+    draft,
+    recipient.pm_ops(),
+    "decision",
+    "6.4/decision resolved",
+    `${decision_id ?? "a decision"} was resolved on ${subject(input)}`,
+  );
+}
+
+/** §6.4: a finished dependency wakes the downstream Assignments. */
+function routeWorkItemUpdate(input: RouteInput, draft: Draft): void {
+  const item_id = payloadString(input.event.payload, "work_item_id");
+  const item = itemOf(input, item_id as WorkItemId | undefined);
+  if (item === undefined || !DONE_WORK_ITEM_STATUSES.includes(item.status)) {
+    return;
+  }
+  const downstream = input.snapshot.work_items.filter((candidate) =>
+    candidate.depends_on.includes(item.id),
+  );
+  if (downstream.length === 0) return;
+  for (const candidate of downstream) {
+    noteAssignment(
+      input,
+      draft,
+      candidate,
+      "dependency",
+      "6.4/dependency completed",
+      `${item.id} completed; ${candidate.id} can start`,
+    );
+  }
+}
+
+/** §6.4: a human action request is "waiting for you" plus a PM Office brief. */
+function routeHumanAction(input: RouteInput, draft: Draft): void {
+  const action_id = payloadString(input.event.payload, "human_action_id");
+  const action = input.snapshot.human_actions.find(
+    (candidate) => candidate.id === action_id,
+  );
+  note(
+    input,
+    draft,
+    recipient.needs_you(),
+    "needs_you",
+    "6.4/human action requested",
+    `${action_id ?? "a human action"}: ${action?.instructions ?? ""}`.trim(),
+  );
+  note(
+    input,
+    draft,
+    recipient.pm_office(),
+    "human_action",
+    "6.4/human action requested",
+    `${action_id ?? "a human action"} is waiting for the human`,
+  );
+}
+
+/** §6.4: a Run that produced nothing (no delivery, blocker or decision). */
+function routeRunFinished(input: RouteInput, draft: Draft): void {
+  const outcome = payloadString(input.event.payload, "outcome");
+  if (outcome !== "completed") return;
+  note(
+    input,
+    draft,
+    recipient.pm_ops(),
+    "run_attention",
+    "6.4/run finished without output",
+    `run ${payloadString(input.event.payload, "run_id") ?? "?"} finished without a delivery`,
+  );
+}
+
+/** §7.2: the five conditions that are a judgement call, not a rule. */
+export type EscalationReason =
+  | "work conflict or priority contention"
+  | "delivery rejected twice"
+  | "delivery does not match the requirement"
+  | "decide whether to pause"
+  | "unhandled exception";
+
+export function escalation(
+  input: RouteInput,
+  reason: EscalationReason,
+  detail: string,
+): RoutedNotification {
+  return {
+    recipient: recipient.pm_ops(),
+    kind: "escalation",
+    rule: `7.2/${reason}`,
+    event_id: input.event.id,
+    seq: input.event.seq,
+    card_id: input.event.card_id,
+    summary: detail,
+  };
+}
+
+/** Route one event; pure, so the same input always yields the same output. */
+export function routeEvent(input: RouteInput): RouteResult {
+  const draft: Draft = { notifications: [], checks: [], problems: [] };
+  switch (input.event.type) {
+    case "comment_posted":
+      routeComment(input, draft);
+      break;
+    case "instruction_issued":
+    case "instruction":
+      routeInstruction(input, draft);
+      break;
+    case "delivery_submitted":
+      routeDelivery(input, draft);
+      break;
+    case "review_submitted":
+      routeReview(input, draft);
+      break;
+    case "decision_requested":
+      routeDecisionRequested(input, draft);
+      break;
+    case "decision_resolved":
+    case "decision_provisionally_resolved":
+      routeDecisionResolved(input, draft);
+      break;
+    case "work_item_updated":
+    case "work_item_assigned":
+      routeWorkItemUpdate(input, draft);
+      break;
+    case "human_action_requested":
+      routeHumanAction(input, draft);
+      break;
+    case "run_finished":
+      routeRunFinished(input, draft);
+      break;
+    default:
+      // card_created, card_updated, work_item_created, blocker_reported,
+      // attachments and the run lifecycle events do not change who acts next.
+      break;
+  }
+  return draft;
+}
+
+/** §6.4 / §3.3: a failed bell goes to PM Ops and is never retried silently. */
+export function routeBellFailure(input: {
+  readonly event_id: EventId;
+  readonly seq: number;
+  readonly card_id?: CardId;
+  readonly assignment_id: AssignmentId;
+  readonly reason: string;
+}): RoutedNotification {
+  return {
+    recipient: recipient.pm_ops(),
+    kind: "escalation",
+    rule: "6.4/bell delivery failed",
+    event_id: input.event_id,
+    seq: input.seq,
+    card_id: input.card_id,
+    summary: `bell to ${input.assignment_id} failed: ${input.reason}`,
+  };
+}
+
+/** §6.4 / §3.3: a running Agent that never calls `finish_run`. */
+export function routeWatchdog(input: {
+  readonly event_id: EventId;
+  readonly seq: number;
+  readonly card_id?: CardId;
+  readonly assignment_id: AssignmentId;
+  readonly idle_minutes: number;
+}): RoutedNotification {
+  return {
+    recipient: recipient.pm_ops(),
+    kind: "run_attention",
+    rule: "6.4/agent idle without finish_run",
+    event_id: input.event_id,
+    seq: input.seq,
+    card_id: input.card_id,
+    summary: `${input.assignment_id} has been idle for ${input.idle_minutes} minutes without finish_run`,
+  };
+}
+
+/** §6.4 / §13.9: a lost runtime beyond the grace period is the human's call. */
+export function routeRuntimeLost(input: {
+  readonly event_id: EventId;
+  readonly seq: number;
+  readonly card_id?: CardId;
+  readonly assignment_id: AssignmentId;
+  readonly lost_minutes: number;
+}): RoutedNotification {
+  return {
+    recipient: recipient.needs_you(),
+    kind: "needs_you",
+    rule: "6.4/runtime lost",
+    event_id: input.event_id,
+    seq: input.seq,
+    card_id: input.card_id,
+    summary: `${input.assignment_id} lost its runtime ${input.lost_minutes} minutes ago; decide whether to take over`,
+  };
+}
