@@ -1,6 +1,7 @@
 # Phase 1 · M1 任务计划：领域模型、事件存储、Card MCP
 
-- 版本：v1（2026-11-04）
+- 版本：v2（2026-11-04）：新增 M1.8（提前做的 `cardigan launch`）
+- v1（2026-11-04）
 - 对应：开发方案 v0.6 §16 Phase 1 M1
 - M1 的验收（开发方案 §16）：状态机和不变量的单元测试；MCP 契约测试；伪造身份、非法状态迁移会被拒绝。
 - M1 不做：运行时和门铃（M2、M3）、Git 拉取与校验（M4，M1 用一个桩代替）、Web 界面（M5）、多机。
@@ -19,6 +20,7 @@
 | M1.T1 | domain 契约测试（§4.4、§4.5） | Pi | — | M1.3 | `test/m1-domain-contract` |
 | M1.T2 | store 验收测试 | Codex | — | M1.4 | `test/m1-store` |
 | M1.T3 | MCP 契约测试 | Pi | — | M1.6 | `test/m1-mcp-contract` |
+| M1.8 | 接入点、启动配置和 `cardigan launch`（提前做） | Pi | Claude 审核 | 无 | `feat/m1-launch` |
 
 建议顺序：
 
@@ -30,6 +32,8 @@ M1.1 ──┬─ M1.2 ─ M1.3 ─┬─ M1.T1（Pi）
 ```
 
 M1.2 和 M1.4 可以并行：Codex 做 M1.2，Pi 做 M1.4。
+
+M1.8 不依赖其他任务，用户要求提前做：Pi 在 Codex 做 M1.1 时先做 M1.8，做完再接 M1.4。
 
 ## 2. 通用约定
 
@@ -199,6 +203,62 @@ domain 只提供纯函数：输入"当前状态 + 调用者身份 + 参数"，�
 
 验收：端到端测试通过；`pnpm build && pnpm test && pnpm lint && pnpm check:deps` 全部通过；README 补充本地启动方法。
 
+### M1.8 接入点、启动配置和 `cardigan launch`（Pi）
+
+依据：开发方案 §10.2 的"接入点与启动配置"。这项本属于 M2，用户要求提前：先让人手动启动 CLI 时能用上，替代现有的 shell 别名。M2 再把它接到 Agent 的自动启动上。
+
+范围：
+
+- `packages/roles`：配置的 schema 和"编译"逻辑，写成**纯函数**：输入启动配置、接入点、密钥值，输出 `{command, args, env, files}`。其中 `files` 是需要临时生成的文件，例如 Claude Code 的 settings 文件。
+- `apps/cli`：负责所有 IO。读取配置和密钥，写临时文件，启动 CLI。
+- 配置文件为 `~/.config/cardigan/launch.yaml`，可以用 `CARDIGAN_CONFIG_DIR` 改目录。用 YAML 是为了方便手改，可以引入 `yaml` 包。格式示意：
+
+  ```yaml
+  providers:
+    of:
+      harness: claude-code
+      env:                       # 不含密钥的环境变量
+        ANTHROPIC_BASE_URL: https://example.invalid
+      secret_env:                # 变量名 → secrets.env 里的键
+        ANTHROPIC_AUTH_TOKEN: OF_AUTH_TOKEN
+  profiles:
+    claude-of:
+      harness: claude-code
+      provider: of
+      permission_mode: bypassPermissions
+      auto_update: true          # 人手动用时可以保留自动更新；Agent 用的配置默认关闭
+    codex-yolo:
+      harness: codex
+      args: ["--yolo", "--no-alt-screen"]
+    pi-deepseek:
+      harness: pi
+      provider_flag: deepseek
+      model: deepseek-flash
+  ```
+
+- 密钥放在 `~/.config/cardigan/secrets.env`，每行一个 `KEY=VALUE`。文件权限不是 600 时拒绝读取，并提示修复命令。
+- 命令：
+  - `cardigan launch <profile> [--cwd <dir>] [-- <透传给 CLI 的参数>]`：在当前终端启动 CLI，继承标准输入输出，退出码原样返回；
+  - `cardigan launch --list`：列出启动配置；
+  - `cardigan launch <profile> --print`：只打印实际命令和环境变量，密钥显示为 `***`；
+  - `cardigan launch check <profile>`：检查 CLI 是否已安装、版本号、需要的密钥是否齐全、密钥文件权限；
+  - `cardigan launch import-claude-settings <settings.json> --provider <name>`：把一个现有的 Claude Code settings 文件转成接入点定义。名字里含 `TOKEN`、`KEY`、`SECRET` 的变量写进 `secrets.env`，其余写进 `launch.yaml`；**不打印任何密钥**。
+- 各 Harness 的生成方式：
+  - Claude Code：在 `$XDG_RUNTIME_DIR/cardigan/`（没有就用 `~/.cache/cardigan/run/`）下生成临时 settings 文件，权限 600，用 `--settings` 传入，CLI 退出后删除。`auto_update: false` 时加上关闭自动更新的环境变量（`DISABLE_AUTOUPDATER=1`）；
+  - Codex：只拼参数（`--profile`、`-c key=value`、`-m`、额外参数），不改 `~/.codex`；
+  - Pi：`--provider`、`--model`，需要时设置 `PI_CODING_AGENT_DIR`。
+
+不做：MCP 配置注入、Assignment 运行目录（M2）；写数据库；修改用户已有的 shell 配置、`~/.claude`、`~/.codex`、`~/.pi`。
+
+验收：
+
+- 编译逻辑的单元测试覆盖三种 Harness，并且全部使用虚构的测试数据，**不读取用户真实的配置和密钥**；
+- `--print` 的输出里不出现任何密钥值；
+- `secrets.env` 权限是 644 时拒绝读取；
+- 临时 settings 文件的权限是 600，CLI 退出后被删除；
+- `import-claude-settings` 用测试用的假 settings 文件验证：密钥进入 `secrets.env`，其余进入 `launch.yaml`；
+- README 补充用法，以及从现有别名迁移的步骤。迁移由用户自己执行，Agent 不碰用户真实的配置。
+
 ### M1.T1、M1.T2、M1.T3：交叉验收测试
 
 由另一个模型只看本计划和开发方案来写，不参照实现代码的内部细节，只调用公开接口：
@@ -209,6 +269,6 @@ domain 只提供纯函数：输入"当前状态 + 调用者身份 + 参数"，�
 
 ## 6. M1 完成的标准
 
-- M1.1–M1.7、M1.T1–M1.T3 全部合并。
+- M1.1–M1.8、M1.T1–M1.T3 全部合并。
 - 开发方案 §16 M1 的验收项都有对应的测试。
 - Claude 根据 M1 的实际情况，写 M2 的任务计划；M2 开工前按 D9 复核运行时基线（ADR 0001）。
