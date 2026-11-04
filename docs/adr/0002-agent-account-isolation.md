@@ -39,6 +39,8 @@
 
 project_id/assignment_id 在参与路径构造前验证。agent-root 必须在 data 及主机私有 home 之外。运行目录父层由主机控制；文件写入必须防范已有 Agent 放置的软链接/硬链接，不能直接追随共享目录中的链接覆盖主机文件。token/secrets 文件仅放必要的启动材料，包装脚本读取后删除。
 
+Linux 写入通过 O_NOFOLLOW 逐级打开并固定目录描述符，用 /proc/self/fd 下的相对路径操作；拒绝权限/属组不符的现有目录，不替它们放宽权限。编译文件先写独占临时文件，再通过描述符设置共享 GID 和权限，最后原子替换目标文件名（不修改原软链接或硬链接的目标）；token 最后写。失败清理只在同样固定的运行目录里 unlink token/secrets.env。server 在打开数据库前验证 agent-ssh 的数据目录已归主机且为 0700；local 模式创建或收紧为 0700。
+
 ## Runtime 路由
 
 hc 0.1.18 的 run/exec 支持 `--on <machine>`，get/send/events/interrupt/kill/rm 则使用 `<machine>/<terminal>` 地址；向这些命令添加不存在的 --on 参数会失败。适配器在两种语法下都只能选择配置的隔离 machine；其他 machine 引用直接拒绝。

@@ -7,6 +7,7 @@ import {
 import {
   LOCAL_RUNTIME_WARNING,
   resolveExecutionConfig,
+  secureDataDirectory,
 } from "@cardigan/runtime-herdr";
 import { Store } from "@cardigan/store";
 import {
@@ -52,6 +53,7 @@ export async function startCardiganServer(
     (options.warn ?? ((message) => process.stderr.write(`${message}\n`)))(
       LOCAL_RUNTIME_WARNING,
     );
+  await secureDataDirectory({ ...execution, dataDir: config.dataDir });
   const store = options.store ?? Store.open({ dataDir: config.dataDir });
   const ownsStore = options.store === undefined;
 

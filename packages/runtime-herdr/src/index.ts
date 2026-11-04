@@ -1,4 +1,5 @@
 import { tmpdir } from "node:os";
+
 import { join } from "node:path";
 import type {
   Assignment,
@@ -17,6 +18,15 @@ import {
   resolveExecutionConfig,
   within,
 } from "./execution.js";
+
+export {
+  type AgentExecution,
+  type LaunchFile,
+  prepareAgentProject,
+  scrubAgentLaunch,
+  secureDataDirectory,
+  writeAgentLaunch,
+} from "./agent-files.js";
 
 export {
   type ExecutionConfig,

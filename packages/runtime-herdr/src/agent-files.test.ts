@@ -1,0 +1,172 @@
+import {
+  chmod,
+  link,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import {
+  type AgentExecution,
+  prepareAgentProject,
+  scrubAgentLaunch,
+  secureDataDirectory,
+  writeAgentLaunch,
+} from "./agent-files.js";
+import { executionPaths } from "./execution.js";
+
+// No sudo, chown to another UID or real agent account: exercise the host's own group.
+describe.skipIf(process.platform !== "linux")("shared launch files", () => {
+  let root: string, config: AgentExecution, runDir: string;
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "cg-files-"));
+    config = {
+      mode: "agent-ssh",
+      dataDir: join(root, "private"),
+      agentRoot: join(root, "agent"),
+      gid: process.getgid?.() ?? 0,
+      machine: "cardigan-agent",
+      identityFile: join(root, "key"),
+      knownHostsFile: join(root, "known"),
+    };
+    await mkdir(config.dataDir, { mode: 0o700 });
+    await mkdir(config.agentRoot, { mode: 0o2750 });
+    await chmod(config.agentRoot, 0o2750);
+    runDir = executionPaths(config, "project", "A-1").runDir;
+  });
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+  const mode = async (path: string) => (await stat(path)).mode & 0o7777;
+  test("prepares protected project parents and writable shared leaves, keeping data private", async () => {
+    const paths = await prepareAgentProject(config, "project", "A-1");
+    expect(paths.runDir).toBe(runDir);
+    expect(await mode(config.dataDir)).toBe(0o700);
+    expect(await mode(join(config.agentRoot, "runs", "project"))).toBe(0o2750);
+    expect(await mode(join(config.agentRoot, "worktrees", "project"))).toBe(
+      0o2750,
+    );
+    expect(await mode(runDir)).toBe(0o2770);
+    expect((await stat(runDir)).gid).toBe(config.gid);
+    expect(await prepareAgentProject(config, "project", "A-1")).toEqual(paths);
+    expect((await prepareAgentProject(config, "other", "A-1")).runDir).not.toBe(
+      runDir,
+    );
+  });
+  test("writes credentials 0660 and launch scripts 0770, including nested MCP configuration", async () => {
+    const files = [
+      {
+        path: join(runDir, "launch.sh"),
+        content: "#!/bin/sh\nexit 0\n",
+        mode: 0o700,
+      },
+      {
+        path: join(runDir, "secrets.env"),
+        content: "KEY='fixture-only'\n",
+        mode: 0o600,
+      },
+      {
+        path: join(runDir, "codex", "config.toml"),
+        content: 'bearer_token_env_var="MCP_TOKEN"',
+        mode: 0o600,
+      },
+    ];
+    await writeAgentLaunch(config, "project", "A-1", files, "fixture-token");
+    for (const name of ["secrets.env", "token", "codex/config.toml"]) {
+      expect(await mode(join(runDir, name))).toBe(0o660);
+      expect((await stat(join(runDir, name))).gid).toBe(config.gid);
+    }
+    expect(await mode(join(runDir, "launch.sh"))).toBe(0o770);
+    expect(await mode(join(runDir, "codex"))).toBe(0o2770);
+    expect(await readFile(join(runDir, "token"), "utf8")).toBe(
+      "fixture-token\n",
+    );
+    await scrubAgentLaunch(config, "project", "A-1");
+    await scrubAgentLaunch(config, "project", "A-1");
+    expect(await readdir(runDir)).toEqual(["codex", "launch.sh"]);
+  });
+  test("atomic replacement never follows a credential symlink or modifies a hardlink target", async () => {
+    await prepareAgentProject(config, "project", "A-1");
+    const outside = join(config.dataDir, "untouched");
+    await writeFile(outside, "host-private");
+    await symlink(outside, join(runDir, "token"));
+    await link(outside, join(runDir, "secrets.env"));
+    await writeAgentLaunch(
+      config,
+      "project",
+      "A-1",
+      [
+        {
+          path: join(runDir, "secrets.env"),
+          content: "replacement",
+          mode: 0o600,
+        },
+      ],
+      "new-token",
+    );
+    expect(await readFile(outside, "utf8")).toBe("host-private");
+    expect(await readFile(join(runDir, "secrets.env"), "utf8")).toBe(
+      "replacement",
+    );
+    expect(await readFile(join(runDir, "token"), "utf8")).toBe("new-token\n");
+  });
+  test("nested or namespace symlinks and out-of-directory files fail without changing private data", async () => {
+    await prepareAgentProject(config, "project", "A-1");
+    const protectedFile = join(config.dataDir, "config.toml");
+    await writeFile(protectedFile, "private");
+    await symlink(config.dataDir, join(runDir, "codex"), "dir");
+    await expect(
+      writeAgentLaunch(
+        config,
+        "project",
+        "A-1",
+        [
+          {
+            path: join(runDir, "codex", "config.toml"),
+            content: "attack",
+            mode: 0o600,
+          },
+        ],
+        "token",
+      ),
+    ).rejects.toThrow();
+    await expect(
+      writeAgentLaunch(
+        config,
+        "project",
+        "A-1",
+        [{ path: protectedFile, content: "attack", mode: 0o600 }],
+        "token",
+      ),
+    ).rejects.toThrow(/outside/);
+    expect(await readFile(protectedFile, "utf8")).toBe("private");
+    await rm(runDir, { recursive: true });
+    await writeFile(join(config.dataDir, "token"), "private-token");
+    await symlink(config.dataDir, runDir, "dir");
+    await expect(scrubAgentLaunch(config, "project", "A-1")).rejects.toThrow();
+    expect(await readFile(join(config.dataDir, "token"), "utf8")).toBe(
+      "private-token",
+    );
+    expect(await readFile(protectedFile, "utf8")).toBe("private");
+  });
+  test("unsafe data/parent permissions are refused instead of silently weakening isolation", async () => {
+    await chmod(config.dataDir, 0o750);
+    await expect(secureDataDirectory(config)).rejects.toThrow(/0700/);
+    await chmod(config.dataDir, 0o700);
+    await chmod(config.agentRoot, 0o2770);
+    await expect(
+      prepareAgentProject(config, "project", "A-1"),
+    ).rejects.toThrow();
+    await chmod(config.agentRoot, 0o2750);
+    await expect(
+      prepareAgentProject(config, "../project", "A-1"),
+    ).rejects.toThrow(/path component/);
+  });
+});

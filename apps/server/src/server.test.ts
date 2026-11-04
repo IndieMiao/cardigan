@@ -1,4 +1,12 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+} from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -30,6 +38,44 @@ test("local server startup visibly warns that the Agent account is not isolated"
   expect(warnings[0]).toContain("没有 Agent 账号隔离");
   expect(warnings[0]).toContain("agent-ssh");
 });
+
+test.skipIf(process.platform !== "linux")(
+  "agent server refuses unsafe data permissions before opening its database",
+  async () => {
+    const privateDir = join(dataDir, "private");
+    mkdirSync(privateDir, { mode: 0o750 });
+    chmodSync(privateDir, 0o750);
+    const config = {
+      dataDir: privateDir,
+      host: "127.0.0.1" as const,
+      port: 0,
+      execution: {
+        mode: "agent-ssh" as const,
+        dataDir: privateDir,
+        agentRoot: join(dataDir, "agent"),
+        gid: process.getgid?.() ?? 0,
+        machine: "cardigan-agent",
+        identityFile: join(dataDir, "key"),
+        knownHostsFile: join(dataDir, "known"),
+      },
+    };
+    await expect(startCardiganServer({ config })).rejects.toThrow(/0700/);
+    expect(readdirSync(privateDir)).toEqual([]);
+    chmodSync(privateDir, 0o700);
+    const isolatedWarnings: string[] = [];
+    const isolated = await startCardiganServer({
+      config,
+      warn: (m) => isolatedWarnings.push(m),
+    });
+    try {
+      expect(statSync(privateDir).mode & 0o777).toBe(0o700);
+      expect(isolatedWarnings).toEqual([]);
+      expect(isolated.store.listProjects()).toEqual([]);
+    } finally {
+      await isolated.close();
+    }
+  },
+);
 
 afterEach(async () => {
   await server.close();
