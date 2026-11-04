@@ -610,6 +610,7 @@ export function submitReview(
         kind: "choose",
         category: "general",
         question: `Review limit reached for ${item.id}`,
+        trigger: "review_limit",
         context: "A decision is required before another review round",
         options: [
           {

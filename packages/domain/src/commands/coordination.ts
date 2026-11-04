@@ -20,6 +20,8 @@ import {
   unwrap,
 } from "./core.js";
 
+import { queueResumedRun, resumeWork } from "./resumption.js";
+
 export function extractReferences(body: string): readonly Reference[] {
   const refs: Reference[] = [];
   for (const match of body.matchAll(
@@ -147,20 +149,6 @@ function endForDecision(
     });
   }
 }
-const pending = (decision: Decision) =>
-  decision.status === "open" || decision.status === "provisional";
-function stillBlocked(d: CommandDraft, id: WorkItemId) {
-  return (
-    d
-      .list("decisions")
-      .some(
-        (q) => q.blocking && pending(q) && q.affected_work_items.includes(id),
-      ) ||
-    d
-      .list("human_actions")
-      .some((h) => h.status === "open" && h.blocked_work_items.includes(id))
-  );
-}
 export function reportBlocker(
   state: CommandState,
   actor: Actor,
@@ -276,7 +264,14 @@ export function requestDecision(
         );
       }
     }
-    const items = [...new Set(p.affected_work_items)].map((id) => d.work(id));
+    const items = [
+      ...new Set([
+        ...p.affected_work_items,
+        ...(p.blocking && d.assignment?.scope === "work_item"
+          ? [d.ownWork(d.assignment.work_item_id).id]
+          : []),
+      ]),
+    ].map((id) => d.work(id));
     const cards = [
       ...new Set([
         ...(p.card_id ? [p.card_id] : []),
@@ -360,7 +355,15 @@ export function recordDecision(
     );
     const result: Decision = {
       ...decision,
-      status: unwrap(transition("decision", decision.status, "resolve")),
+      status: unwrap(
+        transition(
+          "decision",
+          decision.status,
+          decision.trigger === "review_limit" && p.option === "pause"
+            ? "provisionally_resolve"
+            : "resolve",
+        ),
+      ),
       resolution: {
         option: p.option,
         rationale: p.rationale,
@@ -376,10 +379,8 @@ export function recordDecision(
     const resumed: WorkItem[] = [];
     for (const id of decision.affected_work_items) {
       const item = d.work(id);
-      if (item.status === "waiting_decision" && !stillBlocked(d, id)) {
-        d.put("work_items", d.move(item, "decision_resolved"));
+      if (item.status === "waiting_decision" && resumeWork(d, item))
         resumed.push(item);
-      }
     }
     const cards = [
       ...new Set([
@@ -390,11 +391,14 @@ export function recordDecision(
     for (const card of cards.length ? cards : [undefined]) {
       const unblocked = resumed.filter((w) => w.card_id === card);
       const event = d.emit(
-        "decision_resolved",
+        result.status === "provisional"
+          ? "decision_provisionally_resolved"
+          : "decision_resolved",
         card,
         {
           decision_id: decision.id,
           option: p.option,
+          status: result.status,
           resume_work_items: unblocked.map((w) => w.id),
         },
         {
@@ -403,43 +407,7 @@ export function recordDecision(
           decision_id: decision.id,
         },
       );
-      for (const item of unblocked) {
-        if (!item.assignment_id) continue;
-        const assignment = d.get("assignments", item.assignment_id);
-        const runs = d
-          .list("runs")
-          .filter((r) => r.assignment_id === assignment.id);
-        if (
-          assignment.status !== "active" ||
-          runs.some(
-            (r) => !["completed", "failed", "cancelled"].includes(r.status),
-          )
-        )
-          continue;
-        const previous = runs
-          .filter((r) => r.outcome === "blocked")
-          .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
-        if (!previous) continue;
-        ensure(
-          previous.role_version === assignment.role_version &&
-            previous.model.trim() &&
-            previous.agent_cli_version.trim(),
-          "invariant_violation",
-          "Resume requires the previous role/model/CLI snapshot",
-        );
-        d.put("runs", {
-          id: d.ids.next(state.project_id, "run"),
-          assignment_id: assignment.id,
-          trigger_event_id: event.id,
-          kind: "decision_resumed",
-          status: "queued",
-          role_version: previous.role_version,
-          model: previous.model,
-          agent_cli_version: previous.agent_cli_version,
-          outcome: null,
-          summary: "",
-        });
-      }
+      for (const item of unblocked) queueResumedRun(d, item, event);
     }
     return result;
   });
@@ -520,20 +488,21 @@ export function completeHumanAction(
       result: { text: p.text, attachments: p.attachments ?? [], at: d.now },
     };
     d.put("human_actions", result);
+    const resumed: WorkItem[] = [];
     for (const id of action.blocked_work_items) {
       const item = d.work(id);
-      if (item.status === "blocked" && !stillBlocked(d, id))
-        d.put("work_items", d.move(item, "resume"));
+      if (resumeWork(d, item)) resumed.push(item);
     }
-    d.emit(
+    const event = d.emit(
       "human_action_completed",
       action.card_id,
       {
         human_action_id: action.id,
-        resume_work_items: action.blocked_work_items,
+        resume_work_items: resumed.map((item) => item.id),
       },
       { type: "human_action", body: p.text, human_action_id: action.id },
     );
+    for (const item of resumed) queueResumedRun(d, item, event);
     return result;
   });
 }

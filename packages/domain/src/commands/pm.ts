@@ -10,6 +10,7 @@ import {
   text,
   unwrap,
 } from "./core.js";
+import { canResume, queueResumedRun, resumeWork } from "./resumption.js";
 
 export type CreateCardParams = Pick<
   Card,
@@ -315,11 +316,18 @@ export function updateWorkItem(
   return command(state, actor, "update_work_item", ports, (d) => {
     d.pm();
     const item = d.work(p.work_item_id);
+    const resume = item.status === "blocked" && p.status === "in_progress";
     ensure(
-      p.status === undefined || p.status === item.status,
+      p.status === undefined || p.status === item.status || resume,
       "illegal_transition",
       "Work item progress must follow its workflow events",
     );
+    if (resume)
+      ensure(
+        canResume(d, item),
+        "illegal_transition",
+        "Work item still has unresolved blockers or an exhausted review limit",
+      );
     if (p.title !== undefined) text(p.title, "title");
     const card = d.card(item.card_id);
     ensure(
@@ -354,7 +362,7 @@ export function updateWorkItem(
         "Review limits may only be relaxed",
       );
     }
-    const result: WorkItem = {
+    let result: WorkItem = {
       ...item,
       ...(p.title !== undefined ? { title: p.title } : {}),
       ...(p.completion_criteria
@@ -366,11 +374,21 @@ export function updateWorkItem(
         : {}),
     };
     d.put("work_items", result);
+    const resumed =
+      resume ||
+      (item.status === "waiting_decision" &&
+        item.kind === "verify" &&
+        p.max_review_rounds !== undefined &&
+        p.max_review_rounds > item.max_review_rounds)
+        ? resumeWork(d, result)
+        : undefined;
+    if (resumed) result = resumed;
     const event = d.emit(
       "work_item_updated",
       item.card_id,
       {
         work_item_id: item.id,
+        resume_work_items: resumed ? [item.id] : [],
         ...(p.max_review_rounds !== undefined
           ? { max_review_rounds: p.max_review_rounds }
           : {}),
@@ -396,6 +414,7 @@ export function updateWorkItem(
           ],
         });
     }
+    if (resumed) queueResumedRun(d, item, event);
     return result;
   });
 }

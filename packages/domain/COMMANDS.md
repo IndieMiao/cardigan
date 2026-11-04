@@ -21,6 +21,7 @@
 - conditional 不算必需验证通过。已终结的交付不能继续改结论，需要新交付版本；每个 Run 只提交一次审核，请求重放由外层幂等处理。
 - 第二轮起沿用问题描述（去除首尾空白）作为复查匹配依据；新增非 pre_existing 问题必须 critical 且有 proof。此处不做语义相似度判定。
 - 达到上限且仍为 reject 或 conditional 时，在下一轮开始前生成阻塞 Decision、验证项进入 waiting_decision，当前审核 Run 以 blocked 结束；先发 review_submitted（rework_allowed=false），再发 decision_requested，不创建返工 Run。最后一轮 pass 正常通过；换新 Run 不能绕过上限。不存在用户可写的“自动通过”开关。
+- 上限 Decision 带控制面写入的 trigger=review_limit；普通 requestDecision 不接受该标记。Office 记录 pause 时用 provisional 保持阻塞，发 decision_provisionally_resolved，不恢复或排 Run；之后可在同一 Decision 上确认 raise_limit。raise_limit 不直接改上限：审核轮次仍用尽时继续等待，直到 Ops／人用 updateWorkItem 放宽且没有其他阻塞，才 ready 并排新 decision_resumed Run。先放宽后拍板同样可恢复。reject 后仍需新交付；conditional 可继续审核原交付。
 
 ## 验证与边界
 
@@ -30,26 +31,26 @@
 
 ## 其余工具
 
-| 工具                                         | 公开函数                                  | 主要约束                                                                                                               |
-| -------------------------------------------- | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| post_comment / report_blocker                | postComment / reportBlocker               | 服务端抽取引用；同作者、同卡才可 supersede；人工阻塞返回结构化请求指引                                                 |
-| request_decision / record_decision           | requestDecision / recordDecision          | 明确 decider/category；敏感分类只许 human；Office 记录原话、via_chain 和 batch 标识                                    |
-| request_human_action                         | requestHumanAction / completeHumanAction  | 阻塞目标工作项；completeHumanAction 是人操作的内部入口，不增加 MCP 工具                                                |
-| upload_attachment                            | prepareAttachment / uploadAttachment      | 适配器先算 sha256、经 AttachmentStore 准备内容，归约只收进程内凭据和元数据；artifact 必须有存在的 basis 和具体挂载目标 |
-| heartbeat / finish_run                       | heartbeat / finishRun                     | 仅本 Assignment 的 Run；保留版本快照；heartbeat 不进入时间线；结束 Run 不等于业务通过                                  |
-| create_card / update_card                    | createCard / updateCard                   | PM／人；开发卡强制验收标准，禁止手动置 done 或 review/in_progress                                                      |
-| create_work_item / update_work_item          | createWorkItem / updateWorkItem           | PM／人；保护模板必需项，状态不能通过元数据更新绕过流程；上限只能由 Ops／人放宽                                         |
-| assign                                       | assign                                    | 同一工作项保持唯一责任上下文；重复指派复用 Assignment／Session，不重发 Token；M1 仅 local                              |
-| whoami / get_card / get_updates / ack_events | whoami / getCard / getUpdates / ackEvents | 身份和卡片作用域来自 Actor；序号按独立事件流读取，ACK 只前进且不能越过已知事件                                         |
-| project_snapshot / list_needs_you            | projectSnapshot / listNeedsYou            | 项目级 PM／人；复用 M1.2/M1.2b 派生，列出待人决策和待人操作                                                            |
+| 工具                                | 公开函数                                 | 主要约束                                                                                                               |
+| ----------------------------------- | ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| post_comment / report_blocker       | postComment / reportBlocker              | 服务端抽取引用；同作者、同卡才可 supersede；人工阻塞返回结构化请求指引                                                 |
+| request_decision / record_decision  | requestDecision / recordDecision         | 明确 decider/category；敏感分类只许 human；Office 记录原话、via_chain 和 batch 标识                                    |
+| request_human_action                | requestHumanAction / completeHumanAction | 阻塞目标工作项；completeHumanAction 是人操作的内部入口，不增加 MCP 工具                                                |
+| upload_attachment                   | prepareAttachment / uploadAttachment     | 适配器先算 sha256、经 AttachmentStore 准备内容，归约只收进程内凭据和元数据；artifact 必须有存在的 basis 和具体挂载目标 |
+| heartbeat / finish_run              | heartbeat / finishRun                    | 仅本 Assignment 的 Run；保留版本快照；heartbeat 不进入时间线；结束 Run 不等于业务通过                                  |
+| create_card / update_card           | createCard / updateCard                  | PM／人；开发卡强制验收标准，禁止手动置 done 或 review/in_progress                                                      |
+| create_work_item / update_work_item | createWorkItem / updateWorkItem          | PM／人；保护模板必需项，仅允许受控 blocked → in_progress；上限只能由 Ops／人放宽                                       |
+| assign                              | assign                                   | 同一工作项保持唯一责任上下文；重复指派复用 Assignment／Session，不重发 Token；M1 仅 local                              |
+| project_snapshot / list_needs_you   | projectSnapshot / listNeedsYou           | 项目级 PM／人；复用 M1.2/M1.2b 派生，列出待人决策和待人操作                                                            |
 
 协作细节：
 
 - Office/Operations 共用 pm 角色：Office 是常驻 PM 且 Token 允许 record_decision；Ops 是不具备该工具许可的常驻 PM。工作项级 PM 验收 Assignment 不能代替 Office。实际 Token 授权仍由认证层核实。
+- reportBlocker 的普通阻塞由 PM／人用 updateWorkItem(status=in_progress) 确认解除，仅从 blocked 经 resume 迁移。关联此工作项的 open / provisional 阻塞 Decision、open HumanAction 或用尽的审核轮次都会阻止恢复；不能用此入口改写其他状态。已有 Run 保持运行，若之前以 blocked 结束且无其他未结束 Run，则排新的 queued / followup Run。
 - category 的准确性由上层受控输入/策略保证；已标记为敏感类别的请求只能选择 human，本实现不做自然语言意图分类。batch 是批次标识，多条决定以同一标识关联，未增加批量 RPC。
-- 阻塞拍板结束相关 running Run；解决最后一个阻塞原因后，已有执行历史的责任上下文生成新的 queued Run，复用 Assignment／Session 和最近 blocked Run 的版本快照。没有历史快照时只返回触发事件，后续调度负责初始配置；不启动 Harness、不按门铃。
-- 多个 Decision/HumanAction 同时阻塞同一工作项时，不因其中一项完成就提前恢复。对同一个已自动结束的 blocked Run 再 finish_run(blocked) 为无副作用确认。
+- 工作项级 Assignment 请求阻塞拍板时，自动将自身工作项去重并入 affected_work_items，再结束相关 running Run；解决最后一个阻塞原因且审核预算充足后，已有执行历史的责任上下文生成新的 queued Run，复用 Assignment／Session 和最近 blocked Run 的版本快照。没有历史快照时只返回触发事件，后续调度负责初始配置；不启动 Harness、不按门铃。
+- 多个 Decision/HumanAction 同时阻塞同一工作项时，不因其中一项完成就提前恢复；恢复事件的 resume_work_items（包括 completeHumanAction）只列实际恢复项。对同一个已自动结束的 blocked Run 再 finish_run(blocked) 为无副作用确认。
 - 评论识别 C-n、C-n#m、q(n)、h(n)、D-n 以及 GitHub 风格 pull / GitLab merge_requests 链接；跨卡引用不会授予跨卡修改权限。引用解析不发网络请求。
 - token_requests 只有签发所需元数据，token_id 包含项目和 Assignment，不含随机 Token 值。调用方须将签发和 Assignment 记录作为同一提交单元组装；现有 store 的独立签发 API 如何接入事务由后续组装处理，本 PR 不改 store。
 - 附件哈希验证、文件落盘、失败后的内容清理和传输大小上限由 M1.6 适配层负责。prepareAttachment 需在认证之后调用，上传元数据拒绝不会自动删除已准备的内容。
-- 查询必须给出一致且完整的项目快照。getUpdates 的未指定 card_id 对工作项 Assignment 默认为本卡，对常驻 PM 为项目级流，不混用不同卡片的 seq。中间卡片状态及 waiting_on/next_owners/why 复用已合并的派生函数。
+- whoami / get_card / get_updates / ack_events 由 M1.5 的 mcp-server 工具与测试单独维护，domain 删除对应重复实现。projectSnapshot / listNeedsYou 仍要求一致且完整的项目快照，卡片状态及 waiting_on/next_owners/why 复用已合并的派生函数。

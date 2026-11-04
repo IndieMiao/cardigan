@@ -310,6 +310,8 @@ interface DecisionFields {
   readonly key: DecisionId;
   readonly card_id?: CardId;
   readonly raised_by: Author;
+  /** Set by the control plane, never by request_decision parameters. */
+  readonly trigger?: "review_limit";
   readonly category?:
     | "general"
     | "spending"

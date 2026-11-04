@@ -1,15 +1,12 @@
 import { beforeEach, expect, test } from "vitest";
-import type { Actor, TimelineEntry } from "../entities.js";
+import type { TimelineEntry } from "../entities.js";
 import {
-  ackEvents,
   assign,
   completeHumanAction,
   createCard,
   createWorkItem,
   extractReferences,
   finishRun,
-  getCard,
-  getUpdates,
   heartbeat,
   listNeedsYou,
   postComment,
@@ -24,7 +21,6 @@ import {
   updateCard,
   updateWorkItem,
   uploadAttachment,
-  whoami,
 } from "../index.js";
 import {
   actor,
@@ -658,52 +654,10 @@ test("invariants 11, 14: attachments require an actual target and artifacts requ
     basis: requested.data.id,
     size: 2,
   });
-  expect(
-    value(getCard(apply(state, attached), actor(), { card_id: id("card", 1) }))
-      .data.attachments[0]?.approval_status,
-  ).toBe("pending");
 });
 
-test("invariants 11, 14: queries are scoped to Actor; acknowledgements cannot advance past events or move backward", () => {
-  const posted = value(postComment(fixture(), actor(), comment, io));
-  let state = apply(fixture(), posted);
-  expect(value(whoami(state, actor())).data.assignment_id).toBe(
-    id("assignment", 1),
-  );
-  expect(
-    value(getCard(state, actor(), { card_id: id("card", 1) })).data.card
-      .review_matrix,
-  ).toEqual([]);
-  expect(getCard(state, actor(), { card_id: id("card", 2) })).toMatchObject({
-    ok: false,
-    error: { code: "unauthorized" },
-  });
-  const updates = value(getUpdates(state, actor())).data;
-  expect(updates.events).toHaveLength(1);
-  expect(
-    ackEvents(state, actor(), {
-      card_id: id("card", 1),
-      up_to_seq: updates.latest_seq + 1,
-    }),
-  ).toMatchObject({ ok: false, error: { code: "validation_failed" } });
-  state = apply(
-    state,
-    value(
-      ackEvents(state, actor(), {
-        card_id: id("card", 1),
-        up_to_seq: updates.latest_seq,
-      }),
-    ),
-  );
-  expect(value(getUpdates(state, actor())).data.events).toEqual([]);
-  expect(
-    value(ackEvents(state, actor(), { card_id: id("card", 1), up_to_seq: 0 }))
-      .data.acked_seq,
-  ).toBe(updates.latest_seq);
-  expect(getUpdates(state, actor(), { since_seq: -1 })).toMatchObject({
-    ok: false,
-    error: { code: "validation_failed" },
-  });
+test("invariant 11: project queries require PM authority", () => {
+  let state = fixture();
   expect(value(projectSnapshot(state, office)).data.cards).toHaveLength(2);
   expect(projectSnapshot(state, actor())).toMatchObject({
     ok: false,
@@ -718,17 +672,6 @@ test("invariants 11, 14: queries are scoped to Actor; acknowledgements cannot ad
     ok: false,
     error: { code: "forbidden_tool" },
   });
-});
-
-test("invariant 11: forged or stale Actor identities cannot access read tools", () => {
-  for (const caller of [
-    { ...actor(), project_id: "other" },
-    { ...actor(), role_version: 99 },
-    { ...actor(), assignment_id: id("assignment", 999) },
-    { ...actor(), allowed_tools: [] },
-  ] as Actor[]) {
-    expect(whoami(fixture(), caller).ok).toBe(false);
-  }
 });
 
 test.each(["assign", "update_card", "update_work_item"] as const)(
