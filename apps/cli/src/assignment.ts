@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type {
   Actor,
@@ -21,6 +21,8 @@ import {
   firstPrompt,
   type LaunchConfig,
   resolveProfile,
+  SECRETS_FILE_NAME,
+  TOKEN_FILE_NAME,
 } from "@cardigan/roles";
 import { HerdrRuntime } from "@cardigan/runtime-herdr";
 import { getRoleVersion, Store, writeRole } from "@cardigan/store";
@@ -239,6 +241,17 @@ async function writeCompiledFiles(
   });
 }
 
+/**
+ * §4 step 9: no plaintext secret may survive a failed start. The token is
+ * revoked, but `secrets.env` holds provider credentials, so both files are
+ * removed from the run directory even if `launch.sh` never ran.
+ */
+async function scrubRunDirectory(runDir: string): Promise<void> {
+  for (const name of [TOKEN_FILE_NAME, SECRETS_FILE_NAME]) {
+    await rm(join(runDir, name), { force: true });
+  }
+}
+
 /** Run the M2 plan §4 flow; throws `CliError` when a step fails. */
 export async function startAssignment(
   options: StartOptions,
@@ -362,6 +375,7 @@ export async function startAssignment(
   try {
     await writeCompiledFiles(compiled, issued.token);
   } catch (error) {
+    await scrubRunDirectory(dirs.runDir);
     store.revokeToken(issued.record.id);
     abort(store, project_id, run.id, "run directory could not be written");
     throw error;
@@ -394,6 +408,8 @@ export async function startAssignment(
     launchDesc,
   );
   if (!provisioned.ok) {
+    // launch.sh never ran, so its token and secrets files are still on disk.
+    await scrubRunDirectory(dirs.runDir);
     store.revokeToken(issued.record.id);
     abort(
       store,
@@ -439,6 +455,8 @@ export async function startAssignment(
     // §4 step 9: release the terminal first, because abortDispatch clears the
     // assignment's runtime_ref.
     await options.runtime.release(ref, { force: true });
+    // The terminal may have been killed before launch.sh read them.
+    await scrubRunDirectory(dirs.runDir);
     store.revokeToken(issued.record.id);
     abort(store, project_id, run.id, "dispatch failed");
     throw error;
@@ -530,6 +548,17 @@ export async function stopAssignment(input: {
   );
   if (unfinished !== undefined) {
     abort(input.store, input.project_id, unfinished.id, "stopped by host");
+  }
+  // §9.1: the session is over, so its tokens die with it. A token that outlives
+  // a stopped terminal could still read and write the project.
+  const revoked = input.store.uow.run((tx) =>
+    tx
+      .tokensForAssignment(input.project_id, assignment.id)
+      .filter((token) => token.revoked_at === null)
+      .map((token) => tx.revokeToken(token.id)),
+  );
+  if (revoked.some((ok) => !ok)) {
+    throw new CliError("作废 Token 失败", EXIT.failure);
   }
   return { released: true, aborted: unfinished !== undefined };
 }
@@ -730,8 +759,7 @@ export async function startAssignmentCommand(
   return EXIT.ok;
 }
 
-/** Create the runtime and start one Assignment (used by `assign --start`). */
-export async function startAssignmentById(options: {
+export interface StartByIdOptions {
   readonly store: Store;
   readonly io: CliIo;
   readonly project_id: ProjectId;
@@ -739,7 +767,13 @@ export async function startAssignmentById(options: {
   readonly dataDir?: string;
   readonly mcpUrl?: string;
   readonly session?: string;
-}): Promise<number> {
+}
+export type StartById = (options: StartByIdOptions) => Promise<number>;
+
+/** Create the runtime and start one Assignment (used by `assign --start`). */
+export async function startAssignmentById(
+  options: StartByIdOptions,
+): Promise<number> {
   const created = await HerdrRuntime.create({
     session:
       options.session ?? options.io.env.CARDIGAN_HC_SESSION ?? "cardigan",

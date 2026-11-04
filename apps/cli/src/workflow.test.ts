@@ -392,3 +392,53 @@ test("assign rejects a role that does not match the work item", async () => {
   expect(await run(["assign", "W-1", "--role", "reviewer"])).toBe(2);
   expect(errors.join("\n")).toContain("role");
 });
+
+test("assign --start hands off without printing a token", async () => {
+  await bootstrap();
+  await run([
+    "card",
+    "create",
+    "--template",
+    "dev",
+    "--title",
+    "T",
+    "--goal",
+    "G",
+    "--acceptance",
+    "A",
+    "--repo",
+    "r/x",
+  ]);
+
+  const calls: Array<{ assignment_id: string; project_id: string }> = [];
+  const code = await main(["assign", "W-1", "--role", "coder", "--start"], io, {
+    start: async (options) => {
+      calls.push({
+        assignment_id: options.assignment_id,
+        project_id: options.project_id,
+      });
+      options.io.stdout(`已启动 ${options.assignment_id}`);
+      return 0;
+    },
+  });
+
+  expect(code).toBe(0);
+  expect(calls).toEqual([{ assignment_id: "A-1", project_id: "p-work" }]);
+  // One command from a card to a running Agent: the token lives in the run
+  // directory only, so nothing token-shaped is printed here.
+  expect(printed()).toContain("已启动 A-1");
+  expect(printed()).not.toContain("token_id");
+  expect(printed()).not.toContain("Token");
+
+  // No token was issued outside the run directory either.
+  const store = Store.open({ dataDir });
+  try {
+    expect(
+      store.uow.run((tx) =>
+        tx.tokensForAssignment("p-work" as never, "A-1" as never),
+      ),
+    ).toHaveLength(0);
+  } finally {
+    store.close();
+  }
+});

@@ -5,7 +5,7 @@ import { runAssignmentCommand } from "./assignment.js";
 import { CliError, EXIT } from "./errors.js";
 import type { CliIo } from "./io.js";
 import { runLaunchCommand } from "./launch.js";
-import { runWorkflowCommand } from "./workflow.js";
+import { type CliHooks, runWorkflowCommand } from "./workflow.js";
 
 export { parseAdminArgs, runAdminCommand } from "./admin.js";
 export {
@@ -34,7 +34,7 @@ export type {
 } from "./io.js";
 export { parseLaunchArgs, runLaunchCommand } from "./launch.js";
 export { type LaunchPaths, resolveLaunchPaths } from "./paths.js";
-export { runWorkflowCommand } from "./workflow.js";
+export { type CliHooks, runWorkflowCommand } from "./workflow.js";
 
 const TOP_LEVEL_USAGE = [
   "cardigan — 卡片式多 Agent 协作开发系统",
@@ -117,6 +117,7 @@ export function createProcessIo(): CliIo {
 export async function main(
   argv: readonly string[],
   io: CliIo = createProcessIo(),
+  hooks: CliHooks = {},
 ): Promise<number> {
   const [command, ...rest] = argv;
 
@@ -141,7 +142,7 @@ export async function main(
       command === "pm" ||
       command === "human-action"
     ) {
-      return await runWorkflowCommand([command, ...rest], io);
+      return await runWorkflowCommand([command, ...rest], io, hooks);
     }
     io.stderr(`不认识的命令：${command}\n\n${TOP_LEVEL_USAGE}`);
     return EXIT.usage;

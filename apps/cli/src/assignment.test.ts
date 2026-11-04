@@ -1,4 +1,10 @@
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -88,7 +94,13 @@ const refFor = (agentName: string): RuntimeRef =>
   }) as never;
 
 const launchConfig = parseLaunchConfig({
-  providers: { pi: { harness: "pi", env: {}, secret_env: {} } },
+  providers: {
+    pi: {
+      harness: "pi",
+      env: {},
+      secret_env: { PROVIDER_API_KEY: "provider" },
+    },
+  },
   profiles: {
     "pi-agent": { harness: "pi", provider: "pi", model: "fictional-model" },
   },
@@ -248,7 +260,10 @@ describe("startAssignment", () => {
       io,
       project_id,
       assignment_id: assignment.id,
-      launch: { config: launchConfig, secrets: {} },
+      launch: {
+        config: launchConfig,
+        secrets: { provider: "sk-fictional-secret" },
+      },
       mcpUrl: "http://127.0.0.1:3004/mcp",
       runtime,
       dataDir,
@@ -287,7 +302,10 @@ describe("startAssignment", () => {
       io,
       project_id,
       assignment_id: assignment.id,
-      launch: { config: launchConfig, secrets: {} },
+      launch: {
+        config: launchConfig,
+        secrets: { provider: "sk-fictional-secret" },
+      },
       mcpUrl: "http://127.0.0.1:3004/mcp",
       runtime: new FakeRuntime(),
       dataDir,
@@ -329,7 +347,10 @@ describe("startAssignment", () => {
       io,
       project_id,
       assignment_id: assignment.id,
-      launch: { config: launchConfig, secrets: {} },
+      launch: {
+        config: launchConfig,
+        secrets: { provider: "sk-fictional-secret" },
+      },
       mcpUrl: "http://127.0.0.1:3004/mcp",
       runtime,
       dataDir,
@@ -359,7 +380,10 @@ describe("startAssignment", () => {
         io,
         project_id,
         assignment_id: assignment.id,
-        launch: { config: launchConfig, secrets: {} },
+        launch: {
+          config: launchConfig,
+          secrets: { provider: "sk-fictional-secret" },
+        },
         mcpUrl: "http://127.0.0.1:3004/mcp",
         runtime: new FakeRuntime(),
         dataDir,
@@ -385,7 +409,10 @@ describe("startAssignment", () => {
         io,
         project_id,
         assignment_id: assignment.id,
-        launch: { config: launchConfig, secrets: {} },
+        launch: {
+          config: launchConfig,
+          secrets: { provider: "sk-fictional-secret" },
+        },
         mcpUrl: "http://127.0.0.1:3004/mcp",
         runtime,
         dataDir,
@@ -398,6 +425,10 @@ describe("startAssignment", () => {
       tx.tokensForAssignment(project_id, assignment.id),
     );
     expect(tokens.every((token) => token.revoked_at !== null)).toBe(true);
+    // launch.sh never ran: no plaintext token or provider key may survive.
+    const runDir = join(dataDir, "runs", "p-one", assignment.id);
+    expect(existsSync(join(runDir, "token"))).toBe(false);
+    expect(existsSync(join(runDir, "secrets.env"))).toBe(false);
   });
 
   test("a dispatch failure releases the terminal and cancels the Run", async () => {
@@ -411,7 +442,10 @@ describe("startAssignment", () => {
         io,
         project_id,
         assignment_id: assignment.id,
-        launch: { config: launchConfig, secrets: {} },
+        launch: {
+          config: launchConfig,
+          secrets: { provider: "sk-fictional-secret" },
+        },
         mcpUrl: "http://127.0.0.1:3004/mcp",
         runtime,
         dataDir,
@@ -421,6 +455,9 @@ describe("startAssignment", () => {
     expect(runtime.released).toHaveLength(1);
     const runs = store.uow.read((tx) => tx.runs.list(project_id));
     expect(runs.map((run) => run.status)).toEqual(["cancelled"]);
+    const runDir = join(dataDir, "runs", "p-one", assignment.id);
+    expect(existsSync(join(runDir, "token"))).toBe(false);
+    expect(existsSync(join(runDir, "secrets.env"))).toBe(false);
   });
 
   test("starting twice is refused while the first Run is unfinished", async () => {
@@ -431,7 +468,10 @@ describe("startAssignment", () => {
       io,
       project_id,
       assignment_id: assignment.id,
-      launch: { config: launchConfig, secrets: {} },
+      launch: {
+        config: launchConfig,
+        secrets: { provider: "sk-fictional-secret" },
+      },
       mcpUrl: "http://127.0.0.1:3004/mcp",
       runtime,
       dataDir,
@@ -452,11 +492,21 @@ describe("stopAssignment and attachAssignment", () => {
       io,
       project_id,
       assignment_id: assignment.id,
-      launch: { config: launchConfig, secrets: {} },
+      launch: {
+        config: launchConfig,
+        secrets: { provider: "sk-fictional-secret" },
+      },
       mcpUrl: "http://127.0.0.1:3004/mcp",
       runtime,
       dataDir,
     });
+
+    // Read the issued token while the session is still live.
+    const token = readFileSync(
+      join(dataDir, "runs", "p-one", assignment.id, "token"),
+      "utf8",
+    ).trim();
+    expect(store.verifyToken(token)?.assignment_id).toBe(assignment.id);
 
     const stopped = await stopAssignment({
       store,
@@ -476,6 +526,15 @@ describe("stopAssignment and attachAssignment", () => {
     expect(
       statSync(join(dataDir, "runs", "p-one", assignment.id)).isDirectory(),
     ).toBe(true);
+
+    // §9.1: a stopped session must not leave a working token behind.
+    const tokens = store.uow.run((tx) =>
+      tx.tokensForAssignment(project_id, assignment.id),
+    );
+    expect(tokens.every((candidate) => candidate.revoked_at !== null)).toBe(
+      true,
+    );
+    expect(store.verifyToken(token)).toBeUndefined();
   });
 
   test("attach returns the human entry, and stop refuses without a terminal", async () => {
@@ -486,7 +545,10 @@ describe("stopAssignment and attachAssignment", () => {
       io,
       project_id,
       assignment_id: assignment.id,
-      launch: { config: launchConfig, secrets: {} },
+      launch: {
+        config: launchConfig,
+        secrets: { provider: "sk-fictional-secret" },
+      },
       mcpUrl: "http://127.0.0.1:3004/mcp",
       runtime,
       dataDir,

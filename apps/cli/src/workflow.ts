@@ -6,7 +6,7 @@ import {
   parseId,
 } from "@cardigan/domain";
 import { openStore as openCardiganStore, type Store } from "@cardigan/store";
-import { startAssignmentById } from "./assignment.js";
+import { type StartById, startAssignmentById } from "./assignment.js";
 import { CliError, EXIT } from "./errors.js";
 import {
   humanActor,
@@ -123,16 +123,22 @@ function parseHumanAction(raw: string | undefined): HumanActionId {
 }
 
 /** Entry point for `card`, `assign`, `token`, `pm` and `human-action`. */
+/** Injected by tests; production uses `startAssignmentById`. */
+export interface CliHooks {
+  readonly start?: StartById;
+}
+
 export async function runWorkflowCommand(
   args: readonly string[],
   io: CliIo,
+  hooks: CliHooks = {},
 ): Promise<number> {
   const [command, ...rest] = args;
   switch (command) {
     case "card":
       return cardCreate(rest, io);
     case "assign":
-      return await assignWorkItem(rest, io);
+      return await assignWorkItem(rest, io, hooks);
     case "token":
       return tokenIssue(rest, io);
     case "pm":
@@ -208,6 +214,7 @@ function cardCreate(args: readonly string[], io: CliIo): number {
 async function assignWorkItem(
   args: readonly string[],
   io: CliIo,
+  hooks: CliHooks,
 ): Promise<number> {
   // `--start` takes no value: assign and start the Assignment in one step.
   const start = args.includes("--start");
@@ -241,7 +248,10 @@ async function assignWorkItem(
           },
           ports,
         ),
+      // `--start` issues the only token inside `startAssignment`, into the run
+      // directory; issuing one here would print a token that is revoked at once.
       after: (tx, created) => {
+        if (start) return;
         issued = issueTokenForAssignment(
           tx,
           project_id,
@@ -261,28 +271,30 @@ async function assignWorkItem(
         `已指派 ${workItemId} → ${assignment.id}（${assignment.role_id} v${assignment.role_version}）`,
       ].join("\n"),
     );
+    if (start) {
+      // One command from card to a running Agent (M2.6). No token is printed:
+      // it lives in the run directory and is deleted by launch.sh.
+      return await (hooks.start ?? startAssignmentById)({
+        store,
+        io,
+        project_id,
+        assignment_id: assignment.id,
+        ...(optional(parsed.flags, "data-dir") === undefined
+          ? {}
+          : { dataDir: optional(parsed.flags, "data-dir") as string }),
+        ...(optional(parsed.flags, "mcp-url") === undefined
+          ? {}
+          : { mcpUrl: optional(parsed.flags, "mcp-url") as string }),
+        ...(optional(parsed.flags, "hc-session") === undefined
+          ? {}
+          : { session: optional(parsed.flags, "hc-session") as string }),
+      });
+    }
     if (issued === undefined) {
       throw new CliError("签发 Token 失败", EXIT.failure);
     }
     printToken(io, issued);
-    if (!start) return EXIT.ok;
-    // One command from card to a running Agent (M2.6); the printed token is
-    // revoked by `startAssignment` and replaced by the one in the run directory.
-    return await startAssignmentById({
-      store,
-      io,
-      project_id,
-      assignment_id: assignment.id,
-      ...(optional(parsed.flags, "data-dir") === undefined
-        ? {}
-        : { dataDir: optional(parsed.flags, "data-dir") as string }),
-      ...(optional(parsed.flags, "mcp-url") === undefined
-        ? {}
-        : { mcpUrl: optional(parsed.flags, "mcp-url") as string }),
-      ...(optional(parsed.flags, "hc-session") === undefined
-        ? {}
-        : { session: optional(parsed.flags, "hc-session") as string }),
-    });
+    return EXIT.ok;
   } finally {
     store.close();
   }
