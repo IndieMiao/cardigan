@@ -62,6 +62,9 @@ importers:
       '@cardigan/mcp-server':
         specifier: workspace:*
         version: link:../../packages/mcp-server
+      '@cardigan/roles':
+        specifier: workspace:*
+        version: link:../../packages/roles
       '@cardigan/router':
         specifier: workspace:*
         version: link:../../packages/router

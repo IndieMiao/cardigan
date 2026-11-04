@@ -17,7 +17,8 @@
     "@cardigan/mcp-server": "workspace:*",
     "@cardigan/store": "workspace:*",
     "@cardigan/domain": "workspace:*",
-    "@cardigan/router": "workspace:*"
+    "@cardigan/router": "workspace:*",
+    "@cardigan/roles": "workspace:*"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "1.32.2",
