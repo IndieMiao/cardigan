@@ -3,12 +3,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   type Actor,
+  type Assignment,
+  acknowledgeRun,
   assign,
   type CommandEffect,
   type CommandPorts,
   type CommandState,
   createCard,
+  dispatchRun,
+  finishRun,
+  queueRun,
   type Result,
+  type Run,
+  type RuntimeRef,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import { Store, writeRole } from "@cardigan/store";
@@ -91,8 +98,65 @@ export function dispatchFixture() {
     );
     return { card, item, assignment };
   }
+  const actorFor = (a: Assignment): Actor => {
+    const role = store.uow.read((tx) =>
+      tx.roles.get(project, {
+        role_id: a.role_id,
+        role_version: a.role_version,
+      }),
+    );
+    if (!role) throw new Error("Missing actor role");
+    return {
+      ...role,
+      kind: "assignment",
+      project_id: project,
+      assignment_id: a.id,
+    };
+  };
+  const refFor = (a: Assignment): RuntimeRef => ({
+    machine_id: "local",
+    runtime_machine: "local",
+    terminal_ref: `t${a.id.slice(2)}`,
+    agent_name: `coder-${a.id.toLowerCase()}`,
+  });
+  function session(a: Assignment, complete = true): Run {
+    const run = apply((s, actor, p) =>
+      queueRun(
+        s,
+        actor,
+        {
+          assignment_id: a.id,
+          model: "session-model",
+          agent_cli_version: "session-cli",
+        },
+        p,
+      ),
+    );
+    apply((s, actor, p) =>
+      dispatchRun(s, actor, { run_id: run.id, runtime_ref: refFor(a) }, p),
+    );
+    apply(
+      (s, actor, p) => acknowledgeRun(s, actor, { run_id: run.id }, p),
+      actorFor(a),
+    );
+    if (complete)
+      apply(
+        (s, actor, p) =>
+          finishRun(
+            s,
+            actor,
+            { run_id: run.id, outcome: "completed", summary: "fixture" },
+            p,
+          ),
+        actorFor(a),
+      );
+    return run;
+  }
   return {
     store,
+    session,
+    refFor,
+    actorFor,
     project,
     dataDir,
     clock,

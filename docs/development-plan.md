@@ -645,6 +645,8 @@ M3.4 按每条流自身的 seq 分页；每条流分别在事务内读取当前�
 | 已交付、尚未清理 | 复用原 Session 和 worktree，创建返工 Run |
 | 卡片已关闭、worktree 已清理 | 创建后续工作项和新 Assignment，并引用历史 |
 
+M3.4 的 Runtime 接线只根据未结束的业务 Run 判断忙碌，不用 Harness 的 working/idle 画面状态。已有会话沿用最近已启动 Run 的模型和 CLI 版本快照；新终端通过主机启动回调接收同一个 queued Run 和首条门铃，由回调完成凭据、provision 与 dispatch，不能再建一个 Run。投递结果与通知在事务中结算；真实 ACK 优先于迟到失败，租期过期的不确定意图保留原 Run 并升级 PM Ops。
+
 ### 6.7 合并与串行
 
 - 同一卡片的事件串行处理，不同卡片可以并行。
