@@ -1,7 +1,7 @@
-import { mkdtemp, readdir, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
   newInstanceId,
   parseSettingsFileOwner,
@@ -13,6 +13,10 @@ let dir: string;
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "cardigan-runtime-files-"));
+});
+
+afterEach(async () => {
+  await rm(dir, { recursive: true, force: true });
 });
 
 const name = (pid: number, rand: string, profile = "claude-of"): string =>

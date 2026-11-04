@@ -101,6 +101,7 @@ test("enables WAL and enforces foreign keys", () => {
 test("a failing migration leaves nothing behind and is not recorded", () => {
   const dataDir = tempDir("cardigan-migrate-");
   const migrationsDir = tempDir("cardigan-migrations-");
+  const emptyMigrationsDir = tempDir("cardigan-empty-migrations-");
   writeFileSync(
     join(migrationsDir, "0001_broken.sql"),
     "CREATE TABLE half_done (id TEXT);\nSELECT * FROM table_that_does_not_exist;\n",
@@ -113,7 +114,7 @@ test("a failing migration leaves nothing behind and is not recorded", () => {
     // Reopen the same file: the half-applied migration left no trace.
     const store = Store.open({
       dataDir,
-      migrationsDir: tempDir("cardigan-empty-migrations-"),
+      migrationsDir: emptyMigrationsDir,
     });
     try {
       const tables = store.database
@@ -129,6 +130,7 @@ test("a failing migration leaves nothing behind and is not recorded", () => {
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
     rmSync(migrationsDir, { recursive: true, force: true });
+    rmSync(emptyMigrationsDir, { recursive: true, force: true });
   }
 });
 
