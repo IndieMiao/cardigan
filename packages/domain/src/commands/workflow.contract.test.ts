@@ -1,0 +1,569 @@
+import { beforeEach, expect, test } from "vitest";
+import {
+  type Actor,
+  assign,
+  type CommandState,
+  createCard,
+  createWorkItem,
+  type Delivery,
+  finishRun,
+  prepareDelivery,
+  recordDecision,
+  reportBlocker,
+  requestDecision,
+  requestHumanAction,
+  submitDelivery,
+  submitReview,
+  transition,
+  updateWorkItem,
+  type WorkItem,
+  type WorkItemId,
+} from "../index.js";
+import {
+  actor,
+  apply,
+  fixture,
+  human,
+  ports,
+  run,
+  subject,
+  value,
+} from "./test-fixtures.js";
+
+function present<T>(value: T | undefined): T {
+  if (value === undefined) throw new Error("Missing workflow fixture entity");
+  return value;
+}
+let io = ports();
+beforeEach(() => {
+  io = ports();
+});
+const office = actor(4, "pm");
+const issue = {
+  severity: "major" as const,
+  description: "Bug",
+  must_fix: true,
+  pre_existing: false,
+};
+function setup(limit?: number) {
+  const seed = fixture();
+  let state: CommandState = {
+    ...seed,
+    cards: [],
+    work_items: [],
+    runs: [],
+    assignments: seed.assignments.filter((a) => a.scope === "standing"),
+  };
+  const created = value(
+    createCard(
+      state,
+      office,
+      {
+        title: "Real workflow",
+        goal: "Ship",
+        acceptance_criteria: ["Pass"],
+        source: { kind: "quote", text: "Build" },
+        repo: "example/repo",
+        base_branch: "main",
+      },
+      io,
+    ),
+  );
+  state = apply(state, created);
+  let producer: WorkItem = present(
+    state.work_items.find((w) => w.kind === "produce"),
+  );
+  let verifier = present(
+    state.work_items.find((w) => w.template_key === "code_review"),
+  );
+  const other = present(
+    state.work_items.find((w) => w.template_key === "pm_acceptance"),
+  );
+  if (limit !== undefined) {
+    const extra = value(
+      createWorkItem(
+        state,
+        office,
+        {
+          card_id: created.data.id,
+          title: "Extra product",
+          kind: "produce",
+          role_id: "coder",
+          required: false,
+          completion_criteria: ["Pass"],
+        },
+        io,
+      ),
+    );
+    state = apply(state, extra);
+    producer = extra.data;
+    const check = value(
+      createWorkItem(
+        state,
+        office,
+        {
+          card_id: created.data.id,
+          title: "Limited review",
+          kind: "verify",
+          role_id: "reviewer",
+          required: true,
+          completion_criteria: ["Pass"],
+          target_work_item_id: producer.id,
+          max_review_rounds: limit,
+        },
+        io,
+      ),
+    );
+    state = apply(state, check);
+    verifier = check.data;
+  }
+  const callers: Actor[] = [];
+  for (const item of [producer, verifier]) {
+    const assigned = value(
+      assign(
+        state,
+        office,
+        { work_item_id: item.id, role_id: item.role_id },
+        io,
+      ),
+    );
+    state = apply(state, assigned);
+    const caller = actor(1, item.role_id);
+    if (caller.kind !== "assignment")
+      throw new Error("Expected an assignment actor");
+    callers.push({ ...caller, assignment_id: assigned.data.id });
+    // The outer dispatcher starts a Run; it does not mutate the WorkItem.
+    state = {
+      ...state,
+      runs: [
+        ...state.runs,
+        {
+          ...run(1),
+          id: io.ids.next(state.project_id, "run"),
+          assignment_id: assigned.data.id,
+        },
+      ],
+    };
+  }
+  return {
+    state,
+    card: created.data.id,
+    producer: producer.id,
+    verifier: verifier.id,
+    other: other.id,
+    coder: present(callers[0]),
+    reviewer: present(callers[1]),
+  };
+}
+type Context = ReturnType<typeof setup>;
+const item = (state: CommandState, id: WorkItemId) =>
+  present(state.work_items.find((w) => w.id === id));
+const decisionParams = (ctx: Context) => ({
+  card_id: ctx.card,
+  category: "general" as const,
+  kind: "choose" as const,
+  question: "Choose",
+  context: "Need an answer",
+  options: [{ key: "go", description: "Continue", impact: "Unblocks" }],
+  recommended: "go",
+  affected_cards: [],
+  affected_work_items: [],
+  blocking: true,
+  decider: "human" as const,
+});
+const actionParams = (ctx: Context, id: WorkItemId) => ({
+  card_id: ctx.card,
+  instructions: "Connect device",
+  why_human: "Physical access",
+  expected_return: "Connected",
+  blocked_work_items: [id],
+});
+const actions = ["blocker", "decision", "human_action"] as const;
+function pause(
+  ctx: Context,
+  state: CommandState,
+  action: (typeof actions)[number],
+  caller = ctx.coder,
+  id = ctx.producer,
+) {
+  if (action === "blocker")
+    return reportBlocker(
+      state,
+      caller,
+      { work_item_id: id, needs: "role", reason: "Need help" },
+      io,
+    );
+  if (action === "decision")
+    return requestDecision(state, caller, decisionParams(ctx), io);
+  return requestHumanAction(state, caller, actionParams(ctx, id), io);
+}
+async function deliver(ctx: Context, state: CommandState, sha = subject.value) {
+  const params = {
+    work_item_id: ctx.producer,
+    kind: "code" as const,
+    summary: "Ready",
+    subject: { ...subject, value: sha },
+    requested_verifiers: [ctx.verifier],
+  };
+  const receipt = value(
+    await prepareDelivery(state, ctx.coder, params, {
+      verify: async () => ({ ok: true, value: [] }),
+    }),
+  );
+  return value(submitDelivery(state, ctx.coder, params, receipt, io));
+}
+function review(
+  ctx: Context,
+  state: CommandState,
+  delivery: Delivery,
+  reject = false,
+) {
+  return value(
+    submitReview(
+      state,
+      ctx.reviewer,
+      {
+        delivery_id: delivery.id,
+        target_sha: delivery.subject.value,
+        kind: "code",
+        issues: reject ? [issue] : [],
+      },
+      io,
+    ),
+  );
+}
+
+test.each(actions)(
+  "invariants 10, 11: createCard todo work can enter %s in its first Run",
+  (action) => {
+    const ctx = setup();
+    expect(ctx.state.work_items.every((w) => w.status === "todo")).toBe(true);
+    const result = pause(ctx, ctx.state, action);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error.message);
+    const after = apply(ctx.state, result.value);
+    expect(item(after, ctx.producer).status).toBe(
+      action === "decision" ? "waiting_decision" : "blocked",
+    );
+    expect(item(ctx.state, ctx.producer).status).toBe("todo");
+    expect(item(after, ctx.verifier).status).toBe("todo");
+  },
+);
+
+test.each(actions)(
+  "invariants 10, 11: ready and real rejected produce work can enter %s",
+  async (action) => {
+    const ctx = setup();
+    const ready: CommandState = {
+      ...ctx.state,
+      work_items: ctx.state.work_items.map((w) =>
+        w.id === ctx.producer
+          ? ({
+              ...w,
+              status: value(transition("produce", "todo", "dependencies_met")),
+            } as typeof w)
+          : w,
+      ),
+    };
+    expect(pause(ctx, ready, action).ok).toBe(true);
+    const product = await deliver(ctx, ctx.state);
+    let state = apply(ctx.state, product);
+    state = apply(state, review(ctx, state, product.data, true));
+    expect(item(state, ctx.producer).status).toBe("changes_requested");
+    expect(pause(ctx, state, action).ok).toBe(true);
+  },
+);
+
+test.each(actions)(
+  "invariant 11: a verifier made ready by delivery can enter %s",
+  async (action) => {
+    const ctx = setup();
+    const product = await deliver(ctx, ctx.state);
+    const state = apply(ctx.state, product);
+    expect(item(state, ctx.verifier).status).toBe("ready");
+    const result = pause(ctx, state, action, ctx.reviewer, ctx.verifier);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error.message);
+    expect(item(apply(state, result.value), ctx.verifier).status).toBe(
+      action === "decision" ? "waiting_decision" : "blocked",
+    );
+  },
+);
+
+test("invariant 11: activation checks dependencies and requires the caller's running Run", async () => {
+  const ctx = setup();
+  const dependency = {
+    ...ctx.state,
+    work_items: ctx.state.work_items.map((w) =>
+      w.id === ctx.producer ? { ...w, depends_on: [ctx.other] } : w,
+    ),
+  };
+  for (const action of actions)
+    expect(pause(ctx, dependency, action)).toMatchObject({
+      ok: false,
+      error: {
+        code: "invariant_violation",
+        message: expect.stringContaining(ctx.producer),
+      },
+    });
+  const params = {
+    work_item_id: ctx.producer,
+    kind: "code" as const,
+    summary: "Ready",
+    subject,
+    requested_verifiers: [ctx.verifier],
+  };
+  const receipt = value(
+    await prepareDelivery(dependency, ctx.coder, params, {
+      verify: async () => ({ ok: true, value: [] }),
+    }),
+  );
+  expect(
+    submitDelivery(dependency, ctx.coder, params, receipt, io),
+  ).toMatchObject({ ok: false, error: { code: "invariant_violation" } });
+  for (const action of actions)
+    expect(pause(ctx, { ...ctx.state, runs: [] }, action)).toMatchObject({
+      ok: false,
+      error: { code: "illegal_transition" },
+    });
+});
+
+test.each(["delivered", "accepted"] as const)(
+  "invariants 8, 10, 11: %s producers are not implicitly paused and explicit pauses explain why",
+  async (status) => {
+    const ctx = setup();
+    const product = await deliver(ctx, ctx.state);
+    let state = apply(ctx.state, product);
+    if (status === "accepted")
+      state = apply(state, review(ctx, state, product.data));
+    const requested = value(
+      requestDecision(state, ctx.coder, decisionParams(ctx), io),
+    );
+    expect(requested.data.affected_work_items).toEqual([]);
+    expect(apply(state, requested).runs).toEqual(state.runs);
+    expect(item(apply(state, requested), ctx.producer).status).toBe(status);
+    const results = [
+      pause(ctx, state, "blocker"),
+      pause(ctx, state, "human_action"),
+      requestDecision(
+        state,
+        ctx.coder,
+        { ...decisionParams(ctx), affected_work_items: [ctx.producer] },
+        io,
+      ),
+    ];
+    for (const result of results)
+      expect(result).toMatchObject({
+        ok: false,
+        error: {
+          code: "illegal_transition",
+          message: expect.stringContaining(
+            `${ctx.producer} (produce:${status})`,
+          ),
+        },
+      });
+  },
+);
+
+test.each(["decision", "human_action"] as const)(
+  "invariant 11: %s identifies a non-caller item that cannot pause and returns no partial changes",
+  (action) => {
+    const ctx = setup();
+    const before = JSON.stringify(ctx.state);
+    const result =
+      action === "decision"
+        ? requestDecision(
+            ctx.state,
+            ctx.coder,
+            {
+              ...decisionParams(ctx),
+              affected_work_items: [ctx.producer, ctx.verifier],
+            },
+            io,
+          )
+        : requestHumanAction(
+            ctx.state,
+            ctx.coder,
+            {
+              ...actionParams(ctx, ctx.producer),
+              blocked_work_items: [ctx.producer, ctx.verifier],
+            },
+            io,
+          );
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        code: "illegal_transition",
+        message: expect.stringContaining(`${ctx.verifier} (verify:todo)`),
+      },
+    });
+    expect(result).not.toHaveProperty("value");
+    expect(JSON.stringify(ctx.state)).toBe(before);
+  },
+);
+
+test.each([false, true])(
+  "invariants 10, 11, 12, 14: redelivery after a final pass requests a limit decision (review Run finished=%s) and can recover",
+  async (finished) => {
+    const ctx = setup(1);
+    const first = await deliver(ctx, ctx.state);
+    let state = apply(ctx.state, first);
+    state = apply(state, review(ctx, state, first.data));
+    expect(item(state, ctx.verifier).status).toBe("passed");
+    expect(state.decisions).toHaveLength(0);
+    const reviewRun = present(
+      state.runs.find(
+        (r) => r.assignment_id === item(state, ctx.verifier).assignment_id,
+      ),
+    );
+    if (finished)
+      state = apply(
+        state,
+        value(
+          finishRun(
+            state,
+            ctx.reviewer,
+            { run_id: reviewRun.id, outcome: "completed", summary: "Passed" },
+            io,
+          ),
+        ),
+      );
+    const second = await deliver(ctx, state, "b".repeat(40));
+    state = apply(state, second);
+    expect(second.events.map((e) => e.type)).toEqual([
+      "delivery_submitted",
+      "decision_requested",
+    ]);
+    expect(item(state, ctx.verifier).status).toBe("waiting_decision");
+    expect(state.runs.find((r) => r.id === reviewRun.id)).toMatchObject({
+      status: "completed",
+      outcome: finished ? "completed" : "blocked",
+    });
+    expect(
+      state.runs.find(
+        (r) => r.assignment_id === item(state, ctx.producer).assignment_id,
+      )?.status,
+    ).toBe("running");
+    expect(state.decisions).toHaveLength(1);
+    const decision = present(state.decisions[0]);
+    expect(decision).toMatchObject({
+      status: "open",
+      blocking: true,
+      trigger: "review_limit",
+      affected_work_items: [ctx.verifier],
+    });
+    const third = await deliver(ctx, state, "c".repeat(40));
+    state = apply(state, third);
+    expect(state.decisions).toHaveLength(1);
+    expect(third.events.map((e) => e.type)).toEqual(["delivery_submitted"]);
+    state = apply(
+      state,
+      value(
+        recordDecision(
+          state,
+          office,
+          {
+            decision_id: decision.id,
+            option: "pause",
+            rationale: "Wait",
+            raw_quote: "Wait",
+          },
+          io,
+        ),
+      ),
+    );
+    state = apply(
+      state,
+      value(
+        updateWorkItem(
+          state,
+          human,
+          { work_item_id: ctx.verifier, max_review_rounds: 2 },
+          io,
+        ),
+      ),
+    );
+    expect(item(state, ctx.verifier).status).toBe("waiting_decision");
+    expect(state.runs.some((r) => r.status === "queued")).toBe(false);
+    state = apply(
+      state,
+      value(
+        recordDecision(
+          state,
+          office,
+          {
+            decision_id: decision.id,
+            option: "raise_limit",
+            rationale: "Continue",
+            raw_quote: "Continue",
+          },
+          io,
+        ),
+      ),
+    );
+    expect(item(state, ctx.verifier).status).toBe("ready");
+    expect(state.runs.filter((r) => r.status === "queued")).toHaveLength(1);
+    const queued = present(state.runs.find((r) => r.status === "queued"));
+    expect(queued).toMatchObject({
+      kind: "decision_resumed",
+      assignment_id: reviewRun.assignment_id,
+      role_version: reviewRun.role_version,
+      model: reviewRun.model,
+      agent_cli_version: reviewRun.agent_cli_version,
+    });
+    const running = value(
+      transition(
+        "run",
+        value(
+          transition(
+            "run",
+            value(transition("run", queued.status, "dispatch")),
+            "acknowledge",
+          ),
+        ),
+        "start",
+      ),
+    );
+    state = {
+      ...state,
+      runs: state.runs.map((r) =>
+        r.id === queued.id ? { ...r, status: running } : r,
+      ),
+    };
+    expect(review(ctx, state, third.data).data.verdict).toBe("pass");
+  },
+);
+
+test.each(actions)(
+  "invariant 11: %s cannot activate an exhausted verifier from a legacy ready snapshot",
+  async (action) => {
+    const ctx = setup(1);
+    const first = await deliver(ctx, ctx.state);
+    let state = apply(ctx.state, first);
+    state = apply(state, review(ctx, state, first.data));
+    state = {
+      ...state,
+      work_items: state.work_items.map((w) =>
+        w.id === ctx.verifier
+          ? ({
+              ...w,
+              status: value(
+                transition("verify", "passed", "target_redelivered"),
+              ),
+            } as typeof w)
+          : w,
+      ),
+    };
+    expect(pause(ctx, state, action, ctx.reviewer, ctx.verifier)).toMatchObject(
+      {
+        ok: false,
+        error: {
+          code: "illegal_transition",
+          message: expect.stringContaining(
+            `Review round limit has been reached for ${ctx.verifier}`,
+          ),
+        },
+      },
+    );
+  },
+);
