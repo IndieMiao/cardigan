@@ -132,6 +132,12 @@ interface WorkItemFields {
   readonly completion_criteria: readonly string[];
   readonly assignment_id?: AssignmentId;
   readonly template_key?: string;
+  readonly reported_blocker?: {
+    readonly reason: string;
+    readonly needs: "role" | "human";
+    readonly reported_by: Author;
+    readonly reported_at: Timestamp;
+  };
 }
 export type WorkItem = WorkItemFields &
   (

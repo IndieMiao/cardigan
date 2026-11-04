@@ -185,7 +185,7 @@ test.each([false, true])(
 );
 
 test.each(["decision", "provisional", "human_action"] as const)(
-  "invariant 11: PM cannot bypass an outstanding %s when resuming blocked work",
+  "invariant 11: PM can confirm a reported blocker while an outstanding %s still pauses work",
   (blocker) => {
     let state = fixture();
     state = apply(
@@ -219,14 +219,24 @@ test.each(["decision", "provisional", "human_action"] as const)(
       };
     }
     const before = JSON.stringify(state);
-    expect(
+    const confirmed = value(
       updateWorkItem(
         state,
         office,
         { work_item_id: producer, status: "in_progress" },
         io,
       ),
-    ).toMatchObject({ ok: false, error: { code: "illegal_transition" } });
+    );
+    const after = apply(state, confirmed);
+    expect(confirmed.data.status).toBe("blocked");
+    expect(confirmed.data.reported_blocker).toBeUndefined();
+    expect(confirmed.events[0]?.payload).toMatchObject({
+      reported_blocker_cleared: true,
+      resume_work_items: [],
+    });
+    expect(after.runs).toEqual(state.runs);
+    expect(after.decisions).toEqual(state.decisions);
+    expect(after.human_actions).toEqual(state.human_actions);
     expect(JSON.stringify(state)).toBe(before);
   },
 );

@@ -48,11 +48,11 @@
 协作细节：
 
 - Office/Operations 共用 pm 角色：Office 是常驻 PM 且 Token 允许 record_decision；Ops 是不具备该工具许可的常驻 PM。工作项级 PM 验收 Assignment 不能代替 Office。实际 Token 授权仍由认证层核实。
-- reportBlocker 的普通阻塞由 PM／人用 updateWorkItem(status=in_progress) 确认解除，仅从 blocked 经 resume 迁移。关联此工作项的 open / provisional 阻塞 Decision、open HumanAction 或用尽的审核轮次都会阻止恢复；不能用此入口改写其他状态。已有 Run 保持运行，若之前以 blocked 结束且无其他未结束 Run，则排新的 queued / followup Run。
+- reportBlocker 将 reason、needs、来自 Actor 的 reported_by 和 Clock 的 reported_at 保存到 WorkItem.reported_blocker。只有 PM／人用 updateWorkItem(status=in_progress) 确认清除该标记；即使还有其他阻塞，确认也成功，但保持 blocked / waiting_decision，resume_work_items 为空，事件记录 reported_blocker_cleared=true。其他 Decision / HumanAction 解除不能清掉报告，未确认时也不会恢复。最后一个原因解除、审核预算允许后，按当前暂停状态走 resume 或 decision_resolved；已有 Run 保持运行，没有未结束 Run 时按既有规则排一次新 Run。没有报告标记时保留原有受控恢复限制。
 - category 的准确性由上层受控输入/策略保证；已标记为敏感类别的请求只能选择 human，本实现不做自然语言意图分类。batch 是批次标识，多条决定以同一标识关联，未增加批量 RPC。
 - reportBlocker、阻塞 requestDecision 和包含自身工作项的 requestHumanAction 在暂停自身之前调用共用启动校验；不会代为启动其他 Assignment 的工作项。不能暂停时错误包含工作项编号、类型和状态。
 - 工作项级 Assignment 请求阻塞拍板时，自动将自身可执行工作项去重并入 affected_work_items，再结束相关 running Run；produce 已 delivered / accepted 时不自动并入也不结束自身 Run，显式暂停则拒绝。解决最后一个阻塞原因且审核预算充足后，已有执行历史的责任上下文生成新的 queued Run，复用 Assignment／Session 和最近 blocked Run 的版本快照（上限拍板也可沿用已完成的审核 Run）。没有历史快照时只返回触发事件，后续调度负责初始配置；不启动 Harness、不按门铃。
-- 多个 Decision/HumanAction 同时阻塞同一工作项时，不因其中一项完成就提前恢复；恢复事件的 resume_work_items（包括 completeHumanAction）只列实际恢复项。对同一个已自动结束的 blocked Run 再 finish_run(blocked) 为无副作用确认。
+- reported_blocker、多个 Decision/HumanAction 同时阻塞同一工作项时，不因其中一项完成就提前恢复；恢复事件的 resume_work_items（包括 completeHumanAction）只列实际恢复项。对同一个已自动结束的 blocked Run 再 finish_run(blocked) 为无副作用确认。
 - 评论识别 C-n、C-n#m、q(n)、h(n)、D-n 以及 GitHub 风格 pull / GitLab merge_requests 链接；跨卡引用不会授予跨卡修改权限。引用解析不发网络请求。
 - token_requests 只有签发所需元数据，token_id 包含项目和 Assignment，不含随机 Token 值。调用方须将签发和 Assignment 记录作为同一提交单元组装；现有 store 的独立签发 API 如何接入事务由后续组装处理，本 PR 不改 store。
 - 附件哈希验证、文件落盘、失败后的内容清理和传输大小上限由 M1.6 适配层负责。prepareAttachment 需在认证之后调用，上传元数据拒绝不会自动删除已准备的内容。

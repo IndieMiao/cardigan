@@ -120,7 +120,7 @@ function paused(
   item: WorkItem,
   kind: "blocked" | "waiting_decision",
 ) {
-  if (item.status === kind) return;
+  if (item.status === "blocked" || item.status === "waiting_decision") return;
   const next =
     d.assignment?.scope === "work_item" && d.assignment.work_item_id === item.id
       ? activeWork(d, item)
@@ -175,6 +175,15 @@ export function reportBlocker(
       "Unknown blocker owner",
     );
     paused(d, item, "blocked");
+    d.put("work_items", {
+      ...d.work(item.id),
+      reported_blocker: {
+        reason: p.reason,
+        needs: p.needs,
+        reported_by: d.author,
+        reported_at: d.now,
+      },
+    });
     d.emit(
       "blocker_reported",
       item.card_id,
@@ -394,8 +403,7 @@ export function recordDecision(
     const resumed: WorkItem[] = [];
     for (const id of decision.affected_work_items) {
       const item = d.work(id);
-      if (item.status === "waiting_decision" && resumeWork(d, item))
-        resumed.push(item);
+      if (decision.blocking && resumeWork(d, item)) resumed.push(item);
     }
     const cards = [
       ...new Set([
