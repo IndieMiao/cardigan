@@ -38,6 +38,7 @@ export const transitionTables: {
       cancel: "cancelled",
     },
     delivered: {
+      delivery_submitted: "delivered",
       verifiers_passed: "accepted",
       review_rejected: "changes_requested",
       cancel: "cancelled",
@@ -45,24 +46,27 @@ export const transitionTables: {
     changes_requested: { run_started: "in_progress", cancel: "cancelled" },
     blocked: { resume: "in_progress", cancel: "cancelled" },
     waiting_decision: { decision_resolved: "in_progress", cancel: "cancelled" },
-    accepted: { cancel: "cancelled" },
+    accepted: { delivery_submitted: "delivered", cancel: "cancelled" },
   },
   verify: {
-    todo: { target_delivered: "ready" },
+    todo: { target_delivered: "ready", cancel: "cancelled" },
     ready: {
       run_started: "in_progress",
       review_limit_exceeded: "waiting_decision",
+      cancel: "cancelled",
     },
     in_progress: {
+      target_redelivered: "ready",
       review_passed: "passed",
       review_rejected: "failed",
       block: "blocked",
       request_decision: "waiting_decision",
+      cancel: "cancelled",
     },
-    failed: { target_redelivered: "ready" },
+    failed: { target_redelivered: "ready", cancel: "cancelled" },
     passed: { target_redelivered: "ready" },
-    blocked: { resume: "in_progress" },
-    waiting_decision: { decision_resolved: "ready" },
+    blocked: { resume: "in_progress", cancel: "cancelled" },
+    waiting_decision: { decision_resolved: "ready", cancel: "cancelled" },
   },
   delivery: {
     submitted: {
@@ -105,7 +109,11 @@ export const transitionTables: {
       connection_lost: "unknown",
       release: "released",
     },
-    unknown: { declared_lost: "lost", release: "released" },
+    unknown: {
+      reconnected: "idle",
+      declared_lost: "lost",
+      release: "released",
+    },
     lost: { release: "released" },
   },
   run: {
@@ -126,7 +134,7 @@ export const transitionTables: {
       cancel: "cancelled",
       connection_lost: "unknown",
     },
-    unknown: { cancel: "cancelled" },
+    unknown: { reconnected: "running", cancel: "cancelled" },
   },
   card: {
     backlog: { set_todo: "todo", cancel: "cancelled" },

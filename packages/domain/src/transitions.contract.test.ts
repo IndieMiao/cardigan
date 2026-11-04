@@ -77,6 +77,79 @@ test("invariant 14: redelivery resets both failed and previously passed verifica
     });
 });
 
+test.each(["delivered", "accepted"] as const)(
+  "invariant 14: a new delivery from produce:%s requires verification again",
+  (from) => {
+    expect(transition("produce", from, "delivery_submitted")).toEqual({
+      ok: true,
+      value: "delivered",
+    });
+  },
+);
+
+test("invariant 14: redelivery invalidates the version currently under review", () => {
+  expect(transition("verify", "in_progress", "target_redelivered")).toEqual({
+    ok: true,
+    value: "ready",
+  });
+  expect(transition("verify", "cancelled", "target_redelivered")).toMatchObject(
+    {
+      ok: false,
+      error: { code: "illegal_transition" },
+    },
+  );
+});
+
+test.each([
+  ["runtime", "unknown", "idle"],
+  ["run", "unknown", "running"],
+] as const)(
+  "invariant 8: %s reconnects from %s to %s without completing work",
+  (machine, from, to) => {
+    expect(transition(machine, from, "reconnected")).toEqual({
+      ok: true,
+      value: to,
+    });
+  },
+);
+
+test.each([
+  ["runtime", "lost"],
+  ["runtime", "released"],
+  ["run", "completed"],
+  ["run", "failed"],
+  ["run", "cancelled"],
+] as const)("invariant 11: reconnect cannot reopen %s:%s", (machine, from) => {
+  expect(transition(machine, from, "reconnected")).toMatchObject({
+    ok: false,
+    error: { code: "illegal_transition" },
+  });
+});
+
+test.each([
+  "todo",
+  "ready",
+  "in_progress",
+  "failed",
+  "blocked",
+  "waiting_decision",
+] as const)("verify:%s can be cancelled with its card", (from) => {
+  expect(transition("verify", from, "cancel")).toEqual({
+    ok: true,
+    value: "cancelled",
+  });
+});
+
+test.each(["passed", "cancelled"] as const)(
+  "invariant 11: terminal verify:%s cannot be cancelled",
+  (from) => {
+    expect(transition("verify", from, "cancel")).toMatchObject({
+      ok: false,
+      error: { code: "illegal_transition" },
+    });
+  },
+);
+
 test("decisions can resolve provisionally, be revoked, or be superseded as specified", () => {
   expect(transition("decision", "provisional", "resolve")).toEqual({
     ok: true,

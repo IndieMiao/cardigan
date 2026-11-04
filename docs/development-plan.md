@@ -1,6 +1,8 @@
 # Cardigan · 多 Agent 协作开发系统开发方案
 
-- 版本：v0.6.2（2026-11-04）
+- 版本：v0.6.3（2026-11-04）
+  - v0.6.3：按 M1.2 审核意见补齐 §4.4 的新交付重开、在审版本失效、验证项取消及 unknown 重连迁移；§13.9 明确暂时失联后的恢复路径。
+  - v0.6.2（2026-11-04）
   - v0.6.2：§20.4 合并规则改为常规 PR 由 Claude 合并并给出 brief；§10.4 改正 PM 角色的写法（前台、后台是同一个角色的两个 Assignment）。
   - v0.6.1（2026-11-04）
   - v0.6.1：§10.2 新增"接入点 + 启动配置"两层设计，以及供人手动启动的 `cardigan launch`。
@@ -391,7 +393,8 @@ Standing Assignment (scope=project): PM Office, PM Ops — not tied to a WorkIte
 
 ```
 todo --deps met--> ready --run starts--> in_progress --submit_delivery--> delivered
-delivered --all required verifiers pass--> accepted (terminal)
+delivered --all required verifiers pass--> accepted
+delivered / accepted --submit_delivery (new version)--> delivered
 delivered --any reject--> changes_requested --rework run--> in_progress
 in_progress <--> blocked / waiting_decision
 any --> cancelled
@@ -401,17 +404,21 @@ any --> cancelled
 
 ```
 todo --target delivered--> ready --> in_progress --pass--> passed (terminal)
-in_progress --reject--> failed --target redelivered--> ready
+in_progress --reject--> failed
+in_progress / passed / failed --target redelivered--> ready
+todo / ready / in_progress / failed / blocked / waiting_decision --cancel--> cancelled
 ```
+
+批准绑定到交付版本：产出项已交付或已验收后仍可提交新版本，回到 `delivered`；正在审核、已通过或已驳回的验证项遇到新版本时回到 `ready`。旧交付的 supersede 和旧审核失效由命令层更新。验证项只有非终态可取消，`passed` / `cancelled` 不接受 cancel；`passed` 可由新版本重新打开。
 
 审核轮次上限是控制面字段，只有 PM Ops 或你能放宽，放宽动作记在 Run 上。超过上限时，工作项进入 `waiting_decision`，并生成一条 Decision（0.5a §9.3）。
 
 **Assignment**
 
 - 业务状态：`active` | `suspended` | `released`
-- 运行状态：`not_provisioned → provisioning → idle ⇄ running`；异常时 `→ unknown → lost`；最终 `→ released`
+- 运行状态：`not_provisioned → provisioning → idle ⇄ running`；异常时 `→ unknown → lost`；确认重新连通时 `unknown --reconnected--> idle`；最终 `→ released`。`lost` / `released` 不通过 reconnected 恢复。
 
-**Run**：`queued → dispatched → acked → running → completed | failed | cancelled`；运行环境失联时进入 `unknown`。
+**Run**：`queued → dispatched → acked → running → completed | failed | cancelled`；运行环境失联时进入 `unknown`；确认重新连通时 `unknown --reconnected--> running`。重连不表示业务完成，已结束的 Run 不通过 reconnected 恢复。
 
 **Delivery**：`submitted → accepted | rejected | superseded`。
 
@@ -1033,6 +1040,7 @@ RuntimeRef = {machine_id, runtime_machine, terminal_ref, agent_name,
 ### 13.9 故障处理
 
 1. 心跳超时：Assignment 运行状态变为 `unknown`，**不立即换机器重跑**，因为旧机器可能只是暂时断网，仍在改代码。失联判断不依据 CLI 的退出码，而看运行时的事件序号是否还在推进；SSH 设置连接超时（0.5b 用 3 秒验证），外层命令另设截止时间。
+   - 在仍为 `unknown` 时确认重连，显式发出 `reconnected`：Assignment 运行状态回 `idle`，未结束的 Run 回 `running`；不据此判定任务成功或失败。
 2. 宽限期（建议 5–10 分钟，可配置）后仍失联：变为 `lost`，进入 Needs You，由你选择等待或接管。
 3. 接管：从主机最后一次拉取到的 SHA 在另一台机器新建 worktree 和 Session，用时间线生成交接摘要。原机器恢复后，它的 worktree 进入清理流程。
 4. 为了让接管不丢工作：Agent 在检查点 commit；主机按 §12.3 定期拉取 `agent/*` 分支。

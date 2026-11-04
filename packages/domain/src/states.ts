@@ -20,6 +20,7 @@ export const states = {
     "failed",
     "blocked",
     "waiting_decision",
+    "cancelled",
   ],
   assignment: ["active", "suspended", "released"],
   runtime: [

@@ -28,7 +28,9 @@
 ## M1.2：迁移与派生计算
 
 - `transition(machine, from, event)` 查九张表，返回 `Result<状态>`；未列出的组合（含终态重新开始）返回 `illegal_transition`。事件名表达已校验的事实，不是 MCP 命令；调用者身份、交付版本和完成申请审核资格由 M1.3 检查。
-- 产出型工作项按 §4.4 可取消；Run 在排队/派发/执行等未结束状态可取消。失联只进入 unknown，未定义的自动恢复路径不在本次添加。新交付可 supersede 已接受/驳回的交付，并将已通过/失败的验证项重新置为 ready。
+- 产出型工作项按 §4.4 可取消；验证型工作项的六个非终态（todo/ready/in_progress/failed/blocked/waiting_decision）可取消，passed/cancelled 不接受 cancel。Run 在排队/派发/执行等未结束状态可取消。
+- 显式 reconnected 事件使 runtime 从 unknown 回 idle、Run 从 unknown 回 running；它不表示业务完成，也不能从 lost/released 或已结束的 Run 恢复。
+- produce 在 delivered/accepted 收到新 delivery_submitted 都回 delivered；verify 在 in_progress/passed/failed 收到 target_redelivered 回 ready。旧交付 supersede 和旧审核失效的实体更新由 M1.3 处理。
 - 开始审核使用 `beginReviewRound(from, round, max_review_rounds)`：round 是即将开始的正整数轮次，默认上限 3；合法 ready 状态下，第 3 轮可开始，第 4 轮进入 waiting_decision。拍板后回 ready，仍须检查新上限。创建 Decision、记录轮次和放宽权限属于 M1.3。
 - `deriveReview` 返回新 issues 数组、verdict 和 blocking，不修改输入；critical 的 proof 缺失、空串或全空白都降为 major，仍以 must_fix / pre_existing 决定是否阻塞。
 - `isReviewStale` 接收当前交付：交付 ID 改变（即使 SHA 相同）、subject.value 不同或已 superseded，旧结论失效。
