@@ -1,0 +1,248 @@
+import type { DatabaseSync } from "node:sqlite";
+import type {
+  Assignment,
+  AssignmentId,
+  Attachment,
+  AttachmentId,
+  Card,
+  CardId,
+  Cursor,
+  Decision,
+  DecisionId,
+  Delivery,
+  DeliveryId,
+  Event,
+  EventRepository,
+  HumanAction,
+  HumanActionId,
+  Machine,
+  MachineId,
+  Repositories,
+  Repository,
+  Review,
+  ReviewId,
+  RoleReference,
+  Run,
+  RunId,
+  TimelineEntry,
+  TimelineEntryId,
+  WorkItem,
+  WorkItemId,
+} from "@cardigan/domain";
+
+export type SqlValue = string | number | null;
+
+export interface TableSpec<Entity> {
+  readonly table: string;
+  /** Primary-key columns, in order, after project_id. */
+  readonly key: readonly string[];
+  /** Every stored column, in the order `values` returns them. */
+  readonly columns: readonly string[];
+  readonly values: (entity: Entity) => readonly SqlValue[];
+}
+
+const placeholders = (count: number): string =>
+  Array.from({ length: count }, () => "?").join(", ");
+
+/**
+ * Repository over a table that keeps its key columns plus a `doc` column with
+ * the canonical JSON entity.
+ */
+export function jsonRepository<Entity, Key>(
+  db: DatabaseSync,
+  spec: TableSpec<Entity>,
+): Repository<Entity, Key> {
+  const keyMatch = spec.key.map((column) => `${column} = ?`).join(" AND ");
+  const selectByKey = db.prepare(
+    `SELECT doc FROM ${spec.table} WHERE project_id = ? AND ${keyMatch}`,
+  );
+  const selectAll = db.prepare(
+    `SELECT doc FROM ${spec.table} WHERE project_id = ?`,
+  );
+  const updates = spec.columns
+    .filter((column) => !spec.key.includes(column))
+    .map((column) => `${column} = excluded.${column}`)
+    .concat("doc = excluded.doc")
+    .join(", ");
+  const upsert = db.prepare(
+    `INSERT INTO ${spec.table} (project_id, ${spec.columns.join(", ")}, doc) ` +
+      `VALUES (?, ${placeholders(spec.columns.length)}, ?) ` +
+      `ON CONFLICT (project_id, ${spec.key.join(", ")}) DO UPDATE SET ${updates}`,
+  );
+
+  const decode = (row: unknown): Entity =>
+    JSON.parse((row as { doc: string }).doc) as Entity;
+
+  return {
+    get: (project_id, key) => {
+      const row = selectByKey.get(project_id, ...keyColumns(key, spec.key));
+      return row === undefined ? undefined : decode(row);
+    },
+    list: (project_id) => selectAll.all(project_id).map(decode),
+    put: (project_id, entity) => {
+      upsert.run(project_id, ...spec.values(entity), JSON.stringify(entity));
+    },
+  };
+}
+
+/**
+ * Key values in column order. The domain key is either a primitive or an
+ * object of the key columns; `undefined` marks a missing key column, which
+ * SQLite stores as NULL (and never matches another row).
+ */
+function keyColumns(
+  key: unknown,
+  columns: readonly string[],
+): readonly SqlValue[] {
+  if (typeof key === "string" || typeof key === "number" || key === null) {
+    return [key];
+  }
+  const record = key as Record<string, unknown>;
+  return columns.map((column) => {
+    const value = record[column];
+    return typeof value === "string" || typeof value === "number"
+      ? value
+      : null;
+  });
+}
+
+/** Event store: per-stream monotonic seq, enforced by a unique index. */
+export function eventRepository(db: DatabaseSync): EventRepository {
+  const insert = db.prepare(
+    "INSERT INTO events (project_id, id, card_id, stream, seq, type, doc) " +
+      "VALUES (?, ?, ?, ?, ?, ?, ?)",
+  );
+  const after = db.prepare(
+    "SELECT doc FROM events WHERE project_id = ? AND stream = ? AND seq > ? ORDER BY seq",
+  );
+
+  return {
+    append: (project_id, event) => {
+      insert.run(
+        project_id,
+        event.id,
+        event.card_id ?? null,
+        event.card_id ?? "",
+        event.seq,
+        event.type,
+        JSON.stringify(event),
+      );
+    },
+    listAfter: (project_id, card_id, since_seq) =>
+      after
+        .all(project_id, card_id ?? "", since_seq)
+        .map((row) => JSON.parse((row as { doc: string }).doc) as Event),
+  };
+}
+
+const cardSpec: TableSpec<Card> = {
+  table: "cards",
+  key: ["id"],
+  columns: ["id"],
+  values: (card) => [card.id],
+};
+const workItemSpec: TableSpec<WorkItem> = {
+  table: "work_items",
+  key: ["id"],
+  columns: ["id", "card_id"],
+  values: (item) => [item.id, item.card_id],
+};
+const assignmentSpec: TableSpec<Assignment> = {
+  table: "assignments",
+  key: ["id"],
+  columns: ["id", "machine_id", "mcp_token_id"],
+  values: (assignment) => [
+    assignment.id,
+    assignment.machine_id,
+    assignment.mcp_token_id,
+  ],
+};
+const runSpec: TableSpec<Run> = {
+  table: "runs",
+  key: ["id"],
+  columns: ["id", "assignment_id", "trigger_event_id"],
+  values: (run) => [run.id, run.assignment_id, run.trigger_event_id],
+};
+const timelineSpec: TableSpec<TimelineEntry> = {
+  table: "timeline",
+  key: ["id"],
+  columns: ["id", "card_id", "event_seq"],
+  values: (entry) => [entry.id, entry.card_id, entry.event_seq],
+};
+const deliverySpec: TableSpec<Delivery> = {
+  table: "deliveries",
+  key: ["id"],
+  columns: ["id", "work_item_id"],
+  values: (delivery) => [delivery.id, delivery.work_item_id],
+};
+const reviewSpec: TableSpec<Review> = {
+  table: "reviews",
+  key: ["id"],
+  columns: ["id", "delivery_id"],
+  values: (review) => [review.id, review.delivery_id],
+};
+const decisionSpec: TableSpec<Decision> = {
+  table: "decisions",
+  key: ["id"],
+  columns: ["id"],
+  values: (decision) => [decision.id],
+};
+const humanActionSpec: TableSpec<HumanAction> = {
+  table: "human_actions",
+  key: ["id"],
+  columns: ["id"],
+  values: (action) => [action.id],
+};
+const attachmentSpec: TableSpec<Attachment> = {
+  table: "attachments",
+  key: ["id"],
+  columns: ["id", "sha256"],
+  values: (attachment) => [attachment.id, attachment.sha256],
+};
+const roleSpec: TableSpec<RoleReference> = {
+  table: "roles",
+  key: ["role_id", "role_version"],
+  columns: ["role_id", "role_version"],
+  values: (role) => [role.role_id, role.role_version],
+};
+const machineSpec: TableSpec<Machine> = {
+  table: "machines",
+  key: ["id"],
+  columns: ["id"],
+  values: (machine) => [machine.id],
+};
+const cursorSpec: TableSpec<Cursor> = {
+  table: "cursors",
+  key: ["assignment_id", "card_id"],
+  columns: ["assignment_id", "card_id", "acked_seq"],
+  values: (cursor) => [cursor.assignment_id, cursor.card_id, cursor.acked_seq],
+};
+
+/** All repositories of one connection. */
+export function createRepositories(db: DatabaseSync): Repositories {
+  return {
+    cards: jsonRepository<Card, CardId>(db, cardSpec),
+    work_items: jsonRepository<WorkItem, WorkItemId>(db, workItemSpec),
+    assignments: jsonRepository<Assignment, AssignmentId>(db, assignmentSpec),
+    runs: jsonRepository<Run, RunId>(db, runSpec),
+    timeline: jsonRepository<TimelineEntry, TimelineEntryId>(db, timelineSpec),
+    deliveries: jsonRepository<Delivery, DeliveryId>(db, deliverySpec),
+    reviews: jsonRepository<Review, ReviewId>(db, reviewSpec),
+    decisions: jsonRepository<Decision, DecisionId>(db, decisionSpec),
+    human_actions: jsonRepository<HumanAction, HumanActionId>(
+      db,
+      humanActionSpec,
+    ),
+    attachments: jsonRepository<Attachment, AttachmentId>(db, attachmentSpec),
+    roles: jsonRepository<
+      RoleReference,
+      Pick<RoleReference, "role_id" | "role_version">
+    >(db, roleSpec),
+    machines: jsonRepository<Machine, MachineId>(db, machineSpec),
+    cursors: jsonRepository<Cursor, Pick<Cursor, "assignment_id" | "card_id">>(
+      db,
+      cursorSpec,
+    ),
+    events: eventRepository(db),
+  };
+}
