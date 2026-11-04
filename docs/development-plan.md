@@ -1,6 +1,8 @@
 # Cardigan · 多 Agent 协作开发系统开发方案
 
-- 版本：v0.6.18（2026-11-05）
+- 版本：v0.6.19（2026-11-05）
+  - v0.6.19：M2.5 实现本地独立 clone、worktree 创建/复用和脏文件查询，明确 detached 目标和路径冲突的拒绝边界；Assignment 编号按项目分配，worktree 路径按项目分层，project_id 入路径前校验为安全片段。
+  - v0.6.18（2026-11-05）
   - v0.6.18：M2.3 第一部分接入 hc 0.1.18，明确独立 session/socket、子进程超时、事件序号、替换和释放边界；共用真实/内存契约套件单独提交。
   - v0.6.17（2026-11-05）
   - v0.6.17：M2.1 第二部分补齐 acknowledgeRun / abortDispatch，复用 activeWork 推进首次 MCP 确认，明确取消和重复调用边界。
@@ -989,11 +991,17 @@ status 先 hc get，再取 hc events 的初始快照，同时使用该快照的�
 ### 12.2 布局与命名
 
 - 每台机器每个项目一个基础 clone：`/srv/agent/repos/<project>`
-- worktree：`/srv/agent/worktrees/<assignment_id>`。由主机的 Git 服务创建，不使用运行时的默认目录（两台机器上 Herdr 的默认目录并不一致，0.3 实测）
+- worktree：`/srv/agent/worktrees/<project_id>/<assignment_id>`。Assignment 编号按项目分配，路径按项目分层。由主机的 Git 服务创建，不使用运行时的默认目录（两台机器上 Herdr 的默认目录并不一致，0.3 实测）
 - 分支：`agent/<card_id>/<work_item_id>`
 - provision 时记录 `base_sha`。
 - 基线同步：主机把中心仓库的 main 推到各工作机基础 clone 的 `refs/remotes/origin/main`，不碰工作机当前检出的分支；工作项显式从记录的基线建 worktree。不要通过关闭 `receive.denyCurrentBranch` 来同步工作目录（0.5b 实测）。
 - 只有 PM Ops 或 Router 明确要求时才 rebase 到最新基线，避免意外改动。
+
+M2.5 的 GitWorktreeService 经 domain 的 GitWorktreePort 调用 LocalGitTransport，组装层注入实现，不逆向引用 transport。默认目录为 CARDIGAN_DATA_DIR/agent/repos/<project_id> 和 agent/worktrees/<project_id>/<assignment_id>，可分别配置根目录；自定义 worktreesRoot 下同样按项目分层。project_id 入路径前校验为安全片段，拒绝空串、`.`、`..`、路径分隔符和以 `-` 开头的值。只接受绝对本地仓库路径，clone 使用 --no-local --no-checkout，经自己创建的临时目录发布；fetch 显式使用该本地路径并禁用非 file 协议，不使用可能已改成网络地址的远端。现有 clone 必须匹配登记来源。
+
+write 工作项从 fetch 后的 origin/<base_branch> 当前提交创建 agent/<card>/<work_item>；返回 worktree_path、branch、base_sha 供 M2.6 持久化到 Assignment。既有目录必须是该基础 clone 登记的 worktree 且分支匹配，复用时不 reset、不重建、不移动工作项自己的提交或未提交文件；有已记录 base_sha 时保留它，尚未记录时返回现有 HEAD。readonly 必须提供目标提交 SHA，创建 detached worktree；旧目录目标不一致则拒绝，M2 不自动切换已存在的审核目录。detached 表示不挂分支，不等于文件系统只读权限。
+
+worktree=none 跳过 Git。isDirty 包含已跟踪、暂存和未跟踪改动，仅查询。GitWorktreePort 不暴露 push 或 worktree 删除；外部目录、错误分支、错误来源一律拒绝覆盖。不同项目的同号 Assignment 可以在同一个 worktrees 根目录下并存，各自使用独立的基础 clone 和项目子目录，提交和未提交文件互不影响。
 
 ### 12.3 交付
 

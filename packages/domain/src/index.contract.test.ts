@@ -7,6 +7,7 @@ import {
   type DecisionId,
   type Delivery,
   developmentCardTemplate,
+  type GitWorktreePort,
   type IdAllocator,
   type Repositories,
   type Review,
@@ -16,6 +17,14 @@ import {
   type WorkItem,
   type WorkItemId,
 } from "./index.js";
+
+test("invariants 5, 9: Git port supports local worktree reuse without exposing push or deletion", () => {
+  expectTypeOf<GitWorktreePort>().not.toHaveProperty("push");
+  expectTypeOf<GitWorktreePort>().not.toHaveProperty("removeWorktree");
+  expectTypeOf<GitWorktreePort["resolveCommit"]>().returns.toEqualTypeOf<
+    Promise<string>
+  >();
+});
 
 test("invariant 1: roles contain capabilities and permissions, not runtime ownership", () => {
   expectTypeOf<keyof RoleReference>().toEqualTypeOf<

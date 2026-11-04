@@ -85,9 +85,21 @@ importers:
 
   packages/domain: {}
 
-  packages/git-service: {}
+  packages/git-service:
+    dependencies:
+      '@cardigan/domain':
+        specifier: workspace:*
+        version: link:../domain
 
-  packages/git-transport: {}
+  packages/git-transport:
+    dependencies:
+      '@cardigan/domain':
+        specifier: workspace:*
+        version: link:../domain
+    devDependencies:
+      '@cardigan/git-service':
+        specifier: workspace:*
+        version: link:../git-service
 
   packages/mcp-server:
     dependencies:
