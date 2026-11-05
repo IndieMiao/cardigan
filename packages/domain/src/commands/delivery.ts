@@ -100,15 +100,32 @@ function inspect(d: CommandDraft, p: SubmitDeliveryParams) {
     "validation_failed",
     "Invalid subject digest",
   );
-  ensure(
-    Array.isArray(p.requested_verifiers) &&
-      p.requested_verifiers.length > 0 &&
-      new Set(p.requested_verifiers).size === p.requested_verifiers.length,
-    "validation_failed",
-    "Explicit distinct requested_verifiers are required",
-  );
   const completion = p.kind === "card_completion";
   const template = developmentCardTemplate;
+  // §4.4 (user ruling): a produce work item that no verification points at is
+  // done when it is delivered, so it requests no verifiers at all. Everything
+  // else keeps the "explicit distinct verifiers" rule.
+  const verifying = d
+    .list("work_items")
+    .filter(
+      (w) =>
+        w.card_id === card.id &&
+        w.kind === "verify" &&
+        (completion
+          ? w.template_key === PM_ACCEPTANCE_WORK_ITEM_KEY
+          : w.target_work_item_id === item.id),
+    );
+  ensure(
+    Array.isArray(p.requested_verifiers) &&
+      new Set(p.requested_verifiers).size === p.requested_verifiers.length &&
+      (verifying.length > 0
+        ? p.requested_verifiers.length > 0
+        : p.requested_verifiers.length === 0),
+    "validation_failed",
+    verifying.length > 0
+      ? "Explicit distinct requested_verifiers are required"
+      : "A work item nothing verifies must not request verifiers",
+  );
   const verifiers = p.requested_verifiers.map((id) => d.work(id));
   ensure(
     verifiers.every(
@@ -122,20 +139,11 @@ function inspect(d: CommandDraft, p: SubmitDeliveryParams) {
     "invariant_violation",
     "Verifiers must verify this delivery",
   );
-  const required = d
-    .list("work_items")
-    .filter(
-      (w) =>
-        w.card_id === card.id &&
-        w.kind === "verify" &&
-        w.required &&
-        (completion
-          ? w.template_key === PM_ACCEPTANCE_WORK_ITEM_KEY
-          : w.target_work_item_id === item.id),
-    );
+  const required = verifying.filter((w) => w.required);
   ensure(
-    required.length > 0 &&
-      required.every((w) => p.requested_verifiers.includes(w.id)),
+    verifying.length === 0 ||
+      (required.length > 0 &&
+        required.every((w) => p.requested_verifiers.includes(w.id))),
     "invariant_violation",
     "All required verifiers must be requested",
   );
@@ -152,7 +160,15 @@ function inspect(d: CommandDraft, p: SubmitDeliveryParams) {
       "validation_failed",
       "Attachment belongs to another card",
     );
-  return { item, card, verifiers, run: d.currentRun(), completion };
+  return {
+    item,
+    card,
+    verifiers,
+    run: d.currentRun(),
+    completion,
+    // Nothing points a verification at this produce item.
+    unreviewed: !completion && verifying.length === 0,
+  };
 }
 
 const proof = Symbol("verified-delivery");
@@ -235,7 +251,10 @@ export function submitDelivery(
 ) {
   return command(state, actor, "submit_delivery", ports, (d) => {
     const p = params;
-    const { item, card, verifiers, run, completion } = inspect(d, p);
+    const { item, card, verifiers, run, completion, unreviewed } = inspect(
+      d,
+      p,
+    );
     ensure(
       verified?.[proof] && verified.binding === binding(d, p.subject),
       "stale_target",
@@ -335,7 +354,8 @@ export function submitDelivery(
       kind: p.kind,
       summary: p.summary,
       subject: { ...p.subject },
-      status: "submitted",
+      // Accepted on arrival when nothing verifies the work item (§4.4).
+      status: unreviewed ? "accepted" : "submitted",
       requested_verifiers: [...p.requested_verifiers],
       attachments: [...(p.attachments ?? [])],
       known_gaps: [...(p.known_gaps ?? [])],
@@ -356,6 +376,23 @@ export function submitDelivery(
       ...(predecessor ? { supersedes: predecessor.id } : {}),
     };
     d.put("deliveries", value);
+    if (unreviewed) {
+      // §4.4: nothing verifies this work item, so the delivery is accepted on
+      // arrival and the item is done; the timeline says why no review follows.
+      d.put("work_items", d.move(d.work(item.id), "verifiers_passed"));
+      d.emit(
+        "delivery_accepted",
+        card.id,
+        { delivery_id: value.id, work_item_id: item.id, unreviewed: true },
+        {
+          type: "system",
+          body: "没有验证项指向这个工作项，交付直接接受，无需审核。",
+          delivery_id: value.id,
+          work_item_id: item.id,
+          run_id: run.id,
+        },
+      );
+    }
     const status = completion
       ? unwrap(transition("card", card.status, "completion_submitted"))
       : deriveCardStatus(
