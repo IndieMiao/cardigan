@@ -161,6 +161,22 @@ export function projectActor(
   return { kind, project_id: project };
 }
 
+/**
+ * §3.4: a standing PM learns from its first prompt whether it is the foreground
+ * Office or the background Ops. The two share the `pm` role, so the token scope
+ * that was just issued is the only place the distinction lives (§7.1).
+ */
+export function standingModeLine(
+  assignment: Assignment,
+  allowed_tools: readonly string[],
+): string | undefined {
+  if (assignment.scope !== "standing" || assignment.role_id !== "pm")
+    return undefined;
+  return allowed_tools.includes("record_decision")
+    ? "mode=foreground 当前身份：PM Office（前台）。只在 Needs You 新增项和重大风险时被打断；用 record_decision 记录人的原话。"
+    : "mode=background 当前身份：PM Ops（后台）。接收 Router 升级的事件，按 Assignment 合并后投递，不直接打扰人。";
+}
+
 export async function launchRun(
   host: LaunchHost,
   input: LaunchRunInput,
@@ -235,7 +251,9 @@ export async function launchRun(
         harness: role.harness,
         launch_profile: role.launch_profile_ref,
         core_prompt: role.core_prompt,
-        allowed_tools: role.allowed_tools,
+        // The harness advertises the tool scope the token actually carries, so
+        // a rotated Ops session never even sees record_decision (§7.1).
+        allowed_tools: issued.record.allowed_tools,
         worktree: role.worktree,
       },
       launch: host.launch.config,
@@ -243,14 +261,20 @@ export async function launchRun(
       run_dir: runDir,
       work_dir: workDir,
       // The merged bell is the first prompt when the caller has one (M3 §3.2).
-      first_prompt:
+      first_prompt: [
         input.first_prompt ||
-        firstPrompt({
-          assignment_id: assignment.id,
-          run_id: input.run.id,
-          ...(card?.id === undefined ? {} : { card_id: card.id }),
-          ...(workItem?.id === undefined ? {} : { work_item_id: workItem.id }),
-        }),
+          firstPrompt({
+            assignment_id: assignment.id,
+            run_id: input.run.id,
+            ...(card?.id === undefined ? {} : { card_id: card.id }),
+            ...(workItem?.id === undefined
+              ? {}
+              : { work_item_id: workItem.id }),
+          }),
+        standingModeLine(assignment, issued.record.allowed_tools),
+      ]
+        .filter((line): line is string => line !== undefined)
+        .join("\n"),
       secrets: host.launch.secrets,
     });
 

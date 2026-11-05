@@ -63,18 +63,33 @@ export function launchEntities(
 /**
  * Issue a fresh token for an Assignment and revoke its still valid ones (§9.1,
  * §10.2). The plaintext token is only ever handed to the run directory.
+ *
+ * §7.1 / §10.4: the standing PM Office and PM Ops share one `pm` role and are
+ * told apart only by the tools of their newest token. A rotation that took the
+ * role's full tool list would silently promote Ops on every restart, so the new
+ * scope is the previous token's scope intersected with the role's tools — never
+ * wider than the token it replaces.
  */
 export function issueAssignmentToken(
   store: Store,
   project: ProjectId,
   entities: Pick<LaunchEntities, "assignment" | "role">,
 ): IssuedToken {
-  return store.uow.run((tx) =>
-    issueTokenInTransaction(tx, project, entities.assignment.id, {
+  return store.uow.run((tx) => {
+    const previous = tx
+      .tokensForAssignment(project, entities.assignment.id)
+      .at(-1);
+    const allowed_tools =
+      previous === undefined
+        ? entities.role.allowed_tools
+        : entities.role.allowed_tools.filter((tool) =>
+            previous.allowed_tools.includes(tool),
+          );
+    return issueTokenInTransaction(tx, project, entities.assignment.id, {
       role_version: entities.role.version,
-      allowed_tools: entities.role.allowed_tools,
-    }),
-  );
+      allowed_tools,
+    });
+  });
 }
 
 /** Token issuance inside the caller's transaction, so Assignment and token commit together. */

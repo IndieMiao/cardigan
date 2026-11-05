@@ -667,7 +667,9 @@ function routeHumanAction(input: RouteInput, draft: Draft): void {
 /** §6.4: a Run that produced nothing (no delivery, blocker or decision). */
 function routeRunFinished(input: RouteInput, draft: Draft): void {
   const outcome = payloadString(input.event.payload, "outcome");
-  if (outcome !== "completed") return;
+  // §7.3: an execution failure is PM Ops' business, like a Run that finished
+  // without output; neither may interrupt the human or PM Office.
+  if (outcome !== "completed" && outcome !== "failed") return;
   const run_id = payloadString(input.event.payload, "run_id");
   // §6.4: only a Run that produced nothing (no delivery, blocker or decision)
   // is an exception; one that delivered or raised something has done its job.
@@ -691,9 +693,13 @@ function routeRunFinished(input: RouteInput, draft: Draft): void {
     input,
     draft,
     recipient.pm_ops(),
-    "run_attention",
-    "6.4/run finished without output",
-    `run ${payloadString(input.event.payload, "run_id") ?? "?"} finished without a delivery`,
+    outcome === "failed" ? "escalation" : "run_attention",
+    outcome === "failed"
+      ? "7.3/agent execution failed"
+      : "6.4/run finished without output",
+    `run ${payloadString(input.event.payload, "run_id") ?? "?"} ${
+      outcome === "failed" ? "failed" : "finished"
+    } without a delivery`,
   );
 }
 
