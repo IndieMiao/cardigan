@@ -85,3 +85,22 @@ export {
   verifyToken,
 } from "./tokens.js";
 export { newUlid } from "./ulid.js";
+export {
+  countWebSessions,
+  createWebSession,
+  DEFAULT_WEB_SESSION_TTL_MS,
+  findWebSession,
+  hashWebPassword,
+  hashWebSessionToken,
+  type IssuedWebSession,
+  MIN_WEB_PASSWORD_LENGTH,
+  revokeAllWebSessions,
+  revokeWebSession,
+  setWebPassword,
+  verifyWebLogin,
+  verifyWebPassword,
+  type WebCredential,
+  type WebSession,
+  webCredential,
+  webPasswordConfigured,
+} from "./web-auth.js";

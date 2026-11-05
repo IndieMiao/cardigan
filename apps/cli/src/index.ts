@@ -7,6 +7,7 @@ import { attentionCommand, inboxCommand } from "./inbox.js";
 import type { CliIo } from "./io.js";
 import { runLaunchCommand } from "./launch.js";
 import { runMergeCommand } from "./merge.js";
+import { runWebCommand } from "./web.js";
 import { type CliHooks, runWorkflowCommand } from "./workflow.js";
 import { runWorktreeCommand } from "./worktree.js";
 
@@ -39,6 +40,7 @@ export type {
 export { parseLaunchArgs, runLaunchCommand } from "./launch.js";
 export { runMergeCommand } from "./merge.js";
 export { type LaunchPaths, resolveLaunchPaths } from "./paths.js";
+export { runWebCommand } from "./web.js";
 export { type CliHooks, runWorkflowCommand } from "./workflow.js";
 export { runWorktreeCommand } from "./worktree.js";
 
@@ -63,6 +65,7 @@ const TOP_LEVEL_USAGE = [
   "  assignment start|stop|attach  一键启动/停止/接管 Assignment 的运行时（M2）",
   "  merge status|confirm|request  看待合并的卡片、确认合并、重新发起确认（M4）",
   "  worktree diff|clean|keep      看 worktree 改动、强制清理或保留（M4）",
+  "  web set-password 交互式设置 Workbench 登录密码（M5）",
   "  launch           按启动配置启动 Agent CLI（见 cardigan launch --help）",
 ].join("\n");
 
@@ -119,7 +122,67 @@ export function createProcessIo(): CliIo {
         stderr: result.stderr ?? "",
       });
     },
+    promptSecret: (question) => promptSecret(question),
   };
+}
+
+/**
+ * Ask for a secret without echoing it (M5 plan §0: `web set-password`).
+ *
+ * The prompt goes to stderr so a caller can still pipe the command's stdout.
+ * On a TTY the terminal is switched to raw mode and nothing is echoed, which
+ * also keeps the password out of the scrollback; on a pipe the first line is
+ * read, so the command stays scriptable without accepting secrets in argv.
+ */
+async function promptSecret(question: string): Promise<string> {
+  const stdin = process.stdin;
+  process.stderr.write(question);
+
+  if (!stdin.isTTY) {
+    let buffer = "";
+    for await (const chunk of stdin) {
+      buffer += String(chunk);
+      const newline = buffer.indexOf("\n");
+      if (newline >= 0) return buffer.slice(0, newline).replace(/\r$/u, "");
+      if (buffer.length > 4096) break;
+    }
+    return buffer.trim();
+  }
+
+  return new Promise<string>((resolve) => {
+    const wasRaw = stdin.isRaw;
+    stdin.setRawMode(true);
+    stdin.resume();
+    stdin.setEncoding("utf8");
+    let value = "";
+    const finish = (result: string): void => {
+      stdin.off("data", onData);
+      stdin.setRawMode(wasRaw);
+      stdin.pause();
+      process.stderr.write("\n");
+      resolve(result);
+    };
+    const onData = (chunk: string): void => {
+      for (const character of chunk) {
+        if (character === "\r" || character === "\n") {
+          finish(value);
+          return;
+        }
+        if (character === "\u0003") {
+          // Ctrl-C: leave the terminal usable and report an empty password,
+          // which the command itself refuses.
+          finish("");
+          return;
+        }
+        if (character === "\u007f" || character === "\b") {
+          value = Array.from(value).slice(0, -1).join("");
+          continue;
+        }
+        value += character;
+      }
+    };
+    stdin.on("data", onData);
+  });
 }
 
 /**
@@ -148,6 +211,7 @@ export async function main(
       return await runAssignmentCommand(rest, io);
     }
     if (command === "merge") return runMergeCommand(rest, io);
+    if (command === "web") return await runWebCommand(rest, io);
     if (command === "worktree") return await runWorktreeCommand(rest, io);
     if (command === "inbox") return inboxCommand(rest, io);
     if (command === "attention") return attentionCommand(rest, io);
