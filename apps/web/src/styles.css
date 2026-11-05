@@ -429,3 +429,387 @@ fieldset.filters {
   margin: 0;
   padding: 0;
 }
+
+/* ---- card page (§8.4: five questions first, then the timeline) ---- */
+
+.card-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 1100px;
+}
+
+.card-header {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.breadcrumb {
+  margin: 0;
+  font-size: 12px;
+}
+
+.card-header h1 {
+  margin: 0;
+  font-size: 22px;
+  line-height: 1.3;
+}
+
+.card-status-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  flex-wrap: wrap;
+}
+
+.questions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px 20px;
+  margin: 4px 0 0;
+}
+
+.questions dt {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.questions dd {
+  margin: 2px 0 0;
+}
+
+.questions p {
+  margin: 0 0 4px;
+}
+
+.plain-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 13px;
+}
+
+.card-section {
+  padding: 12px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.card-section h2 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.card-section h3 {
+  margin: 0 0 4px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* ---- work items ---- */
+
+.work-items summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.work-item-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.work-item {
+  border-left: 3px solid var(--border);
+  padding-left: 10px;
+}
+
+.work-item-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.work-item-title {
+  font-weight: 600;
+}
+
+.work-item-role {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.work-item p {
+  margin: 2px 0 0;
+}
+
+/* ---- relations (§8.4 关联区) ---- */
+
+.relations {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 16px;
+}
+
+.decision-status {
+  margin-left: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.decision-status.decision-open,
+.decision-status.decision-provisional {
+  color: var(--status-awaiting_merge);
+  font-weight: 600;
+}
+
+.decision-status.decision-resolved {
+  color: var(--status-done);
+  font-weight: 600;
+}
+
+/* ---- comment box ---- */
+
+.comment-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px;
+  background: var(--surface-muted);
+}
+
+.comment-tabs {
+  display: flex;
+  gap: 6px;
+}
+
+.comment-tabs button {
+  background: var(--surface);
+  color: var(--text);
+  padding: 4px 10px;
+}
+
+.comment-tabs button[aria-selected="true"] {
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+.comment-input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 13px;
+  resize: vertical;
+}
+
+.comment-preview {
+  min-height: 60px;
+  padding: 8px 10px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.mention-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.mention-list button {
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+.comment-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* ---- timeline ---- */
+
+.timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.timeline-entry {
+  border-left: 3px solid var(--border);
+  padding: 6px 0 6px 10px;
+}
+
+/* Each entry type has its own accent, always with its label (§3.7). */
+.timeline-comment {
+  border-left-color: var(--status-backlog);
+}
+.timeline-instruction {
+  border-left-color: var(--accent);
+}
+.timeline-delivery {
+  border-left-color: var(--status-done);
+}
+.timeline-review {
+  border-left-color: var(--status-review);
+}
+.timeline-decision_request {
+  border-left-color: var(--status-awaiting_merge);
+}
+.timeline-decision_resolved {
+  border-left-color: var(--status-done);
+}
+.timeline-human_action {
+  border-left-color: var(--status-todo);
+}
+.timeline-handoff {
+  border-left-color: var(--status-review);
+}
+.timeline-status_change,
+.timeline-system {
+  border-left-color: var(--border);
+}
+
+.timeline-retracted {
+  opacity: 0.6;
+}
+
+.timeline-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.timeline-type {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.timeline-retracted-label,
+.timeline-retracted span:last-child {
+  color: var(--danger);
+}
+
+.timeline-body {
+  margin-top: 4px;
+}
+
+.timeline-seq {
+  font-family: var(--mono);
+}
+
+/* ---- Markdown body ---- */
+
+.markdown > :first-child {
+  margin-top: 0;
+}
+
+.markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown p {
+  margin: 0 0 6px;
+}
+
+.markdown pre {
+  background: var(--surface-muted);
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  overflow-x: auto;
+}
+
+.markdown code {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.markdown blockquote {
+  margin: 0 0 6px;
+  padding-left: 10px;
+  border-left: 3px solid var(--border);
+  color: var(--text-muted);
+}
+
+.markdown ul,
+.markdown ol {
+  margin: 0 0 6px;
+  padding-left: 20px;
+}
+
+/* ---- attachments ---- */
+
+.attachments {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.attachment {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.attachment-thumb {
+  max-width: 220px;
+  max-height: 160px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  object-fit: contain;
+  background: var(--surface);
+}
+
+.attachment-id {
+  font-family: var(--mono);
+}
+
+.superseded {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.superseded summary {
+  cursor: pointer;
+}

@@ -57,6 +57,162 @@ export interface CardView {
   readonly related_cards: readonly string[];
 }
 
+/** A reference the server recognised in a body (`refs` of a timeline entry). */
+export type Reference =
+  | { readonly kind: "card"; readonly id: string }
+  | { readonly kind: "timeline_entry"; readonly id: string }
+  | { readonly kind: "decision"; readonly id: string }
+  | { readonly kind: "human_action"; readonly id: string }
+  | { readonly kind: "delivery"; readonly id: string }
+  | { readonly kind: "pr"; readonly url: string };
+
+export interface WorkItemView {
+  readonly id: string;
+  readonly card_id: string;
+  readonly title: string;
+  readonly kind: "produce" | "verify";
+  readonly role_id: string;
+  readonly required: boolean;
+  readonly status: string;
+  readonly depends_on: readonly string[];
+  readonly completion_criteria: readonly string[];
+  readonly assignment_id?: string;
+  readonly target_work_item_id?: string;
+}
+
+export interface TimelineEntryView {
+  readonly id: string;
+  readonly card_id: string;
+  readonly event_seq: number;
+  readonly type:
+    | "comment"
+    | "instruction"
+    | "delivery"
+    | "review"
+    | "decision_request"
+    | "decision_resolved"
+    | "human_action"
+    | "handoff"
+    | "status_change"
+    | "system";
+  readonly author: string;
+  readonly work_item_id?: string;
+  readonly delivery_id?: string;
+  readonly decision_id?: string;
+  readonly human_action_id?: string;
+  readonly refs: readonly Reference[];
+  readonly supersedes?: string;
+  readonly retracted: boolean;
+  readonly body: string;
+  readonly mentions: readonly string[];
+  readonly created_at: string;
+}
+
+export interface DeliveryView {
+  readonly id: string;
+  readonly work_item_id: string;
+  readonly kind: string;
+  readonly summary: string;
+  readonly subject: { readonly kind: string; readonly value: string };
+  readonly branch?: string;
+  readonly pr_url?: string;
+  readonly status: string;
+}
+
+export interface ReviewView {
+  readonly id: string;
+  readonly delivery_id: string;
+  readonly work_item_id: string;
+  readonly verdict: string;
+  readonly blocking: boolean;
+}
+
+export interface ReviewMatrixRow {
+  readonly delivery_id: string;
+  readonly work_item_id: string;
+  readonly target_sha: string;
+  readonly review_id?: string;
+  readonly verdict: string | null;
+}
+
+export interface DecisionView {
+  readonly id: string;
+  readonly question: string;
+  readonly status: string;
+  readonly blocking: boolean;
+  readonly decider: string;
+  readonly options: readonly {
+    readonly key: string;
+    readonly description: string;
+    readonly impact: string;
+  }[];
+  readonly recommended: string;
+}
+
+export interface HumanActionView {
+  readonly id: string;
+  readonly instructions: string;
+  readonly why_human: string;
+  readonly expected_return: string;
+  readonly status: string;
+}
+
+/** Attachment metadata; the blob is a separate request (`download_path`). */
+export interface AttachmentView {
+  readonly id: string;
+  readonly mime: string;
+  readonly size: number;
+  readonly sha256: string;
+  readonly kind: "artifact" | "evidence";
+  readonly attach_to: { readonly kind: string; readonly id: string };
+  readonly uploaded_by: string;
+  readonly basis: { readonly id: string; readonly status: string } | null;
+  readonly supersedes: string | null;
+  readonly inline: boolean;
+  readonly download_path: string;
+}
+
+export interface CardRelations {
+  readonly decisions: readonly {
+    readonly id: string;
+    readonly question: string;
+    readonly status: string;
+    readonly blocking: boolean;
+    readonly decider: string;
+  }[];
+  readonly cards: readonly {
+    readonly id: string;
+    readonly title: string;
+    readonly status: string;
+  }[];
+  readonly pull_requests: readonly {
+    readonly delivery_id: string;
+    readonly work_item_id: string;
+    readonly status: string;
+    readonly pr_url: string;
+  }[];
+}
+
+export interface CardDetail {
+  readonly project_id: string;
+  readonly card: CardView;
+  readonly work_items: readonly WorkItemView[];
+  readonly timeline: readonly TimelineEntryView[];
+  readonly deliveries: readonly DeliveryView[];
+  readonly reviews: readonly ReviewView[];
+  readonly review_matrix: readonly ReviewMatrixRow[];
+  readonly decisions: readonly DecisionView[];
+  readonly human_actions: readonly HumanActionView[];
+  readonly attachments: readonly AttachmentView[];
+  readonly relations: CardRelations;
+  readonly counts: {
+    readonly timeline: number;
+    readonly deliveries: number;
+    readonly reviews: number;
+    readonly open_decisions: number;
+  };
+}
+
 export interface CardCounts {
   readonly total: number;
   readonly needs_me: number;
@@ -90,6 +246,7 @@ export interface CardiganClient {
   logout(): Promise<void>;
   projects(): Promise<readonly ProjectSummary[]>;
   cards(projectId: string, filter: CardFilter): Promise<CardPage>;
+  card(projectId: string, cardId: string): Promise<CardDetail>;
 }
 
 interface ErrorBody {
@@ -130,6 +287,12 @@ export class HttpCardiganClient implements CardiganClient {
   async cards(projectId: string, filter: CardFilter): Promise<CardPage> {
     return this.request<CardPage>(
       `/api/projects/${encodeURIComponent(projectId)}/cards?filter=${filter}`,
+    );
+  }
+
+  async card(projectId: string, cardId: string): Promise<CardDetail> {
+    return this.request<CardDetail>(
+      `/api/projects/${encodeURIComponent(projectId)}/cards/${encodeURIComponent(cardId)}`,
     );
   }
 

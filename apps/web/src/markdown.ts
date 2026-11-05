@@ -35,6 +35,18 @@ export function isAllowedLink(url: string): boolean {
   return false;
 }
 
+/**
+ * Only absolute `http(s)` URLs. Used where a same-site path makes no sense — a
+ * pull-request address comes from an Agent's delivery and must not become a
+ * `javascript:` or `data:` link just because React happens to block it.
+ */
+export function isHttpLink(url: string): boolean {
+  const trimmed = url.trim();
+  if (!isAllowedLink(trimmed)) return false;
+  const lower = trimmed.toLowerCase();
+  return lower.startsWith("http://") || lower.startsWith("https://");
+}
+
 markdown.validateLink = (url: string) => isAllowedLink(url);
 
 const defaultLinkOpen =

@@ -7,6 +7,7 @@ import {
   type SessionInfo,
 } from "./api.js";
 import { routeHash, useRoute } from "./route.js";
+import { CardDetailPage } from "./views/CardDetailPage.js";
 import { CardListPage } from "./views/CardListPage.js";
 import { LoginPage } from "./views/LoginPage.js";
 
@@ -220,9 +221,11 @@ function Workbench({
           </p>
         )}
         {selected !== undefined && route?.kind === "card" && (
-          <p className="empty">
-            卡片 {route.cardId} 的详情界面在 M5.3 的下一个 PR 里接通。
-          </p>
+          <CardDetailPage
+            client={client}
+            projectId={selected.id}
+            cardId={route.cardId}
+          />
         )}
         {selected !== undefined &&
           (route?.kind === "board" ||

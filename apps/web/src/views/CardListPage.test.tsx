@@ -96,6 +96,9 @@ function client(
       calls.push(filter);
       return cards(projectId, filter);
     },
+    card: async () => {
+      throw new Error("the list view must not open a card");
+    },
   };
 }
 
