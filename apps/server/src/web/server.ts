@@ -4,8 +4,9 @@ import {
   type ServerResponse,
 } from "node:http";
 import type { AddressInfo } from "node:net";
-import type { Clock } from "@cardigan/domain";
+import type { CardId, Clock, ProjectId } from "@cardigan/domain";
 import type { Store, WebSession } from "@cardigan/store";
+import { serveAttachment } from "./attachments.js";
 import { allowedHosts, bracket, type WebConfig } from "./config.js";
 import {
   applySecurityHeaders,
@@ -23,7 +24,23 @@ import {
   unauthorized,
 } from "./http.js";
 import { LoginLimiter } from "./login-limiter.js";
+import {
+  type ActivityQuery,
+  activity,
+  type CardFilter,
+  cardDetail,
+  cardViews,
+  executionView,
+  InvalidQuery,
+  needsMe,
+  needsYou,
+  parseCardFilter,
+  projectSnapshotView,
+  projectState,
+  waitingOnAgent,
+} from "./read.js";
 import { serveStatic } from "./static.js";
+import { parseAfter, type StreamCursor, serveStream } from "./stream.js";
 
 /**
  * The Workbench listener (M5 plan §3.1).
@@ -41,6 +58,13 @@ export interface WebServerOptions {
   readonly log?: (event: Readonly<Record<string, unknown>>) => void;
   readonly clock?: Clock;
   readonly loginLimiter?: LoginLimiter;
+  /** Attachment blobs live beside the database (§9.3). */
+  readonly dataDir?: string;
+  /** SSE cadence; tests shorten it, production uses the plan's 500 ms / 15 s. */
+  readonly stream?: {
+    readonly pollMs?: number;
+    readonly heartbeatMs?: number;
+  };
 }
 
 export interface RunningWebServer {
@@ -61,8 +85,11 @@ interface RequestContext {
   readonly config: WebConfig;
   readonly clock: Clock;
   readonly limiter: LoginLimiter;
+  readonly dataDir: string;
+  readonly stream: WebServerOptions["stream"];
   /** The validated `Host` header, i.e. the origin this listener answers on. */
   readonly host: string;
+  readonly log: (event: Readonly<Record<string, unknown>>) => void;
 }
 
 export async function startWebServer(
@@ -72,6 +99,7 @@ export async function startWebServer(
   const clock = options.clock ?? systemClock;
   const limiter = options.loginLimiter ?? new LoginLimiter();
   const log = options.log ?? (() => undefined);
+  const dataDir = options.dataDir ?? process.env.CARDIGAN_DATA_DIR ?? ".data";
   const host = config.host;
   // Filled in once the socket is bound: the Host allow-list needs the port.
   let boundPort = 0;
@@ -130,7 +158,10 @@ export async function startWebServer(
         config,
         clock,
         limiter,
+        dataDir,
+        stream: options.stream,
         host: hostHeader,
+        log,
       });
       return;
     }
@@ -198,7 +229,197 @@ async function handleApi(context: RequestContext): Promise<void> {
     return;
   }
 
+  if (path === "/api/projects") {
+    if (req.method !== "GET") methodNotAllowed(["GET"]);
+    sendJson(res, 200, {
+      projects: context.store.listProjects().map((project) => ({
+        id: project.id,
+        name: project.name,
+        created_at: project.created_at,
+      })),
+    });
+    return;
+  }
+
+  const route = PROJECT_ROUTE.exec(path);
+  if (route !== null) {
+    const project_id = decodeURIComponent(route[1] ?? "") as ProjectId;
+    const rest = route[2] ?? "/";
+    if (context.store.getProject(project_id) === undefined) {
+      throw new HttpRejection(
+        404,
+        "not_found",
+        `project ${project_id} not found`,
+      );
+    }
+    return await serveProjectRoute(context, project_id, rest);
+  }
+
   throw new HttpRejection(404, "not_found", "not found");
+}
+
+/** `/api/projects/<id><rest>`; the id is URL-encoded by the client. */
+const PROJECT_ROUTE = /^\/api\/projects\/([^/]+)(\/.*)$/;
+
+/**
+ * Read-only project routes (M5 plan §4 M5.1). They answer from the domain
+ * queries, as the human, and never write: see `read.ts` for the mapping to
+ * §8.3–§8.6.
+ */
+async function serveProjectRoute(
+  context: RequestContext,
+  project_id: ProjectId,
+  rest: string,
+): Promise<void> {
+  const { req, res, url, clock, store } = context;
+  const now = clock.now();
+
+  if (rest === "/stream") {
+    if (req.method !== "GET") methodNotAllowed(["GET"]);
+    let after: StreamCursor[];
+    try {
+      after = parseAfter(url.searchParams.get("after"));
+    } catch (error) {
+      throw new HttpRejection(
+        400,
+        "validation_failed",
+        error instanceof Error ? error.message : "malformed cursors",
+      );
+    }
+    await serveStream({
+      store,
+      project_id,
+      req,
+      res,
+      after,
+      ...(context.stream?.pollMs === undefined
+        ? {}
+        : { pollMs: context.stream.pollMs }),
+      ...(context.stream?.heartbeatMs === undefined
+        ? {}
+        : { heartbeatMs: context.stream.heartbeatMs }),
+      log: context.log,
+    });
+    return;
+  }
+
+  if (req.method !== "GET") methodNotAllowed(["GET"]);
+
+  const attachment = /^\/attachments\/([^/]+)$/.exec(rest);
+  if (attachment !== null) {
+    const served = await serveAttachment({
+      store,
+      project_id,
+      attachment_id: decodeURIComponent(attachment[1] ?? ""),
+      req,
+      res,
+      dataDir: context.dataDir,
+    });
+    if (!served) {
+      throw new HttpRejection(404, "not_found", "attachment not found");
+    }
+    return;
+  }
+
+  const state = projectState(store, project_id);
+
+  if (rest === "/cards") {
+    let filter: CardFilter;
+    try {
+      filter = parseCardFilter(url.searchParams.get("filter"));
+    } catch (error) {
+      throw new HttpRejection(
+        400,
+        "validation_failed",
+        error instanceof InvalidQuery ? error.message : "unknown filter",
+      );
+    }
+    const cards = cardViews(state);
+    const selected = cards.filter((card) =>
+      filter === "needs_me"
+        ? needsMe(card)
+        : filter === "agent"
+          ? waitingOnAgent(card)
+          : true,
+    );
+    sendJson(res, 200, {
+      project_id,
+      filter,
+      cards: selected,
+      counts: {
+        total: cards.length,
+        needs_me: cards.filter(needsMe).length,
+        agent: cards.filter(waitingOnAgent).length,
+      },
+    });
+    return;
+  }
+
+  const card = /^\/cards\/([^/]+)$/.exec(rest);
+  if (card !== null) {
+    const card_id = decodeURIComponent(card[1] ?? "") as CardId;
+    const limit = numberParam(url.searchParams.get("limit"));
+    const detail = cardDetail(state, card_id, {
+      now,
+      ...(limit === undefined ? {} : { timelineLimit: limit }),
+    });
+    if (detail === undefined) {
+      throw new HttpRejection(404, "not_found", `card ${card_id} not found`);
+    }
+    sendJson(res, 200, { project_id, ...detail });
+    return;
+  }
+
+  if (rest === "/needs-you") {
+    sendJson(res, 200, { project_id, ...needsYou(state, now) });
+    return;
+  }
+
+  if (rest === "/snapshot") {
+    sendJson(res, 200, projectSnapshotView(state, now));
+    return;
+  }
+
+  if (rest === "/execution") {
+    const machines = store.uow.read((tx) => tx.machines.list(project_id));
+    sendJson(res, 200, executionView(state, now, machines));
+    return;
+  }
+
+  if (rest === "/activity") {
+    sendJson(res, 200, activity(state, activityQuery(url)));
+    return;
+  }
+
+  throw new HttpRejection(404, "not_found", "not found");
+}
+
+/** §8.6 filters: card, role, type, paging. Absent parameters mean "no filter". */
+function activityQuery(url: URL): ActivityQuery {
+  const query: {
+    card_id?: CardId;
+    role?: string;
+    type?: string;
+    before?: string;
+    limit?: number;
+  } = {};
+  const card_id = url.searchParams.get("card_id");
+  if (card_id !== null && card_id.length > 0) query.card_id = card_id as CardId;
+  const role = url.searchParams.get("role");
+  if (role !== null && role.length > 0) query.role = role;
+  const type = url.searchParams.get("type");
+  if (type !== null && type.length > 0) query.type = type;
+  const before = url.searchParams.get("before");
+  if (before !== null && before.length > 0) query.before = before;
+  const limit = numberParam(url.searchParams.get("limit"));
+  if (limit !== undefined) query.limit = limit;
+  return query;
+}
+
+function numberParam(value: string | null): number | undefined {
+  if (value === null || value.trim().length === 0) return undefined;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
 
 /** Public: tells the login page whether a password exists and who you are. */

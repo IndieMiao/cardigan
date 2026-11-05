@@ -64,6 +64,11 @@ export interface StartServerOptions {
   readonly web?: {
     readonly config: WebConfig;
     readonly log?: (event: Readonly<Record<string, unknown>>) => void;
+    /** SSE cadence; tests shorten it. */
+    readonly stream?: {
+      readonly pollMs?: number;
+      readonly heartbeatMs?: number;
+    };
   };
 }
 
@@ -178,8 +183,12 @@ export async function startCardiganServer(
     try {
       web = await startWebServer({
         store,
+        dataDir: config.dataDir,
         config: options.web.config,
         ...(options.web.log === undefined ? {} : { log: options.web.log }),
+        ...(options.web.stream === undefined
+          ? {}
+          : { stream: options.web.stream }),
       });
     } catch (error) {
       await plane?.stop();
