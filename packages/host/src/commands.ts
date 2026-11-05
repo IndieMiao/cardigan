@@ -124,13 +124,26 @@ export function issueAssignmentToken(
   });
 }
 
-/** Token issuance inside the caller's transaction, so Assignment and token commit together. */
+/**
+ * Token issuance inside the caller's transaction, so Assignment and token commit
+ * together.
+ *
+ * §7.1 / M4.5: a standing PM's scope is decided by its persisted `standing_mode`,
+ * never by the caller. Every current path pre-filters the tools, but this
+ * function is exported and a new issuance path could forget; intersecting with
+ * the mode's tool set keeps the token from ever being wider than the mode
+ * allows (S02, G11 cross-check).
+ */
 export function issueTokenInTransaction(
   tx: StoreTransactionContext,
   project: ProjectId,
   assignment_id: Assignment["id"],
   role: Pick<RoleReference, "role_version" | "allowed_tools">,
 ): IssuedToken {
+  const allowed_tools = modeScopedTools(
+    tx.assignments.get(project, assignment_id),
+    role.allowed_tools,
+  );
   for (const token of tx.tokensForAssignment(project, assignment_id)) {
     if (token.revoked_at === null) tx.revokeToken(token.id);
   }
@@ -139,9 +152,29 @@ export function issueTokenInTransaction(
     assignment_id,
     role: {
       role_version: role.role_version,
-      allowed_tools: role.allowed_tools,
+      allowed_tools,
     },
   });
+}
+
+/** The caller's tool list, cut down to what the Assignment's mode permits. */
+function modeScopedTools(
+  assignment: Assignment | undefined,
+  allowed_tools: readonly RoleReference["allowed_tools"][number][],
+): readonly RoleReference["allowed_tools"][number][] {
+  if (
+    assignment === undefined ||
+    assignment.scope !== "standing" ||
+    assignment.role_id !== "pm" ||
+    assignment.standing_mode === undefined
+  ) {
+    return allowed_tools;
+  }
+  const permitted = standingTools(
+    allowed_tools as never,
+    assignment.standing_mode,
+  );
+  return allowed_tools.filter((tool) => permitted.includes(tool as never));
 }
 
 /** One domain command in one write transaction; failures surface with their code. */

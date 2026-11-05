@@ -11,7 +11,7 @@ import { join } from "node:path";
 import type { Assignment, ProjectId, Role } from "@cardigan/domain";
 import { Store, writeRole } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
-import { issueAssignmentToken } from "./commands.js";
+import { issueAssignmentToken, issueTokenInTransaction } from "./commands.js";
 
 const project = "p-host-standing" as ProjectId;
 const tools = ["whoami", "create_card", "record_decision"] as const;
@@ -137,4 +137,47 @@ test("work-item Assignments keep the never-wider rule", () => {
   });
   expect(issued.record.allowed_tools).toEqual(["whoami"]);
   expect(current()?.standing_mode).toBeUndefined();
+});
+
+test("the transaction issuer never widens a standing Assignment past its mode", () => {
+  // S02: a caller that passes the role's full tool list must not hand Ops the
+  // Office-only tool. The Assignment's persisted mode decides, not the caller.
+  seat(standing({ standing_mode: "ops" }));
+  const issued = store.uow.run((tx) =>
+    issueTokenInTransaction(tx, project, "A-1" as never, {
+      role_version: 1,
+      allowed_tools: [...tools],
+    }),
+  );
+  expect(issued.record.allowed_tools).not.toContain("record_decision");
+  expect(issued.record.allowed_tools).toEqual(["whoami", "create_card"]);
+});
+
+test("the transaction issuer keeps the office scope intact for the office", () => {
+  seat(standing({ standing_mode: "office" }));
+  const issued = store.uow.run((tx) =>
+    issueTokenInTransaction(tx, project, "A-1" as never, {
+      role_version: 1,
+      allowed_tools: [...tools],
+    }),
+  );
+  expect(issued.record.allowed_tools).toEqual([...tools]);
+});
+
+test("a work-item Assignment keeps the caller's tool list", () => {
+  const work = standing({
+    id: "A-2" as never,
+    scope: "work_item",
+    role_id: "coder",
+    work_item_id: "W-1" as never,
+    standing_mode: undefined,
+  });
+  store.uow.run((tx) => tx.assignments.put(project, work));
+  const issued = store.uow.run((tx) =>
+    issueTokenInTransaction(tx, project, work.id, {
+      role_version: 1,
+      allowed_tools: [...tools],
+    }),
+  );
+  expect(issued.record.allowed_tools).toEqual([...tools]);
 });

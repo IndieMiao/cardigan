@@ -56,80 +56,72 @@ for (const path of [
   "start",
   "dispatcher",
 ] as const) {
-  // Defect: the exported host transaction issuer trusts the role tools, ignoring Ops' persisted mode.
-  const check = path === "transaction" ? test.fails : test;
-  check(
-    `S02 M4.5: Ops token issued through ${path} never gains record_decision`,
-    async () => {
-      const s = await m4Cross();
-      f = s;
-      const ops = standing(s, "ops");
-      let token: string;
-      const entities = launchEntities(s.store(), s.card.project_id, ops.id);
-      if (path === "cli-token") {
-        const printed = await s.cli("token", "issue", ops.id);
-        const issued = printed
-          .split(/\s+/)
-          .find((word) => s.store().verifyToken(word));
-        if (!issued) throw new Error("CLI did not return its issued token");
-        token = issued;
-      } else if (path === "host")
-        token = issueAssignmentToken(
-          s.store(),
-          s.card.project_id,
-          entities,
-        ).token;
-      else if (path === "transaction")
-        token = s.store().uow.run((tx) =>
-          issueTokenInTransaction(tx, s.card.project_id, ops.id, {
-            role_version: entities.role.version,
-            allowed_tools: entities.role.allowed_tools,
-          }),
-        ).token;
-      else if (path === "start") {
-        await s.start(ops);
-        token = s.token(ops) as string;
-      } else {
-        s.command((state, actor, ports) =>
-          postComment(
-            state,
-            actor,
-            { card_id: s.card.id, body: "Please coordinate the next step" },
-            ports,
-          ),
-        );
-        await s.restart();
-        await expect
-          .poll(() => s.token(ops), { timeout: 10_000 })
-          .toBeDefined();
-        token = s.token(ops) as string;
-      }
-      const record = s.store().verifyToken(token);
-      expect(record?.assignment_id).toBe(ops.id);
-      expect(record?.allowed_tools).not.toContain("record_decision");
-      const client = new Client({ name: "standing-cross", version: "1" });
-      try {
-        await client.connect(
-          new StreamableHTTPClientTransport(new URL(s.url()), {
-            requestInit: { headers: { Authorization: `Bearer ${token}` } },
-          }),
-        );
-        expect(
-          (await client.listTools()).tools.map((t) => t.name),
-        ).not.toContain("record_decision");
-        const response = await client.callTool({
-          name: "record_decision",
-          arguments: {},
-        });
-        expect(response.structuredContent).toMatchObject({
-          error: { code: "forbidden_tool" },
-        });
-      } finally {
-        await client.close();
-      }
-    },
-    20_000,
-  );
+  test(`S02 M4.5: Ops token issued through ${path} never gains record_decision`, async () => {
+    const s = await m4Cross();
+    f = s;
+    const ops = standing(s, "ops");
+    let token: string;
+    const entities = launchEntities(s.store(), s.card.project_id, ops.id);
+    if (path === "cli-token") {
+      const printed = await s.cli("token", "issue", ops.id);
+      const issued = printed
+        .split(/\s+/)
+        .find((word) => s.store().verifyToken(word));
+      if (!issued) throw new Error("CLI did not return its issued token");
+      token = issued;
+    } else if (path === "host")
+      token = issueAssignmentToken(
+        s.store(),
+        s.card.project_id,
+        entities,
+      ).token;
+    else if (path === "transaction")
+      token = s.store().uow.run((tx) =>
+        issueTokenInTransaction(tx, s.card.project_id, ops.id, {
+          role_version: entities.role.version,
+          allowed_tools: entities.role.allowed_tools,
+        }),
+      ).token;
+    else if (path === "start") {
+      await s.start(ops);
+      token = s.token(ops) as string;
+    } else {
+      s.command((state, actor, ports) =>
+        postComment(
+          state,
+          actor,
+          { card_id: s.card.id, body: "Please coordinate the next step" },
+          ports,
+        ),
+      );
+      await s.restart();
+      await expect.poll(() => s.token(ops), { timeout: 10_000 }).toBeDefined();
+      token = s.token(ops) as string;
+    }
+    const record = s.store().verifyToken(token);
+    expect(record?.assignment_id).toBe(ops.id);
+    expect(record?.allowed_tools).not.toContain("record_decision");
+    const client = new Client({ name: "standing-cross", version: "1" });
+    try {
+      await client.connect(
+        new StreamableHTTPClientTransport(new URL(s.url()), {
+          requestInit: { headers: { Authorization: `Bearer ${token}` } },
+        }),
+      );
+      expect((await client.listTools()).tools.map((t) => t.name)).not.toContain(
+        "record_decision",
+      );
+      const response = await client.callTool({
+        name: "record_decision",
+        arguments: {},
+      });
+      expect(response.structuredContent).toMatchObject({
+        error: { code: "forbidden_tool" },
+      });
+    } finally {
+      await client.close();
+    }
+  }, 20_000);
 }
 
 test("S03 M4.5: standing resolver follows persistent mode even if token scopes say the opposite", async () => {
