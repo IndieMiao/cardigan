@@ -693,6 +693,8 @@ M3.4 的 Runtime 接线只根据未结束的业务 Run 判断忙碌，不用 Har
 
 > 它们共享"项目事实"，不共享"对话噪声"。
 
+两个 Assignment 只靠最新一张 Token 的工具范围区分：PM Office 有 `record_decision`，PM Ops 没有。换 Token 时（`cardigan pm start`、Dispatcher 重开终端、`token issue`）必须沿用上一张的范围并与角色的工具取交集，永远不能比上一张更宽；否则一次重启就等于把 Ops 提升成 Office。首条提示同时写明当前是前台还是后台。
+
 ### 7.2 Event Router：先规则，后 PM
 
 能由规则确定处理的事件不调用 PM，见 §6.4。只有以下情况才升级给 PM Ops：
