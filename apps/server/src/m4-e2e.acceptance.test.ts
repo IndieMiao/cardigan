@@ -293,9 +293,7 @@ async function harness(): Promise<Harness> {
         inactivityGraceMs: 3_600_000,
         lossGraceMs: 3_600_000,
         eventSilenceMs: 86_400_000,
-        onError: (error) => {
-          if (process.env.M4_E2E_DEBUG) console.error("LOOP", String(error));
-        },
+        onError: () => undefined,
         snapshot: async () => ({
           model: "fixture-model",
           agent_cli_version: "pi 1.5.0",
@@ -387,6 +385,20 @@ async function harness(): Promise<Harness> {
           !["completed", "failed", "cancelled"].includes(candidate.status),
       );
       if (run === undefined) throw new Error("no unfinished run");
+      // Acknowledge the card first: unread notifications would wake the
+      // Assignment again as soon as its Run ends.
+      const card = state().cards[0];
+      if (card !== undefined)
+        await client.callTool({
+          name: "ack_events",
+          arguments: {
+            card_id: card.id,
+            up_to_seq: h.store.getUpdates({
+              project_id: project as never,
+              card_id: card.id,
+            }).latest_seq,
+          },
+        });
       const result = await client.callTool({
         name: "finish_run",
         arguments: {
@@ -659,6 +671,43 @@ async function deliverAndApprove(
   return { deliveryId, completionId };
 }
 
+/**
+ * The Dispatcher keeps waking Agents for pending follow-up notifications. A
+ * real Agent would answer them; this helper acknowledges and finishes each new
+ * Run so the Cleanup loop sees Assignments with no unfinished Run.
+ */
+async function drainRuns(clients: ReadonlyMap<string, Client>) {
+  for (let round = 0; round < 40; round += 1) {
+    const unfinished = h
+      .state()
+      .runs.filter(
+        (run) => !["completed", "failed", "cancelled"].includes(run.status),
+      );
+    if (unfinished.length === 0) return;
+    for (const run of unfinished) {
+      const client = clients.get(run.assignment_id);
+      if (client === undefined) continue;
+      await call(client, "whoami");
+      const card = h.state().cards[0];
+      if (card !== undefined)
+        await call(client, "ack_events", {
+          card_id: card.id,
+          up_to_seq: h.store.getUpdates({
+            project_id: project as never,
+            card_id: card.id,
+          }).latest_seq,
+        });
+      await call(client, "finish_run", {
+        idempotency_key: idem(),
+        run_id: run.id,
+        outcome: "completed",
+        summary: "follow-up handled",
+      });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
 const centralRepo = () =>
   new CentralRepositoryService(
     new CentralGitTransport({ dataDir: h.dataDir }),
@@ -696,6 +745,13 @@ test("a forged SHA is rejected, and the accepted flow merges, releases and clean
   await expect
     .poll(() => h.state().cards[0]?.status, { timeout: 20_000 })
     .toBe("done");
+  await drainRuns(
+    new Map<string, Client>([
+      [seeded.coder.id, seeded.coderClient],
+      [seeded.reviewer.id, seeded.reviewerClient],
+      [seeded.pm.id, seeded.pmClient],
+    ]),
+  );
 
   const central = centralRepo();
   const repository = await central.ensureCentral({
@@ -719,11 +775,22 @@ test("a forged SHA is rejected, and the accepted flow merges, releases and clean
       { timeout: 20_000 },
     )
     .toBe("released");
-  expect(existsSync(seeded.seated.worktree)).toBe(false);
   await expect
-    .poll(async () => (await call(seeded.coderClient, "whoami")).isError, {
-      timeout: 15_000,
-    })
+    .poll(() => existsSync(seeded.seated.worktree), { timeout: 20_000 })
+    .toBe(false);
+  // A 401 aborts the MCP request, so the rejection itself is the evidence.
+  await expect
+    .poll(
+      async () => {
+        try {
+          await call(seeded.coderClient, "whoami");
+          return false;
+        } catch {
+          return true;
+        }
+      },
+      { timeout: 15_000 },
+    )
     .toBe(true);
 }, 60_000);
 
@@ -784,6 +851,16 @@ test("a dirty worktree becomes a Needs You decision and is not deleted", async (
   );
 
   await expect
+    .poll(() => h.state().cards[0]?.status, { timeout: 20_000 })
+    .toBe("done");
+  await drainRuns(
+    new Map<string, Client>([
+      [seeded.coder.id, seeded.coderClient],
+      [seeded.reviewer.id, seeded.reviewerClient],
+      [seeded.pm.id, seeded.pmClient],
+    ]),
+  );
+  await expect
     .poll(
       () =>
         h
@@ -799,6 +876,10 @@ test("a dirty worktree becomes a Needs You decision and is not deleted", async (
     .decisions.find((entry) => entry.trigger === "worktree_cleanup");
   expect(await h.cardigan("needs-you")).toContain(decision?.id as string);
   expect(existsSync(join(seeded.seated.worktree, "notes.txt"))).toBe(true);
+
+  // `worktree diff` shows what a removal would lose before the human decides.
+  const diff = await h.cardigan("worktree", "diff", seeded.coder.id);
+  expect(diff).toContain("notes.txt");
 
   expect(await h.cardigan("worktree", "keep", seeded.coder.id)).toContain(
     "已决定保留",
