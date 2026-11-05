@@ -7,6 +7,7 @@ import {
   type DecisionId,
   type Delivery,
   developmentCardTemplate,
+  type GitCentralPort,
   type GitWorktreePort,
   type IdAllocator,
   type Repositories,
@@ -121,4 +122,11 @@ test("D4 and invariant 13: the development template requires human-facing comple
       required: true,
     },
   ]);
+});
+
+test("invariants 9, 14: central ref writes require an expected value and expose no push", () => {
+  expectTypeOf<GitCentralPort>().not.toHaveProperty("push");
+  expectTypeOf<GitCentralPort["compareAndSwapRef"]>().parameters.toEqualTypeOf<
+    [string, string, string, string | null]
+  >();
 });

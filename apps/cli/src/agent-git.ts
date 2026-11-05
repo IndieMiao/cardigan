@@ -16,7 +16,11 @@ import {
 import { isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { GitWorktreePort } from "@cardigan/domain";
-import { LocalGitTransport } from "@cardigan/git-transport";
+import {
+  gitEnvironment,
+  gitSafetyArguments,
+  LocalGitTransport,
+} from "@cardigan/git-transport";
 import {
   type AgentExecution,
   prepareAgentProject,
@@ -26,7 +30,7 @@ const exec = promisify(execFile);
 const errno = (e: unknown) => (e as NodeJS.ErrnoException).code;
 export type AgentGitRunner = (args: readonly string[]) => Promise<string>;
 
-/** Host reads only the registered source; all mutable workspace Git runs as agent. */
+/** Host reads only the central repository; all mutable workspace Git runs as agent. */
 export class AgentGitTransport implements GitWorktreePort {
   private readonly commands: LocalGitTransport;
   private readonly repository: string;
@@ -93,7 +97,9 @@ export class AgentGitTransport implements GitWorktreePort {
       if (errno(error) !== "EEXIST") throw error;
     }
     if ((await readFile(metadata, "utf8")) !== source)
-      throw new Error("Existing clone does not belong to this local source");
+      throw new Error(
+        "Existing clone does not belong to this local source; rebuild it from the central repository",
+      );
     return source;
   }
   private async bundle(source: string) {
@@ -102,22 +108,18 @@ export class AgentGitTransport implements GitWorktreePort {
     const path = join(stage, "source.bundle");
     const target = join(this.inputs, "source.bundle");
     try {
-      const env = Object.fromEntries(
-        Object.entries(process.env).filter(([k]) => !k.startsWith("GIT_")),
-      );
+      const env = gitEnvironment();
       await exec(
         "git",
         [
-          "-c",
-          "protocol.allow=never",
-          "-c",
-          "core.hooksPath=/dev/null",
+          ...gitSafetyArguments,
           "-C",
           source,
           "bundle",
           "create",
           path,
           "--branches",
+          "--glob=refs/cardigan/deliveries/*",
         ],
         {
           env: { ...env, GIT_TERMINAL_PROMPT: "0" },
@@ -137,12 +139,7 @@ export class AgentGitTransport implements GitWorktreePort {
     const directory = args[0] === "-C" ? args[1] : undefined;
     return this.run([
       ...(directory ? ["-c", `safe.directory=${directory}`] : []),
-      "-c",
-      "protocol.allow=never",
-      "-c",
-      "protocol.file.allow=always",
-      "-c",
-      "core.hooksPath=/dev/null",
+      ...gitSafetyArguments,
       ...args,
     ]);
   }
@@ -224,10 +221,12 @@ export class AgentGitTransport implements GitWorktreePort {
       "-C",
       repository,
       "fetch",
+      "--atomic",
       "--no-tags",
       "--",
       bundle,
       "+refs/heads/*:refs/remotes/origin/*",
+      "+refs/cardigan/deliveries/*:refs/cardigan/deliveries/*",
     ]);
   }
   async resolveCommit(repository: string, ref: string) {

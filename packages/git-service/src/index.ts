@@ -8,6 +8,15 @@ import type {
 } from "@cardigan/domain";
 import { parseId } from "@cardigan/domain";
 
+import type { CentralRepositoryService } from "./central.js";
+
+export {
+  type CentralOptions,
+  type CentralProject,
+  CentralRepositoryService,
+  type SourceSync,
+} from "./central.js";
+
 export interface WorktreePlacement {
   readonly worktree_path: string;
   readonly branch?: string;
@@ -34,6 +43,7 @@ export class GitWorktreeService {
   private readonly worktrees: string;
   constructor(
     private readonly git: GitWorktreePort,
+    private readonly central: CentralRepositoryService,
     options: WorktreeOptions = {},
   ) {
     const dataDir = options.dataDir ?? process.env.CARDIGAN_DATA_DIR ?? ".data";
@@ -90,7 +100,13 @@ export class GitWorktreeService {
       throw new Error("Assignment worktree root changed");
     if (a.branch && a.branch !== branch)
       throw new Error("Assignment branch changed");
-    await this.git.ensureClone(input.source_repo, repository);
+    const project = {
+      project_id: input.project_id,
+      source_repo: input.source_repo,
+      base_branch: card.base_branch,
+    };
+    const central = await this.central.ensureCentral(project);
+    await this.git.ensureClone(central, repository);
     const existing = (await this.git.listWorktrees(repository)).find(
       (w) => w.path === path,
     );
@@ -109,7 +125,12 @@ export class GitWorktreeService {
         base_sha: a.base_sha ?? existing.head,
       };
     }
-    await this.git.fetch(repository, input.source_repo);
+    if (
+      !readonly &&
+      (await this.central.syncFromSource(project)) === "diverged"
+    )
+      throw new Error("Registered source and central baseline diverged");
+    await this.git.fetch(repository, central);
     const base_sha = await this.git.resolveCommit(
       repository,
       readonly

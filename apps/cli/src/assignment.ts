@@ -13,8 +13,14 @@ import type {
   WorkItem,
 } from "@cardigan/domain";
 import { abortDispatch, dispatchRun, queueRun } from "@cardigan/domain";
-import { GitWorktreeService } from "@cardigan/git-service";
-import { LocalGitTransport } from "@cardigan/git-transport";
+import {
+  CentralRepositoryService,
+  GitWorktreeService,
+} from "@cardigan/git-service";
+import {
+  CentralGitTransport,
+  LocalGitTransport,
+} from "@cardigan/git-transport";
 import {
   type CompiledAssignmentLaunch,
   compileAssignmentLaunch,
@@ -830,7 +836,16 @@ export async function startAssignmentCommand(
       : new AgentGitTransport(execution, project_id, assignment_id, (args) =>
           agentCapture(runtime, "git", args),
         );
-  const gitService = new GitWorktreeService(transport, {
+  const central = new CentralRepositoryService(
+    new CentralGitTransport({
+      dataDir,
+      ...(execution.mode === "agent-ssh"
+        ? { agentRoot: execution.agentRoot }
+        : {}),
+    }),
+    { dataDir },
+  );
+  const gitService = new GitWorktreeService(transport, central, {
     dataDir,
     ...locations,
   });

@@ -4,7 +4,7 @@
  * a real Git repository and only the public service surface.
  *
  * The worktree service is called exactly like the assembly layer calls it:
- * `new GitWorktreeService(new LocalGitTransport(), { worktreesRoot })`.
+ * `new GitWorktreeService(localTransport, centralService, { worktreesRoot })`.
  */
 import { execFile } from "node:child_process";
 import {
@@ -22,11 +22,12 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import type { Assignment, Card, Role, WorkItem } from "@cardigan/domain";
 import {
+  CentralRepositoryService,
   type EnsureWorktreeInput,
   GitWorktreeService,
 } from "@cardigan/git-service";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { LocalGitTransport } from "./index.js";
+import { CentralGitTransport, LocalGitTransport } from "./index.js";
 
 const exec = promisify(execFile);
 const git = async (path: string, ...args: string[]) =>
@@ -148,10 +149,17 @@ afterEach(async () => {
 /** The service under test, configured like the assembly layer configures it. */
 function service(): GitWorktreeService {
   // `dataDir` isolates the base clones too, so tests never share a clone.
-  return new GitWorktreeService(new LocalGitTransport(), {
-    dataDir: join(root, "data"),
-    worktreesRoot,
-  });
+  return new GitWorktreeService(
+    new LocalGitTransport(),
+    new CentralRepositoryService(
+      new CentralGitTransport({ dataDir: join(root, "data") }),
+      { dataDir: join(root, "data") },
+    ),
+    {
+      dataDir: join(root, "data"),
+      worktreesRoot,
+    },
+  );
 }
 
 /** A complete, consistent input: card, work item, assignment and role agree. */

@@ -14,12 +14,13 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import type { Assignment, Card, Role, WorkItem } from "@cardigan/domain";
 import {
+  CentralRepositoryService,
   type EnsureWorktreeInput,
   GitWorktreeService,
   type WorktreePlacement,
 } from "@cardigan/git-service";
 import { afterEach, beforeEach, expect, test } from "vitest";
-import { LocalGitTransport } from "./index.js";
+import { CentralGitTransport, LocalGitTransport } from "./index.js";
 
 const exec = promisify(execFile);
 const git = async (path: string, ...args: string[]) =>
@@ -126,7 +127,13 @@ beforeEach(async () => {
     work_item: item,
   };
   transport = new LocalGitTransport();
-  service = new GitWorktreeService(transport, { dataDir });
+  service = new GitWorktreeService(
+    transport,
+    new CentralRepositoryService(new CentralGitTransport({ dataDir }), {
+      dataDir,
+    }),
+    { dataDir },
+  );
 });
 afterEach(async () => {
   await rm(root, { recursive: true, force: true });
@@ -263,10 +270,16 @@ test("worktree=none skips Git and configured roots override the defaults", async
     }),
   ).toBeUndefined();
   await expect(access(dataDir)).rejects.toThrow();
-  const custom = new GitWorktreeService(transport, {
-    repositoriesRoot: join(root, "repos"),
-    worktreesRoot: join(root, "trees"),
-  });
+  const custom = new GitWorktreeService(
+    transport,
+    new CentralRepositoryService(new CentralGitTransport({ dataDir }), {
+      dataDir,
+    }),
+    {
+      repositoriesRoot: join(root, "repos"),
+      worktreesRoot: join(root, "trees"),
+    },
+  );
   expect(placement(await custom.ensureWorktree(input)).worktree_path).toBe(
     join(root, "trees", "fixture", "A-1"),
   );
@@ -325,6 +338,7 @@ test.each([
 
 test("existing foreign paths, branches and source repositories are never overwritten", async () => {
   const path = join(dataDir, "agent", "worktrees", "fixture", "A-1");
+  await mkdir(dataDir, { mode: 0o700 });
   await mkdir(path, { recursive: true });
   await writeFile(join(path, "keep"), "private");
   await expect(service.ensureWorktree(input)).rejects.toThrow(/already exists/);
