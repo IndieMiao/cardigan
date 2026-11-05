@@ -611,6 +611,7 @@ export function activity(state: CommandState, query: ActivityQuery) {
       type: event.type,
       actor: event.actor,
       role: actorRole(event),
+      payload: event.payload,
       created_at: event.created_at,
     })),
     counts: { returned: page.length, matched: filtered.length },

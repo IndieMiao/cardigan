@@ -155,6 +155,11 @@ export function fakeClient(
   overrides: Partial<CardiganClient> = {},
 ): CardiganClient {
   return {
+    activity: async () => ({
+      events: [],
+      next_before: null,
+      counts: { returned: 0, matched: 0 },
+    }),
     snapshot: async () => ({
       cards: [],
       in_progress: [],

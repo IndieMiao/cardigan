@@ -7,6 +7,7 @@ import {
   type SessionInfo,
 } from "./api.js";
 import { routeHash, useRoute } from "./route.js";
+import { ActivityPage } from "./views/ActivityPage.js";
 import { CardDetailPage } from "./views/CardDetailPage.js";
 import { CardListPage } from "./views/CardListPage.js";
 import { ExecutionPage } from "./views/ExecutionPage.js";
@@ -182,6 +183,7 @@ function Workbench({
               [
                 ["snapshot", "项目快照"],
                 ["execution", "执行视图"],
+                ["activity", "项目动态"],
               ] as const
             ).map(([kind, label]) => (
               <a
@@ -241,6 +243,13 @@ function Workbench({
             还没有项目。先在终端运行{" "}
             <code>cardigan project create &lt;id&gt;</code>。
           </p>
+        )}
+        {selected && route?.kind === "activity" && (
+          <ActivityPage
+            key={selected.id}
+            client={client}
+            projectId={selected.id}
+          />
         )}
         {selected && route?.kind === "snapshot" && (
           <SnapshotPage

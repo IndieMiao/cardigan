@@ -354,7 +354,29 @@ export interface ExecutionData {
   readonly machines: readonly { id: string; label: string; status: string }[];
 }
 
+export interface ActivityFilter {
+  readonly card_id?: string;
+  readonly role?: string;
+  readonly type?: string;
+  readonly before?: string;
+}
+export interface ActivityData {
+  readonly events: readonly {
+    id: string;
+    card_id: string | null;
+    seq: number;
+    type: string;
+    role: string;
+    created_at: string;
+    payload: unknown;
+    actor: { kind: string; assignment_id?: string };
+  }[];
+  readonly next_before: string | null;
+  readonly counts: { returned: number; matched: number };
+}
+
 export interface CardiganClient {
+  activity(projectId: string, filters: ActivityFilter): Promise<ActivityData>;
   snapshot(projectId: string): Promise<SnapshotData>;
   execution(projectId: string): Promise<ExecutionData>;
   needsYou(projectId: string): Promise<NeedsPage>;
@@ -458,6 +480,14 @@ export class HttpCardiganClient implements CardiganClient {
     );
   }
 
+  activity(projectId: string, filters: ActivityFilter): Promise<ActivityData> {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(filters))
+      if (value) query.set(key, value);
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/activity?${query}`,
+    );
+  }
   snapshot(projectId: string): Promise<SnapshotData> {
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/snapshot`,

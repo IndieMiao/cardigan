@@ -516,3 +516,20 @@ test("execution exposes the card and persistent PM mode without credential metad
   for (const a of data.assignments)
     expect(a).not.toHaveProperty("mcp_token_id");
 });
+
+test("activity exposes event payloads so the UI can explain instructions and decisions", async () => {
+  await request(cardPath("comments"), { body: "先检查再发布" });
+  const response = await fetch(
+    web.url + path("/activity?type=comment_posted"),
+    { headers: { cookie } },
+  );
+  expect(await response.json()).toMatchObject({
+    events: [
+      expect.objectContaining({
+        type: "comment_posted",
+        role: "human",
+        payload: { body: "先检查再发布" },
+      }),
+    ],
+  });
+});
