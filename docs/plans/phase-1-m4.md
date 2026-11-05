@@ -1,6 +1,7 @@
 # Phase 1 · M4 任务计划：Git 服务（交付固定、中心合并、清理、对账）
 
-- 版本：v3（2026-11-05）：新增 M4.2b（大仓库：长超时、agent-ssh 下用增量推送代替整仓 bundle），排在 M4.4 之前；M4.T1 提前到 M4.4 之前
+- 版本：v4（2026-11-05）：新增 M4.5（常驻 PM 的前台/后台模式持久化），由 Pi 实现、Codex 验收
+- v3（2026-11-05）：新增 M4.2b（大仓库：长超时、agent-ssh 下用增量推送代替整仓 bundle），排在 M4.4 之前；M4.T1 提前到 M4.4 之前
 - v2（2026-11-05）：M4.3 改由 Pi 实现（Pi 先做完 M3 收尾，Codex 还排着 M4.1 修改和 M3.T2），交叉验收相应对调；M4.4 补充释放后 Token 立即失效的要求
 - v1（2026-11-05）
 - 对应：开发方案 §16 Phase 1 M4；§12 Worktree 与 Git 服务；§4.4 状态机、§4.5 不变量 9、13、14；§14 安全模型
@@ -25,8 +26,9 @@
 | M4.2b | git：大仓库支持（可配置的长超时；agent-ssh 下基线和固定交付改用主机推送，经 Agent 执行入口跑 receive-pack，只传增量） | Codex | Pi（M4.T1） | M4.2 | `fix/m4-large-repos` |
 | M4.3 | git：bare 仓库内合并、删除 worktree、worktree 清单与对账 | Pi | Codex（M4.T2） | M4.2 | `feat/m4-merge-cleanup` |
 | M4.4 | 组装：交付校验接进 MCP、合并执行循环、release 后清理、对账和备份循环、CLI | Pi | Codex（M4.T2） | M4.1–M4.3 | `feat/m4-assembly` |
+| M4.5 | 加固：常驻 PM 的前台/后台模式记在 Assignment 上，不再从 Token 的工具范围推断 | Pi | Codex（M4.T2） | 无 | `feat/m4-standing-mode` |
 | M4.T1 | 交叉验收：M4.1 状态机和命令、M4.2 的 Git 行为（M4.2b 合并后补它的部分） | Pi | — | M4.1、M4.2 | `test/m4-git` |
-| M4.T2 | 交叉验收：M4.3 的 Git 行为、M4.4 端到端 | Codex | — | M4.3、M4.4 | `test/m4-e2e` |
+| M4.T2 | 交叉验收：M4.3 的 Git 行为、M4.4 端到端、M4.5 | Codex | — | M4.3、M4.4、M4.5 | `test/m4-e2e` |
 | M4.S | 真实冒烟：一张卡从交付走到合并（agent-ssh 模式，用户装好之后） | Claude | — | M4.4、M3.S | — |
 
 ```
@@ -202,10 +204,20 @@ M4.3 审核时发现：中心仓库、基础 clone、bundle 生成的 git 命令
 - 验收（端到端，真实 server、真实 git、假 Agent；真实 hc 可用时也跑一遍）：伪造 SHA 的 `submit_delivery` 被拒；正常交付 → 审核 → 完成申请 → `merge confirm` → 中心基线出现合并提交、卡片 done、Assignment 被释放、干净的 worktree 被删除；构造冲突 → coder 被按门铃并新建 `fix` Run，卡片回到 `in_progress`；留有未提交修改的 worktree 进入 Needs You，不会被删除；手动在 worktree 根目录下建一个目录，对账能报出孤儿。
 - PR 太大就拆：先 MCP 校验和合并循环，再 release、清理、对账、备份和 CLI。
 
+### M4.5 常驻 PM 的模式持久化（Pi）
+
+M3.T2（#101）测出 P01：Ops 每次重启都会被提升为 Office，根源在于 Office 和 Ops 共用 `pm` 角色，只能靠"最新那张 Token 的工具范围里有没有 record_decision"来区分。#103 用"新 Token 取上一张 Token 和角色工具的交集"修好了，但这种推断很脆弱：只要哪条路径签发 Token 时没有沿用上一张，就会再次出错。
+
+- domain：常驻 Assignment 增加 `standing_mode: "office" | "ops"`，由 `cardigan pm create --office|--ops` 写入，之后不能修改；工作项级 Assignment 没有这个字段。
+- Token 的工具范围由模式决定：office 取 pm 角色的工具，ops 取 pm 角色的工具去掉 `record_decision`。`packages/host` 签发 Token、server 的 standingResolver、首条提示的前台/后台说明，都改为读这个字段。
+- 旧数据：没有这个字段的常驻 Assignment，按它最新那张 Token 推断一次并写回（迁移或首次读取时完成），之后只看字段。
+- 同步开发方案 §4（Assignment 字段）、§7.1、§10.4。
+- 验收：Office 和 Ops 都能从字段区分；Ops 无论经哪条路径换 Token 都拿不到 record_decision；旧数据能正确补上模式；`pm create` 之后不能把 ops 改成 office。
+
 ### M4.T1、M4.T2 交叉验收
 
 - **M4.T1（Pi）**：M4.1 的状态机和命令（每条迁移、合并确认、冲突回到 `in_progress` 后的完整重来）；M4.2 的校验（§16 的"伪造或不在分支上的 SHA 被拒"逐类覆盖）、固定不覆盖、同步三种结果；agent-ssh 下主机不在 Agent 目录里执行 git。
-- **M4.T2（Codex）**：M4.3 的合并、`stale`、清理和对账（agent-ssh 下主机不在 Agent 目录里执行 git）；M4.4 端到端，覆盖 §16 的三条验收和 §3.8 的状态流转；重启 server 后合并循环和对账从持久化状态继续，不重复合并、不重复发起清理决策。
+- **M4.T2（Codex）**：M4.5 的模式持久化；M4.3 的合并、`stale`、清理和对账（agent-ssh 下主机不在 Agent 目录里执行 git）；M4.4 端到端，覆盖 §16 的三条验收和 §3.8 的状态流转；重启 server 后合并循环和对账从持久化状态继续，不重复合并、不重复发起清理决策。
 
 ### M4.S 真实冒烟（Claude）
 
