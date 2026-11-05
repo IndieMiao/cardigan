@@ -36,7 +36,9 @@ const deliveryInput = z.object({
     kind: z.enum(["git_head", "artifact_sha256", "doc_version"]),
     value: z.string().min(1),
   }),
-  requested_verifiers: z.array(id("work_item")).min(1),
+  // §4.4: a work item that nothing verifies is delivered with an empty list.
+  // The domain still refuses an empty list whenever a verifier exists.
+  requested_verifiers: z.array(id("work_item")),
   branch: z.string().optional(),
   pr_url: z.string().optional(),
   attachments,

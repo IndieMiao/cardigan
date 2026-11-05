@@ -150,6 +150,52 @@ const counts = () =>
     timeline: tx.timeline.list(project_id).length,
   }));
 
+/**
+ * §4.4: a produce work item that nothing verifies is accepted on delivery, so
+ * the tool must accept an empty verifier list. The domain keeps refusing it
+ * whenever a verifier exists.
+ */
+test("§4.4: an unreviewed work item is delivered over MCP with no verifiers, and accepted", async () => {
+  // Drop the only verifier that targets W-1 (the fixture's code review item).
+  store.uow.run((tx) => {
+    const verifier = tx.work_items.get(project_id, "W-2" as never);
+    if (verifier === undefined) throw new Error("missing fixture verifier");
+    const { target_work_item_id: _target, ...rest } = verifier;
+    tx.work_items.put(project_id, rest as WorkItem);
+  });
+  const coder = await connect();
+
+  const result = await call(coder, "submit_delivery", {
+    ...delivery,
+    requested_verifiers: [],
+  });
+  expect(result.isError).not.toBe(true);
+  expect(result.structuredContent).toMatchObject({
+    status: "accepted",
+    requested_verifiers: [],
+  });
+
+  const after = store.uow.read((tx) => ({
+    produced: tx.work_items.get(project_id, "W-1" as never),
+    acceptedEvent: tx.events
+      .listAfter(project_id, card_id, 0)
+      .some((event) => event.type === "delivery_accepted"),
+  }));
+  expect(after.produced?.status).toBe("accepted");
+  expect(after.acceptedEvent).toBe(true);
+});
+
+test("§4.4: with a verifier present, an empty verifier list is refused", async () => {
+  const coder = await connect();
+  const result = await call(coder, "submit_delivery", {
+    ...delivery,
+    idempotency_key: "delivery-empty",
+    requested_verifiers: [],
+  });
+  expect(code(result)).toBe("validation_failed");
+  expect(store.uow.read((tx) => tx.deliveries.list(project_id))).toEqual([]);
+});
+
 test("delivery, review and completion use the real MCP transport, and replays survive later state changes", async () => {
   const coder = await connect();
   const reviewer = await connect(1);
