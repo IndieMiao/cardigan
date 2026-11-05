@@ -21,8 +21,12 @@ export interface WebHarness {
   readonly server: RunningWebServer;
   readonly port: number;
   readonly staticDir: string;
+  /** Where attachment blobs live; separate from the static build directory. */
+  readonly dataDir: string;
   /** `Host` header value a browser would send. */
   readonly hostHeader: string;
+  /** Log in with `password` and return the cookie header value. */
+  login(password: string): Promise<string>;
   close(): Promise<void>;
 }
 
@@ -30,6 +34,10 @@ export interface HarnessOptions {
   readonly overrides?: WebConfigOverrides;
   readonly password?: string;
   readonly staticFiles?: Readonly<Record<string, string>>;
+  readonly stream?: {
+    readonly pollMs?: number;
+    readonly heartbeatMs?: number;
+  };
 }
 
 const DEFAULT_FILES: Readonly<Record<string, string>> = {
@@ -49,27 +57,48 @@ export async function webHarness(
     mkdirSync(dirname(file), { recursive: true });
     writeFileSync(file, content);
   }
+  const dataDir = mkdtempSync(join(tmpdir(), "cardigan-web-data-"));
   const store = Store.open({ dbPath: ":memory:" });
   if (options.password !== undefined) {
     store.setWebPassword(options.password);
   }
   const server = await startWebServer({
     store,
+    dataDir,
     config: resolveWebConfig({}, { port: 0, staticDir, ...options.overrides }),
+    ...(options.stream === undefined ? {} : { stream: options.stream }),
   });
   return {
     store,
     server,
     port: server.port,
     staticDir,
+    dataDir,
     hostHeader: `127.0.0.1:${server.port}`,
+    login: async (password: string) => {
+      const res = await call(port(server), "/api/login", {
+        method: "POST",
+        body: JSON.stringify({ password }),
+        headers: {
+          "content-type": "application/json",
+          origin: `http://127.0.0.1:${server.port}`,
+        },
+      });
+      if (res.status !== 200) {
+        throw new Error(`login failed with ${res.status}`);
+      }
+      return String(res.headers["set-cookie"]).split(";")[0] ?? "";
+    },
     close: async () => {
       await server.close();
       store.close();
       rmSync(staticDir, { recursive: true, force: true });
+      rmSync(dataDir, { recursive: true, force: true });
     },
   };
 }
+
+const port = (server: RunningWebServer): number => server.port;
 
 export interface TestResponse {
   readonly status: number;
