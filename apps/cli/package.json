@@ -22,5 +22,8 @@
     "@cardigan/git-service": "workspace:*",
     "@cardigan/git-transport": "workspace:*",
     "@cardigan/host": "workspace:*"
+  },
+  "devDependencies": {
+    "@cardigan/router": "workspace:*"
   }
 }
