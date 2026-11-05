@@ -1063,7 +1063,7 @@ agent-ssh 模式中，主机不能执行 Agent 可修改仓库的 Git 配置。�
 - 只在主机独占的中心 bare 仓库内合并，不检出文件：依次 `merge-tree --write-tree`、`commit-tree`，全部成功后用 `update-ref <ref> <new> <old>` 比较更新基线。M4 不推送外部平台。
 - 前提：整卡完成审核通过、处于 awaiting_merge。模板 merge_policy 为 confirm / auto，开发卡默认 confirm；创建卡片时固定策略，旧卡缺省 confirm。主机可通过 CommandPorts.templates 注入模板配置，MCP 参数不能改策略。
 - confirm 自动生成 trigger=merge_confirmation 的人类 Decision（merge / hold），绑定当前完成申请。人或 PM Office 记录 merge 后才可合并；hold 保留待合并状态，人或 PM Ops 可用 requestMerge 重开一份确认，旧决定被 supersede。
-- 纯函数 mergePlan 校验待合并状态、当前已接受的完成申请、确认及其他阻塞；返回每个 produce 最新未 supersede 的已接受 Git code 交付，按工作项数字编号排序。缺少交付或交付尚未接受时拒绝；组装层还须校验固定 ref 与 SHA 一致。
+- 纯函数 mergePlan 校验待合并状态、当前已接受的完成申请、确认及其他阻塞；返回每个 produce 最新未 supersede 的已接受 Git code 交付，按工作项数字编号排序。未接受或尚无交付的工作项跳过，不因已知遗留阻止完成审核；前置条件仍由完成申请的 known_gaps 和后续卡片校验。没有可合并交付时同命令经 merge_not_required 完成；组装层还须校验固定 ref 与 SHA 一致。
 - 出现冲突时，为原 Coding Assignment 创建一个修复 Run。
 - 不在工作机的 worktree 里合并。
 

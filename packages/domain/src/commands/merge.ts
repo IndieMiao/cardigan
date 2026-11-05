@@ -44,18 +44,12 @@ function candidates(
             v.status !== "superseded",
         ),
       );
-      ensure(
-        delivery || !w.required,
-        "invariant_violation",
-        `Missing current delivery for ${w.id}`,
-      );
-      if (delivery?.kind !== "code" || delivery.subject.kind !== "git_head")
+      if (
+        delivery?.status !== "accepted" ||
+        delivery.kind !== "code" ||
+        delivery.subject.kind !== "git_head"
+      )
         return [];
-      ensure(
-        delivery.status === "accepted" && w.status === "accepted",
-        "invariant_violation",
-        `Code delivery for ${w.id} is not accepted`,
-      );
       return [
         {
           delivery_id: delivery.id,

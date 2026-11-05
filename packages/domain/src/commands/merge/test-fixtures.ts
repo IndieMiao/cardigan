@@ -126,12 +126,14 @@ export function mergeFixture(policy: "confirm" | "auto" = "confirm") {
     kind: Delivery["kind"] = "code",
     sha = "a".repeat(40),
     git = true,
+    known_gaps: Delivery["known_gaps"] = [],
   ) {
     start(coder);
     const p = {
       work_item_id: coder.work_item_id as Delivery["work_item_id"],
       kind,
       summary: "Ready",
+      known_gaps,
       subject: {
         kind: git ? ("git_head" as const) : ("doc_version" as const),
         value: sha,
