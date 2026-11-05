@@ -135,6 +135,8 @@ export interface RouterSnapshot {
   readonly human_actions: readonly HumanAction[];
   readonly runs: readonly Run[];
   readonly timeline: readonly TimelineEntry[];
+  /** The project's events; rules read the ones a Run produced (payload.run_id). */
+  readonly events: readonly Event[];
   /** Roles a card template designates as its reviewer; defaults to `pm`. */
   readonly completion_reviewer_roles?: readonly RoleId[] | undefined;
 }

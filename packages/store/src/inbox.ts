@@ -9,7 +9,10 @@ import type {
   NotificationStatus,
   ProjectId,
 } from "@cardigan/domain";
-import { nextNotificationStatus } from "@cardigan/domain";
+import {
+  isTerminalNotification,
+  nextNotificationStatus,
+} from "@cardigan/domain";
 
 /**
  * M3.3: the router inbox (M3 plan §3.2) and the Router cursor.
@@ -208,7 +211,9 @@ export function acknowledgeNotifications(
   let acked = 0;
   for (const notification of rows) {
     if (notification.recipient.kind !== "assignment") continue;
-    if (notification.status === "acked") continue;
+    // Escalated (and already acked) rows are terminal: an ACK cursor must not
+    // try to move them, or the reconciliation would throw on a valid inbox.
+    if (isTerminalNotification(notification.status)) continue;
     const cursor = db
       .prepare(
         "SELECT acked_seq FROM cursors WHERE project_id = ? AND assignment_id = ? AND card_id = ?",

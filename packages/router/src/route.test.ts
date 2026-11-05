@@ -157,6 +157,109 @@ test("§6.4 all required work items passed reminds the producer, without closing
   expect(result.notifications[0]?.kind).toBe("completion");
 });
 
+test("§6.4 a pass among several required verifiers does not wake the downstream work", () => {
+  // The delivery names two required verifiers; only this one has passed, so the
+  // producer is still only "delivered" and nothing downstream may start.
+  const result = routeEvent({
+    event: event("review_submitted", { verdict: "pass", delivery_id: "D-1" }),
+    snapshot: snapshot({
+      deliveries: [
+        delivery("D-1", {
+          work_item_id: "W-1",
+          requested_verifiers: ["W-2", "W-3"],
+        }),
+      ],
+      reviews: [review("pass")],
+      work_items: [
+        workItem("W-1", { status: "in_progress", assignment_id: "A-1" }),
+        workItem("W-2", {
+          kind: "verify",
+          role_id: "reviewer",
+          status: "passed",
+          assignment_id: "A-2",
+        }),
+        workItem("W-3", {
+          kind: "verify",
+          role_id: "pm",
+          status: "in_progress",
+          assignment_id: "A-3",
+        }),
+        workItem("W-4", {
+          depends_on: ["W-1"],
+          status: "todo",
+          assignment_id: "A-4",
+        }),
+      ],
+    }),
+  });
+  expect(rules(result)).not.toContain("6.4/dependency completed");
+  expect(recipients(result)).not.toContain("assignment:A-4");
+});
+
+test("§6.4 downstream work waits for every one of its dependencies", () => {
+  const base = {
+    // Every recipient needs an Assignment, or the router hands it to PM Ops.
+    assignments: [
+      assignment("A-1"),
+      assignment("A-2", { role_id: "reviewer" }),
+      assignment("A-3", { scope: "standing", role_id: "pm" }),
+      assignment("A-4"),
+      assignment("A-5"),
+      assignment("A-6"),
+      assignment("A-7"),
+    ],
+    deliveries: [
+      delivery("D-1", { work_item_id: "W-1", requested_verifiers: ["W-2"] }),
+    ],
+    reviews: [review("pass")],
+    work_items: [
+      workItem("W-1", { status: "accepted", assignment_id: "A-1" }),
+      workItem("W-2", {
+        kind: "verify",
+        role_id: "reviewer",
+        status: "passed",
+        assignment_id: "A-2",
+      }),
+      workItem("W-3", { status: "accepted", assignment_id: "A-3" }),
+      workItem("W-4", {
+        depends_on: ["W-1"],
+        status: "todo",
+        assignment_id: "A-4",
+      }),
+      workItem("W-5", {
+        depends_on: ["W-1", "W-3"],
+        status: "todo",
+        assignment_id: "A-5",
+      }),
+      workItem("W-6", {
+        depends_on: ["W-1", "W-7"],
+        status: "todo",
+        assignment_id: "A-6",
+      }),
+      workItem("W-7", { status: "in_progress", assignment_id: "A-7" }),
+    ],
+  };
+  // W-5 and W-6 still have an unfinished dependency besides W-1.
+  const partial = routeEvent({
+    event: event("review_submitted", { verdict: "pass", delivery_id: "D-1" }),
+    snapshot: snapshot({
+      ...base,
+      work_items: base.work_items.filter((item) => item.id !== "W-3"),
+    }),
+  });
+  expect(recipients(partial)).not.toContain("assignment:A-5");
+  expect(recipients(partial)).not.toContain("assignment:A-6");
+  expect(recipients(partial)).toContain("assignment:A-4");
+
+  // Once the second dependency has succeeded as well, W-5 is next.
+  const ready = routeEvent({
+    event: event("review_submitted", { verdict: "pass", delivery_id: "D-1" }),
+    snapshot: snapshot(base),
+  });
+  expect(recipients(ready)).toContain("assignment:A-5");
+  expect(recipients(ready)).not.toContain("assignment:A-6");
+});
+
 test("§6.4 review rejected produces a rework notification for the delivery's Assignment", () => {
   const result = routeEvent({
     event: event("review_submitted", { verdict: "reject", delivery_id: "D-1" }),

@@ -432,6 +432,48 @@ function routeReview(input: RouteInput, draft: Draft): void {
       card_id: input.event.card_id,
       detail: "check whether every delivery passed and the card is done",
     });
+    // §6.4 dependency completed: only a delivery whose work item actually
+    // succeeded completes anything — a first pass among several required
+    // verifiers does not. Downstream work is next only when *all* of its
+    // dependencies succeeded.
+    const passed = input.snapshot.deliveries.find(
+      (candidate) => candidate.id === delivery_id,
+    );
+    const completed = itemOf(input, passed?.work_item_id);
+    if (completed !== undefined && succeeded(completed)) {
+      const downstream = input.snapshot.work_items.filter(
+        (candidate) =>
+          candidate.depends_on.includes(completed.id) &&
+          candidate.depends_on.every((id) => {
+            const dependency = itemOf(input, id);
+            return dependency !== undefined && succeeded(dependency);
+          }),
+      );
+      let unowned = false;
+      for (const candidate of downstream) {
+        if (candidate.assignment_id === undefined) {
+          unowned = true;
+          continue;
+        }
+        noteAssignment(
+          input,
+          draft,
+          candidate,
+          "dependency",
+          "6.4/dependency completed",
+          `${completed.id} is done; ${candidate.id} can start`,
+        );
+      }
+      if (unowned)
+        note(
+          input,
+          draft,
+          recipient.pm_ops(),
+          "dependency",
+          "6.4/dependency completed",
+          `${completed.id} is done and a dependent work item has no owner`,
+        );
+    }
     // §6.4: all required work items passed → remind the producer to apply for
     // completion; the card is not closed automatically.
     const card_id = input.event.card_id;
@@ -623,6 +665,25 @@ function routeHumanAction(input: RouteInput, draft: Draft): void {
 function routeRunFinished(input: RouteInput, draft: Draft): void {
   const outcome = payloadString(input.event.payload, "outcome");
   if (outcome !== "completed") return;
+  const run_id = payloadString(input.event.payload, "run_id");
+  // §6.4: only a Run that produced nothing (no delivery, blocker or decision)
+  // is an exception; one that delivered or raised something has done its job.
+  const produced = [
+    ...input.snapshot.events.filter(
+      (event) =>
+        payloadString(event.payload, "run_id") === run_id &&
+        [
+          "delivery_submitted",
+          "blocker_reported",
+          "decision_requested",
+          "human_action_requested",
+        ].includes(event.type),
+    ),
+    ...input.snapshot.deliveries.filter(
+      (delivery) => delivery.run_id === run_id,
+    ),
+  ];
+  if (produced.length > 0) return;
   note(
     input,
     draft,

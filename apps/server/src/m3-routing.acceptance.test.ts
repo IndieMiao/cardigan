@@ -146,16 +146,16 @@ test("[R11] §6.4 resolving a blocking decision notifies resumed work and Ops", 
     [f.coder.id, "pm_ops"].sort(),
   );
 });
-// A real passing review accepts the producer but does not notify its dependent Assignment.
-test.fails("[R12] §6.4 completed dependency reaches downstream Assignment", async () => {
+// A passing review completes the producer, so its dependent work item is next.
+test("[R12] §6.4 completed dependency reaches downstream Assignment", async () => {
   const downstream = f.assignItem(f.extra(f.produce.role_id, [f.produce.id]));
   const reviewed = await pass();
   expect(
     recipients(route(event(reviewed.events, "review_submitted"))),
   ).toContain(downstream.id);
 });
-// A real passing review also fails to notify Ops when the dependent work has no Assignment.
-test.fails("[R13] §6.4 completed dependency with no owner reaches Ops", async () => {
+// A dependent work item without an Assignment is Ops' decision.
+test("[R13] §6.4 completed dependency with no owner reaches Ops", async () => {
   f.extra(f.produce.role_id, [f.produce.id]);
   const reviewed = await pass();
   expect(
@@ -217,8 +217,8 @@ test("[R18] §6.4 Run ending without delivery, blocker or decision reaches Ops",
     recipients(route(event(f.finish(f.coder).events, "run_finished"))),
   ).toEqual(["pm_ops"]);
 });
-// §6.4 excludes Runs that produced a Delivery. Current routing still emits a no-output Ops alert.
-test.fails("[R19] §6.4 a Run that delivered output is not reported as having no output", async () => {
+// §6.4 excludes Runs that produced a Delivery.
+test("[R19] §6.4 a Run that delivered output is not reported as having no output", async () => {
   f.start(f.coder);
   await f.delivery();
   expect(
