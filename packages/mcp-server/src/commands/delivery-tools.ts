@@ -1,6 +1,8 @@
 import {
   type Clock,
+  type DeliveryId,
   type DeliveryVerifier,
+  type ProjectId,
   prepareDelivery,
   type SubmitDeliveryParams,
   type SubmitReviewParams,
@@ -8,6 +10,7 @@ import {
   submitReview,
 } from "@cardigan/domain";
 import { z } from "zod";
+import type { Logger } from "../log.js";
 import { defineTool } from "../tools/types.js";
 import { executeCommand, executePreparedCommand, unwrap } from "./execute.js";
 
@@ -69,32 +72,71 @@ const reviewInput = z.object({
   attachments,
 });
 
-export interface DeliveryToolOptions {
-  readonly deliveryVerifier?: DeliveryVerifier;
-  readonly clock?: Clock;
+/**
+ * §12.3: a verifier instance binds one project, because Assignment ids are only
+ * unique inside a project. The caller resolves it per request, never per token.
+ */
+export type DeliveryVerifierFor = (project_id: ProjectId) => DeliveryVerifier;
+/** §3.3 step 2: pin the accepted commit after the delivery transaction commits. */
+export interface PinDeliveryRequest {
+  readonly project_id: ProjectId;
+  readonly delivery_id: DeliveryId;
+  readonly sha: string;
 }
-/** M1 stub, explicitly not evidence of actual Git verification. M4 supplies the real port. */
-const acceptingVerifier: DeliveryVerifier = {
-  verify: async () => ({ ok: true, value: [] }),
-};
-export function deliveryTools(options: DeliveryToolOptions = {}) {
-  const verifier = options.deliveryVerifier ?? acceptingVerifier;
+
+export interface DeliveryToolOptions {
+  /** Required: production must verify against the real Git service (§3.3). */
+  readonly deliveryVerifier: DeliveryVerifierFor;
+  /** Omitted only by tests that do not exercise Git pinning. */
+  readonly pinDelivery?: (request: PinDeliveryRequest) => Promise<void>;
+  readonly clock?: Clock;
+  readonly log?: Logger;
+}
+export function deliveryTools(options: DeliveryToolOptions) {
   return [
     defineTool({
       name: "submit_delivery",
       description: "Submit a versioned delivery or card completion request.",
       input: deliveryInput,
-      handler: ({ idempotency_key, ...params }, context) =>
-        executePreparedCommand(
+      handler: async ({ idempotency_key, ...params }, context) => {
+        const delivery = await executePreparedCommand(
           context,
           "submit_delivery",
           idempotency_key,
           params as SubmitDeliveryParams,
-          (state, actor, p) => prepareDelivery(state, actor, p, verifier),
+          // The request's project selects the verifier, not the token's claim.
+          (state, actor, p) =>
+            prepareDelivery(
+              state,
+              actor,
+              p,
+              options.deliveryVerifier(actor.project_id),
+            ),
           (state, actor, p, receipt, ports) =>
             submitDelivery(state, actor, p, unwrap(receipt), ports),
           options.clock,
-        ),
+        );
+        if (delivery.subject.kind === "git_head" && options.pinDelivery) {
+          try {
+            await options.pinDelivery({
+              project_id: context.identity.actor.project_id,
+              delivery_id: delivery.id,
+              sha: delivery.subject.value,
+            });
+          } catch {
+            // The delivery is already committed: never roll it back. The
+            // reconcile loop repairs a missing pin from the candidate ref.
+            options.log?.({
+              event: "tool",
+              method: "tools/call",
+              tool: "submit_delivery",
+              assignment_id: context.identity.actor.assignment_id,
+              code: "delivery_pin_failed",
+            });
+          }
+        }
+        return delivery;
+      },
     }),
     defineTool({
       name: "submit_review",

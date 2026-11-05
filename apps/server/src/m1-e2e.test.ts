@@ -14,6 +14,7 @@ import { newUlid, Store } from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, beforeEach, expect, test } from "vitest";
+import { stubGit } from "./git-test-support.js";
 import { type CardiganServer, startCardiganServer } from "./server.js";
 
 const PM_TOOLS = [
@@ -197,6 +198,7 @@ beforeEach(async () => {
   }
   server = await startCardiganServer({
     config: { dataDir, host: "127.0.0.1", port: 0 },
+    git: stubGit(),
   });
 });
 

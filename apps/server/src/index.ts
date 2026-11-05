@@ -41,6 +41,10 @@ export async function runServer(
       env,
       store,
       log: stdoutLogger,
+      // Workspace Git in agent-ssh mode runs as the agent account (§12.6);
+      // the Git assembly is built by startCardiganServer from the same
+      // resolved execution it uses for the rest of startup.
+      captureAgent: (command, args) => host.runtime.captureAgent(command, args),
       dispatcher: {
         runtime: host.runtime,
         snapshot: host.snapshot,

@@ -11,6 +11,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { type RunningServer, startMcpServer } from "./server.js";
+import { acceptingVerifierFor } from "./test-support.js";
 
 const PROJECT = "p-cursor" as never;
 const CARD = "C-1" as never;
@@ -157,7 +158,10 @@ beforeEach(async () => {
   });
   tokens = issued as Record<"one" | "two", string>;
 
-  server = await startMcpServer({ store });
+  server = await startMcpServer({
+    store,
+    deliveryVerifier: acceptingVerifierFor,
+  });
 });
 
 afterEach(async () => {

@@ -2,6 +2,7 @@ import type {
   Assignment,
   Card,
   CardId,
+  DeliveryVerifier,
   Event,
   ProjectId,
   TimelineEntry,
@@ -9,6 +10,7 @@ import type {
   WorkItem,
 } from "@cardigan/domain";
 import type { McpBackend } from "./backend.js";
+import type { DeliveryVerifierFor } from "./commands/delivery-tools.js";
 
 /**
  * Domain-only fixtures for the MCP tests.
@@ -19,6 +21,16 @@ import type { McpBackend } from "./backend.js";
  */
 
 export const project_id = "p-fictional" as ProjectId;
+
+/**
+ * M4.4 moved the "accept everything" stub out of production code: only tests
+ * that do not exercise Git may stand in for the real verifier (§3.3).
+ */
+export const acceptingVerifier: DeliveryVerifier = {
+  verify: async () => ({ ok: true, value: [] }),
+};
+export const acceptingVerifierFor: DeliveryVerifierFor = () =>
+  acceptingVerifier;
 export const card_id = "C-1" as CardId;
 export const NOW = "2026-01-01T00:00:00.000Z";
 

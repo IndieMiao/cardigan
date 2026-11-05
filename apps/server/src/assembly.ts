@@ -16,6 +16,8 @@ import {
   RuntimeMonitor,
   type RuntimeMonitorOptions,
 } from "./dispatch-monitor.js";
+import type { MergeGit } from "./git.js";
+import { type MergeExecutor, startMergeLoop } from "./merge-loop.js";
 
 /**
  * M3.5: the control plane the server runs beside the MCP endpoint.
@@ -39,13 +41,24 @@ export interface ControlPlaneOptions {
   readonly inactivityGraceMs?: number;
   readonly lossGraceMs?: number;
   readonly eventSilenceMs?: number;
+  /**
+   * M4.4: present when the host wired Git. Without it no merge can run, which
+   * is what tests of the pure dispatcher want.
+   */
+  readonly git?: MergeGit;
+  readonly mergeIntervalMs?: number;
   /** Tick failures are reported here; the loop retries on the next interval. */
   readonly onError?: (error: unknown) => void;
 }
 
 export interface ControlPlane {
   readonly done: Promise<void>;
-  /** Stop scheduling, drain the current delivery, then stop the monitor. */
+  /** The merge loop, for tests and for status output. */
+  readonly merge?: MergeExecutor;
+  /**
+   * Stop scheduling, drain the current delivery, then stop the monitor; the
+   * merge loop stops last so SIGTERM never interrupts a merge (§4 M4.4).
+   */
   stop(): Promise<void>;
 }
 
@@ -132,5 +145,27 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
     onError: (error) => options.onError?.(error),
   };
   const loop: DispatchLoop = startDispatchLoop(loopOptions);
-  return { done: loop.done, stop: () => loop.stop() };
+  const merge =
+    options.git === undefined
+      ? undefined
+      : startMergeLoop({
+          store: options.store,
+          git: options.git,
+          clock,
+          ...(options.mergeIntervalMs === undefined
+            ? {}
+            : { intervalMs: options.mergeIntervalMs }),
+          onError: (error) => options.onError?.(error),
+        });
+  return {
+    done:
+      merge === undefined
+        ? loop.done
+        : Promise.all([loop.done, merge.loop.done]).then(() => undefined),
+    ...(merge === undefined ? {} : { merge: merge.executor }),
+    stop: async () => {
+      await loop.stop();
+      await merge?.loop.stop();
+    },
+  };
 }

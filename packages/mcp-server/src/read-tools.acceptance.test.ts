@@ -12,6 +12,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { memoryLogger, type RunningServer, startMcpServer } from "./index.js";
+import { acceptingVerifierFor } from "./test-support.js";
 
 // Independent fixtures from M1.5 / development plan §4, §6, §9, §14, §16.
 // Only public package APIs are used; no implementation helpers or SQL queries.
@@ -185,7 +186,11 @@ beforeEach(async () => {
   const observer = seed("alpha", 4, ["whoami"]);
   seed("beta", 1); // Colliding card, work item and Assignment IDs are intentional.
   const beta = seed("beta", 9);
-  server = await startMcpServer({ store, log: log.log });
+  server = await startMcpServer({
+    store,
+    deliveryVerifier: acceptingVerifierFor,
+    log: log.log,
+  });
   const connected = await connect(alpha);
   caller = connected.client;
   token = connected.token;

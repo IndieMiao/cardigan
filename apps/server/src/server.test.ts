@@ -65,6 +65,8 @@ test.skipIf(process.platform !== "linux")(
     const isolatedWarnings: string[] = [];
     const isolated = await startCardiganServer({
       config,
+      // agent-ssh never runs workspace Git without the Agent execution entry.
+      captureAgent: async () => ({ ok: true, value: "" }),
       warn: (m) => isolatedWarnings.push(m),
     });
     try {

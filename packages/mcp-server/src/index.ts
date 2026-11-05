@@ -13,7 +13,9 @@ export type {
 } from "./backend.js";
 export {
   type DeliveryToolOptions,
+  type DeliveryVerifierFor,
   deliveryTools,
+  type PinDeliveryRequest,
 } from "./commands/delivery-tools.js";
 export { loadCommandState, persistEffect, unwrap } from "./commands/execute.js";
 export { managementTools } from "./commands/management-tools.js";

@@ -18,6 +18,7 @@ import type { McpBackend } from "./backend.js";
 import { type LogEntry, memoryLogger } from "./log.js";
 import { type RunningServer, startMcpServer } from "./server.js";
 import {
+  acceptingVerifierFor,
   card_id,
   project_id,
   type SeededRows,
@@ -104,7 +105,11 @@ beforeEach(async () => {
   entries = [];
   const logger = memoryLogger();
   entries = logger.entries;
-  server = await startMcpServer({ store: fixture.store, log: logger.log });
+  server = await startMcpServer({
+    store: fixture.store,
+    deliveryVerifier: acceptingVerifierFor,
+    log: logger.log,
+  });
 });
 
 afterEach(async () => {
@@ -186,7 +191,11 @@ describe("tools by allowed_tools", () => {
     await server.close();
     const logger = memoryLogger();
     entries = logger.entries;
-    server = await startMcpServer({ store: fixture.store, log: logger.log });
+    server = await startMcpServer({
+      store: fixture.store,
+      deliveryVerifier: acceptingVerifierFor,
+      log: logger.log,
+    });
     const client = await connect(fixture.token);
 
     const result = await client.callTool({
@@ -218,7 +227,11 @@ describe("tools by allowed_tools", () => {
     fixture = seedFixture({ allowed_tools: ["get_updates"] });
     await server.close();
     const logger = memoryLogger();
-    server = await startMcpServer({ store: fixture.store, log: logger.log });
+    server = await startMcpServer({
+      store: fixture.store,
+      deliveryVerifier: acceptingVerifierFor,
+      log: logger.log,
+    });
     const client = await connect(fixture.token);
 
     const names = (await client.listTools()).tools.map((tool) => tool.name);

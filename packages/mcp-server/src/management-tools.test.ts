@@ -13,6 +13,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { memoryLogger } from "./log.js";
 import { type RunningServer, startMcpServer } from "./server.js";
+import { acceptingVerifierFor } from "./test-support.js";
 
 const project = "management-fixture";
 let store: Store, server: RunningServer, office: Client, card: Card;
@@ -122,7 +123,11 @@ beforeEach(async () => {
     tx.assignments.put(project, assignment);
     return assignment;
   });
-  server = await startMcpServer({ store, log: logger.log });
+  server = await startMcpServer({
+    store,
+    deliveryVerifier: acceptingVerifierFor,
+    log: logger.log,
+  });
   office = await connect(standing);
   card = await ok<Card>(office, "create_card", {
     title: "Fixture",

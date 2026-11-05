@@ -22,6 +22,7 @@ import type { Identity } from "./auth.js";
 import { acknowledgeDispatchedRun } from "./commands/acknowledge.js";
 import { loadCommandState, persistEffect } from "./commands/execute.js";
 import { type RunningServer, startMcpServer } from "./server.js";
+import { acceptingVerifierFor } from "./test-support.js";
 
 const project_id = "p-ack" as ProjectId;
 const NOW = "2026-01-01T00:00:00.000Z";
@@ -276,6 +277,7 @@ describe("the HTTP layer", () => {
     }).token;
     running = await startMcpServer({
       store,
+      deliveryVerifier: acceptingVerifierFor,
       host: "127.0.0.1",
       port: 0,
       log: () => undefined,

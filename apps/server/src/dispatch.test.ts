@@ -253,3 +253,24 @@ test("reopened store preserves an uncertain attempt and rejects a late successfu
     }
   }
 });
+
+test("§6.4 a merge conflict queues a kind=fix Run for the producer", async () => {
+  // Same event shape recordMergeResult emits; routing is what is under test.
+  f.store.uow.run((tx) => {
+    const seq = tx.ids.nextEventSequence(f.project, target.card.id);
+    tx.events.append(f.project, {
+      id: tx.ids.nextEventId(),
+      card_id: target.card.id,
+      seq,
+      type: "merge_conflicted",
+      actor: { kind: "system", project_id: f.project },
+      payload: { work_item_id: target.item.id, run_kind: "fix" },
+      created_at: f.clock.now(),
+    });
+  });
+  await new Dispatcher(options).tick();
+  expect(f.state().runs.at(-1)).toMatchObject({
+    assignment_id: target.assignment.id,
+    kind: "fix",
+  });
+});

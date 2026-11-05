@@ -23,6 +23,7 @@ import {
 import { memoryLogger } from "./log.js";
 import { type RunningServer, startMcpServer } from "./server.js";
 import {
+  acceptingVerifierFor,
   card_id,
   NOW,
   project_id,
@@ -151,6 +152,7 @@ beforeEach(async () => {
   });
   server = await startMcpServer({
     store,
+    deliveryVerifier: acceptingVerifierFor,
     dataDir,
     attachmentStore: blobs,
     clock: { now: () => NOW },

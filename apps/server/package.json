@@ -13,13 +13,15 @@
     "cardigan-server": "./dist/bin.js"
   },
   "dependencies": {
-    "@cardigan/runtime-herdr": "workspace:*",
-    "@cardigan/mcp-server": "workspace:*",
-    "@cardigan/store": "workspace:*",
     "@cardigan/domain": "workspace:*",
-    "@cardigan/router": "workspace:*",
-    "@cardigan/roles": "workspace:*",
+    "@cardigan/git-service": "workspace:*",
+    "@cardigan/git-transport": "workspace:*",
     "@cardigan/host": "workspace:*",
+    "@cardigan/mcp-server": "workspace:*",
+    "@cardigan/roles": "workspace:*",
+    "@cardigan/router": "workspace:*",
+    "@cardigan/runtime-herdr": "workspace:*",
+    "@cardigan/store": "workspace:*",
     "yaml": "^2.9.1"
   },
   "devDependencies": {

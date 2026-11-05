@@ -66,6 +66,12 @@ importers:
       '@cardigan/domain':
         specifier: workspace:*
         version: link:../../packages/domain
+      '@cardigan/git-service':
+        specifier: workspace:*
+        version: link:../../packages/git-service
+      '@cardigan/git-transport':
+        specifier: workspace:*
+        version: link:../../packages/git-transport
       '@cardigan/host':
         specifier: workspace:*
         version: link:../../packages/host
