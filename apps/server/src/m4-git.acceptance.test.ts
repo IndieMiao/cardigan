@@ -288,8 +288,8 @@ test.each([
   },
 );
 
-// Defect: §3.6 requires an active owner; released Assignments still suppress orphan findings.
-test.fails("G10 §3.6: a worktree retained after manual release has no active owner", async () => {
+// Plan v5: released Assignments retain ownership; cleanup handles their worktrees.
+test("G10 §3.6: a worktree retained after manual release is not an orphan", async () => {
   const s = await m4Cross();
   f = s;
   await s.start(s.primary.owner);
@@ -299,7 +299,9 @@ test.fails("G10 §3.6: a worktree retained after manual release has no active ow
     path = s.path(s.primary.owner);
   expect(
     await s.worktrees.reconcile(s.project, state.assignments, state.deliveries),
-  ).toContainEqual(expect.objectContaining({ kind: "orphan_worktree", path }));
+  ).not.toContainEqual(
+    expect.objectContaining({ kind: "orphan_worktree", path }),
+  );
   expect(existsSync(path)).toBe(true);
 });
 
