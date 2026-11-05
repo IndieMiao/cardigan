@@ -516,7 +516,7 @@ function needsYou(args: readonly string[], io: CliIo): number {
       io,
       optional(parsed.flags, "project"),
     );
-    const { decisions, actions } = store.uow.read((tx) => ({
+    const { decisions, actions, incidents } = store.uow.read((tx) => ({
       decisions: tx.decisions
         .list(project_id)
         .filter(
@@ -527,9 +527,22 @@ function needsYou(args: readonly string[], io: CliIo): number {
       actions: tx.human_actions
         .list(project_id)
         .filter((action) => action.status === "open"),
+      // §13.9: a lost runtime needs the human to decide whether to take over,
+      // so it belongs on the same page as decisions and human actions.
+      incidents: tx.assignments
+        .list(project_id)
+        .filter(
+          (assignment) =>
+            assignment.status === "active" &&
+            ["lost", "unknown"].includes(assignment.runtime_state),
+        ),
     }));
 
-    if (decisions.length === 0 && actions.length === 0) {
+    if (
+      decisions.length === 0 &&
+      actions.length === 0 &&
+      incidents.length === 0
+    ) {
       io.stdout("Needs You 是空的：没有待你拍板的事项，也没有待你执行的操作。");
       return EXIT.ok;
     }
@@ -547,6 +560,13 @@ function needsYou(args: readonly string[], io: CliIo): number {
           ].join("\n"),
         );
       }
+    }
+    if (incidents.length > 0) {
+      lines.push(`运行环境失联（${incidents.length}，需要你决定是否接管）`);
+      for (const assignment of incidents)
+        lines.push(
+          `  ${assignment.id}  ${assignment.role_id} v${assignment.role_version}  runtime=${assignment.runtime_state}${assignment.worktree_path === undefined ? "" : `  worktree=${assignment.worktree_path}`}`,
+        );
     }
     if (actions.length > 0) {
       lines.push(`待你执行（${actions.length}）`);

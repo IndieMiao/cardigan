@@ -49,6 +49,8 @@ class PmRuntime implements Runtime {
   readonly launches: { assignment: Assignment; launch: RuntimeLaunch }[] = [];
   readonly bells: { id: AssignmentId; text: string }[] = [];
   readonly fail = new Set<AssignmentId>();
+  /** Terminals whose process is gone: the dispatcher must open a new session. */
+  readonly gone = new Set<AssignmentId>();
   readonly refs = new Map<string, AssignmentId>();
   async provision(
     a: Assignment,
@@ -80,7 +82,16 @@ class PmRuntime implements Runtime {
         }
       : ok({ sent: true });
   }
-  async status() {
+  async status(ref: RuntimeRef) {
+    const id = this.refs.get(ref.terminal_ref);
+    if (id === undefined || this.gone.has(id))
+      return {
+        ok: false as const,
+        error: {
+          code: "runtime_not_found" as const,
+          message: "No such terminal",
+        },
+      };
     return ok({
       process: "alive" as const,
       agent: "idle" as const,
@@ -322,6 +333,11 @@ async function pmFixture() {
         dispatchRun(s, actor, { run_id: run.id, runtime_ref: result.value }, p),
     });
   }
+  async function tokenFor(a: Assignment): Promise<string> {
+    return (
+      await readFile(join(dirs.get(a.id) as string, TOKEN_FILE_NAME), "utf8")
+    ).trim();
+  }
   async function client(a: Assignment) {
     if (!clients.has(a.id)) {
       await expect
@@ -400,8 +416,10 @@ async function pmFixture() {
     coder,
     reviewer,
     runtime,
+    url: server.url,
     cli,
     provision,
+    tokenFor,
     call,
     raw,
     client,
@@ -429,9 +447,9 @@ afterEach(async () => {
   f = undefined;
 });
 
-// Defect P01: pm start grants Ops the full pm tool set, including record_decision.
-// Expected: the CLI-created Ops capability restriction survives launch/token rotation.
-test.fails("P01 §7.1: pm start preserves Office/Ops MCP capability separation under the shared pm role", async () => {
+// P01 (fixed): token rotation keeps the previous scope, so the CLI-created Ops
+// restriction survives every restart of the shared pm role.
+test("P01 §7.1: pm start preserves Office/Ops MCP capability separation under the shared pm role", async () => {
   f = await pmFixture();
   await f.cli("pm", "start");
   const office = await f.call(f.office, "whoami"),
@@ -464,6 +482,39 @@ test.fails("P01 §7.1: pm start preserves Office/Ops MCP capability separation u
   expect(ops.allowed_tools).not.toContain("record_decision");
 });
 
+// P01b (fixed): the same restriction holds when the Dispatcher, not the CLI,
+// opens the next Ops terminal and rotates its token.
+test("P01b §7.1: a Dispatcher-started Ops session keeps the narrowed tool scope", async () => {
+  f = await pmFixture();
+  await f.cli("pm", "start");
+  await f.call(f.ops, "whoami");
+  const launches = () =>
+    f.runtime.launches.filter((entry) => entry.assignment.id === f.ops.id)
+      .length;
+  const before = launches();
+  // The Ops terminal exits; the next routed event must open a fresh session
+  // through the same host flow the Dispatcher uses (launchRun).
+  f.runtime.gone.add(f.ops.id);
+  await f.finish(f.ops);
+  await expect.poll(launches).toBeGreaterThan(before);
+
+  const fresh = new Client({ name: "pm-acceptance-relaunch", version: "1" });
+  await fresh.connect(
+    new StreamableHTTPClientTransport(new URL(f.url), {
+      requestInit: {
+        headers: { Authorization: `Bearer ${await f.tokenFor(f.ops)}` },
+      },
+    }),
+  );
+  const who = (await fresh.callTool({ name: "whoami", arguments: {} }))
+    .structuredContent as Record<string, unknown>;
+  expect(who).toMatchObject({ role_id: "pm" });
+  expect(who.allowed_tools).not.toContain("record_decision");
+  const names = (await fresh.listTools()).tools.map((tool) => tool.name);
+  expect(names).not.toContain("record_decision");
+  await fresh.close();
+});
+
 test("P02 M3.5: pm start skips running Office and Ops without another Run or terminal", async () => {
   f = await pmFixture();
   await f.cli("pm", "start");
@@ -490,9 +541,8 @@ test("P03 §7.1–§7.3: default pm Core Prompt describes both duties, interrupt
   expect(prompt).toMatch(/原话/);
 });
 
-// Defect P04: pm start emits generic kind=initial first prompts for both contexts.
-// Expected: each first prompt explicitly identifies Office or Ops.
-test.fails("P04 §7.1: pm start supplies distinct Office and Ops first prompts", async () => {
+// P04 (fixed): each first prompt names the context it runs in (§3.4).
+test("P04 §7.1: pm start supplies distinct Office and Ops first prompts", async () => {
   f = await pmFixture();
   await f.cli("pm", "start");
   expect(await f.script(f.office)).toMatch(/pm[_-]office|PM Office/);
@@ -719,9 +769,8 @@ test("P09 M3.5: attention shows needs_attention for a running Agent without MCP 
   expect(output).toContain(s.coder.id);
 });
 
-// Defect P10: lost runtime notifications reach attention/Office, but needs-you only
-// lists Decision/HumanAction entities and hides the human-facing runtime incident.
-test.fails("P10 §13.9/M3.5: runtime loss becomes unknown then lost; attention, needs-you and Office report it", async () => {
+// P10 (fixed): needs-you lists runtime incidents alongside decisions and actions.
+test("P10 §13.9/M3.5: runtime loss becomes unknown then lost; attention, needs-you and Office report it", async () => {
   const s = await routingSetup();
   await expect
     .poll(() => s.runtime.bus.listenerCount(`terminal-${s.coder.id}`))
@@ -743,8 +792,8 @@ test.fails("P10 §13.9/M3.5: runtime loss becomes unknown then lost; attention, 
   expect(await s.cli("needs-you")).toContain(s.coder.id);
 });
 
-// Defect P11: a failed Run without output is not escalated to PM Ops (§7.3).
-test.fails("P11 §7.3: Agent execution failure escalates to Ops without interrupting Office", async () => {
+// P11 (fixed): a failed Run without output escalates to PM Ops, never to Office.
+test("P11 §7.3: Agent execution failure escalates to Ops without interrupting Office", async () => {
   const s = await routingSetup(false);
   await s.finish(s.coder, "failed");
   await s.routed();
@@ -752,9 +801,8 @@ test.fails("P11 §7.3: Agent execution failure escalates to Ops without interrup
   expect(notices(s, s.office)).toEqual([]);
 });
 
-// Defect P12: pending pm_ops notifications are visible unfiltered but disappear
-// when --assignment selects the actual active Ops Assignment.
-test.fails("P12 M3.5: inbox --assignment includes pending notifications for that standing PM", async () => {
+// P12 (fixed): --assignment on a standing PM also matches its logical recipient.
+test("P12 M3.5: inbox --assignment includes pending notifications for that standing PM", async () => {
   const s = await routingSetup(false);
   await s.finish(s.coder);
   await s.routed();

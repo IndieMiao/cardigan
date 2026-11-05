@@ -1,5 +1,5 @@
 import type { Assignment, Notification } from "@cardigan/domain";
-import { openStore, type Store } from "@cardigan/store";
+import { openStore, type Store, tokensForAssignment } from "@cardigan/store";
 import { CliError, EXIT } from "./errors.js";
 import { resolveDataDir, resolveProject } from "./host.js";
 import type { CliIo } from "./io.js";
@@ -54,6 +54,31 @@ const recipientOf = (notification: Notification): string =>
 const ageMinutes = (from: string, now: string): number =>
   Math.max(0, Math.round((Date.parse(now) - Date.parse(from)) / 60_000));
 
+/**
+ * The logical recipient a standing PM Assignment answers to (`pm_office` /
+ * `pm_ops`), told apart by the tool scope of its newest token (§7.1).
+ */
+function standingRecipient(
+  store: Store,
+  project_id: string,
+  assignment_id: Assignment["id"],
+): "pm_office" | "pm_ops" | undefined {
+  const assignment = store.uow.read((tx) =>
+    tx.assignments.get(project_id, assignment_id),
+  );
+  if (
+    assignment === undefined ||
+    assignment.scope !== "standing" ||
+    assignment.role_id !== "pm"
+  )
+    return undefined;
+  return tokensForAssignment(store.database, project_id as never, assignment_id)
+    .at(-1)
+    ?.allowed_tools.includes("record_decision")
+    ? "pm_office"
+    : "pm_ops";
+}
+
 /** `cardigan inbox` — pending, belled and failed notifications, grouped by owner. */
 export function inboxCommand(args: readonly string[], io: CliIo): number {
   const flags = parseFlags(args, ["assignment", "project", "data-dir"]);
@@ -63,6 +88,12 @@ export function inboxCommand(args: readonly string[], io: CliIo): number {
     const assignment = flags.assignment;
     const wanted: Assignment["id"] | undefined =
       assignment === undefined ? undefined : (assignment as Assignment["id"]);
+    // §7.1: a standing PM is addressed logically (pm_office / pm_ops) as well as
+    // directly, so asking for its Assignment must not hide those notifications.
+    const logical =
+      wanted === undefined
+        ? undefined
+        : standingRecipient(store, project_id, wanted);
     const rows = store
       .listNotifications({ project_id })
       .filter(
@@ -72,7 +103,8 @@ export function inboxCommand(args: readonly string[], io: CliIo): number {
           ) &&
           (wanted === undefined ||
             (notification.recipient.kind === "assignment" &&
-              notification.recipient.assignment_id === wanted)),
+              notification.recipient.assignment_id === wanted) ||
+            (logical !== undefined && notification.recipient.kind === logical)),
       );
     if (rows.length === 0) {
       io.stdout("收件箱是空的：没有待投递或投递失败的通知。");

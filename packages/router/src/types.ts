@@ -87,7 +87,9 @@ export type RuleId =
   | "7.2/delivery rejected twice"
   | "7.2/delivery does not match the requirement"
   | "7.2/decide whether to pause"
-  | "7.2/unhandled exception";
+  | "7.2/unhandled exception"
+  // §7.3 information levels
+  | "7.3/agent execution failed";
 
 export interface RoutedNotification {
   readonly recipient: Recipient;
