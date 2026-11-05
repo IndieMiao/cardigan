@@ -12,6 +12,7 @@ import type {
   RuntimeResult,
 } from "@cardigan/domain";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { corePid, stopCore } from "../test-support/hc-core.js";
 import { HerdrRuntime, type RuntimeEvent } from "./index.js";
 import {
   assignment,
@@ -204,6 +205,8 @@ async function realFixture(): Promise<Fixture> {
     launch: { ...launch, command: process.execPath, args: [program], cwd: dir },
     inspect: (r) => command(["get", r.terminal_ref]),
     cleanup: async () => {
+      // Record the PID before anything can remove the socket.
+      const pid = corePid({ session, socket: socketPath, env });
       try {
         if (
           await stat(socketPath).then(
@@ -220,9 +223,10 @@ async function realFixture(): Promise<Fixture> {
               ),
             );
           expect((await command(["ls", "--all"])).terminals).toEqual([]);
-          await command(["server", "stop"]);
         }
       } finally {
+        // Stop the core even if a terminal release above failed.
+        await stopCore({ session, socket: socketPath, env, pid });
         await rm(dir, { recursive: true, force: true });
       }
     },

@@ -27,6 +27,7 @@ import { HerdrRuntime } from "@cardigan/runtime-herdr";
 import { Store, writeRole } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { startCardiganServer } from "../../server/src/index.js";
+import { HcCore } from "../../server/test-support/hc.js";
 import {
   createProcessIo,
   humanActor,
@@ -485,6 +486,9 @@ if(process.argv.includes('--version')) { console.log('pi acceptance-1'); process
       await writeFile(provisionGate, "go");
       await writeFile(mcpGate, "go");
       await start.catch(() => {});
+      // Record the core's PID first: once the socket is gone, hc cannot stop it.
+      const core = new HcCore(session, socket, env);
+      core.remember();
       try {
         if (existsSync(socket))
           await exec(hc as string, ["server", "stop", "--json"], {
@@ -495,6 +499,7 @@ if(process.argv.includes('--version')) { console.log('pi acceptance-1'); process
           .poll(() => existsSync(socket), { timeout: 2000 })
           .toBe(false);
       } finally {
+        await core.stop();
         await server.close();
       }
     }

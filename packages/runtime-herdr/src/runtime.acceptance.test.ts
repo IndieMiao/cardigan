@@ -27,6 +27,7 @@ import type {
   RuntimeResult,
 } from "@cardigan/domain";
 import { afterAll, describe, expect, test } from "vitest";
+import { corePid, stopCore } from "../test-support/hc-core.js";
 import { HerdrRuntime } from "./index.js";
 
 const HC_VERSION = "0.1.18";
@@ -323,14 +324,8 @@ describe("runtime contract", () => {
       expect(existsSync(join(socketPath, ".."))).toBe(false);
 
       // Any core that a helper started for this session is stopped again.
-      try {
-        execFileSync("hc", ["server", "stop"], {
-          encoding: "utf8",
-          env: { ...process.env, HC_SESSION: SESSION, HC_SOCKET: socketPath },
-        });
-      } catch {
-        // Nothing to stop.
-      }
+      const pid = corePid({ session: SESSION, socket: socketPath });
+      await stopCore({ session: SESSION, socket: socketPath, pid });
       rmSync(join(socketPath, ".."), { recursive: true, force: true });
     });
   });
@@ -341,28 +336,26 @@ describe("runtime contract", () => {
     });
   }
 
-  afterAll(() => {
+  afterAll(async () => {
     // Leave nothing behind: this suite only ever used its own session.
     expect(SESSION.startsWith("m2t1-")).toBe(true);
+    // Record the core before any probe can remove its socket.
+    const pid = corePid({ session: SESSION, socket: SOCKET });
     try {
-      const listed = execFileSync("hc", ["ls", "--all", "--json"], {
-        encoding: "utf8",
-        env: { ...process.env, HC_SESSION: SESSION, HC_SOCKET: SOCKET },
-      });
-      expect(JSON.parse(listed).terminals ?? []).toEqual([]);
+      if (existsSync(SOCKET)) {
+        const listed = execFileSync("hc", ["ls", "--all", "--json"], {
+          encoding: "utf8",
+          env: { ...process.env, HC_SESSION: SESSION, HC_SOCKET: SOCKET },
+        });
+        expect(JSON.parse(listed).terminals ?? []).toEqual([]);
+      }
     } catch {
-      // A core that never started has nothing to list.
+      // A core that never started has nothing to list; the stop below runs.
+    } finally {
+      await stopCore({ session: SESSION, socket: SOCKET, pid });
+      rmSync(join(tmpdir(), SESSION), { recursive: true, force: true });
     }
-    try {
-      execFileSync("hc", ["server", "stop"], {
-        encoding: "utf8",
-        env: { ...process.env, HC_SESSION: SESSION, HC_SOCKET: SOCKET },
-      });
-    } catch {
-      // Already stopped.
-    }
-    rmSync(join(tmpdir(), SESSION), { recursive: true, force: true });
-  });
+  }, 120_000);
 });
 
 function runContract(name: string, create: () => Promise<UnderTest>): void {
