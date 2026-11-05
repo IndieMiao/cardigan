@@ -1,6 +1,7 @@
 # Phase 1 · M4 任务计划：Git 服务（交付固定、中心合并、清理、对账）
 
-- 版本：v4（2026-11-05）：新增 M4.5（常驻 PM 的前台/后台模式持久化），由 Pi 实现、Codex 验收
+- 版本：v5（2026-11-06）：澄清对账的"孤儿"和"缺失"（M4.T2 #114 的 G10、G11）
+- v4（2026-11-05）：新增 M4.5（常驻 PM 的前台/后台模式持久化），由 Pi 实现、Codex 验收
 - v3（2026-11-05）：新增 M4.2b（大仓库：长超时、agent-ssh 下用增量推送代替整仓 bundle），排在 M4.4 之前；M4.T1 提前到 M4.4 之前
 - v2（2026-11-05）：M4.3 改由 Pi 实现（Pi 先做完 M3 收尾，Codex 还排着 M4.1 修改和 M3.T2），交叉验收相应对调；M4.4 补充释放后 Token 立即失效的要求
 - v1（2026-11-05）
@@ -117,8 +118,8 @@ Git 测试一律在临时目录里用真实 `git` 建仓库，不 mock git 的�
   4. 有任一项 → **不删除**，由 domain 发起一个清理决策（Decision，`trigger=worktree_cleanup`，决策人是人，选项 `keep` / `force_clean`）。它会按现有路由进入 Needs You 并给 PM Office 一条简短提示。用户可以先用 `cardigan worktree diff <A-n>` 查看改动；
   5. 选 `force_clean` 时，先把 `git diff HEAD` 和未跟踪文件清单保存到 `<data>/cleanup/<project_id>/<assignment_id>-<时间>.patch`（主机目录，0600），再强制删除；选 `keep` 就保留，之后的对账不再为它发起决策。
 - **对账**（server 启动时一次，之后默认每 10 分钟）：比对基础 clone 的 `git worktree list --porcelain`、worktree 根目录下的实际目录、数据库里的 Assignment：
-  - 孤儿：目录或 worktree 登记存在，但没有 active Assignment 拥有它；
-  - 缺失：active Assignment 记录的 worktree 不存在；
+  - 孤儿：目录或 worktree 登记存在，但没有任何 Assignment 记录这个路径。已释放的 Assignment 的 worktree 由清理流程负责（删除、发起决策或按你的选择保留），不算孤儿；
+  - 缺失：active Assignment 记录的 worktree 目录不存在。只看目录，不管 Git 里是否还有登记；登记还在时同时报"失效登记"；
   - 失效登记：git 里登记了，目录已经没有；
   - 有 `git_head` 交付但没有固定 ref；
   - M2.7 留下的失败临时 clone；
