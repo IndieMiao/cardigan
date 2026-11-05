@@ -87,6 +87,9 @@ export async function startCardiganServer(
   await secureDataDirectory({ ...execution, dataDir: config.dataDir });
   const store = options.store ?? Store.open({ dataDir: config.dataDir });
   const ownsStore = options.store === undefined;
+  // M4.5: stamp `standing_mode` on rows written before the field existed, so
+  // routing and token issuance only ever read the field.
+  store.backfillStandingModes();
   // Use the execution that was resolved above (config or environment): the
   // Agent mode decides whether workspace Git may run as the host at all.
   const git =

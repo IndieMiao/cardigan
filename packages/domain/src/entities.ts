@@ -183,10 +183,25 @@ interface AssignmentFields {
   /** Last authenticated MCP call (M3.2); the watchdog of §3.3 reads it. */
   readonly last_mcp_activity_at?: Timestamp;
 }
+/**
+ * §7.1 / §10.4: PM Office and PM Ops share the `pm` role. The standing mode is
+ * the durable difference between them (M4.5); it is written once by
+ * `cardigan pm create --office|--ops` and never changes.
+ */
+export type StandingMode = "office" | "ops";
 export type Assignment = AssignmentFields &
   (
-    | { readonly scope: "work_item"; readonly work_item_id: WorkItemId }
-    | { readonly scope: "standing"; readonly work_item_id?: never }
+    | {
+        readonly scope: "work_item";
+        readonly work_item_id: WorkItemId;
+        readonly standing_mode?: never;
+      }
+    | {
+        readonly scope: "standing";
+        readonly work_item_id?: never;
+        /** Absent only on rows written before M4.5 (backfilled once). */
+        readonly standing_mode?: StandingMode;
+      }
   );
 export type RunOutcome = "completed" | "blocked" | "failed";
 export interface Run {

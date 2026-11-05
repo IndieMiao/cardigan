@@ -42,6 +42,7 @@ import {
   createRepositories,
   type ReadRepositories,
 } from "./repositories.js";
+import { backfillStandingModesInTransaction } from "./standing.js";
 import {
   findTokenByHash,
   type IssuedToken,
@@ -569,6 +570,18 @@ export class Store {
 
   listNotifications(query: NotificationQuery) {
     return listNotifications(this.#db, query);
+  }
+
+  /**
+   * M4.5: stamp `standing_mode` on rows written before the field existed, using
+   * their newest token once. Safe to call repeatedly and from startup.
+   */
+  backfillStandingModes() {
+    return this.#run((tx) =>
+      this.listProjects().flatMap((project) =>
+        backfillStandingModesInTransaction(tx, project.id),
+      ),
+    );
   }
 
   /** M4.4: upsert one reconciliation pass and resolve what disappeared. */

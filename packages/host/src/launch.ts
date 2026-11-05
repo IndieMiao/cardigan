@@ -10,8 +10,9 @@ import type {
   Runtime,
   RuntimeLaunch,
   RuntimeRef,
+  StandingMode,
 } from "@cardigan/domain";
-import { abortDispatch, dispatchRun } from "@cardigan/domain";
+import { abortDispatch, dispatchRun, standingModeOf } from "@cardigan/domain";
 import {
   type CompiledAssignmentLaunch,
   compileAssignmentLaunch,
@@ -163,16 +164,19 @@ export function projectActor(
 
 /**
  * §3.4: a standing PM learns from its first prompt whether it is the foreground
- * Office or the background Ops. The two share the `pm` role, so the token scope
- * that was just issued is the only place the distinction lives (§7.1).
+ * Office or the background Ops. M4.5 reads that from the Assignment's
+ * `standing_mode`, so the prompt cannot disagree with the token scope (§7.1).
  */
 export function standingModeLine(
   assignment: Assignment,
-  allowed_tools: readonly string[],
+  mode: StandingMode | undefined = assignment.scope === "standing"
+    ? assignment.standing_mode
+    : undefined,
 ): string | undefined {
   if (assignment.scope !== "standing" || assignment.role_id !== "pm")
     return undefined;
-  return allowed_tools.includes("record_decision")
+  if (mode === undefined) return undefined;
+  return mode === "office"
     ? "mode=foreground 当前身份：PM Office（前台）。只在 Needs You 新增项和重大风险时被打断；用 record_decision 记录人的原话。"
     : "mode=background 当前身份：PM Ops（后台）。接收 Router 升级的事件，按 Assignment 合并后投递，不直接打扰人。";
 }
@@ -232,6 +236,11 @@ export async function launchRun(
       role,
     });
     tokenId = issued.record.id;
+    // Issuance may have stamped a legacy standing mode; read the row back so
+    // the first prompt and the token scope describe the same mode.
+    const currentAssignment =
+      host.store.uow.read((tx) => tx.assignments.get(project, assignment.id)) ??
+      assignment;
 
     step = "launch compilation";
     const model = resolveProfile(host.launch.config, role.launch_profile_ref)
@@ -271,7 +280,7 @@ export async function launchRun(
               ? {}
               : { work_item_id: workItem.id }),
           }),
-        standingModeLine(assignment, issued.record.allowed_tools),
+        standingModeLine(currentAssignment, standingModeOf(currentAssignment)),
       ]
         .filter((line): line is string => line !== undefined)
         .join("\n"),
