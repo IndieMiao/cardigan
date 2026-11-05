@@ -17,6 +17,7 @@ import type { Assignment } from "@cardigan/domain";
 import {
   CentralRepositoryService,
   GitDeliveryVerifier,
+  GitWorktreeService,
 } from "@cardigan/git-service";
 import { CentralGitTransport } from "@cardigan/git-transport";
 import { type AgentExecution, agentUploadPack } from "@cardigan/runtime-herdr";
@@ -402,6 +403,130 @@ process.exit(child.status ?? 98);
     await transport.fetch(repository, source);
     await transport.isDirty(worktree);
     expect(await readFile(marker, "utf8")).toBe("agent");
+  });
+  test("M4.3 worktree status, diff, removal and branch deletion run as the Agent", async () => {
+    const hostCalls: { cwd: string; args: readonly string[] }[] = [];
+    const io = new CentralGitTransport({
+      dataDir: config.dataDir,
+      agentRoot: config.agentRoot,
+      onCommand: (cwd, args) => hostCalls.push({ cwd, args }),
+    });
+    const project = {
+      project_id: "project",
+      source_repo: source,
+      base_branch: "main",
+    };
+    const central = new CentralRepositoryService(io, {
+      dataDir: config.dataDir,
+      repositoriesRoot: join(config.agentRoot, "repos"),
+      uploadPack: async () => "git-upload-pack",
+    });
+    const center = await central.ensureCentral(project);
+    // The base clone comes from the private center, like M4.2's real wiring.
+    await transport.ensureClone(center, repository);
+    await transport.fetch(repository, center);
+    const initial = await transport.resolveCommit(
+      repository,
+      "refs/remotes/origin/main",
+    );
+    await transport.addWorktree(repository, worktree, initial, "agent/C-1/W-1");
+    const service = new GitWorktreeService(transport, central, {
+      dataDir: config.dataDir,
+      repositoriesRoot: join(config.agentRoot, "repos"),
+      worktreesRoot: join(config.agentRoot, "worktrees"),
+    });
+    const a = {
+      id: "A-1",
+      scope: "work_item",
+      work_item_id: "W-1",
+      role_id: "coder",
+      role_version: 1,
+      status: "active",
+      runtime_state: "not_provisioned",
+      runtime_ref: null,
+      machine_id: "local",
+      mcp_token_id: "reserved",
+      created_at: "2030-01-01T00:00:00.000Z",
+      branch: "agent/C-1/W-1",
+      worktree_path: worktree,
+      base_sha: initial,
+    } as unknown as Assignment;
+    await writeFile(join(worktree, "file"), "uncommitted");
+    const diff = await service.diffWorktree({ project, assignment: a });
+    expect(diff).toMatchObject({
+      worktree_path: worktree,
+      tracked: ["file"],
+      untracked: [],
+      reachable: true,
+    });
+    expect(diff.patch).toContain("+uncommitted");
+
+    const outcome = await service.removeWorktree({
+      project,
+      assignment: a,
+      force: true,
+    });
+    if (outcome.status !== "removed" || outcome.patch_path === undefined)
+      throw new Error("expected a forced clean with a patch");
+    expect((await lstat(outcome.patch_path)).mode & 0o777).toBe(0o600);
+    expect(
+      await readFile(outcome.patch_path, "utf8").then((text) =>
+        text.includes("+uncommitted"),
+      ),
+    ).toBe(true);
+
+    // The worktree and branch are gone, deleted through the Agent entry.
+    await expect(lstat(worktree)).rejects.toThrow();
+    expect(await transport.listWorktrees(repository)).not.toContainEqual(
+      expect.objectContaining({ path: worktree }),
+    );
+    expect(
+      calls.some(
+        (args) =>
+          args.includes("worktree") &&
+          args.includes("remove") &&
+          args.includes(worktree),
+      ),
+    ).toBe(true);
+    expect(
+      calls.some((args) => args.includes("branch") && args.includes("-D")),
+    ).toBe(true);
+    expect(
+      calls.some(
+        (args) =>
+          args.includes("-C") &&
+          args.includes(worktree) &&
+          args.includes("status"),
+      ),
+    ).toBe(true);
+    // Host Git only ever ran inside the private central repository.
+    expect(hostCalls).not.toHaveLength(0);
+    expect(
+      hostCalls.every(
+        (call) =>
+          call.cwd.startsWith(join(config.dataDir, "central")) &&
+          call.args.includes("transfer.fsckObjects=true"),
+      ),
+    ).toBe(true);
+    expect(
+      hostCalls.some((call) =>
+        call.args.some(
+          (arg) =>
+            arg === worktree ||
+            arg === repository ||
+            arg.startsWith(join(config.agentRoot, "worktrees")),
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      hostCalls.every(
+        (call) =>
+          !call.args.includes("-C") ||
+          call.args[call.args.indexOf("-C") + 1]?.startsWith(
+            join(config.dataDir, "central"),
+          ),
+      ),
+    ).toBe(true);
   });
   test("rejects changed sources, escaped paths and shared source repositories", async () => {
     await initialize();
