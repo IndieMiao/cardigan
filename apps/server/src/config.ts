@@ -27,6 +27,12 @@ export interface ServerEnv extends ExecutionEnv {
   readonly CARDIGAN_DATA_DIR?: string | undefined;
   readonly CARDIGAN_MCP_HOST?: string | undefined;
   readonly CARDIGAN_MCP_PORT?: string | undefined;
+  /**
+   * M5.1: the Workbench port only. The listen address is never configurable
+   * (`resolveWebConfig` refuses anything but loopback), so listing it here
+   * keeps the whole server configuration in one interface.
+   */
+  readonly CARDIGAN_WEB_PORT?: string | undefined;
   readonly CARDIGAN_MERGE_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_CLEANUP_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_RECONCILE_INTERVAL_MS?: string | undefined;

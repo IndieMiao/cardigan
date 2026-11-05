@@ -4,6 +4,7 @@ import { resolveServerConfig, type ServerEnv } from "./config.js";
 import { createHostWiring } from "./host.js";
 import { installShutdownHandlers } from "./lifecycle.js";
 import { type CardiganServer, startCardiganServer } from "./server.js";
+import { resolveWebConfig } from "./web/config.js";
 
 export interface RunServerOptions {
   readonly env?: ServerEnv;
@@ -23,6 +24,9 @@ export async function runServer(
   const write =
     options.log ?? ((line: string) => process.stdout.write(`${line}\n`));
   const config = resolveServerConfig(env);
+  // Resolved before the store is opened: a non-loopback Workbench address is a
+  // startup error, not a listener that comes up in the wrong place (§3.1).
+  const webConfig = resolveWebConfig(env);
   // One Store for the endpoint, the router and the dispatcher: they share the
   // same write lock and see each other's commits immediately.
   const store = Store.open({ dataDir: config.dataDir });
@@ -46,6 +50,7 @@ export async function runServer(
       // resolved execution it uses for the rest of startup.
       captureAgent: (command, args, timeout) =>
         host.runtime.captureAgent(command, args, timeout),
+      web: { config: webConfig },
       dispatcher: {
         runtime: host.runtime,
         snapshot: host.snapshot,
@@ -65,7 +70,13 @@ export async function runServer(
     throw error;
   }
 
-  write(JSON.stringify({ ready: true, url: server.url }));
+  write(
+    JSON.stringify({
+      ready: true,
+      url: server.url,
+      ...(server.web === undefined ? {} : { web_url: server.web.url }),
+    }),
+  );
 
   return new Promise<number>((resolve) => {
     installShutdownHandlers(process, (signal) => {
@@ -109,3 +120,15 @@ export {
 } from "./dispatch-monitor.js";
 export { installShutdownHandlers, SHUTDOWN_SIGNALS } from "./lifecycle.js";
 export { type CardiganServer, startCardiganServer } from "./server.js";
+export {
+  allowedHosts,
+  DEFAULT_WEB_PORT,
+  resolveWebConfig,
+  type WebConfig,
+  type WebEnv,
+} from "./web/config.js";
+export {
+  type RunningWebServer,
+  startWebServer,
+  type WebServerOptions,
+} from "./web/server.js";
