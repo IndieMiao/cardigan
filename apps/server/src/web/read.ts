@@ -412,6 +412,18 @@ export function needsYou(state: CommandState, now: string) {
         id: a.id,
         role_id: a.role_id,
         runtime_state: a.runtime_state,
+        waited_ms:
+          waitedMs(
+            state.events.findLast(
+              (e) =>
+                ["runtime_lost", "runtime_disconnected"].includes(e.type) &&
+                typeof e.payload === "object" &&
+                e.payload !== null &&
+                "assignment_id" in e.payload &&
+                e.payload.assignment_id === a.id,
+            )?.created_at,
+            now,
+          ) ?? null,
         card_id:
           state.work_items.find((w) => w.id === a.work_item_id)?.card_id ??
           null,

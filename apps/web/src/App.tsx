@@ -10,6 +10,7 @@ import { routeHash, useRoute } from "./route.js";
 import { CardDetailPage } from "./views/CardDetailPage.js";
 import { CardListPage } from "./views/CardListPage.js";
 import { LoginPage } from "./views/LoginPage.js";
+import { NeedsYouPage } from "./views/NeedsYouPage.js";
 
 /**
  * Application shell (M5 plan §4 M5.3).
@@ -150,8 +151,7 @@ function Workbench({
     }
   }
 
-  const activeView =
-    route?.kind === "board" || route?.kind === "list" ? route.kind : "board";
+  const activeView = route && route.kind !== "card" ? route.kind : "board";
 
   return (
     <div className="app">
@@ -176,6 +176,12 @@ function Workbench({
         )}
         {selected !== undefined && (
           <nav className="nav" aria-label="视图">
+            <a
+              href={routeHash({ kind: "needs-you", projectId: selected.id })}
+              aria-current={activeView === "needs-you" ? "page" : undefined}
+            >
+              Needs You
+            </a>
             <a
               href={routeHash({ kind: "board", projectId: selected.id })}
               aria-current={activeView === "board" ? "page" : undefined}
@@ -220,6 +226,13 @@ function Workbench({
             <code>cardigan project create &lt;id&gt;</code>。
           </p>
         )}
+        {selected !== undefined && route?.kind === "needs-you" && (
+          <NeedsYouPage
+            key={selected.id}
+            client={client}
+            projectId={selected.id}
+          />
+        )}
         {selected !== undefined && route?.kind === "card" && (
           <CardDetailPage
             client={client}
@@ -234,7 +247,7 @@ function Workbench({
             <CardListPage
               client={client}
               projectId={selected.id}
-              view={activeView}
+              view={route?.kind === "list" ? "list" : "board"}
             />
           )}
       </main>

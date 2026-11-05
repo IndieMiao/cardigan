@@ -294,6 +294,7 @@ export interface NeedsPage {
     readonly role_id: string;
     readonly runtime_state: string;
     readonly card_id: string | null;
+    readonly waited_ms: number | null;
   }[];
 }
 

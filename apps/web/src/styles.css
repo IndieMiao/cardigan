@@ -813,3 +813,46 @@ fieldset.filters {
 .superseded summary {
   cursor: pointer;
 }
+
+.needs-item {
+  margin: var(--gap) 0;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.needs-item.urgent {
+  border-left: 4px solid var(--danger);
+}
+.needs-item form {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+.needs-item label {
+  display: grid;
+  gap: 4px;
+}
+.needs-item textarea,
+.needs-item select {
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px;
+}
+.action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.copy-command {
+  margin: 8px 0;
+  overflow-wrap: anywhere;
+}
+.needs-batch {
+  margin: 16px 0;
+  padding: 12px;
+  background: var(--surface-muted);
+}
