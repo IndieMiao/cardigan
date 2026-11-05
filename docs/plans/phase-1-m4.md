@@ -1,6 +1,7 @@
 # Phase 1 · M4 任务计划：Git 服务（交付固定、中心合并、清理、对账）
 
-- 版本：v1（2026-11-05）
+- 版本：v2（2026-11-05）：M4.3 改由 Pi 实现（Pi 先做完 M3 收尾，Codex 还排着 M4.1 修改和 M3.T2），交叉验收相应对调；M4.4 补充释放后 Token 立即失效的要求
+- v1（2026-11-05）
 - 对应：开发方案 §16 Phase 1 M4；§12 Worktree 与 Git 服务；§4.4 状态机、§4.5 不变量 9、13、14；§14 安全模型
 - M4 的验收（开发方案 §16）：**伪造的或不在该分支上的 SHA 被拒；有未提交修改的 worktree 不被静默删除；孤儿 worktree 能被发现。**
 - 只做 `machine_id=local`，两种运行模式（同用户、agent-ssh）都要支持。M4 不做：向验证方所在机器推送 SHA（§12.4，Phase 2 多机）；合并后自动推送到 GitHub 等外部平台；合并后的自动构建或测试。
@@ -20,19 +21,19 @@
 |---|---|---|---|---|---|
 | M4.1 | domain + router：卡片 `awaiting_merge`、合并确认、合并结果、`release`、清理决策；路由新增事件 | Codex | Pi（M4.T1） | 无 | `feat/m4-domain-merge` |
 | M4.2 | git：中心仓库、登记源同步、基础 clone 改从中心取基线、交付校验与固定、备份拉取 | Codex | Pi（M4.T1） | 无 | `feat/m4-central-repo` |
-| M4.3 | git：bare 仓库内合并、删除 worktree、worktree 清单与对账 | Codex | Pi（M4.T1） | M4.2 | `feat/m4-merge-cleanup` |
+| M4.3 | git：bare 仓库内合并、删除 worktree、worktree 清单与对账 | Pi | Codex（M4.T2） | M4.2 | `feat/m4-merge-cleanup` |
 | M4.4 | 组装：交付校验接进 MCP、合并执行循环、release 后清理、对账和备份循环、CLI | Pi | Codex（M4.T2） | M4.1–M4.3 | `feat/m4-assembly` |
-| M4.T1 | 交叉验收：M4.1 状态机和命令、M4.2、M4.3 的 Git 行为 | Pi | — | M4.1–M4.3 | `test/m4-git` |
-| M4.T2 | 交叉验收：M4.4 端到端 | Codex | — | M4.4 | `test/m4-e2e` |
+| M4.T1 | 交叉验收：M4.1 状态机和命令、M4.2 的 Git 行为 | Pi | — | M4.1、M4.2 | `test/m4-git` |
+| M4.T2 | 交叉验收：M4.3 的 Git 行为、M4.4 端到端 | Codex | — | M4.3、M4.4 | `test/m4-e2e` |
 | M4.S | 真实冒烟：一张卡从交付走到合并（agent-ssh 模式，用户装好之后） | Claude | — | M4.4、M3.S | — |
 
 ```
-M4.2（Codex，可立即开始） ─ M4.3（Codex） ─┐
-M4.1（Codex，M4.2 之后） ──────────────────┼─ M4.4（Pi） ─ M4.T2（Codex） ─ M4.S
-                                            └─ M4.T1（Pi）：M4.1–M4.3 合并后
+M4.2（Codex，已合并） ─ M4.3（Pi） ─────────┐
+M4.1（Codex） ──────────────────────────────┼─ M4.4（Pi） ─ M4.T2（Codex） ─ M4.S
+                                            └─ M4.T1（Pi）：M4.1、M4.2 合并后
 ```
 
-Pi 目前还有 M3 的收尾（M3.5 端到端、路由缺陷修复、两份启动流程合并、M3.T1），所以 M4.1–M4.3 都先给 Codex；Pi 空出来以后，M4.1 如果还没开工就改给 Pi，验收相应对调。
+v1 把 M4.1–M4.3 都排给了 Codex，因为当时 Pi 还在做 M3 收尾。v2：Pi 已做完 M3 收尾，M4.3 改给 Pi；M4.1、M4.2 仍由 Codex 实现、Pi 验收（M4.T1）；M4.3、M4.4 由 Pi 实现、Codex 验收（M4.T2）。
 
 ## 2. 通用约定
 
@@ -179,6 +180,7 @@ awaiting_merge --cancel--> cancelled
 ### M4.4 组装（Pi）
 
 - MCP：`startMcpServer` 必须传入真实校验器（两种模式各自的 `GitDeliveryVerifier`），去掉默认桩；`submit_delivery` 事务提交后调用 `pinDelivery`。
+- Token：收到 `assignment_released` 后作废该 Assignment 的 Token；另外 MCP 认证要拒绝状态不是 active 的 Assignment，多一道防线（M4.1 审核时发现：现在写命令会因 Assignment 不是 active 被拒，但 Token 在作废前仍能读卡片和更新）。
 - 合并执行循环（与 Dispatcher 并列，SIGTERM 时等当前合并结束）：找出 `awaiting_merge` 且已确认（或策略为 `auto`）的卡片 → `syncFromSource` → `mergePlan` → `mergeIntoBase` → `recordMergeResult`；`stale` 下一轮重试；同一项目同时只跑一个合并。
 - Dispatcher：`merge_conflicted` 触发的 Run 种类为 `fix`。
 - 卡片 done / cancelled 后的 release 和清理（§3.6）；清理决策解决后执行 `keep` 或 `force_clean`。
@@ -189,8 +191,8 @@ awaiting_merge --cancel--> cancelled
 
 ### M4.T1、M4.T2 交叉验收
 
-- **M4.T1（Pi）**：M4.1 的状态机和命令（每条迁移、合并确认、冲突回到 `in_progress` 后的完整重来）；M4.2 的校验（§16 的"伪造或不在分支上的 SHA 被拒"逐类覆盖）、固定不覆盖、同步三种结果；M4.3 的合并、`stale`、清理和对账；agent-ssh 下主机不在 Agent 目录里执行 git。
-- **M4.T2（Codex）**：M4.4 端到端，覆盖 §16 的三条验收和 §3.8 的状态流转；重启 server 后合并循环和对账从持久化状态继续，不重复合并、不重复发起清理决策。
+- **M4.T1（Pi）**：M4.1 的状态机和命令（每条迁移、合并确认、冲突回到 `in_progress` 后的完整重来）；M4.2 的校验（§16 的"伪造或不在分支上的 SHA 被拒"逐类覆盖）、固定不覆盖、同步三种结果；agent-ssh 下主机不在 Agent 目录里执行 git。
+- **M4.T2（Codex）**：M4.3 的合并、`stale`、清理和对账（agent-ssh 下主机不在 Agent 目录里执行 git）；M4.4 端到端，覆盖 §16 的三条验收和 §3.8 的状态流转；重启 server 后合并循环和对账从持久化状态继续，不重复合并、不重复发起清理决策。
 
 ### M4.S 真实冒烟（Claude）
 
