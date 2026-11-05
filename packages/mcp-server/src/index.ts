@@ -1,6 +1,12 @@
 // M5.1: the Workbench serves attachment downloads from the same content-
 // addressed store the MCP upload path writes to.
-export { fileAttachmentStore } from "./attachments.js";
+export {
+  decodeAttachment,
+  fileAttachmentStore,
+  MAX_ATTACHMENT_BASE64,
+  MAX_ATTACHMENT_BYTES,
+  MAX_MCP_BODY_BYTES,
+} from "./attachments.js";
 export {
   authenticate,
   bearerToken,
