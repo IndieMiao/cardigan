@@ -74,17 +74,20 @@ export function reconcile(
         detail: "Worktree is registered in Git but its directory is missing",
         path,
       });
-  // An active Assignment expects a worktree that is neither registered nor present.
+  // §3.6: a worktree is "missing" when its directory is gone, whatever Git
+  // still has registered. The database owns the directory, so this is the
+  // finding that tells PM Ops *which* Assignment lost its workspace; a leftover
+  // registration is reported separately above, for pruning.
   for (const assignment of assignments) {
     if (assignment.status !== "active" || !assignment.worktree_path) continue;
     const path = resolve(assignment.worktree_path);
-    if (!registered.has(path) && !directories.has(path))
-      findings.push({
-        kind: "missing_worktree",
-        detail: "Active Assignment has no worktree",
-        path,
-        assignment_id: assignment.id,
-      });
+    if (directories.has(path)) continue;
+    findings.push({
+      kind: "missing_worktree",
+      detail: "Active Assignment has no worktree directory",
+      path,
+      assignment_id: assignment.id,
+    });
   }
   // A delivered Git commit must stay reachable through its fixed ref.
   const pinned = new Map(
