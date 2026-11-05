@@ -1,3 +1,9 @@
+import {
+  browserStream,
+  type StreamCallbacks,
+  type StreamFactory,
+  subscribeProject,
+} from "./stream.js";
 /**
  * The Workbench API client (M5 plan §3.1, §3.2, §4 M5.1/M5.3).
  *
@@ -376,6 +382,7 @@ export interface ActivityData {
 }
 
 export interface CardiganClient {
+  subscribe(projectId: string, callbacks: StreamCallbacks): () => void;
   activity(projectId: string, filters: ActivityFilter): Promise<ActivityData>;
   snapshot(projectId: string): Promise<SnapshotData>;
   execution(projectId: string): Promise<ExecutionData>;
@@ -422,8 +429,12 @@ export class HttpCardiganClient implements CardiganClient {
    */
   constructor(
     private readonly fetchImpl: typeof fetch = (...args) => fetch(...args),
+    private readonly streamFactory: StreamFactory = browserStream,
   ) {}
 
+  subscribe(projectId: string, callbacks: StreamCallbacks): () => void {
+    return subscribeProject(projectId, callbacks, this.streamFactory);
+  }
   async session(): Promise<SessionInfo> {
     return this.request<SessionInfo>("/api/session");
   }

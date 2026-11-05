@@ -38,15 +38,17 @@ function Cards({
 export function SnapshotPage({
   client,
   projectId,
+  revision = 0,
 }: {
   client: CardiganClient;
   projectId: string;
+  revision?: number;
 }) {
   const load = useCallback(
     () => client.snapshot(projectId),
     [client, projectId],
   );
-  const { data, pending, error, reload } = useResource(load);
+  const { data, pending, error, reload } = useResource(load, revision);
   return (
     <section aria-label="项目快照">
       <div className="toolbar">

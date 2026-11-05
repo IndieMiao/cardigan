@@ -7,6 +7,7 @@ import {
   type SessionInfo,
 } from "./api.js";
 import { routeHash, useRoute } from "./route.js";
+import { useProjectStream } from "./useProjectStream.js";
 import { ActivityPage } from "./views/ActivityPage.js";
 import { CardDetailPage } from "./views/CardDetailPage.js";
 import { CardListPage } from "./views/CardListPage.js";
@@ -128,6 +129,8 @@ function Workbench({
       ? projects.projects.find((p) => p.id === route?.projectId)
       : undefined;
 
+  const live = useProjectStream(client, selected?.id, onLoggedOut);
+
   // Land on the first project's board when the URL names no project (or one
   // that no longer exists).
   useEffect(() => {
@@ -214,6 +217,18 @@ function Workbench({
             </a>
           </nav>
         )}
+        {selected && (
+          <span
+            className={`status status-${live.status === "live" ? "done" : "todo"}`}
+            role="status"
+          >
+            {live.status === "live"
+              ? "实时更新已连接"
+              : live.status === "retrying"
+                ? "连接中断，正在重连"
+                : "正在连接实时更新"}
+          </span>
+        )}
         <button
           type="button"
           className="logout"
@@ -249,6 +264,7 @@ function Workbench({
             key={selected.id}
             client={client}
             projectId={selected.id}
+            revision={live.revision}
           />
         )}
         {selected && route?.kind === "snapshot" && (
@@ -256,6 +272,7 @@ function Workbench({
             key={selected.id}
             client={client}
             projectId={selected.id}
+            revision={live.revision}
           />
         )}
         {selected && route?.kind === "execution" && (
@@ -263,6 +280,7 @@ function Workbench({
             key={selected.id}
             client={client}
             projectId={selected.id}
+            revision={live.revision}
           />
         )}
         {selected !== undefined && route?.kind === "needs-you" && (
@@ -270,12 +288,15 @@ function Workbench({
             key={selected.id}
             client={client}
             projectId={selected.id}
+            revision={live.revision}
           />
         )}
         {selected !== undefined && route?.kind === "card" && (
           <CardDetailPage
+            key={`${selected.id}/${route.cardId}`}
             client={client}
             projectId={selected.id}
+            revision={live.cardRevision(route.cardId)}
             cardId={route.cardId}
           />
         )}
@@ -285,7 +306,9 @@ function Workbench({
             route === undefined) && (
             <CardListPage
               client={client}
+              key={selected.id}
               projectId={selected.id}
+              revision={live.revision}
               view={route?.kind === "list" ? "list" : "board"}
             />
           )}

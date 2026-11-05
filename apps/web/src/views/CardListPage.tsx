@@ -1,13 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  type CardFilter,
-  type CardiganClient,
-  type CardPage,
-  type CardView,
-  describeError,
-} from "../api.js";
+import { useCallback, useState } from "react";
+import type { CardFilter, CardiganClient, CardPage, CardView } from "../api.js";
 import { routeHash } from "../route.js";
 import { BOARD_STATUSES, cardStatusLabel, nextOwnersLabel } from "../status.js";
+import { useResource } from "../useResource.js";
 
 /**
  * The board and the list (M5 plan §4 M5.3; development plan §8.7).
@@ -22,6 +17,7 @@ export interface CardListPageProps {
   readonly client: CardiganClient;
   readonly projectId: string;
   readonly view: "board" | "list";
+  readonly revision?: number;
 }
 
 type LoadState =
@@ -38,36 +34,34 @@ const FILTERS: readonly {
   { value: "agent", label: "等 Agent 处理" },
 ];
 
-export function CardListPage({ client, projectId, view }: CardListPageProps) {
+export function CardListPage({
+  client,
+  projectId,
+  view,
+  revision = 0,
+}: CardListPageProps) {
   const [filter, setFilter] = useState<CardFilter>("all");
-  const [state, setState] = useState<LoadState>({ kind: "loading" });
-  // Monotonic request id: a slow answer for an abandoned filter must not
-  // overwrite the current one.
-  const latest = useRef(0);
-
-  const reload = useCallback(() => {
-    const request = latest.current + 1;
-    latest.current = request;
-    setState({ kind: "loading" });
-    client.cards(projectId, filter).then(
-      (page) => {
-        if (latest.current === request) setState({ kind: "ready", page });
-      },
-      (error: unknown) => {
-        if (latest.current === request) {
-          setState({ kind: "error", message: describeError(error) });
-        }
-      },
-    );
-  }, [client, projectId, filter]);
-
-  useEffect(() => {
-    reload();
-  }, [reload]);
-
+  const load = useCallback(
+    () => client.cards(projectId, filter),
+    [client, projectId, filter],
+  );
+  const { data, error, reload } = useResource(load, revision);
+  const state: LoadState = data
+    ? { kind: "ready", page: data }
+    : error
+      ? { kind: "error", message: error }
+      : { kind: "loading" };
   const counts = state.kind === "ready" ? state.page.counts : undefined;
   return (
     <section className="cards-page" aria-label="卡片">
+      {data && error && (
+        <p role="alert" className="error-panel">
+          {error}{" "}
+          <button type="button" onClick={reload}>
+            重试
+          </button>
+        </p>
+      )}
       <div className="toolbar">
         <fieldset className="filters">
           <legend className="visually-hidden">筛选</legend>
