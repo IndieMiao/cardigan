@@ -12,6 +12,7 @@ import { newUlid, Store } from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { stubGit } from "./git-test-support.js";
 import { type CardiganServer, startCardiganServer } from "./server.js";
 
 const PM_TOOLS = [
@@ -263,6 +264,9 @@ beforeEach(async () => {
   }
   server = await startCardiganServer({
     config: { dataDir, host: "127.0.0.1", port: 0 },
+    // M4.4: production verifies Git for real; this card's subject is the
+    // command surface, so the binding accepts any SHA.
+    git: stubGit(),
   });
 });
 

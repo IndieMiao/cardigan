@@ -29,6 +29,10 @@ const unauthorized = (message: string): Result<never> => ({
  * The token decides who the caller is: the assignment, its role version and the
  * tools it may use all come from the stored token row, never from arguments.
  * Unknown, revoked and orphaned tokens are indistinguishable to the caller.
+ *
+ * §3.6 / M4.4: a token only works while its Assignment is active. Revoking the
+ * token on release is the first line of defence; this check is the second, and
+ * it also covers suspended Assignments whose token has not been rotated yet.
  */
 export function authenticate(
   store: McpBackend,
@@ -60,7 +64,7 @@ export function authenticate(
     };
   });
 
-  if (lookup === undefined) {
+  if (lookup === undefined || lookup.assignment.status !== "active") {
     return unauthorized("invalid bearer token");
   }
 

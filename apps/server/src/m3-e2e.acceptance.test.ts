@@ -24,6 +24,7 @@ import { HerdrRuntime } from "@cardigan/runtime-herdr";
 import { Store } from "@cardigan/store";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { routeProjectEvents } from "./dispatch-inbox.js";
+import { stubGit } from "./git-test-support.js";
 import { startQueuedRun } from "./host-start.js";
 import { type CardiganServer, startCardiganServer } from "./server.js";
 
@@ -395,6 +396,8 @@ describe.skipIf(!available)("M3.5 router and dispatcher end to end", () => {
     server = await startCardiganServer({
       config: { dataDir, host: "127.0.0.1", port: 0 },
       store,
+      // M3.5 covers routing, not Git: the fake Agent delivers a fabricated SHA.
+      git: stubGit(),
       dispatcher: {
         runtime,
         intervalMs: 150,

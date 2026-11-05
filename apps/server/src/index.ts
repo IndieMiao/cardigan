@@ -1,6 +1,7 @@
 import { stdoutLogger } from "@cardigan/mcp-server";
 import { Store } from "@cardigan/store";
 import { resolveServerConfig, type ServerEnv } from "./config.js";
+import { ServerGit } from "./git.js";
 import { createHostWiring } from "./host.js";
 import { installShutdownHandlers } from "./lifecycle.js";
 import { type CardiganServer, startCardiganServer } from "./server.js";
@@ -41,6 +42,16 @@ export async function runServer(
       env,
       store,
       log: stdoutLogger,
+      git: new ServerGit({
+        store,
+        dataDir: config.dataDir,
+        ...(config.execution === undefined
+          ? {}
+          : { execution: config.execution }),
+        // Workspace Git in agent-ssh mode runs as the agent account (§12.6).
+        captureAgent: (command, args) =>
+          host.runtime.captureAgent(command, args),
+      }),
       dispatcher: {
         runtime: host.runtime,
         snapshot: host.snapshot,

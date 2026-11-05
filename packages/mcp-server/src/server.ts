@@ -65,7 +65,7 @@ export async function startMcpServer(
   const log = options.log ?? stdoutLogger;
   const tools = options.tools ?? [
     ...readOnlyTools,
-    ...deliveryTools(options),
+    ...deliveryTools({ ...options, log }),
     ...managementTools(options.clock),
     ...supportTools(options),
   ];

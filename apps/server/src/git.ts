@@ -1,0 +1,256 @@
+import { join } from "node:path";
+import type {
+  Assignment,
+  Delivery,
+  DeliverySubject,
+  DeliveryVerifier,
+  MergePlan,
+  ProjectId,
+} from "@cardigan/domain";
+import { validationFailed } from "@cardigan/domain";
+import {
+  type CentralProject,
+  CentralRepositoryService,
+  GitDeliveryVerifier,
+  GitWorktreeService,
+  type MergeOutcome,
+  type ReconcileFinding,
+  type RemoveWorktreeInput,
+  type RemoveWorktreeOutcome,
+  type SourceSync,
+  type WorktreeDiff,
+} from "@cardigan/git-service";
+import {
+  CentralGitTransport,
+  LocalGitTransport,
+  type WorkspaceGit as WorkspaceGitPort,
+} from "@cardigan/git-transport";
+import type { DeliveryVerifierFor } from "@cardigan/mcp-server";
+import {
+  type AgentExecution,
+  agentUploadPack,
+  type ExecutionConfig,
+} from "@cardigan/runtime-herdr";
+import type { ProjectRecord, Store } from "@cardigan/store";
+
+/**
+ * M4.4: the server's Git assembly.
+ *
+ * §20.2 keeps Git behind `domain` ports: this module is the one place that
+ * binds the ports to the real transports for the MCP endpoint and the control
+ * plane. It hands out one verifier per project (§12.3) and one worktree service
+ * for all projects (paths are project-scoped).
+ */
+export interface ServerGitOptions {
+  readonly store: Pick<Store, "getProject" | "listProjects">;
+  readonly dataDir: string;
+  /** Defaults to local mode; `agent-ssh` routes workspace Git via the Agent. */
+  readonly execution?: ExecutionConfig;
+  /**
+   * agent-ssh only: run a command as the agent account. The server never
+   * executes Git inside an Agent-writable repository as its own user (§12.6).
+   */
+  readonly captureAgent?: (
+    command: "git",
+    args: readonly string[],
+  ) => Promise<
+    | { readonly ok: true; readonly value: string }
+    | {
+        readonly ok: false;
+        readonly error: { readonly code: string; readonly message: string };
+      }
+  >;
+}
+
+/** What the loops need; tests substitute a plain object. */
+export interface MergeGit {
+  projectOf(project_id: ProjectId): CentralProject | undefined;
+  sync(project: CentralProject): Promise<SourceSync>;
+  merge(project: CentralProject, plan: MergePlan): Promise<MergeOutcome>;
+}
+export interface ReconcileGit {
+  projectOf(project_id: ProjectId): CentralProject | undefined;
+  reconcile(
+    project: CentralProject,
+    assignments: readonly Assignment[],
+    deliveries: readonly Delivery[],
+  ): Promise<readonly ReconcileFinding[]>;
+  removeWorktree(input: RemoveWorktreeInput): Promise<RemoveWorktreeOutcome>;
+  diffWorktree(input: {
+    readonly project: CentralProject;
+    readonly assignment: Assignment;
+  }): Promise<WorktreeDiff>;
+  backup(project: CentralProject): Promise<void>;
+}
+
+/** The repository roots a checkout layout uses for this execution mode. */
+export function gitRoots(
+  execution: ExecutionConfig,
+  dataDir: string,
+): { repositoriesRoot: string; worktreesRoot: string } {
+  const root =
+    execution.mode === "local" ? join(dataDir, "agent") : execution.agentRoot;
+  return {
+    repositoriesRoot: join(root, "repos"),
+    worktreesRoot: join(root, "worktrees"),
+  };
+}
+
+/**
+ * Agent-ssh: the same `git` argv runs under the agent account through the
+ * runtime's dedicated SSH entry, with the target marked safe explicitly.
+ */
+function agentWorkspace(
+  captureAgent: NonNullable<ServerGitOptions["captureAgent"]>,
+): WorkspaceGitPort {
+  return {
+    run: async (args) => {
+      const at = args.indexOf("-C"),
+        target = at >= 0 ? args[at + 1] : undefined;
+      const result = await captureAgent("git", [
+        ...(target === undefined ? [] : ["-c", `safe.directory=${target}`]),
+        ...args,
+      ]);
+      if (!result.ok)
+        throw new Error(`${result.error.code}: ${result.error.message}`);
+      return result.value;
+    },
+  };
+}
+
+/**
+ * Everything apps/server needs from Git in one object. Tests that only exercise
+ * routing inject a stub; production always uses `ServerGit` (real Git).
+ */
+export interface GitBinding extends MergeGit, ReconcileGit {
+  readonly verifierFor: DeliveryVerifierFor;
+  pinDelivery(input: {
+    readonly project_id: ProjectId;
+    readonly delivery_id: string;
+    readonly sha: string;
+  }): Promise<void>;
+}
+
+export class ServerGit implements GitBinding {
+  private readonly central: CentralRepositoryService;
+  private readonly worktrees: GitWorktreeService;
+  private readonly cache = new Map<ProjectId, CentralProject | undefined>();
+
+  constructor(private readonly options: ServerGitOptions) {
+    const execution =
+      options.execution ??
+      ({ mode: "local", dataDir: options.dataDir } as const);
+    const centralTransport = new CentralGitTransport({
+      dataDir: options.dataDir,
+      ...(execution.mode === "agent-ssh"
+        ? { agentRoot: execution.agentRoot }
+        : {}),
+    });
+    this.central = new CentralRepositoryService(centralTransport, {
+      dataDir: options.dataDir,
+      ...(execution.mode === "agent-ssh"
+        ? {
+            uploadPack: (repository: string) =>
+              agentUploadPack(execution as AgentExecution, repository),
+          }
+        : {}),
+    });
+    const workspace =
+      execution.mode === "agent-ssh" && options.captureAgent !== undefined
+        ? agentWorkspace(options.captureAgent)
+        : undefined;
+    this.worktrees = new GitWorktreeService(
+      new LocalGitTransport("git", 30_000, workspace),
+      this.central,
+      {
+        dataDir: options.dataDir,
+        ...gitRoots(execution, options.dataDir),
+      },
+    );
+  }
+
+  /** The central-repository descriptor of a project, or nothing without a repo. */
+  projectOf(project_id: ProjectId): CentralProject | undefined {
+    if (this.cache.has(project_id)) return this.cache.get(project_id);
+    const record: ProjectRecord | undefined = this.options.store.getProject(
+      project_id as never,
+    );
+    const project =
+      record?.repo_path === null || record?.repo_path === undefined
+        ? undefined
+        : {
+            project_id: record.id,
+            source_repo: record.repo_path,
+            base_branch: record.base_branch ?? "main",
+          };
+    this.cache.set(project_id, project);
+    return project;
+  }
+
+  /** Every project that can own a central repository (§3.1). */
+  projects(): readonly CentralProject[] {
+    return this.options.store.listProjects().flatMap((record) => {
+      const project = this.projectOf(record.id);
+      return project === undefined ? [] : [project];
+    });
+  }
+
+  /**
+   * §3.3 step 1: one verifier per project, because Assignment ids are only
+   * unique inside a project. A project without a repository cannot accept a
+   * Git delivery, but non-Git subjects are still verified by their own rules.
+   */
+  readonly verifierFor: DeliveryVerifierFor = (project_id) => {
+    const project = this.projectOf(project_id);
+    if (project === undefined)
+      return {
+        verify: async (subject: DeliverySubject) =>
+          subject.kind === "git_head"
+            ? validationFailed(
+                "Project has no registered repository for Git deliveries",
+              )
+            : { ok: true, value: [] },
+      } satisfies DeliveryVerifier;
+    return new GitDeliveryVerifier(this.central, project);
+  };
+
+  /** §3.3 step 2; a failure here is logged by the caller and repaired by reconcile. */
+  async pinDelivery(input: {
+    readonly project_id: ProjectId;
+    readonly delivery_id: string;
+    readonly sha: string;
+  }): Promise<void> {
+    const project = this.projectOf(input.project_id);
+    if (project === undefined)
+      throw new Error("Project has no registered repository");
+    await this.central.pinDelivery(project, input.delivery_id, input.sha);
+  }
+
+  async sync(project: CentralProject): Promise<SourceSync> {
+    return this.central.syncFromSource(project);
+  }
+  async merge(project: CentralProject, plan: MergePlan): Promise<MergeOutcome> {
+    return this.central.mergeIntoBase(project, plan);
+  }
+  async backup(project: CentralProject): Promise<void> {
+    await this.central.backupAgentBranches(project, "local");
+  }
+  async reconcile(
+    project: CentralProject,
+    assignments: readonly Assignment[],
+    deliveries: readonly Delivery[],
+  ): Promise<readonly ReconcileFinding[]> {
+    return this.worktrees.reconcile(project, assignments, deliveries);
+  }
+  async removeWorktree(
+    input: RemoveWorktreeInput,
+  ): Promise<RemoveWorktreeOutcome> {
+    return this.worktrees.removeWorktree(input);
+  }
+  async diffWorktree(input: {
+    readonly project: CentralProject;
+    readonly assignment: Assignment;
+  }): Promise<WorktreeDiff> {
+    return this.worktrees.diffWorktree(input);
+  }
+}

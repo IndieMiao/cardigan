@@ -6,6 +6,7 @@ import { CliError, EXIT } from "./errors.js";
 import { attentionCommand, inboxCommand } from "./inbox.js";
 import type { CliIo } from "./io.js";
 import { runLaunchCommand } from "./launch.js";
+import { runMergeCommand } from "./merge.js";
 import { type CliHooks, runWorkflowCommand } from "./workflow.js";
 
 export { parseAdminArgs, runAdminCommand } from "./admin.js";
@@ -35,6 +36,7 @@ export type {
   SpawnInheritOptions,
 } from "./io.js";
 export { parseLaunchArgs, runLaunchCommand } from "./launch.js";
+export { runMergeCommand } from "./merge.js";
 export { type LaunchPaths, resolveLaunchPaths } from "./paths.js";
 export { type CliHooks, runWorkflowCommand } from "./workflow.js";
 
@@ -57,6 +59,7 @@ const TOP_LEVEL_USAGE = [
   "  inbox            待投递和投递失败的通知（--assignment A-n 只看一个）",
   "  attention        升级通知与失联的 Assignment",
   "  assignment start|stop|attach  一键启动/停止/接管 Assignment 的运行时（M2）",
+  "  merge status|confirm|request  看待合并的卡片、确认合并、重新发起确认（M4）",
   "  launch           按启动配置启动 Agent CLI（见 cardigan launch --help）",
 ].join("\n");
 
@@ -141,6 +144,7 @@ export async function main(
     if (command === "assignment") {
       return await runAssignmentCommand(rest, io);
     }
+    if (command === "merge") return runMergeCommand(rest, io);
     if (command === "inbox") return inboxCommand(rest, io);
     if (command === "attention") return attentionCommand(rest, io);
     if (

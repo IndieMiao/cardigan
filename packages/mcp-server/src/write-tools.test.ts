@@ -6,6 +6,7 @@ import { afterEach, beforeEach, expect, test } from "vitest";
 import { memoryLogger } from "./log.js";
 import { type RunningServer, startMcpServer } from "./server.js";
 import {
+  acceptingVerifierFor,
   assignments,
   card_id,
   NOW,
@@ -31,7 +32,11 @@ async function connect(n = 0) {
 }
 async function restart(deliveryVerifier: DeliveryVerifier) {
   await server.close();
-  server = await startMcpServer({ store, deliveryVerifier, log: logger.log });
+  server = await startMcpServer({
+    store,
+    deliveryVerifier: () => deliveryVerifier,
+    log: logger.log,
+  });
 }
 beforeEach(async () => {
   store = Store.open({ dbPath: ":memory:" });
@@ -108,6 +113,7 @@ beforeEach(async () => {
     );
   server = await startMcpServer({
     store,
+    deliveryVerifier: acceptingVerifierFor,
     log: logger.log,
     clock: { now: () => NOW },
   });
@@ -407,4 +413,86 @@ test("concurrent identical submissions commit once, and cached replay does not r
   });
   await call(a, "submit_delivery", delivery);
   expect(entered).toBe(2);
+});
+
+test("the request's project selects the verifier, and the pin follows the commit", async () => {
+  const seen: string[] = [];
+  const pinned: { project_id: string; delivery_id: string; sha: string }[] = [];
+  await server.close();
+  server = await startMcpServer({
+    store,
+    deliveryVerifier: (id) => {
+      // A token can only carry one project; the verifier must still be chosen
+      // by the request's project, never by caller-supplied parameters.
+      seen.push(id);
+      return acceptingVerifierFor(id);
+    },
+    pinDelivery: async (request) => {
+      pinned.push(request);
+    },
+    log: logger.log,
+    clock: { now: () => NOW },
+  });
+  const result = await call(await connect(), "submit_delivery", delivery);
+  expect(result.isError).not.toBe(true);
+  expect(seen).toEqual([project_id]);
+  expect(pinned).toEqual([
+    {
+      project_id,
+      delivery_id: "D-1",
+      sha: delivery.subject.value,
+    },
+  ]);
+});
+
+test("a failed pin keeps the committed delivery and only logs", async () => {
+  await server.close();
+  server = await startMcpServer({
+    store,
+    deliveryVerifier: acceptingVerifierFor,
+    pinDelivery: async () => {
+      throw new Error("central repository unavailable");
+    },
+    log: logger.log,
+    clock: { now: () => NOW },
+  });
+  const result = await call(await connect(), "submit_delivery", delivery);
+  expect(result.structuredContent).toMatchObject({
+    id: "D-1",
+    status: "submitted",
+  });
+  expect(logger.entries).toContainEqual(
+    expect.objectContaining({
+      tool: "submit_delivery",
+      code: "delivery_pin_failed",
+    }),
+  );
+  expect(counts()).toEqual({
+    deliveries: 1,
+    reviews: 0,
+    events: 1,
+    timeline: 1,
+  });
+});
+
+test("a non-Git delivery is never pinned", async () => {
+  const pinned: unknown[] = [];
+  await server.close();
+  server = await startMcpServer({
+    store,
+    deliveryVerifier: acceptingVerifierFor,
+    pinDelivery: async (request) => {
+      pinned.push(request);
+    },
+    log: logger.log,
+    clock: { now: () => NOW },
+  });
+  const result = await call(await connect(), "submit_delivery", {
+    ...delivery,
+    idempotency_key: "delivery-doc",
+    kind: "doc",
+    subject: { kind: "doc_version", value: "v1" },
+  });
+  expect(result.isError).not.toBe(true);
+  expect(pinned).toEqual([]);
 });

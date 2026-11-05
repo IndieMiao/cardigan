@@ -310,12 +310,17 @@ export class Dispatcher {
         actor = { kind: "system" as const, project_id: project };
       if (!run) {
         const event = state.events.find((e) => e.id === cause.event_id);
+        // §6.4: a merge conflict wakes the coder for a fix Run, not a generic
+        // follow-up. The router marks this as run_kind=fix; the trigger event is
+        // the only place it survives, because notifications store no run kind.
         const kind =
-          event?.type === "review_submitted" && cause.kind === "review"
-            ? "rework"
-            : event?.type === "decision_resolved" && a.scope === "work_item"
-              ? "decision_resumed"
-              : "followup";
+          event?.type === "merge_conflicted"
+            ? "fix"
+            : event?.type === "review_submitted" && cause.kind === "review"
+              ? "rework"
+              : event?.type === "decision_resolved" && a.scope === "work_item"
+                ? "decision_resumed"
+                : "followup";
         const effect = unwrap(
           queueRun(
             state,

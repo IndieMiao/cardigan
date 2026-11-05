@@ -17,6 +17,7 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { memoryLogger } from "./log.js";
 import { type RunningServer, startMcpServer } from "./server.js";
 import {
+  acceptingVerifierFor,
   card_id,
   project_id,
   type SeededRows,
@@ -175,7 +176,11 @@ function seedCardRelations(): void {
 beforeEach(async () => {
   fixture = seedFixture({ allowed_tools: allowed });
   const logger = memoryLogger();
-  server = await startMcpServer({ store: fixture.store, log: logger.log });
+  server = await startMcpServer({
+    store: fixture.store,
+    deliveryVerifier: acceptingVerifierFor,
+    log: logger.log,
+  });
 });
 
 afterEach(async () => {

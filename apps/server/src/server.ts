@@ -20,6 +20,7 @@ import {
   type ServerConfig,
   type ServerEnv,
 } from "./config.js";
+import { type GitBinding, ServerGit } from "./git.js";
 
 export interface StartServerOptions {
   readonly env?: ServerEnv;
@@ -32,7 +33,12 @@ export interface StartServerOptions {
    * M3.5: the Dispatcher and RuntimeMonitor loops. Omitted in tests that only
    * need the MCP endpoint; `runServer` always provides it.
    */
-  readonly dispatcher?: Omit<ControlPlaneOptions, "store">;
+  readonly dispatcher?: Omit<ControlPlaneOptions, "store" | "git">;
+  /**
+   * M4.4: the Git assembly. `runServer` passes one that also routes workspace
+   * Git through the Agent in agent-ssh mode; tests get the local default.
+   */
+  readonly git?: GitBinding;
 }
 
 export interface CardiganServer {
@@ -66,6 +72,15 @@ export async function startCardiganServer(
   await secureDataDirectory({ ...execution, dataDir: config.dataDir });
   const store = options.store ?? Store.open({ dataDir: config.dataDir });
   const ownsStore = options.store === undefined;
+  const git =
+    options.git ??
+    new ServerGit({
+      store,
+      dataDir: config.dataDir,
+      ...(config.execution === undefined
+        ? {}
+        : { execution: config.execution }),
+    });
 
   // Assigned once, read from `close()`; the compiler cannot see through the
   // callback, so use `let` with a definite type.
@@ -78,6 +93,10 @@ export async function startCardiganServer(
       dataDir: config.dataDir,
       host: config.host,
       port: config.port,
+      // §3.3: production always verifies against the real Git service, and the
+      // verifier follows the project the request belongs to.
+      deliveryVerifier: git.verifierFor,
+      pinDelivery: (request) => git.pinDelivery(request),
       ...(options.log === undefined ? {} : { log: options.log }),
     });
   } catch (error) {
@@ -95,6 +114,7 @@ export async function startCardiganServer(
       plane = startControlPlane({
         ...options.dispatcher,
         store,
+        git,
       });
     } catch (error) {
       await mcp.close();
