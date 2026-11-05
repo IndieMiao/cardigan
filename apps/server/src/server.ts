@@ -21,6 +21,8 @@ import {
   type ServerEnv,
 } from "./config.js";
 import { type GitBinding, ServerGit } from "./git.js";
+import type { WebConfig } from "./web/config.js";
+import { type RunningWebServer, startWebServer } from "./web/server.js";
 
 export interface StartServerOptions {
   readonly env?: ServerEnv;
@@ -55,6 +57,14 @@ export interface StartServerOptions {
         readonly error: { readonly code: string; readonly message: string };
       }
   >;
+  /**
+   * M5.1: the Workbench listener. Deliberately a separate listener from the MCP
+   * endpoint (§3.1); absent in tests that only exercise the MCP surface.
+   */
+  readonly web?: {
+    readonly config: WebConfig;
+    readonly log?: (event: Readonly<Record<string, unknown>>) => void;
+  };
 }
 
 export interface CardiganServer {
@@ -63,6 +73,8 @@ export interface CardiganServer {
   readonly port: number;
   /** The store the MCP endpoint reads and writes. */
   readonly store: Store;
+  /** The Workbench listener, when this server was started with one. */
+  readonly web?: RunningWebServer;
   close(): Promise<void>;
 }
 
@@ -158,15 +170,37 @@ export async function startCardiganServer(
     }
   }
 
+  // The Workbench is a second listener on its own loopback port (§3.1). It
+  // shares the store but nothing else: a failure here must not leave a
+  // half-started server behind.
+  let web: RunningWebServer | undefined;
+  if (options.web !== undefined) {
+    try {
+      web = await startWebServer({
+        store,
+        config: options.web.config,
+        ...(options.web.log === undefined ? {} : { log: options.web.log }),
+      });
+    } catch (error) {
+      await plane?.stop();
+      await mcp.close();
+      if (ownsStore) store.close();
+      throw error;
+    }
+  }
+
   return {
     url: mcp.url,
     host: mcp.host,
     port: mcp.port,
     store,
+    ...(web === undefined ? {} : { web }),
     close: async () => {
       // Order matters: stop scheduling and drain the current delivery first,
-      // then stop accepting tool calls, then close the database.
+      // then stop serving the UI, then stop accepting tool calls, then close
+      // the database.
       await plane?.stop();
+      await web?.close();
       await mcp.close();
       if (ownsStore) {
         store.close();
