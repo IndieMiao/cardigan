@@ -20,7 +20,14 @@ export interface GitWorktreePort {
 
 /** Host-only bare repository operations. Every ref write requires an expected old value. */
 export interface GitCentralPort {
-  ensureBare(source: string, repository: string): Promise<void>;
+  objectFormat(repository: string): Promise<"sha1" | "sha256">;
+  objectType(repository: string, sha: string): Promise<string | undefined>;
+  countCommits(repository: string, base: string, head: string): Promise<number>;
+  ensureBare(
+    source: string,
+    repository: string,
+    baseline: string,
+  ): Promise<void>;
   fetchRefs(
     repository: string,
     source: string,

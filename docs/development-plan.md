@@ -1016,7 +1016,7 @@ status 先 hc get，再取 hc events 的初始快照，同时使用该快照的�
 
 ### 12.1 原则：所有 Git 网络操作由主机发起
 
-- 中心仓库是主机数据目录下独占的 bare 仓库：`<CARDIGAN_DATA_DIR>/central/<project_id>.git`（根目录可配置），目录为主机拥有的 0700。它从 `projects.repo_path` 登记源经 `clone --bare --no-local` 临时目录校验后发布；登记源始终只读，合并结果由用户自己 fetch 回去，M4 不自动推送外部平台。
+- 中心仓库是主机数据目录下独占的 bare 仓库：`<CARDIGAN_DATA_DIR>/central/<project_id>.git`（根目录可配置），目录为主机拥有的 0700。它从 `projects.repo_path` 登记源经 `clone --bare --no-local` 临时目录校验 bare 类型和请求基线后发布；登记源始终只读，合并结果由用户自己 fetch 回去，M4 不自动推送外部平台。
 - 工作机和 Agent **不持有任何 Git 凭据，不能 push**。主机通过已有的单向 SSH 从工作机拉取，并向工作机推送基线。
 - 项目如果托管在 GitHub / GitLab，只有主机持有其凭据，合并后由主机推送上去。
 - 参照实现（herdr-projects / Shepherdr）让工作机自己 push 到 origin，我们不采用：工作机不持有凭据，这一点不可协商。
@@ -1045,11 +1045,15 @@ agent-ssh 模式中，主机不能执行 Agent 可修改仓库的 Git 配置。�
 
 1. Agent 在 worktree 里 commit，不 push。
 2. 调用 `submit_delivery`，带上 SHA。
-3. 主机校验并固定交付（0.5b 实测）：
-   - 先把该 Assignment 的分支拉到临时 ref，例如 `refs/cardigan/incoming/<delivery_id>`；
-   - 检查这个 SHA 是一个 commit，并且在该分支的历史上（`git merge-base --is-ancestor`）；
-   - 两项都通过，才把 `refs/cardigan/deliveries/<delivery_id>` 固定到这个 SHA。拉取失败或校验不通过则拒绝，并且不覆盖已接受的交付。
-4. 主机定期（建议每 10 分钟）用一条 refspec 拉取各工作机的 `agent/*` 分支，作为半成品备份，供接管使用：`+refs/heads/agent/*:refs/cardigan/backups/<machine_id>/agent/*`。按机器分开存放，避免同名分支互相覆盖。传输失败不推进备份进度，也不据此判定任务失败或完成。
+3. 主机在事务前通过按项目绑定的 GitDeliveryVerifier 校验：只接受对应仓库格式的完整小写 SHA（SHA-1 为 40 位、SHA-256 为 64 位），从基础 clone 拉取数据库中 Assignment.branch 对应的分支到 refs/cardigan/incoming/<assignment_id>；不使用 Agent 提交的分支参数。Assignment 必须记录写入型分支和 worktree_path。
+   - cat-file -t 必须为 commit；merge-base --is-ancestor 必须证明 SHA 属于拉取到的分支顶端快照。不存在／非 commit 与不在分支上分别拒绝，不生成候选或交付 ref。
+   - 通过后只创建 refs/cardigan/candidates/<assignment_id>/<sha> 防止回收，返回 sha、branch、base_sha、commits_ahead 证据；base_sha 优先取 Assignment 记录，缺失时取项目中心基线。非 git_head 的 subject 返回空 Git 证据。
+4. 数据库事务提交后，由 M4.4 调用 pinDelivery(project, delivery_id, sha) 创建 refs/cardigan/deliveries/<delivery_id>：已有同 SHA 为幂等成功，不同 SHA 拒绝，所有创建均比较旧值为不存在。固定失败不回滚已提交交付，由日志及对账从 candidates 修复。
+5. backupAgentBranches 将基础 clone 的 agent/* 拉到 refs/cardigan/backups/local/agent/*。fetch 原子更新、明确不 prune；失败不推进或删除旧备份，也不改变业务结果。默认 10 分钟调度及失败日志由 M4.4 组装。
+
+agent-ssh 拉取在中心仓库里运行 fetch --upload-pack，上传端复用同一专用 SSH 入口（专用密钥、独立 known_hosts、严格主机校验、禁用转发、agent@localhost）。现有 captureAgent 只返回捕获的文本，Git 需要双向二进制流；agentUploadPack 因此复用现有 SSH 参数生成流式命令，绑定主机选定的基础 clone 路径并完整引用参数，不经文本捕获或 JSON 转换。主机开启 transfer.fsckObjects；Agent 路径（含链接）缺少该入口时拒绝，不回退到主机身份。
+
+GitDeliveryVerifier 的实例绑定项目，因为 Assignment 编号仅在项目内唯一；M4.4 必须按当前请求项目选择实例，并接入事务外 prepareDelivery／事务内新快照 submitDelivery／事务后固定流程。M4.2 不修改 MCP 的现有默认桩。
 
 ### 12.4 验证
 
@@ -1193,7 +1197,7 @@ M3.4 通过主机 RuntimeMonitor 订阅每个未结束 Run 所在终端的 hc ev
 | Herdr Socket（无 ACL） | 接受同机 Agent 可互相操作；影响范围限于单台机器 |
 | Card MCP | Token 仅由主机侧签发；MCP 不签发或返回明文，PM 不能借 assign 获取其他 Assignment 的凭据；身份和状态迁移由服务端校验 |
 | Web Workbench | 即使在局域网也要登录；只监听局域网接口 |
-| Git | 工作机和 Agent 不持有任何 Git 凭据；主机 Git 使用独占中心仓库，Agent 可写仓库内的 Git 由 Agent 执行；中心操作清空继承的 GIT_*，禁用系统／全局配置及 hook，只允许 file 协议，启用 transfer.fsckObjects；M4 不推送外部平台 |
+| Git | 工作机和 Agent 不持有任何 Git 凭据；主机 Git 使用独占中心仓库，Agent 可写仓库内的 Git 由 Agent 执行；从 Agent 仓库拉取通过绑定专用 SSH 入口的 upload-pack 传递 pack 数据；中心操作清空继承的 GIT_*，禁用系统／全局配置及 hook，只允许 file 协议，启用 transfer.fsckObjects；M4 不推送外部平台 |
 | 模型密钥 | 只放在环境变量或网关；不写进数据库、评论和仓库 |
 | 注入的提示词和 Token | 主机写入目标 Assignment 自己的 MCP 配置，放在 worktree 外；不进入其他 Agent 的对话记录，Session 替换时作废旧 Token |
 | 仓库内容中的提示注入 | Agent 没有 sudo；高风险操作走工具审批；业务变更走 Decision |

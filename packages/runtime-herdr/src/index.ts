@@ -12,6 +12,9 @@ import type {
   RuntimeResult,
 } from "@cardigan/domain";
 import { registerAgentMachine } from "./agent-ssh.js";
+
+export { agentUploadPack } from "./agent-ssh.js";
+
 import { fail, type HcClient, processClient, result } from "./client.js";
 import {
   type ExecutionConfig,

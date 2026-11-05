@@ -1,4 +1,5 @@
 import { lstat } from "node:fs/promises";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fail, type HcClient } from "./client.js";
 import { type ExecutionConfig, shellQuote } from "./execution.js";
 
@@ -40,20 +41,7 @@ export async function registerAgentMachine(
   session: string,
   version: string,
 ) {
-  if (process.platform !== "linux")
-    fail("invalid_launch", "agent-ssh currently requires Linux");
-  for (const path of [config.identityFile, config.knownHostsFile]) {
-    const entry = await lstat(path);
-    if (
-      !entry.isFile() ||
-      entry.uid !== process.getuid?.() ||
-      (entry.mode & 0o777) !== 0o600
-    )
-      fail(
-        "invalid_launch",
-        "SSH credential files must be host-owned regular files with mode 0600",
-      );
-  }
+  await checkAgentFiles(config);
   const target = agentSshCommand(config);
   const listing = JSON.parse(await client.exec(["machine", "ls", "--json"]));
   if (!Array.isArray(listing.machines))
@@ -88,4 +76,40 @@ export async function registerAgentMachine(
     );
   if (machine.version !== version)
     fail("version_mismatch", "Agent account hc version does not match");
+}
+
+async function checkAgentFiles(config: AgentConfig) {
+  if (process.platform !== "linux")
+    fail("invalid_launch", "agent-ssh currently requires Linux");
+  for (const path of [config.identityFile, config.knownHostsFile]) {
+    const entry = await lstat(path);
+    if (
+      !entry.isFile() ||
+      entry.uid !== process.getuid?.() ||
+      (entry.mode & 0o777) !== 0o600
+    )
+      fail(
+        "invalid_launch",
+        "SSH credential files must be host-owned regular files with mode 0600",
+      );
+  }
+}
+/** captureAgent returns text; reuse the pinned SSH entry for Git's bidirectional binary stream. */
+export async function agentUploadPack(
+  config: AgentConfig,
+  repository: string,
+): Promise<string> {
+  if (
+    config.mode !== "agent-ssh" ||
+    !isAbsolute(repository) ||
+    dirname(resolve(repository)) !== join(config.agentRoot, "repos")
+  )
+    fail(
+      "invalid_launch",
+      "Upload-pack requires a configured Agent base repository",
+    );
+  await checkAgentFiles(config);
+  const remote = `GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -c ${shellQuote(`safe.directory=${repository}`)} upload-pack -- ${shellQuote(repository)}`;
+  // Ignore Git's appended path; the command is bound to the host-selected repository.
+  return `sh -c ${shellQuote(`exec ${agentSshCommand(config)} ${shellQuote(remote)}`)} --`;
 }

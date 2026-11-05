@@ -149,3 +149,5 @@ export class GitWorktreeService {
     return this.git.isDirty(worktree_path);
   }
 }
+
+export { GitDeliveryVerifier } from "./delivery.js";

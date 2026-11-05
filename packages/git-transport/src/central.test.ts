@@ -153,3 +153,18 @@ test("base clone fetches fixed delivery refs from center and rejects legacy sour
   );
   expect(await readFile(join(base, ".git", "config"), "utf8")).toContain(repo);
 });
+
+test("a missing initial baseline never publishes a partial center and can be retried after the first commit", async () => {
+  const source = join(f.root, "empty");
+  await git(f.root, "init", "-b", "main", source);
+  const project = { ...f.project, project_id: "empty", source_repo: source };
+  await expect(f.central.ensureCentral(project)).rejects.toThrow(
+    /baseline branch is missing/,
+  );
+  await expect(
+    access(join(f.dataDir, "central", "empty.git")),
+  ).rejects.toThrow();
+  const sha = await commit(source, "first");
+  const center = await f.central.ensureCentral(project);
+  expect(await f.transport.readRef(center, "refs/heads/main")).toBe(sha);
+});
