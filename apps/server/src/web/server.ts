@@ -41,6 +41,7 @@ import {
 } from "./read.js";
 import { serveStatic } from "./static.js";
 import { parseAfter, type StreamCursor, serveStream } from "./stream.js";
+import { serveWrite } from "./write.js";
 
 /**
  * The Workbench listener (M5 plan §3.1).
@@ -302,6 +303,22 @@ async function serveProjectRoute(
     });
     return;
   }
+
+  if (
+    await serveWrite(
+      {
+        req,
+        res,
+        store,
+        project_id,
+        clock,
+        dataDir: context.dataDir,
+        authorize: () => requireSession(context),
+      },
+      rest,
+    )
+  )
+    return;
 
   if (req.method !== "GET") methodNotAllowed(["GET"]);
 

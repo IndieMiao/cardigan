@@ -13,9 +13,11 @@ import type {
 import {
   deriveCardStatus,
   deriveReviewMatrix,
+  extractReferences,
   listNeedsYou,
   projectSnapshot,
   type Result,
+  resolveReferences,
 } from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
@@ -270,10 +272,32 @@ export function cardDetail(
       ),
     }));
 
+  const description = [
+    card.title,
+    card.goal,
+    ...card.acceptance_criteria,
+    ...card.out_of_scope,
+  ].join("\n");
+  // Resolve the snapshot once per response, then select each body's references.
+  const resolved = new Map(
+    resolveReferences(
+      state,
+      [description, ...timeline.map((e) => e.body)].join("\n"),
+    ).map((ref) => [`${ref.kind}:${ref.id}`, ref]),
+  );
+  const references = (body: string) =>
+    extractReferences(body).flatMap((ref) => {
+      const value =
+        ref.kind === "pr" ? undefined : resolved.get(`${ref.kind}:${ref.id}`);
+      return value ? [value] : [];
+    });
   return {
-    card,
+    card: { ...card, references: references(description) },
     work_items,
-    timeline,
+    timeline: timeline.map((entry) => ({
+      ...entry,
+      references: references(entry.body),
+    })),
     deliveries,
     reviews,
     review_matrix: deriveReviewMatrix(deliveries, work_items, reviews),
