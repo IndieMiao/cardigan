@@ -9,6 +9,7 @@ import type {
   Result,
   RoleReference,
 } from "@cardigan/domain";
+import { issueTokenInTransaction } from "@cardigan/host";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import type {
   IssuedToken,
@@ -149,6 +150,9 @@ export function roleReference(
  * Issue a token for an assignment inside the caller's transaction. Any token of
  * that assignment that is still valid is revoked first (§9.1: a replaced
  * Session invalidates the old token).
+ *
+ * The rotation rule lives in `@cardigan/host`; a started Assignment uses the
+ * same code path through `launchRun`, so both can never rotate differently.
  */
 export function issueTokenForAssignment(
   tx: StoreTransactionContext,
@@ -156,19 +160,7 @@ export function issueTokenForAssignment(
   assignment_id: AssignmentId,
   role: Pick<RoleReference, "role_version" | "allowed_tools">,
 ): IssuedToken {
-  for (const token of tx.tokensForAssignment(project_id, assignment_id)) {
-    if (token.revoked_at === null) {
-      tx.revokeToken(token.id);
-    }
-  }
-  return tx.issueToken({
-    project_id,
-    assignment_id,
-    role: {
-      role_version: role.role_version,
-      allowed_tools: role.allowed_tools,
-    },
-  });
+  return issueTokenInTransaction(tx, project_id, assignment_id, role);
 }
 
 /**

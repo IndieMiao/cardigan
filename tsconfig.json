@@ -26,6 +26,9 @@
       "path": "packages/roles"
     },
     {
+      "path": "packages/host"
+    },
+    {
       "path": "apps/server"
     },
     {

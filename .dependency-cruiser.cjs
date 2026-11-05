@@ -1,11 +1,16 @@
+// Lower layers first: a layer may only depend on the layers below it.
+// `host` sits between the packages and the apps: it is the one place that
+// orchestrates a start, so the CLI and the server share it instead of copying.
 const layers = [
   ["domain"],
   ["store", "router", "mcp-server", "git-service", "roles"],
   ["runtime-herdr", "git-transport"],
+  ["host"],
   ["server", "web", "cli"],
 ];
+const APP_LAYER = layers.length - 1;
 const location = (name, layer) =>
-  `${layer === 3 ? "apps" : "packages"}/${name}`;
+  `${layer === APP_LAYER ? "apps" : "packages"}/${name}`;
 
 module.exports = {
   forbidden: [

@@ -1,0 +1,128 @@
+import type {
+  Actor,
+  Assignment,
+  Card,
+  Clock,
+  CommandEffect,
+  CommandPorts,
+  CommandState,
+  ProjectId,
+  Result,
+  Role,
+  RoleReference,
+  WorkItem,
+} from "@cardigan/domain";
+import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
+import {
+  getRoleVersion,
+  type IssuedToken,
+  type Store,
+  type StoreTransactionContext,
+} from "@cardigan/store";
+
+/** One clock for every host-side command that does not inject its own. */
+export const wallClock: Clock = { now: () => new Date().toISOString() };
+
+/** Assignment, its fixed Role version, and the card/work item it serves. */
+export interface LaunchEntities {
+  readonly assignment: Assignment;
+  readonly role: Role;
+  readonly card?: Card | undefined;
+  readonly workItem?: WorkItem | undefined;
+}
+
+export function launchEntities(
+  store: Store,
+  project: ProjectId,
+  assignment_id: Assignment["id"],
+): LaunchEntities {
+  return store.uow.run((tx) => {
+    const assignment = tx.assignments.get(project, assignment_id);
+    if (assignment === undefined)
+      throw new Error(`Assignment ${assignment_id} 不存在`);
+    const role = getRoleVersion(
+      tx,
+      project,
+      assignment.role_id,
+      assignment.role_version,
+    );
+    if (role === undefined)
+      throw new Error(
+        `角色 ${assignment.role_id} v${assignment.role_version} 不存在`,
+      );
+    if (assignment.scope !== "work_item") return { assignment, role };
+    const workItem = tx.work_items.get(project, assignment.work_item_id);
+    const card =
+      workItem === undefined
+        ? undefined
+        : tx.cards.get(project, workItem.card_id);
+    return { assignment, role, workItem, card };
+  });
+}
+
+/**
+ * Issue a fresh token for an Assignment and revoke its still valid ones (§9.1,
+ * §10.2). The plaintext token is only ever handed to the run directory.
+ */
+export function issueAssignmentToken(
+  store: Store,
+  project: ProjectId,
+  entities: Pick<LaunchEntities, "assignment" | "role">,
+): IssuedToken {
+  return store.uow.run((tx) =>
+    issueTokenInTransaction(tx, project, entities.assignment.id, {
+      role_version: entities.role.version,
+      allowed_tools: entities.role.allowed_tools,
+    }),
+  );
+}
+
+/** Token issuance inside the caller's transaction, so Assignment and token commit together. */
+export function issueTokenInTransaction(
+  tx: StoreTransactionContext,
+  project: ProjectId,
+  assignment_id: Assignment["id"],
+  role: Pick<RoleReference, "role_version" | "allowed_tools">,
+): IssuedToken {
+  for (const token of tx.tokensForAssignment(project, assignment_id)) {
+    if (token.revoked_at === null) tx.revokeToken(token.id);
+  }
+  return tx.issueToken({
+    project_id: project,
+    assignment_id,
+    role: {
+      role_version: role.role_version,
+      allowed_tools: role.allowed_tools,
+    },
+  });
+}
+
+/** One domain command in one write transaction; failures surface with their code. */
+export function applyCommand<T>(
+  store: Store,
+  input: {
+    readonly project: ProjectId;
+    readonly actor: Actor;
+    readonly clock?: Clock;
+    readonly reduce: (
+      state: CommandState,
+      actor: Actor,
+      ports: CommandPorts,
+    ) => Result<CommandEffect<T>>;
+  },
+): T {
+  return store.uow.run((tx) => {
+    const result = input.reduce(
+      loadCommandState(tx, input.project),
+      input.actor,
+      {
+        clock: input.clock ?? wallClock,
+        ids: tx.ids,
+      },
+    );
+    if (!result.ok)
+      throw new Error(`${result.error.code}: ${result.error.message}`);
+    persistEffect(tx, input.project, result.value);
+    return result.value.data;
+  });
+}

@@ -1,18 +1,13 @@
-import { createHash } from "node:crypto";
-import { mkdir, rm, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
 import type {
-  Actor,
   Assignment,
   Card,
   ProjectId,
   Role,
   Runtime,
-  RuntimeLaunch,
   RuntimeRef,
   WorkItem,
 } from "@cardigan/domain";
-import { abortDispatch, dispatchRun, queueRun } from "@cardigan/domain";
+import { abortDispatch, queueRun } from "@cardigan/domain";
 import {
   CentralRepositoryService,
   GitWorktreeService,
@@ -22,32 +17,31 @@ import {
   LocalGitTransport,
 } from "@cardigan/git-transport";
 import {
-  type CompiledAssignmentLaunch,
-  compileAssignmentLaunch,
-  firstPrompt,
-  type LaunchConfig,
-  resolveProfile,
-  SECRETS_FILE_NAME,
-  START_FILE_NAME,
-  TOKEN_FILE_NAME,
-} from "@cardigan/roles";
+  agentCliVersion,
+  applyCommand,
+  HostLaunchError,
+  harnessBinary,
+  type LaunchEntities,
+  launchEntities,
+  launchRun,
+  messageOf,
+  type PreparedWorktree,
+  scrubRunCredentials,
+} from "@cardigan/host";
+import { type LaunchConfig, resolveProfile } from "@cardigan/roles";
 import {
   type ExecutionConfig,
   executionPaths,
   HerdrRuntime,
-  prepareAgentProject,
   resolveExecutionConfig,
-  scrubAgentLaunch,
   secureDataDirectory,
-  writeAgentLaunch,
-  writeAgentSentinel,
 } from "@cardigan/runtime-herdr";
-import { getRoleVersion, Store, writeRole } from "@cardigan/store";
+import { Store, writeRole } from "@cardigan/store";
 import { AgentGitTransport } from "./agent-git.js";
 import { loadConfig, loadSecrets } from "./config.js";
 import { CliError, EXIT } from "./errors.js";
 import {
-  issueTokenForAssignment,
+  humanActor,
   resolveDataDir,
   resolveProject,
   runCommand,
@@ -59,83 +53,19 @@ import { resolveLaunchPaths } from "./paths.js";
 /**
  * M2.6: one-command Assignment start (M2 plan §4).
  *
- * The CLI is the host side: it queues the Run, prepares the worktree, issues the
- * Assignment token, writes the run directory, provisions the runtime and then
- * dispatches the Run. Any failure releases the terminal, aborts the Run and
- * revokes the token again (§4 step 9).
+ * The CLI owns what is specific to a human command — argument validation, the
+ * launch profile and model choice, the Run queue and the worktree — and then
+ * hands the Assignment to `@cardigan/host`'s `launchRun`, the same flow the
+ * Dispatcher uses when it opens a terminal for a bell (M3 §3.1).
  */
 
-/** Project ids become directory names, so they must be safe segments. */
-export function projectSegment(project_id: ProjectId): string {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(project_id)) {
-    throw new CliError(`项目编号不能用作目录名：${project_id}`, EXIT.usage, [
-      "只允许字母、数字和 . _ -",
-    ]);
-  }
-  return project_id;
-}
-
-/** First 8 hex characters of sha256(project_id); M2 plan §3. */
-export function projectShortCode(project_id: ProjectId): string {
-  return createHash("sha256")
-    .update(project_id, "utf8")
-    .digest("hex")
-    .slice(0, 8);
-}
-
-/**
- * `<role>-<project short code>-<card>-<work item>-<assignment>`, lowercased and
- * at most 32 characters; the role is truncated first so the codes survive.
- */
-export function agentNameFor(input: {
-  readonly role_id: string;
-  readonly project_id: ProjectId;
-  readonly card_id?: string;
-  readonly work_item_id?: string;
-  readonly assignment_id: string;
-}): string {
-  const parts = [
-    input.role_id.toLowerCase(),
-    projectShortCode(input.project_id),
-    ...(input.card_id === undefined ? [] : [input.card_id.toLowerCase()]),
-    ...(input.work_item_id === undefined
-      ? []
-      : [input.work_item_id.toLowerCase()]),
-    input.assignment_id.toLowerCase(),
-  ].map((part) => part.replace(/[^a-z0-9_-]/gu, "-"));
-  const name = parts.join("-");
-  if (name.length <= 32) return name;
-  // Drop the role first, then shorten the role prefix if still too long.
-  const tail = parts.slice(1).join("-");
-  if (tail.length <= 32) {
-    const room = 32 - tail.length - 1;
-    return `${parts[0]?.slice(0, Math.max(1, room))}-${tail}`.slice(0, 32);
-  }
-  return tail.slice(-32);
-}
-
-export interface RunDirectory {
-  readonly root: string;
-  readonly runDir: string;
-  readonly workDir: string;
-}
-
-/** `<data>/runs/<project>/<assignment>/`; worktree paths follow the same idea. */
-export function runDirectory(input: {
-  readonly dataDir: string;
-  readonly project_id: ProjectId;
-  readonly assignment_id: string;
-  readonly worktreePath?: string;
-  readonly execution?: ExecutionConfig;
-}): RunDirectory {
-  const { runDir } = executionPaths(
-    input.execution ?? { mode: "local", dataDir: resolve(input.dataDir) },
-    projectSegment(input.project_id),
-    input.assignment_id,
-  );
-  const root = dirname(dirname(runDir));
-  return { root, runDir, workDir: input.worktreePath ?? runDir };
-}
+export type { PreparedWorktree, RunDirectory } from "@cardigan/host";
+export {
+  agentNameFor,
+  projectSegment,
+  projectShortCode,
+  runDirectory,
+} from "@cardigan/host";
 
 /** The worktree the host must prepare before the Agent starts (M2.5). */
 export interface WorktreeRequest {
@@ -146,11 +76,6 @@ export interface WorktreeRequest {
   readonly role: Role;
   readonly card?: Card | undefined;
   readonly work_item?: WorkItem | undefined;
-}
-export interface PreparedWorktree {
-  readonly path: string;
-  readonly branch?: string;
-  readonly base_sha: string;
 }
 export type WorktreeProvider = (
   request: WorktreeRequest,
@@ -183,45 +108,16 @@ export interface StartedAssignment {
   readonly token_id: string;
 }
 
-const host = (project_id: ProjectId): Actor => ({ kind: "human", project_id });
-
 function requireAssignment(
   store: Store,
   project_id: ProjectId,
   assignment_id: Assignment["id"],
-): {
-  assignment: Assignment;
-  role: Role;
-  card?: Card | undefined;
-  workItem?: WorkItem | undefined;
-} {
-  return store.uow.run((tx) => {
-    const assignment = tx.assignments.get(project_id, assignment_id);
-    if (assignment === undefined) {
-      throw new CliError(`Assignment ${assignment_id} 不存在`, EXIT.usage);
-    }
-    const role = getRoleVersion(
-      tx,
-      project_id,
-      assignment.role_id,
-      assignment.role_version,
-    );
-    if (role === undefined) {
-      throw new CliError(
-        `角色 ${assignment.role_id} v${assignment.role_version} 不存在`,
-        EXIT.usage,
-      );
-    }
-    if (assignment.scope !== "work_item") {
-      return { assignment, role };
-    }
-    const workItem = tx.work_items.get(project_id, assignment.work_item_id);
-    const card =
-      workItem === undefined
-        ? undefined
-        : tx.cards.get(project_id, workItem.card_id);
-    return { assignment, role, workItem, card };
-  });
+): LaunchEntities {
+  try {
+    return launchEntities(store, project_id, assignment_id);
+  } catch (error) {
+    throw new CliError(messageOf(error), EXIT.usage);
+  }
 }
 
 async function cliVersion(io: CliIo, binary: string): Promise<string> {
@@ -245,129 +141,55 @@ async function cliVersion(io: CliIo, binary: string): Promise<string> {
   return text;
 }
 
-async function writeCompiledFiles(
-  compiled: CompiledAssignmentLaunch,
-  token: string,
-): Promise<void> {
-  for (const file of compiled.files) {
-    await mkdir(dirname(file.path), { recursive: true, mode: 0o700 });
-    await writeFile(file.path, file.content, {
-      encoding: "utf8",
-      mode: file.mode,
-    });
-  }
-  // The token file is written last and consumed (deleted) by launch.sh.
-  await writeFile(compiled.token_file, `${token}\n`, {
-    encoding: "utf8",
-    mode: 0o600,
-  });
-}
-
-/**
- * §4 step 9: no plaintext secret may survive a failed start. The token is
- * revoked, but `secrets.env` holds provider credentials, so both files are
- * removed from the run directory even if `launch.sh` never ran.
- */
-async function scrubRunDirectory(runDir: string): Promise<void> {
-  for (const name of [TOKEN_FILE_NAME, SECRETS_FILE_NAME, START_FILE_NAME]) {
-    await rm(join(runDir, name), { force: true });
-  }
-}
-
-interface StartProgress {
-  execution: ExecutionConfig;
-  step: string;
-  runId?: string;
-  tokenId?: string;
-  ref?: RuntimeRef;
-}
-const executionFor = (io: CliIo, dataDir: string) =>
+const executionFor = (io: CliIo, dataDir: string): ExecutionConfig =>
   resolveExecutionConfig({
     ...io.env,
     CARDIGAN_DATA_DIR: resolveDataDir(io, dataDir),
   });
-async function agentCapture(
-  runtime: LaunchRuntime,
-  command: "git" | "claude" | "codex" | "pi",
-  args: readonly string[],
-) {
-  if (!runtime.captureAgent)
-    throw new CliError("agent-ssh 启动需要 Agent 执行入口", EXIT.failure);
-  const result = await runtime.captureAgent(command, args);
-  if (!result.ok)
-    throw new CliError(`Agent 命令失败：${result.error.code}`, EXIT.failure);
-  return result.value;
+
+/** §4 step 3: place the worktree the Role needs (roles with `none` skip it). */
+async function prepareWorktree(
+  options: StartOptions,
+  entities: LaunchEntities,
+): Promise<PreparedWorktree | undefined> {
+  const { store, project_id } = options;
+  const { assignment, role, card, workItem } = entities;
+  if (role.worktree === "none") return undefined;
+  if (options.worktree === undefined)
+    throw new CliError(
+      "这个角色需要 worktree，但没有配置 Git 服务",
+      EXIT.usage,
+    );
+  const source_repo = store.getProject(project_id)?.repo_path;
+  if (source_repo === undefined || source_repo === null) {
+    throw new CliError(
+      `项目 ${project_id} 没有登记本地仓库，先运行 cardigan project set-repo --path <目录>`,
+      EXIT.usage,
+    );
+  }
+  const placed = await options.worktree({
+    project_id,
+    source_repo,
+    assignment,
+    role,
+    ...(card === undefined ? {} : { card }),
+    ...(workItem === undefined ? {} : { work_item: workItem }),
+  });
+  if (placed === undefined)
+    throw new CliError("Git 服务没有给出 worktree", EXIT.failure);
+  return placed;
 }
-async function scrubExecution(
-  config: ExecutionConfig,
-  project: ProjectId,
-  assignment: string,
-) {
-  if (config.mode === "agent-ssh")
-    await scrubAgentLaunch(config, project, assignment);
-  else
-    await scrubRunDirectory(executionPaths(config, project, assignment).runDir);
-}
+
 /** Run the M2 plan §4 flow, compensating every step after a successful queue. */
 export async function startAssignment(
   options: StartOptions,
 ): Promise<StartedAssignment> {
-  const progress: StartProgress = {
-    execution: executionFor(options.io, options.dataDir),
-    step: "preflight",
-  };
-  await secureDataDirectory(progress.execution);
-  try {
-    return await startAssignmentSteps(options, progress);
-  } catch (error) {
-    if (progress.runId) {
-      // Cleanup failures must not skip token revocation or Run cancellation.
-      if (progress.ref) {
-        try {
-          const released = await options.runtime.release(progress.ref, {
-            force: true,
-          });
-          if (!released.ok)
-            options.io.stderr(`终端回收失败：${released.error.code}`);
-        } catch {
-          options.io.stderr("终端回收失败，需要人工检查");
-        }
-      }
-      try {
-        await scrubExecution(
-          progress.execution,
-          options.project_id,
-          options.assignment_id,
-        );
-      } catch {
-        options.io.stderr("凭据文件清理失败，需要人工检查");
-      }
-      try {
-        if (progress.tokenId && !options.store.revokeToken(progress.tokenId))
-          options.io.stderr("Token 作废失败，需要人工检查");
-      } catch {
-        options.io.stderr("Token 作废失败，需要人工检查");
-      }
-      abort(
-        options.store,
-        options.project_id,
-        progress.runId,
-        `${progress.step} failed`,
-      );
-    }
-    throw error;
-  }
-}
-async function startAssignmentSteps(
-  options: StartOptions,
-  progress: StartProgress,
-): Promise<StartedAssignment> {
   const { store, io, project_id } = options;
-  const { assignment, role, card, workItem } = requireAssignment(
-    store,
-    project_id,
-    options.assignment_id,
-  );
+  const execution = executionFor(io, options.dataDir);
+  await secureDataDirectory(execution);
+
+  const entities = requireAssignment(store, project_id, options.assignment_id);
+  const { assignment, role } = entities;
   if (assignment.status !== "active") {
     throw new CliError(
       `Assignment 状态是 ${assignment.status}，只有 active 能启动`,
@@ -376,28 +198,26 @@ async function startAssignmentSteps(
   }
 
   // 2. queue the Run with a model/CLI snapshot (invariant 12).
-  const profile = resolveProfile(
-    options.launch.config,
-    role.launch_profile_ref,
-  ).profile;
-  const model = profile.model;
+  const model = resolveProfile(options.launch.config, role.launch_profile_ref)
+    .profile.model;
   if (model === undefined) {
     throw new CliError(
       `启动配置 ${role.launch_profile_ref} 没有 model，Run 无法记录快照`,
       EXIT.usage,
     );
   }
-  const binary = role.harness === "claude-code" ? "claude" : role.harness;
-  const version =
-    progress.execution.mode === "local"
-      ? await cliVersion(io, binary)
-      : (await agentCapture(options.runtime, binary, ["--version"]))
-          .trim()
-          .split("\n")[0];
-  if (!version) throw new CliError("Agent CLI 没有返回版本", EXIT.usage);
+  // The version probe runs as the Agent account in agent-ssh mode (M2.7).
+  const version = await agentCliVersion(
+    {
+      execution,
+      captureAgent: options.runtime.captureAgent,
+      captureLocal: (binary) => cliVersion(io, binary),
+    },
+    harnessBinary(role.harness),
+  );
   const run = runCommand(store, {
     project_id,
-    actor: host(project_id),
+    actor: humanActor(project_id),
     reduce: (state, actor, ports) =>
       queueRun(
         state,
@@ -411,194 +231,60 @@ async function startAssignmentSteps(
       ),
   });
 
-  progress.runId = run.id;
-  progress.step = "directory preparation";
-  if (progress.execution.mode === "agent-ssh")
-    await prepareAgentProject(progress.execution, project_id, assignment.id);
+  let delegated = false;
+  try {
+    // 3. worktree (roles that do not need one skip it).
+    const worktree = await prepareWorktree(options, entities);
 
-  // 3. worktree (roles that do not need one skip it).
-  progress.step = "worktree preparation";
-  let worktree: PreparedWorktree | undefined;
-  if (role.worktree !== "none") {
-    if (options.worktree === undefined) {
-      throw new CliError(
-        "这个角色需要 worktree，但没有配置 Git 服务",
-        EXIT.usage,
-      );
-    }
-    const project = store.getProject(project_id);
-    const source_repo = project?.repo_path;
-    if (source_repo === undefined || source_repo === null) {
-      throw new CliError(
-        `项目 ${project_id} 没有登记本地仓库，先运行 cardigan project set-repo --path <目录>`,
-        EXIT.usage,
-      );
-    }
-    const placed = await options.worktree({
-      project_id,
-      source_repo,
-      assignment,
-      role,
-      ...(card === undefined ? {} : { card }),
-      ...(workItem === undefined ? {} : { work_item: workItem }),
-    });
-    if (placed === undefined) {
-      throw new CliError("Git 服务没有给出 worktree", EXIT.failure);
-    }
-    worktree = placed;
-  }
-
-  const dirs = runDirectory({
-    dataDir: options.dataDir,
-    execution: progress.execution,
-    project_id,
-    assignment_id: assignment.id,
-    ...(worktree === undefined ? {} : { worktreePath: worktree.path }),
-  });
-
-  // 4. token + run directory.
-  progress.step = "launch compilation";
-  const issued = store.uow.run((tx) =>
-    issueTokenForAssignment(tx, project_id, assignment.id, {
-      role_version: role.version,
-      allowed_tools: role.allowed_tools,
-    }),
-  );
-  progress.tokenId = issued.record.id;
-  const compiled = compileAssignmentLaunch({
-    assignment: {
-      assignment_id: assignment.id,
-      run_id: run.id,
-      project_id,
-      ...(card === undefined ? {} : { card_id: card.id }),
-      ...(workItem === undefined ? {} : { work_item_id: workItem.id }),
-    },
-    role: {
-      role_id: role.role_id,
-      harness: role.harness,
-      launch_profile: role.launch_profile_ref,
-      core_prompt: role.core_prompt,
-      allowed_tools: role.allowed_tools,
-      worktree: role.worktree,
-    },
-    launch: options.launch.config,
-    mcp: { url: options.mcpUrl },
-    run_dir: dirs.runDir,
-    work_dir: dirs.workDir,
-    first_prompt: firstPrompt({
-      assignment_id: assignment.id,
-      run_id: run.id,
-      ...(card === undefined ? {} : { card_id: card.id }),
-      ...(workItem === undefined ? {} : { work_item_id: workItem.id }),
-    }),
-    secrets: options.launch.secrets,
-  });
-  progress.step = "run directory write";
-  if (progress.execution.mode === "agent-ssh")
-    await writeAgentLaunch(
-      progress.execution,
-      project_id,
-      assignment.id,
-      compiled.files,
-      issued.token,
+    // 4–8. token, run directory, provision, dispatch, sentinel: one shared flow
+    // that compensates internally (`delegated` keeps the CLI from repeating it).
+    delegated = true;
+    const launched = await launchRun(
+      {
+        store,
+        runtime: options.runtime,
+        launch: options.launch,
+        mcpUrl: options.mcpUrl,
+        dataDir: options.dataDir,
+        execution,
+        report: (message) => io.stderr(message),
+      },
+      {
+        project: project_id,
+        assignment_id: assignment.id,
+        run,
+        actor: humanActor(project_id),
+        ...(worktree === undefined ? {} : { worktree }),
+      },
     );
-  else await writeCompiledFiles(compiled, issued.token);
-
-  // 5. provision the terminal.
-  progress.step = "runtime provision";
-  const agentName = agentNameFor({
-    role_id: role.role_id,
-    project_id,
-    ...(card === undefined ? {} : { card_id: card.id }),
-    ...(workItem === undefined ? {} : { work_item_id: workItem.id }),
-    assignment_id: assignment.id,
-  });
-  const launchDesc: RuntimeLaunch = {
-    command: compiled.launch_script,
-    args: [],
-    cwd: dirs.workDir,
-    agent_name: agentName,
-    labels: {
-      cardigan: "1",
-      project: project_id,
-      assignment: assignment.id,
-      run: run.id,
-    },
-  };
-  const provisioned = await options.runtime.provision(
-    assignment,
-    role,
-    machineRecord(project_id),
-    launchDesc,
-  );
-  if (!provisioned.ok) {
-    throw new CliError(
-      `启动终端失败：${provisioned.error.code} ${provisioned.error.message}`,
-      EXIT.failure,
-    );
+    return {
+      assignment: launched.assignment,
+      run_id: launched.run.id,
+      runtime_ref: launched.runtime_ref,
+      run_dir: launched.run_dir,
+      ...(launched.worktree_path === undefined
+        ? {}
+        : { worktree_path: launched.worktree_path }),
+      token_id: launched.token_id,
+    };
+  } catch (error) {
+    if (!delegated) {
+      // Nothing was written yet: cancel the queued Run and make sure no
+      // plaintext from a prepared directory survives (§4 step 9).
+      try {
+        await scrubRunCredentials(execution, project_id, assignment.id);
+      } catch {
+        io.stderr("凭据文件清理失败，需要人工检查");
+      }
+      abort(store, project_id, run.id, "worktree preparation failed");
+    }
+    if (error instanceof HostLaunchError)
+      throw new CliError(
+        `启动失败（${error.step}）：${error.message}`,
+        EXIT.failure,
+      );
+    throw error;
   }
-  const ref = provisioned.value;
-  progress.ref = ref;
-
-  // 6. dispatch the Run with the runtime and worktree facts.
-  progress.step = "dispatch";
-  // The worktree is the host's fact, not the runtime's: hand it to dispatch
-  // through the ref so the assignment records path, branch and base SHA.
-  const dispatchRef: RuntimeRef =
-    worktree === undefined
-      ? ref
-      : {
-          ...ref,
-          worktree_path: worktree.path,
-          ...(worktree.branch === undefined ? {} : { branch: worktree.branch }),
-        };
-  runCommand(store, {
-    project_id,
-    actor: host(project_id),
-    reduce: (state, actor, ports) =>
-      dispatchRun(
-        state,
-        actor,
-        {
-          run_id: run.id,
-          runtime_ref: dispatchRef,
-          ...(worktree === undefined ? {} : { base_sha: worktree.base_sha }),
-        },
-        ports,
-      ),
-  });
-
-  // The Run is dispatched: let the wrapper start the Agent (M2 §4 step 8).
-  await writeAgentSentinel(progress.execution, project_id, assignment.id);
-
-  const started = requireAssignment(
-    store,
-    project_id,
-    assignment.id,
-  ).assignment;
-  return {
-    assignment: started,
-    run_id: run.id,
-    runtime_ref: dispatchRef,
-    run_dir: dirs.runDir,
-    ...(worktree === undefined ? {} : { worktree_path: worktree.path }),
-    token_id: issued.record.id,
-  };
-}
-
-function machineRecord(project_id: ProjectId) {
-  return {
-    id: "local",
-    label: "local",
-    herdr_machine: "local",
-    os: "linux",
-    arch: "x64",
-    tags: [],
-    max_assignments: 1,
-    status: "online" as const,
-    last_seen: systemClock.now(),
-    project_id,
-  } as never;
 }
 
 /** Abort the Run (best effort); the reason is recorded on it. */
@@ -609,9 +295,10 @@ export function abort(
   reason: string,
 ): void {
   try {
-    runCommand(store, {
-      project_id,
-      actor: host(project_id),
+    applyCommand(store, {
+      project: project_id,
+      actor: humanActor(project_id),
+      clock: systemClock,
       reduce: (state, actor, ports) =>
         abortDispatch(state, actor, { run_id: run_id as never, reason }, ports),
     });
@@ -671,7 +358,7 @@ export async function stopAssignment(input: {
     throw new CliError("作废 Token 失败", EXIT.failure);
   }
   if (input.execution)
-    await scrubExecution(
+    await scrubRunCredentials(
       input.execution,
       input.project_id,
       input.assignment_id,
@@ -930,4 +617,17 @@ export async function startAssignmentById(
     runtime: created.value,
     dataDir,
   });
+}
+
+async function agentCapture(
+  runtime: LaunchRuntime,
+  command: "git" | "claude" | "codex" | "pi",
+  args: readonly string[],
+) {
+  if (!runtime.captureAgent)
+    throw new CliError("agent-ssh 启动需要 Agent 执行入口", EXIT.failure);
+  const result = await runtime.captureAgent(command, args);
+  if (!result.ok)
+    throw new CliError(`Agent 命令失败：${result.error.code}`, EXIT.failure);
+  return result.value;
 }

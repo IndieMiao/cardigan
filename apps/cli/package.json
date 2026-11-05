@@ -20,6 +20,7 @@
     "@cardigan/mcp-server": "workspace:*",
     "@cardigan/runtime-herdr": "workspace:*",
     "@cardigan/git-service": "workspace:*",
-    "@cardigan/git-transport": "workspace:*"
+    "@cardigan/git-transport": "workspace:*",
+    "@cardigan/host": "workspace:*"
   }
 }

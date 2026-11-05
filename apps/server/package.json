@@ -19,6 +19,7 @@
     "@cardigan/domain": "workspace:*",
     "@cardigan/router": "workspace:*",
     "@cardigan/roles": "workspace:*",
+    "@cardigan/host": "workspace:*",
     "yaml": "^2.9.1"
   },
   "devDependencies": {
