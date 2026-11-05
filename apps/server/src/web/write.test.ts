@@ -492,3 +492,27 @@ test("Needs You exposes risk category and cleanup Assignment for the UI", async 
     incidents: [],
   });
 });
+
+test("execution exposes the card and persistent PM mode without credential metadata", async () => {
+  const response = await fetch(web.url + path("/execution"), {
+    headers: { cookie },
+  });
+  const data = (await response.json()) as {
+    assignments: Record<string, unknown>[];
+  };
+  expect(data.assignments).toContainEqual(
+    expect.objectContaining({
+      id: s.primary.owner.id,
+      card_id: s.card.id,
+      card_status: "todo",
+    }),
+  );
+  expect(data.assignments).toContainEqual(
+    expect.objectContaining({ role_id: "pm", standing_mode: "office" }),
+  );
+  expect(data.assignments).toContainEqual(
+    expect.objectContaining({ role_id: "pm", standing_mode: "ops" }),
+  );
+  for (const a of data.assignments)
+    expect(a).not.toHaveProperty("mcp_token_id");
+});

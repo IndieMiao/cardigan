@@ -9,8 +9,10 @@ import {
 import { routeHash, useRoute } from "./route.js";
 import { CardDetailPage } from "./views/CardDetailPage.js";
 import { CardListPage } from "./views/CardListPage.js";
+import { ExecutionPage } from "./views/ExecutionPage.js";
 import { LoginPage } from "./views/LoginPage.js";
 import { NeedsYouPage } from "./views/NeedsYouPage.js";
+import { SnapshotPage } from "./views/SnapshotPage.js";
 
 /**
  * Application shell (M5 plan §4 M5.3).
@@ -176,6 +178,20 @@ function Workbench({
         )}
         {selected !== undefined && (
           <nav className="nav" aria-label="视图">
+            {(
+              [
+                ["snapshot", "项目快照"],
+                ["execution", "执行视图"],
+              ] as const
+            ).map(([kind, label]) => (
+              <a
+                key={kind}
+                href={routeHash({ kind, projectId: selected.id })}
+                aria-current={activeView === kind ? "page" : undefined}
+              >
+                {label}
+              </a>
+            ))}
             <a
               href={routeHash({ kind: "needs-you", projectId: selected.id })}
               aria-current={activeView === "needs-you" ? "page" : undefined}
@@ -225,6 +241,20 @@ function Workbench({
             还没有项目。先在终端运行{" "}
             <code>cardigan project create &lt;id&gt;</code>。
           </p>
+        )}
+        {selected && route?.kind === "snapshot" && (
+          <SnapshotPage
+            key={selected.id}
+            client={client}
+            projectId={selected.id}
+          />
+        )}
+        {selected && route?.kind === "execution" && (
+          <ExecutionPage
+            key={selected.id}
+            client={client}
+            projectId={selected.id}
+          />
         )}
         {selected !== undefined && route?.kind === "needs-you" && (
           <NeedsYouPage

@@ -155,6 +155,15 @@ export function fakeClient(
   overrides: Partial<CardiganClient> = {},
 ): CardiganClient {
   return {
+    snapshot: async () => ({
+      cards: [],
+      in_progress: [],
+      in_review: [],
+      blocked: [],
+      waiting: { human: [], agent: [] },
+      recent_deliveries: [],
+    }),
+    execution: async () => ({ assignments: [], runs: [], machines: [] }),
     needsYou: async () => ({ decisions: [], human_actions: [], incidents: [] }),
     recordDecision: async () => undefined,
     decisionComment: async () => undefined,

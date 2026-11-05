@@ -1,0 +1,220 @@
+// @vitest-environment jsdom
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from "@testing-library/react";
+import { afterEach, expect, test, vi } from "vitest";
+import {
+  type ExecutionAssignment,
+  HttpCardiganClient,
+  type RunView,
+  type SnapshotData,
+} from "../api.js";
+import { card, fakeClient } from "../testing/fixtures.js";
+import { ExecutionPage } from "./ExecutionPage.js";
+import { SnapshotPage } from "./SnapshotPage.js";
+
+afterEach(cleanup);
+const assignment: ExecutionAssignment = {
+  id: "A-1",
+  role_id: "coder",
+  role_version: 2,
+  status: "active",
+  runtime_state: "idle",
+  machine_id: "local",
+  standing_mode: null,
+  card_id: "C-1",
+  card_status: "in_progress",
+  work_item_id: "W-1",
+  worktree_path: "/fixture/worktree",
+  branch: "agent/work",
+  session_ref: "session-fixture",
+  runtime_ref: { terminal_ref: "terminal-fixture", runtime_machine: "local" },
+  last_mcp_activity_at: null,
+  cursors: [{ card_id: "C-1", acked_seq: 12 }],
+};
+const run: RunView = {
+  id: "R-10",
+  assignment_id: "A-1",
+  status: "queued",
+  kind: "fix",
+  model: "fixture-model",
+  role_version: 2,
+  agent_cli_version: "1.0",
+  summary: "Resolve the conflict",
+};
+
+test("snapshot separates human/agent waits, shows next owners, blocked work and recent deliveries", async () => {
+  const review = {
+    ...card,
+    id: "C-2",
+    title: "审核卡片",
+    status: "review" as const,
+    next_owners: [{ kind: "assignment" as const, ref: "A-2" }],
+  };
+  const data: SnapshotData = {
+    cards: [card, review],
+    in_progress: [card],
+    in_review: [review],
+    waiting: { human: [card.id], agent: [review.id] },
+    blocked: [{ card_id: card.id, work_item_id: "W-1", label: "等待权限" }],
+    recent_deliveries: [
+      {
+        id: "D-1",
+        card_id: review.id,
+        summary: "审核版本",
+        status: "submitted",
+      },
+    ],
+  };
+  render(
+    <SnapshotPage
+      client={fakeClient({ snapshot: async () => data })}
+      projectId="p-1"
+    />,
+  );
+  const human = within(await screen.findByRole("region", { name: "等你处理" })),
+    agent = within(screen.getByRole("region", { name: "等 Agent 处理" }));
+  expect(human.getByRole("link", { name: "C-1" }).getAttribute("href")).toBe(
+    "#/p/p-1/cards/C-1",
+  );
+  expect(human.queryByRole("link", { name: "C-2" })).toBeNull();
+  expect(agent.getByRole("link", { name: "C-2" })).toBeTruthy();
+  expect(
+    screen.getByRole("region", { name: "审核与待合并" }).textContent,
+  ).toContain("下一步：A-2");
+  expect(
+    screen.getByRole("region", { name: "阻塞事项" }).textContent,
+  ).toContain("等待权限");
+  expect(
+    screen.getByRole("region", { name: "最近交付" }).textContent,
+  ).toContain("待审核");
+});
+
+test("execution uses the newest queued Run, includes its snapshot and cursor, and does not offer duplicate start", async () => {
+  render(
+    <ExecutionPage
+      client={fakeClient({
+        execution: async () => ({
+          assignments: [assignment],
+          runs: [
+            run,
+            {
+              ...run,
+              id: "R-9",
+              status: "completed",
+              started_at: "2026-01-01T00:00:00Z",
+            },
+          ],
+          machines: [],
+        }),
+      })}
+      projectId="p-1"
+    />,
+  );
+  const row = await screen.findByRole("article", { name: "执行 A-1" });
+  expect(row.textContent).toContain("最近 Run：R-10 · 合并修复 · 排队中");
+  for (const text of [
+    "session-fixture",
+    "terminal-fixture",
+    "/fixture/worktree",
+    "已签收 seq 12",
+    "fixture-model",
+  ])
+    expect(row.textContent).toContain(text);
+  expect(
+    screen.queryByRole("button", { name: "复制启动或恢复会话" }),
+  ).toBeNull();
+  expect(
+    screen.getByText("cardigan inbox --assignment 'A-1' --project 'p-1'"),
+  ).toBeTruthy();
+  expect(
+    screen.getByText("cardigan assignment stop 'A-1' --project 'p-1'"),
+  ).toBeTruthy();
+});
+
+test.each([
+  "not_provisioned",
+  "idle",
+  "running",
+  "unknown",
+  "lost",
+  "released",
+])(
+  "execution %s offers only applicable commands and keeps state text visible",
+  async (state) => {
+    const a = {
+      ...assignment,
+      runtime_state: state,
+      status: state === "released" ? "released" : "active",
+      runtime_ref: state === "not_provisioned" ? null : assignment.runtime_ref,
+    };
+    const runs = state === "running" ? [{ ...run, status: "running" }] : [];
+    render(
+      <ExecutionPage
+        client={fakeClient({
+          execution: async () => ({ assignments: [a], runs, machines: [] }),
+        })}
+        projectId="p-1"
+      />,
+    );
+    await screen.findByRole("article", { name: "执行 A-1" });
+    const start = screen.queryByRole("button", { name: "复制启动或恢复会话" });
+    expect(Boolean(start)).toBe(["idle", "not_provisioned"].includes(state));
+    expect(screen.getByRole("button", { name: "复制检查异常" })).toBeTruthy();
+    expect(
+      screen
+        .getByRole("link", { name: "处理拍板、清理或失联事项" })
+        .getAttribute("href"),
+    ).toBe("#/p/p-1/needs-you");
+    const labels = {
+      not_provisioned: "未启动",
+      idle: "空闲",
+      running: "运行中",
+      unknown: "状态未知",
+      lost: "失联",
+      released: "已释放",
+    };
+    expect(
+      screen.getByRole("article", { name: "执行 A-1" }).textContent,
+    ).toContain(labels[state as keyof typeof labels]);
+  },
+);
+
+test.each(["snapshot", "execution"] as const)(
+  "%s covers initial loading, failure, retry and empty state",
+  async (kind) => {
+    const defaults = fakeClient(),
+      load = vi
+        .fn()
+        .mockRejectedValueOnce(new Error("读取失败"))
+        .mockResolvedValue(await defaults[kind]("p-1"));
+    const client = fakeClient({ [kind]: load }),
+      Component = kind === "snapshot" ? SnapshotPage : ExecutionPage;
+    render(<Component client={client} projectId="p-1" />);
+    expect(screen.getByText("正在加载…")).toBeTruthy();
+    await screen.findByText("读取失败");
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+    await screen.findByText(
+      kind === "snapshot" ? "这个项目还没有卡片。" : "还没有 Assignment。",
+    );
+  },
+);
+
+test("project view API paths encode project IDs and remain read-only", async () => {
+  const fetcher = vi
+    .fn<typeof fetch>()
+    .mockImplementation(async () => new Response("{}"));
+  const client = new HttpCardiganClient(fetcher);
+  await client.snapshot("p/a");
+  await client.execution("p/a");
+  expect(fetcher.mock.calls.map(([path]) => path)).toEqual([
+    "/api/projects/p%2Fa/snapshot",
+    "/api/projects/p%2Fa/execution",
+  ]);
+  for (const [, init] of fetcher.mock.calls)
+    expect(init).toMatchObject({ method: "GET", credentials: "same-origin" });
+});

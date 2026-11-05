@@ -856,3 +856,30 @@ fieldset.filters {
   padding: 12px;
   background: var(--surface-muted);
 }
+
+.overview-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 24px;
+}
+.overview-list {
+  list-style: none;
+  padding: 0;
+}
+.overview-list li {
+  padding: 12px;
+  margin: 8px 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.overview-list p {
+  margin: 6px 0 0;
+  color: var(--text-muted);
+}
+.execution-actions {
+  margin-top: 16px;
+}
+.needs-item dd {
+  overflow-wrap: anywhere;
+}
