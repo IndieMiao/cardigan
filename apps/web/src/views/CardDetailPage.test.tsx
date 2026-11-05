@@ -275,16 +275,17 @@ test("superseded attachments are collapsed", async () => {
   expect(comment?.querySelector(".attachments")?.textContent).toContain("F-2");
 });
 
-test("only server-listed references become links", async () => {
+test("only existing server-resolved references become links", async () => {
   const detail = cardDetail({
     timeline: [
       timelineEntry({
         id: "C-1#5",
         event_seq: 5,
-        body: "见 C-1 和 D-9；C-9 不存在。",
-        refs: [
-          { kind: "card", id: "C-1" },
-          { kind: "decision", id: "D-9" },
+        body: "见 C-1、D-9 和 C-9；C-9 不存在。",
+        references: [
+          { kind: "card", id: "C-1", exists: true, status: "in_progress" },
+          { kind: "decision", id: "D-9", exists: true, status: "open" },
+          { kind: "card", id: "C-9", exists: false, status: null },
         ],
       }),
     ],
@@ -296,8 +297,8 @@ test("only server-listed references become links", async () => {
   const links = [...(entry?.querySelectorAll(".timeline-body a") ?? [])];
   const hrefs = links.map((link) => link.getAttribute("href"));
   expect(hrefs).toEqual(["#/p/p-1/cards/C-1", "#decision-D-9"]);
-  // An id the server did not list stays text.
-  expect(entry?.textContent).toContain("C-9 不存在");
+  // `exists: false` keeps the number as text, even though the server resolved it.
+  expect(entry?.textContent).toContain("C-9");
   expect(links.some((link) => link.textContent === "C-9")).toBe(false);
 });
 

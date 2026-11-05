@@ -3,7 +3,7 @@
 // allow-list), never from the entry body itself.
 import type { AttachmentView } from "../api.js";
 import { renderMarkdown } from "../markdown.js";
-import { linkifyReferences } from "../refs.js";
+import { linkableReferences, linkifyReferences } from "../refs.js";
 
 /**
  * The card's timeline (M5 plan §3.7, §8.4 of the development plan).
@@ -11,7 +11,7 @@ import { linkifyReferences } from "../refs.js";
  * Entries are typed, and each type gets its own label and look so a decision is
  * not mistaken for a comment. The body is Markdown written by a human or an
  * Agent: it goes through the sanitising renderer, and identifiers only become
- * links through the entry's server-provided `refs`.
+ * links through the entry's server-resolved `references` with `exists: true`.
  */
 
 const TYPE_LABELS: Readonly<Record<string, string>> = {
@@ -118,7 +118,11 @@ export function Timeline({ projectId, entries, attachments }: TimelineProps) {
               className="timeline-body markdown"
               dangerouslySetInnerHTML={{
                 __html: renderMarkdown(
-                  linkifyReferences(entry.body, entry.refs, projectId),
+                  linkifyReferences(
+                    entry.body,
+                    linkableReferences(entry.references ?? []),
+                    projectId,
+                  ),
                 ),
               }}
             />
