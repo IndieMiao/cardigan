@@ -1,0 +1,278 @@
+// @vitest-environment jsdom
+/**
+ * M5.3 card page (plan §4 M5.3; development plan §8.4).
+ *
+ * The header must answer the five questions before the timeline, work items must
+ * be collapsible, the 关联区 must show ids with their status, timeline entries
+ * must be visually typed, numbers must only link through the server's `refs`,
+ * and Agent-written bodies must not execute anything.
+ */
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from "@testing-library/react";
+import { afterEach, expect, test } from "vitest";
+import { ApiError } from "../api.js";
+import {
+  attachment,
+  cardDetail,
+  fakeClient,
+  timelineEntry,
+} from "../testing/fixtures.js";
+import { CardDetailPage } from "./CardDetailPage.js";
+
+afterEach(cleanup);
+
+function renderCard(
+  client: Parameters<typeof fakeClient>[0] = {},
+  cardId = "C-1",
+) {
+  return render(
+    <CardDetailPage
+      client={fakeClient(client)}
+      projectId="p-1"
+      cardId={cardId}
+    />,
+  );
+}
+
+test("shows a loading state while the card is on its way", () => {
+  renderCard({ card: () => new Promise(() => undefined) });
+  expect(screen.getByRole("status").textContent).toContain("正在加载卡片 C-1");
+});
+
+test("a missing card explains itself and offers the way back", async () => {
+  renderCard({
+    card: async () => {
+      throw new ApiError(404, "not_found", "card C-9 not found");
+    },
+  });
+  expect(await screen.findByText("找不到卡片 C-1。")).toBeTruthy();
+  expect(
+    screen.getByRole("link", { name: "返回到看板" }).getAttribute("href"),
+  ).toBe("#/p/p-1/board");
+});
+
+test("a failed load shows the message and retries", async () => {
+  let attempt = 0;
+  renderCard({
+    card: async () => {
+      attempt += 1;
+      if (attempt === 1) throw new Error("boom");
+      return cardDetail();
+    },
+  });
+  expect((await screen.findByRole("alert")).textContent).toContain("boom");
+  fireEvent.click(screen.getByRole("button", { name: "重试" }));
+  expect(await screen.findByRole("heading", { level: 1 })).toBeTruthy();
+});
+
+test("the header answers the five questions", async () => {
+  renderCard();
+  const page = await screen.findByRole("article", { name: "卡片 C-1" });
+  const header = within(page).getByRole("heading", { level: 1 });
+  expect(header.textContent).toContain("准备发布");
+
+  const questions = [
+    ["目标是什么", "把 0.1 发出去"],
+    ["进行到哪一步", "工作项 0/2 完成"],
+    ["下一步该谁做", "你、reviewer"],
+    ["被什么阻塞", "等你拍板 D-1"],
+    ["谁验收、依据是什么", "reviewer：还没有结论，依据 没有阻塞问题"],
+  ] as const;
+  for (const [question, answer] of questions) {
+    const term = within(page).getByText(question);
+    const value = term.parentElement?.querySelector("dd");
+    expect(value?.textContent ?? "", question).toContain(answer);
+  }
+  expect(page.textContent).toContain("验收标准：测试通过");
+  expect(page.textContent).toContain("最近交付：迁移脚本与回滚脚本");
+});
+
+test("work items are collapsible and show owner, status and delivery", async () => {
+  renderCard();
+  await screen.findByRole("article", { name: "卡片 C-1" });
+  const details = screen.getByText("工作项（2）").closest("details");
+  expect(details).not.toBeNull();
+  expect((details as HTMLDetailsElement).open).toBe(true);
+  expect(details?.textContent).toContain("写迁移脚本");
+  expect(details?.textContent).toContain("已交付");
+  expect(details?.textContent).toContain("Assignment A-1");
+  expect(details?.textContent).toContain("交付 V-1（待审核）");
+  expect(details?.textContent).toContain("代码审核");
+  expect(details?.textContent).toContain("reviewer");
+});
+
+test("the relations section shows ids with their status", async () => {
+  const detail = cardDetail({
+    relations: {
+      decisions: [
+        {
+          id: "D-1",
+          question: "要不要先跑冒烟？",
+          status: "open",
+          blocking: true,
+          decider: "human",
+        },
+      ],
+      cards: [{ id: "C-2", title: "冒烟测试", status: "todo" }],
+      pull_requests: [
+        {
+          delivery_id: "V-1",
+          work_item_id: "W-1",
+          status: "accepted",
+          pr_url: "https://example.com/pr/7",
+        },
+      ],
+    },
+  });
+  renderCard({ card: async () => detail });
+  const relations = await screen.findByRole("region", { name: "关联" });
+  expect(relations.textContent).toContain("D-1");
+  expect(relations.textContent).toContain("待批");
+  expect(relations.textContent).toContain("阻塞中");
+  const related = within(relations).getByRole("link", { name: "C-2" });
+  expect(related.getAttribute("href")).toBe("#/p/p-1/cards/C-2");
+  const pull = within(relations).getByRole("link", {
+    name: "https://example.com/pr/7",
+  });
+  expect(pull.getAttribute("rel")).toBe("noopener noreferrer");
+  expect(pull.getAttribute("target")).toBe("_blank");
+});
+
+test("timeline entries are typed and carry their attachments", async () => {
+  const detail = cardDetail({
+    timeline: [
+      timelineEntry({
+        id: "C-1#3",
+        event_seq: 3,
+        type: "review",
+        body: "驳回：缺回滚脚本",
+      }),
+      timelineEntry({
+        id: "C-1#2",
+        event_seq: 2,
+        type: "comment",
+        body: "看过了",
+      }),
+      timelineEntry({
+        id: "C-1#1",
+        event_seq: 1,
+        type: "decision_request",
+        body: "要不要合并？",
+      }),
+    ],
+  });
+  renderCard({ card: async () => detail });
+  await screen.findByRole("article", { name: "卡片 C-1" });
+  const entries = document.querySelectorAll(".timeline-entry");
+  expect(entries).toHaveLength(3);
+  expect(entries[0]?.getAttribute("data-timeline-type")).toBe("review");
+  expect(entries[0]?.textContent).toContain("审核");
+  expect(entries[1]?.textContent).toContain("评论");
+  expect(entries[2]?.textContent).toContain("决策请求");
+
+  const comment = document.querySelector('[data-timeline-type="comment"]');
+  const image = comment?.querySelector("img");
+  expect(image?.getAttribute("src")).toBe("/api/projects/p-1/attachments/F-1");
+  expect(comment?.textContent).toContain("依据 D-1（待批）");
+});
+
+test("a non-bitmap attachment is a download, not an image", async () => {
+  const detail = cardDetail({
+    attachments: [
+      attachment({
+        id: "F-2",
+        mime: "image/svg+xml",
+        inline: false,
+        basis: null,
+        download_path: "/api/projects/p-1/attachments/F-2",
+      }),
+    ],
+  });
+  renderCard({ card: async () => detail });
+  const comment = (
+    await screen.findByRole("article", { name: "卡片 C-1" })
+  ).querySelector('[data-timeline-type="comment"]');
+  expect(comment?.querySelector("img")).toBeNull();
+  const link = comment?.querySelector("a");
+  expect(link?.getAttribute("href")).toBe("/api/projects/p-1/attachments/F-2");
+  expect(comment?.textContent).toContain("无拍板依据");
+});
+
+test("superseded attachments are collapsed", async () => {
+  const detail = cardDetail({
+    attachments: [
+      attachment({ id: "F-2", supersedes: "F-1", download_path: "/x/F-2" }),
+      attachment({ id: "F-1", download_path: "/x/F-1" }),
+    ],
+  });
+  renderCard({ card: async () => detail });
+  const comment = (
+    await screen.findByRole("article", { name: "卡片 C-1" })
+  ).querySelector('[data-timeline-type="comment"]');
+  const details = comment?.querySelector("details");
+  expect(details?.textContent).toContain("已取代的附件（1）");
+  expect(details?.textContent).toContain("F-1");
+  // The current attachment stays visible outside the collapsed block.
+  expect(comment?.querySelector(".attachments")?.textContent).toContain("F-2");
+});
+
+test("only server-listed references become links", async () => {
+  const detail = cardDetail({
+    timeline: [
+      timelineEntry({
+        id: "C-1#5",
+        event_seq: 5,
+        body: "见 C-1 和 D-9；C-9 不存在。",
+        refs: [
+          { kind: "card", id: "C-1" },
+          { kind: "decision", id: "D-9" },
+        ],
+      }),
+    ],
+  });
+  renderCard({ card: async () => detail });
+  const entry = (
+    await screen.findByRole("article", { name: "卡片 C-1" })
+  ).querySelector('[data-timeline-type="comment"]');
+  const links = [...(entry?.querySelectorAll(".timeline-body a") ?? [])];
+  const hrefs = links.map((link) => link.getAttribute("href"));
+  expect(hrefs).toEqual(["#/p/p-1/cards/C-1", "#decision-D-9"]);
+  // An id the server did not list stays text.
+  expect(entry?.textContent).toContain("C-9 不存在");
+  expect(links.some((link) => link.textContent === "C-9")).toBe(false);
+});
+
+test("an Agent body with HTML or javascript: links stays inert", async () => {
+  const detail = cardDetail({
+    timeline: [
+      timelineEntry({
+        id: "C-1#6",
+        event_seq: 6,
+        body: [
+          '<img src=x onerror="alert(1)">',
+          "[点我](javascript:alert(1))",
+          "<script>alert(2)</script>",
+        ].join("\n\n"),
+      }),
+    ],
+  });
+  renderCard({ card: async () => detail });
+  const entry = (
+    await screen.findByRole("article", { name: "卡片 C-1" })
+  ).querySelector('[data-timeline-type="comment"]');
+  expect(entry?.querySelector("script")).toBeNull();
+  expect(entry?.querySelector(".timeline-body img")).toBeNull();
+  const anchors = [...(entry?.querySelectorAll(".timeline-body a") ?? [])];
+  expect(
+    anchors.every(
+      (anchor) => !/javascript:/iu.test(anchor.getAttribute("href") ?? ""),
+    ),
+  ).toBe(true);
+  // The hostile source is visible as text, which is the point.
+  expect(entry?.textContent).toContain("<script>");
+});

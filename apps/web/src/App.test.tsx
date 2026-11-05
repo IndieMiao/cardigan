@@ -24,6 +24,7 @@ import {
   type ProjectSummary,
   type SessionInfo,
 } from "./api.js";
+import { cardDetail } from "./testing/fixtures.js";
 
 afterEach(() => {
   cleanup();
@@ -83,6 +84,7 @@ function fakeClient(options: FakeOptions): CardiganClient {
     logout: options.logout ?? noop,
     projects: options.projects ?? oneProject,
     cards: options.cards ?? oneCard,
+    card: async () => cardDetail(),
   };
 }
 
@@ -223,9 +225,14 @@ test("logout clears the session and returns to the login page", async () => {
   expect(loggedOut).toBe(1);
 });
 
-test("the card detail route is not part of the shell", async () => {
+test("the card route opens the card page", async () => {
   render(<App client={fakeClient({})} />);
   await screen.findByText("准备发布");
   navigate("#/p/p-1/cards/C-1");
-  expect(await screen.findByText(/卡片 C-1/u)).toBeTruthy();
+  expect(await screen.findByRole("article", { name: "卡片 C-1" })).toBeTruthy();
+  expect(screen.getByRole("heading", { level: 1 }).textContent).toContain(
+    "准备发布",
+  );
+  // The board is no longer mounted once the card page is shown.
+  expect(screen.queryByRole("link", { name: "看板" })).toBeTruthy();
 });
