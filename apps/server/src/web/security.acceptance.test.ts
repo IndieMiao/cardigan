@@ -56,8 +56,7 @@ test.each(["0.0.0.0", "::", "public.example.invalid"])(
   },
 );
 
-// Defect: only resolveWebConfig rejects external hosts; the public listener accepts an unchecked config.
-test.fails("S03 §0: the public server entry also refuses a non-loopback config", async () => {
+test("S03 §0: the public server entry also refuses a non-loopback config", async () => {
   let started: RunningWebServer | undefined, failure: unknown;
   try {
     started = await startWebServer({
@@ -114,9 +113,7 @@ test.each(["missing", "different"])(
 );
 
 for (const action of ["login", "logout"]) {
-  // Defect: logout skips the JSON Content-Type check and revokes the session for text/plain.
-  const check = action === "logout" ? test.fails : test;
-  check(`S06 §3.2: ${action} requires JSON Content-Type`, async () => {
+  test(`S06 §3.2: ${action} requires JSON Content-Type`, async () => {
     await success();
     const response = await f.call(`/api/${action}`, {
       method: "POST",

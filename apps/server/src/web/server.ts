@@ -7,7 +7,12 @@ import type { AddressInfo } from "node:net";
 import type { CardId, Clock, ProjectId } from "@cardigan/domain";
 import type { Store, WebSession } from "@cardigan/store";
 import { serveAttachment } from "./attachments.js";
-import { allowedHosts, bracket, type WebConfig } from "./config.js";
+import {
+  allowedHosts,
+  bracket,
+  requireLoopbackHost,
+  type WebConfig,
+} from "./config.js";
 import {
   applySecurityHeaders,
   clearedSessionCookie,
@@ -96,7 +101,13 @@ interface RequestContext {
 export async function startWebServer(
   options: WebServerOptions,
 ): Promise<RunningWebServer> {
-  const { config, store } = options;
+  // The listener, not just the config resolver, enforces §0: a config object
+  // built by hand must not put the Workbench on a network interface.
+  const config: WebConfig = {
+    ...options.config,
+    host: requireLoopbackHost(options.config.host),
+  };
+  const { store } = options;
   const clock = options.clock ?? systemClock;
   const limiter = options.loginLimiter ?? new LoginLimiter();
   const log = options.log ?? (() => undefined);
@@ -222,6 +233,8 @@ async function handleApi(context: RequestContext): Promise<void> {
   }
   if (path === "/api/logout") {
     if (req.method !== "POST") methodNotAllowed(["POST"]);
+    // §3.2: every non-GET JSON endpoint checks its Content-Type, logout included.
+    await readJsonBody(req);
     const token = sessionToken(req);
     if (token !== undefined) {
       context.store.revokeWebSession(token);
