@@ -294,8 +294,7 @@ test("R05 §8.5: execution exposes real launch metadata and ACK without leaking 
   expect(f.state().cursors).toEqual(state.cursors);
 });
 
-// Defect: the assignment row orders only by started_at, so an older completed Run hides a new queued one.
-test.fails("R06 §8.5: a newly queued Run is the latest even before it has a started_at", async () => {
+test("R06 §8.5: a newly queued Run is the latest even before it has a started_at", async () => {
   await f.start(f.primary.owner);
   await f.finish(f.primary.owner);
   const queued = f.command((s, a, p) =>
