@@ -53,6 +53,18 @@ import {
   tokensForAssignment,
   verifyToken,
 } from "./tokens.js";
+import {
+  countWebSessions,
+  createWebSession,
+  findWebSession,
+  type IssuedWebSession,
+  revokeWebSession,
+  setWebPassword,
+  verifyWebLogin,
+  type WebCredential,
+  type WebSession,
+  webPasswordConfigured,
+} from "./web-auth.js";
 
 export const DEFAULT_DB_FILE = "cardigan.db";
 
@@ -687,6 +699,55 @@ export class Store {
         );
       return true;
     });
+  }
+
+  /**
+   * M5.1: the operator's Workbench password (§14). Setting it revokes every
+   * open web session, so a stolen cookie dies with the old password.
+   */
+  setWebPassword(password: string): WebCredential {
+    return this.#run(() =>
+      setWebPassword(this.#db, password, () => this.#clock.now()),
+    );
+  }
+
+  /** True once `cardigan web set-password` has run. */
+  webPasswordConfigured(): boolean {
+    return webPasswordConfigured(this.#db);
+  }
+
+  /** Constant-time login check; an unset password never matches. */
+  verifyWebLogin(password: string): boolean {
+    return verifyWebLogin(this.#db, password);
+  }
+
+  /** Create a login session; the plaintext token is returned once. */
+  createWebSession(
+    options: { readonly ttlMs?: number } = {},
+  ): IssuedWebSession {
+    return this.#run(() =>
+      createWebSession(this.#db, {
+        now: () => this.#clock.now(),
+        ...(options.ttlMs === undefined ? {} : { ttlMs: options.ttlMs }),
+      }),
+    );
+  }
+
+  /** Live session for a cookie value; `undefined` when unknown/expired/revoked. */
+  webSession(token: string): WebSession | undefined {
+    return findWebSession(this.#db, token, () => this.#clock.now());
+  }
+
+  /** Logout; returns whether a live session was actually revoked. */
+  revokeWebSession(token: string): boolean {
+    return this.#run(() =>
+      revokeWebSession(this.#db, token, () => this.#clock.now()),
+    );
+  }
+
+  /** Number of sessions that are neither revoked nor logged out (tests/status). */
+  countWebSessions(): number {
+    return countWebSessions(this.#db);
   }
 
   #timelineAfter(

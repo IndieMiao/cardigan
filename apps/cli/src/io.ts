@@ -55,4 +55,10 @@ export interface CliIo {
     args: readonly string[],
     options: CaptureOptions,
   ): Promise<CapturedOutput>;
+  /**
+   * Read a secret without echoing it (`cardigan web set-password`). Optional: a
+   * plain test IO object can leave it out, and the command then refuses to run
+   * rather than reading a password from argv.
+   */
+  promptSecret?(question: string): Promise<string>;
 }
