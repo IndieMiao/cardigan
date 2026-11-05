@@ -452,22 +452,22 @@ describe.skipIf(!available)("M3.5 router and dispatcher end to end", () => {
   });
 
   afterAll(async () => {
-    // The core goes first: its terminals and Agents die with it, and the
-    // rest of the cleanup cannot leak it even if one step hangs or throws.
+    // The core goes first: its terminals and Agents die with it. No
+    // `assignment stop` follows: it is an hc command, so it would start a
+    // fresh core after this one is gone, and the temporary directory removal
+    // below would then orphan that new core.
     await core.stop();
     // Every remaining step stands alone: one failure must not skip the next.
-    for (const step of [
-      () => cardigan(["assignment", "stop", "A-1", "--project", project_id]),
-      () => server?.close(),
-      async () => store?.close(),
-    ])
+    for (const step of [() => server?.close(), async () => store?.close()])
       try {
         await step();
       } catch {
         // Best effort; the next step still runs.
       }
     process.env = savedEnv;
-    // Only after the core is gone: its state directory lives under `root`.
+    // Belt and braces before the socket directory disappears: stop again and
+    // fail the run if a core of this session is (again) alive.
+    await core.stop();
     rmSync(root, { recursive: true, force: true });
   }, 120_000);
 

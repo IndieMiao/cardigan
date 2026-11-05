@@ -45,12 +45,12 @@ export class HcCore {
   }
 
   /**
-   * Record the core's PID. Never spawns a core: without a socket there is
-   * nothing this test owns to remember.
+   * Record the core's current PID. Only called while the socket exists, so it
+   * can never start a core; a core that appeared after the previous stop gets a
+   * new PID and this refresh is what catches it.
    */
   remember(): number | undefined {
-    if (this.#pid !== undefined) return this.#pid;
-    if (!existsSync(this.socket)) return undefined;
+    if (!existsSync(this.socket)) return this.#pid;
     try {
       const status = JSON.parse(
         execFileSync("hc", ["server", "status", "--json"], {
@@ -66,17 +66,33 @@ export class HcCore {
     return this.#pid;
   }
 
-  /** Stop through hc first, then make sure the recorded PID is gone. */
+  /**
+   * Stop through hc first, then make sure every PID this test ever saw is gone.
+   * Idempotent and safe to call again right before the temporary directory (and
+   * with it the socket) is removed.
+   */
   async stop(): Promise<void> {
-    if (existsSync(this.socket))
-      try {
-        await exec("hc", ["server", "stop", "--json"], {
-          env: this.hcEnv,
-          timeout: 5_000,
-        });
-      } catch {
-        // Socket vanished or stop failed; the PID path below finishes the job.
-      }
+    // Two rounds: a stop can reveal a core that was started in between (for
+    // example by an hc command issued from another cleanup step).
+    for (let round = 0; round < 2; round += 1) {
+      this.remember();
+      if (existsSync(this.socket))
+        try {
+          await exec("hc", ["server", "stop", "--json"], {
+            env: this.hcEnv,
+            timeout: 5_000,
+          });
+        } catch {
+          // Socket vanished or stop failed; the PID path finishes the job.
+        }
+      await this.terminate();
+      if (!existsSync(this.socket)) break;
+    }
+    this.assertStopped();
+  }
+
+  /** SIGTERM the recorded PID, then SIGKILL if it is still alive. */
+  private async terminate(): Promise<void> {
     const pid = this.#pid;
     if (pid === undefined || !alive(pid)) return;
     try {
@@ -95,9 +111,20 @@ export class HcCore {
       return;
     }
     await sleep(200);
-    if (alive(pid))
+  }
+
+  /**
+   * Fail the test instead of leaking: the core this test recorded must be dead
+   * and its socket must be gone. PIDs only — never a command-line match.
+   */
+  assertStopped(): void {
+    if (this.#pid !== undefined && alive(this.#pid))
       throw new Error(
-        `herdr-core ${pid} (session ${this.session}) survived SIGKILL`,
+        `herdr-core ${this.#pid} (session ${this.session}) is still alive`,
+      );
+    if (existsSync(this.socket))
+      throw new Error(
+        `herdr-core socket for session ${this.session} still exists: ${this.socket}`,
       );
   }
 }

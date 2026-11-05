@@ -88,8 +88,13 @@ export async function stopCore(
     return;
   }
   await sleep(200);
+  // Fail the test instead of leaking; PIDs only, never a command-line match.
   if (alive(pid))
     throw new Error(
       `herdr-core ${pid} (session ${options.session}) survived SIGKILL`,
+    );
+  if (existsSync(options.socket))
+    throw new Error(
+      `herdr-core socket for session ${options.session} still exists: ${options.socket}`,
     );
 }
