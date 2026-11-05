@@ -96,7 +96,7 @@ function note(
   kind: RoutedNotification["kind"],
   rule: RuleId,
   summary: string,
-  extra: { work_item_id?: WorkItemId } = {},
+  extra: { work_item_id?: WorkItemId; run_kind?: "fix" } = {},
 ): void {
   // Never notify an Assignment about its own action (§6.4).
   if (
@@ -124,6 +124,7 @@ function note(
     card_id: input.event.card_id,
     work_item_id: extra.work_item_id,
     summary,
+    ...(extra.run_kind ? { run_kind: extra.run_kind } : {}),
   });
 }
 
@@ -479,7 +480,9 @@ function routeReview(input: RouteInput, draft: Draft): void {
     const card_id = input.event.card_id;
     if (
       input.snapshot.cards.some(
-        (c) => c.id === card_id && ["done", "cancelled"].includes(c.status),
+        (c) =>
+          c.id === card_id &&
+          ["done", "cancelled", "awaiting_merge"].includes(c.status),
       )
     )
       return;
@@ -748,6 +751,70 @@ export function routeEvent(input: RouteInput): RouteResult {
       break;
     case "human_action_requested":
       routeHumanAction(input, draft);
+      break;
+    case "merge_conflicted": {
+      const item = itemOf(
+        input,
+        payloadString(input.event.payload, "work_item_id") as
+          | WorkItemId
+          | undefined,
+      );
+      const owner = assignmentOf(input, item?.assignment_id);
+      if (
+        item?.card_id === input.event.card_id &&
+        item?.kind === "produce" &&
+        owner &&
+        isActive(owner)
+      )
+        note(
+          input,
+          draft,
+          recipient.assignment(owner.id),
+          "instruction",
+          "6.4/merge conflicted",
+          `Resolve the merge conflict for ${item.id}`,
+          { work_item_id: item.id, run_kind: "fix" },
+        );
+      else
+        note(
+          input,
+          draft,
+          recipient.pm_ops(),
+          "escalation",
+          "6.4/merge conflicted",
+          "Merge conflict has no active producer",
+        );
+      break;
+    }
+    case "card_merged":
+      note(
+        input,
+        draft,
+        recipient.pm_ops(),
+        "completion",
+        "6.4/card merged",
+        `${subject(input)} merged into the central baseline`,
+      );
+      break;
+    case "merge_failed":
+      note(
+        input,
+        draft,
+        recipient.pm_ops(),
+        "escalation",
+        "6.4/merge failed",
+        `${subject(input)} merge failed`,
+      );
+      break;
+    case "reconcile_finding":
+      note(
+        input,
+        draft,
+        recipient.pm_ops(),
+        "escalation",
+        "6.4/reconcile finding",
+        "Git reconciliation found an item needing attention",
+      );
       break;
     case "run_finished":
       routeRunFinished(input, draft);

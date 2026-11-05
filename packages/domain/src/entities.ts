@@ -321,7 +321,9 @@ interface DecisionFields {
   readonly card_id?: CardId;
   readonly raised_by: Author;
   /** Set by the control plane, never by request_decision parameters. */
-  readonly trigger?: "review_limit" | "merge_confirmation";
+  readonly trigger?: "review_limit" | "merge_confirmation" | "worktree_cleanup";
+  /** Control-plane cleanup target; not writable by request_decision. */
+  readonly assignment_id?: AssignmentId;
   readonly category?:
     | "general"
     | "spending"

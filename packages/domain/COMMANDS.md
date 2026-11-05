@@ -73,3 +73,10 @@
 - CardTemplate.merge_policy 为 confirm / auto，开发卡默认 confirm。createCard 将主机 CommandPorts.templates 中 dev 模板的策略固定到 Card.merge_policy，旧卡缺省 confirm；MCP 参数不能覆盖。
 - 完成审核通过后先发 review_submitted，再按策略发 decision_requested；确认绑定当前完成申请，merge / hold 均保留 awaiting_merge，只有 merge 允许执行。recordDecision 对合并确认开放 human 入口，记录原话和 needs_you 来源；原有 Office 入口保持。requestMerge 仅人或常驻 PM Ops 可用，仅对已 hold 的确认重新申请。
 - mergePlan(state, card_id) 无 IO，返回 card_id/title/base_branch/completion_id 和按工作项编号排序的 deliveries（delivery_id/work_item_id/sha）。只收最新未被取代且已接受的 Git code 交付；未接受或尚无交付的工作项跳过，known_gaps 仍由完成申请校验。没有可合并交付时直接 done。检查当前完成申请及确认，未决阻塞会拒绝；M4.4 负责一致快照和固定 ref 校验。待合并期间冻结交付与审核，冲突后才能重新交付。
+
+## M4.1 合并结果、释放和清理
+
+- recordMergeResult(state, system, { card_id, completion_id, result }, ports)：result 为 merged { merge_sha, previous_sha } / conflicted { delivery_id, files } / failed { reason }（用 kind 区分）。检查当前 mergePlan 及完成版本；只允许 system。除已记录结果的精确重放外，非 awaiting_merge 拒绝。以完成版本和规范化结果去重，旧结果不能完成新版本；事件 payload 为 completion_id、result，冲突另带 work_item_id/run_kind=fix。
+- merged 写 done/resolution；failed 仅写事件；conflicted 回 in_progress，冲突产出经 merge_conflicted 返工，旧完成申请 supersede、PM 验收经 target_withdrawn 等待新目标。Router 输出原产出 Assignment 的 fix 通知；真正排 Run、按铃属于 M4.4，未在命令里另建第二个 Run。
+- releaseAssignment({ assignment_id }) 允许人／常驻 PM Ops／system，无未结束 Run 才迁移两个 Assignment 状态并写 assignment_released。system 只自动释放闭卡的工作项 Assignment；PM Ops 只能释放 scope=work_item，常驻 Assignment 仅允许 human 释放；重复释放前也先校验这一权限。事件携带 token_id（非明文）、runtime_ref、worktree_path、branch；M4.4 沿用 M2 stop 方式撤销该 Assignment 的全部 Token 并释放终端，domain 不证明外部清理已完成。
+- requestWorktreeCleanup({ assignment_id, reason }) 只允许 system；要求已 released 且有工作目录，创建绑定 Assignment 的人类 keep/force_clean 决策。未决或已解决决定均复用，keep 不再重复询问。recordDecision 对此类决策开放 human 入口；不扩充 MCP 工具。

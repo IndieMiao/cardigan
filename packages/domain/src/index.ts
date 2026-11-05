@@ -11,8 +11,10 @@ export type {
 export * from "./commands/delivery.js";
 export * from "./commands/launch.js";
 export { type MergePlan, mergePlan, requestMerge } from "./commands/merge.js";
+export * from "./commands/merge-result.js";
 export * from "./commands/pm.js";
 export * from "./commands/queries.js";
+export * from "./commands/release.js";
 export * from "./commands/runtime.js";
 export * from "./derived.js";
 export * from "./entities.js";
