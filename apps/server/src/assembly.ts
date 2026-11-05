@@ -4,7 +4,7 @@ import type {
   CommandState,
   ProjectId,
 } from "@cardigan/domain";
-import type { Store } from "@cardigan/store";
+import { type Store, tokensForAssignment } from "@cardigan/store";
 import { Dispatcher, type DispatcherOptions } from "./dispatch.js";
 import { dispatcherClock, type StandingResolver } from "./dispatch-inbox.js";
 import {
@@ -49,7 +49,12 @@ export interface ControlPlane {
   stop(): Promise<void>;
 }
 
-/** PM Office / Ops are the standing pm Assignments whose newest token tells them apart. */
+/**
+ * PM Office / Ops are the standing pm Assignments whose newest token tells them
+ * apart. The lookup runs on plain queries of the shared connection: it is also
+ * called from inside a Dispatcher transaction, where opening another UnitOfWork
+ * would fail.
+ */
 export function standingResolver(
   store: Store,
   tokensOf: (
@@ -59,11 +64,9 @@ export function standingResolver(
     project,
     assignment,
   ) =>
-    store.uow.run((tx) =>
-      tx.tokensForAssignment(project, assignment).map((token) => ({
-        allowed_tools: token.allowed_tools,
-      })),
-    ),
+    tokensForAssignment(store.database, project, assignment).map((token) => ({
+      allowed_tools: token.allowed_tools,
+    })),
 ): StandingResolver {
   return (
     project: ProjectId,

@@ -347,13 +347,16 @@ export class Dispatcher {
         kind: n.kind as NotificationKind,
         summary: "",
       }));
+      // §6.2: the bell names the Run, because the Agent needs it for
+      // finish_run and heartbeat even when the host started the session.
       const bell = cause.card_id
         ? mergeNotifications({
             card_id: cause.card_id,
             assignment_id: a.id,
+            run_id: run.id,
             notifications: kinds,
           })?.text
-        : `[bell] project=${project} asg=${a.id} seq=${Math.min(...ready.map((n) => n.seq))}..${Math.max(...ready.map((n) => n.seq))} summary=${JSON.stringify(summarizeNotifications(kinds))}\n→ 请调用 get_updates 读取项目更新`;
+        : `[bell] project=${project} asg=${a.id} run=${run.id} seq=${Math.min(...ready.map((n) => n.seq))}..${Math.max(...ready.map((n) => n.seq))} summary=${JSON.stringify(summarizeNotifications(kinds))}\n→ 请调用 get_updates 读取项目更新`;
       if (!bell) throw new Error("Missing bell");
       const attempt: BellAttempt = {
         id: randomUUID(),

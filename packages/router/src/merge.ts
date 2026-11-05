@@ -1,4 +1,4 @@
-import type { AssignmentId, CardId } from "@cardigan/domain";
+import type { AssignmentId, CardId, RunId } from "@cardigan/domain";
 import type { NotificationKind, RoutedNotification } from "./types.js";
 
 /**
@@ -12,6 +12,7 @@ import type { NotificationKind, RoutedNotification } from "./types.js";
  */
 export interface BellMessage {
   readonly card_id: CardId;
+  readonly run_id?: RunId;
   readonly assignment_id: AssignmentId;
   readonly from_seq: number;
   readonly to_seq: number;
@@ -69,6 +70,12 @@ export function summarizeNotifications(
 export function mergeNotifications(input: {
   readonly card_id: CardId;
   readonly assignment_id: AssignmentId;
+  /**
+   * The Run this bell belongs to. §6.2 puts it in the first line, and an Agent
+   * needs it for `finish_run` / `heartbeat`; without it a host-started Agent
+   * cannot close its Run.
+   */
+  readonly run_id?: RunId | undefined;
   readonly notifications: readonly Pick<
     RoutedNotification,
     "seq" | "kind" | "summary"
@@ -80,12 +87,13 @@ export function mergeNotifications(input: {
   const to_seq = Math.max(...seqs);
   const summary = summarizeNotifications(input.notifications);
   const text = [
-    `[bell] card=${input.card_id} asg=${input.assignment_id} seq=${from_seq}..${to_seq} summary="${summary}"`,
+    `[bell] card=${input.card_id} asg=${input.assignment_id}${input.run_id === undefined ? "" : ` run=${input.run_id}`} seq=${from_seq}..${to_seq} summary="${summary}"`,
     "→ 请调用 card.get_updates 读取详情",
   ].join("\n");
   return {
     card_id: input.card_id,
     assignment_id: input.assignment_id,
+    ...(input.run_id === undefined ? {} : { run_id: input.run_id }),
     from_seq,
     to_seq,
     summary,
