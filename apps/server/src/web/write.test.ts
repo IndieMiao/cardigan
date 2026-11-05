@@ -1,6 +1,12 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
+import {
+  request as httpRequest,
+  type IncomingMessage,
+  type ServerResponse,
+} from "node:http";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 import {
   type Decision,
   requestDecision,
@@ -10,7 +16,9 @@ import {
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { type M4Cross, m4Cross } from "../../test-support/m4-cross.js";
 import { resolveWebConfig } from "./config.js";
+import { HttpRejection } from "./http.js";
 import { type RunningWebServer, startWebServer } from "./server.js";
+import { serveWrite } from "./write.js";
 
 let s: M4Cross, web: RunningWebServer, cookie: string;
 const password = "workbench test password";
@@ -393,4 +401,94 @@ test("every write route enforces cookie authentication, Origin and JSON before a
     ).toMatchObject({ status: 415 });
   }
   expect(snapshot()).toBe(before);
+});
+
+test("write handler authenticates before touching an upload body", async () => {
+  let read = false;
+  const req = Object.assign(
+    Readable.from(
+      (async function* () {
+        read = true;
+        yield "{}";
+      })(),
+    ),
+    { method: "POST", headers: { "content-type": "application/json" } },
+  ) as unknown as IncomingMessage;
+  await expect(
+    serveWrite(
+      {
+        req,
+        res: {} as ServerResponse,
+        store: s.store(),
+        project_id: s.project.project_id,
+        dataDir: s.dataDir,
+        clock: { now: () => new Date().toISOString() },
+        authorize: () => {
+          throw new HttpRejection(401, "unauthorized", "login required");
+        },
+      },
+      cardPath("attachments"),
+    ),
+  ).rejects.toMatchObject({ status: 401 });
+  expect(read).toBe(false);
+  req.destroy();
+});
+
+test("unauthenticated large upload receives 401 before the request body finishes", async () => {
+  let client: ReturnType<typeof httpRequest> | undefined;
+  try {
+    const status = await new Promise<number | undefined>((resolve, reject) => {
+      client = httpRequest(
+        web.url + path(cardPath("attachments")),
+        {
+          method: "POST",
+          headers: {
+            origin: web.url,
+            "content-type": "application/json",
+            "content-length": 14 * 1024 * 1024,
+          },
+        },
+        (response) => {
+          response.resume();
+          response.on("end", () => resolve(response.statusCode));
+        },
+      );
+      client.on("error", reject);
+      client.setTimeout(3000, () =>
+        client?.destroy(new Error("Server waited for the upload")),
+      );
+      client.write("{"); // Deliberately never end the declared 14 MiB body.
+    });
+    expect(status).toBe(401);
+    expect(client?.writableFinished).toBe(false);
+  } finally {
+    client?.destroy();
+  }
+});
+
+test("Needs You exposes risk category and cleanup Assignment for the UI", async () => {
+  await s.start(s.primary.owner);
+  await s.finish(s.primary.owner);
+  s.release(s.primary.owner);
+  const q = s.command((state, _actor, ports) =>
+    requestWorktreeCleanup(
+      state,
+      { kind: "system", project_id: state.project_id },
+      { assignment_id: s.primary.owner.id, reason: "Dirty workspace" },
+      ports,
+    ),
+  );
+  const response = await fetch(web.url + path("/needs-you"), {
+    headers: { cookie },
+  });
+  expect(await response.json()).toMatchObject({
+    decisions: [
+      expect.objectContaining({
+        id: q.id,
+        category: "data_deletion",
+        assignment_id: s.primary.owner.id,
+      }),
+    ],
+    incidents: [],
+  });
 });
