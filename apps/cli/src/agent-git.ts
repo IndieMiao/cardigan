@@ -1,34 +1,39 @@
-import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   chmod,
   chown,
   lstat,
   mkdir,
-  mkdtemp,
   readFile,
   realpath,
   rename,
-  rm,
   rmdir,
   writeFile,
 } from "node:fs/promises";
-import { isAbsolute, join, resolve } from "node:path";
-import { promisify } from "node:util";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { GitWorktreePort } from "@cardigan/domain";
 import {
-  gitEnvironment,
+  CentralGitTransport,
+  type GitTimeoutOptions,
   gitSafetyArguments,
   LocalGitTransport,
+  withGitTimeout,
 } from "@cardigan/git-transport";
 import {
   type AgentExecution,
+  agentReceivePack,
   prepareAgentProject,
 } from "@cardigan/runtime-herdr";
 
-const exec = promisify(execFile);
 const errno = (e: unknown) => (e as NodeJS.ErrnoException).code;
-export type AgentGitRunner = (args: readonly string[]) => Promise<string>;
+export type AgentGitRunner = (
+  args: readonly string[],
+  timeoutMs: number,
+) => Promise<string>;
+export interface AgentGitOptions extends GitTimeoutOptions {
+  /** Observation only: all host calls still execute real Git in the center. */
+  readonly onHostCommand?: (cwd: string, args: readonly string[]) => void;
+}
 
 /** Host reads only the central repository; all mutable workspace Git runs as agent. */
 export class AgentGitTransport implements GitWorktreePort {
@@ -41,19 +46,23 @@ export class AgentGitTransport implements GitWorktreePort {
     private readonly project: string,
     private readonly assignment: string,
     private readonly run: AgentGitRunner,
+    private readonly options: AgentGitOptions = {},
   ) {
     this.repository = join(config.agentRoot, "repos", project);
     this.worktree = join(config.agentRoot, "worktrees", project, assignment);
     this.inputs = join(config.agentRoot, "inputs", project);
-    this.commands = new LocalGitTransport("git", 30000, {
-      run: (args) =>
-        this.run([
-          "-c",
-          `safe.directory=${this.repository}`,
-          "-c",
-          `safe.directory=${this.worktree}`,
-          ...args,
-        ]),
+    this.commands = new LocalGitTransport("git", options, {
+      run: (args, timeout) =>
+        this.run(
+          [
+            "-c",
+            `safe.directory=${this.repository}`,
+            "-c",
+            `safe.directory=${this.worktree}`,
+            ...args,
+          ],
+          timeout,
+        ),
       prepareWorktree: async (path) => {
         this.exact(path, this.worktree);
         await this.leaf(path);
@@ -102,46 +111,36 @@ export class AgentGitTransport implements GitWorktreePort {
       );
     return source;
   }
-  private async bundle(source: string) {
-    // Build privately, then publish a read-only bundle under a protected parent.
-    const stage = await mkdtemp(join(this.inputs, ".bundle-"));
-    const path = join(stage, "source.bundle");
-    const target = join(this.inputs, "source.bundle");
-    try {
-      const env = gitEnvironment();
-      await exec(
-        "git",
-        [
-          ...gitSafetyArguments,
-          "-C",
-          source,
-          "bundle",
-          "create",
-          path,
-          "--branches",
-          "--glob=refs/cardigan/deliveries/*",
-        ],
-        {
-          env: { ...env, GIT_TERMINAL_PROMPT: "0" },
-          timeout: 30000,
-          maxBuffer: 4 * 1024 * 1024,
-        },
-      );
-      await chown(path, process.getuid?.() ?? -1, this.config.gid);
-      await chmod(path, 0o640);
-      await rename(path, target);
-      return target;
-    } finally {
-      await rm(stage, { recursive: true, force: true });
-    }
+  private host(source: string) {
+    return new CentralGitTransport({
+      ...this.options,
+      dataDir: this.config.dataDir,
+      centralRoot: dirname(source),
+      agentRoot: this.config.agentRoot,
+      ...(this.options.onHostCommand
+        ? { onCommand: this.options.onHostCommand }
+        : {}),
+    });
+  }
+  private async push(source: string, target: string) {
+    await this.host(source).pushBaseline(
+      source,
+      target,
+      await agentReceivePack(this.config, target),
+    );
   }
   private git(args: readonly string[]) {
     const directory = args[0] === "-C" ? args[1] : undefined;
-    return this.run([
-      ...(directory ? ["-c", `safe.directory=${directory}`] : []),
-      ...gitSafetyArguments,
-      ...args,
-    ]);
+    return withGitTimeout(args[directory ? 2 : 0], this.options, (timeout) =>
+      this.run(
+        [
+          ...(directory ? ["-c", `safe.directory=${directory}`] : []),
+          ...gitSafetyArguments,
+          ...args,
+        ],
+        timeout,
+      ),
+    );
   }
   async ensureClone(source: string, directory: string) {
     await this.prepare();
@@ -156,7 +155,6 @@ export class AgentGitTransport implements GitWorktreePort {
     }
     const bundle = join(this.inputs, "source.bundle");
     if (!exists) {
-      await this.bundle(local);
       const stage = join(
         this.config.agentRoot,
         "repos",
@@ -164,21 +162,16 @@ export class AgentGitTransport implements GitWorktreePort {
       );
       await this.leaf(stage);
       try {
+        const format = await this.host(local).objectFormat(local);
         await this.git([
-          "clone",
-          "--no-local",
-          "--no-checkout",
+          "init",
+          `--object-format=${format}`,
+          "--shared=0660",
           "--",
-          bundle,
           stage,
         ]);
-        await this.git([
-          "-C",
-          stage,
-          "config",
-          "core.sharedRepository",
-          "0660",
-        ]);
+        await this.git(["-C", stage, "config", "remote.origin.url", local]);
+        await this.push(local, stage);
         try {
           await rename(stage, directory);
         } catch (error) {
@@ -196,19 +189,15 @@ export class AgentGitTransport implements GitWorktreePort {
       }
     }
     await this.checkLeaf(directory);
+    const origin = (
+      await this.git(["-C", directory, "config", "--get", "remote.origin.url"])
+    ).trim();
     if (
       (
         await this.git(["-C", directory, "rev-parse", "--show-toplevel"])
       ).trim() !== directory ||
-      (
-        await this.git([
-          "-C",
-          directory,
-          "config",
-          "--get",
-          "remote.origin.url",
-        ])
-      ).trim() !== bundle
+      // Existing center-based bundle clones can receive incremental updates too.
+      ![local, bundle].includes(origin)
     )
       throw new Error("Existing Agent clone has an unexpected origin");
   }
@@ -216,19 +205,9 @@ export class AgentGitTransport implements GitWorktreePort {
     await this.prepare();
     this.exact(repository, this.repository);
     await this.checkLeaf(repository);
-    const bundle = await this.bundle(await this.source(source));
-    await this.git([
-      "-C",
-      repository,
-      "fetch",
-      "--atomic",
-      "--no-tags",
-      "--",
-      bundle,
-      "+refs/heads/*:refs/remotes/origin/*",
-      "+refs/cardigan/deliveries/*:refs/cardigan/deliveries/*",
-    ]);
+    await this.push(await this.source(source), repository);
   }
+
   async resolveCommit(repository: string, ref: string) {
     this.exact(repository, this.repository);
     return this.commands.resolveCommit(repository, ref);

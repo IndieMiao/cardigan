@@ -30,10 +30,12 @@ const git = async (args: readonly string[], env = process.env) =>
 describe.skipIf(process.platform !== "linux")("Agent workspace Git", () => {
   let root: string,
     source: string,
+    center: string,
     repository: string,
     worktree: string,
     config: AgentExecution;
   let calls: string[][], transport: AgentGitTransport;
+  let hostCalls: { cwd: string; args: readonly string[] }[];
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), "cg-agent-git-"));
     source = join(root, "source");
@@ -67,6 +69,31 @@ describe.skipIf(process.platform !== "linux")("Agent workspace Git", () => {
     repository = join(config.agentRoot, "repos", "project");
     worktree = join(config.agentRoot, "worktrees", "project", "A-1");
     calls = [];
+    hostCalls = [];
+    center = await new CentralRepositoryService(
+      new CentralGitTransport({ dataDir: config.dataDir }),
+      { dataDir: config.dataDir },
+    ).ensureCentral({
+      project_id: "project",
+      source_repo: source,
+      base_branch: "main",
+    });
+    for (const path of [config.identityFile, config.knownHostsFile])
+      await writeFile(path, "fixture-only", { mode: 0o600 });
+    const bin = join(root, "default-bin");
+    await mkdir(bin);
+    await writeFile(
+      join(bin, "ssh"),
+      `#!/usr/bin/env node
+const {spawnSync} = require('node:child_process');
+const args = process.argv.slice(2), at = args.indexOf('--');
+if (args[at + 1] !== 'agent@localhost') process.exit(99);
+const child = spawnSync('sh', ['-c', args.slice(at + 2).join(' ')], {cwd: ${JSON.stringify(config.agentRoot)}, env: {...process.env, CARDIGAN_TEST_GIT_CONTEXT:'agent'}, stdio:'inherit'});
+process.exit(child.status ?? 98);
+`,
+      { mode: 0o700 },
+    );
+    vi.stubEnv("PATH", `${bin}:${process.env.PATH}`);
     transport = new AgentGitTransport(
       config,
       "project",
@@ -79,6 +106,7 @@ describe.skipIf(process.platform !== "linux")("Agent workspace Git", () => {
           CARDIGAN_TEST_GIT_CONTEXT: "agent",
         });
       },
+      { onHostCommand: (cwd, args) => hostCalls.push({ cwd, args }) },
     );
   });
   afterEach(async () => {
@@ -87,8 +115,8 @@ describe.skipIf(process.platform !== "linux")("Agent workspace Git", () => {
   });
   const mode = async (path: string) => (await lstat(path)).mode & 0o7777;
   const initialize = async () => {
-    await transport.ensureClone(source, repository);
-    await transport.fetch(repository, source);
+    await transport.ensureClone(center, repository);
+    await transport.fetch(repository, center);
     const sha = await transport.resolveCommit(
       repository,
       "refs/remotes/origin/main",
@@ -96,23 +124,28 @@ describe.skipIf(process.platform !== "linux")("Agent workspace Git", () => {
     await transport.addWorktree(repository, worktree, sha, "agent/C-1/W-1");
     return sha;
   };
-  test("private source is exported as a read-only bundle; every shared Git command uses the agent runner", async () => {
+  test("private center pushes into an empty Agent repository without generating a bundle", async () => {
     const head = await initialize();
     expect(await mode(config.dataDir)).toBe(0o700);
     expect(await mode(repository)).toBe(0o2770);
     expect(await mode(worktree)).toBe(0o2770);
     const bundle = join(config.agentRoot, "inputs", "project", "source.bundle");
-    expect(await mode(bundle)).toBe(0o640);
-    expect((await lstat(bundle)).gid).toBe(config.gid);
+    await expect(lstat(bundle)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(hostCalls.some((call) => call.args.includes("push"))).toBe(true);
+    expect(
+      hostCalls.every(
+        (call) =>
+          call.cwd === center &&
+          call.args.includes("transfer.fsckObjects=true"),
+      ),
+    ).toBe(true);
     expect(await transport.listWorktrees(repository)).toContainEqual({
       path: worktree,
       head,
       branch: "agent/C-1/W-1",
     });
     expect(await transport.isDirty(worktree)).toBe(false);
-    expect(
-      calls.some((args) => args.includes("clone") && args.includes(bundle)),
-    ).toBe(true);
+    expect(calls.some((args) => args.includes("init"))).toBe(true);
     expect(
       calls.some((args) => args.includes(`safe.directory=${repository}`)),
     ).toBe(true);
@@ -129,7 +162,7 @@ describe.skipIf(process.platform !== "linux")("Agent workspace Git", () => {
     );
     expect((await git(["-C", source, "rev-parse", "HEAD"])).trim()).toBe(head);
   });
-  test("M4.2 bundles the private center including pinned deliveries and restores removed objects", async () => {
+  test("M4.2 pushes pinned deliveries incrementally from the private center", async () => {
     const hostCalls: string[] = [];
     const io = new CentralGitTransport({
       dataDir: config.dataDir,
@@ -167,14 +200,14 @@ describe.skipIf(process.platform !== "linux")("Agent workspace Git", () => {
     expect(
       await transport.resolveCommit(repository, "refs/cardigan/deliveries/D-1"),
     ).toBe(sha);
-    await rm(join(repository, ".git", "objects"), { recursive: true });
-    await mkdir(join(repository, ".git", "objects"));
-    await transport.fetch(repository, center);
+    await expect(
+      lstat(join(config.agentRoot, "inputs", "project", "source.bundle")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
     expect(
-      await transport.resolveCommit(repository, "refs/cardigan/deliveries/D-1"),
-    ).toBe(sha);
-    expect(
-      calls.every((args) => !args.includes(source) && !args.includes(center)),
+      calls.every(
+        (args) =>
+          !args.includes(source) && args[args.indexOf("-C") + 1] !== center,
+      ),
     ).toBe(true);
     expect(
       hostCalls.every((cwd) => cwd.startsWith(join(config.dataDir, "central"))),
@@ -182,6 +215,10 @@ describe.skipIf(process.platform !== "linux")("Agent workspace Git", () => {
   });
   test("M4.2 refuses a legacy Agent clone instead of rewriting its source", async () => {
     await initialize();
+    await writeFile(
+      join(config.agentRoot, "inputs", "project", "source.path"),
+      source,
+    );
     const central = new CentralRepositoryService(
       new CentralGitTransport({ dataDir: config.dataDir }),
       { dataDir: config.dataDir },
@@ -213,8 +250,13 @@ describe.skipIf(process.platform !== "linux")("Agent workspace Git", () => {
       await writeFile(path, "fixture-only", { mode: 0o600 });
     repository = join(config.agentRoot, "repos", "project");
     worktree = join(config.agentRoot, "worktrees", "project", "A-1");
-    transport = new AgentGitTransport(config, "project", "A-1", (args) =>
-      git(args, { ...process.env, CARDIGAN_TEST_GIT_CONTEXT: "agent" }),
+    transport = new AgentGitTransport(
+      config,
+      "project",
+      "A-1",
+      (args) =>
+        git(args, { ...process.env, CARDIGAN_TEST_GIT_CONTEXT: "agent" }),
+      { onHostCommand: (cwd, args) => hostCalls.push({ cwd, args }) },
     );
     const bin = join(root, "bin"),
       trace = join(root, "ssh-trace"),
@@ -327,7 +369,12 @@ process.exit(child.status ?? 98);
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line) as { args: string[]; cwd: string });
-    expect(ssh).toHaveLength(2);
+    expect(
+      ssh.filter(({ args }) => args.some((a) => a.includes("upload-pack"))),
+    ).toHaveLength(2);
+    expect(
+      ssh.filter(({ args }) => args.some((a) => a.includes("receive-pack"))),
+    ).toHaveLength(2);
     expect(
       ssh.every(
         ({ args, cwd }) =>
@@ -347,7 +394,11 @@ process.exit(child.status ?? 98);
       hostCalls
         .filter((call) => call.args.includes(repository))
         .every((call) =>
-          call.args.some((arg) => arg.startsWith("--upload-pack=")),
+          call.args.some(
+            (arg) =>
+              arg.startsWith("--upload-pack=") ||
+              arg.startsWith("--receive-pack="),
+          ),
         ),
     ).toBe(true);
     await writeFile(unavailable, "down");
@@ -357,11 +408,28 @@ process.exit(child.status ?? 98);
     expect(
       await io.readRef(center, "refs/cardigan/backups/local/agent/C-1/W-1"),
     ).toBe(sha);
-    expect((await readFile(trace, "utf8")).trim().split("\n")).toHaveLength(3);
+    expect((await readFile(trace, "utf8")).trim().split("\n")).toHaveLength(5);
     expect(await central.syncFromSource(project)).toBe("up_to_date");
   });
   test("fetch advances the baseline without overwriting an existing branch or dirty worktree", async () => {
     const initial = await initialize();
+    await git([
+      "-C",
+      repository,
+      "switch",
+      "-c",
+      "personal",
+      "refs/remotes/origin/main",
+    ]);
+    await writeFile(join(repository, "file"), "base uncommitted");
+    await git([
+      "-C",
+      repository,
+      "remote",
+      "set-url",
+      "origin",
+      join(config.agentRoot, "inputs", "project", "source.bundle"),
+    ]);
     await writeFile(join(worktree, "file"), "agent uncommitted");
     await writeFile(join(source, "file"), "host next");
     await git([
@@ -375,8 +443,16 @@ process.exit(child.status ?? 98);
       "-am",
       "next",
     ]);
-    await transport.ensureClone(source, repository);
-    await transport.fetch(repository, source);
+    await new CentralRepositoryService(
+      new CentralGitTransport({ dataDir: config.dataDir }),
+      { dataDir: config.dataDir },
+    ).syncFromSource({
+      project_id: "project",
+      source_repo: source,
+      base_branch: "main",
+    });
+    await transport.ensureClone(center, repository);
+    await transport.fetch(repository, center);
     expect(
       await transport.resolveCommit(repository, "refs/remotes/origin/main"),
     ).not.toBe(initial);
@@ -387,7 +463,22 @@ process.exit(child.status ?? 98);
       "agent uncommitted",
     );
     expect(await transport.isDirty(worktree)).toBe(true);
-    expect(calls.filter((args) => args.includes("clone"))).toHaveLength(1);
+    expect(calls.filter((args) => args.includes("init"))).toHaveLength(1);
+    expect(
+      calls.some((args) => args.includes("bundle") || args.includes("clone")),
+    ).toBe(false);
+    expect((await git(["-C", repository, "rev-parse", "HEAD"])).trim()).toBe(
+      initial,
+    );
+    expect(
+      (await git(["-C", repository, "branch", "--show-current"])).trim(),
+    ).toBe("personal");
+    expect(await readFile(join(repository, "file"), "utf8")).toBe(
+      "base uncommitted",
+    );
+    await expect(
+      lstat(join(config.agentRoot, "inputs", "project", "source.bundle")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
   });
   test("workspace configuration executes only inside the agent runner, never host Git", async () => {
     await initialize();
@@ -399,8 +490,8 @@ process.exit(child.status ?? 98);
       { mode: 0o700 },
     );
     await git(["-C", repository, "config", "core.fsmonitor", hook]);
-    await transport.ensureClone(source, repository);
-    await transport.fetch(repository, source);
+    await transport.ensureClone(center, repository);
+    await transport.fetch(repository, center);
     await transport.isDirty(worktree);
     expect(await readFile(marker, "utf8")).toBe("agent");
   });
@@ -528,6 +619,19 @@ process.exit(child.status ?? 98);
       ),
     ).toBe(true);
   });
+  test("Agent baseline push honors the transfer timeout and names its configuration", async () => {
+    const limited = new AgentGitTransport(
+      config,
+      "project",
+      "A-1",
+      (args) => git(args),
+      { transferTimeoutMs: 1 },
+    );
+    await expect(limited.ensureClone(center, repository)).rejects.toThrow(
+      /push timed out.*CARDIGAN_GIT_TRANSFER_TIMEOUT_MS/,
+    );
+    await expect(lstat(repository)).rejects.toMatchObject({ code: "ENOENT" });
+  });
   test("rejects changed sources, escaped paths and shared source repositories", async () => {
     await initialize();
     await expect(transport.ensureClone(repository, repository)).rejects.toThrow(
@@ -550,7 +654,7 @@ process.exit(child.status ?? 98);
   test("refuses a namespace symlink and never falls back to host Git when agent execution fails", async () => {
     await symlink(config.dataDir, join(config.agentRoot, "repos"), "dir");
     await expect(transport.ensureClone(source, repository)).rejects.toThrow();
-    expect(await readdir(config.dataDir)).toEqual([]);
+    expect(await readdir(config.dataDir)).toEqual(["central"]);
     expect(calls).toEqual([]);
     await rm(join(config.agentRoot, "repos"));
     const unavailable = new AgentGitTransport(

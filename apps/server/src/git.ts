@@ -53,6 +53,7 @@ export interface ServerGitOptions {
   readonly captureAgent?: (
     command: "git",
     args: readonly string[],
+    timeoutMs?: number,
   ) => Promise<
     | { readonly ok: true; readonly value: string }
     | {
@@ -110,15 +111,22 @@ function agentWorkspace(
   captureAgent: NonNullable<ServerGitOptions["captureAgent"]>,
 ): WorkspaceGitPort {
   return {
-    run: async (args) => {
+    run: async (args, timeoutMs) => {
       const at = args.indexOf("-C"),
         target = at >= 0 ? args[at + 1] : undefined;
-      const result = await captureAgent("git", [
-        ...(target === undefined ? [] : ["-c", `safe.directory=${target}`]),
-        ...args,
-      ]);
+      const result = await captureAgent(
+        "git",
+        [
+          ...(target === undefined ? [] : ["-c", `safe.directory=${target}`]),
+          ...args,
+        ],
+        timeoutMs,
+      );
       if (!result.ok)
-        throw new Error(`${result.error.code}: ${result.error.message}`);
+        throw Object.assign(
+          new Error(`${result.error.code}: ${result.error.message}`),
+          { code: result.error.code },
+        );
       return result.value;
     },
   };
@@ -175,7 +183,7 @@ export class ServerGit implements GitBinding {
         ? agentWorkspace(options.captureAgent)
         : undefined;
     this.worktrees = new GitWorktreeService(
-      new LocalGitTransport("git", 30_000, workspace),
+      new LocalGitTransport("git", {}, workspace),
       this.central,
       { dataDir: options.dataDir, ...roots },
     );

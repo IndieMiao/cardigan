@@ -3,7 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RuntimeRef } from "@cardigan/domain";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { agentSshCommand, agentUploadPack } from "./agent-ssh.js";
+import {
+  agentReceivePack,
+  agentSshCommand,
+  agentUploadPack,
+} from "./agent-ssh.js";
 import type { HcClient } from "./client.js";
 import {
   type ExecutionConfig,
@@ -204,6 +208,11 @@ test("all Runtime operations route to the configured agent machine using support
     ["get", "send", "kill", "rm", "interrupt"].includes(a[0] ?? ""),
   ))
     expect(args).toContain(ref.terminal_ref);
+  value(await runtime.captureAgent("git", ["status"], 1234));
+  expect(client.exec).toHaveBeenLastCalledWith(
+    ["exec", "--on", "cardigan-agent", "--", "git", "status"],
+    1234,
+  );
   value(await runtime.captureAgent("pi", ["--version"]));
   expect(client.exec).toHaveBeenLastCalledWith([
     "exec",
@@ -269,31 +278,32 @@ test("credential permissions and the remote hc version are validated before laun
   });
 });
 
-test("M4.2 upload-pack uses the dedicated SSH policy and rejects unbound paths or unsafe credentials", async () => {
-  const command = await agentUploadPack(
-    execution,
-    join(execution.agentRoot, "repos", "project"),
-  );
-  for (const option of [
-    "upload-pack",
-    "agent@localhost",
-    "IdentitiesOnly=yes",
-    "IdentityAgent=none",
-    "ForwardAgent=no",
-    "StrictHostKeyChecking=yes",
-    "GIT_CONFIG_GLOBAL=/dev/null",
-  ])
-    expect(command).toContain(option);
-  for (const path of [
-    "relative",
-    execution.dataDir,
-    join(execution.agentRoot, "worktrees", "project", "A-1"),
-  ])
-    await expect(agentUploadPack(execution, path)).rejects.toThrow(
-      /base repository/,
+test.each([agentUploadPack, agentReceivePack])(
+  "M4 pack services use the dedicated SSH policy and reject unbound paths or unsafe credentials: %s",
+  async (pack) => {
+    const command = await pack(
+      execution,
+      join(execution.agentRoot, "repos", "project"),
     );
-  await chmod(execution.identityFile, 0o644);
-  await expect(
-    agentUploadPack(execution, join(execution.agentRoot, "repos", "project")),
-  ).rejects.toThrow(/0600/);
-});
+    for (const option of [
+      pack === agentUploadPack ? "upload-pack" : "receive-pack",
+      "agent@localhost",
+      "IdentitiesOnly=yes",
+      "IdentityAgent=none",
+      "ForwardAgent=no",
+      "StrictHostKeyChecking=yes",
+      "GIT_CONFIG_GLOBAL=/dev/null",
+    ])
+      expect(command).toContain(option);
+    for (const path of [
+      "relative",
+      execution.dataDir,
+      join(execution.agentRoot, "worktrees", "project", "A-1"),
+    ])
+      await expect(pack(execution, path)).rejects.toThrow(/base repository/);
+    await chmod(execution.identityFile, 0o644);
+    await expect(
+      pack(execution, join(execution.agentRoot, "repos", "project")),
+    ).rejects.toThrow(/0600/);
+  },
+);

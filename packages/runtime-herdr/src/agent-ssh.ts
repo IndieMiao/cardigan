@@ -99,6 +99,19 @@ export async function agentUploadPack(
   config: AgentConfig,
   repository: string,
 ): Promise<string> {
+  return agentPack(config, repository, "upload-pack");
+}
+export async function agentReceivePack(
+  config: AgentConfig,
+  repository: string,
+): Promise<string> {
+  return agentPack(config, repository, "receive-pack");
+}
+async function agentPack(
+  config: AgentConfig,
+  repository: string,
+  service: "upload-pack" | "receive-pack",
+): Promise<string> {
   if (
     config.mode !== "agent-ssh" ||
     !isAbsolute(repository) ||
@@ -106,10 +119,10 @@ export async function agentUploadPack(
   )
     fail(
       "invalid_launch",
-      "Upload-pack requires a configured Agent base repository",
+      "Git pack service requires a configured Agent base repository",
     );
   await checkAgentFiles(config);
-  const remote = `GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -c ${shellQuote(`safe.directory=${repository}`)} upload-pack -- ${shellQuote(repository)}`;
+  const remote = `GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -c ${shellQuote(`safe.directory=${repository}`)} -c core.hooksPath=/dev/null -c transfer.fsckObjects=true ${service} -- ${shellQuote(repository)}`;
   // Ignore Git's appended path; the command is bound to the host-selected repository.
   return `sh -c ${shellQuote(`exec ${agentSshCommand(config)} ${shellQuote(remote)}`)} --`;
 }

@@ -47,6 +47,7 @@ export interface StartServerOptions {
   readonly captureAgent?: (
     command: "git",
     args: readonly string[],
+    timeoutMs?: number,
   ) => Promise<
     | { readonly ok: true; readonly value: string }
     | {

@@ -7,11 +7,12 @@ import type {
   GitWorktreeChanges,
   GitWorktreePort,
 } from "@cardigan/domain";
-
 import { gitEnvironment, gitSafetyArguments } from "./hardening.js";
+import { type GitTimeoutOptions, withGitTimeout } from "./timeouts.js";
 
 export { type CentralGitOptions, CentralGitTransport } from "./central.js";
 export { gitEnvironment, gitSafetyArguments } from "./hardening.js";
+export { type GitTimeoutOptions, withGitTimeout } from "./timeouts.js";
 
 const exec = promisify(execFile);
 const exists = (path: string) =>
@@ -22,7 +23,7 @@ const exists = (path: string) =>
 
 /** Execute workspace Git as the workspace owner (for isolated Agent accounts). */
 export interface WorkspaceGit {
-  run(args: readonly string[]): Promise<string>;
+  run(args: readonly string[], timeoutMs: number): Promise<string>;
   prepareWorktree?(path: string): Promise<void>;
 }
 
@@ -30,7 +31,7 @@ export interface WorkspaceGit {
 export class LocalGitTransport implements GitWorktreePort {
   constructor(
     private readonly binary = "git",
-    private readonly timeoutMs = 30000,
+    private readonly timeouts: GitTimeoutOptions | number = {},
     private readonly workspace?: WorkspaceGit,
   ) {}
   private async git(repository: string | undefined, args: string[]) {
@@ -40,14 +41,21 @@ export class LocalGitTransport implements GitWorktreePort {
       ...(repository ? ["-C", repository] : []),
       ...args,
     ];
-    if (this.workspace) return (await this.workspace.run(command)).trimEnd();
-    const { stdout } = await exec(this.binary, command, {
-      env,
-      timeout: this.timeoutMs,
-      killSignal: "SIGKILL",
-      maxBuffer: 4 * 1024 * 1024,
+    const options =
+      typeof this.timeouts === "number"
+        ? { queryTimeoutMs: this.timeouts, transferTimeoutMs: this.timeouts }
+        : this.timeouts;
+    return withGitTimeout(args[0], options, async (timeout) => {
+      if (this.workspace)
+        return (await this.workspace.run(command, timeout)).trimEnd();
+      const { stdout } = await exec(this.binary, command, {
+        env,
+        timeout,
+        killSignal: "SIGKILL",
+        maxBuffer: 4 * 1024 * 1024,
+      });
+      return stdout.trimEnd();
     });
-    return stdout.trimEnd();
   }
   private async source(path: string) {
     if (!isAbsolute(path))
