@@ -87,6 +87,12 @@ export interface ReconcileGit {
     readonly assignment: Assignment;
   }): Promise<WorktreeDiff>;
   backup(project: CentralProject): Promise<void>;
+  /** §3.3: re-create a missing fixed ref from the candidate ref, if it exists. */
+  repairPin(
+    project: CentralProject,
+    delivery: Delivery,
+    assignment: Assignment,
+  ): Promise<boolean>;
 }
 
 /** The repository roots a checkout layout uses for this execution mode. */
@@ -124,11 +130,14 @@ function agentWorkspace(
   };
 }
 
+/** What the control plane's phase loops need: merge plus cleanup/reconcile. */
+export type GitPhases = MergeGit & ReconcileGit;
+
 /**
  * Everything apps/server needs from Git in one object. Tests that only exercise
  * routing inject a stub; production always uses `ServerGit` (real Git).
  */
-export interface GitBinding extends MergeGit, ReconcileGit {
+export interface GitBinding extends GitPhases {
   readonly verifierFor: DeliveryVerifierFor;
   pinDelivery(input: {
     readonly project_id: ProjectId;
@@ -245,6 +254,25 @@ export class ServerGit implements GitBinding {
   }
   async backup(project: CentralProject): Promise<void> {
     await this.central.backupAgentBranches(project, "local");
+  }
+  async repairPin(
+    project: CentralProject,
+    delivery: Delivery,
+    assignment: Assignment,
+  ): Promise<boolean> {
+    if (delivery.subject.kind !== "git_head") return false;
+    const repository = await this.central.ensureCentral(project),
+      candidate = await this.central.git.readRef(
+        repository,
+        `refs/cardigan/candidates/${assignment.id}/${delivery.subject.value}`,
+      );
+    if (candidate !== delivery.subject.value) return false;
+    await this.central.createRef(
+      repository,
+      `refs/cardigan/deliveries/${delivery.id}`,
+      delivery.subject.value,
+    );
+    return true;
   }
   async reconcile(
     project: CentralProject,

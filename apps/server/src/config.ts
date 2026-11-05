@@ -16,13 +16,30 @@ export interface ServerConfig {
   readonly host: string;
   /** `0` asks the OS for a free port (tests). */
   readonly port: number;
+  /** M4.4 phase loops; every value has a default and is overridable. */
+  readonly mergeIntervalMs?: number;
+  readonly cleanupIntervalMs?: number;
+  readonly reconcileIntervalMs?: number;
+  readonly backupIntervalMs?: number;
 }
 
 export interface ServerEnv extends ExecutionEnv {
   readonly CARDIGAN_DATA_DIR?: string | undefined;
   readonly CARDIGAN_MCP_HOST?: string | undefined;
   readonly CARDIGAN_MCP_PORT?: string | undefined;
+  readonly CARDIGAN_MERGE_INTERVAL_MS?: string | undefined;
+  readonly CARDIGAN_CLEANUP_INTERVAL_MS?: string | undefined;
+  readonly CARDIGAN_RECONCILE_INTERVAL_MS?: string | undefined;
+  readonly CARDIGAN_BACKUP_INTERVAL_MS?: string | undefined;
 }
+
+/** Default cadence of the M4.4 phase loops (plan §3.6, §3.7). */
+export const DEFAULT_INTERVALS = {
+  merge: 5_000,
+  cleanup: 60_000,
+  reconcile: 600_000,
+  backup: 600_000,
+} as const;
 
 const nonEmpty = (value: string | undefined): string | undefined =>
   value === undefined || value.trim().length === 0 ? undefined : value.trim();
@@ -42,7 +59,40 @@ export function resolveServerConfig(env: ServerEnv): ServerConfig {
     execution: resolveExecutionConfig({ ...env, CARDIGAN_DATA_DIR: dataDir }),
     host: resolveHost(env.CARDIGAN_MCP_HOST),
     port,
+    mergeIntervalMs: interval(
+      env.CARDIGAN_MERGE_INTERVAL_MS,
+      "CARDIGAN_MERGE_INTERVAL_MS",
+      DEFAULT_INTERVALS.merge,
+    ),
+    cleanupIntervalMs: interval(
+      env.CARDIGAN_CLEANUP_INTERVAL_MS,
+      "CARDIGAN_CLEANUP_INTERVAL_MS",
+      DEFAULT_INTERVALS.cleanup,
+    ),
+    reconcileIntervalMs: interval(
+      env.CARDIGAN_RECONCILE_INTERVAL_MS,
+      "CARDIGAN_RECONCILE_INTERVAL_MS",
+      DEFAULT_INTERVALS.reconcile,
+    ),
+    backupIntervalMs: interval(
+      env.CARDIGAN_BACKUP_INTERVAL_MS,
+      "CARDIGAN_BACKUP_INTERVAL_MS",
+      DEFAULT_INTERVALS.backup,
+    ),
   };
+}
+
+function interval(
+  value: string | undefined,
+  name: string,
+  fallback: number,
+): number {
+  const text = nonEmpty(value);
+  if (text === undefined) return fallback;
+  const parsed = Number(text);
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 2_147_483_647)
+    throw new Error(`${name} must be a positive integer of milliseconds`);
+  return parsed;
 }
 
 /**

@@ -154,12 +154,25 @@ export function attentionCommand(args: readonly string[], io: CliIo): number {
             ["lost", "unknown"].includes(candidate.runtime_state),
         ),
     );
-    if (escalated.length === 0 && lost.length === 0) {
-      io.stdout("没有需要关注的项：没有升级通知，也没有失联的 Assignment。");
+    // M4.4: reconciliation findings and a diverged registered source.
+    const findings = store.listReconcileFindings(project_id, {
+      openOnly: true,
+    });
+    if (escalated.length === 0 && lost.length === 0 && findings.length === 0) {
+      io.stdout(
+        "没有需要关注的项：没有升级通知，没有失联的 Assignment，也没有对账发现。",
+      );
       return EXIT.ok;
     }
     const now = new Date().toISOString();
     const lines: string[] = [];
+    if (findings.length > 0) {
+      lines.push(`对账发现（${findings.length}，只报告，不会自动删除）`);
+      for (const finding of findings)
+        lines.push(
+          `  ${finding.kind.padEnd(22)} first=${finding.first_seen_at} last=${finding.last_seen_at} age=${ageMinutes(finding.first_seen_at, now)}m ${finding.detail}${finding.path === undefined ? "" : `  ${finding.path}`}${finding.delivery_id === undefined ? "" : `  ${finding.delivery_id}`}`,
+        );
+    }
     if (escalated.length > 0) {
       lines.push(`升级通知（${escalated.length}）`);
       for (const note of escalated)

@@ -33,6 +33,11 @@ import {
 } from "./inbox.js";
 import { type AppliedMigration, migrate } from "./migrate.js";
 import {
+  listFindings,
+  type ReconcileFindingInput,
+  recordFindings,
+} from "./reconcile.js";
+import {
   createReadRepositories,
   createRepositories,
   type ReadRepositories,
@@ -564,6 +569,21 @@ export class Store {
 
   listNotifications(query: NotificationQuery) {
     return listNotifications(this.#db, query);
+  }
+
+  /** M4.4: upsert one reconciliation pass and resolve what disappeared. */
+  recordReconcileFindings(
+    project_id: ProjectId,
+    findings: readonly ReconcileFindingInput[],
+  ) {
+    return recordFindings(this.#db, project_id, findings, this.#clock.now());
+  }
+
+  listReconcileFindings(
+    project_id: ProjectId,
+    options: { readonly openOnly?: boolean } = {},
+  ) {
+    return listFindings(this.#db, project_id, options);
   }
 
   /** Pending and belled notifications grouped by recipient (§3.2). */

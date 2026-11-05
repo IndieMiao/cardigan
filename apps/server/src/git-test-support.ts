@@ -26,6 +26,7 @@ export function stubGit(
     merge: async (): Promise<MergeOutcome> => ({ status: "stale" }),
     backup: async () => undefined,
     reconcile: async () => [],
+    repairPin: async () => false,
     removeWorktree: async () => {
       throw new Error("stub Git cannot remove a worktree");
     },
