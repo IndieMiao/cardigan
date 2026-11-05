@@ -9,6 +9,7 @@ import type {
   GitTreeMerge,
 } from "@cardigan/domain";
 import { gitEnvironment, gitSafetyArguments } from "./hardening.js";
+import { type GitTimeoutOptions, withGitTimeout } from "./timeouts.js";
 
 const exec = promisify(execFile);
 const exists = async (path: string) => {
@@ -24,7 +25,7 @@ const within = (root: string, path: string) =>
   path === root || path.startsWith(root + sep);
 const fullSha = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u;
 const conflictRecord = /^[0-7]{6} [a-f0-9]+ [1-3]\t/u;
-export interface CentralGitOptions {
+export interface CentralGitOptions extends GitTimeoutOptions {
   dataDir: string;
   centralRoot?: string;
   agentRoot?: string;
@@ -75,12 +76,14 @@ export class CentralGitTransport implements GitCentralPort {
     const command = [...gitSafetyArguments, "-C", repository, ...args];
     this.options.onCommand?.(repository, command);
     try {
-      const r = await exec("git", command, {
-        env: { ...gitEnvironment(), ...extraEnv },
-        timeout: 30000,
-        killSignal: "SIGKILL",
-        maxBuffer: 4 * 1024 * 1024,
-      });
+      const r = await withGitTimeout(args[0], this.options, (timeout) =>
+        exec("git", command, {
+          env: { ...gitEnvironment(), ...extraEnv },
+          timeout,
+          killSignal: "SIGKILL",
+          maxBuffer: 4 * 1024 * 1024,
+        }),
+      );
       return { code: 0, stdout: r.stdout.trimEnd(), stderr: r.stderr };
     } catch (error) {
       const e = error as {
@@ -200,6 +203,33 @@ export class CentralGitTransport implements GitCentralPort {
       throw new Error(
         "Central repository source changed; explicit rebuild required",
       );
+  }
+  /** Host pushes only baseline snapshots and pinned deliveries, never Agent branches. */
+  async pushBaseline(repository: string, target: string, receivePack: string) {
+    const local = await this.source(target);
+    if (!receivePack || !(await this.agentSource(target, local)))
+      throw new Error(
+        "Baseline push requires an Agent repository and receive-pack entry",
+      );
+    if (
+      (await this.checked(repository, [
+        "rev-parse",
+        "--is-bare-repository",
+      ])) !== "true"
+    )
+      throw new Error(
+        "Baseline push requires a private bare central repository",
+      );
+    await this.checked(repository, [
+      "push",
+      "--atomic",
+      "--no-verify",
+      `--receive-pack=${receivePack}`,
+      "--",
+      target,
+      "+refs/heads/*:refs/remotes/origin/*",
+      "+refs/cardigan/deliveries/*:refs/cardigan/deliveries/*",
+    ]);
   }
   async fetchRefs(
     repository: string,

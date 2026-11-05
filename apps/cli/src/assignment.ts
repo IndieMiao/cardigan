@@ -520,8 +520,11 @@ export async function startAssignmentCommand(
   const transport =
     execution.mode === "local"
       ? new LocalGitTransport()
-      : new AgentGitTransport(execution, project_id, assignment_id, (args) =>
-          agentCapture(runtime, "git", args),
+      : new AgentGitTransport(
+          execution,
+          project_id,
+          assignment_id,
+          (args, timeout) => agentCapture(runtime, "git", args, timeout),
         );
   const central = new CentralRepositoryService(
     new CentralGitTransport({
@@ -623,11 +626,15 @@ async function agentCapture(
   runtime: LaunchRuntime,
   command: "git" | "claude" | "codex" | "pi",
   args: readonly string[],
+  timeoutMs?: number,
 ) {
   if (!runtime.captureAgent)
     throw new CliError("agent-ssh 启动需要 Agent 执行入口", EXIT.failure);
-  const result = await runtime.captureAgent(command, args);
+  const result = await runtime.captureAgent(command, args, timeoutMs);
   if (!result.ok)
-    throw new CliError(`Agent 命令失败：${result.error.code}`, EXIT.failure);
+    throw Object.assign(
+      new CliError(`Agent 命令失败：${result.error.code}`, EXIT.failure),
+      { code: result.error.code },
+    );
   return result.value;
 }

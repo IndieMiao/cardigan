@@ -13,7 +13,7 @@ import type {
 } from "@cardigan/domain";
 import { registerAgentMachine } from "./agent-ssh.js";
 
-export { agentUploadPack } from "./agent-ssh.js";
+export { agentReceivePack, agentUploadPack } from "./agent-ssh.js";
 
 import { fail, type HcClient, processClient, result } from "./client.js";
 import {
@@ -272,6 +272,7 @@ export class HerdrRuntime implements Runtime {
   captureAgent(
     command: "git" | "claude" | "codex" | "pi",
     args: readonly string[],
+    timeoutMs?: number,
   ) {
     return result(async () => {
       if (
@@ -284,14 +285,17 @@ export class HerdrRuntime implements Runtime {
         );
       await this.live();
       // hc exec emits program stdout and propagates its exit status, unlike JSON control calls.
-      return this.client.exec([
+      const input = [
         "exec",
         "--on",
         this.execution.machine,
         "--",
         command,
         ...args,
-      ]);
+      ];
+      return timeoutMs === undefined
+        ? this.client.exec(input)
+        : this.client.exec(input, timeoutMs);
     });
   }
   async *events(

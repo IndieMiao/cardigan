@@ -19,7 +19,7 @@ import { join } from "node:path";
 import { CentralRepositoryService } from "@cardigan/git-service";
 import { CentralGitTransport } from "@cardigan/git-transport";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
-import { afterEach, beforeEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { ServerGit } from "./git.js";
 import { type M4Fixture, m4Fixture, m4Scenario } from "./m4-fixtures.js";
 
@@ -78,6 +78,7 @@ beforeEach(() => {
   });
 });
 afterEach(() => {
+  vi.unstubAllEnvs();
   f.close();
   rmSync(root, { recursive: true, force: true });
 });
@@ -186,12 +187,15 @@ test("worktree Git in agent-ssh mode runs through the Agent entry", async () => 
   git(repository, "worktree", "add", "-q", worktree, branch);
 
   const calls: string[][] = [];
+  const timeouts: (number | undefined)[] = [];
+  vi.stubEnv("CARDIGAN_GIT_QUERY_TIMEOUT_MS", "12345");
   const gitService = new ServerGit({
     store: f.store,
     dataDir,
     execution,
-    captureAgent: async (command, args) => {
+    captureAgent: async (command, args, timeout) => {
       calls.push([command, ...args]);
+      timeouts.push(timeout);
       try {
         return {
           ok: true,
@@ -225,6 +229,7 @@ test("worktree Git in agent-ssh mode runs through the Agent entry", async () => 
   const flatten = calls.map((call) => call.join(" "));
   expect(flatten.some((call) => call.includes(worktree))).toBe(true);
   expect(flatten.every((call) => call.startsWith("git "))).toBe(true);
+  expect(timeouts.every((timeout) => timeout === 12345)).toBe(true);
 });
 
 test("a project registered after startup is picked up without a restart", async () => {

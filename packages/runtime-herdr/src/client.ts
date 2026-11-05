@@ -57,7 +57,7 @@ function hcError(stderr: string): RuntimeFailure {
   return new RuntimeFailure(code, `hc refused the operation (${kind})`);
 }
 export interface HcClient {
-  exec(args: readonly string[]): Promise<string>;
+  exec(args: readonly string[], timeoutMs?: number): Promise<string>;
   lines(args: readonly string[], signal?: AbortSignal): AsyncIterable<string>;
   available(): Promise<boolean>;
 }
@@ -75,14 +75,14 @@ export function processClient(
         return false;
       }
     },
-    exec: (args) =>
+    exec: (args, commandTimeoutMs = timeoutMs) =>
       new Promise((resolve, reject) => {
         execFile(
           binary,
           [...args],
           {
             env,
-            timeout: timeoutMs,
+            timeout: commandTimeoutMs,
             killSignal: "SIGKILL",
             maxBuffer: 1024 * 1024,
           },

@@ -118,6 +118,7 @@ describe.skipIf(process.platform !== "linux" || process.getgid?.() === 0)(
       };
     });
     afterEach(async () => {
+      vi.unstubAllEnvs();
       store.close();
       await rm(root, { recursive: true, force: true });
     });
@@ -193,6 +194,23 @@ describe.skipIf(process.platform !== "linux" || process.getgid?.() === 0)(
       }));
     test("start command wires Agent Git, versions and shared files; stop revokes credentials and keeps the worktree", async () => {
       seed("write");
+      for (const name of ["key", "known"])
+        await writeFile(join(root, name), "fixture-only", { mode: 0o600 });
+      const bin = join(root, "bin");
+      await mkdir(bin);
+      await writeFile(
+        join(bin, "ssh"),
+        `#!/usr/bin/env node
+const {spawnSync} = require('node:child_process');
+const args = process.argv.slice(2), at = args.indexOf('--');
+if (args[at + 1] !== 'agent@localhost') process.exit(99);
+const child = spawnSync('sh', ['-c', args.slice(at + 2).join(' ')], {cwd: ${JSON.stringify(agentRoot)}, stdio:'inherit'});
+process.exit(child.status ?? 98);
+`,
+        { mode: 0o700 },
+      );
+      vi.stubEnv("PATH", `${bin}:${process.env.PATH}`);
+      vi.stubEnv("CARDIGAN_GIT_QUERY_TIMEOUT_MS", "12345");
       await exec("git", ["init", "-b", "main", source]);
       await writeFile(join(source, "file"), "fixture");
       await exec("git", ["-C", source, "add", "file"]);
@@ -240,6 +258,11 @@ describe.skipIf(process.platform !== "linux" || process.getgid?.() === 0)(
         command: join(runDir, "launch.sh"),
       });
       expect(io.captureCommand).not.toHaveBeenCalled();
+      const gitCalls = vi
+        .mocked(runtime.captureAgent)
+        .mock.calls.filter(([command]) => command === "git");
+      expect(gitCalls.length).toBeGreaterThan(0);
+      expect(gitCalls.every((call) => call[2] === 12345)).toBe(true);
       const token = (await readFile(join(runDir, "token"), "utf8")).trim();
       expect(JSON.stringify(vi.mocked(io.stdout).mock.calls)).not.toContain(
         token,
