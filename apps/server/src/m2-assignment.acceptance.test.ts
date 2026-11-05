@@ -21,6 +21,7 @@ import { join } from "node:path";
 import { agentNameFor, main as cli } from "@cardigan/cli";
 import { Store } from "@cardigan/store";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { HcCore } from "../test-support/hc.js";
 import { type CardiganServer, startCardiganServer } from "./server.js";
 
 const HC_VERSION = "0.1.18";
@@ -51,7 +52,7 @@ let server: CardiganServer;
 let output: string[] = [];
 let errors: string[] = [];
 let socketPath: string;
-const started: Array<{ project: string; assignment: string }> = [];
+let core: HcCore;
 
 /** Run the CLI in-process so failures surface as thrown errors with stack. */
 async function cardigan(
@@ -225,6 +226,7 @@ describe.skipIf(!available)("assignment start end to end", () => {
     dataDir = join(root, "data");
     runtimeDir = join(root, "run");
     socketPath = join(runtimeDir, "cardigan", `${SESSION}.sock`);
+    core = new HcCore(SESSION, socketPath, {});
     hostEnv = {
       CARDIGAN_DATA_DIR: dataDir,
       CARDIGAN_CONFIG_DIR: join(root, "config"),
@@ -299,32 +301,22 @@ setInterval(() => {}, 1000);
   });
 
   afterAll(async () => {
-    for (const entry of started) {
-      await cardigan([
-        "assignment",
-        "stop",
-        entry.assignment,
-        "--project",
-        entry.project,
-      ]);
-    }
-    for (const socket of [
-      socketPath,
-      `/run/user/${process.getuid?.() ?? 1000}/cardigan/${SESSION}.sock`,
-    ]) {
-      try {
-        execFileSync("hc", ["server", "stop"], {
-          env: { ...process.env, HC_SESSION: SESSION, HC_SOCKET: socket },
-          stdio: "ignore",
-        });
-      } catch {
-        // Core already gone.
-      }
+    // The core goes first; its terminals die with it. Everything below is
+    // best effort and isolated, so one failure cannot leak the core.
+    await core.stop();
+    // No `assignment stop` here: the core already ended every terminal, and an
+    // hc command would start a fresh core. Each step stands alone instead.
+    try {
+      await server?.close();
+    } catch {
+      // Continue with the rest.
     }
     process.env = savedEnv;
-    await server?.close();
+    // One last check in case a cleanup step woke a core again.
+    await core.stop();
+    // Only after the core is gone: its state lives under `root`.
     rmSync(root, { recursive: true, force: true });
-  });
+  }, 120_000);
 
   test("a coder Assignment starts, the Run advances and the Agent reads its task", async () => {
     const repo = sourceRepo("p-one");
@@ -354,7 +346,7 @@ setInterval(() => {}, 1000);
       server.url,
     ]);
     expect(result.code, result.err).toBe(0);
-    started.push({ project: "p-one", assignment: "A-1" });
+    core.remember();
     expect(result.out).toContain("已启动 A-1");
 
     const store = Store.open({ dataDir });
@@ -497,7 +489,7 @@ setInterval(() => {}, 1000);
       server.url,
     ]);
     expect(result.code, result.err).toBe(0);
-    started.push({ project: "p-two", assignment: "A-1" });
+    core.remember();
 
     const store2 = Store.open({ dataDir });
     try {
@@ -563,12 +555,6 @@ setInterval(() => {}, 1000);
       "p-one",
     ]);
     expect(stopped.code, stopped.err).toBe(0);
-    started.splice(
-      started.findIndex(
-        (entry) => entry.project === "p-one" && entry.assignment === "A-1",
-      ),
-      1,
-    );
 
     const reopened = Store.open({ dataDir });
     try {

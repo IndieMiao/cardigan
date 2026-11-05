@@ -23,6 +23,7 @@ import { parseLaunchConfig } from "@cardigan/roles";
 import { HerdrRuntime } from "@cardigan/runtime-herdr";
 import { Store } from "@cardigan/store";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { HcCore } from "../test-support/hc.js";
 import { routeProjectEvents } from "./dispatch-inbox.js";
 import { stubGit } from "./git-test-support.js";
 import { startQueuedRun } from "./host-start.js";
@@ -60,6 +61,7 @@ let output: string[] = [];
 let errors: string[] = [];
 let savedEnv: NodeJS.ProcessEnv;
 let hostEnv: Record<string, string> = {};
+let core: HcCore;
 
 const launch = parseLaunchConfig({
   providers: {
@@ -273,6 +275,7 @@ describe.skipIf(!available)("M3.5 router and dispatcher end to end", () => {
     dataDir = join(root, "data");
     runtimeDir = join(root, "run");
     socketPath = join(runtimeDir, "cardigan", `${SESSION}.sock`);
+    core = new HcCore(SESSION, socketPath, hostEnv);
     hostEnv = {
       CARDIGAN_DATA_DIR: dataDir,
       CARDIGAN_CONFIG_DIR: join(root, "config"),
@@ -393,6 +396,9 @@ describe.skipIf(!available)("M3.5 router and dispatcher end to end", () => {
     const created = await HerdrRuntime.create({ session: SESSION });
     if (!created.ok) throw new Error(created.error.code);
     const runtime = created.value;
+    // Remember the core while its socket still exists: after a crash the socket
+    // is gone and `hc server stop` can no longer reach it.
+    core.remember();
     server = await startCardiganServer({
       config: { dataDir, host: "127.0.0.1", port: 0 },
       store,
@@ -416,6 +422,8 @@ describe.skipIf(!available)("M3.5 router and dispatcher end to end", () => {
             },
             { project: project as never, assignment, run, bell },
           );
+          // The first launch starts the core; record its PID right away.
+          core.remember();
         },
         onError: (error) => errors.push(String(error)),
       },
@@ -444,30 +452,24 @@ describe.skipIf(!available)("M3.5 router and dispatcher end to end", () => {
   });
 
   afterAll(async () => {
-    await cardigan([
-      "assignment",
-      "stop",
-      "A-1",
-      "--project",
-      project_id,
-    ]).catch(() => undefined);
-    for (const socket of [
-      socketPath,
-      `/run/user/${process.getuid?.() ?? 1000}/cardigan/${SESSION}.sock`,
+    // The core goes first: its terminals and Agents die with it, and the
+    // rest of the cleanup cannot leak it even if one step hangs or throws.
+    await core.stop();
+    // Every remaining step stands alone: one failure must not skip the next.
+    for (const step of [
+      () => cardigan(["assignment", "stop", "A-1", "--project", project_id]),
+      () => server?.close(),
+      async () => store?.close(),
     ])
       try {
-        execFileSync("hc", ["server", "stop"], {
-          env: { ...process.env, HC_SESSION: SESSION, HC_SOCKET: socket },
-          stdio: "ignore",
-        });
+        await step();
       } catch {
-        // Core already gone.
+        // Best effort; the next step still runs.
       }
-    await server?.close();
-    store?.close();
     process.env = savedEnv;
+    // Only after the core is gone: its state directory lives under `root`.
     rmSync(root, { recursive: true, force: true });
-  });
+  }, 120_000);
 
   const notes = () => store.listNotifications({ project_id });
   const runsFor = (assignment: string) =>
