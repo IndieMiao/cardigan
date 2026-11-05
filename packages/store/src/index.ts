@@ -25,6 +25,13 @@ export {
   migrate,
 } from "./migrate.js";
 export {
+  findingKey,
+  listFindings,
+  type ReconcileFindingInput,
+  type ReconcileFindingRecord,
+  recordFindings,
+} from "./reconcile.js";
+export {
   createReadRepositories,
   createRepositories,
   jsonRepository,
