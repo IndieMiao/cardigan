@@ -362,6 +362,8 @@ export function needsYou(state: CommandState, now: string) {
       options: decision.options,
       recommended: decision.recommended,
       trigger: decision.trigger ?? null,
+      category: decision.category ?? "general",
+      assignment_id: decision.assignment_id ?? null,
       opened_at: opened ?? null,
       waited_ms: waitedMs(opened, now) ?? null,
     };
@@ -400,6 +402,32 @@ export function needsYou(state: CommandState, now: string) {
     return (right.waited_ms ?? 0) - (left.waited_ms ?? 0);
   };
   return {
+    incidents: state.assignments
+      .filter(
+        (a) =>
+          a.status === "active" &&
+          ["unknown", "lost"].includes(a.runtime_state),
+      )
+      .map((a) => ({
+        id: a.id,
+        role_id: a.role_id,
+        runtime_state: a.runtime_state,
+        waited_ms:
+          waitedMs(
+            state.events.findLast(
+              (e) =>
+                ["runtime_lost", "runtime_disconnected"].includes(e.type) &&
+                typeof e.payload === "object" &&
+                e.payload !== null &&
+                "assignment_id" in e.payload &&
+                e.payload.assignment_id === a.id,
+            )?.created_at,
+            now,
+          ) ?? null,
+        card_id:
+          state.work_items.find((w) => w.id === a.work_item_id)?.card_id ??
+          null,
+      })),
     // Batched, non-urgent decisions come after the blocking ones (§8.2).
     decisions: [...decisions].sort(blockingFirst),
     human_actions: [...human_actions].sort(

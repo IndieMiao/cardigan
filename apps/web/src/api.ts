@@ -269,7 +269,50 @@ export class ApiError extends Error {
   }
 }
 
+export interface NeedsDecision extends DecisionView {
+  readonly card_id: string | null;
+  readonly affected_cards: readonly string[];
+  readonly why: string;
+  readonly waited_ms: number | null;
+  readonly trigger: string | null;
+  readonly category: string;
+  readonly assignment_id: string | null;
+}
+export interface NeedsAction
+  extends Pick<HumanActionView, "id" | "instructions" | "expected_return"> {
+  readonly card_id: string | null;
+  readonly why: string;
+  readonly waited_ms: number | null;
+  readonly due: string | null;
+  readonly blocked_work_items: readonly string[];
+}
+export interface NeedsPage {
+  readonly decisions: readonly NeedsDecision[];
+  readonly human_actions: readonly NeedsAction[];
+  readonly incidents: readonly {
+    readonly id: string;
+    readonly role_id: string;
+    readonly runtime_state: string;
+    readonly card_id: string | null;
+    readonly waited_ms: number | null;
+  }[];
+}
+
 export interface CardiganClient {
+  needsYou(projectId: string): Promise<NeedsPage>;
+  recordDecision(
+    projectId: string,
+    id: string,
+    option: string,
+    quote: string,
+  ): Promise<void>;
+  decisionComment(
+    projectId: string,
+    id: string,
+    action: "request_information" | "explain",
+    body: string,
+  ): Promise<void>;
+  completeAction(projectId: string, id: string, text: string): Promise<void>;
   session(): Promise<SessionInfo>;
   login(password: string): Promise<void>;
   logout(): Promise<void>;
@@ -354,6 +397,56 @@ export class HttpCardiganClient implements CardiganClient {
     return this.request<AttachmentReceipt>(
       `/api/projects/${encodeURIComponent(projectId)}/cards/${encodeURIComponent(cardId)}/attachments`,
       { method: "POST", body: JSON.stringify(input) },
+    );
+  }
+
+  needsYou(projectId: string): Promise<NeedsPage> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/needs-you`,
+    );
+  }
+  async recordDecision(
+    projectId: string,
+    id: string,
+    option: string,
+    quote: string,
+  ): Promise<void> {
+    await this.write(projectId, `decisions/${encodeURIComponent(id)}/resolve`, {
+      option,
+      raw_quote: quote,
+    });
+  }
+  async decisionComment(
+    projectId: string,
+    id: string,
+    action: "request_information" | "explain",
+    body: string,
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      `decisions/${encodeURIComponent(id)}/comments`,
+      { action, ...(body.trim() ? { body } : {}) },
+    );
+  }
+  async completeAction(
+    projectId: string,
+    id: string,
+    text: string,
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      `human-actions/${encodeURIComponent(id)}/complete`,
+      { text },
+    );
+  }
+  private write(
+    projectId: string,
+    rest: string,
+    body: unknown,
+  ): Promise<unknown> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/${rest}`,
+      { method: "POST", body: JSON.stringify(body) },
     );
   }
 

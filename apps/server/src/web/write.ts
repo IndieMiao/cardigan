@@ -174,6 +174,7 @@ export async function serveWrite(
         : ["complete"];
   if (!supported.includes(operation ?? "")) return false;
   if (c.req.method !== "POST") methodNotAllowed(["POST"]);
+  c.authorize();
   const body = await readJsonBody(
     c.req,
     operation === "attachments" ? MAX_MCP_BODY_BYTES : undefined,

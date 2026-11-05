@@ -11,6 +11,7 @@ test("board, list and card routes round-trip", () => {
   for (const route of [
     { kind: "board", projectId: "p-fictional" },
     { kind: "list", projectId: "p-fictional" },
+    { kind: "needs-you", projectId: "p-fictional" },
     { kind: "card", projectId: "p-fictional", cardId: "C-1" },
   ] as const) {
     expect(parseRoute(routeHash(route))).toEqual(route);
