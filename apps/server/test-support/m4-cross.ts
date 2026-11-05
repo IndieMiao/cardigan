@@ -1,9 +1,17 @@
 // Independent M4.T2 fixture: public commands, CLI, MCP and real Git only.
 import { execFileSync } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  type CliIo,
   createProcessIo,
   main,
   runCommand,
@@ -19,9 +27,12 @@ import {
   createCard,
   createWorkItem,
   type Delivery,
+  dispatchRun,
   mergePlan,
+  queueRun,
   type Result,
   type Runtime,
+  type RuntimeRef,
   releaseAssignment,
   toolNames,
   updateCard,
@@ -35,18 +46,22 @@ import {
   CentralGitTransport,
   LocalGitTransport,
 } from "@cardigan/git-transport";
-import { runDirectory } from "@cardigan/host";
+import { launchRun, runDirectory } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
 import {
   corePromptFor,
   parseLaunchConfig,
   TOKEN_FILE_NAME,
 } from "@cardigan/roles";
+import { type ExecutionConfig, HerdrRuntime } from "@cardigan/runtime-herdr";
 import { Store } from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { expect } from "vitest";
+import { expect, vi } from "vitest";
+import { AgentGitTransport } from "../../cli/src/agent-git.js";
+import { ServerGit } from "../src/git.js";
 import { type CardiganServer, startCardiganServer } from "../src/index.js";
+import { HcCore } from "./hc.js";
 
 export const git = (cwd: string, ...args: string[]) =>
   execFileSync(
@@ -69,44 +84,89 @@ export function value<T>(r: Result<T>): T {
 export type Producer = { owner: Assignment; verifier: Assignment };
 const ok = <T>(v: T) => ({ ok: true as const, value: v });
 
-export async function m4Cross() {
+export async function m4Cross(options: { hc?: boolean; agent?: boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), "cardigan-m4-cross-"));
   const source = join(root, "source"),
     dataDir = join(root, "data"),
     project_id = "cross";
   const project = { project_id, source_repo: source, base_branch: "main" };
+  const bin = join(root, "bin");
+  const execution: ExecutionConfig = options.agent
+    ? {
+        mode: "agent-ssh",
+        dataDir,
+        agentRoot: join(root, "shared"),
+        gid: process.getgid?.() ?? 1000,
+        machine: "cardigan-agent",
+        identityFile: join(root, "key"),
+        knownHostsFile: join(root, "known"),
+      }
+    : { mode: "local", dataDir };
+  const agentRoot =
+    execution.mode === "agent-ssh"
+      ? execution.agentRoot
+      : join(dataDir, "agent");
+  let core: HcCore | undefined, realRuntime: HerdrRuntime | undefined;
+  const bells: { ref: RuntimeRef; text: string }[] = [],
+    released: RuntimeRef[] = [],
+    errors: unknown[] = [];
+  const trace = join(root, "git-trace");
+  const agentRun = async (args: readonly string[], timeout = 30000) =>
+    execFileSync(
+      "git",
+      [
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        ...args,
+      ],
+      {
+        encoding: "utf8",
+        timeout,
+        env: { ...process.env, CARDIGAN_TEST_SIDE: "agent" },
+      },
+    ).trim();
   let server: CardiganServer | undefined,
     store: Store | undefined,
     sequence = 0;
   const clients = new Map<string, { token: string; client: Client }>();
   const tokens = new Map<string, string>();
-  const runtime: Runtime = {
-    async provision(a, _role, _machine, launch) {
+  const runtime: Runtime & Pick<HerdrRuntime, "events" | "captureAgent"> = {
+    async provision(a, role, machine, launch) {
       const dir = runDirectory({
         dataDir,
         project_id,
         assignment_id: a.id,
+        execution,
       }).runDir;
       tokens.set(
         a.id,
         (await readFile(join(dir, TOKEN_FILE_NAME), "utf8")).trim(),
       );
-      const ref = {
+      if (realRuntime) return realRuntime.provision(a, role, machine, launch);
+      return ok({
         machine_id: "local",
-        runtime_machine: "local",
+        runtime_machine:
+          execution.mode === "agent-ssh" ? execution.machine : "local",
         terminal_ref: `fixture-${a.id}`,
         agent_name: launch.agent_name,
-      };
-      return ok(ref);
+      });
     },
-    async wake() {
-      return ok({ sent: true });
+    async wake(ref, text, opts) {
+      bells.push({ ref, text });
+      return realRuntime
+        ? realRuntime.wake(ref, text, opts)
+        : ok({ sent: true });
     },
-    async status() {
-      return ok({ process: "alive", agent: "idle", observed_seq: 1 });
+    async status(ref) {
+      return realRuntime
+        ? realRuntime.status(ref)
+        : ok({ process: "alive", agent: "idle", observed_seq: 1 });
     },
-    async release() {
-      return ok(undefined);
+    async release(ref, opts) {
+      released.push(ref);
+      return realRuntime ? realRuntime.release(ref, opts) : ok(undefined);
     },
     async interrupt() {
       return ok(undefined);
@@ -114,8 +174,30 @@ export async function m4Cross() {
     async human_entry() {
       return ok("fixture");
     },
-    async resume_or_replace(ref) {
-      return ok(ref);
+    async resume_or_replace(ref, launch) {
+      return realRuntime ? realRuntime.resume_or_replace(ref, launch) : ok(ref);
+    },
+    async *events(ref, signal) {
+      if (realRuntime) {
+        yield* realRuntime.events(ref, signal);
+        return;
+      }
+      if (!signal?.aborted)
+        await new Promise<void>((resolve) =>
+          signal?.addEventListener("abort", () => resolve(), { once: true }),
+        );
+    },
+    async captureAgent(command, args, timeout) {
+      try {
+        return ok(
+          command === "git" ? await agentRun(args, timeout) : "pi fixture-1",
+        );
+      } catch (e) {
+        return {
+          ok: false,
+          error: { code: "runtime_unavailable", message: String(e) },
+        };
+      }
     },
   };
   async function closeClients() {
@@ -123,10 +205,19 @@ export async function m4Cross() {
     clients.clear();
   }
   async function close() {
-    await server?.close();
-    await closeClients();
-    store?.close();
-    await rm(root, { recursive: true, force: true });
+    try {
+      await server?.close();
+      await closeClients();
+    } finally {
+      try {
+        await core?.stop();
+        core?.assertStopped();
+      } finally {
+        store?.close();
+        vi.unstubAllEnvs();
+      }
+      await rm(root, { recursive: true, force: true });
+    }
   }
   const db = () => {
     if (!store) throw new Error("No store");
@@ -134,10 +225,23 @@ export async function m4Cross() {
   };
   let output = "",
     stderr = "";
-  const io = {
+  const io: CliIo = {
     ...createProcessIo(),
     cwd: root,
-    env: { CARDIGAN_DATA_DIR: dataDir, CARDIGAN_PROJECT: project_id },
+    env: {
+      CARDIGAN_DATA_DIR: dataDir,
+      CARDIGAN_PROJECT: project_id,
+      ...(execution.mode === "agent-ssh"
+        ? {
+            CARDIGAN_RUNTIME_MODE: execution.mode,
+            CARDIGAN_AGENT_ROOT: agentRoot,
+            CARDIGAN_AGENT_GID: String(execution.gid),
+            CARDIGAN_AGENT_MACHINE: execution.machine,
+            CARDIGAN_AGENT_IDENTITY: execution.identityFile,
+            CARDIGAN_AGENT_KNOWN_HOSTS: execution.knownHostsFile,
+          }
+        : {}),
+    },
     stdout: (s: string) => {
       output += s;
     },
@@ -179,11 +283,30 @@ export async function m4Cross() {
   const local = new LocalGitTransport();
   const worktrees = new GitWorktreeService(local, central, { dataDir });
   const center = central.repositoryPath(project),
-    repository = join(dataDir, "agent", "repos", project_id),
-    trees = join(dataDir, "agent", "worktrees", project_id);
+    repository = join(agentRoot, "repos", project_id),
+    trees = join(agentRoot, "worktrees", project_id);
+  const prepare = async (request: EnsureWorktreeInput) => {
+    if (execution.mode === "local") return worktrees.ensureWorktree(request);
+    const transport = new AgentGitTransport(
+      execution,
+      project_id,
+      request.assignment.id,
+      agentRun,
+    );
+    return new GitWorktreeService(transport, central, {
+      dataDir,
+      repositoriesRoot: join(agentRoot, "repos"),
+      worktreesRoot: join(agentRoot, "worktrees"),
+    }).ensureWorktree(request);
+  };
   const launch = {
     config: parseLaunchConfig({
-      profiles: { fixture: { harness: "pi", model: "fixture-model" } },
+      providers: {
+        fixture: { harness: "pi", env: { PATH: `${bin}:${process.env.PATH}` } },
+      },
+      profiles: {
+        fixture: { harness: "pi", provider: "fixture", model: "fixture-model" },
+      },
     }),
     secrets: {},
   };
@@ -197,13 +320,75 @@ export async function m4Cross() {
     if (!result) throw new Error("No worktree");
     return result;
   };
-  async function open() {
+  let port = 0;
+  let binding: ServerGit;
+  async function open(live = false) {
+    binding = new ServerGit({
+      store: db(),
+      dataDir,
+      execution,
+      ...(options.agent ? { captureAgent: runtime.captureAgent } : {}),
+    });
     server = await startCardiganServer({
       store: db(),
-      config: { dataDir, host: "localhost", port: 0 },
+      config: { dataDir, host: "localhost", port, execution },
+      git: binding,
       log: () => {},
       warn: () => {},
+      ...(live
+        ? {
+            dispatcher: {
+              runtime,
+              intervalMs: 10,
+              mergeIntervalMs: 20,
+              cleanupIntervalMs: 30,
+              reconcileIntervalMs: 50,
+              backupIntervalMs: 50,
+              onError: (error: unknown) => errors.push(error),
+              snapshot: async () => ({
+                model: "fixture-model",
+                agent_cli_version: "fixture-1",
+              }),
+              startRun: async ({
+                assignment,
+                run,
+                bell,
+              }: {
+                assignment: Assignment;
+                run: import("@cardigan/domain").Run;
+                bell: string;
+              }) => {
+                if (!server) throw new Error("No server");
+                await launchRun(
+                  {
+                    store: db(),
+                    runtime,
+                    launch,
+                    dataDir,
+                    execution,
+                    mcpUrl: server.url,
+                  },
+                  {
+                    project: project_id,
+                    assignment_id: assignment.id,
+                    run,
+                    actor: { kind: "system", project_id },
+                    first_prompt: bell,
+                  },
+                );
+              },
+            },
+          }
+        : {}),
     });
+    port = server.port;
+  }
+  async function restart(live = true) {
+    await server?.close();
+    await closeClients();
+    db().close();
+    store = Store.open({ dataDir });
+    await open(live);
   }
   async function client(a: Assignment) {
     const token = tokens.get(a.id);
@@ -247,28 +432,41 @@ export async function m4Cross() {
     );
     if (!active) {
       if (!server) throw new Error("No server");
-      await startAssignment({
-        store: db(),
-        io,
-        project_id,
-        assignment_id: a.id,
-        runtime,
-        dataDir,
-        launch,
-        mcpUrl: server.url,
-        worktree: async (request) => {
-          const placement = await worktrees.ensureWorktree(
-            request as EnsureWorktreeInput,
-          );
-          return placement
-            ? {
-                path: placement.worktree_path,
-                ...(placement.branch ? { branch: placement.branch } : {}),
-                base_sha: placement.base_sha,
-              }
-            : undefined;
-        },
-      });
+      if (current(a).runtime_ref) {
+        const run = command((s, actor, p) =>
+          queueRun(
+            s,
+            actor,
+            {
+              assignment_id: a.id,
+              model: "fixture-model",
+              agent_cli_version: "fixture-1",
+            },
+            p,
+          ),
+        );
+        command((s, actor, p) => dispatchRun(s, actor, { run_id: run.id }, p));
+      } else
+        await startAssignment({
+          store: db(),
+          io,
+          project_id,
+          assignment_id: a.id,
+          runtime,
+          dataDir,
+          launch,
+          mcpUrl: server.url,
+          worktree: async (request) => {
+            const placement = await prepare(request as EnsureWorktreeInput);
+            return placement
+              ? {
+                  path: placement.worktree_path,
+                  ...(placement.branch ? { branch: placement.branch } : {}),
+                  base_sha: placement.base_sha,
+                }
+              : undefined;
+          },
+        });
     }
     await expect
       .poll(() =>
@@ -285,19 +483,37 @@ export async function m4Cross() {
     const run = state().runs.find(
       (r) => r.assignment_id === a.id && r.status === "running",
     );
-    if (run)
+    if (run) {
+      const card_id = state().work_items.find(
+        (w) => w.id === a.work_item_id,
+      )?.card_id;
+      if (card_id)
+        await call(a, "ack_events", {
+          card_id,
+          up_to_seq: Math.max(
+            0,
+            ...state()
+              .events.filter((e) => e.card_id === card_id)
+              .map((e) => e.seq),
+          ),
+        });
       await call(a, "finish_run", {
         run_id: run.id,
         outcome: "completed",
         summary: "Delivered or reviewed",
       });
+    }
   }
   async function change(a: Assignment, file: string, text: string) {
     await start(a);
     await writeFile(join(path(a), file), text);
-    git(path(a), "add", "--", file);
-    git(path(a), "commit", "-qm", "Fixture delivery");
-    return git(path(a), "rev-parse", "HEAD");
+    const run = (...args: string[]) =>
+      options.agent
+        ? agentRun(["-C", path(a), ...args])
+        : git(path(a), ...args);
+    await run("add", "--", file);
+    await run("commit", "-qm", "Fixture delivery");
+    return run("rev-parse", "HEAD");
   }
   async function deliver(p: Producer, sha: string) {
     await start(p.owner);
@@ -322,6 +538,62 @@ export async function m4Cross() {
     await finish(a);
   }
   try {
+    await mkdir(bin);
+    await writeFile(
+      join(bin, "pi"),
+      "#!/usr/bin/env node\nprocess.stdout.write('fixture ready\\n');process.stdin.resume();setInterval(()=>{},1000);\n",
+      { mode: 0o700 },
+    );
+    if (options.hc) {
+      const session = `m4t2-${process.pid}-${root.slice(-6)}`,
+        socket = join(root, "hc.sock"),
+        env = { ...process.env, HC_SESSION: session, HC_SOCKET: socket };
+      core = new HcCore(session, socket, env);
+      execFileSync("hc", ["server", "start", "--json"], {
+        env,
+        stdio: "pipe",
+        timeout: 10000,
+      });
+      core.remember();
+      const created = await HerdrRuntime.create({
+        session,
+        socketPath: socket,
+        env,
+      });
+      if (!created.ok) throw new Error(created.error.message);
+      realRuntime = created.value;
+    }
+    if (execution.mode === "agent-ssh") {
+      await mkdir(dataDir, { mode: 0o700 });
+      await mkdir(agentRoot, { mode: 0o2750 });
+      await chmod(agentRoot, 0o2750);
+      for (const file of [execution.identityFile, execution.knownHostsFile])
+        await writeFile(file, "fixture-only", { mode: 0o600 });
+      const realGit = execFileSync("which", ["git"], {
+        encoding: "utf8",
+      }).trim();
+      await writeFile(trace, "");
+      await writeFile(
+        join(bin, "git"),
+        `#!/usr/bin/env node
+const {appendFileSync}=require('node:fs'),{spawnSync}=require('node:child_process'), args=process.argv.slice(2);
+appendFileSync(${JSON.stringify(trace)},JSON.stringify({side:process.env.CARDIGAN_TEST_SIDE||'host',cwd:args[args.indexOf('-C')+1],args})+'\\n');
+const child=spawnSync(${JSON.stringify(realGit)},args,{stdio:'inherit'});process.exit(child.status??99);
+`,
+        { mode: 0o700 },
+      );
+      await writeFile(
+        join(bin, "ssh"),
+        `#!/usr/bin/env node
+const {appendFileSync}=require('node:fs'),{spawnSync}=require('node:child_process'), args=process.argv.slice(2), at=args.indexOf('--');
+if(args[at+1]!=='agent@localhost')process.exit(99);
+appendFileSync(${JSON.stringify(trace)},JSON.stringify({side:'agent',cwd:${JSON.stringify(agentRoot)},args})+'\\n');
+const child=spawnSync('sh',['-c',args.slice(at+2).join(' ')],{cwd:${JSON.stringify(agentRoot)},env:{...process.env,CARDIGAN_TEST_SIDE:'agent'},stdio:'inherit'});process.exit(child.status??99);
+`,
+        { mode: 0o700 },
+      );
+      vi.stubEnv("PATH", `${bin}:${process.env.PATH}`);
+    }
     git(root, "init", "-q", "-b", "main", source);
     await writeFile(join(source, "shared.txt"), "base\n");
     git(source, "add", ".");
@@ -445,6 +717,14 @@ export async function m4Cross() {
       transport,
       hostCalls,
       runtime,
+      bells,
+      released,
+      errors,
+      restart,
+      agentRun,
+      agentRoot,
+      trace,
+      binding: () => binding,
       cli,
       state,
       current,
