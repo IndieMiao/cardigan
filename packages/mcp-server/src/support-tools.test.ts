@@ -172,9 +172,9 @@ afterEach(async () => {
   vi.unstubAllEnvs();
 });
 
-test("all planned tools are advertised; concurrent attachment uploads and replays commit once", async () => {
+test("legacy PM tools exclude Ops instructions; concurrent attachment uploads and replays commit once", async () => {
   expect((await office.listTools()).tools.map((t) => t.name).sort()).toEqual(
-    [...toolNames].sort(),
+    toolNames.filter((name) => name !== "issue_instruction").sort(),
   );
   const args = {
     ...upload,

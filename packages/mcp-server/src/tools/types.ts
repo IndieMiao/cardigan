@@ -49,5 +49,12 @@ export function allowedTools(
   identity: Identity,
 ): readonly ToolDefinition[] {
   const allowed = identity.actor.allowed_tools;
-  return tools.filter((tool) => allowed.includes(tool.name));
+  return tools.filter(
+    (tool) =>
+      allowed.includes(tool.name) &&
+      (tool.name !== "issue_instruction" ||
+        (identity.assignment.scope === "standing" &&
+          identity.assignment.role_id === "pm" &&
+          identity.assignment.standing_mode === "ops")),
+  );
 }

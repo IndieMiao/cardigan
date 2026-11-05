@@ -7,6 +7,7 @@ import {
   type CommandState,
   createCard,
   createWorkItem,
+  issueInstruction,
   parseId,
   postComment,
   type Result,
@@ -32,6 +33,10 @@ const subject = z.object({
 const refs = z.array(
   z.discriminatedUnion("kind", [
     z.object({ kind: z.literal("card"), id: id("card") }),
+    z.object({ kind: z.literal("work_item"), id: id("work_item") }),
+    z.object({ kind: z.literal("assignment"), id: id("assignment") }),
+    z.object({ kind: z.literal("run"), id: id("run") }),
+    z.object({ kind: z.literal("review"), id: id("review") }),
     z.object({ kind: z.literal("timeline_entry"), id: entryId }),
     z.object({ kind: z.literal("delivery"), id: id("delivery") }),
     z.object({ kind: z.literal("decision"), id: id("decision") }),
@@ -49,6 +54,11 @@ const viaAuthor = z
     "Invalid author",
   );
 const schemas = {
+  issue_instruction: {
+    card_id: id("card"),
+    work_item_id: id("work_item"),
+    body: text,
+  },
   post_comment: {
     card_id: id("card"),
     body: text,
@@ -199,6 +209,11 @@ export function managementTools(clock?: Clock) {
   }
   return [
     wire("post_comment", "Post a comment and references.", postComment),
+    wire(
+      "issue_instruction",
+      "Instruct an unfinished work item as PM Ops.",
+      issueInstruction,
+    ),
     wire("report_blocker", "Report a work item blocker.", reportBlocker),
     wire("request_decision", "Request a scoped decision.", requestDecision),
     wire(

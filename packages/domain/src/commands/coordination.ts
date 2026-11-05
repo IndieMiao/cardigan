@@ -3,12 +3,14 @@ import type {
   Author,
   Decision,
   HumanAction,
-  Reference,
   TimelineEntry,
   WorkItem,
 } from "../entities.js";
 import type { CardId, DecisionId, HumanActionId, WorkItemId } from "../ids.js";
-import { parseId, parseTimelineEntryId } from "../ids.js";
+import { extractReferences } from "../references.js";
+
+export { extractReferences } from "../references.js";
+
 import { transition } from "../transitions.js";
 import {
   type CommandDraft,
@@ -23,34 +25,48 @@ import {
 import { queueResumedRun, resumeWork } from "./resumption.js";
 import { activeWork } from "./workflow.js";
 
-export function extractReferences(body: string): readonly Reference[] {
-  const refs: Reference[] = [];
-  for (const match of body.matchAll(
-    /(?<![A-Za-z0-9_-])(?:C-[1-9][0-9]*(?:#[1-9][0-9]*)?|[qh]\([1-9][0-9]*\)|D-[1-9][0-9]*)(?![A-Za-z0-9_#])/gu,
-  )) {
-    const token = match[0];
-    if (token.includes("#")) {
-      const parsed = parseTimelineEntryId(token);
-      if (parsed.ok) refs.push({ kind: "timeline_entry", id: parsed.value.id });
-    } else if (token.startsWith("C")) {
-      const p = parseId("card", token);
-      if (p.ok) refs.push({ kind: "card", id: p.value.id });
-    } else if (token.startsWith("D")) {
-      const p = parseId("delivery", token);
-      if (p.ok) refs.push({ kind: "delivery", id: p.value.id });
-    } else if (token.startsWith("q")) {
-      const p = parseId("decision", token);
-      if (p.ok) refs.push({ kind: "decision", id: p.value.id });
-    } else {
-      const p = parseId("human_action", token);
-      if (p.ok) refs.push({ kind: "human_action", id: p.value.id });
-    }
-  }
-  for (const [url] of body.matchAll(
-    /https?:\/\/[A-Za-z0-9.-]+(?::[0-9]+)?\/[^\s<>()]*?(?:\/pull\/[1-9][0-9]*|\/-\/merge_requests\/[1-9][0-9]*)(?:[?#][^\s<>()]*)?/gu,
-  ))
-    refs.push({ kind: "pr", url: url.replace(/[.,;，。；]+$/u, "") });
-  return [...new Map(refs.map((ref) => [JSON.stringify(ref), ref])).values()];
+export function issueInstruction(
+  state: CommandState,
+  actor: Actor,
+  p: { card_id: CardId; work_item_id: WorkItemId; body: string },
+  ports: CommandPorts,
+) {
+  return command(state, actor, "issue_instruction", ports, (d) => {
+    ensure(
+      actor.kind === "human" ||
+        (d.assignment?.scope === "standing" &&
+          d.assignment.role_id === "pm" &&
+          d.assignment.standing_mode === "ops"),
+      "forbidden_tool",
+      "Only the human or standing PM Ops can issue instructions",
+    );
+    const card = d.card(p.card_id),
+      item = d.work(p.work_item_id);
+    ensure(
+      item.card_id === card.id,
+      "validation_failed",
+      "Work item belongs to another card",
+    );
+    ensure(
+      !["done", "cancelled", "awaiting_merge"].includes(card.status) &&
+        !["accepted", "passed", "cancelled"].includes(item.status),
+      "illegal_transition",
+      "Cannot instruct closed work or a card awaiting merge",
+    );
+    text(p.body, "body");
+    d.emit(
+      "instruction_issued",
+      card.id,
+      { work_item_id: item.id },
+      {
+        type: "instruction",
+        body: p.body,
+        work_item_id: item.id,
+        refs: extractReferences(p.body),
+      },
+    );
+    return d.timeline[0];
+  });
 }
 export function postComment(
   state: CommandState,
@@ -361,16 +377,13 @@ export function recordDecision(
   return command(state, actor, "record_decision", ports, (d) => {
     const decision = d.get("decisions", p.decision_id);
     ensure(
-      (actor.kind === "human" &&
-        ["merge_confirmation", "worktree_cleanup"].includes(
-          decision.trigger ?? "",
-        )) ||
+      (actor.kind === "human" && decision.decider === "human") ||
         (actor.kind === "assignment" &&
           actor.role_id === "pm" &&
           d.assignment?.scope === "standing" &&
           actor.allowed_tools.includes("record_decision")),
       "forbidden_tool",
-      "Only PM Office, or the human for merge/cleanup decisions, can record decisions",
+      "Only PM Office or the designated human can record decisions",
     );
     if (decision.card_id) d.card(decision.card_id);
     else d.projectAccess();
