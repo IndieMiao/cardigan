@@ -8,7 +8,7 @@ import type {
 } from "@cardigan/domain";
 import { parseId } from "@cardigan/domain";
 
-import type { CentralRepositoryService } from "./central.js";
+import type { CentralRepositoryService, SourceSync } from "./central.js";
 
 export {
   type CentralOptions,
@@ -21,6 +21,8 @@ export interface WorktreePlacement {
   readonly worktree_path: string;
   readonly branch?: string;
   readonly base_sha: string;
+  /** Present only when a new writable worktree synchronizes its baseline. */
+  readonly source_sync?: SourceSync;
 }
 export interface EnsureWorktreeInput {
   readonly project_id: string;
@@ -125,11 +127,9 @@ export class GitWorktreeService {
         base_sha: a.base_sha ?? existing.head,
       };
     }
-    if (
-      !readonly &&
-      (await this.central.syncFromSource(project)) === "diverged"
-    )
-      throw new Error("Registered source and central baseline diverged");
+    const source_sync = readonly
+      ? undefined
+      : await this.central.syncFromSource(project);
     await this.git.fetch(repository, central);
     const base_sha = await this.git.resolveCommit(
       repository,
@@ -138,7 +138,12 @@ export class GitWorktreeService {
         : `refs/remotes/origin/${card.base_branch}`,
     );
     await this.git.addWorktree(repository, path, base_sha, branch);
-    return { worktree_path: path, ...(branch ? { branch } : {}), base_sha };
+    return {
+      worktree_path: path,
+      ...(branch ? { branch } : {}),
+      base_sha,
+      ...(source_sync ? { source_sync } : {}),
+    };
   }
   isDirty(worktree_path: string): Promise<boolean> {
     return this.git.isDirty(worktree_path);
