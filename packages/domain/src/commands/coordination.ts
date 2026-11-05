@@ -361,13 +361,16 @@ export function recordDecision(
   return command(state, actor, "record_decision", ports, (d) => {
     const decision = d.get("decisions", p.decision_id);
     ensure(
-      (actor.kind === "human" && decision.trigger === "merge_confirmation") ||
+      (actor.kind === "human" &&
+        ["merge_confirmation", "worktree_cleanup"].includes(
+          decision.trigger ?? "",
+        )) ||
         (actor.kind === "assignment" &&
           actor.role_id === "pm" &&
           d.assignment?.scope === "standing" &&
           actor.allowed_tools.includes("record_decision")),
       "forbidden_tool",
-      "Only PM Office, or the human for merge confirmation, can record decisions",
+      "Only PM Office, or the human for merge/cleanup decisions, can record decisions",
     );
     if (decision.card_id) d.card(decision.card_id);
     else d.projectAccess();

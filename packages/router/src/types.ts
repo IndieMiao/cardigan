@@ -73,6 +73,10 @@ export type RuleId =
   | "6.4/run finished without output"
   | "6.4/agent idle without finish_run"
   | "6.4/runtime lost"
+  | "6.4/merge conflicted"
+  | "6.4/card merged"
+  | "6.4/merge failed"
+  | "6.4/reconcile finding"
   // §6.5 mention cases
   | "6.5/single assignment for the role"
   | "6.5/no assignment for the role"
@@ -93,6 +97,8 @@ export interface RoutedNotification {
   readonly seq: number;
   readonly card_id?: CardId | undefined;
   readonly work_item_id?: WorkItemId | undefined;
+  /** M4.4 maps a conflict notification to a fix Run. */
+  readonly run_kind?: Run["kind"];
   /** One short line for the inbox and the merged bell summary. */
   readonly summary: string;
 }

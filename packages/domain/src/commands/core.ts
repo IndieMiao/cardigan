@@ -59,7 +59,10 @@ type CommandName =
   | "dispatch_run"
   | "acknowledge_run"
   | "abort_dispatch"
-  | "request_merge";
+  | "request_merge"
+  | "record_merge_result"
+  | "release_assignment"
+  | "request_worktree_cleanup";
 export function ensure(
   condition: unknown,
   code: ErrorCode,
@@ -122,9 +125,21 @@ export class CommandDraft {
     const hostOnly = ["queue_run", "dispatch_run", "abort_dispatch"].includes(
       tool,
     );
+    const systemOnly = [
+      "record_merge_result",
+      "request_worktree_cleanup",
+    ].includes(tool);
+    ensure(
+      !systemOnly || actor.kind === "system",
+      "unauthorized",
+      "Only the system can perform this operation",
+    );
     ensure(
       actor.project_id === state.project_id &&
-        (actor.kind !== "system" || hostOnly),
+        (actor.kind !== "system" ||
+          hostOnly ||
+          systemOnly ||
+          tool === "release_assignment"),
       "unauthorized",
       "Actor cannot access this project",
     );
@@ -161,6 +176,7 @@ export class CommandDraft {
         role &&
           (tool === "acknowledge_run" ||
             tool === "request_merge" ||
+            tool === "release_assignment" ||
             (role.allowed_tools.includes(tool as E.ToolName) &&
               actor.allowed_tools.includes(tool as E.ToolName))),
         "forbidden_tool",
@@ -223,6 +239,7 @@ export class CommandDraft {
   projectAccess(): void {
     ensure(
       this.actor.kind === "human" ||
+        this.actor.kind === "system" ||
         (this.assignment?.scope === "standing" &&
           this.assignment.role_id === "pm"),
       "unauthorized",

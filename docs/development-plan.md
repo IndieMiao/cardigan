@@ -434,7 +434,7 @@ Standing Assignment (scope=project): PM Office, PM Ops — not tied to a WorkIte
 - **`done` 不由规则自动触发**：主产出工作项的负责人提交完成申请（`kind=card_completion` 的交付），写明逐条验收标准的对照、证据和已知遗留；卡片模板指定的审核者（默认 PM，可以配置为你）审核通过后，经 `completion_review_passed` 进入 `awaiting_merge`；没有 Git code 交付时同命令经 `merge_not_required` 到 `done`，否则仅合并成功经 `merge_succeeded` 到 `done`。
 - 规则只做两件事：除本次完成审核项以外的必需工作项都通过后，提醒负责人可以申请；收到申请时校验前置条件（排除本次完成审核项，其余 `required` 工作项处于成功终态；没有 open 且 `blocking` 的 Decision），并把结果展示给审核者。未满足的条件必须列为已知遗留，并关联后续卡片。本次完成审核项（开发卡中的 PM 验收）在审核通过后才置为 passed，卡片再进入合并阶段，避免前置条件循环（2026-11-04 用户确认）。
 
-`awaiting_merge --merge_conflicted--> in_progress`，`awaiting_merge --cancel--> cancelled`。派生计算保留待合并状态，`resolution=done` 只在真正 done 时写入。待合并期间拒绝新交付和审核；冲突返回执行阶段后再按原流程交付，避免修改已确认的合并集合。
+`awaiting_merge --merge_conflicted--> in_progress`，`awaiting_merge --cancel--> cancelled`。派生计算保留待合并状态，`resolution=done` 只在真正 done 时写入。待合并期间拒绝新交付和审核；冲突使相应产出 accepted → changes_requested、旧完成申请 supersede、验收项 target_withdrawn 回 todo，返回执行阶段后再按原流程交付，避免修改已确认的合并集合。
 
 **WorkItem（produce，产出型）**
 
@@ -628,6 +628,9 @@ M3.4 主机循环通过 startDispatchLoop 启动：默认每轮结束后等待 1
 | Run 结束但没有交付、阻塞或决策 | PM Ops（异常） |
 | Agent 空闲超过宽限期仍未调用 `finish_run` | PM Ops（`needs_attention`） |
 | 运行环境失联超过宽限期 | Needs You（是否接管由你决定） |
+| merge_conflicted | 冲突产出工作项的 Assignment，run_kind=fix；无 active 负责人时交 PM Ops |
+| card_merged | PM Ops 摘要 |
+| merge_failed / reconcile_finding | PM Ops 升级 |
 
 原则：
 
@@ -1068,12 +1071,14 @@ GitDeliveryVerifier 的实例绑定项目，因为 Assignment 编号仅在项目
 - 前提：整卡完成审核通过、处于 awaiting_merge。模板 merge_policy 为 confirm / auto，开发卡默认 confirm；创建卡片时固定策略，旧卡缺省 confirm。主机可通过 CommandPorts.templates 注入模板配置，MCP 参数不能改策略。
 - confirm 自动生成 trigger=merge_confirmation 的人类 Decision（merge / hold），绑定当前完成申请。人或 PM Office 记录 merge 后才可合并；hold 保留待合并状态，人或 PM Ops 可用 requestMerge 重开一份确认，旧决定被 supersede。
 - 纯函数 mergePlan 校验待合并状态、当前已接受的完成申请、确认及其他阻塞；返回每个 produce 最新未 supersede 的已接受 Git code 交付，按工作项数字编号排序。未接受或尚无交付的工作项跳过，不因已知遗留阻止完成审核；前置条件仍由完成申请的 known_gaps 和后续卡片校验。没有可合并交付时同命令经 merge_not_required 完成；组装层还须校验固定 ref 与 SHA 一致。
-- 出现冲突时，为原 Coding Assignment 创建一个修复 Run。
+- recordMergeResult 只允许 system，必须携带 mergePlan 的 completion_id；合并成功到 done 并发 card_merged，失败保持卡片并发 merge_failed，冲突让卡片回 in_progress、冲突产出 accepted → changes_requested。冲突会 supersede 旧完成申请、将其验收项通过 target_withdrawn 退回 todo；重新交付使旧代码审核失效，再次完成需重新确认。
+- 同一卡片／完成版本／同一结果的重放无变更或事件；其他过期完成版本结果拒绝。命令不访问 Git；M4.4 按 merge_conflicted 的工作项找到原 Assignment，消费 Router 返回的 run_kind=fix 并排修复 Run。
 - 不在工作机的 worktree 里合并。
 
 ### 12.6 清理与对账
 
-- 合并或取消后执行 `release`。worktree 有未提交修改时，在 Needs You 里给出"查看 Diff / 保留 / 强制清理"。
+- releaseAssignment 允许人、常驻 PM Ops 或 system；必须没有任何未结束 Run（含 queued/unknown）。system 只自动释放 done/cancelled 卡片的工作项 Assignment，不释放常驻 PM；人／Ops 可手动释放。Assignment 与 runtime 都经 release 迁移，保留工作目录、分支和运行时引用供清理；assignment_released 带 worktree_path/branch/token_id/runtime_ref。M4.4 在主机侧作废该 Assignment 的所有 Token、释放终端。
+- requestWorktreeCleanup 只允许 system 对已 released 且有 worktree 的 Assignment 发起决策，附未提交／未备份原因；trigger=worktree_cleanup、category=data_deletion、decider=human、keep/force_clean，不阻塞已释放的工作项。同 Assignment 只保留一份未决申请；已解决决定也复用，尤其 keep 后不再因对账重复询问。人或 Office 可记录原话，既有 decision_requested 路由进入 Needs You 并提示 PM Office。补丁备份、文件删除和强制清理均由 M4.3/M4.4 执行，domain 不做 IO。
 - 定期对账：比对 `herdr worktree list` 与数据库，发现孤儿 worktree 和缺失的 worktree。
 - 未提交、尚未被主机拉取的修改，以及 ahead / behind 数据，由 Dispatcher 通过 SSH 在对应机器上执行 git 命令获取（Herdr 没有这个 API）。
 
