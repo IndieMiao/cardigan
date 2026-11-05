@@ -45,6 +45,11 @@ export interface GitCommitTreeInput {
   /** Merge commits never inherit the host's Git identity. */
   readonly author: { readonly name: string; readonly email: string };
 }
+export interface GitRef {
+  readonly ref: string;
+  readonly sha: string;
+}
+
 /** Host-only bare repository operations. Every ref write requires an expected old value. */
 export interface GitCentralPort {
   objectFormat(repository: string): Promise<"sha1" | "sha256">;
@@ -82,4 +87,5 @@ export interface GitCentralPort {
   commitTree(repository: string, input: GitCommitTreeInput): Promise<string>;
   /** Whether the object is reachable from some ref, e.g. after a backup fetch. */
   isReachable(repository: string, sha: string): Promise<boolean>;
+  listRefs(repository: string, prefix: string): Promise<readonly GitRef[]>;
 }

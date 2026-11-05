@@ -1,3 +1,4 @@
+import { access } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { type GitCentralPort, type MergePlan, parseId } from "@cardigan/domain";
 export interface CentralProject {
@@ -34,6 +35,7 @@ export const DEFAULT_MERGE_IDENTITY = {
   email: "cardigan@localhost",
 } as const;
 const fullSha = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u;
+const projectSegment = /^[a-zA-Z0-9_][a-zA-Z0-9._-]*$/u;
 /** Ref policy lives here; filesystem and Git execution stay behind the domain port. */
 export class CentralRepositoryService {
   private readonly root: string;
@@ -45,10 +47,22 @@ export class CentralRepositoryService {
       options.centralRoot ?? join(options.dataDir, "central"),
     );
   }
-  async ensureCentral(project: CentralProject): Promise<string> {
-    if (!/^[a-zA-Z0-9_][a-zA-Z0-9._-]*$/u.test(project.project_id))
+  /** The central repository path; reading it never creates it. */
+  repositoryPath(project: CentralProject): string {
+    if (!projectSegment.test(project.project_id))
       throw new Error("Invalid project path component");
-    const repository = join(this.root, `${project.project_id}.git`);
+    return join(this.root, `${project.project_id}.git`);
+  }
+  async hasCentral(project: CentralProject): Promise<boolean> {
+    return access(this.repositoryPath(project)).then(
+      () => true,
+      () => false,
+    );
+  }
+  async ensureCentral(project: CentralProject): Promise<string> {
+    if (!projectSegment.test(project.project_id))
+      throw new Error("Invalid project path component");
+    const repository = this.repositoryPath(project);
     await this.git.ensureBare(
       project.source_repo,
       repository,
@@ -60,7 +74,8 @@ export class CentralRepositoryService {
       throw new Error("Central baseline branch is missing");
     return repository;
   }
-  async syncFromSource(project: CentralProject): Promise<SourceSync> {
+  /** Fetch the source snapshot and classify it without moving the baseline. */
+  private async sourceSnapshot(project: CentralProject) {
     const repo = await this.ensureCentral(project),
       base = `refs/heads/${project.base_branch}`,
       source = `refs/cardigan/source/${project.base_branch}`;
@@ -69,12 +84,25 @@ export class CentralRepositoryService {
       next = await this.git.readRef(repo, source);
     if (!old || !next)
       throw new Error("Baseline disappeared during synchronization");
-    if (old === next) return "up_to_date";
-    if (await this.git.isAncestor(repo, old, next)) {
-      await this.git.compareAndSwapRef(repo, base, next, old);
-      return "fast_forwarded";
-    }
+    return { repo, base, old, next };
+  }
+  private async classify(repo: string, old: string, next: string) {
+    if (old === next) return "up_to_date" as const;
+    if (await this.git.isAncestor(repo, old, next))
+      return "fast_forwarded" as const;
     return (await this.git.isAncestor(repo, next, old)) ? "ahead" : "diverged";
+  }
+  async syncFromSource(project: CentralProject): Promise<SourceSync> {
+    const { repo, base, old, next } = await this.sourceSnapshot(project);
+    const status = await this.classify(repo, old, next);
+    if (status === "fast_forwarded")
+      await this.git.compareAndSwapRef(repo, base, next, old);
+    return status;
+  }
+  /** Read-only view of §3.2 for reconciliation: never moves the baseline. */
+  async sourceStatus(project: CentralProject): Promise<SourceSync> {
+    const { repo, old, next } = await this.sourceSnapshot(project);
+    return this.classify(repo, old, next);
   }
   /** Whether a commit is reachable from some ref of the central repository. */
   async hasCommit(project: CentralProject, sha: string): Promise<boolean> {
@@ -82,6 +110,17 @@ export class CentralRepositoryService {
     const repository = await this.ensureCentral(project);
     if ((await this.git.objectType(repository, sha)) !== "commit") return false;
     return this.git.isReachable(repository, sha);
+  }
+  /** Fixed delivery refs (`refs/cardigan/deliveries/<id>`) keyed by delivery id. */
+  async pinnedDeliveries(
+    project: CentralProject,
+  ): Promise<ReadonlyMap<string, string>> {
+    const repository = await this.ensureCentral(project),
+      prefix = "refs/cardigan/deliveries/",
+      pinned = new Map<string, string>();
+    for (const { ref, sha } of await this.git.listRefs(repository, prefix))
+      pinned.set(ref.slice(prefix.length), sha);
+    return pinned;
   }
   /**
    * §3.5: linearize the planned deliveries on the central baseline.

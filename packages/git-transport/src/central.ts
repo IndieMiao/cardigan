@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import type {
   GitCentralPort,
   GitCommitTreeInput,
+  GitRef,
   GitTreeMerge,
 } from "@cardigan/domain";
 import { gitEnvironment, gitSafetyArguments } from "./hardening.js";
@@ -350,5 +351,26 @@ export class CentralGitTransport implements GitCentralPort {
       `--contains=${sha}`,
     ]);
     return refs.length > 0;
+  }
+  async listRefs(
+    repository: string,
+    prefix: string,
+  ): Promise<readonly GitRef[]> {
+    if (!/^refs\/[A-Za-z0-9._/-]+$/u.test(prefix) || prefix.includes(".."))
+      throw new Error("Invalid ref prefix");
+    const raw = await this.checked(repository, [
+      "for-each-ref",
+      "--format=%(refname) %(objectname)",
+      prefix,
+    ]);
+    return raw
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => {
+        const [ref, sha] = line.split(" ");
+        if (!ref || !sha || !fullSha.test(sha))
+          throw new Error("Unsupported Git ref record");
+        return { ref, sha };
+      });
   }
 }

@@ -1,8 +1,10 @@
-import { mkdir, writeFile } from "node:fs/promises";
-import { isAbsolute, join, resolve } from "node:path";
+import { access, mkdir, readdir, writeFile } from "node:fs/promises";
+import { basename, isAbsolute, join, resolve } from "node:path";
 import type {
   Assignment,
   Card,
+  Delivery,
+  GitWorktree,
   GitWorktreePort,
   Role,
   WorkItem,
@@ -14,6 +16,11 @@ import type {
   CentralRepositoryService,
   SourceSync,
 } from "./central.js";
+import {
+  type ReconcileFinding,
+  reconcile as reconcileState,
+  type WorktreeState,
+} from "./reconcile.js";
 
 export {
   type CentralOptions,
@@ -22,6 +29,12 @@ export {
   type MergeOutcome,
   type SourceSync,
 } from "./central.js";
+export {
+  type ReconcileFinding,
+  type ReconcileFindingKind,
+  reconcile,
+  type WorktreeState,
+} from "./reconcile.js";
 
 export interface WorktreePlacement {
   readonly worktree_path: string;
@@ -78,6 +91,20 @@ export type RemoveWorktreeOutcome =
       readonly summary: WorktreeChangeSummary;
     };
 
+const code = (error: unknown) => (error as NodeJS.ErrnoException).code;
+/** Immediate subdirectories of `path`; a missing directory is an empty list. */
+async function subdirectories(path: string): Promise<readonly string[]> {
+  try {
+    const entries = await readdir(path, { withFileTypes: true });
+    return entries
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => join(path, entry.name))
+      .sort();
+  } catch (error) {
+    if (code(error) === "ENOENT") return [];
+    throw error;
+  }
+}
 /** Application policy; Git process/file IO is injected through the domain port. */
 export class GitWorktreeService {
   private readonly repositories: string;
@@ -315,6 +342,60 @@ export class GitWorktreeService {
       flag: "wx",
     });
     return path;
+  }
+
+  /** §3.6: gather the facts `reconcile` needs; this method never deletes. */
+  async listWorktreeState(project: CentralProject): Promise<WorktreeState> {
+    const root = join(this.worktrees, project.project_id),
+      clone = join(this.repositories, project.project_id),
+      hasClone = await access(clone).then(
+        () => true,
+        () => false,
+      ),
+      [registered, directories, clones, central] = await Promise.all([
+        // The base clone is itself a worktree of its own repository; only the
+        // per-Assignment worktrees belong in the state.
+        hasClone
+          ? this.git
+              .listWorktrees(clone)
+              .then((entries) =>
+                entries.filter((entry) => resolve(entry.path) !== clone),
+              )
+          : Promise.resolve([] as readonly GitWorktree[]),
+        subdirectories(root),
+        subdirectories(this.repositories),
+        this.central.hasCentral(project),
+      ]),
+      state: WorktreeState = {
+        project_id: project.project_id,
+        worktrees_root: root,
+        registered,
+        directories,
+        failed_clones: clones.filter((path) =>
+          basename(path).startsWith(".clone-"),
+        ),
+        pinned: [],
+      };
+    if (!central) return state;
+    const pinned = await this.central.pinnedDeliveries(project);
+    return {
+      ...state,
+      source_sync: await this.central.sourceStatus(project),
+      pinned: [...pinned].map(([delivery_id, sha]) => ({ delivery_id, sha })),
+    };
+  }
+
+  /** Gather the state and run the pure `reconcile` (report only, never delete). */
+  async reconcile(
+    project: CentralProject,
+    assignments: readonly Assignment[],
+    deliveries: readonly Delivery[],
+  ): Promise<readonly ReconcileFinding[]> {
+    return reconcileState(
+      await this.listWorktreeState(project),
+      assignments,
+      deliveries,
+    );
   }
 }
 
