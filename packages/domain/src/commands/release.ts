@@ -28,6 +28,11 @@ export function releaseAssignment(
       "Only the human, system or PM Ops can release assignments",
     );
     const a = d.get("assignments", p.assignment_id);
+    ensure(
+      a.scope === "work_item" || actor.kind === "human",
+      "unauthorized",
+      "Only the human can release standing assignments",
+    );
     const card =
       a.scope === "work_item"
         ? d.card(d.work(a.work_item_id).card_id)

@@ -1,6 +1,7 @@
 import { expect, test } from "vitest";
 import {
   type Actor,
+  type Assignment,
   finishRun,
   isReviewStale,
   mergePlan,
@@ -10,7 +11,7 @@ import {
   requestWorktreeCleanup,
 } from "../index.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
-import { human, value } from "./test-fixtures.js";
+import { human, role, value } from "./test-fixtures.js";
 
 const system: Actor = { kind: "system", project_id: human.project_id };
 const merged = {
@@ -211,6 +212,56 @@ test("invariants 5, 11: release waits for every Run, preserves cleanup metadata 
     changes: [],
     events: [],
   });
+});
+
+test("invariant 11: PM Ops can release work items, but only the human can release PM Office", () => {
+  const f = mergeFixture();
+  // Standing PM assignments are host bootstrap records, not work-item assignments.
+  const { work_item_id: _item, ...base } = f.pm;
+  const standing = (token: string): Assignment => ({
+    ...base,
+    id: f.io.ids.next(f.state.project_id, "assignment"),
+    scope: "standing",
+    mcp_token_id: token,
+  });
+  const office = standing("office-token-reference");
+  const ops = standing("ops-token-reference");
+  const state = {
+    ...f.state,
+    assignments: [...f.state.assignments, office, ops],
+  };
+  const opsActor: Actor = {
+    ...role("pm"),
+    kind: "assignment",
+    project_id: state.project_id,
+    assignment_id: ops.id,
+    allowed_tools: role("pm").allowed_tools.filter(
+      (tool) => tool !== "record_decision",
+    ),
+  };
+  const target = { assignment_id: office.id };
+  for (const actor of [opsActor, system])
+    expect(releaseAssignment(state, actor, target, f.io)).toMatchObject({
+      ok: false,
+      error: { code: "unauthorized" },
+    });
+  const released = value(releaseAssignment(state, human, target, f.io));
+  expect(released.data).toMatchObject({
+    id: office.id,
+    scope: "standing",
+    status: "released",
+    runtime_state: "released",
+  });
+  expect(released.events[0]).toMatchObject({
+    type: "assignment_released",
+    actor: human,
+    payload: { assignment_id: office.id },
+  });
+  expect(
+    value(
+      releaseAssignment(state, opsActor, { assignment_id: f.coder.id }, f.io),
+    ).data.status,
+  ).toBe("released");
 });
 
 test.each(["keep", "force_clean"])(
