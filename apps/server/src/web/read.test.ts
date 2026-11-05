@@ -288,6 +288,56 @@ test("the execution view lists assignments, their run, worktree and cursor", asy
   }
 });
 
+test("the execution view shows a queued Run over the older finished one", async () => {
+  const { harness, cookie } = await seeded();
+  try {
+    // The seeded Assignment has R-1 finished; a rework Run is queued but has
+    // not started yet, which is exactly when ordering by `started_at` hides it.
+    harness.store.uow.run((tx) => {
+      const finished = tx.runs.get(project_id, "R-1" as never);
+      if (finished === undefined) throw new Error("missing fixture run");
+      tx.runs.put(project_id, {
+        ...finished,
+        status: "completed",
+        finished_at: NOW,
+        outcome: "completed",
+        summary: "done",
+      });
+      tx.runs.put(project_id, {
+        id: "R-2" as never,
+        assignment_id: "A-1" as never,
+        trigger_event_id: "evt-2" as never,
+        kind: "rework",
+        status: "queued",
+        role_version: 1,
+        model: "fixture-model",
+        agent_cli_version: "1.0.0",
+        outcome: null,
+        summary: "",
+      });
+    });
+
+    const res = await call(
+      harness.port,
+      `/api/projects/${project_id}/execution`,
+      { cookie },
+    );
+    expect(res.status).toBe(200);
+    const body = res.json as {
+      assignments: { id: string; run: { id: string; status: string } | null }[];
+      runs: { id: string; status: string }[];
+    };
+    expect(body.assignments[0]?.run).toMatchObject({
+      id: "R-2",
+      status: "queued",
+    });
+    // Both Runs are still listed for the execution view.
+    expect(body.runs.map((run) => run.id)).toEqual(["R-2", "R-1"]);
+  } finally {
+    await harness.close();
+  }
+});
+
 test("项目动态 filters by card, role and type and pages backwards", async () => {
   const { harness, cookie } = await seeded();
   try {

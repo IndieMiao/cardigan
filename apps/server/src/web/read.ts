@@ -498,12 +498,13 @@ export function executionView(
   now: string,
   machines: readonly Machine[] = [],
 ) {
+  // §8.5: the newest Run is the one created last, not the one that started
+  // last. A Run that is still queued has no `started_at`, and ordering by it
+  // would let the previous, finished Run hide the new one.
   const latestRun = (assignment_id: string) =>
     [...state.runs]
       .filter((run) => run.assignment_id === assignment_id)
-      .sort((left, right) =>
-        (right.started_at ?? "").localeCompare(left.started_at ?? ""),
-      )[0];
+      .sort((left, right) => (left.id === right.id ? 0 : byId(right, left)))[0];
   return {
     project_id: state.project_id,
     generated_at: now,
