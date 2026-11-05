@@ -1,7 +1,10 @@
 import { beforeEach, expect, test } from "vitest";
-import type { Actor, Delivery, Review } from "../entities.js";
+import type { Actor, Delivery, Review, WorkItem } from "../entities.js";
 import {
+  assign,
   type CommandState,
+  createCard,
+  createWorkItem,
   deriveCardFields,
   prepareDelivery,
   type SubmitDeliveryParams,
@@ -20,6 +23,11 @@ import {
   subject,
   value,
 } from "./test-fixtures.js";
+
+function present<T>(entity: T | undefined): T {
+  if (entity === undefined) throw new Error("Missing delivery fixture entity");
+  return entity;
+}
 
 const p: SubmitDeliveryParams = {
   work_item_id: id("work_item", 1),
@@ -602,3 +610,268 @@ test.each(["pending", "conditional", "rejected"] as const)(
     ).toMatchObject({ ok: false, error: { code: "stale_target" } });
   },
 );
+
+/**
+ * §4.4 (user ruling, 2026-11-06): a produce work item that no verification
+ * points at is done when it is delivered.
+ *
+ * The state is built the way the product builds it: `createCard` for the
+ * template, `createWorkItem` for the unreviewed product step, `assign` for the
+ * Assignments, and one queued Run per Assignment, which is what the dispatcher
+ * would open. Nothing here hand-writes a WorkItem.
+ */
+const office = actor(4, "pm");
+const PM_TOOLS = [
+  "whoami",
+  "get_card",
+  "submit_delivery",
+  "create_card",
+  "create_work_item",
+  "assign",
+];
+
+/** The caller of a work-item Assignment, with the tool scope the role carries. */
+function workActor(
+  assignmentId: string,
+  role_id: string,
+  tools: readonly string[],
+): Actor {
+  return {
+    kind: "assignment",
+    project_id: "fixture-project",
+    assignment_id: assignmentId as never,
+    role_id,
+    role_version: 1,
+    allowed_tools: tools as never,
+    capabilities: [role_id],
+  };
+}
+
+function unreviewedSetup(options: { readonly dependent?: boolean } = {}) {
+  const seed = fixture();
+  let state: CommandState = {
+    ...seed,
+    cards: [],
+    work_items: [],
+    runs: [],
+    assignments: seed.assignments.filter((entry) => entry.scope === "standing"),
+  };
+  const created = value(
+    createCard(
+      state,
+      office,
+      {
+        title: "Unreviewed produce",
+        goal: "Ship the confirmation",
+        acceptance_criteria: ["Confirmed"],
+        source: { kind: "quote", text: "Confirm" },
+        repo: "example/repo",
+        base_branch: "main",
+      },
+      io,
+    ),
+  );
+  state = apply(state, created);
+
+  const product = value(
+    createWorkItem(
+      state,
+      office,
+      {
+        card_id: created.data.id,
+        title: "产品确认",
+        kind: "produce",
+        role_id: "pm",
+        required: true,
+        completion_criteria: ["Confirmed"],
+      },
+      io,
+    ),
+  );
+  state = apply(state, product);
+
+  let dependent: WorkItem | undefined;
+  if (options.dependent === true) {
+    const next = value(
+      createWorkItem(
+        state,
+        office,
+        {
+          card_id: created.data.id,
+          title: "Split the release notes",
+          kind: "produce",
+          role_id: "coder",
+          required: true,
+          completion_criteria: ["Notes written"],
+          depends_on: [product.data.id],
+        },
+        io,
+      ),
+    );
+    state = apply(state, next);
+    dependent = next.data;
+  }
+
+  const assigned = value(
+    assign(state, office, { work_item_id: product.data.id, role_id: "pm" }, io),
+  );
+  state = apply(state, assigned);
+  const started: CommandState = {
+    ...state,
+    runs: [
+      ...state.runs,
+      {
+        ...run(1),
+        id: io.ids.next(state.project_id, "run"),
+        assignment_id: assigned.data.id,
+      },
+    ],
+  };
+  return {
+    state: started,
+    card: created.data.id,
+    product: product.data,
+    caller: workActor(assigned.data.id, "pm", PM_TOOLS),
+    dependent,
+  };
+}
+
+const unreviewedDelivery: SubmitDeliveryParams = {
+  work_item_id: "" as never,
+  kind: "doc",
+  summary: "需求已确认",
+  subject: { kind: "doc_version", value: "product-v1" },
+  requested_verifiers: [],
+};
+
+async function deliverUnreviewed(
+  setup: ReturnType<typeof unreviewedSetup>,
+  requested: readonly string[] = [],
+) {
+  const params = {
+    ...unreviewedDelivery,
+    work_item_id: setup.product.id,
+    requested_verifiers: requested as never,
+  };
+  return deliver(setup.state, params, setup.caller);
+}
+
+test("§4.4: a produce item nothing verifies is accepted on delivery, with a timeline note", async () => {
+  const setup = unreviewedSetup();
+  const result = value(await deliverUnreviewed(setup));
+
+  expect(result.data.status).toBe("accepted");
+  expect(result.data.requested_verifiers).toEqual([]);
+
+  const after = apply(setup.state, result);
+  expect(
+    after.work_items.find((item) => item.id === setup.product.id)?.status,
+  ).toBe("accepted");
+  const note = result.timeline.find((entry) => entry.type === "system");
+  expect(note?.body).toContain("无需审核");
+  expect(note?.delivery_id).toBe(result.data.id);
+});
+
+test("§4.4: a dependent item stays todo until its own Run activates it", async () => {
+  const setup = unreviewedSetup({ dependent: true });
+  const result = value(await deliverUnreviewed(setup));
+  let state = apply(setup.state, result);
+
+  const dependent = present(setup.dependent);
+  // Lazy activation: acceptance alone does not move the dependent item.
+  expect(
+    state.work_items.find((item) => item.id === dependent.id)?.status,
+  ).toBe("todo");
+
+  // Its own Run does: the first command in that Run goes through
+  // `dependencies_met` and `run_started` because its dependency succeeded.
+  const assigned = value(
+    assign(state, office, { work_item_id: dependent.id, role_id: "coder" }, io),
+  );
+  state = apply(state, assigned);
+  const runId = io.ids.next(state.project_id, "run");
+  state = {
+    ...state,
+    runs: [
+      ...state.runs,
+      { ...run(1), id: runId, assignment_id: assigned.data.id },
+    ],
+  };
+  const produced = value(
+    await deliver(
+      state,
+      {
+        work_item_id: dependent.id,
+        kind: "doc",
+        summary: "notes",
+        subject: { kind: "doc_version", value: "notes-v1" },
+        requested_verifiers: [],
+      },
+      workActor(assigned.data.id, "coder", PM_TOOLS),
+    ),
+  );
+  state = apply(state, produced);
+  expect(
+    state.work_items.find((item) => item.id === dependent.id)?.status,
+  ).toBe("accepted");
+});
+
+test("§4.4: an unfinished dependency still blocks the dependent Run", async () => {
+  const setup = unreviewedSetup({ dependent: true });
+  const dependent = present(setup.dependent);
+  let state = setup.state;
+  const assigned = value(
+    assign(state, office, { work_item_id: dependent.id, role_id: "coder" }, io),
+  );
+  state = apply(state, assigned);
+  const runId = io.ids.next(state.project_id, "run");
+  state = {
+    ...state,
+    runs: [
+      ...state.runs,
+      { ...run(1), id: runId, assignment_id: assigned.data.id },
+    ],
+  };
+  const blocked = await deliver(
+    state,
+    {
+      work_item_id: dependent.id,
+      kind: "doc",
+      summary: "notes",
+      subject: { kind: "doc_version", value: "notes-v1" },
+      requested_verifiers: [],
+    },
+    workActor(assigned.data.id, "coder", PM_TOOLS),
+  );
+  expect(blocked.ok).toBe(false);
+  if (blocked.ok) return;
+  expect(blocked.error.code).toBe("invariant_violation");
+});
+
+test("§4.4: a verified produce item still requires its verifiers", async () => {
+  // The template's development item is verified by code_review: an empty request
+  // is refused and the delivery stays `submitted` until the review passes.
+  const refused = await deliver(fixture(), {
+    ...p,
+    requested_verifiers: [],
+  } as SubmitDeliveryParams);
+  expect(refused.ok).toBe(false);
+  if (refused.ok) return;
+  expect(refused.error.code).toBe("validation_failed");
+
+  const accepted = value(await deliver());
+  expect(accepted.data.status).toBe("submitted");
+  const after = apply(fixture(), accepted);
+  expect(
+    after.work_items.find((w) => w.id === id("work_item", 1))?.status,
+  ).toBe("delivered");
+});
+
+test("§4.4: an unreviewed delivery may not name somebody else's verifier", async () => {
+  const setup = unreviewedSetup();
+  const refused = await deliverUnreviewed(setup, [id("work_item", 2)]);
+  // The verifier does not target the product item, and the item has none.
+  expect(refused.ok).toBe(false);
+  if (refused.ok) return;
+  expect(refused.error.code).toBe("validation_failed");
+});

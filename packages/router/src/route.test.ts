@@ -629,3 +629,106 @@ test("M3.4 real success states remind the primary producer without waiting for i
     ),
   ).toEqual([]);
 });
+
+/**
+ * §4.4: a produce work item nothing verifies is accepted the moment its
+ * delivery arrives. The router must treat that like a passing review, or the
+ * downstream work (and PM Ops, when nothing owns it) never hears about it.
+ */
+test("§4.4 delivery_accepted wakes a downstream Assignment whose dependencies are complete", () => {
+  const result = routeEvent({
+    event: event("delivery_accepted", {
+      delivery_id: "D-1",
+      work_item_id: "W-1",
+      unreviewed: true,
+    }),
+    snapshot: snapshot({
+      assignments: [
+        assignment("A-1"),
+        assignment("A-2", { role_id: "reviewer" }),
+        assignment("A-4"),
+      ],
+      deliveries: [
+        delivery("D-1", { work_item_id: "W-1", requested_verifiers: [] }),
+      ],
+      work_items: [
+        workItem("W-1", { status: "accepted", assignment_id: "A-1" }),
+        workItem("W-4", {
+          depends_on: ["W-1"],
+          status: "todo",
+          assignment_id: "A-4",
+        }),
+      ],
+    }),
+  });
+  expect(rules(result)).toContain("6.4/dependency completed");
+  expect(recipients(result)).toContain("assignment:A-4");
+});
+
+test("§4.4 delivery_accepted hands an unowned downstream item to PM Ops", () => {
+  const result = routeEvent({
+    event: event("delivery_accepted", {
+      delivery_id: "D-1",
+      work_item_id: "W-1",
+      unreviewed: true,
+    }),
+    snapshot: snapshot({
+      deliveries: [
+        delivery("D-1", { work_item_id: "W-1", requested_verifiers: [] }),
+      ],
+      work_items: [
+        workItem("W-1", { status: "accepted", assignment_id: "A-1" }),
+        workItem("W-4", { depends_on: ["W-1"], status: "todo" }),
+      ],
+    }),
+  });
+  expect(rules(result)).toContain("6.4/dependency completed");
+  expect(recipients(result)).toContain("pm_ops");
+});
+
+test("§4.4 delivery_accepted waits for the other dependencies and keeps the work item lazy", () => {
+  const result = routeEvent({
+    event: event("delivery_accepted", {
+      delivery_id: "D-1",
+      work_item_id: "W-1",
+      unreviewed: true,
+    }),
+    snapshot: snapshot({
+      assignments: [assignment("A-1"), assignment("A-4"), assignment("A-7")],
+      deliveries: [
+        delivery("D-1", { work_item_id: "W-1", requested_verifiers: [] }),
+      ],
+      work_items: [
+        workItem("W-1", { status: "accepted", assignment_id: "A-1" }),
+        // W-4 depends on W-1 and an unfinished W-7.
+        workItem("W-4", {
+          depends_on: ["W-1", "W-7"],
+          status: "todo",
+          assignment_id: "A-4",
+        }),
+        workItem("W-7", { status: "in_progress", assignment_id: "A-7" }),
+      ],
+    }),
+  });
+  expect(recipients(result)).not.toContain("assignment:A-4");
+});
+
+test("§4.4 delivery_accepted reminds the producer when it was the last required item", () => {
+  const result = routeEvent({
+    event: event("delivery_accepted", {
+      delivery_id: "D-1",
+      work_item_id: "W-1",
+      unreviewed: true,
+    }),
+    snapshot: snapshot({
+      deliveries: [
+        delivery("D-1", { work_item_id: "W-1", requested_verifiers: [] }),
+      ],
+      work_items: [
+        workItem("W-1", { status: "accepted", assignment_id: "A-1" }),
+      ],
+    }),
+  });
+  expect(rules(result)).toContain("6.4/all required work items passed");
+  expect(recipients(result)).toContain("assignment:A-1");
+});

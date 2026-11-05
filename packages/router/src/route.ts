@@ -420,6 +420,116 @@ function routeCompletionRequest(
 }
 
 /** §6.4: a passed review wakes nobody; it only advances derived checks. */
+/**
+ * §6.4: a work item succeeded, so whoever works on what depends on it is next.
+ *
+ * Only a delivery whose work item actually succeeded completes anything — a
+ * first pass among several required verifiers does not — and a downstream item
+ * is next only when *all* of its dependencies succeeded. An unowned downstream
+ * item goes to PM Ops, which decides whether to create an Assignment.
+ */
+function routeCompletedItem(
+  input: RouteInput,
+  draft: Draft,
+  completedId: WorkItemId | undefined,
+): void {
+  const completed = itemOf(input, completedId);
+  if (completed === undefined || !succeeded(completed)) return;
+  const downstream = input.snapshot.work_items.filter(
+    (candidate) =>
+      candidate.depends_on.includes(completed.id) &&
+      candidate.depends_on.every((id) => {
+        const dependency = itemOf(input, id);
+        return dependency !== undefined && succeeded(dependency);
+      }),
+  );
+  let unowned = false;
+  for (const candidate of downstream) {
+    if (candidate.assignment_id === undefined) {
+      unowned = true;
+      continue;
+    }
+    noteAssignment(
+      input,
+      draft,
+      candidate,
+      "dependency",
+      "6.4/dependency completed",
+      `${completed.id} is done; ${candidate.id} can start`,
+    );
+  }
+  if (unowned)
+    note(
+      input,
+      draft,
+      recipient.pm_ops(),
+      "dependency",
+      "6.4/dependency completed",
+      `${completed.id} is done and a dependent work item has no owner`,
+    );
+}
+
+/** §6.4: all required items succeeded → remind the producer to apply. */
+function routeCompletionReminder(input: RouteInput, draft: Draft): void {
+  const card_id = input.event.card_id;
+  if (
+    input.snapshot.cards.some(
+      (card) =>
+        card.id === card_id &&
+        ["done", "cancelled", "awaiting_merge"].includes(card.status),
+    )
+  )
+    return;
+  const items = input.snapshot.work_items.filter(
+    (item) => item.card_id === card_id,
+  );
+  const required = items.filter(
+    (item) =>
+      item.required && item.template_key !== PM_ACCEPTANCE_WORK_ITEM_KEY,
+  );
+  const allPassed = required.length > 0 && required.every(succeeded);
+  if (!allPassed) return;
+  const producer =
+    items.find(
+      (item) =>
+        item.kind === "produce" &&
+        item.template_key === developmentCardTemplate.primary_work_item_key,
+    ) ?? items.find((item) => item.kind === "produce");
+  if (producer === undefined) return;
+  noteAssignment(
+    input,
+    draft,
+    producer,
+    "completion",
+    "6.4/all required work items passed",
+    `all required work items passed; ${producer.id} may apply for completion`,
+  );
+}
+
+/** Both the reviewed and the unreviewed path end with these two rules. */
+function routeCompletion(
+  input: RouteInput,
+  draft: Draft,
+  completedId: WorkItemId | undefined,
+): void {
+  routeCompletedItem(input, draft, completedId);
+  routeCompletionReminder(input, draft);
+}
+
+/**
+ * §4.4: a delivery nothing verifies is accepted the moment it arrives, so the
+ * work item it belongs to succeeded. It routes exactly like a passing review:
+ * dependents are woken (or PM Ops is told when a dependent has no owner) and
+ * the producer may apply for completion.
+ */
+function routeDeliveryAccepted(input: RouteInput, draft: Draft): void {
+  const delivery_id = payloadString(input.event.payload, "delivery_id");
+  const delivery = input.snapshot.deliveries.find(
+    (candidate) => candidate.id === delivery_id,
+  );
+  routeCompletion(input, draft, delivery?.work_item_id);
+}
+
 function routeReview(input: RouteInput, draft: Draft): void {
   const verdict = payloadString(input.event.payload, "verdict");
   const delivery_id = payloadString(input.event.payload, "delivery_id");
@@ -433,83 +543,10 @@ function routeReview(input: RouteInput, draft: Draft): void {
       card_id: input.event.card_id,
       detail: "check whether every delivery passed and the card is done",
     });
-    // §6.4 dependency completed: only a delivery whose work item actually
-    // succeeded completes anything — a first pass among several required
-    // verifiers does not. Downstream work is next only when *all* of its
-    // dependencies succeeded.
     const passed = input.snapshot.deliveries.find(
       (candidate) => candidate.id === delivery_id,
     );
-    const completed = itemOf(input, passed?.work_item_id);
-    if (completed !== undefined && succeeded(completed)) {
-      const downstream = input.snapshot.work_items.filter(
-        (candidate) =>
-          candidate.depends_on.includes(completed.id) &&
-          candidate.depends_on.every((id) => {
-            const dependency = itemOf(input, id);
-            return dependency !== undefined && succeeded(dependency);
-          }),
-      );
-      let unowned = false;
-      for (const candidate of downstream) {
-        if (candidate.assignment_id === undefined) {
-          unowned = true;
-          continue;
-        }
-        noteAssignment(
-          input,
-          draft,
-          candidate,
-          "dependency",
-          "6.4/dependency completed",
-          `${completed.id} is done; ${candidate.id} can start`,
-        );
-      }
-      if (unowned)
-        note(
-          input,
-          draft,
-          recipient.pm_ops(),
-          "dependency",
-          "6.4/dependency completed",
-          `${completed.id} is done and a dependent work item has no owner`,
-        );
-    }
-    // §6.4: all required work items passed → remind the producer to apply for
-    // completion; the card is not closed automatically.
-    const card_id = input.event.card_id;
-    if (
-      input.snapshot.cards.some(
-        (c) =>
-          c.id === card_id &&
-          ["done", "cancelled", "awaiting_merge"].includes(c.status),
-      )
-    )
-      return;
-    const items = input.snapshot.work_items.filter(
-      (item) => item.card_id === card_id,
-    );
-    const required = items.filter(
-      (item) =>
-        item.required && item.template_key !== PM_ACCEPTANCE_WORK_ITEM_KEY,
-    );
-    const allPassed = required.length > 0 && required.every(succeeded);
-    if (!allPassed) return;
-    const producer =
-      items.find(
-        (item) =>
-          item.kind === "produce" &&
-          item.template_key === developmentCardTemplate.primary_work_item_key,
-      ) ?? items.find((item) => item.kind === "produce");
-    if (producer === undefined) return;
-    noteAssignment(
-      input,
-      draft,
-      producer,
-      "completion",
-      "6.4/all required work items passed",
-      `all required work items passed; ${producer.id} may apply for completion`,
-    );
+    routeCompletion(input, draft, passed?.work_item_id);
     return;
   }
 
@@ -743,6 +780,9 @@ export function routeEvent(input: RouteInput): RouteResult {
       break;
     case "review_submitted":
       routeReview(input, draft);
+      break;
+    case "delivery_accepted":
+      routeDeliveryAccepted(input, draft);
       break;
     case "decision_requested":
       routeDecisionRequested(input, draft);
