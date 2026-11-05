@@ -14,6 +14,7 @@ test("board, list and card routes round-trip", () => {
     { kind: "needs-you", projectId: "p-fictional" },
     { kind: "snapshot", projectId: "p-fictional" },
     { kind: "execution", projectId: "p-fictional" },
+    { kind: "activity", projectId: "p-fictional" },
     { kind: "card", projectId: "p-fictional", cardId: "C-1" },
   ] as const) {
     expect(parseRoute(routeHash(route))).toEqual(route);

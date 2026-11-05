@@ -11,7 +11,12 @@ import { useCallback, useEffect, useState } from "react";
 export type Route =
   | { readonly kind: "board"; readonly projectId: string }
   | {
-      readonly kind: "list" | "needs-you" | "snapshot" | "execution";
+      readonly kind:
+        | "list"
+        | "needs-you"
+        | "snapshot"
+        | "execution"
+        | "activity";
       readonly projectId: string;
     }
   | {
@@ -43,7 +48,8 @@ export function parseRoute(hash: string): Route | undefined {
     (segments[2] === "list" ||
       segments[2] === "needs-you" ||
       segments[2] === "snapshot" ||
-      segments[2] === "execution")
+      segments[2] === "execution" ||
+      segments[2] === "activity")
   ) {
     return { kind: segments[2], projectId };
   }
