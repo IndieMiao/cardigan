@@ -12,6 +12,11 @@ import type {
   RoleReference,
   WorkItem,
 } from "@cardigan/domain";
+import {
+  applyStandingMode,
+  standingModeFromTools,
+  standingTools,
+} from "@cardigan/domain";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import {
   getRoleVersion,
@@ -64,11 +69,12 @@ export function launchEntities(
  * Issue a fresh token for an Assignment and revoke its still valid ones (§9.1,
  * §10.2). The plaintext token is only ever handed to the run directory.
  *
- * §7.1 / §10.4: the standing PM Office and PM Ops share one `pm` role and are
- * told apart only by the tools of their newest token. A rotation that took the
- * role's full tool list would silently promote Ops on every restart, so the new
- * scope is the previous token's scope intersected with the role's tools — never
- * wider than the token it replaces.
+ * §7.1 / §10.4 / M4.5: a standing PM's tool scope comes from its
+ * `standing_mode`, not from whatever token it happened to hold. A row written
+ * before the field existed is inferred once from its newest token and written
+ * back before this issuance, so every path (CLI start, Dispatcher restart,
+ * `token issue`) produces the same scope. Work-item Assignments keep the M3.T2
+ * rule: never wider than the token being replaced.
  */
 export function issueAssignmentToken(
   store: Store,
@@ -76,16 +82,42 @@ export function issueAssignmentToken(
   entities: Pick<LaunchEntities, "assignment" | "role">,
 ): IssuedToken {
   return store.uow.run((tx) => {
-    const previous = tx
-      .tokensForAssignment(project, entities.assignment.id)
-      .at(-1);
+    let assignment =
+      tx.assignments.get(project, entities.assignment.id) ??
+      entities.assignment;
+    if (assignment.scope === "standing" && assignment.role_id === "pm") {
+      if (assignment.standing_mode === undefined) {
+        const newest = tx.tokensForAssignment(project, assignment.id).at(-1);
+        const stamped = applyStandingMode(
+          assignment,
+          newest === undefined
+            ? // No token to infer from: least privilege is the safe default.
+              "ops"
+            : standingModeFromTools(newest.allowed_tools),
+        );
+        if (!stamped.ok)
+          throw new Error(
+            `cannot stamp standing_mode: ${stamped.error.message}`,
+          );
+        tx.assignments.put(project, stamped.value);
+        assignment = stamped.value;
+      }
+      const mode = assignment.standing_mode;
+      if (mode === undefined)
+        throw new Error("standing mode is missing after stamping");
+      return issueTokenInTransaction(tx, project, assignment.id, {
+        role_version: entities.role.version,
+        allowed_tools: standingTools(entities.role.allowed_tools, mode),
+      });
+    }
+    const previous = tx.tokensForAssignment(project, assignment.id).at(-1);
     const allowed_tools =
       previous === undefined
         ? entities.role.allowed_tools
         : entities.role.allowed_tools.filter((tool) =>
             previous.allowed_tools.includes(tool),
           );
-    return issueTokenInTransaction(tx, project, entities.assignment.id, {
+    return issueTokenInTransaction(tx, project, assignment.id, {
       role_version: entities.role.version,
       allowed_tools,
     });

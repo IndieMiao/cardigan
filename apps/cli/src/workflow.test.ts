@@ -690,3 +690,75 @@ test("needs-you says so when nothing is waiting for the human", async () => {
   expect(await run(["needs-you", "--project", "p-work"])).toBe(0);
   expect(printed()).toContain("Needs You 是空的");
 });
+
+test("M4.5: pm create writes the standing mode once and never changes it", async () => {
+  await bootstrap();
+  expect(await run(["pm", "create", "--ops"])).toBe(0);
+  const store = Store.open({ dataDir });
+  try {
+    expect(
+      store.uow.read((tx) =>
+        tx.assignments.get("p-work" as never, "A-1" as never),
+      )?.standing_mode,
+    ).toBe("ops");
+  } finally {
+    store.close();
+  }
+
+  // Asking for Office later does not promote the Ops Assignment; it seats the
+  // second standing Assignment, and Ops keeps its mode.
+  expect(await run(["pm", "create", "--office"])).toBe(0);
+  const reopened = Store.open({ dataDir });
+  try {
+    expect(
+      reopened.uow.read((tx) =>
+        tx.assignments
+          .list("p-work" as never)
+          .filter((assignment) => assignment.scope === "standing")
+          .map((assignment) => [assignment.id, assignment.standing_mode]),
+      ),
+    ).toEqual([
+      ["A-1", "ops"],
+      ["A-2", "office"],
+    ]);
+  } finally {
+    reopened.close();
+  }
+});
+
+test("M4.5: a legacy standing row is inferred from its newest token once", async () => {
+  await bootstrap();
+  expect(await run(["pm", "create", "--ops"])).toBe(0);
+  const opsToken = tokenFromOutput();
+
+  // Simulate a row written before the field existed: same token, no mode.
+  const store = Store.open({ dataDir });
+  try {
+    store.uow.run((tx) => {
+      const current = tx.assignments.get("p-work" as never, "A-1" as never);
+      if (current === undefined) throw new Error("missing assignment");
+      const { standing_mode, ...legacy } = current;
+      void standing_mode;
+      tx.assignments.put("p-work" as never, legacy);
+    });
+  } finally {
+    store.close();
+  }
+
+  expect(await run(["token", "issue", "A-1"])).toBe(0);
+  const rotated = tokenFromOutput();
+  const reopened = Store.open({ dataDir });
+  try {
+    expect(
+      reopened.uow.read((tx) =>
+        tx.assignments.get("p-work" as never, "A-1" as never),
+      )?.standing_mode,
+    ).toBe("ops");
+    expect(reopened.verifyToken(opsToken)).toBeUndefined();
+    expect(reopened.verifyToken(rotated)?.allowed_tools ?? []).not.toContain(
+      "record_decision",
+    );
+  } finally {
+    reopened.close();
+  }
+});

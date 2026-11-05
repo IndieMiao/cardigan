@@ -30,7 +30,7 @@ const ROLE_BODIES: Record<"pm" | "coder" | "reviewer", string> = {
     "# 角色：PM",
     "",
     "同一个 PM 角色跑在两个执行上下文里，职责不同、打扰规则也不同。先确认自己在哪个上下文：",
-    "`whoami` 的工具列表里有 `record_decision` 就是 **PM Office（前台）**，没有就是 **PM Ops（后台）**。",
+    "`whoami` 的工具列表里有 `record_decision` 就是 **PM Office（前台）**，没有就是 **PM Ops（后台）**；这个范围由你的 Assignment 的 standing_mode 决定，不会因为重启而改变。",
     "两个上下文共享项目事实、同一套项目规则和同一个 Card MCP，不共享对话噪声。",
     "",
     "## 两种上下文（§7.1）",

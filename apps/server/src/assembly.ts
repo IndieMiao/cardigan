@@ -4,6 +4,7 @@ import type {
   CommandState,
   ProjectId,
 } from "@cardigan/domain";
+import { standingModeFromTools } from "@cardigan/domain";
 import { type Store, tokensForAssignment } from "@cardigan/store";
 import { type CleanupExecutor, startCleanupLoop } from "./cleanup-loop.js";
 import { Dispatcher, type DispatcherOptions } from "./dispatch.js";
@@ -76,10 +77,11 @@ export interface ControlPlane {
 }
 
 /**
- * PM Office / Ops are the standing pm Assignments whose newest token tells them
- * apart. The lookup runs on plain queries of the shared connection: it is also
- * called from inside a Dispatcher transaction, where opening another UnitOfWork
- * would fail.
+ * M4.5 (§7.1, §10.4): PM Office and PM Ops are the standing pm Assignments with
+ * `standing_mode` office / ops. The field is written once by `cardigan pm
+ * create` and backfilled for older rows at startup, so routing never has to
+ * guess from a token again. The token lookup stays as a read-only fallback for
+ * a legacy row that a dispatcher tick sees before the startup backfill.
  */
 export function standingResolver(
   store: Store,
@@ -99,7 +101,7 @@ export function standingResolver(
     kind: "pm_ops" | "pm_office",
     state: CommandState,
   ): AssignmentId | undefined => {
-    const wantOffice = kind === "pm_office";
+    const want = kind === "pm_office" ? "office" : "ops";
     for (const candidate of state.assignments) {
       if (
         candidate.scope !== "standing" ||
@@ -107,8 +109,13 @@ export function standingResolver(
         candidate.status !== "active"
       )
         continue;
-      const tools = tokensOf(project, candidate.id).at(-1)?.allowed_tools ?? [];
-      if (tools.includes("record_decision") === wantOffice) return candidate.id;
+      const newest = tokensOf(project, candidate.id).at(-1);
+      const mode =
+        candidate.standing_mode ??
+        (newest === undefined
+          ? undefined
+          : standingModeFromTools(newest.allowed_tools));
+      if (mode === want) return candidate.id;
     }
     return undefined;
   };

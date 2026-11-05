@@ -323,6 +323,7 @@ Standing Assignment (scope=project): PM Office, PM Ops — not tied to a WorkIte
 **Assignment**
 
 - 标识：`id`、`scope`（`work_item` | `standing`）、`work_item_id?`
+- 常驻模式（M4.5）：`standing_mode?`（`office` | `ops`），仅常驻 `pm` Assignment 使用，由 `cardigan pm create --office|--ops` 写入，之后不能修改；工作项级 Assignment 没有这个字段。旧的常驻行没有它时，按最新 Token 的工具范围推断一次并写回
 - 角色：`role_id`、`role_version`
 - 状态：`status`（业务状态）、`runtime_state`（运行状态）
 - 运行位置：`machine_id`、`runtime_ref`（JSON，见 §11.1）、`session_ref?`（Agent CLI 的会话 ID，由控制面记录，恢复时使用，见 D5）、`eta?`
@@ -693,7 +694,7 @@ M3.4 的 Runtime 接线只根据未结束的业务 Run 判断忙碌，不用 Har
 
 > 它们共享"项目事实"，不共享"对话噪声"。
 
-两个 Assignment 只靠最新一张 Token 的工具范围区分：PM Office 有 `record_decision`，PM Ops 没有。换 Token 时（`cardigan pm start`、Dispatcher 重开终端、`token issue`）必须沿用上一张的范围并与角色的工具取交集，永远不能比上一张更宽；否则一次重启就等于把 Ops 提升成 Office。首条提示同时写明当前是前台还是后台。
+两个 Assignment 靠 `standing_mode`（`office` | `ops`）区分，这是由 `cardigan pm create --office|--ops` 写入一次、之后不能修改的字段。Token 的工具范围由模式决定：office 取 `pm` 角色的工具，ops 去掉 `record_decision`；`cardigan pm start`、Dispatcher 重开终端、`token issue` 都按模式签发，所以 Ops 无论换多少次 Token 都拿不到 `record_decision`。首条提示同时写明当前是前台还是后台。旧数据没有这个字段时，按最新一张 Token 推断一次并写回，之后只看字段。
 
 ### 7.2 Event Router：先规则，后 PM
 
@@ -955,7 +956,7 @@ M2.1 的 Role 子集包含 role_id、version、display_name、kind、core_prompt
 | reviewer | work | 只读（按 SHA 检出） | 代码审核 | Claude Code（和 coder 用不同模型，交叉检查） |
 | tester | work | 只读（按 SHA 检出） | 测试验收；需要带对应能力标签的机器（如真机） | 接入移动端项目时再定 |
 
-`pm（office）` 和 `pm（ops）` 是同一个角色 `pm` 的两个常驻 Assignment（§7.1）：共用角色说明和项目规则，权限按 Assignment 区分，只有 office 能调用 `record_decision`。
+`pm（office）` 和 `pm（ops）` 是同一个角色 `pm` 的两个常驻 Assignment（§7.1）：共用角色说明和项目规则，权限按 Assignment 的 `standing_mode` 区分，只有 office 能调用 `record_decision`；模式在 `cardigan pm create --office|--ops` 时写入，之后不能修改。
 
 每张卡的 PM 验收工作项单独指派一个工作项级的 `pm` Assignment，开独立会话完成验收，不交给常驻的 PM Ops。这样验收会话只装这张卡的上下文，也符合 §9.3"只有验证型工作项的 Assignment 能提交审核"（2026-11-05 用户确认：效果优先，可以多开 PM 会话）。
 

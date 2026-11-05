@@ -1,5 +1,9 @@
 import type { Assignment, Notification } from "@cardigan/domain";
-import { openStore, type Store, tokensForAssignment } from "@cardigan/store";
+import {
+  backfillStandingModesInTransaction,
+  openStore,
+  type Store,
+} from "@cardigan/store";
 import { CliError, EXIT } from "./errors.js";
 import { resolveDataDir, resolveProject } from "./host.js";
 import type { CliIo } from "./io.js";
@@ -63,20 +67,23 @@ function standingRecipient(
   project_id: string,
   assignment_id: Assignment["id"],
 ): "pm_office" | "pm_ops" | undefined {
-  const assignment = store.uow.read((tx) =>
-    tx.assignments.get(project_id, assignment_id),
-  );
-  if (
-    assignment === undefined ||
-    assignment.scope !== "standing" ||
-    assignment.role_id !== "pm"
-  )
-    return undefined;
-  return tokensForAssignment(store.database, project_id as never, assignment_id)
-    .at(-1)
-    ?.allowed_tools.includes("record_decision")
-    ? "pm_office"
-    : "pm_ops";
+  // M4.5: the mode is data. A row written before the field existed is stamped
+  // from its newest token here, once, and then read from the field.
+  return store.uow.run((tx) => {
+    backfillStandingModesInTransaction(tx, project_id as never);
+    const assignment = tx.assignments.get(project_id as never, assignment_id);
+    if (
+      assignment === undefined ||
+      assignment.scope !== "standing" ||
+      assignment.role_id !== "pm"
+    )
+      return undefined;
+    return assignment.standing_mode === "office"
+      ? "pm_office"
+      : assignment.standing_mode === "ops"
+        ? "pm_ops"
+        : undefined;
+  });
 }
 
 /** `cardigan inbox` — pending, belled and failed notifications, grouped by owner. */

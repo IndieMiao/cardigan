@@ -25,6 +25,7 @@ export * from "./notification.js";
 export * from "./ports.js";
 export * from "./role.js";
 export * from "./runtime-port.js";
+export * from "./standing.js";
 export * from "./states.js";
 export * from "./templates.js";
 export * from "./transitions.js";

@@ -54,6 +54,7 @@ export {
   roleFromDocument,
   writeRole,
 } from "./roles.js";
+export { backfillStandingModesInTransaction } from "./standing.js";
 export {
   type AckEventsParams,
   type AckEventsResult,

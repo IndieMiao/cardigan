@@ -5,16 +5,22 @@ import type {
   WorkItemId,
 } from "@cardigan/domain";
 import {
+  applyStandingMode,
   assign,
   completeHumanAction,
   createCard,
   parseId,
+  standingTools,
 } from "@cardigan/domain";
 import {
   resolveExecutionConfig,
   secureDataDirectory,
 } from "@cardigan/runtime-herdr";
-import { openStore as openCardiganStore, type Store } from "@cardigan/store";
+import {
+  backfillStandingModesInTransaction,
+  openStore as openCardiganStore,
+  type Store,
+} from "@cardigan/store";
 import { type StartById, startAssignmentById } from "./assignment.js";
 import { CliError, EXIT } from "./errors.js";
 import {
@@ -356,12 +362,21 @@ function tokenIssue(args: readonly string[], io: CliIo): number {
         assignment.role_id,
         assignment.role_version,
       );
-      // A rotation keeps the assignment's own tool scope: re-issuing the Ops
-      // token must not hand it record_decision (that would silently promote it).
+      // M4.5: a standing PM's scope comes from its mode; a work-item
+      // Assignment keeps the scope it already had (never wider).
+      backfillStandingModesInTransaction(tx, project_id);
+      const current =
+        tx.assignments.get(project_id, assignment.id) ?? assignment;
       const previous = tx.tokensForAssignment(project_id, assignment.id).at(-1);
+      const allowed_tools =
+        current.scope === "standing" &&
+        current.role_id === "pm" &&
+        current.standing_mode !== undefined
+          ? standingTools(role.allowed_tools, current.standing_mode)
+          : (previous?.allowed_tools ?? role.allowed_tools);
       return issueTokenForAssignment(tx, project_id, assignment.id, {
         role_version: role.role_version,
-        allowed_tools: previous?.allowed_tools ?? role.allowed_tools,
+        allowed_tools,
       });
     });
 
@@ -391,15 +406,17 @@ interface StandingPm {
   readonly office: boolean;
 }
 
-/** Standing pm Assignments, told apart by the tools of their newest token. */
+/**
+ * Standing pm Assignments, told apart by `standing_mode` (§7.1 / M4.5). Rows
+ * written before the field existed are inferred and stamped here, once.
+ */
 function standingPmAssignments(
   store: Store,
   project_id: ProjectId,
 ): readonly StandingPm[] {
-  // The newest token's tool list is the only place Office and Ops differ, and
-  // it is readable through the write transaction context.
-  return store.uow.run((tx) =>
-    tx.assignments
+  return store.uow.run((tx) => {
+    backfillStandingModesInTransaction(tx, project_id);
+    return tx.assignments
       .list(project_id)
       .filter(
         (candidate) =>
@@ -407,14 +424,17 @@ function standingPmAssignments(
           candidate.role_id === "pm" &&
           candidate.status === "active",
       )
-      .map((assignment) => ({
-        assignment,
-        office: (
-          tx.tokensForAssignment(project_id, assignment.id).at(-1)
-            ?.allowed_tools ?? []
-        ).includes("record_decision"),
-      })),
-  );
+      .flatMap((assignment) =>
+        assignment.standing_mode === undefined
+          ? []
+          : [
+              {
+                assignment,
+                office: assignment.standing_mode === "office",
+              },
+            ],
+      );
+  });
 }
 
 /** An Assignment with an unfinished Run is already being served. */
@@ -616,10 +636,9 @@ function pmCreate(args: readonly string[], io: CliIo): number {
           EXIT.usage,
         );
       }
+      const mode = office ? ("office" as const) : ("ops" as const);
       // The Office may record decisions; Ops runs without that tool (§10.4).
-      const tools = office
-        ? latest.allowed_tools
-        : latest.allowed_tools.filter((tool) => tool !== "record_decision");
+      const tools = standingTools(latest.allowed_tools, mode);
       if (!office && tools.length === latest.allowed_tools.length) {
         throw new CliError(
           "PM 角色里没有 record_decision，无法区分 Ops；先运行 cardigan role add 补上",
@@ -627,9 +646,10 @@ function pmCreate(args: readonly string[], io: CliIo): number {
         );
       }
 
-      // §7.1 / §10.4: Office and Ops are two standing assignments of the same
-      // pm role. They are told apart by the tools their newest token carries,
-      // which is the only place the distinction lives (no domain field for it).
+      // §7.1 / §10.4 / M4.5: Office and Ops are two standing assignments of the
+      // same pm role, told apart by `standing_mode`. Rows written before the
+      // field existed get theirs from their newest token, once.
+      backfillStandingModesInTransaction(tx, project_id);
       const standing = tx.assignments
         .list(project_id)
         .filter(
@@ -638,28 +658,47 @@ function pmCreate(args: readonly string[], io: CliIo): number {
             candidate.role_id === "pm" &&
             candidate.status === "active",
         );
-      const isOffice = (id: Parameters<typeof tx.tokensForAssignment>[1]) =>
-        (
-          tx.tokensForAssignment(project_id, id).at(-1)?.allowed_tools ?? []
-        ).includes("record_decision");
       const existing = standing.find(
-        (candidate) => isOffice(candidate.id) === office,
+        (candidate) => candidate.standing_mode === mode,
       );
+      if (
+        existing === undefined &&
+        standing.some(
+          (candidate) =>
+            candidate.standing_mode === undefined &&
+            candidate.status === "active",
+        )
+      ) {
+        // A legacy row with no token to infer from cannot be matched; the user
+        // must resolve it explicitly rather than silently reuse it.
+        throw new CliError(
+          "有常驻 PM Assignment 没有模式且无法推断；先运行 cardigan token issue <A-n> 让它确定模式",
+          EXIT.usage,
+        );
+      }
 
-      const assignment: Assignment = existing ?? {
-        id: tx.ids.next(project_id, "assignment"),
-        scope: "standing",
-        role_id: "pm",
-        role_version: latest.role_version,
-        status: "active",
-        runtime_state: "not_provisioned",
-        machine_id: "local",
-        runtime_ref: null,
-        // A standing PM assignment has no domain command; it is project
-        // bootstrap data, like the project row itself.
-        mcp_token_id: office ? "pm-office" : "pm-ops",
-        created_at: new Date().toISOString(),
-      };
+      const stamped =
+        existing === undefined
+          ? applyStandingMode(
+              {
+                id: tx.ids.next(project_id, "assignment"),
+                scope: "standing",
+                role_id: "pm",
+                role_version: latest.role_version,
+                status: "active",
+                runtime_state: "not_provisioned",
+                machine_id: "local",
+                runtime_ref: null,
+                // A standing PM assignment has no domain command; it is project
+                // bootstrap data, like the project row itself.
+                mcp_token_id: office ? "pm-office" : "pm-ops",
+                created_at: new Date().toISOString(),
+              },
+              mode,
+            )
+          : applyStandingMode(existing, mode);
+      if (!stamped.ok) throw new CliError(stamped.error.message, EXIT.usage);
+      const assignment: Assignment = stamped.value;
       if (existing === undefined) {
         tx.assignments.put(project_id, assignment);
       }
