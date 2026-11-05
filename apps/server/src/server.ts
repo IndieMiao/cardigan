@@ -39,6 +39,21 @@ export interface StartServerOptions {
    * Git through the Agent in agent-ssh mode; tests get the local default.
    */
   readonly git?: GitBinding;
+  /**
+   * The Agent execution entry. agent-ssh mode cannot run workspace Git without
+   * it, so the server refuses to start rather than fall back to the host
+   * identity inside an Agent-writable repository (§3.4, §14).
+   */
+  readonly captureAgent?: (
+    command: "git",
+    args: readonly string[],
+  ) => Promise<
+    | { readonly ok: true; readonly value: string }
+    | {
+        readonly ok: false;
+        readonly error: { readonly code: string; readonly message: string };
+      }
+  >;
 }
 
 export interface CardiganServer {
@@ -72,14 +87,17 @@ export async function startCardiganServer(
   await secureDataDirectory({ ...execution, dataDir: config.dataDir });
   const store = options.store ?? Store.open({ dataDir: config.dataDir });
   const ownsStore = options.store === undefined;
+  // Use the execution that was resolved above (config or environment): the
+  // Agent mode decides whether workspace Git may run as the host at all.
   const git =
     options.git ??
     new ServerGit({
       store,
       dataDir: config.dataDir,
-      ...(config.execution === undefined
+      execution,
+      ...(options.captureAgent === undefined
         ? {}
-        : { execution: config.execution }),
+        : { captureAgent: options.captureAgent }),
     });
 
   // Assigned once, read from `close()`; the compiler cannot see through the

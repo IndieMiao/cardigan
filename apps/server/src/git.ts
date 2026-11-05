@@ -60,6 +60,12 @@ export interface ServerGitOptions {
         readonly error: { readonly code: string; readonly message: string };
       }
   >;
+  /**
+   * agent-ssh upload-pack command builder. Production uses `agentUploadPack`
+   * (the dedicated SSH entry); tests inject a local one so they can run the
+   * real fetch against a real Agent-layout clone.
+   */
+  readonly uploadPack?: (repository: string) => Promise<string>;
 }
 
 /** What the loops need; tests substitute a plain object. */
@@ -134,12 +140,16 @@ export interface GitBinding extends MergeGit, ReconcileGit {
 export class ServerGit implements GitBinding {
   private readonly central: CentralRepositoryService;
   private readonly worktrees: GitWorktreeService;
-  private readonly cache = new Map<ProjectId, CentralProject | undefined>();
 
   constructor(private readonly options: ServerGitOptions) {
     const execution =
       options.execution ??
       ({ mode: "local", dataDir: options.dataDir } as const);
+    if (execution.mode === "agent-ssh" && options.captureAgent === undefined)
+      throw new Error(
+        "agent-ssh Git requires the Agent execution entry; refusing to run workspace Git as the host",
+      );
+    const roots = gitRoots(execution, options.dataDir);
     const centralTransport = new CentralGitTransport({
       dataDir: options.dataDir,
       ...(execution.mode === "agent-ssh"
@@ -148,10 +158,15 @@ export class ServerGit implements GitBinding {
     });
     this.central = new CentralRepositoryService(centralTransport, {
       dataDir: options.dataDir,
+      // The base clone lives under the Agent root in agent-ssh mode; fetching
+      // deliveries and backups from the wrong path would fail every time.
+      repositoriesRoot: roots.repositoriesRoot,
       ...(execution.mode === "agent-ssh"
         ? {
-            uploadPack: (repository: string) =>
-              agentUploadPack(execution as AgentExecution, repository),
+            uploadPack:
+              options.uploadPack ??
+              ((repository: string) =>
+                agentUploadPack(execution as AgentExecution, repository)),
           }
         : {}),
     });
@@ -162,16 +177,13 @@ export class ServerGit implements GitBinding {
     this.worktrees = new GitWorktreeService(
       new LocalGitTransport("git", 30_000, workspace),
       this.central,
-      {
-        dataDir: options.dataDir,
-        ...gitRoots(execution, options.dataDir),
-      },
+      { dataDir: options.dataDir, ...roots },
     );
   }
 
   /** The central-repository descriptor of a project, or nothing without a repo. */
   projectOf(project_id: ProjectId): CentralProject | undefined {
-    if (this.cache.has(project_id)) return this.cache.get(project_id);
+    // No cache: `cardigan project set-repo` must take effect without a restart.
     const record: ProjectRecord | undefined = this.options.store.getProject(
       project_id as never,
     );
@@ -183,7 +195,6 @@ export class ServerGit implements GitBinding {
             source_repo: record.repo_path,
             base_branch: record.base_branch ?? "main",
           };
-    this.cache.set(project_id, project);
     return project;
   }
 

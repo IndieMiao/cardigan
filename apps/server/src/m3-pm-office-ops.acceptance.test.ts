@@ -40,6 +40,7 @@ import { Store } from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, expect, test } from "vitest";
+import { stubGit } from "./git-test-support.js";
 import { startCardiganServer } from "./index.js";
 
 const ok = <T>(value: T): RuntimeResult<T> => ({ ok: true, value });
@@ -254,6 +255,9 @@ async function pmFixture() {
     config: { dataDir, host: "localhost", port: 0 },
     warn: () => {},
     log: () => {},
+    // This fixture has no repository: routing is the subject, so the delivery
+    // verifier accepts the fabricated SHA (the Git path is covered elsewhere).
+    git: stubGit(),
     dispatcher: {
       runtime,
       clock,

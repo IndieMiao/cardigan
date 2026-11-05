@@ -131,7 +131,10 @@ export class MergeExecutor {
     if (!already) this.record(project_id, plan, { kind: "failed", reason });
   }
 
-  /** One attempt; `false` means "stop this round" (stale or a recorded failure). */
+  /**
+   * One attempt; `false` means "stop this round". Only a `stale` baseline stops
+   * the round: a broken card must not block the other cards of its project.
+   */
   private async merge(
     project: CentralProject,
     plan: MergePlan,
@@ -170,7 +173,7 @@ export class MergeExecutor {
           error instanceof Error ? error.message : String(error)
         }`,
       );
-      return false;
+      return true;
     }
   }
 

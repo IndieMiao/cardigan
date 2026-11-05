@@ -268,6 +268,35 @@ test("a baseline advanced behind the loop's back is not overwritten", async () =
   expect(f.card().status).toBe("done");
 });
 
+test("a broken card does not stop the other cards of the same project", async () => {
+  // The first card's delivery is pinned to the wrong SHA; the second is fine.
+  const broken = m4Scenario(f, "auto"),
+    healthy = m4Scenario(f, "auto"),
+    brokenSha = agentCommit("agent/C-1/W-1", "broken.txt", "broken\n"),
+    healthySha = agentCommit("agent/C-3/W-4", "healthy.txt", "healthy\n"),
+    wrong = agentCommit("agent/C-9/W-9", "other.txt", "other\n");
+  const brokenDelivery = await acceptThroughMergeGate(f, broken, brokenSha);
+  await pin(brokenDelivery.product.id, wrong);
+  const healthyDelivery = await acceptThroughMergeGate(f, healthy, healthySha);
+  await pin(healthyDelivery.product.id, healthySha);
+  await executor().tick(f.project_id);
+
+  expect(f.card(broken.card.id).status).toBe("awaiting_merge");
+  expect(f.card(healthy.card.id).status).toBe("done");
+  expect(
+    f
+      .state()
+      .events.filter(
+        (event) =>
+          event.type === "merge_failed" && event.card_id === broken.card.id,
+      ),
+  ).toHaveLength(1);
+  const repository = await central.ensureCentral(project);
+  expect(
+    git(repository, "cat-file", "-p", (await baseline()) as string),
+  ).toContain(`Merge ${healthy.card.id}/${healthy.development.id} delivery`);
+});
+
 test("a delivery whose pinned ref does not match is reported, not merged", async () => {
   const scenario = m4Scenario(f, "auto");
   const sha = agentCommit("agent/C-1/W-1", "feature.txt", "feature\n"),
