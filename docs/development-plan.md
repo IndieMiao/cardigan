@@ -428,11 +428,13 @@ Standing Assignment (scope=project): PM Office, PM Ops — not tied to a WorkIte
 
 ### 4.4 状态机
 
-**Card**：`backlog → todo → in_progress → review → done`；任意状态都可以转为 `cancelled`。
+**Card**：`backlog → todo → in_progress → review → awaiting_merge → done`；任意状态都可以转为 `cancelled`。
 
 - `backlog`、`todo` 属于规划，由 PM 设置；`in_progress`、`review` 由工作项推导，规则自动更新（D4）。
-- **`done` 不由规则自动触发**：主产出工作项的负责人提交完成申请（`kind=card_completion` 的交付），写明逐条验收标准的对照、证据和已知遗留；卡片模板指定的审核者（默认 PM，可以配置为你）审核通过后，才变为 `done`。
-- 规则只做两件事：除本次完成审核项以外的必需工作项都通过后，提醒负责人可以申请；收到申请时校验前置条件（排除本次完成审核项，其余 `required` 工作项处于成功终态；没有 open 且 `blocking` 的 Decision），并把结果展示给审核者。未满足的条件必须列为已知遗留，并关联后续卡片。本次完成审核项（开发卡中的 PM 验收）在审核通过后才置为 passed，卡片才置为 done，避免前置条件循环（2026-11-04 用户确认）。
+- **`done` 不由规则自动触发**：主产出工作项的负责人提交完成申请（`kind=card_completion` 的交付），写明逐条验收标准的对照、证据和已知遗留；卡片模板指定的审核者（默认 PM，可以配置为你）审核通过后，经 `completion_review_passed` 进入 `awaiting_merge`；没有 Git code 交付时同命令经 `merge_not_required` 到 `done`，否则仅合并成功经 `merge_succeeded` 到 `done`。
+- 规则只做两件事：除本次完成审核项以外的必需工作项都通过后，提醒负责人可以申请；收到申请时校验前置条件（排除本次完成审核项，其余 `required` 工作项处于成功终态；没有 open 且 `blocking` 的 Decision），并把结果展示给审核者。未满足的条件必须列为已知遗留，并关联后续卡片。本次完成审核项（开发卡中的 PM 验收）在审核通过后才置为 passed，卡片再进入合并阶段，避免前置条件循环（2026-11-04 用户确认）。
+
+`awaiting_merge --merge_conflicted--> in_progress`，`awaiting_merge --cancel--> cancelled`。派生计算保留待合并状态，`resolution=done` 只在真正 done 时写入。待合并期间拒绝新交付和审核；冲突返回执行阶段后再按原流程交付，避免修改已确认的合并集合。
 
 **WorkItem（produce，产出型）**
 
@@ -441,6 +443,7 @@ todo --deps met--> ready --run starts--> in_progress --submit_delivery--> delive
 delivered --all required verifiers pass--> accepted
 delivered / accepted --submit_delivery (new version)--> delivered
 delivered --any reject--> changes_requested --rework run--> in_progress
+accepted --merge_conflicted--> changes_requested
 in_progress <--> blocked / waiting_decision
 any --> cancelled
 ```
@@ -1057,8 +1060,10 @@ agent-ssh 模式中，主机不能执行 Agent 可修改仓库的 Git 配置。�
 
 ### 12.5 合并
 
-- 只在中心合并：主机上的集成 clone 执行合并，并更新中心仓库的 main；需要时再推送到外部托管平台。
-- 前提：整卡验收通过，并且你确认（可按卡片模板配置）。
+- 只在主机独占的中心 bare 仓库内合并，不检出文件：依次 `merge-tree --write-tree`、`commit-tree`，全部成功后用 `update-ref <ref> <new> <old>` 比较更新基线。M4 不推送外部平台。
+- 前提：整卡完成审核通过、处于 awaiting_merge。模板 merge_policy 为 confirm / auto，开发卡默认 confirm；创建卡片时固定策略，旧卡缺省 confirm。主机可通过 CommandPorts.templates 注入模板配置，MCP 参数不能改策略。
+- confirm 自动生成 trigger=merge_confirmation 的人类 Decision（merge / hold），绑定当前完成申请。人或 PM Office 记录 merge 后才可合并；hold 保留待合并状态，人或 PM Ops 可用 requestMerge 重开一份确认，旧决定被 supersede。
+- 纯函数 mergePlan 校验待合并状态、当前已接受的完成申请、确认及其他阻塞；返回每个 produce 最新未 supersede 的已接受 Git code 交付，按工作项数字编号排序。缺少交付或交付尚未接受时拒绝；组装层还须校验固定 ref 与 SHA 一致。
 - 出现冲突时，为原 Coding Assignment 创建一个修复 Run。
 - 不在工作机的 worktree 里合并。
 

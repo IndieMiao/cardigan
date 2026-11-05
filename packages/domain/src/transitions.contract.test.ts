@@ -189,14 +189,14 @@ test("invariant 8: losing runtime contact does not complete or fail business wor
   });
 });
 
-test("invariant 13: only a completion review event can finish a card", () => {
+test("invariant 13: a completion review precedes the merge gate", () => {
   expect(transition("card", "in_progress", "completion_submitted")).toEqual({
     ok: true,
     value: "review",
   });
   expect(transition("card", "review", "completion_review_passed")).toEqual({
     ok: true,
-    value: "done",
+    value: "awaiting_merge",
   });
   expect(transition("card", "review", "completion_review_rejected")).toEqual({
     ok: true,

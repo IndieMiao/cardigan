@@ -1,6 +1,14 @@
 // Shared vocabulary for entity types and the transition tables.
 export const states = {
-  card: ["backlog", "todo", "in_progress", "review", "done", "cancelled"],
+  card: [
+    "backlog",
+    "todo",
+    "in_progress",
+    "review",
+    "awaiting_merge",
+    "done",
+    "cancelled",
+  ],
   produce: [
     "todo",
     "ready",

@@ -3,6 +3,7 @@ import type * as E from "../entities.js";
 import type { DomainError, ErrorCode, Result } from "../errors.js";
 import type * as I from "../ids.js";
 import type { Clock, IdAllocator } from "../ports.js";
+import type { CardTemplate } from "../templates.js";
 import { transition } from "../transitions.js";
 
 export interface CommandEntities {
@@ -32,6 +33,8 @@ export type EntityChange = {
 export interface CommandPorts {
   readonly clock: Clock;
   readonly ids: IdAllocator;
+  /** Host-provided template configuration, never MCP parameters. */
+  readonly templates?: readonly CardTemplate[];
 }
 export interface TokenRequest {
   readonly token_id: string;
@@ -55,7 +58,8 @@ type CommandName =
   | "queue_run"
   | "dispatch_run"
   | "acknowledge_run"
-  | "abort_dispatch";
+  | "abort_dispatch"
+  | "request_merge";
 export function ensure(
   condition: unknown,
   code: ErrorCode,
@@ -156,6 +160,7 @@ export class CommandDraft {
       ensure(
         role &&
           (tool === "acknowledge_run" ||
+            tool === "request_merge" ||
             (role.allowed_tools.includes(tool as E.ToolName) &&
               actor.allowed_tools.includes(tool as E.ToolName))),
         "forbidden_tool",

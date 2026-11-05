@@ -16,6 +16,7 @@ export interface CardTemplate {
   readonly require_acceptance_criteria: boolean;
   readonly primary_work_item_key: string;
   readonly completion_reviewer: Decider;
+  readonly merge_policy: "confirm" | "auto";
   readonly work_items: readonly TemplateWorkItem[];
 }
 export const PM_ACCEPTANCE_WORK_ITEM_KEY = "pm_acceptance";
@@ -26,6 +27,7 @@ export const developmentCardTemplate = {
   require_acceptance_criteria: true,
   primary_work_item_key: "development",
   completion_reviewer: "role:pm",
+  merge_policy: "confirm",
   work_items: [
     {
       key: "development",

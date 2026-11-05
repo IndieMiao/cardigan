@@ -10,6 +10,7 @@ export type {
 } from "./commands/core.js";
 export * from "./commands/delivery.js";
 export * from "./commands/launch.js";
+export { type MergePlan, mergePlan, requestMerge } from "./commands/merge.js";
 export * from "./commands/pm.js";
 export * from "./commands/queries.js";
 export * from "./commands/runtime.js";

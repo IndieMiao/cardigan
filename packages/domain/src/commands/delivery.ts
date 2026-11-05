@@ -26,6 +26,7 @@ import {
   unwrap,
 } from "./core.js";
 
+import { completionPassed } from "./merge.js";
 import { pendingReviewLimit, requestReviewLimit } from "./review-limit.js";
 import { activeWork, reviewRound, workCompleted } from "./workflow.js";
 
@@ -55,9 +56,9 @@ function inspect(d: CommandDraft, p: SubmitDeliveryParams) {
   );
   const card = d.card(item.card_id);
   ensure(
-    card.status !== "done" && card.status !== "cancelled",
+    !["done", "cancelled", "awaiting_merge"].includes(card.status),
     "illegal_transition",
-    "Card is closed",
+    "Card is closed or awaiting merge",
   );
   text(p.summary, "summary");
   ensure(
@@ -396,9 +397,9 @@ export function submitReview(
     const producer = d.work(target.work_item_id);
     const card = d.card(producer.card_id);
     ensure(
-      card.status !== "done" && card.status !== "cancelled",
+      !["done", "cancelled", "awaiting_merge"].includes(card.status),
       "illegal_transition",
-      "Card is closed",
+      "Card is closed or awaiting merge",
     );
     ensure(
       d.assignment?.scope === "work_item",
@@ -531,7 +532,7 @@ export function submitReview(
           ),
         ),
       });
-      if (target.kind === "card_completion")
+      if (target.kind === "card_completion" && value.blocking)
         d.put("cards", {
           ...card,
           status: unwrap(
@@ -543,9 +544,8 @@ export function submitReview(
                 : "completion_review_passed",
             ),
           ),
-          ...(value.blocking ? {} : { resolution: "done" as const }),
         });
-      else
+      else if (target.kind !== "card_completion")
         d.put(
           "work_items",
           d.move(
@@ -577,6 +577,8 @@ export function submitReview(
         run_id: run.id,
       },
     );
+    if (target.kind === "card_completion" && allPassed && !value.blocking)
+      completionPassed(d, card, target);
     if (limitReached) requestReviewLimit(d, item);
     return value;
   });

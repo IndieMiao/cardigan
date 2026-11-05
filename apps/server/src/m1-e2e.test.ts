@@ -205,7 +205,7 @@ afterEach(async () => {
   rmSync(dataDir, { recursive: true, force: true });
 });
 
-test("pm, coder and reviewer walk a dev card from creation to done", async () => {
+test("pm, coder and reviewer walk a dev card from creation to merge readiness", async () => {
   // --- host: a standing PM Office assignment with a token -------------------
   resetOutput();
   await host(["pm", "create", "--office"]);
@@ -511,8 +511,8 @@ test("pm, coder and reviewer walk a dev card from creation to done", async () =>
   const finalView = payload(
     await pm.callTool({ name: "get_card", arguments: { card_id: card.id } }),
   ) as { card: { status: string; resolution?: string } };
-  expect(finalView.card.status).toBe("done");
-  expect(finalView.card.resolution).toBe("done");
+  expect(finalView.card.status).toBe("awaiting_merge");
+  expect(finalView.card.resolution).toBeUndefined();
 
   // --- the host can re-issue a token, which revokes the previous one ------
   resetOutput();

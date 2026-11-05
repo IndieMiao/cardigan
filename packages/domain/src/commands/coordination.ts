@@ -359,15 +359,16 @@ export function recordDecision(
   ports: CommandPorts,
 ) {
   return command(state, actor, "record_decision", ports, (d) => {
-    ensure(
-      actor.kind === "assignment" &&
-        actor.role_id === "pm" &&
-        d.assignment?.scope === "standing" &&
-        actor.allowed_tools.includes("record_decision"),
-      "forbidden_tool",
-      "Only the PM Office assignment can record decisions",
-    );
     const decision = d.get("decisions", p.decision_id);
+    ensure(
+      (actor.kind === "human" && decision.trigger === "merge_confirmation") ||
+        (actor.kind === "assignment" &&
+          actor.role_id === "pm" &&
+          d.assignment?.scope === "standing" &&
+          actor.allowed_tools.includes("record_decision")),
+      "forbidden_tool",
+      "Only PM Office, or the human for merge confirmation, can record decisions",
+    );
     if (decision.card_id) d.card(decision.card_id);
     else d.projectAccess();
     text(p.raw_quote, "raw_quote");
@@ -392,7 +393,7 @@ export function recordDecision(
         option: p.option,
         rationale: p.rationale,
         resolved_by: decision.decider === "human" ? "human" : d.author,
-        via: "pm_office_chat",
+        via: actor.kind === "human" ? "needs_you" : "pm_office_chat",
         raw_quote: p.raw_quote,
         via_chain: [...(p.via_chain ?? []), d.author],
         ...(p.batch ? { batch: p.batch } : {}),

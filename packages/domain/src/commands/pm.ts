@@ -63,6 +63,13 @@ export function createCard(
       "Invalid priority",
     );
     for (const id of p.related_cards ?? []) d.card(id);
+    const template =
+      ports.templates?.find((t) => t.id === "dev") ?? developmentCardTemplate;
+    ensure(
+      ["confirm", "auto"].includes(template.merge_policy),
+      "validation_failed",
+      "Invalid template merge policy",
+    );
     const id = d.ids.next(state.project_id, "card");
     const card: Card = {
       id,
@@ -76,6 +83,7 @@ export function createCard(
       priority: p.priority ?? 0,
       status: "todo",
       template: "dev",
+      merge_policy: template.merge_policy,
       out_of_scope: p.out_of_scope ?? [],
       related_cards: p.related_cards ?? [],
       created_by: d.author,

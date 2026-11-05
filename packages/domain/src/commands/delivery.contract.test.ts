@@ -224,7 +224,7 @@ test("invariants 11, 14: stale SHA, foreign verifier and client verdict cannot b
   ).toBe("conditional");
 });
 
-test("invariant 13: code review enables completion; only the PM completion review finishes the card", async () => {
+test("invariant 13: code review enables completion; the PM completion review opens the merge gate", async () => {
   let state = fixture();
   const product = value(await deliver(state));
   state = apply(state, product);
@@ -277,7 +277,9 @@ test("invariant 13: code review enables completion; only the PM completion revie
     ),
   );
   state = apply(state, reviewed);
-  expect(state.cards.find((c) => c.id === id("card", 1))?.status).toBe("done");
+  expect(state.cards.find((c) => c.id === id("card", 1))?.status).toBe(
+    "awaiting_merge",
+  );
   expect(
     state.work_items.find((w) => w.template_key === "pm_acceptance")?.status,
   ).toBe("passed");

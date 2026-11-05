@@ -109,7 +109,12 @@ export function deriveCardStatus(
   workItems: readonly Pick<WorkItem, "kind" | "status" | "required">[],
   completion?: Pick<Delivery, "kind" | "status">,
 ): CardStatus {
-  if (current === "done" || current === "cancelled") return current;
+  if (
+    current === "done" ||
+    current === "cancelled" ||
+    current === "awaiting_merge"
+  )
+    return current;
   if (
     completion?.kind === "card_completion" &&
     completion.status === "submitted"
