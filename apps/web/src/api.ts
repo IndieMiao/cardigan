@@ -298,7 +298,65 @@ export interface NeedsPage {
   }[];
 }
 
+export interface SnapshotData {
+  readonly cards: readonly CardView[];
+  readonly in_progress: readonly CardView[];
+  readonly in_review: readonly CardView[];
+  readonly blocked: readonly {
+    card_id: string;
+    work_item_id: string;
+    label: string;
+  }[];
+  readonly waiting: { human: readonly string[]; agent: readonly string[] };
+  readonly recent_deliveries: readonly {
+    id: string;
+    card_id: string | null;
+    summary: string;
+    status: string;
+  }[];
+}
+export interface RunView {
+  readonly id: string;
+  readonly assignment_id: string;
+  readonly status: string;
+  readonly kind: string;
+  readonly model: string;
+  readonly role_version: number;
+  readonly agent_cli_version: string;
+  readonly started_at?: string;
+  readonly finished_at?: string;
+  readonly summary: string;
+}
+export interface ExecutionAssignment {
+  readonly id: string;
+  readonly role_id: string;
+  readonly role_version: number;
+  readonly status: string;
+  readonly runtime_state: string;
+  readonly machine_id: string;
+  readonly standing_mode: string | null;
+  readonly card_id: string | null;
+  readonly card_status: string | null;
+  readonly work_item_id: string | null;
+  readonly worktree_path: string | null;
+  readonly branch: string | null;
+  readonly session_ref: string | null;
+  readonly runtime_ref: {
+    terminal_ref: string;
+    runtime_machine: string;
+  } | null;
+  readonly last_mcp_activity_at: string | null;
+  readonly cursors: readonly { card_id: string; acked_seq: number }[];
+}
+export interface ExecutionData {
+  readonly assignments: readonly ExecutionAssignment[];
+  readonly runs: readonly RunView[];
+  readonly machines: readonly { id: string; label: string; status: string }[];
+}
+
 export interface CardiganClient {
+  snapshot(projectId: string): Promise<SnapshotData>;
+  execution(projectId: string): Promise<ExecutionData>;
   needsYou(projectId: string): Promise<NeedsPage>;
   recordDecision(
     projectId: string,
@@ -400,6 +458,16 @@ export class HttpCardiganClient implements CardiganClient {
     );
   }
 
+  snapshot(projectId: string): Promise<SnapshotData> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/snapshot`,
+    );
+  }
+  execution(projectId: string): Promise<ExecutionData> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/execution`,
+    );
+  }
   needsYou(projectId: string): Promise<NeedsPage> {
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/needs-you`,

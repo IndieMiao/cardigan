@@ -510,7 +510,16 @@ export function executionView(
     machines,
     assignments: state.assignments.map((assignment) => {
       const run = latestRun(assignment.id);
+      const card_id =
+        state.work_items.find((w) => w.id === assignment.work_item_id)
+          ?.card_id ?? null;
       return {
+        card_id,
+        card_status: state.cards.find((c) => c.id === card_id)?.status ?? null,
+        standing_mode:
+          assignment.scope === "standing"
+            ? (assignment.standing_mode ?? null)
+            : null,
         id: assignment.id,
         scope: assignment.scope,
         work_item_id: assignment.work_item_id ?? null,

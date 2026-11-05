@@ -10,7 +10,10 @@ import { useCallback, useEffect, useState } from "react";
 
 export type Route =
   | { readonly kind: "board"; readonly projectId: string }
-  | { readonly kind: "list" | "needs-you"; readonly projectId: string }
+  | {
+      readonly kind: "list" | "needs-you" | "snapshot" | "execution";
+      readonly projectId: string;
+    }
   | {
       readonly kind: "card";
       readonly projectId: string;
@@ -37,7 +40,10 @@ export function parseRoute(hash: string): Route | undefined {
   }
   if (
     segments.length === 3 &&
-    (segments[2] === "list" || segments[2] === "needs-you")
+    (segments[2] === "list" ||
+      segments[2] === "needs-you" ||
+      segments[2] === "snapshot" ||
+      segments[2] === "execution")
   ) {
     return { kind: segments[2], projectId };
   }

@@ -12,6 +12,8 @@ test("board, list and card routes round-trip", () => {
     { kind: "board", projectId: "p-fictional" },
     { kind: "list", projectId: "p-fictional" },
     { kind: "needs-you", projectId: "p-fictional" },
+    { kind: "snapshot", projectId: "p-fictional" },
+    { kind: "execution", projectId: "p-fictional" },
     { kind: "card", projectId: "p-fictional", cardId: "C-1" },
   ] as const) {
     expect(parseRoute(routeHash(route))).toEqual(route);
@@ -36,7 +38,7 @@ test("unknown or incomplete hashes have no route", () => {
     "#",
     "#/",
     "#/p/p-1",
-    "#/p/p-1/snapshot",
+    "#/p/p-1/not-a-view",
     "#/p//board",
     "#/projects/p-1/board",
     "#/p/p-1/cards",
