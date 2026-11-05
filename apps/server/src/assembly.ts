@@ -5,6 +5,7 @@ import type {
   ProjectId,
 } from "@cardigan/domain";
 import { type Store, tokensForAssignment } from "@cardigan/store";
+import { type CleanupExecutor, startCleanupLoop } from "./cleanup-loop.js";
 import { Dispatcher, type DispatcherOptions } from "./dispatch.js";
 import { dispatcherClock, type StandingResolver } from "./dispatch-inbox.js";
 import {
@@ -16,8 +17,14 @@ import {
   RuntimeMonitor,
   type RuntimeMonitorOptions,
 } from "./dispatch-monitor.js";
-import type { MergeGit } from "./git.js";
+import type { GitPhases } from "./git.js";
 import { type MergeExecutor, startMergeLoop } from "./merge-loop.js";
+import {
+  type BackupExecutor,
+  type ReconcileExecutor,
+  startBackupLoop,
+  startReconcileLoop,
+} from "./reconcile-loop.js";
 
 /**
  * M3.5: the control plane the server runs beside the MCP endpoint.
@@ -45,16 +52,22 @@ export interface ControlPlaneOptions {
    * M4.4: present when the host wired Git. Without it no merge can run, which
    * is what tests of the pure dispatcher want.
    */
-  readonly git?: MergeGit;
+  readonly git?: GitPhases;
   readonly mergeIntervalMs?: number;
+  readonly cleanupIntervalMs?: number;
+  readonly reconcileIntervalMs?: number;
+  readonly backupIntervalMs?: number;
   /** Tick failures are reported here; the loop retries on the next interval. */
   readonly onError?: (error: unknown) => void;
 }
 
 export interface ControlPlane {
   readonly done: Promise<void>;
-  /** The merge loop, for tests and for status output. */
+  /** The phase loops, exposed for tests and for status output. */
   readonly merge?: MergeExecutor;
+  readonly cleanup?: CleanupExecutor;
+  readonly reconcile?: ReconcileExecutor;
+  readonly backup?: BackupExecutor;
   /**
    * Stop scheduling, drain the current delivery, then stop the monitor; the
    * merge loop stops last so SIGTERM never interrupts a merge (§4 M4.4).
@@ -145,6 +158,7 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
     onError: (error) => options.onError?.(error),
   };
   const loop: DispatchLoop = startDispatchLoop(loopOptions);
+  const report = (error: unknown) => options.onError?.(error);
   const merge =
     options.git === undefined
       ? undefined
@@ -155,17 +169,70 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
           ...(options.mergeIntervalMs === undefined
             ? {}
             : { intervalMs: options.mergeIntervalMs }),
-          onError: (error) => options.onError?.(error),
+          onError: report,
         });
+  const cleanup =
+    options.git === undefined
+      ? undefined
+      : startCleanupLoop({
+          store: options.store,
+          git: options.git,
+          runtime: options.runtime,
+          clock,
+          ...(options.cleanupIntervalMs === undefined
+            ? {}
+            : { intervalMs: options.cleanupIntervalMs }),
+          onError: report,
+          report: (message) => options.onError?.(new Error(message)),
+        });
+  const reconcile =
+    options.git === undefined
+      ? undefined
+      : startReconcileLoop({
+          store: options.store,
+          git: options.git,
+          clock,
+          ...(options.reconcileIntervalMs === undefined
+            ? {}
+            : { intervalMs: options.reconcileIntervalMs }),
+          onError: report,
+          report: (message) => options.onError?.(new Error(message)),
+        });
+  const backup =
+    options.git === undefined
+      ? undefined
+      : startBackupLoop({
+          store: options.store,
+          git: options.git,
+          clock,
+          ...(options.backupIntervalMs === undefined
+            ? {}
+            : { intervalMs: options.backupIntervalMs }),
+          onError: report,
+          report: (message) => options.onError?.(new Error(message)),
+        });
+  const loops = [
+    loop.done,
+    merge?.loop.done,
+    cleanup?.loop.done,
+    reconcile?.loop.done,
+    backup?.loop.done,
+  ].filter((entry): entry is Promise<void> => entry !== undefined);
   return {
-    done:
-      merge === undefined
-        ? loop.done
-        : Promise.all([loop.done, merge.loop.done]).then(() => undefined),
+    done: Promise.all(loops).then(() => undefined),
     ...(merge === undefined ? {} : { merge: merge.executor }),
+    ...(cleanup === undefined ? {} : { cleanup: cleanup.executor }),
+    ...(reconcile === undefined ? {} : { reconcile: reconcile.executor }),
+    ...(backup === undefined ? {} : { backup: backup.executor }),
     stop: async () => {
+      // Dispatcher first (no new work), then the phases in a fixed order; each
+      // stop waits for its current tick, so SIGTERM never cuts a merge or a
+      // worktree removal in half.
       await loop.stop();
       await merge?.loop.stop();
+      await cleanup?.loop.stop();
+      await reconcile?.loop.stop();
+      await backup?.loop.stop();
     },
   };
 }

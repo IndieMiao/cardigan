@@ -40,7 +40,7 @@ function run(argv: string[]): Promise<number> {
 test("cardigan init creates the database and runs migrations", async () => {
   expect(await run(["init"])).toBe(0);
   expect(out.join("\n")).toContain(`数据库：${dataDir}`);
-  expect(out.join("\n")).toContain("schema 版本：5");
+  expect(out.join("\n")).toContain("schema 版本：6");
 
   const store = Store.open({ dataDir });
   try {
@@ -53,7 +53,7 @@ test("cardigan init creates the database and runs migrations", async () => {
   // Running it again is harmless and reports the same schema version.
   out = [];
   expect(await run(["init"])).toBe(0);
-  expect(out.join("\n")).toContain("schema 版本：5");
+  expect(out.join("\n")).toContain("schema 版本：6");
 });
 
 test("cardigan project create records a project", async () => {

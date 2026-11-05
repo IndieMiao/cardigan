@@ -1,5 +1,6 @@
 import { expect, test } from "vitest";
 import {
+  DEFAULT_INTERVALS,
   DEFAULT_MCP_HOST,
   DEFAULT_MCP_PORT,
   LOCAL_ONLY_HINT,
@@ -12,6 +13,10 @@ test("defaults to the loopback address, port 3004 and .data", () => {
     execution: { mode: "local", dataDir: resolve(".data") },
     host: DEFAULT_MCP_HOST,
     port: DEFAULT_MCP_PORT,
+    mergeIntervalMs: DEFAULT_INTERVALS.merge,
+    cleanupIntervalMs: DEFAULT_INTERVALS.cleanup,
+    reconcileIntervalMs: DEFAULT_INTERVALS.reconcile,
+    backupIntervalMs: DEFAULT_INTERVALS.backup,
   });
 });
 
@@ -73,6 +78,10 @@ test("reads data dir and port from the environment", () => {
     execution: { mode: "local", dataDir: "/srv/cardigan/data" },
     host: DEFAULT_MCP_HOST,
     port: 0,
+    mergeIntervalMs: DEFAULT_INTERVALS.merge,
+    cleanupIntervalMs: DEFAULT_INTERVALS.cleanup,
+    reconcileIntervalMs: DEFAULT_INTERVALS.reconcile,
+    backupIntervalMs: DEFAULT_INTERVALS.backup,
   });
 });
 

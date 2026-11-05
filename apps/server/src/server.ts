@@ -129,10 +129,23 @@ export async function startCardiganServer(
   let plane: ControlPlane | undefined;
   if (options.dispatcher !== undefined) {
     try {
+      const mergeIntervalMs =
+          options.dispatcher.mergeIntervalMs ?? config.mergeIntervalMs,
+        cleanupIntervalMs =
+          options.dispatcher.cleanupIntervalMs ?? config.cleanupIntervalMs,
+        reconcileIntervalMs =
+          options.dispatcher.reconcileIntervalMs ?? config.reconcileIntervalMs,
+        backupIntervalMs =
+          options.dispatcher.backupIntervalMs ?? config.backupIntervalMs;
       plane = startControlPlane({
         ...options.dispatcher,
         store,
         git,
+        // Test overrides win; otherwise the server configuration decides.
+        ...(mergeIntervalMs === undefined ? {} : { mergeIntervalMs }),
+        ...(cleanupIntervalMs === undefined ? {} : { cleanupIntervalMs }),
+        ...(reconcileIntervalMs === undefined ? {} : { reconcileIntervalMs }),
+        ...(backupIntervalMs === undefined ? {} : { backupIntervalMs }),
       });
     } catch (error) {
       await mcp.close();

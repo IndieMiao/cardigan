@@ -456,8 +456,9 @@ export async function acceptThroughMergeGate(
   fixture: M4Fixture,
   scenario: M4Scenario,
   sha: string,
+  worktree?: { readonly path: string; readonly branch: string },
 ) {
-  fixture.startRun(scenario.coder);
+  fixture.startRun(scenario.coder, worktree);
   const product = await fixture.deliver(
     scenario.coder,
     scenario.development.id,
