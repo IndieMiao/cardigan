@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RuntimeRef } from "@cardigan/domain";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { agentSshCommand } from "./agent-ssh.js";
+import { agentSshCommand, agentUploadPack } from "./agent-ssh.js";
 import type { HcClient } from "./client.js";
 import {
   type ExecutionConfig,
@@ -267,4 +267,33 @@ test("credential permissions and the remote hc version are validated before laun
     ok: false,
     error: { code: "invalid_launch" },
   });
+});
+
+test("M4.2 upload-pack uses the dedicated SSH policy and rejects unbound paths or unsafe credentials", async () => {
+  const command = await agentUploadPack(
+    execution,
+    join(execution.agentRoot, "repos", "project"),
+  );
+  for (const option of [
+    "upload-pack",
+    "agent@localhost",
+    "IdentitiesOnly=yes",
+    "IdentityAgent=none",
+    "ForwardAgent=no",
+    "StrictHostKeyChecking=yes",
+    "GIT_CONFIG_GLOBAL=/dev/null",
+  ])
+    expect(command).toContain(option);
+  for (const path of [
+    "relative",
+    execution.dataDir,
+    join(execution.agentRoot, "worktrees", "project", "A-1"),
+  ])
+    await expect(agentUploadPack(execution, path)).rejects.toThrow(
+      /base repository/,
+    );
+  await chmod(execution.identityFile, 0o644);
+  await expect(
+    agentUploadPack(execution, join(execution.agentRoot, "repos", "project")),
+  ).rejects.toThrow(/0600/);
 });

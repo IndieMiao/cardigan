@@ -130,3 +130,15 @@ test("invariants 9, 14: central ref writes require an expected value and expose 
     [string, string, string, string | null]
   >();
 });
+
+test("invariant 14: central verification reports object format, type and commit distance", () => {
+  expectTypeOf<GitCentralPort["objectFormat"]>().returns.toEqualTypeOf<
+    Promise<"sha1" | "sha256">
+  >();
+  expectTypeOf<GitCentralPort["objectType"]>().returns.toEqualTypeOf<
+    Promise<string | undefined>
+  >();
+  expectTypeOf<GitCentralPort["countCommits"]>().returns.toEqualTypeOf<
+    Promise<number>
+  >();
+});

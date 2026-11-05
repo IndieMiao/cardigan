@@ -96,14 +96,24 @@ export class CentralGitTransport implements GitCentralPort {
       throw new Error("Git source must be an absolute local repository path");
     return realpath(path);
   }
-  async ensureBare(source: string, repository: string) {
+  private async agentSource(source: string, canonical: string) {
+    if (!this.options.agentRoot) return false;
+    const configured = resolve(this.options.agentRoot);
+    const actual = await realpath(configured).catch((error) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return configured;
+      throw error;
+    });
+    return [configured, actual].some(
+      (root) => within(root, resolve(source)) || within(root, canonical),
+    );
+  }
+  async ensureBare(source: string, repository: string, baseline: string) {
     if (dirname(repository) !== this.root)
       throw new Error("Unexpected central repository path");
     const local = await this.source(source);
-    if (
-      this.options.agentRoot &&
-      within(resolve(this.options.agentRoot), local)
-    )
+    if (await this.agentSource(this.root, this.root))
+      throw new Error("Central root must be outside the Agent workspace");
+    if (await this.agentSource(source, local))
       throw new Error("Registered source must not be an Agent repository");
     await mkdir(this.root, { recursive: true, mode: 0o700 });
     await this.privateDirectory(this.root);
@@ -123,6 +133,8 @@ export class CentralGitTransport implements GitCentralPort {
           "true"
         )
           throw new Error("Central clone must be bare");
+        if (!(await this.readRef(stage, baseline)))
+          throw new Error("Registered baseline branch is missing");
         await this.checked(stage, [
           "config",
           "--local",
@@ -163,16 +175,13 @@ export class CentralGitTransport implements GitCentralPort {
     uploadPack?: string,
   ) {
     const local = await this.source(source);
-    if (
-      this.options.agentRoot &&
-      within(resolve(this.options.agentRoot), local) &&
-      !uploadPack
-    )
+    if ((await this.agentSource(source, local)) && !uploadPack)
       throw new Error("Agent fetch requires an Agent upload-pack entry");
     await this.checked(repository, [
       "fetch",
       "--atomic",
       "--no-tags",
+      "--no-prune",
       "--no-write-fetch-head",
       "--no-auto-maintenance",
       ...(uploadPack ? [`--upload-pack=${uploadPack}`] : []),
@@ -204,6 +213,39 @@ export class CentralGitTransport implements GitCentralPort {
     ]);
     if (r.code > 1) throw new Error(r.stderr);
     return r.code === 0;
+  }
+  async objectFormat(repository: string) {
+    const format = await this.checked(repository, [
+      "rev-parse",
+      "--show-object-format",
+    ]);
+    if (format !== "sha1" && format !== "sha256")
+      throw new Error("Unsupported Git object format");
+    return format;
+  }
+  async objectType(repository: string, sha: string) {
+    if (!/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(sha))
+      throw new Error("Invalid full object SHA");
+    const r = await this.command(repository, ["cat-file", "-t", sha]);
+    if (r.code === 128) return undefined;
+    if (r.code !== 0)
+      throw new Error(r.stderr || "Cannot read Git object type");
+    return r.stdout;
+  }
+  async countCommits(repository: string, base: string, head: string) {
+    if (
+      ![base, head].every((sha) => /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(sha))
+    )
+      throw new Error("Invalid recorded base or delivery SHA");
+    return Number(
+      await this.checked(repository, [
+        "rev-list",
+        "--count",
+        "--end-of-options",
+        `${base}..${head}`,
+        "--",
+      ]),
+    );
   }
   async compareAndSwapRef(
     repository: string,
