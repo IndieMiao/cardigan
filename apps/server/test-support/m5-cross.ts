@@ -150,6 +150,7 @@ export async function m5Cross() {
     web,
     staticDir,
     call,
+    mcp: f.call,
     projectPath,
     password,
     login,
