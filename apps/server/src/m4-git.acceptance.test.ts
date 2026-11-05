@@ -305,8 +305,8 @@ test("G10 §3.6: a worktree retained after manual release is not an orphan", asy
   expect(existsSync(path)).toBe(true);
 });
 
-// Defect: an absent active worktree only reports stale_registration while Git still registers it.
-test.fails("G11 §3.6: a missing active worktree can also have a stale Git registration", async () => {
+// Plan v5 / #118: an absent active worktree also reports missing despite its stale registration.
+test("G11 §3.6: a missing active worktree can also have a stale Git registration", async () => {
   const s = await m4Cross();
   f = s;
   await s.start(s.primary.owner);
