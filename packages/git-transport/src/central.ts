@@ -341,4 +341,14 @@ export class CentralGitTransport implements GitCentralPort {
       throw new Error("commit-tree did not return a commit id");
     return sha;
   }
+  async isReachable(repository: string, sha: string) {
+    if (!fullSha.test(sha)) throw new Error("Invalid full commit SHA");
+    const refs = await this.checked(repository, [
+      "for-each-ref",
+      "--count=1",
+      "--format=%(refname)",
+      `--contains=${sha}`,
+    ]);
+    return refs.length > 0;
+  }
 }

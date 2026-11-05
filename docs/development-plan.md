@@ -1040,7 +1040,7 @@ GitWorktreeService 经 domain 的 GitWorktreePort 调用 LocalGitTransport，并
 
 write 工作项从 fetch 后的 origin/<base_branch> 当前提交创建 agent/<card>/<work_item>；返回 worktree_path、branch、base_sha 供 M2.6 持久化到 Assignment。既有目录必须是该基础 clone 登记的 worktree 且分支匹配，复用时不 reset、不重建、不移动工作项自己的提交或未提交文件；有已记录 base_sha 时保留它，尚未记录时返回现有 HEAD。readonly 必须提供目标提交 SHA，创建 detached worktree；旧目录目标不一致则拒绝，M2 不自动切换已存在的审核目录。detached 表示不挂分支，不等于文件系统只读权限。
 
-worktree=none 跳过 Git。isDirty 包含已跟踪、暂存和未跟踪改动，仅查询。GitWorktreePort 不暴露 push 或 worktree 删除；外部目录、错误分支、错误来源一律拒绝覆盖。不同项目的同号 Assignment 可以在同一个 worktrees 根目录下并存，各自使用独立的基础 clone 和项目子目录，提交和未提交文件互不影响。
+worktree=none 跳过 Git。isDirty 包含已跟踪、暂存和未跟踪改动，仅查询。GitWorktreePort 不暴露 push；M4.3 起另有 `changes`（改动文件清单）、`diffHead`、`removeWorktree(force)`、`deleteBranch`，只由清理流程在完成备份和可删判定后调用，参数必须显式给出 `force`。外部目录、错误分支、错误来源一律拒绝覆盖。不同项目的同号 Assignment 可以在同一个 worktrees 根目录下并存，各自使用独立的基础 clone 和项目子目录，提交和未提交文件互不影响。
 
 agent-ssh 模式中，主机不能执行 Agent 可修改仓库的 Git 配置。主机从私有中心仓库生成包含 heads 和 refs/cardigan/deliveries/* 的 bundle，在受保护的 inputs/<project_id> 父层发布 0640 的 source.bundle；它不是新的远端或 Git 凭据。基础 clone 从该 bundle 创建，后续 fetch 同一 bundle；所有共享仓库的 Git 操作通过配置好的 Agent 执行入口运行。repos 和 worktrees 的父层保持 2750，主机预建 2770 叶子供 Agent 写入。失败的非空临时 clone 不由主机递归删除，留待 M4 显式清理。
 
@@ -1075,8 +1075,8 @@ GitDeliveryVerifier 的实例绑定项目，因为 Assignment 编号仅在项目
 ### 12.6 清理与对账
 
 - 合并或取消后执行 `release`。worktree 有未提交修改时，在 Needs You 里给出"查看 Diff / 保留 / 强制清理"。
-- 定期对账：比对 `herdr worktree list` 与数据库，发现孤儿 worktree 和缺失的 worktree。
-- 未提交、尚未被主机拉取的修改，以及 ahead / behind 数据，由 Dispatcher 通过 SSH 在对应机器上执行 git 命令获取（Herdr 没有这个 API）。
+- 清理判定（M4.3 `removeWorktree`）：先做一次备份拉取，把分支提交保存进中心仓库；再取 worktree 的改动文件清单（含未跟踪）和分支顶端是否已在中心仓库的某个 ref 里。有任一问题且未强制时返回 `needs_decision` 并附改动摘要，worktree、分支和提交都保留；强制清理时先把 `git diff HEAD` 和未跟踪文件清单写到主机目录 `<data>/cleanup/<project_id>/<assignment_id>-<时间>.patch`（0600），再删除 worktree 和分支。clean 且提交已备份时直接删除。`diffWorktree` 给 `cardigan worktree diff` 提供同一份摘要和补丁。
+- 未提交、尚未被主机拉取的修改，以及 ahead / behind 数据，由 Dispatcher 通过 SSH 在对应机器上执行 git 命令获取（Herdr 没有这个 API）。agent-ssh 下这些仓库操作（`status`、`diff`、`worktree remove`、`branch -D`）一律经 Agent 执行入口，主机身份的 git 只在中心仓库里运行。
 
 ### 12.7 写锁
 

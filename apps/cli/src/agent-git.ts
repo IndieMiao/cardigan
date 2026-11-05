@@ -252,4 +252,28 @@ export class AgentGitTransport implements GitWorktreePort {
     this.exact(path, this.worktree);
     return this.commands.isDirty(path);
   }
+  /** §3.4: status and diff read Agent-writable files, so the Agent runs them. */
+  async changes(path: string) {
+    this.exact(path, this.worktree);
+    return this.commands.changes(path);
+  }
+  async diffHead(path: string) {
+    this.exact(path, this.worktree);
+    return this.commands.diffHead(path);
+  }
+  async removeWorktree(
+    repository: string,
+    path: string,
+    options: { readonly force: boolean },
+  ) {
+    await this.prepare();
+    this.exact(repository, this.repository);
+    this.exact(path, this.worktree);
+    return this.commands.removeWorktree(repository, path, options);
+  }
+  async deleteBranch(repository: string, branch: string) {
+    await this.prepare();
+    this.exact(repository, this.repository);
+    return this.commands.deleteBranch(repository, branch);
+  }
 }

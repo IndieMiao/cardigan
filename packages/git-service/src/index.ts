@@ -1,4 +1,5 @@
-import { join, resolve } from "node:path";
+import { mkdir, writeFile } from "node:fs/promises";
+import { isAbsolute, join, resolve } from "node:path";
 import type {
   Assignment,
   Card,
@@ -8,12 +9,17 @@ import type {
 } from "@cardigan/domain";
 import { parseId } from "@cardigan/domain";
 
-import type { CentralRepositoryService, SourceSync } from "./central.js";
+import type {
+  CentralProject,
+  CentralRepositoryService,
+  SourceSync,
+} from "./central.js";
 
 export {
   type CentralOptions,
   type CentralProject,
   CentralRepositoryService,
+  type MergeOutcome,
   type SourceSync,
 } from "./central.js";
 
@@ -38,11 +44,45 @@ export interface WorktreeOptions {
   readonly dataDir?: string;
   readonly repositoriesRoot?: string;
   readonly worktreesRoot?: string;
+  /** Where force-clean patches are written; defaults to `<dataDir>/cleanup`. */
+  readonly cleanupRoot?: string;
 }
+/** What a cleanup decision or a `worktree diff` shows the human. */
+export interface WorktreeChangeSummary {
+  readonly worktree_path: string;
+  readonly branch?: string;
+  readonly head_sha: string;
+  readonly tracked: readonly string[];
+  readonly untracked: readonly string[];
+  /** The branch tip is reachable from a ref of the central repository. */
+  readonly reachable: boolean;
+}
+export interface WorktreeDiff extends WorktreeChangeSummary {
+  /** `git diff HEAD`; untracked files are listed separately and not inlined. */
+  readonly patch: string;
+}
+export interface RemoveWorktreeInput {
+  readonly project: CentralProject;
+  readonly assignment: Assignment;
+  readonly force: boolean;
+}
+export type RemoveWorktreeOutcome =
+  | {
+      readonly status: "removed";
+      readonly head_sha: string;
+      /** Present when a dirty worktree was force-cleaned. */
+      readonly patch_path?: string;
+    }
+  | {
+      readonly status: "needs_decision";
+      readonly summary: WorktreeChangeSummary;
+    };
+
 /** Application policy; Git process/file IO is injected through the domain port. */
 export class GitWorktreeService {
   private readonly repositories: string;
   private readonly worktrees: string;
+  private readonly cleanup: string;
   constructor(
     private readonly git: GitWorktreePort,
     private readonly central: CentralRepositoryService,
@@ -55,6 +95,7 @@ export class GitWorktreeService {
     this.worktrees = resolve(
       options.worktreesRoot ?? join(dataDir, "agent", "worktrees"),
     );
+    this.cleanup = resolve(options.cleanupRoot ?? join(dataDir, "cleanup"));
   }
   async ensureWorktree(
     input: EnsureWorktreeInput,
@@ -147,6 +188,133 @@ export class GitWorktreeService {
   }
   isDirty(worktree_path: string): Promise<boolean> {
     return this.git.isDirty(worktree_path);
+  }
+
+  /** The worktree this service owns for the Assignment, or a rejection. */
+  private worktreeOf(project_id: string, assignment: Assignment) {
+    if (!/^[a-zA-Z0-9_][a-zA-Z0-9._-]*$/u.test(project_id))
+      throw new Error("Invalid project path component");
+    if (
+      !parseId("assignment", assignment.id).ok ||
+      assignment.scope !== "work_item" ||
+      !assignment.worktree_path ||
+      !isAbsolute(assignment.worktree_path)
+    )
+      throw new Error(
+        "Cleanup requires a work-item Assignment with an absolute worktree path",
+      );
+    const path = join(this.worktrees, project_id, assignment.id);
+    if (resolve(assignment.worktree_path) !== path)
+      throw new Error("Assignment worktree is outside its project root");
+    return {
+      path,
+      branch: assignment.branch,
+      repository: join(this.repositories, project_id),
+    };
+  }
+
+  /** §3.6 step 1–2: back the branch up, then judge what a removal would lose. */
+  private async changeSummary(
+    project: CentralProject,
+    assignment: Assignment,
+  ): Promise<WorktreeChangeSummary> {
+    const worktree = this.worktreeOf(project.project_id, assignment);
+    // The backup fetch runs first: a commit that only exists in this worktree
+    // must reach the central repository before anyone decides to delete it.
+    await this.central.backupAgentBranches(project, "local");
+    const registered = (await this.git.listWorktrees(worktree.repository)).find(
+        (entry) => resolve(entry.path) === worktree.path,
+      ),
+      changes = await this.git.changes(worktree.path);
+    if (registered === undefined)
+      throw new Error("Worktree is not registered in the base clone");
+    const head_sha = registered.head;
+    return {
+      worktree_path: worktree.path,
+      ...(worktree.branch === undefined ? {} : { branch: worktree.branch }),
+      head_sha,
+      tracked: changes.tracked,
+      untracked: changes.untracked,
+      reachable: await this.central.hasCommit(project, head_sha),
+    };
+  }
+
+  /** `cardigan worktree diff <A-n>`: the summary plus the tracked diff. */
+  async diffWorktree(input: {
+    readonly project: CentralProject;
+    readonly assignment: Assignment;
+  }): Promise<WorktreeDiff> {
+    const summary = await this.changeSummary(input.project, input.assignment);
+    return {
+      ...summary,
+      patch: await this.git.diffHead(summary.worktree_path),
+    };
+  }
+
+  /**
+   * §3.6: remove a worktree only when nothing would be lost, or when the caller
+   * forced it. A forced removal writes the diff and the untracked list to the
+   * host's cleanup directory (0600) before deleting anything.
+   */
+  async removeWorktree(
+    input: RemoveWorktreeInput,
+  ): Promise<RemoveWorktreeOutcome> {
+    const summary = await this.changeSummary(input.project, input.assignment),
+      dirty = summary.tracked.length + summary.untracked.length > 0;
+    if (!input.force && (dirty || !summary.reachable))
+      return { status: "needs_decision", summary };
+    let patch_path: string | undefined;
+    if (input.force && dirty) {
+      const patch = await this.git.diffHead(summary.worktree_path);
+      patch_path = await this.writePatch(
+        input.project.project_id,
+        input.assignment,
+        summary,
+        patch,
+      );
+    }
+    const worktree = this.worktreeOf(
+      input.project.project_id,
+      input.assignment,
+    );
+    // The decision is made here; Git must not veto it because of a dirty file.
+    await this.git.removeWorktree(worktree.repository, worktree.path, {
+      force: true,
+    });
+    if (worktree.branch !== undefined)
+      await this.git.deleteBranch(worktree.repository, worktree.branch);
+    return {
+      status: "removed",
+      head_sha: summary.head_sha,
+      ...(patch_path === undefined ? {} : { patch_path }),
+    };
+  }
+
+  private async writePatch(
+    project_id: string,
+    assignment: Assignment,
+    summary: WorktreeChangeSummary,
+    patch: string,
+  ): Promise<string> {
+    const directory = join(this.cleanup, project_id);
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    const stamp = new Date().toISOString().replaceAll(":", "-"),
+      path = join(directory, `${assignment.id}-${stamp}.patch`),
+      header = [
+        `# project: ${project_id}`,
+        `# assignment: ${assignment.id}`,
+        `# branch: ${summary.branch ?? "(detached)"}`,
+        `# head: ${summary.head_sha}`,
+        "# untracked files:",
+        ...summary.untracked.map((name) => `#   ${name}`),
+        "",
+      ].join("\n");
+    await writeFile(path, `${header}${patch}`, {
+      encoding: "utf8",
+      mode: 0o600,
+      flag: "wx",
+    });
+    return path;
   }
 }
 

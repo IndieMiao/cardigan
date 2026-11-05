@@ -76,6 +76,13 @@ export class CentralRepositoryService {
     }
     return (await this.git.isAncestor(repo, next, old)) ? "ahead" : "diverged";
   }
+  /** Whether a commit is reachable from some ref of the central repository. */
+  async hasCommit(project: CentralProject, sha: string): Promise<boolean> {
+    if (!fullSha.test(sha)) throw new Error("Invalid full commit SHA");
+    const repository = await this.ensureCentral(project);
+    if ((await this.git.objectType(repository, sha)) !== "commit") return false;
+    return this.git.isReachable(repository, sha);
+  }
   /**
    * §3.5: linearize the planned deliveries on the central baseline.
    *

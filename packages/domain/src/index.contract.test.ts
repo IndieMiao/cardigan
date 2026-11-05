@@ -19,12 +19,18 @@ import {
   type WorkItemId,
 } from "./index.js";
 
-test("invariants 5, 9: Git port supports local worktree reuse without exposing push or deletion", () => {
+test("invariants 5, 9: Git ports never push and deletion is an explicit, forced decision", () => {
   expectTypeOf<GitWorktreePort>().not.toHaveProperty("push");
-  expectTypeOf<GitWorktreePort>().not.toHaveProperty("removeWorktree");
+  expectTypeOf<GitCentralPort>().not.toHaveProperty("push");
   expectTypeOf<GitWorktreePort["resolveCommit"]>().returns.toEqualTypeOf<
     Promise<string>
   >();
+  // M4.3 cleanup: removal is not implied by a query, it needs an explicit force.
+  expectTypeOf<
+    Parameters<GitWorktreePort["removeWorktree"]>[2]
+  >().toEqualTypeOf<{
+    readonly force: boolean;
+  }>();
 });
 
 test("invariant 1: roles contain capabilities and permissions, not runtime ownership", () => {

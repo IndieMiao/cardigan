@@ -2,7 +2,11 @@ import { execFile } from "node:child_process";
 import { access, mkdir, mkdtemp, realpath, rename, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
-import type { GitWorktree, GitWorktreePort } from "@cardigan/domain";
+import type {
+  GitWorktree,
+  GitWorktreeChanges,
+  GitWorktreePort,
+} from "@cardigan/domain";
 
 import { gitEnvironment, gitSafetyArguments } from "./hardening.js";
 
@@ -168,16 +172,58 @@ export class LocalGitTransport implements GitWorktreePort {
         head,
       ]);
   }
+  async changes(path: string): Promise<GitWorktreeChanges> {
+    // -z keeps paths literal (no quoting) and separates rename pairs with NUL.
+    const fields = (
+      await this.git(path, [
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+      ])
+    ).split("\0");
+    const tracked: string[] = [],
+      untracked: string[] = [];
+    for (let index = 0; index < fields.length; index += 1) {
+      const field = fields[index];
+      if (!field) continue;
+      const code = field.slice(0, 2),
+        name = field.slice(3);
+      // A rename or copy entry carries the original path as the next field.
+      if (code.startsWith("R") || code.startsWith("C")) index += 1;
+      if (code === "??") untracked.push(name);
+      else tracked.push(name);
+    }
+    return { tracked, untracked };
+  }
   async isDirty(path: string): Promise<boolean> {
-    return (
-      (
-        await this.git(path, [
-          "status",
-          "--porcelain=v1",
-          "-z",
-          "--untracked-files=all",
-        ])
-      ).length > 0
+    const changes = await this.changes(path);
+    return changes.tracked.length + changes.untracked.length > 0;
+  }
+  async diffHead(path: string): Promise<string> {
+    return this.git(path, ["diff", "HEAD", "--"]);
+  }
+  async removeWorktree(
+    repository: string,
+    path: string,
+    options: { readonly force: boolean },
+  ): Promise<void> {
+    const registered = (await this.listWorktrees(repository)).some(
+      (worktree) => worktree.path === resolve(path),
     );
+    if (!registered)
+      throw new Error("Worktree is not registered in this clone");
+    await this.git(repository, [
+      "worktree",
+      "remove",
+      ...(options.force ? ["--force"] : []),
+      "--",
+      path,
+    ]);
+  }
+  async deleteBranch(repository: string, branch: string): Promise<void> {
+    await this.git(repository, ["check-ref-format", "--branch", branch]);
+    // Deletion is force-only: the service has already backed the commits up.
+    await this.git(repository, ["branch", "-D", branch]);
   }
 }
