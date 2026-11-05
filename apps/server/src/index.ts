@@ -103,6 +103,13 @@ export {
 } from "./config.js";
 export { Dispatcher, type DispatcherOptions } from "./dispatch.js";
 export {
+  configDir,
+  createHostWiring,
+  type HostEnv,
+  type HostWiring,
+  loadLaunchFiles,
+} from "./host.js";
+export {
   acknowledgeInbox,
   routeProjectEvents,
   routeStreamEvents,
