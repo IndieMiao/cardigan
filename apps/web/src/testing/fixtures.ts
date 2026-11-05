@@ -166,6 +166,15 @@ export function fakeClient(
       counts: { total: 1, needs_me: 1, agent: 1 },
     }),
     card: async () => cardDetail(),
+    addComment: async (projectId, cardId, input) => ({
+      id: `${cardId}#99`,
+      body: input.body,
+      created_at: NOW,
+      project_id: projectId,
+    }),
+    uploadAttachment: async (_projectId, _cardId, input) => ({
+      id: input.attach_to.kind === "timeline_entry" ? "F-9" : "F-9",
+    }),
     ...overrides,
   };
 }

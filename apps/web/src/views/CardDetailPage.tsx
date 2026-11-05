@@ -123,7 +123,13 @@ export function CardDetailPage({
       <Relations detail={detail} projectId={projectId} />
       <section className="card-section" aria-label="时间线">
         <h2>时间线</h2>
-        <CommentBox mentions={mentionOptions(detail)} />
+        <CommentBox
+          client={client}
+          projectId={projectId}
+          cardId={cardId}
+          mentions={mentionOptions(detail)}
+          onPosted={() => reload()}
+        />
         <Timeline
           projectId={projectId}
           entries={detail.timeline}

@@ -213,6 +213,35 @@ export interface CardDetail {
   };
 }
 
+export interface CommentInput {
+  readonly body: string;
+  readonly work_item_id?: string;
+  readonly mentions?: readonly string[];
+}
+
+/** The timeline entry `postComment` returns. */
+export interface PostedComment {
+  readonly id: string;
+  readonly body: string;
+  readonly created_at: string;
+}
+
+export interface UploadAttachmentInput {
+  /** Canonical padded base64. */
+  readonly file: string;
+  readonly mime: string;
+  readonly kind: "artifact" | "evidence";
+  readonly attach_to:
+    | { readonly kind: "timeline_entry"; readonly id: string }
+    | { readonly kind: "delivery"; readonly id: string };
+  readonly basis?: string;
+  readonly sha256?: string;
+}
+
+export interface AttachmentReceipt {
+  readonly id: string;
+}
+
 export interface CardCounts {
   readonly total: number;
   readonly needs_me: number;
@@ -247,6 +276,16 @@ export interface CardiganClient {
   projects(): Promise<readonly ProjectSummary[]>;
   cards(projectId: string, filter: CardFilter): Promise<CardPage>;
   card(projectId: string, cardId: string): Promise<CardDetail>;
+  addComment(
+    projectId: string,
+    cardId: string,
+    input: CommentInput,
+  ): Promise<PostedComment>;
+  uploadAttachment(
+    projectId: string,
+    cardId: string,
+    input: UploadAttachmentInput,
+  ): Promise<AttachmentReceipt>;
 }
 
 interface ErrorBody {
@@ -293,6 +332,28 @@ export class HttpCardiganClient implements CardiganClient {
   async card(projectId: string, cardId: string): Promise<CardDetail> {
     return this.request<CardDetail>(
       `/api/projects/${encodeURIComponent(projectId)}/cards/${encodeURIComponent(cardId)}`,
+    );
+  }
+
+  async addComment(
+    projectId: string,
+    cardId: string,
+    input: CommentInput,
+  ): Promise<PostedComment> {
+    return this.request<PostedComment>(
+      `/api/projects/${encodeURIComponent(projectId)}/cards/${encodeURIComponent(cardId)}/comments`,
+      { method: "POST", body: JSON.stringify(input) },
+    );
+  }
+
+  async uploadAttachment(
+    projectId: string,
+    cardId: string,
+    input: UploadAttachmentInput,
+  ): Promise<AttachmentReceipt> {
+    return this.request<AttachmentReceipt>(
+      `/api/projects/${encodeURIComponent(projectId)}/cards/${encodeURIComponent(cardId)}/attachments`,
+      { method: "POST", body: JSON.stringify(input) },
     );
   }
 
