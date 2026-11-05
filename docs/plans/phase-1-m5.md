@@ -1,6 +1,7 @@
 # Phase 1 · M5 任务计划：Web Workbench 与自研看板
 
-- 版本：v1（2026-11-06）
+- 版本：v2（2026-11-06）：Codex 还在做 M4.T2，关键路径上的 M5.1 改给空闲的 Pi；M5.1、M5.3 由 Pi 实现、Codex 验收，M5.2、M5.4 由 Codex 实现、Pi 验收
+- v1（2026-11-06）
 - 对应：开发方案 §16 Phase 1 M5；§8 用户界面；§9 Card MCP（Workbench Web API 不经过 MCP）；§14 安全模型；附录 A 端到端验收场景
 - M5 的验收（开发方案 §16）：**附录 A 场景完整跑通。** 通过标准：你只在附录 A 第 8 步（拍板）和第 10 步（合并确认）被打断；人为重复发送门铃不产生重复 Run；中途重启 Herdr server 后，所有 Assignment 都能恢复或得到明确处理。
 - 只做 `machine_id=local`。M5 不做：Web 聊天（PM Office 仍在 Herdr 里，§8.1）、多用户和权限、移动端、邮件通知、甘特图和日历、diff 视图（先给可直接运行的 git 命令，§8.7）、开放局域网访问。
@@ -17,21 +18,21 @@
 
 | 任务 | 内容 | 实现 | 验收测试 | 依赖 | 分支 |
 |---|---|---|---|---|---|
-| M5.1 | server：Workbench Web API 的骨架、登录、只读接口、SSE、静态文件 | Codex | Pi（M5.T1） | 无 | `feat/m5-web-api` |
-| M5.2 | domain + server：人的写操作（评论、指令、拍板、执行操作、合并确认、worktree 处置）和编号自动链接 | Pi | Codex（M5.T2） | M5.1 | `feat/m5-web-commands` |
-| M5.3 | web：应用外壳、登录页、卡片列表和看板、卡片详情、评论框 | Codex | Pi（M5.T1） | M5.1 | `feat/m5-web-cards` |
-| M5.4 | web：Needs You、项目快照、执行视图、项目动态、实时刷新 | Pi | Codex（M5.T2） | M5.1、M5.2 | `feat/m5-web-needs-you` |
-| M5.5 | e2e：附录 A 场景（真实 server、真实 hc、真实 git、模拟 Agent），含中途重启 Herdr server | Pi | Codex（M5.T2 复核） | M5.2、M5.4 | `test/m5-appendix-a` |
-| M5.T1 | 交叉验收：M5.1、M5.3 | Pi | — | M5.1、M5.3 | `test/m5-api-cards` |
-| M5.T2 | 交叉验收：M5.2、M5.4，复核 M5.5 | Codex | — | M5.2、M5.4、M5.5 | `test/m5-commands-ui` |
+| M5.1 | server：Workbench Web API 的骨架、登录、只读接口、SSE、静态文件 | Pi | Codex（M5.T1） | 无 | `feat/m5-web-api` |
+| M5.2 | domain + server：人的写操作（评论、指令、拍板、执行操作、合并确认、worktree 处置）和编号自动链接 | Codex | Pi（M5.T2） | M5.1 | `feat/m5-web-commands` |
+| M5.3 | web：应用外壳、登录页、卡片列表和看板、卡片详情、评论框 | Pi | Codex（M5.T1） | M5.1 | `feat/m5-web-cards` |
+| M5.4 | web：Needs You、项目快照、执行视图、项目动态、实时刷新 | Codex | Pi（M5.T2） | M5.1、M5.2 | `feat/m5-web-needs-you` |
+| M5.5 | e2e：附录 A 场景（真实 server、真实 hc、真实 git、模拟 Agent），含中途重启 Herdr server | Pi | Codex（M5.T1 复核） | M5.2、M5.4 | `test/m5-appendix-a` |
+| M5.T1 | 交叉验收：M5.1、M5.3，复核 M5.5 | Codex | — | M5.1、M5.3、M5.5 | `test/m5-api-cards` |
+| M5.T2 | 交叉验收：M5.2、M5.4 | Pi | — | M5.2、M5.4 | `test/m5-commands-ui` |
 | M5.S | 真实冒烟：用真实 Agent 跑附录 A，并在浏览器里走一遍 | Claude | — | M5.5、M4.S | — |
 
 ```
-M5.1（Codex，可立即开始） ─┬─ M5.3（Codex） ──────────────┬─ M5.T1（Pi）
-                           └─ M5.2（Pi） ─ M5.4（Pi） ─ M5.5（Pi） ─ M5.T2（Codex） ─ M5.S
+M5.1（Pi，可立即开始） ─┬─ M5.3（Pi） ─────────── M5.5（Pi） ─┬─ M5.T1（Codex） ─ M5.S
+                         └─ M5.2（Codex，M4.T2 之后） ─ M5.4（Codex） ┴─ M5.T2（Pi）
 ```
 
-M5.1 合并之前，Pi 可以先做 M5.2 的 domain 部分（`issueInstruction` 和编号识别），它们不依赖 Web API。
+M5.2 的 domain 部分（`issueInstruction`、编号识别、人记录决策）不依赖 Web API，Codex 可以在 M5.1 合并前先做。
 
 ## 2. 通用约定
 
@@ -105,7 +106,7 @@ M3.T2 发现：路由表里有"指令"一行，但没有任何命令产生指令
 
 ## 4. 各任务说明
 
-### M5.1 Web API 骨架（Codex，可立即开始）
+### M5.1 Web API 骨架（Pi，可立即开始）
 
 - 监听、`Host` 校验、安全响应头、静态文件、JSON 错误格式。
 - 登录：store 新增凭据表和会话表（迁移）；`cardigan web set-password`（交互输入两次，不经命令行参数传密码）；`POST /api/login`、`POST /api/logout`、`GET /api/me`；§3.2 的全部要求。
@@ -114,13 +115,13 @@ M3.T2 发现：路由表里有"指令"一行，但没有任何命令产生指令
 - 附件下载（§3.2 的 XSS 规则）。
 - 验收：未登录的接口全部 401；MCP Token 访问 401；`Host` 不对返回 421；非 GET 请求 Origin 不对返回 403；配置非回环地址时拒绝启动；SSE 断线重连后不丢事件、不重复推送；SVG 附件作为下载返回。
 
-### M5.2 人的写操作和编号链接（Pi）
+### M5.2 人的写操作和编号链接（Codex）
 
 - domain：`issueInstruction`（§3.5）和 MCP 工具 `issue_instruction`；`recordDecision` 放开到人记录所有 `decider=human` 的决策（§3.6）；编号识别（§3.4，纯函数）。修改 domain 必须附带契约测试。
 - Web API 写接口：发评论（@提及、Markdown 正文、附件）、上传附件（复用 `uploadAttachment`，大小上限沿用现有配置）、下达指令、Needs You 的各项操作（§3.6）。全部以人的身份执行，经 domain 命令校验，不直接写仓储。
 - 验收：每个写接口的成功路径和被拒路径（非法状态、越权、CSRF）；指令按路由唤醒对应 Assignment，没有 Assignment 时交给 PM Ops；PM Ops 能用 `issue_instruction`，工作项 Assignment 不能；不存在的编号不生成链接。
 
-### M5.3 卡片界面（Codex）
+### M5.3 卡片界面（Pi）
 
 - 应用外壳（项目切换、导航）、登录页。
 - 卡片列表和看板视图，"等我处理"和"等 Agent 处理"两个筛选。
@@ -128,7 +129,7 @@ M3.T2 发现：路由表里有"指令"一行，但没有任何命令产生指令
 - 评论框：Markdown 预览、@提及补全、粘贴图片上传。M5.2 的写接口合并前，评论框可以先接只读的预览。
 - 验收：组件测试覆盖各视图的主要状态（空、加载、错误、有数据）；Agent 写的正文里的 HTML 和 `javascript:` 链接不会被执行；状态不只靠颜色区分。
 
-### M5.4 Needs You 和其他视图（Pi）
+### M5.4 Needs You 和其他视图（Codex）
 
 - Needs You（§8.2、§3.6）：批次和阻塞优先、一句话原因、已等待时间、所有操作。
 - 项目快照（§8.3）：进行中、Review 中、阻塞中、最近交付；每张卡的下一步负责人；等你和等 Agent 分开。
@@ -146,8 +147,8 @@ M3.T2 发现：路由表里有"指令"一行，但没有任何命令产生指令
 
 ### M5.T1、M5.T2 交叉验收
 
-- **M5.T1（Pi）**：M5.1 的 Web API（§3.2 安全表逐条、只读接口的数据正确性、SSE 补发）；M5.3 的界面（组件测试，XSS 用例）。
-- **M5.T2（Codex）**：M5.2 的写操作和指令；M5.4 的界面；复核 M5.5 的场景是否和附录 A 一致，有没有绕开公开接口。
+- **M5.T1（Codex）**：M5.1 的 Web API（§3.2 安全表逐条、只读接口的数据正确性、SSE 补发）；M5.3 的界面（组件测试，XSS 用例）；复核 M5.5 的场景是否和附录 A 一致，有没有绕开公开接口。
+- **M5.T2（Pi）**：M5.2 的写操作和指令；M5.4 的界面。
 
 ### M5.S 真实冒烟（Claude）
 
