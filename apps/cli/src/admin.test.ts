@@ -44,7 +44,7 @@ test("cardigan init creates the database and runs migrations", async () => {
 
   const store = Store.open({ dataDir });
   try {
-    expect(store.schemaVersion()).toBe(5);
+    expect(store.schemaVersion()).toBe(6);
     expect(store.listProjects()).toEqual([]);
   } finally {
     store.close();
