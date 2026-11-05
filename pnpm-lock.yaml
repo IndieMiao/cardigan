@@ -38,6 +38,9 @@ importers:
       '@cardigan/git-transport':
         specifier: workspace:*
         version: link:../../packages/git-transport
+      '@cardigan/host':
+        specifier: workspace:*
+        version: link:../../packages/host
       '@cardigan/mcp-server':
         specifier: workspace:*
         version: link:../../packages/mcp-server
@@ -59,6 +62,9 @@ importers:
       '@cardigan/domain':
         specifier: workspace:*
         version: link:../../packages/domain
+      '@cardigan/host':
+        specifier: workspace:*
+        version: link:../../packages/host
       '@cardigan/mcp-server':
         specifier: workspace:*
         version: link:../../packages/mcp-server
@@ -124,6 +130,24 @@ importers:
       '@cardigan/git-service':
         specifier: workspace:*
         version: link:../git-service
+
+  packages/host:
+    dependencies:
+      '@cardigan/domain':
+        specifier: workspace:*
+        version: link:../domain
+      '@cardigan/mcp-server':
+        specifier: workspace:*
+        version: link:../mcp-server
+      '@cardigan/roles':
+        specifier: workspace:*
+        version: link:../roles
+      '@cardigan/runtime-herdr':
+        specifier: workspace:*
+        version: link:../runtime-herdr
+      '@cardigan/store':
+        specifier: workspace:*
+        version: link:../store
 
   packages/mcp-server:
     dependencies:

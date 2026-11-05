@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import type { Assignment, Clock, Run } from "@cardigan/domain";
+import { agentCliVersion, harnessBinary } from "@cardigan/host";
 import {
   type LaunchConfig,
   parseLaunchConfig,
@@ -81,7 +82,7 @@ export async function loadLaunchFiles(dir: string): Promise<{
   return { config, secrets };
 }
 
-/** Ask the harness binary for its version; the Run records the snapshot. */
+/** Ask the harness binary for its version (local mode only); the Run records it. */
 async function cliVersion(binary: string): Promise<string> {
   const { stdout } = await exec(binary, ["--version"], { timeout: 10_000 });
   const line = stdout.trim().split("\n")[0]?.trim();
@@ -151,9 +152,21 @@ export async function createHostWiring(options: {
       ).profile;
       if (profile.model === undefined)
         throw new Error("The launch profile has no model");
-      const binary = role.harness === "claude-code" ? "claude" : role.harness;
+      // In agent-ssh mode the binary only exists for the agent account, so the
+      // probe goes through the runtime instead of the host's PATH (M2.7, §13.4).
+      const binary = harnessBinary(role.harness);
       const cached = versions.get(binary);
-      const version = cached ?? (await cliVersion(binary));
+      const version =
+        cached ??
+        (await agentCliVersion(
+          {
+            execution,
+            captureAgent: (command, args) =>
+              runtime.captureAgent(command, args),
+            captureLocal: cliVersion,
+          },
+          binary,
+        ));
       versions.set(binary, version);
       return { model: profile.model, agent_cli_version: version };
     },
