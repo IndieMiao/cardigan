@@ -18,6 +18,19 @@ export interface GitWorktreePort {
   isDirty(path: string): Promise<boolean>;
 }
 
+/** In-memory result of `merge-tree --write-tree`; conflicts never move a ref. */
+export interface GitTreeMerge {
+  readonly tree: string;
+  readonly conflicts: readonly string[];
+}
+export interface GitCommitTreeInput {
+  readonly tree: string;
+  readonly parents: readonly string[];
+  readonly message: string;
+  /** Merge commits never inherit the host's Git identity. */
+  readonly author: { readonly name: string; readonly email: string };
+}
+
 /** Host-only bare repository operations. Every ref write requires an expected old value. */
 export interface GitCentralPort {
   objectFormat(repository: string): Promise<"sha1" | "sha256">;
@@ -46,4 +59,11 @@ export interface GitCentralPort {
     sha: string,
     expected: string | null,
   ): Promise<void>;
+  /** Merge two commits in the bare repository without checking anything out. */
+  mergeTree(
+    repository: string,
+    ours: string,
+    theirs: string,
+  ): Promise<GitTreeMerge>;
+  commitTree(repository: string, input: GitCommitTreeInput): Promise<string>;
 }

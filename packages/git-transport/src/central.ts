@@ -2,7 +2,11 @@ import { execFile } from "node:child_process";
 import { lstat, mkdir, mkdtemp, realpath, rename, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
-import type { GitCentralPort } from "@cardigan/domain";
+import type {
+  GitCentralPort,
+  GitCommitTreeInput,
+  GitTreeMerge,
+} from "@cardigan/domain";
 import { gitEnvironment, gitSafetyArguments } from "./hardening.js";
 
 const exec = promisify(execFile);
@@ -17,6 +21,8 @@ const exists = async (path: string) => {
 };
 const within = (root: string, path: string) =>
   path === root || path.startsWith(root + sep);
+const fullSha = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u;
+const conflictRecord = /^[0-7]{6} [a-f0-9]+ [1-3]\t/u;
 export interface CentralGitOptions {
   dataDir: string;
   centralRoot?: string;
@@ -56,7 +62,11 @@ export class CentralGitTransport implements GitCentralPort {
         "Central directory must be host-owned, private and without symlinks",
       );
   }
-  private async command(repository: string, args: string[]) {
+  private async command(
+    repository: string,
+    args: string[],
+    extraEnv: NodeJS.ProcessEnv = {},
+  ) {
     if (repository !== this.root && dirname(repository) !== this.root)
       throw new Error("Git command escaped central root");
     await this.privateDirectory(this.root);
@@ -65,7 +75,7 @@ export class CentralGitTransport implements GitCentralPort {
     this.options.onCommand?.(repository, command);
     try {
       const r = await exec("git", command, {
-        env: gitEnvironment(),
+        env: { ...gitEnvironment(), ...extraEnv },
         timeout: 30000,
         killSignal: "SIGKILL",
         maxBuffer: 4 * 1024 * 1024,
@@ -86,10 +96,32 @@ export class CentralGitTransport implements GitCentralPort {
       };
     }
   }
-  private async checked(repository: string, args: string[]) {
-    const r = await this.command(repository, args);
+  private async checked(
+    repository: string,
+    args: string[],
+    extraEnv: NodeJS.ProcessEnv = {},
+  ) {
+    const r = await this.command(repository, args, extraEnv);
     if (r.code !== 0) throw new Error(r.stderr || "Git command failed");
     return r.stdout;
+  }
+  /** Merge-tree prints the tree id, then `mode object stage<TAB>path` per conflict. */
+  private parseMergeTree(stdout: string): GitTreeMerge {
+    const fields = stdout.split("\0"),
+      tree = fields[0] ?? "";
+    if (!fullSha.test(tree))
+      throw new Error("merge-tree did not return a tree id");
+    const conflicts: string[] = [];
+    for (const field of fields.slice(1)) {
+      // An empty field ends the conflicted file section; the rest is informational.
+      if (field === "") break;
+      const tab = field.lastIndexOf("\t"),
+        path = tab < 0 ? "" : field.slice(tab + 1);
+      if (!conflictRecord.test(field) || path.length === 0)
+        throw new Error("Unsupported merge-tree conflict record");
+      if (!conflicts.includes(path)) conflicts.push(path);
+    }
+    return { tree, conflicts };
   }
   private async source(path: string) {
     if (!isAbsolute(path))
@@ -254,11 +286,7 @@ export class CentralGitTransport implements GitCentralPort {
     expected: string | null,
   ) {
     await this.checked(repository, ["check-ref-format", ref]);
-    if (
-      ![sha, expected ?? sha].every((s) =>
-        /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(s),
-      )
-    )
+    if (![sha, expected ?? sha].every((s) => fullSha.test(s)))
       throw new Error("Invalid full commit SHA");
     await this.checked(repository, [
       "update-ref",
@@ -266,5 +294,51 @@ export class CentralGitTransport implements GitCentralPort {
       sha,
       expected ?? "0".repeat(sha.length),
     ]);
+  }
+  async mergeTree(repository: string, ours: string, theirs: string) {
+    if (![ours, theirs].every((sha) => fullSha.test(sha)))
+      throw new Error("Invalid full commit SHA");
+    const result = await this.command(repository, [
+      "merge-tree",
+      "--write-tree",
+      "-z",
+      ours,
+      theirs,
+    ]);
+    // 1 means conflicts; anything else non-zero is a real failure.
+    if (result.code !== 0 && result.code !== 1)
+      throw new Error(result.stderr || "merge-tree failed");
+    const merge = this.parseMergeTree(result.stdout);
+    if ((result.code === 1) !== merge.conflicts.length > 0)
+      throw new Error("merge-tree conflict report is inconsistent");
+    return merge;
+  }
+  async commitTree(repository: string, input: GitCommitTreeInput) {
+    if (!fullSha.test(input.tree)) throw new Error("Invalid tree id");
+    if (input.parents.length === 0 || input.parents.length > 2)
+      throw new Error("Merge commits need one or two parents");
+    if (!input.parents.every((sha) => fullSha.test(sha)))
+      throw new Error("Invalid parent SHA");
+    // The committer identity is explicit: user or global config must not leak in.
+    const identity = {
+      GIT_AUTHOR_NAME: input.author.name,
+      GIT_AUTHOR_EMAIL: input.author.email,
+      GIT_COMMITTER_NAME: input.author.name,
+      GIT_COMMITTER_EMAIL: input.author.email,
+    };
+    const sha = await this.checked(
+      repository,
+      [
+        "commit-tree",
+        input.tree,
+        ...input.parents.flatMap((parent) => ["-p", parent]),
+        "-m",
+        input.message,
+      ],
+      identity,
+    );
+    if (!fullSha.test(sha))
+      throw new Error("commit-tree did not return a commit id");
+    return sha;
   }
 }
