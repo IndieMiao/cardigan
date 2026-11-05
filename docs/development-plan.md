@@ -357,7 +357,7 @@ Standing Assignment (scope=project): PM Office, PM Ops — not tied to a WorkIte
 - `id`、`work_item_id`、`run_id`
 - `kind`：`code` | `design` | `doc` | `test_report` | `card_completion` | `other`。`card_completion` 即卡片的完成申请（§4.4）
 - `summary`：面向人，≤160 字，超长拒绝；细节放附件或正文
-- `subject`（必填）：`{kind: git_head | artifact_sha256 | doc_version, value}`。代码交付以 commit SHA 定位，`branch?`、`pr_url?` 只作参考
+- `subject`（必填）：`{kind: git_head | artifact_sha256 | doc_version, value}`。代码交付以 commit SHA 定位，`branch?`、`pr_url?` 只作参考；`pr_url` 若提供必须是 http/https 的绝对 URL，其他协议、相对地址或无效 URL 返回 validation_failed
 - `evidence[]`：由控制面生成（commit、diff 统计、测试命令与结果、附件 id），和 Agent 的自述分开
 - `test_results?`、`attachments[]`、`known_gaps[]`
 - 完成申请的遗留项以 `precondition`（`work_item:<id>` 或 `decision:<id>`）对应未满足的检查，必须带非空说明和 `followup_card_id`；检查结果由控制面写入 evidence。
@@ -615,7 +615,7 @@ M3.4 主机循环通过 startDispatchLoop 启动：默认每轮结束后等待 1
 |---|---|
 | 工作项下的新评论 | 该工作项的 Assignment（作者是它自己时不通知） |
 | 卡片级普通评论，没有 @ | 不按门铃；随下一次 `get_updates` 一并读到。作者是人时，合并通知 PM Ops |
-| 指令 | 对应工作项的 Assignment；还没有 Assignment 时交给 PM Ops 分配 |
+| 指令（`instruction_issued`） | 人或常驻 PM Ops 下达；对应未结束工作项的 Assignment，未指派时交给 PM Ops 分配 |
 | Delivery 提交 | 验证这个工作项的各个验证型 Assignment；PM Ops 只收摘要 |
 | Review 通过 | 不唤醒；检查交付是否全部通过、整卡是否满足 Done 条件 |
 | Review 驳回 | 产生被审核 Delivery 的 Assignment（返工 Run） |
@@ -789,7 +789,7 @@ PM Office 回答"项目现在怎么样"时，查询的就是这份快照，而�
 
 工作项清单可以折叠显示，每项包含负责人、状态和交付。
 
-卡片页顶部有"关联"区：列出这张卡关联的拍板（例如 `q(280)` 待批 / 已批 / 已撤回）、卡片和 PR（打开 / 已合并 / 已部署），每项显示编号和当前状态，点击即可跳转。时间线和描述里出现的编号由服务端识别后自动变成链接。附件缩略图上显示所依据的拍板编号和状态，已取代的附件折叠显示。
+卡片页顶部有"关联"区：列出这张卡关联的拍板（例如 `q(280)` 待批 / 已批 / 已撤回）、卡片和 PR（打开 / 已合并 / 已部署），每项显示编号和当前状态，点击即可跳转。时间线和描述里出现的编号由服务端识别后自动变成链接。domain 的 `resolveReferences` 在一致的项目快照内返回 C/W/D/A/R/V 编号、q(n)/h(n) 和 C-n#序号的类型、存在性、当前状态及所属卡片；不存在的编号保留文本，不返回卡片目标，前端不得生成链接。附件缩略图上显示所依据的拍板编号和状态，已取代的附件折叠显示。
 
 ### 8.5 执行视图（调试和运维）
 
@@ -855,6 +855,7 @@ Agent 只通过 Card MCP 读写，看板界面只服务你一个人，所以第�
 | `get_updates(card_id?, since_seq?)` | 全部 | 游标之后的事件和条目 |
 | `ack_events(card_id, up_to_seq)` | 全部 | 推进游标 |
 | `post_comment(card_id, body, work_item_id?, mentions[], reply_to?, refs[], supersedes?)` | 全部 | 发评论；正文里的编号由服务端自动识别 |
+| `issue_instruction(card_id, work_item_id, body)` | 仅常驻 PM Ops | 下达指令，生成 instruction 时间线和 instruction_issued 事件；人走 Workbench API |
 | `report_blocker(work_item_id, reason, needs: role\|human)` | 全部 | 报告阻塞 |
 | `request_human_action(card_id, instructions, why_human, expected_return, blocked_work_items[], due?) → key` | 全部 | 请求你执行只有你能做的操作，进入 Needs You |
 | `request_decision(card_id?, kind, question, context, options[], recommended, affected_cards[], affected_work_items[], blocking, decider) → key` | 全部 | 发起拍板，返回编号 |
@@ -868,7 +869,7 @@ Agent 只通过 Card MCP 读写，看板界面只服务你一个人，所以第�
 | `project_snapshot()` / `list_needs_you()` | PM | 项目快照和待你处理的事项 |
 | `record_decision(decision_id, option, rationale, raw_quote, via_chain[]?, batch?)` | 仅 PM Office | 记录你在对话中做出的决定，`raw_quote` 为你的原话 |
 
-你在 Web 界面上的操作走 Workbench Web API，不经过 MCP。
+你在 Web 界面上的操作走 Workbench Web API，不经过 MCP。`recordDecision` 允许人记录所有 `decider=human` 的决策，`via=needs_you`，保留非空原话；MCP 的 `record_decision` 仍限 PM Office。`issue_instruction` 同时校验角色/Token 工具许可和 Assignment 的持久模式 `standing_mode=ops`；Office 和工作项 Assignment 不显示也不能调用。工作项必须属于该卡、未 accepted/passed/cancelled，卡片不可已关闭或等待合并。
 
 M1.5 已负责 `whoami`、`get_card`、`get_updates`、`ack_events` 的实现与测试；domain 不再提供第二套同名命令。M1.3 的项目查询仅保留 `project_snapshot`、`list_needs_you`。
 

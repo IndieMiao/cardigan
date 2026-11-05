@@ -247,8 +247,8 @@ test("invariant 11: decision inputs and PM Office authority are checked", () => 
     raw_quote: "go",
   };
   expect(recordDecision(state, human, p, io)).toMatchObject({
-    ok: false,
-    error: { code: "forbidden_tool" },
+    ok: true,
+    value: { data: { resolution: { via: "needs_you", resolved_by: "human" } } },
   });
   expect(recordDecision(state, actor(3, "pm"), p, io)).toMatchObject({
     ok: false,

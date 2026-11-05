@@ -80,3 +80,11 @@
 - merged 写 done/resolution；failed 仅写事件；conflicted 回 in_progress，冲突产出经 merge_conflicted 返工，旧完成申请 supersede、PM 验收经 target_withdrawn 等待新目标。Router 输出原产出 Assignment 的 fix 通知；真正排 Run、按铃属于 M4.4，未在命令里另建第二个 Run。
 - releaseAssignment({ assignment_id }) 允许人／常驻 PM Ops／system，无未结束 Run 才迁移两个 Assignment 状态并写 assignment_released。system 只自动释放闭卡的工作项 Assignment；PM Ops 只能释放 scope=work_item，常驻 Assignment 仅允许 human 释放；重复释放前也先校验这一权限。事件携带 token_id（非明文）、runtime_ref、worktree_path、branch；M4.4 沿用 M2 stop 方式撤销该 Assignment 的全部 Token 并释放终端，domain 不证明外部清理已完成。
 - requestWorktreeCleanup({ assignment_id, reason }) 只允许 system；要求已 released 且有工作目录，创建绑定 Assignment 的人类 keep/force_clean 决策。未决或已解决决定均复用，keep 不再重复询问。recordDecision 对此类决策开放 human 入口；不扩充 MCP 工具。
+
+## M5.2 人的操作与编号
+
+`issueInstruction(state, actor, {card_id, work_item_id, body}, ports)` 仅接受人或常驻 PM Ops（持久 standing_mode=ops），校验工具许可、同卡和未结束状态；closed/awaiting_merge 卡片不能下指令。输出 instruction_issued 事件及 instruction 时间线；不直接排 Run，复用 Router 指令规则。MCP 名称为 issue_instruction，复用幂等事务；Office、工作项 Assignment 不显示且不能调用。
+
+`recordDecision` 允许人记录所有 decider=human 的决策，via=needs_you；原话和理由仍必填。MCP 的 PM Office 路径不变。`submitDelivery` 的 pr_url 若提供必须是合法绝对 HTTP/HTTPS URL；预检和事务内归约均拒绝其他协议/相对地址（validation_failed），不会为无效 URL 做 Git 预检。
+
+`extractReferences` 支持工作项、Assignment、Run 和 Review 编号；`resolveReferences(state, body)` 在当前项目快照中返回去重的编号、kind、status、exists 和可用的 card_id。未知编号无卡片目标，不应生成链接；函数不访问仓储或外部 PR。

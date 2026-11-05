@@ -44,6 +44,7 @@ export const toolNames = [
   "get_updates",
   "ack_events",
   "post_comment",
+  "issue_instruction",
   "report_blocker",
   "request_human_action",
   "request_decision",
@@ -80,6 +81,10 @@ export type Author = "human" | "system" | `assignment:${AssignmentId}`;
 export type Decider = "human" | `role:${RoleId}`;
 export type Reference =
   | { readonly kind: "card"; readonly id: CardId }
+  | { readonly kind: "work_item"; readonly id: WorkItemId }
+  | { readonly kind: "assignment"; readonly id: AssignmentId }
+  | { readonly kind: "run"; readonly id: RunId }
+  | { readonly kind: "review"; readonly id: ReviewId }
   | { readonly kind: "timeline_entry"; readonly id: TimelineEntryId }
   | { readonly kind: "decision"; readonly id: DecisionId }
   | { readonly kind: "human_action"; readonly id: HumanActionId }

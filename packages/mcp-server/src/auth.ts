@@ -86,7 +86,13 @@ export function authenticate(
         role_version: role.role_version,
         // §9.1: the token carries the tool scope; the role row only adds
         // capabilities and the human-readable role id.
-        allowed_tools: record.allowed_tools,
+        allowed_tools: record.allowed_tools.filter(
+          (tool) =>
+            tool !== "issue_instruction" ||
+            (lookup.assignment.scope === "standing" &&
+              lookup.assignment.role_id === "pm" &&
+              lookup.assignment.standing_mode === "ops"),
+        ),
         capabilities: role.capabilities,
       },
       token: record,

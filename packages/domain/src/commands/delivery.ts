@@ -15,6 +15,7 @@ import {
   PM_ACCEPTANCE_WORK_ITEM_KEY,
 } from "../templates.js";
 import { DEFAULT_MAX_REVIEW_ROUNDS, transition } from "../transitions.js";
+import { isHttpUrl } from "../url.js";
 import {
   attempt,
   CommandDraft,
@@ -59,6 +60,11 @@ function inspect(d: CommandDraft, p: SubmitDeliveryParams) {
     !["done", "cancelled", "awaiting_merge"].includes(card.status),
     "illegal_transition",
     "Card is closed or awaiting merge",
+  );
+  ensure(
+    p.pr_url === undefined || isHttpUrl(p.pr_url),
+    "validation_failed",
+    "pr_url must be an absolute HTTP or HTTPS URL",
   );
   text(p.summary, "summary");
   ensure(

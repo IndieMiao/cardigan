@@ -20,9 +20,11 @@ export function standingTools(
   roleTools: readonly ToolName[],
   mode: StandingMode,
 ): readonly ToolName[] {
-  return mode === "office"
-    ? [...roleTools]
-    : roleTools.filter((tool) => tool !== OFFICE_ONLY_TOOL);
+  return roleTools.filter((tool) =>
+    mode === "office"
+      ? tool !== "issue_instruction"
+      : tool !== OFFICE_ONLY_TOOL,
+  );
 }
 
 /**
