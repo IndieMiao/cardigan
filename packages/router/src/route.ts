@@ -432,16 +432,22 @@ function routeReview(input: RouteInput, draft: Draft): void {
       card_id: input.event.card_id,
       detail: "check whether every delivery passed and the card is done",
     });
-    // §6.4 dependency completed: a passing review completes the delivery's
-    // work item, so the work items that depend on it are next (or Ops decides
-    // who takes them). This is independent of the whole card being done.
+    // §6.4 dependency completed: only a delivery whose work item actually
+    // succeeded completes anything — a first pass among several required
+    // verifiers does not. Downstream work is next only when *all* of its
+    // dependencies succeeded.
     const passed = input.snapshot.deliveries.find(
       (candidate) => candidate.id === delivery_id,
     );
     const completed = itemOf(input, passed?.work_item_id);
-    if (completed !== undefined) {
-      const downstream = input.snapshot.work_items.filter((candidate) =>
-        candidate.depends_on.includes(completed.id),
+    if (completed !== undefined && succeeded(completed)) {
+      const downstream = input.snapshot.work_items.filter(
+        (candidate) =>
+          candidate.depends_on.includes(completed.id) &&
+          candidate.depends_on.every((id) => {
+            const dependency = itemOf(input, id);
+            return dependency !== undefined && succeeded(dependency);
+          }),
       );
       let unowned = false;
       for (const candidate of downstream) {
