@@ -77,6 +77,23 @@ export function resolveWebConfig(
   };
 }
 
+/**
+ * §0: the listener itself refuses a non-loopback address.
+ *
+ * `resolveWebConfig` is the only production caller, but `startWebServer` is
+ * exported too and takes a `WebConfig` object; a hand-built one must not be able
+ * to bind 0.0.0.0 (S03).
+ */
+export function requireLoopbackHost(host: string): string {
+  const normalized = host.trim().toLowerCase();
+  if ((WEB_LOOPBACK_HOSTS as readonly string[]).includes(normalized)) {
+    return normalized;
+  }
+  throw new Error(
+    `Web Workbench 拒绝监听 ${JSON.stringify(host)}。${WEB_LOCAL_ONLY_MESSAGE}`,
+  );
+}
+
 function resolveWebHost(value: string | undefined): string {
   if (value === undefined || value.trim().length === 0) {
     return DEFAULT_WEB_HOST;
