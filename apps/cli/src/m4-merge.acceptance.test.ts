@@ -48,6 +48,7 @@ import {
   recordDecision,
   recordMergeResult,
   releaseAssignment,
+  requestDecision,
   requestMerge,
   requestWorktreeCleanup,
   submitDelivery,
@@ -56,6 +57,7 @@ import {
   updateCard,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
+import { routeEvent } from "@cardigan/router";
 import { Store, writeRole } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { main } from "./index.js";
@@ -78,7 +80,11 @@ const pmTools: readonly ToolName[] = [
   "finish_run",
 ];
 const opsTools = pmTools.filter((tool) => tool !== "record_decision");
-const coderTools: readonly ToolName[] = ["submit_delivery", "finish_run"];
+const coderTools: readonly ToolName[] = [
+  "submit_delivery",
+  "request_decision",
+  "finish_run",
+];
 const reviewerTools: readonly ToolName[] = ["submit_review", "finish_run"];
 
 /** The adapter would check Git; M4.1 tests only exercise the state machine. */
@@ -1301,4 +1307,387 @@ test("§12.6 requestWorktreeCleanup: system only, released worktree only, one pe
   expect(
     state().decisions.filter((q) => q.trigger === "worktree_cleanup"),
   ).toHaveLength(1);
+});
+
+// -------------------------------------------- §4/§6.4 routing of M4 events ---
+
+/**
+ * The router is a pure function of one event plus a snapshot. Routing the
+ * events these commands really wrote (never a hand-built event) is how M4.1's
+ * new rows are accepted.
+ */
+const eventOf = (
+  type: string,
+  match: (payload: Record<string, unknown>) => boolean = () => true,
+): Event => {
+  const events = state().events.filter(
+    (event) =>
+      event.type === type &&
+      match((event.payload ?? {}) as Record<string, unknown>),
+  );
+  const last = events.at(-1);
+  if (last === undefined) throw new Error(`missing ${type} event`);
+  return last;
+};
+const route = (event: Event) => routeEvent({ event, snapshot: state() });
+const rules = (result: ReturnType<typeof routeEvent>) =>
+  result.notifications.map((note) => note.rule).sort();
+
+test("§4/§6.4 the completion reminder stops once the card is awaiting merge and is sent while it is not", async () => {
+  const s = await scenario("auto");
+  startRun(s.coder);
+  const product = await deliver(s.coder, s.development.id, {
+    subject: SHA_A,
+    verifiers: [s.codeReview.id],
+  });
+  endRun(s.coder);
+  startRun(s.reviewer);
+  review(s.reviewer, product, SHA_A);
+  endRun(s.reviewer);
+
+  // Control: the code review passed, the card is not awaiting merge yet.
+  expect(card(s.card.id).status).not.toBe("awaiting_merge");
+  const codeReview = eventOf(
+    "review_submitted",
+    (payload) => payload.delivery_id === product.id,
+  );
+  const beforeCompletion = route(codeReview);
+  expect(rules(beforeCompletion)).toContain(
+    "6.4/all required work items passed",
+  );
+  expect(
+    beforeCompletion.notifications.find(
+      (note) => note.rule === "6.4/all required work items passed",
+    ),
+  ).toMatchObject({
+    recipient: { kind: "assignment", assignment_id: s.coder.id },
+    kind: "completion",
+  });
+
+  startRun(s.coder);
+  const completion = await deliver(s.coder, s.development.id, {
+    kind: "card_completion",
+    subject: SHA_A,
+    verifiers: [s.acceptance.id],
+  });
+  endRun(s.coder);
+  startRun(s.pmAcceptance);
+  review(s.pmAcceptance, completion, SHA_A, "product");
+  expect(card(s.card.id).status).toBe("awaiting_merge");
+
+  // The same rule must stay silent once the card is past review.
+  const acceptance = eventOf(
+    "review_submitted",
+    (payload) => payload.delivery_id === completion.id,
+  );
+  const afterAcceptance = route(acceptance);
+  expect(rules(afterAcceptance)).not.toContain(
+    "6.4/all required work items passed",
+  );
+});
+
+test("§4/§6.4 merge_conflicted wakes the conflicting work item's producer for a fix Run", async () => {
+  const s = await scenario("auto");
+  const { product, completion } = await acceptThroughMergeGate(s);
+  apply(
+    (st, a, p) =>
+      recordMergeResult(
+        st,
+        a,
+        {
+          card_id: s.card.id,
+          completion_id: completion.id,
+          result: {
+            kind: "conflicted",
+            delivery_id: product.id,
+            files: ["a.ts"],
+          },
+        },
+        p,
+      ),
+    system,
+  );
+  const result = route(eventOf("merge_conflicted"));
+  expect(result.notifications).toHaveLength(1);
+  expect(result.notifications[0]).toMatchObject({
+    recipient: { kind: "assignment", assignment_id: s.coder.id },
+    rule: "6.4/merge conflicted",
+    kind: "instruction",
+    work_item_id: s.development.id,
+    run_kind: "fix",
+  });
+});
+
+test("§4/§6.4 merge_conflicted without an active producer goes to PM Ops", async () => {
+  const s = await scenario("auto");
+  const { product, completion } = await acceptThroughMergeGate(s);
+  // The producer is released before the merge verdict: nothing can take the fix.
+  apply(
+    (st, a, p) => releaseAssignment(st, a, { assignment_id: s.coder.id }, p),
+    human,
+  );
+  apply(
+    (st, a, p) =>
+      recordMergeResult(
+        st,
+        a,
+        {
+          card_id: s.card.id,
+          completion_id: completion.id,
+          result: {
+            kind: "conflicted",
+            delivery_id: product.id,
+            files: ["a.ts"],
+          },
+        },
+        p,
+      ),
+    system,
+  );
+  const result = route(eventOf("merge_conflicted"));
+  expect(result.notifications).toHaveLength(1);
+  expect(result.notifications[0]).toMatchObject({
+    recipient: { kind: "pm_ops" },
+    rule: "6.4/merge conflicted",
+    kind: "escalation",
+  });
+  expect(result.notifications[0]?.run_kind).toBeUndefined();
+});
+
+test("§4/§6.4 card_merged and merge_failed notify PM Ops", async () => {
+  const merged = await scenario("auto");
+  const { completion } = await acceptThroughMergeGate(merged);
+  apply(
+    (st, a, p) =>
+      recordMergeResult(
+        st,
+        a,
+        {
+          card_id: merged.card.id,
+          completion_id: completion.id,
+          result: { kind: "merged", merge_sha: SHA_B, previous_sha: SHA_A },
+        },
+        p,
+      ),
+    system,
+  );
+  expect(route(eventOf("card_merged")).notifications).toMatchObject([
+    {
+      recipient: { kind: "pm_ops" },
+      rule: "6.4/card merged",
+      kind: "completion",
+    },
+  ]);
+
+  h.close();
+  h = harness();
+  const failed = await scenario("auto");
+  const attempt = await acceptThroughMergeGate(failed);
+  apply(
+    (st, a, p) =>
+      recordMergeResult(
+        st,
+        a,
+        {
+          card_id: failed.card.id,
+          completion_id: attempt.completion.id,
+          result: { kind: "failed", reason: "fixture failure" },
+        },
+        p,
+      ),
+    system,
+  );
+  expect(route(eventOf("merge_failed")).notifications).toMatchObject([
+    {
+      recipient: { kind: "pm_ops" },
+      rule: "6.4/merge failed",
+      kind: "escalation",
+    },
+  ]);
+  expect(card(failed.card.id).status).toBe("awaiting_merge");
+});
+
+test("§4/§6.4 a reconcile finding is escalated to PM Ops", async () => {
+  // M4.4 owns the reconcile loop; until it lands the acceptance appends the
+  // event through the public Store event repository, the only writer there is.
+  h.store.uow.run((tx) =>
+    tx.events.append(project, {
+      id: tx.ids.nextEventId(),
+      seq: tx.ids.nextEventSequence(project),
+      type: "reconcile_finding",
+      actor: system,
+      payload: {
+        finding: "orphan_worktree",
+        path: "/tmp/cardigan-m4t1/orphan",
+      },
+      created_at: h.clock.now(),
+    }),
+  );
+  expect(route(eventOf("reconcile_finding")).notifications).toMatchObject([
+    {
+      recipient: { kind: "pm_ops" },
+      rule: "6.4/reconcile finding",
+      kind: "escalation",
+    },
+  ]);
+});
+
+// ------------------------------------------------- recordDecision audience ---
+
+test("§4.4 recordDecision: the human only records merge/cleanup decisions, PM Ops records neither", async () => {
+  const s = await scenario("confirm");
+  // An ordinary decision: the human cannot record it, PM Office can.
+  startRun(s.coder);
+  const ordinary = apply(
+    (st, a, p) =>
+      requestDecision(
+        st,
+        a,
+        {
+          card_id: s.card.id,
+          kind: "choose",
+          category: "general",
+          question: "Which way?",
+          context: "fixture",
+          options: [
+            { key: "a", description: "A", impact: "none" },
+            { key: "b", description: "B", impact: "none" },
+          ],
+          recommended: "a",
+          decider: "role:pm",
+          affected_cards: [s.card.id],
+          affected_work_items: [],
+          blocking: true,
+        },
+        p,
+      ),
+    actorFor(s.coder),
+  );
+  expect(
+    reject(
+      (st, a, p) =>
+        recordDecision(
+          st,
+          a,
+          {
+            decision_id: ordinary.id,
+            option: "a",
+            rationale: "fixture",
+            raw_quote: "fixture a",
+          },
+          p,
+        ),
+      human,
+    ).code,
+  ).toBe("forbidden_tool");
+  expect(
+    apply(
+      (st, a, p) =>
+        recordDecision(
+          st,
+          a,
+          {
+            decision_id: ordinary.id,
+            option: "a",
+            rationale: "fixture",
+            raw_quote: "fixture a",
+          },
+          p,
+        ),
+      actorFor(s.office),
+    ).status,
+  ).toBe("resolved");
+});
+
+test("§4.4 recordDecision: PM Ops cannot record a merge confirmation or a cleanup decision; the human can", async () => {
+  const s = await scenario("confirm");
+  const { completion } = await acceptThroughMergeGate(s);
+  const [pending] = confirmations(s.card.id);
+  if (pending === undefined) throw new Error("missing confirmation");
+  expect(
+    reject(
+      (st, a, p) =>
+        recordDecision(
+          st,
+          a,
+          {
+            decision_id: pending.id,
+            option: "merge",
+            rationale: "fixture",
+            raw_quote: "fixture merge",
+          },
+          p,
+        ),
+      actorFor(s.ops, opsTools),
+    ).code,
+  ).toBe("forbidden_tool");
+  expect(
+    apply(
+      (st, a, p) =>
+        recordDecision(
+          st,
+          a,
+          {
+            decision_id: pending.id,
+            option: "merge",
+            rationale: "fixture",
+            raw_quote: "fixture merge",
+          },
+          p,
+        ),
+      human,
+    ).status,
+  ).toBe("resolved");
+  expect(mergePlan(state(), s.card.id).ok).toBe(true);
+
+  // Cleanup decision: same audience rule, and the human's keep is final here.
+  apply(
+    (st, a, p) => releaseAssignment(st, a, { assignment_id: s.coder.id }, p),
+    human,
+  );
+  const cleanup = apply(
+    (st, a, p) =>
+      requestWorktreeCleanup(
+        st,
+        a,
+        { assignment_id: s.coder.id, reason: "uncommitted changes" },
+        p,
+      ),
+    system,
+  );
+  expect(
+    reject(
+      (st, a, p) =>
+        recordDecision(
+          st,
+          a,
+          {
+            decision_id: cleanup.id,
+            option: "keep",
+            rationale: "fixture",
+            raw_quote: "fixture keep",
+          },
+          p,
+        ),
+      actorFor(s.ops, opsTools),
+    ).code,
+  ).toBe("forbidden_tool");
+  const kept = apply(
+    (st, a, p) =>
+      recordDecision(
+        st,
+        a,
+        {
+          decision_id: cleanup.id,
+          option: "keep",
+          rationale: "fixture",
+          raw_quote: "fixture keep",
+        },
+        p,
+      ),
+    human,
+  );
+  expect(kept).toMatchObject({ status: "resolved" });
+  expect(kept.resolution?.option).toBe("keep");
+  expect(completion.id.length).toBeGreaterThan(0);
 });
