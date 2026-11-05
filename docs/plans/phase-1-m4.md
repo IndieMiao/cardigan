@@ -1,6 +1,7 @@
 # Phase 1 · M4 任务计划：Git 服务（交付固定、中心合并、清理、对账）
 
-- 版本：v2（2026-11-05）：M4.3 改由 Pi 实现（Pi 先做完 M3 收尾，Codex 还排着 M4.1 修改和 M3.T2），交叉验收相应对调；M4.4 补充释放后 Token 立即失效的要求
+- 版本：v3（2026-11-05）：新增 M4.2b（大仓库：长超时、agent-ssh 下用增量推送代替整仓 bundle），排在 M4.4 之前；M4.T1 提前到 M4.4 之前
+- v2（2026-11-05）：M4.3 改由 Pi 实现（Pi 先做完 M3 收尾，Codex 还排着 M4.1 修改和 M3.T2），交叉验收相应对调；M4.4 补充释放后 Token 立即失效的要求
 - v1（2026-11-05）
 - 对应：开发方案 §16 Phase 1 M4；§12 Worktree 与 Git 服务；§4.4 状态机、§4.5 不变量 9、13、14；§14 安全模型
 - M4 的验收（开发方案 §16）：**伪造的或不在该分支上的 SHA 被拒；有未提交修改的 worktree 不被静默删除；孤儿 worktree 能被发现。**
@@ -21,9 +22,10 @@
 |---|---|---|---|---|---|
 | M4.1 | domain + router：卡片 `awaiting_merge`、合并确认、合并结果、`release`、清理决策；路由新增事件 | Codex | Pi（M4.T1） | 无 | `feat/m4-domain-merge` |
 | M4.2 | git：中心仓库、登记源同步、基础 clone 改从中心取基线、交付校验与固定、备份拉取 | Codex | Pi（M4.T1） | 无 | `feat/m4-central-repo` |
+| M4.2b | git：大仓库支持（可配置的长超时；agent-ssh 下基线和固定交付改用主机推送，经 Agent 执行入口跑 receive-pack，只传增量） | Codex | Pi（M4.T1） | M4.2 | `fix/m4-large-repos` |
 | M4.3 | git：bare 仓库内合并、删除 worktree、worktree 清单与对账 | Pi | Codex（M4.T2） | M4.2 | `feat/m4-merge-cleanup` |
 | M4.4 | 组装：交付校验接进 MCP、合并执行循环、release 后清理、对账和备份循环、CLI | Pi | Codex（M4.T2） | M4.1–M4.3 | `feat/m4-assembly` |
-| M4.T1 | 交叉验收：M4.1 状态机和命令、M4.2 的 Git 行为 | Pi | — | M4.1、M4.2 | `test/m4-git` |
+| M4.T1 | 交叉验收：M4.1 状态机和命令、M4.2 的 Git 行为（M4.2b 合并后补它的部分） | Pi | — | M4.1、M4.2 | `test/m4-git` |
 | M4.T2 | 交叉验收：M4.3 的 Git 行为、M4.4 端到端 | Codex | — | M4.3、M4.4 | `test/m4-e2e` |
 | M4.S | 真实冒烟：一张卡从交付走到合并（agent-ssh 模式，用户装好之后） | Claude | — | M4.4、M3.S | — |
 
@@ -169,6 +171,17 @@ awaiting_merge --cancel--> cancelled
 - 同步开发方案：§12.1（中心仓库的位置）、§12.2（基础 clone 的来源）、§12.3。
 - 验收：伪造的 SHA（仓库里不存在）、不是 commit 的对象（tree、blob）、存在但不在该 Assignment 分支上的 SHA（例如另一个 Assignment 分支上的提交）都被拒，且不创建任何 candidates 或 deliveries ref；`deliveries/<id>` 已存在时不被覆盖；登记源分叉时中心基线不动；同步和校验在 agent-ssh 模式下，主机自己从不在 Agent 目录里执行 git；备份失败不动已有备份。
 - PR 太大就拆：先中心仓库、同步、基础 clone 来源，再校验、固定、备份。
+
+### M4.2b 大仓库支持（Codex）
+
+M4.3 审核时发现：中心仓库、基础 clone、bundle 生成的 git 命令都写死了 30 秒超时，超时直接 SIGKILL；目标项目的 pack 有 2.2 GiB，首次克隆一定会被杀掉。agent-ssh 模式每次建 worktree 都把整个中心仓库重新打成 bundle，对大仓库太重。
+
+- 超时：查询类命令（rev-parse、cat-file、for-each-ref 等）保持短超时；克隆、拉取、推送、bundle 用单独的长超时（默认 30 分钟），两者都可配置。超时仍然杀进程，但错误信息要说明是超时，并给出配置项的名字。
+- agent-ssh 的基线分发改为主机推送（开发方案 §12.2 的"主机把中心仓库的基线推到工作机"）：主机在**中心仓库**里执行 `git push`，`--receive-pack` 经 M2.7 的 Agent 执行入口以 agent 身份运行，目标是该项目的基础 clone；推送 `refs/heads/*:refs/remotes/origin/*` 和 `refs/cardigan/deliveries/*`，只传增量，不碰基础 clone 当前检出的分支。主机这一侧仍然只在中心仓库里执行 git。
+- 首次创建基础 clone：由 Agent 执行入口建一个空仓库，再由主机推送；或者首次仍用 bundle、之后改用推送。两种都可以，选实现简单的，写清理由。
+- 同用户模式保持现状（直接从中心仓库路径 fetch）。
+- 同步开发方案 §12.2 的 agent-ssh 段落和 §14 的 Git 一行。
+- 验收：推送路径下，主机从不在 Agent 目录里执行 git；第二次同步只传新增对象（例如断言没有生成 bundle 文件，并且新增提交在基础 clone 里可见）；不覆盖基础 clone 当前检出的分支和未提交文件；长超时、短超时分别生效（用可配置的小超时值触发超时）。
 
 ### M4.3 合并与清理（Codex）
 
