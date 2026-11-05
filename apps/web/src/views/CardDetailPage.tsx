@@ -1,10 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback } from "react";
 import {
   ApiError,
   type CardDetail,
   type CardiganClient,
   type CardView,
-  describeError,
   type WorkItemView,
 } from "../api.js";
 import { CommentBox, type MentionOption } from "../components/CommentBox.js";
@@ -16,6 +15,7 @@ import {
   type nextOwnerLabel,
   nextOwnersLabel,
 } from "../status.js";
+import { useResource } from "../useResource.js";
 
 /**
  * The card page (M5 plan §3.7, §4 M5.3; development plan §8.4).
@@ -30,6 +30,7 @@ export interface CardDetailPageProps {
   readonly client: CardiganClient;
   readonly projectId: string;
   readonly cardId: string;
+  readonly revision?: number;
 }
 
 type LoadState =
@@ -60,33 +61,25 @@ export function CardDetailPage({
   client,
   projectId,
   cardId,
+  revision = 0,
 }: CardDetailPageProps) {
-  const [state, setState] = useState<LoadState>({ kind: "loading" });
-  const latest = useRef(0);
-
-  const reload = useCallback(() => {
-    const request = latest.current + 1;
-    latest.current = request;
-    setState({ kind: "loading" });
-    client.card(projectId, cardId).then(
-      (detail) => {
-        if (latest.current === request) setState({ kind: "ready", detail });
-      },
-      (error: unknown) => {
-        if (latest.current !== request) return;
-        if (error instanceof ApiError && error.status === 404) {
-          setState({ kind: "missing" });
-          return;
-        }
-        setState({ kind: "error", message: describeError(error) });
-      },
-    );
+  const load = useCallback(async () => {
+    try {
+      return await client.card(projectId, cardId);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) return null;
+      throw error;
+    }
   }, [client, projectId, cardId]);
-
-  useEffect(() => {
-    reload();
-  }, [reload]);
-
+  const { data, error, reload } = useResource(load, revision);
+  const state: LoadState =
+    data === null
+      ? { kind: "missing" }
+      : data
+        ? { kind: "ready", detail: data }
+        : error
+          ? { kind: "error", message: error }
+          : { kind: "loading" };
   const back = routeHash({ kind: "board", projectId });
 
   if (state.kind === "loading") {
@@ -118,6 +111,14 @@ export function CardDetailPage({
   const { detail } = state;
   return (
     <article className="card-page" aria-label={`卡片 ${cardId}`}>
+      {error && (
+        <p role="alert" className="error-panel">
+          {error}{" "}
+          <button type="button" onClick={reload}>
+            重试
+          </button>
+        </p>
+      )}
       <CardHeader detail={detail} back={back} />
       <WorkItems detail={detail} />
       <Relations detail={detail} projectId={projectId} />

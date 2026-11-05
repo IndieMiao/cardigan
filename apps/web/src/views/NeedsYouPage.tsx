@@ -26,7 +26,7 @@ const waitLabel = (ms: number | null, elapsed = 0) => {
         : `已等待 ${Math.floor(age / 3600000)} 小时`;
 };
 const urgent = (q: NeedsDecision) => q.blocking || q.category !== "general";
-type Props = { client: CardiganClient; projectId: string };
+type Props = { client: CardiganClient; projectId: string; revision?: number };
 function useAction(done: () => void) {
   const [busy, setBusy] = useState(false),
     [error, setError] = useState<string>(),
@@ -222,12 +222,12 @@ function HumanAction({
     </article>
   );
 }
-export function NeedsYouPage({ client, projectId }: Props) {
+export function NeedsYouPage({ client, projectId, revision = 0 }: Props) {
   const load = useCallback(
     () => client.needsYou(projectId),
     [client, projectId],
   );
-  const { data, pending, error, reload } = useResource(load);
+  const { data, pending, error, reload } = useResource(load, revision);
   const [elapsed, setElapsed] = useState(0);
   useEffect(() => {
     setElapsed(0);

@@ -155,6 +155,7 @@ export function fakeClient(
   overrides: Partial<CardiganClient> = {},
 ): CardiganClient {
   return {
+    subscribe: () => () => {},
     activity: async () => ({
       events: [],
       next_before: null,

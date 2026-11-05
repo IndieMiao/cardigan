@@ -24,9 +24,11 @@ const labels: Record<string, string> = {
 export function ActivityPage({
   client,
   projectId,
+  revision = 0,
 }: {
   client: CardiganClient;
   projectId: string;
+  revision?: number;
 }) {
   const [draft, setDraft] = useState({ card_id: "", role: "", type: "" });
   const [filters, setFilters] = useState<ActivityFilter>({});
@@ -34,7 +36,7 @@ export function ActivityPage({
     () => client.activity(projectId, filters),
     [client, projectId, filters],
   );
-  const { data, pending, error, reload } = useResource(load);
+  const { data, pending, error, reload } = useResource(load, revision);
   return (
     <section aria-label="项目动态">
       <div className="toolbar">
