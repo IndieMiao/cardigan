@@ -9,6 +9,7 @@ import {
 } from "../api.js";
 import { CommentBox, type MentionOption } from "../components/CommentBox.js";
 import { decisionStatusLabel, Timeline } from "../components/Timeline.js";
+import { isHttpLink } from "../markdown.js";
 import { routeHash } from "../route.js";
 import {
   cardStatusLabel,
@@ -380,13 +381,19 @@ function Relations({
             <ul className="plain-list">
               {pull_requests.map((pull) => (
                 <li key={pull.delivery_id}>
-                  <a
-                    href={pull.pr_url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    {pull.pr_url}
-                  </a>
+                  {/* The URL comes from an Agent's delivery; a scheme we do not
+                      allow is shown as text instead of becoming a link. */}
+                  {isHttpLink(pull.pr_url) ? (
+                    <a
+                      href={pull.pr_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      {pull.pr_url}
+                    </a>
+                  ) : (
+                    <span className="plain-url">{pull.pr_url}</span>
+                  )}
                   <span className="card-why">
                     {pull.work_item_id}（{deliveryStatusLabel(pull.status)}）
                   </span>

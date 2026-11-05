@@ -143,6 +143,60 @@ test("the relations section shows ids with their status", async () => {
   expect(pull.getAttribute("target")).toBe("_blank");
 });
 
+test("a pull request URL is only a link when its scheme is allowed", async () => {
+  const detail = cardDetail({
+    relations: {
+      decisions: [],
+      cards: [],
+      pull_requests: [
+        {
+          delivery_id: "V-1",
+          work_item_id: "W-1",
+          status: "submitted",
+          pr_url: "javascript:alert(1)",
+        },
+        {
+          delivery_id: "V-2",
+          work_item_id: "W-1",
+          status: "submitted",
+          pr_url: "data:text/html,<script>alert(2)</script>",
+        },
+        {
+          delivery_id: "V-3",
+          work_item_id: "W-1",
+          status: "submitted",
+          pr_url: "https://example.com/pr/9",
+        },
+      ],
+    },
+  });
+  renderCard({ card: async () => detail });
+  const relations = await screen.findByRole("region", { name: "关联" });
+
+  // Agent-supplied schemes are text, not links, whatever React would allow.
+  expect(
+    within(relations).queryByRole("link", { name: /javascript:/u }),
+  ).toBeNull();
+  expect(
+    within(relations).queryByRole("link", { name: /data:text/u }),
+  ).toBeNull();
+  expect(relations.textContent).toContain("javascript:alert(1)");
+  expect(relations.textContent).toContain("data:text/html");
+  const anchors = [...relations.querySelectorAll("a")];
+  expect(
+    anchors.every((link) =>
+      /^https?:\/\//u.test(link.getAttribute("href") ?? ""),
+    ),
+  ).toBe(true);
+
+  // The real https address still links, with the hardened attributes.
+  const pull = within(relations).getByRole("link", {
+    name: "https://example.com/pr/9",
+  });
+  expect(pull.getAttribute("target")).toBe("_blank");
+  expect(pull.getAttribute("rel")).toBe("noopener noreferrer");
+});
+
 test("timeline entries are typed and carry their attachments", async () => {
   const detail = cardDetail({
     timeline: [

@@ -1,4 +1,5 @@
 import type { Reference } from "./api.js";
+import { isHttpLink } from "./markdown.js";
 import { routeHash } from "./route.js";
 
 /**
@@ -32,7 +33,7 @@ export function referenceHref(
       return `#entry-${reference.id}`;
     case "pr":
       // Only an http(s) address becomes a link; anything else stays text.
-      return /^https?:\/\//iu.test(reference.url) ? reference.url : undefined;
+      return isHttpLink(reference.url) ? reference.url : undefined;
   }
 }
 
