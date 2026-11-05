@@ -4,6 +4,11 @@ export interface GitWorktree {
   readonly head: string;
   readonly branch?: string;
 }
+/** Changed paths of a worktree: tracked (modified or staged) and untracked. */
+export interface GitWorktreeChanges {
+  readonly tracked: readonly string[];
+  readonly untracked: readonly string[];
+}
 export interface GitWorktreePort {
   ensureClone(source: string, directory: string): Promise<void>;
   fetch(repository: string, source: string): Promise<void>;
@@ -16,6 +21,33 @@ export interface GitWorktreePort {
     branch?: string,
   ): Promise<void>;
   isDirty(path: string): Promise<boolean>;
+  /** The cleanup decision needs the file lists, not just a boolean. */
+  changes(path: string): Promise<GitWorktreeChanges>;
+  /** `git diff HEAD`: staged and unstaged changes of tracked files. */
+  diffHead(path: string): Promise<string>;
+  removeWorktree(
+    repository: string,
+    path: string,
+    options: { readonly force: boolean },
+  ): Promise<void>;
+  deleteBranch(repository: string, branch: string): Promise<void>;
+}
+
+/** In-memory result of `merge-tree --write-tree`; conflicts never move a ref. */
+export interface GitTreeMerge {
+  readonly tree: string;
+  readonly conflicts: readonly string[];
+}
+export interface GitCommitTreeInput {
+  readonly tree: string;
+  readonly parents: readonly string[];
+  readonly message: string;
+  /** Merge commits never inherit the host's Git identity. */
+  readonly author: { readonly name: string; readonly email: string };
+}
+export interface GitRef {
+  readonly ref: string;
+  readonly sha: string;
 }
 
 /** Host-only bare repository operations. Every ref write requires an expected old value. */
@@ -46,4 +78,14 @@ export interface GitCentralPort {
     sha: string,
     expected: string | null,
   ): Promise<void>;
+  /** Merge two commits in the bare repository without checking anything out. */
+  mergeTree(
+    repository: string,
+    ours: string,
+    theirs: string,
+  ): Promise<GitTreeMerge>;
+  commitTree(repository: string, input: GitCommitTreeInput): Promise<string>;
+  /** Whether the object is reachable from some ref, e.g. after a backup fetch. */
+  isReachable(repository: string, sha: string): Promise<boolean>;
+  listRefs(repository: string, prefix: string): Promise<readonly GitRef[]>;
 }
