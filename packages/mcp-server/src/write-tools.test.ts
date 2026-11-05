@@ -199,15 +199,15 @@ test("delivery, review and completion use the real MCP transport, and replays su
   ).not.toBe(true);
   expect(
     store.uow.read((tx) => tx.cards.get(project_id, card_id)?.status),
-  ).toBe("done");
+  ).toBe("awaiting_merge");
   expect(
     (await call(coder, "submit_delivery", delivery)).structuredContent,
   ).toEqual(first.structuredContent);
   expect(counts()).toEqual({
     deliveries: 2,
     reviews: 2,
-    events: 4,
-    timeline: 4,
+    events: 5,
+    timeline: 5,
   });
   expect(store.uow.read((tx) => tx.timeline.list(project_id)[0]?.author)).toBe(
     "assignment:A-1",

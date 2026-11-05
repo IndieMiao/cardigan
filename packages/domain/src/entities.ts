@@ -104,6 +104,8 @@ export interface Card {
   readonly status: CardStatus;
   readonly resolution?: "done" | "superseded" | "duplicate" | "wontdo";
   readonly template: string;
+  /** Template policy fixed at creation; legacy cards default to confirm. */
+  readonly merge_policy?: "confirm" | "auto";
   readonly created_by: Author;
   readonly created_at: Timestamp;
 }
@@ -319,7 +321,7 @@ interface DecisionFields {
   readonly card_id?: CardId;
   readonly raised_by: Author;
   /** Set by the control plane, never by request_decision parameters. */
-  readonly trigger?: "review_limit";
+  readonly trigger?: "review_limit" | "merge_confirmation";
   readonly category?:
     | "general"
     | "spending"

@@ -48,7 +48,11 @@ export const transitionTables: {
     changes_requested: { run_started: "in_progress", cancel: "cancelled" },
     blocked: { resume: "in_progress", cancel: "cancelled" },
     waiting_decision: { decision_resolved: "in_progress", cancel: "cancelled" },
-    accepted: { delivery_submitted: "delivered", cancel: "cancelled" },
+    accepted: {
+      delivery_submitted: "delivered",
+      merge_conflicted: "changes_requested",
+      cancel: "cancelled",
+    },
   },
   verify: {
     todo: { target_delivered: "ready", cancel: "cancelled" },
@@ -171,8 +175,14 @@ export const transitionTables: {
     in_progress: { completion_submitted: "review", cancel: "cancelled" },
     review: {
       completion_submitted: "review",
-      completion_review_passed: "done",
+      completion_review_passed: "awaiting_merge",
       completion_review_rejected: "in_progress",
+      cancel: "cancelled",
+    },
+    awaiting_merge: {
+      merge_not_required: "done",
+      merge_succeeded: "done",
+      merge_conflicted: "in_progress",
       cancel: "cancelled",
     },
     done: { cancel: "cancelled" },

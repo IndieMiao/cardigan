@@ -524,7 +524,7 @@ const machineTables: readonly TableCase[] = [
   {
     machine: "card",
     from: "review",
-    to: ["review", "done", "in_progress", "cancelled"],
+    to: ["review", "awaiting_merge", "in_progress", "cancelled"],
   },
   { machine: "card", from: "done", to: ["cancelled"] },
   { machine: "card", from: "cancelled", to: [] },
@@ -540,7 +540,11 @@ const machineTables: readonly TableCase[] = [
     from: "delivered",
     to: ["delivered", "accepted", "changes_requested", "cancelled"],
   },
-  { machine: "produce", from: "accepted", to: ["delivered", "cancelled"] },
+  {
+    machine: "produce",
+    from: "accepted",
+    to: ["delivered", "changes_requested", "cancelled"],
+  },
   {
     machine: "produce",
     from: "changes_requested",
@@ -678,6 +682,7 @@ const events = [
   "set_backlog",
   "completion_submitted",
   "completion_review_passed",
+  "merge_conflicted",
   "completion_review_rejected",
   "unknown_event",
 ] as const;
@@ -798,7 +803,7 @@ describe("§4.4 state machines: allowed and forbidden transitions", () => {
     });
     expect(transition("card", "review", "completion_review_passed")).toEqual({
       ok: true,
-      value: "done",
+      value: "awaiting_merge",
     });
     expect(transition("card", "review", "completion_review_rejected")).toEqual({
       ok: true,
@@ -1250,7 +1255,7 @@ describe("inventory of §4.5 invariants", () => {
 
 // --------------------------------------------------------------- end to end ---
 
-describe("end to end: a dev card from creation to done", () => {
+describe("end to end: a dev card from creation to merge readiness", () => {
   test("create, assign, deliver, reject, rework, pass, completion, acceptance", async () => {
     const s = scenario();
     const { h } = s;
@@ -1342,8 +1347,8 @@ describe("end to end: a dev card from creation to done", () => {
     );
     expect(accepted.verdict).toBe("pass");
     expect(workItem(h, s.acceptance.id).status).toBe("passed");
-    expect(h.state.cards[0]?.status).toBe("done");
-    expect(h.state.cards[0]?.resolution).toBe("done");
+    expect(h.state.cards[0]?.status).toBe("awaiting_merge");
+    expect(h.state.cards[0]?.resolution).toBeUndefined();
   });
 });
 

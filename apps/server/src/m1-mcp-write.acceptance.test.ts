@@ -705,7 +705,7 @@ describe("§16: forged identity and illegal transitions", () => {
     expect(coderRecord.isError).toBe(true);
   });
 
-  test("a closed card refuses further work", async () => {
+  test("a card awaiting merge refuses further deliveries", async () => {
     const w = await world();
     // Take the card all the way to done, so its work items stay deliverable
     // and only the "card is closed" rule can refuse a new delivery.
@@ -760,9 +760,9 @@ describe("§16: forged identity and illegal transitions", () => {
     expect(accepted.verdict).toBe("pass");
 
     const closed = await call(w.office, "get_card", { card_id: w.cardId });
-    expect((closed.card as { status: string }).status).toBe("done");
+    expect((closed.card as { status: string }).status).toBe("awaiting_merge");
 
-    // A new delivery on the closed card is refused and writes nothing, even
+    // A new delivery while awaiting merge is refused and writes nothing, even
     // though `accepted --delivery_submitted--> delivered` exists in the table.
     const before = await call(w.office, "get_updates", { card_id: w.cardId });
     provisionRun(w.assignments.coder);
