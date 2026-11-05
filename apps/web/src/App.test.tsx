@@ -24,7 +24,7 @@ import {
   type ProjectSummary,
   type SessionInfo,
 } from "./api.js";
-import { cardDetail } from "./testing/fixtures.js";
+import { fakeClient as baseClient, cardDetail } from "./testing/fixtures.js";
 
 afterEach(() => {
   cleanup();
@@ -79,6 +79,7 @@ const noop = async (): Promise<void> => undefined;
 
 function fakeClient(options: FakeOptions): CardiganClient {
   return {
+    ...baseClient(),
     session: options.session ?? loggedIn,
     login: options.login ?? noop,
     logout: options.logout ?? noop,
