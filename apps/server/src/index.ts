@@ -118,6 +118,13 @@ export {
   RuntimeMonitor,
   type RuntimeMonitorOptions,
 } from "./dispatch-monitor.js";
+export {
+  configDir,
+  createHostWiring,
+  type HostEnv,
+  type HostWiring,
+  loadLaunchFiles,
+} from "./host.js";
 export { installShutdownHandlers, SHUTDOWN_SIGNALS } from "./lifecycle.js";
 export { type CardiganServer, startCardiganServer } from "./server.js";
 export {

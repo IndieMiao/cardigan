@@ -14,7 +14,8 @@
       ".dependency-cruiser.cjs",
       "pnpm-workspace.yaml",
       "packages/**",
-      "apps/**"
+      "apps/**",
+      "e2e/**"
     ]
   },
   "formatter": {

@@ -141,6 +141,34 @@ importers:
         specifier: 8.3.5
         version: 8.3.5(@types/node@26.6.6)(yaml@2.9.1)
 
+  e2e:
+    dependencies:
+      '@cardigan/cli':
+        specifier: workspace:*
+        version: link:../apps/cli
+      '@cardigan/domain':
+        specifier: workspace:*
+        version: link:../packages/domain
+      '@cardigan/mcp-server':
+        specifier: workspace:*
+        version: link:../packages/mcp-server
+      '@cardigan/server':
+        specifier: workspace:*
+        version: link:../apps/server
+      '@cardigan/store':
+        specifier: workspace:*
+        version: link:../packages/store
+      '@modelcontextprotocol/sdk':
+        specifier: 1.32.2
+        version: 1.32.2(zod@4.6.7)
+    devDependencies:
+      '@types/node':
+        specifier: ^24.19.2
+        version: 24.19.2
+      vitest:
+        specifier: 5.1.0
+        version: 5.1.0(@types/node@24.19.2)(jsdom@30.1.3)(vite@8.3.5(@types/node@24.19.2)(yaml@2.9.1))
+
   packages/domain: {}
 
   packages/git-service:
