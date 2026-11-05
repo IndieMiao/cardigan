@@ -327,8 +327,7 @@ test.each([
   },
 );
 
-// Defect: Timeline still links raw refs, ignoring references.exists=false from the server.
-test.fails("U07 §3.4: only existing server-resolved numbers in an Agent comment become links", async () => {
+test("U07 §3.4: only existing server-resolved numbers in an Agent comment become links", async () => {
   await f.loginBrowser();
   const text = `${f.card.id} C-999999 ${f.primary.owner.work_item_id} W-999999`;
   await f.agentComment(text);

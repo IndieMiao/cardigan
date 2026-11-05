@@ -45,6 +45,7 @@ export function timelineEntry(
     type: "comment",
     author: "assignment:A-1",
     refs: [],
+    references: [],
     retracted: false,
     body: "看过了，没问题。",
     mentions: [],

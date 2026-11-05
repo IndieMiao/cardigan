@@ -63,7 +63,25 @@ export interface CardView {
   readonly related_cards: readonly string[];
 }
 
-/** A reference the server recognised in a body (`refs` of a timeline entry). */
+/**
+ * A reference the server resolved for a body (`references` of a timeline entry).
+ * `exists` decides whether it may become a link: an identifier that names
+ * nothing stays text (M5 plan §3.4).
+ */
+export interface ResolvedReference {
+  readonly kind:
+    | "card"
+    | "timeline_entry"
+    | "decision"
+    | "human_action"
+    | "delivery";
+  readonly id: string;
+  readonly exists: boolean;
+  readonly status: string | null;
+  readonly card_id?: string;
+}
+
+/** A reference an Agent put in a body, as stored on the entry itself. */
 export type Reference =
   | { readonly kind: "card"; readonly id: string }
   | { readonly kind: "timeline_entry"; readonly id: string }
@@ -106,7 +124,10 @@ export interface TimelineEntryView {
   readonly delivery_id?: string;
   readonly decision_id?: string;
   readonly human_action_id?: string;
+  /** What the body spelled; the server-resolved form is `references`. */
   readonly refs: readonly Reference[];
+  /** Resolved references with existence and status (`references` in JSON). */
+  readonly references: readonly ResolvedReference[];
   readonly supersedes?: string;
   readonly retracted: boolean;
   readonly body: string;
