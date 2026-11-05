@@ -17,3 +17,26 @@ export interface GitWorktreePort {
   ): Promise<void>;
   isDirty(path: string): Promise<boolean>;
 }
+
+/** Host-only bare repository operations. Every ref write requires an expected old value. */
+export interface GitCentralPort {
+  ensureBare(source: string, repository: string): Promise<void>;
+  fetchRefs(
+    repository: string,
+    source: string,
+    refspecs: readonly string[],
+    uploadPack?: string,
+  ): Promise<void>;
+  readRef(repository: string, ref: string): Promise<string | undefined>;
+  isAncestor(
+    repository: string,
+    ancestor: string,
+    descendant: string,
+  ): Promise<boolean>;
+  compareAndSwapRef(
+    repository: string,
+    ref: string,
+    sha: string,
+    expected: string | null,
+  ): Promise<void>;
+}

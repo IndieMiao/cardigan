@@ -13,6 +13,8 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { CentralRepositoryService } from "@cardigan/git-service";
+import { CentralGitTransport } from "@cardigan/git-transport";
 import type { AgentExecution } from "@cardigan/runtime-herdr";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { AgentGitTransport } from "./agent-git.js";
@@ -120,6 +122,78 @@ describe.skipIf(process.platform !== "linux")("Agent workspace Git", () => {
       "main",
     );
     expect((await git(["-C", source, "rev-parse", "HEAD"])).trim()).toBe(head);
+  });
+  test("M4.2 bundles the private center including pinned deliveries and restores removed objects", async () => {
+    const hostCalls: string[] = [];
+    const io = new CentralGitTransport({
+      dataDir: config.dataDir,
+      agentRoot: config.agentRoot,
+      onCommand: (cwd) => hostCalls.push(cwd),
+    });
+    const central = new CentralRepositoryService(io, {
+      dataDir: config.dataDir,
+    });
+    const project = {
+      project_id: "project",
+      source_repo: source,
+      base_branch: "main",
+    };
+    const center = await central.ensureCentral(project);
+    await transport.ensureClone(center, repository);
+    await git(["-C", source, "switch", "-c", "candidate"]);
+    await writeFile(join(source, "file"), "delivery");
+    await git([
+      "-C",
+      source,
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.invalid",
+      "commit",
+      "-am",
+      "delivery",
+    ]);
+    const sha = (await git(["-C", source, "rev-parse", "HEAD"])).trim();
+    await io.fetchRefs(center, source, [
+      "refs/heads/candidate:refs/cardigan/deliveries/D-1",
+    ]);
+    await transport.fetch(repository, center);
+    expect(
+      await transport.resolveCommit(repository, "refs/cardigan/deliveries/D-1"),
+    ).toBe(sha);
+    await rm(join(repository, ".git", "objects"), { recursive: true });
+    await mkdir(join(repository, ".git", "objects"));
+    await transport.fetch(repository, center);
+    expect(
+      await transport.resolveCommit(repository, "refs/cardigan/deliveries/D-1"),
+    ).toBe(sha);
+    expect(
+      calls.every((args) => !args.includes(source) && !args.includes(center)),
+    ).toBe(true);
+    expect(
+      hostCalls.every((cwd) => cwd.startsWith(join(config.dataDir, "central"))),
+    ).toBe(true);
+  });
+  test("M4.2 refuses a legacy Agent clone instead of rewriting its source", async () => {
+    await initialize();
+    const central = new CentralRepositoryService(
+      new CentralGitTransport({ dataDir: config.dataDir }),
+      { dataDir: config.dataDir },
+    );
+    const center = await central.ensureCentral({
+      project_id: "project",
+      source_repo: source,
+      base_branch: "main",
+    });
+    await expect(transport.ensureClone(center, repository)).rejects.toThrow(
+      /rebuild/,
+    );
+    expect(
+      await readFile(
+        join(config.agentRoot, "inputs", "project", "source.path"),
+        "utf8",
+      ),
+    ).toBe(source);
   });
   test("fetch advances the baseline without overwriting an existing branch or dirty worktree", async () => {
     const initial = await initialize();

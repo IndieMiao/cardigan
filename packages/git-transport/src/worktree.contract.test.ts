@@ -14,12 +14,13 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import type { Assignment, Card, Role, WorkItem } from "@cardigan/domain";
 import {
+  CentralRepositoryService,
   type EnsureWorktreeInput,
   GitWorktreeService,
   type WorktreePlacement,
 } from "@cardigan/git-service";
 import { afterEach, beforeEach, expect, test } from "vitest";
-import { LocalGitTransport } from "./index.js";
+import { CentralGitTransport, LocalGitTransport } from "./index.js";
 
 const exec = promisify(execFile);
 const git = async (path: string, ...args: string[]) =>
@@ -126,7 +127,13 @@ beforeEach(async () => {
     work_item: item,
   };
   transport = new LocalGitTransport();
-  service = new GitWorktreeService(transport, { dataDir });
+  service = new GitWorktreeService(
+    transport,
+    new CentralRepositoryService(new CentralGitTransport({ dataDir }), {
+      dataDir,
+    }),
+    { dataDir },
+  );
 });
 afterEach(async () => {
   await rm(root, { recursive: true, force: true });
@@ -148,6 +155,7 @@ test.each(["checkout", "bare"])(
       worktree_path: join(dataDir, "agent", "worktrees", "fixture", "A-1"),
       branch: "agent/C-1/W-1",
       base_sha: head,
+      source_sync: "up_to_date",
     });
     expect(
       await git(created.worktree_path, "symbolic-ref", "--short", "HEAD"),
@@ -181,7 +189,7 @@ test("invariant 5: repeated start preserves its branch commits, uncommitted file
     ...input,
     assignment: { ...input.assignment, ...first },
   });
-  expect(again).toEqual(first);
+  expect(again).toEqual({ ...first, source_sync: undefined });
   expect(await git(first.worktree_path, "rev-parse", "HEAD")).toBe(ownHead);
   expect(await readFile(join(first.worktree_path, "tracked.txt"), "utf8")).toBe(
     "uncommitted",
@@ -189,34 +197,62 @@ test("invariant 5: repeated start preserves its branch commits, uncommitted file
   expect(await service.isDirty(first.worktree_path)).toBe(true);
 });
 
-test("a new Assignment fetches the current local baseline without moving existing worktrees", async () => {
-  const first = placement(await service.ensureWorktree(input));
-  const nextHead = await commit(source, "Next baseline");
-  if (!input.card || !input.work_item) throw new Error("Missing fixture");
-  const next = placement(
-    await service.ensureWorktree({
-      ...input,
-      assignment: {
-        ...input.assignment,
-        id: "A-2" as never,
-        scope: "work_item",
-        work_item_id: "W-2" as never,
-      },
-      card: { ...input.card, id: "C-2" as never },
-      work_item: {
-        ...input.work_item,
-        id: "W-2" as never,
-        card_id: "C-2" as never,
-        assignment_id: "A-2" as never,
-      },
-    }),
-  );
-  expect(next).toMatchObject({ branch: "agent/C-2/W-2", base_sha: nextHead });
-  expect(await git(first.worktree_path, "rev-parse", "HEAD")).toBe(
-    first.base_sha,
-  );
-  expect(await git(source, "for-each-ref", "refs/heads/agent/")).toBe("");
-});
+test.each(["fast_forwarded", "ahead", "diverged"])(
+  "a new Assignment uses the central baseline after %s synchronization",
+  async (sync) => {
+    const first = placement(await service.ensureWorktree(input));
+    const central = join(dataDir, "central", "fixture.git");
+    const nextHead = await commit(
+      sync === "fast_forwarded" ? source : first.worktree_path,
+      "Next baseline",
+    );
+    if (sync !== "fast_forwarded") {
+      await git(
+        central,
+        "fetch",
+        first.worktree_path,
+        `${first.branch}:refs/heads/main`,
+      );
+      if (sync === "diverged") await commit(source, "Diverged source");
+    }
+    const sourceRefs = await git(source, "show-ref");
+    const centralRefs = await git(central, "for-each-ref", "refs/heads/");
+    if (!input.card || !input.work_item) throw new Error("Missing fixture");
+    const next = placement(
+      await service.ensureWorktree({
+        ...input,
+        assignment: {
+          ...input.assignment,
+          id: "A-2" as never,
+          scope: "work_item",
+          work_item_id: "W-2" as never,
+        },
+        card: { ...input.card, id: "C-2" as never },
+        work_item: {
+          ...input.work_item,
+          id: "W-2" as never,
+          card_id: "C-2" as never,
+          assignment_id: "A-2" as never,
+        },
+      }),
+    );
+    expect(next).toMatchObject({
+      branch: "agent/C-2/W-2",
+      base_sha: nextHead,
+      source_sync: sync,
+    });
+    expect(await git(next.worktree_path, "rev-parse", "HEAD")).toBe(nextHead);
+    expect(await git(source, "show-ref")).toBe(sourceRefs);
+    if (sync !== "fast_forwarded")
+      expect(await git(central, "for-each-ref", "refs/heads/")).toBe(
+        centralRefs,
+      );
+    expect(await git(first.worktree_path, "rev-parse", "HEAD")).toBe(
+      sync === "fast_forwarded" ? first.base_sha : nextHead,
+    );
+    expect(await git(source, "for-each-ref", "refs/heads/agent/")).toBe("");
+  },
+);
 
 test("readonly worktrees are detached at the requested SHA and never silently retargeted", async () => {
   const sha = await git(source, "rev-parse", "HEAD");
@@ -263,10 +299,16 @@ test("worktree=none skips Git and configured roots override the defaults", async
     }),
   ).toBeUndefined();
   await expect(access(dataDir)).rejects.toThrow();
-  const custom = new GitWorktreeService(transport, {
-    repositoriesRoot: join(root, "repos"),
-    worktreesRoot: join(root, "trees"),
-  });
+  const custom = new GitWorktreeService(
+    transport,
+    new CentralRepositoryService(new CentralGitTransport({ dataDir }), {
+      dataDir,
+    }),
+    {
+      repositoriesRoot: join(root, "repos"),
+      worktreesRoot: join(root, "trees"),
+    },
+  );
   expect(placement(await custom.ensureWorktree(input)).worktree_path).toBe(
     join(root, "trees", "fixture", "A-1"),
   );
@@ -325,6 +367,7 @@ test.each([
 
 test("existing foreign paths, branches and source repositories are never overwritten", async () => {
   const path = join(dataDir, "agent", "worktrees", "fixture", "A-1");
+  await mkdir(dataDir, { mode: 0o700 });
   await mkdir(path, { recursive: true });
   await writeFile(join(path, "keep"), "private");
   await expect(service.ensureWorktree(input)).rejects.toThrow(/already exists/);
@@ -384,13 +427,13 @@ test("two projects with A-1 have simultaneous independent worktrees under the de
       ...input,
       assignment: { ...input.assignment, ...first },
     }),
-  ).toEqual(first);
+  ).toEqual({ ...first, source_sync: undefined });
   expect(
     await service.ensureWorktree({
       ...other,
       assignment: { ...other.assignment, ...second },
     }),
-  ).toEqual(second);
+  ).toEqual({ ...second, source_sync: undefined });
   expect(await git(first.worktree_path, "rev-parse", "HEAD")).toBe(firstHead);
   expect(await git(second.worktree_path, "rev-parse", "HEAD")).toBe(secondHead);
   expect(await readFile(join(first.worktree_path, "tracked.txt"), "utf8")).toBe(

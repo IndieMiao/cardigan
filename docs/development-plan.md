@@ -1016,28 +1016,30 @@ status 先 hc get，再取 hc events 的初始快照，同时使用该快照的�
 
 ### 12.1 原则：所有 Git 网络操作由主机发起
 
-- 中心仓库是主机上的 bare 仓库：`/srv/cardigan/repos/<project>.git`。
+- 中心仓库是主机数据目录下独占的 bare 仓库：`<CARDIGAN_DATA_DIR>/central/<project_id>.git`（根目录可配置），目录为主机拥有的 0700。它从 `projects.repo_path` 登记源经 `clone --bare --no-local` 临时目录校验后发布；登记源始终只读，合并结果由用户自己 fetch 回去，M4 不自动推送外部平台。
 - 工作机和 Agent **不持有任何 Git 凭据，不能 push**。主机通过已有的单向 SSH 从工作机拉取，并向工作机推送基线。
 - 项目如果托管在 GitHub / GitLab，只有主机持有其凭据，合并后由主机推送上去。
 - 参照实现（herdr-projects / Shepherdr）让工作机自己 push 到 origin，我们不采用：工作机不持有凭据，这一点不可协商。
 - 单机时用同一套代码，拉取直接走本地文件路径（`git-transport` 的本地实现）。
 
+M4.2 的 CentralRepositoryService 通过 domain 的 GitCentralPort 调用 CentralGitTransport。中心配置绑定登记源的规范路径，来源变更要求显式重建。syncFromSource 只将登记源基线 fetch 到 refs/cardigan/source/<base_branch>：中心是其祖先时用 update-ref 的旧值比较快进；相同、中心领先、分叉分别返回 up_to_date / ahead / diverged，后两者不移动中心基线。新写入型 worktree 创建前同步；分叉时仍从中心基线创建，并在返回值 `source_sync` 中报告 `diverged`，由 M4.4 组装层放进 attention，不阻塞新任务。`source_sync` 也区分快进、相同和中心领先；只读或复用已有 worktree 时不执行同步、不返回该字段，旧 worktree 和原基线记录不改。
+
 ### 12.2 布局与命名
 
-- 每台机器每个项目一个基础 clone：`/srv/agent/repos/<project>`
+- 每台机器每个项目一个基础 clone：`/srv/agent/repos/<project>`，来源为主机中心仓库
 - worktree：`/srv/agent/worktrees/<project_id>/<assignment_id>`。Assignment 编号按项目分配，路径按项目分层。由主机的 Git 服务创建，不使用运行时的默认目录（两台机器上 Herdr 的默认目录并不一致，0.3 实测）
 - 分支：`agent/<card_id>/<work_item_id>`
 - provision 时记录 `base_sha`。
 - 基线同步：主机把中心仓库的 main 推到各工作机基础 clone 的 `refs/remotes/origin/main`，不碰工作机当前检出的分支；工作项显式从记录的基线建 worktree。不要通过关闭 `receive.denyCurrentBranch` 来同步工作目录（0.5b 实测）。
 - 只有 PM Ops 或 Router 明确要求时才 rebase 到最新基线，避免意外改动。
 
-M2.5 的 GitWorktreeService 经 domain 的 GitWorktreePort 调用 LocalGitTransport，组装层注入实现，不逆向引用 transport。默认目录为 CARDIGAN_DATA_DIR/agent/repos/<project_id> 和 agent/worktrees/<project_id>/<assignment_id>，可分别配置根目录；自定义 worktreesRoot 下同样按项目分层。project_id 入路径前校验为安全片段，拒绝空串、`.`、`..`、路径分隔符和以 `-` 开头的值。只接受绝对本地仓库路径，clone 使用 --no-local --no-checkout，经自己创建的临时目录发布；fetch 显式使用该本地路径并禁用非 file 协议，不使用可能已改成网络地址的远端。现有 clone 必须匹配登记来源。
+GitWorktreeService 经 domain 的 GitWorktreePort 调用 LocalGitTransport，并由组装层注入 CentralRepositoryService 取得中心基线，不逆向引用 transport。默认目录为 CARDIGAN_DATA_DIR/agent/repos/<project_id> 和 agent/worktrees/<project_id>/<assignment_id>，可分别配置根目录；自定义 worktreesRoot 下同样按项目分层。project_id 入路径前校验为安全片段，拒绝空串、`.`、`..`、路径分隔符和以 `-` 开头的值。只接受绝对本地仓库路径，基础 clone 使用 --no-local --no-checkout 从中心仓库经临时目录发布；fetch 显式使用中心的本地路径，并同时拉取 heads 到 remotes/origin 及 refs/cardigan/deliveries/* 固定交付。现有 clone 必须匹配中心来源；M2 的旧来源 clone 拒绝复用并提示显式重建，不自动删除。
 
 write 工作项从 fetch 后的 origin/<base_branch> 当前提交创建 agent/<card>/<work_item>；返回 worktree_path、branch、base_sha 供 M2.6 持久化到 Assignment。既有目录必须是该基础 clone 登记的 worktree 且分支匹配，复用时不 reset、不重建、不移动工作项自己的提交或未提交文件；有已记录 base_sha 时保留它，尚未记录时返回现有 HEAD。readonly 必须提供目标提交 SHA，创建 detached worktree；旧目录目标不一致则拒绝，M2 不自动切换已存在的审核目录。detached 表示不挂分支，不等于文件系统只读权限。
 
 worktree=none 跳过 Git。isDirty 包含已跟踪、暂存和未跟踪改动，仅查询。GitWorktreePort 不暴露 push 或 worktree 删除；外部目录、错误分支、错误来源一律拒绝覆盖。不同项目的同号 Assignment 可以在同一个 worktrees 根目录下并存，各自使用独立的基础 clone 和项目子目录，提交和未提交文件互不影响。
 
-agent-ssh 模式中，主机不能执行 Agent 可修改仓库的 Git 配置。主机从共享工作根之外的登记源生成 bundle，在受保护的 inputs/<project_id> 父层发布 0640 的 source.bundle；它不是新的远端或 Git 凭据。基础 clone 从该 bundle 创建，后续 fetch 同一 bundle；所有共享仓库的 Git 操作通过配置好的 Agent 执行入口运行。repos 和 worktrees 的父层保持 2750，主机预建 2770 叶子供 Agent 写入。失败的非空临时 clone 不由主机递归删除，留待 M4 显式清理。
+agent-ssh 模式中，主机不能执行 Agent 可修改仓库的 Git 配置。主机从私有中心仓库生成包含 heads 和 refs/cardigan/deliveries/* 的 bundle，在受保护的 inputs/<project_id> 父层发布 0640 的 source.bundle；它不是新的远端或 Git 凭据。基础 clone 从该 bundle 创建，后续 fetch 同一 bundle；所有共享仓库的 Git 操作通过配置好的 Agent 执行入口运行。repos 和 worktrees 的父层保持 2750，主机预建 2770 叶子供 Agent 写入。失败的非空临时 clone 不由主机递归删除，留待 M4 显式清理。
 
 ### 12.3 交付
 
@@ -1191,7 +1193,7 @@ M3.4 通过主机 RuntimeMonitor 订阅每个未结束 Run 所在终端的 hc ev
 | Herdr Socket（无 ACL） | 接受同机 Agent 可互相操作；影响范围限于单台机器 |
 | Card MCP | Token 仅由主机侧签发；MCP 不签发或返回明文，PM 不能借 assign 获取其他 Assignment 的凭据；身份和状态迁移由服务端校验 |
 | Web Workbench | 即使在局域网也要登录；只监听局域网接口 |
-| Git | 工作机和 Agent 不持有任何 Git 凭据；拉取和推送都由主机发起；只在中心合并；外部托管平台的凭据只在主机 |
+| Git | 工作机和 Agent 不持有任何 Git 凭据；主机 Git 使用独占中心仓库，Agent 可写仓库内的 Git 由 Agent 执行；中心操作清空继承的 GIT_*，禁用系统／全局配置及 hook，只允许 file 协议，启用 transfer.fsckObjects；M4 不推送外部平台 |
 | 模型密钥 | 只放在环境变量或网关；不写进数据库、评论和仓库 |
 | 注入的提示词和 Token | 主机写入目标 Assignment 自己的 MCP 配置，放在 worktree 外；不进入其他 Agent 的对话记录，Session 替换时作废旧 Token |
 | 仓库内容中的提示注入 | Agent 没有 sudo；高风险操作走工具审批；业务变更走 Decision |

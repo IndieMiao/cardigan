@@ -4,6 +4,11 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { GitWorktree, GitWorktreePort } from "@cardigan/domain";
 
+import { gitEnvironment, gitSafetyArguments } from "./hardening.js";
+
+export { type CentralGitOptions, CentralGitTransport } from "./central.js";
+export { gitEnvironment, gitSafetyArguments } from "./hardening.js";
+
 const exec = promisify(execFile);
 const exists = (path: string) =>
   access(path).then(
@@ -25,17 +30,9 @@ export class LocalGitTransport implements GitWorktreePort {
     private readonly workspace?: WorkspaceGit,
   ) {}
   private async git(repository: string | undefined, args: string[]) {
-    const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
-    for (const key of Object.keys(env))
-      if (key.startsWith("GIT_") && key !== "GIT_TERMINAL_PROMPT")
-        delete env[key];
+    const env = gitEnvironment();
     const command = [
-      "-c",
-      "protocol.allow=never",
-      "-c",
-      "protocol.file.allow=always",
-      "-c",
-      "core.hooksPath=/dev/null",
+      ...gitSafetyArguments,
       ...(repository ? ["-C", repository] : []),
       ...args,
     ];
@@ -84,16 +81,20 @@ export class LocalGitTransport implements GitWorktreePort {
       (await this.git(directory, ["config", "--get", "remote.origin.url"])) !==
         local
     )
-      throw new Error("Existing clone does not belong to this local source");
+      throw new Error(
+        "Existing clone does not belong to this local source; rebuild it from the central repository",
+      );
   }
   async fetch(repository: string, source: string): Promise<void> {
     const local = await this.source(source);
     await this.git(repository, [
       "fetch",
+      "--atomic",
       "--no-tags",
       "--",
       local,
       "+refs/heads/*:refs/remotes/origin/*",
+      "+refs/cardigan/deliveries/*:refs/cardigan/deliveries/*",
     ]);
   }
   async resolveCommit(repository: string, ref: string): Promise<string> {

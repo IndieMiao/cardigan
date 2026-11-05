@@ -8,10 +8,21 @@ import type {
 } from "@cardigan/domain";
 import { parseId } from "@cardigan/domain";
 
+import type { CentralRepositoryService, SourceSync } from "./central.js";
+
+export {
+  type CentralOptions,
+  type CentralProject,
+  CentralRepositoryService,
+  type SourceSync,
+} from "./central.js";
+
 export interface WorktreePlacement {
   readonly worktree_path: string;
   readonly branch?: string;
   readonly base_sha: string;
+  /** Present only when a new writable worktree synchronizes its baseline. */
+  readonly source_sync?: SourceSync;
 }
 export interface EnsureWorktreeInput {
   readonly project_id: string;
@@ -34,6 +45,7 @@ export class GitWorktreeService {
   private readonly worktrees: string;
   constructor(
     private readonly git: GitWorktreePort,
+    private readonly central: CentralRepositoryService,
     options: WorktreeOptions = {},
   ) {
     const dataDir = options.dataDir ?? process.env.CARDIGAN_DATA_DIR ?? ".data";
@@ -90,7 +102,13 @@ export class GitWorktreeService {
       throw new Error("Assignment worktree root changed");
     if (a.branch && a.branch !== branch)
       throw new Error("Assignment branch changed");
-    await this.git.ensureClone(input.source_repo, repository);
+    const project = {
+      project_id: input.project_id,
+      source_repo: input.source_repo,
+      base_branch: card.base_branch,
+    };
+    const central = await this.central.ensureCentral(project);
+    await this.git.ensureClone(central, repository);
     const existing = (await this.git.listWorktrees(repository)).find(
       (w) => w.path === path,
     );
@@ -109,7 +127,10 @@ export class GitWorktreeService {
         base_sha: a.base_sha ?? existing.head,
       };
     }
-    await this.git.fetch(repository, input.source_repo);
+    const source_sync = readonly
+      ? undefined
+      : await this.central.syncFromSource(project);
+    await this.git.fetch(repository, central);
     const base_sha = await this.git.resolveCommit(
       repository,
       readonly
@@ -117,7 +138,12 @@ export class GitWorktreeService {
         : `refs/remotes/origin/${card.base_branch}`,
     );
     await this.git.addWorktree(repository, path, base_sha, branch);
-    return { worktree_path: path, ...(branch ? { branch } : {}), base_sha };
+    return {
+      worktree_path: path,
+      ...(branch ? { branch } : {}),
+      base_sha,
+      ...(source_sync ? { source_sync } : {}),
+    };
   }
   isDirty(worktree_path: string): Promise<boolean> {
     return this.git.isDirty(worktree_path);
