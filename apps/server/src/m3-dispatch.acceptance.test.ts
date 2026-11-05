@@ -25,6 +25,7 @@ import {
   assign,
   createCard,
   dispatchRun,
+  finishRun,
   postComment,
   queueRun,
 } from "@cardigan/domain";
@@ -41,8 +42,10 @@ const CLI = "pi 1.5.0";
 
 interface Harness {
   readonly store: Store;
-  patchAssignment(patch: Partial<Assignment>, id?: Assignment["id"]): void;
-  finishRun(status?: "completed" | "failed", assignment?: Assignment): void;
+  /** Acknowledge the newest Run, as its Assignment (first tool call). */
+  acknowledge(assignment?: Assignment): Run;
+  /** End the newest Run through the domain command, as its Assignment. */
+  endRun(assignment?: Assignment, outcome?: "completed" | "failed"): Run;
   readonly dataDir: string;
   readonly clock: { now(): string };
   advance(ms: number): void;
@@ -188,14 +191,18 @@ function harness(): Harness {
       persistEffect(tx, project, effect);
       return effect.data;
     });
-  const actor = (assignment: Assignment): Actor =>
+  /** The Assignment's token gives it its Role's tools; tests may narrow them. */
+  const actor = (
+    assignment: Assignment,
+    tools: readonly string[] = ["finish_run", "acknowledge_run"],
+  ): Actor =>
     ({
       kind: "assignment",
       project_id: project,
       assignment_id: assignment.id,
       role_id: assignment.role_id,
       role_version: assignment.role_version,
-      allowed_tools: [],
+      allowed_tools: [...tools],
     }) as never;
 
   const card = apply((state, who, ports) =>
@@ -232,41 +239,53 @@ function harness(): Harness {
           assignment === undefined || run.assignment_id === assignment.id,
       );
 
-  /** Patch the coder Assignment without reading inside the write transaction. */
-  const patchAssignment = (
-    patch: Partial<Assignment>,
-    id: Assignment["id"] = coder.id,
-  ) => {
-    const current = store.uow.read((tx) => tx.assignments.get(project, id));
-    if (current === undefined) throw new Error(`missing assignment ${id}`);
-    store.uow.run((tx) =>
-      tx.assignments.put(project, { ...current, ...patch } as never),
-    );
-  };
-  /** Close the newest Run of `assignment` with `status`. */
-  const finishRun = (
-    status: "completed" | "failed" = "completed",
-    assignment: Assignment = coder,
-  ) => {
+  const newestRun = (assignment: Assignment) => {
     const run = store.uow
       .read((tx) => tx.runs.list(project))
       .filter((candidate) => candidate.assignment_id === assignment.id)
       .at(-1);
     if (run === undefined) throw new Error("missing run");
-    store.uow.run((tx) =>
-      tx.runs.put(project, {
-        ...run,
-        status,
-        ...(status === "completed" ? { outcome: "completed" as const } : {}),
-      }),
-    );
+    return run;
+  };
+  const acknowledge = (assignment: Assignment = coder): Run => {
+    const run_id = newestRun(assignment).id;
+    return apply(
+      (state, who, ports) => acknowledgeRun(state, who, { run_id }, ports),
+      actor(assignment),
+    ) as never as Run;
+  };
+
+  /**
+   * End the newest Run of `assignment` with the real `finish_run` command, as
+   * that Assignment. The command leaves `runtime_state` alone on purpose: the
+   * Dispatcher decides liveness from `Runtime.status`, not from that field.
+   */
+  const endRun = (
+    assignment: Assignment = coder,
+    outcome: "completed" | "failed" = "completed",
+  ): Run => {
+    const run = store.uow
+      .read((tx) => tx.runs.list(project))
+      .filter((candidate) => candidate.assignment_id === assignment.id)
+      .at(-1);
+    if (run === undefined) throw new Error("missing run");
+    return apply(
+      (state, who, ports) =>
+        finishRun(
+          state,
+          who,
+          { run_id: run.id, outcome, summary: "fixture finished" },
+          ports,
+        ),
+      actor(assignment),
+    ) as never as Run;
   };
 
   return {
     store,
     dataDir,
-    patchAssignment,
-    finishRun,
+    acknowledge,
+    endRun,
     clock,
     advance: (ms) => {
       time += ms;
@@ -307,10 +326,13 @@ function withRun(
       ports,
     ),
   ) as never as Run;
-  f.store.uow.run((tx) =>
-    tx.assignments.put(project, { ...assignment, runtime_ref: ref } as never),
-  );
-  if (status === "queued") return run;
+  if (status === "queued") {
+    // A queued Run has no runtime history yet, so nothing records a ref for it.
+    f.store.uow.run((tx) =>
+      tx.assignments.put(project, { ...assignment, runtime_ref: ref } as never),
+    );
+    return run;
+  }
   f.apply((state, who, ports) =>
     dispatchRun(state, who, { run_id: run.id, runtime_ref: ref }, ports),
   );
@@ -395,8 +417,7 @@ test("§3.1 an idle terminal gets a new Run and then the bell", async () => {
   const runtime = fakeRuntime();
   // A Run that already started, then finished, leaves a live idle terminal.
   withRun(f, f.coder, "running");
-  f.finishRun();
-  f.patchAssignment({ runtime_state: "idle", runtime_ref: refFor(f.coder) });
+  f.endRun();
   comment(f);
   f.route();
 
@@ -459,7 +480,10 @@ test("§3.1 a released Assignment is not belled and goes to PM Ops", async () =>
   // released before the dispatcher gets to deliver it.
   comment(f);
   f.route();
-  f.patchAssignment({ status: "released" });
+  // No domain command reaches `assignment:released` in M3 (the plan only fixes
+  // the transition); the Dispatcher must still refuse to bell it.
+  const released = { ...(f.assignment() as Assignment), status: "released" };
+  f.store.uow.run((tx) => tx.assignments.put(project, released as never));
 
   await dispatcher(f, runtime).tick();
 
@@ -475,8 +499,7 @@ test("§3.1 a released Assignment is not belled and goes to PM Ops", async () =>
 test("§3.3 a bell without an ACK is resent with 1/2/4/8 minute backoff, then escalated", async () => {
   const runtime = fakeRuntime();
   withRun(f, f.coder, "running");
-  f.finishRun();
-  f.patchAssignment({ runtime_state: "idle", runtime_ref: refFor(f.coder) });
+  f.endRun();
   comment(f);
   f.route();
   const d = dispatcher(f, runtime, {
@@ -488,7 +511,10 @@ test("§3.3 a bell without an ACK is resent with 1/2/4/8 minute backoff, then es
   // First bell. The Agent then finishes its Run without ACKing, which is the
   // state §3.3 describes: no unfinished Run, still no ACK.
   await d.tick();
-  f.finishRun();
+  // The Agent acked its Run and finished it, but never advanced the event
+  // cursor — the bell is still unconfirmed.
+  f.acknowledge();
+  f.endRun();
   const bell = () =>
     f
       .notes()
@@ -500,19 +526,20 @@ test("§3.3 a bell without an ACK is resent with 1/2/4/8 minute backoff, then es
   // No time passed: the retry is not due yet.
   await d.tick();
   expect(bell()?.attempts).toBe(1);
-  f.notes().find(
-    (note) => note.recipient.assignment_id === f.coder.id && note.attempts > 0,
-  );
-  // The first retry is due one minute later; the delays double.
+  // The delays double: 1, 2, 4 and 8 minutes after the previous bell. One
+  // second before the delay no retry is due, one second later it is — a fixed
+  // interval would fail the "just before" half.
   for (const [index, minutes] of [1, 2, 4, 8].entries()) {
-    f.advance(minutes * 60_000);
+    f.advance(minutes * 60_000 - 1000);
     await d.tick();
-    // Each retry starts another Run; finish it so the next retry is eligible.
-    if (index < 3) f.finishRun();
+    expect(bell()?.attempts, `too early for retry ${index + 1}`).toBe(
+      index + 1,
+    );
+    f.advance(1000);
+    await d.tick();
     expect(bell()?.attempts, `retry ${index + 1}`).toBe(index + 2);
   }
   // One more tick past the last delay exhausts the retries.
-  f.finishRun();
   f.advance(16 * 60_000);
   await d.tick();
   expect(
@@ -551,8 +578,7 @@ test("§3.3 a failed wake is marked delivery_failed, escalated, and never retrie
     error: { code: "runtime_unavailable", message: "socket gone" },
   });
   withRun(f, f.coder, "running");
-  f.finishRun();
-  f.patchAssignment({ runtime_state: "idle", runtime_ref: refFor(f.coder) });
+  f.endRun();
   comment(f);
   f.route();
   const d = dispatcher(f, runtime);
@@ -649,8 +675,7 @@ test("§3.3/§13.9 a lost runtime goes unknown, then lost, then Needs You and PM
 test("a delivery interrupted mid-flight is settled once and never duplicated", async () => {
   const runtime = fakeRuntime();
   withRun(f, f.coder, "running");
-  f.finishRun();
-  f.patchAssignment({ runtime_state: "idle", runtime_ref: refFor(f.coder) });
+  f.endRun();
   comment(f);
   f.route();
 
@@ -697,8 +722,7 @@ test("a delivery interrupted mid-flight is settled once and never duplicated", a
 test("a restarted dispatcher does not ring the same notifications twice", async () => {
   const runtime = fakeRuntime();
   withRun(f, f.coder, "running");
-  f.finishRun();
-  f.patchAssignment({ runtime_state: "idle", runtime_ref: refFor(f.coder) });
+  f.endRun();
   comment(f);
   f.route();
 
