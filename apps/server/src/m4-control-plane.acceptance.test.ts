@@ -1,9 +1,15 @@
-/** M4.T2: public-flow expectations from plan §3.3/§3.6/§3.8, §16. */
+/** M4.T2: public-flow expectations from plan §3.3/§3.6/§3.8, §16.
+ *
+ * Background-loop waits use the shared helper (test-support/waits.ts); each test
+ * that waits on a loop carries an explicit 120 s budget, because on a saturated
+ * host one loop round is several seconds of real Git work.
+ */
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
 import { git, type M4Cross, m4Cross } from "../test-support/m4-cross.js";
+import { waitFor } from "../test-support/waits.js";
 import { CleanupExecutor } from "./cleanup-loop.js";
 
 let f: M4Cross | undefined;
@@ -11,8 +17,6 @@ afterEach(async () => {
   await f?.close();
   f = undefined;
 }, 60_000);
-const wait = <T>(read: () => T) =>
-  expect.poll(read, { timeout: 10_000, interval: 30 });
 const events = (s: M4Cross, type: string) =>
   s.state().events.filter((e) => e.type === type);
 const decisions = (s: M4Cross) =>
@@ -69,6 +73,7 @@ test.each(["missing", "other-branch"] as const)(
         .filter((line) => /cardigan\/(candidates|deliveries)\//.test(line));
     expect(fixed(git(s.center, "show-ref"))).toEqual(fixed(refs));
   },
+  60_000,
 );
 
 test.each([false, true])(
@@ -84,8 +89,8 @@ test.each([false, true])(
     await s.confirm();
     expect(s.state().cards[0]?.status).toBe("awaiting_merge"); // No executor yet.
     await s.restart();
-    await wait(() => s.state().cards[0]?.status).toBe("done");
-    await wait(() => existsSync(path)).toBe(false);
+    await waitFor(() => s.state().cards[0]?.status).toBe("done");
+    await waitFor(() => existsSync(path)).toBe(false);
     const head = git(s.center, "rev-parse", "main");
     expect(
       git(s.center, "rev-list", "--parents", "-n", "1", head).split(" "),
@@ -117,7 +122,7 @@ test.each([false, true])(
     expect(events(s, "card_merged")).toHaveLength(1);
     expect(decisions(s)).toHaveLength(0);
   },
-  60_000,
+  120_000,
 );
 
 test("E03 §3.8: merge conflict dispatches a fix Run; a new reviewed delivery completes the cycle", async () => {
@@ -128,8 +133,8 @@ test("E03 §3.8: merge conflict dispatches a fix Run; a new reviewed delivery co
   const upstream = git(s.source, "rev-parse", "HEAD");
   await s.confirm();
   await s.restart();
-  await wait(() => events(s, "merge_conflicted").length).toBe(1);
-  await wait(() =>
+  await waitFor(() => events(s, "merge_conflicted").length).toBe(1);
+  await waitFor(() =>
     s
       .state()
       .runs.some(
@@ -168,11 +173,11 @@ test("E03 §3.8: merge conflict dispatches a fix Run; a new reviewed delivery co
   await s.complete(next);
   await s.confirm();
   await s.restart();
-  await wait(() => s.state().cards[0]?.status).toBe("done");
-  await wait(() => existsSync(s.path(s.primary.owner))).toBe(false);
+  await waitFor(() => s.state().cards[0]?.status).toBe("done");
+  await waitFor(() => existsSync(s.path(s.primary.owner))).toBe(false);
   expect(events(s, "card_merged")).toHaveLength(1);
   expect(events(s, "merge_conflicted")).toHaveLength(1);
-}, 30_000);
+}, 120_000);
 
 test("E04 §3.6: dirty worktree enters Needs You; keep survives restart without duplicate decisions or merges", async () => {
   const { s } = await accepted();
@@ -180,7 +185,7 @@ test("E04 §3.6: dirty worktree enters Needs You; keep survives restart without 
   await writeFile(join(path, "shared.txt"), "unfinished\n");
   await s.confirm();
   await s.restart();
-  await wait(() => decisions(s).length).toBe(1);
+  await waitFor(() => decisions(s).length).toBe(1);
   const decision = decisions(s)[0];
   expect(decision?.status).toBe("open");
   expect(existsSync(path)).toBe(true);
@@ -189,7 +194,7 @@ test("E04 §3.6: dirty worktree enters Needs You; keep survives restart without 
     "unfinished",
   );
   await s.restart();
-  await wait(() => s.released.length).toBeGreaterThan(0);
+  await waitFor(() => s.released.length).toBeGreaterThan(0);
   expect(decisions(s)).toHaveLength(1);
   await s.cli("worktree", "keep", s.primary.owner.id);
   await s.restart();
@@ -202,7 +207,7 @@ test("E04 §3.6: dirty worktree enters Needs You; keep survives restart without 
   expect(decisions(s)[0]?.resolution?.option).toBe("keep");
   expect(readFileSync(join(path, "shared.txt"), "utf8")).toBe("unfinished\n");
   expect(events(s, "card_merged")).toHaveLength(1);
-}, 30_000);
+}, 120_000);
 
 test("E05 §3.6: force-clean records the human decision and saves a private patch", async () => {
   const { s } = await accepted();
@@ -211,9 +216,9 @@ test("E05 §3.6: force-clean records the human decision and saves a private patc
   await writeFile(join(path, "notes.txt"), "untracked\n");
   await s.confirm();
   await s.restart();
-  await wait(() => decisions(s).length).toBe(1);
+  await waitFor(() => decisions(s).length).toBe(1);
   await s.cli("worktree", "clean", s.primary.owner.id, "--force");
-  await wait(() => existsSync(path)).toBe(false);
+  await waitFor(() => existsSync(path)).toBe(false);
   const dir = join(s.dataDir, "cleanup", s.project.project_id),
     patches = readdirSync(dir);
   expect(patches).toHaveLength(1);
@@ -228,7 +233,7 @@ test("E05 §3.6: force-clean records the human decision and saves a private patc
   });
   await s.restart();
   expect(decisions(s)).toHaveLength(1);
-}, 30_000);
+}, 120_000);
 
 test("E06 §14: Agent Git stays behind the execution entry throughout delivery, merge and cleanup", async () => {
   const { s } = await accepted({ agent: true });
@@ -247,8 +252,8 @@ test("E06 §14: Agent Git stays behind the execution entry throughout delivery, 
   await s.agentRun(["-C", s.path(s.primary.owner), "restore", "shared.txt"]);
   await s.confirm();
   await s.restart();
-  await wait(() => s.state().cards[0]?.status).toBe("done");
-  await wait(() => existsSync(s.path(s.primary.owner))).toBe(false);
+  await waitFor(() => s.state().cards[0]?.status).toBe("done");
+  await waitFor(() => existsSync(s.path(s.primary.owner))).toBe(false);
   const calls = readFileSync(s.trace, "utf8")
     .trim()
     .split("\n")
@@ -275,7 +280,7 @@ test("E06 §14: Agent Git stays behind the execution entry throughout delivery, 
         c.side === "agent" && c.args.some((a) => a.includes("receive-pack")),
     ),
   ).toBe(true);
-}, 60_000);
+}, 120_000);
 
 test("E07 §3.6: released Assignment cannot read while its token awaits revocation", async () => {
   const s = await m4Cross();
@@ -303,4 +308,4 @@ test("E07 §3.6: released Assignment cannot read while its token awaits revocati
     expect(response.status).toBe(401);
     await response.body?.cancel();
   }
-});
+}, 60_000);

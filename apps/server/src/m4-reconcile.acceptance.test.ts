@@ -1,9 +1,15 @@
-/** M4.T2: plan §3.3, §3.6–3.7; real loops/CLI/Git and read-only observations. */
+/** M4.T2: plan §3.3, §3.6–3.7; real loops/CLI/Git and read-only observations.
+ *
+ * Background-loop waits use the shared helper (test-support/waits.ts); each test
+ * that waits on a loop carries an explicit 120 s budget, because on a saturated
+ * host one loop round is several seconds of real Git work.
+ */
 import { existsSync } from "node:fs";
 import { mkdir, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
-import { git, type M4Cross, m4Cross } from "../test-support/m4-cross.js";
+import { git, type M4Cross, m4Cross, refAt } from "../test-support/m4-cross.js";
+import { waitFor } from "../test-support/waits.js";
 import { BackupExecutor } from "./reconcile-loop.js";
 
 let f: M4Cross | undefined;
@@ -11,8 +17,6 @@ afterEach(async () => {
   await f?.close();
   f = undefined;
 }, 30_000);
-const wait = <T>(read: () => T) =>
-  expect.poll(read, { timeout: 10_000, interval: 30 });
 const findings = (s: M4Cross) =>
   s.store().listReconcileFindings(s.card.project_id);
 
@@ -31,18 +35,18 @@ test("R01 §3.6: reconciliation reports once, survives restart, and announces a 
           JSON.stringify(e.payload).includes(orphan),
       );
   await s.restart();
-  await wait(() => notices().length).toBe(1);
+  await waitFor(() => notices().length).toBe(1);
   const first = findings(s).find((x) => x.path === orphan);
   expect(first).toMatchObject({ kind: "orphan_worktree", resolved_at: null });
   expect(await s.cli("attention")).toContain(orphan);
-  await wait(
+  await waitFor(
     () => findings(s).find((x) => x.path === orphan)?.last_seen_at,
   ).not.toBe(first?.last_seen_at);
   expect(notices()).toHaveLength(1);
   expect(existsSync(orphan)).toBe(true);
   const lastSeen = findings(s).find((x) => x.path === orphan)?.last_seen_at;
   await s.restart();
-  await wait(
+  await waitFor(
     () => findings(s).find((x) => x.path === orphan)?.last_seen_at,
   ).not.toBe(lastSeen);
   expect(notices()).toHaveLength(1);
@@ -50,13 +54,13 @@ test("R01 §3.6: reconciliation reports once, survives restart, and announces a 
     first?.first_seen_at,
   );
   await rm(orphan, { recursive: true });
-  await wait(
+  await waitFor(
     () => findings(s).find((x) => x.path === orphan)?.resolved_at,
   ).toBeTruthy();
   await mkdir(orphan);
-  await wait(() => notices().length).toBe(2);
+  await waitFor(() => notices().length).toBe(2);
   expect(existsSync(orphan)).toBe(true);
-}, 30_000);
+}, 120_000);
 
 test("R02 §3.3: reconciliation repairs missing delivery pins from candidates, otherwise raises attention", async () => {
   const s = await m4Cross();
@@ -68,9 +72,7 @@ test("R02 §3.3: reconciliation repairs missing delivery pins from candidates, o
   const ref = `refs/cardigan/deliveries/${d.id}`;
   git(s.center, "update-ref", "-d", ref);
   await s.restart();
-  await wait(() => git(s.center, "rev-parse", "--verify", ref)).toBe(
-    d.subject.value,
-  );
+  await waitFor(() => refAt(s.center, ref)).toBe(d.subject.value);
   expect(
     findings(s).filter((x) => x.delivery_id === d.id && !x.resolved_at),
   ).toEqual([]);
@@ -83,7 +85,7 @@ test("R02 §3.3: reconciliation repairs missing delivery pins from candidates, o
     `refs/cardigan/candidates/${s.primary.owner.id}/${d.subject.value}`,
   );
   await s.restart();
-  await wait(() =>
+  await waitFor(() =>
     findings(s).some(
       (x) =>
         x.kind === "missing_delivery_ref" &&
@@ -93,7 +95,7 @@ test("R02 §3.3: reconciliation repairs missing delivery pins from candidates, o
   ).toBe(true);
   expect(await s.cli("attention")).toContain(d.id);
   expect(s.state().deliveries.find((x) => x.id === d.id)).toEqual(d);
-}, 30_000);
+}, 120_000);
 
 test("R03 §3.7: backup loop saves unfinished commits; failed fetch keeps the previous ref and business state", async () => {
   const s = await m4Cross();
@@ -101,7 +103,7 @@ test("R03 §3.7: backup loop saves unfinished commits; failed fetch keeps the pr
   const sha = await s.change(s.primary.owner, "unfinished.txt", "half done\n");
   const ref = `refs/cardigan/backups/local/${s.current(s.primary.owner).branch}`;
   await s.restart();
-  await wait(() => git(s.center, "rev-parse", "--verify", ref)).toBe(sha);
+  await waitFor(() => refAt(s.center, ref)).toBe(sha);
   await s.restart(false);
   const before = s.state(),
     errors: unknown[] = [];
@@ -122,4 +124,4 @@ test("R03 §3.7: backup loop saves unfinished commits; failed fetch keeps the pr
   } finally {
     await rename(unavailable, s.repository);
   }
-});
+}, 120_000);
