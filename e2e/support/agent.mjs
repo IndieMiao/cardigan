@@ -14,7 +14,13 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 
 // The SDK is resolved by the harness (it lives in `@cardigan/mcp-server`'s
@@ -33,6 +39,8 @@ const log = (line) => {
 };
 const marker = (name) => join(stateDir, `marker-${name}`);
 const mark = (name) => writeFileSync(marker(name), "1");
+/** Runs this process already acted on; a merged bell can repeat one. */
+const handledRuns = new Set();
 
 const client = new Client({ name: "appendix-a-agent", version: "1" });
 await client.connect(
@@ -116,13 +124,74 @@ async function produceWork(card, runId) {
     log(`${who.role_id}: no work item ${who.work_item_id}`);
     return;
   }
-  const latest = currentDelivery(card, item.id);
+  // `get_card` lists deliveries newest first; the whole list (superseded ones
+  // included) tells us which round this Run belongs to.
+  const history = (card.deliveries ?? []).filter(
+    (delivery) =>
+      delivery.work_item_id === item.id && delivery.kind !== "card_completion",
+  );
+  const latest = history[0];
   // A delivery that is still under review means someone else acts next.
   if (latest && ["submitted", "accepted"].includes(latest.status)) {
     log(`${who.role_id}: ${latest.id} is ${latest.status}, nothing to do`);
     return;
   }
-  const round = existsSync(join(stateDir, `marker-${who.role_id}-1`)) ? 2 : 1;
+
+  // Appendix A step 7: the second rework finds a product question. The Run asks
+  // for the decision and ends blocked **without delivering** — a produce item
+  // that is already delivered cannot end its own Run, so this must happen before
+  // the next delivery, and the decision_resumed Run delivers D-3.
+  if (
+    who.role_id === "coder" &&
+    history.length === 2 &&
+    latest?.status === "rejected"
+  ) {
+    if ((card.open_decisions ?? []).length > 0) {
+      log("coder: already waiting for the decision");
+      return;
+    }
+    if (!existsSync(marker("decision-asked"))) {
+      const asked = await call("request_decision", {
+        idempotency_key: `${idempotencySalt}-decision-${runId}`,
+        card_id: card.card_id ?? card.card.id,
+        kind: "choose",
+        category: "general",
+        question: "返工发现需要改变产品行为：发布前是否补一次真机冒烟？",
+        context: "第 2 轮返工发现现有验收标准覆盖不到起飞画面。",
+        options: [
+          {
+            key: "smoke",
+            description: "补一次真机冒烟再发布",
+            impact: "推迟一天，覆盖空白帧",
+          },
+          {
+            key: "ship",
+            description: "按现状发布",
+            impact: "空白帧留给下个版本",
+          },
+        ],
+        recommended: "smoke",
+        affected_cards: [card.card?.id ?? card.card_id],
+        affected_work_items: [item.id],
+        blocking: true,
+        decider: "human",
+      });
+      mark("decision-asked");
+      log(`coder: decision ${JSON.stringify(asked).slice(0, 160)}`);
+      await finish(runId, "blocked", "等拍板：真机冒烟");
+      mark(`done-${runId}`);
+      return;
+    }
+    log("coder: decision already recorded, delivering the next version");
+  }
+  // One delivery per round; the count is the round number, so a resumed Run
+  // after the decision continues from where the rework stopped.
+  const round =
+    (card.deliveries ?? []).filter(
+      (delivery) =>
+        delivery.work_item_id === item.id &&
+        delivery.kind !== "card_completion",
+    ).length + 1;
 
   // A writing role works in the real worktree; every other produce item is a
   // document delivery, which needs no checkout.
@@ -229,7 +298,54 @@ async function reviewWork(card, runId, verdict) {
     `${who.role_id}: reviewed ${target.id} (${blocking ? "reject" : "pass"}, rejections ${rejections})`,
   );
   mark(`${who.role_id}-${blocking ? "reject" : "pass"}-${target.id}`);
+  // A stable marker for "the first test round already rejected", so later rounds
+  // pass: the per-delivery marker above cannot be found by a fixed name.
+  if (blocking) mark("tester-reject");
 }
+
+/** All required verifications passed and no completion request exists yet. */
+function readyForCompletion(card) {
+  const item = card.work_items.find((entry) => entry.id === who.work_item_id);
+  if (!item || item.kind !== "produce") return false;
+  const accepted = (entry) =>
+    entry.kind === "produce"
+      ? entry.status === "accepted"
+      : entry.status === "passed";
+  const pending = card.work_items.filter(
+    (entry) =>
+      entry.required &&
+      entry.id !== item.id &&
+      !(entry.kind === "verify" && entry.role_id === "pm") &&
+      !accepted(entry),
+  );
+  const asked = (card.deliveries ?? []).some(
+    (delivery) => delivery.kind === "card_completion",
+  );
+  return pending.length === 0 && !asked;
+}
+
+async function completionWork(card, runId) {
+  const item = card.work_items.find((entry) => entry.id === who.work_item_id);
+  const pmAcceptance = card.work_items.find(
+    (entry) => entry.kind === "verify" && entry.role_id === "pm",
+  );
+  // The completion request binds to the current product delivery's subject.
+  const product = currentDelivery(card, item?.id ?? "");
+  if (!item || !pmAcceptance || !product) return false;
+  const delivery = await call("submit_delivery", {
+    idempotency_key: `${idempotencySalt}-completion-${runId}`,
+    work_item_id: item.id,
+    kind: "card_completion",
+    summary: "所有必需项通过，申请完成",
+    subject: product.subject,
+    requested_verifiers: [pmAcceptance.id],
+  });
+  log(`coder: completion ${JSON.stringify(delivery).slice(0, 160)}`);
+  mark("completion");
+  return true;
+}
+
+const cardIdFrom = (card) => card.card.id;
 
 async function workOn(prompt) {
   const match = /run=(R-\d+)/u.exec(prompt);
@@ -238,6 +354,13 @@ async function workOn(prompt) {
     return;
   }
   const runId = match[1];
+  // Merged bells can deliver the same Run twice; the second prompt is stale by
+  // definition and must not touch the (possibly closed) Run again.
+  if (handledRuns.has(runId)) {
+    log(`duplicate prompt for ${runId}, ignored`);
+    return;
+  }
+  handledRuns.add(runId);
   try {
     if (!who.card_id) {
       // A standing Assignment (PM Office / Ops) has no card; the scripted Agent
@@ -251,24 +374,49 @@ async function workOn(prompt) {
     }
     const card = await call("get_card", { card_id: who.card_id });
     const item = card.work_items.find((entry) => entry.id === who.work_item_id);
-    if (item?.kind === "produce") await produceWork(card, runId);
+    if (item?.kind === "produce" && readyForCompletion(card)) {
+      await completionWork(card, runId);
+    } else if (item?.kind === "produce") await produceWork(card, runId);
     else if (who.role_id === "designer" || who.role_id === "reviewer")
       await reviewWork(card, runId, "pass");
     else if (who.role_id === "tester") {
-      // §5 of the appendix: the first test round rejects, later rounds pass.
-      const round = existsSync(join(stateDir, "marker-tester-reject"))
-        ? "pass"
-        : "reject";
-      await reviewWork(card, runId, round);
+      // Appendix A: 测试验收 rejects D-1 and D-2, then passes D-3. The round is
+      // this verifier's review count, so the behaviour follows the delivery
+      // stream instead of a marker that would drift.
+      // Appendix A: the first two test rounds reject, the third passes. The
+      // count comes from the timeline the server keeps for this work item, so
+      // it cannot drift with superseded deliveries or agent restarts.
+      // `since_seq: 0` is the full history; the default continues from the ACK
+      // cursor, which would always look like the first round.
+      const updates = await call("get_updates", {
+        card_id: who.card_id,
+        since_seq: 0,
+      });
+      const round =
+        (updates.timeline ?? []).filter(
+          (entry) =>
+            entry.type === "review" && entry.work_item_id === who.work_item_id,
+        ).length + 1;
+      log(`tester: review round ${round}`);
+      await reviewWork(card, runId, round <= 2 ? "reject" : "pass");
     } else if (who.role_id === "pm") await reviewWork(card, runId, "pass");
     await ack(who.card_id);
     await finish(runId, "completed", `${who.role_id} acted`);
     mark(`done-${runId}`);
     log(`finished ${runId}`);
   } catch (error) {
-    log(`error ${String(error)}`);
+    const text = String(error);
+    // A bell can arrive after this Agent already finished its Run (the Run is
+    // closed, so no tool accepts another write); that is a stale prompt, not a
+    // failure of the scenario.
+    const stale =
+      text.includes("Exactly one running Run is required") ||
+      text.includes("Cannot apply complete to run:completed") ||
+      text.includes("run:completed");
+    log(`${stale ? "stale" : "error"} ${text}`);
+    if (stale) return;
     try {
-      await finish(runId, "failed", String(error).slice(0, 200));
+      await finish(runId, "failed", text.slice(0, 200));
     } catch {
       // The Run may already be closed; nothing else to do.
     }

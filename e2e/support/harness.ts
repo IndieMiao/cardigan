@@ -27,9 +27,13 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import { main as cli, runCommand } from "@cardigan/cli";
-import type { Actor, CommandState, ProjectId } from "@cardigan/domain";
-import { dispatchRun } from "@cardigan/domain";
+import { main as cli } from "@cardigan/cli";
+import type {
+  Actor,
+  CardTemplate,
+  CommandState,
+  ProjectId,
+} from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
 import {
   type CardiganServer,
@@ -40,6 +44,7 @@ import type { Store } from "@cardigan/store";
 import { Store as SqliteStore } from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { resolveWebConfig } from "../../apps/server/src/web/config.js";
 import { HcCore } from "../../apps/server/test-support/hc.js";
 
 const exec = promisify(execFile);
@@ -74,8 +79,20 @@ export interface E2eHarness {
   markers(): readonly string[];
   /** Start an Assignment the way the host does (`cardigan assignment start`). */
   startAssignment(assignmentId: string): Promise<void>;
-  /** Stop the hc core without removing the session, then let it come back. */
-  restartCore(): Promise<void>;
+  /** The Workbench URL, for the human steps of the appendix. */
+  readonly webUrl: string;
+  /** Call the Workbench API as the logged-in human; throws on a non-2xx. */
+  api(
+    method: string,
+    path: string,
+    body?: unknown,
+  ): Promise<Record<string, any>>;
+  /** Stop the hc core without removing the session; nothing restarts it. */
+  stopCore(): Promise<void>;
+  /** Record the PID of a core that came up after `stopCore()`. */
+  rememberCore(): number | undefined;
+  /** What the host runtime answers for an Assignment's `runtime_ref`. */
+  probeRuntime(ref: unknown): Promise<unknown>;
   close(): Promise<void>;
 }
 
@@ -193,6 +210,7 @@ export async function createHarness(
   Object.assign(process.env, hostEnv);
 
   const port = await freePort();
+  const webPort = await freePort();
   const mcpUrl = `http://127.0.0.1:${port}/mcp`;
   hostEnv.CARDIGAN_MCP_URL = mcpUrl;
   process.env.CARDIGAN_MCP_URL = mcpUrl;
@@ -219,6 +237,7 @@ export async function createHarness(
     ].join("\n"),
   );
 
+  const WEB_PASSWORD = "appendix-a-password";
   let out: string[] = [];
   const io = {
     env: hostEnv as Record<string, string>,
@@ -230,6 +249,7 @@ export async function createHarness(
     spawnInherit: () => {
       throw new Error("the e2e CLI must not spawn");
     },
+    promptSecret: async () => WEB_PASSWORD,
     captureCommand: async (command: string, args: readonly string[]) => {
       const result = await exec(command, [...args], { cwd: root }).catch(
         (error: { stdout?: string; stderr?: string; code?: number }) => ({
@@ -343,43 +363,42 @@ export async function createHarness(
     server = await startCardiganServer({
       store,
       config: { dataDir, host: "127.0.0.1", port },
+      web: {
+        config: resolveWebConfig(
+          {},
+          {
+            port: webPort,
+            staticDir: join(root, "web"),
+            loginFailureDelayMs: 0,
+          },
+        ),
+      },
       warn: () => undefined,
       log: () => undefined,
       dispatcher: {
         runtime: host.runtime,
         snapshot: host.snapshot,
-        // Standing PM Assignments (Office/Ops) are recorded but not launched:
-        // their conversation lives in Herdr and is driven by the human, so a
-        // scripted Agent cannot stand in for them. Starting them would also
-        // rotate their tokens on every bell, which the test's own PM clients
-        // use for steps 1 and 8.
+        // Standing PM Assignments (Office/Ops) have no RuntimeRef here: their
+        // conversation lives in Herdr and is driven by the human, so a scripted
+        // Agent cannot stand in for them. Returning no Assignment makes every
+        // Office/Ops notification ownerless (`notificationOwner`), so no bell is
+        // claimed for them and nothing escalates when it is not delivered. It
+        // has to be explicit: without `standing` the control plane builds a
+        // resolver from the store, claims those bells, and the failed start
+        // escalates to the human. The test's own PM clients drive steps 1 and 8.
+        standing: () => undefined,
         startRun: async (input) => {
-          if (input.assignment.scope === "standing") {
-            runCommand(store, {
-              project_id: input.project,
-              actor: { kind: "system", project_id: input.project },
-              reduce: (state, actor, ports) =>
-                dispatchRun(
-                  state,
-                  actor,
-                  {
-                    run_id: input.run.id,
-                    runtime_ref: {
-                      machine_id: "local",
-                      runtime_machine: "local",
-                      terminal_ref: `standing-${input.assignment.id}`,
-                      agent_name: `standing-${input.assignment.id}`,
-                    },
-                  },
-                  ports,
-                ),
-            });
-            return;
-          }
+          if (input.assignment.scope === "standing")
+            throw new Error(
+              `no scripted PM session for standing Assignment ${input.assignment.id}`,
+            );
           await host.startRun(input);
         },
-        standing: host.standing,
         intervalMs: 100,
+        // The appendix reaches the merge and cleanup phases; keep the phase
+        // loops fast enough for a test run.
+        mergeIntervalMs: 200,
+        cleanupIntervalMs: 200,
         deliveryLeaseMs: 5_000,
         retryBaseMs: 1_000,
         onError: (error) => errors.push(String(error)),
@@ -395,6 +414,44 @@ export async function createHarness(
   core.remember();
 
   const clients: Client[] = [];
+  const webUrl = `http://127.0.0.1:${webPort}`;
+  // The human's Workbench password; `web set-password` prompts twice.
+  await cardigan("web", "set-password");
+  let cookie = "";
+  async function login(): Promise<void> {
+    const response = await fetch(`${webUrl}/api/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: webUrl },
+      body: JSON.stringify({ password: WEB_PASSWORD }),
+    });
+    if (response.status !== 200) {
+      throw new Error(`Workbench login failed: ${response.status}`);
+    }
+    cookie = (response.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
+  }
+  await login();
+  const api = async (
+    method: string,
+    path: string,
+    body?: unknown,
+  ): Promise<Record<string, any>> => {
+    const response = await fetch(`${webUrl}${path}`, {
+      method,
+      headers: {
+        cookie,
+        accept: "application/json",
+        ...(body === undefined ? {} : { "content-type": "application/json" }),
+        ...(method === "GET" ? {} : { origin: webUrl }),
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    const text = await response.text();
+    const parsed = text.length > 0 ? JSON.parse(text) : {};
+    if (!response.ok) {
+      throw new Error(`${method} ${path} -> ${response.status}: ${text}`);
+    }
+    return parsed;
+  };
   const harness: E2eHarness = {
     root,
     dataDir,
@@ -403,6 +460,7 @@ export async function createHarness(
     core,
     agentDir,
     cardigan,
+    probeRuntime: (ref) => host.runtime.status(ref as never),
     async connect(token: string) {
       const client = new Client({ name: "appendix-a-test", version: "1" });
       await client.connect(
@@ -437,6 +495,8 @@ export async function createHarness(
     markers() {
       return readdirSync(agentDir).filter((name) => name.startsWith("marker-"));
     },
+    webUrl,
+    api,
     async startAssignment(assignmentId: string) {
       const output = await cardigan(
         "assignment",
@@ -494,18 +554,27 @@ export async function createHarness(
         });
       void connected;
     },
-    async restartCore() {
-      // §12.9: the core is gone, its terminals with it. The monitor then has to
-      // resume the Assignments or report them.
+    async stopCore() {
+      // Appendix pass criterion 3 (M5.6): the Herdr server dies and its
+      // terminals with it. Nothing here starts a core again — the system has to
+      // recover on its own, and the next hc call it makes brings a core up (0.3:
+      // hc commands start one when the socket is absent).
       await core.stop();
       await sleep(500);
+    },
+    rememberCore() {
+      // A core that came up after `stopCore()` gets a new PID; record it while
+      // the socket exists so cleanup can stop exactly that process.
+      return core.remember();
     },
     async close() {
       for (const client of clients.splice(0))
         await client.close().catch(() => undefined);
       // The core first: its terminals and Agents die with it. No
       // `assignment stop` follows, because that hc command would start a fresh
-      // core after this one is gone.
+      // core after this one is gone. `stop()` re-reads the PID while the socket
+      // still exists, so a core the system started after `stopCore()` is cleaned
+      // up too; it does not demand that no core ever came back.
       await core.stop();
       for (const step of [() => server.close(), async () => store.close()]) {
         try {
