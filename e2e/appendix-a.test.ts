@@ -10,8 +10,13 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { PROJECT_EVENT_STREAM } from "@cardigan/store";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import {
+  interruptionSnapshot,
+  printInterruptionFailure,
+} from "./support/diagnostics.js";
 import {
   createHarness,
   type E2eHarness,
@@ -1151,54 +1156,86 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
     }, 180_000);
 
     test("通过标准一：只有拍板与合并确认打断过你", async () => {
-      const decisions = h
-        .state()
-        .decisions.filter((decision) => decision.decider === "human");
-      // One product question (step 7) and one merge confirmation (step 10).
-      expect(decisions).toHaveLength(2);
-      expect(decisions.map((decision) => decision.trigger).sort()).toEqual([
-        "merge_confirmation",
-        undefined,
-      ]);
-      expect(h.state().human_actions).toEqual([]);
+      const observed: Record<string, unknown> = {};
+      try {
+        const decisions = h
+          .state()
+          .decisions.filter((decision) => decision.decider === "human");
+        observed.human_decisions = decisions;
+        // One product question (step 7) and one merge confirmation (step 10).
+        expect(decisions).toHaveLength(2);
+        expect(decisions.map((decision) => decision.trigger).sort()).toEqual([
+          "merge_confirmation",
+          undefined,
+        ]);
+        const actions = h.state().human_actions;
+        observed.human_actions = actions;
+        expect(actions).toEqual([]);
 
-      // M5.6's runtime view is part of Needs You: after the Session was replaced
-      // and the card reached Done, nothing may be left for the human to look at.
-      const you = await needsYou();
-      expect(you.incidents).toEqual([]);
-      expect(you.decisions).toEqual([]);
-      expect(you.human_actions).toEqual([]);
+        // M5.6's runtime view is part of Needs You: after the Session was replaced
+        // and the card reached Done, nothing may be left for the human to look at.
+        const you = await needsYou();
+        observed.extra_needs_you = you;
+        expect(you.incidents).toEqual([]);
+        expect(you.decisions).toEqual([]);
+        expect(you.human_actions).toEqual([]);
 
-      // The restart must not have disturbed the human. Needs You notifications
-      // are the escalation channel behind the list, so nothing but the two
-      // card decisions (step 7's product question and step 10's merge
-      // confirmation) may ever reach the PM Office or the Needs You list:
-      // `runtime_lost` / `runtime_disconnected` / `bell_delivery_failed`
-      // escalations all fail here.
-      const state = h.state();
-      const escalating = h.store
-        .listNotifications({ project_id: PROJECT })
-        .filter((note) =>
-          ["pm_office", "needs_you"].includes(note.recipient.kind),
-        )
-        .map(
-          (note) =>
-            state.events.find((event) => event.id === note.event_id)?.type ??
-            `missing:${note.event_id}`,
+        // The restart must not have disturbed the human. Needs You notifications
+        // are the escalation channel behind the list, so nothing but the two
+        // card decisions (step 7's product question and step 10's merge
+        // confirmation) may ever reach the PM Office or the Needs You list:
+        // `runtime_lost` / `runtime_disconnected` / `bell_delivery_failed`
+        // escalations all fail here.
+        const pendingRequests = h
+          .state()
+          .events.filter((e) => e.type === "decision_requested");
+        // Card completion/cleanup can outrun the Router's next tick. Wait for its
+        // persisted consumption checkpoint, not for the desired notification contents.
+        await h.until(
+          "Router 已消费全部拍板请求",
+          () =>
+            pendingRequests.every(
+              (event) =>
+                h.store.routerCursor(
+                  PROJECT,
+                  event.card_id ?? PROJECT_EVENT_STREAM,
+                ) >= event.seq,
+            )
+              ? true
+              : undefined,
+          10000,
         );
-      expect(new Set(escalating)).toEqual(new Set(["decision_requested"]));
-      const requests = state.events.filter(
-        (e) => e.type === "decision_requested",
-      );
-      expect(requests).toHaveLength(2);
-      for (const kind of ["pm_office", "needs_you"])
-        expect(
-          h.store
-            .listNotifications({ project_id: PROJECT })
-            .filter((n) => n.recipient.kind === kind)
-            .map((n) => n.event_id)
-            .sort(),
-        ).toEqual(requests.map((e) => e.id).sort());
+        const state = h.state();
+        const notifications = h.store.listNotifications({
+          project_id: PROJECT,
+        });
+        observed.interruptions = interruptionSnapshot(state, notifications);
+        const escalating = notifications
+          .filter((note) =>
+            ["pm_office", "needs_you"].includes(note.recipient.kind),
+          )
+          .map(
+            (note) =>
+              state.events.find((event) => event.id === note.event_id)?.type ??
+              `missing:${note.event_id}`,
+          );
+        expect(new Set(escalating)).toEqual(new Set(["decision_requested"]));
+        const requests = state.events.filter(
+          (e) => e.type === "decision_requested",
+        );
+        expect(requests).toHaveLength(2);
+        for (const kind of ["pm_office", "needs_you"])
+          expect(
+            h.store
+              .listNotifications({ project_id: PROJECT })
+              .filter((n) => n.recipient.kind === kind)
+              .map((n) => n.event_id)
+              .sort(),
+          ).toEqual(requests.map((e) => e.id).sort());
+      } catch (error) {
+        await printInterruptionFailure(h, observed);
+        throw error;
+      }
     }, 120_000);
 
     test("通过标准三：重启后 coder 的 Assignment 被替换并恢复", async () => {
