@@ -214,6 +214,11 @@ test.each(["board", "list"] as const)(
 );
 
 test("U04 §8.4: card detail handles loading, transport errors, missing cards and answers all five questions", async () => {
+  // Both `findBy*` waits below are real HTTP + a full card render. The default
+  // 1 s is an idle-machine budget: measured 15-54 ms for the missing-card reply
+  // and 61-506 ms for the detail render here, and a loaded host multiplies that
+  // by ~5. Wait on the condition with one explicit ceiling instead of guessing.
+  const UI_WAIT = { timeout: 10_000 } as const;
   await f.loginBrowser();
   const pending = deferred<CardDetail>();
   let page = detail(decorate(f.client, { card: () => pending.promise }));
@@ -222,9 +227,9 @@ test("U04 §8.4: card detail handles loading, transport errors, missing cards an
   expect(textOf(screen.getByRole("alert"))).toContain("Card unavailable");
   page.unmount();
   page = detail(f.client, "C-999999");
-  expect(textOf(await screen.findByText(/不存在|找不到/))).toMatch(
-    /不存在|找不到/,
-  );
+  expect(
+    textOf(await screen.findByText(/不存在|找不到/, undefined, UI_WAIT)),
+  ).toMatch(/不存在|找不到/);
   page.unmount();
   const product = await f.deliver(
     f.primary,
@@ -233,7 +238,11 @@ test("U04 §8.4: card detail handles loading, transport errors, missing cards an
   await f.review(f.primary.verifier, product);
   await f.complete(product);
   detail();
-  await screen.findByRole("heading", { name: new RegExp(f.card.title) });
+  await screen.findByRole(
+    "heading",
+    { name: new RegExp(f.card.title) },
+    UI_WAIT,
+  );
   expect(screen.getByText(f.card.goal)).toBeTruthy();
   expect(screen.getAllByText(/等待合并|待合并/).length).toBeGreaterThan(0);
   expect(
@@ -256,7 +265,7 @@ test("U04 §8.4: card detail handles loading, transport errors, missing cards an
   );
   expect(acceptance).toContain("pm");
   expect(acceptance).toContain("pass");
-});
+}, 30_000);
 
 test("U05 §3.2: real Agent Markdown renders as text, with only web and local links and no executable HTML", async () => {
   await f.loginBrowser();

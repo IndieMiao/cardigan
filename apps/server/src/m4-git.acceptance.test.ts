@@ -1,4 +1,10 @@
-/** M4.T2: independent expectations from M4 plan §0, §3.5–§3.6 and §16. */
+/** M4.T2: independent expectations from M4 plan §0, §3.5–§3.6 and §16.
+ *
+ * Every test builds a real Git workspace (clone, worktree, deliveries, merges)
+ * and spawns several `git` processes, so each carries an explicit 60 s budget
+ * instead of the 5 s default: a loaded host takes several seconds for the setup
+ * alone and the default cap only hides that behind a timeout.
+ */
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -56,7 +62,7 @@ test("G01 §3.5: two accepted deliveries merge in order, each with two parents; 
     String(plan.deliveries[1]?.delivery_id),
   );
   expect(git(s.source, "show-ref")).toBe(source);
-});
+}, 60_000);
 
 test("G02 §3.5: a later conflicting delivery leaves every central ref unchanged", async () => {
   const s = await accepted(true, true),
@@ -69,7 +75,7 @@ test("G02 §3.5: a later conflicting delivery leaves every central ref unchanged
     files: ["shared.txt"],
   });
   expect(git(s.center, "show-ref")).toBe(before);
-});
+}, 60_000);
 
 test("G03 §3.5: a concurrent baseline advance returns stale and cannot be overwritten", async () => {
   const s = await accepted();
@@ -94,7 +100,7 @@ test("G03 §3.5: a concurrent baseline advance returns stale and cannot be overw
   });
   expect(advanced).toBe(true);
   expect(git(s.center, "rev-parse", "main")).toBe(concurrent);
-});
+}, 60_000);
 
 test("G04 §3.5: replaying a merged plan is a no-op with no extra merge commit", async () => {
   const s = await accepted();
@@ -106,7 +112,7 @@ test("G04 §3.5: replaying a merged plan is a no-op with no extra merge commit",
     branch_sha: git(s.center, "rev-parse", "main"),
   });
   expect(git(s.center, "show-ref")).toBe(before);
-});
+}, 60_000);
 
 test("G05 §3.5: a pinned delivery ref disagreeing with the accepted plan refuses the merge", async () => {
   const s = await accepted(),
@@ -120,7 +126,7 @@ test("G05 §3.5: a pinned delivery ref disagreeing with the accepted plan refuse
   const before = git(s.center, "show-ref");
   await expect(s.central.mergeIntoBase(s.project, plan)).rejects.toThrow();
   expect(git(s.center, "show-ref")).toBe(before);
-});
+}, 60_000);
 
 async function released() {
   const s = await m4Cross();
@@ -155,7 +161,7 @@ test("G06 §3.6: clean released worktree and branch are removed after backup", a
       `refs/cardigan/backups/local/${assignment.branch}`,
     ),
   ).toBe(head);
-});
+}, 60_000);
 
 test.each(["tracked", "untracked"])(
   "G07 §16: %s changes are never silently removed",
@@ -175,6 +181,7 @@ test.each(["tracked", "untracked"])(
     expect(readFileSync(join(path, file), "utf8")).toBe("keep me\n");
     expect(git(s.repository, "show-ref")).toBe(before);
   },
+  60_000,
 );
 
 test("G08 §3.6: force-clean writes a private patch and untracked inventory before deletion", async () => {
@@ -206,7 +213,7 @@ test("G08 §3.6: force-clean writes a private patch and untracked inventory befo
   expect(statSync(result.patch_path).mode & 0o777).toBe(0o600);
   expect(readFileSync(result.patch_path, "utf8")).toContain("loose.txt");
   expect(existsSync(path)).toBe(false);
-});
+}, 60_000);
 
 test.each([
   "orphan_worktree",
@@ -286,6 +293,7 @@ test.each([
           expect.objectContaining({ kind, path }),
         );
   },
+  60_000,
 );
 
 // Plan v5: released Assignments retain ownership; cleanup handles their worktrees.
@@ -303,7 +311,7 @@ test("G10 §3.6: a worktree retained after manual release is not an orphan", asy
     expect.objectContaining({ kind: "orphan_worktree", path }),
   );
   expect(existsSync(path)).toBe(true);
-});
+}, 60_000);
 
 // Plan v5 / #118: an absent active worktree also reports missing despite its stale registration.
 test("G11 §3.6: a missing active worktree can also have a stale Git registration", async () => {
@@ -320,4 +328,4 @@ test("G11 §3.6: a missing active worktree can also have a stale Git registratio
     );
   for (const kind of ["missing_worktree", "stale_registration"])
     expect(findings).toContainEqual(expect.objectContaining({ kind, path }));
-});
+}, 60_000);
