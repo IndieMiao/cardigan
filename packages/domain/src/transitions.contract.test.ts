@@ -17,6 +17,8 @@ test.each([
   ["run", "dispatched", "acknowledge", "acked"],
   ["assignment", "suspended", "resume", "active"],
   ["runtime", "running", "run_finished", "idle"],
+  ["runtime", "unknown", "session_replaced", "idle"],
+  ["runtime", "lost", "session_replaced", "idle"],
   ["card", "backlog", "set_todo", "todo"],
 ] as const)("%s permits %s + %s -> %s", (machine, from, event, to) => {
   expect(transition(machine, from, event)).toEqual({ ok: true, value: to });

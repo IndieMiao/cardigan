@@ -4,7 +4,6 @@ import type {
   CardView,
   CommandState,
   Decision,
-  HumanAction,
   Machine,
   ProjectId,
   TimelineEntry,
@@ -340,10 +339,7 @@ export function cardDetail(
 /** `listNeedsYou` plus the one-line reason and how long each item has waited. */
 export function needsYou(state: CommandState, now: string) {
   const result = unwrap(listNeedsYou(state, human(state.project_id)));
-  const data = result.data as {
-    readonly decisions: readonly (Decision & { readonly why: string })[];
-    readonly human_actions: readonly (HumanAction & { readonly why: string })[];
-  };
+  const data = result.data;
   const decisions = data.decisions.map((decision) => {
     const opened = openedAt(
       state.timeline,
@@ -402,32 +398,14 @@ export function needsYou(state: CommandState, now: string) {
     return (right.waited_ms ?? 0) - (left.waited_ms ?? 0);
   };
   return {
-    incidents: state.assignments
-      .filter(
-        (a) =>
-          a.status === "active" &&
-          ["unknown", "lost"].includes(a.runtime_state),
-      )
-      .map((a) => ({
-        id: a.id,
-        role_id: a.role_id,
-        runtime_state: a.runtime_state,
-        waited_ms:
-          waitedMs(
-            state.events.findLast(
-              (e) =>
-                ["runtime_lost", "runtime_disconnected"].includes(e.type) &&
-                typeof e.payload === "object" &&
-                e.payload !== null &&
-                "assignment_id" in e.payload &&
-                e.payload.assignment_id === a.id,
-            )?.created_at,
-            now,
-          ) ?? null,
-        card_id:
-          state.work_items.find((w) => w.id === a.work_item_id)?.card_id ??
-          null,
-      })),
+    incidents: data.incidents.map((incident) => ({
+      ...incident,
+      waited_ms:
+        waitedMs(
+          incident.disconnected_at ?? incident.lost_at ?? undefined,
+          now,
+        ) ?? null,
+    })),
     // Batched, non-urgent decisions come after the blocking ones (§8.2).
     decisions: [...decisions].sort(blockingFirst),
     human_actions: [...human_actions].sort(

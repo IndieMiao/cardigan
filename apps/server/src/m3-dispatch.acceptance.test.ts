@@ -257,8 +257,8 @@ function harness(): Harness {
 
   /**
    * End the newest Run of `assignment` with the real `finish_run` command, as
-   * that Assignment. The command leaves `runtime_state` alone on purpose: the
-   * Dispatcher decides liveness from `Runtime.status`, not from that field.
+   * that Assignment. The command returns `runtime_state` to idle; the Dispatcher
+   * still decides terminal liveness from `Runtime.status`.
    */
   const endRun = (
     assignment: Assignment = coder,

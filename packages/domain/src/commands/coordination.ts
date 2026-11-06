@@ -21,7 +21,7 @@ import {
   text,
   unwrap,
 } from "./core.js";
-
+import { endRun } from "./end-run.js";
 import { queueResumedRun, resumeWork } from "./resumption.js";
 import { activeWork } from "./workflow.js";
 
@@ -167,13 +167,7 @@ function endForDecision(
     .filter(
       (run) => assignments.has(run.assignment_id) && run.status === "running",
     )) {
-    d.put("runs", {
-      ...run,
-      status: unwrap(transition("run", run.status, "complete")),
-      outcome: "blocked",
-      summary,
-      finished_at: d.now,
-    });
+    endRun(d, run, "blocked", summary);
   }
 }
 export function reportBlocker(

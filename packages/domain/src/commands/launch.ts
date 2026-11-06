@@ -166,6 +166,11 @@ export interface DispatchRunParams {
    */
   readonly runtime_ref?: RuntimeRef;
   readonly base_sha?: string;
+  /** Host-only D5 replacement, committed together with dispatch and its handoff. */
+  readonly replacement?: {
+    readonly previous: RuntimeRef;
+    readonly reason: "runtime_not_found" | "runtime_unavailable";
+  };
 }
 export function dispatchRun(
   state: CommandState,
@@ -221,7 +226,41 @@ export function dispatchRun(
       "A worktree requires a valid base SHA",
     );
     exclusive(d, assignment, run.id, path);
+    if (p.replacement) {
+      ensure(
+        actor.kind === "system" && p.runtime_ref !== undefined,
+        "unauthorized",
+        "Only the system can record a Session replacement",
+      );
+      ensure(
+        JSON.stringify(assignment.runtime_ref) ===
+          JSON.stringify(p.replacement.previous),
+        "invariant_violation",
+        "Session changed during replacement",
+      );
+      const previousRun = d
+        .list("runs")
+        .filter((r) => r.assignment_id === assignment.id && r.id !== run.id)
+        .sort((x, y) => Number(y.id.slice(2)) - Number(x.id.slice(2)))[0];
+      const body = `运行时失联（${p.replacement.reason}），替换 Session。旧 RuntimeRef：${JSON.stringify(p.replacement.previous)}。最近 Run：${previousRun?.id ?? "无"}，outcome：${previousRun?.outcome ?? "无"}。新 Session 先读卡片和 get_updates。`;
+      d.emit(
+        "session_replaced",
+        cardId(d, assignment),
+        {
+          assignment_id: assignment.id,
+          run_id: run.id,
+          reason: p.replacement.reason,
+          old_runtime_ref: { ...p.replacement.previous },
+          last_run_id: previousRun?.id ?? null,
+          last_outcome: previousRun?.outcome ?? null,
+          handoff: body,
+        },
+        { type: "handoff", body, run_id: run.id },
+      );
+    }
     let runtime = assignment.runtime_state;
+    if (p.replacement && ["unknown", "lost"].includes(runtime))
+      runtime = unwrap(transition("runtime", runtime, "session_replaced"));
     // A completed prior Run may leave the M1 runtime observation at running.
     if (runtime === "running")
       runtime = unwrap(transition("runtime", runtime, "run_finished"));
@@ -230,8 +269,10 @@ export function dispatchRun(
     if (runtime === "provisioning")
       runtime = unwrap(transition("runtime", runtime, "provisioned"));
     runtime = unwrap(transition("runtime", runtime, "run_started"));
+    const nextAssignment = { ...assignment };
+    if (p.replacement) delete nextAssignment.session_ref;
     d.put("assignments", {
-      ...assignment,
+      ...nextAssignment,
       runtime_state: runtime,
       runtime_ref: ref,
       ...(path ? { worktree_path: path } : {}),

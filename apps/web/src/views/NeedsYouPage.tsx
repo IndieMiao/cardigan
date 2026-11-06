@@ -270,6 +270,20 @@ export function NeedsYouPage({ client, projectId, revision = 0 }: Props) {
                     {waitLabel(a.waited_ms, elapsed)} ·
                     <CardLink projectId={projectId} id={a.card_id} />
                   </p>
+                  {a.disconnected_at && (
+                    <p>
+                      失联时间：
+                      <time dateTime={a.disconnected_at}>
+                        {a.disconnected_at}
+                      </time>
+                    </p>
+                  )}
+                  {a.last_run && (
+                    <p>
+                      最近 Run：{a.last_run.id}
+                      {a.last_run.summary ? ` · ${a.last_run.summary}` : ""}
+                    </p>
+                  )}
                   <CopyCommand
                     label="查看终端"
                     command={cliCommand(projectId, "assignment attach", a.id)}

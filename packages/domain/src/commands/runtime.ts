@@ -1,14 +1,14 @@
 import type { Actor, RunOutcome } from "../entities.js";
 import type { RunId } from "../ids.js";
-import { transition } from "../transitions.js";
 import {
   type CommandPorts,
   type CommandState,
   command,
   ensure,
   text,
-  unwrap,
 } from "./core.js";
+
+import { endRun } from "./end-run.js";
 
 export function heartbeat(
   state: CommandState,
@@ -53,20 +53,7 @@ export function finishRun(
       p.outcome === "blocked"
     )
       return run;
-    const result = {
-      ...run,
-      status: unwrap(
-        transition(
-          "run",
-          run.status,
-          p.outcome === "failed" ? "fail" : "complete",
-        ),
-      ),
-      outcome: p.outcome,
-      summary: p.summary,
-      finished_at: d.now,
-    };
-    d.put("runs", result);
+    const result = endRun(d, run, p.outcome, p.summary);
     const item =
       d.assignment?.scope === "work_item"
         ? d.work(d.assignment.work_item_id)

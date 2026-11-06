@@ -6,6 +6,7 @@
 
 - queueRun / dispatchRun 只接受同项目 human/system Actor，不是 MCP 工具。queueRun 输入 assignment_id、model、agent_cli_version，生成 initial/queued Run 和 run_queued 事件（同时作为触发事件），快照固定的 Role 版本；拒绝 inactive Assignment、闭卡、归属变化和已有未结束 Run。
 - dispatchRun 输入 run_id、runtime_ref、可选 base_sha；RuntimeRef 携带 worktree_path / branch / agent_session_id，归约记录到 Assignment，工作目录存在时必须有有效基线 SHA。旧 worktree/branch 必须复用，同机器共享路径上有未结束 Run 时保守拒绝；所有状态变更走 transition。第一次派发从 not_provisioned 经 provisioning/idle 到 running；旧 Run 已结束时可把遗留 running 经 run_finished 归到 idle 再派发。unknown/lost/released 需另行恢复，不能跳过。
+- M5.6：dispatchRun 可由 system 携带 replacement（旧 RuntimeRef、runtime_not_found/runtime_unavailable 原因）；校验旧引用仍匹配且无其他未结束 Run 后，将 session_replaced 事件及系统 handoff 与当前 queued Run 的派发原子提交，清除旧 CLI 会话 ID。常驻 Assignment 无卡片时间线，交接正文保存在项目事件中。
 - acknowledgeRun 输入 run_id，仅接受拥有该 Run 的 active Assignment Actor，供 MCP 认证后内部调用，无独立 MCP 工具名。dispatched 经 acknowledge/start 到 running（兼容 acked），写 started_at 和 run_started；复用 activeWork 检查依赖/审核预算并激活自己的可执行工作项，其他工作项不动。等待目标、暂停或已交付的工作项保持原状态。重复确认 running Run 无变更/事件；检查失败时不返回部分效果。
 - abortDispatch 输入 run_id/reason，只允许 human/system，经 cancel 标记 cancelled/outcome=failed、记录原因和结束时间。已 cancelled 可重试；completed/failed 拒绝。运行状态为 running 时经 run_finished 到 idle 并清空 runtime_ref，保留工作目录和 Session 元数据，允许后续排新 Run；不倒退工作项、不删除 worktree。外层负责 release 终端和撤销 Token，此命令不替代 IO 清理。
 - Runtime 的编译输入、端口错误与业务 Result 分开；domain 不启动终端、写文件或签发 Token。命令的快照读取、编号、实体和事件仍需外层同一事务提交；M2.6 接入真实启动和首次 MCP 调用。
@@ -53,7 +54,7 @@
 | create_card / update_card           | createCard / updateCard                  | PM／人；开发卡强制验收标准，禁止手动置 done 或 review/in_progress                                                      |
 | create_work_item / update_work_item | createWorkItem / updateWorkItem          | PM／人；保护模板必需项，仅允许受控 blocked → in_progress；上限只能由 Ops／人放宽                                       |
 | assign                              | assign                                   | 同一工作项保持唯一责任上下文；重复指派复用 Assignment／Session，不重发 Token；M1 仅 local                              |
-| project_snapshot / list_needs_you   | projectSnapshot / listNeedsYou           | 项目级 PM／人；复用 M1.2/M1.2b 派生，列出待人决策和待人操作                                                            |
+| project_snapshot / list_needs_you   | projectSnapshot / listNeedsYou           | 项目级 PM／人；复用 M1.2/M1.2b 派生，列出待人决策、待人操作和运行异常                                                  |
 
 协作细节：
 
@@ -88,3 +89,5 @@
 `recordDecision` 允许人记录所有 decider=human 的决策，via=needs_you；原话和理由仍必填。MCP 的 PM Office 路径不变。`submitDelivery` 的 pr_url 若提供必须是合法绝对 HTTP/HTTPS URL；预检和事务内归约均拒绝其他协议/相对地址（validation_failed），不会为无效 URL 做 Git 预检。
 
 `extractReferences` 支持工作项、Assignment、Run 和 Review 编号；`resolveReferences(state, body)` 在当前项目快照中返回去重的编号、kind、status、exists 和可用的 card_id。未知编号无卡片目标，不应生成链接；函数不访问仓储或外部 PR。
+
+M5.6：阻塞 Decision 和审核轮次上限的隐式 Run 结束与 finish_run 共用收尾，Assignment 回 idle。未知/失联环境不由业务收尾判定重连。
