@@ -50,6 +50,31 @@ type ToolResult = {
   content: { text: string }[];
 };
 
+/**
+ * `GET /api/projects/:id/needs-you`: everything that asks the human (§8.2).
+ * `incidents` is M5.6's runtime view: an active Assignment whose Session is
+ * unknown or lost has to be handled by the human too.
+ */
+type NeedsYouBody = {
+  incidents: {
+    id: string;
+    role_id: string;
+    runtime_state: string;
+    card_id: string | null;
+    disconnected_at: string | null;
+    lost_at: string | null;
+  }[];
+  decisions: {
+    id: string;
+    kind: string;
+    blocking: boolean;
+    trigger?: string | null;
+    why: string;
+    waited_ms: number | null;
+  }[];
+  human_actions: unknown[];
+};
+
 const READ_ONLY = new Set([
   "whoami",
   "get_card",
@@ -120,19 +145,18 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
     const events = (card: string) =>
       h.store.uow.read((tx) => tx.events.listAfter(PROJECT, card as never, 0));
     /** Needs You as the human sees it in the Workbench, not a table dump. */
-    const needsYou = async (): Promise<{
-      decisions: { id: string; kind: string; blocking: boolean }[];
-      human_actions: unknown[];
-    }> => {
-      const body = await h.api("GET", `/api/projects/${PROJECT}/needs-you`);
-      return body as {
-        decisions: { id: string; kind: string; blocking: boolean }[];
-        human_actions: unknown[];
-      };
-    };
+    const needsYou = async (): Promise<NeedsYouBody> =>
+      (await h.api(
+        "GET",
+        `/api/projects/${PROJECT}/needs-you`,
+      )) as NeedsYouBody;
     const isNeedsYouEmpty = async (): Promise<boolean> => {
       const body = await needsYou();
-      return body.decisions.length === 0 && body.human_actions.length === 0;
+      return (
+        body.decisions.length === 0 &&
+        body.human_actions.length === 0 &&
+        body.incidents.length === 0
+      );
     };
 
     test("准 备：PM Office 与 Ops 的 Token 都可用", async () => {
@@ -449,6 +473,9 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
     /** Facts the restart criterion (pass criterion 3) is judged on. */
     let stoppedAt: string;
     let probesAfterRecovery: Record<string, unknown>;
+    /** Step 7's blocked Run and the terminal it used: both go into the handoff. */
+    let blockedRunId: string;
+    let oldTerminalRef: string;
 
     beforeAll(async () => {
       h = await createHarness({ salt: "appendix-a-late" });
@@ -611,17 +638,7 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
     /** Poll the Workbench until the API shows what the step expects. */
     const untilNeedsYou = async <T>(
       label: string,
-      probe: (body: {
-        decisions: {
-          id: string;
-          blocking: boolean;
-          kind: string;
-          trigger?: string | null;
-          why: string;
-          waited_ms: number | null;
-        }[];
-        human_actions: unknown[];
-      }) => T | undefined,
+      probe: (body: NeedsYouBody) => T | undefined,
       timeoutMs = 180_000,
     ): Promise<T> => {
       const deadline = Date.now() + timeoutMs;
@@ -634,18 +651,11 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
         await sleep(200);
       }
     };
-    const needsYou = () =>
-      h.api("GET", `/api/projects/${PROJECT}/needs-you`) as Promise<{
-        decisions: {
-          id: string;
-          blocking: boolean;
-          kind: string;
-          trigger?: string | null;
-          why: string;
-          waited_ms: number | null;
-        }[];
-        human_actions: unknown[];
-      }>;
+    const needsYou = async (): Promise<NeedsYouBody> =>
+      (await h.api(
+        "GET",
+        `/api/projects/${PROJECT}/needs-you`,
+      )) as NeedsYouBody;
 
     test("第 6 步：返工 Run 复用原 worktree，D-2 提交后 D-1 变成 superseded", async () => {
       const development = itemByRole("coder", "produce");
@@ -730,6 +740,7 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
         });
       // The domain ends the Run itself and records the question as the summary.
       expect(blocked.outcome).toBe("blocked");
+      blockedRunId = blocked.id;
     }, 300_000);
 
     test("通过标准三的前半：停掉 Herdr server，系统自己恢复", async () => {
@@ -738,6 +749,11 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
       // again: the system has to replace the Session on its own (D5), and the hc
       // call it makes brings a core back (0.3).
       stoppedAt = new Date().toISOString();
+      const coderBeforeStop = assignmentFor(
+        itemByRole("coder", "produce")?.id as string,
+      );
+      oldTerminalRef = coderBeforeStop?.runtime_ref?.terminal_ref ?? "";
+      expect(oldTerminalRef).not.toBe("");
       await h.stopCore();
       const stopped = h
         .state()
@@ -769,10 +785,12 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
         `/api/projects/${PROJECT}/decisions/${decision?.id}/resolve`,
         { option: "smoke", raw_quote: "按方案 A" },
       );
-      // Needs You clears as soon as you answered.
+      // Needs You clears as soon as you answered — and the lost runtime of the
+      // killed Herdr server never turns into an incident for the human (M5.6).
       const cleared = await needsYou();
       expect(cleared.decisions).toEqual([]);
       expect(cleared.human_actions).toEqual([]);
+      expect(cleared.incidents).toEqual([]);
     }, 180_000);
 
     test("第 9 步：decision_resumed Run 产出 D-3，两个复核都通过", async () => {
@@ -812,6 +830,9 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
         Date.parse(stoppedAt),
       );
       expect(probesAfterRecovery[coder?.id ?? ""]).toMatchObject({ ok: true });
+      // The recovery did not hand a runtime incident to the human: no Assignment
+      // is left unknown or lost once the Session has been replaced.
+      expect((await needsYou()).incidents).toEqual([]);
       // The replacement is a timeline entry on the card, not only a log line (D5).
       const detail = (await h.api(
         "GET",
@@ -986,6 +1007,32 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
         undefined,
       ]);
       expect(h.state().human_actions).toEqual([]);
+
+      // M5.6's runtime view is part of Needs You: after the Session was replaced
+      // and the card reached Done, nothing may be left for the human to look at.
+      const you = await needsYou();
+      expect(you.incidents).toEqual([]);
+      expect(you.decisions).toEqual([]);
+      expect(you.human_actions).toEqual([]);
+
+      // The restart must not have disturbed the human. Needs You notifications
+      // are the escalation channel behind the list, so nothing but the two
+      // card decisions (step 7's product question and step 10's merge
+      // confirmation) may ever reach the PM Office or the Needs You list:
+      // `runtime_lost` / `runtime_disconnected` / `bell_delivery_failed`
+      // escalations all fail here.
+      const state = h.state();
+      const escalating = h.store
+        .listNotifications({ project_id: PROJECT })
+        .filter((note) =>
+          ["pm_office", "needs_you"].includes(note.recipient.kind),
+        )
+        .map(
+          (note) =>
+            state.events.find((event) => event.id === note.event_id)?.type ??
+            `missing:${note.event_id}`,
+        );
+      expect(new Set(escalating)).toEqual(new Set(["decision_requested"]));
     }, 120_000);
 
     test("通过标准三：重启后 coder 的 Assignment 被替换并恢复", async () => {
@@ -1013,15 +1060,24 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
       expect(["unknown", "lost"]).not.toContain(coder?.runtime_state);
       expect(probesAfterRecovery[coder?.id ?? ""]).toMatchObject({ ok: true });
 
-      // 3. The timeline records the handoff (D5: replacement writes one).
+      // 3. The timeline records the handoff (D5: replacement writes one), and
+      //    it says enough for a fresh Session to pick the work up: why the
+      //    Session went away, which terminal it replaces, and which Run was the
+      //    last one (step 7's blocked rework).
       const detail = (await h.api(
         "GET",
         `/api/projects/${PROJECT}/cards/${cardId}`,
       )) as { timeline: { type: string; body: string }[] };
-      const handoffs = detail.timeline.filter(
-        (entry) => entry.type === "handoff",
-      );
-      expect(handoffs.length).toBeGreaterThan(0);
+      const coderHandoff = detail.timeline
+        .filter((entry) => entry.type === "handoff")
+        .find((entry) => entry.body.includes(blockedRunId));
+      expect(coderHandoff).toBeDefined();
+      const handoff = coderHandoff?.body ?? "";
+      expect(handoff).toContain("运行时失联");
+      expect(handoff).toContain(`"terminal_ref":"${oldTerminalRef}"`);
+      expect(handoff).toContain(`最近 Run：${blockedRunId}`);
+      expect(handoff).toContain("outcome：blocked");
+      expect(handoff).toContain("get_updates");
 
       // 4. No work-item Assignment is left in limbo: each one either finished
       //    its job (released) or ran again after the restart.

@@ -380,11 +380,13 @@ export async function createHarness(
         snapshot: host.snapshot,
         // Standing PM Assignments (Office/Ops) have no RuntimeRef here: their
         // conversation lives in Herdr and is driven by the human, so a scripted
-        // Agent cannot stand in for them. Without a resolver no bell is ever
-        // claimed for them (notificationOwner returns undefined), which is what
-        // keeps a fake `standing-A-n` terminal out of the RuntimeMonitor: the
-        // monitor would reject such a ref and report the standing Assignment as
-        // disconnected. The test's own PM clients drive steps 1 and 8 instead.
+        // Agent cannot stand in for them. Returning no Assignment makes every
+        // Office/Ops notification ownerless (`notificationOwner`), so no bell is
+        // claimed for them and nothing escalates when it is not delivered. It
+        // has to be explicit: without `standing` the control plane builds a
+        // resolver from the store, claims those bells, and the failed start
+        // escalates to the human. The test's own PM clients drive steps 1 and 8.
+        standing: () => undefined,
         startRun: async (input) => {
           if (input.assignment.scope === "standing")
             throw new Error(
