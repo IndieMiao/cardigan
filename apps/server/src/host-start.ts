@@ -2,6 +2,7 @@ import type {
   Actor,
   Assignment,
   Clock,
+  DispatchRunParams,
   ProjectId,
   Run,
   Runtime,
@@ -38,6 +39,7 @@ export interface StartRunInput {
   readonly assignment: Assignment;
   readonly run: Run;
   readonly bell: string;
+  readonly replacement?: DispatchRunParams["replacement"];
 }
 
 const hostActor = (project: ProjectId): Actor =>
@@ -66,5 +68,6 @@ export async function startQueuedRun(
     run: input.run,
     actor: hostActor(input.project),
     first_prompt: input.bell,
+    ...(input.replacement ? { replacement: input.replacement } : {}),
   });
 }

@@ -99,6 +99,36 @@ test("an absent socket causes all probes to fail without invoking hc or starting
   });
   expect(client.exec).toHaveBeenCalledTimes(1);
 });
+test("M5.6 replacement can recreate a missing core without probing it into existence", async () => {
+  const client = stub();
+  client.available = async () => false;
+  const runtime = value(await HerdrRuntime.create({ client }));
+  const previous = { ...ref, agent_session_id: "obsolete" };
+  const replaced = value(await runtime.resume_or_replace(previous, launch));
+  expect(replaced).not.toHaveProperty("agent_session_id");
+  const calls = vi.mocked(client.exec).mock.calls.map(([args]) => args);
+  expect(calls).toHaveLength(2);
+  expect(calls[1]).toEqual(
+    expect.arrayContaining(["run", "--keep", "--", launch.command]),
+  );
+  expect(
+    calls.some((args) => ["get", "kill", "rm"].includes(args[0] ?? "")),
+  ).toBe(false);
+});
+test("M5.6 replacement refuses an uncertain release while a core socket still exists", async () => {
+  const client = stub();
+  const runtime = value(await HerdrRuntime.create({ client }));
+  vi.mocked(client.exec).mockRejectedValue({
+    code: "runtime_unavailable",
+    message: "Cannot inspect live core",
+  });
+  expect(await runtime.resume_or_replace(ref, launch)).toMatchObject({
+    ok: false,
+  });
+  expect(
+    vi.mocked(client.exec).mock.calls.some(([args]) => args[0] === "run"),
+  ).toBe(false);
+});
 test("status uses a runtime sequence, and malformed or ended event streams fail explicitly", async () => {
   const client = stub();
   const runtime = value(await HerdrRuntime.create({ client }));
