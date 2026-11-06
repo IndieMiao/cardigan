@@ -1482,20 +1482,21 @@ DeepSeek 的 Pi 环境：
 
 基于讨论中的"0.2.5 发版后的相关改动与验收"卡片：
 
-1. 你在 PM Office 提出需求，PM Office 创建卡片 C-1，包含以下工作项：
+1. 你在 PM Office 提出需求，PM Office 按开发卡模板创建卡片 C-1（§15 D4），并补充产品确认、设计走查和测试验收，共包含以下工作项：
    - 产品确认（produce，PM）
-   - 开发（produce，coder，required）
+   - 开发（produce，coder，required，模板项）
+   - 代码审核（verify→开发，reviewer，required，模板项）
    - 设计走查（verify→开发，designer，required）
    - 测试验收（verify→开发，tester，required）
-   - PM 验收（verify，PM，required）
+   - PM 验收（verify，PM，required，模板项）
 2. 产品确认完成后，开发工作项变为 `ready`。PM Ops 指派 coder，系统建立 Assignment、worktree 和分支，并按门铃。
 3. coder 读取卡片，实现并在本地提交（不 push），提交 Delivery D-1（附带前后对比的附件，附件带上对应的拍板编号）。
-4. 设计走查和测试验收自动进入 `ready`，两个 Assignment 被唤醒。全程不打扰你。
-5. 设计走查提交 `pass`；测试验收提交 `reject`（例如真机上起飞有空白帧）。
+4. 代码审核、设计走查和测试验收自动进入 `ready`，三个 Assignment 被唤醒。全程不打扰你。
+5. 代码审核和设计走查提交 `pass`；测试验收提交 `reject`（例如真机上起飞有空白帧）。
 6. 系统为原 coder 的 Assignment 创建返工 Run，复用原 Session 和 worktree；D-2 提交后，D-1 标记为 `superseded`。
-7. 返工中 coder 发现需要改变产品行为，调用 `request_decision`，本次 Run 以 `blocked` 结束。
+7. 测试验收复核 D-2 时再次 `reject`。第二次返工中，coder 发现需要改变产品行为，在交付新版本之前调用 `request_decision`（blocking），开发进入 `waiting_decision`，本次 Run 以 `blocked` 结束。（已交付的产出项调用 `request_decision` 不会结束请求者的 Run，见 §4.4，所以拍板发生在交付之前。）
 8. Needs You 出现该 Decision，PM Office 给你一句话提示。你在对话里说"按方案 A"，PM Office 调用 `record_decision` 记录。
-9. 系统为 coder 创建 `decision_resumed` Run，产出 D-3；设计走查和测试验收复核通过。
+9. 系统为 coder 创建 `decision_resumed` Run，产出 D-3（D-2 标记为 `superseded`）；代码审核、设计走查和测试验收复核通过。默认审核上限是 3 轮，测试验收在第 3 轮通过，不触发上限 Decision。
 10. 所有必需项都通过后，系统提醒 coder 提交完成申请；PM 审核通过，卡片进入 Done，并合并到主干（需要你确认）。
 11. worktree 被清理，时间线完整记录全过程。
 12. 你随后问"现在整体怎么样"，PM Office 查询项目快照作答，不需要重放门铃历史。
