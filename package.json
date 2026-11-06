@@ -15,7 +15,7 @@
     "test": "pnpm --filter @cardigan/domain test:types && vitest run",
     "lint": "biome check .",
     "check:deps": "depcruise packages/*/src apps/*/src --config .dependency-cruiser.cjs",
-    "test:e2e": "tsc -p e2e/tsconfig.json && vitest run --config e2e/vitest.config.ts"
+    "test:e2e": "tsc -b && tsc -p e2e/tsconfig.json && vitest run --config e2e/vitest.config.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "2.6.4",
