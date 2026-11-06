@@ -72,6 +72,41 @@ export function listNeedsYou(state: CommandState, actor: Actor) {
     d.projectAccess();
     const why = (text: string) => [...text].slice(0, 40).join("");
     return {
+      incidents: d
+        .list("assignments")
+        .filter(
+          (a) =>
+            a.status === "active" &&
+            ["unknown", "lost"].includes(a.runtime_state),
+        )
+        .map((a) => {
+          const fact = (type: string) =>
+            state.events.findLast(
+              (e) =>
+                e.type === type &&
+                typeof e.payload === "object" &&
+                e.payload !== null &&
+                "assignment_id" in e.payload &&
+                e.payload.assignment_id === a.id,
+            );
+          return {
+            id: a.id,
+            role_id: a.role_id,
+            runtime_state: a.runtime_state,
+            card_id:
+              d.list("work_items").find((w) => w.id === a.work_item_id)
+                ?.card_id ?? null,
+            disconnected_at: fact("runtime_disconnected")?.created_at ?? null,
+            lost_at: fact("runtime_lost")?.created_at ?? null,
+            last_run:
+              d
+                .list("runs")
+                .filter((r) => r.assignment_id === a.id)
+                .sort(
+                  (x, y) => Number(y.id.slice(2)) - Number(x.id.slice(2)),
+                )[0] ?? null,
+          };
+        }),
       decisions: d
         .list("decisions")
         .filter(

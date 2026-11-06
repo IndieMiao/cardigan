@@ -4,6 +4,7 @@ import type {
   Actor,
   Assignment,
   Clock,
+  DispatchRunParams,
   Machine,
   ProjectId,
   Run,
@@ -90,6 +91,7 @@ export interface LaunchRunInput {
   readonly worktree?: PreparedWorktree | undefined;
   /** The doorbell (M3 §3.2); without it the M2 initial prompt is generated. */
   readonly first_prompt?: string | undefined;
+  readonly replacement?: DispatchRunParams["replacement"];
 }
 
 export interface LaunchedRun {
@@ -212,6 +214,24 @@ export async function launchRun(
       "directory preparation",
       `Run ${input.run.id} is not queued`,
     );
+  if (
+    input.replacement &&
+    (input.actor.kind !== "system" ||
+      JSON.stringify(assignment.runtime_ref) !==
+        JSON.stringify(input.replacement.previous) ||
+      host.store.uow
+        .read((tx) => tx.runs.list(project))
+        .some(
+          (r) =>
+            r.assignment_id === assignment.id &&
+            r.id !== current.id &&
+            !["completed", "failed", "cancelled"].includes(r.status),
+        ))
+  )
+    throw new HostLaunchError(
+      "directory preparation",
+      "Session replacement requires the same idle Assignment and queued Run",
+    );
 
   const { runDir } = executionPaths(execution, project, assignment.id);
   const workDir = input.worktree?.path ?? assignment.worktree_path ?? runDir;
@@ -312,12 +332,17 @@ export async function launchRun(
         run: input.run.id,
       },
     };
-    const provisioned = await host.runtime.provision(
-      assignment,
-      role,
-      localMachine(clock),
-      launchDesc,
-    );
+    const provisioned = input.replacement
+      ? await host.runtime.resume_or_replace(
+          input.replacement.previous,
+          launchDesc,
+        )
+      : await host.runtime.provision(
+          assignment,
+          role,
+          localMachine(clock),
+          launchDesc,
+        );
     if (!provisioned.ok)
       throw new Error(
         `provision failed: ${provisioned.error.code} ${provisioned.error.message}`,
@@ -350,6 +375,7 @@ export async function launchRun(
             run_id: input.run.id,
             runtime_ref: dispatchRef,
             ...(baseSha === undefined ? {} : { base_sha: baseSha }),
+            ...(input.replacement ? { replacement: input.replacement } : {}),
           },
           ports,
         ),

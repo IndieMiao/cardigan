@@ -3,6 +3,7 @@ import type {
   Assignment,
   Clock,
   CommandState,
+  DispatchRunParams,
   Notification,
   ProjectId,
   Run,
@@ -59,6 +60,7 @@ export interface DispatcherOptions {
     assignment: Assignment;
     run: Run;
     bell: string;
+    replacement?: DispatchRunParams["replacement"];
   }) => Promise<void>;
 }
 const sameRef = (a: Assignment, b: Assignment) =>
@@ -187,12 +189,21 @@ export class Dispatcher {
     }
     if (a.status !== "active" || this.busy(state, a, notes)) return;
     let live = false;
+    let replacement: DispatchRunParams["replacement"];
     if (a.runtime_ref) {
       const observed = await this.options.runtime.status(a.runtime_ref);
       if (observed.ok) {
         if (observed.value.process === "unknown") return;
         live = observed.value.process === "alive";
-      } else if (observed.error.code !== "runtime_not_found") return;
+      } else if (
+        observed.error.code === "runtime_not_found" ||
+        observed.error.code === "runtime_unavailable"
+      ) {
+        replacement = {
+          previous: a.runtime_ref,
+          reason: observed.error.code,
+        };
+      } else return;
     }
     const queued = this.queued(state, a, notes);
     const prior = state.runs
@@ -250,6 +261,7 @@ export class Dispatcher {
           assignment: job.assignment,
           run: job.run,
           bell: job.bell,
+          ...(replacement ? { replacement } : {}),
         });
         const actual = this.state(project).runs.find(
           (r) => r.id === job?.run.id,

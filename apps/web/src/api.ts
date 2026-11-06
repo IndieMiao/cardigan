@@ -320,6 +320,9 @@ export interface NeedsPage {
     readonly id: string;
     readonly role_id: string;
     readonly runtime_state: string;
+    readonly disconnected_at?: string | null;
+    readonly lost_at?: string | null;
+    readonly last_run?: RunView | null;
     readonly card_id: string | null;
     readonly waited_ms: number | null;
   }[];

@@ -3,7 +3,12 @@ import { readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import type { Assignment, Clock, Run } from "@cardigan/domain";
+import type {
+  Assignment,
+  Clock,
+  DispatchRunParams,
+  Run,
+} from "@cardigan/domain";
 import { agentCliVersion, harnessBinary } from "@cardigan/host";
 import {
   type LaunchConfig,
@@ -39,6 +44,7 @@ export interface HostWiring {
     assignment: Assignment;
     run: Run;
     bell: string;
+    replacement?: DispatchRunParams["replacement"];
   }) => Promise<void>;
   readonly standing: ReturnType<typeof standingResolver>;
 }
@@ -186,6 +192,7 @@ export async function createHostWiring(options: {
           assignment: input.assignment,
           run: input.run,
           bell: input.bell,
+          ...(input.replacement ? { replacement: input.replacement } : {}),
         },
       ),
   };

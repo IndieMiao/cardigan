@@ -375,10 +375,18 @@ export class HerdrRuntime implements Runtime {
       if (ref.worktree_path && ref.worktree_path !== launch.cwd)
         fail("invalid_launch", "Replacement must reuse the worktree");
       const released = await this.release(ref, { force: true });
-      if (!released.ok && released.error.code !== "runtime_not_found")
+      if (
+        !released.ok &&
+        released.error.code !== "runtime_not_found" &&
+        !(
+          released.error.code === "runtime_unavailable" &&
+          !(await this.client.available())
+        )
+      )
         fail(released.error.code, released.error.message);
+      const { agent_session_id: _previousSession, ...previous } = ref;
       return {
-        ...ref,
+        ...previous,
         terminal_ref: await this.launch(
           { ...launch, labels: { ...launch.labels, cardigan: "1" } },
           true,

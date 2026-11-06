@@ -1,6 +1,6 @@
 import type { Decision, WorkItem } from "../entities.js";
-import { transition } from "../transitions.js";
-import { type CommandDraft, unwrap } from "./core.js";
+import type { CommandDraft } from "./core.js";
+import { endRun } from "./end-run.js";
 
 export function pendingReviewLimit(d: CommandDraft, item: WorkItem) {
   return d
@@ -54,14 +54,7 @@ export function requestReviewLimit(d: CommandDraft, item: WorkItem) {
     .filter(
       (r) => r.assignment_id === item.assignment_id && r.status === "running",
     );
-  for (const run of runs)
-    d.put("runs", {
-      ...run,
-      status: unwrap(transition("run", run.status, "complete")),
-      outcome: "blocked",
-      summary: decision.question,
-      finished_at: d.now,
-    });
+  for (const run of runs) endRun(d, run, "blocked", decision.question);
   if (existing) return;
   d.put("decisions", decision);
   d.emit(

@@ -212,6 +212,18 @@ test("project decisions explain unavailable comments; cleanup and lost runtimes 
               runtime_state: "lost",
               waited_ms: 60000,
               card_id: "C-1",
+              disconnected_at: "2026-01-01T00:00:00.000Z",
+              lost_at: "2026-01-01T00:05:00.000Z",
+              last_run: {
+                id: "R-9",
+                assignment_id: "A-3",
+                status: "unknown",
+                kind: "followup",
+                model: "fixture",
+                role_version: 1,
+                agent_cli_version: "1",
+                summary: "等待恢复",
+              },
             },
           ],
         }),
@@ -220,6 +232,9 @@ test("project decisions explain unavailable comments; cleanup and lost runtimes 
     />,
   );
   await screen.findByText("失联，需要你检查");
+  expect(screen.getByText("2026-01-01T00:00:00.000Z")).toBeTruthy();
+  expect(screen.getByText(/最近 Run：R-9/)).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /接管|替换/ })).toBeNull();
   expect(
     (screen.getByRole("button", { name: "要求补充信息" }) as HTMLButtonElement)
       .disabled,
