@@ -745,7 +745,7 @@ M3.4 的 Runtime 接线只根据未结束的业务 Run 判断忙碌，不用 Har
 
 1. 执行 Agent 创建 Decision。
 2. Decision 出现在 Needs You 里，PM Office 给出一句话摘要和建议。
-3. 你可以在 Needs You 里操作，也可以在对话里说"选 A"。后一种情况由 PM Office 调用 `record_decision`，记录原话和来源。
+3. 你可以在 Needs You 里操作，也可以在对话里说"选 A"。后一种情况由 PM Office 调用 `record_decision`，记录原话和来源。Phase 2 起，花钱、账号、权限、删除数据四类只能在 Workbench 里确认（D12）。
 4. 系统唤醒受影响的 Assignment，PM Ops 据此调整后续任务。
 
 ---
@@ -987,6 +987,7 @@ M2.1 的 Role 子集包含 role_id、version、display_name、kind、core_prompt
 
 - **固定部分**：角色说明、行为准则、协议、项目规则。放在 Role Registry，有版本，第一版就实现。
 - **演进部分**：跨任务积累的经验和偏好。由 Agent 通过 MCP 提议更新，经 PM 或你审核后合入，启动 Session 时注入。放到 Phase 3。
+- **定期提炼—整合（D10，2026-11-06 决定）**：在 Phase 3 的自动化做好之前，先按人工流程做。每个阶段结束时，请各项目的资深 PM 按统一的 9 节结构提炼规则，每条写明证据、可信度和适用范围：角色边界、拆任务和派活、跟进和催办、验收和审核、何时打断用户和怎么汇报、和执行 Agent 的沟通约定、失败案例、工具经验、试过但效果不好的做法。Claude 对照各份报告和现有设计，把规则分成五类：已由系统覆盖、系统缺口、进通用 Core Prompt、项目级素材、要你拍板。整合结果写成 `docs/research/` 下的研究文档，定稿的规则由实现者写进角色包。第一次整合见 `docs/research/pm-practice-distillation.md`。
 
 ### 10.4 初始角色建议
 
@@ -1289,6 +1290,9 @@ M3.4 通过主机 RuntimeMonitor 订阅每个未结束 Run 所在终端的 hc ev
 | D7 | "core memo"的含义 | **已决定（2026-11-04）**：第一版只做固定的角色说明（Role Registry，有版本号）；演进式记忆放到 Phase 3 |
 | D8 | 是否借鉴或 fork herdr-projects | **已决定（2026-11-04）**：不 fork，借鉴设计（`docs/research/0.5a-herdr-projects.md` §9） |
 | D9 | 运行时基线 | **已决定（2026-11-04），2026-11-05 复核维持**：herdr-core，锁定 0.1.18；Herdr 0.9.5 作为回退。见 `docs/adr/0001-runtime-baseline.md` 的复核记录 |
+| D10 | PM 角色的经验来源和人格 | **已决定（2026-11-06）**：pm 角色的规则来自各项目 PM 的实战经验，按 §10.3 的"定期提炼—整合"流程更新；PM Office 不沿用任何现有 PM 的人格和说话方式，用提炼出的规则代替。见 `docs/research/pm-practice-distillation.md` |
+| D11 | 你不在时的代拍板 | **已决定（2026-11-06），Phase 2 实现**：允许 PM 按书面的常驻授权，替你决定一部分 `decider=human` 的 Decision。授权是控制面里的记录，写明范围（按 category 限定）、期限和例外；代批的 Decision 标为 `delegated`，汇总进你回来时的摘要。`spending`、`account`、`permission`、`data_deletion` 四类永远不能代批 |
+| D12 | 高风险拍板的确认方式 | **已决定（2026-11-06），Phase 2 实现**：`spending`、`account`、`permission`、`data_deletion` 四类 Decision 必须由你在 Workbench 里确认，PM Office 在对话里转录的 `record_decision` 不能解决这四类；`general` 类保持现状 |
 
 ---
 
@@ -1333,6 +1337,8 @@ M3.4 通过主机 RuntimeMonitor 订阅每个未结束 Run 所在终端的 hc ev
 | 工作机初始化脚本：`agent` 用户、工具链、Agent CLI、凭据（移动端真机测试会更多） | 2–5 天 |
 | 故障处理：`unknown` → 宽限期 → `lost` → 手动接管；半成品推送 | 3–5 天 |
 | 安全收口：SSH 方向、分支权限、Token 作用域 | 2–3 天 |
+| 高风险 Decision 只能在 Workbench 确认（D12） | 1–2 天 |
+| 常驻授权和代拍板（D11） | 2–3 天 |
 
 验收场景：
 

@@ -136,6 +136,8 @@ PM Ops 一节增加两条：
 
 ## 6 要你拍板的事
 
+**2026-11-06 已决定：E1–E4 全部按下表的建议执行**，记入开发方案 §15 D10–D12 和 §10.3。
+
 | 编号 | 问题 | 两边的做法 | Cardigan 现状 | 我的建议 |
 |---|---|---|---|---|
 | E1 | 你不在的时候，PM 能不能按书面授权替你决定一部分 Decision？ | 两边都用过，而且都写明了边界：可以合已经审过的、按推荐做日常小决定；不推未批的决策、不扩大范围、不做对外动作、不花钱。代批的标明"代批"，你回来时给一份汇总（A 5.4、5.5；B 1.5、5.15） | `request_decision` 的 `decider` 可以是 `role:<角色>`，但没有"常驻授权"这个概念，PM 也不能代人决定 `decider=human` 的 Decision | 做，放到 Phase 2：授权写成控制面里的记录（范围、按 category 限定、期限、例外），代批的 Decision 标 `delegated` 并进入你回来时的摘要；spending、account、permission、data_deletion 四类永远不能代批 |
@@ -146,5 +148,5 @@ PM Ops 一节增加两条：
 ## 7 下一步
 
 1. 按 §5 的定稿文字改 pm 的 Core Prompt，派给实现者，附带测试（每条规则都出现在 pm 的 Core Prompt 里；coder 和 reviewer 的 Core Prompt 不受影响）。
-2. E1–E4 等你拍板；E1、E2 定了以后，写进 Phase 2 计划。
+2. E1–E4 已按建议决定（§15 D10–D12）；E1、E2 写进 Phase 2 计划。
 3. §4 的 C1–C7 在写 Phase 2 计划时一起排期；C7 先核实。
