@@ -40,6 +40,17 @@ def run(*args, user=None):
     return subprocess.run(command, check=True, text=True, capture_output=True).stdout.strip()
 
 
+def has_sudo_rights(user):
+    result = subprocess.run(
+        ["sudo", "-n", "-l", "-U", user], capture_output=True, text=True,
+        env={**os.environ, "LC_ALL": "C", "LANG": "C"},
+    )
+    # sudo-rs can return 0 for an explicit denial; unknown successful output is unsafe.
+    return result.returncode == 0 and "is not allowed to run sudo" not in (
+        result.stdout + "\n" + result.stderr
+    )
+
+
 def plain_path(path):
     require(path.is_absolute() and ".." not in path.parts, "Paths must be absolute without '..'")
     require(len(path.parts) >= 3, "Refusing a top-level system directory")
@@ -123,7 +134,7 @@ def preflight(args):
                 "Existing installation has different ownership or roots")
         allowed_groups = {agent.pw_gid} | ({shared.gr_gid} if shared else set())
         require(set(os.getgrouplist(AGENT, agent.pw_gid)) <= allowed_groups, "Agent has additional groups (possibly privileged)")
-        require(subprocess.run(["sudo", "-n", "-l", "-U", AGENT], capture_output=True).returncode != 0,
+        require(not has_sudo_rights(AGENT),
                 "Agent has sudo rights; remove them before proceeding")
         require(subprocess.run(["runuser", "-u", AGENT, "--", "test", "-x", str(host_home)]).returncode != 0,
                 "Host home is accessible to agent")
@@ -209,7 +220,7 @@ def main():
         run("groupadd", "--system", GROUP)
         shared = grp.getgrnam(GROUP)
     run("passwd", "--lock", AGENT)
-    require(subprocess.run(["sudo", "-n", "-l", "-U", AGENT], capture_output=True).returncode != 0,
+    require(not has_sudo_rights(AGENT),
             "New agent account has sudo rights; installation stopped")
     for user in [host.pw_name, AGENT]:
         run("usermod", "-a", "-G", GROUP, user)

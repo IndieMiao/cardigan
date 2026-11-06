@@ -96,7 +96,7 @@ print('verified')`;
   expect((await python(probe, [root])).stdout.trim()).toBe("verified");
 });
 
-const preflightProbe = `import importlib.util,sys,os
+const preflightFixture = `import importlib.util,sys,os
 from pathlib import Path
 from types import SimpleNamespace as Record
 spec=importlib.util.spec_from_file_location('installer',sys.argv[1]);mod=importlib.util.module_from_spec(spec);spec.loader.exec_module(mod)
@@ -134,6 +134,8 @@ def run(*args,**kwargs):
 def mutation(*a,**kw):calls.append(a);raise AssertionError('filesystem mutation attempted')
 mod.run=run;mod.directory=mutation;mod.atomic_file=mutation;mod.subprocess.run=mutation
 mod.payload=lambda *a:b'verified fixture executable'
+`;
+const preflightProbe = `${preflightFixture}
 before=sorted(str(p) for p in root.rglob('*'))
 sys.argv=[sys.argv[1],'--host-user','operator','--data-dir',str(root/'private'),'--agent-root',str(root/'agent')]
 if fault=='check':sys.argv+=['--check']
@@ -171,3 +173,140 @@ test("--check runs the successful read-only preflight without beginning installa
     "Read-only checks passed; no installation changes made.",
   );
 });
+
+// Every privileged command is a fixture: exercise main's post-create check and
+// the real preflight of a partially installed account without invoking sudo.
+const sudoProbe = `${preflightFixture}
+import json
+managed=sys.argv[4]=='managed';result=json.loads(sys.argv[5]);sudo_calls=[]
+agent=Record(pw_name='agent',pw_uid=9877,pw_gid=9877,pw_dir=str(mod.AGENT_HOME))
+account_exists=managed;group_exists=False
+def getuser(name):
+ if name=='operator':return host
+ if name=='agent' and account_exists:return agent
+ raise KeyError(name)
+def getgroup(name):
+ if name==mod.GROUP and group_exists:return shared
+ raise KeyError(name)
+mod.pwd.getpwnam=getuser;mod.grp.getgrnam=getgroup
+mod.os.getgrouplist=lambda *a:[agent.pw_gid]
+if managed:
+ mod.AGENT_HOME.mkdir(mode=0o750)
+ marker=mod.AGENT_HOME/'.cardigan-managed'
+ marker.write_text(json.dumps({'host':'operator','data':str(root/'private'),'root':str(root/'agent')}));marker.chmod(0o600)
+ original_stat=Path.stat
+ def managed_stat(path,*a,**kw):
+  value=original_stat(path,*a,**kw)
+  if path in [mod.AGENT_HOME,marker]:
+   fields=list(value);fields[4]=0;return os.stat_result(fields)
+  return value
+ Path.stat=managed_stat
+os.environ['LC_ALL']='fixture-locale';os.environ['LANG']='fixture-language'
+def subprocess_run(command,**kwargs):
+ if command==['sudo','-n','-l','-U','agent']:
+  assert kwargs['env']['LC_ALL']=='C' and kwargs['env']['LANG']=='C'
+  assert kwargs['capture_output'] is True and kwargs['text'] is True
+  sudo_calls.append(command)
+  return mod.subprocess.CompletedProcess(command,result['code'],result['stdout'],result['stderr'])
+ if command[:5]==['runuser','-u','agent','--','test']:
+  return mod.subprocess.CompletedProcess(command,1)
+ raise AssertionError('unexpected subprocess: '+str(command))
+mod.subprocess.run=subprocess_run
+class CheckPassed(Exception):pass
+read_run=mod.run
+def install_run(*args,**kwargs):
+ global account_exists,group_exists
+ if args[0] in ['sudo','sshd']:return read_run(*args,**kwargs)
+ calls.append(args)
+ if args[0]=='useradd':account_exists=True
+ elif args[0]=='groupadd':group_exists=True
+ elif args[0]=='passwd':pass
+ elif args[0]=='usermod':raise CheckPassed()
+ else:raise AssertionError('unexpected install command: '+str(args))
+ return ''
+mod.run=install_run
+mod.directory=lambda *a:calls.append(('directory',*a))
+mod.atomic_file=lambda *a:calls.append(('atomic_file',*a))
+before=sorted(str(p) for p in root.rglob('*'))
+sys.argv=[sys.argv[1],'--host-user','operator','--data-dir',str(root/'private'),'--agent-root',str(root/'agent')]
+if managed:sys.argv+=['--check']
+passed=False
+try:
+ mod.main();assert managed;passed=True
+except CheckPassed:
+ assert not managed;passed=True
+except RuntimeError as error:
+ assert 'sudo rights' in str(error),str(error)
+assert len(sudo_calls)==1
+assert os.environ['LC_ALL']=='fixture-locale' and os.environ['LANG']=='fixture-language'
+assert sorted(str(p) for p in root.rglob('*'))==before
+if managed:assert calls==[],calls
+else:
+ assert any(call[0]=='useradd' for call in calls)
+ assert any(call[0]=='usermod' for call in calls)==passed
+print(json.dumps({'passed':passed,'sudo_calls':len(sudo_calls)}))
+`;
+
+const sudoCases = [
+  {
+    name: "traditional sudo denial",
+    code: 1,
+    stdout: "",
+    stderr: "",
+    passed: true,
+  },
+  {
+    name: "sudo-rs denial on stdout",
+    code: 0,
+    stdout: "User agent is not allowed to run sudo on fixture-host.\n",
+    stderr: "",
+    passed: true,
+  },
+  {
+    name: "sudo-rs denial on stderr",
+    code: 0,
+    stdout: "",
+    stderr: "User agent is not allowed to run sudo on fixture-host.\n",
+    passed: true,
+  },
+  {
+    name: "allowed commands",
+    code: 0,
+    stdout:
+      "User agent may run the following commands on fixture-host:\n    (ALL : ALL) ALL\n",
+    stderr: "",
+    passed: false,
+  },
+  {
+    name: "empty successful output",
+    code: 0,
+    stdout: "",
+    stderr: "",
+    passed: false,
+  },
+  {
+    name: "unrecognized successful output",
+    code: 0,
+    stdout: "Policy result unavailable\n",
+    stderr: "",
+    passed: false,
+  },
+];
+test.each(
+  ["new", "managed"].flatMap((account) =>
+    sudoCases.map((result) => ({ account, ...result })),
+  ),
+)(
+  "$account account sudo check handles $name with a fixed locale",
+  async ({ account, passed, ...result }) => {
+    const response = await python(sudoProbe, [
+      root,
+      "sudo-case",
+      account,
+      JSON.stringify(result),
+    ]);
+    expect(JSON.parse(response.stdout.trim().split("\n").at(-1) ?? "")).toEqual(
+      { passed, sudo_calls: 1 },
+    );
+  },
+);

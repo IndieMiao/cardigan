@@ -27,6 +27,8 @@
 
 安装器不安装模型 CLI、不复制用户模型认证或 SSH 私钥，不改用户全局配置。需要现有 openssh-server、Python 3、ACL 工具，以及常规 Linux 账号工具。
 
+sudo-rs 0.2.13 在无权限时可能返回 0（传统 sudo 返回非 0），因此两处权限检查统一以 `LC_ALL=C`、`LANG=C` 调用 `sudo -n -l -U agent`，仅在退出码非 0 或退出码为 0 且输出含 `is not allowed to run sudo` 时认定无权限，其余情况（包括空输出或无法识别的输出）均拒绝继续安装。
+
 ## 路径和文件权限
 
 | 内容 | local | agent-ssh |
