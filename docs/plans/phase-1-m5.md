@@ -159,7 +159,7 @@ M5.5 的重启场景（停掉 hc core）暴露了三处实现缺陷。附录 A �
 - **两次 Run 之间失联，自动替换**：投递门铃时，如果 `runtime.status` 返回 `runtime_not_found` 或 `runtime_unavailable`，并且这个 Assignment 没有在途的 Run（dispatched、acked、running、unknown），就按 D5 替换 Session。
   - 用主机编译的启动描述调用 `resume_or_replace`，和 provision 用同一份。hc 需要时会自动拉起 core（0.3），不另写启动 core 的逻辑。
   - 成功后写一条 `type=handoff` 的系统时间线条目，内容包括：原因（运行时失联）、旧的 RuntimeRef、最近一次 Run 及其 outcome、"新 Session 先读卡片和 `get_updates`"。然后更新 RuntimeRef，按原流程投递，启动排队的 Run，不产生第二个 Run。
-  - 替换失败时走现有的投递失败路径：重试退避，用尽后升级。不能静默挂起。
+  - 替换失败时走现有的投递失败路径：外部调用的结果不确定，立即标为 `delivery_failed` 并升级 PM Ops（ADR 0003），不自动重试。退避重发只用于已经送达、但没有收到 ACK 的门铃。不能静默挂起。
 - **Run 进行中失联，不自动替换**：保持 §13.9 的流程，unknown → 宽限期 → lost → Needs You。旧进程可能还在改代码。
 - **runtime_state 要准确**：Run 结束后 Assignment 回到 idle。核实现在为什么停在 running，并修正。
 - **Needs You 显示 runtime_lost**：§13.9 规定 lost 进入 Needs You，但 Web 的 `/needs-you` 和 MCP 的 `list_needs_you` 现在只列 Decision 和 HumanAction。补上 runtime_lost 升级的显示，包括哪个 Assignment、什么时候失联、最后一次 Run。本次只显示，不加操作按钮，接管属于 Phase 2（§13.9 第 3 条）。
