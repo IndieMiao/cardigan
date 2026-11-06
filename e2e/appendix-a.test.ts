@@ -2,24 +2,21 @@
 // few fields out of large tool payloads; pinning every response shape here
 // would duplicate the MCP surface without testing anything extra.
 /**
- * Appendix A, steps 1–5 (M5 plan §4 M5.5; development plan 附录 A).
- *
- * Real server, real herdr-core, real Git and scripted Agents that only speak the
- * Card MCP protocol: the human asks PM Office for a feature, PM Office creates
- * the card with the five work items, product confirmation unlocks development,
- * PM Ops assigns the coder and the host builds a worktree and branch, the coder
- * delivers with an attachment, and the two verification Assignments are woken to
- * pass and reject it — all without interrupting the human.
- *
- * Steps 6–12 (rework, the decision, the resumed Run, completion, the merge
- * confirmation, cleanup, the snapshot and the restart criterion) follow in the
- * next PR of this milestone.
+ * M5.5 / M5.T1: Appendix A's 12 steps, real server/hc/Git and MCP-only Agents.
+ * D-n denotes the coder's nth code delivery, not the project's global Delivery ID.
+ * The first half checks initial setup; the second repeats it and completes the flow.
+ * Human business writes use Web API. CLI is only host provisioning/launch setup.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { PROJECT_EVENT_STREAM } from "@cardigan/store";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import {
+  interruptionSnapshot,
+  printInterruptionFailure,
+} from "./support/diagnostics.js";
 import {
   createHarness,
   type E2eHarness,
@@ -127,7 +124,7 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
     }, 180_000);
 
     afterAll(async () => {
-      await h.close();
+      await h?.close();
     }, 180_000);
 
     const items = () =>
@@ -171,7 +168,7 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
       expect(snapshot.cards).toEqual([]);
     }, 60_000);
 
-    test("第 1 步：PM Office 建卡，工作项按附录 A 的五项", async () => {
+    test("第 1 步：PM Office 建卡，工作项按附录 A 的六项", async () => {
       const card = await call(office, "create_card", {
         title: "0.2.5 发版后的相关改动与验收",
         goal: "把 0.2.5 之后的改动带上真机验收",
@@ -368,6 +365,42 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
       expect(entry).toBeDefined();
     }, 180_000);
 
+    test("通过标准二：向存活终端重复发送原门铃，不新增 Run 或业务写入", async () => {
+      const coder = assignmentFor(itemByRole("coder", "produce")?.id as string);
+      if (!coder?.runtime_ref) throw new Error("Missing coder terminal");
+      const run = await h.until("首轮 Run 完成", () =>
+        h
+          .state()
+          .runs.find(
+            (r) => r.assignment_id === coder.id && r.status === "completed",
+          ),
+      );
+      await h.until("Agent 完成首轮协议", () =>
+        h.markers().includes(`marker-done-${run.id}`) ? true : undefined,
+      );
+      const before = h.state(),
+        count = () =>
+          h.agentLog().split(`duplicate prompt for ${run.id}, ignored`).length -
+          1;
+      const seen = count();
+      const bell = readFileSync(
+        join(h.dataDir, "runs", PROJECT, coder.id, "first.md"),
+        "utf8",
+      );
+      await h.repeatBell(coder.runtime_ref, bell);
+      await h.until(
+        "两次重复门铃都已处理",
+        () => (count() >= seen + 2 ? true : undefined),
+        5000,
+      );
+      await sleep(500); // Give Dispatcher several ticks to expose accidental follow-up work.
+      const after = h.state();
+      expect(after.runs).toEqual(before.runs);
+      expect(after.deliveries).toEqual(before.deliveries);
+      expect(after.reviews).toEqual(before.reviews);
+      expect(after.timeline).toEqual(before.timeline);
+    }, 30000);
+
     test("第 4 步：设计走查、代码审核和测试验收被唤醒，全程不打扰你", async () => {
       const development = itemByRole("coder", "produce");
       const reviewerItem = items().find(
@@ -402,6 +435,7 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
         120_000,
       );
       expect(reviewed.delivery_id).toBeDefined();
+      expect(reviewed.kind).toBe("code");
 
       const designed = await h.until(
         "设计走查通过",
@@ -416,6 +450,7 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
         120_000,
       );
       expect(designed.delivery_id).toBeDefined();
+      expect(designed.kind).toBe("design");
 
       const rejected = await h.until(
         "测试验收驳回",
@@ -430,6 +465,7 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
         120_000,
       );
       expect(rejected.issues.some((issue) => issue.must_fix)).toBe(true);
+      expect(rejected.kind).toBe("test");
 
       // "全程不打扰你": nothing reached Needs You for these rounds.
       expect(await isNeedsYouEmpty()).toBe(true);
@@ -476,6 +512,10 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
     /** Step 7's blocked Run and the terminal it used: both go into the handoff. */
     let blockedRunId: string;
     let oldTerminalRef: string;
+    let initialCoder: { worktree_path?: string; runtime_ref: unknown };
+    let stoppedCorePid: number | undefined;
+    let restartCohort: ReturnType<E2eHarness["state"]>["assignments"];
+    let completedBeforeStop = new Set<string>();
 
     beforeAll(async () => {
       h = await createHarness({ salt: "appendix-a-late" });
@@ -560,6 +600,16 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
         .state()
         .assignments.find((entry) => entry.work_item_id === development?.id);
       await h.startAssignment(coder?.id as string);
+      const launchedCoder = h
+        .state()
+        .assignments.find((a) => a.id === coder?.id);
+      if (!launchedCoder) throw new Error("Missing initial coder Assignment");
+      initialCoder = {
+        ...(launchedCoder.worktree_path
+          ? { worktree_path: launchedCoder.worktree_path }
+          : {}),
+        runtime_ref: launchedCoder.runtime_ref,
+      };
       // The three verifiers join for the development delivery.
       for (const [roleId, item] of [
         [
@@ -612,7 +662,7 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
     }, 600_000);
 
     afterAll(async () => {
-      await h.close();
+      await h?.close();
     }, 180_000);
 
     const items = () =>
@@ -685,6 +735,9 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
         .state()
         .deliveries.find((delivery) => delivery.id === first?.id);
       expect(after?.status).toBe("superseded");
+      expect(assignmentFor(development?.id as string)).toMatchObject(
+        initialCoder,
+      );
     }, 300_000);
 
     test("第 7 步：返工中的产品问题进入 Needs You，Run 以 blocked 结束", async () => {
@@ -741,6 +794,18 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
       // The domain ends the Run itself and records the question as the summary.
       expect(blocked.outcome).toBe("blocked");
       blockedRunId = blocked.id;
+      const history = deliveries(itemByRole("coder", "produce")?.id as string);
+      expect(history).toHaveLength(2); // The decision happens before D-3.
+      expect(itemByRole("coder", "produce")?.status).toBe("waiting_decision");
+      const tester = itemByRole("tester", "verify");
+      for (const delivery of history)
+        expect(h.state().reviews).toContainEqual(
+          expect.objectContaining({
+            delivery_id: delivery.id,
+            work_item_id: tester?.id,
+            verdict: "reject",
+          }),
+        );
     }, 300_000);
 
     test("通过标准三的前半：停掉 Herdr server，系统自己恢复", async () => {
@@ -754,7 +819,32 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
       );
       oldTerminalRef = coderBeforeStop?.runtime_ref?.terminal_ref ?? "";
       expect(oldTerminalRef).not.toBe("");
+      stoppedCorePid = h.core.remember();
+      expect(stoppedCorePid).toBeTypeOf("number");
+      restartCohort = h
+        .state()
+        .assignments.filter(
+          (a) => a.runtime_ref !== null && a.runtime_ref !== undefined,
+        );
+      completedBeforeStop = new Set(
+        h
+          .state()
+          .work_items.filter(
+            (w) =>
+              (w.kind === "produce"
+                ? w.status === "accepted"
+                : w.status === "passed") &&
+              h
+                .state()
+                .runs.filter((r) => r.assignment_id === w.assignment_id)
+                .every((r) =>
+                  ["completed", "failed", "cancelled"].includes(r.status),
+                ),
+          )
+          .map((w) => w.assignment_id as string),
+      );
       await h.stopCore();
+      h.core.assertStopped();
       const stopped = h
         .state()
         .assignments.filter((assignment) => assignment.scope === "work_item");
@@ -763,7 +853,7 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
       expect(
         stopped.every((assignment) => assignment.status === "active"),
       ).toBe(true);
-      // The coder sits between Runs: blocked on the decision, resumed Run queued.
+      // The coder is blocked between Runs; answering step 8 will queue decision_resumed.
       const coder = assignmentFor(itemByRole("coder", "produce")?.id as string);
       expect(coder?.runtime_ref).toBeDefined();
       expect(
@@ -793,7 +883,7 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
       expect(cleared.incidents).toEqual([]);
     }, 180_000);
 
-    test("第 9 步：decision_resumed Run 产出 D-3，两个复核都通过", async () => {
+    test("第 9 步：decision_resumed Run 产出 D-3，三个复核都通过", async () => {
       const development = itemByRole("coder", "produce");
       const coder = assignmentFor(development?.id as string);
       // The Run is queued as soon as the decision is recorded; wait until the
@@ -817,11 +907,15 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
       // Pass criterion 3: the core was killed while this Run was queued, so the
       // Session had to be replaced before it could start. `stopCore()` never
       // starts a core; recording the PID here is cleanup, not recovery.
-      h.rememberCore();
+      expect(h.rememberCore()).not.toBe(stoppedCorePid);
+      expect(h.core.pid).toBeTypeOf("number");
       probesAfterRecovery = {};
       for (const assignment of h
         .state()
-        .assignments.filter((entry) => entry.runtime_ref !== undefined))
+        .assignments.filter(
+          (entry) =>
+            entry.runtime_ref !== undefined && entry.runtime_ref !== null,
+        ))
         probesAfterRecovery[assignment.id] = await h.probeRuntime(
           assignment.runtime_ref,
         );
@@ -850,6 +944,35 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
       expect(third.supersedes).toBe(
         deliveries(development?.id as string)[1]?.id,
       );
+      const productDecision = h
+        .state()
+        .decisions.find((d) => d.trigger === undefined);
+      expect(productDecision).toMatchObject({
+        status: "resolved",
+        resolution: { raw_quote: "按方案 A" },
+      });
+      const artifact = await h.until("D-3 的拍板依据附件", () =>
+        h
+          .state()
+          .attachments.find(
+            (a) =>
+              a.attach_to.kind === "delivery" && a.attach_to.id === third.id,
+          ),
+      );
+      expect(artifact).toMatchObject({
+        kind: "artifact",
+        basis: productDecision?.id,
+      });
+      for (const earlier of deliveries(development?.id as string).slice(0, 2)) {
+        const evidence = h
+          .state()
+          .attachments.find(
+            (a) =>
+              a.attach_to.kind === "delivery" && a.attach_to.id === earlier.id,
+          );
+        expect(evidence?.kind).toBe("evidence");
+        expect(evidence?.basis).toBeUndefined();
+      }
       // All three verifiers (设计走查、代码审核、测试验收) pass D-3.
       await h.until(
         "三个验证项对 D-3 都通过",
@@ -861,6 +984,8 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
                 .reviews.some(
                   (review) =>
                     review.delivery_id === third.id &&
+                    review.work_item_id === itemByRole(role, "verify")?.id &&
+                    review.target_sha === third.subject.value &&
                     review.verdict === "pass",
                 ) &&
               h
@@ -874,6 +999,13 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
         300_000,
       );
       expect(itemByRole("coder", "produce")?.status).toBe("accepted");
+      expect(
+        h
+          .state()
+          .deliveries.find(
+            (d) => d.id === deliveries(development?.id as string)[1]?.id,
+          )?.status,
+      ).toBe("superseded");
     }, 600_000);
 
     test("第 10 步：完成申请 + PM 验收，合并确认走 Workbench Web API", async () => {
@@ -918,6 +1050,20 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
       );
       expect(mergeDecision.decider).toBe("human");
       expect(mergeDecision.card_id).toBe(cardId);
+      const state = h.state();
+      expect(state.cards.find((c) => c.id === cardId)?.status).toBe(
+        "awaiting_merge",
+      );
+      expect(state.reviews).toContainEqual(
+        expect.objectContaining({
+          work_item_id: pmAcceptance?.id,
+          delivery_id: completion.id,
+          verdict: "pass",
+        }),
+      );
+      expect((await needsYou()).decisions.map((d) => d.id)).toEqual([
+        mergeDecision.id,
+      ]);
 
       // The human confirms the merge in the Workbench, not on the terminal.
       await h.api(
@@ -934,6 +1080,15 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
         300_000,
       );
       expect(merged).toBe(true);
+      const latest = deliveries(development?.id as string).at(-1);
+      execFileSync("git", [
+        "-C",
+        join(h.dataDir, "central", `${PROJECT}.git`),
+        "merge-base",
+        "--is-ancestor",
+        latest?.subject.value as string,
+        "refs/heads/main",
+      ]);
     }, 900_000);
 
     test("第 11 步：worktree 被清理，Assignment 被释放", async () => {
@@ -971,6 +1126,10 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
         cards: { id: string; status: string }[];
         by_status: Record<string, number>;
       };
+      const officeSnapshot = await call(office, "project_snapshot");
+      expect(officeSnapshot.cards).toContainEqual(
+        expect.objectContaining({ id: cardId, status: "done" }),
+      );
       const card = snapshot.cards.find((entry) => entry.id === cardId);
       expect(card?.status).toBe("done");
       expect(snapshot.by_status.done).toBe(1);
@@ -997,42 +1156,86 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
     }, 180_000);
 
     test("通过标准一：只有拍板与合并确认打断过你", async () => {
-      const decisions = h
-        .state()
-        .decisions.filter((decision) => decision.decider === "human");
-      // One product question (step 7) and one merge confirmation (step 10).
-      expect(decisions).toHaveLength(2);
-      expect(decisions.map((decision) => decision.trigger).sort()).toEqual([
-        "merge_confirmation",
-        undefined,
-      ]);
-      expect(h.state().human_actions).toEqual([]);
+      const observed: Record<string, unknown> = {};
+      try {
+        const decisions = h
+          .state()
+          .decisions.filter((decision) => decision.decider === "human");
+        observed.human_decisions = decisions;
+        // One product question (step 7) and one merge confirmation (step 10).
+        expect(decisions).toHaveLength(2);
+        expect(decisions.map((decision) => decision.trigger).sort()).toEqual([
+          "merge_confirmation",
+          undefined,
+        ]);
+        const actions = h.state().human_actions;
+        observed.human_actions = actions;
+        expect(actions).toEqual([]);
 
-      // M5.6's runtime view is part of Needs You: after the Session was replaced
-      // and the card reached Done, nothing may be left for the human to look at.
-      const you = await needsYou();
-      expect(you.incidents).toEqual([]);
-      expect(you.decisions).toEqual([]);
-      expect(you.human_actions).toEqual([]);
+        // M5.6's runtime view is part of Needs You: after the Session was replaced
+        // and the card reached Done, nothing may be left for the human to look at.
+        const you = await needsYou();
+        observed.extra_needs_you = you;
+        expect(you.incidents).toEqual([]);
+        expect(you.decisions).toEqual([]);
+        expect(you.human_actions).toEqual([]);
 
-      // The restart must not have disturbed the human. Needs You notifications
-      // are the escalation channel behind the list, so nothing but the two
-      // card decisions (step 7's product question and step 10's merge
-      // confirmation) may ever reach the PM Office or the Needs You list:
-      // `runtime_lost` / `runtime_disconnected` / `bell_delivery_failed`
-      // escalations all fail here.
-      const state = h.state();
-      const escalating = h.store
-        .listNotifications({ project_id: PROJECT })
-        .filter((note) =>
-          ["pm_office", "needs_you"].includes(note.recipient.kind),
-        )
-        .map(
-          (note) =>
-            state.events.find((event) => event.id === note.event_id)?.type ??
-            `missing:${note.event_id}`,
+        // The restart must not have disturbed the human. Needs You notifications
+        // are the escalation channel behind the list, so nothing but the two
+        // card decisions (step 7's product question and step 10's merge
+        // confirmation) may ever reach the PM Office or the Needs You list:
+        // `runtime_lost` / `runtime_disconnected` / `bell_delivery_failed`
+        // escalations all fail here.
+        const pendingRequests = h
+          .state()
+          .events.filter((e) => e.type === "decision_requested");
+        // Card completion/cleanup can outrun the Router's next tick. Wait for its
+        // persisted consumption checkpoint, not for the desired notification contents.
+        await h.until(
+          "Router 已消费全部拍板请求",
+          () =>
+            pendingRequests.every(
+              (event) =>
+                h.store.routerCursor(
+                  PROJECT,
+                  event.card_id ?? PROJECT_EVENT_STREAM,
+                ) >= event.seq,
+            )
+              ? true
+              : undefined,
+          10000,
         );
-      expect(new Set(escalating)).toEqual(new Set(["decision_requested"]));
+        const state = h.state();
+        const notifications = h.store.listNotifications({
+          project_id: PROJECT,
+        });
+        observed.interruptions = interruptionSnapshot(state, notifications);
+        const escalating = notifications
+          .filter((note) =>
+            ["pm_office", "needs_you"].includes(note.recipient.kind),
+          )
+          .map(
+            (note) =>
+              state.events.find((event) => event.id === note.event_id)?.type ??
+              `missing:${note.event_id}`,
+          );
+        expect(new Set(escalating)).toEqual(new Set(["decision_requested"]));
+        const requests = state.events.filter(
+          (e) => e.type === "decision_requested",
+        );
+        expect(requests).toHaveLength(2);
+        for (const kind of ["pm_office", "needs_you"])
+          expect(
+            h.store
+              .listNotifications({ project_id: PROJECT })
+              .filter((n) => n.recipient.kind === kind)
+              .map((n) => n.event_id)
+              .sort(),
+          ).toEqual(requests.map((e) => e.id).sort());
+      } catch (error) {
+        await printInterruptionFailure(h, observed);
+        throw error;
+      }
     }, 120_000);
 
     test("通过标准三：重启后 coder 的 Assignment 被替换并恢复", async () => {
@@ -1079,68 +1282,31 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
       expect(handoff).toContain("outcome：blocked");
       expect(handoff).toContain("get_updates");
 
-      // 4. No work-item Assignment is left in limbo: each one either finished
-      //    its job (released) or ran again after the restart.
-      const unhandled = state.assignments
-        .filter((assignment) => assignment.scope === "work_item")
-        .filter(
-          (assignment) =>
-            assignment.status !== "released" &&
-            !state.runs.some(
-              (run) =>
-                run.assignment_id === assignment.id &&
-                run.started_at !== undefined &&
-                Date.parse(run.started_at) >= Date.parse(stoppedAt),
+      // Completion after recovery cannot hide an Assignment that never resumed.
+      for (const prior of restartCohort) {
+        const current = state.assignments.find((a) => a.id === prior.id);
+        expect(current?.status, prior.id).toBe("released");
+        if (!completedBeforeStop.has(prior.id))
+          expect(
+            state.runs.some(
+              (r) =>
+                r.assignment_id === prior.id &&
+                r.status === "completed" &&
+                r.started_at &&
+                Date.parse(r.started_at) >= Date.parse(stoppedAt),
             ),
-        );
-      expect(unhandled.map((assignment) => assignment.id)).toEqual([]);
+            prior.id,
+          ).toBe(true);
+      }
+      // Standing PMs deliberately have no terminal in this harness. Verify the actual MCP sessions
+      // still serve their identities; this is not evidence of a PM terminal restart.
+      for (const pm of [office, ops])
+        expect(await call(pm, "whoami")).toMatchObject({
+          scope: "standing",
+          role_id: "pm",
+        });
       // Whatever core the system started is cleaned up by `close()`.
       h.rememberCore();
-    }, 120_000);
-
-    test("通过标准二：重复发送门铃不产生重复 Run", async () => {
-      const keys = () =>
-        h
-          .state()
-          .runs.map((run) => `${run.assignment_id}/${run.trigger_event_id}`);
-      const before = keys();
-      // A bell rings for the same event and the same recipient only once: the
-      // inbox is keyed on (event, recipient), so a duplicate send is a no-op.
-      const { recordNotification } = await import("@cardigan/store");
-      const delivered = h.store
-        .listNotifications({ project_id: PROJECT })
-        .filter((note) => note.recipient.kind === "assignment")
-        .at(-1);
-      expect(delivered).toBeDefined();
-      const again = h.store.uow.run(() =>
-        recordNotification(h.store.database, {
-          project_id: PROJECT,
-          event_id: delivered?.event_id as never,
-          recipient: delivered?.recipient as never,
-          seq: delivered?.seq as number,
-          kind: delivered?.kind as string,
-        }),
-      );
-      expect(again.created).toBe(false);
-      expect(again.notification.id).toBe(delivered?.id);
-
-      // Replaying the whole history through the router rings nothing twice
-      // either, and every (assignment, trigger event) still has one Run.
-      for (const stream of h.store.uow.read((tx) => [
-        "",
-        ...tx.cards.list(PROJECT).map((card) => card.id as string),
-      ])) {
-        h.store.advanceRouterCursor(PROJECT, stream, 0);
-      }
-      const { routeProjectEvents } = await import(
-        "../apps/server/src/dispatch-inbox.js"
-      );
-      await sleep(1_500);
-      routeProjectEvents(h.store, PROJECT);
-      await sleep(1_500);
-      expect(keys()).toEqual(before);
-      const unique = new Set(keys());
-      expect(unique.size).toBe(keys().length);
     }, 120_000);
   },
 );
