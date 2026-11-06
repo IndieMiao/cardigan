@@ -148,7 +148,14 @@ export function supportTools(options: SupportToolOptions = {}) {
       description:
         "List open human decisions and actions in this project (PM only).",
       input: z.object({}),
-      handler: (_params, context) => readProject(context, listNeedsYou),
+      handler: (_params, context) =>
+        readProject(context, (state, actor) =>
+          listNeedsYou(
+            state,
+            actor,
+            options.clock ?? { now: () => new Date().toISOString() },
+          ),
+        ),
     }),
   ];
 }

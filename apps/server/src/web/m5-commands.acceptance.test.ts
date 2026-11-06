@@ -423,7 +423,7 @@ test("§8.2/M5.4: Needs You returns blocking first, then the longest wait, with 
 // Plan risk for the owner to settle: §3.6/§8.2 ask every Needs You item to show
 // how long it has waited, but a project-level decision has no card timeline and
 // the decision entity carries no creation time, so `waited_ms` stays null.
-test.fails("§3.6: a project-level decision still reports how long it has waited", async () => {
+test("§3.6: a project-level decision still reports how long it has waited", async () => {
   const s = await workbench();
   const q = s.command((state, actor, ports) =>
     requestDecision(state, actor, question, ports),

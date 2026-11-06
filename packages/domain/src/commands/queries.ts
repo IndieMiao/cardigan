@@ -2,6 +2,7 @@ import { type CardDerivedFields, deriveCardFields } from "../card-derived.js";
 import { deriveCardStatus, deriveReviewMatrix } from "../derived.js";
 import type { Actor, CardView, Decision } from "../entities.js";
 import type { CardId } from "../ids.js";
+import type { Clock } from "../ports.js";
 import { type CommandDraft, type CommandState, command } from "./core.js";
 
 function affects(d: CommandDraft, q: Decision, id: CardId) {
@@ -66,10 +67,11 @@ export function projectSnapshot(state: CommandState, actor: Actor) {
     };
   });
 }
-export function listNeedsYou(state: CommandState, actor: Actor) {
+export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
   return command(state, actor, "list_needs_you", undefined, (d) => {
     d.pm();
     d.projectAccess();
+    const now = clock?.now();
     const why = (text: string) => [...text].slice(0, 40).join("");
     return {
       incidents: d
@@ -113,7 +115,32 @@ export function listNeedsYou(state: CommandState, actor: Actor) {
           (q) =>
             q.decider === "human" && ["open", "provisional"].includes(q.status),
         )
-        .map((q) => ({ ...q, why: why(q.question) })),
+        .map((q) => {
+          // Project decisions have no card timeline; their request event is the creation fact.
+          const opened =
+            state.events
+              .filter(
+                (e) =>
+                  e.type === "decision_requested" &&
+                  typeof e.payload === "object" &&
+                  e.payload !== null &&
+                  "decision_id" in e.payload &&
+                  e.payload.decision_id === q.id,
+              )
+              .sort((a, b) => a.created_at.localeCompare(b.created_at))[0]
+              ?.created_at ??
+            state.timeline
+              .filter((e) => e.decision_id === q.id)
+              .sort((a, b) => a.event_seq - b.event_seq)[0]?.created_at;
+          const elapsed =
+            opened && now ? Date.parse(now) - Date.parse(opened) : Number.NaN;
+          return {
+            ...q,
+            why: why(q.question),
+            opened_at: opened ?? null,
+            waited_ms: Number.isFinite(elapsed) ? Math.max(0, elapsed) : null,
+          };
+        }),
       human_actions: d
         .list("human_actions")
         .filter((h) => h.status === "open")

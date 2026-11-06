@@ -338,13 +338,11 @@ export function cardDetail(
 
 /** `listNeedsYou` plus the one-line reason and how long each item has waited. */
 export function needsYou(state: CommandState, now: string) {
-  const result = unwrap(listNeedsYou(state, human(state.project_id)));
+  const result = unwrap(
+    listNeedsYou(state, human(state.project_id), { now: () => now }),
+  );
   const data = result.data;
   const decisions = data.decisions.map((decision) => {
-    const opened = openedAt(
-      state.timeline,
-      (entry) => entry.decision_id === decision.id,
-    );
     return {
       kind: "decision" as const,
       id: decision.id,
@@ -360,8 +358,8 @@ export function needsYou(state: CommandState, now: string) {
       trigger: decision.trigger ?? null,
       category: decision.category ?? "general",
       assignment_id: decision.assignment_id ?? null,
-      opened_at: opened ?? null,
-      waited_ms: waitedMs(opened, now) ?? null,
+      opened_at: decision.opened_at,
+      waited_ms: decision.waited_ms,
     };
   });
   const human_actions = data.human_actions.map((action) => {
