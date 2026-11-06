@@ -41,6 +41,12 @@ export {
   type DefaultRoleOptions,
   defaultRoles,
   firstPrompt,
+  PM_DECISION_RULES,
+  PM_DELEGATION_RULES,
+  PM_OFFICE_REPORTING_RULES,
+  PM_OPS_EVENT_RULES,
+  PM_PLANNING_RULES,
+  PM_VERIFICATION_RULES,
 } from "./role-pack.js";
 export {
   type LaunchConfig,
