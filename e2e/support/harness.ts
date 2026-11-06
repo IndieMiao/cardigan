@@ -30,9 +30,9 @@ import { promisify } from "node:util";
 import { main as cli } from "@cardigan/cli";
 import type {
   Actor,
-  CardTemplate,
   CommandState,
   ProjectId,
+  RuntimeRef,
 } from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
 import {
@@ -93,6 +93,7 @@ export interface E2eHarness {
   rememberCore(): number | undefined;
   /** What the host runtime answers for an Assignment's `runtime_ref`. */
   probeRuntime(ref: unknown): Promise<unknown>;
+  repeatBell(ref: RuntimeRef, bell: string): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -553,6 +554,13 @@ export async function createHarness(
           );
         });
       void connected;
+    },
+    async repeatBell(ref, bell) {
+      for (let n = 0; n < 2; n++) {
+        const sent = await host.runtime.wake(ref, bell);
+        if (!sent.ok || !sent.value.sent)
+          throw new Error("Duplicate bell was not delivered");
+      }
     },
     async stopCore() {
       // Appendix pass criterion 3 (M5.6): the Herdr server dies and its

@@ -227,13 +227,25 @@ async function produceWork(card, runId) {
 
   // Appendix A step 3: the delivery comes with a before/after attachment.
   if (who.role_id === "coder") {
+    // The first decision happens before D-3. Earlier screenshots are evidence;
+    // the post-decision artifact records the approved basis read through MCP.
+    const basis =
+      round >= 3
+        ? (
+            await call("get_updates", { card_id: card.card.id, since_seq: 0 })
+          ).events.find((event) => event.type === "decision_resolved")?.payload
+            ?.decision_id
+        : undefined;
+    if (round >= 3 && !basis)
+      throw new Error("D-3 artifact requires the recorded product decision");
     const uploaded = await call("upload_attachment", {
       idempotency_key: `${idempotencySalt}-attachment-${runId}`,
       card_id: card.card.id,
       file: PNG.toString("base64"),
       sha256: createHash("sha256").update(PNG).digest("hex"),
       mime: "image/png",
-      kind: "evidence",
+      kind: basis ? "artifact" : "evidence",
+      ...(basis ? { basis } : {}),
       attach_to: { kind: "delivery", id: delivery.delivery_id ?? delivery.id },
     });
     log(`coder: attachment ${JSON.stringify(uploaded).slice(0, 160)}`);
@@ -280,7 +292,9 @@ async function reviewWork(card, runId, verdict) {
         ? "design"
         : item.role_id === "pm"
           ? "product"
-          : "test",
+          : item.role_id === "reviewer"
+            ? "code"
+            : "test",
     issues: blocking
       ? [
           {
