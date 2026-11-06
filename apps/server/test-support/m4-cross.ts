@@ -77,6 +77,21 @@ export const git = (cwd: string, ...args: string[]) =>
     ],
     { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
   ).trim();
+/**
+ * A ref's object name, or `undefined` while it does not exist.
+ *
+ * A poll predicate must not throw when the ref is still missing: `git rev-parse
+ * --verify` exits non-zero for an absent ref, which `expect.poll` treats as a
+ * hard failure instead of retrying (M4.T2 R02/R03 relied on the reconcile loop
+ * recreating the ref before the first poll and failed under load).
+ */
+export const refAt = (cwd: string, ref: string): string | undefined => {
+  try {
+    return git(cwd, "rev-parse", "--verify", ref);
+  } catch {
+    return undefined;
+  }
+};
 export function value<T>(r: Result<T>): T {
   if (!r.ok) throw new Error(`${r.error.code}: ${r.error.message}`);
   return r.value;
