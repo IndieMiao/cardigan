@@ -175,6 +175,7 @@ describe("snapshot: claude-code", () => {
       "mcp__card__submit_delivery",
     );
     expect(compiled.env.DISABLE_AUTOUPDATER).toBe("1");
+    expect(compiled.env.CLAUDE_CONFIG_DIR).toBe(`${RUN_DIR}/claude`);
   });
 
   test("the Core Prompt and the first prompt are written into the run directory", () => {
@@ -209,6 +210,7 @@ describe("snapshot: codex", () => {
 
   test("points CODEX_HOME at the run directory and approves the Card tools", () => {
     expect(compiled.env.CODEX_HOME).toBe(`${RUN_DIR}/codex`);
+    expect(compiled.env.CLAUDE_CONFIG_DIR).toBeUndefined();
     const config = compiled.files.find(
       (file) => file.path === `${RUN_DIR}/codex/config.toml`,
     );
@@ -249,6 +251,7 @@ describe("snapshot: pi", () => {
 
   test("uses PI_CODING_AGENT_DIR and appends the Core Prompt without disabling extensions", () => {
     expect(compiled.env.PI_CODING_AGENT_DIR).toBe(`${RUN_DIR}/pi`);
+    expect(compiled.env.CLAUDE_CONFIG_DIR).toBeUndefined();
     expect(compiled.args).toContain("--append-system-prompt");
     expect(compiled.args).toContain(`${RUN_DIR}/core.md`);
     expect(compiled.args).not.toContain("--no-extensions");
