@@ -23,6 +23,7 @@
 | M5.3 | web：应用外壳、登录页、卡片列表和看板、卡片详情、评论框 | Pi | Codex（M5.T1） | M5.1 | `feat/m5-web-cards` |
 | M5.4 | web：Needs You、项目快照、执行视图、项目动态、实时刷新 | Codex | Pi（M5.T2） | M5.1、M5.2 | `feat/m5-web-needs-you` |
 | M5.5 | e2e：附录 A 场景（真实 server、真实 hc、真实 git、模拟 Agent），含中途重启 Herdr server | Pi | Codex（M5.T1 复核） | M5.2、M5.4 | `test/m5-appendix-a` |
+| M5.6 | server：Session 失联后的恢复（M5.5 发现的缺陷） | Codex | Pi（M5.5 的重启场景） | M5.5 诊断 | `fix/m5-session-recovery` |
 | M5.T1 | 交叉验收：M5.1、M5.3，复核 M5.5 | Codex | — | M5.1、M5.3、M5.5 | `test/m5-api-cards` |
 | M5.T2 | 交叉验收：M5.2、M5.4 | Pi | — | M5.2、M5.4 | `test/m5-commands-ui` |
 | M5.S | 真实冒烟：用真实 Agent 跑附录 A，并在浏览器里走一遍 | Claude | — | M5.5、M4.S | — |
@@ -142,8 +143,36 @@ M3.T2 发现：路由表里有"指令"一行，但没有任何命令产生指令
 
 - 放在仓库根的 `e2e/`（§20.1）：真实 server、真实 hc、真实 git（本地登记源和中心仓库）、模拟 Agent（只走 Card MCP，按脚本行动）。
 - 按附录 A 的 12 步执行，Workbench 的操作通过 Web API 完成（拍板、合并确认）。
+- 重启场景（2026-11-06 裁定）：只执行 `hc server stop`，由系统在下一次需要时经 hc 自动拉起 core（不在测试里手动重启）；测试记下新 core 并在结束时清理。常驻 PM 的 Assignment 不伪造 RuntimeRef，否则会被监控判为失联，产生多余的 Needs You。
 - 断言附录 A 的三条通过标准：你只在第 8 步和第 10 步被打断（Needs You 里只出现这两次）；人为重复发送门铃不产生重复 Run；中途重启 Herdr server（`hc server stop` 后重启）后，所有 Assignment 都恢复或得到明确处理（Needs You 或 attention 里有记录）。
 - 跑完不能留下 herdr-core。
+
+### M5.6 Session 失联后的恢复（Codex，2026-11-06 加入）
+
+M5.5 的重启场景（停掉 hc core）暴露了三处实现缺陷。附录 A 第 7 步之后，coder 的 Run 已经以 blocked 结束，拍板产生的 decision_resumed Run 还在 queued。这时 core 消失：
+1. `apps/server/src/dispatch-monitor.ts` 只监控未结束且不是 queued 的 Run，所以处在"两次 Run 之间"的 Assignment 没有任何订阅。core 消失对它不可见，`runtime_state` 停在 running，§13.9 的宽限期不会开始，也不会进 Needs You。
+2. `apps/server/src/dispatch.ts` 的 `deliver()` 只在 `runtime_not_found` 时继续处理，`runtime_unavailable`（core 不在，"hc socket is absent"）被静默跳过：不认领门铃、不重试、不升级，通知一直挂着。
+3. D5 规定失联时替换 Session 并写交接，但 `resume_or_replace` 在生产代码里没有调用方。
+
+按 D5 和 §13.9 补齐，规则如下：
+
+- **两次 Run 之间失联，自动替换**：投递门铃时，如果 `runtime.status` 返回 `runtime_not_found` 或 `runtime_unavailable`，并且这个 Assignment 没有在途的 Run（dispatched、acked、running、unknown），就按 D5 替换 Session。
+  - 用主机编译的启动描述调用 `resume_or_replace`，和 provision 用同一份。hc 需要时会自动拉起 core（0.3），不另写启动 core 的逻辑。
+  - 成功后写一条 `type=handoff` 的系统时间线条目，内容包括：原因（运行时失联）、旧的 RuntimeRef、最近一次 Run 及其 outcome、"新 Session 先读卡片和 `get_updates`"。然后更新 RuntimeRef，按原流程投递，启动排队的 Run，不产生第二个 Run。
+  - 替换失败时走现有的投递失败路径：重试退避，用尽后升级。不能静默挂起。
+- **Run 进行中失联，不自动替换**：保持 §13.9 的流程，unknown → 宽限期 → lost → Needs You。旧进程可能还在改代码。
+- **runtime_state 要准确**：Run 结束后 Assignment 回到 idle。核实现在为什么停在 running，并修正。
+- **Needs You 显示 runtime_lost**：§13.9 规定 lost 进入 Needs You，但 Web 的 `/needs-you` 和 MCP 的 `list_needs_you` 现在只列 Decision 和 HumanAction。补上 runtime_lost 升级的显示，包括哪个 Assignment、什么时候失联、最后一次 Run。本次只显示，不加操作按钮，接管属于 Phase 2（§13.9 第 3 条）。
+- **已知未做**：D5 的后半句"控制面记录 CLI 会话 ID、恢复时用 CLI 自带的恢复参数"还没有实现，所以替换后是一个新 Session，靠交接条目和卡片接续。列入 Phase 2 计划。
+
+测试：用假 Runtime 和真实 store 覆盖以下情况：
+- 两次 Run 之间出现 `runtime_not_found`，以及出现 `runtime_unavailable`：替换 Session、写交接、启动 Run，并且只有一个 Run；
+- 有在途 Run 时失联：不替换；
+- 替换失败：升级，不挂起；
+- Run 结束后 runtime_state 回到 idle；
+- Needs You 列出 runtime_lost。
+
+端到端由 M5.5 的重启场景验证。
 
 ### M5.T1、M5.T2 交叉验收
 
