@@ -962,9 +962,11 @@ M2.1 的 Role 子集包含 role_id、version、display_name、kind、core_prompt
 
 | Harness | MCP 配置 | 注意 |
 |---|---|---|
-| Claude Code | `--mcp-config <仓库外的文件>`，Token 用 `${MCP_TOKEN}` 引用 | 关闭自动更新；按 session_id 恢复 |
+| Claude Code | `--mcp-config <仓库外的文件>`，Token 用 `${MCP_TOKEN}` 引用；`CLAUDE_CONFIG_DIR=<run_dir>/claude` 隔离配置与会话 | 关闭自动更新；按 session_id 恢复 |
 | Codex | 独立的配置目录（`CODEX_HOME`），`bearer_token_env_var` | 显式放行 MCP 工具；按 thread_id 恢复 |
 | Pi | `PI_CODING_AGENT_DIR` 指向独立目录，Header 引用环境变量 | 不能用 `--no-extensions`（会关掉内置 MCP）；原生上报状态（OSC 7501） |
+
+Claude 的配置与会话目录固定在 Assignment 的 `runs/<project>/<assignment>/claude`，跨 Run、`resume_or_replace` 保留；`launch.sh` 在启动 CLI 前由实际运行账号创建并设为 0700（local 为主机用户，agent-ssh 为 agent），拒绝软链接、非目录和其他用户持有的目录，不清空已有会话。主机只写外层启动文件，不预建或写入这个 Agent 私有目录，避免主机持有的 0700 目录阻止 Agent 保存 `.claude.json`、projects 和 sessions。
 
 **接入点与启动配置**（2026-11-04 用户确认）
 

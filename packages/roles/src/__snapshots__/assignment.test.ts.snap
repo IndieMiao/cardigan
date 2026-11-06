@@ -17,6 +17,7 @@ exports[`snapshot: claude-code > command, arguments and files 1`] = `
   ],
   "command": "claude",
   "env": {
+    "CLAUDE_CONFIG_DIR": "/srv/cardigan/runs/A-12/claude",
     "DISABLE_AUTOUPDATER": "1",
   },
   "files": [
@@ -118,6 +119,7 @@ set -a
 set +a
 rm -f "$secrets_file"
 export DISABLE_AUTOUPDATER='1'
+export CLAUDE_CONFIG_DIR='/srv/cardigan/runs/A-12/claude'
 # The first task message is the last positional argument: claude, codex and pi
 # all start an interactive session with one (see the harness table below). It is
 # read here, never embedded in this script, and kept verbatim: the x sentinel
@@ -143,6 +145,17 @@ while [ ! -f "$start_file" ]; do
   waited=$((waited + 1))
 done
 rm -f "$start_file"
+# Session state belongs to this Assignment, not to the user's home.
+claude_config_dir='/srv/cardigan/runs/A-12/claude'
+if [ ! -e "$claude_config_dir" ] && [ ! -L "$claude_config_dir" ]; then
+  (umask 077; mkdir -m 700 -- "$claude_config_dir")
+fi
+if [ -L "$claude_config_dir" ] || [ ! -d "$claude_config_dir" ] || [ ! -O "$claude_config_dir" ]; then
+  echo "cardigan: Claude config directory must be a directory owned by the running user, not a symlink" >&2
+  exit 78
+fi
+# The extra leading zero clears inherited setgid on shared run directories.
+chmod 00700 -- "$claude_config_dir"
 exec 'claude' '--settings' '/srv/cardigan/runs/A-12/cardigan-assignment.claude-agent.claude-settings.json' '--model' 'opus' '--strict-mcp-config' '--mcp-config' '/srv/cardigan/runs/A-12/mcp.json' '--append-system-prompt-file' '/srv/cardigan/runs/A-12/core.md' '--allowedTools' 'mcp__card__whoami,mcp__card__get_card,mcp__card__get_updates,mcp__card__ack_events,mcp__card__submit_delivery' "$first_message"
 ",
       "mode": "700",

@@ -170,6 +170,7 @@ export function compileAssignmentLaunch(
       }
       // Agents never update themselves mid-run.
       harnessEnv.DISABLE_AUTOUPDATER = "1";
+      harnessEnv.CLAUDE_CONFIG_DIR = join(input.run_dir, "claude");
       break;
 
     case "codex":
@@ -302,6 +303,9 @@ export function compileAssignmentLaunch(
           command,
           args,
           env,
+          ...(input.role.harness === "claude-code"
+            ? { claudeConfigDir: join(input.run_dir, "claude") }
+            : {}),
         }),
         mode: 0o700,
       },
@@ -362,6 +366,7 @@ function launchScriptContent(options: {
   readonly command: string;
   readonly args: readonly string[];
   readonly env: Readonly<Record<string, string>>;
+  readonly claudeConfigDir?: string;
 }): string {
   const quote = (value: string): string =>
     `'${value.replaceAll("'", `'\\''`)}'`;
@@ -369,6 +374,22 @@ function launchScriptContent(options: {
     .map(([name, value]) => `export ${name}=${quote(value)}`)
     .join("\n");
   const args = options.args.map(quote).join(" ");
+  // Run as the actual CLI user: agent-ssh must not inherit a host-owned 0700 leaf.
+  const claudeConfig =
+    options.claudeConfigDir === undefined
+      ? ""
+      : `# Session state belongs to this Assignment, not to the user's home.
+claude_config_dir=${quote(options.claudeConfigDir)}
+if [ ! -e "$claude_config_dir" ] && [ ! -L "$claude_config_dir" ]; then
+  (umask 077; mkdir -m 700 -- "$claude_config_dir")
+fi
+if [ -L "$claude_config_dir" ] || [ ! -d "$claude_config_dir" ] || [ ! -O "$claude_config_dir" ]; then
+  echo "cardigan: Claude config directory must be a directory owned by the running user, not a symlink" >&2
+  exit 78
+fi
+# The extra leading zero clears inherited setgid on shared run directories.
+chmod 00700 -- "$claude_config_dir"
+`;
   const credentials =
     options.secretsFile === undefined
       ? ""
@@ -425,7 +446,7 @@ while [ ! -f "$start_file" ]; do
   waited=$((waited + 1))
 done
 rm -f "$start_file"
-exec ${quote(options.command)}${args ? ` ${args}` : ""} "$first_message"
+${claudeConfig}exec ${quote(options.command)}${args ? ` ${args}` : ""} "$first_message"
 `;
 }
 
