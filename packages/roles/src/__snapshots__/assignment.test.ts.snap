@@ -14,6 +14,7 @@ exports[`snapshot: claude-code > command, arguments and files 1`] = `
     "/srv/cardigan/runs/A-12/core.md",
     "--allowedTools",
     "mcp__card__whoami,mcp__card__get_card,mcp__card__get_updates,mcp__card__ack_events,mcp__card__submit_delivery",
+    "--",
   ],
   "command": "claude",
   "env": {
@@ -156,7 +157,16 @@ if [ -L "$claude_config_dir" ] || [ ! -d "$claude_config_dir" ] || [ ! -O "$clau
 fi
 # The extra leading zero clears inherited setgid on shared run directories.
 chmod 00700 -- "$claude_config_dir"
-exec 'claude' '--settings' '/srv/cardigan/runs/A-12/cardigan-assignment.claude-agent.claude-settings.json' '--model' 'opus' '--strict-mcp-config' '--mcp-config' '/srv/cardigan/runs/A-12/mcp.json' '--append-system-prompt-file' '/srv/cardigan/runs/A-12/core.md' '--allowedTools' 'mcp__card__whoami,mcp__card__get_card,mcp__card__get_updates,mcp__card__ack_events,mcp__card__submit_delivery' "$first_message"
+# Claude Code 2.1.318 stores onboarding/trust in .claude.json, but theme and
+# bypass confirmation in settings.json. Seed fresh state as the runtime user;
+# noclobber prevents replacing a file created concurrently (or a symlink).
+if [ ! -e "$claude_config_dir/.claude.json" ] && [ ! -L "$claude_config_dir/.claude.json" ]; then
+  if [ ! -e "$claude_config_dir/settings.json" ] && [ ! -L "$claude_config_dir/settings.json" ]; then
+    (umask 077; set -C; printf '%s\\n' '{"theme":"dark","skipDangerousModePermissionPrompt":true}' > "$claude_config_dir/settings.json")
+  fi
+  (umask 077; set -C; printf '%s\\n' '{"hasCompletedOnboarding":true,"lastOnboardingVersion":"2.1.318","projects":{"/srv/agent/worktrees/A-12":{"hasTrustDialogAccepted":true}}}' > "$claude_config_dir/.claude.json")
+fi
+exec 'claude' '--settings' '/srv/cardigan/runs/A-12/cardigan-assignment.claude-agent.claude-settings.json' '--model' 'opus' '--strict-mcp-config' '--mcp-config' '/srv/cardigan/runs/A-12/mcp.json' '--append-system-prompt-file' '/srv/cardigan/runs/A-12/core.md' '--allowedTools' 'mcp__card__whoami,mcp__card__get_card,mcp__card__get_updates,mcp__card__ack_events,mcp__card__submit_delivery' '--' "$first_message"
 ",
       "mode": "700",
       "path": "/srv/cardigan/runs/A-12/launch.sh",
@@ -241,6 +251,12 @@ approval_mode = "approve"
 
 [mcp_servers.card.tools.submit_delivery]
 approval_mode = "approve"
+
+[projects."/srv/agent/worktrees/A-12"]
+trust_level = "trusted"
+
+[projects."/srv/agent/repos/p-demo"]
+trust_level = "trusted"
 ",
       "mode": "600",
       "path": "/srv/cardigan/runs/A-12/codex/config.toml",

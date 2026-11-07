@@ -70,12 +70,14 @@ async function fixture(mode: "local" | "agent-ssh") {
     `#!${process.execPath}
 const fs = require('node:fs'), path = require('node:path');
 const directory = process.env.CLAUDE_CONFIG_DIR;
+const initial = JSON.parse(fs.readFileSync(path.join(directory, '.claude.json'), 'utf8'));
+const settings = JSON.parse(fs.readFileSync(path.join(directory, 'settings.json'), 'utf8'));
 fs.mkdirSync(path.join(directory, 'sessions'), {recursive: true, mode: 0o700});
 const record = path.join(directory, 'sessions', 'fixture-session.json');
 const visits = fs.existsSync(record) ? Number(fs.readFileSync(record, 'utf8')) + 1 : 1;
 fs.writeFileSync(record, String(visits));
 fs.writeFileSync(path.join(directory, '.claude.json'), '{}');
-console.log(JSON.stringify({directory, visits}));
+console.log(JSON.stringify({directory, visits, initial, settings, prompt: process.argv.at(-1)}));
 `,
     { mode: 0o700 },
   );
@@ -134,7 +136,13 @@ console.log(JSON.stringify({directory, visits}));
       labels: { project: "project", assignment: assignment.id, run },
     };
   }
-  const observations: { directory: string; visits: number }[] = [];
+  const observations: {
+    directory: string;
+    visits: number;
+    initial: unknown;
+    settings: unknown;
+    prompt: string;
+  }[] = [];
   const launches: (readonly string[])[] = [];
   const runtime = value(
     await HerdrRuntime.create({
@@ -206,17 +214,50 @@ describe.skipIf(process.platform !== "linux")(
         const initial = await stat(f.configDir);
         expect(initial.mode & 0o7777).toBe(0o700);
         expect(initial.uid).toBe(process.getuid?.());
+        for (const name of [".claude.json", "settings.json"]) {
+          const file = await stat(join(f.configDir, name));
+          expect(file.mode & 0o777).toBe(0o600);
+          expect(file.uid).toBe(process.getuid?.());
+        }
         if (mode === "agent-ssh")
           expect((await stat(f.runDir)).mode & 0o7777).toBe(0o2770);
         const next = await f.prepare("R-2");
+        const settings = {
+          theme: "light",
+          skipDangerousModePermissionPrompt: true,
+          custom: "preserved",
+        };
+        await writeFile(
+          join(f.configDir, "settings.json"),
+          JSON.stringify(settings),
+        );
         expect(next.command).toBe(first.command);
         const replaced = value(
           await f.runtime.resume_or_replace(firstRef, next),
         );
         expect(replaced.terminal_ref).not.toBe(firstRef.terminal_ref);
         expect(f.observations).toEqual([
-          { directory: f.configDir, visits: 1 },
-          { directory: f.configDir, visits: 2 },
+          {
+            directory: f.configDir,
+            visits: 1,
+            initial: {
+              hasCompletedOnboarding: true,
+              lastOnboardingVersion: "2.1.318",
+              projects: { [f.runDir]: { hasTrustDialogAccepted: true } },
+            },
+            settings: {
+              theme: "dark",
+              skipDangerousModePermissionPrompt: true,
+            },
+            prompt: "run=R-1\n",
+          },
+          {
+            directory: f.configDir,
+            visits: 2,
+            initial: {},
+            settings,
+            prompt: "run=R-2\n",
+          },
         ]);
         expect((await stat(f.configDir)).ino).toBe(initial.ino);
         expect((await stat(f.configDir)).mode & 0o7777).toBe(0o700);

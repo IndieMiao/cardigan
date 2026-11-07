@@ -233,7 +233,11 @@ export async function launchRun(
       "Session replacement requires the same idle Assignment and queued Run",
     );
 
-  const { runDir } = executionPaths(execution, project, assignment.id);
+  const { runDir, repositoriesRoot } = executionPaths(
+    execution,
+    project,
+    assignment.id,
+  );
   const workDir = input.worktree?.path ?? assignment.worktree_path ?? runDir;
   const agentName = agentNameFor({
     role_id: role.role_id,
@@ -289,6 +293,11 @@ export async function launchRun(
       mcp: { url: host.mcpUrl },
       run_dir: runDir,
       work_dir: workDir,
+      // GitWorktreeService owns this layout; do not run host Git in an Agent
+      // repository to discover the common dir (§12.2).
+      ...(role.worktree === "none"
+        ? {}
+        : { repository_root: join(repositoriesRoot, project) }),
       // The merged bell is the first prompt when the caller has one (M3 §3.2).
       first_prompt: [
         input.first_prompt ||
