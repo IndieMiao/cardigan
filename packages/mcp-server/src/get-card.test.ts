@@ -219,6 +219,9 @@ describe("get_card", () => {
     // Inferred from the work items (M1.2), not read from the stored status.
     expect(payload.card.status).toBe("review");
     expect(payload.card.stored_status).toBe("todo");
+    // M5.S S13: Agents read their checkout from whoami; the card has no host path.
+    expect(payload.card).not.toHaveProperty("repo");
+    expect(JSON.stringify(result)).not.toContain("example/repo");
     expect(payload.work_items.map((item) => item.id).sort()).toEqual([
       "W-1",
       "W-2",

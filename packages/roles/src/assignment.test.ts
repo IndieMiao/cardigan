@@ -408,6 +408,23 @@ describe("default role pack", () => {
     expect(prompt).toContain("| | PM Office（前台） | PM Ops（后台） |");
   });
 
+  test("M5.S S14: PM acceptance reviews the completion request, not the product delivery", () => {
+    const prompt = corePromptFor("pm");
+    for (const phrase of [
+      "工作项上的 PM 验收审的是完成申请",
+      "`kind=card_completion`",
+      "不审产出交付",
+      "常驻 PM 不直接提交审核",
+      "`whoami` 的 `worktree_path`",
+      "指派",
+    ])
+      expect(prompt, `pm is missing: ${phrase}`).toContain(phrase);
+    for (const role of ["coder", "reviewer"] as const) {
+      expect(corePromptFor(role), role).not.toContain("不审产出交付");
+      expect(corePromptFor(role), role).not.toContain("常驻 PM 不直接提交审核");
+    }
+  });
+
   test("the coder and reviewer prompts stay free of PM instructions", () => {
     for (const role of ["coder", "reviewer"] as const) {
       const prompt = corePromptFor(role);

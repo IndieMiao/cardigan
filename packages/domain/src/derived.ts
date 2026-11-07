@@ -60,20 +60,44 @@ export function deriveAttachmentApproval(
 // Inputs belong to one card/project. V-n is project-monotonic; input order is irrelevant.
 type MatrixDelivery = Pick<
   Delivery,
-  "id" | "subject" | "status" | "supersedes"
+  | "id"
+  | "subject"
+  | "status"
+  | "supersedes"
+  | "work_item_id"
+  | "kind"
+  | "requested_verifiers"
 >;
+type MatrixWorkItem = Pick<WorkItem, "id" | "kind"> & {
+  readonly target_work_item_id?: WorkItem["target_work_item_id"];
+};
 type MatrixReview = Pick<
   Review,
   "id" | "delivery_id" | "work_item_id" | "target_sha" | "verdict"
 >;
+/**
+ * Only the verifiers that review this delivery (§4.4, M5.S S16): a completion
+ * request asks for the PM acceptance item and nothing else, while a produce
+ * delivery is reviewed by the verification items that target it.
+ */
+function verifiesDelivery(
+  item: MatrixWorkItem,
+  delivery: MatrixDelivery,
+): boolean {
+  return delivery.kind === "card_completion"
+    ? delivery.requested_verifiers.includes(item.id)
+    : item.target_work_item_id === delivery.work_item_id;
+}
 export function deriveReviewMatrix(
   deliveries: readonly MatrixDelivery[],
-  workItems: readonly Pick<WorkItem, "id" | "kind">[],
+  workItems: readonly MatrixWorkItem[],
   reviews: readonly MatrixReview[],
 ): CardView["review_matrix"] {
   return deliveries.flatMap((delivery) =>
     workItems
-      .filter((item) => item.kind === "verify")
+      .filter(
+        (item) => item.kind === "verify" && verifiesDelivery(item, delivery),
+      )
       .map((item) => {
         const superseded = deliveries.some(
           (next) => next.supersedes === delivery.id,

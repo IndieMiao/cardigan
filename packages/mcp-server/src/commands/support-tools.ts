@@ -1,6 +1,7 @@
 import {
   type Actor,
   type AttachmentStore,
+  type CardView,
   type Clock,
   type CommandEffect,
   type CommandState,
@@ -18,6 +19,7 @@ import {
   fileAttachmentStore,
   MAX_ATTACHMENT_BASE64,
 } from "../attachments.js";
+import { agentCard } from "../tools/shared.js";
 import { defineTool, type ToolContext } from "../tools/types.js";
 import {
   executeCommand,
@@ -141,7 +143,15 @@ export function supportTools(options: SupportToolOptions = {}) {
       description:
         "Read the current project and derived card states (PM only).",
       input: z.object({}),
-      handler: (_params, context) => readProject(context, projectSnapshot),
+      handler: (_params, context) => {
+        const snapshot = readProject(context, projectSnapshot) as {
+          readonly project_id: string;
+          readonly cards: readonly CardView[];
+        };
+        // Agents read their own checkout from whoami; the card carries no host
+        // repository path (M5.S S13).
+        return { ...snapshot, cards: snapshot.cards.map(agentCard) };
+      },
     }),
     defineTool({
       name: "list_needs_you",

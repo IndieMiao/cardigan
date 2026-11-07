@@ -130,6 +130,7 @@ export function m4Fixture(
     readonly policy?: "confirm" | "auto";
     readonly clock?: Clock;
     readonly reviewer_worktree?: "none" | "readonly";
+    readonly pm_worktree?: "none" | "readonly";
   } = {},
 ): M4Fixture {
   const project_id = (options.project_id ?? "p-m4") as ProjectId;
@@ -159,7 +160,7 @@ export function m4Fixture(
     required_machine_tags: [],
   });
   for (const [role_id, tools, worktree] of [
-    ["pm", PM_TOOLS, "none"],
+    ["pm", PM_TOOLS, options.pm_worktree ?? "none"],
     ["coder", CODER_TOOLS, "write"],
     ["reviewer", REVIEWER_TOOLS, options.reviewer_worktree ?? "none"],
   ] as const)

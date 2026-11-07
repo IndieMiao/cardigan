@@ -494,6 +494,10 @@ test("PM queries derive current project views without writes or idempotency keys
     ],
   });
   expect(JSON.stringify(snapshot)).not.toContain("Private other project");
+  // M5.S S13: project snapshots carry no host repository path either.
+  const cards = (snapshot.structuredContent as { cards: unknown[] }).cards;
+  expect(cards[0]).not.toHaveProperty("repo");
+  expect(JSON.stringify(snapshot)).not.toContain("example/repo");
   const needs = await office.callTool({
     name: "list_needs_you",
     arguments: {},

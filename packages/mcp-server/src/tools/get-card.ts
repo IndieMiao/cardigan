@@ -5,7 +5,7 @@ import {
   deriveReviewMatrix,
 } from "@cardigan/domain";
 import { z } from "zod";
-import { readCardRelations, requireCard } from "./shared.js";
+import { agentCard, readCardRelations, requireCard } from "./shared.js";
 import { defineTool } from "./types.js";
 
 /** Numeric part of a readable ID such as `D-12` or `V-3`. */
@@ -63,7 +63,7 @@ export const getCardTool = defineTool({
 
     return {
       card: {
-        ...card,
+        ...agentCard(card),
         status,
         stored_status: card.status,
       },

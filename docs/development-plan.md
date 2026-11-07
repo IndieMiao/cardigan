@@ -311,7 +311,7 @@ Standing Assignment (scope=project): PM Office, PM Ops — not tied to a WorkIte
 - 代码基线：`repo`、`base_branch`
 - 管理字段：`priority`、`status`（见 §4.4：中间状态由工作项推导，`done` 要走完成申请）、`resolution?`（`done | superseded | duplicate | wontdo`）、`template`（决定默认生成哪些工作项，以及哪些是必需的）
 - 审计：`created_by`、`created_at`
-- 派生字段（不存储，实时计算）：`waiting_on[]`、`next_owners[]`、`open_decisions[]`、`review_matrix`（每个交付 × 每个验证方 → 对当前 SHA 的结论）、`why`（一句话原因，≤40 字，见 §8.2）
+- 派生字段（不存储，实时计算）：`waiting_on[]`、`next_owners[]`、`open_decisions[]`、`review_matrix`（每个交付 × 审核它的验证方 → 对当前 SHA 的结论；产出交付只列以该工作项为目标的验证项，完成申请只列它请求的 PM 验收项）、`why`（一句话原因，≤40 字，见 §8.2）
 - 负责人和审核人不写进描述正文；改派作为事件进时间线。
 
 **WorkItem**
@@ -891,7 +891,7 @@ Agent 只通过 Card MCP 读写，看板界面只服务你一个人，所以第�
 | 工具 | 可用角色 | 作用 |
 |---|---|---|
 | `whoami()` | 全部 | 返回本 Assignment 的上下文：卡片、工作项、角色、机器、worktree、分支 |
-| `get_card(card_id)` | 全部 | 卡片、工作项、开放的 Decision、最近的交付摘要 |
+| `get_card(card_id)` | 全部 | 卡片、工作项、开放的 Decision、最近的交付摘要；不含仓库路径等主机路径，Agent 的代码位置以 `whoami` 的 `worktree_path` 为准 |
 | `get_updates(card_id?, since_seq?)` | 全部 | 游标之后的事件和条目 |
 | `ack_events(card_id?, up_to_seq)` | 全部 | 推进游标；不填 `card_id` 时推进项目级流，和 `get_updates` 对称 |
 | `post_comment(card_id, body, work_item_id?, mentions[], reply_to?, refs[], supersedes?)` | 全部 | 发评论；正文里的编号由服务端自动识别 |
@@ -1011,8 +1011,8 @@ M5.S S9：三种 Harness 的 Assignment 启动环境统一通过 `GIT_CONFIG_COU
 
 | 角色 | 类型 | worktree | 主要权限 | Harness 和模型（D3） |
 |---|---|---|---|---|
-| pm（office） | standing | 不需要（可选只读 clone） | PM 工具 + `record_decision` | Claude Code（Opus） |
-| pm（ops） | standing | 不需要 | PM 工具（不能记录人的决定） | Claude Code（Opus） |
+| pm（office） | standing | 常驻不需要；工作项验收只读（按完成申请 SHA 检出） | PM 工具 + `record_decision` | Claude Code（Opus） |
+| pm（ops） | standing | 常驻不需要；工作项验收只读（按完成申请 SHA 检出） | PM 工具（不能记录人的决定） | Claude Code（Opus） |
 | designer | work | 按需 | 设计相关产出与走查；设计工具 MCP；截图 | 接入移动端项目时再定 |
 | coder | work | 需要 | 代码产出；只在本地 commit，没有任何推送权限 | Codex（GPT-6-Astra） |
 | reviewer | work | 只读（按 SHA 检出） | 代码审核 | Claude Code（和 coder 用不同模型，交叉检查） |
@@ -1020,7 +1020,7 @@ M5.S S9：三种 Harness 的 Assignment 启动环境统一通过 `GIT_CONFIG_COU
 
 `pm（office）` 和 `pm（ops）` 是同一个角色 `pm` 的两个常驻 Assignment（§7.1）：共用角色说明和项目规则，权限按 Assignment 的 `standing_mode` 区分，只有 office 能调用 `record_decision`；模式在 `cardigan pm create --office|--ops` 时写入，之后不能修改。
 
-每张卡的 PM 验收工作项单独指派一个工作项级的 `pm` Assignment，开独立会话完成验收，不交给常驻的 PM Ops。这样验收会话只装这张卡的上下文，也符合 §9.3"只有验证型工作项的 Assignment 能提交审核"（2026-11-05 用户确认：效果优先，可以多开 PM 会话）。
+每张卡的 PM 验收工作项单独指派一个工作项级的 `pm` Assignment，开独立会话完成验收，不交给常驻的 PM Ops。这样验收会话只装这张卡的上下文，也符合 §9.3"只有验证型工作项的 Assignment 能提交审核"（2026-11-05 用户确认：效果优先，可以多开 PM 会话）。工作项级 PM 验收的 `pm` 角色设为 `readonly` 时，主机按完成申请的 SHA 检出只读 worktree（复用 reviewer 的只读准备逻辑）；常驻 PM 即使共用同一个 `pm` 角色也仍然没有 worktree。
 
 ---
 
