@@ -244,7 +244,9 @@ test.each([false, true])(
     expect(runtime.wake).not.toHaveBeenCalled();
     expect(git(path, "rev-parse", "HEAD")).toBe(sha);
     f.endRun(s.reviewer);
-    if (dirty) writeFileSync(join(path, "local-notes"), "keep");
+    // S12: untracked test outputs are disposable; tracked edits still block.
+    writeFileSync(join(path, "local-notes"), "cache");
+    if (dirty) writeFileSync(join(path, "version"), "keep");
     vi.mocked(runtime.wake).mockImplementation(async () => {
       expect(git(path, "rev-parse", "HEAD")).toBe(next);
       return ok({ sent: true });
@@ -254,7 +256,7 @@ test.each([false, true])(
     if (dirty) {
       expect(runtime.wake).not.toHaveBeenCalled();
       expect(git(path, "rev-parse", "HEAD")).toBe(sha);
-      expect(readFileSync(join(path, "local-notes"), "utf8")).toBe("keep");
+      expect(readFileSync(join(path, "version"), "utf8")).toBe("keep");
       expect(
         f.store
           .listNotifications({ project_id: f.project_id })
@@ -262,6 +264,7 @@ test.each([false, true])(
       ).toBe(true);
     } else {
       expect(runtime.wake).toHaveBeenCalledOnce();
+      expect(readFileSync(join(path, "local-notes"), "utf8")).toBe("cache");
       expect(readFileSync(join(path, "version"), "utf8")).toBe("two");
     }
   },

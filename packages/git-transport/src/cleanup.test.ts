@@ -1,4 +1,11 @@
-import { lstat, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  readdir,
+  readFile,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import type { Assignment } from "@cardigan/domain";
 import { type CentralProject, GitWorktreeService } from "@cardigan/git-service";
@@ -71,6 +78,10 @@ test("a clean worktree whose commits reached the center is removed with its bran
 
   expect(outcome).toEqual({ status: "removed", head_sha: f.initial });
   await expect(lstat(work)).rejects.toThrow();
+  // S18: the last Assignment must not leave an empty project directory.
+  await expect(lstat(join(work, ".."))).rejects.toMatchObject({
+    code: "ENOENT",
+  });
   expect(await git(base, "for-each-ref", "refs/heads/agent/")).toBe("");
   expect(await patches()).toEqual([]);
   // The backup ref exists even when there was nothing to save.
@@ -106,18 +117,95 @@ test("uncommitted tracked changes need a decision and the worktree is kept", asy
   expect(await patches()).toEqual([]);
 });
 
-test("untracked files alone also need a decision", async () => {
-  await writeFile(join(work, "notes.txt"), "keep me");
-  const outcome = await service.removeWorktree({
-    project,
-    assignment,
-    force: false,
+test.each([false, true])(
+  "untracked writer files need a decision even when temporarily detached (%s)",
+  async (detached) => {
+    if (detached) await git(work, "checkout", "--detach");
+    await writeFile(join(work, "notes.txt"), "keep me");
+    const outcome = await service.removeWorktree({
+      project,
+      assignment,
+      force: false,
+    });
+    expect(outcome).toMatchObject({
+      status: "needs_decision",
+      summary: { tracked: [], untracked: ["notes.txt"] },
+    });
+    expect(await readFile(join(work, "notes.txt"), "utf8")).toBe("keep me");
+  },
+);
+
+test("S18 completes Git removal when the Agent leaves an empty host-owned leaf", async () => {
+  class PartialRemoval extends LocalGitTransport {
+    override async removeWorktree(
+      repository: string,
+      path: string,
+      options: { readonly force: boolean },
+    ) {
+      await super.removeWorktree(repository, path, options);
+      await mkdir(path);
+      throw new Error("Agent cannot remove host-owned namespace entry");
+    }
+  }
+  const cleanup = new GitWorktreeService(new PartialRemoval(), f.central, {
+    dataDir: f.dataDir,
   });
-  expect(outcome).toMatchObject({
-    status: "needs_decision",
-    summary: { tracked: [], untracked: ["notes.txt"] },
+  await expect(
+    cleanup.removeWorktree({ project, assignment, force: false }),
+  ).resolves.toMatchObject({ status: "removed" });
+  await expect(lstat(work)).rejects.toMatchObject({ code: "ENOENT" });
+  await expect(lstat(join(work, ".."))).rejects.toMatchObject({
+    code: "ENOENT",
   });
-  expect(await readFile(join(work, "notes.txt"), "utf8")).toBe("keep me");
+});
+
+test.each([false, true])(
+  "S12 readonly caches are disposable but tracked edits are protected (tracked=%s)",
+  async (tracked) => {
+    await git(work, "checkout", "--detach");
+    const review = assignmentFor(work, {
+      branch: undefined,
+      role_id: "reviewer",
+    });
+    await mkdir(join(work, "__pycache__"));
+    await writeFile(join(work, "__pycache__", "review.pyc"), "cache");
+    if (tracked) await writeFile(join(work, "file"), "review edits");
+    const result = await service.removeWorktree({
+      project,
+      assignment: review,
+      force: false,
+    });
+    expect(result.status).toBe(tracked ? "needs_decision" : "removed");
+    if (tracked)
+      expect(await readFile(join(work, "file"), "utf8")).toBe("review edits");
+    else {
+      await expect(lstat(work)).rejects.toThrow();
+      expect(await patches()).toEqual([]);
+    }
+  },
+);
+
+test("S18 removes a known empty leftover without deleting a nonempty sibling", async () => {
+  await new LocalGitTransport().removeWorktree(base, work, { force: true });
+  await mkdir(work);
+  const sibling = join(work, "..", "A-2");
+  await mkdir(sibling);
+  await writeFile(join(sibling, "keep"), "keep");
+  await expect(
+    service.removeWorktree({ project, assignment, force: false }),
+  ).resolves.toMatchObject({ status: "already_removed" });
+  await expect(lstat(work)).rejects.toMatchObject({ code: "ENOENT" });
+  expect(await readFile(join(sibling, "keep"), "utf8")).toBe("keep");
+});
+
+test("S18 never recursively deletes a nonempty unregistered worktree", async () => {
+  await new LocalGitTransport().removeWorktree(base, work, { force: true });
+  await mkdir(work);
+  await writeFile(join(work, "keep"), "preserved");
+  await expect(
+    service.removeWorktree({ project, assignment, force: true }),
+  ).rejects.toThrow();
+  expect(await readFile(join(work, "keep"), "utf8")).toBe("preserved");
 });
 
 test("a commit the central repository does not have needs a decision", async () => {

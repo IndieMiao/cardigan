@@ -203,7 +203,10 @@ export class CleanupExecutor {
         assignment,
         force,
       });
-      if (outcome.status === "removed") {
+      if (
+        outcome.status === "removed" ||
+        outcome.status === "already_removed"
+      ) {
         this.cleaned.add(assignment.id);
         return;
       }

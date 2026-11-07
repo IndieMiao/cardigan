@@ -1015,6 +1015,13 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
         300_000,
       );
       expect(itemByRole("coder", "produce")?.status).toBe("accepted");
+      // S12: a cache from D-1 survives into the rework cycles; D-3 is inspected
+      // in the refreshed checkout and creates another cache for cleanup.
+      const firstCode = deliveries(development?.id as string).find(
+        (d) => d.kind === "code",
+      );
+      expect(h.markers()).toContain(`marker-reviewer-cache-${firstCode?.id}`);
+      expect(h.markers()).toContain(`marker-reviewer-cache-${third.id}`);
       expect(
         h
           .state()
@@ -1124,11 +1131,22 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
               assignment.worktree_path === undefined ||
               !existsSync(assignment.worktree_path),
           );
-          return released && gone ? true : undefined;
+          return released &&
+            gone &&
+            !existsSync(join(h.dataDir, "agent", "worktrees", PROJECT))
+            ? true
+            : undefined;
         },
         300_000,
       );
       expect(worktreeCleaned).toBe(true);
+      expect(
+        h.state().decisions.filter((d) => d.trigger === "worktree_cleanup"),
+      ).toEqual([]);
+      expect((await needsYou()).decisions).toEqual([]);
+      expect(existsSync(join(h.dataDir, "agent", "worktrees", PROJECT))).toBe(
+        false,
+      );
       await expect(
         h.api("GET", `/api/projects/${PROJECT}/cards/${cardId}`),
       ).resolves.toBeDefined();

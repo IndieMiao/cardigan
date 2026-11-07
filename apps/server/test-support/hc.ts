@@ -1,6 +1,5 @@
-import { execFile, execFileSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { promisify } from "node:util";
 
 /**
  * herdr-core cleanup for the tests that use a real `hc`.
@@ -8,10 +7,9 @@ import { promisify } from "node:util";
  * A core outlives the test process when a hook times out before it stops: the
  * socket file is gone, `hc server stop` cannot connect any more, and the only
  * way to end it is its PID. Remember the PID while the socket is still there,
- * stop the core first, and fall back to SIGTERM/SIGKILL on that exact PID —
+ * send SIGTERM/SIGKILL only to that exact PID —
  * never by pattern-matching processes.
  */
-const exec = promisify(execFile);
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const alive = (pid: number): boolean => {
@@ -25,6 +23,7 @@ const alive = (pid: number): boolean => {
 
 export class HcCore {
   #pid: number | undefined;
+  readonly #holders = new Set<number>();
   constructor(
     readonly session: string,
     readonly socket: string,
@@ -58,16 +57,18 @@ export class HcCore {
           timeout: 5_000,
           env: this.hcEnv,
         }),
-      ) as { pid?: unknown };
+      ) as { pid?: unknown; holders?: { pid?: unknown }[] };
       if (typeof status.pid === "number") this.#pid = status.pid;
+      for (const holder of status.holders ?? [])
+        if (typeof holder.pid === "number") this.#holders.add(holder.pid);
     } catch {
-      // A core that cannot report is left to the socket-based stop below.
+      // Keep the previously recorded PID if the status call fails.
     }
     return this.#pid;
   }
 
   /**
-   * Stop through hc first, then make sure every PID this test ever saw is gone.
+   * Stop only the recorded PID, then make sure it is gone.
    * Idempotent and safe to call again right before the temporary directory (and
    * with it the socket) is removed.
    */
@@ -76,24 +77,17 @@ export class HcCore {
     // example by an hc command issued from another cleanup step).
     for (let round = 0; round < 2; round += 1) {
       this.remember();
-      if (existsSync(this.socket))
-        try {
-          await exec("hc", ["server", "stop", "--json"], {
-            env: this.hcEnv,
-            timeout: 5_000,
-          });
-        } catch {
-          // Socket vanished or stop failed; the PID path finishes the job.
-        }
-      await this.terminate();
+      // A live PTY holder can restart core after SIGTERM; stop its recorded
+      // PID first so shutdown cannot resurrect this test session.
+      for (const pid of this.#holders) await this.terminate(pid);
+      await this.terminate(this.#pid);
       if (!existsSync(this.socket)) break;
     }
     this.assertStopped();
   }
 
   /** SIGTERM the recorded PID, then SIGKILL if it is still alive. */
-  private async terminate(): Promise<void> {
-    const pid = this.#pid;
+  private async terminate(pid: number | undefined): Promise<void> {
     if (pid === undefined || !alive(pid)) return;
     try {
       process.kill(pid, "SIGTERM");

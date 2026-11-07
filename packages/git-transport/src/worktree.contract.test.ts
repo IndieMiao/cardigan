@@ -270,11 +270,23 @@ test("S7 readonly worktrees refresh to an explicitly requested delivery SHA", as
   ).rejects.toThrow();
   expect(await git(created.worktree_path, "rev-parse", "HEAD")).toBe(sha);
   expect(await service.ensureWorktree(readonly)).toEqual(created);
+  // S12: test tools generate disposable, untracked caches in review workspaces.
+  await mkdir(join(created.worktree_path, "__pycache__"));
+  await writeFile(
+    join(created.worktree_path, "__pycache__", "review.pyc"),
+    "cache",
+  );
   const refreshed = placement(
     await service.ensureWorktree({ ...readonly, target_sha: next }),
   );
   expect(refreshed.worktree_path).toBe(created.worktree_path);
   expect(await git(created.worktree_path, "rev-parse", "HEAD")).toBe(next);
+  expect(
+    await readFile(
+      join(created.worktree_path, "__pycache__", "review.pyc"),
+      "utf8",
+    ),
+  ).toBe("cache");
   await expect(
     git(created.worktree_path, "symbolic-ref", "HEAD"),
   ).rejects.toThrow();
