@@ -72,7 +72,8 @@ exports[`snapshot: claude-code > command, arguments and files 1`] = `
       "content": "{
   "env": {
     "ANTHROPIC_BASE_URL": "https://gateway.example.invalid"
-  }
+  },
+  "autoMemoryEnabled": false
 }
 ",
       "mode": "600",
@@ -179,7 +180,7 @@ chmod 00700 -- "$claude_config_dir"
 # noclobber prevents replacing a file created concurrently (or a symlink).
 if [ ! -e "$claude_config_dir/.claude.json" ] && [ ! -L "$claude_config_dir/.claude.json" ]; then
   if [ ! -e "$claude_config_dir/settings.json" ] && [ ! -L "$claude_config_dir/settings.json" ]; then
-    (umask 077; set -C; printf '%s\\n' '{"theme":"dark","skipDangerousModePermissionPrompt":true}' > "$claude_config_dir/settings.json")
+    (umask 077; set -C; printf '%s\\n' '{"theme":"dark","skipDangerousModePermissionPrompt":true,"autoMemoryEnabled":false}' > "$claude_config_dir/settings.json")
   fi
   (umask 077; set -C; printf '%s\\n' '{"hasCompletedOnboarding":true,"lastOnboardingVersion":"2.1.318","projects":{"/srv/agent/worktrees/A-12":{"hasTrustDialogAccepted":true}}}' > "$claude_config_dir/.claude.json")
 fi

@@ -45,8 +45,6 @@ const exists = (path: string) =>
 
 export class CleanupExecutor {
   private serial: Promise<void> = Promise.resolve();
-  /** Terminal refs already released by this process (restart repeats once). */
-  private readonly released = new Set<string>();
   /** Worktrees this process already cleaned, so a slow git tree is not retried. */
   private readonly cleaned = new Set<string>();
 
@@ -76,18 +74,22 @@ export class CleanupExecutor {
   }
 
   private async project(project_id: ProjectId) {
-    const project = this.options.git.projectOf(project_id);
-    if (project === undefined) return;
     this.releaseClosed(project_id);
     // Re-read after releasing: released Assignments are what cleanup looks at.
     const state = this.state(project_id);
     for (const assignment of state.assignments.filter(
-      (candidate) =>
-        candidate.scope === "work_item" &&
-        candidate.status === "released" &&
-        candidate.worktree_path !== undefined,
-    ))
-      await this.settle(project_id, assignment);
+      (candidate) => candidate.status === "released",
+    )) {
+      // Terminal/token cleanup is independent of Git and runs on every sweep:
+      // previous failures or incomplete external releases must be repaired.
+      if (!(await this.revokeAndReleaseTerminal(project_id, assignment)))
+        continue;
+      if (
+        assignment.scope === "work_item" &&
+        assignment.worktree_path !== undefined
+      )
+        await this.settle(project_id, assignment);
+    }
   }
 
   /** §3.6: release every work-item Assignment of a done or cancelled card. */
@@ -129,7 +131,7 @@ export class CleanupExecutor {
   private async revokeAndReleaseTerminal(
     project_id: ProjectId,
     assignment: Assignment,
-  ) {
+  ): Promise<boolean> {
     for (const token of tokensForAssignment(
       this.options.store.database,
       project_id,
@@ -137,14 +139,24 @@ export class CleanupExecutor {
     ))
       if (token.revoked_at === null) this.options.store.revokeToken(token.id);
     const ref: RuntimeRef | undefined = assignment.runtime_ref ?? undefined;
-    if (ref === undefined || this.released.has(assignment.id)) return;
-    this.released.add(assignment.id);
-    const result = await this.options.runtime.release(ref, { force: false });
-    // A terminal that is already gone is exactly what "released" means.
-    if (!result.ok && result.error.code !== "runtime_not_found")
+    if (ref === undefined) return true;
+    try {
+      const observed = await this.options.runtime.status(ref);
+      if (!observed.ok && observed.error.code === "runtime_not_found")
+        return true;
+      // The domain already forbids release while a business Run is unfinished.
+      // A stale harness "working" label must not keep a released Agent alive.
+      const result = await this.options.runtime.release(ref, { force: true });
+      if (result.ok || result.error.code === "runtime_not_found") return true;
       this.report(
         `terminal release for ${assignment.id} failed: ${result.error.code} ${result.error.message}`,
       );
+    } catch (error) {
+      this.report(
+        `terminal release for ${assignment.id} failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    return false;
   }
 
   /** The newest cleanup decision of an Assignment, if any. */
@@ -163,7 +175,6 @@ export class CleanupExecutor {
   }
 
   private async settle(project_id: ProjectId, assignment: Assignment) {
-    await this.revokeAndReleaseTerminal(project_id, assignment);
     const state = this.state(project_id),
       decision = this.cleanupDecision(state, assignment);
     if (decision?.status === "resolved") {

@@ -16,13 +16,18 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Assignment, Runtime, RuntimeRef } from "@cardigan/domain";
+import {
+  type Assignment,
+  type Runtime,
+  type RuntimeRef,
+  releaseAssignment,
+} from "@cardigan/domain";
 import {
   type CentralProject,
   CentralRepositoryService,
 } from "@cardigan/git-service";
 import { CentralGitTransport } from "@cardigan/git-transport";
-import { afterEach, beforeEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { CleanupExecutor } from "./cleanup-loop.js";
 import { ServerGit } from "./git.js";
 import {
@@ -263,4 +268,92 @@ test("an unfinished card keeps its Assignments", async () => {
   f.startRun(scenario.coder);
   await cleanup().tick(f.project_id);
   expect(assignment().status).toBe("active");
+  expect(released).toEqual([]);
 });
+
+test("S17 releases every terminal and token, including PM acceptance without a worktree", async () => {
+  await doneCard();
+  const all = f.state().assignments.filter((a) => a.runtime_ref);
+  const tokens = all.map(
+    (a) =>
+      f.store.issueToken({
+        project_id: f.project_id,
+        assignment_id: a.id,
+        role: { role_version: 1, allowed_tools: [] },
+      }).token,
+  );
+  await cleanup().tick(f.project_id);
+  expect(released.map((r) => r.terminal_ref).sort()).toEqual(
+    all.map((a) => a.runtime_ref?.terminal_ref).sort(),
+  );
+  for (const token of tokens)
+    expect(f.store.verifyToken(token)).toBeUndefined();
+});
+
+test("S17 sweeps an already released terminal even in a project with no repository", async () => {
+  const noGit = m4Fixture();
+  try {
+    const s = m4Scenario(noGit);
+    noGit.startRun(s.pmAcceptance);
+    noGit.endRun(s.pmAcceptance);
+    noGit.apply((state, actor, ports) =>
+      releaseAssignment(
+        state,
+        actor,
+        { assignment_id: s.pmAcceptance.id },
+        ports,
+      ),
+    );
+    const closed = vi.fn(runtime.release);
+    const executor = new CleanupExecutor({
+      store: noGit.store,
+      git: new ServerGit({ store: noGit.store, dataDir: noGit.dataDir }),
+      runtime: { ...runtime, release: closed },
+    });
+    await executor.tick();
+    await executor.tick();
+    // The fake runtime still reports alive: a prior success must not suppress repair.
+    expect(closed).toHaveBeenCalledTimes(2);
+    expect(closed).toHaveBeenLastCalledWith(
+      expect.objectContaining({ terminal_ref: `t-${s.pmAcceptance.id}` }),
+      { force: true },
+    );
+  } finally {
+    noGit.close();
+  }
+});
+
+test.each(["result", "throw"])(
+  "S17 retries a failed terminal release (%s) before deleting its worktree",
+  async (mode) => {
+    await doneCard();
+    const ref = assignment().runtime_ref;
+    let attempts = 0;
+    const release = vi.fn(
+      async (r: RuntimeRef, options: { readonly force: boolean }) => {
+        expect(options.force).toBe(true);
+        if (r.terminal_ref === ref?.terminal_ref && ++attempts === 1) {
+          if (mode === "throw") throw new Error("transient transport failure");
+          return {
+            ok: false as const,
+            error: { code: "runtime_unavailable" as const, message: "retry" },
+          };
+        }
+        return { ok: true as const, value: undefined };
+      },
+    );
+    const report = vi.fn();
+    const executor = new CleanupExecutor({
+      store: f.store,
+      git: new ServerGit({ store: f.store, dataDir: f.dataDir }),
+      runtime: { ...runtime, release },
+      report,
+    });
+    await executor.tick();
+    expect(existsSync(worktree)).toBe(true);
+    expect(report).toHaveBeenCalled();
+    await executor.tick();
+    expect(attempts).toBe(2);
+    expect(existsSync(worktree)).toBe(false);
+  },
+);
