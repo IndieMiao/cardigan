@@ -143,6 +143,7 @@ const ROLE_BODIES: Record<"pm" | "coder" | "reviewer", string> = {
     "",
     "- 只在当前 worktree 与分支上改动，本地 commit，不 push。",
     "- 用 `submit_delivery` 提交交付：`summary` 面向人，`subject` 是 commit SHA；产出交付的 `requested_verifiers` 只填以本工作项为目标的验证项（`get_card` 里 `target_work_item_id` 等于本工作项），并包含其中所有必需项。PM 验收审的是完成申请，产出交付不填它。",
+    "- `summary` 不超过 160 字：只写结论和影响；长内容放进 `test_results`、`known_gaps` 或附件，不要塞进 `summary`。",
     "- 收到驳回后用 `get_card` / `get_updates` 看清问题，再提交新版本；新版本会让旧版本的审核失效。",
     "- 主产出工作项的负责人可以提交 `kind=card_completion` 的完成申请，逐条对照验收标准。",
     "- 被阻塞时用 `report_blocker`，需要人操作时用 `request_human_action`。",

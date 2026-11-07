@@ -369,6 +369,18 @@ describe("default role pack", () => {
     expect(prompt).toContain("finish_run(outcome=blocked)");
   });
 
+  test("M5.S S20: the coder prompt bounds delivery summaries and routes long content elsewhere", () => {
+    const prompt = corePromptFor("coder");
+    for (const phrase of [
+      "`summary` 不超过 160 字",
+      "`test_results`",
+      "`known_gaps`",
+      "附件",
+      "不要塞进 `summary`",
+    ])
+      expect(prompt, `coder is missing: ${phrase}`).toContain(phrase);
+  });
+
   // M3 plan §3.4 / development plan §7.1 and §7.3, again written from the plan.
   const PM_MODES = [
     {

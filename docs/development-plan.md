@@ -902,7 +902,7 @@ Agent 只通过 Card MCP 读写，看板界面只服务你一个人，所以第�
 | `upload_attachment(card_id, file, mime, kind, attach_to, basis?, sha256?, supersedes?)` | 全部 | 返回附件元数据；file 为标准带填充 base64，解码后 ≤10MiB（10×1024×1024 字节）；artifact 必须有 basis |
 | `heartbeat(run_id, note?)` | 全部 | 心跳 |
 | `finish_run(run_id, outcome: completed\|blocked\|failed, summary)` | 全部 | 结束本次 Run |
-| `submit_delivery(work_item_id, kind, summary, subject, requested_verifiers[], branch?, pr_url?, test_results?, attachments[], known_gaps[], supersedes?)` | 产出型角色 | 提交交付。`kind=card_completion` 即卡片的完成申请，只有主产出工作项的负责人可以提交 |
+| `submit_delivery(work_item_id, kind, summary, subject, requested_verifiers[], branch?, pr_url?, test_results?, attachments[], known_gaps[], supersedes?)` | 产出型角色 | 提交交付。`kind=card_completion` 即卡片的完成申请，只有主产出工作项的负责人可以提交。`summary` 面向人且不超过 160 字；长内容放 `test_results`、`known_gaps` 或附件 |
 | `submit_review(delivery_id, target_sha, kind, issues[], attachments[], recheck_required?)` | 验证型角色 | 提交审核结论；`verdict` 和 `blocking` 由服务端计算 |
 | `create_card` / `update_card` / `create_work_item` / `update_work_item` | PM | 管理卡片与工作项 |
 | `assign(work_item_id, role_id, machine_id?)` | PM | 登记指派（第一版手动指定机器），Token 待主机侧签发；Agent/PM 经 MCP 指派后系统为该 Assignment 排 `initial` Run |
