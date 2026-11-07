@@ -14,6 +14,33 @@ export class RuntimeFailure extends Error {
 export function fail(code: RuntimeErrorCode, message: string): never {
   throw new RuntimeFailure(code, message);
 }
+/** Keep programming-error context without dumping child output, stacks or credentials. */
+function unexpectedMessage(error: unknown): string {
+  if (!(error instanceof Error)) return "Runtime operation failed";
+  let message = error.message;
+  for (const [, value] of Object.entries(process.env)
+    .filter(
+      ([key, value]) =>
+        /token|secret|password|(?:api|private)_?key|auth/i.test(key) && value,
+    )
+    .sort((a, b) => (b[1]?.length ?? 0) - (a[1]?.length ?? 0))) {
+    if (value) message = message.replaceAll(value, "[redacted]");
+  }
+  message = message
+    .replace(
+      /-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-]*PRIVATE KEY-----|$)/g,
+      "[redacted]",
+    )
+    .replace(/\b(Bearer|Basic)\s+[^\s"']+/gi, "$1 [redacted]")
+    .replace(
+      /([\w.-]*(?:token|secret|password|api[_-]?key|private[_-]?key|authorization)[\w.-]*["']?\s*[:=]\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;&]+)/gi,
+      "$1[redacted]",
+    )
+    .replace(/(\b[a-z][a-z\d+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/gi, "$1[redacted]@");
+  return message
+    ? `Runtime operation failed: ${message.slice(0, 1000)}`
+    : "Runtime operation failed";
+}
 export async function result<T>(
   operation: () => Promise<T>,
 ): Promise<RuntimeResult<T>> {
@@ -28,7 +55,7 @@ export async function result<T>(
         message:
           error instanceof RuntimeFailure
             ? error.message
-            : "Runtime operation failed",
+            : unexpectedMessage(error),
       },
     };
   }

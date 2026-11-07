@@ -192,96 +192,118 @@ describe.skipIf(process.platform !== "linux" || process.getgid?.() === 0)(
         runs: tx.runs.list(project_id),
         tokens: tx.tokensForAssignment(project_id, assignment.id),
       }));
-    test("start command wires Agent Git, versions and shared files; stop revokes credentials and keeps the worktree", async () => {
-      seed("write");
-      for (const name of ["key", "known"])
-        await writeFile(join(root, name), "fixture-only", { mode: 0o600 });
-      const bin = join(root, "bin");
-      await mkdir(bin);
-      await writeFile(
-        join(bin, "ssh"),
-        `#!/usr/bin/env node
+    test.each(["callbacks", "instance methods"])(
+      "start command wires Agent Git, versions and shared files (%s); stop revokes credentials and keeps the worktree",
+      async (implementation) => {
+        const capture = runtime.captureAgent;
+        if (implementation === "instance methods") {
+          // A plain vi.fn does not need a receiver and cannot catch detached methods.
+          class StatefulRuntime {
+            #capture = capture;
+            captureAgent(...args: Parameters<typeof capture>) {
+              return this.#capture(...args);
+            }
+          }
+          const { captureAgent: _capture, ...operations } = runtime;
+          runtime = Object.assign(new StatefulRuntime(), operations);
+        }
+        seed("write");
+        for (const name of ["key", "known"])
+          await writeFile(join(root, name), "fixture-only", { mode: 0o600 });
+        const bin = join(root, "bin");
+        await mkdir(bin);
+        await writeFile(
+          join(bin, "ssh"),
+          `#!/usr/bin/env node
 const {spawnSync} = require('node:child_process');
 const args = process.argv.slice(2), at = args.indexOf('--');
 if (args[at + 1] !== 'agent@localhost') process.exit(99);
 const child = spawnSync('sh', ['-c', args.slice(at + 2).join(' ')], {cwd: ${JSON.stringify(agentRoot)}, stdio:'inherit'});
 process.exit(child.status ?? 98);
 `,
-        { mode: 0o700 },
-      );
-      vi.stubEnv("PATH", `${bin}:${process.env.PATH}`);
-      vi.stubEnv("CARDIGAN_GIT_QUERY_TIMEOUT_MS", "12345");
-      await exec("git", ["init", "-b", "main", source]);
-      await writeFile(join(source, "file"), "fixture");
-      await exec("git", ["-C", source, "add", "file"]);
-      await exec("git", [
-        "-C",
-        source,
-        "-c",
-        "user.name=Fixture",
-        "-c",
-        "user.email=fixture@example.invalid",
-        "commit",
-        "-m",
-        "fixture",
-      ]);
-      store.setProjectRepo({ project_id, repo_path: source });
-      const configDir = join(root, "config");
-      await mkdir(configDir);
-      await writeFile(
-        join(configDir, "launch.yaml"),
-        JSON.stringify(launch.config),
-      );
-      await writeFile(join(configDir, "secrets.env"), `provider=${secret}\n`, {
-        mode: 0o600,
-      });
-      await startAssignmentCommand({
-        store,
-        io,
-        runtime,
-        dataDir,
-        project_id,
-        assignment_id: assignment.id,
-      });
-      const path = join(agentRoot, "worktrees", project_id, assignment.id);
-      expect(await readFile(join(path, "file"), "utf8")).toBe("fixture");
-      expect((await lstat(runDir)).mode & 0o7777).toBe(0o2770);
-      for (const name of ["token", "secrets.env", "pi/mcp.json"])
-        expect((await lstat(join(runDir, name))).mode & 0o777).toBe(0o660);
-      expect((await lstat(join(runDir, "launch.sh"))).mode & 0o777).toBe(0o770);
-      expect(state().runs[0]).toMatchObject({
-        status: "dispatched",
-        agent_cli_version: "pi fixture-agent-version",
-      });
-      expect(vi.mocked(runtime.provision).mock.calls[0]?.[3]).toMatchObject({
-        cwd: path,
-        command: join(runDir, "launch.sh"),
-      });
-      expect(io.captureCommand).not.toHaveBeenCalled();
-      const gitCalls = vi
-        .mocked(runtime.captureAgent)
-        .mock.calls.filter(([command]) => command === "git");
-      expect(gitCalls.length).toBeGreaterThan(0);
-      expect(gitCalls.every((call) => call[2] === 12345)).toBe(true);
-      const token = (await readFile(join(runDir, "token"), "utf8")).trim();
-      expect(JSON.stringify(vi.mocked(io.stdout).mock.calls)).not.toContain(
-        token,
-      );
-      expect(JSON.stringify(vi.mocked(io.stdout).mock.calls)).not.toContain(
-        secret,
-      );
-      await stopAssignment({
-        store,
-        project_id,
-        assignment_id: assignment.id,
-        runtime,
-        execution: resolveExecutionConfig(io.env),
-      });
-      for (const name of ["token", "secrets.env"])
-        await expect(lstat(join(runDir, name))).rejects.toThrow();
-      expect(state().tokens.every((t) => t.revoked_at !== null)).toBe(true);
-      expect(await readFile(join(path, "file"), "utf8")).toBe("fixture");
-    });
+          { mode: 0o700 },
+        );
+        vi.stubEnv("PATH", `${bin}:${process.env.PATH}`);
+        vi.stubEnv("CARDIGAN_GIT_QUERY_TIMEOUT_MS", "12345");
+        await exec("git", ["init", "-b", "main", source]);
+        await writeFile(join(source, "file"), "fixture");
+        await exec("git", ["-C", source, "add", "file"]);
+        await exec("git", [
+          "-C",
+          source,
+          "-c",
+          "user.name=Fixture",
+          "-c",
+          "user.email=fixture@example.invalid",
+          "commit",
+          "-m",
+          "fixture",
+        ]);
+        store.setProjectRepo({ project_id, repo_path: source });
+        const configDir = join(root, "config");
+        await mkdir(configDir);
+        await writeFile(
+          join(configDir, "launch.yaml"),
+          JSON.stringify(launch.config),
+        );
+        await writeFile(
+          join(configDir, "secrets.env"),
+          `provider=${secret}\n`,
+          {
+            mode: 0o600,
+          },
+        );
+        await startAssignmentCommand({
+          store,
+          io,
+          runtime,
+          dataDir,
+          project_id,
+          assignment_id: assignment.id,
+        });
+        const path = join(agentRoot, "worktrees", project_id, assignment.id);
+        expect(await readFile(join(path, "file"), "utf8")).toBe("fixture");
+        expect((await lstat(runDir)).mode & 0o7777).toBe(0o2770);
+        for (const name of ["token", "secrets.env", "pi/mcp.json"])
+          expect((await lstat(join(runDir, name))).mode & 0o777).toBe(0o660);
+        expect((await lstat(join(runDir, "launch.sh"))).mode & 0o777).toBe(
+          0o770,
+        );
+        expect(state().runs[0]).toMatchObject({
+          status: "dispatched",
+          agent_cli_version: "pi fixture-agent-version",
+        });
+        expect(vi.mocked(runtime.provision).mock.calls[0]?.[3]).toMatchObject({
+          cwd: path,
+          command: join(runDir, "launch.sh"),
+        });
+        expect(io.captureCommand).not.toHaveBeenCalled();
+        expect(capture).toHaveBeenCalledWith("pi", ["--version"]);
+        const gitCalls = vi
+          .mocked(capture)
+          .mock.calls.filter(([command]) => command === "git");
+        expect(gitCalls.length).toBeGreaterThan(0);
+        expect(gitCalls.every((call) => call[2] === 12345)).toBe(true);
+        const token = (await readFile(join(runDir, "token"), "utf8")).trim();
+        expect(JSON.stringify(vi.mocked(io.stdout).mock.calls)).not.toContain(
+          token,
+        );
+        expect(JSON.stringify(vi.mocked(io.stdout).mock.calls)).not.toContain(
+          secret,
+        );
+        await stopAssignment({
+          store,
+          project_id,
+          assignment_id: assignment.id,
+          runtime,
+          execution: resolveExecutionConfig(io.env),
+        });
+        for (const name of ["token", "secrets.env"])
+          await expect(lstat(join(runDir, name))).rejects.toThrow();
+        expect(state().tokens.every((t) => t.revoked_at !== null)).toBe(true);
+        expect(await readFile(join(path, "file"), "utf8")).toBe("fixture");
+      },
+    );
     test("roles without worktrees run in the shared run directory and duplicate starts preserve the live token", async () => {
       seed();
       const first = await startAssignment(options());
