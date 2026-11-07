@@ -461,6 +461,24 @@ test("§6.4 run finished without output is an exception for PM Ops", () => {
   expect(result.notifications[0]?.kind).toBe("run_attention");
 });
 
+test("§6.4/M5.S S25 a verification Run that submitted a review produced output", () => {
+  // Reviewer/tester/PM-acceptance Runs end after submit_review; the review has
+  // no run_id in its event payload, so the review row is the output fact.
+  const result = routeEvent({
+    event: event("run_finished", { run_id: "R-1", outcome: "completed" }),
+    snapshot: snapshot({
+      reviews: [
+        review("pass", "D-1", {
+          run_id: "R-1" as never,
+          work_item_id: "W-2" as never,
+        }),
+      ],
+      runs: [run("R-1", { assignment_id: "A-2" })],
+    }),
+  });
+  expect(result.notifications).toEqual([]);
+});
+
 test("§7.1/S4 a finished work-item Run is PM Ops' business, never its own bell", () => {
   const result = routeEvent({
     event: event(

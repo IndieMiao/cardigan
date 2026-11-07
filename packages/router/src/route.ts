@@ -765,8 +765,11 @@ function routeRunFinished(input: RouteInput, draft: Draft): void {
       );
     return;
   }
-  // §6.4: only a Run that produced nothing (no delivery, blocker or decision)
-  // is an exception; one that delivered or raised something has done its job.
+  // §6.4: only a Run that produced nothing (no delivery, review, blocker or
+  // decision) is an exception; one that delivered, reviewed or raised
+  // something has done its job. Verification Runs end after submit_review, and
+  // that event carries no run_id, so reviews are matched on their own row
+  // (M5.S S25).
   const produced = [
     ...input.snapshot.events.filter(
       (event) =>
@@ -781,6 +784,7 @@ function routeRunFinished(input: RouteInput, draft: Draft): void {
     ...input.snapshot.deliveries.filter(
       (delivery) => delivery.run_id === run_id,
     ),
+    ...input.snapshot.reviews.filter((review) => review.run_id === run_id),
   ];
   if (produced.length > 0) return;
   note(
@@ -793,7 +797,7 @@ function routeRunFinished(input: RouteInput, draft: Draft): void {
       : "6.4/run finished without output",
     `run ${payloadString(input.event.payload, "run_id") ?? "?"} ${
       outcome === "failed" ? "failed" : "finished"
-    } without a delivery`,
+    } without a delivery or review`,
   );
 }
 
