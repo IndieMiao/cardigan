@@ -423,7 +423,7 @@ function standingPmAssignments(
         (candidate) =>
           candidate.scope === "standing" &&
           candidate.role_id === "pm" &&
-          candidate.status === "active",
+          ["active", "suspended"].includes(candidate.status),
       )
       .flatMap((assignment) =>
         assignment.standing_mode === undefined

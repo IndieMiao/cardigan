@@ -134,7 +134,12 @@ export class Dispatcher {
     routeProjectEvents(store, project, { clock: this.clock });
     acknowledgeInbox(store, project, standing, this.clock);
     for (const attempt of unfinishedBellAttempts(store.database, project))
-      if (attempt.lease_until <= this.clock.now())
+      if (
+        attempt.lease_until <= this.clock.now() &&
+        this.state(project).assignments.find(
+          (a) => a.id === attempt.assignment_id,
+        )?.status !== "suspended"
+      )
         this.settle(attempt, false, "interrupted_delivery");
     this.maintenance(project);
     const claimed = new Set(
@@ -521,7 +526,7 @@ export class Dispatcher {
         const owner = this.owner(n, state),
           a = state.assignments.find((a) => a.id === owner);
         if (
-          !a ||
+          a?.status !== "active" ||
           state.runs.some(
             (r) => r.assignment_id === a.id && unfinishedRun(r),
           ) ||

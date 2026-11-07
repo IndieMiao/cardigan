@@ -4,7 +4,12 @@ import type {
   Runtime,
   RuntimeRef,
 } from "@cardigan/domain";
-import { abortDispatch, queueRun } from "@cardigan/domain";
+import {
+  abortDispatch,
+  pauseStandingAssignment,
+  queueRun,
+  standingModeOf,
+} from "@cardigan/domain";
 import {
   agentCliVersion,
   applyCommand,
@@ -27,7 +32,12 @@ import {
   resolveExecutionConfig,
   secureDataDirectory,
 } from "@cardigan/runtime-herdr";
-import { Store, writeRole } from "@cardigan/store";
+import {
+  finishBellAttempt,
+  Store,
+  unfinishedBellAttempts,
+  writeRole,
+} from "@cardigan/store";
 import { loadConfig, loadSecrets } from "./config.js";
 import { CliError, EXIT } from "./errors.js";
 import {
@@ -178,7 +188,11 @@ export async function startAssignment(
 
   const entities = requireAssignment(store, project_id, options.assignment_id);
   const { assignment, role } = entities;
-  if (assignment.status !== "active") {
+  const resuming =
+    assignment.scope === "standing" &&
+    assignment.role_id === "pm" &&
+    assignment.status === "suspended";
+  if (assignment.status !== "active" && !resuming) {
     throw new CliError(
       `Assignment 状态是 ${assignment.status}，只有 active 能启动`,
       EXIT.usage,
@@ -203,6 +217,8 @@ export async function startAssignment(
     },
     harnessBinary(role.harness),
   );
+  if (resuming && assignment.runtime_ref)
+    await closeStandingTerminal(options.runtime, assignment.runtime_ref);
   const run = runCommand(store, {
     project_id,
     actor: humanActor(project_id),
@@ -214,6 +230,7 @@ export async function startAssignment(
           assignment_id: assignment.id,
           model,
           agent_cli_version: version,
+          ...(resuming ? { resume: true } : {}),
         },
         ports,
       ),
@@ -242,6 +259,11 @@ export async function startAssignment(
         assignment_id: assignment.id,
         run,
         actor: humanActor(project_id),
+        ...(resuming
+          ? {
+              first_prompt: resumedBells(store, project_id, assignment, run.id),
+            }
+          : {}),
         ...(worktree === undefined ? {} : { worktree }),
       },
     );
@@ -266,6 +288,7 @@ export async function startAssignment(
       }
       abort(store, project_id, run.id, "worktree preparation failed");
     }
+    if (resuming) pauseStanding(store, project_id, assignment.id);
     if (error instanceof HostLaunchError)
       throw new CliError(
         `启动失败（${error.step}）：${error.message}`,
@@ -273,6 +296,76 @@ export async function startAssignment(
       );
     throw error;
   }
+}
+
+function pauseStanding(
+  store: Store,
+  project_id: ProjectId,
+  assignment_id: Assignment["id"],
+) {
+  return runCommand(store, {
+    project_id,
+    actor: humanActor(project_id),
+    reduce: (s, a, p) => pauseStandingAssignment(s, a, { assignment_id }, p),
+    after: (tx) => {
+      const at = systemClock.now();
+      for (const token of tx.tokensForAssignment(project_id, assignment_id))
+        if (token.revoked_at === null) tx.revokeToken(token.id);
+      // A late external result from an interrupted attempt must not escalate a manual stop.
+      for (const attempt of unfinishedBellAttempts(store.database, project_id))
+        if (attempt.assignment_id === assignment_id)
+          finishBellAttempt(
+            store.database,
+            project_id,
+            attempt.id,
+            "failed",
+            // Keep the intent timestamp monotonic if the host clock moved back.
+            new Date(
+              Math.max(Date.parse(at), Date.parse(attempt.started_at)),
+            ).toISOString(),
+          );
+    },
+  });
+}
+async function closeStandingTerminal(runtime: Runtime, ref: RuntimeRef) {
+  const result = await runtime.release(ref, { force: true });
+  if (!result.ok && result.error.code !== "runtime_not_found")
+    throw new CliError(
+      `常驻 PM 已暂停，但终端关闭失败：${result.error.code} ${result.error.message}`,
+      EXIT.failure,
+    );
+}
+function resumedBells(
+  store: Store,
+  project: ProjectId,
+  a: Assignment,
+  run: string,
+): string {
+  const recipient = standingModeOf(a) === "office" ? "pm_office" : "pm_ops";
+  const owners = new Map(
+    store.uow
+      .read((tx) => tx.runs.list(project))
+      .map((r) => [r.id, r.assignment_id]),
+  );
+  const notes = store
+    .listNotifications({ project_id: project })
+    .filter(
+      (n) =>
+        ["pending", "belled", "delivery_failed"].includes(n.status) &&
+        (n.run_id && owners.has(n.run_id)
+          ? owners.get(n.run_id) === a.id
+          : n.recipient.kind === "assignment"
+            ? n.recipient.assignment_id === a.id
+            : n.recipient.kind === recipient),
+    );
+  return [
+    `[bell] project=${project} asg=${a.id} run=${run} kind=initial`,
+    ...notes.map(
+      (n) =>
+        `[bell] ${n.card_id ? `card=${n.card_id}` : `project=${project}`} asg=${a.id} run=${run} seq=${n.seq}`,
+    ),
+    "常驻 PM 已由人恢复。请调用 whoami，再逐条读取这些流的 get_updates 并 ack_events，处理暂停期间的更新。",
+  ].join("\n");
 }
 
 /** Abort the Run (best effort); the reason is recorded on it. */
@@ -302,13 +395,27 @@ export async function stopAssignment(input: {
   readonly assignment_id: Assignment["id"];
   readonly runtime: Runtime;
   readonly execution?: ExecutionConfig;
-}): Promise<{ released: boolean; aborted: boolean }> {
+}): Promise<{ released: boolean; aborted: boolean; paused?: boolean }> {
   const { assignment } = requireAssignment(
     input.store,
     input.project_id,
     input.assignment_id,
   );
   const ref = assignment.runtime_ref;
+  if (assignment.scope === "standing" && assignment.role_id === "pm") {
+    const paused = pauseStanding(input.store, input.project_id, assignment.id);
+    try {
+      if (ref) await closeStandingTerminal(input.runtime, ref);
+    } finally {
+      if (input.execution)
+        await scrubRunCredentials(
+          input.execution,
+          input.project_id,
+          assignment.id,
+        );
+    }
+    return { released: ref !== null, aborted: paused.aborted, paused: true };
+  }
   if (ref === null) {
     throw new CliError(
       `Assignment ${assignment.id} 没有在运行的终端`,
@@ -437,6 +544,13 @@ export async function runAssignmentCommand(
   const store = Store.open({ dataDir });
   try {
     const project_id = resolveProject(store, io, flags.project);
+    if (sub === "stop") {
+      const { assignment } = requireAssignment(store, project_id, assignmentId);
+      if (assignment.scope === "standing" && assignment.role_id === "pm") {
+        pauseStanding(store, project_id, assignment.id);
+        await scrubRunCredentials(execution, project_id, assignment.id);
+      }
+    }
     const session =
       flags["hc-session"] ?? io.env.CARDIGAN_HC_SESSION ?? "cardigan";
     const created = await HerdrRuntime.create({ session, execution });
@@ -457,7 +571,9 @@ export async function runAssignmentCommand(
         execution,
       });
       io.stdout(
-        `已释放 ${assignmentId} 的终端${result.aborted ? "，未结束的 Run 已取消" : ""}（worktree 保留）`,
+        result.paused
+          ? `已暂停常驻 PM ${assignmentId}，门铃将排队；用 cardigan pm start 或 assignment start 恢复。`
+          : `已释放 ${assignmentId} 的终端${result.aborted ? "，未结束的 Run 已取消" : ""}（worktree 保留）`,
       );
       return EXIT.ok;
     }

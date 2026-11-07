@@ -10,6 +10,7 @@ import {
   text,
   unwrap,
 } from "./core.js";
+import { resumeStanding } from "./standing.js";
 import { activeWork } from "./workflow.js";
 
 const unfinished = (run: Run) =>
@@ -95,6 +96,8 @@ function snapshot(run: Run, a: Assignment) {
 export type RunKind = Run["kind"];
 
 export interface QueueRunParams {
+  /** Explicit human start after a standing PM pause; never set by Dispatcher. */
+  readonly resume?: boolean;
   readonly assignment_id: AssignmentId;
   readonly model: string;
   readonly agent_cli_version: string;
@@ -115,6 +118,7 @@ export function queueRun(
   ports: CommandPorts,
 ) {
   return command(state, actor, "queue_run", ports, (d) => {
+    if (p.resume) resumeStanding(d, p.assignment_id);
     const assignment = target(d, p.assignment_id);
     text(p.model, "model");
     text(p.agent_cli_version, "agent_cli_version");

@@ -91,3 +91,5 @@
 `extractReferences` 支持工作项、Assignment、Run 和 Review 编号；`resolveReferences(state, body)` 在当前项目快照中返回去重的编号、kind、status、exists 和可用的 card_id。未知编号无卡片目标，不应生成链接；函数不访问仓储或外部 PR。
 
 M5.6：阻塞 Decision 和审核轮次上限的隐式 Run 结束与 finish_run 共用收尾，Assignment 回 idle。未知/失联环境不由业务收尾判定重连。
+
+S24：`pauseStandingAssignment` 是只允许同项目 human 的主机命令，仅作用于常驻 pm。它经 suspend 暂停 Assignment、经 cancel 结束未完成 Run，保留 RuntimeRef 供主机回收。`queueRun(..., {resume:true})` 也仅允许人恢复 suspended 常驻 PM，并在同一个纯命令中恢复状态、排新 Run；系统派发不能使用该选项。CLI 在暂停事务内撤销 Token、结清被手动中断的投递意图，关闭失败会保持暂停；显式 start 失败也重新暂停。工作项 stop 保持原语义。
