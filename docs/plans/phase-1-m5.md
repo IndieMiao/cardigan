@@ -183,6 +183,26 @@ M5.5 的重启场景（停掉 hc core）暴露了三处实现缺陷。附录 A �
 
 M4.S 之后：真实 coder、reviewer、tester、designer（可以用同一个 harness 扮演多个角色）跑附录 A，你在浏览器里完成第 8、10 步；记录被打断的次数和每一步的耗时，写进本计划的附录。
 
+### M5.S 第一轮冒烟发现（2026-11-07）
+
+环境：本机 agent-ssh 隔离模式，一个小测试仓库，coder 用 Codex 0.161（gpt-6-astra xhigh），reviewer 和 PM 用 Claude Code 2.1.318（Opus）。M2.S 通过：coder 经 MCP 读卡、实现、本地提交并成功交付。走到 M3.S 时，主流程被下面几个缺陷挡住，第一轮在这里停止。全部修复后，从 M2.S 开始重跑。
+
+| 编号 | 现象 | 根因 | 处理 | 负责 |
+|---|---|---|---|---|
+| S1 | CLI 在 agent-ssh 下启动 Assignment 报 Runtime operation failed | CLI 把 `captureAgent` 当普通函数传出，丢了 `this` | #156 已修 | Codex |
+| S2 | Codex 启动后停在 Trust this folder 确认框 | 生成的 Codex 配置没有预先信任 worktree 和仓库根 | 预置信任，只信任本 Assignment 的路径 | Codex（`fix/codex-trust-worktree`） |
+| S3 | Claude Code 在按 Assignment 隔离的新配置目录里出现 4 屏首次引导（主题、安全说明、信任文件夹、Bypass 确认，后两屏默认选中退出），走完后第一条消息丢失 | #145 隔离配置目录后，没有预置首次引导状态 | launch.sh 在 `.claude.json` 不存在时写入预置内容 | Codex（同上） |
+| S4 | PM Ops 自我循环：每个 Run 结束都产生 run_attention，又给自己开一个新 Run | 路由把 PM Ops 自己正常结束的 Run 也当成需要关注的事件 | 正常结束（completed，有结论）的 Run 不产生 run_attention；只有 §7.2 列的异常（Run 结束却没有产出、长时间无 ACK 等）才升级；永远不因为 Assignment 自己的 Run 结束事件唤醒它自己 | Pi |
+| S5 | `ack_events` 必须填卡片编号，项目级事件流的游标推不动 | 工具参数只支持卡片流 | 不填 `card_id` 时确认项目级流，和 `get_updates` 对称 | Pi |
+| S6 | PM Ops 经 MCP `assign` 指派后，Agent 不会启动（Assignment 停在 not_provisioned，没有 Run，也没有通知） | 只有 CLI 的 `assign --start` 会排首个 Run 并启动；e2e 每次指派后由测试手动启动，掩盖了这个问题 | 按附录 A 第 2 步：Agent 或 PM 经 MCP 指派后，系统排 initial Run，由 Dispatcher 用与 `assignment start` 相同的 `launchRun` 启动并按门铃；启动失败按投递失败升级 | Pi |
+| S7 | 只读 worktree 的 reviewer 启动报 Readonly worktree requires a delivery commit SHA | CLI 和 server 都没有把被审交付的 SHA 传给 `ensureWorktree`，只有测试夹具传了；e2e 的 reviewer 用无 worktree 模式，掩盖了这个问题 | 启动和每次唤醒验证项时，取目标工作项当前有效（未被替代）的交付 SHA；新交付到来时把只读 worktree 切到新 SHA | Codex |
+| S8 | coder 把 PM 验收填进 `requested_verifiers`，被拒，报错没指出是哪一项 | coder 的 Core Prompt 写"写全所有必需验证项"；错误信息不带编号 | Core Prompt 改为"填以本工作项为目标的验证项（`get_card` 里 `target_work_item_id` 等于本工作项），PM 验收审的是完成申请，不填"；错误信息列出不符合的编号 | Codex |
+| S9 | agent 账号的 git 报 dubious ownership，coder 只能自己加 `-c safe.directory` | worktree 背后的仓库归主机账号 | 启动时通过环境变量只为本 Assignment 的 worktree 和仓库设置 `safe.directory` | Codex |
+| S10 | CLI 不设 `CARDIGAN_DATA_DIR` 时默认用当前目录的 `.data`，用户设密码写错了位置 | 相对路径默认值 | 默认改为 `~/.local/share/cardigan`，并在 CLI 输出里显示实际使用的数据目录 | Pi |
+| S11 | 基础 clone 建立前，备份循环每次报 ENOENT | 没有区分"还没有仓库"和"出错" | 仓库还不存在时静默跳过 | Pi |
+
+另外：第一轮里 PM Office（A-2）是 Claude 在处理首次引导时按错键退出的，属于操作失误，不是缺陷；监控按 §13.9 正确地把它标为失联并进了 Needs You。
+
 ## 5. 后续事项（M5 不处理）
 
 | 事项 | 处理 |
