@@ -29,7 +29,7 @@
 - requested_verifiers 必须是明确、不同的验证 WorkItemId。产出交付只填 target_work_item_id 等于当前工作项的验证项，并覆盖其中所有必需项；PM 验收审完成申请，不能填入产出交付。已有工作项的目标不符或非空列表遗漏必需项时，invariant_violation 消息列出对应编号，不能用“角色 A 或 B”绕过验证。证据来自预检，参数中的 evidence/author/run_id 不作为可信字段。
 - 新产出替代该工作项的旧产出和旧完成申请：产出验证项回到 ready，失去完成申请目标的 PM 验收项回到 todo，等新完成申请再 ready。supersedes 只指向同类上一版（产出 / 完成申请），显式传入时也校验类型。完成申请只替代旧完成申请，绑定当前产出的相同 subject，保留已经通过的代码审核。
 - 主产出及 PM 验收项通过模板稳定键识别。按用户确认，前置条件排除本次 PM 验收项；其余未满足项必须有精确 precondition 键、说明及同项目后续卡片。检查结果加入 evidence，不能由调用者伪造“已通过”。
-- `submitReview`：只允许该交付请求的验证 Assignment；SHA/交付版本过期拒绝。verdict/blocking 通过 M1.2 计算，忽略客户端同名字段；普通审核使产出被接受或返工，完成审核后进入 awaiting_merge；无 Git code 交付时同命令直接 done，其余经合并后才 done。
+- `submitReview`：只允许该交付请求的验证 Assignment；SHA/交付版本过期拒绝。verdict/blocking 通过 M1.2 计算，忽略客户端同名字段；普通审核使产出被接受或返工，完成审核后进入 awaiting_merge；无 Git 提交形式的交付（subject.kind=git_head，不按 kind 分类）时同命令直接 done，其余经合并后才 done。
 - conditional 不算必需验证通过。已终结的交付不能继续改结论，需要新交付版本；每个 Run 只提交一次审核，请求重放由外层幂等处理。
 - 第二轮起沿用问题描述（去除首尾空白）作为复查匹配依据；新增非 pre_existing 问题必须 critical 且有 proof。此处不做语义相似度判定。
 - 达到上限且仍为 reject 或 conditional 时，在下一轮开始前生成阻塞 Decision、验证项进入 waiting_decision，当前审核 Run 以 blocked 结束；先发 review_submitted（rework_allowed=false），再发 decision_requested，不创建返工 Run。最后一轮 pass 正常通过；换新 Run 不能绕过上限。不存在用户可写的“自动通过”开关。
@@ -73,7 +73,7 @@
 
 - CardTemplate.merge_policy 为 confirm / auto，开发卡默认 confirm。createCard 将主机 CommandPorts.templates 中 dev 模板的策略固定到 Card.merge_policy，旧卡缺省 confirm；MCP 参数不能覆盖。
 - 完成审核通过后先发 review_submitted，再按策略发 decision_requested；确认绑定当前完成申请，merge / hold 均保留 awaiting_merge，只有 merge 允许执行。recordDecision 对合并确认开放 human 入口，记录原话和 needs_you 来源；原有 Office 入口保持。requestMerge 仅人或常驻 PM Ops 可用，仅对已 hold 的确认重新申请。
-- mergePlan(state, card_id) 无 IO，返回 card_id/title/base_branch/completion_id 和按工作项编号排序的 deliveries（delivery_id/work_item_id/sha）。只收最新未被取代且已接受的 Git code 交付；未接受或尚无交付的工作项跳过，known_gaps 仍由完成申请校验。没有可合并交付时直接 done。检查当前完成申请及确认，未决阻塞会拒绝；M4.4 负责一致快照和固定 ref 校验。待合并期间冻结交付与审核，冲突后才能重新交付。
+- mergePlan(state, card_id) 无 IO，返回 card_id/title/base_branch/completion_id 和按工作项编号排序的 deliveries（delivery_id/work_item_id/sha）。只收最新未被取代且已接受的 Git 提交形式的交付（subject.kind=git_head，不按 kind 分类）；未接受或尚无交付的工作项跳过，known_gaps 仍由完成申请校验。没有可合并交付时直接 done。检查当前完成申请及确认，未决阻塞会拒绝；M4.4 负责一致快照和固定 ref 校验。待合并期间冻结交付与审核，冲突后才能重新交付。
 
 ## M4.1 合并结果、释放和清理
 

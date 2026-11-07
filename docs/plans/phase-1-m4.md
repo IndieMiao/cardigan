@@ -102,7 +102,7 @@ Git 测试一律在临时目录里用真实 `git` 建仓库，不 mock git 的�
 ### 3.5 合并（§12.5）
 
 - **在中心 bare 仓库里合并，不检出文件**：对合并集合里的每个交付依次执行 `git merge-tree --write-tree <当前顶端> <交付 SHA>`，成功则 `git commit-tree <tree> -p <当前顶端> -p <交付 SHA>` 得到新顶端；全部成功后 `update-ref refs/heads/<base_branch> <新顶端> <旧顶端>`。不检出就不会运行 filter、hook 或 smudge，比 §12.5 原文的"集成 clone"更安全；§12.5 正文同步改成这一做法。本机 git 2.53 已实测支持 `merge-tree --write-tree`。
-- 合并集合（M4.1 的纯函数 `mergePlan`）：卡片里每个 produce 工作项最新一份已接受、未被取代、`subject.kind=git_head` 的 code 交付，按工作项编号排序。交付 SHA 必须和 `refs/cardigan/deliveries/<id>` 一致，不一致就拒绝合并。
+- 合并集合（M4.1 的纯函数 `mergePlan`）：卡片里每个 produce 工作项最新一份已接受、未被取代、Git 提交形式的交付（`subject.kind=git_head`，不按 `kind` 分类），按工作项编号排序。交付 SHA 必须和 `refs/cardigan/deliveries/<id>` 一致，不一致就拒绝合并。
 - 已经是基线祖先的交付跳过（重复执行合并是无操作）。
 - 冲突：`merge-tree` 退出码 1 时，记下冲突文件列表，**不改任何 ref**，返回 `conflicted`。
 - 比较后更新失败（期间基线被别的合并或同步推进）：返回 `stale`，由执行循环下一轮重算，不强写。
@@ -135,7 +135,7 @@ Git 测试一律在临时目录里用真实 `git` 建仓库，不 mock git 的�
 
 ```
 review --completion_review_passed--> awaiting_merge
-awaiting_merge --merge_not_required--> done      （卡片没有 git_head 的 code 交付，同一命令内直接完成）
+awaiting_merge --merge_not_required--> done      （卡片没有 Git 提交形式的交付（subject.kind=git_head），同一命令内直接完成）
 awaiting_merge --merge_succeeded--> done
 awaiting_merge --merge_conflicted--> in_progress
 awaiting_merge --cancel--> cancelled
@@ -151,7 +151,7 @@ awaiting_merge --cancel--> cancelled
 ### M4.1 domain + router（Codex）
 
 - 卡片状态 `awaiting_merge` 和 §3.8 的迁移；produce 的 `accepted --merge_conflicted--> changes_requested`。
-- 模板字段 `merge_policy`；完成审核通过时按"有没有 git_head code 交付"和策略决定直接 done、发起合并确认，还是等待自动合并。
+- 模板字段 `merge_policy`；完成审核通过时按"有没有 Git 提交形式的交付（subject.kind=git_head）"和策略决定直接 done、发起合并确认，还是等待自动合并。
 - 纯函数 `mergePlan(state, card_id)`：返回合并集合（§3.5），卡片不在 `awaiting_merge`、确认决策未通过、或缺少交付时返回说明原因的错误。
 - 命令：
   - `recordMergeResult`（只允许 system）：`merged { merge_sha, previous_sha }` → 卡片 done，事件 `card_merged`；`conflicted { delivery_id, files }` → §3.8 的冲突处理，事件 `merge_conflicted`；`failed { reason }` → 卡片不动，事件 `merge_failed`。卡片不在 `awaiting_merge` 时拒绝，重复提交同一结果是无操作。
@@ -197,7 +197,7 @@ M4.3 审核时发现：中心仓库、基础 clone、bundle 生成的 git 命令
 
 - MCP：`startMcpServer` 必须传入真实校验器（两种模式各自的 `GitDeliveryVerifier`），去掉默认桩；`submit_delivery` 事务提交后调用 `pinDelivery`。
 - Token：收到 `assignment_released` 后作废该 Assignment 的 Token；另外 MCP 认证要拒绝状态不是 active 的 Assignment，多一道防线（M4.1 审核时发现：现在写命令会因 Assignment 不是 active 被拒，但 Token 在作废前仍能读卡片和更新）。
-- 合并执行循环（与 Dispatcher 并列，SIGTERM 时等当前合并结束）：找出 `awaiting_merge` 且已确认（或策略为 `auto`）的卡片 → `syncFromSource` → `mergePlan` → `mergeIntoBase` → `recordMergeResult`；`stale` 下一轮重试；同一项目同时只跑一个合并。
+- 合并执行循环（与 Dispatcher 并列，SIGTERM 时等当前合并结束）处理 Git 提交形式的交付（`subject.kind=git_head`），doc、design 等类型同样必须经过默认 confirm 策略的人类确认；流程为：找出 `awaiting_merge` 且已确认（或策略为 `auto`）的卡片 → `syncFromSource` → `mergePlan` → `mergeIntoBase` → `recordMergeResult`；`stale` 下一轮重试；同一项目同时只跑一个合并。
 - Dispatcher：`merge_conflicted` 触发的 Run 种类为 `fix`。
 - 卡片 done / cancelled 后的 release 和清理（§3.6）；清理决策解决后执行 `keep` 或 `force_clean`。
 - 对账循环和备份循环（默认各 10 分钟，可配置）；store 增加对账表和迁移；对账新发现项写 `reconcile_finding` 事件。
