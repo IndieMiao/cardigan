@@ -10,7 +10,7 @@ import { toolNames } from "@cardigan/domain";
 import { Store } from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { afterEach, beforeEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { memoryLogger } from "./log.js";
 import { type RunningServer, startMcpServer } from "./server.js";
 import { acceptingVerifierFor } from "./test-support.js";
@@ -139,6 +139,7 @@ beforeEach(async () => {
   });
 });
 afterEach(async () => {
+  vi.restoreAllMocks();
   const persisted = store.database.prepare("SELECT * FROM idempotency").all();
   for (const secret of secrets) {
     for (const output of [responses, persisted, logger.entries])
@@ -407,4 +408,134 @@ test("a failed pending assignment rolls back entities, events, counters and cach
     tokens: before.tokens,
     events: before.events + 1,
   });
+});
+
+const newCard = {
+  title: "Defaults",
+  goal: "Use project defaults",
+  acceptance_criteria: ["Created"],
+  source: { kind: "quote", text: "Fixture" },
+};
+function registerRepository(
+  repo = "/fixture/registered",
+  branch = "release/default",
+) {
+  if (!store.getProject(project))
+    store.createProject({ id: project, name: "Fixture" });
+  expect(
+    store.setProjectRepo({
+      project_id: project,
+      repo_path: repo,
+      base_branch: branch,
+    }).ok,
+  ).toBe(true);
+}
+test.each([
+  {},
+  { repo: "explicit/repository" },
+  { base_branch: "feature/explicit" },
+])(
+  "S21 create_card fills omitted fields from the token's project (%j)",
+  async (explicit) => {
+    registerRepository();
+    store.createProject({ id: "other", name: "Other" });
+    store.setProjectRepo({
+      project_id: "other",
+      repo_path: "/fixture/other",
+      base_branch: "other-branch",
+    });
+    const created = await ok<Card>(office, "create_card", {
+      ...newCard,
+      ...explicit,
+      project_id: "other",
+    });
+    expect(
+      store.uow.read((tx) => tx.cards.get(project, created.id)),
+    ).toMatchObject({
+      repo: explicit.repo ?? "/fixture/registered",
+      base_branch: explicit.base_branch ?? "release/default",
+    });
+    expect(created).not.toHaveProperty("repo");
+    expect(JSON.stringify(created)).not.toContain("/fixture/registered");
+    expect(
+      await ok(office, "update_card", {
+        card_id: created.id,
+        title: "Updated",
+      }),
+    ).not.toHaveProperty("repo");
+  },
+);
+
+test("S21 defaults resolve inside the command transaction and replay ignores changed project settings", async () => {
+  registerRepository();
+  const get = store.getProject.bind(store),
+    reads: boolean[] = [];
+  const spy = vi.spyOn(store, "getProject").mockImplementation((id) => {
+    reads.push(store.database.isTransaction);
+    return get(id);
+  });
+  const first = await ok<Card>(
+    office,
+    "create_card",
+    newCard,
+    "defaults-replay",
+  );
+  expect(reads).toEqual([true]);
+  spy.mockRestore();
+  const before = store.uow.read((tx) => ({
+    cards: tx.cards.list(project),
+    events: tx.events.listAfter(project, first.id, 0),
+  }));
+  registerRepository("/fixture/replacement", "replacement-branch");
+  const replaySpy = vi.spyOn(store, "getProject");
+  expect(await ok(office, "create_card", newCard, "defaults-replay")).toEqual(
+    first,
+  );
+  expect(replaySpy).not.toHaveBeenCalled();
+  replaySpy.mockRestore();
+  expect(
+    store.uow.read((tx) => ({
+      cards: tx.cards.list(project),
+      events: tx.events.listAfter(project, first.id, 0),
+    })),
+  ).toEqual(before);
+});
+
+test("S21 an unregistered project needs explicit metadata and a failed attempt can be retried", async () => {
+  const before = store.uow.read((tx) => tx.cards.list(project).length);
+  const failed = await raw(office, "create_card", newCard, "missing-default");
+  expect(failed.structuredContent).toMatchObject({
+    error: {
+      code: "validation_failed",
+      message: expect.stringContaining("registered repository"),
+    },
+  });
+  expect(store.uow.read((tx) => tx.cards.list(project).length)).toBe(before);
+  registerRepository();
+  expect(
+    (await ok<Card>(office, "create_card", newCard, "missing-default"))
+      .base_branch,
+  ).toBe("release/default");
+});
+
+test("S21 explicit repository and branch keep the existing mismatch behavior", async () => {
+  registerRepository();
+  const created = await ok<Card>(office, "create_card", {
+    ...newCard,
+    repo: "different/repo",
+    base_branch: "different-base",
+  });
+  expect(
+    store.uow.read((tx) => tx.cards.get(project, created.id)),
+  ).toMatchObject({ repo: "different/repo", base_branch: "different-base" });
+});
+
+test("S21 tools/list advertises optional project defaults", async () => {
+  const tool = (await office.listTools()).tools.find(
+    (t) => t.name === "create_card",
+  );
+  expect(tool?.inputSchema.required).not.toContain("repo");
+  expect(tool?.inputSchema.required).not.toContain("base_branch");
+  expect(tool?.description).toMatch(/registered repository/);
+  expect(tool?.description).toMatch(/default base branch/);
 });
