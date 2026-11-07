@@ -79,12 +79,14 @@ export const delivery = (
 export const review = (
   verdict: Review["verdict"],
   delivery_id = "D-1",
+  overrides: Overrides<Review> = {},
 ): Review =>
   ({
     id: "V-1",
     delivery_id,
     verdict,
     work_item_id: "W-2",
+    ...overrides,
   }) as unknown as Review;
 
 export const decision = (overrides: Overrides<Decision> = {}): Decision =>
