@@ -338,9 +338,23 @@ describe("default role pack", () => {
     }
   });
 
+  const DEFAULT_ROLE_IDS = [
+    "pm",
+    "coder",
+    "reviewer",
+    "designer",
+    "tester",
+  ] as const;
+
   test("every role's Core Prompt carries all of §6.3", () => {
-    const titles = { pm: "PM", coder: "coder", reviewer: "reviewer" } as const;
-    for (const role of ["pm", "coder", "reviewer"] as const) {
+    const titles = {
+      pm: "PM",
+      coder: "coder",
+      reviewer: "reviewer",
+      designer: "designer",
+      tester: "tester",
+    } as const;
+    for (const role of DEFAULT_ROLE_IDS) {
       const prompt = corePromptFor(role);
       for (const rule of SPEC_RULES) {
         for (const phrase of rule.phrases) {
@@ -380,6 +394,53 @@ describe("default role pack", () => {
     ])
       expect(prompt, `coder is missing: ${phrase}`).toContain(phrase);
   });
+
+  test.each([
+    [
+      "designer",
+      [
+        "验证型角色",
+        "只读的 worktree",
+        "只审当前版本",
+        "界面、交互和文案",
+        "截图",
+        "`submit_review` 提交结论",
+        "`target_sha` 必须等于交付的 `subject`",
+        "`verdict` 与 `blocking` 由服务端计算",
+        "第二轮起只复查上一轮的问题是否修好",
+        "不改代码",
+        "不 push",
+      ],
+    ],
+    [
+      "tester",
+      [
+        "验证型角色",
+        "只读的 worktree",
+        "只审当前版本",
+        "实际运行和测试",
+        "什么命令",
+        "什么环境",
+        "模拟",
+        "真机",
+        "未覆盖",
+        "不要声称测过",
+        "`submit_review` 提交结论",
+        "`target_sha` 必须等于交付的 `subject`",
+        "`verdict` 与 `blocking` 由服务端计算",
+        "第二轮起只复查上一轮的问题是否修好",
+        "不改代码",
+        "不 push",
+      ],
+    ],
+  ] as const)(
+    "M5.S designer and tester role: %s keeps the review contract",
+    (role, phrases) => {
+      const prompt = corePromptFor(role);
+      for (const phrase of phrases)
+        expect(prompt, `${role} is missing: ${phrase}`).toContain(phrase);
+    },
+  );
 
   // M3 plan §3.4 / development plan §7.1 and §7.3, again written from the plan.
   const PM_MODES = [
@@ -431,21 +492,21 @@ describe("default role pack", () => {
       "指派",
     ])
       expect(prompt, `pm is missing: ${phrase}`).toContain(phrase);
-    for (const role of ["coder", "reviewer"] as const) {
+    for (const role of ["coder", "reviewer", "designer", "tester"] as const) {
       expect(corePromptFor(role), role).not.toContain("不审产出交付");
       expect(corePromptFor(role), role).not.toContain("常驻 PM 不直接提交审核");
     }
   });
 
-  test("the coder and reviewer prompts stay free of PM instructions", () => {
-    for (const role of ["coder", "reviewer"] as const) {
+  test("non-PM prompts stay free of PM instructions", () => {
+    for (const role of ["coder", "reviewer", "designer", "tester"] as const) {
       const prompt = corePromptFor(role);
       expect(prompt).not.toContain("PM Office");
       expect(prompt).not.toContain("`record_decision`");
     }
   });
 
-  test("defaultRoles builds the three roles from the given harness mappings", () => {
+  test("defaultRoles builds every default role from the given harness mappings", () => {
     const roles = defaultRoles({
       pm: {
         harness: "claude-code",
@@ -465,16 +526,32 @@ describe("default role pack", () => {
         worktree: "readonly",
         allowed_tools: ["submit_review"],
       },
+      designer: {
+        harness: "claude-code",
+        launch_profile: "claude-agent",
+        worktree: "readonly",
+        allowed_tools: ["submit_review"],
+      },
+      tester: {
+        harness: "claude-code",
+        launch_profile: "claude-agent",
+        worktree: "readonly",
+        allowed_tools: ["submit_review"],
+      },
     });
 
     expect(roles.map((role) => role.role_id)).toEqual([
       "pm",
       "coder",
       "reviewer",
+      "designer",
+      "tester",
     ]);
     expect(roles.map((role) => role.worktree)).toEqual([
       "none",
       "write",
+      "readonly",
+      "readonly",
       "readonly",
     ]);
     for (const role of roles) {
@@ -484,6 +561,16 @@ describe("default role pack", () => {
       // Same §6.3 phrases as above, so a role cannot ship a trimmed protocol.
       expect(role.core_prompt).toContain("本次 Run 结束必须调用 `finish_run`");
       expect(role.core_prompt).toContain("防止漏铃");
+      // Every role carries the shared boundaries, not just the protocol.
+      for (const phrase of [
+        "身份只来自 Token",
+        "不要 push",
+        "不要修改 Git 凭据",
+        "拿不准时在时间线里提问",
+      ])
+        expect(role.core_prompt, `${role.role_id}: ${phrase}`).toContain(
+          phrase,
+        );
     }
   });
 
