@@ -192,6 +192,12 @@ importers:
       '@cardigan/domain':
         specifier: workspace:*
         version: link:../domain
+      '@cardigan/git-service':
+        specifier: workspace:*
+        version: link:../git-service
+      '@cardigan/git-transport':
+        specifier: workspace:*
+        version: link:../git-transport
       '@cardigan/mcp-server':
         specifier: workspace:*
         version: link:../mcp-server

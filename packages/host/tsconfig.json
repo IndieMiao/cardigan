@@ -10,6 +10,8 @@
   "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx"],
   "references": [
     { "path": "../domain" },
+    { "path": "../git-service" },
+    { "path": "../git-transport" },
     { "path": "../store" },
     { "path": "../mcp-server" },
     { "path": "../roles" },

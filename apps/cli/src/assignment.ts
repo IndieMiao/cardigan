@@ -1,21 +1,10 @@
 import type {
   Assignment,
-  Card,
   ProjectId,
-  Role,
   Runtime,
   RuntimeRef,
-  WorkItem,
 } from "@cardigan/domain";
 import { abortDispatch, queueRun } from "@cardigan/domain";
-import {
-  CentralRepositoryService,
-  GitWorktreeService,
-} from "@cardigan/git-service";
-import {
-  CentralGitTransport,
-  LocalGitTransport,
-} from "@cardigan/git-transport";
 import {
   agentCliVersion,
   applyCommand,
@@ -26,18 +15,19 @@ import {
   launchRun,
   messageOf,
   type PreparedWorktree,
+  reviewTargetSha,
   scrubRunCredentials,
+  type WorktreeProvider,
+  worktreeProvider,
 } from "@cardigan/host";
 import { type LaunchConfig, resolveProfile } from "@cardigan/roles";
 import {
   type ExecutionConfig,
-  executionPaths,
   HerdrRuntime,
   resolveExecutionConfig,
   secureDataDirectory,
 } from "@cardigan/runtime-herdr";
 import { Store, writeRole } from "@cardigan/store";
-import { AgentGitTransport } from "./agent-git.js";
 import { loadConfig, loadSecrets } from "./config.js";
 import { CliError, EXIT } from "./errors.js";
 import {
@@ -59,27 +49,18 @@ import { resolveLaunchPaths } from "./paths.js";
  * Dispatcher uses when it opens a terminal for a bell (M3 §3.1).
  */
 
-export type { PreparedWorktree, RunDirectory } from "@cardigan/host";
+export type {
+  PreparedWorktree,
+  RunDirectory,
+  WorktreeProvider,
+  WorktreeRequest,
+} from "@cardigan/host";
 export {
   agentNameFor,
   projectSegment,
   projectShortCode,
   runDirectory,
 } from "@cardigan/host";
-
-/** The worktree the host must prepare before the Agent starts (M2.5). */
-export interface WorktreeRequest {
-  readonly project_id: ProjectId;
-  /** The project's registered local repository. */
-  readonly source_repo: string;
-  readonly assignment: Assignment;
-  readonly role: Role;
-  readonly card?: Card | undefined;
-  readonly work_item?: WorkItem | undefined;
-}
-export type WorktreeProvider = (
-  request: WorktreeRequest,
-) => Promise<PreparedWorktree | undefined>;
 
 export type LaunchRuntime = Runtime &
   Partial<Pick<HerdrRuntime, "captureAgent">>;
@@ -174,6 +155,9 @@ async function prepareWorktree(
     role,
     ...(card === undefined ? {} : { card }),
     ...(workItem === undefined ? {} : { work_item: workItem }),
+    ...(role.worktree === "readonly"
+      ? { target_sha: reviewTargetSha(store, project_id, workItem) }
+      : {}),
   });
   if (placed === undefined)
     throw new CliError("Git 服务没有给出 worktree", EXIT.failure);
@@ -516,30 +500,6 @@ export async function startAssignmentCommand(
   const paths = resolveLaunchPaths(io.env);
   const dataDir = resolveDataDir(io, options.dataDir);
   const execution = executionFor(io, dataDir);
-  const locations = executionPaths(execution, project_id, assignment_id);
-  const transport =
-    execution.mode === "local"
-      ? new LocalGitTransport()
-      : new AgentGitTransport(
-          execution,
-          project_id,
-          assignment_id,
-          (args, timeout) => agentCapture(runtime, "git", args, timeout),
-        );
-  const central = new CentralRepositoryService(
-    new CentralGitTransport({
-      dataDir,
-      ...(execution.mode === "agent-ssh"
-        ? { agentRoot: execution.agentRoot }
-        : {}),
-    }),
-    { dataDir },
-  );
-  const gitService = new GitWorktreeService(transport, central, {
-    dataDir,
-    ...locations,
-  });
-
   const started = await startAssignment({
     store,
     io,
@@ -552,24 +512,7 @@ export async function startAssignmentCommand(
     mcpUrl: options.mcpUrl ?? io.env.CARDIGAN_MCP_URL ?? DEFAULT_MCP_URL,
     runtime,
     dataDir,
-    worktree: async (request) => {
-      const placed = await gitService.ensureWorktree({
-        project_id: request.project_id,
-        source_repo: request.source_repo,
-        assignment: request.assignment,
-        role: request.role,
-        ...(request.card === undefined ? {} : { card: request.card }),
-        ...(request.work_item === undefined
-          ? {}
-          : { work_item: request.work_item }),
-      });
-      if (placed === undefined) return undefined;
-      return {
-        path: placed.worktree_path,
-        ...(placed.branch === undefined ? {} : { branch: placed.branch }),
-        base_sha: placed.base_sha,
-      };
-    },
+    worktree: worktreeProvider(execution, runtime),
   });
 
   io.stdout(
@@ -620,21 +563,4 @@ export async function startAssignmentById(
     runtime: created.value,
     dataDir,
   });
-}
-
-async function agentCapture(
-  runtime: LaunchRuntime,
-  command: "git" | "claude" | "codex" | "pi",
-  args: readonly string[],
-  timeoutMs?: number,
-) {
-  if (!runtime.captureAgent)
-    throw new CliError("agent-ssh 启动需要 Agent 执行入口", EXIT.failure);
-  const result = await runtime.captureAgent(command, args, timeoutMs);
-  if (!result.ok)
-    throw Object.assign(
-      new CliError(`Agent 命令失败：${result.error.code}`, EXIT.failure),
-      { code: result.error.code },
-    );
-  return result.value;
 }

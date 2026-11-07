@@ -208,6 +208,23 @@ export class LocalGitTransport implements GitWorktreePort {
     const changes = await this.changes(path);
     return changes.tracked.length + changes.untracked.length > 0;
   }
+  async checkoutDetached(path: string, head: string): Promise<void> {
+    const target = await this.resolveCommit(path, head);
+    const registered = (await this.listWorktrees(path)).find(
+      (w) => w.path === resolve(path),
+    );
+    if (!registered || registered.branch)
+      throw new Error("Review workspace must be detached");
+    if (await this.isDirty(path))
+      throw new Error("Review worktree has uncommitted changes");
+    await this.git(path, [
+      "checkout",
+      "--detach",
+      "--no-overwrite-ignore",
+      target,
+      "--",
+    ]);
+  }
   async diffHead(path: string): Promise<string> {
     return this.git(path, ["diff", "HEAD", "--"]);
   }

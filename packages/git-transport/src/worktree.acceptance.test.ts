@@ -414,7 +414,7 @@ describe("readonly worktrees (§12.4)", () => {
     expect(await exists(join(worktreesRoot, "p-one", "A-1"))).toBe(false);
   });
 
-  test("a readonly worktree already at another commit is refused, not switched", async () => {
+  test("S7 a clean readonly worktree can move to the explicitly selected review commit", async () => {
     const input = await fixture();
     const write = await placed(input);
     for (const [name, message] of [
@@ -436,12 +436,12 @@ describe("readonly worktrees (§12.4)", () => {
       target_sha: second,
     };
     await placed(review);
-    await expect(
-      service().ensureWorktree({ ...review, target_sha: first }),
-    ).rejects.toThrow(/target|SHA/i);
+    // S7 supersedes M2's refusal rule: the host selects the current delivery
+    // between Runs; detached, clean workspaces may follow that explicit SHA.
+    await service().ensureWorktree({ ...review, target_sha: first });
     expect(
       await git(join(worktreesRoot, "p-one", "A-2"), "rev-parse", "HEAD"),
-    ).toBe(second);
+    ).toBe(first);
   });
 });
 

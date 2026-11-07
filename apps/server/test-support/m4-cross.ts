@@ -46,7 +46,7 @@ import {
   CentralGitTransport,
   LocalGitTransport,
 } from "@cardigan/git-transport";
-import { launchRun, runDirectory } from "@cardigan/host";
+import { AgentGitTransport, launchRun, runDirectory } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
 import {
   corePromptFor,
@@ -58,7 +58,6 @@ import { Store } from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { expect, vi } from "vitest";
-import { AgentGitTransport } from "../../cli/src/agent-git.js";
 import { ServerGit } from "../src/git.js";
 import { type CardiganServer, startCardiganServer } from "../src/index.js";
 import { HcCore } from "./hc.js";

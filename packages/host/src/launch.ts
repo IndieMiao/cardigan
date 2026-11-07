@@ -28,6 +28,7 @@ import {
   clearAgentSentinel,
   type ExecutionConfig,
   executionPaths,
+  type HerdrRuntime,
   prepareAgentProject,
   scrubAgentLaunch,
   secureDataDirectory,
@@ -43,6 +44,9 @@ import {
 } from "./commands.js";
 import { HostLaunchError, type LaunchStep, messageOf } from "./errors.js";
 import { agentNameFor } from "./naming.js";
+import { type PreparedWorktree, prepareReadonlyWorktree } from "./worktree.js";
+
+export type { PreparedWorktree } from "./worktree.js";
 
 /**
  * The one host-side start flow (M2 plan §4 steps 3–9).
@@ -55,16 +59,9 @@ import { agentNameFor } from "./naming.js";
  * compensation — exists once, so the two entries cannot drift apart.
  */
 
-/** The worktree the host prepared before the Agent may start (M2.5). */
-export interface PreparedWorktree {
-  readonly path: string;
-  readonly branch?: string | undefined;
-  readonly base_sha: string;
-}
-
 export interface LaunchHost {
   readonly store: Store;
-  readonly runtime: Runtime;
+  readonly runtime: Runtime & Partial<Pick<HerdrRuntime, "captureAgent">>;
   readonly launch: {
     readonly config: LaunchConfig;
     readonly secrets: Readonly<Record<string, string>>;
@@ -238,7 +235,8 @@ export async function launchRun(
     project,
     assignment.id,
   );
-  const workDir = input.worktree?.path ?? assignment.worktree_path ?? runDir;
+  let worktree = input.worktree;
+  let workDir = worktree?.path ?? assignment.worktree_path ?? runDir;
   const agentName = agentNameFor({
     role_id: role.role_id,
     project_id: project,
@@ -253,6 +251,13 @@ export async function launchRun(
   try {
     if (execution.mode === "agent-ssh")
       await prepareAgentProject(execution, project, assignment.id);
+
+    worktree ??= await prepareReadonlyWorktree(
+      { store: host.store, execution, runtime: host.runtime },
+      project,
+      assignment.id,
+    );
+    workDir = worktree?.path ?? workDir;
 
     step = "token issuance";
     const issued = issueAssignmentToken(host.store, project, {
@@ -361,16 +366,16 @@ export async function launchRun(
     // The worktree is the host's fact, not the runtime's: hand it to dispatch
     // through the ref so the assignment records path, branch and base SHA.
     const dispatchRef: RuntimeRef =
-      input.worktree === undefined
+      worktree === undefined
         ? ref
         : {
             ...ref,
-            worktree_path: input.worktree.path,
-            ...(input.worktree.branch === undefined
+            worktree_path: worktree.path,
+            ...(worktree.branch === undefined
               ? {}
-              : { branch: input.worktree.branch }),
+              : { branch: worktree.branch }),
           };
-    const baseSha = input.worktree?.base_sha ?? assignment.base_sha;
+    const baseSha = worktree?.base_sha ?? assignment.base_sha;
     step = "dispatch";
     applyCommand(host.store, {
       project,
@@ -404,9 +409,7 @@ export async function launchRun(
       runtime_ref: dispatchRef,
       run_dir: runDir,
       work_dir: workDir,
-      ...(input.worktree === undefined
-        ? {}
-        : { worktree_path: input.worktree.path }),
+      ...(worktree === undefined ? {} : { worktree_path: worktree.path }),
       token_id: tokenId,
     };
   } catch (error) {

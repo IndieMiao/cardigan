@@ -20,9 +20,9 @@ import {
   GitWorktreeService,
 } from "@cardigan/git-service";
 import { CentralGitTransport } from "@cardigan/git-transport";
+import { AgentGitTransport } from "@cardigan/host";
 import { type AgentExecution, agentUploadPack } from "@cardigan/runtime-herdr";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { AgentGitTransport } from "./agent-git.js";
 
 const exec = promisify(execFile);
 const git = async (args: readonly string[], env = process.env) =>
@@ -179,6 +179,11 @@ process.exit(child.status ?? 98);
     };
     const center = await central.ensureCentral(project);
     await transport.ensureClone(center, repository);
+    const original = await transport.resolveCommit(
+      repository,
+      "refs/remotes/origin/main",
+    );
+    await transport.addWorktree(repository, worktree, original);
     await git(["-C", source, "switch", "-c", "candidate"]);
     await writeFile(join(source, "file"), "delivery");
     await git([
@@ -200,6 +205,19 @@ process.exit(child.status ?? 98);
     expect(
       await transport.resolveCommit(repository, "refs/cardigan/deliveries/D-1"),
     ).toBe(sha);
+    await transport.checkoutDetached(worktree, sha);
+    expect(await transport.listWorktrees(repository)).toContainEqual({
+      path: worktree,
+      head: sha,
+    });
+    expect(
+      calls.some(
+        (args) => args.includes("checkout") && args.includes("--detach"),
+      ),
+    ).toBe(true);
+    await expect(transport.checkoutDetached(source, sha)).rejects.toThrow(
+      /Unexpected Agent Git path/,
+    );
     await expect(
       lstat(join(config.agentRoot, "inputs", "project", "source.bundle")),
     ).rejects.toMatchObject({ code: "ENOENT" });

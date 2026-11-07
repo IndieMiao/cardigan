@@ -254,7 +254,7 @@ test.each(["fast_forwarded", "ahead", "diverged"])(
   },
 );
 
-test("readonly worktrees are detached at the requested SHA and never silently retargeted", async () => {
+test("S7 readonly worktrees refresh to an explicitly requested delivery SHA", async () => {
   const sha = await git(source, "rev-parse", "HEAD");
   const next = await commit(source, "Next version");
   const readonly = {
@@ -270,10 +270,22 @@ test("readonly worktrees are detached at the requested SHA and never silently re
   ).rejects.toThrow();
   expect(await git(created.worktree_path, "rev-parse", "HEAD")).toBe(sha);
   expect(await service.ensureWorktree(readonly)).toEqual(created);
+  const refreshed = placement(
+    await service.ensureWorktree({ ...readonly, target_sha: next }),
+  );
+  expect(refreshed.worktree_path).toBe(created.worktree_path);
+  expect(await git(created.worktree_path, "rev-parse", "HEAD")).toBe(next);
   await expect(
-    service.ensureWorktree({ ...readonly, target_sha: next }),
-  ).rejects.toThrow(/different/);
-  expect(await git(created.worktree_path, "rev-parse", "HEAD")).toBe(sha);
+    git(created.worktree_path, "symbolic-ref", "HEAD"),
+  ).rejects.toThrow();
+  await writeFile(join(created.worktree_path, "tracked.txt"), "review notes");
+  await expect(service.ensureWorktree(readonly)).rejects.toThrow(
+    /dirty|uncommitted/i,
+  );
+  expect(await git(created.worktree_path, "rev-parse", "HEAD")).toBe(next);
+  expect(
+    await readFile(join(created.worktree_path, "tracked.txt"), "utf8"),
+  ).toBe("review notes");
 });
 
 test("dirty queries include tracked, staged and untracked changes but do not modify anything", async () => {
