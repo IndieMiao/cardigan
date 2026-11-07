@@ -97,7 +97,7 @@ function Workbench({
   readonly client: CardiganClient;
   readonly onLoggedOut: () => void | Promise<void>;
 }) {
-  const [route, navigate] = useRoute();
+  const [route, navigate, invalidHash] = useRoute();
   const [projects, setProjects] = useState<ProjectsState>({ kind: "loading" });
   const [loggingOut, setLoggingOut] = useState(false);
   const latest = useRef(0);
@@ -132,16 +132,18 @@ function Workbench({
   const live = useProjectStream(client, selected?.id, onLoggedOut);
 
   // Land on the first project's board when the URL names no project (or one
-  // that no longer exists).
+  // that no longer exists). An unparseable hash is not a missing project: keep
+  // the current screen instead of silently switching projects (M5.S S23).
   useEffect(() => {
     if (projects.kind !== "ready") return;
     if (projects.projects.length === 0) return;
+    if (invalidHash !== undefined) return;
     if (route !== undefined && selected !== undefined) return;
     const first = projects.projects[0];
     if (first !== undefined) {
       navigate({ kind: "board", projectId: first.id });
     }
-  }, [projects, route, selected, navigate]);
+  }, [projects, route, selected, navigate, invalidHash]);
 
   async function logout(): Promise<void> {
     if (loggingOut) return;
@@ -259,6 +261,11 @@ function Workbench({
             <code>cardigan project create &lt;id&gt;</code>。
           </p>
         )}
+        {invalidHash !== undefined && route === undefined && (
+          <div className="error-panel" role="alert">
+            <p>无法识别链接 {invalidHash}；请从项目导航重新进入。</p>
+          </div>
+        )}
         {selected && route?.kind === "activity" && (
           <ActivityPage
             key={selected.id}
@@ -298,6 +305,7 @@ function Workbench({
             projectId={selected.id}
             revision={live.cardRevision(route.cardId)}
             cardId={route.cardId}
+            {...(route.anchor === undefined ? {} : { anchor: route.anchor })}
           />
         )}
         {selected !== undefined &&

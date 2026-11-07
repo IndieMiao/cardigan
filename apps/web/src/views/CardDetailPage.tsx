@@ -1,4 +1,4 @@
-import { useCallback } from "react";
+import { useCallback, useEffect } from "react";
 import {
   ApiError,
   type CardDetail,
@@ -30,6 +30,8 @@ export interface CardDetailPageProps {
   readonly client: CardiganClient;
   readonly projectId: string;
   readonly cardId: string;
+  /** Route location (element id) to reveal once the card has loaded. */
+  readonly anchor?: string;
   readonly revision?: number;
 }
 
@@ -61,6 +63,7 @@ export function CardDetailPage({
   client,
   projectId,
   cardId,
+  anchor,
   revision = 0,
 }: CardDetailPageProps) {
   const load = useCallback(async () => {
@@ -81,6 +84,14 @@ export function CardDetailPage({
           ? { kind: "error", message: error }
           : { kind: "loading" };
   const back = routeHash({ kind: "board", projectId });
+
+  // The location lives in the route (``?at=``), so a reload or a copied URL
+  // finds the same row. `getElementById` accepts ids such as `q(2)` and
+  // `C-1#7` without CSS escaping (M5.S S23).
+  useEffect(() => {
+    if (state.kind !== "ready" || anchor === undefined) return;
+    document.getElementById(anchor)?.scrollIntoView?.({ block: "start" });
+  }, [anchor, state.kind]);
 
   if (state.kind === "loading") {
     return (
@@ -121,7 +132,7 @@ export function CardDetailPage({
       )}
       <CardHeader detail={detail} back={back} />
       <WorkItems detail={detail} />
-      <Relations detail={detail} projectId={projectId} />
+      <Relations detail={detail} projectId={projectId} cardId={cardId} />
       <section className="card-section" aria-label="时间线">
         <h2>时间线</h2>
         <CommentBox
@@ -133,6 +144,7 @@ export function CardDetailPage({
         />
         <Timeline
           projectId={projectId}
+          cardId={cardId}
           entries={detail.timeline}
           attachments={detail.attachments}
         />
@@ -323,9 +335,11 @@ export function deliveryStatusLabel(status: string): string {
 function Relations({
   detail,
   projectId,
+  cardId,
 }: {
   readonly detail: CardDetail;
   readonly projectId: string;
+  readonly cardId: string;
 }) {
   const { decisions, cards, pull_requests } = detail.relations;
   return (
@@ -340,7 +354,16 @@ function Relations({
             <ul className="plain-list">
               {decisions.map((decision) => (
                 <li key={decision.id} id={`decision-${decision.id}`}>
-                  <a href={`#decision-${decision.id}`}>{decision.id}</a>
+                  <a
+                    href={routeHash({
+                      kind: "card",
+                      projectId,
+                      cardId,
+                      anchor: `decision-${decision.id}`,
+                    })}
+                  >
+                    {decision.id}
+                  </a>
                   <span
                     className={`decision-status decision-${decision.status}`}
                   >
