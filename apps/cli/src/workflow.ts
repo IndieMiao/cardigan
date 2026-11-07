@@ -24,6 +24,7 @@ import {
 import { type StartById, startAssignmentById } from "./assignment.js";
 import { CliError, EXIT } from "./errors.js";
 import {
+  announceDataDir,
   humanActor,
   issueTokenForAssignment,
   printToken,
@@ -45,7 +46,7 @@ const USAGE = [
   "  cardigan human-action done <h(n)> --text <结果> [--project <p>]",
   "",
   "通用：--project 省略时取 CARDIGAN_PROJECT，再取数据库里唯一的项目；",
-  "      --data-dir 省略时取 CARDIGAN_DATA_DIR，再取 .data。",
+  "      --data-dir 省略时取 CARDIGAN_DATA_DIR，再取 ~/.local/share/cardigan。",
 ].join("\n");
 
 interface Args {
@@ -763,9 +764,9 @@ function humanActionDone(args: readonly string[], io: CliIo): number {
   }
 }
 
-/** Open the store from `--data-dir`, `CARDIGAN_DATA_DIR` or `.data`. */
+/** Open the store from `--data-dir`, `CARDIGAN_DATA_DIR` or `~/.local/share/cardigan`. */
 function openStoreFrom(io: CliIo, flags: Args["flags"]): Store {
   return openCardiganStore({
-    dataDir: resolveDataDir(io, optional(flags, "data-dir")),
+    dataDir: announceDataDir(io, optional(flags, "data-dir")),
   });
 }

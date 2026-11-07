@@ -1,4 +1,4 @@
-export const DEFAULT_DATA_DIR = ".data";
+export const DEFAULT_DATA_DIR = defaultDataDirectory();
 /**
  * M1 only listens on this machine (§3, §9.1): LAN listening arrives with the
  * multi-machine phase and needs TLS or a private network on top.
@@ -59,7 +59,7 @@ export function resolveServerConfig(env: ServerEnv): ServerConfig {
       `CARDIGAN_MCP_PORT must be an integer between 0 and 65535, got ${JSON.stringify(portText)}`,
     );
   }
-  const dataDir = nonEmpty(env.CARDIGAN_DATA_DIR) ?? DEFAULT_DATA_DIR;
+  const dataDir = resolveDataDirectory(env);
   return {
     dataDir,
     execution: resolveExecutionConfig({ ...env, CARDIGAN_DATA_DIR: dataDir }),
@@ -120,7 +120,9 @@ function resolveHost(value: string | undefined): string {
 }
 
 import {
+  defaultDataDirectory,
   type ExecutionConfig,
   type ExecutionEnv,
+  resolveDataDirectory,
   resolveExecutionConfig,
 } from "@cardigan/runtime-herdr";

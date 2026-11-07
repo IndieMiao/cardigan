@@ -5,7 +5,7 @@ import {
   type Store,
 } from "@cardigan/store";
 import { CliError, EXIT } from "./errors.js";
-import { resolveDataDir, resolveProject } from "./host.js";
+import { announceDataDir, resolveProject } from "./host.js";
 import type { CliIo } from "./io.js";
 
 /**
@@ -203,5 +203,5 @@ export function attentionCommand(args: readonly string[], io: CliIo): number {
 
 /** Open the store the way the other read-only commands do. */
 function open(io: CliIo, flags: Record<string, string>): Store {
-  return openStore({ dataDir: resolveDataDir(io, flags["data-dir"]) });
+  return openStore({ dataDir: announceDataDir(io, flags["data-dir"]) });
 }

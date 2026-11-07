@@ -107,8 +107,11 @@ test("R03 §3.7: backup loop saves unfinished commits; failed fetch keeps the pr
   await s.restart(false);
   const before = s.state(),
     errors: unknown[] = [];
-  const unavailable = `${s.repository}-unavailable`;
-  await rename(s.repository, unavailable);
+  // S11 skips an absent base clone. Keep its directory and break Git metadata
+  // instead, so this still verifies a real fetch failure and preserved backups.
+  const metadata = join(s.repository, ".git"),
+    unavailable = `${metadata}-unavailable`;
+  await rename(metadata, unavailable);
   try {
     await new BackupExecutor({
       store: s.store(),
@@ -122,6 +125,6 @@ test("R03 §3.7: backup loop saves unfinished commits; failed fetch keeps the pr
     expect(s.state().cards).toEqual(before.cards);
     expect(s.state().runs).toEqual(before.runs);
   } finally {
-    await rename(unavailable, s.repository);
+    await rename(unavailable, metadata);
   }
 }, 120_000);

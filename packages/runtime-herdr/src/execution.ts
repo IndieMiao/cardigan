@@ -1,6 +1,8 @@
+import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export interface ExecutionEnv {
+  readonly HOME?: string | undefined;
   readonly CARDIGAN_RUNTIME_MODE?: string | undefined;
   readonly CARDIGAN_DATA_DIR?: string | undefined;
   readonly CARDIGAN_AGENT_ROOT?: string | undefined;
@@ -8,6 +10,21 @@ export interface ExecutionEnv {
   readonly CARDIGAN_AGENT_MACHINE?: string | undefined;
   readonly CARDIGAN_AGENT_IDENTITY?: string | undefined;
   readonly CARDIGAN_AGENT_KNOWN_HOSTS?: string | undefined;
+}
+
+export const defaultDataDirectory = (home = homedir()): string =>
+  join(home, ".local", "share", "cardigan");
+
+/** Application data is independent of the project cwd unless explicitly overridden. */
+export function resolveDataDirectory(
+  env: Pick<ExecutionEnv, "HOME" | "CARDIGAN_DATA_DIR"> = process.env,
+  cwd = process.cwd(),
+): string {
+  const configured = env.CARDIGAN_DATA_DIR;
+  return resolve(
+    cwd,
+    configured?.trim() ? configured : defaultDataDirectory(env.HOME),
+  );
 }
 export type ExecutionConfig =
   | { readonly mode: "local"; readonly dataDir: string }
@@ -34,7 +51,7 @@ export function resolveExecutionConfig(
   env: ExecutionEnv = process.env,
 ): ExecutionConfig {
   const mode = env.CARDIGAN_RUNTIME_MODE ?? "local";
-  const dataDir = resolve(env.CARDIGAN_DATA_DIR ?? ".data");
+  const dataDir = resolveDataDirectory(env);
   if (mode === "local") return { mode, dataDir };
   if (mode !== "agent-ssh")
     throw new Error("CARDIGAN_RUNTIME_MODE must be local or agent-ssh");

@@ -1,6 +1,6 @@
 import { MIN_WEB_PASSWORD_LENGTH, Store } from "@cardigan/store";
 import { CliError, EXIT } from "./errors.js";
-import { resolveDataDir } from "./host.js";
+import { announceDataDir } from "./host.js";
 import type { CliIo } from "./io.js";
 
 /**
@@ -71,6 +71,7 @@ async function setPassword(
     );
   }
   const flags = parseFlags(argv);
+  const dataDir = announceDataDir(io, flags.dataDir);
   const prompt = io.promptSecret;
 
   const first = await prompt(
@@ -87,7 +88,6 @@ async function setPassword(
     throw new CliError("两次输入不一致，未做任何修改", EXIT.usage);
   }
 
-  const dataDir = resolveDataDir(io, flags.dataDir);
   const store = Store.open({ dataDir });
   try {
     store.setWebPassword(first);

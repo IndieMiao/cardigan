@@ -11,6 +11,7 @@ import type {
 } from "@cardigan/domain";
 import { issueTokenInTransaction } from "@cardigan/host";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
+import { resolveDataDirectory } from "@cardigan/runtime-herdr";
 import type {
   IssuedToken,
   Store,
@@ -31,7 +32,17 @@ export function humanActor(project_id: ProjectId): Actor {
 }
 
 export function resolveDataDir(io: CliIo, override?: string): string {
-  return override ?? io.env.CARDIGAN_DATA_DIR ?? ".data";
+  return resolveDataDirectory(
+    { ...io.env, CARDIGAN_DATA_DIR: override ?? io.env.CARDIGAN_DATA_DIR },
+    io.cwd,
+  );
+}
+
+/** Keep stdout machine-readable; disclose the actual store before opening it. */
+export function announceDataDir(io: CliIo, override?: string): string {
+  const path = resolveDataDir(io, override);
+  io.stderr(`数据目录：${path}`);
+  return path;
 }
 
 /**

@@ -5,6 +5,7 @@ import {
 } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { CardId, Clock, ProjectId } from "@cardigan/domain";
+import { resolveDataDirectory } from "@cardigan/runtime-herdr";
 import type { Store, WebSession } from "@cardigan/store";
 import { serveAttachment } from "./attachments.js";
 import {
@@ -111,7 +112,10 @@ export async function startWebServer(
   const clock = options.clock ?? systemClock;
   const limiter = options.loginLimiter ?? new LoginLimiter();
   const log = options.log ?? (() => undefined);
-  const dataDir = options.dataDir ?? process.env.CARDIGAN_DATA_DIR ?? ".data";
+  const dataDir = resolveDataDirectory({
+    ...process.env,
+    CARDIGAN_DATA_DIR: options.dataDir ?? process.env.CARDIGAN_DATA_DIR,
+  });
   const host = config.host;
   // Filled in once the socket is bound: the Host allow-list needs the port.
   let boundPort = 0;

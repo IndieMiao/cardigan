@@ -7,10 +7,13 @@ import {
   resolveServerConfig,
 } from "./config.js";
 
-test("defaults to the loopback address, port 3004 and .data", () => {
-  expect(resolveServerConfig({})).toEqual({
-    dataDir: ".data",
-    execution: { mode: "local", dataDir: resolve(".data") },
+test("S10 defaults to loopback, port 3004 and the same user data directory as the CLI", () => {
+  expect(resolveServerConfig({ HOME: "/fixture/home" })).toEqual({
+    dataDir: "/fixture/home/.local/share/cardigan",
+    execution: {
+      mode: "local",
+      dataDir: "/fixture/home/.local/share/cardigan",
+    },
     host: DEFAULT_MCP_HOST,
     port: DEFAULT_MCP_PORT,
     mergeIntervalMs: DEFAULT_INTERVALS.merge,
@@ -108,5 +111,3 @@ test("server parses agent-ssh settings and refuses unknown runtime modes", () =>
     resolveServerConfig({ CARDIGAN_RUNTIME_MODE: "remote" }),
   ).toThrow(/local or agent-ssh/);
 });
-
-import { resolve } from "node:path";
