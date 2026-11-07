@@ -134,6 +134,10 @@ test("the relations section shows ids with their status", async () => {
   expect(relations.textContent).toContain("D-1");
   expect(relations.textContent).toContain("待批");
   expect(relations.textContent).toContain("阻塞中");
+  const decision = within(relations).getByRole("link", { name: "D-1" });
+  expect(decision.getAttribute("href")).toBe(
+    "#/p/p-1/cards/C-1?at=decision-D-1",
+  );
   const related = within(relations).getByRole("link", { name: "C-2" });
   expect(related.getAttribute("href")).toBe("#/p/p-1/cards/C-2");
   const pull = within(relations).getByRole("link", {
@@ -296,10 +300,31 @@ test("only existing server-resolved references become links", async () => {
   ).querySelector('[data-timeline-type="comment"]');
   const links = [...(entry?.querySelectorAll(".timeline-body a") ?? [])];
   const hrefs = links.map((link) => link.getAttribute("href"));
-  expect(hrefs).toEqual(["#/p/p-1/cards/C-1", "#decision-D-9"]);
+  expect(hrefs).toEqual([
+    "#/p/p-1/cards/C-1",
+    "#/p/p-1/cards/C-1?at=decision-D-9",
+  ]);
   // `exists: false` keeps the number as text, even though the server resolved it.
   expect(entry?.textContent).toContain("C-9");
   expect(links.some((link) => link.textContent === "C-9")).toBe(false);
+});
+
+test("delivery and human-action references have a timeline target (M5.S S23)", async () => {
+  const detail = cardDetail({
+    timeline: [
+      timelineEntry({
+        id: "C-1#7",
+        event_seq: 7,
+        delivery_id: "V-7",
+        human_action_id: "h(3)",
+        body: "见 V-7 和 h(3)。",
+      }),
+    ],
+  });
+  renderCard({ card: async () => detail });
+  await screen.findByRole("article", { name: "卡片 C-1" });
+  expect(document.getElementById("delivery-V-7")).toBeTruthy();
+  expect(document.getElementById("human-action-h(3)")).toBeTruthy();
 });
 
 test("an Agent body with HTML or javascript: links stays inert", async () => {

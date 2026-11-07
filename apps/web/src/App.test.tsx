@@ -13,10 +13,11 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import { App } from "./App.js";
 import {
   ApiError,
+  type CardDetail,
   type CardFilter,
   type CardiganClient,
   type CardPage,
@@ -59,6 +60,7 @@ interface FakeOptions {
   readonly logout?: () => Promise<void>;
   readonly projects?: () => Promise<readonly ProjectSummary[]>;
   readonly cards?: (projectId: string, filter: CardFilter) => Promise<CardPage>;
+  readonly card?: () => Promise<CardDetail>;
 }
 
 const loggedIn = async (): Promise<SessionInfo> => ({
@@ -85,7 +87,7 @@ function fakeClient(options: FakeOptions): CardiganClient {
     logout: options.logout ?? noop,
     projects: options.projects ?? oneProject,
     cards: options.cards ?? oneCard,
-    card: async () => cardDetail(),
+    card: options.card ?? (async () => cardDetail()),
   };
 }
 
@@ -93,6 +95,23 @@ const navigate = (hash: string) => {
   window.location.hash = hash;
   fireEvent(window, new HashChangeEvent("hashchange"));
 };
+
+const decisionCard = () =>
+  cardDetail({
+    relations: {
+      decisions: [
+        {
+          id: "q(2)",
+          question: "发布前要不要再跑一次冒烟？",
+          status: "open",
+          blocking: true,
+          decider: "human",
+        },
+      ],
+      cards: [],
+      pull_requests: [],
+    },
+  });
 
 test("checks the session before showing anything else", async () => {
   let resolve: (info: SessionInfo) => void = () => undefined;
@@ -224,6 +243,68 @@ test("logout clears the session and returns to the login page", async () => {
   fireEvent.click(await screen.findByRole("button", { name: "登出" }));
   expect(await screen.findByLabelText("密码")).toBeTruthy();
   expect(loggedOut).toBe(1);
+});
+
+test("M5.S S23: a related decision keeps the card route and scrolls to its row", async () => {
+  const scroll = vi.fn();
+  const original = Element.prototype.scrollIntoView;
+  Element.prototype.scrollIntoView =
+    scroll as unknown as typeof Element.prototype.scrollIntoView;
+  try {
+    render(<App client={fakeClient({ card: async () => decisionCard() })} />);
+    await screen.findByText("准备发布");
+    navigate("#/p/p-1/cards/C-1");
+    await screen.findByRole("article", { name: "卡片 C-1" });
+
+    fireEvent.click(screen.getByRole("link", { name: "q(2)" }));
+
+    await waitFor(() =>
+      expect(window.location.hash).toBe("#/p/p-1/cards/C-1?at=decision-q(2)"),
+    );
+    expect(screen.getByRole("article", { name: "卡片 C-1" })).toBeTruthy();
+    await waitFor(() =>
+      expect(scroll).toHaveBeenCalledWith({ block: "start" }),
+    );
+    expect(scroll.mock.contexts.at(-1)).toBe(
+      document.getElementById("decision-q(2)"),
+    );
+  } finally {
+    Element.prototype.scrollIntoView = original;
+  }
+});
+
+test("M5.S S23: a copied anchored card URL locates the same row after reload", async () => {
+  const scroll = vi.fn();
+  const original = Element.prototype.scrollIntoView;
+  Element.prototype.scrollIntoView =
+    scroll as unknown as typeof Element.prototype.scrollIntoView;
+  window.location.hash = "#/p/p-1/cards/C-1?at=decision-q(2)";
+  try {
+    render(<App client={fakeClient({ card: async () => decisionCard() })} />);
+    await screen.findByRole("article", { name: "卡片 C-1" });
+    await waitFor(() =>
+      expect(scroll).toHaveBeenCalledWith({ block: "start" }),
+    );
+    expect(scroll.mock.contexts.at(-1)).toBe(
+      document.getElementById("decision-q(2)"),
+    );
+    expect(window.location.hash).toBe("#/p/p-1/cards/C-1?at=decision-q(2)");
+  } finally {
+    Element.prototype.scrollIntoView = original;
+  }
+});
+
+test("M5.S S23: an unparseable hash keeps the current card instead of switching projects", async () => {
+  render(<App client={fakeClient({})} />);
+  await screen.findByText("准备发布");
+  navigate("#/p/p-1/cards/C-1");
+  await screen.findByRole("article", { name: "卡片 C-1" });
+
+  navigate("#decision-q(2)");
+
+  await waitFor(() => expect(window.location.hash).toBe("#decision-q(2)"));
+  expect(screen.getByRole("article", { name: "卡片 C-1" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /等我处理/u })).toBeNull();
 });
 
 test("the card route opens the card page", async () => {

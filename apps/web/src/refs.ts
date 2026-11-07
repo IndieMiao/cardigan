@@ -11,21 +11,39 @@ import { routeHash } from "./route.js";
  * text instead of offering a dead link.
  */
 
+/** A body reference plus the card the server says it belongs to. */
+export type LinkableReference = Reference & { readonly card_id?: string };
+
 /** Only the entries a link may point at: resolved and existing. */
 export function linkableReferences(
   references: readonly ResolvedReference[],
-): Reference[] {
+): LinkableReference[] {
   return references.flatMap((reference) =>
     reference.exists
-      ? [{ kind: reference.kind, id: reference.id } as Reference]
+      ? [
+          {
+            kind: reference.kind,
+            id: reference.id,
+            ...(reference.card_id === undefined
+              ? {}
+              : { card_id: reference.card_id }),
+          } as LinkableReference,
+        ]
       : [],
   );
 }
 
-/** Where a reference points, or `undefined` when it must stay text. */
+/**
+ * Where a reference points, or `undefined` when it must stay text.
+ *
+ * Location anchors are card-route parameters, never `#fragment`s: the hash is
+ * the route (M5.S S23). `cardId` is the card currently open, used when the
+ * server did not attach one to the reference.
+ */
 export function referenceHref(
-  reference: Reference,
+  reference: LinkableReference,
   projectId: string,
+  cardId?: string,
 ): string | undefined {
   switch (reference.kind) {
     case "card":
@@ -35,13 +53,26 @@ export function referenceHref(
         cardId: reference.id,
       });
     case "decision":
-      return `#decision-${reference.id}`;
     case "human_action":
-      return `#human-action-${reference.id}`;
     case "delivery":
-      return `#delivery-${reference.id}`;
-    case "timeline_entry":
-      return `#entry-${reference.id}`;
+    case "timeline_entry": {
+      const target = reference.card_id ?? cardId;
+      if (target === undefined) return undefined;
+      const anchor =
+        reference.kind === "decision"
+          ? `decision-${reference.id}`
+          : reference.kind === "human_action"
+            ? `human-action-${reference.id}`
+            : reference.kind === "delivery"
+              ? `delivery-${reference.id}`
+              : `entry-${reference.id}`;
+      return routeHash({
+        kind: "card",
+        projectId,
+        cardId: target,
+        anchor,
+      });
+    }
     case "pr":
       // Only an http(s) address becomes a link; anything else stays text.
       return isHttpLink(reference.url) ? reference.url : undefined;
@@ -63,11 +94,12 @@ const PROTECTED = /\[[^\]]*\]\([^)]*\)|`[^`]*`/gu;
  */
 export function linkifyReferences(
   body: string,
-  refs: readonly Reference[],
+  refs: readonly LinkableReference[],
   projectId: string,
+  cardId?: string,
 ): string {
   const replacements = refs.flatMap((reference) => {
-    const href = referenceHref(reference, projectId);
+    const href = referenceHref(reference, projectId, cardId);
     if (href === undefined || !("id" in reference)) return [];
     const token = new RegExp(
       `(?<![\\[\\w])${escapeRegExp(reference.id)}(?![\\]\\w])`,

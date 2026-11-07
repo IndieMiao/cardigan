@@ -8,25 +8,41 @@ import { expect, test } from "vitest";
 import { linkifyReferences, referenceHref } from "./refs.js";
 
 test("each reference kind has a destination", () => {
-  expect(referenceHref({ kind: "card", id: "C-2" }, "p-1")).toBe(
+  expect(referenceHref({ kind: "card", id: "C-2" }, "p-1", "C-1")).toBe(
     "#/p/p-1/cards/C-2",
   );
-  expect(referenceHref({ kind: "decision", id: "D-3" }, "p-1")).toBe(
-    "#decision-D-3",
+  expect(referenceHref({ kind: "decision", id: "q(2)" }, "p-1", "C-1")).toBe(
+    "#/p/p-1/cards/C-1?at=decision-q(2)",
   );
-  expect(referenceHref({ kind: "delivery", id: "V-4" }, "p-1")).toBe(
-    "#delivery-V-4",
-  );
-  expect(referenceHref({ kind: "human_action", id: "H-5" }, "p-1")).toBe(
-    "#human-action-H-5",
-  );
-  expect(referenceHref({ kind: "timeline_entry", id: "C-1#7" }, "p-1")).toBe(
-    "#entry-C-1#7",
+  expect(referenceHref({ kind: "delivery", id: "V-4" }, "p-1", "C-1")).toBe(
+    "#/p/p-1/cards/C-1?at=delivery-V-4",
   );
   expect(
-    referenceHref({ kind: "pr", url: "https://example.com/pr/1" }, "p-1"),
+    referenceHref({ kind: "human_action", id: "h(3)" }, "p-1", "C-1"),
+  ).toBe("#/p/p-1/cards/C-1?at=human-action-h(3)");
+  expect(
+    referenceHref({ kind: "timeline_entry", id: "C-1#7" }, "p-1", "C-1"),
+  ).toBe("#/p/p-1/cards/C-1?at=entry-C-1%237");
+  // A server-resolved card target wins over the currently open card.
+  expect(
+    referenceHref(
+      { kind: "decision", id: "q(2)", card_id: "C-9" },
+      "p-1",
+      "C-1",
+    ),
+  ).toBe("#/p/p-1/cards/C-9?at=decision-q(2)");
+  expect(
+    referenceHref(
+      { kind: "pr", url: "https://example.com/pr/1" },
+      "p-1",
+      "C-1",
+    ),
   ).toBe("https://example.com/pr/1");
-  expect(referenceHref({ kind: "pr", url: "javascript:alert(1)" }, "p-1")).toBe(
+  expect(
+    referenceHref({ kind: "pr", url: "javascript:alert(1)" }, "p-1", "C-1"),
+  ).toBe(undefined);
+  // Without a card target, a non-card reference must not invent a fragment.
+  expect(referenceHref({ kind: "decision", id: "q(2)" }, "p-1")).toBe(
     undefined,
   );
 });
@@ -40,9 +56,10 @@ test("only listed identifiers become links", () => {
       { kind: "decision", id: "D-3" },
     ],
     "p-1",
+    "C-1",
   );
   expect(linked).toContain("[C-1](#/p/p-1/cards/C-1)");
-  expect(linked).toContain("[D-3](#decision-D-3)");
+  expect(linked).toContain("[D-3](#/p/p-1/cards/C-1?at=decision-D-3)");
   expect(linked).toContain("C-9 还没建");
 });
 

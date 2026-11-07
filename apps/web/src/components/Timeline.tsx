@@ -79,14 +79,29 @@ export function splitSuperseded(attachments: readonly AttachmentView[]): {
 
 export interface TimelineProps {
   readonly projectId: string;
+  readonly cardId: string;
   readonly entries: readonly import("../api.js").TimelineEntryView[];
   readonly attachments: readonly AttachmentView[];
 }
 
-export function Timeline({ projectId, entries, attachments }: TimelineProps) {
+export function Timeline({
+  projectId,
+  cardId,
+  entries,
+  attachments,
+}: TimelineProps) {
   if (entries.length === 0) {
     return <p className="empty">还没有时间线条目。</p>;
   }
+  const seenAnchors = new Set<string>();
+  /** One alias per referenced delivery/human action, at its first timeline row. */
+  const alias = (prefix: string, id: string | undefined) => {
+    if (id === undefined) return null;
+    const anchor = `${prefix}-${id}`;
+    if (seenAnchors.has(anchor)) return null;
+    seenAnchors.add(anchor);
+    return <span key={anchor} id={anchor} className="anchor-target" />;
+  };
   return (
     <ol className="timeline">
       {entries.map((entry) => {
@@ -99,6 +114,8 @@ export function Timeline({ projectId, entries, attachments }: TimelineProps) {
             id={`entry-${entry.id}`}
             data-timeline-type={entry.type}
           >
+            {alias("delivery", entry.delivery_id)}
+            {alias("human-action", entry.human_action_id)}
             <div className="timeline-head">
               <span className="timeline-type">
                 {TYPE_LABELS[entry.type] ?? entry.type}
@@ -122,6 +139,7 @@ export function Timeline({ projectId, entries, attachments }: TimelineProps) {
                     entry.body,
                     linkableReferences(entry.references ?? []),
                     projectId,
+                    cardId,
                   ),
                 ),
               }}

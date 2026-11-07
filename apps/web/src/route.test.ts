@@ -16,6 +16,18 @@ test("board, list and card routes round-trip", () => {
     { kind: "execution", projectId: "p-fictional" },
     { kind: "activity", projectId: "p-fictional" },
     { kind: "card", projectId: "p-fictional", cardId: "C-1" },
+    {
+      kind: "card",
+      projectId: "p-fictional",
+      cardId: "C-1",
+      anchor: "decision-q(2)",
+    },
+    {
+      kind: "card",
+      projectId: "p-fictional",
+      cardId: "C-1",
+      anchor: "entry-C-1#7",
+    },
   ] as const) {
     expect(parseRoute(routeHash(route))).toEqual(route);
   }
@@ -25,6 +37,14 @@ test("board, list and card routes round-trip", () => {
   expect(
     routeHash({ kind: "card", projectId: "p-fictional", cardId: "C-1" }),
   ).toBe("#/p/p-fictional/cards/C-1");
+  expect(
+    routeHash({
+      kind: "card",
+      projectId: "p-fictional",
+      cardId: "C-1",
+      anchor: "decision-q(2)",
+    }),
+  ).toBe("#/p/p-fictional/cards/C-1?at=decision-q(2)");
 });
 
 test("identifiers are URL-encoded", () => {
@@ -43,6 +63,7 @@ test("unknown or incomplete hashes have no route", () => {
     "#/p//board",
     "#/projects/p-1/board",
     "#/p/p-1/cards",
+    "#decision-q(2)",
   ]) {
     expect(parseRoute(hash), hash).toBeUndefined();
   }
