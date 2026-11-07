@@ -130,13 +130,22 @@ export function worktreeProvider(
   };
 }
 
-export async function prepareReadonlyWorktree(
+/**
+ * The worktree this Role needs when a launch did not pass one.
+ *
+ * `cardigan assignment start` prepares its own (it owns the human's placement
+ * choice), but the Dispatcher only has the Run and the bell, so the host
+ * prepares what the Role asks for: nothing for `none`, the write worktree and
+ * branch for a coder, and the current delivery SHA for a readonly reviewer
+ * (M5.S S7).
+ */
+export async function prepareRoleWorktree(
   host: { store: Store; execution: ExecutionConfig; runtime: AgentRuntime },
   project: ProjectId,
   assignment: Assignment["id"],
 ): Promise<PreparedWorktree | undefined> {
   const entities = launchEntities(host.store, project, assignment);
-  if (entities.role.worktree !== "readonly") return undefined;
+  if (entities.role.worktree === "none") return undefined;
   const source = host.store.getProject(project)?.repo_path;
   if (!source)
     throw new Error(`Project ${project} has no registered repository`);
@@ -148,6 +157,19 @@ export async function prepareReadonlyWorktree(
     source_repo: source,
     ...entities,
     work_item: entities.workItem,
-    target_sha: reviewTargetSha(host.store, project, entities.workItem),
+    ...(entities.role.worktree === "readonly"
+      ? { target_sha: reviewTargetSha(host.store, project, entities.workItem) }
+      : {}),
   });
+}
+
+/** Only a readonly reviewer needs its worktree refreshed before every wake. */
+export async function prepareReadonlyWorktree(
+  host: { store: Store; execution: ExecutionConfig; runtime: AgentRuntime },
+  project: ProjectId,
+  assignment: Assignment["id"],
+): Promise<PreparedWorktree | undefined> {
+  const entities = launchEntities(host.store, project, assignment);
+  if (entities.role.worktree !== "readonly") return undefined;
+  return prepareRoleWorktree(host, project, assignment);
 }

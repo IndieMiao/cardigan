@@ -42,6 +42,7 @@ export {
 } from "./version.js";
 export {
   prepareReadonlyWorktree,
+  prepareRoleWorktree,
   reviewTargetSha,
   type WorktreeProvider,
   type WorktreeRequest,

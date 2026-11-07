@@ -16,6 +16,7 @@ export * from "./commands/pm.js";
 export * from "./commands/queries.js";
 export * from "./commands/release.js";
 export * from "./commands/runtime.js";
+export { canStartWork, workCompleted } from "./commands/workflow.js";
 export * from "./derived.js";
 export * from "./entities.js";
 export * from "./errors.js";

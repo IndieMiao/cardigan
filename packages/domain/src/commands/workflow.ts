@@ -7,6 +7,32 @@ export const workCompleted = (item: WorkItem) =>
     ? item.status === "accepted"
     : item.status === "passed";
 
+/**
+ * M5.S S6: whether a Run could start this work item right now.
+ *
+ * A bell that comes from `assign` (an Agent or the PM assigning through MCP)
+ * must not wake an Agent that has nothing to do yet: a verify item waits for
+ * its target delivery and a produce item for its dependencies — both are woken
+ * by their own bell when that happens (§6.4). The rule mirrors `activeWork`
+ * without moving anything; the Run itself still advances the item.
+ */
+export function canStartWork(input: {
+  readonly item: WorkItem;
+  readonly work_items: readonly WorkItem[];
+}): boolean {
+  const { item } = input;
+  if (item.kind === "verify") return item.status === "ready";
+  if (item.status === "ready" || item.status === "changes_requested")
+    return true;
+  if (item.status !== "todo") return false;
+  return item.depends_on.every((id) => {
+    const dependency = input.work_items.find(
+      (candidate) => candidate.id === id,
+    );
+    return dependency !== undefined && workCompleted(dependency);
+  });
+}
+
 export const reviewRound = (d: CommandDraft, item: WorkItem) =>
   d.list("reviews").filter((r) => r.work_item_id === item.id).length + 1;
 

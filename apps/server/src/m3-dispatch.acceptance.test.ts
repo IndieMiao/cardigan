@@ -24,6 +24,7 @@ import {
   acknowledgeRun,
   assign,
   createCard,
+  createWorkItem,
   dispatchRun,
   finishRun,
   postComment,
@@ -63,6 +64,9 @@ interface Harness {
   card: { id: string };
   coder: Assignment;
   reviewer: Assignment;
+  /** The template's PM acceptance item, used as an MCP-side PM actor. */
+  pm: Assignment;
+  pmActor: Actor;
   route(): number;
   runs(assignment?: Assignment): readonly Run[];
   notes(): readonly {
@@ -223,12 +227,19 @@ function harness(): Harness {
   const items = store.uow.read((tx) => tx.work_items.list(project));
   const produce = items.find((item) => item.role_id === "coder");
   const verify = items.find((item) => item.role_id === "reviewer");
-  if (!produce || !verify) throw new Error("template items missing");
+  const acceptance = items.find((item) => item.role_id === "pm");
+  if (!produce || !verify || !acceptance)
+    throw new Error("template items missing");
   const coder = apply((state, who, ports) =>
     assign(state, who, { work_item_id: produce.id, role_id: "coder" }, ports),
   ) as never as Assignment;
   const reviewer = apply((state, who, ports) =>
     assign(state, who, { work_item_id: verify.id, role_id: "reviewer" }, ports),
+  ) as never as Assignment;
+  // A real pm-role Assignment, so `assign` can be called by an Agent/PM actor
+  // the way the MCP path does (M5.S S6) instead of by the human CLI.
+  const pm = apply((state, who, ports) =>
+    assign(state, who, { work_item_id: acceptance.id, role_id: "pm" }, ports),
   ) as never as Assignment;
 
   const runs = (assignment?: Assignment) =>
@@ -295,6 +306,8 @@ function harness(): Harness {
     card,
     coder,
     reviewer,
+    pm,
+    pmActor: actor(pm, ["assign"]),
     route: () => routeProjectEvents(store, project),
     runs,
     notes: () => store.listNotifications({ project_id: project }) as never,
@@ -397,6 +410,134 @@ afterEach(() => f.close());
 const pending = () => f.notes().filter((note) => note.status === "pending");
 const alertsFor = (kind: string) =>
   f.notes().filter((note) => note.recipient.kind === kind);
+
+// ------------------------------------------------- M5.S S6: assign starts it
+
+/** A fresh produce item with no dependencies: the Assignment may start at once. */
+function newProduceItem(f: Harness, title: string) {
+  return f.apply((state, who, ports) =>
+    createWorkItem(
+      state,
+      who,
+      {
+        card_id: f.card.id as never,
+        title,
+        kind: "produce",
+        role_id: "coder",
+        required: false,
+        completion_criteria: ["done"],
+      },
+      ports,
+    ),
+  ) as never as { id: string };
+}
+
+test("M5.S S6 an MCP assign queues the initial Run and the host starts it once", async () => {
+  const runtime = fakeRuntime();
+  const item = newProduceItem(f, "Assigned over MCP");
+  // The PM is an Assignment, exactly like the MCP path; a human `assign` keeps
+  // its explicit `--start` and is covered by the router unit test.
+  const created = f.apply(
+    (state, who, ports) =>
+      assign(
+        state,
+        who,
+        { work_item_id: item.id as never, role_id: "coder" },
+        ports,
+      ),
+    f.pmActor,
+  ) as never as Assignment;
+  f.route();
+
+  const started: Array<{ runId: string; bell: string }> = [];
+  const d = dispatcher(f, runtime, {
+    startRun: async ({ run, assignment, bell }) => {
+      started.push({ runId: run.id, bell });
+      f.apply((state, who, ports) =>
+        dispatchRun(
+          state,
+          who,
+          { run_id: run.id, runtime_ref: refFor(assignment) },
+          ports,
+        ),
+      );
+    },
+  });
+  await d.tick();
+
+  const runs = f.runs(created);
+  expect(runs).toHaveLength(1);
+  expect(runs[0]).toMatchObject({ kind: "initial", status: "dispatched" });
+  expect(started).toHaveLength(1);
+  expect(started[0]?.runId).toBe(runs[0]?.id);
+  // The bell carries the assignment and the card, so the Agent can start work.
+  expect(started[0]?.bell).toContain("[bell]");
+  expect(started[0]?.bell).toContain(`card=${f.card.id}`);
+  expect(started[0]?.bell).toContain("1 assignment");
+  expect(
+    f
+      .notes()
+      .some(
+        (note) =>
+          note.recipient.assignment_id === created.id &&
+          ["belled", "acked"].includes(note.status),
+      ),
+  ).toBe(true);
+
+  // A second tick must not create or start a second Run.
+  await d.tick();
+  await d.tick();
+  expect(f.runs(created)).toHaveLength(1);
+  expect(started).toHaveLength(1);
+});
+
+test("M5.S S6 a verify Assignment assigned before the delivery waits for it", async () => {
+  const runtime = fakeRuntime();
+  const development = f.store.uow
+    .read((tx) => tx.work_items.list(project))
+    .find((item) => item.role_id === "coder" && item.kind === "produce");
+  if (development === undefined) throw new Error("missing produce item");
+  const check = f.apply((state, who, ports) =>
+    createWorkItem(
+      state,
+      who,
+      {
+        card_id: f.card.id as never,
+        title: "Review the follow-up",
+        kind: "verify",
+        role_id: "reviewer",
+        required: false,
+        completion_criteria: ["passes"],
+        target_work_item_id: development.id,
+      },
+      ports,
+    ),
+  ) as never as { id: string };
+  const verifier = f.apply(
+    (state, who, ports) =>
+      assign(
+        state,
+        who,
+        { work_item_id: check.id as never, role_id: "reviewer" },
+        ports,
+      ),
+    f.pmActor,
+  ) as never as Assignment;
+  f.route();
+
+  const started: string[] = [];
+  const d = dispatcher(f, runtime, {
+    startRun: async ({ assignment }) => {
+      started.push(assignment.id);
+    },
+  });
+  await d.tick();
+
+  // The target has no delivery yet: no Run, no terminal, and the Assignment is
+  // waiting for the delivery bell of §6.4 instead.
+  expect(f.runs(verifier)).toHaveLength(0);
+  expect(started).toEqual([]);
+});
 
 // ---------------------------------------------------------------- §3.1 rows
 

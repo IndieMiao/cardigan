@@ -44,7 +44,7 @@ import {
 } from "./commands.js";
 import { HostLaunchError, type LaunchStep, messageOf } from "./errors.js";
 import { agentNameFor } from "./naming.js";
-import { type PreparedWorktree, prepareReadonlyWorktree } from "./worktree.js";
+import { type PreparedWorktree, prepareRoleWorktree } from "./worktree.js";
 
 export type { PreparedWorktree } from "./worktree.js";
 
@@ -252,7 +252,9 @@ export async function launchRun(
     if (execution.mode === "agent-ssh")
       await prepareAgentProject(execution, project, assignment.id);
 
-    worktree ??= await prepareReadonlyWorktree(
+    // The Dispatcher passes no worktree: the host prepares what the Role needs
+    // (a writer's branch, or a readonly reviewer at the current delivery).
+    worktree ??= await prepareRoleWorktree(
       { store: host.store, execution, runtime: host.runtime },
       project,
       assignment.id,

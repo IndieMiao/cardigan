@@ -9,6 +9,7 @@ import type {
   WorkItemId,
 } from "@cardigan/domain";
 import {
+  canStartWork,
   developmentCardTemplate,
   PM_ACCEPTANCE_WORK_ITEM_KEY,
 } from "@cardigan/domain";
@@ -654,6 +655,40 @@ function routeDecisionResolved(input: RouteInput, draft: Draft): void {
   );
 }
 
+/**
+ * Appendix A step 2 / M5.S S6: an Assignment created through MCP gets its first
+ * Run from the host, so the new Assignment is woken right away and the
+ * Dispatcher opens the terminal with the same `launchRun` the CLI uses.
+ *
+ * The rule only rings when the work item can start now: a verify item waits for
+ * its target delivery and a produce item for its dependencies, and both get
+ * their own bell when that happens. A human assigning from the CLI starts the
+ * Assignment explicitly (`assign --start` or `assignment start`), so it is not
+ * woken here and never gets a second Run from this route.
+ */
+function routeAssignment(input: RouteInput, draft: Draft): void {
+  if (input.event.actor.kind === "human") return;
+  const item = itemOf(
+    input,
+    payloadString(input.event.payload, "work_item_id") as
+      | WorkItemId
+      | undefined,
+  );
+  if (item === undefined) return;
+  const assignment = assignmentOf(input, item.assignment_id);
+  if (assignment === undefined || !isActive(assignment)) return;
+  if (!canStartWork({ item, work_items: input.snapshot.work_items })) return;
+  note(
+    input,
+    draft,
+    recipient.assignment(assignment.id),
+    "assignment",
+    "6.4/work item assigned",
+    `${item.id} was assigned; start it`,
+    { work_item_id: item.id },
+  );
+}
+
 /** §6.4: a finished dependency wakes the downstream Assignments. */
 function routeWorkItemUpdate(input: RouteInput, draft: Draft): void {
   const item_id = payloadString(input.event.payload, "work_item_id");
@@ -814,7 +849,10 @@ export function routeEvent(input: RouteInput): RouteResult {
       routeDecisionResolved(input, draft);
       break;
     case "work_item_updated":
+      routeWorkItemUpdate(input, draft);
+      break;
     case "work_item_assigned":
+      routeAssignment(input, draft);
       routeWorkItemUpdate(input, draft);
       break;
     case "human_action_requested":
