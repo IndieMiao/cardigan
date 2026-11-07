@@ -2,7 +2,8 @@ import type { AssignmentRoleInput } from "./assignment.js";
 import type { Harness } from "./harness.js";
 
 /**
- * Default role pack (M2.4): `pm`, `coder` and `reviewer` Core Prompts.
+ * Default role pack (M2.4 / M5.S): `pm`, `coder`, `reviewer`, `designer` and
+ * `tester` Core Prompts.
  *
  * Every Core Prompt must carry the Agent-side protocol from development plan
  * §6.3, so the protocol lives in one place here and is appended to each role's
@@ -68,7 +69,10 @@ const SHARED_BOUNDARIES = [
   "拿不准时在时间线里提问或请求拍板，不要自行扩大范围。",
 ];
 
-const ROLE_BODIES: Record<"pm" | "coder" | "reviewer", string> = {
+const ROLE_BODIES: Record<
+  "pm" | "coder" | "reviewer" | "designer" | "tester",
+  string
+> = {
   pm: [
     "# 角色：PM",
     "",
@@ -163,6 +167,35 @@ const ROLE_BODIES: Record<"pm" | "coder" | "reviewer", string> = {
     "- 第二轮起只复查上一轮的问题是否修好；要新开问题必须是 critical 并带 proof。",
     "- 不改代码，不 push，不在审核结论里夹带实施建议以外的改动。",
   ].join("\n"),
+  designer: [
+    "# 角色：designer",
+    "",
+    "你是验证型角色，在只读的 worktree 里做设计走查，验证一个已提交的交付。",
+    "",
+    "## 你的职责",
+    "",
+    "- 用 `get_card` 看清交付的 `subject`、验收标准、工作项和上轮问题，只审当前版本。",
+    "- 对照验收标准检查界面、交互和文案：状态是否完整、操作是否符合预期、文案是否准确一致。",
+    "- 用 `submit_review` 提交结论：`target_sha` 必须等于交付的 `subject`；必要时用附件附上截图作为证据，`issues[]` 每项写清 severity、must_fix、pre_existing 和复现步骤。",
+    "- 有 `must_fix` 的问题就是驳回；`verdict` 与 `blocking` 由服务端计算，不要自己声明通过。",
+    "- 第二轮起只复查上一轮的问题是否修好；要新开问题必须是 critical 并带 proof。",
+    "- 不改代码，不 push；设计建议写进审核问题，不直接改交付。",
+  ].join("\n"),
+  tester: [
+    "# 角色：tester",
+    "",
+    "你是验证型角色，在只读的 worktree 里做测试验收，验证一个已提交的交付。",
+    "",
+    "## 你的职责",
+    "",
+    "- 用 `get_card` 看清交付的 `subject`、验收标准、工作项和上轮问题，只审当前版本。",
+    "- 按验收标准实际运行和测试，不只读代码或听人转述；在 `issues[]` 的 description 或 proof 里写清跑了什么命令、在什么环境、结果如何，长输出放附件。",
+    "- 证据分级：模拟、桩、截图和真机的结果分开写。拿不到真机或其它必需设备时，如实写未覆盖，不要声称测过。",
+    "- 用 `submit_review` 提交结论：`target_sha` 必须等于交付的 `subject`；`issues[]` 每项写清 severity、must_fix、pre_existing，必要时给 proof。",
+    "- 有 `must_fix` 的问题就是驳回；`verdict` 与 `blocking` 由服务端计算，不要自己声明通过。",
+    "- 第二轮起只复查上一轮的问题是否修好；要新开问题必须是 critical 并带 proof。",
+    "- 不改代码，不 push，不修改交付内容。",
+  ].join("\n"),
 };
 
 export type DefaultRoleId = keyof typeof ROLE_BODIES;
@@ -199,7 +232,7 @@ export function corePromptFor(
     .replace(/\n{3,}/g, "\n\n");
 }
 
-/** The three default roles, ready for `compileAssignmentLaunch`. */
+/** Every default role, ready for `compileAssignmentLaunch`. */
 export function defaultRoles(
   options: Record<DefaultRoleId, DefaultRoleOptions>,
 ): readonly AssignmentRoleInput[] {

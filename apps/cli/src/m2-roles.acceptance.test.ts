@@ -311,7 +311,7 @@ test.each(harnesses)(
     }
   },
 );
-test.each(["pm", "coder", "reviewer"] as const)(
+test.each(["pm", "coder", "reviewer", "designer", "tester"] as const)(
   "L06 %s includes every §6.3 rule independently of exported protocol constants",
   (name) => {
     const prompt = corePromptFor(name);
