@@ -20,6 +20,13 @@ exports[`snapshot: claude-code > command, arguments and files 1`] = `
   "env": {
     "CLAUDE_CONFIG_DIR": "/srv/cardigan/runs/A-12/claude",
     "DISABLE_AUTOUPDATER": "1",
+    "GIT_CONFIG_COUNT": "3",
+    "GIT_CONFIG_KEY_0": "safe.directory",
+    "GIT_CONFIG_KEY_1": "safe.directory",
+    "GIT_CONFIG_KEY_2": "safe.directory",
+    "GIT_CONFIG_VALUE_0": "",
+    "GIT_CONFIG_VALUE_1": "/srv/agent/worktrees/A-12",
+    "GIT_CONFIG_VALUE_2": "/srv/agent/repos/p-demo",
   },
   "files": [
     {
@@ -30,7 +37,7 @@ exports[`snapshot: claude-code > command, arguments and files 1`] = `
 ## 你的职责
 
 - 只在当前 worktree 与分支上改动，本地 commit，不 push。
-- 用 \`submit_delivery\` 提交交付：\`summary\` 面向人，\`subject\` 是 commit SHA，\`requested_verifiers\` 写全所有必需验证项。
+- 用 \`submit_delivery\` 提交交付：\`summary\` 面向人，\`subject\` 是 commit SHA；产出交付的 \`requested_verifiers\` 只填以本工作项为目标的验证项（\`get_card\` 里 \`target_work_item_id\` 等于本工作项），并包含其中所有必需项。PM 验收审的是完成申请，产出交付不填它。
 - 收到驳回后用 \`get_card\` / \`get_updates\` 看清问题，再提交新版本；新版本会让旧版本的审核失效。
 - 主产出工作项的负责人可以提交 \`kind=card_completion\` 的完成申请，逐条对照验收标准。
 - 被阻塞时用 \`report_blocker\`，需要人操作时用 \`request_human_action\`。
@@ -119,8 +126,17 @@ set -a
 . "$secrets_file"
 set +a
 rm -f "$secrets_file"
+export GIT_CONFIG_COUNT='3'
+export GIT_CONFIG_KEY_0='safe.directory'
+export GIT_CONFIG_VALUE_0=''
+export GIT_CONFIG_KEY_1='safe.directory'
+export GIT_CONFIG_VALUE_1='/srv/agent/worktrees/A-12'
+export GIT_CONFIG_KEY_2='safe.directory'
+export GIT_CONFIG_VALUE_2='/srv/agent/repos/p-demo'
 export DISABLE_AUTOUPDATER='1'
 export CLAUDE_CONFIG_DIR='/srv/cardigan/runs/A-12/claude'
+# Git's legacy command-line environment must not override the scoped list.
+unset GIT_CONFIG_PARAMETERS
 # The first task message is the last positional argument: claude, codex and pi
 # all start an interactive session with one (see the harness table below). It is
 # read here, never embedded in this script, and kept verbatim: the x sentinel
@@ -186,6 +202,13 @@ exports[`snapshot: codex > command, arguments and files 1`] = `
   "command": "codex",
   "env": {
     "CODEX_HOME": "/srv/cardigan/runs/A-12/codex",
+    "GIT_CONFIG_COUNT": "3",
+    "GIT_CONFIG_KEY_0": "safe.directory",
+    "GIT_CONFIG_KEY_1": "safe.directory",
+    "GIT_CONFIG_KEY_2": "safe.directory",
+    "GIT_CONFIG_VALUE_0": "",
+    "GIT_CONFIG_VALUE_1": "/srv/agent/worktrees/A-12",
+    "GIT_CONFIG_VALUE_2": "/srv/agent/repos/p-demo",
     "OPENAI_BASE_URL": "https://codex.example.invalid/v1",
   },
   "files": [
@@ -197,7 +220,7 @@ exports[`snapshot: codex > command, arguments and files 1`] = `
 ## 你的职责
 
 - 只在当前 worktree 与分支上改动，本地 commit，不 push。
-- 用 \`submit_delivery\` 提交交付：\`summary\` 面向人，\`subject\` 是 commit SHA，\`requested_verifiers\` 写全所有必需验证项。
+- 用 \`submit_delivery\` 提交交付：\`summary\` 面向人，\`subject\` 是 commit SHA；产出交付的 \`requested_verifiers\` 只填以本工作项为目标的验证项（\`get_card\` 里 \`target_work_item_id\` 等于本工作项），并包含其中所有必需项。PM 验收审的是完成申请，产出交付不填它。
 - 收到驳回后用 \`get_card\` / \`get_updates\` 看清问题，再提交新版本；新版本会让旧版本的审核失效。
 - 主产出工作项的负责人可以提交 \`kind=card_completion\` 的完成申请，逐条对照验收标准。
 - 被阻塞时用 \`report_blocker\`，需要人操作时用 \`request_human_action\`。
@@ -295,7 +318,16 @@ set -a
 set +a
 rm -f "$secrets_file"
 export OPENAI_BASE_URL='https://codex.example.invalid/v1'
+export GIT_CONFIG_COUNT='3'
+export GIT_CONFIG_KEY_0='safe.directory'
+export GIT_CONFIG_VALUE_0=''
+export GIT_CONFIG_KEY_1='safe.directory'
+export GIT_CONFIG_VALUE_1='/srv/agent/worktrees/A-12'
+export GIT_CONFIG_KEY_2='safe.directory'
+export GIT_CONFIG_VALUE_2='/srv/agent/repos/p-demo'
 export CODEX_HOME='/srv/cardigan/runs/A-12/codex'
+# Git's legacy command-line environment must not override the scoped list.
+unset GIT_CONFIG_PARAMETERS
 # The first task message is the last positional argument: claude, codex and pi
 # all start an interactive session with one (see the harness table below). It is
 # read here, never embedded in this script, and kept verbatim: the x sentinel
@@ -342,6 +374,13 @@ exports[`snapshot: pi > command, arguments and files 1`] = `
   ],
   "command": "pi",
   "env": {
+    "GIT_CONFIG_COUNT": "3",
+    "GIT_CONFIG_KEY_0": "safe.directory",
+    "GIT_CONFIG_KEY_1": "safe.directory",
+    "GIT_CONFIG_KEY_2": "safe.directory",
+    "GIT_CONFIG_VALUE_0": "",
+    "GIT_CONFIG_VALUE_1": "/srv/agent/worktrees/A-12",
+    "GIT_CONFIG_VALUE_2": "/srv/agent/repos/p-demo",
     "PI_CODING_AGENT_DIR": "/srv/cardigan/runs/A-12/pi",
   },
   "files": [
@@ -353,7 +392,7 @@ exports[`snapshot: pi > command, arguments and files 1`] = `
 ## 你的职责
 
 - 只在当前 worktree 与分支上改动，本地 commit，不 push。
-- 用 \`submit_delivery\` 提交交付：\`summary\` 面向人，\`subject\` 是 commit SHA，\`requested_verifiers\` 写全所有必需验证项。
+- 用 \`submit_delivery\` 提交交付：\`summary\` 面向人，\`subject\` 是 commit SHA；产出交付的 \`requested_verifiers\` 只填以本工作项为目标的验证项（\`get_card\` 里 \`target_work_item_id\` 等于本工作项），并包含其中所有必需项。PM 验收审的是完成申请，产出交付不填它。
 - 收到驳回后用 \`get_card\` / \`get_updates\` 看清问题，再提交新版本；新版本会让旧版本的审核失效。
 - 主产出工作项的负责人可以提交 \`kind=card_completion\` 的完成申请，逐条对照验收标准。
 - 被阻塞时用 \`report_blocker\`，需要人操作时用 \`request_human_action\`。
@@ -431,7 +470,16 @@ set -a
 . "$secrets_file"
 set +a
 rm -f "$secrets_file"
+export GIT_CONFIG_COUNT='3'
+export GIT_CONFIG_KEY_0='safe.directory'
+export GIT_CONFIG_VALUE_0=''
+export GIT_CONFIG_KEY_1='safe.directory'
+export GIT_CONFIG_VALUE_1='/srv/agent/worktrees/A-12'
+export GIT_CONFIG_KEY_2='safe.directory'
+export GIT_CONFIG_VALUE_2='/srv/agent/repos/p-demo'
 export PI_CODING_AGENT_DIR='/srv/cardigan/runs/A-12/pi'
+# Git's legacy command-line environment must not override the scoped list.
+unset GIT_CONFIG_PARAMETERS
 # The first task message is the last positional argument: claude, codex and pi
 # all start an interactive session with one (see the harness table below). It is
 # read here, never embedded in this script, and kept verbatim: the x sentinel

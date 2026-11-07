@@ -127,25 +127,27 @@ function inspect(d: CommandDraft, p: SubmitDeliveryParams) {
       : "A work item nothing verifies must not request verifiers",
   );
   const verifiers = p.requested_verifiers.map((id) => d.work(id));
-  ensure(
-    verifiers.every(
-      (w) =>
+  const invalid = verifiers.filter(
+    (w) =>
+      !(
         w.card_id === card.id &&
         w.kind === "verify" &&
         (completion
           ? w.role_id === "pm" && w.template_key === PM_ACCEPTANCE_WORK_ITEM_KEY
-          : w.target_work_item_id === item.id),
-    ),
+          : w.target_work_item_id === item.id)
+      ),
+  );
+  ensure(
+    invalid.length === 0,
     "invariant_violation",
-    "Verifiers must verify this delivery",
+    `Verifiers must verify this delivery: ${invalid.map((w) => w.id).join(", ")}`,
   );
   const required = verifying.filter((w) => w.required);
+  const missing = required.filter((w) => !p.requested_verifiers.includes(w.id));
   ensure(
-    verifying.length === 0 ||
-      (required.length > 0 &&
-        required.every((w) => p.requested_verifiers.includes(w.id))),
+    verifying.length === 0 || (required.length > 0 && missing.length === 0),
     "invariant_violation",
-    "All required verifiers must be requested",
+    `All required verifiers must be requested: ${missing.map((w) => w.id).join(", ")}`,
   );
   if (completion)
     ensure(

@@ -140,6 +140,24 @@ export function compileAssignmentLaunch(
   const harnessEnv: Record<string, string> = {};
   const harnessArgs: string[] = [];
 
+  // Scope Git's ownership exception to this Assignment. An empty entry resets
+  // inherited safe.directory values (including a global '*') without editing
+  // any user config. Roles without a worktree grant no repository exceptions.
+  const gitPaths =
+    input.role.worktree === "none"
+      ? []
+      : [
+          ...new Set([
+            input.work_dir,
+            ...(input.repository_root ? [input.repository_root] : []),
+          ]),
+        ];
+  harnessEnv.GIT_CONFIG_COUNT = String(gitPaths.length + 1);
+  for (const [index, path] of ["", ...gitPaths].entries()) {
+    harnessEnv[`GIT_CONFIG_KEY_${index}`] = "safe.directory";
+    harnessEnv[`GIT_CONFIG_VALUE_${index}`] = path;
+  }
+
   switch (input.role.harness) {
     case "claude-code":
       // §M2.4: strict MCP config, explicit Card tool allow-list, Core Prompt file.
@@ -457,6 +475,8 @@ if [ -z "$MCP_TOKEN" ]; then
 fi
 export MCP_TOKEN
 ${credentials}${exports}
+# Git's legacy command-line environment must not override the scoped list.
+unset GIT_CONFIG_PARAMETERS
 # The first task message is the last positional argument: claude, codex and pi
 # all start an interactive session with one (see the harness table below). It is
 # read here, never embedded in this script, and kept verbatim: the x sentinel
