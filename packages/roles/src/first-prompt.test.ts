@@ -121,6 +121,18 @@ const message = firstPrompt({
   work_item_id: "W-1",
 });
 
+test("Claude ends the variadic tool allow-list before the first message", async () => {
+  const received = await runWrapper("claude-code", message);
+  const start = received.argv.indexOf("--allowedTools") + 1;
+  const end = received.argv.indexOf("--", start);
+  expect(start).toBeGreaterThan(0);
+  expect(end).toBe(received.argv.length - 2);
+  expect(received.argv.slice(start, end)).toEqual([
+    "mcp__card__whoami,mcp__card__get_card",
+  ]);
+  expect(received.argv.at(-1)).toBe(`${message}\n`);
+});
+
 test.each(["claude-code", "codex", "pi"] as const)(
   "%s receives first.md as its last positional argument, verbatim",
   async (harness) => {

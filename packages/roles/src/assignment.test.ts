@@ -35,6 +35,7 @@ import {
 const TOKEN = "fictional-assignment-token-never-written-to-a-file";
 const RUN_DIR = "/srv/cardigan/runs/A-12";
 const WORK_DIR = "/srv/agent/worktrees/A-12";
+const REPOSITORY_ROOT = "/srv/agent/repos/p-demo";
 const MCP_URL = "http://127.0.0.1:3004/mcp";
 
 const launchConfig = parseLaunchConfig({
@@ -114,6 +115,7 @@ function compile(
     mcp: { url: MCP_URL },
     run_dir: RUN_DIR,
     work_dir: WORK_DIR,
+    repository_root: REPOSITORY_ROOT,
     first_prompt: first,
     secrets,
   });
@@ -482,6 +484,41 @@ describe("mismatched role and profile are refused", () => {
       }),
     ).toThrow(/claude-code/);
   });
+});
+
+test("Codex trusts only the Assignment worktree and its common-dir repository root", () => {
+  const compiled = compile("codex", "codex-agent", first);
+  const config =
+    compiled.files.find((file) => file.path.endsWith("config.toml"))?.content ??
+    "";
+  expect(
+    [...config.matchAll(/^\[projects\.(.+)\]\ntrust_level = "trusted"$/gm)].map(
+      (m) => JSON.parse(m[1] ?? ""),
+    ),
+  ).toEqual([WORK_DIR, REPOSITORY_ROOT]);
+});
+
+test("Codex without a worktree trusts only its cwd, with TOML metacharacters escaped", () => {
+  const cwd = '/srv/runs/project "quoted"/A-1';
+  const compiled = compileAssignmentLaunch({
+    assignment: { assignment_id: "A-1", run_id: "R-1" },
+    role: { ...roleFor("codex", "codex-agent"), worktree: "none" },
+    launch: launchConfig,
+    mcp: { url: MCP_URL },
+    run_dir: RUN_DIR,
+    work_dir: cwd,
+    repository_root: cwd,
+    first_prompt: first,
+    secrets,
+  });
+  const config =
+    compiled.files.find((file) => file.path.endsWith("config.toml"))?.content ??
+    "";
+  expect(
+    [...config.matchAll(/^\[projects\.(.+)\]$/gm)].map((m) =>
+      JSON.parse(m[1] ?? ""),
+    ),
+  ).toEqual([cwd]);
 });
 
 /** Recursively read every regular file under `dir`. */

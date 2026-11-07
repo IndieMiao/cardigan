@@ -72,6 +72,8 @@ export interface CompileAssignmentInput {
   readonly run_dir: string;
   /** Where the CLI starts: the worktree, or the run directory for `none`. */
   readonly work_dir: string;
+  /** Host-selected base clone containing the worktree's common .git directory. */
+  readonly repository_root?: string;
   /** First message the agent receives (a bell-shaped prompt, M2 §4 step 7). */
   readonly first_prompt: string;
   /** Values from `secrets.env`, keyed by secret name. */
@@ -183,6 +185,10 @@ export function compileAssignmentLaunch(
           input.mcp.url,
           input.role.allowed_tools,
           coreFile,
+          [
+            input.work_dir,
+            ...(input.repository_root ? [input.repository_root] : []),
+          ],
         ),
         mode: 0o600,
       });
@@ -213,7 +219,13 @@ export function compileAssignmentLaunch(
       break;
   }
 
-  const args = [...base.args, ...harnessArgs];
+  // Claude's --allowedTools is variadic. Terminate options so it cannot consume
+  // the positional first message (verified with the interactive 2.1.318 CLI).
+  const args = [
+    ...base.args,
+    ...harnessArgs,
+    ...(input.role.harness === "claude-code" ? ["--"] : []),
+  ];
   const command = base.command;
 
   // Provider credentials never travel in `env` or in a long-lived file: they go
@@ -304,7 +316,12 @@ export function compileAssignmentLaunch(
           args,
           env,
           ...(input.role.harness === "claude-code"
-            ? { claudeConfigDir: join(input.run_dir, "claude") }
+            ? {
+                claude: {
+                  configDir: join(input.run_dir, "claude"),
+                  workDir: input.work_dir,
+                },
+              }
             : {}),
         }),
         mode: 0o700,
@@ -331,6 +348,7 @@ function codexConfig(
   url: string,
   tools: readonly string[],
   coreFile: string,
+  trustedPaths: readonly string[],
 ): string {
   const lines = [
     `model_instructions_file = ${JSON.stringify(coreFile)}`,
@@ -350,6 +368,15 @@ function codexConfig(
       "",
     );
   }
+  // Codex 0.161 resolves a linked worktree's project root through its common dir.
+  // Never trust the worktrees/repos parent or inherit the host user's config.
+  for (const path of new Set(trustedPaths)) {
+    lines.push(
+      `[projects.${JSON.stringify(path)}]`,
+      'trust_level = "trusted"',
+      "",
+    );
+  }
   return `${lines.join("\n")}`;
 }
 
@@ -366,7 +393,7 @@ function launchScriptContent(options: {
   readonly command: string;
   readonly args: readonly string[];
   readonly env: Readonly<Record<string, string>>;
-  readonly claudeConfigDir?: string;
+  readonly claude?: { readonly configDir: string; readonly workDir: string };
 }): string {
   const quote = (value: string): string =>
     `'${value.replaceAll("'", `'\\''`)}'`;
@@ -376,10 +403,10 @@ function launchScriptContent(options: {
   const args = options.args.map(quote).join(" ");
   // Run as the actual CLI user: agent-ssh must not inherit a host-owned 0700 leaf.
   const claudeConfig =
-    options.claudeConfigDir === undefined
+    options.claude === undefined
       ? ""
       : `# Session state belongs to this Assignment, not to the user's home.
-claude_config_dir=${quote(options.claudeConfigDir)}
+claude_config_dir=${quote(options.claude.configDir)}
 if [ ! -e "$claude_config_dir" ] && [ ! -L "$claude_config_dir" ]; then
   (umask 077; mkdir -m 700 -- "$claude_config_dir")
 fi
@@ -389,6 +416,15 @@ if [ -L "$claude_config_dir" ] || [ ! -d "$claude_config_dir" ] || [ ! -O "$clau
 fi
 # The extra leading zero clears inherited setgid on shared run directories.
 chmod 00700 -- "$claude_config_dir"
+# Claude Code 2.1.318 stores onboarding/trust in .claude.json, but theme and
+# bypass confirmation in settings.json. Seed fresh state as the runtime user;
+# noclobber prevents replacing a file created concurrently (or a symlink).
+if [ ! -e "$claude_config_dir/.claude.json" ] && [ ! -L "$claude_config_dir/.claude.json" ]; then
+  if [ ! -e "$claude_config_dir/settings.json" ] && [ ! -L "$claude_config_dir/settings.json" ]; then
+    (umask 077; set -C; printf '%s\\n' ${quote(JSON.stringify({ theme: "dark", skipDangerousModePermissionPrompt: true }))} > "$claude_config_dir/settings.json")
+  fi
+  (umask 077; set -C; printf '%s\\n' ${quote(JSON.stringify({ hasCompletedOnboarding: true, lastOnboardingVersion: "2.1.318", projects: { [options.claude.workDir]: { hasTrustDialogAccepted: true } } }))} > "$claude_config_dir/.claude.json")
+fi
 `;
   const credentials =
     options.secretsFile === undefined
