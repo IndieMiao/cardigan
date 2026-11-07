@@ -210,7 +210,7 @@ export async function startAssignment(
   const version = await agentCliVersion(
     {
       execution,
-      captureAgent: options.runtime.captureAgent,
+      captureAgent: options.runtime.captureAgent?.bind(options.runtime),
       captureLocal: (binary) => cliVersion(io, binary),
     },
     harnessBinary(role.harness),
