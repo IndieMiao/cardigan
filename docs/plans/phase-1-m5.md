@@ -203,6 +203,28 @@ M4.S 之后：真实 coder、reviewer、tester、designer（可以用同一个 h
 
 另外：第一轮里 PM Office（A-2）是 Claude 在处理首次引导时按错键退出的，属于操作失误，不是缺陷；监控按 §13.9 正确地把它标为失联并进了 Needs You。
 
+### M5.S 第二轮冒烟（2026-11-07）
+
+第一轮的 S1–S11 全部修复后，在新数据库、新项目里重跑。
+
+- M2.S 通过：一条命令启动 coder，没有任何确认框，Codex 经 MCP 读卡、实现、交付；交付第一次就通过校验。
+- M3.S 主体通过：coder 交付 → PM Ops 收到门铃后指派 reviewer → 系统自动启动 reviewer，只读 worktree 检出在交付的提交上 → 审核通过 → 系统提醒 coder 提交完成申请 → PM Ops 指派 PM 验收 → 验收通过 → 等待合并。全程没有人工操作。reviewer 第一次就通过了，所以"驳回 → 返工"还没在真实 Agent 上发生，留给 M5.S 覆盖。
+- M4.S（小仓库）通过：用户 `merge confirm` 后卡片 done，中心仓库出现两个父提交的合并提交；从登记源 `git fetch` 中心仓库能拿到结果，合并后的代码可以运行、测试通过；登记源的 main 没有被改动。
+
+新发现：
+
+| 编号 | 现象 | 处理 | 负责 |
+|---|---|---|---|
+| S12 | reviewer 跑测试留下 `__pycache__/` 等未跟踪文件。只读 worktree 因此被判为有改动：返工时拒绝切到新提交；卡片完成后清理时又进 Needs You 问人"保留还是强制清理"，多打扰了一次 | 只读 worktree 只看已跟踪文件：未跟踪文件不阻止切换（git 切换本来就保留它们），清理时也不算未保存的工作。写 worktree 的规则不变 | Codex |
+| S13 | PM 验收看不到代码：pm 角色没有 worktree，Agent 按 `get_card` 里的 `repo`（主机上的登记源路径）去找，被隔离挡住，只能依据别人的报告验收 | pm 角色设为 readonly 时：常驻 PM 仍然没有 worktree；工作项上的 PM 验收按完成申请的 SHA 检出只读 worktree（§10.4"可选只读 clone"）。MCP 输出给 Agent 的卡片信息不再包含主机路径，代码位置以 `whoami` 的 `worktree_path` 为准 | Pi |
+| S14 | PM 验收一开始去审代码交付 D-1，被拒后才改审完成申请 D-2 | pm 的 Core Prompt 写明：工作项上的 PM 验收审的是完成申请（`kind=card_completion`），不审产出交付；常驻 PM 不直接提交审核，而是指派 PM 验收 | Pi |
+| S15 | Claude Code 的自动记忆会往 Assignment 的配置目录写记忆，Agent 的行为会随运行次数漂移 | 按 §15 D7（第一版只有固定的角色说明，演进式记忆放 Phase 3）：在预置的 settings 里关闭自动记忆，实测确认生效 | Codex |
+| S16 | 审核矩阵把完成申请 D-2 也列成等待代码审核 W-2 | 核实是读模型还是规则问题：完成申请只需要完成审核项，矩阵不应要求其他验证项 | Pi |
+| S17 | 工作项 Assignment 释放后，它的终端还在运行（PM 验收 A-5 的终端在卡片 done 后仍是 live） | 释放 Assignment 时关闭它的终端；清理循环补查已释放但终端还在的情况 | Codex |
+| S18 | worktree 删除后在 `worktrees/<project>/` 下留下空目录 | 清理时一并删除空目录 | Codex |
+
+M5.S 开始前必须修好 S12 和 S17：附录 A 场景有返工，S12 会让 reviewer 第二轮失败并多打扰用户一次。
+
 ## 5. 后续事项（M5 不处理）
 
 | 事项 | 处理 |
