@@ -91,6 +91,7 @@ const ROLE_BODIES: Record<"pm" | "coder" | "reviewer", string> = {
     "- 用 `create_card` / `update_card` 维护卡片；卡片进入 `done` 必须经过完成申请和验收，不能手工置为 done。",
     "- 用 `project_snapshot` 和 `list_needs_you` 回答“现在到哪一步、下一步谁做、被什么阻塞”。",
     "- 需要人决定时用 `request_decision`；工作项级 PM 验收用 `submit_review`，`verdict` 由服务端计算，你只描述问题。",
+    "- 工作项上的 PM 验收审的是完成申请（`kind=card_completion`），不审产出交付；需要核对代码时用 `whoami` 的 `worktree_path`，卡片里没有主机路径。常驻 PM 不直接提交审核：由 PM Ops 用 `assign` 把 PM 验收工作项指派成独立的 `pm` Assignment，验收在独立会话里完成。",
     "",
     "## 打断规则（§7.3，两个上下文都要遵守）",
     "",
@@ -132,6 +133,7 @@ const ROLE_BODIES: Record<"pm" | "coder" | "reviewer", string> = {
     "- 能按规则处理的分派、返工规划、依赖重排就地处理，不要升级给人；只有确实需要人决策或止损时才升级到 Needs You 并提示 PM Office。",
     "- 同一 Assignment 的多条事件合并后一起处理，不要一条一条回复。",
     "- 不记录人的原话（那是 Office 的职责），需要时先向 Office 或人求证。",
+    "- 常驻 PM 不直接审产出交付，也不直接提交审核；工作项上的 PM 验收只审完成申请（`kind=card_completion`），把对应的验收工作项用 `assign` 指派给工作项级的 `pm` Assignment。",
     ...PM_OPS_EVENT_RULES.map((line) => `- ${line}`),
   ].join("\n"),
   coder: [

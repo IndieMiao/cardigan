@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { type CliIo, startAssignment } from "@cardigan/cli";
 import {
+  type Assignment,
   acknowledgeRun,
   queueRun,
   type Runtime,
@@ -18,6 +19,7 @@ import {
 } from "@cardigan/git-transport";
 import { prepareReadonlyWorktree } from "@cardigan/host";
 import { parseLaunchConfig } from "@cardigan/roles";
+import { executionPaths } from "@cardigan/runtime-herdr";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { Dispatcher } from "./dispatch.js";
 import { startQueuedRun } from "./host-start.js";
@@ -48,7 +50,7 @@ const launch = {
 const launched: RuntimeLaunch[] = [];
 const ok = <T>(value: T) => ({ ok: true as const, value });
 beforeEach(async () => {
-  f = m4Fixture({ reviewer_worktree: "readonly" });
+  f = m4Fixture({ reviewer_worktree: "readonly", pm_worktree: "readonly" });
   s = m4Scenario(f);
   source = join(f.dataDir, "source");
   mkdirSync(source);
@@ -304,4 +306,100 @@ test("M5.S S6 a Dispatcher-started writer gets its worktree and branch", async (
   // A real checkout of the central baseline, on the Agent's own branch.
   expect(git(path, "symbolic-ref", "HEAD")).toBe(`refs/heads/${branch}`);
   expect(git(path, "rev-parse", "HEAD")).toBe(sha);
+});
+
+// ------------------------------------ M5.S S13: readonly pm and PM acceptance
+
+test("M5.S S13 a standing PM keeps no worktree even when the pm role is readonly", async () => {
+  const standing: Assignment = {
+    id: "A-90" as never,
+    scope: "standing",
+    standing_mode: "office",
+    role_id: "pm",
+    role_version: 1,
+    status: "active",
+    runtime_state: "not_provisioned",
+    machine_id: "local",
+    runtime_ref: null,
+    mcp_token_id: "pm-office",
+    created_at: f.clock.now(),
+  };
+  f.store.uow.run((tx) => tx.assignments.put(f.project_id, standing));
+  const run = f.apply((state, actor, ports) =>
+    queueRun(
+      state,
+      actor,
+      {
+        assignment_id: standing.id,
+        model: "fixture-model",
+        agent_cli_version: "pi fixture",
+      },
+      ports,
+    ),
+  );
+  await startQueuedRun(host(), {
+    project: f.project_id,
+    assignment: standing,
+    run,
+    bell: "standing pm",
+  });
+  const saved = f.state().assignments.find((a) => a.id === standing.id);
+  expect(saved?.worktree_path).toBeUndefined();
+  const runDirectory = executionPaths(
+    { mode: "local", dataDir: f.dataDir },
+    f.project_id,
+    standing.id,
+  ).runDir;
+  expect(launched[0]?.cwd).toBe(runDirectory);
+  expect(launched[0]?.cwd).not.toContain("worktrees");
+});
+
+test("M5.S S13 a work-item PM acceptance reads the completion at its SHA", async () => {
+  const product = f.state().deliveries.find((entry) => entry.kind === "code");
+  if (product === undefined) throw new Error("Missing product delivery");
+  f.startRun(s.reviewer);
+  f.review(s.reviewer, product);
+  f.endRun(s.reviewer);
+
+  // §4.4: the completion request binds to the current product delivery subject.
+  f.startRun(s.coder);
+  const completion = await f.deliver(s.coder, s.development.id, {
+    kind: "card_completion",
+    subject: sha,
+    verifiers: [s.acceptance.id],
+  });
+  f.endRun(s.coder);
+  expect(completion.subject.value).toBe(sha);
+
+  const run = f.apply((state, actor, ports) =>
+    queueRun(
+      state,
+      actor,
+      {
+        assignment_id: s.pmAcceptance.id,
+        model: "fixture-model",
+        agent_cli_version: "pi fixture",
+      },
+      ports,
+    ),
+  );
+  await startQueuedRun(host(), {
+    project: f.project_id,
+    assignment: s.pmAcceptance,
+    run,
+    bell: "PM acceptance",
+  });
+  const path = join(
+    f.dataDir,
+    "agent",
+    "worktrees",
+    f.project_id,
+    s.pmAcceptance.id,
+  );
+  expect(launched[0]?.cwd).toBe(path);
+  const saved = f.state().assignments.find((a) => a.id === s.pmAcceptance.id);
+  expect(saved?.worktree_path).toBe(path);
+  expect(git(path, "rev-parse", "HEAD")).toBe(sha);
+  expect(readFileSync(join(path, "version"), "utf8")).toBe("one");
+  expect(() => git(path, "symbolic-ref", "HEAD")).toThrow();
 });

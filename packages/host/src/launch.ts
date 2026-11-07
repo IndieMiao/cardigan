@@ -301,8 +301,9 @@ export async function launchRun(
       run_dir: runDir,
       work_dir: workDir,
       // GitWorktreeService owns this layout; do not run host Git in an Agent
-      // repository to discover the common dir (§12.2).
-      ...(role.worktree === "none"
+      // repository to discover the common dir (§12.2). Only an Assignment that
+      // actually got a worktree needs the repository exception (M5.S S13).
+      ...(worktree === undefined
         ? {}
         : { repository_root: join(repositoriesRoot, project) }),
       // The merged bell is the first prompt when the caller has one (M3 §3.2).

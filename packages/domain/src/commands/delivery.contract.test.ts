@@ -6,6 +6,7 @@ import {
   createCard,
   createWorkItem,
   deriveCardFields,
+  deriveReviewMatrix,
   prepareDelivery,
   type SubmitDeliveryParams,
   type SubmitReviewParams,
@@ -874,4 +875,157 @@ test("§4.4: an unreviewed delivery may not name somebody else's verifier", asyn
   expect(refused.ok).toBe(false);
   if (refused.ok) return;
   expect(refused.error.code).toBe("validation_failed");
+});
+
+/**
+ * M5.S S16: the review matrix must not ask a completion request for the code
+ * review. Built from real `createCard` and `assign` output (template work items
+ * and per-item Assignments), then driven through the real delivery/review
+ * commands, so the mapping is checked against the product's own state.
+ */
+function completionMatrixSetup() {
+  const office = actor(4, "pm");
+  const seed = fixture();
+  let state: CommandState = {
+    ...seed,
+    cards: [],
+    work_items: [],
+    runs: [],
+    deliveries: [],
+    reviews: [],
+    assignments: seed.assignments.filter((entry) => entry.scope === "standing"),
+  };
+  const created = value(
+    createCard(
+      state,
+      office,
+      {
+        title: "Completion matrix",
+        goal: "Check the matrix",
+        acceptance_criteria: ["Pass"],
+        source: { kind: "quote", text: "Pass" },
+        repo: "example/repo",
+        base_branch: "main",
+      },
+      io,
+    ),
+  );
+  state = apply(state, created);
+  const items = state.work_items.filter(
+    (item) => item.card_id === created.data.id,
+  );
+  const produce = present(items.find((item) => item.kind === "produce"));
+  const codeReview = present(
+    items.find((item) => item.template_key === "code_review"),
+  );
+  const acceptance = present(
+    items.find((item) => item.template_key === "pm_acceptance"),
+  );
+  const callers = new Map<WorkItem["id"], Actor>();
+  for (const [item, role, tools] of [
+    [produce, "coder", PM_TOOLS],
+    [codeReview, "reviewer", ["whoami", "submit_review", "finish_run"]],
+    [acceptance, "pm", ["whoami", "submit_review", "finish_run"]],
+  ] as const) {
+    const assigned = value(
+      assign(state, office, { work_item_id: item.id, role_id: role }, io),
+    );
+    state = apply(state, assigned);
+    callers.set(
+      item.id,
+      workActor(assigned.data.id, role, tools as readonly string[]),
+    );
+    state = {
+      ...state,
+      runs: [
+        ...state.runs,
+        {
+          ...run(1),
+          id: io.ids.next(state.project_id, "run"),
+          assignment_id: assigned.data.id,
+        },
+      ],
+    };
+  }
+  return {
+    state,
+    produce,
+    codeReview,
+    acceptance,
+    coder: present(callers.get(produce.id)),
+    reviewer: present(callers.get(codeReview.id)),
+    pm: present(callers.get(acceptance.id)),
+  };
+}
+
+test("M5.S S16: a completion request only waits on the PM acceptance item", async () => {
+  const setup = completionMatrixSetup();
+  const product = value(
+    await deliver(
+      setup.state,
+      {
+        work_item_id: setup.produce.id,
+        kind: "code",
+        summary: "Ready",
+        subject,
+        requested_verifiers: [setup.codeReview.id],
+      },
+      setup.coder,
+    ),
+  );
+  let state = apply(setup.state, product);
+  const codeReview = value(
+    submitReview(
+      state,
+      setup.reviewer,
+      {
+        delivery_id: product.data.id,
+        target_sha: product.data.subject.value,
+        kind: "code",
+        issues: [],
+      },
+      io,
+    ),
+  );
+  state = apply(state, codeReview);
+  const completion = value(
+    await deliver(
+      state,
+      {
+        work_item_id: setup.produce.id,
+        kind: "card_completion",
+        summary: "Complete",
+        subject,
+        requested_verifiers: [setup.acceptance.id],
+      },
+      setup.coder,
+    ),
+  );
+  state = apply(state, completion);
+  const acceptance = value(
+    submitReview(
+      state,
+      setup.pm,
+      {
+        delivery_id: completion.data.id,
+        target_sha: completion.data.subject.value,
+        kind: "product",
+        issues: [],
+      },
+      io,
+    ),
+  );
+  state = apply(state, acceptance);
+
+  const matrix = deriveReviewMatrix(
+    state.deliveries,
+    state.work_items,
+    state.reviews,
+  );
+  expect(
+    matrix.map((cell) => [cell.delivery_id, cell.work_item_id, cell.verdict]),
+  ).toEqual([
+    [product.data.id, setup.codeReview.id, "pass"],
+    [completion.data.id, setup.acceptance.id, "pass"],
+  ]);
 });

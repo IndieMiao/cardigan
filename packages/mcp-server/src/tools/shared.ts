@@ -67,6 +67,18 @@ function inScope(identity: Identity, work_items: readonly WorkItem[]): boolean {
   return work_items.some((item) => item.id === assignment.work_item_id);
 }
 
+/**
+ * The card as an Agent may see it: host paths stay on the host (§9.2, M5.S S13).
+ * An Agent finds its own checkout through `whoami().worktree_path`, never by
+ * reading the project's registered repository from the card.
+ */
+export function agentCard<T extends { readonly repo: string }>(
+  card: T,
+): Omit<T, "repo"> {
+  const { repo: _hostPath, ...rest } = card;
+  return rest;
+}
+
 export interface CardReadings {
   readonly assignments: readonly Assignment[];
   readonly deliveries: readonly Delivery[];

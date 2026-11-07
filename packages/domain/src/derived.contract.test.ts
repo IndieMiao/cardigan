@@ -31,10 +31,14 @@ const delivery = (
   n = 1,
   value = "head",
   status: DeliveryStatus = "submitted",
+  workItem = 1,
 ) => ({
   id: id("delivery", n),
   subject: { kind: "git_head" as const, value },
   status,
+  work_item_id: id("work_item", workItem),
+  kind: "code" as const,
+  requested_verifiers: [] as readonly WorkItem["id"][],
 });
 const review = (
   n: number,
@@ -120,8 +124,16 @@ test("attachments without a matching decision stay pending", () => {
 
 test("matrix uses numeric review order, matching delivery/verifier/SHA, and empty cells", () => {
   const verifiers = [
-    { id: id("work_item", 1), kind: "verify" },
-    { id: id("work_item", 2), kind: "verify" },
+    {
+      id: id("work_item", 1),
+      kind: "verify",
+      target_work_item_id: id("work_item", 1),
+    },
+    {
+      id: id("work_item", 2),
+      kind: "verify",
+      target_work_item_id: id("work_item", 1),
+    },
     { id: id("work_item", 3), kind: "produce" },
   ] as const;
   const reviews = Object.freeze([
@@ -155,13 +167,47 @@ test("matrix uses numeric review order, matching delivery/verifier/SHA, and empt
   expect(deriveReviewMatrix([], verifiers, reviews)).toEqual([]);
 });
 test("invariant 14: superseding a delivery invalidates old matrix cells even at the same SHA", () => {
-  const verifiers = [{ id: id("work_item", 1), kind: "verify" }] as const;
+  const verifiers = [
+    {
+      id: id("work_item", 1),
+      kind: "verify",
+      target_work_item_id: id("work_item", 1),
+    },
+  ] as const;
   const matrix = deriveReviewMatrix(
     [delivery(), { ...delivery(2), supersedes: id("delivery", 1) }],
     verifiers,
     [review(1)],
   );
   expect(matrix.map((cell) => cell.verdict)).toEqual([null, null]);
+});
+
+test("M5.S S16: a completion request waits only on the verifiers it requested", () => {
+  const workItems = [
+    { id: id("work_item", 1), kind: "produce" },
+    {
+      id: id("work_item", 2),
+      kind: "verify",
+      target_work_item_id: id("work_item", 1),
+    },
+    { id: id("work_item", 3), kind: "verify" },
+  ] as const;
+  const product = delivery(1, "head", "submitted", 1);
+  const completion = {
+    ...delivery(2, "head", "submitted", 1),
+    kind: "card_completion" as const,
+    requested_verifiers: [id("work_item", 3)],
+  };
+  const matrix = deriveReviewMatrix([product, completion], workItems, [
+    review(1, 1, 2),
+    review(2, 2, 3),
+  ]);
+  expect(
+    matrix.map((cell) => [cell.delivery_id, cell.work_item_id, cell.verdict]),
+  ).toEqual([
+    [id("delivery", 1), id("work_item", 2), "pass"],
+    [id("delivery", 2), id("work_item", 3), "pass"],
+  ]);
 });
 
 type Item = Pick<WorkItem, "kind" | "status" | "required">;

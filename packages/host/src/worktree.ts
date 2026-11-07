@@ -145,7 +145,14 @@ export async function prepareRoleWorktree(
   assignment: Assignment["id"],
 ): Promise<PreparedWorktree | undefined> {
   const entities = launchEntities(host.store, project, assignment);
-  if (entities.role.worktree === "none") return undefined;
+  // A standing Assignment owns no work item, so it never gets a worktree even
+  // when the role is readonly (M5.S S13): only a work-item PM acceptance reads
+  // the completion's SHA.
+  if (
+    entities.role.worktree === "none" ||
+    entities.assignment.scope !== "work_item"
+  )
+    return undefined;
   const source = host.store.getProject(project)?.repo_path;
   if (!source)
     throw new Error(`Project ${project} has no registered repository`);
