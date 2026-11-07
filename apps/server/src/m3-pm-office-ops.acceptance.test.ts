@@ -496,6 +496,10 @@ test("P01b §7.1: a Dispatcher-started Ops session keeps the narrowed tool scope
   // through the same host flow the Dispatcher uses (launchRun).
   f.runtime.gone.add(f.ops.id);
   await f.finish(f.ops);
+  // S4: Ops' own finished Run no longer rings it again, so the relaunch has to
+  // come from a real escalation (§6.4): the coder finishes without output.
+  await f.provision(f.coder);
+  await f.finish(f.coder);
   await expect.poll(launches).toBeGreaterThan(before);
 
   const fresh = new Client({ name: "pm-acceptance-relaunch", version: "1" });
@@ -513,6 +517,26 @@ test("P01b §7.1: a Dispatcher-started Ops session keeps the narrowed tool scope
   const names = (await fresh.listTools()).tools.map((tool) => tool.name);
   expect(names).not.toContain("record_decision");
   await fresh.close();
+});
+
+test("S4 §7.1: an Ops Run that ends normally raises no run_attention for Ops", async () => {
+  f = await pmFixture();
+  await f.cli("pm", "start");
+  await f.call(f.ops, "whoami");
+  await f.finish(f.ops);
+  // `run_finished` for a standing Assignment is a project-level event.
+  const seq = f.store.getUpdates({ project_id: f.project }).latest_seq;
+  await expect
+    .poll(() => f?.store.routerCursor(f.project, ""))
+    .toBeGreaterThanOrEqual(seq);
+  const own = f.store
+    .listNotifications({ project_id: f.project })
+    .filter(
+      (note) =>
+        note.recipient.kind === "pm_ops" &&
+        ["run_attention", "escalation"].includes(note.kind),
+    );
+  expect(own).toEqual([]);
 });
 
 test("P02 M3.5: pm start skips running Office and Ops without another Run or terminal", async () => {

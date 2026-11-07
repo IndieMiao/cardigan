@@ -133,7 +133,11 @@ export interface GetUpdatesResult {
 export interface AckEventsParams {
   readonly project_id: ProjectId;
   readonly assignment_id: AssignmentId;
-  readonly card_id: CardId;
+  /**
+   * The card stream, or `PROJECT_EVENT_STREAM` for project-level events — the
+   * same stream `get_updates` selects when it gets no `card_id` (S5).
+   */
+  readonly card_id: CardId | typeof PROJECT_EVENT_STREAM;
   readonly up_to_seq: number;
 }
 
@@ -359,7 +363,9 @@ export class Store {
 
       tx.cursors.put(params.project_id, {
         assignment_id: params.assignment_id,
-        card_id: params.card_id,
+        // `""` is the project-level stream; the cursor row keys streams by
+        // their event-stream id, exactly like `events.stream`.
+        card_id: params.card_id as CardId,
         acked_seq: params.up_to_seq,
       });
       return {
@@ -763,7 +769,10 @@ export class Store {
       .map((row) => JSON.parse((row as { doc: string }).doc) as TimelineEntry);
   }
 
-  #latestSequence(project_id: ProjectId, card_id?: CardId): number {
+  #latestSequence(
+    project_id: ProjectId,
+    card_id?: CardId | typeof PROJECT_EVENT_STREAM,
+  ): number {
     const row = this.#db
       .prepare(
         "SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE project_id = ? AND stream = ?",
@@ -775,7 +784,7 @@ export class Store {
   #cursor(
     project_id: ProjectId,
     assignment_id: AssignmentId,
-    card_id: CardId,
+    card_id: CardId | typeof PROJECT_EVENT_STREAM,
   ): Cursor | undefined {
     const row = this.#db
       .prepare(

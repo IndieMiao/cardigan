@@ -8,6 +8,7 @@ import {
   event,
   humanAction,
   review,
+  run,
   snapshot,
   workItem,
 } from "./fixtures.js";
@@ -404,6 +405,63 @@ test("§6.4 run finished without output is an exception for PM Ops", () => {
   });
   expect(rules(result)).toEqual(["6.4/run finished without output"]);
   expect(result.notifications[0]?.kind).toBe("run_attention");
+});
+
+test("§7.1/S4 a finished work-item Run is PM Ops' business, never its own bell", () => {
+  const result = routeEvent({
+    event: event(
+      "run_finished",
+      { run_id: "R-1", outcome: "completed" },
+      { seq: 9 },
+    ),
+    snapshot: snapshot({ runs: [run("R-1", { assignment_id: "A-1" })] }),
+  });
+  expect(recipients(result)).toEqual(["pm_ops"]);
+});
+
+test("§7.1/S4 a standing PM's own finished Run never rings it again", () => {
+  // PM Ops ends a working turn (completed, with a conclusion) and nothing was
+  // delivered: that is its normal work, not the §7.2 exception.
+  const result = routeEvent({
+    event: event(
+      "run_finished",
+      { run_id: "R-9", outcome: "completed" },
+      { seq: 9, card: false },
+    ),
+    snapshot: snapshot({
+      assignments: [
+        assignment("A-9", {
+          scope: "standing",
+          role_id: "pm",
+          standing_mode: "ops",
+        }),
+      ],
+      runs: [run("R-9", { assignment_id: "A-9" })],
+    }),
+  });
+  expect(result.notifications).toEqual([]);
+});
+
+test("§7.1/S4 a standing PM Run that failed goes to the human, not to itself", () => {
+  const result = routeEvent({
+    event: event(
+      "run_finished",
+      { run_id: "R-9", outcome: "failed" },
+      { seq: 9, card: false },
+    ),
+    snapshot: snapshot({
+      assignments: [
+        assignment("A-9", {
+          scope: "standing",
+          role_id: "pm",
+          standing_mode: "ops",
+        }),
+      ],
+      runs: [run("R-9", { assignment_id: "A-9", outcome: "failed" })],
+    }),
+  });
+  expect(recipients(result)).toEqual(["needs_you"]);
+  expect(result.notifications[0]?.kind).toBe("escalation");
 });
 
 test("§6.4 agent idle without finish_run is a watchdog escalation for PM Ops", () => {

@@ -134,7 +134,8 @@ export interface McpBackend {
   ackEvents(params: {
     readonly project_id: ProjectId;
     readonly assignment_id: AssignmentId;
-    readonly card_id: CardId;
+    /** The card stream, or `""` (the project stream) for project-level events. */
+    readonly card_id: CardId | "";
     readonly up_to_seq: number;
   }): Result<McpAckResult>;
 }

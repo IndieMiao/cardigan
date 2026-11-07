@@ -708,6 +708,28 @@ function routeRunFinished(input: RouteInput, draft: Draft): void {
   // without output; neither may interrupt the human or PM Office.
   if (outcome !== "completed" && outcome !== "failed") return;
   const run_id = payloadString(input.event.payload, "run_id");
+  // §7.1: a standing PM (Office or Ops) closes a working turn, not a
+  // deliverable; its conclusion is the summary, so finishing without a
+  // delivery is its normal outcome and never the §7.2 exception.
+  const owner = assignmentOf(
+    input,
+    input.snapshot.runs.find((candidate) => candidate.id === run_id)
+      ?.assignment_id,
+  );
+  if (owner?.scope === "standing") {
+    // §6.1: an Assignment is never woken by its own Run, so the PM's own
+    // failure goes to the human instead of looping back into another Run.
+    if (outcome === "failed")
+      note(
+        input,
+        draft,
+        recipient.needs_you(),
+        "escalation",
+        "7.3/agent execution failed",
+        `${owner.id} failed run ${run_id ?? "?"}: ${payloadString(input.event.payload, "summary") ?? "no summary"}`,
+      );
+    return;
+  }
   // §6.4: only a Run that produced nothing (no delivery, blocker or decision)
   // is an exception; one that delivered or raised something has done its job.
   const produced = [

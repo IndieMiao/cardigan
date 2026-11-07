@@ -154,6 +154,18 @@ beforeEach(async () => {
         created_at: NOW,
       });
     }
+    // Project-level events have their own stream (and seqs), so the two
+    // cursors can be shown to be independent (S5).
+    for (let seq = 1; seq <= 2; seq += 1) {
+      tx.events.append(PROJECT, {
+        id: tx.ids.nextEventId(),
+        seq,
+        type: "run_queued",
+        actor: { kind: "system", project_id: PROJECT },
+        payload: { note: `project ${seq}` },
+        created_at: NOW,
+      });
+    }
     return tokens;
   });
   tokens = issued as Record<"one" | "two", string>;
@@ -220,7 +232,38 @@ test("the project-level stream keeps starting at 0 (cursors are per card)", asyn
   const projectLevel = await call(tokens.one, "get_updates");
   expect(projectLevel.card_id).toBeNull();
   expect(projectLevel.since_seq).toBe(0);
+  expect(projectLevel.events).toHaveLength(2);
+});
+
+test("S5 ack_events without card_id acknowledges the project-level stream", async () => {
+  const acked = await call(tokens.one, "ack_events", { up_to_seq: 1 });
+  expect(acked.changed).toBe(true);
+  expect(acked.card_id).toBeNull();
+
+  const projectLevel = await call(tokens.one, "get_updates");
+  expect(projectLevel.since_seq).toBe(1);
+  expect(seqsOf(projectLevel)).toEqual([2]);
+});
+
+test("S5 the two streams keep separate cursors", async () => {
+  await call(tokens.one, "ack_events", { up_to_seq: 2 });
+
+  // The card stream is untouched by the project acknowledgement ...
+  const card = await call(tokens.one, "get_updates", { card_id: CARD });
+  expect(card.since_seq).toBe(0);
+  expect(seqsOf(card)).toEqual([1, 2, 3]);
+
+  // ... and acknowledging it does not move the project cursor back.
+  await call(tokens.one, "ack_events", { card_id: CARD, up_to_seq: 3 });
+  const projectLevel = await call(tokens.one, "get_updates");
+  expect(projectLevel.since_seq).toBe(2);
   expect(projectLevel.events).toEqual([]);
+});
+
+test("S5 a project acknowledgement cannot pass the newest project seq", async () => {
+  const rejected = await call(tokens.one, "ack_events", { up_to_seq: 3 });
+  const error = rejected.error as { message?: string } | undefined;
+  expect(error?.message).toContain("newest seq is 2");
 });
 
 test("acknowledging everything leaves an empty read", async () => {
