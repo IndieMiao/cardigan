@@ -283,6 +283,14 @@ async function reviewWork(card, runId, verdict) {
   ) {
     throw new Error(`Readonly reviewer checkout does not match ${target.id}`);
   }
+  if (who.role_id === "reviewer") {
+    mkdirSync(join(process.cwd(), "__pycache__"), { recursive: true });
+    writeFileSync(
+      join(process.cwd(), "__pycache__", `${target.id}.pyc`),
+      "fixture test cache",
+    );
+    mark(`reviewer-cache-${target.id}`);
+  }
   if (reviewBy(card, item.id, target.id)) {
     log(`${who.role_id}: already reviewed ${target.id}`);
     return;

@@ -1,5 +1,5 @@
-import { access, mkdir, readdir, writeFile } from "node:fs/promises";
-import { basename, isAbsolute, join, resolve } from "node:path";
+import { access, mkdir, readdir, rmdir, writeFile } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type {
   Assignment,
   Card,
@@ -80,6 +80,7 @@ export interface RemoveWorktreeInput {
   readonly force: boolean;
 }
 export type RemoveWorktreeOutcome =
+  | { readonly status: "already_removed" }
   | {
       readonly status: "removed";
       readonly head_sha: string;
@@ -189,7 +190,7 @@ export class GitWorktreeService {
         readonly &&
         existing.head.toLowerCase() !== input.target_sha?.toLowerCase()
       ) {
-        if (await this.git.isDirty(path))
+        if ((await this.git.changes(path)).tracked.length > 0)
           throw new Error("Review worktree has uncommitted changes");
         await this.git.fetch(repository, central);
         const target = await this.git.resolveCommit(
@@ -270,7 +271,12 @@ export class GitWorktreeService {
       ...(worktree.branch === undefined ? {} : { branch: worktree.branch }),
       head_sha,
       tracked: changes.tracked,
-      untracked: changes.untracked,
+      // Managed readonly worktrees have no Assignment branch and are detached.
+      // A writer that temporarily detaches still keeps its assigned branch.
+      untracked:
+        worktree.branch === undefined && registered.branch === undefined
+          ? []
+          : changes.untracked,
       reachable: await this.central.hasCommit(project, head_sha),
     };
   }
@@ -295,6 +301,20 @@ export class GitWorktreeService {
   async removeWorktree(
     input: RemoveWorktreeInput,
   ): Promise<RemoveWorktreeOutcome> {
+    const worktree = this.worktreeOf(
+      input.project.project_id,
+      input.assignment,
+    );
+    if (
+      !(await this.git.listWorktrees(worktree.repository)).some(
+        (w) => resolve(w.path) === worktree.path,
+      )
+    ) {
+      // A previous Git removal can leave a host-owned empty leaf. Never recurse
+      // into unregistered contents or pretend to know the removed HEAD.
+      await this.pruneEmpty(worktree.path);
+      return { status: "already_removed" };
+    }
     const summary = await this.changeSummary(input.project, input.assignment),
       dirty = summary.tracked.length + summary.untracked.length > 0;
     if (!input.force && (dirty || !summary.reachable))
@@ -309,21 +329,44 @@ export class GitWorktreeService {
         patch,
       );
     }
-    const worktree = this.worktreeOf(
-      input.project.project_id,
-      input.assignment,
-    );
     // The decision is made here; Git must not veto it because of a dirty file.
-    await this.git.removeWorktree(worktree.repository, worktree.path, {
-      force: true,
-    });
+    try {
+      await this.git.removeWorktree(worktree.repository, worktree.path, {
+        force: true,
+      });
+    } catch (error) {
+      // Agent cannot unlink a leaf from its host-owned namespace parent. Only
+      // complete a removal here if Git already emptied it; otherwise keep data.
+      await rmdir(worktree.path).catch((e) => {
+        if (code(e) !== "ENOENT") throw error;
+      });
+      if (
+        (await this.git.listWorktrees(worktree.repository)).some(
+          (w) => resolve(w.path) === worktree.path,
+        )
+      )
+        await this.git.removeWorktree(worktree.repository, worktree.path, {
+          force: true,
+        });
+    }
     if (worktree.branch !== undefined)
       await this.git.deleteBranch(worktree.repository, worktree.branch);
+    await this.pruneEmpty(worktree.path);
     return {
       status: "removed",
       head_sha: summary.head_sha,
       ...(patch_path === undefined ? {} : { patch_path }),
     };
+  }
+
+  private async pruneEmpty(path: string): Promise<void> {
+    await rmdir(path).catch((error) => {
+      if (code(error) !== "ENOENT") throw error;
+    });
+    await rmdir(dirname(path)).catch((error) => {
+      if (!["ENOENT", "ENOTEMPTY", "EEXIST"].includes(code(error) ?? ""))
+        throw error;
+    });
   }
 
   private async writePatch(

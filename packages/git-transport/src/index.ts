@@ -215,7 +215,7 @@ export class LocalGitTransport implements GitWorktreePort {
     );
     if (!registered || registered.branch)
       throw new Error("Review workspace must be detached");
-    if (await this.isDirty(path))
+    if ((await this.changes(path)).tracked.length > 0)
       throw new Error("Review worktree has uncommitted changes");
     await this.git(path, [
       "checkout",
