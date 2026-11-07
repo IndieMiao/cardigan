@@ -271,7 +271,8 @@ export function compileAssignmentLaunch(
     }
   }
   const strippedBaseFiles = base.files.map((file) => {
-    if (secretKeys.size === 0) return file;
+    if (secretKeys.size === 0 && input.role.harness !== "claude-code")
+      return file;
     try {
       const parsed = JSON.parse(file.content) as {
         env?: Record<string, string>;
@@ -282,7 +283,9 @@ export function compileAssignmentLaunch(
       );
       return {
         ...file,
-        content: `${JSON.stringify({ ...parsed, env: keptEnv }, null, 2)}\n`,
+        // D7: the per-launch --settings file also overrides an existing Claude
+        // config without editing its session history or remembered files.
+        content: `${JSON.stringify({ ...parsed, env: keptEnv, ...(input.role.harness === "claude-code" ? { autoMemoryEnabled: false } : {}) }, null, 2)}\n`,
       };
     } catch {
       return file;
@@ -439,7 +442,7 @@ chmod 00700 -- "$claude_config_dir"
 # noclobber prevents replacing a file created concurrently (or a symlink).
 if [ ! -e "$claude_config_dir/.claude.json" ] && [ ! -L "$claude_config_dir/.claude.json" ]; then
   if [ ! -e "$claude_config_dir/settings.json" ] && [ ! -L "$claude_config_dir/settings.json" ]; then
-    (umask 077; set -C; printf '%s\\n' ${quote(JSON.stringify({ theme: "dark", skipDangerousModePermissionPrompt: true }))} > "$claude_config_dir/settings.json")
+    (umask 077; set -C; printf '%s\\n' ${quote(JSON.stringify({ theme: "dark", skipDangerousModePermissionPrompt: true, autoMemoryEnabled: false }))} > "$claude_config_dir/settings.json")
   fi
   (umask 077; set -C; printf '%s\\n' ${quote(JSON.stringify({ hasCompletedOnboarding: true, lastOnboardingVersion: "2.1.318", projects: { [options.claude.workDir]: { hasTrustDialogAccepted: true } } }))} > "$claude_config_dir/.claude.json")
 fi

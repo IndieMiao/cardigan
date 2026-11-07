@@ -225,6 +225,7 @@ describe.skipIf(process.platform !== "linux")(
         const settings = {
           theme: "light",
           skipDangerousModePermissionPrompt: true,
+          autoMemoryEnabled: true,
           custom: "preserved",
         };
         await writeFile(
@@ -248,6 +249,7 @@ describe.skipIf(process.platform !== "linux")(
             settings: {
               theme: "dark",
               skipDangerousModePermissionPrompt: true,
+              autoMemoryEnabled: false,
             },
             prompt: "run=R-1\n",
           },

@@ -1147,6 +1147,24 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
       expect(existsSync(join(h.dataDir, "agent", "worktrees", PROJECT))).toBe(
         false,
       );
+      // S17: persisted "released" is insufficient. Every actual hc terminal,
+      // including PM/produce seats with no worktree, must have been removed.
+      const terminalRefs = h
+        .state()
+        .assignments.filter((a) => a.scope === "work_item" && a.runtime_ref)
+        .map((a) => a.runtime_ref);
+      expect(terminalRefs.length).toBeGreaterThan(2);
+      await expect
+        .poll(
+          () => Promise.all(terminalRefs.map((ref) => h.probeRuntime(ref))),
+          { timeout: 60_000, interval: 100 },
+        )
+        .toEqual(
+          terminalRefs.map(() => ({
+            ok: false,
+            error: expect.objectContaining({ code: "runtime_not_found" }),
+          })),
+        );
       await expect(
         h.api("GET", `/api/projects/${PROJECT}/cards/${cardId}`),
       ).resolves.toBeDefined();
