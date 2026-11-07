@@ -7,6 +7,7 @@ import type {
   Event,
   HumanAction,
   Review,
+  Run,
   TimelineEntry,
   WorkItem,
 } from "@cardigan/domain";
@@ -102,6 +103,21 @@ export const humanAction = (id = "h(1)"): HumanAction =>
     card_id: CARD_ID,
     instructions: "Connect the device",
   }) as unknown as HumanAction;
+
+export const run = (id: string, overrides: Overrides<Run> = {}): Run =>
+  ({
+    id,
+    assignment_id: "A-1",
+    trigger_event_id: "E-0",
+    kind: "initial",
+    status: "completed",
+    role_version: 1,
+    model: "fixture-model",
+    agent_cli_version: "fixture-cli",
+    outcome: "completed",
+    summary: "finished",
+    ...overrides,
+  }) as unknown as Run;
 
 export const entry = (
   seq: number,

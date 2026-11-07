@@ -14,6 +14,16 @@ import type { McpBackend } from "../backend.js";
 import { ToolError } from "../errors.js";
 
 /**
+ * Stream key of the project-level event stream.
+ *
+ * The store keys event streams by card id, with `""` for "no card"; `get_updates`
+ * and `ack_events` both fall back to it when the caller omits `card_id` (S5).
+ * Declared here as a literal so `mcp-server` keeps depending on `domain` only
+ * (§20.2); `get-updates-cursor.test.ts` exercises it against a real store.
+ */
+export const PROJECT_STREAM = "";
+
+/**
  * Read a card the token is allowed to see.
  *
  * §9.1 scopes a token to "its card and work item": a work-item assignment may
