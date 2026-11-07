@@ -46,7 +46,6 @@ function candidates(
       );
       if (
         delivery?.status !== "accepted" ||
-        delivery.kind !== "code" ||
         delivery.subject.kind !== "git_head"
       )
         return [];
@@ -113,7 +112,7 @@ export function mergePlan(state: CommandState, card_id: CardId) {
     ensure(
       deliveries.length > 0,
       "invariant_violation",
-      "No accepted Git code delivery to merge",
+      "No accepted Git delivery to merge",
     );
     if ((card.merge_policy ?? "confirm") === "confirm") {
       const q = confirmation(state.decisions, card, target);

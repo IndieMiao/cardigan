@@ -438,7 +438,7 @@ Standing Assignment (scope=project): PM Office, PM Ops — not tied to a WorkIte
 **Card**：`backlog → todo → in_progress → review → awaiting_merge → done`；任意状态都可以转为 `cancelled`。
 
 - `backlog`、`todo` 属于规划，由 PM 设置；`in_progress`、`review` 由工作项推导，规则自动更新（D4）。
-- **`done` 不由规则自动触发**：主产出工作项的负责人提交完成申请（`kind=card_completion` 的交付），写明逐条验收标准的对照、证据和已知遗留；卡片模板指定的审核者（默认 PM，可以配置为你）审核通过后，经 `completion_review_passed` 进入 `awaiting_merge`；没有 Git code 交付时同命令经 `merge_not_required` 到 `done`，否则仅合并成功经 `merge_succeeded` 到 `done`。
+- **`done` 不由规则自动触发**：主产出工作项的负责人提交完成申请（`kind=card_completion` 的交付），写明逐条验收标准的对照、证据和已知遗留；卡片模板指定的审核者（默认 PM，可以配置为你）审核通过后，经 `completion_review_passed` 进入 `awaiting_merge`；没有 Git 提交形式的交付（`subject.kind=git_head`）时同命令经 `merge_not_required` 到 `done`，否则仅合并成功经 `merge_succeeded` 到 `done`。
 - 规则只做两件事：除本次完成审核项以外的必需工作项都通过后，提醒负责人可以申请；收到申请时校验前置条件（排除本次完成审核项，其余 `required` 工作项处于成功终态；没有 open 且 `blocking` 的 Decision），并把结果展示给审核者。未满足的条件必须列为已知遗留，并关联后续卡片。本次完成审核项（开发卡中的 PM 验收）在审核通过后才置为 passed，卡片再进入合并阶段，避免前置条件循环（2026-11-04 用户确认）。
 
 `awaiting_merge --merge_conflicted--> in_progress`，`awaiting_merge --cancel--> cancelled`。派生计算保留待合并状态，`resolution=done` 只在真正 done 时写入。待合并期间拒绝新交付和审核；冲突使相应产出 accepted → changes_requested、旧完成申请 supersede、验收项 target_withdrawn 回 todo，返回执行阶段后再按原流程交付，避免修改已确认的合并集合。
@@ -1146,12 +1146,12 @@ CLI 启动、server 新开／替换审核会话、已有会话每次按铃前，
 - 只在主机独占的中心 bare 仓库内合并，不检出文件：依次 `merge-tree --write-tree`、`commit-tree`，全部成功后用 `update-ref <ref> <new> <old>` 比较更新基线。M4 不推送外部平台。
 - 前提：整卡完成审核通过、处于 awaiting_merge。模板 merge_policy 为 confirm / auto，开发卡默认 confirm；创建卡片时固定策略，旧卡缺省 confirm。主机可通过 CommandPorts.templates 注入模板配置，MCP 参数不能改策略。
 - confirm 自动生成 trigger=merge_confirmation 的人类 Decision（merge / hold），绑定当前完成申请。人或 PM Office 记录 merge 后才可合并；hold 保留待合并状态，人或 PM Ops 可用 requestMerge 重开一份确认，旧决定被 supersede。
-- 纯函数 mergePlan 校验待合并状态、当前已接受的完成申请、确认及其他阻塞；返回每个 produce 最新未 supersede 的已接受 Git code 交付，按工作项数字编号排序。未接受或尚无交付的工作项跳过，不因已知遗留阻止完成审核；前置条件仍由完成申请的 known_gaps 和后续卡片校验。没有可合并交付时同命令经 merge_not_required 完成；组装层还须校验固定 ref 与 SHA 一致。
+- 纯函数 mergePlan 校验待合并状态、当前已接受的完成申请、确认及其他阻塞；返回每个 produce 最新未 supersede 的已接受、Git 提交形式的交付（`subject.kind=git_head`，不按 `kind` 分类），按工作项数字编号排序。未接受或尚无交付的工作项跳过，不因已知遗留阻止完成审核；前置条件仍由完成申请的 known_gaps 和后续卡片校验。没有可合并交付时同命令经 merge_not_required 完成；组装层还须校验固定 ref 与 SHA 一致。
 - recordMergeResult 只允许 system，必须携带 mergePlan 的 completion_id；合并成功到 done 并发 card_merged，失败保持卡片并发 merge_failed，冲突让卡片回 in_progress、冲突产出 accepted → changes_requested。冲突会 supersede 旧完成申请、将其验收项通过 target_withdrawn 退回 todo；重新交付使旧代码审核失效，再次完成需重新确认。
 - 同一卡片／完成版本／同一结果的重放无变更或事件；其他过期完成版本结果拒绝。命令不访问 Git；M4.4 按 merge_conflicted 的工作项找到原 Assignment，消费 Router 返回的 run_kind=fix 并排修复 Run。
 - 出现冲突时，为原 Coding Assignment 创建一个修复 Run。
 - M4.3 的 `mergeIntoBase` 返回四种结果：`merged`（新顶端与前一个基线）、`conflicted`（第一份冲突交付和冲突文件列表，**不改任何 ref**）、`stale`（比较后更新失败，说明基线被别的合并或同步推进，不强写）、`noop`（计划里的交付都已是基线祖先，重复执行不会产生第二个合并提交）。合并前逐个校验交付 SHA 等于 `refs/cardigan/deliveries/<id>`，不一致就拒绝；合并提交的作者和提交者显式设为配置的 `Cardigan <cardigan@localhost>`（可配置），不继承主机的 Git 身份。
-- 合并执行循环（M4.4）与 Dispatcher 并列运行，默认每 5 秒一轮、可配置：逐项目找出 awaiting_merge 且 mergePlan 通过的卡片，先 syncFromSource 再 mergeIntoBase，最后以 system 身份 recordMergeResult。同一项目同时只跑一个合并；`stale` 不写事件，下一轮重算；`noop` 记为 merged 并取当前基线顶端（卡片要真正到 done）；Git 抛错（例如固定 ref 与计划不一致）每份完成申请只记一条 merge_failed，不逐轮刷事件。收到 SIGTERM 时先停派发，再等当前合并结束才关闭。
+- 合并执行循环（M4.4）处理 Git 提交形式的交付，doc、design 等类型不绕过默认 confirm 策略的人类确认；与 Dispatcher 并列运行，默认每 5 秒一轮、可配置：逐项目找出 awaiting_merge 且 mergePlan 通过的卡片，先 syncFromSource 再 mergeIntoBase，最后以 system 身份 recordMergeResult。同一项目同时只跑一个合并；`stale` 不写事件，下一轮重算；`noop` 记为 merged 并取当前基线顶端（卡片要真正到 done）；Git 抛错（例如固定 ref 与计划不一致）每份完成申请只记一条 merge_failed，不逐轮刷事件。收到 SIGTERM 时先停派发，再等当前合并结束才关闭。
 - 不在工作机的 worktree 里合并。
 
 ### 12.6 清理与对账
