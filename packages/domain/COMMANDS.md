@@ -26,7 +26,7 @@
 
 - `prepareDelivery` / `submitDelivery`：只允许产出工作项当前 Assignment，并要求恰好一个 running Run。摘要按 Unicode 码点限制 160；subject 必填，git_head 接受 40/64 位十六进制，artifact_sha256 接受 64 位，doc_version 为非空字符串。
 - 交付、审核和暂停自身工作项共用 activeWork：todo 产出先校验依赖再启动，ready / changes_requested 产出走 run_started；ready 验证项在有剩余轮次时才启动。启动要求当前 running Run，不把 Run 启动等同于工作项已经 in_progress。
-- requested_verifiers 必须是明确、不同的验证 WorkItemId，覆盖所有必需验证方，不能用“角色 A 或 B”绕过验证。证据来自预检，参数中的 evidence/author/run_id 不作为可信字段。
+- requested_verifiers 必须是明确、不同的验证 WorkItemId。产出交付只填 target_work_item_id 等于当前工作项的验证项，并覆盖其中所有必需项；PM 验收审完成申请，不能填入产出交付。已有工作项的目标不符或非空列表遗漏必需项时，invariant_violation 消息列出对应编号，不能用“角色 A 或 B”绕过验证。证据来自预检，参数中的 evidence/author/run_id 不作为可信字段。
 - 新产出替代该工作项的旧产出和旧完成申请：产出验证项回到 ready，失去完成申请目标的 PM 验收项回到 todo，等新完成申请再 ready。supersedes 只指向同类上一版（产出 / 完成申请），显式传入时也校验类型。完成申请只替代旧完成申请，绑定当前产出的相同 subject，保留已经通过的代码审核。
 - 主产出及 PM 验收项通过模板稳定键识别。按用户确认，前置条件排除本次 PM 验收项；其余未满足项必须有精确 precondition 键、说明及同项目后续卡片。检查结果加入 evidence，不能由调用者伪造“已通过”。
 - `submitReview`：只允许该交付请求的验证 Assignment；SHA/交付版本过期拒绝。verdict/blocking 通过 M1.2 计算，忽略客户端同名字段；普通审核使产出被接受或返工，完成审核后进入 awaiting_merge；无 Git code 交付时同命令直接 done，其余经合并后才 done。
