@@ -1,4 +1,4 @@
-import { access } from "node:fs/promises";
+import { access, lstat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { type GitCentralPort, type MergePlan, parseId } from "@cardigan/domain";
 export interface CentralProject {
@@ -186,14 +186,17 @@ export class CentralRepositoryService {
     }
     return { status: "merged", merge_sha: head, previous_sha: previous };
   }
-  async agentSource(project: CentralProject) {
+  private agentRepositoryPath(project: CentralProject): string {
     if (!/^[a-zA-Z0-9_][a-zA-Z0-9._-]*$/u.test(project.project_id))
       throw new Error("Invalid project path component");
-    const path = resolve(
+    return resolve(
       this.options.repositoriesRoot ??
         join(this.options.dataDir, "agent", "repos"),
       project.project_id,
     );
+  }
+  async agentSource(project: CentralProject) {
+    const path = this.agentRepositoryPath(project);
     return { path, uploadPack: await this.options.uploadPack?.(path) };
   }
   /** Only creates; same SHA is an idempotent success, including concurrent creation. */
@@ -230,6 +233,14 @@ export class CentralRepositoryService {
   async backupAgentBranches(project: CentralProject, machine_id: string) {
     if (machine_id !== "local")
       throw new Error("Only local machine backups are supported");
+    // No base clone before the first worktree is normal. Only this missing
+    // path is skipped: dangling links, permission and later Git/SSH errors fail.
+    try {
+      await lstat(this.agentRepositoryPath(project));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
     const repository = await this.ensureCentral(project),
       source = await this.agentSource(project);
     await this.git.fetchRefs(

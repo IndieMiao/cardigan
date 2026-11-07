@@ -31,6 +31,7 @@ import { Store, writeRole } from "@cardigan/store";
 import { loadConfig, loadSecrets } from "./config.js";
 import { CliError, EXIT } from "./errors.js";
 import {
+  announceDataDir,
   humanActor,
   resolveDataDir,
   resolveProject,
@@ -427,7 +428,7 @@ export async function runAssignmentCommand(
   io: CliIo,
 ): Promise<number> {
   const { sub, assignmentId, flags } = parseArgs(args);
-  const dataDir = resolveDataDir(io, flags["data-dir"]);
+  const dataDir = announceDataDir(io, flags["data-dir"]);
   const execution = executionFor(io, dataDir);
   await secureDataDirectory(execution);
   const store = Store.open({ dataDir });
@@ -474,7 +475,7 @@ export async function runAssignmentCommand(
       project_id,
       assignment_id: assignmentId,
       runtime,
-      dataDir: flags["data-dir"] ?? io.env.CARDIGAN_DATA_DIR ?? ".data",
+      dataDir,
       ...(flags["mcp-url"] === undefined ? {} : { mcpUrl: flags["mcp-url"] }),
     });
   } finally {

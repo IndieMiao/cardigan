@@ -18,6 +18,7 @@ import { HerdrRuntime, resolveExecutionConfig } from "@cardigan/runtime-herdr";
 import { openStore as openCardiganStore, type Store } from "@cardigan/store";
 import { CliError, EXIT } from "./errors.js";
 import {
+  announceDataDir,
   humanActor,
   resolveDataDir,
   resolveProject,
@@ -41,7 +42,7 @@ const USAGE = [
   "  cardigan worktree keep <A-n> [--quote <原话>]       保留 worktree，之后不再询问",
   "",
   "通用：--project 省略时取 CARDIGAN_PROJECT，再取数据库里唯一的项目；",
-  "      --data-dir 省略时取 CARDIGAN_DATA_DIR，再取 .data。",
+  "      --data-dir 省略时取 CARDIGAN_DATA_DIR，再取 ~/.local/share/cardigan。",
 ].join("\n");
 
 interface Args {
@@ -92,7 +93,7 @@ function assignmentId(raw: string | undefined): AssignmentId {
 }
 function open(io: CliIo, flags: Args["flags"]): Store {
   return openCardiganStore({
-    dataDir: resolveDataDir(io, optional(flags, "data-dir")),
+    dataDir: announceDataDir(io, optional(flags, "data-dir")),
   });
 }
 

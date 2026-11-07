@@ -7,7 +7,15 @@
  * `agent/*` into the central repository without touching business state.
  */
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -234,7 +242,11 @@ test("backup moves agent branches into the central repository", async () => {
   expect(errors).toEqual([]);
 });
 
-test("a failed backup is reported and leaves the previous one alone", async () => {
+test.each([
+  "corrupt clone",
+  "missing registered source",
+  "dangling clone link",
+])("S11 %s is reported and leaves the previous backup alone", async (cause) => {
   const repository = await centralWithBaseClone();
   git(base, "checkout", "-q", "-b", "agent/C-1/W-1");
   const sha = commitOn(base, "work.txt", "in progress\n");
@@ -245,7 +257,14 @@ test("a failed backup is reported and leaves the previous one alone", async () =
     report: (message) => errors.push(message),
   });
   await backup.tick(f.project_id);
-  rmSync(base, { recursive: true, force: true });
+  if (cause === "corrupt clone")
+    rmSync(join(base, ".git"), { recursive: true, force: true });
+  else if (cause === "missing registered source")
+    rmSync(source, { recursive: true, force: true });
+  else {
+    rmSync(base, { recursive: true, force: true });
+    symlinkSync(join(root, "absent-target"), base);
+  }
   await backup.tick(f.project_id);
   expect(errors.length).toBeGreaterThan(0);
   expect(
@@ -255,3 +274,60 @@ test("a failed backup is reported and leaves the previous one alone", async () =
     ),
   ).toBe(sha);
 });
+
+test.each(["local", "agent-ssh"] as const)(
+  "S11 %s skips backups before the base clone exists without hiding other errors",
+  async (mode) => {
+    const binding = new ServerGit({
+      store: f.store,
+      dataDir: f.dataDir,
+      ...(mode === "agent-ssh"
+        ? {
+            execution: {
+              mode,
+              dataDir: f.dataDir,
+              agentRoot: join(root, "agent"),
+              gid: 2001,
+              machine: "fixture-agent",
+              identityFile: join(root, "no-key"),
+              knownHostsFile: join(root, "no-known-hosts"),
+            },
+            captureAgent: async () => {
+              throw new Error("No Agent command before a clone exists");
+            },
+          }
+        : {}),
+    });
+    const backup = new BackupExecutor({
+      store: f.store,
+      git: binding,
+      report: (m) => errors.push(m),
+    });
+    await backup.tick(f.project_id);
+    await backup.tick(f.project_id);
+    expect(errors).toEqual([]);
+    expect(existsSync(join(f.dataDir, "central", `${f.project_id}.git`))).toBe(
+      false,
+    );
+  },
+);
+
+test.skipIf(process.getuid?.() === 0)(
+  "S11 inaccessible clone parent remains an error",
+  async () => {
+    await centralWithBaseClone();
+    const parent = join(f.dataDir, "agent", "repos");
+    chmodSync(parent, 0);
+    try {
+      await new BackupExecutor({
+        store: f.store,
+        git: new ServerGit({ store: f.store, dataDir: f.dataDir }),
+        report: (m) => errors.push(m),
+      }).tick(f.project_id);
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toContain("EACCES");
+    } finally {
+      chmodSync(parent, 0o700);
+    }
+  },
+);

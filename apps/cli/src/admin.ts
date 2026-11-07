@@ -1,7 +1,7 @@
 import { type ToolName, toolNames } from "@cardigan/domain";
 import { RoleVersionError, Store, writeRole } from "@cardigan/store";
 import { CliError, EXIT } from "./errors.js";
-import { resolveProject } from "./host.js";
+import { announceDataDir, resolveProject } from "./host.js";
 import type { CliIo } from "./io.js";
 import { readRoleFile, roleFromFile } from "./role-file.js";
 
@@ -160,7 +160,7 @@ export async function runAdminCommand(
   io: CliIo,
 ): Promise<number> {
   const { command, subcommand, options } = parseAdminArgs(args);
-  const dataDir = options.dataDir ?? io.env.CARDIGAN_DATA_DIR ?? ".data";
+  const dataDir = announceDataDir(io, options.dataDir);
 
   switch (command) {
     case "init":

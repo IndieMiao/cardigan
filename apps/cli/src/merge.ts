@@ -9,8 +9,8 @@ import { loadCommandState } from "@cardigan/mcp-server";
 import { openStore as openCardiganStore, type Store } from "@cardigan/store";
 import { CliError, EXIT } from "./errors.js";
 import {
+  announceDataDir,
   humanActor,
-  resolveDataDir,
   resolveProject,
   runCommand,
   systemClock,
@@ -31,7 +31,7 @@ const USAGE = [
   "  cardigan merge request <C-n>                      hold 之后重新发起合并确认",
   "",
   "通用：--project 省略时取 CARDIGAN_PROJECT，再取数据库里唯一的项目；",
-  "      --data-dir 省略时取 CARDIGAN_DATA_DIR，再取 .data。",
+  "      --data-dir 省略时取 CARDIGAN_DATA_DIR，再取 ~/.local/share/cardigan。",
 ].join("\n");
 
 interface Args {
@@ -76,7 +76,7 @@ function cardId(raw: string | undefined): CardId {
 }
 function open(io: CliIo, flags: Args["flags"]): Store {
   return openCardiganStore({
-    dataDir: resolveDataDir(io, optional(flags, "data-dir")),
+    dataDir: announceDataDir(io, optional(flags, "data-dir")),
   });
 }
 

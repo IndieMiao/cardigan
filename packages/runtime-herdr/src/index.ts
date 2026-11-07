@@ -35,11 +35,13 @@ export {
 } from "./agent-files.js";
 
 export {
+  defaultDataDirectory,
   type ExecutionConfig,
   type ExecutionEnv,
   executionPaths,
   executionPermissions,
   LOCAL_RUNTIME_WARNING,
+  resolveDataDirectory,
   resolveExecutionConfig,
 } from "./execution.js";
 
