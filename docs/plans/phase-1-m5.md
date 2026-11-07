@@ -223,6 +223,13 @@ M4.S 之后：真实 coder、reviewer、tester、designer（可以用同一个 h
 | S17 | 工作项 Assignment 释放后，它的终端还在运行（PM 验收 A-5 的终端在卡片 done 后仍是 live） | 释放 Assignment 时关闭它的终端；清理循环补查已释放但终端还在的情况 | Codex |
 | S18 | worktree 删除后在 `worktrees/<project>/` 下留下空目录 | 清理时一并删除空目录 | Codex |
 
+大仓库检查（sensen-godot，pack 2.53 GiB，2026-11-07）：只读登记后首次启动 coder 共 57 秒，包括中心仓库开启 fsck 同步、agent 基础 clone、worktree 检出。中心仓库和基础 clone 各 2.2G，worktree 约 60M；fsck 没有报错。卡片 271 秒走完，但暴露出 S19：
+
+| 编号 | 现象 | 处理 | 负责 |
+|---|---|---|---|
+| S19 | coder 交付了一个文档提交，`kind=doc`、`subject=git_head`。mergePlan 只收 `kind=code` 的交付，卡片经 `merge_not_required` 直接 done：**改动没有合并进中心仓库，也没有请用户确认合并** | 是否需要合并，以交付内容是不是 git 提交（`subject.kind=git_head`）为准，不看 `kind`；开发方案 §4.4、M4.4 一节的"Git code 交付"改为"Git 提交形式的交付"。补一条契约测试：doc 或 design 类型的 git_head 交付也进合并计划，并要求合并确认 | Codex（优先） |
+| S20 | coder 两轮都因为 `summary` 超过 160 字被拒一次 | coder 的 Core Prompt 写明 `summary` 不超过 160 字，长内容放进 `test_results`、`known_gaps` 或附件 | Pi |
+
 M5.S 开始前必须修好 S12 和 S17：附录 A 场景有返工，S12 会让 reviewer 第二轮失败并多打扰用户一次。
 
 ## 5. 后续事项（M5 不处理）
