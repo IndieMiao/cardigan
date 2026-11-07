@@ -108,7 +108,7 @@ test("§6.4 instruction goes to the work item's Assignment, or to PM Ops when un
   expect(recipients(unassigned)).toEqual(["pm_ops"]);
 });
 
-test("§6.4 delivery submitted notifies the verifying Assignments and PM Ops with a summary", () => {
+test("§6.4 delivery submitted wakes its requested verifiers, not PM Ops", () => {
   const result = routeEvent({
     event: event("delivery_submitted", {
       delivery_id: "D-1",
@@ -118,8 +118,30 @@ test("§6.4 delivery submitted notifies the verifying Assignments and PM Ops wit
       deliveries: [delivery("D-1", { requested_verifiers: ["W-2"] })],
     }),
   });
-  expect(recipients(result)).toEqual(["assignment:A-2", "pm_ops"]);
-  expect(result.notifications[1]?.summary).toContain("D-1");
+  expect(recipients(result)).toEqual(["assignment:A-2"]);
+});
+
+test("§6.4 delivery with an unowned verifier asks PM Ops to assign it", () => {
+  const result = routeEvent({
+    event: event("delivery_submitted", { delivery_id: "D-1" }),
+    snapshot: snapshot({
+      deliveries: [delivery("D-1", { requested_verifiers: ["W-3"] })],
+      work_items: [
+        ...snapshot().work_items,
+        workItem("W-3", {
+          kind: "verify",
+          role_id: "reviewer",
+          status: "todo",
+        }),
+      ],
+    }),
+  });
+  expect(recipients(result)).toEqual(["pm_ops"]);
+  expect(result.notifications[0]).toMatchObject({
+    kind: "delivery",
+    rule: "6.4/delivery submitted",
+  });
+  expect(result.notifications[0]?.summary).toContain("W-3");
 });
 
 test("§6.4 review passed wakes nobody and asks for the done checks", () => {
@@ -293,7 +315,7 @@ test("§6.4 decision requested from a role goes to that role's Assignment", () =
   expect(recipients(result)).toEqual(["assignment:A-3"]);
 });
 
-test("§6.4 decision resolved wakes every Assignment it had blocked, and PM Ops", () => {
+test("§6.4 decision resolved wakes every Assignment it had blocked, not PM Ops", () => {
   const result = routeEvent({
     event: event("decision_resolved", {
       decision_id: "q(1)",
@@ -301,8 +323,32 @@ test("§6.4 decision resolved wakes every Assignment it had blocked, and PM Ops"
     }),
     snapshot: snapshot(),
   });
-  expect(recipients(result)).toEqual(["assignment:A-2", "pm_ops"]);
+  expect(recipients(result)).toEqual(["assignment:A-2"]);
   expect(rules(result)[0]).toBe("6.4/decision resolved");
+});
+
+test("§6.4 decision resolved with an unowned blocked item asks PM Ops", () => {
+  const result = routeEvent({
+    event: event("decision_resolved", {
+      decision_id: "q(1)",
+      resume_work_items: ["W-3"],
+    }),
+    snapshot: snapshot({
+      work_items: [
+        ...snapshot().work_items,
+        workItem("W-3", {
+          kind: "verify",
+          role_id: "reviewer",
+          status: "todo",
+        }),
+      ],
+    }),
+  });
+  expect(recipients(result)).toEqual(["pm_ops"]);
+  expect(result.notifications[0]).toMatchObject({
+    kind: "decision",
+    rule: "6.4/decision resolved",
+  });
 });
 
 test("§6.4/S6 an MCP assign wakes the new Assignment so the host can start it", () => {
