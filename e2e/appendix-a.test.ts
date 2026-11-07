@@ -241,7 +241,7 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
       await call(ops, "assign", { work_item_id: product?.id, role_id: "pm" });
       const productAssignment = assignmentFor(product?.id as string);
       expect(productAssignment).toBeDefined();
-      await h.startAssignment(productAssignment?.id as string);
+      await h.awaitAgent(productAssignment?.id as string);
 
       // §4.4: nothing verifies the product confirmation, so its delivery is
       // accepted on arrival and the item is done.
@@ -274,7 +274,9 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
       });
       const coder = assignmentFor(development?.id as string);
       expect(coder).toBeDefined();
-      await h.startAssignment(coder?.id as string);
+      // M5.S S6: the assign bell alone must start the Agent — the test never
+      // runs `assignment start`. `awaitAgent` only waits for the host to do it.
+      await h.awaitAgent(coder?.id as string);
 
       // The host built the worktree and branch, and the Agent got its bell.
       const seated = await h.until(
@@ -419,7 +421,7 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
         });
         const assignment = assignmentFor(item?.id as string);
         expect(assignment).toBeDefined();
-        await h.startAssignment(assignment?.id as string);
+        await h.awaitAgent(assignment?.id as string);
       }
 
       const reviewed = await h.until(
@@ -581,7 +583,7 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
         const assignment = h
           .state()
           .assignments.find((entry) => entry.work_item_id === itemId);
-        await h.startAssignment(assignment?.id as string);
+        await h.awaitAgent(assignment?.id as string);
       }
       await h.until(
         "产品确认被接受",
@@ -599,7 +601,7 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
       const coder = h
         .state()
         .assignments.find((entry) => entry.work_item_id === development?.id);
-      await h.startAssignment(coder?.id as string);
+      await h.awaitAgent(coder?.id as string);
       const launchedCoder = h
         .state()
         .assignments.find((a) => a.id === coder?.id);
@@ -657,7 +659,7 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
         const assignment = h
           .state()
           .assignments.find((entry) => entry.work_item_id === item?.id);
-        await h.startAssignment(assignment?.id as string);
+        await h.awaitAgent(assignment?.id as string);
       }
       // Let the first rejection land, which is what starts the appendix's
       // second half.
@@ -1045,7 +1047,7 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
       });
       const pmAssignment = assignmentFor(pmAcceptance?.id as string);
       expect(pmAssignment).toBeDefined();
-      await h.startAssignment(pmAssignment?.id as string);
+      await h.awaitAgent(pmAssignment?.id as string);
 
       // PM acceptance approves the completion request: the card awaits merge
       // and a merge confirmation decision appears.

@@ -77,8 +77,15 @@ export interface E2eHarness {
   agentLog(): string;
   /** Marker files the Agents left behind (one per completed action). */
   markers(): readonly string[];
-  /** Start an Assignment the way the host does (`cardigan assignment start`). */
-  startAssignment(assignmentId: string): Promise<void>;
+  /**
+   * Wait until the host has started this Assignment (M5.S S6).
+   *
+   * Nothing is started from the test: assigning over MCP routes a bell, the
+   * Dispatcher queues the `initial` Run and opens the terminal through the same
+   * `launchRun` the CLI uses. This method only waits for that and records the
+   * hc core PID, so a crash can still be cleaned up by PID.
+   */
+  awaitAgent(assignmentId: string): Promise<void>;
   /** The Workbench URL, for the human steps of the appendix. */
   readonly webUrl: string;
   /** Call the Workbench API as the logged-in human; throws on a non-2xx. */
@@ -499,50 +506,45 @@ export async function createHarness(
     },
     webUrl,
     api,
-    async startAssignment(assignmentId: string) {
-      const output = await cardigan(
-        "assignment",
-        "start",
-        assignmentId,
-        "--project",
-        PROJECT,
-        "--data-dir",
-        dataDir,
-        "--hc-session",
-        session,
-        "--mcp-url",
-        mcpUrl,
-      );
-      // The first launch starts the core; record its PID while the socket is
-      // still there, so a crash can be cleaned up by PID.
+    async awaitAgent(assignmentId: string) {
+      // A Run the host started is the evidence that the assign bell did its
+      // job; without it the next wait would blame the wrong step.
+      const run = await harness
+        .until(
+          `a Run for ${assignmentId}`,
+          () =>
+            store.uow.read((tx) =>
+              tx.runs
+                .list(PROJECT)
+                .filter(
+                  (entry) =>
+                    entry.assignment_id === assignmentId &&
+                    !["completed", "failed", "cancelled"].includes(
+                      entry.status,
+                    ),
+                )
+                .at(-1),
+            ),
+          120_000,
+        )
+        .catch(async (error: unknown) => {
+          throw new Error(
+            `${String(error)}\nnotifications:\n${JSON.stringify(
+              store.listNotifications({ project_id: PROJECT }),
+            )}\ndispatcher errors:\n${errors.join("; ")}`,
+          );
+        });
+      // The launch started the hc core; record its PID while the socket exists.
       core.remember();
-      // Starting is only useful if the terminal exists and the Run left the
-      // queue; otherwise the next wait would blame the wrong step.
-      const run = store.uow.read((tx) =>
-        tx.runs
-          .list(PROJECT)
-          .filter(
-            (entry) =>
-              entry.assignment_id === assignmentId &&
-              !["completed", "failed", "cancelled"].includes(entry.status),
-          )
-          .at(-1),
-      );
-      if (run === undefined) {
-        throw new Error(
-          `no open Run after starting ${assignmentId}: ${output}`,
-        );
-      }
-      // The Agent must actually connect: otherwise the next `until` would blame
-      // the wrong step. Wait for its whoami line, or fail with evidence.
-      const connected = await harness
+      // The Agent must actually connect: wait for its whoami line.
+      await harness
         .until(
           `agent for ${assignmentId}`,
           () =>
             harness.agentLog().includes(`"assignment_id":"${assignmentId}"`)
               ? true
               : undefined,
-          45_000,
+          90_000,
         )
         .catch(async (error: unknown) => {
           const terminals = await exec("hc", ["ls"], {
@@ -551,10 +553,9 @@ export async function createHarness(
             .then((result) => result.stdout)
             .catch((failure: unknown) => String(failure));
           throw new Error(
-            `${String(error)}\nstart output:\n${output}\nterminals:\n${terminals}`,
+            `${String(error)}\nrun:\n${JSON.stringify(run)}\nterminals:\n${terminals}`,
           );
         });
-      void connected;
     },
     async repeatBell(ref, bell) {
       for (let n = 0; n < 2; n++) {

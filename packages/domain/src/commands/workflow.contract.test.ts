@@ -3,6 +3,7 @@ import {
   type Actor,
   assign,
   type CommandState,
+  canStartWork,
   createCard,
   createWorkItem,
   type Delivery,
@@ -567,3 +568,159 @@ test.each(actions)(
     );
   },
 );
+
+// ------------------------------------------------- M5.S S6: assign and start
+
+test("M5.S S6: canStartWork reads the real state after createCard + assign", () => {
+  const seed = fixture();
+  let state: CommandState = {
+    ...seed,
+    cards: [],
+    work_items: [],
+    assignments: seed.assignments.filter((a) => a.scope === "standing"),
+    runs: [],
+  };
+  const created = value(
+    createCard(
+      state,
+      office,
+      {
+        title: "Assign starts an Agent",
+        goal: "Ship",
+        acceptance_criteria: ["Pass"],
+        source: { kind: "quote", text: "Build" },
+        repo: "example/repo",
+        base_branch: "main",
+      },
+      io,
+    ),
+  );
+  state = apply(state, created);
+  const producer = present(
+    state.work_items.find((w) => w.template_key === "development"),
+  );
+  const verifier = present(
+    state.work_items.find((w) => w.template_key === "code_review"),
+  );
+
+  // Assigned but not started: nothing has run, so nothing is delivered yet.
+  state = apply(
+    state,
+    value(
+      assign(
+        state,
+        office,
+        { work_item_id: producer.id, role_id: producer.role_id },
+        io,
+      ),
+    ),
+  );
+  expect(state.work_items.find((item) => item.id === producer.id)?.status).toBe(
+    "todo",
+  );
+
+  // The produce item has no dependencies, so its Assignment may start now.
+  expect(
+    canStartWork({
+      item: present(state.work_items.find((item) => item.id === producer.id)),
+      work_items: state.work_items,
+    }),
+  ).toBe(true);
+
+  // The verifier is assigned too, but its target has no delivery: it waits and
+  // is woken by the delivery bell instead of the assign bell.
+  state = apply(
+    state,
+    value(
+      assign(
+        state,
+        office,
+        { work_item_id: verifier.id, role_id: verifier.role_id },
+        io,
+      ),
+    ),
+  );
+  const waitingVerifier = present(
+    state.work_items.find((item) => item.id === verifier.id),
+  );
+  expect(waitingVerifier.status).toBe("todo");
+  expect(
+    canStartWork({ item: waitingVerifier, work_items: state.work_items }),
+  ).toBe(false);
+
+  // Once the target is delivered the verifier moves to ready and can start.
+  const delivered = value(transition("verify", "todo", "target_delivered"));
+  const readyVerifier = { ...waitingVerifier, status: delivered } as WorkItem;
+  expect(
+    canStartWork({
+      item: readyVerifier,
+      work_items: [...state.work_items],
+    }),
+  ).toBe(true);
+});
+
+test("M5.S S6: a produce work item waits for an unfinished dependency", () => {
+  const seed = fixture();
+  let state: CommandState = {
+    ...seed,
+    cards: [],
+    work_items: [],
+    assignments: seed.assignments.filter((a) => a.scope === "standing"),
+    runs: [],
+  };
+  const created = value(
+    createCard(
+      state,
+      office,
+      {
+        title: "Dependencies first",
+        goal: "Ship",
+        acceptance_criteria: ["Pass"],
+        source: { kind: "quote", text: "Build" },
+        repo: "example/repo",
+        base_branch: "main",
+      },
+      io,
+    ),
+  );
+  state = apply(state, created);
+  const dependency = present(
+    state.work_items.find((w) => w.template_key === "development"),
+  );
+  const dependent = value(
+    createWorkItem(
+      state,
+      office,
+      {
+        card_id: created.data.id,
+        title: "After the development",
+        kind: "produce",
+        role_id: "coder",
+        required: false,
+        completion_criteria: ["Pass"],
+        depends_on: [dependency.id],
+      },
+      io,
+    ),
+  );
+  state = apply(state, dependent);
+  const assigned = present(
+    state.work_items.find((item) => item.id === dependent.data.id),
+  );
+  expect(assigned.status).toBe("todo");
+  expect(canStartWork({ item: assigned, work_items: state.work_items })).toBe(
+    false,
+  );
+
+  // The dependency succeeded: the same item may now start.
+  expect(
+    canStartWork({
+      item: assigned,
+      work_items: state.work_items.map((item) =>
+        item.id === dependency.id
+          ? ({ ...item, status: "accepted" } as WorkItem)
+          : item,
+      ),
+    }),
+  ).toBe(true);
+});

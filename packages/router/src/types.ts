@@ -39,6 +39,7 @@ export interface Recipient {
 
 /** What the recipient is being told, used for merging and for the inbox. */
 export type NotificationKind =
+  | "assignment"
   | "comment"
   | "instruction"
   | "delivery"
@@ -60,6 +61,7 @@ export type RuleId =
   | "6.4/work-item comment"
   | "6.4/card comment without mention"
   | "6.4/instruction"
+  | "6.4/work item assigned"
   | "6.4/delivery submitted"
   | "6.4/review passed"
   | "6.4/review rejected"

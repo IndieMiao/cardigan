@@ -266,3 +266,39 @@ test.each([false, true])(
     }
   },
 );
+
+// -------------------------------------------------- M5.S S6: writer launches
+
+test("M5.S S6 a Dispatcher-started writer gets its worktree and branch", async () => {
+  // Before S6 the Dispatcher only ever started readonly reviewers, so the host
+  // never prepared a writer's worktree: the coder started with none and could
+  // not commit. Assigning over MCP now goes through this exact path.
+  const run = f.apply((state, actor, ports) =>
+    queueRun(
+      state,
+      actor,
+      {
+        assignment_id: s.coder.id,
+        model: "fixture-model",
+        agent_cli_version: "pi fixture",
+      },
+      ports,
+    ),
+  );
+  await startQueuedRun(host(), {
+    project: f.project_id,
+    assignment: s.coder,
+    run,
+    bell: "assigned",
+  });
+  const path = join(f.dataDir, "agent", "worktrees", f.project_id, s.coder.id);
+  const branch = `agent/${s.card.id}/${s.development.id}`;
+  expect(launched[0]?.cwd).toBe(path);
+  const coder =
+    f.state().assignments.find((entry) => entry.id === s.coder.id) ?? s.coder;
+  expect(coder.worktree_path).toBe(path);
+  expect(coder.branch).toBe(branch);
+  // A real checkout of the central baseline, on the Agent's own branch.
+  expect(git(path, "symbolic-ref", "HEAD")).toBe(`refs/heads/${branch}`);
+  expect(git(path, "rev-parse", "HEAD")).toBe(sha);
+});

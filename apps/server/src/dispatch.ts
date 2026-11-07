@@ -335,13 +335,17 @@ export class Dispatcher {
         // follow-up. The router marks this as run_kind=fix; the trigger event is
         // the only place it survives, because notifications store no run kind.
         const kind =
-          event?.type === "merge_conflicted"
-            ? "fix"
-            : event?.type === "review_submitted" && cause.kind === "review"
-              ? "rework"
-              : event?.type === "decision_resolved" && a.scope === "work_item"
-                ? "decision_resumed"
-                : "followup";
+          event?.type === "work_item_assigned"
+            ? // M5.S S6: an Assignment created through MCP gets its first Run
+              // from the host, so the assign bell starts an `initial` Run.
+              "initial"
+            : event?.type === "merge_conflicted"
+              ? "fix"
+              : event?.type === "review_submitted" && cause.kind === "review"
+                ? "rework"
+                : event?.type === "decision_resolved" && a.scope === "work_item"
+                  ? "decision_resumed"
+                  : "followup";
         const effect = unwrap(
           queueRun(
             state,

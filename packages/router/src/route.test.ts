@@ -305,6 +305,60 @@ test("§6.4 decision resolved wakes every Assignment it had blocked, and PM Ops"
   expect(rules(result)[0]).toBe("6.4/decision resolved");
 });
 
+test("§6.4/S6 an MCP assign wakes the new Assignment so the host can start it", () => {
+  const result = routeEvent({
+    event: event(
+      "work_item_assigned",
+      { work_item_id: "W-1", assignment_id: "A-1" },
+      { seq: 4, actor: agent("A-3") },
+    ),
+    snapshot: snapshot({
+      work_items: [workItem("W-1", { assignment_id: "A-1", status: "todo" })],
+    }),
+  });
+  expect(recipients(result)).toEqual(["assignment:A-1"]);
+  expect(rules(result)).toEqual(["6.4/work item assigned"]);
+  expect(result.notifications[0]?.kind).toBe("assignment");
+  expect(result.notifications[0]?.work_item_id).toBe("W-1");
+});
+
+test("§6.4/S6 a verify Assignment assigned before its delivery is not woken", () => {
+  const result = routeEvent({
+    event: event(
+      "work_item_assigned",
+      { work_item_id: "W-2", assignment_id: "A-2" },
+      { seq: 4, actor: agent("A-3") },
+    ),
+    snapshot: snapshot({
+      work_items: [
+        workItem("W-2", {
+          kind: "verify",
+          role_id: "reviewer",
+          assignment_id: "A-2",
+          status: "todo",
+        }),
+      ],
+    }),
+  });
+  // The delivery bell of §6.4 wakes it later, when the target is delivered.
+  expect(result.notifications).toEqual([]);
+});
+
+test("§6.4/S6 a human `assign` stays an explicit start, so it wakes nobody", () => {
+  const result = routeEvent({
+    event: event("work_item_assigned", {
+      work_item_id: "W-1",
+      assignment_id: "A-1",
+    }),
+    snapshot: snapshot({
+      work_items: [workItem("W-1", { assignment_id: "A-1", status: "todo" })],
+    }),
+  });
+  // The human's `assign --start` queues the Run itself; a second bell here
+  // would create a second Run (§6.1 idempotency, M5.S S6).
+  expect(result.notifications).toEqual([]);
+});
+
 test("§6.4 dependency completed notifies the downstream Assignment", () => {
   const result = routeEvent({
     event: event("work_item_updated", { work_item_id: "W-1" }),
