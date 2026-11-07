@@ -129,6 +129,7 @@ export function m4Fixture(
     readonly project_id?: string;
     readonly policy?: "confirm" | "auto";
     readonly clock?: Clock;
+    readonly reviewer_worktree?: "none" | "readonly";
   } = {},
 ): M4Fixture {
   const project_id = (options.project_id ?? "p-m4") as ProjectId;
@@ -160,7 +161,7 @@ export function m4Fixture(
   for (const [role_id, tools, worktree] of [
     ["pm", PM_TOOLS, "none"],
     ["coder", CODER_TOOLS, "write"],
-    ["reviewer", REVIEWER_TOOLS, "none"],
+    ["reviewer", REVIEWER_TOOLS, options.reviewer_worktree ?? "none"],
   ] as const)
     store.uow.run((tx) =>
       writeRole(tx, project_id, role(role_id, tools, worktree), {

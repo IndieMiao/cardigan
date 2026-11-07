@@ -610,6 +610,20 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
           : {}),
         runtime_ref: launchedCoder.runtime_ref,
       };
+      // A readonly reviewer needs the real delivery SHA, not merely a connected coder.
+      await h.until(
+        "首份代码交付已提交",
+        () =>
+          h
+            .state()
+            .deliveries.find(
+              (d) =>
+                d.work_item_id === development?.id &&
+                d.kind === "code" &&
+                d.status === "submitted",
+            ),
+        120_000,
+      );
       // The three verifiers join for the development delivery.
       for (const [roleId, item] of [
         [

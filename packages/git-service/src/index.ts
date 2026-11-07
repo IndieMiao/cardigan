@@ -181,14 +181,23 @@ export class GitWorktreeService {
       (w) => w.path === path,
     );
     if (existing) {
-      if (
-        existing.branch !== branch ||
-        (readonly &&
-          existing.head.toLowerCase() !== input.target_sha?.toLowerCase())
-      )
+      if (existing.branch !== branch)
         throw new Error(
           "Existing worktree has a different branch or review target",
         );
+      if (
+        readonly &&
+        existing.head.toLowerCase() !== input.target_sha?.toLowerCase()
+      ) {
+        if (await this.git.isDirty(path))
+          throw new Error("Review worktree has uncommitted changes");
+        await this.git.fetch(repository, central);
+        const target = await this.git.resolveCommit(
+          repository,
+          input.target_sha as string,
+        );
+        await this.git.checkoutDetached(path, target);
+      }
       return {
         worktree_path: path,
         ...(branch ? { branch } : {}),

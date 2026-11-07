@@ -40,6 +40,7 @@ export interface ControlPlaneOptions {
     RuntimeMonitorOptions["runtime"];
   readonly snapshot: DispatcherOptions["snapshot"];
   readonly startRun: DispatcherOptions["startRun"];
+  readonly beforeWake?: DispatcherOptions["beforeWake"];
   readonly standing?: StandingResolver;
   readonly clock?: Clock;
   readonly intervalMs?: number;
@@ -131,6 +132,7 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
     standing,
     snapshot: options.snapshot,
     startRun: options.startRun,
+    ...(options.beforeWake ? { beforeWake: options.beforeWake } : {}),
     ...(options.deliveryLeaseMs === undefined
       ? {}
       : { deliveryLeaseMs: options.deliveryLeaseMs }),

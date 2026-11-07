@@ -11,6 +11,8 @@
   },
   "dependencies": {
     "@cardigan/domain": "workspace:*",
+    "@cardigan/git-service": "workspace:*",
+    "@cardigan/git-transport": "workspace:*",
     "@cardigan/mcp-server": "workspace:*",
     "@cardigan/roles": "workspace:*",
     "@cardigan/runtime-herdr": "workspace:*",

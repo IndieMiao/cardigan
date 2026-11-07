@@ -332,7 +332,7 @@ export async function createHarness(
   for (const [role_id, worktree, tools] of [
     ["coder", "write", DELIVERY_TOOLS],
     ["designer", "none", REVIEW_TOOLS],
-    ["reviewer", "none", REVIEW_TOOLS],
+    ["reviewer", "readonly", REVIEW_TOOLS],
     ["tester", "none", REVIEW_TOOLS],
     ["pm", "none", PM_TOOLS],
   ] as const) {
@@ -379,6 +379,7 @@ export async function createHarness(
       dispatcher: {
         runtime: host.runtime,
         snapshot: host.snapshot,
+        beforeWake: host.beforeWake,
         // Standing PM Assignments (Office/Ops) have no RuntimeRef here: their
         // conversation lives in Herdr and is driven by the human, so a scripted
         // Agent cannot stand in for them. Returning no Assignment makes every

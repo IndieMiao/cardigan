@@ -148,3 +148,9 @@ test("invariant 14: central verification reports object format, type and commit 
     Promise<number>
   >();
 });
+
+test("invariants 5, 14: readonly retargeting names the workspace and SHA, with no force option", () => {
+  expectTypeOf<GitWorktreePort["checkoutDetached"]>().parameters.toEqualTypeOf<
+    [string, string]
+  >();
+});

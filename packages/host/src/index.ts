@@ -1,4 +1,9 @@
 export {
+  type AgentGitOptions,
+  type AgentGitRunner,
+  AgentGitTransport,
+} from "./agent-git.js";
+export {
   applyCommand,
   issueAssignmentToken,
   issueTokenInTransaction,
@@ -35,3 +40,10 @@ export {
   type CaptureAgent,
   harnessBinary,
 } from "./version.js";
+export {
+  prepareReadonlyWorktree,
+  reviewTargetSha,
+  type WorktreeProvider,
+  type WorktreeRequest,
+  worktreeProvider,
+} from "./worktree.js";

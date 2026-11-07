@@ -9,7 +9,11 @@ import type {
   DispatchRunParams,
   Run,
 } from "@cardigan/domain";
-import { agentCliVersion, harnessBinary } from "@cardigan/host";
+import {
+  agentCliVersion,
+  harnessBinary,
+  prepareReadonlyWorktree,
+} from "@cardigan/host";
 import {
   type LaunchConfig,
   parseLaunchConfig,
@@ -25,6 +29,7 @@ import { getRoleVersion, type Store } from "@cardigan/store";
 import { parse as parseYaml } from "yaml";
 import { standingResolver } from "./assembly.js";
 import type { ServerEnv } from "./config.js";
+import type { DispatcherOptions } from "./dispatch.js";
 import { startQueuedRun } from "./host-start.js";
 
 const exec = promisify(execFile);
@@ -36,6 +41,7 @@ const exec = promisify(execFile);
  */
 export interface HostWiring {
   readonly runtime: HerdrRuntime;
+  readonly beforeWake: NonNullable<DispatcherOptions["beforeWake"]>;
   readonly snapshot: (
     assignment: Assignment,
   ) => Promise<Pick<Run, "model" | "agent_cli_version">>;
@@ -127,6 +133,13 @@ export async function createHostWiring(options: {
 
   return {
     runtime,
+    beforeWake: async ({ project, assignment }) => {
+      await prepareReadonlyWorktree(
+        { store: options.store, execution, runtime },
+        project,
+        assignment.id,
+      );
+    },
     standing: standingResolver(options.store),
     snapshot: async (assignment) => {
       // The port hands the Assignment without a project id; the role version

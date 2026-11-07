@@ -55,6 +55,7 @@ export async function runServer(
         runtime: host.runtime,
         snapshot: host.snapshot,
         startRun: host.startRun,
+        beforeWake: host.beforeWake,
         standing: host.standing,
         onError: (error) =>
           write(

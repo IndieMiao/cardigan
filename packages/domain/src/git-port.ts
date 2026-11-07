@@ -21,6 +21,8 @@ export interface GitWorktreePort {
     branch?: string,
   ): Promise<void>;
   isDirty(path: string): Promise<boolean>;
+  /** Retarget a clean detached review workspace; never force or discard edits. */
+  checkoutDetached(path: string, head: string): Promise<void>;
   /** The cleanup decision needs the file lists, not just a boolean. */
   changes(path: string): Promise<GitWorktreeChanges>;
   /** `git diff HEAD`: staged and unstaged changes of tracked files. */

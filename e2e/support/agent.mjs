@@ -277,6 +277,12 @@ async function reviewWork(card, runId, verdict) {
     log(`${who.role_id}: ${target.id} is ${target.status}, nothing to review`);
     return;
   }
+  if (
+    who.role_id === "reviewer" &&
+    (!who.worktree_path || git("rev-parse", "HEAD") !== target.subject.value)
+  ) {
+    throw new Error(`Readonly reviewer checkout does not match ${target.id}`);
+  }
   if (reviewBy(card, item.id, target.id)) {
     log(`${who.role_id}: already reviewed ${target.id}`);
     return;

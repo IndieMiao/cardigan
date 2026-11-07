@@ -62,6 +62,11 @@ export interface DispatcherOptions {
     bell: string;
     replacement?: DispatchRunParams["replacement"];
   }) => Promise<void>;
+  /** Refresh a readonly review checkout after claiming an idle Run, before wake. */
+  readonly beforeWake?: (input: {
+    project: ProjectId;
+    assignment: Assignment;
+  }) => Promise<void>;
 }
 const sameRef = (a: Assignment, b: Assignment) =>
   JSON.stringify(a.runtime_ref) === JSON.stringify(b.runtime_ref);
@@ -249,6 +254,10 @@ export class Dispatcher {
       reason = "delivery_failed";
     try {
       if (live && job.assignment.runtime_ref) {
+        await this.options.beforeWake?.({
+          project,
+          assignment: job.assignment,
+        });
         const result = await this.options.runtime.wake(
           job.assignment.runtime_ref,
           job.bell,
