@@ -267,7 +267,7 @@ test("M5.S S23: a related decision keeps the card route and scrolls to its row",
     );
     expect(screen.getByRole("article", { name: "卡片 C-1" })).toBeTruthy();
     await waitFor(() =>
-      expect(scroll).toHaveBeenCalledWith({ block: "start" }),
+      expect(scroll).toHaveBeenCalledWith({ block: "nearest" }),
     );
     expect(scroll.mock.contexts.at(-1)).toBe(
       document.getElementById("decision-q(2)"),
@@ -287,7 +287,7 @@ test("M5.S S23: a copied anchored card URL locates the same row after reload", a
     render(<App client={fakeClient({ card: async () => decisionCard() })} />);
     await screen.findByRole("article", { name: "卡片 C-1" });
     await waitFor(() =>
-      expect(scroll).toHaveBeenCalledWith({ block: "start" }),
+      expect(scroll).toHaveBeenCalledWith({ block: "nearest" }),
     );
     expect(scroll.mock.contexts.at(-1)).toBe(
       document.getElementById("decision-q(2)"),

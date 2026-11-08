@@ -79,3 +79,26 @@ test("an id inside a word or an existing link is left alone", () => {
 test("an empty reference list changes nothing", () => {
   expect(linkifyReferences("见 C-1", [], "p-1")).toBe("见 C-1");
 });
+
+test.each([false, true])(
+  "mixed references are scanned once, preserving addresses, longest IDs and existing Markdown (reverse=%s)",
+  (reverse) => {
+    const refs = [
+      { kind: "delivery" as const, id: "D-5" },
+      { kind: "card" as const, id: "C-1" },
+      { kind: "timeline_entry" as const, id: "C-1#98" },
+    ];
+    const body =
+      "见 D-5、C-1#98 和 C-1。已有 [C-1](#/p/p-m5s/cards/C-1?at=decision-q(4))，代码 `C-1 D-5`。\n```\nC-1#98 D-5\n```";
+    const result = linkifyReferences(
+      body,
+      reverse ? refs.reverse() : refs,
+      "p-m5s",
+      "C-1",
+    );
+    expect(result).toBe(
+      "见 [D-5 交付](#/p/p-m5s/cards/C-1?at=delivery-D-5)、[C-1#98 时间线条目](#/p/p-m5s/cards/C-1?at=entry-C-1%2398) 和 [C-1 卡片](#/p/p-m5s/cards/C-1)。已有 [C-1](#/p/p-m5s/cards/C-1?at=decision-q(4))，代码 `C-1 D-5`。\n```\nC-1#98 D-5\n```",
+    );
+    expect(linkifyReferences(result, refs, "p-m5s", "C-1")).toBe(result);
+  },
+);

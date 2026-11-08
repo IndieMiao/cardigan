@@ -396,6 +396,9 @@ async function serveProjectRoute(
     const detail = cardDetail(state, card_id, {
       now,
       ...(limit === undefined ? {} : { timelineLimit: limit }),
+      ...(url.searchParams.get("at")
+        ? { timelineAnchor: url.searchParams.get("at") ?? "" }
+        : {}),
     });
     if (detail === undefined) {
       throw new HttpRejection(404, "not_found", `card ${card_id} not found`);

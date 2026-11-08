@@ -102,7 +102,13 @@ export function IdTag({
 }
 
 /** Measure rendered lines, including wrapping and Markdown, rather than source newlines. */
-export function LongContent({ children }: { children: ReactNode }) {
+export function LongContent({
+  children,
+  lines = 6,
+}: {
+  children: ReactNode;
+  lines?: 4 | 6;
+}) {
   const ref = useRef<HTMLDivElement>(null),
     id = useId();
   const [long, setLong] = useState(false),
@@ -113,7 +119,7 @@ export function LongContent({ children }: { children: ReactNode }) {
     if (!node) return;
     const measure = () => {
       const line = Number.parseFloat(window.getComputedStyle(node).lineHeight);
-      setLong(node.scrollHeight > line * 6 + 1);
+      setLong(node.scrollHeight > line * lines + 1);
     };
     measure();
     const observer =
@@ -126,9 +132,9 @@ export function LongContent({ children }: { children: ReactNode }) {
       observer?.disconnect();
       window.removeEventListener("resize", measure);
     };
-  }, [children]);
+  }, [children, lines]);
   return (
-    <div className="long-content">
+    <div className={`long-content long-content-${lines}`}>
       <div
         ref={ref}
         onFocusCapture={() => setExpanded(true)}

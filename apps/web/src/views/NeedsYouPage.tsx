@@ -21,6 +21,7 @@ import {
   Feedback,
   Markdown,
 } from "../components/Operations.js";
+import { decisionTitle } from "../decision-labels.js";
 import { routeHash } from "../route.js";
 import { useResource } from "../useResource.js";
 
@@ -224,14 +225,6 @@ function ReviewLine({ review }: { readonly review: MergeConfirmationReview }) {
       )}
     </li>
   );
-}
-/** The system writes merge titles in English; show the confirmed Chinese copy. */
-function decisionTitle(q: NeedsDecision): string {
-  if (!isMergeConfirmation(q)) return q.question;
-  const match = /^Merge\s+(.+?)\s+into\s+(.+?)\??$/u.exec(q.question);
-  return match === null
-    ? q.question
-    : `确认把 ${match[1]} 合并到 ${match[2]}？`;
 }
 function MergeConfirmation({
   q,

@@ -180,7 +180,14 @@ export function useRouteFilters(fallback: Route) {
     filters,
     (next: Record<string, string>) =>
       navigate({
-        ...selected,
+        // A new filter selection stops spotlighting an old card anchor.
+        ...(selected.kind === "card"
+          ? {
+              kind: selected.kind,
+              projectId: selected.projectId,
+              cardId: selected.cardId,
+            }
+          : selected),
         filters: Object.fromEntries(
           Object.entries(next).filter(([, value]) => value),
         ),

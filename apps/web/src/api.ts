@@ -115,6 +115,10 @@ export interface TimelineEntryView {
   readonly id: string;
   readonly card_id: string;
   readonly event_seq: number;
+  readonly event_type?: string | null;
+  readonly author_role?: string | null;
+  readonly review_id?: string;
+  readonly decision_option?: string;
   readonly type:
     | "comment"
     | "instruction"
@@ -151,6 +155,13 @@ export interface DeliveryView {
   readonly branch?: string;
   readonly pr_url?: string;
   readonly status: string;
+  readonly supersedes?: string;
+  readonly test_results?: readonly { command: string; result: string }[];
+  readonly evidence?: readonly { kind: string; details: unknown }[];
+  readonly known_gaps?: readonly {
+    description: string;
+    followup_card_id?: string;
+  }[];
 }
 
 export interface ReviewView {
@@ -159,6 +170,15 @@ export interface ReviewView {
   readonly work_item_id: string;
   readonly verdict: string;
   readonly blocking: boolean;
+  readonly target_sha?: string;
+  readonly issues?: readonly {
+    severity: string;
+    description: string;
+    must_fix: boolean;
+    pre_existing: boolean;
+    proof?: string;
+  }[];
+  readonly recheck_required?: boolean;
 }
 
 export interface ReviewMatrixRow {
@@ -170,6 +190,7 @@ export interface ReviewMatrixRow {
 }
 
 export interface DecisionView {
+  readonly trigger?: string | null;
   readonly id: string;
   readonly question: string;
   readonly status: string;
@@ -181,6 +202,13 @@ export interface DecisionView {
     readonly impact: string;
   }[];
   readonly recommended: string;
+  readonly context?: string;
+  readonly resolution?: {
+    option: string;
+    rationale: string;
+    raw_quote: string;
+    at: string;
+  };
 }
 
 export interface HumanActionView {
@@ -228,6 +256,7 @@ export interface CardRelations {
 }
 
 export interface CardDetail {
+  readonly updated_at?: string;
   readonly project_id: string;
   readonly card: CardView;
   readonly work_items: readonly WorkItemView[];
@@ -464,6 +493,11 @@ export interface ActivityData {
   readonly counts: { returned: number; matched: number };
 }
 
+export interface CardReadOptions {
+  readonly limit?: number;
+  readonly at?: string;
+}
+
 export interface CardiganClient {
   subscribe(projectId: string, callbacks: StreamCallbacks): () => void;
   activity(projectId: string, filters: ActivityFilter): Promise<ActivityData>;
@@ -488,7 +522,11 @@ export interface CardiganClient {
   logout(): Promise<void>;
   projects(): Promise<readonly ProjectSummary[]>;
   cards(projectId: string, filter: CardFilter): Promise<CardPage>;
-  card(projectId: string, cardId: string): Promise<CardDetail>;
+  card(
+    projectId: string,
+    cardId: string,
+    options?: CardReadOptions,
+  ): Promise<CardDetail>;
   addComment(
     projectId: string,
     cardId: string,
@@ -546,9 +584,17 @@ export class HttpCardiganClient implements CardiganClient {
     );
   }
 
-  async card(projectId: string, cardId: string): Promise<CardDetail> {
+  async card(
+    projectId: string,
+    cardId: string,
+    options: CardReadOptions = {},
+  ): Promise<CardDetail> {
+    const params = new URLSearchParams();
+    if (options.limit !== undefined) params.set("limit", String(options.limit));
+    if (options.at) params.set("at", options.at);
+    const query = params.size ? `?${params}` : "";
     return this.request<CardDetail>(
-      `/api/projects/${encodeURIComponent(projectId)}/cards/${encodeURIComponent(cardId)}`,
+      `/api/projects/${encodeURIComponent(projectId)}/cards/${encodeURIComponent(cardId)}${query}`,
     );
   }
 

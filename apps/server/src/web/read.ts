@@ -243,6 +243,7 @@ export function cardDetail(
   card_id: CardId,
   options: {
     readonly timelineLimit?: number;
+    readonly timelineAnchor?: string;
     readonly now?: string;
   } = {},
 ) {
@@ -275,10 +276,32 @@ export function cardDetail(
         action.blocked_work_items.some((id) => workItemIds.has(id)),
     )
     .sort(byId);
-  const timeline = state.timeline
+  const allTimeline = state.timeline
     .filter((entry) => entry.card_id === card_id)
-    .sort((left, right) => right.event_seq - left.event_seq)
-    .slice(0, options.timelineLimit ?? DEFAULT_TIMELINE_LIMIT);
+    .sort((left, right) => right.event_seq - left.event_seq);
+  const anchor = options.timelineAnchor;
+  const review = anchor
+    ? reviews.find((r) => `review-${r.id}` === anchor)
+    : undefined;
+  const target = anchor
+    ? allTimeline.findLastIndex(
+        (entry) =>
+          [
+            `entry-${entry.id}`,
+            entry.delivery_id && `delivery-${entry.delivery_id}`,
+            entry.decision_id && `decision-${entry.decision_id}`,
+            entry.human_action_id && `human-action-${entry.human_action_id}`,
+          ].includes(anchor) ||
+          (review !== undefined &&
+            entry.type === "review" &&
+            entry.run_id === review.run_id &&
+            entry.work_item_id === review.work_item_id),
+      )
+    : -1;
+  const timeline = allTimeline.slice(
+    0,
+    Math.max(options.timelineLimit ?? DEFAULT_TIMELINE_LIMIT, target + 1),
+  );
 
   const related = state.cards
     .filter((other) => card.related_cards.includes(other.id))
@@ -318,16 +341,56 @@ export function cardDetail(
         ref.kind === "pr" ? undefined : resolved.get(`${ref.kind}:${ref.id}`);
       return value ? [value] : [];
     });
+  const events = state.events.filter((event) => event.card_id === card_id);
+  const eventBySeq = new Map(events.map((event) => [event.seq, event]));
+  const roles = new Map<string, string>(
+    state.assignments.map((a) => [a.id, a.role_id]),
+  );
+  const review_matrix = deriveReviewMatrix(deliveries, work_items, reviews);
+  const updated_at =
+    [...events.map((e) => e.created_at), card.created_at].sort().at(-1) ??
+    card.created_at;
   return {
+    updated_at,
     card: { ...card, references: references(description) },
     work_items,
-    timeline: timeline.map((entry) => ({
-      ...entry,
-      references: references(entry.body),
-    })),
+    timeline: timeline.map((entry) => {
+      const event = eventBySeq.get(entry.event_seq);
+      const reviewId =
+        event?.payload &&
+        typeof event.payload === "object" &&
+        "review_id" in event.payload
+          ? event.payload.review_id
+          : undefined;
+      const review_id =
+        entry.type === "review"
+          ? reviews.find(
+              (r) =>
+                r.id === reviewId &&
+                r.delivery_id === entry.delivery_id &&
+                r.work_item_id === entry.work_item_id,
+            )?.id
+          : undefined;
+      return {
+        ...entry,
+        event_type: event?.type ?? null,
+        ...(entry.type === "decision_resolved" &&
+        event?.payload &&
+        typeof event.payload === "object" &&
+        "option" in event.payload &&
+        typeof event.payload.option === "string"
+          ? { decision_option: event.payload.option }
+          : {}),
+        author_role: entry.author.startsWith("assignment:")
+          ? (roles.get(entry.author.slice(11)) ?? null)
+          : null,
+        ...(review_id ? { review_id } : {}),
+        references: references(entry.body),
+      };
+    }),
     deliveries,
     reviews,
-    review_matrix: deriveReviewMatrix(deliveries, work_items, reviews),
+    review_matrix,
     decisions,
     human_actions,
     attachments: attachmentViews(state, card_id),

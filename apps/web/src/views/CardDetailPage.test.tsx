@@ -72,32 +72,36 @@ test("a failed load shows the message and retries", async () => {
   expect(await screen.findByRole("heading", { level: 1 })).toBeTruthy();
 });
 
-test("the header answers the five questions", async () => {
+test("the main column and sidebar answer the five questions", async () => {
   renderCard();
   const page = await screen.findByRole("article", { name: "卡片 C-1" });
   const header = within(page).getByRole("heading", { level: 1 });
   expect(header.textContent).toContain("准备发布");
 
   const questions = [
-    ["目标是什么", "把 0.1 发出去"],
     ["进行到哪一步", "工作项 0/2 完成"],
     ["下一步该谁做", "你、reviewer"],
     ["被什么阻塞", "等你拍板 D-1"],
-    ["谁验收、依据是什么", "reviewer：还没有结论，依据 没有阻塞问题"],
   ] as const;
   for (const [question, answer] of questions) {
     const term = within(page).getByText(question);
     const value = term.parentElement?.querySelector("dd");
     expect(value?.textContent ?? "", question).toContain(answer);
   }
-  expect(page.textContent).toContain("验收标准：测试通过");
-  expect(page.textContent).toContain("最近交付：迁移脚本与回滚脚本");
+  expect(
+    within(page).getByRole("region", { name: "目标和验收标准" }).textContent,
+  ).toContain("把 0.1 发出去");
+  expect(page.textContent).toContain("测试通过");
+  expect(
+    within(page).getByRole("region", { name: "验收责任" }).textContent,
+  ).toContain("reviewer：还没有结论，依据 没有阻塞问题");
+  expect(within(page).getByRole("link", { name: "V-1 交付" })).toBeTruthy();
 });
 
 test("work items are collapsible and show owner, status and delivery", async () => {
   renderCard();
   await screen.findByRole("article", { name: "卡片 C-1" });
-  const details = screen.getByText("工作项（2）").closest("details");
+  const details = screen.getByText("工作项（0/2 完成）").closest("details");
   expect(details).not.toBeNull();
   expect((details as HTMLDetailsElement).open).toBe(true);
   expect(details?.textContent).toContain("写迁移脚本");
@@ -133,10 +137,11 @@ test("the relations section shows ids with their status", async () => {
   });
   renderCard({ card: async () => detail });
   const relations = await screen.findByRole("region", { name: "关联" });
-  expect(relations.textContent).toContain("D-1");
-  expect(relations.textContent).toContain("待拍板");
-  expect(relations.textContent).toContain("阻塞中");
-  const decision = within(relations).getByRole("link", { name: /^D-1 / });
+  const decisions = screen.getByRole("region", { name: "拍板" });
+  expect(decisions.textContent).toContain("D-1");
+  expect(decisions.textContent).toContain("待拍板");
+  expect(decisions.textContent).toContain("阻塞中");
+  const decision = within(decisions).getByRole("link", { name: /^D-1 / });
   expect(decision.getAttribute("href")).toBe(
     "#/p/p-1/cards/C-1?at=decision-D-1",
   );
@@ -230,10 +235,12 @@ test("timeline entries are typed and carry their attachments", async () => {
   await screen.findByRole("article", { name: "卡片 C-1" });
   const entries = document.querySelectorAll(".timeline-entry");
   expect(entries).toHaveLength(3);
-  expect(entries[0]?.getAttribute("data-timeline-type")).toBe("review");
-  expect(entries[0]?.textContent).toContain("审核");
+  expect(entries[0]?.getAttribute("data-timeline-type")).toBe(
+    "decision_request",
+  );
+  expect(entries[0]?.textContent).toContain("请求拍板");
   expect(entries[1]?.textContent).toContain("评论");
-  expect(entries[2]?.textContent).toContain("请求拍板");
+  expect(entries[2]?.textContent).toContain("审核");
 
   const comment = document.querySelector('[data-timeline-type="comment"]');
   const image = comment?.querySelector("img");

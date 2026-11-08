@@ -1,11 +1,13 @@
 // biome-ignore-all lint/security/noDangerouslySetInnerHtml: every HTML string
 // here comes from `renderMarkdown` (markdown-it with html off and a link
 // allow-list), never from the entry body itself.
-import type { AttachmentView } from "../api.js";
+import type { AttachmentView, CardDetail, TimelineEntryView } from "../api.js";
+import { eventLabel } from "../events.js";
 import { renderMarkdown } from "../markdown.js";
 import { linkableReferences, linkifyReferences } from "../refs.js";
 import { statusLabel } from "../status.js";
 import { EmptyState, IdTag, LongContent, Time } from "./Foundation.js";
+import { TimelineContent } from "./TimelineContent.js";
 
 /**
  * The card's timeline (M5 plan §3.7, §8.4 of the development plan).
@@ -40,17 +42,6 @@ export function authorLabel(author: string): string {
     : author;
 }
 
-function attachmentFor(
-  entryId: string,
-  attachments: readonly AttachmentView[],
-): readonly AttachmentView[] {
-  return attachments.filter(
-    (attachment) =>
-      attachment.attach_to.kind === "timeline_entry" &&
-      attachment.attach_to.id === entryId,
-  );
-}
-
 /** Split current attachments from the ones a newer upload replaced. */
 export function splitSuperseded(attachments: readonly AttachmentView[]): {
   readonly current: readonly AttachmentView[];
@@ -72,94 +63,206 @@ export interface TimelineProps {
   readonly cardId: string;
   readonly entries: readonly import("../api.js").TimelineEntryView[];
   readonly attachments: readonly AttachmentView[];
+  readonly detail?: CardDetail;
+  readonly typeFilter?: string;
+  readonly authorFilter?: string;
+  readonly anchor?: string | undefined;
 }
 
+export const timelineCategory = (entry: TimelineEntryView) =>
+  entry.type.startsWith("decision_")
+    ? "decision"
+    : ["system", "status_change"].includes(entry.type)
+      ? "system"
+      : entry.type;
+export const timelineAuthor = (entry: TimelineEntryView) =>
+  entry.author === "human"
+    ? "human"
+    : entry.author === "system"
+      ? "system"
+      : entry.author_role === "pm"
+        ? "pm"
+        : "agent";
+export const targetsEntry = (entry: TimelineEntryView, anchor?: string) =>
+  anchor !== undefined &&
+  [
+    `entry-${entry.id}`,
+    entry.delivery_id && `delivery-${entry.delivery_id}`,
+    entry.review_id && `review-${entry.review_id}`,
+    entry.decision_id && `decision-${entry.decision_id}`,
+    entry.human_action_id && `human-action-${entry.human_action_id}`,
+  ].includes(anchor);
+
+/** Group before filtering: hidden comments must not make separated system rows consecutive. */
+export function timelineGroups(entries: readonly TimelineEntryView[]) {
+  const groups: TimelineEntryView[][] = [];
+  for (const entry of [...entries].sort(
+    (a, b) =>
+      Date.parse(a.created_at) - Date.parse(b.created_at) ||
+      a.event_seq - b.event_seq,
+  )) {
+    const last = groups.at(-1),
+      previous = last?.at(-1);
+    if (
+      previous &&
+      timelineCategory(entry) === "system" &&
+      timelineCategory(previous) === "system" &&
+      entry.event_type &&
+      entry.event_type === previous.event_type &&
+      entry.author === previous.author &&
+      !entry.retracted &&
+      !previous.retracted
+    )
+      last?.push(entry);
+    else groups.push([entry]);
+  }
+  return groups;
+}
 export function Timeline({
   projectId,
   cardId,
   entries,
   attachments,
+  detail,
+  typeFilter = "",
+  authorFilter = "",
+  anchor,
 }: TimelineProps) {
-  if (entries.length === 0) {
+  const groups = timelineGroups(entries)
+    .map((group) =>
+      group.filter(
+        (entry) =>
+          ((!typeFilter || timelineCategory(entry) === typeFilter) &&
+            (!authorFilter || timelineAuthor(entry) === authorFilter)) ||
+          targetsEntry(entry, anchor),
+      ),
+    )
+    .filter((group) => group.length);
+  if (!groups.length)
     return (
-      <EmptyState>还没有时间线条目。评论、交付和审核会记录在这里。</EmptyState>
+      <EmptyState>
+        {entries.length
+          ? "没有符合筛选条件的条目。调整筛选后继续查看。"
+          : "还没有时间线条目。评论、交付和审核会记录在这里。"}
+      </EmptyState>
     );
-  }
   const seenAnchors = new Set<string>();
-  /** One alias per referenced delivery/human action, at its first timeline row. */
   const alias = (prefix: string, id: string | undefined) => {
-    if (id === undefined) return null;
-    const anchor = `${prefix}-${id}`;
-    if (seenAnchors.has(anchor)) return null;
-    seenAnchors.add(anchor);
-    return <span key={anchor} id={anchor} className="anchor-target" />;
+    if (!id) return null;
+    const anchorId = `${prefix}-${id}`;
+    if (seenAnchors.has(anchorId)) return null;
+    seenAnchors.add(anchorId);
+    return <span key={anchorId} id={anchorId} className="anchor-target" />;
+  };
+  const row = (entry: TimelineEntryView) => {
+    const related = attachments.filter(
+      (a) =>
+        (a.attach_to.kind === "timeline_entry" &&
+          a.attach_to.id === entry.id) ||
+        (entry.type === "delivery" &&
+          a.attach_to.kind === "delivery" &&
+          a.attach_to.id === entry.delivery_id),
+    );
+    const { current, superseded } = splitSuperseded(related);
+    const structured =
+      detail &&
+      ((entry.type === "delivery" &&
+        detail.deliveries.some((d) => d.id === entry.delivery_id)) ||
+        (entry.type === "review" &&
+          detail.reviews.some((r) => r.id === entry.review_id)) ||
+        (entry.type.startsWith("decision_") &&
+          detail.decisions.some((d) => d.id === entry.decision_id)));
+    return (
+      <li
+        className={`timeline-entry timeline-${entry.type}${entry.retracted ? " timeline-retracted" : ""}`}
+        key={entry.id}
+        id={`entry-${entry.id}`}
+        data-timeline-type={entry.type}
+      >
+        {alias("delivery", entry.delivery_id)}
+        {alias("review", entry.review_id)}
+        {alias("decision", entry.decision_id)}
+        {alias("human-action", entry.human_action_id)}
+        <div className="timeline-head">
+          <span className="timeline-type">
+            {TYPE_LABELS[entry.type] ?? "系统记录"}
+          </span>
+          <span className="timeline-author">
+            {entry.author.startsWith("assignment:") ? (
+              <IdTag
+                id={authorLabel(entry.author)}
+                label={entry.author_role ?? "Agent"}
+              />
+            ) : (
+              authorLabel(entry.author)
+            )}
+          </span>
+          <Time value={entry.created_at} />
+          <span className="timeline-seq">序号 {entry.event_seq}</span>
+          {entry.retracted && <span>已撤回</span>}
+        </div>
+        {structured && detail ? (
+          <TimelineContent
+            entry={entry}
+            detail={detail}
+            projectId={projectId}
+            cardId={cardId}
+          />
+        ) : (
+          <LongContent lines={entry.type === "comment" ? 4 : 6}>
+            <div
+              className="timeline-body markdown"
+              dangerouslySetInnerHTML={{
+                __html: renderMarkdown(
+                  linkifyReferences(
+                    entry.body,
+                    linkableReferences(entry.references ?? []),
+                    projectId,
+                    cardId,
+                  ),
+                ),
+              }}
+            />
+          </LongContent>
+        )}
+        {!!current.length && (
+          <ul className="attachments">
+            {current.map((attachment) => (
+              <AttachmentItem key={attachment.id} attachment={attachment} />
+            ))}
+          </ul>
+        )}
+        {!!superseded.length && (
+          <details className="superseded">
+            <summary>已取代的附件（{superseded.length}）</summary>
+            <ul className="attachments">
+              {superseded.map((attachment) => (
+                <AttachmentItem key={attachment.id} attachment={attachment} />
+              ))}
+            </ul>
+          </details>
+        )}
+      </li>
+    );
   };
   return (
     <ol className="timeline">
-      {entries.map((entry) => {
-        const all = attachmentFor(entry.id, attachments);
-        const { current, superseded } = splitSuperseded(all);
+      {groups.map((group) => {
+        const first = group[0];
+        if (!first) return null;
+        if (timelineCategory(first) !== "system") return row(first);
+        const label =
+          first.event_type === "assignment_released" && group.length > 1
+            ? `释放了 ${group.length} 个 Assignment`
+            : `${eventLabel(first.event_type ?? "")}${group.length > 1 ? `（${group.length} 条）` : ""}`;
         return (
-          <li
-            className={`timeline-entry timeline-${entry.type}${entry.retracted ? " timeline-retracted" : ""}`}
-            key={entry.id}
-            id={`entry-${entry.id}`}
-            data-timeline-type={entry.type}
-          >
-            {alias("delivery", entry.delivery_id)}
-            {alias("human-action", entry.human_action_id)}
-            <div className="timeline-head">
-              <span className="timeline-type">
-                {TYPE_LABELS[entry.type] ?? "系统记录"}
-              </span>
-              <span className="timeline-author">
-                {entry.author.startsWith("assignment:") ? (
-                  <IdTag id={authorLabel(entry.author)} label="Agent" />
-                ) : (
-                  authorLabel(entry.author)
-                )}
-              </span>
-              <Time value={entry.created_at} />
-              <span className="timeline-seq">序号 {entry.event_seq}</span>
-              {entry.retracted && (
-                <span className="timeline-retracted">已撤回</span>
-              )}
-            </div>
-            <LongContent>
-              <div
-                className="timeline-body markdown"
-                dangerouslySetInnerHTML={{
-                  __html: renderMarkdown(
-                    linkifyReferences(
-                      entry.body,
-                      linkableReferences(entry.references ?? []),
-                      projectId,
-                      cardId,
-                    ),
-                  ),
-                }}
-              />
-            </LongContent>
-            {current.length > 0 && (
-              <ul className="attachments">
-                {current.map((attachment) => (
-                  <AttachmentItem key={attachment.id} attachment={attachment} />
-                ))}
-              </ul>
-            )}
-            {superseded.length > 0 && (
-              <details className="superseded">
-                <summary>已取代的附件（{superseded.length}）</summary>
-                <ul className="attachments">
-                  {superseded.map((attachment) => (
-                    <AttachmentItem
-                      key={attachment.id}
-                      attachment={attachment}
-                    />
-                  ))}
-                </ul>
-              </details>
-            )}
+          <li className="system-group" key={first.id}>
+            <details>
+              <summary>
+                <Time value={group.at(-1)?.created_at} /> <span>{label}</span>
+              </summary>
+              <ol>{group.map(row)}</ol>
+            </details>
           </li>
         );
       })}

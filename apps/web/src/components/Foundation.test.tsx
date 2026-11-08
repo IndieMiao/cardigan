@@ -335,7 +335,7 @@ test("U1 base text wrapping protects card header panels from unbroken commit SHA
             ...detail,
             card: {
               ...detail.card,
-              why: `等待确认 ${sha}`,
+              title: `等待确认 ${sha}`,
               waiting_on: [{ kind: "review", ref: "D-1", label: sha }],
             },
           }),
@@ -343,7 +343,7 @@ test("U1 base text wrapping protects card header panels from unbroken commit SHA
       />,
     );
     const card = await screen.findByRole("article", { name: "卡片 C-1" });
-    expect(card.querySelector(".page-title p")?.textContent).toContain(sha);
+    expect(card.querySelector(".page-title h1")?.textContent).toContain(sha);
     expect(
       within(card).getByText("被什么阻塞").nextElementSibling?.textContent,
     ).toBe(sha);
@@ -355,4 +355,23 @@ test("U1 base text wrapping protects card header panels from unbroken commit SHA
   } finally {
     sheet.remove();
   }
+});
+
+test("U3 comments can fold at four rendered lines without changing the six-line default", () => {
+  const style = window.getComputedStyle(document.body);
+  style.lineHeight = "20px";
+  vi.spyOn(window, "getComputedStyle").mockReturnValue(style);
+  vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(100);
+  const view = render(
+    <LongContent lines={4}>
+      <p>Five lines</p>
+    </LongContent>,
+  );
+  expect(screen.getByRole("button", { name: "展开全文" })).toBeTruthy();
+  view.rerender(
+    <LongContent>
+      <p>Five lines</p>
+    </LongContent>,
+  );
+  expect(screen.queryByRole("button", { name: "展开全文" })).toBeNull();
 });
