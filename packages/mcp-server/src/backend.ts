@@ -97,6 +97,13 @@ export interface McpReadContext {
  * pass in. Only `domain` types appear in this surface.
  */
 export interface McpBackend {
+  /** Host metadata; read on the same connection as the active command transaction. */
+  getProject?(project_id: ProjectId):
+    | {
+        readonly repo_path: string | null;
+        readonly base_branch: string | null;
+      }
+    | undefined;
   /** Cache lookup, command and response recording share one write transaction. */
   runIdempotent<T>(
     params: {

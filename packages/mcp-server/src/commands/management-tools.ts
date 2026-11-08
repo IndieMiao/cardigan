@@ -19,8 +19,10 @@ import {
   type ToolName,
   updateCard,
   updateWorkItem,
+  validationFailed,
 } from "@cardigan/domain";
 import { z } from "zod";
+import { agentCard } from "../tools/shared.js";
 import { defineTool } from "../tools/types.js";
 import { executeCommand } from "./execute.js";
 import { entryId, id, idempotency_key } from "./schemas.js";
@@ -121,8 +123,16 @@ const schemas = {
       z.object({ kind: z.literal("quote"), text }),
       z.object({ kind: z.literal("decision"), decision_id: id("decision") }),
     ]),
-    repo: text,
-    base_branch: text,
+    repo: text
+      .describe(
+        "Defaults to the current project's registered repository when omitted.",
+      )
+      .optional(),
+    base_branch: text
+      .describe(
+        "Defaults to the current project's default base branch when omitted.",
+      )
+      .optional(),
     out_of_scope: z.array(text).optional(),
     related_cards: z.array(id("card")).optional(),
     priority: z.number().optional(),
@@ -181,6 +191,14 @@ function assignPending(...args: Parameters<typeof assign>) {
   };
 }
 
+function cardReply(result: ReturnType<typeof createCard>) {
+  if (!result.ok) return result;
+  return {
+    ok: true as const,
+    value: { ...result.value, data: agentCard(result.value.data) },
+  };
+}
+
 export function managementTools(clock?: Clock) {
   function wire<P, T>(
     name: keyof typeof schemas & ToolName,
@@ -226,12 +244,69 @@ export function managementTools(clock?: Clock) {
       "Request an action only a human can perform.",
       requestHumanAction,
     ),
+    defineTool({
+      name: "create_card",
+      description:
+        "Create a card from the development template. Omit repo to use this project's registered repository; omit base_branch to use its default base branch. Explicit values keep the existing validation rules.",
+      input: z.object({ ...schemas.create_card, idempotency_key }),
+      handler: ({ idempotency_key, ...params }, context) =>
+        executeCommand(
+          context,
+          "create_card",
+          idempotency_key,
+          params,
+          (state, actor, p, ports) => {
+            // Resolve only on a cache miss, inside the same transaction as the card.
+            // The raw request remains the idempotency fingerprint across config changes.
+            const project =
+              p.repo === undefined || p.base_branch === undefined
+                ? context.store.getProject?.(actor.project_id)
+                : undefined;
+            const repo = p.repo ?? project?.repo_path;
+            const base_branch = p.base_branch ?? project?.base_branch;
+            if (!repo)
+              return validationFailed(
+                "No registered repository; register the project repository or provide repo explicitly",
+              );
+            if (!base_branch)
+              return validationFailed(
+                "No default base branch; register the project baseline or provide base_branch explicitly",
+              );
+            const {
+              out_of_scope,
+              related_cards,
+              priority,
+              deadline,
+              template,
+              ...required
+            } = p;
+            return cardReply(
+              createCard(
+                state,
+                actor,
+                {
+                  ...required,
+                  repo,
+                  base_branch,
+                  ...(out_of_scope === undefined ? {} : { out_of_scope }),
+                  ...(related_cards === undefined ? {} : { related_cards }),
+                  ...(priority === undefined ? {} : { priority }),
+                  ...(deadline === undefined ? {} : { deadline }),
+                  ...(template === undefined ? {} : { template }),
+                },
+                ports,
+              ),
+            );
+          },
+          clock,
+        ),
+    }),
     wire(
-      "create_card",
-      "Create a card from the development template.",
-      createCard,
+      "update_card",
+      "Update card metadata or planning state.",
+      (...args: Parameters<typeof updateCard>) =>
+        cardReply(updateCard(...args)),
     ),
-    wire("update_card", "Update card metadata or planning state.", updateCard),
     wire(
       "create_work_item",
       "Create a producing or verifying work item.",
