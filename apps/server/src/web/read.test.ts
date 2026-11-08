@@ -98,6 +98,11 @@ test("the card list separates 'needs me' from 'waiting on an agent'", async () =
       counts: { total: number; needs_me: number; agent: number };
     };
     expect(body.cards.map((card) => card.id)).toEqual(["C-1", "C-2", "C-3"]);
+    expect(body.cards[0]).toMatchObject({
+      progress: { completed: 0, total: 1 },
+      updated_at: expect.any(String),
+      roles: ["coder"],
+    });
     expect(body.counts.total).toBe(3);
     expect(body.counts.needs_me).toBe(1);
     expect(body.counts.agent).toBe(1);
@@ -352,6 +357,16 @@ test("项目动态 filters by card, role and type and pages backwards", async ()
       ),
     ).toBe(true);
     expect(allBody.next_before).toBeNull();
+    expect(allBody.cards).toEqual([
+      { id: "C-1", title: expect.any(String) },
+      { id: "C-2", title: expect.any(String) },
+      { id: "C-3", title: expect.any(String) },
+    ]);
+    expect(
+      allBody.events.find(
+        (event: { card_id: string | null }) => event.card_id === "C-1",
+      ),
+    ).toMatchObject({ card_title: expect.any(String) });
 
     const byCard = await call(harness.port, `${base}?card_id=C-1`, { cookie });
     expect(
@@ -363,11 +378,21 @@ test("项目动态 filters by card, role and type and pages backwards", async ()
     const byRole = await call(harness.port, `${base}?role=pm`, { cookie });
     expect((byRole.json as { events: unknown[] }).events).toHaveLength(2);
 
+    const byActor = await call(harness.port, `${base}?actor=pm`, { cookie });
+    expect((byActor.json as { events: unknown[] }).events).toHaveLength(2);
+
     const byType = await call(harness.port, `${base}?type=comment_added`, {
       cookie,
     });
     expect((byType.json as { events: { type: string }[] }).events).toEqual([
       expect.objectContaining({ type: "comment_added", role: "human" }),
+    ]);
+
+    const byCategory = await call(harness.port, `${base}?category=comment`, {
+      cookie,
+    });
+    expect((byCategory.json as { events: { type: string }[] }).events).toEqual([
+      expect.objectContaining({ type: "comment_added" }),
     ]);
 
     const page = await call(harness.port, `${base}?limit=2`, { cookie });

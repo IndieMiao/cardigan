@@ -385,6 +385,7 @@ test("§8.6: 项目动态 filters, paginates before the cursor, and shows payloa
   const event = {
     id: "E-3",
     card_id: "C-1",
+    card_title: "准备发布",
     seq: 3,
     type: "instruction_issued",
     role: "human",
@@ -396,6 +397,7 @@ test("§8.6: 项目动态 filters, paginates before the cursor, and shows payloa
     path.includes("before=")
       ? { events: [], next_before: null, counts: { returned: 0, matched: 0 } }
       : {
+          cards: [{ id: "C-1", title: "准备发布" }],
           events: [event],
           next_before: "2026-01-01T00:00:00.000Z",
           counts: { returned: 1, matched: 2 },
@@ -403,18 +405,18 @@ test("§8.6: 项目动态 filters, paginates before the cursor, and shows payloa
   );
   render(<ActivityPage client={server.client} projectId="p-1" />);
   await screen.findByText(/指令/);
-  fireEvent.change(screen.getByLabelText("卡片编号"), {
+  fireEvent.change(screen.getByLabelText("卡片"), {
     target: { value: "C-1" },
   });
-  fireEvent.change(screen.getByLabelText("角色"), {
+  fireEvent.change(screen.getByLabelText("发言方"), {
     target: { value: "human" },
   });
-  fireEvent.change(screen.getByLabelText("事件类型"), {
-    target: { value: "instruction_issued" },
+  fireEvent.change(screen.getByLabelText("事件类别"), {
+    target: { value: "comment" },
   });
   await waitFor(() =>
     expect(server.calls.at(-1)?.path).toContain(
-      "/activity?card_id=C-1&role=human&type=instruction_issued",
+      "/activity?card_id=C-1&actor=human&category=comment",
     ),
   );
   const details = document.querySelector("details.event-details");
@@ -465,8 +467,14 @@ test("§8.5: the execution view offers copyable commands only and hides start wh
     machines: [],
   }));
   render(<ExecutionPage client={server.client} projectId="p-1" />);
-  const row = await screen.findByRole("article", { name: "执行 A-1" });
-  expect(row.textContent).toContain("失联");
+  fireEvent.change(screen.getByLabelText("筛选"), {
+    target: { value: "all" },
+  });
+  const toggle = await screen.findByRole("button", {
+    name: "展开 A-1 详情",
+  });
+  expect(toggle.closest("tr")?.textContent).toContain("失联");
+  fireEvent.click(toggle);
   expect(
     screen.queryByRole("button", { name: "复制启动或恢复会话" }),
   ).toBeNull();

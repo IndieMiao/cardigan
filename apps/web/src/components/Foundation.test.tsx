@@ -200,53 +200,62 @@ test("U1 shell orders Needs You first with its count, then work and runtime grou
 });
 
 test("U1 list filters survive a copied route, chip removal, back navigation and remount", async () => {
-  window.location.hash = "#/p/p-1/list?filter=needs_me&q=%E5%87%86%E5%A4%87";
+  window.location.hash =
+    "#/p/p-1/list?status=in_progress&next=human&q=%E5%87%86%E5%A4%87";
   const cards = vi.fn(fakeClient().cards),
     client = fakeClient({ cards });
   const page = render(
     <CardListPage client={client} projectId="p-1" view="list" />,
   );
   await screen.findByText("准备发布");
-  expect(cards).toHaveBeenLastCalledWith("p-1", "needs_me");
+  expect(cards).toHaveBeenLastCalledWith("p-1", "all");
   expect(
     (screen.getByLabelText("搜索标题或编号") as HTMLInputElement).value,
   ).toBe("准备");
-  fireEvent.click(screen.getByRole("button", { name: "移除下一步筛选" }));
+  expect(
+    (screen.getByRole("checkbox", { name: "进行中" }) as HTMLInputElement)
+      .checked,
+  ).toBe(true);
+  fireEvent.click(screen.getByRole("button", { name: "移除下一步谁做筛选" }));
   expect(parseRoute(window.location.hash)).toMatchObject({
     kind: "list",
-    filters: { q: "准备" },
+    filters: { status: "in_progress", q: "准备" },
   });
-  await waitFor(() => expect(cards).toHaveBeenLastCalledWith("p-1", "all"));
   act(() => {
-    window.location.hash = "#/p/p-1/list?filter=agent";
+    window.location.hash = "#/p/p-1/list?status=done&next=none";
     window.dispatchEvent(new HashChangeEvent("hashchange"));
   });
-  await waitFor(() => expect(cards).toHaveBeenLastCalledWith("p-1", "agent"));
+  await waitFor(() =>
+    expect(
+      (screen.getByRole("checkbox", { name: "已完成" }) as HTMLInputElement)
+        .checked,
+    ).toBe(true),
+  );
   page.unmount();
   render(<CardListPage client={client} projectId="p-1" view="list" />);
-  expect((screen.getByLabelText("下一步") as HTMLSelectElement).value).toBe(
-    "agent",
+  expect((screen.getByLabelText("下一步谁做") as HTMLSelectElement).value).toBe(
+    "none",
   );
 });
 
 test("U1 activity restores filters and pagination without losing project identity", async () => {
   window.location.hash =
-    "#/p/p-1/activity?role=pm&type=run_started&card_id=C-1&before=e%2F2";
+    "#/p/p-1/activity?actor=pm&category=run&card_id=C-1&before=e%2F2";
   const activity = vi.fn(fakeClient().activity);
   render(<ActivityPage client={fakeClient({ activity })} projectId="p-1" />);
   await waitFor(() =>
     expect(activity).toHaveBeenLastCalledWith("p-1", {
-      role: "pm",
-      type: "run_started",
+      actor: "pm",
+      category: "run",
       card_id: "C-1",
       before: "e/2",
     }),
   );
-  fireEvent.click(screen.getByRole("button", { name: "移除角色筛选" }));
+  fireEvent.click(screen.getByRole("button", { name: "移除发言方筛选" }));
   expect(parseRoute(window.location.hash)).toEqual({
     kind: "activity",
     projectId: "p-1",
-    filters: { type: "run_started", card_id: "C-1" },
+    filters: { category: "run", card_id: "C-1" },
   });
 });
 
@@ -298,6 +307,11 @@ test("U1 shell fixes the sidebar to the viewport and maps pass to the done colou
     ),
   ).toContain("grid-column: 2;");
   expect(css).toContain("--status-done: #2e7d4f;");
+  const multiStart = css.indexOf(".filter-multi {"),
+    multi = css.slice(multiStart, css.indexOf("}", multiStart) + 1);
+  expect(multi).toContain("display: grid;");
+  expect(css).toContain(".filter-multi-options {");
+  expect(css).toContain(".activity-list .event-details {");
   const doneStart = css.indexOf(".status-passed::before"),
     doneGroup = css.slice(doneStart, css.indexOf("}", doneStart));
   expect(doneGroup).toContain(".status-pass::before");

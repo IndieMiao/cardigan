@@ -35,7 +35,7 @@ import {
   activity,
   type CardFilter,
   cardDetail,
-  cardViews,
+  cardListViews,
   executionView,
   InvalidQuery,
   needsMe,
@@ -368,7 +368,7 @@ async function serveProjectRoute(
         error instanceof InvalidQuery ? error.message : "unknown filter",
       );
     }
-    const cards = cardViews(state);
+    const cards = cardListViews(state);
     const selected = cards.filter((card) =>
       filter === "needs_me"
         ? needsMe(card)
@@ -421,7 +421,7 @@ async function serveProjectRoute(
   }
 
   if (rest === "/activity") {
-    sendJson(res, 200, activity(state, activityQuery(url)));
+    sendJson(res, 200, activity(state, activityQuery(url), now));
     return;
   }
 
@@ -433,7 +433,10 @@ function activityQuery(url: URL): ActivityQuery {
   const query: {
     card_id?: CardId;
     role?: string;
+    actor?: string;
     type?: string;
+    category?: string;
+    range?: string;
     before?: string;
     limit?: number;
   } = {};
@@ -441,8 +444,15 @@ function activityQuery(url: URL): ActivityQuery {
   if (card_id !== null && card_id.length > 0) query.card_id = card_id as CardId;
   const role = url.searchParams.get("role");
   if (role !== null && role.length > 0) query.role = role;
+  const actor = url.searchParams.get("actor");
+  if (actor !== null && actor.length > 0) query.actor = actor;
   const type = url.searchParams.get("type");
   if (type !== null && type.length > 0) query.type = type;
+  const category = url.searchParams.get("category");
+  if (category !== null && category.length > 0) query.category = category;
+  const range = url.searchParams.get("range");
+  if (range !== null && ["24h", "7d", "30d"].includes(range))
+    query.range = range;
   const before = url.searchParams.get("before");
   if (before !== null && before.length > 0) query.before = before;
   const limit = numberParam(url.searchParams.get("limit"));
