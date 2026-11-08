@@ -40,6 +40,7 @@ const q = (overrides: Partial<NeedsDecision> = {}): NeedsDecision => ({
 const merge = (overrides: Partial<NeedsDecision> = {}): NeedsDecision =>
   q({
     id: "q(3)",
+    question: "Merge C-2 into main?",
     trigger: "merge_confirmation",
     why: "确认合并",
     merge_confirmation: {
@@ -178,6 +179,9 @@ test("decision cards collapse the background, do not preselect an option and exp
     />,
   );
   const card = await screen.findByRole("article", { name: "拍板 q(1)" });
+  expect(within(card).getAllByText("要发布吗？")).toHaveLength(1);
+  expect(within(card).queryByText("待拍板")).toBeNull();
+  expect(within(card).queryByText("等待合并确认")).toBeNull();
   expect(screen.getByText("这是需要折叠的完整背景。")).toBeTruthy();
   const background = within(card).getByText("背景").closest("details");
   expect(background?.open).toBe(false);
@@ -249,6 +253,9 @@ test("merge confirmation lists the deliveries, reviews and known gaps and record
     />,
   );
   const card = await screen.findByRole("article", { name: "合并确认 q(3)" });
+  expect(within(card).getByRole("heading", { level: 3 }).textContent).toBe(
+    "确认把 C-2 合并到 main？",
+  );
   const deliveries = within(card).getByRole("region", { name: "要合并的交付" });
   expect(deliveries.textContent).toContain("实现");
   expect(deliveries.textContent).toContain("增加 --json 输出");

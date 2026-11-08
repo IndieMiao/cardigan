@@ -266,7 +266,7 @@ test("§8.2/M5.4: a stream-triggered refresh keeps the human's draft and shows t
   const second = page({
     decisions: [
       decision({ id: "q(1)" }),
-      decision({ id: "q(4)", why: "新出现的拍板" }),
+      decision({ id: "q(4)", question: "新出现的拍板？" }),
     ],
   });
   const needsYou = vi
@@ -336,7 +336,7 @@ test("§8.6/M5.4: after a reconnect the Needs You view refetches and catches up 
     incidents: [],
     decisions: [
       decision(),
-      decision({ id: "q(7)", why: "断线期间出现的拍板" }),
+      decision({ id: "q(7)", question: "断线期间出现的拍板？" }),
     ],
   });
   const previous = connections.at(-1);
@@ -362,7 +362,8 @@ test("§3.2/§14: Agent-written decision text stays text and unsafe links never 
       decision({
         question:
           '<img src=x onerror="alert(1)"> [点我](javascript:alert(1)) 见 C-1',
-        why: "恶意原因 <script>alert(1)</script>",
+        context: '<img src=x onerror="alert(1)"> <script>alert(1)</script>',
+        why: "恶意原因",
       }),
     ],
   });
@@ -376,8 +377,8 @@ test("§3.2/§14: Agent-written decision text stays text and unsafe links never 
   expect(document.querySelector("img")).toBeNull();
   expect(document.querySelector("script")).toBeNull();
   expect(document.querySelector('a[href^="javascript:"]')).toBeNull();
-  expect(screen.getByText(/<img src=x onerror/)).toBeTruthy();
-  expect(screen.getByText(/<script>alert\(1\)<\/script>/)).toBeTruthy();
+  expect(document.body.textContent).toContain('<img src=x onerror="alert(1)">');
+  expect(document.body.textContent).toContain("<script>alert(1)</script>");
 });
 
 test("§8.6: 项目动态 filters, paginates before the cursor, and shows payloads as escaped text", async () => {

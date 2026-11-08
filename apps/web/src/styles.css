@@ -242,9 +242,10 @@ button.quiet,
   grid-template-columns: 220px minmax(0, 1fr);
 }
 .sidebar {
-  position: sticky;
-  top: 0;
-  height: 100vh;
+  position: fixed;
+  inset: 0 auto 0 0;
+  width: 220px;
+  height: auto;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -307,6 +308,7 @@ button.quiet,
   text-align: left;
 }
 .content {
+  grid-column: 2;
   padding: 28px 32px;
   min-width: 0;
   width: 100%;
@@ -1023,9 +1025,6 @@ fieldset.filters {
   border-top: 3px solid var(--accent);
   padding: 20px;
 }
-.needs-item.needs-merge {
-  border-left: 4px solid var(--status-review);
-}
 .needs-item.needs-decision.urgent {
   border-left: 4px solid var(--danger);
 }
@@ -1239,6 +1238,7 @@ fieldset.filters {
   background: var(--danger);
 }
 .status-passed::before,
+.status-pass::before,
 .status-accepted::before,
 .status-resolved::before,
 .status-completed::before,

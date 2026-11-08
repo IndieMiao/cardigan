@@ -75,10 +75,7 @@ function DecisionMeta({
     <header className="needs-meta">
       <IdTag id={q.id} label={isMergeConfirmation(q) ? "合并确认" : "拍板"} />
       {q.blocking && <StatusTag status="blocked" />}
-      {q.category !== "general" && <StatusTag status="needs_attention" />}
-      <StatusTag status={q.status} />
       <span className="hint">{waitLabel(q.waited_ms, elapsed)}</span>
-      <span className="hint needs-why">{q.why}</span>
       <span className="needs-cards">
         {q.related_cards.length === 0 ? (
           <span>项目级事项</span>
@@ -228,6 +225,14 @@ function ReviewLine({ review }: { readonly review: MergeConfirmationReview }) {
     </li>
   );
 }
+/** The system writes merge titles in English; show the confirmed Chinese copy. */
+function decisionTitle(q: NeedsDecision): string {
+  if (!isMergeConfirmation(q)) return q.question;
+  const match = /^Merge\s+(.+?)\s+into\s+(.+?)\??$/u.exec(q.question);
+  return match === null
+    ? q.question
+    : `确认把 ${match[1]} 合并到 ${match[2]}？`;
+}
 function MergeConfirmation({
   q,
   client,
@@ -244,7 +249,7 @@ function MergeConfirmation({
   return (
     <article className="needs-item needs-merge" aria-label={`合并确认 ${q.id}`}>
       <DecisionMeta q={q} projectId={projectId} elapsed={elapsed} />
-      <h3 className="needs-question">{q.question}</h3>
+      <h3 className="needs-question">{decisionTitle(q)}</h3>
       <section className="needs-merge-section" aria-label="要合并的交付">
         <h4>要合并的交付</h4>
         {!merge || merge.deliveries.length === 0 ? (
