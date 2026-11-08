@@ -7,13 +7,21 @@ import {
   type WorkItemView,
 } from "../api.js";
 import { CommentBox, type MentionOption } from "../components/CommentBox.js";
-import { decisionStatusLabel, Timeline } from "../components/Timeline.js";
+import {
+  EmptyState,
+  IdTag,
+  LongContent,
+  PageTitle,
+  StatusTag,
+} from "../components/Foundation.js";
+import { Timeline } from "../components/Timeline.js";
 import { isHttpLink } from "../markdown.js";
 import { routeHash } from "../route.js";
 import {
   cardStatusLabel,
   type nextOwnerLabel,
   nextOwnersLabel,
+  statusLabel,
 } from "../status.js";
 import { useResource } from "../useResource.js";
 
@@ -41,23 +49,7 @@ type LoadState =
   | { readonly kind: "error"; readonly message: string }
   | { readonly kind: "ready"; readonly detail: CardDetail };
 
-const WORK_ITEM_STATUS_LABELS: Readonly<Record<string, string>> = {
-  todo: "待开始",
-  ready: "就绪",
-  in_progress: "进行中",
-  delivered: "已交付",
-  accepted: "已接受",
-  passed: "已通过",
-  failed: "未通过",
-  changes_requested: "需返工",
-  blocked: "阻塞",
-  waiting_decision: "等待拍板",
-  cancelled: "已取消",
-};
-
-export function workItemStatusLabel(status: string): string {
-  return WORK_ITEM_STATUS_LABELS[status] ?? status;
-}
+export const workItemStatusLabel = statusLabel;
 
 export function CardDetailPage({
   client,
@@ -103,7 +95,7 @@ export function CardDetailPage({
   if (state.kind === "missing") {
     return (
       <div className="empty">
-        <p>找不到卡片 {cardId}。</p>
+        <EmptyState>找不到卡片 {cardId}。请核对编号或返回看板。</EmptyState>
         <a href={back}>返回到看板</a>
       </div>
     );
@@ -181,20 +173,24 @@ function CardHeader({
       <p className="breadcrumb">
         <a href={back}>← 返回看板</a>
       </p>
-      <h1>
-        <span className="card-id">{card.id}</span> {card.title}
-      </h1>
+      <PageTitle
+        title={
+          <>
+            <IdTag id={card.id} label="卡片" /> {card.title}
+          </>
+        }
+        description={card.why}
+      />
       <p className="card-status-line">
-        <span className={`status status-${card.status}`}>
-          {cardStatusLabel(card.status)}
-        </span>
-        <span className="card-why">{card.why}</span>
+        <StatusTag status={card.status} />
       </p>
       <dl className="questions">
         <div>
           <dt>目标是什么</dt>
           <dd>
-            <p>{card.goal}</p>
+            <LongContent>
+              <p>{card.goal}</p>
+            </LongContent>
             <ul className="plain-list">
               {(card.acceptance_criteria ?? []).map((criterion) => (
                 <li key={criterion}>验收标准：{criterion}</li>
@@ -263,11 +259,7 @@ function progressLine(detail: CardDetail): string {
 }
 
 export function verdictLabel(verdict: string | null): string {
-  if (verdict === null) return "还没有结论";
-  if (verdict === "approve") return "已通过";
-  if (verdict === "reject") return "已驳回";
-  if (verdict === "conditional") return "有条件通过";
-  return verdict;
+  return verdict === null ? "还没有结论" : statusLabel(verdict);
 }
 
 function WorkItems({ detail }: { readonly detail: CardDetail }) {
@@ -276,7 +268,9 @@ function WorkItems({ detail }: { readonly detail: CardDetail }) {
       <details className="work-items" open>
         <summary>工作项（{detail.work_items.length}）</summary>
         {detail.work_items.length === 0 ? (
-          <p className="empty">这张卡还没有工作项。</p>
+          <EmptyState>
+            这张卡还没有工作项。PM 拆分任务后会在这里显示。
+          </EmptyState>
         ) : (
           <ul className="work-item-list">
             {detail.work_items.map((item) => (
@@ -300,36 +294,33 @@ function WorkItemRow({
     .reverse()
     .find((entry) => entry.work_item_id === item.id);
   return (
-    <li className="work-item">
+    <li className="work-item" id={`work-item-${item.id}`}>
       <div className="work-item-head">
-        <span className="card-id">{item.id}</span>
-        <span className="work-item-title">{item.title}</span>
-        <span className={`status status-${item.status}`}>
-          {workItemStatusLabel(item.status)}
-        </span>
+        <IdTag id={item.id} label={item.title} />
+        <StatusTag status={item.status} />
         <span className="work-item-role">{item.role_id}</span>
       </div>
       <p className="card-why">
-        {item.assignment_id === undefined
-          ? "还没有 Assignment"
-          : `Assignment ${item.assignment_id}`}
-        {delivery === undefined
-          ? "；还没有交付"
-          : `；交付 ${delivery.id}（${deliveryStatusLabel(delivery.status)}）`}
+        {item.assignment_id === undefined ? (
+          "还没有 Assignment"
+        ) : (
+          <IdTag id={item.assignment_id} label={item.role_id} />
+        )}
+        {delivery === undefined ? (
+          "；还没有交付"
+        ) : (
+          <>
+            {" "}
+            <IdTag id={delivery.id} label="交付" detail={delivery.summary} />{" "}
+            <StatusTag status={delivery.status} />
+          </>
+        )}
       </p>
     </li>
   );
 }
 
-export function deliveryStatusLabel(status: string): string {
-  const labels: Record<string, string> = {
-    submitted: "待审核",
-    accepted: "已接受",
-    rejected: "已驳回",
-    superseded: "已取代",
-  };
-  return labels[status] ?? status;
-}
+export const deliveryStatusLabel = statusLabel;
 
 /** §8.4 关联区: decisions, related cards and pull requests. */
 function Relations({
@@ -349,26 +340,23 @@ function Relations({
         <div>
           <h3>拍板</h3>
           {decisions.length === 0 ? (
-            <p className="empty">没有相关拍板。</p>
+            <EmptyState>没有相关拍板。</EmptyState>
           ) : (
             <ul className="plain-list">
               {decisions.map((decision) => (
                 <li key={decision.id} id={`decision-${decision.id}`}>
-                  <a
+                  <IdTag
+                    id={decision.id}
+                    label="拍板"
+                    detail={decision.question}
                     href={routeHash({
                       kind: "card",
                       projectId,
                       cardId,
                       anchor: `decision-${decision.id}`,
                     })}
-                  >
-                    {decision.id}
-                  </a>
-                  <span
-                    className={`decision-status decision-${decision.status}`}
-                  >
-                    {decisionStatusLabel(decision.status)}
-                  </span>
+                  />
+                  <StatusTag status={decision.status} />
                   {decision.blocking && (
                     <span className="card-why">阻塞中</span>
                   )}
@@ -381,20 +369,21 @@ function Relations({
         <div>
           <h3>卡片</h3>
           {cards.length === 0 ? (
-            <p className="empty">没有关联卡片。</p>
+            <EmptyState>没有关联卡片。</EmptyState>
           ) : (
             <ul className="plain-list">
               {cards.map((related) => (
                 <li key={related.id}>
-                  <a
+                  <IdTag
+                    id={related.id}
+                    label="卡片"
+                    detail={related.title}
                     href={routeHash({
                       kind: "card",
                       projectId,
                       cardId: related.id,
                     })}
-                  >
-                    {related.id}
-                  </a>
+                  />
                   <span className="card-why">
                     {related.title}（{cardStatusLabel(related.status)}）
                   </span>
@@ -406,7 +395,7 @@ function Relations({
         <div>
           <h3>PR</h3>
           {pull_requests.length === 0 ? (
-            <p className="empty">没有 PR。</p>
+            <EmptyState>没有 PR。</EmptyState>
           ) : (
             <ul className="plain-list">
               {pull_requests.map((pull) => (

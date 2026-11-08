@@ -1,7 +1,13 @@
 import { useCallback } from "react";
 import type { CardiganClient, CardView } from "../api.js";
+import {
+  EmptyState,
+  IdTag,
+  PageTitle,
+  StatusTag,
+} from "../components/Foundation.js";
 import { CardLink, Feedback } from "../components/Operations.js";
-import { cardStatusLabel, nextOwnersLabel } from "../status.js";
+import { nextOwnersLabel } from "../status.js";
 import { useResource } from "../useResource.js";
 
 function Cards({
@@ -13,21 +19,20 @@ function Cards({
   cards: readonly CardView[];
   projectId: string;
 }) {
+  if (!cards.length) return null;
   return (
     <section aria-label={title}>
       <h2>
         {title}（{cards.length}）
       </h2>
-      {!cards.length && <p className="hint">暂无</p>}
       <ul className="overview-list">
         {cards.map((c) => (
           <li key={c.id}>
-            <CardLink projectId={projectId} id={c.id} /> · {c.title}{" "}
-            <span className={`status status-${c.status}`}>
-              {cardStatusLabel(c.status)}
-            </span>
+            <CardLink projectId={projectId} id={c.id} label={c.title} />{" "}
+            <StatusTag status={c.status} />
             <p>
-              下一步：{nextOwnersLabel(c.next_owners)} · {c.why}
+              <span>下一步：{nextOwnersLabel(c.next_owners)}</span>{" "}
+              <span>原因：{c.why}</span>
             </p>
           </li>
         ))}
@@ -49,20 +54,34 @@ export function SnapshotPage({
     [client, projectId],
   );
   const { data, pending, error, reload } = useResource(load, revision);
+  const hasItems =
+    data &&
+    data.waiting.human.length +
+      data.waiting.agent.length +
+      data.in_progress.length +
+      data.in_review.length +
+      data.blocked.length +
+      data.recent_deliveries.length >
+      0;
   return (
     <section aria-label="项目快照">
-      <div className="toolbar">
-        <h1>项目快照</h1>
-        <button type="button" className="quiet" onClick={reload}>
-          刷新
-        </button>
-      </div>
+      <PageTitle
+        title="项目快照"
+        description="查看当前进度、等待事项与最近交付。"
+      />
       <Feedback pending={pending} error={error} retry={reload} />
       {data &&
         (!data.cards.length ? (
-          <p className="empty">这个项目还没有卡片。</p>
+          <EmptyState>
+            这个项目还没有卡片。向 PM 描述目标后，卡片会出现在这里。
+          </EmptyState>
         ) : (
           <>
+            {!hasItems && (
+              <EmptyState>
+                目前没有进行中、待审核或阻塞的工作。新进展会出现在这里。
+              </EmptyState>
+            )}
             <div className="overview-grid">
               <Cards
                 title="等你处理"
@@ -91,42 +110,33 @@ export function SnapshotPage({
                 projectId={projectId}
               />
             </div>
-            <section aria-label="阻塞事项">
-              <h2>阻塞事项（{data.blocked.length}）</h2>
-              {!data.blocked.length && <p className="hint">没有阻塞。</p>}
-              <ul>
-                {data.blocked.map((b) => (
-                  <li key={`${b.card_id}/${b.work_item_id}/${b.label}`}>
-                    <CardLink projectId={projectId} id={b.card_id} /> ·{" "}
-                    {b.label}
-                  </li>
-                ))}
-              </ul>
-            </section>
-            <section aria-label="最近交付">
-              <h2>最近交付</h2>
-              {!data.recent_deliveries.length && (
-                <p className="hint">暂无交付。</p>
-              )}
-              <ul>
-                {data.recent_deliveries.map((d) => (
-                  <li key={d.id}>
-                    <CardLink projectId={projectId} id={d.card_id} /> · {d.id} ·{" "}
-                    {d.summary}{" "}
-                    <span className="status">
-                      {(
-                        {
-                          submitted: "待审核",
-                          accepted: "已接受",
-                          rejected: "已驳回",
-                          superseded: "已取代",
-                        } as Record<string, string>
-                      )[d.status] ?? d.status}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </section>
+            {!!data.blocked.length && (
+              <section aria-label="阻塞事项">
+                <h2>阻塞事项（{data.blocked.length}）</h2>
+                <ul>
+                  {data.blocked.map((b) => (
+                    <li key={`${b.card_id}/${b.work_item_id}/${b.label}`}>
+                      <CardLink projectId={projectId} id={b.card_id} />{" "}
+                      {b.label}
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
+            {!!data.recent_deliveries.length && (
+              <section aria-label="最近交付">
+                <h2>最近交付</h2>
+                <ul>
+                  {data.recent_deliveries.map((d) => (
+                    <li key={d.id}>
+                      <CardLink projectId={projectId} id={d.card_id} />{" "}
+                      <IdTag id={d.id} label="交付" detail={d.summary} />
+                      <span>{d.summary}</span> <StatusTag status={d.status} />
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
           </>
         ))}
     </section>

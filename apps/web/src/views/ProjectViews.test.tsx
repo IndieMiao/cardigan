@@ -78,11 +78,11 @@ test("snapshot separates human/agent waits, shows next owners, blocked work and 
   );
   const human = within(await screen.findByRole("region", { name: "等你处理" })),
     agent = within(screen.getByRole("region", { name: "等 Agent 处理" }));
-  expect(human.getByRole("link", { name: "C-1" }).getAttribute("href")).toBe(
+  expect(human.getByRole("link", { name: /^C-1 / }).getAttribute("href")).toBe(
     "#/p/p-1/cards/C-1",
   );
-  expect(human.queryByRole("link", { name: "C-2" })).toBeNull();
-  expect(agent.getByRole("link", { name: "C-2" })).toBeTruthy();
+  expect(human.queryByRole("link", { name: /^C-2 / })).toBeNull();
+  expect(agent.getByRole("link", { name: /^C-2 / })).toBeTruthy();
   expect(
     screen.getByRole("region", { name: "审核与待合并" }).textContent,
   ).toContain("下一步：A-2");
@@ -116,7 +116,8 @@ test("execution uses the newest queued Run, includes its snapshot and cursor, an
     />,
   );
   const row = await screen.findByRole("article", { name: "执行 A-1" });
-  expect(row.textContent).toContain("最近 Run：R-10 · 合并修复 · 排队中");
+  expect(row.textContent).toContain("最近 Run：R-10 合并修复");
+  expect(row.textContent).toContain("排队中");
   for (const text of [
     "session-fixture",
     "terminal-fixture",
@@ -199,7 +200,9 @@ test.each(["snapshot", "execution"] as const)(
     await screen.findByText("读取失败");
     fireEvent.click(screen.getByRole("button", { name: "重试" }));
     await screen.findByText(
-      kind === "snapshot" ? "这个项目还没有卡片。" : "还没有 Assignment。",
+      kind === "snapshot"
+        ? "这个项目还没有卡片。向 PM 描述目标后，卡片会出现在这里。"
+        : "还没有 Assignment。指派工作后会在这里显示运行情况。",
     );
   },
 );
@@ -217,4 +220,23 @@ test("project view API paths encode project IDs and remain read-only", async () 
   ]);
   for (const [, init] of fetcher.mock.calls)
     expect(init).toMatchObject({ method: "GET", credentials: "same-origin" });
+});
+
+test("U1 a project with only inactive cards explains its empty snapshot without zero-count sections", async () => {
+  const base = await fakeClient().snapshot("p-1");
+  render(
+    <SnapshotPage
+      client={fakeClient({
+        snapshot: async () => ({
+          ...base,
+          cards: [{ ...card, status: "cancelled" }],
+        }),
+      })}
+      projectId="p-1"
+    />,
+  );
+  await screen.findByText(
+    "目前没有进行中、待审核或阻塞的工作。新进展会出现在这里。",
+  );
+  expect(document.querySelectorAll("h2")).toHaveLength(0);
 });

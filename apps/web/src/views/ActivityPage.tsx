@@ -1,26 +1,17 @@
-import { useCallback, useState } from "react";
-import type { ActivityFilter, CardiganClient } from "../api.js";
+import { useCallback } from "react";
+import type { CardiganClient } from "../api.js";
+import { FilterBar } from "../components/FilterBar.js";
+import {
+  EmptyState,
+  IdTag,
+  PageTitle,
+  Time,
+} from "../components/Foundation.js";
 import { CardLink, Feedback } from "../components/Operations.js";
+import { EVENT_LABELS, eventLabel } from "../events.js";
+import { useRouteFilters } from "../route.js";
 import { useResource } from "../useResource.js";
 
-const labels: Record<string, string> = {
-  comment_posted: "评论",
-  instruction_issued: "指令",
-  delivery_submitted: "交付",
-  review_submitted: "审核",
-  decision_requested: "请求拍板",
-  decision_resolved: "拍板结果",
-  human_action_requested: "待你执行",
-  human_action_completed: "执行回报",
-  card_merged: "合并完成",
-  merge_conflicted: "合并冲突",
-  run_queued: "Run 排队",
-  run_dispatched: "Run 派发",
-  run_finished: "Run 结束",
-  runtime_lost: "运行环境失联",
-  bell_delivery_failed: "门铃失败",
-  reconcile_finding: "对账发现",
-};
 export function ActivityPage({
   client,
   projectId,
@@ -30,8 +21,10 @@ export function ActivityPage({
   projectId: string;
   revision?: number;
 }) {
-  const [draft, setDraft] = useState({ card_id: "", role: "", type: "" });
-  const [filters, setFilters] = useState<ActivityFilter>({});
+  const [filters, setFilters] = useRouteFilters({
+    kind: "activity",
+    projectId,
+  });
   const load = useCallback(
     () => client.activity(projectId, filters),
     [client, projectId, filters],
@@ -39,75 +32,85 @@ export function ActivityPage({
   const { data, pending, error, reload } = useResource(load, revision);
   return (
     <section aria-label="项目动态">
-      <div className="toolbar">
-        <h1>项目动态</h1>
-        <button type="button" className="quiet" onClick={reload}>
-          刷新
-        </button>
-      </div>
-      <form
-        className="activity-filters"
-        onSubmit={(e) => {
-          e.preventDefault();
-          setFilters(
-            Object.fromEntries(
-              Object.entries(draft)
-                .filter(([, v]) => v.trim())
-                .map(([k, v]) => [k, v.trim()]),
+      <PageTitle
+        title="项目动态"
+        description="查看发生了什么，展开事件可核对原始记录。"
+      />
+      <FilterBar
+        fields={[
+          { key: "card_id", label: "卡片编号" },
+          {
+            key: "role",
+            label: "角色",
+            options: ["human", "pm", "coder", "reviewer", "system"].map(
+              (value) => ({
+                value,
+                label:
+                  value === "human"
+                    ? "你"
+                    : value === "system"
+                      ? "系统"
+                      : value,
+              }),
             ),
-          );
-        }}
+          },
+          {
+            key: "type",
+            label: "事件类型",
+            options: Object.entries(EVENT_LABELS).map(([value, label]) => ({
+              value,
+              label,
+            })),
+          },
+        ]}
+        values={filters}
+        onChange={(next) => setFilters({ ...next, before: "" })}
       >
-        {(
-          [
-            ["card_id", "卡片编号"],
-            ["role", "角色"],
-            ["type", "事件类型"],
-          ] as const
-        ).map(([key, label]) => (
-          <label key={key}>
-            {label}
-            <input
-              value={draft[key]}
-              onChange={(e) => setDraft({ ...draft, [key]: e.target.value })}
-            />
-          </label>
-        ))}
-        <button type="submit">应用筛选</button>
-        <button
-          type="button"
-          className="quiet"
-          onClick={() => {
-            setDraft({ card_id: "", role: "", type: "" });
-            setFilters({});
-          }}
-        >
+        <button type="button" className="quiet" onClick={() => setFilters({})}>
           清除筛选
         </button>
-      </form>
+      </FilterBar>
       <Feedback pending={pending} error={error} retry={reload} />
       {data && (
         <>
-          <p>
-            {filters.before ? "正在查看更早的事件" : "最新事件"} · 本页{" "}
-            {data.counts.returned} 条
+          <p className="metadata">
+            <span>{filters.before ? "正在查看更早的事件" : "最新事件"}</span>
+            <span>本页：{data.counts.returned} 条</span>
           </p>
-          {!data.events.length && <p className="empty">没有符合条件的事件。</p>}
+          {!data.events.length && (
+            <EmptyState>
+              没有符合条件的事件。调整筛选，或等待新的项目动态。
+            </EmptyState>
+          )}
           {data.events.map((e) => (
             <details key={e.id} className="event-details">
-              <summary>
-                <time dateTime={e.created_at}>{e.created_at}</time> ·{" "}
-                {labels[e.type] ?? e.type} ·{" "}
-                {e.role === "human"
-                  ? "你"
-                  : e.role === "system"
-                    ? "系统"
-                    : e.role}{" "}
-                · {e.card_id ?? "项目"}
+              <summary className="metadata">
+                <Time value={e.created_at} />
+                <span>{eventLabel(e.type)}</span>
+                <span>
+                  发起者：
+                  {e.role === "human"
+                    ? "你"
+                    : e.role === "system"
+                      ? "系统"
+                      : e.role}
+                </span>
+                <span>
+                  {e.card_id ? (
+                    <IdTag id={e.card_id} label="卡片" />
+                  ) : (
+                    "项目级事件"
+                  )}
+                </span>
               </summary>
-              <p>
-                <CardLink projectId={projectId} id={e.card_id} /> ·{" "}
-                {e.actor.assignment_id ?? e.actor.kind} · seq {e.seq} · {e.id}
+              <p className="metadata">
+                <CardLink projectId={projectId} id={e.card_id} />
+                {e.actor.assignment_id && (
+                  <IdTag id={e.actor.assignment_id} label={e.role} />
+                )}
+                <span>流内序号：{e.seq}</span>
+                <span>事件编号：{e.id}</span>
+                <span>原始类型：{e.type}</span>
               </p>
               <pre>{JSON.stringify(e.payload, null, 2)}</pre>
             </details>
@@ -127,9 +130,7 @@ export function ActivityPage({
             {filters.before && (
               <button
                 type="button"
-                onClick={() =>
-                  setFilters(({ before: _before, ...rest }) => rest)
-                }
+                onClick={() => setFilters({ ...filters, before: "" })}
               >
                 返回最新
               </button>

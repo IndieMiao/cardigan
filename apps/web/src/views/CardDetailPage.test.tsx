@@ -50,7 +50,9 @@ test("a missing card explains itself and offers the way back", async () => {
       throw new ApiError(404, "not_found", "card C-9 not found");
     },
   });
-  expect(await screen.findByText("找不到卡片 C-1。")).toBeTruthy();
+  expect(
+    await screen.findByText("找不到卡片 C-1。请核对编号或返回看板。"),
+  ).toBeTruthy();
   expect(
     screen.getByRole("link", { name: "返回到看板" }).getAttribute("href"),
   ).toBe("#/p/p-1/board");
@@ -100,8 +102,8 @@ test("work items are collapsible and show owner, status and delivery", async () 
   expect((details as HTMLDetailsElement).open).toBe(true);
   expect(details?.textContent).toContain("写迁移脚本");
   expect(details?.textContent).toContain("已交付");
-  expect(details?.textContent).toContain("Assignment A-1");
-  expect(details?.textContent).toContain("交付 V-1（待审核）");
+  expect(details?.textContent).toContain("A-1 coder");
+  expect(details?.textContent).toContain("V-1 交付 待审核");
   expect(details?.textContent).toContain("代码审核");
   expect(details?.textContent).toContain("reviewer");
 });
@@ -132,13 +134,13 @@ test("the relations section shows ids with their status", async () => {
   renderCard({ card: async () => detail });
   const relations = await screen.findByRole("region", { name: "关联" });
   expect(relations.textContent).toContain("D-1");
-  expect(relations.textContent).toContain("待批");
+  expect(relations.textContent).toContain("待拍板");
   expect(relations.textContent).toContain("阻塞中");
-  const decision = within(relations).getByRole("link", { name: "D-1" });
+  const decision = within(relations).getByRole("link", { name: /^D-1 / });
   expect(decision.getAttribute("href")).toBe(
     "#/p/p-1/cards/C-1?at=decision-D-1",
   );
-  const related = within(relations).getByRole("link", { name: "C-2" });
+  const related = within(relations).getByRole("link", { name: /^C-2 / });
   expect(related.getAttribute("href")).toBe("#/p/p-1/cards/C-2");
   const pull = within(relations).getByRole("link", {
     name: "https://example.com/pr/7",
@@ -231,12 +233,12 @@ test("timeline entries are typed and carry their attachments", async () => {
   expect(entries[0]?.getAttribute("data-timeline-type")).toBe("review");
   expect(entries[0]?.textContent).toContain("审核");
   expect(entries[1]?.textContent).toContain("评论");
-  expect(entries[2]?.textContent).toContain("决策请求");
+  expect(entries[2]?.textContent).toContain("请求拍板");
 
   const comment = document.querySelector('[data-timeline-type="comment"]');
   const image = comment?.querySelector("img");
   expect(image?.getAttribute("src")).toBe("/api/projects/p-1/attachments/F-1");
-  expect(comment?.textContent).toContain("依据 D-1（待批）");
+  expect(comment?.textContent).toContain("依据 D-1（待拍板）");
 });
 
 test("a non-bitmap attachment is a download, not an image", async () => {

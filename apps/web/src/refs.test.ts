@@ -58,8 +58,8 @@ test("only listed identifiers become links", () => {
     "p-1",
     "C-1",
   );
-  expect(linked).toContain("[C-1](#/p/p-1/cards/C-1)");
-  expect(linked).toContain("[D-3](#/p/p-1/cards/C-1?at=decision-D-3)");
+  expect(linked).toContain("[C-1 卡片](#/p/p-1/cards/C-1)");
+  expect(linked).toContain("[D-3 拍板](#/p/p-1/cards/C-1?at=decision-D-3)");
   expect(linked).toContain("C-9 还没建");
 });
 

@@ -22,7 +22,10 @@ import {
 } from "../api.js";
 import { CardListPage } from "./CardListPage.js";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  window.history.replaceState(null, "", "/");
+});
 
 const NOW = "2026-01-01T00:00:00.000Z";
 
@@ -133,13 +136,27 @@ test("an empty project says so, and each filter has its own empty text", async (
     counts: { total: 0, needs_me: 0, agent: 0 },
   }));
   render(<CardListPage client={api} projectId="p-1" view="board" />);
-  expect(await screen.findByText("这个项目还没有卡片。")).toBeTruthy();
+  expect(
+    await screen.findByText(
+      "这个项目还没有卡片。向 PM 描述目标后，卡片会出现在这里。",
+    ),
+  ).toBeTruthy();
 
-  fireEvent.click(screen.getByRole("button", { name: /等我处理/u }));
-  expect(await screen.findByText("没有等你处理的卡片。")).toBeTruthy();
+  fireEvent.change(screen.getByLabelText("下一步"), {
+    target: { value: "needs_me" },
+  });
+  expect(
+    await screen.findByText("没有等你处理的卡片。有事项需要你时会出现在这里。"),
+  ).toBeTruthy();
 
-  fireEvent.click(screen.getByRole("button", { name: /等 Agent 处理/u }));
-  expect(await screen.findByText("没有等 Agent 处理的卡片。")).toBeTruthy();
+  fireEvent.change(screen.getByLabelText("下一步"), {
+    target: { value: "agent" },
+  });
+  expect(
+    await screen.findByText(
+      "没有等 Agent 处理的卡片。指派工作后可在这里查看。",
+    ),
+  ).toBeTruthy();
 });
 
 test("the board groups cards by status and links each one", async () => {
@@ -170,12 +187,16 @@ test("the two filters ask the server for their own view", async () => {
   await screen.findByText("准备发布");
   expect(api.calls).toEqual(["all"]);
 
-  fireEvent.click(screen.getByRole("button", { name: /等我处理/u }));
+  fireEvent.change(screen.getByLabelText("下一步"), {
+    target: { value: "needs_me" },
+  });
   await waitFor(() => expect(api.calls).toEqual(["all", "needs_me"]));
   const listed = await screen.findByRole("region", { name: "进行中" });
   expect(listed.textContent).toContain("准备发布");
 
-  fireEvent.click(screen.getByRole("button", { name: /等 Agent 处理/u }));
+  fireEvent.change(screen.getByLabelText("下一步"), {
+    target: { value: "agent" },
+  });
   await waitFor(() => expect(api.calls).toEqual(["all", "needs_me", "agent"]));
   await waitFor(() =>
     expect(

@@ -1,6 +1,13 @@
 import { useCallback } from "react";
 import type { CardiganClient, ExecutionAssignment, RunView } from "../api.js";
 import {
+  EmptyState,
+  IdTag,
+  PageTitle,
+  StatusTag,
+  Time,
+} from "../components/Foundation.js";
+import {
   CardLink,
   CopyCommand,
   cliCommand,
@@ -9,23 +16,6 @@ import {
 import { routeHash } from "../route.js";
 import { useResource } from "../useResource.js";
 
-const states: Record<string, string> = {
-  active: "有效",
-  suspended: "已暂停",
-  released: "已释放",
-  not_provisioned: "未启动",
-  provisioning: "启动中",
-  idle: "空闲",
-  running: "运行中",
-  unknown: "状态未知",
-  lost: "失联",
-  queued: "排队中",
-  dispatched: "已派发",
-  acked: "已签收",
-  completed: "已完成",
-  failed: "失败",
-  cancelled: "已取消",
-};
 const kinds: Record<string, string> = {
   initial: "首次执行",
   rework: "审核返工",
@@ -47,30 +37,31 @@ function Assignment({
   // The API's full run list is newest first, including queued Runs without started_at.
   const run = runs.find((r) => r.assignment_id === a.id),
     live = runs.some((r) => r.assignment_id === a.id && unfinished(r));
-  const color = ["lost", "unknown"].includes(a.runtime_state)
-    ? "awaiting_merge"
-    : a.runtime_state === "running"
-      ? "in_progress"
-      : "todo";
   return (
     <article className="needs-item" aria-label={`执行 ${a.id}`}>
       <header>
-        <strong>
-          {a.id} · {a.role_id} v{a.role_version}
+        <IdTag
+          id={a.id}
+          label={a.role_id}
+          detail={`${a.role_id} v${a.role_version}`}
+        />
+        <span>
           {a.standing_mode === "office"
-            ? " · PM 前台"
+            ? "PM 前台"
             : a.standing_mode === "ops"
-              ? " · PM 后台"
+              ? "PM 后台"
               : ""}
-        </strong>{" "}
-        <span className={`status status-${color}`}>
-          {states[a.runtime_state] ?? a.runtime_state}
-        </span>{" "}
-        <span>{states[a.status] ?? a.status}</span>
+        </span>
+        <StatusTag status={a.runtime_state} /> <StatusTag status={a.status} />
       </header>
-      <p>
-        <CardLink projectId={projectId} id={a.card_id} /> ·{" "}
-        {a.work_item_id ?? "常驻"} · 机器 {a.machine_id}
+      <p className="metadata">
+        <CardLink projectId={projectId} id={a.card_id} />
+        {a.work_item_id ? (
+          <IdTag id={a.work_item_id} label="工作项" />
+        ) : (
+          <span>常驻</span>
+        )}
+        <span>机器：{a.machine_id}</span>
       </p>
       <dl>
         <dt>Session</dt>
@@ -86,13 +77,24 @@ function Assignment({
         <dt>分支</dt>
         <dd>{a.branch ?? "无"}</dd>
         <dt>最近 MCP 活动</dt>
-        <dd>{a.last_mcp_activity_at ?? "尚无记录"}</dd>
+        <dd>
+          {a.last_mcp_activity_at ? (
+            <Time value={a.last_mcp_activity_at} />
+          ) : (
+            "尚无记录"
+          )}
+        </dd>
       </dl>
       {run ? (
-        <p>
-          最近 Run：{run.id} · {kinds[run.kind] ?? run.kind} ·{" "}
-          {states[run.status] ?? run.status} · {run.model} · Role v
-          {run.role_version} · CLI {run.agent_cli_version}
+        <p className="metadata">
+          <span>
+            最近 Run：
+            <IdTag id={run.id} label={kinds[run.kind] ?? "执行"} />
+          </span>
+          <StatusTag status={run.status} />
+          <span>模型：{run.model}</span>
+          <span>角色版本：{run.role_version}</span>
+          <span>CLI 版本：{run.agent_cli_version}</span>
         </p>
       ) : (
         <p>尚无 Run。</p>
@@ -104,8 +106,9 @@ function Assignment({
             .filter((r) => r.assignment_id === a.id)
             .map((r) => (
               <li key={r.id}>
-                {r.id} · {states[r.status] ?? r.status} ·{" "}
-                {r.summary || "无摘要"}
+                <IdTag id={r.id} label={kinds[r.kind] ?? "执行"} />{" "}
+                <StatusTag status={r.status} />{" "}
+                <span>{r.summary || "无摘要"}</span>
               </li>
             ))}
         </ul>
@@ -115,7 +118,8 @@ function Assignment({
           <ul>
             {a.cursors.map((c) => (
               <li key={c.card_id}>
-                {c.card_id} · 已签收 seq {c.acked_seq}
+                <IdTag id={c.card_id} label="卡片" />{" "}
+                <span>已签收 seq {c.acked_seq}</span>
               </li>
             ))}
           </ul>
@@ -182,17 +186,15 @@ export function ExecutionPage({
   const { data, pending, error, reload } = useResource(load, revision);
   return (
     <section aria-label="执行视图">
-      <div className="toolbar">
-        <h1>执行视图</h1>
-        <button type="button" className="quiet" onClick={reload}>
-          刷新
-        </button>
-      </div>
+      <PageTitle
+        title="执行视图"
+        description="查看 Agent 的运行环境、最近执行和可用命令。"
+      />
       <Feedback pending={pending} error={error} retry={reload} />
       {data && (
         <>
           <p>
-            {data.assignments.length} 个 Assignment ·{" "}
+            {data.assignments.length} 个 Assignment，
             {data.runs.filter(unfinished).length} 个未结束 Run
           </p>
           {!!data.machines.length && (
@@ -201,21 +203,17 @@ export function ExecutionPage({
               <ul>
                 {data.machines.map((m) => (
                   <li key={m.id}>
-                    {m.id} · {m.label} ·{" "}
-                    {(
-                      {
-                        online: "在线",
-                        offline: "离线",
-                        draining: "停止接收新任务",
-                      } as Record<string, string>
-                    )[m.status] ?? m.status}
+                    <IdTag id={m.id} label={m.label} />{" "}
+                    <StatusTag status={m.status} />
                   </li>
                 ))}
               </ul>
             </details>
           )}
           {!data.assignments.length && (
-            <p className="empty">还没有 Assignment。</p>
+            <EmptyState>
+              还没有 Assignment。指派工作后会在这里显示运行情况。
+            </EmptyState>
           )}
           {data.assignments.map((a) => (
             <Assignment

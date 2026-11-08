@@ -191,16 +191,20 @@ test.each(["board", "list"] as const)(
     });
     expect(link.getAttribute("href")).toContain(`/cards/${f.card.id}`);
     expect(screen.getAllByText(/待开始/).length).toBeGreaterThan(0);
-    expect(screen.getByRole("button", { name: /等我处理/ })).toBeTruthy();
-    expect(screen.getByRole("button", { name: /等 Agent 处理/ })).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: /等我处理/ }));
-    await screen.findByText("没有等你处理的卡片。");
+    expect(screen.getByRole("option", { name: /等我处理/ })).toBeTruthy();
+    expect(screen.getByRole("option", { name: /等 Agent 处理/ })).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("下一步"), {
+      target: { value: "needs_me" },
+    });
+    await screen.findByText("没有等你处理的卡片。有事项需要你时会出现在这里。");
     await waitFor(() =>
       expect(
         screen.queryByRole("link", { name: new RegExp(f.card.title) }),
       ).toBeNull(),
     );
-    fireEvent.click(screen.getByRole("button", { name: /全部/ }));
+    fireEvent.change(screen.getByLabelText("下一步"), {
+      target: { value: "" },
+    });
     await screen.findByRole("link", { name: new RegExp(f.card.title) });
     cleanup();
     await f.cli("project", "create", "empty-board");
@@ -264,7 +268,7 @@ test("U04 §8.4: card detail handles loading, transport errors, missing cards an
     screen.getByText("谁验收、依据是什么").nextElementSibling,
   );
   expect(acceptance).toContain("pm");
-  expect(acceptance).toContain("pass");
+  expect(acceptance).toContain("已通过");
 }, 30_000);
 
 test("U05 §3.2: real Agent Markdown renders as text, with only web and local links and no executable HTML", async () => {
@@ -354,7 +358,7 @@ test("U07 §3.4: only existing server-resolved numbers in an Agent comment becom
   );
   expect(bad).toEqual([]);
   const existing = [...page.container.querySelectorAll("a")].filter(
-    (a) => a.textContent === f.card.id,
+    (a) => a.textContent === `${f.card.id} 卡片`,
   );
   expect(existing.length).toBeGreaterThan(0);
 });
