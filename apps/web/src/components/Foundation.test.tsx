@@ -307,6 +307,11 @@ test("U1 shell fixes the sidebar to the viewport and maps pass to the done colou
     ),
   ).toContain("grid-column: 2;");
   expect(css).toContain("--status-done: #2e7d4f;");
+  const multiStart = css.indexOf(".filter-multi {"),
+    multi = css.slice(multiStart, css.indexOf("}", multiStart) + 1);
+  expect(multi).toContain("display: grid;");
+  expect(css).toContain(".filter-multi-options {");
+  expect(css).toContain(".activity-list .event-details {");
   const doneStart = css.indexOf(".status-passed::before"),
     doneGroup = css.slice(doneStart, css.indexOf("}", doneStart));
   expect(doneGroup).toContain(".status-pass::before");

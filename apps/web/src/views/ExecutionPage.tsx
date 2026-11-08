@@ -46,6 +46,28 @@ function matchesView(a: ExecutionAssignment, view: string): boolean {
   if (view === "lost") return lost(a);
   return working(a);
 }
+function RunSummary({ text }: { readonly text: string }) {
+  const [open, setOpen] = useState(false);
+  if (text.trim().length === 0) return <span className="hint">无摘要</span>;
+  return (
+    <div className={`execution-summary${open ? " open" : ""}`}>
+      <p>{text}</p>
+      {text.length > 60 && (
+        <button
+          type="button"
+          className="quiet"
+          aria-expanded={open}
+          onClick={(event) => {
+            event.stopPropagation();
+            setOpen(!open);
+          }}
+        >
+          {open ? "收起摘要" : "展开摘要"}
+        </button>
+      )}
+    </div>
+  );
+}
 function AssignmentRow({
   a,
   runs,
@@ -62,7 +84,8 @@ function AssignmentRow({
   const assignmentsRuns = runs.filter((run) => run.assignment_id === a.id),
     run = assignmentsRuns[0],
     live = assignmentsRuns.some(unfinished),
-    lastActivity = a.last_mcp_activity_at ?? (run ? runTime(run) : undefined);
+    lastActivity = a.last_mcp_activity_at ?? (run ? runTime(run) : undefined),
+    [showAllRuns, setShowAllRuns] = useState(false);
   return (
     <>
       <tr className="execution-row" onClick={toggle} aria-expanded={expanded}>
@@ -91,16 +114,26 @@ function AssignmentRow({
           )}
         </td>
         <td>
-          <CardLink projectId={projectId} id={a.card_id} />
           {a.work_item_id ? (
-            <IdTag id={a.work_item_id} label="工作项" />
+            <>
+              <CardLink projectId={projectId} id={a.card_id} />
+              <IdTag id={a.work_item_id} label="工作项" />
+            </>
           ) : (
-            <span className="hint">常驻</span>
+            <span>常驻 PM（项目级）</span>
           )}
         </td>
         <td>
-          <StatusTag status={a.runtime_state} />
-          <StatusTag status={a.status} />
+          <dl className="execution-status">
+            <dt>运行</dt>
+            <dd>
+              <StatusTag status={a.runtime_state} />
+            </dd>
+            <dt>Assignment</dt>
+            <dd>
+              <StatusTag status={a.status} />
+            </dd>
+          </dl>
         </td>
         <td>
           {run ? (
@@ -146,16 +179,34 @@ function AssignmentRow({
                 {assignmentsRuns.length === 0 ? (
                   <p className="hint">尚无 Run。</p>
                 ) : (
-                  <ul className="execution-runs">
-                    {assignmentsRuns.map((entry) => (
-                      <li key={entry.id}>
-                        <IdTag id={entry.id} label={runKind(entry)} />
-                        <StatusTag status={entry.outcome ?? entry.status} />
-                        {runTime(entry) && <Time value={runTime(entry)} />}
-                        <span>{entry.summary || "无摘要"}</span>
-                      </li>
-                    ))}
-                  </ul>
+                  <>
+                    <ul className="execution-runs">
+                      {(showAllRuns
+                        ? assignmentsRuns
+                        : assignmentsRuns.slice(0, 5)
+                      ).map((entry) => (
+                        <li key={entry.id}>
+                          <div className="execution-run-head">
+                            <IdTag id={entry.id} label={runKind(entry)} />
+                            <StatusTag status={entry.outcome ?? entry.status} />
+                            {runTime(entry) && <Time value={runTime(entry)} />}
+                          </div>
+                          <RunSummary text={entry.summary} />
+                        </li>
+                      ))}
+                    </ul>
+                    {assignmentsRuns.length > 5 && (
+                      <button
+                        type="button"
+                        className="quiet"
+                        onClick={() => setShowAllRuns(!showAllRuns)}
+                      >
+                        {showAllRuns
+                          ? "只显示最近 5 条"
+                          : `显示全部 ${assignmentsRuns.length} 条`}
+                      </button>
+                    )}
+                  </>
                 )}
                 <h3>ACK 游标</h3>
                 {a.cursors.length === 0 ? (
@@ -267,7 +318,7 @@ export function ExecutionPage({
             })),
           },
         ]}
-        values={filters}
+        values={{ ...filters, view }}
         onChange={setFilters}
       />
       <Feedback pending={pending} error={error} retry={reload} />

@@ -34,27 +34,31 @@ export function FilterBar({
               aria-label={field.label}
             >
               <legend>{field.label}</legend>
-              {field.options.map((option) => {
-                const selected = valuesOf(values[field.key]);
-                return (
-                  <label key={option.value}>
-                    <input
-                      type="checkbox"
-                      checked={selected.includes(option.value)}
-                      onChange={() =>
-                        onChange({
-                          ...values,
-                          [field.key]: (selected.includes(option.value)
-                            ? selected.filter((value) => value !== option.value)
-                            : [...selected, option.value]
-                          ).join(","),
-                        })
-                      }
-                    />
-                    {option.label}
-                  </label>
-                );
-              })}
+              <div className="filter-multi-options">
+                {field.options.map((option) => {
+                  const selected = valuesOf(values[field.key]);
+                  return (
+                    <label key={option.value}>
+                      <input
+                        type="checkbox"
+                        checked={selected.includes(option.value)}
+                        onChange={() =>
+                          onChange({
+                            ...values,
+                            [field.key]: (selected.includes(option.value)
+                              ? selected.filter(
+                                  (value) => value !== option.value,
+                                )
+                              : [...selected, option.value]
+                            ).join(","),
+                          })
+                        }
+                      />
+                      {option.label}
+                    </label>
+                  );
+                })}
+              </div>
             </fieldset>
           ) : (
             <label key={field.key} htmlFor={`${id}-${field.key}`}>

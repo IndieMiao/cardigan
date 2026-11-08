@@ -384,19 +384,25 @@ button.quiet,
   max-width: 240px;
 }
 .filter-multi {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  align-content: start;
+}
+.filter-multi legend {
+  margin: 0;
+  padding: 0;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+.filter-multi-options {
   display: flex;
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
-  margin: 0;
-  padding: 0;
-  border: 0;
-}
-.filter-multi legend {
-  float: left;
-  margin-right: 4px;
-  color: var(--text-muted);
-  font-size: var(--text-sm);
+  min-height: 32px;
 }
 .filter-multi label {
   display: inline-flex;
@@ -1192,6 +1198,30 @@ fieldset.filters {
   margin: 6px 0 0;
   color: var(--text-muted);
 }
+.execution-run-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.execution-summary p {
+  display: -webkit-box;
+  margin: 2px 0 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.execution-summary.open p {
+  display: block;
+  overflow: visible;
+  -webkit-line-clamp: unset;
+}
+.execution-summary button {
+  margin-top: 2px;
+  padding: 0 6px;
+  font-size: var(--text-xs);
+}
 .execution-actions {
   margin-top: 16px;
 }
@@ -1207,6 +1237,11 @@ fieldset.filters {
   color: var(--text-muted);
   font-size: var(--text-sm);
   font-weight: 600;
+}
+.activity-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 .activity-summary {
   display: flex;
@@ -1234,6 +1269,18 @@ fieldset.filters {
 .execution-table th {
   color: var(--text-muted);
   font-weight: 600;
+}
+.execution-status {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px 6px;
+  margin: 0;
+}
+.execution-status dt {
+  color: var(--text-muted);
+}
+.execution-status dd {
+  margin: 0;
 }
 .execution-row {
   cursor: pointer;
@@ -1381,4 +1428,16 @@ fieldset.filters {
 }
 .event-details summary {
   cursor: pointer;
+}
+.activity-list .event-details {
+  margin: 0;
+  padding: 6px 0;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+}
+.activity-list .event-details pre {
+  max-height: 260px;
+  margin: 6px 0 0;
 }

@@ -74,19 +74,38 @@ function rowsOf(events: readonly ActivityEvent[]): Row[] {
       };
       continue;
     }
-    rows.push(
-      event.actor.kind === "system"
-        ? {
-            kind: "system",
-            type: event.type,
-            card_id: event.card_id,
-            card_title: event.card_title,
-            events: [event],
-          }
-        : { kind: "event", event },
-    );
+    if (
+      event.actor.kind === "system" &&
+      previous?.kind === "event" &&
+      previous.event.actor.kind === "system" &&
+      previous.event.type === event.type &&
+      previous.event.card_id === event.card_id
+    ) {
+      rows[rows.length - 1] = {
+        kind: "system",
+        type: event.type,
+        card_id: event.card_id,
+        card_title: event.card_title,
+        events: [previous.event, event],
+      };
+      continue;
+    }
+    rows.push({ kind: "event", event });
   }
   return rows;
+}
+function groupedLabel(type: string, count: number): string {
+  const label = eventLabel(type);
+  if (label.includes("了 ")) return label.replace("了 ", `了 ${count} 个 `);
+  for (const [prefix, suffix] of [
+    ["开始一次 ", "开始"],
+    ["结束一次 ", "结束"],
+    ["派发一次 ", "派发"],
+    ["排队一次 ", "排队"],
+  ] as const)
+    if (label.startsWith(prefix))
+      return `${suffix} ${count} 次 ${label.slice(prefix.length)}`;
+  return `${label} ${count} 次`;
 }
 function DayGroup({
   day,
@@ -100,50 +119,54 @@ function DayGroup({
   return (
     <section className="activity-day" aria-label={dayLabel(day)}>
       <h2>{dayLabel(day)}</h2>
-      {rowsOf(events).map((row) => {
-        if (row.kind === "event") {
-          const event = row.event;
+      <ol className="activity-list">
+        {rowsOf(events).map((row) => {
+          if (row.kind === "event") {
+            const event = row.event;
+            return (
+              <li key={event.id}>
+                <details className="event-details">
+                  <summary className="activity-summary">
+                    <Time value={event.created_at} />
+                    <strong>{actorLabel(event)}</strong>
+                    <span>{eventLabel(event.type)}</span>
+                    <CardLink
+                      projectId={projectId}
+                      id={event.card_id}
+                      label={event.card_title ?? "卡片"}
+                    />
+                  </summary>
+                  <pre>{JSON.stringify(event.payload, null, 2)}</pre>
+                </details>
+              </li>
+            );
+          }
+          const first = row.events[0];
           return (
-            <details key={event.id} className="event-details">
-              <summary className="activity-summary">
-                <Time value={event.created_at} />
-                <strong>{actorLabel(event)}</strong>
-                <span>{eventLabel(event.type)}</span>
-                <CardLink
-                  projectId={projectId}
-                  id={event.card_id}
-                  label={event.card_title ?? "卡片"}
-                />
-              </summary>
-              <pre>{JSON.stringify(event.payload, null, 2)}</pre>
-            </details>
+            <li key={first?.id}>
+              <details className="event-details">
+                <summary className="activity-summary">
+                  <Time value={first?.created_at} />
+                  <strong>系统</strong>
+                  <span>{groupedLabel(row.type, row.events.length)}</span>
+                  <CardLink
+                    projectId={projectId}
+                    id={row.card_id}
+                    label={row.card_title ?? "卡片"}
+                  />
+                </summary>
+                <pre>
+                  {JSON.stringify(
+                    row.events.map((event) => event.payload),
+                    null,
+                    2,
+                  )}
+                </pre>
+              </details>
+            </li>
           );
-        }
-        const first = row.events[0];
-        return (
-          <details key={first?.id} className="event-details">
-            <summary className="activity-summary">
-              <Time value={first?.created_at} />
-              <strong>系统</strong>
-              <span>
-                {row.events.length} 条{eventLabel(row.type)}
-              </span>
-              <CardLink
-                projectId={projectId}
-                id={row.card_id}
-                label={row.card_title ?? "卡片"}
-              />
-            </summary>
-            <pre>
-              {JSON.stringify(
-                row.events.map((event) => event.payload),
-                null,
-                2,
-              )}
-            </pre>
-          </details>
-        );
-      })}
+        })}
+      </ol>
     </section>
   );
 }

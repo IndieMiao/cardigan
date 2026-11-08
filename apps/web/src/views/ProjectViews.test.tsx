@@ -112,6 +112,9 @@ test("execution defaults to working and switches between all, working, released 
       projectId="p-1"
     />,
   );
+  expect((screen.getByLabelText("筛选") as HTMLSelectElement).value).toBe(
+    "working",
+  );
   expect(
     await screen.findByRole("button", { name: "展开 A-1 详情" }),
   ).toBeTruthy();
@@ -165,6 +168,8 @@ test("execution shows working assignments in a table and expands the newest Run,
   expect(row?.textContent).toContain("W-1");
   expect(row?.textContent).toContain("R-10");
   expect(row?.textContent).toContain("排队中");
+  expect(row?.textContent).toContain("运行");
+  expect(row?.textContent).toContain("Assignment");
   expect(screen.getByRole("columnheader", { name: "最近 Run" })).toBeTruthy();
   fireEvent.click(toggle);
   const expanded = await screen.findByRole("button", {
@@ -264,6 +269,68 @@ test.each(["snapshot", "execution"] as const)(
     );
   },
 );
+
+test("execution labels a standing PM as project-level and keeps the card/work item words apart", async () => {
+  const standing = {
+    ...assignment,
+    id: "A-9",
+    role_id: "pm",
+    standing_mode: "ops",
+    card_id: null,
+    card_status: null,
+    work_item_id: null,
+  };
+  render(
+    <ExecutionPage
+      client={fakeClient({
+        execution: async () => ({
+          assignments: [standing],
+          runs: [],
+          machines: [],
+        }),
+      })}
+      projectId="p-1"
+    />,
+  );
+  const toggle = await screen.findByRole("button", {
+    name: "展开 A-9 详情",
+  });
+  const row = toggle.closest("tr");
+  expect(row?.textContent).toContain("常驻 PM（项目级）");
+  expect(row?.textContent).not.toContain("项目级事项常驻");
+});
+
+test("execution shows five recent Runs by default and can reveal all with expandable summaries", async () => {
+  const runs = Array.from({ length: 7 }, (_, index) => ({
+    ...run,
+    id: `R-${20 - index}`,
+    status: "completed",
+    summary: `Run ${20 - index} ${"很长的摘要".repeat(20)}`,
+  }));
+  render(
+    <ExecutionPage
+      client={fakeClient({
+        execution: async () => ({
+          assignments: [assignment],
+          runs,
+          machines: [],
+        }),
+      })}
+      projectId="p-1"
+    />,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "展开 A-1 详情" }));
+  expect(screen.getByText("显示全部 7 条")).toBeTruthy();
+  expect(screen.queryByText(/R-14/)).toBeNull();
+  expect(screen.getAllByText("展开摘要").length).toBe(5);
+  fireEvent.click(screen.getByRole("button", { name: "显示全部 7 条" }));
+  expect(screen.getByText("R-14", { exact: false })).toBeTruthy();
+  expect(screen.getAllByText("展开摘要").length).toBe(7);
+  fireEvent.click(
+    screen.getAllByRole("button", { name: "展开摘要" })[0] as HTMLElement,
+  );
+  expect(screen.getAllByText("收起摘要").length).toBe(1);
+});
 
 test("project view API paths encode project IDs and remain read-only", async () => {
   const fetcher = vi

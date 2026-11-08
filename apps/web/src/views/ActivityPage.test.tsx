@@ -54,6 +54,7 @@ test("activity is collapsed, describes time/actor/action/card and escapes the pa
   await screen.findByText("下达了指令");
   expect(document.querySelector("summary")?.textContent).toContain("PM");
   expect(document.querySelector("summary")?.textContent).toContain("准备发布");
+  expect(container.querySelector(".activity-list")).toBeTruthy();
   expect(container.querySelector("details")?.open).toBe(false);
   expect(container.querySelector("pre")?.textContent).toContain(
     "先完成必要检查",
@@ -128,13 +129,23 @@ test("groups by day and folds adjacent system events of the same type", async ()
       system("event-1", 1),
       {
         ...event,
+        id: "event-4",
+        seq: 4,
+        type: "assignment_released",
+        role: "system",
+        created_at: "2026-01-01T00:40:00Z",
+        payload: { assignment_id: "A-1" },
+        actor: { kind: "system" },
+      },
+      {
+        ...event,
         id: "event-3",
         seq: 3,
         created_at: "2026-01-02T00:00:00Z",
       },
     ],
     next_before: null,
-    counts: { returned: 3, matched: 3 },
+    counts: { returned: 4, matched: 4 },
   };
   render(
     <ActivityPage
@@ -142,9 +153,11 @@ test("groups by day and folds adjacent system events of the same type", async ()
       projectId="p-1"
     />,
   );
-  await screen.findByText("2 条开始一次 Run");
+  await screen.findByText("开始 2 次 Run");
+  expect(screen.getByText("释放了 Assignment")).toBeTruthy();
+  expect(screen.queryByText(/1 条/u)).toBeNull();
   expect(screen.getAllByRole("region", { name: /月.*日/u })).toHaveLength(2);
-  const folded = screen.getByText("2 条开始一次 Run").closest("details");
+  const folded = screen.getByText("开始 2 次 Run").closest("details");
   expect(folded?.querySelector("pre")?.textContent).toContain("event-2");
   expect(folded?.querySelector("pre")?.textContent).toContain("event-1");
 });
