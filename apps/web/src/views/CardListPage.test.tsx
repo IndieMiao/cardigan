@@ -8,7 +8,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import {
   ApiError,
   type CardFilter,
@@ -17,11 +17,13 @@ import {
   type CardPage,
 } from "../api.js";
 import { parseRoute } from "../route.js";
+import { cardDetail, fakeClient } from "../testing/fixtures.js";
 import { CardListPage } from "./CardListPage.js";
 
 afterEach(() => {
   cleanup();
   window.history.replaceState(null, "", "/");
+  window.localStorage.clear();
 });
 
 const NOW = "2026-01-01T00:00:00.000Z";
@@ -139,6 +141,7 @@ test("an empty project says so, and active filters have their own empty text", a
       "这个项目还没有卡片。向 PM 描述目标后，卡片会出现在这里。",
     ),
   ).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "状态：全部" }));
   fireEvent.click(screen.getByRole("checkbox", { name: "进行中" }));
   expect(
     await screen.findByText("没有匹配的卡片，请调整筛选条件。"),
@@ -148,6 +151,7 @@ test("an empty project says so, and active filters have their own empty text", a
 test("the board groups cards by status and links each one", async () => {
   const api = client(async () => page());
   render(<CardListPage client={api} projectId="p-1" view="board" />);
+  expect(screen.getByRole("heading", { name: /卡片.*张卡片/u })).toBeTruthy();
   const inProgress = await screen.findByRole("region", { name: "进行中" });
   expect(inProgress.textContent).toContain("准备发布");
   expect(inProgress.textContent).not.toContain("写迁移脚本");
@@ -162,12 +166,12 @@ test("the board groups cards by status and links each one", async () => {
   expect(inProgress.textContent).toContain("下一步：你");
 });
 
-test("the list has the six columns, progress, updated time and reason tooltip", async () => {
+test("the list shows the configurable columns, progress, updated time and reason", async () => {
   const api = client(async () => page());
   render(<CardListPage client={api} projectId="p-1" view="list" />);
   const row = (await screen.findByText("写迁移脚本")).closest("tr");
   if (!row) throw new Error("Missing row");
-  expect([...row.querySelectorAll("td")].length).toBe(6);
+  expect([...row.querySelectorAll("td")].length).toBe(8);
   expect(row.textContent).toContain("C-2");
   expect(row.textContent).toContain("待开始");
   expect(row.textContent).toContain("coder");
@@ -179,8 +183,18 @@ test("the list has the six columns, progress, updated time and reason tooltip", 
   expect(row.querySelector("a")?.getAttribute("href")).toBe(
     "#/p/p-1/cards/C-2",
   );
-  for (const header of ["编号", "标题", "状态", "下一步", "进度", "更新时间"])
+  for (const header of [
+    "编号",
+    "标题",
+    "状态",
+    "负责角色",
+    "进度",
+    "更新时间",
+    "下一步",
+  ])
     expect(screen.getByRole("columnheader", { name: header })).toBeTruthy();
+  expect(row.lastElementChild?.textContent).toBe("→");
+  expect(screen.getByText("共 3 张卡片")).toBeTruthy();
 });
 
 test("status, next owner, role, search and sort filter the rows and live in the route", async () => {
@@ -189,32 +203,44 @@ test("status, next owner, role, search and sort filter the rows and live in the 
   await screen.findByText("准备发布");
   expect(api.calls).toEqual(["all"]);
 
+  fireEvent.click(screen.getByRole("button", { name: "状态：全部" }));
   fireEvent.click(screen.getByRole("checkbox", { name: "进行中" }));
   await waitFor(() => expect(screen.queryByText("写迁移脚本")).toBeNull());
   expect(screen.getByText("准备发布")).toBeTruthy();
   expect(parseRoute(window.location.hash)).toMatchObject({
-    kind: "list",
-    filters: { status: "in_progress" },
+    kind: "cards",
+    filters: { view: "list", status: "in_progress" },
   });
   fireEvent.click(screen.getByRole("button", { name: "移除状态筛选" }));
 
-  fireEvent.change(screen.getByLabelText("下一步谁做"), {
-    target: { value: "agent" },
+  fireEvent.pointerDown(screen.getByRole("button", { name: "下一步：全部" }), {
+    button: 0,
+    pointerType: "mouse",
   });
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Agent" }));
   await waitFor(() => expect(screen.queryByText("准备发布")).toBeNull());
   expect(screen.getByText("写迁移脚本")).toBeTruthy();
-  fireEvent.change(screen.getByLabelText("下一步谁做"), {
-    target: { value: "" },
+  fireEvent.pointerDown(screen.getByRole("button", { name: "下一步：Agent" }), {
+    button: 0,
+    pointerType: "mouse",
   });
+  fireEvent.click(await screen.findByRole("menuitem", { name: "全部" }));
 
-  fireEvent.change(screen.getByLabelText("角色"), {
-    target: { value: "reviewer" },
+  fireEvent.pointerDown(screen.getByRole("button", { name: "角色：全部" }), {
+    button: 0,
+    pointerType: "mouse",
   });
+  fireEvent.click(await screen.findByRole("menuitem", { name: "reviewer" }));
   await waitFor(() => expect(screen.queryByText("写迁移脚本")).toBeNull());
   expect(screen.getByText("准备发布")).toBeTruthy();
-  fireEvent.change(screen.getByLabelText("角色"), {
-    target: { value: "" },
-  });
+  fireEvent.pointerDown(
+    screen.getByRole("button", { name: "角色：reviewer" }),
+    {
+      button: 0,
+      pointerType: "mouse",
+    },
+  );
+  fireEvent.click(await screen.findByRole("menuitem", { name: "全部" }));
 
   fireEvent.change(screen.getByLabelText("搜索标题或编号"), {
     target: { value: "C-2" },
@@ -225,9 +251,11 @@ test("status, next owner, role, search and sort filter the rows and live in the 
     target: { value: "" },
   });
 
-  fireEvent.change(screen.getByLabelText("排序"), {
-    target: { value: "priority" },
+  fireEvent.pointerDown(screen.getByRole("button", { name: "排序：全部" }), {
+    button: 0,
+    pointerType: "mouse",
   });
+  fireEvent.click(await screen.findByRole("menuitem", { name: "优先级" }));
   await waitFor(() => {
     const rows = within(screen.getByRole("table")).getAllByRole("row").slice(1);
     expect(rows.map((row) => row.textContent?.slice(0, 3))).toEqual([
@@ -237,21 +265,122 @@ test("status, next owner, role, search and sort filter the rows and live in the 
     ]);
   });
   expect(parseRoute(window.location.hash)).toMatchObject({
-    kind: "list",
-    filters: { sort: "priority" },
+    kind: "cards",
+    filters: { view: "list", sort: "priority" },
   });
 });
 
 test("filters from a copied URL are restored", async () => {
-  window.location.hash = "#/p/p-1/list?status=done&next=none&q=C-3&sort=id";
+  window.location.hash =
+    "#/p/p-1/cards?view=list&status=done&next=none&q=C-3&sort=id";
   const api = client(async () => page());
   render(<CardListPage client={api} projectId="p-1" view="list" />);
   expect(await screen.findByText("清理 worktree")).toBeTruthy();
   expect(screen.queryByText("准备发布")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "状态：已完成" }));
   expect(
     (screen.getByRole("checkbox", { name: "已完成" }) as HTMLInputElement)
       .checked,
   ).toBe(true);
+});
+
+test("the display menu hides fields and persists the choice in localStorage", async () => {
+  const api = client(async () => page());
+  const first = render(
+    <CardListPage client={api} projectId="p-1" view="list" />,
+  );
+  await screen.findByText("准备发布");
+  expect(screen.getByRole("columnheader", { name: "编号" })).toBeTruthy();
+  fireEvent.pointerDown(screen.getByRole("button", { name: "显示" }), {
+    button: 0,
+    pointerType: "mouse",
+  });
+  const menu = await screen.findByRole("menu");
+  expect(within(menu).getByText("显示字段")).toBeTruthy();
+  expect(within(menu).getByText("标题始终显示")).toBeTruthy();
+  expect(within(menu).getByText("仅保存在此浏览器")).toBeTruthy();
+  const number = within(menu)
+    .getByText("编号")
+    .closest('[role="menuitemcheckbox"]');
+  if (number === null) throw new Error("Missing number display item");
+  expect(number.getAttribute("aria-checked")).toBe("true");
+  fireEvent.click(number);
+  await waitFor(() =>
+    expect(screen.queryByRole("columnheader", { name: "编号" })).toBeNull(),
+  );
+  fireEvent.keyDown(document, { key: "Escape" });
+  expect(
+    JSON.parse(window.localStorage.getItem("cardigan.cards.display") ?? "{}"),
+  ).toMatchObject({
+    number: false,
+  });
+  first.unmount();
+  render(<CardListPage client={api} projectId="p-1" view="list" />);
+  await screen.findByText("准备发布");
+  expect(screen.queryByRole("columnheader", { name: "编号" })).toBeNull();
+});
+
+test("invalid stored display settings fall back to the defaults", async () => {
+  window.localStorage.setItem("cardigan.cards.display", "{not-json");
+  const api = client(async () => page());
+  render(<CardListPage client={api} projectId="p-1" view="list" />);
+  await screen.findByText("准备发布");
+  for (const header of ["编号", "负责角色", "进度", "更新时间"])
+    expect(screen.getByRole("columnheader", { name: header })).toBeTruthy();
+});
+
+test("clicking a card opens the detail drawer on the route and returns focus on close", async () => {
+  window.location.hash = "#/p/p-1/cards?view=list&status=in_progress";
+  const api = fakeClient({
+    cards: async () => page(),
+    card: async () => cardDetail(),
+  });
+  render(<CardListPage client={api} projectId="p-1" view="list" />);
+  const link = await screen.findByRole("link", { name: "准备发布" });
+  fireEvent.click(link);
+  const dialog = await screen.findByRole("dialog", {
+    name: "C-1 准备发布",
+  });
+  expect(dialog.textContent).toContain("把 0.1 发出去");
+  await waitFor(() =>
+    expect(window.location.hash).toBe(
+      "#/p/p-1/cards?view=list&status=in_progress&card=C-1",
+    ),
+  );
+  expect(
+    screen.getByRole("link", { name: "在完整页面打开" }).getAttribute("href"),
+  ).toBe("#/p/p-1/cards/C-1");
+  const clipboard = vi.fn(async () => {});
+  Object.defineProperty(navigator, "clipboard", {
+    value: { writeText: clipboard },
+    configurable: true,
+  });
+  fireEvent.click(screen.getByRole("button", { name: "复制链接" }));
+  await waitFor(() =>
+    expect(clipboard).toHaveBeenCalledWith(expect.stringContaining("card=C-1")),
+  );
+  fireEvent.keyDown(document, { key: "Escape" });
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(document.activeElement).toBe(link);
+  expect(window.location.hash).toBe(
+    "#/p/p-1/cards?view=list&status=in_progress",
+  );
+});
+
+test("a drawer card in the URL survives refresh and the back link opens the full page", async () => {
+  window.location.hash = "#/p/p-1/cards?view=board&card=C-1";
+  const api = fakeClient({
+    cards: async () => page(),
+    card: async () => cardDetail(),
+  });
+  render(<CardListPage client={api} projectId="p-1" />);
+  const dialog = await screen.findByRole("dialog", {
+    name: "C-1 准备发布",
+  });
+  expect(dialog.textContent).toContain("把 0.1 发出去");
+  expect(
+    screen.getByRole("link", { name: "在完整页面打开" }).getAttribute("href"),
+  ).toBe("#/p/p-1/cards/C-1");
 });
 
 test("HTML inside a card title is shown as text, not markup", async () => {

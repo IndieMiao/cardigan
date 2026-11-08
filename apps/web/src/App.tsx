@@ -156,9 +156,21 @@ function Workbench({
     if (route !== undefined && selected !== undefined) return;
     const first = projects.projects[0];
     if (first !== undefined) {
-      navigate({ kind: "board", projectId: first.id });
+      navigate({ kind: "cards", projectId: first.id });
     }
   }, [projects, route, selected, navigate, invalidHash]);
+
+  // Old board/list URLs are bookmarks: move them to the merged cards route and
+  // keep every filter (the old view becomes ?view=list|board).
+  useEffect(() => {
+    if (route?.kind !== "board" && route?.kind !== "list") return;
+    const { projectId, filters } = route;
+    navigate({
+      kind: "cards",
+      projectId,
+      filters: { view: route.kind, ...filters },
+    });
+  }, [route, navigate]);
 
   async function logout(): Promise<void> {
     if (loggingOut) return;
@@ -174,7 +186,10 @@ function Workbench({
     }
   }
 
-  const activeView = route && route.kind !== "card" ? route.kind : "board";
+  const activeView =
+    route?.kind === "card" || route?.kind === "board" || route?.kind === "list"
+      ? "cards"
+      : (route?.kind ?? "cards");
 
   return (
     <div className="app">
@@ -212,13 +227,7 @@ function Workbench({
             </a>
             {(
               [
-                [
-                  "工作",
-                  [
-                    ["board", "看板"],
-                    ["list", "列表"],
-                  ],
-                ],
+                ["工作", [["cards", "卡片"]]],
                 [
                   "运行",
                   [
@@ -336,18 +345,14 @@ function Workbench({
             {...(route.anchor === undefined ? {} : { anchor: route.anchor })}
           />
         )}
-        {selected !== undefined &&
-          (route?.kind === "board" ||
-            route?.kind === "list" ||
-            route === undefined) && (
-            <CardListPage
-              client={client}
-              key={selected.id}
-              projectId={selected.id}
-              revision={live.revision}
-              view={route?.kind === "list" ? "list" : "board"}
-            />
-          )}
+        {selected !== undefined && route?.kind === "cards" && (
+          <CardListPage
+            client={client}
+            key={selected.id}
+            projectId={selected.id}
+            revision={live.revision}
+          />
+        )}
       </main>
     </div>
   );

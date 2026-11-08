@@ -11,6 +11,7 @@ export type Route = (
   | { readonly kind: "board"; readonly projectId: string }
   | {
       readonly kind:
+        | "cards"
         | "list"
         | "needs-you"
         | "snapshot"
@@ -36,8 +37,10 @@ function decode(segment: string): string | undefined {
 }
 
 /**
- * `#/p/<project>/board`, `#/p/<project>/list`,
+ * `#/p/<project>/cards?view=list|board&card=<card>`,
  * `#/p/<project>/cards/<card>?at=<anchor>`.
+ *
+ * `board` and `list` are legacy routes the shell redirects to `cards`.
  *
  * The location anchor is a query parameter of the card route, not a second
  * `#fragment`: the hash is the route itself, so `#decision-q(2)` would replace
@@ -59,6 +62,9 @@ export function parseRoute(hash: string): Route | undefined {
   if (projectId === undefined) return undefined;
   if (segments.length === 3 && segments[2] === "board") {
     return { kind: "board", projectId, ...filtered };
+  }
+  if (segments.length === 3 && segments[2] === "cards") {
+    return { kind: "cards", projectId, ...filtered };
   }
   if (
     segments.length === 3 &&

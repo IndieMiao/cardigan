@@ -12,6 +12,8 @@ export interface ViewSwitchProps {
   readonly value: string;
   readonly options: readonly ViewSwitchOption[];
   readonly onChange: (value: string) => void;
+  /** Show the text label beside the icon (U5a cards page). */
+  readonly showLabel?: boolean;
 }
 
 /** Single-choice icon button group with aria-pressed toggle semantics. */
@@ -20,6 +22,7 @@ export function ViewSwitch({
   value,
   options,
   onChange,
+  showLabel = false,
 }: ViewSwitchProps) {
   return (
     <ToggleGroup.Root
@@ -41,6 +44,7 @@ export function ViewSwitch({
           title={option.label}
         >
           {option.icon}
+          {showLabel && <span>{option.label}</span>}
         </ToggleGroup.Item>
       ))}
     </ToggleGroup.Root>

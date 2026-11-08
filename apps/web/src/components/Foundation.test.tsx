@@ -186,22 +186,15 @@ test("U1 shell orders Needs You first with its count, then work and runtime grou
     within(sidebar)
       .getAllByRole("link")
       .map((a) => a.textContent?.trim()),
-  ).toEqual([
-    "Needs You 1",
-    "看板",
-    "列表",
-    "执行视图",
-    "项目动态",
-    "项目快照",
-  ]);
+  ).toEqual(["Needs You 1", "卡片", "执行视图", "项目动态", "项目快照"]);
   expect(within(sidebar).getByRole("heading", { name: "工作" })).toBeTruthy();
   expect(within(sidebar).getByRole("heading", { name: "运行" })).toBeTruthy();
-  expect(await screen.findByRole("heading", { name: "看板" })).toBeTruthy();
+  expect(await screen.findByRole("heading", { name: /卡片/u })).toBeTruthy();
 });
 
 test("U1 list filters survive a copied route, chip removal, back navigation and remount", async () => {
   window.location.hash =
-    "#/p/p-1/list?status=in_progress&next=human&q=%E5%87%86%E5%A4%87";
+    "#/p/p-1/cards?view=list&status=in_progress&next=human&q=%E5%87%86%E5%A4%87";
   const cards = vi.fn(fakeClient().cards),
     client = fakeClient({ cards });
   const page = render(
@@ -212,19 +205,22 @@ test("U1 list filters survive a copied route, chip removal, back navigation and 
   expect(
     (screen.getByLabelText("搜索标题或编号") as HTMLInputElement).value,
   ).toBe("准备");
+  fireEvent.click(screen.getByRole("button", { name: "状态：进行中" }));
   expect(
     (screen.getByRole("checkbox", { name: "进行中" }) as HTMLInputElement)
       .checked,
   ).toBe(true);
+  fireEvent.keyDown(document, { key: "Escape" });
   fireEvent.click(screen.getByRole("button", { name: "移除下一步谁做筛选" }));
   expect(parseRoute(window.location.hash)).toMatchObject({
-    kind: "list",
-    filters: { status: "in_progress", q: "准备" },
+    kind: "cards",
+    filters: { view: "list", status: "in_progress", q: "准备" },
   });
   act(() => {
-    window.location.hash = "#/p/p-1/list?status=done&next=none";
+    window.location.hash = "#/p/p-1/cards?view=board&status=done&next=none";
     window.dispatchEvent(new HashChangeEvent("hashchange"));
   });
+  fireEvent.click(screen.getByRole("button", { name: "状态：已完成" }));
   await waitFor(() =>
     expect(
       (screen.getByRole("checkbox", { name: "已完成" }) as HTMLInputElement)
@@ -233,9 +229,7 @@ test("U1 list filters survive a copied route, chip removal, back navigation and 
   );
   page.unmount();
   render(<CardListPage client={client} projectId="p-1" view="list" />);
-  expect((screen.getByLabelText("下一步谁做") as HTMLSelectElement).value).toBe(
-    "none",
-  );
+  expect(screen.getByRole("button", { name: "下一步：无人" })).toBeTruthy();
 });
 
 test("U1 activity restores filters and pagination without losing project identity", async () => {

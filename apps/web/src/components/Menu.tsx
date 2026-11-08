@@ -22,10 +22,18 @@ export interface MenuProps {
   readonly trigger: ReactElement;
   readonly items: readonly MenuItem[];
   readonly label?: string;
+  readonly title?: ReactNode;
+  readonly footer?: ReactNode;
 }
 
 /** Dropdown menu with regular and persistent checkbox items. */
-export function Menu({ trigger, items, label = "菜单" }: MenuProps) {
+export function Menu({
+  trigger,
+  items,
+  label = "菜单",
+  title,
+  footer,
+}: MenuProps) {
   return (
     <DropdownMenu.Root>
       <DropdownMenu.Trigger asChild>{trigger}</DropdownMenu.Trigger>
@@ -35,6 +43,11 @@ export function Menu({ trigger, items, label = "菜单" }: MenuProps) {
           sideOffset={6}
           aria-label={label}
         >
+          {title && (
+            <DropdownMenu.Label className="menu-title">
+              {title}
+            </DropdownMenu.Label>
+          )}
           {items.map((item) =>
             item.kind === "checkbox" ? (
               <DropdownMenu.CheckboxItem
@@ -61,6 +74,7 @@ export function Menu({ trigger, items, label = "菜单" }: MenuProps) {
               </DropdownMenu.Item>
             ),
           )}
+          {footer && <div className="menu-footer">{footer}</div>}
         </DropdownMenu.Content>
       </DropdownMenu.Portal>
     </DropdownMenu.Root>

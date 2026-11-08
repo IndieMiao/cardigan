@@ -138,7 +138,7 @@ test("a disconnect before any event reconnects from zero; malformed changes cann
 });
 
 test("StrictMode reconnect catches missed UI changes and coalesces a burst into one refresh", async () => {
-  window.location.hash = "#/p/p-1/board";
+  window.location.hash = "#/p/p-1/cards";
   let title = "初始数据";
   const cards = vi
     .fn<CardiganClient["cards"]>()
@@ -187,7 +187,7 @@ test("StrictMode reconnect catches missed UI changes and coalesces a burst into 
   expect(cards).toHaveBeenCalledTimes(count);
 });
 
-test.each(["needs-you", "snapshot", "execution", "activity", "board", "list"])(
+test.each(["needs-you", "snapshot", "execution", "activity", "cards"])(
   "%s refreshes on project changes without remounting the view",
   async (view) => {
     window.location.hash = `#/p/p-1/${view}`;
@@ -195,7 +195,7 @@ test.each(["needs-you", "snapshot", "execution", "activity", "board", "list"])(
       method =
         view === "needs-you"
           ? "needsYou"
-          : view === "board" || view === "list"
+          : view === "cards"
             ? "cards"
             : (view as "snapshot" | "execution" | "activity");
     const loader = vi.spyOn(defaults, method);
@@ -252,7 +252,7 @@ test("card streams filter unrelated events and preserve a comment draft and pend
 });
 
 test("switching project cancels old retries and cursors; expired sessions leave the live Workbench", async () => {
-  window.location.hash = "#/p/p-1/board";
+  window.location.hash = "#/p/p-1/cards";
   let authenticated = true;
   const { client, connections } = live({
     projects: async () => [
