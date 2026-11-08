@@ -5,6 +5,7 @@ import type {
   CardListItem,
   CardPage,
 } from "../api.js";
+import { Board } from "../components/Board.js";
 import { FilterBar } from "../components/FilterBar.js";
 import {
   EmptyState,
@@ -14,6 +15,7 @@ import {
   Time,
 } from "../components/Foundation.js";
 import { routeHash, useRouteFilters } from "../route.js";
+import { inSnapshotGroup, SNAPSHOT_GROUPS } from "../snapshot-groups.js";
 import { BOARD_STATUSES, cardStatusLabel, nextOwnersLabel } from "../status.js";
 import { useResource } from "../useResource.js";
 
@@ -70,6 +72,7 @@ function filteredCards(
   const matched = cards.filter(
     (card) =>
       (selected.size === 0 || selected.has(card.status)) &&
+      inSnapshotGroup(card, filters.overview ?? "") &&
       (next === "" || nextKind(card) === next) &&
       (role === "" || card.roles.includes(role)) &&
       `${card.id} ${card.title}`.toLocaleLowerCase().includes(q),
@@ -107,7 +110,9 @@ export function CardListPage({
   const roles = [
     ...new Set((data?.cards ?? []).flatMap((card) => card.roles)),
   ].sort();
-  const activeFilters = Object.entries(filters).some(([, value]) => value);
+  const activeFilters = Object.entries(filters).some(
+    ([key, value]) => key !== "expanded" && value,
+  );
   return (
     <section className="cards-page" aria-label="卡片">
       <PageTitle
@@ -124,6 +129,9 @@ export function CardListPage({
       )}
       <FilterBar
         fields={[
+          ...(filters.overview
+            ? [{ key: "overview", label: "概览", options: SNAPSHOT_GROUPS }]
+            : []),
           {
             key: "status",
             label: "状态",
@@ -183,64 +191,22 @@ export function CardListPage({
         </EmptyState>
       )}
       {state.kind === "ready" &&
-        cards.length > 0 &&
         (view === "board" ? (
-          <Board cards={cards} projectId={projectId} />
-        ) : (
+          <Board
+            cards={cards}
+            projectId={projectId}
+            expanded={filters.expanded ?? ""}
+            onExpanded={(expanded) => setFilters({ ...filters, expanded })}
+          />
+        ) : cards.length > 0 ? (
           <CardTable cards={cards} projectId={projectId} />
-        ))}
+        ) : null)}
     </section>
   );
 }
 
 function cardHref(projectId: string, card: CardListItem): string {
   return routeHash({ kind: "card", projectId, cardId: card.id });
-}
-
-function Board({
-  cards,
-  projectId,
-}: {
-  readonly cards: readonly CardListItem[];
-  readonly projectId: string;
-}) {
-  return (
-    <div className="board">
-      {BOARD_STATUSES.map((status) => {
-        const column = cards.filter((card) => card.status === status);
-        return (
-          <section
-            className="board-column"
-            key={status}
-            aria-label={cardStatusLabel(status)}
-          >
-            <h3 className="board-column-title">
-              <StatusTag status={status} />
-              <span className="board-column-count">{column.length}</span>
-            </h3>
-            {column.length === 0 ? (
-              <p className="board-column-empty">没有卡片</p>
-            ) : (
-              <ul className="board-list">
-                {column.map((card) => (
-                  <li key={card.id}>
-                    <a className="card-tile" href={cardHref(projectId, card)}>
-                      <IdTag id={card.id} label="卡片" detail={card.title} />
-                      <span className="card-title">{card.title}</span>
-                      <span className="card-why">{card.why}</span>
-                      <span className="card-next">
-                        下一步：{nextOwnersLabel(card.next_owners)}
-                      </span>
-                    </a>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
-        );
-      })}
-    </div>
-  );
 }
 
 function CardTable({

@@ -460,20 +460,42 @@ button.quiet,
 }
 
 .board {
-  display: grid;
-  grid-auto-flow: column;
-  grid-auto-columns: minmax(220px, 1fr);
+  display: flex;
+  flex-wrap: wrap;
   gap: var(--gap);
-  overflow-x: auto;
-  align-items: start;
-  padding-bottom: 8px;
+  align-items: flex-start;
 }
-
+.board-hint {
+  margin-bottom: 12px;
+}
 .board-column {
+  flex: 1 1 240px;
+  min-width: 240px;
+  max-width: 320px;
   background: var(--surface-muted);
+  border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 10px;
   min-height: 120px;
+}
+.board-column-collapsed {
+  flex: 0 0 48px;
+  min-width: 48px;
+  max-width: 48px;
+  padding: 8px;
+}
+.column-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+}
+.board-column-collapsed .column-toggle {
+  flex-direction: column;
+  justify-content: flex-start;
 }
 
 .board-column-title {
@@ -1557,4 +1579,83 @@ fieldset.filters {
 }
 .timeline-records {
   margin-bottom: 20px;
+}
+
+.card-tile-blocked {
+  border-left: 3px solid var(--danger);
+}
+.card-tile > .id-tag {
+  align-self: flex-start;
+}
+.snapshot-overview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  margin: 0 0 24px;
+}
+.snapshot-overview a {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  flex: 1 1 160px;
+  padding: 12px 16px;
+  text-decoration: none;
+  border-right: 1px solid var(--border);
+}
+.snapshot-overview a:last-child {
+  border-right: 0;
+}
+.snapshot-overview strong {
+  font-size: var(--text-page);
+}
+.delivery-table {
+  table-layout: fixed;
+}
+.delivery-table th:nth-child(1),
+.delivery-table th:nth-child(2) {
+  width: 22%;
+}
+.delivery-table th:nth-child(3) {
+  width: 11%;
+}
+.delivery-table th:nth-child(4) {
+  width: 15%;
+}
+.delivery-table .id-tag {
+  max-width: 100%;
+}
+.delivery-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.delivery-summary .id-tag {
+  flex: none;
+}
+.summary-text {
+  display: block;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.board-column-collapsed .status {
+  writing-mode: vertical-rl;
+}
+
+.board-column-collapsed .board-column-title {
+  margin: 0;
+}
+.delivery-table .id-tag > span:first-child {
+  white-space: nowrap;
+  flex: none;
+}
+.delivery-table .id-description {
+  min-width: 0;
 }

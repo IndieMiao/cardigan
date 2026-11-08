@@ -530,6 +530,18 @@ export function projectSnapshotView(state: CommandState, now: string) {
         why: card.why,
       })),
   );
+  const submitted = new Map<string, string>();
+  for (const event of state.events) {
+    const payload = event.payload;
+    if (
+      event.type === "delivery_submitted" &&
+      payload &&
+      typeof payload === "object" &&
+      "delivery_id" in payload &&
+      typeof payload.delivery_id === "string"
+    )
+      submitted.set(payload.delivery_id, event.created_at);
+  }
   const recent_deliveries = [...state.deliveries]
     .sort(byId)
     .reverse()
@@ -537,6 +549,15 @@ export function projectSnapshotView(state: CommandState, now: string) {
     .map((delivery) => ({
       id: delivery.id,
       work_item_id: delivery.work_item_id,
+      work_item_title:
+        state.work_items.find((w) => w.id === delivery.work_item_id)?.title ??
+        null,
+      submitted_at:
+        submitted.get(delivery.id) ??
+        state.timeline.find(
+          (e) => e.type === "delivery" && e.delivery_id === delivery.id,
+        )?.created_at ??
+        null,
       card_id:
         state.work_items.find((item) => item.id === delivery.work_item_id)
           ?.card_id ?? null,

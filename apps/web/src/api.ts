@@ -422,6 +422,9 @@ export interface SnapshotData {
   readonly waiting: { human: readonly string[]; agent: readonly string[] };
   readonly recent_deliveries: readonly {
     id: string;
+    work_item_id?: string;
+    work_item_title?: string | null;
+    submitted_at?: string | null;
     card_id: string | null;
     summary: string;
     status: string;
