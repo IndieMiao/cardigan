@@ -1,11 +1,15 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiError,
   type CardDetail,
   type CardiganClient,
   type CardReadOptions,
 } from "../api.js";
-import { CardSidebar } from "../components/CardSidebar.js";
+import { AttachmentGrid } from "../components/AttachmentGrid.js";
+import { CardSource, RecentConclusions } from "../components/CardIntro.js";
+import { CardRecords } from "../components/CardRecords.js";
+import { CardSectionNav } from "../components/CardSectionNav.js";
+import { CardSidebar, CardWorkItems } from "../components/CardSidebar.js";
 import { CommentBox, type MentionOption } from "../components/CommentBox.js";
 import {
   EmptyState,
@@ -34,10 +38,12 @@ export function CardDetailPage(props: CardDetailPageProps) {
     client,
     projectId,
     cardId,
-    anchor,
+    anchor: routeAnchor,
     inDrawer = false,
     revision = 0,
   } = props;
+  const [localAnchor, setLocalAnchor] = useState<string>();
+  const anchor = routeAnchor ?? localAnchor;
   const [routeFilters] = useRouteFilters({ kind: "card", projectId, cardId });
   const pageSize = [20, 50, 100].includes(Number(routeFilters.count))
     ? Number(routeFilters.count)
@@ -102,6 +108,7 @@ export function CardDetailPage(props: CardDetailPageProps) {
       cardId={cardId}
       anchor={anchor}
       inDrawer={inDrawer}
+      onLocate={inDrawer ? setLocalAnchor : undefined}
       error={error}
       reload={reload}
       pending={pending}
@@ -127,6 +134,7 @@ function CardContent({
   cardId,
   anchor,
   inDrawer,
+  onLocate,
   error,
   reload,
   pending,
@@ -140,6 +148,7 @@ function CardContent({
   cardId: string;
   anchor: string | undefined;
   inDrawer: boolean;
+  onLocate: ((anchor: string) => void) | undefined;
   error: string | undefined;
   reload: () => void;
   anchorReady: boolean;
@@ -152,6 +161,7 @@ function CardContent({
     projectId,
     cardId,
   });
+  const article = useRef<HTMLElement>(null);
   const scroll = useRef<HTMLElement>(null),
     initialTimeline = useRef(detail.timeline),
     interacted = useRef(false),
@@ -203,7 +213,7 @@ function CardContent({
       typeof ResizeObserver === "undefined"
         ? undefined
         : new ResizeObserver(settle);
-    observer?.observe(region.closest(".card-main") ?? region);
+    observer?.observe(article.current ?? region);
     const stop = () => {
       following = false;
       interacted.current = true;
@@ -230,8 +240,52 @@ function CardContent({
   const completion = [...detail.deliveries]
     .reverse()
     .find((d) => d.kind === "card_completion" && d.status === "accepted");
+  const sectionId = (name: string) => `card-${cardId}-${name}`;
+  const sections = [
+    { id: sectionId("overview"), label: "概览" },
+    ...(detail.work_items.length
+      ? [
+          {
+            id: sectionId("work"),
+            label: "工作项",
+            count: detail.work_items.length,
+          },
+        ]
+      : []),
+    ...(detail.deliveries.length || detail.reviews.length
+      ? [
+          {
+            id: sectionId("records"),
+            label: "交付与审核",
+            count: detail.deliveries.length + detail.reviews.length,
+          },
+        ]
+      : []),
+    ...(detail.counts.timeline
+      ? [
+          {
+            id: sectionId("timeline"),
+            label: "时间线",
+            count: detail.counts.timeline,
+          },
+        ]
+      : []),
+    ...(detail.attachments.length
+      ? [
+          {
+            id: sectionId("attachments"),
+            label: "附件",
+            count: detail.attachments.length,
+          },
+        ]
+      : []),
+  ];
   return (
-    <article className={cardPageClass} aria-label={`卡片 ${cardId}`}>
+    <article
+      ref={article}
+      className={cardPageClass}
+      aria-label={`卡片 ${cardId}`}
+    >
       <div className="card-main">
         {error && (
           <p role="alert" className="error-panel">
@@ -242,6 +296,7 @@ function CardContent({
           </p>
         )}
         <header className="card-header">
+          <CardSource detail={detail} projectId={projectId} />
           <PageTitle
             title={
               <>
@@ -258,7 +313,12 @@ function CardContent({
             }
           />
         </header>
-        <section className="card-purpose" aria-label="目标和验收标准">
+        <CardSectionNav article={article} sections={sections} />
+        <section
+          id={sectionId("overview")}
+          className="card-purpose"
+          aria-label="目标和验收标准"
+        >
           <h2>目标</h2>
           <LongContent>
             <p>{card.goal}</p>
@@ -291,8 +351,35 @@ function CardContent({
               </p>
             )}
           </details>
+          <RecentConclusions
+            detail={detail}
+            projectId={projectId}
+            onLocate={onLocate}
+          />
         </section>
-        <section className="card-section card-timeline" aria-label="时间线">
+        {!!detail.work_items.length && (
+          <div id={sectionId("work")}>
+            <CardWorkItems
+              detail={detail}
+              projectId={projectId}
+              cardId={cardId}
+            />
+          </div>
+        )}
+        {!!(detail.deliveries.length || detail.reviews.length) && (
+          <div id={sectionId("records")}>
+            <CardRecords
+              detail={detail}
+              projectId={projectId}
+              onLocate={onLocate}
+            />
+          </div>
+        )}
+        <section
+          id={sectionId("timeline")}
+          className="card-section card-timeline"
+          aria-label="时间线"
+        >
           <h2>时间线</h2>
           <TimelineControls
             filters={filters}
@@ -332,6 +419,16 @@ function CardContent({
             onPosted={reload}
           />
         </section>
+        {!!detail.attachments.length && (
+          <section
+            id={sectionId("attachments")}
+            className="card-section"
+            aria-label="附件"
+          >
+            <h2>附件（{detail.attachments.length}）</h2>
+            <AttachmentGrid attachments={detail.attachments} />
+          </section>
+        )}
       </div>
       <CardSidebar detail={detail} projectId={projectId} cardId={cardId} />
     </article>
