@@ -178,6 +178,8 @@ export interface AttachmentView {
   readonly kind: "artifact" | "evidence";
   readonly attach_to: { readonly kind: string; readonly id: string };
   readonly uploaded_by: string;
+  readonly uploader_role: string | null;
+  readonly uploaded_at: string | null;
   readonly basis: { readonly id: string; readonly status: string } | null;
   readonly supersedes: string | null;
   /** Known bitmap types may render inline; everything else is a download. */
@@ -198,6 +200,21 @@ export function attachmentViews(
   state: CommandState,
   card_id: CardId,
 ): AttachmentView[] {
+  const roles = new Map(
+    state.assignments.map((a) => [String(a.id), a.role_id]),
+  );
+  const uploaded = new Map<string, string>();
+  for (const event of state.events) {
+    if (
+      event.type === "attachment_uploaded" &&
+      event.payload &&
+      typeof event.payload === "object" &&
+      "attachment_id" in event.payload &&
+      typeof event.payload.attachment_id === "string"
+    ) {
+      uploaded.set(event.payload.attachment_id, event.created_at);
+    }
+  }
   const decisions = new Map(state.decisions.map((q) => [q.id, q]));
   const entryCard = new Map(
     state.timeline.map((entry) => [entry.id, entry.card_id]),
@@ -227,6 +244,10 @@ export function attachmentViews(
         kind: attachment.kind,
         attach_to: attachment.attach_to,
         uploaded_by: attachment.uploaded_by,
+        uploader_role: attachment.uploaded_by.startsWith("assignment:")
+          ? (roles.get(attachment.uploaded_by.slice(11)) ?? null)
+          : null,
+        uploaded_at: uploaded.get(attachment.id) ?? null,
         basis,
         supersedes: attachment.supersedes ?? null,
         inline: INLINE_MIME_TYPES.has(attachment.mime.toLowerCase()),
@@ -322,6 +343,13 @@ export function cardDetail(
       ),
     }));
 
+  const conclusionEntries = allTimeline
+    .filter(
+      (entry) =>
+        !entry.retracted &&
+        ["review", "decision_resolved"].includes(entry.type),
+    )
+    .slice(0, 3);
   const description = [
     card.title,
     card.goal,
@@ -332,7 +360,11 @@ export function cardDetail(
   const resolved = new Map(
     resolveReferences(
       state,
-      [description, ...timeline.map((e) => e.body)].join("\n"),
+      [
+        description,
+        ...timeline.map((e) => e.body),
+        ...conclusionEntries.map((e) => e.body),
+      ].join("\n"),
     ).map((ref) => [`${ref.kind}:${ref.id}`, ref]),
   );
   const references = (body: string) =>
@@ -350,44 +382,60 @@ export function cardDetail(
   const updated_at =
     [...events.map((e) => e.created_at), card.created_at].sort().at(-1) ??
     card.created_at;
+  const timelineView = (entry: TimelineEntry) => {
+    const event = eventBySeq.get(entry.event_seq);
+    const reviewId =
+      event?.payload &&
+      typeof event.payload === "object" &&
+      "review_id" in event.payload
+        ? event.payload.review_id
+        : undefined;
+    const review_id =
+      entry.type === "review"
+        ? reviews.find(
+            (r) =>
+              r.id === reviewId &&
+              r.delivery_id === entry.delivery_id &&
+              r.work_item_id === entry.work_item_id,
+          )?.id
+        : undefined;
+    return {
+      ...entry,
+      event_type: event?.type ?? null,
+      ...(entry.type === "decision_resolved" &&
+      event?.payload &&
+      typeof event.payload === "object" &&
+      "option" in event.payload &&
+      typeof event.payload.option === "string"
+        ? { decision_option: event.payload.option }
+        : {}),
+      author_role: entry.author.startsWith("assignment:")
+        ? (roles.get(entry.author.slice(11)) ?? null)
+        : null,
+      ...(review_id ? { review_id } : {}),
+      references: references(entry.body),
+    };
+  };
+  const source = card.source;
+  const sourceDecision =
+    source.kind === "decision"
+      ? state.decisions.find((d) => d.id === source.decision_id)
+      : undefined;
+  const sourceCard =
+    sourceDecision?.card_id !== card_id
+      ? state.cards.find((c) => c.id === sourceDecision?.card_id)
+      : undefined;
   return {
     updated_at,
     card: { ...card, references: references(description) },
     work_items,
-    timeline: timeline.map((entry) => {
-      const event = eventBySeq.get(entry.event_seq);
-      const reviewId =
-        event?.payload &&
-        typeof event.payload === "object" &&
-        "review_id" in event.payload
-          ? event.payload.review_id
-          : undefined;
-      const review_id =
-        entry.type === "review"
-          ? reviews.find(
-              (r) =>
-                r.id === reviewId &&
-                r.delivery_id === entry.delivery_id &&
-                r.work_item_id === entry.work_item_id,
-            )?.id
-          : undefined;
-      return {
-        ...entry,
-        event_type: event?.type ?? null,
-        ...(entry.type === "decision_resolved" &&
-        event?.payload &&
-        typeof event.payload === "object" &&
-        "option" in event.payload &&
-        typeof event.payload.option === "string"
-          ? { decision_option: event.payload.option }
-          : {}),
-        author_role: entry.author.startsWith("assignment:")
-          ? (roles.get(entry.author.slice(11)) ?? null)
-          : null,
-        ...(review_id ? { review_id } : {}),
-        references: references(entry.body),
-      };
-    }),
+    timeline: timeline.map(timelineView),
+    recent_conclusions: conclusionEntries
+      .map(timelineView)
+      .filter(
+        (entry) =>
+          entry.review_id || decisions.some((d) => d.id === entry.decision_id),
+      ),
     deliveries,
     reviews,
     review_matrix,
@@ -404,6 +452,14 @@ export function cardDetail(
         decider: decision.decider,
       })),
       cards: related,
+      source_card:
+        sourceCard && sourceDecision
+          ? {
+              id: sourceCard.id,
+              title: sourceCard.title,
+              decision_id: sourceDecision.id,
+            }
+          : null,
       pull_requests: deliveries
         .filter((delivery) => delivery.pr_url !== undefined)
         .map((delivery) => ({

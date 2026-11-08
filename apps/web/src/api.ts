@@ -61,6 +61,9 @@ export interface CardView {
   readonly waiting_on: readonly WaitingOnItem[];
   readonly next_owners: readonly NextOwnerItem[];
   readonly related_cards: readonly string[];
+  readonly source?:
+    | { readonly kind: "quote"; readonly text: string }
+    | { readonly kind: "decision"; readonly decision_id: string };
 }
 
 /** A list row: the card plus the fields the list filters and columns need. */
@@ -228,6 +231,8 @@ export interface AttachmentView {
   readonly kind: "artifact" | "evidence";
   readonly attach_to: { readonly kind: string; readonly id: string };
   readonly uploaded_by: string;
+  readonly uploader_role?: string | null;
+  readonly uploaded_at?: string | null;
   readonly basis: { readonly id: string; readonly status: string } | null;
   readonly supersedes: string | null;
   readonly inline: boolean;
@@ -235,6 +240,11 @@ export interface AttachmentView {
 }
 
 export interface CardRelations {
+  readonly source_card?: {
+    readonly id: string;
+    readonly title: string;
+    readonly decision_id: string;
+  } | null;
   readonly decisions: readonly {
     readonly id: string;
     readonly question: string;
@@ -257,6 +267,7 @@ export interface CardRelations {
 
 export interface CardDetail {
   readonly updated_at?: string;
+  readonly recent_conclusions?: readonly TimelineEntryView[];
   readonly project_id: string;
   readonly card: CardView;
   readonly work_items: readonly WorkItemView[];

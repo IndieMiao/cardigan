@@ -1713,10 +1713,11 @@ fieldset.filters {
   }
 }
 .drawer-body {
+  --drawer-padding: 24px;
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 24px;
+  padding: var(--drawer-padding);
 }
 .drawer-footer {
   display: flex;
@@ -1725,10 +1726,13 @@ fieldset.filters {
   padding: 16px 24px;
   border-top: 1px solid var(--border);
 }
+.lightbox-overlay {
+  z-index: 110;
+}
 .lightbox-content {
   position: fixed;
   inset: 0;
-  z-index: 101;
+  z-index: 111;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -1951,20 +1955,20 @@ fieldset.filters {
 .long-content-4 .long-body.collapsed {
   max-height: 6.6em;
 }
-.card-sidebar .work-item > details > summary {
+.work-item > details > summary {
   display: grid;
   grid-template-columns: 12px minmax(0, 1fr);
   align-items: start;
   gap: 4px;
   list-style: none;
 }
-.card-sidebar .work-item > details > summary::-webkit-details-marker {
+.work-item > details > summary::-webkit-details-marker {
   display: none;
 }
-.card-sidebar .work-item > details > summary::before {
+.work-item > details > summary::before {
   content: "▸";
 }
-.card-sidebar .work-item > details[open] > summary::before {
+.work-item > details[open] > summary::before {
   content: "▾";
 }
 .work-item-caption {
@@ -2123,4 +2127,148 @@ fieldset.filters {
 }
 .card-tile-head .status {
   margin-left: auto;
+}
+
+.card-main [id] {
+  scroll-margin-top: 64px;
+}
+
+/* U5b: one detail component in the page or the drawer's own scroll container. */
+.card-main > :where(section, div[id]) {
+  margin-bottom: 16px;
+}
+.card-source {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  margin-bottom: 12px;
+}
+.card-source blockquote {
+  margin: 0;
+  border-left: 3px solid var(--border);
+  padding-left: 12px;
+}
+.card-main .card-source p {
+  margin: 4px 0;
+}
+.related-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+.related-cards :where(details) a {
+  display: block;
+}
+.card-section-nav {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 8px 0;
+  margin-bottom: 16px;
+  font-size: var(--text-sm);
+}
+.card-section-nav button {
+  white-space: nowrap;
+  padding: 6px 4px;
+  border: 0;
+  border-radius: 0;
+}
+.card-section-nav [aria-current="location"] {
+  border-bottom: 2px solid var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+.card-section-nav .write-comment {
+  margin-left: auto;
+  padding: 6px 10px;
+  border-radius: 4px;
+}
+.recent-conclusions ul,
+.card-record-list {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0 0;
+}
+.recent-conclusions a,
+.card-main .card-record-list p {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.card-record-list > li {
+  border-bottom: 1px solid var(--border);
+  padding: 10px 0;
+}
+.card-record-list > li > div,
+.record-reviews {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 16px;
+}
+.card-main .card-record-list p {
+  margin: 4px 0;
+}
+.attachment-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.attachment-grid > li {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: var(--text-sm);
+}
+.attachment-preview,
+.attachment-file {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 112px;
+  background: var(--surface-muted);
+  color: var(--text-muted);
+  gap: 8px;
+}
+.attachment-preview {
+  padding: 0;
+  border: 0;
+}
+.attachment-preview img {
+  max-height: 100%;
+  width: 100%;
+  object-fit: contain;
+}
+.card-page-drawer {
+  display: block;
+}
+.card-page-drawer .card-main {
+  display: contents;
+}
+.card-page-drawer .card-sidebar {
+  position: static;
+  max-height: none;
+  margin-top: 20px;
+  padding-left: 0;
+  border-left: 0;
+}
+
+.card-page-drawer .card-section-nav {
+  top: calc(-1 * var(--drawer-padding));
+}
+.lightbox-caption a {
+  color: var(--overlay-text);
+  text-decoration: underline;
 }
