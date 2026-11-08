@@ -151,6 +151,7 @@ test("an empty project says so, and active filters have their own empty text", a
 test("the board groups cards by status and links each one", async () => {
   const api = client(async () => page());
   render(<CardListPage client={api} projectId="p-1" view="board" />);
+  expect(screen.getByRole("heading", { name: /卡片.*张卡片/u })).toBeTruthy();
   const inProgress = await screen.findByRole("region", { name: "进行中" });
   expect(inProgress.textContent).toContain("准备发布");
   expect(inProgress.textContent).not.toContain("写迁移脚本");
@@ -170,12 +171,11 @@ test("the list shows the configurable columns, progress, updated time and reason
   render(<CardListPage client={api} projectId="p-1" view="list" />);
   const row = (await screen.findByText("写迁移脚本")).closest("tr");
   if (!row) throw new Error("Missing row");
-  expect([...row.querySelectorAll("td")].length).toBe(9);
+  expect([...row.querySelectorAll("td")].length).toBe(8);
   expect(row.textContent).toContain("C-2");
   expect(row.textContent).toContain("待开始");
   expect(row.textContent).toContain("coder");
   expect(row.textContent).toContain("0/3");
-  expect(row.textContent).toContain("coder 返工中");
   expect(row.querySelector("time")?.getAttribute("datetime")).toBe(
     "2026-01-02T00:00:00.000Z",
   );
@@ -187,14 +187,14 @@ test("the list shows the configurable columns, progress, updated time and reason
     "编号",
     "标题",
     "状态",
-    "等待标记",
     "负责角色",
     "进度",
     "更新时间",
     "下一步",
-    "原因",
   ])
     expect(screen.getByRole("columnheader", { name: header })).toBeTruthy();
+  expect(row.lastElementChild?.textContent).toBe("→");
+  expect(screen.getByText("共 3 张卡片")).toBeTruthy();
 });
 
 test("status, next owner, role, search and sort filter the rows and live in the route", async () => {
@@ -213,23 +213,34 @@ test("status, next owner, role, search and sort filter the rows and live in the 
   });
   fireEvent.click(screen.getByRole("button", { name: "移除状态筛选" }));
 
-  fireEvent.change(screen.getByLabelText("下一步谁做"), {
-    target: { value: "agent" },
+  fireEvent.pointerDown(screen.getByRole("button", { name: "下一步：全部" }), {
+    button: 0,
+    pointerType: "mouse",
   });
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Agent" }));
   await waitFor(() => expect(screen.queryByText("准备发布")).toBeNull());
   expect(screen.getByText("写迁移脚本")).toBeTruthy();
-  fireEvent.change(screen.getByLabelText("下一步谁做"), {
-    target: { value: "" },
+  fireEvent.pointerDown(screen.getByRole("button", { name: "下一步：Agent" }), {
+    button: 0,
+    pointerType: "mouse",
   });
+  fireEvent.click(await screen.findByRole("menuitem", { name: "全部" }));
 
-  fireEvent.change(screen.getByLabelText("角色"), {
-    target: { value: "reviewer" },
+  fireEvent.pointerDown(screen.getByRole("button", { name: "角色：全部" }), {
+    button: 0,
+    pointerType: "mouse",
   });
+  fireEvent.click(await screen.findByRole("menuitem", { name: "reviewer" }));
   await waitFor(() => expect(screen.queryByText("写迁移脚本")).toBeNull());
   expect(screen.getByText("准备发布")).toBeTruthy();
-  fireEvent.change(screen.getByLabelText("角色"), {
-    target: { value: "" },
-  });
+  fireEvent.pointerDown(
+    screen.getByRole("button", { name: "角色：reviewer" }),
+    {
+      button: 0,
+      pointerType: "mouse",
+    },
+  );
+  fireEvent.click(await screen.findByRole("menuitem", { name: "全部" }));
 
   fireEvent.change(screen.getByLabelText("搜索标题或编号"), {
     target: { value: "C-2" },
@@ -240,9 +251,11 @@ test("status, next owner, role, search and sort filter the rows and live in the 
     target: { value: "" },
   });
 
-  fireEvent.change(screen.getByLabelText("排序"), {
-    target: { value: "priority" },
+  fireEvent.pointerDown(screen.getByRole("button", { name: "排序：全部" }), {
+    button: 0,
+    pointerType: "mouse",
   });
+  fireEvent.click(await screen.findByRole("menuitem", { name: "优先级" }));
   await waitFor(() => {
     const rows = within(screen.getByRole("table")).getAllByRole("row").slice(1);
     expect(rows.map((row) => row.textContent?.slice(0, 3))).toEqual([
@@ -283,6 +296,9 @@ test("the display menu hides fields and persists the choice in localStorage", as
     pointerType: "mouse",
   });
   const menu = await screen.findByRole("menu");
+  expect(within(menu).getByText("显示字段")).toBeTruthy();
+  expect(within(menu).getByText("标题始终显示")).toBeTruthy();
+  expect(within(menu).getByText("仅保存在此浏览器")).toBeTruthy();
   const number = within(menu)
     .getByText("编号")
     .closest('[role="menuitemcheckbox"]');
@@ -309,7 +325,7 @@ test("invalid stored display settings fall back to the defaults", async () => {
   const api = client(async () => page());
   render(<CardListPage client={api} projectId="p-1" view="list" />);
   await screen.findByText("准备发布");
-  for (const header of ["编号", "等待标记", "负责角色", "进度", "更新时间"])
+  for (const header of ["编号", "负责角色", "进度", "更新时间"])
     expect(screen.getByRole("columnheader", { name: header })).toBeTruthy();
 });
 

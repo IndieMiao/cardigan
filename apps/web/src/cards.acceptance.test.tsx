@@ -186,8 +186,13 @@ test.each(["board", "list"] as const)(
     });
     expect(link.getAttribute("href")).toContain(`/cards/${f.card.id}`);
     expect(screen.getAllByText(/待开始/).length).toBeGreaterThan(0);
-    for (const name of ["你", "Agent", "无人"])
-      expect(screen.getByRole("option", { name })).toBeTruthy();
+    for (const name of [
+      "状态：全部",
+      "下一步：全部",
+      "角色：全部",
+      "排序：全部",
+    ])
+      expect(screen.getByRole("button", { name })).toBeTruthy();
     fireEvent.change(screen.getByLabelText("搜索标题或编号"), {
       target: { value: "没有这张卡" },
     });

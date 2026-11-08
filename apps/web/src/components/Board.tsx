@@ -52,7 +52,7 @@ export function Board({
                   >
                     <StatusTag status={status} />
                     <span className="board-column-count">0</span>
-                    <span aria-hidden="true">{collapsed ? "+" : "−"}</span>
+                    {!collapsed && <span aria-hidden="true">−</span>}
                   </button>
                 ) : (
                   <>
@@ -95,53 +95,77 @@ export function Board({
                               onOpenCard(card.id, event.currentTarget);
                             }}
                           >
-                            {display.number && (
-                              <IdTag
-                                id={card.id}
-                                label="卡片"
-                                detail={card.title}
-                              />
-                            )}
+                            <span className="card-tile-head">
+                              {display.number && (
+                                <IdTag
+                                  id={card.id}
+                                  label="卡片"
+                                  detail={card.title}
+                                />
+                              )}
+                              <StatusTag status={card.status} />
+                            </span>
                             <span className="card-title">{card.title}</span>
                             {display.waiting &&
                               (blocked || decision || humanAction) && (
-                                <span className="metadata">
-                                  {decision && (
-                                    <span className="status status-waiting">
-                                      等你拍板
-                                    </span>
-                                  )}
-                                  {humanAction && (
-                                    <span className="status status-waiting">
-                                      待你执行
-                                    </span>
-                                  )}
-                                  {blocked && <StatusTag status="blocked" />}
+                                <span className="card-field">
+                                  <span className="card-field-label">
+                                    等待标记：
+                                  </span>
+                                  <span className="metadata">
+                                    {decision && (
+                                      <span className="status status-waiting">
+                                        等你拍板
+                                      </span>
+                                    )}
+                                    {humanAction && (
+                                      <span className="status status-waiting">
+                                        待你执行
+                                      </span>
+                                    )}
+                                    {blocked && <StatusTag status="blocked" />}
+                                  </span>
                                 </span>
                               )}
                             {display.reason && (
-                              <span className="card-why">{card.why}</span>
+                              <span className="card-field">
+                                <span className="card-field-label">原因：</span>
+                                <span>{card.why}</span>
+                              </span>
                             )}
                             {display.roles && (
-                              <span>
-                                负责角色：
-                                {card.roles.join("、") || "尚未配置"}
+                              <span className="card-field">
+                                <span className="card-field-label">
+                                  负责角色：
+                                </span>
+                                <span>
+                                  {card.roles.join("、") || "尚未配置"}
+                                </span>
                               </span>
                             )}
                             {display.progress && (
-                              <span>
-                                进度：{card.progress.completed}/
-                                {card.progress.total} 工作项完成
+                              <span className="card-field">
+                                <span className="card-field-label">进度：</span>
+                                <span>
+                                  {card.progress.completed}/
+                                  {card.progress.total}
+                                </span>
                               </span>
                             )}
                             {display.updated && (
-                              <span>
-                                更新于 <Time value={card.updated_at} />
+                              <span className="card-field">
+                                <span className="card-field-label">
+                                  更新时间：
+                                </span>
+                                <Time value={card.updated_at} />
                               </span>
                             )}
                             {display.next && (
-                              <span className="card-next">
-                                下一步：{nextOwnersLabel(card.next_owners)}
+                              <span className="card-field">
+                                <span className="card-field-label">
+                                  下一步：
+                                </span>
+                                <span>{nextOwnersLabel(card.next_owners)}</span>
                               </span>
                             )}
                           </a>

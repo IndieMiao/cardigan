@@ -189,7 +189,7 @@ test("U1 shell orders Needs You first with its count, then work and runtime grou
   ).toEqual(["Needs You 1", "卡片", "执行视图", "项目动态", "项目快照"]);
   expect(within(sidebar).getByRole("heading", { name: "工作" })).toBeTruthy();
   expect(within(sidebar).getByRole("heading", { name: "运行" })).toBeTruthy();
-  expect(await screen.findByRole("heading", { name: "卡片" })).toBeTruthy();
+  expect(await screen.findByRole("heading", { name: /卡片/u })).toBeTruthy();
 });
 
 test("U1 list filters survive a copied route, chip removal, back navigation and remount", async () => {
@@ -229,9 +229,7 @@ test("U1 list filters survive a copied route, chip removal, back navigation and 
   );
   page.unmount();
   render(<CardListPage client={client} projectId="p-1" view="list" />);
-  expect((screen.getByLabelText("下一步谁做") as HTMLSelectElement).value).toBe(
-    "none",
-  );
+  expect(screen.getByRole("button", { name: "下一步：无人" })).toBeTruthy();
 });
 
 test("U1 activity restores filters and pagination without losing project identity", async () => {

@@ -124,6 +124,44 @@ function BoardIcon() {
     </svg>
   );
 }
+function SelectFilter({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  readonly label: string;
+  readonly value: string;
+  readonly options: readonly {
+    readonly value: string;
+    readonly label: string;
+  }[];
+  readonly onChange: (value: string) => void;
+}) {
+  const current =
+    options.find((option) => option.value === value)?.label ?? "全部";
+  return (
+    <Menu
+      label={label}
+      trigger={
+        <button type="button" className="filter-select-trigger">
+          <span>
+            {label}：{current}
+          </span>
+          <span aria-hidden="true">▾</span>
+        </button>
+      }
+      items={[
+        { id: "__all", label: "全部", onSelect: () => onChange("") },
+        ...options.map((option) => ({
+          id: option.value,
+          label: option.label,
+          onSelect: () => onChange(option.value),
+        })),
+      ]}
+    />
+  );
+}
 function CopyLinkButton() {
   const [message, setMessage] = useState("");
   return (
@@ -218,12 +256,20 @@ export function CardListPage({
   return (
     <section className="cards-page" aria-label="卡片">
       <PageTitle
-        title="卡片"
+        title={
+          <span className="cards-title">
+            卡片
+            <small className="cards-count">
+              {data?.cards.length ?? 0} 张卡片
+            </small>
+          </span>
+        }
         description="查看卡片进度与下一步负责人。"
         actions={
           <ViewSwitch
             label="视图"
             value={view}
+            showLabel
             onChange={(next) =>
               setFilters({
                 ...filters,
@@ -272,11 +318,34 @@ export function CardListPage({
               { value: "agent", label: "Agent" },
               { value: "none", label: "无人" },
             ],
+            render: (value, setValue) => (
+              <SelectFilter
+                label="下一步"
+                value={value}
+                options={[
+                  { value: "human", label: "你" },
+                  { value: "agent", label: "Agent" },
+                  { value: "none", label: "无人" },
+                ]}
+                onChange={setValue}
+              />
+            ),
           },
           {
             key: "role",
             label: "角色",
             options: roles.map((role) => ({ value: role, label: role })),
+            render: (value, setValue) => (
+              <SelectFilter
+                label="角色"
+                value={value}
+                options={roles.map((role) => ({
+                  value: role,
+                  label: role,
+                }))}
+                onChange={setValue}
+              />
+            ),
           },
           {
             key: "sort",
@@ -286,20 +355,55 @@ export function CardListPage({
               { value: "id", label: "编号" },
               { value: "priority", label: "优先级" },
             ],
+            render: (value, setValue) => (
+              <SelectFilter
+                label="排序"
+                value={value}
+                options={[
+                  { value: "updated", label: "更新时间" },
+                  { value: "id", label: "编号" },
+                  { value: "priority", label: "优先级" },
+                ]}
+                onChange={setValue}
+              />
+            ),
           },
-          { key: "q", label: "搜索标题或编号" },
+          {
+            key: "q",
+            label: "搜索标题或编号",
+            render: (value, setValue) => (
+              <label className="filter-search">
+                <span aria-hidden="true">⌕</span>
+                <input
+                  type="search"
+                  aria-label="搜索标题或编号"
+                  placeholder="搜索标题或编号"
+                  value={value}
+                  onChange={(event) => setValue(event.target.value)}
+                />
+              </label>
+            ),
+          },
           {
             key: "display",
             label: "显示",
             render: () => (
               <Menu
                 label="显示字段"
+                title="显示字段"
                 trigger={
-                  <button type="button" className="quiet">
-                    显示
+                  <button type="button" className="filter-select-trigger">
+                    <span>显示</span>
+                    <span aria-hidden="true">▾</span>
                   </button>
                 }
                 items={displayItems}
+                footer={
+                  <>
+                    <span>标题始终显示</span>
+                    <span>仅保存在此浏览器</span>
+                  </>
+                }
               />
             ),
           },
@@ -392,16 +496,6 @@ export function CardListPage({
 function cardHref(projectId: string, card: CardListItem): string {
   return routeHash({ kind: "card", projectId, cardId: card.id });
 }
-function WaitingTags({ card }: { readonly card: CardListItem }) {
-  if (card.waiting_on.length === 0) return <span>—</span>;
-  return (
-    <span className="metadata">
-      {card.waiting_on.map((waiting) => (
-        <span key={`${waiting.kind}:${waiting.ref}`}>{waiting.label}</span>
-      ))}
-    </span>
-  );
-}
 function CardTable({
   cards,
   projectId,
@@ -413,74 +507,76 @@ function CardTable({
   readonly display: CardDisplay;
   readonly onOpenCard: (cardId: string, trigger: HTMLElement) => void;
 }) {
-  const columns = CARD_DISPLAY_FIELDS.filter((field) => display[field.key]);
   return (
-    <table className="card-table">
-      <thead>
-        <tr>
-          {display.number && <th scope="col">编号</th>}
-          <th scope="col">标题</th>
-          <th scope="col">状态</th>
-          {columns
-            .filter((field) => field.key !== "number")
-            .map((field) => (
-              <th key={field.key} scope="col">
-                {field.label}
-              </th>
-            ))}
-        </tr>
-      </thead>
-      <tbody>
-        {cards.map((card) => (
-          <tr key={card.id} title={display.reason ? card.why : undefined}>
-            {display.number && (
-              <td>
-                <IdTag id={card.id} label="卡片" detail={card.title} />
-              </td>
-            )}
-            <td>
-              <a
-                href={cardHref(projectId, card)}
-                title={display.reason ? card.why : undefined}
-                onClick={(event) => {
-                  if (
-                    event.metaKey ||
-                    event.ctrlKey ||
-                    event.shiftKey ||
-                    event.altKey
-                  )
-                    return;
-                  event.preventDefault();
-                  onOpenCard(card.id, event.currentTarget);
-                }}
-              >
-                {card.title}
-              </a>
-            </td>
-            <td>
-              <StatusTag status={card.status} />
-            </td>
-            {display.waiting && (
-              <td>
-                <WaitingTags card={card} />
-              </td>
-            )}
-            {display.roles && <td>{card.roles.join("、") || "—"}</td>}
-            {display.progress && (
-              <td>
-                {card.progress.completed}/{card.progress.total}
-              </td>
-            )}
-            {display.updated && (
-              <td>
-                <Time value={card.updated_at} />
-              </td>
-            )}
-            {display.next && <td>{nextOwnersLabel(card.next_owners)}</td>}
-            {display.reason && <td>{card.why}</td>}
+    <>
+      <table className="card-table">
+        <thead>
+          <tr>
+            {display.number && <th scope="col">编号</th>}
+            <th scope="col">标题</th>
+            <th scope="col">状态</th>
+            {display.roles && <th scope="col">负责角色</th>}
+            {display.progress && <th scope="col">进度</th>}
+            {display.updated && <th scope="col">更新时间</th>}
+            {display.next && <th scope="col">下一步</th>}
+            <th scope="col" aria-label="打开" />
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {cards.map((card) => (
+            <tr key={card.id} title={display.reason ? card.why : undefined}>
+              {display.number && (
+                <td>
+                  <IdTag id={card.id} label="卡片" detail={card.title} />
+                </td>
+              )}
+              <td>
+                <a
+                  className="card-table-title"
+                  href={cardHref(projectId, card)}
+                  title={display.reason ? card.why : undefined}
+                  onClick={(event) => {
+                    if (
+                      event.metaKey ||
+                      event.ctrlKey ||
+                      event.shiftKey ||
+                      event.altKey
+                    )
+                      return;
+                    event.preventDefault();
+                    onOpenCard(card.id, event.currentTarget);
+                  }}
+                >
+                  {card.title}
+                </a>
+              </td>
+              <td>
+                <StatusTag status={card.status} />
+              </td>
+              {display.roles && (
+                <td className="card-table-roles">
+                  {card.roles.join("、") || "—"}
+                </td>
+              )}
+              {display.progress && (
+                <td>
+                  {card.progress.completed}/{card.progress.total}
+                </td>
+              )}
+              {display.updated && (
+                <td>
+                  <Time value={card.updated_at} />
+                </td>
+              )}
+              {display.next && <td>{nextOwnersLabel(card.next_owners)}</td>}
+              <td className="card-table-arrow" aria-hidden="true">
+                →
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="card-table-footer">共 {cards.length} 张卡片</p>
+    </>
   );
 }

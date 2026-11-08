@@ -41,13 +41,15 @@ export function Drawer({
           <header className="drawer-header">
             <Dialog.Title className="drawer-title">{title}</Dialog.Title>
             {actions && <div className="drawer-actions">{actions}</div>}
+            {actions && <span className="drawer-divider" aria-hidden="true" />}
             <Dialog.Close asChild>
               <button
                 type="button"
                 className="quiet drawer-close"
                 aria-label="关闭抽屉"
+                title="关闭"
               >
-                关闭
+                ×
               </button>
             </Dialog.Close>
           </header>

@@ -204,7 +204,7 @@ test("the shell shows the project switcher, the filters and the navigation", asy
   expect(await screen.findByRole("link", { name: "卡片" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "看板" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "列表" })).toBeTruthy();
-  expect(screen.getByLabelText("下一步谁做")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "下一步：全部" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "状态：全部" })).toBeTruthy();
   // The URL lands on the only project's cards page, defaulting to the board.
   await waitFor(() => expect(window.location.hash).toBe("#/p/p-1/cards"));

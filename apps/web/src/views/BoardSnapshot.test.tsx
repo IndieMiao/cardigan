@@ -77,7 +77,7 @@ test("U4b cards show role, progress, update and a textual blocker; newly occupie
   );
   const link = await screen.findByRole("link", { name: /准备发布/ });
   expect(link.textContent).toContain("负责角色：coder、reviewer");
-  expect(link.textContent).toContain("进度：2/5 工作项完成");
+  expect(link.textContent).toContain("进度：2/5");
   expect(link.querySelector(".status-blocked")?.textContent).toBe("阻塞");
   expect(link.querySelector("time")?.getAttribute("datetime")).toBe(
     active.updated_at,
@@ -159,7 +159,7 @@ test.each([
       `#/p/p-1/cards?view=list&overview=${group}`,
     );
     fireEvent.click(link);
-    await screen.findByRole("heading", { level: 1, name: "卡片" });
+    await screen.findByRole("heading", { level: 1, name: /卡片/u });
     const table = await screen.findByRole("table");
     await waitFor(() =>
       expect(
@@ -223,7 +223,7 @@ test.each([
     const tile = await screen.findByRole("link", { name: /准备发布/ });
     expect(
       [...tile.querySelectorAll(".status")].map((tag) => tag.textContent),
-    ).toEqual(labels);
+    ).toEqual(["进行中", ...labels]);
     expect(tile.classList.contains("card-tile-blocked")).toBe(
       tone === "blocked",
     );
