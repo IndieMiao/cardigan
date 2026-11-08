@@ -45,7 +45,7 @@ import { Store as SqliteStore } from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { resolveWebConfig } from "../../apps/server/src/web/config.js";
-import { HcCore } from "../../apps/server/test-support/hc.js";
+import { HcCore, runCleanupSteps } from "../../apps/server/test-support/hc.js";
 
 const exec = promisify(execFile);
 
@@ -414,18 +414,41 @@ export async function createHarness(
       },
     });
   } catch (error) {
-    store.close();
-    await core.stop();
-    process.env = savedEnv;
-    rmSync(root, { recursive: true, force: true });
+    try {
+      await runCleanupSteps({
+        session,
+        socket: socketPath,
+        steps: [
+          { label: "stop herdr-core", run: () => core.stop() },
+          { label: "close store", run: () => store.close() },
+          {
+            label: "restore process environment",
+            run: () => {
+              process.env = savedEnv;
+            },
+          },
+          { label: "stop herdr-core again", run: () => core.stop() },
+          {
+            label: "verify herdr-core stopped",
+            run: () => core.assertStopped(),
+          },
+          {
+            label: "remove temporary directory",
+            run: () => rmSync(root, { recursive: true, force: true }),
+          },
+        ],
+      });
+    } catch (cleanupError) {
+      throw new Error(
+        `E2E harness setup failed: ${String(error)}\n${String(cleanupError)}`,
+      );
+    }
     throw error;
   }
   core.remember();
 
   const clients: Client[] = [];
   const webUrl = `http://127.0.0.1:${webPort}`;
-  // The human's Workbench password; `web set-password` prompts twice.
-  await cardigan("web", "set-password");
   let cookie = "";
   async function login(): Promise<void> {
     const response = await fetch(`${webUrl}/api/login`, {
@@ -438,7 +461,43 @@ export async function createHarness(
     }
     cookie = (response.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
   }
-  await login();
+  try {
+    // The human's Workbench password; `web set-password` prompts twice.
+    await cardigan("web", "set-password");
+    await login();
+  } catch (error) {
+    try {
+      await runCleanupSteps({
+        session,
+        socket: socketPath,
+        steps: [
+          { label: "stop herdr-core", run: () => core.stop() },
+          { label: "close Cardigan server", run: () => server.close() },
+          { label: "close store", run: () => store.close() },
+          {
+            label: "restore process environment",
+            run: () => {
+              process.env = savedEnv;
+            },
+          },
+          { label: "stop herdr-core again", run: () => core.stop() },
+          {
+            label: "verify herdr-core stopped",
+            run: () => core.assertStopped(),
+          },
+          {
+            label: "remove temporary directory",
+            run: () => rmSync(root, { recursive: true, force: true }),
+          },
+        ],
+      });
+    } catch (cleanupError) {
+      throw new Error(
+        `E2E harness setup failed: ${String(error)}\n${String(cleanupError)}`,
+      );
+    }
+    throw error;
+  }
   const api = async (
     method: string,
     path: string,
@@ -578,29 +637,41 @@ export async function createHarness(
       return core.remember();
     },
     async close() {
-      for (const client of clients.splice(0))
-        await client.close().catch(() => undefined);
-      // The core first: its terminals and Agents die with it. No
-      // `assignment stop` follows, because that hc command would start a fresh
-      // core after this one is gone. `stop()` re-reads the PID while the socket
-      // still exists, so a core the system started after `stopCore()` is cleaned
-      // up too; it does not demand that no core ever came back.
-      await core.stop();
-      for (const step of [() => server.close(), async () => store.close()]) {
-        try {
-          await step();
-        } catch {
-          // Best effort: the next step still runs.
-        }
-      }
-      process.env = savedEnv;
-      await core.stop();
-      rmSync(root, { recursive: true, force: true });
-      if (errors.length > 0) {
-        // Surfaced, not thrown: a dispatcher error is a real failure of the
-        // run, but it should not mask a failed assertion above.
+      // The core first: its terminals and Agents die with it. Every step still
+      // runs after a failure, and the final error names the session, socket and
+      // every cleanup step that failed instead of silently failing the group.
+      if (errors.length > 0)
         process.emitWarning(`dispatcher errors: ${errors.join("; ")}`);
-      }
+      await runCleanupSteps({
+        session,
+        socket: socketPath,
+        steps: [
+          {
+            label: "close MCP clients",
+            run: async () => {
+              for (const client of clients.splice(0)) await client.close();
+            },
+          },
+          { label: "stop herdr-core", run: () => core.stop() },
+          { label: "close Cardigan server", run: () => server.close() },
+          { label: "close store", run: () => store.close() },
+          {
+            label: "restore process environment",
+            run: () => {
+              process.env = savedEnv;
+            },
+          },
+          { label: "stop herdr-core again", run: () => core.stop() },
+          {
+            label: "verify herdr-core stopped",
+            run: () => core.assertStopped(),
+          },
+          {
+            label: "remove temporary directory",
+            run: () => rmSync(root, { recursive: true, force: true }),
+          },
+        ],
+      });
     },
   };
   return harness;
