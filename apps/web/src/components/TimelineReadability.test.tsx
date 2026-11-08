@@ -7,11 +7,13 @@ import {
   fireEvent,
   render,
   screen,
+  waitFor,
   within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { cardDetail, timelineEntry } from "../testing/fixtures.js";
+import { cardDetail, fakeClient, timelineEntry } from "../testing/fixtures.js";
 import { selectMenu } from "../testing/menu.js";
+import { CardDetailPage } from "../views/CardDetailPage.js";
 import { Timeline } from "./Timeline.js";
 import { TimelineControls } from "./TimelineControls.js";
 
@@ -296,4 +298,36 @@ test("U5c long comments fold at two rendered lines and expand safely; sequence a
   const tooltip = await screen.findByRole("tooltip");
   expect(tooltip.textContent).toContain("序号 37");
   expect(tooltip.textContent).toContain("A-1");
+});
+
+test("U5c full page follows the latest day while the drawer keeps its top position", async () => {
+  const data = records();
+  data.timeline = data.timeline.map((entry, index) => ({
+    ...entry,
+    created_at: new Date(2026, 10, 7 + index).toISOString(),
+  }));
+  const client = fakeClient({ card: async () => data }),
+    scroll = vi.fn();
+  const original = Element.prototype.scrollIntoView;
+  Element.prototype.scrollIntoView = scroll;
+  try {
+    const full = render(
+      <CardDetailPage client={client} projectId="p-1" cardId="C-1" />,
+    );
+    await waitFor(() =>
+      expect(scroll.mock.contexts.at(-1)).toBe(
+        document.getElementById("entry-C-1#3"),
+      ),
+    );
+    expect(document.querySelectorAll(".timeline-day")).toHaveLength(3);
+    full.unmount();
+    scroll.mockClear();
+    render(
+      <CardDetailPage client={client} projectId="p-1" cardId="C-1" inDrawer />,
+    );
+    await screen.findByRole("region", { name: "时间线记录" });
+    expect(scroll).not.toHaveBeenCalled();
+  } finally {
+    Element.prototype.scrollIntoView = original;
+  }
 });

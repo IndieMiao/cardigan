@@ -1162,7 +1162,13 @@ fieldset.filters {
   color: var(--text-muted);
 }
 .long-content-2 .long-body.collapsed {
-  max-height: 3.3em;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  max-height: none;
+}
+.timeline-comment .timeline-body {
+  margin-top: 0;
 }
 
 /* ---- Markdown body ---- */
