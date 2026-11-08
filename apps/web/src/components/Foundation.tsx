@@ -107,7 +107,7 @@ export function LongContent({
   lines = 6,
 }: {
   children: ReactNode;
-  lines?: 4 | 6;
+  lines?: 2 | 4 | 6;
 }) {
   const ref = useRef<HTMLDivElement>(null),
     id = useId();
