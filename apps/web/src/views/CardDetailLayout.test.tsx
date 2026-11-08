@@ -189,7 +189,7 @@ test("U3 structured delivery, review and decision rows use bound versions and or
     "影响：Simple",
   );
   const decision = document.getElementById("entry-C-1#6");
-  expect(decision?.textContent).toContain("记录的结果：A");
+  expect(decision?.textContent).toContain("记录的结果：First");
   expect(decision?.textContent).toContain("Original quote");
   expect(decision?.textContent).not.toContain("Newer quote");
 });
@@ -268,38 +268,46 @@ test("U3 combines only consecutive system records and explicit locations reveal 
   }
 });
 
-test("U3 opening follows the latest entry within the timeline; refresh keeps the reader's position and draft", async () => {
-  vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(900);
-  const data = detail(),
-    client = fakeClient({ card: async () => data });
-  const view = render(
-    <CardDetailPage client={client} projectId="p-1" cardId="C-1" />,
-  );
-  const scroll = await screen.findByRole("region", { name: "时间线记录" });
-  await waitFor(() => expect(scroll.scrollTop).toBe(900));
-  scroll.scrollTop = 40;
-  const input = screen.getByRole("textbox", { name: /评论|内容/ });
-  fireEvent.change(input, { target: { value: "Draft survives" } });
-  view.rerender(
-    <CardDetailPage
-      client={client}
-      projectId="p-1"
-      cardId="C-1"
-      revision={1}
-    />,
-  );
-  await act(async () => {});
-  expect(scroll.scrollTop).toBe(40);
-  expect((input as HTMLTextAreaElement).value).toBe("Draft survives");
+test("U3 opening scrolls the page to the latest entry; refresh keeps the reader's position and draft", async () => {
+  const scroll = vi.fn(),
+    original = Element.prototype.scrollIntoView;
+  Element.prototype.scrollIntoView = scroll;
+  try {
+    const data = detail(),
+      client = fakeClient({ card: async () => data });
+    const view = render(
+      <CardDetailPage client={client} projectId="p-1" cardId="C-1" />,
+    );
+    await screen.findByRole("region", { name: "时间线记录" });
+    await waitFor(() => expect(scroll).toHaveBeenCalledWith({ block: "end" }));
+    expect(scroll.mock.contexts.at(-1)).toBe(
+      document.getElementById("entry-C-1#6"),
+    );
+    const before = scroll.mock.calls.length;
+    const input = screen.getByRole("textbox", { name: /评论|内容/ });
+    fireEvent.change(input, { target: { value: "Draft survives" } });
+    view.rerender(
+      <CardDetailPage
+        client={client}
+        projectId="p-1"
+        cardId="C-1"
+        revision={1}
+      />,
+    );
+    await act(async () => {});
+    expect(scroll.mock.calls.length).toBe(before);
+    expect((input as HTMLTextAreaElement).value).toBe("Draft survives");
+  } finally {
+    Element.prototype.scrollIntoView = original;
+  }
 });
 
-test("U3 initial latest following survives StrictMode, settles layout and stops at user interaction", async () => {
-  let height = 900;
+test("U3 initial page scrolling survives StrictMode and stops after interaction", async () => {
   const callbacks: (() => void)[] = [],
     disconnects: ReturnType<typeof vi.fn>[] = [];
-  vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockImplementation(
-    () => height,
-  );
+  const scroll = vi.fn(),
+    original = Element.prototype.scrollIntoView;
+  Element.prototype.scrollIntoView = scroll;
   vi.stubGlobal(
     "ResizeObserver",
     class {
@@ -322,20 +330,19 @@ test("U3 initial latest following survives StrictMode, settles layout and stops 
         />
       </StrictMode>,
     );
-    const region = await screen.findByRole("region", { name: "时间线记录" });
-    await waitFor(() => expect(region.scrollTop).toBe(900));
+    await screen.findByRole("region", { name: "时间线记录" });
+    await waitFor(() => expect(scroll).toHaveBeenCalled());
     const pending = callbacks.at(-1),
-      disconnect = disconnects.at(-1);
-    height = 1100;
+      disconnect = disconnects.at(-1),
+      initial = scroll.mock.calls.length;
     act(() => pending?.());
-    expect(region.scrollTop).toBe(1100);
-    fireEvent.wheel(region);
+    expect(scroll.mock.calls.length).toBe(initial + 1);
+    fireEvent.wheel(window);
     expect(disconnect).toHaveBeenCalled();
-    region.scrollTop = 40;
-    height = 1300;
     act(() => pending?.());
-    expect(region.scrollTop).toBe(40);
+    expect(scroll.mock.calls.length).toBe(initial + 1);
   } finally {
+    Element.prototype.scrollIntoView = original;
     vi.unstubAllGlobals();
   }
 });

@@ -356,3 +356,22 @@ test("U1 base text wrapping protects card header panels from unbroken commit SHA
     sheet.remove();
   }
 });
+
+test("U3 comments can fold at four rendered lines without changing the six-line default", () => {
+  const style = window.getComputedStyle(document.body);
+  style.lineHeight = "20px";
+  vi.spyOn(window, "getComputedStyle").mockReturnValue(style);
+  vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(100);
+  const view = render(
+    <LongContent lines={4}>
+      <p>Five lines</p>
+    </LongContent>,
+  );
+  expect(screen.getByRole("button", { name: "展开全文" })).toBeTruthy();
+  view.rerender(
+    <LongContent>
+      <p>Five lines</p>
+    </LongContent>,
+  );
+  expect(screen.queryByRole("button", { name: "展开全文" })).toBeNull();
+});

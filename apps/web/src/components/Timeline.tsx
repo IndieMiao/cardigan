@@ -209,7 +209,7 @@ export function Timeline({
             cardId={cardId}
           />
         ) : (
-          <LongContent>
+          <LongContent lines={entry.type === "comment" ? 4 : 6}>
             <div
               className="timeline-body markdown"
               dangerouslySetInnerHTML={{

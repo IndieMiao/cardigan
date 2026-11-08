@@ -243,6 +243,7 @@ export function cardDetail(
   card_id: CardId,
   options: {
     readonly timelineLimit?: number;
+    readonly timelineAnchor?: string;
     readonly now?: string;
   } = {},
 ) {
@@ -275,10 +276,32 @@ export function cardDetail(
         action.blocked_work_items.some((id) => workItemIds.has(id)),
     )
     .sort(byId);
-  const timeline = state.timeline
+  const allTimeline = state.timeline
     .filter((entry) => entry.card_id === card_id)
-    .sort((left, right) => right.event_seq - left.event_seq)
-    .slice(0, options.timelineLimit ?? DEFAULT_TIMELINE_LIMIT);
+    .sort((left, right) => right.event_seq - left.event_seq);
+  const anchor = options.timelineAnchor;
+  const review = anchor
+    ? reviews.find((r) => `review-${r.id}` === anchor)
+    : undefined;
+  const target = anchor
+    ? allTimeline.findLastIndex(
+        (entry) =>
+          [
+            `entry-${entry.id}`,
+            entry.delivery_id && `delivery-${entry.delivery_id}`,
+            entry.decision_id && `decision-${entry.decision_id}`,
+            entry.human_action_id && `human-action-${entry.human_action_id}`,
+          ].includes(anchor) ||
+          (review !== undefined &&
+            entry.type === "review" &&
+            entry.run_id === review.run_id &&
+            entry.work_item_id === review.work_item_id),
+      )
+    : -1;
+  const timeline = allTimeline.slice(
+    0,
+    Math.max(options.timelineLimit ?? DEFAULT_TIMELINE_LIMIT, target + 1),
+  );
 
   const related = state.cards
     .filter((other) => card.related_cards.includes(other.id))

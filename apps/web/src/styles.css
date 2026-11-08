@@ -742,15 +742,7 @@ fieldset.filters {
 .card-timeline .filter-bar {
   margin-bottom: 12px;
 }
-.timeline-scroll {
-  height: clamp(160px, calc(100dvh - 630px), 420px);
-  overflow-y: auto;
-  overflow-x: hidden;
-  overscroll-behavior: contain;
-  margin-bottom: 16px;
-  padding-right: 8px;
-  border-bottom: 1px solid var(--border);
-}
+
 .structured-entry p {
   margin: 6px 0;
 }
@@ -1528,4 +1520,41 @@ fieldset.filters {
 .activity-list .event-details pre {
   max-height: 260px;
   margin: 6px 0 0;
+}
+
+.long-content-4 .long-body.collapsed {
+  max-height: 6.6em;
+}
+.card-sidebar .work-item > details > summary {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr);
+  align-items: start;
+  gap: 4px;
+  list-style: none;
+}
+.card-sidebar .work-item > details > summary::-webkit-details-marker {
+  display: none;
+}
+.card-sidebar .work-item > details > summary::before {
+  content: "▸";
+}
+.card-sidebar .work-item > details[open] > summary::before {
+  content: "▾";
+}
+.work-item-caption {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px;
+}
+.timeline-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.timeline-records {
+  margin-bottom: 20px;
 }

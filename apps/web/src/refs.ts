@@ -84,7 +84,8 @@ function escapeRegExp(text: string): string {
 }
 
 /** Existing Markdown links and code spans, which must not be rewritten. */
-const PROTECTED = /\[[^\]]*\]\([^)]*\)|`[^`]*`/gu;
+const PROTECTED =
+  /(?<ticks>`+)[\s\S]*?\k<ticks>|~~~[\s\S]*?~~~|\[(?:\\.|[^\]\\])*\]\((?:\\.|[^()\\]|\([^()]*\))*\)/gu;
 
 /**
  * Rewrite the identifiers of `refs` in `body` as Markdown links, in place.
@@ -101,10 +102,6 @@ export function linkifyReferences(
   const replacements = refs.flatMap((reference) => {
     const href = referenceHref(reference, projectId, cardId);
     if (href === undefined || !("id" in reference)) return [];
-    const token = new RegExp(
-      `(?<![\\[\\w])${escapeRegExp(reference.id)}(?![\\]\\w])`,
-      "gu",
-    );
     const label = {
       card: "卡片",
       decision: "拍板",
@@ -112,15 +109,21 @@ export function linkifyReferences(
       delivery: "交付",
       timeline_entry: "时间线条目",
     }[reference.kind];
-    return [{ token, replacement: `[${reference.id} ${label}](${href})` }];
+    return [[reference.id, `[${reference.id} ${label}](${href})`] as const];
   });
   if (replacements.length === 0) return body;
 
-  const linkifyText = (text: string): string =>
-    replacements.reduce(
-      (current, { token, replacement }) => current.replace(token, replacement),
-      text,
-    );
+  const byId = new Map(replacements);
+  const token = new RegExp(
+    `(?<![\\[\\w/#])(?:${[...byId.keys()]
+      .sort((a, b) => b.length - a.length)
+      .map(escapeRegExp)
+      .join("|")})(?![\\]\\w#])`,
+    "gu",
+  );
+  // One replacement pass over original text: generated hrefs are never scanned.
+  const linkifyText = (text: string) =>
+    text.replace(token, (id) => byId.get(id) ?? id);
 
   let result = "";
   let last = 0;

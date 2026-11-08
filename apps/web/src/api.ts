@@ -190,6 +190,7 @@ export interface ReviewMatrixRow {
 }
 
 export interface DecisionView {
+  readonly trigger?: string | null;
   readonly id: string;
   readonly question: string;
   readonly status: string;
@@ -492,6 +493,11 @@ export interface ActivityData {
   readonly counts: { returned: number; matched: number };
 }
 
+export interface CardReadOptions {
+  readonly limit?: number;
+  readonly at?: string;
+}
+
 export interface CardiganClient {
   subscribe(projectId: string, callbacks: StreamCallbacks): () => void;
   activity(projectId: string, filters: ActivityFilter): Promise<ActivityData>;
@@ -516,7 +522,11 @@ export interface CardiganClient {
   logout(): Promise<void>;
   projects(): Promise<readonly ProjectSummary[]>;
   cards(projectId: string, filter: CardFilter): Promise<CardPage>;
-  card(projectId: string, cardId: string): Promise<CardDetail>;
+  card(
+    projectId: string,
+    cardId: string,
+    options?: CardReadOptions,
+  ): Promise<CardDetail>;
   addComment(
     projectId: string,
     cardId: string,
@@ -574,9 +584,17 @@ export class HttpCardiganClient implements CardiganClient {
     );
   }
 
-  async card(projectId: string, cardId: string): Promise<CardDetail> {
+  async card(
+    projectId: string,
+    cardId: string,
+    options: CardReadOptions = {},
+  ): Promise<CardDetail> {
+    const params = new URLSearchParams();
+    if (options.limit !== undefined) params.set("limit", String(options.limit));
+    if (options.at) params.set("at", options.at);
+    const query = params.size ? `?${params}` : "";
     return this.request<CardDetail>(
-      `/api/projects/${encodeURIComponent(projectId)}/cards/${encodeURIComponent(cardId)}`,
+      `/api/projects/${encodeURIComponent(projectId)}/cards/${encodeURIComponent(cardId)}${query}`,
     );
   }
 

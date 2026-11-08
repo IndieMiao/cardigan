@@ -1,4 +1,5 @@
 import type { CardDetail } from "../api.js";
+import { decisionTitle } from "../decision-labels.js";
 import { isHttpLink } from "../markdown.js";
 import { routeHash } from "../route.js";
 import { nextOwnersLabel, statusLabel } from "../status.js";
@@ -68,8 +69,10 @@ export function CardSidebar({
                 >
                   <details>
                     <summary>
-                      <IdTag id={item.id} label={item.title} />{" "}
-                      <StatusTag status={item.status} />
+                      <span className="work-item-caption">
+                        <IdTag id={item.id} label={item.title} />{" "}
+                        <StatusTag status={item.status} />
+                      </span>
                     </summary>
                     <p>
                       {item.assignment_id ? (
@@ -147,7 +150,11 @@ export function CardSidebar({
                   !["resolved", "withdrawn", "superseded", "revoked"].includes(
                     d.status,
                   ) && <span>阻塞中</span>}
-                <p>{d.question}</p>
+                <p>
+                  {decisionTitle(
+                    detail.decisions.find((q) => q.id === d.id) ?? d,
+                  )}
+                </p>
               </li>
             ))}
           </ul>

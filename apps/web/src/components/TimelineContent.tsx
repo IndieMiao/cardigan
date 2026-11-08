@@ -1,5 +1,6 @@
 // biome-ignore-all lint/suspicious/noArrayIndexKey: delivery and review arrays are immutable record snapshots with no item IDs.
 import type { CardDetail, TimelineEntryView } from "../api.js";
+import { decisionOption, decisionTitle } from "../decision-labels.js";
 import { routeHash } from "../route.js";
 import { IdTag, LongContent, StatusTag } from "./Foundation.js";
 import { Markdown } from "./Operations.js";
@@ -157,7 +158,7 @@ export function TimelineContent({
       <div className="structured-entry">
         <p>
           <IdTag id={decision.id} label="拍板" />{" "}
-          <strong>{decision.question}</strong>
+          <strong>{decisionTitle(decision)}</strong>
         </p>
         {entry.type === "decision_request" ? (
           <details>
@@ -166,7 +167,7 @@ export function TimelineContent({
             {decision.options.map((o) => (
               <div key={o.key}>
                 <strong>
-                  {o.key}：{o.description}
+                  {o.key}：{decisionOption(decision, o.key)}
                   {o.key === decision.recommended ? "（推荐）" : ""}
                 </strong>
                 <Markdown body={`影响：${o.impact}`} />
@@ -175,7 +176,12 @@ export function TimelineContent({
           </details>
         ) : (
           <>
-            <p>记录的结果：{entry.decision_option ?? "原记录未附选项"}</p>
+            <p>
+              记录的结果：
+              {entry.decision_option
+                ? decisionOption(decision, entry.decision_option)
+                : "原记录未附选项"}
+            </p>
             <blockquote>
               <Markdown body={entry.body} />
             </blockquote>

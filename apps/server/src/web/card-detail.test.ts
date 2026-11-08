@@ -90,3 +90,41 @@ test("U3 detail identifies PM and decision event choices without advancing Agent
     await f.close();
   }
 }, 30_000);
+
+test("U3 recent windows load older records and resolve an anchor beyond the former 200-entry limit", async () => {
+  const { postComment } = await import("@cardigan/domain");
+  const f = await m5Cross();
+  try {
+    await f.password(TEST_PASSWORD);
+    await f.login();
+    const first = f.command((s, a, p) =>
+      postComment(
+        s,
+        a,
+        { card_id: f.card.id, body: "Oldest linked comment" },
+        p,
+      ),
+    );
+    for (let n = 0; n < 205; n++)
+      f.command((s, a, p) =>
+        postComment(s, a, { card_id: f.card.id, body: `Comment ${n}` }, p),
+      );
+    const read = async (query: string) =>
+      (await f.call(f.projectPath(`/cards/${f.card.id}?${query}`)))
+        .json as CardDetail;
+    const before = f.state().cursors;
+    expect((await read("limit=20")).timeline).toHaveLength(20);
+    expect((await read("limit=40")).timeline).toHaveLength(40);
+    const anchored = await read(
+      `limit=20&at=${encodeURIComponent(`entry-${first.id}`)}`,
+    );
+    expect(anchored.timeline.length).toBeGreaterThan(200);
+    expect(anchored.timeline.at(-1)?.id).toBe(first.id);
+    expect((await read("limit=20&at=entry-C-999%231")).timeline).toHaveLength(
+      20,
+    );
+    expect(f.state().cursors).toEqual(before);
+  } finally {
+    await f.close();
+  }
+}, 30_000);

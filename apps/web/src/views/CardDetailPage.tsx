@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useRef } from "react";
-import { ApiError, type CardDetail, type CardiganClient } from "../api.js";
+import {
+  ApiError,
+  type CardDetail,
+  type CardiganClient,
+  type CardReadOptions,
+} from "../api.js";
 import { CardSidebar } from "../components/CardSidebar.js";
 import { CommentBox, type MentionOption } from "../components/CommentBox.js";
 import { FilterBar } from "../components/FilterBar.js";
@@ -29,15 +34,40 @@ export function CardDetailPage({
   anchor,
   revision = 0,
 }: CardDetailPageProps) {
+  const [routeFilters] = useRouteFilters({ kind: "card", projectId, cardId });
+  const pageSize = [20, 50, 100].includes(Number(routeFilters.count))
+    ? Number(routeFilters.count)
+    : 20;
+  const query = useRef<CardReadOptions>({
+    limit: pageSize,
+    ...(anchor ? { at: anchor } : {}),
+  });
+  const previousSize = useRef(pageSize);
   const load = useCallback(async () => {
     try {
-      return await client.card(projectId, cardId);
+      return await client.card(projectId, cardId, query.current);
     } catch (error) {
       if (error instanceof ApiError && error.status === 404) return null;
       throw error;
     }
   }, [client, projectId, cardId]);
-  const { data, error, reload } = useResource(load, revision);
+  const { data, error, reload, pending } = useResource(load, revision);
+  useEffect(() => {
+    if (query.current.at === anchor && previousSize.current === pageSize)
+      return;
+    query.current = {
+      limit:
+        previousSize.current === pageSize
+          ? Math.max(
+              query.current.limit ?? pageSize,
+              data?.timeline.length ?? 0,
+            )
+          : pageSize,
+      ...(anchor ? { at: anchor } : {}),
+    };
+    previousSize.current = pageSize;
+    reload();
+  }, [anchor, pageSize, data, reload]);
   const back = routeHash({ kind: "board", projectId });
   if (data === null)
     return (
@@ -69,6 +99,18 @@ export function CardDetailPage({
       anchor={anchor}
       error={error}
       reload={reload}
+      pending={pending}
+      anchorReady={!anchor || (query.current.at === anchor && !pending)}
+      pageSize={pageSize}
+      loadEarlier={() => {
+        query.current = {
+          ...query.current,
+          limit:
+            Math.max(query.current.limit ?? pageSize, data.timeline.length) +
+            pageSize,
+        };
+        reload();
+      }}
     />
   );
 }
@@ -81,6 +123,10 @@ function CardContent({
   anchor,
   error,
   reload,
+  pending,
+  pageSize,
+  loadEarlier,
+  anchorReady,
 }: {
   detail: CardDetail;
   client: CardiganClient;
@@ -89,6 +135,10 @@ function CardContent({
   anchor: string | undefined;
   error: string | undefined;
   reload: () => void;
+  anchorReady: boolean;
+  pending: boolean;
+  pageSize: number;
+  loadEarlier: () => void;
 }) {
   const [filters, setFilters] = useRouteFilters({
     kind: "card",
@@ -107,13 +157,14 @@ function CardContent({
     if (!region) return;
     let position: () => void;
     if (anchor) {
+      if (!anchorReady) return;
       const location = `${anchor}/${filters.type ?? ""}/${filters.author ?? ""}`;
       if (lastAnchor.current === location) return;
-      lastAnchor.current = location;
       interacted.current = true;
       position = () => {
         const target = document.getElementById(anchor);
         if (!target) return;
+        lastAnchor.current = location;
         for (
           let parent = target.parentElement;
           parent;
@@ -130,7 +181,9 @@ function CardContent({
       if (interacted.current || initialTimeline.current !== detail.timeline)
         return;
       position = () => {
-        region.scrollTop = region.scrollHeight;
+        region
+          .querySelector(".timeline > li:last-child")
+          ?.scrollIntoView?.({ block: "end" });
       };
     }
     let following = true;
@@ -142,21 +195,21 @@ function CardContent({
       typeof ResizeObserver === "undefined"
         ? undefined
         : new ResizeObserver(settle);
-    if (region.firstElementChild) observer?.observe(region.firstElementChild);
+    observer?.observe(region.closest(".card-main") ?? region);
     const stop = () => {
       following = false;
       interacted.current = true;
       observer?.disconnect();
     };
     for (const event of ["wheel", "pointerdown", "keydown"])
-      region.addEventListener(event, stop, { once: true });
+      window.addEventListener(event, stop, { once: true });
     return () => {
       following = false;
       observer?.disconnect();
       for (const event of ["wheel", "pointerdown", "keydown"])
-        region.removeEventListener(event, stop);
+        window.removeEventListener(event, stop);
     };
-  }, [anchor, detail.timeline, filters.type, filters.author]);
+  }, [anchor, anchorReady, detail.timeline, filters.type, filters.author]);
   const card = detail.card;
   const completion = [...detail.deliveries]
     .reverse()
@@ -260,17 +313,39 @@ function CardContent({
               已保留链接指向的条目，便于定位；重新筛选后恢复只显示匹配项。
             </p>
           )}
-          {detail.counts.timeline > detail.timeline.length && (
-            <p className="hint">
-              显示最近 {detail.timeline.length} 条，共 {detail.counts.timeline}{" "}
-              条。
-            </p>
-          )}
+          <div className="timeline-controls">
+            <label>
+              每次加载{" "}
+              <select
+                value={pageSize}
+                onChange={(e) =>
+                  setFilters({ ...filters, count: e.target.value })
+                }
+              >
+                {[20, 50, 100].map((size) => (
+                  <option value={size} key={size}>
+                    {size} 条
+                  </option>
+                ))}
+              </select>
+            </label>
+            <span>
+              已加载 {detail.timeline.length} / {detail.counts.timeline} 条
+            </span>
+            {detail.counts.timeline > detail.timeline.length && (
+              <button
+                type="button"
+                className="quiet"
+                disabled={pending}
+                onClick={loadEarlier}
+              >
+                {pending ? "正在加载…" : "加载更早的记录"}
+              </button>
+            )}
+          </div>
           <section
-            className="timeline-scroll"
+            className="timeline-records"
             ref={scroll}
-            // biome-ignore lint/a11y/noNoninteractiveTabindex: keyboard users must be able to scroll this region.
-            tabIndex={0}
             aria-label="时间线记录"
           >
             <Timeline
