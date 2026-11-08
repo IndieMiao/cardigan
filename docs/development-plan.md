@@ -627,11 +627,11 @@ M3.4 主机循环通过 startDispatchLoop 启动：默认每轮结束后等待 1
 | 卡片级普通评论，没有 @ | 不按门铃；随下一次 `get_updates` 一并读到。作者是人时，合并通知 PM Ops |
 | 指令（`instruction_issued`） | 人或常驻 PM Ops 下达；对应未结束工作项的 Assignment，未指派时交给 PM Ops 分配 |
 | 工作项被指派（Agent 或 PM 经 MCP `assign`） | 该工作项的 Assignment，**前提是现在就能开工**（产出型无未完成依赖，或验证型的交付已到）；还不能开工的等依赖完成或交付门铃，人从 CLI `assign` 仍由自己显式启动 |
-| Delivery 提交 | 验证这个工作项的各个验证型 Assignment；PM Ops 只收摘要 |
+| Delivery 提交 | 验证这个工作项的各个验证型 Assignment；验证项没有负责人、需要指派时给 PM Ops 定向通知 |
 | Review 通过 | 不唤醒；检查交付是否全部通过、整卡是否满足 Done 条件 |
 | Review 驳回 | 产生被审核 Delivery 的 Assignment（返工 Run） |
 | Decision 请求 | 决策人：人则进入 Needs You，并给 PM Office 一条简短提示 |
-| Decision 已解决 | 所有被它阻塞的 Assignment（新 Run）；PM Ops 收摘要 |
+| Decision 已解决 | 所有被它阻塞的 Assignment（新 Run）；没有负责人、无法恢复时给 PM Ops 定向通知 |
 | 依赖完成 | 下游工作项的 Assignment；没有 Assignment 时交给 PM Ops |
 | 所有必需工作项都已通过 | 提醒主产出工作项的负责人提交完成申请（不自动关卡） |
 | 完成申请 | 卡片模板指定的审核者（默认 PM） |
@@ -720,6 +720,8 @@ M3.4 的 Runtime 接线只根据未结束的业务 Run 判断忙碌，不用 Har
 - 交付与需求不一致，或者依赖关系发生变化；
 - 需要判断是否暂停后续工作；
 - 规则无法处理的异常（Run 结束却没有产出、长时间无 ACK 等）。
+
+规则能确定下一步的事件不升级给 PM Ops：交付提交只唤醒它请求的验证项，验证项没有负责人、需要指派时才给 PM Ops 定向通知；拍板完成只唤醒被它阻塞的 Assignment，只有工作项因为没有负责人而无法恢复时才给 PM Ops 定向通知。`card_merged` 仍给 PM Ops 摘要，因为跨卡依赖需要 PM 判断；完成申请没有已指派的 PM 验收项时也保留定向通知（M5.S S25 后续裁定）。
 
 ### 7.3 信息分级与打断规则
 

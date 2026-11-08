@@ -363,6 +363,10 @@ function routeDelivery(input: RouteInput, draft: Draft): void {
     routeCompletionRequest(input, draft, delivery.id);
     return;
   }
+  // The next step is the requested verifier. PM Ops only hears about this
+  // delivery through noteAssignment when a verifier has no active owner and
+  // needs an Assignment; a generic summary is not a §7.2 judgement call
+  // (M5.S S25 follow-up).
   for (const verifier_id of delivery.requested_verifiers) {
     const verifier = itemOf(input, verifier_id);
     if (verifier === undefined) continue;
@@ -375,14 +379,6 @@ function routeDelivery(input: RouteInput, draft: Draft): void {
       `${delivery.id} is waiting for ${verifier.id}`,
     );
   }
-  note(
-    input,
-    draft,
-    recipient.pm_ops(),
-    "delivery",
-    "6.4/delivery submitted",
-    `${delivery.id} submitted on ${subject(input)}`,
-  );
 }
 
 /** §6.4: notify this completion delivery's explicitly requested verifiers. */
@@ -630,7 +626,13 @@ function routeDecisionRequested(input: RouteInput, draft: Draft): void {
   }
 }
 
-/** §6.4: a resolved decision wakes every Assignment it had blocked. */
+/**
+ * §6.4: a resolved decision wakes every Assignment it had blocked.
+ *
+ * There is no generic PM Ops summary: the affected Assignments already get the
+ * result, and PM Ops only needs the targeted noteAssignment fallback when a
+ * blocked work item has no active owner to resume (M5.S S25 follow-up).
+ */
 function routeDecisionResolved(input: RouteInput, draft: Draft): void {
   const decision_id = payloadString(input.event.payload, "decision_id");
   const resolved = payloadStrings(input.event.payload, "resume_work_items");
@@ -645,14 +647,6 @@ function routeDecisionResolved(input: RouteInput, draft: Draft): void {
       `${decision_id ?? "the decision"} was resolved; continue ${id}`,
     );
   }
-  note(
-    input,
-    draft,
-    recipient.pm_ops(),
-    "decision",
-    "6.4/decision resolved",
-    `${decision_id ?? "a decision"} was resolved on ${subject(input)}`,
-  );
 }
 
 /**

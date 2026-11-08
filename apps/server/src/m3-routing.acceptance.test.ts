@@ -94,12 +94,12 @@ test("[R06] §6.4 unassigned instruction goes to Ops", () => {
     recipients(route(f.fact("instruction", { work_item_id: w.id }))),
   ).toEqual(["pm_ops"]);
 });
-test("[R07] §6.4 delivery reaches its requested reviewer and Ops", async () => {
+test("[R07] §6.4 delivery reaches its requested reviewer, not Ops", async () => {
   f.start(f.coder);
   const d = await f.delivery();
-  expect(recipients(route(event(d.events, "delivery_submitted")))).toEqual(
-    [f.reviewer.id, "pm_ops"].sort(),
-  );
+  expect(recipients(route(event(d.events, "delivery_submitted")))).toEqual([
+    f.reviewer.id,
+  ]);
 });
 test("[R08] §6.4 passing review does not wake anyone before all required work succeeds", async () => {
   const w = f.extra(f.produce.role_id);
@@ -125,7 +125,7 @@ test("[R10] §6.4 human decision request reaches Needs You and Office", () => {
     recipients(route(event(decision().events, "decision_requested"))),
   ).toEqual(["needs_you", "pm_office"]);
 });
-test("[R11] §6.4 resolving a blocking decision notifies resumed work and Ops", () => {
+test("[R11] §6.4 resolving a blocking decision notifies resumed work, not Ops", () => {
   const d = decision().data;
   const r = f.apply(
     (s, a, p) =>
@@ -142,9 +142,9 @@ test("[R11] §6.4 resolving a blocking decision notifies resumed work and Ops", 
       ),
     f.actor(f.office()),
   );
-  expect(recipients(route(event(r.events, "decision_resolved")))).toEqual(
-    [f.coder.id, "pm_ops"].sort(),
-  );
+  expect(recipients(route(event(r.events, "decision_resolved")))).toEqual([
+    f.coder.id,
+  ]);
 });
 // A passing review completes the producer, so its dependent work item is next.
 test("[R12] §6.4 completed dependency reaches downstream Assignment", async () => {
