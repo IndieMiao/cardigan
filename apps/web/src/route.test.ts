@@ -9,6 +9,12 @@ import { parseRoute, routeHash } from "./route.js";
 
 test("board, list and card routes round-trip", () => {
   for (const route of [
+    { kind: "cards", projectId: "p-fictional" },
+    {
+      kind: "cards",
+      projectId: "p-fictional",
+      filters: { view: "list", status: "in_progress,review", card: "C-1" },
+    },
     { kind: "board", projectId: "p-fictional" },
     { kind: "list", projectId: "p-fictional" },
     { kind: "needs-you", projectId: "p-fictional" },
@@ -31,6 +37,9 @@ test("board, list and card routes round-trip", () => {
   ] as const) {
     expect(parseRoute(routeHash(route))).toEqual(route);
   }
+  expect(routeHash({ kind: "cards", projectId: "p-fictional" })).toBe(
+    "#/p/p-fictional/cards",
+  );
   expect(routeHash({ kind: "board", projectId: "p-fictional" })).toBe(
     "#/p/p-fictional/board",
   );
@@ -62,7 +71,6 @@ test("unknown or incomplete hashes have no route", () => {
     "#/p/p-1/not-a-view",
     "#/p//board",
     "#/projects/p-1/board",
-    "#/p/p-1/cards",
     "#decision-q(2)",
   ]) {
     expect(parseRoute(hash), hash).toBeUndefined();

@@ -1,5 +1,6 @@
 import { useId } from "react";
 import type { CardListItem } from "../api.js";
+import type { CardDisplay } from "../card-display.js";
 import { routeHash } from "../route.js";
 import { BOARD_STATUSES, cardStatusLabel, nextOwnersLabel } from "../status.js";
 import { IdTag, StatusTag, Time } from "./Foundation.js";
@@ -9,11 +10,15 @@ export function Board({
   projectId,
   expanded,
   onExpanded,
+  display,
+  onOpenCard,
 }: {
   cards: readonly CardListItem[];
   projectId: string;
   expanded: string;
   onExpanded: (value: string) => void;
+  display: CardDisplay;
+  onOpenCard?: (cardId: string, trigger: HTMLElement) => void;
 }) {
   const id = useId();
   const open = new Set(expanded.split(","));
@@ -77,42 +82,68 @@ export function Board({
                               projectId,
                               cardId: card.id,
                             })}
+                            onClick={(event) => {
+                              if (
+                                onOpenCard === undefined ||
+                                event.metaKey ||
+                                event.ctrlKey ||
+                                event.shiftKey ||
+                                event.altKey
+                              )
+                                return;
+                              event.preventDefault();
+                              onOpenCard(card.id, event.currentTarget);
+                            }}
                           >
-                            <IdTag
-                              id={card.id}
-                              label="卡片"
-                              detail={card.title}
-                            />
+                            {display.number && (
+                              <IdTag
+                                id={card.id}
+                                label="卡片"
+                                detail={card.title}
+                              />
+                            )}
                             <span className="card-title">{card.title}</span>
-                            {(blocked || decision || humanAction) && (
-                              <span className="metadata">
-                                {decision && (
-                                  <span className="status status-waiting">
-                                    等你拍板
-                                  </span>
-                                )}
-                                {humanAction && (
-                                  <span className="status status-waiting">
-                                    待你执行
-                                  </span>
-                                )}
-                                {blocked && <StatusTag status="blocked" />}
+                            {display.waiting &&
+                              (blocked || decision || humanAction) && (
+                                <span className="metadata">
+                                  {decision && (
+                                    <span className="status status-waiting">
+                                      等你拍板
+                                    </span>
+                                  )}
+                                  {humanAction && (
+                                    <span className="status status-waiting">
+                                      待你执行
+                                    </span>
+                                  )}
+                                  {blocked && <StatusTag status="blocked" />}
+                                </span>
+                              )}
+                            {display.reason && (
+                              <span className="card-why">{card.why}</span>
+                            )}
+                            {display.roles && (
+                              <span>
+                                负责角色：
+                                {card.roles.join("、") || "尚未配置"}
                               </span>
                             )}
-                            <span className="card-why">{card.why}</span>
-                            <span>
-                              负责角色：{card.roles.join("、") || "尚未配置"}
-                            </span>
-                            <span>
-                              进度：{card.progress.completed}/
-                              {card.progress.total} 工作项完成
-                            </span>
-                            <span>
-                              更新于 <Time value={card.updated_at} />
-                            </span>
-                            <span className="card-next">
-                              下一步：{nextOwnersLabel(card.next_owners)}
-                            </span>
+                            {display.progress && (
+                              <span>
+                                进度：{card.progress.completed}/
+                                {card.progress.total} 工作项完成
+                              </span>
+                            )}
+                            {display.updated && (
+                              <span>
+                                更新于 <Time value={card.updated_at} />
+                              </span>
+                            )}
+                            {display.next && (
+                              <span className="card-next">
+                                下一步：{nextOwnersLabel(card.next_owners)}
+                              </span>
+                            )}
                           </a>
                         </li>
                       );

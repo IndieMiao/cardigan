@@ -234,9 +234,9 @@ function Overview({
         <a
           key={group.value}
           href={routeHash({
-            kind: "list",
+            kind: "cards",
             projectId,
-            filters: { overview: group.value },
+            filters: { view: "list", overview: group.value },
           })}
           title={
             group.value === "blocked"

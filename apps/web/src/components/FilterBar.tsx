@@ -6,6 +6,8 @@ export interface FilterField {
   options?: readonly { value: string; label: string }[];
   /** Render an option set as checkboxes; the route value is comma-separated. */
   multiple?: boolean;
+  /** Custom control; receives the route value and its setter. */
+  render?: (value: string, setValue: (value: string) => void) => ReactNode;
 }
 
 const valuesOf = (value: string | undefined): string[] =>
@@ -27,7 +29,13 @@ export function FilterBar({
     <div className="filter-bar">
       <div className="filter-controls">
         {fields.map((field) =>
-          field.multiple && field.options ? (
+          field.render ? (
+            <div key={field.key} className="filter-custom">
+              {field.render(values[field.key] ?? "", (value) =>
+                onChange({ ...values, [field.key]: value }),
+              )}
+            </div>
+          ) : field.multiple && field.options ? (
             <fieldset
               key={field.key}
               className="filter-multi"

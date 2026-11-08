@@ -80,7 +80,10 @@ test("drawer moves focus inside, closes on Escape/outside and returns focus", as
   fireEvent.click(trigger);
   await screen.findByRole("dialog", { name: "卡片详情" });
   await new Promise((resolve) => setTimeout(resolve, 10));
-  fireEvent.click(document.querySelector(".drawer-overlay") as Element);
+  const outside = screen.getByText("页面别处").closest("button");
+  if (outside === null) throw new Error("Missing outside button");
+  fireEvent.pointerDown(outside, { button: 0, pointerType: "mouse" });
+  fireEvent.click(outside, { button: 0 });
   await waitFor(() =>
     expect(screen.queryByRole("dialog", { name: "卡片详情" })).toBeNull(),
   );
@@ -191,10 +194,9 @@ test("multiselect toggles checkbox values, closes outside and returns focus", as
   expect((open as HTMLInputElement).checked).toBe(true);
   await new Promise((resolve) => setTimeout(resolve, 10));
 
-  fireEvent.pointerDown(screen.getByRole("button", { name: "页面别处" }), {
-    button: 0,
-    pointerType: "mouse",
-  });
+  const outside = screen.getByRole("button", { name: "页面别处" });
+  fireEvent.pointerDown(outside, { button: 0, pointerType: "mouse" });
+  fireEvent.click(outside, { button: 0 });
   await waitFor(() =>
     expect(screen.queryByRole("checkbox", { name: "进行中" })).toBeNull(),
   );

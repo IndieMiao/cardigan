@@ -111,17 +111,12 @@ test("U01 §8.1: shell shows session loading, failure, login, then project navig
   fireEvent.click(screen.getByRole("button", { name: /登录/ }));
   await screen.findByRole("link", { name: new RegExp(f.card.title) });
   expect(screen.getByRole("combobox", { name: /项目/ })).toBeTruthy();
-  for (const name of [
-    "看板",
-    "列表",
-    "Needs You",
-    "项目快照",
-    "执行视图",
-    "项目动态",
-  ])
+  for (const name of ["卡片", "Needs You", "项目快照", "执行视图", "项目动态"])
     expect(screen.getByRole("link", { name })).toBeTruthy();
-  fireEvent.click(screen.getByRole("link", { name: "列表" }));
-  await waitFor(() => expect(window.location.hash).toContain("/list"));
+  fireEvent.click(screen.getByRole("button", { name: "列表" }));
+  await waitFor(() =>
+    expect(window.location.hash).toContain("/cards?view=list"),
+  );
 });
 
 test("U02 §3.2: login explains missing password setup, reports bad passwords and succeeds through HTTP", async () => {

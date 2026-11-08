@@ -39,7 +39,7 @@ const cardsPage = (cards: readonly CardListItem[]) => ({
 });
 
 test("U4b empty columns default to narrow controls; expansion survives route restoration without losing filters", async () => {
-  window.location.hash = "#/p/p-1/board?q=C-1";
+  window.location.hash = "#/p/p-1/cards?view=board&q=C-1";
   const client = fakeClient({ cards: async () => cardsPage([active]) });
   const page = render(
     <CardListPage client={client} projectId="p-1" view="board" />,
@@ -51,7 +51,8 @@ test("U4b empty columns default to narrow controls; expansion survives route res
   );
   fireEvent.click(button);
   expect(parseRoute(window.location.hash)).toMatchObject({
-    filters: { q: "C-1", expanded: "done" },
+    kind: "cards",
+    filters: { view: "board", q: "C-1", expanded: "done" },
   });
   expect(
     screen
@@ -62,7 +63,7 @@ test("U4b empty columns default to narrow controls; expansion survives route res
   render(<CardListPage client={client} projectId="p-1" view="board" />);
   await screen.findByRole("button", { name: "收起已完成空列" });
   act(() => {
-    window.location.hash = "#/p/p-1/board?q=C-1";
+    window.location.hash = "#/p/p-1/cards?view=board&q=C-1";
     window.dispatchEvent(new HashChangeEvent("hashchange"));
   });
   await screen.findByRole("button", { name: "展开已完成空列" });
@@ -154,9 +155,11 @@ test.each([
     const link = within(nav).getByRole("link", {
       name: `${label} ${ids.length}`,
     });
-    expect(link.getAttribute("href")).toBe(`#/p/p-1/list?overview=${group}`);
+    expect(link.getAttribute("href")).toBe(
+      `#/p/p-1/cards?view=list&overview=${group}`,
+    );
     fireEvent.click(link);
-    await screen.findByRole("heading", { level: 1, name: "列表" });
+    await screen.findByRole("heading", { level: 1, name: "卡片" });
     const table = await screen.findByRole("table");
     await waitFor(() =>
       expect(

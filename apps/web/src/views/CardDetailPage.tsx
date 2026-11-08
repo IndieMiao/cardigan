@@ -68,12 +68,12 @@ export function CardDetailPage({
     previousSize.current = pageSize;
     reload();
   }, [anchor, pageSize, data, reload]);
-  const back = routeHash({ kind: "board", projectId });
+  const back = routeHash({ kind: "cards", projectId });
   if (data === null)
     return (
       <div>
-        <EmptyState>找不到卡片 {cardId}。请核对编号或返回看板。</EmptyState>
-        <a href={back}>返回到看板</a>
+        <EmptyState>找不到卡片 {cardId}。请核对编号或返回卡片。</EmptyState>
+        <a href={back}>返回到卡片</a>
       </div>
     );
   if (!data)

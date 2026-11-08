@@ -34,10 +34,7 @@ export function Lightbox({
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       {trigger && <Dialog.Trigger asChild>{trigger}</Dialog.Trigger>}
       <Dialog.Portal>
-        <Dialog.Overlay
-          className="lightbox-overlay"
-          onClick={() => onOpenChange(false)}
-        />
+        <Dialog.Overlay className="lightbox-overlay" />
         <Dialog.Content
           className="lightbox-content"
           aria-describedby={undefined}

@@ -159,7 +159,7 @@ test("a failed login explains itself and does not enter the workbench", async ()
   const alert = await screen.findByRole("alert");
   expect(alert.textContent).toContain("密码不对");
   expect(attempts).toBe(1);
-  expect(screen.queryByText("看板")).toBeNull();
+  expect(screen.queryByText("卡片")).toBeNull();
 });
 
 test("a successful login reloads the session and shows the board", async () => {
@@ -201,30 +201,51 @@ test("a broken connection offers a retry instead of a blank page", async () => {
 test("the shell shows the project switcher, the filters and the navigation", async () => {
   render(<App client={fakeClient({})} />);
   expect(await screen.findByLabelText("项目")).toBeTruthy();
-  expect(await screen.findByRole("link", { name: "看板" })).toBeTruthy();
-  expect(screen.getByRole("link", { name: "列表" })).toBeTruthy();
+  expect(await screen.findByRole("link", { name: "卡片" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "看板" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "列表" })).toBeTruthy();
   expect(screen.getByLabelText("下一步谁做")).toBeTruthy();
-  expect(screen.getByRole("checkbox", { name: "进行中" })).toBeTruthy();
-  // The URL lands on the only project's board by itself.
-  await waitFor(() => expect(window.location.hash).toBe("#/p/p-1/board"));
+  expect(screen.getByRole("button", { name: "状态：全部" })).toBeTruthy();
+  // The URL lands on the only project's cards page, defaulting to the board.
+  await waitFor(() => expect(window.location.hash).toBe("#/p/p-1/cards"));
 });
 
-test("switching the view changes the route and the screen", async () => {
+test("switching the view changes the route and keeps filters", async () => {
+  window.location.hash = "#/p/p-1/cards?view=board&status=in_progress&q=C";
   render(<App client={fakeClient({})} />);
   await screen.findByText("准备发布");
-  navigate("#/p/p-1/list");
+  fireEvent.click(screen.getByRole("button", { name: "列表" }));
   const row = (await screen.findByText("准备发布")).closest("tr");
   expect(row?.textContent).toContain("C-1");
-  expect(window.location.hash).toBe("#/p/p-1/list");
+  await waitFor(() =>
+    expect(window.location.hash).toBe(
+      "#/p/p-1/cards?view=list&status=in_progress&q=C",
+    ),
+  );
+});
+
+test("legacy board and list routes redirect and keep filters", async () => {
+  render(<App client={fakeClient({})} />);
+  await screen.findByText("准备发布");
+  navigate("#/p/p-1/list?status=in_progress&q=C");
+  await waitFor(() =>
+    expect(window.location.hash).toBe(
+      "#/p/p-1/cards?view=list&status=in_progress&q=C",
+    ),
+  );
+  navigate("#/p/p-1/board?q=C");
+  await waitFor(() =>
+    expect(window.location.hash).toBe("#/p/p-1/cards?view=board&q=C"),
+  );
 });
 
 test("an unknown project in the URL falls back to the first real project", async () => {
   render(<App client={fakeClient({})} />);
   await screen.findByText("准备发布");
-  navigate("#/p/p-missing/board");
+  navigate("#/p/p-missing/cards");
   // The stale id is replaced by a project that exists, so a bookmarked URL from
   // a renamed project still lands on a working screen.
-  await waitFor(() => expect(window.location.hash).toBe("#/p/p-1/board"));
+  await waitFor(() => expect(window.location.hash).toBe("#/p/p-1/cards"));
   expect(await screen.findByText("准备发布")).toBeTruthy();
 });
 
@@ -319,6 +340,6 @@ test("the card route opens the card page", async () => {
   expect(screen.getByRole("heading", { level: 1 }).textContent).toContain(
     "准备发布",
   );
-  // The board is no longer mounted once the card page is shown.
-  expect(screen.queryByRole("link", { name: "看板" })).toBeTruthy();
+  // The cards page is no longer mounted once the card page is shown.
+  expect(screen.queryByRole("link", { name: "卡片" })).toBeTruthy();
 });

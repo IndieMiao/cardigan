@@ -1,5 +1,5 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import type { ReactElement, ReactNode } from "react";
+import { type ReactElement, type ReactNode, useId } from "react";
 
 export interface DrawerProps {
   readonly open: boolean;
@@ -9,6 +9,8 @@ export interface DrawerProps {
   readonly trigger?: ReactElement;
   readonly children: ReactNode;
   readonly footer?: ReactNode;
+  /** Extra header buttons rendered before the close button. */
+  readonly actions?: ReactNode;
   readonly className?: string;
 }
 
@@ -21,24 +23,24 @@ export function Drawer({
   trigger,
   children,
   footer,
+  actions,
   className,
 }: DrawerProps) {
+  const descriptionId = useId();
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       {trigger && <Dialog.Trigger asChild>{trigger}</Dialog.Trigger>}
       <Dialog.Portal>
-        <Dialog.Overlay
-          className="drawer-overlay"
-          onClick={() => onOpenChange(false)}
-        />
+        <Dialog.Overlay className="drawer-overlay" />
         <Dialog.Content
           className={`drawer-content${className ? ` ${className}` : ""}`}
           aria-describedby={
-            description === undefined ? undefined : "drawer-description"
+            description === undefined ? undefined : descriptionId
           }
         >
           <header className="drawer-header">
             <Dialog.Title className="drawer-title">{title}</Dialog.Title>
+            {actions && <div className="drawer-actions">{actions}</div>}
             <Dialog.Close asChild>
               <button
                 type="button"
@@ -50,10 +52,7 @@ export function Drawer({
             </Dialog.Close>
           </header>
           {description !== undefined && (
-            <Dialog.Description
-              id="drawer-description"
-              className="visually-hidden"
-            >
+            <Dialog.Description id={descriptionId} className="visually-hidden">
               {description}
             </Dialog.Description>
           )}

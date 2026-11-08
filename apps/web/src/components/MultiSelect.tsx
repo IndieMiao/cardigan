@@ -1,5 +1,5 @@
 import * as Popover from "@radix-ui/react-popover";
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 
 export interface MultiSelectOption {
   readonly value: string;
@@ -24,29 +24,19 @@ export function MultiSelect({
 }: MultiSelectProps) {
   const [open, setOpen] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null);
-  const content = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    const closeOnOutside = (event: PointerEvent) => {
-      const target = event.target;
-      if (
-        target instanceof Node &&
-        (trigger.current?.contains(target) || content.current?.contains(target))
-      )
-        return;
-      setOpen(false);
-    };
-    document.addEventListener("pointerdown", closeOnOutside, true);
-    return () =>
-      document.removeEventListener("pointerdown", closeOnOutside, true);
-  }, [open]);
   const selected = options.filter((option) => values.includes(option.value));
   const text =
     selected.length === 0
       ? emptyLabel
       : selected.map((option) => option.label).join("、");
   return (
-    <Popover.Root open={open} onOpenChange={setOpen}>
+    <Popover.Root
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        if (!next) trigger.current?.focus();
+      }}
+    >
       <Popover.Trigger asChild>
         <button
           ref={trigger}
@@ -62,7 +52,6 @@ export function MultiSelect({
       </Popover.Trigger>
       <Popover.Portal>
         <Popover.Content
-          ref={content}
           className="popover-content multiselect-content"
           align="start"
           sideOffset={6}

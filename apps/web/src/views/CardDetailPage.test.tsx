@@ -51,11 +51,11 @@ test("a missing card explains itself and offers the way back", async () => {
     },
   });
   expect(
-    await screen.findByText("找不到卡片 C-1。请核对编号或返回看板。"),
+    await screen.findByText("找不到卡片 C-1。请核对编号或返回卡片。"),
   ).toBeTruthy();
   expect(
-    screen.getByRole("link", { name: "返回到看板" }).getAttribute("href"),
-  ).toBe("#/p/p-1/board");
+    screen.getByRole("link", { name: "返回到卡片" }).getAttribute("href"),
+  ).toBe("#/p/p-1/cards");
 });
 
 test("a failed load shows the message and retries", async () => {
