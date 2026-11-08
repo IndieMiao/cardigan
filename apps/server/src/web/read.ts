@@ -318,16 +318,56 @@ export function cardDetail(
         ref.kind === "pr" ? undefined : resolved.get(`${ref.kind}:${ref.id}`);
       return value ? [value] : [];
     });
+  const events = state.events.filter((event) => event.card_id === card_id);
+  const eventBySeq = new Map(events.map((event) => [event.seq, event]));
+  const roles = new Map<string, string>(
+    state.assignments.map((a) => [a.id, a.role_id]),
+  );
+  const review_matrix = deriveReviewMatrix(deliveries, work_items, reviews);
+  const updated_at =
+    [...events.map((e) => e.created_at), card.created_at].sort().at(-1) ??
+    card.created_at;
   return {
+    updated_at,
     card: { ...card, references: references(description) },
     work_items,
-    timeline: timeline.map((entry) => ({
-      ...entry,
-      references: references(entry.body),
-    })),
+    timeline: timeline.map((entry) => {
+      const event = eventBySeq.get(entry.event_seq);
+      const reviewId =
+        event?.payload &&
+        typeof event.payload === "object" &&
+        "review_id" in event.payload
+          ? event.payload.review_id
+          : undefined;
+      const review_id =
+        entry.type === "review"
+          ? reviews.find(
+              (r) =>
+                r.id === reviewId &&
+                r.delivery_id === entry.delivery_id &&
+                r.work_item_id === entry.work_item_id,
+            )?.id
+          : undefined;
+      return {
+        ...entry,
+        event_type: event?.type ?? null,
+        ...(entry.type === "decision_resolved" &&
+        event?.payload &&
+        typeof event.payload === "object" &&
+        "option" in event.payload &&
+        typeof event.payload.option === "string"
+          ? { decision_option: event.payload.option }
+          : {}),
+        author_role: entry.author.startsWith("assignment:")
+          ? (roles.get(entry.author.slice(11)) ?? null)
+          : null,
+        ...(review_id ? { review_id } : {}),
+        references: references(entry.body),
+      };
+    }),
     deliveries,
     reviews,
-    review_matrix: deriveReviewMatrix(deliveries, work_items, reviews),
+    review_matrix,
     decisions,
     human_actions,
     attachments: attachmentViews(state, card_id),

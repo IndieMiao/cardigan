@@ -335,7 +335,7 @@ test("U1 base text wrapping protects card header panels from unbroken commit SHA
             ...detail,
             card: {
               ...detail.card,
-              why: `等待确认 ${sha}`,
+              title: `等待确认 ${sha}`,
               waiting_on: [{ kind: "review", ref: "D-1", label: sha }],
             },
           }),
@@ -343,7 +343,7 @@ test("U1 base text wrapping protects card header panels from unbroken commit SHA
       />,
     );
     const card = await screen.findByRole("article", { name: "卡片 C-1" });
-    expect(card.querySelector(".page-title p")?.textContent).toContain(sha);
+    expect(card.querySelector(".page-title h1")?.textContent).toContain(sha);
     expect(
       within(card).getByText("被什么阻塞").nextElementSibling?.textContent,
     ).toBe(sha);

@@ -115,6 +115,10 @@ export interface TimelineEntryView {
   readonly id: string;
   readonly card_id: string;
   readonly event_seq: number;
+  readonly event_type?: string | null;
+  readonly author_role?: string | null;
+  readonly review_id?: string;
+  readonly decision_option?: string;
   readonly type:
     | "comment"
     | "instruction"
@@ -151,6 +155,13 @@ export interface DeliveryView {
   readonly branch?: string;
   readonly pr_url?: string;
   readonly status: string;
+  readonly supersedes?: string;
+  readonly test_results?: readonly { command: string; result: string }[];
+  readonly evidence?: readonly { kind: string; details: unknown }[];
+  readonly known_gaps?: readonly {
+    description: string;
+    followup_card_id?: string;
+  }[];
 }
 
 export interface ReviewView {
@@ -159,6 +170,15 @@ export interface ReviewView {
   readonly work_item_id: string;
   readonly verdict: string;
   readonly blocking: boolean;
+  readonly target_sha?: string;
+  readonly issues?: readonly {
+    severity: string;
+    description: string;
+    must_fix: boolean;
+    pre_existing: boolean;
+    proof?: string;
+  }[];
+  readonly recheck_required?: boolean;
 }
 
 export interface ReviewMatrixRow {
@@ -181,6 +201,13 @@ export interface DecisionView {
     readonly impact: string;
   }[];
   readonly recommended: string;
+  readonly context?: string;
+  readonly resolution?: {
+    option: string;
+    rationale: string;
+    raw_quote: string;
+    at: string;
+  };
 }
 
 export interface HumanActionView {
@@ -228,6 +255,7 @@ export interface CardRelations {
 }
 
 export interface CardDetail {
+  readonly updated_at?: string;
   readonly project_id: string;
   readonly card: CardView;
   readonly work_items: readonly WorkItemView[];
