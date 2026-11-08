@@ -21,7 +21,7 @@ import { join } from "node:path";
 import { agentNameFor, main as cli } from "@cardigan/cli";
 import { Store } from "@cardigan/store";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
-import { HcCore } from "../test-support/hc.js";
+import { HcCore, runCleanupSteps } from "../test-support/hc.js";
 import { type CardiganServer, startCardiganServer } from "./server.js";
 
 const HC_VERSION = "0.1.18";
@@ -301,21 +301,31 @@ setInterval(() => {}, 1000);
   });
 
   afterAll(async () => {
-    // The core goes first; its terminals die with it. Everything below is
-    // best effort and isolated, so one failure cannot leak the core.
-    await core.stop();
-    // No `assignment stop` here: the core already ended every terminal, and an
-    // hc command would start a fresh core. Each step stands alone instead.
-    try {
-      await server?.close();
-    } catch {
-      // Continue with the rest.
-    }
-    process.env = savedEnv;
-    // One last check in case a cleanup step woke a core again.
-    await core.stop();
-    // Only after the core is gone: its state lives under `root`.
-    rmSync(root, { recursive: true, force: true });
+    await runCleanupSteps({
+      session: SESSION,
+      socket: socketPath ?? "",
+      steps: [
+        { label: "stop herdr-core", run: () => core?.stop() },
+        { label: "close server", run: () => server?.close() },
+        {
+          label: "restore process environment",
+          run: () => {
+            process.env = savedEnv;
+          },
+        },
+        { label: "stop herdr-core again", run: () => core?.stop() },
+        {
+          label: "verify herdr-core stopped",
+          run: () => core?.assertStopped(),
+        },
+        {
+          label: "remove temporary directory",
+          run: () => {
+            if (root) rmSync(root, { recursive: true, force: true });
+          },
+        },
+      ],
+    });
   }, 120_000);
 
   test("a coder Assignment starts, the Run advances and the Agent reads its task", async () => {

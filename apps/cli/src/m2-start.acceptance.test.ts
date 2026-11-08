@@ -27,7 +27,7 @@ import { HerdrRuntime } from "@cardigan/runtime-herdr";
 import { Store, writeRole } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { startCardiganServer } from "../../server/src/index.js";
-import { HcCore } from "../../server/test-support/hc.js";
+import { HcCore, runCleanupSteps } from "../../server/test-support/hc.js";
 import {
   createProcessIo,
   humanActor,
@@ -499,8 +499,19 @@ if(process.argv.includes('--version')) { console.log('pi acceptance-1'); process
           .poll(() => existsSync(socket), { timeout: 2000 })
           .toBe(false);
       } finally {
-        await core.stop();
-        await server.close();
+        await runCleanupSteps({
+          session,
+          socket,
+          steps: [
+            { label: "stop herdr-core", run: () => core.stop() },
+            { label: "close server", run: () => server.close() },
+            { label: "stop herdr-core again", run: () => core.stop() },
+            {
+              label: "verify herdr-core stopped",
+              run: () => core.assertStopped(),
+            },
+          ],
+        });
       }
     }
   },

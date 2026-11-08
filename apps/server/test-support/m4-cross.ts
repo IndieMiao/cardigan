@@ -60,7 +60,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { expect, vi } from "vitest";
 import { ServerGit } from "../src/git.js";
 import { type CardiganServer, startCardiganServer } from "../src/index.js";
-import { HcCore } from "./hc.js";
+import { HcCore, runCleanupSteps } from "./hc.js";
 
 export const git = (cwd: string, ...args: string[]) =>
   execFileSync(
@@ -219,19 +219,26 @@ export async function m4Cross(options: { hc?: boolean; agent?: boolean } = {}) {
     clients.clear();
   }
   async function close() {
-    try {
-      await server?.close();
-      await closeClients();
-    } finally {
-      try {
-        await core?.stop();
-        core?.assertStopped();
-      } finally {
-        store?.close();
-        vi.unstubAllEnvs();
-      }
-      await rm(root, { recursive: true, force: true });
-    }
+    await runCleanupSteps({
+      session: core?.session ?? "none",
+      socket: core?.socket ?? "",
+      steps: [
+        { label: "close server", run: () => server?.close() },
+        { label: "close MCP clients", run: () => closeClients() },
+        { label: "stop herdr-core", run: () => core?.stop() },
+        { label: "close store", run: () => store?.close() },
+        { label: "restore environment", run: () => vi.unstubAllEnvs() },
+        { label: "stop herdr-core again", run: () => core?.stop() },
+        {
+          label: "verify herdr-core stopped",
+          run: () => core?.assertStopped(),
+        },
+        {
+          label: "remove temporary directory",
+          run: () => rm(root, { recursive: true, force: true }),
+        },
+      ],
+    });
   }
   const db = () => {
     if (!store) throw new Error("No store");

@@ -23,7 +23,7 @@ import { parseLaunchConfig } from "@cardigan/roles";
 import { HerdrRuntime } from "@cardigan/runtime-herdr";
 import { Store } from "@cardigan/store";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
-import { HcCore } from "../test-support/hc.js";
+import { HcCore, runCleanupSteps } from "../test-support/hc.js";
 import { routeProjectEvents } from "./dispatch-inbox.js";
 import { stubGit } from "./git-test-support.js";
 import { startQueuedRun } from "./host-start.js";
@@ -452,23 +452,32 @@ describe.skipIf(!available)("M3.5 router and dispatcher end to end", () => {
   });
 
   afterAll(async () => {
-    // The core goes first: its terminals and Agents die with it. No
-    // `assignment stop` follows: it is an hc command, so it would start a
-    // fresh core after this one is gone, and the temporary directory removal
-    // below would then orphan that new core.
-    await core.stop();
-    // Every remaining step stands alone: one failure must not skip the next.
-    for (const step of [() => server?.close(), async () => store?.close()])
-      try {
-        await step();
-      } catch {
-        // Best effort; the next step still runs.
-      }
-    process.env = savedEnv;
-    // Belt and braces before the socket directory disappears: stop again and
-    // fail the run if a core of this session is (again) alive.
-    await core.stop();
-    rmSync(root, { recursive: true, force: true });
+    await runCleanupSteps({
+      session: SESSION,
+      socket: socketPath ?? "",
+      steps: [
+        { label: "stop herdr-core", run: () => core?.stop() },
+        { label: "close server", run: () => server?.close() },
+        { label: "close store", run: () => store?.close() },
+        {
+          label: "restore process environment",
+          run: () => {
+            process.env = savedEnv;
+          },
+        },
+        { label: "stop herdr-core again", run: () => core?.stop() },
+        {
+          label: "verify herdr-core stopped",
+          run: () => core?.assertStopped(),
+        },
+        {
+          label: "remove temporary directory",
+          run: () => {
+            if (root) rmSync(root, { recursive: true, force: true });
+          },
+        },
+      ],
+    });
   }, 120_000);
 
   const notes = () => store.listNotifications({ project_id });
