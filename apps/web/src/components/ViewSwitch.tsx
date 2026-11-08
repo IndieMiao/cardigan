@@ -1,0 +1,48 @@
+import * as ToggleGroup from "@radix-ui/react-toggle-group";
+import type { ReactNode } from "react";
+
+export interface ViewSwitchOption {
+  readonly value: string;
+  readonly label: string;
+  readonly icon: ReactNode;
+}
+
+export interface ViewSwitchProps {
+  readonly label: string;
+  readonly value: string;
+  readonly options: readonly ViewSwitchOption[];
+  readonly onChange: (value: string) => void;
+}
+
+/** Single-choice icon button group with aria-pressed toggle semantics. */
+export function ViewSwitch({
+  label,
+  value,
+  options,
+  onChange,
+}: ViewSwitchProps) {
+  return (
+    <ToggleGroup.Root
+      type="multiple"
+      className="view-switch"
+      value={[value]}
+      onValueChange={(next) => {
+        const last = next.at(-1);
+        if (last !== undefined) onChange(last);
+      }}
+      aria-label={label}
+    >
+      {options.map((option) => (
+        <ToggleGroup.Item
+          key={option.value}
+          value={option.value}
+          className="view-switch-item"
+          aria-label={option.label}
+          title={option.label}
+        >
+          {option.icon}
+        </ToggleGroup.Item>
+      ))}
+    </ToggleGroup.Root>
+  );
+}
