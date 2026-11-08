@@ -8,6 +8,7 @@ import { linkableReferences, linkifyReferences } from "../refs.js";
 import { statusLabel } from "../status.js";
 import { EmptyState, IdTag, LongContent, Time } from "./Foundation.js";
 import { TimelineContent } from "./TimelineContent.js";
+import { Tooltip } from "./Tooltip.js";
 
 /**
  * The card's timeline (M5 plan §3.7, §8.4 of the development plan).
@@ -93,6 +94,21 @@ export const targetsEntry = (entry: TimelineEntryView, anchor?: string) =>
     entry.human_action_id && `human-action-${entry.human_action_id}`,
   ].includes(anchor);
 
+function timelineDay(entry: TimelineEntryView) {
+  const date = new Date(entry.created_at);
+  if (!Number.isFinite(date.getTime()))
+    return { key: "unknown", label: "日期未知" };
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return {
+    key: `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`,
+    label: new Intl.DateTimeFormat("zh-CN", {
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+    }).format(date),
+  };
+}
+
 /** Group before filtering: hidden comments must not make separated system rows consecutive. */
 export function timelineGroups(entries: readonly TimelineEntryView[]) {
   const groups: TimelineEntryView[][] = [];
@@ -105,6 +121,7 @@ export function timelineGroups(entries: readonly TimelineEntryView[]) {
       previous = last?.at(-1);
     if (
       previous &&
+      timelineDay(entry).key === timelineDay(previous).key &&
       timelineCategory(entry) === "system" &&
       timelineCategory(previous) === "system" &&
       entry.event_type &&
@@ -172,9 +189,26 @@ export function Timeline({
           detail.reviews.some((r) => r.id === entry.review_id)) ||
         (entry.type.startsWith("decision_") &&
           detail.decisions.some((d) => d.id === entry.decision_id)));
+    const context = (
+      <>
+        <Tooltip
+          content={`${authorLabel(entry.author)}，${entry.id}，序号 ${entry.event_seq}`}
+        >
+          <button type="button" className="quiet timeline-author">
+            {entry.author.startsWith("assignment:")
+              ? (entry.author_role ?? "Agent")
+              : authorLabel(entry.author)}
+          </button>
+        </Tooltip>
+        <Time value={entry.created_at} />
+        {entry.retracted && (
+          <span className="timeline-retracted-label">已撤回</span>
+        )}
+      </>
+    );
     return (
       <li
-        className={`timeline-entry timeline-${entry.type}${entry.retracted ? " timeline-retracted" : ""}`}
+        className={`timeline-entry timeline-${entry.type}${["delivery", "review", "decision"].includes(timelineCategory(entry)) ? " timeline-record" : ""}${entry.retracted ? " timeline-retracted" : ""}`}
         key={entry.id}
         id={`entry-${entry.id}`}
         data-timeline-type={entry.type}
@@ -183,47 +217,38 @@ export function Timeline({
         {alias("review", entry.review_id)}
         {alias("decision", entry.decision_id)}
         {alias("human-action", entry.human_action_id)}
-        <div className="timeline-head">
-          <span className="timeline-type">
-            {TYPE_LABELS[entry.type] ?? "系统记录"}
-          </span>
-          <span className="timeline-author">
-            {entry.author.startsWith("assignment:") ? (
-              <IdTag
-                id={authorLabel(entry.author)}
-                label={entry.author_role ?? "Agent"}
-              />
-            ) : (
-              authorLabel(entry.author)
-            )}
-          </span>
-          <Time value={entry.created_at} />
-          <span className="timeline-seq">序号 {entry.event_seq}</span>
-          {entry.retracted && <span>已撤回</span>}
-        </div>
         {structured && detail ? (
           <TimelineContent
             entry={entry}
             detail={detail}
             projectId={projectId}
             cardId={cardId}
+            context={context}
           />
         ) : (
-          <LongContent lines={entry.type === "comment" ? 4 : 6}>
-            <div
-              className="timeline-body markdown"
-              dangerouslySetInnerHTML={{
-                __html: renderMarkdown(
-                  linkifyReferences(
-                    entry.body,
-                    linkableReferences(entry.references ?? []),
-                    projectId,
-                    cardId,
+          <>
+            <div className="timeline-head">
+              <span className="timeline-type">
+                {TYPE_LABELS[entry.type] ?? "系统记录"}
+              </span>
+              {context}
+            </div>
+            <LongContent lines={entry.type === "comment" ? 2 : 6}>
+              <div
+                className="timeline-body markdown"
+                dangerouslySetInnerHTML={{
+                  __html: renderMarkdown(
+                    linkifyReferences(
+                      entry.body,
+                      linkableReferences(entry.references ?? []),
+                      projectId,
+                      cardId,
+                    ),
                   ),
-                ),
-              }}
-            />
-          </LongContent>
+                }}
+              />
+            </LongContent>
+          </>
         )}
         {!!current.length && (
           <ul className="attachments">
@@ -245,28 +270,51 @@ export function Timeline({
       </li>
     );
   };
+  const days = new Map<
+    string,
+    { label: string; groups: TimelineEntryView[][] }
+  >();
+  for (const group of groups) {
+    const first = group[0];
+    if (!first) continue;
+    const day = timelineDay(first);
+    if (!days.has(day.key)) days.set(day.key, { label: day.label, groups: [] });
+    days.get(day.key)?.groups.push(group);
+  }
   return (
-    <ol className="timeline">
-      {groups.map((group) => {
-        const first = group[0];
-        if (!first) return null;
-        if (timelineCategory(first) !== "system") return row(first);
-        const label =
-          first.event_type === "assignment_released" && group.length > 1
-            ? `释放了 ${group.length} 个 Assignment`
-            : `${eventLabel(first.event_type ?? "")}${group.length > 1 ? `（${group.length} 条）` : ""}`;
-        return (
-          <li className="system-group" key={first.id}>
-            <details>
-              <summary>
-                <Time value={group.at(-1)?.created_at} /> <span>{label}</span>
-              </summary>
-              <ol>{group.map(row)}</ol>
-            </details>
-          </li>
-        );
-      })}
-    </ol>
+    <div className="timeline-days">
+      {[...days].map(([key, day]) => (
+        <section
+          className="timeline-day"
+          key={key}
+          aria-label={`${day.label}时间线`}
+        >
+          <h3>{day.label}</h3>
+          <ol className="timeline">
+            {day.groups.map((group) => {
+              const first = group[0];
+              if (!first) return null;
+              if (timelineCategory(first) !== "system") return row(first);
+              const label =
+                first.event_type === "assignment_released" && group.length > 1
+                  ? `释放了 ${group.length} 个 Assignment`
+                  : `${eventLabel(first.event_type ?? "")}${group.length > 1 ? `（${group.length} 条）` : ""}`;
+              return (
+                <li className="system-group" key={first.id}>
+                  <details>
+                    <summary>
+                      <Time value={group.at(-1)?.created_at} />{" "}
+                      <span>{label}</span>
+                    </summary>
+                    <ol>{group.map(row)}</ol>
+                  </details>
+                </li>
+              );
+            })}
+          </ol>
+        </section>
+      ))}
+    </div>
   );
 }
 

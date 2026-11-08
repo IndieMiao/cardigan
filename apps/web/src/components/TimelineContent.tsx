@@ -1,9 +1,11 @@
 // biome-ignore-all lint/suspicious/noArrayIndexKey: delivery and review arrays are immutable record snapshots with no item IDs.
+import type { ReactNode } from "react";
 import type { CardDetail, TimelineEntryView } from "../api.js";
 import { decisionOption, decisionTitle } from "../decision-labels.js";
 import { routeHash } from "../route.js";
 import { IdTag, LongContent, StatusTag } from "./Foundation.js";
 import { Markdown } from "./Operations.js";
+import { TimelineVersion } from "./TimelineVersion.js";
 
 /** Structural records come from the read model, never from parsing Agent prose. */
 export function TimelineContent({
@@ -11,54 +13,58 @@ export function TimelineContent({
   detail,
   projectId,
   cardId,
+  context,
 }: {
   entry: TimelineEntryView;
   detail: CardDetail;
   projectId: string;
   cardId: string;
+  context: ReactNode;
 }) {
   const link = (anchor: string) =>
     routeHash({ kind: "card", projectId, cardId, anchor });
-  const work = detail.work_items.find((w) => w.id === entry.work_item_id);
+  const workLabel = (id: string) =>
+    detail.work_items.find((w) => w.id === id)?.title ?? "工作项";
+  const heading = (type: string, id: string, result: ReactNode) => (
+    <div className="timeline-head">
+      <h4 className="timeline-conclusion">
+        <span>{type}</span> <span>{id}</span> {result}
+      </h4>
+      {context}
+    </div>
+  );
   if (entry.type === "delivery") {
     const delivery = detail.deliveries.find((d) => d.id === entry.delivery_id);
     if (!delivery) return null;
     return (
       <div className="structured-entry">
-        <p>
+        {heading(
+          delivery.kind === "card_completion" ? "完成申请" : "交付",
+          delivery.id,
+          <StatusTag status={delivery.status} />,
+        )}
+        <p className="entry-summary">{delivery.summary}</p>
+        <div className="entry-meta">
           <IdTag
-            id={delivery.id}
-            label={delivery.kind === "card_completion" ? "完成申请" : "交付"}
-          />{" "}
-          <strong>{delivery.summary}</strong>
-        </p>
-        <dl className="entry-fields">
-          <dt>工作项</dt>
-          <dd>
-            <IdTag
-              id={delivery.work_item_id}
-              label={work?.title ?? "工作项"}
-              href={link(`work-item-${delivery.work_item_id}`)}
-            />
-          </dd>
-          <dt>{delivery.subject.kind === "git_head" ? "提交" : "版本"}</dt>
-          <dd>{delivery.subject.value}</dd>
-          <dt>当前状态</dt>
-          <dd>
-            <StatusTag status={delivery.status} />
-            {delivery.supersedes && (
-              <>
-                {" "}
-                替代{" "}
-                <IdTag
-                  id={delivery.supersedes}
-                  label="旧交付"
-                  href={link(`delivery-${delivery.supersedes}`)}
-                />
-              </>
-            )}
-          </dd>
-        </dl>
+            id={delivery.work_item_id}
+            label={workLabel(delivery.work_item_id)}
+            href={link(`work-item-${delivery.work_item_id}`)}
+          />
+          <TimelineVersion
+            value={delivery.subject.value}
+            git={delivery.subject.kind === "git_head"}
+          />
+          {delivery.supersedes && (
+            <span>
+              替代{" "}
+              <IdTag
+                id={delivery.supersedes}
+                label="旧交付"
+                href={link(`delivery-${delivery.supersedes}`)}
+              />
+            </span>
+          )}
+        </div>
         <details>
           <summary>
             测试结果与证据（{delivery.test_results?.length ?? 0} 项测试）
@@ -101,31 +107,35 @@ export function TimelineContent({
     const delivery = detail.deliveries.find((d) => d.id === review.delivery_id);
     return (
       <div className="structured-entry">
-        <p>
-          <IdTag id={review.id} label="审核" />{" "}
-          <StatusTag status={review.verdict} />{" "}
+        {heading("审核", review.id, <StatusTag status={review.verdict} />)}
+        <p className="entry-summary">
+          {review.issues?.length
+            ? `报告 ${review.issues.length} 个问题。`
+            : "未报告问题。"}
+          {review.recheck_required && "需要复审。"}
           {delivery?.status === "superseded" && <span>旧版本结论，已失效</span>}
         </p>
-        <dl className="entry-fields">
-          <dt>验证项</dt>
-          <dd>
-            <IdTag
-              id={review.work_item_id}
-              label={work?.title ?? "验证项"}
-              href={link(`work-item-${review.work_item_id}`)}
+        <div className="entry-meta">
+          <IdTag
+            id={review.work_item_id}
+            label={workLabel(review.work_item_id)}
+            href={link(`work-item-${review.work_item_id}`)}
+          />
+          <IdTag
+            id={review.delivery_id}
+            label="交付"
+            href={link(`delivery-${review.delivery_id}`)}
+          />
+          {review.target_sha ? (
+            <TimelineVersion
+              value={review.target_sha}
+              git={!delivery || delivery.subject.kind === "git_head"}
             />
-          </dd>
-          <dt>审核版本</dt>
-          <dd>
-            <IdTag
-              id={review.delivery_id}
-              label="交付"
-              href={link(`delivery-${review.delivery_id}`)}
-            />{" "}
-            {review.target_sha ?? "版本未记录"}
-          </dd>
-        </dl>
-        <details open={review.blocking}>
+          ) : (
+            <span>版本未记录</span>
+          )}
+        </div>
+        <details>
           <summary>
             问题列表（{review.issues?.length ?? 0}）
             {review.recheck_required ? "，需要复审" : ""}
@@ -154,12 +164,38 @@ export function TimelineContent({
   if (entry.type === "decision_request" || entry.type === "decision_resolved") {
     const decision = detail.decisions.find((d) => d.id === entry.decision_id);
     if (!decision) return null;
+    const resolved = entry.type === "decision_resolved";
+    const status = resolved
+      ? entry.event_type === "decision_provisionally_resolved"
+        ? "provisional"
+        : "resolved"
+      : decision.status;
     return (
       <div className="structured-entry">
-        <p>
-          <IdTag id={decision.id} label="拍板" />{" "}
-          <strong>{decisionTitle(decision)}</strong>
-        </p>
+        {heading(
+          "拍板",
+          decision.id,
+          resolved &&
+            decision.trigger === "merge_confirmation" &&
+            entry.decision_option ? (
+            <span className={`status status-${status}`}>
+              {decisionOption(decision, entry.decision_option)}
+            </span>
+          ) : (
+            <StatusTag status={status} />
+          ),
+        )}
+        <p className="entry-summary">{decisionTitle(decision)}</p>
+        <div className="entry-meta">
+          <span>
+            {resolved
+              ? "已记录拍板原话"
+              : decision.decider === "human"
+                ? "由你拍板"
+                : "由指定角色拍板"}
+          </span>
+          {!resolved && decision.blocking && <span>影响工作继续</span>}
+        </div>
         {entry.type === "decision_request" ? (
           <details>
             <summary>背景与选项</summary>
@@ -176,12 +212,14 @@ export function TimelineContent({
           </details>
         ) : (
           <>
-            <p>
-              记录的结果：
-              {entry.decision_option
-                ? decisionOption(decision, entry.decision_option)
-                : "原记录未附选项"}
-            </p>
+            {decision.trigger !== "merge_confirmation" && (
+              <p>
+                记录的结果：
+                {entry.decision_option
+                  ? decisionOption(decision, entry.decision_option)
+                  : "原记录未附选项"}
+              </p>
+            )}
             <blockquote>
               <Markdown body={entry.body} />
             </blockquote>

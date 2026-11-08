@@ -15,6 +15,7 @@ import type { CardDetail } from "../api.js";
 import { timelineGroups } from "../components/Timeline.js";
 import { parseRoute } from "../route.js";
 import { cardDetail, fakeClient, timelineEntry } from "../testing/fixtures.js";
+import { selectMenu } from "../testing/menu.js";
 import { CardDetailPage } from "./CardDetailPage.js";
 
 afterEach(() => {
@@ -194,13 +195,13 @@ test("U3 structured delivery, review and decision rows use bound versions and or
   expect(decision?.textContent).not.toContain("Newer quote");
 });
 
-test("U3 type and speaker filters survive a shared URL, chip removal and remount", async () => {
+test("U3 type and speaker filters survive a shared URL, clearing a menu and remount", async () => {
   window.location.hash = "#/p/p-1/cards/C-1?type=comment&author=pm";
   const view = show();
   await screen.findByText("PM comment");
   expect(screen.queryByText("Human comment")).toBeNull();
   expect(document.querySelectorAll(".timeline-entry")).toHaveLength(1);
-  fireEvent.click(screen.getByRole("button", { name: "移除发言方筛选" }));
+  await selectMenu(/^发言方：/, "全部");
   expect(parseRoute(window.location.hash)).toMatchObject({
     kind: "card",
     cardId: "C-1",
@@ -210,12 +211,8 @@ test("U3 type and speaker filters survive a shared URL, chip removal and remount
   view.unmount();
   show();
   await screen.findByText("Human comment");
-  expect((screen.getByLabelText("条目类型") as HTMLSelectElement).value).toBe(
-    "comment",
-  );
-  fireEvent.change(screen.getByLabelText("条目类型"), {
-    target: { value: "handoff" },
-  });
+  expect(screen.getByRole("button", { name: "条目类型：评论" })).toBeTruthy();
+  await selectMenu(/^条目类型：/, "交接");
   await screen.findByText("没有符合筛选条件的条目。调整筛选后继续查看。");
 });
 
@@ -250,9 +247,7 @@ test("U3 combines only consecutive system records and explicit locations reveal 
     expect(target?.closest("details")?.open).toBe(true);
     expect(scroll.mock.contexts.at(-1)).toBe(target);
     expect(window.location.hash).toContain("cards/C-1");
-    fireEvent.change(screen.getByLabelText("条目类型"), {
-      target: { value: "review" },
-    });
+    await selectMenu(/^条目类型：/, "审核");
     await waitFor(() =>
       expect(parseRoute(window.location.hash)).toEqual({
         kind: "card",

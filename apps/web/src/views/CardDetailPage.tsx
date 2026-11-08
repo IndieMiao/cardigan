@@ -7,7 +7,6 @@ import {
 } from "../api.js";
 import { CardSidebar } from "../components/CardSidebar.js";
 import { CommentBox, type MentionOption } from "../components/CommentBox.js";
-import { FilterBar } from "../components/FilterBar.js";
 import {
   EmptyState,
   IdTag,
@@ -17,6 +16,7 @@ import {
   Time,
 } from "../components/Foundation.js";
 import { Timeline } from "../components/Timeline.js";
+import { TimelineControls } from "../components/TimelineControls.js";
 import { routeHash, useRouteFilters } from "../route.js";
 import { useResource } from "../useResource.js";
 
@@ -189,8 +189,8 @@ function CardContent({
       if (interacted.current || initialTimeline.current !== detail.timeline)
         return;
       position = () => {
-        region
-          .querySelector(".timeline > li:last-child")
+        Array.from(region.querySelectorAll(".timeline > li"))
+          .at(-1)
           ?.scrollIntoView?.({ block: "end" });
       };
     }
@@ -294,71 +294,20 @@ function CardContent({
         </section>
         <section className="card-section card-timeline" aria-label="时间线">
           <h2>时间线</h2>
-          <FilterBar
-            fields={[
-              {
-                key: "type",
-                label: "条目类型",
-                options: [
-                  { value: "delivery", label: "交付" },
-                  { value: "review", label: "审核" },
-                  { value: "decision", label: "拍板" },
-                  { value: "comment", label: "评论" },
-                  { value: "instruction", label: "指令" },
-                  { value: "human_action", label: "待你执行" },
-                  { value: "handoff", label: "交接" },
-                  { value: "system", label: "系统" },
-                ],
-              },
-              {
-                key: "author",
-                label: "发言方",
-                options: [
-                  { value: "human", label: "人" },
-                  { value: "pm", label: "PM" },
-                  { value: "agent", label: "Agent" },
-                  { value: "system", label: "系统" },
-                ],
-              },
-            ]}
-            values={filters}
+          <TimelineControls
+            filters={filters}
             onChange={setFilters}
+            loaded={detail.timeline.length}
+            total={detail.counts.timeline}
+            pageSize={pageSize}
+            pending={pending}
+            loadEarlier={loadEarlier}
           />
           {anchor && (filters.type || filters.author) && (
             <p className="hint">
               已保留链接指向的条目，便于定位；重新筛选后恢复只显示匹配项。
             </p>
           )}
-          <div className="timeline-controls">
-            <label>
-              每次加载{" "}
-              <select
-                value={pageSize}
-                onChange={(e) =>
-                  setFilters({ ...filters, count: e.target.value })
-                }
-              >
-                {[20, 50, 100].map((size) => (
-                  <option value={size} key={size}>
-                    {size} 条
-                  </option>
-                ))}
-              </select>
-            </label>
-            <span>
-              已加载 {detail.timeline.length} / {detail.counts.timeline} 条
-            </span>
-            {detail.counts.timeline > detail.timeline.length && (
-              <button
-                type="button"
-                className="quiet"
-                disabled={pending}
-                onClick={loadEarlier}
-              >
-                {pending ? "正在加载…" : "加载更早的记录"}
-              </button>
-            )}
-          </div>
           <section
             className="timeline-records"
             ref={scroll}

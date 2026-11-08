@@ -11,6 +11,7 @@ import { afterEach, expect, test, vi } from "vitest";
 import { App } from "../App.js";
 import { type CardReadOptions, HttpCardiganClient } from "../api.js";
 import { cardDetail, fakeClient, timelineEntry } from "../testing/fixtures.js";
+import { selectMenu } from "../testing/menu.js";
 import { CardDetailPage } from "./CardDetailPage.js";
 
 afterEach(() => {
@@ -61,9 +62,7 @@ test("U3 starts with 20 page-flow records, loads older records, changes count an
     expect(document.querySelectorAll(".timeline-entry")).toHaveLength(40),
   );
   expect((input as HTMLTextAreaElement).value).toBe("Keep my draft");
-  fireEvent.change(screen.getByLabelText("每次加载"), {
-    target: { value: "50" },
-  });
+  await selectMenu(/^每次加载：/, "50 条");
   await waitFor(() =>
     expect(document.querySelectorAll(".timeline-entry")).toHaveLength(50),
   );
@@ -131,7 +130,9 @@ test("U3 merge confirmation uses Chinese question and option labels and work-ite
     />,
   );
   await screen.findByText("确认把 C-1 合并到 main？");
-  expect(screen.getByText("记录的结果：确认合并")).toBeTruthy();
+  expect(
+    screen.getByRole("heading", { name: "拍板 q(1) 确认合并" }),
+  ).toBeTruthy();
   const item = within(screen.getByRole("region", { name: "工作项" }))
     .getByText("写迁移脚本")
     .closest("summary");
