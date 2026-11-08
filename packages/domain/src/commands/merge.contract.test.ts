@@ -1,6 +1,7 @@
 import { expect, test } from "vitest";
 import {
   deriveCardStatus,
+  listNeedsYou,
   mergePlan,
   recordDecision,
   requestMerge,
@@ -172,5 +173,70 @@ test("invariants 13, 14: missing delivery, stale confirmation and unaccepted ver
   expect(mergePlan({ ...f.state, deliveries: [] }, f.card.id).ok).toBe(false);
   expect(mergePlan({ ...f.state, project_id: "other" }, f.card.id).ok).toBe(
     false,
+  );
+});
+
+test("U4a: listNeedsYou exposes merge deliveries, reviews and completion gaps", async () => {
+  const f = mergeFixture();
+  const product = await f.deliver("code", "b".repeat(40));
+  f.review(product);
+  const completion = await f.deliver(
+    "card_completion",
+    product.subject.value,
+    true,
+    [{ description: "Known limitation" }],
+  );
+  f.review(completion);
+
+  const decisions = value(listNeedsYou(f.state, human)).data.decisions;
+  const decision = decisions.find((q) => q.trigger === "merge_confirmation");
+  if (decision === undefined) throw new Error("Missing merge confirmation");
+  const productItem = f.state.work_items.find(
+    (item) => item.id === product.work_item_id,
+  );
+
+  expect(decision).toMatchObject({
+    context: completion.summary,
+    related_cards: [{ id: f.card.id, title: f.card.title }],
+    options: expect.arrayContaining([
+      {
+        key: "merge",
+        description: expect.any(String),
+        impact: expect.any(String),
+      },
+    ]),
+    recommended: "merge",
+  });
+  expect(decision.merge_confirmation).toMatchObject({
+    completion: {
+      id: completion.id,
+      work_item_id: completion.work_item_id,
+      summary: completion.summary,
+      subject: completion.subject,
+    },
+    deliveries: [
+      {
+        id: product.id,
+        work_item_id: product.work_item_id,
+        work_item_title: productItem?.title,
+        subject: product.subject,
+        summary: product.summary,
+      },
+    ],
+    known_gaps: [{ description: "Known limitation" }],
+  });
+  expect(decision.merge_confirmation?.reviews).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        delivery_id: product.id,
+        work_item_id: f.reviewer.work_item_id,
+        verdict: "pass",
+      }),
+      expect.objectContaining({
+        delivery_id: completion.id,
+        work_item_id: f.pm.work_item_id,
+        verdict: "pass",
+      }),
+    ]),
   );
 });

@@ -504,7 +504,15 @@ test("PM queries derive current project views without writes or idempotency keys
   });
   expect(needs.isError).not.toBe(true);
   expect(needs.structuredContent).toMatchObject({
-    decisions: [{ id: q.id, why: "Continue?" }],
+    decisions: [
+      {
+        id: q.id,
+        why: "Continue?",
+        context: "Fixture",
+        related_cards: [{ id: card_id, title: "Fictional card" }],
+        merge_confirmation: null,
+      },
+    ],
     human_actions: [{ key: "h(1)", why: "Device" }],
   });
   for (const name of ["project_snapshot", "list_needs_you"])

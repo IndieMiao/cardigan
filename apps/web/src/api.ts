@@ -296,14 +296,60 @@ export class ApiError extends Error {
   }
 }
 
+export interface NeedsCardRef {
+  readonly id: string;
+  readonly title: string;
+}
+export interface MergeConfirmationDelivery {
+  readonly id: string;
+  readonly work_item_id: string;
+  readonly work_item_title: string;
+  readonly subject: { readonly kind: string; readonly value: string };
+  readonly summary: string;
+}
+export interface MergeConfirmationReview {
+  readonly id: string;
+  readonly delivery_id: string;
+  readonly work_item_id: string;
+  readonly work_item_title: string | null;
+  readonly role_id: string | null;
+  readonly kind: string;
+  readonly verdict: string;
+  readonly target_sha: string;
+  readonly issues: readonly {
+    readonly severity: string;
+    readonly description: string;
+    readonly must_fix: boolean;
+    readonly pre_existing: boolean;
+    readonly proof?: string;
+  }[];
+}
+export interface MergeConfirmationView {
+  readonly completion: {
+    readonly id: string;
+    readonly work_item_id: string;
+    readonly summary: string;
+    readonly subject: { readonly kind: string; readonly value: string };
+  } | null;
+  readonly deliveries: readonly MergeConfirmationDelivery[];
+  readonly reviews: readonly MergeConfirmationReview[];
+  readonly known_gaps: readonly {
+    readonly description: string;
+    readonly followup_card_id?: string;
+    readonly precondition?: string;
+  }[];
+}
 export interface NeedsDecision extends DecisionView {
   readonly card_id: string | null;
   readonly affected_cards: readonly string[];
+  readonly context: string;
   readonly why: string;
   readonly waited_ms: number | null;
   readonly trigger: string | null;
   readonly category: string;
   readonly assignment_id: string | null;
+  readonly related_cards: readonly NeedsCardRef[];
+  readonly merge_confirmation: MergeConfirmationView | null;
 }
 export interface NeedsAction
   extends Pick<HumanActionView, "id" | "instructions" | "expected_return"> {

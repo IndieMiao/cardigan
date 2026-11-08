@@ -349,6 +349,7 @@ export function needsYou(state: CommandState, now: string) {
       card_id: decision.card_id ?? null,
       affected_cards: decision.affected_cards,
       question: decision.question,
+      context: decision.context,
       why: clamp(decision.why),
       status: decision.status,
       blocking: decision.blocking,
@@ -360,6 +361,8 @@ export function needsYou(state: CommandState, now: string) {
       assignment_id: decision.assignment_id ?? null,
       opened_at: decision.opened_at,
       waited_ms: decision.waited_ms,
+      related_cards: decision.related_cards,
+      merge_confirmation: decision.merge_confirmation,
     };
   });
   const human_actions = data.human_actions.map((action) => {
