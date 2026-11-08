@@ -70,6 +70,7 @@ test("drawer moves focus inside, closes on Escape/outside and returns focus", as
   const dialog = await screen.findByRole("dialog", { name: "卡片详情" });
   expect(dialog.textContent).toContain("抽屉正文");
   expect(dialog.contains(document.activeElement)).toBe(true);
+  expect(document.activeElement?.textContent).toBe("卡片详情");
 
   fireEvent.keyDown(document, { key: "Escape" });
   await waitFor(() =>

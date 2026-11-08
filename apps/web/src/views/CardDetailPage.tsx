@@ -25,15 +25,19 @@ export interface CardDetailPageProps {
   readonly projectId: string;
   readonly cardId: string;
   readonly anchor?: string;
+  /** Embedded in a drawer: do not auto-scroll to the latest timeline entry. */
+  readonly inDrawer?: boolean;
   readonly revision?: number;
 }
-export function CardDetailPage({
-  client,
-  projectId,
-  cardId,
-  anchor,
-  revision = 0,
-}: CardDetailPageProps) {
+export function CardDetailPage(props: CardDetailPageProps) {
+  const {
+    client,
+    projectId,
+    cardId,
+    anchor,
+    inDrawer = false,
+    revision = 0,
+  } = props;
   const [routeFilters] = useRouteFilters({ kind: "card", projectId, cardId });
   const pageSize = [20, 50, 100].includes(Number(routeFilters.count))
     ? Number(routeFilters.count)
@@ -97,6 +101,7 @@ export function CardDetailPage({
       projectId={projectId}
       cardId={cardId}
       anchor={anchor}
+      inDrawer={inDrawer}
       error={error}
       reload={reload}
       pending={pending}
@@ -121,6 +126,7 @@ function CardContent({
   projectId,
   cardId,
   anchor,
+  inDrawer,
   error,
   reload,
   pending,
@@ -133,6 +139,7 @@ function CardContent({
   projectId: string;
   cardId: string;
   anchor: string | undefined;
+  inDrawer: boolean;
   error: string | undefined;
   reload: () => void;
   anchorReady: boolean;
@@ -177,6 +184,7 @@ function CardContent({
         });
       };
     } else {
+      if (inDrawer) return;
       lastAnchor.current = undefined;
       if (interacted.current || initialTimeline.current !== detail.timeline)
         return;
@@ -209,13 +217,21 @@ function CardContent({
       for (const event of ["wheel", "pointerdown", "keydown"])
         window.removeEventListener(event, stop);
     };
-  }, [anchor, anchorReady, detail.timeline, filters.type, filters.author]);
+  }, [
+    anchor,
+    anchorReady,
+    detail.timeline,
+    filters.type,
+    filters.author,
+    inDrawer,
+  ]);
   const card = detail.card;
+  const cardPageClass = inDrawer ? "card-page card-page-drawer" : "card-page";
   const completion = [...detail.deliveries]
     .reverse()
     .find((d) => d.kind === "card_completion" && d.status === "accepted");
   return (
-    <article className="card-page" aria-label={`卡片 ${cardId}`}>
+    <article className={cardPageClass} aria-label={`卡片 ${cardId}`}>
       <div className="card-main">
         {error && (
           <p role="alert" className="error-panel">

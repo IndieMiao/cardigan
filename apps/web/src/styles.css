@@ -595,9 +595,6 @@ button.quiet,
 .board-column-collapsed .column-toggle {
   min-height: 100%;
 }
-.board-column-collapsed .board-column-count {
-  writing-mode: vertical-rl;
-}
 
 .card-id {
   font-family: var(--font);
@@ -1769,19 +1766,6 @@ fieldset.filters {
   color: var(--text-muted);
   font-size: var(--text-xs);
 }
-.multiselect-trigger {
-  display: inline-flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  min-width: 180px;
-  padding: 6px 8px;
-  background: var(--surface);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  font-size: var(--text-sm);
-}
 .multiselect-content {
   display: grid;
   gap: 2px;
@@ -2024,9 +2008,6 @@ fieldset.filters {
 .cards-page .filter-custom {
   display: flex;
   align-items: end;
-}
-.cards-page .filter-controls input[type="search"] {
-  max-width: 170px;
 }
 .cards-page .filter-search {
   display: flex;

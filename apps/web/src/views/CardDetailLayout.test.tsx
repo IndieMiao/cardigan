@@ -302,6 +302,40 @@ test("U3 opening scrolls the page to the latest entry; refresh keeps the reader'
   }
 });
 
+test("U5a embedded detail starts at the top but still follows an explicit anchor", async () => {
+  const scroll = vi.fn(),
+    original = Element.prototype.scrollIntoView;
+  Element.prototype.scrollIntoView = scroll;
+  try {
+    const view = render(
+      <CardDetailPage
+        client={fakeClient({ card: async () => detail() })}
+        projectId="p-1"
+        cardId="C-1"
+        inDrawer
+      />,
+    );
+    await screen.findByRole("region", { name: "时间线记录" });
+    expect(scroll).not.toHaveBeenCalled();
+    view.unmount();
+
+    render(
+      <CardDetailPage
+        client={fakeClient({ card: async () => detail() })}
+        projectId="p-1"
+        cardId="C-1"
+        anchor="entry-C-1#6"
+        inDrawer
+      />,
+    );
+    await waitFor(() =>
+      expect(scroll).toHaveBeenCalledWith({ block: "nearest" }),
+    );
+  } finally {
+    Element.prototype.scrollIntoView = original;
+  }
+});
+
 test("U3 initial page scrolling survives StrictMode and stops after interaction", async () => {
   const callbacks: (() => void)[] = [],
     disconnects: ReturnType<typeof vi.fn>[] = [];

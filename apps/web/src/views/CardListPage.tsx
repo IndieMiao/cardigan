@@ -485,6 +485,7 @@ export function CardListPage({
             client={client}
             projectId={projectId}
             cardId={openCardId}
+            inDrawer
             revision={revision}
           />
         )}

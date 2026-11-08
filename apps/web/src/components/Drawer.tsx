@@ -1,5 +1,5 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import { type ReactElement, type ReactNode, useId } from "react";
+import { type ReactElement, type ReactNode, useId, useRef } from "react";
 
 export interface DrawerProps {
   readonly open: boolean;
@@ -27,6 +27,7 @@ export function Drawer({
   className,
 }: DrawerProps) {
   const descriptionId = useId();
+  const titleRef = useRef<HTMLHeadingElement>(null);
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       {trigger && <Dialog.Trigger asChild>{trigger}</Dialog.Trigger>}
@@ -34,12 +35,18 @@ export function Drawer({
         <Dialog.Overlay className="drawer-overlay" />
         <Dialog.Content
           className={`drawer-content${className ? ` ${className}` : ""}`}
+          onOpenAutoFocus={(event) => {
+            event.preventDefault();
+            titleRef.current?.focus();
+          }}
           aria-describedby={
             description === undefined ? undefined : descriptionId
           }
         >
           <header className="drawer-header">
-            <Dialog.Title className="drawer-title">{title}</Dialog.Title>
+            <Dialog.Title ref={titleRef} tabIndex={-1} className="drawer-title">
+              {title}
+            </Dialog.Title>
             {actions && <div className="drawer-actions">{actions}</div>}
             {actions && <span className="drawer-divider" aria-hidden="true" />}
             <Dialog.Close asChild>
