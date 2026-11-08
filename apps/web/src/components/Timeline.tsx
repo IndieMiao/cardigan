@@ -4,6 +4,8 @@
 import type { AttachmentView } from "../api.js";
 import { renderMarkdown } from "../markdown.js";
 import { linkableReferences, linkifyReferences } from "../refs.js";
+import { statusLabel } from "../status.js";
+import { EmptyState, IdTag, LongContent, Time } from "./Foundation.js";
 
 /**
  * The card's timeline (M5 plan §3.7, §8.4 of the development plan).
@@ -19,27 +21,15 @@ const TYPE_LABELS: Readonly<Record<string, string>> = {
   instruction: "指令",
   delivery: "交付",
   review: "审核",
-  decision_request: "决策请求",
-  decision_resolved: "决策结果",
+  decision_request: "请求拍板",
+  decision_resolved: "拍板结果",
   human_action: "待你执行",
   handoff: "交接",
   status_change: "状态变化",
   system: "系统",
 };
 
-const DECISION_STATUS_LABELS: Readonly<Record<string, string>> = {
-  open: "待批",
-  provisional: "临时",
-  resolved: "已批",
-  withdrawn: "已撤回",
-  superseded: "已取代",
-  revoked: "已撤销",
-  unknown: "状态未知",
-};
-
-export function decisionStatusLabel(status: string): string {
-  return DECISION_STATUS_LABELS[status] ?? status;
-}
+export const decisionStatusLabel = statusLabel;
 
 /** `assignment:A-1` → `A-1`; `human` → 你; `system` → 系统. */
 export function authorLabel(author: string): string {
@@ -91,7 +81,9 @@ export function Timeline({
   attachments,
 }: TimelineProps) {
   if (entries.length === 0) {
-    return <p className="empty">还没有时间线条目。</p>;
+    return (
+      <EmptyState>还没有时间线条目。评论、交付和审核会记录在这里。</EmptyState>
+    );
   }
   const seenAnchors = new Set<string>();
   /** One alias per referenced delivery/human action, at its first timeline row. */
@@ -118,32 +110,36 @@ export function Timeline({
             {alias("human-action", entry.human_action_id)}
             <div className="timeline-head">
               <span className="timeline-type">
-                {TYPE_LABELS[entry.type] ?? entry.type}
+                {TYPE_LABELS[entry.type] ?? "系统记录"}
               </span>
               <span className="timeline-author">
-                {authorLabel(entry.author)}
+                {entry.author.startsWith("assignment:") ? (
+                  <IdTag id={authorLabel(entry.author)} label="Agent" />
+                ) : (
+                  authorLabel(entry.author)
+                )}
               </span>
-              <time dateTime={entry.created_at}>
-                {entry.created_at.replace("T", " ").replace(/\..*$/u, "")}
-              </time>
-              <span className="timeline-seq">#{entry.event_seq}</span>
+              <Time value={entry.created_at} />
+              <span className="timeline-seq">序号 {entry.event_seq}</span>
               {entry.retracted && (
                 <span className="timeline-retracted">已撤回</span>
               )}
             </div>
-            <div
-              className="timeline-body markdown"
-              dangerouslySetInnerHTML={{
-                __html: renderMarkdown(
-                  linkifyReferences(
-                    entry.body,
-                    linkableReferences(entry.references ?? []),
-                    projectId,
-                    cardId,
+            <LongContent>
+              <div
+                className="timeline-body markdown"
+                dangerouslySetInnerHTML={{
+                  __html: renderMarkdown(
+                    linkifyReferences(
+                      entry.body,
+                      linkableReferences(entry.references ?? []),
+                      projectId,
+                      cardId,
+                    ),
                   ),
-                ),
-              }}
-            />
+                }}
+              />
+            </LongContent>
             {current.length > 0 && (
               <ul className="attachments">
                 {current.map((attachment) => (
@@ -199,7 +195,7 @@ function AttachmentItem({
           下载 {attachment.id}（{attachment.mime}）
         </a>
       )}
-      <span className="attachment-id">{attachment.id}</span>
+      <IdTag id={attachment.id} label="附件" detail={attachment.mime} />
       <span className="attachment-basis">
         {attachment.basis === null
           ? "无拍板依据"

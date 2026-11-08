@@ -6,8 +6,10 @@ import {
   type ProjectSummary,
   type SessionInfo,
 } from "./api.js";
+import { EmptyState } from "./components/Foundation.js";
 import { routeHash, useRoute } from "./route.js";
 import { useProjectStream } from "./useProjectStream.js";
+import { useResource } from "./useResource.js";
 import { ActivityPage } from "./views/ActivityPage.js";
 import { CardDetailPage } from "./views/CardDetailPage.js";
 import { CardListPage } from "./views/CardListPage.js";
@@ -130,6 +132,19 @@ function Workbench({
       : undefined;
 
   const live = useProjectStream(client, selected?.id, onLoggedOut);
+  const loadNeeds = useCallback(
+    () =>
+      selected
+        ? client.needsYou(selected.id)
+        : Promise.resolve({ decisions: [], human_actions: [], incidents: [] }),
+    [client, selected],
+  );
+  const needs = useResource(loadNeeds, live.revision);
+  const needsCount = needs.data
+    ? needs.data.decisions.length +
+      needs.data.human_actions.length +
+      needs.data.incidents.length
+    : 0;
 
   // Land on the first project's board when the URL names no project (or one
   // that no longer exists). An unparseable hash is not a missing project: keep
@@ -163,7 +178,7 @@ function Workbench({
 
   return (
     <div className="app">
-      <header className="topbar">
+      <aside className="sidebar" aria-label="Workbench 导航">
         <span className="brand">Cardigan</span>
         {projects.kind === "ready" && projects.projects.length > 0 && (
           <label className="project-switcher">
@@ -184,62 +199,74 @@ function Workbench({
         )}
         {selected !== undefined && (
           <nav className="nav" aria-label="视图">
-            {(
-              [
-                ["snapshot", "项目快照"],
-                ["execution", "执行视图"],
-                ["activity", "项目动态"],
-              ] as const
-            ).map(([kind, label]) => (
-              <a
-                key={kind}
-                href={routeHash({ kind, projectId: selected.id })}
-                aria-current={activeView === kind ? "page" : undefined}
-              >
-                {label}
-              </a>
-            ))}
             <a
               href={routeHash({ kind: "needs-you", projectId: selected.id })}
               aria-current={activeView === "needs-you" ? "page" : undefined}
             >
-              Needs You
+              Needs You{" "}
+              {needsCount > 0 && (
+                <span className="nav-count" title={`${needsCount} 件待处理`}>
+                  {needsCount}
+                </span>
+              )}
             </a>
-            <a
-              href={routeHash({ kind: "board", projectId: selected.id })}
-              aria-current={activeView === "board" ? "page" : undefined}
-            >
-              看板
-            </a>
-            <a
-              href={routeHash({ kind: "list", projectId: selected.id })}
-              aria-current={activeView === "list" ? "page" : undefined}
-            >
-              列表
-            </a>
+            {(
+              [
+                [
+                  "工作",
+                  [
+                    ["board", "看板"],
+                    ["list", "列表"],
+                  ],
+                ],
+                [
+                  "运行",
+                  [
+                    ["execution", "执行视图"],
+                    ["activity", "项目动态"],
+                    ["snapshot", "项目快照"],
+                  ],
+                ],
+              ] as const
+            ).map(([group, links]) => (
+              <div className="nav-group" key={group}>
+                <h2>{group}</h2>
+                {links.map(([kind, label]) => (
+                  <a
+                    key={kind}
+                    href={routeHash({ kind, projectId: selected.id })}
+                    aria-current={activeView === kind ? "page" : undefined}
+                  >
+                    {label}
+                  </a>
+                ))}
+              </div>
+            ))}
           </nav>
         )}
-        {selected && (
-          <span
-            className={`status status-${live.status === "live" ? "done" : "todo"}`}
-            role="status"
+        <div className="sidebar-footer">
+          {selected && (
+            <span
+              className={`status status-${live.status === "live" ? "done" : "todo"}`}
+              role="status"
+            >
+              {live.status === "live"
+                ? "实时更新已连接"
+                : live.status === "retrying"
+                  ? "连接中断，正在重连"
+                  : "正在连接实时更新"}
+            </span>
+          )}
+          <button
+            type="button"
+            className="logout"
+            onClick={() => void logout()}
+            disabled={loggingOut}
           >
-            {live.status === "live"
-              ? "实时更新已连接"
-              : live.status === "retrying"
-                ? "连接中断，正在重连"
-                : "正在连接实时更新"}
-          </span>
-        )}
-        <button
-          type="button"
-          className="logout"
-          onClick={() => void logout()}
-          disabled={loggingOut}
-        >
-          {loggingOut ? "登出中…" : "登出"}
-        </button>
-      </header>
+            {loggingOut ? "登出中…" : "登出"}
+          </button>
+        </div>
+      </aside>
 
       <main className="content">
         {projects.kind === "loading" && (
@@ -256,10 +283,10 @@ function Workbench({
           </div>
         )}
         {projects.kind === "ready" && projects.projects.length === 0 && (
-          <p className="empty">
+          <EmptyState>
             还没有项目。先在终端运行{" "}
             <code>cardigan project create &lt;id&gt;</code>。
-          </p>
+          </EmptyState>
         )}
         {invalidHash !== undefined && route === undefined && (
           <div className="error-panel" role="alert">
@@ -292,6 +319,7 @@ function Workbench({
         )}
         {selected !== undefined && route?.kind === "needs-you" && (
           <NeedsYouPage
+            resource={needs}
             key={selected.id}
             client={client}
             projectId={selected.id}

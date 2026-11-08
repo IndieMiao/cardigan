@@ -200,7 +200,7 @@ test("the shell shows the project switcher, the filters and the navigation", asy
   expect(await screen.findByLabelText("项目")).toBeTruthy();
   expect(await screen.findByRole("link", { name: "看板" })).toBeTruthy();
   expect(screen.getByRole("link", { name: "列表" })).toBeTruthy();
-  expect(screen.getByRole("button", { name: /等我处理/u })).toBeTruthy();
+  expect(screen.getByRole("option", { name: /等我处理/u })).toBeTruthy();
   // The URL lands on the only project's board by itself.
   await waitFor(() => expect(window.location.hash).toBe("#/p/p-1/board"));
 });
@@ -256,7 +256,7 @@ test("M5.S S23: a related decision keeps the card route and scrolls to its row",
     navigate("#/p/p-1/cards/C-1");
     await screen.findByRole("article", { name: "卡片 C-1" });
 
-    fireEvent.click(screen.getByRole("link", { name: "q(2)" }));
+    fireEvent.click(screen.getByRole("link", { name: "q(2) 拍板" }));
 
     await waitFor(() =>
       expect(window.location.hash).toBe("#/p/p-1/cards/C-1?at=decision-q(2)"),

@@ -4,7 +4,15 @@ import {
   describeError,
   type NeedsAction,
   type NeedsDecision,
+  type NeedsPage,
 } from "../api.js";
+import {
+  EmptyState,
+  IdTag,
+  PageTitle,
+  StatusTag,
+  Time,
+} from "../components/Foundation.js";
 import {
   CardLink,
   CopyCommand,
@@ -12,7 +20,6 @@ import {
   Feedback,
   Markdown,
 } from "../components/Operations.js";
-import { decisionStatusLabel } from "../components/Timeline.js";
 import { useResource } from "../useResource.js";
 
 const waitLabel = (ms: number | null, elapsed = 0) => {
@@ -69,17 +76,15 @@ function Decision({
     >
       <header>
         <strong>
-          {q.id} · {[...q.why].slice(0, 40).join("")}
+          <IdTag id={q.id} label="拍板" detail={q.question} />{" "}
+          {[...q.why].slice(0, 40).join("")}
         </strong>{" "}
-        <span
-          className={`status status-${q.blocking ? "awaiting_merge" : "todo"}`}
-        >
-          {q.blocking ? "阻塞 · " : q.category !== "general" ? "风险 · " : ""}
-          {decisionStatusLabel(q.status)}
-        </span>
+        {q.blocking && <StatusTag status="blocked" />}
+        {q.category !== "general" && <span>风险</span>}{" "}
+        <StatusTag status={q.status} />
       </header>
       <p className="hint">
-        {waitLabel(q.waited_ms, elapsed)} ·{" "}
+        <span>{waitLabel(q.waited_ms, elapsed)}</span>{" "}
         <CardLink projectId={projectId} id={q.card_id} />
       </p>
       <details>
@@ -112,7 +117,7 @@ function Decision({
           >
             {q.options.map((o) => (
               <option value={o.key} key={o.key}>
-                {o.key} · {o.description}
+                {o.key}：{o.description}
               </option>
             ))}
           </select>
@@ -180,13 +185,19 @@ function HumanAction({
   return (
     <article className="needs-item" aria-label={`执行 ${item.id}`}>
       <strong>
-        {item.id} · {[...item.why].slice(0, 40).join("")}
+        <IdTag id={item.id} label="待你执行" />{" "}
+        {[...item.why].slice(0, 40).join("")}
       </strong>{" "}
-      <span className="status status-todo">待执行</span>
+      <StatusTag status="todo" />
       <p className="hint">
-        {waitLabel(item.waited_ms, elapsed)} ·{" "}
+        <span>{waitLabel(item.waited_ms, elapsed)}</span>{" "}
         <CardLink projectId={projectId} id={item.card_id} />
-        {item.due && ` · 截止 ${item.due}`}
+        {item.due && (
+          <span>
+            截止：
+            <Time value={item.due} />
+          </span>
+        )}
       </p>
       <details>
         <summary>操作步骤与期望返回</summary>
@@ -222,12 +233,30 @@ function HumanAction({
     </article>
   );
 }
-export function NeedsYouPage({ client, projectId, revision = 0 }: Props) {
+type NeedsResource = ReturnType<typeof useResource<NeedsPage>>;
+export function NeedsYouPage(props: Props & { resource?: NeedsResource }) {
+  return props.resource ? (
+    <NeedsContent {...props} resource={props.resource} />
+  ) : (
+    <NeedsLoader {...props} />
+  );
+}
+function NeedsLoader({ client, projectId, revision = 0 }: Props) {
   const load = useCallback(
     () => client.needsYou(projectId),
     [client, projectId],
   );
-  const { data, pending, error, reload } = useResource(load, revision);
+  const resource = useResource(load, revision);
+  return (
+    <NeedsContent client={client} projectId={projectId} resource={resource} />
+  );
+}
+function NeedsContent({
+  client,
+  projectId,
+  resource,
+}: Props & { resource: NeedsResource }) {
+  const { data, pending, error, reload } = resource;
   const [elapsed, setElapsed] = useState(0);
   useEffect(() => {
     setElapsed(0);
@@ -239,19 +268,28 @@ export function NeedsYouPage({ client, projectId, revision = 0 }: Props) {
   const props = { client, projectId, done: reload, elapsed };
   return (
     <section aria-label="Needs You">
-      <div className="toolbar">
-        <h1>Needs You</h1>
-        <button type="button" className="quiet" onClick={reload}>
-          刷新
-        </button>
-      </div>
+      <PageTitle
+        title="Needs You"
+        description={
+          data &&
+          data.decisions.length +
+            data.human_actions.length +
+            data.incidents.length >
+            0
+            ? `${data.decisions.length + data.human_actions.length + data.incidents.length} 件事等你处理。`
+            : "在这里拍板、确认合并和回报执行结果。"
+        }
+      />
       <Feedback pending={pending} error={error} retry={reload} />
       {data && (
         <>
           {!data.decisions.length &&
             !data.human_actions.length &&
             !data.incidents.length && (
-              <p className="empty">目前没有需要你处理的事项。</p>
+              <EmptyState>
+                没有需要你处理的事。Agent
+                提出拍板或需要你确认合并时会出现在这里。
+              </EmptyState>
             )}
           {!!data.incidents.length && (
             <section aria-label="运行环境异常">
@@ -259,29 +297,24 @@ export function NeedsYouPage({ client, projectId, revision = 0 }: Props) {
               {data.incidents.map((a) => (
                 <article key={a.id} className="needs-item urgent">
                   <strong>
-                    {a.id} · {a.role_id}
+                    <IdTag id={a.id} label={a.role_id} />
                   </strong>{" "}
-                  <span>
-                    {a.runtime_state === "lost"
-                      ? "失联，需要你检查"
-                      : "状态未知，等待确认"}
-                  </span>
+                  <StatusTag status={a.runtime_state} />
                   <p>
-                    {waitLabel(a.waited_ms, elapsed)} ·
+                    {waitLabel(a.waited_ms, elapsed)}
                     <CardLink projectId={projectId} id={a.card_id} />
                   </p>
                   {a.disconnected_at && (
                     <p>
                       失联时间：
-                      <time dateTime={a.disconnected_at}>
-                        {a.disconnected_at}
-                      </time>
+                      <Time value={a.disconnected_at} />
                     </p>
                   )}
                   {a.last_run && (
                     <p>
-                      最近 Run：{a.last_run.id}
-                      {a.last_run.summary ? ` · ${a.last_run.summary}` : ""}
+                      最近 Run：
+                      <IdTag id={a.last_run.id} label="执行" />{" "}
+                      {a.last_run.summary}
                     </p>
                   )}
                   <CopyCommand
@@ -296,28 +329,34 @@ export function NeedsYouPage({ client, projectId, revision = 0 }: Props) {
               ))}
             </section>
           )}
-          <section aria-label="优先拍板">
-            <h2>阻塞与风险</h2>
-            {data.decisions.filter(urgent).map((q) => (
-              <Decision key={q.id} q={q} {...props} />
-            ))}
-          </section>
-          <details className="needs-batch">
-            <summary>
-              其他拍板（{data.decisions.filter((q) => !urgent(q)).length}）
-            </summary>
-            {data.decisions
-              .filter((q) => !urgent(q))
-              .map((q) => (
+          {!!data.decisions.filter(urgent).length && (
+            <section aria-label="优先拍板">
+              <h2>阻塞与风险</h2>
+              {data.decisions.filter(urgent).map((q) => (
                 <Decision key={q.id} q={q} {...props} />
               ))}
-          </details>
-          <section aria-label="待你执行">
-            <h2>待你执行（{data.human_actions.length}）</h2>
-            {data.human_actions.map((item) => (
-              <HumanAction key={item.id} item={item} {...props} />
-            ))}
-          </section>
+            </section>
+          )}
+          {!!data.decisions.filter((q) => !urgent(q)).length && (
+            <details className="needs-batch">
+              <summary>
+                其他拍板（{data.decisions.filter((q) => !urgent(q)).length}）
+              </summary>
+              {data.decisions
+                .filter((q) => !urgent(q))
+                .map((q) => (
+                  <Decision key={q.id} q={q} {...props} />
+                ))}
+            </details>
+          )}
+          {!!data.human_actions.length && (
+            <section aria-label="待你执行">
+              <h2>待你执行（{data.human_actions.length}）</h2>
+              {data.human_actions.map((item) => (
+                <HumanAction key={item.id} item={item} {...props} />
+              ))}
+            </section>
+          )}
         </>
       )}
     </section>

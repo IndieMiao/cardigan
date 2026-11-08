@@ -105,7 +105,14 @@ export function linkifyReferences(
       `(?<![\\[\\w])${escapeRegExp(reference.id)}(?![\\]\\w])`,
       "gu",
     );
-    return [{ token, replacement: `[${reference.id}](${href})` }];
+    const label = {
+      card: "卡片",
+      decision: "拍板",
+      human_action: "待你执行",
+      delivery: "交付",
+      timeline_entry: "时间线条目",
+    }[reference.kind];
+    return [{ token, replacement: `[${reference.id} ${label}](${href})` }];
   });
   if (replacements.length === 0) return body;
 

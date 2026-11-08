@@ -1,6 +1,13 @@
-import { useCallback, useState } from "react";
+import { useCallback } from "react";
 import type { CardFilter, CardiganClient, CardPage, CardView } from "../api.js";
-import { routeHash } from "../route.js";
+import { FilterBar } from "../components/FilterBar.js";
+import {
+  EmptyState,
+  IdTag,
+  PageTitle,
+  StatusTag,
+} from "../components/Foundation.js";
+import { routeHash, useRouteFilters } from "../route.js";
 import { BOARD_STATUSES, cardStatusLabel, nextOwnersLabel } from "../status.js";
 import { useResource } from "../useResource.js";
 
@@ -25,22 +32,17 @@ type LoadState =
   | { readonly kind: "error"; readonly message: string }
   | { readonly kind: "ready"; readonly page: CardPage };
 
-const FILTERS: readonly {
-  readonly value: CardFilter;
-  readonly label: string;
-}[] = [
-  { value: "all", label: "全部" },
-  { value: "needs_me", label: "等我处理" },
-  { value: "agent", label: "等 Agent 处理" },
-];
-
 export function CardListPage({
   client,
   projectId,
   view,
   revision = 0,
 }: CardListPageProps) {
-  const [filter, setFilter] = useState<CardFilter>("all");
+  const [filters, setFilters] = useRouteFilters({ kind: view, projectId });
+  const filter: CardFilter =
+    filters.filter === "needs_me" || filters.filter === "agent"
+      ? filters.filter
+      : "all";
   const load = useCallback(
     () => client.cards(projectId, filter),
     [client, projectId, filter],
@@ -51,9 +53,18 @@ export function CardListPage({
     : error
       ? { kind: "error", message: error }
       : { kind: "loading" };
-  const counts = state.kind === "ready" ? state.page.counts : undefined;
+  const cards =
+    data?.cards.filter((c) =>
+      `${c.id} ${c.title}`
+        .toLocaleLowerCase()
+        .includes((filters.q ?? "").trim().toLocaleLowerCase()),
+    ) ?? [];
   return (
     <section className="cards-page" aria-label="卡片">
+      <PageTitle
+        title={view === "board" ? "看板" : "列表"}
+        description="查看卡片进度与下一步负责人。"
+      />
       {data && error && (
         <p role="alert" className="error-panel">
           {error}{" "}
@@ -62,31 +73,21 @@ export function CardListPage({
           </button>
         </p>
       )}
-      <div className="toolbar">
-        <fieldset className="filters">
-          <legend className="visually-hidden">筛选</legend>
-          {FILTERS.map((option) => (
-            <button
-              key={option.value}
-              type="button"
-              className={option.value === filter ? "filter active" : "filter"}
-              aria-pressed={option.value === filter}
-              onClick={() => setFilter(option.value)}
-            >
-              {option.label}
-              {counts !== undefined && (
-                <span className="filter-count">
-                  {option.value === "all"
-                    ? counts.total
-                    : option.value === "needs_me"
-                      ? counts.needs_me
-                      : counts.agent}
-                </span>
-              )}
-            </button>
-          ))}
-        </fieldset>
-      </div>
+      <FilterBar
+        fields={[
+          {
+            key: "filter",
+            label: "下一步",
+            options: [
+              { value: "needs_me", label: "等我处理" },
+              { value: "agent", label: "等 Agent 处理" },
+            ],
+          },
+          { key: "q", label: "搜索标题或编号" },
+        ]}
+        values={filters}
+        onChange={setFilters}
+      />
 
       {state.kind === "loading" && (
         <p className="loading" role="status">
@@ -101,21 +102,23 @@ export function CardListPage({
           </button>
         </div>
       )}
-      {state.kind === "ready" && state.page.cards.length === 0 && (
-        <p className="empty">
-          {filter === "all"
-            ? "这个项目还没有卡片。"
-            : filter === "needs_me"
-              ? "没有等你处理的卡片。"
-              : "没有等 Agent 处理的卡片。"}
-        </p>
+      {state.kind === "ready" && cards.length === 0 && (
+        <EmptyState>
+          {filters.q
+            ? "没有匹配的卡片，请调整筛选条件。"
+            : filter === "all"
+              ? "这个项目还没有卡片。向 PM 描述目标后，卡片会出现在这里。"
+              : filter === "needs_me"
+                ? "没有等你处理的卡片。有事项需要你时会出现在这里。"
+                : "没有等 Agent 处理的卡片。指派工作后可在这里查看。"}
+        </EmptyState>
       )}
       {state.kind === "ready" &&
-        state.page.cards.length > 0 &&
+        cards.length > 0 &&
         (view === "board" ? (
-          <Board cards={state.page.cards} projectId={projectId} />
+          <Board cards={cards} projectId={projectId} />
         ) : (
-          <CardTable cards={state.page.cards} projectId={projectId} />
+          <CardTable cards={cards} projectId={projectId} />
         ))}
     </section>
   );
@@ -143,9 +146,7 @@ function Board({
             aria-label={cardStatusLabel(status)}
           >
             <h3 className="board-column-title">
-              <span className={`status status-${status}`}>
-                {cardStatusLabel(status)}
-              </span>
+              <StatusTag status={status} />
               <span className="board-column-count">{column.length}</span>
             </h3>
             {column.length === 0 ? (
@@ -155,7 +156,7 @@ function Board({
                 {column.map((card) => (
                   <li key={card.id}>
                     <a className="card-tile" href={cardHref(projectId, card)}>
-                      <span className="card-id">{card.id}</span>
+                      <IdTag id={card.id} label="卡片" detail={card.title} />
                       <span className="card-title">{card.title}</span>
                       <span className="card-why">{card.why}</span>
                       <span className="card-next">
@@ -194,14 +195,14 @@ function CardTable({
       <tbody>
         {cards.map((card) => (
           <tr key={card.id}>
-            <td className="card-id">{card.id}</td>
+            <td>
+              <IdTag id={card.id} label="卡片" detail={card.title} />
+            </td>
             <td>
               <a href={cardHref(projectId, card)}>{card.title}</a>
             </td>
             <td>
-              <span className={`status status-${card.status}`}>
-                {cardStatusLabel(card.status)}
-              </span>
+              <StatusTag status={card.status} />
             </td>
             <td>{nextOwnersLabel(card.next_owners)}</td>
             <td className="card-why">{card.why}</td>

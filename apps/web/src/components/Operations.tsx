@@ -1,24 +1,34 @@
 // biome-ignore-all lint/security/noDangerouslySetInnerHtml: Markdown is rendered by the existing safe renderer.
+
 import { useState } from "react";
 import { renderMarkdown } from "../markdown.js";
 import { routeHash } from "../route.js";
+import { IdTag, LongContent } from "./Foundation.js";
 export function Markdown({ body }: { body: string }) {
   return (
-    <div
-      className="markdown"
-      dangerouslySetInnerHTML={{ __html: renderMarkdown(body) }}
-    />
+    <LongContent>
+      <div
+        className="markdown"
+        dangerouslySetInnerHTML={{ __html: renderMarkdown(body) }}
+      />
+    </LongContent>
   );
 }
 export function CardLink({
   projectId,
   id,
+  label = "卡片",
 }: {
   projectId: string;
   id: string | null;
+  label?: string;
 }) {
   return id ? (
-    <a href={routeHash({ kind: "card", projectId, cardId: id })}>{id}</a>
+    <IdTag
+      id={id}
+      label={label}
+      href={routeHash({ kind: "card", projectId, cardId: id })}
+    />
   ) : (
     <span>项目级事项</span>
   );

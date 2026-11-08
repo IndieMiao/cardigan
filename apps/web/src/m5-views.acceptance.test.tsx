@@ -210,11 +210,19 @@ test("§8.2/M5.6: runtime incidents come first, then blocking/risk, then the col
       projectId="p-1"
     />,
   );
-  await screen.findByText("失联，需要你检查");
+  await screen.findByText("失联");
   // M5.6: which Assignment, when it disconnected, and its last Run.
-  expect(screen.getByText(/A-3 · coder/)).toBeTruthy();
-  expect(screen.getByText("2026-01-01T00:00:00.000Z")).toBeTruthy();
-  expect(screen.getByText(/最近 Run：R-9/)).toBeTruthy();
+  expect(screen.getByText("A-3").closest(".id-tag")?.textContent).toBe(
+    "A-3 coder",
+  );
+  expect(
+    document
+      .querySelector('time[datetime="2026-01-01T00:00:00.000Z"]')
+      ?.getAttribute("title"),
+  ).toContain("GMT");
+  expect(screen.getByText("R-9").closest("p")?.textContent).toContain(
+    "最近 Run：R-9",
+  );
   expect(screen.queryByRole("button", { name: /接管|替换/ })).toBeNull();
   // Placement follows §8.2: incidents, then blocking/risk, then the batch, then actions.
   const incidents = screen.getByRole("region", { name: "运行环境异常" }),
@@ -389,7 +397,6 @@ test("§8.6: 项目动态 filters, paginates before the cursor, and shows payloa
   fireEvent.change(screen.getByLabelText("事件类型"), {
     target: { value: "instruction_issued" },
   });
-  fireEvent.click(screen.getByRole("button", { name: "应用筛选" }));
   await waitFor(() =>
     expect(server.calls.at(-1)?.path).toContain(
       "/activity?card_id=C-1&role=human&type=instruction_issued",
@@ -405,7 +412,7 @@ test("§8.6: 项目动态 filters, paginates before the cursor, and shows payloa
       "before=2026-01-01T00%3A00%3A00.000Z",
     ),
   );
-  await screen.findByText("没有符合条件的事件。");
+  await screen.findByText("没有符合条件的事件。调整筛选，或等待新的项目动态。");
 });
 
 test("§8.5: the execution view offers copyable commands only and hides start when a Run is unfinished", async () => {

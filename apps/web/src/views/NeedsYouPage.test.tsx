@@ -117,7 +117,9 @@ test.each(["approve", "reject", "merge", "keep", "force_clean"])(
       target: { value: "  我选这个  " },
     });
     fireEvent.click(screen.getByRole("button", { name: "记录决定" }));
-    await screen.findByText("目前没有需要你处理的事项。");
+    await screen.findByText(
+      "没有需要你处理的事。Agent 提出拍板或需要你确认合并时会出现在这里。",
+    );
     expect(recordDecision).toHaveBeenCalledWith(
       "p-1",
       "q(1)",
@@ -196,7 +198,9 @@ test("handles loading, failed reads with retry, and empty data", async () => {
   fireEvent.click(screen.getByRole("button", { name: "重试" }));
   expect(screen.getByText("正在加载…")).toBeTruthy();
   settle({ decisions: [], human_actions: [], incidents: [] });
-  await screen.findByText("目前没有需要你处理的事项。");
+  await screen.findByText(
+    "没有需要你处理的事。Agent 提出拍板或需要你确认合并时会出现在这里。",
+  );
 });
 
 test("project decisions explain unavailable comments; cleanup and lost runtimes show real commands", async () => {
@@ -234,9 +238,15 @@ test("project decisions explain unavailable comments; cleanup and lost runtimes 
       projectId="p-1"
     />,
   );
-  await screen.findByText("失联，需要你检查");
-  expect(screen.getByText("2026-01-01T00:00:00.000Z")).toBeTruthy();
-  expect(screen.getByText(/最近 Run：R-9/)).toBeTruthy();
+  await screen.findByText("失联");
+  expect(
+    document
+      .querySelector('time[datetime="2026-01-01T00:00:00.000Z"]')
+      ?.getAttribute("title"),
+  ).toContain("GMT");
+  expect(screen.getByText("R-9").closest("p")?.textContent).toContain(
+    "最近 Run：R-9",
+  );
   expect(screen.queryByRole("button", { name: /接管|替换/ })).toBeNull();
   expect(
     (screen.getByRole("button", { name: "要求补充信息" }) as HTMLButtonElement)
@@ -266,7 +276,9 @@ test("Needs You is reachable through the hash navigation and preserves project s
       })}
     />,
   );
-  await screen.findByText("目前没有需要你处理的事项。");
+  await screen.findByText(
+    "没有需要你处理的事。Agent 提出拍板或需要你确认合并时会出现在这里。",
+  );
   expect(
     screen
       .getByRole("link", { name: "Needs You" })

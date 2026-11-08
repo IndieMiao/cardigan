@@ -28,15 +28,60 @@ export const CARD_STATUS_LABELS: Readonly<Record<CardStatus, string>> = {
   cancelled: "已取消",
 };
 
-export function cardStatusLabel(status: string): string {
-  return CARD_STATUS_LABELS[status as CardStatus] ?? status;
+export const STATUS_LABELS: Readonly<Record<string, string>> = {
+  ...CARD_STATUS_LABELS,
+  ready: "就绪",
+  delivered: "已交付",
+  accepted: "已接受",
+  passed: "已通过",
+  failed: "失败",
+  changes_requested: "需返工",
+  blocked: "阻塞",
+  waiting_decision: "等待拍板",
+  submitted: "待审核",
+  rejected: "已驳回",
+  superseded: "已取代",
+  open: "待拍板",
+  provisional: "暂定",
+  resolved: "已拍板",
+  withdrawn: "已撤回",
+  revoked: "已撤销",
+  active: "有效",
+  suspended: "已暂停",
+  released: "已释放",
+  not_provisioned: "未启动",
+  provisioning: "启动中",
+  idle: "空闲",
+  running: "运行中",
+  unknown: "状态未知",
+  lost: "失联",
+  queued: "排队中",
+  dispatched: "已派发",
+  acked: "已签收",
+  completed: "已完成",
+  online: "在线",
+  offline: "离线",
+  draining: "停止接收新任务",
+  degraded: "运行异常",
+  pass: "已通过",
+  approve: "已通过",
+  reject: "已驳回",
+  conditional: "有条件通过",
+  pending: "待投递",
+  belled: "已投递",
+  delivery_failed: "投递失败",
+  needs_attention: "需要关注",
+};
+export function statusLabel(status: string): string {
+  return STATUS_LABELS[status] ?? "状态未知";
 }
+export const cardStatusLabel = statusLabel;
 
 /** Who acts next, in the words the card page uses. */
 export function nextOwnerLabel(owner: NextOwnerItem): string {
   if (owner.kind === "human") return "你";
   if (owner.kind === "role") return owner.ref;
-  return owner.ref;
+  return `${owner.ref} Assignment`;
 }
 
 export function nextOwnersLabel(owners: readonly NextOwnerItem[]): string {

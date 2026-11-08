@@ -35,7 +35,10 @@ const empty: ActivityData = {
   next_before: null,
   counts: { returned: 0, matched: 0 },
 };
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  window.history.replaceState(null, "", "/");
+});
 
 test("activity is collapsed by default, exposes the actor/reason and escapes event content", async () => {
   const { container } = render(
@@ -44,7 +47,10 @@ test("activity is collapsed by default, exposes the actor/reason and escapes eve
       projectId="p-1"
     />,
   );
-  await screen.findByText(/指令 · pm · C-1/);
+  await screen.findByText("发起者：pm");
+  expect(document.querySelector("summary")?.textContent).toContain(
+    "下达了指令",
+  );
   expect(container.querySelector("details")?.open).toBe(false);
   expect(container.querySelector("pre")?.textContent).toContain(
     "先完成必要检查",
@@ -52,7 +58,7 @@ test("activity is collapsed by default, exposes the actor/reason and escapes eve
   expect(container.querySelector("img")).toBeNull();
   expect(
     screen
-      .getByRole("link", { name: "C-1", hidden: true })
+      .getByRole("link", { name: /^C-1 /, hidden: true })
       .getAttribute("href"),
   ).toBe("#/p/p-1/cards/C-1");
 });
@@ -71,7 +77,6 @@ test("filters by card, role and type; paging preserves filters and a new filter 
     fireEvent.change(screen.getByLabelText(label as string), {
       target: { value },
     });
-  fireEvent.click(screen.getByRole("button", { name: "应用筛选" }));
   const filters = { card_id: "C-1", role: "pm", type: "instruction_issued" };
   await waitFor(() =>
     expect(activity).toHaveBeenLastCalledWith("p-1", filters),
@@ -107,7 +112,7 @@ test("activity shows loading and errors, retries, and handles empty results", as
   expect(screen.getByText("正在加载…")).toBeTruthy();
   await screen.findByText("事件读取失败");
   fireEvent.click(screen.getByRole("button", { name: "重试" }));
-  await screen.findByText("没有符合条件的事件。");
+  await screen.findByText("没有符合条件的事件。调整筛选，或等待新的项目动态。");
   expect(
     (screen.getByRole("button", { name: "更早的事件" }) as HTMLButtonElement)
       .disabled,
