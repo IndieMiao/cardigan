@@ -55,6 +55,7 @@ class Rejection {
 }
 type CommandName =
   | E.ToolName
+  | "pause_standing_assignment"
   | "queue_run"
   | "dispatch_run"
   | "acknowledge_run"
@@ -122,9 +123,12 @@ export class CommandDraft {
     tool: CommandName,
     readonly ports?: CommandPorts,
   ) {
-    const hostOnly = ["queue_run", "dispatch_run", "abort_dispatch"].includes(
-      tool,
-    );
+    const hostOnly = [
+      "queue_run",
+      "dispatch_run",
+      "abort_dispatch",
+      "pause_standing_assignment",
+    ].includes(tool);
     const systemOnly = [
       "record_merge_result",
       "request_worktree_cleanup",

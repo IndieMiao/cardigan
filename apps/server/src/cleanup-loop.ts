@@ -78,7 +78,11 @@ export class CleanupExecutor {
     // Re-read after releasing: released Assignments are what cleanup looks at.
     const state = this.state(project_id);
     for (const assignment of state.assignments.filter(
-      (candidate) => candidate.status === "released",
+      (candidate) =>
+        candidate.status === "released" ||
+        (candidate.status === "suspended" &&
+          candidate.scope === "standing" &&
+          candidate.role_id === "pm"),
     )) {
       // Terminal/token cleanup is independent of Git and runs on every sweep:
       // previous failures or incomplete external releases must be repaired.

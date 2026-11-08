@@ -161,11 +161,26 @@ export function attentionCommand(args: readonly string[], io: CliIo): number {
             ["lost", "unknown"].includes(candidate.runtime_state),
         ),
     );
+    const paused = store.uow.read((tx) =>
+      tx.assignments
+        .list(project_id)
+        .filter(
+          (a) =>
+            a.scope === "standing" &&
+            a.role_id === "pm" &&
+            a.status === "suspended",
+        ),
+    );
     // M4.4: reconciliation findings and a diverged registered source.
     const findings = store.listReconcileFindings(project_id, {
       openOnly: true,
     });
-    if (escalated.length === 0 && lost.length === 0 && findings.length === 0) {
+    if (
+      escalated.length === 0 &&
+      lost.length === 0 &&
+      findings.length === 0 &&
+      paused.length === 0
+    ) {
       io.stdout(
         "没有需要关注的项：没有升级通知，没有失联的 Assignment，也没有对账发现。",
       );
@@ -173,6 +188,13 @@ export function attentionCommand(args: readonly string[], io: CliIo): number {
     }
     const now = new Date().toISOString();
     const lines: string[] = [];
+    if (paused.length) {
+      lines.push(`常驻 PM 已暂停（${paused.length}，门铃排队，不自动启动）`);
+      for (const a of paused)
+        lines.push(
+          `  ${a.id} ${a.standing_mode ?? "pm"} suspended；cardigan assignment start ${a.id} --project ${project_id}`,
+        );
+    }
     if (findings.length > 0) {
       lines.push(`对账发现（${findings.length}，只报告，不会自动删除）`);
       for (const finding of findings)

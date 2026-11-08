@@ -553,6 +553,7 @@ describe("stopAssignment and attachAssignment", () => {
     });
     expect(stopped.released).toBe(true);
     expect(stopped.aborted).toBe(true);
+    expect(stopped.paused).toBeUndefined();
     expect(runtime.released[0]?.terminal_ref).toBe(
       started.runtime_ref.terminal_ref,
     );
