@@ -17,6 +17,7 @@ import { NeedsYouPage } from "./NeedsYouPage.js";
 const q = (overrides: Partial<NeedsDecision> = {}): NeedsDecision => ({
   id: "q(1)",
   question: "要发布吗？",
+  context: "发布前的背景",
   why: "等待合并确认",
   status: "open",
   blocking: true,
@@ -32,6 +33,8 @@ const q = (overrides: Partial<NeedsDecision> = {}): NeedsDecision => ({
   trigger: "merge_confirmation",
   category: "general",
   assignment_id: null,
+  related_cards: [{ id: "C-1", title: "发布卡" }],
+  merge_confirmation: null,
   ...overrides,
 });
 const page = (decisions = [q()]): NeedsPage => ({

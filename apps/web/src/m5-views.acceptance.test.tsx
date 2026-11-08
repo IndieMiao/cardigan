@@ -44,6 +44,7 @@ const decision = (overrides: Partial<NeedsDecision> = {}): NeedsDecision => ({
   card_id: "C-1",
   affected_cards: ["C-1"],
   question: "要发布吗？",
+  context: "发布前的背景",
   why: "等待发布确认",
   status: "open",
   blocking: true,
@@ -57,6 +58,8 @@ const decision = (overrides: Partial<NeedsDecision> = {}): NeedsDecision => ({
   trigger: "merge_confirmation",
   category: "general",
   assignment_id: null,
+  related_cards: [{ id: "C-1", title: "发布卡" }],
+  merge_confirmation: null,
   ...overrides,
 });
 const action = {

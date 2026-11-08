@@ -1,6 +1,14 @@
 import { type CardDerivedFields, deriveCardFields } from "../card-derived.js";
 import { deriveCardStatus, deriveReviewMatrix } from "../derived.js";
-import type { Actor, CardView, Decision } from "../entities.js";
+import type {
+  Actor,
+  Card,
+  CardView,
+  Decision,
+  Delivery,
+  Review,
+  WorkItem,
+} from "../entities.js";
 import type { CardId } from "../ids.js";
 import type { Clock } from "../ports.js";
 import { type CommandDraft, type CommandState, command } from "./core.js";
@@ -67,6 +75,146 @@ export function projectSnapshot(state: CommandState, actor: Actor) {
     };
   });
 }
+
+const numericId = (id: string): number => {
+  const digits = /(\d+)\)?$/.exec(id)?.[1];
+  return digits === undefined ? 0 : Number(digits);
+};
+const newest = <T extends { readonly id: string }>(
+  values: readonly T[],
+): T | undefined =>
+  [...values].sort(
+    (left, right) => numericId(right.id) - numericId(left.id),
+  )[0];
+
+/** Every card a decision names, with the title the Needs You page shows. */
+function relatedCards(
+  cards: readonly Card[],
+  decision: Decision,
+): readonly { readonly id: string; readonly title: string }[] {
+  const ids = [
+    ...new Set([
+      ...(decision.card_id === undefined ? [] : [decision.card_id]),
+      ...decision.affected_cards,
+    ]),
+  ];
+  return ids.flatMap((id) => {
+    const card = cards.find((candidate) => candidate.id === id);
+    return card === undefined ? [] : [{ id: card.id, title: card.title }];
+  });
+}
+
+/**
+ * What a merge confirmation will merge.
+ *
+ * Candidate deliveries follow `mergePlan`: each producing work item's newest
+ * non-superseded Git delivery that is accepted. Reviews are the latest current
+ * conclusion per verifier; the completion's known gaps travel with it so the
+ * human can decide before the merge.
+ */
+function mergeConfirmation(
+  decision: Decision,
+  items: readonly WorkItem[],
+  deliveries: readonly Delivery[],
+  reviews: readonly Review[],
+) {
+  if (decision.trigger !== "merge_confirmation") return null;
+  const cardItems = items.filter((item) => item.card_id === decision.card_id);
+  const products = cardItems
+    .filter((item) => item.kind === "produce")
+    .sort((left, right) => numericId(left.id) - numericId(right.id));
+  const candidates = products.flatMap((item) => {
+    const delivery = newest(
+      deliveries.filter(
+        (candidate) =>
+          candidate.work_item_id === item.id &&
+          candidate.kind !== "card_completion" &&
+          candidate.status !== "superseded",
+      ),
+    );
+    if (delivery?.status !== "accepted" || delivery.subject.kind !== "git_head")
+      return [];
+    return [
+      {
+        id: delivery.id,
+        work_item_id: item.id,
+        work_item_title: item.title,
+        subject: delivery.subject,
+        summary: delivery.summary,
+      },
+    ];
+  });
+  let completionTarget: Delivery["id"] | undefined;
+  if (decision.kind === "approve") {
+    const target = decision.target;
+    if ("delivery_id" in target) completionTarget = target.delivery_id;
+  }
+  const completion =
+    (completionTarget === undefined
+      ? undefined
+      : deliveries.find((delivery) => delivery.id === completionTarget)) ??
+    newest(
+      deliveries.filter(
+        (delivery) =>
+          delivery.kind === "card_completion" &&
+          delivery.status !== "superseded" &&
+          cardItems.some((item) => item.id === delivery.work_item_id),
+      ),
+    );
+  const current = new Map<string, Delivery>();
+  for (const candidate of candidates) {
+    const delivery = deliveries.find((entry) => entry.id === candidate.id);
+    if (delivery !== undefined) current.set(delivery.id, delivery);
+  }
+  if (completion !== undefined) current.set(completion.id, completion);
+  const latest = new Map<string, Review>();
+  for (const review of reviews) {
+    const delivery = current.get(review.delivery_id);
+    if (
+      delivery === undefined ||
+      review.target_sha !== delivery.subject.value ||
+      delivery.status === "superseded"
+    )
+      continue;
+    const previous = latest.get(review.work_item_id);
+    if (previous === undefined || numericId(review.id) > numericId(previous.id))
+      latest.set(review.work_item_id, review);
+  }
+  const reviewRows = [...latest.values()]
+    .sort(
+      (left, right) =>
+        numericId(left.work_item_id) - numericId(right.work_item_id),
+    )
+    .map((review) => {
+      const item = items.find((entry) => entry.id === review.work_item_id);
+      return {
+        id: review.id,
+        delivery_id: review.delivery_id,
+        work_item_id: review.work_item_id,
+        work_item_title: item?.title ?? null,
+        role_id: item?.role_id ?? null,
+        kind: review.kind,
+        verdict: review.verdict,
+        target_sha: review.target_sha,
+        issues: review.issues,
+      };
+    });
+  return {
+    completion:
+      completion === undefined
+        ? null
+        : {
+            id: completion.id,
+            work_item_id: completion.work_item_id,
+            summary: completion.summary,
+            subject: completion.subject,
+          },
+    deliveries: candidates,
+    reviews: reviewRows,
+    known_gaps: completion?.known_gaps ?? [],
+  };
+}
+
 export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
   return command(state, actor, "list_needs_you", undefined, (d) => {
     d.pm();
@@ -139,6 +287,13 @@ export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
             why: why(q.question),
             opened_at: opened ?? null,
             waited_ms: Number.isFinite(elapsed) ? Math.max(0, elapsed) : null,
+            related_cards: relatedCards(d.list("cards"), q),
+            merge_confirmation: mergeConfirmation(
+              q,
+              d.list("work_items"),
+              d.list("deliveries"),
+              d.list("reviews"),
+            ),
           };
         }),
       human_actions: d

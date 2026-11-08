@@ -232,6 +232,57 @@ test("R03 §8.2: Needs You puts blockers first, truncates reasons and calculates
   expect([...(h?.why ?? "")].length).toBeLessThanOrEqual(40);
 });
 
+test("R03b U4a: Needs You carries decision context, related card titles and merge details", async () => {
+  const { product, completion } = await awaitingMerge();
+  const q = f
+    .state()
+    .decisions.find((decision) => decision.trigger === "merge_confirmation");
+  if (q === undefined) throw new Error("Missing merge confirmation");
+  const needs = await read<NeedsPage>("/needs-you");
+  const view = needs.decisions.find((decision) => decision.id === q.id);
+  const productItem = f
+    .state()
+    .work_items.find((item) => item.id === product.work_item_id);
+  if (view === undefined) throw new Error("Missing decision in Needs You");
+
+  expect(view.context).toBe(q.context);
+  expect(view.options).toEqual(q.options);
+  expect(view.recommended).toBe(q.recommended);
+  expect(view.related_cards).toEqual([{ id: f.card.id, title: f.card.title }]);
+  expect(view.merge_confirmation).toMatchObject({
+    completion: {
+      id: completion.id,
+      work_item_id: completion.work_item_id,
+      summary: completion.summary,
+      subject: completion.subject,
+    },
+    deliveries: [
+      {
+        id: product.id,
+        work_item_id: product.work_item_id,
+        work_item_title: productItem?.title,
+        subject: product.subject,
+        summary: product.summary,
+      },
+    ],
+    known_gaps: [],
+  });
+  expect(view.merge_confirmation?.reviews).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        delivery_id: product.id,
+        work_item_id: f.primary.verifier.work_item_id,
+        verdict: "pass",
+      }),
+      expect.objectContaining({
+        delivery_id: completion.id,
+        work_item_id: f.pm.work_item_id,
+        verdict: "pass",
+      }),
+    ]),
+  );
+});
+
 test("R04 §8.3: snapshot separates waiting actors, review and progress, and includes actual recent deliveries", async () => {
   const { product, completion } = await awaitingMerge(),
     other = await second();
