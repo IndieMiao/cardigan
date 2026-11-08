@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import {
   type CardiganClient,
   describeError,
+  type MergeConfirmationReview,
   type NeedsAction,
   type NeedsDecision,
   type NeedsPage,
@@ -20,6 +21,7 @@ import {
   Feedback,
   Markdown,
 } from "../components/Operations.js";
+import { routeHash } from "../route.js";
 import { useResource } from "../useResource.js";
 
 const waitLabel = (ms: number | null, elapsed = 0) => {
@@ -32,7 +34,8 @@ const waitLabel = (ms: number | null, elapsed = 0) => {
         ? `已等待 ${Math.floor(age / 60000)} 分钟`
         : `已等待 ${Math.floor(age / 3600000)} 小时`;
 };
-const urgent = (q: NeedsDecision) => q.blocking || q.category !== "general";
+const isMergeConfirmation = (q: NeedsDecision) =>
+  q.trigger === "merge_confirmation";
 type Props = { client: CardiganClient; projectId: string; revision?: number };
 function useAction(done: () => void) {
   const [busy, setBusy] = useState(false),
@@ -59,6 +62,37 @@ function useAction(done: () => void) {
     },
   };
 }
+function DecisionMeta({
+  q,
+  projectId,
+  elapsed,
+}: {
+  readonly q: NeedsDecision;
+  readonly projectId: string;
+  readonly elapsed: number;
+}) {
+  return (
+    <header className="needs-meta">
+      <IdTag id={q.id} label={isMergeConfirmation(q) ? "合并确认" : "拍板"} />
+      {q.blocking && <StatusTag status="blocked" />}
+      <span className="hint">{waitLabel(q.waited_ms, elapsed)}</span>
+      <span className="needs-cards">
+        {q.related_cards.length === 0 ? (
+          <span>项目级事项</span>
+        ) : (
+          q.related_cards.map((card) => (
+            <CardLink
+              key={card.id}
+              projectId={projectId}
+              id={card.id}
+              label={card.title}
+            />
+          ))
+        )}
+      </span>
+    </header>
+  );
+}
 function Decision({
   q,
   client,
@@ -66,67 +100,60 @@ function Decision({
   done,
   elapsed,
 }: Props & { q: NeedsDecision; done: () => void; elapsed: number }) {
-  const [option, setOption] = useState(q.recommended),
+  const [option, setOption] = useState(""),
     [quote, setQuote] = useState("");
   const action = useAction(done);
   return (
     <article
-      className={`needs-item ${urgent(q) ? "urgent" : ""}`}
+      className={`needs-item needs-decision${q.blocking ? " urgent" : ""}`}
       aria-label={`拍板 ${q.id}`}
     >
-      <header>
-        <strong>
-          <IdTag id={q.id} label="拍板" detail={q.question} />{" "}
-          {[...q.why].slice(0, 40).join("")}
-        </strong>{" "}
-        {q.blocking && <StatusTag status="blocked" />}
-        {q.category !== "general" && <span>风险</span>}{" "}
-        <StatusTag status={q.status} />
-      </header>
-      <p className="hint">
-        <span>{waitLabel(q.waited_ms, elapsed)}</span>{" "}
-        <CardLink projectId={projectId} id={q.card_id} />
-      </p>
-      <details>
-        <summary>问题与选项</summary>
-        <Markdown body={q.question} />
-        {q.options.map((o) => (
-          <div key={o.key}>
-            <strong>
-              {o.key}
-              {q.recommended === o.key ? "（推荐）" : ""}
-            </strong>
-            <Markdown body={`${o.description}\n\n影响：${o.impact}`} />
-          </div>
-        ))}
-      </details>
+      <DecisionMeta q={q} projectId={projectId} elapsed={elapsed} />
+      <h3 className="needs-question">{q.question}</h3>
+      {q.context.trim().length > 0 && (
+        <details className="needs-context">
+          <summary>背景</summary>
+          <Markdown body={q.context} />
+        </details>
+      )}
       <form
         onSubmit={(e) => {
           e.preventDefault();
+          if (option === "") return;
           void action.run(() =>
             client.recordDecision(projectId, q.id, option, quote),
           );
         }}
       >
+        <fieldset className="needs-options">
+          <legend>选择方案</legend>
+          {q.options.map((o) => (
+            <label
+              key={o.key}
+              className={`needs-option${option === o.key ? " selected" : ""}`}
+            >
+              <input
+                type="radio"
+                name={`decision-${q.id}`}
+                value={o.key}
+                checked={option === o.key}
+                onChange={() => setOption(o.key)}
+              />
+              <span>
+                <span className="needs-option-head">
+                  <strong>{o.key}</strong>
+                  <span>{o.description}</span>
+                  {q.recommended === o.key && (
+                    <span className="needs-recommended">推荐</span>
+                  )}
+                </span>
+                <span className="needs-option-impact">影响：{o.impact}</span>
+              </span>
+            </label>
+          ))}
+        </fieldset>
         <label>
-          选择方案
-          <select
-            aria-label={`${q.id} 选择方案`}
-            value={option}
-            onChange={(e) => setOption(e.target.value)}
-          >
-            {q.options.map((o) => (
-              <option value={o.key} key={o.key}>
-                {o.key}：{o.description}
-              </option>
-            ))}
-          </select>
-        </label>
-        <Markdown
-          body={q.options.find((o) => o.key === option)?.impact ?? ""}
-        />
-        <label>
-          原话或补充说明
+          补充说明（可选，会作为你的原话记录）
           <textarea
             aria-label={`${q.id} 原话或补充说明`}
             value={quote}
@@ -134,13 +161,10 @@ function Decision({
           />
         </label>
         <div className="action-row">
-          <button
-            type="submit"
-            disabled={action.busy || !q.options.some((o) => o.key === option)}
-          >
-            记录决定
+          <button type="submit" disabled={action.busy || option === ""}>
+            按所选拍板
           </button>
-          {(["request_information", "explain"] as const).map((kind, i) => (
+          {(["request_information", "explain"] as const).map((kind) => (
             <button
               key={kind}
               type="button"
@@ -152,7 +176,7 @@ function Decision({
                 )
               }
             >
-              {i ? "请 PM 解释后果" : "要求补充信息"}
+              {kind === "request_information" ? "要求补充信息" : "请 PM 解释"}
             </button>
           ))}
         </div>
@@ -173,6 +197,169 @@ function Decision({
     </article>
   );
 }
+function ReviewLine({ review }: { readonly review: MergeConfirmationReview }) {
+  const label =
+    [review.work_item_title, review.role_id].filter(Boolean).join(" ") ||
+    "验证";
+  return (
+    <li>
+      <div className="needs-review-head">
+        <IdTag id={review.work_item_id} label={label} />
+        <StatusTag status={review.verdict} />
+      </div>
+      {review.issues.length > 0 && (
+        <details className="needs-review-issues">
+          <summary>问题（{review.issues.length}）</summary>
+          <ul>
+            {review.issues.map((issue) => (
+              <li key={`${review.id}-${issue.severity}-${issue.description}`}>
+                <strong>
+                  {issue.must_fix ? "必须修" : "非阻塞"} · {issue.severity}
+                </strong>
+                <span>{issue.description}</span>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+    </li>
+  );
+}
+/** The system writes merge titles in English; show the confirmed Chinese copy. */
+function decisionTitle(q: NeedsDecision): string {
+  if (!isMergeConfirmation(q)) return q.question;
+  const match = /^Merge\s+(.+?)\s+into\s+(.+?)\??$/u.exec(q.question);
+  return match === null
+    ? q.question
+    : `确认把 ${match[1]} 合并到 ${match[2]}？`;
+}
+function MergeConfirmation({
+  q,
+  client,
+  projectId,
+  done,
+  elapsed,
+}: Props & { q: NeedsDecision; done: () => void; elapsed: number }) {
+  const [quote, setQuote] = useState("");
+  const action = useAction(done);
+  const merge = q.merge_confirmation;
+  const cardId = q.card_id ?? q.related_cards[0]?.id ?? null;
+  const decide = (option: "merge" | "hold") =>
+    action.run(() => client.recordDecision(projectId, q.id, option, quote));
+  return (
+    <article className="needs-item needs-merge" aria-label={`合并确认 ${q.id}`}>
+      <DecisionMeta q={q} projectId={projectId} elapsed={elapsed} />
+      <h3 className="needs-question">{decisionTitle(q)}</h3>
+      <section className="needs-merge-section" aria-label="要合并的交付">
+        <h4>要合并的交付</h4>
+        {!merge || merge.deliveries.length === 0 ? (
+          <p className="hint">还没有可合并的交付。</p>
+        ) : (
+          <ul className="needs-delivery-list">
+            {merge.deliveries.map((delivery) => (
+              <li key={delivery.id}>
+                <div className="needs-delivery-head">
+                  <IdTag
+                    id={delivery.work_item_id}
+                    label={delivery.work_item_title}
+                  />
+                  <code title={delivery.subject.value}>
+                    {delivery.subject.value.slice(0, 12)}
+                  </code>
+                  {cardId && (
+                    <a
+                      href={routeHash({
+                        kind: "card",
+                        projectId,
+                        cardId,
+                        anchor: `delivery-${delivery.id}`,
+                      })}
+                    >
+                      查看改动
+                    </a>
+                  )}
+                </div>
+                <p>{delivery.summary}</p>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+      <section className="needs-merge-section" aria-label="审核与验收">
+        <h4>审核与验收</h4>
+        {!merge || merge.reviews.length === 0 ? (
+          <p className="hint">还没有审核或验收结论。</p>
+        ) : (
+          <ul className="needs-review-list">
+            {merge.reviews.map((review) => (
+              <ReviewLine key={review.id} review={review} />
+            ))}
+          </ul>
+        )}
+      </section>
+      <section className="needs-merge-section" aria-label="已知遗留">
+        <h4>已知遗留</h4>
+        {!merge || merge.known_gaps.length === 0 ? (
+          <p className="hint">没有已知遗留。</p>
+        ) : (
+          <ul className="needs-gap-list">
+            {merge.known_gaps.map((gap) => (
+              <li
+                key={`${gap.description}-${gap.followup_card_id ?? ""}-${gap.precondition ?? ""}`}
+              >
+                <span>{gap.description}</span>
+                {gap.followup_card_id && (
+                  <CardLink
+                    projectId={projectId}
+                    id={gap.followup_card_id}
+                    label="后续卡"
+                  />
+                )}
+                {gap.precondition && (
+                  <span className="hint">前置条件：{gap.precondition}</span>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          void decide("merge");
+        }}
+      >
+        <label>
+          补充说明（可选，会作为你的原话记录）
+          <textarea
+            aria-label={`${q.id} 原话或补充说明`}
+            value={quote}
+            onChange={(e) => setQuote(e.target.value)}
+          />
+        </label>
+        <div className="action-row">
+          <button type="submit" disabled={action.busy}>
+            确认合并
+          </button>
+          <button
+            type="button"
+            className="quiet"
+            disabled={action.busy}
+            onClick={() => void decide("hold")}
+          >
+            暂不合并
+          </button>
+        </div>
+      </form>
+      {action.error && (
+        <p role="alert" className="error-panel">
+          {action.error}
+        </p>
+      )}
+      <span role="status">{action.busy ? "提交中…" : action.message}</span>
+    </article>
+  );
+}
 function HumanAction({
   item,
   client,
@@ -184,21 +371,25 @@ function HumanAction({
   const action = useAction(done);
   return (
     <article className="needs-item" aria-label={`执行 ${item.id}`}>
-      <strong>
-        <IdTag id={item.id} label="待你执行" />{" "}
-        {[...item.why].slice(0, 40).join("")}
-      </strong>{" "}
-      <StatusTag status="todo" />
-      <p className="hint">
-        <span>{waitLabel(item.waited_ms, elapsed)}</span>{" "}
-        <CardLink projectId={projectId} id={item.card_id} />
+      <header className="needs-meta">
+        <IdTag id={item.id} label="待你执行" />
+        <StatusTag status="todo" />
+        <span className="hint">{waitLabel(item.waited_ms, elapsed)}</span>
+        <span className="needs-cards">
+          {item.card_id ? (
+            <CardLink projectId={projectId} id={item.card_id} />
+          ) : (
+            <span>项目级事项</span>
+          )}
+        </span>
         {item.due && (
-          <span>
+          <span className="hint">
             截止：
             <Time value={item.due} />
           </span>
         )}
-      </p>
+      </header>
+      <h3 className="needs-question">{item.why}</h3>
       <details>
         <summary>操作步骤与期望返回</summary>
         <Markdown body={item.instructions} />
@@ -230,6 +421,52 @@ function HumanAction({
         </p>
       )}
       <span role="status">{action.busy ? "提交中…" : action.message}</span>
+    </article>
+  );
+}
+function Incident({
+  incident,
+  projectId,
+  elapsed,
+}: {
+  readonly incident: NeedsPage["incidents"][number];
+  readonly projectId: string;
+  readonly elapsed: number;
+}) {
+  return (
+    <article
+      className="needs-item urgent"
+      aria-label={`运行异常 ${incident.id}`}
+    >
+      <header className="needs-meta">
+        <IdTag id={incident.id} label={incident.role_id} />
+        <StatusTag status={incident.runtime_state} />
+        <span className="hint">{waitLabel(incident.waited_ms, elapsed)}</span>
+        <span className="needs-cards">
+          <CardLink projectId={projectId} id={incident.card_id} />
+        </span>
+      </header>
+      {incident.disconnected_at && (
+        <p>
+          失联时间：
+          <Time value={incident.disconnected_at} />
+        </p>
+      )}
+      {incident.last_run && (
+        <p>
+          最近 Run：
+          <IdTag id={incident.last_run.id} label="执行" />{" "}
+          {incident.last_run.summary}
+        </p>
+      )}
+      <CopyCommand
+        label="查看终端"
+        command={cliCommand(projectId, "assignment attach", incident.id)}
+      />
+      <CopyCommand
+        label="检查异常"
+        command={cliCommand(projectId, "attention")}
+      />
     </article>
   );
 }
@@ -266,91 +503,73 @@ function NeedsContent({
     return () => clearInterval(timer);
   }, [data]);
   const props = { client, projectId, done: reload, elapsed };
+  const total = data
+    ? data.decisions.length + data.human_actions.length + data.incidents.length
+    : 0;
+  const blocking = (data?.decisions ?? []).filter(
+    (q) => q.blocking && !isMergeConfirmation(q),
+  );
+  const merges = (data?.decisions ?? []).filter(isMergeConfirmation);
+  const other = (data?.decisions ?? []).filter(
+    (q) => !q.blocking && !isMergeConfirmation(q),
+  );
   return (
-    <section aria-label="Needs You">
+    <section aria-label="Needs You" className="needs-page">
       <PageTitle
         title="Needs You"
         description={
-          data &&
-          data.decisions.length +
-            data.human_actions.length +
-            data.incidents.length >
-            0
-            ? `${data.decisions.length + data.human_actions.length + data.incidents.length} 件事等你处理。`
+          total > 0
+            ? `${total} 件事等你处理。`
             : "在这里拍板、确认合并和回报执行结果。"
         }
       />
       <Feedback pending={pending} error={error} retry={reload} />
       {data && (
         <>
-          {!data.decisions.length &&
-            !data.human_actions.length &&
-            !data.incidents.length && (
-              <EmptyState>
-                没有需要你处理的事。Agent
-                提出拍板或需要你确认合并时会出现在这里。
-              </EmptyState>
-            )}
+          {total === 0 && (
+            <EmptyState>
+              没有需要你处理的事。Agent 提出拍板或需要你确认合并时会出现在这里。
+            </EmptyState>
+          )}
           {!!data.incidents.length && (
-            <section aria-label="运行环境异常">
-              <h2>运行环境异常</h2>
-              {data.incidents.map((a) => (
-                <article key={a.id} className="needs-item urgent">
-                  <strong>
-                    <IdTag id={a.id} label={a.role_id} />
-                  </strong>{" "}
-                  <StatusTag status={a.runtime_state} />
-                  <p>
-                    {waitLabel(a.waited_ms, elapsed)}
-                    <CardLink projectId={projectId} id={a.card_id} />
-                  </p>
-                  {a.disconnected_at && (
-                    <p>
-                      失联时间：
-                      <Time value={a.disconnected_at} />
-                    </p>
-                  )}
-                  {a.last_run && (
-                    <p>
-                      最近 Run：
-                      <IdTag id={a.last_run.id} label="执行" />{" "}
-                      {a.last_run.summary}
-                    </p>
-                  )}
-                  <CopyCommand
-                    label="查看终端"
-                    command={cliCommand(projectId, "assignment attach", a.id)}
-                  />
-                  <CopyCommand
-                    label="检查异常"
-                    command={cliCommand(projectId, "attention")}
-                  />
-                </article>
+            <section className="needs-group" aria-label="运行异常">
+              <h2>运行异常（{data.incidents.length}）</h2>
+              {data.incidents.map((incident) => (
+                <Incident
+                  key={incident.id}
+                  incident={incident}
+                  projectId={projectId}
+                  elapsed={elapsed}
+                />
               ))}
             </section>
           )}
-          {!!data.decisions.filter(urgent).length && (
-            <section aria-label="优先拍板">
-              <h2>阻塞与风险</h2>
-              {data.decisions.filter(urgent).map((q) => (
+          {!!blocking.length && (
+            <section className="needs-group" aria-label="阻塞拍板">
+              <h2>阻塞拍板（{blocking.length}）</h2>
+              {blocking.map((q) => (
                 <Decision key={q.id} q={q} {...props} />
               ))}
             </section>
           )}
-          {!!data.decisions.filter((q) => !urgent(q)).length && (
-            <details className="needs-batch">
-              <summary>
-                其他拍板（{data.decisions.filter((q) => !urgent(q)).length}）
-              </summary>
-              {data.decisions
-                .filter((q) => !urgent(q))
-                .map((q) => (
-                  <Decision key={q.id} q={q} {...props} />
-                ))}
-            </details>
+          {!!merges.length && (
+            <section className="needs-group" aria-label="合并确认">
+              <h2>合并确认（{merges.length}）</h2>
+              {merges.map((q) => (
+                <MergeConfirmation key={q.id} q={q} {...props} />
+              ))}
+            </section>
+          )}
+          {!!other.length && (
+            <section className="needs-group" aria-label="其他拍板">
+              <h2>其他拍板（{other.length}）</h2>
+              {other.map((q) => (
+                <Decision key={q.id} q={q} {...props} />
+              ))}
+            </section>
           )}
           {!!data.human_actions.length && (
-            <section aria-label="待你执行">
+            <section className="needs-group" aria-label="待你执行">
               <h2>待你执行（{data.human_actions.length}）</h2>
               {data.human_actions.map((item) => (
                 <HumanAction key={item.id} item={item} {...props} />

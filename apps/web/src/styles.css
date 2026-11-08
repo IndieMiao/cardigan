@@ -242,9 +242,10 @@ button.quiet,
   grid-template-columns: 220px minmax(0, 1fr);
 }
 .sidebar {
-  position: sticky;
-  top: 0;
-  height: 100vh;
+  position: fixed;
+  inset: 0 auto 0 0;
+  width: 220px;
+  height: auto;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -307,6 +308,7 @@ button.quiet,
   text-align: left;
 }
 .content {
+  grid-column: 2;
   padding: 28px 32px;
   min-width: 0;
   width: 100%;
@@ -1009,6 +1011,140 @@ fieldset.filters {
   margin: 8px 0;
   overflow-wrap: anywhere;
 }
+.needs-page {
+  max-width: 980px;
+}
+.needs-group {
+  margin: 0 0 32px;
+}
+.needs-group h2 {
+  margin: 0 0 12px;
+}
+.needs-item.needs-decision,
+.needs-item.needs-merge {
+  border-top: 3px solid var(--accent);
+  padding: 20px;
+}
+.needs-item.needs-decision.urgent {
+  border-left: 4px solid var(--danger);
+}
+.needs-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.needs-cards {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.needs-question {
+  max-width: 680px;
+  margin: 12px 0;
+  font-size: var(--text-body);
+  font-weight: 600;
+  line-height: 1.5;
+}
+.needs-context {
+  margin: 8px 0 12px;
+}
+.needs-context summary,
+.needs-merge-section summary,
+.needs-review-issues summary {
+  cursor: pointer;
+}
+.needs-options {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.needs-options legend {
+  margin-bottom: 6px;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+.needs-option {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  cursor: pointer;
+}
+.needs-option:hover,
+.needs-option.selected {
+  border-color: var(--accent);
+  background: var(--surface-muted);
+}
+.needs-option input {
+  margin-top: 4px;
+  accent-color: var(--accent);
+}
+.needs-option-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px 8px;
+  flex-wrap: wrap;
+}
+.needs-option-impact {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+.needs-recommended {
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 0 5px;
+  color: var(--accent);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+.needs-merge-section {
+  margin-top: 16px;
+}
+.needs-merge-section h4 {
+  margin: 0 0 6px;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+.needs-delivery-list,
+.needs-review-list,
+.needs-gap-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.needs-delivery-list li,
+.needs-review-list li,
+.needs-gap-list li {
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+.needs-delivery-head,
+.needs-review-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.needs-delivery-list p {
+  margin: 4px 0 0;
+  color: var(--text-muted);
+}
+.needs-review-issues {
+  margin-top: 4px;
+}
 .needs-batch {
   margin: 16px 0;
   padding: 12px;
@@ -1102,6 +1238,7 @@ fieldset.filters {
   background: var(--danger);
 }
 .status-passed::before,
+.status-pass::before,
 .status-accepted::before,
 .status-resolved::before,
 .status-completed::before,

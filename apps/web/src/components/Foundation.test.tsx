@@ -281,6 +281,28 @@ test("U1 card uses shared tags and time without changing comment or attachment c
   expect(card.querySelector(".attachment")).toBeTruthy();
 });
 
+test("U1 shell fixes the sidebar to the viewport and maps pass to the done colour", () => {
+  const css = readFileSync(
+    new NodeURL("../styles.css", import.meta.url),
+    "utf8",
+  );
+  const sidebarStart = css.indexOf(".sidebar {"),
+    sidebar = css.slice(sidebarStart, css.indexOf("}", sidebarStart) + 1);
+  expect(sidebar).toContain("position: fixed;");
+  expect(sidebar).toContain("inset: 0 auto 0 0;");
+  expect(sidebar).not.toContain("position: sticky;");
+  expect(
+    css.slice(
+      css.indexOf(".content {"),
+      css.indexOf("}", css.indexOf(".content {")),
+    ),
+  ).toContain("grid-column: 2;");
+  expect(css).toContain("--status-done: #2e7d4f;");
+  const doneStart = css.indexOf(".status-passed::before"),
+    doneGroup = css.slice(doneStart, css.indexOf("}", doneStart));
+  expect(doneGroup).toContain(".status-pass::before");
+});
+
 test("U1 base text wrapping protects card header panels from unbroken commit SHAs", async () => {
   const sheet = document.createElement("style");
   sheet.textContent = readFileSync(

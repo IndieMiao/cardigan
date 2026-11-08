@@ -37,6 +37,45 @@ const q = (overrides: Partial<NeedsDecision> = {}): NeedsDecision => ({
   merge_confirmation: null,
   ...overrides,
 });
+const merge = (overrides: Partial<NeedsDecision> = {}): NeedsDecision =>
+  q({
+    id: "q(3)",
+    question: "Merge C-2 into main?",
+    trigger: "merge_confirmation",
+    why: "确认合并",
+    merge_confirmation: {
+      completion: {
+        id: "D-9",
+        work_item_id: "W-1",
+        summary: "全部验收通过",
+        subject: { kind: "git_head", value: "abcdef123456" },
+      },
+      deliveries: [
+        {
+          id: "D-8",
+          work_item_id: "W-1",
+          work_item_title: "实现",
+          subject: { kind: "git_head", value: "abcdef123456" },
+          summary: "增加 --json 输出",
+        },
+      ],
+      reviews: [
+        {
+          id: "V-1",
+          delivery_id: "D-8",
+          work_item_id: "W-2",
+          work_item_title: "代码审核",
+          role_id: "reviewer",
+          kind: "code",
+          verdict: "pass",
+          target_sha: "abcdef123456",
+          issues: [],
+        },
+      ],
+      known_gaps: [{ description: "Windows 未覆盖" }],
+    },
+    ...overrides,
+  });
 const page = (decisions = [q()]): NeedsPage => ({
   decisions,
   human_actions: [
@@ -59,12 +98,31 @@ afterEach(() => {
   window.location.hash = "";
 });
 
-test("groups blocking and risky decisions ahead of ordinary batches and separates human actions", async () => {
+test("groups runtime incidents, blocking decisions, merge confirmations, other decisions and actions in order", async () => {
   const data = page([
-    q({ id: "q(2)", blocking: false }),
-    q(),
-    q({ id: "q(3)", blocking: false, category: "permission", why: "权限确认" }),
+    q({ id: "q(4)", trigger: null, blocking: false, why: "普通拍板" }),
+    merge({ id: "q(3)", blocking: true }),
+    q({ id: "q(1)", trigger: null, blocking: true, why: "阻塞拍板" }),
+    q({
+      id: "q(2)",
+      trigger: null,
+      blocking: false,
+      category: "permission",
+      why: "权限确认",
+    }),
   ]);
+  data.incidents = [
+    {
+      id: "A-3",
+      role_id: "coder",
+      runtime_state: "lost",
+      waited_ms: 60000,
+      card_id: "C-1",
+      disconnected_at: "2026-01-01T00:00:00.000Z",
+      lost_at: "2026-01-01T00:05:00.000Z",
+      last_run: null,
+    },
+  ];
   render(
     <NeedsYouPage
       client={fakeClient({ needsYou: async () => data })}
@@ -72,19 +130,71 @@ test("groups blocking and risky decisions ahead of ordinary batches and separate
     />,
   );
   await screen.findByRole("article", { name: "拍板 q(1)" });
-  const urgent = within(screen.getByRole("region", { name: "优先拍板" }));
-  expect(urgent.queryByRole("article", { name: "拍板 q(2)" })).toBeNull();
-  expect(urgent.getByRole("article", { name: "拍板 q(3)" })).toBeTruthy();
-  const batch = screen.getByText("其他拍板（1）").closest("details");
-  expect(batch?.open).toBe(false);
-  expect(
-    within(screen.getByRole("article", { name: "拍板 q(1)" })).getByText(
-      /已等待 2 分钟/,
-    ),
-  ).toBeTruthy();
+  const regions = [
+    "运行异常",
+    "阻塞拍板",
+    "合并确认",
+    "其他拍板",
+    "待你执行",
+  ].map((name) => screen.getByRole("region", { name }));
+  const before = (left: Node, right: Node) =>
+    Boolean(
+      left.compareDocumentPosition(right) & Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+  for (let index = 1; index < regions.length; index += 1)
+    expect(before(regions[index - 1] as Node, regions[index] as Node)).toBe(
+      true,
+    );
+
+  const blocking = within(screen.getByRole("region", { name: "阻塞拍板" }));
+  expect(blocking.getByRole("article", { name: "拍板 q(1)" })).toBeTruthy();
+  expect(blocking.queryByRole("article", { name: "拍板 q(2)" })).toBeNull();
+  const merges = within(screen.getByRole("region", { name: "合并确认" }));
+  expect(merges.getByRole("article", { name: "合并确认 q(3)" })).toBeTruthy();
+  const other = within(screen.getByRole("region", { name: "其他拍板" }));
+  expect(other.getByRole("article", { name: "拍板 q(2)" })).toBeTruthy();
+  expect(other.getByRole("article", { name: "拍板 q(4)" })).toBeTruthy();
   expect(
     screen.getByRole("region", { name: "待你执行" }).textContent,
   ).toContain("连接结果");
+});
+
+test("decision cards collapse the background, do not preselect an option and expose the impact", async () => {
+  const data = page([
+    q({
+      id: "q(1)",
+      trigger: null,
+      context: "这是需要折叠的完整背景。",
+      options: [
+        { key: "a", description: "方案 A", impact: "影响 A" },
+        { key: "b", description: "方案 B", impact: "影响 B" },
+      ],
+      recommended: "a",
+    }),
+  ]);
+  render(
+    <NeedsYouPage
+      client={fakeClient({ needsYou: async () => data })}
+      projectId="p-1"
+    />,
+  );
+  const card = await screen.findByRole("article", { name: "拍板 q(1)" });
+  expect(within(card).getAllByText("要发布吗？")).toHaveLength(1);
+  expect(within(card).queryByText("待拍板")).toBeNull();
+  expect(within(card).queryByText("等待合并确认")).toBeNull();
+  expect(screen.getByText("这是需要折叠的完整背景。")).toBeTruthy();
+  const background = within(card).getByText("背景").closest("details");
+  expect(background?.open).toBe(false);
+  const radios = within(card).getAllByRole("radio");
+  expect(radios).toHaveLength(2);
+  for (const radio of radios)
+    expect((radio as HTMLInputElement).checked).toBe(false);
+  expect(within(card).getByText("推荐")).toBeTruthy();
+  expect(within(card).getByText("影响：影响 A")).toBeTruthy();
+  const submit = within(card).getByRole("button", { name: "按所选拍板" });
+  expect((submit as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(radios[1] as HTMLInputElement);
+  expect((submit as HTMLButtonElement).disabled).toBe(false);
 });
 
 test.each(["approve", "reject", "merge", "keep", "force_clean"])(
@@ -113,10 +223,11 @@ test.each(["approve", "reject", "merge", "keep", "force_clean"])(
       />,
     );
     await screen.findByRole("article", { name: "拍板 q(1)" });
+    fireEvent.click(screen.getByRole("radio"));
     fireEvent.change(screen.getByLabelText("q(1) 原话或补充说明"), {
       target: { value: "  我选这个  " },
     });
-    fireEvent.click(screen.getByRole("button", { name: "记录决定" }));
+    fireEvent.click(screen.getByRole("button", { name: "按所选拍板" }));
     await screen.findByText(
       "没有需要你处理的事。Agent 提出拍板或需要你确认合并时会出现在这里。",
     );
@@ -130,14 +241,61 @@ test.each(["approve", "reject", "merge", "keep", "force_clean"])(
   },
 );
 
+test("merge confirmation lists the deliveries, reviews and known gaps and records merge", async () => {
+  const recordDecision = vi.fn().mockResolvedValue(undefined);
+  render(
+    <NeedsYouPage
+      client={fakeClient({
+        needsYou: async () => page([merge({ id: "q(3)" })]),
+        recordDecision,
+      })}
+      projectId="p-1"
+    />,
+  );
+  const card = await screen.findByRole("article", { name: "合并确认 q(3)" });
+  expect(within(card).getByRole("heading", { level: 3 }).textContent).toBe(
+    "确认把 C-2 合并到 main？",
+  );
+  const deliveries = within(card).getByRole("region", { name: "要合并的交付" });
+  expect(deliveries.textContent).toContain("实现");
+  expect(deliveries.textContent).toContain("增加 --json 输出");
+  expect(deliveries.textContent).toContain("abcdef123456");
+  expect(
+    within(deliveries)
+      .getByRole("link", { name: "查看改动" })
+      .getAttribute("href"),
+  ).toBe("#/p/p-1/cards/C-1?at=delivery-D-8");
+  const reviews = within(card).getByRole("region", { name: "审核与验收" });
+  expect(reviews.textContent).toContain("代码审核");
+  expect(reviews.textContent).toContain("已通过");
+  expect(
+    within(card).getByRole("region", { name: "已知遗留" }).textContent,
+  ).toContain("Windows 未覆盖");
+  fireEvent.change(within(card).getByLabelText("q(3) 原话或补充说明"), {
+    target: { value: " 可以合并 " },
+  });
+  fireEvent.click(within(card).getByRole("button", { name: "确认合并" }));
+  await waitFor(() =>
+    expect(recordDecision).toHaveBeenCalledWith(
+      "p-1",
+      "q(3)",
+      "merge",
+      " 可以合并 ",
+    ),
+  );
+});
+
 test.each([
   ["要求补充信息", "request_information"],
-  ["请 PM 解释后果", "explain"],
+  ["请 PM 解释", "explain"],
 ] as const)("%s calls the decision-comment action", async (label, action) => {
   const decisionComment = vi.fn().mockResolvedValue(undefined);
   render(
     <NeedsYouPage
-      client={fakeClient({ needsYou: async () => page(), decisionComment })}
+      client={fakeClient({
+        needsYou: async () => page([q({ trigger: null })]),
+        decisionComment,
+      })}
       projectId="p-1"
     />,
   );
@@ -260,6 +418,19 @@ test("project decisions explain unavailable comments; cleanup and lost runtimes 
   ).toBeTruthy();
 });
 
+test("empty groups are not rendered", async () => {
+  render(
+    <NeedsYouPage
+      client={fakeClient({ needsYou: async () => page([]) })}
+      projectId="p-1"
+    />,
+  );
+  await screen.findByRole("article", { name: "执行 h(1)" });
+  for (const name of ["运行异常", "阻塞拍板", "合并确认", "其他拍板"])
+    expect(screen.queryByRole("region", { name })).toBeNull();
+  expect(screen.getByRole("region", { name: "待你执行" })).toBeTruthy();
+});
+
 test("Needs You is reachable through the hash navigation and preserves project switching", async () => {
   window.location.hash = "#/p/p-1/needs-you";
   const needsYou = vi
@@ -293,7 +464,9 @@ test("waiting durations advance without changing the decision draft", async () =
   vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
   render(
     <NeedsYouPage
-      client={fakeClient({ needsYou: async () => page() })}
+      client={fakeClient({
+        needsYou: async () => page([q({ trigger: null })]),
+      })}
       projectId="p-1"
     />,
   );
