@@ -20,8 +20,8 @@ import {
   type CardDetail,
   type CardFilter,
   type CardiganClient,
+  type CardListItem,
   type CardPage,
-  type CardView,
   type ProjectSummary,
   type SessionInfo,
 } from "./api.js";
@@ -38,7 +38,7 @@ const project: ProjectSummary = {
   created_at: "2026-01-01T00:00:00.000Z",
 };
 
-const card: CardView = {
+const card: CardListItem = {
   id: "C-1",
   title: "准备发布",
   goal: "把 0.1 发出去",
@@ -52,6 +52,9 @@ const card: CardView = {
   waiting_on: [],
   next_owners: [{ kind: "human", ref: "human" }],
   related_cards: [],
+  progress: { completed: 0, total: 0 },
+  updated_at: "2026-01-01T00:00:00.000Z",
+  roles: ["coder"],
 };
 
 interface FakeOptions {
@@ -200,7 +203,8 @@ test("the shell shows the project switcher, the filters and the navigation", asy
   expect(await screen.findByLabelText("项目")).toBeTruthy();
   expect(await screen.findByRole("link", { name: "看板" })).toBeTruthy();
   expect(screen.getByRole("link", { name: "列表" })).toBeTruthy();
-  expect(screen.getByRole("option", { name: /等我处理/u })).toBeTruthy();
+  expect(screen.getByLabelText("下一步谁做")).toBeTruthy();
+  expect(screen.getByRole("checkbox", { name: "进行中" })).toBeTruthy();
   // The URL lands on the only project's board by itself.
   await waitFor(() => expect(window.location.hash).toBe("#/p/p-1/board"));
 });

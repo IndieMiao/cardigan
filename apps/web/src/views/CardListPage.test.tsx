@@ -1,25 +1,22 @@
 // @vitest-environment jsdom
-/**
- * M5.3 card list and board (plan §4 M5.3; development plan §8.7).
- *
- * The four states the plan asks for — loading, error, empty, data — plus the two
- * filters, board grouping and the rule that a status is never colour alone.
- */
+/** Phase 1.5 §4.3 list filters, columns and existing board behaviour. */
 import {
   cleanup,
   fireEvent,
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { afterEach, expect, test } from "vitest";
 import {
   ApiError,
   type CardFilter,
   type CardiganClient,
+  type CardListItem,
   type CardPage,
-  type CardView,
 } from "../api.js";
+import { parseRoute } from "../route.js";
 import { CardListPage } from "./CardListPage.js";
 
 afterEach(() => {
@@ -29,58 +26,59 @@ afterEach(() => {
 
 const NOW = "2026-01-01T00:00:00.000Z";
 
-const card = (overrides: Partial<CardView> = {}): CardView => ({
+const card = (overrides: Partial<CardListItem> = {}): CardListItem => ({
   id: "C-1",
   title: "准备发布",
   goal: "把 0.1 发出去",
   acceptance_criteria: ["测试通过"],
   status: "in_progress",
-  priority: 1,
+  priority: 2,
   repo: "example/repo",
   base_branch: "main",
   created_at: NOW,
+  updated_at: "2026-01-03T00:00:00.000Z",
   why: "等你拍板 D-1",
   waiting_on: [{ kind: "decision", ref: "D-1", label: "等你拍板 D-1" }],
   next_owners: [{ kind: "human", ref: "human" }],
   related_cards: [],
+  progress: { completed: 2, total: 3 },
+  roles: ["coder", "reviewer"],
   ...overrides,
 });
 
-const CARDS: readonly CardView[] = [
+const CARDS: readonly CardListItem[] = [
   card({ id: "C-1", title: "准备发布", why: "等你拍板 D-1" }),
   card({
     id: "C-2",
     title: "写迁移脚本",
     status: "todo",
+    priority: 3,
+    updated_at: "2026-01-02T00:00:00.000Z",
     why: "coder 返工中",
     waiting_on: [],
     next_owners: [{ kind: "role", ref: "coder" }],
+    progress: { completed: 0, total: 3 },
+    roles: ["coder"],
   }),
   card({
     id: "C-3",
     title: "清理 worktree",
     status: "done",
+    priority: 1,
+    updated_at: "2026-01-01T00:00:00.000Z",
     why: "已完成",
     waiting_on: [],
     next_owners: [],
+    progress: { completed: 3, total: 3 },
+    roles: [],
   }),
 ];
 
-function page(filter: CardFilter): CardPage {
-  const cards =
-    filter === "needs_me"
-      ? CARDS.filter((item) => item.next_owners.some((o) => o.kind === "human"))
-      : filter === "agent"
-        ? CARDS.filter((item) =>
-            item.next_owners.some(
-              (o) => o.kind === "role" || o.kind === "assignment",
-            ),
-          )
-        : CARDS;
+function page(filter: CardFilter = "all"): CardPage {
   return {
     project_id: "p-1",
     filter,
-    cards,
+    cards: CARDS,
     counts: { total: CARDS.length, needs_me: 1, agent: 1 },
   };
 }
@@ -118,7 +116,7 @@ test("shows the server's error and can retry", async () => {
   const api = client(async () => {
     attempt += 1;
     if (attempt === 1) throw new ApiError(500, "internal_error", "boom");
-    return page("all");
+    return page();
   });
   render(<CardListPage client={api} projectId="p-1" view="board" />);
   const alert = await screen.findByRole("alert");
@@ -128,93 +126,132 @@ test("shows the server's error and can retry", async () => {
   expect(attempt).toBe(2);
 });
 
-test("an empty project says so, and each filter has its own empty text", async () => {
+test("an empty project says so, and active filters have their own empty text", async () => {
   const api = client(async (_projectId, filter) => ({
     project_id: "p-1",
     filter,
     cards: [],
     counts: { total: 0, needs_me: 0, agent: 0 },
   }));
-  render(<CardListPage client={api} projectId="p-1" view="board" />);
+  render(<CardListPage client={api} projectId="p-1" view="list" />);
   expect(
     await screen.findByText(
       "这个项目还没有卡片。向 PM 描述目标后，卡片会出现在这里。",
     ),
   ).toBeTruthy();
-
-  fireEvent.change(screen.getByLabelText("下一步"), {
-    target: { value: "needs_me" },
-  });
+  fireEvent.click(screen.getByRole("checkbox", { name: "进行中" }));
   expect(
-    await screen.findByText("没有等你处理的卡片。有事项需要你时会出现在这里。"),
-  ).toBeTruthy();
-
-  fireEvent.change(screen.getByLabelText("下一步"), {
-    target: { value: "agent" },
-  });
-  expect(
-    await screen.findByText(
-      "没有等 Agent 处理的卡片。指派工作后可在这里查看。",
-    ),
+    await screen.findByText("没有匹配的卡片，请调整筛选条件。"),
   ).toBeTruthy();
 });
 
 test("the board groups cards by status and links each one", async () => {
-  const api = client(async (_projectId, filter) => page(filter));
+  const api = client(async () => page());
   render(<CardListPage client={api} projectId="p-1" view="board" />);
   const inProgress = await screen.findByRole("region", { name: "进行中" });
   expect(inProgress.textContent).toContain("准备发布");
   expect(inProgress.textContent).not.toContain("写迁移脚本");
-
-  const todo = screen.getByRole("region", { name: "待开始" });
-  expect(todo.textContent).toContain("写迁移脚本");
-
-  const done = screen.getByRole("region", { name: "已完成" });
-  expect(done.textContent).toContain("清理 worktree");
-
-  // Status is a label, not only a colour (§3.7).
-  expect(inProgress.textContent).toContain("进行中");
-
+  expect(screen.getByRole("region", { name: "待开始" }).textContent).toContain(
+    "写迁移脚本",
+  );
+  expect(screen.getByRole("region", { name: "已完成" }).textContent).toContain(
+    "清理 worktree",
+  );
   const link = screen.getByRole("link", { name: /准备发布/u });
   expect(link.getAttribute("href")).toBe("#/p/p-1/cards/C-1");
   expect(inProgress.textContent).toContain("下一步：你");
-  expect(todo.textContent).toContain("下一步：coder");
 });
 
-test("the two filters ask the server for their own view", async () => {
-  const api = client(async (_projectId, filter) => page(filter));
-  render(<CardListPage client={api} projectId="p-1" view="board" />);
+test("the list has the six columns, progress, updated time and reason tooltip", async () => {
+  const api = client(async () => page());
+  render(<CardListPage client={api} projectId="p-1" view="list" />);
+  const row = (await screen.findByText("写迁移脚本")).closest("tr");
+  if (!row) throw new Error("Missing row");
+  expect([...row.querySelectorAll("td")].length).toBe(6);
+  expect(row.textContent).toContain("C-2");
+  expect(row.textContent).toContain("待开始");
+  expect(row.textContent).toContain("coder");
+  expect(row.textContent).toContain("0/3");
+  expect(row.querySelector("time")?.getAttribute("datetime")).toBe(
+    "2026-01-02T00:00:00.000Z",
+  );
+  expect(row.getAttribute("title")).toBe("coder 返工中");
+  expect(row.querySelector("a")?.getAttribute("href")).toBe(
+    "#/p/p-1/cards/C-2",
+  );
+  for (const header of ["编号", "标题", "状态", "下一步", "进度", "更新时间"])
+    expect(screen.getByRole("columnheader", { name: header })).toBeTruthy();
+});
+
+test("status, next owner, role, search and sort filter the rows and live in the route", async () => {
+  const api = client(async () => page());
+  render(<CardListPage client={api} projectId="p-1" view="list" />);
   await screen.findByText("准备发布");
   expect(api.calls).toEqual(["all"]);
 
-  fireEvent.change(screen.getByLabelText("下一步"), {
-    target: { value: "needs_me" },
+  fireEvent.click(screen.getByRole("checkbox", { name: "进行中" }));
+  await waitFor(() => expect(screen.queryByText("写迁移脚本")).toBeNull());
+  expect(screen.getByText("准备发布")).toBeTruthy();
+  expect(parseRoute(window.location.hash)).toMatchObject({
+    kind: "list",
+    filters: { status: "in_progress" },
   });
-  await waitFor(() => expect(api.calls).toEqual(["all", "needs_me"]));
-  const listed = await screen.findByRole("region", { name: "进行中" });
-  expect(listed.textContent).toContain("准备发布");
+  fireEvent.click(screen.getByRole("button", { name: "移除状态筛选" }));
 
-  fireEvent.change(screen.getByLabelText("下一步"), {
+  fireEvent.change(screen.getByLabelText("下一步谁做"), {
     target: { value: "agent" },
   });
-  await waitFor(() => expect(api.calls).toEqual(["all", "needs_me", "agent"]));
-  await waitFor(() =>
-    expect(
-      screen.getByRole("region", { name: "进行中" }).textContent,
-    ).not.toContain("准备发布"),
-  );
+  await waitFor(() => expect(screen.queryByText("准备发布")).toBeNull());
+  expect(screen.getByText("写迁移脚本")).toBeTruthy();
+  fireEvent.change(screen.getByLabelText("下一步谁做"), {
+    target: { value: "" },
+  });
+
+  fireEvent.change(screen.getByLabelText("角色"), {
+    target: { value: "reviewer" },
+  });
+  await waitFor(() => expect(screen.queryByText("写迁移脚本")).toBeNull());
+  expect(screen.getByText("准备发布")).toBeTruthy();
+  fireEvent.change(screen.getByLabelText("角色"), {
+    target: { value: "" },
+  });
+
+  fireEvent.change(screen.getByLabelText("搜索标题或编号"), {
+    target: { value: "C-2" },
+  });
+  await waitFor(() => expect(screen.queryByText("准备发布")).toBeNull());
+  expect(screen.getByText("写迁移脚本")).toBeTruthy();
+  fireEvent.change(screen.getByLabelText("搜索标题或编号"), {
+    target: { value: "" },
+  });
+
+  fireEvent.change(screen.getByLabelText("排序"), {
+    target: { value: "priority" },
+  });
+  await waitFor(() => {
+    const rows = within(screen.getByRole("table")).getAllByRole("row").slice(1);
+    expect(rows.map((row) => row.textContent?.slice(0, 3))).toEqual([
+      "C-2",
+      "C-1",
+      "C-3",
+    ]);
+  });
+  expect(parseRoute(window.location.hash)).toMatchObject({
+    kind: "list",
+    filters: { sort: "priority" },
+  });
 });
 
-test("the list view prints one row per card with its status", async () => {
-  const api = client(async (_projectId, filter) => page(filter));
+test("filters from a copied URL are restored", async () => {
+  window.location.hash = "#/p/p-1/list?status=done&next=none&q=C-3&sort=id";
+  const api = client(async () => page());
   render(<CardListPage client={api} projectId="p-1" view="list" />);
-  const row = (await screen.findByText("写迁移脚本")).closest("tr");
-  expect(row?.textContent).toContain("C-2");
-  expect(row?.textContent).toContain("待开始");
-  expect(row?.textContent).toContain("coder");
-  expect(row?.querySelector("a")?.getAttribute("href")).toBe(
-    "#/p/p-1/cards/C-2",
-  );
+  expect(await screen.findByText("清理 worktree")).toBeTruthy();
+  expect(screen.queryByText("准备发布")).toBeNull();
+  expect(
+    (screen.getByRole("checkbox", { name: "已完成" }) as HTMLInputElement)
+      .checked,
+  ).toBe(true);
 });
 
 test("HTML inside a card title is shown as text, not markup", async () => {
@@ -224,9 +261,9 @@ test("HTML inside a card title is shown as text, not markup", async () => {
     why: "<script>alert(2)</script>",
     status: "backlog",
   });
-  const api = client(async (_projectId, filter) => ({
+  const api = client(async () => ({
     project_id: "p-1",
-    filter,
+    filter: "all",
     cards: [hostile],
     counts: { total: 1, needs_me: 1, agent: 0 },
   }));

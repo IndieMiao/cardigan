@@ -70,6 +70,34 @@ export function cardViews(state: CommandState): CardView[] {
     .cards as CardView[];
 }
 
+export interface CardListView extends CardView {
+  readonly progress: { readonly completed: number; readonly total: number };
+  readonly updated_at: string;
+  readonly roles: readonly string[];
+}
+
+/** Card rows plus the counts, timestamp and roles the list filters need (U2). */
+export function cardListViews(state: CommandState): CardListView[] {
+  return cardViews(state).map((card) => {
+    const items = state.work_items.filter((item) => item.card_id === card.id),
+      completed = items.filter(
+        (item) => item.status === "accepted" || item.status === "passed",
+      ).length,
+      updated_at =
+        state.events
+          .filter((event) => event.card_id === card.id)
+          .map((event) => event.created_at)
+          .sort()
+          .at(-1) ?? card.created_at;
+    return {
+      ...card,
+      progress: { completed, total: items.length },
+      updated_at,
+      roles: [...new Set(items.map((item) => item.role_id))].sort(),
+    };
+  });
+}
+
 /** A card is "needs me" when the next actor is the human or something waits on them. */
 export function needsMe(card: CardView): boolean {
   return (
@@ -543,7 +571,13 @@ export function executionView(
 export interface ActivityQuery {
   readonly card_id?: CardId;
   readonly role?: string;
+  /** Coarse speaker group: human | pm | agent | system. */
+  readonly actor?: string;
   readonly type?: string;
+  /** Coarse event category used by the picker. */
+  readonly category?: string;
+  /** Relative time window: 24h | 7d | 30d. */
+  readonly range?: string;
   /** Return events strictly older than this event id (paging back). */
   readonly before?: string;
   readonly limit?: number;
@@ -556,8 +590,73 @@ function actorRole(event: { readonly actor: Actor }): string {
     : event.actor.kind;
 }
 
+const ACTOR_GROUPS: Readonly<Record<string, string>> = {
+  human: "human",
+  system: "system",
+  pm: "pm",
+  office: "pm",
+  ops: "pm",
+};
+function actorGroup(event: { readonly actor: Actor }): string {
+  const role = actorRole(event);
+  return ACTOR_GROUPS[role] ?? "agent";
+}
+
+const EVENT_CATEGORIES: Readonly<Record<string, readonly string[]>> = {
+  delivery: ["delivery_submitted", "delivery_accepted"],
+  review: ["review_submitted"],
+  decision: [
+    "decision_requested",
+    "decision_resolved",
+    "decision_provisionally_resolved",
+  ],
+  comment: [
+    "comment_posted",
+    "comment_added",
+    "instruction_issued",
+    "instruction",
+  ],
+  run: [
+    "run_queued",
+    "run_dispatched",
+    "run_started",
+    "run_finished",
+    "run_dispatch_aborted",
+    "run_inactive",
+    "session_replaced",
+    "runtime_unknown",
+    "runtime_lost",
+    "runtime_reconnected",
+    "bell_delivery_failed",
+    "bell_retry_exhausted",
+  ],
+  merge: [
+    "card_merged",
+    "merge_conflicted",
+    "merge_failed",
+    "worktree_cleaned",
+    "worktree_cleanup_failed",
+    "reconcile_finding",
+  ],
+};
+function activityCategory(type: string): string {
+  for (const [category, types] of Object.entries(EVENT_CATEGORIES))
+    if (types.includes(type)) return category;
+  return "other";
+}
+
+const RANGE_MS: Readonly<Record<string, number>> = {
+  "24h": 24 * 60 * 60 * 1000,
+  "7d": 7 * 24 * 60 * 60 * 1000,
+  "30d": 30 * 24 * 60 * 60 * 1000,
+};
+
 /** §8.6 项目动态: the event stream, filterable and paged newest first. */
-export function activity(state: CommandState, query: ActivityQuery) {
+export function activity(
+  state: CommandState,
+  query: ActivityQuery,
+  now = new Date().toISOString(),
+) {
   const limit = Math.min(
     Math.max(1, query.limit ?? DEFAULT_ACTIVITY_LIMIT),
     MAX_ACTIVITY_LIMIT,
@@ -574,19 +673,32 @@ export function activity(state: CommandState, query: ActivityQuery) {
     0,
     beforeIndex === -1 ? ordered.length : beforeIndex,
   );
+  const range = query.range === undefined ? undefined : RANGE_MS[query.range];
+  const since = range === undefined ? undefined : Date.parse(now) - range;
   const filtered = eligible.filter(
     (event) =>
       (query.card_id === undefined || event.card_id === query.card_id) &&
       (query.role === undefined || actorRole(event) === query.role) &&
-      (query.type === undefined || event.type === query.type),
+      (query.actor === undefined || actorGroup(event) === query.actor) &&
+      (query.type === undefined || event.type === query.type) &&
+      (query.category === undefined ||
+        activityCategory(event.type) === query.category) &&
+      (since === undefined || Date.parse(event.created_at) >= since),
   );
   const page = filtered.slice(-limit).reverse();
   const oldest = page.at(-1);
+  const cards = [...state.cards].sort(byId);
+  const titles = new Map(cards.map((card) => [card.id, card.title]));
   return {
     project_id: state.project_id,
+    cards: cards.map((card) => ({ id: card.id, title: card.title })),
     events: page.map((event) => ({
       id: event.id,
       card_id: event.card_id ?? null,
+      card_title:
+        event.card_id === undefined
+          ? null
+          : (titles.get(event.card_id) ?? null),
       seq: event.seq,
       type: event.type,
       actor: event.actor,

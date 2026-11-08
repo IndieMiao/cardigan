@@ -63,6 +63,13 @@ export interface CardView {
   readonly related_cards: readonly string[];
 }
 
+/** A list row: the card plus the fields the list filters and columns need. */
+export interface CardListItem extends CardView {
+  readonly progress: { readonly completed: number; readonly total: number };
+  readonly updated_at: string;
+  readonly roles: readonly string[];
+}
+
 /**
  * A reference the server resolved for a body (`references` of a timeline entry).
  * `exists` decides whether it may become a link: an identifier that names
@@ -280,7 +287,7 @@ export type CardFilter = "all" | "needs_me" | "agent";
 export interface CardPage {
   readonly project_id: string;
   readonly filter: CardFilter;
-  readonly cards: readonly CardView[];
+  readonly cards: readonly CardListItem[];
   readonly counts: CardCounts;
 }
 
@@ -396,6 +403,7 @@ export interface RunView {
   readonly assignment_id: string;
   readonly status: string;
   readonly kind: string;
+  readonly outcome?: string | null;
   readonly model: string;
   readonly role_version: number;
   readonly agent_cli_version: string;
@@ -433,13 +441,18 @@ export interface ExecutionData {
 export interface ActivityFilter {
   readonly card_id?: string;
   readonly role?: string;
+  readonly actor?: string;
   readonly type?: string;
+  readonly category?: string;
+  readonly range?: string;
   readonly before?: string;
 }
 export interface ActivityData {
+  readonly cards: readonly { id: string; title: string }[];
   readonly events: readonly {
     id: string;
     card_id: string | null;
+    card_title: string | null;
     seq: number;
     type: string;
     role: string;

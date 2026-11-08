@@ -1,23 +1,27 @@
 import { useCallback } from "react";
-import type { CardFilter, CardiganClient, CardPage, CardView } from "../api.js";
+import type {
+  CardFilter,
+  CardiganClient,
+  CardListItem,
+  CardPage,
+} from "../api.js";
 import { FilterBar } from "../components/FilterBar.js";
 import {
   EmptyState,
   IdTag,
   PageTitle,
   StatusTag,
+  Time,
 } from "../components/Foundation.js";
 import { routeHash, useRouteFilters } from "../route.js";
 import { BOARD_STATUSES, cardStatusLabel, nextOwnersLabel } from "../status.js";
 import { useResource } from "../useResource.js";
 
 /**
- * The board and the list (M5 plan §4 M5.3; development plan §8.7).
+ * The board and the list (M5 plan §4 M5.3; Phase 1.5 §4.3).
  *
- * Both views are the same data: `GET /api/projects/:id/cards?filter=…` returns
- * every card with its domain-derived status, `why` and next owners, so the
- * board only groups by status and the list only prints one row per card. The
- * two filters are the ones the plan names: 等我处理 and 等 Agent 处理.
+ * Both views read the same card rows. The list exposes the §4.3 filters in the
+ * route, so a copied URL keeps the status, next owner, role, search and sort.
  */
 
 export interface CardListPageProps {
@@ -32,6 +36,56 @@ type LoadState =
   | { readonly kind: "error"; readonly message: string }
   | { readonly kind: "ready"; readonly page: CardPage };
 
+const statusesOf = (value: string | undefined): string[] =>
+  (value ?? "").split(",").filter(Boolean);
+const idNumber = (id: string): number => {
+  const digits = /(\d+)\)?$/.exec(id)?.[1];
+  return digits === undefined ? 0 : Number(digits);
+};
+const nextKind = (card: CardListItem): "human" | "agent" | "none" => {
+  if (
+    card.next_owners.some((owner) => owner.kind === "human") ||
+    card.waiting_on.some(
+      (waiting) =>
+        waiting.kind === "decision" || waiting.kind === "human_action",
+    )
+  )
+    return "human";
+  if (
+    card.next_owners.some(
+      (owner) => owner.kind === "role" || owner.kind === "assignment",
+    )
+  )
+    return "agent";
+  return "none";
+};
+function filteredCards(
+  cards: readonly CardListItem[],
+  filters: Readonly<Record<string, string>>,
+): readonly CardListItem[] {
+  const selected = new Set(statusesOf(filters.status)),
+    q = (filters.q ?? "").trim().toLocaleLowerCase(),
+    next = filters.next ?? "",
+    role = filters.role ?? "";
+  const matched = cards.filter(
+    (card) =>
+      (selected.size === 0 || selected.has(card.status)) &&
+      (next === "" || nextKind(card) === next) &&
+      (role === "" || card.roles.includes(role)) &&
+      `${card.id} ${card.title}`.toLocaleLowerCase().includes(q),
+  );
+  return [...matched].sort((left, right) => {
+    if (filters.sort === "id") return idNumber(left.id) - idNumber(right.id);
+    if (filters.sort === "priority")
+      return (
+        right.priority - left.priority || idNumber(left.id) - idNumber(right.id)
+      );
+    return (
+      right.updated_at.localeCompare(left.updated_at) ||
+      idNumber(right.id) - idNumber(left.id)
+    );
+  });
+}
 export function CardListPage({
   client,
   projectId,
@@ -39,13 +93,9 @@ export function CardListPage({
   revision = 0,
 }: CardListPageProps) {
   const [filters, setFilters] = useRouteFilters({ kind: view, projectId });
-  const filter: CardFilter =
-    filters.filter === "needs_me" || filters.filter === "agent"
-      ? filters.filter
-      : "all";
   const load = useCallback(
-    () => client.cards(projectId, filter),
-    [client, projectId, filter],
+    () => client.cards(projectId, "all" as CardFilter),
+    [client, projectId],
   );
   const { data, error, reload } = useResource(load, revision);
   const state: LoadState = data
@@ -53,12 +103,11 @@ export function CardListPage({
     : error
       ? { kind: "error", message: error }
       : { kind: "loading" };
-  const cards =
-    data?.cards.filter((c) =>
-      `${c.id} ${c.title}`
-        .toLocaleLowerCase()
-        .includes((filters.q ?? "").trim().toLocaleLowerCase()),
-    ) ?? [];
+  const cards = data ? filteredCards(data.cards, filters) : [];
+  const roles = [
+    ...new Set((data?.cards ?? []).flatMap((card) => card.roles)),
+  ].sort();
+  const activeFilters = Object.entries(filters).some(([, value]) => value);
   return (
     <section className="cards-page" aria-label="卡片">
       <PageTitle
@@ -76,14 +125,38 @@ export function CardListPage({
       <FilterBar
         fields={[
           {
-            key: "filter",
-            label: "下一步",
+            key: "status",
+            label: "状态",
+            multiple: true,
+            options: BOARD_STATUSES.map((status) => ({
+              value: status,
+              label: cardStatusLabel(status),
+            })),
+          },
+          {
+            key: "next",
+            label: "下一步谁做",
             options: [
-              { value: "needs_me", label: "等我处理" },
-              { value: "agent", label: "等 Agent 处理" },
+              { value: "human", label: "你" },
+              { value: "agent", label: "Agent" },
+              { value: "none", label: "无人" },
             ],
           },
+          {
+            key: "role",
+            label: "角色",
+            options: roles.map((role) => ({ value: role, label: role })),
+          },
           { key: "q", label: "搜索标题或编号" },
+          {
+            key: "sort",
+            label: "排序",
+            options: [
+              { value: "updated", label: "更新时间" },
+              { value: "id", label: "编号" },
+              { value: "priority", label: "优先级" },
+            ],
+          },
         ]}
         values={filters}
         onChange={setFilters}
@@ -104,13 +177,9 @@ export function CardListPage({
       )}
       {state.kind === "ready" && cards.length === 0 && (
         <EmptyState>
-          {filters.q
+          {activeFilters
             ? "没有匹配的卡片，请调整筛选条件。"
-            : filter === "all"
-              ? "这个项目还没有卡片。向 PM 描述目标后，卡片会出现在这里。"
-              : filter === "needs_me"
-                ? "没有等你处理的卡片。有事项需要你时会出现在这里。"
-                : "没有等 Agent 处理的卡片。指派工作后可在这里查看。"}
+            : "这个项目还没有卡片。向 PM 描述目标后，卡片会出现在这里。"}
         </EmptyState>
       )}
       {state.kind === "ready" &&
@@ -124,7 +193,7 @@ export function CardListPage({
   );
 }
 
-function cardHref(projectId: string, card: CardView): string {
+function cardHref(projectId: string, card: CardListItem): string {
   return routeHash({ kind: "card", projectId, cardId: card.id });
 }
 
@@ -132,7 +201,7 @@ function Board({
   cards,
   projectId,
 }: {
-  readonly cards: readonly CardView[];
+  readonly cards: readonly CardListItem[];
   readonly projectId: string;
 }) {
   return (
@@ -178,7 +247,7 @@ function CardTable({
   cards,
   projectId,
 }: {
-  readonly cards: readonly CardView[];
+  readonly cards: readonly CardListItem[];
   readonly projectId: string;
 }) {
   return (
@@ -189,23 +258,31 @@ function CardTable({
           <th scope="col">标题</th>
           <th scope="col">状态</th>
           <th scope="col">下一步</th>
-          <th scope="col">原因</th>
+          <th scope="col">进度</th>
+          <th scope="col">更新时间</th>
         </tr>
       </thead>
       <tbody>
         {cards.map((card) => (
-          <tr key={card.id}>
+          <tr key={card.id} title={card.why}>
             <td>
               <IdTag id={card.id} label="卡片" detail={card.title} />
             </td>
             <td>
-              <a href={cardHref(projectId, card)}>{card.title}</a>
+              <a href={cardHref(projectId, card)} title={card.why}>
+                {card.title}
+              </a>
             </td>
             <td>
               <StatusTag status={card.status} />
             </td>
             <td>{nextOwnersLabel(card.next_owners)}</td>
-            <td className="card-why">{card.why}</td>
+            <td>
+              {card.progress.completed}/{card.progress.total}
+            </td>
+            <td>
+              <Time value={card.updated_at} />
+            </td>
           </tr>
         ))}
       </tbody>

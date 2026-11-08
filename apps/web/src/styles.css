@@ -383,6 +383,27 @@ button.quiet,
 .filter-controls select {
   max-width: 240px;
 }
+.filter-multi {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.filter-multi legend {
+  float: left;
+  margin-right: 4px;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+.filter-multi label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--text-sm);
+}
 .filter-chips {
   border: 0;
   margin: 0;
@@ -1178,6 +1199,106 @@ fieldset.filters {
   overflow-wrap: anywhere;
 }
 
+.activity-day {
+  margin: 24px 0;
+}
+.activity-day h2 {
+  margin: 0 0 8px;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+.activity-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  cursor: pointer;
+}
+.execution-page {
+  max-width: 1600px;
+}
+.execution-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+  line-height: 1.45;
+}
+.execution-table th,
+.execution-table td {
+  padding: 10px 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+.execution-table th {
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.execution-row {
+  cursor: pointer;
+}
+.execution-row:hover {
+  background: var(--surface-muted);
+}
+.execution-toggle {
+  margin-right: 8px;
+  padding: 2px 8px;
+  font-size: var(--text-xs);
+}
+.execution-run {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.execution-detail > td {
+  padding: 16px;
+  background: var(--surface-muted);
+}
+.execution-detail-grid {
+  display: grid;
+  grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
+  gap: 24px;
+}
+.execution-detail-grid dl {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 12px;
+  margin: 0;
+}
+.execution-detail-grid dt {
+  color: var(--text-muted);
+}
+.execution-detail-grid dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.execution-detail-grid h3 {
+  margin: 12px 0 6px;
+  font-size: var(--text-sm);
+}
+.execution-detail-grid h3:first-child {
+  margin-top: 0;
+}
+.execution-runs {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.execution-runs li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.execution-actions {
+  display: grid;
+  gap: 4px;
+  margin-top: 16px;
+}
 .activity-filters {
   display: flex;
   gap: 12px;

@@ -191,18 +191,18 @@ test.each(["board", "list"] as const)(
     });
     expect(link.getAttribute("href")).toContain(`/cards/${f.card.id}`);
     expect(screen.getAllByText(/待开始/).length).toBeGreaterThan(0);
-    expect(screen.getByRole("option", { name: /等我处理/ })).toBeTruthy();
-    expect(screen.getByRole("option", { name: /等 Agent 处理/ })).toBeTruthy();
-    fireEvent.change(screen.getByLabelText("下一步"), {
-      target: { value: "needs_me" },
+    for (const name of ["你", "Agent", "无人"])
+      expect(screen.getByRole("option", { name })).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("搜索标题或编号"), {
+      target: { value: "没有这张卡" },
     });
-    await screen.findByText("没有等你处理的卡片。有事项需要你时会出现在这里。");
+    await screen.findByText("没有匹配的卡片，请调整筛选条件。");
     await waitFor(() =>
       expect(
         screen.queryByRole("link", { name: new RegExp(f.card.title) }),
       ).toBeNull(),
     );
-    fireEvent.change(screen.getByLabelText("下一步"), {
+    fireEvent.change(screen.getByLabelText("搜索标题或编号"), {
       target: { value: "" },
     });
     await screen.findByRole("link", { name: new RegExp(f.card.title) });

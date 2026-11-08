@@ -2,7 +2,7 @@ import type {
   AttachmentView,
   CardDetail,
   CardiganClient,
-  CardView,
+  CardListItem,
   ProjectSummary,
   SessionInfo,
   TimelineEntryView,
@@ -16,7 +16,7 @@ import type {
 
 export const NOW = "2026-01-01T00:00:00.000Z";
 
-export const card: CardView = {
+export const card: CardListItem = {
   id: "C-1",
   title: "准备发布",
   goal: "把 0.1 发出去",
@@ -33,6 +33,9 @@ export const card: CardView = {
     { kind: "role", ref: "reviewer" },
   ],
   related_cards: [],
+  progress: { completed: 1, total: 2 },
+  updated_at: NOW,
+  roles: ["coder", "reviewer"],
 };
 
 export function timelineEntry(
@@ -158,6 +161,7 @@ export function fakeClient(
   return {
     subscribe: () => () => {},
     activity: async () => ({
+      cards: [{ id: card.id, title: card.title }],
       events: [],
       next_before: null,
       counts: { returned: 0, matched: 0 },

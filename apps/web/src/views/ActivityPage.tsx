@@ -1,17 +1,152 @@
 import { useCallback } from "react";
-import type { CardiganClient } from "../api.js";
+import type { ActivityData, CardiganClient } from "../api.js";
 import { FilterBar } from "../components/FilterBar.js";
-import {
-  EmptyState,
-  IdTag,
-  PageTitle,
-  Time,
-} from "../components/Foundation.js";
+import { EmptyState, PageTitle, Time } from "../components/Foundation.js";
 import { CardLink, Feedback } from "../components/Operations.js";
-import { EVENT_LABELS, eventLabel } from "../events.js";
+import { eventLabel } from "../events.js";
 import { useRouteFilters } from "../route.js";
 import { useResource } from "../useResource.js";
 
+const ACTOR_LABELS: Readonly<Record<string, string>> = {
+  human: "你",
+  pm: "PM",
+  agent: "Agent",
+  system: "系统",
+};
+const CATEGORY_LABELS: Readonly<Record<string, string>> = {
+  delivery: "交付",
+  review: "审核",
+  decision: "拍板",
+  comment: "评论与指令",
+  run: "运行",
+  merge: "合并与清理",
+  other: "其他",
+};
+const RANGE_LABELS: Readonly<Record<string, string>> = {
+  "24h": "最近 24 小时",
+  "7d": "最近 7 天",
+  "30d": "最近 30 天",
+};
+const actorLabel = (event: ActivityData["events"][number]): string =>
+  event.actor.kind === "human"
+    ? "你"
+    : event.actor.kind === "system"
+      ? "系统"
+      : event.role === "pm"
+        ? "PM"
+        : "Agent";
+const dayKey = (value: string): string => {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "时间未知";
+  const pad = (number: number) => String(number).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+};
+const dayLabel = (key: string): string => {
+  if (key === "时间未知") return key;
+  const [year, month, day] = key.split("-").map(Number);
+  const current = new Date().getFullYear();
+  return `${year === current ? "" : `${year} 年 `}${month} 月 ${day} 日`;
+};
+type ActivityEvent = ActivityData["events"][number];
+type Row =
+  | { readonly kind: "event"; readonly event: ActivityEvent }
+  | {
+      readonly kind: "system";
+      readonly type: string;
+      readonly card_id: string | null;
+      readonly card_title: string | null;
+      readonly events: readonly ActivityEvent[];
+    };
+/** Collapse adjacent system events of the same type and card into one row. */
+function rowsOf(events: readonly ActivityEvent[]): Row[] {
+  const rows: Row[] = [];
+  for (const event of events) {
+    const previous = rows.at(-1);
+    if (
+      event.actor.kind === "system" &&
+      previous?.kind === "system" &&
+      previous.type === event.type &&
+      previous.card_id === event.card_id
+    ) {
+      rows[rows.length - 1] = {
+        ...previous,
+        events: [...previous.events, event],
+      };
+      continue;
+    }
+    rows.push(
+      event.actor.kind === "system"
+        ? {
+            kind: "system",
+            type: event.type,
+            card_id: event.card_id,
+            card_title: event.card_title,
+            events: [event],
+          }
+        : { kind: "event", event },
+    );
+  }
+  return rows;
+}
+function DayGroup({
+  day,
+  events,
+  projectId,
+}: {
+  readonly day: string;
+  readonly events: readonly ActivityEvent[];
+  readonly projectId: string;
+}) {
+  return (
+    <section className="activity-day" aria-label={dayLabel(day)}>
+      <h2>{dayLabel(day)}</h2>
+      {rowsOf(events).map((row) => {
+        if (row.kind === "event") {
+          const event = row.event;
+          return (
+            <details key={event.id} className="event-details">
+              <summary className="activity-summary">
+                <Time value={event.created_at} />
+                <strong>{actorLabel(event)}</strong>
+                <span>{eventLabel(event.type)}</span>
+                <CardLink
+                  projectId={projectId}
+                  id={event.card_id}
+                  label={event.card_title ?? "卡片"}
+                />
+              </summary>
+              <pre>{JSON.stringify(event.payload, null, 2)}</pre>
+            </details>
+          );
+        }
+        const first = row.events[0];
+        return (
+          <details key={first?.id} className="event-details">
+            <summary className="activity-summary">
+              <Time value={first?.created_at} />
+              <strong>系统</strong>
+              <span>
+                {row.events.length} 条{eventLabel(row.type)}
+              </span>
+              <CardLink
+                projectId={projectId}
+                id={row.card_id}
+                label={row.card_title ?? "卡片"}
+              />
+            </summary>
+            <pre>
+              {JSON.stringify(
+                row.events.map((event) => event.payload),
+                null,
+                2,
+              )}
+            </pre>
+          </details>
+        );
+      })}
+    </section>
+  );
+}
 export function ActivityPage({
   client,
   projectId,
@@ -30,6 +165,11 @@ export function ActivityPage({
     [client, projectId, filters],
   );
   const { data, pending, error, reload } = useResource(load, revision);
+  const days = new Map<string, ActivityEvent[]>();
+  for (const event of data?.events ?? []) {
+    const key = dayKey(event.created_at);
+    days.set(key, [...(days.get(key) ?? []), event]);
+  }
   return (
     <section aria-label="项目动态">
       <PageTitle
@@ -38,26 +178,34 @@ export function ActivityPage({
       />
       <FilterBar
         fields={[
-          { key: "card_id", label: "卡片编号" },
           {
-            key: "role",
-            label: "角色",
-            options: ["human", "pm", "coder", "reviewer", "system"].map(
-              (value) => ({
-                value,
-                label:
-                  value === "human"
-                    ? "你"
-                    : value === "system"
-                      ? "系统"
-                      : value,
-              }),
-            ),
+            key: "card_id",
+            label: "卡片",
+            options: (data?.cards ?? []).map((card) => ({
+              value: card.id,
+              label: `${card.id} ${card.title}`,
+            })),
           },
           {
-            key: "type",
-            label: "事件类型",
-            options: Object.entries(EVENT_LABELS).map(([value, label]) => ({
+            key: "actor",
+            label: "发言方",
+            options: Object.entries(ACTOR_LABELS).map(([value, label]) => ({
+              value,
+              label,
+            })),
+          },
+          {
+            key: "category",
+            label: "事件类别",
+            options: Object.entries(CATEGORY_LABELS).map(([value, label]) => ({
+              value,
+              label,
+            })),
+          },
+          {
+            key: "range",
+            label: "时间范围",
+            options: Object.entries(RANGE_LABELS).map(([value, label]) => ({
               value,
               label,
             })),
@@ -82,38 +230,13 @@ export function ActivityPage({
               没有符合条件的事件。调整筛选，或等待新的项目动态。
             </EmptyState>
           )}
-          {data.events.map((e) => (
-            <details key={e.id} className="event-details">
-              <summary className="metadata">
-                <Time value={e.created_at} />
-                <span>{eventLabel(e.type)}</span>
-                <span>
-                  发起者：
-                  {e.role === "human"
-                    ? "你"
-                    : e.role === "system"
-                      ? "系统"
-                      : e.role}
-                </span>
-                <span>
-                  {e.card_id ? (
-                    <IdTag id={e.card_id} label="卡片" />
-                  ) : (
-                    "项目级事件"
-                  )}
-                </span>
-              </summary>
-              <p className="metadata">
-                <CardLink projectId={projectId} id={e.card_id} />
-                {e.actor.assignment_id && (
-                  <IdTag id={e.actor.assignment_id} label={e.role} />
-                )}
-                <span>流内序号：{e.seq}</span>
-                <span>事件编号：{e.id}</span>
-                <span>原始类型：{e.type}</span>
-              </p>
-              <pre>{JSON.stringify(e.payload, null, 2)}</pre>
-            </details>
+          {[...days].map(([day, events]) => (
+            <DayGroup
+              key={day}
+              day={day}
+              events={events}
+              projectId={projectId}
+            />
           ))}
           <div className="action-row">
             <button

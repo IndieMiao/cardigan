@@ -18,6 +18,7 @@ import { ActivityPage } from "./ActivityPage.js";
 const event: ActivityData["events"][number] = {
   id: "event-new",
   card_id: "C-1",
+  card_title: "准备发布",
   seq: 3,
   type: "instruction_issued",
   role: "pm",
@@ -25,12 +26,15 @@ const event: ActivityData["events"][number] = {
   payload: { reason: "先完成必要检查", text: '<img src=x onerror="alert(1)">' },
   actor: { kind: "assignment", assignment_id: "A-1" },
 };
+const cards = [{ id: "C-1", title: "准备发布" }];
 const data: ActivityData = {
+  cards,
   events: [event],
   next_before: "event-new",
   counts: { returned: 1, matched: 2 },
 };
 const empty: ActivityData = {
+  cards,
   events: [],
   next_before: null,
   counts: { returned: 0, matched: 0 },
@@ -40,44 +44,47 @@ afterEach(() => {
   window.history.replaceState(null, "", "/");
 });
 
-test("activity is collapsed by default, exposes the actor/reason and escapes event content", async () => {
+test("activity is collapsed, describes time/actor/action/card and escapes the payload", async () => {
   const { container } = render(
     <ActivityPage
       client={fakeClient({ activity: async () => data })}
       projectId="p-1"
     />,
   );
-  await screen.findByText("发起者：pm");
-  expect(document.querySelector("summary")?.textContent).toContain(
-    "下达了指令",
-  );
+  await screen.findByText("下达了指令");
+  expect(document.querySelector("summary")?.textContent).toContain("PM");
+  expect(document.querySelector("summary")?.textContent).toContain("准备发布");
   expect(container.querySelector("details")?.open).toBe(false);
   expect(container.querySelector("pre")?.textContent).toContain(
     "先完成必要检查",
   );
   expect(container.querySelector("img")).toBeNull();
   expect(
-    screen
-      .getByRole("link", { name: /^C-1 /, hidden: true })
-      .getAttribute("href"),
+    screen.getByRole("link", { name: /C-1 准备发布/u }).getAttribute("href"),
   ).toBe("#/p/p-1/cards/C-1");
 });
 
-test("filters by card, role and type; paging preserves filters and a new filter resets the cursor", async () => {
+test("filters by card, speaker and category; paging preserves filters and a filter resets the cursor", async () => {
   const activity = vi
     .fn<(p: string, f: ActivityFilter) => Promise<ActivityData>>()
     .mockResolvedValue(data);
   render(<ActivityPage client={fakeClient({ activity })} projectId="p-1" />);
   await screen.findByText(/最新事件/);
   for (const [label, value] of [
-    ["卡片编号", "C-1"],
-    ["角色", "pm"],
-    ["事件类型", "instruction_issued"],
+    ["卡片", "C-1"],
+    ["发言方", "pm"],
+    ["事件类别", "comment"],
+    ["时间范围", "7d"],
   ])
     fireEvent.change(screen.getByLabelText(label as string), {
       target: { value },
     });
-  const filters = { card_id: "C-1", role: "pm", type: "instruction_issued" };
+  const filters = {
+    card_id: "C-1",
+    actor: "pm",
+    category: "comment",
+    range: "7d",
+  };
   await waitFor(() =>
     expect(activity).toHaveBeenLastCalledWith("p-1", filters),
   );
@@ -103,6 +110,45 @@ test("filters by card, role and type; paging preserves filters and a new filter 
   await waitFor(() => expect(activity).toHaveBeenLastCalledWith("p-1", {}));
 });
 
+test("groups by day and folds adjacent system events of the same type", async () => {
+  const system = (id: string, seq: number): ActivityData["events"][number] => ({
+    ...event,
+    id,
+    seq,
+    type: "run_started",
+    role: "system",
+    created_at: "2026-01-01T00:30:00Z",
+    payload: { run_id: id },
+    actor: { kind: "system" },
+  });
+  const response: ActivityData = {
+    cards,
+    events: [
+      system("event-2", 2),
+      system("event-1", 1),
+      {
+        ...event,
+        id: "event-3",
+        seq: 3,
+        created_at: "2026-01-02T00:00:00Z",
+      },
+    ],
+    next_before: null,
+    counts: { returned: 3, matched: 3 },
+  };
+  render(
+    <ActivityPage
+      client={fakeClient({ activity: async () => response })}
+      projectId="p-1"
+    />,
+  );
+  await screen.findByText("2 条开始一次 Run");
+  expect(screen.getAllByRole("region", { name: /月.*日/u })).toHaveLength(2);
+  const folded = screen.getByText("2 条开始一次 Run").closest("details");
+  expect(folded?.querySelector("pre")?.textContent).toContain("event-2");
+  expect(folded?.querySelector("pre")?.textContent).toContain("event-1");
+});
+
 test("activity shows loading and errors, retries, and handles empty results", async () => {
   const activity = vi
     .fn()
@@ -119,13 +165,15 @@ test("activity shows loading and errors, retries, and handles empty results", as
   ).toBe(true);
 });
 
-test("activity client encodes filters and paging without mutating Agent cursors", async () => {
+test("activity client encodes speaker, category, range and paging without mutating Agent cursors", async () => {
   const fetcher = vi
     .fn<typeof fetch>()
     .mockResolvedValue(new Response(JSON.stringify(empty)));
   await new HttpCardiganClient(fetcher).activity("p/a", {
     card_id: "C-1",
-    role: "pm ops",
+    actor: "pm",
+    category: "run",
+    range: "30d",
     type: "instruction_issued",
     before: "event/1",
   });
@@ -134,7 +182,9 @@ test("activity client encodes filters and paging without mutating Agent cursors"
   expect(parsed.pathname).toBe("/api/projects/p%2Fa/activity");
   expect(Object.fromEntries(parsed.searchParams)).toEqual({
     card_id: "C-1",
-    role: "pm ops",
+    actor: "pm",
+    category: "run",
+    range: "30d",
     type: "instruction_issued",
     before: "event/1",
   });

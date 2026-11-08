@@ -17,7 +17,10 @@ import { card, fakeClient } from "../testing/fixtures.js";
 import { ExecutionPage } from "./ExecutionPage.js";
 import { SnapshotPage } from "./SnapshotPage.js";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  window.history.replaceState(null, "", "/");
+});
 const assignment: ExecutionAssignment = {
   id: "A-1",
   role_id: "coder",
@@ -94,7 +97,47 @@ test("snapshot separates human/agent waits, shows next owners, blocked work and 
   ).toContain("待审核");
 });
 
-test("execution uses the newest queued Run, includes its snapshot and cursor, and does not offer duplicate start", async () => {
+test("execution defaults to working and switches between all, working, released and lost", async () => {
+  const lost = { ...assignment, id: "A-2", runtime_state: "lost" },
+    released = { ...assignment, id: "A-3", status: "released" };
+  render(
+    <ExecutionPage
+      client={fakeClient({
+        execution: async () => ({
+          assignments: [assignment, lost, released],
+          runs: [],
+          machines: [],
+        }),
+      })}
+      projectId="p-1"
+    />,
+  );
+  expect(
+    await screen.findByRole("button", { name: "展开 A-1 详情" }),
+  ).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "展开 A-2 详情" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "展开 A-3 详情" })).toBeNull();
+  fireEvent.change(screen.getByLabelText("筛选"), {
+    target: { value: "released" },
+  });
+  expect(
+    await screen.findByRole("button", { name: "展开 A-3 详情" }),
+  ).toBeTruthy();
+  fireEvent.change(screen.getByLabelText("筛选"), {
+    target: { value: "lost" },
+  });
+  expect(
+    await screen.findByRole("button", { name: "展开 A-2 详情" }),
+  ).toBeTruthy();
+  fireEvent.change(screen.getByLabelText("筛选"), {
+    target: { value: "all" },
+  });
+  expect(
+    await screen.findByRole("button", { name: "展开 A-1 详情" }),
+  ).toBeTruthy();
+});
+
+test("execution shows working assignments in a table and expands the newest Run, cursor and commands", async () => {
   render(
     <ExecutionPage
       client={fakeClient({
@@ -115,17 +158,27 @@ test("execution uses the newest queued Run, includes its snapshot and cursor, an
       projectId="p-1"
     />,
   );
-  const row = await screen.findByRole("article", { name: "执行 A-1" });
-  expect(row.textContent).toContain("最近 Run：R-10 合并修复");
-  expect(row.textContent).toContain("排队中");
+  const toggle = await screen.findByRole("button", { name: "展开 A-1 详情" });
+  const row = toggle.closest("tr");
+  expect(row?.textContent).toContain("A-1");
+  expect(row?.textContent).toContain("C-1");
+  expect(row?.textContent).toContain("W-1");
+  expect(row?.textContent).toContain("R-10");
+  expect(row?.textContent).toContain("排队中");
+  expect(screen.getByRole("columnheader", { name: "最近 Run" })).toBeTruthy();
+  fireEvent.click(toggle);
+  const expanded = await screen.findByRole("button", {
+    name: "收起 A-1 详情",
+  });
+  expect(expanded).toBeTruthy();
   for (const text of [
     "session-fixture",
     "terminal-fixture",
     "/fixture/worktree",
+    "agent/work",
     "已签收 seq 12",
-    "fixture-model",
   ])
-    expect(row.textContent).toContain(text);
+    expect(screen.getByText(text, { exact: false })).toBeTruthy();
   expect(
     screen.queryByRole("button", { name: "复制启动或恢复会话" }),
   ).toBeNull();
@@ -162,7 +215,12 @@ test.each([
         projectId="p-1"
       />,
     );
-    await screen.findByRole("article", { name: "执行 A-1" });
+    fireEvent.change(screen.getByLabelText("筛选"), {
+      target: { value: "all" },
+    });
+    fireEvent.click(
+      await screen.findByRole("button", { name: "展开 A-1 详情" }),
+    );
     const start = screen.queryByRole("button", { name: "复制启动或恢复会话" });
     expect(Boolean(start)).toBe(["idle", "not_provisioned"].includes(state));
     expect(screen.getByRole("button", { name: "复制检查异常" })).toBeTruthy();
@@ -180,8 +238,8 @@ test.each([
       released: "已释放",
     };
     expect(
-      screen.getByRole("article", { name: "执行 A-1" }).textContent,
-    ).toContain(labels[state as keyof typeof labels]);
+      screen.getAllByText(labels[state as keyof typeof labels]).length,
+    ).toBeGreaterThan(0);
   },
 );
 
@@ -202,7 +260,7 @@ test.each(["snapshot", "execution"] as const)(
     await screen.findByText(
       kind === "snapshot"
         ? "这个项目还没有卡片。向 PM 描述目标后，卡片会出现在这里。"
-        : "还没有 Assignment。指派工作后会在这里显示运行情况。",
+        : "现在没有工作中的 Assignment。切换筛选可查看全部、已释放或失联的 Assignment。",
     );
   },
 );
