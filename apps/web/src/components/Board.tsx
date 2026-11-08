@@ -62,13 +62,16 @@ export function Board({
                 ) : (
                   <ul className="board-list">
                     {column.map((card) => {
-                      const blocked = card.waiting_on.some(
-                        (w) => w.kind !== "review",
+                      const reasons = new Set(
+                        card.waiting_on.map((w) => w.kind),
                       );
+                      const blocked = reasons.has("blocked");
+                      const decision = reasons.has("decision");
+                      const humanAction = reasons.has("human_action");
                       return (
                         <li key={card.id}>
                           <a
-                            className={`card-tile${blocked ? " card-tile-blocked" : ""}`}
+                            className={`card-tile${blocked ? " card-tile-blocked" : decision || humanAction ? " card-tile-waiting" : ""}`}
                             href={routeHash({
                               kind: "card",
                               projectId,
@@ -81,7 +84,21 @@ export function Board({
                               detail={card.title}
                             />
                             <span className="card-title">{card.title}</span>
-                            {blocked && <StatusTag status="blocked" />}
+                            {(blocked || decision || humanAction) && (
+                              <span className="metadata">
+                                {decision && (
+                                  <span className="status status-waiting">
+                                    等你拍板
+                                  </span>
+                                )}
+                                {humanAction && (
+                                  <span className="status status-waiting">
+                                    待你执行
+                                  </span>
+                                )}
+                                {blocked && <StatusTag status="blocked" />}
+                              </span>
+                            )}
                             <span className="card-why">{card.why}</span>
                             <span>
                               负责角色：{card.roles.join("、") || "尚未配置"}

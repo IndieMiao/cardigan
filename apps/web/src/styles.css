@@ -1491,6 +1491,7 @@ fieldset.filters {
 .status-conditional::before {
   background: var(--status-review);
 }
+.status-waiting::before,
 .status-open::before,
 .status-provisional::before,
 .status-waiting_decision::before,
@@ -1581,6 +1582,9 @@ fieldset.filters {
   margin-bottom: 20px;
 }
 
+.card-tile-waiting {
+  border-left: 3px solid var(--status-wait);
+}
 .card-tile-blocked {
   border-left: 3px solid var(--danger);
 }

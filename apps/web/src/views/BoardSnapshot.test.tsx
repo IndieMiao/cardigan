@@ -191,3 +191,45 @@ test("U4b recent deliveries are a five-column table with full safe summary text 
   expect(summary?.getAttribute("title")).toBe(summary?.textContent);
   expect(container.querySelector("img")).toBeNull();
 });
+
+test.each([
+  { kinds: ["decision"], labels: ["等你拍板"], tone: "waiting" },
+  { kinds: ["human_action"], labels: ["待你执行"], tone: "waiting" },
+  { kinds: ["blocked"], labels: ["阻塞"], tone: "blocked" },
+  { kinds: ["review"], labels: [], tone: undefined },
+  { kinds: [], labels: [], tone: undefined },
+  {
+    kinds: ["decision", "human_action", "blocked", "decision", "review"],
+    labels: ["等你拍板", "待你执行", "阻塞"],
+    tone: "blocked",
+  },
+] as const)(
+  "U4b board labels waiting reasons independently ($kinds)",
+  async ({ kinds, labels, tone }) => {
+    const item: CardListItem = {
+      ...active,
+      waiting_on: kinds.map((kind) => ({ kind, ref: "fixture", label: kind })),
+    };
+    render(
+      <CardListPage
+        client={fakeClient({ cards: async () => cardsPage([item]) })}
+        projectId="p-1"
+        view="board"
+      />,
+    );
+    const tile = await screen.findByRole("link", { name: /准备发布/ });
+    expect(
+      [...tile.querySelectorAll(".status")].map((tag) => tag.textContent),
+    ).toEqual(labels);
+    expect(tile.classList.contains("card-tile-blocked")).toBe(
+      tone === "blocked",
+    );
+    expect(tile.classList.contains("card-tile-waiting")).toBe(
+      tone === "waiting",
+    );
+    for (const label of ["等你拍板", "待你执行"]) {
+      const badge = within(tile).queryByText(label, { exact: true });
+      if (badge) expect(badge.classList.contains("status-waiting")).toBe(true);
+    }
+  },
+);
