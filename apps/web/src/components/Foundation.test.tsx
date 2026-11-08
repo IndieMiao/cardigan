@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { URL as NodeURL } from "node:url";
 import {
   act,
   cleanup,
@@ -277,4 +279,44 @@ test("U1 card uses shared tags and time without changing comment or attachment c
   expect(card.querySelector("time")?.title).toMatch(/GMT/);
   expect(card.querySelector(".comment-box")).toBeTruthy();
   expect(card.querySelector(".attachment")).toBeTruthy();
+});
+
+test("U1 base text wrapping protects card header panels from unbroken commit SHAs", async () => {
+  const sheet = document.createElement("style");
+  sheet.textContent = readFileSync(
+    new NodeURL("../styles.css", import.meta.url),
+    "utf8",
+  );
+  document.head.append(sheet);
+  try {
+    const sha = `c6f87cbb${"a".repeat(32)}`;
+    const detail = cardDetail();
+    window.location.hash = "#/p/p-1/cards/C-1";
+    render(
+      <App
+        client={fakeClient({
+          card: async () => ({
+            ...detail,
+            card: {
+              ...detail.card,
+              why: `等待确认 ${sha}`,
+              waiting_on: [{ kind: "review", ref: "D-1", label: sha }],
+            },
+          }),
+        })}
+      />,
+    );
+    const card = await screen.findByRole("article", { name: "卡片 C-1" });
+    expect(card.querySelector(".page-title p")?.textContent).toContain(sha);
+    expect(
+      within(card).getByText("被什么阻塞").nextElementSibling?.textContent,
+    ).toBe(sha);
+    // jsdom does not lay out text. Assert the inherited base policy from the real
+    // stylesheet; a separate Chromium probe measures both viewport sizes.
+    expect(window.getComputedStyle(document.body).overflowWrap).toBe(
+      "anywhere",
+    );
+  } finally {
+    sheet.remove();
+  }
 });
