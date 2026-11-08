@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, readlinkSync } from "node:fs";
 
 /**
  * herdr-core cleanup for the tests that use a real `hc`.
@@ -12,14 +12,28 @@ import { existsSync } from "node:fs";
  */
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const alive = (pid: number): boolean => {
+/**
+ * Safely identify a PID before signalling it.
+ *
+ * A recorded PID can be recycled by an unrelated process after its core exits.
+ * Require `/proc/<pid>/exe` to be herdr-core and the process environment to
+ * carry this exact HC_SESSION; any read failure means "already gone", so we
+ * skip it instead of signalling a stranger.
+ */
+export function isHerdrCoreProcess(
+  pid: number | undefined,
+  session: string,
+): boolean {
+  if (pid === undefined) return false;
   try {
-    process.kill(pid, 0);
-    return true;
+    const exe = readlinkSync(`/proc/${pid}/exe`);
+    if (exe.split("/").pop() !== "herdr-core") return false;
+    const environ = readFileSync(`/proc/${pid}/environ`, "utf8");
+    return environ.split("\0").includes(`HC_SESSION=${session}`);
   } catch {
     return false;
   }
-};
+}
 
 const liveCores = new Set<HcCore>();
 let exitHookInstalled = false;
@@ -79,15 +93,40 @@ export class HcCore {
     installExitHook();
   }
 
+  /** Record a PID inspected by status or a test fixture. */
+  trackPid(pid: number, holder = false): void {
+    if (!Number.isSafeInteger(pid) || pid <= 0) return;
+    if (holder) this.#holders.add(pid);
+    else this.#pid = pid;
+    liveCores.add(this);
+  }
+
+  private owns(pid: number | undefined): boolean {
+    return isHerdrCoreProcess(pid, this.session);
+  }
+
+  /** Drop a PID that is gone, or whose number now belongs to someone else. */
+  private forgetPid(pid: number): void {
+    if (this.#pid === pid) this.#pid = undefined;
+    this.#holders.delete(pid);
+  }
+
+  private prune(): void {
+    if (this.#pid !== undefined && !this.owns(this.#pid)) this.#pid = undefined;
+    for (const pid of [...this.#holders])
+      if (!this.owns(pid)) this.#holders.delete(pid);
+  }
+
   /** Synchronous last resort; normal cleanup remains `stop()`. */
   killRecordedNow(): void {
     for (const pid of [this.#pid, ...this.#holders])
-      if (pid !== undefined && alive(pid))
+      if (pid !== undefined && this.owns(pid))
         try {
           process.kill(pid, "SIGKILL");
         } catch {
           // The PID is already gone or not ours any more.
         }
+    this.prune();
   }
 
   get pid(): number | undefined {
@@ -118,9 +157,9 @@ export class HcCore {
           env: this.hcEnv,
         }),
       ) as { pid?: unknown; holders?: { pid?: unknown }[] };
-      if (typeof status.pid === "number") this.#pid = status.pid;
+      if (typeof status.pid === "number") this.trackPid(status.pid);
       for (const holder of status.holders ?? [])
-        if (typeof holder.pid === "number") this.#holders.add(holder.pid);
+        if (typeof holder.pid === "number") this.trackPid(holder.pid, true);
     } catch {
       // Keep the previously recorded PID if the status call fails.
     }
@@ -151,7 +190,13 @@ export class HcCore {
       // PID first so shutdown cannot resurrect this test session.
       for (const pid of this.#holders) await this.terminate(pid);
       await this.terminate(this.#pid);
-      if (!existsSync(this.socket) && this.#pid === undefined) break;
+      this.prune();
+      if (
+        !existsSync(this.socket) &&
+        this.#pid === undefined &&
+        this.#holders.size === 0
+      )
+        break;
       await sleep(150);
     }
     // A holder can start just after the last stop; settle once before claiming
@@ -162,6 +207,9 @@ export class HcCore {
     for (const pid of this.#holders) await this.terminate(pid);
     await this.terminate(this.#pid);
     this.assertStopped();
+    this.#pid = undefined;
+    this.#holders.clear();
+    liveCores.delete(this);
   }
 
   /** Session-scoped stop for when the status call cannot return PIDs. */
@@ -177,25 +225,40 @@ export class HcCore {
     }
   }
 
-  /** SIGTERM the recorded PID, then SIGKILL if it is still alive. */
+  /** SIGTERM the recorded PID, then SIGKILL if it is still ours. */
   private async terminate(pid: number | undefined): Promise<void> {
-    if (pid === undefined || !alive(pid)) return;
+    if (pid === undefined) return;
+    if (!this.owns(pid)) {
+      this.forgetPid(pid);
+      return;
+    }
     try {
       process.kill(pid, "SIGTERM");
     } catch {
+      this.forgetPid(pid);
       return;
     }
     const deadline = Date.now() + 5_000;
     while (Date.now() < deadline) {
-      if (!alive(pid)) return;
+      if (!this.owns(pid)) {
+        this.forgetPid(pid);
+        return;
+      }
       await sleep(50);
+    }
+    // The PID may have been recycled while waiting; never signal a stranger.
+    if (!this.owns(pid)) {
+      this.forgetPid(pid);
+      return;
     }
     try {
       process.kill(pid, "SIGKILL");
     } catch {
+      this.forgetPid(pid);
       return;
     }
     await sleep(200);
+    if (!this.owns(pid)) this.forgetPid(pid);
   }
 
   /**
@@ -203,15 +266,15 @@ export class HcCore {
    * and its socket must be gone. PIDs only — never a command-line match.
    */
   assertStopped(): void {
-    if (this.#pid !== undefined && alive(this.#pid))
+    this.prune();
+    if (this.#pid !== undefined)
       throw new Error(
         `herdr-core ${this.#pid} (session ${this.session}) is still alive`,
       );
     for (const pid of this.#holders)
-      if (alive(pid))
-        throw new Error(
-          `herdr-core holder ${pid} (session ${this.session}) is still alive`,
-        );
+      throw new Error(
+        `herdr-core holder ${pid} (session ${this.session}) is still alive`,
+      );
     if (existsSync(this.socket))
       throw new Error(
         `herdr-core socket for session ${this.session} still exists: ${this.socket}`,
