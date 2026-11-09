@@ -266,11 +266,11 @@ test("U5c clipboard denial reports failure instead of claiming success", async (
   expect(screen.queryByText("已复制")).toBeNull();
 });
 
-test("U5c long comments fold at two rendered lines and expand safely; sequence and Assignment stay in tooltip", async () => {
+test("U6b long comments fold after fifteen rendered lines and expand safely; sequence stays in tooltip", async () => {
   const computed = getComputedStyle(document.body);
   computed.lineHeight = "20px";
   vi.spyOn(window, "getComputedStyle").mockReturnValue(computed);
-  vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(100);
+  vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(400);
   const entry = timelineEntry({
     body: "<script>alert(1)</script>\n\n[bad](javascript:alert(1))\n\n最后一行",
     author_role: "coder",
@@ -286,7 +286,7 @@ test("U5c long comments fold at two rendered lines and expand safely; sequence a
   );
   const expand = screen.getByRole("button", { name: "展开全文" });
   expect(expand.getAttribute("aria-expanded")).toBe("false");
-  expect(document.querySelector(".long-content-2 .collapsed")).toBeTruthy();
+  expect(document.querySelector(".long-content-15 .collapsed")).toBeTruthy();
   fireEvent.click(expand);
   expect(expand.getAttribute("aria-expanded")).toBe("true");
   expect(screen.getByText("最后一行")).toBeTruthy();

@@ -384,6 +384,11 @@ export function cardDetail(
     card.created_at;
   const timelineView = (entry: TimelineEntry) => {
     const event = eventBySeq.get(entry.event_seq);
+    const payload = event?.payload;
+    const attachmentId =
+      payload && typeof payload === "object" && "attachment_id" in payload
+        ? payload.attachment_id
+        : undefined;
     const reviewId =
       event?.payload &&
       typeof event.payload === "object" &&
@@ -402,6 +407,13 @@ export function cardDetail(
     return {
       ...entry,
       event_type: event?.type ?? null,
+      ...(event?.type === "attachment_uploaded" &&
+      typeof attachmentId === "string" &&
+      state.attachments.some(
+        (a) => a.id === attachmentId && a.card_id === card_id,
+      )
+        ? { attachment_id: attachmentId }
+        : {}),
       ...(entry.type === "decision_resolved" &&
       event?.payload &&
       typeof event.payload === "object" &&

@@ -47,7 +47,13 @@ export function formatTime(value: string, now = Date.now()): string {
       : `${date.getFullYear()}-`;
   return `${year}${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
-export function Time({ value }: { value: string | null | undefined }) {
+export function Time({
+  value,
+  relative = false,
+}: {
+  value: string | null | undefined;
+  relative?: boolean;
+}) {
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 60000);
@@ -67,7 +73,9 @@ export function Time({ value }: { value: string | null | undefined }) {
   }).format(new Date(value));
   return (
     <time dateTime={value} title={title}>
-      {formatTime(value, now)}
+      {relative && now - Date.parse(value) >= 86400000
+        ? `${Math.floor((now - Date.parse(value)) / 86400000)} 天前`
+        : formatTime(value, now)}
     </time>
   );
 }
@@ -107,7 +115,7 @@ export function LongContent({
   lines = 6,
 }: {
   children: ReactNode;
-  lines?: 2 | 4 | 6;
+  lines?: 2 | 4 | 6 | 15;
 }) {
   const ref = useRef<HTMLDivElement>(null),
     id = useId();
@@ -139,7 +147,11 @@ export function LongContent({
         ref={ref}
         onFocusCapture={() => setExpanded(true)}
         id={id}
-        className={expanded ? "long-body" : "long-body collapsed"}
+        className={
+          expanded || (lines === 15 && !long)
+            ? "long-body"
+            : "long-body collapsed"
+        }
       >
         {children}
       </div>
