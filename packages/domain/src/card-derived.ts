@@ -281,7 +281,7 @@ export function deriveNextOwners(input: CardDerivedInput): NextOwnerItem[] {
       item.assignment_id === undefined
         ? undefined
         : assignments.get(item.assignment_id);
-    if (assignment !== undefined) {
+    if (assignment !== undefined && assignment.status !== "released") {
       add({ kind: "assignment", ref: assignment.id });
     } else {
       add({ kind: "role", ref: item.role_id });

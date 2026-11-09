@@ -401,14 +401,58 @@ describe("next_owners", () => {
     );
   });
 
-  test("points active work items at their assignment", () => {
+  test.each(["active", "suspended"] as const)(
+    "points active work items at their %s assignment",
+    (status) => {
+      for (const workStatus of ["ready", "in_progress", "changes_requested"]) {
+        const owners = deriveNextOwners(
+          input({
+            work_items: [
+              produce(workStatus, { assignment_id: "A-1" as never }),
+            ],
+            assignments: [assignment({ status })],
+          }),
+        );
+        expect(owners).toEqual([{ kind: "assignment", ref: "A-1" }]);
+      }
+    },
+  );
+
+  test.each(["ready", "in_progress", "changes_requested"])(
+    "falls back to the work item's role for a released assignment (%s)",
+    (status) => {
+      const owners = deriveNextOwners(
+        input({
+          work_items: [produce(status, { assignment_id: "A-1" as never })],
+          assignments: [assignment({ status: "released" })],
+        }),
+      );
+      expect(owners).toEqual([{ kind: "role", ref: "coder" }]);
+    },
+  );
+
+  test("de-duplicates the role across released and unassigned work items", () => {
     const owners = deriveNextOwners(
       input({
-        work_items: [produce("in_progress", { assignment_id: "A-1" as never })],
-        assignments: [assignment()],
+        work_items: [
+          produce("in_progress", { assignment_id: "A-1" as never }),
+          produce("ready", {
+            id: "W-2" as never,
+            assignment_id: "A-2" as never,
+          }),
+          produce("changes_requested", { id: "W-3" as never }),
+        ],
+        assignments: [
+          assignment({ status: "released" }),
+          assignment({
+            id: "A-2" as never,
+            work_item_id: "W-2" as never,
+            status: "released",
+          }),
+        ],
       }),
     );
-    expect(owners).toEqual([{ kind: "assignment", ref: "A-1" }]);
+    expect(owners).toEqual([{ kind: "role", ref: "coder" }]);
   });
 
   test("falls back to the role when no assignment exists yet", () => {
