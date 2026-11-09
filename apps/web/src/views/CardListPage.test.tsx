@@ -189,7 +189,7 @@ test("the board groups cards by status and links each one", async () => {
   expect(inProgress.textContent).toContain("下一步：你");
 });
 
-test("the list shows the configurable columns, progress, updated time and reason", async () => {
+test("the list shows the configurable columns and progress; the reason stays off by default (U6a)", async () => {
   const api = client(async () => page());
   render(<CardListPage client={api} projectId="p-1" view="list" />);
   const row = (await screen.findByText("写迁移脚本")).closest("tr");
@@ -202,7 +202,7 @@ test("the list shows the configurable columns, progress, updated time and reason
   expect(row.querySelector("time")?.getAttribute("datetime")).toBe(
     "2026-01-02T00:00:00.000Z",
   );
-  expect(row.getAttribute("title")).toBe("coder 返工中");
+  expect(row.getAttribute("title")).toBe(null);
   expect(row.querySelector("a")?.getAttribute("href")).toBe(
     "#/p/p-1/cards/C-2",
   );
@@ -350,6 +350,45 @@ test("invalid stored display settings fall back to the defaults", async () => {
   await screen.findByText("准备发布");
   for (const header of ["编号", "负责角色", "进度", "更新时间"])
     expect(screen.getByRole("columnheader", { name: header })).toBeTruthy();
+});
+
+test("U6a the reason field is off by default while every other field stays on", async () => {
+  const api = client(async () => page());
+  render(<CardListPage client={api} projectId="p-1" view="board" />);
+  await screen.findByText("准备发布");
+  // No stored settings: the board tiles do not repeat the reason.
+  expect(screen.queryByText(/原因：/u)).toBeNull();
+  fireEvent.pointerDown(screen.getByRole("button", { name: "显示" }), {
+    button: 0,
+    pointerType: "mouse",
+  });
+  const menu = await screen.findByRole("menu");
+  const checked = (label: string) =>
+    within(menu)
+      .getByText(label)
+      .closest('[role="menuitemcheckbox"]')
+      ?.getAttribute("aria-checked");
+  expect(checked("原因")).toBe("false");
+  for (const label of [
+    "编号",
+    "等待标记",
+    "负责角色",
+    "进度",
+    "更新时间",
+    "下一步",
+  ])
+    expect(checked(label)).toBe("true");
+});
+
+test("stored display settings keep the user's own choice for the reason field", async () => {
+  window.localStorage.setItem(
+    "cardigan.cards.display",
+    JSON.stringify({ reason: true }),
+  );
+  const api = client(async () => page());
+  render(<CardListPage client={api} projectId="p-1" view="board" />);
+  await screen.findByText("准备发布");
+  expect(screen.getAllByText("原因：")).toHaveLength(3);
 });
 
 test("clicking a card opens the detail drawer on the route and returns focus on close", async () => {
