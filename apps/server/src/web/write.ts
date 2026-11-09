@@ -11,19 +11,17 @@ import {
   parseId,
   parseTimelineEntryId,
   postComment,
-  prepareAttachment,
   type ReadableIdKind,
   type Result,
   recordDecision,
   uploadAttachment,
 } from "@cardigan/domain";
 import {
-  decodeAttachment,
-  fileAttachmentStore,
   loadCommandState,
   MAX_ATTACHMENT_BASE64,
   MAX_MCP_BODY_BYTES,
   persistEffect,
+  prepareAttachmentFile,
   ToolError,
 } from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
@@ -195,20 +193,13 @@ export async function serveWrite(
       );
     } else {
       const { file, sha256, ...p } = defined(parsed(attachment, body));
-      let decoded: ReturnType<typeof decodeAttachment>;
+      let receipt: Awaited<ReturnType<typeof prepareAttachmentFile>>;
       try {
-        decoded = decodeAttachment(file, sha256);
+        receipt = await prepareAttachmentFile(file, c.dataDir, sha256);
       } catch (error) {
         if (error instanceof ToolError) rejected(error.toDomainError());
         throw error;
       }
-      const receipt = must(
-        await prepareAttachment(
-          decoded.digest,
-          decoded.content,
-          fileAttachmentStore(c.dataDir),
-        ),
-      );
       // Published content-addressed blobs remain on rejection: another upload may already share them.
       output = run(c, (s, a, ports) =>
         uploadAttachment(s, a, { ...p, card_id }, receipt, ports),

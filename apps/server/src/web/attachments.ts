@@ -1,6 +1,9 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AttachmentId, ProjectId } from "@cardigan/domain";
-import { fileAttachmentStore } from "@cardigan/mcp-server";
+import {
+  ATTACHMENT_EXTENSIONS,
+  fileAttachmentStore,
+} from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
 import { INLINE_MIME_TYPES } from "./read.js";
 
@@ -25,20 +28,7 @@ export interface AttachmentDownloadContext {
 
 /** Safe file name for the download: the readable id plus a neutral extension. */
 function downloadName(id: string, mime: string): string {
-  const extension =
-    {
-      "image/png": "png",
-      "image/jpeg": "jpg",
-      "image/gif": "gif",
-      "image/webp": "webp",
-      "image/avif": "avif",
-      "image/svg+xml": "svg",
-      "text/html": "html",
-      "text/markdown": "md",
-      "text/plain": "txt",
-      "application/json": "json",
-      "application/pdf": "pdf",
-    }[mime.toLowerCase()] ?? "bin";
+  const extension = ATTACHMENT_EXTENSIONS[mime.toLowerCase()] ?? "bin";
   return `${id.replace(/[^A-Za-z0-9._-]/gu, "_")}.${extension}`;
 }
 

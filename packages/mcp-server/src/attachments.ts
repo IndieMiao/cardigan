@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { link, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import type { AttachmentStore } from "@cardigan/domain";
+import { type AttachmentStore, prepareAttachment } from "@cardigan/domain";
 import { ToolError } from "./errors.js";
 
 export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
@@ -10,6 +10,52 @@ export const MAX_ATTACHMENT_BASE64 = 4 * Math.ceil(MAX_ATTACHMENT_BYTES / 3);
 export const MAX_MCP_BODY_BYTES = MAX_ATTACHMENT_BASE64 + 1024 * 1024;
 export const sha256 = (content: Uint8Array) =>
   createHash("sha256").update(content).digest("hex");
+
+/** File types recognized by Workbench downloads and human CLI uploads. */
+export const ATTACHMENT_EXTENSIONS: Readonly<Record<string, string>> = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/gif": "gif",
+  "image/webp": "webp",
+  "image/avif": "avif",
+  "image/svg+xml": "svg",
+  "text/html": "html",
+  "text/markdown": "md",
+  "text/plain": "txt",
+  "application/json": "json",
+  "application/pdf": "pdf",
+};
+
+export function attachmentMimeForExtension(
+  extension: string,
+): string | undefined {
+  const normalized = extension.replace(/^\./u, "").toLowerCase();
+  const aliases: Readonly<Record<string, string>> = {
+    jpeg: "jpg",
+    htm: "html",
+    markdown: "md",
+    log: "txt",
+  };
+  return Object.entries(ATTACHMENT_EXTENSIONS).find(
+    ([, ext]) => ext === (aliases[normalized] ?? normalized),
+  )?.[0];
+}
+
+/** Shared Workbench/CLI preflight, outside the database transaction. */
+export async function prepareAttachmentFile(
+  file: string,
+  dataDir: string,
+  expected?: string,
+) {
+  const { content, digest } = decodeAttachment(file, expected);
+  const result = await prepareAttachment(
+    digest,
+    content,
+    fileAttachmentStore(dataDir),
+  );
+  if (!result.ok) throw new ToolError(result.error.code, result.error.message);
+  return result.value;
+}
 
 export function decodeAttachment(file: string, expected?: string) {
   const content = Buffer.from(file, "base64");
