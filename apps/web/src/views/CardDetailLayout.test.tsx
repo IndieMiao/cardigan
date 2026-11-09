@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { URL as NodeURL } from "node:url";
 import {
   act,
   cleanup,
@@ -412,4 +414,38 @@ test("U3 the same anchor is repositioned when a route change restores filtered-o
   } finally {
     Element.prototype.scrollIntoView = original;
   }
+});
+
+test("U6d the wheel over the card sidebar reaches the page or the drawer", async () => {
+  const css = readFileSync(
+    new NodeURL("../styles.css", import.meta.url),
+    "utf8",
+  );
+  const rule = (selector: string) => {
+    const start = css.indexOf(`${selector} {`);
+    expect(start).toBeGreaterThanOrEqual(0);
+    return css
+      .slice(start, css.indexOf("}", start) + 1)
+      .replaceAll(/\/\*[\s\S]*?\*\//g, "");
+  };
+  const sidebar = rule(".card-sidebar");
+  // Tall sidebars still scroll on their own in the full page…
+  expect(sidebar).toContain("overflow-y: auto;");
+  // …but the wheel is never trapped when they fit.
+  expect(sidebar).not.toContain("overscroll-behavior:");
+  // The drawer body is the only scroll container inside a drawer.
+  expect(rule(".card-page-drawer .card-sidebar")).toContain(
+    "overflow: visible;",
+  );
+  render(
+    <CardDetailPage
+      client={fakeClient({ card: async () => detail() })}
+      projectId="p-1"
+      cardId="C-1"
+      inDrawer
+    />,
+  );
+  const column = await screen.findByRole("complementary", { name: "卡片概况" });
+  expect(column.className).toContain("card-sidebar");
+  expect(column.closest(".card-page-drawer")).toBeTruthy();
 });
