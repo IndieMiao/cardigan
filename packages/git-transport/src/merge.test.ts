@@ -65,6 +65,138 @@ const authors = (rev: string) =>
 const parents = (rev: string) =>
   git(repo, "rev-list", "--parents", "-n", "1", rev);
 
+test("prepare pins only a candidate and its real tree; publish is the separate baseline mutation", async () => {
+  const first = await deliver("D-1", writeFileTo("first.txt", "first"));
+  const second = await deliver("D-2", writeFileTo("second.txt", "second"));
+  const sourceRefs = await git(f.source, "show-ref");
+  const refs = (
+    await git(repo, "for-each-ref", "--format=%(refname) %(objectname)")
+  ).split("\n");
+  const prepared = await f.central.prepareMerge(f.project, plan("D-1", "D-2"));
+  if (prepared.status !== "candidate") throw new Error("Missing candidate");
+  expect(prepared.previous_sha).toBe(f.initial);
+  expect(await git(repo, "rev-parse", "main")).toBe(f.initial);
+  expect(await git(repo, "rev-parse", "refs/cardigan/candidates/D-99")).toBe(
+    prepared.candidate_sha,
+  );
+  expect(await f.transport.treeOfCommit(repo, prepared.candidate_sha)).toBe(
+    prepared.tree_sha,
+  );
+  expect(
+    (await git(repo, "for-each-ref", "--format=%(refname) %(objectname)"))
+      .split("\n")
+      .filter((ref) => !ref.startsWith("refs/cardigan/candidates/D-99 ")),
+  ).toEqual(refs);
+  const firstMerge = await git(
+    repo,
+    "rev-parse",
+    `${prepared.candidate_sha}~1`,
+  );
+  expect((await parents(firstMerge)).split(" ")).toEqual([
+    firstMerge,
+    f.initial,
+    first,
+  ]);
+  expect((await parents(prepared.candidate_sha)).split(" ")).toEqual([
+    prepared.candidate_sha,
+    firstMerge,
+    second,
+  ]);
+  expect(
+    await f.central.publishMerge(
+      f.project,
+      prepared.candidate_sha,
+      prepared.previous_sha,
+    ),
+  ).toEqual({
+    status: "merged",
+    merge_sha: prepared.candidate_sha,
+    previous_sha: f.initial,
+  });
+  expect(await git(repo, "rev-parse", "main")).toBe(prepared.candidate_sha);
+  expect(await git(f.source, "show-ref")).toBe(sourceRefs);
+});
+
+test("recomputing a candidate after a tree-preserving baseline advance changes only its candidate ref", async () => {
+  await deliver("D-1", writeFileTo("first.txt", "first"));
+  const before = await f.central.prepareMerge(f.project, plan("D-1"));
+  if (before.status !== "candidate") throw new Error("Missing candidate");
+  await git(
+    f.source,
+    "commit",
+    "--allow-empty",
+    "-m",
+    "metadata-only baseline advance",
+  );
+  const advanced = await git(f.source, "rev-parse", "HEAD");
+  await f.central.syncFromSource(f.project);
+  const after = await f.central.prepareMerge(f.project, plan("D-1"));
+  if (after.status !== "candidate") throw new Error("Missing candidate");
+  expect(after.tree_sha).toBe(before.tree_sha);
+  expect(after.candidate_sha).not.toBe(before.candidate_sha);
+  expect(after.previous_sha).toBe(advanced);
+  expect(await git(repo, "rev-parse", "main")).toBe(advanced);
+  expect(await git(repo, "rev-parse", "refs/cardigan/candidates/D-99")).toBe(
+    after.candidate_sha,
+  );
+  expect(await git(repo, "rev-parse", "refs/cardigan/deliveries/D-1")).toBe(
+    deliveries.get("D-1"),
+  );
+  expect(
+    await f.central.publishMerge(
+      f.project,
+      before.candidate_sha,
+      before.previous_sha,
+    ),
+  ).toEqual({ status: "stale" });
+  expect(await git(repo, "rev-parse", "main")).toBe(advanced);
+});
+
+test("preparation preserves conflict/noop semantics and rejects an unsafe completion ref", async () => {
+  await deliver("D-1", writeFileTo("file", "first"));
+  await deliver("D-2", writeFileTo("file", "different"));
+  const before = await git(repo, "show-ref");
+  expect(
+    await f.central.prepareMerge(f.project, plan("D-1", "D-2")),
+  ).toMatchObject({ status: "conflicted", delivery_id: "D-2" });
+  await expect(
+    f.central.prepareMerge(f.project, {
+      ...plan("D-1"),
+      completion_id: "../../heads/main" as never,
+    }),
+  ).rejects.toThrow(/completion id/);
+  expect(await git(repo, "show-ref")).toBe(before);
+  const merged = await f.central.mergeIntoBase(f.project, plan("D-1"));
+  if (merged.status !== "merged") throw new Error("Missing merge");
+  const done = await git(repo, "show-ref");
+  expect(await f.central.prepareMerge(f.project, plan("D-1"))).toEqual({
+    status: "noop",
+    branch_sha: merged.merge_sha,
+  });
+  expect(await git(repo, "show-ref")).toBe(done);
+});
+
+test("tree lookup rejects refs and non-commits; publish rejects a rollback without touching baseline", async () => {
+  const tree = await git(repo, "rev-parse", "HEAD^{tree}");
+  for (const invalid of ["HEAD", "--help", tree])
+    await expect(f.transport.treeOfCommit(repo, invalid)).rejects.toThrow(
+      /full commit SHA/,
+    );
+  await deliver("D-1", writeFileTo("first.txt", "first"));
+  const prepared = await f.central.prepareMerge(f.project, plan("D-1"));
+  if (prepared.status !== "candidate") throw new Error("Missing candidate");
+  await expect(
+    f.central.publishMerge(f.project, tree, f.initial),
+  ).rejects.toThrow(/Candidate/);
+  await expect(
+    f.central.publishMerge(f.project, f.initial, prepared.candidate_sha),
+  ).rejects.toThrow(/Candidate/);
+  await expect(
+    f.central.publishMerge(f.project, "HEAD", f.initial),
+  ).rejects.toThrow(/full/);
+  expect(await git(repo, "rev-parse", "main")).toBe(f.initial);
+});
+
 test("merges planned deliveries onto the baseline, each with two parents", async () => {
   const first = await deliver("D-1", writeFileTo("first.txt", "first"));
   const second = await deliver("D-2", writeFileTo("second.txt", "second"));

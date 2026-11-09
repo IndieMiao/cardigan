@@ -30,6 +30,14 @@ export type MergeOutcome =
     }
   | { readonly status: "stale" }
   | { readonly status: "noop"; readonly branch_sha: string };
+export type PreparedMerge =
+  | {
+      readonly status: "candidate";
+      readonly candidate_sha: string;
+      readonly tree_sha: string;
+      readonly previous_sha: string;
+    }
+  | Extract<MergeOutcome, { readonly status: "conflicted" | "noop" }>;
 export const DEFAULT_MERGE_IDENTITY = {
   name: "Cardigan",
   email: "cardigan@localhost",
@@ -134,8 +142,24 @@ export class CentralRepositoryService {
     project: CentralProject,
     plan: MergePlan,
   ): Promise<MergeOutcome> {
+    const prepared = await this.prepareMerge(project, plan);
+    return prepared.status === "candidate"
+      ? this.publishMerge(
+          project,
+          prepared.candidate_sha,
+          prepared.previous_sha,
+        )
+      : prepared;
+  }
+  /** Build and pin a candidate in the bare repository without advancing the baseline. */
+  async prepareMerge(
+    project: CentralProject,
+    plan: MergePlan,
+  ): Promise<PreparedMerge> {
     if (plan.base_branch !== project.base_branch)
       throw new Error("Merge plan targets a different baseline branch");
+    if (!parseId("delivery", plan.completion_id).ok)
+      throw new Error("Invalid completion id in the merge plan");
     const repository = await this.ensureCentral(project),
       base = `refs/heads/${project.base_branch}`,
       previous = await this.git.readRef(repository, base);
@@ -176,15 +200,53 @@ export class CentralRepositoryService {
       });
     }
     if (head === previous) return { status: "noop", branch_sha: previous };
+    const tree = await this.git.treeOfCommit(repository, head);
+    const ref = `refs/cardigan/candidates/${plan.completion_id}`;
+    const old = await this.git.readRef(repository, ref);
+    if (old !== head)
+      await this.git.compareAndSwapRef(repository, ref, head, old ?? null);
+    return {
+      status: "candidate",
+      candidate_sha: head,
+      tree_sha: tree,
+      previous_sha: previous,
+    };
+  }
+  /** Publish only by CAS, after the caller has checked this exact candidate tree. */
+  async publishMerge(
+    project: CentralProject,
+    candidate_sha: string,
+    previous_sha: string,
+  ): Promise<Extract<MergeOutcome, { status: "merged" | "stale" }>> {
+    if (
+      ![candidate_sha, previous_sha].every((sha) => fullSha.test(sha)) ||
+      candidate_sha.length !== previous_sha.length
+    )
+      throw new Error("Publishing requires full candidate and baseline SHAs");
+    const repository = await this.ensureCentral(project),
+      base = `refs/heads/${project.base_branch}`;
+    if (
+      (await this.git.objectType(repository, candidate_sha)) !== "commit" ||
+      (await this.git.objectType(repository, previous_sha)) !== "commit" ||
+      !(await this.git.isAncestor(repository, previous_sha, candidate_sha))
+    )
+      throw new Error(
+        "Candidate must be a commit descending from the prepared baseline",
+      );
     try {
-      await this.git.compareAndSwapRef(repository, base, head, previous);
+      await this.git.compareAndSwapRef(
+        repository,
+        base,
+        candidate_sha,
+        previous_sha,
+      );
     } catch (error) {
       // Only a moved baseline is `stale`; anything else is a real failure.
-      if ((await this.git.readRef(repository, base)) !== previous)
+      if ((await this.git.readRef(repository, base)) !== previous_sha)
         return { status: "stale" };
       throw error;
     }
-    return { status: "merged", merge_sha: head, previous_sha: previous };
+    return { status: "merged", merge_sha: candidate_sha, previous_sha };
   }
   private agentRepositoryPath(project: CentralProject): string {
     if (!/^[a-zA-Z0-9_][a-zA-Z0-9._-]*$/u.test(project.project_id))
