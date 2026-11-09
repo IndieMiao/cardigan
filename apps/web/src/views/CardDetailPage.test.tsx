@@ -39,6 +39,44 @@ function renderCard(
   );
 }
 
+test.each(["done", "cancelled"] as const)(
+  "P2a-5: %s detail links to the replacement card in the same project",
+  async (status) => {
+    const detail = cardDetail();
+    renderCard({
+      card: async () => ({
+        ...detail,
+        card: {
+          ...detail.card,
+          status,
+          resolution: "superseded",
+          superseded_by: "C-2",
+          related_cards: ["C-99", "C-2"],
+        },
+      }),
+    });
+    const link = await screen.findByRole("link", { name: "已被 C-2 取代" });
+    expect(link.getAttribute("href")).toBe("#/p/p-1/cards/C-2");
+    expect(screen.queryByText("已被 C-99 取代")).toBeNull();
+  },
+);
+
+test("P2a-5: legacy superseded cards without a replacement do not infer it from related cards", async () => {
+  const detail = cardDetail();
+  renderCard({
+    card: async () => ({
+      ...detail,
+      card: {
+        ...detail.card,
+        resolution: "superseded",
+        related_cards: ["C-99"],
+      },
+    }),
+  });
+  expect(await screen.findByText("已被取代")).toBeTruthy();
+  expect(screen.queryByRole("link", { name: /已被.*取代/ })).toBeNull();
+});
+
 test("shows a loading state while the card is on its way", () => {
   renderCard({ card: () => new Promise(() => undefined) });
   expect(screen.getByRole("status").textContent).toContain("正在加载卡片 C-1");

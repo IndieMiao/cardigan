@@ -12,6 +12,7 @@ import {
   writeCardDisplay,
 } from "../card-display.js";
 import { Board } from "../components/Board.js";
+import { CardSuperseded } from "../components/CardSuperseded.js";
 import { Drawer } from "../components/Drawer.js";
 import { FilterBar } from "../components/FilterBar.js";
 import {
@@ -526,7 +527,13 @@ function CardTable({
         </thead>
         <tbody>
           {cards.map((card) => (
-            <tr key={card.id} title={display.reason ? card.why : undefined}>
+            <tr
+              key={card.id}
+              title={display.reason ? card.why : undefined}
+              className={
+                card.resolution === "superseded" ? "card-superseded" : undefined
+              }
+            >
               {display.number && (
                 <td>
                   <IdTag id={card.id} label="卡片" detail={card.title} />
@@ -551,6 +558,7 @@ function CardTable({
                 >
                   {card.title}
                 </a>
+                <CardSuperseded card={card} />
               </td>
               <td>
                 <StatusTag status={card.status} />

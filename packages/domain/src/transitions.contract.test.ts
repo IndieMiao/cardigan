@@ -34,10 +34,25 @@ test.each([
   ["assignment", "released", "resume"],
   ["runtime", "released", "provision"],
   ["card", "todo", "completion_review_passed"],
+  ["card", "done", "cancel"],
+  ["card", "cancelled", "cancel"],
 ] as const)("invariant 11: %s rejects %s + %s", (machine, from, event) => {
   expect(transition(machine, from, event)).toMatchObject({
     ok: false,
     error: { code: "illegal_transition" },
+  });
+});
+
+test.each([
+  "backlog",
+  "todo",
+  "in_progress",
+  "review",
+  "awaiting_merge",
+] as const)("P2a-5: unfinished card %s can still be cancelled", (status) => {
+  expect(transition("card", status, "cancel")).toEqual({
+    ok: true,
+    value: "cancelled",
   });
 });
 

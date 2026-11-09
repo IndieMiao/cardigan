@@ -63,6 +63,7 @@ type CommandName =
   | "request_merge"
   | "record_merge_result"
   | "release_assignment"
+  | "supersede_card"
   | "request_worktree_cleanup";
 export function ensure(
   condition: unknown,
@@ -123,6 +124,11 @@ export class CommandDraft {
     tool: CommandName,
     readonly ports?: CommandPorts,
   ) {
+    ensure(
+      tool !== "supersede_card" || actor.kind === "human",
+      "forbidden_tool",
+      "Only the human can supersede a card",
+    );
     const hostOnly = [
       "queue_run",
       "dispatch_run",
