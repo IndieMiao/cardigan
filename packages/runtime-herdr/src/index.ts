@@ -37,6 +37,7 @@ export {
   type LaunchFile,
   prepareAgentCheckout,
   prepareAgentProject,
+  prepareCheckoutAlias,
   START_FILE_NAME,
   scrubAgentLaunch,
   secureDataDirectory,

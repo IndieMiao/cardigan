@@ -3,7 +3,9 @@ import {
   chmod,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
+  readlink,
   rm,
   stat,
   writeFile,
@@ -24,8 +26,16 @@ import {
 
 const exec = promisify(execFile);
 const roots: string[] = [];
+const recordedProcesses: { pid: number; root: string }[] = [];
 afterEach(async () => {
   vi.unstubAllEnvs();
+  for (const { pid, root } of recordedProcesses.splice(0)) {
+    const exe = await readlink(`/proc/${pid}/exe`).catch(() => "");
+    if (exe.startsWith(`${root}/`))
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {}
+  }
   for (const root of roots.splice(0))
     await rm(root, { recursive: true, force: true });
 });
@@ -83,6 +93,10 @@ async function fixture(agent = false) {
     totalTimeoutMs: 5000,
   };
   const container = join(base, "checks", "project", "attempt-1");
+  const aliases = join(
+    execution.mode === "local" ? execution.dataDir : execution.agentRoot,
+    "s",
+  );
   const clean = async () => {
     await expect(stat(container)).rejects.toMatchObject({ code: "ENOENT" });
     expect(
@@ -90,9 +104,96 @@ async function fixture(agent = false) {
     ).toHaveLength(1);
     expect(await git("rev-parse", "HEAD")).toBe(input.sha);
     expect(await readFile(join(repository, "file"), "utf8")).toBe("original\n");
+    expect(
+      await readdir(aliases).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return [];
+        throw error;
+      }),
+    ).toEqual([]);
   };
-  return { input, git, clean, repository, container };
+  return { input, git, clean, repository, container, aliases, root };
 }
+
+test("short private aliases keep Unix sockets usable for long attempts and are removed with their targets", async () => {
+  const f = await fixture(),
+    attempt = "a".repeat(80),
+    container = join(f.container, "..", attempt);
+  const result = await runInTemporaryCheckout({
+    ...f.input,
+    attempt,
+    checks: [
+      {
+        name: "socket",
+        run: node(`
+    const fs=require('node:fs'), path=require('node:path'), assert=require('node:assert/strict');
+    for(const [key,target] of [['TMPDIR','tmp'],['XDG_RUNTIME_DIR','runtime']]) {
+      assert.equal(fs.realpathSync(process.env[key]),path.join(${JSON.stringify(container)},target));
+      const owner=fs.statSync(path.dirname(process.env[key]));
+      assert.equal(owner.uid,process.getuid()); assert.equal(owner.mode & 0o777,0o700);
+    }
+    const dir=path.join(process.env.TMPDIR,'cardigan-e2e-x','run','cardigan');
+    fs.mkdirSync(dir,{recursive:true});
+    const server=require('node:net').createServer();
+    server.on('error',()=>process.exit(1));
+    server.listen(path.join(dir,'e2e-123-123.sock'),()=>server.close());
+  `),
+      },
+    ],
+  });
+  expect(result.status).toBe("passed");
+  expect(result.cleanup_errors).toEqual([]);
+  await expect(stat(container)).rejects.toMatchObject({ code: "ENOENT" });
+  await f.clean();
+});
+
+test
+  .skipIf(process.platform !== "linux")
+  .each(["passed", "timed_out"] as const)(
+  "%s checks reap detached core/holder PIDs only from this attempt",
+  async (expected) => {
+    const f = await fixture(),
+      outside = join(f.root, "outside");
+    let output = "";
+    const result = await runInTemporaryCheckout({
+      ...f.input,
+      checks: [
+        {
+          name: "cores",
+          timeoutMs: 400,
+          run: node(`
+      const fs=require('node:fs'), path=require('node:path'), {spawn}=require('node:child_process');
+      const outside=${JSON.stringify(outside)}; fs.mkdirSync(outside);
+      const own=path.join(process.env.TMPDIR,'herdr-core'), other=path.join(outside,'herdr-core');
+      for(const binary of [own,other]){fs.copyFileSync('/usr/bin/python3',binary);fs.chmodSync(binary,0o700);}
+      const launch=(binary,runtime)=>{const c=spawn(binary,['-c','import time; time.sleep(60)'],{detached:true,stdio:'ignore',env:{PATH:process.env.PATH,XDG_RUNTIME_DIR:runtime}});c.unref();return c.pid;};
+      console.log(JSON.stringify([launch(own,process.env.XDG_RUNTIME_DIR),launch(own,fs.realpathSync(process.env.TMPDIR)+'/holder'),launch(other,outside)]));
+      ${expected === "timed_out" ? "setInterval(()=>{},1000);" : "setTimeout(()=>{},50);"}
+    `),
+        },
+      ],
+      onOutput: (name, text) => {
+        if (name === "cores") {
+          output += text;
+          try {
+            for (const pid of JSON.parse(output) as number[])
+              recordedProcesses.push({ pid, root: f.root });
+          } catch {}
+        }
+      },
+    });
+    const [core, holder, other] = JSON.parse(output) as number[];
+    expect(result.status).toBe(expected);
+    expect(result.cleanup_errors).toEqual([]);
+    for (const pid of [core, holder]) {
+      const state = await readFile(`/proc/${pid}/stat`, "utf8").catch(
+        () => "gone",
+      );
+      expect(state === "gone" || /\) Z /u.test(state)).toBe(true);
+    }
+    expect(() => process.kill(other as number, 0)).not.toThrow();
+    await f.clean();
+  },
+);
 
 test("local checkout uses an explicit environment, runs in order, warns, and removes ignored build output", async () => {
   const f = await fixture(),
@@ -134,8 +235,8 @@ test("local checkout uses an explicit environment, runs in order, warns, and rem
   ).toEqual({
     PATH: "/usr/local/bin:/usr/bin:/bin",
     HOME: userInfo().homedir,
-    XDG_RUNTIME_DIR: join(f.container, "runtime"),
-    TMPDIR: join(f.container, "tmp"),
+    XDG_RUNTIME_DIR: expect.stringContaining(`${f.aliases}/`),
+    TMPDIR: expect.stringContaining(`${f.aliases}/`),
     PWD: join(f.container, "worktree"),
     CHECK_VALUE: "explicit",
   });
@@ -352,8 +453,8 @@ test.skipIf(process.platform !== "linux")(
     expect(JSON.parse(output.join(""))).toEqual({
       PATH: AGENT_PATH,
       HOME: userInfo().homedir,
-      XDG_RUNTIME_DIR: join(f.container, "runtime"),
-      TMPDIR: join(f.container, "tmp"),
+      XDG_RUNTIME_DIR: expect.stringContaining(`${f.aliases}/`),
+      TMPDIR: expect.stringContaining(`${f.aliases}/`),
       PWD: join(f.container, "worktree"),
     });
     await f.clean();

@@ -6,6 +6,7 @@ import {
   lstat,
   mkdir,
   open,
+  realpath,
   rename,
   unlink,
 } from "node:fs/promises";
@@ -221,6 +222,52 @@ export async function prepareAgentCheckout(
         await leaf.close();
       }
       return join(config.agentRoot, "checks", project, attempt);
+    } finally {
+      await parent.close();
+    }
+  } finally {
+    await root.close();
+  }
+}
+
+/** Short, exclusive host-controlled namespace; the execution account creates its private child. */
+export async function prepareCheckoutAlias(
+  config: ExecutionConfig,
+  name: string,
+) {
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}$/u.test(name))
+    throw new Error("Invalid checkout alias");
+  if (config.mode === "local") {
+    await secureDataDirectory(config);
+    const parent = join(config.dataDir, "s");
+    await mkdir(parent, { mode: 0o700 }).catch((error) => {
+      if (code(error) !== "EEXIST") throw error;
+    });
+    const info = await lstat(parent);
+    if (
+      !info.isDirectory() ||
+      info.uid !== process.getuid?.() ||
+      (info.mode & 0o777) !== 0o700 ||
+      (await realpath(parent)) !== parent
+    )
+      throw new Error("Unsafe checkout alias namespace");
+    const path = join(parent, name);
+    await mkdir(path, { mode: 0o700 });
+    return path;
+  }
+  const root = await agentRoot(config);
+  try {
+    const parent = await child(root, "s", config, 0o2750);
+    try {
+      await mkdir(at(parent, name), { mode: 0o700 });
+      const leaf = await open(at(parent, name), directoryFlags);
+      try {
+        await leaf.chown(process.getuid?.() ?? -1, config.gid);
+        await leaf.chmod(0o2770);
+      } finally {
+        await leaf.close();
+      }
+      return join(config.agentRoot, "s", name);
     } finally {
       await parent.close();
     }
