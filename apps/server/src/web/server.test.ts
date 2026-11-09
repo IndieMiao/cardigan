@@ -389,3 +389,36 @@ test("an unknown API path answers a JSON 404", async () => {
     await harness.close();
   }
 });
+
+test("U6c local WOFF2 fonts keep their MIME type, immutable cache and self-only CSP", async () => {
+  const harness = await webHarness({
+    staticFiles: {
+      "index.html": "<!doctype html><title>Fonts</title>",
+      "assets/font.woff2": "font fixture",
+    },
+  });
+  try {
+    for (const method of ["GET", "HEAD"]) {
+      const font = await call(harness.port, "/assets/font.woff2", { method });
+      expect(font.status).toBe(200);
+      expect(font.headers["content-type"]).toBe("font/woff2");
+      expect(font.headers["content-length"]).toBe(
+        String(Buffer.byteLength("font fixture")),
+      );
+      expect(font.headers["cache-control"]).toContain("immutable");
+      expect(font.headers["content-security-policy"]).toContain(
+        "font-src 'self'",
+      );
+      expect(font.body).toBe(method === "HEAD" ? "" : "font fixture");
+    }
+    const shell = await call(harness.port, "/");
+    expect(shell.headers["content-security-policy"]).toContain(
+      "font-src 'self'",
+    );
+    expect((await call(harness.port, "/assets/missing.woff2")).status).toBe(
+      404,
+    );
+  } finally {
+    await harness.close();
+  }
+});

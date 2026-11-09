@@ -195,7 +195,7 @@ test("U6c timeline prose is 15, speakers and subheadings 14, and secondary infor
   }
 });
 
-test("U6c site typography uses tokens, western-first system fonts, autospace and scoped tabular figures", () => {
+test("U6c site typography uses tokens, bundled fonts with system fallbacks, autospace and scoped tabular figures", () => {
   const style = sheet();
   try {
     const root = getComputedStyle(document.documentElement);
@@ -206,7 +206,7 @@ test("U6c site typography uses tokens, western-first system fonts, autospace and
         .replace(/,\s*/g, ", ")
         .trim(),
     ).toBe(
-      '-apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", "PingFang SC", "Noto Sans SC", "Microsoft YaHei", sans-serif',
+      '"Inter Variable", "Noto Sans SC Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
     );
     expect(
       root
@@ -215,14 +215,14 @@ test("U6c site typography uses tokens, western-first system fonts, autospace and
         .replace(/,\s*/g, ", ")
         .trim(),
     ).toBe(
-      'ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", "PingFang SC", "Noto Sans Mono CJK SC", monospace',
+      '"JetBrains Mono Variable", "Noto Sans SC Variable", ui-monospace, Menlo, Consolas, monospace',
     );
     expect(root.getPropertyValue("--text-code-inline").trim()).toBe("0.92em");
     for (const [, value] of css.matchAll(/font-size:\s*([^;]+);/g))
       expect(value).toMatch(/^(?:var\(--[\w-]+\)|inherit)$/);
     for (const [, value] of css.matchAll(/font-weight:\s*([^;]+);/g))
       expect(["400", "600"]).toContain(value);
-    expect(css).toContain("text-autospace: ideograph-alpha ideograph-numeric;");
+    expect(css).toContain("text-autospace: normal;");
     render(
       <>
         <p>English 中文 123</p>
@@ -256,4 +256,43 @@ test("U6c site typography uses tokens, western-first system fonts, autospace and
   } finally {
     style.remove();
   }
+});
+
+test("U6c font imports are pinned, Noto keeps Unicode slices, and the distribution includes exact OFL notices", () => {
+  const main = readFileSync(
+    new NodeURL("../main.tsx", import.meta.url),
+    "utf8",
+  );
+  const pkg = JSON.parse(
+    readFileSync(new NodeURL("../../package.json", import.meta.url), "utf8"),
+  );
+  for (const name of ["inter", "noto-sans-sc", "jetbrains-mono"]) {
+    expect(main).toContain(`import "@fontsource-variable/${name}";`);
+    expect(pkg.dependencies[`@fontsource-variable/${name}`]).toMatch(
+      /^\d+\.\d+\.\d+$/,
+    );
+    const license = readFileSync(
+      new NodeURL(
+        `../../node_modules/@fontsource-variable/${name}/LICENSE`,
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    expect(license).toContain("SIL OPEN FONT LICENSE Version 1.1");
+    expect(
+      readFileSync(
+        new NodeURL(`../../public/licenses/${name}-OFL.txt`, import.meta.url),
+        "utf8",
+      ),
+    ).toBe(license);
+  }
+  const noto = readFileSync(
+    new NodeURL(
+      "../../node_modules/@fontsource-variable/noto-sans-sc/index.css",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  expect(noto.match(/unicode-range:/g)?.length).toBeGreaterThan(10);
+  expect(noto).not.toMatch(/url\(https?:/);
 });
