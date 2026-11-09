@@ -36,6 +36,7 @@ import {
   submitReview,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
+import { routeEvent } from "@cardigan/router";
 import { Store, writeRole } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { main } from "./index.js";
@@ -350,4 +351,84 @@ test("an unknown card is refused", async () => {
   const result = await cardigan("merge", "confirm", "C-9");
   expect(result.code).not.toBe(0);
   expect(result.err).toContain("C-9");
+});
+
+test("merge request-changes records the human reason and routes a fix to the original coder", async () => {
+  const { development, confirmation } = await seatAwaitingMerge();
+  const reason = "补齐空输入校验";
+  const result = await cardigan(
+    "merge",
+    "request-changes",
+    card_id,
+    "--reason",
+    reason,
+    "--project",
+    project,
+  );
+  expect(result.code).toBe(0);
+  expect(result.out).toContain(`已将 ${card_id} 退回修改`);
+  const current = state();
+  expect(current.decisions.find((q) => q.id === confirmation.id)).toMatchObject(
+    {
+      status: "resolved",
+      resolution: {
+        option: "request_changes",
+        rationale: reason,
+        raw_quote: reason,
+        resolved_by: "human",
+        via: "needs_you",
+      },
+    },
+  );
+  expect(current.cards[0]?.status).toBe("in_progress");
+  const producer = current.work_items.find((w) => w.id === development.id);
+  expect(producer?.status).toBe("changes_requested");
+  const event = current.events.findLast(
+    (e) => e.type === "merge_changes_requested",
+  );
+  if (!event) throw new Error("Missing return event");
+  expect(routeEvent({ event, snapshot: current }).notifications).toEqual([
+    expect.objectContaining({
+      recipient: { kind: "assignment", assignment_id: producer?.assignment_id },
+      work_item_id: development.id,
+      run_kind: "fix",
+      summary: expect.stringContaining(reason),
+    }),
+  ]);
+  expect(
+    routeEvent({
+      event,
+      snapshot: {
+        ...current,
+        assignments: current.assignments.filter(
+          (a) => a.id !== producer?.assignment_id,
+        ),
+      },
+    }).notifications[0]?.recipient.kind,
+  ).toBe("pm_ops");
+});
+
+test.each([[], ["--reason"], ["--reason", ""], ["--reason", " \n "]])(
+  "merge request-changes refuses a missing or blank reason (%j)",
+  async (...args) => {
+    await seatAwaitingMerge();
+    const before = JSON.stringify(state());
+    const result = await cardigan("merge", "request-changes", card_id, ...args);
+    expect(result.code).not.toBe(0);
+    expect(result.err).toContain("--reason");
+    expect(JSON.stringify(state())).toBe(before);
+  },
+);
+
+test("merge request-changes refuses an already confirmed merge and documents its usage", async () => {
+  await seatAwaitingMerge();
+  await cardigan("merge", "confirm", card_id);
+  expect(
+    (await cardigan("merge", "request-changes", card_id, "--reason", "Fix"))
+      .code,
+  ).not.toBe(0);
+  expect((await cardigan("merge")).err).toContain(
+    "request-changes <C-n> --reason <原因>",
+  );
+  expect((await cardigan("--help")).out).toContain("request-changes");
 });

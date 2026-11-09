@@ -51,6 +51,7 @@ export const transitionTables: {
     accepted: {
       delivery_submitted: "delivered",
       merge_conflicted: "changes_requested",
+      request_changes: "changes_requested",
       cancel: "cancelled",
     },
   },
@@ -184,6 +185,7 @@ export const transitionTables: {
       merge_not_required: "done",
       merge_succeeded: "done",
       merge_conflicted: "in_progress",
+      request_changes: "in_progress",
       cancel: "cancelled",
     },
     done: { cancel: "cancelled" },

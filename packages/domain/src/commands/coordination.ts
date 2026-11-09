@@ -22,6 +22,7 @@ import {
   unwrap,
 } from "./core.js";
 import { endRun } from "./end-run.js";
+import { requestMergeChanges } from "./merge.js";
 import { queueResumedRun, resumeWork } from "./resumption.js";
 import { activeWork } from "./workflow.js";
 
@@ -443,6 +444,11 @@ export function recordDecision(
       );
       for (const item of unblocked) queueResumedRun(d, item, event);
     }
+    if (
+      decision.trigger === "merge_confirmation" &&
+      p.option === "request_changes"
+    )
+      requestMergeChanges(d, decision, p.rationale);
     return result;
   });
 }

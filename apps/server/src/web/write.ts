@@ -217,12 +217,17 @@ export async function serveWrite(
   } else if (group === "decisions") {
     const decision_id = parsed(id("decision"), key);
     if (operation === "resolve") {
-      const p = parsed(decision, body),
-        raw_quote = p.raw_quote?.trim()
-          ? p.raw_quote
-          : `在 Needs You 选择了 ${p.option}`;
-      output = run(c, (s, a, ports) =>
-        recordDecision(
+      const p = parsed(decision, body);
+      output = run(c, (s, a, ports) => {
+        const returning =
+          p.option === "request_changes" &&
+          s.decisions.find((q) => q.id === decision_id)?.trigger ===
+            "merge_confirmation";
+        const raw_quote =
+          p.raw_quote?.trim() || returning
+            ? (p.raw_quote ?? "")
+            : `在 Needs You 选择了 ${p.option}`;
+        return recordDecision(
           s,
           a,
           {
@@ -232,8 +237,8 @@ export async function serveWrite(
             rationale: p.rationale?.trim() ? p.rationale : raw_quote,
           },
           ports,
-        ),
-      );
+        );
+      });
     } else {
       const p = parsed(clarification, body);
       output = run(c, (s, a, ports) => {

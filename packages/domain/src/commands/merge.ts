@@ -12,6 +12,7 @@ import {
   ensure,
   unwrap,
 } from "./core.js";
+import { reopenMerge } from "./merge-rework.js";
 
 const newest = <T extends { readonly id: string }>(values: readonly T[]) =>
   [...values].sort(
@@ -177,6 +178,11 @@ function requestConfirmation(d: CommandDraft, card: Card, target: Delivery) {
         description: "Hold this merge",
         impact: "Keep the card awaiting merge",
       },
+      {
+        key: "request_changes",
+        description: "退回修改",
+        impact: "Return the card to its producer for changes and fresh review",
+      },
     ],
     recommended: "merge",
     affected_cards: [card.id],
@@ -195,6 +201,48 @@ function requestConfirmation(d: CommandDraft, card: Card, target: Delivery) {
     { type: "decision_request", decision_id: id, body: q.question },
   );
   return q;
+}
+export function requestMergeChanges(
+  d: CommandDraft,
+  decision: Decision,
+  reason: string,
+) {
+  ensure(
+    decision.card_id &&
+      decision.kind === "approve" &&
+      "delivery_id" in decision.target,
+    "invariant_violation",
+    "Merge confirmation must target a completion request",
+  );
+  const card = d.card(decision.card_id);
+  const target = completion(
+    { work_items: d.list("work_items"), deliveries: d.list("deliveries") },
+    card,
+  );
+  ensure(
+    target.id === decision.target.delivery_id &&
+      confirmation(d.list("decisions"), card, target)?.id === decision.id,
+    "stale_target",
+    "Merge confirmation belongs to an older completion request",
+  );
+  reopenMerge(d, card, target, target.work_item_id, "request_changes");
+  d.emit(
+    "merge_changes_requested",
+    card.id,
+    {
+      decision_id: decision.id,
+      completion_id: target.id,
+      work_item_id: target.work_item_id,
+      run_kind: "fix",
+      reason,
+    },
+    {
+      type: "status_change",
+      body: `退回修改：${reason}`,
+      decision_id: decision.id,
+      work_item_id: target.work_item_id,
+    },
+  );
 }
 export function completionPassed(
   d: CommandDraft,

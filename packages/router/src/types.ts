@@ -76,6 +76,7 @@ export type RuleId =
   | "6.4/agent idle without finish_run"
   | "6.4/runtime lost"
   | "6.4/merge conflicted"
+  | "6.4/merge changes requested"
   | "6.4/card merged"
   | "6.4/merge failed"
   | "6.4/reconcile finding"

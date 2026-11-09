@@ -234,6 +234,8 @@ function MergeConfirmation({
   elapsed,
 }: Props & { q: NeedsDecision; done: () => void; elapsed: number }) {
   const [quote, setQuote] = useState("");
+  const [returning, setReturning] = useState(false);
+  const [reason, setReason] = useState("");
   const action = useAction(done);
   const merge = q.merge_confirmation;
   const cardId = q.card_id ?? q.related_cards[0]?.id ?? null;
@@ -342,8 +344,50 @@ function MergeConfirmation({
           >
             暂不合并
           </button>
+          <button
+            type="button"
+            className="quiet"
+            disabled={action.busy}
+            onClick={() => setReturning(true)}
+          >
+            退回修改
+          </button>
         </div>
       </form>
+      {returning && (
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (!reason.trim()) return;
+            void action.run(() =>
+              client.recordDecision(projectId, q.id, "request_changes", reason),
+            );
+          }}
+        >
+          <label>
+            退回原因（必填）
+            <textarea
+              aria-label={`${q.id} 退回原因`}
+              required
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+            />
+          </label>
+          <div className="action-row">
+            <button type="submit" disabled={action.busy || !reason.trim()}>
+              确认退回修改
+            </button>
+            <button
+              type="button"
+              className="quiet"
+              disabled={action.busy}
+              onClick={() => setReturning(false)}
+            >
+              取消
+            </button>
+          </div>
+        </form>
+      )}
       {action.error && (
         <p role="alert" className="error-panel">
           {action.error}
