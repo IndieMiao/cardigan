@@ -87,6 +87,9 @@ export function CopyCommand({
         复制
       </button>{" "}
       <span role="status">{message}</span>
+      <p className="copy-command-hint">
+        需要先用 <code>deploy/install-cli.sh</code> 安装 cardigan 命令。
+      </p>
     </div>
   );
 }

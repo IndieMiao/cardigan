@@ -19,23 +19,41 @@ sudo python3 deploy/install-agent.py --host-user <主机用户名> \
 
 网络不可用时可提供 `--archive <hc归档路径>`，摘要仍必须匹配固定版本。校验不通过不安装二进制。
 
-完成后，主机重新登录以取得共享组身份，再执行脚本打印的 runtime.env 加载命令。模型 CLI 需另装到 agent 可执行的目录，模型凭据通过启动配置按需注入；不要复制主机的整个 HOME 或 SSH 目录。
+完成后，主机重新登录以取得共享组身份，启动 server 前执行脚本打印的 runtime.env 加载命令；Cardigan CLI 推荐用下文的安装脚本安装，由生成的命令加载配置。模型 CLI 需另装到 agent 可执行的目录，模型凭据通过启动配置按需注入；不要复制主机的整个 HOME 或 SSH 目录。
 
 重复执行时保留专用私钥、复用托管账号和组，重设托管目录/授权文件的权限并验证 hc。工作区内容不会被递归清理。前置检查失败不做安装改动；真正执行系统命令时的 IO 失败或新建账号后的复核失败仍可能留下部分托管状态，可修正原因后用相同参数重跑。
 
 本 PR 不执行 sudo。用户安装后再验证：agent 无 sudo、不能访问主机 home 和 Cardigan data；专用密钥可从 localhost 登录，其他密钥不能登录；agent-ssh 启动的终端 UID 为 agent；token/secrets 只由主机和 agent 读取并在启动后删除。
 
 
+## 安装 cardigan 命令
+
+在主机用户的 Cardigan 仓库中构建 CLI，再运行无需 sudo 的安装脚本：
+
+```sh
+pnpm exec tsc -b apps/cli
+deploy/install-cli.sh --dry-run
+deploy/install-cli.sh
+export PATH="$HOME/.local/bin:$PATH"
+cardigan --help
+```
+
+脚本默认在 `~/.local/bin/cardigan` 写入可执行包装命令，调用脚本所在仓库的 `apps/cli/dist/bin.js`；主机 PATH 中需要有 Node.js 24。将安装目录加入 shell 的 PATH 后，Workbench 复制的命令即可直接使用。脚本不会修改 shell 配置；仓库更新后重新构建 CLI，仓库移动后重新安装。
+
+可用 `--bin-dir <目录>` 更改安装目录、`--repo <已构建的仓库>` 指定仓库、`--runtime-env <文件>` 指定配置。默认配置为 Agent 安装器生成的 `~/.config/cardigan/agent-ssh/runtime.env`；相对路径在安装时解析。`--dry-run` 检查目标并打印生成内容，不创建或覆盖文件。生成命令第二行固定为 `# cardigan: managed by deploy/install-cli.sh`；已有普通文件仅在第二行以 `# cardigan:` 开头时才覆盖，其他文件和符号链接会被拒绝。
+
+每次执行时，包装命令先加载并导出存在的 runtime.env；文件缺失时跳过，不会因缺少该文件报错。`agent-ssh` 模式下，如果当前进程尚无 `cardigan-share` 组身份，使用 `sg cardigan-share -c` 运行 CLI，每个参数与入口路径分别做 shell 引用，保留空格、引号和特殊字符。已有组身份或使用 local 模式时直接运行 CLI。该脚本不创建组或添加成员；共享组由 Agent 安装器配置，`sg` 失败会直接返回错误。
+
 ## 使用隔离模式启动 Assignment
 
-安装并重新登录后，在启动 server 和 CLI 的两个主机终端都加载安装器生成的 runtime.env（按安装器打印的路径；用 `set -a` / `. <runtime.env>` / `set +a` 导出）。随后沿用已登记的项目、Role 和 launch.yaml：
+安装并重新登录后，在启动 server 的主机终端加载 Agent 安装器生成的 runtime.env（按安装器打印的路径；用 `set -a` / `. <runtime.env>` / `set +a` 导出）。CLI 使用上文安装的 `cardigan` 命令，自动加载同一配置。随后沿用已登记的项目、Role 和 launch.yaml：
 
 ```sh
 pnpm --filter @cardigan/server exec cardigan-server
 # 另一主机终端：
-pnpm --filter @cardigan/cli exec cardigan assignment start A-1 --project p-demo
-pnpm --filter @cardigan/cli exec cardigan assignment attach A-1 --project p-demo
-pnpm --filter @cardigan/cli exec cardigan assignment stop A-1 --project p-demo
+cardigan assignment start A-1 --project p-demo
+cardigan assignment attach A-1 --project p-demo
+cardigan assignment stop A-1 --project p-demo
 ```
 
 `cardigan assign W-1 --role coder --start` 同样使用该模式。CLI 版本在 agent 账号下查询；模型 CLI 必须已经装到该账号的 PATH 中，不会回退主机版本。运行目录是 agent-root/runs/project/assignment，Git 路径使用 agent-root/repos/project 和 worktrees/project/assignment。主机私有源仓库通过只读 bundle 提供基线，无需让 agent 进入主机 home。

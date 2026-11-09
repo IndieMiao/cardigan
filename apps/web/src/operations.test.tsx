@@ -83,6 +83,9 @@ test("commands quote project values, copy explicitly and fall back to visible te
     "cardigan worktree diff 'A-1' --project 'p'\\''$(echo injected)'",
   );
   render(<CopyCommand label="查看 Diff" command={command} />);
+  expect(
+    screen.getByText("deploy/install-cli.sh").parentElement?.textContent,
+  ).toBe("需要先用 deploy/install-cli.sh 安装 cardigan 命令。");
   fireEvent.click(screen.getByRole("button", { name: "复制查看 Diff" }));
   await screen.findByText("已复制");
   expect(writeText).toHaveBeenCalledWith(command);
