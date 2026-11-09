@@ -33,13 +33,14 @@
 
 | 任务 | 内容 | 负责 | 验收要点 |
 |---|---|---|---|
-| P2a-1 合并闸门 | 合并确认后、真正合并前，主机在隔离账号的干净 worktree 里对"合并结果"跑构建、全量测试、lint、依赖检查和 e2e；全部通过才合并，失败则卡片停在待合并并显示失败摘要。多张卡排队依次检查。合并成功后自动推 GitHub（仓库级 deploy key，私钥放数据目录 0600，只快进、不 force；被拒就停下并进 Needs You）。Needs You 的合并卡片显示检查状态（排队、运行中、通过、失败和日志链接） | Codex | 合并结果与测过的代码树一致才推送；检查失败不推进 main；检查进程不继承正式 herdr 会话的环境变量；密钥不出现在日志和界面 |
+| P2a-1 合并闸门（细化计划：[p2a-1-merge-gate.md](p2a-1-merge-gate.md)） | 卡片进入待合并后、真正合并前，主机在隔离账号的干净 worktree 里对"合并结果"跑构建、全量测试、lint、依赖检查和 e2e；全部通过才合并，失败则卡片停在待合并并显示失败摘要。多张卡排队依次检查。合并成功后自动推 GitHub（仓库级 deploy key，私钥放数据目录 0600，只快进、不 force；被拒就停下并进 Needs You）。Needs You 的合并卡片显示检查状态（排队、运行中、通过、失败和日志链接） | Codex | 合并结果与测过的代码树一致才推送；检查失败不推进 main；检查进程不继承正式 herdr 会话的环境变量；密钥不出现在日志和界面 |
 | P2a-2 测试残留 | 修复负载高时清理后又被迟到的 hc 调用拉起 holder 和 core 的竞态（试行发现 D2） | Pi | 连续跑 5 次全量测试加 e2e，没有残留进程 |
 | P2a-3 验证方的构建环境 | 验证方（reviewer、tester、PM 验收）除只读 worktree 外，再得到一个可写的临时构建目录（交付 SHA 的检出，依赖走共享缓存），用完即删，能跑构建和测试 | Cardigan | 验证方能在交付版本上跑 `pnpm build`、`check:deps` 和指定测试；不能改动交付分支 |
 | P2a-4 Agent 规则 | Cardigan 注入的项目规则写明：不新建 `docs/plans/` 任务计划；按卡片写明的范围跑测试；修复 Run 先合入最新 main 再交付 | Cardigan | 规则出现在三个 Harness 的启动配置里，有测试覆盖 |
 | P2a-5 卡片规则 | 开发方案 §4.4：`done` 不能再转 `cancelled`；`resolution=superseded` 的卡片在看板和列表上淡化显示 | Cardigan | domain 契约测试覆盖；CLI `card update` 对已完成卡片给出中文错误 |
 | P2a-7 HTTPS 外部访问 | Workbench 支持配置的外部 HTTPS 来源（C-8，已在做）；Claude 配置 Tailscale Serve 和 server 启动环境 | Cardigan + Claude | 只监听回环地址；未配置时行为不变；经 HTTPS 访问的 cookie 带 Secure；从 MacBook 用 https 地址能登录和操作 |
 | P2a-6 审核者不是作者（C7） | 核实 `assign` 是否允许同一个 Assignment（或同一员工）既做产出项又做验证它的工作项；允许就补一条不变量 | Cardigan | 契约测试覆盖；开发方案 §4.5 补不变量 |
+| P2a-8 CLI 评论和附件（试行发现 14） | 人在命令行给卡片发评论（`cardigan comment add <C-n> --text <内容>`）和上传附件（`cardigan attachment add <C-n> --file <路径> [--kind evidence] [--note <说明>]`），复用 Workbench 的同一段处理代码，身份是人 | Cardigan | 不登录 Workbench 也能完成；附件类型校验、大小上限与 Workbench 一致；artifact 仍必须挂拍板 |
 
 ## 3. P2-V 虚拟员工和看板强化（约 2–3 周）
 
@@ -57,7 +58,7 @@
 | V1 员工实体 | domain 实体、状态、指派规则和不变量；store 迁移；MCP `whoami` 返回员工名和职位；CLI `employee add / list / update` | Codex |
 | V2 接入点和模型 | Workbench 管理网关（地址、协议：Anthropic Messages / OpenAI Responses / OpenAI 兼容、密钥）和启动配置；密钥只存主机，界面不显示原文；为员工选"Agent CLI + 网关 + 模型"时检查组合是否兼容，并用该配置实际调一次 `whoami` 验证。`launch.yaml` 继续可用，界面上的改动写回同一份配置 | Codex |
 | V3 Agent 侧身份 | 启动时把员工名、职位注入提示词；评论和交付摘要用这个身份；`@员工名` 路由到该员工当前的 Assignment | Cardigan |
-| V4 头像素材 | 从 `cardigan-avatar-studio` 的导出包导入第一期人物（全身图、多尺寸头像、清单）；"招聘"时可以从素材库挑人物，也可以上传自己的图片；素材随 Workbench 打包，注明 AI 生成、自有 | Pi |
+| V4 头像素材 | 从 `cardigan-avatar-studio` 的导出包导入第一期人物（全身图、多尺寸头像、清单）；"招聘"时可以从素材库挑人物，也可以上传自己的图片；素材随 Workbench 打包，注明 AI 生成、自有。附件补上原文件名和一句说明（试行发现 16），附件网格显示文件名而不是 attachment-n | Pi |
 | V5 员工出现在所有界面 | 时间线作者、看板卡片上的负责人头像、Needs You、附件上传者、执行视图 | Pi |
 | V6 团队页 | 员工名册：每人状态（工作中、空闲、离线）、正在做的卡片、今天的产出、历史交付和审核通过率 | Pi |
 | V7 执行视图可视化 | 按员工展示实时状态：在哪张卡、做了多久、最近在做什么，一键查看终端（只看模式）；取代偏技术的 Assignment 表格（原表格保留在"详细"里） | Codex |
