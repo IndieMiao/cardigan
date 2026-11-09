@@ -38,6 +38,8 @@
 
 ## 验证与边界
 
+CLI 的 `cardigan card update <C-n> [--title <标题>] [--goal <目标>] [--acceptance <标准1;标准2>] [--priority <n>] [--status backlog|todo|cancelled] [--project <p>]` 以 human Actor 调用 `updateCard`，至少提供一个修改字段。`--acceptance` 按分号拆分并去除空白与空项（整体需加引号，至少保留一条），`--priority` 必须为有限数值。项目选择复用 `--project`、`CARDIGAN_PROJECT`、数据库唯一项目的顺序，也支持通用 `--data-dir`。取消卡片和工作项由 domain 状态机处理，已通过的验证项保持 passed；既有规则允许 done → cancelled，但拒绝 done → todo/backlog，也不能手动设置 done / review / in_progress。成功输出卡片编号和修改字段；无字段、非法参数及不允许的转换返回中文错误和非零退出码，拒绝时事务不持久化任何部分效果。
+
 契约测试通过公开函数、确定性 Clock/IdAllocator 和可配置验证桩执行，测试名标明不变量。真实鉴权入口、同事务提交、Token 签发和传输幂等由 store/MCP/组装层验收；本任务不实现这些 IO 层。
 
 合法状态迁移统一调用 M1.2；对其没有定义迁移的前态，返回 illegal_transition，不强行改写状态。长度、权限和版本等语义由命令检查；MCP 输入的完整 JSON 类型校验仍由 M1.6 的 zod 参数层负责。

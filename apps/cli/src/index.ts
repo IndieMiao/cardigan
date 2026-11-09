@@ -56,6 +56,7 @@ const TOP_LEVEL_USAGE = [
   "  pm create        建常驻 PM Assignment 并签发 Token（--office / --ops）",
   "  pm start         一键启动 PM Office 与 PM Ops（已在运行就跳过）",
   "  card create      按 dev 模板建卡",
+  "  card update      修改卡片字段或取消卡片（见 cardigan card --help）",
   "  assign           建 Assignment 并在同一事务里签发 Token",
   "  token issue      给已有 active Assignment 重新签发 Token（先作废旧 Token）",
   "  human-action done 标记人已执行完 h(n)",
