@@ -2,6 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { LaunchConfigError } from "@cardigan/roles";
 import { runAdminCommand } from "./admin.js";
 import { runAssignmentCommand } from "./assignment.js";
+import { runContentCommand } from "./content.js";
 import { CliError, EXIT } from "./errors.js";
 import { attentionCommand, inboxCommand } from "./inbox.js";
 import type { CliIo } from "./io.js";
@@ -57,6 +58,8 @@ const TOP_LEVEL_USAGE = [
   "  pm start         一键启动 PM Office 与 PM Ops（已在运行就跳过）",
   "  card create      按 dev 模板建卡",
   "  card update      修改或取消卡片；--superseded-by <C-m> 标记取代（已完成卡片不能取消；见 cardigan card --help）",
+  "  comment add      发评论：--text <内容> 或 --text-file <路径>，可重复 --file 附文件",
+  "  attachment add   上传附件：--file <路径> [--kind evidence|artifact] [--basis <q(n)>] [--entry <C-n#k>]",
   "  assign           建 Assignment 并在同一事务里签发 Token",
   "  token issue      给已有 active Assignment 重新签发 Token（先作废旧 Token）",
   "  human-action done 标记人已执行完 h(n)",
@@ -210,6 +213,9 @@ export async function main(
     }
     if (command === "assignment") {
       return await runAssignmentCommand(rest, io);
+    }
+    if (command === "comment" || command === "attachment") {
+      return await runContentCommand(command, rest, io);
     }
     if (command === "merge") return runMergeCommand(rest, io);
     if (command === "web") return await runWebCommand(rest, io);
