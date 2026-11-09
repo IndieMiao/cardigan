@@ -63,8 +63,11 @@
 
 ### 3.2 字体和字号
 
-- 字体（2026-11-09 第二轮走查修订）：`-apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", "PingFang SC", "Noto Sans SC", "Microsoft YaHei", sans-serif`。西文系统字体在前，中文由后面的中文字体补上，避免英文和数字用中文字体自带的西文字形。仍然只用系统字体，不加载网络字体。正文开启 `text-autospace`（中英文、中文和数字之间自动留空隙；不支持的浏览器忽略）。等宽数字只用于表格、时间和计数，不用于正文。
-- 代码字体：`ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", "PingFang SC", "Noto Sans Mono CJK SC", monospace`；行内代码为所在文字大小的 0.92 倍，代码块 13px。
+- 字体（2026-11-09 第二轮走查，用户拍板）：随 Workbench 打包三套 SIL OFL 1.1 授权的开源字体，由 Workbench 自己的 server 提供（CSP 已有 `font-src 'self'`），不走外部 CDN，离线可用，Mac、Linux、Windows 显示同一套字形。
+  - 英文和数字：Inter（`@fontsource-variable/inter`）；中文：思源黑体 Noto Sans SC（`@fontsource-variable/noto-sans-sc`，按字符范围切片，浏览器只加载用到的切片）；代码：JetBrains Mono（`@fontsource-variable/jetbrains-mono`）。版本写死，选发布超过两周的稳定版本。
+  - 正文字体栈：`"Inter Variable", "Noto Sans SC Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif`。代码字体栈：`"JetBrains Mono Variable", "Noto Sans SC Variable", ui-monospace, Menlo, Consolas, monospace`。行内代码为所在文字大小的 0.92 倍，代码块 13px。
+  - 正文开启 `text-autospace`（中英文、中文和数字之间自动留空隙；不支持的浏览器忽略）。等宽数字只用于表格、时间和计数，不用于正文。
+  - 在仓库里保留三套字体的授权说明（OFL 原文随包附带即可，PR 里注明位置）。
 - 字号层级：12（辅助信息）、13（字段名、表格）、14（正文）、16（区块标题）、20（页面标题）、24（卡片标题）。只用 400 和 600 两种字重。
 - 行高：正文 1.65，表格 1.45。
 - 长文本（目标、评论、方案）每行不超过约 40 个汉字，大约 680px，超过就换行，不铺满整个宽度。
@@ -340,6 +343,7 @@ U3 和 U4a 在 U1 合并后并行开始，然后是 U2 和 U4b。
 | 7 | 交付、审核、拍板卡片里的关键状态（如"审核 V-12 已通过"）夹在正文里，不便检查 | 状态独立出来，固定放在卡片头部右上角，所有卡片在同一位置、右边缘对齐 | U6c |
 | 8 | 字体大小不统一 | 时间线只用三档字号（见下方"字号和字体"），全站去掉写死的字号 | U6c |
 | 9 | 当前字体在中英混排时可读性不好 | 调整字体栈：西文系统字体在前、中文字体在后，中英文之间自动加间距，代码用等宽字体并跟随正文大小（见下方"字号和字体"） | U6c |
+| 10 | 能否用独立的可商用字体，保证 Mac、Linux、PC 阅读体验一致 | 用户拍板：打包 Inter + 思源黑体 + JetBrains Mono（均为 OFL），见 §3.2 | U6c |
 
 Claude 走查前记下的小问题，一并处理：
 
