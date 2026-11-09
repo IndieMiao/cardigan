@@ -129,6 +129,50 @@ test("lightbox switches images with arrows and closes back to its trigger", asyn
   expect(document.activeElement).toBe(trigger);
 });
 
+test.each([
+  {
+    name: "drawer",
+    Harness: DrawerHarness,
+    triggerName: "打开抽屉",
+    closeName: "关闭抽屉",
+    buttonNames: ["关闭抽屉"],
+  },
+  {
+    name: "lightbox",
+    Harness: LightboxHarness,
+    triggerName: "打开图片",
+    closeName: "关闭预览",
+    buttonNames: ["关闭预览", "上一张", "下一张"],
+  },
+])(
+  "$name controls have at least 44px targets and close back to their trigger",
+  async ({ Harness, triggerName, closeName, buttonNames }) => {
+    const style = document.createElement("style");
+    style.textContent = readFileSync(
+      new NodeURL("../styles.css", import.meta.url),
+      "utf8",
+    );
+    document.head.append(style);
+    try {
+      render(<Harness />);
+      const trigger = screen.getByRole("button", { name: triggerName });
+      fireEvent.click(trigger);
+      await screen.findByRole("dialog");
+      for (const name of buttonNames) {
+        const button = screen.getByRole("button", { name });
+        const computed = getComputedStyle(button);
+        expect(parseFloat(computed.minWidth), name).toBeGreaterThanOrEqual(44);
+        expect(parseFloat(computed.minHeight), name).toBeGreaterThanOrEqual(44);
+      }
+      fireEvent.click(screen.getByRole("button", { name: closeName }));
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      expect(document.activeElement).toBe(trigger);
+    } finally {
+      style.remove();
+    }
+  },
+);
+
 function MenuHarness() {
   const [checked, setChecked] = useState(false);
   const select = vi.fn();
@@ -306,6 +350,14 @@ test("radix primitive styles use shared tokens, focus styles and the dark theme"
   expect(layer(".drawer-content")).toContain("z-index: 101;");
   expect(layer(".lightbox-overlay")).toContain("z-index: 200;");
   expect(layer(".lightbox-content")).toContain("z-index: 201;");
+  const close = layer(".lightbox-close");
+  expect(close).toContain("position: absolute;");
+  expect(close).toContain("top: 20px;");
+  expect(close).toContain("right: 24px;");
+  // Keep the full close target above the later, positioned image stage.
+  expect(close).toContain("z-index: 1;");
+  expect(close).toContain("background: var(--surface);");
+  expect(close).toContain("color: var(--text);");
   expect(layer(".tooltip-content")).toContain("z-index: 120;");
   expect(css).toContain('body[data-lightbox="open"] .drawer-overlay {');
 });

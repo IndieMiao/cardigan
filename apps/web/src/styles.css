@@ -1897,8 +1897,8 @@ body[data-lightbox="open"] .drawer-overlay {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 30px;
-  height: 30px;
+  min-width: 44px;
+  min-height: 44px;
   margin-left: 0;
   padding: 0;
   font-size: var(--text-section);
@@ -1974,6 +1974,9 @@ body[data-lightbox="open"] .drawer-overlay {
   position: absolute;
   top: 20px;
   right: 24px;
+  z-index: 1;
+  min-width: 44px;
+  min-height: 44px;
   background: var(--surface);
   color: var(--text);
 }
@@ -1995,6 +1998,8 @@ body[data-lightbox="open"] .drawer-overlay {
   position: absolute;
   top: 50%;
   transform: translateY(-50%);
+  min-width: 44px;
+  min-height: 44px;
   padding: 8px 12px;
   border: 1px solid var(--overlay-text);
   background: transparent;
