@@ -19,6 +19,7 @@ test("the default listener is 127.0.0.1:7781 with the 7-day session", () => {
   expect(config.host).toBe("127.0.0.1");
   expect(config.port).toBe(DEFAULT_WEB_PORT);
   expect(config.port).toBe(7781);
+  expect(config.publicOrigins).toEqual([]);
   expect(config.sessionTtlMs).toBe(7 * 24 * 60 * 60 * 1000);
   expect(config.staticDir.endsWith("apps/web/dist/")).toBe(true);
 });
@@ -50,4 +51,70 @@ test("the Host allow-list names this listener with its port", () => {
     "localhost:7781",
   ]);
   expect(allowedHosts("::1", 7781)).toContain("[::1]:7781");
+});
+
+test.each([undefined, "", "  \t "])(
+  "empty public origins keep the local-only configuration (%j)",
+  (value) => {
+    expect(resolveWebConfig({ CARDIGAN_WEB_PUBLIC_ORIGINS: value })).toEqual(
+      resolveWebConfig(),
+    );
+  },
+);
+
+test("public origins trim, normalize and deduplicate HTTPS authorities", () => {
+  const config = resolveWebConfig({
+    CARDIGAN_WEB_PUBLIC_ORIGINS:
+      " https://Workbench.example:8443, https://other.example:443, https://workbench.example:8443 ",
+  });
+  expect(config.publicOrigins).toEqual([
+    "https://workbench.example:8443",
+    "https://other.example",
+  ]);
+  expect(allowedHosts(config.host, config.port, config.publicOrigins)).toEqual([
+    "127.0.0.1:7781",
+    "localhost:7781",
+    "workbench.example:8443",
+    "other.example",
+  ]);
+  expect(() =>
+    resolveWebConfig(
+      { CARDIGAN_WEB_PUBLIC_ORIGINS: "https://workbench.example:8443" },
+      { host: "0.0.0.0" },
+    ),
+  ).toThrow(WEB_LOCAL_ONLY_MESSAGE);
+});
+
+test.each([
+  "http://workbench.example",
+  "ftp://workbench.example",
+  "workbench.example",
+  "https://",
+  "https:///workbench.example",
+  "https://workbench.example/",
+  "https://workbench.example/path",
+  "https://workbench.example/..",
+  "https://user:password@workbench.example",
+  "https://@workbench.example",
+  "https://workbench.example?",
+  "https://workbench.example?key=value",
+  "https://workbench.example#",
+  "https://workbench.example#fragment",
+  "https://*.example",
+  "https://workbench.example:*",
+  "https://%2a.example",
+  "https://＊.example",
+  "https://workbench.example:invalid",
+  "https://workbench.example:65536",
+  "https://workbench.example:",
+  "https://workbench.example\\path",
+  "https://work\tbench.example",
+  ",",
+  "https://workbench.example,",
+  "https://workbench.example,,https://other.example",
+  "https://workbench.example, http://other.example",
+])("invalid public origin fails startup with a Chinese error (%j)", (value) => {
+  expect(() =>
+    resolveWebConfig({ CARDIGAN_WEB_PUBLIC_ORIGINS: value }),
+  ).toThrow(/CARDIGAN_WEB_PUBLIC_ORIGINS 无效/);
 });

@@ -6,6 +6,7 @@ import { Store } from "@cardigan/store";
 import {
   resolveWebConfig,
   type WebConfigOverrides,
+  type WebEnv,
 } from "../src/web/config.js";
 import { type RunningWebServer, startWebServer } from "../src/web/server.js";
 
@@ -31,6 +32,7 @@ export interface WebHarness {
 }
 
 export interface HarnessOptions {
+  readonly env?: WebEnv;
   readonly overrides?: WebConfigOverrides;
   readonly password?: string;
   readonly staticFiles?: Readonly<Record<string, string>>;
@@ -65,7 +67,11 @@ export async function webHarness(
   const server = await startWebServer({
     store,
     dataDir,
-    config: resolveWebConfig({}, { port: 0, staticDir, ...options.overrides }),
+    config: resolveWebConfig(options.env, {
+      port: 0,
+      staticDir,
+      ...options.overrides,
+    }),
     ...(options.stream === undefined ? {} : { stream: options.stream }),
   });
   return {
