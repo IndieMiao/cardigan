@@ -74,8 +74,8 @@ CLI 的 `cardigan card update <C-n> [--title <标题>] [--goal <目标>] [--acce
 ## M4.1 合并确认与计划
 
 - CardTemplate.merge_policy 为 confirm / auto，开发卡默认 confirm。createCard 将主机 CommandPorts.templates 中 dev 模板的策略固定到 Card.merge_policy，旧卡缺省 confirm；MCP 参数不能覆盖。
-- 完成审核通过后先发 review_submitted，再按策略发 decision_requested；确认绑定当前完成申请，merge / hold 均保留 awaiting_merge，只有 merge 允许执行。recordDecision 对合并确认开放 human 入口，记录原话和 needs_you 来源；原有 Office 入口保持。requestMerge 仅人或常驻 PM Ops 可用，仅对已 hold 的确认重新申请。
-- mergePlan(state, card_id) 无 IO，返回 card_id/title/base_branch/completion_id 和按工作项编号排序的 deliveries（delivery_id/work_item_id/sha）。只收最新未被取代且已接受的 Git 提交形式的交付（subject.kind=git_head，不按 kind 分类）；未接受或尚无交付的工作项跳过，known_gaps 仍由完成申请校验。没有可合并交付时直接 done。检查当前完成申请及确认，未决阻塞会拒绝；M4.4 负责一致快照和固定 ref 校验。待合并期间冻结交付与审核，冲突后才能重新交付。
+- 完成审核通过后先发 review_submitted，再按策略发 decision_requested；确认绑定当前完成申请，merge / hold 均保留 awaiting_merge，只有 merge 允许执行。recordDecision 对合并确认开放 human 入口，记录原话和 needs_you 来源；原有 Office 入口保持。requestMerge 仅人或常驻 PM Ops 可用，仅对已 hold 的确认重新申请。新增 request_changes（退回修改），rationale 和 raw_quote 均须非空；Web 不为此选项生成默认原话。确认必须绑定当前已接受的完成申请。退回时卡片经 request_changes 回 in_progress，完成申请所属的主产出 accepted → changes_requested，旧完成申请 supersede，PM 验收经 target_withdrawn 回 todo。与 merge_conflicted 共用 reopenMerge 迁移；发出 decision_resolved 后再发 merge_changes_requested，payload 带 decision_id/completion_id/work_item_id/run_kind=fix/reason，时间线记原因。Router 和 Dispatcher 为原 Assignment 排 fix Run，trigger_event_id 关联含原因的事件，不在 domain 重复排 Run。
+- mergePlan(state, card_id) 无 IO，返回 card_id/title/base_branch/completion_id 和按工作项编号排序的 deliveries（delivery_id/work_item_id/sha）。只收最新未被取代且已接受的 Git 提交形式的交付（subject.kind=git_head，不按 kind 分类）；未接受或尚无交付的工作项跳过，known_gaps 仍由完成申请校验。没有可合并交付时直接 done。检查当前完成申请及确认，未决阻塞会拒绝；M4.4 负责一致快照和固定 ref 校验。待合并期间冻结交付与审核，冲突或退回修改后才能重新交付；之后需重新审核、申请完成和确认合并。
 
 ## M4.1 合并结果、释放和清理
 

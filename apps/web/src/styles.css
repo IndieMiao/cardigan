@@ -1508,7 +1508,7 @@ fieldset.filters {
 .copy-command-hint {
   margin: 4px 0 0;
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: var(--text-sm);
 }
 .needs-page {
   max-width: 980px;

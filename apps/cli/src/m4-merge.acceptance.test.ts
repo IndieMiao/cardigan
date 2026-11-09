@@ -615,7 +615,11 @@ test("§12.5 confirm: an unconfirmed merge is impossible until the human merges,
     decider: "human",
     blocking: true,
   });
-  expect(first?.options.map((o) => o.key).sort()).toEqual(["hold", "merge"]);
+  expect(first?.options.map((o) => o.key).sort()).toEqual([
+    "hold",
+    "merge",
+    "request_changes",
+  ]);
   // Confirm policy: not confirmed ⇒ no plan, no merge result.
   expect(mergePlan(state(), s.card.id).ok).toBe(false);
   expect(

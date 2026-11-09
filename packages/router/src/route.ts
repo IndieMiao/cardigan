@@ -856,7 +856,12 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "human_action_requested":
       routeHumanAction(input, draft);
       break;
-    case "merge_conflicted": {
+    case "merge_conflicted":
+    case "merge_changes_requested": {
+      const returned = input.event.type === "merge_changes_requested";
+      const rule = returned
+        ? "6.4/merge changes requested"
+        : "6.4/merge conflicted";
       const item = itemOf(
         input,
         payloadString(input.event.payload, "work_item_id") as
@@ -875,8 +880,10 @@ export function routeEvent(input: RouteInput): RouteResult {
           draft,
           recipient.assignment(owner.id),
           "instruction",
-          "6.4/merge conflicted",
-          `Resolve the merge conflict for ${item.id}`,
+          rule,
+          returned
+            ? `Changes requested for ${item.id}: ${payloadString(input.event.payload, "reason") ?? ""}`
+            : `Resolve the merge conflict for ${item.id}`,
           { work_item_id: item.id, run_kind: "fix" },
         );
       else
@@ -885,8 +892,10 @@ export function routeEvent(input: RouteInput): RouteResult {
           draft,
           recipient.pm_ops(),
           "escalation",
-          "6.4/merge conflicted",
-          "Merge conflict has no active producer",
+          rule,
+          returned
+            ? "Merge changes have no active producer"
+            : "Merge conflict has no active producer",
         );
       break;
     }

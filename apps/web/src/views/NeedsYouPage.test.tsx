@@ -314,6 +314,61 @@ test.each([
   );
 });
 
+test("returning a merge requires a nonblank reason and submits the exact explanation", async () => {
+  const recordDecision = vi.fn().mockResolvedValue(undefined);
+  render(
+    <NeedsYouPage
+      client={fakeClient({
+        needsYou: async () => page([merge()]),
+        recordDecision,
+      })}
+      projectId="p-1"
+    />,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "退回修改" }));
+  const reason = screen.getByLabelText("q(3) 退回原因");
+  const submit = screen.getByRole("button", {
+    name: "确认退回修改",
+  }) as HTMLButtonElement;
+  expect(submit.disabled).toBe(true);
+  fireEvent.change(reason, { target: { value: " \n " } });
+  expect(submit.disabled).toBe(true);
+  fireEvent.submit(submit.closest("form") as HTMLFormElement);
+  expect(recordDecision).not.toHaveBeenCalled();
+  fireEvent.change(reason, { target: { value: " 请补齐空输入校验 " } });
+  expect(submit.disabled).toBe(false);
+  fireEvent.click(submit);
+  await waitFor(() =>
+    expect(recordDecision).toHaveBeenCalledWith(
+      "p-1",
+      "q(3)",
+      "request_changes",
+      " 请补齐空输入校验 ",
+    ),
+  );
+});
+
+test("hold still submits without a reason after cancelling the return form", async () => {
+  const recordDecision = vi.fn().mockResolvedValue(undefined);
+  render(
+    <NeedsYouPage
+      client={fakeClient({
+        needsYou: async () => page([merge()]),
+        recordDecision,
+      })}
+      projectId="p-1"
+    />,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "退回修改" }));
+  fireEvent.click(screen.getByRole("button", { name: "取消" }));
+  expect(screen.queryByLabelText("q(3) 退回原因")).toBeNull();
+  expect(recordDecision).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "暂不合并" }));
+  await waitFor(() =>
+    expect(recordDecision).toHaveBeenCalledWith("p-1", "q(3)", "hold", ""),
+  );
+});
+
 test("execution results require text; errors preserve the draft for retry", async () => {
   const completeAction = vi
     .fn()

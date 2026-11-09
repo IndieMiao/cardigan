@@ -15,8 +15,10 @@ test.each([
   ["card", "awaiting_merge", "merge_not_required", "done", "review"],
   ["card", "awaiting_merge", "merge_succeeded", "done", "in_progress"],
   ["card", "awaiting_merge", "merge_conflicted", "in_progress", "done"],
+  ["card", "awaiting_merge", "request_changes", "in_progress", "done"],
   ["card", "awaiting_merge", "cancel", "cancelled", "cancelled"],
   ["produce", "accepted", "merge_conflicted", "changes_requested", "delivered"],
+  ["produce", "accepted", "request_changes", "changes_requested", "delivered"],
 ] as const)(
   "invariants 11, 13: %s %s --%s--> %s rejects %s",
   (machine, from, event, to, invalid) => {

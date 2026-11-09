@@ -29,6 +29,7 @@ const USAGE = [
   "  cardigan merge status [C-n] [--project <p>]       看待合并的卡片、确认和合并计划",
   "  cardigan merge confirm <C-n> [--quote <原话>]     以人的身份确认合并",
   "  cardigan merge request <C-n>                      hold 之后重新发起合并确认",
+  "  cardigan merge request-changes <C-n> --reason <原因> [--project <p>]  退回修改（原因必填）",
   "",
   "通用：--project 省略时取 CARDIGAN_PROJECT，再取数据库里唯一的项目；",
   "      --data-dir 省略时取 CARDIGAN_DATA_DIR，再取 ~/.local/share/cardigan。",
@@ -89,9 +90,11 @@ export function runMergeCommand(args: readonly string[], io: CliIo): number {
       return mergeConfirm(rest, io);
     case "request":
       return mergeRequest(rest, io);
+    case "request-changes":
+      return mergeRequestChanges(rest, io);
     default:
       throw new CliError(
-        "用法：cardigan merge status|confirm|request",
+        "用法：cardigan merge status|confirm|request|request-changes",
         EXIT.usage,
         [USAGE],
       );
@@ -274,6 +277,50 @@ function mergeRequest(args: readonly string[], io: CliIo): number {
   }
 }
 
+function mergeRequestChanges(args: readonly string[], io: CliIo): number {
+  const parsed = parseArgs(args);
+  const id = cardId(parsed.positionals[0]);
+  const reason = optional(parsed.flags, "reason");
+  if (!reason)
+    throw new CliError("退回修改必须提供非空的 --reason", EXIT.usage, [USAGE]);
+  const store = open(io, parsed.flags);
+  try {
+    const project_id = resolveProject(
+      store,
+      io,
+      optional(parsed.flags, "project"),
+    );
+    requireMergeCard(store, project_id, id);
+    const confirmation = confirmationOf(store, project_id, id);
+    if (confirmation?.status !== "open")
+      throw new CliError(
+        `${id} 没有待处理的合并确认；hold 后请先运行 cardigan merge request ${id}`,
+        EXIT.usage,
+      );
+    const decision = runCommand(store, {
+      project_id,
+      actor: humanActor(project_id),
+      reduce: (state, actor, ports) =>
+        recordDecision(
+          state,
+          actor,
+          {
+            decision_id: confirmation.id,
+            option: "request_changes",
+            rationale: reason,
+            raw_quote: reason,
+          },
+          ports,
+        ),
+      clock: systemClock,
+    });
+    io.stdout(`已将 ${id} 退回修改（${decision.id}）：${reason}`);
+    return EXIT.ok;
+  } finally {
+    store.close();
+  }
+}
+
 function requireMergeCard(
   store: Store,
   project_id: ProjectId,
@@ -283,7 +330,7 @@ function requireMergeCard(
   if (card === undefined) throw new CliError(`${id} 不存在`, EXIT.usage);
   if (card.status !== "awaiting_merge")
     throw new CliError(
-      `${id} 当前状态是 ${card.status}，只有 awaiting_merge 才能确认或重新发起合并`,
+      `${id} 当前状态是 ${card.status}，只有 awaiting_merge 才能确认、退回修改或重新发起合并`,
       EXIT.usage,
     );
   return card;

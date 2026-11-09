@@ -336,15 +336,16 @@ export class Dispatcher {
         actor = { kind: "system" as const, project_id: project };
       if (!run) {
         const event = state.events.find((e) => e.id === cause.event_id);
-        // §6.4: a merge conflict wakes the coder for a fix Run, not a generic
-        // follow-up. The router marks this as run_kind=fix; the trigger event is
+        // §6.4: merge conflicts and returned merges wake the coder for a fix Run.
+        // The router marks this as run_kind=fix; the trigger event is
         // the only place it survives, because notifications store no run kind.
         const kind =
           event?.type === "work_item_assigned"
             ? // M5.S S6: an Assignment created through MCP gets its first Run
               // from the host, so the assign bell starts an `initial` Run.
               "initial"
-            : event?.type === "merge_conflicted"
+            : event?.type === "merge_conflicted" ||
+                event?.type === "merge_changes_requested"
               ? "fix"
               : event?.type === "review_submitted" && cause.kind === "review"
                 ? "rework"

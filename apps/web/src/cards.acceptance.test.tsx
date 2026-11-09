@@ -271,6 +271,57 @@ test("U04 §8.4: card detail handles loading, transport errors, missing cards an
   expect(acceptance).toContain("已通过");
 }, 30_000);
 
+test("merge return through HTTP rejects blank reasons and preserves the human explanation", async () => {
+  await f.loginBrowser();
+  const product = await f.deliver(
+    f.primary,
+    await f.change(f.primary.owner, "return.txt", "ready\n"),
+  );
+  await f.review(f.primary.verifier, product);
+  await f.complete(product);
+  const decision = f
+    .state()
+    .decisions.find((q) => q.trigger === "merge_confirmation");
+  if (!decision) throw new Error("Missing confirmation");
+  for (const reason of ["", " \n "])
+    await expect(
+      f.client.recordDecision(
+        project(),
+        decision.id,
+        "request_changes",
+        reason,
+      ),
+    ).rejects.toMatchObject({ code: "validation_failed" });
+  expect(f.state().cards.find((c) => c.id === f.card.id)?.status).toBe(
+    "awaiting_merge",
+  );
+  const reason = " 请补齐空输入校验 ";
+  await f.client.recordDecision(
+    project(),
+    decision.id,
+    "request_changes",
+    reason,
+  );
+  expect(f.state().decisions.find((q) => q.id === decision.id)).toMatchObject({
+    status: "resolved",
+    resolution: {
+      option: "request_changes",
+      raw_quote: reason,
+      rationale: reason,
+      resolved_by: "human",
+    },
+  });
+  expect(f.state().cards.find((c) => c.id === f.card.id)?.status).toBe(
+    "in_progress",
+  );
+  expect(f.state().timeline).toContainEqual(
+    expect.objectContaining({
+      body: `退回修改：${reason}`,
+      work_item_id: product.work_item_id,
+    }),
+  );
+});
+
 test("U05 §3.2: real Agent Markdown renders as text, with only web and local links and no executable HTML", async () => {
   await f.loginBrowser();
   await f.agentComment(

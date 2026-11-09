@@ -10,6 +10,7 @@ import {
   unwrap,
 } from "./core.js";
 import { mergePlan } from "./merge.js";
+import { reopenMerge } from "./merge-rework.js";
 
 export type MergeResult =
   | {
@@ -108,21 +109,13 @@ export function recordMergeResult(
         "Conflicting delivery is not in the current merge plan",
       );
       work_item_id = target.work_item_id;
-      d.put(
-        "work_items",
-        d.move(d.work(target.work_item_id), "merge_conflicted"),
+      next = reopenMerge(
+        d,
+        card,
+        d.get("deliveries", plan.completion_id),
+        target.work_item_id,
+        "merge_conflicted",
       );
-      next = {
-        ...card,
-        status: unwrap(transition("card", card.status, "merge_conflicted")),
-      };
-      const completion = d.get("deliveries", plan.completion_id);
-      d.put("deliveries", {
-        ...completion,
-        status: unwrap(transition("delivery", completion.status, "supersede")),
-      });
-      for (const id of completion.requested_verifiers)
-        d.put("work_items", d.move(d.work(id), "target_withdrawn"));
     }
     if (next !== card) d.put("cards", next);
     d.emit(
