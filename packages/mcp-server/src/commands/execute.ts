@@ -22,6 +22,7 @@ export function unwrap<T>(result: Result<T>): T {
 export function loadCommandState(
   tx: McpReadContext,
   project_id: ProjectId,
+  project_settings?: CommandState["project_settings"],
 ): CommandState {
   const cards = tx.cards.list(project_id);
   return {
@@ -30,6 +31,7 @@ export function loadCommandState(
     card_templates: tx.card_templates?.list(project_id) ?? [],
     employees: tx.employees?.list() ?? [],
     employee_activity: tx.employees?.assignmentActivity?.() ?? [],
+    ...(project_settings ? { project_settings } : {}),
     cards,
     work_items: tx.work_items.list(project_id),
     assignments: tx.assignments.list(project_id),

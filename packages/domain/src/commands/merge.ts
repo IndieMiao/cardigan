@@ -98,29 +98,40 @@ function confirmation(
 }
 /** No Git IO: the caller checks these SHAs against the pinned delivery refs. */
 export function mergePlan(state: CommandState, card_id: CardId) {
+  return planFor(state, card_id, true);
+}
+/** Candidate preparation may precede confirmation; publication still uses mergePlan. */
+export function prepareMergePlan(state: CommandState, card_id: CardId) {
+  return planFor(state, card_id, false);
+}
+/** Recording a running check must survive unrelated decisions opened after it started. */
+export function mergeContext(state: CommandState, card_id: CardId) {
+  const card = state.cards.find(
+    (c) => c.id === card_id && c.project_id === state.project_id,
+  );
+  ensure(card, "not_found", "Card was not found in this project");
+  ensure(
+    card.status === "awaiting_merge",
+    "illegal_transition",
+    "Card is not awaiting merge",
+  );
+  return { card, target: completion(state, card) };
+}
+function planFor(state: CommandState, card_id: CardId, confirmed: boolean) {
   return attempt((): MergePlan => {
-    const card = state.cards.find(
-      (c) => c.id === card_id && c.project_id === state.project_id,
-    );
-    ensure(card, "not_found", "Card was not found in this project");
-    ensure(
-      card.status === "awaiting_merge",
-      "illegal_transition",
-      "Card is not awaiting merge",
-    );
+    const { card, target } = mergeContext(state, card_id);
     ensure(
       card.repo && card.base_branch && card.merge_policy !== "none",
       "invariant_violation",
       "Git 合并需要仓库、基线和合并策略",
     );
-    const target = completion(state, card);
     const deliveries = candidates(state, card);
     ensure(
       deliveries.length > 0,
       "invariant_violation",
       "No accepted Git delivery to merge",
     );
-    if ((card.merge_policy ?? "confirm") === "confirm") {
+    if (confirmed && (card.merge_policy ?? "confirm") === "confirm") {
       const q = confirmation(state.decisions, card, target);
       ensure(
         q?.status === "resolved" && q.resolution?.option === "merge",
@@ -131,6 +142,13 @@ export function mergePlan(state: CommandState, card_id: CardId) {
     ensure(
       !state.decisions.some(
         (q) =>
+          !(
+            !confirmed &&
+            q.trigger === "merge_confirmation" &&
+            q.kind === "approve" &&
+            "delivery_id" in q.target &&
+            q.target.delivery_id === target.id
+          ) &&
           q.blocking &&
           ["open", "provisional"].includes(q.status) &&
           (q.card_id === card.id ||
