@@ -553,6 +553,7 @@ abortDispatch 只允许同项目 human/system，须带非空 reason，将未结�
 12. Run 记录所用的 Role 版本、模型和 Agent CLI 版本，保证可复现。
 13. 卡片的 `done` 必须经过完成申请和审核，规则不能自动把卡片置为 `done`。
 14. 交付和审核绑定到版本（SHA）：交付有新版本后，针对旧版本的审核结论自动失效。产物类附件必须带 `basis`（对应的拍板编号）。
+15. 审核者不能是作者：验证工作项不能使用其目标产出项当前或曾经的 Assignment；产出项也不能使用已经验证过它的 Assignment。完成申请的 PM 验收项与模板指定的主产出项同样必须使用不同 Assignment。当前 `assign` 不接受既有 `assignment_id`，只为新工作项分配新身份，或复用该工作项唯一且仍 active 的原身份；Assignment 的 `work_item_id` 不可改派，释放后也保留归属，因此现有规则已阻止上述身份复用。归属不一致或试图复用已释放身份时返回 `invariant_violation`，产出方调用 `submitReview` 自审返回 `unauthorized`。CLI `cardigan assign` 与 MCP `assign` 共用这条 domain 路径；即使两个工作项使用同一 Role，也必须分配不同身份。本条为 Assignment 级约束，员工级隔离留给 Phase 2 V1。
 
 ---
 
