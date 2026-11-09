@@ -7,8 +7,7 @@ import { DEFAULT_WEB_SESSION_TTL_MS } from "@cardigan/store";
  * The Workbench is a second, independent listener beside the MCP endpoint: it
  * serves `/api/*` for the SPA and the built `apps/web` assets, and it never
  * binds a non-loopback address. `CARDIGAN_WEB_PORT` can change the port only —
- * there is no environment variable that moves the address (§0: LAN access needs
- * HTTPS and a separate decision).
+ * external access requires an explicitly configured HTTPS reverse proxy origin.
  */
 
 /** Default Workbench port (M5 plan §3.1). */
@@ -27,6 +26,8 @@ export interface WebConfig {
   readonly host: string;
   /** `0` asks the OS for a free port (tests). */
   readonly port: number;
+  /** Explicit HTTPS reverse proxy origins; empty keeps local-only access. */
+  readonly publicOrigins: readonly string[];
   /** Directory holding the SPA build (`apps/web/dist`). */
   readonly staticDir: string;
   /** Session lifetime; 7 days by default. */
@@ -37,6 +38,7 @@ export interface WebConfig {
 
 export interface WebEnv {
   readonly CARDIGAN_WEB_PORT?: string | undefined;
+  readonly CARDIGAN_WEB_PUBLIC_ORIGINS?: string | undefined;
 }
 
 export interface WebConfigOverrides {
@@ -64,6 +66,7 @@ export function resolveWebConfig(
   return {
     host: resolveWebHost(overrides.host),
     port: resolveWebPort(env.CARDIGAN_WEB_PORT, overrides.port),
+    publicOrigins: resolvePublicOrigins(env.CARDIGAN_WEB_PUBLIC_ORIGINS),
     staticDir: overrides.staticDir ?? defaultWebStaticDir(),
     sessionTtlMs: positive(
       overrides.sessionTtlMs ?? DEFAULT_WEB_SESSION_TTL_MS,
@@ -75,6 +78,33 @@ export function resolveWebConfig(
       0,
     ),
   };
+}
+
+function resolvePublicOrigins(value: string | undefined): readonly string[] {
+  if (value === undefined || value.trim().length === 0) return [];
+  return [
+    ...new Set(
+      value.split(",").map((entry) => {
+        const text = entry.trim();
+        // Check the raw spelling too: URL would silently remove paths such as
+        // /.., empty query/fragment markers, credentials, and some whitespace.
+        if (/^https:\/\/[^/?#\\@\s*%]+$/.test(text) && !text.endsWith(":")) {
+          try {
+            const url = new URL(text);
+            if (url.hostname.length > 0 && !url.hostname.includes("*")) {
+              return url.origin;
+            }
+          } catch {
+            // Report the same configuration error for all malformed origins.
+          }
+        }
+        // Do not echo the value: a rejected URL may contain credentials.
+        throw new Error(
+          "CARDIGAN_WEB_PUBLIC_ORIGINS 无效：请用逗号分隔 HTTPS 来源，每项必须以 https:// 开头并包含主机名，可带端口，不得带路径（含末尾 /）、用户名密码、查询、片段或通配符",
+        );
+      }),
+    ),
+  ];
 }
 
 /**
@@ -156,11 +186,16 @@ export function bracket(host: string): string {
  * loopback interface could reach this listener. `localhost` and the bound
  * literal are both accepted because a browser may be given either.
  */
-export function allowedHosts(host: string, port: number): readonly string[] {
+export function allowedHosts(
+  host: string,
+  port: number,
+  publicOrigins: readonly string[] = [],
+): readonly string[] {
   const names = new Set([
     `127.0.0.1:${port}`,
     `localhost:${port}`,
     `${bracket(host)}:${port}`,
+    ...publicOrigins.map((origin) => new URL(origin).host),
   ]);
   return [...names];
 }

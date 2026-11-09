@@ -170,9 +170,16 @@ export function requireHost(
  * Origin as well means a request from anywhere else is refused explicitly
  * instead of merely arriving without credentials.
  */
-export function requireOrigin(req: IncomingMessage, host: string): string {
+export function requireOrigin(
+  req: IncomingMessage,
+  host: string,
+  publicOrigins: readonly string[] = [],
+): string {
+  const expected = publicOrigins.includes(`https://${host}`)
+    ? `https://${host}`
+    : `http://${host}`;
   if (req.method === "GET" || req.method === "HEAD") {
-    return `http://${host}`;
+    return expected;
   }
   const origin = req.headers.origin;
   if (typeof origin !== "string" || origin.length === 0) {
@@ -182,8 +189,7 @@ export function requireOrigin(req: IncomingMessage, host: string): string {
       "Origin header is required for this request",
     );
   }
-  const expected = `http://${host}`;
-  if (origin !== expected) {
+  if (origin !== expected && !publicOrigins.includes(origin)) {
     throw new HttpRejection(403, "origin_rejected", "unexpected Origin", {
       expected,
     });
@@ -274,25 +280,24 @@ export function parseCookies(
   return cookies;
 }
 
-export function sessionCookie(token: string, maxAgeSeconds: number): string {
+export function sessionCookie(
+  token: string,
+  maxAgeSeconds: number,
+  secure = false,
+): string {
   return [
     `${SESSION_COOKIE}=${encodeURIComponent(token)}`,
     "Path=/",
     "HttpOnly",
     "SameSite=Strict",
     `Max-Age=${maxAgeSeconds}`,
+    ...(secure ? ["Secure"] : []),
   ].join("; ");
 }
 
 /** Logout: the same attributes, an empty value and no lifetime. */
-export function clearedSessionCookie(): string {
-  return [
-    `${SESSION_COOKIE}=`,
-    "Path=/",
-    "HttpOnly",
-    "SameSite=Strict",
-    "Max-Age=0",
-  ].join("; ");
+export function clearedSessionCookie(secure = false): string {
+  return sessionCookie("", 0, secure);
 }
 
 export function methodNotAllowed(allowed: readonly string[]): never {

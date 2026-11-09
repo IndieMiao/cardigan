@@ -94,8 +94,8 @@ interface RequestContext {
   readonly limiter: LoginLimiter;
   readonly dataDir: string;
   readonly stream: WebServerOptions["stream"];
-  /** The validated `Host` header, i.e. the origin this listener answers on. */
-  readonly host: string;
+  /** Only the validated Host and explicit configuration decide cookie flags. */
+  readonly secureCookie: boolean;
   readonly log: (event: Readonly<Record<string, unknown>>) => void;
 }
 
@@ -162,8 +162,11 @@ export async function startWebServer(
     // Parsing against a fixed base keeps the URL independent of the Host header;
     // requireHost decides separately whether that header may be trusted.
     const url = new URL(req.url ?? "/", "http://workbench.invalid");
-    const hostHeader = requireHost(req, allowedHosts(host, boundPort));
-    requireOrigin(req, hostHeader);
+    const hostHeader = requireHost(
+      req,
+      allowedHosts(host, boundPort, config.publicOrigins),
+    );
+    requireOrigin(req, hostHeader, config.publicOrigins);
 
     if (url.pathname.startsWith(API_PREFIX) || url.pathname === "/api") {
       await handleApi({
@@ -176,7 +179,7 @@ export async function startWebServer(
         limiter,
         dataDir,
         stream: options.stream,
-        host: hostHeader,
+        secureCookie: config.publicOrigins.includes(`https://${hostHeader}`),
         log,
       });
       return;
@@ -243,7 +246,14 @@ async function handleApi(context: RequestContext): Promise<void> {
     if (token !== undefined) {
       context.store.revokeWebSession(token);
     }
-    sendJson(res, 200, { ok: true }, { "Set-Cookie": clearedSessionCookie() });
+    sendJson(
+      res,
+      200,
+      { ok: true },
+      {
+        "Set-Cookie": clearedSessionCookie(context.secureCookie),
+      },
+    );
     return;
   }
 
@@ -518,6 +528,7 @@ async function login(context: RequestContext): Promise<void> {
       "Set-Cookie": sessionCookie(
         issued.token,
         Math.floor(config.sessionTtlMs / 1000),
+        context.secureCookie,
       ),
     },
   );
