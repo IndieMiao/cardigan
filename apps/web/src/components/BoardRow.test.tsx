@@ -1,0 +1,106 @@
+// @vitest-environment jsdom
+/** Phase 1.5 §9 U.S-2 #1: the board is one row that scrolls inside its own strip. */
+import { readFileSync } from "node:fs";
+import { URL as NodeURL } from "node:url";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, expect, test } from "vitest";
+import type { CardListItem } from "../api.js";
+import { DEFAULT_CARD_DISPLAY } from "../card-display.js";
+import { card } from "../testing/fixtures.js";
+import { Board } from "./Board.js";
+
+afterEach(cleanup);
+
+const cards: readonly CardListItem[] = [
+  { ...card, id: "C-1", title: "进行中的卡片", status: "in_progress" },
+  { ...card, id: "C-2", title: "待开始的卡片", status: "todo" },
+  { ...card, id: "C-3", title: "已完成卡片", status: "done" },
+];
+
+const renderBoard = () =>
+  render(
+    <Board
+      cards={cards}
+      projectId="p-1"
+      expanded=""
+      onExpanded={() => {}}
+      display={DEFAULT_CARD_DISPLAY}
+    />,
+  );
+
+const styles = readFileSync(
+  new NodeURL("../styles.css", import.meta.url),
+  "utf8",
+);
+const rule = (selector: string) => {
+  const start = styles.indexOf(`${selector} {`);
+  expect(start).toBeGreaterThanOrEqual(0);
+  return styles.slice(start, styles.indexOf("}", start) + 1);
+};
+
+test("U6a board columns stay in one row inside a horizontally scrollable strip", () => {
+  const board = rule(".board");
+  expect(board).toContain("display: flex;");
+  expect(board).toContain("flex-wrap: nowrap;");
+  expect(board).toContain("overflow-x: auto;");
+  // The scrollbar is styled explicitly so it does not disappear on macOS.
+  expect(board).toContain("scrollbar-width: thin;");
+  expect(styles).toContain(".board::-webkit-scrollbar {");
+  expect(rule(".board-column")).toContain("flex: 0 0 280px;");
+  const collapsed = rule(".board-column-collapsed");
+  expect(collapsed).toContain("flex: 0 0 48px;");
+  expect(collapsed).toContain("min-width: 48px;");
+  expect(rule(".board-scroll")).toContain("min-width: 0;");
+  // The page itself never scrolls sideways: the strip cannot widen the content.
+  expect(rule(".content")).toContain("min-width: 0;");
+});
+
+test("U6a every status column renders as one child of the single board strip", () => {
+  renderBoard();
+  expect(screen.getByText("空列默认收起。").textContent).not.toContain("折行");
+  const strip = document.querySelector(".board");
+  expect(strip).toBeTruthy();
+  const columns = [...document.querySelectorAll(".board-column")];
+  expect(columns).toHaveLength(7);
+  for (const column of columns) expect(column.parentElement).toBe(strip);
+});
+
+test("U6a the edge fade appears while columns are hidden and disappears at the right end", () => {
+  const scrollWidth = Object.getOwnPropertyDescriptor(
+      Element.prototype,
+      "scrollWidth",
+    ),
+    clientWidth = Object.getOwnPropertyDescriptor(
+      Element.prototype,
+      "clientWidth",
+    );
+  Object.defineProperty(Element.prototype, "scrollWidth", {
+    configurable: true,
+    get: () => 1800,
+  });
+  Object.defineProperty(Element.prototype, "clientWidth", {
+    configurable: true,
+    get: () => 1440,
+  });
+  try {
+    renderBoard();
+    const strip = document.querySelector(".board") as HTMLElement;
+    expect(document.querySelector(".board-fade")).toBeTruthy();
+    strip.scrollLeft = 360;
+    fireEvent.scroll(strip);
+    expect(document.querySelector(".board-fade")).toBeNull();
+    strip.scrollLeft = 0;
+    fireEvent.scroll(strip);
+    expect(document.querySelector(".board-fade")).toBeTruthy();
+  } finally {
+    if (scrollWidth)
+      Object.defineProperty(Element.prototype, "scrollWidth", scrollWidth);
+    if (clientWidth)
+      Object.defineProperty(Element.prototype, "clientWidth", clientWidth);
+  }
+});
+
+test("U6a the fade lives outside the scroller and never blocks clicks", () => {
+  expect(rule(".board-fade")).toContain("pointer-events: none;");
+  expect(rule(".board-fade")).toContain("position: absolute;");
+});

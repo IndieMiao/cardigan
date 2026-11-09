@@ -488,19 +488,48 @@ button.quiet,
   gap: 6px;
 }
 
+.board-scroll {
+  position: relative;
+  min-width: 0;
+}
+/* U6a: one row of fixed-width columns; only the board scrolls sideways. */
 .board {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: var(--gap);
   align-items: flex-start;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 10px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--text-muted) transparent;
+}
+.board::-webkit-scrollbar {
+  height: 10px;
+}
+.board::-webkit-scrollbar-thumb {
+  background: var(--text-muted);
+  border-radius: 999px;
+}
+.board::-webkit-scrollbar-track {
+  background: transparent;
+}
+/* Fades the last visible column while the board still has columns to the right. */
+.board-fade {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 10px;
+  width: 56px;
+  pointer-events: none;
+  background: linear-gradient(to right, transparent, var(--bg));
 }
 .board-hint {
   margin-bottom: 12px;
 }
 .board-column {
-  flex: 1 1 240px;
-  min-width: 240px;
-  max-width: 320px;
+  flex: 0 0 280px;
+  width: 280px;
   background: var(--surface-muted);
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -509,6 +538,7 @@ button.quiet,
 }
 .board-column-collapsed {
   flex: 0 0 48px;
+  width: 48px;
   min-width: 48px;
   max-width: 48px;
   padding: 8px;
@@ -1628,13 +1658,18 @@ fieldset.filters {
   overflow: auto;
 }
 
-/* Radix-backed interaction primitives (U5-0); colours stay in the tokens above. */
-.drawer-overlay,
-.lightbox-overlay {
+/* Radix-backed interaction primitives (U5-0); colours stay in the tokens above.
+   Modal layers are ordered explicitly (§9 U6a): drawer < menus/popovers/tooltips
+   < nested lightbox, so a preview always covers the drawer and its tooltips. */
+.drawer-overlay {
   position: fixed;
   inset: 0;
   z-index: 100;
   background: var(--overlay);
+}
+/* The lightbox already dims the whole viewport, including the drawer. */
+body[data-lightbox="open"] .drawer-overlay {
+  background: transparent;
 }
 .drawer-content {
   position: fixed;
@@ -1727,12 +1762,15 @@ fieldset.filters {
   border-top: 1px solid var(--border);
 }
 .lightbox-overlay {
-  z-index: 110;
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background: var(--overlay);
 }
 .lightbox-content {
   position: fixed;
   inset: 0;
-  z-index: 111;
+  z-index: 201;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -1911,6 +1949,7 @@ fieldset.filters {
 .status-blocked::before,
 .status-lost::before,
 .status-rejected::before,
+.status-reject::before,
 .status-delivery_failed::before,
 .status-changes_requested::before {
   background: var(--danger);
@@ -2101,12 +2140,15 @@ fieldset.filters {
   display: flex;
   align-items: end;
 }
+.cards-page .filter-custom-grow {
+  flex: 1 1 220px;
+  min-width: 160px;
+}
 .cards-page .filter-search {
   display: flex;
-  flex: 1 1 220px;
+  flex: 1;
   align-items: center;
   gap: 6px;
-  min-width: 160px;
   min-height: 34px;
   padding: 0 10px;
   border: 1px solid var(--border);
@@ -2193,7 +2235,27 @@ fieldset.filters {
   padding: 0;
   margin: 8px 0 0;
 }
-.recent-conclusions a,
+.recent-conclusions li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.recent-conclusions .conclusion-dot {
+  flex: none;
+}
+/* §9 U6a: the result dot carries the outcome; the link underlines on hover. */
+.recent-conclusions a {
+  display: block;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-decoration: none;
+}
+.recent-conclusions a:hover {
+  text-decoration: underline;
+}
 .card-main .card-record-list p {
   display: block;
   white-space: nowrap;

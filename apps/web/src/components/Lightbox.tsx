@@ -1,5 +1,5 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import type { ReactElement, ReactNode } from "react";
+import { type ReactElement, type ReactNode, useEffect } from "react";
 
 export interface LightboxImage {
   readonly src: string;
@@ -26,6 +26,20 @@ export function Lightbox({
   trigger,
 }: LightboxProps) {
   const current = images[index];
+  /**
+   * §9 U6a: a preview dims the whole viewport, so the page records it and the
+   * drawer drops its own mask instead of stacking two of them.
+   */
+  useEffect(() => {
+    if (!open) return;
+    const body = document.body,
+      previous = body.getAttribute("data-lightbox");
+    body.setAttribute("data-lightbox", "open");
+    return () => {
+      if (previous === null) body.removeAttribute("data-lightbox");
+      else body.setAttribute("data-lightbox", previous);
+    };
+  }, [open]);
   const move = (delta: number) => {
     if (images.length === 0) return;
     onIndexChange((index + delta + images.length) % images.length);

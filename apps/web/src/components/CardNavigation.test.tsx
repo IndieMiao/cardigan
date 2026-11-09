@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { URL as NodeURL } from "node:url";
 import {
   cleanup,
   fireEvent,
@@ -349,6 +351,72 @@ test("U5b recent conclusions are capped, link to their event and disappear when 
   expect(screen.getAllByRole("link")[0]?.getAttribute("href")).toBe(
     "#/p/p-1/cards/C-1?at=entry-C-1%234",
   );
+});
+
+test("U6a recent conclusions carry a result dot and only underline the link on hover", () => {
+  const base = cardDetail(),
+    pass = timelineEntry({
+      id: "C-1#6",
+      event_seq: 6,
+      type: "review",
+      review_id: "V-6",
+      author_role: "reviewer",
+    }),
+    reject = timelineEntry({
+      id: "C-1#5",
+      event_seq: 5,
+      type: "review",
+      review_id: "V-5",
+      author_role: "reviewer",
+    });
+  render(
+    <RecentConclusions
+      detail={{
+        ...base,
+        recent_conclusions: [pass, reject],
+        reviews: [
+          {
+            id: "V-6",
+            delivery_id: "V-1",
+            work_item_id: "W-2",
+            verdict: "pass",
+            blocking: false,
+          },
+          {
+            id: "V-5",
+            delivery_id: "V-1",
+            work_item_id: "W-2",
+            verdict: "reject",
+            blocking: true,
+          },
+        ],
+      }}
+      projectId="p-1"
+      onLocate={undefined}
+    />,
+  );
+  const rows = [...document.querySelectorAll(".recent-conclusions li")];
+  expect(
+    rows.map((row) => row.querySelector(".conclusion-dot")?.className),
+  ).toEqual([
+    "status conclusion-dot status-pass",
+    "status conclusion-dot status-reject",
+  ]);
+  // Decorative: the row text already states the outcome.
+  for (const row of rows)
+    expect(
+      row.querySelector(".conclusion-dot")?.getAttribute("aria-hidden"),
+    ).toBe("true");
+  const css = readFileSync(
+    new NodeURL("../styles.css", import.meta.url),
+    "utf8",
+  );
+  const linkStart = css.indexOf(".recent-conclusions a {");
+  expect(linkStart).toBeGreaterThanOrEqual(0);
+  const link = css.slice(linkStart, css.indexOf("}", linkStart) + 1);
+  expect(link).toContain("text-decoration: none;");
+  expect(css).toContain(".recent-conclusions a:hover {");
+  expect(css).toContain(".status-reject::before");
 });
 
 test("U5b a conclusion outside the drawer window loads and scrolls its original entry without leaving the drawer", async () => {

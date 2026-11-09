@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 /** Phase 1.5 §4.3 list filters, columns and existing board behaviour. */
+import { readFileSync } from "node:fs";
+import { URL as NodeURL } from "node:url";
 import {
   cleanup,
   fireEvent,
@@ -146,6 +148,27 @@ test("an empty project says so, and active filters have their own empty text", a
   expect(
     await screen.findByText("没有匹配的卡片，请调整筛选条件。"),
   ).toBeTruthy();
+});
+
+test("U6a only the search box takes the remaining width of the filter row", async () => {
+  const api = client(async () => page());
+  render(<CardListPage client={api} projectId="p-1" view="board" />);
+  const search = await screen.findByLabelText("搜索标题或编号");
+  const grow = document.querySelectorAll(".filter-custom-grow");
+  expect(grow).toHaveLength(1);
+  expect(grow[0]?.className).toContain("filter-custom");
+  expect(grow[0]?.contains(search)).toBe(true);
+  const css = readFileSync(
+    new NodeURL("../styles.css", import.meta.url),
+    "utf8",
+  );
+  const box = css.indexOf(".cards-page .filter-custom-grow {");
+  expect(box).toBeGreaterThanOrEqual(0);
+  expect(css.slice(box, css.indexOf("}", box) + 1)).toContain(
+    "flex: 1 1 220px;",
+  );
+  const input = css.indexOf(".cards-page .filter-search {");
+  expect(css.slice(input, css.indexOf("}", input) + 1)).toContain("flex: 1;");
 });
 
 test("the board groups cards by status and links each one", async () => {
