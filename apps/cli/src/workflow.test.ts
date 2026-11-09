@@ -219,6 +219,83 @@ test("token issue validates the assignment and its state", async () => {
   expect(errors.join("\n")).toContain("不合法");
 });
 
+test("P2a-6: CLI assign separates authors, reviewers and PM acceptance and rejects a borrowed identity", async () => {
+  await bootstrap();
+  expect(
+    await run([
+      "role",
+      "add",
+      "p-work",
+      "reviewer",
+      "--allowed-tools",
+      "submit_review",
+    ]),
+  ).toBe(0);
+  expect(
+    await run([
+      "card",
+      "create",
+      "--template",
+      "dev",
+      "--title",
+      "Identity separation",
+      "--goal",
+      "Independent review",
+      "--acceptance",
+      "Distinct assignments",
+      "--repo",
+      "example/repo",
+    ]),
+  ).toBe(0);
+  const roles = ["coder", "reviewer", "pm"];
+  const tokens: string[] = [];
+  for (const [index, role] of roles.entries()) {
+    expect(await run(["assign", `W-${index + 1}`, "--role", role])).toBe(0);
+    expect(printed()).toContain(`已指派 W-${index + 1} → A-${index + 1}`);
+    tokens.push(tokenFromOutput());
+  }
+
+  const store = Store.open({ dataDir });
+  try {
+    store.uow.run((tx) => {
+      expect(
+        tx.assignments.list("p-work").map((a) => [a.id, a.work_item_id]),
+      ).toEqual([
+        ["A-1", "W-1"],
+        ["A-2", "W-2"],
+        ["A-3", "W-3"],
+      ]);
+      const reviewer = tx.work_items.get("p-work", "W-2" as never);
+      if (!reviewer) throw new Error("Missing reviewer");
+      // No CLI option reuses an identity; simulate a conflicting stored link.
+      tx.work_items.put("p-work", {
+        ...reviewer,
+        assignment_id: "A-1" as never,
+      });
+    });
+  } finally {
+    store.close();
+  }
+
+  expect(await run(["assign", "W-2", "--role", "reviewer"])).toBe(2);
+  expect(errors.join("\n")).toContain(
+    "invariant_violation: A work item has one persistent assignment",
+  );
+  expect(printed()).toBe("");
+  const reopened = Store.open({ dataDir });
+  try {
+    // Rejection must not rotate any credentials or rebind either Assignment.
+    for (const [index, token] of tokens.entries()) {
+      expect(reopened.verifyToken(token)?.assignment_id).toBe(`A-${index + 1}`);
+    }
+    expect(
+      reopened.uow.read((tx) => tx.assignments.list("p-work")),
+    ).toHaveLength(3);
+  } finally {
+    reopened.close();
+  }
+});
+
 test("office and ops are separate standing assignments with independent tokens", async () => {
   await bootstrap();
   expect(await run(["pm", "create", "--office"])).toBe(0);
