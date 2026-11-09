@@ -169,7 +169,9 @@ export function recordMergeCheck(
         p.status === "running"
           ? latest.status === "queued"
           : latest.status === "running" ||
-              (p.status === "interrupted" && latest.status === "queued"),
+              (latest.status === "queued" &&
+                (p.status === "interrupted" ||
+                  (p.status === "failed" && p.checks.length === 0))),
         "illegal_transition",
         "Invalid merge check transition",
       );
