@@ -25,25 +25,28 @@ export function TimelineContent({
   const workLabel = (id: string) =>
     detail.work_items.find((w) => w.id === id)?.title ?? "工作项";
   const heading = (type: string, id: string, result: ReactNode) => (
-    <>
-      <TimelineHeader
-        entry={entry}
-        action={
-          type === "完成申请"
-            ? "提交完成申请"
-            : type === "交付"
-              ? "提交交付"
-              : type === "审核"
-                ? "提交审核"
-                : entry.type === "decision_request"
-                  ? "请求拍板"
-                  : "记录拍板"
-        }
-      />
-      <h4 className="timeline-conclusion">
-        <span>{type}</span> <span>{id}</span> {result}
-      </h4>
-    </>
+    <TimelineHeader
+      entry={entry}
+      action={
+        type === "完成申请"
+          ? "提交完成申请"
+          : type === "交付"
+            ? "提交交付"
+            : type === "审核"
+              ? "提交审核"
+              : entry.type === "decision_request"
+                ? "请求拍板"
+                : "记录拍板"
+      }
+      conclusion={
+        <h4 className="timeline-conclusion">
+          <span>
+            {type} {id}
+          </span>{" "}
+          {result}
+        </h4>
+      }
+    />
   );
   if (entry.type === "delivery") {
     const delivery = detail.deliveries.find((d) => d.id === entry.delivery_id);

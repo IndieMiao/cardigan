@@ -32,8 +32,13 @@
   --status-cancelled: var(--status-muted);
   --radius: 8px;
   --gap: 12px;
-  --font: "PingFang SC", "Noto Sans SC", system-ui, sans-serif;
-  --mono: ui-monospace, SFMono-Regular, "Noto Sans Mono", monospace;
+  --font:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue",
+    "PingFang SC", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+  --font-code:
+    ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", "PingFang SC",
+    "Noto Sans Mono CJK SC", monospace;
+  --text-code-inline: 0.92em;
   --text-xs: 12px;
   --text-sm: 13px;
   --text-body: 14px;
@@ -78,11 +83,13 @@ body {
   font-family: var(--font);
   font-size: var(--text-body);
   line-height: 1.65;
-  font-variant-numeric: tabular-nums;
+  font-weight: 400;
+  text-autospace: ideograph-alpha ideograph-numeric;
 }
 
 code {
-  font-family: var(--mono);
+  font-size: var(--text-code-inline);
+  font-family: var(--font-code);
   background: var(--surface-muted);
   padding: 0 0.25em;
   border-radius: 4px;
@@ -113,6 +120,9 @@ h1,
 h2,
 h3,
 h4,
+h5,
+h6,
+th,
 strong,
 b {
   font-weight: 600;
@@ -123,12 +133,32 @@ h1 {
 h2 {
   font-size: var(--text-section);
 }
-h3 {
+h3,
+h4,
+h5,
+h6 {
   font-size: var(--text-body);
 }
 
 pre {
-  font-family: var(--mono);
+  font-family: var(--font-code);
+  font-size: var(--text-sm);
+}
+pre code {
+  font-size: inherit;
+}
+small {
+  font-size: var(--text-xs);
+}
+table,
+time,
+.filter-count,
+.board-column-count,
+.cards-count,
+.nav-count,
+.timeline-count,
+.snapshot-overview strong {
+  font-variant-numeric: tabular-nums;
 }
 
 .centered,
@@ -204,7 +234,6 @@ button.quiet,
 
 .filter-count {
   margin-left: 6px;
-  font-variant-numeric: tabular-nums;
   opacity: 0.8;
 }
 
@@ -570,7 +599,6 @@ button.quiet,
 
 .board-column-count {
   color: var(--text-muted);
-  font-variant-numeric: tabular-nums;
 }
 
 .board-column-empty {
@@ -881,14 +909,14 @@ fieldset.filters {
 }
 .entry-summary {
   max-width: 680px;
-  font-size: var(--text-body);
+  font-size: var(--text-reading);
 }
 .entry-meta {
   display: flex;
   align-items: baseline;
   gap: 12px;
   color: var(--text-muted);
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
   white-space: nowrap;
   margin: 8px 0;
 }
@@ -907,8 +935,7 @@ fieldset.filters {
 .timeline-version {
   flex: none;
 }
-.timeline-version button.quiet,
-.timeline-head button.timeline-author {
+.timeline-version button.quiet {
   border: 0;
   padding: 0;
   color: inherit;
@@ -921,12 +948,13 @@ fieldset.filters {
 }
 .structured-entry details {
   color: var(--text-muted);
-  font-size: var(--text-xs);
+  font-size: var(--text-reading);
 }
 .structured-entry details[open] {
   color: var(--text);
 }
 .structured-entry summary {
+  font-size: var(--text-sm);
   cursor: pointer;
 }
 .structured-entry blockquote {
@@ -1093,7 +1121,7 @@ fieldset.filters {
   align-items: center;
   gap: 12px;
   margin: 24px 0 20px;
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
   font-weight: 400;
   color: var(--text-muted);
 }
@@ -1115,7 +1143,8 @@ fieldset.filters {
 .system-group {
   position: relative;
   min-width: 0;
-  font-size: var(--text-sm);
+  font-size: var(--text-reading);
+  line-height: 1.7;
 }
 .timeline-icon {
   position: absolute;
@@ -1168,6 +1197,10 @@ fieldset.filters {
   opacity: 0.6;
 }
 .timeline-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 12px;
   margin-bottom: 16px;
 }
 .timeline-identity {
@@ -1213,26 +1246,35 @@ fieldset.filters {
   border-radius: 4px;
   padding: 0 6px;
   color: var(--text-muted);
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
 }
 .timeline-head .timeline-when {
+  grid-column: 1;
+  grid-row: 2;
   margin: 0 0 0 40px;
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
   color: var(--text-muted);
 }
 .timeline-conclusion {
+  grid-column: 2;
+  grid-row: 1;
+  justify-self: end;
   display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
-  margin: 0 0 8px;
-  font-size: var(--text-body);
-  color: var(--text);
+  margin: 0;
+  white-space: nowrap;
+  font-size: var(--text-sm);
+  font-weight: 400;
+  color: var(--text-muted);
 }
 .timeline-conclusion .status {
-  font-size: var(--text-section);
+  font-size: var(--text-sm);
   font-weight: 600;
   color: var(--status-muted);
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: color-mix(in srgb, currentColor 12%, var(--timeline-card));
 }
 .timeline-conclusion .status::before {
   background: currentColor;
@@ -1292,6 +1334,7 @@ fieldset.filters {
   background: linear-gradient(transparent, var(--timeline-card));
 }
 .long-content-15 > button.quiet {
+  font-size: var(--text-sm);
   border: 0;
   padding: 4px 0;
   color: var(--accent);
@@ -1302,7 +1345,7 @@ fieldset.filters {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
   color: var(--text-muted);
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
 }
 .system-line {
   display: flex;
@@ -1367,11 +1410,6 @@ fieldset.filters {
   padding: 8px 10px;
   border-radius: var(--radius);
   overflow-x: auto;
-}
-
-.markdown code {
-  font-family: var(--mono);
-  font-size: var(--text-xs);
 }
 
 .markdown blockquote {
@@ -2173,7 +2211,7 @@ body[data-lightbox="open"] .drawer-overlay {
   align-items: center;
   gap: 6px;
   white-space: nowrap;
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
   padding: 4px 0;
   margin-bottom: 12px;
 }
@@ -2499,4 +2537,31 @@ body[data-lightbox="open"] .drawer-overlay {
 .attachments .attachment-preview {
   width: 180px;
   height: 120px;
+}
+
+/* U6c: timeline prose, headings and secondary text use only three sizes. */
+.timeline-entry :where(h1, h2, h3, h4, h5, h6):not(.timeline-conclusion),
+.structured-entry details strong {
+  font-size: var(--text-body);
+}
+.timeline-entry :where(.id-tag, .attachment, .superseded),
+.timeline-entry :where(.long-content) > button,
+.timeline-avatar,
+.system-line .timeline-author {
+  font-size: var(--text-sm);
+}
+.timeline-entry :where(pre) {
+  font-size: var(--text-sm);
+}
+
+.card-timeline > h2 {
+  font-size: var(--text-body);
+}
+.card-timeline .comment-input,
+.card-timeline .comment-preview {
+  font-size: var(--text-reading);
+}
+.card-timeline .hint,
+.timeline-entry small {
+  font-size: var(--text-sm);
 }
