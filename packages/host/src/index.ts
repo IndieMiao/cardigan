@@ -27,6 +27,12 @@ export {
   scrubRunCredentials,
 } from "./launch.js";
 export {
+  loadMergeGateConfig,
+  type MergeGateConfiguration,
+  type ProjectMergeGate,
+} from "./merge-gate-config.js";
+export { CHECK_OUTPUT_LIMIT, createMergeCheckLog } from "./merge-gate-log.js";
+export {
   agentNameFor,
   projectSegment,
   projectShortCode,
