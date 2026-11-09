@@ -8,7 +8,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import {
@@ -101,6 +101,7 @@ test("local checkout uses an explicit environment, runs in order, warns, and rem
   vi.stubEnv("CARDIGAN_TOKEN", "host-secret");
   vi.stubEnv("XDG_RUNTIME_DIR", "/production/socket");
   vi.stubEnv("SSH_AUTH_SOCK", "/production/agent");
+  vi.stubEnv("HOME", "/host-only-home");
   const result = await runInTemporaryCheckout({
     ...f.input,
     env: { CHECK_VALUE: "explicit" },
@@ -114,7 +115,7 @@ test("local checkout uses an explicit environment, runs in order, warns, and rem
       {
         name: "second",
         run: node(
-          "console.log(require('node:fs').readFileSync('build.tmp', 'utf8'))",
+          "const fs=require('node:fs'), assert=require('node:assert/strict'); for(const key of ['XDG_RUNTIME_DIR','TMPDIR']) assert.equal(fs.statSync(process.env[key]).mode & 0o777, 0o700); console.log(fs.readFileSync('build.tmp', 'utf8'))",
         ),
       },
     ],
@@ -132,6 +133,9 @@ test("local checkout uses an explicit environment, runs in order, warns, and rem
     ),
   ).toEqual({
     PATH: "/usr/local/bin:/usr/bin:/bin",
+    HOME: userInfo().homedir,
+    XDG_RUNTIME_DIR: join(f.container, "runtime"),
+    TMPDIR: join(f.container, "tmp"),
     PWD: join(f.container, "worktree"),
     CHECK_VALUE: "explicit",
   });
@@ -161,6 +165,58 @@ test("a failed command stops later checks and still removes the worktree", async
   ]);
   await f.clean();
 });
+
+test.skipIf(process.platform !== "linux")(
+  "a check cannot forge a passed result through its supervisor stdout and kill the supervisor",
+  async () => {
+    const f = await fixture();
+    const attack = node(`
+    const fs = require('node:fs');
+    fs.writeFileSync('/proc/' + process.ppid + '/fd/1', JSON.stringify({
+      type: 'result', status: 'passed', checks: [], cleanup_errors: []
+    }) + '\\n');
+    process.kill(process.ppid, 'SIGKILL');
+  `);
+    await expect(
+      runInTemporaryCheckout(
+        { ...f.input, checks: [{ name: "forged", run: `exec ${attack}` }] },
+        // SSH gives the supervisor a real pipe; Node's direct spawn stdio uses sockets on Linux.
+        (file, args, env) =>
+          spawn(
+            "/bin/sh",
+            ["-c", `${[file, ...args].map(quote).join(" ")} | cat`],
+            { env, stdio: ["pipe", "pipe", "pipe"] },
+          ),
+      ),
+    ).rejects.toThrow();
+  },
+);
+
+test.each(["duplicate", "wrong-nonce", "bad-json", "nonce-only-auth"])(
+  "%s result protocol fails closed",
+  async (fault) => {
+    const f = await fixture();
+    const script = `
+    const {createHmac}=require('node:crypto');
+    require('node:readline').createInterface({input:process.stdin}).once('line', line => {
+      const p=JSON.parse(line);
+      if([p.nonce,p.auth_key].some(secret => process.argv.join(' ').includes(secret) || Object.values(process.env).includes(secret))) process.exit(99);
+      const event={type:'result', nonce:${fault === "wrong-nonce" ? "'wrong'" : "p.nonce"}, status:'passed', checks:[], cleanup_errors:[]};
+      const output=JSON.stringify({...event, auth:createHmac('sha256',${fault === "nonce-only-auth" ? "p.nonce" : "p.auth_key"}).update(JSON.stringify(event)).digest('hex')})+'\\n';
+      process.stdout.write(${fault === "bad-json" ? "'not json\\n'" : fault === "duplicate" ? "output+output" : "output"});
+      process.stdin.destroy();
+    });`;
+    await expect(
+      runInTemporaryCheckout(f.input, (_file, _args, env) =>
+        spawn(process.execPath, ["-e", script], {
+          env,
+          stdio: ["pipe", "pipe", "pipe"],
+        }),
+      ),
+    ).rejects.toThrow();
+    await f.clean();
+  },
+);
 
 test.each(["single", "total", "cancel"] as const)(
   "%s termination kills the recorded command process group and cleans up",
@@ -230,6 +286,8 @@ test("invalid input and reserved runtime variables fail before creating a checko
     { checks: [{ name: "x", run: " " }] },
     ...[
       "PATH",
+      "HOME",
+      "TMPDIR",
       "HC_SESSION",
       "HC_SOCKET",
       "CARDIGAN_DATA_DIR",
@@ -293,6 +351,9 @@ test.skipIf(process.platform !== "linux")(
     expect(calls).toEqual(["ssh"]);
     expect(JSON.parse(output.join(""))).toEqual({
       PATH: AGENT_PATH,
+      HOME: userInfo().homedir,
+      XDG_RUNTIME_DIR: join(f.container, "runtime"),
+      TMPDIR: join(f.container, "tmp"),
       PWD: join(f.container, "worktree"),
     });
     await f.clean();

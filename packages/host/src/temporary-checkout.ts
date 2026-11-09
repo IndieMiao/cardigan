@@ -1,5 +1,5 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import { mkdir, rmdir } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -72,7 +72,7 @@ export async function runInTemporaryCheckout(
   for (const [key, value] of Object.entries(input.env ?? {})) {
     if (
       !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(key) ||
-      /^(PATH|PWD|HC_.*|CARDIGAN_.*|XDG_RUNTIME_DIR)$/u.test(key) ||
+      /^(PATH|PWD|HOME|TMPDIR|HC_.*|CARDIGAN_.*|XDG_RUNTIME_DIR)$/u.test(key) ||
       typeof value !== "string" ||
       value.includes("\0")
     )
@@ -115,6 +115,8 @@ export async function runInTemporaryCheckout(
   const directory = join(container, "worktree");
   let completed: CheckoutResult;
   const cleanupErrors: string[] = [];
+  const nonce = randomBytes(32).toString("hex");
+  const authKey = randomBytes(32).toString("hex");
   try {
     if (execution.mode === "local")
       input.onOutput?.("system", `${LOCAL_RUNTIME_WARNING}\n`);
@@ -122,6 +124,8 @@ export async function runInTemporaryCheckout(
       // No ambient environment, even for the SSH client or local supervisor.
       const child = start(command.file, command.args, { PATH: path });
       let result: CheckoutResult | undefined;
+      let resultCount = 0,
+        protocolFailed = false;
       const cancel = () => {
         if (!child.stdin.destroyed) child.stdin.write("cancel\n");
       };
@@ -130,10 +134,26 @@ export async function runInTemporaryCheckout(
       const lines = createInterface({ input: child.stdout });
       lines.on("line", (line) => {
         try {
-          const event = JSON.parse(line);
+          const { auth, ...event } = JSON.parse(line);
+          if (event.type === "result") resultCount++;
+          if (
+            protocolFailed ||
+            auth !==
+              createHmac("sha256", authKey)
+                .update(JSON.stringify(event))
+                .digest("hex") ||
+            resultCount > 1
+          )
+            throw new Error("Invalid checkout message");
           if (event.type === "output") input.onOutput?.(event.name, event.text);
-          if (event.type === "result") result = event as CheckoutResult;
+          if (event.type === "result") {
+            if (event.nonce !== nonce)
+              throw new Error("Invalid checkout nonce");
+            const { nonce: _nonce, type: _type, ...value } = event;
+            result = value as CheckoutResult;
+          }
         } catch {
+          protocolFailed = true;
           cancel();
         }
       });
@@ -141,10 +161,11 @@ export async function runInTemporaryCheckout(
       child.once("error", () =>
         reject(new Error("Checkout execution entry failed")),
       );
-      child.once("close", () => {
+      child.once("close", (code) => {
         signal?.removeEventListener("abort", cancel);
         lines.close();
-        if (result) resolve(result);
+        if (code === 0 && !protocolFailed && resultCount === 1 && result)
+          resolve(result);
         else
           reject(
             new Error(
@@ -154,6 +175,9 @@ export async function runInTemporaryCheckout(
       });
       child.stdin.write(
         `${JSON.stringify({
+          nonce,
+          auth_key: authKey,
+          container,
           repository,
           directory,
           sha,
