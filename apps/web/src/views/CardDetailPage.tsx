@@ -4,13 +4,18 @@ import {
   type CardDetail,
   type CardiganClient,
   type CardReadOptions,
+  type PostedComment,
 } from "../api.js";
 import { AttachmentGrid } from "../components/AttachmentGrid.js";
 import { CardSource, RecentConclusions } from "../components/CardIntro.js";
 import { CardRecords } from "../components/CardRecords.js";
 import { CardSectionNav } from "../components/CardSectionNav.js";
 import { CardSidebar, CardWorkItems } from "../components/CardSidebar.js";
-import { CommentBox, type MentionOption } from "../components/CommentBox.js";
+import {
+  CommentBox,
+  type CommentBoxHandle,
+  type MentionOption,
+} from "../components/CommentBox.js";
 import {
   EmptyState,
   IdTag,
@@ -42,9 +47,20 @@ export function CardDetailPage(props: CardDetailPageProps) {
     inDrawer = false,
     revision = 0,
   } = props;
-  const [localAnchor, setLocalAnchor] = useState<string>();
-  const anchor = routeAnchor ?? localAnchor;
   const [routeFilters] = useRouteFilters({ kind: "card", projectId, cardId });
+  const routeLocation = `${projectId}/${cardId}/${routeAnchor ?? ""}/${routeFilters.type ?? ""}/${routeFilters.author ?? ""}`;
+  const [localAnchor, setLocalAnchor] = useState<{
+    id: string;
+    routeLocation: string;
+  }>();
+  const anchor =
+    localAnchor?.routeLocation === routeLocation ? localAnchor.id : routeAnchor;
+  useEffect(() => {
+    setLocalAnchor((current) =>
+      current?.routeLocation === routeLocation ? current : undefined,
+    );
+  }, [routeLocation]);
+  const locate = (id: string) => setLocalAnchor({ id, routeLocation });
   const pageSize = [20, 50, 100].includes(Number(routeFilters.count))
     ? Number(routeFilters.count)
     : 20;
@@ -108,7 +124,19 @@ export function CardDetailPage(props: CardDetailPageProps) {
       cardId={cardId}
       anchor={anchor}
       inDrawer={inDrawer}
-      onLocate={inDrawer ? setLocalAnchor : undefined}
+      onLocate={inDrawer ? locate : undefined}
+      onPosted={(comment) => {
+        const id = `entry-${comment.id}`;
+        locate(id);
+        if (!inDrawer)
+          window.location.hash = routeHash({
+            kind: "card",
+            projectId,
+            cardId,
+            anchor: id,
+            filters: routeFilters,
+          });
+      }}
       error={error}
       reload={reload}
       pending={pending}
@@ -135,6 +163,7 @@ function CardContent({
   anchor,
   inDrawer,
   onLocate,
+  onPosted,
   error,
   reload,
   pending,
@@ -149,6 +178,7 @@ function CardContent({
   anchor: string | undefined;
   inDrawer: boolean;
   onLocate: ((anchor: string) => void) | undefined;
+  onPosted: (comment: PostedComment) => void;
   error: string | undefined;
   reload: () => void;
   anchorReady: boolean;
@@ -162,6 +192,7 @@ function CardContent({
     cardId,
   });
   const article = useRef<HTMLElement>(null);
+  const commentBox = useRef<CommentBoxHandle>(null);
   const scroll = useRef<HTMLElement>(null),
     initialTimeline = useRef(detail.timeline),
     interacted = useRef(false),
@@ -199,9 +230,9 @@ function CardContent({
       if (interacted.current || initialTimeline.current !== detail.timeline)
         return;
       position = () => {
-        Array.from(region.querySelectorAll(".timeline > li"))
-          .at(-1)
-          ?.scrollIntoView?.({ block: "end" });
+        region
+          .querySelector(".timeline > li")
+          ?.scrollIntoView?.({ block: "start" });
       };
     }
     let following = true;
@@ -313,7 +344,13 @@ function CardContent({
             }
           />
         </header>
-        <CardSectionNav article={article} sections={sections} />
+        <CardSectionNav
+          article={article}
+          sections={sections}
+          cardId={card.id}
+          title={card.title}
+          commentBox={commentBox}
+        />
         <section
           id={sectionId("overview")}
           className="card-purpose"
@@ -390,6 +427,14 @@ function CardContent({
             pending={pending}
             loadEarlier={loadEarlier}
           />
+          <CommentBox
+            ref={commentBox}
+            client={client}
+            projectId={projectId}
+            cardId={cardId}
+            mentions={mentionOptions(detail)}
+            onPosted={onPosted}
+          />
           {anchor && (filters.type || filters.author) && (
             <p className="hint">
               已保留链接指向的条目，便于定位；重新筛选后恢复只显示匹配项。
@@ -411,13 +456,6 @@ function CardContent({
               anchor={anchor}
             />
           </section>
-          <CommentBox
-            client={client}
-            projectId={projectId}
-            cardId={cardId}
-            mentions={mentionOptions(detail)}
-            onPosted={reload}
-          />
         </section>
         {!!detail.attachments.length && (
           <section

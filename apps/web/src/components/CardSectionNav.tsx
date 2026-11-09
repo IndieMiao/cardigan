@@ -1,4 +1,5 @@
 import { type RefObject, useEffect, useRef, useState } from "react";
+import type { CommentBoxHandle } from "./CommentBox.js";
 
 export interface CardSection {
   readonly id: string;
@@ -10,9 +11,15 @@ export interface CardSection {
 export function CardSectionNav({
   sections,
   article,
+  cardId,
+  title,
+  commentBox,
 }: {
   sections: readonly CardSection[];
   article: RefObject<HTMLElement | null>;
+  cardId: string;
+  title: string;
+  commentBox: RefObject<CommentBoxHandle | null>;
 }) {
   const nav = useRef<HTMLElement>(null);
   const [active, setActive] = useState(sections[0]?.id);
@@ -24,7 +31,15 @@ export function CardSectionNav({
     const root = page.closest<HTMLElement>(".drawer-body");
     const scroller = root ?? window;
     const update = () => {
-      const top = bar.getBoundingClientRect().bottom + 12;
+      const gap =
+        Number.parseFloat(
+          window.getComputedStyle(bar).getPropertyValue("--gap"),
+        ) || 0;
+      page.style.setProperty(
+        "--card-scroll-offset",
+        `${scrollInset(bar, root)}px`,
+      );
+      const top = bar.getBoundingClientRect().bottom + gap;
       let current = keys.split("|")[0];
       for (const id of keys.split("|")) {
         const target = document.getElementById(id);
@@ -53,25 +68,17 @@ export function CardSectionNav({
         ? undefined
         : new ResizeObserver(update);
     observer?.observe(page);
+    observer?.observe(bar);
     return () => {
       scroller.removeEventListener("scroll", update);
       window.removeEventListener("resize", update);
       observer?.disconnect();
+      page.style.removeProperty("--card-scroll-offset");
     };
   }, [article, keys]);
   const scrollTo = (target: HTMLElement) => {
     const root = article.current?.closest<HTMLElement>(".drawer-body");
-    const padding = root
-      ? Number.parseFloat(getComputedStyle(root).paddingTop) || 0
-      : 0;
-    const stickyTop = nav.current
-      ? Number.parseFloat(getComputedStyle(nav.current).top) || 0
-      : 0;
-    const inset =
-      (nav.current?.getBoundingClientRect().height ?? 0) +
-      padding +
-      stickyTop +
-      12;
+    const inset = nav.current ? scrollInset(nav.current, root) : 0;
     const top =
       target.getBoundingClientRect().top -
       (root?.getBoundingClientRect().top ?? 0) +
@@ -81,40 +88,53 @@ export function CardSectionNav({
   };
   return (
     <nav ref={nav} className="card-section-nav" aria-label="卡片区块导航">
-      {sections.map((section) => (
+      <div className="card-nav-identity">
+        <span className="card-nav-id">{cardId}</span>
+        <span className="card-nav-title" title={title}>
+          {title}
+        </span>
+      </div>
+      <div className="card-nav-links">
+        {sections.map((section) => (
+          <button
+            key={section.id}
+            type="button"
+            className="quiet"
+            aria-current={active === section.id ? "location" : undefined}
+            onClick={() => {
+              const target = document.getElementById(section.id);
+              if (target) {
+                setActive(section.id);
+                scrollTo(target);
+              }
+            }}
+          >
+            {section.label}
+            {section.count === undefined ? "" : `（${section.count}）`}
+          </button>
+        ))}
         <button
-          key={section.id}
           type="button"
-          className="quiet"
-          aria-current={active === section.id ? "location" : undefined}
+          className="write-comment"
           onClick={() => {
-            const target = document.getElementById(section.id);
-            if (target) {
-              setActive(section.id);
-              scrollTo(target);
-            }
+            commentBox.current?.focus(scrollTo);
           }}
         >
-          {section.label}
-          {section.count === undefined ? "" : `（${section.count}）`}
+          写评论
         </button>
-      ))}
-      <button
-        type="button"
-        className="write-comment"
-        onClick={() => {
-          const input =
-            article.current?.querySelector<HTMLTextAreaElement>(
-              ".comment-input",
-            );
-          if (input) {
-            scrollTo(input);
-            input.focus({ preventScroll: true });
-          }
-        }}
-      >
-        写评论
-      </button>
+      </div>
     </nav>
+  );
+}
+
+function scrollInset(bar: HTMLElement, root?: HTMLElement | null): number {
+  const style = window.getComputedStyle(bar);
+  return (
+    bar.getBoundingClientRect().height +
+    (root
+      ? Number.parseFloat(window.getComputedStyle(root).paddingTop) || 0
+      : 0) +
+    (Number.parseFloat(style.top) || 0) +
+    (Number.parseFloat(style.getPropertyValue("--gap")) || 0)
   );
 }

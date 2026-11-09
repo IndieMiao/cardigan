@@ -235,12 +235,10 @@ test("timeline entries are typed and carry their attachments", async () => {
   await screen.findByRole("article", { name: "卡片 C-1" });
   const entries = document.querySelectorAll(".timeline-entry");
   expect(entries).toHaveLength(3);
-  expect(entries[0]?.getAttribute("data-timeline-type")).toBe(
-    "decision_request",
-  );
-  expect(entries[0]?.textContent).toContain("请求拍板");
+  expect(entries[0]?.getAttribute("data-timeline-type")).toBe("review");
+  expect(entries[0]?.textContent).toContain("审核");
   expect(entries[1]?.textContent).toContain("评论");
-  expect(entries[2]?.textContent).toContain("审核");
+  expect(entries[2]?.textContent).toContain("请求拍板");
 
   const comment = document.querySelector('[data-timeline-type="comment"]');
   const image = comment?.querySelector("img");

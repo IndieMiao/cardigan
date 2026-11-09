@@ -189,15 +189,21 @@ test("U5c groups by local calendar day, in order, without combining system event
   );
   const days = [...document.querySelectorAll(".timeline-day")];
   expect(days.map((d) => d.querySelector("h3")?.textContent)).toEqual([
-    "2026年11月7日",
     "2026年11月8日",
+    "2026年11月7日",
   ]);
-  expect(days[0]?.querySelectorAll(".timeline-entry")).toHaveLength(1);
-  expect(days[1]?.querySelectorAll(".timeline-entry")).toHaveLength(2);
+  expect(days[0]?.querySelectorAll(".timeline-entry")).toHaveLength(2);
+  expect(days[1]?.querySelectorAll(".timeline-entry")).toHaveLength(1);
   expect(
-    within(days[1] as HTMLElement).getByText("释放了 2 个 Assignment"),
+    within(days[0] as HTMLElement).getByText("释放了 2 个 Assignment"),
   ).toBeTruthy();
   expect(document.getElementById("entry-C-1#3")).toBeTruthy();
+  expect(
+    [...document.querySelectorAll(".timeline-entry")].map((row) => row.id),
+  ).toEqual(["entry-C-1#3", "entry-C-1#2", "entry-C-1#1"]);
+  expect(
+    days[0]?.querySelector(".system-line time")?.getAttribute("datetime"),
+  ).toBe(entries[0]?.created_at);
 });
 
 test("U5c delivery, review and decision lead with unique IDs and coloured results above summary and metadata", () => {

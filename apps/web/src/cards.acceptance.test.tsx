@@ -552,7 +552,11 @@ test("U11 §8.4: attachments show decision status, fold superseded versions and 
     svg = await upload("image/svg+xml", "<svg onload='bad()'></svg>");
   const page = detail();
   await screen.findByText("Design attachments");
-  const images = [...page.container.querySelectorAll("img")];
+  // Inspect the attachment's owning comment, not the separate upload-event
+  // thumbnail which now appears before it in the newest-first timeline.
+  const commentRow = page.container.querySelector(`[id="entry-${comment.id}"]`);
+  if (!commentRow) throw new Error("Missing attachment comment");
+  const images = [...commentRow.querySelectorAll("img")];
   expect(
     images.some((i) => i.getAttribute("src")?.endsWith(`/${current.id}`)),
   ).toBe(true);
@@ -569,7 +573,7 @@ test("U11 §8.4: attachments show decision status, fold superseded versions and 
   const evidence = currentImage?.closest("li");
   expect(textOf(evidence ?? null)).toContain(decision.id);
   expect(textOf(evidence ?? null)).toMatch(/已拍板|已批|已解决/);
-  const download = [...page.container.querySelectorAll("a")].find((a) =>
+  const download = [...commentRow.querySelectorAll("a")].find((a) =>
     a.getAttribute("href")?.endsWith(`/${svg.id}`),
   );
   expect(download?.textContent).toMatch(/下载/);

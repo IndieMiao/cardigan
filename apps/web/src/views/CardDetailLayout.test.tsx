@@ -165,13 +165,13 @@ test("U3 separates goal/checklist and sticky summary, with only identity/status/
   expect(purpose.textContent).not.toContain("✓");
   const rows = [...page.querySelectorAll(".timeline-entry")];
   expect(rows.map((r) => r.id)).toEqual(
-    [1, 2, 3, 4, 5, 6].map((n) => `entry-C-1#${n}`),
+    [6, 5, 4, 3, 2, 1].map((n) => `entry-C-1#${n}`),
   );
   const commentBox = page.querySelector(".comment-box");
   if (!commentBox) throw new Error("Missing comment form");
   expect(
-    rows.at(-1)?.compareDocumentPosition(commentBox) &
-      Node.DOCUMENT_POSITION_FOLLOWING,
+    rows[0]?.compareDocumentPosition(commentBox) &
+      Node.DOCUMENT_POSITION_PRECEDING,
   ).toBeTruthy();
 });
 
@@ -228,7 +228,7 @@ test("U3 combines only consecutive system records and explicit locations reveal 
       event_type: n === 3 ? "comment_posted" : "assignment_released",
     }),
   );
-  expect(timelineGroups(entries).map((g) => g.length)).toEqual([2, 1, 1]);
+  expect(timelineGroups(entries).map((g) => g.length)).toEqual([1, 1, 2]);
   window.location.hash = "#/p/p-1/cards/C-1?type=comment&at=entry-C-1%232";
   const scroll = vi.fn();
   vi.stubGlobal("HTMLDetailsElement", window.HTMLDetailsElement);
@@ -276,7 +276,9 @@ test("U3 opening scrolls the page to the latest entry; refresh keeps the reader'
       <CardDetailPage client={client} projectId="p-1" cardId="C-1" />,
     );
     await screen.findByRole("region", { name: "时间线记录" });
-    await waitFor(() => expect(scroll).toHaveBeenCalledWith({ block: "end" }));
+    await waitFor(() =>
+      expect(scroll).toHaveBeenCalledWith({ block: "start" }),
+    );
     expect(scroll.mock.contexts.at(-1)).toBe(
       document.getElementById("entry-C-1#6"),
     );

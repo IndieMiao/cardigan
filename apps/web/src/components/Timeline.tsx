@@ -119,8 +119,8 @@ export function timelineGroups(entries: readonly TimelineEntryView[]) {
   const groups: TimelineEntryView[][] = [];
   for (const entry of [...entries].sort(
     (a, b) =>
-      Date.parse(a.created_at) - Date.parse(b.created_at) ||
-      a.event_seq - b.event_seq,
+      Date.parse(b.created_at) - Date.parse(a.created_at) ||
+      b.event_seq - a.event_seq,
   )) {
     const last = groups.at(-1),
       previous = last?.at(-1);
@@ -169,8 +169,22 @@ export function Timeline({
       </EmptyState>
     );
   const seenAnchors = new Set<string>();
-  const alias = (prefix: string, id: string | undefined) => {
+  // A newer review also references its delivery. Keep delivery links on the
+  // delivery itself when it is loaded, regardless of the display order.
+  const deliveryRows = new Map(
+    groups
+      .flat()
+      .filter((entry) => entry.type === "delivery" && entry.delivery_id)
+      .map((entry) => [entry.delivery_id, entry.id]),
+  );
+  const alias = (prefix: string, id: string | undefined, entryId?: string) => {
     if (!id) return null;
+    if (
+      prefix === "delivery" &&
+      deliveryRows.has(id) &&
+      deliveryRows.get(id) !== entryId
+    )
+      return null;
     const anchorId = `${prefix}-${id}`;
     if (seenAnchors.has(anchorId)) return null;
     seenAnchors.add(anchorId);
@@ -202,7 +216,7 @@ export function Timeline({
         data-timeline-type={entry.type}
       >
         {!nested && <TimelineIcon entry={entry} />}
-        {alias("delivery", entry.delivery_id)}
+        {alias("delivery", entry.delivery_id, entry.id)}
         {alias("review", entry.review_id)}
         {alias("decision", entry.decision_id)}
         {alias("human-action", entry.human_action_id)}
@@ -312,7 +326,7 @@ export function Timeline({
                   <div className="system-line">
                     <TimelineActor entry={first} compact />
                     <span>{label}</span>
-                    <Time value={group.at(-1)?.created_at} relative />
+                    <Time value={first.created_at} relative />
                     {uploaded.map((a) =>
                       isBitmap(a) ? (
                         <AttachmentPreview
