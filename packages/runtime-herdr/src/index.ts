@@ -13,7 +13,12 @@ import type {
 } from "@cardigan/domain";
 import { registerAgentMachine } from "./agent-ssh.js";
 
-export { agentReceivePack, agentUploadPack } from "./agent-ssh.js";
+export {
+  AGENT_PATH,
+  agentProcessCommand,
+  agentReceivePack,
+  agentUploadPack,
+} from "./agent-ssh.js";
 
 import { fail, type HcClient, processClient, result } from "./client.js";
 
@@ -30,6 +35,7 @@ export {
   type AgentExecution,
   clearAgentSentinel,
   type LaunchFile,
+  prepareAgentCheckout,
   prepareAgentProject,
   START_FILE_NAME,
   scrubAgentLaunch,

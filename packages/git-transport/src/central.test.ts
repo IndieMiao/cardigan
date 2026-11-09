@@ -140,9 +140,13 @@ test("base clone fetches fixed delivery refs from center and rejects legacy sour
   const sha = await commit(f.source, "delivery only");
   await f.transport.fetchRefs(repo, f.source, [
     "refs/heads/candidate:refs/cardigan/deliveries/D-1",
+    "refs/heads/candidate:refs/cardigan/candidates/D-2",
   ]);
   await local.fetch(base, repo);
   expect(await local.resolveCommit(base, "refs/cardigan/deliveries/D-1")).toBe(
+    sha,
+  );
+  expect(await local.resolveCommit(base, "refs/cardigan/candidates/D-2")).toBe(
     sha,
   );
   await rm(join(base, ".git", "objects"), { recursive: true });
@@ -152,6 +156,25 @@ test("base clone fetches fixed delivery refs from center and rejects legacy sour
     sha,
   );
   expect(await readFile(join(base, ".git", "config"), "utf8")).toContain(repo);
+});
+
+test("incremental Agent distribution includes merge candidates without moving the checked-out branch", async () => {
+  const repo = await f.central.ensureCentral(f.project),
+    agentRoot = join(f.root, "agent"),
+    base = join(agentRoot, "repos", "project");
+  await mkdir(base, { recursive: true });
+  await git(f.root, "clone", f.source, base);
+  const previous = await git(base, "rev-parse", "HEAD");
+  const sha = await commit(f.source, "candidate");
+  await f.transport.fetchRefs(repo, f.source, [
+    "refs/heads/main:refs/cardigan/candidates/D-2",
+  ]);
+  const transport = new CentralGitTransport({ dataDir: f.dataDir, agentRoot });
+  await transport.pushBaseline(repo, base, "git receive-pack");
+  expect(await git(base, "rev-parse", "refs/cardigan/candidates/D-2")).toBe(
+    sha,
+  );
+  expect(await git(base, "rev-parse", "HEAD")).toBe(previous);
 });
 
 test("a missing initial baseline never publishes a partial center and can be retried after the first commit", async () => {

@@ -34,6 +34,13 @@ export {
   runDirectory,
 } from "./naming.js";
 export {
+  type CheckoutCheck,
+  type CheckoutInput,
+  type CheckoutResult,
+  type CheckoutStatus,
+  runInTemporaryCheckout,
+} from "./temporary-checkout.js";
+export {
   type AgentBinary,
   type AgentCliVersionSource,
   agentCliVersion,

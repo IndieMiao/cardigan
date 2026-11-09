@@ -107,6 +107,7 @@ export class LocalGitTransport implements GitWorktreePort {
       local,
       "+refs/heads/*:refs/remotes/origin/*",
       "+refs/cardigan/deliveries/*:refs/cardigan/deliveries/*",
+      "+refs/cardigan/candidates/*:refs/cardigan/candidates/*",
     ]);
   }
   async resolveCommit(repository: string, ref: string): Promise<string> {

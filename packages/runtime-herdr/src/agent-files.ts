@@ -196,6 +196,38 @@ async function runDirectory(
     await root.close();
   }
 }
+
+/** Exclusive, protected leaf for a host-selected temporary checkout (P2a-1/P2a-3). */
+export async function prepareAgentCheckout(
+  config: AgentExecution,
+  project: string,
+  attempt: string,
+): Promise<string> {
+  executionPaths(config, project, "A-1");
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/u.test(attempt))
+    throw new Error("Invalid checkout attempt");
+  await secureDataDirectory(config);
+  const root = await agentRoot(config);
+  try {
+    const parent = await projectDirectory(root, "checks", project, config);
+    try {
+      // Unlike run directories, a check must never reuse a previous attempt.
+      await mkdir(at(parent, attempt), { mode: 0o700 });
+      const leaf = await open(at(parent, attempt), directoryFlags);
+      try {
+        await leaf.chown(process.getuid?.() ?? -1, config.gid);
+        await leaf.chmod(0o2770);
+      } finally {
+        await leaf.close();
+      }
+      return join(config.agentRoot, "checks", project, attempt);
+    } finally {
+      await parent.close();
+    }
+  } finally {
+    await root.close();
+  }
+}
 async function writeAt(
   parent: FileHandle,
   name: string,
