@@ -52,6 +52,8 @@ export interface CardView {
   readonly goal: string;
   readonly acceptance_criteria: readonly string[];
   readonly status: CardStatus;
+  readonly resolution?: "done" | "superseded" | "duplicate" | "wontdo";
+  readonly superseded_by?: string;
   readonly priority: number;
   readonly repo: string;
   readonly base_branch: string;

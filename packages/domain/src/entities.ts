@@ -108,6 +108,8 @@ export interface Card {
   readonly priority: number;
   readonly status: CardStatus;
   readonly resolution?: "done" | "superseded" | "duplicate" | "wontdo";
+  /** The replacement card, distinct from other related cards. */
+  readonly superseded_by?: CardId;
   readonly template: string;
   /** Template policy fixed at creation; legacy cards default to confirm. */
   readonly merge_policy?: "confirm" | "auto";

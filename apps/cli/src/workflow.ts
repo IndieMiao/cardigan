@@ -11,8 +11,10 @@ import {
   createCard,
   parseId,
   standingTools,
+  supersedeCard,
   updateCard,
 } from "@cardigan/domain";
+import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import {
   resolveExecutionConfig,
   secureDataDirectory,
@@ -33,14 +35,16 @@ import {
   resolveProject,
   roleInTransaction,
   runCommand,
+  systemClock,
 } from "./host.js";
 import type { CliIo } from "./io.js";
 
 const USAGE = [
   "用法：",
   "  cardigan card create --template dev --title <标题> --goal <目标> --acceptance <标准1;标准2> --repo <仓库> [--base-branch main] [--project <p>]",
-  "  cardigan card update <C-n> [--title <标题>] [--goal <目标>] [--acceptance <标准1;标准2>] [--priority <n>] [--status backlog|todo|cancelled] [--project <p>]",
+  "  cardigan card update <C-n> [--title <标题>] [--goal <目标>] [--acceptance <标准1;标准2>] [--priority <n>] [--status backlog|todo|cancelled] [--superseded-by <C-m>] [--project <p>]",
   "    update 至少提供一个修改字段；含分号的验收标准请加引号。",
+  "    已完成卡片不能取消；请建新卡，再用 --superseded-by 标记已完成或已取消的旧卡。",
   "  cardigan assign <W-n> --role <角色> [--machine local] [--start] [--project <p>]",
   "  cardigan token issue <A-n> [--project <p>]",
   "  cardigan pm create --office|--ops [--project <p>]",
@@ -198,7 +202,14 @@ function cardUpdate(args: readonly string[], io: CliIo): number {
       USAGE,
     ]);
   }
-  const fields = ["title", "goal", "acceptance", "priority", "status"];
+  const fields = [
+    "title",
+    "goal",
+    "acceptance",
+    "priority",
+    "status",
+    "superseded-by",
+  ];
   for (const name of Object.keys(flags)) {
     if (![...fields, "project", "data-dir"].includes(name)) {
       throw new CliError(`不认识的选项：--${name}`, EXIT.usage, [USAGE]);
@@ -210,6 +221,16 @@ function cardUpdate(args: readonly string[], io: CliIo): number {
     throw new CliError("至少提供一个要修改的字段", EXIT.usage, [USAGE]);
   }
   const status = optional(flags, "status");
+  const supersededBy = optional(flags, "superseded-by");
+  const replacement =
+    supersededBy === undefined ? undefined : parseId("card", supersededBy);
+  if (replacement && !replacement.ok) {
+    throw new CliError(
+      "--superseded-by 需要合法的卡片编号（形如 C-3）",
+      EXIT.usage,
+      [USAGE],
+    );
+  }
   if (
     status !== undefined &&
     status !== "backlog" &&
@@ -245,10 +266,12 @@ function cardUpdate(args: readonly string[], io: CliIo): number {
   const store = openStoreFrom(io, flags);
   try {
     const project_id = resolveProject(store, io, optional(flags, "project"));
-    const card = runCommand(store, {
-      project_id,
-      actor: humanActor(project_id),
-      reduce: (state, actor, ports) => {
+    store.uow.run((tx) => {
+      const actor = humanActor(project_id);
+      const ports = { clock: systemClock, ids: tx.ids };
+      let state = loadCommandState(tx, project_id);
+      const card = state.cards.find((item) => item.id === cardId);
+      if (changed.some((name) => name !== "superseded-by")) {
         const result = updateCard(
           state,
           actor,
@@ -256,10 +279,11 @@ function cardUpdate(args: readonly string[], io: CliIo): number {
           ports,
         );
         if (!result.ok) {
-          const current = state.cards.find((item) => item.id === cardId);
           const reason =
             result.error.code === "illegal_transition"
-              ? `不允许从 ${current?.status} 转为 ${status}`
+              ? card?.status === "done" && status === "cancelled"
+                ? "已完成卡片不能取消；请建新卡（例如回滚卡），再用 --superseded-by <C-m> 标记旧卡"
+                : `不允许从 ${card?.status} 转为 ${status}`
               : result.error.code === "not_found"
                 ? "卡片不存在"
                 : `更新被拒绝：${result.error.message}`;
@@ -268,10 +292,34 @@ function cardUpdate(args: readonly string[], io: CliIo): number {
             EXIT.usage,
           );
         }
-        return result;
-      },
+        persistEffect(tx, project_id, result.value);
+        if (replacement?.ok) state = loadCommandState(tx, project_id);
+      }
+      if (replacement?.ok) {
+        const result = supersedeCard(
+          state,
+          actor,
+          { card_id: cardId, superseded_by: replacement.value.id },
+          ports,
+        );
+        if (!result.ok) {
+          const reason =
+            result.error.code === "illegal_transition"
+              ? "只有已完成或已取消的卡片才能标记为被取代"
+              : result.error.code === "not_found"
+                ? "原卡片或取代它的卡片在当前项目中不存在"
+                : result.error.code === "validation_failed"
+                  ? "卡片不能被自身取代"
+                  : "只能标记同项目的卡片";
+          throw new CliError(
+            `无法更新卡片 ${cardId}：${reason}（${result.error.code}）`,
+            EXIT.usage,
+          );
+        }
+        persistEffect(tx, project_id, result.value);
+      }
     });
-    io.stdout(`已更新卡片 ${card.id}：${changed.join("、")}`);
+    io.stdout(`已更新卡片 ${cardId}：${changed.join("、")}`);
     return EXIT.ok;
   } finally {
     store.close();
