@@ -5,6 +5,7 @@ import { decisionOption, decisionTitle } from "../decision-labels.js";
 import { routeHash } from "../route.js";
 import { IdTag, LongContent, StatusTag } from "./Foundation.js";
 import { Markdown } from "./Operations.js";
+import { TimelineHeader } from "./TimelineHeader.js";
 import { TimelineVersion } from "./TimelineVersion.js";
 
 /** Structural records come from the read model, never from parsing Agent prose. */
@@ -13,25 +14,36 @@ export function TimelineContent({
   detail,
   projectId,
   cardId,
-  context,
 }: {
   entry: TimelineEntryView;
   detail: CardDetail;
   projectId: string;
   cardId: string;
-  context: ReactNode;
 }) {
   const link = (anchor: string) =>
     routeHash({ kind: "card", projectId, cardId, anchor });
   const workLabel = (id: string) =>
     detail.work_items.find((w) => w.id === id)?.title ?? "工作项";
   const heading = (type: string, id: string, result: ReactNode) => (
-    <div className="timeline-head">
+    <>
+      <TimelineHeader
+        entry={entry}
+        action={
+          type === "完成申请"
+            ? "提交完成申请"
+            : type === "交付"
+              ? "提交交付"
+              : type === "审核"
+                ? "提交审核"
+                : entry.type === "decision_request"
+                  ? "请求拍板"
+                  : "记录拍板"
+        }
+      />
       <h4 className="timeline-conclusion">
         <span>{type}</span> <span>{id}</span> {result}
       </h4>
-      {context}
-    </div>
+    </>
   );
   if (entry.type === "delivery") {
     const delivery = detail.deliveries.find((d) => d.id === entry.delivery_id);

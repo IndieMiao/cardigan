@@ -121,6 +121,7 @@ export interface TimelineEntryView {
   readonly event_type?: string | null;
   readonly author_role?: string | null;
   readonly review_id?: string;
+  readonly attachment_id?: string;
   readonly decision_option?: string;
   readonly type:
     | "comment"

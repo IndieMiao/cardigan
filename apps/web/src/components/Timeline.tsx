@@ -6,9 +6,14 @@ import { eventLabel } from "../events.js";
 import { renderMarkdown } from "../markdown.js";
 import { linkableReferences, linkifyReferences } from "../refs.js";
 import { statusLabel } from "../status.js";
+import { AttachmentPreview, isBitmap } from "./AttachmentPreview.js";
 import { EmptyState, IdTag, LongContent, Time } from "./Foundation.js";
 import { TimelineContent } from "./TimelineContent.js";
-import { Tooltip } from "./Tooltip.js";
+import {
+  TimelineActor,
+  TimelineHeader,
+  TimelineIcon,
+} from "./TimelineHeader.js";
 
 /**
  * The card's timeline (M5 plan §3.7, §8.4 of the development plan).
@@ -171,7 +176,7 @@ export function Timeline({
     seenAnchors.add(anchorId);
     return <span key={anchorId} id={anchorId} className="anchor-target" />;
   };
-  const row = (entry: TimelineEntryView) => {
+  const row = (entry: TimelineEntryView, nested = false) => {
     const related = attachments.filter(
       (a) =>
         (a.attach_to.kind === "timeline_entry" &&
@@ -189,23 +194,6 @@ export function Timeline({
           detail.reviews.some((r) => r.id === entry.review_id)) ||
         (entry.type.startsWith("decision_") &&
           detail.decisions.some((d) => d.id === entry.decision_id)));
-    const context = (
-      <>
-        <Tooltip
-          content={`${authorLabel(entry.author)}，${entry.id}，序号 ${entry.event_seq}`}
-        >
-          <button type="button" className="quiet timeline-author">
-            {entry.author.startsWith("assignment:")
-              ? (entry.author_role ?? "Agent")
-              : authorLabel(entry.author)}
-          </button>
-        </Tooltip>
-        <Time value={entry.created_at} />
-        {entry.retracted && (
-          <span className="timeline-retracted-label">已撤回</span>
-        )}
-      </>
-    );
     return (
       <li
         className={`timeline-entry timeline-${entry.type}${["delivery", "review", "decision"].includes(timelineCategory(entry)) ? " timeline-record" : ""}${entry.retracted ? " timeline-retracted" : ""}`}
@@ -213,6 +201,7 @@ export function Timeline({
         id={`entry-${entry.id}`}
         data-timeline-type={entry.type}
       >
+        {!nested && <TimelineIcon entry={entry} />}
         {alias("delivery", entry.delivery_id)}
         {alias("review", entry.review_id)}
         {alias("decision", entry.decision_id)}
@@ -223,17 +212,16 @@ export function Timeline({
             detail={detail}
             projectId={projectId}
             cardId={cardId}
-            context={context}
           />
         ) : (
           <>
-            <div className="timeline-head">
-              <span className="timeline-type">
-                {TYPE_LABELS[entry.type] ?? "系统记录"}
-              </span>
-              {context}
-            </div>
-            <LongContent lines={entry.type === "comment" ? 2 : 6}>
+            <TimelineHeader
+              entry={entry}
+              action={TYPE_LABELS[entry.type] ?? "系统记录"}
+            />
+            <LongContent
+              lines={["comment", "instruction"].includes(entry.type) ? 15 : 6}
+            >
               <div
                 className="timeline-body markdown"
                 dangerouslySetInnerHTML={{
@@ -299,15 +287,54 @@ export function Timeline({
                 first.event_type === "assignment_released" && group.length > 1
                   ? `释放了 ${group.length} 个 Assignment`
                   : `${eventLabel(first.event_type ?? "")}${group.length > 1 ? `（${group.length} 条）` : ""}`;
+              const uploaded = attachments.filter((a) =>
+                group.some((entry) => entry.attachment_id === a.id),
+              );
+              const images = uploaded.filter(isBitmap);
+              const hasDetails =
+                group.length > 1 ||
+                group.some(
+                  (entry) =>
+                    entry.retracted ||
+                    (entry.body.trim() &&
+                      ![
+                        entry.event_type,
+                        eventLabel(entry.event_type ?? ""),
+                      ].includes(entry.body.trim())),
+                );
               return (
-                <li className="system-group" key={first.id}>
-                  <details>
-                    <summary>
-                      <Time value={group.at(-1)?.created_at} />{" "}
-                      <span>{label}</span>
-                    </summary>
-                    <ol>{group.map(row)}</ol>
-                  </details>
+                <li
+                  className={`system-group${hasDetails ? "" : " timeline-entry"}`}
+                  key={first.id}
+                  id={hasDetails ? undefined : `entry-${first.id}`}
+                >
+                  <TimelineIcon entry={first} />
+                  <div className="system-line">
+                    <TimelineActor entry={first} compact />
+                    <span>{label}</span>
+                    <Time value={group.at(-1)?.created_at} relative />
+                    {uploaded.map((a) =>
+                      isBitmap(a) ? (
+                        <AttachmentPreview
+                          key={a.id}
+                          attachment={a}
+                          images={images}
+                        />
+                      ) : (
+                        <a key={a.id} href={a.download_path} download>
+                          {a.id}
+                        </a>
+                      ),
+                    )}
+                  </div>
+                  {hasDetails && (
+                    <details className="system-details">
+                      <summary>
+                        详情{group.length > 1 ? `（${group.length}）` : ""}
+                      </summary>
+                      <ol>{group.map((entry) => row(entry, true))}</ol>
+                    </details>
+                  )}
                 </li>
               );
             })}
@@ -330,13 +357,8 @@ function AttachmentItem({
 }) {
   return (
     <li className="attachment">
-      {attachment.inline ? (
-        <img
-          className="attachment-thumb"
-          src={attachment.download_path}
-          alt={`附件 ${attachment.id}`}
-          loading="lazy"
-        />
+      {isBitmap(attachment) ? (
+        <AttachmentPreview attachment={attachment} images={[attachment]} />
       ) : (
         <a
           className="attachment-download"

@@ -95,6 +95,18 @@ test("U5b attachment times are upload facts and uploaders retain their role; rea
             attachment.id,
       );
       expect(attachment.uploaded_at).toBe(event?.created_at);
+      // U6b thumbnails bind to the upload event, not to the comment receiving the file.
+      const upload = detail.timeline.find(
+        (entry) => entry.event_seq === event?.seq,
+      );
+      expect(upload).toMatchObject({
+        attachment_id: attachment.id,
+        event_type: "attachment_uploaded",
+        author: attachment.uploaded_by,
+      });
+      expect(
+        detail.timeline.find((entry) => entry.id === comment.id)?.attachment_id,
+      ).toBeUndefined();
     }
     expect(detail.attachments.find((a) => a.id === agentFile.id)).toMatchObject(
       {

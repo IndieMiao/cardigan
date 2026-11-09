@@ -1,12 +1,9 @@
-import { useState } from "react";
 import type { AttachmentView } from "../api.js";
 import { statusLabel } from "../status.js";
+import { AttachmentPreview, isBitmap } from "./AttachmentPreview.js";
 import { Time } from "./Foundation.js";
-import { Lightbox } from "./Lightbox.js";
 import { splitSuperseded } from "./Timeline.js";
 
-const bitmap = (a: AttachmentView) =>
-  a.inline && /^image\/(png|jpeg|gif|webp|avif)$/i.test(a.mime);
 const uploader = (a: AttachmentView) =>
   a.uploaded_by === "human"
     ? "你"
@@ -19,61 +16,14 @@ const size = (bytes: number) =>
     : bytes < 1048576
       ? `${(bytes / 1024).toFixed(1)} KiB`
       : `${(bytes / 1048576).toFixed(1)} MiB`;
-function Preview({
-  attachment,
-  images,
-}: {
-  attachment: AttachmentView;
-  images: readonly AttachmentView[];
-}) {
-  const initial = images.findIndex((image) => image.id === attachment.id);
-  const [open, setOpen] = useState(false),
-    [index, setIndex] = useState(initial);
-  return (
-    <Lightbox
-      open={open}
-      onOpenChange={(next) => {
-        setOpen(next);
-        if (next) setIndex(initial);
-      }}
-      index={index}
-      onIndexChange={setIndex}
-      images={images.map((a) => ({
-        src: a.download_path,
-        alt: `附件 ${a.id}`,
-        caption: (
-          <>
-            {a.id} {uploader(a)}{" "}
-            <a href={a.download_path} download>
-              下载
-            </a>
-          </>
-        ),
-      }))}
-      trigger={
-        <button
-          type="button"
-          className="attachment-preview"
-          aria-label={`预览 ${attachment.id}`}
-        >
-          <img
-            src={attachment.download_path}
-            alt={`附件 ${attachment.id}`}
-            loading="lazy"
-          />
-        </button>
-      }
-    />
-  );
-}
 function Gallery({ attachments }: { attachments: readonly AttachmentView[] }) {
-  const images = attachments.filter(bitmap);
+  const images = attachments.filter(isBitmap);
   return (
     <ul className="attachment-grid">
       {attachments.map((a) => (
         <li key={a.id} id={`attachment-${a.id}`}>
-          {bitmap(a) ? (
-            <Preview attachment={a} images={images} />
+          {isBitmap(a) ? (
+            <AttachmentPreview attachment={a} images={images} />
           ) : (
             <div
               className="attachment-file"
