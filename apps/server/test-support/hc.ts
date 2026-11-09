@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readlinkSync } from "node:fs";
+import { type HcClient, processClient } from "@cardigan/runtime-herdr";
 
 /**
  * herdr-core cleanup for the tests that use a real `hc`.
@@ -84,6 +85,8 @@ export async function runCleanupSteps(input: {
 export class HcCore {
   #pid: number | undefined;
   readonly #holders = new Set<number>();
+  readonly #lateCalls: string[] = [];
+  #stopped = false;
   constructor(
     readonly session: string,
     readonly socket: string,
@@ -131,6 +134,59 @@ export class HcCore {
 
   get pid(): number | undefined {
     return this.#pid;
+  }
+
+  /**
+   * Every hc call started after `stop()` began, with its call stack.
+   *
+   * `hc` starts a holder and a core on demand, so one late call from a timer
+   * that outlived cleanup leaves an orphan core for the rest of the machine's
+   * uptime. Recording the stack is what turns that race into a fixable bug.
+   */
+  get lateCalls(): readonly string[] {
+    return this.#lateCalls;
+  }
+
+  /**
+   * A real `hc` client for this session that refuses to run once `stop()`
+   * began, so a late timer fails loudly instead of restarting the core.
+   */
+  client(options: { readonly timeoutMs?: number } = {}): HcClient {
+    const timeoutMs = options.timeoutMs ?? 10_000,
+      inner = processClient("hc", this.hcEnv, this.socket, timeoutMs);
+    const guard = (action: string): void => {
+      if (!this.#stopped) return;
+      const stack = new Error(`hc ${action}`).stack ?? "",
+        trace = `hc ${action} (session ${this.session})\n${stack}`;
+      this.#lateCalls.push(trace);
+      process.stderr.write(`[hc-cleanup] hc ran after cleanup:\n${trace}\n`);
+      throw new Error(
+        `hc refused: the ${this.session} session is stopped (${action})`,
+      );
+    };
+    return {
+      available: async () => {
+        guard("available");
+        return inner.available();
+      },
+      // Async, so a refusal reaches callers as a rejection like a real failure.
+      exec: async (args, commandTimeoutMs) => {
+        guard(args.join(" "));
+        return inner.exec(args, commandTimeoutMs);
+      },
+      lines: (args, signal) => {
+        guard(`${args.join(" ")} (stream)`);
+        return inner.lines(args, signal);
+      },
+    };
+  }
+
+  /** Fail instead of leaking when a background task called hc during cleanup. */
+  assertNoLateCalls(): void {
+    if (this.#lateCalls.length > 0)
+      throw new Error(
+        `hc ran after herdr-core ${this.session} stopped: ${this.#lateCalls.join("\n")}`,
+      );
   }
 
   private get hcEnv(): NodeJS.ProcessEnv {
@@ -212,6 +268,20 @@ export class HcCore {
     liveCores.delete(this);
   }
 
+  /**
+   * Final cleanup: latch the session shut, stop it and verify it stays down.
+   *
+   * Mid-test stops (`stop()` on its own) are allowed to come back — a test that
+   * kills the core to simulate a lost machine expects the next hc call to start
+   * a new one. Only the end of a worker may forbid that, and then every later
+   * hc call fails with its stack instead of leaving an orphan process.
+   */
+  async finalStop(): Promise<void> {
+    this.#stopped = true;
+    await this.stop();
+    this.assertStopped();
+  }
+
   /** Session-scoped stop for when the status call cannot return PIDs. */
   private stopViaHc(): void {
     try {
@@ -279,5 +349,6 @@ export class HcCore {
       throw new Error(
         `herdr-core socket for session ${this.session} still exists: ${this.socket}`,
       );
+    this.assertNoLateCalls();
   }
 }

@@ -16,6 +16,10 @@ import { registerAgentMachine } from "./agent-ssh.js";
 export { agentReceivePack, agentUploadPack } from "./agent-ssh.js";
 
 import { fail, type HcClient, processClient, result } from "./client.js";
+
+// The test harnesses wrap the real client so a late call cannot restart a core.
+export { type HcClient, processClient } from "./client.js";
+
 import {
   type ExecutionConfig,
   resolveExecutionConfig,

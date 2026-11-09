@@ -82,3 +82,34 @@ test("an already exited PID is skipped without throwing", async () => {
   await expect(core.stop()).resolves.toBeUndefined();
   expect(isHerdrCoreProcess(child.pid, "fixture-session")).toBe(false);
 });
+
+test("a cleanup handle refuses hc calls after the final stop", async () => {
+  // A nonexistent socket path keeps this test off every real hc core: any `hc`
+  // call for an unknown session would start one, which is the bug this guard
+  // prevents.
+  const core = new HcCore("fixture-session", "/tmp/no-such-core.sock", {});
+  const client = core.client({ timeoutMs: 1000 });
+  // Before cleanup the wrapper is the real client: no socket means unavailable.
+  await expect(client.available()).resolves.toBe(false);
+  // A mid-test stop may come back: e2e recovery tests kill the core on purpose
+  // and expect the next hc call to start a new one, so only the final stop latches.
+  await core.stop();
+  await expect(client.available()).resolves.toBe(false);
+  expect(core.lateCalls).toHaveLength(0);
+  await core.finalStop();
+  await expect(client.exec(["get", "t1", "--json"])).rejects.toThrow(
+    /hc refused: the fixture-session session is stopped \(get t1 --json\)/,
+  );
+  await expect(client.available()).rejects.toThrow(/session is stopped/);
+  // Streams are refused before a child process can be started.
+  expect(() => client.lines(["events", "--json"])).toThrow(
+    /session is stopped \(events --json \(stream\)\)/,
+  );
+  // The stack is kept so the late caller can be found from the failure alone.
+  expect(core.lateCalls).toHaveLength(3);
+  expect(core.lateCalls[0]).toContain("hc get t1 --json");
+  expect(core.lateCalls[0]).toContain("hc-cleanup.test.ts");
+  expect(() => core.assertStopped()).toThrow(
+    /hc ran after herdr-core fixture-session stopped/,
+  );
+});

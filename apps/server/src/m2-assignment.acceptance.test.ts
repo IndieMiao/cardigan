@@ -301,11 +301,11 @@ setInterval(() => {}, 1000);
   });
 
   afterAll(async () => {
+    // Order matters (§P2a-2): the server drains every hc-calling task first.
     await runCleanupSteps({
       session: SESSION,
       socket: socketPath ?? "",
       steps: [
-        { label: "stop herdr-core", run: () => core?.stop() },
         { label: "close server", run: () => server?.close() },
         {
           label: "restore process environment",
@@ -313,7 +313,8 @@ setInterval(() => {}, 1000);
             process.env = savedEnv;
           },
         },
-        { label: "stop herdr-core again", run: () => core?.stop() },
+        { label: "stop herdr-core", run: () => core?.finalStop() },
+        { label: "stop herdr-core again", run: () => core?.finalStop() },
         {
           label: "verify herdr-core stopped",
           run: () => core?.assertStopped(),

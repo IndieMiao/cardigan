@@ -489,30 +489,24 @@ if(process.argv.includes('--version')) { console.log('pi acceptance-1'); process
       // Record the core's PID first: once the socket is gone, hc cannot stop it.
       const core = new HcCore(session, socket, env);
       core.remember();
-      try {
-        if (existsSync(socket))
-          await exec(hc as string, ["server", "stop", "--json"], {
-            env,
-            timeout: 5000,
-          });
-        await expect
-          .poll(() => existsSync(socket), { timeout: 2000 })
-          .toBe(false);
-      } finally {
-        await runCleanupSteps({
-          session,
-          socket,
-          steps: [
-            { label: "stop herdr-core", run: () => core.stop() },
-            { label: "close server", run: () => server.close() },
-            { label: "stop herdr-core again", run: () => core.stop() },
-            {
-              label: "verify herdr-core stopped",
-              run: () => core.assertStopped(),
-            },
-          ],
-        });
-      }
+      // §P2a-2: close the server and let the started assignment settle before
+      // stopping the core, so no late hc call can start a holder and a core.
+      await runCleanupSteps({
+        session,
+        socket,
+        steps: [
+          { label: "close server", run: () => server.close() },
+          {
+            label: "drain the started assignment",
+            run: () => start.catch(() => {}),
+          },
+          { label: "stop herdr-core", run: () => core.finalStop() },
+          {
+            label: "verify herdr-core stopped",
+            run: () => core.assertStopped(),
+          },
+        ],
+      });
     }
   },
   40_000,
