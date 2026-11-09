@@ -6,11 +6,18 @@
  * commits and events, so nothing about the merge itself is mocked.
  */
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   completeHumanAction,
+  latestMergeCheck,
   requestHumanAction,
   setProjectPreferences,
 } from "@cardigan/domain";
@@ -19,7 +26,10 @@ import {
   CentralRepositoryService,
 } from "@cardigan/git-service";
 import { CentralGitTransport } from "@cardigan/git-transport";
+import { loadMergeGateConfig } from "@cardigan/host";
+import { authenticate, getCardTool, unwrap } from "@cardigan/mcp-server";
 import { afterEach, beforeEach, expect, test } from "vitest";
+import { createProcessIo, main } from "../../cli/src/index.js";
 import { ServerGit } from "./git.js";
 import {
   acceptThroughMergeGate,
@@ -28,7 +38,7 @@ import {
   m4Scenario,
   mergeConfirmation,
 } from "./m4-fixtures.js";
-import { MergeExecutor } from "./merge-loop.js";
+import { MergeExecutor, startMergeLoop } from "./merge-loop.js";
 import { cardDetail, needsYou } from "./web/read.js";
 
 const git = (cwd: string, ...args: string[]) =>
@@ -393,4 +403,167 @@ test("timeout preference delegates once then merges through the existing Git exe
   expect(f.state().events.filter((e) => e.type === "card_merged")).toHaveLength(
     1,
   );
+});
+
+async function gated(run = "true") {
+  writeFileSync(
+    join(repos.root, "merge-gate.yaml"),
+    JSON.stringify({
+      projects: { [f.project_id]: { checks: [{ name: "test", run }] } },
+    }),
+    { mode: 0o600 },
+  );
+  const configuration = await loadMergeGateConfig({
+    configDir: repos.root,
+    projectIds: [f.project_id],
+  });
+  const errors: unknown[] = [];
+  const binding = new ServerGit({ store: f.store, dataDir: f.dataDir });
+  const options = {
+    store: f.store,
+    git: binding,
+    gate: {
+      configuration,
+      execution: { mode: "local" as const, dataDir: f.dataDir },
+    },
+    onError: (error: unknown) => errors.push(error),
+  };
+  const cli = (...args: string[]) =>
+    main(args, {
+      ...createProcessIo(),
+      env: { CARDIGAN_DATA_DIR: f.dataDir, CARDIGAN_CONFIG_DIR: repos.root },
+      stdout: () => {},
+      stderr: () => {},
+    });
+  return { options, errors, binding, cli };
+}
+
+test("real checks fail, CLI requeues, and a restart publishes the checked tree after human confirmation", async () => {
+  const scenario = m4Scenario(f, "confirm");
+  const sha = agentCommit("agent/C-1/W-1", "feature.txt", "checked feature\n");
+  const { product, completion } = await acceptThroughMergeGate(
+    f,
+    scenario,
+    sha,
+  );
+  await pin(product.id, sha);
+  const marker = join(repos.root, "allow-check");
+  const c = await gated(
+    `test -f '${marker}' && test "$(cat feature.txt)" = 'checked feature'`,
+  );
+  const check = () =>
+    latestMergeCheck(f.state().events, scenario.card.id, completion.id);
+  const loop = new MergeExecutor(c.options);
+  await loop.tick();
+  expect(check()?.status).toBe("failed");
+  const token = f.store.issueToken({
+    project_id: f.project_id,
+    assignment_id: scenario.coder.id,
+    role: {
+      role_version: scenario.coder.role_version,
+      allowed_tools: ["get_card"],
+    },
+  });
+  const view = await getCardTool.handler(
+    { card_id: scenario.card.id },
+    { store: f.store, identity: unwrap(authenticate(f.store, token.token)) },
+  );
+  expect(view).toMatchObject({
+    card: { merge_check: { status: "failed", completion_id: completion.id } },
+  });
+  expect(await baseline()).toBe(repos.base);
+  const failedAttempt = check()?.attempt_id;
+  await loop.tick();
+  expect(check()?.attempt_id).toBe(failedAttempt);
+  writeFileSync(marker, "ready");
+  expect(await c.cli("merge", "recheck", scenario.card.id)).toBe(0);
+  await loop.tick();
+  expect(check()?.status).toBe("passed");
+  expect(check()?.attempt_id).not.toBe(failedAttempt);
+  expect(await baseline()).toBe(repos.base);
+  expect(
+    readFileSync(
+      join(
+        f.dataDir,
+        "merge-gate",
+        "logs",
+        f.project_id,
+        `${check()?.attempt_id}.log`,
+      ),
+      "utf8",
+    ),
+  ).toContain("没有 Agent 账号隔离");
+  expect(readdirSync(join(f.dataDir, "agent", "checks", f.project_id))).toEqual(
+    [],
+  );
+  expect(await c.cli("merge", "confirm", scenario.card.id)).toBe(0);
+  await new MergeExecutor(c.options).tick();
+  expect(f.card().status).toBe("done");
+  const merged = await baseline();
+  expect(
+    git(await central.ensureCentral(project), "rev-parse", `${merged}^{tree}`),
+  ).toBe(check()?.tree_sha);
+  await new MergeExecutor(c.options).tick();
+  expect(await baseline()).toBe(merged);
+  expect(f.state().events.filter((e) => e.type === "card_merged")).toHaveLength(
+    1,
+  );
+  expect(c.errors).toEqual([]);
+});
+
+test("an invalid configured gate blocks both execution and CLI recheck", async () => {
+  const scenario = m4Scenario(f, "auto");
+  const sha = agentCommit("agent/C-1/W-1", "feature.txt", "feature\n");
+  const { product } = await acceptThroughMergeGate(f, scenario, sha);
+  await pin(product.id, sha);
+  const c = await gated();
+  writeFileSync(join(repos.root, "merge-gate.yaml"), "projects: [invalid]");
+  const configuration = await loadMergeGateConfig({
+    configDir: repos.root,
+    projectIds: [f.project_id],
+  });
+  await new MergeExecutor({
+    ...c.options,
+    gate: { ...c.options.gate, configuration },
+  }).tick();
+  expect(f.card().status).toBe("awaiting_merge");
+  expect(await baseline()).toBe(repos.base);
+  expect(await c.cli("merge", "recheck", scenario.card.id)).not.toBe(0);
+  rmSync(join(repos.root, "merge-gate.yaml"));
+  expect(await c.cli("merge", "recheck", scenario.card.id)).not.toBe(0);
+});
+
+test("stopping the long-lived loop cancels a real check and records interruption before returning", async () => {
+  const scenario = m4Scenario(f, "auto");
+  const sha = agentCommit("agent/C-1/W-1", "feature.txt", "feature\n");
+  const { product, completion } = await acceptThroughMergeGate(
+    f,
+    scenario,
+    sha,
+  );
+  await pin(product.id, sha);
+  const c = await gated("node -e 'setInterval(()=>{},1000)'");
+  const loop = startMergeLoop({ ...c.options, intervalMs: 60_000 });
+  try {
+    const deadline = Date.now() + 5000;
+    while (
+      latestMergeCheck(f.state().events, scenario.card.id, completion.id)
+        ?.status !== "running"
+    ) {
+      if (Date.now() > deadline)
+        throw new Error(`Check did not start: ${c.errors}`);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  } finally {
+    await loop.loop.stop();
+  }
+  await loop.loop.done;
+  expect(
+    latestMergeCheck(f.state().events, scenario.card.id, completion.id)?.status,
+  ).toBe("interrupted");
+  expect(await baseline()).toBe(repos.base);
+  expect(readdirSync(join(f.dataDir, "agent", "checks", f.project_id))).toEqual(
+    [],
+  );
+  expect(c.errors).toEqual([]);
 });

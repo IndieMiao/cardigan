@@ -2,9 +2,11 @@ import type { Card, CardId, Decision, ProjectId } from "@cardigan/domain";
 import {
   mergePlan,
   parseId,
+  recheckMerge,
   recordDecision,
   requestMerge,
 } from "@cardigan/domain";
+import { loadMergeGateConfig } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
 import { openStore as openCardiganStore, type Store } from "@cardigan/store";
 import { CliError, EXIT } from "./errors.js";
@@ -29,6 +31,7 @@ const USAGE = [
   "  cardigan merge status [C-n] [--project <p>]       看待合并的卡片、确认和合并计划",
   "  cardigan merge confirm <C-n> [--quote <原话>]     以人的身份确认合并",
   "  cardigan merge request <C-n>                      hold 之后重新发起合并确认",
+  "  cardigan merge recheck <C-n> [--project <p>]       重查失败或超时的合并候选",
   "  cardigan merge request-changes <C-n> --reason <原因> [--project <p>]  退回修改（原因必填）",
   "",
   "通用：--project 省略时取 CARDIGAN_PROJECT，再取数据库里唯一的项目；",
@@ -81,7 +84,10 @@ function open(io: CliIo, flags: Args["flags"]): Store {
   });
 }
 
-export function runMergeCommand(args: readonly string[], io: CliIo): number {
+export async function runMergeCommand(
+  args: readonly string[],
+  io: CliIo,
+): Promise<number> {
   const [sub, ...rest] = args;
   switch (sub) {
     case "status":
@@ -90,14 +96,58 @@ export function runMergeCommand(args: readonly string[], io: CliIo): number {
       return mergeConfirm(rest, io);
     case "request":
       return mergeRequest(rest, io);
+    case "recheck":
+      return mergeRecheck(rest, io);
     case "request-changes":
       return mergeRequestChanges(rest, io);
     default:
       throw new CliError(
-        "用法：cardigan merge status|confirm|request|request-changes",
+        "用法：cardigan merge status|confirm|request|request-changes|recheck",
         EXIT.usage,
         [USAGE],
       );
+  }
+}
+
+async function mergeRecheck(
+  args: readonly string[],
+  io: CliIo,
+): Promise<number> {
+  const parsed = parseArgs(args),
+    id = cardId(parsed.positionals[0]),
+    store = open(io, parsed.flags);
+  try {
+    const project_id = resolveProject(
+      store,
+      io,
+      optional(parsed.flags, "project"),
+    );
+    const config = await loadMergeGateConfig({
+      projectIds: store.listProjects().map((project) => project.id),
+      env: io.env,
+    });
+    const gate = config.forProject(project_id);
+    if (gate.status !== "enabled")
+      throw new CliError(
+        gate.status === "invalid" ? gate.reason : "该项目未启用合并闸门",
+        EXIT.usage,
+      );
+    runCommand(store, {
+      project_id,
+      actor: humanActor(project_id),
+      clock: systemClock,
+      reduce: (state, actor, ports) =>
+        recheckMerge(
+          { ...state, project_settings: { merge_gate_enabled: true } },
+          actor,
+          { card_id: id },
+          ports,
+        ),
+    });
+    io.stdout(`已将 ${id} 的合并候选重新排队检查。`);
+    return EXIT.ok;
+  } finally {
+    store.close();
   }
 }
 

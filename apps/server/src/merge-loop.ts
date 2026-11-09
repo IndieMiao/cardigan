@@ -21,6 +21,7 @@ import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
 import type { MergeGit } from "./git.js";
 import { startTimerLoop, type TimerLoop } from "./loop.js";
+import { type MergeCheckOptions, MergeChecks } from "./merge-checks.js";
 
 /** Default cadence: one pass is cheap when no card is ready. */
 export const DEFAULT_MERGE_INTERVAL_MS = 5_000;
@@ -58,6 +59,7 @@ export interface MergeLoopOptions {
   readonly git: MergeGit;
   readonly clock?: Clock;
   readonly onError?: (error: unknown) => void;
+  readonly gate?: MergeCheckOptions;
 }
 
 /**
@@ -71,15 +73,31 @@ export interface MergeLoopOptions {
  */
 export class MergeExecutor {
   private serial: Promise<void> = Promise.resolve();
-  constructor(private readonly options: MergeLoopOptions) {}
+  private readonly checks: MergeChecks | undefined;
+  constructor(private readonly options: MergeLoopOptions) {
+    this.checks = options.gate
+      ? new MergeChecks({
+          ...options.gate,
+          store: options.store,
+          git: options.git,
+          clock: this.clock,
+          onError: options.onError ?? (() => {}),
+        })
+      : undefined;
+  }
+  stop(): void {
+    this.checks?.stop();
+  }
 
   /** Serialize ticks: one project never merges two cards in parallel. */
   tick(project_id?: ProjectId): Promise<void> {
     const next = this.serial.then(async () => {
-      for (const id of project_id
+      const projects = project_id
         ? [project_id]
-        : this.options.store.listProjects().map((project) => project.id))
-        await this.project(id as ProjectId);
+        : this.options.store.listProjects().map((project) => project.id);
+      for (const id of projects)
+        if (!this.checks?.configured(id)) await this.project(id);
+      await this.checks?.tick(projects);
     });
     this.serial = next.catch(() => {});
     return next;
@@ -225,25 +243,35 @@ export interface MergeLoop {
   readonly executor: MergeExecutor;
   readonly loop: TimerLoop;
 }
-export function startMergeLoop(options: {
-  readonly store: Store;
-  readonly git: MergeGit;
-  readonly intervalMs?: number;
-  readonly clock?: Clock;
-  readonly onError?: (error: unknown) => void;
-  readonly signal?: AbortSignal;
-}): MergeLoop {
-  const executor = new MergeExecutor({
-    store: options.store,
-    git: options.git,
-    ...(options.clock === undefined ? {} : { clock: options.clock }),
-    ...(options.onError === undefined ? {} : { onError: options.onError }),
-  });
+export function startMergeLoop(
+  options: MergeLoopOptions & {
+    readonly intervalMs?: number;
+    readonly clock?: Clock;
+    readonly onError?: (error: unknown) => void;
+    readonly signal?: AbortSignal;
+  },
+): MergeLoop {
+  const executor = new MergeExecutor(options);
+  const cancel = () => executor.stop();
+  options.signal?.addEventListener("abort", cancel, { once: true });
+  if (options.signal?.aborted) cancel();
   const loop = startTimerLoop({
     tick: () => executor.tick(),
     intervalMs: options.intervalMs ?? DEFAULT_MERGE_INTERVAL_MS,
     onError: options.onError ?? (() => undefined),
     ...(options.signal === undefined ? {} : { signal: options.signal }),
   });
-  return { executor, loop };
+  void loop.done
+    .finally(() => options.signal?.removeEventListener("abort", cancel))
+    .catch(() => {});
+  return {
+    executor,
+    loop: {
+      done: loop.done,
+      stop: () => {
+        cancel();
+        return loop.stop();
+      },
+    },
+  };
 }

@@ -20,6 +20,7 @@ import {
   type RuntimeMonitorOptions,
 } from "./dispatch-monitor.js";
 import type { GitPhases } from "./git.js";
+import type { MergeCheckOptions } from "./merge-checks.js";
 import { type MergeExecutor, startMergeLoop } from "./merge-loop.js";
 import {
   type BackupExecutor,
@@ -56,6 +57,7 @@ export interface ControlPlaneOptions {
    * is what tests of the pure dispatcher want.
    */
   readonly git?: GitPhases;
+  readonly mergeGate?: MergeCheckOptions;
   readonly mergeIntervalMs?: number;
   readonly cleanupIntervalMs?: number;
   readonly reconcileIntervalMs?: number;
@@ -184,6 +186,7 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
           store: options.store,
           git: options.git,
           clock,
+          ...(options.mergeGate ? { gate: options.mergeGate } : {}),
           ...(options.mergeIntervalMs === undefined
             ? {}
             : { intervalMs: options.mergeIntervalMs }),
@@ -259,6 +262,8 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
     ...(backup === undefined ? {} : { backup: backup.executor }),
     ...(attachments === undefined ? {} : { attachments: attachments.executor }),
     stop: async () => {
+      // Cancel checks promptly; wait below before closing the shared Store.
+      merge?.executor.stop();
       // Dispatcher first (no new work), then the phases in a fixed order; each
       // stop waits for its current tick, so SIGTERM never cuts a merge or a
       // worktree removal in half.

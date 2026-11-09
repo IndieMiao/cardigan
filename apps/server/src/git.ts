@@ -14,6 +14,7 @@ import {
   GitDeliveryVerifier,
   GitWorktreeService,
   type MergeOutcome,
+  type PreparedMerge,
   type ReconcileFinding,
   type RemoveWorktreeInput,
   type RemoveWorktreeOutcome,
@@ -28,6 +29,7 @@ import {
 import type { DeliveryVerifierFor } from "@cardigan/mcp-server";
 import {
   type AgentExecution,
+  agentReceivePack,
   agentUploadPack,
   type ExecutionConfig,
 } from "@cardigan/runtime-herdr";
@@ -67,6 +69,7 @@ export interface ServerGitOptions {
    * real fetch against a real Agent-layout clone.
    */
   readonly uploadPack?: (repository: string) => Promise<string>;
+  readonly receivePack?: (repository: string) => Promise<string>;
 }
 
 /** What the loops need; tests substitute a plain object. */
@@ -74,6 +77,13 @@ export interface MergeGit {
   projectOf(project_id: ProjectId): CentralProject | undefined;
   sync(project: CentralProject): Promise<SourceSync>;
   merge(project: CentralProject, plan: MergePlan): Promise<MergeOutcome>;
+  baseline?(project: CentralProject): Promise<string>;
+  prepare?(project: CentralProject, plan: MergePlan): Promise<PreparedMerge>;
+  publish?(
+    project: CentralProject,
+    candidate: Extract<PreparedMerge, { status: "candidate" }>,
+  ): Promise<MergeOutcome>;
+  distribute?(project: CentralProject): Promise<void>;
 }
 export interface ReconcileGit {
   projectOf(project_id: ProjectId): CentralProject | undefined;
@@ -156,6 +166,7 @@ export interface GitBinding extends GitPhases {
 
 export class ServerGit implements GitBinding {
   private readonly central: CentralRepositoryService;
+  private readonly transport: CentralGitTransport;
   private readonly worktrees: GitWorktreeService;
 
   constructor(private readonly options: ServerGitOptions) {
@@ -173,6 +184,7 @@ export class ServerGit implements GitBinding {
         ? { agentRoot: execution.agentRoot }
         : {}),
     });
+    this.transport = centralTransport;
     this.central = new CentralRepositoryService(centralTransport, {
       dataDir: options.dataDir,
       // The base clone lives under the Agent root in agent-ssh mode; fetching
@@ -259,6 +271,55 @@ export class ServerGit implements GitBinding {
   }
   async merge(project: CentralProject, plan: MergePlan): Promise<MergeOutcome> {
     return this.central.mergeIntoBase(project, plan);
+  }
+  async baseline(project: CentralProject): Promise<string> {
+    const repository = await this.central.ensureCentral(project);
+    const sha = await this.central.git.readRef(
+      repository,
+      `refs/heads/${project.base_branch}`,
+    );
+    if (!sha) throw new Error("Central baseline is missing");
+    return sha;
+  }
+  prepare(project: CentralProject, plan: MergePlan): Promise<PreparedMerge> {
+    return this.central.prepareMerge(project, plan);
+  }
+  publish(
+    project: CentralProject,
+    candidate: Extract<PreparedMerge, { status: "candidate" }>,
+  ): Promise<MergeOutcome> {
+    return this.central.publishMerge(
+      project,
+      candidate.candidate_sha,
+      candidate.previous_sha,
+    );
+  }
+  async distribute(project: CentralProject): Promise<void> {
+    const execution = this.options.execution ?? {
+      mode: "local",
+      dataDir: this.options.dataDir,
+    };
+    const source = await this.central.ensureCentral(project);
+    const repository = join(
+      gitRoots(execution, this.options.dataDir).repositoriesRoot,
+      project.project_id,
+    );
+    if (execution.mode === "agent-ssh") {
+      // Accepted Git deliveries already have a base clone. If it disappeared,
+      // fail this attempt; never recreate an Agent repository as the host.
+      await this.transport.pushBaseline(
+        source,
+        repository,
+        await (
+          this.options.receivePack ??
+          ((path: string) => agentReceivePack(execution, path))
+        )(repository),
+      );
+    } else {
+      const local = new LocalGitTransport();
+      await local.ensureClone(source, repository);
+      await local.fetch(repository, source);
+    }
   }
   async backup(project: CentralProject): Promise<void> {
     await this.central.backupAgentBranches(project, "local");
