@@ -364,7 +364,13 @@ export async function createHarness(
 
   const store = SqliteStore.open({ dataDir });
   const core = new HcCore(session, socketPath, hostEnv);
-  const host = await createHostWiring({ env: hostEnv, store, dataDir });
+  const host = await createHostWiring({
+    env: hostEnv,
+    store,
+    dataDir,
+    // §P2a-2: a late hc call fails with its stack instead of restarting a core.
+    client: core.client(),
+  });
   const errors: string[] = [];
   let server: CardiganServer;
   try {
@@ -419,7 +425,7 @@ export async function createHarness(
         session,
         socket: socketPath,
         steps: [
-          { label: "stop herdr-core", run: () => core.stop() },
+          { label: "stop herdr-core", run: () => core.finalStop() },
           { label: "close store", run: () => store.close() },
           {
             label: "restore process environment",
@@ -427,7 +433,7 @@ export async function createHarness(
               process.env = savedEnv;
             },
           },
-          { label: "stop herdr-core again", run: () => core.stop() },
+          { label: "stop herdr-core again", run: () => core.finalStop() },
           {
             label: "verify herdr-core stopped",
             run: () => core.assertStopped(),
@@ -471,8 +477,8 @@ export async function createHarness(
         session,
         socket: socketPath,
         steps: [
-          { label: "stop herdr-core", run: () => core.stop() },
           { label: "close Cardigan server", run: () => server.close() },
+          { label: "stop herdr-core", run: () => core.finalStop() },
           { label: "close store", run: () => store.close() },
           {
             label: "restore process environment",
@@ -480,7 +486,7 @@ export async function createHarness(
               process.env = savedEnv;
             },
           },
-          { label: "stop herdr-core again", run: () => core.stop() },
+          { label: "stop herdr-core again", run: () => core.finalStop() },
           {
             label: "verify herdr-core stopped",
             run: () => core.assertStopped(),
@@ -652,8 +658,11 @@ export async function createHarness(
               for (const client of clients.splice(0)) await client.close();
             },
           },
-          { label: "stop herdr-core", run: () => core.stop() },
+          // §P2a-2: every background task that can call `hc` stops and drains
+          // before the core goes away; otherwise a late bell or launch starts a
+          // fresh holder and core after cleanup.
           { label: "close Cardigan server", run: () => server.close() },
+          { label: "stop herdr-core", run: () => core.finalStop() },
           { label: "close store", run: () => store.close() },
           {
             label: "restore process environment",
@@ -661,7 +670,7 @@ export async function createHarness(
               process.env = savedEnv;
             },
           },
-          { label: "stop herdr-core again", run: () => core.stop() },
+          { label: "stop herdr-core again", run: () => core.finalStop() },
           {
             label: "verify herdr-core stopped",
             run: () => core.assertStopped(),

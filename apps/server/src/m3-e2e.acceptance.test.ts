@@ -275,7 +275,6 @@ describe.skipIf(!available)("M3.5 router and dispatcher end to end", () => {
     dataDir = join(root, "data");
     runtimeDir = join(root, "run");
     socketPath = join(runtimeDir, "cardigan", `${SESSION}.sock`);
-    core = new HcCore(SESSION, socketPath, hostEnv);
     hostEnv = {
       CARDIGAN_DATA_DIR: dataDir,
       CARDIGAN_CONFIG_DIR: join(root, "config"),
@@ -284,6 +283,9 @@ describe.skipIf(!available)("M3.5 router and dispatcher end to end", () => {
       HC_SESSION: SESSION,
       PATH: `${join(root, "bin")}:${process.env.PATH ?? ""}`,
     };
+    // Build the cleanup handle after its environment exists, so every `hc`
+    // lookup targets this session's socket.
+    core = new HcCore(SESSION, socketPath, hostEnv);
     savedEnv = { ...process.env };
     for (const [key, value] of Object.entries(hostEnv))
       process.env[key] = value;
@@ -393,7 +395,13 @@ describe.skipIf(!available)("M3.5 router and dispatcher end to end", () => {
     ).toBe(0);
 
     store = Store.open({ dataDir });
-    const created = await HerdrRuntime.create({ session: SESSION });
+    // The guarded client refuses to run once cleanup stops the core, so a late
+    // timer fails with its stack instead of starting a new holder and core.
+    const created = await HerdrRuntime.create({
+      session: SESSION,
+      socketPath,
+      client: core.client(),
+    });
     if (!created.ok) throw new Error(created.error.code);
     const runtime = created.value;
     // Remember the core while its socket still exists: after a crash the socket
@@ -452,11 +460,13 @@ describe.skipIf(!available)("M3.5 router and dispatcher end to end", () => {
   });
 
   afterAll(async () => {
+    // Order matters (§P2a-2): every background task that can call `hc` stops and
+    // drains first. `hc` starts a holder plus a core on demand, so stopping the
+    // core while the dispatcher still ticks resurrects the session after cleanup.
     await runCleanupSteps({
       session: SESSION,
       socket: socketPath ?? "",
       steps: [
-        { label: "stop herdr-core", run: () => core?.stop() },
         { label: "close server", run: () => server?.close() },
         { label: "close store", run: () => store?.close() },
         {
@@ -465,7 +475,9 @@ describe.skipIf(!available)("M3.5 router and dispatcher end to end", () => {
             process.env = savedEnv;
           },
         },
-        { label: "stop herdr-core again", run: () => core?.stop() },
+        { label: "stop herdr-core", run: () => core?.finalStop() },
+        { label: "let late timers try", run: () => sleep(500) },
+        { label: "stop herdr-core again", run: () => core?.finalStop() },
         {
           label: "verify herdr-core stopped",
           run: () => core?.assertStopped(),

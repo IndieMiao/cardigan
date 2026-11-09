@@ -225,10 +225,10 @@ export async function m4Cross(options: { hc?: boolean; agent?: boolean } = {}) {
       steps: [
         { label: "close server", run: () => server?.close() },
         { label: "close MCP clients", run: () => closeClients() },
-        { label: "stop herdr-core", run: () => core?.stop() },
+        { label: "stop herdr-core", run: () => core?.finalStop() },
         { label: "close store", run: () => store?.close() },
         { label: "restore environment", run: () => vi.unstubAllEnvs() },
-        { label: "stop herdr-core again", run: () => core?.stop() },
+        { label: "stop herdr-core again", run: () => core?.finalStop() },
         {
           label: "verify herdr-core stopped",
           run: () => core?.assertStopped(),
@@ -580,6 +580,8 @@ export async function m4Cross(options: { hc?: boolean; agent?: boolean } = {}) {
         session,
         socketPath: socket,
         env,
+        // §P2a-2: no hc call can restart this session after cleanup stopped it.
+        client: core.client(),
       });
       if (!created.ok) throw new Error(created.error.message);
       realRuntime = created.value;

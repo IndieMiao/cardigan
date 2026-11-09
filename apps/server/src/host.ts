@@ -22,6 +22,7 @@ import {
 } from "@cardigan/roles";
 import {
   type ExecutionConfig,
+  type HcClient,
   HerdrRuntime,
   resolveExecutionConfig,
 } from "@cardigan/runtime-herdr";
@@ -109,6 +110,8 @@ export async function createHostWiring(options: {
   readonly execution?: ExecutionConfig;
   readonly clock?: Clock;
   readonly url?: string;
+  /** Test harnesses pass a client that refuses calls after cleanup (§P2a-2). */
+  readonly client?: HcClient;
 }): Promise<HostWiring> {
   const env = options.env;
   const execution =
@@ -120,6 +123,7 @@ export async function createHostWiring(options: {
   const created = await HerdrRuntime.create({
     execution,
     session: env.CARDIGAN_HC_SESSION ?? "cardigan",
+    ...(options.client === undefined ? {} : { client: options.client }),
   });
   if (!created.ok)
     throw new Error(
