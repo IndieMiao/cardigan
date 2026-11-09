@@ -88,7 +88,7 @@ projects:
 
 - 新增事件（domain 定义，主机以 system 身份记录）：`merge_check_queued`、`merge_check_started`、`merge_check_finished`（`result: passed | failed | timed_out | interrupted`，带 `completion_id`、`candidate_sha`、`tree_sha`、每条检查的名称 / 退出码 / 用时、失败摘要、日志引用）、`merge_check_requeued`（人点了重新检查）。
 - 卡片状态机不变；卡片视图新增派生字段 `merge_check`（当前完成申请最新一次检查的状态和摘要）。
-- 新增 §4.5 不变量：**项目启用了合并闸门时，`recordMergeResult(kind=merged)` 的 `merge_sha` 的 tree 必须有一条同一 `completion_id` 的 `passed` 检查记录**；domain 拒绝不满足的记录。项目是否启用闸门由主机在加载命令状态时作为项目设置传入（domain 不读文件）。
+- 新增 §4.5 不变量：**项目启用了合并闸门时，`recordMergeResult(kind=merged)` 的 `merge_sha` 的 tree 必须有一条同一 `completion_id` 的 `passed` 检查记录**；domain 拒绝不满足的记录。唯一例外是 `noop`：所有计划交付都已是当前基线的祖先，基线没有任何新代码，此时按现有做法以 `merge_sha == previous_sha` 收尾并在结果里标明 `noop`，不需要也不伪造 `passed` 检查记录（2026-11-09 实现中确认）。项目是否启用闸门由主机在加载命令状态时作为项目设置传入（domain 不读文件）。
 - 日志：`<dataDir>/merge-gate/logs/<project>/<attempt>.log`，0600；每条检查的输出各自截断到 2 MB（保留首尾）；每个项目保留最近 50 次，旧的删除。日志写入前过滤配置里 `env` 的值和推送密钥路径以外的任何密钥内容（检查进程拿不到密钥，这条是兜底）。
 - 失败摘要：失败检查的名称、退出码，加上输出最后 40 行里的错误行（vitest 的 `FAIL`、`Error`、`×` 开头的行），最多 20 行。
 
