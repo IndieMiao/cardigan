@@ -40,6 +40,7 @@ exports[`snapshot: claude-code > command, arguments and files 1`] = `
 - 用 \`submit_delivery\` 提交交付：\`summary\` 面向人，\`subject\` 是 commit SHA；产出交付的 \`requested_verifiers\` 只填以本工作项为目标的验证项（\`get_card\` 里 \`target_work_item_id\` 等于本工作项），并包含其中所有必需项。PM 验收审的是完成申请，产出交付不填它。
 - \`summary\` 不超过 160 字：只写结论和影响；长内容放进 \`test_results\`、\`known_gaps\` 或附件，不要塞进 \`summary\`。
 - 收到驳回后用 \`get_card\` / \`get_updates\` 看清问题，再提交新版本；新版本会让旧版本的审核失效。
+- 收到修复或退回修改（包括 \`fix\` Run、\`merge_changes_requested\`、合并冲突）时，先把最新的基线分支合入当前工作分支并解决冲突，再跑测试并交付；交付摘要里写明合入的基线提交 SHA。
 - 主产出工作项的负责人可以提交 \`kind=card_completion\` 的完成申请，逐条对照验收标准。
 - 被阻塞时用 \`report_blocker\`，需要人操作时用 \`request_human_action\`。
 
@@ -47,6 +48,8 @@ exports[`snapshot: claude-code > command, arguments and files 1`] = `
 
 - 身份只来自 Token：不要在参数里自称别的 Assignment、角色或作者。
 - 不要 push，不要修改 Git 凭据，不要在仓库里写 Token、密钥或运行目录里的文件。
+- 不新建任务计划文件（例如 \`docs/plans/\` 下的计划）；任务计划由人或 PM 维护，设计改动只更新卡片要求的正文文档。
+- 只运行卡片或工作项写明范围的测试；未写明范围时只运行改动所在包的测试。全量测试和端到端测试由合并前的主机检查负责。
 - 拿不准时在时间线里提问或请求拍板，不要自行扩大范围。
 
 ## 协议（每个 Run 都要遵守）
@@ -225,6 +228,7 @@ exports[`snapshot: codex > command, arguments and files 1`] = `
 - 用 \`submit_delivery\` 提交交付：\`summary\` 面向人，\`subject\` 是 commit SHA；产出交付的 \`requested_verifiers\` 只填以本工作项为目标的验证项（\`get_card\` 里 \`target_work_item_id\` 等于本工作项），并包含其中所有必需项。PM 验收审的是完成申请，产出交付不填它。
 - \`summary\` 不超过 160 字：只写结论和影响；长内容放进 \`test_results\`、\`known_gaps\` 或附件，不要塞进 \`summary\`。
 - 收到驳回后用 \`get_card\` / \`get_updates\` 看清问题，再提交新版本；新版本会让旧版本的审核失效。
+- 收到修复或退回修改（包括 \`fix\` Run、\`merge_changes_requested\`、合并冲突）时，先把最新的基线分支合入当前工作分支并解决冲突，再跑测试并交付；交付摘要里写明合入的基线提交 SHA。
 - 主产出工作项的负责人可以提交 \`kind=card_completion\` 的完成申请，逐条对照验收标准。
 - 被阻塞时用 \`report_blocker\`，需要人操作时用 \`request_human_action\`。
 
@@ -232,6 +236,8 @@ exports[`snapshot: codex > command, arguments and files 1`] = `
 
 - 身份只来自 Token：不要在参数里自称别的 Assignment、角色或作者。
 - 不要 push，不要修改 Git 凭据，不要在仓库里写 Token、密钥或运行目录里的文件。
+- 不新建任务计划文件（例如 \`docs/plans/\` 下的计划）；任务计划由人或 PM 维护，设计改动只更新卡片要求的正文文档。
+- 只运行卡片或工作项写明范围的测试；未写明范围时只运行改动所在包的测试。全量测试和端到端测试由合并前的主机检查负责。
 - 拿不准时在时间线里提问或请求拍板，不要自行扩大范围。
 
 ## 协议（每个 Run 都要遵守）
@@ -398,6 +404,7 @@ exports[`snapshot: pi > command, arguments and files 1`] = `
 - 用 \`submit_delivery\` 提交交付：\`summary\` 面向人，\`subject\` 是 commit SHA；产出交付的 \`requested_verifiers\` 只填以本工作项为目标的验证项（\`get_card\` 里 \`target_work_item_id\` 等于本工作项），并包含其中所有必需项。PM 验收审的是完成申请，产出交付不填它。
 - \`summary\` 不超过 160 字：只写结论和影响；长内容放进 \`test_results\`、\`known_gaps\` 或附件，不要塞进 \`summary\`。
 - 收到驳回后用 \`get_card\` / \`get_updates\` 看清问题，再提交新版本；新版本会让旧版本的审核失效。
+- 收到修复或退回修改（包括 \`fix\` Run、\`merge_changes_requested\`、合并冲突）时，先把最新的基线分支合入当前工作分支并解决冲突，再跑测试并交付；交付摘要里写明合入的基线提交 SHA。
 - 主产出工作项的负责人可以提交 \`kind=card_completion\` 的完成申请，逐条对照验收标准。
 - 被阻塞时用 \`report_blocker\`，需要人操作时用 \`request_human_action\`。
 
@@ -405,6 +412,8 @@ exports[`snapshot: pi > command, arguments and files 1`] = `
 
 - 身份只来自 Token：不要在参数里自称别的 Assignment、角色或作者。
 - 不要 push，不要修改 Git 凭据，不要在仓库里写 Token、密钥或运行目录里的文件。
+- 不新建任务计划文件（例如 \`docs/plans/\` 下的计划）；任务计划由人或 PM 维护，设计改动只更新卡片要求的正文文档。
+- 只运行卡片或工作项写明范围的测试；未写明范围时只运行改动所在包的测试。全量测试和端到端测试由合并前的主机检查负责。
 - 拿不准时在时间线里提问或请求拍板，不要自行扩大范围。
 
 ## 协议（每个 Run 都要遵守）
