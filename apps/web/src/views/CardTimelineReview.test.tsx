@@ -107,6 +107,103 @@ test("U3 a copied old anchor loads its record automatically before scrolling the
   }
 });
 
+test.each(
+  [false, true].flatMap((inDrawer) => [
+    {
+      inDrawer,
+      anchor: "decision-q(1)",
+      request: { type: "decision_request", decision_id: "q(1)" },
+      result: { type: "decision_resolved", decision_id: "q(1)" },
+    },
+    {
+      inDrawer,
+      anchor: "human-action-h(1)",
+      request: { type: "human_action", human_action_id: "h(1)" },
+      result: { type: "human_action", human_action_id: "h(1)" },
+    },
+  ]),
+)(
+  "$anchor loads and locates its original request despite newer results and filters (drawer=$inDrawer)",
+  async ({ inDrawer, anchor, request, result }) => {
+    window.location.hash = "#/p/p-1/cards/C-1?type=comment&author=human";
+    const entries = [
+      timelineEntry({
+        id: "C-1#1",
+        event_seq: 1,
+        body: "Original request",
+        ...request,
+      }),
+      ...Array.from({ length: 21 }, (_, n) =>
+        timelineEntry({
+          id: `C-1#${n + 2}`,
+          event_seq: n + 2,
+          author: "human",
+          body: `Comment ${n + 2}`,
+        }),
+      ),
+      timelineEntry({
+        id: "C-1#23",
+        event_seq: 23,
+        body: "Later result",
+        ...result,
+      }),
+    ].reverse();
+    const card = vi.fn(
+      async (_project: string, _card: string, options?: CardReadOptions) =>
+        cardDetail({
+          // The server extends an entity anchor's read window through its earliest
+          // event, even when a completion/result is already in the latest page.
+          timeline: entries.slice(
+            0,
+            options?.at === anchor ? entries.length : (options?.limit ?? 20),
+          ),
+          counts: { ...cardDetail().counts, timeline: entries.length },
+        }),
+    );
+    const props = {
+      client: fakeClient({ card }),
+      projectId: "p-1",
+      cardId: "C-1",
+      inDrawer,
+    };
+    const scroll = vi.fn(),
+      original = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = scroll;
+    try {
+      const view = render(<CardDetailPage {...props} />);
+      await screen.findByText("已加载 20 / 23 条");
+      expect(screen.queryByText("Original request")).toBeNull();
+      view.rerender(<CardDetailPage {...props} anchor={anchor} />);
+      await screen.findByText("Original request");
+      expect(card).toHaveBeenLastCalledWith("p-1", "C-1", {
+        limit: 20,
+        at: anchor,
+      });
+      await waitFor(() =>
+        expect(scroll.mock.contexts.at(-1)).toBe(
+          document.getElementById("entry-C-1#1"),
+        ),
+      );
+      expect(
+        document.getElementById(anchor)?.closest(".timeline-entry")?.id,
+      ).toBe("entry-C-1#1");
+      expect(document.querySelectorAll(`[id="${anchor}"]`)).toHaveLength(1);
+      const rows = [...document.querySelectorAll(".timeline-entry")];
+      expect(rows[0]?.id).toBe("entry-C-1#23");
+      expect(rows.at(-1)?.id).toBe("entry-C-1#1");
+      // An explicit entry link still targets the later result, not its request.
+      view.rerender(<CardDetailPage {...props} anchor="entry-C-1#23" />);
+      await waitFor(() =>
+        expect(scroll.mock.contexts.at(-1)).toBe(
+          document.getElementById("entry-C-1#23"),
+        ),
+      );
+    } finally {
+      Element.prototype.scrollIntoView = original;
+    }
+  },
+);
+
 test.each([false, true])(
   "posting locates the returned comment above older records despite filters and a previous anchor (drawer=%s)",
   async (inDrawer) => {

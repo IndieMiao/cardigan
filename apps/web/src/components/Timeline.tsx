@@ -89,15 +89,17 @@ export const timelineAuthor = (entry: TimelineEntryView) =>
       : entry.author_role === "pm"
         ? "pm"
         : "agent";
-export const targetsEntry = (entry: TimelineEntryView, anchor?: string) =>
-  anchor !== undefined &&
+const timelineAliases = (entry: TimelineEntryView) =>
   [
-    `entry-${entry.id}`,
     entry.delivery_id && `delivery-${entry.delivery_id}`,
     entry.review_id && `review-${entry.review_id}`,
     entry.decision_id && `decision-${entry.decision_id}`,
     entry.human_action_id && `human-action-${entry.human_action_id}`,
-  ].includes(anchor);
+  ].filter((id): id is string => Boolean(id));
+
+export const targetsEntry = (entry: TimelineEntryView, anchor?: string) =>
+  anchor !== undefined &&
+  (anchor === `entry-${entry.id}` || timelineAliases(entry).includes(anchor));
 
 function timelineDay(entry: TimelineEntryView) {
   const date = new Date(entry.created_at);
@@ -168,28 +170,15 @@ export function Timeline({
           : "还没有时间线条目。评论、交付和审核会记录在这里。"}
       </EmptyState>
     );
-  const seenAnchors = new Set<string>();
-  // A newer review also references its delivery. Keep delivery links on the
-  // delivery itself when it is loaded, regardless of the display order.
-  const deliveryRows = new Map(
-    groups
-      .flat()
-      .filter((entry) => entry.type === "delivery" && entry.delivery_id)
-      .map((entry) => [entry.delivery_id, entry.id]),
-  );
-  const alias = (prefix: string, id: string | undefined, entryId?: string) => {
-    if (!id) return null;
-    if (
-      prefix === "delivery" &&
-      deliveryRows.has(id) &&
-      deliveryRows.get(id) !== entryId
-    )
-      return null;
-    const anchorId = `${prefix}-${id}`;
-    if (seenAnchors.has(anchorId)) return null;
-    seenAnchors.add(anchorId);
-    return <span key={anchorId} id={anchorId} className="anchor-target" />;
-  };
+  // Entity links belong to their earliest event (the server's anchor-window
+  // contract), not the first displayed result/review in a newest-first list.
+  const aliasRows = new Map<string, TimelineEntryView>();
+  for (const entry of groups.flat()) {
+    for (const id of timelineAliases(entry)) {
+      const owner = aliasRows.get(id);
+      if (!owner || entry.event_seq < owner.event_seq) aliasRows.set(id, entry);
+    }
+  }
   const row = (entry: TimelineEntryView, nested = false) => {
     const related = attachments.filter(
       (a) =>
@@ -216,10 +205,11 @@ export function Timeline({
         data-timeline-type={entry.type}
       >
         {!nested && <TimelineIcon entry={entry} />}
-        {alias("delivery", entry.delivery_id, entry.id)}
-        {alias("review", entry.review_id)}
-        {alias("decision", entry.decision_id)}
-        {alias("human-action", entry.human_action_id)}
+        {timelineAliases(entry).map((id) =>
+          aliasRows.get(id)?.id === entry.id ? (
+            <span key={id} id={id} className="anchor-target" />
+          ) : null,
+        )}
         {structured && detail ? (
           <TimelineContent
             entry={entry}
