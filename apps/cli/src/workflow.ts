@@ -11,6 +11,7 @@ import {
   createCard,
   parseId,
   standingTools,
+  updateCard,
 } from "@cardigan/domain";
 import {
   resolveExecutionConfig,
@@ -38,6 +39,8 @@ import type { CliIo } from "./io.js";
 const USAGE = [
   "用法：",
   "  cardigan card create --template dev --title <标题> --goal <目标> --acceptance <标准1;标准2> --repo <仓库> [--base-branch main] [--project <p>]",
+  "  cardigan card update <C-n> [--title <标题>] [--goal <目标>] [--acceptance <标准1;标准2>] [--priority <n>] [--status backlog|todo|cancelled] [--project <p>]",
+  "    update 至少提供一个修改字段；含分号的验收标准请加引号。",
   "  cardigan assign <W-n> --role <角色> [--machine local] [--start] [--project <p>]",
   "  cardigan token issue <A-n> [--project <p>]",
   "  cardigan pm create --office|--ops [--project <p>]",
@@ -64,7 +67,9 @@ function parseArgs(args: readonly string[], booleans: readonly string[]): Args {
       positionals.push(token);
       continue;
     }
-    const [name, inline] = token.slice(2).split("=", 2) as [string, string?];
+    const separator = token.indexOf("=");
+    const name = token.slice(2, separator < 0 ? undefined : separator);
+    const inline = separator < 0 ? undefined : token.slice(separator + 1);
     if (inline !== undefined) {
       flags[name] = inline;
       continue;
@@ -74,7 +79,7 @@ function parseArgs(args: readonly string[], booleans: readonly string[]): Args {
       flags[name] = true;
       continue;
     }
-    if (next === undefined) {
+    if (next === undefined || next.startsWith("--")) {
       throw new CliError(`${token} 需要一个值`, EXIT.usage, [USAGE]);
     }
     flags[name] = next;
@@ -154,7 +159,7 @@ export async function runWorkflowCommand(
   const [command, ...rest] = args;
   switch (command) {
     case "card":
-      return cardCreate(rest, io);
+      return cardCommand(rest, io);
     case "assign":
       return await assignWorkItem(rest, io, hooks);
     case "token":
@@ -172,12 +177,109 @@ export async function runWorkflowCommand(
   }
 }
 
-function cardCreate(args: readonly string[], io: CliIo): number {
+function cardCommand(args: readonly string[], io: CliIo): number {
   const [sub, ...rest] = args;
-  if (sub !== "create") {
-    throw new CliError("用法：cardigan card create ...", EXIT.usage, [USAGE]);
+  if (args.includes("--help") || args.includes("-h")) {
+    io.stdout(USAGE);
+    return EXIT.ok;
   }
-  const parsed = parseArgs(rest, []);
+  if (sub === "create") return cardCreate(rest, io);
+  if (sub === "update") return cardUpdate(rest, io);
+  throw new CliError("用法：cardigan card create|update ...", EXIT.usage, [
+    USAGE,
+  ]);
+}
+
+function cardUpdate(args: readonly string[], io: CliIo): number {
+  const { flags, positionals } = parseArgs(args, []);
+  const parsedId = parseId("card", positionals[0]);
+  if (positionals.length !== 1 || !parsedId.ok) {
+    throw new CliError("请提供一个合法的卡片编号（形如 C-3）", EXIT.usage, [
+      USAGE,
+    ]);
+  }
+  const fields = ["title", "goal", "acceptance", "priority", "status"];
+  for (const name of Object.keys(flags)) {
+    if (![...fields, "project", "data-dir"].includes(name)) {
+      throw new CliError(`不认识的选项：--${name}`, EXIT.usage, [USAGE]);
+    }
+    required(flags, name);
+  }
+  const changed = fields.filter((name) => flags[name] !== undefined);
+  if (changed.length === 0) {
+    throw new CliError("至少提供一个要修改的字段", EXIT.usage, [USAGE]);
+  }
+  const status = optional(flags, "status");
+  if (
+    status !== undefined &&
+    status !== "backlog" &&
+    status !== "todo" &&
+    status !== "cancelled"
+  ) {
+    throw new CliError("--status 只接受 backlog、todo、cancelled", EXIT.usage, [
+      USAGE,
+    ]);
+  }
+  const priority =
+    flags.priority === undefined
+      ? undefined
+      : Number(required(flags, "priority"));
+  if (priority !== undefined && !Number.isFinite(priority)) {
+    throw new CliError("--priority 必须是有限数值", EXIT.usage, [USAGE]);
+  }
+  const acceptance =
+    flags.acceptance === undefined
+      ? undefined
+      : list(required(flags, "acceptance"));
+  if (acceptance?.length === 0) {
+    throw new CliError("--acceptance 至少写一条标准", EXIT.usage, [USAGE]);
+  }
+  const patch: Omit<Parameters<typeof updateCard>[2], "card_id"> = {
+    ...(flags.title === undefined ? {} : { title: required(flags, "title") }),
+    ...(flags.goal === undefined ? {} : { goal: required(flags, "goal") }),
+    ...(acceptance === undefined ? {} : { acceptance_criteria: acceptance }),
+    ...(priority === undefined ? {} : { priority }),
+    ...(status === undefined ? {} : { status }),
+  };
+  const cardId = parsedId.value.id;
+  const store = openStoreFrom(io, flags);
+  try {
+    const project_id = resolveProject(store, io, optional(flags, "project"));
+    const card = runCommand(store, {
+      project_id,
+      actor: humanActor(project_id),
+      reduce: (state, actor, ports) => {
+        const result = updateCard(
+          state,
+          actor,
+          { card_id: cardId, ...patch },
+          ports,
+        );
+        if (!result.ok) {
+          const current = state.cards.find((item) => item.id === cardId);
+          const reason =
+            result.error.code === "illegal_transition"
+              ? `不允许从 ${current?.status} 转为 ${status}`
+              : result.error.code === "not_found"
+                ? "卡片不存在"
+                : `更新被拒绝：${result.error.message}`;
+          throw new CliError(
+            `无法更新卡片 ${cardId}：${reason}（${result.error.code}）`,
+            EXIT.usage,
+          );
+        }
+        return result;
+      },
+    });
+    io.stdout(`已更新卡片 ${card.id}：${changed.join("、")}`);
+    return EXIT.ok;
+  } finally {
+    store.close();
+  }
+}
+
+function cardCreate(args: readonly string[], io: CliIo): number {
+  const parsed = parseArgs(args, []);
   const template = required(parsed.flags, "template");
   if (template !== "dev") {
     throw new CliError("M1 只有 dev 模板", EXIT.usage, [USAGE]);

@@ -1,0 +1,305 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { ProjectId } from "@cardigan/domain";
+import { loadCommandState } from "@cardigan/mcp-server";
+import { Store } from "@cardigan/store";
+import { afterEach, beforeEach, expect, test } from "vitest";
+import { main } from "./index.js";
+import type { CliIo } from "./io.js";
+
+const project = "p-card-update" as ProjectId;
+let dataDir: string;
+let store: Store;
+let output: string[];
+let errors: string[];
+let io: CliIo;
+
+async function run(args: string[]): Promise<number> {
+  output = [];
+  errors = [];
+  return main(args, io);
+}
+
+async function createCard(projectId = project): Promise<void> {
+  expect(
+    await run([
+      "card",
+      "create",
+      "--template",
+      "dev",
+      "--title",
+      "Original title",
+      "--goal",
+      "Original goal",
+      "--acceptance",
+      "Original criterion",
+      "--repo",
+      "example/repo",
+      "--project",
+      projectId,
+    ]),
+  ).toBe(0);
+}
+
+const snapshot = (projectId = project) =>
+  store.uow.read((tx) => loadCommandState(tx, projectId));
+
+beforeEach(async () => {
+  dataDir = mkdtempSync(join(tmpdir(), "cardigan-card-update-"));
+  io = {
+    env: { CARDIGAN_DATA_DIR: dataDir },
+    cwd: dataDir,
+    platform: "linux",
+    stdout: (line) => output.push(line),
+    stderr: (line) => errors.push(line),
+    signals: { on: () => undefined, off: () => undefined },
+    spawnInherit: () => {
+      throw new Error("card commands must not spawn");
+    },
+    captureCommand: async () => {
+      throw new Error("card commands must not spawn");
+    },
+  };
+  expect(await run(["project", "create", project])).toBe(0);
+  await createCard();
+  store = Store.open({ dataDir });
+});
+
+afterEach(() => {
+  store?.close();
+  rmSync(dataDir, { recursive: true, force: true });
+});
+
+test("updates text and acceptance criteria as human, preserving other fields", async () => {
+  const before = snapshot();
+  expect(
+    await run([
+      "card",
+      "update",
+      "C-1",
+      "--title=新标题=x=y",
+      "--goal",
+      " 新目标 ",
+      "--acceptance",
+      " 标准一 ; ; 标准二; ",
+    ]),
+  ).toBe(0);
+  const after = snapshot();
+  expect(after.cards[0]).toEqual({
+    ...before.cards[0],
+    title: "新标题=x=y",
+    goal: "新目标",
+    acceptance_criteria: ["标准一", "标准二"],
+  });
+  expect(after.work_items).toEqual(before.work_items);
+  expect(after.events.at(-1)).toMatchObject({
+    type: "card_updated",
+    actor: { kind: "human", project_id: project },
+  });
+  expect(after.timeline.at(-1)?.author).toBe("human");
+  expect(output.join("\n")).toBe("已更新卡片 C-1：title、goal、acceptance");
+});
+
+test("updates finite priority and planning states including priority zero", async () => {
+  for (const [status, priority] of [
+    ["backlog", "-2.5"],
+    ["todo", "0"],
+  ] as const) {
+    expect(
+      await run([
+        "card",
+        "update",
+        "C-1",
+        "--status",
+        status,
+        "--priority",
+        priority,
+      ]),
+    ).toBe(0);
+    expect(snapshot().cards[0]).toMatchObject({
+      status,
+      priority: Number(priority),
+    });
+    expect(output.join("\n")).toBe("已更新卡片 C-1：priority、status");
+  }
+});
+
+test("cancels unfinished work, preserves passed verification and other cards", async () => {
+  await createCard();
+  store.uow.run((tx) => {
+    for (const item of tx.work_items.list(project)) {
+      if (item.id === "W-1")
+        tx.work_items.put(project, { ...item, status: "in_progress" });
+      if (item.kind === "verify" && item.id === "W-2")
+        tx.work_items.put(project, { ...item, status: "passed" });
+    }
+  });
+  const before = snapshot();
+  expect(await run(["card", "update", "C-1", "--status", "cancelled"])).toBe(0);
+  const after = snapshot();
+  expect(after.cards.find((card) => card.id === "C-1")?.status).toBe(
+    "cancelled",
+  );
+  expect(
+    after.work_items
+      .filter((item) => item.card_id === "C-1")
+      .map((item) => [item.id, item.status]),
+  ).toEqual([
+    ["W-1", "cancelled"],
+    ["W-2", "passed"],
+    ["W-3", "cancelled"],
+  ]);
+  expect(after.cards.find((card) => card.id === "C-2")).toEqual(
+    before.cards.find((card) => card.id === "C-2"),
+  );
+  expect(after.work_items.filter((item) => item.card_id === "C-2")).toEqual(
+    before.work_items.filter((item) => item.card_id === "C-2"),
+  );
+  expect(output.join("\n")).toBe("已更新卡片 C-1：status");
+});
+
+test.each([
+  ["done", "todo"],
+  ["done", "backlog"],
+  ["in_progress", "backlog"],
+] as const)(
+  "rejects %s → %s in Chinese without partial changes",
+  async (from, to) => {
+    store.uow.run((tx) => {
+      const card = tx.cards.list(project)[0];
+      if (!card) throw new Error("missing fixture card");
+      tx.cards.put(project, { ...card, status: from });
+    });
+    const before = snapshot();
+    expect(
+      await run([
+        "card",
+        "update",
+        "C-1",
+        "--title",
+        "Must roll back",
+        "--status",
+        to,
+      ]),
+    ).toBe(2);
+    expect(errors.join("\n")).toContain(
+      `无法更新卡片 C-1：不允许从 ${from} 转为 ${to}`,
+    );
+    expect(output).toEqual([]);
+    expect(snapshot()).toEqual(before);
+  },
+);
+
+test("preserves the existing domain rule allowing done cards to be cancelled", async () => {
+  store.uow.run((tx) => {
+    const card = tx.cards.list(project)[0];
+    if (!card) throw new Error("missing fixture card");
+    tx.cards.put(project, { ...card, status: "done", resolution: "done" });
+    for (const item of tx.work_items.list(project)) {
+      tx.work_items.put(
+        project,
+        item.kind === "produce"
+          ? { ...item, status: "accepted" }
+          : { ...item, status: "passed" },
+      );
+    }
+  });
+  expect(await run(["card", "update", "C-1", "--status", "cancelled"])).toBe(0);
+  expect(snapshot().cards[0]?.status).toBe("cancelled");
+  expect(snapshot().work_items.map((item) => item.status)).toEqual([
+    "cancelled",
+    "passed",
+    "passed",
+  ]);
+});
+
+test.each([
+  { args: [], message: "至少提供一个" },
+  { args: ["--project", project], message: "至少提供一个" },
+  ...["done", "in_progress", "review", "awaiting_merge", "invalid"].map(
+    (status) => ({
+      args: ["--title", "Must not persist", "--status", status],
+      message: "--status 只接受",
+    }),
+  ),
+  { args: ["--title", ""], message: "缺少 --title" },
+  { args: ["--goal", " "], message: "缺少 --goal" },
+  { args: ["--acceptance", " ; ; "], message: "至少写一条标准" },
+  ...["NaN", "Infinity", "abc", ""].map((priority) => ({
+    args: ["--priority", priority],
+    message: "--priority",
+  })),
+  { args: ["--status", ""], message: "缺少 --status" },
+  { args: ["--title"], message: "--title 需要一个值" },
+  { args: ["--title", "--status", "cancelled"], message: "--title 需要一个值" },
+  {
+    args: ["--titel", "typo", "--status", "cancelled"],
+    message: "不认识的选项",
+  },
+  { args: ["C-2", "--status", "cancelled"], message: "一个合法的卡片编号" },
+])("rejects invalid update args: $args", async ({ args, message }) => {
+  const before = snapshot();
+  expect(await run(["card", "update", "C-1", ...args])).toBe(2);
+  expect(errors.join("\n")).toContain(message);
+  expect(errors.join("\n")).toContain("用法：");
+  expect(output).toEqual([]);
+  expect(snapshot()).toEqual(before);
+});
+
+test.each([{ ids: [] }, { ids: ["W-1"] }, { ids: ["C-99"] }])(
+  "rejects missing, malformed or absent card: $ids",
+  async ({ ids }) => {
+    const before = snapshot();
+    expect(await run(["card", "update", ...ids, "--status", "cancelled"])).toBe(
+      2,
+    );
+    expect(errors.join("\n")).toContain(
+      ids[0] === "C-99" ? "卡片不存在" : "合法的卡片编号",
+    );
+    expect(snapshot()).toEqual(before);
+  },
+);
+
+test("explicit project overrides the environment and ambiguous projects fail", async () => {
+  const otherProject = "p-other" as ProjectId;
+  expect(await run(["project", "create", otherProject])).toBe(0);
+  await createCard(otherProject);
+  io.env.CARDIGAN_PROJECT = otherProject;
+  expect(
+    await run([
+      "card",
+      "update",
+      "C-1",
+      "--title",
+      "Explicit",
+      "--project",
+      project,
+    ]),
+  ).toBe(0);
+  expect(snapshot().cards[0]?.title).toBe("Explicit");
+  expect(snapshot(otherProject).cards[0]?.title).toBe("Original title");
+  expect(await run(["card", "update", "C-1", "--title", "Environment"])).toBe(
+    0,
+  );
+  expect(snapshot(otherProject).cards[0]?.title).toBe("Environment");
+  delete io.env.CARDIGAN_PROJECT;
+  const before = snapshot();
+  expect(await run(["card", "update", "C-1", "--status", "cancelled"])).toBe(2);
+  expect(errors.join("\n")).toContain("有多个项目");
+  expect(snapshot()).toEqual(before);
+});
+
+test.each([["--help"], ["card", "--help"], ["card", "update", "--help"]])(
+  "help documents card update: %s",
+  async (...args) => {
+    expect(await run(args)).toBe(0);
+    expect(output.join("\n")).toContain("card update");
+  },
+);
+
+test("card usage lists both create and update", async () => {
+  expect(await run(["card"])).toBe(2);
+  expect(errors.join("\n")).toContain("card create|update");
+  expect(errors.join("\n")).toContain("--status backlog|todo|cancelled");
+});
