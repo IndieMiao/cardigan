@@ -318,6 +318,7 @@ Standing Assignment (scope=project): PM Office, PM Ops — not tied to a WorkIte
 - 管理字段：`priority`、`status`（见 §4.4：中间状态由工作项推导，`done` 要走完成申请）、`resolution?`（`done | superseded | duplicate | wontdo`）、`template`（决定默认生成哪些工作项，以及哪些是必需的）
 - 审计：`created_by`、`created_at`
 - 派生字段（不存储，实时计算）：`waiting_on[]`、`next_owners[]`、`open_decisions[]`、`review_matrix`（每个交付 × 审核它的验证方 → 对当前 SHA 的结论；产出交付只列以该工作项为目标的验证项，完成申请只列它请求的 PM 验收项）、`why`（一句话原因，≤40 字，见 §8.2）
+- `next_owners[]` 中，处于 `ready`、`in_progress`、`changes_requested` 的工作项若关联的 Assignment 已 `released`，退回 `{kind: "role", ref: 工作项的 role_id}`，表示需要重新指派；`active` 和 `suspended` 仍指向该 Assignment。同一角色去重，其他派生字段规则不变。
 - 负责人和审核人不写进描述正文；改派作为事件进时间线。
 
 **WorkItem**
