@@ -23,6 +23,7 @@ import { parseLaunchConfig } from "@cardigan/roles";
 import { HerdrRuntime } from "@cardigan/runtime-herdr";
 import { Store } from "@cardigan/store";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { createTestRuntime } from "../../../test-support/paths.js";
 import { HcCore, runCleanupSteps } from "../test-support/hc.js";
 import { routeProjectEvents } from "./dispatch-inbox.js";
 import { stubGit } from "./git-test-support.js";
@@ -273,7 +274,7 @@ describe.skipIf(!available)("M3.5 router and dispatcher end to end", () => {
   beforeAll(async () => {
     root = mkdtempSync(join(tmpdir(), "cardigan-m3-"));
     dataDir = join(root, "data");
-    runtimeDir = join(root, "run");
+    runtimeDir = createTestRuntime(join(root, "run"));
     socketPath = join(runtimeDir, "cardigan", `${SESSION}.sock`);
     hostEnv = {
       CARDIGAN_DATA_DIR: dataDir,

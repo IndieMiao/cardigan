@@ -12,6 +12,7 @@ import type {
   RuntimeResult,
 } from "@cardigan/domain";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { createTestRuntime } from "../../../test-support/paths.js";
 import { corePid, stopCore } from "../test-support/hc-core.js";
 import { HerdrRuntime, type RuntimeEvent } from "./index.js";
 import {
@@ -183,11 +184,13 @@ interface Fixture {
 async function realFixture(): Promise<Fixture> {
   const dir = await mkdtemp(join(tmpdir(), "cg-rt-"));
   const session = `test-${randomUUID().slice(0, 8)}`,
-    socketPath = join(dir, "hc.sock");
+    runtimeDir = createTestRuntime(join(dir, "runtime")),
+    socketPath = join(runtimeDir, "hc.sock");
   const env = {
     ...process.env,
     HC_SESSION: session,
     HC_SOCKET: socketPath,
+    XDG_RUNTIME_DIR: runtimeDir,
     XDG_STATE_HOME: join(dir, "state"),
     XDG_CONFIG_HOME: join(dir, "config"),
   };
