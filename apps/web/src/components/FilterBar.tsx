@@ -8,6 +8,8 @@ export interface FilterField {
   multiple?: boolean;
   /** Custom control; receives the route value and its setter. */
   render?: (value: string, setValue: (value: string) => void) => ReactNode;
+  /** Let this control take the row's remaining width (§9 U6a: the search box). */
+  grow?: boolean;
 }
 
 const valuesOf = (value: string | undefined): string[] =>
@@ -30,7 +32,10 @@ export function FilterBar({
       <div className="filter-controls">
         {fields.map((field) =>
           field.render ? (
-            <div key={field.key} className="filter-custom">
+            <div
+              key={field.key}
+              className={`filter-custom${field.grow ? " filter-custom-grow" : ""}`}
+            >
               {field.render(values[field.key] ?? "", (value) =>
                 onChange({ ...values, [field.key]: value }),
               )}

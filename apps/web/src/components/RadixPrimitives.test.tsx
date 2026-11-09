@@ -250,6 +250,22 @@ test("tooltip appears on keyboard focus and disappears on blur", async () => {
   await waitFor(() => expect(screen.queryByRole("tooltip")).toBeNull());
 });
 
+test("U6a a preview opened over the drawer owns the only mask in the viewport", async () => {
+  render(
+    <Drawer open onOpenChange={() => {}} title="卡片详情">
+      <LightboxHarness />
+    </Drawer>,
+  );
+  expect(document.body.getAttribute("data-lightbox")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "打开图片" }));
+  await screen.findByRole("dialog", { name: "第一张" });
+  expect(document.body.getAttribute("data-lightbox")).toBe("open");
+  fireEvent.keyDown(document, { key: "Escape" });
+  await waitFor(() =>
+    expect(document.body.getAttribute("data-lightbox")).toBeNull(),
+  );
+});
+
 test("radix primitive styles use shared tokens, focus styles and the dark theme", () => {
   const css = readFileSync(
     new NodeURL("../styles.css", import.meta.url),
@@ -281,4 +297,15 @@ test("radix primitive styles use shared tokens, focus styles and the dark theme"
   expect(css).toContain('.view-switch-item[data-state="on"]');
   expect(css).toContain(".drawer-divider");
   expect(css).toContain("@keyframes drawer-slide-in");
+  // §9 U6a: layers are ordered and a preview mask replaces the drawer mask.
+  const layer = (selector: string) => {
+    const start = css.indexOf(`${selector} {`);
+    expect(start).toBeGreaterThanOrEqual(0);
+    return css.slice(start, css.indexOf("}", start) + 1);
+  };
+  expect(layer(".drawer-content")).toContain("z-index: 101;");
+  expect(layer(".lightbox-overlay")).toContain("z-index: 200;");
+  expect(layer(".lightbox-content")).toContain("z-index: 201;");
+  expect(layer(".tooltip-content")).toContain("z-index: 120;");
+  expect(css).toContain('body[data-lightbox="open"] .drawer-overlay {');
 });

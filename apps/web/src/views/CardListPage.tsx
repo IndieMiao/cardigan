@@ -371,6 +371,7 @@ export function CardListPage({
           {
             key: "q",
             label: "搜索标题或编号",
+            grow: true,
             render: (value, setValue) => (
               <label className="filter-search">
                 <span aria-hidden="true">⌕</span>

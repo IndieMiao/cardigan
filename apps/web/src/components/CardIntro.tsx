@@ -82,7 +82,9 @@ export function RecentConclusions({
         : decision
           ? `${decision.id} ${entry.author === "human" ? "你" : (entry.author_role ?? "PM")} ${entry.decision_option ? decisionOption(decision, entry.decision_option) : "已记录拍板结果"}`
           : undefined;
-      return label ? [{ entry, label }] : [];
+      return label
+        ? [{ entry, label, tone: review?.verdict ?? decision?.status }]
+        : [];
     })
     .slice(0, 3);
   if (!rows.length) return null;
@@ -90,8 +92,12 @@ export function RecentConclusions({
     <section className="recent-conclusions" aria-label="最近结论">
       <h3>最近结论</h3>
       <ul>
-        {rows.map(({ entry, label }) => (
+        {rows.map(({ entry, label, tone }) => (
           <li key={entry.id}>
+            <span
+              className={`status conclusion-dot${tone ? ` status-${tone}` : ""}`}
+              aria-hidden="true"
+            />
             <a
               title={label}
               href={routeHash({

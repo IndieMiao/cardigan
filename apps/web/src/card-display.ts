@@ -12,13 +12,25 @@ export const CARD_DISPLAY_FIELDS = [
 export type CardDisplayField = (typeof CARD_DISPLAY_FIELDS)[number]["key"];
 export type CardDisplay = Readonly<Record<CardDisplayField, boolean>>;
 
+/**
+ * §9 U6a: "原因" is off by default because it repeats the waiting marker; every
+ * other field stays on. Stored settings keep whatever the user chose.
+ */
+const OFF_BY_DEFAULT: ReadonlySet<CardDisplayField> = new Set(["reason"]);
+
 export const DEFAULT_CARD_DISPLAY: CardDisplay = Object.fromEntries(
-  CARD_DISPLAY_FIELDS.map((field) => [field.key, true]),
+  CARD_DISPLAY_FIELDS.map((field) => [
+    field.key,
+    !OFF_BY_DEFAULT.has(field.key),
+  ]),
 ) as CardDisplay;
 
 export const CARD_DISPLAY_KEY = "cardigan.cards.display";
 
-/** localStorage is optional (private mode/SSR); bad data falls back to defaults. */
+/**
+ * localStorage is optional (private mode/SSR) and bad data falls back to the
+ * defaults; stored fields keep the user's own choice (§9 U6a).
+ */
 export function readCardDisplay(): CardDisplay {
   try {
     const raw = window.localStorage.getItem(CARD_DISPLAY_KEY);
