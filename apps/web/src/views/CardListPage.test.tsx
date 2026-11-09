@@ -107,6 +107,54 @@ function client(
   };
 }
 
+test.each(["board", "list"] as const)(
+  "P2a-5: %s fades superseded cards and identifies their replacement, not unrelated cards",
+  async (view) => {
+    const api = client(async () => ({
+      ...page(),
+      cards: [
+        card({
+          id: "C-1",
+          title: "Old completed card",
+          status: "done",
+          resolution: "superseded",
+          superseded_by: "C-2",
+          related_cards: ["C-99", "C-2"],
+        }),
+        card({
+          id: "C-3",
+          title: "Old cancelled card",
+          status: "cancelled",
+          resolution: "superseded",
+          superseded_by: "C-4",
+        }),
+        card({
+          id: "C-5",
+          title: "Ordinary completed card",
+          status: "done",
+          resolution: "done",
+        }),
+      ],
+    }));
+    render(<CardListPage client={api} projectId="p-1" view={view} />);
+    const notice = await screen.findByText("已被 C-2 取代");
+    expect(
+      notice
+        .closest(view === "board" ? ".card-tile" : "tr")
+        ?.classList.contains("card-superseded"),
+    ).toBe(true);
+    expect(
+      screen.getByText("已被 C-4 取代").closest(".card-superseded"),
+    ).toBeTruthy();
+    expect(
+      screen.getByText("Ordinary completed card").closest(".card-superseded"),
+    ).toBeNull();
+    expect(screen.queryByText("已被 C-99 取代")).toBeNull();
+    expect(document.querySelectorAll(".card-superseded")).toHaveLength(2);
+    expect(document.querySelector("a a")).toBeNull();
+  },
+);
+
 test("shows a loading state while the cards are on their way", () => {
   const never = new Promise<CardPage>(() => undefined);
   render(

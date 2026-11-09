@@ -2605,3 +2605,24 @@ body[data-lightbox="open"] .drawer-overlay {
 .timeline-entry small {
   font-size: var(--text-sm);
 }
+
+.card-superseded {
+  background: var(--surface-muted);
+  color: var(--text-muted);
+}
+
+.card-superseded .card-title,
+.card-superseded .card-field > :last-child,
+.card-superseded .card-table-title {
+  color: var(--text-muted);
+}
+
+.card-superseded .status::before {
+  background: var(--status-muted);
+}
+
+.card-superseded-notice {
+  display: block;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}

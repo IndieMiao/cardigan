@@ -188,7 +188,6 @@ export const transitionTables: {
       request_changes: "in_progress",
       cancel: "cancelled",
     },
-    done: { cancel: "cancelled" },
   },
 };
 

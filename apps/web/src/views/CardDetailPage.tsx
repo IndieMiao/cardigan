@@ -11,6 +11,7 @@ import { CardSource, RecentConclusions } from "../components/CardIntro.js";
 import { CardRecords } from "../components/CardRecords.js";
 import { CardSectionNav } from "../components/CardSectionNav.js";
 import { CardSidebar, CardWorkItems } from "../components/CardSidebar.js";
+import { CardSuperseded } from "../components/CardSuperseded.js";
 import {
   CommentBox,
   type CommentBoxHandle,
@@ -337,6 +338,7 @@ function CardContent({
             description={
               <>
                 <StatusTag status={card.status} />
+                <CardSuperseded card={card} projectId={projectId} />
                 <span>
                   更新于 <Time value={detail.updated_at ?? card.created_at} />
                 </span>

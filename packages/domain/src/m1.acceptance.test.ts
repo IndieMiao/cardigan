@@ -526,7 +526,7 @@ const machineTables: readonly TableCase[] = [
     from: "review",
     to: ["review", "awaiting_merge", "in_progress", "cancelled"],
   },
-  { machine: "card", from: "done", to: ["cancelled"] },
+  { machine: "card", from: "done", to: [] },
   { machine: "card", from: "cancelled", to: [] },
   { machine: "produce", from: "todo", to: ["ready", "cancelled"] },
   { machine: "produce", from: "ready", to: ["in_progress", "cancelled"] },

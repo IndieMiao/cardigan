@@ -213,6 +213,52 @@ export function updateCard(
     return result;
   });
 }
+/** Human-only bookkeeping for closed cards; never reopens or cancels work. */
+export function supersedeCard(
+  state: CommandState,
+  actor: Actor,
+  p: { card_id: Card["id"]; superseded_by: Card["id"] },
+  ports: CommandPorts,
+) {
+  return command(state, actor, "supersede_card", ports, (d) => {
+    const card = d.card(p.card_id);
+    ensure(
+      card.status === "done" || card.status === "cancelled",
+      "illegal_transition",
+      "Only done or cancelled cards can be superseded",
+    );
+    ensure(
+      p.superseded_by !== card.id,
+      "validation_failed",
+      "A card cannot supersede itself",
+    );
+    const replacement = d.card(p.superseded_by);
+    if (
+      card.resolution === "superseded" &&
+      card.superseded_by === replacement.id
+    )
+      return card;
+    const result: Card = {
+      ...card,
+      resolution: "superseded",
+      superseded_by: replacement.id,
+      related_cards: [...new Set([...card.related_cards, replacement.id])],
+    };
+    d.put("cards", result);
+    d.emit(
+      "card_superseded",
+      card.id,
+      { card_id: card.id, superseded_by: replacement.id },
+      {
+        type: "status_change",
+        body: `已被 ${replacement.id} 取代`,
+        refs: [{ kind: "card", id: replacement.id }],
+      },
+    );
+    return result;
+  });
+}
+
 export type CreateWorkItemParams = Pick<
   WorkItem,
   "card_id" | "title" | "kind" | "role_id" | "required" | "completion_criteria"

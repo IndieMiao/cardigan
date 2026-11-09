@@ -3,6 +3,7 @@ import type { CardListItem } from "../api.js";
 import type { CardDisplay } from "../card-display.js";
 import { routeHash } from "../route.js";
 import { BOARD_STATUSES, cardStatusLabel, nextOwnersLabel } from "../status.js";
+import { CardSuperseded } from "./CardSuperseded.js";
 import { IdTag, StatusTag, Time } from "./Foundation.js";
 
 export function Board({
@@ -103,7 +104,7 @@ export function Board({
                         return (
                           <li key={card.id}>
                             <a
-                              className={`card-tile${blocked ? " card-tile-blocked" : decision || humanAction ? " card-tile-waiting" : ""}`}
+                              className={`card-tile${blocked ? " card-tile-blocked" : decision || humanAction ? " card-tile-waiting" : ""}${card.resolution === "superseded" ? " card-superseded" : ""}`}
                               href={routeHash({
                                 kind: "card",
                                 projectId,
@@ -133,6 +134,7 @@ export function Board({
                                 <StatusTag status={card.status} />
                               </span>
                               <span className="card-title">{card.title}</span>
+                              <CardSuperseded card={card} />
                               {display.waiting &&
                                 (blocked || decision || humanAction) && (
                                   <span className="card-field">

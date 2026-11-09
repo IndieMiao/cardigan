@@ -191,7 +191,7 @@ test.each([
   },
 );
 
-test("preserves the existing domain rule allowing done cards to be cancelled", async () => {
+test("rejects cancelling done cards with a Chinese recovery instruction and no partial changes", async () => {
   store.uow.run((tx) => {
     const card = tx.cards.list(project)[0];
     if (!card) throw new Error("missing fixture card");
@@ -205,13 +205,22 @@ test("preserves the existing domain rule allowing done cards to be cancelled", a
       );
     }
   });
-  expect(await run(["card", "update", "C-1", "--status", "cancelled"])).toBe(0);
-  expect(snapshot().cards[0]?.status).toBe("cancelled");
-  expect(snapshot().work_items.map((item) => item.status)).toEqual([
-    "cancelled",
-    "passed",
-    "passed",
-  ]);
+  const before = snapshot();
+  expect(
+    await run([
+      "card",
+      "update",
+      "C-1",
+      "--title",
+      "Must roll back",
+      "--status",
+      "cancelled",
+    ]),
+  ).toBe(2);
+  expect(errors.join("\n")).toContain("已完成卡片不能取消");
+  expect(errors.join("\n")).toContain("请建新卡");
+  expect(errors.join("\n")).toContain("--superseded-by <C-m>");
+  expect(snapshot()).toEqual(before);
 });
 
 test.each([
@@ -231,6 +240,9 @@ test.each([
     message: "--priority",
   })),
   { args: ["--status", ""], message: "缺少 --status" },
+  { args: ["--superseded-by"], message: "--superseded-by 需要一个值" },
+  { args: ["--superseded-by", ""], message: "缺少 --superseded-by" },
+  { args: ["--superseded-by", "W-2"], message: "合法的卡片编号" },
   { args: ["--title"], message: "--title 需要一个值" },
   { args: ["--title", "--status", "cancelled"], message: "--title 需要一个值" },
   {
@@ -295,6 +307,8 @@ test.each([["--help"], ["card", "--help"], ["card", "update", "--help"]])(
   async (...args) => {
     expect(await run(args)).toBe(0);
     expect(output.join("\n")).toContain("card update");
+    expect(output.join("\n")).toContain("--superseded-by <C-m>");
+    expect(output.join("\n")).toContain("已完成卡片不能取消");
   },
 );
 
@@ -302,4 +316,132 @@ test("card usage lists both create and update", async () => {
   expect(await run(["card"])).toBe(2);
   expect(errors.join("\n")).toContain("card create|update");
   expect(errors.join("\n")).toContain("--status backlog|todo|cancelled");
+});
+
+test.each(["done", "cancelled"] as const)(
+  "marks %s cards as superseded and persists a distinct replacement",
+  async (status) => {
+    await createCard();
+    await createCard();
+    store.uow.run((tx) => {
+      const card = tx.cards.list(project).find((c) => c.id === "C-1");
+      if (!card) throw new Error("missing fixture card");
+      tx.cards.put(project, {
+        ...card,
+        status,
+        related_cards: ["C-3" as typeof card.id],
+      });
+    });
+    const before = snapshot();
+    expect(
+      await run([
+        "card",
+        "update",
+        "C-1",
+        "--title",
+        "Updated title",
+        "--superseded-by",
+        "C-2",
+      ]),
+    ).toBe(0);
+    const after = snapshot();
+    expect(after.cards.find((c) => c.id === "C-1")).toMatchObject({
+      title: "Updated title",
+      status,
+      resolution: "superseded",
+      superseded_by: "C-2",
+      related_cards: ["C-3", "C-2"],
+    });
+    expect(after.work_items).toEqual(before.work_items);
+    expect(
+      after.events.filter((event) => event.card_id === "C-1").at(-1),
+    ).toMatchObject({
+      type: "card_superseded",
+      payload: { card_id: "C-1", superseded_by: "C-2" },
+    });
+    expect(
+      after.timeline.filter((entry) => entry.card_id === "C-1").at(-1)?.body,
+    ).toBe("已被 C-2 取代");
+    expect(output.join("\n")).toBe("已更新卡片 C-1：title、superseded-by");
+    expect(await run(["card", "update", "C-1", "--superseded-by", "C-2"])).toBe(
+      0,
+    );
+    expect(snapshot()).toEqual(after);
+  },
+);
+
+test.each([
+  { status: "done", target: "C-1", message: "不能被自身取代" },
+  { status: "cancelled", target: "C-99", message: "当前项目中不存在" },
+  { status: "todo", target: "C-2", message: "只有已完成或已取消" },
+] as const)(
+  "rejects invalid supersession ($status/$target) and rolls back combined updates",
+  async ({ status, target, message }) => {
+    await createCard();
+    store.uow.run((tx) => {
+      const card = tx.cards.list(project)[0];
+      if (!card) throw new Error("missing fixture card");
+      tx.cards.put(project, { ...card, status });
+    });
+    const before = snapshot();
+    expect(
+      await run([
+        "card",
+        "update",
+        "C-1",
+        "--title",
+        "Must roll back",
+        "--superseded-by",
+        target,
+      ]),
+    ).toBe(2);
+    expect(errors.join("\n")).toContain(message);
+    expect(output).toEqual([]);
+    expect(snapshot()).toEqual(before);
+  },
+);
+
+test("cancels unfinished cards and marks their replacement in one transaction", async () => {
+  await createCard();
+  expect(
+    await run([
+      "card",
+      "update",
+      "C-1",
+      "--status",
+      "cancelled",
+      "--superseded-by",
+      "C-2",
+    ]),
+  ).toBe(0);
+  expect(snapshot().cards.find((c) => c.id === "C-1")).toMatchObject({
+    status: "cancelled",
+    resolution: "superseded",
+    superseded_by: "C-2",
+  });
+});
+
+test("does not resolve a replacement from another project and rolls back cancellation", async () => {
+  const otherProject = "p-other" as ProjectId;
+  expect(await run(["project", "create", otherProject])).toBe(0);
+  await createCard(otherProject);
+  await createCard(otherProject);
+  const before = snapshot(),
+    otherBefore = snapshot(otherProject);
+  expect(
+    await run([
+      "card",
+      "update",
+      "C-1",
+      "--project",
+      project,
+      "--status",
+      "cancelled",
+      "--superseded-by",
+      "C-2",
+    ]),
+  ).toBe(2);
+  expect(errors.join("\n")).toContain("当前项目中不存在");
+  expect(snapshot()).toEqual(before);
+  expect(snapshot(otherProject)).toEqual(otherBefore);
 });

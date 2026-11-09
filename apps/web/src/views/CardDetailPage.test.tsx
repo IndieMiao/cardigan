@@ -29,15 +29,73 @@ afterEach(cleanup);
 function renderCard(
   client: Parameters<typeof fakeClient>[0] = {},
   cardId = "C-1",
+  inDrawer = false,
 ) {
   return render(
     <CardDetailPage
       client={fakeClient(client)}
       projectId="p-1"
       cardId={cardId}
+      inDrawer={inDrawer}
     />,
   );
 }
+
+test.each(
+  (["done", "cancelled"] as const).flatMap((status) =>
+    [false, true].map((inDrawer) => ({ status, inDrawer })),
+  ),
+)(
+  "P2a-5: $status detail links to the replacement card outside the sticky identity (drawer=$inDrawer)",
+  async ({ status, inDrawer }) => {
+    const detail = cardDetail();
+    renderCard(
+      {
+        card: async () => ({
+          ...detail,
+          card: {
+            ...detail.card,
+            status,
+            resolution: "superseded",
+            superseded_by: "C-2",
+            related_cards: ["C-99", "C-2"],
+          },
+        }),
+      },
+      "C-1",
+      inDrawer,
+    );
+    const link = await screen.findByRole("link", { name: "已被 C-2 取代" });
+    expect(link.closest(".card-header")).toBeTruthy();
+    const nav = screen.getByRole("navigation", { name: "卡片区块导航" });
+    expect(nav.querySelector(".card-nav-id")?.textContent).toBe("C-1");
+    expect(nav.querySelector(".card-nav-title")?.textContent).toBe(
+      detail.card.title,
+    );
+    expect(nav.querySelector(".card-nav-title")?.getAttribute("title")).toBe(
+      detail.card.title,
+    );
+    expect(within(nav).queryByText(/已被.*取代/)).toBeNull();
+    expect(link.getAttribute("href")).toBe("#/p/p-1/cards/C-2");
+    expect(screen.queryByText("已被 C-99 取代")).toBeNull();
+  },
+);
+
+test("P2a-5: legacy superseded cards without a replacement do not infer it from related cards", async () => {
+  const detail = cardDetail();
+  renderCard({
+    card: async () => ({
+      ...detail,
+      card: {
+        ...detail.card,
+        resolution: "superseded",
+        related_cards: ["C-99"],
+      },
+    }),
+  });
+  expect(await screen.findByText("已被取代")).toBeTruthy();
+  expect(screen.queryByRole("link", { name: /已被.*取代/ })).toBeNull();
+});
 
 test("shows a loading state while the card is on its way", () => {
   renderCard({ card: () => new Promise(() => undefined) });
