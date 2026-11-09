@@ -19,6 +19,7 @@ import {
   type CompiledAssignmentLaunch,
   compileAssignmentLaunch,
   corePromptFor,
+  type DefaultRoleId,
   defaultRoles,
   firstPrompt,
   type Harness,
@@ -86,14 +87,19 @@ const TOOLS = [
   "submit_delivery",
 ];
 
-function roleFor(harness: Harness, profile: string): AssignmentRoleInput {
+function roleFor(
+  harness: Harness,
+  profile: string,
+  roleId: DefaultRoleId = "coder",
+): AssignmentRoleInput {
   return {
-    role_id: "coder",
+    role_id: roleId,
     harness,
     launch_profile: profile,
-    worktree: "write",
+    worktree:
+      roleId === "pm" ? "none" : roleId === "coder" ? "write" : "readonly",
     allowed_tools: TOOLS,
-    core_prompt: corePromptFor("coder"),
+    core_prompt: corePromptFor(roleId),
   };
 }
 
@@ -101,6 +107,7 @@ function compile(
   harness: Harness,
   profile: string,
   first: string,
+  roleId: DefaultRoleId = "coder",
 ): CompiledAssignmentLaunch {
   return compileAssignmentLaunch({
     assignment: {
@@ -110,7 +117,7 @@ function compile(
       work_item_id: "W-7",
       project_id: "p-demo",
     },
-    role: roleFor(harness, profile),
+    role: roleFor(harness, profile, roleId),
     launch: launchConfig,
     mcp: { url: MCP_URL },
     run_dir: RUN_DIR,
@@ -345,6 +352,66 @@ describe("default role pack", () => {
     "designer",
     "tester",
   ] as const;
+
+  // P2a-4 expectations come from the card, not the production rule arrays.
+  const SHARED_TASK_RULES = [
+    "不新建任务计划文件（例如 `docs/plans/` 下的计划）；任务计划由人或 PM 维护，设计改动只更新卡片要求的正文文档。",
+    "只运行卡片或工作项写明范围的测试；未写明范围时只运行改动所在包的测试。全量测试和端到端测试由合并前的主机检查负责。",
+  ];
+  const CODER_REPAIR_RULE =
+    "收到修复或退回修改（包括 `fix` Run、`merge_changes_requested`、合并冲突）时，先把最新的基线分支合入当前工作分支并解决冲突，再跑测试并交付；交付摘要里写明合入的基线提交 SHA。";
+
+  function expectTaskRules(prompt: string, roleId: DefaultRoleId): void {
+    for (const rule of SHARED_TASK_RULES) {
+      expect(prompt, `${roleId}: ${rule}`).toContain(`- ${rule}\n`);
+    }
+    if (roleId === "coder") {
+      expect(prompt).toContain(`- ${CODER_REPAIR_RULE}\n`);
+    } else {
+      expect(prompt).not.toContain("最新的基线分支");
+      expect(prompt).not.toContain("合入的基线提交 SHA");
+    }
+  }
+
+  test.each(DEFAULT_ROLE_IDS)(
+    "P2a-4: %s carries shared task boundaries and only coder has the repair rule",
+    (roleId) => {
+      expectTaskRules(corePromptFor(roleId), roleId);
+    },
+  );
+
+  describe.each([
+    ["claude-code", "claude-agent"],
+    ["codex", "codex-agent"],
+    ["pi", "pi-agent"],
+  ] as const)("P2a-4: %s launch", (harness, profile) => {
+    test.each(DEFAULT_ROLE_IDS)(
+      "%s loads task rules through its configured Core Prompt",
+      (roleId) => {
+        const compiled = compile(harness, profile, first, roleId);
+        const corePath = `${RUN_DIR}/core.md`;
+        const core = compiled.files.find((file) => file.path === corePath);
+        expectTaskRules(core?.content ?? "", roleId);
+
+        if (harness === "codex") {
+          const config = compiled.files.find(
+            (file) => file.path === `${RUN_DIR}/codex/config.toml`,
+          );
+          expect(config?.content).toContain(
+            `model_instructions_file = "${corePath}"`,
+          );
+        } else {
+          const flag =
+            harness === "claude-code"
+              ? "--append-system-prompt-file"
+              : "--append-system-prompt";
+          const index = compiled.args.indexOf(flag);
+          expect(index).toBeGreaterThanOrEqual(0);
+          expect(compiled.args[index + 1]).toBe(corePath);
+        }
+      },
+    );
+  });
 
   test("every role's Core Prompt carries all of §6.3", () => {
     const titles = {
