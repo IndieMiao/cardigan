@@ -8,6 +8,7 @@
  * only fires when there is something to send.
  */
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -39,6 +40,31 @@ const box = (overrides: Parameters<typeof fakeClient>[0] = {}) =>
       mentions={MENTIONS}
     />,
   );
+
+test("empty comments stay compact until focused, keep drafts expanded, and shrink after clearing and leaving", () => {
+  box();
+  const input = screen.getByLabelText("评论正文") as HTMLTextAreaElement;
+  expect(input.rows).toBe(2);
+  expect(screen.queryByRole("tablist")).toBeNull();
+  expect(screen.queryByRole("button", { name: "发表评论" })).toBeNull();
+  act(() => input.focus());
+  expect(input.rows).toBe(6);
+  expect(screen.getByRole("tab", { name: "预览" })).toBeTruthy();
+  // Moving focus inside the editor must not collapse its controls.
+  act(() => screen.getByRole("tab", { name: "预览" }).focus());
+  expect(input.rows).toBe(6);
+  act(() => input.focus());
+  fireEvent.change(input, { target: { value: "Draft" } });
+  act(() => input.blur());
+  expect(input.rows).toBe(6);
+  fireEvent.change(input, { target: { value: "" } });
+  expect(input.rows).toBe(2);
+  act(() => input.focus());
+  expect(input.rows).toBe(6);
+  act(() => input.blur());
+  expect(input.rows).toBe(2);
+  expect(screen.queryByRole("tablist")).toBeNull();
+});
 
 test("writes Markdown and previews it", () => {
   box();
@@ -96,6 +122,7 @@ test("sending a comment posts it and clears the box", async () => {
       }}
     />,
   );
+  fireEvent.focus(screen.getByLabelText("评论正文"));
   const send = screen.getByRole("button", {
     name: "发表评论",
   }) as HTMLButtonElement;
@@ -109,6 +136,9 @@ test("sending a comment posts it and clears the box", async () => {
   await waitFor(() => expect(reloaded).toBe(1));
   expect(posted).toEqual([{ body: "看过了 @coder", mentions: ["coder"] }]);
   expect(input.value).toBe("");
+  expect(input.rows).toBe(2);
+  expect(screen.queryByRole("tablist")).toBeNull();
+  expect(screen.queryByRole("button", { name: "发表评论" })).toBeNull();
 });
 
 test("pasted images are uploaded as evidence on the new comment", async () => {
@@ -134,6 +164,7 @@ test("pasted images are uploaded as evidence on the new comment", async () => {
   const file = new File(["png-bytes"], "screenshot.png", { type: "image/png" });
   fireEvent.paste(input, { clipboardData: { files: [file] } });
   expect(screen.getByText(/已捕获 1 张图片/u)).toBeTruthy();
+  expect((input as HTMLTextAreaElement).rows).toBe(6);
 
   fireEvent.change(input, { target: { value: "贴一张图" } });
   fireEvent.click(screen.getByRole("button", { name: "发表评论" }));

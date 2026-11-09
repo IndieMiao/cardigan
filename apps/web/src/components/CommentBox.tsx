@@ -1,6 +1,13 @@
 // biome-ignore-all lint/security/noDangerouslySetInnerHtml: the preview is
 // `renderMarkdown` output (html off, filtered links), not raw user HTML.
-import { useMemo, useRef, useState } from "react";
+import {
+  type Ref,
+  useImperativeHandle,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   type CardiganClient,
   describeError,
@@ -24,12 +31,17 @@ export interface MentionOption {
 }
 
 export interface CommentBoxProps {
+  readonly ref?: Ref<CommentBoxHandle>;
   readonly client: CardiganClient;
   readonly projectId: string;
   readonly cardId: string;
   readonly mentions?: readonly MentionOption[];
   /** Called after the comment and its images were accepted. */
   readonly onPosted?: (comment: PostedComment) => void | Promise<void>;
+}
+
+export interface CommentBoxHandle {
+  focus(onFocused: (input: HTMLTextAreaElement) => void): void;
 }
 
 interface PastedImage {
@@ -39,6 +51,7 @@ interface PastedImage {
 }
 
 export function CommentBox({
+  ref,
   client,
   projectId,
   cardId,
@@ -51,7 +64,34 @@ export function CommentBox({
   const [suggesting, setSuggesting] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string>();
+  const [focused, setFocused] = useState(false);
+  const [focusRequest, setFocusRequest] = useState(0);
+  const afterFocus = useRef<((input: HTMLTextAreaElement) => void) | undefined>(
+    undefined,
+  );
   const textarea = useRef<HTMLTextAreaElement>(null);
+  const section = useRef<HTMLElement>(null);
+  const expanded = focused || body.length > 0 || images.length > 0;
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      focus(onFocused) {
+        afterFocus.current = onFocused;
+        setTab("write");
+        setFocused(true);
+        setFocusRequest((request) => request + 1);
+      },
+    }),
+    [],
+  );
+  // Focus and scroll only after the write tab and expanded textarea have laid out.
+  useLayoutEffect(() => {
+    if (!focusRequest || !afterFocus.current || !textarea.current) return;
+    textarea.current.focus({ preventScroll: true });
+    afterFocus.current(textarea.current);
+    afterFocus.current = undefined;
+  }, [focusRequest]);
 
   const preview = useMemo(() => renderMarkdown(body), [body]);
   const canSubmit = body.trim().length > 0 && !submitting;
@@ -87,6 +127,10 @@ export function CommentBox({
       setBody("");
       setImages([]);
       setTab("write");
+      setSuggesting(false);
+      if (section.current?.contains(document.activeElement))
+        (document.activeElement as HTMLElement).blur();
+      setFocused(false);
       await onPosted?.(comment);
     } catch (failure) {
       // The text stays in the box: a failed submit must not lose the comment.
@@ -97,25 +141,38 @@ export function CommentBox({
   }
 
   return (
-    <section className="comment-box" aria-label="写评论">
-      <div className="comment-tabs" role="tablist" aria-label="评论编辑方式">
-        <button
-          type="button"
-          role="tab"
-          aria-selected={tab === "write"}
-          onClick={() => setTab("write")}
-        >
-          编写
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={tab === "preview"}
-          onClick={() => setTab("preview")}
-        >
-          预览
-        </button>
-      </div>
+    <section
+      ref={section}
+      className="comment-box"
+      aria-label="写评论"
+      onFocus={() => setFocused(true)}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) {
+          setFocused(false);
+          if (!body.length && !images.length) setTab("write");
+        }
+      }}
+    >
+      {expanded && (
+        <div className="comment-tabs" role="tablist" aria-label="评论编辑方式">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "write"}
+            onClick={() => setTab("write")}
+          >
+            编写
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "preview"}
+            onClick={() => setTab("preview")}
+          >
+            预览
+          </button>
+        </div>
+      )}
 
       {tab === "write" ? (
         <>
@@ -124,7 +181,7 @@ export function CommentBox({
             className="comment-input"
             aria-label="评论正文"
             placeholder="支持 Markdown；@ 提及角色或 Assignment；可以直接粘贴图片"
-            rows={6}
+            rows={expanded ? 6 : 2}
             value={body}
             onChange={(event) => {
               const value = event.target.value;
@@ -146,7 +203,7 @@ export function CommentBox({
               ]);
             }}
           />
-          {suggesting && mentions.length > 0 && (
+          {expanded && suggesting && mentions.length > 0 && (
             <ul className="mention-list" aria-label="提及建议">
               {mentions.map((mention) => (
                 <li key={mention.value}>
@@ -186,18 +243,20 @@ export function CommentBox({
         </p>
       )}
 
-      <div className="comment-actions">
-        <button
-          type="button"
-          disabled={!canSubmit}
-          onClick={() => void submit()}
-        >
-          {submitting ? "发表中…" : "发表评论"}
-        </button>
-        <span className="hint">
-          以你的身份发表；正文支持 Markdown，编号由服务端识别成链接。
-        </span>
-      </div>
+      {expanded && (
+        <div className="comment-actions">
+          <button
+            type="button"
+            disabled={!canSubmit}
+            onClick={() => void submit()}
+          >
+            {submitting ? "发表中…" : "发表评论"}
+          </button>
+          <span className="hint">
+            以你的身份发表；正文支持 Markdown，编号由服务端识别成链接。
+          </span>
+        </div>
+      )}
     </section>
   );
 }

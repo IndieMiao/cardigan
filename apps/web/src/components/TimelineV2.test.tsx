@@ -257,19 +257,19 @@ test("U6b system rows show the authenticated actor and exact upload thumbnail; p
   );
   const rows = [...document.querySelectorAll(".system-line")];
   expect(rows.map((r) => r.querySelector("strong")?.textContent)).toEqual([
-    "tester",
-    "你",
     "系统",
+    "你",
+    "tester",
   ]);
-  expect(rows[0]?.textContent).toContain("上传了附件");
-  expect(rows[0]?.textContent).toContain("A-14");
-  expect(rows[2]?.textContent).toContain("完成了合并");
-  expect(rows[2]?.parentElement?.querySelector("summary")).toBeNull();
+  expect(rows[2]?.textContent).toContain("上传了附件");
+  expect(rows[2]?.textContent).toContain("A-14");
+  expect(rows[0]?.textContent).toContain("完成了合并");
+  expect(rows[0]?.parentElement?.querySelector("summary")).toBeNull();
   expect(document.querySelectorAll(".system-line img")).toHaveLength(1);
   expect(
     document.querySelector(".system-line img")?.getAttribute("loading"),
   ).toBe("lazy");
-  const trigger = within(rows[0] as HTMLElement).getByRole("button", {
+  const trigger = within(rows[2] as HTMLElement).getByRole("button", {
     name: "预览 F-1",
   });
   fireEvent.click(trigger);

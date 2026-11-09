@@ -29,33 +29,53 @@ afterEach(cleanup);
 function renderCard(
   client: Parameters<typeof fakeClient>[0] = {},
   cardId = "C-1",
+  inDrawer = false,
 ) {
   return render(
     <CardDetailPage
       client={fakeClient(client)}
       projectId="p-1"
       cardId={cardId}
+      inDrawer={inDrawer}
     />,
   );
 }
 
-test.each(["done", "cancelled"] as const)(
-  "P2a-5: %s detail links to the replacement card in the same project",
-  async (status) => {
+test.each(
+  (["done", "cancelled"] as const).flatMap((status) =>
+    [false, true].map((inDrawer) => ({ status, inDrawer })),
+  ),
+)(
+  "P2a-5: $status detail links to the replacement card outside the sticky identity (drawer=$inDrawer)",
+  async ({ status, inDrawer }) => {
     const detail = cardDetail();
-    renderCard({
-      card: async () => ({
-        ...detail,
-        card: {
-          ...detail.card,
-          status,
-          resolution: "superseded",
-          superseded_by: "C-2",
-          related_cards: ["C-99", "C-2"],
-        },
-      }),
-    });
+    renderCard(
+      {
+        card: async () => ({
+          ...detail,
+          card: {
+            ...detail.card,
+            status,
+            resolution: "superseded",
+            superseded_by: "C-2",
+            related_cards: ["C-99", "C-2"],
+          },
+        }),
+      },
+      "C-1",
+      inDrawer,
+    );
     const link = await screen.findByRole("link", { name: "已被 C-2 取代" });
+    expect(link.closest(".card-header")).toBeTruthy();
+    const nav = screen.getByRole("navigation", { name: "卡片区块导航" });
+    expect(nav.querySelector(".card-nav-id")?.textContent).toBe("C-1");
+    expect(nav.querySelector(".card-nav-title")?.textContent).toBe(
+      detail.card.title,
+    );
+    expect(nav.querySelector(".card-nav-title")?.getAttribute("title")).toBe(
+      detail.card.title,
+    );
+    expect(within(nav).queryByText(/已被.*取代/)).toBeNull();
     expect(link.getAttribute("href")).toBe("#/p/p-1/cards/C-2");
     expect(screen.queryByText("已被 C-99 取代")).toBeNull();
   },
@@ -273,12 +293,10 @@ test("timeline entries are typed and carry their attachments", async () => {
   await screen.findByRole("article", { name: "卡片 C-1" });
   const entries = document.querySelectorAll(".timeline-entry");
   expect(entries).toHaveLength(3);
-  expect(entries[0]?.getAttribute("data-timeline-type")).toBe(
-    "decision_request",
-  );
-  expect(entries[0]?.textContent).toContain("请求拍板");
+  expect(entries[0]?.getAttribute("data-timeline-type")).toBe("review");
+  expect(entries[0]?.textContent).toContain("审核");
   expect(entries[1]?.textContent).toContain("评论");
-  expect(entries[2]?.textContent).toContain("审核");
+  expect(entries[2]?.textContent).toContain("请求拍板");
 
   const comment = document.querySelector('[data-timeline-type="comment"]');
   const image = comment?.querySelector("img");
