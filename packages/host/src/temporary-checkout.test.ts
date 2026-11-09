@@ -250,6 +250,101 @@ test("local checkout uses an explicit environment, runs in order, warns, and rem
   await f.clean();
 });
 
+test.skipIf(process.platform !== "linux")(
+  "one persistent OS lock serializes checks from two projects and does not leak its descriptor",
+  async () => {
+    const f = await fixture(),
+      other = join(f.repository, "..", "other"),
+      occupied = join(f.root, "occupied");
+    await exec("git", ["clone", f.repository, other]);
+    const check = {
+      name: "exclusive",
+      run: node(`
+    const fs=require('node:fs');
+    for(const fd of fs.readdirSync('/proc/self/fd')) {
+      let path;try{path=fs.readlinkSync('/proc/self/fd/'+fd)}catch{continue}
+      if(path.endsWith('/merge-check.lock'))process.exit(8);
+    }
+    fs.mkdirSync(${JSON.stringify(occupied)});
+    setTimeout(()=>fs.rmdirSync(${JSON.stringify(occupied)}),200);
+  `),
+    };
+    let acquired = 0;
+    const run = async (project: string) => {
+      const result = await runInTemporaryCheckout({
+        ...f.input,
+        project,
+        serialize: true,
+        checks: [check],
+        onReady: () => {
+          acquired++;
+        },
+      });
+      return result;
+    };
+    const results = await Promise.all([run("project"), run("other")]);
+    expect(results.map((r) => r.status)).toEqual(["passed", "passed"]);
+    expect(acquired).toBe(2);
+    const file = join(f.input.execution.dataDir, "merge-check.lock");
+    expect((await stat(file)).mode & 0o777).toBe(0o600);
+    expect((await stat(file)).size).toBe(0);
+    await f.clean();
+  },
+);
+
+test.skipIf(process.platform !== "linux")(
+  "cancelling a queued lock waiter returns without running its check or waiting for the active holder",
+  async () => {
+    const f = await fixture(),
+      controller = new AbortController();
+    let ready = () => {};
+    const acquired = new Promise<void>((resolve) => {
+      ready = resolve;
+    });
+    const release = join(f.root, "release");
+    let firstDone = false,
+      ran = false;
+    const first = runInTemporaryCheckout({
+      ...f.input,
+      serialize: true,
+      onReady: ready,
+      checks: [
+        {
+          name: "hold",
+          run: node(
+            `const fs=require('node:fs');const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(release)}))clearInterval(timer)},20)`,
+          ),
+        },
+      ],
+    }).then((r) => {
+      firstDone = true;
+      return r;
+    });
+    await acquired;
+    const second = runInTemporaryCheckout({
+      ...f.input,
+      attempt: "attempt-2",
+      serialize: true,
+      signal: controller.signal,
+      onReady: () => {
+        ran = true;
+      },
+      checks: [{ name: "must-not-run", run: "exit 99" }],
+    });
+    const timer = setTimeout(() => controller.abort(), 50);
+    try {
+      expect((await second).status).toBe("interrupted");
+      expect(ran).toBe(false);
+      expect(firstDone).toBe(false);
+    } finally {
+      clearTimeout(timer);
+      await writeFile(release, "release");
+      await first;
+    }
+    await f.clean();
+  },
+);
+
 test("a failed command stops later checks and still removes the worktree", async () => {
   const f = await fixture();
   const result = await runInTemporaryCheckout({
@@ -301,6 +396,8 @@ test.each(["duplicate", "wrong-nonce", "bad-json", "nonce-only-auth"])(
     const {createHmac}=require('node:crypto');
     require('node:readline').createInterface({input:process.stdin}).once('line', line => {
       const p=JSON.parse(line);
+      const ready={type:'ready'};
+      process.stdout.write(JSON.stringify({...ready,auth:createHmac('sha256',p.auth_key).update(JSON.stringify(ready)).digest('hex')})+'\\n');
       if([p.nonce,p.auth_key].some(secret => process.argv.join(' ').includes(secret) || Object.values(process.env).includes(secret))) process.exit(99);
       const event={type:'result', nonce:${fault === "wrong-nonce" ? "'wrong'" : "p.nonce"}, status:'passed', checks:[], cleanup_errors:[]};
       const output=JSON.stringify({...event, auth:createHmac('sha256',${fault === "nonce-only-auth" ? "p.nonce" : "p.auth_key"}).update(JSON.stringify(event)).digest('hex')})+'\\n';
