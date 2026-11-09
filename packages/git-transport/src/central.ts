@@ -229,6 +229,7 @@ export class CentralGitTransport implements GitCentralPort {
       target,
       "+refs/heads/*:refs/remotes/origin/*",
       "+refs/cardigan/deliveries/*:refs/cardigan/deliveries/*",
+      "+refs/cardigan/candidates/*:refs/cardigan/candidates/*",
     ]);
   }
   async fetchRefs(

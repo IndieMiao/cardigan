@@ -4,9 +4,10 @@ import { fail, type HcClient } from "./client.js";
 import { type ExecutionConfig, shellQuote } from "./execution.js";
 
 type AgentConfig = Extract<ExecutionConfig, { mode: "agent-ssh" }>;
-export function agentSshCommand(config: AgentConfig): string {
+export const AGENT_PATH =
+  "/var/lib/cardigan-agent/.local/bin:/usr/local/bin:/usr/bin:/bin";
+function sshArguments(config: AgentConfig): string[] {
   return [
-    "ssh",
     "-F",
     "/dev/null",
     "-T",
@@ -29,11 +30,30 @@ export function agentSshCommand(config: AgentConfig): string {
     ].flatMap((option) => ["-o", option]),
     "--",
     "agent@localhost",
-    "env",
-    "PATH=/var/lib/cardigan-agent/.local/bin:/usr/local/bin:/usr/bin:/bin",
-  ]
+  ];
+}
+export function agentSshCommand(config: AgentConfig): string {
+  return ["ssh", ...sshArguments(config), "env", `PATH=${AGENT_PATH}`]
     .map(shellQuote)
     .join(" ");
+}
+/** A streaming, credential-checked entry; the caller supplies an explicit environment. */
+export async function agentProcessCommand(
+  config: AgentConfig,
+  args: readonly string[],
+) {
+  await checkAgentFiles(config);
+  return {
+    file: "ssh",
+    args: [
+      "-o",
+      "ServerAliveInterval=5",
+      "-o",
+      "ServerAliveCountMax=3",
+      ...sshArguments(config),
+      ["env", "-i", `PATH=${AGENT_PATH}`, ...args].map(shellQuote).join(" "),
+    ],
+  };
 }
 export async function registerAgentMachine(
   client: HcClient,

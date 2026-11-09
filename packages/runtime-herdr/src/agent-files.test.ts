@@ -16,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
   type AgentExecution,
   clearAgentSentinel,
+  prepareAgentCheckout,
   prepareAgentProject,
   scrubAgentLaunch,
   secureDataDirectory,
@@ -47,6 +48,25 @@ describe.skipIf(process.platform !== "linux")("shared launch files", () => {
     await rm(root, { recursive: true, force: true });
   });
   const mode = async (path: string) => (await stat(path)).mode & 0o7777;
+  test("temporary checkout namespaces are protected, exclusive and reject links", async () => {
+    const path = await prepareAgentCheckout(config, "project", "attempt-1");
+    expect(path).toBe(join(config.agentRoot, "checks", "project", "attempt-1"));
+    expect(await mode(path)).toBe(0o2770);
+    expect(await mode(join(config.agentRoot, "checks", "project"))).toBe(
+      0o2750,
+    );
+    await expect(
+      prepareAgentCheckout(config, "project", "attempt-1"),
+    ).rejects.toMatchObject({ code: "EEXIST" });
+    await expect(
+      prepareAgentCheckout(config, "project", "../escape"),
+    ).rejects.toThrow();
+    await symlink(config.dataDir, join(config.agentRoot, "checks", "linked"));
+    await expect(
+      prepareAgentCheckout(config, "linked", "attempt-2"),
+    ).rejects.toThrow();
+    expect(await readdir(config.dataDir)).toEqual([]);
+  });
   test("prepares protected project parents and writable shared leaves, keeping data private", async () => {
     const paths = await prepareAgentProject(config, "project", "A-1");
     expect(paths.runDir).toBe(runDir);
