@@ -1,5 +1,8 @@
 #!/usr/bin/env node
-import { runServer } from "./index.js";
+import { installSqliteWarningFilter } from "@cardigan/host/warnings";
+
+installSqliteWarningFilter();
+const { runServer } = await import("./index.js");
 
 try {
   process.exitCode = await runServer();
