@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import type { TimelineEntryView } from "../api.js";
 import { Time } from "./Foundation.js";
 import { Tooltip } from "./Tooltip.js";
@@ -85,13 +86,16 @@ export function TimelineActor({
 export function TimelineHeader({
   entry,
   action,
+  conclusion,
 }: {
   entry: TimelineEntryView;
   action: string;
+  conclusion?: ReactNode;
 }) {
   return (
     <header className="timeline-head">
       <TimelineActor entry={entry} />
+      {conclusion}
       <p className="timeline-when">
         {action}于 <Time value={entry.created_at} relative />
         {entry.retracted && (
