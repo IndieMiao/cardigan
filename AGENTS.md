@@ -38,7 +38,7 @@
 
 1. 一个计划任务对应一个分支、一个 PR。分支命名：`feat/<milestone>-<short-name>`，或 `fix/...`、`docs/...`。
 2. PR 尽量小，控制在几百行以内。
-3. 测试随代码一起提交；修改 `packages/domain` 必须附带契约测试，覆盖状态机或不变量。
+3. 测试随代码一起提交；修改 `packages/domain` 必须附带契约测试，覆盖状态机或不变量。改了 `packages/domain`（包括它的测试文件）时，除了 vitest 还要运行 `pnpm --filter @cardigan/domain test:types`：`vitest` 和 `tsc -b` 都不检查测试文件的类型，根目录的 `pnpm test` 会先跑这一步，失败时后面的测试全部不执行。
 4. PR 描述必须包含：
    - 对应的计划任务；
    - 改动摘要；
