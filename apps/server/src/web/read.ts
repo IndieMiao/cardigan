@@ -24,6 +24,7 @@ import {
   resolveReferences,
   runAuthorView,
 } from "@cardigan/domain";
+import type { ProjectMergeGate } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
 
@@ -644,14 +645,14 @@ export function cardDetail(
 export function needsYou(
   state: CommandState,
   now: string,
-  mergeGateEnabled = false,
+  mergeGateStatus: ProjectMergeGate["status"] = "disabled",
 ) {
   const result = unwrap(
     listNeedsYou(state, human(state.project_id), { now: () => now }),
   );
   const data = result.data;
   const checks = new Map(
-    mergeGateEnabled
+    mergeGateStatus === "enabled"
       ? cardViews(state).map((card) => [card.id, card.merge_check])
       : [],
   );
@@ -688,7 +689,7 @@ export function needsYou(
       merge_confirmation: decision.merge_confirmation
         ? {
             ...decision.merge_confirmation,
-            ...(mergeGateEnabled
+            ...(mergeGateStatus === "enabled"
               ? {
                   merge_gate_enabled: true,
                   merge_check:
@@ -697,6 +698,9 @@ export function needsYou(
                       ? (check ?? null)
                       : null,
                 }
+              : {}),
+            ...(mergeGateStatus === "invalid"
+              ? { merge_gate_invalid: true }
               : {}),
             deliveries: decision.merge_confirmation.deliveries.map(
               (delivery) => ({

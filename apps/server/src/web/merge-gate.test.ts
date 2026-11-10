@@ -1,4 +1,4 @@
-import { mkdir, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, open, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   type CardId,
@@ -207,21 +207,68 @@ test.each(["queued", "running", "passed", "interrupted"] as const)(
   },
 );
 
-test("disabled/invalid gates refuse rechecks and leave Needs You unchanged", async () => {
+test("disabled gates stay unchanged; invalid gates expose only a safe flag", async () => {
   record("queued");
   record("running");
   record("failed");
   for (const setting of [
     { status: "disabled" },
-    { status: "invalid", reason: "合并闸门配置无效" },
+    { status: "invalid", reason: "private-config-fixture" },
   ] as const) {
     gate = setting;
     const needs = await read("/needs-you");
     expect(needs.body).not.toContain('"merge_check"');
     expect(needs.body).not.toContain('"merge_gate_enabled"');
+    expect(needs.body).not.toContain("private-config-fixture");
+    if (setting.status === "invalid") {
+      expect(needs.json).toMatchObject({
+        decisions: expect.arrayContaining([
+          expect.objectContaining({
+            id: "q(2)",
+            merge_confirmation: expect.objectContaining({
+              merge_gate_invalid: true,
+            }),
+          }),
+        ]),
+      });
+    } else {
+      expect(needs.body).not.toContain('"merge_gate_invalid"');
+    }
     expect((await recheck()).status).toBe(409);
   }
 });
+
+test.each([0, 1])(
+  "log response stays within 8 MiB (overflow: %i byte)",
+  async (overflow) => {
+    record("queued");
+    const limit = 8 * 1024 * 1024;
+    const dir = join(h.dataDir, "merge-gate", "logs", project_id);
+    await mkdir(dir, { recursive: true });
+    const file = await open(join(dir, `${attempt}.log`), "w", 0o600);
+    try {
+      // A sparse fixture tests the boundary without producing check output.
+      await file.truncate(limit + overflow);
+      await file.write("log start", 0);
+      await file.write("omitted middle", Math.floor(limit / 2));
+      await file.write("log end", limit + overflow - 7);
+    } finally {
+      await file.close();
+    }
+    const response = await read(`/merge-checks/${attempt}`);
+    expect(response.status).toBe(200);
+    expect(Buffer.byteLength(response.body)).toBe(limit);
+    expect(response.body.startsWith("log start")).toBe(true);
+    expect(response.body.endsWith("log end")).toBe(true);
+    if (overflow) {
+      expect(response.body).toContain("日志已截断：超过 8 MiB，仅保留首尾内容");
+      expect(response.body).not.toContain("omitted middle");
+    } else {
+      expect(response.body).not.toContain("日志已截断");
+      expect(response.body).toContain("omitted middle");
+    }
+  },
+);
 
 test("logs require a session, are plain text, read only and isolated to the project", async () => {
   record("queued");
