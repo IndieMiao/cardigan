@@ -868,11 +868,33 @@ function routeHumanActionCompleted(input: RouteInput, draft: Draft): void {
   if (action?.status !== "done") return;
   const rule = "6.4/human action completed";
   const summary = `${action.card_id ?? "项目"} ${action.key}: 已完成；${action.result?.text ?? entryOf(input)?.body ?? ""}`;
+  // A verifier without a current target cannot act on this result. Keep the
+  // completion event readable via get_updates and wait for the delivery bell.
+  const hasTarget = (item: WorkItem | undefined) =>
+    item?.kind !== "verify" ||
+    input.snapshot.deliveries.some(
+      (delivery) =>
+        itemOf(input, delivery.work_item_id)?.card_id === item.card_id &&
+        delivery.status !== "superseded" &&
+        (item.target_work_item_id
+          ? delivery.work_item_id === item.target_work_item_id &&
+            delivery.kind !== "card_completion"
+          : delivery.kind === "card_completion" &&
+            delivery.requested_verifiers.includes(item.id)),
+    );
   const to = requesterNotificationRecipient(
     action.requested_by,
     input.snapshot.assignments,
   );
-  if (to)
+  if (
+    to &&
+    (to.kind !== "assignment" ||
+      hasTarget(
+        input.snapshot.work_items.find(
+          (item) => item.assignment_id === to.assignment_id,
+        ),
+      ))
+  )
     note(
       input,
       draft,
@@ -884,17 +906,13 @@ function routeHumanActionCompleted(input: RouteInput, draft: Draft): void {
 
   // Keep the decision-resolved resumption path, including its unowned-item fallback.
   const resumed = payloadStrings(input.event.payload, "resume_work_items");
-  for (const id of resumed)
-    noteAssignment(
-      input,
-      draft,
-      itemOf(input, id as WorkItemId),
-      "human_action",
-      rule,
-      summary,
-    );
+  for (const id of resumed) {
+    const item = itemOf(input, id as WorkItemId);
+    if (!hasTarget(item)) continue;
+    noteAssignment(input, draft, item, "human_action", rule, summary);
+  }
   for (const item of input.snapshot.work_items) {
-    if (item.card_id !== action.card_id) continue;
+    if (item.card_id !== action.card_id || !hasTarget(item)) continue;
     const waiting =
       ["blocked", "waiting_decision", "delivered"].includes(item.status) ||
       (item.kind === "verify" &&

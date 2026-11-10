@@ -1,5 +1,7 @@
 import { main } from "@cardigan/cli";
 import {
+  type Assignment,
+  acknowledgeRun,
   completeHumanAction,
   dispatchRun,
   finishRun,
@@ -7,6 +9,7 @@ import {
   releaseAssignment,
   requestHumanAction,
 } from "@cardigan/domain";
+import { reviewTargetSha } from "@cardigan/host";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { m3Fixture } from "../test-support/m3-acceptance.js";
 import { Dispatcher } from "./dispatch.js";
@@ -67,11 +70,32 @@ const cli = (args: string[], output: string[] = []) =>
     stderr: (line) => output.push(line),
   });
 
-test.each(["CLI", "Workbench"])(
-  "%s completion reaches the requester and waiting reviewers through one persisted bell per recipient",
-  async (entry) => {
+test.each([
+  ["CLI", "none"],
+  ["Workbench", "none"],
+  ["CLI", "code"],
+  ["Workbench", "code"],
+  ["CLI", "card_completion"],
+  ["Workbench", "card_completion"],
+])(
+  "%s completion only wakes reviewers with a current target (delivery=%s)",
+  async (entry, target) => {
     const original = f.start(f.coder);
-    const action = requestAction(true);
+    if (target !== "none") {
+      const code = await f.delivery();
+      if (target === "card_completion") {
+        f.start(f.reviewer);
+        f.review(code.data.id);
+        f.finish(f.reviewer);
+        await f.delivery("card_completion");
+      }
+    }
+    const recipients = [
+      f.coder,
+      ...(target === "code" ? [f.reviewer] : []),
+      ...(target === "card_completion" ? [f.pm] : []),
+    ];
+    const action = requestAction(target === "none");
     f.apply(
       (s, a, p) =>
         finishRun(
@@ -79,13 +103,25 @@ test.each(["CLI", "Workbench"])(
           a,
           {
             run_id: original.id,
-            outcome: "blocked",
+            outcome: target === "none" ? "blocked" : "completed",
             summary: "Waiting for copy",
           },
           p,
         ),
       f.actor(f.coder),
     );
+    // Isolate the completion notification from the earlier delivery/review bells.
+    const previousSeq = f.store.getUpdates({
+      project_id: f.id,
+      card_id: f.card.id,
+    }).latest_seq;
+    for (const a of [f.coder, f.reviewer, f.pm])
+      f.store.ackEvents({
+        project_id: f.id,
+        assignment_id: a.id,
+        card_id: f.card.id,
+        up_to_seq: previousSeq,
+      });
     if (entry === "CLI") {
       const output: string[] = [];
       expect(
@@ -124,7 +160,7 @@ test.each(["CLI", "Workbench"])(
       .runs.find(
         (r) => r.assignment_id === f.coder.id && r.status === "queued",
       );
-    expect(queued?.trigger_event_id).toBe(event.id);
+    if (target === "none") expect(queued?.trigger_event_id).toBe(event.id);
     const wake = vi.fn(async () => ({
       ok: true as const,
       value: { sent: true },
@@ -145,6 +181,18 @@ test.each(["CLI", "Workbench"])(
       },
       human_entry: async () => ({ ok: true, value: "fixture" }),
     };
+    const prepareReview = vi.fn((assignment: Assignment) => {
+      if (assignment.id === f.coder.id) return;
+      // Use the real readonly-start precondition: an empty target would fail
+      // before launch/wake and produce a bell_delivery_failed regression.
+      expect(
+        reviewTargetSha(
+          f.store,
+          f.id,
+          f.state().work_items.find((w) => w.id === assignment.work_item_id),
+        ),
+      ).toBe("a".repeat(40));
+    });
     const dispatcher = new Dispatcher({
       store: f.store,
       runtime,
@@ -153,7 +201,9 @@ test.each(["CLI", "Workbench"])(
         model: "test-model",
         agent_cli_version: "test-cli",
       }),
+      beforeWake: async ({ assignment }) => prepareReview(assignment),
       startRun: async ({ run, assignment }) => {
+        prepareReview(assignment);
         f.apply((s, a, p) =>
           dispatchRun(
             s,
@@ -180,23 +230,31 @@ test.each(["CLI", "Workbench"])(
         .filter((n) => n.event_id === event.id);
     expect(notes().map((n) => n.recipient)).toEqual(
       expect.arrayContaining(
-        [f.coder, f.reviewer, f.pm].map((a) => ({
+        recipients.map((a) => ({
           kind: "assignment",
           assignment_id: a.id,
         })),
       ),
     );
-    expect(notes()).toHaveLength(3);
+    expect(notes()).toHaveLength(recipients.length);
     expect(
       notes().every((n) => n.status === "belled" && n.attempts === 1),
     ).toBe(true);
+    if (queued)
+      expect(
+        notes().find((n) => n.recipient.assignment_id === f.coder.id)?.run_id,
+      ).toBe(queued.id);
     expect(
-      notes().find(
-        (n) =>
-          n.recipient.kind === "assignment" &&
-          n.recipient.assignment_id === f.coder.id,
-      )?.run_id,
-    ).toBe(queued?.id);
+      f
+        .state()
+        .runs.filter((r) => r.trigger_event_id === event.id)
+        .map((r) => r.assignment_id)
+        .sort(),
+    ).toEqual(recipients.map((a) => a.id).sort());
+    expect(prepareReview).toHaveBeenCalledTimes(recipients.length);
+    expect(
+      f.state().events.some((e) => e.type === "bell_delivery_failed"),
+    ).toBe(false);
     expect(wake).toHaveBeenCalledOnce();
     expect(JSON.stringify(wake.mock.calls)).not.toContain(resultText);
     const updates = f.store.getUpdates({
@@ -210,7 +268,7 @@ test.each(["CLI", "Workbench"])(
         body: resultText,
       }),
     );
-    for (const a of [f.coder, f.reviewer, f.pm])
+    for (const a of recipients)
       f.store.ackEvents({
         project_id: f.id,
         assignment_id: a.id,
@@ -219,6 +277,25 @@ test.each(["CLI", "Workbench"])(
       });
     await dispatcher.tick();
     expect(notes().every((n) => n.status === "acked")).toBe(true);
+    if (target === "none") {
+      const resumed = f.state().runs.find((r) => r.id === queued?.id);
+      if (!resumed) throw new Error("Missing resumed Run");
+      f.apply(
+        (s, a, p) => acknowledgeRun(s, a, { run_id: resumed.id }, p),
+        f.actor(f.coder),
+      );
+      const delivered = await f.delivery();
+      f.finish(f.coder);
+      await dispatcher.tick();
+      const reviewRuns = f
+        .state()
+        .runs.filter((r) => r.assignment_id === f.reviewer.id);
+      expect(reviewRuns).toHaveLength(1);
+      expect(reviewRuns[0]?.trigger_event_id).toBe(
+        delivered.events.find((e) => e.type === "delivery_submitted")?.id,
+      );
+      expect(reviewRuns[0]?.status).toBe("dispatched");
+    }
   },
 );
 

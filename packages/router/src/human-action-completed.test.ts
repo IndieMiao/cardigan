@@ -1,6 +1,7 @@
 import { expect, test } from "vitest";
 import {
   assignment,
+  delivery,
   event,
   humanAction,
   snapshot,
@@ -23,16 +24,23 @@ const completed = event("human_action_completed", {
   human_action_id: action.id,
   resume_work_items: ["W-1"],
 });
+const code = delivery("D-1");
+const completion = delivery("D-2", {
+  kind: "card_completion",
+  requested_verifiers: ["W-3"],
+});
 
 test("completion notifies its requester, resumed owners and waiting verifiers once with the result and card", () => {
   const result = routeEvent({
     event: completed,
     snapshot: snapshot({
       human_actions: [action],
+      deliveries: [code, completion],
       work_items: [
         workItem("W-1", { assignment_id: "A-1" }),
         workItem("W-2", {
           kind: "verify",
+          target_work_item_id: "W-1",
           status: "in_progress",
           assignment_id: "A-2",
         }),
@@ -88,13 +96,88 @@ test.each([
     event: completed,
     snapshot: snapshot({
       human_actions: [action],
-      work_items: [workItem("W-2", { kind, status, assignment_id: "A-2" })],
+      deliveries: [code],
+      work_items: [
+        workItem("W-1"),
+        workItem("W-2", {
+          kind,
+          status,
+          assignment_id: "A-2",
+          target_work_item_id: "W-1",
+        }),
+      ],
     }),
   });
   expect(
     result.notifications.some((n) => n.recipient.assignment_id === "A-2"),
   ).toBe(notified);
 });
+
+test.each(["waiter", "requester", "resumed"])(
+  "a verifier notified as %s waits for its own current delivery",
+  (reason) => {
+    for (const kind of ["code", "card_completion"] as const) {
+      const target = delivery("D-3", {
+        kind,
+        requested_verifiers: ["W-2"],
+      });
+      const scenarios = [
+        { deliveries: [], notified: false },
+        { deliveries: [{ ...target, status: "superseded" }], notified: false },
+        { deliveries: [{ ...target, work_item_id: "W-9" }], notified: false },
+        {
+          deliveries: [
+            { ...target, work_item_id: "W-9", requested_verifiers: ["W-9"] },
+          ],
+          notified: false,
+        },
+        {
+          deliveries: [
+            { ...target, kind: kind === "code" ? "card_completion" : "code" },
+          ],
+          notified: false,
+        },
+        { deliveries: [target], notified: true },
+      ];
+      for (const { deliveries, notified } of scenarios) {
+        const result = routeEvent({
+          event: event("human_action_completed", {
+            human_action_id: action.id,
+            resume_work_items: reason === "resumed" ? ["W-2"] : [],
+          }),
+          snapshot: snapshot({
+            human_actions: [
+              {
+                ...action,
+                requested_by:
+                  reason === "requester"
+                    ? "assignment:A-2"
+                    : action.requested_by,
+              },
+            ],
+            work_items: [
+              workItem("W-1"),
+              workItem("W-9", { card_id: "C-2" }),
+              workItem("W-2", {
+                kind: "verify",
+                status: "todo",
+                assignment_id: "A-2",
+                ...(kind === "code" ? { target_work_item_id: "W-1" } : {}),
+              }),
+            ],
+            deliveries,
+          }),
+        });
+        expect(
+          result.notifications.filter(
+            (n) => n.recipient.assignment_id === "A-2",
+          ),
+          `${reason}/${kind}/${JSON.stringify(deliveries)}`,
+        ).toHaveLength(notified ? 1 : 0);
+      }
+    }
+  },
+);
 
 test.each(["suspended", "released"])(
   "inactive requester (%s) falls back to Ops or Needs You; inactive waiters stay silent",
