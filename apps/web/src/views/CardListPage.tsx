@@ -212,7 +212,7 @@ export function CardListPage({
     load,
     revision,
   );
-  const boardLanes = useBoardLanes(client, projectId);
+  const boardLanes = useBoardLanes(client, projectId, revision);
   useEffect(() => {
     writeCardDisplay(display);
   }, [display]);
@@ -304,6 +304,12 @@ export function CardListPage({
           error={boardLanes.error}
           retry={boardLanes.retry}
           retryLabel="重新保存"
+        />
+      )}
+      {view === "board" && boardLanes.readError && (
+        <RequestFeedback
+          error={boardLanes.readError}
+          retry={boardLanes.reload}
         />
       )}
       <FilterBar

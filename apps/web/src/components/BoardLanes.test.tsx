@@ -1,9 +1,11 @@
 // @vitest-environment jsdom
 /** C-64: lanes fold and unfold by hand; the human's setting beats the empty-lane default. */
 import {
+  act,
   cleanup,
   fireEvent,
   render,
+  renderHook,
   screen,
   waitFor,
   within,
@@ -13,6 +15,7 @@ import { afterEach, expect, test, vi } from "vitest";
 import type { CardListItem } from "../api.js";
 import { DEFAULT_CARD_DISPLAY } from "../card-display.js";
 import { card, fakeClient } from "../testing/fixtures.js";
+import { useBoardLanes } from "../useBoardLanes.js";
 import { CardListPage } from "../views/CardListPage.js";
 import { Board, type BoardLanes, laneCollapsed } from "./Board.js";
 
@@ -199,4 +202,125 @@ test("writes are sent in click order", async () => {
   await waitFor(() =>
     expect(order).toEqual(["in_progress:true", "in_progress:false"]),
   );
+});
+
+function deferred() {
+  let resolve: () => void = () => {};
+  let reject: (error: Error) => void = () => {};
+  const promise = new Promise<void>((ok, fail) => {
+    resolve = ok;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
+test("V-205: a stale failure on a lane cannot undo a later successful click", async () => {
+  const writes = [deferred(), deferred(), deferred()];
+  let saved = false;
+  let call = 0;
+  const client = fakeClient({
+    preferences: async () => ({
+      auto_merge_after_minutes: null,
+      merge_gate_enabled: false,
+      board_collapsed_lanes: { in_progress: false },
+    }),
+    setBoardLane: async (_project, _lane, collapsed) => {
+      const write = writes[call++];
+      if (!write) throw new Error("unexpected write");
+      await write.promise;
+      saved = collapsed;
+    },
+  });
+  const hook = renderHook(() => useBoardLanes(client, "p-1"));
+  await waitFor(() => expect(hook.result.current.ready).toBe(true));
+  act(() => hook.result.current.setLane("in_progress", true));
+  act(() => hook.result.current.setLane("in_progress", false));
+  act(() => hook.result.current.setLane("in_progress", true));
+  expect(hook.result.current.lanes.in_progress).toBe(true);
+  await act(async () => writes[0]?.reject(new Error("first request failed")));
+  await act(async () => writes[1]?.resolve());
+  await act(async () => writes[2]?.resolve());
+  await waitFor(() => expect(call).toBe(3));
+  expect(saved).toBe(true);
+  expect(hook.result.current.lanes.in_progress).toBe(true);
+  expect(hook.result.current.error).toBeUndefined();
+  expect(hook.result.current.retry).toBeUndefined();
+});
+
+test("V-205: when the newest click fails the lane falls back to the last value the server accepted", async () => {
+  const writes = [deferred(), deferred()];
+  let call = 0;
+  const client = fakeClient({
+    preferences: async () => ({
+      auto_merge_after_minutes: null,
+      merge_gate_enabled: false,
+    }),
+    setBoardLane: async () => {
+      const write = writes[call++];
+      if (!write) throw new Error("unexpected write");
+      await write.promise;
+    },
+  });
+  const hook = renderHook(() => useBoardLanes(client, "p-1"));
+  await waitFor(() => expect(hook.result.current.ready).toBe(true));
+  act(() => hook.result.current.setLane("in_progress", true));
+  act(() => hook.result.current.setLane("in_progress", false));
+  await act(async () => writes[0]?.resolve());
+  await act(async () => writes[1]?.reject(new Error("offline")));
+  await waitFor(() =>
+    expect(hook.result.current.error).toBe(
+      "进行中列的折叠设置没有保存：offline",
+    ),
+  );
+  // The server holds the first click, so that is what the lane shows.
+  expect(hook.result.current.lanes.in_progress).toBe(true);
+  // A new click on the lane clears its stale error.
+  act(() => hook.result.current.setLane("in_progress", true));
+  expect(hook.result.current.error).toBeUndefined();
+});
+
+test("V-205: a failed preference read is reported with a retry that restores the saved lanes", async () => {
+  window.location.hash = "#/p/p-1/cards?view=board";
+  let fail = true;
+  const client = fakeClient({
+    cards: async () => page(many),
+    preferences: async () => {
+      if (fail) throw new Error("read failed");
+      return {
+        auto_merge_after_minutes: null,
+        merge_gate_enabled: false,
+        board_collapsed_lanes: { in_progress: true },
+      };
+    },
+  });
+  render(<CardListPage client={client} projectId="p-1" view="board" />);
+  const alert = await screen.findByRole("alert");
+  expect(alert.textContent).toContain("看板折叠设置读取失败，暂按默认显示");
+  expect(screen.getByRole("button", { name: "折叠进行中列" })).toBeTruthy();
+  fail = false;
+  fireEvent.click(within(alert).getByRole("button", { name: "重试" }));
+  await screen.findByRole("button", { name: "展开进行中列" });
+  await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+});
+
+test("V-205: a card refresh re-reads the saved lanes", async () => {
+  window.location.hash = "#/p/p-1/cards?view=board";
+  let lanes: Record<string, boolean> = {};
+  const client = fakeClient({
+    cards: async () => page(many),
+    preferences: async () => ({
+      auto_merge_after_minutes: null,
+      merge_gate_enabled: false,
+      board_collapsed_lanes: lanes,
+    }),
+  });
+  const view = render(
+    <CardListPage client={client} projectId="p-1" view="board" />,
+  );
+  await screen.findByRole("button", { name: "折叠进行中列" });
+  lanes = { in_progress: true };
+  view.rerender(
+    <CardListPage client={client} projectId="p-1" view="board" revision={1} />,
+  );
+  await screen.findByRole("button", { name: "展开进行中列" });
 });
