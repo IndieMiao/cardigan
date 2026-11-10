@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { link, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { link, mkdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { type AttachmentStore, prepareAttachment } from "@cardigan/domain";
 import { ToolError } from "./errors.js";
@@ -104,12 +104,30 @@ export function fileAttachmentStore(
       const temporary = join(directory, `.${randomUUID()}.tmp`);
       try {
         await writeFile(temporary, content, { flag: "wx", mode: 0o600 });
-        try {
-          // Publish a complete file atomically without overwriting another upload.
-          await link(temporary, target);
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-          if (!(await get(digest))) throw new Error("Attachment disappeared");
+        // Publish a complete file atomically without overwriting another upload.
+        // Two retries cover a blob the attachment sweep removes in between.
+        for (let attempt = 0; ; attempt++) {
+          try {
+            await link(temporary, target);
+            break;
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+            if (!(await get(digest))) throw new Error("Attachment disappeared");
+            // Reusing an existing blob refreshes its modification time, so the
+            // sweep's 24 hour grace period covers the record this upload is
+            // about to write (§9.3). Without it an old rejected blob could be
+            // deleted right after being reused.
+            try {
+              const now = new Date();
+              await utimes(target, now, now);
+              break;
+            } catch (touched) {
+              if ((touched as NodeJS.ErrnoException).code !== "ENOENT")
+                throw touched;
+              if (attempt >= 1) throw new Error("Attachment disappeared");
+              // The blob vanished between the check and the touch: publish again.
+            }
+          }
         }
       } finally {
         await rm(temporary, { force: true });
