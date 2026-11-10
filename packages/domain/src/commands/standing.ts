@@ -11,6 +11,7 @@ import {
   ensure,
   unwrap,
 } from "./core.js";
+import { handoffReviewLimitsWithoutOps } from "./review-limit.js";
 
 function standing(d: CommandDraft, id: AssignmentId) {
   ensure(
@@ -35,7 +36,10 @@ export function pauseStandingAssignment(
 ): Result<CommandEffect<{ assignment: Assignment; aborted: boolean }>> {
   return command(state, actor, "pause_standing_assignment", ports, (d) => {
     const a = standing(d, p.assignment_id);
-    if (a.status === "suspended") return { assignment: a, aborted: false };
+    if (a.status === "suspended") {
+      handoffReviewLimitsWithoutOps(d, a);
+      return { assignment: a, aborted: false };
+    }
     const status = unwrap(transition("assignment", a.status, "suspend"));
     const runs = d
       .list("runs")
@@ -65,6 +69,7 @@ export function pauseStandingAssignment(
       assignment_id: a.id,
       cancelled_run_ids: runs.map((r) => r.id),
     });
+    handoffReviewLimitsWithoutOps(d, next);
     return { assignment: next, aborted: runs.length > 0 };
   });
 }

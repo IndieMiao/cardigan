@@ -11,6 +11,7 @@ import {
   type Card,
   type Decision,
   pauseStandingAssignment,
+  releaseAssignment,
   requestDecision,
   requestHumanAction,
   requestWorktreeCleanup,
@@ -1002,6 +1003,66 @@ async function reviewLimit(delegated = false) {
   if (!q) throw new Error("Missing review-limit decision");
   return q;
 }
+
+test.each(["pause", "release"] as const)(
+  "Needs You can resolve a delegated limit after the last PM Ops leaves via %s",
+  async (operation) => {
+    const q = await reviewLimit(true);
+    const ops = s
+      .state()
+      .assignments.find(
+        (a) => a.scope === "standing" && a.standing_mode === "ops",
+      );
+    if (!ops) throw new Error("Missing PM Ops");
+    if (operation === "pause")
+      s.command((state, actor, ports) =>
+        pauseStandingAssignment(state, actor, { assignment_id: ops.id }, ports),
+      );
+    else
+      s.command((state, actor, ports) =>
+        releaseAssignment(state, actor, { assignment_id: ops.id }, ports),
+      );
+    const state = s.state();
+    const event = state.events.findLast(
+      (e) => e.type === "decision_requested" && e.payload.decision_id === q.id,
+    );
+    if (!event) throw new Error("Missing handoff event");
+    expect(
+      routeEvent({ event, snapshot: state }).notifications.map(
+        (n) => n.recipient.kind,
+      ),
+    ).toEqual(["needs_you", "pm_office"]);
+    const response = await fetch(web.url + path("/needs-you"), {
+      headers: { cookie },
+    });
+    expect(await response.json()).toMatchObject({
+      decisions: [
+        expect.objectContaining({ id: q.id, decider: "human", status: "open" }),
+      ],
+    });
+    expect(
+      (
+        await request(resolvePath(q), {
+          option: "raise_limit",
+          raw_quote: "确认继续",
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      s
+        .state()
+        .work_items.find((w) => w.id === s.primary.verifier.work_item_id),
+    ).toMatchObject({ status: "ready", max_review_rounds: 2 });
+    expect(
+      s
+        .state()
+        .runs.filter(
+          (r) =>
+            r.assignment_id === s.primary.verifier.id && r.status === "queued",
+        ),
+    ).toHaveLength(1);
+  },
+);
 
 test.each([false, true])(
   "PM Ops handles review limits through MCP and routes only human escalations to Needs You (escalate=%s)",

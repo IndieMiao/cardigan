@@ -3,14 +3,16 @@ import {
   type Actor,
   type Assignment,
   listNeedsYou,
+  pauseStandingAssignment,
   recordDecision,
+  releaseAssignment,
   requestHumanAction,
   standingTools,
   submitReview,
   updateWorkItem,
 } from "../index.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
-import { assignment, human, role, value } from "./test-fixtures.js";
+import { assignment, human, id, role, value } from "./test-fixtures.js";
 
 async function limited(
   mode: "ops" | "office" = "ops",
@@ -74,8 +76,116 @@ async function limited(
       },
       f.io,
     );
-  return { f, actor, decision, work, resolve };
+  return { f, ops, actor, decision, work, resolve };
 }
+
+test.each([
+  ["pause", "open"],
+  ["pause", "provisional"],
+  ["release", "open"],
+  ["release", "provisional"],
+] as const)(
+  "losing the last PM Ops via %s hands its %s limit to a human who can resume review",
+  async (operation, status) => {
+    const { f, ops, decision, work, resolve } = await limited();
+    if (status === "provisional") f.commit(resolve("pause"));
+    const deactivate = () => {
+      if (operation === "pause")
+        f.commit(
+          pauseStandingAssignment(
+            f.state,
+            human,
+            { assignment_id: ops.id },
+            f.io,
+          ),
+        );
+      else
+        f.commit(
+          releaseAssignment(f.state, human, { assignment_id: ops.id }, f.io),
+        );
+    };
+    deactivate();
+    expect(value(listNeedsYou(f.state, human)).data.decisions).toEqual([
+      expect.objectContaining({
+        id: decision.id,
+        decider: "human",
+        status,
+        context: expect.stringContaining("项目已无活跃后台"),
+      }),
+    ]);
+    expect(f.state.events.at(-1)).toMatchObject({
+      type: "decision_requested",
+      actor: human,
+      payload: {
+        decision_id: decision.id,
+        previous_decider: "role:pm",
+        assignment_id: ops.id,
+      },
+    });
+    expect(f.state.work_items.find((w) => w.id === work.id)).toMatchObject({
+      status: "waiting_decision",
+      max_review_rounds: 1,
+    });
+    expect(resolve("raise_limit").ok).toBe(false);
+    const before = f.state;
+    deactivate();
+    expect(f.state).toEqual(before);
+    f.commit(
+      updateWorkItem(
+        f.state,
+        human,
+        { work_item_id: work.id, max_review_rounds: 2 },
+        f.io,
+      ),
+    );
+    f.commit(
+      recordDecision(
+        f.state,
+        human,
+        {
+          decision_id: decision.id,
+          option: "raise_limit",
+          rationale: "确认继续审核",
+          raw_quote: "确认继续审核",
+        },
+        f.io,
+      ),
+    );
+    expect(f.state.work_items.find((w) => w.id === work.id)).toMatchObject({
+      status: "ready",
+      max_review_rounds: 2,
+    });
+    expect(f.state.runs.filter((r) => r.status === "queued")).toHaveLength(1);
+  },
+);
+
+test("another active PM Ops keeps delegated limits off Needs You until the last one leaves", async () => {
+  const { f, ops, decision } = await limited();
+  const second: Assignment = { ...ops, id: id("assignment", 5) };
+  f.commit({
+    ok: true,
+    value: {
+      data: second,
+      changes: [{ collection: "assignments", entity: second }],
+      events: [],
+      timeline: [],
+      token_requests: [],
+    },
+  });
+  f.commit(
+    pauseStandingAssignment(f.state, human, { assignment_id: ops.id }, f.io),
+  );
+  expect(f.state.decisions.find((q) => q.id === decision.id)?.decider).toBe(
+    "role:pm",
+  );
+  expect(value(listNeedsYou(f.state, human)).data.decisions).toEqual([]);
+  f.commit(
+    releaseAssignment(f.state, human, { assignment_id: second.id }, f.io),
+  );
+  expect(value(listNeedsYou(f.state, human)).data.decisions).toEqual([
+    expect.objectContaining({ id: decision.id }),
+  ]);
+});
 
 test.each([false, true])(
   "PM Ops raises a delegated limit atomically and resumes once (paused=%s)",

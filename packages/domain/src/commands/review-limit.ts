@@ -1,7 +1,59 @@
-import type { Decision, WorkItem } from "../entities.js";
+import type { Assignment, Decision, WorkItem } from "../entities.js";
 import type { CommandDraft } from "./core.js";
 import { endRun } from "./end-run.js";
 import { currentReviewTarget } from "./review-round.js";
+
+function hasActivePmOps(d: CommandDraft) {
+  return d
+    .list("assignments")
+    .some(
+      (a) =>
+        a.status === "active" &&
+        a.role_id === "pm" &&
+        a.scope === "standing" &&
+        a.standing_mode === "ops",
+    );
+}
+
+/** Reassign pending process decisions in the same transaction as the last Ops leaves. */
+export function handoffReviewLimitsWithoutOps(
+  d: CommandDraft,
+  assignment: Assignment,
+) {
+  if (
+    assignment.scope !== "standing" ||
+    assignment.role_id !== "pm" ||
+    assignment.standing_mode !== "ops" ||
+    hasActivePmOps(d)
+  )
+    return;
+  const reason = `后台项目经理 ${assignment.id} 已${assignment.status === "suspended" ? "暂停" : "释放"}，项目已无活跃后台，审核上限拍板转交给你。`;
+  for (const q of d.list("decisions")) {
+    if (
+      q.trigger !== "review_limit" ||
+      q.decider !== "role:pm" ||
+      !["open", "provisional"].includes(q.status)
+    )
+      continue;
+    d.put("decisions", {
+      ...q,
+      decider: "human",
+      context: `${q.context}\n\n${reason}`,
+    });
+    d.emit(
+      "decision_requested",
+      q.card_id,
+      {
+        decision_id: q.id,
+        affected_work_items: [...q.affected_work_items],
+        previous_decider: q.decider,
+        assignment_id: assignment.id,
+        reason,
+      },
+      { type: "decision_request", decision_id: q.id, body: reason },
+    );
+  }
+}
 
 export function pendingReviewLimit(d: CommandDraft, item: WorkItem) {
   return d
@@ -37,15 +89,6 @@ export function requestReviewLimit(d: CommandDraft, item: WorkItem) {
       ? "上一轮仍有必须修复的问题，建议暂停并先确认后续处理方向"
       : "上一轮没有必须修复的问题，建议增加一轮审核额度以继续确认交付";
   const id = existing?.id ?? d.ids.next(d.state.project_id, "decision");
-  const hasOps = d
-    .list("assignments")
-    .some(
-      (a) =>
-        a.status === "active" &&
-        a.role_id === "pm" &&
-        a.scope === "standing" &&
-        a.standing_mode === "ops",
-    );
   const decision: Decision = existing ?? {
     id,
     key: id,
@@ -72,7 +115,7 @@ export function requestReviewLimit(d: CommandDraft, item: WorkItem) {
     affected_cards: [item.card_id],
     affected_work_items: [item.id],
     blocking: true,
-    decider: hasOps ? "role:pm" : "human",
+    decider: hasActivePmOps(d) ? "role:pm" : "human",
     doc_refs: [],
     status: "open",
   };
