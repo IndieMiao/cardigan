@@ -8,11 +8,14 @@ import {
   completeHumanAction,
   type DomainError,
   issueInstruction,
+  latestMergeCheck,
   parseId,
   parseTimelineEntryId,
   postComment,
+  prepareMergePlan,
   type ReadableIdKind,
   type Result,
+  recheckMerge,
   recordDecision,
   setProjectPreferences,
   supersedeCard,
@@ -20,6 +23,7 @@ import {
   updateWorkItem,
   uploadAttachment,
 } from "@cardigan/domain";
+import type { ProjectMergeGate } from "@cardigan/host";
 import {
   loadCommandState,
   MAX_ATTACHMENT_BASE64,
@@ -140,6 +144,7 @@ export interface WriteContext {
   readonly project_id: string;
   readonly clock: Clock;
   readonly dataDir: string;
+  readonly mergeGate?: ProjectMergeGate | undefined;
   /** Recheck the session after body/file IO and inside the command transaction. */
   readonly authorize: () => unknown;
 }
@@ -212,7 +217,7 @@ function cardResult<T>(result: Result<T>, operation: string): Result<T> {
   return { ok: false, error: { ...result.error, message } };
 }
 const routes =
-  /^\/(cards|decisions|human-actions)\/([^/]+)\/(comments|instructions|attachments|resolve|complete|update|cancel|supersede)$/u;
+  /^\/(cards|decisions|human-actions)\/([^/]+)\/(comments|instructions|attachments|resolve|complete|update|cancel|supersede|recheck-merge)$/u;
 /** Returns false for read routes, leaving M5.1's handlers and method checks intact. */
 export async function serveWrite(
   c: WriteContext,
@@ -277,6 +282,7 @@ export async function serveWrite(
           "update",
           "cancel",
           "supersede",
+          "recheck-merge",
         ]
       : group === "decisions"
         ? ["comments", "resolve"]
@@ -324,7 +330,58 @@ export async function serveWrite(
   let output: unknown;
   if (group === "cards") {
     const card_id = parsed(id("card"), key);
-    if (operation === "update") {
+    if (operation === "recheck-merge") {
+      const input = parsed(
+        z.object({ completion_id: id("delivery") }).strict(),
+        body,
+      );
+      if (c.mergeGate?.status !== "enabled")
+        throw new HttpRejection(
+          409,
+          "illegal_transition",
+          c.mergeGate?.status === "invalid"
+            ? c.mergeGate.reason
+            : "该项目未启用合并闸门，不能重新检查。",
+        );
+      output = run(context, (s, a, ports) => {
+        const plan = prepareMergePlan(s, card_id);
+        if (!plan.ok)
+          throw new HttpRejection(
+            409,
+            "illegal_transition",
+            "暂时无法重新检查：请确认卡片仍待合并、当前完成申请已通过审核，且没有待处理的阻塞事项。",
+          );
+        if (plan.value.completion_id !== input.completion_id)
+          throw new HttpRejection(
+            409,
+            "illegal_transition",
+            "完成申请已更新，请刷新后重新检查。",
+          );
+        const latest = latestMergeCheck(
+          s.events,
+          card_id,
+          plan.value.completion_id,
+        );
+        if (!latest || !["failed", "timed_out"].includes(latest.status))
+          throw new HttpRejection(
+            409,
+            "illegal_transition",
+            "当前完成申请没有失败或超时的检查结果，不能重新检查。",
+          );
+        return recheckMerge(
+          {
+            ...s,
+            project_settings: {
+              ...s.project_settings,
+              merge_gate_enabled: true,
+            },
+          },
+          a,
+          { card_id },
+          ports,
+        );
+      });
+    } else if (operation === "update") {
       const p = defined(
         parsed(
           cardUpdate,

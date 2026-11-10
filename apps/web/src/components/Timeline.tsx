@@ -9,6 +9,7 @@ import { statusLabel } from "../status.js";
 import { AttachmentCaption, attachmentName } from "./AttachmentCaption.js";
 import { AttachmentPreview, isBitmap } from "./AttachmentPreview.js";
 import { EmptyState, LongContent, StatusTag, Time } from "./Foundation.js";
+import { MergeCheck } from "./MergeCheck.js";
 import { TimelineContent } from "./TimelineContent.js";
 import {
   TimelineActor,
@@ -211,7 +212,12 @@ export function Timeline({
             <span key={id} id={id} className="anchor-target" />
           ) : null,
         )}
-        {structured && detail ? (
+        {entry.merge_check ? (
+          <>
+            <TimelineHeader entry={entry} action="合并检查" />
+            <MergeCheck check={entry.merge_check} projectId={projectId} />
+          </>
+        ) : structured && detail ? (
           <TimelineContent
             entry={entry}
             detail={detail}
@@ -287,7 +293,8 @@ export function Timeline({
             {day.groups.map((group) => {
               const first = group[0];
               if (!first) return null;
-              if (timelineCategory(first) !== "system") return row(first);
+              if (timelineCategory(first) !== "system" || first.merge_check)
+                return group.map((entry) => row(entry));
               const label =
                 first.event_type === "assignment_released" && group.length > 1
                   ? `释放了 ${group.length} 个 Assignment`

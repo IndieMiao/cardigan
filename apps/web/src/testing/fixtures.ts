@@ -182,6 +182,7 @@ export function fakeClient(
     setPreferences: async () => {},
     needsYou: async () => ({ decisions: [], human_actions: [], incidents: [] }),
     recordDecision: async () => undefined,
+    recheckMerge: async () => undefined,
     decisionComment: async () => undefined,
     completeAction: async () => undefined,
     updateCard: async () => undefined,

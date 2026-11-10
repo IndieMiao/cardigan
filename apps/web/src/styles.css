@@ -2211,6 +2211,16 @@ body[data-lightbox="open"] .drawer-overlay {
   fill: var(--tooltip-bg);
 }
 
+.merge-check {
+  margin-block: 12px;
+  min-width: 0;
+}
+.merge-check-summary {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--danger);
+}
+
 .needs-item > header {
   display: flex;
   align-items: baseline;
