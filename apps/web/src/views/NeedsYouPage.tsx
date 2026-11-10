@@ -38,6 +38,8 @@ const waitLabel = (ms: number | null, elapsed = 0) => {
 };
 const isMergeConfirmation = (q: NeedsDecision) =>
   q.trigger === "merge_confirmation";
+const isPausedReview = (q: NeedsDecision) =>
+  q.trigger === "review_limit" && q.status === "provisional";
 type Props = { client: CardiganClient; projectId: string; revision?: number };
 function useAction(done: () => void) {
   const keys = useRef(new Map<string, string>());
@@ -89,6 +91,7 @@ function DecisionMeta({
       <EmployeeIdentity {...q} showTitle={false} />
       <IdTag id={q.id} label={isMergeConfirmation(q) ? "合并确认" : "拍板"} />
       {q.blocking && <StatusTag status="blocked" />}
+      {isPausedReview(q) && <span className="hint">已暂停（临时决定）</span>}
       <span className="hint">{waitLabel(q.waited_ms, elapsed)}</span>
       <span className="needs-cards">
         {q.related_cards.length === 0 ? (
@@ -117,6 +120,11 @@ function Decision({
   const [option, setOption] = useState(""),
     [quote, setQuote] = useState("");
   const action = useAction(done);
+  const paused = isPausedReview(q);
+  const selected = paused ? "raise_limit" : option;
+  const options = paused
+    ? q.options.filter((o) => o.key === "raise_limit")
+    : q.options;
   return (
     <article
       className={`needs-item needs-decision${q.blocking ? " urgent" : ""}`}
@@ -133,35 +141,46 @@ function Decision({
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          if (option === "") return;
-          void action.run([projectId, q.id, "resolve", option, quote], (key) =>
-            client.recordDecision(projectId, q.id, option, quote, key),
+          if (selected === "") return;
+          void action.run(
+            [projectId, q.id, "resolve", selected, quote],
+            (key) =>
+              client.recordDecision(projectId, q.id, selected, quote, key),
           );
         }}
       >
         <fieldset className="needs-options">
           <legend>选择方案</legend>
-          {q.options.map((o) => (
+          {options.map((o) => (
             <label
               key={o.key}
-              className={`needs-option${option === o.key ? " selected" : ""}`}
+              className={`needs-option${selected === o.key ? " selected" : ""}`}
             >
               <input
                 type="radio"
                 name={`decision-${q.id}`}
                 value={o.key}
-                checked={option === o.key}
+                checked={selected === o.key}
                 onChange={() => setOption(o.key)}
               />
               <span>
                 <span className="needs-option-head">
                   <strong>{o.key}</strong>
-                  <span>{o.description}</span>
+                  <span>
+                    {q.trigger === "review_limit" && o.key === "raise_limit"
+                      ? "增加一轮审核额度"
+                      : o.description}
+                  </span>
                   {q.recommended === o.key && (
                     <span className="needs-recommended">推荐</span>
                   )}
                 </span>
-                <span className="needs-option-impact">影响：{o.impact}</span>
+                <span className="needs-option-impact">
+                  影响：
+                  {q.trigger === "review_limit" && o.key === "raise_limit"
+                    ? "审核上限加 1；没有其他阻塞且额度可用时自动恢复审核。"
+                    : o.impact}
+                </span>
               </span>
             </label>
           ))}
@@ -175,26 +194,27 @@ function Decision({
           />
         </label>
         <div className="action-row">
-          <button type="submit" disabled={action.busy || option === ""}>
-            按所选拍板
+          <button type="submit" disabled={action.busy || selected === ""}>
+            {paused ? "raise_limit · 增加一轮审核额度" : "按所选拍板"}
           </button>
-          {(["request_information", "explain"] as const).map((kind) => (
-            <button
-              key={kind}
-              type="button"
-              className="quiet"
-              disabled={action.busy || !q.card_id}
-              onClick={() =>
-                void action.run(
-                  [projectId, q.id, "comments", kind, quote],
-                  (key) =>
-                    client.decisionComment(projectId, q.id, kind, quote, key),
-                )
-              }
-            >
-              {kind === "request_information" ? "要求补充信息" : "请 PM 解释"}
-            </button>
-          ))}
+          {!paused &&
+            (["request_information", "explain"] as const).map((kind) => (
+              <button
+                key={kind}
+                type="button"
+                className="quiet"
+                disabled={action.busy || !q.card_id}
+                onClick={() =>
+                  void action.run(
+                    [projectId, q.id, "comments", kind, quote],
+                    (key) =>
+                      client.decisionComment(projectId, q.id, kind, quote, key),
+                  )
+                }
+              >
+                {kind === "request_information" ? "要求补充信息" : "请 PM 解释"}
+              </button>
+            ))}
         </div>
       </form>
       {!q.card_id && <p className="hint">项目级事项请在 PM 对话中补充说明。</p>}

@@ -16,6 +16,7 @@ import {
   recordDecision,
   supersedeCard,
   updateCard,
+  updateWorkItem,
   uploadAttachment,
 } from "@cardigan/domain";
 import {
@@ -352,26 +353,48 @@ export async function serveWrite(
     const decision_id = parsed(id("decision"), key);
     if (operation === "resolve") {
       const p = parsed(decision, body);
-      output = run(context, (s, a, ports) => {
-        const returning =
-          p.option === "request_changes" &&
-          s.decisions.find((q) => q.id === decision_id)?.trigger ===
-            "merge_confirmation";
-        const raw_quote =
-          p.raw_quote?.trim() || returning
-            ? (p.raw_quote ?? "")
-            : `在 Needs You 选择了 ${p.option}`;
-        return recordDecision(
-          s,
-          a,
-          {
-            decision_id,
-            option: p.option,
-            raw_quote,
-            rationale: p.rationale?.trim() ? p.rationale : raw_quote,
-          },
-          ports,
-        );
+      output = execute(context, (tx) => {
+        const q = tx.decisions.get(c.project_id, decision_id);
+        // Keep the limit audit and decision in one human, idempotent transaction.
+        // While the decision is still blocking, updateWorkItem cannot resume it.
+        if (q?.trigger === "review_limit" && p.option === "raise_limit") {
+          for (const work_item_id of new Set(q.affected_work_items)) {
+            applyCommand(context, tx, (s, a, ports) => {
+              const item = s.work_items.find((w) => w.id === work_item_id);
+              return updateWorkItem(
+                s,
+                a,
+                {
+                  work_item_id,
+                  max_review_rounds:
+                    item?.kind === "verify" ? item.max_review_rounds + 1 : 0,
+                },
+                ports,
+              );
+            });
+          }
+        }
+        return applyCommand(context, tx, (s, a, ports) => {
+          const returning =
+            p.option === "request_changes" &&
+            s.decisions.find((q) => q.id === decision_id)?.trigger ===
+              "merge_confirmation";
+          const raw_quote =
+            p.raw_quote?.trim() || returning
+              ? (p.raw_quote ?? "")
+              : `在 Needs You 选择了 ${p.option}`;
+          return recordDecision(
+            s,
+            a,
+            {
+              decision_id,
+              option: p.option,
+              raw_quote,
+              rationale: p.rationale?.trim() ? p.rationale : raw_quote,
+            },
+            ports,
+          );
+        });
       });
     } else {
       const p = parsed(clarification, body);

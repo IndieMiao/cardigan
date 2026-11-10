@@ -955,3 +955,188 @@ test("human comments parse Chinese and spaced employee names on the server", asy
     },
   });
 });
+
+async function reviewLimit() {
+  const reviewer = s.primary.verifier;
+  // A one-round budget keeps this fixture small; normal updates only raise it.
+  s.store().uow.run((tx) => {
+    const item = tx.work_items.get(
+      s.project.project_id,
+      reviewer.work_item_id as never,
+    );
+    if (item?.kind !== "verify") throw new Error("Missing verifier");
+    tx.work_items.put(s.project.project_id, { ...item, max_review_rounds: 1 });
+  });
+  const sha = await s.change(s.primary.owner, "limit.txt", "Review me");
+  const delivery = await s.deliver(s.primary, sha);
+  await s.start(reviewer);
+  await s.call(reviewer, "submit_review", {
+    delivery_id: delivery.id,
+    target_sha: sha,
+    kind: "code",
+    issues: [],
+    recheck_required: true,
+  });
+  const q = s.state().decisions.find((d) => d.trigger === "review_limit");
+  if (!q) throw new Error("Missing review-limit decision");
+  return q;
+}
+
+test.each([false, true])(
+  "Needs You raises the limit and resumes atomically (previously paused=%s), exactly once",
+  async (paused) => {
+    const q = await reviewLimit();
+    if (paused) {
+      expect(await request(resolvePath(q), { option: "pause" })).toMatchObject({
+        status: 200,
+        body: { status: "provisional" },
+      });
+      expect(
+        s
+          .state()
+          .work_items.find((w) => w.id === s.primary.verifier.work_item_id),
+      ).toMatchObject({ status: "waiting_decision", max_review_rounds: 1 });
+    }
+    const payload = { option: "raise_limit", raw_quote: "增加一轮" };
+    const headers = { "Idempotency-Key": "raise-once" };
+    const resolved = await request(resolvePath(q), payload, headers);
+    expect(resolved).toMatchObject({
+      status: 200,
+      body: { status: "resolved" },
+    });
+    const state = s.state();
+    expect(
+      state.work_items.find((w) => w.id === s.primary.verifier.work_item_id),
+    ).toMatchObject({ status: "ready", max_review_rounds: 2 });
+    const update = state.events.find(
+      (e) =>
+        e.type === "work_item_updated" && e.payload.max_review_rounds === 2,
+    );
+    expect(update).toMatchObject({
+      actor: { kind: "human" },
+      payload: { resume_work_items: [] },
+    });
+    expect(
+      state.runs.find((r) => r.review_limit_changes?.length),
+    ).toMatchObject({
+      review_limit_changes: [
+        { event_id: update?.id, max_review_rounds: 2, actor: "human" },
+      ],
+    });
+    expect(
+      state.runs.filter(
+        (r) =>
+          r.assignment_id === s.primary.verifier.id && r.status === "queued",
+      ),
+    ).toHaveLength(1);
+    const before = snapshot();
+    expect(await request(resolvePath(q), payload, headers)).toEqual(resolved);
+    expect(snapshot()).toBe(before);
+    // A second request without the original key fails and rolls back its attempted increment.
+    expect((await request(resolvePath(q), payload)).status).toBe(409);
+    expect(snapshot()).toBe(before);
+  },
+);
+
+test.each(["decision", "provisional", "human_action", "reported"] as const)(
+  "raising a review limit preserves another %s blocker",
+  async (blocker) => {
+    const q = await reviewLimit();
+    const itemId = s.primary.verifier.work_item_id as NonNullable<
+      typeof s.primary.verifier.work_item_id
+    >;
+    if (blocker === "human_action") {
+      s.command((state, actor, ports) =>
+        requestHumanAction(
+          state,
+          actor,
+          {
+            card_id: s.card.id,
+            instructions: "Connect device",
+            why_human: "Physical access",
+            expected_return: "Connected",
+            blocked_work_items: [itemId],
+          },
+          ports,
+        ),
+      );
+    } else if (blocker === "reported") {
+      s.store().uow.run((tx) => {
+        const item = tx.work_items.get(s.project.project_id, itemId);
+        if (!item) throw new Error("Missing verifier");
+        tx.work_items.put(s.project.project_id, {
+          ...item,
+          reported_blocker: {
+            reason: "Need input",
+            needs: "role",
+            reported_by: "human",
+            reported_at: new Date().toISOString(),
+          },
+        });
+      });
+    } else {
+      const other = s.command((state, actor, ports) =>
+        requestDecision(
+          state,
+          actor,
+          {
+            ...question,
+            card_id: s.card.id,
+            blocking: true,
+            affected_work_items: [itemId],
+          },
+          ports,
+        ),
+      );
+      if (blocker === "provisional")
+        s.store().uow.run((tx) =>
+          tx.decisions.put(s.project.project_id, {
+            ...other,
+            status: "provisional",
+          }),
+        );
+    }
+    expect(
+      (await request(resolvePath(q), { option: "raise_limit" })).status,
+    ).toBe(200);
+    expect(s.state().work_items.find((w) => w.id === itemId)).toMatchObject({
+      status: "waiting_decision",
+      max_review_rounds: 2,
+    });
+    expect(
+      s
+        .state()
+        .runs.filter(
+          (r) =>
+            r.assignment_id === s.primary.verifier.id && r.status === "queued",
+        ),
+    ).toHaveLength(0);
+  },
+);
+
+test("a normal decision named raise_limit does not change review budgets", async () => {
+  const q = s.command((state, actor, ports) =>
+    requestDecision(
+      state,
+      actor,
+      {
+        ...question,
+        card_id: s.card.id,
+        options: [
+          {
+            key: "raise_limit",
+            description: "Ordinary choice",
+            impact: "No budget change",
+          },
+        ],
+        recommended: "raise_limit",
+      },
+      ports,
+    ),
+  );
+  const items = s.state().work_items;
+  expect(
+    (await request(resolvePath(q), { option: "raise_limit" })).status,
+  ).toBe(200);
+  expect(s.state().work_items).toEqual(items);
+});
