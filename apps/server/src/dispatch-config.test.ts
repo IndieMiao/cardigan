@@ -80,10 +80,10 @@ test.each(["writable", "symlink", "directory", "parent"])(
   },
 );
 
-test("q(86) loads a configurable cancellation grace once, defaulting to 120 minutes", async () => {
+test("q(88) loads a configurable cancellation grace once, defaulting to 60 minutes", async () => {
   expect(
     (await loadRunCapacityConfig({ configDir })).inactiveCancelAfterMs,
-  ).toBe(120 * 60_000);
+  ).toBe(60 * 60_000);
   await write("machines: { local: 4 }\ninactive_cancel_after_minutes: 45\n");
   const config = await loadRunCapacityConfig({ configDir });
   expect(config.errors).toEqual([]);

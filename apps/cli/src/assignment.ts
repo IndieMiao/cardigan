@@ -21,7 +21,6 @@ import {
   loadRunCapacityConfig,
   messageOf,
   type PreparedWorktree,
-  RunCapacityDeferred,
   reviewTargetSha,
   scrubRunCredentials,
   type WorktreeProvider,
@@ -769,14 +768,7 @@ export async function startAssignmentCommand(
     runtime,
     dataDir,
     worktree: worktreeProvider(execution, runtime),
-  }).catch((error: unknown) => {
-    if (!(error instanceof RunCapacityDeferred)) throw error;
-    io.stdout(
-      `${assignment_id}（run ${error.run_id}）${error.message}；server 将自动继续派发。`,
-    );
-    return undefined;
   });
-  if (!started) return EXIT.ok;
 
   io.stdout(
     [

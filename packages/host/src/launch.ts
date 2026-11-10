@@ -99,8 +99,8 @@ export interface LaunchHost {
   readonly execution?: ExecutionConfig | undefined;
   readonly clock?: Clock | undefined;
   /**
-   * Cleanup problems are reported and never thrown: a failed release or scrub
-   * must not skip token revocation or Run cancellation (§13.4).
+   * Host diagnostics, including manual-start capacity notices and cleanup
+   * failures. Reporting must not skip token revocation or Run cancellation.
    */
   readonly report?: ((message: string) => void) | undefined;
 }
@@ -238,16 +238,19 @@ export async function launchRun(
       throw new HostLaunchError("dispatch", "Assignment is missing");
     tx.runs.put(input.project, { ...run, queue_reason: "concurrency_limit" });
     const capacity = runCapacitySnapshot(host.store, tx);
+    const manual =
+      input.actor.kind === "human" && input.actor.project_id === input.project;
+    const limit = host.runLimit?.(assignment.machine_id) ?? DEFAULT_RUN_LIMIT;
+    const occupied = capacity.occupied.get(assignment.machine_id) ?? 0;
+    // q(88): only the explicit human host entry may bypass machine capacity.
+    // PM tools, Dispatcher and recovery callers retain system/assignment actors.
     if (
-      !canDispatchRun(
-        host.runLimit?.(assignment.machine_id) ?? DEFAULT_RUN_LIMIT,
-        capacity.occupied.get(assignment.machine_id) ?? 0,
-        isStandingPm(assignment),
-      ) ||
-      (!isStandingPm(assignment) &&
-        (capacity.queue.find(
-          (r) => r.project_id === input.project && r.run_id === run.id,
-        )?.ahead ?? 0) > 0)
+      !manual &&
+      (!canDispatchRun(limit, occupied, isStandingPm(assignment)) ||
+        (!isStandingPm(assignment) &&
+          (capacity.queue.find(
+            (r) => r.project_id === input.project && r.run_id === run.id,
+          )?.ahead ?? 0) > 0))
     ) {
       return undefined;
     }
@@ -268,7 +271,13 @@ export async function launchRun(
       outcome: null,
     };
     beginLaunchAttempt(host.store.database, attempt);
-    return attempt;
+    return {
+      ...attempt,
+      capacity_notice:
+        manual && limit > 0 && occupied + 1 > limit
+          ? `已超过全机上限（当前 ${occupied + 1}/上限 ${limit}）`
+          : undefined,
+    };
   });
   if (!attempt) {
     const waiting = host.store.uow.read((tx) =>
@@ -280,6 +289,8 @@ export async function launchRun(
   }
   let sent = false;
   try {
+    // Report the claim-time snapshot, including this Run's durable reservation.
+    if (attempt.capacity_notice) host.report?.(attempt.capacity_notice);
     const result = await launch(host, input);
     sent = true;
     return result;

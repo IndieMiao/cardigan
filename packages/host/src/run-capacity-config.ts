@@ -36,7 +36,7 @@ export async function loadRunCapacityConfig(
   const result = (): RunCapacityConfiguration => ({
     errors,
     inactiveCancelAfterMs: errors.length ? null : inactiveCancelAfterMs,
-    // Invalid configuration fails closed for work items; standing PMs remain exempt.
+    // Invalid configuration stops automatic work items; standing PMs remain exempt.
     forMachine: (machine) =>
       errors.length ? 0 : (limits.get(machine) ?? DEFAULT_RUN_LIMIT),
   });
@@ -72,7 +72,7 @@ export async function loadRunCapacityConfig(
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT")
       errors.push(
-        "无法安全读取 run-capacity.yaml，暂停普通 Run 派发及自动回收",
+        "无法安全读取 run-capacity.yaml，暂停普通 Run 自动派发及失活回收",
       );
     return result();
   }
@@ -115,7 +115,7 @@ export async function loadRunCapacityConfig(
   } catch {
     // Never include YAML contents (which could contain credentials) in diagnostics.
     errors.push(
-      "run-capacity.yaml 必须包含 machines 映射；机器上限及可选 inactive_cancel_after_minutes 须为允许范围的正整数。配置无效，暂停普通 Run 派发及自动回收",
+      "run-capacity.yaml 必须包含 machines 映射；机器上限及可选 inactive_cancel_after_minutes 须为允许范围的正整数。配置无效，暂停普通 Run 自动派发及失活回收",
     );
   }
   return result();

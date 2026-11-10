@@ -1,3 +1,5 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import type {
   Assignment,
   CommandEffect,
@@ -32,6 +34,7 @@ import {
   unfinishedBellAttempts,
 } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { startAssignmentCommand } from "../../cli/src/assignment.js";
 import { attentionCommand } from "../../cli/src/inbox.js";
 import { dispatchFixture } from "../test-support/dispatch.js";
 import { Dispatcher, type DispatcherOptions } from "./dispatch.js";
@@ -688,7 +691,7 @@ test("startup reservations prevent concurrent dispatcher instances from claiming
   expect(startRun).toHaveBeenCalledOnce();
 });
 
-test("an explicit host launch defers without provisioning and the Dispatcher resumes it without a notification", async () => {
+test("a system host launch stays capacity-limited and the Dispatcher resumes it without a notification", async () => {
   const busy = f.create();
   f.session(busy.assignment, false);
   const run = f.apply((s, a, p) =>
@@ -717,7 +720,7 @@ test("an explicit host launch defers without provisioning and the Dispatcher res
         project: f.project,
         assignment_id: target.assignment.id,
         run,
-        actor: { kind: "human", project_id: f.project },
+        actor: { kind: "system", project_id: f.project },
         reuse_session: true,
       },
     ),
@@ -1229,7 +1232,7 @@ test("q(86) an in-flight stop fences concurrent dispatchers and preserves a Run 
   }
 });
 
-test("q(86) the default grace tolerates the observed 48-minute silence and restarts on fresh MCP activity", async () => {
+test("q(88) the 60-minute default tolerates 48-minute silence and restarts on fresh MCP activity", async () => {
   const t = inactiveTarget();
   runtime.release = vi.fn(async () => ({ ok: true, value: undefined }));
   f.advance(48 * 60_000);
@@ -1245,9 +1248,118 @@ test("q(86) the default grace tolerates the observed 48-minute silence and resta
     t.busy.assignment.id,
     f.clock.now(),
   );
-  f.advance(119 * 60_000);
+  f.advance(59 * 60_000);
   await dispatcher.tick();
   expect(runtime.release).not.toHaveBeenCalled();
   expect(f.store.verifyToken(t.token.token)).toBeDefined();
   expect(slots()).toBe(1);
+});
+
+test("q(88) a full machine permits human CLI start, reports excess, and still queues concurrent automatic work", async () => {
+  const busy = f.create();
+  f.session(busy.assignment, false);
+  const automatic = f.create();
+  f.session(automatic.assignment);
+  f.apply((s, a, p) =>
+    postComment(
+      s,
+      a,
+      {
+        card_id: automatic.card.id,
+        work_item_id: automatic.item.id,
+        body: "automatic work",
+      },
+      p,
+    ),
+  );
+  f.store.issueToken({
+    project_id: f.project,
+    assignment_id: target.assignment.id,
+    role: {
+      role_version: target.assignment.role_version,
+      allowed_tools: ["whoami"],
+    },
+  });
+  const configDir = join(f.dataDir, "config");
+  await mkdir(configDir, { mode: 0o700 });
+  await writeFile(
+    join(configDir, "run-capacity.yaml"),
+    "machines: { local: 1 }\n",
+    { mode: 0o600 },
+  );
+  await writeFile(
+    join(configDir, "launch.yaml"),
+    "profiles:\n  fixture:\n    harness: pi\n    model: fixture-model\n",
+    { mode: 0o600 },
+  );
+  const output: string[] = [];
+  let release = () => {};
+  const hold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  vi.mocked(runtime.wake).mockImplementationOnce(async () => {
+    await hold;
+    return { ok: true, value: { sent: true } };
+  });
+  const manual = startAssignmentCommand({
+    store: f.store,
+    project_id: f.project,
+    assignment_id: target.assignment.id,
+    runtime,
+    dataDir: f.dataDir,
+    io: {
+      cwd: f.dataDir,
+      platform: "linux",
+      signals: { on() {}, off() {} },
+      env: {
+        CARDIGAN_CONFIG_DIR: configDir,
+        CARDIGAN_DATA_DIR: f.dataDir,
+        CARDIGAN_RUNTIME_MODE: "local",
+      },
+      stdout: (line) => output.push(line),
+      stderr: (line) => output.push(line),
+      captureCommand: async () => ({
+        code: 0,
+        stdout: "fixture-cli 1.0\n",
+        stderr: "",
+      }),
+      spawnInherit: () => {
+        throw new Error("No real process in this test");
+      },
+    },
+  });
+  void manual.catch(() => {});
+  try {
+    await expect.poll(() => vi.mocked(runtime.wake).mock.calls.length).toBe(1);
+    expect(
+      f
+        .state()
+        .runs.some(
+          (r) =>
+            r.assignment_id === target.assignment.id &&
+            r.status === "dispatched",
+        ),
+    ).toBe(true);
+    expect(slots()).toBe(2);
+    // The CLI uses the wall clock. Keep recovery leases on that same clock;
+    // fixture Run timestamps are later and cannot accidentally become inactive.
+    await new Dispatcher({
+      ...options,
+      clock: { now: () => new Date().toISOString() },
+      runLimit: () => 1,
+    }).tick();
+    expect(readRunQueue(f.store).map((r) => r.assignment_id)).toEqual([
+      automatic.assignment.id,
+    ]);
+    expect(runtime.wake).toHaveBeenCalledOnce();
+    release();
+    expect(await manual).toBe(0);
+    expect(output.join("\n")).toContain("已超过全机上限（当前 2/上限 1）");
+    expect(output.join("\n")).toContain(`已启动 ${target.assignment.id}`);
+    expect(output.join("\n")).not.toContain("排队中");
+    expect(slots()).toBe(2);
+  } finally {
+    release();
+    await manual;
+  }
 });

@@ -10,9 +10,9 @@ import {
   unwrap,
 } from "./core.js";
 
-// C-54#19: a legitimate Run stayed silent for 48 minutes. Two hours gives
-// more than twice that observed interval; the 15-minute alert is not a kill deadline.
-export const DEFAULT_INACTIVE_CANCEL_AFTER_MS = 120 * 60_000;
+// q(88) explicitly selects 60 minutes despite observed legitimate silence of
+// 48 minutes. The 15-minute alert remains separate from this configurable deadline.
+export const DEFAULT_INACTIVE_CANCEL_AFTER_MS = 60 * 60_000;
 export const INACTIVE_STOP_LEASE_MS = 60_000;
 const ended = (run: Run) =>
   ["completed", "failed", "cancelled"].includes(run.status);
