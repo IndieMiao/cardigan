@@ -420,6 +420,7 @@ export interface MergeConfirmationView {
   }[];
 }
 export interface NeedsDecision extends DecisionView, AuthorView {
+  readonly followup_notice?: string;
   readonly card_id: string | null;
   readonly affected_cards: readonly string[];
   readonly context: string;
@@ -441,6 +442,7 @@ export interface NeedsAction
   readonly waited_ms: number | null;
   readonly due: string | null;
   readonly blocked_work_items: readonly string[];
+  readonly completion_notice?: string;
 }
 export interface NeedsPage {
   readonly decisions: readonly NeedsDecision[];

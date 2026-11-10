@@ -94,7 +94,7 @@ function DecisionMeta({
     <header className="needs-meta">
       <EmployeeIdentity {...q} showTitle={false} />
       <IdTag id={q.id} label={isMergeConfirmation(q) ? "合并确认" : "拍板"} />
-      {q.blocking && <StatusTag status="blocked" />}
+      {q.blocking && !q.followup_notice && <StatusTag status="blocked" />}
       {isPausedReview(q) && <span className="hint">已暂停（临时决定）</span>}
       <span className="hint">{waitLabel(q.waited_ms, elapsed)}</span>
       {q.auto_merge && (
@@ -146,6 +146,23 @@ function Decision({
   const options = paused
     ? q.options.filter((o) => o.key === "raise_limit")
     : q.options;
+  if (q.followup_notice)
+    return (
+      <article className="needs-item" aria-label={`拍板落实 ${q.id}`}>
+        <DecisionMeta q={q} projectId={projectId} elapsed={elapsed} />
+        <h3 className="needs-question">{q.question}</h3>
+        <p>{q.followup_notice}</p>
+        <p>
+          已选方案：
+          {q.options.find((o) => o.key === q.resolution?.option)?.description ??
+            q.resolution?.option}
+        </p>
+        <p>
+          影响：{q.options.find((o) => o.key === q.resolution?.option)?.impact}
+        </p>
+        <p>请安排落实，并在卡片时间线引用 {q.id} 记录执行结果。</p>
+      </article>
+    );
   return (
     <article
       className={`needs-item needs-decision${q.blocking ? " urgent" : ""}`}
@@ -498,6 +515,18 @@ function HumanAction({
 }: Props & { item: NeedsAction; done: () => void; elapsed: number }) {
   const [text, setText] = useState("");
   const action = useAction(done);
+  if (item.completion_notice !== undefined)
+    return (
+      <article className="needs-item" aria-label={`执行结果待接手 ${item.id}`}>
+        <header className="needs-meta">
+          <IdTag id={item.id} label="已完成" />
+          {item.card_id && <CardLink projectId={projectId} id={item.card_id} />}
+        </header>
+        <h3 className="needs-question">{item.why}</h3>
+        <Markdown body={item.completion_notice} />
+        <p>请恢复发起方或启动项目的 PM Ops，继续处理这项执行结果。</p>
+      </article>
+    );
   return (
     <article className="needs-item" aria-label={`执行 ${item.id}`}>
       <header className="needs-meta">
@@ -648,11 +677,14 @@ function NeedsContent({
     ? data.decisions.length + data.human_actions.length + data.incidents.length
     : 0;
   const blocking = (data?.decisions ?? []).filter(
-    (q) => q.blocking && !isMergeConfirmation(q),
+    (q) => q.blocking && !q.followup_notice && !isMergeConfirmation(q),
   );
-  const merges = (data?.decisions ?? []).filter(isMergeConfirmation);
+  const followups = (data?.decisions ?? []).filter((q) => q.followup_notice);
+  const merges = (data?.decisions ?? []).filter(
+    (q) => !q.followup_notice && isMergeConfirmation(q),
+  );
   const other = (data?.decisions ?? []).filter(
-    (q) => !q.blocking && !isMergeConfirmation(q),
+    (q) => !q.blocking && !q.followup_notice && !isMergeConfirmation(q),
   );
   return (
     <section aria-label="Needs You" className="needs-page">
@@ -705,6 +737,14 @@ function NeedsContent({
             <section className="needs-group" aria-label="其他拍板">
               <h2>其他拍板（{other.length}）</h2>
               {other.map((q) => (
+                <Decision key={q.id} q={q} {...props} />
+              ))}
+            </section>
+          )}
+          {!!followups.length && (
+            <section className="needs-group" aria-label="拍板落实">
+              <h2>拍板落实（{followups.length}）</h2>
+              {followups.map((q) => (
                 <Decision key={q.id} q={q} {...props} />
               ))}
             </section>

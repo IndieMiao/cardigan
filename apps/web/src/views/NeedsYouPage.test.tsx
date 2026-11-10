@@ -795,3 +795,38 @@ test.each(["spending", "account", "permission", "data_deletion"])(
     ).toBeNull();
   },
 );
+
+test("unclaimed decision follow-up displays its outcome without offering a second decision", async () => {
+  const recordDecision = vi.fn();
+  render(
+    <NeedsYouPage
+      projectId="p-1"
+      client={fakeClient({
+        recordDecision,
+        needsYou: async () => ({
+          decisions: [
+            q({
+              trigger: null,
+              status: "resolved",
+              followup_notice: "无 PM Ops 接手，请跟进落实",
+              resolution: {
+                option: "merge",
+                rationale: "已确认",
+                raw_quote: "同意",
+                at: "2026-11-10T00:00:00Z",
+              },
+            }),
+          ],
+          human_actions: [],
+          incidents: [],
+        }),
+      })}
+    />,
+  );
+  const notice = await screen.findByRole("article", { name: "拍板落实 q(1)" });
+  expect(within(notice).getByText("已选方案：合并")).toBeTruthy();
+  expect(within(notice).getByText("影响：更新基线")).toBeTruthy();
+  expect(within(notice).queryByRole("radio")).toBeNull();
+  expect(screen.queryByRole("button", { name: "按所选拍板" })).toBeNull();
+  expect(recordDecision).not.toHaveBeenCalled();
+});

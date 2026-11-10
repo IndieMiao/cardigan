@@ -686,3 +686,88 @@ test.each([true, false])(
       expect(result).toMatchObject({ error: { code: "unauthorized" } });
   },
 );
+
+test("unclaimed decisions and overdue follow-ups remain visible without Ops until implementation is recorded", () => {
+  const f = setup(false);
+  const q = f.request();
+  f.commit(f.humanResolve(q.id));
+  expect(value(listNeedsYou(f.state, human)).data.decisions).toHaveLength(0);
+  const unavailable = {
+    ...f.state,
+    assignments: f.state.assignments.map((a) =>
+      a.id === id("assignment", 1) ? { ...a, status: "released" as const } : a,
+    ),
+  };
+  expect(value(listNeedsYou(unavailable, human)).data.decisions).toMatchObject([
+    { id: q.id, status: "resolved", followup_notice: expect.any(String) },
+  ]);
+  const later = {
+    ...f.io,
+    clock: { now: () => new Date(Date.parse(now) + 31 * 60_000).toISOString() },
+  };
+  f.commit(
+    remindDecisionFollowups(
+      f.state,
+      { kind: "system", project_id: f.state.project_id },
+      later,
+    ),
+  );
+  const needs = value(listNeedsYou(f.state, human));
+  expect(needs.data.decisions).toMatchObject([
+    {
+      id: q.id,
+      status: "resolved",
+      followup_notice: expect.any(String),
+      resolution: { option: "continue" },
+    },
+  ]);
+  expect(needs.events).toEqual([]);
+  const withOps = {
+    ...f.state,
+    assignments: f.state.assignments.map((a) =>
+      a.id === f.ops.id ? { ...a, status: "active" as const } : a,
+    ),
+  };
+  expect(value(listNeedsYou(withOps, human)).data.decisions).toHaveLength(0);
+  f.commit(
+    postComment(
+      f.state,
+      human,
+      { card_id: id("card", 1), body: `${q.id} 执行结果：已安排后续工作` },
+      later,
+    ),
+  );
+  expect(value(listNeedsYou(f.state, human)).data.decisions).toHaveLength(0);
+});
+
+test("merged HumanAction query hides untriaged requests and retains C-41's unclaimed completion notice", () => {
+  const f = setup();
+  const params = {
+    card_id: id("card", 1),
+    instructions: "提供数据副本",
+    why_human: "主机权限",
+    expected_return: "路径",
+    blocked_work_items: [],
+  };
+  const action = f.commit(requestHumanAction(f.state, actor(), params, f.io));
+  f.commit(
+    triageHumanAction(
+      f.state,
+      f.pm,
+      { human_action_id: action.id, disposition: "done", rationale: "已完成" },
+      f.io,
+    ),
+  );
+  const pending = f.commit(requestHumanAction(f.state, actor(), params, f.io));
+  const noOwners = {
+    ...f.state,
+    assignments: f.state.assignments.map((a) =>
+      a.id === id("assignment", 1) || a.id === f.ops.id
+        ? { ...a, status: "released" as const }
+        : a,
+    ),
+  };
+  const needs = value(listNeedsYou(noOwners, human)).data.human_actions;
+  expect(needs).toMatchObject([{ id: action.id, completion_notice: "已完成" }]);
+  expect(needs.some((h) => h.id === pending.id)).toBe(false);
+});

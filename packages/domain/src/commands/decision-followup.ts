@@ -1,4 +1,5 @@
 import type { Actor, Decision, Event } from "../entities.js";
+import { requesterNotificationRecipient } from "../notification.js";
 import { type CommandPorts, type CommandState, command } from "./core.js";
 
 const field = (e: Event, key: string) =>
@@ -18,6 +19,90 @@ const progressTypes = new Set([
   "review_submitted",
   "human_action_completed",
 ]);
+function decisionImplementationRecorded(state: CommandState, q: Decision) {
+  const resolutions = state.events.filter(
+    (e) => e.type === "decision_resolved" && field(e, "decision_id") === q.id,
+  );
+  const after = (e: Event) =>
+    e.created_at > (q.resolution?.at ?? "") ||
+    (e.created_at === q.resolution?.at &&
+      resolutions.some((r) => r.card_id === e.card_id && e.seq > r.seq));
+  const cards = new Set([
+    ...q.affected_cards,
+    ...(q.card_id ? [q.card_id] : []),
+  ]);
+  const changed = state.events.some(
+    (e) =>
+      after(e) &&
+      progressTypes.has(e.type) &&
+      !!e.card_id &&
+      cards.has(e.card_id) &&
+      (!q.affected_work_items.length ||
+        !field(e, "work_item_id") ||
+        q.affected_work_items.some((id) => id === field(e, "work_item_id"))),
+  );
+  const recorded = state.timeline.some(
+    (entry) =>
+      entry.created_at >= (q.resolution?.at ?? "") &&
+      entry.type === "comment" &&
+      (entry.author === q.raised_by ||
+        entry.author === "human" ||
+        state.assignments.some(
+          (a) =>
+            `assignment:${a.id}` === entry.author &&
+            a.scope === "standing" &&
+            a.role_id === "pm" &&
+            a.standing_mode === "ops",
+        )) &&
+      entry.refs.some((ref) => ref.kind === "decision" && ref.id === q.id) &&
+      state.events.some(
+        (e) =>
+          e.card_id === entry.card_id && e.seq === entry.event_seq && after(e),
+      ),
+  );
+  return changed || recorded;
+}
+
+/** Read-only attention: completed decisions must not disappear when nobody can receive a bell. */
+export function decisionFollowupNeedsHuman(
+  state: CommandState,
+  q: Decision,
+): boolean {
+  if (
+    q.status !== "resolved" ||
+    !q.resolution ||
+    !q.raised_by.startsWith("assignment:")
+  )
+    return false;
+  if (
+    q.card_id &&
+    state.cards.some(
+      (c) => c.id === q.card_id && ["done", "cancelled"].includes(c.status),
+    )
+  )
+    return false;
+  const recipient = requesterNotificationRecipient(
+    q.raised_by,
+    state.assignments,
+  );
+  const overdue = state.events.some(
+    (e) =>
+      e.type === "decision_followup_due" &&
+      field(e, "decision_id") === q.id &&
+      field(e, "resolved_at") === q.resolution?.at,
+  );
+  const fallback = requesterNotificationRecipient(
+    q.raised_by,
+    state.assignments,
+    { skip_requester: true },
+  );
+  return (
+    (recipient?.kind === "needs_you" ||
+      (overdue && fallback?.kind === "needs_you")) &&
+    !decisionImplementationRecorded(state, q)
+  );
+}
+
 /** Host tick: one persistent reminder per resolution, independent of bells and ACKs. */
 export function remindDecisionFollowups(
   state: CommandState,
@@ -43,54 +128,7 @@ export function remindDecisionFollowups(
         )
       )
         continue;
-      const resolutions = state.events.filter(
-        (e) =>
-          e.type === "decision_resolved" && field(e, "decision_id") === q.id,
-      );
-      const after = (e: Event) =>
-        e.created_at > (q.resolution?.at ?? "") ||
-        (e.created_at === q.resolution?.at &&
-          resolutions.some((r) => r.card_id === e.card_id && e.seq > r.seq));
-      const cards = new Set([
-        ...q.affected_cards,
-        ...(q.card_id ? [q.card_id] : []),
-      ]);
-      const changed = state.events.some(
-        (e) =>
-          after(e) &&
-          progressTypes.has(e.type) &&
-          !!e.card_id &&
-          cards.has(e.card_id) &&
-          (!q.affected_work_items.length ||
-            !field(e, "work_item_id") ||
-            q.affected_work_items.some(
-              (id) => id === field(e, "work_item_id"),
-            )),
-      );
-      const recorded = state.timeline.some(
-        (entry) =>
-          entry.created_at >= (q.resolution?.at ?? "") &&
-          entry.type === "comment" &&
-          (entry.author === q.raised_by ||
-            entry.author === "human" ||
-            state.assignments.some(
-              (a) =>
-                `assignment:${a.id}` === entry.author &&
-                a.scope === "standing" &&
-                a.role_id === "pm" &&
-                a.standing_mode === "ops",
-            )) &&
-          entry.refs.some(
-            (ref) => ref.kind === "decision" && ref.id === q.id,
-          ) &&
-          state.events.some(
-            (e) =>
-              e.card_id === entry.card_id &&
-              e.seq === entry.event_seq &&
-              after(e),
-          ),
-      );
-      if (changed || recorded) continue;
+      if (decisionImplementationRecorded(state, q)) continue;
       d.emit(
         "decision_followup_due",
         q.card_id,

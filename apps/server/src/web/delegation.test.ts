@@ -1,6 +1,12 @@
-import { type Decision, requestDecision } from "@cardigan/domain";
+import {
+  type Decision,
+  pauseStandingAssignment,
+  postComment,
+  requestDecision,
+} from "@cardigan/domain";
 import { expect, test } from "vitest";
 import { m5Cross, TEST_PASSWORD } from "../../test-support/m5-cross.js";
+import { confirmWorkbenchDecision } from "../../test-support/workbench-decision.js";
 
 test("Workbench answers and grants atomically, enforces fixed risks and filters human/PM history", async () => {
   const f = await m5Cross();
@@ -124,6 +130,131 @@ test("Workbench answers and grants atomically, enforces fixed risks and filters 
       .state()
       .events.filter((e) => e.type === "project_preferences_updated");
     expect(grants).toHaveLength(1);
+  } finally {
+    await f.close();
+  }
+});
+
+test("unclaimed completed decisions stay visible in Workbench and CLI without allowing a second answer", async () => {
+  const f = await m5Cross();
+  try {
+    await f.password(TEST_PASSWORD);
+    await f.login();
+    await f.start(f.primary.owner);
+    const q = await f.mcp<Decision>(f.primary.owner, "request_decision", {
+      card_id: f.card.id,
+      category: "scope_change",
+      kind: "choose",
+      question: "是否扩大范围",
+      context: "需要确认",
+      options: [
+        { key: "go", description: "安排后续卡", impact: "建立下一阶段工作" },
+      ],
+      recommended: "go",
+      decider: "human",
+      blocking: false,
+      affected_cards: [f.card.id],
+      affected_work_items: [],
+    });
+    await f.finish(f.primary.owner);
+    f.release(f.primary.owner);
+    const ops = f
+      .state()
+      .assignments.find(
+        (a) => a.scope === "standing" && a.standing_mode === "ops",
+      );
+    if (!ops) throw new Error("Missing Ops");
+    f.command((s, a, p) =>
+      pauseStandingAssignment(s, a, { assignment_id: ops.id }, p),
+    );
+    expect(
+      (
+        await f.call(
+          f.projectPath(`/decisions/${encodeURIComponent(q.id)}/resolve`),
+          { method: "POST", body: { option: "go" } },
+        )
+      ).status,
+    ).toBe(200);
+    const before = f.state();
+    expect((await f.call(f.projectPath("/needs-you"))).json).toMatchObject({
+      decisions: [
+        {
+          id: q.id,
+          status: "resolved",
+          followup_notice: expect.any(String),
+          resolution: { option: "go" },
+        },
+      ],
+    });
+    expect(await f.cli("needs-you")).toContain("拍板落实（1）");
+    expect(f.state()).toEqual(before);
+    expect(
+      (
+        await f.call(
+          f.projectPath(`/decisions/${encodeURIComponent(q.id)}/resolve`),
+          { method: "POST", body: { option: "go" } },
+        )
+      ).status,
+    ).toBe(409);
+    f.command((s, a, p) =>
+      postComment(
+        s,
+        a,
+        { card_id: f.card.id, body: `${q.id} 执行结果：已经建立后续卡` },
+        p,
+      ),
+    );
+    expect((await f.call(f.projectPath("/needs-you"))).json).toMatchObject({
+      decisions: [],
+    });
+  } finally {
+    await f.close();
+  }
+});
+
+test("cleanup fixture uses an authenticated Workbench confirmation for protected data deletion", async () => {
+  const f = await m5Cross();
+  try {
+    const q = f.command((s, a, p) =>
+      requestDecision(
+        s,
+        a,
+        {
+          card_id: f.card.id,
+          category: "data_deletion",
+          kind: "choose",
+          question: "清理工作目录",
+          context: "未保存的修改需要人确认",
+          options: [
+            {
+              key: "force_clean",
+              description: "备份并清理",
+              impact: "保存补丁后删除目录",
+            },
+          ],
+          recommended: "force_clean",
+          decider: "human",
+          blocking: false,
+          affected_cards: [f.card.id],
+          affected_work_items: [],
+        },
+        p,
+      ),
+    );
+    await confirmWorkbenchDecision({
+      store: f.store(),
+      dataDir: f.dataDir,
+      project_id: f.project.project_id,
+      decision_id: q.id,
+      option: "force_clean",
+    });
+    expect(
+      f.state().decisions.find((d) => d.id === q.id)?.resolution,
+    ).toMatchObject({
+      option: "force_clean",
+      resolved_by: "human",
+      via: "needs_you",
+    });
   } finally {
     await f.close();
   }

@@ -13,6 +13,7 @@ import {
   cardTemplate,
   employeeNameKey,
   isCompletionVerifier,
+  requesterNotificationRecipient,
 } from "@cardigan/domain";
 import {
   payloadObject,
@@ -796,16 +797,20 @@ function routeDecisionResolved(input: RouteInput, draft: Draft): void {
     const ownerCard = input.snapshot.cards.find(
       (c) => c.id === ownerItem?.card_id,
     );
-    const available =
-      owner &&
-      isActive(owner) &&
-      !["done", "cancelled"].includes(ownerCard?.status ?? "");
+    const to = requesterNotificationRecipient(
+      q.raised_by,
+      input.snapshot.assignments,
+      {
+        skip_requester: ["done", "cancelled"].includes(ownerCard?.status ?? ""),
+      },
+    );
+    if (!to) return;
     const option = q.options.find((o) => o.key === q.resolution?.option);
     note(
       input,
       draft,
-      available ? recipient.assignment(id) : recipient.pm_ops(),
-      "decision",
+      to,
+      to.kind === "needs_you" ? "needs_you" : "decision",
       "6.4/decision resolved",
       `${q.id} 已选择 ${q.resolution.option}：${option?.description ?? ""}。影响：${option?.impact ?? ""}。请发起人落实，并在时间线引用 ${q.id} 记录执行结果。`,
     );
@@ -821,6 +826,59 @@ function routeDecisionResolved(input: RouteInput, draft: Draft): void {
       "6.4/decision resolved",
       `${decision_id ?? "the decision"} was resolved; continue ${id}`,
     );
+  }
+}
+
+/** Completion informs the requester and current waiters without clearing blockers. */
+function routeHumanActionCompleted(input: RouteInput, draft: Draft): void {
+  const action = input.snapshot.human_actions.find(
+    (h) => h.id === payloadString(input.event.payload, "human_action_id"),
+  );
+  if (action?.status !== "done") return;
+  const rule = "6.4/human action completed";
+  const summary = `${action.card_id ?? "项目"} ${action.key}: 已完成；${action.result?.text ?? entryOf(input)?.body ?? ""}`;
+  const to = requesterNotificationRecipient(
+    action.requested_by,
+    input.snapshot.assignments,
+  );
+  if (to)
+    note(
+      input,
+      draft,
+      to,
+      to.kind === "needs_you" ? "needs_you" : "human_action",
+      rule,
+      summary,
+    );
+
+  // Keep the decision-resolved resumption path, including its unowned-item fallback.
+  const resumed = payloadStrings(input.event.payload, "resume_work_items");
+  for (const id of resumed)
+    noteAssignment(
+      input,
+      draft,
+      itemOf(input, id as WorkItemId),
+      "human_action",
+      rule,
+      summary,
+    );
+  for (const item of input.snapshot.work_items) {
+    if (item.card_id !== action.card_id) continue;
+    const waiting =
+      ["blocked", "waiting_decision", "delivered"].includes(item.status) ||
+      (item.kind === "verify" &&
+        ["todo", "ready", "in_progress"].includes(item.status));
+    const owner = assignmentOf(input, item.assignment_id);
+    if (waiting && owner?.scope === "work_item" && isActive(owner))
+      note(
+        input,
+        draft,
+        recipient.assignment(owner.id),
+        "human_action",
+        rule,
+        summary,
+        { work_item_id: item.id },
+      );
   }
 }
 
@@ -1029,16 +1087,28 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "decision_requested":
       routeDecisionRequested(input, draft);
       break;
-    case "decision_followup_due":
-      note(
-        input,
-        draft,
-        recipient.pm_ops(),
-        "decision",
-        "6.4/decision resolved",
-        `${payloadString(input.event.payload, "decision_id")} 已拍板超过 30 分钟，尚无落实结果，请跟进发起人。`,
+    case "decision_followup_due": {
+      const q = input.snapshot.decisions.find(
+        (q) => q.id === payloadString(input.event.payload, "decision_id"),
       );
+      const to =
+        q &&
+        requesterNotificationRecipient(
+          q.raised_by,
+          input.snapshot.assignments,
+          { skip_requester: true },
+        );
+      if (to)
+        note(
+          input,
+          draft,
+          to,
+          to.kind === "needs_you" ? "needs_you" : "decision",
+          "6.4/decision resolved",
+          `${q.id} 已拍板超过 30 分钟，尚无落实结果，请跟进发起人。`,
+        );
       break;
+    }
     case "decision_resolved":
     case "decision_provisionally_resolved":
       routeDecisionResolved(input, draft);
@@ -1052,6 +1122,9 @@ export function routeEvent(input: RouteInput): RouteResult {
       break;
     case "human_action_requested":
       routeHumanAction(input, draft);
+      break;
+    case "human_action_completed":
+      routeHumanActionCompleted(input, draft);
       break;
     case "merge_conflicted":
     case "merge_changes_requested": {

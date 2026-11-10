@@ -48,6 +48,7 @@ import { Store } from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, beforeEach, expect, test } from "vitest";
+import { confirmWorkbenchDecision } from "../test-support/workbench-decision.js";
 import { type CardiganServer, startCardiganServer } from "./server.js";
 
 const project = "p-m4e2e";
@@ -891,9 +892,20 @@ test("a dirty worktree becomes a Needs You decision and is not deleted", async (
   const diff = await h.cardigan("worktree", "diff", seeded.coder.id);
   expect(diff).toContain("notes.txt");
 
-  expect(await h.cardigan("worktree", "keep", seeded.coder.id)).toContain(
-    "已决定保留",
-  );
+  await expect(
+    h.cardigan("worktree", "keep", seeded.coder.id),
+  ).rejects.toThrow();
+  if (!decision) throw new Error("Missing cleanup decision");
+  await confirmWorkbenchDecision({
+    store: h.store,
+    dataDir: h.dataDir,
+    project_id: project,
+    decision_id: decision.id,
+    option: "keep",
+  });
+  expect(
+    h.state().decisions.find((q) => q.id === decision.id)?.resolution,
+  ).toMatchObject({ option: "keep", resolved_by: "human", via: "needs_you" });
   await new Promise((resolve) => setTimeout(resolve, 1_000));
   expect(existsSync(join(seeded.seated.worktree, "notes.txt"))).toBe(true);
   expect(

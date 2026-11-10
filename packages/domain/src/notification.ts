@@ -1,4 +1,4 @@
-import type { Timestamp } from "./entities.js";
+import type { Assignment, Author, Timestamp } from "./entities.js";
 import { type Result, validationFailed } from "./errors.js";
 import type { AssignmentId, CardId, EventId, ProjectId, RunId } from "./ids.js";
 import type { NotificationStatus } from "./states.js";
@@ -35,6 +35,27 @@ export type NotificationRecipient =
   | { readonly kind: "pm_ops" }
   | { readonly kind: "pm_office" }
   | { readonly kind: "needs_you" };
+
+/** A resolved request returns to its owner, then Ops, then the human. Timed follow-ups can skip the requester. */
+export function requesterNotificationRecipient(
+  author: Author,
+  assignments: readonly Assignment[],
+  options: { readonly skip_requester?: boolean } = {},
+): NotificationRecipient | undefined {
+  if (!author.startsWith("assignment:")) return undefined;
+  const owner = assignments.find((a) => `assignment:${a.id}` === author);
+  if (!options.skip_requester && owner?.status === "active")
+    return { kind: "assignment", assignment_id: owner.id };
+  return assignments.some(
+    (a) =>
+      a.status === "active" &&
+      a.scope === "standing" &&
+      a.role_id === "pm" &&
+      a.standing_mode === "ops",
+  )
+    ? { kind: "pm_ops" }
+    : { kind: "needs_you" };
+}
 
 export interface Notification {
   /** Opaque id; the store assigns it (M3.3). */

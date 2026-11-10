@@ -634,6 +634,12 @@ export function needsYou(state: CommandState, now: string) {
         state.decisions.find((d) => d.id === decision.id)?.raised_by ??
           "system",
       ),
+      ...(decision.followup_notice
+        ? {
+            followup_notice: decision.followup_notice,
+            resolution: decision.resolution,
+          }
+        : {}),
       kind: "decision" as const,
       id: decision.id,
       card_id: decision.card_id ?? null,
@@ -696,6 +702,9 @@ export function needsYou(state: CommandState, now: string) {
       triage: action.triage ?? "human",
       triage_rationale: action.triage_rationale ?? null,
       blocked_work_items: action.blocked_work_items,
+      ...(action.completion_notice !== undefined
+        ? { completion_notice: action.completion_notice }
+        : {}),
       due: action.due ?? null,
       opened_at: opened ?? null,
       waited_ms: waitedMs(opened, now) ?? null,

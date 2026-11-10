@@ -10,12 +10,13 @@ import {
   completeHumanAction,
   createCard,
   isRoleActive,
+  listNeedsYou,
   parseId,
   standingTools,
   supersedeCard,
   updateCard,
 } from "@cardigan/domain";
-import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
+import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import {
   resolveExecutionConfig,
   secureDataDirectory,
@@ -692,27 +693,22 @@ function needsYou(args: readonly string[], io: CliIo): number {
       io,
       optional(parsed.flags, "project"),
     );
-    const { decisions, actions, incidents } = store.uow.read((tx) => ({
-      decisions: tx.decisions
-        .list(project_id)
-        .filter(
-          (decision) =>
-            decision.decider === "human" &&
-            ["open", "provisional"].includes(decision.status),
-        ),
-      actions: tx.human_actions
-        .list(project_id)
-        .filter((action) => action.status === "open"),
-      // §13.9: a lost runtime needs the human to decide whether to take over,
-      // so it belongs on the same page as decisions and human actions.
-      incidents: tx.assignments
-        .list(project_id)
-        .filter(
-          (assignment) =>
-            assignment.status === "active" &&
-            ["lost", "unknown"].includes(assignment.runtime_state),
-        ),
-    }));
+    const { decisions, actions, incidents } = store.uow.read((tx) => {
+      const needs = unwrap(
+        listNeedsYou(loadCommandState(tx, project_id), humanActor(project_id)),
+      ).data;
+      return {
+        decisions: needs.decisions,
+        actions: needs.human_actions,
+        incidents: tx.assignments
+          .list(project_id)
+          .filter(
+            (a) =>
+              a.status === "active" &&
+              ["lost", "unknown"].includes(a.runtime_state),
+          ),
+      };
+    });
 
     if (
       decisions.length === 0 &&
@@ -723,9 +719,18 @@ function needsYou(args: readonly string[], io: CliIo): number {
       return EXIT.ok;
     }
     const lines: string[] = [];
-    if (decisions.length > 0) {
-      lines.push(`待你拍板（${decisions.length}）`);
-      for (const decision of decisions) {
+    const pending = decisions.filter((q) => !q.followup_notice);
+    const followups = decisions.filter((q) => q.followup_notice);
+    if (followups.length) {
+      lines.push(`拍板落实（${followups.length}）`);
+      for (const q of followups)
+        lines.push(
+          `  ${q.id}  ${q.card_id ?? "项目"}\n    ${q.followup_notice}\n    已选方案：${q.resolution?.option}\n    请安排落实，并在时间线引用 ${q.id} 记录结果。`,
+        );
+    }
+    if (pending.length > 0) {
+      lines.push(`待你拍板（${pending.length}）`);
+      for (const decision of pending) {
         lines.push(
           [
             `  ${decision.id}${decision.card_id === undefined ? "" : `  ${decision.card_id}`}`,
@@ -747,6 +752,12 @@ function needsYou(args: readonly string[], io: CliIo): number {
     if (actions.length > 0) {
       lines.push(`待你执行（${actions.length}）`);
       for (const action of actions) {
+        if (action.completion_notice !== undefined) {
+          lines.push(
+            `  ${action.id}  ${action.card_id ?? "项目"}\n    ${action.why}\n    执行结果：${action.completion_notice}\n    请恢复发起方或启动项目的 PM Ops。`,
+          );
+          continue;
+        }
         lines.push(
           [
             `  ${action.id}${action.card_id === undefined ? "" : `  ${action.card_id}`}`,

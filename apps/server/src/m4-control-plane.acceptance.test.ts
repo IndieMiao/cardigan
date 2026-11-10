@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
 import { git, type M4Cross, m4Cross } from "../test-support/m4-cross.js";
 import { waitFor } from "../test-support/waits.js";
+import { confirmWorkbenchDecision } from "../test-support/workbench-decision.js";
 import { CleanupExecutor } from "./cleanup-loop.js";
 
 let f: M4Cross | undefined;
@@ -196,7 +197,17 @@ test("E04 §3.6: dirty worktree enters Needs You; keep survives restart without 
   await s.restart();
   await waitFor(() => s.released.length).toBeGreaterThan(0);
   expect(decisions(s)).toHaveLength(1);
-  await s.cli("worktree", "keep", s.primary.owner.id);
+  await expect(s.cli("worktree", "keep", s.primary.owner.id)).rejects.toThrow(
+    "只能由人在 Workbench 确认",
+  );
+  if (!decision) throw new Error("Missing cleanup decision");
+  await confirmWorkbenchDecision({
+    store: s.store(),
+    dataDir: s.dataDir,
+    project_id: s.project.project_id,
+    decision_id: decision.id,
+    option: "keep",
+  });
   await s.restart();
   await new CleanupExecutor({
     store: s.store(),
@@ -217,7 +228,18 @@ test("E05 §3.6: force-clean records the human decision and saves a private patc
   await s.confirm();
   await s.restart();
   await waitFor(() => decisions(s).length).toBe(1);
-  await s.cli("worktree", "clean", s.primary.owner.id, "--force");
+  await expect(
+    s.cli("worktree", "clean", s.primary.owner.id, "--force"),
+  ).rejects.toThrow("只能由人在 Workbench 确认");
+  const decision = decisions(s)[0];
+  if (!decision) throw new Error("Missing cleanup decision");
+  await confirmWorkbenchDecision({
+    store: s.store(),
+    dataDir: s.dataDir,
+    project_id: s.project.project_id,
+    decision_id: decision.id,
+    option: "force_clean",
+  });
   await waitFor(() => existsSync(path)).toBe(false);
   const dir = join(s.dataDir, "cleanup", s.project.project_id),
     patches = readdirSync(dir);

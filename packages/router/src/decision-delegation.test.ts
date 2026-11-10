@@ -64,7 +64,7 @@ test("resolved nonblocking decisions notify their standing initiator with choice
     }).notifications,
   ).toMatchObject([
     {
-      recipient: { kind: "pm_ops" },
+      recipient: { kind: "needs_you" },
       summary: expect.stringContaining("30 分钟"),
     },
   ]);
@@ -85,3 +85,49 @@ test("action triage stays out of Needs You until the PM hands it to a host opera
     }).notifications.map((n) => n.recipient.kind),
   ).toEqual(["needs_you", "pm_office"]);
 });
+
+test.each(["active", "suspended", "released"] as const)(
+  "decision follow-up recipient matches shared request routing when requester is %s",
+  (status) => {
+    for (const ops of [false, true]) {
+      const q = decision({
+        raised_by: "assignment:A-8",
+        status: "resolved",
+        options: [{ key: "go", description: "继续", impact: "安排后续工作" }],
+        resolution: { option: "go" },
+      });
+      const assignments = [
+        assignment("A-8", { status }),
+        ...(ops
+          ? [
+              assignment("A-9", {
+                scope: "standing",
+                role_id: "pm",
+                standing_mode: "ops",
+              }),
+            ]
+          : []),
+      ];
+      const state = snapshot({ decisions: [q], assignments });
+      const routed = routeEvent({
+        event: event("decision_resolved", {
+          decision_id: q.id,
+          resume_work_items: [],
+        }),
+        snapshot: state,
+      });
+      expect(routed.notifications.map((n) => n.recipient)).toEqual([
+        status === "active"
+          ? { kind: "assignment", assignment_id: "A-8" }
+          : { kind: ops ? "pm_ops" : "needs_you" },
+      ]);
+      const reminder = routeEvent({
+        event: event("decision_followup_due", { decision_id: q.id }),
+        snapshot: state,
+      });
+      expect(reminder.notifications.map((n) => n.recipient)).toEqual([
+        { kind: ops ? "pm_ops" : "needs_you" },
+      ]);
+    }
+  },
+);

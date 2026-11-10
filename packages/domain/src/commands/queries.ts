@@ -10,8 +10,10 @@ import type {
   WorkItem,
 } from "../entities.js";
 import type { CardId } from "../ids.js";
+import { requesterNotificationRecipient } from "../notification.js";
 import type { Clock } from "../ports.js";
 import { type CommandDraft, type CommandState, command } from "./core.js";
+import { decisionFollowupNeedsHuman } from "./decision-followup.js";
 import { isPmOps } from "./delegation.js";
 import { latestMergeCheck } from "./merge-check.js";
 import { resolveCardTemplate } from "./templates.js";
@@ -285,7 +287,9 @@ export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
         .list("decisions")
         .filter(
           (q) =>
-            q.decider === "human" && ["open", "provisional"].includes(q.status),
+            (q.decider === "human" &&
+              ["open", "provisional"].includes(q.status)) ||
+            decisionFollowupNeedsHuman(state, q),
         )
         .map((q) => {
           // Project decisions have no card timeline; their request event is the creation fact.
@@ -308,6 +312,12 @@ export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
             opened && now ? Date.parse(now) - Date.parse(opened) : Number.NaN;
           return {
             ...q,
+            ...(q.status === "resolved"
+              ? {
+                  followup_notice:
+                    "拍板已完成，尚无落实结果；当前无 PM Ops 接手，请安排跟进。",
+                }
+              : {}),
             why: why(q.question),
             opened_at: opened ?? null,
             waited_ms: Number.isFinite(elapsed) ? Math.max(0, elapsed) : null,
@@ -322,8 +332,30 @@ export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
         }),
       human_actions: d
         .list("human_actions")
-        .filter((h) => h.status === "open" && h.triage !== "pm_ops")
-        .map((h) => ({ ...h, why: why(h.why_human) })),
+        .filter(
+          (h) =>
+            (h.status === "open" && h.triage !== "pm_ops") ||
+            (h.status === "done" &&
+              requesterNotificationRecipient(h.requested_by, state.assignments)
+                ?.kind === "needs_you" &&
+              (!h.card_id ||
+                state.cards.some(
+                  (c) =>
+                    c.id === h.card_id &&
+                    !["done", "cancelled"].includes(c.status),
+                ))),
+        )
+        .map((h) => ({
+          ...h,
+          why: why(
+            h.status === "done"
+              ? "已完成，但发起方不可用且无活跃 PM Ops 接手"
+              : h.why_human,
+          ),
+          ...(h.status === "done"
+            ? { completion_notice: h.result?.text ?? "" }
+            : {}),
+        })),
     };
   });
 }
