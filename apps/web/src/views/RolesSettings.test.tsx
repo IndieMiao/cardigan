@@ -98,7 +98,7 @@ const history: RoleHistoryView = {
       changes: ["instructions", "abilities"],
       created_at: "2026-11-10T10:00:00.000Z",
       actor: "human",
-      author_display: "你",
+      author_display: "所有者",
     },
     {
       version: 1,
@@ -108,7 +108,7 @@ const history: RoleHistoryView = {
       changes: [],
       created_at: "2026-11-09T10:00:00.000Z",
       actor: "human",
-      author_display: "你",
+      author_display: "所有者",
     },
   ],
 };
@@ -175,7 +175,7 @@ test("detail shows every field, the version-pin notice, the diff and history", a
   expect(historyList.textContent).toContain(
     "编辑：改动 instructions、abilities",
   );
-  expect(historyList.textContent).toContain("你");
+  expect(historyList.textContent).toContain("所有者");
   expect(within(historyList).getAllByRole("button")).toHaveLength(1);
 });
 

@@ -1,8 +1,10 @@
 // biome-ignore-all lint/suspicious/noArrayIndexKey: delivery and review arrays are immutable record snapshots with no item IDs.
+
 import type { ReactNode } from "react";
 import type { CardDetail, TimelineEntryView } from "../api.js";
 import { decisionOption, decisionTitle } from "../decision-labels.js";
 import { routeHash } from "../route.js";
+import { EmployeeIdentity } from "./EmployeeIdentity.js";
 import { IdTag, LongContent, StatusTag } from "./Foundation.js";
 import { Markdown } from "./Operations.js";
 import { TimelineHeader } from "./TimelineHeader.js";
@@ -225,11 +227,21 @@ export function TimelineContent({
         )}
         <div className="entry-meta">
           <span>
-            {resolved
-              ? "已记录拍板原话"
-              : decision.decider === "human"
-                ? "由你拍板"
-                : "由指定角色拍板"}
+            {resolved ? (
+              "已记录拍板原话"
+            ) : decision.decider === "human" ? (
+              <>
+                由{" "}
+                <EmployeeIdentity
+                  {...decision.decider_view}
+                  author="human"
+                  showTitle={false}
+                />{" "}
+                拍板
+              </>
+            ) : (
+              "由指定角色拍板"
+            )}
           </span>
           {!resolved && decision.blocking && <span>影响工作继续</span>}
         </div>

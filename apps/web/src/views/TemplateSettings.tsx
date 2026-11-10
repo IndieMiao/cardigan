@@ -16,7 +16,7 @@ const mergeLabels = { none: "不合并", confirm: "确认后合并", auto: "自�
 const completionLabel = (t: TemplateDefinition) =>
   t.completion.mode === "human_mark_done"
     ? "人标记完成"
-    : `审核完成（${t.completion.reviewer === "human" ? "人" : t.completion.reviewer}）`;
+    : `审核完成（${t.completion.reviewer === "human" ? "所有者" : t.completion.reviewer}）`;
 const empty: TemplateDefinition = {
   id: "",
   title: "",

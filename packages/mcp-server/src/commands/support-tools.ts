@@ -1,10 +1,12 @@
 import {
   type Actor,
   type AttachmentStore,
+  authorView,
   type CardView,
   type Clock,
   type CommandEffect,
   type CommandState,
+  decisionAuthorView,
   finishRun,
   heartbeat,
   listNeedsYou,
@@ -171,13 +173,42 @@ export function supportTools(options: SupportToolOptions = {}) {
         "List open human decisions and actions in this project (PM only).",
       input: z.object({}),
       handler: (_params, context) =>
-        readProject(context, (state, actor) =>
-          listNeedsYou(
+        readProject(context, (state, actor) => {
+          const result = listNeedsYou(
             state,
             actor,
             options.clock ?? { now: () => new Date().toISOString() },
-          ),
-        ),
+          );
+          if (!result.ok) return result;
+          return {
+            ...result,
+            value: {
+              ...result.value,
+              data: {
+                ...result.value.data,
+                decisions: result.value.data.decisions.map((decision) => {
+                  const stored = state.decisions.find(
+                    (d) => d.id === decision.id,
+                  );
+                  return {
+                    ...decision,
+                    ...(stored ? decisionAuthorView(state, stored) : {}),
+                  };
+                }),
+                human_actions: result.value.data.human_actions.map(
+                  (action) => ({
+                    ...action,
+                    ...authorView(
+                      state,
+                      state.human_actions.find((a) => a.id === action.id)
+                        ?.requested_by ?? "system",
+                    ),
+                  }),
+                ),
+              },
+            },
+          };
+        }),
     }),
   ];
 }

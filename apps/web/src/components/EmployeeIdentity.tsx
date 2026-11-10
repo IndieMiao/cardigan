@@ -59,6 +59,7 @@ function EmployeeAvatar({
 
 export function EmployeeIdentity({
   employee,
+  member,
   author,
   author_role,
   author_display,
@@ -88,19 +89,24 @@ export function EmployeeIdentity({
     },
     [],
   );
-  const role = employee?.role_id ?? author_role ?? "Agent";
+  const profile = member ?? employee;
+  const role = member
+    ? "所有者"
+    : (employee?.role_id ?? author_role ?? "Agent");
   const name =
-    employee?.name ??
+    profile?.name ??
+    author_display ??
     (author === "human"
-      ? "你"
+      ? "所有者"
       : author === "system"
         ? "系统"
-        : (author_display ?? `未命名的 ${role}`));
-  const src = avatarPath(employee?.avatar);
+        : `未命名的 ${role}`);
+  const src = avatarPath(profile?.avatar);
   const initial = Array.from(
-    employee?.name ?? (name === "你" ? "人" : name === "系统" ? "系" : role),
+    profile?.name ??
+      (author === "human" ? name : name === "系统" ? "系" : role),
   )[0]?.toUpperCase();
-  const color = employee ? colorIndex(employee.id) : "role";
+  const color = profile ? colorIndex(profile.id) : "role";
   const keepOpen = () => clearTimeout(closeTimer.current);
   const leave = () => {
     keepOpen();
@@ -120,14 +126,14 @@ export function EmployeeIdentity({
       {!avatarOnly && (
         <span className="employee-label">
           <strong>{name}</strong>
-          {showTitle && employee?.title && (
-            <span className="employee-title">{employee.title}</span>
+          {showTitle && profile?.title && (
+            <span className="employee-title">{profile.title}</span>
           )}
         </span>
       )}
     </>
   );
-  if (!employee) {
+  if (!profile) {
     if (metadata)
       return (
         <Tooltip content={metadata}>
@@ -163,7 +169,7 @@ export function EmployeeIdentity({
           ref={trigger}
           type="button"
           className="employee-identity employee-trigger"
-          aria-label={`${name}的员工卡片`}
+          aria-label={`${name}的${member ? "成员" : "员工"}卡片`}
           onPointerEnter={(event) => {
             if (event.pointerType === "touch") return;
             keepOpen();
@@ -187,7 +193,7 @@ export function EmployeeIdentity({
           className="popover-content employee-card"
           sideOffset={6}
           align="start"
-          aria-label={`${name}的员工卡片`}
+          aria-label={`${name}的${member ? "成员" : "员工"}卡片`}
           onPointerEnter={keepOpen}
           onPointerLeave={leave}
           onOpenAutoFocus={(event) => event.preventDefault()}
@@ -212,12 +218,12 @@ export function EmployeeIdentity({
           <EmployeeAvatar src={src} initial={initial} color={color} size={64} />
           <div className="employee-card-body">
             <p className="employee-card-heading">
-              <strong>{employee.name}</strong>
-              {employee.title && (
-                <span className="employee-title">{employee.title}</span>
+              <strong>{profile.name}</strong>
+              {profile.title && (
+                <span className="employee-title">{profile.title}</span>
               )}
             </p>
-            {employee.bio?.trim() && (
+            {employee?.bio?.trim() && (
               <p className="employee-card-bio">{employee.bio}</p>
             )}
             <p className="employee-card-meta">角色：{role}</p>
