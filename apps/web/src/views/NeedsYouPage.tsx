@@ -6,6 +6,7 @@ import {
   type NeedsAction,
   type NeedsDecision,
   type NeedsPage,
+  type NoticeView,
 } from "../api.js";
 import { EmployeeIdentity } from "../components/EmployeeIdentity.js";
 import {
@@ -859,8 +860,104 @@ function NeedsContent({
               ))}
             </section>
           )}
+          {!!data.notices?.length && (
+            <Notices notices={data.notices} {...props} />
+          )}
         </>
       )}
+    </section>
+  );
+}
+
+/** §7.4 知会: delegated merges and decisions; informational, never blocking. */
+function Notices({
+  notices,
+  client,
+  projectId,
+  done,
+}: {
+  notices: readonly NoticeView[];
+  client: CardiganClient;
+  projectId: string;
+  done: () => void;
+}) {
+  const unread = notices.filter((n) => !n.read);
+  const [busy, setBusy] = useState(false),
+    [error, setError] = useState("");
+  const mark = async (ids: readonly string[]) => {
+    if (busy || !ids.length) return;
+    setBusy(true);
+    setError("");
+    try {
+      await client.markNoticesRead(projectId, ids);
+      done();
+    } catch (cause) {
+      setError(describeWriteError(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <section className="needs-group" aria-label="知会">
+      <h2>知会（未读 {unread.length}）</h2>
+      <p className="hint">
+        PM 代为确认的合并和代拍的决定，不需要你处理；有疑问可在卡片里追问。
+      </p>
+      {unread.length > 1 && (
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => mark(unread.map((n) => n.id))}
+        >
+          全部标为已读
+        </button>
+      )}
+      {error && <p role="alert">{error}</p>}
+      {notices.map((n) => (
+        <article
+          key={n.id}
+          className={n.read ? "needs-item read" : "needs-item"}
+          aria-label={`知会 ${n.decision_id}`}
+        >
+          <header className="needs-meta">
+            <StatusTag
+              status={n.read ? "done" : "active"}
+              label={
+                n.kind === "merge"
+                  ? n.resolved_by === "system"
+                    ? "超时自动合并"
+                    : "PM 代确认合并"
+                  : "PM 代拍"
+              }
+            />
+            <IdTag id={n.decision_id} label="拍板" />
+            {n.card_id && <CardLink projectId={projectId} id={n.card_id} />}
+            <Time value={n.at} />
+          </header>
+          {n.question && <p className="hint">{n.question}</p>}
+          <Markdown body={n.body} />
+          <footer>
+            <a
+              href={routeHash({
+                kind: "decision-history",
+                projectId,
+                ...(n.card_id ? { filters: { card_id: n.card_id } } : {}),
+              })}
+            >
+              查看拍板记录
+            </a>
+            {!n.read && (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => mark([n.id])}
+              >
+                标为已读
+              </button>
+            )}
+          </footer>
+        </article>
+      ))}
     </section>
   );
 }

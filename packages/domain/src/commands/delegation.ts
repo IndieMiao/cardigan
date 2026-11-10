@@ -1,8 +1,10 @@
-import type { Assignment, Decision, ToolName } from "../entities.js";
+import type { Assignment, Card, Decision, ToolName } from "../entities.js";
+import type { CardId } from "../ids.js";
 import {
   type DecisionCategory,
   decisionDelegation,
   highRiskCategories,
+  pmMergeConfirmation,
 } from "../preferences.js";
 import { type CommandDraft, ensure } from "./core.js";
 
@@ -31,37 +33,98 @@ export function isPmOps(d: CommandDraft) {
     d.assignment.standing_mode === "ops"
   );
 }
-/** Old uncategorized decisions remain human-only until explicitly classified. */
-export function delegationAllowed(
-  d: CommandDraft,
-  q: Pick<Decision, "category" | "trigger">,
-) {
+/**
+ * D12 high-risk categories and scope changes on a card keep its merge
+ * confirmation with the human (§7.4): decisions on or affecting the card,
+ * plus the decision the card was created from (`source.kind=decision`), so
+ * work derived from a project-level sensitive decision is not "ordinary".
+ * Withdrawn questions on the card no longer count.
+ */
+export function mergeNeedsHuman(
+  decisions: readonly Decision[],
+  cards: readonly Pick<Card, "id" | "source">[],
+  card_id: CardId,
+): string | undefined {
+  const card = cards.find((c) => c.id === card_id);
+  const sourceId =
+    card?.source.kind === "decision" ? card.source.decision_id : undefined;
+  const sensitive = decisions.find(
+    (q) =>
+      // System confirmations (merge, worktree cleanup) are not card content.
+      q.trigger !== "merge_confirmation" &&
+      q.trigger !== "worktree_cleanup" &&
+      (q.id === sourceId ||
+        (q.status !== "withdrawn" &&
+          (q.card_id === card_id || q.affected_cards.includes(card_id)))) &&
+      (q.category === "scope_change" ||
+        (!!q.category && highRiskCategories.includes(q.category))),
+  );
+  return sensitive
+    ? `卡片${sensitive.id === sourceId ? "来源拍板" : ""}涉及${sensitive.category === "scope_change" ? "需求范围变化" : "高风险事项（花钱、账号、权限或删除数据）"}（${sensitive.id}），合并须由人确认。`
+    : undefined;
+}
+/** Human-only merge confirmation: sensitive card or PM handed it over (§7.4). */
+export function mergeRequiresHuman(
+  state: {
+    readonly decisions: readonly Decision[];
+    readonly cards: readonly Pick<Card, "id" | "source">[];
+  },
+  q: Decision,
+): boolean {
   return (
-    q.trigger !== "merge_confirmation" &&
-    !!q.category &&
-    !highRiskCategories.includes(q.category) &&
-    decisionDelegation(
-      d.list("project_preferences").find((p) => p.id === d.state.project_id),
-    )[q.category]
+    q.trigger === "merge_confirmation" &&
+    (!!q.human_required_reason ||
+      !q.card_id ||
+      !!mergeNeedsHuman(state.decisions, state.cards, q.card_id))
   );
 }
-export function delegationAuthority(
-  d: CommandDraft,
-  category: DecisionCategory,
-) {
-  const preference = d
-    .list("project_preferences")
-    .find((p) => p.id === d.state.project_id);
-  const audit = [...d.state.events, ...d.events]
+type DelegationSubject = Pick<
+  Decision,
+  "category" | "trigger" | "card_id" | "human_required_reason"
+>;
+function projectPreference(d: CommandDraft) {
+  return d.list("project_preferences").find((p) => p.id === d.state.project_id);
+}
+/** Old uncategorized decisions remain human-only until explicitly classified. */
+export function delegationAllowed(d: CommandDraft, q: DelegationSubject) {
+  if (q.trigger === "merge_confirmation")
+    return (
+      pmMergeConfirmation(projectPreference(d)) &&
+      !q.human_required_reason &&
+      !!q.card_id &&
+      !mergeNeedsHuman(d.list("decisions"), d.list("cards"), q.card_id)
+    );
+  return (
+    !!q.category &&
+    !highRiskCategories.includes(q.category) &&
+    decisionDelegation(projectPreference(d))[q.category]
+  );
+}
+function preferenceAudit(d: CommandDraft, preference: string) {
+  return [...d.state.events, ...d.events]
     .filter(
       (e) =>
         e.type === "project_preferences_updated" &&
         typeof e.payload === "object" &&
         e.payload !== null &&
         "preference" in e.payload &&
-        e.payload.preference === "decision_delegation",
+        e.payload.preference === preference,
     )
     .at(-1);
+}
+/** Policy evidence for a delegated merge confirmation. */
+export function mergeDelegationAuthority(d: CommandDraft) {
+  const audit = preferenceAudit(d, "pm_merge_confirmation");
+  return projectPreference(d)?.pm_merge_confirmation !== undefined
+    ? `project:${d.state.project_id}/pm_merge_confirmation${audit ? `/event:${audit.id}` : ""}`
+    : `project:${d.state.project_id}/default-pm-merge-confirmation`;
+}
+export function delegationAuthority(
+  d: CommandDraft,
+  category: DecisionCategory,
+) {
+  const preference = projectPreference(d);
+  const audit = preferenceAudit(d, "decision_delegation");
   return preference?.decision_delegation?.[category] !== undefined
     ? `project:${d.state.project_id}/decision_delegation/${category}${audit ? `/event:${audit.id}` : ""}`
     : `project:${d.state.project_id}/default-decision-delegation/${category}`;
@@ -80,10 +143,10 @@ export function assignDecision(d: CommandDraft, q: Decision): Decision {
     return {
       ...q,
       decider: "role:pm",
-      delegation_authority: delegationAuthority(
-        d,
-        q.category as DecisionCategory,
-      ),
+      delegation_authority:
+        q.trigger === "merge_confirmation"
+          ? mergeDelegationAuthority(d)
+          : delegationAuthority(d, q.category as DecisionCategory),
     };
   if (q.decider === "role:pm") return { ...q, decider: "human" };
   return q;
@@ -93,11 +156,13 @@ export function handoffDecision(
   q: Decision,
   reason: string,
   assignmentId?: string,
+  humanRequired = false,
 ) {
   d.put("decisions", {
     ...q,
     decider: "human",
     context: `${q.context}\n\n${reason}`,
+    ...(humanRequired ? { human_required_reason: reason } : {}),
   });
   d.emit(
     "decision_requested",

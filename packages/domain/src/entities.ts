@@ -378,6 +378,8 @@ export interface DecisionResolution {
   readonly external_ref?: string;
   readonly batch?: string;
   readonly proxy_authority?: string;
+  /** Notice shown to the human after a delegated resolution (§7.4). */
+  readonly notice?: string;
   readonly at: Timestamp;
 }
 interface DecisionFields {
@@ -396,6 +398,8 @@ interface DecisionFields {
   readonly category?: DecisionCategory;
   /** Persisted policy evidence for decisions assigned to PM Ops. */
   readonly delegation_authority?: string;
+  /** Set when PM Ops hands a merge confirmation to the human; disables auto-merge. */
+  readonly human_required_reason?: string;
   readonly question: string;
   readonly context: string;
   readonly options: readonly {

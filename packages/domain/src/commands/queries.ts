@@ -17,6 +17,7 @@ import { type CommandDraft, type CommandState, command } from "./core.js";
 import { decisionFollowupNeedsHuman } from "./decision-followup.js";
 import { isPmOps } from "./delegation.js";
 import { failedConfirmedMergeCheck, latestMergeCheck } from "./merge-check.js";
+import { pmMergeBlockers } from "./merge-delegation.js";
 import { resolveCardTemplate } from "./templates.js";
 
 function affects(d: CommandDraft, q: Decision, id: CardId) {
@@ -244,6 +245,18 @@ export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
                     q.decider === "role:pm" &&
                     ["open", "provisional"].includes(q.status),
                 ),
+              // §7.4: why PM Ops cannot choose merge yet (empty = allowed).
+              merge_blockers: Object.fromEntries(
+                d
+                  .list("decisions")
+                  .filter(
+                    (q) =>
+                      q.decider === "role:pm" &&
+                      q.trigger === "merge_confirmation" &&
+                      q.status === "open",
+                  )
+                  .map((q) => [q.id, pmMergeBlockers(state, q)]),
+              ),
               human_actions: d
                 .list("human_actions")
                 .filter((h) => h.status === "open" && h.triage === "pm_ops"),

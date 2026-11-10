@@ -218,6 +218,8 @@ export function fakeClient(
       throw new Error("rollbackRole not stubbed");
     },
     setDelegation: async () => {},
+    setPmMergeConfirmation: async () => {},
+    markNoticesRead: async () => {},
     decisionHistory: async () => ({ decisions: [] }),
     needsYou: async () => ({ decisions: [], human_actions: [], incidents: [] }),
     recordDecision: async () => undefined,

@@ -1,0 +1,129 @@
+import type { Actor, Event } from "../entities.js";
+import type { CardId, DecisionId, EventId } from "../ids.js";
+import {
+  type CommandPorts,
+  type CommandState,
+  command,
+  ensure,
+} from "./core.js";
+
+/**
+ * Needs You "知会" (§7.4): every delegated resolution (PM Ops on project
+ * authorization, PM merge confirmation, timed auto-merge) becomes a
+ * non-blocking notice derived from its resolution event. Read state is an
+ * append-only `notices_read` event, so no stored entity is needed.
+ */
+export interface Notice {
+  readonly id: EventId;
+  readonly kind: "merge" | "decision";
+  readonly card_id: CardId | null;
+  readonly decision_id: DecisionId;
+  readonly question: string;
+  readonly option: string;
+  readonly resolved_by: string;
+  readonly body: string;
+  readonly proxy_authority: string | null;
+  readonly at: string;
+  readonly read: boolean;
+}
+const field = (e: Event, key: string) => {
+  const value =
+    typeof e.payload === "object" &&
+    e.payload !== null &&
+    !Array.isArray(e.payload)
+      ? (e.payload as Record<string, unknown>)[key]
+      : undefined;
+  return typeof value === "string" ? value : undefined;
+};
+function readIds(events: readonly Event[]) {
+  const ids = new Set<string>();
+  for (const e of events)
+    if (
+      e.type === "notices_read" &&
+      typeof e.payload === "object" &&
+      e.payload !== null &&
+      "notice_ids" in e.payload &&
+      Array.isArray(e.payload.notice_ids)
+    )
+      for (const id of e.payload.notice_ids)
+        if (typeof id === "string") ids.add(id);
+  return ids;
+}
+function noticeBody(e: Event) {
+  const notice = field(e, "notice");
+  if (notice) return notice;
+  const option = field(e, "option_description") || field(e, "option") || "";
+  const rationale = field(e, "rationale");
+  return rationale ? `${option}。理由：${rationale}` : option;
+}
+/** Newest first; one notice per delegated resolution, even for multi-card decisions. */
+export function notices(state: CommandState): readonly Notice[] {
+  const read = readIds(state.events);
+  const seen = new Set<string>();
+  const out: Notice[] = [];
+  // seq is per card stream (§6.1); order across cards by time, then by the
+  // time-ordered event id, so a newer notice is never pushed out by older ones.
+  const chronological = [...state.events].sort(
+    (a, b) =>
+      Date.parse(a.created_at) - Date.parse(b.created_at) ||
+      (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+  );
+  for (const e of chronological) {
+    if (
+      !["decision_resolved", "decision_provisionally_resolved"].includes(
+        e.type,
+      ) ||
+      field(e, "via") !== "delegated"
+    )
+      continue;
+    const decision_id = field(e, "decision_id") as DecisionId | undefined;
+    if (!decision_id) continue;
+    const q = state.decisions.find((q) => q.id === decision_id);
+    const key = `${decision_id}/${e.type}/${e.created_at}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      id: e.id,
+      kind: q?.trigger === "merge_confirmation" ? "merge" : "decision",
+      card_id: q?.card_id ?? e.card_id ?? null,
+      decision_id,
+      question: q?.question ?? "",
+      option: field(e, "option") ?? "",
+      resolved_by: e.actor.kind === "system" ? "system" : "pm",
+      body: noticeBody(e),
+      proxy_authority: field(e, "proxy_authority") ?? null,
+      at: e.created_at,
+      read: read.has(e.id),
+    });
+  }
+  return out.reverse();
+}
+/** Human-only; marking is idempotent and never blocks or changes any decision. */
+export function markNoticesRead(
+  state: CommandState,
+  actor: Actor,
+  p: { readonly notice_ids: readonly string[] },
+  ports: CommandPorts,
+) {
+  return command(state, actor, "mark_notices_read", ports, (d) => {
+    ensure(
+      actor.kind === "human",
+      "unauthorized",
+      "Only the human can mark notices as read",
+    );
+    ensure(
+      Array.isArray(p.notice_ids) && p.notice_ids.length > 0,
+      "validation_failed",
+      "notice_ids is required",
+    );
+    const all = notices(state);
+    const unread = p.notice_ids.filter((id) => {
+      const notice = all.find((n) => n.id === id);
+      ensure(notice, "not_found", `Notice ${id} was not found`);
+      return !notice.read;
+    });
+    if (unread.length)
+      d.emit("notices_read", undefined, { notice_ids: [...new Set(unread)] });
+    return { notice_ids: unread };
+  });
+}

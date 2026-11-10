@@ -122,9 +122,23 @@ test("C-37 PM instructions explain authorization limits, action triage and imple
     "triage_human_action",
     "主机操作",
     "四类高风险永不代拍",
-    "合并确认仍走原有流程",
+    "合并确认默认由你代确认",
     "拍板解决后必须执行所选方案，并在卡片时间线写一句执行结果",
     "30 分钟未落实提醒",
+  ])
+    expect(prompt).toContain(rule);
+});
+
+test("C-49 PM instructions cover merge confirmation preconditions and notices", () => {
+  const prompt = corePromptFor("pm");
+  for (const rule of [
+    "merge_blockers",
+    "合并闸门检查通过、所有验证项通过、没有未处理的 must_fix",
+    "只能 hold、request_changes",
+    "需求范围变化时，确认直接交人",
+    "必须传 notice（知会）",
+    "常规合并一句话即可",
+    "改了什么、对人有什么影响、需要注意的风险或后续",
   ])
     expect(prompt).toContain(rule);
 });
