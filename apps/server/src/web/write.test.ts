@@ -154,9 +154,13 @@ test("Needs You decisions preserve a human quote, supply a default, and reject w
     body: { error: { code: "validation_failed" } },
   });
   expect(snapshot()).toBe(before);
-  expect(
-    await request(resolvePath(q), { option: "go", raw_quote: "  选 go  " }),
-  ).toMatchObject({
+  const payload = { option: "go", raw_quote: "  选 go  " };
+  const headers = { "Idempotency-Key": "resolve-once" };
+  const resolved = await request(resolvePath(q), payload, headers);
+  const committed = snapshot();
+  expect(await request(resolvePath(q), payload, headers)).toEqual(resolved);
+  expect(snapshot()).toBe(committed);
+  expect(resolved).toMatchObject({
     status: 200,
     body: {
       resolution: {
@@ -210,9 +214,13 @@ test("human action completion validates result, completes once, and rejects a te
     before = snapshot();
   expect(await request(url, { text: "" })).toMatchObject({ status: 400 });
   expect(snapshot()).toBe(before);
-  expect(
-    await request(url, { text: "Connected", attachments: [] }),
-  ).toMatchObject({
+  const payload = { text: "Connected", attachments: [] };
+  const headers = { "Idempotency-Key": "complete-once" };
+  const completed = await request(url, payload, headers);
+  const committed = snapshot();
+  expect(await request(url, payload, headers)).toEqual(completed);
+  expect(snapshot()).toBe(committed);
+  expect(completed).toMatchObject({
     status: 200,
     body: { status: "done", result: { text: "Connected" } },
   });
@@ -321,7 +329,11 @@ test("attachment upload shares MCP storage, verifies digest and retains an unref
     await request(cardPath("attachments"), { ...p, sha256: "0".repeat(64) }),
   ).toMatchObject({ status: 400 });
   expect(snapshot()).toBe(before);
-  const uploaded = await request(cardPath("attachments"), p);
+  const headers = { "Idempotency-Key": "upload-once" };
+  const uploaded = await request(cardPath("attachments"), p, headers);
+  const committed = snapshot();
+  expect(await request(cardPath("attachments"), p, headers)).toEqual(uploaded);
+  expect(snapshot()).toBe(committed);
   expect(uploaded).toMatchObject({
     status: 200,
     body: { sha256: digest, uploaded_by: "human" },
@@ -532,4 +544,189 @@ test("activity exposes event payloads so the UI can explain instructions and dec
       }),
     ],
   });
+});
+
+test("concurrent retries return the original comment and commit only one event", async () => {
+  const payload = { body: "只发一次", mentions: [] };
+  const headers = { "Idempotency-Key": "comment-once" };
+  const before = s.state();
+  const [first, retry] = await Promise.all([
+    request(cardPath("comments"), payload, headers),
+    request(cardPath("comments"), payload, headers),
+  ]);
+  expect(first.status).toBe(200);
+  expect(retry).toEqual(first);
+  expect(s.state().timeline.length - before.timeline.length).toBe(1);
+  expect(s.state().events.length - before.events.length).toBe(1);
+  const after = snapshot();
+  // JSON key order is irrelevant; subsequent state changes do not alter the receipt.
+  s.cancel();
+  expect(
+    await request(
+      cardPath("comments"),
+      { mentions: [], body: payload.body },
+      headers,
+    ),
+  ).toEqual(first);
+  expect(
+    s.state().timeline.filter((entry) => entry.body === payload.body),
+  ).toHaveLength(1);
+  expect(after).not.toBe(snapshot());
+});
+
+test("same-key content or route conflicts return a Chinese 409 without changes", async () => {
+  const headers = { "Idempotency-Key": "conflict" };
+  const payload = { body: "原文", work_item_id: s.primary.owner.work_item_id };
+  const first = await request(cardPath("comments"), payload, headers);
+  expect(first.status).toBe(200);
+  const before = snapshot();
+  for (const [url, body] of [
+    [cardPath("comments"), { ...payload, body: "修改过的正文" }],
+    [cardPath("instructions"), payload],
+  ] as const) {
+    expect(await request(url, body, headers)).toMatchObject({
+      status: 409,
+      body: {
+        error: {
+          code: "idempotency_conflict",
+          message: expect.stringContaining("不同的请求内容"),
+        },
+      },
+    });
+  }
+  expect(snapshot()).toBe(before);
+  expect(await request(cardPath("comments"), payload, headers)).toEqual(first);
+});
+
+test("legacy comments without a key still execute on every request", async () => {
+  const before = s.state();
+  const first = await request(cardPath("comments"), { body: "旧客户端" });
+  const second = await request(cardPath("comments"), { body: "旧客户端" });
+  expect(first.status).toBe(200);
+  expect(second.status).toBe(200);
+  expect(first.body.id).not.toBe(second.body.id);
+  expect(s.state().timeline.length - before.timeline.length).toBe(2);
+  expect(s.state().events.length - before.events.length).toBe(2);
+});
+
+test("cached writes still require a live session, valid Origin and JSON", async () => {
+  const headers = { "Idempotency-Key": "authenticated-retry" };
+  const payload = { body: "需要认证" };
+  const first = await request(cardPath("comments"), payload, headers);
+  const before = snapshot();
+  expect(first.status).toBe(200);
+  expect(
+    await request(cardPath("comments"), payload, {
+      ...headers,
+      origin: "https://foreign.invalid",
+    }),
+  ).toMatchObject({ status: 403 });
+  expect(
+    await request(cardPath("comments"), payload, {
+      ...headers,
+      "content-type": "text/plain",
+    }),
+  ).toMatchObject({ status: 415 });
+  // Rotating sessions does not rotate the single human identity.
+  const login = await fetch(`${web.url}/api/login`, {
+    method: "POST",
+    headers: { origin: web.url, "content-type": "application/json" },
+    body: JSON.stringify({ password }),
+  });
+  const secondCookie = (login.headers.get("set-cookie") ?? "").split(
+    ";",
+  )[0] as string;
+  await login.body?.cancel();
+  expect(
+    await request(cardPath("comments"), payload, {
+      ...headers,
+      cookie: secondCookie,
+    }),
+  ).toEqual(first);
+  s.store().setWebPassword(password);
+  expect(await request(cardPath("comments"), payload, headers)).toMatchObject({
+    status: 401,
+  });
+  expect(snapshot()).toBe(before);
+});
+
+test("failed persistence rolls back the effect and leaves the key available", async () => {
+  const headers = { "Idempotency-Key": "rollback" };
+  const payload = { body: "事务测试" };
+  const before = snapshot();
+  s.store().database.exec(
+    "CREATE TRIGGER reject_receipt BEFORE INSERT ON idempotency BEGIN SELECT RAISE(ABORT, 'receipt failure'); END",
+  );
+  expect(await request(cardPath("comments"), payload, headers)).toMatchObject({
+    status: 500,
+  });
+  expect(snapshot()).toBe(before);
+  s.store().database.exec("DROP TRIGGER reject_receipt");
+  expect(await request(cardPath("comments"), payload, headers)).toMatchObject({
+    status: 200,
+  });
+});
+
+test("human receipts expire after 24 hours without expiring MCP or other projects", async () => {
+  const store = s.store(),
+    key = "retained-key";
+  const params = { project_id: s.project.project_id, key, request: {} };
+  expect(
+    store.runIdempotent(
+      { ...params, assignment_id: s.primary.owner.id },
+      () => "MCP",
+    ).ok,
+  ).toBe(true);
+  expect(
+    store.runHumanIdempotent(
+      { ...params, project_id: "other-project" },
+      () => "other",
+    ).ok,
+  ).toBe(true);
+  const headers = { "Idempotency-Key": key },
+    payload = { body: "一天内重试" };
+  const first = await request(cardPath("comments"), payload, headers);
+  expect(first.status).toBe(200);
+  store.database
+    .prepare("UPDATE idempotency SET created_at = ?")
+    .run(new Date(Date.now() - 23 * 60 * 60 * 1000).toISOString());
+  expect(await request(cardPath("comments"), payload, headers)).toEqual(first);
+  store.database
+    .prepare("UPDATE idempotency SET created_at = ?")
+    .run(new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString());
+  const next = await request(cardPath("comments"), payload, headers);
+  expect(next.status).toBe(200);
+  expect(next.body.id).not.toBe(first.body.id);
+  expect(
+    store.runIdempotent(
+      { ...params, assignment_id: s.primary.owner.id },
+      () => "wrong",
+    ),
+  ).toMatchObject({ ok: true, value: { value: "MCP", replayed: true } });
+  expect(
+    store.database
+      .prepare("SELECT response FROM idempotency WHERE project_id = ?")
+      .get("other-project")?.response,
+  ).toBe('"other"');
+});
+
+test("invalid keys are rejected and validation failures do not consume a key", async () => {
+  const before = snapshot();
+  for (const key of ["", " ", "k".repeat(257)]) {
+    expect(
+      await request(
+        cardPath("comments"),
+        { body: "test" },
+        { "Idempotency-Key": key },
+      ),
+    ).toMatchObject({ status: 400 });
+  }
+  const headers = { "Idempotency-Key": "correctable" };
+  expect(
+    await request(cardPath("comments"), { body: "" }, headers),
+  ).toMatchObject({ status: 400 });
+  expect(snapshot()).toBe(before);
+  expect(
+    await request(cardPath("comments"), { body: "修正正文" }, headers),
+  ).toMatchObject({ status: 200 });
 });

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type CardiganClient,
   describeError,
@@ -39,6 +39,8 @@ const isMergeConfirmation = (q: NeedsDecision) =>
   q.trigger === "merge_confirmation";
 type Props = { client: CardiganClient; projectId: string; revision?: number };
 function useAction(done: () => void) {
+  const keys = useRef(new Map<string, string>());
+  const sending = useRef(false);
   const [busy, setBusy] = useState(false),
     [error, setError] = useState<string>(),
     [message, setMessage] = useState("");
@@ -46,18 +48,27 @@ function useAction(done: () => void) {
     busy,
     error,
     message,
-    run: async (action: () => Promise<void>) => {
-      if (busy) return;
+    run: async (
+      input: readonly unknown[],
+      action: (key: string) => Promise<void>,
+    ) => {
+      if (sending.current) return;
+      sending.current = true;
+      const request = JSON.stringify(input);
+      const key = keys.current.get(request) ?? crypto.randomUUID();
+      keys.current.set(request, key);
       setBusy(true);
       setError(undefined);
       setMessage("");
       try {
-        await action();
+        await action(key);
+        keys.current.delete(request);
         setMessage("已提交");
         done();
       } catch (e) {
         setError(describeError(e));
       } finally {
+        sending.current = false;
         setBusy(false);
       }
     },
@@ -121,8 +132,8 @@ function Decision({
         onSubmit={(e) => {
           e.preventDefault();
           if (option === "") return;
-          void action.run(() =>
-            client.recordDecision(projectId, q.id, option, quote),
+          void action.run([projectId, q.id, "resolve", option, quote], (key) =>
+            client.recordDecision(projectId, q.id, option, quote, key),
           );
         }}
       >
@@ -172,8 +183,10 @@ function Decision({
               className="quiet"
               disabled={action.busy || !q.card_id}
               onClick={() =>
-                void action.run(() =>
-                  client.decisionComment(projectId, q.id, kind, quote),
+                void action.run(
+                  [projectId, q.id, "comments", kind, quote],
+                  (key) =>
+                    client.decisionComment(projectId, q.id, kind, quote, key),
                 )
               }
             >
@@ -240,7 +253,9 @@ function MergeConfirmation({
   const merge = q.merge_confirmation;
   const cardId = q.card_id ?? q.related_cards[0]?.id ?? null;
   const decide = (option: "merge" | "hold") =>
-    action.run(() => client.recordDecision(projectId, q.id, option, quote));
+    action.run([projectId, q.id, "resolve", option, quote], (key) =>
+      client.recordDecision(projectId, q.id, option, quote, key),
+    );
   return (
     <article className="needs-item needs-merge" aria-label={`合并确认 ${q.id}`}>
       <DecisionMeta q={q} projectId={projectId} elapsed={elapsed} />
@@ -359,8 +374,16 @@ function MergeConfirmation({
           onSubmit={(e) => {
             e.preventDefault();
             if (!reason.trim()) return;
-            void action.run(() =>
-              client.recordDecision(projectId, q.id, "request_changes", reason),
+            void action.run(
+              [projectId, q.id, "resolve", "request_changes", reason],
+              (key) =>
+                client.recordDecision(
+                  projectId,
+                  q.id,
+                  "request_changes",
+                  reason,
+                  key,
+                ),
             );
           }}
         >
@@ -435,8 +458,8 @@ function HumanAction({
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          void action.run(() =>
-            client.completeAction(projectId, item.id, text),
+          void action.run([projectId, item.id, "complete", text], (key) =>
+            client.completeAction(projectId, item.id, text, key),
           );
         }}
       >

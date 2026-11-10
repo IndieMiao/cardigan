@@ -526,14 +526,21 @@ export interface CardiganClient {
     id: string,
     option: string,
     quote: string,
+    idempotencyKey?: string,
   ): Promise<void>;
   decisionComment(
     projectId: string,
     id: string,
     action: "request_information" | "explain",
     body: string,
+    idempotencyKey?: string,
   ): Promise<void>;
-  completeAction(projectId: string, id: string, text: string): Promise<void>;
+  completeAction(
+    projectId: string,
+    id: string,
+    text: string,
+    idempotencyKey?: string,
+  ): Promise<void>;
   session(): Promise<SessionInfo>;
   login(password: string): Promise<void>;
   logout(): Promise<void>;
@@ -548,11 +555,13 @@ export interface CardiganClient {
     projectId: string,
     cardId: string,
     input: CommentInput,
+    idempotencyKey?: string,
   ): Promise<PostedComment>;
   uploadAttachment(
     projectId: string,
     cardId: string,
     input: UploadAttachmentInput,
+    idempotencyKey?: string,
   ): Promise<AttachmentReceipt>;
 }
 
@@ -619,10 +628,11 @@ export class HttpCardiganClient implements CardiganClient {
     projectId: string,
     cardId: string,
     input: CommentInput,
+    idempotencyKey: string = crypto.randomUUID(),
   ): Promise<PostedComment> {
     return this.request<PostedComment>(
       `/api/projects/${encodeURIComponent(projectId)}/cards/${encodeURIComponent(cardId)}/comments`,
-      { method: "POST", body: JSON.stringify(input) },
+      { method: "POST", body: JSON.stringify(input), idempotencyKey },
     );
   }
 
@@ -630,10 +640,11 @@ export class HttpCardiganClient implements CardiganClient {
     projectId: string,
     cardId: string,
     input: UploadAttachmentInput,
+    idempotencyKey: string = crypto.randomUUID(),
   ): Promise<AttachmentReceipt> {
     return this.request<AttachmentReceipt>(
       `/api/projects/${encodeURIComponent(projectId)}/cards/${encodeURIComponent(cardId)}/attachments`,
-      { method: "POST", body: JSON.stringify(input) },
+      { method: "POST", body: JSON.stringify(input), idempotencyKey },
     );
   }
 
@@ -665,58 +676,74 @@ export class HttpCardiganClient implements CardiganClient {
     id: string,
     option: string,
     quote: string,
+    idempotencyKey: string = crypto.randomUUID(),
   ): Promise<void> {
-    await this.write(projectId, `decisions/${encodeURIComponent(id)}/resolve`, {
-      option,
-      raw_quote: quote,
-    });
+    await this.write(
+      projectId,
+      `decisions/${encodeURIComponent(id)}/resolve`,
+      {
+        option,
+        raw_quote: quote,
+      },
+      idempotencyKey,
+    );
   }
   async decisionComment(
     projectId: string,
     id: string,
     action: "request_information" | "explain",
     body: string,
+    idempotencyKey: string = crypto.randomUUID(),
   ): Promise<void> {
     await this.write(
       projectId,
       `decisions/${encodeURIComponent(id)}/comments`,
       { action, ...(body.trim() ? { body } : {}) },
+      idempotencyKey,
     );
   }
   async completeAction(
     projectId: string,
     id: string,
     text: string,
+    idempotencyKey: string = crypto.randomUUID(),
   ): Promise<void> {
     await this.write(
       projectId,
       `human-actions/${encodeURIComponent(id)}/complete`,
       { text },
+      idempotencyKey,
     );
   }
   private write(
     projectId: string,
     rest: string,
     body: unknown,
+    idempotencyKey: string,
   ): Promise<unknown> {
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/${rest}`,
-      { method: "POST", body: JSON.stringify(body) },
+      { method: "POST", body: JSON.stringify(body), idempotencyKey },
     );
   }
 
   private async request<T>(
     path: string,
-    init: { method?: string; body?: string } = {},
+    init: { method?: string; body?: string; idempotencyKey?: string } = {},
   ): Promise<T> {
     const method = init.method ?? "GET";
     const response = await this.fetchImpl(path, {
       method,
       credentials: "same-origin",
-      headers:
-        init.body === undefined
-          ? { accept: "application/json" }
-          : { accept: "application/json", "content-type": "application/json" },
+      headers: {
+        accept: "application/json",
+        ...(init.body === undefined
+          ? {}
+          : { "content-type": "application/json" }),
+        ...(init.idempotencyKey === undefined
+          ? {}
+          : { "Idempotency-Key": init.idempotencyKey }),
+      },
       ...(init.body === undefined ? {} : { body: init.body }),
     });
     if (!response.ok) {

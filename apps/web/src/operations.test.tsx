@@ -51,6 +51,11 @@ test("Needs You client writes the right routes and JSON with the browser session
   ]);
   for (const [, init] of fetcher.mock.calls)
     expect(init?.credentials).toBe("same-origin");
+  const keys = fetcher.mock.calls
+    .slice(1)
+    .map(([, init]) => new Headers(init?.headers).get("Idempotency-Key"));
+  expect(keys.every((key) => /^[0-9a-f-]{36}$/u.test(key ?? ""))).toBe(true);
+  expect(new Set(keys).size).toBe(4);
 });
 
 test("resource changes ignore slow old responses and retain data on a failed refresh", async () => {
