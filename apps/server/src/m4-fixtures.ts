@@ -129,12 +129,15 @@ export function m4Fixture(
     readonly project_id?: string;
     readonly policy?: "confirm" | "auto";
     readonly clock?: Clock;
+    /** Share a real database for cross-project scheduling tests. */
+    readonly dataDir?: string;
     readonly reviewer_worktree?: "none" | "readonly";
     readonly pm_worktree?: "none" | "readonly";
   } = {},
 ): M4Fixture {
   const project_id = (options.project_id ?? "p-m4") as ProjectId;
-  const dataDir = mkdtempSync(join(tmpdir(), "cardigan-m4-"));
+  const dataDir =
+    options.dataDir ?? mkdtempSync(join(tmpdir(), "cardigan-m4-"));
   const time = Date.parse("2030-01-01T00:00:00.000Z");
   const clock: Clock = options.clock ?? {
     now: () => new Date(time).toISOString(),
@@ -381,7 +384,7 @@ export function m4Fixture(
     human,
     close: () => {
       store.close();
-      rmSync(dataDir, { recursive: true, force: true });
+      if (!options.dataDir) rmSync(dataDir, { recursive: true, force: true });
     },
     state,
     apply,

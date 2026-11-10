@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
+import { removeTestRuntime } from "../../../test-support/paths.js";
 
 /**
  * herdr-core cleanup for the runtime tests that start a real `hc`.
@@ -74,6 +75,7 @@ export async function stopCore(
     throw new Error(
       `herdr-core socket for session ${options.session} still exists: ${options.socket}`,
     );
+  removeTestRuntime(options.socket);
 }
 
 async function terminate(pid: number | undefined): Promise<void> {

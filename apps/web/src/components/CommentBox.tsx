@@ -49,10 +49,12 @@ export interface CommentBoxHandle {
 }
 
 interface PastedImage {
+  readonly id: string;
   readonly idempotencyKey: string;
   readonly name: string;
   readonly mime: string;
   readonly file: File;
+  readonly note: string;
 }
 
 export function CommentBox({
@@ -129,6 +131,16 @@ export function CommentBox({
 
   async function submit(): Promise<void> {
     if (!canSubmit || sending.current) return;
+    if (
+      images.some(
+        (image) =>
+          [...image.note].length > 200 ||
+          /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(image.note),
+      )
+    ) {
+      setError("附件说明最多 200 字符，不能包含控制字符或换行。");
+      return;
+    }
     sending.current = true;
     setSubmitting(true);
     setError(undefined);
@@ -151,6 +163,8 @@ export function CommentBox({
           cardId,
           {
             file: await toBase64(image.file),
+            ...(image.file.name ? { original_filename: image.file.name } : {}),
+            ...(image.note.trim() ? { note: image.note } : {}),
             mime: image.mime,
             kind: "evidence",
             attach_to: { kind: "timeline_entry", id: comment.id },
@@ -264,10 +278,12 @@ export function CommentBox({
               setImages((current) => [
                 ...current,
                 ...files.map((file) => ({
+                  id: crypto.randomUUID(),
                   idempotencyKey: crypto.randomUUID(),
                   name: file.name || file.type,
                   mime: file.type,
                   file,
+                  note: "",
                 })),
               ]);
             }}
@@ -300,11 +316,31 @@ export function CommentBox({
       )}
 
       {images.length > 0 && (
-        <p className="notice">
-          已捕获 {images.length} 张图片（
-          {images.map((image) => image.name).join("、")}
-          ），随评论一起作为证据附件上传。
-        </p>
+        <div className="notice">
+          <p>已捕获 {images.length} 张图片，随评论一起作为证据附件上传。</p>
+          {images.map((image) => (
+            <label className="attachment-caption" key={image.id}>
+              <span>{image.name}</span>
+              <input
+                type="text"
+                aria-label={`${image.name} 的说明`}
+                placeholder="附件说明（可选，最多 200 字符）"
+                value={image.note}
+                disabled={submitting}
+                onChange={(event) => {
+                  const note = event.target.value;
+                  setImages((current) =>
+                    current.map((item) =>
+                      item.id === image.id
+                        ? { ...item, note, idempotencyKey: crypto.randomUUID() }
+                        : item,
+                    ),
+                  );
+                }}
+              />
+            </label>
+          ))}
+        </div>
       )}
 
       {error !== undefined && (

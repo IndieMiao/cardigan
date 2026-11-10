@@ -26,6 +26,7 @@ export interface ServerConfig {
 }
 
 export interface ServerEnv extends ExecutionEnv {
+  readonly CARDIGAN_CONFIG_DIR?: string | undefined;
   readonly CARDIGAN_DATA_DIR?: string | undefined;
   readonly CARDIGAN_MCP_HOST?: string | undefined;
   readonly CARDIGAN_MCP_PORT?: string | undefined;

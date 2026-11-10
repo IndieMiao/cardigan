@@ -15,7 +15,8 @@
       "pnpm-workspace.yaml",
       "packages/**",
       "apps/**",
-      "e2e/**"
+      "e2e/**",
+      "test-support/**"
     ]
   },
   "formatter": {

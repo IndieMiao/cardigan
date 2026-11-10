@@ -4,15 +4,18 @@ import {
   type Assignment,
   autoConfirmMerge,
   type CommandEffect,
+  type CommandState,
   type DecisionCategory,
   decisionCategories,
   decisionDelegation,
   decisionFollowupBlocked,
   decisionFollowupPrompt,
   decisionHistory,
+  developmentCardTemplate,
   listNeedsYou,
   pauseStandingAssignment,
   postComment,
+  prepareDelivery,
   projectPreferences,
   type Result,
   recordDecision,
@@ -23,6 +26,7 @@ import {
   resolveDelegatedDecision,
   setProjectPreferences,
   standingTools,
+  submitDelivery,
   triageHumanAction,
 } from "../index.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
@@ -612,3 +616,73 @@ test("history distinguishes system auto-approval from PM and keeps a resolved de
   };
   expect(decisionHistory(superseded, { decider: "system" })).toHaveLength(1);
 });
+
+test.each([true, false])(
+  "delegated completion preserves employee separation (same employee=%s)",
+  async (sameEmployee) => {
+    const f = setup();
+    const template = {
+      ...developmentCardTemplate,
+      id: "human-acceptance",
+      builtin: false,
+      merge: "none" as const,
+      requires_repo: false,
+      completion: { mode: "review" as const, reviewer: "human" as const },
+      work_items: [{ ...developmentCardTemplate.work_items[0], role_id: "pm" }],
+    };
+    let state: CommandState = {
+      ...f.state,
+      card_templates: [template],
+      cards: f.state.cards.map((c) => ({
+        ...c,
+        template: template.id,
+        template_version: 1,
+      })),
+      work_items: f.state.work_items
+        .filter((w) => w.kind === "produce")
+        .map((w) => ({ ...w, role_id: "pm" })),
+      assignments: f.state.assignments.map((a) =>
+        a.id === id("assignment", 1)
+          ? { ...a, role_id: "pm", employee_id: id("employee", 1) }
+          : a.id === f.ops.id
+            ? { ...a, employee_id: id("employee", sameEmployee ? 1 : 2) }
+            : a,
+      ),
+    };
+    const product = {
+      work_item_id: id("work_item", 1),
+      kind: "doc" as const,
+      summary: "已完成",
+      subject: { kind: "doc_version" as const, value: "v1" },
+      requested_verifiers: [],
+    };
+    for (const kind of ["doc", "card_completion"] as const) {
+      const params = { ...product, kind };
+      const verified = value(
+        await prepareDelivery(state, actor(1, "pm"), params, {
+          verify: async () => ({ ok: true, value: [] }),
+        }),
+      );
+      const effect = value(
+        submitDelivery(state, actor(1, "pm"), params, verified, f.io),
+      );
+      state = apply(state, effect);
+    }
+    const q = state.decisions.at(-1);
+    if (!q) throw new Error("Missing completion decision");
+    expect(q).toMatchObject({
+      trigger: "completion_review",
+      category: "feature_detail",
+      decider: "role:pm",
+    });
+    const result = resolveDelegatedDecision(
+      state,
+      f.pm,
+      { decision_id: q.id, option: "approve", rationale: "已核对完成申请" },
+      f.io,
+    );
+    expect(result.ok).toBe(!sameEmployee);
+    if (sameEmployee)
+      expect(result).toMatchObject({ error: { code: "unauthorized" } });
+  },
+);

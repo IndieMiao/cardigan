@@ -77,14 +77,24 @@ export function resolveHumanCompletionReview(
   const card = d.card(decision.card_id);
   ensure(
     !d.assignment ||
-      !d
+      (!d
         .list("runs")
         .some(
           (r) =>
             r.id === delivery.run_id && r.assignment_id === d.assignment?.id,
-        ),
+        ) &&
+        !d
+          .list("assignments")
+          .some(
+            (a) =>
+              a.scope === "work_item" &&
+              a.work_item_id === delivery.work_item_id &&
+              (a.id === d.assignment?.id ||
+                (a.employee_id !== undefined &&
+                  a.employee_id === d.assignment?.employee_id)),
+          )),
     "unauthorized",
-    "The author cannot approve their own completion request",
+    "The author or employee cannot review their own completion request",
   );
   const template = resolveCardTemplate(d, card);
   ensure(

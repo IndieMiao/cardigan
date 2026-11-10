@@ -1480,6 +1480,14 @@ fieldset.filters {
 
 /* ---- attachments ---- */
 
+.attachment-caption {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .attachments {
   list-style: none;
   margin: 8px 0 0;

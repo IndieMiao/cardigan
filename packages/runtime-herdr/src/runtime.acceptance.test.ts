@@ -27,13 +27,15 @@ import type {
   RuntimeResult,
 } from "@cardigan/domain";
 import { afterAll, describe, expect, test } from "vitest";
+import { createTestRuntime } from "../../../test-support/paths.js";
 import { corePid, stopCore } from "../test-support/hc-core.js";
 import { HerdrRuntime } from "./index.js";
 
 const HC_VERSION = "0.1.18";
 const SESSION = `m2t1-${process.pid}-${Math.floor(Date.now() / 1000) % 100000}`;
-/** An explicit socket under /tmp, so cleanup never depends on XDG layout. */
-const SOCKET = join(tmpdir(), SESSION, "hc.sock");
+/** Keep actual cores under the supervisor runtime, separate from private data. */
+const RUNTIME = createTestRuntime(join(tmpdir(), SESSION));
+const SOCKET = join(RUNTIME, "hc.sock");
 
 const assignment: Assignment = {
   id: "A-1" as never,
@@ -278,6 +280,7 @@ describe("runtime contract", () => {
       const created = await HerdrRuntime.create({
         session: SESSION,
         socketPath: SOCKET,
+        env: { ...process.env, XDG_RUNTIME_DIR: RUNTIME },
         version: HC_VERSION,
         timeoutMs: 20000,
       });

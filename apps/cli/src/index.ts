@@ -2,6 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { LaunchConfigError } from "@cardigan/roles";
 import { runAdminCommand } from "./admin.js";
 import { runAssignmentCommand } from "./assignment.js";
+import { runAvatarCommand } from "./avatar.js";
 import { runContentCommand } from "./content.js";
 import { runEmployeeCommand } from "./employee.js";
 import { CliError, EXIT } from "./errors.js";
@@ -51,6 +52,7 @@ export { runWorktreeCommand } from "./worktree.js";
 const TOP_LEVEL_USAGE = [
   "cardigan — 卡片式多 Agent 协作开发系统",
   "  employee add|list|update|deactivate|activate  管理全局员工",
+  "  avatar list  列出内置头像素材库",
   "",
   "用法：cardigan <命令>",
   "",
@@ -65,8 +67,8 @@ const TOP_LEVEL_USAGE = [
   "  card create      按模板建卡（默认 dev）",
   "  card done        用 --result 记录结果并完成人工完成的卡片，可重复 --file 附证据",
   "  card update      修改或取消卡片；--superseded-by <C-m> 标记取代（已完成卡片不能取消；见 cardigan card --help）",
-  "  comment add      发评论：--text <内容> 或 --text-file <路径>，可重复 --file 附文件",
-  "  attachment add   上传附件：--file <路径> [--kind evidence|artifact] [--basis <q(n)>] [--entry <C-n#k>]",
+  "  comment add      发评论：--text <内容> 或 --text-file <路径>，可重复 --file 附文件，--note <说明>",
+  "  attachment add   上传附件：--file <路径> [--note <说明>] [--kind evidence|artifact] [--basis <q(n)>] [--entry <C-n#k>]",
   "  assign           建 Assignment 并在同一事务里签发 Token",
   "  token issue      给已有 active Assignment 重新签发 Token（先作废旧 Token）",
   "  human-action done 标记人已执行完 h(n)",
@@ -216,6 +218,7 @@ export async function main(
       return await runLaunchCommand(rest, io);
     }
     if (command === "employee") return await runEmployeeCommand(rest, io);
+    if (command === "avatar") return runAvatarCommand(rest, io);
     if (command === "init" || command === "project" || command === "role") {
       return await runAdminCommand([command, ...rest], io);
     }
@@ -227,7 +230,7 @@ export async function main(
     if (command === "comment" || command === "attachment") {
       return await runContentCommand(command, rest, io);
     }
-    if (command === "merge") return runMergeCommand(rest, io);
+    if (command === "merge") return await runMergeCommand(rest, io);
     if (command === "web") return await runWebCommand(rest, io);
     if (command === "worktree") return await runWorktreeCommand(rest, io);
     if (command === "inbox") return inboxCommand(rest, io);

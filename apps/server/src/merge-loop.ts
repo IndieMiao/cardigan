@@ -21,6 +21,7 @@ import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
 import type { MergeGit } from "./git.js";
 import { startTimerLoop, type TimerLoop } from "./loop.js";
+import { type MergeCheckOptions, MergeChecks } from "./merge-checks.js";
 
 /** Default cadence: one pass is cheap when no card is ready. */
 export const DEFAULT_MERGE_INTERVAL_MS = 5_000;
@@ -58,6 +59,7 @@ export interface MergeLoopOptions {
   readonly git: MergeGit;
   readonly clock?: Clock;
   readonly onError?: (error: unknown) => void;
+  readonly gate?: MergeCheckOptions;
 }
 
 /**
@@ -71,15 +73,33 @@ export interface MergeLoopOptions {
  */
 export class MergeExecutor {
   private serial: Promise<void> = Promise.resolve();
-  constructor(private readonly options: MergeLoopOptions) {}
+  private readonly checks: MergeChecks | undefined;
+  constructor(private readonly options: MergeLoopOptions) {
+    this.checks = options.gate
+      ? new MergeChecks({
+          ...options.gate,
+          store: options.store,
+          git: options.git,
+          clock: this.clock,
+          onError: options.onError ?? (() => {}),
+        })
+      : undefined;
+  }
+  stop(): void {
+    this.checks?.stop();
+  }
 
   /** Serialize ticks: one project never merges two cards in parallel. */
   tick(project_id?: ProjectId): Promise<void> {
     const next = this.serial.then(async () => {
-      for (const id of project_id
+      const projects = project_id
         ? [project_id]
-        : this.options.store.listProjects().map((project) => project.id))
-        await this.project(id as ProjectId);
+        : this.options.store.listProjects().map((project) => project.id);
+      for (const id of projects) {
+        this.confirmDue(id);
+        if (!this.checks?.configured(id)) await this.project(id);
+      }
+      await this.checks?.tick(projects);
     });
     this.serial = next.catch(() => {});
     return next;
@@ -92,6 +112,30 @@ export class MergeExecutor {
     return this.options.store.uow.read((tx) =>
       loadCommandState(tx, project_id),
     );
+  }
+
+  /** Delegation grants consent only; both publication paths retain their own gates. */
+  private confirmDue(project_id: ProjectId) {
+    if (!this.options.git.projectOf(project_id)) return;
+    const state = this.state(project_id);
+    for (const decision of state.decisions.filter(
+      (q) =>
+        q.trigger === "merge_confirmation" &&
+        q.status === "open" &&
+        state.cards.some(
+          (c) => c.id === q.card_id && c.status === "awaiting_merge",
+        ),
+    )) {
+      // Re-read preferences, the completion version and blockers in the write
+      // transaction. Not-yet-due or ineligible decisions wait for another tick.
+      runSystemCommand(
+        this.options.store,
+        project_id,
+        (s, a, ports) =>
+          autoConfirmMerge(s, a, { decision_id: decision.id }, ports),
+        this.clock,
+      );
+    }
   }
 
   /** Record one result; a rejection is reported, never thrown into the loop. */
@@ -198,22 +242,6 @@ export class MergeExecutor {
           .sort((a, b) => Number(a.id.slice(2)) - Number(b.id.slice(2)))[0];
       if (card === undefined) return;
       attempted.add(card.id);
-      for (const decision of state.decisions.filter(
-        (q) =>
-          q.card_id === card.id &&
-          q.trigger === "merge_confirmation" &&
-          q.status === "open",
-      )) {
-        // Every attempt rechecks preferences and blockers in the write transaction.
-        // Ineligible or not-yet-due confirmations simply wait for a later tick.
-        runSystemCommand(
-          this.options.store,
-          project_id,
-          (s, a, ports) =>
-            autoConfirmMerge(s, a, { decision_id: decision.id }, ports),
-          this.clock,
-        );
-      }
       const plan = mergePlan(this.state(project_id), card.id);
       if (!plan.ok) continue;
       if (!(await this.merge(project, plan.value))) return;
@@ -225,25 +253,35 @@ export interface MergeLoop {
   readonly executor: MergeExecutor;
   readonly loop: TimerLoop;
 }
-export function startMergeLoop(options: {
-  readonly store: Store;
-  readonly git: MergeGit;
-  readonly intervalMs?: number;
-  readonly clock?: Clock;
-  readonly onError?: (error: unknown) => void;
-  readonly signal?: AbortSignal;
-}): MergeLoop {
-  const executor = new MergeExecutor({
-    store: options.store,
-    git: options.git,
-    ...(options.clock === undefined ? {} : { clock: options.clock }),
-    ...(options.onError === undefined ? {} : { onError: options.onError }),
-  });
+export function startMergeLoop(
+  options: MergeLoopOptions & {
+    readonly intervalMs?: number;
+    readonly clock?: Clock;
+    readonly onError?: (error: unknown) => void;
+    readonly signal?: AbortSignal;
+  },
+): MergeLoop {
+  const executor = new MergeExecutor(options);
+  const cancel = () => executor.stop();
+  options.signal?.addEventListener("abort", cancel, { once: true });
+  if (options.signal?.aborted) cancel();
   const loop = startTimerLoop({
     tick: () => executor.tick(),
     intervalMs: options.intervalMs ?? DEFAULT_MERGE_INTERVAL_MS,
     onError: options.onError ?? (() => undefined),
     ...(options.signal === undefined ? {} : { signal: options.signal }),
   });
-  return { executor, loop };
+  void loop.done
+    .finally(() => options.signal?.removeEventListener("abort", cancel))
+    .catch(() => {});
+  return {
+    executor,
+    loop: {
+      done: loop.done,
+      stop: () => {
+        cancel();
+        return loop.stop();
+      },
+    },
+  };
 }
