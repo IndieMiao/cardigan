@@ -157,7 +157,10 @@ export async function startCardiganServer(
         reconcileIntervalMs =
           options.dispatcher.reconcileIntervalMs ?? config.reconcileIntervalMs,
         backupIntervalMs =
-          options.dispatcher.backupIntervalMs ?? config.backupIntervalMs;
+          options.dispatcher.backupIntervalMs ?? config.backupIntervalMs,
+        attachmentIntervalMs =
+          options.dispatcher.attachmentIntervalMs ??
+          config.attachmentIntervalMs;
       plane = startControlPlane({
         ...options.dispatcher,
         store,
@@ -167,6 +170,9 @@ export async function startCardiganServer(
         ...(cleanupIntervalMs === undefined ? {} : { cleanupIntervalMs }),
         ...(reconcileIntervalMs === undefined ? {} : { reconcileIntervalMs }),
         ...(backupIntervalMs === undefined ? {} : { backupIntervalMs }),
+        ...(attachmentIntervalMs === undefined ? {} : { attachmentIntervalMs }),
+        // The blob GC sweeps `<dataDir>/attachments`; §9.3.
+        dataDir: config.dataDir,
       });
     } catch (error) {
       await mcp.close();

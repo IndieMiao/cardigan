@@ -6,6 +6,7 @@ import type {
 } from "@cardigan/domain";
 import { standingModeFromTools } from "@cardigan/domain";
 import { type Store, tokensForAssignment } from "@cardigan/store";
+import { type AttachmentGc, startAttachmentLoop } from "./attachment-loop.js";
 import { type CleanupExecutor, startCleanupLoop } from "./cleanup-loop.js";
 import { Dispatcher, type DispatcherOptions } from "./dispatch.js";
 import { dispatcherClock, type StandingResolver } from "./dispatch-inbox.js";
@@ -59,6 +60,12 @@ export interface ControlPlaneOptions {
   readonly cleanupIntervalMs?: number;
   readonly reconcileIntervalMs?: number;
   readonly backupIntervalMs?: number;
+  /**
+   * Data directory holding `attachments/`. Without it the blob GC has nothing
+   * to sweep, so the loop only starts when the caller passes it.
+   */
+  readonly dataDir?: string;
+  readonly attachmentIntervalMs?: number;
   /** Tick failures are reported here; the loop retries on the next interval. */
   readonly onError?: (error: unknown) => void;
 }
@@ -70,9 +77,11 @@ export interface ControlPlane {
   readonly cleanup?: CleanupExecutor;
   readonly reconcile?: ReconcileExecutor;
   readonly backup?: BackupExecutor;
+  readonly attachments?: AttachmentGc;
   /**
    * Stop scheduling, drain the current delivery, then stop the monitor; the
-   * merge loop stops last so SIGTERM never interrupts a merge (§4 M4.4).
+   * Git phase loops stop in a fixed order so SIGTERM never interrupts a merge
+   * (§4 M4.4), and the attachment sweep stops last.
    */
   stop(): Promise<void>;
 }
@@ -220,12 +229,27 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
           onError: report,
           report: (message) => options.onError?.(new Error(message)),
         });
+  // Orphaned content-addressed blobs (§9.3) are host housekeeping, not Git work:
+  // the sweep runs even when the host wired no Git.
+  const attachments =
+    options.dataDir === undefined
+      ? undefined
+      : startAttachmentLoop({
+          dataDir: options.dataDir,
+          store: options.store,
+          ...(options.clock === undefined ? {} : { clock: options.clock }),
+          ...(options.attachmentIntervalMs === undefined
+            ? {}
+            : { intervalMs: options.attachmentIntervalMs }),
+          onError: report,
+        });
   const loops = [
     loop.done,
     merge?.loop.done,
     cleanup?.loop.done,
     reconcile?.loop.done,
     backup?.loop.done,
+    attachments?.loop.done,
   ].filter((entry): entry is Promise<void> => entry !== undefined);
   return {
     done: Promise.all(loops).then(() => undefined),
@@ -233,6 +257,7 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
     ...(cleanup === undefined ? {} : { cleanup: cleanup.executor }),
     ...(reconcile === undefined ? {} : { reconcile: reconcile.executor }),
     ...(backup === undefined ? {} : { backup: backup.executor }),
+    ...(attachments === undefined ? {} : { attachments: attachments.executor }),
     stop: async () => {
       // Dispatcher first (no new work), then the phases in a fixed order; each
       // stop waits for its current tick, so SIGTERM never cuts a merge or a
@@ -242,6 +267,8 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
       await cleanup?.loop.stop();
       await reconcile?.loop.stop();
       await backup?.loop.stop();
+      // The blob sweep last: it only touches files no record references.
+      await attachments?.loop.stop();
     },
   };
 }

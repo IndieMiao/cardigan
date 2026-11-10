@@ -1,3 +1,13 @@
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { dispatchRun } from "@cardigan/domain";
 import { PROJECT_EVENT_STREAM } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
@@ -156,4 +166,53 @@ test("a failing tick is reported and the loop keeps running", async () => {
   await plane.stop();
   expect(errors.map(String)).toContain("Error: boom");
   expect(ticks).toBeGreaterThan(1);
+});
+
+test("the control plane sweeps orphaned attachment blobs when it knows the data dir", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "cardigan-plane-attachments-"));
+  const directory = join(dataDir, "attachments");
+  mkdirSync(directory, { recursive: true });
+  const orphan = join(directory, "a".repeat(64));
+  writeFileSync(orphan, "orphan");
+  const old = new Date(Date.now() - 48 * 60 * 60 * 1000);
+  utimesSync(orphan, old, old);
+  const runtime = {
+    status: async () => ({
+      ok: true as const,
+      value: { process: "gone" as const },
+    }),
+    wake: async () => ({ ok: true as const, value: { sent: true } }),
+    provision: async () => {
+      throw new Error("unused");
+    },
+    release: async () => ({ ok: true as const, value: undefined }),
+    interrupt: async () => ({ ok: true as const, value: undefined }),
+    resume_or_replace: async () => ({
+      ok: false as const,
+      error: { code: "runtime_unavailable" as const, message: "unused" },
+    }),
+    human_entry: async () => ({ ok: true as const, value: "" }),
+    async *events() {
+      yield* [] as never[];
+    },
+  };
+  try {
+    const plane = startControlPlane({
+      store: f.store,
+      runtime,
+      intervalMs: 10_000,
+      dataDir,
+      attachmentIntervalMs: 5,
+      snapshot: async () => ({ model: "m", agent_cli_version: "c" }),
+      startRun: async () => {},
+      onError: () => {},
+    });
+    expect(plane.attachments).toBeDefined();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await plane.stop();
+    await plane.done;
+    expect(existsSync(orphan)).toBe(false);
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
 });

@@ -20,6 +20,7 @@ test("S10 defaults to loopback, port 3004 and the same user data directory as th
     cleanupIntervalMs: DEFAULT_INTERVALS.cleanup,
     reconcileIntervalMs: DEFAULT_INTERVALS.reconcile,
     backupIntervalMs: DEFAULT_INTERVALS.backup,
+    attachmentIntervalMs: DEFAULT_INTERVALS.attachment,
   });
 });
 
@@ -85,6 +86,7 @@ test("reads data dir and port from the environment", () => {
     cleanupIntervalMs: DEFAULT_INTERVALS.cleanup,
     reconcileIntervalMs: DEFAULT_INTERVALS.reconcile,
     backupIntervalMs: DEFAULT_INTERVALS.backup,
+    attachmentIntervalMs: DEFAULT_INTERVALS.attachment,
   });
 });
 
@@ -110,4 +112,22 @@ test("server parses agent-ssh settings and refuses unknown runtime modes", () =>
   expect(() =>
     resolveServerConfig({ CARDIGAN_RUNTIME_MODE: "remote" }),
   ).toThrow(/local or agent-ssh/);
+});
+
+test("the attachment sweep defaults to six hours and can be overridden", () => {
+  expect(
+    resolveServerConfig({ HOME: "/fixture/home" }).attachmentIntervalMs,
+  ).toBe(DEFAULT_INTERVALS.attachment);
+  expect(
+    resolveServerConfig({
+      HOME: "/fixture/home",
+      CARDIGAN_ATTACHMENT_GC_INTERVAL_MS: "900000",
+    }).attachmentIntervalMs,
+  ).toBe(900_000);
+  expect(() =>
+    resolveServerConfig({
+      HOME: "/fixture/home",
+      CARDIGAN_ATTACHMENT_GC_INTERVAL_MS: "0",
+    }),
+  ).toThrow(/CARDIGAN_ATTACHMENT_GC_INTERVAL_MS/);
 });
