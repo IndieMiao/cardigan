@@ -13,7 +13,9 @@ import type {
 import {
   agentCliVersion,
   harnessBinary,
+  type PreparationRetryOptions,
   prepareRoleWorktree,
+  withPreparationRetry,
   worktreeBaselinePrompt,
 } from "@cardigan/host";
 import {
@@ -115,6 +117,8 @@ export async function createHostWiring(options: {
   readonly url?: string;
   /** Test harnesses pass a client that refuses calls after cleanup (§P2a-2). */
   readonly client?: HcClient;
+  /** Tests shorten the in-delivery retry waits. */
+  readonly preparationRetry?: PreparationRetryOptions;
 }): Promise<HostWiring> {
   const env = options.env;
   const execution =
@@ -140,11 +144,17 @@ export async function createHostWiring(options: {
 
   return {
     runtime,
+    // Lock contention and transient network errors retry briefly inside this
+    // delivery; the final error carries a sanitized category (§6.5, §12.4).
     beforeWake: async ({ project, assignment }) => {
-      const worktree = await prepareRoleWorktree(
-        { store: options.store, execution, runtime },
-        project,
-        assignment.id,
+      const worktree = await withPreparationRetry(
+        () =>
+          prepareRoleWorktree(
+            { store: options.store, execution, runtime },
+            project,
+            assignment.id,
+          ),
+        options.preparationRetry ?? {},
       );
       return worktreeBaselinePrompt(worktree);
     },

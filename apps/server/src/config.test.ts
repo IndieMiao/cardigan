@@ -23,6 +23,7 @@ test("S10 defaults to loopback, port 3004 and the same user data directory as th
     checkCleanupGraceMs: DEFAULT_CHECK_CLEANUP_GRACE_MS,
     backupIntervalMs: DEFAULT_INTERVALS.backup,
     attachmentIntervalMs: DEFAULT_INTERVALS.attachment,
+    dispatchTimeoutMs: 600_000,
   });
 });
 
@@ -90,6 +91,7 @@ test("reads data dir and port from the environment", () => {
     checkCleanupGraceMs: DEFAULT_CHECK_CLEANUP_GRACE_MS,
     backupIntervalMs: DEFAULT_INTERVALS.backup,
     attachmentIntervalMs: DEFAULT_INTERVALS.attachment,
+    dispatchTimeoutMs: 600_000,
   });
 });
 

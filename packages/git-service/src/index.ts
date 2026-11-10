@@ -23,6 +23,7 @@ import type {
   CentralRepositoryService,
   SourceSync,
 } from "./central.js";
+import { defaultRepositoryLock, type RepositoryLock } from "./lock.js";
 import {
   type ReconcileFinding,
   reconcile as reconcileState,
@@ -37,6 +38,14 @@ export {
   type PreparedMerge,
   type SourceSync,
 } from "./central.js";
+export {
+  defaultRepositoryLock,
+  type RepositoryLock,
+  type RepositoryLockKey,
+  type RepositoryLockOptions,
+  RepositoryLockTimeoutError,
+  repositoryLock,
+} from "./lock.js";
 export {
   DEFAULT_CHECK_CLEANUP_GRACE_MS,
   type ReconcileChecks,
@@ -72,6 +81,11 @@ export interface WorktreeOptions {
   readonly checksRoot?: string;
   /** Where force-clean patches are written; defaults to `<dataDir>/cleanup`. */
   readonly cleanupRoot?: string;
+  /**
+   * Serializes fetch and worktree changes on a project's shared base clone.
+   * Defaults to an in-process queue; the host adds a cross-process flock.
+   */
+  readonly lock?: RepositoryLock;
 }
 /** What a cleanup decision or a `worktree diff` shows the human. */
 export interface WorktreeChangeSummary {
@@ -125,6 +139,7 @@ export class GitWorktreeService {
   private readonly worktrees: string;
   private readonly checks: string;
   private readonly cleanup: string;
+  private readonly lock: RepositoryLock;
   constructor(
     private readonly git: GitWorktreePort,
     private readonly central: CentralRepositoryService,
@@ -141,6 +156,7 @@ export class GitWorktreeService {
       options.checksRoot ?? join(dataDir, "agent", "checks"),
     );
     this.cleanup = resolve(options.cleanupRoot ?? join(dataDir, "cleanup"));
+    this.lock = options.lock ?? defaultRepositoryLock;
   }
   async ensureWorktree(
     input: EnsureWorktreeInput,
@@ -196,6 +212,31 @@ export class GitWorktreeService {
       source_repo: input.source_repo,
       base_branch: card.base_branch,
     };
+    return this.lock({ project_id: input.project_id, repository }, () =>
+      this.placeWorktree(input, project, {
+        path,
+        repository,
+        readonly,
+        baselineRef,
+        ...(branch ? { branch } : {}),
+      }),
+    );
+  }
+  /** Runs under the project's repository lock; inputs are validated. */
+  private async placeWorktree(
+    input: EnsureWorktreeInput,
+    project: CentralProject,
+    target: {
+      readonly path: string;
+      readonly repository: string;
+      readonly readonly: boolean;
+      readonly baselineRef: string;
+      readonly branch?: string;
+    },
+  ): Promise<WorktreePlacement> {
+    const { path, repository, readonly, baselineRef, branch } = target,
+      a = input.assignment,
+      card = input.card as Card;
     const central = await this.central.ensureCentral(project);
     await this.git.ensureClone(central, repository);
     const existing = (await this.git.listWorktrees(repository)).find(
@@ -321,11 +362,23 @@ export class GitWorktreeService {
     readonly project: CentralProject;
     readonly assignment: Assignment;
   }): Promise<WorktreeDiff> {
-    const summary = await this.changeSummary(input.project, input.assignment);
-    return {
-      ...summary,
-      patch: await this.git.diffHead(summary.worktree_path),
-    };
+    const { repository } = this.worktreeOf(
+      input.project.project_id,
+      input.assignment,
+    );
+    return this.lock(
+      { project_id: input.project.project_id, repository },
+      async () => {
+        const summary = await this.changeSummary(
+          input.project,
+          input.assignment,
+        );
+        return {
+          ...summary,
+          patch: await this.git.diffHead(summary.worktree_path),
+        };
+      },
+    );
   }
 
   /**
@@ -340,6 +393,18 @@ export class GitWorktreeService {
       input.project.project_id,
       input.assignment,
     );
+    return this.lock(
+      {
+        project_id: input.project.project_id,
+        repository: worktree.repository,
+      },
+      () => this.removeLocked(input, worktree),
+    );
+  }
+  private async removeLocked(
+    input: RemoveWorktreeInput,
+    worktree: ReturnType<GitWorktreeService["worktreeOf"]>,
+  ): Promise<RemoveWorktreeOutcome> {
     if (
       !(await this.git.listWorktrees(worktree.repository)).some(
         (w) => resolve(w.path) === worktree.path,

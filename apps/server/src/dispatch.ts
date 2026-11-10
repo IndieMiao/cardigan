@@ -17,13 +17,16 @@ import {
   DEFAULT_RUN_LIMIT,
   decisionFollowupBlocked,
   decisionFollowupPrompt,
+  dispatchRecoveryFailed,
   dispatchRun,
   isStandingPm,
   lastRunActivity,
+  obsoleteDispatchAttention,
   queueRun,
   remindDecisionFollowups,
+  resolveDispatchAttention,
 } from "@cardigan/domain";
-import { runCapacitySnapshot } from "@cardigan/host";
+import { redactFailureLine, runCapacitySnapshot } from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import {
   mergeNotifications,
@@ -43,8 +46,14 @@ import {
 } from "@cardigan/store";
 import {
   alertAudience,
+  type DeliveryFailure,
+  type DeliveryStage,
+  deliveryAttemptFailed,
+  deliveryFailure,
+  deliveryFailureLine,
   dispatchAlert,
   unfinishedRun,
+  wakeFailure,
 } from "./dispatch-alert.js";
 import { InactiveRunReaper } from "./dispatch-inactive.js";
 import {
@@ -54,6 +63,7 @@ import {
   routeProjectEvents,
   type StandingResolver,
 } from "./dispatch-inbox.js";
+import { retryDispatchedRuns } from "./dispatch-retry.js";
 import { escalateReviewLimitWaits } from "./review-limit-attention.js";
 
 export interface DispatcherOptions {
@@ -68,6 +78,8 @@ export interface DispatcherOptions {
   /** Loaded once by the host; the decision reads the supplied limit on every claim. */
   readonly runLimit?: (machine: string) => number;
   readonly inactivityGraceMs?: number;
+  readonly dispatchTimeoutMs?: number;
+  readonly deliveryRetryBaseMs?: number;
   readonly inactiveCancelAfterMs?: number | null;
   /** Snapshot for a NEW terminal; an existing session keeps its previous Run's snapshot. */
   readonly snapshot: (
@@ -88,6 +100,8 @@ export interface DispatcherOptions {
     project: ProjectId;
     assignment: Assignment;
   }) => Promise<string | undefined> | Promise<void>;
+  /** Server log for a failed bell delivery (sanitized, one line). */
+  readonly onError?: (error: unknown) => void;
 }
 const sameRef = (a: Assignment, b: Assignment) =>
   JSON.stringify(a.runtime_ref) === JSON.stringify(b.runtime_ref);
@@ -124,6 +138,8 @@ export class Dispatcher {
   private readonly retryBaseMs: number;
   private readonly maxRetries: number;
   private readonly inactivityGraceMs: number;
+  private readonly dispatchTimeoutMs: number;
+  private readonly deliveryRetryBaseMs: number;
   private readonly inactive: InactiveRunReaper;
   constructor(readonly options: DispatcherOptions) {
     this.clock = options.clock ?? dispatcherClock;
@@ -131,6 +147,8 @@ export class Dispatcher {
     this.retryBaseMs = options.retryBaseMs ?? 60_000;
     this.maxRetries = options.maxRetries ?? 4;
     this.inactivityGraceMs = options.inactivityGraceMs ?? 15 * 60_000;
+    this.dispatchTimeoutMs = options.dispatchTimeoutMs ?? 10 * 60_000;
+    this.deliveryRetryBaseMs = options.deliveryRetryBaseMs ?? 30_000;
     // Reject invalid source settings before deriving the cancellation grace.
     if (
       !Number.isSafeInteger(this.maxRetries) ||
@@ -139,6 +157,9 @@ export class Dispatcher {
       ![
         this.retryBaseMs,
         this.inactivityGraceMs,
+        this.dispatchTimeoutMs,
+        this.deliveryRetryBaseMs,
+        this.deliveryRetryBaseMs * 2 ** Math.max(0, this.maxRetries - 1),
         this.retryDelay(this.maxRetries + 1),
       ].every((n) => Number.isSafeInteger(n) && n > 0)
     )
@@ -193,9 +214,9 @@ export class Dispatcher {
     const next = this.serial.then(async () => {
       // Route every project before choosing any winner. Project enumeration is
       // not a scheduling priority, even when a caller requests a project tick.
-      const candidates = this.options.store
-        .listProjects()
-        .flatMap((p) => this.project(p.id));
+      const candidates: Candidate[] = [];
+      for (const project of this.options.store.listProjects())
+        candidates.push(...(await this.project(project.id)));
       await this.inactive.tick(
         this.options.store.listProjects().map((p) => p.id),
       );
@@ -216,7 +237,7 @@ export class Dispatcher {
   private owner(n: Notification, state: CommandState) {
     return notificationOwner(n, state, this.options.standing);
   }
-  private project(project: ProjectId): Candidate[] {
+  private async project(project: ProjectId): Promise<Candidate[]> {
     const { store, standing } = this.options;
     store.uow.run((tx) => {
       const effect = unwrap(
@@ -238,6 +259,20 @@ export class Dispatcher {
         )?.status !== "suspended"
       )
         this.settle(attempt, false, "interrupted_delivery");
+    await retryDispatchedRuns(
+      { ...this.options, clock: this.clock },
+      project,
+      {
+        timeoutMs: this.dispatchTimeoutMs,
+        retryBaseMs: this.deliveryRetryBaseMs,
+        maxRetries: this.maxRetries,
+        leaseMs: this.leaseMs,
+      },
+      (attempt, sent, reason, bell, failure) =>
+        this.settle(attempt, sent, reason, bell, failure),
+    );
+    // Recovery and escalation are durable events, including CLI starts without an inbox row.
+    routeProjectEvents(store, project, { clock: this.clock });
     this.maintenance(project);
     const claimed = new Set(
       unfinishedBellAttempts(store.database, project).flatMap(
@@ -313,7 +348,9 @@ export class Dispatcher {
     return state.runs.some(
       (r) =>
         r.assignment_id === a.id &&
-        (r.inactivity_stop || (unfinishedRun(r) && r.id !== queued?.id)),
+        (r.dispatch_stop ||
+          r.inactivity_stop ||
+          (unfinishedRun(r) && r.id !== queued?.id)),
     );
   }
   private async deliver(
@@ -396,7 +433,12 @@ export class Dispatcher {
         }
         snapshot = prior;
       } else snapshot = await this.options.snapshot(a, project);
-    } catch {
+    } catch (error) {
+      this.options.onError?.(
+        new Error(
+          `bell delivery rejected: project=${project} asg=${a.id} reason=snapshot_unavailable message=${redactFailureLine(error instanceof Error ? error.message : String(error))}`,
+        ),
+      );
       this.reject(project, notes, a, "snapshot_unavailable");
       return;
     }
@@ -418,19 +460,23 @@ export class Dispatcher {
     }
     if (!job) return;
     let sent = false,
-      reason = "delivery_failed";
+      reason = "delivery_failed",
+      failure: DeliveryFailure | undefined,
+      stage: DeliveryStage = "delivery_call";
     try {
       if (live && job.assignment.runtime_ref) {
+        stage = "before_wake";
         const baseline = await this.options.beforeWake?.({
           project,
           assignment: job.assignment,
         });
+        stage = "wake";
         const result = await this.options.runtime.wake(
           job.assignment.runtime_ref,
           [job.bell, baseline].filter(Boolean).join("\n"),
         );
         sent = result.ok && result.value.sent;
-        if (!result.ok) reason = `wake_failed:${result.error.code}`;
+        if (!result.ok) ({ reason, failure } = wakeFailure(result.error));
       } else {
         if (replaceProfile && job.assignment.runtime_ref) {
           const released = await this.options.runtime.release(
@@ -457,10 +503,22 @@ export class Dispatcher {
           );
         reason = "startup_did_not_dispatch";
       }
-    } catch {
-      reason = "delivery_call_failed";
+    } catch (error) {
+      ({ reason, failure } = deliveryFailure(stage, error));
     }
-    this.settle(job.attempt, sent, reason, job.bell);
+    if (failure)
+      this.options.onError?.(
+        new Error(
+          deliveryFailureLine({
+            project,
+            assignment: job.assignment.id,
+            run: job.run.id,
+            reason,
+            failure,
+          }),
+        ),
+      );
+    this.settle(job.attempt, sent, reason, job.bell, failure);
   }
   private waitForRuntime(project: ProjectId, expected: Assignment) {
     this.options.store.uow.run((tx) => {
@@ -685,6 +743,7 @@ export class Dispatcher {
     sent: boolean,
     reason: string,
     bell?: string,
+    failure?: DeliveryFailure,
   ) {
     const { store } = this.options,
       project = attempt.project_id;
@@ -731,7 +790,6 @@ export class Dispatcher {
         if (!["pending", "belled", "delivery_failed"].includes(n.status))
           continue;
         const acked = covered(n, state, attempt.assignment_id);
-        if (!acked && !["pending", "belled"].includes(n.status)) continue;
         moveNotification(store.database, {
           project_id: project,
           id: n.id,
@@ -752,8 +810,37 @@ export class Dispatcher {
         });
         failed ||= !sent && !acked;
       }
-      if (failed)
-        this.escalate(tx, project, notes, attempt.assignment_id, reason);
+      const run = state.runs.find((r) => r.id === attempt.run_id);
+      // C-56: a dispatched Run is retried with backoff and recovered by
+      // dispatch-retry; only escalate failures nobody else will handle.
+      const recovering =
+        run?.status === "dispatched" ||
+        run?.status === "running" ||
+        (run !== undefined && dispatchRecoveryFailed(state, run));
+      if (failed && !recovering)
+        this.escalate(
+          tx,
+          project,
+          notes,
+          attempt.assignment_id,
+          reason,
+          failure,
+        );
+      else if (failed && failure && run) {
+        // C-68: keep the real cause on the card without alerting anyone.
+        const a = state.assignments.find((x) => x.id === attempt.assignment_id);
+        if (a)
+          deliveryAttemptFailed(tx, state, at, {
+            assignment: a,
+            run_id: run.id,
+            reason,
+            error: failure,
+            notification_ids: attempt.notification_ids,
+            card_id:
+              notes[0]?.card_id ??
+              state.work_items.find((w) => w.id === a.work_item_id)?.card_id,
+          });
+      }
     });
   }
   private reject(
@@ -798,6 +885,7 @@ export class Dispatcher {
     notes: readonly Notification[],
     assignment: Assignment["id"],
     reason: string,
+    failure?: DeliveryFailure,
   ) {
     const state = loadCommandState(tx, project);
     const a = state.assignments.find((a) => a.id === assignment);
@@ -811,6 +899,8 @@ export class Dispatcher {
         notes[0]?.card_id ??
         state.work_items.find((w) => w.id === a.work_item_id)?.card_id,
       notification_ids: notes.map((n) => n.id),
+      run_id: notes[0]?.run_id,
+      ...(failure ? { error: failure } : {}),
     });
   }
   private retryDelay(attempts: number) {
@@ -824,6 +914,26 @@ export class Dispatcher {
     store.uow.run((tx) => {
       const state = loadCommandState(tx, project),
         at = this.clock.now();
+      persistEffect(
+        tx,
+        project,
+        unwrap(
+          resolveDispatchAttention(
+            state,
+            { kind: "system", project_id: project },
+            { clock: this.clock, ids: tx.ids },
+          ),
+        ),
+      );
+      for (const n of store.listNotifications({ project_id: project })) {
+        if (obsoleteDispatchAttention(state, n))
+          moveNotification(store.database, {
+            project_id: project,
+            id: n.id,
+            event: "resolve",
+            at,
+          });
+      }
       escalateReviewLimitWaits(tx, store, state, at);
       const attempts = unfinishedBellAttempts(store.database, project);
       for (const n of store.listNotifications({

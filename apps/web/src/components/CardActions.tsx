@@ -23,6 +23,19 @@ const labels = {
  * C-69: unmarking restarts the auto-merge timeout; mention it only when the
  * project has it on. The flag is already saved, so a failed read stays silent.
  */
+/** C-72: a no-op unmark restarts nothing; show the time that still applies. */
+function alreadyUnmarkedNote(due_at: string | null) {
+  const due =
+    due_at === null
+      ? ""
+      : `当前合并确认将于 ${new Date(due_at).toLocaleTimeString("zh-CN", {
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false,
+        })} 按项目设置自动合并。`;
+  return `该卡本来就没有敏感标记，这次没有改动，合并确认的超时计时也没有重新开始。${due}`;
+}
+
 async function unmarkNote(client: CardiganClient, projectId: string) {
   try {
     const minutes = (await client.preferences(projectId))
@@ -64,12 +77,19 @@ export function CardActions({
     setFlagError("");
     setMessage("");
     try {
-      await client.setCardSensitive(projectId, card.id, next, key);
+      const result = await client.setCardSensitive(
+        projectId,
+        card.id,
+        next,
+        key,
+      );
       keys.current.delete(request);
       setMessage(
         next
           ? "已标为敏感：合并确认将由你亲自处理。"
-          : `已取消敏感标记。${await unmarkNote(client, projectId)}`,
+          : result.changed
+            ? `已取消敏感标记。${await unmarkNote(client, projectId)}`
+            : alreadyUnmarkedNote(result.auto_merge_due_at),
       );
       onSaved();
     } catch (cause) {

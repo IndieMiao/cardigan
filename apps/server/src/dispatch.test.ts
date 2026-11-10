@@ -259,7 +259,7 @@ test("§3.1 released Assignment is not started or woken and the failure reaches 
     }).length,
   ).toBeGreaterThan(0);
 });
-test("§3.3 wake failure preserves its Run, records failure once and never silently retries", async () => {
+test("C-56 wake failure retries the same Run after backoff without immediate escalation", async () => {
   comment();
   vi.mocked(runtime.wake).mockResolvedValue({
     ok: false,
@@ -269,11 +269,11 @@ test("§3.3 wake failure preserves its Run, records failure once and never silen
   await dispatcher.tick();
   f.advance(120000);
   await dispatcher.tick();
-  expect(runtime.wake).toHaveBeenCalledOnce();
+  expect(runtime.wake).toHaveBeenCalledTimes(2);
   expect(f.state().runs).toHaveLength(2);
   expect(ownNotes()[0]).toMatchObject({
     status: "delivery_failed",
-    attempts: 1,
+    attempts: 2,
   });
   expect(unfinishedBellAttempts(f.store.database, f.project)).toEqual([]);
   expect(
@@ -281,7 +281,7 @@ test("§3.3 wake failure preserves its Run, records failure once and never silen
       project_id: f.project,
       recipient_kind: "pm_ops",
     }),
-  ).toHaveLength(1);
+  ).toHaveLength(0);
 });
 test("an ACK during wake wins over its late failure response", async () => {
   comment();
@@ -1117,6 +1117,61 @@ test("q(86) MCP activity arriving during the preflight read withdraws cancellati
   ).toBeUndefined();
   expect(f.store.verifyToken(t.token.token)).toBeDefined();
   expect(runtime.wake).not.toHaveBeenCalled();
+});
+
+test("inactivity settlement rolls back cancellation and slot release when shared token revocation fails", async () => {
+  const t = inactiveTarget();
+  let stopped = false;
+  vi.mocked(runtime.status).mockImplementation(async (ref) => ({
+    ok: true,
+    value: {
+      process:
+        stopped && ref.terminal_ref === f.refFor(t.busy.assignment).terminal_ref
+          ? "exited"
+          : "alive",
+      agent: "idle",
+      observed_seq: 1,
+    },
+  }));
+  runtime.release = vi.fn(async () => {
+    stopped = true;
+    return { ok: true, value: undefined };
+  });
+  f.store.database.exec(
+    "CREATE TRIGGER fail_revoke BEFORE UPDATE OF revoked_at ON tokens BEGIN SELECT RAISE(ABORT, 'test revoke failure'); END",
+  );
+  try {
+    await expect(new Dispatcher(t.settings).tick()).rejects.toThrow(
+      "test revoke failure",
+    );
+  } finally {
+    f.store.database.exec("DROP TRIGGER fail_revoke");
+  }
+  expect(f.state().runs.find((r) => r.id === t.run.id)).toMatchObject({
+    status: "running",
+    inactivity_stop: { stopping: true },
+  });
+  expect(f.store.verifyToken(t.token.token)).toBeDefined();
+  expect(slots()).toBe(1);
+  expect(runtime.wake).not.toHaveBeenCalled();
+  expect(
+    f
+      .state()
+      .events.filter(
+        (e) =>
+          e.type === "run_dispatch_aborted" ||
+          e.type === "run_inactivity_stop_finished",
+      ),
+  ).toHaveLength(0);
+  f.advance(60001);
+  await new Dispatcher(t.settings).tick();
+  expect(f.state().runs.find((r) => r.id === t.run.id)).toMatchObject({
+    status: "cancelled",
+  });
+  expect(f.store.verifyToken(t.token.token)).toBeUndefined();
+  expect(runtime.release).toHaveBeenCalledOnce();
+  expect(runtime.wake).toHaveBeenCalledOnce();
+  expect(slots()).toBe(1);
 });
 
 test.each(["alive", "unknown", "unavailable"] as const)(

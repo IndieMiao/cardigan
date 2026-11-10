@@ -26,16 +26,26 @@ const allowed: Record<
     ack: "acked",
     deliver_failed: "delivery_failed",
     needs_attention: "needs_attention",
+    resolve: "resolved",
   },
   belled: {
     ack: "acked",
     retry: "pending",
     deliver_failed: "delivery_failed",
     needs_attention: "needs_attention",
+    resolve: "resolved",
   },
-  delivery_failed: { ack: "acked", needs_attention: "needs_attention" },
+  delivery_failed: {
+    ack: "acked",
+    retry: "pending",
+    bell: "belled",
+    deliver_failed: "delivery_failed",
+    needs_attention: "needs_attention",
+    resolve: "resolved",
+  },
   acked: {},
-  needs_attention: {},
+  needs_attention: { resolve: "resolved" },
+  resolved: {},
 };
 const events: NotificationEvent[] = [
   "bell",
@@ -43,6 +53,7 @@ const events: NotificationEvent[] = [
   "retry",
   "deliver_failed",
   "needs_attention",
+  "resolve",
 ];
 let number = 0;
 const cases = (Object.keys(allowed) as NotificationStatus[]).flatMap((from) =>
@@ -68,7 +79,7 @@ test.each(
   })),
 )("[$id] §4.4 terminal/escalated classification of $status", ({ status }) => {
   expect(isTerminalNotification(status)).toBe(
-    ["acked", "needs_attention"].includes(status),
+    ["acked", "needs_attention", "resolved"].includes(status),
   );
   expect(isEscalatedNotification(status)).toBe(
     ["delivery_failed", "needs_attention"].includes(status),

@@ -3,8 +3,10 @@ export {
   type BeginBellAttempt,
   type BellAttempt,
   beginBellAttempt,
+  beginDispatchRetry,
   beginLaunchAttempt,
   finishBellAttempt,
+  listBellAttempts,
   unfinishedBellAttempts,
 } from "./dispatcher.js";
 export { persistEmployeeEffect } from "./employees.js";

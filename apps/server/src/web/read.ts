@@ -1200,6 +1200,7 @@ const EVENT_CATEGORIES: Readonly<Record<string, readonly string[]>> = {
     "runtime_lost",
     "runtime_reconnected",
     "bell_delivery_failed",
+    "bell_delivery_attempt_failed",
     "bell_retry_exhausted",
   ],
   merge: [
