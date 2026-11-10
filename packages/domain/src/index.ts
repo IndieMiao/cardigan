@@ -39,6 +39,7 @@ export {
 export * from "./commands/merge-result.js";
 export * from "./commands/notices.js";
 export * from "./commands/pm.js";
+export * from "./commands/pm-rotate.js";
 export * from "./commands/preferences.js";
 export * from "./commands/queries.js";
 export * from "./commands/release.js";

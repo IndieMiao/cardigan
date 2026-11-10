@@ -343,3 +343,186 @@ export function rollbackRole(
     );
   });
 }
+
+/** The fields a role takes from the default pack on `role upgrade --from-default`. */
+export const DEFAULT_PACK_FIELDS = [
+  "instructions",
+  "allowed_tools",
+  "capabilities",
+  "kind",
+  "worktree",
+] as const;
+export type DefaultPackPatch = Pick<
+  RoleDefinition,
+  "allowed_tools" | "capabilities" | "kind" | "worktree"
+> & { readonly instructions: string };
+
+export interface RoleFieldChange {
+  readonly field: "instructions" | "kind" | "worktree";
+  readonly from: string;
+  readonly to: string;
+}
+export interface RoleUpgradeDiff {
+  readonly added_tools: readonly string[];
+  readonly removed_tools: readonly string[];
+  readonly added_capabilities: readonly string[];
+  readonly removed_capabilities: readonly string[];
+  readonly fields: readonly RoleFieldChange[];
+  /** Human-readable widenings; the CLI lists them prominently. */
+  readonly relaxations: readonly string[];
+}
+export type RoleUpgradeEffect =
+  | {
+      readonly unchanged: true;
+      readonly previous: Role;
+      readonly diff: RoleUpgradeDiff;
+    }
+  | {
+      readonly unchanged: false;
+      readonly previous: Role;
+      readonly diff: RoleUpgradeDiff;
+      readonly effect: RoleEffect;
+    };
+
+const WORKTREE_RANK = { none: 0, readonly: 1, write: 2 } as const;
+const KIND_LABEL: Record<string, string> = {
+  produce: "产出",
+  verify: "验证",
+  standing: "常驻",
+  work: "旧版工作",
+};
+
+/** Pure diff between a role version and the default-pack fields it would take. */
+export function roleUpgradeDiff(
+  previous: Role,
+  patch: DefaultPackPatch,
+): RoleUpgradeDiff {
+  const minus = (a: readonly string[], b: readonly string[]) =>
+    a.filter((value) => !b.includes(value));
+  const added_tools = minus(patch.allowed_tools, previous.allowed_tools);
+  const removed_tools = minus(previous.allowed_tools, patch.allowed_tools);
+  const added_capabilities = minus(patch.capabilities, previous.capabilities);
+  const removed_capabilities = minus(previous.capabilities, patch.capabilities);
+  const fields: RoleFieldChange[] = [];
+  const previousKind = roleKind(previous);
+  if (previous.kind !== patch.kind)
+    fields.push({ field: "kind", from: previous.kind, to: patch.kind });
+  if (previous.worktree !== patch.worktree)
+    fields.push({
+      field: "worktree",
+      from: previous.worktree,
+      to: patch.worktree,
+    });
+  if ((previous.instructions ?? previous.core_prompt) !== patch.instructions)
+    fields.push({
+      field: "instructions",
+      from:
+        previous.instructions === undefined
+          ? "core_prompt（旧版）"
+          : "旧版说明",
+      to: "默认包说明",
+    });
+  const relaxations = [
+    ...added_tools.map((tool) => `新增工具 ${tool}`),
+    ...added_capabilities.map((value) => `新增能力 ${value}`),
+    ...(WORKTREE_RANK[patch.worktree] > WORKTREE_RANK[previous.worktree]
+      ? [`worktree 从 ${previous.worktree} 放宽为 ${patch.worktree}`]
+      : []),
+    ...(previousKind !== roleKind(patch)
+      ? [
+          `角色类型从${KIND_LABEL[previousKind]}改为${KIND_LABEL[roleKind(patch)]}，工具白名单随之改变`,
+        ]
+      : []),
+  ];
+  return {
+    added_tools,
+    removed_tools,
+    added_capabilities,
+    removed_capabilities,
+    fields,
+    relaxations,
+  };
+}
+
+export interface RoleUpgradePreview {
+  readonly unchanged: boolean;
+  readonly previous: Role;
+  readonly diff: RoleUpgradeDiff;
+  readonly patch: DefaultPackPatch;
+}
+
+/**
+ * Compute what `upgradeRole` would write, without allocating ids or events, so
+ * a dry run can use a read-only transaction. A changed definition is checked
+ * with the same `validateRole` the write uses.
+ */
+export function previewRoleUpgrade(
+  state: RoleCommandState,
+  actor: Actor,
+  id: string,
+  source: RoleDefinition,
+): Result<RoleUpgradePreview> {
+  return attempt(() => {
+    authorize(state, actor);
+    ensure(
+      source.role_id === id && source.instructions !== undefined,
+      "validation_failed",
+      `默认角色包里的 ${id} 不完整`,
+    );
+    const previous = find(state, id);
+    const patch: DefaultPackPatch = {
+      instructions: source.instructions,
+      allowed_tools: [...source.allowed_tools],
+      capabilities: [...source.capabilities],
+      kind: source.kind,
+      worktree: source.worktree,
+    };
+    const diff = roleUpgradeDiff(previous, patch);
+    const same = (a: readonly string[], b: readonly string[]) =>
+      a.length === b.length && a.every((value) => b.includes(value));
+    const unchanged =
+      diff.fields.length === 0 &&
+      same(previous.allowed_tools, patch.allowed_tools) &&
+      same(previous.capabilities, patch.capabilities);
+    if (!unchanged) {
+      const checked = validateRole({ ...previous, ...patch });
+      ensure(
+        checked.ok,
+        "validation_failed",
+        checked.ok ? "" : checked.error.message,
+      );
+    }
+    return { unchanged, previous, diff, patch };
+  });
+}
+
+/**
+ * Append a version whose policy fields come from the default pack, keeping the
+ * project's own launch fields. The caller resolves `source` from the pack; the
+ * write itself is `updateRole`, so authorization and `validateRole` are shared.
+ */
+export function upgradeRole(
+  state: RoleCommandState,
+  actor: Actor,
+  id: string,
+  source: RoleDefinition,
+  ports: CommandPorts,
+): Result<RoleUpgradeEffect> {
+  return attempt(() => {
+    const preview = previewRoleUpgrade(state, actor, id, source);
+    ensure(
+      preview.ok,
+      preview.ok ? "validation_failed" : preview.error.code,
+      preview.ok ? "" : preview.error.message,
+    );
+    const { unchanged, previous, diff, patch } = preview.value;
+    if (unchanged) return { unchanged: true, previous, diff };
+    const effect = updateRole(state, actor, id, patch, ports);
+    ensure(
+      effect.ok,
+      effect.ok ? "validation_failed" : effect.error.code,
+      effect.ok ? "" : effect.error.message,
+    );
+    return { unchanged: false, previous, diff, effect: effect.value };
+  });
+}
