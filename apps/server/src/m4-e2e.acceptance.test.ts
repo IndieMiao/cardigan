@@ -432,6 +432,7 @@ async function harness(): Promise<Harness> {
         card: {
           id: card.id,
           project_id: project,
+          repo: source,
           base_branch: card.base_branch,
         } as never,
         work_item: item,

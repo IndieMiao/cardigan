@@ -10,6 +10,7 @@ import {
   type CommandEffect,
   type CommandPorts,
   type CommandState,
+  createCard,
   type Delivery,
   dispatchRun,
   manageCardTemplate,
@@ -32,6 +33,99 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { expect, test, vi } from "vitest";
 import { ServerGit } from "../git.js";
 import { cardDetail } from "./read.js";
+
+test("a persisted legacy project with empty capabilities creates dev cards and assigns all three roles", () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "cardigan-legacy-dev-"));
+  const store = Store.open({ dataDir }),
+    project = "legacy-dev";
+  try {
+    unwrap(store.createProject({ id: project }));
+    store.uow.run((tx) => {
+      for (const role_id of ["coder", "reviewer", "pm"])
+        writeRole(
+          tx,
+          project,
+          {
+            role_id,
+            version: 1,
+            display_name: role_id,
+            kind: role_id === "pm" ? "standing" : "work",
+            harness: "codex",
+            core_prompt: "Fixture",
+            launch_profile_ref: "fixture",
+            abilities: [],
+            capabilities: [],
+            required_machine_tags: [],
+            worktree: role_id === "coder" ? "write" : "readonly",
+            allowed_tools:
+              role_id === "pm"
+                ? ["whoami", "create_card", "assign"]
+                : [
+                    "whoami",
+                    role_id === "coder" ? "submit_delivery" : "submit_review",
+                  ],
+          },
+          { mode: "add" },
+        );
+      const human: Actor = { kind: "human", project_id: project };
+      const ports = {
+        clock: { now: () => new Date().toISOString() },
+        ids: tx.ids,
+      };
+      const created = unwrap(
+        createCard(
+          loadCommandState(tx, project),
+          human,
+          {
+            title: "Legacy dev",
+            goal: "Preserve existing projects",
+            acceptance_criteria: ["All roles can be assigned"],
+            source: { kind: "quote", text: "Regression" },
+            repo: "fixture/repo",
+            base_branch: "main",
+          },
+          ports,
+        ),
+      );
+      persistEffect(tx, project, created);
+      expect(created.data).toMatchObject({
+        template: "dev",
+        template_version: 1,
+      });
+      for (const item of tx.work_items.list(project)) {
+        const assigned = unwrap(
+          assign(
+            loadCommandState(tx, project),
+            human,
+            { work_item_id: item.id, role_id: item.role_id },
+            ports,
+          ),
+        );
+        persistEffect(tx, project, assigned);
+      }
+    });
+    const state = store.uow.read((tx) => loadCommandState(tx, project));
+    expect(state.roles).toHaveLength(3);
+    expect(state.roles.every((r) => r.capabilities.length === 0)).toBe(true);
+    expect(state.assignments.map((a) => a.role_id).sort()).toEqual([
+      "coder",
+      "pm",
+      "reviewer",
+    ]);
+    for (const item of state.work_items)
+      expect(state.assignments).toContainEqual(
+        expect.objectContaining({
+          id: item.assignment_id,
+          work_item_id: item.id,
+          role_id: item.role_id,
+          status: "active",
+        }),
+      );
+  } finally {
+    store.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
 
 /** Fake Agents talk to the actual MCP/SQLite/Git assembly; no hc or repository. */
 test.each([
