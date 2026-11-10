@@ -13,11 +13,13 @@ import {
   abortDispatch,
   canDispatchRun,
   compareDispatchOrder,
+  DEFAULT_INACTIVE_CANCEL_AFTER_MS,
   DEFAULT_RUN_LIMIT,
   decisionFollowupBlocked,
   decisionFollowupPrompt,
   dispatchRun,
   isStandingPm,
+  lastRunActivity,
   queueRun,
   remindDecisionFollowups,
 } from "@cardigan/domain";
@@ -44,6 +46,7 @@ import {
   dispatchAlert,
   unfinishedRun,
 } from "./dispatch-alert.js";
+import { InactiveRunReaper } from "./dispatch-inactive.js";
 import {
   acknowledgeInbox,
   dispatcherClock,
@@ -64,6 +67,7 @@ export interface DispatcherOptions {
   /** Loaded once by the host; the decision reads the supplied limit on every claim. */
   readonly runLimit?: (machine: string) => number;
   readonly inactivityGraceMs?: number;
+  readonly inactiveCancelAfterMs?: number | null;
   /** Snapshot for a NEW terminal; an existing session keeps its previous Run's snapshot. */
   readonly snapshot: (
     assignment: Assignment,
@@ -119,12 +123,54 @@ export class Dispatcher {
   private readonly retryBaseMs: number;
   private readonly maxRetries: number;
   private readonly inactivityGraceMs: number;
+  private readonly inactive: InactiveRunReaper;
   constructor(readonly options: DispatcherOptions) {
     this.clock = options.clock ?? dispatcherClock;
     this.leaseMs = options.deliveryLeaseMs ?? 60_000;
     this.retryBaseMs = options.retryBaseMs ?? 60_000;
     this.maxRetries = options.maxRetries ?? 4;
     this.inactivityGraceMs = options.inactivityGraceMs ?? 15 * 60_000;
+    const cancelAfterMs =
+      options.inactiveCancelAfterMs === undefined
+        ? Math.max(DEFAULT_INACTIVE_CANCEL_AFTER_MS, this.inactivityGraceMs)
+        : options.inactiveCancelAfterMs;
+    if (
+      cancelAfterMs !== null &&
+      (!Number.isSafeInteger(cancelAfterMs) || cancelAfterMs < 1)
+    )
+      throw new Error("Invalid inactive Run cancellation grace");
+    this.inactive = new InactiveRunReaper({
+      store: options.store,
+      runtime: options.runtime,
+      clock: this.clock,
+      afterMs: cancelAfterMs,
+      alert: (tx, state, assignment, run, reason) => {
+        if (
+          state.events.some(
+            (e) =>
+              e.type === reason &&
+              payloadString(e.payload, "run_id") === run.id,
+          )
+        )
+          return;
+        const audience = isStandingPm(assignment)
+          ? assignment.standing_mode === "office"
+            ? "human_only"
+            : "human"
+          : alertAudience(assignment, state, options.standing);
+        dispatchAlert(tx, options.store, state, this.clock.now(), {
+          assignment,
+          type: reason,
+          reason,
+          audience,
+          run_id: run.id,
+          mark: reason === "inactive_stop_unconfirmed",
+          card_id: state.work_items.find(
+            (w) => w.id === assignment.work_item_id,
+          )?.card_id,
+        });
+      },
+    });
     if (
       !Number.isSafeInteger(this.maxRetries) ||
       this.maxRetries < 0 ||
@@ -148,6 +194,9 @@ export class Dispatcher {
       const candidates = this.options.store
         .listProjects()
         .flatMap((p) => this.project(p.id));
+      await this.inactive.tick(
+        this.options.store.listProjects().map((p) => p.id),
+      );
       candidates.sort((a, b) => compareDispatchOrder(a.order, b.order));
       for (const candidate of candidates)
         await this.deliver(
@@ -261,7 +310,8 @@ export class Dispatcher {
     const queued = this.queued(state, a);
     return state.runs.some(
       (r) =>
-        r.assignment_id === a.id && unfinishedRun(r) && r.id !== queued?.id,
+        r.assignment_id === a.id &&
+        (r.inactivity_stop || (unfinishedRun(r) && r.id !== queued?.id)),
     );
   }
   private async deliver(
@@ -814,10 +864,7 @@ export class Dispatcher {
         if (r.status !== "running") continue;
         const a = state.assignments.find((a) => a.id === r.assignment_id);
         if (a?.status !== "active") continue;
-        const last = Math.max(
-          Date.parse(r.started_at ?? a.created_at),
-          Date.parse(a.last_mcp_activity_at ?? a.created_at),
-        );
+        const last = lastRunActivity(r, a);
         if (
           Date.parse(at) - last < this.inactivityGraceMs ||
           state.events.some(

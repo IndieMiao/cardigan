@@ -989,3 +989,265 @@ test("reopened capacity view releases dead or reused process owners, while keepi
     dead();
   }
 });
+
+function inactiveTarget() {
+  const busy = f.create();
+  const run = f.session(busy.assignment, false);
+  const token = f.store.issueToken({
+    project_id: f.project,
+    assignment_id: busy.assignment.id,
+    role: {
+      role_version: busy.assignment.role_version,
+      allowed_tools: ["whoami"],
+    },
+  });
+  f.store.uow.run((tx) => {
+    const owner = tx.assignments.get(f.project, busy.assignment.id);
+    if (!owner) throw new Error("Missing owner");
+    tx.assignments.put(f.project, {
+      ...owner,
+      worktree_path: "/fixture/retained",
+      branch: "agent/retained",
+      base_sha: "a".repeat(40),
+    });
+  });
+  comment();
+  f.advance(101);
+  return {
+    busy,
+    run,
+    token,
+    settings: {
+      ...options,
+      runLimit: () => 1,
+      inactivityGraceMs: 50,
+      inactiveCancelAfterMs: 100,
+    },
+  };
+}
+const slots = () =>
+  f.store.uow.read((tx) =>
+    runCapacitySnapshot(f.store, tx).occupied.get("local"),
+  );
+
+test("q(86) stops and confirms exit before cancelling/revoking, then automatically dispatches the next Run", async () => {
+  const t = inactiveTarget();
+  let stopped = false;
+  const order: string[] = [];
+  vi.mocked(runtime.status).mockImplementation(async (ref) => {
+    const current =
+      ref.terminal_ref === f.refFor(t.busy.assignment).terminal_ref;
+    if (current) {
+      order.push(stopped ? "confirm" : "observe");
+      expect(f.store.verifyToken(t.token.token)).toBeDefined();
+      expect(f.state().runs.find((r) => r.id === t.run.id)?.status).toBe(
+        "running",
+      );
+      expect(slots()).toBe(1);
+    }
+    return {
+      ok: true,
+      value: {
+        process: current && stopped ? "exited" : "alive",
+        agent: "idle",
+        observed_seq: 1,
+      },
+    };
+  });
+  runtime.release = vi.fn(async () => {
+    order.push("release");
+    stopped = true;
+    return { ok: true, value: undefined };
+  });
+  await new Dispatcher(t.settings).tick();
+  expect(order).toEqual(["observe", "release", "confirm"]);
+  expect(f.state().runs.find((r) => r.id === t.run.id)).toMatchObject({
+    status: "cancelled",
+    outcome: "failed",
+  });
+  expect(f.store.verifyToken(t.token.token)).toBeUndefined();
+  expect(
+    f.state().assignments.find((a) => a.id === t.busy.assignment.id),
+  ).toMatchObject({
+    worktree_path: "/fixture/retained",
+    branch: "agent/retained",
+    base_sha: "a".repeat(40),
+  });
+  expect(
+    f.state().events.filter((e) => e.type === "run_inactivity_stop_finished"),
+  ).toHaveLength(1);
+  expect(
+    f
+      .state()
+      .timeline.some(
+        (entry) => entry.run_id === t.run.id && entry.body.includes("自动取消"),
+      ),
+  ).toBe(true);
+  expect(runtime.wake).toHaveBeenCalledOnce();
+  expect(slots()).toBe(1); // Only the newly dispatched work occupies the slot.
+});
+
+test("q(86) MCP activity arriving during the preflight read withdraws cancellation", async () => {
+  const t = inactiveTarget();
+  vi.mocked(runtime.status).mockImplementation(async (ref) => {
+    if (ref.terminal_ref === f.refFor(t.busy.assignment).terminal_ref) {
+      f.advance(1);
+      f.store.touchAssignmentActivity(
+        f.project,
+        t.busy.assignment.id,
+        f.clock.now(),
+      );
+    }
+    return {
+      ok: true,
+      value: { process: "alive", agent: "idle", observed_seq: 1 },
+    };
+  });
+  runtime.release = vi.fn(async () => ({ ok: true, value: undefined }));
+  await new Dispatcher(t.settings).tick();
+  expect(runtime.release).not.toHaveBeenCalled();
+  expect(f.state().runs.find((r) => r.id === t.run.id)).toMatchObject({
+    status: "running",
+  });
+  expect(
+    f.state().runs.find((r) => r.id === t.run.id)?.inactivity_stop,
+  ).toBeUndefined();
+  expect(f.store.verifyToken(t.token.token)).toBeDefined();
+  expect(runtime.wake).not.toHaveBeenCalled();
+});
+
+test.each(["alive", "unknown", "unavailable"] as const)(
+  "q(86) unconfirmed %s exit retains the slot and token until a later confirmed retry",
+  async (observed) => {
+    const t = inactiveTarget();
+    let confirmed = false;
+    vi.mocked(runtime.status).mockImplementation(async (ref) => {
+      if (ref.terminal_ref !== f.refFor(t.busy.assignment).terminal_ref)
+        return {
+          ok: true,
+          value: { process: "alive", agent: "idle", observed_seq: 1 },
+        };
+      if (confirmed)
+        return {
+          ok: false,
+          error: { code: "runtime_not_found", message: "gone" },
+        };
+      if (observed === "unavailable")
+        return {
+          ok: false,
+          error: { code: "runtime_unavailable", message: "unknown" },
+        };
+      return {
+        ok: true,
+        value: { process: observed, agent: "idle", observed_seq: 1 },
+      };
+    });
+    runtime.release = vi.fn(async () => {
+      // RuntimeMonitor may change the status during the external call; the stop
+      // intent must still hold capacity until exit proof arrives.
+      f.store.uow.run((tx) => {
+        const run = tx.runs.get(f.project, t.run.id);
+        if (run) tx.runs.put(f.project, { ...run, status: "unknown" });
+      });
+      return {
+        ok: false,
+        error: { code: "runtime_timeout", message: "unconfirmed" },
+      };
+    });
+    const dispatcher = new Dispatcher(t.settings);
+    await dispatcher.tick();
+    await new Dispatcher(t.settings).tick();
+    expect(runtime.release).toHaveBeenCalledOnce();
+    expect(slots()).toBe(1);
+    expect(f.store.verifyToken(t.token.token)).toBeDefined();
+    expect(runtime.wake).not.toHaveBeenCalled();
+    expect(
+      f.state().events.filter((e) => e.type === "inactive_stop_unconfirmed"),
+    ).toHaveLength(1);
+    confirmed = true;
+    f.advance(60_001);
+    const reopened = Store.open({ dataDir: f.dataDir });
+    try {
+      await new Dispatcher({ ...t.settings, store: reopened }).tick();
+    } finally {
+      reopened.close();
+    }
+    expect(f.state().runs.find((r) => r.id === t.run.id)).toMatchObject({
+      status: "cancelled",
+      outcome: "failed",
+    });
+    expect(f.store.verifyToken(t.token.token)).toBeUndefined();
+    expect(runtime.release).toHaveBeenCalledOnce(); // Exit is already proven on recovery.
+    expect(runtime.wake).toHaveBeenCalledOnce();
+  },
+);
+
+test("q(86) an in-flight stop fences concurrent dispatchers and preserves a Run that finishes meanwhile", async () => {
+  const t = inactiveTarget();
+  let release = () => {},
+    stopped = false;
+  const hold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  vi.mocked(runtime.status).mockImplementation(async (ref) => ({
+    ok: true,
+    value: {
+      process:
+        stopped && ref.terminal_ref === f.refFor(t.busy.assignment).terminal_ref
+          ? "exited"
+          : "alive",
+      agent: "idle",
+      observed_seq: 1,
+    },
+  }));
+  runtime.release = vi.fn(async () => {
+    await hold;
+    stopped = true;
+    return { ok: true, value: undefined };
+  });
+  const first = new Dispatcher(t.settings).tick();
+  try {
+    await expect
+      .poll(() => vi.mocked(runtime.release).mock.calls.length)
+      .toBe(1);
+    finish(t.busy.assignment);
+    await new Dispatcher(t.settings).tick();
+    expect(runtime.release).toHaveBeenCalledOnce();
+    expect(slots()).toBe(1);
+    expect(runtime.wake).not.toHaveBeenCalled();
+    release();
+    await first;
+    expect(f.state().runs.find((r) => r.id === t.run.id)).toMatchObject({
+      status: "completed",
+      outcome: "completed",
+    });
+    expect(f.store.verifyToken(t.token.token)).toBeUndefined();
+    expect(runtime.wake).toHaveBeenCalledOnce();
+  } finally {
+    release();
+    await first;
+  }
+});
+
+test("q(86) the default grace tolerates the observed 48-minute silence and restarts on fresh MCP activity", async () => {
+  const t = inactiveTarget();
+  runtime.release = vi.fn(async () => ({ ok: true, value: undefined }));
+  f.advance(48 * 60_000);
+  const dispatcher = new Dispatcher({ ...options, runLimit: () => 1 });
+  await dispatcher.tick();
+  expect(f.state().events.some((e) => e.type === "run_inactive")).toBe(true);
+  expect(runtime.release).not.toHaveBeenCalled();
+  expect(
+    f.state().runs.find((r) => r.id === t.run.id)?.inactivity_stop,
+  ).toBeUndefined();
+  f.store.touchAssignmentActivity(
+    f.project,
+    t.busy.assignment.id,
+    f.clock.now(),
+  );
+  f.advance(119 * 60_000);
+  await dispatcher.tick();
+  expect(runtime.release).not.toHaveBeenCalled();
+  expect(f.store.verifyToken(t.token.token)).toBeDefined();
+  expect(slots()).toBe(1);
+});

@@ -1,12 +1,21 @@
 import { beforeEach, expect, test } from "vitest";
 import {
+  claimInactiveRunStop,
+  DEFAULT_INACTIVE_CANCEL_AFTER_MS,
+  finishInactiveRunStop,
+  INACTIVE_STOP_LEASE_MS,
+  startInactiveRunStop,
+} from "./commands/inactive-run.js";
+import {
+  actor,
   commit,
   dispatch,
   f,
   queue,
   setup,
 } from "./commands/launch/test-fixtures.js";
-import { abortDispatch } from "./commands/launch.js";
+import { abortDispatch, acknowledgeRun } from "./commands/launch.js";
+import { finishRun, heartbeat } from "./commands/runtime.js";
 import type { Assignment, Run } from "./entities.js";
 import {
   canDispatchRun,
@@ -129,4 +138,211 @@ test("cancelling a queued startup fences every later dispatch of that Run", () =
     outcome: "failed",
     trigger_event_id: run.trigger_event_id,
   });
+});
+
+function inactiveFixture() {
+  const run = commit(queue());
+  commit(dispatch(run));
+  commit(acknowledgeRun(f.state, actor(), { run_id: run.id }, f.io));
+  let now = Date.parse(f.io.clock.now());
+  f.io = { ...f.io, clock: { now: () => new Date(now).toISOString() } };
+  const system = { kind: "system" as const, project_id: f.state.project_id };
+  const advance = (ms: number) => {
+    now += ms;
+  };
+  const claim = () =>
+    commit(
+      claimInactiveRunStop(
+        f.state,
+        system,
+        { run_id: run.id, after_ms: DEFAULT_INACTIVE_CANCEL_AFTER_MS },
+        f.io,
+      ),
+    );
+  const start = (attempt_id: string) =>
+    commit(
+      startInactiveRunStop(
+        f.state,
+        system,
+        {
+          run_id: run.id,
+          attempt_id,
+          after_ms: DEFAULT_INACTIVE_CANCEL_AFTER_MS,
+        },
+        f.io,
+      ),
+    );
+  return { run, system, advance, claim, start };
+}
+
+test("q(86) requires the grace and rechecks new heartbeat activity before issuing a stop", () => {
+  const t = inactiveFixture();
+  expect(t.claim()).toBeUndefined();
+  t.advance(DEFAULT_INACTIVE_CANCEL_AFTER_MS);
+  const stop = t.claim()?.inactivity_stop;
+  if (!stop) throw new Error("Missing stop intent");
+  t.advance(1);
+  const caller = actor();
+  if (caller.kind !== "assignment") throw new Error("Missing fixture actor");
+  commit(
+    heartbeat(
+      f.state,
+      { ...caller, allowed_tools: [...caller.allowed_tools, "heartbeat"] },
+      { run_id: t.run.id },
+      f.io,
+    ),
+  );
+  expect(t.start(stop.attempt_id)).toBeUndefined();
+  expect(f.state.runs[0]).toMatchObject({ status: "running" });
+  expect(f.state.runs[0]?.inactivity_stop).toBeUndefined();
+});
+
+test("q(86) rejects unproven exit and Agent authority, and cancellation preserves the worktree and work item", () => {
+  const t = inactiveFixture();
+  t.advance(DEFAULT_INACTIVE_CANCEL_AFTER_MS);
+  const stop = t.claim()?.inactivity_stop;
+  if (!stop) throw new Error("Missing stop intent");
+  t.start(stop.attempt_id);
+  const itemBefore = f.state.work_items;
+  const ownerBefore = f.state.assignments.find(
+    (a) => a.id === t.run.assignment_id,
+  );
+  const input = {
+    run_id: t.run.id,
+    attempt_id: stop.attempt_id,
+    runtime_ref: stop.runtime_ref,
+    exited: true,
+  };
+  expect(finishInactiveRunStop(f.state, actor(), input, f.io)).toMatchObject({
+    ok: false,
+    error: { code: "unauthorized" },
+  });
+  expect(
+    finishInactiveRunStop(f.state, t.system, { ...input, exited: false }, f.io),
+  ).toMatchObject({ ok: false, error: { code: "validation_failed" } });
+  const ended = commit(finishInactiveRunStop(f.state, t.system, input, f.io));
+  expect(ended).toMatchObject({ status: "cancelled", outcome: "failed" });
+  expect(ended?.inactivity_stop).toBeUndefined();
+  expect(f.state.work_items).toEqual(itemBefore);
+  expect(
+    f.state.assignments.find((a) => a.id === t.run.assignment_id),
+  ).toMatchObject({
+    worktree_path: ownerBefore?.worktree_path,
+    branch: ownerBefore?.branch,
+    base_sha: ownerBefore?.base_sha,
+  });
+});
+
+test("q(86) holds capacity and launch exclusion during stop even if the Run finishes or becomes unknown", () => {
+  const t = inactiveFixture();
+  t.advance(DEFAULT_INACTIVE_CANCEL_AFTER_MS);
+  const stop = t.claim()?.inactivity_stop;
+  if (!stop) throw new Error("Missing stop intent");
+  t.start(stop.attempt_id);
+  commit(
+    finishRun(
+      f.state,
+      actor(),
+      {
+        run_id: t.run.id,
+        outcome: "completed",
+        summary: "finished during release",
+      },
+      f.io,
+    ),
+  );
+  expect(occupiedRunSlots(f.state.assignments, f.state.runs, "local")).toBe(1);
+  expect(queue()).toMatchObject({
+    ok: false,
+    error: { code: "invariant_violation" },
+  });
+  const ended = commit(
+    finishInactiveRunStop(
+      f.state,
+      t.system,
+      {
+        run_id: t.run.id,
+        attempt_id: stop.attempt_id,
+        runtime_ref: stop.runtime_ref,
+        exited: true,
+      },
+      f.io,
+    ),
+  );
+  expect(ended).toMatchObject({
+    status: "completed",
+    outcome: "completed",
+    summary: "finished during release",
+  });
+  expect(occupiedRunSlots(f.state.assignments, f.state.runs, "local")).toBe(0);
+  expect(queue().ok).toBe(true);
+});
+
+test("q(86) a recovered stop rejects the previous owner's late result", () => {
+  const t = inactiveFixture();
+  t.advance(DEFAULT_INACTIVE_CANCEL_AFTER_MS);
+  const old = t.claim()?.inactivity_stop;
+  if (!old) throw new Error("Missing stop intent");
+  t.start(old.attempt_id);
+  f.state = {
+    ...f.state,
+    runs: f.state.runs.map((r) => ({ ...r, status: "unknown" as const })),
+  };
+  expect(occupiedRunSlots(f.state.assignments, f.state.runs, "local")).toBe(1);
+  t.advance(INACTIVE_STOP_LEASE_MS);
+  const current = t.claim()?.inactivity_stop;
+  expect(current?.attempt_id).not.toBe(old.attempt_id);
+  expect(
+    commit(
+      finishInactiveRunStop(
+        f.state,
+        t.system,
+        {
+          run_id: t.run.id,
+          attempt_id: old.attempt_id,
+          runtime_ref: old.runtime_ref,
+          exited: true,
+        },
+        f.io,
+      ),
+    ),
+  ).toBeUndefined();
+  expect(f.state.runs[0]?.inactivity_stop).toEqual(current);
+});
+
+test("q(86) a replaced runtime is never cancelled by an old stop result", () => {
+  const t = inactiveFixture();
+  t.advance(DEFAULT_INACTIVE_CANCEL_AFTER_MS);
+  const stop = t.claim()?.inactivity_stop;
+  if (!stop) throw new Error("Missing stop intent");
+  t.start(stop.attempt_id);
+  const replacement = {
+    ...stop.runtime_ref,
+    terminal_ref: "replacement-terminal",
+  };
+  f.state = {
+    ...f.state,
+    assignments: f.state.assignments.map((a) =>
+      a.id === t.run.assignment_id ? { ...a, runtime_ref: replacement } : a,
+    ),
+  };
+  expect(
+    commit(
+      finishInactiveRunStop(
+        f.state,
+        t.system,
+        {
+          run_id: t.run.id,
+          attempt_id: stop.attempt_id,
+          runtime_ref: stop.runtime_ref,
+          exited: true,
+        },
+        f.io,
+      ),
+    ),
+  ).toBeUndefined();
+  expect(f.state.runs[0]?.status).toBe("running");
+  expect(
+    f.state.assignments.find((a) => a.id === t.run.assignment_id)?.runtime_ref,
+  ).toEqual(replacement);
 });

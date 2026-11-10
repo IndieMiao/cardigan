@@ -183,6 +183,7 @@ export async function startCardiganServer(
         git,
         mergeGate: { configuration: mergeGate, execution },
         runLimit: runCapacity.forMachine,
+        inactiveCancelAfterMs: runCapacity.inactiveCancelAfterMs,
         // Test overrides win; otherwise the server configuration decides.
         ...(mergeIntervalMs === undefined ? {} : { mergeIntervalMs }),
         ...(cleanupIntervalMs === undefined ? {} : { cleanupIntervalMs }),

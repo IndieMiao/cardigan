@@ -2,12 +2,16 @@ import { constants } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { DEFAULT_RUN_LIMIT } from "@cardigan/domain";
+import {
+  DEFAULT_INACTIVE_CANCEL_AFTER_MS,
+  DEFAULT_RUN_LIMIT,
+} from "@cardigan/domain";
 import { parseDocument } from "yaml";
 
 export interface RunCapacityConfiguration {
   readonly errors: readonly string[];
   forMachine(machine: string): number;
+  readonly inactiveCancelAfterMs: number | null;
 }
 
 /** Same trust boundary as merge-gate.yaml. Read once; changing the file needs a restart. */
@@ -28,8 +32,10 @@ export async function loadRunCapacityConfig(
   );
   const limits = new Map<string, number>();
   const errors: string[] = [];
+  let inactiveCancelAfterMs = DEFAULT_INACTIVE_CANCEL_AFTER_MS;
   const result = (): RunCapacityConfiguration => ({
     errors,
+    inactiveCancelAfterMs: errors.length ? null : inactiveCancelAfterMs,
     // Invalid configuration fails closed for work items; standing PMs remain exempt.
     forMachine: (machine) =>
       errors.length ? 0 : (limits.get(machine) ?? DEFAULT_RUN_LIMIT),
@@ -65,7 +71,9 @@ export async function loadRunCapacityConfig(
     }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT")
-      errors.push("无法安全读取 run-capacity.yaml，暂停普通 Run 派发");
+      errors.push(
+        "无法安全读取 run-capacity.yaml，暂停普通 Run 派发及自动回收",
+      );
     return result();
   }
   try {
@@ -77,10 +85,23 @@ export async function loadRunCapacityConfig(
       typeof value === "object" && value !== null && !Array.isArray(value);
     if (
       !object(raw) ||
-      Object.keys(raw).some((key) => key !== "machines") ||
+      Object.keys(raw).some(
+        (key) => !["machines", "inactive_cancel_after_minutes"].includes(key),
+      ) ||
       !object(raw.machines)
     )
       throw new Error("Invalid machines");
+    if (raw.inactive_cancel_after_minutes !== undefined) {
+      const minutes = raw.inactive_cancel_after_minutes;
+      if (
+        typeof minutes !== "number" ||
+        !Number.isSafeInteger(minutes) ||
+        minutes < 1 ||
+        minutes > Math.floor(2147483647 / 60_000)
+      )
+        throw new Error("Invalid inactivity grace");
+      inactiveCancelAfterMs = minutes * 60_000;
+    }
     for (const [machine, limit] of Object.entries(raw.machines)) {
       if (
         !machine.trim() ||
@@ -94,7 +115,7 @@ export async function loadRunCapacityConfig(
   } catch {
     // Never include YAML contents (which could contain credentials) in diagnostics.
     errors.push(
-      "run-capacity.yaml 必须只包含 machines 映射，各机器上限为正整数；暂停普通 Run 派发",
+      "run-capacity.yaml 必须包含 machines 映射；机器上限及可选 inactive_cancel_after_minutes 须为允许范围的正整数。配置无效，暂停普通 Run 派发及自动回收",
     );
   }
   return result();

@@ -79,3 +79,30 @@ test.each(["writable", "symlink", "directory", "parent"])(
     expect((await loadRunCapacityConfig({ configDir })).errors).toHaveLength(1);
   },
 );
+
+test("q(86) loads a configurable cancellation grace once, defaulting to 120 minutes", async () => {
+  expect(
+    (await loadRunCapacityConfig({ configDir })).inactiveCancelAfterMs,
+  ).toBe(120 * 60_000);
+  await write("machines: { local: 4 }\ninactive_cancel_after_minutes: 45\n");
+  const config = await loadRunCapacityConfig({ configDir });
+  expect(config.errors).toEqual([]);
+  expect(config.inactiveCancelAfterMs).toBe(45 * 60_000);
+  await write("machines: { local: 4 }\ninactive_cancel_after_minutes: 60\n");
+  expect(config.inactiveCancelAfterMs).toBe(45 * 60_000);
+  expect(
+    (await loadRunCapacityConfig({ configDir })).inactiveCancelAfterMs,
+  ).toBe(60 * 60_000);
+});
+
+test.each(["0", "-1", "1.5", "'30'", "null", "35792"])(
+  "invalid inactivity grace %s disables destructive recovery",
+  async (value) => {
+    await write(
+      `machines: { local: 4 }\ninactive_cancel_after_minutes: ${value}\n`,
+    );
+    const config = await loadRunCapacityConfig({ configDir });
+    expect(config.errors).toHaveLength(1);
+    expect(config.inactiveCancelAfterMs).toBeNull();
+  },
+);

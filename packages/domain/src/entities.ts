@@ -250,6 +250,13 @@ export type Assignment = AssignmentFields &
   );
 export type RunOutcome = "completed" | "blocked" | "failed";
 export interface Run {
+  /** Durable host stop intent. Keeps its slot and blocks another launch until exit is confirmed. */
+  readonly inactivity_stop?: {
+    readonly attempt_id: string;
+    readonly runtime_ref: RuntimeRef;
+    readonly stopping: boolean;
+    readonly lease_until: Timestamp;
+  };
   /** Host scheduling metadata; only meaningful while status is queued. */
   readonly queue_reason?: "concurrency_limit" | "runtime_unavailable";
   readonly employee_id?: EmployeeId;

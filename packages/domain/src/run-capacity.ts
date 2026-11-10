@@ -32,7 +32,8 @@ export function occupiedRunSlots(
   return runs.filter(
     (r) =>
       owners.has(r.assignment_id) &&
-      ["dispatched", "acked", "running"].includes(r.status),
+      (r.inactivity_stop ||
+        ["dispatched", "acked", "running"].includes(r.status)),
   ).length;
 }
 

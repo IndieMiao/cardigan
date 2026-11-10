@@ -322,6 +322,17 @@ async function launch(
   const current = host.store.uow.read((tx) =>
     tx.runs.get(project, input.run.id),
   );
+  if (
+    host.store.uow.read((tx) =>
+      tx.runs
+        .list(project)
+        .some((r) => r.assignment_id === assignment.id && r.inactivity_stop),
+    )
+  )
+    throw new HostLaunchError(
+      "dispatch",
+      "Previous Run is waiting for confirmed runtime exit",
+    );
   if (current?.status !== "queued" || current.assignment_id !== assignment.id)
     throw new HostLaunchError(
       "directory preparation",
