@@ -25,7 +25,7 @@ test("existing author display shows the employee name as text and keeps role sty
   expect(container.querySelector(".actor-coder")).toBeTruthy();
   expect(container.querySelector("script")).toBeNull();
 });
-test("legacy unnamed authors show their role; human attribution stays unchanged", () => {
+test("legacy unnamed authors show their role; human attribution falls back to owner", () => {
   const { rerender } = render(
     <TimelineActor
       entry={timelineEntry({
@@ -36,5 +36,30 @@ test("legacy unnamed authors show their role; human attribution stays unchanged"
   );
   expect(screen.getByText("未命名的 reviewer")).toBeTruthy();
   rerender(<TimelineActor entry={timelineEntry({ author: "human" })} />);
-  expect(screen.getByText("你")).toBeTruthy();
+  expect(screen.getByText("所有者")).toBeTruthy();
+});
+
+test("human authors render member name, title and avatar with the shared identity component", () => {
+  const { container, rerender } = render(
+    <TimelineActor
+      entry={timelineEntry({
+        author: "human",
+        author_display: "邵杰",
+        member: {
+          id: "M-1",
+          name: "邵杰",
+          title: "所有者",
+          avatar: "/avatars/v1/liu-bei/head-64.webp",
+        },
+      })}
+    />,
+  );
+  expect(screen.getByText("邵杰")).toBeTruthy();
+  expect(screen.getByText("所有者")).toBeTruthy();
+  expect(container.querySelector("img")?.getAttribute("src")).toBe(
+    "/avatars/v1/liu-bei/head-64.webp",
+  );
+  expect(screen.queryByText(/^(你|人)$/)).toBeNull();
+  rerender(<TimelineActor entry={timelineEntry({ author: "human" })} />);
+  expect(screen.getByText("所有者")).toBeTruthy();
 });

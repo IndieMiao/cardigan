@@ -963,6 +963,7 @@ function Notices({
                   : "PM 代拍"
               }
             />
+            <EmployeeIdentity {...n} showTitle={false} />
             <IdTag id={n.decision_id} label="拍板" />
             {n.card_id && <CardLink projectId={projectId} id={n.card_id} />}
             <Time value={n.at} />

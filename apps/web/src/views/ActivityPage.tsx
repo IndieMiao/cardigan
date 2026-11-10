@@ -9,7 +9,7 @@ import { useRouteFilters } from "../route.js";
 import { useResource } from "../useResource.js";
 
 const ACTOR_LABELS: Readonly<Record<string, string>> = {
-  human: "你",
+  human: "所有者",
   pm: "PM",
   agent: "Agent",
   system: "系统",

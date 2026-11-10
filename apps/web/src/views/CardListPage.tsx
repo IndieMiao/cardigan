@@ -320,7 +320,7 @@ export function CardListPage({
             key: "next",
             label: "下一步谁做",
             options: [
-              { value: "human", label: "你" },
+              { value: "human", label: "所有者" },
               { value: "agent", label: "Agent" },
               { value: "none", label: "无人" },
             ],
@@ -329,7 +329,7 @@ export function CardListPage({
                 label="下一步"
                 value={value}
                 options={[
-                  { value: "human", label: "你" },
+                  { value: "human", label: "所有者" },
                   { value: "agent", label: "Agent" },
                   { value: "none", label: "无人" },
                 ]}

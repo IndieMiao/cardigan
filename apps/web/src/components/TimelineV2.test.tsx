@@ -318,7 +318,7 @@ test("U6b system rows show the authenticated actor and exact upload thumbnail; p
   const rows = [...document.querySelectorAll(".system-line")];
   expect(rows.map((r) => r.querySelector("strong")?.textContent)).toEqual([
     "系统",
-    "你",
+    "所有者",
     "未命名的 tester",
   ]);
   expect(rows[2]?.textContent).toContain("上传了附件");

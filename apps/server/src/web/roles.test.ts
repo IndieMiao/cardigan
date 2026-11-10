@@ -221,7 +221,8 @@ test("V9b role routes list, show, version history and run every write as the log
       summary: "编辑：改动 instructions、abilities",
       changes: ["instructions", "abilities"],
       actor: "human",
-      author_display: "你",
+      author_display: "所有者",
+      member: { id: "M-1", name: "所有者", title: "所有者", avatar: null },
       created_at: expect.any(String),
     });
 

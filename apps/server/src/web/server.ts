@@ -60,6 +60,8 @@ import {
   templateHistory,
   templateList,
   waitingOnAgent,
+  webDecisionView,
+  webMemberView,
 } from "./read.js";
 import { serveStatic } from "./static.js";
 import { parseAfter, type StreamCursor, serveStream } from "./stream.js";
@@ -278,6 +280,13 @@ async function handleApi(context: RequestContext): Promise<void> {
     if (req.method !== "GET") methodNotAllowed(["GET"]);
     sendJson(res, 200, {
       authenticated: true,
+      member: context.store.uow.read((tx) =>
+        webMemberView(
+          session.member_id
+            ? (tx.members.get(session.member_id) ?? null)
+            : null,
+        ),
+      ),
       created_at: session.created_at,
       expires_at: session.expires_at,
     });
@@ -542,7 +551,10 @@ async function serveProjectRoute(
         ...(card_id ? { card_id } : {}),
         ...(from ? { from: new Date(from).toISOString() } : {}),
         ...(to ? { to: new Date(to).toISOString() } : {}),
-      }),
+      }).map((decision) => ({
+        ...decision,
+        ...webDecisionView(state, decision),
+      })),
     });
     return;
   }

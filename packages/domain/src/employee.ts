@@ -1,6 +1,11 @@
+import type { GlobalActor, GlobalEvent, GlobalIdAllocator } from "./global.js";
+
+export type { GlobalEvent, GlobalIdAllocator } from "./global.js";
+
 import type { Clock } from "./clock.js";
-import type { Actor, Event, Timestamp } from "./entities.js";
-import type { EmployeeId, EventId, RoleId } from "./ids.js";
+import type { Timestamp } from "./entities.js";
+import type { EmployeeId, RoleId } from "./ids.js";
+import type { MemberRepository } from "./member.js";
 import type { EmployeeStatus } from "./states.js";
 
 /** A global identity, independent of project-local roles and assignments. */
@@ -17,10 +22,7 @@ export interface Employee {
   readonly updated_at: Timestamp;
 }
 
-export type EmployeeActor = Actor | { readonly kind: "human" };
-export type GlobalEvent = Omit<Event, "card_id" | "actor"> & {
-  readonly actor: { readonly kind: "human" | "system" };
-};
+export type EmployeeActor = GlobalActor;
 
 /** Preserve display case while normalizing surrounding and full-width spaces. */
 export function employeeDisplayName(name: string): string {
@@ -67,16 +69,15 @@ export interface GlobalEventRepository {
 }
 export interface GlobalRepositories {
   readonly employees: EmployeeRepository;
+  readonly members: MemberRepository;
   readonly global_events: GlobalEventRepository;
-}
-export interface GlobalIdAllocator {
-  nextEmployeeId(): EmployeeId;
-  nextEventId(): EventId;
-  nextEventSequence(): number;
 }
 export interface EmployeeCommandPorts {
   readonly clock: Clock;
-  readonly ids: GlobalIdAllocator;
+  readonly ids: Pick<
+    GlobalIdAllocator,
+    "nextEmployeeId" | "nextEventId" | "nextEventSequence"
+  >;
   /** Host-loaded names from launch.yaml; never employee-controlled configuration. */
   readonly launch_profiles?: readonly string[];
 }
