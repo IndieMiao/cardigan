@@ -145,3 +145,21 @@ test("the human marks and unmarks a card sensitive; a PM-held merge moves to the
   );
   expect(card).toBeUndefined();
 });
+
+test("C-72: the sensitive route says whether the flag actually changed", async () => {
+  const on = await post("/cards/C-2/sensitive", { sensitive: true }, "on");
+  expect(on.json).toMatchObject({
+    card: { id: "C-2", sensitive: true },
+    changed: true,
+  });
+  const off = await post("/cards/C-2/sensitive", { sensitive: false }, "off");
+  expect(off.json).toMatchObject({ changed: true, auto_merge_due_at: null });
+  const again = await post(
+    "/cards/C-2/sensitive",
+    { sensitive: false },
+    "off-again",
+  );
+  expect(again.status).toBe(200);
+  // Auto-merge is off in this fixture, so there is no due time to report.
+  expect(again.json).toMatchObject({ changed: false, auto_merge_due_at: null });
+});
