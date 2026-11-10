@@ -27,17 +27,15 @@ function EmployeeAvatar({
   initial,
   color,
   size,
-  profile = false,
 }: {
   src: string | undefined;
   initial: string | undefined;
   color: number | "role";
   size?: 32 | 64 | 128 | undefined;
-  profile?: boolean;
 }) {
   const [failedImage, setFailedImage] = useState<string>();
   const pixels = (size ?? 32) > 64 ? 128 : 64;
-  const image = avatarVariant(src, profile ? 256 : pixels);
+  const image = avatarVariant(src, pixels);
   const retina = avatarVariant(src, pixels === 64 ? 128 : 256);
   return (
     <span
@@ -48,11 +46,7 @@ function EmployeeAvatar({
       {image && failedImage !== image ? (
         <img
           src={image}
-          srcSet={
-            !profile && retina !== image
-              ? `${image} 1x, ${retina} 2x`
-              : undefined
-          }
+          srcSet={retina !== image ? `${image} 1x, ${retina} 2x` : undefined}
           alt=""
           onError={() => setFailedImage(image)}
         />
@@ -191,21 +185,20 @@ export function EmployeeIdentity({
           }}
           onClick={(event) => event.stopPropagation()}
         >
-          <EmployeeAvatar
-            src={src}
-            initial={initial}
-            color={color}
-            size={128}
-            profile
-          />
-          <strong>{employee.name}</strong>
-          <span>{employee.title}</span>
-          <p>{employee.bio || "暂无简介"}</p>
-          <span>担任角色：{role}</span>
-          {metadata && <span className="employee-title">{metadata}</span>}
-          <Popover.Close className="quiet" aria-label="关闭员工卡片">
-            关闭
-          </Popover.Close>
+          <EmployeeAvatar src={src} initial={initial} color={color} size={64} />
+          <div className="employee-card-body">
+            <p className="employee-card-heading">
+              <strong>{employee.name}</strong>
+              {employee.title && (
+                <span className="employee-title">{employee.title}</span>
+              )}
+            </p>
+            {employee.bio?.trim() && (
+              <p className="employee-card-bio">{employee.bio}</p>
+            )}
+            <p className="employee-card-meta">角色：{role}</p>
+            {metadata && <p className="employee-card-meta">{metadata}</p>}
+          </div>
         </Popover.Content>
       </Popover.Portal>
     </Popover.Root>
