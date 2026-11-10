@@ -4,10 +4,12 @@ import type * as E from "../entities.js";
 import type { DomainError, ErrorCode, Result } from "../errors.js";
 import type * as I from "../ids.js";
 import type { Clock, IdAllocator } from "../ports.js";
+import type { ProjectPreferences } from "../preferences.js";
 import type { CardTemplate } from "../templates.js";
 import { transition } from "../transitions.js";
 
 export interface CommandEntities {
+  project_preferences: ProjectPreferences;
   cards: E.Card;
   card_templates: CardTemplate;
   work_items: E.WorkItem;
@@ -22,6 +24,7 @@ export interface CommandEntities {
 }
 export type CommandState = {
   readonly project_id: I.ProjectId;
+  readonly project_preferences?: readonly ProjectPreferences[];
   readonly card_templates?: readonly CardTemplate[];
   readonly employees?: readonly Employee[];
   readonly employee_activity?: readonly EmployeeActivity[];
@@ -31,7 +34,7 @@ export type CommandState = {
 } & {
   readonly [K in Exclude<
     keyof CommandEntities,
-    "card_templates"
+    "card_templates" | "project_preferences"
   >]: readonly CommandEntities[K][];
 };
 export type EntityChange = {
@@ -70,6 +73,8 @@ type CommandName =
   | "dispatch_run"
   | "acknowledge_run"
   | "abort_dispatch"
+  | "set_project_preferences"
+  | "auto_confirm_merge"
   | "request_merge"
   | "record_merge_result"
   | "release_assignment"
@@ -152,6 +157,7 @@ export class CommandDraft {
       "pause_standing_assignment",
     ].includes(tool);
     const systemOnly = [
+      "auto_confirm_merge",
       "record_merge_result",
       "request_worktree_cleanup",
     ].includes(tool);
