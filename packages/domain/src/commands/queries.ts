@@ -15,7 +15,7 @@ import type { Clock } from "../ports.js";
 import { type CommandDraft, type CommandState, command } from "./core.js";
 import { decisionFollowupNeedsHuman } from "./decision-followup.js";
 import { isPmOps } from "./delegation.js";
-import { latestMergeCheck } from "./merge-check.js";
+import { failedConfirmedMergeCheck, latestMergeCheck } from "./merge-check.js";
 import { resolveCardTemplate } from "./templates.js";
 
 function affects(d: CommandDraft, q: Decision, id: CardId) {
@@ -288,10 +288,14 @@ export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
         .filter(
           (q) =>
             (q.decider === "human" &&
-              ["open", "provisional"].includes(q.status)) ||
+              (["open", "provisional"].includes(q.status) ||
+                failedConfirmedMergeCheck(state, q))) ||
             decisionFollowupNeedsHuman(state, q),
         )
         .map((q) => {
+          const failedConfirmation = failedConfirmedMergeCheck(state, q);
+          const followup =
+            !failedConfirmation && decisionFollowupNeedsHuman(state, q);
           // Project decisions have no card timeline; their request event is the creation fact.
           const opened =
             state.events
@@ -312,13 +316,23 @@ export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
             opened && now ? Date.parse(now) - Date.parse(opened) : Number.NaN;
           return {
             ...q,
-            ...(q.status === "resolved"
+            ...(failedConfirmation
+              ? {
+                  options: q.options.filter((o) => o.key === "request_changes"),
+                  recommended: "request_changes",
+                }
+              : {}),
+            ...(followup
               ? {
                   followup_notice:
                     "拍板已完成，尚无落实结果；当前无 PM Ops 接手，请安排跟进。",
                 }
               : {}),
-            why: why(q.question),
+            why: why(
+              failedConfirmation
+                ? "合并检查失败或超时，可以退回修改"
+                : q.question,
+            ),
             opened_at: opened ?? null,
             waited_ms: Number.isFinite(elapsed) ? Math.max(0, elapsed) : null,
             related_cards: relatedCards(d.list("cards"), q),

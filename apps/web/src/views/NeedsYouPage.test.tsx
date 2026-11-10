@@ -360,40 +360,49 @@ test.each([
   );
 });
 
-test("returning a merge requires a nonblank reason and submits the exact explanation", async () => {
-  const recordDecision = vi.fn().mockResolvedValue(undefined);
-  render(
-    <NeedsYouPage
-      client={fakeClient({
-        needsYou: async () => page([merge()]),
-        recordDecision,
-      })}
-      projectId="p-1"
-    />,
-  );
-  fireEvent.click(await screen.findByRole("button", { name: "退回修改" }));
-  const reason = screen.getByLabelText("q(3) 退回原因");
-  const submit = screen.getByRole("button", {
-    name: "确认退回修改",
-  }) as HTMLButtonElement;
-  expect(submit.disabled).toBe(true);
-  fireEvent.change(reason, { target: { value: " \n " } });
-  expect(submit.disabled).toBe(true);
-  fireEvent.submit(submit.closest("form") as HTMLFormElement);
-  expect(recordDecision).not.toHaveBeenCalled();
-  fireEvent.change(reason, { target: { value: " 请补齐空输入校验 " } });
-  expect(submit.disabled).toBe(false);
-  fireEvent.click(submit);
-  await waitFor(() =>
-    expect(recordDecision).toHaveBeenCalledWith(
-      "p-1",
-      "q(3)",
-      "request_changes",
-      " 请补齐空输入校验 ",
-      expect.any(String),
-    ),
-  );
-});
+test.each(["open", "resolved"])(
+  "returning a %s merge requires a nonblank reason and submits the exact explanation",
+  async (status) => {
+    const recordDecision = vi.fn().mockResolvedValue(undefined);
+    render(
+      <NeedsYouPage
+        client={fakeClient({
+          needsYou: async () =>
+            page([merge({ status, why: "合并检查失败或超时，可以退回修改" })]),
+          recordDecision,
+        })}
+        projectId="p-1"
+      />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "退回修改" }));
+    if (status === "resolved") {
+      expect(screen.queryByRole("button", { name: "确认合并" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "暂不合并" })).toBeNull();
+      expect(screen.getByText("合并检查失败或超时，可以退回修改")).toBeTruthy();
+    }
+    const reason = screen.getByLabelText("q(3) 退回原因");
+    const submit = screen.getByRole("button", {
+      name: "确认退回修改",
+    }) as HTMLButtonElement;
+    expect(submit.disabled).toBe(true);
+    fireEvent.change(reason, { target: { value: " \n " } });
+    expect(submit.disabled).toBe(true);
+    fireEvent.submit(submit.closest("form") as HTMLFormElement);
+    expect(recordDecision).not.toHaveBeenCalled();
+    fireEvent.change(reason, { target: { value: " 请补齐空输入校验 " } });
+    expect(submit.disabled).toBe(false);
+    fireEvent.click(submit);
+    await waitFor(() =>
+      expect(recordDecision).toHaveBeenCalledWith(
+        "p-1",
+        "q(3)",
+        "request_changes",
+        " 请补齐空输入校验 ",
+        expect.any(String),
+      ),
+    );
+  },
+);
 
 test("hold still submits without a reason after cancelling the return form", async () => {
   const recordDecision = vi.fn().mockResolvedValue(undefined);
@@ -829,4 +838,62 @@ test("unclaimed decision follow-up displays its outcome without offering a secon
   expect(within(notice).queryByRole("radio")).toBeNull();
   expect(screen.queryByRole("button", { name: "按所选拍板" })).toBeNull();
   expect(recordDecision).not.toHaveBeenCalled();
+});
+
+test("failed confirmed merges remain returnable beside read-only decision follow-up notices", async () => {
+  const recordDecision = vi.fn().mockResolvedValue(undefined);
+  const followup = q({
+    trigger: null,
+    status: "resolved",
+    followup_notice: "当前无 PM Ops 接手，请安排落实",
+    resolution: {
+      option: "merge",
+      rationale: "已决定",
+      raw_quote: "同意",
+      at: "2026-11-10T00:00:00Z",
+    },
+  });
+  const failed = merge({
+    status: "resolved",
+    why: "合并检查失败或超时，可以退回修改",
+    options: [
+      { key: "request_changes", description: "退回修改", impact: "重新交付" },
+    ],
+    recommended: "request_changes",
+  });
+  render(
+    <NeedsYouPage
+      projectId="p-1"
+      client={fakeClient({
+        recordDecision,
+        needsYou: async () => page([followup, failed]),
+      })}
+    />,
+  );
+  const notice = await screen.findByRole("article", { name: "拍板落实 q(1)" });
+  expect(within(notice).queryByRole("radio")).toBeNull();
+  expect(within(notice).queryByRole("button", { name: "退回修改" })).toBeNull();
+  const confirmation = screen.getByRole("article", { name: "合并确认 q(3)" });
+  expect(
+    within(confirmation).queryByRole("button", { name: "确认合并" }),
+  ).toBeNull();
+  fireEvent.click(
+    within(confirmation).getByRole("button", { name: "退回修改" }),
+  );
+  fireEvent.change(within(confirmation).getByLabelText("q(3) 退回原因"), {
+    target: { value: "修复检查失败" },
+  });
+  fireEvent.click(
+    within(confirmation).getByRole("button", { name: "确认退回修改" }),
+  );
+  await waitFor(() =>
+    expect(recordDecision).toHaveBeenCalledWith(
+      "p-1",
+      "q(3)",
+      "request_changes",
+      "修复检查失败",
+      expect.any(String),
+    ),
+  );
+  expect(recordDecision).toHaveBeenCalledTimes(1);
 });

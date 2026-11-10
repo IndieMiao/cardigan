@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import {
   mkdir,
   mkdtemp,
@@ -399,15 +400,32 @@ describe("cardigan launch <profile>", () => {
     expect(captured?.cwd).toBe("/tmp");
   });
 
-  test("reports a missing CLI binary as exit 127", async () => {
-    override(harness, "spawnInherit", () => {
-      throw enoentError("claude");
-    });
-    expect(await harness.run(["launch", "claude-of"])).toBe(127);
-    expect(harness.err.join("\n")).toContain("没有找到 claude");
-    // The temp file is still removed after a failed spawn.
-    expect(await listRuntimeFiles(runtimeDirOf(harness))).toEqual([]);
-  });
+  test.each(["sync", "async"])(
+    "reports a missing CLI binary as exit 127 and restores handlers (%s failure)",
+    async (mode) => {
+      const signals = new EventEmitter();
+      const existingHandler = (): void => {};
+      signals.on("SIGINT", existingHandler);
+      const io: CliIo = {
+        ...harness.io,
+        signals,
+        spawnInherit: () => {
+          if (mode === "sync") throw enoentError("claude");
+          return {
+            ...fakeChild(0),
+            exit: Promise.reject(enoentError("claude")),
+          };
+        },
+      };
+      expect(await main(["launch", "claude-of"], io)).toBe(127);
+      expect(harness.err.join("\n")).toContain("没有找到 claude");
+      expect(await listRuntimeFiles(runtimeDirOf(harness))).toEqual([]);
+      expect(signals.listeners("SIGINT")).toEqual([existingHandler]);
+      for (const signal of ["SIGQUIT", "SIGTERM", "SIGHUP"]) {
+        expect(signals.listenerCount(signal)).toBe(0);
+      }
+    },
+  );
 
   test("rejects a secrets file with 0644 permissions", async () => {
     harness = await makeHarness({ secretsMode: 0o644 });

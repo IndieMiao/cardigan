@@ -243,6 +243,7 @@ export function requestMergeChanges(
   d: CommandDraft,
   decision: Decision,
   reason: string,
+  raw_quote: string,
 ) {
   ensure(
     decision.card_id &&
@@ -272,6 +273,7 @@ export function requestMergeChanges(
       work_item_id: target.work_item_id,
       run_kind: "fix",
       reason,
+      raw_quote,
     },
     {
       type: "status_change",

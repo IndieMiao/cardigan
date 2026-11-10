@@ -362,7 +362,14 @@ function mergeRequestChanges(args: readonly string[], io: CliIo): number {
     );
     requireMergeCard(store, project_id, id);
     const confirmation = confirmationOf(store, project_id, id);
-    if (confirmation?.status !== "open")
+    if (
+      !confirmation ||
+      (confirmation.status !== "open" &&
+        !(
+          confirmation.status === "resolved" &&
+          confirmation.resolution?.option === "merge"
+        ))
+    )
       throw new CliError(
         `${id} 没有待处理的合并确认；hold 后请先运行 cardigan merge request ${id}`,
         EXIT.usage,

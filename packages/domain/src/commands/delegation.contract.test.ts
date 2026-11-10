@@ -719,6 +719,8 @@ test("unclaimed decisions and overdue follow-ups remain visible without Ops unti
       status: "resolved",
       followup_notice: expect.any(String),
       resolution: { option: "continue" },
+      options: [expect.objectContaining({ key: "continue" })],
+      recommended: "continue",
     },
   ]);
   expect(needs.events).toEqual([]);
