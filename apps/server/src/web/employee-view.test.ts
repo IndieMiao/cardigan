@@ -175,7 +175,7 @@ function employeeState(): CommandState {
         name: "林舟",
         title: "工程师",
         bio: "负责实现",
-        avatar: "/avatars/lin.png",
+        avatar: "library:guan-yu",
         role_id: "coder",
         launch_profile_ref: "private-profile",
         status: "active",
@@ -232,7 +232,7 @@ test("board owners use current produce assignments, deduplicate employees and ex
     name: "林舟",
     bio: "负责实现",
     role_id: "coder",
-    avatar: "/avatars/lin.png",
+    avatar: "/avatars/v1/guan-yu/head-64.webp",
   });
   expect(card?.produce_owners[1]).toMatchObject({
     employee: null,
@@ -321,6 +321,10 @@ test.each([
   "/\\example.com/a.png",
   "data:image/png;base64,YQ==",
   "avatar:one",
+  "/avatars/legacy.png",
+  "library:unknown",
+  "library:../guan-yu",
+  "upload:../../secret",
 ])("read views omit unsafe or opaque avatar reference %s", (avatar) => {
   const state = employeeState();
   expect(
@@ -330,3 +334,24 @@ test.each([
     ).assignments[0]?.employee?.avatar,
   ).toBeNull();
 });
+
+test.each([
+  ["library:guan-yu", "/avatars/v1/guan-yu/head-64.webp"],
+  [`upload:${"a".repeat(64)}`, `/api/avatars/${"a".repeat(64)}`],
+])(
+  "read views resolve %s without exposing the persisted reference",
+  (avatar, path) => {
+    const base = employeeState();
+    const state = {
+      ...base,
+      employees: base.employees?.map((e) => ({ ...e, avatar })),
+    };
+    expect(cardListViews(state)[0]?.produce_owners[0]?.employee?.avatar).toBe(
+      path,
+    );
+    expect(
+      executionView(state, "2026-01-01").assignments[0]?.employee?.avatar,
+    ).toBe(path);
+    expect(state.employees?.[0]?.avatar).toBe(avatar);
+  },
+);
