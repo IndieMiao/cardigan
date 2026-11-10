@@ -131,6 +131,20 @@ export class Dispatcher {
     this.retryBaseMs = options.retryBaseMs ?? 60_000;
     this.maxRetries = options.maxRetries ?? 4;
     this.inactivityGraceMs = options.inactivityGraceMs ?? 15 * 60_000;
+    // Reject invalid source settings before deriving the cancellation grace.
+    if (
+      !Number.isSafeInteger(this.maxRetries) ||
+      this.maxRetries < 0 ||
+      this.maxRetries > 30 ||
+      ![
+        this.retryBaseMs,
+        this.inactivityGraceMs,
+        this.retryDelay(this.maxRetries + 1),
+      ].every((n) => Number.isSafeInteger(n) && n > 0)
+    )
+      throw new Error("Invalid dispatcher retry/watchdog settings");
+    if (!Number.isFinite(this.leaseMs) || this.leaseMs <= 0)
+      throw new Error("Invalid delivery lease");
     const cancelAfterMs =
       options.inactiveCancelAfterMs === undefined
         ? Math.max(DEFAULT_INACTIVE_CANCEL_AFTER_MS, this.inactivityGraceMs)
@@ -172,19 +186,6 @@ export class Dispatcher {
         });
       },
     });
-    if (
-      !Number.isSafeInteger(this.maxRetries) ||
-      this.maxRetries < 0 ||
-      this.maxRetries > 30 ||
-      ![
-        this.retryBaseMs,
-        this.inactivityGraceMs,
-        this.retryDelay(this.maxRetries + 1),
-      ].every((n) => Number.isSafeInteger(n) && n > 0)
-    )
-      throw new Error("Invalid dispatcher retry/watchdog settings");
-    if (!Number.isFinite(this.leaseMs) || this.leaseMs <= 0)
-      throw new Error("Invalid delivery lease");
   }
   /** Calls on one instance serialize; cross-process attempts are guarded in SQLite. */
   // Keep the legacy argument for callers; scheduling always spans all projects.
