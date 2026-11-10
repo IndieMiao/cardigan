@@ -630,6 +630,14 @@ export interface ExecutionData {
   readonly machines: readonly { id: string; label: string; status: string }[];
 }
 
+/** C-75: one server page of an Assignment's Run history, newest first. */
+export interface ExecutionRunPage {
+  readonly runs: readonly RunView[];
+  readonly total: number;
+  /** Pass as `before` to read the next page; null on the last page. */
+  readonly next_cursor: string | null;
+}
+
 export interface ActivityFilter {
   readonly card_id?: string;
   readonly role?: string;
@@ -948,6 +956,11 @@ export interface CardiganClient {
   activity(projectId: string, filters: ActivityFilter): Promise<ActivityData>;
   snapshot(projectId: string): Promise<SnapshotData>;
   execution(projectId: string): Promise<ExecutionData>;
+  executionRuns(
+    projectId: string,
+    assignmentId: string,
+    before?: string,
+  ): Promise<ExecutionRunPage>;
   needsYou(projectId: string): Promise<NeedsPage>;
   notices(projectId: string, before: string): Promise<NoticesPage>;
   recheckMerge(
@@ -1100,6 +1113,16 @@ export class HttpCardiganClient implements CardiganClient {
   execution(projectId: string): Promise<ExecutionData> {
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/execution`,
+    );
+  }
+  executionRuns(
+    projectId: string,
+    assignmentId: string,
+    before?: string,
+  ): Promise<ExecutionRunPage> {
+    const query = before ? `?${new URLSearchParams({ before })}` : "";
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/execution/assignments/${encodeURIComponent(assignmentId)}/runs${query}`,
     );
   }
   decisionHistory(

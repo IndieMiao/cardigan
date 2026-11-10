@@ -1783,9 +1783,6 @@ fieldset.filters {
   padding: 0 6px;
   font-size: var(--text-xs);
 }
-.execution-actions {
-  margin-top: 16px;
-}
 .needs-item dd {
   overflow-wrap: anywhere;
 }
@@ -1860,34 +1857,46 @@ fieldset.filters {
   gap: 6px;
   flex-wrap: wrap;
 }
-.execution-detail > td {
-  padding: 16px;
+.execution-row.selected {
   background: var(--surface-muted);
 }
-.execution-detail-grid {
-  display: grid;
-  grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
-  gap: 24px;
+/* C-75: the execution detail is a narrower drawer than the card drawer. */
+.drawer-content.execution-drawer-content {
+  width: clamp(480px, 40vw, 560px);
 }
-.execution-detail-grid dl {
+@media (max-width: 640px) {
+  .drawer-content.execution-drawer-content {
+    width: 100vw;
+  }
+}
+.execution-drawer {
+  display: grid;
+  gap: 16px;
+  font-size: var(--text-sm);
+  line-height: 1.45;
+}
+.execution-basics {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
-  gap: 4px 12px;
+  gap: 2px 12px;
   margin: 0;
 }
-.execution-detail-grid dt {
+.execution-basics dt {
   color: var(--text-muted);
 }
-.execution-detail-grid dd {
+.execution-basics dd {
   margin: 0;
   overflow-wrap: anywhere;
 }
-.execution-detail-grid h3 {
-  margin: 12px 0 6px;
+.execution-drawer-section h3 {
+  margin: 0 0 6px;
   font-size: var(--text-sm);
 }
-.execution-detail-grid h3:first-child {
-  margin-top: 0;
+.execution-drawer-section > button {
+  margin-top: 6px;
+}
+.execution-cursor-summary {
+  padding: 2px 6px;
 }
 .execution-runs {
   display: grid;
@@ -1905,7 +1914,6 @@ fieldset.filters {
 .execution-actions {
   display: grid;
   gap: 4px;
-  margin-top: 16px;
 }
 .activity-filters {
   display: flex;

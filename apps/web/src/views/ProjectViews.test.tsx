@@ -117,27 +117,27 @@ test("execution defaults to working and switches between all, working, released 
     "working",
   );
   expect(
-    await screen.findByRole("button", { name: "展开 A-1 详情" }),
+    await screen.findByRole("button", { name: "查看 A-1 详情" }),
   ).toBeTruthy();
-  expect(screen.queryByRole("button", { name: "展开 A-2 详情" })).toBeNull();
-  expect(screen.queryByRole("button", { name: "展开 A-3 详情" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "查看 A-2 详情" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "查看 A-3 详情" })).toBeNull();
   fireEvent.change(screen.getByLabelText("筛选"), {
     target: { value: "released" },
   });
   expect(
-    await screen.findByRole("button", { name: "展开 A-3 详情" }),
+    await screen.findByRole("button", { name: "查看 A-3 详情" }),
   ).toBeTruthy();
   fireEvent.change(screen.getByLabelText("筛选"), {
     target: { value: "lost" },
   });
   expect(
-    await screen.findByRole("button", { name: "展开 A-2 详情" }),
+    await screen.findByRole("button", { name: "查看 A-2 详情" }),
   ).toBeTruthy();
   fireEvent.change(screen.getByLabelText("筛选"), {
     target: { value: "all" },
   });
   expect(
-    await screen.findByRole("button", { name: "展开 A-1 详情" }),
+    await screen.findByRole("button", { name: "查看 A-1 详情" }),
   ).toBeTruthy();
 });
 
@@ -162,7 +162,7 @@ test("execution shows working assignments in a table and expands the newest Run,
       projectId="p-1"
     />,
   );
-  const toggle = await screen.findByRole("button", { name: "展开 A-1 详情" });
+  const toggle = await screen.findByRole("button", { name: "查看 A-1 详情" });
   const row = toggle.closest("tr");
   expect(row?.textContent).toContain("A-1");
   expect(row?.textContent).toContain("C-1");
@@ -183,18 +183,21 @@ test("execution shows working assignments in a table and expands the newest Run,
   ).not.toBeNull();
   expect(screen.getByRole("columnheader", { name: "最近 Run" })).toBeTruthy();
   fireEvent.click(toggle);
-  const expanded = await screen.findByRole("button", {
-    name: "收起 A-1 详情",
-  });
-  expect(expanded).toBeTruthy();
+  const drawer = await screen.findByRole("dialog", { name: "A-1 详情" });
   for (const text of [
     "session-fixture",
     "terminal-fixture",
     "/fixture/worktree",
     "agent/work",
-    "已签收 seq 12",
   ])
-    expect(screen.getByText(text, { exact: false })).toBeTruthy();
+    expect(within(drawer).getByText(text, { exact: false })).toBeTruthy();
+  fireEvent.click(
+    within(drawer).getByRole("button", {
+      name: /已签收 1 张卡片，最新 seq 12/,
+    }),
+  );
+  expect(within(drawer).getByText("已签收 seq 12")).toBeTruthy();
+  expect(await within(drawer).findByText("R-9", { exact: false })).toBeTruthy();
   expect(
     screen.queryByRole("button", { name: "复制启动或恢复会话" }),
   ).toBeNull();
@@ -224,7 +227,7 @@ test("execution copies observe by default and reveals warned interactive access 
       projectId="p-1"
     />,
   );
-  fireEvent.click(await screen.findByRole("button", { name: "展开 A-1 详情" }));
+  fireEvent.click(await screen.findByRole("button", { name: "查看 A-1 详情" }));
   const command = "cardigan assignment attach 'A-1' --project 'p-1'";
   expect(screen.getByText(command)).toBeTruthy();
   const observe = screen.getByRole("button", {
@@ -282,7 +285,7 @@ test("execution keeps suspended assignments, lost runtimes and blocked Run outco
     />,
   );
   const row = (
-    await screen.findByRole("button", { name: "展开 A-1 详情" })
+    await screen.findByRole("button", { name: "查看 A-1 详情" })
   ).closest("tr");
   expect(
     row?.querySelector(".status-suspended svg.status-shape-paused"),
@@ -294,12 +297,14 @@ test("execution keeps suspended assignments, lost runtimes and blocked Run outco
     row?.querySelector(".status-blocked svg.status-shape-error"),
   ).not.toBeNull();
   expect(row?.querySelector(".status-subdued")).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "展开 A-1 详情" }));
-  expect(
-    screen
-      .getByRole("region", { name: "A-1 Run 历史" })
-      .querySelector(".status-blocked svg.status-shape-error"),
-  ).not.toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "查看 A-1 详情" }));
+  await waitFor(() =>
+    expect(
+      screen
+        .getByRole("region", { name: "A-1 Run 历史" })
+        .querySelector(".status-blocked svg.status-shape-error"),
+    ).not.toBeNull(),
+  );
 });
 
 test.each([
@@ -331,7 +336,7 @@ test.each([
       target: { value: "all" },
     });
     fireEvent.click(
-      await screen.findByRole("button", { name: "展开 A-1 详情" }),
+      await screen.findByRole("button", { name: "查看 A-1 详情" }),
     );
     const start = screen.queryByRole("button", { name: "复制启动或恢复会话" });
     expect(Boolean(start)).toBe(["idle", "not_provisioned"].includes(state));
@@ -400,20 +405,33 @@ test("execution labels a standing PM as project-level and keeps the card/work it
     />,
   );
   const toggle = await screen.findByRole("button", {
-    name: "展开 A-9 详情",
+    name: "查看 A-9 详情",
   });
   const row = toggle.closest("tr");
   expect(row?.textContent).toContain("常驻 PM（项目级）");
   expect(row?.textContent).not.toContain("项目级事项常驻");
 });
 
-test("execution shows five recent Runs by default and can reveal all with expandable summaries", async () => {
-  const runs = Array.from({ length: 7 }, (_, index) => ({
+test("C-75: the drawer shows ten recent Runs and pages ten more from the server, with expandable summaries", async () => {
+  const runs = Array.from({ length: 23 }, (_, index) => ({
     ...run,
-    id: `R-${20 - index}`,
+    id: `R-${30 - index}`,
     status: "completed",
-    summary: `Run ${20 - index} ${"很长的摘要".repeat(20)}`,
+    summary: `Run ${30 - index} ${"很长的摘要".repeat(20)}`,
   }));
+  const executionRuns = vi.fn(
+    async (_projectId: string, _assignmentId: string, before?: string) => {
+      const start =
+        before === undefined ? 0 : runs.findIndex((r) => r.id === before) + 1;
+      const page = runs.slice(start, start + 10);
+      return {
+        runs: page,
+        total: runs.length,
+        next_cursor:
+          start + page.length < runs.length ? (page.at(-1)?.id ?? null) : null,
+      };
+    },
+  );
   render(
     <ExecutionPage
       client={fakeClient({
@@ -422,21 +440,135 @@ test("execution shows five recent Runs by default and can reveal all with expand
           runs,
           machines: [],
         }),
+        executionRuns,
       })}
       projectId="p-1"
     />,
   );
-  fireEvent.click(await screen.findByRole("button", { name: "展开 A-1 详情" }));
-  expect(screen.getByText("显示全部 7 条")).toBeTruthy();
-  expect(screen.queryByText(/R-14/)).toBeNull();
-  expect(screen.getAllByText("展开摘要").length).toBe(5);
-  fireEvent.click(screen.getByRole("button", { name: "显示全部 7 条" }));
-  expect(screen.getByText("R-14", { exact: false })).toBeTruthy();
-  expect(screen.getAllByText("展开摘要").length).toBe(7);
+  fireEvent.click(await screen.findByRole("button", { name: "查看 A-1 详情" }));
+  const history = await screen.findByRole("region", { name: "A-1 Run 历史" });
+  await within(history).findByText("R-21", { exact: false });
+  expect(within(history).queryByText("R-20", { exact: false })).toBeNull();
+  expect(within(history).getAllByText("展开摘要")).toHaveLength(10);
+  expect(within(history).queryByText(/显示全部/)).toBeNull();
+  expect(executionRuns).toHaveBeenLastCalledWith("p-1", "A-1");
+
+  fireEvent.click(within(history).getByRole("button", { name: "显示更多" }));
+  await within(history).findByText("R-11", { exact: false });
+  expect(executionRuns).toHaveBeenLastCalledWith("p-1", "A-1", "R-21");
+  expect(within(history).getAllByText("展开摘要")).toHaveLength(20);
+
+  fireEvent.click(within(history).getByRole("button", { name: "显示更多" }));
+  await within(history).findByText("R-8", { exact: false });
+  expect(executionRuns).toHaveBeenLastCalledWith("p-1", "A-1", "R-11");
+  expect(within(history).getAllByText("展开摘要")).toHaveLength(23);
+  expect(
+    within(history).queryByRole("button", { name: "显示更多" }),
+  ).toBeNull();
+
   fireEvent.click(
-    screen.getAllByRole("button", { name: "展开摘要" })[0] as HTMLElement,
+    within(history).getAllByRole("button", {
+      name: "展开摘要",
+    })[0] as HTMLElement,
   );
-  expect(screen.getAllByText("收起摘要").length).toBe(1);
+  expect(within(history).getAllByText("收起摘要")).toHaveLength(1);
+});
+
+test("C-75: one detail drawer at a time; Esc, the close icon and the overlay close it and return focus", async () => {
+  const second = { ...assignment, id: "A-2", session_ref: "session-second" };
+  render(
+    <ExecutionPage
+      client={fakeClient({
+        execution: async () => ({
+          assignments: [assignment, second],
+          runs: [],
+          machines: [],
+        }),
+      })}
+      projectId="p-1"
+    />,
+  );
+  const first = await screen.findByRole("button", { name: "查看 A-1 详情" });
+  const other = screen.getByRole("button", { name: "查看 A-2 详情" });
+  expect(first.textContent).toBe("详情");
+  const rowsBefore = document.querySelectorAll(".execution-table tr").length;
+
+  fireEvent.click(first);
+  expect(await screen.findByRole("dialog", { name: "A-1 详情" })).toBeTruthy();
+  // The row does not expand or push the rows below it.
+  expect(document.querySelectorAll(".execution-table tr")).toHaveLength(
+    rowsBefore,
+  );
+  // Another row's 详情 replaces the drawer instead of opening a second one.
+  fireEvent.click(other);
+  const replaced = await screen.findByRole("dialog", { name: "A-2 详情" });
+  expect(screen.getAllByRole("dialog")).toHaveLength(1);
+  expect(within(replaced).getByText("session-second")).toBeTruthy();
+
+  fireEvent.keyDown(replaced, { key: "Escape" });
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  await waitFor(() => expect(document.activeElement).toBe(other));
+
+  fireEvent.click(first);
+  const drawer = await screen.findByRole("dialog", { name: "A-1 详情" });
+  fireEvent.click(within(drawer).getByRole("button", { name: "关闭抽屉" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  await waitFor(() => expect(document.activeElement).toBe(first));
+
+  fireEvent.click(other);
+  await screen.findByRole("dialog", { name: "A-2 详情" });
+  const overlay = document.querySelector(".drawer-overlay") as HTMLElement;
+  fireEvent.pointerDown(overlay);
+  fireEvent.pointerUp(overlay);
+  fireEvent.click(overlay);
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  await waitFor(() => expect(document.activeElement).toBe(other));
+});
+
+test("C-75: ACK cursors fold into one line and expand to the ten newest with 显示更多", async () => {
+  const cursors = Array.from({ length: 23 }, (_, index) => ({
+    card_id: `C-${index + 1}`,
+    acked_seq: (index + 1) * 10,
+  }));
+  render(
+    <ExecutionPage
+      client={fakeClient({
+        execution: async () => ({
+          assignments: [{ ...assignment, cursors }],
+          runs: [],
+          machines: [],
+        }),
+      })}
+      projectId="p-1"
+    />,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "查看 A-1 详情" }));
+  const section = await screen.findByRole("region", { name: "A-1 ACK 游标" });
+  const fold = within(section).getByRole("button", {
+    name: "已签收 23 张卡片，最新 seq 230",
+  });
+  expect(fold.getAttribute("aria-expanded")).toBe("false");
+  expect(within(section).queryByText(/已签收 seq/)).toBeNull();
+
+  fireEvent.click(fold);
+  expect(fold.getAttribute("aria-expanded")).toBe("true");
+  const shown = () =>
+    within(section)
+      .getAllByText(/^已签收 seq/)
+      .map((node) => node.textContent);
+  expect(shown()).toEqual(
+    Array.from({ length: 10 }, (_, i) => `已签收 seq ${230 - i * 10}`),
+  );
+  fireEvent.click(within(section).getByRole("button", { name: "显示更多" }));
+  expect(shown()).toHaveLength(20);
+  fireEvent.click(within(section).getByRole("button", { name: "显示更多" }));
+  expect(shown()).toHaveLength(23);
+  expect(
+    within(section).queryByRole("button", { name: "显示更多" }),
+  ).toBeNull();
+
+  fireEvent.click(fold);
+  expect(within(section).queryByText(/已签收 seq/)).toBeNull();
 });
 
 test("project view API paths encode project IDs and remain read-only", async () => {
@@ -446,9 +578,13 @@ test("project view API paths encode project IDs and remain read-only", async () 
   const client = new HttpCardiganClient(fetcher);
   await client.snapshot("p/a");
   await client.execution("p/a");
+  await client.executionRuns("p/a", "A/1");
+  await client.executionRuns("p/a", "A-1", "R-9");
   expect(fetcher.mock.calls.map(([path]) => path)).toEqual([
     "/api/projects/p%2Fa/snapshot",
     "/api/projects/p%2Fa/execution",
+    "/api/projects/p%2Fa/execution/assignments/A%2F1/runs",
+    "/api/projects/p%2Fa/execution/assignments/A-1/runs?before=R-9",
   ]);
   for (const [, init] of fetcher.mock.calls)
     expect(init).toMatchObject({ method: "GET", credentials: "same-origin" });
@@ -494,8 +630,10 @@ test("execution includes unprovisioned queued work in the default view and shows
     />,
   );
   expect(await screen.findByText("排队中（前面还有 2 个）")).toBeTruthy();
-  fireEvent.click(screen.getByRole("button", { name: "展开 A-1 详情" }));
-  expect(screen.getAllByText("排队中（前面还有 2 个）")).toHaveLength(2);
+  fireEvent.click(screen.getByRole("button", { name: "查看 A-1 详情" }));
+  await waitFor(() =>
+    expect(screen.getAllByText("排队中（前面还有 2 个）")).toHaveLength(2),
+  );
 });
 
 test("execution distinguishes an unavailable runtime from capacity waiting", async () => {
