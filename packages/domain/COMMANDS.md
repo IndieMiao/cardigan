@@ -122,3 +122,17 @@ S21：MCP create_card 可省略 repo／base_branch，适配层在命令事务内
 - Run 由 Assignment 复制 `employee_id`；主机在排队及派发时记录实际 `launch_profile_ref`。选择顺序为员工配置 → 固定 Role 版本配置，实际 Harness 取所选配置，工具权限仍取 Role。员工修改配置仅影响后续新 Run；继续使用旧会话前检查配置是否变化。
 - `authorView` / `runAuthorView` 只生成查询投影：employee 含 id/name/title/avatar，无员工为 null，author_display 为“未命名的 <角色>”。交付和审核按原 Run 归属解析，不修改 author 或权限。MCP whoami 的员工字段由 Token 所属 Assignment 查询。
 - 存储迁移 0010 使用与 domain 相同的 Unicode name_key 规则。旧库同名在职员工保留最小编号的原名，其他追加员工编号，冲突再追加序号，原名前缀按 40 字上限截短；保留身份与在职状态，每次改名写 system 全局事件和原名。重跑不重复改名或审计，规则详见开发方案 §4.3。
+
+
+## P2-V V9a 项目角色命令
+
+计划：[p2v-9-10-roles-templates.md §2.1](../../docs/plans/p2v-9-10-roles-templates.md)。入口从 `@cardigan/domain` 导出，不增加 MCP 工具。
+
+- 输入为 `RoleCommandState {project_id, roles}`、认证层 Actor、参数和 `CommandPorts`；`canManageRoles(actor, project_id)` 独立判断，只允许同项目 human，Phase 3 扩展此处。返回 `Result<RoleEffect>`（data、roles、events），store 的 `persistRoleEffect` 在同一事务写入版本及项目事件。
+- `createRole(state, actor, definition, ports)` 新建 v1；`updateRole(state, actor, id, patch, ports)` 追加 latest+1。拒绝修改编号、版本和状态；可编辑显示名、类型、instructions、兼容 core_prompt、Harness／启动配置引用、capabilities、abilities、worktree、allowed_tools 和机器标签。
+- `copyRole(state, actor, {source, role_id, display_name?}, ports)`：source 由主机从默认包或同一事务内的源项目读取；新编号从 v1 开始、状态 active；源后续变化不影响副本。重新按目标编号校验权限，不能通过复制 pm 给其他编号授予 record_decision。
+- `deactivateRole / activateRole(state, actor, id, ports)` 追加 inactive / active 版本；重复设置已有状态无版本和事件。`rollbackRole(state, actor, id, version, ports)` 复制历史内容到 latest+1，重新校验权限，保留当前启停状态。
+- `validateRole` 覆盖系统工具白名单：produce 禁 submit_review，verify 禁 submit_delivery，standing 以上述 PM 固定列表为上限；任意未知名称拒绝；record_decision 仅 pm；验证型 worktree 只允许 readonly/none。旧 kind=work 保存时通过工具／验证能力标记转成明确类型，不能绕过验证型限制。Token 的 office 作用域继续在主机签发时收窄。
+- 新指派前 `isRoleActive` 始终检查最新版，即便显式要求旧版也不能绕过停用；重复指派复用原 Assignment，已有 Assignment 与 Run 保持固定版本和历史权限。不存在角色仍为 not_found。
+- 事件为 role_created、role_copied、role_updated、role_deactivated、role_activated、role_rolled_back；保存 Actor 和完整版本快照。验证失败无部分效果。
+- instructions/status 存入原 roles.doc，不改表；旧记录缺省 active，没有 instructions 就继续使用原 core_prompt，转换和启动拼接位于 roles 包。迁移不重写旧文档，不自动把旧提示词当作新格式。

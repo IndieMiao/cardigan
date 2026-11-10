@@ -297,6 +297,9 @@ export async function launchRun(
         harness: role.harness,
         launch_profile: profileRef,
         core_prompt: role.core_prompt,
+        ...(role.instructions === undefined
+          ? {}
+          : { instructions: role.instructions }),
         // The harness advertises the tool scope the token actually carries, so
         // a rotated Ops session never even sees record_decision (§7.1).
         allowed_tools: issued.record.allowed_tools,

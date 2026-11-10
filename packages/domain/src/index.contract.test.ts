@@ -53,7 +53,7 @@ test("invariants 5, 9: Git ports never push and deletion is an explicit, forced 
 
 test("invariant 1: roles contain capabilities and permissions, not runtime ownership", () => {
   expectTypeOf<keyof RoleReference>().toEqualTypeOf<
-    "role_id" | "role_version" | "allowed_tools" | "capabilities"
+    "role_id" | "role_version" | "allowed_tools" | "capabilities" | "status"
   >();
   expectTypeOf<RoleReference>().not.toHaveProperty("session_ref");
   expectTypeOf<RoleReference>().not.toHaveProperty("worktree_path");

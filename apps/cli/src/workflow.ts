@@ -9,6 +9,7 @@ import {
   assign,
   completeHumanAction,
   createCard,
+  isRoleActive,
   parseId,
   standingTools,
   supersedeCard,
@@ -814,6 +815,9 @@ function pmCreate(args: readonly string[], io: CliIo): number {
       const existing = standing.find(
         (candidate) => candidate.standing_mode === mode,
       );
+      if (existing === undefined && !isRoleActive(roles, "pm")) {
+        throw new CliError("停用的角色不能被新指派", EXIT.usage);
+      }
       if (
         existing === undefined &&
         standing.some(

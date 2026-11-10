@@ -1,9 +1,8 @@
-import { type ToolName, toolNames } from "@cardigan/domain";
-import { RoleVersionError, Store, writeRole } from "@cardigan/store";
+import { Store } from "@cardigan/store";
 import { CliError, EXIT } from "./errors.js";
 import { announceDataDir, resolveProject } from "./host.js";
 import type { CliIo } from "./io.js";
-import { readRoleFile, roleFromFile } from "./role-file.js";
+import { runRoleCommand } from "./role.js";
 
 const ADMIN_USAGE = [
   "用法：",
@@ -159,7 +158,8 @@ export async function runAdminCommand(
   args: readonly string[],
   io: CliIo,
 ): Promise<number> {
-  const { command, subcommand, options } = parseAdminArgs(args);
+  if (args[0] === "role") return runRoleCommand(args.slice(1), io);
+  const { command, options } = parseAdminArgs(args);
   const dataDir = announceDataDir(io, options.dataDir);
 
   switch (command) {
@@ -170,9 +170,7 @@ export async function runAdminCommand(
         ? createProject(dataDir, io, options)
         : setProjectRepo(dataDir, io, options);
     case "role":
-      return options.flags.file === undefined
-        ? addRole(dataDir, io, options)
-        : writeRoleFile(dataDir, io, options, subcommand);
+      return runRoleCommand(args.slice(1), io);
   }
 }
 
@@ -217,44 +215,6 @@ function createProject(
   }
 }
 
-function addRole(dataDir: string, io: CliIo, options: AdminOptions): number {
-  const projectId = requireIdentifier(options.positionals[0], "project_id");
-  const roleId = requireIdentifier(options.positionals[1], "role_id");
-  const version = parseVersion(options.flags.version);
-  const allowedTools = parseTools(options.flags["allowed-tools"]);
-  const capabilities = parseList(options.flags.capabilities);
-
-  const store = Store.open({ dataDir });
-  try {
-    if (store.getProject(projectId) === undefined) {
-      throw new CliError(
-        `项目 ${projectId} 不存在，先运行 cardigan project create ${projectId}`,
-        EXIT.usage,
-      );
-    }
-
-    store.uow.run((tx) => {
-      tx.roles.put(projectId, {
-        role_id: roleId,
-        role_version: version,
-        allowed_tools: allowedTools,
-        capabilities,
-      });
-    });
-
-    io.stdout(
-      [
-        `已写入角色 ${roleId} v${version}（项目 ${projectId}）`,
-        `allowed_tools：${allowedTools.join(", ") || "（无）"}`,
-        `capabilities：${capabilities.join(", ") || "（无）"}`,
-      ].join("\n"),
-    );
-    return EXIT.ok;
-  } finally {
-    store.close();
-  }
-}
-
 function requireIdentifier(value: string | undefined, what: string): string {
   if (value === undefined || !IDENTIFIER.test(value)) {
     throw new CliError(
@@ -263,42 +223,6 @@ function requireIdentifier(value: string | undefined, what: string): string {
     );
   }
   return value;
-}
-
-function parseVersion(value: string | undefined): number {
-  if (value === undefined) {
-    return 1;
-  }
-  const version = Number(value);
-  if (!Number.isSafeInteger(version) || version < 1) {
-    throw new CliError(
-      `--version 必须是正整数，收到 ${JSON.stringify(value)}`,
-      EXIT.usage,
-    );
-  }
-  return version;
-}
-
-function parseTools(value: string | undefined): ToolName[] {
-  const names = parseList(value);
-  const known = new Set<string>(toolNames);
-  const unknown = names.filter((name) => !known.has(name));
-  if (unknown.length > 0) {
-    throw new CliError(`不认识的工具：${unknown.join(", ")}`, EXIT.usage, [
-      `可用工具：${toolNames.join(", ")}`,
-    ]);
-  }
-  return names as ToolName[];
-}
-
-function parseList(value: string | undefined): string[] {
-  if (value === undefined) {
-    return [];
-  }
-  return value
-    .split(",")
-    .map((item) => item.trim())
-    .filter((item) => item.length > 0);
 }
 
 /** `cardigan project set-repo --path <dir> [--base-branch main]` */
@@ -331,53 +255,6 @@ function setProjectRepo(
       [
         `项目 ${projectId} 的仓库：${result.value.repo_path}`,
         `默认基线分支：${result.value.base_branch}`,
-      ].join("\n"),
-    );
-    return EXIT.ok;
-  } finally {
-    store.close();
-  }
-}
-
-/**
- * `cardigan role add|update --file <role.yaml> [--project <p>]`
- *
- * The store owns versioning: `add` writes v1, `update` appends the next
- * version, and old versions stay readable (§10.1, invariant 12).
- */
-async function writeRoleFile(
-  dataDir: string,
-  io: CliIo,
-  options: AdminOptions,
-  subcommand: "add" | "update" | "create" | "set-repo" | undefined,
-): Promise<number> {
-  const filePath = options.flags.file as string;
-  const isUpdate = subcommand === "update";
-  const definition = await readRoleFile(filePath);
-
-  const store = Store.open({ dataDir });
-  try {
-    const projectId = resolveProject(store, io, options.flags.project);
-    const result = (() => {
-      try {
-        return store.uow.run((tx) =>
-          writeRole(tx, projectId, roleFromFile(definition, 1), {
-            mode: isUpdate ? "update" : "add",
-          }),
-        );
-      } catch (error) {
-        if (error instanceof RoleVersionError) {
-          throw new CliError(error.message, EXIT.usage);
-        }
-        throw error;
-      }
-    })();
-    io.stdout(
-      [
-        `${result.created ? "已创建" : "已更新"}角色 ${result.role.role_id} v${result.role.version}（项目 ${projectId}）`,
-        `harness：${result.role.harness}；启动配置：${result.role.launch_profile_ref}`,
-        `allowed_tools：${result.role.allowed_tools.join(", ") || "（无）"}`,
-        `core_prompt：${result.role.core_prompt.length} 字`,
       ].join("\n"),
     );
     return EXIT.ok;
