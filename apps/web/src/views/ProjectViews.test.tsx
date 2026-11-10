@@ -306,7 +306,7 @@ test.each(["snapshot", "execution"] as const)(
     const client = fakeClient({ [kind]: load }),
       Component = kind === "snapshot" ? SnapshotPage : ExecutionPage;
     render(<Component client={client} projectId="p-1" />);
-    expect(screen.getByText("正在加载…")).toBeTruthy();
+    expect(screen.queryByText("正在加载…")).toBeNull();
     await screen.findByText("读取失败");
     fireEvent.click(screen.getByRole("button", { name: "重试" }));
     await screen.findByText(

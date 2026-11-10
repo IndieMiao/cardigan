@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { RequestFeedback } from "./RequestFeedback.js";
 import { Tooltip } from "./Tooltip.js";
 
 export function TimelineVersion({
@@ -29,7 +30,7 @@ export function TimelineVersion({
           提交 {value.slice(0, 7)}
         </button>
       </Tooltip>
-      <span role="status">{message}</span>
+      <RequestFeedback message={message} />
     </span>
   );
 }

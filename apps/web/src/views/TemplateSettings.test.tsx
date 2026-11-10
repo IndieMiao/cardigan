@@ -136,7 +136,15 @@ test("copy retries the exact request with the same key, then offers editing on t
   fireEvent.change(screen.getByLabelText("模板编号"), {
     target: { value: "custom" },
   });
-  await screen.findByText("校验通过");
+  await waitFor(() =>
+    expect(
+      (
+        screen.getByRole("button", {
+          name: /^(确认复制|保存模板)$/,
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(false),
+  );
   fireEvent.click(screen.getByRole("button", { name: "确认复制" }));
   await screen.findByText(/操作可能已经成功/);
   fireEvent.click(screen.getByRole("button", { name: "确认复制" }));
@@ -203,7 +211,15 @@ test("create and edit forms validate current drafts, display server reasons and 
   fireEvent.change(screen.getByLabelText("完成方式"), {
     target: { value: "review" },
   });
-  await screen.findByText("校验通过");
+  await waitFor(() =>
+    expect(
+      (
+        screen.getByRole("button", {
+          name: /^(确认复制|保存模板)$/,
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(false),
+  );
   fireEvent.click(screen.getByRole("button", { name: "保存模板" }));
   await screen.findByText(/角色 coder 未登记或已停用/);
   expect((screen.getByLabelText("模板标题") as HTMLInputElement).value).toBe(
@@ -229,7 +245,15 @@ test("create and edit forms validate current drafts, display server reasons and 
   fireEvent.change(screen.getByLabelText("模板标题"), {
     target: { value: "编辑标题" },
   });
-  await screen.findByText("校验通过");
+  await waitFor(() =>
+    expect(
+      (
+        screen.getByRole("button", {
+          name: /^(确认复制|保存模板)$/,
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(false),
+  );
   fireEvent.click(screen.getByRole("button", { name: "保存模板" }));
   await waitFor(() => expect(manageTemplate).toHaveBeenCalledTimes(3));
   expect(manageTemplate.mock.calls[2]?.[1]).toMatchObject({
@@ -354,4 +378,23 @@ test("HTTP template and mark-done calls encode IDs and send operation-specific i
     result: "已确认",
     attachments: ["F-1"],
   });
+});
+
+test("manual validation retry immediately replaces the error with shared progress", async () => {
+  const request = Promise.withResolvers<{ valid: boolean; reason: null }>();
+  const validateTemplate = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("校验失败"))
+    .mockImplementation(() => request.promise);
+  await open({ ...api([general]), validateTemplate });
+  fireEvent.click(screen.getByRole("button", { name: "新建模板" }));
+  const retry = await screen.findByRole("button", { name: "重新校验" });
+  fireEvent.click(retry);
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(
+    screen.getByText("正在校验…").closest(".request-feedback-region"),
+  ).not.toBeNull();
+  await waitFor(() => expect(validateTemplate).toHaveBeenCalledTimes(2));
+  await act(async () => request.resolve({ valid: true, reason: null }));
+  expect(screen.queryByText("正在校验…")).toBeNull();
 });
