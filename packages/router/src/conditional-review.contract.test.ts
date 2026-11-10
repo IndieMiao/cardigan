@@ -1,4 +1,4 @@
-import { submitReview } from "@cardigan/domain";
+import { finishRun, queueRun, submitReview } from "@cardigan/domain";
 import { expect, test } from "vitest";
 import { mergeFixture } from "../../domain/src/commands/merge/test-fixtures.js";
 import { value } from "../../domain/src/commands/test-fixtures.js";
@@ -155,3 +155,155 @@ test.each([false, true])(
     ).toEqual([{ kind: "needs_you" }, { kind: "pm_office" }]);
   },
 );
+
+test.each([false, true])(
+  "real pass with issues only summarizes to PM Ops (completion=%s)",
+  async (completion) => {
+    const { f, delivery, reviewer } = await conditional(completion);
+    f.start(reviewer);
+    const effect = value(
+      submitReview(
+        f.state,
+        f.actor(reviewer),
+        {
+          delivery_id: delivery.id,
+          target_sha: delivery.subject.value,
+          kind: completion ? "product" : "code",
+          recheck_required: false,
+          issues,
+        },
+        f.io,
+      ),
+    );
+    f.commit({ ok: true, value: effect });
+    const event = effect.events[0];
+    if (!event) throw new Error("Missing review event");
+    expect(effect.data.verdict).toBe("pass");
+    expect(f.state.deliveries.find((d) => d.id === delivery.id)?.status).toBe(
+      "accepted",
+    );
+    // Older events have no issues payload; look up this review, not its history.
+    for (const payload of [
+      event.payload,
+      { review_id: effect.data.id, delivery_id: delivery.id, verdict: "pass" },
+    ]) {
+      const result = routeEvent({
+        event: { ...event, payload },
+        snapshot: f.state,
+      });
+      expect(result.notifications).toEqual([
+        expect.objectContaining({
+          recipient: { kind: "pm_ops" },
+          kind: "review",
+          rule: "6.4/review conditional",
+          summary: `${delivery.id} passed with 1 review issue(s); no recheck is needed`,
+        }),
+      ]);
+      expect(result.checks[0]?.rule).toBe("6.4/review passed");
+    }
+  },
+);
+
+test.each([false, true])(
+  "pass without issues retains completion routing and never summarizes past issues (completion=%s)",
+  async (completion) => {
+    const { f, delivery } = await conditional(completion);
+    const review = f.review(delivery);
+    const event = f.state.events.findLast((e) => e.type === "review_submitted");
+    if (!event) throw new Error("Missing review event");
+    expect(review).toMatchObject({ verdict: "pass", issues: [] });
+    for (const payload of [
+      event.payload,
+      { review_id: review.id, delivery_id: delivery.id, verdict: "pass" },
+    ]) {
+      const result = routeEvent({
+        event: { ...event, payload },
+        snapshot: f.state,
+      });
+      expect(result.notifications).toEqual(
+        completion
+          ? []
+          : [
+              expect.objectContaining({
+                recipient: { kind: "assignment", assignment_id: f.coder.id },
+                kind: "completion",
+                rule: "6.4/all required work items passed",
+              }),
+            ],
+      );
+    }
+  },
+);
+
+test("accepted producer can rework a PM conditional, redeliver and pass both original verifiers", async () => {
+  const { f, delivery: completion, event } = await conditional(true);
+  expect(
+    f.state.work_items.find((w) => w.id === f.coder.work_item_id)?.status,
+  ).toBe("accepted");
+  const notification = routeEvent({ event, snapshot: f.state })
+    .notifications[0];
+  if (notification?.run_kind !== "rework")
+    throw new Error("Missing rework notification");
+  const current = f.state.runs.find(
+    (r) => r.assignment_id === f.coder.id && r.status === "running",
+  );
+  if (!current) throw new Error("Missing producer run");
+  f.commit(
+    finishRun(
+      f.state,
+      f.actor(f.coder),
+      {
+        run_id: current.id,
+        outcome: "completed",
+        summary: "Completion submitted",
+      },
+      f.io,
+    ),
+  );
+  const rework = f.commit(
+    queueRun(
+      f.state,
+      { kind: "system", project_id: f.state.project_id },
+      {
+        assignment_id: f.coder.id,
+        trigger_event_id: notification.event_id,
+        kind: notification.run_kind,
+        model: "fixture-model",
+        agent_cli_version: "1",
+      },
+      f.io,
+    ),
+  );
+
+  const revised = await f.deliver("code", "b".repeat(40));
+  expect(f.state.runs.find((r) => r.id === rework.id)).toMatchObject({
+    kind: "rework",
+    status: "running",
+  });
+  expect(revised.run_id).toBe(rework.id);
+  expect(
+    f.state.work_items.find((w) => w.id === f.coder.work_item_id)?.status,
+  ).toBe("delivered");
+  expect(f.state.deliveries.find((d) => d.id === completion.id)?.status).toBe(
+    "superseded",
+  );
+  expect(
+    f.state.work_items.find((w) => w.id === f.pm.work_item_id)?.status,
+  ).toBe("todo");
+
+  expect(f.review(revised)).toMatchObject({
+    verdict: "pass",
+    work_item_id: f.reviewer.work_item_id,
+  });
+  const revisedCompletion = await f.deliver(
+    "card_completion",
+    revised.subject.value,
+  );
+  expect(f.review(revisedCompletion)).toMatchObject({
+    verdict: "pass",
+    work_item_id: f.pm.work_item_id,
+  });
+  expect(f.state.cards.find((c) => c.id === f.card.id)?.status).toBe(
+    "awaiting_merge",
+  );
+});

@@ -610,6 +610,34 @@ function routeReview(input: RouteInput, draft: Draft): void {
   const reviews = input.snapshot.reviews.filter(
     (review) => review.delivery_id === delivery_id,
   );
+  const payload = payloadObject(input.event.payload);
+  const review = reviews.find((r) => r.id === payload.review_id);
+  const issueCount = Array.isArray(payload.issues)
+    ? payload.issues.length
+    : (review?.issues.length ?? 0);
+  const recheck = payload.recheck_required ?? review?.recheck_required;
+
+  // deriveReview represents nonblocking conditions without a recheck as pass.
+  // Only PM Ops handles these notes, including the legacy conditional verdict.
+  if (
+    (verdict === "pass" && issueCount > 0) ||
+    (verdict === "conditional" && recheck === false)
+  ) {
+    draft.checks.push({
+      rule: "6.4/review passed",
+      card_id: input.event.card_id,
+      detail: "check whether every delivery passed and the card is done",
+    });
+    note(
+      input,
+      draft,
+      recipient.pm_ops(),
+      "review",
+      "6.4/review conditional",
+      `${delivery_id ?? "the delivery"} passed with ${issueCount} review issue(s); no recheck is needed`,
+    );
+    return;
+  }
 
   if (verdict === "pass") {
     draft.checks.push({
@@ -625,25 +653,6 @@ function routeReview(input: RouteInput, draft: Draft): void {
   }
 
   if (verdict === "conditional") {
-    const payload = payloadObject(input.event.payload);
-    const review = reviews.find((r) => r.id === payload.review_id);
-    const recheck = payload.recheck_required ?? review?.recheck_required;
-    if (recheck === false) {
-      draft.checks.push({
-        rule: "6.4/review passed",
-        card_id: input.event.card_id,
-        detail: "check whether every delivery passed and the card is done",
-      });
-      note(
-        input,
-        draft,
-        recipient.pm_ops(),
-        "review",
-        "6.4/review conditional",
-        `${delivery_id ?? "the delivery"} passed conditionally; no recheck is needed`,
-      );
-      return;
-    }
     // The final non-pass round is handled by the blocking review-limit Decision.
     if (payload.rework_allowed === false) return;
     const delivery = input.snapshot.deliveries.find(
