@@ -10,6 +10,7 @@ import {
   compileLaunch,
 } from "./compile.js";
 import type { Harness } from "./harness.js";
+import { composeRolePrompt } from "./prompt.js";
 import type { LaunchConfig, LaunchProfileDefinition } from "./schema.js";
 
 /**
@@ -46,7 +47,8 @@ export interface AssignmentRoleInput {
   /** Name of the launch profile in `launch.yaml` (§10.2). */
   readonly launch_profile: string;
   /** Full Core Prompt; §6.3's protocol must be part of it. */
-  readonly core_prompt: string;
+  readonly core_prompt?: string;
+  readonly instructions?: string;
   /** Card MCP tools this role may call; the CLI allow-list is derived from it. */
   readonly allowed_tools: readonly string[];
   /** `none` roles (PM) run in the run directory instead of a worktree. */
@@ -128,20 +130,21 @@ export function compileAssignmentLaunch(
   if (!Number.isInteger(agentNice) || agentNice < 0 || agentNice > 19)
     throw new Error("Agent niceness must be an integer from 0 to 19");
   const identity = employeeIdentityPrompt(input.employee?.identity);
+  const rolePrompt =
+    input.role.instructions === undefined
+      ? (input.role.core_prompt ?? "")
+      : composeRolePrompt(input.role.instructions);
   const corePrompt =
     identity === undefined
-      ? input.role.core_prompt
-      : /\n（显示名：[^\n]*）/u.test(input.role.core_prompt)
-        ? input.role.core_prompt.replace(
-            /\n（显示名：[^\n]*）/u,
-            () => `\n${identity}`,
-          )
-        : input.role.core_prompt.includes("\n## 协作规则")
-          ? input.role.core_prompt.replace(
+      ? rolePrompt
+      : /\n（显示名：[^\n]*）/u.test(rolePrompt)
+        ? rolePrompt.replace(/\n（显示名：[^\n]*）/u, () => `\n${identity}`)
+        : rolePrompt.includes("\n## 协作规则")
+          ? rolePrompt.replace(
               "\n## 协作规则",
               () => `\n${identity}\n\n## 协作规则`,
             )
-          : `${input.role.core_prompt}\n\n${identity}`;
+          : `${rolePrompt}\n\n${identity}`;
   const firstPrompt =
     identity === undefined
       ? input.first_prompt

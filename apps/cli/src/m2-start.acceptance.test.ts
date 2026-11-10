@@ -26,6 +26,7 @@ import {
 import { HerdrRuntime } from "@cardigan/runtime-herdr";
 import { Store, writeRole } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { createTestRuntime } from "../../../test-support/paths.js";
 import { startCardiganServer } from "../../server/src/index.js";
 import { HcCore, runCleanupSteps } from "../../server/test-support/hc.js";
 import {
@@ -262,12 +263,16 @@ test.skipIf(!hc)(
       bin = join(root, "bin"),
       launchDir = join(root, "config");
     const session = `cg-m2-e2e-${randomUUID().slice(0, 8)}`,
-      xdg = join(root, "runtime");
+      xdg = createTestRuntime(join(root, "runtime"));
     const socket = join(xdg, "cardigan", `${session}.sock`),
       provisionGate = join(root, "provision-go"),
       mcpGate = join(root, "mcp-go"),
       report = join(root, "agent-report.json");
-    await Promise.all([mkdir(bin), mkdir(launchDir), mkdir(xdg)]);
+    await Promise.all([
+      mkdir(bin),
+      mkdir(launchDir),
+      mkdir(xdg, { recursive: true }),
+    ]);
     const env = {
       ...process.env,
       CARDIGAN_RUNTIME_MODE: "local",

@@ -20,6 +20,7 @@
     "@cardigan/mcp-server": "workspace:*",
     "@cardigan/roles": "workspace:*",
     "@cardigan/runtime-herdr": "workspace:*",
-    "@cardigan/store": "workspace:*"
+    "@cardigan/store": "workspace:*",
+    "yaml": "2.9.1"
   }
 }

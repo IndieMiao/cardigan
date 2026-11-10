@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readlinkSync } from "node:fs";
 import { type HcClient, processClient } from "@cardigan/runtime-herdr";
+import { removeTestRuntime } from "../../../test-support/paths.js";
 
 /**
  * herdr-core cleanup for the tests that use a real `hc`.
@@ -280,6 +281,7 @@ export class HcCore {
     this.#stopped = true;
     await this.stop();
     this.assertStopped();
+    removeTestRuntime(this.socket);
   }
 
   /** Session-scoped stop for when the status call cannot return PIDs. */

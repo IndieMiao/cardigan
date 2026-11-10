@@ -55,6 +55,11 @@ test("invariant 13: a real dev card waits for confirmation and preserves the acc
     decider: "human",
     affected_work_items: [],
   });
+  expect(q.question).toBe(`将 ${f.card.id} 合并到 main？`);
+  for (const option of q.options) {
+    expect(option.description).toMatch(/[\u4e00-\u9fff]/u);
+    expect(option.impact).toMatch(/^[\u4e00-\u9fff，]+$/u);
+  }
   f.commit(
     recordDecision(
       f.state,

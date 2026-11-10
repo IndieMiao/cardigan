@@ -4,6 +4,7 @@ import {
   deriveCardFields,
   deriveCardStatus,
   deriveReviewMatrix,
+  latestMergeCheck,
   runAuthorView,
 } from "@cardigan/domain";
 import { z } from "zod";
@@ -56,6 +57,17 @@ export const getCardTool = defineTool({
       completion,
     );
 
+    const mergeCheck =
+      completion && completion.status !== "superseded"
+        ? store.uow.read((tx) =>
+            latestMergeCheck(
+              tx.events.listAfter(identity.actor.project_id, cardId, 0),
+              cardId,
+              completion.id,
+            ),
+          )
+        : undefined;
+
     // Typed against CardView so the tool cannot drift from the domain's
     // derived-field types (M1.2b).
     const template = cardTemplate(card, authors.templates);
@@ -77,6 +89,7 @@ export const getCardTool = defineTool({
         ...agentCard(card),
         status,
         stored_status: card.status,
+        ...(mergeCheck ? { merge_check: mergeCheck } : {}),
       },
       waiting_on: derived.waiting_on,
       next_owners: derived.next_owners,

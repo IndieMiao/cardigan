@@ -1,6 +1,9 @@
 import type { WorkItem } from "../entities.js";
 import { beginReviewRound } from "../transitions.js";
 import { type CommandDraft, ensure, unwrap } from "./core.js";
+import { reviewRound } from "./review-round.js";
+
+export { reviewRound } from "./review-round.js";
 
 export const workCompleted = (item: WorkItem) =>
   item.kind === "produce"
@@ -32,9 +35,6 @@ export function canStartWork(input: {
     return dependency !== undefined && workCompleted(dependency);
   });
 }
-
-export const reviewRound = (d: CommandDraft, item: WorkItem) =>
-  d.list("reviews").filter((r) => r.work_item_id === item.id).length + 1;
 
 // Only the caller's current Run can activate its work; waiting/terminal states stay intact.
 export function activeWork(d: CommandDraft, item: WorkItem): WorkItem {

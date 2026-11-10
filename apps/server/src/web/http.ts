@@ -52,7 +52,11 @@ export function requestRoute(path: string): string {
   const rest = project?.[1];
   if (rest) {
     const prefix = "/api/projects/:project_id";
-    if (/^\/(cards|needs-you|snapshot|execution|activity|stream)$/.test(rest))
+    if (
+      /^\/(cards|needs-you|snapshot|execution|activity|stream|preferences)$/.test(
+        rest,
+      )
+    )
       return prefix + rest;
     const entity = /^\/(cards|attachments)\/[^/]+$/.exec(rest);
     if (entity) return `${prefix}/${entity[1]}/:id`;

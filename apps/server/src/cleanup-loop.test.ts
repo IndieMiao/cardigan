@@ -220,7 +220,7 @@ test("a dirty worktree asks the human and is not deleted", async () => {
     decider: "human",
     blocking: false,
   });
-  expect(decisions[0]?.context).toContain("untracked=1");
+  expect(decisions[0]?.context).toContain("未跟踪文件 1 个");
   expect(existsSync(worktree)).toBe(true);
   expect(assignment().status).toBe("released");
 });

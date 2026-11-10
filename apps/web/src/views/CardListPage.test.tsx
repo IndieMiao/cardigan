@@ -234,7 +234,9 @@ test("the board groups cards by status and links each one", async () => {
   );
   const link = screen.getByRole("link", { name: /准备发布/u });
   expect(link.getAttribute("href")).toBe("#/p/p-1/cards/C-1");
-  expect(inProgress.textContent).toContain("下一步：你");
+  expect(
+    within(inProgress).getByRole("link", { name: "下一步：你" }),
+  ).toBeTruthy();
 });
 
 test("the list shows the configurable columns and progress; the reason stays off by default (U6a)", async () => {
@@ -436,7 +438,7 @@ test("stored display settings keep the user's own choice for the reason field", 
   const api = client(async () => page());
   render(<CardListPage client={api} projectId="p-1" view="board" />);
   await screen.findByText("准备发布");
-  expect(screen.getAllByText("原因：")).toHaveLength(3);
+  expect(screen.getAllByRole("link", { name: /^原因：/ })).toHaveLength(3);
 });
 
 test("clicking a card opens the detail drawer on the route and returns focus on close", async () => {

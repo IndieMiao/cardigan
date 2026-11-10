@@ -155,6 +155,7 @@ test.each(["checkout", "bare"])(
       worktree_path: join(dataDir, "agent", "worktrees", "fixture", "A-1"),
       branch: "agent/C-1/W-1",
       base_sha: head,
+      baseline: { ref: "origin/main", sha: head },
       source_sync: "up_to_date",
     });
     expect(

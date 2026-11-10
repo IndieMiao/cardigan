@@ -194,13 +194,26 @@ export function TimelineContent({
             decision.trigger === "merge_confirmation" &&
             entry.decision_option ? (
             <span className={`status status-${status}`}>
-              {decisionOption(decision, entry.decision_option)}
+              {entry.decision_via === "delegated"
+                ? "自动合并（代批）"
+                : decisionOption(decision, entry.decision_option)}
             </span>
           ) : (
             <StatusTag status={status} />
           ),
         )}
         <p className="entry-summary">{decisionTitle(decision)}</p>
+        {!resolved && decision.auto_merge && (
+          <p className="hint">
+            将于{" "}
+            {new Date(decision.auto_merge.due_at).toLocaleTimeString("zh-CN", {
+              hour: "2-digit",
+              minute: "2-digit",
+              hour12: false,
+            })}{" "}
+            自动合并（偏好设置：{decision.auto_merge.minutes} 分钟）
+          </p>
+        )}
         <div className="entry-meta">
           <span>
             {resolved

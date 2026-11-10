@@ -37,6 +37,19 @@ const comment = (body: string, mentions: string[] = []) =>
     ),
   );
 
+test("invariant 3: body targets share parsing with names and roles, preserving explicit mentions", () => {
+  expect(
+    comment("请 (@A-2)、@W-3 与 @reviewer、@Mary Jane 看一下 @A-2", [
+      "A-2",
+      "reviewer",
+    ]).data?.mentions,
+  ).toEqual(["A-2", "reviewer", "@W-3", "@Mary Jane"]);
+  expect(
+    comment("mail@A-2 x@W-3 @@A-2 @A-2suffix @W-3_abc @A-4-5").data?.mentions,
+  ).toEqual([]);
+  expect(comment("@a-2 @w-3").data?.mentions).toEqual(["@A-2", "@W-3"]);
+});
+
 test.each([human, actor()])(
   "employee parsing uses stored identities and preserves the authenticated author ($kind)",
   (who) => {

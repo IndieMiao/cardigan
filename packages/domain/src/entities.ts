@@ -69,6 +69,7 @@ export interface RoleReference {
   readonly role_version: number;
   readonly allowed_tools: readonly ToolName[];
   readonly capabilities: readonly string[];
+  /** Missing on legacy versions means active. Only the latest version gates new assignments. */
   readonly status?: "active" | "inactive";
 }
 // Constructed by authentication, not from command parameters.
@@ -120,6 +121,7 @@ export interface Card {
   readonly created_at: Timestamp;
 }
 export interface CardView extends Card {
+  readonly merge_check?: MergeCheckView;
   /** Derived by `deriveWaitingOn` in `card-derived.ts`. */
   readonly waiting_on: readonly WaitingOnItem[];
   /** Derived by `deriveNextOwners` in `card-derived.ts`. */
@@ -133,6 +135,34 @@ export interface CardView extends Card {
     readonly verdict: ReviewVerdict | null;
   }[];
   readonly why: string;
+}
+export interface MergeCheckView {
+  readonly attempt_id: string;
+  readonly completion_id: DeliveryId;
+  readonly candidate_sha: string;
+  readonly tree_sha: string;
+  readonly status:
+    | "queued"
+    | "running"
+    | "passed"
+    | "failed"
+    | "timed_out"
+    | "interrupted";
+  readonly checks: readonly {
+    readonly name: string;
+    readonly status:
+      | "passed"
+      | "failed"
+      | "timed_out"
+      | "interrupted"
+      | "not_run";
+    readonly exit_code?: number | null;
+    readonly duration_ms?: number;
+  }[];
+  readonly summary?: string;
+  readonly log_ref?: string;
+  readonly updated_at: Timestamp;
+  readonly recheck_requested?: boolean;
 }
 interface WorkItemFields {
   readonly id: WorkItemId;
@@ -307,6 +337,8 @@ export interface Delivery {
     readonly precondition?: string;
   }[];
   readonly requested_verifiers: readonly WorkItemId[];
+  /** Control-plane provenance; never accepted from submit_delivery parameters. */
+  readonly merge_conflict_event_id?: EventId;
   readonly supersedes?: DeliveryId;
   readonly status: DeliveryStatus;
 }
@@ -337,7 +369,7 @@ export interface DecisionResolution {
   readonly option: string;
   readonly rationale: string;
   readonly resolved_by: Author;
-  readonly via: "needs_you" | "pm_office_chat" | "external";
+  readonly via: "needs_you" | "pm_office_chat" | "external" | "delegated";
   readonly raw_quote: string;
   readonly via_chain: readonly Author[];
   readonly external_ref?: string;

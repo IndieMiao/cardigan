@@ -40,6 +40,10 @@ const isMergeConfirmation = (q: NeedsDecision) =>
   q.trigger === "merge_confirmation";
 const isPausedReview = (q: NeedsDecision) =>
   q.trigger === "review_limit" && q.status === "provisional";
+const reviewOptionLabels: Record<string, string> = {
+  pause: "暂停",
+  raise_limit: "增加轮数",
+};
 type Props = { client: CardiganClient; projectId: string; revision?: number };
 function useAction(done: () => void) {
   const keys = useRef(new Map<string, string>());
@@ -93,6 +97,19 @@ function DecisionMeta({
       {q.blocking && <StatusTag status="blocked" />}
       {isPausedReview(q) && <span className="hint">已暂停（临时决定）</span>}
       <span className="hint">{waitLabel(q.waited_ms, elapsed)}</span>
+      {q.auto_merge && (
+        <span className="hint">
+          将于{" "}
+          {new Date(q.auto_merge.due_at).toLocaleTimeString("zh-CN", {
+            hour: "2-digit",
+            minute: "2-digit",
+            hour12: false,
+          })}{" "}
+          自动合并（偏好设置：{q.auto_merge.minutes} 分钟）
+          {q.waited_ms !== null &&
+            ` · 剩余 ${Math.max(0, Math.ceil((q.auto_merge.minutes * 60_000 - q.waited_ms - elapsed) / 60_000))} 分钟`}
+        </span>
+      )}
       <span className="needs-cards">
         {q.related_cards.length === 0 ? (
           <span>项目级事项</span>
@@ -165,7 +182,11 @@ function Decision({
               />
               <span>
                 <span className="needs-option-head">
-                  <strong>{o.key}</strong>
+                  <strong>
+                    {q.trigger === "review_limit"
+                      ? (reviewOptionLabels[o.key] ?? o.key)
+                      : o.key}
+                  </strong>
                   <span>
                     {q.trigger === "review_limit" && o.key === "raise_limit"
                       ? "增加一轮审核额度"
@@ -195,7 +216,7 @@ function Decision({
         </label>
         <div className="action-row">
           <button type="submit" disabled={action.busy || selected === ""}>
-            {paused ? "raise_limit · 增加一轮审核额度" : "按所选拍板"}
+            {paused ? "增加一轮审核额度" : "按所选拍板"}
           </button>
           {!paused &&
             (["request_information", "explain"] as const).map((kind) => (

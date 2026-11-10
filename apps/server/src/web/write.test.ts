@@ -10,12 +10,18 @@ import { Readable } from "node:stream";
 import {
   type Card,
   type Decision,
+  pauseStandingAssignment,
+  releaseAssignment,
   requestDecision,
   requestHumanAction,
   requestWorktreeCleanup,
 } from "@cardigan/domain";
-import { afterEach, beforeEach, expect, test } from "vitest";
+import { parseLaunchConfig } from "@cardigan/roles";
+import { routeEvent } from "@cardigan/router";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { type M4Cross, m4Cross } from "../../test-support/m4-cross.js";
+import { Dispatcher } from "../dispatch.js";
+import { startQueuedRun } from "../host-start.js";
 import { resolveWebConfig } from "./config.js";
 import { HttpRejection } from "./http.js";
 import { type RunningWebServer, startWebServer } from "./server.js";
@@ -928,7 +934,7 @@ test("K2 cannot supersede an unfinished card", async () => {
   expect(snapshot()).toBe(before);
 });
 
-test("human comments parse Chinese and spaced employee names on the server", async () => {
+test("Workbench body mentions use the shared parser for IDs, roles and employee names", async () => {
   s.store().uow.run((tx) =>
     tx.employees.put({
       id: "E-1",
@@ -944,20 +950,36 @@ test("human comments parse Chinese and spaced employee names on the server", asy
     }),
   );
   const response = await request(cardPath("comments"), {
-    body: "请 @诸葛亮　mARY 检查",
+    body: `请 @${s.primary.owner.id}、@${s.primary.owner.work_item_id}、@coder 和 @诸葛亮　mARY 检查`,
     mentions: [],
   });
   expect(response).toMatchObject({
     status: 200,
     body: {
       author: "human",
-      mentions: ["@诸葛亮 Mary"],
+      mentions: [
+        `@${s.primary.owner.id}`,
+        `@${s.primary.owner.work_item_id}`,
+        "@coder",
+        "@诸葛亮 Mary",
+      ],
     },
   });
 });
 
-async function reviewLimit() {
+async function reviewLimit(delegated = false) {
   const reviewer = s.primary.verifier;
+  if (!delegated) {
+    const ops = s
+      .state()
+      .assignments.find(
+        (a) => a.scope === "standing" && a.standing_mode === "ops",
+      );
+    if (!ops) throw new Error("Missing PM Ops");
+    s.command((state, actor, ports) =>
+      pauseStandingAssignment(state, actor, { assignment_id: ops.id }, ports),
+    );
+  }
   // A one-round budget keeps this fixture small; normal updates only raise it.
   s.store().uow.run((tx) => {
     const item = tx.work_items.get(
@@ -981,6 +1003,164 @@ async function reviewLimit() {
   if (!q) throw new Error("Missing review-limit decision");
   return q;
 }
+
+test.each(["pause", "release"] as const)(
+  "Needs You can resolve a delegated limit after the last PM Ops leaves via %s",
+  async (operation) => {
+    const q = await reviewLimit(true);
+    const ops = s
+      .state()
+      .assignments.find(
+        (a) => a.scope === "standing" && a.standing_mode === "ops",
+      );
+    if (!ops) throw new Error("Missing PM Ops");
+    if (operation === "pause")
+      s.command((state, actor, ports) =>
+        pauseStandingAssignment(state, actor, { assignment_id: ops.id }, ports),
+      );
+    else
+      s.command((state, actor, ports) =>
+        releaseAssignment(state, actor, { assignment_id: ops.id }, ports),
+      );
+    const state = s.state();
+    const event = state.events.findLast(
+      (e) => e.type === "decision_requested" && e.payload.decision_id === q.id,
+    );
+    if (!event) throw new Error("Missing handoff event");
+    expect(
+      routeEvent({ event, snapshot: state }).notifications.map(
+        (n) => n.recipient.kind,
+      ),
+    ).toEqual(["needs_you", "pm_office"]);
+    const response = await fetch(web.url + path("/needs-you"), {
+      headers: { cookie },
+    });
+    expect(await response.json()).toMatchObject({
+      decisions: [
+        expect.objectContaining({ id: q.id, decider: "human", status: "open" }),
+      ],
+    });
+    expect(
+      (
+        await request(resolvePath(q), {
+          option: "raise_limit",
+          raw_quote: "确认继续",
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      s
+        .state()
+        .work_items.find((w) => w.id === s.primary.verifier.work_item_id),
+    ).toMatchObject({ status: "ready", max_review_rounds: 2 });
+    expect(
+      s
+        .state()
+        .runs.filter(
+          (r) =>
+            r.assignment_id === s.primary.verifier.id && r.status === "queued",
+        ),
+    ).toHaveLength(1);
+  },
+);
+
+test.each([false, true])(
+  "PM Ops handles review limits through MCP and routes only human escalations to Needs You (escalate=%s)",
+  async (escalate) => {
+    const q = await reviewLimit(true);
+    expect(q.decider).toBe("role:pm");
+    const ops = s
+      .state()
+      .assignments.find(
+        (a) => a.scope === "standing" && a.standing_mode === "ops",
+      );
+    if (!ops) throw new Error("Missing PM Ops");
+    const recipients = () => {
+      const state = s.state();
+      const event = state.events.findLast(
+        (e) =>
+          e.type === "decision_requested" && e.payload.decision_id === q.id,
+      );
+      if (!event) throw new Error("Missing decision event");
+      return routeEvent({ event, snapshot: state }).notifications.map(
+        (n) => n.recipient.kind,
+      );
+    };
+    const needsYou = async () =>
+      (await (
+        await fetch(web.url + path("/needs-you"), { headers: { cookie } })
+      ).json()) as { decisions: { id: string }[] };
+    expect(recipients()).toEqual(["pm_ops"]);
+    expect((await needsYou()).decisions.some((d) => d.id === q.id)).toBe(false);
+    const before = snapshot();
+    expect(
+      (await request(resolvePath(q), { option: "raise_limit" })).status,
+    ).toBe(403);
+    expect(snapshot()).toBe(before);
+    await s.start(ops);
+    const args = {
+      work_item_id: s.primary.verifier.work_item_id,
+      review_limit_decision: {
+        decision_id: q.id,
+        option: "pause",
+        rationale: "先核对上一轮结论",
+      },
+    };
+    await s.call(ops, "update_work_item", args);
+    expect(s.state().decisions.find((d) => d.id === q.id)).toMatchObject({
+      status: "provisional",
+    });
+    await s.call(ops, "update_work_item", {
+      ...args,
+      review_limit_decision: {
+        decision_id: q.id,
+        option: escalate ? "escalate" : "raise_limit",
+        rationale: escalate
+          ? "需求有疑问，请确认预期结果"
+          : "审核无必须修复问题，继续确认交付",
+      },
+    });
+    if (escalate) {
+      expect(recipients()).toEqual(["needs_you", "pm_office"]);
+      expect((await needsYou()).decisions).toContainEqual(
+        expect.objectContaining({ id: q.id }),
+      );
+      expect(
+        (
+          await request(resolvePath(q), {
+            option: "raise_limit",
+            raw_quote: "确认继续",
+          })
+        ).status,
+      ).toBe(200);
+    } else {
+      expect((await needsYou()).decisions.some((d) => d.id === q.id)).toBe(
+        false,
+      );
+      const duplicate = await s.raw(ops, "update_work_item", {
+        ...args,
+        review_limit_decision: {
+          ...args.review_limit_decision,
+          option: "raise_limit",
+        },
+      });
+      expect(duplicate.isError).toBe(true);
+    }
+    expect(
+      s
+        .state()
+        .work_items.find((w) => w.id === s.primary.verifier.work_item_id),
+    ).toMatchObject({ status: "ready", max_review_rounds: 2 });
+    expect(
+      s
+        .state()
+        .runs.filter(
+          (r) =>
+            r.assignment_id === s.primary.verifier.id && r.status === "queued",
+        ),
+    ).toHaveLength(1);
+  },
+);
 
 test.each([false, true])(
   "Needs You raises the limit and resumes atomically (previously paused=%s), exactly once",
@@ -1035,6 +1215,104 @@ test.each([false, true])(
     // A second request without the original key fails and rolls back its attempted increment.
     expect((await request(resolvePath(q), payload)).status).toBe(409);
     expect(snapshot()).toBe(before);
+  },
+);
+
+test.each(["alive", "exited"] as const)(
+  "raise_limit dispatches the same queued recovery Run on an %s session after its trigger was ACKed",
+  async (process) => {
+    const q = await reviewLimit();
+    const reviewer = s.primary.verifier;
+    expect(
+      (await request(resolvePath(q), { option: "raise_limit" })).status,
+    ).toBe(200);
+    const queued = s
+      .state()
+      .runs.find(
+        (r) => r.assignment_id === reviewer.id && r.status === "queued",
+      );
+    if (!queued) throw new Error("Missing queued recovery Run");
+    expect(queued.kind).toBe("decision_resumed");
+    // An idle Agent can read/ACK the decision before the Dispatcher gets to
+    // it. Subsequent pending instructions must still start the queued work.
+    await s.call(reviewer, "ack_events", {
+      card_id: s.card.id,
+      up_to_seq: s
+        .store()
+        .getUpdates({ project_id: s.project.project_id, card_id: s.card.id })
+        .latest_seq,
+    });
+    expect(
+      (
+        await request(cardPath("comments"), {
+          work_item_id: reviewer.work_item_id,
+          body: "继续审核",
+        })
+      ).status,
+    ).toBe(200);
+    const count = s.state().runs.length;
+    const startRun = vi.fn(
+      async (input: Parameters<typeof startQueuedRun>[1]) =>
+        startQueuedRun(
+          {
+            store: s.store(),
+            runtime: s.runtime,
+            launch: {
+              config: parseLaunchConfig({
+                profiles: {
+                  fixture: { harness: "pi", model: "fixture-model" },
+                },
+              }),
+              secrets: {},
+            },
+            dataDir: s.dataDir,
+            mcpUrl: s.url(),
+          },
+          input,
+        ),
+    );
+    const dispatcher = new Dispatcher({
+      store: s.store(),
+      runtime: {
+        ...s.runtime,
+        status: async () => ({
+          ok: true,
+          value: { process, agent: "idle", observed_seq: 2 },
+        }),
+      },
+      snapshot: async () => ({
+        model: "fixture-model",
+        agent_cli_version: "fixture-1",
+      }),
+      startRun,
+    });
+    await dispatcher.tick();
+    expect(s.state().runs.find((r) => r.id === queued.id)?.status).toBe(
+      "dispatched",
+    );
+    await s.call(reviewer, "whoami");
+    await dispatcher.tick();
+    expect(s.state().runs).toHaveLength(count);
+    expect(s.state().runs.find((r) => r.id === queued.id)).toMatchObject({
+      status: "running",
+      kind: "decision_resumed",
+      trigger_event_id: queued.trigger_event_id,
+    });
+    expect(
+      s.store().listNotifications({
+        project_id: s.project.project_id,
+        assignment_id: reviewer.id,
+      }),
+    ).toContainEqual(
+      expect.objectContaining({
+        run_id: queued.id,
+        status: "belled",
+        attempts: 1,
+      }),
+    );
+    expect(startRun).toHaveBeenCalledTimes(process === "exited" ? 1 : 0);
+    if (process === "alive")
+      expect(s.bells.at(-1)?.text).toContain(`run=${queued.id}`);
   },
 );
 

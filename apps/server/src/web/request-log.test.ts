@@ -59,6 +59,14 @@ test("Workbench logs one duration and fixed route per read/write/error without r
       route: "unmatched",
       status: 404,
     });
+    expect(
+      await request(
+        `/api/projects/${project_id}/preferences?token=query-secret`,
+      ),
+    ).toMatchObject({
+      route: "/api/projects/:project_id/preferences",
+      status: 200,
+    });
     const spy = vi
       .spyOn(f.store.database, "prepare")
       .mockImplementationOnce(() => {

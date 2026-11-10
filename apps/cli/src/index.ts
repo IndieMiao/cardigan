@@ -9,6 +9,7 @@ import { attentionCommand, inboxCommand } from "./inbox.js";
 import type { CliIo } from "./io.js";
 import { runLaunchCommand } from "./launch.js";
 import { runMergeCommand } from "./merge.js";
+import { runPreferenceCommand } from "./preference.js";
 import { runTemplateCommand } from "./template.js";
 import { runWebCommand } from "./web.js";
 import { type CliHooks, runWorkflowCommand } from "./workflow.js";
@@ -56,9 +57,10 @@ const TOP_LEVEL_USAGE = [
   "命令：",
   "  init             建库并执行迁移",
   "  project create   创建项目",
-  "  role add         写入角色定义（allowed_tools、capabilities）",
+  "  role             列出、查看、创建、复制、修改、停用、恢复和回退角色",
   "  pm create        建常驻 PM Assignment 并签发 Token（--office / --ops）",
   "  pm start         一键启动 PM Office 与 PM Ops（已在运行就跳过）",
+  "  preference get|set auto-merge-after  查看或修改超时自动合并偏好",
   "  template list|show|add|copy|update|deactivate|activate|rollback  管理项目模板",
   "  card create      按模板建卡（默认 dev）",
   "  card done        用 --result 记录结果并完成人工完成的卡片，可重复 --file 附证据",
@@ -220,11 +222,12 @@ export async function main(
     if (command === "assignment") {
       return await runAssignmentCommand(rest, io);
     }
+    if (command === "preference") return runPreferenceCommand(rest, io);
     if (command === "template") return await runTemplateCommand(rest, io);
     if (command === "comment" || command === "attachment") {
       return await runContentCommand(command, rest, io);
     }
-    if (command === "merge") return runMergeCommand(rest, io);
+    if (command === "merge") return await runMergeCommand(rest, io);
     if (command === "web") return await runWebCommand(rest, io);
     if (command === "worktree") return await runWorktreeCommand(rest, io);
     if (command === "inbox") return inboxCommand(rest, io);

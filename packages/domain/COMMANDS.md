@@ -86,6 +86,13 @@ CLI 的 `cardigan card update <C-n> [--title <标题>] [--goal <目标>] [--acce
 - releaseAssignment({ assignment_id }) 允许人／常驻 PM Ops／system，无未结束 Run 才迁移两个 Assignment 状态并写 assignment_released。system 只自动释放闭卡的工作项 Assignment；PM Ops 只能释放 scope=work_item，常驻 Assignment 仅允许 human 释放；重复释放前也先校验这一权限。事件携带 token_id（非明文）、runtime_ref、worktree_path、branch；M4.4 沿用 M2 stop 方式撤销该 Assignment 的全部 Token 并释放终端，domain 不证明外部清理已完成。
 - requestWorktreeCleanup({ assignment_id, reason }) 只允许 system；要求已 released 且有工作目录，创建绑定 Assignment 的人类 keep/force_clean 决策。未决或已解决决定均复用，keep 不再重复询问。recordDecision 对此类决策开放 human 入口；不扩充 MCP 工具。
 
+## P2a-1a 合并检查
+
+- 主机加载命令状态时可提供 `project_settings.merge_gate_enabled`；MCP 参数不能配置该字段，未启用项目的原行为保持。
+- `prepareMergePlan` 仅忽略当前完成申请的合并确认，其他阻塞仍拒绝；正式 `mergePlan` 继续要求确认。启用闸门后，冲突／失败可以在确认前记录，成功必须满足确认及不变量 21。
+- `recordMergeCheck(state, system, input, ports)` 记录 queued／running／passed／failed／timed_out／interrupted，绑定 card、completion、attempt、candidate 和 tree。结束结果只接受一次，精确重放无事件；failed／timed_out 的同树重试必须先由人 `recheckMerge({card_id})`，中断可自动重排。每次重排使用全新 attempt，未结束检查不能并发替换。
+- `recordMergeResult(merged)` 在启用闸门时要求同完成申请、同 tree 的 passed 记录；`noop=true` 必须 merge_sha == previous_sha，由主机证明交付均已包含，不创建虚假的检查记录。`latestMergeCheck` 和 `hasPassedMergeCheck` 是无 IO 的事件投影。
+
 ## M5.2 人的操作与编号
 
 `issueInstruction(state, actor, {card_id, work_item_id, body}, ports)` 仅接受人或常驻 PM Ops（持久 standing_mode=ops），校验工具许可、同卡和未结束状态；closed/awaiting_merge 卡片不能下指令。输出 instruction_issued 事件及 instruction 时间线；不直接排 Run，复用 Router 指令规则。MCP 名称为 issue_instruction，复用幂等事务；Office、工作项 Assignment 不显示且不能调用。
@@ -123,6 +130,21 @@ S21 / V10a：MCP create_card 可省略 repo／base_branch。需要仓库的模�
 - `authorView` / `runAuthorView` 只生成查询投影：employee 含 id/name/title/avatar，无员工为 null，author_display 为“未命名的 <角色>”。交付和审核按原 Run 归属解析，不修改 author 或权限。MCP whoami 的员工字段由 Token 所属 Assignment 查询。
 - 存储迁移 0010 使用与 domain 相同的 Unicode name_key 规则。旧库同名在职员工保留最小编号的原名，其他追加员工编号，冲突再追加序号，原名前缀按 40 字上限截短；保留身份与在职状态，每次改名写 system 全局事件和原名。重跑不重复改名或审计，规则详见开发方案 §4.3。
 
+
+## P2-V V9a 项目角色命令
+
+计划：[p2v-9-10-roles-templates.md §2.1](../../docs/plans/p2v-9-10-roles-templates.md)。入口从 `@cardigan/domain` 导出，不增加 MCP 工具。
+
+- 输入为 `RoleCommandState {project_id, roles}`、认证层 Actor、参数和 `CommandPorts`；`canManageRoles(actor, project_id)` 独立判断，只允许同项目 human，Phase 3 扩展此处。返回 `Result<RoleEffect>`（data、roles、events），store 的 `persistRoleEffect` 在同一事务写入版本及项目事件。
+- `createRole(state, actor, definition, ports)` 新建 v1；`updateRole(state, actor, id, patch, ports)` 追加 latest+1。拒绝修改编号、版本和状态；可编辑显示名、类型、instructions、兼容 core_prompt、Harness／启动配置引用、capabilities、abilities、worktree、allowed_tools 和机器标签。
+- `copyRole(state, actor, {source, role_id, display_name?}, ports)`：source 由主机从默认包或同一事务内的源项目读取；新编号从 v1 开始、状态 active；源后续变化不影响副本。重新按目标编号校验权限，不能通过复制 pm 给其他编号授予 record_decision。
+- `deactivateRole / activateRole(state, actor, id, ports)` 追加 inactive / active 版本；重复设置已有状态无版本和事件。`rollbackRole(state, actor, id, version, ports)` 复制历史内容到 latest+1，重新校验权限，保留当前启停状态。
+- `validateRole` 覆盖系统工具白名单：produce 禁 submit_review，verify 禁 submit_delivery，standing 以上述 PM 固定列表为上限；任意未知名称拒绝；record_decision 仅 pm；验证型 worktree 只允许 readonly/none。旧 kind=work 保存时通过工具／验证能力标记转成明确类型，不能绕过验证型限制。Token 的 office 作用域继续在主机签发时收窄。
+- `instructions` 禁止包含系统协作规则／协议的标题和任意一条规则原文，`roleInstructionsError` 与系统文本常量由 domain 共用；新建、修改、复制、回退及启停写入均返回 validation_failed。roles 启动编译复查同一边界，确保三种 Harness 不输出重复段落。只有 core_prompt 的旧角色不受影响；完整旧提示词应通过显式转换剥离系统段落，不能直接粘贴到 instructions。
+- 新指派前 `isRoleActive` 始终检查最新版，即便显式要求旧版也不能绕过停用；重复指派复用原 Assignment，已有 Assignment 与 Run 保持固定版本和历史权限。不存在角色仍为 not_found。
+- 事件为 role_created、role_copied、role_updated、role_deactivated、role_activated、role_rolled_back；保存 Actor 和完整版本快照。验证失败无部分效果。
+- instructions/status 存入原 roles.doc，不改表；旧记录缺省 active，没有 instructions 就继续使用原 core_prompt，转换和启动拼接位于 roles 包。迁移不重写旧文档，不自动把旧提示词当作新格式。
+- 工具白名单是新版本写入边界：旧库已有角色在读取、assign、queueRun 和主机启动时不调用 validateRole，不因历史宽工具范围或旧 kind 被拒绝。写入同一内容的新版本仍需通过校验，既有 Token 作用域控制不变。回归覆盖旧 schema 升级后的 coder/reviewer/pm 与三种 Harness。
 
 ## P2-V V10a 卡片模板与无仓库流程
 

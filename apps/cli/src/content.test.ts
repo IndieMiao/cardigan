@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type ProjectId, requestDecision } from "@cardigan/domain";
 import { loadCommandState, MAX_ATTACHMENT_BYTES } from "@cardigan/mcp-server";
+import { routeEvent } from "@cardigan/router";
 import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { humanActor, runCommand } from "./host.js";
@@ -99,6 +100,42 @@ test.each([false, true])(
     });
     expect(output).toEqual([`已发表评论 ${entry?.id}`]);
     expect(errors).toEqual([`数据目录：${dataDir}`]);
+  },
+);
+
+test.each([false, true])(
+  "CLI body mentions resolve and route all four target types (text file: %s)",
+  async (fromFile) => {
+    // createCard already registered the template roles in beforeEach.
+    expect(
+      await run([
+        "employee",
+        "add",
+        "--name",
+        "诸葛亮 Mary",
+        "--title",
+        "开发",
+        "--role",
+        "coder",
+      ]),
+    ).toBe(0);
+    expect(await run(["assign", "W-1", "--role", "coder"])).toBe(0);
+    for (const mention of ["@A-1", "@W-1", "@coder", "@诸葛亮 Mary"]) {
+      const body = `请 ${mention} 检查`;
+      const args = fromFile
+        ? ["--text-file", file("mentions.md", body)]
+        : ["--text", body];
+      expect(await run(["comment", "add", "C-1", ...args])).toBe(0);
+      const state = snapshot();
+      expect(state.timeline.at(-1)?.mentions).toEqual([mention]);
+      const event = state.events.at(-1);
+      if (!event) throw new Error("Missing comment event");
+      const routed = routeEvent({ event, snapshot: state });
+      expect(routed.problems).toEqual([]);
+      expect(routed.notifications.map((n) => n.recipient)).toEqual([
+        { kind: "assignment", assignment_id: "A-1" },
+      ]);
+    }
   },
 );
 

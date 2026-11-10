@@ -6,7 +6,7 @@
  * CLI surface. The merge execution itself is covered by
  * `apps/server/src/merge-loop.test.ts`.
  */
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -31,7 +31,9 @@ import {
   dispatchRun,
   finishRun,
   prepareDelivery,
+  prepareMergePlan,
   queueRun,
+  recordMergeCheck,
   submitDelivery,
   submitReview,
 } from "@cardigan/domain";
@@ -58,7 +60,7 @@ let errors: string[];
 let card_id: string;
 
 const io = (): CliIo => ({
-  env: {},
+  env: { CARDIGAN_CONFIG_DIR: dataDir },
   cwd: dataDir,
   platform: "linux",
   stdout: (line) => output.push(line),
@@ -432,3 +434,128 @@ test("merge request-changes refuses an already confirmed merge and documents its
   );
   expect((await cardigan("--help")).out).toContain("request-changes");
 });
+
+function enableMergeGate() {
+  writeFileSync(
+    join(dataDir, "merge-gate.yaml"),
+    JSON.stringify({
+      projects: { [project]: { checks: [{ name: "test", run: "true" }] } },
+    }),
+    { mode: 0o600 },
+  );
+}
+
+function recordCheck(
+  status:
+    | "queued"
+    | "running"
+    | "passed"
+    | "failed"
+    | "timed_out"
+    | "interrupted",
+) {
+  const plan = unwrap(prepareMergePlan(state(), card_id as never));
+  const identity = {
+    card_id: plan.card_id,
+    completion_id: plan.completion_id,
+    attempt_id: "cli-check",
+    candidate_sha: SHA,
+    tree_sha: "b".repeat(40),
+  };
+  apply(
+    (s, a, p) =>
+      recordMergeCheck(
+        { ...s, project_settings: { merge_gate_enabled: true } },
+        a,
+        status === "queued" || status === "running"
+          ? { ...identity, status }
+          : {
+              ...identity,
+              status,
+              checks: [
+                {
+                  name: "test",
+                  status,
+                  exit_code: status === "passed" ? 0 : 1,
+                },
+              ],
+              summary: "fixture result",
+              log_ref: "cli-check.log",
+            },
+        p,
+      ),
+    { kind: "system", project_id: project },
+  );
+}
+
+test("merge recheck explains a missing card in Chinese without writing state", async () => {
+  enableMergeGate();
+  const before = JSON.stringify(state());
+  const result = await cardigan("merge", "recheck", "C-99");
+  expect(result.code).toBe(2);
+  expect(result.err).toContain("C-99 不存在");
+  expect(result.out).toBe("");
+  expect(JSON.stringify(state())).toBe(before);
+});
+
+test("merge recheck explains a card outside awaiting_merge in Chinese without writing state", async () => {
+  enableMergeGate();
+  await seatAwaitingMerge();
+  expect(
+    (
+      await cardigan(
+        "merge",
+        "request-changes",
+        card_id,
+        "--reason",
+        "先修正交付",
+      )
+    ).code,
+  ).toBe(0);
+  const before = JSON.stringify(state());
+  const result = await cardigan("merge", "recheck", card_id);
+  expect(result.code).toBe(2);
+  expect(result.err).toContain(`${card_id} 当前状态是 in_progress`);
+  expect(result.err).toContain("只有 awaiting_merge");
+  expect(result.out).toBe("");
+  expect(JSON.stringify(state())).toBe(before);
+});
+
+test.each(["never", "queued", "running", "passed", "interrupted"] as const)(
+  "merge recheck explains no retryable result in Chinese (%s)",
+  async (status) => {
+    enableMergeGate();
+    await seatAwaitingMerge();
+    if (status !== "never") recordCheck("queued");
+    if (!["never", "queued"].includes(status)) recordCheck("running");
+    if (status === "passed" || status === "interrupted") recordCheck(status);
+    const before = JSON.stringify(state());
+    const result = await cardigan("merge", "recheck", card_id);
+    expect(result.code).toBe(2);
+    expect(result.err).toContain(
+      `${card_id} 当前完成申请没有失败或超时的检查结果，不能重新检查。`,
+    );
+    expect(result.err).not.toContain("Only a failed or timed-out");
+    expect(result.out).toBe("");
+    expect(JSON.stringify(state())).toBe(before);
+  },
+);
+
+test.each(["failed", "timed_out"] as const)(
+  "merge recheck accepts %s once and refuses a duplicate in Chinese",
+  async (status) => {
+    enableMergeGate();
+    await seatAwaitingMerge();
+    recordCheck("queued");
+    recordCheck("running");
+    recordCheck(status);
+    const result = await cardigan("merge", "recheck", card_id);
+    expect(result.code).toBe(0);
+    expect(result.out).toContain(`已将 ${card_id} 的合并候选重新排队检查`);
+    const before = JSON.stringify(state());
+    const duplicate = await cardigan("merge", "recheck", card_id);
+    expect(duplicate.code).toBe(2);
+    expect(duplicate.err).toContain("当前完成申请没有失败或超时的检查结果");
+    expect(JSON.stringify(state())).toBe(before);
+  },
+);

@@ -1,3 +1,4 @@
+import { loadMergeGateConfig } from "@cardigan/host";
 import type { McpBackend } from "@cardigan/mcp-server";
 import {
   type Logger,
@@ -108,6 +109,14 @@ export async function startCardiganServer(
   // M4.5: stamp `standing_mode` on rows written before the field existed, so
   // routing and token issuance only ever read the field.
   store.backfillStandingModes();
+  const mergeGate = await loadMergeGateConfig({
+    projectIds: store.listProjects().map((project) => project.id),
+    env: { ...(options.env ?? process.env) },
+  });
+  for (const message of mergeGate.errors)
+    (options.warn ?? ((line: string) => process.stderr.write(`${line}\n`)))(
+      message,
+    );
   // Use the execution that was resolved above (config or environment): the
   // Agent mode decides whether workspace Git may run as the host at all.
   const git =
@@ -157,16 +166,23 @@ export async function startCardiganServer(
         reconcileIntervalMs =
           options.dispatcher.reconcileIntervalMs ?? config.reconcileIntervalMs,
         backupIntervalMs =
-          options.dispatcher.backupIntervalMs ?? config.backupIntervalMs;
+          options.dispatcher.backupIntervalMs ?? config.backupIntervalMs,
+        attachmentIntervalMs =
+          options.dispatcher.attachmentIntervalMs ??
+          config.attachmentIntervalMs;
       plane = startControlPlane({
         ...options.dispatcher,
         store,
         git,
+        mergeGate: { configuration: mergeGate, execution },
         // Test overrides win; otherwise the server configuration decides.
         ...(mergeIntervalMs === undefined ? {} : { mergeIntervalMs }),
         ...(cleanupIntervalMs === undefined ? {} : { cleanupIntervalMs }),
         ...(reconcileIntervalMs === undefined ? {} : { reconcileIntervalMs }),
         ...(backupIntervalMs === undefined ? {} : { backupIntervalMs }),
+        ...(attachmentIntervalMs === undefined ? {} : { attachmentIntervalMs }),
+        // The blob GC sweeps `<dataDir>/attachments`; §9.3.
+        dataDir: config.dataDir,
       });
     } catch (error) {
       await mcp.close();

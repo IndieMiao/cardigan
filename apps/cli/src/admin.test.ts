@@ -40,11 +40,11 @@ function run(argv: string[]): Promise<number> {
 test("cardigan init creates the database and runs migrations", async () => {
   expect(await run(["init"])).toBe(0);
   expect(out.join("\n")).toContain(`数据库：${dataDir}`);
-  expect(out.join("\n")).toContain("schema 版本：11");
+  expect(out.join("\n")).toContain("schema 版本：12");
 
   const store = Store.open({ dataDir });
   try {
-    expect(store.schemaVersion()).toBe(11);
+    expect(store.schemaVersion()).toBe(12);
     expect(store.listProjects()).toEqual([]);
   } finally {
     store.close();
@@ -53,7 +53,7 @@ test("cardigan init creates the database and runs migrations", async () => {
   // Running it again is harmless and reports the same schema version.
   out = [];
   expect(await run(["init"])).toBe(0);
-  expect(out.join("\n")).toContain("schema 版本：11");
+  expect(out.join("\n")).toContain("schema 版本：12");
 });
 
 test("cardigan project create records a project", async () => {
@@ -85,23 +85,23 @@ test("cardigan role add writes allowed_tools and capabilities", async () => {
       "p-cli",
       "coder",
       "--version",
-      "3",
+      "1",
       "--allowed-tools",
       "whoami,get_card,get_updates",
       "--capabilities",
       "code, review",
     ]),
   ).toBe(0);
-  expect(out.join("\n")).toContain("已写入角色 coder v3");
+  expect(out.join("\n")).toContain("已写入角色 coder v1");
 
   const store = Store.open({ dataDir });
   try {
     const role = store.uow.read((tx) =>
-      tx.roles.get("p-cli" as never, { role_id: "coder", role_version: 3 }),
+      tx.roles.get("p-cli" as never, { role_id: "coder", role_version: 1 }),
     );
-    expect(role).toEqual({
+    expect(role).toMatchObject({
       role_id: "coder",
-      role_version: 3,
+      role_version: 1,
       allowed_tools: ["whoami", "get_card", "get_updates"],
       capabilities: ["code", "review"],
     });

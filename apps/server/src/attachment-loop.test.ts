@@ -1,0 +1,248 @@
+/**
+ * Attachment blob GC (Phase 2 plan §7 leftover 1; development plan §9.3, §12.6).
+ *
+ * The sweep must never remove a blob that a project still records, a blob an
+ * in-flight upload may own, or anything that is not a regular sha256 file.
+ */
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { Store } from "@cardigan/store";
+import { Store as SqliteStore } from "@cardigan/store";
+import { afterEach, expect, test } from "vitest";
+import {
+  ATTACHMENT_GC_GRACE_MS,
+  AttachmentGc,
+  startAttachmentLoop,
+} from "./attachment-loop.js";
+
+const NOW = Date.parse("2026-02-01T00:00:00.000Z");
+const DAY = 24 * 60 * 60 * 1000;
+const clock = { now: () => new Date(NOW).toISOString() };
+const digest = (seed: string) => seed.repeat(64).slice(0, 64);
+
+const cleanups: (() => void)[] = [];
+afterEach(() => {
+  for (const cleanup of cleanups.splice(0)) cleanup();
+});
+
+function fixture() {
+  const dataDir = mkdtempSync(join(tmpdir(), "cardigan-attachment-gc-"));
+  const store = SqliteStore.open({ dataDir });
+  const project = store.createProject({
+    id: "p-1" as never,
+    name: "attachments",
+  });
+  if (!project.ok) throw new Error(project.error.message);
+  const directory = join(dataDir, "attachments");
+  mkdirSync(directory, { recursive: true });
+  cleanups.push(() => {
+    store.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+  return { dataDir, store, directory };
+}
+
+/** Write a blob whose mtime is `ageMs` before the sweep's clock. */
+function blob(directory: string, name: string, ageMs: number): string {
+  const path = join(directory, name);
+  writeFileSync(path, `content of ${name}`);
+  const at = new Date(NOW - ageMs);
+  utimesSync(path, at, at);
+  return path;
+}
+
+function record(store: Store, id: string, sha256: string): void {
+  store.uow.run((tx) =>
+    tx.attachments.put("p-1" as never, {
+      id: id as never,
+      sha256,
+      mime: "text/plain",
+      size: 12,
+      card_id: "C-1" as never,
+      uploaded_by: "human",
+      storage_path: `attachments/${sha256}`,
+      attach_to: { kind: "timeline_entry", id: "C-1#1" as never },
+      kind: "evidence",
+    }),
+  );
+}
+
+const sweep = (options: {
+  dataDir: string;
+  store: Pick<Store, "listProjects" | "uow">;
+}) => new AttachmentGc({ ...options, clock }).tick();
+
+test("keeps blobs that a project still references", async () => {
+  const f = fixture();
+  const kept = digest("a");
+  const path = blob(f.directory, kept, 30 * DAY);
+  record(f.store, "F-1", kept);
+  const result = await sweep(f);
+  expect(result.deleted).toEqual([]);
+  expect(existsSync(path)).toBe(true);
+});
+
+test("keeps unreferenced blobs younger than the 24 hour grace period", async () => {
+  const f = fixture();
+  const fresh = blob(f.directory, digest("b"), 60 * 60 * 1000);
+  const justInside = blob(
+    f.directory,
+    digest("c"),
+    ATTACHMENT_GC_GRACE_MS - 1000,
+  );
+  const result = await sweep(f);
+  expect(result.deleted).toEqual([]);
+  expect(existsSync(fresh)).toBe(true);
+  expect(existsSync(justInside)).toBe(true);
+});
+
+test("skips symlinks, directories and names that are not a sha256", async () => {
+  const f = fixture();
+  const target = blob(f.directory, "target.bin", 30 * DAY);
+  const link = join(f.directory, digest("d"));
+  symlinkSync(target, link);
+  const directory = join(f.directory, digest("e"));
+  mkdirSync(directory);
+  writeFileSync(join(directory, "inside"), "keep");
+  const notes = blob(f.directory, "notes.txt", 30 * DAY);
+  const temporary = blob(f.directory, `.${"f".repeat(36)}.tmp`, 30 * DAY);
+  const uppercase = blob(f.directory, "A".repeat(64), 30 * DAY);
+  const result = await sweep(f);
+  expect(result.deleted).toEqual([]);
+  for (const path of [target, link, directory, notes, temporary, uppercase])
+    expect(existsSync(path)).toBe(true);
+});
+
+test("removes an unreferenced blob once it is older than the grace period", async () => {
+  const f = fixture();
+  const orphan = digest("1");
+  const path = blob(f.directory, orphan, 2 * DAY);
+  const messages: string[] = [];
+  const result = await new AttachmentGc({
+    ...f,
+    clock,
+    report: (message) => messages.push(message),
+  }).tick();
+  expect(result.deleted).toEqual([orphan]);
+  expect(result.candidates).toBe(1);
+  expect(existsSync(path)).toBe(false);
+  // Logs carry the count and an eight-character prefix, never the whole digest.
+  expect(messages).toHaveLength(1);
+  expect(messages[0]).toContain("removed 1 orphaned blob");
+  expect(messages[0]).toContain(orphan.slice(0, 8));
+  expect(messages[0]).not.toContain(orphan);
+});
+
+test("an upload that records the blob before the delete wins", async () => {
+  const f = fixture();
+  const rescued = digest("2");
+  const path = blob(f.directory, rescued, 2 * DAY);
+  let hooked = false;
+  // First write transaction is the deletion: an upload commits its record then.
+  const store: Pick<Store, "listProjects" | "uow"> = {
+    listProjects: () => f.store.listProjects(),
+    uow: {
+      read: (operation) => f.store.uow.read(operation),
+      run: async (operation) => {
+        if (!hooked) {
+          hooked = true;
+          record(f.store, "F-late", rescued);
+        }
+        return f.store.uow.run(operation);
+      },
+    } as Store["uow"],
+  };
+  const result = await sweep({ dataDir: f.dataDir, store });
+  expect(hooked).toBe(true);
+  expect(result.deleted).toEqual([]);
+  expect(existsSync(path)).toBe(true);
+});
+
+test("a reuse upload between selection and deletion refreshes the grace period", async () => {
+  const f = fixture();
+  const reused = digest("9");
+  const path = blob(f.directory, reused, 2 * DAY);
+  let hooked = false;
+  const store: Pick<Store, "listProjects" | "uow"> = {
+    listProjects: () => f.store.listProjects(),
+    uow: {
+      read: (operation) => f.store.uow.read(operation),
+      run: async (operation) => {
+        if (!hooked) {
+          hooked = true;
+          // Exactly what `put()` does when it reuses an existing blob: refresh
+          // the mtime (packages/mcp-server/src/attachments.test.ts covers that)
+          // and then record the attachment.
+          const fresh = new Date();
+          utimesSync(path, fresh, fresh);
+        }
+        return f.store.uow.run(operation);
+      },
+    } as Store["uow"],
+  };
+  const result = await sweep({ dataDir: f.dataDir, store });
+  expect(hooked).toBe(true);
+  // The blob was a candidate, but the reuse made it young again before the
+  // deletion transaction re-read its age.
+  expect(result.candidates).toBe(1);
+  expect(result.deleted).toEqual([]);
+  expect(existsSync(path)).toBe(true);
+});
+
+test("limits one round and leaves the rest for the next sweep", async () => {
+  const f = fixture();
+  const first = blob(f.directory, digest("3"), 5 * DAY);
+  const second = blob(f.directory, digest("4"), 4 * DAY);
+  const third = blob(f.directory, digest("5"), 3 * DAY);
+  const gc = new AttachmentGc({ ...f, clock, limit: 2 });
+  const round = await gc.tick();
+  expect(round.deleted).toEqual([digest("3"), digest("4")]);
+  expect(round.truncated).toBe(true);
+  expect(existsSync(first)).toBe(false);
+  expect(existsSync(second)).toBe(false);
+  expect(existsSync(third)).toBe(true);
+  const next = await gc.tick();
+  expect(next.deleted).toEqual([digest("5")]);
+  expect(existsSync(third)).toBe(false);
+});
+
+test("a missing attachments directory is not an error", async () => {
+  const f = fixture();
+  rmSync(f.directory, { recursive: true, force: true });
+  await expect(sweep(f)).resolves.toMatchObject({ scanned: 0, deleted: [] });
+});
+
+test("the loop can be stopped and never sweeps again", async () => {
+  const f = fixture();
+  const orphan = blob(f.directory, digest("6"), 3 * DAY);
+  const { loop } = startAttachmentLoop({ ...f, clock, intervalMs: 5 });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  await loop.stop();
+  await loop.done;
+  expect(existsSync(orphan)).toBe(false);
+  // A blob created after the stop stays: no tick may run again.
+  const late = blob(f.directory, digest("7"), 3 * DAY);
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  expect(existsSync(late)).toBe(true);
+  await loop.stop(); // idempotent
+});
+
+test("stores the blob bytes and never rewrites referenced files", async () => {
+  const f = fixture();
+  const referenced = digest("8");
+  const path = blob(f.directory, referenced, 10 * DAY);
+  record(f.store, "F-8", referenced);
+  const before = readFileSync(path, "utf8");
+  await sweep(f);
+  expect(readFileSync(path, "utf8")).toBe(before);
+});

@@ -12,6 +12,7 @@ import { cardDetail, cardListViews } from "./read.js";
 function cardState(tx: ReadRepositories, project_id: ProjectId): CommandState {
   return {
     project_id,
+    project_preferences: tx.project_preferences.list(project_id),
     cards: tx.cards.list(project_id),
     card_templates: tx.card_templates.list(project_id),
     employees: tx.employees.list(),
@@ -33,8 +34,32 @@ function cardState(tx: ReadRepositories, project_id: ProjectId): CommandState {
 export function readCardList(store: Store, project_id: ProjectId) {
   return store.uow.read((tx) => {
     const state = cardState(tx, project_id);
-    // Timestamps are the list's only event data. Aggregate in SQLite instead of
-    // transferring and parsing every event payload (including delivery evidence).
+    const attachments = tx.attachments.list(project_id);
+    // The board counts legacy attachments via their entry when no card is set.
+    const entryIds = new Set(
+      attachments.flatMap((attachment) =>
+        !attachment.card_id && attachment.attach_to.kind === "timeline_entry"
+          ? [attachment.attach_to.id]
+          : [],
+      ),
+    );
+    const timeline = [...entryIds].flatMap((id) => {
+      const entry = tx.timeline.get(project_id, id);
+      return entry ? [entry] : [];
+    });
+    // Current card views also expose merge-check state; retain only those facts.
+    const events = store.database
+      .prepare(
+        "SELECT doc FROM events WHERE project_id = ? AND type IN " +
+          "('merge_check_queued', 'merge_check_started', 'merge_check_finished', 'merge_check_requeued')",
+      )
+      .all(project_id)
+      .map(
+        (row) =>
+          JSON.parse(row.doc as string) as CommandState["events"][number],
+      );
+    // Aggregate update timestamps in SQLite instead of transferring and parsing
+    // every event payload (including delivery evidence).
     const rows = store.database
       .prepare(
         "SELECT card_id, MAX(json_extract(doc, '$.created_at')) AS updated_at " +
@@ -42,7 +67,7 @@ export function readCardList(store: Store, project_id: ProjectId) {
       )
       .all(project_id) as { card_id: string; updated_at: string }[];
     return cardListViews(
-      state,
+      { ...state, attachments, timeline, events },
       new Map(rows.map((row) => [row.card_id, row.updated_at])),
     );
   });
@@ -81,11 +106,11 @@ export function readCardDetail(
       if (entry) timeline.push(entry);
     }
     const events = tx.events.listAfter(project_id, card_id, 0);
-    // Legacy attachments can be attached to this timeline with another card_id.
-    // Their upload timestamp must still come from the original event stream.
-    const uploads = store.database
+    // Preserve upload dates and auto-merge schedules for cross-card relations.
+    const relatedEvents = store.database
       .prepare(
-        "SELECT doc FROM events WHERE project_id = ? AND type = 'attachment_uploaded' AND stream <> ?",
+        "SELECT doc FROM events WHERE project_id = ? AND type IN " +
+          "('attachment_uploaded', 'decision_requested', 'decision_resolved', 'decision_provisionally_resolved') AND stream <> ? ORDER BY stream, seq",
       )
       .all(project_id, card_id)
       .map(
@@ -98,7 +123,7 @@ export function readCardDetail(
         runs: tx.runs.list(project_id),
         attachments: tx.attachments.list(project_id),
         timeline,
-        events: [...events, ...uploads],
+        events: [...events, ...relatedEvents],
       },
       card_id,
       options,

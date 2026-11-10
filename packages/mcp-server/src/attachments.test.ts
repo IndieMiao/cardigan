@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, test } from "vitest";
@@ -69,4 +69,23 @@ test("shared preflight enforces canonical base64 and the inclusive 10 MiB limit"
       dataDir,
     ),
   ).rejects.toThrow("10 MiB");
+});
+
+test("reusing an existing blob refreshes its mtime so the sweep keeps it", async () => {
+  const content = Buffer.from("shared evidence"),
+    digest = sha256(content),
+    blobs = fileAttachmentStore(dataDir);
+  const path = join(dataDir, "attachments", digest);
+  expect(await blobs.put(digest, content)).toMatchObject({
+    storage_path: `attachments/${digest}`,
+  });
+  const stale = new Date(Date.now() - 72 * 60 * 60 * 1000);
+  await utimes(path, stale, stale);
+  // A second upload of the same bytes reuses the file and must refresh its age.
+  expect(await blobs.put(digest, content)).toMatchObject({
+    storage_path: `attachments/${digest}`,
+  });
+  const touched = (await stat(path)).mtimeMs;
+  expect(touched).toBeGreaterThan(stale.getTime() + 60 * 60 * 1000);
+  expect(await blobs.get(digest)).toEqual(content);
 });

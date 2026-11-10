@@ -6,6 +6,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -37,6 +38,23 @@ test("local server startup visibly warns that the Agent account is not isolated"
   expect(warnings).toHaveLength(1);
   expect(warnings[0]).toContain("没有 Agent 账号隔离");
   expect(warnings[0]).toContain("agent-ssh");
+});
+
+test("server startup reports invalid merge gate settings in Chinese without exposing YAML values", async () => {
+  await server.close();
+  writeFileSync(
+    join(dataDir, "merge-gate.yaml"),
+    "projects: [secret-fixture-value]",
+  );
+  warnings = [];
+  server = await startCardiganServer({
+    config: { dataDir, host: "127.0.0.1", port: 0 },
+    store,
+    env: { CARDIGAN_CONFIG_DIR: dataDir },
+    warn: (message) => warnings.push(message),
+  });
+  expect(warnings.join("\n")).toContain("所有项目暂停合并");
+  expect(warnings.join("\n")).not.toContain("secret-fixture-value");
 });
 
 test.skipIf(process.platform !== "linux")(
