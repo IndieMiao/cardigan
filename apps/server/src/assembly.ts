@@ -163,6 +163,7 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
       ? {}
       : { deliveryRetryBaseMs: options.deliveryRetryBaseMs }),
     ...(options.beforeWake ? { beforeWake: options.beforeWake } : {}),
+    onError: (error) => options.onError?.(error),
     ...(options.deliveryLeaseMs === undefined
       ? {}
       : { deliveryLeaseMs: options.deliveryLeaseMs }),

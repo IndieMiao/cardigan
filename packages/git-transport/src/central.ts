@@ -160,7 +160,12 @@ export class CentralGitTransport implements GitCentralPort {
     extraEnv: NodeJS.ProcessEnv = {},
   ) {
     const r = await this.command(repository, args, extraEnv);
-    if (r.code !== 0) throw new Error(r.stderr || "Git command failed");
+    // execFile-shaped, so callers can classify by exit status and stderr.
+    if (r.code !== 0)
+      throw Object.assign(new Error(r.stderr || "Git command failed"), {
+        code: r.code,
+        stderr: r.stderr,
+      });
     return r.stdout;
   }
   /** Merge-tree prints the tree id, then `mode object stage<TAB>path` per conflict. */

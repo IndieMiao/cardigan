@@ -92,3 +92,40 @@ test("a failed baseline transfer rejects placement before launch", async () => {
   expect(git.resolveCommit).not.toHaveBeenCalled();
   expect(git.checkoutDetached).not.toHaveBeenCalled();
 });
+
+test("concurrent wakes of one project never overlap their base-clone fetches", async () => {
+  const { service, git } = fixture();
+  let active = 0,
+    peak = 0;
+  git.fetch.mockImplementation(async () => {
+    active += 1;
+    peak = Math.max(peak, active);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    active -= 1;
+  });
+  const results = await Promise.all(
+    [1, 2, 3, 4].map(() => service.ensureWorktree(input)),
+  );
+  expect(results.every((r) => r?.baseline?.sha === latest)).toBe(true);
+  expect(git.fetch).toHaveBeenCalledTimes(4);
+  expect(peak).toBe(1);
+});
+
+test("an injected lock wraps placement with the project's base clone as key", async () => {
+  const git = fixture().git;
+  const lock = vi.fn(
+    async <T>(_key: unknown, work: () => Promise<T>): Promise<T> => work(),
+  );
+  const service = new GitWorktreeService(
+    git as unknown as GitWorktreePort,
+    {
+      ensureCentral: vi.fn(async () => "/fixture/central.git"),
+    } as unknown as CentralRepositoryService,
+    { dataDir: "/fixture", worktreesRoot: "/fixture/worktrees", lock },
+  );
+  await service.ensureWorktree(input);
+  expect(lock).toHaveBeenCalledWith(
+    { project_id: "project", repository: "/fixture/agent/repos/project" },
+    expect.any(Function),
+  );
+});
