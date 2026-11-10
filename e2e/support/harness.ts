@@ -349,7 +349,8 @@ export async function createHarness(
       [
         `role_id: ${role_id}`,
         `display_name: ${role_id}`,
-        "kind: work",
+        // PM combines coordination and acceptance; it is not a verifier role.
+        `kind: ${role_id === "pm" ? "standing" : role_id === "coder" ? "produce" : "verify"}`,
         "core_prompt: |",
         `  You are the ${role_id}.`,
         "harness: pi",

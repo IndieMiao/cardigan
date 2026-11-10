@@ -192,12 +192,23 @@ async function pmFixture() {
       JSON.stringify({
         role_id,
         display_name: role_id,
-        kind: role_id === "pm" ? "standing" : "work",
+        kind:
+          role_id === "pm"
+            ? "standing"
+            : role_id === "coder"
+              ? "produce"
+              : "verify",
         core_prompt: corePromptFor(role_id),
         harness: "claude-code",
         launch_profile_ref: "fixture",
         worktree: "none",
-        allowed_tools: [...toolNames],
+        allowed_tools: toolNames.filter(
+          (tool) =>
+            role_id === "pm" ||
+            (tool !== "record_decision" &&
+              tool !==
+                (role_id === "coder" ? "submit_review" : "submit_delivery")),
+        ),
         capabilities: [],
         abilities: [],
         required_machine_tags: [],

@@ -134,6 +134,28 @@ describe("human-only role management", () => {
 });
 
 describe("tool and worktree boundaries", () => {
+  test("verifiers may collaborate, upload evidence and request decisions", () => {
+    const tools = [
+      "submit_review",
+      "upload_attachment",
+      "post_comment",
+      "request_decision",
+    ] as const;
+    const created = value(
+      createRole(
+        empty,
+        human,
+        definition({
+          role_id: "reviewer",
+          kind: "verify",
+          worktree: "readonly",
+          allowed_tools: tools,
+        }),
+        ports(),
+      ),
+    );
+    expect(created.data.allowed_tools).toEqual(tools);
+  });
   test.each<RoleKind>(["produce", "verify", "standing"])(
     "checks every system tool for %s",
     (kind) => {

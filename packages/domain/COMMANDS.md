@@ -137,3 +137,4 @@ S21：MCP create_card 可省略 repo／base_branch，适配层在命令事务内
 - 新指派前 `isRoleActive` 始终检查最新版，即便显式要求旧版也不能绕过停用；重复指派复用原 Assignment，已有 Assignment 与 Run 保持固定版本和历史权限。不存在角色仍为 not_found。
 - 事件为 role_created、role_copied、role_updated、role_deactivated、role_activated、role_rolled_back；保存 Actor 和完整版本快照。验证失败无部分效果。
 - instructions/status 存入原 roles.doc，不改表；旧记录缺省 active，没有 instructions 就继续使用原 core_prompt，转换和启动拼接位于 roles 包。迁移不重写旧文档，不自动把旧提示词当作新格式。
+- 工具白名单是新版本写入边界：旧库已有角色在读取、assign、queueRun 和主机启动时不调用 validateRole，不因历史宽工具范围或旧 kind 被拒绝。写入同一内容的新版本仍需通过校验，既有 Token 作用域控制不变。回归覆盖旧 schema 升级后的 coder/reviewer/pm 与三种 Harness。

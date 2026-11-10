@@ -630,11 +630,23 @@ const child=spawnSync('sh',['-c',args.slice(at+2).join(' ')],{cwd:${JSON.stringi
         JSON.stringify({
           role_id,
           display_name: role_id,
-          kind: role_id === "pm" ? "standing" : "work",
+          kind:
+            role_id === "pm"
+              ? "standing"
+              : role_id === "coder"
+                ? "produce"
+                : "verify",
           core_prompt: corePromptFor(role_id),
           harness: "pi",
           launch_profile_ref: "fixture",
-          allowed_tools: [...toolNames],
+          // Preserve collaboration tools, but do not give every role both work-item actions.
+          allowed_tools: toolNames.filter(
+            (tool) =>
+              role_id === "pm" ||
+              (tool !== "record_decision" &&
+                tool !==
+                  (role_id === "coder" ? "submit_review" : "submit_delivery")),
+          ),
           worktree: role_id === "coder" ? "write" : "none",
         }),
       );
