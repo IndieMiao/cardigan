@@ -361,7 +361,9 @@ test.each([
 );
 
 test("the human marks and unmarks a card sensitive from the card detail", async () => {
-  const setCardSensitive = vi.fn().mockResolvedValue(undefined);
+  const setCardSensitive = vi
+    .fn()
+    .mockResolvedValue({ changed: true, auto_merge_due_at: null });
   const onSaved = vi.fn();
   const card = cardDetail().card;
   const { rerender } = render(
@@ -432,7 +434,9 @@ test("C-69: unmarking says when the timeout will auto-merge, only if it is on", 
       <CardActions
         card={card}
         client={fakeClient({
-          setCardSensitive: vi.fn().mockResolvedValue(undefined),
+          setCardSensitive: vi
+            .fn()
+            .mockResolvedValue({ changed: true, auto_merge_due_at: null }),
           preferences,
         })}
         projectId="p-1"
@@ -462,4 +466,68 @@ test("the sensitive toggle posts to the human-only card route", async () => {
   expect(url).toBe("/api/projects/p-1/cards/C-1/sensitive");
   expect(init.method).toBe("POST");
   expect(JSON.parse(String(init.body))).toEqual({ sensitive: true });
+});
+
+test("C-72: a repeated unmark does not promise a restarted timeout", async () => {
+  const card = { ...cardDetail().card, sensitive: true };
+  const base = fakeClient();
+  const due = "2030-01-01T00:15:00.000Z";
+  const time = new Date(due).toLocaleTimeString("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  for (const [auto_merge_due_at, expected] of [
+    [
+      due,
+      `该卡本来就没有敏感标记，这次没有改动，合并确认的超时计时也没有重新开始。当前合并确认将于 ${time} 按项目设置自动合并。`,
+    ],
+    [
+      null,
+      "该卡本来就没有敏感标记，这次没有改动，合并确认的超时计时也没有重新开始。",
+    ],
+  ] as const) {
+    const { unmount } = render(
+      <CardActions
+        card={card}
+        client={fakeClient({
+          setCardSensitive: vi
+            .fn()
+            .mockResolvedValue({ changed: false, auto_merge_due_at }),
+          preferences: async () => ({
+            ...(await base.preferences("p-1")),
+            auto_merge_after_minutes: 15,
+          }),
+        })}
+        projectId="p-1"
+        onSaved={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "取消敏感标记" }));
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toBe(expected),
+    );
+    expect(screen.getByRole("status").textContent).not.toContain("重新计时，");
+    unmount();
+  }
+});
+
+test("C-72: the client reads whether the flag changed", async () => {
+  const reply = (body: unknown) =>
+    vi.fn(
+      async () => new Response(JSON.stringify(body), { status: 200 }),
+    ) as unknown as typeof fetch;
+  expect(
+    await new HttpCardiganClient(
+      reply({ card: {}, changed: false, auto_merge_due_at: "x" }),
+    ).setCardSensitive("p-1", "C-1", false, "k-1"),
+  ).toEqual({ changed: false, auto_merge_due_at: "x" });
+  expect(
+    await new HttpCardiganClient(reply({})).setCardSensitive(
+      "p-1",
+      "C-1",
+      false,
+      "k-2",
+    ),
+  ).toEqual({ changed: true, auto_merge_due_at: null });
 });
