@@ -1,6 +1,7 @@
 import { expect, test } from "vitest";
 import {
   type Actor,
+  autoConfirmMerge,
   hasPassedMergeCheck,
   latestMergeCheck,
   type MergeCheckView,
@@ -12,6 +13,7 @@ import {
   recordMergeCheck,
   recordMergeResult,
   requestDecision,
+  setProjectPreferences,
 } from "../index.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
 import { human, value } from "./test-fixtures.js";
@@ -373,4 +375,44 @@ test("invariant 21: a new tree is eligible after failure but an old completion c
       f.io,
     ).ok,
   ).toBe(false);
+});
+
+test("a timeout-delegated confirmation still requires a passed check before publication", async () => {
+  const { f, state, record, merged } = await fixture("confirm");
+  f.commit(
+    setProjectPreferences(
+      state(),
+      human,
+      { auto_merge_after_minutes: 1 },
+      f.io,
+    ),
+  );
+  const decision = f.state.decisions.find(
+    (q) => q.trigger === "merge_confirmation",
+  );
+  if (!decision) throw new Error("Missing confirmation");
+  f.io.clock = { now: () => "2099-01-01T00:00:00.000Z" };
+  const delegated = f.commit(
+    autoConfirmMerge(state(), system, { decision_id: decision.id }, f.io),
+  );
+  expect(delegated.resolution).toMatchObject({
+    via: "delegated",
+    option: "merge",
+    resolved_by: "system",
+  });
+  expect(mergePlan(state(), f.card.id).ok).toBe(true);
+  expect(recordMergeResult(state(), system, merged, f.io)).toMatchObject({
+    ok: false,
+    error: { code: "invariant_violation" },
+  });
+  record("queued");
+  record("running");
+  record("failed");
+  expect(recordMergeResult(state(), system, merged, f.io).ok).toBe(false);
+  f.commit(recheckMerge(state(), human, { card_id: f.card.id }, f.io));
+  record("queued", "rechecked");
+  record("running", "rechecked");
+  record("passed", "rechecked");
+  f.commit(recordMergeResult(state(), system, merged, f.io));
+  expect(f.state.cards[0]?.status).toBe("done");
 });
