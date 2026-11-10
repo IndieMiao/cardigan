@@ -11,6 +11,7 @@ import {
 import {
   beginLaunchAttempt,
   finishBellAttempt,
+  listBellAttempts,
   Store,
   tokensForAssignment,
   unfinishedBellAttempts,
@@ -47,11 +48,24 @@ const dispatcher = (extra: Partial<typeof f.options> = {}) =>
     ...extra,
   });
 
-test("failure retries after 30/60/120/240 seconds across restarts; only then queues one replacement", async () => {
+test("failed attempts persist through backoff and one recovery, then escalate after retry exhaustion", async () => {
   fail();
+  const provision = vi.mocked(f.options.startRun).getMockImplementation();
+  if (!provision) throw new Error("Missing startup fixture");
+  vi.mocked(f.options.startRun).mockImplementation(async (input) => {
+    await provision(input);
+    throw new Error("uncertain startup delivery");
+  });
   f.comment();
   await dispatcher().tick();
   const original = f.latest();
+  const history = (id: typeof original.id) =>
+    listBellAttempts(f.store.database, f.project).filter(
+      (a) => a.run_id === id,
+    );
+  expect(history(original.id)).toMatchObject([
+    { outcome: "failed", finished_at: f.clock.now() },
+  ]);
   for (const [i, delay] of [30000, 60000, 120000, 240000].entries()) {
     f.advance(delay - 1);
     await dispatcher().tick();
@@ -67,6 +81,16 @@ test("failure retries after 30/60/120/240 seconds across restarts; only then que
     expect(f.latest().id).toBe(original.id);
     expect(f.runtime.status).toHaveBeenCalledTimes(i + 2);
     expect(f.state().human_actions).toEqual([]);
+    const attempts = history(original.id);
+    expect(attempts).toHaveLength(i + 2);
+    expect(new Set(attempts.map((a) => a.id)).size).toBe(i + 2);
+    expect(
+      attempts.every((a) => a.outcome === "failed" && a.finished_at !== null),
+    ).toBe(true);
+    expect(f.notes()[0]).toMatchObject({
+      status: "delivery_failed",
+      attempts: i + 2,
+    });
   }
   await dispatcher().tick();
   expect(f.latest().id).not.toBe(original.id);
@@ -80,6 +104,31 @@ test("failure retries after 30/60/120/240 seconds across restarts; only then que
   );
   expect(count("run_dispatch_recovered")).toBe(1);
   expect(f.notes()[0]?.status).toBe("resolved");
+  const originalHistory = history(original.id);
+  const replacement = f.latest();
+  expect(history(replacement.id)).toMatchObject([{ outcome: "failed" }]);
+  for (const delay of [30000, 60000, 120000, 240000]) {
+    const before = history(replacement.id).length;
+    f.advance(delay - 1);
+    await dispatcher().tick();
+    expect(history(replacement.id)).toHaveLength(before);
+    f.advance(1);
+    await dispatcher().tick();
+    expect(history(replacement.id)).toHaveLength(before + 1);
+    expect(f.state().human_actions).toHaveLength(0);
+  }
+  await dispatcher().tick();
+  await dispatcher().tick();
+  expect(history(original.id)).toEqual(originalHistory);
+  expect(history(replacement.id)).toHaveLength(5);
+  expect(
+    history(replacement.id).every(
+      (a) => a.outcome === "failed" && a.finished_at !== null,
+    ),
+  ).toBe(true);
+  expect(count("run_dispatch_recovered")).toBe(1);
+  expect(count("run_dispatch_stalled")).toBe(1);
+  expect(f.state().human_actions).toMatchObject([{ status: "open" }]);
 });
 
 test("successful send without run_started times out once; second timeout creates a visible Needs You action", async () => {

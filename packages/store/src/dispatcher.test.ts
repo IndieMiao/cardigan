@@ -3,7 +3,10 @@ import { expect, test } from "vitest";
 import {
   advanceRouterCursor,
   beginBellAttempt,
+  beginDispatchRetry,
   finishBellAttempt,
+  listBellAttempts,
+  moveNotification,
   recordNotification,
   Store,
   unfinishedBellAttempts,
@@ -197,6 +200,78 @@ test("invalid claims are rejected before any receipt is persisted", () => {
       store.uow.run(() => beginBellAttempt(store.database, claim(n.id))),
     ).toThrow(/deliverable/);
     expect(unfinishedBellAttempts(store.database, project_id)).toEqual([]);
+  });
+});
+
+test("a successful retry preserves the original failed delivery history across reopen", () => {
+  withTempStore((store, dataDir) => {
+    const { input, run } = seed(store);
+    store.uow.run((tx) =>
+      tx.runs.put(project_id, { ...run, status: "dispatched" }),
+    );
+    const n = store.recordNotification(input).notification;
+    const first = claim(n.id);
+    store.uow.run(() => {
+      beginBellAttempt(store.database, first);
+      finishBellAttempt(store.database, project_id, first.id, "failed", at);
+      moveNotification(store.database, {
+        project_id,
+        id: n.id,
+        event: "deliver_failed",
+        at,
+        patch: { run_id: run.id, attempts: 1 },
+      });
+    });
+    const failed = listBellAttempts(store.database, project_id)[0];
+    expect(failed).toMatchObject({
+      id: first.id,
+      outcome: "failed",
+      finished_at: at,
+    });
+    expect(store.listNotifications({ project_id })[0]).toMatchObject({
+      status: "delivery_failed",
+      attempts: 1,
+    });
+    const second = {
+      ...first,
+      id: "attempt-2",
+      started_at: lease,
+      lease_until: "2026-01-01T00:02:00.000Z",
+    };
+    store.uow.run(() => {
+      beginDispatchRetry(store.database, second);
+      finishBellAttempt(store.database, project_id, second.id, "sent", lease);
+      moveNotification(store.database, {
+        project_id,
+        id: n.id,
+        event: "bell",
+        at: lease,
+        patch: { attempts: 2 },
+      });
+      expect(
+        finishBellAttempt(store.database, project_id, first.id, "sent", lease),
+      ).toBe(false);
+    });
+    const reopened = Store.open({ dataDir });
+    try {
+      expect(listBellAttempts(reopened.database, project_id)).toEqual([
+        failed,
+        { ...second, finished_at: lease, outcome: "sent" },
+      ]);
+      expect(reopened.listNotifications({ project_id })).toMatchObject([
+        {
+          id: n.id,
+          event_id: n.event_id,
+          recipient: n.recipient,
+          run_id: run.id,
+          status: "belled",
+          attempts: 2,
+        },
+      ]);
+      expect(unfinishedBellAttempts(reopened.database, project_id)).toEqual([]);
+    } finally {
+      reopened.close();
+    }
   });
 });
 
