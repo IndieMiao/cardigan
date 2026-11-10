@@ -309,6 +309,8 @@ export interface CardRelations {
 }
 
 export interface CardDetail {
+  readonly template?: TemplateView | null;
+  readonly mark_done?: { allowed: boolean; reason: string | null } | null;
   readonly updated_at?: string;
   readonly recent_conclusions?: readonly TimelineEntryView[];
   readonly project_id: string;
@@ -617,6 +619,49 @@ export interface DecisionHistoryRecord extends DecisionView {
     proxy_authority?: string;
   };
 }
+export interface TemplateDefinition {
+  id: string;
+  title: string;
+  description: string;
+  requires_repo: boolean;
+  merge: "none" | "confirm" | "auto";
+  require_acceptance_criteria: boolean;
+  work_items: {
+    key: string;
+    title: string;
+    kind: "produce" | "verify";
+    role_id: string;
+    required: boolean;
+    target_work_item_key?: string;
+  }[];
+  primary_work_item_key: string | null;
+  completion:
+    | { mode: "human_mark_done" }
+    | { mode: "review"; reviewer: string };
+}
+export interface TemplateView extends TemplateDefinition {
+  version: number;
+  builtin: boolean;
+  status: "active" | "inactive";
+}
+export interface TemplateVersion extends TemplateView {
+  summary: string;
+  created_at: string | null;
+}
+export type TemplateChange =
+  | { action: "add" | "update"; definition: TemplateDefinition }
+  | { action: "copy"; template_id: string; new_id: string; version?: number }
+  | { action: "activate" | "deactivate"; template_id: string }
+  | { action: "rollback"; template_id: string; version: number };
+export interface TemplateDetail {
+  template: TemplateVersion;
+  previous: TemplateVersion | null;
+}
+export interface TemplateValidation {
+  valid: boolean;
+  reason: string | null;
+}
+
 export interface PreferencesView {
   readonly decision_delegation?: Readonly<Record<string, boolean>>;
   readonly auto_merge_after_minutes: number | null;
@@ -729,6 +774,28 @@ export interface RoleCopyInput {
 }
 
 export interface CardiganClient {
+  templates(projectId: string): Promise<{ templates: TemplateView[] }>;
+  template(projectId: string, id: string): Promise<TemplateDetail>;
+  templateHistory(
+    projectId: string,
+    id: string,
+  ): Promise<{ versions: TemplateVersion[] }>;
+  validateTemplate(
+    projectId: string,
+    change: TemplateChange,
+  ): Promise<TemplateValidation>;
+  manageTemplate(
+    projectId: string,
+    change: TemplateChange,
+    idempotencyKey: string,
+  ): Promise<TemplateView>;
+  markCardDone(
+    projectId: string,
+    cardId: string,
+    result: string,
+    attachments: string[],
+    idempotencyKey: string,
+  ): Promise<void>;
   roles(projectId: string): Promise<RoleListView>;
   role(projectId: string, roleId: string): Promise<RoleDetailView>;
   roleHistory(projectId: string, roleId: string): Promise<RoleHistoryView>;
@@ -967,6 +1034,59 @@ export class HttpCardiganClient implements CardiganClient {
       projectId,
       "preferences",
       { decision_delegation: { [category]: enabled } },
+      idempotencyKey,
+    );
+  }
+  templates(projectId: string): Promise<{ templates: TemplateView[] }> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/card-templates`,
+    );
+  }
+  template(projectId: string, id: string): Promise<TemplateDetail> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/card-templates/${encodeURIComponent(id)}`,
+    );
+  }
+  templateHistory(
+    projectId: string,
+    id: string,
+  ): Promise<{ versions: TemplateVersion[] }> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/card-templates/${encodeURIComponent(id)}/history`,
+    );
+  }
+  validateTemplate(
+    projectId: string,
+    change: TemplateChange,
+  ): Promise<TemplateValidation> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/card-templates/validate`,
+      { method: "POST", body: JSON.stringify(change) },
+    );
+  }
+  async manageTemplate(
+    projectId: string,
+    change: TemplateChange,
+    idempotencyKey: string,
+  ): Promise<TemplateView> {
+    return (await this.write(
+      projectId,
+      "card-templates",
+      change,
+      idempotencyKey,
+    )) as TemplateView;
+  }
+  async markCardDone(
+    projectId: string,
+    cardId: string,
+    result: string,
+    attachments: string[],
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      `cards/${encodeURIComponent(cardId)}/mark-done`,
+      { result, attachments },
       idempotencyKey,
     );
   }

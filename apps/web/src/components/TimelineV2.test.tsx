@@ -418,3 +418,30 @@ test("a PM delegated decision uses a shared status icon and remains distinct fro
   ).toBe("true");
   expect(screen.queryByText("自动合并（代批）")).toBeNull();
 });
+
+test("human completion results render literally, including Markdown, references and HTML", () => {
+  const body =
+    "**确认完成** <img src=x onerror=alert(1)>\n[证据](https://example.test) C-2";
+  const { container } = show([
+    timelineEntry({
+      type: "status_change",
+      event_type: "card_marked_done",
+      author: "human",
+      body,
+      references: [
+        {
+          kind: "card",
+          id: "C-2",
+          exists: true,
+          status: "done",
+          card_id: "C-2",
+        },
+      ],
+    }),
+  ]);
+  fireEvent.click(screen.getByText("详情"));
+  const content = container.querySelector(".timeline-body");
+  expect(content?.textContent).toBe(body);
+  expect(content?.querySelector("strong, a, img, script")).toBeNull();
+  expect(content?.classList.contains("markdown")).toBe(false);
+});

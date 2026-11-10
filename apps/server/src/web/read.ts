@@ -3,8 +3,10 @@ import type {
   Author,
   CardId,
   CardView,
+  CommandPorts,
   CommandState,
   Decision,
+  EventId,
   Machine,
   MergeCheckView,
   ProjectId,
@@ -14,10 +16,15 @@ import type {
 import {
   authorView,
   autoMergeSchedule,
+  builtinCardTemplates,
+  cardTemplate,
   deriveCardStatus,
   deriveReviewMatrix,
   extractReferences,
+  formatTimelineEntryId,
+  latestCardTemplate,
   listNeedsYou,
+  markCardDone,
   parseAvatarReference,
   projectSnapshot,
   type Result,
@@ -73,6 +80,66 @@ export function projectState(
   project_id: ProjectId,
 ): CommandState {
   return store.uow.read((tx) => loadCommandState(tx, project_id));
+}
+
+/** Preview pure commands without persisting effects or allocating database IDs. */
+export function previewPorts(now: string): CommandPorts {
+  return {
+    clock: { now: () => now },
+    ids: {
+      next: () => {
+        throw new Error("Preview cannot allocate entity IDs");
+      },
+      nextAttachmentId: () => {
+        throw new Error("Preview cannot allocate attachments");
+      },
+      nextEventId: () => "preview" as EventId,
+      nextEventSequence: () => 1,
+      nextTimelineEntryId: (_project, card) =>
+        unwrap(formatTimelineEntryId(card, 1)),
+    },
+  };
+}
+
+export function templateHistory(state: CommandState, id: string) {
+  const versions = new Map(
+    [...builtinCardTemplates, ...(state.card_templates ?? [])]
+      .filter((t) => t.id === id)
+      .map((t) => [t.version, t]),
+  );
+  return [...versions.values()]
+    .sort((a, b) => b.version - a.version)
+    .map((template) => {
+      const event = state.events.find((e) => {
+        const p = e.payload;
+        return (
+          e.type === "card_template_changed" &&
+          p &&
+          typeof p === "object" &&
+          "template_id" in p &&
+          p.template_id === id &&
+          "version" in p &&
+          p.version === template.version
+        );
+      });
+      return {
+        ...template,
+        summary: `${template.title} · ${template.work_items.length} 个工作项`,
+        // Builtin migration snapshots have no creation event; do not invent a date.
+        created_at: event?.created_at ?? null,
+      };
+    });
+}
+
+export function templateList(state: CommandState) {
+  const templates = [...builtinCardTemplates, ...(state.card_templates ?? [])];
+  return [...new Set(templates.map((t) => t.id))]
+    .sort()
+    .map(
+      (id) =>
+        latestCardTemplate(state.card_templates ?? [], id) ??
+        latestCardTemplate(builtinCardTemplates, id),
+    );
 }
 
 /** Public employee profile only; opaque references and external URLs are not images. */
@@ -567,7 +634,28 @@ export function cardDetail(
     sourceDecision?.card_id !== card_id
       ? state.cards.find((c) => c.id === sourceDecision?.card_id)
       : undefined;
+  const template = cardTemplate(card, state.card_templates);
+  const completionPreview =
+    template?.completion.mode === "human_mark_done"
+      ? markCardDone(
+          state,
+          human(state.project_id),
+          { card_id, result: "检查完成条件" },
+          previewPorts(options.now ?? card.created_at),
+        )
+      : undefined;
   return {
+    template: template ?? null,
+    mark_done: completionPreview
+      ? {
+          allowed: completionPreview.ok,
+          reason: completionPreview.ok
+            ? null
+            : completionPreview.error.code === "illegal_transition"
+              ? "当前卡片状态不允许标记完成。"
+              : completionPreview.error.message,
+        }
+      : null,
     updated_at,
     card: { ...card, references: references(description) },
     work_items,

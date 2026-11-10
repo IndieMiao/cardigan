@@ -180,6 +180,16 @@ export function fakeClient(
       merge_gate_enabled: false,
     }),
     setPreferences: async () => {},
+    templates: async () => ({ templates: [] }),
+    template: async () => {
+      throw new Error("Missing template fixture");
+    },
+    templateHistory: async () => ({ versions: [] }),
+    validateTemplate: async () => ({ valid: true, reason: null }),
+    manageTemplate: async () => {
+      throw new Error("Missing template fixture");
+    },
+    markCardDone: async () => {},
     roles: async (project_id) => ({
       project_id,
       roles: [],

@@ -12,6 +12,7 @@ import {
 } from "../decision-labels.js";
 import { useResource } from "../useResource.js";
 import { RolesSettings } from "./RolesSettings.js";
+import { TemplateSettings } from "./TemplateSettings.js";
 
 export function SettingsPage({
   client,
@@ -22,109 +23,135 @@ export function SettingsPage({
   projectId: string;
   revision?: number;
 }) {
+  const [tab, setTab] = useState<
+    "preferences" | "authorization" | "roles" | "templates"
+  >("preferences");
   const load = useCallback(
     () => client.preferences(projectId),
     [client, projectId],
   );
   const resource = useResource(load, revision);
-  const [tab, setTab] = useState<"general" | "roles">("general");
   return (
     <>
-      <PageTitle title="设置" description="管理当前项目的偏好、授权和角色。" />
+      <PageTitle
+        title="设置"
+        description="管理当前项目的偏好、授权、角色和卡片模板。"
+      />
       <div className="settings-layout">
         <nav aria-label="设置分栏">
-          {(
-            [
-              ["preferences", "偏好", "general"],
-              ["authorization", "授权", "general"],
-              ["roles", "角色", "roles"],
-            ] as const
-          ).map(([target, label, value]) => (
-            <button
-              key={target}
-              type="button"
-              onClick={() => {
-                setTab(value);
-                requestAnimationFrame(() =>
-                  document.getElementById(target)?.focus(),
-                );
-              }}
-              {...(tab === value &&
-              (value === "roles" || target === "preferences")
-                ? { "aria-current": "page" as const }
-                : {})}
-            >
-              {label}
-            </button>
-          ))}
+          <button
+            type="button"
+            onClick={() => {
+              setTab("preferences");
+            }}
+            aria-current={tab === "preferences" ? "page" : undefined}
+          >
+            偏好
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab("authorization")}
+            aria-current={tab === "authorization" ? "page" : undefined}
+          >
+            授权
+          </button>
+          <button
+            type="button"
+            aria-current={tab === "roles" ? "page" : undefined}
+            onClick={() => {
+              setTab("roles");
+              requestAnimationFrame(() =>
+                document.getElementById("roles")?.focus(),
+              );
+            }}
+          >
+            角色
+          </button>
+          <button
+            type="button"
+            aria-current={tab === "templates" ? "page" : undefined}
+            onClick={() => setTab("templates")}
+          >
+            卡片模板
+          </button>
         </nav>
-        {tab === "roles" ? (
+        {tab === "roles" && (
           <section id="roles" tabIndex={-1} aria-labelledby="roles-title">
             <h2 id="roles-title">角色</h2>
             <RolesSettings
+              key={projectId}
               client={client}
               projectId={projectId}
               revision={revision}
             />
           </section>
-        ) : (
-          <div>
-            <section
-              id="preferences"
-              tabIndex={-1}
-              aria-labelledby="preferences-title"
-            >
-              <h2 id="preferences-title">偏好</h2>
-              {resource.error && (
-                <p role="alert">
-                  {resource.error}
-                  <button type="button" onClick={resource.reload}>
-                    重试
-                  </button>
-                </p>
-              )}
-              {!resource.data && !resource.error && (
-                <p role="status">正在加载偏好…</p>
-              )}
-              {resource.data && (
-                <PreferenceForm
-                  key={String(resource.data.auto_merge_after_minutes)}
-                  initial={resource.data}
+        )}
+        {tab === "templates" && (
+          <TemplateSettings
+            key={projectId}
+            client={client}
+            projectId={projectId}
+            revision={revision}
+          />
+        )}
+        <div hidden={tab === "templates" || tab === "roles"}>
+          <section
+            hidden={tab !== "preferences"}
+            id="preferences"
+            tabIndex={-1}
+            aria-labelledby="preferences-title"
+          >
+            <h2 id="preferences-title">偏好</h2>
+            {resource.error && (
+              <p role="alert">
+                {resource.error}
+                <button type="button" onClick={resource.reload}>
+                  重试
+                </button>
+              </p>
+            )}
+            {!resource.data && !resource.error && (
+              <p role="status">正在加载偏好…</p>
+            )}
+            {resource.data && (
+              <PreferenceForm
+                key={String(resource.data.auto_merge_after_minutes)}
+                initial={resource.data}
+                client={client}
+                projectId={projectId}
+                saved={resource.reload}
+              />
+            )}
+          </section>
+          <section
+            hidden={tab !== "authorization"}
+            id="authorization"
+            tabIndex={-1}
+            aria-labelledby="authorization-title"
+          >
+            <h2 id="authorization-title">授权</h2>
+            <p>
+              PM 代拍时必须写明理由并保留授权依据。没有活跃 PM Ops
+              时交给你；合并确认沿用原有设置。
+            </p>
+            {resource.data &&
+              Object.entries(categoryLabels).map(([category, label]) => (
+                <DelegationSetting
+                  key={`${category}:${resource.data?.decision_delegation?.[category]}`}
+                  category={category}
+                  label={label}
+                  enabled={
+                    resource.data?.decision_delegation?.[category] ??
+                    defaultDelegation[category] ??
+                    false
+                  }
                   client={client}
                   projectId={projectId}
                   saved={resource.reload}
                 />
-              )}
-            </section>
-            <section
-              id="authorization"
-              tabIndex={-1}
-              aria-labelledby="authorization-title"
-            >
-              <h2 id="authorization-title">授权</h2>
-              <p>
-                PM 代拍时必须写明理由并保留授权依据。没有活跃 PM Ops
-                时交给你；合并确认沿用原有设置。
-              </p>
-              {resource.data &&
-                Object.entries(categoryLabels).map(([category, label]) => (
-                  <DelegationSetting
-                    key={`${category}:${resource.data?.decision_delegation?.[category]}`}
-                    category={category}
-                    label={label}
-                    enabled={
-                      resource.data?.decision_delegation?.[category] ??
-                      defaultDelegation[category] ??
-                      false
-                    }
-                    client={client}
-                    projectId={projectId}
-                    saved={resource.reload}
-                  />
-                ))}
-            </section>
-          </div>
-        )}
+              ))}
+          </section>
+        </div>
       </div>
     </>
   );

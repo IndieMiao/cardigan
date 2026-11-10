@@ -55,6 +55,8 @@ import {
   roleDetail,
   roleHistory,
   roleList,
+  templateHistory,
+  templateList,
   waitingOnAgent,
 } from "./read.js";
 import { serveStatic } from "./static.js";
@@ -491,6 +493,24 @@ async function serveProjectRoute(
   }
 
   const state = projectState(store, project_id);
+  if (rest === "/card-templates") {
+    sendJson(res, 200, { templates: templateList(state) });
+    return;
+  }
+  const template = /^\/card-templates\/([a-z0-9-]+)(\/history)?$/.exec(rest);
+  if (template) {
+    const history = templateHistory(state, template[1] ?? "");
+    if (!history.length)
+      throw new HttpRejection(404, "not_found", "模板不存在");
+    sendJson(
+      res,
+      200,
+      template[2]
+        ? { versions: history }
+        : { template: history[0], previous: history[1] ?? null },
+    );
+    return;
+  }
   if (rest === "/preferences") {
     // This baseline has no merge-gate executor/configuration yet.
     sendJson(res, 200, {
