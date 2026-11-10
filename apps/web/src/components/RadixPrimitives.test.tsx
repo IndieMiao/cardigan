@@ -359,5 +359,54 @@ test("radix primitive styles use shared tokens, focus styles and the dark theme"
   expect(close).toContain("background: var(--surface);");
   expect(close).toContain("color: var(--text);");
   expect(layer(".tooltip-content")).toContain("z-index: 120;");
+  const tooltip = layer(".tooltip-content");
+  expect(tooltip).toContain("background: var(--tooltip-bg);");
+  expect(tooltip).toContain("color: var(--tooltip-text);");
+  expect(tooltip).toContain("border: 1px solid var(--tooltip-border);");
+  expect(tooltip).toContain("box-shadow:");
+  expect(tooltip).toContain(
+    "max-width: min(280px, calc(100vw - var(--gap) * 2));",
+  );
+  expect(layer(".tooltip-arrow")).toContain("fill: var(--tooltip-bg);");
   expect(css).toContain('body[data-lightbox="open"] .drawer-overlay {');
+});
+
+test("tooltip colors remain dark with AA text contrast and a visible edge in both themes", () => {
+  const css = readFileSync(
+    new NodeURL("../styles.css", import.meta.url),
+    "utf8",
+  );
+  const themes = [...css.matchAll(/:root\s*\{([^}]+)\}/g)];
+  expect(themes).toHaveLength(2);
+  for (const theme of themes) {
+    const luminance = (token: string) => {
+      const hex = new RegExp(`--${token}: #([0-9a-f]{6});`).exec(
+        theme[1] ?? "",
+      )?.[1];
+      expect(hex).toBeDefined();
+      const channels = [0, 2, 4].map((offset) => {
+        const value =
+          Number.parseInt(hex?.slice(offset, offset + 2) ?? "", 16) / 255;
+        return value <= 0.04045
+          ? value / 12.92
+          : ((value + 0.055) / 1.055) ** 2.4;
+      });
+      return channels.reduce(
+        (sum, channel, index) =>
+          sum + channel * ([0.2126, 0.7152, 0.0722][index] ?? 0),
+        0,
+      );
+    };
+    const background = luminance("tooltip-bg");
+    const text = luminance("tooltip-text");
+    const border = luminance("tooltip-border");
+    expect(background).toBeLessThan(0.1);
+    expect(text).toBeGreaterThan(0.8);
+    expect((text + 0.05) / (background + 0.05)).toBeGreaterThanOrEqual(4.5);
+    expect((border + 0.05) / (background + 0.05)).toBeGreaterThanOrEqual(3);
+    if (theme[1]?.includes("color-scheme: dark"))
+      expect((border + 0.05) / (luminance("bg") + 0.05)).toBeGreaterThanOrEqual(
+        3,
+      );
+  }
 });

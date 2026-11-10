@@ -295,6 +295,7 @@ function MergeConfirmation({
   const [reason, setReason] = useState("");
   const action = useAction(done);
   const merge = q.merge_confirmation;
+  const confirmed = q.status === "resolved";
   const cardId = q.card_id ?? q.related_cards[0]?.id ?? null;
   const decide = (option: "merge" | "hold") =>
     action.run([projectId, q.id, "resolve", option, quote], (key) =>
@@ -381,29 +382,37 @@ function MergeConfirmation({
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          void decide("merge");
+          if (!confirmed) void decide("merge");
         }}
       >
-        <label>
-          补充说明（可选，会作为你的原话记录）
-          <textarea
-            aria-label={`${q.id} 原话或补充说明`}
-            value={quote}
-            onChange={(e) => setQuote(e.target.value)}
-          />
-        </label>
+        {confirmed ? (
+          <p className="hint">{q.why}</p>
+        ) : (
+          <label>
+            补充说明（可选，会作为你的原话记录）
+            <textarea
+              aria-label={`${q.id} 原话或补充说明`}
+              value={quote}
+              onChange={(e) => setQuote(e.target.value)}
+            />
+          </label>
+        )}
         <div className="action-row">
-          <button type="submit" disabled={action.busy}>
-            确认合并
-          </button>
-          <button
-            type="button"
-            className="quiet"
-            disabled={action.busy}
-            onClick={() => void decide("hold")}
-          >
-            暂不合并
-          </button>
+          {!confirmed && (
+            <button type="submit" disabled={action.busy}>
+              确认合并
+            </button>
+          )}
+          {!confirmed && (
+            <button
+              type="button"
+              className="quiet"
+              disabled={action.busy}
+              onClick={() => void decide("hold")}
+            >
+              暂不合并
+            </button>
+          )}
           <button
             type="button"
             className="quiet"
@@ -474,6 +483,18 @@ function HumanAction({
 }: Props & { item: NeedsAction; done: () => void; elapsed: number }) {
   const [text, setText] = useState("");
   const action = useAction(done);
+  if (item.completion_notice !== undefined)
+    return (
+      <article className="needs-item" aria-label={`执行结果待接手 ${item.id}`}>
+        <header className="needs-meta">
+          <IdTag id={item.id} label="已完成" />
+          {item.card_id && <CardLink projectId={projectId} id={item.card_id} />}
+        </header>
+        <h3 className="needs-question">{item.why}</h3>
+        <Markdown body={item.completion_notice} />
+        <p>请恢复发起方或启动项目的 PM Ops，继续处理这项执行结果。</p>
+      </article>
+    );
   return (
     <article className="needs-item" aria-label={`执行 ${item.id}`}>
       <header className="needs-meta">

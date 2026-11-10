@@ -1,6 +1,7 @@
-import type { Actor, Event, MergeCheckView } from "../entities.js";
+import type { Actor, Decision, Event, MergeCheckView } from "../entities.js";
 import type { CardId, DeliveryId } from "../ids.js";
 import {
+  attempt,
   type CommandPorts,
   type CommandState,
   command,
@@ -8,6 +9,34 @@ import {
   unwrap,
 } from "./core.js";
 import { mergeContext, prepareMergePlan } from "./merge.js";
+
+/** Only the current failed completion can withdraw an existing merge approval. */
+export function failedConfirmedMergeCheck(
+  state: CommandState,
+  decision: Decision,
+): MergeCheckView | undefined {
+  if (
+    decision.trigger !== "merge_confirmation" ||
+    decision.status !== "resolved" ||
+    decision.resolution?.option !== "merge" ||
+    !decision.card_id ||
+    decision.kind !== "approve" ||
+    !("delivery_id" in decision.target)
+  )
+    return undefined;
+  const card_id = decision.card_id;
+  const context = attempt(() => mergeContext(state, card_id));
+  if (!context.ok || context.value.target.id !== decision.target.delivery_id)
+    return undefined;
+  const check = latestMergeCheck(
+    state.events,
+    decision.card_id,
+    context.value.target.id,
+  );
+  return check && ["failed", "timed_out"].includes(check.status)
+    ? check
+    : undefined;
+}
 
 const types = [
   "merge_check_queued",

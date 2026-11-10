@@ -13,6 +13,7 @@ import {
   cardTemplate,
   employeeNameKey,
   isCompletionVerifier,
+  requesterNotificationRecipient,
 } from "@cardigan/domain";
 import {
   payloadObject,
@@ -795,6 +796,59 @@ function routeDecisionResolved(input: RouteInput, draft: Draft): void {
   }
 }
 
+/** Completion informs the requester and current waiters without clearing blockers. */
+function routeHumanActionCompleted(input: RouteInput, draft: Draft): void {
+  const action = input.snapshot.human_actions.find(
+    (h) => h.id === payloadString(input.event.payload, "human_action_id"),
+  );
+  if (action?.status !== "done") return;
+  const rule = "6.4/human action completed";
+  const summary = `${action.card_id ?? "项目"} ${action.key}: 已完成；${action.result?.text ?? entryOf(input)?.body ?? ""}`;
+  const to = requesterNotificationRecipient(
+    action.requested_by,
+    input.snapshot.assignments,
+  );
+  if (to)
+    note(
+      input,
+      draft,
+      to,
+      to.kind === "needs_you" ? "needs_you" : "human_action",
+      rule,
+      summary,
+    );
+
+  // Keep the decision-resolved resumption path, including its unowned-item fallback.
+  const resumed = payloadStrings(input.event.payload, "resume_work_items");
+  for (const id of resumed)
+    noteAssignment(
+      input,
+      draft,
+      itemOf(input, id as WorkItemId),
+      "human_action",
+      rule,
+      summary,
+    );
+  for (const item of input.snapshot.work_items) {
+    if (item.card_id !== action.card_id) continue;
+    const waiting =
+      ["blocked", "waiting_decision", "delivered"].includes(item.status) ||
+      (item.kind === "verify" &&
+        ["todo", "ready", "in_progress"].includes(item.status));
+    const owner = assignmentOf(input, item.assignment_id);
+    if (waiting && owner?.scope === "work_item" && isActive(owner))
+      note(
+        input,
+        draft,
+        recipient.assignment(owner.id),
+        "human_action",
+        rule,
+        summary,
+        { work_item_id: item.id },
+      );
+  }
+}
+
 /**
  * Appendix A step 2 / M5.S S6: an Assignment created through MCP gets its first
  * Run from the host, so the new Assignment is woken right away and the
@@ -1002,6 +1056,9 @@ export function routeEvent(input: RouteInput): RouteResult {
       break;
     case "human_action_requested":
       routeHumanAction(input, draft);
+      break;
+    case "human_action_completed":
+      routeHumanActionCompleted(input, draft);
       break;
     case "merge_conflicted":
     case "merge_changes_requested": {

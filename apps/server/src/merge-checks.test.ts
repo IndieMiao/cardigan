@@ -347,3 +347,36 @@ test("invalid config never falls back, and verified noop still requires confirma
   expect(c.git.publish).not.toHaveBeenCalled();
   expect(prepareMergePlan(f.state(), scenario.card.id).ok).toBe(false);
 });
+
+test.each(["failed", "timed_out"] as const)(
+  "returning a confirmed %s completion prevents later merge-loop publication",
+  async (status) => {
+    const { f, scenario, check, completion } = await fixture();
+    const c = controller(f);
+    const decision = required(mergeConfirmation(f, scenario.card.id));
+    f.decide(decision, "merge");
+    c.run.mockImplementationOnce(async (input) => {
+      input.onReady?.();
+      return {
+        status,
+        checks: [{ name: "test", status, exit_code: 1 }],
+        cleanup_errors: [],
+      };
+    });
+    await c.gate.tick([f.project_id]);
+    expect(check()?.status).toBe(status);
+    expect(c.git.publish).not.toHaveBeenCalled();
+    f.decide(decision, "request_changes");
+    await c.gate.tick([f.project_id]);
+    expect(c.run).toHaveBeenCalledTimes(1);
+    expect(c.git.publish).not.toHaveBeenCalled();
+    expect(c.errors).not.toHaveBeenCalled();
+    expect(f.card().status).toBe("in_progress");
+    expect(
+      f.state().deliveries.find((d) => d.id === completion.id)?.status,
+    ).toBe("superseded");
+    expect(f.state().decisions.find((q) => q.id === decision.id)?.status).toBe(
+      "superseded",
+    );
+  },
+);

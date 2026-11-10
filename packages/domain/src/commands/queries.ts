@@ -10,9 +10,10 @@ import type {
   WorkItem,
 } from "../entities.js";
 import type { CardId } from "../ids.js";
+import { requesterNotificationRecipient } from "../notification.js";
 import type { Clock } from "../ports.js";
 import { type CommandDraft, type CommandState, command } from "./core.js";
-import { latestMergeCheck } from "./merge-check.js";
+import { failedConfirmedMergeCheck, latestMergeCheck } from "./merge-check.js";
 import { resolveCardTemplate } from "./templates.js";
 
 function affects(d: CommandDraft, q: Decision, id: CardId) {
@@ -268,7 +269,9 @@ export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
         .list("decisions")
         .filter(
           (q) =>
-            q.decider === "human" && ["open", "provisional"].includes(q.status),
+            q.decider === "human" &&
+            (["open", "provisional"].includes(q.status) ||
+              failedConfirmedMergeCheck(state, q)),
         )
         .map((q) => {
           // Project decisions have no card timeline; their request event is the creation fact.
@@ -291,7 +294,17 @@ export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
             opened && now ? Date.parse(now) - Date.parse(opened) : Number.NaN;
           return {
             ...q,
-            why: why(q.question),
+            ...(q.status === "resolved"
+              ? {
+                  options: q.options.filter((o) => o.key === "request_changes"),
+                  recommended: "request_changes",
+                }
+              : {}),
+            why: why(
+              q.status === "resolved"
+                ? "合并检查失败或超时，可以退回修改"
+                : q.question,
+            ),
             opened_at: opened ?? null,
             waited_ms: Number.isFinite(elapsed) ? Math.max(0, elapsed) : null,
             related_cards: relatedCards(d.list("cards"), q),
@@ -305,8 +318,30 @@ export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
         }),
       human_actions: d
         .list("human_actions")
-        .filter((h) => h.status === "open")
-        .map((h) => ({ ...h, why: why(h.why_human) })),
+        .filter(
+          (h) =>
+            h.status === "open" ||
+            (h.status === "done" &&
+              requesterNotificationRecipient(h.requested_by, state.assignments)
+                ?.kind === "needs_you" &&
+              (!h.card_id ||
+                state.cards.some(
+                  (c) =>
+                    c.id === h.card_id &&
+                    !["done", "cancelled"].includes(c.status),
+                ))),
+        )
+        .map((h) => ({
+          ...h,
+          why: why(
+            h.status === "done"
+              ? "已完成，但发起方不可用且无活跃 PM Ops 接手"
+              : h.why_human,
+          ),
+          ...(h.status === "done"
+            ? { completion_notice: h.result?.text ?? "" }
+            : {}),
+        })),
     };
   });
 }
