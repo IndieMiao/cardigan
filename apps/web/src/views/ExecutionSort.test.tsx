@@ -111,7 +111,7 @@ test("C-73: newest activity first by default, running and queued work not pinned
   expect(header().getAttribute("aria-sort")).toBe("descending");
   // The queued Run shows its queue time as the activity time.
   const queuedRow = screen
-    .getByRole("button", { name: "展开 A-4 详情" })
+    .getByRole("button", { name: "查看 A-4 详情" })
     .closest("tr");
   expect(within(queuedRow as HTMLElement).queryByText("尚无记录")).toBeNull();
 });

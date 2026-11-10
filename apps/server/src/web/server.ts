@@ -47,6 +47,7 @@ import {
   type ActivityQuery,
   activity,
   type CardFilter,
+  executionRunPage,
   executionView,
   InvalidQuery,
   needsMe,
@@ -594,6 +595,33 @@ async function serveProjectRoute(
       200,
       executionView(state, now, machines, readRunQueue(store)),
     );
+    return;
+  }
+
+  const runPage = /^\/execution\/assignments\/([^/]+)\/runs$/u.exec(rest);
+  if (runPage) {
+    let assignment_id: string;
+    try {
+      assignment_id = decodeURIComponent(runPage[1] ?? "");
+    } catch {
+      throw new HttpRejection(404, "not_found", "Assignment 不存在");
+    }
+    let page: ReturnType<typeof executionRunPage>;
+    try {
+      page = executionRunPage(
+        state,
+        assignment_id,
+        url.searchParams.get("before") ?? undefined,
+        readRunQueue(store),
+      );
+    } catch (error) {
+      if (error instanceof InvalidQuery)
+        throw new HttpRejection(400, "validation_failed", error.message);
+      throw error;
+    }
+    if (page === undefined)
+      throw new HttpRejection(404, "not_found", "Assignment 不存在");
+    sendJson(res, 200, { project_id, ...page });
     return;
   }
 

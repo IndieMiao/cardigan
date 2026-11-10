@@ -175,6 +175,22 @@ export function fakeClient(
       recent_deliveries: [],
     }),
     execution: async () => ({ assignments: [], runs: [], machines: [] }),
+    // Pages the overridden execution view's Runs like the server does, so a
+    // test that only fakes `execution` still sees the drawer's Run history.
+    executionRuns: async (projectId, assignmentId, before) => {
+      const all = (
+        overrides.execution ? (await overrides.execution(projectId)).runs : []
+      ).filter((run) => run.assignment_id === assignmentId);
+      const start =
+        before === undefined ? 0 : all.findIndex((r) => r.id === before) + 1;
+      const runs = all.slice(start, start + 10);
+      return {
+        runs,
+        total: all.length,
+        next_cursor:
+          start + runs.length < all.length ? (runs.at(-1)?.id ?? null) : null,
+      };
+    },
     preferences: async () => ({
       auto_merge_after_minutes: null,
       merge_gate_enabled: false,

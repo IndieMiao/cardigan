@@ -476,7 +476,7 @@ test("§8.5: the execution view offers copyable commands only and hides start wh
     target: { value: "all" },
   });
   const toggle = await screen.findByRole("button", {
-    name: "展开 A-1 详情",
+    name: "查看 A-1 详情",
   });
   expect(toggle.closest("tr")?.textContent).toContain("失联");
   fireEvent.click(toggle);

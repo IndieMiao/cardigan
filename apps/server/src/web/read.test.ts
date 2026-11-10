@@ -347,6 +347,72 @@ test("the execution view shows a queued Run over the older finished one", async 
   }
 });
 
+test("C-75: the execution drawer pages one Assignment's Run history, newest first", async () => {
+  const { harness, cookie } = await seeded();
+  try {
+    harness.store.uow.run((tx) => {
+      for (let n = 2; n <= 23; n += 1)
+        tx.runs.put(project_id, {
+          id: `R-${n}` as never,
+          assignment_id: "A-1" as never,
+          trigger_event_id: `evt-${n}` as never,
+          kind: "followup",
+          status: "completed",
+          role_version: 1,
+          model: "fixture-model",
+          agent_cli_version: "1.0.0",
+          outcome: "completed",
+          summary: `run ${n}`,
+        });
+    });
+    const base = `/api/projects/${project_id}/execution/assignments/A-1/runs`;
+    const first = await call(harness.port, base, { cookie });
+    expect(first.status).toBe(200);
+    const firstBody = first.json as ReadBody;
+    expect(firstBody.total).toBe(23);
+    // R-10 sorts after R-9: ids compare by number, not as strings.
+    expect(firstBody.runs.map((run: { id: string }) => run.id)).toEqual(
+      Array.from({ length: 10 }, (_, i) => `R-${23 - i}`),
+    );
+    expect(firstBody.next_cursor).toBe("R-14");
+
+    const second = (await call(harness.port, `${base}?before=R-14`, { cookie }))
+      .json as ReadBody;
+    expect(second.runs.map((run: { id: string }) => run.id)).toEqual(
+      Array.from({ length: 10 }, (_, i) => `R-${13 - i}`),
+    );
+    expect(second.next_cursor).toBe("R-4");
+
+    const last = (await call(harness.port, `${base}?before=R-4`, { cookie }))
+      .json as ReadBody;
+    expect(last.runs.map((run: { id: string }) => run.id)).toEqual([
+      "R-3",
+      "R-2",
+      "R-1",
+    ]);
+    expect(last.next_cursor).toBeNull();
+
+    expect(
+      (await call(harness.port, `${base}?before=R-999`, { cookie })).status,
+    ).toBe(400);
+    expect(
+      (
+        await call(
+          harness.port,
+          `/api/projects/${project_id}/execution/assignments/A-404/runs`,
+          { cookie },
+        )
+      ).status,
+    ).toBe(404);
+    expect(
+      (await call(harness.port, base)).status,
+      "the page needs a session",
+    ).toBe(401);
+  } finally {
+    await harness.close();
+  }
+});
+
 test("项目动态 filters by card, role and type and pages backwards", async () => {
   const { harness, cookie } = await seeded();
   try {

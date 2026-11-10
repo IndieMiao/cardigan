@@ -1088,6 +1088,23 @@ export function projectSnapshotView(state: CommandState, now: string) {
   };
 }
 
+/** When each Run was queued: its run_queued event, else its trigger event. */
+function runQueuedAt(state: CommandState) {
+  const queuedAt = new Map<string, string>();
+  const eventAt = new Map<string, string>();
+  for (const event of state.events) {
+    eventAt.set(event.id, event.created_at);
+    if (event.type !== "run_queued") continue;
+    const runId = (event.payload as { readonly run_id?: unknown }).run_id;
+    if (typeof runId === "string" && !queuedAt.has(runId))
+      queuedAt.set(runId, event.created_at);
+  }
+  return (run: Run) => {
+    const at = queuedAt.get(run.id) ?? eventAt.get(run.trigger_event_id);
+    return at === undefined ? {} : { queued_at: at };
+  };
+}
+
 /** §8.5 执行视图: assignments with their newest Run, worktree, machine, cursor. */
 export function executionView(
   state: CommandState,
@@ -1108,19 +1125,7 @@ export function executionView(
   // and dispatch recovery create the queued Run in the same command that
   // emits its trigger event, without a run_queued event, so that trigger's
   // time is when the Run was queued.
-  const queuedAt = new Map<string, string>();
-  const eventAt = new Map<string, string>();
-  for (const event of state.events) {
-    eventAt.set(event.id, event.created_at);
-    if (event.type !== "run_queued") continue;
-    const runId = (event.payload as { readonly run_id?: unknown }).run_id;
-    if (typeof runId === "string" && !queuedAt.has(runId))
-      queuedAt.set(runId, event.created_at);
-  }
-  const withQueuedAt = (run: Run) => {
-    const at = queuedAt.get(run.id) ?? eventAt.get(run.trigger_event_id);
-    return at === undefined ? {} : { queued_at: at };
-  };
+  const withQueuedAt = runQueuedAt(state);
   return {
     project_id: state.project_id,
     generated_at: now,
@@ -1193,6 +1198,50 @@ export function executionView(
           ...(waiting ? { queue_ahead: waiting.ahead } : {}),
         };
       }),
+  };
+}
+
+/** C-75: page size of the execution drawer's Run history. */
+export const EXECUTION_RUN_PAGE = 10;
+
+/**
+ * C-75: one page of an Assignment's Run history for the execution drawer,
+ * newest first. `before` is the id of the last Run of the previous page.
+ * Returns `undefined` when the Assignment does not exist.
+ */
+export function executionRunPage(
+  state: CommandState,
+  assignment_id: string,
+  before?: string,
+  queue: readonly RunQueuePosition[] = [],
+) {
+  if (!state.assignments.some((assignment) => assignment.id === assignment_id))
+    return undefined;
+  const all = [...state.runs]
+    .filter((run) => run.assignment_id === assignment_id)
+    .sort(byId)
+    .reverse();
+  const anchor =
+    before === undefined ? -1 : all.findIndex((run) => run.id === before);
+  if (before !== undefined && anchor < 0)
+    throw new InvalidQuery("Run 历史分页游标无效，请刷新后重试");
+  const rest = all.slice(anchor + 1);
+  const page = rest.slice(0, EXECUTION_RUN_PAGE);
+  const queuedAt = runQueuedAt(state);
+  return {
+    assignment_id,
+    total: all.length,
+    runs: page.map((run) => {
+      const waiting = queue.find(
+        (r) => r.project_id === state.project_id && r.run_id === run.id,
+      );
+      return {
+        ...run,
+        ...queuedAt(run),
+        ...(waiting ? { queue_ahead: waiting.ahead } : {}),
+      };
+    }),
+    next_cursor: rest.length > page.length ? (page.at(-1)?.id ?? null) : null,
   };
 }
 
