@@ -69,6 +69,7 @@ export interface RoleReference {
   readonly role_version: number;
   readonly allowed_tools: readonly ToolName[];
   readonly capabilities: readonly string[];
+  /** Missing on legacy versions means active. Only the latest version gates new assignments. */
   readonly status?: "active" | "inactive";
 }
 // Constructed by authentication, not from command parameters.

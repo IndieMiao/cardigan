@@ -155,7 +155,7 @@ function roleFile(name: string, worktree: string, tools: string[]): string {
     [
       `role_id: ${name}`,
       `display_name: ${name}`,
-      "kind: work",
+      `kind: ${name === "pm" ? "standing" : name === "coder" ? "produce" : "verify"}`,
       `core_prompt: |`,
       `  You are the ${name}.`,
       "harness: pi",

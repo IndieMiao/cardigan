@@ -48,6 +48,7 @@ export {
   getRoleVersion,
   listRoleVersions,
   nextRoleVersion,
+  persistRoleEffect,
   type RoleDocument,
   RoleVersionError,
   type RoleVersionSummary,

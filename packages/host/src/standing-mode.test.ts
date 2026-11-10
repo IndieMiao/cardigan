@@ -164,20 +164,23 @@ test("the transaction issuer keeps the office scope intact for the office", () =
   expect(issued.record.allowed_tools).toEqual([...tools]);
 });
 
-test("a work-item Assignment keeps the caller's tool list", () => {
-  const work = standing({
-    id: "A-2" as never,
-    scope: "work_item",
-    role_id: "coder",
-    work_item_id: "W-1" as never,
-    standing_mode: undefined,
-  });
-  store.uow.run((tx) => tx.assignments.put(project, work));
-  const issued = store.uow.run((tx) =>
-    issueTokenInTransaction(tx, project, work.id, {
-      role_version: 1,
-      allowed_tools: [...tools],
-    }),
-  );
-  expect(issued.record.allowed_tools).toEqual([...tools]);
-});
+test.each(["coder", "pm"])(
+  "a work-item %s Assignment cannot receive the Office-only tool",
+  (role_id) => {
+    const work = standing({
+      id: "A-2" as never,
+      scope: "work_item",
+      role_id,
+      work_item_id: "W-1" as never,
+      standing_mode: undefined,
+    });
+    store.uow.run((tx) => tx.assignments.put(project, work));
+    const issued = store.uow.run((tx) =>
+      issueTokenInTransaction(tx, project, work.id, {
+        role_version: 1,
+        allowed_tools: [...tools],
+      }),
+    );
+    expect(issued.record.allowed_tools).toEqual(["whoami", "create_card"]);
+  },
+);

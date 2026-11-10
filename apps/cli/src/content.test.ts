@@ -106,7 +106,7 @@ test.each([false, true])(
 test.each([false, true])(
   "CLI body mentions resolve and route all four target types (text file: %s)",
   async (fromFile) => {
-    expect(await run(["role", "add", project, "coder"])).toBe(0);
+    // createCard already registered the template roles in beforeEach.
     expect(
       await run([
         "employee",

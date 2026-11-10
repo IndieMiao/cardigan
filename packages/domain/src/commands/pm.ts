@@ -1,5 +1,6 @@
 import type { Actor, Assignment, Card, WorkItem } from "../entities.js";
 import type { WorkItemId } from "../ids.js";
+import { isRoleActive } from "../role.js";
 import { builtinCardTemplates, latestCardTemplate } from "../templates.js";
 import { DEFAULT_MAX_REVIEW_ROUNDS, transition } from "../transitions.js";
 import {
@@ -576,6 +577,11 @@ export function assign(
       checkEmployeeSeparation(d, item, current.employee_id);
       return current;
     }
+    ensure(
+      isRoleActive(state.roles, p.role_id),
+      "validation_failed",
+      "停用的角色不能被新指派",
+    );
     const card = d.card(item.card_id);
     ensure(
       card.status !== "done" && card.status !== "cancelled",

@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { corePromptFor } from "@cardigan/roles";
 import { getRoleVersion, listRoleVersions, Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { main } from "./index.js";
@@ -234,4 +235,211 @@ test("a run pinned to an old version still resolves that version", async () => {
   } finally {
     reopened.close();
   }
+});
+
+test("role CLI copies defaults and project versions, filters inactive roles and rolls back content", async () => {
+  expect(
+    await run([
+      "role",
+      "copy",
+      "coder",
+      "builder",
+      "--from-default",
+      "--harness",
+      "codex",
+      "--launch-profile",
+      "codex-agent",
+    ]),
+  ).toBe(0);
+  expect(await run(["role", "show", "builder"])).toBe(0);
+  expect(JSON.parse(printed())).toMatchObject({
+    kind: "produce",
+    version: 1,
+    status: "active",
+    instructions: expect.stringContaining("角色：coder"),
+  });
+  expect(await run(["role", "deactivate", "builder"])).toBe(0);
+  expect(await run(["role", "list"])).toBe(0);
+  expect(printed()).not.toContain("builder");
+  expect(await run(["role", "list", "--all"])).toBe(0);
+  expect(printed()).toContain("已停用");
+  expect(await run(["role", "activate", "builder"])).toBe(0);
+  expect(await run(["role", "rollback", "builder", "--version", "1"])).toBe(0);
+  expect(printed()).toContain("builder v4");
+  expect(await run(["role", "show", "builder", "--history"])).toBe(0);
+  expect(
+    JSON.parse(printed()).map((role: { version: number }) => role.version),
+  ).toEqual([1, 2, 3, 4]);
+  expect(await run(["project", "create", "destination"])).toBe(0);
+  expect(
+    await run([
+      "role",
+      "copy",
+      "builder",
+      "copied",
+      "--from-project",
+      "p-roles",
+      "--project",
+      "destination",
+      "--version",
+      "1",
+      "--name",
+      "Copied builder",
+    ]),
+  ).toBe(0);
+  expect(
+    await run(["role", "show", "copied", "--project", "destination"]),
+  ).toBe(0);
+  expect(JSON.parse(printed())).toMatchObject({
+    version: 1,
+    display_name: "Copied builder",
+    kind: "produce",
+    instructions: expect.any(String),
+  });
+});
+
+test("instructions-only YAML and explicit legacy conversion use the same domain writes", async () => {
+  writeFileSync(
+    roleFile,
+    ROLE_YAML.replace(
+      "core_prompt: |\n  实现并交付。",
+      "instructions: 角色说明",
+    ),
+  );
+  expect(await run(["role", "add", "--file", roleFile])).toBe(0);
+  expect(await run(["role", "show", "coder"])).toBe(0);
+  expect(JSON.parse(printed())).toMatchObject({
+    instructions: "角色说明",
+    kind: "produce",
+    core_prompt: "",
+  });
+  writeFileSync(
+    roleFile,
+    ROLE_YAML.replace("role_id: coder", "role_id: legacy"),
+  );
+  expect(await run(["role", "add", "--file", roleFile])).toBe(0);
+  expect(await run(["role", "update", "legacy", "--convert-legacy"])).toBe(0);
+  expect(errors.join("\n")).toContain("可能与系统");
+  expect(await run(["role", "show", "legacy"])).toBe(0);
+  expect(JSON.parse(printed())).toMatchObject({
+    version: 2,
+    instructions: "实现并交付。\n",
+  });
+});
+
+test("role add/update and copy cannot bypass domain permission or version checks", async () => {
+  writeFileSync(
+    roleFile,
+    ROLE_YAML.replace(
+      "submit_delivery, get_card",
+      "submit_delivery, submit_review",
+    ),
+  );
+  expect(await run(["role", "add", "--file", roleFile])).toBe(2);
+  writeFileSync(roleFile, ROLE_YAML);
+  expect(await run(["role", "add", "--file", roleFile])).toBe(0);
+  writeFileSync(
+    roleFile,
+    ROLE_YAML.replace("submit_delivery, get_card", "record_decision"),
+  );
+  expect(await run(["role", "update", "--file", roleFile])).toBe(2);
+  expect(errors.join("\n")).toContain("record_decision");
+  expect(
+    await run([
+      "role",
+      "copy",
+      "pm",
+      "fake-pm",
+      "--from-default",
+      "--harness",
+      "codex",
+      "--launch-profile",
+      "fixture",
+    ]),
+  ).toBe(2);
+  expect(await run(["role", "add", "p-roles", "other", "--version", "3"])).toBe(
+    2,
+  );
+  expect(await run(["role", "show", "coder", "--history"])).toBe(0);
+  expect(JSON.parse(printed())).toHaveLength(1);
+});
+
+test("deactivation blocks new work and standing assignments but preserves existing ones", async () => {
+  expect(await run(["role", "add", "--file", roleFile])).toBe(0);
+  // Templates now validate their roles at card creation; deactivate afterwards
+  // to exercise assignment policy against an already-existing card.
+  for (const role of ["reviewer", "pm"]) {
+    expect(
+      await run([
+        "role",
+        "copy",
+        role,
+        role,
+        "--from-default",
+        "--harness",
+        "codex",
+        "--launch-profile",
+        "fixture",
+      ]),
+    ).toBe(0);
+  }
+  expect(
+    await run([
+      "card",
+      "create",
+      "--template",
+      "dev",
+      "--title",
+      "Role test",
+      "--goal",
+      "Role test",
+      "--acceptance",
+      "Check roles",
+      "--repo",
+      "fixture/repo",
+    ]),
+  ).toBe(0);
+  expect(await run(["role", "deactivate", "coder"])).toBe(0);
+  expect(await run(["assign", "W-1", "--role", "coder"])).toBe(2);
+  expect(errors.join("\n")).toContain("停用");
+  expect(await run(["role", "activate", "coder"])).toBe(0);
+  expect(await run(["assign", "W-1", "--role", "coder"])).toBe(0);
+  expect(await run(["role", "deactivate", "coder"])).toBe(0);
+  expect(await run(["assign", "W-1", "--role", "coder"])).toBe(0);
+  expect(await run(["pm", "create", "--office"])).toBe(0);
+  expect(await run(["role", "deactivate", "pm"])).toBe(0);
+  expect(await run(["pm", "create", "--office"])).toBe(0);
+  expect(await run(["pm", "create", "--ops"])).toBe(2);
+  expect(errors.join("\n")).toContain("停用");
+});
+
+test("file writes reject pasted system sections; explicit legacy conversion removes them", async () => {
+  const prompt = corePromptFor("coder");
+  const instructionsFile = ROLE_YAML.replace(
+    "core_prompt: |\n  实现并交付。",
+    `instructions: ${JSON.stringify(prompt)}`,
+  );
+  writeFileSync(roleFile, instructionsFile);
+  expect(await run(["role", "add", "--file", roleFile])).toBe(2);
+  expect(errors.join("\n")).toContain("instructions 不得包含");
+  // Old full prompts still save as legacy roles and can be converted explicitly.
+  writeFileSync(
+    roleFile,
+    ROLE_YAML.replace(
+      "core_prompt: |\n  实现并交付。",
+      `core_prompt: ${JSON.stringify(prompt)}`,
+    ),
+  );
+  expect(await run(["role", "add", "--file", roleFile])).toBe(0);
+  writeFileSync(roleFile, instructionsFile);
+  expect(await run(["role", "update", "--file", roleFile])).toBe(2);
+  expect(errors.join("\n")).toContain("instructions 不得包含");
+  expect(await run(["role", "show", "coder", "--history"])).toBe(0);
+  expect(JSON.parse(printed())).toHaveLength(1);
+  expect(await run(["role", "update", "coder", "--convert-legacy"])).toBe(0);
+  expect(await run(["role", "show", "coder"])).toBe(0);
+  const converted = JSON.parse(printed());
+  expect(converted).toMatchObject({ version: 2, core_prompt: prompt });
+  expect(converted.instructions).not.toContain("## 协作规则");
+  expect(converted.instructions).not.toContain("## 协议（每个 Run 都要遵守）");
 });

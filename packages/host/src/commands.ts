@@ -173,7 +173,7 @@ function modeScopedTools(
     assignment.role_id !== "pm" ||
     assignment.standing_mode === undefined
   ) {
-    return allowed_tools;
+    return allowed_tools.filter((tool) => tool !== "record_decision");
   }
   const permitted = standingTools(
     allowed_tools as never,

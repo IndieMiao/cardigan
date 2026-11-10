@@ -1,5 +1,20 @@
+import {
+  type RoleDefinition,
+  type RoleKind,
+  STANDING_ROLE_TOOLS,
+  type ToolName,
+} from "@cardigan/domain";
 import type { AssignmentRoleInput } from "./assignment.js";
 import type { Harness } from "./harness.js";
+import { composeRolePrompt } from "./prompt.js";
+
+export {
+  AGENT_PROTOCOL,
+  type ConvertedRoleInstructions,
+  composeRolePrompt,
+  convertLegacyRole,
+  SHARED_BOUNDARIES,
+} from "./prompt.js";
 
 /**
  * Default role pack (M2.4 / M5.S): `pm`, `coder`, `reviewer`, `designer` and
@@ -9,16 +24,6 @@ import type { Harness } from "./harness.js";
  * §6.3, so the protocol lives in one place here and is appended to each role's
  * specific instructions. Tests assert every line appears in every prompt.
  */
-
-/** §6.3, one entry per rule; each becomes a bullet in every Core Prompt. */
-export const AGENT_PROTOCOL = [
-  "每次 Run 开始时调用 `get_updates`，结束前再调用一次。",
-  "读完后调用 `ack_events`，把游标推进到你读到的最后一个 seq。",
-  "产出必须通过 `submit_delivery` 或 `submit_review` 提交，不能只在终端里说“做完了”。",
-  "需要拍板时调用 `request_decision`，然后调用 `finish_run(outcome=blocked)` 结束本次 Run。",
-  "本次 Run 结束必须调用 `finish_run`，写清 outcome 和 summary。",
-  "空闲时即使没有收到门铃，也可以低频调用 `get_updates` 自查，防止漏铃。",
-] as const;
 
 /** PL.1: verbatim rules from pm-practice-distillation.md §5, one entry per bullet. */
 export const PM_VERIFICATION_RULES = [
@@ -62,14 +67,6 @@ export const PM_OPS_EVENT_RULES = [
   "处理事件之前先用 `get_card` 查当前状态，事件里的信息可能已经过时。",
   "同一交付被驳回两次以上时，先判断原因（需求不清、能力不匹配、环境问题），再决定返工、换人还是升级。",
 ] as const;
-
-const SHARED_BOUNDARIES = [
-  "身份只来自 Token：不要在参数里自称别的 Assignment、角色或作者。",
-  "不要 push，不要修改 Git 凭据，不要在仓库里写 Token、密钥或运行目录里的文件。",
-  "不新建任务计划文件（例如 `docs/plans/` 下的计划）；任务计划由人或 PM 维护，设计改动只更新卡片要求的正文文档。",
-  "只运行卡片或工作项写明范围的测试；未写明范围时只运行改动所在包的测试。全量测试和端到端测试由合并前的主机检查负责。",
-  "拿不准时在时间线里提问或请求拍板，不要自行扩大范围。",
-];
 
 const ROLE_BODIES: Record<
   "pm" | "coder" | "reviewer" | "designer" | "tester",
@@ -216,23 +213,57 @@ export function corePromptFor(
   role: DefaultRoleId,
   display_name?: string,
 ): string {
+  return composeRolePrompt(instructionsFor(role, display_name));
+}
+
+export function instructionsFor(
+  role: DefaultRoleId,
+  display_name?: string,
+): string {
   const header =
     display_name === undefined ? "" : `\n（显示名：${display_name}）`;
-  return [
-    ROLE_BODIES[role],
-    header,
-    "",
-    "## 协作规则",
-    "",
-    ...SHARED_BOUNDARIES.map((line) => `- ${line}`),
-    "",
-    "## 协议（每个 Run 都要遵守）",
-    "",
-    ...AGENT_PROTOCOL.map((line) => `- ${line}`),
-    "",
-  ]
-    .join("\n")
-    .replace(/\n{3,}/g, "\n\n");
+  return [ROLE_BODIES[role], header].join("\n").trimEnd();
+}
+
+/** Default pack definition for initial registration and one-time copies. */
+export function defaultRoleDefinition(
+  role: DefaultRoleId,
+  launch: { readonly harness: Harness; readonly launch_profile_ref: string },
+): RoleDefinition {
+  const kind: RoleKind =
+    role === "pm" ? "standing" : role === "coder" ? "produce" : "verify";
+  const common: readonly ToolName[] = [
+    "whoami",
+    "get_card",
+    "get_updates",
+    "ack_events",
+    "post_comment",
+    "heartbeat",
+    "finish_run",
+    "report_blocker",
+    "request_human_action",
+    "request_decision",
+    "upload_attachment",
+  ];
+  return {
+    role_id: role,
+    display_name: role,
+    kind,
+    instructions: instructionsFor(role),
+    ...launch,
+    abilities: [],
+    required_machine_tags: [],
+    worktree: role === "coder" ? "write" : "readonly",
+    capabilities: [kind === "standing" ? "verify" : kind],
+    allowed_tools:
+      kind === "standing"
+        ? STANDING_ROLE_TOOLS
+        : [...common, kind === "produce" ? "submit_delivery" : "submit_review"],
+  };
+}
+
+export function isDefaultRoleId(id: string): id is DefaultRoleId {
+  return Object.hasOwn(ROLE_BODIES, id);
 }
 
 /** Every default role, ready for `compileAssignmentLaunch`. */
@@ -246,6 +277,7 @@ export function defaultRoles(
     worktree: options[role].worktree,
     allowed_tools: options[role].allowed_tools,
     core_prompt: corePromptFor(role, options[role].display_name),
+    instructions: instructionsFor(role, options[role].display_name),
   }));
 }
 
