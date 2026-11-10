@@ -412,3 +412,28 @@ test("U1 a project with only inactive cards explains its empty snapshot without 
   );
   expect(document.querySelectorAll("h2")).toHaveLength(0);
 });
+
+test("execution includes unprovisioned queued work in the default view and shows its global position", async () => {
+  render(
+    <ExecutionPage
+      projectId="p-1"
+      client={fakeClient({
+        execution: async () => ({
+          machines: [],
+          assignments: [
+            {
+              ...assignment,
+              runtime_ref: null,
+              runtime_state: "not_provisioned",
+              queue_ahead: 2,
+            },
+          ],
+          runs: [{ ...run, queue_ahead: 2 }],
+        }),
+      })}
+    />,
+  );
+  expect(await screen.findByText("排队中（前面还有 2 个）")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "展开 A-1 详情" }));
+  expect(screen.getAllByText("排队中（前面还有 2 个）")).toHaveLength(2);
+});

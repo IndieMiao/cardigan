@@ -247,6 +247,8 @@ export type Assignment = AssignmentFields &
   );
 export type RunOutcome = "completed" | "blocked" | "failed";
 export interface Run {
+  /** Host scheduling metadata; only meaningful while status is queued. */
+  readonly queue_reason?: "concurrency_limit";
   readonly employee_id?: EmployeeId;
   /** Actual launch profile; absent on legacy runs. */
   readonly launch_profile_ref?: string;

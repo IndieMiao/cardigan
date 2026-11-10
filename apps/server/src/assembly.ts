@@ -45,6 +45,7 @@ export interface ControlPlaneOptions {
   readonly runtime: DispatcherOptions["runtime"] &
     RuntimeMonitorOptions["runtime"];
   readonly snapshot: DispatcherOptions["snapshot"];
+  readonly runLimit?: DispatcherOptions["runLimit"];
   readonly startRun: DispatcherOptions["startRun"];
   readonly beforeWake?: DispatcherOptions["beforeWake"];
   readonly standing?: StandingResolver;
@@ -147,6 +148,7 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
     clock,
     standing,
     snapshot: options.snapshot,
+    ...(options.runLimit ? { runLimit: options.runLimit } : {}),
     startRun: options.startRun,
     ...(options.beforeWake ? { beforeWake: options.beforeWake } : {}),
     ...(options.deliveryLeaseMs === undefined

@@ -31,8 +31,8 @@ const runKind = (run: RunView) => kinds[run.kind] ?? "执行";
 const runTime = (run: RunView) => run.finished_at ?? run.started_at;
 const working = (a: ExecutionAssignment) =>
   a.status === "active" &&
-  a.runtime_ref !== null &&
-  !["lost", "unknown"].includes(a.runtime_state);
+  (a.queue_ahead !== undefined ||
+    (a.runtime_ref !== null && !["lost", "unknown"].includes(a.runtime_state)));
 const lost = (a: ExecutionAssignment) =>
   ["lost", "unknown"].includes(a.runtime_state);
 const viewLabel: Readonly<Record<string, string>> = {
@@ -141,7 +141,11 @@ function AssignmentRow({
           {run ? (
             <span className="execution-run">
               <IdTag id={run.id} label={runKind(run)} />
-              <StatusTag status={run.outcome ?? run.status} />
+              {run.queue_ahead !== undefined ? (
+                <span>排队中（前面还有 {run.queue_ahead} 个）</span>
+              ) : (
+                <StatusTag status={run.outcome ?? run.status} />
+              )}
               {runTime(run) && <Time value={runTime(run)} />}
             </span>
           ) : (
@@ -190,7 +194,15 @@ function AssignmentRow({
                         <li key={entry.id}>
                           <div className="execution-run-head">
                             <IdTag id={entry.id} label={runKind(entry)} />
-                            <StatusTag status={entry.outcome ?? entry.status} />
+                            {entry.queue_ahead !== undefined ? (
+                              <span>
+                                排队中（前面还有 {entry.queue_ahead} 个）
+                              </span>
+                            ) : (
+                              <StatusTag
+                                status={entry.outcome ?? entry.status}
+                              />
+                            )}
                             {runTime(entry) && <Time value={runTime(entry)} />}
                           </div>
                           <RunSummary text={entry.summary} />

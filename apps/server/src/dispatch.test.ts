@@ -1,18 +1,39 @@
-import type { Runtime } from "@cardigan/domain";
+import type {
+  Assignment,
+  CommandEffect,
+  CommandPorts,
+  CommandState,
+  ProjectId,
+  Result,
+  Runtime,
+} from "@cardigan/domain";
 import {
   acknowledgeRun,
+  assign,
+  createCard,
   dispatchRun,
+  finishRun,
   postComment,
   queueRun,
 } from "@cardigan/domain";
+import {
+  launchRun,
+  RunCapacityDeferred,
+  readRunQueue,
+  runCapacitySnapshot,
+} from "@cardigan/host";
+import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import {
   PROJECT_EVENT_STREAM,
   Store,
   unfinishedBellAttempts,
 } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { attentionCommand } from "../../cli/src/inbox.js";
 import { dispatchFixture } from "../test-support/dispatch.js";
 import { Dispatcher, type DispatcherOptions } from "./dispatch.js";
+import { readCardList } from "./web/card-state.js";
+import { executionView } from "./web/read.js";
 
 let f: ReturnType<typeof dispatchFixture>,
   target: ReturnType<typeof f.create>,
@@ -345,3 +366,393 @@ test.each(["merge_conflicted", "merge_changes_requested"])(
     });
   },
 );
+
+// P2a-9: real SQLite + fake runtime; never create CPU load for scheduling tests.
+const finish = (owner: Assignment) => {
+  const run = f
+    .state()
+    .runs.find((r) => r.assignment_id === owner.id && r.status === "running");
+  if (!run) throw new Error("Missing running Run");
+  f.apply(
+    (s, a, p) =>
+      finishRun(
+        s,
+        a,
+        { run_id: run.id, outcome: "completed", summary: "done" },
+        p,
+      ),
+    f.actorFor(owner),
+  );
+};
+
+function secondProject() {
+  const project = "second-project" as ProjectId;
+  f.store.createProject({ id: project, name: "Second" });
+  f.store.uow.run((tx) => {
+    for (const role of tx.roles.list(f.project)) tx.roles.put(project, role);
+  });
+  const apply = <T>(
+    command: (s: CommandState, p: CommandPorts) => Result<CommandEffect<T>>,
+  ) =>
+    f.store.uow.run((tx) => {
+      const effect = unwrap(
+        command(loadCommandState(tx, project), { ids: tx.ids, clock: f.clock }),
+      );
+      persistEffect(tx, project, effect);
+      return effect.data;
+    });
+  const actor = { kind: "human" as const, project_id: project };
+  const card = apply((s, p) =>
+    createCard(
+      s,
+      actor,
+      {
+        title: "Other project",
+        goal: "Global FIFO",
+        acceptance_criteria: ["ordered"],
+        source: { kind: "quote", text: "fixture" },
+        repo: "fixture/repo",
+        base_branch: "main",
+      },
+      p,
+    ),
+  );
+  const item = f.store.uow.read((tx) =>
+    tx.work_items
+      .list(project)
+      .find((w) => w.card_id === card.id && w.kind === "produce"),
+  );
+  if (!item) throw new Error("Missing item");
+  const owner = apply((s, p) =>
+    assign(s, actor, { work_item_id: item.id, role_id: "coder" }, p),
+  );
+  const comment = () =>
+    apply((s, p) =>
+      postComment(
+        s,
+        actor,
+        { card_id: card.id, work_item_id: item.id, body: "earlier" },
+        p,
+      ),
+    );
+  return { project, card, item, owner, apply, comment };
+}
+
+test("capacity preserves queued Run identity and notifications, then dispatches after a slot frees", async () => {
+  const busy = f.create();
+  f.session(busy.assignment, false);
+  comment();
+  const dispatcher = new Dispatcher({ ...options, runLimit: () => 1 });
+  await dispatcher.tick();
+  const queued = f.state().runs.find((r) => r.status === "queued");
+  expect(queued).toMatchObject({
+    assignment_id: target.assignment.id,
+    queue_reason: "concurrency_limit",
+  });
+  expect(runtime.wake).not.toHaveBeenCalled();
+  expect(options.startRun).not.toHaveBeenCalled();
+  expect(ownNotes()[0]).toMatchObject({ status: "pending", attempts: 0 });
+  expect(unfinishedBellAttempts(f.store.database, f.project)).toEqual([]);
+  await dispatcher.tick();
+  expect(f.state().runs.filter((r) => r.status === "queued")).toEqual([queued]);
+  finish(busy.assignment);
+  await dispatcher.tick();
+  expect(f.state().runs.find((r) => r.id === queued?.id)).toMatchObject({
+    status: "dispatched",
+  });
+  expect(readRunQueue(f.store)).toEqual([]);
+  expect(runtime.wake).toHaveBeenCalledOnce();
+});
+
+test("cross-project event FIFO survives full ticks, changed limits, restart, and projects with identical IDs", async () => {
+  const other = secondProject();
+  // IDs are project-scoped; event creation time is the only scheduling priority.
+  expect(other.owner.id).toBe(target.assignment.id);
+  other.comment();
+  f.advance(1000);
+  comment();
+  const busy = f.create();
+  f.session(busy.assignment, false);
+  let limit = 1;
+  const startRun = vi.fn(
+    async ({
+      project,
+      run,
+      assignment,
+    }: Parameters<DispatcherOptions["startRun"]>[0]) => {
+      f.store.uow.run((tx) =>
+        persistEffect(
+          tx,
+          project,
+          unwrap(
+            dispatchRun(
+              loadCommandState(tx, project),
+              { kind: "system", project_id: project },
+              { run_id: run.id, runtime_ref: f.refFor(assignment) },
+              { ids: tx.ids, clock: f.clock },
+            ),
+          ),
+        ),
+      );
+    },
+  );
+  const settings = { ...options, startRun, runLimit: () => limit };
+  await new Dispatcher(settings).tick();
+  const before = readRunQueue(f.store);
+  expect(before.map((r) => [r.project_id, r.ahead])).toEqual([
+    [other.project, 0],
+    [f.project, 1],
+  ]);
+  const rows = readCardList(f.store, f.project);
+  expect(
+    rows.find((c) => c.id === target.card.id)?.queued_runs?.[0]?.ahead,
+  ).toBe(1);
+  const output: string[] = [];
+  expect(
+    attentionCommand(["--project", f.project], {
+      env: { CARDIGAN_DATA_DIR: f.dataDir },
+      cwd: f.dataDir,
+      platform: "linux",
+      stdout: (line) => output.push(line),
+      stderr: (line) => output.push(line),
+      signals: { on() {}, off() {} },
+      spawnInherit: () => {
+        throw new Error("read-only command");
+      },
+      captureCommand: async () => {
+        throw new Error("read-only command");
+      },
+    }),
+  ).toBe(0);
+  expect(output.join("\n")).toContain("排队中（前面还有 1 个）");
+  expect(
+    executionView(f.state(), f.clock.now(), [], before).runs.find(
+      (r) => r.status === "queued",
+    )?.queue_ahead,
+  ).toBe(1);
+  await new Dispatcher(settings).tick();
+  expect(readRunQueue(f.store)).toEqual(before);
+  limit = 2;
+  await new Dispatcher(settings).tick(f.project);
+  expect(startRun).toHaveBeenCalledOnce();
+  expect(startRun.mock.calls[0]?.[0].project).toBe(other.project);
+  expect(runtime.wake).not.toHaveBeenCalled();
+  expect(readRunQueue(f.store).map((r) => [r.project_id, r.ahead])).toEqual([
+    [f.project, 0],
+  ]);
+  limit = 3;
+  await new Dispatcher(settings).tick();
+  expect(runtime.wake).toHaveBeenCalledOnce();
+  expect(readRunQueue(f.store)).toEqual([]);
+});
+
+test("a prequeued Run sorts by its original trigger, not by the later notification", async () => {
+  const queued = f.apply((s, a, p) =>
+    queueRun(
+      s,
+      a,
+      {
+        assignment_id: target.assignment.id,
+        kind: "fix",
+        model: "m",
+        agent_cli_version: "1",
+      },
+      p,
+    ),
+  );
+  f.advance(1000);
+  const other = secondProject();
+  other.comment();
+  f.advance(1000);
+  comment();
+  await new Dispatcher({ ...options, runLimit: () => 1 }).tick();
+  expect(f.state().runs.find((r) => r.id === queued.id)?.status).toBe(
+    "dispatched",
+  );
+  expect(options.startRun).not.toHaveBeenCalled();
+  expect(readRunQueue(f.store)[0]?.project_id).toBe(other.project);
+});
+
+test("standing PM dispatches beyond the cap and counts against subsequent ordinary Runs", async () => {
+  const busy = f.create();
+  f.session(busy.assignment, false);
+  const extra = f.create();
+  const { work_item_id: _workItem, ...base } = extra.assignment;
+  const pm: Assignment = {
+    ...base,
+    scope: "standing",
+    role_id: "pm",
+    standing_mode: "ops",
+  };
+  f.store.uow.run((tx) => tx.assignments.put(f.project, pm));
+  f.session(pm);
+  const event = f.apply((s, a, p) =>
+    postComment(s, a, { card_id: extra.card.id, body: "PM message" }, p),
+  );
+  const cause =
+    f.state().events.find((e) => e.id === event.id) ?? f.state().events.at(-1);
+  if (!cause) throw new Error("Missing cause");
+  f.store.recordNotification({
+    project_id: f.project,
+    event_id: cause.id,
+    card_id: cause.card_id,
+    seq: cause.seq,
+    kind: "comment",
+    recipient: { kind: "assignment", assignment_id: pm.id },
+  });
+  f.advance(1000);
+  comment();
+  await new Dispatcher({ ...options, runLimit: () => 1 }).tick();
+  expect(
+    f
+      .state()
+      .runs.filter((r) => r.status === "dispatched")
+      .map((r) => r.assignment_id),
+  ).toEqual([pm.id]);
+  expect(readRunQueue(f.store).map((r) => r.assignment_id)).toEqual([
+    target.assignment.id,
+  ]);
+  // Even a fail-closed limit must not strand a PM Office/Ops Run.
+  expect(
+    f.store.uow.read((tx) =>
+      runCapacitySnapshot(f.store, tx).occupied.get("local"),
+    ),
+  ).toBe(2);
+});
+
+test("running merge checks occupy two slots across projects until their attempt finishes", async () => {
+  const other = secondProject();
+  const emit = (type: string) =>
+    f.store.uow.run((tx) =>
+      tx.events.append(other.project, {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(other.project, other.card.id),
+        card_id: other.card.id,
+        type,
+        actor: { kind: "system", project_id: other.project },
+        created_at: f.clock.now(),
+        payload: {
+          attempt_id: "merge-test",
+          status: type === "merge_check_started" ? "running" : "passed",
+        },
+      }),
+    );
+  emit("merge_check_started");
+  comment();
+  const dispatcher = new Dispatcher({ ...options, runLimit: () => 2 });
+  await dispatcher.tick();
+  expect(runtime.wake).not.toHaveBeenCalled();
+  expect(readRunQueue(f.store)[0]?.ahead).toBe(0);
+  emit("merge_check_finished");
+  await dispatcher.tick();
+  expect(runtime.wake).toHaveBeenCalledOnce();
+});
+
+test("startup reservations prevent concurrent dispatcher instances from claiming the same last slot", async () => {
+  const extra = f.create();
+  comment();
+  f.advance(1);
+  f.apply((s, a, p) =>
+    postComment(
+      s,
+      a,
+      { card_id: extra.card.id, work_item_id: extra.item.id, body: "second" },
+      p,
+    ),
+  );
+  vi.mocked(runtime.status).mockResolvedValue({
+    ok: true,
+    value: { process: "exited", agent: "unknown", observed_seq: 1 },
+  });
+  let release = () => {};
+  const hold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const original = options.startRun;
+  const startRun = vi.fn(
+    async (input: Parameters<DispatcherOptions["startRun"]>[0]) => {
+      await hold;
+      await original(input);
+    },
+  );
+  const settings = { ...options, startRun, runLimit: () => 1 };
+  const first = new Dispatcher(settings).tick();
+  try {
+    await expect.poll(() => startRun.mock.calls.length).toBe(1);
+    await new Dispatcher(settings).tick();
+    expect(startRun).toHaveBeenCalledOnce();
+    expect(readRunQueue(f.store)[0]?.assignment_id).toBe(extra.assignment.id);
+  } finally {
+    release();
+    await first;
+  }
+  expect(startRun).toHaveBeenCalledOnce();
+});
+
+test("an explicit host launch defers without provisioning and the Dispatcher resumes it without a notification", async () => {
+  const busy = f.create();
+  f.session(busy.assignment, false);
+  const run = f.apply((s, a, p) =>
+    queueRun(
+      s,
+      a,
+      {
+        assignment_id: target.assignment.id,
+        model: "m",
+        agent_cli_version: "1",
+      },
+      p,
+    ),
+  );
+  await expect(
+    launchRun(
+      {
+        store: f.store,
+        runtime,
+        launch: { config: { gateways: {}, profiles: {} }, secrets: {} },
+        mcpUrl: "http://127.0.0.1/mcp",
+        dataDir: f.dataDir,
+        runLimit: () => 1,
+      },
+      {
+        project: f.project,
+        assignment_id: target.assignment.id,
+        run,
+        actor: { kind: "human", project_id: f.project },
+        reuse_session: true,
+      },
+    ),
+  ).rejects.toBeInstanceOf(RunCapacityDeferred);
+  expect(runtime.status).not.toHaveBeenCalled();
+  expect(readRunQueue(f.store)[0]?.run_id).toBe(run.id);
+  finish(busy.assignment);
+  await new Dispatcher({ ...options, runLimit: () => 1 }).tick();
+  expect(runtime.wake).toHaveBeenCalledOnce();
+  expect(f.state().runs.find((r) => r.id === run.id)?.status).toBe(
+    "dispatched",
+  );
+});
+
+test("ACK while waiting neither loses nor recreates the queued Run", async () => {
+  const busy = f.create();
+  f.session(busy.assignment, false);
+  comment();
+  const dispatcher = new Dispatcher({ ...options, runLimit: () => 1 });
+  await dispatcher.tick();
+  const run = readRunQueue(f.store)[0];
+  const note = ownNotes()[0];
+  if (!note?.card_id || !run) throw new Error("Missing waiting work");
+  f.store.ackEvents({
+    project_id: f.project,
+    assignment_id: target.assignment.id,
+    card_id: note.card_id,
+    up_to_seq: note.seq,
+  });
+  finish(busy.assignment);
+  await dispatcher.tick();
+  expect(f.state().runs.find((r) => r.id === run.run_id)?.status).toBe(
+    "dispatched",
+  );
+  expect(runtime.wake).toHaveBeenCalledOnce();
+  expect(ownNotes()[0]?.status).toBe("acked");
+});

@@ -18,8 +18,10 @@ import {
   type LaunchEntities,
   launchEntities,
   launchRun,
+  loadRunCapacityConfig,
   messageOf,
   type PreparedWorktree,
+  RunCapacityDeferred,
   reviewTargetSha,
   scrubRunCredentials,
   type WorktreeProvider,
@@ -192,6 +194,8 @@ export async function startAssignment(
   options: StartOptions,
 ): Promise<StartedAssignment> {
   const { store, io, project_id } = options;
+  const capacity = await loadRunCapacityConfig({ env: io.env });
+  for (const error of capacity.errors) io.stderr(error);
   const execution = executionFor(io, options.dataDir);
   await secureDataDirectory(execution);
 
@@ -261,6 +265,7 @@ export async function startAssignment(
       {
         store,
         runtime: options.runtime,
+        runLimit: capacity.forMachine,
         launch: options.launch,
         mcpUrl: options.mcpUrl,
         dataDir: options.dataDir,
@@ -641,7 +646,14 @@ export async function startAssignmentCommand(
     runtime,
     dataDir,
     worktree: worktreeProvider(execution, runtime),
+  }).catch((error: unknown) => {
+    if (!(error instanceof RunCapacityDeferred)) throw error;
+    io.stdout(
+      `${assignment_id}（run ${error.run_id}）${error.message}；server 将自动继续派发。`,
+    );
+    return undefined;
   });
+  if (!started) return EXIT.ok;
 
   io.stdout(
     [

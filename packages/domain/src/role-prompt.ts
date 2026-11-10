@@ -14,6 +14,7 @@ export const SHARED_BOUNDARIES = [
   "不新建任务计划文件（例如 `docs/plans/` 下的计划）；任务计划由人或 PM 维护，设计改动只更新卡片要求的正文文档。",
   "只运行卡片或工作项写明范围的测试；未写明范围时只运行改动所在包的测试。全量测试和端到端测试由合并前的主机检查负责。",
   "拿不准时在时间线里提问或请求拍板，不要自行扩大范围。",
+  "验证时不得人为制造 CPU 负载（空转、压测）；偶发失败只重复运行，次数不超过 20。",
 ] as const;
 
 /** New role instructions cannot override or duplicate system-owned prompt sections. */

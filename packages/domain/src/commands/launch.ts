@@ -338,6 +338,7 @@ export function dispatchRun(
         ? { employee_id: assignment.employee_id }
         : {}),
     };
+    delete next.queue_reason;
     d.put("runs", next);
     d.emit("run_dispatched", cardId(d, assignment), {
       run_id: run.id,

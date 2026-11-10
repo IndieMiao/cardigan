@@ -14,7 +14,14 @@ import type {
   RuntimeRef,
   StandingMode,
 } from "@cardigan/domain";
-import { abortDispatch, dispatchRun, standingModeOf } from "@cardigan/domain";
+import {
+  abortDispatch,
+  canDispatchRun,
+  DEFAULT_RUN_LIMIT,
+  dispatchRun,
+  isStandingPm,
+  standingModeOf,
+} from "@cardigan/domain";
 import {
   type CompiledAssignmentLaunch,
   compileAssignmentLaunch,
@@ -50,6 +57,7 @@ import {
 } from "./commands.js";
 import { HostLaunchError, type LaunchStep, messageOf } from "./errors.js";
 import { agentNameFor } from "./naming.js";
+import { runCapacitySnapshot } from "./run-capacity.js";
 import {
   type PreparedWorktree,
   prepareRoleWorktree,
@@ -69,7 +77,17 @@ export type { PreparedWorktree } from "./worktree.js";
  * compensation — exists once, so the two entries cannot drift apart.
  */
 
+export class RunCapacityDeferred extends Error {
+  constructor(
+    readonly run_id: string,
+    readonly ahead: number,
+  ) {
+    super(`排队中（前面还有 ${ahead} 个）`);
+  }
+}
+
 export interface LaunchHost {
+  readonly runLimit?: (machine: string) => number;
   readonly store: Store;
   readonly runtime: Runtime & Partial<Pick<HerdrRuntime, "captureAgent">>;
   readonly launch: {
@@ -215,6 +233,27 @@ export async function launchRun(
         "dispatch",
         "Assignment delivery is in progress",
       );
+    const assignment = tx.assignments.get(input.project, input.assignment_id);
+    if (!assignment)
+      throw new HostLaunchError("dispatch", "Assignment is missing");
+    tx.runs.put(input.project, { ...run, queue_reason: "concurrency_limit" });
+    const capacity = runCapacitySnapshot(host.store, tx);
+    if (
+      !canDispatchRun(
+        host.runLimit?.(assignment.machine_id) ?? DEFAULT_RUN_LIMIT,
+        capacity.occupied.get(assignment.machine_id) ?? 0,
+        isStandingPm(assignment),
+      ) ||
+      (!isStandingPm(assignment) &&
+        (capacity.queue.find(
+          (r) => r.project_id === input.project && r.run_id === run.id,
+        )?.ahead ?? 0) > 0)
+    ) {
+      return undefined;
+    }
+    const cleared = { ...run };
+    delete cleared.queue_reason;
+    tx.runs.put(input.project, cleared);
     const at = clock.now();
     const attempt = {
       id: randomUUID(),
@@ -231,6 +270,14 @@ export async function launchRun(
     beginLaunchAttempt(host.store.database, attempt);
     return attempt;
   });
+  if (!attempt) {
+    const waiting = host.store.uow.read((tx) =>
+      runCapacitySnapshot(host.store, tx).queue.find(
+        (r) => r.project_id === input.project && r.run_id === input.run.id,
+      ),
+    );
+    throw new RunCapacityDeferred(input.run.id, waiting?.ahead ?? 0);
+  }
   let sent = false;
   try {
     const result = await launch(host, input);

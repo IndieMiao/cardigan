@@ -1,4 +1,4 @@
-import { loadMergeGateConfig } from "@cardigan/host";
+import { loadMergeGateConfig, loadRunCapacityConfig } from "@cardigan/host";
 import type { McpBackend } from "@cardigan/mcp-server";
 import {
   type Logger,
@@ -117,7 +117,10 @@ export async function startCardiganServer(
     projectIds: store.listProjects().map((project) => project.id),
     env: { ...(options.env ?? process.env) },
   });
-  for (const message of mergeGate.errors)
+  const runCapacity = await loadRunCapacityConfig({
+    env: { ...(options.env ?? process.env) },
+  });
+  for (const message of [...mergeGate.errors, ...runCapacity.errors])
     (options.warn ?? ((line: string) => process.stderr.write(`${line}\n`)))(
       message,
     );
@@ -179,6 +182,7 @@ export async function startCardiganServer(
         store,
         git,
         mergeGate: { configuration: mergeGate, execution },
+        runLimit: runCapacity.forMachine,
         // Test overrides win; otherwise the server configuration decides.
         ...(mergeIntervalMs === undefined ? {} : { mergeIntervalMs }),
         ...(cleanupIntervalMs === undefined ? {} : { cleanupIntervalMs }),
