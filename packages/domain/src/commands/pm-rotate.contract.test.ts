@@ -315,13 +315,42 @@ test("rotating the Office keeps the Ops and its items in place", () => {
   expect(effect.data.decisions).toEqual([]);
 });
 
-test("a new version without the delegation tools hands its items to the human", () => {
+test("rotate refuses, without any write, a new version that cannot serve the inherited items", () => {
   const x = setup(legacyTools);
+  const result = rotateStandingPm(
+    x.state,
+    human,
+    { standing_mode: "ops" },
+    ports(),
+  );
+  expect(result.ok).toBe(false);
+  if (!result.ok) {
+    expect(result.error.code).toBe("validation_failed");
+    expect(result.error.message).toContain("resolve_delegated_decision");
+    expect(result.error.message).toContain("triage_human_action");
+    expect(result.error.message).toContain("没有做任何改动");
+  }
+  // With no PM items pending, the same version can take over.
+  const empty = { ...x.state, decisions: [], human_actions: [] };
   const effect = value(
-    rotateStandingPm(x.state, human, { standing_mode: "ops" }, ports()),
+    rotateStandingPm(empty, human, { standing_mode: "ops" }, ports()),
   );
-  const after = apply(x.state, effect);
-  expect(after.decisions.find((q) => q.id === x.decision.id)?.decider).toBe(
-    "human",
+  expect(effect.data.unchanged).toBe(false);
+});
+
+test("a review-limit item needs update_work_item, not resolve_delegated_decision", () => {
+  const x = setup(STANDING_ROLE_TOOLS.filter((t) => t !== "update_work_item"));
+  const state = {
+    ...x.state,
+    decisions: [{ ...x.decision, trigger: "review_limit" as const }],
+    human_actions: [],
+  };
+  const result = rotateStandingPm(
+    state,
+    human,
+    { standing_mode: "ops" },
+    ports(),
   );
+  expect(result.ok).toBe(false);
+  if (!result.ok) expect(result.error.message).toContain("update_work_item");
 });

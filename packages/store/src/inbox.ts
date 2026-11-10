@@ -287,7 +287,8 @@ export interface ReassignNotificationsInput {
  * Re-point the unfinished inbox of a replaced standing Assignment so nothing
  * addressed to it is lost or falls back to the human. A row sent to `from`
  * now goes to `to`; a role-addressed row pinned to an old Run drops the pin so
- * the standing resolver picks the new Assignment. A belled row rings again.
+ * the standing resolver picks the new Assignment. A belled row rings again; a
+ * failed delivery is closed (`ack`) and recorded anew, pending, for `to`.
  * Call inside the transaction that releases `from`.
  */
 export function reassignNotifications(
@@ -307,6 +308,30 @@ export function reassignNotifications(
     const pinned =
       current.run_id !== undefined && input.run_ids.includes(current.run_id);
     if (!addressed && !pinned) continue;
+    if (current.status === "delivery_failed") {
+      // The state machine has no way back to pending from a failed delivery:
+      // close the old row as handed over and ring the new Assignment afresh.
+      moveNotification(
+        db,
+        { project_id: input.project_id, id: current.id, event: "ack", at },
+        () => at,
+      );
+      recordNotification(
+        db,
+        {
+          project_id: input.project_id,
+          event_id: current.event_id,
+          recipient: { kind: "assignment", assignment_id: input.to },
+          card_id: current.card_id,
+          seq: current.seq,
+          kind: current.kind,
+          at,
+        },
+        () => at,
+      );
+      moved += 1;
+      continue;
+    }
     const { run_id: _oldRun, next_attempt_at: _retry, ...rest } = current;
     const status =
       current.status === "belled"

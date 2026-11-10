@@ -144,7 +144,7 @@ S21 / V10a：MCP create_card 可省略 repo／base_branch。需要仓库的模�
 - 新指派前 `isRoleActive` 始终检查最新版，即便显式要求旧版也不能绕过停用；重复指派复用原 Assignment，已有 Assignment 与 Run 保持固定版本和历史权限。不存在角色仍为 not_found。
 - 事件为 role_created、role_copied、role_updated、role_deactivated、role_activated、role_rolled_back；保存 Actor 和完整版本快照。验证失败无部分效果。
 - instructions/status 存入原 roles.doc，不改表；旧记录缺省 active，没有 instructions 就继续使用原 core_prompt，转换和启动拼接位于 roles 包。迁移不重写旧文档，不自动把旧提示词当作新格式。
-- `upgradeRole(state, actor, id, source, ports)`（C-55）：source 由主机从默认角色包解析（domain 不依赖 roles 包），只取 instructions、allowed_tools、capabilities、kind、worktree；返回 `{unchanged, previous, diff, effect?}`，diff 含新增／移除的工具和能力、字段变化及放宽项（新增工具、新增能力、worktree 放宽、类型改变）。内容相同（工具、能力不计顺序）时 `unchanged=true`，无版本无事件；否则写入走 `updateRole`，共用权限和 validateRole。CLI：`cardigan role upgrade <角色> --from-default [--dry-run]`，非默认角色由 CLI 中文拒绝。
+- `upgradeRole(state, actor, id, source, ports)`（C-55）：source 由主机从默认角色包解析（domain 不依赖 roles 包），只取 instructions、allowed_tools、capabilities、kind、worktree；返回 `{unchanged, previous, diff, effect?}`，diff 含新增／移除的工具和能力、字段变化及放宽项（新增工具、新增能力、worktree 放宽、类型改变）。内容相同（工具、能力不计顺序）时 `unchanged=true`，无版本无事件；否则写入走 `updateRole`，共用权限和 validateRole。`previewRoleUpgrade(state, actor, id, source)` 是不需要 ports 的同一计算（含 validateRole），供 `--dry-run` 在只读事务里使用。CLI：`cardigan role upgrade <角色> --from-default [--dry-run]`，非默认角色由 CLI 中文拒绝。
 - 工具白名单是新版本写入边界：旧库已有角色在读取、assign、queueRun 和主机启动时不调用 validateRole，不因历史宽工具范围或旧 kind 被拒绝。写入同一内容的新版本仍需通过校验，既有 Token 作用域控制不变。回归覆盖旧 schema 升级后的 coder/reviewer/pm 与三种 Harness。
 
 ## P2-V V10a 卡片模板与无仓库流程
@@ -166,5 +166,5 @@ S21 / V10a：MCP create_card 可省略 repo／base_branch。需要仓库的模�
 ## C-55 常驻 PM 换版本
 
 - `rotateStandingPm(state, actor, {standing_mode}, ports)`：只接受 human（Agent 因工具名不在角色里被拒，system 不能访问此命令）。找唯一在岗的同模式常驻 pm；已暂停或不存在时中文拒绝。最新 pm 版本等于在岗版本时返回 `unchanged=true`，无改动无事件。
-- 否则在同一个 effect 里依次：新建同模式、固定最新版本的 standing Assignment（先写入）；复制旧游标；取消旧的未结束 Run；释放旧 Assignment；发 `assignment_released`（`replaced_by`）与 `standing_pm_rotated`（`decisions`、`human_actions`、`cancelled_run_ids`）；最后按释放的原规则调用 `handoffWithoutOps`，新版本具备工具时没有任何事项转回给人。任一步被拒，整个 effect 不产生。
-- 主机（`apps/cli/src/pm-rotate.ts`）在持久化 effect 的同一事务里作废旧 Token、用 store 的 `reassignNotifications` 把旧 Assignment 的未结束通知改给新的，并结束旧会话未完成的投递尝试。CLI：`cardigan pm rotate --ops|--office`。
+- 否则在同一个 effect 里依次：新建同模式、固定最新版本的 standing Assignment（先写入）；复制旧游标；取消旧的未结束 Run；释放旧 Assignment；发 `assignment_released`（`replaced_by`）与 `standing_pm_rotated`（`decisions`、`human_actions`、`cancelled_run_ids`）；不调用 `handoffWithoutOps`。写入前检查新版本具备接手工具（拍板需要 `resolve_delegated_decision`，审核上限拍板需要 `update_work_item`，待你执行需要 `triage_human_action`），缺工具时 validation_failed、无任何改动；effect 最后断言没有改写 decisions 或 human_actions。任一步被拒，整个 effect 不产生。
+- 主机（`apps/cli/src/pm-rotate.ts`）在持久化 effect 的同一事务里作废旧 Token、用 store 的 `reassignNotifications` 把旧 Assignment 的未结束通知改给新的（投递失败的通知 ack 旧行、为新 Assignment 新建待投递行），并结束旧会话未完成的投递尝试。CLI：`cardigan pm rotate --ops|--office`。

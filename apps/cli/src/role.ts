@@ -2,7 +2,9 @@ import {
   activateRole,
   copyRole,
   createRole,
+  type DomainError,
   deactivateRole,
+  previewRoleUpgrade,
   type Result,
   type RoleDefinition,
   type RoleEffect,
@@ -392,7 +394,10 @@ export async function runRoleCommand(
 
 const DEFAULT_ROLE_IDS = ["pm", "coder", "reviewer", "designer", "tester"];
 
-function printUpgrade(io: CliIo, result: RoleUpgradeEffect): void {
+function printUpgrade(
+  io: CliIo,
+  result: Pick<RoleUpgradeEffect, "previous" | "diff">,
+): void {
   const { previous, diff } = result;
   const list = (values: readonly string[]) =>
     values.length ? values.join(", ") : "无";
@@ -428,36 +433,51 @@ function upgradeFromDefault(
     fail(
       `${id} 不是默认角色包里的角色，不能按默认包升级；默认角色有：${DEFAULT_ROLE_IDS.filter(isDefaultRoleId).join("、")}`,
     );
-  return store.uow.run((tx) => {
+  const human = { kind: "human", project_id: project } as const;
+  const source = (tx: Parameters<typeof listRoleVersions>[0]) => {
     const latest = getRoleVersion(tx, project, id);
     if (!latest)
       fail(`项目 ${project} 还没有角色 ${id}，先用 cardigan role add 创建`);
-    const result = upgradeRole(
-      { project_id: project, roles: listRoleVersions(tx, project) },
-      { kind: "human", project_id: project },
-      id,
-      defaultRoleDefinition(id, {
+    return {
+      latest,
+      state: { project_id: project, roles: listRoleVersions(tx, project) },
+      pack: defaultRoleDefinition(id, {
         harness: latest.harness,
         launch_profile_ref: latest.launch_profile_ref,
       }),
-      { clock: systemClock, ids: tx.ids },
+    };
+  };
+  const rejected = (error: DomainError) =>
+    new CliError(formatCommandError("升级角色", id, error), EXIT.usage);
+  const same = (version: number) =>
+    io.stdout(
+      `角色 ${id} v${version} 已是默认包内容，没有追加新版本（项目 ${project}）`,
     );
-    if (!result.ok)
-      throw new CliError(
-        formatCommandError("升级角色", id, result.error),
-        EXIT.usage,
-      );
+  if (dryRun)
+    // A read-only transaction: no version, event or id counter is written.
+    return store.uow.read((tx) => {
+      const { latest, state, pack } = source(tx);
+      const preview = previewRoleUpgrade(state, human, id, pack);
+      if (!preview.ok) throw rejected(preview.error);
+      if (preview.value.unchanged) same(latest.version);
+      else {
+        printUpgrade(io, preview.value);
+        io.stdout("--dry-run：只打印变化，没有写入");
+      }
+      return EXIT.ok;
+    });
+  return store.uow.run((tx) => {
+    const { latest, state, pack } = source(tx);
+    const result = upgradeRole(state, human, id, pack, {
+      clock: systemClock,
+      ids: tx.ids,
+    });
+    if (!result.ok) throw rejected(result.error);
     if (result.value.unchanged) {
-      io.stdout(
-        `角色 ${id} v${latest.version} 已是默认包内容，没有追加新版本（项目 ${project}）`,
-      );
+      same(latest.version);
       return EXIT.ok;
     }
     printUpgrade(io, result.value);
-    if (dryRun) {
-      io.stdout("--dry-run：只打印变化，没有写入");
-      return EXIT.ok;
-    }
     persistRoleEffect(tx, project, result.value.effect);
     io.stdout(
       `已按默认角色包升级 ${id} 到 v${result.value.effect.data.version}（项目 ${project}）`,

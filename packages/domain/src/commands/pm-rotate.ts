@@ -1,4 +1,4 @@
-import type { Actor, Assignment, StandingMode } from "../entities.js";
+import type { Actor, Assignment, StandingMode, ToolName } from "../entities.js";
 import type { Result } from "../errors.js";
 import type { DecisionId, HumanActionId, RunId } from "../ids.js";
 import { isRoleActive } from "../role.js";
@@ -11,7 +11,6 @@ import {
   ensure,
   unwrap,
 } from "./core.js";
-import { handoffWithoutOps } from "./delegation.js";
 
 export interface RotateStandingPmResult {
   /** True when the standing PM already runs the newest pm version. */
@@ -108,6 +107,45 @@ export function rotateStandingPm(
       "pm 角色已停用，不能换到新版本",
     );
 
+    // PM-owned items stay with the role; the new Assignment is who serves it.
+    const decisions =
+      p.standing_mode === "ops"
+        ? d
+            .list("decisions")
+            .filter(
+              (q) =>
+                q.decider === "role:pm" &&
+                ["open", "provisional"].includes(q.status),
+            )
+            .map((q) => q.id)
+        : [];
+    const human_actions =
+      p.standing_mode === "ops"
+        ? d
+            .list("human_actions")
+            .filter((h) => h.status === "open" && h.triage === "pm_ops")
+            .map((h) => h.id)
+        : [];
+    // The new version must be able to serve every item it inherits; otherwise
+    // rotating would silently hand them to the human. Refuse before any write.
+    const missing = new Set<ToolName>();
+    for (const q of d.list("decisions"))
+      if (decisions.includes(q.id))
+        missing.add(
+          q.trigger === "review_limit"
+            ? "update_work_item"
+            : "resolve_delegated_decision",
+        );
+    if (human_actions.length) missing.add("triage_human_action");
+    const lacking = [...missing].filter(
+      (tool) => !latest.allowed_tools.includes(tool),
+    );
+    ensure(
+      lacking.length === 0,
+      "validation_failed",
+      `pm v${latest.role_version} 缺少 ${lacking.join("、")}，接不住 ${label} 现有的待处理事项（拍板 ${decisions.length} 项，待你执行 ${human_actions.length} 项）；没有做任何改动。先用 cardigan role upgrade pm --from-default 补齐工具再换版本`,
+    );
+
     // 1. The replacement goes on duty first: there is never a moment without
     //    an active standing PM of this mode.
     const next: Assignment = {
@@ -162,25 +200,6 @@ export function rotateStandingPm(
     };
     d.put("assignments", released);
 
-    // PM-owned items stay with the role; the new Assignment is who serves it.
-    const decisions =
-      p.standing_mode === "ops"
-        ? d
-            .list("decisions")
-            .filter(
-              (q) =>
-                q.decider === "role:pm" &&
-                ["open", "provisional"].includes(q.status),
-            )
-            .map((q) => q.id)
-        : [];
-    const human_actions =
-      p.standing_mode === "ops"
-        ? d
-            .list("human_actions")
-            .filter((h) => h.status === "open" && h.triage === "pm_ops")
-            .map((h) => h.id)
-        : [];
     d.emit("assignment_released", undefined, {
       assignment_id: previous.id,
       worktree_path: previous.worktree_path ?? null,
@@ -199,9 +218,15 @@ export function rotateStandingPm(
       human_actions: [...human_actions],
       cancelled_run_ids: runs.map((r) => r.id),
     });
-    // Same rule as release: anything the new version cannot serve goes to the
-    // human. With the new Ops on duty and holding the tools, nothing moves.
-    handoffWithoutOps(d, released);
+    // No handoff: the new Ops is on duty and was checked to hold every tool
+    // its inherited items need, so nothing is rewritten or returned to the human.
+    ensure(
+      !d.changes.some(
+        (c) => c.collection === "decisions" || c.collection === "human_actions",
+      ),
+      "invariant_violation",
+      "换版本不能改写拍板或待你执行",
+    );
     return {
       ...result,
       unchanged: false,

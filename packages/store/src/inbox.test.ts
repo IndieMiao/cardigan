@@ -330,3 +330,53 @@ test("reassignNotifications moves a replaced standing PM's unfinished inbox", ()
     });
   });
 });
+
+test("reassignNotifications hands failed deliveries to the new Assignment as pending", () => {
+  withTempStore((store) => {
+    seed(store);
+    const old = assignment().id;
+    const addressed = store.recordNotification(note(store, 1)).notification;
+    store.moveNotification({
+      project_id,
+      id: addressed.id,
+      event: "deliver_failed",
+    });
+    const pinned = store.recordNotification(
+      note(store, 5, { kind: "pm_ops" } as never),
+    ).notification;
+    store.moveNotification({
+      project_id,
+      id: pinned.id,
+      event: "bell",
+      patch: { run_id: "R-9" as never, attempts: 1 },
+    });
+    store.moveNotification({
+      project_id,
+      id: pinned.id,
+      event: "deliver_failed",
+    });
+
+    expect(
+      store.uow.run(() =>
+        reassignNotifications(store.database, {
+          project_id,
+          from: old,
+          to: "A-99" as never,
+          run_ids: ["R-9"],
+        }),
+      ),
+    ).toBe(2);
+    const rows = store.listNotifications({ project_id });
+    expect(rows.find((n) => n.id === addressed.id)?.status).toBe("acked");
+    expect(rows.find((n) => n.id === pinned.id)?.status).toBe("acked");
+    const handed = store.listNotifications({
+      project_id,
+      assignment_id: "A-99" as never,
+    });
+    expect(handed.map((n) => [n.seq, n.status, n.attempts])).toEqual([
+      [1, "pending", 0],
+      [5, "pending", 0],
+    ]);
+    expect(handed.every((n) => n.run_id === undefined)).toBe(true);
+  });
+});

@@ -444,18 +444,24 @@ export function roleUpgradeDiff(
   };
 }
 
+export interface RoleUpgradePreview {
+  readonly unchanged: boolean;
+  readonly previous: Role;
+  readonly diff: RoleUpgradeDiff;
+  readonly patch: DefaultPackPatch;
+}
+
 /**
- * Append a version whose policy fields come from the default pack, keeping the
- * project's own launch fields. The caller resolves `source` from the pack; the
- * write itself is `updateRole`, so authorization and `validateRole` are shared.
+ * Compute what `upgradeRole` would write, without allocating ids or events, so
+ * a dry run can use a read-only transaction. A changed definition is checked
+ * with the same `validateRole` the write uses.
  */
-export function upgradeRole(
+export function previewRoleUpgrade(
   state: RoleCommandState,
   actor: Actor,
   id: string,
   source: RoleDefinition,
-  ports: CommandPorts,
-): Result<RoleUpgradeEffect> {
+): Result<RoleUpgradePreview> {
   return attempt(() => {
     authorize(state, actor);
     ensure(
@@ -474,23 +480,49 @@ export function upgradeRole(
     const diff = roleUpgradeDiff(previous, patch);
     const same = (a: readonly string[], b: readonly string[]) =>
       a.length === b.length && a.every((value) => b.includes(value));
-    if (
+    const unchanged =
       diff.fields.length === 0 &&
       same(previous.allowed_tools, patch.allowed_tools) &&
-      same(previous.capabilities, patch.capabilities)
-    )
-      return { unchanged: true, previous, diff };
+      same(previous.capabilities, patch.capabilities);
+    if (!unchanged) {
+      const checked = validateRole({ ...previous, ...patch });
+      ensure(
+        checked.ok,
+        "validation_failed",
+        checked.ok ? "" : checked.error.message,
+      );
+    }
+    return { unchanged, previous, diff, patch };
+  });
+}
+
+/**
+ * Append a version whose policy fields come from the default pack, keeping the
+ * project's own launch fields. The caller resolves `source` from the pack; the
+ * write itself is `updateRole`, so authorization and `validateRole` are shared.
+ */
+export function upgradeRole(
+  state: RoleCommandState,
+  actor: Actor,
+  id: string,
+  source: RoleDefinition,
+  ports: CommandPorts,
+): Result<RoleUpgradeEffect> {
+  return attempt(() => {
+    const preview = previewRoleUpgrade(state, actor, id, source);
+    ensure(
+      preview.ok,
+      preview.ok ? "validation_failed" : preview.error.code,
+      preview.ok ? "" : preview.error.message,
+    );
+    const { unchanged, previous, diff, patch } = preview.value;
+    if (unchanged) return { unchanged: true, previous, diff };
     const effect = updateRole(state, actor, id, patch, ports);
     ensure(
       effect.ok,
       effect.ok ? "validation_failed" : effect.error.code,
       effect.ok ? "" : effect.error.message,
     );
-    return {
-      unchanged: false,
-      previous,
-      diff,
-      effect: effect.value,
-    };
+    return { unchanged: false, previous, diff, effect: effect.value };
   });
 }
