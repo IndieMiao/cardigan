@@ -23,6 +23,10 @@ import type { GitPhases } from "./git.js";
 import type { MergeCheckOptions } from "./merge-checks.js";
 import { type MergeExecutor, startMergeLoop } from "./merge-loop.js";
 import {
+  type MergePushExecutor,
+  startMergePushLoop,
+} from "./merge-push-loop.js";
+import {
   type BackupExecutor,
   type ReconcileExecutor,
   startBackupLoop,
@@ -76,6 +80,7 @@ export interface ControlPlane {
   readonly done: Promise<void>;
   /** The phase loops, exposed for tests and for status output. */
   readonly merge?: MergeExecutor;
+  readonly push?: MergePushExecutor;
   readonly cleanup?: CleanupExecutor;
   readonly reconcile?: ReconcileExecutor;
   readonly backup?: BackupExecutor;
@@ -192,6 +197,19 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
             : { intervalMs: options.mergeIntervalMs }),
           onError: report,
         });
+  const push =
+    options.git && options.mergeGate
+      ? startMergePushLoop({
+          store: options.store,
+          git: options.git,
+          configuration: options.mergeGate.configuration,
+          clock,
+          onError: report,
+          ...(options.mergeIntervalMs === undefined
+            ? {}
+            : { intervalMs: options.mergeIntervalMs }),
+        })
+      : undefined;
   const cleanup =
     options.git === undefined
       ? undefined
@@ -249,6 +267,7 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
   const loops = [
     loop.done,
     merge?.loop.done,
+    push?.loop.done,
     cleanup?.loop.done,
     reconcile?.loop.done,
     backup?.loop.done,
@@ -257,6 +276,7 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
   return {
     done: Promise.all(loops).then(() => undefined),
     ...(merge === undefined ? {} : { merge: merge.executor }),
+    ...(push === undefined ? {} : { push: push.executor }),
     ...(cleanup === undefined ? {} : { cleanup: cleanup.executor }),
     ...(reconcile === undefined ? {} : { reconcile: reconcile.executor }),
     ...(backup === undefined ? {} : { backup: backup.executor }),
@@ -264,11 +284,13 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
     stop: async () => {
       // Cancel checks promptly; wait below before closing the shared Store.
       merge?.executor.stop();
+      push?.executor.stop();
       // Dispatcher first (no new work), then the phases in a fixed order; each
       // stop waits for its current tick, so SIGTERM never cuts a merge or a
       // worktree removal in half.
       await loop.stop();
       await merge?.loop.stop();
+      await push?.loop.stop();
       await cleanup?.loop.stop();
       await reconcile?.loop.stop();
       await backup?.loop.stop();
