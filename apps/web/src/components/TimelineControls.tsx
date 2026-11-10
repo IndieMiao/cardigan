@@ -19,7 +19,7 @@ const fields = [
     key: "author",
     label: "发言方",
     options: [
-      ["human", "人"],
+      ["human", "所有者"],
       ["pm", "PM"],
       ["agent", "Agent"],
       ["system", "系统"],

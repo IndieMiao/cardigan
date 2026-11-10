@@ -9,10 +9,12 @@ import {
   type GlobalIdAllocator,
   type GlobalRepositories,
 } from "@cardigan/domain";
+import { createMemberRepository } from "./members.js";
 import { ReadOnlyTransactionError } from "./read-only.js";
 import { newUlid } from "./ulid.js";
 
 export interface ReadGlobalRepositories {
+  readonly members: Pick<GlobalRepositories["members"], "get" | "list">;
   readonly employees: Pick<
     GlobalRepositories["employees"],
     "get" | "list" | "assignmentActivity"
@@ -33,6 +35,7 @@ export function createGlobalRepositories(
   const employee = (row: { doc: string }): Employee =>
     JSON.parse(row.doc) as Employee;
   return {
+    members: createMemberRepository(db, mode),
     employees: {
       assignmentActivity: () =>
         db
@@ -104,6 +107,11 @@ export function createGlobalIdAllocator(db: DatabaseSync): GlobalIdAllocator {
     return Number(row?.value);
   }
   return {
+    nextMemberId: () => {
+      const result = formatId("member", next("member"));
+      if (!result.ok) throw new Error(result.error.message);
+      return result.value;
+    },
     nextEmployeeId: () => {
       const result = formatId("employee", next("employee"));
       if (!result.ok) throw new Error(result.error.message);

@@ -191,6 +191,9 @@ export function recordDecisionResolution(
           ? { proxy_authority: resolution.proxy_authority }
           : {}),
         ...(resolution.notice ? { notice: resolution.notice } : {}),
+        ...(resolution.taken_over_from
+          ? { taken_over_from: resolution.taken_over_from }
+          : {}),
         status: result.status,
         resume_work_items: unblocked.map((w) => w.id),
       },

@@ -8,6 +8,7 @@ import {
   projectPreferences,
   recordDecision,
   requestMerge,
+  setCardSensitive,
   setProjectPreferences,
 } from "../index.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
@@ -330,5 +331,180 @@ test("changing or disabling preferences re-evaluates existing confirmations", as
   );
   expect(
     autoConfirmMerge(f.state, system, { decision_id: q.id }, later(f, 100)).ok,
+  ).toBe(false);
+});
+
+// C-69: unmarking a sensitive card restarts the timeout at the last unmark.
+const at = (minutes: number) =>
+  new Date(Date.parse(now) + minutes * 60_000).toISOString();
+function flag(
+  f: ReturnType<typeof mergeFixture>,
+  sensitive: boolean,
+  minutes: number,
+) {
+  f.commit(
+    setCardSensitive(
+      f.state,
+      human,
+      { card_id: f.card.id, sensitive },
+      later(f, minutes),
+    ),
+  );
+}
+const schedule = (state: CommandState, q: Decision) =>
+  value(autoMergeSchedule(state, q.id));
+
+test("C-69: after unmarking, the timeout counts from the unmark, so an overdue confirmation is not merged at once", async () => {
+  const { f, q } = await setup();
+  flag(f, true, 1);
+  expect(f.state.decisions[0]).toMatchObject({ id: q.id, status: "open" });
+  // Sensitive: never auto-merged, however long it waits.
+  expect(autoMergeSchedule(f.state, q.id).ok).toBe(false);
+  expect(
+    autoConfirmMerge(f.state, system, { decision_id: q.id }, later(f, 60)).ok,
+  ).toBe(false);
+  // Unmarked at +30, long after the original +10 deadline.
+  flag(f, false, 30);
+  expect(schedule(f.state, q)).toMatchObject({
+    minutes: 10,
+    waiting_since: at(30),
+    due_at: at(40),
+  });
+  for (const minutes of [30, 39.999])
+    expect(
+      autoConfirmMerge(
+        f.state,
+        system,
+        { decision_id: q.id },
+        later(f, minutes),
+      ).ok,
+    ).toBe(false);
+  const answer = f.commit(
+    autoConfirmMerge(f.state, system, { decision_id: q.id }, later(f, 40)),
+  );
+  expect(JSON.parse(answer.resolution?.proxy_authority ?? "")).toMatchObject({
+    waiting_since: at(30),
+    due_at: at(40),
+  });
+  expect(mergePlan(f.state, f.card.id).ok).toBe(true);
+});
+
+test("C-69: marking again and unmarking again counts from the last unmark", async () => {
+  const { f, q } = await setup();
+  flag(f, true, 1);
+  flag(f, false, 5);
+  expect(schedule(f.state, q).due_at).toBe(at(15));
+  flag(f, true, 12);
+  expect(autoMergeSchedule(f.state, q.id).ok).toBe(false);
+  expect(
+    autoConfirmMerge(f.state, system, { decision_id: q.id }, later(f, 15)).ok,
+  ).toBe(false);
+  flag(f, false, 20);
+  expect(schedule(f.state, q)).toMatchObject({
+    waiting_since: at(20),
+    due_at: at(30),
+  });
+  expect(
+    autoConfirmMerge(f.state, system, { decision_id: q.id }, later(f, 29)).ok,
+  ).toBe(false);
+  expect(
+    autoConfirmMerge(f.state, system, { decision_id: q.id }, later(f, 30)).ok,
+  ).toBe(true);
+});
+
+test("C-69: a confirmation opened while sensitive also counts from the unmark", async () => {
+  const f = mergeFixture();
+  f.commit(
+    setProjectPreferences(
+      f.state,
+      human,
+      { auto_merge_after_minutes: 10 },
+      f.io,
+    ),
+  );
+  f.commit(
+    setCardSensitive(
+      f.state,
+      human,
+      { card_id: f.card.id, sensitive: true },
+      f.io,
+    ),
+  );
+  await f.accept();
+  const q = f.state.decisions.find(
+    (d) => d.trigger === "merge_confirmation",
+  ) as Decision;
+  expect(q).toMatchObject({ status: "open", decider: "human" });
+  expect(autoMergeSchedule(f.state, q.id).ok).toBe(false);
+  flag(f, false, 25);
+  expect(schedule(f.state, q).due_at).toBe(at(35));
+});
+
+test("C-69: a card never marked, or unmarked before the confirmation opened, keeps the original start", async () => {
+  const { f, q } = await setup();
+  expect(schedule(f.state, q)).toMatchObject({
+    waiting_since: now,
+    due_at: at(10),
+  });
+  // Another card's unmark does not touch this confirmation.
+  const other = {
+    ...f.state,
+    events: [
+      ...f.state.events,
+      {
+        ...(f.state.events.at(-1) as (typeof f.state.events)[number]),
+        id: "evt-other",
+        seq: (f.state.events.at(-1)?.seq ?? 0) + 1,
+        type: "card_sensitivity_changed",
+        card_id: "C-999",
+        payload: { card_id: "C-999", sensitive: false },
+        created_at: at(5),
+      },
+    ],
+  } as CommandState;
+  expect(schedule(other, q).due_at).toBe(at(10));
+
+  const g = mergeFixture();
+  g.commit(
+    setProjectPreferences(
+      g.state,
+      human,
+      { auto_merge_after_minutes: 10 },
+      g.io,
+    ),
+  );
+  g.commit(
+    setCardSensitive(
+      g.state,
+      human,
+      { card_id: g.card.id, sensitive: true },
+      g.io,
+    ),
+  );
+  g.commit(
+    setCardSensitive(
+      g.state,
+      human,
+      { card_id: g.card.id, sensitive: false },
+      g.io,
+    ),
+  );
+  await g.accept();
+  const opened = g.state.events.find((e) => e.type === "decision_requested");
+  const r = g.state.decisions.find(
+    (d) => d.trigger === "merge_confirmation",
+  ) as Decision;
+  expect(schedule(g.state, r).waiting_since).toBe(opened?.created_at);
+});
+
+test("C-69: the restarted start is derived from events, so a reloaded state agrees", async () => {
+  const { f, q } = await setup();
+  flag(f, true, 1);
+  flag(f, false, 30);
+  const reloaded = JSON.parse(JSON.stringify(f.state)) as CommandState;
+  expect(schedule(reloaded, q)).toEqual(schedule(f.state, q));
+  expect(schedule(reloaded, q).due_at).toBe(at(40));
+  expect(
+    autoConfirmMerge(reloaded, system, { decision_id: q.id }, later(f, 35)).ok,
   ).toBe(false);
 });

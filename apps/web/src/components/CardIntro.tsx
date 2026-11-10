@@ -27,7 +27,7 @@ export function CardSource({
       {quote && (
         <LongContent lines={2}>
           <blockquote>
-            来源：你的原话<p>{quote}</p>
+            来源原话<p>{quote}</p>
           </blockquote>
         </LongContent>
       )}
@@ -81,7 +81,7 @@ export function RecentConclusions({
       const label = review
         ? `${review.id} ${work?.title ?? entry.author_role ?? "审核者"} ${statusLabel(review.verdict)} ${review.delivery_id} ${delivery?.kind === "card_completion" ? "完成申请" : "交付"}${delivery?.status === "superseded" ? "（旧版本）" : ""}`
         : decision
-          ? `${decision.id} ${entry.author === "human" ? "你" : (entry.author_role ?? "PM")} ${entry.decision_option ? decisionOption(decision, entry.decision_option) : "已记录拍板结果"}`
+          ? `${decision.id} ${entry.author_display ?? (entry.author === "human" ? "所有者" : (entry.author_role ?? "PM"))} ${entry.decision_option ? decisionOption(decision, entry.decision_option) : "已记录拍板结果"}`
           : undefined;
       return label
         ? [{ entry, label, tone: review?.verdict ?? decision?.status }]

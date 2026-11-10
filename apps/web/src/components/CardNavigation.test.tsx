@@ -440,7 +440,7 @@ test("U5b attachment grid retains true metadata, only previews bitmaps and resto
     />,
   );
   expect(screen.getByText("未命名的 tester")).toBeTruthy();
-  expect(screen.getByText("你")).toBeTruthy();
+  expect(screen.getByText("所有者")).toBeTruthy();
   expect(document.querySelector("time")?.dateTime).toBe(when);
   expect(screen.getAllByText("1.2 KiB")).toHaveLength(5);
   expect(document.querySelectorAll(".attachment-preview img")).toHaveLength(2);

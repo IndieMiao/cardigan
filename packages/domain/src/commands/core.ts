@@ -3,6 +3,7 @@ import type { Employee, EmployeeActivity } from "../employee.js";
 import type * as E from "../entities.js";
 import type { DomainError, ErrorCode, Result } from "../errors.js";
 import type * as I from "../ids.js";
+import type { Member } from "../member.js";
 import type { Clock, IdAllocator } from "../ports.js";
 import type { ProjectPreferences } from "../preferences.js";
 import type { CardTemplate } from "../templates.js";
@@ -27,6 +28,7 @@ export type CommandState = {
   readonly project_preferences?: readonly ProjectPreferences[];
   readonly card_templates?: readonly CardTemplate[];
   readonly employees?: readonly Employee[];
+  readonly members?: readonly Member[];
   readonly employee_activity?: readonly EmployeeActivity[];
   /** Loaded by the host from trusted configuration; never supplied by MCP callers. */
   readonly project_settings?: {
@@ -87,6 +89,7 @@ type CommandName =
   | "manage_inactive_run_stop"
   | "set_project_preferences"
   | "mark_notices_read"
+  | "set_card_sensitive"
   | "auto_confirm_merge"
   | "remind_decision_followups"
   | "request_merge"

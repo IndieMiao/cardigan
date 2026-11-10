@@ -355,3 +355,124 @@ test.each([
     expect(state.employees?.[0]?.avatar).toBe(avatar);
   },
 );
+
+test("all human read surfaces resolve the same owner, including legacy decision and attachment authors", () => {
+  const p = ports();
+  const human = { kind: "human", project_id: fixture().project_id } as const;
+  let state: CommandState = {
+    ...fixture(),
+    members: [
+      {
+        id: id("member", 1),
+        name: "邵杰",
+        title: "所有者",
+        role: "owner",
+        status: "active",
+        avatar: "library:liu-bei",
+        created_at: "2026-01-01",
+        updated_at: "2026-01-01",
+      },
+    ],
+  };
+  const comment = value(
+    postComment(state, human, { card_id: id("card", 1), body: "历史评论" }, p),
+  );
+  state = apply(state, comment);
+  const decision = value(
+    requestDecision(
+      state,
+      human,
+      {
+        card_id: id("card", 1),
+        kind: "choose",
+        question: "选择方案",
+        category: "general",
+        context: "背景",
+        options: [{ key: "go", description: "继续", impact: "开始" }],
+        recommended: "go",
+        decider: "human",
+        affected_cards: [],
+        affected_work_items: [],
+        blocking: false,
+      },
+      p,
+    ),
+  );
+  state = apply(state, decision);
+  const action = value(
+    requestHumanAction(
+      state,
+      human,
+      {
+        card_id: id("card", 1),
+        instructions: "连接设备",
+        why_human: "需要人工",
+        expected_return: "连接结果",
+        blocked_work_items: [],
+      },
+      p,
+    ),
+  );
+  state = apply(state, action);
+  state = {
+    ...state,
+    attachments: [
+      {
+        id: "file",
+        card_id: id("card", 1),
+        sha256: "a".repeat(64),
+        mime: "text/plain",
+        size: 1,
+        kind: "evidence",
+        storage_path: "/private",
+        uploaded_by: "human",
+        attach_to: { kind: "timeline_entry", id: comment.data.id },
+      },
+    ],
+  };
+  const expected = {
+    employee: null,
+    author_display: "邵杰",
+    member: {
+      id: "M-1",
+      name: "邵杰",
+      title: "所有者",
+      avatar: "/avatars/v1/liu-bei/head-64.webp",
+    },
+  };
+  const before = JSON.stringify(state);
+  const detail = cardDetail(state, id("card", 1));
+  expect(
+    detail?.timeline.find((entry) => entry.id === comment.data.id),
+  ).toMatchObject(expected);
+  expect(detail?.attachments[0]).toMatchObject({
+    ...expected,
+    uploaded_by: "human",
+  });
+  expect(detail?.decisions[0]?.decider_view).toMatchObject(expected);
+  expect(detail?.human_actions[0]).toMatchObject(expected);
+  expect(needsYou(state, "2026-01-02").decisions[0]).toMatchObject(expected);
+  expect(needsYou(state, "2026-01-02").human_actions[0]).toMatchObject(
+    expected,
+  );
+  expect(
+    activity(state, {}).events.find((event) => event.type === "comment_posted"),
+  ).toMatchObject(expected);
+  expect(JSON.stringify(state)).toBe(before);
+  const resolved = {
+    ...decision.data,
+    status: "resolved" as const,
+    resolution: {
+      option: "go",
+      rationale: "确认",
+      raw_quote: "继续",
+      at: "2026-01-02",
+      resolved_by: "human" as const,
+      via: "needs_you" as const,
+    },
+  };
+  state = { ...state, decisions: [resolved] };
+  expect(
+    cardDetail(state, id("card", 1))?.decisions[0]?.resolution,
+  ).toMatchObject({ ...expected, resolved_by: "human" });
+});

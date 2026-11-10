@@ -18,6 +18,7 @@ import type {
   HumanActionId,
   Machine,
   MachineId,
+  MemberRepository,
   ProjectId,
   ProjectPreferences,
   Repository,
@@ -70,6 +71,7 @@ export type McpReadRepository<Entity, Key> = Pick<
 
 /** What a read transaction hands to its callback. */
 export interface McpReadContext {
+  readonly members?: Pick<MemberRepository, "get" | "list">;
   readonly project_preferences?: McpReadRepository<
     ProjectPreferences,
     ProjectId

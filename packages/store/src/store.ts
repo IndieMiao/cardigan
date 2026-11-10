@@ -79,6 +79,7 @@ export interface StoreTransactionContext
   extends TransactionContext,
     GlobalRepositories {
   readonly employees: GlobalRepositories["employees"];
+  readonly members: GlobalRepositories["members"];
   readonly global_ids: GlobalIdAllocator;
   /** Issue a token inside this transaction (assignment and token commit together). */
   issueToken(input: IssueTokenInput): IssuedToken;

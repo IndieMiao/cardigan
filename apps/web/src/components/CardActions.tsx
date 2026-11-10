@@ -19,6 +19,22 @@ const labels = {
   supersede: "标记被取代",
 };
 
+/**
+ * C-69: unmarking restarts the auto-merge timeout; mention it only when the
+ * project has it on. The flag is already saved, so a failed read stays silent.
+ */
+async function unmarkNote(client: CardiganClient, projectId: string) {
+  try {
+    const minutes = (await client.preferences(projectId))
+      .auto_merge_after_minutes;
+    return minutes === null
+      ? ""
+      : `如有等你处理的合并确认，从现在起重新计时，${minutes} 分钟内无人处理将按项目设置自动合并。`;
+  } catch {
+    return "";
+  }
+}
+
 export function CardActions({
   card,
   client,
@@ -35,6 +51,33 @@ export function CardActions({
   // Retain uncertain requests even if the user closes and reopens the form.
   const keys = useRef(new Map<string, string>());
   const closed = card.status === "done" || card.status === "cancelled";
+  const [flagging, setFlagging] = useState(false);
+  const [flagError, setFlagError] = useState("");
+  // C-65: human-only; the Workbench is the human's surface.
+  const toggleSensitive = async () => {
+    if (flagging) return;
+    const next = !card.sensitive;
+    const request = JSON.stringify({ mode: "sensitive", next });
+    const key = keys.current.get(request) ?? crypto.randomUUID();
+    keys.current.set(request, key);
+    setFlagging(true);
+    setFlagError("");
+    setMessage("");
+    try {
+      await client.setCardSensitive(projectId, card.id, next, key);
+      keys.current.delete(request);
+      setMessage(
+        next
+          ? "已标为敏感：合并确认将由你亲自处理。"
+          : `已取消敏感标记。${await unmarkNote(client, projectId)}`,
+      );
+      onSaved();
+    } catch (cause) {
+      setFlagError(describeWriteError(cause));
+    } finally {
+      setFlagging(false);
+    }
+  };
   const perform = async (operation: Operation) => {
     const request = JSON.stringify(operation);
     const key = keys.current.get(request) ?? crypto.randomUUID();
@@ -86,9 +129,28 @@ export function CardActions({
               取消卡片
             </button>
           )}
+          <button
+            type="button"
+            className="quiet"
+            aria-pressed={!!card.sensitive}
+            disabled={flagging}
+            title="被标为敏感的卡，合并确认一律由你亲自处理，PM 不能代确认，也不会超时自动合并"
+            onClick={() => void toggleSensitive()}
+          >
+            {card.sensitive ? "取消敏感标记" : "标为敏感"}
+          </button>
         </div>
       )}
-      <RequestFeedback message={message} />
+      {card.sensitive && (
+        <p className="hint">敏感卡片：合并确认由你亲自处理。</p>
+      )}
+      <RequestFeedback
+        message={message}
+        pending={flagging}
+        interactive
+        pendingMessage="正在提交…"
+        error={flagError}
+      />
       {mode && (
         <CardActionForm
           key={mode}

@@ -359,3 +359,107 @@ test.each([
     }
   },
 );
+
+test("the human marks and unmarks a card sensitive from the card detail", async () => {
+  const setCardSensitive = vi.fn().mockResolvedValue(undefined);
+  const onSaved = vi.fn();
+  const card = cardDetail().card;
+  const { rerender } = render(
+    <CardActions
+      card={card}
+      client={fakeClient({ setCardSensitive })}
+      projectId="p-1"
+      onSaved={onSaved}
+    />,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "标为敏感" }));
+  await waitFor(() =>
+    expect(setCardSensitive).toHaveBeenCalledWith(
+      "p-1",
+      card.id,
+      true,
+      expect.any(String),
+    ),
+  );
+  expect(await screen.findByRole("status")).toHaveProperty(
+    "textContent",
+    "已标为敏感：合并确认将由你亲自处理。",
+  );
+  expect(onSaved).toHaveBeenCalled();
+  rerender(
+    <CardActions
+      card={{ ...card, sensitive: true }}
+      client={fakeClient({ setCardSensitive })}
+      projectId="p-1"
+      onSaved={onSaved}
+    />,
+  );
+  expect(screen.getByText("敏感卡片：合并确认由你亲自处理。")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "取消敏感标记" }));
+  await waitFor(() =>
+    expect(setCardSensitive).toHaveBeenLastCalledWith(
+      "p-1",
+      card.id,
+      false,
+      expect.any(String),
+    ),
+  );
+  // C-69: auto-merge is off in the fixture, so no timeout sentence.
+  await waitFor(() =>
+    expect(screen.getByRole("status").textContent).toBe("已取消敏感标记。"),
+  );
+});
+
+test("C-69: unmarking says when the timeout will auto-merge, only if it is on", async () => {
+  const card = { ...cardDetail().card, sensitive: true };
+  const base = fakeClient();
+  for (const [preferences, expected] of [
+    [
+      async () => ({
+        ...(await base.preferences("p-1")),
+        auto_merge_after_minutes: 15,
+      }),
+      "已取消敏感标记。如有等你处理的合并确认，从现在起重新计时，15 分钟内无人处理将按项目设置自动合并。",
+    ],
+    [
+      async () => {
+        throw new Error("offline");
+      },
+      "已取消敏感标记。",
+    ],
+  ] as const) {
+    const { unmount } = render(
+      <CardActions
+        card={card}
+        client={fakeClient({
+          setCardSensitive: vi.fn().mockResolvedValue(undefined),
+          preferences,
+        })}
+        projectId="p-1"
+        onSaved={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "取消敏感标记" }));
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toBe(expected),
+    );
+    unmount();
+  }
+});
+
+test("the sensitive toggle posts to the human-only card route", async () => {
+  const fetchImpl = vi.fn(
+    async () => new Response("{}", { status: 200 }),
+  ) as unknown as typeof fetch;
+  await new HttpCardiganClient(fetchImpl).setCardSensitive(
+    "p-1",
+    "C-1",
+    true,
+    "k-1",
+  );
+  const [url, init] = (fetchImpl as unknown as ReturnType<typeof vi.fn>).mock
+    .calls[0] as [string, RequestInit];
+  expect(url).toBe("/api/projects/p-1/cards/C-1/sensitive");
+  expect(init.method).toBe("POST");
+  expect(JSON.parse(String(init.body))).toEqual({ sensitive: true });
+});

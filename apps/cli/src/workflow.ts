@@ -14,7 +14,9 @@ import {
   markNoticesRead,
   notices,
   parseId,
+  projectPreferences,
   projectSnapshot,
+  setCardSensitive,
   standingTools,
   supersedeCard,
   updateCard,
@@ -53,6 +55,7 @@ const USAGE = [
   "  cardigan card update <C-n> [--title <标题>] [--goal <目标>] [--acceptance <标准1;标准2>] [--priority <n>] [--status backlog|todo|cancelled] [--superseded-by <C-m>] [--project <p>]",
   "    update 至少提供一个修改字段；含分号的验收标准请加引号。",
   "    已完成卡片不能取消；请建新卡，再用 --superseded-by 标记已完成或已取消的旧卡。",
+  "  cardigan card sensitive <C-n> on|off [--project <p>]   标记或取消敏感：被标记卡片的合并确认一律由你亲自处理",
   "  cardigan assign <W-n> --role <角色> [--employee <E-n 或名字>] [--machine local] [--start] [--project <p>]",
   "  cardigan token issue <A-n> [--project <p>]",
   "  cardigan pm create --office|--ops [--project <p>]",
@@ -205,9 +208,73 @@ function cardCommand(
   if (sub === "done") return runContentCommand("card_done", args, io);
   if (sub === "create") return cardCreate(rest, io);
   if (sub === "update") return cardUpdate(rest, io);
-  throw new CliError("用法：cardigan card create|update ...", EXIT.usage, [
-    USAGE,
-  ]);
+  if (sub === "sensitive") return cardSensitive(rest, io);
+  throw new CliError(
+    "用法：cardigan card create|update|sensitive ...",
+    EXIT.usage,
+    [USAGE],
+  );
+}
+
+/** C-69: matches the Workbench wording. */
+export function unmarkAutoMergeNote(minutes: number) {
+  return `如有等你处理的合并确认，从现在起重新计时，${minutes} 分钟内无人处理将按项目设置自动合并。`;
+}
+
+/** C-65: human-only sensitive flag; the local CLI acts as the human. */
+function cardSensitive(args: readonly string[], io: CliIo): number {
+  const { flags, positionals } = parseArgs(args, []);
+  const parsedId = parseId("card", positionals[0]);
+  const value = positionals[1];
+  if (
+    positionals.length !== 2 ||
+    !parsedId.ok ||
+    (value !== "on" && value !== "off")
+  )
+    throw new CliError(
+      "用法：cardigan card sensitive <C-n> on|off",
+      EXIT.usage,
+      [USAGE],
+    );
+  for (const name of Object.keys(flags))
+    if (!["project", "data-dir"].includes(name))
+      throw new CliError(`不认识的选项：--${name}`, EXIT.usage, [USAGE]);
+  const card_id = parsedId.value.id;
+  const store = openStoreFrom(io, flags);
+  try {
+    const project_id = resolveProject(store, io, optional(flags, "project"));
+    runCommand(store, {
+      operation: "修改敏感标记",
+      target: card_id,
+      project_id,
+      actor: humanActor(project_id),
+      clock: systemClock,
+      reduce: (state, actor, ports) =>
+        setCardSensitive(
+          state,
+          actor,
+          { card_id, sensitive: value === "on" },
+          ports,
+        ),
+    });
+    // C-69: the timeout restarts at the unmark; say so only when it is on.
+    const minutes =
+      value === "off"
+        ? store.uow.read(
+            (tx) =>
+              projectPreferences(loadCommandState(tx, project_id))
+                .auto_merge_after_minutes,
+          )
+        : null;
+    io.stdout(
+      value === "on"
+        ? `已将 ${card_id} 标为敏感：合并确认将由你亲自处理，PM 不能代确认，也不会超时自动合并。`
+        : `已取消 ${card_id} 的敏感标记。${minutes === null ? "" : unmarkAutoMergeNote(minutes)}`,
+    );
+    return EXIT.ok;
+  } finally {
+    store.close();
+  }
 }
 
 function cardUpdate(args: readonly string[], io: CliIo): number {
@@ -747,11 +814,12 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
       timed_out: "超时",
       interrupted: "中断",
     };
-    const { decisions, actions, incidents, noticeList } = store.uow.read(
+    const { decisions, actions, incidents, noticeList, held } = store.uow.read(
       (tx) => {
         const state = loadCommandState(tx, project_id);
         const needs = unwrap(listNeedsYou(state, humanActor(project_id))).data;
         return {
+          held: needs.pm_held_merges,
           decisions: needs.decisions,
           actions: needs.human_actions,
           // Same source as the Workbench 知会 section (§7.4): newest first.
@@ -767,13 +835,35 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
       },
     );
 
+    // §7.4 (C-65): not waiting on the human, but answerable directly.
+    const heldLines = held.length
+      ? [
+          `PM 代确认中的合并（${held.length}，不需要你处理；也可以直接处理）`,
+          ...held.map((q) =>
+            [
+              `  ${q.id}  ${q.card_id ?? "项目"}`,
+              `    ${q.question}`,
+              ...(q.card_id
+                ? [
+                    `    直接处理：cardigan merge confirm|hold ${q.card_id}，或 cardigan merge request-changes ${q.card_id} --reason <原因>`,
+                  ]
+                : []),
+            ].join("\n"),
+          ),
+        ]
+      : [];
     if (
       decisions.length === 0 &&
       actions.length === 0 &&
       incidents.length === 0 &&
       noticeList.length === 0
     ) {
-      io.stdout("Needs You 是空的：没有待你拍板的事项，也没有待你执行的操作。");
+      io.stdout(
+        [
+          "Needs You 是空的：没有待你拍板的事项，也没有待你执行的操作。",
+          ...heldLines,
+        ].join("\n"),
+      );
       return EXIT.ok;
     }
     const lines: string[] = [];
@@ -845,6 +935,7 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
         );
       }
     }
+    lines.push(...heldLines);
     if (noticeList.length > 0) lines.push(...noticeLines(noticeList));
     io.stdout(lines.join("\n"));
     return EXIT.ok;

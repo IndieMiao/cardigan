@@ -422,3 +422,37 @@ test("U6c local WOFF2 fonts keep their MIME type, immutable cache and self-only 
     await harness.close();
   }
 });
+
+test("login and legacy sessions expose the current owner through /api/me", async () => {
+  const harness = await webHarness({ password: PASSWORD });
+  try {
+    const cookie = await harness.login(PASSWORD);
+    expect(
+      (await call(harness.port, "/api/me", { cookie })).json,
+    ).toMatchObject({
+      member: { id: "M-1", name: "所有者", title: "所有者", avatar: null },
+    });
+    harness.store.uow.run((tx) => {
+      const owner = tx.members.list()[0];
+      if (!owner) throw new Error("Missing owner");
+      tx.members.put({ ...owner, name: "邵杰", avatar: "library:liu-bei" });
+    });
+    harness.store.database.exec("UPDATE web_sessions SET member_id = NULL");
+    expect(
+      (await call(harness.port, "/api/me", { cookie })).json,
+    ).toMatchObject({
+      member: {
+        id: "M-1",
+        name: "邵杰",
+        title: "所有者",
+        avatar: "/avatars/v1/liu-bei/head-64.webp",
+      },
+    });
+    expect(
+      harness.store.database.prepare("SELECT member_id FROM web_sessions").get()
+        ?.member_id,
+    ).toBe("M-1");
+  } finally {
+    await harness.close();
+  }
+});
