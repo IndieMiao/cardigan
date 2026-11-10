@@ -1,5 +1,6 @@
 import { useCallback } from "react";
 import type { CardiganClient, CardView, SnapshotData } from "../api.js";
+import { NextOwners } from "../components/EmployeeIdentity.js";
 import {
   EmptyState,
   IdTag,
@@ -10,7 +11,6 @@ import {
 import { CardLink, Feedback } from "../components/Operations.js";
 import { routeHash } from "../route.js";
 import { SNAPSHOT_GROUPS } from "../snapshot-groups.js";
-import { nextOwnersLabel } from "../status.js";
 import { useResource } from "../useResource.js";
 
 function Cards({
@@ -34,7 +34,10 @@ function Cards({
             <CardLink projectId={projectId} id={c.id} label={c.title} />{" "}
             <StatusTag status={c.status} />
             <p>
-              <span>下一步：{nextOwnersLabel(c.next_owners)}</span>{" "}
+              <span>
+                下一步：
+                <NextOwners owners={c.next_owners} />
+              </span>{" "}
               <span>原因：{c.why}</span>
             </p>
           </li>

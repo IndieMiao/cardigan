@@ -164,7 +164,7 @@ test("U6c timeline prose is 15, speakers and subheadings 14, and secondary infor
       for (const el of document.querySelectorAll(selector))
         expect(size(el), selector).toBe("15px");
     for (const selector of [
-      ".timeline-head .timeline-author",
+      ".timeline-head .employee-identity",
       ".timeline-body h3",
     ])
       for (const el of document.querySelectorAll(selector))
@@ -175,7 +175,7 @@ test("U6c timeline prose is 15, speakers and subheadings 14, and secondary infor
       ".entry-meta",
       ".timeline-day > h3",
       ".system-line",
-      ".system-line .timeline-author",
+      ".system-line .employee-identity",
       ".timeline-conclusion",
       ".status",
       ".structured-entry summary",
@@ -186,7 +186,7 @@ test("U6c timeline prose is 15, speakers and subheadings 14, and secondary infor
       for (const el of document.querySelectorAll(selector))
         expect(size(el), selector).toBe("13px");
     for (const el of document.querySelectorAll(".timeline-days *")) {
-      if (el.closest("svg, code, .timeline-avatar")) continue;
+      if (el.closest("svg, code, .employee-avatar")) continue;
       expect(["12px", "16px"]).not.toContain(size(el));
     }
     expect(screen.getByText("中文English 123正文。")).toBeTruthy();

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { AttachmentView } from "../api.js";
+import { EmployeeIdentity } from "./EmployeeIdentity.js";
 import { Lightbox } from "./Lightbox.js";
 
 export const isBitmap = (a: AttachmentView) =>
@@ -30,11 +31,12 @@ export function AttachmentPreview({
         caption: (
           <>
             {a.id}{" "}
-            {a.uploaded_by === "human"
-              ? "你"
-              : a.uploaded_by.startsWith("assignment:")
-                ? `${a.employee?.name ?? a.author_display ?? `未命名的 ${a.uploader_role ?? "Agent"}`} ${a.uploaded_by.slice(11)}`
-                : "系统"}{" "}
+            <EmployeeIdentity
+              {...a}
+              author={a.uploaded_by}
+              author_role={a.uploader_role}
+              showTitle={false}
+            />{" "}
             <a href={a.download_path} download>
               下载
             </a>
