@@ -311,6 +311,22 @@ export class CentralGitTransport implements GitCentralPort {
       ]),
     );
   }
+  async treeOfCommit(repository: string, sha: string): Promise<string> {
+    if (
+      !fullSha.test(sha) ||
+      (await this.objectType(repository, sha)) !== "commit"
+    )
+      throw new Error("Tree lookup requires a full commit SHA");
+    const tree = await this.checked(repository, [
+      "rev-parse",
+      "--verify",
+      "--end-of-options",
+      `${sha}^{tree}`,
+    ]);
+    if (!fullSha.test(tree) || tree.length !== sha.length)
+      throw new Error("Invalid commit tree id");
+    return tree;
+  }
   async compareAndSwapRef(
     repository: string,
     ref: string,
