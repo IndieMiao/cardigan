@@ -4,6 +4,7 @@ import {
   autoConfirmMerge,
   hasPassedMergeCheck,
   latestMergeCheck,
+  listNeedsYou,
   type MergeCheckView,
   mergePlan,
   prepareMergePlan,
@@ -463,4 +464,207 @@ test("a timeout-delegated confirmation still requires a passed check before publ
   record("passed", "rechecked");
   f.commit(recordMergeResult(state(), system, merged, f.io));
   expect(f.state.cards[0]?.status).toBe("done");
+});
+
+for (const approval of ["open", "human", "delegated"] as const) {
+  test.each(["failed", "timed_out"] as const)(
+    `a ${approval} confirmation can return a %s check through the existing rework lifecycle`,
+    async (status) => {
+      const { f, state, record, completion } = await fixture("confirm");
+      const decision = f.state.decisions[0];
+      if (!decision) throw new Error("Missing confirmation");
+      if (approval === "human")
+        f.commit(
+          recordDecision(
+            state(),
+            human,
+            {
+              decision_id: decision.id,
+              option: "merge",
+              rationale: "Merge",
+              raw_quote: "Merge",
+            },
+            f.io,
+          ),
+        );
+      if (approval === "delegated") {
+        f.commit(
+          setProjectPreferences(
+            state(),
+            human,
+            { auto_merge_after_minutes: 1 },
+            f.io,
+          ),
+        );
+        f.io.clock = { now: () => "2099-01-01T00:00:00.000Z" };
+        f.commit(
+          autoConfirmMerge(state(), system, { decision_id: decision.id }, f.io),
+        );
+      }
+      const authorization = f.state.decisions[0]?.resolution;
+      record("queued");
+      record("running");
+      record(status);
+      const pending = value(listNeedsYou(state(), human)).data.decisions;
+      expect(pending.map((q) => q.id)).toContain(decision.id);
+      if (approval !== "open")
+        expect(pending[0]?.options.map((o) => o.key)).toEqual([
+          "request_changes",
+        ]);
+      const params = {
+        decision_id: decision.id,
+        option: "request_changes",
+        rationale: "修复合并检查失败",
+        raw_quote: "请先修复这次失败再申请合并",
+      };
+      const effect = value(recordDecision(state(), human, params, f.io));
+      f.commit({ ok: true, value: effect });
+      expect(f.state.cards[0]?.status).toBe("in_progress");
+      expect(
+        f.state.work_items.find((w) => w.id === f.coder.work_item_id),
+      ).toMatchObject({
+        status: "changes_requested",
+        assignment_id: f.coder.id,
+      });
+      expect(
+        f.state.deliveries.find((d) => d.id === completion.id)?.status,
+      ).toBe("superseded");
+      expect(
+        f.state.work_items.find((w) => w.id === f.pm.work_item_id)?.status,
+      ).toBe("todo");
+      if (approval !== "open")
+        expect(f.state.decisions[0]).toMatchObject({
+          status: "superseded",
+          resolution: authorization,
+        });
+      expect(effect.events).toContainEqual(
+        expect.objectContaining({
+          type: "merge_changes_requested",
+          payload: expect.objectContaining({
+            decision_id: decision.id,
+            completion_id: completion.id,
+            work_item_id: f.coder.work_item_id,
+            run_kind: "fix",
+            reason: params.rationale,
+            raw_quote: params.raw_quote,
+          }),
+        }),
+      );
+      expect(effect.timeline).toContainEqual(
+        expect.objectContaining({ body: `退回修改：${params.rationale}` }),
+      );
+      expect(value(listNeedsYou(state(), human)).data.decisions).toEqual([]);
+      expect(recordDecision(state(), human, params, f.io).ok).toBe(false);
+      expect(mergePlan(state(), f.card.id).ok).toBe(false);
+      const next = await f.deliver("code", "e".repeat(40));
+      f.review(next);
+      const request = await f.deliver("card_completion", next.subject.value);
+      f.review(request);
+      expect(f.state.decisions.at(-1)).toMatchObject({
+        status: "open",
+        target: { delivery_id: request.id },
+      });
+      expect(f.state.decisions.at(-1)?.id).not.toBe(decision.id);
+      expect(
+        latestMergeCheck(state().events, f.card.id, request.id),
+      ).toBeUndefined();
+      expect(recordDecision(state(), human, params, f.io).ok).toBe(false);
+    },
+  );
+}
+
+test.each([
+  "missing",
+  "queued",
+  "running",
+  "passed",
+  "interrupted",
+  "requeued",
+] as const)(
+  "a confirmed merge with a %s latest check cannot be returned or offered in Needs You",
+  async (status) => {
+    const { f, state, record } = await fixture("confirm");
+    const decision = f.state.decisions[0];
+    if (!decision) throw new Error("Missing confirmation");
+    const params = {
+      decision_id: decision.id,
+      option: "request_changes",
+      rationale: "Fix",
+      raw_quote: "Fix",
+    };
+    f.commit(
+      recordDecision(state(), human, { ...params, option: "merge" }, f.io),
+    );
+    if (status !== "missing") {
+      record("queued");
+      record("running");
+      record("failed");
+      f.commit(recheckMerge(state(), human, { card_id: f.card.id }, f.io));
+      if (status !== "requeued") record("queued", "retry");
+      if (!["queued", "requeued"].includes(status)) record("running", "retry");
+      if (status === "passed" || status === "interrupted")
+        record(status, "retry");
+    }
+    const before = JSON.stringify(f.state);
+    expect(recordDecision(state(), human, params, f.io)).toMatchObject({
+      ok: false,
+      error: {
+        code: "illegal_transition",
+        message: expect.stringContaining("最新检查失败或超时"),
+      },
+    });
+    expect(value(listNeedsYou(state(), human)).data.decisions).toEqual([]);
+    expect(JSON.stringify(f.state)).toBe(before);
+  },
+);
+
+test("failed confirmed returns still reject blank reasons, agents, stale checks and closed cards", async () => {
+  const { f, state, record, product } = await fixture("confirm");
+  const decision = f.state.decisions[0];
+  if (!decision) throw new Error("Missing confirmation");
+  const params = {
+    decision_id: decision.id,
+    option: "request_changes",
+    rationale: "Fix",
+    raw_quote: "Fix",
+  };
+  f.commit(
+    recordDecision(state(), human, { ...params, option: "merge" }, f.io),
+  );
+  record("queued");
+  record("running");
+  record("failed");
+  const before = JSON.stringify(f.state);
+  for (const field of ["rationale", "raw_quote"] as const)
+    expect(
+      recordDecision(state(), human, { ...params, [field]: " \n " }, f.io).ok,
+    ).toBe(false);
+  for (const actor of [system, f.actor(f.coder), f.actor(f.pm)])
+    expect(recordDecision(state(), actor, params, f.io).ok).toBe(false);
+  const stale = {
+    ...state(),
+    events: state().events.map((e) =>
+      e.type.startsWith("merge_check_")
+        ? {
+            ...e,
+            payload: { ...(e.payload as object), completion_id: product.id },
+          }
+        : e,
+    ),
+  };
+  expect(recordDecision(stale, human, params, f.io).ok).toBe(false);
+  expect(value(listNeedsYou(stale, human)).data.decisions).toEqual([]);
+  for (const status of ["done", "cancelled"] as const)
+    expect(
+      recordDecision(
+        { ...state(), cards: state().cards.map((c) => ({ ...c, status })) },
+        human,
+        params,
+        f.io,
+      ).ok,
+    ).toBe(false);
+  expect(
+    recordDecision(state(), human, { ...params, option: "hold" }, f.io).ok,
+  ).toBe(false);
+  expect(JSON.stringify(f.state)).toBe(before);
 });
