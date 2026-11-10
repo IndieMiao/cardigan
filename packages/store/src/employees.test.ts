@@ -20,6 +20,7 @@ import {
   assignment,
   card,
   event,
+  latestSchemaVersion,
   project_id,
   withTempStore,
   workItem,
@@ -174,7 +175,7 @@ test("v8 migration preserves old project data, assignments, event streams, token
   try {
     const upgraded = Store.open({ dataDir });
     try {
-      expect(upgraded.schemaVersion()).toBe(14);
+      expect(upgraded.schemaVersion()).toBe(latestSchemaVersion());
       expect(upgraded.migrate()).toEqual([]);
       expect(upgraded.getProject(project_id)?.id).toBe(project_id);
       expect(upgraded.verifyToken(token)).toBeDefined();

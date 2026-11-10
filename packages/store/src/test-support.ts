@@ -11,7 +11,17 @@ import type {
   TimelineEntry,
   WorkItem,
 } from "@cardigan/domain";
+import { defaultMigrationsDir, listMigrations } from "./migrate.js";
 import { Store } from "./store.js";
+
+export function latestSchemaVersion(): number {
+  return Math.max(
+    0,
+    ...listMigrations(defaultMigrationsDir).map(
+      (migration) => migration.version,
+    ),
+  );
+}
 
 /**
  * Test support: every test gets its own temporary directory, so databases never
