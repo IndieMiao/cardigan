@@ -32,6 +32,22 @@ export function employeeNameKey(name: string): string {
   return employeeDisplayName(name).toLowerCase();
 }
 
+/** Shared by human edits and launch compilation of persisted employee text. */
+export function employeeTextError(
+  value: unknown,
+  label: string,
+  limit?: number,
+  required = false,
+): string | undefined {
+  if (typeof value !== "string") return `${label}必须是文本`;
+  if (/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value))
+    return `${label}不能含控制字符或换行`;
+  if (required && value.trim().length === 0) return `${label}不能为空`;
+  if (limit !== undefined && Array.from(value.trim()).length > limit)
+    return `${label}最多 ${limit} 字`;
+  return undefined;
+}
+
 export interface EmployeeActivity {
   readonly employee_id: EmployeeId;
   readonly last_assigned_at: Timestamp | null;

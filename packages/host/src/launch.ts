@@ -282,8 +282,8 @@ export async function launchRun(
     if (model === undefined)
       throw new Error(`Launch profile ${profileRef} has no model`);
     const compiled = compileAssignmentLaunch({
-      ...(assignment.employee_id
-        ? { employee: { launch_profile_ref: profileRef } }
+      ...(employee !== undefined
+        ? { employee: { launch_profile_ref: profileRef, identity: employee } }
         : {}),
       assignment: {
         assignment_id: assignment.id,
