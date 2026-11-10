@@ -74,7 +74,7 @@ const TOP_LEVEL_USAGE = [
   "  assign           建 Assignment 并在同一事务里签发 Token",
   "  token issue      给已有 active Assignment 重新签发 Token（先作废旧 Token）",
   "  human-action done 标记人已执行完 h(n)",
-  "  needs-you        看待你拍板和待你执行的事项",
+  "  needs-you        看待你拍板、待你执行的事项和知会（read 标为已读）",
   "  inbox            待投递和投递失败的通知（--assignment A-n 只看一个）",
   "  attention        升级通知与失联的 Assignment",
   "  assignment start|stop|attach  启动/停止/观察终端；attach --interactive 接管输入，--print 只打印命令",

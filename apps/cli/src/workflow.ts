@@ -11,6 +11,8 @@ import {
   createCard,
   isRoleActive,
   listNeedsYou,
+  markNoticesRead,
+  notices,
   parseId,
   projectSnapshot,
   setCardSensitive,
@@ -60,7 +62,8 @@ const USAGE = [
   "  cardigan pm rotate --office|--ops [--project <p>]     把常驻 PM 换到 pm 角色的最新版本",
   "    新建固定最新版本的常驻 Assignment，待处理的 PM 事项转给它，旧的释放并作废 Token；",
   "    已是最新版本时不做改动。先用 cardigan role upgrade pm --from-default 追加新版本。",
-  "  cardigan needs-you [--project <p>]                   看待你拍板和待你执行的事项",
+  "  cardigan needs-you [--project <p>]                   看待你拍板、待你执行的事项和知会",
+  "  cardigan needs-you read <知会编号...>|--all [--project <p>]  把知会标为已读",
   "  cardigan human-action done <h(n)> --text <结果> [--project <p>]",
   "",
   "通用：--project 省略时取 CARDIGAN_PROJECT，再取数据库里唯一的项目；",
@@ -758,9 +761,11 @@ async function pmStart(
 
 /**
  * `cardigan needs-you` — M3.5 read-only view until M5 builds the page
- * (development plan §7.3): open human decisions and pending human actions.
+ * (development plan §7.3): open human decisions, pending human actions and
+ * the §7.4 知会 list; `needs-you read` marks notices read.
  */
 async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
+  if (args[0] === "read") return needsYouRead(args.slice(1), io);
   const parsed = parseArgs(args, []);
   const store = openStoreFrom(io, parsed.flags);
   try {
@@ -794,23 +799,26 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
       timed_out: "超时",
       interrupted: "中断",
     };
-    const { decisions, actions, incidents, held } = store.uow.read((tx) => {
-      const needs = unwrap(
-        listNeedsYou(loadCommandState(tx, project_id), humanActor(project_id)),
-      ).data;
-      return {
-        held: needs.pm_held_merges,
-        decisions: needs.decisions,
-        actions: needs.human_actions,
-        incidents: tx.assignments
-          .list(project_id)
-          .filter(
-            (a) =>
-              a.status === "active" &&
-              ["lost", "unknown"].includes(a.runtime_state),
-          ),
-      };
-    });
+    const { decisions, actions, incidents, noticeList, held } = store.uow.read(
+      (tx) => {
+        const state = loadCommandState(tx, project_id);
+        const needs = unwrap(listNeedsYou(state, humanActor(project_id))).data;
+        return {
+          held: needs.pm_held_merges,
+          decisions: needs.decisions,
+          actions: needs.human_actions,
+          // Same source as the Workbench 知会 section (§7.4): newest first.
+          noticeList: notices(state),
+          incidents: tx.assignments
+            .list(project_id)
+            .filter(
+              (a) =>
+                a.status === "active" &&
+                ["lost", "unknown"].includes(a.runtime_state),
+            ),
+        };
+      },
+    );
 
     // §7.4 (C-65): not waiting on the human, but answerable directly.
     const heldLines = held.length
@@ -832,7 +840,8 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
     if (
       decisions.length === 0 &&
       actions.length === 0 &&
-      incidents.length === 0
+      incidents.length === 0 &&
+      noticeList.length === 0
     ) {
       io.stdout(
         [
@@ -912,7 +921,88 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
       }
     }
     lines.push(...heldLines);
+    if (noticeList.length > 0) lines.push(...noticeLines(noticeList));
     io.stdout(lines.join("\n"));
+    return EXIT.ok;
+  } finally {
+    store.close();
+  }
+}
+
+type NoticeList = ReturnType<typeof notices>;
+
+/** The Workbench shows the newest 50 notices; the CLI shows the same slice. */
+const NOTICE_LIMIT = 50;
+
+/** §7.4 知会 section: delegated merges and decisions, informational only. */
+function noticeLines(all: NoticeList): string[] {
+  const unread = all.filter((n) => !n.read).length;
+  const shown = all.slice(0, NOTICE_LIMIT);
+  const lines = [
+    `知会（未读 ${unread}，共 ${all.length}${all.length > shown.length ? `，显示最新 ${shown.length} 条` : ""}）`,
+    "  PM 代为确认的合并和代拍的决定，不需要你处理；有疑问可在卡片里追问。",
+  ];
+  for (const n of shown) {
+    const label =
+      n.kind === "merge"
+        ? n.resolved_by === "system"
+          ? "超时自动合并"
+          : "PM 代确认合并"
+        : "PM 代拍";
+    lines.push(
+      [
+        `  ${n.read ? "[已读]" : "[未读]"} ${n.id}  ${label}  ${n.decision_id}${n.card_id ? `  ${n.card_id}` : ""}  ${n.at}`,
+        ...(n.question ? [`    ${n.question}`] : []),
+        `    ${n.body}`,
+      ].join("\n"),
+    );
+  }
+  if (unread > 0)
+    lines.push(
+      "  标为已读：cardigan needs-you read <知会编号...>，或 cardigan needs-you read --all",
+    );
+  return lines;
+}
+
+/** `cardigan needs-you read <notice id...>|--all` — same command as the Workbench. */
+function needsYouRead(args: readonly string[], io: CliIo): number {
+  const parsed = parseArgs(args, ["all"]);
+  const all = parsed.flags.all === true;
+  if (all === parsed.positionals.length > 0)
+    throw new CliError("请给出知会编号，或使用 --all（二选一）", EXIT.usage, [
+      USAGE,
+    ]);
+  const store = openStoreFrom(io, parsed.flags);
+  try {
+    const project_id = resolveProject(
+      store,
+      io,
+      optional(parsed.flags, "project"),
+    );
+    const ids = all
+      ? store.uow.read((tx) =>
+          notices(loadCommandState(tx, project_id))
+            .filter((n) => !n.read)
+            .map((n) => n.id),
+        )
+      : parsed.positionals;
+    if (ids.length === 0) {
+      io.stdout("没有未读的知会");
+      return EXIT.ok;
+    }
+    const result = runCommand(store, {
+      operation: "标记知会已读",
+      target: all ? "全部未读知会" : ids.join(", "),
+      project_id,
+      actor: humanActor(project_id),
+      reduce: (state, actor, ports) =>
+        markNoticesRead(state, actor, { notice_ids: ids }, ports),
+    });
+    io.stdout(
+      result.notice_ids.length === 0
+        ? "这些知会已经是已读"
+        : `已标为已读 ${result.notice_ids.length} 条知会`,
+    );
     return EXIT.ok;
   } finally {
     store.close();
