@@ -13,7 +13,10 @@ import { ReadOnlyTransactionError } from "./read-only.js";
 import { newUlid } from "./ulid.js";
 
 export interface ReadGlobalRepositories {
-  readonly employees: Pick<GlobalRepositories["employees"], "get" | "list">;
+  readonly employees: Pick<
+    GlobalRepositories["employees"],
+    "get" | "list" | "assignmentActivity"
+  >;
   readonly global_events: Pick<
     GlobalRepositories["global_events"],
     "listAfter"
@@ -31,6 +34,24 @@ export function createGlobalRepositories(
     JSON.parse(row.doc) as Employee;
   return {
     employees: {
+      assignmentActivity: () =>
+        db
+          .prepare(`
+        SELECT e.id AS employee_id,
+          MAX(json_extract(a.doc, '$.created_at')) AS last_assigned_at,
+          COUNT(r.id) AS unfinished_runs
+        FROM employees e
+        LEFT JOIN assignments a ON json_extract(a.doc, '$.employee_id') = e.id
+        LEFT JOIN runs r ON r.project_id = a.project_id AND r.assignment_id = a.id
+          AND json_extract(r.doc, '$.status') NOT IN ('completed', 'failed', 'cancelled')
+        GROUP BY e.id
+      `)
+          .all()
+          .map((row) => ({
+            employee_id: row.employee_id as Employee["id"],
+            last_assigned_at: row.last_assigned_at as string | null,
+            unfinished_runs: Number(row.unfinished_runs),
+          })),
       get: (id) => {
         const row = db
           .prepare("SELECT doc FROM employees WHERE id = ?")

@@ -52,7 +52,8 @@ export interface DispatcherOptions {
   /** Snapshot for a NEW terminal; an existing session keeps its previous Run's snapshot. */
   readonly snapshot: (
     assignment: Assignment,
-  ) => Promise<Pick<Run, "model" | "agent_cli_version">>;
+    project: ProjectId,
+  ) => Promise<Pick<Run, "model" | "agent_cli_version" | "launch_profile_ref">>;
   /** M3.5 host adapter: provision and dispatch THIS queued Run with bell as first prompt.
    * Never queue another Run. Own token/terminal compensation on startup failure. */
   readonly startRun: (input: {
@@ -224,16 +225,35 @@ export class Dispatcher {
           r.role_version === a.role_version,
       )
       .sort((x, y) => Number(y.id.slice(2)) - Number(x.id.slice(2)))[0];
-    let snapshot: Pick<Run, "model" | "agent_cli_version">;
+    let snapshot: Pick<
+      Run,
+      "model" | "agent_cli_version" | "launch_profile_ref"
+    >;
+    let replaceProfile = false;
     try {
-      if (queued) snapshot = queued;
+      if (a.employee_id) {
+        snapshot = await this.options.snapshot(a, project);
+        replaceProfile =
+          live &&
+          snapshot.launch_profile_ref !== undefined &&
+          (prior?.launch_profile_ref !== snapshot.launch_profile_ref ||
+            prior.model !== snapshot.model);
+        if (replaceProfile) {
+          live = false;
+          if (a.runtime_ref)
+            replacement = {
+              previous: a.runtime_ref,
+              reason: "launch_profile_changed",
+            };
+        } else if (live && prior) snapshot = prior;
+      } else if (queued) snapshot = queued;
       else if (live) {
         if (!prior) {
           this.reject(project, notes, a, "missing_session_snapshot");
           return;
         }
         snapshot = prior;
-      } else snapshot = await this.options.snapshot(a);
+      } else snapshot = await this.options.snapshot(a, project);
     } catch {
       this.reject(project, notes, a, "snapshot_unavailable");
       return;
@@ -270,6 +290,14 @@ export class Dispatcher {
         sent = result.ok && result.value.sent;
         if (!result.ok) reason = `wake_failed:${result.error.code}`;
       } else {
+        if (replaceProfile && job.assignment.runtime_ref) {
+          const released = await this.options.runtime.release(
+            job.assignment.runtime_ref,
+            { force: true },
+          );
+          if (!released.ok)
+            throw new Error("Previous employee session could not be released");
+        }
         await this.options.startRun({
           project,
           assignment: job.assignment,
@@ -296,7 +324,7 @@ export class Dispatcher {
     project: ProjectId,
     notes: readonly Notification[],
     expected: Assignment,
-    snapshot: Pick<Run, "model" | "agent_cli_version">,
+    snapshot: Pick<Run, "model" | "agent_cli_version" | "launch_profile_ref">,
     live: boolean,
   ): Job | undefined {
     const { store } = this.options;
@@ -362,12 +390,25 @@ export class Dispatcher {
               kind,
               model: snapshot.model,
               agent_cli_version: snapshot.agent_cli_version,
+              ...(snapshot.launch_profile_ref
+                ? { launch_profile_ref: snapshot.launch_profile_ref }
+                : {}),
             },
             ports,
           ),
         );
         persistEffect(tx, project, effect);
         run = effect.data;
+        state = loadCommandState(tx, project);
+      }
+      if (run.status === "queued" && snapshot.launch_profile_ref) {
+        run = {
+          ...run,
+          model: snapshot.model,
+          agent_cli_version: snapshot.agent_cli_version,
+          launch_profile_ref: snapshot.launch_profile_ref,
+        };
+        tx.runs.put(project, run);
         state = loadCommandState(tx, project);
       }
       if (!live && run.status !== "queued")

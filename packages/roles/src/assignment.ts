@@ -64,6 +64,8 @@ export interface AssignmentMcpEndpoint {
 
 export interface CompileAssignmentInput {
   readonly assignment: AssignmentIdentity;
+  /** Employee profiles select the CLI as well as its model/provider. */
+  readonly employee?: { readonly launch_profile_ref: string | null };
   readonly role: AssignmentRoleInput;
   /** Whole launch config; the profile is looked up by `role.launch_profile`. */
   readonly launch: LaunchConfig;
@@ -118,19 +120,26 @@ export function compileAssignmentLaunch(
   const firstFile = join(input.run_dir, "first.md");
   const launchScript = join(input.run_dir, LAUNCH_SCRIPT_NAME);
 
+  const profile =
+    input.employee?.launch_profile_ref ?? input.role.launch_profile;
   const base = compileLaunch({
     config: input.launch,
-    profile: input.role.launch_profile,
+    profile,
     secrets: input.secrets,
     runtimeDir: input.run_dir,
     instanceId: "assignment",
   });
 
-  if (base.harness !== input.role.harness) {
+  if (
+    !input.employee?.launch_profile_ref &&
+    base.harness !== input.role.harness
+  ) {
     throw new Error(
       `Role ${input.role.role_id} uses ${input.role.harness} but profile ${input.role.launch_profile} launches ${base.harness}`,
     );
   }
+
+  const harness = base.harness;
 
   const toolNames = input.role.allowed_tools.map(
     (tool) => `mcp__${serverName}__${tool}`,
@@ -158,7 +167,7 @@ export function compileAssignmentLaunch(
     harnessEnv[`GIT_CONFIG_VALUE_${index}`] = path;
   }
 
-  switch (input.role.harness) {
+  switch (harness) {
     case "claude-code":
       // §M2.4: strict MCP config, explicit Card tool allow-list, Core Prompt file.
       harnessFiles.push({
@@ -242,7 +251,7 @@ export function compileAssignmentLaunch(
   const args = [
     ...base.args,
     ...harnessArgs,
-    ...(input.role.harness === "claude-code" ? ["--"] : []),
+    ...(harness === "claude-code" ? ["--"] : []),
   ];
   const command = base.command;
 
@@ -271,8 +280,7 @@ export function compileAssignmentLaunch(
     }
   }
   const strippedBaseFiles = base.files.map((file) => {
-    if (secretKeys.size === 0 && input.role.harness !== "claude-code")
-      return file;
+    if (secretKeys.size === 0 && harness !== "claude-code") return file;
     try {
       const parsed = JSON.parse(file.content) as {
         env?: Record<string, string>;
@@ -285,7 +293,7 @@ export function compileAssignmentLaunch(
         ...file,
         // D7: the per-launch --settings file also overrides an existing Claude
         // config without editing its session history or remembered files.
-        content: `${JSON.stringify({ ...parsed, env: keptEnv, ...(input.role.harness === "claude-code" ? { autoMemoryEnabled: false } : {}) }, null, 2)}\n`,
+        content: `${JSON.stringify({ ...parsed, env: keptEnv, ...(harness === "claude-code" ? { autoMemoryEnabled: false } : {}) }, null, 2)}\n`,
       };
     } catch {
       return file;
@@ -305,7 +313,7 @@ export function compileAssignmentLaunch(
         ];
 
   return {
-    harness: input.role.harness,
+    harness: harness,
     role_id: input.role.role_id,
     profile: base.profile,
     command,
@@ -336,7 +344,7 @@ export function compileAssignmentLaunch(
           command,
           args,
           env,
-          ...(input.role.harness === "claude-code"
+          ...(harness === "claude-code"
             ? {
                 claude: {
                   configDir: join(input.run_dir, "claude"),

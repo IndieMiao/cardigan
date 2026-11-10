@@ -101,6 +101,7 @@ export interface QueueRunParams {
   readonly assignment_id: AssignmentId;
   readonly model: string;
   readonly agent_cli_version: string;
+  readonly launch_profile_ref?: string;
   /** Defaults to `initial` (a host-started Assignment). */
   readonly kind?: RunKind;
   /**
@@ -122,6 +123,8 @@ export function queueRun(
     const assignment = target(d, p.assignment_id);
     text(p.model, "model");
     text(p.agent_cli_version, "agent_cli_version");
+    if (p.launch_profile_ref !== undefined)
+      text(p.launch_profile_ref, "launch_profile_ref");
     if (p.trigger_event_id !== undefined) {
       ensure(
         !d
@@ -148,6 +151,12 @@ export function queueRun(
     const run: Run = {
       id,
       assignment_id: assignment.id,
+      ...(assignment.employee_id
+        ? { employee_id: assignment.employee_id }
+        : {}),
+      ...(p.launch_profile_ref
+        ? { launch_profile_ref: p.launch_profile_ref }
+        : {}),
       trigger_event_id: p.trigger_event_id ?? event.id,
       kind: p.kind ?? "initial",
       status: "queued",
@@ -163,6 +172,11 @@ export function queueRun(
 }
 
 export interface DispatchRunParams {
+  /** Host compilation snapshot, recorded atomically before a queued Run starts. */
+  readonly launch_snapshot?: Pick<
+    Run,
+    "model" | "agent_cli_version" | "launch_profile_ref"
+  >;
   readonly run_id: RunId;
   /**
    * M3.2: omit it to dispatch on the Assignment's existing terminal — the
@@ -173,7 +187,10 @@ export interface DispatchRunParams {
   /** Host-only D5 replacement, committed together with dispatch and its handoff. */
   readonly replacement?: {
     readonly previous: RuntimeRef;
-    readonly reason: "runtime_not_found" | "runtime_unavailable";
+    readonly reason:
+      | "runtime_not_found"
+      | "runtime_unavailable"
+      | "launch_profile_changed";
   };
 }
 export function dispatchRun(
@@ -183,7 +200,19 @@ export function dispatchRun(
   ports: CommandPorts,
 ) {
   return command(state, actor, "dispatch_run", ports, (d) => {
-    const run = d.get("runs", p.run_id);
+    const stored = d.get("runs", p.run_id);
+    const run = p.launch_snapshot
+      ? {
+          ...stored,
+          model: p.launch_snapshot.model,
+          agent_cli_version: p.launch_snapshot.agent_cli_version,
+          ...(p.launch_snapshot.launch_profile_ref
+            ? { launch_profile_ref: p.launch_snapshot.launch_profile_ref }
+            : {}),
+        }
+      : stored;
+    if (p.launch_snapshot?.launch_profile_ref !== undefined)
+      text(p.launch_snapshot.launch_profile_ref, "launch_profile_ref");
     const assignment = target(d, run.assignment_id);
     snapshot(run, assignment);
     const status = unwrap(transition("run", run.status, "dispatch"));
@@ -246,7 +275,11 @@ export function dispatchRun(
         .list("runs")
         .filter((r) => r.assignment_id === assignment.id && r.id !== run.id)
         .sort((x, y) => Number(y.id.slice(2)) - Number(x.id.slice(2)))[0];
-      const body = `运行时失联（${p.replacement.reason}），替换 Session。旧 RuntimeRef：${JSON.stringify(p.replacement.previous)}。最近 Run：${previousRun?.id ?? "无"}，outcome：${previousRun?.outcome ?? "无"}。新 Session 先读卡片和 get_updates。`;
+      const reason =
+        p.replacement.reason === "launch_profile_changed"
+          ? "员工启动配置已变更"
+          : `运行时失联（${p.replacement.reason}）`;
+      const body = `${reason}，替换 Session。旧 RuntimeRef：${JSON.stringify(p.replacement.previous)}。最近 Run：${previousRun?.id ?? "无"}，outcome：${previousRun?.outcome ?? "无"}。新 Session 先读卡片和 get_updates。`;
       d.emit(
         "session_replaced",
         cardId(d, assignment),
@@ -284,7 +317,13 @@ export function dispatchRun(
       ...(base_sha ? { base_sha } : {}),
       ...(ref.agent_session_id ? { session_ref: ref.agent_session_id } : {}),
     });
-    const next = { ...run, status };
+    const next = {
+      ...run,
+      status,
+      ...(assignment.employee_id
+        ? { employee_id: assignment.employee_id }
+        : {}),
+    };
     d.put("runs", next);
     d.emit("run_dispatched", cardId(d, assignment), {
       run_id: run.id,

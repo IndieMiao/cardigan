@@ -300,7 +300,7 @@ test("U6b long comments fold after fifteen rendered lines and expand safely; seq
   expect(document.querySelector(".timeline-entry")?.textContent).not.toContain(
     "序号",
   );
-  act(() => screen.getByRole("button", { name: "coder" }).focus());
+  act(() => screen.getByRole("button", { name: "未命名的 coder" }).focus());
   const tooltip = await screen.findByRole("tooltip");
   expect(tooltip.textContent).toContain("序号 37");
   expect(tooltip.textContent).toContain("A-1");

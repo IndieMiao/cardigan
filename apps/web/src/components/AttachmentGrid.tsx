@@ -8,7 +8,7 @@ const uploader = (a: AttachmentView) =>
   a.uploaded_by === "human"
     ? "你"
     : a.uploaded_by.startsWith("assignment:")
-      ? `${a.uploader_role ?? "Agent"} ${a.uploaded_by.slice(11)}`
+      ? `${a.employee?.name ?? a.author_display ?? `未命名的 ${a.uploader_role ?? "Agent"}`} ${a.uploaded_by.slice(11)}`
       : "系统";
 const size = (bytes: number) =>
   bytes < 1024

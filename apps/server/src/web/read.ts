@@ -1,5 +1,6 @@
 import type {
   Actor,
+  AuthorView,
   CardId,
   CardView,
   CommandState,
@@ -10,6 +11,7 @@ import type {
   WorkItem,
 } from "@cardigan/domain";
 import {
+  authorView,
   deriveCardStatus,
   deriveReviewMatrix,
   extractReferences,
@@ -17,6 +19,7 @@ import {
   projectSnapshot,
   type Result,
   resolveReferences,
+  runAuthorView,
 } from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
@@ -170,7 +173,7 @@ function affectsCard(
 }
 
 /** Attachment metadata as the browser gets it; the blob is a separate request. */
-export interface AttachmentView {
+export interface AttachmentView extends AuthorView {
   readonly id: string;
   readonly mime: string;
   readonly size: number;
@@ -244,6 +247,7 @@ export function attachmentViews(
         kind: attachment.kind,
         attach_to: attachment.attach_to,
         uploaded_by: attachment.uploaded_by,
+        ...authorView(state, attachment.uploaded_by),
         uploader_role: attachment.uploaded_by.startsWith("assignment:")
           ? (roles.get(attachment.uploaded_by.slice(11)) ?? null)
           : null,
@@ -406,6 +410,7 @@ export function cardDetail(
         : undefined;
     return {
       ...entry,
+      ...authorView(state, entry.author),
       event_type: event?.type ?? null,
       ...(event?.type === "attachment_uploaded" &&
       typeof attachmentId === "string" &&
@@ -448,8 +453,11 @@ export function cardDetail(
         (entry) =>
           entry.review_id || decisions.some((d) => d.id === entry.decision_id),
       ),
-    deliveries,
-    reviews,
+    deliveries: deliveries.map((d) => ({
+      ...d,
+      ...runAuthorView(state, d.run_id),
+    })),
+    reviews: reviews.map((r) => ({ ...r, ...runAuthorView(state, r.run_id) })),
     review_matrix,
     decisions,
     human_actions,
@@ -681,6 +689,7 @@ export function executionView(
             ? (assignment.standing_mode ?? null)
             : null,
         id: assignment.id,
+        ...authorView(state, `assignment:${assignment.id}`),
         scope: assignment.scope,
         work_item_id: assignment.work_item_id ?? null,
         role_id: assignment.role_id,
@@ -854,6 +863,12 @@ export function activity(
       seq: event.seq,
       type: event.type,
       actor: event.actor,
+      ...authorView(
+        state,
+        event.actor.kind === "assignment"
+          ? `assignment:${event.actor.assignment_id}`
+          : event.actor.kind,
+      ),
       role: actorRole(event),
       payload: event.payload,
       created_at: event.created_at,

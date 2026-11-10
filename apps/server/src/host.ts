@@ -7,6 +7,7 @@ import type {
   Assignment,
   Clock,
   DispatchRunParams,
+  ProjectId,
   Run,
 } from "@cardigan/domain";
 import {
@@ -45,7 +46,8 @@ export interface HostWiring {
   readonly beforeWake: NonNullable<DispatcherOptions["beforeWake"]>;
   readonly snapshot: (
     assignment: Assignment,
-  ) => Promise<Pick<Run, "model" | "agent_cli_version">>;
+    project: ProjectId,
+  ) => Promise<Pick<Run, "model" | "agent_cli_version" | "launch_profile_ref">>;
   readonly startRun: (input: {
     project: string;
     assignment: Assignment;
@@ -145,20 +147,7 @@ export async function createHostWiring(options: {
       );
     },
     standing: standingResolver(options.store),
-    snapshot: async (assignment) => {
-      // The port hands the Assignment without a project id; the role version
-      // is unique per project, so look it up where it lives.
-      const project = options.store
-        .listProjects()
-        .map((entry) => entry.id)
-        .find(
-          (id) =>
-            options.store.uow.read((tx) =>
-              tx.assignments.get(id, assignment.id),
-            )?.id === assignment.id,
-        );
-      if (project === undefined)
-        throw new Error(`Assignment ${assignment.id} is not in any project`);
+    snapshot: async (assignment, project) => {
       const role = options.store.uow.run((tx) =>
         getRoleVersion(
           tx,
@@ -169,15 +158,19 @@ export async function createHostWiring(options: {
       );
       if (role === undefined)
         throw new Error(`Role ${assignment.role_id} is missing`);
-      const profile = resolveProfile(
-        launch.config,
-        role.launch_profile_ref,
-      ).profile;
+      const employee = options.store.uow.read((tx) =>
+        assignment.employee_id
+          ? tx.employees.get(assignment.employee_id)
+          : undefined,
+      );
+      const profileRef =
+        employee?.launch_profile_ref ?? role.launch_profile_ref;
+      const profile = resolveProfile(launch.config, profileRef).profile;
       if (profile.model === undefined)
         throw new Error("The launch profile has no model");
       // In agent-ssh mode the binary only exists for the agent account, so the
       // probe goes through the runtime instead of the host's PATH (M2.7, §13.4).
-      const binary = harnessBinary(role.harness);
+      const binary = harnessBinary(profile.harness);
       const cached = versions.get(binary);
       const version =
         cached ??
@@ -191,7 +184,11 @@ export async function createHostWiring(options: {
           binary,
         ));
       versions.set(binary, version);
-      return { model: profile.model, agent_cli_version: version };
+      return {
+        model: profile.model,
+        agent_cli_version: version,
+        launch_profile_ref: profileRef,
+      };
     },
     startRun: (input) =>
       startQueuedRun(

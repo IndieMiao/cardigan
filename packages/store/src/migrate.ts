@@ -2,6 +2,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
+import { migrateEmployeeNames } from "./employee-migration.js";
 
 /** Directory shipped next to the compiled package: `packages/store/migrations`. */
 export const defaultMigrationsDir = fileURLToPath(
@@ -49,6 +50,8 @@ export function migrate(
     db.exec("BEGIN IMMEDIATE");
     try {
       db.exec(migration.sql);
+      if (migration.version === 10 && migration.name === "employee_assignment")
+        migrateEmployeeNames(db, now());
       db.prepare(
         "INSERT INTO schema_version (version, name, applied_at) VALUES (?, ?, ?)",
       ).run(migration.version, migration.name, now());
