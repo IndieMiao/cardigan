@@ -226,3 +226,37 @@ test("a planted start symlink is replaced, never followed", async () => {
   expect(readFileSync(target, "utf8")).toBe("host-private");
   expect(lstatSync(join(runDir, "start")).isSymbolicLink()).toBe(false);
 });
+
+test("host start rejects an external identity before runtime, credentials or session changes", async () => {
+  const { assignment, run } = queuedRun();
+  const { work_item_id: _work, ...base } = assignment;
+  const external = {
+    ...base,
+    id: "A-99" as const,
+    scope: "standing" as const,
+    standing_mode: "office" as const,
+    role_id: "pm",
+    external: true,
+  };
+  f.store.uow.run((tx) => tx.assignments.put(f.project, external));
+  await expect(
+    startQueuedRun(host(f.dataDir), {
+      project: f.project,
+      assignment: external,
+      run: { ...run, assignment_id: external.id },
+      bell: "fixture",
+    }),
+  ).rejects.toThrow("这是外接 Assignment");
+  expect(f.state().assignments.find((a) => a.id === external.id)).toEqual(
+    external,
+  );
+  expect(
+    f.store.uow.run((tx) => tx.tokensForAssignment(f.project, external.id)),
+  ).toEqual([]);
+  expect(runtime.provision).not.toHaveBeenCalled();
+  expect(runtime.status).not.toHaveBeenCalled();
+  expect(runtime.wake).not.toHaveBeenCalled();
+  expect(existsSync(join(f.dataDir, "runs", f.project, external.id))).toBe(
+    false,
+  );
+});

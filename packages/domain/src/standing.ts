@@ -67,3 +67,26 @@ export function standingModeOf(
 ): StandingMode | undefined {
   return assignment.scope === "standing" ? assignment.standing_mode : undefined;
 }
+
+/** External identities pull their inbox and never own a managed terminal. */
+export const EXTERNAL_ASSIGNMENT_START_ERROR =
+  "这是外接 Assignment，没有可以启动的终端，用 `cardigan inbox` 查看待处理通知";
+
+export function assignmentExternalError(
+  assignment: Assignment,
+  previous?: Assignment,
+): string | undefined {
+  if (
+    assignment.external !== undefined &&
+    typeof assignment.external !== "boolean"
+  )
+    return "external 必须是布尔值";
+  if (
+    assignment.external &&
+    (assignment.scope !== "standing" || assignment.standing_mode !== "office")
+  )
+    return "外接 Assignment 仅支持 standing Office";
+  if (previous && previous.external !== assignment.external)
+    return "Assignment 的 external 创建后不能修改";
+  return undefined;
+}

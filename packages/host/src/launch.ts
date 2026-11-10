@@ -14,7 +14,12 @@ import type {
   RuntimeRef,
   StandingMode,
 } from "@cardigan/domain";
-import { abortDispatch, dispatchRun, standingModeOf } from "@cardigan/domain";
+import {
+  abortDispatch,
+  dispatchRun,
+  EXTERNAL_ASSIGNMENT_START_ERROR,
+  standingModeOf,
+} from "@cardigan/domain";
 import {
   type CompiledAssignmentLaunch,
   compileAssignmentLaunch,
@@ -198,6 +203,12 @@ export async function launchRun(
   host: LaunchHost,
   input: LaunchRunInput,
 ): Promise<LaunchedRun> {
+  if (
+    host.store.uow.read((tx) =>
+      tx.assignments.get(input.project, input.assignment_id),
+    )?.external
+  )
+    throw new HostLaunchError("dispatch", EXTERNAL_ASSIGNMENT_START_ERROR);
   if (!input.reuse_session) return launch(host, input);
   // CLI starts share the Dispatcher's durable exclusion while the Run is
   // still queued. Otherwise two starts could rotate tokens/provision at once.

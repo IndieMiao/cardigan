@@ -24,6 +24,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { dispatchFixture } from "../test-support/dispatch.js";
 import { standingResolver } from "./assembly.js";
 import { Dispatcher } from "./dispatch.js";
+import { executionView } from "./web/read.js";
 
 let f: ReturnType<typeof dispatchFixture>,
   io: CliIo,
@@ -385,3 +386,105 @@ test("S24 a late wake result cannot escalate an intentional pause", async () => 
     false,
   );
 });
+
+test.each([false, true])(
+  "external Office stays in inbox across restart (stale session=%s) and ACK works",
+  async (staleSession) => {
+    const { pm, card } = await setup("office");
+    const oldRun = f.state().runs.find((r) => r.assignment_id === pm.id);
+    if (!oldRun) throw new Error("No old Run");
+    f.apply(
+      (s, a, p) =>
+        finishRun(
+          s,
+          a,
+          {
+            run_id: oldRun.id,
+            outcome: "completed",
+            summary: "Ready to rotate",
+          },
+          p,
+        ),
+      f.actorFor(pm),
+    );
+    expect(
+      await runWorkflowCommand(
+        ["pm", "rotate", "--office", "--external"],
+        io,
+        {},
+      ),
+    ).toBe(0);
+    const external = f.state().assignments.find((a) => a.external);
+    if (!external) throw new Error("No external Office");
+    if (staleSession)
+      f.store.uow.run((tx) =>
+        tx.assignments.put(f.project, {
+          ...external,
+          runtime_ref: f.refFor(pm),
+          session_ref: "unmanaged-session",
+        }),
+      );
+    f.apply((s, a, p) =>
+      postComment(
+        s,
+        a,
+        { card_id: card.id, body: `@${external.id} 请查看` },
+        p,
+      ),
+    );
+    const before = current(external);
+    expect(
+      executionView(f.state(), f.clock.now()).assignments.find(
+        (a) => a.id === external.id,
+      )?.external,
+    ).toBe(true);
+    const options = {
+      store: f.store,
+      runtime,
+      clock: f.clock,
+      standing: standingResolver(f.store),
+      snapshot: vi.fn(),
+      startRun: vi.fn(),
+    };
+    for (let n = 0; n < 2; n++) {
+      f.advance(60 * 60 * 1000);
+      await new Dispatcher(options).tick();
+    }
+    expect(current(external)).toEqual(before);
+    expect(
+      f.state().runs.filter((r) => r.assignment_id === external.id),
+    ).toEqual([]);
+    expect(options.snapshot).not.toHaveBeenCalled();
+    expect(options.startRun).not.toHaveBeenCalled();
+    expect(runtime.status).not.toHaveBeenCalled();
+    expect(runtime.provision).not.toHaveBeenCalled();
+    expect(runtime.resume_or_replace).not.toHaveBeenCalled();
+    expect(runtime.wake).not.toHaveBeenCalled();
+    const notes = f.store
+      .listNotifications({ project_id: f.project })
+      .filter(
+        (n) =>
+          n.recipient.kind === "assignment" &&
+          n.recipient.assignment_id === external.id,
+      );
+    expect(notes.length).toBeGreaterThan(0);
+    expect(notes.every((n) => n.status === "pending")).toBe(true);
+    expect(
+      f.store.ackEvents({
+        project_id: f.project,
+        assignment_id: external.id,
+        card_id: card.id,
+        up_to_seq: Math.max(...notes.map((n) => n.seq)),
+      }).ok,
+    ).toBe(true);
+    await new Dispatcher(options).tick();
+    expect(
+      f.store
+        .listNotifications({ project_id: f.project })
+        .filter((n) => notes.some((pending) => pending.id === n.id))
+        .every((n) => n.status === "acked"),
+    ).toBe(true);
+    await expect(start(external)).rejects.toThrow("这是外接 Assignment");
+    expect(runtime.provision).not.toHaveBeenCalled();
+  },
+);

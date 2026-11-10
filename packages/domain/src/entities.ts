@@ -227,6 +227,8 @@ interface AssignmentFields {
   readonly released_at?: Timestamp;
   /** Last authenticated MCP call (M3.2); the watchdog of §3.3 reads it. */
   readonly last_mcp_activity_at?: Timestamp;
+  /** Immutable scheduling flag; true only for standing Office assignments. */
+  readonly external?: boolean;
 }
 /**
  * §7.1 / §10.4: PM Office and PM Ops share the `pm` role. The standing mode is

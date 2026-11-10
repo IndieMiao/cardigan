@@ -1,7 +1,15 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type EventId, type ProjectId, queueRun } from "@cardigan/domain";
+import {
+  type EventId,
+  type ProjectId,
+  queueRun,
+  recordDecision,
+  requestDecision,
+  resolveDelegatedDecision,
+} from "@cardigan/domain";
+import { authenticate, loadCommandState } from "@cardigan/mcp-server";
 import { defaultRoleDefinition } from "@cardigan/roles";
 import {
   getRoleVersion,
@@ -344,5 +352,192 @@ test("pm rotate refuses a new version that cannot serve PM items, changing nothi
         (t) => t.revoked_at === null,
       ),
     ).toBe(true);
+  });
+});
+
+test("external Office rotation issues the same scoped token, moves inbox, and refuses terminal commands", async () => {
+  await bootstrap();
+  expect(await run(["pm", "create", "--office"])).toBe(0);
+  const tokenText = () => {
+    const lines = printed().split("\n");
+    return lines[lines.findIndex((line) => line.startsWith("token_id：")) + 2];
+  };
+  const oldToken = tokenText();
+  const oldIdentity = withStore((s) => authenticate(s, oldToken));
+  const oldTools = withStore(
+    (s) =>
+      tokensForAssignment(s.database, project, "A-1" as never).at(-1)
+        ?.allowed_tools,
+  );
+  expect(
+    await run([
+      "employee",
+      "add",
+      "--name",
+      "Office Agent",
+      "--title",
+      "PM",
+      "--role",
+      "pm",
+    ]),
+  ).toBe(0);
+  withStore((s) =>
+    s.recordNotification({
+      project_id: project,
+      event_id: lastEvent(s),
+      recipient: { kind: "assignment", assignment_id: "A-1" as never },
+      seq: 1,
+      kind: "decision",
+    }),
+  );
+  expect(
+    await run([
+      "pm",
+      "rotate",
+      "--office",
+      "--external",
+      "--employee",
+      "Office Agent",
+    ]),
+  ).toBe(0);
+  const newToken = tokenText();
+  expect(newToken).toBeTruthy();
+  expect(printed()).toContain("外接身份");
+  expect(printed()).not.toContain("assignment start");
+  withStore((s) => {
+    const identity = authenticate(s, newToken);
+    expect(identity.ok).toBe(true);
+    expect(oldIdentity.ok).toBe(true);
+    if (!identity.ok || !oldIdentity.ok) throw new Error("Invalid identity");
+    expect(identity.value.actor.allowed_tools).toEqual(
+      oldIdentity.value.actor.allowed_tools,
+    );
+    expect(identity.value.actor.kind).toBe("assignment");
+    expect(authenticate(s, oldToken).ok).toBe(false);
+    for (const category of [
+      "spending",
+      "account",
+      "permission",
+      "data_deletion",
+    ] as const) {
+      const q = runCommand(s, {
+        project_id: project,
+        actor: humanActor(project),
+        reduce: (state, actor, ports) =>
+          requestDecision(
+            state,
+            actor,
+            {
+              category,
+              kind: "choose",
+              question: "是否继续",
+              context: "高风险确认",
+              options: [{ key: "yes", description: "继续", impact: "执行" }],
+              recommended: "yes",
+              decider: "human",
+              blocking: false,
+              affected_cards: [],
+              affected_work_items: [],
+            },
+            ports,
+          ),
+      });
+      s.uow.run((tx) => {
+        const state = loadCommandState(tx, project);
+        const answer = {
+          decision_id: q.id,
+          option: "yes",
+          rationale: "转录",
+          raw_quote: "同意",
+        };
+        const ports = {
+          clock: { now: () => "2030-01-01T00:00:00.000Z" },
+          ids: tx.ids,
+        };
+        expect(
+          recordDecision(state, identity.value.actor, answer, ports).ok,
+        ).toBe(false);
+        expect(
+          resolveDelegatedDecision(state, identity.value.actor, answer, ports)
+            .ok,
+        ).toBe(false);
+      });
+    }
+    const next = s.uow.read((tx) =>
+      tx.assignments.get(project, "A-2" as never),
+    );
+    expect(next).toMatchObject({
+      external: true,
+      employee_id: "E-1",
+      standing_mode: "office",
+      role_version: 1,
+    });
+    const token = tokensForAssignment(s.database, project, "A-2" as never).at(
+      -1,
+    );
+    expect(token?.allowed_tools).toEqual(oldTools);
+    expect(token?.allowed_tools).not.toContain("resolve_delegated_decision");
+    expect(token?.allowed_tools).toContain("record_decision");
+    expect(
+      tokensForAssignment(s.database, project, "A-1" as never).every(
+        (t) => t.revoked_at !== null,
+      ),
+    ).toBe(true);
+    expect(s.listNotifications({ project_id: project })[0]).toMatchObject({
+      recipient: { kind: "assignment", assignment_id: "A-2" },
+      status: "pending",
+    });
+  });
+  for (const args of [
+    ["assignment", "start", "A-2"],
+    ["pm", "create", "--office"],
+    ["pm", "start", "--office"],
+  ]) {
+    expect(await run(args)).toBe(2);
+    expect(failed()).toContain("这是外接 Assignment，没有可以启动的终端");
+    expect(failed()).toContain("cardigan inbox");
+  }
+  withStore((s) => {
+    expect(s.uow.read((tx) => tx.runs.list(project))).toEqual([]);
+    expect(
+      tokensForAssignment(s.database, project, "A-2" as never),
+    ).toHaveLength(1);
+  });
+  expect(
+    await run(["pm", "rotate", "--office", "--external", "--employee", "E-1"]),
+  ).toBe(0);
+  expect(printed()).toContain("没有改动");
+  withStore((s) =>
+    s.uow.run((tx) => {
+      const a = tx.assignments.get(project, "A-2" as never);
+      if (!a) throw new Error("Missing Office");
+      tx.assignments.put(project, { ...a, status: "suspended" });
+    }),
+  );
+  expect(await run(["pm", "create", "--office"])).toBe(2);
+  expect(failed()).toContain("这是外接 Assignment");
+});
+
+test("external rotation rolls back new tokens, identity and inbox on a late failure", async () => {
+  await bootstrap();
+  expect(await run(["pm", "create", "--office"])).toBe(0);
+  withStore((s) => {
+    const before = s.uow.read((tx) => tx.assignments.list(project));
+    const tokens = tokensForAssignment(s.database, project, "A-1" as never);
+    expect(() =>
+      rotateStandingPmInStore(s, project, "office", {
+        external: true,
+        beforeCommit: () => {
+          throw new Error("rollback");
+        },
+      }),
+    ).toThrow("rollback");
+    expect(s.uow.read((tx) => tx.assignments.list(project))).toEqual(before);
+    expect(tokensForAssignment(s.database, project, "A-1" as never)).toEqual(
+      tokens,
+    );
+    expect(tokensForAssignment(s.database, project, "A-2" as never)).toEqual(
+      [],
+    );
   });
 });

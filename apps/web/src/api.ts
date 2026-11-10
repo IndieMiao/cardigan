@@ -576,6 +576,7 @@ export interface ExecutionAssignment extends AuthorView {
   readonly runtime_state: string;
   readonly machine_id: string;
   readonly standing_mode: string | null;
+  readonly external?: boolean;
   readonly card_id: string | null;
   readonly card_status: string | null;
   readonly work_item_id: string | null;

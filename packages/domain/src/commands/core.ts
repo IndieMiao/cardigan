@@ -5,6 +5,7 @@ import type { DomainError, ErrorCode, Result } from "../errors.js";
 import type * as I from "../ids.js";
 import type { Clock, IdAllocator } from "../ports.js";
 import type { ProjectPreferences } from "../preferences.js";
+import { assignmentExternalError } from "../standing.js";
 import type { CardTemplate } from "../templates.js";
 import { transition } from "../transitions.js";
 
@@ -277,6 +278,18 @@ export class CommandDraft {
     collection: K,
     entity: CommandEntities[K],
   ): void {
+    if (collection === "assignments") {
+      const assignment = entity as E.Assignment;
+      const error = assignmentExternalError(
+        assignment,
+        this.list("assignments").find((a) => a.id === assignment.id),
+      );
+      ensure(
+        !error,
+        "invariant_violation",
+        error ?? "Invalid external Assignment",
+      );
+    }
     const index = this.changes.findIndex(
       (c) => c.collection === collection && keyOf(c.entity) === keyOf(entity),
     );

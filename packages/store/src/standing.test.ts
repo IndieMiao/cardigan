@@ -104,3 +104,38 @@ test("rows that already carry a mode are left exactly as they are", () => {
   expect(store.backfillStandingModes()).toEqual([]);
   expect(modeOf("A-1")).toBe("ops");
 });
+
+test("external rows enforce Office scope and immutable JSON across writes", () => {
+  const external = standing("A-1", { standing_mode: "office", external: true });
+  seat(external, ["whoami"]);
+  expect(() =>
+    seat({ ...external, status: "released" }, undefined),
+  ).not.toThrow();
+  for (const update of [
+    { external: false },
+    { external: undefined },
+    { standing_mode: "ops" as const },
+  ])
+    expect(() => seat({ ...external, ...update }, undefined)).toThrow();
+  seat(standing("A-2", { standing_mode: "office" }), undefined);
+  expect(() =>
+    seat(
+      standing("A-2", { standing_mode: "office", external: true }),
+      undefined,
+    ),
+  ).toThrow(/immutable/);
+  for (const invalid of [
+    standing("A-3", { external: true }),
+    standing("A-3", { standing_mode: "ops", external: true }),
+    {
+      ...external,
+      id: "A-3",
+      scope: "work_item",
+      work_item_id: "W-1",
+      standing_mode: undefined,
+    },
+    { ...external, id: "A-3", external: 1 },
+  ])
+    expect(() => seat(invalid as Assignment, undefined)).toThrow();
+  expect(store.migrate()).toEqual([]);
+});

@@ -11,9 +11,10 @@ import {
   ensure,
   unwrap,
 } from "./core.js";
+import { resolveEmployee } from "./employee-assignment.js";
 
 export interface RotateStandingPmResult {
-  /** True when the standing PM already runs the newest pm version. */
+  /** True when the role version and explicitly requested identity already match. */
   readonly unchanged: boolean;
   readonly previous: Assignment;
   /** The new standing Assignment; equals `previous` when unchanged. */
@@ -41,7 +42,11 @@ const LABEL = { ops: "PM Ops", office: "PM Office" } as const;
 export function rotateStandingPm(
   state: CommandState,
   actor: Actor,
-  p: { readonly standing_mode: StandingMode },
+  p: {
+    readonly standing_mode: StandingMode;
+    readonly external?: boolean;
+    readonly employee_id?: string;
+  },
   ports: CommandPorts,
 ): Result<CommandEffect<RotateStandingPmResult>> {
   return command(state, actor, "rotate_standing_pm", ports, (d) => {
@@ -54,6 +59,16 @@ export function rotateStandingPm(
       p.standing_mode === "ops" || p.standing_mode === "office",
       "validation_failed",
       "standing_mode 必须是 ops 或 office",
+    );
+    ensure(
+      p.external === undefined || typeof p.external === "boolean",
+      "validation_failed",
+      "external 必须是布尔值",
+    );
+    ensure(
+      !p.external || p.standing_mode === "office",
+      "validation_failed",
+      "外接 Assignment 仅支持 standing Office",
     );
     const label = LABEL[p.standing_mode];
     const standing = d
@@ -82,12 +97,33 @@ export function rotateStandingPm(
       .filter((r) => r.role_id === "pm")
       .sort((a, b) => b.role_version - a.role_version)[0];
     ensure(latest, "not_found", "项目里没有 pm 角色");
+    const employee =
+      p.employee_id === undefined
+        ? undefined
+        : resolveEmployee(d, p.employee_id);
+    if (employee) {
+      ensure(
+        employee.status === "active",
+        "invariant_violation",
+        "员工已停用，不能指派新工作",
+      );
+      ensure(
+        employee.role_id === "pm",
+        "validation_failed",
+        "员工角色必须与 pm 一致",
+      );
+    }
+    const employee_id = employee?.id ?? previous.employee_id;
     const result = {
       previous,
       from_version: previous.role_version,
       to_version: latest.role_version,
     };
-    if (latest.role_version === previous.role_version)
+    if (
+      latest.role_version === previous.role_version &&
+      employee_id === previous.employee_id &&
+      (p.external === undefined || p.external === (previous.external ?? false))
+    )
       return {
         ...result,
         unchanged: true,
@@ -97,7 +133,7 @@ export function rotateStandingPm(
         cancelled_run_ids: [],
       };
     ensure(
-      latest.role_version > previous.role_version,
+      latest.role_version >= previous.role_version,
       "invariant_violation",
       "pm 最新版本低于在岗版本",
     );
@@ -105,6 +141,19 @@ export function rotateStandingPm(
       isRoleActive(d.state.roles, "pm"),
       "validation_failed",
       "pm 角色已停用，不能换到新版本",
+    );
+
+    ensure(
+      !p.external ||
+        !d
+          .list("runs")
+          .some(
+            (r) =>
+              r.assignment_id === previous.id &&
+              !["completed", "failed", "cancelled"].includes(r.status),
+          ),
+      "illegal_transition",
+      "原 PM 仍有未结束的 Run，请先收尾再切换外接身份",
     );
 
     // PM-owned items stay with the role; the new Assignment is who serves it.
@@ -158,12 +207,11 @@ export function rotateStandingPm(
       runtime_state: "not_provisioned",
       machine_id: previous.machine_id,
       runtime_ref: null,
-      // Like `pm create`: the real token is issued by `assignment start`.
+      // The host issues external tokens on rotation; others on assignment start.
       mcp_token_id: p.standing_mode === "office" ? "pm-office" : "pm-ops",
       created_at: d.now,
-      ...(previous.employee_id === undefined
-        ? {}
-        : { employee_id: previous.employee_id }),
+      ...(employee_id === undefined ? {} : { employee_id }),
+      ...(p.external === undefined ? {} : { external: p.external }),
     };
     d.put("assignments", next);
 
@@ -214,6 +262,8 @@ export function rotateStandingPm(
       assignment_id: next.id,
       from_version: previous.role_version,
       to_version: next.role_version,
+      ...(p.external === undefined ? {} : { external: p.external }),
+      ...(employee_id === undefined ? {} : { employee_id }),
       decisions: [...decisions],
       human_actions: [...human_actions],
       cancelled_run_ids: runs.map((r) => r.id),

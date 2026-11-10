@@ -9,6 +9,7 @@ import {
   assign,
   completeHumanAction,
   createCard,
+  EXTERNAL_ASSIGNMENT_START_ERROR,
   isRoleActive,
   listNeedsYou,
   markNoticesRead,
@@ -57,7 +58,7 @@ const USAGE = [
   "  cardigan token issue <A-n> [--project <p>]",
   "  cardigan pm create --office|--ops [--project <p>]",
   "  cardigan pm start [--office] [--ops] [--project <p>]  一键启动常驻 PM（已在运行就跳过）",
-  "  cardigan pm rotate --office|--ops [--project <p>]     把常驻 PM 换到 pm 角色的最新版本",
+  "  cardigan pm rotate --office|--ops [--external] [--employee <E-n 或名字>] [--project <p>]     把常驻 PM 换到 pm 角色的最新版本",
   "    新建固定最新版本的常驻 Assignment，待处理的 PM 事项转给它，旧的释放并作废 Token；",
   "    已是最新版本时不做改动。先用 cardigan role upgrade pm --from-default 追加新版本。",
   "  cardigan needs-you [--project <p>]                   看待你拍板、待你执行的事项和知会",
@@ -566,7 +567,7 @@ async function pmCommand(
 
 /** `cardigan pm rotate --office|--ops`: human-only, one write transaction. */
 function pmRotate(args: readonly string[], io: CliIo): number {
-  const parsed = parseArgs(args, ["office", "ops"]);
+  const parsed = parseArgs(args, ["office", "ops", "external"]);
   const office = parsed.flags.office === true;
   if (office === (parsed.flags.ops === true) || parsed.positionals.length > 0)
     throw new CliError("必须二选一：--office 或 --ops", EXIT.usage, [USAGE]);
@@ -578,7 +579,16 @@ function pmRotate(args: readonly string[], io: CliIo): number {
       io,
       optional(parsed.flags, "project"),
     );
-    printRotation(io, mode, rotateStandingPmInStore(store, project_id, mode));
+    printRotation(
+      io,
+      mode,
+      rotateStandingPmInStore(store, project_id, mode, {
+        ...(parsed.flags.external === true ? { external: true } : {}),
+        ...(optional(parsed.flags, "employee") === undefined
+          ? {}
+          : { employee_id: optional(parsed.flags, "employee") as string }),
+      }),
+    );
     return EXIT.ok;
   } finally {
     store.close();
@@ -676,6 +686,8 @@ async function pmStart(
     let started = 0;
     for (const entry of wanted) {
       const label = entry.office ? "PM Office" : "PM Ops";
+      if (entry.assignment.external)
+        throw new CliError(EXTERNAL_ASSIGNMENT_START_ERROR, EXIT.usage);
       if (hasUnfinishedRun(store, project_id, entry.assignment.id)) {
         io.stdout(`${label}（${entry.assignment.id}）已在运行，跳过`);
         continue;
@@ -974,14 +986,23 @@ function pmCreate(args: readonly string[], io: CliIo): number {
       // same pm role, told apart by `standing_mode`. Rows written before the
       // field existed get theirs from their newest token, once.
       backfillStandingModesInTransaction(tx, project_id);
-      const standing = tx.assignments
-        .list(project_id)
-        .filter(
-          (candidate) =>
-            candidate.scope === "standing" &&
-            candidate.role_id === "pm" &&
-            candidate.status === "active",
-        );
+      const assignments = tx.assignments.list(project_id);
+      if (
+        assignments.some(
+          (a) =>
+            a.external &&
+            a.scope === "standing" &&
+            a.standing_mode === mode &&
+            a.status !== "released",
+        )
+      )
+        throw new CliError(EXTERNAL_ASSIGNMENT_START_ERROR, EXIT.usage);
+      const standing = assignments.filter(
+        (candidate) =>
+          candidate.scope === "standing" &&
+          candidate.role_id === "pm" &&
+          candidate.status === "active",
+      );
       const existing = standing.find(
         (candidate) => candidate.standing_mode === mode,
       );

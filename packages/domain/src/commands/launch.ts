@@ -1,5 +1,6 @@
 import type { Actor, Assignment, Run, RuntimeRef } from "../entities.js";
 import type { AssignmentId, EventId, RunId } from "../ids.js";
+import { EXTERNAL_ASSIGNMENT_START_ERROR } from "../standing.js";
 import { transition } from "../transitions.js";
 import {
   type CommandDraft,
@@ -17,6 +18,11 @@ const unfinished = (run: Run) =>
   !["completed", "failed", "cancelled"].includes(run.status);
 function target(d: CommandDraft, id: AssignmentId) {
   const assignment = d.get("assignments", id);
+  ensure(
+    !assignment.external,
+    "validation_failed",
+    EXTERNAL_ASSIGNMENT_START_ERROR,
+  );
   ensure(
     assignment.status === "active",
     "illegal_transition",
