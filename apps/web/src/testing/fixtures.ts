@@ -222,6 +222,7 @@ export function fakeClient(
     markNoticesRead: async () => {},
     decisionHistory: async () => ({ decisions: [] }),
     needsYou: async () => ({ decisions: [], human_actions: [], incidents: [] }),
+    notices: async () => ({ notices: [], next_cursor: null, unread_count: 0 }),
     recordDecision: async () => undefined,
     recheckMerge: async () => undefined,
     decisionComment: async () => undefined,

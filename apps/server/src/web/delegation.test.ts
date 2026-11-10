@@ -110,6 +110,12 @@ test("Workbench answers and grants atomically, enforces fixed risks and filters 
       ),
     ).toEqual([next.id]);
     expect(
+      (await history("decider=pm")).decisions[0]?.resolution,
+    ).toMatchObject({
+      resolved_by: `assignment:${ops.id}`,
+      author_display: "PM 后台（PM Ops）",
+    });
+    expect(
       (
         await history(
           `decider=human&card_id=${f.card.id}&category=scope_change`,
@@ -390,6 +396,7 @@ test("PM merge confirmation setting round-trips and delegated answers become rea
         decision_id: q.id,
         body: "继续。理由：流程类，按惯例处理",
         read: false,
+        author_display: "PM 后台（PM Ops）",
       },
     ]);
     expect(needs.counts.notices_unread).toBe(1);

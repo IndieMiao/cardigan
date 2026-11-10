@@ -51,6 +51,7 @@ import {
   InvalidQuery,
   needsMe,
   needsYou,
+  noticePage,
   parseCardFilter,
   projectSnapshotView,
   projectState,
@@ -563,6 +564,21 @@ async function serveProjectRoute(
       project_id,
       ...needsYou(state, now, context.mergeGate?.forProject(project_id).status),
     });
+    return;
+  }
+
+  if (rest === "/notices") {
+    try {
+      sendJson(
+        res,
+        200,
+        noticePage(state, url.searchParams.get("before") ?? undefined),
+      );
+    } catch (error) {
+      if (error instanceof InvalidQuery)
+        throw new HttpRejection(400, "validation_failed", error.message);
+      throw error;
+    }
     return;
   }
 

@@ -26,6 +26,14 @@ test("global member CLI manages the seeded owner and shares avatar rules without
   };
   const run = (...args: string[]) => main(["member", ...args], io);
   try {
+    for (const command of ["update", "activate", "deactivate"]) {
+      expect(await run(command)).toBe(2);
+      expect(errors.at(-1)).toContain(
+        `缺少成员编号：cardigan member ${command} M-1${command === "update" ? " --name 邵杰" : ""}（用 cardigan member list 查看编号）`,
+      );
+    }
+    expect(await run("update", "--name", "邵杰")).toBe(2);
+    expect(errors.at(-1)).toContain("缺少成员编号");
     expect(await run("list")).toBe(0);
     expect(output.join("\n")).toContain("M-1  所有者  所有者");
     expect(

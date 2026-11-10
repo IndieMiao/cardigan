@@ -86,6 +86,11 @@ function parse(args: readonly string[]) {
     flags[key] = value;
   }
   const needsId = command !== "add" && command !== "list";
+  if (needsId && positionals.length === 0)
+    throw new CliError(
+      `缺少员工编号：cardigan employee ${command} E-1${command === "update" ? " --name 诸葛亮" : ""}（用 cardigan employee list 查看编号）`,
+      EXIT.usage,
+    );
   if (positionals.length !== (needsId ? 1 : 0))
     throw new CliError("员工命令的位置参数不正确", EXIT.usage, [USAGE]);
   if (needsId && !parseId("employee", positionals[0]).ok)

@@ -10,7 +10,12 @@ import {
 } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { App } from "../App.js";
-import type { NeedsDecision, NeedsPage } from "../api.js";
+import type {
+  NeedsDecision,
+  NeedsPage,
+  NoticesPage,
+  NoticeView,
+} from "../api.js";
 import { fakeClient } from "../testing/fixtures.js";
 import { writeFailures } from "../testing/write-errors.js";
 import { NeedsYouPage } from "./NeedsYouPage.js";
@@ -1243,6 +1248,128 @@ test("notices list delegated merges and decisions without blocking, and can be m
   );
   const read = within(group).getByRole("article", { name: "知会 q(8)" });
   expect(within(read).queryByRole("button", { name: "标为已读" })).toBeNull();
+});
+
+const pagedNotice = (n: number, read = true): NoticeView => ({
+  id: `notice-${n}`,
+  kind: "decision",
+  card_id: "C-1",
+  decision_id: `q(${n})`,
+  question: "",
+  option: "go",
+  resolved_by: "pm",
+  author_display: "PM 后台（PM Ops）",
+  body: `已选择方案 ${n}`,
+  proxy_authority: null,
+  at: new Date(Date.UTC(2026, 0, 1, 0, n)).toISOString(),
+  read,
+});
+
+test("notices append server pages, keep all unread first and retain visible rows during requests and refreshes", async () => {
+  const unread = Array.from({ length: 12 }, (_, i) =>
+    pagedNotice(12 - i, false),
+  );
+  const first = Array.from({ length: 10 }, (_, i) => pagedNotice(35 - i));
+  let current: NeedsPage = {
+    ...page([]),
+    human_actions: [],
+    notices: [...unread, ...first],
+    notices_next_cursor: "notice-26",
+  };
+  let finish: (page: NoticesPage) => void = () => {};
+  const notices = vi
+    .fn()
+    .mockImplementationOnce(
+      () =>
+        new Promise<NoticesPage>((resolve) => {
+          finish = resolve;
+        }),
+    )
+    .mockRejectedValueOnce(new Error("暂时离线"))
+    .mockResolvedValueOnce({
+      notices: [pagedNotice(15), pagedNotice(14), pagedNotice(13)],
+      next_cursor: null,
+      unread_count: 12,
+    });
+  const markNoticesRead = vi.fn().mockImplementation(async () => {
+    current = { ...current, notices: first };
+  });
+  const client = fakeClient({
+    needsYou: async () => current,
+    notices,
+    markNoticesRead,
+  });
+  const view = render(<NeedsYouPage client={client} projectId="p-1" />);
+  const group = await screen.findByRole("region", { name: "知会" });
+  const rows = () => within(group).getAllByRole("article");
+  const initialRows = rows();
+  expect(initialRows).toHaveLength(22);
+  expect(
+    initialRows
+      .slice(0, 12)
+      .every((row) => within(row).queryByRole("button", { name: "标为已读" })),
+  ).toBe(true);
+  fireEvent.click(within(group).getByRole("button", { name: "显示更多" }));
+  fireEvent.click(within(group).getByRole("button", { name: "显示更多" }));
+  expect(notices).toHaveBeenCalledTimes(1);
+  expect(notices).toHaveBeenLastCalledWith("p-1", "notice-26");
+  expect(rows()).toEqual(initialRows);
+  const feedback = screen.getByText("正在加载更多知会…");
+  expect(group.contains(feedback)).toBe(false);
+  await act(async () =>
+    finish({
+      notices: Array.from({ length: 10 }, (_, i) => pagedNotice(25 - i)),
+      next_cursor: "notice-16",
+      unread_count: 12,
+    }),
+  );
+  expect(rows()).toHaveLength(32);
+  expect(rows().slice(0, 22)).toEqual(initialRows);
+  fireEvent.click(within(group).getByRole("button", { name: "显示更多" }));
+  expect((await screen.findByRole("alert")).textContent).toContain("暂时离线");
+  expect(rows()).toHaveLength(32);
+  fireEvent.click(screen.getByRole("button", { name: "重试" }));
+  await waitFor(() => expect(rows()).toHaveLength(35));
+  expect(notices).toHaveBeenLastCalledWith("p-1", "notice-16");
+  expect(within(group).queryByRole("button", { name: "显示更多" })).toBeNull();
+  // First-page SSE refreshes must not collapse already expanded history.
+  current = { ...current, notices: [...unread, ...first] };
+  view.rerender(<NeedsYouPage client={client} projectId="p-1" revision={1} />);
+  await waitFor(() => expect(rows()).toHaveLength(35));
+  fireEvent.click(within(group).getByRole("button", { name: "全部标为已读" }));
+  await waitFor(() =>
+    expect(markNoticesRead).toHaveBeenCalledWith(
+      "p-1",
+      unread.map((n) => n.id),
+    ),
+  );
+  await within(group).findByText("知会（未读 0）");
+  expect(rows()).toHaveLength(35);
+  expect(within(group).queryByRole("button", { name: "标为已读" })).toBeNull();
+});
+
+test("a late notice page from a previous project cannot appear in the next project", async () => {
+  let finish: (page: NoticesPage) => void = () => {};
+  const client = fakeClient({
+    needsYou: async (project) => ({
+      ...page([]),
+      human_actions: [],
+      notices: [pagedNotice(project === "p-1" ? 20 : 99)],
+      notices_next_cursor: project === "p-1" ? "notice-20" : null,
+    }),
+    notices: () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  });
+  const view = render(<NeedsYouPage client={client} projectId="p-1" />);
+  fireEvent.click(await screen.findByRole("button", { name: "显示更多" }));
+  view.rerender(<NeedsYouPage client={client} projectId="p-2" />);
+  await screen.findByRole("article", { name: "知会 q(99)" });
+  await act(async () =>
+    finish({ notices: [pagedNotice(19)], next_cursor: null, unread_count: 0 }),
+  );
+  expect(screen.queryByRole("article", { name: "知会 q(19)" })).toBeNull();
 });
 
 test("PM-held merges are listed without counting as waiting, and the human can answer them directly", async () => {

@@ -297,7 +297,9 @@ test("compact profile lays out name, title, bio and role without empty rows", as
       employee={{ ...employee, bio: undefined, role_id: undefined }}
     />,
   );
-  expect(screen.getByRole("dialog").textContent).toBe("林舟工程师角色：Agent");
+  expect(screen.getByRole("dialog").textContent).toBe(
+    "林舟工程师角色：未知角色",
+  );
 });
 
 test("profile CSS is a compact horizontal card that clamps the bio to two lines", () => {
