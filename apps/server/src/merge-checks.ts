@@ -43,7 +43,16 @@ type CheckChange = WithoutCard<Parameters<typeof recordMergeCheck>[2]>;
 export interface MergeCheckGit {
   baseline(project: CentralProject): Promise<string>;
   prepare(project: CentralProject, plan: MergePlan): Promise<PreparedMerge>;
-  publish(project: CentralProject, candidate: Candidate): Promise<MergeOutcome>;
+  publish(
+    project: CentralProject,
+    completion: DeliveryId,
+    candidate: Candidate,
+  ): Promise<
+    | Extract<MergeOutcome, { status: "stale" }>
+    | (Extract<MergeOutcome, { status: "merged" }> & {
+        readonly tree_sha: string;
+      })
+  >;
   distribute(project: CentralProject): Promise<void>;
 }
 export interface MergeCheckOptions {
@@ -319,13 +328,17 @@ export class MergeChecks {
     }
     // Re-read confirmation/state after Git IO. CAS protects against another baseline writer.
     if (!this.valid(task, true)) return;
-    const result = await this.git().publish(task.project, candidate);
+    const result = await this.git().publish(
+      task.project,
+      task.plan.completion_id,
+      candidate,
+    );
     if (result.status === "merged")
       this.record(task, {
         kind: "merged",
         merge_sha: result.merge_sha,
         previous_sha: result.previous_sha,
-        tree_sha: candidate.tree_sha,
+        tree_sha: result.tree_sha,
       });
   }
   private failure(task: Task, error: unknown) {

@@ -88,12 +88,14 @@ function controller(f: M4Fixture) {
     publish: vi.fn(
       async (
         _project: CentralProject,
+        _completion: string,
         candidate: Extract<PreparedMerge, { status: "candidate" }>,
       ) => {
         base = candidate.candidate_sha;
         return {
           status: "merged" as const,
           merge_sha: candidate.candidate_sha,
+          tree_sha: candidate.tree_sha,
           previous_sha: candidate.previous_sha,
         };
       },
@@ -199,7 +201,7 @@ test.each([false, true])(
     f.decide(required(mergeConfirmation(f, scenario.card.id)), "merge");
     await c.gate.tick([f.project_id]);
     expect(c.run).toHaveBeenCalledTimes(different ? 2 : 1);
-    expect(c.git.publish.mock.calls[0]?.[1]).toMatchObject({
+    expect(c.git.publish.mock.calls[0]?.[2]).toMatchObject({
       candidate_sha: "e".repeat(40),
       tree_sha: (different ? "f" : "c").repeat(40),
     });
