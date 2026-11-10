@@ -44,6 +44,7 @@ test("migrates an empty database and creates every M1 table", () => {
       "notifications",
       "router_cursors",
       "bell_attempts",
+      "merge_check_capacity",
       "schema_version",
     ]) {
       expect(tables, table).toContain(table);
@@ -128,7 +129,9 @@ test("a failing migration leaves nothing behind and is not recorded", () => {
         .map((row) => String(row.name));
       expect(tables).toContain("schema_version");
       expect(tables).not.toContain("half_done");
-      expect(store.schemaVersion()).toBe(0);
+      expect(store.schemaVersion()).toBe(
+        latestSchemaVersion(emptyMigrationsDir),
+      );
     } finally {
       store.close();
     }
@@ -168,7 +171,7 @@ test("apply later migrations once, without re-running earlier ones", () => {
 
   const store = Store.open({ dataDir, migrationsDir });
   try {
-    expect(store.schemaVersion()).toBe(2);
+    expect(store.schemaVersion()).toBe(latestSchemaVersion(migrationsDir));
     expect(store.migrate()).toEqual([]);
 
     writeFileSync(

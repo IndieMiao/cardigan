@@ -91,6 +91,11 @@ export interface CardView {
 
 /** A list row: the card plus the fields the list filters and columns need. */
 export interface CardListItem extends CardView {
+  readonly queued_runs?: readonly {
+    readonly run_id: string;
+    readonly assignment_id: string;
+    readonly ahead: number;
+  }[];
   readonly produce_owners?: readonly AuthorView[];
   readonly participants?: readonly AuthorView[];
   readonly work_items?: readonly Pick<
@@ -562,6 +567,8 @@ export interface SnapshotData {
   }[];
 }
 export interface RunView {
+  readonly queue_reason?: "concurrency_limit" | "runtime_unavailable";
+  readonly queue_ahead?: number;
   readonly employee_id?: string;
   readonly launch_profile_ref?: string;
   readonly id: string;
@@ -577,6 +584,7 @@ export interface RunView {
   readonly summary: string;
 }
 export interface ExecutionAssignment extends AuthorView {
+  readonly queue_ahead?: number;
   readonly id: string;
   readonly role_id: string;
   readonly role_version: number;

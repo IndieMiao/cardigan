@@ -122,7 +122,7 @@ test("checks the session before showing anything else", async () => {
     resolve = done;
   });
   render(<App client={fakeClient({ session: () => pending })} />);
-  expect(screen.getByRole("status").textContent).toContain("正在检查登录状态");
+  expect(screen.getByRole("status").textContent).toBe("");
   resolve({ authenticated: false, password_configured: true });
   expect(await screen.findByRole("button", { name: "登录" })).toBeTruthy();
 });

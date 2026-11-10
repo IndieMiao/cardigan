@@ -11,6 +11,7 @@ import {
 } from "../api.js";
 import { EmployeeIdentity } from "../components/EmployeeIdentity.js";
 import { StatusTag, Time } from "../components/Foundation.js";
+import { RequestFeedback } from "../components/RequestFeedback.js";
 import {
   parseList,
   ROLE_FIELD_LABELS,
@@ -84,12 +85,17 @@ export function RolesSettings({
   };
   return (
     <div className="role-settings">
-      {message && <p role="status">{message}</p>}
+      <RequestFeedback message={message} />
+      {view.kind === "list" && (
+        <RequestFeedback
+          {...list}
+          retry={list.reload}
+          pendingMessage="正在加载角色…"
+        />
+      )}
       {view.kind === "list" && (
         <RoleList
           list={list.data}
-          error={list.error}
-          reload={list.reload}
           onOpen={(roleId) => open({ kind: "detail", roleId })}
           onNew={() => open({ kind: "new" })}
         />
@@ -131,14 +137,10 @@ export function RolesSettings({
 
 function RoleList({
   list,
-  error,
-  reload,
   onOpen,
   onNew,
 }: {
   list: RoleListView | undefined;
-  error: string | undefined;
-  reload: () => void;
   onOpen: (roleId: string) => void;
   onNew: () => void;
 }) {
@@ -149,15 +151,6 @@ function RoleList({
           新建角色
         </button>
       </div>
-      {error && (
-        <p role="alert">
-          {error}
-          <button type="button" onClick={reload}>
-            重试
-          </button>
-        </p>
-      )}
-      {!list && !error && <p role="status">正在加载角色…</p>}
       {list && list.roles.length === 0 && (
         <p className="empty">本项目还没有登记角色。</p>
       )}
@@ -374,7 +367,11 @@ function NewRoleForm({
               ))}
             </select>
           </label>
-          {sourceRoles.error && <p role="alert">{sourceRoles.error}</p>}
+          <RequestFeedback
+            {...sourceRoles}
+            retry={sourceRoles.reload}
+            pendingMessage="正在加载来源角色…"
+          />
           <label>
             来源版本（留空用最新版本）
             <input
@@ -383,31 +380,40 @@ function NewRoleForm({
               onChange={(e) => setSourceVersion(e.target.value)}
             />
           </label>
-          {!versionValid && <p role="alert">版本号须为正整数。</p>}
+          <RequestFeedback
+            error={!versionValid ? "版本号须为正整数。" : undefined}
+          />
         </>
       )}
       <label>
         新角色编号
         <input value={roleId} onChange={(e) => setRoleId(e.target.value)} />
       </label>
-      {roleId !== "" && !idValid && (
-        <p role="alert">
-          角色编号只能用小写字母、数字、点、下划线和短横线，且以字母或数字开头。
-        </p>
-      )}
+      <RequestFeedback
+        error={
+          roleId !== "" && !idValid
+            ? "角色编号只能用小写字母、数字、点、下划线和短横线，且以字母或数字开头。"
+            : undefined
+        }
+      />
       <label>
         显示名（可选）
         <input value={name} onChange={(e) => setName(e.target.value)} />
       </label>
       <div className="role-actions">
         <button type="submit" disabled={write.busy || !ready}>
-          {write.busy ? "创建中…" : "创建角色"}
+          创建角色
         </button>
         <button type="button" onClick={onCancel} disabled={write.busy}>
           取消
         </button>
       </div>
-      {write.error && <p role="alert">{write.error}</p>}
+      <RequestFeedback
+        interactive
+        pending={write.busy}
+        pendingMessage="正在提交角色…"
+        error={write.error}
+      />
     </form>
   );
 }
@@ -454,15 +460,11 @@ function RoleDetail({
       <button type="button" className="link-button" onClick={onBack}>
         ← 返回角色列表
       </button>
-      {detail.error && (
-        <p role="alert">
-          {detail.error}
-          <button type="button" onClick={detail.reload}>
-            重试
-          </button>
-        </p>
-      )}
-      {!data && !detail.error && <p role="status">正在加载角色…</p>}
+      <RequestFeedback
+        {...detail}
+        retry={detail.reload}
+        pendingMessage="正在加载角色…"
+      />
       {data && (
         <>
           <h3>
@@ -516,7 +518,12 @@ function RoleDetail({
                   {data.role.status === "active" ? "停用" : "启用"}
                 </button>
               </div>
-              {write.error && <p role="alert">{write.error}</p>}
+              <RequestFeedback
+                interactive
+                pending={write.busy}
+                pendingMessage="正在提交角色…"
+                error={write.error}
+              />
               <RoleFields role={data.role} />
               <h4>与上一版本的差异</h4>
               {data.previous ? (
@@ -530,7 +537,11 @@ function RoleDetail({
             </>
           )}
           <h4>版本历史</h4>
-          {history.error && <p role="alert">{history.error}</p>}
+          <RequestFeedback
+            {...history}
+            retry={history.reload}
+            pendingMessage="正在加载版本历史…"
+          />
           {history.data && (
             <ol className="role-history" aria-label="版本历史">
               {history.data.versions.map((entry) => (
@@ -927,13 +938,18 @@ function RoleEditForm({
       )}
       <div className="role-actions">
         <button type="submit" disabled={busy || !changed}>
-          {busy ? "保存中…" : "保存为新版本"}
+          保存为新版本
         </button>
         <button type="button" onClick={onCancel} disabled={busy}>
           取消
         </button>
       </div>
-      {error && <p role="alert">{error}</p>}
+      <RequestFeedback
+        interactive
+        pending={busy}
+        pendingMessage="保存中…"
+        error={error}
+      />
     </form>
   );
 }

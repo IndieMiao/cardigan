@@ -9,6 +9,7 @@ import {
   type TemplateView,
 } from "../api.js";
 import { StatusTag, Time } from "../components/Foundation.js";
+import { RequestFeedback } from "../components/RequestFeedback.js";
 import { useResource } from "../useResource.js";
 
 const mergeLabels = { none: "不合并", confirm: "确认后合并", auto: "自动合并" };
@@ -108,15 +109,11 @@ export function TemplateSettings({
       <p className="hint">
         模板修改生成新版本，已有卡片继续使用创建时的版本。停用仅阻止新建卡片。
       </p>
-      {list.error && (
-        <p role="alert">
-          {list.error}{" "}
-          <button type="button" onClick={list.reload}>
-            重试
-          </button>
-        </p>
-      )}
-      {!list.data && !list.error && <p role="status">正在加载模板…</p>}
+      <RequestFeedback
+        {...list}
+        retry={list.reload}
+        pendingMessage="正在加载模板…"
+      />
       {list.data && (
         <div className="template-table-scroll">
           <table>
@@ -174,8 +171,13 @@ export function TemplateSettings({
           </table>
         </div>
       )}
-      {message && <p role="status">{message}</p>}
-      {error && <p role="alert">{error}</p>}
+      <RequestFeedback
+        interactive
+        pending={busy}
+        pendingMessage="正在保存模板…"
+        message={message}
+        error={error}
+      />
       {editing ? (
         <TemplateForm
           key={`${editing.action}:${editing.template.id}:${editing.version ?? "new"}`}
@@ -241,14 +243,11 @@ function TemplatePanel({
   const [version, setVersion] = useState<number>();
   if (!resource.data)
     return (
-      <p role={resource.error ? "alert" : "status"}>
-        {resource.error ?? "正在加载模板详情…"}
-        {resource.error && (
-          <button type="button" onClick={resource.reload}>
-            重试
-          </button>
-        )}
-      </p>
+      <RequestFeedback
+        {...resource}
+        retry={resource.reload}
+        pendingMessage="正在加载模板详情…"
+      />
     );
   const { template, previous, versions } = resource.data;
   const shown = versions.find((t) => t.version === version) ?? template;
@@ -260,14 +259,11 @@ function TemplatePanel({
       <h3>
         {template.title} · {template.id}
       </h3>
-      {resource.error && (
-        <p role="alert">
-          {resource.error}{" "}
-          <button type="button" onClick={resource.reload}>
-            重试
-          </button>
-        </p>
-      )}
+      <RequestFeedback
+        {...resource}
+        retry={resource.reload}
+        pendingMessage="正在加载模板详情…"
+      />
       <div className="template-toolbar">
         {template.builtin ? (
           <>
@@ -462,10 +458,10 @@ function TemplateForm({
   const request = JSON.stringify(change);
   const [validation, setValidation] = useState<{
     request: string;
+    retry: number;
     result: TemplateValidation;
   }>();
   const [retry, setRetry] = useState(0);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: retry explicitly invalidates the same validation request.
   useEffect(() => {
     let active = true;
     const timer = window.setTimeout(() => {
@@ -473,12 +469,13 @@ function TemplateForm({
         .validateTemplate(projectId, JSON.parse(request) as TemplateChange)
         .then(
           (result) => {
-            if (active) setValidation({ request, result });
+            if (active) setValidation({ request, retry, result });
           },
           (cause) => {
             if (active)
               setValidation({
                 request,
+                retry,
                 result: {
                   valid: false,
                   reason: describeWriteError(cause, "请重试校验。"),
@@ -493,7 +490,9 @@ function TemplateForm({
     };
   }, [client, projectId, request, retry]);
   const checked =
-    validation?.request === request ? validation.result : undefined;
+    validation?.request === request && validation.retry === retry
+      ? validation.result
+      : undefined;
   const patch = (value: Partial<TemplateDefinition>) =>
     setDraft((old) => ({ ...old, ...value }));
   const item = (
@@ -776,21 +775,17 @@ function TemplateForm({
           </>
         )}
         <p className="hint">角色须在本项目登记且启用；保存时将再次校验。</p>
-        {!checked ? (
-          <p role="status">正在校验…</p>
-        ) : checked.reason ? (
-          <p role="alert">
-            {checked.reason}{" "}
-            <button type="button" onClick={() => setRetry((v) => v + 1)}>
-              重新校验
-            </button>
-          </p>
-        ) : (
-          <p role="status">校验通过</p>
-        )}
+        <RequestFeedback
+          pending={!checked}
+          interactive={retry > 0 && validation?.request === request}
+          pendingMessage="正在校验…"
+          error={checked?.reason ?? undefined}
+          retry={() => setRetry((v) => v + 1)}
+          retryLabel="重新校验"
+        />
         <div className="template-toolbar">
           <button type="submit" disabled={!checked?.valid}>
-            {busy ? "正在保存…" : action === "copy" ? "确认复制" : "保存模板"}
+            {action === "copy" ? "确认复制" : "保存模板"}
           </button>
           <button type="button" className="quiet" onClick={dismiss}>
             放弃修改

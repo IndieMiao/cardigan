@@ -25,6 +25,7 @@ import {
 } from "../components/Foundation.js";
 import { Menu, type MenuItem } from "../components/Menu.js";
 import { MultiSelect } from "../components/MultiSelect.js";
+import { RequestFeedback } from "../components/RequestFeedback.js";
 import { ViewSwitch } from "../components/ViewSwitch.js";
 import { routeHash, useRouteFilters } from "../route.js";
 import { inSnapshotGroup, SNAPSHOT_GROUPS } from "../snapshot-groups.js";
@@ -182,9 +183,7 @@ function CopyLinkButton() {
       >
         复制链接
       </button>
-      <span className="visually-hidden" role="status">
-        {message}
-      </span>
+      <RequestFeedback message={message} />
     </>
   );
 }
@@ -208,7 +207,10 @@ export function CardListPage({
     () => client.cards(projectId, "all" as CardFilter),
     [client, projectId],
   );
-  const { data, error, reload } = useResource(load, revision);
+  const { data, error, reload, pending, interactive } = useResource(
+    load,
+    revision,
+  );
   useEffect(() => {
     writeCardDisplay(display);
   }, [display]);
@@ -288,14 +290,13 @@ export function CardListPage({
           />
         }
       />
-      {data && error && (
-        <p role="alert" className="error-panel">
-          {error}{" "}
-          <button type="button" onClick={reload}>
-            重试
-          </button>
-        </p>
-      )}
+      <RequestFeedback
+        pending={pending}
+        interactive={interactive}
+        error={error}
+        retry={reload}
+        pendingMessage="正在加载卡片…"
+      />
       <FilterBar
         fields={[
           ...(filters.overview
@@ -418,19 +419,6 @@ export function CardListPage({
         onChange={setFilters}
       />
 
-      {state.kind === "loading" && (
-        <p className="loading" role="status">
-          正在加载卡片…
-        </p>
-      )}
-      {state.kind === "error" && (
-        <div className="error-panel" role="alert">
-          <p>{state.message}</p>
-          <button type="button" onClick={reload}>
-            重试
-          </button>
-        </div>
-      )}
       {state.kind === "ready" && cards.length === 0 && (
         <EmptyState>
           {activeFilters

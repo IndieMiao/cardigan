@@ -45,7 +45,11 @@ export function queueResumedRun(d: CommandDraft, item: WorkItem, event: Event) {
   const runs = d.list("runs").filter((r) => r.assignment_id === assignment.id);
   if (
     assignment.status !== "active" ||
-    runs.some((r) => !["completed", "failed", "cancelled"].includes(r.status))
+    runs.some(
+      (r) =>
+        r.inactivity_stop ||
+        !["completed", "failed", "cancelled"].includes(r.status),
+    )
   )
     return;
   // A new delivery can hit the limit after the previous review Run already completed.

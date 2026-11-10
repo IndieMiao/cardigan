@@ -32,6 +32,7 @@ export function startDispatchLoop(options: DispatchLoopOptions): DispatchLoop {
       while (!stopping) {
         try {
           options.monitor?.reconcile();
+          // One global tick preserves FIFO across projects and rechecks freed slots.
           await options.dispatcher.tick();
           if (!stopping) options.monitor?.reconcile();
         } catch (error) {

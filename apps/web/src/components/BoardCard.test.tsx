@@ -277,3 +277,23 @@ test("compact styles clamp two readable lines, wrap metadata and use existing th
     ).toContain(`--${token}:`);
   }
 });
+
+test("board cards show capacity queue positions, including the first waiting Run", () => {
+  const { rerender } = renderCard({
+    ...example,
+    queued_runs: [{ run_id: "R-1", assignment_id: "A-1", ahead: 0 }],
+  });
+  expect(screen.getByText("排队中（前面还有 0 个）")).toBeTruthy();
+  rerender(
+    <BoardCard
+      card={{
+        ...example,
+        queued_runs: [{ run_id: "R-1", assignment_id: "A-1", ahead: 3 }],
+      }}
+      projectId="p-1"
+      display={DEFAULT_CARD_DISPLAY}
+    />,
+  );
+  expect(screen.getByText("排队中（前面还有 3 个）")).toBeTruthy();
+  expect(screen.queryByText("排队中（前面还有 0 个）")).toBeNull();
+});

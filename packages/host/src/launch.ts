@@ -14,7 +14,14 @@ import type {
   RuntimeRef,
   StandingMode,
 } from "@cardigan/domain";
-import { abortDispatch, dispatchRun, standingModeOf } from "@cardigan/domain";
+import {
+  abortDispatch,
+  canDispatchRun,
+  DEFAULT_RUN_LIMIT,
+  dispatchRun,
+  isStandingPm,
+  standingModeOf,
+} from "@cardigan/domain";
 import {
   type CompiledAssignmentLaunch,
   compileAssignmentLaunch,
@@ -50,6 +57,7 @@ import {
 } from "./commands.js";
 import { HostLaunchError, type LaunchStep, messageOf } from "./errors.js";
 import { agentNameFor } from "./naming.js";
+import { runCapacitySnapshot } from "./run-capacity.js";
 import {
   type PreparedWorktree,
   prepareRoleWorktree,
@@ -69,7 +77,17 @@ export type { PreparedWorktree } from "./worktree.js";
  * compensation — exists once, so the two entries cannot drift apart.
  */
 
+export class RunCapacityDeferred extends Error {
+  constructor(
+    readonly run_id: string,
+    readonly ahead: number,
+  ) {
+    super(`排队中（前面还有 ${ahead} 个）`);
+  }
+}
+
 export interface LaunchHost {
+  readonly runLimit?: (machine: string) => number;
   readonly store: Store;
   readonly runtime: Runtime & Partial<Pick<HerdrRuntime, "captureAgent">>;
   readonly launch: {
@@ -81,8 +99,8 @@ export interface LaunchHost {
   readonly execution?: ExecutionConfig | undefined;
   readonly clock?: Clock | undefined;
   /**
-   * Cleanup problems are reported and never thrown: a failed release or scrub
-   * must not skip token revocation or Run cancellation (§13.4).
+   * Host diagnostics, including manual-start capacity notices and cleanup
+   * failures. Reporting must not skip token revocation or Run cancellation.
    */
   readonly report?: ((message: string) => void) | undefined;
 }
@@ -215,6 +233,30 @@ export async function launchRun(
         "dispatch",
         "Assignment delivery is in progress",
       );
+    const assignment = tx.assignments.get(input.project, input.assignment_id);
+    if (!assignment)
+      throw new HostLaunchError("dispatch", "Assignment is missing");
+    tx.runs.put(input.project, { ...run, queue_reason: "concurrency_limit" });
+    const capacity = runCapacitySnapshot(host.store, tx);
+    const manual =
+      input.actor.kind === "human" && input.actor.project_id === input.project;
+    const limit = host.runLimit?.(assignment.machine_id) ?? DEFAULT_RUN_LIMIT;
+    const occupied = capacity.occupied.get(assignment.machine_id) ?? 0;
+    // q(88): only the explicit human host entry may bypass machine capacity.
+    // PM tools, Dispatcher and recovery callers retain system/assignment actors.
+    if (
+      !manual &&
+      (!canDispatchRun(limit, occupied, isStandingPm(assignment)) ||
+        (!isStandingPm(assignment) &&
+          (capacity.queue.find(
+            (r) => r.project_id === input.project && r.run_id === run.id,
+          )?.ahead ?? 0) > 0))
+    ) {
+      return undefined;
+    }
+    const cleared = { ...run };
+    delete cleared.queue_reason;
+    tx.runs.put(input.project, cleared);
     const at = clock.now();
     const attempt = {
       id: randomUUID(),
@@ -229,10 +271,26 @@ export async function launchRun(
       outcome: null,
     };
     beginLaunchAttempt(host.store.database, attempt);
-    return attempt;
+    return {
+      ...attempt,
+      capacity_notice:
+        manual && limit > 0 && occupied + 1 > limit
+          ? `已超过全机上限（当前 ${occupied + 1}/上限 ${limit}）`
+          : undefined,
+    };
   });
+  if (!attempt) {
+    const waiting = host.store.uow.read((tx) =>
+      runCapacitySnapshot(host.store, tx).queue.find(
+        (r) => r.project_id === input.project && r.run_id === input.run.id,
+      ),
+    );
+    throw new RunCapacityDeferred(input.run.id, waiting?.ahead ?? 0);
+  }
   let sent = false;
   try {
+    // Report the claim-time snapshot, including this Run's durable reservation.
+    if (attempt.capacity_notice) host.report?.(attempt.capacity_notice);
     const result = await launch(host, input);
     sent = true;
     return result;
@@ -275,6 +333,17 @@ async function launch(
   const current = host.store.uow.read((tx) =>
     tx.runs.get(project, input.run.id),
   );
+  if (
+    host.store.uow.read((tx) =>
+      tx.runs
+        .list(project)
+        .some((r) => r.assignment_id === assignment.id && r.inactivity_stop),
+    )
+  )
+    throw new HostLaunchError(
+      "dispatch",
+      "Previous Run is waiting for confirmed runtime exit",
+    );
   if (current?.status !== "queued" || current.assignment_id !== assignment.id)
     throw new HostLaunchError(
       "directory preparation",

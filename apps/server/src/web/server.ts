@@ -13,6 +13,7 @@ import {
   projectPreferences,
 } from "@cardigan/domain";
 import type { MergeGateConfiguration } from "@cardigan/host";
+import { readRunQueue } from "@cardigan/host";
 import { resolveDataDirectory } from "@cardigan/runtime-herdr";
 import { listRoleVersions, type Store, type WebSession } from "@cardigan/store";
 import { serveAttachment } from "./attachments.js";
@@ -572,7 +573,11 @@ async function serveProjectRoute(
 
   if (rest === "/execution") {
     const machines = store.uow.read((tx) => tx.machines.list(project_id));
-    sendJson(res, 200, executionView(state, now, machines));
+    sendJson(
+      res,
+      200,
+      executionView(state, now, machines, readRunQueue(store)),
+    );
     return;
   }
 

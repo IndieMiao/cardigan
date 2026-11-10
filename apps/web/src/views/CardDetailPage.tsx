@@ -27,6 +27,7 @@ import {
   StatusTag,
   Time,
 } from "../components/Foundation.js";
+import { RequestFeedback } from "../components/RequestFeedback.js";
 import { Timeline } from "../components/Timeline.js";
 import { TimelineControls } from "../components/TimelineControls.js";
 import { routeHash, useRouteFilters } from "../route.js";
@@ -81,7 +82,10 @@ export function CardDetailPage(props: CardDetailPageProps) {
       throw error;
     }
   }, [client, projectId, cardId]);
-  const { data, error, reload, pending } = useResource(load, revision);
+  const { data, error, reload, pending, interactive } = useResource(
+    load,
+    revision,
+  );
   useEffect(() => {
     if (query.current.at === anchor && previousSize.current === pageSize)
       return;
@@ -106,68 +110,67 @@ export function CardDetailPage(props: CardDetailPageProps) {
         <a href={back}>返回到卡片</a>
       </div>
     );
-  if (!data)
-    return error ? (
-      <div role="alert" className="error-panel">
-        {error}
-        <button type="button" onClick={reload}>
-          重试
-        </button>
-      </div>
-    ) : (
-      <p className="loading" role="status">
-        正在加载卡片 {cardId}…
-      </p>
-    );
   return (
-    <CardContent
-      key={`${projectId}/${cardId}`}
-      detail={data}
-      client={client}
-      projectId={projectId}
-      cardId={cardId}
-      anchor={anchor}
-      inDrawer={inDrawer}
-      onLocate={inDrawer ? locate : undefined}
-      onPosted={(comment) => {
-        const id = `entry-${comment.id}`;
-        locate(id);
-        if (!inDrawer)
-          window.location.hash = routeHash({
-            kind: "card",
-            projectId,
-            cardId,
-            anchor: id,
-            filters: routeFilters,
-          });
-      }}
-      onCommentConflict={() => {
-        locate(undefined);
-        query.current = { limit: pageSize };
-        if (!inDrawer)
-          window.location.hash = routeHash({
-            kind: "card",
-            projectId,
-            cardId,
-            filters: routeFilters,
-          });
-        reload();
-      }}
-      error={error}
-      reload={reload}
-      pending={pending}
-      anchorReady={!anchor || (query.current.at === anchor && !pending)}
-      pageSize={pageSize}
-      loadEarlier={() => {
-        query.current = {
-          ...query.current,
-          limit:
-            Math.max(query.current.limit ?? pageSize, data.timeline.length) +
-            pageSize,
-        };
-        reload();
-      }}
-    />
+    <>
+      <RequestFeedback
+        pending={pending}
+        interactive={interactive}
+        error={error}
+        retry={reload}
+        pendingMessage={`正在加载卡片 ${cardId}…`}
+      />
+      {data && (
+        <CardContent
+          key={`${projectId}/${cardId}`}
+          detail={data}
+          client={client}
+          projectId={projectId}
+          cardId={cardId}
+          anchor={anchor}
+          inDrawer={inDrawer}
+          onLocate={inDrawer ? locate : undefined}
+          onPosted={(comment) => {
+            const id = `entry-${comment.id}`;
+            locate(id);
+            if (!inDrawer)
+              window.location.hash = routeHash({
+                kind: "card",
+                projectId,
+                cardId,
+                anchor: id,
+                filters: routeFilters,
+              });
+          }}
+          onCommentConflict={() => {
+            locate(undefined);
+            query.current = { limit: pageSize };
+            if (!inDrawer)
+              window.location.hash = routeHash({
+                kind: "card",
+                projectId,
+                cardId,
+                filters: routeFilters,
+              });
+            reload();
+          }}
+          reload={reload}
+          pending={pending}
+          anchorReady={!anchor || (query.current.at === anchor && !pending)}
+          pageSize={pageSize}
+          loadEarlier={() => {
+            query.current = {
+              ...query.current,
+              limit:
+                Math.max(
+                  query.current.limit ?? pageSize,
+                  data.timeline.length,
+                ) + pageSize,
+            };
+            reload();
+          }}
+        />
+      )}
+    </>
   );
 }
 
@@ -181,7 +184,6 @@ function CardContent({
   onLocate,
   onPosted,
   onCommentConflict,
-  error,
   reload,
   pending,
   pageSize,
@@ -197,7 +199,6 @@ function CardContent({
   onLocate: ((anchor: string) => void) | undefined;
   onPosted: (comment: PostedComment) => void;
   onCommentConflict: () => void;
-  error: string | undefined;
   reload: () => void;
   anchorReady: boolean;
   pending: boolean;
@@ -336,14 +337,6 @@ function CardContent({
       aria-label={`卡片 ${cardId}`}
     >
       <div className="card-main">
-        {error && (
-          <p role="alert" className="error-panel">
-            {error}
-            <button type="button" onClick={reload}>
-              重试
-            </button>
-          </p>
-        )}
         <header className="card-header">
           <CardSource detail={detail} projectId={projectId} />
           <PageTitle

@@ -5,6 +5,7 @@ import type {
   TimelineEntry,
 } from "@cardigan/domain";
 import { extractReferences } from "@cardigan/domain";
+import { readRunQueue } from "@cardigan/host";
 import type { ReadRepositories, Store } from "@cardigan/store";
 import { cardDetail, cardListViews } from "./read.js";
 
@@ -70,6 +71,7 @@ export function readCardList(store: Store, project_id: ProjectId) {
     return cardListViews(
       { ...state, attachments, timeline, events },
       new Map(rows.map((row) => [row.card_id, row.updated_at])),
+      readRunQueue(store, tx),
     );
   });
 }

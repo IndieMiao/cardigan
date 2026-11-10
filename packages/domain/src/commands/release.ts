@@ -54,7 +54,8 @@ export function releaseAssignment(
         .some(
           (r) =>
             r.assignment_id === a.id &&
-            !["completed", "failed", "cancelled"].includes(r.status),
+            (r.inactivity_stop ||
+              !["completed", "failed", "cancelled"].includes(r.status)),
         ),
       "illegal_transition",
       "Assignment has an unfinished Run",

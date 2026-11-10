@@ -79,7 +79,7 @@ export function TimelineControls({
           disabled={pending}
           onClick={loadEarlier}
         >
-          {pending ? "正在加载…" : "加载更早的记录"}
+          加载更早的记录
         </button>
       )}
       <Menu
