@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
-import type { CardiganClient, ExecutionAssignment, RunView } from "../api.js";
+import type {
+  CardiganClient,
+  ExecutionAssignment,
+  ExecutionRunPage,
+  RunView,
+} from "../api.js";
 import { Drawer } from "../components/Drawer.js";
 import { EmployeeIdentity } from "../components/EmployeeIdentity.js";
 import { FilterBar } from "../components/FilterBar.js";
@@ -215,25 +220,7 @@ function RunHistory({
       (page) => {
         if (cancelled) return;
         setError(undefined);
-        setState((current) => {
-          const last = page.runs.at(-1);
-          const older =
-            current === undefined || last === undefined
-              ? []
-              : current.runs.filter(
-                  (run) =>
-                    idNumber(run.id) < idNumber(last.id) &&
-                    !page.runs.some((fresh) => fresh.id === run.id),
-                );
-          return {
-            runs: [...page.runs, ...older],
-            total: page.total,
-            next:
-              older.length > 0 && current
-                ? current.next
-                : (page.next_cursor ?? null),
-          };
-        });
+        setState((current) => mergeFirstPage(current, page));
       },
       (reason: unknown) => {
         if (!cancelled)
@@ -322,9 +309,32 @@ function RunHistory({
     </section>
   );
 }
-function idNumber(id: string): number {
-  const digits = /(\d+)$/.exec(id)?.[1];
-  return digits === undefined ? 0 : Number(digits);
+/**
+ * Merge a re-read first page into the pages already loaded. The older pages
+ * are kept only when they continue the new first page without a gap, i.e. the
+ * new page's last Run is one the reader already has; the loaded Runs after it
+ * are then contiguous server pages. Otherwise (more new Runs than one page)
+ * the list restarts from the new first page so "显示更多" reads the rest in
+ * order instead of skipping the Runs in between.
+ */
+function mergeFirstPage(
+  current: RunHistoryState | undefined,
+  page: ExecutionRunPage,
+): RunHistoryState {
+  const fresh: RunHistoryState = {
+    runs: page.runs,
+    total: page.total,
+    next: page.next_cursor ?? null,
+  };
+  const last = page.runs.at(-1);
+  if (current === undefined || last === undefined || fresh.next === null)
+    return fresh;
+  const join = current.runs.findIndex((run) => run.id === last.id);
+  if (join < 0) return fresh;
+  const older = current.runs.slice(join + 1);
+  return older.length === 0
+    ? fresh
+    : { runs: [...page.runs, ...older], total: page.total, next: current.next };
 }
 
 const CURSOR_PAGE = 10;
@@ -629,6 +639,17 @@ export function ExecutionPage({
           if (!next) setSelected(undefined);
         }}
         className="execution-drawer-content"
+        // C-75: rows stay usable while the drawer is open, so another row's
+        // 详情 replaces the content; any other outside click closes it.
+        modal={false}
+        onInteractOutside={(event) => {
+          const target = event.target;
+          if (
+            target instanceof Element &&
+            target.closest(".execution-table tbody tr")
+          )
+            event.preventDefault();
+        }}
         title={detail ? `${detail.id} 详情` : "Assignment 详情"}
         description={
           detail

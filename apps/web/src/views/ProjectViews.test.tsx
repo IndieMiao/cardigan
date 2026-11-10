@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -474,7 +475,7 @@ test("C-75: the drawer shows ten recent Runs and pages ten more from the server,
   expect(within(history).getAllByText("收起摘要")).toHaveLength(1);
 });
 
-test("C-75: one detail drawer at a time; Esc, the close icon and the overlay close it and return focus", async () => {
+test("C-75: one detail drawer at a time; another row stays clickable and replaces it; Esc, the close icon and outside clicks close it and return focus", async () => {
   const second = { ...assignment, id: "A-2", session_ref: "session-second" };
   render(
     <ExecutionPage
@@ -489,40 +490,115 @@ test("C-75: one detail drawer at a time; Esc, the close icon and the overlay clo
     />,
   );
   const first = await screen.findByRole("button", { name: "查看 A-1 详情" });
-  const other = screen.getByRole("button", { name: "查看 A-2 详情" });
   expect(first.textContent).toBe("详情");
   const rowsBefore = document.querySelectorAll(".execution-table tr").length;
+  /** Click like a pointer would: Radix dismisses on pointerdown outside. */
+  const press = (element: Element) => {
+    fireEvent.pointerDown(element);
+    fireEvent.mouseDown(element);
+    fireEvent.pointerUp(element);
+    fireEvent.mouseUp(element);
+    fireEvent.click(element);
+  };
+  // Radix arms its outside-pointer listener on the next tick after opening.
+  const settle = () => act(() => new Promise((r) => setTimeout(r, 10)));
 
-  fireEvent.click(first);
+  press(first);
   expect(await screen.findByRole("dialog", { name: "A-1 详情" })).toBeTruthy();
+  await settle();
   // The row does not expand or push the rows below it.
   expect(document.querySelectorAll(".execution-table tr")).toHaveLength(
     rowsBefore,
   );
-  // Another row's 详情 replaces the drawer instead of opening a second one.
-  fireEvent.click(other);
+  // The page behind stays usable: no pointer blocking, no aria-hidden, so the
+  // other row's 详情 is still reachable by role and takes focus.
+  expect(document.body.style.pointerEvents).not.toBe("none");
+  const other = screen.getByRole("button", { name: "查看 A-2 详情" });
+  expect(other.closest("[aria-hidden='true']")).toBeNull();
+  other.focus();
+  expect(document.activeElement).toBe(other);
+  press(other);
   const replaced = await screen.findByRole("dialog", { name: "A-2 详情" });
   expect(screen.getAllByRole("dialog")).toHaveLength(1);
   expect(within(replaced).getByText("session-second")).toBeTruthy();
+  await settle();
+  expect(screen.getByRole("dialog", { name: "A-2 详情" })).toBe(replaced);
 
   fireEvent.keyDown(replaced, { key: "Escape" });
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   await waitFor(() => expect(document.activeElement).toBe(other));
 
-  fireEvent.click(first);
+  press(first);
   const drawer = await screen.findByRole("dialog", { name: "A-1 详情" });
-  fireEvent.click(within(drawer).getByRole("button", { name: "关闭抽屉" }));
+  press(within(drawer).getByRole("button", { name: "关闭抽屉" }));
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   await waitFor(() => expect(document.activeElement).toBe(first));
 
-  fireEvent.click(other);
+  // The dimming overlay lets clicks through, so clicking the dimmed page
+  // outside the rows is an outside click that closes the drawer.
+  press(other);
   await screen.findByRole("dialog", { name: "A-2 详情" });
-  const overlay = document.querySelector(".drawer-overlay") as HTMLElement;
-  fireEvent.pointerDown(overlay);
-  fireEvent.pointerUp(overlay);
-  fireEvent.click(overlay);
+  await settle();
+  expect(
+    document
+      .querySelector(".drawer-overlay")
+      ?.classList.contains("drawer-overlay-passthrough"),
+  ).toBe(true);
+  press(screen.getByRole("heading", { name: "执行视图" }));
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   await waitFor(() => expect(document.activeElement).toBe(other));
+});
+
+test("C-75: a live refresh with more new Runs than one page leaves no gap in the history", async () => {
+  const make = (n: number) => ({
+    ...run,
+    id: `R-${n}`,
+    status: "completed",
+    summary: `run ${n}`,
+  });
+  let runs = Array.from({ length: 20 }, (_, i) => make(20 - i));
+  const client = fakeClient({
+    execution: async () => ({ assignments: [assignment], runs, machines: [] }),
+  });
+  const { rerender } = render(
+    <ExecutionPage client={client} projectId="p-1" revision={0} />,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "查看 A-1 详情" }));
+  const history = await screen.findByRole("region", { name: "A-1 Run 历史" });
+  const ids = () =>
+    [...history.querySelectorAll(".execution-runs li")].map(
+      (li) => /R-\d+/.exec(li.textContent ?? "")?.[0],
+    );
+  await within(history).findByText("R-11", { exact: false });
+  fireEvent.click(within(history).getByRole("button", { name: "显示更多" }));
+  await waitFor(() => expect(ids()).toHaveLength(20));
+  expect(
+    within(history).queryByRole("button", { name: "显示更多" }),
+  ).toBeNull();
+
+  // Eleven new Runs while the page was away: more than one page.
+  runs = Array.from({ length: 31 }, (_, i) => make(31 - i));
+  rerender(<ExecutionPage client={client} projectId="p-1" revision={1} />);
+  await within(history).findByText("R-31", { exact: false });
+  // Restarted from the new first page; the rest loads in order, no gap.
+  expect(ids()).toEqual(Array.from({ length: 10 }, (_, i) => `R-${31 - i}`));
+  for (const length of [20, 30, 31]) {
+    fireEvent.click(within(history).getByRole("button", { name: "显示更多" }));
+    await waitFor(() => expect(ids()).toHaveLength(length));
+  }
+  expect(ids()).toEqual(Array.from({ length: 31 }, (_, i) => `R-${31 - i}`));
+  expect(
+    within(history).queryByRole("button", { name: "显示更多" }),
+  ).toBeNull();
+
+  // A few new Runs (less than a page) keep the loaded pages, still gap-free.
+  runs = Array.from({ length: 33 }, (_, i) => make(33 - i));
+  rerender(<ExecutionPage client={client} projectId="p-1" revision={2} />);
+  await within(history).findByText("R-33", { exact: false });
+  expect(ids()).toEqual(Array.from({ length: 33 }, (_, i) => `R-${33 - i}`));
+  expect(
+    within(history).queryByRole("button", { name: "显示更多" }),
+  ).toBeNull();
 });
 
 test("C-75: ACK cursors fold into one line and expand to the ten newest with 显示更多", async () => {
