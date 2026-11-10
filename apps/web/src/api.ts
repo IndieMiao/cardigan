@@ -4,8 +4,12 @@ export interface AuthorView {
     readonly name: string;
     readonly title: string;
     readonly avatar: string | null;
+    readonly bio?: string;
+    readonly role_id?: string;
   } | null;
   readonly author_display?: string;
+  readonly author?: string;
+  readonly author_role?: string | null;
 }
 
 import {
@@ -41,7 +45,7 @@ export interface WaitingOnItem {
   readonly label: string;
 }
 
-export interface NextOwnerItem {
+export interface NextOwnerItem extends AuthorView {
   readonly kind: "human" | "role" | "assignment";
   readonly ref: string;
 }
@@ -80,6 +84,7 @@ export interface CardView {
 
 /** A list row: the card plus the fields the list filters and columns need. */
 export interface CardListItem extends CardView {
+  readonly produce_owners?: readonly AuthorView[];
   readonly progress: { readonly completed: number; readonly total: number };
   readonly updated_at: string;
   readonly roles: readonly string[];
@@ -360,14 +365,14 @@ export interface NeedsCardRef {
   readonly id: string;
   readonly title: string;
 }
-export interface MergeConfirmationDelivery {
+export interface MergeConfirmationDelivery extends AuthorView {
   readonly id: string;
   readonly work_item_id: string;
   readonly work_item_title: string;
   readonly subject: { readonly kind: string; readonly value: string };
   readonly summary: string;
 }
-export interface MergeConfirmationReview {
+export interface MergeConfirmationReview extends AuthorView {
   readonly id: string;
   readonly delivery_id: string;
   readonly work_item_id: string;
@@ -399,7 +404,7 @@ export interface MergeConfirmationView {
     readonly precondition?: string;
   }[];
 }
-export interface NeedsDecision extends DecisionView {
+export interface NeedsDecision extends DecisionView, AuthorView {
   readonly card_id: string | null;
   readonly affected_cards: readonly string[];
   readonly context: string;
@@ -412,7 +417,8 @@ export interface NeedsDecision extends DecisionView {
   readonly merge_confirmation: MergeConfirmationView | null;
 }
 export interface NeedsAction
-  extends Pick<HumanActionView, "id" | "instructions" | "expected_return"> {
+  extends Pick<HumanActionView, "id" | "instructions" | "expected_return">,
+    AuthorView {
   readonly card_id: string | null;
   readonly why: string;
   readonly waited_ms: number | null;
@@ -422,7 +428,7 @@ export interface NeedsAction
 export interface NeedsPage {
   readonly decisions: readonly NeedsDecision[];
   readonly human_actions: readonly NeedsAction[];
-  readonly incidents: readonly {
+  readonly incidents: readonly (AuthorView & {
     readonly id: string;
     readonly role_id: string;
     readonly runtime_state: string;
@@ -431,7 +437,7 @@ export interface NeedsPage {
     readonly last_run?: RunView | null;
     readonly card_id: string | null;
     readonly waited_ms: number | null;
-  }[];
+  })[];
 }
 
 export interface SnapshotData {

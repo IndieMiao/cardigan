@@ -140,7 +140,7 @@ test("the main column and sidebar answer the five questions", async () => {
 
   const questions = [
     ["进行到哪一步", "工作项 0/2 完成"],
-    ["下一步该谁做", "你、reviewer"],
+    ["下一步该谁做", "未命名的 reviewer"],
     ["被什么阻塞", "等你拍板 D-1"],
   ] as const;
   for (const [question, answer] of questions) {

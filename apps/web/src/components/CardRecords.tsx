@@ -1,5 +1,6 @@
 import type { CardDetail } from "../api.js";
 import { routeHash } from "../route.js";
+import { EmployeeIdentity } from "./EmployeeIdentity.js";
 import { StatusTag } from "./Foundation.js";
 import { TimelineVersion } from "./TimelineVersion.js";
 
@@ -39,6 +40,7 @@ export function CardRecords({
         {detail.deliveries.map((d) => (
           <li key={d.id}>
             <div>
+              <EmployeeIdentity {...d} showTitle={false} />{" "}
               {link(d.id, `delivery-${d.id}`)} <StatusTag status={d.status} />{" "}
               <TimelineVersion
                 value={d.subject.value}
@@ -51,6 +53,7 @@ export function CardRecords({
                 .filter((r) => r.delivery_id === d.id)
                 .map((r) => (
                   <span key={r.id}>
+                    <EmployeeIdentity {...r} showTitle={false} />{" "}
                     {link(r.id, `review-${r.id}`)}{" "}
                     <StatusTag status={r.verdict} />
                   </span>

@@ -1,5 +1,6 @@
 import { useCallback } from "react";
 import type { ActivityData, CardiganClient } from "../api.js";
+import { EmployeeIdentity } from "../components/EmployeeIdentity.js";
 import { FilterBar } from "../components/FilterBar.js";
 import { EmptyState, PageTitle, Time } from "../components/Foundation.js";
 import { CardLink, Feedback } from "../components/Operations.js";
@@ -27,14 +28,6 @@ const RANGE_LABELS: Readonly<Record<string, string>> = {
   "7d": "最近 7 天",
   "30d": "最近 30 天",
 };
-const actorLabel = (event: ActivityData["events"][number]): string =>
-  event.actor.kind === "human"
-    ? "你"
-    : event.actor.kind === "system"
-      ? "系统"
-      : (event.employee?.name ??
-        event.author_display ??
-        `未命名的 ${event.role}`);
 const dayKey = (value: string): string => {
   const date = new Date(value);
   if (!Number.isFinite(date.getTime())) return "时间未知";
@@ -128,7 +121,12 @@ function DayGroup({
                 <details className="event-details">
                   <summary className="activity-summary">
                     <Time value={event.created_at} />
-                    <strong>{actorLabel(event)}</strong>
+                    <EmployeeIdentity
+                      {...event}
+                      author={event.actor.kind}
+                      author_role={event.role}
+                      showTitle={false}
+                    />
                     <span>{eventLabel(event.type)}</span>
                     <CardLink
                       projectId={projectId}

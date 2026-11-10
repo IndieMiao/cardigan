@@ -4,6 +4,7 @@ import type { CardDisplay } from "../card-display.js";
 import { routeHash } from "../route.js";
 import { BOARD_STATUSES, cardStatusLabel, nextOwnersLabel } from "../status.js";
 import { CardSuperseded } from "./CardSuperseded.js";
+import { ProduceOwners } from "./EmployeeIdentity.js";
 import { IdTag, StatusTag, Time } from "./Foundation.js";
 
 export function Board({
@@ -103,109 +104,116 @@ export function Board({
                         const humanAction = reasons.has("human_action");
                         return (
                           <li key={card.id}>
-                            <a
+                            <div
                               className={`card-tile${blocked ? " card-tile-blocked" : decision || humanAction ? " card-tile-waiting" : ""}${card.resolution === "superseded" ? " card-superseded" : ""}`}
-                              href={routeHash({
-                                kind: "card",
-                                projectId,
-                                cardId: card.id,
-                              })}
-                              onClick={(event) => {
-                                if (
-                                  onOpenCard === undefined ||
-                                  event.metaKey ||
-                                  event.ctrlKey ||
-                                  event.shiftKey ||
-                                  event.altKey
-                                )
-                                  return;
-                                event.preventDefault();
-                                onOpenCard(card.id, event.currentTarget);
-                              }}
                             >
-                              <span className="card-tile-head">
-                                {display.number && (
-                                  <IdTag
-                                    id={card.id}
-                                    label="卡片"
-                                    detail={card.title}
-                                  />
-                                )}
-                                <StatusTag status={card.status} />
-                              </span>
-                              <span className="card-title">{card.title}</span>
-                              <CardSuperseded card={card} />
-                              {display.waiting &&
-                                (blocked || decision || humanAction) && (
+                              <a
+                                className="card-tile-link"
+                                href={routeHash({
+                                  kind: "card",
+                                  projectId,
+                                  cardId: card.id,
+                                })}
+                                onClick={(event) => {
+                                  if (
+                                    onOpenCard === undefined ||
+                                    event.metaKey ||
+                                    event.ctrlKey ||
+                                    event.shiftKey ||
+                                    event.altKey
+                                  )
+                                    return;
+                                  event.preventDefault();
+                                  onOpenCard(card.id, event.currentTarget);
+                                }}
+                              >
+                                <span className="card-tile-head">
+                                  {display.number && (
+                                    <IdTag
+                                      id={card.id}
+                                      label="卡片"
+                                      detail={card.title}
+                                    />
+                                  )}
+                                  <StatusTag status={card.status} />
+                                </span>
+                                <span className="card-title">{card.title}</span>
+                                <CardSuperseded card={card} />
+                                {display.waiting &&
+                                  (blocked || decision || humanAction) && (
+                                    <span className="card-field">
+                                      <span className="card-field-label">
+                                        等待标记：
+                                      </span>
+                                      <span className="metadata">
+                                        {decision && (
+                                          <span className="status status-waiting">
+                                            等你拍板
+                                          </span>
+                                        )}
+                                        {humanAction && (
+                                          <span className="status status-waiting">
+                                            待你执行
+                                          </span>
+                                        )}
+                                        {blocked && (
+                                          <StatusTag status="blocked" />
+                                        )}
+                                      </span>
+                                    </span>
+                                  )}
+                                {display.reason && (
                                   <span className="card-field">
                                     <span className="card-field-label">
-                                      等待标记：
+                                      原因：
                                     </span>
-                                    <span className="metadata">
-                                      {decision && (
-                                        <span className="status status-waiting">
-                                          等你拍板
-                                        </span>
-                                      )}
-                                      {humanAction && (
-                                        <span className="status status-waiting">
-                                          待你执行
-                                        </span>
-                                      )}
-                                      {blocked && (
-                                        <StatusTag status="blocked" />
-                                      )}
+                                    <span>{card.why}</span>
+                                  </span>
+                                )}
+                                {display.roles && (
+                                  <span className="card-field">
+                                    <span className="card-field-label">
+                                      负责角色：
+                                    </span>
+                                    <span>
+                                      {card.roles.join("、") || "尚未配置"}
                                     </span>
                                   </span>
                                 )}
-                              {display.reason && (
-                                <span className="card-field">
-                                  <span className="card-field-label">
-                                    原因：
+                                {display.progress && (
+                                  <span className="card-field">
+                                    <span className="card-field-label">
+                                      进度：
+                                    </span>
+                                    <span>
+                                      {card.progress.completed}/
+                                      {card.progress.total}
+                                    </span>
                                   </span>
-                                  <span>{card.why}</span>
-                                </span>
-                              )}
-                              {display.roles && (
-                                <span className="card-field">
-                                  <span className="card-field-label">
-                                    负责角色：
+                                )}
+                                {display.updated && (
+                                  <span className="card-field">
+                                    <span className="card-field-label">
+                                      更新时间：
+                                    </span>
+                                    <Time value={card.updated_at} />
                                   </span>
-                                  <span>
-                                    {card.roles.join("、") || "尚未配置"}
+                                )}
+                                {display.next && (
+                                  <span className="card-field">
+                                    <span className="card-field-label">
+                                      下一步：
+                                    </span>
+                                    <span>
+                                      {nextOwnersLabel(card.next_owners)}
+                                    </span>
                                   </span>
-                                </span>
-                              )}
-                              {display.progress && (
-                                <span className="card-field">
-                                  <span className="card-field-label">
-                                    进度：
-                                  </span>
-                                  <span>
-                                    {card.progress.completed}/
-                                    {card.progress.total}
-                                  </span>
-                                </span>
-                              )}
-                              {display.updated && (
-                                <span className="card-field">
-                                  <span className="card-field-label">
-                                    更新时间：
-                                  </span>
-                                  <Time value={card.updated_at} />
-                                </span>
-                              )}
-                              {display.next && (
-                                <span className="card-field">
-                                  <span className="card-field-label">
-                                    下一步：
-                                  </span>
-                                  <span>
-                                    {nextOwnersLabel(card.next_owners)}
-                                  </span>
-                                </span>
-                              )}
-                            </a>
+                                )}
+                              </a>
+                              <ProduceOwners
+                                owners={card.produce_owners ?? []}
+                              />
+                            </div>
                           </li>
                         );
                       })}
