@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import {
   existsSync,
   lstatSync,
@@ -111,5 +112,39 @@ test("worker teardown only removes empty private data roots", async () => {
   rmSync(unfinished);
   paths.removeEmptyTestRoot(root);
   paths.removeEmptyTestRoot(root);
+  expect(existsSync(root)).toBe(false);
+});
+
+test("worker children cannot leave Node compile caches in private test data", async () => {
+  const { paths } = await fixture();
+  const root = paths.createPrivateTestRoot();
+  roots.push(root);
+  const result = JSON.parse(
+    execFileSync(
+      process.execPath,
+      [
+        "-e",
+        `
+    const module = require('node:module');
+    const {status} = module.enableCompileCache();
+    module.flushCompileCache();
+    console.log(JSON.stringify({disabled:status === module.constants.compileCacheStatus.DISABLED}));
+  `,
+      ],
+      {
+        env: {
+          ...process.env,
+          TMPDIR: root,
+          TEMP: root,
+          TMP: root,
+          // Even an inherited explicit cache opt-in cannot defeat worker policy.
+          NODE_COMPILE_CACHE: join(root, "node-compile-cache"),
+        },
+        encoding: "utf8",
+      },
+    ),
+  );
+  paths.removeEmptyTestRoot(root);
+  expect(result.disabled).toBe(true);
   expect(existsSync(root)).toBe(false);
 });
