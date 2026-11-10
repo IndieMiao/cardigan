@@ -68,6 +68,7 @@ export type RuleId =
   | "6.4/delivery submitted"
   | "6.4/review passed"
   | "6.4/review rejected"
+  | "6.4/review conditional"
   | "6.4/decision requested"
   | "6.4/decision resolved"
   | "6.4/dependency completed"

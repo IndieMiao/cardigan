@@ -233,6 +233,68 @@ test("invariants 11, 14: stale SHA, foreign verifier and client verdict cannot b
   ).toBe("conditional");
 });
 
+test.each([true, false])(
+  "invariants 8, 14: review events retain conditions and allow same-version recheck (%s)",
+  async (recheck_required) => {
+    const product = value(await deliver());
+    let state = apply(fixture(), product);
+    const issues = [
+      {
+        severity: "minor" as const,
+        description: "Clarify the validation evidence",
+        must_fix: false,
+        pre_existing: false,
+        proof: "The report omits an expected result",
+      },
+    ];
+    const result = value(
+      submitReview(
+        state,
+        actor(2, "reviewer"),
+        { ...reviewParams(product.data), recheck_required, issues },
+        io,
+      ),
+    );
+    expect(result.events[0]?.payload).toMatchObject({
+      review_id: result.data.id,
+      delivery_id: product.data.id,
+      verdict: recheck_required ? "conditional" : "pass",
+      recheck_required,
+      rework_allowed: recheck_required,
+      issues,
+    });
+    state = apply(state, result);
+    expect(state.work_items.find((w) => w.id === p.work_item_id)?.status).toBe(
+      recheck_required ? "delivered" : "accepted",
+    );
+    if (recheck_required) {
+      state = {
+        ...state,
+        runs: [
+          ...state.runs.map((r) =>
+            r.id === id("run", 2) ? { ...r, status: "completed" as const } : r,
+          ),
+          { ...run(2), id: id("run", 99) },
+        ],
+      };
+      const rechecked = value(
+        submitReview(
+          state,
+          actor(2, "reviewer"),
+          reviewParams(product.data),
+          io,
+        ),
+      );
+      expect(rechecked.data).toMatchObject({
+        delivery_id: product.data.id,
+        target_sha: product.data.subject.value,
+        verdict: "pass",
+      });
+      expect(apply(state, rechecked).deliveries[0]?.status).toBe("accepted");
+    }
+  },
+);
+
 test("invariant 13: code review enables completion; the PM completion review opens the merge gate", async () => {
   let state = fixture();
   const product = value(await deliver(state));
