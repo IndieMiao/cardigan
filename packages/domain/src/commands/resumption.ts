@@ -48,6 +48,7 @@ export function queueResumedRun(d: CommandDraft, item: WorkItem, event: Event) {
     runs.some(
       (r) =>
         r.inactivity_stop ||
+        r.dispatch_stop ||
         !["completed", "failed", "cancelled"].includes(r.status),
     )
   )

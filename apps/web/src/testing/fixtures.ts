@@ -229,7 +229,7 @@ export function fakeClient(
     updateCard: async () => undefined,
     cancelCard: async () => undefined,
     supersedeCard: async () => undefined,
-    setCardSensitive: async () => undefined,
+    setCardSensitive: async () => ({ changed: true, auto_merge_due_at: null }),
     session: loggedIn,
     login: async () => undefined,
     logout: async () => undefined,

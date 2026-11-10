@@ -84,6 +84,9 @@ type CommandName =
   | "dispatch_run"
   | "acknowledge_run"
   | "abort_dispatch"
+  | "recover_dispatch"
+  | "manage_dispatch_stop"
+  | "resolve_dispatch_attention"
   | "manage_inactive_run_stop"
   | "set_project_preferences"
   | "mark_notices_read"
@@ -179,6 +182,9 @@ export class CommandDraft {
     const systemOnly = [
       "manage_inactive_run_stop",
       "auto_confirm_merge",
+      "recover_dispatch",
+      "manage_dispatch_stop",
+      "resolve_dispatch_attention",
       "remind_decision_followups",
       "record_merge_result",
       "record_merge_check",
@@ -355,6 +361,11 @@ export class CommandDraft {
   }
   ownRun(id: I.RunId): E.Run {
     const run = this.get("runs", id);
+    ensure(
+      !run.dispatch_stop?.stopping,
+      "illegal_transition",
+      "Run terminal stop is in progress",
+    );
     ensure(
       this.assignment && run.assignment_id === this.assignment.id,
       "unauthorized",

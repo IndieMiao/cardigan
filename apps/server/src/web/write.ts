@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import {
   type Actor,
   activateRole,
+  autoMergeSchedule,
   type Clock,
   type CommandEffect,
   type CommandPorts,
@@ -822,9 +823,36 @@ export async function serveWrite(
     } else if (operation === "sensitive") {
       // C-65: human-only; the domain rejects any agent actor.
       const p = parsed(cardSensitive, body, "sensitive 须为 true 或 false。");
-      output = run(context, (s, a, ports) =>
-        setCardSensitive(s, a, { ...p, card_id }, ports),
-      );
+      // C-72: tell the Workbench whether the flag actually changed, so a
+      // no-op unmark does not promise a restarted auto-merge timeout.
+      output = run(context, (s, a, ports) => {
+        const result = setCardSensitive(s, a, { ...p, card_id }, ports);
+        if (!result.ok) return result;
+        const changed = result.value.events.some(
+          (e) => e.type === "card_sensitivity_changed",
+        );
+        let auto_merge_due_at: string | null = null;
+        if (!changed)
+          for (const q of s.decisions) {
+            if (q.trigger !== "merge_confirmation" || q.card_id !== card_id)
+              continue;
+            const schedule = autoMergeSchedule(s, q.id);
+            if (
+              schedule.ok &&
+              (auto_merge_due_at === null ||
+                Date.parse(schedule.value.due_at) <
+                  Date.parse(auto_merge_due_at))
+            )
+              auto_merge_due_at = schedule.value.due_at;
+          }
+        return {
+          ok: true as const,
+          value: {
+            ...result.value,
+            data: { card: result.value.data, changed, auto_merge_due_at },
+          },
+        };
+      });
     } else if (operation === "supersede") {
       const p = parsed(
         cardSupersede,

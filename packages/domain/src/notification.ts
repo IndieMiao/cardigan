@@ -18,16 +18,16 @@ import { transition } from "./transitions.js";
  *    └──needs_attention─▶ needs_attention
  * ```
  *
- * `needs_attention` and `acked` are terminal: a notification that was answered
- * or escalated never rings again. `retry` (back to `pending`) is what the
- * dispatcher uses for the exponential re-send of §3.3.
+ * Answered, escalated or resolved notifications never ring again. The host
+ * resolves obsolete attention without advancing the Agent's ACK cursor.
  */
 export type NotificationEvent =
   | "bell"
   | "ack"
   | "retry"
   | "deliver_failed"
-  | "needs_attention";
+  | "needs_attention"
+  | "resolve";
 
 /** Who a notification is for (mirrors the router's recipient kinds). */
 export type NotificationRecipient =
@@ -93,7 +93,7 @@ export function nextNotificationStatus(
 
 /** Terminal states never ring again, whatever the dispatcher retries. */
 export const isTerminalNotification = (status: NotificationStatus): boolean =>
-  status === "acked" || status === "needs_attention";
+  status === "acked" || status === "needs_attention" || status === "resolved";
 
 /** Human readable reason for the two escalation states (§3.3). */
 export const isEscalatedNotification = (status: NotificationStatus): boolean =>

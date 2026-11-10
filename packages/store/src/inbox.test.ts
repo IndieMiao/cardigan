@@ -135,7 +135,7 @@ test("the notification state machine is enforced by the store", () => {
   });
 });
 
-test("a delivery failure is recorded and never silently retried", () => {
+test("a delivery failure is recorded before explicit retry preserves its identity and attempt count", () => {
   withTempStore((store) => {
     seed(store);
     const { notification } = store.recordNotification(note(store));
@@ -143,15 +143,27 @@ test("a delivery failure is recorded and never silently retried", () => {
       project_id,
       id: notification.id,
       event: "deliver_failed",
+      patch: { attempts: 2, bell: "[bell] fixture" },
     });
     expect(failed.status).toBe("delivery_failed");
-    expect(() =>
-      store.moveNotification({
-        project_id,
-        id: notification.id,
-        event: "retry",
-      }),
-    ).toThrow(/delivery_failed/);
+    expect(store.listNotifications({ project_id })).toEqual([failed]);
+    const retried = store.moveNotification({
+      project_id,
+      id: notification.id,
+      event: "retry",
+    });
+    expect(retried).toMatchObject({
+      id: notification.id,
+      event_id: notification.event_id,
+      recipient: notification.recipient,
+      card_id: notification.card_id,
+      seq: notification.seq,
+      created_at: notification.created_at,
+      status: "pending",
+      attempts: 2,
+      bell: "[bell] fixture",
+    });
+    expect(store.listNotifications({ project_id })).toEqual([retried]);
   });
 });
 

@@ -234,6 +234,12 @@ export interface ReviewMatrixRow {
   readonly verdict: string | null;
 }
 
+/** C-72: whether the flag actually changed, and the unchanged due time if not. */
+export interface SensitiveResult {
+  readonly changed: boolean;
+  readonly auto_merge_due_at: string | null;
+}
+
 export interface DecisionView {
   readonly auto_merge?: {
     readonly minutes: number;
@@ -921,7 +927,7 @@ export interface CardiganClient {
     cardId: string,
     sensitive: boolean,
     idempotencyKey?: string,
-  ): Promise<void>;
+  ): Promise<SensitiveResult>;
   subscribe(projectId: string, callbacks: StreamCallbacks): () => void;
   activity(projectId: string, filters: ActivityFilter): Promise<ActivityData>;
   snapshot(projectId: string): Promise<SnapshotData>;
@@ -1381,13 +1387,18 @@ export class HttpCardiganClient implements CardiganClient {
     cardId: string,
     sensitive: boolean,
     idempotencyKey = crypto.randomUUID(),
-  ): Promise<void> {
-    await this.write(
+  ): Promise<SensitiveResult> {
+    const output = (await this.write(
       projectId,
       `cards/${encodeURIComponent(cardId)}/sensitive`,
       { sensitive },
       idempotencyKey,
-    );
+    )) as Partial<SensitiveResult> | null;
+    // C-72: treat a reply without the flag as a change (pre-C-72 behaviour).
+    return {
+      changed: output?.changed !== false,
+      auto_merge_due_at: output?.auto_merge_due_at ?? null,
+    };
   }
 
   private async request<T>(

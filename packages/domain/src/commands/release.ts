@@ -55,6 +55,7 @@ export function releaseAssignment(
           (r) =>
             r.assignment_id === a.id &&
             (r.inactivity_stop ||
+              r.dispatch_stop ||
               !["completed", "failed", "cancelled"].includes(r.status)),
         ),
       "illegal_transition",

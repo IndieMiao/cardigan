@@ -8,7 +8,12 @@ import {
   requestDecision,
 } from "@cardigan/domain";
 import { parseLaunchConfig } from "@cardigan/roles";
-import { PROJECT_EVENT_STREAM, unfinishedBellAttempts } from "@cardigan/store";
+import {
+  listBellAttempts,
+  PROJECT_EVENT_STREAM,
+  Store,
+  unfinishedBellAttempts,
+} from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { dispatchFixture } from "../test-support/dispatch.js";
 import { runtimeEvents } from "../test-support/runtime-events.js";
@@ -227,7 +232,7 @@ test.each(["dispatched", "running", "unknown"])(
   },
 );
 
-test("M5.6 failed replacement settles delivery_failed, compensates and escalates once", async () => {
+test("M5.6 failed replacement records failure, compensates and escalates once; cancelled Run attention resolves", async () => {
   const s = scenario();
   vi.mocked(s.runtime.resume_or_replace).mockResolvedValue({
     ok: false,
@@ -235,15 +240,62 @@ test("M5.6 failed replacement settles delivery_failed, compensates and escalates
   });
   const dispatcher = new Dispatcher(s.options);
   await dispatcher.tick();
+  const failed = s.notes();
+  expect(failed.length).toBeGreaterThan(0);
+  expect(failed.every((n) => n.status === "delivery_failed")).toBe(true);
+  const attempts = listBellAttempts(f.store.database, f.project).filter(
+    (attempt) => attempt.run_id === s.run.id,
+  );
+  expect(attempts).toHaveLength(1);
+  expect(attempts[0]).toMatchObject({
+    outcome: "failed",
+    finished_at: f.clock.now(),
+  });
+  expect(f.state().runs.find((r) => r.id === s.run.id)?.status).toBe(
+    "cancelled",
+  );
+  const tokens = f.store.uow.run((tx) =>
+    tx.tokensForAssignment(f.project, s.target.assignment.id),
+  );
+  expect(tokens.length).toBeGreaterThan(0);
+  expect(tokens.every((token) => token.revoked_at !== null)).toBe(true);
+  const cursors = f.state().cursors;
   f.advance(3600000);
   await dispatcher.tick();
+  // C-56 clears obsolete attention after compensation cancels the Run. It must
+  // retain the failed receipt and notification identity, without retrying it.
+  expect(s.notes()).toEqual(
+    failed.map((note) => ({
+      ...note,
+      status: "resolved",
+      updated_at: f.clock.now(),
+    })),
+  );
+  const reopened = Store.open({ dataDir: f.dataDir, clock: f.clock });
+  try {
+    await new Dispatcher({ ...s.options, store: reopened }).tick();
+    expect(listBellAttempts(reopened.database, f.project)).toEqual(attempts);
+  } finally {
+    reopened.close();
+  }
+  expect(f.state().cursors).toEqual(cursors);
   expect(s.runtime.resume_or_replace).toHaveBeenCalledOnce();
-  expect(s.notes().every((n) => n.status === "delivery_failed")).toBe(true);
+  expect(s.notes().every((n) => n.status === "resolved")).toBe(true);
   expect(unfinishedBellAttempts(f.store.database, f.project)).toEqual([]);
   expect(f.state().runs.find((r) => r.id === s.run.id)?.status).toBe(
     "cancelled",
   );
   expect(f.state().runs).toHaveLength(2);
+  expect(
+    f.state().events.filter((e) => e.type === "bell_delivery_failed"),
+  ).toHaveLength(1);
+  expect(
+    f
+      .state()
+      .events.filter((e) =>
+        ["run_dispatch_recovered", "run_dispatch_stalled"].includes(e.type),
+      ),
+  ).toEqual([]);
   expect(f.state().timeline.filter((e) => e.type === "handoff")).toEqual([]);
   expect(
     f.store

@@ -179,6 +179,14 @@ export async function startCardiganServer(
           config.attachmentIntervalMs;
       plane = startControlPlane({
         ...options.dispatcher,
+        ...((options.dispatcher.dispatchTimeoutMs ??
+          config.dispatchTimeoutMs) === undefined
+          ? {}
+          : {
+              dispatchTimeoutMs:
+                options.dispatcher.dispatchTimeoutMs ??
+                config.dispatchTimeoutMs,
+            }),
         store,
         git,
         mergeGate: { configuration: mergeGate, execution },
