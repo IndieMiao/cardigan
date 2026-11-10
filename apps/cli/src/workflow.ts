@@ -43,6 +43,7 @@ import {
   systemClock,
 } from "./host.js";
 import type { CliIo } from "./io.js";
+import { printRotation, rotateStandingPmInStore } from "./pm-rotate.js";
 
 const USAGE = [
   "用法：",
@@ -54,6 +55,9 @@ const USAGE = [
   "  cardigan token issue <A-n> [--project <p>]",
   "  cardigan pm create --office|--ops [--project <p>]",
   "  cardigan pm start [--office] [--ops] [--project <p>]  一键启动常驻 PM（已在运行就跳过）",
+  "  cardigan pm rotate --office|--ops [--project <p>]     把常驻 PM 换到 pm 角色的最新版本",
+  "    新建固定最新版本的常驻 Assignment，待处理的 PM 事项转给它，旧的释放并作废 Token；",
+  "    已是最新版本时不做改动。先用 cardigan role upgrade pm --from-default 追加新版本。",
   "  cardigan needs-you [--project <p>]                   看待你拍板和待你执行的事项",
   "  cardigan human-action done <h(n)> --text <结果> [--project <p>]",
   "",
@@ -545,7 +549,7 @@ function tokenIssue(args: readonly string[], io: CliIo): number {
   }
 }
 
-/** `cardigan pm create|start`: the two standing PM assignments (§7.1). */
+/** `cardigan pm create|start|rotate`: the two standing PM assignments (§7.1). */
 async function pmCommand(
   args: readonly string[],
   io: CliIo,
@@ -553,7 +557,29 @@ async function pmCommand(
 ): Promise<number> {
   const [sub] = args;
   if (sub === "start") return await pmStart(args.slice(1), io, hooks);
+  if (sub === "rotate") return pmRotate(args.slice(1), io);
   return pmCreate(args, io);
+}
+
+/** `cardigan pm rotate --office|--ops`: human-only, one write transaction. */
+function pmRotate(args: readonly string[], io: CliIo): number {
+  const parsed = parseArgs(args, ["office", "ops"]);
+  const office = parsed.flags.office === true;
+  if (office === (parsed.flags.ops === true) || parsed.positionals.length > 0)
+    throw new CliError("必须二选一：--office 或 --ops", EXIT.usage, [USAGE]);
+  const mode = office ? ("office" as const) : ("ops" as const);
+  const store = openStoreFrom(io, parsed.flags);
+  try {
+    const project_id = resolveProject(
+      store,
+      io,
+      optional(parsed.flags, "project"),
+    );
+    printRotation(io, mode, rotateStandingPmInStore(store, project_id, mode));
+    return EXIT.ok;
+  } finally {
+    store.close();
+  }
 }
 
 interface StandingPm {

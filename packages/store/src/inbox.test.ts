@@ -1,7 +1,11 @@
 import type { CardId, NotificationStatus } from "@cardigan/domain";
 import { expect, test } from "vitest";
 import { PROJECT_EVENT_STREAM } from "./ids.js";
-import { advanceRouterCursor, recordNotification } from "./inbox.js";
+import {
+  advanceRouterCursor,
+  reassignNotifications,
+  recordNotification,
+} from "./inbox.js";
 import { Store } from "./store.js";
 import {
   assignment,
@@ -269,5 +273,110 @@ test("notifications survive a restart with their status", () => {
     } finally {
       reopened.close();
     }
+  });
+});
+
+test("reassignNotifications moves a replaced standing PM's unfinished inbox", () => {
+  withTempStore((store) => {
+    seed(store);
+    const old = assignment().id;
+    const addressed = store.recordNotification(note(store, 1)).notification;
+    const pinned = store.recordNotification(
+      note(store, 5, { kind: "pm_ops" } as never),
+    ).notification;
+    store.moveNotification({
+      project_id,
+      id: pinned.id,
+      event: "bell",
+      patch: { run_id: "R-9" as never, attempts: 1 },
+    });
+    const done = store.recordNotification(
+      note(store, 5, {
+        kind: "assignment",
+        assignment_id: old,
+      } as never),
+    ).notification;
+    store.moveNotification({ project_id, id: done.id, event: "ack" });
+
+    const moved = store.uow.run(() =>
+      reassignNotifications(store.database, {
+        project_id,
+        from: old,
+        to: "A-99" as never,
+        run_ids: ["R-9"],
+      }),
+    );
+    expect(moved).toBe(2);
+    const rows = new Map(
+      store.listNotifications({ project_id }).map((n) => [n.id, n]),
+    );
+    expect(rows.get(addressed.id)?.recipient).toEqual({
+      kind: "assignment",
+      assignment_id: "A-99",
+    });
+    expect(
+      store.listNotifications({ project_id, assignment_id: "A-99" as never }),
+    ).toHaveLength(1);
+    expect(rows.get(pinned.id)).toMatchObject({
+      recipient: { kind: "pm_ops" },
+      status: "pending",
+      attempts: 0,
+    });
+    expect(rows.get(pinned.id)?.run_id).toBeUndefined();
+    // Terminal rows are history and stay where they were.
+    expect(rows.get(done.id)).toMatchObject({
+      status: "acked",
+      recipient: { kind: "assignment", assignment_id: old },
+    });
+  });
+});
+
+test("reassignNotifications hands failed deliveries to the new Assignment as pending", () => {
+  withTempStore((store) => {
+    seed(store);
+    const old = assignment().id;
+    const addressed = store.recordNotification(note(store, 1)).notification;
+    store.moveNotification({
+      project_id,
+      id: addressed.id,
+      event: "deliver_failed",
+    });
+    const pinned = store.recordNotification(
+      note(store, 5, { kind: "pm_ops" } as never),
+    ).notification;
+    store.moveNotification({
+      project_id,
+      id: pinned.id,
+      event: "bell",
+      patch: { run_id: "R-9" as never, attempts: 1 },
+    });
+    store.moveNotification({
+      project_id,
+      id: pinned.id,
+      event: "deliver_failed",
+    });
+
+    expect(
+      store.uow.run(() =>
+        reassignNotifications(store.database, {
+          project_id,
+          from: old,
+          to: "A-99" as never,
+          run_ids: ["R-9"],
+        }),
+      ),
+    ).toBe(2);
+    const rows = store.listNotifications({ project_id });
+    expect(rows.find((n) => n.id === addressed.id)?.status).toBe("acked");
+    expect(rows.find((n) => n.id === pinned.id)?.status).toBe("acked");
+    const handed = store.listNotifications({
+      project_id,
+      assignment_id: "A-99" as never,
+    });
+    expect(handed.map((n) => [n.seq, n.status, n.attempts])).toEqual([
+      [1, "pending", 0],
+      [5, "pending", 0],
+    ]);
+    expect(handed.every((n) => n.run_id === undefined)).toBe(true);
   });
 });

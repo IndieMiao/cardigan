@@ -366,6 +366,7 @@ Standing Assignment (scope=project): PM Office, PM Ops — not tied to a WorkIte
 - 新格式使用 `kind=produce | verify | standing`、可编辑的 `instructions`、`status=active | inactive`。旧 `kind=work` 继续可读，保存时根据 `submit_review` 或验证能力标记转成 verify，否则转成 produce；旧记录没有 status 时视为 active。字段具体约束见 §10.1、§14。
 - 新建、复制、修改、停用、恢复、回退都是仅同项目 human 可调用的 domain 命令，权限判断集中在 `canManageRoles`，Phase 3 再扩展。每次保存追加版本，回退复制指定历史版本的内容但保留当前启停状态；重复停用或恢复不写新版本。没有删除入口。
 - 角色版本与 `role_created / role_copied / role_updated / role_deactivated / role_activated / role_rolled_back` 项目级事件在同一事务内保存，事件记录操作者和角色快照。复制是一次性的，源项目后续修改不影响副本。新指派默认取最新版，停用检查始终看最新版，显式指定旧版也不能绕过停用；已有 Assignment 继续使用其固定角色版本。
+- 角色升级与常驻 PM 换版本（C-55）：`cardigan role upgrade <角色> --from-default [--dry-run]` 为项目里已有的默认角色（pm、coder、reviewer、designer、tester）追加一个版本，`instructions`、`allowed_tools`、`capabilities`、`kind`、`worktree` 取当前默认角色包，`harness`、`launch_profile_ref`、`display_name`、`abilities`、`required_machine_tags` 保留项目自己的。写入前打印新增和移除的工具、能力及其他字段差异（`--dry-run` 只在只读事务里用 `previewRoleUpgrade` 计算，不消耗任何编号或事件序号），新增工具、新增能力、worktree 放宽和类型改变单独醒目列出；与最新版内容相同（工具和能力不计顺序）时不追加版本，提示“已是默认包内容”。domain 入口 `upgradeRole` 只计算差异，写入复用 `updateRole`（同一 `canManageRoles` 和 `validateRole`），事件仍为 `role_updated`；不是默认角色或项目里还没有该角色时用中文拒绝。升级角色不改变已有 Assignment 的固定版本；常驻 PM 换到新版本用 `cardigan pm rotate`（§7.1）。不自动升级任何角色。
 - 存储采用加字段兼容，不改表结构，不批量改写旧 core_prompt，也不自动转换旧角色。旧库升级测试确认旧 JSON 文档逐字保留；新字段在下一次角色保存时写入。
 - 工具白名单和类型边界只约束新建、更新等保存新版本的操作，不对已有数据库文档在读取、指派或启动时补做校验。即使旧版本曾允许两类工作项动作或使用旧 kind=work，也继续按历史快照启动；Token 的既有作用域规则仍然生效。host 兼容回归从旧 schema 的 roles 行升级，覆盖 coder/reviewer/pm 经三种 Harness 的读取、指派、编译与派发，确认旧文档不变。
 
@@ -848,6 +849,14 @@ M3.4 的 Runtime 接线根据已派发的业务 Run（dispatched / acked / runni
 
 两个 Assignment 靠 `standing_mode`（`office` | `ops`）区分，这是由 `cardigan pm create --office|--ops` 写入一次、之后不能修改的字段。Token 的工具范围由模式决定：office 去掉后台专用的 `issue_instruction`、`resolve_delegated_decision`、`triage_human_action`，ops 去掉 `record_decision`；`cardigan pm start`、Dispatcher 重开终端、`token issue` 都按模式签发，所以 Ops 无论换多少次 Token 都拿不到 `record_decision`。首条提示同时写明当前是前台还是后台。旧数据没有这个字段时，按最新一张 Token 推断一次并写回，之后只看字段。
 
+**常驻 PM 换版本（C-55）。** Assignment 终身固定创建时的角色版本，`pm create` 只复用在岗的常驻 PM，所以 pm 角色追加新版本（例如 `role upgrade pm --from-default`）后，常驻 PM 要用 `cardigan pm rotate --ops|--office` 换人：只接受 human，domain 命令 `rotateStandingPm` 与主机侧步骤在同一个写事务里完成，中途失败全部回滚：
+
+1. 新建同 `standing_mode`、固定 pm 最新版本的 standing Assignment（沿用旧的机器和员工），**先于**释放旧的写入，`hasActivePmOps` 全程为真；
+2. 旧 Assignment 的 ACK 游标复制给新的；未结束的 Run 取消；旧 Assignment 标为 released，写 `assignment_released`（带 `replaced_by`）和 `standing_pm_rotated` 事件，后者列出转给新 Assignment 的拍板（`decider=role:pm` 的待决项）和待你执行（`triage=pm_ops`）；这些事项本来就按角色归属，不改写、不转回给人，换版本也不调用 `handoffWithoutOps`；
+3. 主机作废旧 Assignment 的全部 Token；收件箱里发给旧 Assignment 的未结束通知改发给新的，钉在旧 Run 上的角色通知去掉 Run 绑定、由常驻解析器交给新 Assignment，已响铃的改回待投递；投递失败的通知状态机不能退回待投递，旧行以 `ack` 结束留作历史，再给新 Assignment 新建一条待投递通知；旧会话未结束的投递尝试记为失败。
+
+写入前先检查新版本能否接住现有事项：Ops 有 `decider=role:pm` 的拍板时需要 `resolve_delegated_decision`（审核上限拍板需要 `update_work_item`），有 `triage=pm_ops` 的待你执行时需要 `triage_human_action`；缺任何一个就用中文拒绝、不做任何改动，旧 PM 继续在岗。最新版本与在岗版本相同时不做任何改动，提示“已是最新版本”。后台或前台已暂停、或没有在岗 PM 时拒绝。命令输出新 Assignment 编号和启动命令 `cardigan assignment start <A-n>`；旧会话终端由 server 清理循环按已释放 Assignment 的现有流程关闭（同时再次作废 Token），server 未运行时旧终端会保留，但 Token 已作废、MCP 拒绝非 active Assignment，无法再读写项目。
+
 流程和功能细节默认由 PM Ops 先审，需要人决策的才进入 Needs You。后台用 `list_needs_you.pm_queue` 读取包括项目级拍板在内的完整待办、选项和人工操作详情，用代拍与分拣专用工具处理；Office 不参与后台代拍。
 
 审核轮数上限由 PM Ops 作流程判断，使用 `update_work_item.review_limit_decision` 的限定入口（§4.4），不借用前台代记人的权限。后台在流程类别授权开启时可以附理由增加一轮或暂停；仅涉及功能、结果或需求疑问时，才将原拍板升级给人。没有活跃后台时由系统直接交人。
@@ -1206,7 +1215,7 @@ M1.6c 的 `heartbeat`、`finish_run` 与附件上传复用写命令的幂等事�
 
 Role 修改后版本号递增，Run 记录所用版本。`createRole / copyRole / updateRole / deactivateRole / activateRole / rollbackRole` 统一进行 domain 校验；文件导入、默认角色包复制、跨项目复制和历史回退都不能绕过边界。
 
-角色更新只影响之后的新指派，已有 Assignment 固定使用指派时的版本；要让已有工作用上新版本，需要重新指派。重复执行 assign 会复用原 Assignment，不是版本升级入口。V9a 沿用这一现有机制，不自动替换既有会话、Token 或 worktree（C-25 的 PM 指令）；系统共用协议的更新仍随下一次启动编译生效。
+角色更新只影响之后的新指派，已有 Assignment 固定使用指派时的版本；要让已有工作用上新版本，需要重新指派，常驻 PM 用 `cardigan pm rotate`（§7.1）。按默认角色包追加版本用 `cardigan role upgrade <角色> --from-default`（§4.3）。重复执行 assign 会复用原 Assignment，不是版本升级入口。V9a 沿用这一现有机制，不自动替换既有会话、Token 或 worktree（C-25 的 PM 指令）；系统共用协议的更新仍随下一次启动编译生效。
 
 新格式启动由 `composeRolePrompt(instructions)` 按固定顺序拼接 `instructions + SHARED_BOUNDARIES + AGENT_PROTOCOL`，Claude Code、Codex、Pi 共用同一路径。系统两部分各拼接一次；修改角色说明不会修改系统常量，协议更新随下次启动生效。仍兼容员工身份注入。旧 core_prompt 路径不解析、不补协议，输出与改动前逐字一致。
 
