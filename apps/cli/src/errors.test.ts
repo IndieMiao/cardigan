@@ -81,6 +81,15 @@ describe("Chinese CLI errors", () => {
   });
 
   test.each([
+    ["validation_failed", "title is required", "标题不能为空"],
+    ["validation_failed", "goal is required", "目标不能为空"],
+    [
+      "validation_failed",
+      "Acceptance criteria are required",
+      "至少需要一条非空的验收标准",
+    ],
+    ["validation_failed", "Invalid priority", "优先级必须是有限数值"],
+    ["not_found", "cards:C-99 was not found", "卡片 C-99 在当前项目中不存在"],
     [
       "invariant_violation",
       "A work item has one persistent assignment",

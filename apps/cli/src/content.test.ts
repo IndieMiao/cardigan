@@ -268,7 +268,7 @@ test("enforces card and entry scope without writing partial records", async () =
   const path = file("evidence.txt"),
     before = snapshot();
   for (const [card, entry, message] of [
-    ["C-99", "C-1#1", "卡片在当前项目中不存在"],
+    ["C-99", "C-1#1", "卡片 C-99 在当前项目中不存在"],
     ["C-1", "C-1#999", "挂载条目在当前项目中不存在"],
     ["C-1", "C-2#1", "属于另一张卡片"],
   ]) {
@@ -288,7 +288,7 @@ test("enforces card and entry scope without writing partial records", async () =
   }
   expect(await run(["comment", "add", "C-99", "--text=x"])).toBe(2);
   expect(errors.join("\n")).toContain(
-    "无法发表评论 C-99：卡片在当前项目中不存在（not_found）",
+    "无法发表评论 C-99：卡片 C-99 在当前项目中不存在（not_found）",
   );
   expect(snapshot()).toEqual(before);
 });

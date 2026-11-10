@@ -42,6 +42,10 @@ const SPECIFIC_REASONS: Partial<Record<ErrorCode, Record<string, string>>> = {
     "Card has an unresolved blocking decision": "卡片还有未解决的阻塞拍板",
   },
   validation_failed: {
+    "title is required": "标题不能为空",
+    "goal is required": "目标不能为空",
+    "Acceptance criteria are required": "至少需要一条非空的验收标准",
+    "Invalid priority": "优先级必须是有限数值",
     "A card cannot supersede itself": "卡片不能被自身取代",
     "Assignment role must match the work item":
       "指派的角色必须与工作项要求一致",
@@ -127,8 +131,10 @@ function describeError({ code, message }: CodedError): string {
     if (transition)
       return `不允许从 ${transition[2]} 转为 ${transition[1] === "cancel" ? "cancelled" : transition[1]?.slice(4)}`;
   }
-  if (code === "not_found" && /^cards:.* was not found$/u.test(message))
-    return "卡片在当前项目中不存在";
+  if (code === "not_found") {
+    const missingCard = /^cards:(C-[1-9]\d*) was not found$/u.exec(message);
+    if (missingCard) return `卡片 ${missingCard[1]} 在当前项目中不存在`;
+  }
   if (
     code === "validation_failed" &&
     /^project .* already exists$/u.test(message)
