@@ -2,6 +2,7 @@ export {
   type BeginBellAttempt,
   type BellAttempt,
   beginBellAttempt,
+  beginLaunchAttempt,
   finishBellAttempt,
   unfinishedBellAttempts,
 } from "./dispatcher.js";

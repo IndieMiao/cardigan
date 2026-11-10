@@ -34,11 +34,27 @@ export function beginBellAttempt(
   db: DatabaseSync,
   input: BeginBellAttempt,
 ): void {
+  beginAttempt(db, input, false);
+}
+
+/** An explicit host launch has no inbox notification but shares its exclusion. */
+export function beginLaunchAttempt(
+  db: DatabaseSync,
+  input: Omit<BeginBellAttempt, "notification_ids">,
+): void {
+  beginAttempt(db, { ...input, notification_ids: [] }, true);
+}
+
+function beginAttempt(
+  db: DatabaseSync,
+  input: BeginBellAttempt,
+  launch: boolean,
+): void {
   requireTransaction(db);
   if (
     !input.id ||
     timestamp(input.lease_until) <= timestamp(input.started_at) ||
-    input.notification_ids.length === 0 ||
+    (!launch && input.notification_ids.length === 0) ||
     input.notification_ids.length > 1000 ||
     new Set(input.notification_ids).size !== input.notification_ids.length
   )
@@ -54,7 +70,9 @@ export function beginBellAttempt(
     .get(input.project_id, input.run_id);
   if (
     !row ||
-    (JSON.parse(String(row.doc)) as Run).assignment_id !== input.assignment_id
+    (JSON.parse(String(row.doc)) as Run).assignment_id !==
+      input.assignment_id ||
+    (launch && (JSON.parse(String(row.doc)) as Run).status !== "queued")
   )
     throw new Error("Bell Run does not belong to its Assignment");
   const read = db.prepare(
