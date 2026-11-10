@@ -14,6 +14,7 @@ import {
 import { Board } from "../components/Board.js";
 import { CardSuperseded } from "../components/CardSuperseded.js";
 import { Drawer } from "../components/Drawer.js";
+import { NextOwners } from "../components/EmployeeIdentity.js";
 import { FilterBar } from "../components/FilterBar.js";
 import {
   EmptyState,
@@ -27,7 +28,7 @@ import { MultiSelect } from "../components/MultiSelect.js";
 import { ViewSwitch } from "../components/ViewSwitch.js";
 import { routeHash, useRouteFilters } from "../route.js";
 import { inSnapshotGroup, SNAPSHOT_GROUPS } from "../snapshot-groups.js";
-import { BOARD_STATUSES, cardStatusLabel, nextOwnersLabel } from "../status.js";
+import { BOARD_STATUSES, cardStatusLabel } from "../status.js";
 import { useResource } from "../useResource.js";
 import { CardDetailPage } from "./CardDetailPage.js";
 
@@ -578,7 +579,11 @@ function CardTable({
                   <Time value={card.updated_at} />
                 </td>
               )}
-              {display.next && <td>{nextOwnersLabel(card.next_owners)}</td>}
+              {display.next && (
+                <td>
+                  <NextOwners owners={card.next_owners} />
+                </td>
+              )}
               <td className="card-table-arrow" aria-hidden="true">
                 →
               </td>

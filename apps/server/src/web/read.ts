@@ -1,6 +1,6 @@
 import type {
   Actor,
-  AuthorView,
+  Author,
   CardId,
   CardView,
   CommandState,
@@ -67,13 +67,63 @@ export function projectState(
   return store.uow.read((tx) => loadCommandState(tx, project_id));
 }
 
-/** `projectSnapshot` as the human sees it: every card with derived fields. */
-export function cardViews(state: CommandState): CardView[] {
-  return unwrap(projectSnapshot(state, human(state.project_id))).data
-    .cards as CardView[];
+/** Public employee profile only; opaque references and external URLs are not images. */
+function webAuthorView(state: CommandState, author: Author) {
+  const view = authorView(state, author);
+  const employee = state.employees?.find((e) => e.id === view.employee?.id);
+  const avatar = employee?.avatar;
+  return {
+    ...view,
+    author,
+    employee: employee
+      ? {
+          id: employee.id,
+          name: employee.name,
+          title: employee.title,
+          bio: employee.bio,
+          role_id: employee.role_id,
+          avatar:
+            avatar && /^\/(?![/\\])[^\s\\]*$/.test(avatar) ? avatar : null,
+        }
+      : null,
+  };
 }
 
-export interface CardListView extends CardView {
+function webRunAuthorView(state: CommandState, run_id: string) {
+  return webAuthorView(state, runAuthorView(state, run_id).author);
+}
+
+type WebAuthorView = ReturnType<typeof webAuthorView>;
+type WebCardView = Omit<CardView, "next_owners"> & {
+  readonly next_owners: readonly (CardView["next_owners"][number] &
+    WebAuthorView)[];
+};
+
+/** `projectSnapshot` as the human sees it: every card with derived fields. */
+export function cardViews(state: CommandState): WebCardView[] {
+  return unwrap(projectSnapshot(state, human(state.project_id))).data.cards.map(
+    (card) => ({
+      ...card,
+      next_owners: card.next_owners.map((owner) => ({
+        ...owner,
+        ...webAuthorView(
+          state,
+          owner.kind === "assignment"
+            ? (`assignment:${owner.ref}` as Author)
+            : owner.kind === "human"
+              ? "human"
+              : "system",
+        ),
+        ...(owner.kind === "role"
+          ? { author_role: owner.ref, author_display: `未命名的 ${owner.ref}` }
+          : {}),
+      })),
+    }),
+  );
+}
+
+export interface CardListView extends WebCardView {
+  readonly produce_owners: readonly WebAuthorView[];
   readonly progress: { readonly completed: number; readonly total: number };
   readonly updated_at: string;
   readonly roles: readonly string[];
@@ -94,6 +144,25 @@ export function cardListViews(state: CommandState): CardListView[] {
           .at(-1) ?? card.created_at;
     return {
       ...card,
+      produce_owners: [
+        ...new Map(
+          items
+            .filter((item) => item.kind === "produce")
+            .flatMap((item) => {
+              const assignment = state.assignments.find(
+                (a) => a.id === item.assignment_id && a.status !== "released",
+              );
+              return assignment
+                ? [
+                    [
+                      assignment.employee_id ?? assignment.id,
+                      webAuthorView(state, `assignment:${assignment.id}`),
+                    ] as const,
+                  ]
+                : [];
+            }),
+        ).values(),
+      ],
       progress: { completed, total: items.length },
       updated_at,
       roles: [...new Set(items.map((item) => item.role_id))].sort(),
@@ -173,7 +242,7 @@ function affectsCard(
 }
 
 /** Attachment metadata as the browser gets it; the blob is a separate request. */
-export interface AttachmentView extends AuthorView {
+export interface AttachmentView extends WebAuthorView {
   readonly id: string;
   readonly mime: string;
   readonly size: number;
@@ -247,7 +316,7 @@ export function attachmentViews(
         kind: attachment.kind,
         attach_to: attachment.attach_to,
         uploaded_by: attachment.uploaded_by,
-        ...authorView(state, attachment.uploaded_by),
+        ...webAuthorView(state, attachment.uploaded_by),
         uploader_role: attachment.uploaded_by.startsWith("assignment:")
           ? (roles.get(attachment.uploaded_by.slice(11)) ?? null)
           : null,
@@ -410,7 +479,7 @@ export function cardDetail(
         : undefined;
     return {
       ...entry,
-      ...authorView(state, entry.author),
+      ...webAuthorView(state, entry.author),
       event_type: event?.type ?? null,
       ...(event?.type === "attachment_uploaded" &&
       typeof attachmentId === "string" &&
@@ -455,9 +524,12 @@ export function cardDetail(
       ),
     deliveries: deliveries.map((d) => ({
       ...d,
-      ...runAuthorView(state, d.run_id),
+      ...webRunAuthorView(state, d.run_id),
     })),
-    reviews: reviews.map((r) => ({ ...r, ...runAuthorView(state, r.run_id) })),
+    reviews: reviews.map((r) => ({
+      ...r,
+      ...webRunAuthorView(state, r.run_id),
+    })),
     review_matrix,
     decisions,
     human_actions,
@@ -511,6 +583,11 @@ export function needsYou(state: CommandState, now: string) {
   const data = result.data;
   const decisions = data.decisions.map((decision) => {
     return {
+      ...webAuthorView(
+        state,
+        state.decisions.find((d) => d.id === decision.id)?.raised_by ??
+          "system",
+      ),
       kind: "decision" as const,
       id: decision.id,
       card_id: decision.card_id ?? null,
@@ -529,7 +606,28 @@ export function needsYou(state: CommandState, now: string) {
       opened_at: decision.opened_at,
       waited_ms: decision.waited_ms,
       related_cards: decision.related_cards,
-      merge_confirmation: decision.merge_confirmation,
+      merge_confirmation: decision.merge_confirmation
+        ? {
+            ...decision.merge_confirmation,
+            deliveries: decision.merge_confirmation.deliveries.map(
+              (delivery) => ({
+                ...delivery,
+                ...webRunAuthorView(
+                  state,
+                  state.deliveries.find((d) => d.id === delivery.id)?.run_id ??
+                    "",
+                ),
+              }),
+            ),
+            reviews: decision.merge_confirmation.reviews.map((review) => ({
+              ...review,
+              ...webRunAuthorView(
+                state,
+                state.reviews.find((r) => r.id === review.id)?.run_id ?? "",
+              ),
+            })),
+          }
+        : null,
     };
   });
   const human_actions = data.human_actions.map((action) => {
@@ -538,6 +636,11 @@ export function needsYou(state: CommandState, now: string) {
       (entry) => entry.human_action_id === action.id,
     );
     return {
+      ...webAuthorView(
+        state,
+        state.human_actions.find((a) => a.id === action.id)?.requested_by ??
+          "system",
+      ),
       kind: "human_action" as const,
       id: action.id,
       card_id: action.card_id ?? null,
@@ -568,6 +671,7 @@ export function needsYou(state: CommandState, now: string) {
   return {
     incidents: data.incidents.map((incident) => ({
       ...incident,
+      ...webAuthorView(state, `assignment:${incident.id}`),
       waited_ms:
         waitedMs(
           incident.disconnected_at ?? incident.lost_at ?? undefined,
@@ -689,7 +793,7 @@ export function executionView(
             ? (assignment.standing_mode ?? null)
             : null,
         id: assignment.id,
-        ...authorView(state, `assignment:${assignment.id}`),
+        ...webAuthorView(state, `assignment:${assignment.id}`),
         scope: assignment.scope,
         work_item_id: assignment.work_item_id ?? null,
         role_id: assignment.role_id,
@@ -863,7 +967,7 @@ export function activity(
       seq: event.seq,
       type: event.type,
       actor: event.actor,
-      ...authorView(
+      ...webAuthorView(
         state,
         event.actor.kind === "assignment"
           ? `assignment:${event.actor.assignment_id}`

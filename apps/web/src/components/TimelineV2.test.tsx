@@ -109,7 +109,7 @@ test.each(["comment", "instruction"] as const)(
       }),
     ]);
     const head = document.querySelector(".timeline-head") as HTMLElement;
-    expect(head.querySelector(".timeline-avatar")?.textContent).toBe("T");
+    expect(head.querySelector(".employee-avatar")?.textContent).toBe("T");
     expect(head.querySelector("strong")?.textContent).toBe("未命名的 tester");
     expect(within(head).getByText("A-14")).toBeTruthy();
     expect(head.textContent).toContain(
@@ -211,7 +211,7 @@ test("U6b structural conclusions retain their result and share the comment heade
   );
   for (const [n, result] of ["已接受", "已驳回", "待拍板"].entries()) {
     const row = document.getElementById(`entry-e${n + 1}`) as HTMLElement;
-    expect(row.querySelector(".timeline-avatar")).toBeTruthy();
+    expect(row.querySelector(".employee-avatar")).toBeTruthy();
     expect(row.querySelector(".timeline-head strong")).toBeTruthy();
     expect(row.querySelector(".timeline-conclusion .status")?.textContent).toBe(
       result,

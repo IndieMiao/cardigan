@@ -224,12 +224,12 @@ test.each([
     expect(
       [...tile.querySelectorAll(".status")].map((tag) => tag.textContent),
     ).toEqual(["进行中", ...labels]);
-    expect(tile.classList.contains("card-tile-blocked")).toBe(
-      tone === "blocked",
-    );
-    expect(tile.classList.contains("card-tile-waiting")).toBe(
-      tone === "waiting",
-    );
+    expect(
+      tile.closest(".card-tile")?.classList.contains("card-tile-blocked"),
+    ).toBe(tone === "blocked");
+    expect(
+      tile.closest(".card-tile")?.classList.contains("card-tile-waiting"),
+    ).toBe(tone === "waiting");
     for (const label of ["等你拍板", "待你执行"]) {
       const badge = within(tile).queryByText(label, { exact: true });
       if (badge) expect(badge.classList.contains("status-waiting")).toBe(true);

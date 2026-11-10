@@ -7,6 +7,7 @@ import {
   type NeedsDecision,
   type NeedsPage,
 } from "../api.js";
+import { EmployeeIdentity } from "../components/EmployeeIdentity.js";
 import {
   EmptyState,
   IdTag,
@@ -85,6 +86,7 @@ function DecisionMeta({
 }) {
   return (
     <header className="needs-meta">
+      <EmployeeIdentity {...q} showTitle={false} />
       <IdTag id={q.id} label={isMergeConfirmation(q) ? "合并确认" : "拍板"} />
       {q.blocking && <StatusTag status="blocked" />}
       <span className="hint">{waitLabel(q.waited_ms, elapsed)}</span>
@@ -218,6 +220,7 @@ function ReviewLine({ review }: { readonly review: MergeConfirmationReview }) {
   return (
     <li>
       <div className="needs-review-head">
+        <EmployeeIdentity {...review} showTitle={false} />
         <IdTag id={review.work_item_id} label={label} />
         <StatusTag status={review.verdict} />
       </div>
@@ -269,6 +272,7 @@ function MergeConfirmation({
             {merge.deliveries.map((delivery) => (
               <li key={delivery.id}>
                 <div className="needs-delivery-head">
+                  <EmployeeIdentity {...delivery} showTitle={false} />
                   <IdTag
                     id={delivery.work_item_id}
                     label={delivery.work_item_title}
@@ -432,6 +436,7 @@ function HumanAction({
   return (
     <article className="needs-item" aria-label={`执行 ${item.id}`}>
       <header className="needs-meta">
+        <EmployeeIdentity {...item} showTitle={false} />
         <IdTag id={item.id} label="待你执行" />
         <StatusTag status="todo" />
         <span className="hint">{waitLabel(item.waited_ms, elapsed)}</span>
@@ -499,6 +504,11 @@ function Incident({
       aria-label={`运行异常 ${incident.id}`}
     >
       <header className="needs-meta">
+        <EmployeeIdentity
+          {...incident}
+          author_role={incident.role_id}
+          showTitle={false}
+        />
         <IdTag id={incident.id} label={incident.role_id} />
         <StatusTag status={incident.runtime_state} />
         <span className="hint">{waitLabel(incident.waited_ms, elapsed)}</span>
