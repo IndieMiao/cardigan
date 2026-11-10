@@ -628,13 +628,27 @@ function routeReview(input: RouteInput, draft: Draft): void {
       card_id: input.event.card_id,
       detail: "check whether every delivery passed and the card is done",
     });
+    const passed = input.snapshot.deliveries.find(
+      (candidate) => candidate.id === delivery_id,
+    );
+    routeCompletedItem(input, draft, passed?.work_item_id);
+    let summary = `${delivery_id ?? "the delivery"} passed with ${issueCount} review issue(s); no recheck is needed`;
+    // A recipient gets one notification per event. Preserve any PM Ops handoff
+    // for an unowned dependent inside the review summary instead of losing it.
+    const dependency = draft.notifications.find(
+      (n) => n.recipient.kind === "pm_ops",
+    );
+    if (dependency !== undefined) {
+      draft.notifications.splice(draft.notifications.indexOf(dependency), 1);
+      summary += `; ${dependency.summary}`;
+    }
     note(
       input,
       draft,
       recipient.pm_ops(),
       "review",
       "6.4/review conditional",
-      `${delivery_id ?? "the delivery"} passed with ${issueCount} review issue(s); no recheck is needed`,
+      summary,
     );
     return;
   }

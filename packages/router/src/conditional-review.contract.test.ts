@@ -1,7 +1,13 @@
-import { finishRun, queueRun, submitReview } from "@cardigan/domain";
+import {
+  assign,
+  createWorkItem,
+  finishRun,
+  queueRun,
+  submitReview,
+} from "@cardigan/domain";
 import { expect, test } from "vitest";
 import { mergeFixture } from "../../domain/src/commands/merge/test-fixtures.js";
-import { value } from "../../domain/src/commands/test-fixtures.js";
+import { human, value } from "../../domain/src/commands/test-fixtures.js";
 import { routeEvent } from "./route.js";
 
 const issues = [
@@ -232,6 +238,108 @@ test.each([false, true])(
             ],
       );
     }
+  },
+);
+
+test.each(["active", "unassigned", "suspended", "released"] as const)(
+  "pass with issues retains dependency routing for a %s downstream owner",
+  async (status) => {
+    const f = mergeFixture();
+    const producer = f.coder.work_item_id;
+    if (!producer) throw new Error("Missing producer");
+    const downstream = f.commit(
+      createWorkItem(
+        f.state,
+        human,
+        {
+          card_id: f.card.id,
+          title: "Dependent work",
+          kind: "produce",
+          role_id: "coder",
+          required: false,
+          depends_on: [producer],
+          completion_criteria: ["Build on the reviewed delivery"],
+        },
+        f.io,
+      ),
+    );
+    const owner =
+      status === "unassigned"
+        ? undefined
+        : f.commit(
+            assign(
+              f.state,
+              human,
+              { work_item_id: downstream.id, role_id: "coder" },
+              f.io,
+            ),
+          );
+    const delivery = await f.deliver();
+    f.start(f.reviewer);
+    const effect = value(
+      submitReview(
+        f.state,
+        f.actor(f.reviewer),
+        {
+          delivery_id: delivery.id,
+          target_sha: delivery.subject.value,
+          kind: "code",
+          recheck_required: false,
+          issues: issues.map((issue) => ({ ...issue, pre_existing: true })),
+        },
+        f.io,
+      ),
+    );
+    f.commit({ ok: true, value: effect });
+    const event = effect.events[0];
+    if (!event) throw new Error("Missing review event");
+    expect(effect.data.verdict).toBe("pass");
+    expect(f.state.work_items.find((w) => w.id === producer)?.status).toBe(
+      "accepted",
+    );
+    const snapshot =
+      status === "suspended" || status === "released"
+        ? {
+            ...f.state,
+            assignments: f.state.assignments.map((a) =>
+              a.id === owner?.id ? { ...a, status } : a,
+            ),
+          }
+        : f.state;
+    const result = routeEvent({ event, snapshot });
+    const pm = result.notifications.filter(
+      (n) => n.recipient.kind === "pm_ops",
+    );
+    expect(pm).toHaveLength(1);
+    expect(pm[0]).toMatchObject({
+      kind: "review",
+      rule: "6.4/review conditional",
+    });
+    expect(pm[0]?.summary).toContain(
+      `${delivery.id} passed with 1 review issue(s)`,
+    );
+    if (status === "active") {
+      expect(result.notifications).toHaveLength(2);
+      expect(result.notifications).toContainEqual(
+        expect.objectContaining({
+          recipient: { kind: "assignment", assignment_id: owner?.id },
+          kind: "dependency",
+          rule: "6.4/dependency completed",
+          work_item_id: downstream.id,
+        }),
+      );
+    } else {
+      expect(result.notifications).toHaveLength(1);
+      expect(pm[0]?.summary).toContain(`${producer} is done`);
+      expect(pm[0]?.summary).toContain(
+        status === "unassigned" ? "no owner" : `${downstream.id} can start`,
+      );
+    }
+    expect(
+      result.notifications.some(
+        (n) => n.recipient.assignment_id === f.coder.id,
+      ),
+    ).toBe(false);
   },
 );
 
