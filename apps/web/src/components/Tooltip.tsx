@@ -6,6 +6,7 @@ export interface TooltipProps {
   readonly children: ReactElement;
   readonly side?: "top" | "right" | "bottom" | "left";
   readonly delayDuration?: number;
+  readonly className?: string;
 }
 
 /** Small text hint for icon buttons and metadata. */
@@ -14,6 +15,7 @@ export function Tooltip({
   children,
   side = "top",
   delayDuration = 200,
+  className = "",
 }: TooltipProps) {
   return (
     <TooltipPrimitive.Provider delayDuration={delayDuration}>
@@ -21,7 +23,7 @@ export function Tooltip({
         <TooltipPrimitive.Trigger asChild>{children}</TooltipPrimitive.Trigger>
         <TooltipPrimitive.Portal>
           <TooltipPrimitive.Content
-            className="tooltip-content"
+            className={`tooltip-content ${className}`}
             side={side}
             sideOffset={6}
           >

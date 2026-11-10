@@ -124,6 +124,9 @@ export function cardViews(state: CommandState): WebCardView[] {
 
 export interface CardListView extends WebCardView {
   readonly produce_owners: readonly WebAuthorView[];
+  readonly participants: readonly WebAuthorView[];
+  readonly work_items: readonly Pick<WorkItem, "id" | "title" | "status">[];
+  readonly attachment_count: number;
   readonly progress: { readonly completed: number; readonly total: number };
   readonly updated_at: string;
   readonly roles: readonly string[];
@@ -131,6 +134,39 @@ export interface CardListView extends WebCardView {
 
 /** Card rows plus the counts, timestamp and roles the list filters need (U2). */
 export function cardListViews(state: CommandState): CardListView[] {
+  const entryCard = new Map(
+    state.timeline.map((entry) => [entry.id, entry.card_id]),
+  );
+  const attachmentCounts = new Map<string, number>();
+  for (const attachment of state.attachments) {
+    const cardId =
+      attachment.card_id ??
+      (attachment.attach_to.kind === "timeline_entry"
+        ? entryCard.get(attachment.attach_to.id)
+        : undefined);
+    if (cardId)
+      attachmentCounts.set(cardId, (attachmentCounts.get(cardId) ?? 0) + 1);
+  }
+  const assignments = new Map(
+    state.assignments.map((assignment) => [assignment.id, assignment]),
+  );
+  const owners = (items: readonly WorkItem[]) => [
+    ...new Map(
+      items.flatMap((item) => {
+        const assignment = item.assignment_id
+          ? assignments.get(item.assignment_id)
+          : undefined;
+        return assignment && assignment.status !== "released"
+          ? [
+              [
+                assignment.employee_id ?? assignment.id,
+                webAuthorView(state, `assignment:${assignment.id}`),
+              ] as const,
+            ]
+          : [];
+      }),
+    ).values(),
+  ];
   return cardViews(state).map((card) => {
     const items = state.work_items.filter((item) => item.card_id === card.id),
       completed = items.filter(
@@ -144,25 +180,10 @@ export function cardListViews(state: CommandState): CardListView[] {
           .at(-1) ?? card.created_at;
     return {
       ...card,
-      produce_owners: [
-        ...new Map(
-          items
-            .filter((item) => item.kind === "produce")
-            .flatMap((item) => {
-              const assignment = state.assignments.find(
-                (a) => a.id === item.assignment_id && a.status !== "released",
-              );
-              return assignment
-                ? [
-                    [
-                      assignment.employee_id ?? assignment.id,
-                      webAuthorView(state, `assignment:${assignment.id}`),
-                    ] as const,
-                  ]
-                : [];
-            }),
-        ).values(),
-      ],
+      produce_owners: owners(items.filter((item) => item.kind === "produce")),
+      participants: owners(items),
+      work_items: items.map(({ id, title, status }) => ({ id, title, status })),
+      attachment_count: attachmentCounts.get(card.id) ?? 0,
       progress: { completed, total: items.length },
       updated_at,
       roles: [...new Set(items.map((item) => item.role_id))].sort(),

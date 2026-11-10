@@ -224,8 +224,10 @@ test("board shows three owner avatars plus overflow; profile click does not open
       onOpenCard={openCard}
     />,
   );
-  const group = screen.getByRole("group", { name: "产出负责人" });
-  expect(within(group).getAllByRole("button")).toHaveLength(3);
+  const group = screen.getByRole("group", { name: "参与员工" });
+  expect(
+    within(group).getAllByRole("button", { name: /的员工卡片$/ }),
+  ).toHaveLength(3);
   expect(within(group).getByText("+2")).toBeTruthy();
   const trigger = within(group).getByRole("button", {
     name: "员工1的员工卡片",

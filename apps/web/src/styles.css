@@ -2781,3 +2781,113 @@ body[data-lightbox="open"] .drawer-overlay {
 .system-line .employee-identity {
   font-size: var(--text-sm);
 }
+
+/* C-31: compact cards share the existing palette in both themes. */
+.board-card {
+  position: relative;
+  min-width: 0;
+  gap: calc(var(--gap) / 2);
+  padding: calc(var(--gap) * 2 / 3);
+}
+.board-card .card-tile-link {
+  gap: calc(var(--gap) / 2);
+  min-width: 0;
+}
+.board-card .card-tile-link::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radius);
+}
+.board-card .card-title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  line-height: 1.65;
+  font-size: var(--text-body);
+}
+.board-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: calc(var(--gap) / 3);
+  min-width: 0;
+}
+.board-card-badge {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: calc(var(--gap) / 3);
+  min-width: 0;
+  max-width: 100%;
+  padding: 0 calc(var(--gap) / 3);
+  min-height: calc(var(--gap) * 2);
+  border-radius: calc(var(--radius) / 2);
+  background: var(--surface-muted);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  text-decoration: none;
+  font-variant-numeric: tabular-nums;
+}
+.board-card-badge svg {
+  flex: none;
+  width: var(--text-section);
+  height: var(--text-section);
+}
+.board-card-badge:hover {
+  color: var(--accent);
+}
+.board-card-complete {
+  color: var(--status-done);
+}
+.board-card-waiting {
+  color: var(--status-wait);
+}
+.board-card-blocked {
+  color: var(--danger);
+}
+.board-card .employee-owners {
+  position: relative;
+  gap: 0;
+  flex-wrap: nowrap;
+}
+.board-card .employee-owners > * + * {
+  margin-inline-start: calc(var(--gap) / -2);
+}
+.board-card .employee-avatar {
+  width: calc(var(--gap) * 2);
+  height: calc(var(--gap) * 2);
+  border: 2px solid var(--surface);
+  font-size: var(--text-xs);
+}
+.board-card .employee-trigger {
+  position: relative;
+  border-radius: 50%;
+}
+.board-card .employee-trigger:is(:hover, :focus-visible) {
+  z-index: 1;
+}
+.board-card .employee-overflow {
+  position: relative;
+  margin-inline-start: calc(var(--gap) / 3);
+  font-size: var(--text-xs);
+}
+.board-card-tooltip {
+  max-width: min(360px, calc(100vw - var(--gap) * 2));
+  max-height: var(--radix-tooltip-content-available-height);
+  overflow-y: auto;
+  padding: calc(var(--gap) * 2 / 3);
+}
+.board-card-preview {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--gap) / 3);
+  overflow-wrap: anywhere;
+  font-size: var(--text-sm);
+}
+.board-card-preview ul {
+  margin: 0;
+  padding-inline-start: var(--gap);
+}
