@@ -527,7 +527,7 @@ test("project decisions explain unavailable comments; cleanup and lost runtimes 
   expect(screen.getByText("R-9").closest("p")?.textContent).toContain(
     "最近 Run：R-9",
   );
-  expect(screen.queryByRole("button", { name: /接管|替换/ })).toBeNull();
+  expect(screen.queryByRole("button", { name: /^(接管|替换)/ })).toBeNull();
   expect(
     (screen.getByRole("button", { name: "要求补充信息" }) as HTMLButtonElement)
       .disabled,
@@ -538,6 +538,39 @@ test("project decisions explain unavailable comments; cleanup and lost runtimes 
   expect(
     screen.getByText("cardigan assignment attach 'A-3' --project 'p-1'"),
   ).toBeTruthy();
+  const incident = within(
+    screen.getByRole("article", { name: "运行异常 A-3" }),
+  );
+  const writeText = vi.fn(async () => {});
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText },
+  });
+  fireEvent.click(
+    incident.getByRole("button", { name: "复制查看终端（只看不动）" }),
+  );
+  await waitFor(() =>
+    expect(writeText).toHaveBeenCalledWith(
+      "cardigan assignment attach 'A-3' --project 'p-1'",
+    ),
+  );
+  const summary = incident.getByText("需要接管输入？");
+  const details = summary.closest("details") as HTMLDetailsElement;
+  expect(details.open).toBe(false);
+  expect(
+    incident.getByRole("button", { name: "复制接管输入" }).closest("details"),
+  ).toBe(details);
+  fireEvent.click(summary);
+  expect(details.open).toBe(true);
+  expect(
+    within(details).getByText("你的输入会直接发给正在工作的 Agent，可能打断它"),
+  ).toBeTruthy();
+  fireEvent.click(incident.getByRole("button", { name: "复制接管输入" }));
+  await waitFor(() =>
+    expect(writeText).toHaveBeenLastCalledWith(
+      "cardigan assignment attach 'A-3' --project 'p-1' --interactive",
+    ),
+  );
 });
 
 test("empty groups are not rendered", async () => {

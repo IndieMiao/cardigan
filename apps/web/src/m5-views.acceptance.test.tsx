@@ -236,7 +236,8 @@ test("U4a: incidents, blocking decisions, merge confirmations, other decisions a
   expect(screen.getByText("R-9").closest("p")?.textContent).toContain(
     "最近 Run：R-9",
   );
-  expect(screen.queryByRole("button", { name: /接管|替换/ })).toBeNull();
+  // Interactive access is a copyable CLI command, not a direct runtime action.
+  expect(screen.queryByRole("button", { name: /^(接管|替换)/ })).toBeNull();
   const regions = [
     "运行异常",
     "阻塞拍板",

@@ -10,6 +10,7 @@ import {
   Time,
 } from "../components/Foundation.js";
 import {
+  AttachCommands,
   CardLink,
   CopyCommand,
   cliCommand,
@@ -243,10 +244,7 @@ function AssignmentRow({
             </div>
             <div className="execution-actions">
               {a.status === "active" && a.runtime_ref && (
-                <CopyCommand
-                  label="在 Herdr 中打开"
-                  command={cliCommand(projectId, "assignment attach", a.id)}
-                />
+                <AttachCommands projectId={projectId} assignmentId={a.id} />
               )}
               {a.status === "active" &&
                 !live &&

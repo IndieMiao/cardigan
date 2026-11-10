@@ -1593,10 +1593,11 @@ fieldset.filters {
   margin: 8px 0;
   overflow-wrap: anywhere;
 }
-.copy-command-hint {
-  margin: 4px 0 0;
-  color: var(--text-muted);
-  font-size: var(--text-sm);
+.attach-command-warning {
+  padding: 10px 12px;
+  border-left: 3px solid var(--danger);
+  background: var(--danger-surface);
+  color: var(--danger);
 }
 .needs-page {
   max-width: 980px;
