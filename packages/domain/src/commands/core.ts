@@ -116,8 +116,9 @@ export function attempt<T>(operation: () => T): Result<T> {
   }
 }
 
-type Entry = Pick<E.TimelineEntry, "type" | "body"> &
-  Partial<
+type Entry = Pick<E.TimelineEntry, "type" | "body"> & {
+  readonly author?: "system";
+} & Partial<
     Pick<
       E.TimelineEntry,
       | "work_item_id"
@@ -383,7 +384,7 @@ export class CommandDraft {
         short_id: id,
         card_id,
         event_seq: event.seq,
-        author: this.author,
+        author: entry.author ?? this.author,
         refs: entry.refs ?? [],
         mentions: entry.mentions ?? [],
         retracted: false,

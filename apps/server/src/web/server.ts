@@ -11,10 +11,12 @@ import {
   decisionHistory,
   projectPreferences,
 } from "@cardigan/domain";
+import type { MergeGateConfiguration } from "@cardigan/host";
 import { resolveDataDirectory } from "@cardigan/runtime-herdr";
 import type { Store, WebSession } from "@cardigan/store";
 import { serveAttachment } from "./attachments.js";
 import { serveAvatar } from "./avatars.js";
+import { readCardDetail, readCardList } from "./card-state.js";
 import {
   allowedHosts,
   bracket,
@@ -28,6 +30,7 @@ import {
   methodNotAllowed,
   parseCookies,
   readJsonBody,
+  requestRoute,
   requireHost,
   requireOrigin,
   SESSION_COOKIE,
@@ -37,12 +40,11 @@ import {
   unauthorized,
 } from "./http.js";
 import { LoginLimiter } from "./login-limiter.js";
+import { serveMergeCheckLog } from "./merge-check-log.js";
 import {
   type ActivityQuery,
   activity,
   type CardFilter,
-  cardDetail,
-  cardListViews,
   executionView,
   InvalidQuery,
   needsMe,
@@ -74,6 +76,7 @@ export interface WebServerOptions {
   readonly loginLimiter?: LoginLimiter;
   /** Attachment blobs live beside the database (§9.3). */
   readonly dataDir?: string;
+  readonly mergeGate?: MergeGateConfiguration;
   /** SSE cadence; tests shorten it, production uses the plan's 500 ms / 15 s. */
   readonly stream?: {
     readonly pollMs?: number;
@@ -100,6 +103,7 @@ interface RequestContext {
   readonly clock: Clock;
   readonly limiter: LoginLimiter;
   readonly dataDir: string;
+  readonly mergeGate: MergeGateConfiguration | undefined;
   readonly stream: WebServerOptions["stream"];
   /** Only the validated Host and explicit configuration decide cookie flags. */
   readonly secureCookie: boolean;
@@ -118,7 +122,11 @@ export async function startWebServer(
   const { store } = options;
   const clock = options.clock ?? systemClock;
   const limiter = options.loginLimiter ?? new LoginLimiter();
-  const log = options.log ?? (() => undefined);
+  const log =
+    options.log ??
+    ((event) => {
+      process.stdout.write(`${JSON.stringify(event)}\n`);
+    });
   const dataDir = resolveDataDirectory({
     ...process.env,
     CARDIGAN_DATA_DIR: options.dataDir ?? process.env.CARDIGAN_DATA_DIR,
@@ -128,14 +136,34 @@ export async function startWebServer(
   let boundPort = 0;
 
   const http = createServer((req, res) => {
+    const startedAt = performance.now();
+    let code = "ok";
+    let route = "unmatched";
+    try {
+      route = requestRoute(
+        new URL(req.url ?? "/", "http://workbench.invalid").pathname,
+      );
+    } catch {
+      /* Invalid URLs are handled below. */
+    }
+    let logged = false;
+    const completed = () => {
+      if (logged) return;
+      logged = true;
+      log({
+        event: "web_http",
+        method: req.method,
+        route,
+        code: res.writableFinished ? code : "aborted",
+        status: res.statusCode,
+        duration_ms: performance.now() - startedAt,
+      });
+    };
+    res.once("finish", completed);
+    res.once("close", completed);
     void handle(req, res).catch((error: unknown) => {
+      code = error instanceof HttpRejection ? error.code : "internal_error";
       if (!(error instanceof HttpRejection)) {
-        log({
-          event: "web_http",
-          method: req.method,
-          path: req.url,
-          code: "internal_error",
-        });
         if (!res.headersSent) {
           sendError(res, 500, "internal_error", "internal error");
         } else {
@@ -147,13 +175,6 @@ export async function startWebServer(
         sendError(res, error.status, error.code, error.message, {
           ...(error.details === undefined ? {} : { details: error.details }),
           headers: error.headers,
-        });
-        log({
-          event: "web_http",
-          method: req.method,
-          path: req.url,
-          code: error.code,
-          status: error.status,
         });
       } else {
         res.end();
@@ -185,6 +206,7 @@ export async function startWebServer(
         clock,
         limiter,
         dataDir,
+        mergeGate: options.mergeGate,
         stream: options.stream,
         secureCookie: config.publicOrigins.includes(`https://${hostHeader}`),
         log,
@@ -356,6 +378,7 @@ async function serveProjectRoute(
         project_id,
         clock,
         dataDir: context.dataDir,
+        mergeGate: context.mergeGate?.forProject(project_id),
         authorize: () => requireSession(context),
       },
       rest,
@@ -364,6 +387,34 @@ async function serveProjectRoute(
     return;
 
   if (req.method !== "GET") methodNotAllowed(["GET"]);
+
+  if (rest.startsWith("/merge-checks/")) {
+    return serveMergeCheckLog({
+      res,
+      dataDir: context.dataDir,
+      projectId: project_id,
+      attempt: rest.slice("/merge-checks/".length),
+      hasAttempt: (attempt) =>
+        projectState(store, project_id).events.some((event) => {
+          const payload = event.payload;
+          return (
+            event.card_id &&
+            event.actor.project_id === project_id &&
+            [
+              "merge_check_queued",
+              "merge_check_started",
+              "merge_check_finished",
+              "merge_check_requeued",
+            ].includes(event.type) &&
+            payload !== null &&
+            typeof payload === "object" &&
+            "attempt_id" in payload &&
+            payload.attempt_id === attempt
+          );
+        }),
+      authorize: () => requireSession(context),
+    });
+  }
 
   const attachment = /^\/attachments\/([^/]+)$/.exec(rest);
   if (attachment !== null) {
@@ -381,8 +432,6 @@ async function serveProjectRoute(
     return;
   }
 
-  const state = projectState(store, project_id);
-
   if (rest === "/cards") {
     let filter: CardFilter;
     try {
@@ -394,7 +443,7 @@ async function serveProjectRoute(
         error instanceof InvalidQuery ? error.message : "unknown filter",
       );
     }
-    const cards = cardListViews(state);
+    const cards = readCardList(store, project_id);
     const selected = cards.filter((card) =>
       filter === "needs_me"
         ? needsMe(card)
@@ -419,7 +468,7 @@ async function serveProjectRoute(
   if (card !== null) {
     const card_id = decodeURIComponent(card[1] ?? "") as CardId;
     const limit = numberParam(url.searchParams.get("limit"));
-    const detail = cardDetail(state, card_id, {
+    const detail = readCardDetail(store, project_id, card_id, {
       now,
       ...(limit === undefined ? {} : { timelineLimit: limit }),
       ...(url.searchParams.get("at")
@@ -433,6 +482,7 @@ async function serveProjectRoute(
     return;
   }
 
+  const state = projectState(store, project_id);
   if (rest === "/preferences") {
     // This baseline has no merge-gate executor/configuration yet.
     sendJson(res, 200, {
@@ -466,7 +516,14 @@ async function serveProjectRoute(
     return;
   }
   if (rest === "/needs-you") {
-    sendJson(res, 200, { project_id, ...needsYou(state, now) });
+    sendJson(res, 200, {
+      project_id,
+      ...needsYou(
+        state,
+        now,
+        context.mergeGate?.forProject(project_id).status === "enabled",
+      ),
+    });
     return;
   }
 

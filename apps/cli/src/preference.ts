@@ -84,6 +84,8 @@ export function runPreferenceCommand(
     const preferences =
       action === "set"
         ? runCommand(store, {
+            operation: "设置项目偏好",
+            target: `${project} auto-merge-after`,
             project_id: project,
             actor: humanActor(project),
             reduce: (s, a, ports) =>

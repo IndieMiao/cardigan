@@ -187,7 +187,7 @@ if [ ! -e "$claude_config_dir/.claude.json" ] && [ ! -L "$claude_config_dir/.cla
   fi
   (umask 077; set -C; printf '%s\\n' '{"hasCompletedOnboarding":true,"lastOnboardingVersion":"2.1.318","projects":{"/srv/agent/worktrees/A-12":{"hasTrustDialogAccepted":true}}}' > "$claude_config_dir/.claude.json")
 fi
-exec 'claude' '--settings' '/srv/cardigan/runs/A-12/cardigan-assignment.claude-agent.claude-settings.json' '--model' 'opus' '--strict-mcp-config' '--mcp-config' '/srv/cardigan/runs/A-12/mcp.json' '--append-system-prompt-file' '/srv/cardigan/runs/A-12/core.md' '--allowedTools' 'mcp__card__whoami,mcp__card__get_card,mcp__card__get_updates,mcp__card__ack_events,mcp__card__submit_delivery' '--' "$first_message"
+exec nice -n 10 'claude' '--settings' '/srv/cardigan/runs/A-12/cardigan-assignment.claude-agent.claude-settings.json' '--model' 'opus' '--strict-mcp-config' '--mcp-config' '/srv/cardigan/runs/A-12/mcp.json' '--append-system-prompt-file' '/srv/cardigan/runs/A-12/core.md' '--allowedTools' 'mcp__card__whoami,mcp__card__get_card,mcp__card__get_updates,mcp__card__ack_events,mcp__card__submit_delivery' '--' "$first_message"
 ",
       "mode": "700",
       "path": "/srv/cardigan/runs/A-12/launch.sh",
@@ -362,7 +362,7 @@ while [ ! -f "$start_file" ]; do
   waited=$((waited + 1))
 done
 rm -f "$start_file"
-exec 'codex' '--profile' 'codex-gateway' '-m' 'gpt-6-astra' "$first_message"
+exec nice -n 10 'codex' '--profile' 'codex-gateway' '-m' 'gpt-6-astra' "$first_message"
 ",
       "mode": "700",
       "path": "/srv/cardigan/runs/A-12/launch.sh",
@@ -518,7 +518,7 @@ while [ ! -f "$start_file" ]; do
   waited=$((waited + 1))
 done
 rm -f "$start_file"
-exec 'pi' '--provider' 'deepseek' '--model' 'deepseek-flash' '--append-system-prompt' '/srv/cardigan/runs/A-12/core.md' "$first_message"
+exec nice -n 10 'pi' '--provider' 'deepseek' '--model' 'deepseek-flash' '--append-system-prompt' '/srv/cardigan/runs/A-12/core.md' "$first_message"
 ",
       "mode": "700",
       "path": "/srv/cardigan/runs/A-12/launch.sh",

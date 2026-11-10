@@ -110,8 +110,10 @@ function compile(
   first: string,
   roleId: DefaultRoleId = "coder",
   employee?: CompileAssignmentInput["employee"],
+  agentNice?: number,
 ): CompiledAssignmentLaunch {
   return compileAssignmentLaunch({
+    ...(agentNice === undefined ? {} : { agent_nice: agentNice }),
     assignment: {
       assignment_id: "A-12",
       run_id: "R-5",
@@ -140,6 +142,32 @@ function surface(compiled: CompiledAssignmentLaunch): string {
     ...compiled.files.map((file) => `${file.path}\n${file.content}`),
   ].join("\n");
 }
+
+test("all Agent harnesses default to nice 10 and accept only integers from 0 to 19", () => {
+  for (const [harness, profile, binary] of [
+    ["claude-code", "claude-agent", "claude"],
+    ["codex", "codex-agent", "codex"],
+    ["pi", "pi-agent", "pi"],
+  ] as const) {
+    for (const value of [undefined, 0, 19]) {
+      const compiled = compile(
+        harness,
+        profile,
+        "fixture",
+        "coder",
+        undefined,
+        value,
+      );
+      expect(surface(compiled)).toContain(
+        `exec nice -n ${value ?? 10} '${binary}'`,
+      );
+    }
+    for (const value of [-1, 20, 0.5, Number.NaN])
+      expect(() =>
+        compile(harness, profile, "fixture", "coder", undefined, value),
+      ).toThrow(/niceness/);
+  }
+});
 
 const first = firstPrompt({
   card_id: "C-3",
@@ -306,7 +334,7 @@ describe("the token never reaches a generated file", () => {
     expect(content).toContain(`cat "$token_file"`);
     expect(content).toContain('rm -f "$token_file"');
     expect(content).toContain("export MCP_TOKEN");
-    expect(content).toContain("exec 'pi'");
+    expect(content).toContain("exec nice -n 10 'pi'");
     // Reading before deleting, and failing loudly when the file is gone.
     expect(content.indexOf('cat "$token_file"')).toBeLessThan(
       content.indexOf('rm -f "$token_file"'),

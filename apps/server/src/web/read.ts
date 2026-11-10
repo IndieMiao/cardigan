@@ -6,6 +6,7 @@ import type {
   CommandState,
   Decision,
   Machine,
+  MergeCheckView,
   ProjectId,
   TimelineEntry,
   WorkItem,
@@ -139,7 +140,10 @@ export interface CardListView extends WebCardView {
 }
 
 /** Card rows plus the counts, timestamp and roles the list filters need (U2). */
-export function cardListViews(state: CommandState): CardListView[] {
+export function cardListViews(
+  state: CommandState,
+  updatedAt?: ReadonlyMap<string, string>,
+): CardListView[] {
   const entryCard = new Map(
     state.timeline.map((entry) => [entry.id, entry.card_id]),
   );
@@ -179,11 +183,13 @@ export function cardListViews(state: CommandState): CardListView[] {
         (item) => item.status === "accepted" || item.status === "passed",
       ).length,
       updated_at =
+        updatedAt?.get(card.id) ??
         state.events
           .filter((event) => event.card_id === card.id)
           .map((event) => event.created_at)
           .sort()
-          .at(-1) ?? card.created_at;
+          .at(-1) ??
+        card.created_at;
     return {
       ...card,
       produce_owners: owners(items.filter((item) => item.kind === "produce")),
@@ -368,7 +374,10 @@ export function cardDetail(
     readonly now?: string;
   } = {},
 ) {
-  const card = cardViews(state).find((view) => view.id === card_id);
+  const card = cardViews({
+    ...state,
+    cards: state.cards.filter((c) => c.id === card_id),
+  })[0];
   if (card === undefined) {
     return undefined;
   }
@@ -508,6 +517,14 @@ export function cardDetail(
       ...entry,
       ...webAuthorView(state, entry.author),
       event_type: event?.type ?? null,
+      ...([
+        "merge_check_queued",
+        "merge_check_started",
+        "merge_check_finished",
+        "merge_check_requeued",
+      ].includes(event?.type ?? "")
+        ? { merge_check: event?.payload as unknown as MergeCheckView }
+        : {}),
       ...(entry.type === "decision_resolved" &&
       event?.payload &&
       typeof event.payload === "object" &&
@@ -618,13 +635,23 @@ export function cardDetail(
 }
 
 /** `listNeedsYou` plus the one-line reason and how long each item has waited. */
-export function needsYou(state: CommandState, now: string) {
+export function needsYou(
+  state: CommandState,
+  now: string,
+  mergeGateEnabled = false,
+) {
   const result = unwrap(
     listNeedsYou(state, human(state.project_id), { now: () => now }),
   );
   const data = result.data;
+  const checks = new Map(
+    mergeGateEnabled
+      ? cardViews(state).map((card) => [card.id, card.merge_check])
+      : [],
+  );
   const decisions = data.decisions.map((decision) => {
     const schedule = autoMergeSchedule(state, decision.id);
+    const check = decision.card_id ? checks.get(decision.card_id) : undefined;
     return {
       auto_merge: schedule.ok
         ? { minutes: schedule.value.minutes, due_at: schedule.value.due_at }
@@ -661,6 +688,16 @@ export function needsYou(state: CommandState, now: string) {
       merge_confirmation: decision.merge_confirmation
         ? {
             ...decision.merge_confirmation,
+            ...(mergeGateEnabled
+              ? {
+                  merge_gate_enabled: true,
+                  merge_check:
+                    check?.completion_id ===
+                    decision.merge_confirmation.completion?.id
+                      ? (check ?? null)
+                      : null,
+                }
+              : {}),
             deliveries: decision.merge_confirmation.deliveries.map(
               (delivery) => ({
                 ...delivery,

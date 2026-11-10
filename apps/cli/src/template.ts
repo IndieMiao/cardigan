@@ -115,6 +115,18 @@ export async function runTemplateCommand(
     if (change) {
       const params = change;
       const template = runCommand(store, {
+        operation: {
+          add: "创建模板",
+          update: "更新模板",
+          copy: "复制模板",
+          deactivate: "停用模板",
+          activate: "启用模板",
+          rollback: "回退模板",
+        }[params.action],
+        target:
+          "definition" in params
+            ? (params.definition.id ?? (flags.file as string))
+            : params.template_id,
         project_id: project,
         actor: humanActor(project),
         reduce: (s, a, p) => manageCardTemplate(s, a, params, p),

@@ -956,3 +956,174 @@ test("a PM handoff shows a readable title and all four explanations, with the ea
   expect(prior?.open).toBe(false);
   expect(within(article).getByText("查看改写前的内容")).toBeTruthy();
 });
+
+const checkStates = [
+  ["queued", "排队"],
+  ["running", "运行中"],
+  ["passed", "通过"],
+  ["failed", "失败"],
+  ["timed_out", "超时"],
+  ["interrupted", "中断"],
+] as const;
+const attempt = "e42de008-2c67-49e2-a59d-077a0f7936de";
+function checkedMerge(status: (typeof checkStates)[number][0]) {
+  const decision = merge();
+  if (!decision.merge_confirmation) throw new Error("Missing fixture");
+  return {
+    ...decision,
+    merge_confirmation: {
+      ...decision.merge_confirmation,
+      merge_gate_enabled: true,
+      merge_check: {
+        status,
+        attempt_id: attempt,
+        completion_id: "D-9",
+        checks: [{ duration_ms: 65000 }],
+        updated_at: new Date().toISOString(),
+        summary: "Error: test failed\n<script>unsafe</script>",
+        log_ref: `${attempt}.log`,
+      },
+    },
+  };
+}
+
+test.each(checkStates)(
+  "merge gate %s shows a badge and only retryable failures offer recheck",
+  async (status, label) => {
+    const recordDecision = vi.fn(async () => undefined);
+    const { container } = render(
+      <NeedsYouPage
+        projectId="p/a"
+        client={fakeClient({
+          needsYou: async () => page([checkedMerge(status)]),
+          recordDecision,
+        })}
+      />,
+    );
+    const article = await screen.findByRole("article", {
+      name: "合并确认 q(3)",
+    });
+    const content = within(article);
+    expect(content.getByText(label).className).toContain(`status-${status}`);
+    expect(content.queryByRole("button", { name: "重新检查" }) !== null).toBe(
+      ["failed", "timed_out"].includes(status),
+    );
+    expect(content.queryByText("检查通过后才会合并") !== null).toBe(
+      status !== "passed",
+    );
+    expect(
+      content.getByRole("link", { name: "查看日志" }).getAttribute("href"),
+    ).toBe(`/api/projects/p%2Fa/merge-checks/${attempt}`);
+    if (!["queued", "running"].includes(status))
+      expect(content.getByText("用时：1 分 5 秒")).toBeTruthy();
+    if (["failed", "timed_out", "interrupted"].includes(status))
+      expect(content.getByText(/Error: test failed/)).toBeTruthy();
+    expect(container.querySelector("script")).toBeNull();
+    fireEvent.click(content.getByRole("button", { name: "确认合并" }));
+    await waitFor(() =>
+      expect(recordDecision).toHaveBeenCalledWith(
+        "p/a",
+        "q(3)",
+        "merge",
+        "",
+        expect.any(String),
+      ),
+    );
+  },
+);
+
+test("recheck preserves its idempotency key on uncertain failure and refreshes on success", async () => {
+  let current = checkedMerge("failed");
+  const retry = vi
+    .fn()
+    .mockRejectedValueOnce(new TypeError("offline"))
+    .mockImplementationOnce(async () => {
+      current = checkedMerge("queued");
+    });
+  render(
+    <NeedsYouPage
+      projectId="p-1"
+      client={fakeClient({
+        needsYou: async () => page([current]),
+        recheckMerge: retry,
+      })}
+    />,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "重新检查" }));
+  expect(await screen.findByText(/操作可能已经成功/)).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "重新检查" }));
+  await waitFor(() =>
+    expect(screen.queryByRole("button", { name: "重新检查" })).toBeNull(),
+  );
+  expect(retry.mock.calls[0]).toEqual([
+    "p-1",
+    "C-1",
+    "D-9",
+    expect.any(String),
+  ]);
+  expect(retry.mock.calls[1]).toEqual(retry.mock.calls[0]);
+  expect(screen.getByText("排队")).toBeTruthy();
+});
+
+test.each(["failed", "timed_out"] as const)(
+  "a confirmed %s merge keeps its check and recheck action without another confirmation",
+  async (status) => {
+    const recheckMerge = vi.fn(async () => undefined);
+    render(
+      <NeedsYouPage
+        projectId="p-1"
+        client={fakeClient({
+          needsYou: async () =>
+            page([{ ...checkedMerge(status), status: "resolved" }]),
+          recheckMerge,
+        })}
+      />,
+    );
+    const article = within(
+      await screen.findByRole("article", { name: "合并确认 q(3)" }),
+    );
+    expect(
+      article.getByText(status === "failed" ? "失败" : "超时"),
+    ).toBeTruthy();
+    expect(article.getByRole("link", { name: "查看日志" })).toBeTruthy();
+    expect(article.queryByRole("button", { name: "确认合并" })).toBeNull();
+    expect(article.queryByRole("button", { name: "暂不合并" })).toBeNull();
+    expect(article.getByRole("button", { name: "退回修改" })).toBeTruthy();
+    fireEvent.click(article.getByRole("button", { name: "重新检查" }));
+    await waitFor(() =>
+      expect(recheckMerge).toHaveBeenCalledWith(
+        "p-1",
+        "C-1",
+        "D-9",
+        expect.any(String),
+      ),
+    );
+  },
+);
+
+test("a gate waiting for its first event shows queued, while disabled projects are unchanged", async () => {
+  const q = checkedMerge("queued");
+  const client = fakeClient({
+    needsYou: async () =>
+      page([
+        {
+          ...q,
+          merge_confirmation: { ...q.merge_confirmation, merge_check: null },
+        },
+      ]),
+  });
+  const view = render(<NeedsYouPage projectId="p-1" client={client} />);
+  expect(await screen.findByText("排队")).toBeTruthy();
+  expect(screen.getByText("用时：尚未开始")).toBeTruthy();
+  expect(screen.queryByRole("link", { name: "查看日志" })).toBeNull();
+  view.unmount();
+  render(
+    <NeedsYouPage
+      projectId="p-1"
+      client={fakeClient({ needsYou: async () => page([merge()]) })}
+    />,
+  );
+  await screen.findByRole("button", { name: "确认合并" });
+  expect(screen.queryByText("合并检查")).toBeNull();
+  expect(screen.queryByText("检查通过后才会合并")).toBeNull();
+});

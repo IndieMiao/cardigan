@@ -10,6 +10,7 @@ export interface ExecutionEnv {
   readonly CARDIGAN_AGENT_MACHINE?: string | undefined;
   readonly CARDIGAN_AGENT_IDENTITY?: string | undefined;
   readonly CARDIGAN_AGENT_KNOWN_HOSTS?: string | undefined;
+  readonly CARDIGAN_AGENT_NICE?: string | undefined;
 }
 
 export const defaultDataDirectory = (home = homedir()): string =>
@@ -26,7 +27,7 @@ export function resolveDataDirectory(
     configured?.trim() ? configured : defaultDataDirectory(env.HOME),
   );
 }
-export type ExecutionConfig =
+export type ExecutionConfig = { readonly agentNice?: number } & (
   | { readonly mode: "local"; readonly dataDir: string }
   | {
       readonly mode: "agent-ssh";
@@ -36,7 +37,8 @@ export type ExecutionConfig =
       readonly machine: string;
       readonly identityFile: string;
       readonly knownHostsFile: string;
-    };
+    }
+);
 export const LOCAL_RUNTIME_WARNING =
   "警告：local 模式没有 Agent 账号隔离，会继承主机账号的文件和凭据访问能力；生产运行请配置 agent-ssh。";
 export const shellQuote = (s: string) => `'${s.replaceAll("'", "'\\''")}'`;
@@ -52,7 +54,15 @@ export function resolveExecutionConfig(
 ): ExecutionConfig {
   const mode = env.CARDIGAN_RUNTIME_MODE ?? "local";
   const dataDir = resolveDataDirectory(env);
-  if (mode === "local") return { mode, dataDir };
+  const configuredNice = env.CARDIGAN_AGENT_NICE;
+  if (
+    configuredNice !== undefined &&
+    !/^(?:[0-9]|1[0-9])$/.test(configuredNice)
+  )
+    throw new Error("CARDIGAN_AGENT_NICE must be an integer from 0 to 19");
+  const priority =
+    configuredNice === undefined ? {} : { agentNice: Number(configuredNice) };
+  if (mode === "local") return { mode, dataDir, ...priority };
   if (mode !== "agent-ssh")
     throw new Error("CARDIGAN_RUNTIME_MODE must be local or agent-ssh");
   const path = (value: string | undefined, name: string) => {
@@ -94,6 +104,7 @@ export function resolveExecutionConfig(
     machine,
     identityFile,
     knownHostsFile,
+    ...priority,
   };
 }
 export function executionPaths(

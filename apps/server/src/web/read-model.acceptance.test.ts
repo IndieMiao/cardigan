@@ -227,6 +227,11 @@ test("R03 §8.2: Needs You puts blockers first, truncates reasons and calculates
     human_action_id: action.id,
     disposition: "human",
     rationale: "需要实体设备",
+    title: "请检查设备是否已经连接",
+    summary: "后续任务需要先确认设备可用。",
+    why_human:
+      "设备在你的工作台，需要现场核对连接线和指示灯；项目经理没有远程操作实体设备的能力。",
+    expected_outcome: "确认连接后，开发者可以继续使用设备验证功能。",
     instructions: action.instructions,
     expected_return: action.expected_return,
   });

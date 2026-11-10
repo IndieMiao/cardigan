@@ -224,9 +224,22 @@ test("assign issues a token once and re-assigning rotates it", async () => {
 test("token issue validates the assignment and its state", async () => {
   await bootstrap();
   expect(await run(["token", "issue", "A-99"])).toBe(2);
-  expect(errors.join("\n")).toContain("不存在");
+  expect(errors.join("\n")).toContain(
+    "无法签发 Token A-99：Assignment A-99 不存在（not_found）",
+  );
   expect(await run(["token", "issue", "not-an-id"])).toBe(2);
   expect(errors.join("\n")).toContain("不合法");
+});
+
+test("human-action reports domain rejection in Chinese with the same exit code", async () => {
+  await bootstrap();
+  expect(await run(["human-action", "done", "h(99)", "--text", "done"])).toBe(
+    2,
+  );
+  expect(errors.join("\n")).toContain(
+    "无法完成待办操作 h(99)：对象在当前项目中不存在（not_found）",
+  );
+  expect(printed()).toBe("");
 });
 
 test("P2a-6: CLI assign separates authors, reviewers and PM acceptance and rejects a borrowed identity", async () => {
@@ -279,7 +292,7 @@ test("P2a-6: CLI assign separates authors, reviewers and PM acceptance and rejec
 
   expect(await run(["assign", "W-2", "--role", "reviewer"])).toBe(2);
   expect(errors.join("\n")).toContain(
-    "invariant_violation: A work item has one persistent assignment",
+    "无法指派工作项 W-2：这个工作项已经有负责的 Assignment，不能再指派新的（invariant_violation）",
   );
   expect(printed()).toBe("");
   const reopened = Store.open({ dataDir });
@@ -473,7 +486,7 @@ test("assign rejects a role that does not match the work item", async () => {
     "r/x",
   ]);
   expect(await run(["assign", "W-1", "--role", "reviewer"])).toBe(2);
-  expect(errors.join("\n")).toContain("role");
+  expect(errors.join("\n")).toContain("指派的角色必须与工作项要求一致");
 });
 
 test("assign --start hands off without printing a token", async () => {
