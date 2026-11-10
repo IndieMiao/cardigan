@@ -105,6 +105,7 @@ test("prepare pins only a candidate and its real tree; publish is the separate b
   expect(
     await f.central.publishMerge(
       f.project,
+      plan().completion_id,
       prepared.candidate_sha,
       prepared.previous_sha,
     ),
@@ -142,13 +143,14 @@ test("recomputing a candidate after a tree-preserving baseline advance changes o
   expect(await git(repo, "rev-parse", "refs/cardigan/deliveries/D-1")).toBe(
     deliveries.get("D-1"),
   );
-  expect(
-    await f.central.publishMerge(
+  await expect(
+    f.central.publishMerge(
       f.project,
+      plan().completion_id,
       before.candidate_sha,
       before.previous_sha,
     ),
-  ).toEqual({ status: "stale" });
+  ).rejects.toThrow(/Candidate ref/);
   expect(await git(repo, "rev-parse", "main")).toBe(advanced);
 });
 
@@ -186,13 +188,18 @@ test("tree lookup rejects refs and non-commits; publish rejects a rollback witho
   const prepared = await f.central.prepareMerge(f.project, plan("D-1"));
   if (prepared.status !== "candidate") throw new Error("Missing candidate");
   await expect(
-    f.central.publishMerge(f.project, tree, f.initial),
+    f.central.publishMerge(f.project, plan().completion_id, tree, f.initial),
   ).rejects.toThrow(/Candidate/);
   await expect(
-    f.central.publishMerge(f.project, f.initial, prepared.candidate_sha),
+    f.central.publishMerge(
+      f.project,
+      plan().completion_id,
+      f.initial,
+      prepared.candidate_sha,
+    ),
   ).rejects.toThrow(/Candidate/);
   await expect(
-    f.central.publishMerge(f.project, "HEAD", f.initial),
+    f.central.publishMerge(f.project, plan().completion_id, "HEAD", f.initial),
   ).rejects.toThrow(/full/);
   expect(await git(repo, "rev-parse", "main")).toBe(f.initial);
 });
@@ -371,4 +378,37 @@ test("an empty plan is a no-op and reports the current baseline", async () => {
       deliveries: [],
     }),
   ).toEqual({ status: "noop", branch_sha: f.initial });
+});
+
+test("publication requires this completion's unchanged candidate ref, not merely an ancestor-compatible commit", async () => {
+  await deliver("D-1", writeFileTo("first.txt", "first"));
+  const prepared = await f.central.prepareMerge(f.project, plan("D-1"));
+  if (prepared.status !== "candidate") throw new Error("Missing candidate");
+  // This is a valid descendant, but not the candidate selected for D-99.
+  const other = await f.transport.commitTree(repo, {
+    tree: prepared.tree_sha,
+    parents: [prepared.candidate_sha],
+    message: "unselected candidate",
+    author: { name: "Fixture", email: "fixture@example.invalid" },
+  });
+  const publish = (completion: string, sha = prepared.candidate_sha) =>
+    f.central.publishMerge(f.project, completion, sha, prepared.previous_sha);
+  await expect(publish("D-99", other)).rejects.toThrow(/Candidate ref/);
+  await expect(publish("D-98")).rejects.toThrow(/Candidate ref/);
+  await expect(publish("../heads/main")).rejects.toThrow(/completion id/);
+  await git(repo, "update-ref", "refs/cardigan/candidates/D-99", other);
+  await expect(publish("D-99")).rejects.toThrow(/Candidate ref/);
+  await git(repo, "update-ref", "-d", "refs/cardigan/candidates/D-99");
+  await expect(publish("D-99")).rejects.toThrow(/Candidate ref/);
+  expect(await git(repo, "rev-parse", "main")).toBe(f.initial);
+  await git(
+    repo,
+    "update-ref",
+    "refs/cardigan/candidates/D-99",
+    prepared.candidate_sha,
+  );
+  await expect(publish("D-99")).resolves.toMatchObject({
+    status: "merged",
+    merge_sha: prepared.candidate_sha,
+  });
 });

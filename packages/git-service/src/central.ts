@@ -146,6 +146,7 @@ export class CentralRepositoryService {
     return prepared.status === "candidate"
       ? this.publishMerge(
           project,
+          plan.completion_id,
           prepared.candidate_sha,
           prepared.previous_sha,
         )
@@ -215,6 +216,7 @@ export class CentralRepositoryService {
   /** Publish only by CAS, after the caller has checked this exact candidate tree. */
   async publishMerge(
     project: CentralProject,
+    completion_id: string,
     candidate_sha: string,
     previous_sha: string,
   ): Promise<Extract<MergeOutcome, { status: "merged" | "stale" }>> {
@@ -223,8 +225,17 @@ export class CentralRepositoryService {
       candidate_sha.length !== previous_sha.length
     )
       throw new Error("Publishing requires full candidate and baseline SHAs");
+    if (!parseId("delivery", completion_id).ok)
+      throw new Error("Invalid completion id for publication");
     const repository = await this.ensureCentral(project),
       base = `refs/heads/${project.base_branch}`;
+    if (
+      (await this.git.readRef(
+        repository,
+        `refs/cardigan/candidates/${completion_id}`,
+      )) !== candidate_sha
+    )
+      throw new Error("Candidate ref does not match the prepared completion");
     if (
       (await this.git.objectType(repository, candidate_sha)) !== "commit" ||
       (await this.git.objectType(repository, previous_sha)) !== "commit" ||
