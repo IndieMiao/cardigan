@@ -93,6 +93,25 @@ export function autoMergeSchedule(
       "illegal_transition",
       "A held or returned merge needs a fresh confirmation",
     );
+    // C-69: a confirmation that waited through a sensitive flag restarts its
+    // countdown at the last unmark, so the human gets a full window again.
+    // Derived from events only, so a restarted server computes the same time.
+    const unmarked = state.events.findLast(
+      (e) =>
+        e.type === "card_sensitivity_changed" &&
+        e.card_id === card.id &&
+        e.seq > opened.seq &&
+        e.payload !== null &&
+        typeof e.payload === "object" &&
+        "sensitive" in e.payload &&
+        e.payload.sensitive === false &&
+        Number.isFinite(Date.parse(e.created_at)),
+    );
+    const waiting_since =
+      unmarked &&
+      Date.parse(unmarked.created_at) > Date.parse(opened.created_at)
+        ? unmarked.created_at
+        : opened.created_at;
     // Reuse the actual merge planner for accepted completion, latest confirmation,
     // project/card state and every remaining blocker; only simulate this answer.
     const resolved: Decision = {
@@ -105,7 +124,7 @@ export function autoMergeSchedule(
         resolved_by: "system",
         via: "delegated",
         via_chain: ["system"],
-        at: opened.created_at,
+        at: waiting_since,
       },
     };
     unwrap(
@@ -122,9 +141,9 @@ export function autoMergeSchedule(
     return {
       decision,
       minutes,
-      waiting_since: opened.created_at,
+      waiting_since,
       due_at: new Date(
-        Date.parse(opened.created_at) + minutes * 60_000,
+        Date.parse(waiting_since) + minutes * 60_000,
       ).toISOString(),
     };
   });

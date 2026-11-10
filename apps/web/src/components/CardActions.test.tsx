@@ -404,6 +404,47 @@ test("the human marks and unmarks a card sensitive from the card detail", async 
       expect.any(String),
     ),
   );
+  // C-69: auto-merge is off in the fixture, so no timeout sentence.
+  await waitFor(() =>
+    expect(screen.getByRole("status").textContent).toBe("已取消敏感标记。"),
+  );
+});
+
+test("C-69: unmarking says when the timeout will auto-merge, only if it is on", async () => {
+  const card = { ...cardDetail().card, sensitive: true };
+  const base = fakeClient();
+  for (const [preferences, expected] of [
+    [
+      async () => ({
+        ...(await base.preferences("p-1")),
+        auto_merge_after_minutes: 15,
+      }),
+      "已取消敏感标记。如有等你处理的合并确认，从现在起重新计时，15 分钟内无人处理将按项目设置自动合并。",
+    ],
+    [
+      async () => {
+        throw new Error("offline");
+      },
+      "已取消敏感标记。",
+    ],
+  ] as const) {
+    const { unmount } = render(
+      <CardActions
+        card={card}
+        client={fakeClient({
+          setCardSensitive: vi.fn().mockResolvedValue(undefined),
+          preferences,
+        })}
+        projectId="p-1"
+        onSaved={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "取消敏感标记" }));
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toBe(expected),
+    );
+    unmount();
+  }
 });
 
 test("the sensitive toggle posts to the human-only card route", async () => {
