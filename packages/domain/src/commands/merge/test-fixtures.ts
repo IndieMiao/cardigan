@@ -2,6 +2,7 @@ import type {
   Actor,
   Assignment,
   CommandEffect,
+  CommandPorts,
   CommandState,
   Delivery,
   Event,
@@ -25,12 +26,13 @@ import { apply, human, ports, role, value } from "../test-fixtures.js";
 export function mergeFixture(
   policy: "confirm" | "auto" = "confirm",
   limit = 3,
+  prior?: { state: CommandState; ports: CommandPorts },
 ) {
   const io = {
-    ...ports(),
+    ...(prior?.ports ?? ports()),
     templates: [{ ...developmentCardTemplate, merge: policy }],
   };
-  let state: CommandState = {
+  let state: CommandState = prior?.state ?? {
     project_id: human.project_id,
     roles: [role("coder"), role("reviewer"), role("pm")],
     cards: [],
@@ -70,14 +72,18 @@ export function mergeFixture(
   state = {
     ...state,
     work_items: state.work_items.map((w) =>
-      w.kind === "verify" ? { ...w, max_review_rounds: limit } : w,
+      w.card_id === card.id && w.kind === "verify"
+        ? { ...w, max_review_rounds: limit }
+        : w,
     ),
   };
-  const owners = state.work_items.map((w) =>
-    commit(
-      assign(state, human, { work_item_id: w.id, role_id: w.role_id }, io),
-    ),
-  );
+  const owners = state.work_items
+    .filter((w) => w.card_id === card.id)
+    .map((w) =>
+      commit(
+        assign(state, human, { work_item_id: w.id, role_id: w.role_id }, io),
+      ),
+    );
   const coder = owners[0] as Assignment,
     reviewer = owners[1] as Assignment,
     pm = owners[2] as Assignment;
