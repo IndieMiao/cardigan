@@ -36,6 +36,8 @@ import type { ExecutionConfig } from "@cardigan/runtime-herdr";
 import type { Store } from "@cardigan/store";
 import type { MergeGit } from "./git.js";
 
+import { mergeProjectSettings } from "./merge-push-loop.js";
+
 type Candidate = Extract<PreparedMerge, { status: "candidate" }>;
 type Settings = Extract<ProjectMergeGate, { status: "enabled" }>;
 type WithoutCard<T> = T extends unknown ? Omit<T, "card_id"> : never;
@@ -92,7 +94,11 @@ export class MergeChecks {
   }
   private state(project: string) {
     return this.options.store.uow.read((tx) =>
-      loadCommandState(tx, project as ProjectId, { merge_gate_enabled: true }),
+      loadCommandState(
+        tx,
+        project as ProjectId,
+        mergeProjectSettings(this.options.configuration, project),
+      ),
     );
   }
   private command<T>(
@@ -105,9 +111,11 @@ export class MergeChecks {
   ): T {
     return this.options.store.uow.run((tx) => {
       const result = reduce(
-        loadCommandState(tx, project as ProjectId, {
-          merge_gate_enabled: true,
-        }),
+        loadCommandState(
+          tx,
+          project as ProjectId,
+          mergeProjectSettings(this.options.configuration, project),
+        ),
         { kind: "system", project_id: project as ProjectId },
         { ids: tx.ids, clock: this.options.clock },
       );

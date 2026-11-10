@@ -25,8 +25,10 @@ import {
 import {
   CentralGitTransport,
   LocalGitTransport,
+  type PushResult,
   type WorkspaceGit as WorkspaceGitPort,
 } from "@cardigan/git-transport";
+import { type MergePushConfig, validateMergePushConfig } from "@cardigan/host";
 import type { DeliveryVerifierFor } from "@cardigan/mcp-server";
 import {
   type AgentExecution,
@@ -91,6 +93,12 @@ export interface MergeGit {
       })
   >;
   distribute?(project: CentralProject): Promise<void>;
+  push?(
+    project: CentralProject,
+    input: { sha: string; included: readonly string[] },
+    config: MergePushConfig,
+    signal?: AbortSignal,
+  ): Promise<PushResult>;
 }
 export interface ReconcileGit {
   projectOf(project_id: ProjectId): CentralProject | undefined;
@@ -338,6 +346,35 @@ export class ServerGit implements GitBinding {
       const local = new LocalGitTransport();
       await local.ensureClone(source, repository);
       await local.fetch(repository, source);
+    }
+  }
+  async push(
+    project: CentralProject,
+    input: { sha: string; included: readonly string[] },
+    config: MergePushConfig,
+    signal?: AbortSignal,
+  ): Promise<PushResult> {
+    try {
+      await validateMergePushConfig(config, this.options.dataDir);
+    } catch {
+      return { status: "failed", reason: "auth" };
+    }
+    try {
+      const repository = await this.central.ensureCentral(project);
+      for (const sha of input.included) {
+        if (
+          (await this.transport.objectType(repository, sha)) !== "commit" ||
+          !(await this.transport.isAncestor(repository, sha, input.sha))
+        )
+          return { status: "failed", reason: "other" };
+      }
+      return await this.transport.pushMergedCommit(repository, {
+        ...config,
+        sha: input.sha,
+        ...(signal ? { signal } : {}),
+      });
+    } catch {
+      return { status: "failed", reason: "other" };
     }
   }
   async backup(project: CentralProject): Promise<void> {
