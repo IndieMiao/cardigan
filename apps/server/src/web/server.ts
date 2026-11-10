@@ -9,6 +9,7 @@ import {
   decisionCategories,
   decisionDelegation,
   decisionHistory,
+  pmMergeConfirmation,
   projectPreferences,
 } from "@cardigan/domain";
 import type { MergeGateConfiguration } from "@cardigan/host";
@@ -516,6 +517,7 @@ async function serveProjectRoute(
     sendJson(res, 200, {
       ...projectPreferences(state),
       decision_delegation: decisionDelegation(projectPreferences(state)),
+      pm_merge_confirmation: pmMergeConfirmation(projectPreferences(state)),
       merge_gate_enabled: false,
     });
     return;

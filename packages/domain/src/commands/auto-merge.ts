@@ -12,6 +12,7 @@ import {
   ensure,
   unwrap,
 } from "./core.js";
+import { mergeNeedsHuman } from "./delegation.js";
 import { mergePlan } from "./merge.js";
 import { projectPreferences } from "./preferences.js";
 
@@ -50,6 +51,13 @@ export function autoMergeSchedule(
       card && (card.merge_policy ?? "confirm") === "confirm",
       "illegal_transition",
       "Card must require merge confirmation",
+    );
+    // §7.4: PM handoffs, D12 and scope changes need an explicit human answer.
+    ensure(
+      !decision.human_required_reason &&
+        !mergeNeedsHuman(state.decisions, card.id),
+      "illegal_transition",
+      "此合并须由人明确确认，不适用超时自动合并",
     );
     const opened = state.events.find(
       (e) =>

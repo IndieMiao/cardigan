@@ -131,3 +131,36 @@ test.each(["active", "suspended", "released"] as const)(
     }
   },
 );
+test("PM-held merge confirmations go to PM Ops and wake it when the check finishes", () => {
+  const q = decision({
+    decider: "role:pm",
+    trigger: "merge_confirmation",
+    status: "open",
+    affected_work_items: [],
+  });
+  const requested = routeEvent({
+    event: event("decision_requested", { decision_id: q.id }),
+    snapshot: snapshot({ decisions: [q] }),
+  }).notifications;
+  expect(requested).toMatchObject([
+    {
+      recipient: { kind: "pm_ops" },
+      summary: expect.stringContaining("must_fix"),
+    },
+  ]);
+  const finished = (decisions = [q]) =>
+    routeEvent({
+      event: event("merge_check_finished", { status: "passed" }),
+      snapshot: snapshot({ decisions }),
+    }).notifications;
+  expect(finished()).toMatchObject([
+    {
+      recipient: { kind: "pm_ops" },
+      rule: "6.4/merge check finished",
+      summary: expect.stringContaining("passed"),
+    },
+  ]);
+  // Human-held or already answered confirmations do not wake PM Ops.
+  expect(finished([{ ...q, decider: "human" }])).toEqual([]);
+  expect(finished([{ ...q, status: "resolved" }])).toEqual([]);
+});

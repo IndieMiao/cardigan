@@ -81,6 +81,7 @@ type CommandName =
   | "acknowledge_run"
   | "abort_dispatch"
   | "set_project_preferences"
+  | "mark_notices_read"
   | "auto_confirm_merge"
   | "remind_decision_followups"
   | "request_merge"

@@ -215,7 +215,11 @@ test("Needs You explains each item and how long it has waited", async () => {
     );
     expect(res.status).toBe(200);
     const body = res.json as ReadBody;
-    expect(body.counts).toEqual({ decisions: 1, human_actions: 1 });
+    expect(body.counts).toEqual({
+      decisions: 1,
+      human_actions: 1,
+      notices_unread: 0,
+    });
     expect(body.decisions[0]).toMatchObject({
       kind: "decision",
       id: "D-1",

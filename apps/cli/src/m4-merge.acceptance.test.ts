@@ -52,6 +52,7 @@ import {
   requestMerge,
   requestWorktreeCleanup,
   resolveDelegatedDecision,
+  setProjectPreferences,
   submitDelivery,
   submitReview,
   transition,
@@ -308,6 +309,12 @@ async function scenario(
 ): Promise<Scenario> {
   const office = await seatStanding(true);
   const ops = await seatStanding(false);
+  // C-49 defaults merge confirmation to PM Ops; this suite covers the human path.
+  apply(
+    (s, a, p) =>
+      setProjectPreferences(s, a, { pm_merge_confirmation: false }, p),
+    human,
+  );
   const templates: readonly CardTemplate[] = [
     { ...developmentCardTemplate, merge: policy },
   ];

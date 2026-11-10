@@ -16,9 +16,12 @@ import {
   delegationAuthority,
   grantDecisionCategory,
   handoffDecision,
+  handoffUnauthorizedDecisions,
   hasActivePmOps,
   isPmOps,
+  mergeDelegationAuthority,
 } from "./delegation.js";
+import { pmMergeBlockers } from "./merge-delegation.js";
 import { resolveReviewLimit } from "./review-limit-resolution.js";
 
 export { extractReferences } from "../references.js";
@@ -371,6 +374,15 @@ export function requestDecision(
         { decision_id: id, affected_work_items: decision.affected_work_items },
         { type: "decision_request", body: p.question, decision_id: id },
       );
+    // §7.4: a D12 or scope question makes the card's merge confirmation human-only.
+    if (
+      p.category === "scope_change" ||
+      highRiskCategories.includes(p.category)
+    )
+      handoffUnauthorizedDecisions(
+        d,
+        `${id} 涉及${p.category === "scope_change" ? "需求范围变化" : "高风险事项"}，此卡片的合并确认转交给你。`,
+      );
     return decision;
   });
 }
@@ -456,6 +468,7 @@ function resolveDecisionDraft(
     raw_quote: string;
     via_chain?: readonly Author[];
     batch?: string;
+    notice?: string;
   },
   delegated: boolean,
 ) {
@@ -471,12 +484,13 @@ function resolveDecisionDraft(
         : "pm_office_chat",
     ...(delegated
       ? {
-          proxy_authority: delegationAuthority(
-            d,
-            decision.category ?? "general",
-          ),
+          proxy_authority:
+            decision.trigger === "merge_confirmation"
+              ? mergeDelegationAuthority(d)
+              : delegationAuthority(d, decision.category ?? "general"),
         }
       : {}),
+    ...(delegated && p.notice?.trim() ? { notice: p.notice.trim() } : {}),
     raw_quote: p.raw_quote,
     via_chain: [...(p.via_chain ?? []), d.author],
     ...(p.batch ? { batch: p.batch } : {}),
@@ -500,6 +514,8 @@ export function resolveDelegatedDecision(
     option: string;
     rationale: string;
     escalate?: boolean;
+    /** Needs You notice; required when PM Ops confirms a merge (§7.4). */
+    notice?: string;
   },
   ports: CommandPorts,
 ) {
@@ -519,8 +535,23 @@ export function resolveDelegatedDecision(
     );
     text(p.rationale, "rationale");
     if (p.escalate) {
-      handoffDecision(d, q, `项目经理升级给你：${p.rationale}`);
+      handoffDecision(
+        d,
+        q,
+        `项目经理升级给你：${p.rationale}`,
+        undefined,
+        q.trigger === "merge_confirmation",
+      );
       return d.get("decisions", q.id);
+    }
+    if (q.trigger === "merge_confirmation" && p.option === "merge") {
+      const blockers = pmMergeBlockers(state, q);
+      ensure(
+        blockers.length === 0,
+        "illegal_transition",
+        `PM 只能在闸门检查、验证全部通过且无 must_fix 时确认合并，否则只能 hold、request_changes 或交人：${blockers.join("；")}`,
+      );
+      text(p.notice, "notice");
     }
     if (q.trigger === "review_limit") {
       ensure(
