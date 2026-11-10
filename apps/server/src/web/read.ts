@@ -695,6 +695,9 @@ export function needsYou(state: CommandState, now: string) {
       why: clamp(action.why),
       expected_return: action.expected_return,
       blocked_work_items: action.blocked_work_items,
+      ...(action.completion_notice !== undefined
+        ? { completion_notice: action.completion_notice }
+        : {}),
       due: action.due ?? null,
       opened_at: opened ?? null,
       waited_ms: waitedMs(opened, now) ?? null,

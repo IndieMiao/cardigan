@@ -1,4 +1,4 @@
-import type { Timestamp } from "./entities.js";
+import type { Assignment, Author, Timestamp } from "./entities.js";
 import { type Result, validationFailed } from "./errors.js";
 import type { AssignmentId, CardId, EventId, ProjectId, RunId } from "./ids.js";
 import type { NotificationStatus } from "./states.js";
@@ -35,6 +35,26 @@ export type NotificationRecipient =
   | { readonly kind: "pm_ops" }
   | { readonly kind: "pm_office" }
   | { readonly kind: "needs_you" };
+
+/** A completed human request returns to its owner, then Ops, then the human. */
+export function requesterNotificationRecipient(
+  author: Author,
+  assignments: readonly Assignment[],
+): NotificationRecipient | undefined {
+  if (!author.startsWith("assignment:")) return undefined;
+  const owner = assignments.find((a) => `assignment:${a.id}` === author);
+  if (owner?.status === "active")
+    return { kind: "assignment", assignment_id: owner.id };
+  return assignments.some(
+    (a) =>
+      a.status === "active" &&
+      a.scope === "standing" &&
+      a.role_id === "pm" &&
+      a.standing_mode === "ops",
+  )
+    ? { kind: "pm_ops" }
+    : { kind: "needs_you" };
+}
 
 export interface Notification {
   /** Opaque id; the store assigns it (M3.3). */
