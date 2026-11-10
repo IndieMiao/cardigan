@@ -54,6 +54,7 @@ import {
   routeProjectEvents,
   type StandingResolver,
 } from "./dispatch-inbox.js";
+import { escalateReviewLimitWaits } from "./review-limit-attention.js";
 
 export interface DispatcherOptions {
   readonly store: Store;
@@ -822,6 +823,7 @@ export class Dispatcher {
     store.uow.run((tx) => {
       const state = loadCommandState(tx, project),
         at = this.clock.now();
+      escalateReviewLimitWaits(tx, store, state, at);
       const attempts = unfinishedBellAttempts(store.database, project);
       for (const n of store.listNotifications({
         project_id: project,

@@ -497,6 +497,15 @@ export interface NeedsAction
   readonly completion_notice?: string;
 }
 export interface NeedsPage {
+  readonly attention?: readonly {
+    readonly kind: "review_limit_not_resumed";
+    readonly card_id: string;
+    readonly work_item_id: string;
+    readonly decision_id: string;
+    readonly resolved_at: string;
+    readonly waited_ms: number;
+    readonly detail: string;
+  }[];
   readonly decisions: readonly NeedsDecision[];
   readonly human_actions: readonly NeedsAction[];
   readonly incidents: readonly (AuthorView & {

@@ -4,11 +4,13 @@ import {
   completeHumanAction,
   type DecisionId,
   finishRun,
+  listNeedsYou,
   prepareDelivery,
   recordDecision,
   reportBlocker,
   requestDecision,
   requestHumanAction,
+  reviewLimitAttention,
   submitDelivery,
   submitReview,
   toolNames,
@@ -331,7 +333,7 @@ test("invariants 10, 11: review-limit pause remains pending even after Ops raise
 });
 
 test.each(["reject", "conditional"] as const)(
-  "invariants 5, 10, 11, 12: a %s at the limit resumes only after the decision and a larger budget, and can pass review",
+  "invariants 5, 10, 11, 12: a %s at the limit atomically raises the budget and resumes via recordDecision",
   async (verdict) => {
     let { state, product, decision } = await exhausted(verdict);
     const recorded = resolve(state, decision.id, "raise_limit");
@@ -339,29 +341,11 @@ test.each(["reject", "conditional"] as const)(
     expect(recorded.events[0]?.payload).toMatchObject({
       resume_work_items: [],
     });
-    expect(state.work_items.find((w) => w.id === reviewer)?.status).toBe(
-      "waiting_decision",
-    );
-    const unchanged = value(
-      updateWorkItem(
-        state,
-        ops,
-        { work_item_id: reviewer, max_review_rounds: 1 },
-        io,
-      ),
-    );
-    expect(unchanged.data.status).toBe("waiting_decision");
-    const raised = value(
-      updateWorkItem(
-        state,
-        ops,
-        { work_item_id: reviewer, max_review_rounds: 2 },
-        io,
-      ),
-    );
-    state = apply(state, raised);
-    expect(raised.data.status).toBe("ready");
-    expect(raised.events[0]?.payload).toMatchObject({
+    expect(state.work_items.find((w) => w.id === reviewer)).toMatchObject({
+      status: "ready",
+      max_review_rounds: 2,
+    });
+    expect(recorded.events.at(-1)?.payload).toMatchObject({
       resume_work_items: [reviewer],
     });
     expect(state.runs.find((r) => r.id === id("run", 2))).toMatchObject({
@@ -372,7 +356,7 @@ test.each(["reject", "conditional"] as const)(
     expect(state.runs.find((r) => r.status === "queued")).toMatchObject({
       assignment_id: id("assignment", 2),
       kind: "decision_resumed",
-      trigger_event_id: raised.events[0]?.id,
+      trigger_event_id: recorded.events.at(-1)?.id,
       role_version: 1,
       model: "fixture-model",
       agent_cli_version: "1.0",
@@ -584,3 +568,130 @@ test("invariants 10, 11: a human action also gates review resumption and its com
     trigger_event_id: result.events[0]?.id,
   });
 });
+
+test.each([human, office])(
+  "invariants 10, 11: pause then raise_limit resumes atomically for $kind",
+  async (caller) => {
+    let { state, decision } = await exhausted();
+    state = apply(state, resolve(state, decision.id, "pause"));
+    const params = {
+      decision_id: decision.id,
+      option: "raise_limit",
+      rationale: "继续审核",
+      raw_quote: "再加一轮",
+    };
+    const effect = value(recordDecision(state, caller, params, io));
+    state = apply(state, effect);
+    expect(effect.events.map((e) => e.type)).toEqual([
+      "work_item_updated",
+      "decision_resolved",
+    ]);
+    expect(state.work_items.find((w) => w.id === reviewer)).toMatchObject({
+      status: "ready",
+      max_review_rounds: 2,
+    });
+    expect(state.runs.filter((r) => r.status === "queued")).toHaveLength(1);
+    expect(effect.data.resolution).toMatchObject({
+      raw_quote: "再加一轮",
+      via: caller.kind === "human" ? "needs_you" : "pm_office_chat",
+    });
+    expect(recordDecision(state, caller, params, io).ok).toBe(false);
+  },
+);
+
+test("review-limit attention starts strictly after ten minutes and clears on recovery", async () => {
+  const { state: pending, decision } = await exhausted();
+  // Reproduce the historical bug: resolution persisted without any budget or resume effects.
+  const resolution = resolve(pending, decision.id, "raise_limit").data;
+  const state = { ...pending, decisions: [resolution] };
+  const at = Date.parse(resolution.resolution?.at ?? "");
+  const atTime = (ms: number) => new Date(at + ms).toISOString();
+  for (const ms of [-1, 0, 599999, 600000])
+    expect(reviewLimitAttention(state, atTime(ms))).toEqual([]);
+  const findings = reviewLimitAttention(state, atTime(600001));
+  expect(findings).toEqual([
+    expect.objectContaining({
+      kind: "review_limit_not_resumed",
+      decision_id: decision.id,
+      work_item_id: reviewer,
+      waited_ms: 600001,
+    }),
+  ]);
+  expect(
+    value(listNeedsYou(state, human, { now: () => atTime(600001) })).data
+      .attention,
+  ).toEqual(findings);
+  expect(reviewLimitAttention(pending, atTime(600001))).toEqual([]);
+  const paused = apply(pending, resolve(pending, decision.id, "pause"));
+  expect(reviewLimitAttention(paused, atTime(600001))).toEqual([]);
+  const repaired = apply(
+    state,
+    value(
+      updateWorkItem(
+        state,
+        human,
+        { work_item_id: reviewer, max_review_rounds: 2 },
+        io,
+      ),
+    ),
+  );
+  expect(reviewLimitAttention(repaired, atTime(600001))).toEqual([]);
+  // A later unrelated wait must not revive the old alarm.
+  const waitingAgain: CommandState = {
+    ...repaired,
+    work_items: repaired.work_items.map((w) =>
+      w.id === reviewer ? { ...w, status: "waiting_decision" } : w,
+    ),
+  };
+  expect(reviewLimitAttention(waitingAgain, atTime(600001))).toEqual([]);
+  const newerId = io.ids.next(state.project_id, "decision");
+  const newer = { ...decision, id: newerId, key: newerId };
+  expect(
+    reviewLimitAttention(
+      { ...state, decisions: [resolution, newer] },
+      atTime(600001),
+    ),
+  ).toEqual([]);
+  const { trigger: _trigger, ...ordinary } = resolution;
+  expect(
+    reviewLimitAttention({ ...state, decisions: [ordinary] }, atTime(600001)),
+  ).toEqual([]);
+});
+
+test.each(["closed", "overflow"])(
+  "invariant 11: invalid review-limit updates (%s) leave the decision and budget unchanged",
+  async (failure) => {
+    const { state: initial, decision } = await exhausted();
+    const state: CommandState = {
+      ...initial,
+      cards: initial.cards.map((c) =>
+        failure === "closed" ? { ...c, status: "cancelled" } : c,
+      ),
+      work_items: initial.work_items.map((w) =>
+        failure === "overflow" && w.id === reviewer && w.kind === "verify"
+          ? { ...w, max_review_rounds: Number.MAX_SAFE_INTEGER }
+          : w,
+      ),
+    };
+    const before = JSON.stringify(state);
+    expect(
+      recordDecision(
+        state,
+        human,
+        {
+          decision_id: decision.id,
+          option: "raise_limit",
+          rationale: "Continue",
+          raw_quote: "Continue",
+        },
+        io,
+      ),
+    ).toMatchObject({
+      ok: false,
+      error: {
+        code: failure === "closed" ? "illegal_transition" : "validation_failed",
+      },
+    });
+    expect(JSON.stringify(state)).toBe(before);
+  },
+);

@@ -1,5 +1,7 @@
 import type { Assignment, Notification } from "@cardigan/domain";
+import { reviewLimitAttention } from "@cardigan/domain";
 import { readRunQueue } from "@cardigan/host";
+import { loadCommandState } from "@cardigan/mcp-server";
 import {
   backfillStandingModesInTransaction,
   openStore,
@@ -148,6 +150,10 @@ export function attentionCommand(args: readonly string[], io: CliIo): number {
   const store = open(io, flags);
   try {
     const project_id = resolveProject(store, io, flags.project);
+    const now = new Date().toISOString();
+    const attention = store.uow.read((tx) =>
+      reviewLimitAttention(loadCommandState(tx, project_id), now),
+    );
     const escalated = store
       .listNotifications({ project_id })
       .filter((notification) =>
@@ -180,6 +186,7 @@ export function attentionCommand(args: readonly string[], io: CliIo): number {
       openOnly: true,
     });
     if (
+      attention.length === 0 &&
       escalated.length === 0 &&
       lost.length === 0 &&
       findings.length === 0 &&
@@ -191,8 +198,14 @@ export function attentionCommand(args: readonly string[], io: CliIo): number {
       );
       return EXIT.ok;
     }
-    const now = new Date().toISOString();
     const lines: string[] = [];
+    if (attention.length) {
+      lines.push(`审核恢复异常（${attention.length}）`);
+      for (const finding of attention)
+        lines.push(
+          `  ${finding.kind} ${finding.card_id} age=${ageMinutes(finding.resolved_at, now)}m ${finding.detail}`,
+        );
+    }
     if (queued.length) {
       lines.push(`等待并发名额（${queued.length}）`);
       for (const run of queued)

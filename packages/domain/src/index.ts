@@ -38,6 +38,7 @@ export {
 } from "./commands/merge-push.js";
 export * from "./commands/merge-result.js";
 export * from "./commands/pm.js";
+export * from "./commands/pm-rotate.js";
 export * from "./commands/preferences.js";
 export * from "./commands/queries.js";
 export * from "./commands/release.js";
@@ -56,6 +57,7 @@ export * from "./notification.js";
 export * from "./ports.js";
 export * from "./preferences.js";
 export { type ResolvedReference, resolveReferences } from "./references.js";
+export { reviewLimitAttention } from "./review-limit-attention.js";
 export * from "./role.js";
 export * from "./role-prompt.js";
 export * from "./run-capacity.js";
