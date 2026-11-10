@@ -57,7 +57,7 @@
 
 | 任务 | 内容 | 负责 |
 |---|---|---|
-| V1 员工实体 | domain 实体、状态、指派规则和不变量；store 迁移；MCP `whoami` 返回员工名和职位；CLI `employee add / list / update` | Codex |
+| V1 员工实体（细化计划：[p2v-1-employee.md](p2v-1-employee.md)） | domain 实体、状态、指派规则和不变量；store 迁移；MCP `whoami` 返回员工名和职位；CLI `employee add / list / update` | Cardigan（V1a、V1b 两张卡） |
 | V2 接入点和模型 | Workbench 管理网关（地址、协议：Anthropic Messages / OpenAI Responses / OpenAI 兼容、密钥）和启动配置；密钥只存主机，界面不显示原文；为员工选"Agent CLI + 网关 + 模型"时检查组合是否兼容，并用该配置实际调一次 `whoami` 验证。`launch.yaml` 继续可用，界面上的改动写回同一份配置 | Codex |
 | V3 Agent 侧身份 | 启动时把员工名、职位注入提示词；评论和交付摘要用这个身份；`@员工名` 路由到该员工当前的 Assignment | Cardigan |
 | V4 头像素材 | 从 `cardigan-avatar-studio` 的导出包导入第一期人物（全身图、多尺寸头像、清单）；"招聘"时可以从素材库挑人物，也可以上传自己的图片；素材随 Workbench 打包，注明 AI 生成、自有。附件补上原文件名和一句说明（试行发现 16），附件网格显示文件名而不是 attachment-n | Pi |
