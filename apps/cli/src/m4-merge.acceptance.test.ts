@@ -51,6 +51,7 @@ import {
   requestDecision,
   requestMerge,
   requestWorktreeCleanup,
+  resolveDelegatedDecision,
   submitDelivery,
   submitReview,
   transition,
@@ -76,6 +77,7 @@ const pmTools: readonly ToolName[] = [
   "create_work_item",
   "assign",
   "record_decision",
+  "resolve_delegated_decision",
   "submit_review",
   "finish_run",
 ];
@@ -1538,9 +1540,9 @@ test("§4/§6.4 a reconcile finding is escalated to PM Ops", async () => {
 
 // ------------------------------------------------- recordDecision audience ---
 
-test("§4.4 recordDecision: the human only records merge/cleanup decisions, PM Ops records neither", async () => {
+test("§4.4 recordDecision: PM-authorized choices use the dedicated Ops tool", async () => {
   const s = await scenario("confirm");
-  // An ordinary decision: the human cannot record it, PM Office can.
+  // An authorized process decision belongs to PM Ops, not Office.
   startRun(s.coder);
   const ordinary = apply(
     (st, a, p) =>
@@ -1587,18 +1589,17 @@ test("§4.4 recordDecision: the human only records merge/cleanup decisions, PM O
   expect(
     apply(
       (st, a, p) =>
-        recordDecision(
+        resolveDelegatedDecision(
           st,
           a,
           {
             decision_id: ordinary.id,
             option: "a",
             rationale: "fixture",
-            raw_quote: "fixture a",
           },
           p,
         ),
-      actorFor(s.office),
+      actorFor(s.ops, opsTools),
     ).status,
   ).toBe("resolved");
 });
@@ -1687,7 +1688,7 @@ test("§4.4 recordDecision: PM Ops cannot record a merge confirmation or a clean
           rationale: "fixture",
           raw_quote: "fixture keep",
         },
-        p,
+        { ...p, human_confirmation: "workbench" },
       ),
     human,
   );

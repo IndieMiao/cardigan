@@ -113,3 +113,18 @@ test("PL.1 places the three source blocks in their prescribed sections", () => {
       .endsWith(blocks[2] as string),
   ).toBe(true);
 });
+
+test("C-37 PM instructions explain authorization limits, action triage and implementation responsibility", () => {
+  const prompt = corePromptFor("pm");
+  for (const rule of [
+    "resolve_delegated_decision",
+    "proxy_authority",
+    "triage_human_action",
+    "主机操作",
+    "四类高风险永不代拍",
+    "合并确认仍走原有流程",
+    "拍板解决后必须执行所选方案，并在卡片时间线写一句执行结果",
+    "30 分钟未落实提醒",
+  ])
+    expect(prompt).toContain(rule);
+});

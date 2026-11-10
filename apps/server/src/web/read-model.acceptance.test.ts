@@ -38,7 +38,7 @@ afterEach(async () => {
   await f?.close();
 }, 30_000);
 const question = {
-  category: "general" as const,
+  category: "scope_change" as const,
   kind: "choose" as const,
   question: "请选择下一步",
   context: "等待方向",
@@ -216,6 +216,20 @@ test("R03 §8.2: Needs You puts blockers first, truncates reasons and calculates
       blocked_work_items: [],
     },
   );
+  const ops = f
+    .state()
+    .assignments.find(
+      (a) => a.scope === "standing" && a.standing_mode === "ops",
+    );
+  if (!ops) throw new Error("Missing PM Ops");
+  await f.start(ops);
+  await f.mcp(ops, "triage_human_action", {
+    human_action_id: action.id,
+    disposition: "human",
+    rationale: "需要实体设备",
+    instructions: action.instructions,
+    expected_return: action.expected_return,
+  });
   const now = Date.now() + 120000;
   f.setTime(now);
   const needs = await read<NeedsPage>("/needs-you");

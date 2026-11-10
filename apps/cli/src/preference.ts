@@ -1,4 +1,10 @@
-import { projectPreferences, setProjectPreferences } from "@cardigan/domain";
+import {
+  type DecisionCategory,
+  decisionCategories,
+  decisionDelegation,
+  projectPreferences,
+  setProjectPreferences,
+} from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
 import { openStore } from "@cardigan/store";
 import { CliError, EXIT } from "./errors.js";
@@ -11,7 +17,7 @@ import {
 import type { CliIo } from "./io.js";
 
 const USAGE =
-  "cardigan preference get auto-merge-after | set auto-merge-after <分钟|off> [--project <p>] [--data-dir <目录>]";
+  "cardigan preference get auto-merge-after | set auto-merge-after <分钟|off> | get decision-delegation | set decision-delegation <类别> <on|off> [--project <p>] [--data-dir <目录>]";
 export function runPreferenceCommand(
   args: readonly string[],
   io: CliIo,
@@ -46,21 +52,30 @@ export function runPreferenceCommand(
       fail();
     flags[name] = value as string;
   }
-  const [action, preference, raw] = positions;
+  const [action, preference, raw, toggle] = positions;
+  const delegation = preference === "decision-delegation";
   if (
-    preference !== "auto-merge-after" ||
+    (!delegation && preference !== "auto-merge-after") ||
     !["get", "set"].includes(action ?? "") ||
-    positions.length !== (action === "get" ? 2 : 3)
+    positions.length !== (action === "get" ? 2 : delegation ? 4 : 3)
   )
     fail();
   const minutes = raw === "off" ? null : Number(raw);
   if (
     action === "set" &&
+    !delegation &&
     raw !== "off" &&
     (!/^\d+$/.test(raw ?? "") ||
       !Number.isInteger(minutes) ||
       Number(minutes) < 1 ||
       Number(minutes) > 1440)
+  )
+    fail();
+  if (
+    delegation &&
+    action === "set" &&
+    (!decisionCategories.includes(raw as DecisionCategory) ||
+      !["on", "off"].includes(toggle ?? ""))
   )
     fail();
   const store = openStore({ dataDir: announceDataDir(io, flags["data-dir"]) });
@@ -75,7 +90,13 @@ export function runPreferenceCommand(
               setProjectPreferences(
                 s,
                 a,
-                { auto_merge_after_minutes: minutes },
+                delegation
+                  ? {
+                      decision_delegation: {
+                        [raw as DecisionCategory]: toggle === "on",
+                      },
+                    }
+                  : { auto_merge_after_minutes: minutes },
                 ports,
               ),
           })
@@ -83,7 +104,14 @@ export function runPreferenceCommand(
             projectPreferences(loadCommandState(tx, project)),
           );
     io.stdout(
-      `auto-merge-after: ${preferences.auto_merge_after_minutes ?? "off"}`,
+      delegation
+        ? Object.entries(decisionDelegation(preferences))
+            .map(
+              ([category, enabled]) =>
+                `${category}: ${enabled ? "on (PM 代拍)" : "off (由人确认)"}`,
+            )
+            .join("\n")
+        : `auto-merge-after: ${preferences.auto_merge_after_minutes ?? "off"}`,
     );
     return EXIT.ok;
   } finally {

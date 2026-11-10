@@ -13,6 +13,7 @@ import { useResource } from "./useResource.js";
 import { ActivityPage } from "./views/ActivityPage.js";
 import { CardDetailPage } from "./views/CardDetailPage.js";
 import { CardListPage } from "./views/CardListPage.js";
+import { DecisionHistoryPage } from "./views/DecisionHistoryPage.js";
 import { ExecutionPage } from "./views/ExecutionPage.js";
 import { LoginPage } from "./views/LoginPage.js";
 import { NeedsYouPage } from "./views/NeedsYouPage.js";
@@ -234,6 +235,7 @@ function Workbench({
                   [
                     ["execution", "执行视图"],
                     ["activity", "项目动态"],
+                    ["decision-history", "拍板记录"],
                     ["snapshot", "项目快照"],
                   ],
                 ],
@@ -303,6 +305,13 @@ function Workbench({
           <div className="error-panel" role="alert">
             <p>无法识别链接 {invalidHash}；请从项目导航重新进入。</p>
           </div>
+        )}
+        {selected && route?.kind === "decision-history" && (
+          <DecisionHistoryPage
+            client={client}
+            projectId={selected.id}
+            revision={live.revision}
+          />
         )}
         {selected && route?.kind === "settings" && (
           <SettingsPage

@@ -30,7 +30,7 @@ import { serveWrite } from "./write.js";
 let s: M4Cross, web: RunningWebServer, cookie: string;
 const password = "workbench test password";
 const question = {
-  category: "general" as const,
+  category: "scope_change" as const,
   kind: "choose" as const,
   question: "Choose",
   context: "Need direction",
@@ -190,7 +190,7 @@ test("Needs You decisions preserve a human quote, supply a default, and reject w
     requestDecision(
       state,
       actor,
-      { ...question, decider: "role:reviewer" },
+      { ...question, category: "general", decider: "role:reviewer" },
       ports,
     ),
   );

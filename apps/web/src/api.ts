@@ -432,6 +432,8 @@ export interface NeedsAction
     AuthorView {
   readonly card_id: string | null;
   readonly why: string;
+  readonly triage?: "human" | "host";
+  readonly triage_rationale?: string | null;
   readonly waited_ms: number | null;
   readonly due: string | null;
   readonly blocked_work_items: readonly string[];
@@ -553,12 +555,34 @@ export interface CardUpdateInput {
   readonly priority: number;
 }
 
+export interface DecisionHistoryRecord extends DecisionView {
+  readonly category: string;
+  readonly card_id?: string;
+  readonly affected_cards: readonly string[];
+  readonly decision_maker: "human" | "pm" | "system";
+  readonly resolution: NonNullable<DecisionView["resolution"]> & {
+    resolved_by: string;
+    via: string;
+    proxy_authority?: string;
+  };
+}
 export interface PreferencesView {
+  readonly decision_delegation?: Readonly<Record<string, boolean>>;
   readonly auto_merge_after_minutes: number | null;
   readonly merge_gate_enabled: boolean;
 }
 
 export interface CardiganClient {
+  decisionHistory(
+    projectId: string,
+    filters: Readonly<Record<string, string>>,
+  ): Promise<{ decisions: readonly DecisionHistoryRecord[] }>;
+  setDelegation(
+    projectId: string,
+    category: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void>;
   preferences(projectId: string): Promise<PreferencesView>;
   setPreferences(
     projectId: string,
@@ -594,6 +618,7 @@ export interface CardiganClient {
     option: string,
     quote: string,
     idempotencyKey?: string,
+    delegateFuture?: boolean,
   ): Promise<void>;
   decisionComment(
     projectId: string,
@@ -733,6 +758,30 @@ export class HttpCardiganClient implements CardiganClient {
       `/api/projects/${encodeURIComponent(projectId)}/execution`,
     );
   }
+  decisionHistory(
+    projectId: string,
+    filters: Readonly<Record<string, string>>,
+  ): Promise<{ decisions: readonly DecisionHistoryRecord[] }> {
+    const query = new URLSearchParams(
+      Object.entries(filters).filter(([, v]) => v),
+    );
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/decision-history?${query}`,
+    );
+  }
+  async setDelegation(
+    projectId: string,
+    category: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      "preferences",
+      { decision_delegation: { [category]: enabled } },
+      idempotencyKey,
+    );
+  }
   preferences(projectId: string): Promise<PreferencesView> {
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/preferences`,
@@ -761,6 +810,7 @@ export class HttpCardiganClient implements CardiganClient {
     option: string,
     quote: string,
     idempotencyKey: string = crypto.randomUUID(),
+    delegateFuture = false,
   ): Promise<void> {
     await this.write(
       projectId,
@@ -768,6 +818,7 @@ export class HttpCardiganClient implements CardiganClient {
       {
         option,
         raw_quote: quote,
+        ...(delegateFuture ? { delegate_future: true } : {}),
       },
       idempotencyKey,
     );

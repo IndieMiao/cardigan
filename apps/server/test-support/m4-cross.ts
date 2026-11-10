@@ -643,7 +643,11 @@ const child=spawnSync('sh',['-c',args.slice(at+2).join(' ')],{cwd:${JSON.stringi
           allowed_tools: toolNames.filter(
             (tool) =>
               role_id === "pm" ||
-              (tool !== "record_decision" &&
+              (![
+                "record_decision",
+                "resolve_delegated_decision",
+                "triage_human_action",
+              ].includes(tool) &&
                 tool !==
                   (role_id === "coder" ? "submit_review" : "submit_delivery")),
           ),

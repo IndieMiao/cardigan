@@ -44,6 +44,8 @@ export type EntityChange = {
   };
 }[keyof CommandEntities];
 export interface CommandPorts {
+  /** Only the authenticated Workbench adapter may supply this confirmation channel. */
+  readonly human_confirmation?: "workbench";
   readonly clock: Clock;
   readonly ids: IdAllocator;
   /** Host-provided template configuration, never MCP parameters. */
@@ -75,6 +77,7 @@ type CommandName =
   | "abort_dispatch"
   | "set_project_preferences"
   | "auto_confirm_merge"
+  | "remind_decision_followups"
   | "request_merge"
   | "record_merge_result"
   | "release_assignment"
@@ -158,6 +161,7 @@ export class CommandDraft {
     ].includes(tool);
     const systemOnly = [
       "auto_confirm_merge",
+      "remind_decision_followups",
       "record_merge_result",
       "request_worktree_cleanup",
     ].includes(tool);

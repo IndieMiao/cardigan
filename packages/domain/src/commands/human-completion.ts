@@ -1,6 +1,7 @@
 import type { Card, Decision, Delivery } from "../entities.js";
 import { transition } from "../transitions.js";
 import { type CommandDraft, ensure, unwrap } from "./core.js";
+import { assignDecision } from "./delegation.js";
 import { completionPassed } from "./merge.js";
 import { resolveCardTemplate } from "./templates.js";
 
@@ -29,14 +30,14 @@ export function requestHumanCompletionReview(
       });
   }
   const id = d.ids.next(d.state.project_id, "decision");
-  const decision: Decision = {
+  const decision: Decision = assignDecision(d, {
     id,
     key: id,
     card_id: card.id,
     raised_by: "system",
     kind: "approve",
     trigger: "completion_review",
-    category: "general",
+    category: "feature_detail",
     target: { delivery_id: delivery.id },
     question: `验收 ${card.id} 的完成申请 ${delivery.id}`,
     context: delivery.summary,
@@ -51,7 +52,7 @@ export function requestHumanCompletionReview(
     decider: "human",
     doc_refs: [],
     status: "open",
-  };
+  });
   d.put("decisions", decision);
   d.emit(
     "decision_requested",
@@ -74,6 +75,17 @@ export function resolveHumanCompletionReview(
   );
   const delivery = d.get("deliveries", decision.target.delivery_id);
   const card = d.card(decision.card_id);
+  ensure(
+    !d.assignment ||
+      !d
+        .list("runs")
+        .some(
+          (r) =>
+            r.id === delivery.run_id && r.assignment_id === d.assignment?.id,
+        ),
+    "unauthorized",
+    "The author cannot approve their own completion request",
+  );
   const template = resolveCardTemplate(d, card);
   ensure(
     template.completion.mode === "review" &&

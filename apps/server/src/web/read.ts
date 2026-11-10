@@ -194,13 +194,7 @@ export function cardListViews(state: CommandState): CardListView[] {
 
 /** A card is "needs me" when the next actor is the human or something waits on them. */
 export function needsMe(card: CardView): boolean {
-  return (
-    card.next_owners.some((owner) => owner.kind === "human") ||
-    card.waiting_on.some(
-      (waiting) =>
-        waiting.kind === "decision" || waiting.kind === "human_action",
-    )
-  );
+  return card.next_owners.some((owner) => owner.kind === "human");
 }
 
 /** A card is "waiting on an agent" when a role or an assignment acts next. */
@@ -688,6 +682,8 @@ export function needsYou(state: CommandState, now: string) {
       instructions: action.instructions,
       why: clamp(action.why),
       expected_return: action.expected_return,
+      triage: action.triage ?? "human",
+      triage_rationale: action.triage_rationale ?? null,
       blocked_work_items: action.blocked_work_items,
       due: action.due ?? null,
       opened_at: opened ?? null,

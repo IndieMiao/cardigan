@@ -307,12 +307,12 @@ test("§6.4 decision requested for the human becomes Needs You plus a PM Office 
   ]);
 });
 
-test("§6.4 decision requested from a role goes to that role's Assignment", () => {
+test("§6.4 decision requested from PM goes only to PM Ops", () => {
   const result = routeEvent({
     event: event("decision_requested", { decision_id: "q(1)" }),
     snapshot: snapshot({ decisions: [decision({ decider: "role:pm" })] }),
   });
-  expect(recipients(result)).toEqual(["assignment:A-3"]);
+  expect(recipients(result)).toEqual(["pm_ops"]);
 });
 
 test("§6.4 decision resolved wakes every Assignment it had blocked, not PM Ops", () => {

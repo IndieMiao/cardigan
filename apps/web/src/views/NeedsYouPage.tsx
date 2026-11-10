@@ -22,7 +22,7 @@ import {
   Feedback,
   Markdown,
 } from "../components/Operations.js";
-import { decisionTitle } from "../decision-labels.js";
+import { decisionTitle, delegableCategories } from "../decision-labels.js";
 import { routeHash } from "../route.js";
 import { useResource } from "../useResource.js";
 
@@ -137,6 +137,10 @@ function Decision({
   const [option, setOption] = useState(""),
     [quote, setQuote] = useState("");
   const action = useAction(done);
+  const [delegateFuture, setDelegateFuture] = useState(false);
+  const canDelegate =
+    q.trigger !== "merge_confirmation" &&
+    delegableCategories.includes(q.category);
   const paused = isPausedReview(q);
   const selected = paused ? "raise_limit" : option;
   const options = paused
@@ -160,9 +164,18 @@ function Decision({
           e.preventDefault();
           if (selected === "") return;
           void action.run(
-            [projectId, q.id, "resolve", selected, quote],
+            [projectId, q.id, "resolve", selected, quote, delegateFuture],
             (key) =>
-              client.recordDecision(projectId, q.id, selected, quote, key),
+              delegateFuture
+                ? client.recordDecision(
+                    projectId,
+                    q.id,
+                    selected,
+                    quote,
+                    key,
+                    true,
+                  )
+                : client.recordDecision(projectId, q.id, selected, quote, key),
           );
         }}
       >
@@ -206,6 +219,17 @@ function Decision({
             </label>
           ))}
         </fieldset>
+        {canDelegate && (
+          <label>
+            <input
+              type="checkbox"
+              checked={delegateFuture}
+              disabled={action.busy}
+              onChange={(e) => setDelegateFuture(e.target.checked)}
+            />
+            此类问题以后由 PM 代拍
+          </label>
+        )}
         <label>
           补充说明（可选，会作为你的原话记录）
           <textarea
@@ -478,7 +502,10 @@ function HumanAction({
     <article className="needs-item" aria-label={`执行 ${item.id}`}>
       <header className="needs-meta">
         <EmployeeIdentity {...item} showTitle={false} />
-        <IdTag id={item.id} label="待你执行" />
+        <IdTag
+          id={item.id}
+          label={item.triage === "host" ? "主机操作" : "待你执行"}
+        />
         <StatusTag status="todo" />
         <span className="hint">{waitLabel(item.waited_ms, elapsed)}</span>
         <span className="needs-cards">
@@ -495,7 +522,10 @@ function HumanAction({
           </span>
         )}
       </header>
-      <h3 className="needs-question">{item.why}</h3>
+      <h3 className="needs-question">
+        {item.triage === "host" ? "主机操作：" : ""}
+        {item.triage_rationale || item.why}
+      </h3>
       <details>
         <summary>操作步骤与期望返回</summary>
         <Markdown body={item.instructions} />

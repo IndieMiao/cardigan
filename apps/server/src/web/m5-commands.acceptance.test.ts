@@ -44,7 +44,7 @@ const cardPath = (s: M5Cross, rest: string) =>
 const decisionPath = (s: M5Cross, id: string, operation: string) =>
   s.projectPath(`/decisions/${encodeURIComponent(id)}/${operation}`);
 const question = {
-  category: "general" as const,
+  category: "scope_change" as const,
   kind: "choose" as const,
   question: "要发布吗？",
   context: "需要你的方向",

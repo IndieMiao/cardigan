@@ -187,7 +187,12 @@ test.each([
       rationale: "Approved",
       raw_quote: "我选 go",
     };
-    const e = value(recordDecision(f.state, human, p, f.io));
+    const e = value(
+      recordDecision(f.state, human, p, {
+        ...f.io,
+        human_confirmation: "workbench",
+      }),
+    );
     expect(e.data.resolution).toMatchObject({
       resolved_by: "human",
       via: "needs_you",

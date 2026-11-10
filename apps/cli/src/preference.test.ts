@@ -93,3 +93,23 @@ test.each(["0", "1441", "1.5", "-10", "NaN", "1e2", "on"])(
     ).toEqual([]);
   },
 );
+
+test("delegation preferences persist separately from merge settings and reject fixed-risk categories", async () => {
+  expect(await run(["preference", "get", "decision-delegation"])).toBe(0);
+  expect(output.join("\n")).toContain("general: on (PM 代拍)");
+  expect(await run(["preference", "set", "auto-merge-after", "10"])).toBe(0);
+  expect(
+    await run(["preference", "set", "decision-delegation", "general", "off"]),
+  ).toBe(0);
+  expect(await run(["preference", "get", "decision-delegation"])).toBe(0);
+  expect(output.join("\n")).toContain("general: off (由人确认)");
+  expect(await run(["preference", "get", "auto-merge-after"])).toBe(0);
+  expect(output).toContain("auto-merge-after: 10");
+  for (const category of ["spending", "account", "permission", "data_deletion"])
+    expect(
+      await run(["preference", "set", "decision-delegation", category, "on"]),
+    ).not.toBe(0);
+  expect(
+    await run(["preference", "set", "decision-delegation", "unknown", "on"]),
+  ).not.toBe(0);
+});

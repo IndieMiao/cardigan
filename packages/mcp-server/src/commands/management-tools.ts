@@ -8,6 +8,7 @@ import {
   type CommandState,
   createCard,
   createWorkItem,
+  decisionCategories,
   issueInstruction,
   latestCardTemplate,
   parseId,
@@ -17,8 +18,10 @@ import {
   reportBlocker,
   requestDecision,
   requestHumanAction,
+  resolveDelegatedDecision,
   states,
   type ToolName,
+  triageHumanAction,
   updateCard,
   updateWorkItem,
   validationFailed,
@@ -80,13 +83,7 @@ const schemas = {
   request_decision: {
     card_id: id("card").optional(),
     kind: z.enum(["choose", "approve"]),
-    category: z.enum([
-      "general",
-      "spending",
-      "account",
-      "permission",
-      "data_deletion",
-    ]),
+    category: z.enum(decisionCategories),
     question: text,
     context: text,
     options: z
@@ -100,6 +97,19 @@ const schemas = {
     target: z
       .union([z.object({ delivery_id: id("delivery") }), z.object({ subject })])
       .optional(),
+  },
+  resolve_delegated_decision: {
+    decision_id: id("decision"),
+    option: text,
+    rationale: text,
+    escalate: z.boolean().optional(),
+  },
+  triage_human_action: {
+    human_action_id: id("human_action"),
+    disposition: z.enum(["done", "host", "human"]),
+    rationale: text,
+    instructions: text.optional(),
+    expected_return: text.optional(),
   },
   record_decision: {
     decision_id: id("decision"),
@@ -249,6 +259,16 @@ export function managementTools(clock?: Clock) {
       issueInstruction,
     ),
     wire("report_blocker", "Report a work item blocker.", reportBlocker),
+    wire(
+      "resolve_delegated_decision",
+      "Resolve an authorized decision as PM Ops, with a rationale, or escalate it to the human.",
+      resolveDelegatedDecision,
+    ),
+    wire(
+      "triage_human_action",
+      "Triage a requested action as PM Ops: record a result already performed within your permissions, or hand off clear steps to the host operator or human.",
+      triageHumanAction,
+    ),
     wire("request_decision", "Request a scoped decision.", requestDecision),
     wire(
       "record_decision",

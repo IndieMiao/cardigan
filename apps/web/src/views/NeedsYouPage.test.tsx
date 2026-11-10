@@ -742,3 +742,56 @@ test("merge confirmation shows due time and a decreasing countdown", async () =>
   });
   expect(screen.getByText(/剩余 7 分钟/)).toBeTruthy();
 });
+
+test("answering a human scope decision can grant future PM authority in the same request", async () => {
+  const recordDecision = vi.fn().mockResolvedValue(undefined);
+  render(
+    <NeedsYouPage
+      projectId="p-1"
+      client={fakeClient({
+        recordDecision,
+        needsYou: async () => ({
+          decisions: [q({ trigger: null, category: "scope_change" })],
+          human_actions: [],
+          incidents: [],
+        }),
+      })}
+    />,
+  );
+  fireEvent.click(
+    await screen.findByRole("checkbox", { name: "此类问题以后由 PM 代拍" }),
+  );
+  fireEvent.click(screen.getByRole("radio", { name: /merge/ }));
+  fireEvent.click(screen.getByRole("button", { name: "按所选拍板" }));
+  await waitFor(() =>
+    expect(recordDecision).toHaveBeenCalledWith(
+      "p-1",
+      "q(1)",
+      "merge",
+      "",
+      expect.any(String),
+      true,
+    ),
+  );
+});
+test.each(["spending", "account", "permission", "data_deletion"])(
+  "%s never offers the delegation checkbox",
+  async (category) => {
+    render(
+      <NeedsYouPage
+        projectId="p-1"
+        client={fakeClient({
+          needsYou: async () => ({
+            decisions: [q({ trigger: null, category })],
+            human_actions: [],
+            incidents: [],
+          }),
+        })}
+      />,
+    );
+    await screen.findByRole("article", { name: "拍板 q(1)" });
+    expect(
+      screen.queryByRole("checkbox", { name: "此类问题以后由 PM 代拍" }),
+    ).toBeNull();
+  },
+);

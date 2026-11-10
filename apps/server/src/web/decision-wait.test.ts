@@ -31,7 +31,7 @@ test("Web and MCP report the same project Decision request time and elapsed wait
         actor,
         {
           kind: "choose",
-          category: "general",
+          category: "scope_change",
           question: "Project direction",
           context: "Choose next phase",
           options: [{ key: "go", description: "Go", impact: "Proceed" }],

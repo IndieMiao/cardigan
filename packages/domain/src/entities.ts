@@ -16,6 +16,7 @@ import type {
   TimelineEntryId,
   WorkItemId,
 } from "./ids.js";
+import type { DecisionCategory } from "./preferences.js";
 import type {
   ApprovalStatus,
   AssignmentStatus,
@@ -62,6 +63,8 @@ export const toolNames = [
   "project_snapshot",
   "list_needs_you",
   "record_decision",
+  "resolve_delegated_decision",
+  "triage_human_action",
 ] as const;
 export type ToolName = (typeof toolNames)[number];
 export interface RoleReference {
@@ -361,12 +364,9 @@ interface DecisionFields {
     | "completion_review";
   /** Control-plane cleanup target; not writable by request_decision. */
   readonly assignment_id?: AssignmentId;
-  readonly category?:
-    | "general"
-    | "spending"
-    | "account"
-    | "permission"
-    | "data_deletion";
+  readonly category?: DecisionCategory;
+  /** Persisted policy evidence for decisions assigned to PM Ops. */
+  readonly delegation_authority?: string;
   readonly question: string;
   readonly context: string;
   readonly options: readonly {
@@ -409,6 +409,8 @@ export interface HumanAction {
   readonly instructions: string;
   readonly why_human: string;
   readonly expected_return: string;
+  readonly triage?: "pm_ops" | "human" | "host";
+  readonly triage_rationale?: string;
   readonly due?: Timestamp;
   readonly blocked_work_items: readonly WorkItemId[];
   readonly status: HumanActionStatus;

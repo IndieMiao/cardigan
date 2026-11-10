@@ -12,6 +12,7 @@ import type {
 import type { CardId } from "../ids.js";
 import type { Clock } from "../ports.js";
 import { type CommandDraft, type CommandState, command } from "./core.js";
+import { isPmOps } from "./delegation.js";
 import { resolveCardTemplate } from "./templates.js";
 
 function affects(d: CommandDraft, q: Decision, id: CardId) {
@@ -224,6 +225,22 @@ export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
     const now = clock?.now();
     const why = (text: string) => [...text].slice(0, 40).join("");
     return {
+      ...(isPmOps(d)
+        ? {
+            pm_queue: {
+              decisions: d
+                .list("decisions")
+                .filter(
+                  (q) =>
+                    q.decider === "role:pm" &&
+                    ["open", "provisional"].includes(q.status),
+                ),
+              human_actions: d
+                .list("human_actions")
+                .filter((h) => h.status === "open" && h.triage === "pm_ops"),
+            },
+          }
+        : {}),
       incidents: d
         .list("assignments")
         .filter(
@@ -300,7 +317,7 @@ export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
         }),
       human_actions: d
         .list("human_actions")
-        .filter((h) => h.status === "open")
+        .filter((h) => h.status === "open" && h.triage !== "pm_ops")
         .map((h) => ({ ...h, why: why(h.why_human) })),
     };
   });
