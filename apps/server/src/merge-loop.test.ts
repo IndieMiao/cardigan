@@ -657,3 +657,118 @@ test("a real Git-verified noop skips checks but still waits for the completion's
   });
   expect(c.errors).toEqual([]);
 });
+
+test("a due delegated confirmation cannot publish a failed gate; rechecking can complete without another approval", async () => {
+  const scenario = m4Scenario(f, "confirm");
+  const sha = agentCommit(
+    "agent/C-1/W-1",
+    "timeout-gate.txt",
+    "checked after delegation\n",
+  );
+  const { product, completion } = await acceptThroughMergeGate(
+    f,
+    scenario,
+    sha,
+  );
+  await pin(product.id, sha);
+  f.apply((s, a, p) =>
+    setProjectPreferences(s, a, { auto_merge_after_minutes: 1 }, p),
+  );
+  const marker = join(repos.root, "pass-delegated-check");
+  const c = await gated(`test -f '${marker}'`);
+  const loop = new MergeExecutor({
+    ...c.options,
+    clock: {
+      now: () => new Date(Date.parse(f.clock.now()) + 60_000).toISOString(),
+    },
+  });
+  const check = () =>
+    latestMergeCheck(f.state().events, scenario.card.id, completion.id);
+  await loop.tick();
+  expect(mergeConfirmation(f, scenario.card.id)?.resolution).toMatchObject({
+    via: "delegated",
+    resolved_by: "system",
+    option: "merge",
+  });
+  expect(check()?.status).toBe("failed");
+  expect(f.card().status).toBe("awaiting_merge");
+  expect(await baseline()).toBe(repos.base);
+  expect(f.state().events.filter((e) => e.type === "card_merged")).toHaveLength(
+    0,
+  );
+  await loop.tick();
+  expect(
+    f.state().events.filter((e) => e.type === "merge_check_queued"),
+  ).toHaveLength(1);
+  writeFileSync(marker, "ready");
+  expect(await c.cli("merge", "recheck", scenario.card.id)).toBe(0);
+  await loop.tick();
+  expect(check()?.status).toBe("passed");
+  expect(f.card().status).toBe("done");
+  expect(await baseline()).not.toBe(repos.base);
+  expect(
+    f.state().events.filter((e) => e.type === "decision_resolved"),
+  ).toHaveLength(1);
+  expect(f.state().events.filter((e) => e.type === "card_merged")).toHaveLength(
+    1,
+  );
+  expect(c.errors).toEqual([]);
+});
+
+test("delegation while a check is running leaves the baseline untouched until its passed result", async () => {
+  const scenario = m4Scenario(f, "confirm");
+  const sha = agentCommit(
+    "agent/C-1/W-1",
+    "running-gate.txt",
+    "wait for checks\n",
+  );
+  const { product, completion } = await acceptThroughMergeGate(
+    f,
+    scenario,
+    sha,
+  );
+  await pin(product.id, sha);
+  f.apply((s, a, p) =>
+    setProjectPreferences(s, a, { auto_merge_after_minutes: 1 }, p),
+  );
+  const c = await gated(),
+    ready = Promise.withResolvers<void>(),
+    finish = Promise.withResolvers<void>();
+  const loop = new MergeExecutor({
+    ...c.options,
+    clock: {
+      now: () => new Date(Date.parse(f.clock.now()) + 60_000).toISOString(),
+    },
+    gate: {
+      ...c.options.gate,
+      run: async (input) => {
+        input.onReady?.();
+        ready.resolve();
+        await finish.promise;
+        return {
+          status: "passed",
+          checks: [{ name: "test", status: "passed", exit_code: 0 }],
+          cleanup_errors: [],
+        };
+      },
+    },
+  });
+  const pending = loop.tick();
+  try {
+    await ready.promise;
+    expect(mergeConfirmation(f, scenario.card.id)?.resolution?.via).toBe(
+      "delegated",
+    );
+    expect(
+      latestMergeCheck(f.state().events, scenario.card.id, completion.id)
+        ?.status,
+    ).toBe("running");
+    expect(await baseline()).toBe(repos.base);
+    expect(f.card().status).toBe("awaiting_merge");
+  } finally {
+    finish.resolve();
+    await pending;
+  }
+  expect(f.card().status).toBe("done");
+  expect(c.errors).toEqual([]);
+});
