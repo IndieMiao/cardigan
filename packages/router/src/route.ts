@@ -618,7 +618,7 @@ function routeReview(input: RouteInput, draft: Draft): void {
   const recheck = payload.recheck_required ?? review?.recheck_required;
 
   // deriveReview represents nonblocking conditions without a recheck as pass.
-  // Only PM Ops handles these notes, including the legacy conditional verdict.
+  // Add a PM Ops summary without suppressing the normal completion routing.
   if (
     (verdict === "pass" && issueCount > 0) ||
     (verdict === "conditional" && recheck === false)
@@ -631,7 +631,7 @@ function routeReview(input: RouteInput, draft: Draft): void {
     const passed = input.snapshot.deliveries.find(
       (candidate) => candidate.id === delivery_id,
     );
-    routeCompletedItem(input, draft, passed?.work_item_id);
+    routeCompletion(input, draft, passed?.work_item_id);
     let summary = `${delivery_id ?? "the delivery"} passed with ${issueCount} review issue(s); no recheck is needed`;
     // A recipient gets one notification per event. Preserve any PM Ops handoff
     // for an unowned dependent inside the review summary instead of losing it.

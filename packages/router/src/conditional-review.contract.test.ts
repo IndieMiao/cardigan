@@ -163,7 +163,7 @@ test.each([false, true])(
 );
 
 test.each([false, true])(
-  "real pass with issues only summarizes to PM Ops (completion=%s)",
+  "real pass with issues retains completion reminders and summarizes to PM Ops without rework (completion=%s)",
   async (completion) => {
     const { f, delivery, reviewer } = await conditional(completion);
     f.start(reviewer);
@@ -192,12 +192,27 @@ test.each([false, true])(
     for (const payload of [
       event.payload,
       { review_id: effect.data.id, delivery_id: delivery.id, verdict: "pass" },
+      {
+        review_id: effect.data.id,
+        delivery_id: delivery.id,
+        verdict: "conditional",
+        recheck_required: false,
+      },
     ]) {
       const result = routeEvent({
         event: { ...event, payload },
         snapshot: f.state,
       });
       expect(result.notifications).toEqual([
+        ...(completion
+          ? []
+          : [
+              expect.objectContaining({
+                recipient: { kind: "assignment", assignment_id: f.coder.id },
+                kind: "completion",
+                rule: "6.4/all required work items passed",
+              }),
+            ]),
         expect.objectContaining({
           recipient: { kind: "pm_ops" },
           kind: "review",
@@ -205,6 +220,9 @@ test.each([false, true])(
           summary: `${delivery.id} passed with 1 review issue(s); no recheck is needed`,
         }),
       ]);
+      expect(result.notifications.every((n) => n.run_kind !== "rework")).toBe(
+        true,
+      );
       expect(result.checks[0]?.rule).toBe("6.4/review passed");
     }
   },
@@ -319,7 +337,7 @@ test.each(["active", "unassigned", "suspended", "released"] as const)(
       `${delivery.id} passed with 1 review issue(s)`,
     );
     if (status === "active") {
-      expect(result.notifications).toHaveLength(2);
+      expect(result.notifications).toHaveLength(3);
       expect(result.notifications).toContainEqual(
         expect.objectContaining({
           recipient: { kind: "assignment", assignment_id: owner?.id },
@@ -329,17 +347,25 @@ test.each(["active", "unassigned", "suspended", "released"] as const)(
         }),
       );
     } else {
-      expect(result.notifications).toHaveLength(1);
+      expect(result.notifications).toHaveLength(2);
       expect(pm[0]?.summary).toContain(`${producer} is done`);
       expect(pm[0]?.summary).toContain(
         status === "unassigned" ? "no owner" : `${downstream.id} can start`,
       );
     }
     expect(
-      result.notifications.some(
+      result.notifications.filter(
         (n) => n.recipient.assignment_id === f.coder.id,
       ),
-    ).toBe(false);
+    ).toEqual([
+      expect.objectContaining({
+        kind: "completion",
+        rule: "6.4/all required work items passed",
+      }),
+    ]);
+    expect(result.notifications.every((n) => n.run_kind !== "rework")).toBe(
+      true,
+    );
   },
 );
 
