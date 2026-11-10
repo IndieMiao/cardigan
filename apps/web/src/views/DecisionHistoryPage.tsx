@@ -7,6 +7,7 @@ import {
   Time,
 } from "../components/Foundation.js";
 import { CardLink, Markdown } from "../components/Operations.js";
+import { RequestFeedback } from "../components/RequestFeedback.js";
 import { categoryLabels } from "../decision-labels.js";
 import { useRouteFilters } from "../route.js";
 import { useResource } from "../useResource.js";
@@ -101,17 +102,11 @@ export function DecisionHistoryPage({
           />
         </label>
       </div>
-      {resource.error && (
-        <p role="alert">
-          {resource.error}
-          <button type="button" onClick={resource.reload}>
-            重试
-          </button>
-        </p>
-      )}
-      {!resource.data && !resource.error && (
-        <p role="status">正在加载拍板记录…</p>
-      )}
+      <RequestFeedback
+        {...resource}
+        retry={resource.reload}
+        pendingMessage="正在加载拍板记录…"
+      />
       {resource.data?.decisions.length === 0 && (
         <EmptyState>没有符合条件的拍板记录</EmptyState>
       )}

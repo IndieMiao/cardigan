@@ -6,6 +6,7 @@ import {
   type CardView,
   describeWriteError,
 } from "../api.js";
+import { RequestFeedback } from "./RequestFeedback.js";
 
 type Mode = "edit" | "cancel" | "supersede";
 type Operation =
@@ -125,8 +126,13 @@ export function CardActions({
       {card.sensitive && (
         <p className="hint">敏感卡片：合并确认由你亲自处理。</p>
       )}
-      {flagError && <p role="alert">{flagError}</p>}
-      {message && <p role="status">{message}</p>}
+      <RequestFeedback
+        message={message}
+        pending={flagging}
+        interactive
+        pendingMessage="正在提交…"
+        error={flagError}
+      />
       {mode && (
         <CardActionForm
           key={mode}
@@ -343,22 +349,19 @@ function CardActionForm({
             disabled={!valid}
             className={mode === "cancel" ? "danger" : undefined}
           >
-            {pending
-              ? "正在提交…"
-              : mode === "edit"
-                ? "保存修改"
-                : labels[mode]}
+            {mode === "edit" ? "保存修改" : labels[mode]}
           </button>
           <button type="button" className="quiet" onClick={dismiss}>
             {mode === "cancel" ? "暂不取消" : "放弃修改"}
           </button>
         </div>
       </fieldset>
-      {error && (
-        <div role="alert" className="error-panel">
-          {error}
-        </div>
-      )}
+      <RequestFeedback
+        interactive
+        pending={pending}
+        pendingMessage="正在提交…"
+        error={error}
+      />
     </form>
   );
 }

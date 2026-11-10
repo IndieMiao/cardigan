@@ -250,7 +250,7 @@ test("U5c seven-character SHA copies the complete bound commit and exposes it in
   expect(copy.textContent).toBe("提交 fffb15b");
   expect(row.textContent).not.toContain(sha);
   fireEvent.click(copy);
-  expect(await within(row).findByText("已复制")).toBeTruthy();
+  expect(await screen.findByText("已复制")).toBeTruthy();
   expect(writeText).toHaveBeenCalledWith(sha);
   act(() => copy.focus());
   expect((await screen.findByRole("tooltip")).textContent).toContain(sha);

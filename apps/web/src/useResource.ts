@@ -9,42 +9,56 @@ export function useResource<T>(load: () => Promise<T>, revision = 0) {
     data?: T;
     error?: string;
     pending: boolean;
-  }>({ source: load, pending: true });
-  const reload = useCallback(() => {
-    const request = ++version.current;
-    setState((old) => ({
-      source: load,
-      ...(old.source === load && old.data !== undefined
-        ? { data: old.data }
-        : {}),
-      pending: true,
-    }));
-    load().then(
-      (data) => {
-        if (request === version.current)
-          setState({ source: load, data, pending: false });
-      },
-      (error) => {
-        if (request === version.current)
-          setState((old) => ({
-            ...old,
-            error: describeError(error),
-            pending: false,
-          }));
-      },
-    );
-  }, [load]);
+    interactive: boolean;
+  }>({ source: load, pending: true, interactive: false });
+  const start = useCallback(
+    (interactive: boolean) => {
+      const request = ++version.current;
+      setState((old) => ({
+        source: load,
+        ...(old.source === load && old.data !== undefined
+          ? { data: old.data }
+          : {}),
+        pending: true,
+        interactive:
+          interactive ||
+          (old.source === load && old.pending && old.interactive),
+      }));
+      load().then(
+        (data) => {
+          if (request === version.current)
+            setState({
+              source: load,
+              data,
+              pending: false,
+              interactive: false,
+            });
+        },
+        (error) => {
+          if (request === version.current)
+            setState((old) => ({
+              ...old,
+              error: describeError(error),
+              pending: false,
+            }));
+        },
+      );
+    },
+    [load],
+  );
+  const reload = useCallback(() => start(true), [start]);
   // biome-ignore lint/correctness/useExhaustiveDependencies: revision is an explicit external invalidation signal.
   useEffect(() => {
-    reload();
+    start(false);
     return () => {
       ++version.current;
     };
-  }, [reload, revision]);
+  }, [start, revision]);
   return {
     data: state.source === load ? state.data : undefined,
     error: state.source === load ? state.error : undefined,
     pending: state.source !== load || state.pending,
+    interactive: state.source === load && state.interactive,
     reload,
   };
 }

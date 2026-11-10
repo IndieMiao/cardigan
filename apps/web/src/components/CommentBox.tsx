@@ -16,6 +16,7 @@ import {
   type PostedComment,
 } from "../api.js";
 import { renderMarkdown } from "../markdown.js";
+import { RequestFeedback } from "./RequestFeedback.js";
 
 /**
  * The comment box (M5 plan §3.7, §4 M5.3; the write endpoints arrive with M5.2).
@@ -343,11 +344,12 @@ export function CommentBox({
         </div>
       )}
 
-      {error !== undefined && (
-        <p role="alert" className="error">
-          {error}
-        </p>
-      )}
+      <RequestFeedback
+        interactive
+        pending={submitting}
+        pendingMessage="发表中…"
+        error={error}
+      />
 
       {expanded && (
         <div className="comment-actions">
@@ -356,7 +358,7 @@ export function CommentBox({
             disabled={!canSubmit}
             onClick={() => void submit()}
           >
-            {submitting ? "发表中…" : "发表评论"}
+            发表评论
           </button>
           <span className="hint">
             以你的身份发表；正文支持 Markdown，编号由服务端识别成链接。
