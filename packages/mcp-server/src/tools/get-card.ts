@@ -1,5 +1,6 @@
 import type { CardId, CardStatus, CardView, Delivery } from "@cardigan/domain";
 import {
+  cardTemplate,
   deriveCardFields,
   deriveCardStatus,
   deriveReviewMatrix,
@@ -38,6 +39,7 @@ export const getCardTool = defineTool({
 
     const authors = store.uow.read((tx) => ({
       assignments,
+      templates: tx.card_templates?.list(identity.actor.project_id) ?? [],
       runs: tx.runs.list(identity.actor.project_id),
       employees: tx.employees?.list() ?? [],
     }));
@@ -56,9 +58,11 @@ export const getCardTool = defineTool({
 
     // Typed against CardView so the tool cannot drift from the domain's
     // derived-field types (M1.2b).
+    const template = cardTemplate(card, authors.templates);
     const derived: Pick<CardView, "waiting_on" | "next_owners" | "why"> =
       deriveCardFields({
         card,
+        ...(template === undefined ? {} : { template }),
         work_items,
         assignments,
         deliveries,

@@ -35,6 +35,7 @@ import type {
   TimelineEntryId,
   WorkItemId,
 } from "./ids.js";
+import type { CardTemplate } from "./templates.js";
 
 export type { Clock } from "./clock.js";
 // Implementations allocate within the same transaction as the entity changes.
@@ -74,6 +75,10 @@ export interface EventRepository {
   ): readonly Event[];
 }
 export interface Repositories {
+  readonly card_templates: Repository<
+    CardTemplate,
+    Pick<CardTemplate, "id" | "version">
+  >;
   readonly cards: Repository<Card, CardId>;
   readonly work_items: Repository<WorkItem, WorkItemId>;
   readonly assignments: Repository<Assignment, AssignmentId>;

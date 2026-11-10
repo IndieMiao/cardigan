@@ -69,6 +69,7 @@ export interface RoleReference {
   readonly role_version: number;
   readonly allowed_tools: readonly ToolName[];
   readonly capabilities: readonly string[];
+  readonly status?: "active" | "inactive";
 }
 // Constructed by authentication, not from command parameters.
 export type Actor =
@@ -104,16 +105,17 @@ export interface Card {
   readonly out_of_scope: readonly string[];
   readonly deadline?: Timestamp;
   readonly related_cards: readonly CardId[];
-  readonly repo: string;
-  readonly base_branch: string;
+  readonly repo?: string;
+  readonly base_branch?: string;
   readonly priority: number;
   readonly status: CardStatus;
   readonly resolution?: "done" | "superseded" | "duplicate" | "wontdo";
   /** The replacement card, distinct from other related cards. */
   readonly superseded_by?: CardId;
   readonly template: string;
+  readonly template_version?: number;
   /** Template policy fixed at creation; legacy cards default to confirm. */
-  readonly merge_policy?: "confirm" | "auto";
+  readonly merge_policy?: "none" | "confirm" | "auto";
   readonly created_by: Author;
   readonly created_at: Timestamp;
 }
@@ -349,7 +351,11 @@ interface DecisionFields {
   readonly card_id?: CardId;
   readonly raised_by: Author;
   /** Set by the control plane, never by request_decision parameters. */
-  readonly trigger?: "review_limit" | "merge_confirmation" | "worktree_cleanup";
+  readonly trigger?:
+    | "review_limit"
+    | "merge_confirmation"
+    | "worktree_cleanup"
+    | "completion_review";
   /** Control-plane cleanup target; not writable by request_decision. */
   readonly assignment_id?: AssignmentId;
   readonly category?:

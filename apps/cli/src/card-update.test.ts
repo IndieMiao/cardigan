@@ -7,6 +7,7 @@ import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { main } from "./index.js";
 import type { CliIo } from "./io.js";
+import { registerTemplateRoles } from "./template-fixtures.js";
 
 const project = "p-card-update" as ProjectId;
 let dataDir: string;
@@ -22,6 +23,12 @@ async function run(args: string[]): Promise<number> {
 }
 
 async function createCard(projectId = project): Promise<void> {
+  const setup = Store.open({ dataDir });
+  try {
+    registerTemplateRoles(setup, projectId);
+  } finally {
+    setup.close();
+  }
   expect(
     await run([
       "card",

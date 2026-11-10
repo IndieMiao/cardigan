@@ -22,6 +22,7 @@ import {
 } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { humanActor, runCommand } from "./index.js";
+import { registerTemplateRoles } from "./template-fixtures.js";
 
 const exec = promisify(execFile);
 const project = "p-acceptance" as never;
@@ -43,7 +44,7 @@ const role = (): Role => ({
   core_prompt: "Version one instructions",
   harness: "codex",
   launch_profile_ref: "fixture",
-  allowed_tools: ["whoami", "get_card"],
+  allowed_tools: ["whoami", "get_card", "submit_delivery"],
   capabilities: ["code"],
   abilities: ["vision"],
   worktree: "write",
@@ -95,6 +96,7 @@ test("L02 an explicit old role version cannot overwrite history", () => {
 });
 test("L03 invariant 12: a queued Run keeps its Assignment's role version after a registry update", () => {
   const original = add();
+  registerTemplateRoles(store, project);
   const actor = humanActor(project);
   const card = runCommand(store, {
     project_id: project,
@@ -198,7 +200,7 @@ function compile(harness: Harness) {
       harness,
       launch_profile: "fixture",
       core_prompt: corePromptFor("coder"),
-      allowed_tools: ["whoami", "get_card"],
+      allowed_tools: ["whoami", "get_card", "submit_delivery"],
       worktree: "write",
     },
     launch: parseLaunchConfig({
@@ -243,7 +245,7 @@ test.each(harnesses)(
           "--append-system-prompt-file",
           join(root, "run", "core.md"),
           "--allowedTools",
-          "mcp__card__whoami,mcp__card__get_card",
+          "mcp__card__whoami,mcp__card__get_card,mcp__card__submit_delivery",
         ]),
       );
       expect({

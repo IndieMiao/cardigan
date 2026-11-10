@@ -9,6 +9,7 @@ import { transition } from "../transitions.js";
 
 export interface CommandEntities {
   cards: E.Card;
+  card_templates: CardTemplate;
   work_items: E.WorkItem;
   assignments: E.Assignment;
   runs: E.Run;
@@ -21,12 +22,18 @@ export interface CommandEntities {
 }
 export type CommandState = {
   readonly project_id: I.ProjectId;
+  readonly card_templates?: readonly CardTemplate[];
   readonly employees?: readonly Employee[];
   readonly employee_activity?: readonly EmployeeActivity[];
   readonly roles: readonly E.RoleReference[];
   readonly events: readonly E.Event[];
   readonly timeline: readonly E.TimelineEntry[];
-} & { readonly [K in keyof CommandEntities]: readonly CommandEntities[K][] };
+} & {
+  readonly [K in Exclude<
+    keyof CommandEntities,
+    "card_templates"
+  >]: readonly CommandEntities[K][];
+};
 export type EntityChange = {
   [K in keyof CommandEntities]: {
     readonly collection: K;
@@ -67,6 +74,8 @@ type CommandName =
   | "record_merge_result"
   | "release_assignment"
   | "supersede_card"
+  | "manage_templates"
+  | "mark_card_done"
   | "request_worktree_cleanup";
 export function ensure(
   condition: unknown,
@@ -111,7 +120,11 @@ type Entry = Pick<E.TimelineEntry, "type" | "body"> &
     >
   >;
 const keyOf = (entity: CommandEntities[keyof CommandEntities]) =>
-  "id" in entity ? entity.id : `${entity.assignment_id}/${entity.card_id}`;
+  "version" in entity
+    ? `${entity.id}@${entity.version}`
+    : "id" in entity
+      ? entity.id
+      : `${entity.assignment_id}/${entity.card_id}`;
 
 // A private draft: rejection never exposes a partially applied entity/event batch.
 export class CommandDraft {
@@ -213,7 +226,7 @@ export class CommandDraft {
     collection: K,
   ): readonly CommandEntities[K][] {
     const values = new Map<string, CommandEntities[K]>(
-      this.state[collection].map(
+      (this.state[collection] ?? []).map(
         (entity) => [keyOf(entity), entity] as [string, CommandEntities[K]],
       ),
     );

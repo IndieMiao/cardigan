@@ -14,6 +14,7 @@ import type {
   AttachmentId,
   Card,
   CardId,
+  CardTemplate,
   Cursor,
   Decision,
   DecisionId,
@@ -50,6 +51,10 @@ export type ReadEventRepository = Pick<EventRepository, "listAfter">;
 
 /** Everything `uow.read` hands to its callback. */
 export interface ReadRepositories extends ReadGlobalRepositories {
+  readonly card_templates: ReadRepository<
+    CardTemplate,
+    Pick<CardTemplate, "id" | "version">
+  >;
   readonly cards: ReadRepository<Card, CardId>;
   readonly work_items: ReadRepository<WorkItem, WorkItemId>;
   readonly assignments: ReadRepository<Assignment, AssignmentId>;
@@ -286,6 +291,7 @@ export function createReadRepositories(db: DatabaseSync): ReadRepositories {
 
 function create(db: DatabaseSync, mode: "read" | "write"): Repositories {
   return {
+    card_templates: templateRepository(db, mode),
     cards: jsonRepository<Card, CardId>(db, cardSpec, mode),
     work_items: jsonRepository<WorkItem, WorkItemId>(db, workItemSpec, mode),
     assignments: jsonRepository<Assignment, AssignmentId>(
@@ -323,5 +329,44 @@ function create(db: DatabaseSync, mode: "read" | "write"): Repositories {
       mode,
     ),
     events: eventRepository(db, mode),
+  };
+}
+
+function templateRepository(
+  db: DatabaseSync,
+  mode: "read" | "write",
+): Repository<CardTemplate, Pick<CardTemplate, "id" | "version">> {
+  // Historical migration fixtures may open a pre-template schema.
+  if (
+    !db
+      .prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'card_templates'",
+      )
+      .get()
+  )
+    return {
+      get: () => undefined,
+      list: () => [],
+      put: () => {
+        throw new Error("Card template migration is required");
+      },
+    };
+  const repository = jsonRepository<
+    CardTemplate,
+    { template_id: string; version: number }
+  >(
+    db,
+    {
+      table: "card_templates",
+      key: ["template_id", "version"],
+      columns: ["template_id", "version"],
+      values: (t) => [t.id, t.version],
+    },
+    mode,
+  );
+  return {
+    ...repository,
+    get: (project, key) =>
+      repository.get(project, { template_id: key.id, version: key.version }),
   };
 }

@@ -178,10 +178,19 @@ export const transitionTables: {
     needs_attention: {},
   },
   card: {
-    backlog: { set_todo: "todo", cancel: "cancelled" },
-    todo: { set_backlog: "backlog", cancel: "cancelled" },
-    in_progress: { completion_submitted: "review", cancel: "cancelled" },
+    backlog: { human_mark_done: "done", set_todo: "todo", cancel: "cancelled" },
+    todo: {
+      human_mark_done: "done",
+      set_backlog: "backlog",
+      cancel: "cancelled",
+    },
+    in_progress: {
+      human_mark_done: "done",
+      completion_submitted: "review",
+      cancel: "cancelled",
+    },
     review: {
+      human_mark_done: "done",
       completion_submitted: "review",
       completion_review_passed: "awaiting_merge",
       completion_review_rejected: "in_progress",

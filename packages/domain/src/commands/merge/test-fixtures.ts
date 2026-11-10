@@ -24,7 +24,7 @@ import { apply, human, ports, role, value } from "../test-fixtures.js";
 export function mergeFixture(policy: "confirm" | "auto" = "confirm") {
   const io = {
     ...ports(),
-    templates: [{ ...developmentCardTemplate, merge_policy: policy }],
+    templates: [{ ...developmentCardTemplate, merge: policy }],
   };
   let state: CommandState = {
     project_id: human.project_id,
