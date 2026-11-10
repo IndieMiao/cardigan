@@ -641,7 +641,10 @@ export function submitReview(
         review_id: value.id,
         delivery_id: target.id,
         verdict: value.verdict,
-        rework_allowed: value.blocking && !limitReached,
+        recheck_required: value.recheck_required,
+        issues: value.issues.map((issue) => ({ ...issue })),
+        rework_allowed:
+          (value.blocking || value.verdict === "conditional") && !limitReached,
       },
       {
         type: "review",

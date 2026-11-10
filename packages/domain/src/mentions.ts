@@ -29,6 +29,13 @@ export function commentMentions(
     )
       continue;
     const rest = source.slice(index + 1).trimStart();
+    // Explicit targets take precedence over employee names and role names.
+    const target = /^[aw]-\d+(?![\p{L}\p{N}\p{M}_-])/u.exec(rest)?.[0];
+    if (target !== undefined) {
+      found.push(`@${target.toUpperCase()}`);
+      index += source.slice(index + 1).length - rest.length + target.length;
+      continue;
+    }
     const name = names.find(
       ({ key }) =>
         rest.startsWith(key) &&
