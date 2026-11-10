@@ -65,7 +65,10 @@ function exclusive(
 ) {
   ensure(
     !d.list("runs").some((r) => {
-      if (r.id === run_id || (!unfinished(r) && !r.inactivity_stop))
+      if (
+        r.id === run_id ||
+        (!unfinished(r) && !r.dispatch_stop && !r.inactivity_stop)
+      )
         return false;
       const owner = d.get("assignments", r.assignment_id);
       return (
@@ -388,26 +391,39 @@ export function abortDispatch(
   return command(state, actor, "abort_dispatch", ports, (d) => {
     text(p.reason, "reason");
     const run = d.get("runs", p.run_id);
-    if (run.status === "cancelled") return run;
-    const next: Run = {
-      ...run,
-      status: unwrap(transition("run", run.status, "cancel")),
-      outcome: "failed",
-      summary: p.reason,
-      finished_at: d.now,
-    };
-    const assignment = d.get("assignments", run.assignment_id);
-    if (assignment.runtime_state === "running")
-      d.put("assignments", {
-        ...assignment,
-        runtime_state: unwrap(transition("runtime", "running", "run_finished")),
-        runtime_ref: null,
-      });
-    d.put("runs", next);
-    d.emit("run_dispatch_aborted", cardId(d, assignment), {
-      run_id: run.id,
-      reason: p.reason,
-    });
-    return next;
+    return cancelRunDispatch(d, run, p.reason);
   });
+}
+
+/** Shared cancellation effect for explicit abort and confirmed automatic stops. */
+export function cancelRunDispatch(
+  d: CommandDraft,
+  run: Run,
+  reason: string,
+): Run {
+  if (run.status === "cancelled") return run;
+  const next: Run = {
+    ...run,
+    status: unwrap(transition("run", run.status, "cancel")),
+    outcome: "failed",
+    summary: reason,
+    finished_at: d.now,
+  };
+  const assignment = d.get("assignments", run.assignment_id);
+  if (assignment.runtime_state === "running")
+    d.put("assignments", {
+      ...assignment,
+      runtime_state: unwrap(transition("runtime", "running", "run_finished")),
+      // A concurrent host abort cannot erase an automatic stop's exit target.
+      runtime_ref:
+        run.dispatch_stop || run.inactivity_stop
+          ? assignment.runtime_ref
+          : null,
+    });
+  d.put("runs", next);
+  d.emit("run_dispatch_aborted", cardId(d, assignment), {
+    run_id: run.id,
+    reason,
+  });
+  return next;
 }

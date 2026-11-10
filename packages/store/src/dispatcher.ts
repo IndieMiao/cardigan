@@ -49,12 +49,13 @@ function beginAttempt(
   db: DatabaseSync,
   input: BeginBellAttempt,
   launch: boolean,
+  retry = false,
 ): void {
   requireTransaction(db);
   if (
     !input.id ||
     timestamp(input.lease_until) <= timestamp(input.started_at) ||
-    (!launch && input.notification_ids.length === 0) ||
+    (!launch && !retry && input.notification_ids.length === 0) ||
     input.notification_ids.length > 1000 ||
     new Set(input.notification_ids).size !== input.notification_ids.length
   )
@@ -82,7 +83,9 @@ function beginAttempt(
     const notification = read.get(input.project_id, id);
     if (
       !notification ||
-      !["pending", "belled"].includes(String(notification.status))
+      !["pending", "belled", "delivery_failed"].includes(
+        String(notification.status),
+      )
     )
       throw new Error("Bell notification is missing or no longer deliverable");
     const recipient = (JSON.parse(String(notification.doc)) as Notification)
@@ -126,9 +129,24 @@ export function unfinishedBellAttempts(
   db: DatabaseSync,
   project: ProjectId,
 ): BellAttempt[] {
+  return readAttempts(db, project, true);
+}
+
+/** Delivery history also covers explicit CLI starts, which have no notification. */
+export function listBellAttempts(
+  db: DatabaseSync,
+  project: ProjectId,
+): BellAttempt[] {
+  return readAttempts(db, project, false);
+}
+function readAttempts(
+  db: DatabaseSync,
+  project: ProjectId,
+  unfinished: boolean,
+): BellAttempt[] {
   return db
     .prepare(
-      "SELECT * FROM bell_attempts WHERE project_id = ? AND finished_at IS NULL ORDER BY started_at, id",
+      `SELECT * FROM bell_attempts WHERE project_id = ? ${unfinished ? "AND finished_at IS NULL" : ""} ORDER BY started_at, rowid`,
     )
     .all(project)
     .map((row) => ({
@@ -139,7 +157,20 @@ export function unfinishedBellAttempts(
       notification_ids: JSON.parse(String(row.notification_ids)) as string[],
       started_at: String(row.started_at),
       lease_until: String(row.lease_until),
-      finished_at: null,
-      outcome: null,
+      finished_at: row.finished_at === null ? null : String(row.finished_at),
+      outcome: row.outcome as BellAttempt["outcome"],
     }));
+}
+
+/** Retry an existing dispatched Run, including a CLI start without inbox rows. */
+export function beginDispatchRetry(
+  db: DatabaseSync,
+  input: BeginBellAttempt,
+): void {
+  const run = db
+    .prepare("SELECT doc FROM runs WHERE project_id = ? AND id = ?")
+    .get(input.project_id, input.run_id);
+  if (!run || (JSON.parse(String(run.doc)) as Run).status !== "dispatched")
+    throw new Error("Only an unstarted dispatched Run can retry delivery");
+  beginAttempt(db, input, false, true);
 }

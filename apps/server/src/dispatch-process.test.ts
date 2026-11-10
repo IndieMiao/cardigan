@@ -68,7 +68,7 @@ test("M3.4 real SIGKILL during wake: fresh processes respect the lease, recover 
       phase: "recovered",
       calls: 0,
       intents: 0,
-      failures: 1,
+      failures: 0,
       runs,
     });
     expect(
@@ -77,7 +77,7 @@ test("M3.4 real SIGKILL during wake: fresh processes respect the lease, recover 
     ).toBe("delivery_failed");
     expect(
       recovered.notes.filter((n) => n.recipient === "pm_ops"),
-    ).toHaveLength(1);
+    ).toHaveLength(0);
 
     const again = start("recover");
     expect(await again.reply).toEqual(recovered);

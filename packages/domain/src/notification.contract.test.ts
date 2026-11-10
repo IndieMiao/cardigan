@@ -21,6 +21,12 @@ const allowed: ReadonlyArray<[from: string, event: string, to: string]> = [
   // A failed wake may still have landed (§6.8), so an ACK is accepted.
   ["delivery_failed", "ack", "acked"],
   ["delivery_failed", "needs_attention", "needs_attention"],
+  ["delivery_failed", "retry", "pending"],
+  ["delivery_failed", "bell", "belled"],
+  ["delivery_failed", "deliver_failed", "delivery_failed"],
+  ...["pending", "belled", "delivery_failed", "needs_attention"].map(
+    (from): [string, string, string] => [from, "resolve", "resolved"],
+  ),
 ];
 
 test("every allowed notification transition is in the shared table", () => {
@@ -33,10 +39,11 @@ test("every allowed notification transition is in the shared table", () => {
   }
 });
 
-test("terminal states are exactly acked and needs_attention", () => {
+test("answered, escalated and resolved states never ring again", () => {
   expect(states.notification.filter(isTerminalNotification)).toEqual([
     "acked",
     "needs_attention",
+    "resolved",
   ]);
   // Escalation is what the dispatcher and PM Ops watch for.
   expect(states.notification.filter(isEscalatedNotification)).toEqual([
@@ -61,10 +68,11 @@ test("an escalated notification never rings again", () => {
       false,
     );
   }
-  // delivery_failed is not terminal, but it cannot go back to pending: the
-  // dispatcher must not silently retry a failed wake (§3.3 / §6.4).
-  expect(nextNotificationStatus("delivery_failed", "retry").ok).toBe(false);
-  expect(nextNotificationStatus("delivery_failed", "bell").ok).toBe(false);
+  expect(nextNotificationStatus("delivery_failed", "retry")).toEqual({
+    ok: true,
+    value: "pending",
+  });
+  expect(nextNotificationStatus("resolved", "retry").ok).toBe(false);
 });
 
 test("a pending notification cannot be acknowledged only after a bell was tried out of order", () => {
@@ -79,8 +87,6 @@ test("the notification table has a row for every state", () => {
   for (const status of states.notification) {
     // Every state is reachable or terminal; none is silently missing.
     const row = transition("notification", status, "ack");
-    expect(row.ok || status === "acked" || status === "needs_attention").toBe(
-      true,
-    );
+    expect(row.ok || isTerminalNotification(status)).toBe(true);
   }
 });

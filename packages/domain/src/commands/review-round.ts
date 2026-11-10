@@ -25,7 +25,24 @@ export function conflictRepairEvent(
       ? eventId
       : undefined;
   }
-  const trigger = d.state.events.find((e) => e.id === run.trigger_event_id);
+  let trigger = d.state.events.find((e) => e.id === run.trigger_event_id);
+  // A dispatch recovery is the same unstarted fix, with a new queue identity.
+  const recovery = trigger?.payload as
+    | {
+        assignment_id?: string;
+        replacement_run_id?: string;
+        original_trigger_event_id?: string;
+      }
+    | undefined;
+  if (
+    trigger?.type === "run_dispatch_recovered" &&
+    trigger.actor.kind === "system" &&
+    recovery?.assignment_id === run.assignment_id &&
+    recovery.replacement_run_id === run.id
+  )
+    trigger = d.state.events.find(
+      (e) => e.id === recovery.original_trigger_event_id,
+    );
   const payload = trigger?.payload as { work_item_id?: string } | undefined;
   return run.kind === "fix" &&
     trigger?.type === "merge_conflicted" &&

@@ -337,7 +337,11 @@ async function launch(
     host.store.uow.read((tx) =>
       tx.runs
         .list(project)
-        .some((r) => r.assignment_id === assignment.id && r.inactivity_stop),
+        .some(
+          (r) =>
+            r.assignment_id === assignment.id &&
+            (r.inactivity_stop || r.dispatch_stop),
+        ),
     )
   )
     throw new HostLaunchError(

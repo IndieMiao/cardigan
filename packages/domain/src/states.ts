@@ -72,6 +72,7 @@ export const states = {
     "acked",
     "delivery_failed",
     "needs_attention",
+    "resolved",
   ],
 } as const;
 export type CardStatus = (typeof states.card)[number];

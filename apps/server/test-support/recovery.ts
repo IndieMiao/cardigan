@@ -1,5 +1,10 @@
 import type { Runtime } from "@cardigan/domain";
-import { acknowledgeRun, finishRun, postComment } from "@cardigan/domain";
+import {
+  acknowledgeRun,
+  dispatchRun,
+  finishRun,
+  postComment,
+} from "@cardigan/domain";
 import {
   getRoleVersion,
   PROJECT_EVENT_STREAM,
@@ -13,14 +18,22 @@ export function recoveryFixture() {
   const f = dispatchFixture(),
     target = f.create();
   f.session(target.assignment);
+  const stopped = new Set<string>();
   const runtime: Runtime = {
-    status: vi.fn(async () => ({
+    status: vi.fn(async (ref) => ({
       ok: true,
-      value: { process: "alive", agent: "idle", observed_seq: 1 },
+      value: {
+        process: stopped.has(ref.terminal_ref) ? "exited" : "alive",
+        agent: "idle",
+        observed_seq: 1,
+      },
     })),
     wake: vi.fn(async () => ({ ok: true, value: { sent: true } })),
     provision: vi.fn(),
-    release: vi.fn(),
+    release: vi.fn(async (ref) => {
+      stopped.add(ref.terminal_ref);
+      return { ok: true, value: undefined };
+    }),
     interrupt: vi.fn(),
     resume_or_replace: vi.fn(),
     human_entry: vi.fn(),
@@ -30,7 +43,13 @@ export function recoveryFixture() {
     runtime,
     clock: f.clock,
     snapshot: async () => ({ model: "fixture", agent_cli_version: "fixture" }),
-    startRun: vi.fn(),
+    startRun: vi.fn(async ({ run, assignment }) => {
+      const ref = f.refFor(assignment);
+      stopped.delete(ref.terminal_ref);
+      f.apply((s, a, p) =>
+        dispatchRun(s, a, { run_id: run.id, runtime_ref: ref }, p),
+      );
+    }),
   };
   const skipEvents = () => {
     for (const card of [undefined, ...f.state().cards.map((c) => c.id)])
