@@ -6,7 +6,6 @@ import {
 } from "@cardigan/domain";
 import { expect, test } from "vitest";
 import { m5Cross, TEST_PASSWORD } from "../../test-support/m5-cross.js";
-import { confirmWorkbenchDecision } from "../../test-support/workbench-decision.js";
 
 test("Workbench answers and grants atomically, enforces fixed risks and filters human/PM history", async () => {
   const f = await m5Cross();
@@ -206,54 +205,6 @@ test("unclaimed completed decisions stay visible in Workbench and CLI without al
     );
     expect((await f.call(f.projectPath("/needs-you"))).json).toMatchObject({
       decisions: [],
-    });
-  } finally {
-    await f.close();
-  }
-});
-
-test("cleanup fixture uses an authenticated Workbench confirmation for protected data deletion", async () => {
-  const f = await m5Cross();
-  try {
-    const q = f.command((s, a, p) =>
-      requestDecision(
-        s,
-        a,
-        {
-          card_id: f.card.id,
-          category: "data_deletion",
-          kind: "choose",
-          question: "清理工作目录",
-          context: "未保存的修改需要人确认",
-          options: [
-            {
-              key: "force_clean",
-              description: "备份并清理",
-              impact: "保存补丁后删除目录",
-            },
-          ],
-          recommended: "force_clean",
-          decider: "human",
-          blocking: false,
-          affected_cards: [f.card.id],
-          affected_work_items: [],
-        },
-        p,
-      ),
-    );
-    await confirmWorkbenchDecision({
-      store: f.store(),
-      dataDir: f.dataDir,
-      project_id: f.project.project_id,
-      decision_id: q.id,
-      option: "force_clean",
-    });
-    expect(
-      f.state().decisions.find((d) => d.id === q.id)?.resolution,
-    ).toMatchObject({
-      option: "force_clean",
-      resolved_by: "human",
-      via: "needs_you",
     });
   } finally {
     await f.close();

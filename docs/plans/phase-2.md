@@ -120,7 +120,7 @@ V9、V10 是 Phase 3"PM 按任务创建、修改流程"的前提：先把角色�
 | 任务 | 内容 | 负责 |
 |---|---|---|
 | C-D11 常驻授权代拍板（C-37，提前） | 复用 C-36：流程 general、功能细节 feature_detail 默认由 PM Ops 先审；scope_change 默认交人，可在拍板时或设置页授权。代拍写理由、delegated、proxy_authority；无可处理的后台／授权关闭时交人。合并确认排除，C-29 逻辑不变。设置页与 preference CLI 管理授权；HumanAction 先分拣，主机操作标记及步骤改写；Workbench 查询拍板记录并按决策人、类别、卡片、时间筛选，无撤销。拍板解决后通知发起人落实，首提示含选项和影响，30 分钟无落实信号提醒 PM Ops | Codex |
-| C-D12 高风险只在 Workbench 确认（随 C-37） | spending/account/permission/data_deletion 四类永不授权给 PM，只接受 Workbench 的 human 确认；Office record_decision 与 CLI 均不得代结。未经类别授权的需求范围变化同样要求 Workbench 确认 | Cardigan |
+| C-D12 高风险只能由人确认（随 C-37，2026-11-10 更新） | spending/account/permission/data_deletion 四类永不授权给 PM；只接受 human 身份，Workbench 与本机 CLI 同等有效，PM Office/PM Ops/其他 Agent 不得代拍或转录。未经类别授权的需求范围变化仍要求 Workbench 确认 | Cardigan |
 | C-due 拍板截止时间（C5） | `request_decision` 加 `due`；Needs You 按截止时间排序和提示 | Cardigan |
 | C-remind 人工动作提醒（C4） | HumanAction 到期前提醒一次，到点没开始再提醒一次 | Cardigan |
 | C-S22 拍板之前不许开工 | 允许对尚未开工（`todo`、`ready`）的工作项发起阻塞型拍板，拍板解决前不派 Run、不能开始；开发方案 §4.4、§4.5 补对应迁移和不变量 | Codex |

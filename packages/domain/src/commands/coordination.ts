@@ -410,14 +410,12 @@ export function recordDecision(
       "validation_failed",
       "Option is not part of this decision",
     );
+    // D12 permits human CLI confirmation; scope changes retain the browser-only rule.
     ensure(
-      !(
-        highRiskCategories.includes(decision.category ?? "general") ||
-        decision.category === "scope_change"
-      ) ||
+      decision.category !== "scope_change" ||
         (actor.kind === "human" && ports.human_confirmation === "workbench"),
       "unauthorized",
-      "此类拍板只能由人在 Workbench 确认",
+      "未授权的需求范围变化只能由人在 Workbench 确认",
     );
     if (p.delegate_future) grantDecisionCategory(d, decision);
     return resolveDecisionDraft(d, decision, p, false);

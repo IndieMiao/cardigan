@@ -1688,7 +1688,7 @@ test("§4.4 recordDecision: PM Ops cannot record a merge confirmation or a clean
           rationale: "fixture",
           raw_quote: "fixture keep",
         },
-        { ...p, human_confirmation: "workbench" },
+        p,
       ),
     human,
   );

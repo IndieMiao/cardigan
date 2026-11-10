@@ -251,7 +251,7 @@ function DelegationSetting({
         />
         {label}：
         {fixed
-          ? "固定由人在 Workbench 确认"
+          ? "固定由人确认（Workbench 或本机 CLI）"
           : enabled
             ? "由 PM 代拍"
             : "由人拍板"}

@@ -205,7 +205,11 @@ async function pmFixture() {
         allowed_tools: toolNames.filter(
           (tool) =>
             role_id === "pm" ||
-            (tool !== "record_decision" &&
+            (![
+              "record_decision",
+              "resolve_delegated_decision",
+              "triage_human_action",
+            ].includes(tool) &&
               tool !==
                 (role_id === "coder" ? "submit_review" : "submit_delivery")),
         ),
@@ -702,6 +706,8 @@ test("P06 §7.2/§6.7: Ops escalations wait while busy, then merge into one deli
 
 test("P07 §6.4/§7.3: decisions and human actions appear in needs-you, Office gets only a brief hint", async () => {
   const s = await routingSetup();
+  // This scenario explicitly leaves process choices to the human.
+  await s.cli("preference", "set", "decision-delegation", "general", "off");
   const question = "MAJOR-RISK: stop release before irreversible data loss";
   const decision = await s.call(s.coder, "request_decision", {
     card_id: s.card.id,
@@ -731,6 +737,13 @@ test("P07 §6.4/§7.3: decisions and human actions appear in needs-you, Office g
     why_human: "Human credentials needed",
     expected_return: "Result",
     blocked_work_items: [],
+  });
+  await s.call(s.ops, "triage_human_action", {
+    human_action_id: action.id,
+    disposition: "human",
+    rationale: "The human must inspect the switch",
+    instructions: "Inspect the release switch",
+    expected_return: "Result",
   });
   await s.routed();
   const needs = await s.cli("needs-you");

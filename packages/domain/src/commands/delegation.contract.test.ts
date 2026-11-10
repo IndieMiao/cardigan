@@ -200,7 +200,7 @@ test.each(decisionCategories)(
           },
           f.io,
         ).ok,
-      ).toBe(false);
+      ).toBe(category !== "scope_change");
       expect(f.commit(f.humanResolve(q.id)).status).toBe("resolved");
     }
   },
@@ -771,3 +771,41 @@ test("merged HumanAction query hides untriaged requests and retains C-41's uncla
   expect(needs).toMatchObject([{ id: action.id, completion_notice: "已完成" }]);
   expect(needs.some((h) => h.id === pending.id)).toBe(false);
 });
+
+test.each(["spending", "account", "permission", "data_deletion"] as const)(
+  "D12: the local human can confirm %s without a browser marker; PM and Agent identities cannot",
+  (category) => {
+    const f = setup();
+    const q = f.request(category);
+    const answer = {
+      decision_id: q.id,
+      option: "continue",
+      rationale: "人在本机 CLI 确认",
+      raw_quote: "确认继续",
+    };
+    for (const identity of [
+      f.pm,
+      f.front,
+      actor(),
+      { kind: "system", project_id: f.state.project_id } as const,
+    ]) {
+      expect(recordDecision(f.state, identity, answer, f.io).ok).toBe(false);
+      expect(
+        recordDecision(f.state, identity, answer, {
+          ...f.io,
+          human_confirmation: "workbench",
+        }).ok,
+      ).toBe(false);
+      expect(resolveDelegatedDecision(f.state, identity, answer, f.io).ok).toBe(
+        false,
+      );
+    }
+    const result = f.commit(recordDecision(f.state, human, answer, f.io));
+    expect(result).toMatchObject({
+      status: "resolved",
+      resolution: { resolved_by: "human", raw_quote: answer.raw_quote },
+    });
+    expect(result.resolution?.via).not.toBe("delegated");
+    expect(result.resolution?.proxy_authority).toBeUndefined();
+  },
+);

@@ -703,27 +703,42 @@ test("category authorization uses PM Ops tools, rejects Office/high-risk bypasse
   expect(
     await ok(ops, "resolve_delegated_decision", p, "delegation-answer"),
   ).toEqual(resolved);
-  const risk = await ok<Decision>(office, "request_decision", {
-    ...question,
-    category: "permission",
-  });
-  expect(
-    (
-      await raw(ops, "resolve_delegated_decision", {
-        ...p,
-        decision_id: risk.id,
-      })
-    ).isError,
-  ).toBe(true);
-  expect(
-    (
-      await raw(office, "record_decision", {
-        ...p,
-        decision_id: risk.id,
-        raw_quote: "同意",
-      })
-    ).isError,
-  ).toBe(true);
+  const agent = await coder();
+  for (const category of [
+    "spending",
+    "account",
+    "permission",
+    "data_deletion",
+  ]) {
+    const risk = await ok<Decision>(office, "request_decision", {
+      ...question,
+      category,
+    });
+    for (const client of [ops, office, agent]) {
+      expect(
+        (
+          await raw(client, "resolve_delegated_decision", {
+            ...p,
+            decision_id: risk.id,
+          })
+        ).isError,
+      ).toBe(true);
+      expect(
+        (
+          await raw(client, "record_decision", {
+            ...p,
+            decision_id: risk.id,
+            raw_quote: "同意",
+            actor: { kind: "human" },
+            human_confirmation: "workbench",
+          })
+        ).isError,
+      ).toBe(true);
+    }
+    expect(
+      store.uow.read((tx) => tx.decisions.get(project, risk.id))?.status,
+    ).toBe("open");
+  }
   const action = await ok<HumanAction>(office, "request_human_action", {
     card_id: card.id,
     instructions: "同步代码",

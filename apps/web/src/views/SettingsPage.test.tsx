@@ -136,7 +136,7 @@ test("authorization exposes defaults, retries safely, and fixes high-risk catego
     expect(
       (
         screen.getByRole("checkbox", {
-          name: `${category}：固定由人在 Workbench 确认`,
+          name: `${category}：固定由人确认（Workbench 或本机 CLI）`,
         }) as HTMLInputElement
       ).disabled,
     ).toBe(true);

@@ -307,7 +307,7 @@ test.each(["keep", "force_clean"])(
         f.state,
         human,
         { decision_id: q.id, option, rationale: "Reviewed", raw_quote: option },
-        { ...f.io, human_confirmation: "workbench" },
+        f.io,
       ),
     );
     expect(

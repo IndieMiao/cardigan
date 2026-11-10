@@ -128,3 +128,12 @@ test("C-37 PM instructions explain authorization limits, action triage and imple
   ])
     expect(prompt).toContain(rule);
 });
+
+test("D12 allows a human at Workbench or local CLI, never PM or Agent proxy confirmation", () => {
+  expect(corePromptFor("pm")).toContain(
+    "四类只能由人确认（Workbench 或本机 CLI）",
+  );
+  expect(corePromptFor("pm")).toContain(
+    "PM Office、PM Ops 和其他 Agent 不能代拍或转录",
+  );
+});

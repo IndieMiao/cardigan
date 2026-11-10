@@ -46,7 +46,7 @@ export type EntityChange = {
   };
 }[keyof CommandEntities];
 export interface CommandPorts {
-  /** Only the authenticated Workbench adapter may supply this confirmation channel. */
+  /** Workbench confirmation for ungranted scope changes. D12 high risks are gated by the actor. */
   readonly human_confirmation?: "workbench";
   readonly clock: Clock;
   readonly ids: IdAllocator;

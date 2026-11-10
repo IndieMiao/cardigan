@@ -64,7 +64,7 @@ export function setProjectPreferences(
       ensure(
         !highRiskCategories.includes(category as DecisionCategory),
         "unauthorized",
-        "高风险类别固定由人在 Workbench 确认",
+        "高风险类别固定由人确认（Workbench 或本机 CLI）",
       );
       delegation[category as DecisionCategory] = enabled;
     }
