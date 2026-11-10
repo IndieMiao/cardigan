@@ -1,6 +1,7 @@
 import { expect, test } from "vitest";
 import {
   assignment,
+  card,
   decision,
   event,
   humanAction,
@@ -163,4 +164,42 @@ test("PM-held merge confirmations go to PM Ops and wake it when the check finish
   // Human-held or already answered confirmations do not wake PM Ops.
   expect(finished([{ ...q, decider: "human" }])).toEqual([]);
   expect(finished([{ ...q, status: "resolved" }])).toEqual([]);
+});
+test("a failed check on a confirmed merge wakes PM Ops unless the card is human-only", () => {
+  const q = decision({
+    decider: "human",
+    trigger: "merge_confirmation",
+    kind: "approve",
+    status: "resolved",
+    target: { delivery_id: "D-9" },
+    resolution: { option: "merge" },
+    affected_work_items: [],
+  });
+  const finished = (status: string, decisions = [q], completion_id = "D-9") =>
+    routeEvent({
+      event: event("merge_check_finished", { status, completion_id }),
+      snapshot: snapshot({
+        cards: [card({ source: { kind: "human" } } as never)],
+        decisions,
+      }),
+    }).notifications;
+  for (const status of ["failed", "timed_out"])
+    expect(finished(status)).toMatchObject([
+      {
+        recipient: { kind: "pm_ops" },
+        rule: "6.4/merge check finished",
+        summary: expect.stringContaining("退回修改或重新检查"),
+      },
+    ]);
+  expect(finished("passed")).toEqual([]);
+  expect(finished("failed", [q], "D-1")).toEqual([]);
+  expect(finished("failed", [{ ...q, human_required_reason: "交人" }])).toEqual(
+    [],
+  );
+  const sensitive = decision({
+    id: "q(2)",
+    category: "spending",
+    status: "resolved",
+  });
+  expect(finished("failed", [q, sensitive])).toEqual([]);
 });

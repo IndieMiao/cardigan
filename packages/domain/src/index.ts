@@ -12,6 +12,7 @@ export type {
   TokenRequest,
 } from "./commands/core.js";
 export * from "./commands/decision-followup.js";
+export { mergeRequiresHuman } from "./commands/delegation.js";
 export * from "./commands/delivery.js";
 export * from "./commands/employee.js";
 export * from "./commands/launch.js";
@@ -27,7 +28,10 @@ export {
   recheckMerge,
   recordMergeCheck,
 } from "./commands/merge-check.js";
-export { pmMergeBlockers } from "./commands/merge-delegation.js";
+export {
+  pmFailedMergeCheck,
+  pmMergeBlockers,
+} from "./commands/merge-delegation.js";
 export {
   beginMergePush,
   type MergePushAttempt,

@@ -1,7 +1,8 @@
 import type { Actor, Decision, Event, MergeCheckView } from "../entities.js";
-import type { CardId, DeliveryId } from "../ids.js";
+import type { CardId, DecisionId, DeliveryId } from "../ids.js";
 import {
   attempt,
+  type CommandDraft,
   type CommandPorts,
   type CommandState,
   command,
@@ -10,15 +11,13 @@ import {
 } from "./core.js";
 import { mergeContext, prepareMergePlan } from "./merge.js";
 
-/** Only the current failed completion can withdraw an existing merge approval. */
-export function failedConfirmedMergeCheck(
+/** The latest check of the confirmation's current completion, when it failed or timed out. */
+export function failedCurrentMergeCheck(
   state: CommandState,
   decision: Decision,
 ): MergeCheckView | undefined {
   if (
     decision.trigger !== "merge_confirmation" ||
-    decision.status !== "resolved" ||
-    decision.resolution?.option !== "merge" ||
     !decision.card_id ||
     decision.kind !== "approve" ||
     !("delivery_id" in decision.target)
@@ -35,6 +34,16 @@ export function failedConfirmedMergeCheck(
   );
   return check && ["failed", "timed_out"].includes(check.status)
     ? check
+    : undefined;
+}
+/** Only the current failed completion can withdraw an existing merge approval. */
+export function failedConfirmedMergeCheck(
+  state: CommandState,
+  decision: Decision,
+): MergeCheckView | undefined {
+  return decision.status === "resolved" &&
+    decision.resolution?.option === "merge"
+    ? failedCurrentMergeCheck(state, decision)
     : undefined;
 }
 
@@ -285,30 +294,60 @@ export function recheckMerge(
       "illegal_transition",
       "Merge gate is not enabled",
     );
-    const plan = unwrap(prepareMergePlan(state, p.card_id));
-    const latest = latestMergeCheck(
-      state.events,
-      p.card_id,
-      plan.completion_id,
-    );
-    ensure(
-      latest && ["failed", "timed_out"].includes(latest.status),
-      "illegal_transition",
-      "Only a failed or timed-out current completion can be rechecked",
-    );
-    const value: MergeCheckView = {
-      ...latest,
-      status: "queued",
-      checks: [],
-      recheck_requested: true,
-      updated_at: d.now,
-    };
-    d.emit(
-      "merge_check_requeued",
-      p.card_id,
-      { ...value, checks: [] },
-      { type: "status_change", body: "已请求重新检查合并候选" },
-    );
-    return value;
+    return requeueMergeCheck(d, p.card_id);
   });
+}
+/**
+ * Queue the current completion's failed or timed-out candidate again. Shared
+ * by the human `recheck_merge` and PM Ops (`resolve_delegated_decision`
+ * option `recheck`, §7.4); `delegated` records PM's reason and notice.
+ */
+export function requeueMergeCheck(
+  d: CommandDraft,
+  card_id: CardId,
+  delegated?: {
+    readonly decision_id: DecisionId;
+    readonly rationale: string;
+    readonly notice: string;
+    readonly proxy_authority: string;
+  },
+) {
+  const plan = unwrap(prepareMergePlan(d.state, card_id));
+  const latest = latestMergeCheck(d.state.events, card_id, plan.completion_id);
+  ensure(
+    latest && ["failed", "timed_out"].includes(latest.status),
+    "illegal_transition",
+    "Only a failed or timed-out current completion can be rechecked",
+  );
+  const value: MergeCheckView = {
+    ...latest,
+    status: "queued",
+    checks: [],
+    recheck_requested: true,
+    updated_at: d.now,
+  };
+  d.emit(
+    "merge_check_requeued",
+    card_id,
+    {
+      ...value,
+      checks: [],
+      ...(delegated
+        ? {
+            via: "delegated",
+            decision_id: delegated.decision_id,
+            rationale: delegated.rationale,
+            notice: delegated.notice,
+            proxy_authority: delegated.proxy_authority,
+          }
+        : {}),
+    },
+    {
+      type: "status_change",
+      body: delegated
+        ? `项目经理已请求重新检查合并候选：${delegated.rationale}`
+        : "已请求重新检查合并候选",
+    },
+  );
+  return value;
 }

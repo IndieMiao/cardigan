@@ -22,7 +22,11 @@ import {
   mergeDelegationAuthority,
   mergeRequiresHuman,
 } from "./delegation.js";
-import { pmMergeBlockers } from "./merge-delegation.js";
+import {
+  pmFailedMergeCheck,
+  pmMergeBlockers,
+  pmMergeCheckFailureAuthority,
+} from "./merge-delegation.js";
 import { resolveReviewLimit } from "./review-limit-resolution.js";
 
 export { extractReferences } from "../references.js";
@@ -40,7 +44,7 @@ import {
 import { endRun } from "./end-run.js";
 import { resolveHumanCompletionReview } from "./human-completion.js";
 import { requestMergeChanges } from "./merge.js";
-import { failedConfirmedMergeCheck } from "./merge-check.js";
+import { failedConfirmedMergeCheck, requeueMergeCheck } from "./merge-check.js";
 import { queueResumedRun, resumeWork } from "./resumption.js";
 import { recordDecisionResolution } from "./review-limit-resolution.js";
 import { activeWork } from "./workflow.js";
@@ -451,21 +455,36 @@ export function recordDecision(
         "forbidden_tool",
         "只有人可以退回已确认的合并",
       );
-      ensure(
-        failedConfirmedMergeCheck(state, decision),
-        "illegal_transition",
-        "已确认的合并只有在当前完成申请的最新检查失败或超时时才能退回修改；检查通过、排队或运行中均不能退回。",
-      );
-      requestMergeChanges(d, decision, p.rationale, p.raw_quote);
-      const superseded: Decision = {
-        ...decision,
-        status: unwrap(transition("decision", decision.status, "supersede")),
-      };
-      d.put("decisions", superseded);
-      return superseded;
+      return returnConfirmedMerge(d, decision, p.rationale, p.raw_quote);
     }
     return resolveDecisionDraft(d, decision, p, false);
   });
+}
+/**
+ * Withdraw a confirmed merge whose current check failed or timed out (P2a-1
+ * §2.6). The human (record_decision) and PM Ops (resolve_delegated_decision)
+ * share this effect: completion superseded, producer back to
+ * changes_requested, verifiers back to todo, confirmation superseded.
+ */
+function returnConfirmedMerge(
+  d: CommandDraft,
+  decision: Decision,
+  reason: string,
+  raw_quote: string,
+  delegated?: { readonly notice: string; readonly proxy_authority: string },
+) {
+  ensure(
+    failedConfirmedMergeCheck(d.state, decision),
+    "illegal_transition",
+    "已确认的合并只有在当前完成申请的最新检查失败或超时时才能退回修改；检查通过、排队或运行中均不能退回。",
+  );
+  requestMergeChanges(d, decision, reason, raw_quote, delegated);
+  const superseded: Decision = {
+    ...decision,
+    status: unwrap(transition("decision", decision.status, "supersede")),
+  };
+  d.put("decisions", superseded);
+  return superseded;
 }
 function resolveDecisionDraft(
   d: CommandDraft,
@@ -534,14 +553,61 @@ export function resolveDelegatedDecision(
       "Only standing PM Ops can decide under project authorization",
     );
     const q = d.get("decisions", p.decision_id);
+    // P2a-1 §2.6: a failed or timed-out check may also be handled on a
+    // confirmed merge, whoever confirmed it; D12/scope cards stay human.
+    const failed = pmFailedMergeCheck(state, q);
+    const confirmedFailed = !!failed && q.status === "resolved";
     ensure(
-      q.decider === "role:pm" &&
-        ["open", "provisional"].includes(q.status) &&
-        delegationAllowed(d, q),
+      confirmedFailed ||
+        (q.decider === "role:pm" &&
+          ["open", "provisional"].includes(q.status) &&
+          delegationAllowed(d, q)),
       "unauthorized",
-      "Decision is not authorized for PM Ops",
+      q.trigger === "merge_confirmation" && mergeRequiresHuman(state, q)
+        ? "此合并确认须由人处理（高风险、需求范围变化或已交人），PM 不能退回或重新检查"
+        : "Decision is not authorized for PM Ops",
     );
     text(p.rationale, "rationale");
+    if (failed && !p.escalate) {
+      ensure(
+        !confirmedFailed ||
+          p.option === "request_changes" ||
+          p.option === "recheck",
+        "validation_failed",
+        "已确认合并的检查失败或超时后，PM 只能 request_changes、recheck 或交人",
+      );
+      if (p.option === "request_changes" || p.option === "recheck") {
+        // §7.4: PM handling a failed check is synced to the human's notices.
+        text(p.notice, "notice");
+        const delegated = {
+          notice: (p.notice ?? "").trim(),
+          proxy_authority: pmMergeCheckFailureAuthority(state.project_id),
+        };
+        if (p.option === "recheck") {
+          requeueMergeCheck(d, q.card_id as CardId, {
+            ...delegated,
+            decision_id: q.id,
+            rationale: p.rationale,
+          });
+          return d.get("decisions", q.id);
+        }
+        if (confirmedFailed)
+          return returnConfirmedMerge(
+            d,
+            q,
+            p.rationale,
+            p.rationale,
+            delegated,
+          );
+      }
+    }
+    ensure(
+      !!p.escalate ||
+        p.option !== "recheck" ||
+        q.trigger !== "merge_confirmation",
+      "illegal_transition",
+      "只有当前完成申请的最新检查失败或超时时才能重新检查",
+    );
     if (p.escalate) {
       handoffDecision(
         d,

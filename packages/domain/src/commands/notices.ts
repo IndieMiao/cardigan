@@ -9,7 +9,8 @@ import {
 
 /**
  * Needs You "知会" (§7.4): every delegated resolution (PM Ops on project
- * authorization, PM merge confirmation, timed auto-merge) becomes a
+ * authorization, PM merge confirmation, timed auto-merge, PM returning or
+ * rechecking a merge whose check failed) becomes a
  * non-blocking notice derived from its resolution event. Read state is an
  * append-only `notices_read` event, so no stored entity is needed.
  */
@@ -56,6 +57,11 @@ function noticeBody(e: Event) {
   const rationale = field(e, "rationale");
   return rationale ? `${option}。理由：${rationale}` : option;
 }
+/** Delegated events without a decision resolution, and the option they stand for. */
+const noticeOnlyEvents = new Map([
+  ["merge_changes_requested", "request_changes"],
+  ["merge_check_requeued", "recheck"],
+]);
 /** Newest first; one notice per delegated resolution, even for multi-card decisions. */
 export function notices(state: CommandState): readonly Notice[] {
   const read = readIds(state.events);
@@ -70,9 +76,12 @@ export function notices(state: CommandState): readonly Notice[] {
   );
   for (const e of chronological) {
     if (
-      !["decision_resolved", "decision_provisionally_resolved"].includes(
-        e.type,
-      ) ||
+      ![
+        "decision_resolved",
+        "decision_provisionally_resolved",
+        // P2a-1 §2.6: PM Ops returned or rechecked after a failed merge check.
+        ...noticeOnlyEvents.keys(),
+      ].includes(e.type) ||
       field(e, "via") !== "delegated"
     )
       continue;
@@ -88,7 +97,7 @@ export function notices(state: CommandState): readonly Notice[] {
       card_id: q?.card_id ?? e.card_id ?? null,
       decision_id,
       question: q?.question ?? "",
-      option: field(e, "option") ?? "",
+      option: noticeOnlyEvents.get(e.type) ?? field(e, "option") ?? "",
       resolved_by: e.actor.kind === "system" ? "system" : "pm",
       body: noticeBody(e),
       proxy_authority: field(e, "proxy_authority") ?? null,

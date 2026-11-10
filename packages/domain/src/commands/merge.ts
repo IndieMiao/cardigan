@@ -252,6 +252,8 @@ export function requestMergeChanges(
   decision: Decision,
   reason: string,
   raw_quote: string,
+  /** PM Ops returning after a failed check (§7.4): notice for Needs You. */
+  delegated?: { readonly notice: string; readonly proxy_authority: string },
 ) {
   ensure(
     decision.card_id &&
@@ -282,6 +284,13 @@ export function requestMergeChanges(
       run_kind: "fix",
       reason,
       raw_quote,
+      ...(delegated
+        ? {
+            via: "delegated",
+            notice: delegated.notice,
+            proxy_authority: delegated.proxy_authority,
+          }
+        : {}),
     },
     {
       type: "status_change",
