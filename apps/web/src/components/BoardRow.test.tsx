@@ -28,8 +28,8 @@ const renderBoard = () =>
     <Board
       cards={cards}
       projectId="p-1"
-      expanded=""
-      onExpanded={() => {}}
+      lanes={{}}
+      onLaneChange={() => {}}
       display={DEFAULT_CARD_DISPLAY}
     />,
   );
@@ -112,8 +112,8 @@ test.each(["light", "dark"])(
             id: `C-${index + 1}`,
           }))}
           projectId="p-1"
-          expanded="todo"
-          onExpanded={() => {}}
+          lanes={{ todo: false }}
+          onLaneChange={() => {}}
           display={DEFAULT_CARD_DISPLAY}
         />,
       );
@@ -129,8 +129,8 @@ test.each(["light", "dark"])(
         );
       }
       for (const control of [
-        screen.getByRole("button", { name: "展开待整理空列" }),
-        screen.getByRole("button", { name: "收起待开始空列" }),
+        screen.getByRole("button", { name: "展开待整理列" }),
+        screen.getByRole("button", { name: "折叠待开始列" }),
         screen.getByRole("button", { name: "加载更多进行中卡片" }),
       ]) {
         expect(getComputedStyle(control).backgroundColor).toBe(
@@ -151,27 +151,27 @@ test.each(["light", "dark"])(
 );
 
 test("unframed empty lanes keep their count and expansion control", () => {
-  const onExpanded = vi.fn();
+  const onLaneChange = vi.fn();
   const props = {
     cards,
     projectId: "p-1",
-    expanded: "",
-    onExpanded,
+    lanes: {},
+    onLaneChange,
     display: DEFAULT_CARD_DISPLAY,
   };
   const view = render(<Board {...props} />);
-  const button = screen.getByRole("button", { name: "展开待整理空列" });
+  const button = screen.getByRole("button", { name: "展开待整理列" });
   expect(button.getAttribute("aria-expanded")).toBe("false");
   expect(button.textContent).toBe("待整理0");
-  fireEvent.click(button);
-  expect(onExpanded).toHaveBeenCalledWith("backlog");
-  view.rerender(<Board {...props} expanded="backlog" />);
+  fireEvent.click(button, { detail: 1 });
+  expect(onLaneChange).toHaveBeenCalledWith("backlog", false);
+  view.rerender(<Board {...props} lanes={{ backlog: false }} />);
   const lane = screen.getByRole("region", { name: "待整理" });
   expect(within(lane).getByText("已显示全部 0 张")).toBeTruthy();
-  const close = within(lane).getByRole("button", { name: "收起待整理空列" });
+  const close = within(lane).getByRole("button", { name: "折叠待整理列" });
   expect(close.getAttribute("aria-expanded")).toBe("true");
-  fireEvent.click(close);
-  expect(onExpanded).toHaveBeenLastCalledWith("");
+  fireEvent.click(close, { detail: 1 });
+  expect(onLaneChange).toHaveBeenLastCalledWith("backlog", true);
 });
 
 test("narrow screens release the sidebar width and let filters wrap inside the page", () => {
@@ -213,7 +213,7 @@ test("Shift+wheel reaches the right end on a phone-width board without hijacking
 
 test("U6a every status column renders as one child of the single board strip", () => {
   renderBoard();
-  expect(screen.getByText("空列默认收起。").textContent).not.toContain("折行");
+  expect(screen.getByText(/空列默认收起/).textContent).not.toContain("折行");
   const strip = document.querySelector(".board");
   expect(strip).toBeTruthy();
   const columns = [...document.querySelectorAll(".board-column")];

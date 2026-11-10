@@ -1,6 +1,5 @@
 // @vitest-environment jsdom
 import {
-  act,
   cleanup,
   fireEvent,
   render,
@@ -38,35 +37,43 @@ const cardsPage = (cards: readonly CardListItem[]) => ({
   counts: { total: cards.length, needs_me: 0, agent: 0 },
 });
 
-test("U4b empty columns default to narrow controls; expansion survives route restoration without losing filters", async () => {
+test("U4b empty columns default to narrow strips; a lane the human expanded stays expanded after remounting", async () => {
   window.location.hash = "#/p/p-1/cards?view=board&q=C-1";
-  const client = fakeClient({ cards: async () => cardsPage([active]) });
+  let saved: Record<string, boolean> = {};
+  const client = fakeClient({
+    cards: async () => cardsPage([active]),
+    preferences: async () => ({
+      auto_merge_after_minutes: null,
+      merge_gate_enabled: false,
+      board_collapsed_lanes: saved,
+    }),
+    setBoardLane: async (_project, lane, collapsed) => {
+      saved = { ...saved, [lane]: collapsed };
+    },
+  });
   const page = render(
     <CardListPage client={client} projectId="p-1" view="board" />,
   );
-  const button = await screen.findByRole("button", { name: "展开已完成空列" });
+  const button = await screen.findByRole("button", { name: "展开已完成列" });
   expect(button.getAttribute("aria-expanded")).toBe("false");
   expect(button.closest("section")?.className).toContain(
     "board-column-collapsed",
   );
-  fireEvent.click(button);
-  expect(parseRoute(window.location.hash)).toMatchObject({
-    kind: "cards",
-    filters: { view: "board", q: "C-1", expanded: "done" },
-  });
+  fireEvent.click(button, { detail: 1 });
   expect(
     screen
-      .getByRole("button", { name: "收起已完成空列" })
+      .getByRole("button", { name: "折叠已完成列" })
       .getAttribute("aria-expanded"),
   ).toBe("true");
+  // Filters stay in the route; the lane setting lives in project preferences.
+  expect(parseRoute(window.location.hash)).toMatchObject({
+    kind: "cards",
+    filters: { view: "board", q: "C-1" },
+  });
+  await waitFor(() => expect(saved).toEqual({ done: false }));
   page.unmount();
   render(<CardListPage client={client} projectId="p-1" view="board" />);
-  await screen.findByRole("button", { name: "收起已完成空列" });
-  act(() => {
-    window.location.hash = "#/p/p-1/cards?view=board&q=C-1";
-    window.dispatchEvent(new HashChangeEvent("hashchange"));
-  });
-  await screen.findByRole("button", { name: "展开已完成空列" });
+  await screen.findByRole("button", { name: "折叠已完成列" });
 });
 
 test("U4b cards show role, progress, update and a textual blocker; newly occupied columns open on refresh", async () => {

@@ -219,6 +219,7 @@ export function fakeClient(
     },
     setDelegation: async () => {},
     setPmMergeConfirmation: async () => {},
+    setBoardLane: async () => {},
     markNoticesRead: async () => {},
     decisionHistory: async () => ({ decisions: [] }),
     needsYou: async () => ({ decisions: [], human_actions: [], incidents: [] }),
