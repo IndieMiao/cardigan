@@ -7,6 +7,7 @@ import {
   recordDecision,
   requestDecision,
   requestHumanAction,
+  resolveDelegatedDecision,
 } from "@cardigan/domain";
 import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
@@ -779,6 +780,135 @@ test("needs-you says so when nothing is waiting for the human", async () => {
   await bootstrap();
   expect(await run(["needs-you", "--project", "p-work"])).toBe(0);
   expect(printed()).toContain("Needs You 是空的");
+});
+
+test("needs-you lists 知会 newest first and marks them read like the Workbench", async () => {
+  await bootstrap();
+  await run([
+    "card",
+    "create",
+    "--template",
+    "dev",
+    "--title",
+    "T",
+    "--goal",
+    "G",
+    "--acceptance",
+    "A",
+    "--repo",
+    "r/x",
+  ]);
+  // PM Ops needs the default pm pack's resolve_delegated_decision tool.
+  expect(await run(["role", "upgrade", "pm", "--from-default"])).toBe(0);
+  expect(await run(["pm", "create", "--ops", "--project", "p-work"])).toBe(0);
+
+  const store = Store.open({ dataDir });
+  try {
+    const human = { kind: "human", project_id: "p-work" as never } as const;
+    const ops = store.uow.read((tx) =>
+      tx.assignments
+        .list("p-work" as never)
+        .find((candidate) => candidate.standing_mode === "ops"),
+    );
+    if (ops === undefined) throw new Error("no PM Ops assignment");
+    const opsActor = {
+      kind: "assignment",
+      project_id: "p-work" as never,
+      assignment_id: ops.id,
+      role_id: ops.role_id,
+      role_version: ops.role_version,
+      allowed_tools: ["resolve_delegated_decision"],
+    } as never;
+    // Two general decisions PM Ops decides under project authorization.
+    const delegated = (question: string, rationale: string) => {
+      const q = runCommand(store, {
+        project_id: "p-work" as never,
+        actor: human,
+        reduce: (state, actor, ports) =>
+          requestDecision(
+            state,
+            actor,
+            {
+              card_id: "C-1" as never,
+              category: "general",
+              kind: "choose",
+              question,
+              context: "背景",
+              options: [{ key: "a", description: "方案 A", impact: "影响" }],
+              recommended: "a",
+              affected_cards: [],
+              affected_work_items: [],
+              blocking: false,
+              decider: "human",
+            },
+            ports,
+          ),
+      });
+      expect(q.decider).toBe("role:pm");
+      runCommand(store, {
+        project_id: "p-work" as never,
+        actor: opsActor,
+        reduce: (state, actor, ports) =>
+          resolveDelegatedDecision(
+            state,
+            actor,
+            { decision_id: q.id, option: "a", rationale },
+            ports,
+          ),
+      });
+      return q.id;
+    };
+    const older = delegated("Older question?", "first reason");
+    const newer = delegated("Newer question?", "second reason");
+
+    expect(await run(["needs-you", "--project", "p-work"])).toBe(0);
+    let text = printed();
+    expect(text).toContain("知会（未读 2，共 2）");
+    expect(text).not.toContain("Needs You 是空的");
+    expect(text).toContain("方案 A。理由：second reason");
+    expect(text.indexOf(newer)).toBeLessThan(text.indexOf(older));
+    const ids = [
+      ...text.matchAll(/\[未读\] (\S+) {2}PM 代拍 {2}(\S+) {2}C-1/g),
+    ].map((m) => ({ id: m[1] as string, decision: m[2] }));
+    expect(ids.map((n) => n.decision)).toEqual([newer, older]);
+
+    // Mark one notice read by id: it stays listed, flagged read.
+    const first = ids[0]?.id as string;
+    expect(await run(["needs-you", "read", first, "--project", "p-work"])).toBe(
+      0,
+    );
+    expect(printed()).toContain("已标为已读 1 条知会");
+    expect(await run(["needs-you", "--project", "p-work"])).toBe(0);
+    text = printed();
+    expect(text).toContain("知会（未读 1，共 2）");
+    expect(text).toContain(`[已读] ${first}`);
+    expect(text).toContain(`[未读] ${ids[1]?.id}`);
+    // Marking again is idempotent; an unknown id is refused.
+    expect(await run(["needs-you", "read", first, "--project", "p-work"])).toBe(
+      0,
+    );
+    expect(printed()).toContain("已经是已读");
+    expect(
+      await run(["needs-you", "read", "missing", "--project", "p-work"]),
+    ).toBe(2);
+    expect(errors.join("\n")).toContain("missing");
+    expect(await run(["needs-you", "read", "--project", "p-work"])).toBe(2);
+
+    // --all marks every remaining unread notice.
+    expect(
+      await run(["needs-you", "read", "--all", "--project", "p-work"]),
+    ).toBe(0);
+    expect(printed()).toContain("已标为已读 1 条知会");
+    expect(await run(["needs-you", "--project", "p-work"])).toBe(0);
+    expect(printed()).toContain("知会（未读 0，共 2）");
+    expect(printed()).not.toContain("[未读]");
+    expect(
+      await run(["needs-you", "read", "--all", "--project", "p-work"]),
+    ).toBe(0);
+    expect(printed()).toContain("没有未读的知会");
+  } finally {
+    store.close();
+  }
 });
 
 test("M4.5: pm create writes the standing mode once and never changes it", async () => {
