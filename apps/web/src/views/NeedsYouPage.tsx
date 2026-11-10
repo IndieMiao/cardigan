@@ -297,6 +297,7 @@ function MergeConfirmation({
   const action = useAction(done);
   const merge = q.merge_confirmation;
   const check = merge?.merge_check;
+  const confirmed = q.status === "resolved";
   const cardId = q.card_id ?? q.related_cards[0]?.id ?? null;
   const decide = (option: "merge" | "hold") =>
     action.run([projectId, q.id, "resolve", option, quote], (key) =>
@@ -386,21 +387,27 @@ function MergeConfirmation({
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          void decide("merge");
+          if (!confirmed) void decide("merge");
         }}
       >
-        <label>
-          补充说明（可选，会作为你的原话记录）
-          <textarea
-            aria-label={`${q.id} 原话或补充说明`}
-            value={quote}
-            onChange={(e) => setQuote(e.target.value)}
-          />
-        </label>
+        {confirmed ? (
+          <p className="hint">{q.why}</p>
+        ) : (
+          <label>
+            补充说明（可选，会作为你的原话记录）
+            <textarea
+              aria-label={`${q.id} 原话或补充说明`}
+              value={quote}
+              onChange={(e) => setQuote(e.target.value)}
+            />
+          </label>
+        )}
         <div className="action-row">
-          <button type="submit" disabled={action.busy}>
-            确认合并
-          </button>
+          {!confirmed && (
+            <button type="submit" disabled={action.busy}>
+              确认合并
+            </button>
+          )}
           {merge?.merge_gate_enabled && check?.status !== "passed" && (
             <span className="hint">检查通过后才会合并</span>
           )}
@@ -434,14 +441,16 @@ function MergeConfirmation({
                 重新检查
               </button>
             )}
-          <button
-            type="button"
-            className="quiet"
-            disabled={action.busy}
-            onClick={() => void decide("hold")}
-          >
-            暂不合并
-          </button>
+          {!confirmed && (
+            <button
+              type="button"
+              className="quiet"
+              disabled={action.busy}
+              onClick={() => void decide("hold")}
+            >
+              暂不合并
+            </button>
+          )}
           <button
             type="button"
             className="quiet"

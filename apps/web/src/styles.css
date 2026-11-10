@@ -20,6 +20,9 @@
   --danger-surface: var(--surface);
   --overlay: rgba(0, 0, 0, 0.55);
   --overlay-text: #ffffff;
+  --tooltip-bg: #1d2522;
+  --tooltip-text: #f5f7f6;
+  --tooltip-border: #72877a;
   --status-wait: #b45309;
   --status-progress: #2563a8;
   --status-review: #6b4fb3;
@@ -63,6 +66,9 @@
     --danger: #ff9c91;
     --overlay: rgba(0, 0, 0, 0.75);
     --overlay-text: #f5f5f5;
+    --tooltip-bg: #1d2522;
+    --tooltip-text: #f5f7f6;
+    --tooltip-border: #72877a;
     --status-wait: #edb96d;
     --status-progress: #94bde9;
     --status-review: #c5b0f1;
@@ -2169,15 +2175,17 @@ body[data-lightbox="open"] .drawer-overlay {
 }
 .tooltip-content {
   z-index: 120;
-  max-width: 280px;
+  max-width: min(280px, calc(100vw - var(--gap) * 2));
   padding: 4px 8px;
-  background: var(--text);
-  color: var(--surface);
+  background: var(--tooltip-bg);
+  color: var(--tooltip-text);
+  border: 1px solid var(--tooltip-border);
+  box-shadow: 0 4px 12px var(--overlay);
   border-radius: 4px;
   font-size: var(--text-xs);
 }
 .tooltip-arrow {
-  fill: var(--text);
+  fill: var(--tooltip-bg);
 }
 
 /* One colour role per state across all views; text stays readable without colour. */
@@ -3009,21 +3017,4 @@ body[data-lightbox="open"] .drawer-overlay {
   position: relative;
   margin-inline-start: calc(var(--gap) / 3);
   font-size: var(--text-xs);
-}
-.board-card-tooltip {
-  max-width: min(360px, calc(100vw - var(--gap) * 2));
-  max-height: var(--radix-tooltip-content-available-height);
-  overflow-y: auto;
-  padding: calc(var(--gap) * 2 / 3);
-}
-.board-card-preview {
-  display: flex;
-  flex-direction: column;
-  gap: calc(var(--gap) / 3);
-  overflow-wrap: anywhere;
-  font-size: var(--text-sm);
-}
-.board-card-preview ul {
-  margin: 0;
-  padding-inline-start: var(--gap);
 }

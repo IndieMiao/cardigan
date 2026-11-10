@@ -25,6 +25,7 @@ import {
 import { endRun } from "./end-run.js";
 import { resolveHumanCompletionReview } from "./human-completion.js";
 import { requestMergeChanges } from "./merge.js";
+import { failedConfirmedMergeCheck } from "./merge-check.js";
 import { queueResumedRun, resumeWork } from "./resumption.js";
 import { activeWork } from "./workflow.js";
 
@@ -400,6 +401,30 @@ export function recordDecision(
       "validation_failed",
       "Option is not part of this decision",
     );
+    if (
+      decision.trigger === "merge_confirmation" &&
+      decision.status === "resolved" &&
+      decision.resolution?.option === "merge" &&
+      p.option === "request_changes"
+    ) {
+      ensure(
+        actor.kind === "human",
+        "forbidden_tool",
+        "只有人可以退回已确认的合并",
+      );
+      ensure(
+        failedConfirmedMergeCheck(state, decision),
+        "illegal_transition",
+        "已确认的合并只有在当前完成申请的最新检查失败或超时时才能退回修改；检查通过、排队或运行中均不能退回。",
+      );
+      requestMergeChanges(d, decision, p.rationale, p.raw_quote);
+      const superseded: Decision = {
+        ...decision,
+        status: unwrap(transition("decision", decision.status, "supersede")),
+      };
+      d.put("decisions", superseded);
+      return superseded;
+    }
     const result: Decision = {
       ...decision,
       status: unwrap(
@@ -459,7 +484,7 @@ export function recordDecision(
       decision.trigger === "merge_confirmation" &&
       p.option === "request_changes"
     )
-      requestMergeChanges(d, decision, p.rationale);
+      requestMergeChanges(d, decision, p.rationale, p.raw_quote);
     if (decision.trigger === "completion_review")
       resolveHumanCompletionReview(d, decision, p.option);
     return result;

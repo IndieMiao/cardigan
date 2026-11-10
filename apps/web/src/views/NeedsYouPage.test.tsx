@@ -360,40 +360,49 @@ test.each([
   );
 });
 
-test("returning a merge requires a nonblank reason and submits the exact explanation", async () => {
-  const recordDecision = vi.fn().mockResolvedValue(undefined);
-  render(
-    <NeedsYouPage
-      client={fakeClient({
-        needsYou: async () => page([merge()]),
-        recordDecision,
-      })}
-      projectId="p-1"
-    />,
-  );
-  fireEvent.click(await screen.findByRole("button", { name: "退回修改" }));
-  const reason = screen.getByLabelText("q(3) 退回原因");
-  const submit = screen.getByRole("button", {
-    name: "确认退回修改",
-  }) as HTMLButtonElement;
-  expect(submit.disabled).toBe(true);
-  fireEvent.change(reason, { target: { value: " \n " } });
-  expect(submit.disabled).toBe(true);
-  fireEvent.submit(submit.closest("form") as HTMLFormElement);
-  expect(recordDecision).not.toHaveBeenCalled();
-  fireEvent.change(reason, { target: { value: " 请补齐空输入校验 " } });
-  expect(submit.disabled).toBe(false);
-  fireEvent.click(submit);
-  await waitFor(() =>
-    expect(recordDecision).toHaveBeenCalledWith(
-      "p-1",
-      "q(3)",
-      "request_changes",
-      " 请补齐空输入校验 ",
-      expect.any(String),
-    ),
-  );
-});
+test.each(["open", "resolved"])(
+  "returning a %s merge requires a nonblank reason and submits the exact explanation",
+  async (status) => {
+    const recordDecision = vi.fn().mockResolvedValue(undefined);
+    render(
+      <NeedsYouPage
+        client={fakeClient({
+          needsYou: async () =>
+            page([merge({ status, why: "合并检查失败或超时，可以退回修改" })]),
+          recordDecision,
+        })}
+        projectId="p-1"
+      />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "退回修改" }));
+    if (status === "resolved") {
+      expect(screen.queryByRole("button", { name: "确认合并" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "暂不合并" })).toBeNull();
+      expect(screen.getByText("合并检查失败或超时，可以退回修改")).toBeTruthy();
+    }
+    const reason = screen.getByLabelText("q(3) 退回原因");
+    const submit = screen.getByRole("button", {
+      name: "确认退回修改",
+    }) as HTMLButtonElement;
+    expect(submit.disabled).toBe(true);
+    fireEvent.change(reason, { target: { value: " \n " } });
+    expect(submit.disabled).toBe(true);
+    fireEvent.submit(submit.closest("form") as HTMLFormElement);
+    expect(recordDecision).not.toHaveBeenCalled();
+    fireEvent.change(reason, { target: { value: " 请补齐空输入校验 " } });
+    expect(submit.disabled).toBe(false);
+    fireEvent.click(submit);
+    await waitFor(() =>
+      expect(recordDecision).toHaveBeenCalledWith(
+        "p-1",
+        "q(3)",
+        "request_changes",
+        " 请补齐空输入校验 ",
+        expect.any(String),
+      ),
+    );
+  },
+);
 
 test("hold still submits without a reason after cancelling the return form", async () => {
   const recordDecision = vi.fn().mockResolvedValue(undefined);
@@ -850,6 +859,42 @@ test("recheck preserves its idempotency key on uncertain failure and refreshes o
   expect(retry.mock.calls[1]).toEqual(retry.mock.calls[0]);
   expect(screen.getByText("排队")).toBeTruthy();
 });
+
+test.each(["failed", "timed_out"] as const)(
+  "a confirmed %s merge keeps its check and recheck action without another confirmation",
+  async (status) => {
+    const recheckMerge = vi.fn(async () => undefined);
+    render(
+      <NeedsYouPage
+        projectId="p-1"
+        client={fakeClient({
+          needsYou: async () =>
+            page([{ ...checkedMerge(status), status: "resolved" }]),
+          recheckMerge,
+        })}
+      />,
+    );
+    const article = within(
+      await screen.findByRole("article", { name: "合并确认 q(3)" }),
+    );
+    expect(
+      article.getByText(status === "failed" ? "失败" : "超时"),
+    ).toBeTruthy();
+    expect(article.getByRole("link", { name: "查看日志" })).toBeTruthy();
+    expect(article.queryByRole("button", { name: "确认合并" })).toBeNull();
+    expect(article.queryByRole("button", { name: "暂不合并" })).toBeNull();
+    expect(article.getByRole("button", { name: "退回修改" })).toBeTruthy();
+    fireEvent.click(article.getByRole("button", { name: "重新检查" }));
+    await waitFor(() =>
+      expect(recheckMerge).toHaveBeenCalledWith(
+        "p-1",
+        "C-1",
+        "D-9",
+        expect.any(String),
+      ),
+    );
+  },
+);
 
 test("a gate waiting for its first event shows queued, while disabled projects are unchanged", async () => {
   const q = checkedMerge("queued");

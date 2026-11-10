@@ -14,14 +14,15 @@ export const IGNORED_SIGNALS = ["SIGINT", "SIGQUIT"] as const;
 export const FORWARDED_SIGNALS = ["SIGTERM", "SIGHUP"] as const;
 
 /**
- * Install handlers for the duration of one child process. Returns a function
- * that removes them again, restoring the parent's default signal behaviour.
+ * Install handlers before spawning the child. The kill target can defer child
+ * lookup until spawn returns. Returns a function that removes the handlers,
+ * restoring the parent's default signal behaviour.
  *
  * Pure with respect to the process: it only talks to `host` and `child`, so it
  * can be tested with a fake `EventEmitter` outside the test runner's process.
  */
 export function forwardSignals(
-  child: SpawnedChild,
+  child: Pick<SpawnedChild, "kill">,
   host: SignalHost,
 ): () => void {
   const installed: Array<[NodeJS.Signals, () => void]> = [];

@@ -10,8 +10,8 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { describe, expect, test } from "vitest";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { beforeAll, describe, expect, test } from "vitest";
 
 /**
  * End-to-end check of the reviewer's reproduction: the parent must survive
@@ -72,136 +72,203 @@ async function settingsFiles(runtimeDir: string): Promise<string[]> {
   }
 }
 
+function killProcessGroup(pid: number): void {
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
+      throw error;
+    }
+  }
+}
+
 describe.skipIf(process.platform === "win32")("launch signal handling", () => {
-  test("parent survives SIGINT to the process group and cleans up after the CLI", async () => {
+  beforeAll(() => {
     // Build the CLI so the test runs the code under review, not a stale build.
     execFileSync(
       join(workspaceRoot, "node_modules", ".bin", "tsc"),
       ["-b", "."],
       { cwd: cliRoot, stdio: "ignore" },
     );
+  }, 60000);
 
-    const root = await mkdtemp(join(tmpdir(), "cardigan-signal-"));
-    const configDir = join(root, "config");
-    const binDir = join(root, "bin");
-    const runtimeDir = join(root, "run");
-    const workDir = join(root, "work");
-    const markFile = join(root, "harness.log");
-    await mkdir(configDir, { recursive: true });
-    await mkdir(binDir, { recursive: true });
-    await mkdir(workDir, { recursive: true });
+  test.each(["normal spawn", "paused spawn"])(
+    "parent survives SIGINT to the process group and cleans up after the CLI (%s)",
+    async (mode) => {
+      const root = await mkdtemp(join(tmpdir(), "cardigan-signal-"));
+      const configDir = join(root, "config");
+      const binDir = join(root, "bin");
+      const runtimeDir = join(root, "run");
+      const workDir = join(root, "work");
+      const markFile = join(root, "harness.log");
+      const finishFile = join(root, "finish");
+      const spawnReadyFile = join(root, "spawn-ready");
+      const resumeSpawnFile = join(root, "resume-spawn");
+      await mkdir(configDir, { recursive: true });
+      await mkdir(binDir, { recursive: true });
+      await mkdir(workDir, { recursive: true });
 
-    await writeFile(
-      join(configDir, "launch.yaml"),
-      [
-        "providers:",
-        "  fake:",
-        "    harness: claude-code",
-        "    env:",
-        "      ANTHROPIC_BASE_URL: https://fake.example.invalid",
-        "    secret_env:",
-        "      ANTHROPIC_AUTH_TOKEN: FAKE_TOKEN",
-        "profiles:",
-        "  fake-claude:",
-        "    harness: claude-code",
-        "    provider: fake",
-        "",
-      ].join("\n"),
-      "utf8",
-    );
-    await writeFile(
-      join(configDir, "secrets.env"),
-      "FAKE_TOKEN=sk-fictional-signal-test\n",
-      "utf8",
-    );
-    await chmod(join(configDir, "secrets.env"), 0o600);
-
-    // The fake harness ignores SIGINT (traps it, keeps working for ~1.5s) and
-    // exits with code 3, like an agent that finishes its turn.
-    await writeFile(
-      join(binDir, "claude"),
-      [
-        "#!/bin/sh",
-        `MARK=${JSON.stringify(markFile)}`,
-        'echo started >> "$MARK"',
-        "trap 'echo caught-int >> \"$MARK\"' INT",
-        "i=0",
-        'while [ "$i" -lt 15 ]; do',
-        "  sleep 0.1",
-        "  i=$((i + 1))",
-        "done",
-        'echo finished >> "$MARK"',
-        "exit 3",
-        "",
-      ].join("\n"),
-      "utf8",
-    );
-    await chmod(join(binDir, "claude"), 0o755);
-
-    const child = spawn(process.execPath, [distBin, "launch", "fake-claude"], {
-      cwd: workDir,
-      detached: true,
-      stdio: "ignore",
-      env: {
-        ...process.env,
-        CARDIGAN_CONFIG_DIR: configDir,
-        XDG_RUNTIME_DIR: runtimeDir,
-        PATH: `${binDir}:${process.env.PATH ?? ""}`,
-      },
-    });
-    const parentPid = child.pid;
-    expect(parentPid).toBeTypeOf("number");
-    if (parentPid === undefined) {
-      throw new Error("no pid");
-    }
-
-    const exited = new Promise<{ code: number | null; signal: string | null }>(
-      (resolve) => {
-        child.once("exit", (code, signal) => resolve({ code, signal }));
-      },
-    );
-
-    try {
-      // The harness has started and the settings file exists.
-      await waitFor("harness start", async () =>
-        (await readFile(markFile, "utf8").catch(() => "")).includes("started")
-          ? true
-          : undefined,
+      await writeFile(
+        join(configDir, "launch.yaml"),
+        [
+          "providers:",
+          "  fake:",
+          "    harness: claude-code",
+          "    env:",
+          "      ANTHROPIC_BASE_URL: https://fake.example.invalid",
+          "    secret_env:",
+          "      ANTHROPIC_AUTH_TOKEN: FAKE_TOKEN",
+          "profiles:",
+          "  fake-claude:",
+          "    harness: claude-code",
+          "    provider: fake",
+          "",
+        ].join("\n"),
+        "utf8",
       );
-      await waitFor("settings file", async () => {
-        const files = await settingsFiles(runtimeDir);
-        return files.length === 1 ? files[0] : undefined;
+      await writeFile(
+        join(configDir, "secrets.env"),
+        "FAKE_TOKEN=sk-fictional-signal-test\n",
+        "utf8",
+      );
+      await chmod(join(configDir, "secrets.env"), 0o600);
+
+      // Keep the fake harness running until the assertions explicitly release it.
+      // A fixed lifetime races the test worker's scheduling under load.
+      await writeFile(
+        join(binDir, "claude"),
+        [
+          "#!/bin/sh",
+          `MARK=${JSON.stringify(markFile)}`,
+          `FINISH=${JSON.stringify(finishFile)}`,
+          "trap 'echo caught-int >> \"$MARK\"' INT",
+          'echo started >> "$MARK"',
+          'while [ ! -f "$FINISH" ]; do',
+          "  sleep 0.05",
+          "done",
+          'echo finished >> "$MARK"',
+          "exit 3",
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+      await chmod(join(binDir, "claude"), 0o755);
+
+      let entrypoint = distBin;
+      if (mode === "paused spawn") {
+        // Hold the parent's JS stack inside spawnInherit after the OS child has
+        // started. A signal here must be safe before spawnInherit returns; this
+        // reproduces a descheduled parent without relying on a timing window.
+        entrypoint = join(root, "paused-spawn.mjs");
+        await writeFile(
+          entrypoint,
+          `import { existsSync, writeFileSync } from "node:fs";
+import { createProcessIo, main } from ${JSON.stringify(pathToFileURL(join(cliRoot, "dist", "index.js")).href)};
+const io = createProcessIo();
+process.exitCode = await main(process.argv.slice(2), {
+  ...io,
+  spawnInherit(...args) {
+    const child = io.spawnInherit(...args);
+    writeFileSync(${JSON.stringify(spawnReadyFile)}, "");
+    const deadline = Date.now() + 10000;
+    const pause = new Int32Array(new SharedArrayBuffer(4));
+    while (!existsSync(${JSON.stringify(resumeSpawnFile)})) {
+      if (Date.now() > deadline) throw new Error("timed out waiting to resume spawn");
+      Atomics.wait(pause, 0, 0, 10);
+    }
+    return child;
+  },
+});
+`,
+        );
+      }
+
+      const child = spawn(
+        process.execPath,
+        [entrypoint, "launch", "fake-claude"],
+        {
+          cwd: workDir,
+          detached: true,
+          stdio: "ignore",
+          env: {
+            ...process.env,
+            CARDIGAN_CONFIG_DIR: configDir,
+            XDG_RUNTIME_DIR: runtimeDir,
+            PATH: `${binDir}:${process.env.PATH ?? ""}`,
+          },
+        },
+      );
+      const parentPid = child.pid;
+      expect(parentPid).toBeTypeOf("number");
+      if (parentPid === undefined) {
+        throw new Error("no pid");
+      }
+
+      const exited = new Promise<{
+        code: number | null;
+        signal: string | null;
+      }>((resolve) => {
+        child.once("exit", (code, signal) => resolve({ code, signal }));
       });
 
-      // Ctrl+C: the terminal sends SIGINT to the whole foreground process group.
-      process.kill(-parentPid, "SIGINT");
+      try {
+        // The harness publishes readiness only after its SIGINT trap is installed.
+        await waitFor("harness start", async () =>
+          (await readFile(markFile, "utf8").catch(() => "")).includes("started")
+            ? true
+            : undefined,
+        );
+        await waitFor("settings file", async () => {
+          const files = await settingsFiles(runtimeDir);
+          return files.length === 1 ? files[0] : undefined;
+        });
+        if (mode === "paused spawn") {
+          await waitFor("parent paused inside spawn", () =>
+            readFile(spawnReadyFile).then(
+              () => true,
+              () => undefined,
+            ),
+          );
+        }
 
-      // The harness saw the signal and kept running.
-      await waitFor("harness INT trap", async () =>
-        (await readFile(markFile, "utf8").catch(() => "")).includes(
-          "caught-int",
-        )
-          ? true
-          : undefined,
-      );
+        // Ctrl+C: the terminal sends SIGINT to the whole foreground process group.
+        process.kill(-parentPid, "SIGINT");
 
-      // The parent is still alive while the CLI runs, and the settings file is
-      // still on disk because the CLI may still need it.
-      expect(isAlive(parentPid)).toBe(true);
-      expect(await settingsFiles(runtimeDir)).toHaveLength(1);
+        // The harness saw the signal and kept running.
+        await waitFor("harness INT trap", async () =>
+          (await readFile(markFile, "utf8").catch(() => "")).includes(
+            "caught-int",
+          )
+            ? true
+            : undefined,
+        );
 
-      // Only after the CLI exits does the parent return its exit code and
-      // remove the settings file.
-      const result = await exited;
-      expect(result).toEqual({ code: 3, signal: null });
-      expect(await settingsFiles(runtimeDir)).toEqual([]);
-      expect(await readFile(markFile, "utf8")).toContain("finished");
-    } finally {
-      if (isAlive(parentPid)) {
-        process.kill(-parentPid, "SIGKILL");
+        // The parent is still alive while the CLI runs, and the settings file is
+        // still on disk because the CLI may still need it.
+        expect(isAlive(parentPid)).toBe(true);
+        expect(await settingsFiles(runtimeDir)).toHaveLength(1);
+
+        // Only after the CLI exits does the parent return its exit code and
+        // remove the settings file.
+        await writeFile(resumeSpawnFile, "");
+        await writeFile(finishFile, "");
+        const result = await waitFor("parent exit", () => {
+          const { exitCode: code, signalCode: signal } = child;
+          return code !== null || signal !== null
+            ? { code, signal }
+            : undefined;
+        });
+        expect(result).toEqual({ code: 3, signal: null });
+        expect(await settingsFiles(runtimeDir)).toEqual([]);
+        expect(await readFile(markFile, "utf8")).toContain("finished");
+      } finally {
+        // The harness may outlive a broken parent. Always clean up this group.
+        killProcessGroup(parentPid);
+        await exited;
+        // Do not leave the fixture directory behind.
+        await rm(root, { recursive: true, force: true });
       }
-      // Do not leave the fixture directory behind.
-      await rm(root, { recursive: true, force: true });
-    }
-  }, 60000);
+    },
+    60000,
+  );
 });
