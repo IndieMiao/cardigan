@@ -2,7 +2,7 @@ import type { CardStatus, NextOwnerItem } from "./api.js";
 
 /**
  * Status vocabulary for the board (development plan §8.7: 按状态分列; M5 plan
- * §3.7: 状态用文字加颜色).
+ * §3.7 and C-48: 状态用形状、文字加颜色).
  *
  * Every status renders its Chinese label next to the colour, so the board stays
  * readable in a screenshot, in greyscale and for a colour-blind reader.
@@ -28,7 +28,7 @@ export const CARD_STATUS_LABELS: Readonly<Record<CardStatus, string>> = {
   cancelled: "已取消",
 };
 
-export const STATUS_LABELS: Readonly<Record<string, string>> = {
+export const STATUS_LABELS = {
   ...CARD_STATUS_LABELS,
   ready: "就绪",
   delivered: "已交付",
@@ -71,9 +71,14 @@ export const STATUS_LABELS: Readonly<Record<string, string>> = {
   belled: "已投递",
   delivery_failed: "投递失败",
   needs_attention: "需要关注",
-};
+  timed_out: "超时",
+  interrupted: "已中断",
+  skipped: "未运行",
+} as const;
 export function statusLabel(status: string): string {
-  return STATUS_LABELS[status] ?? "状态未知";
+  return Object.hasOwn(STATUS_LABELS, status)
+    ? STATUS_LABELS[status as keyof typeof STATUS_LABELS]
+    : "状态未知";
 }
 export const cardStatusLabel = statusLabel;
 

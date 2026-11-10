@@ -8,7 +8,7 @@ import { linkableReferences, linkifyReferences } from "../refs.js";
 import { statusLabel } from "../status.js";
 import { AttachmentCaption, attachmentName } from "./AttachmentCaption.js";
 import { AttachmentPreview, isBitmap } from "./AttachmentPreview.js";
-import { EmptyState, LongContent, Time } from "./Foundation.js";
+import { EmptyState, LongContent, StatusTag, Time } from "./Foundation.js";
 import { TimelineContent } from "./TimelineContent.js";
 import {
   TimelineActor,
@@ -374,9 +374,14 @@ function AttachmentItem({
       )}
       <AttachmentCaption attachment={attachment} />
       <span className="attachment-basis">
-        {attachment.basis === null
-          ? "无拍板依据"
-          : `依据 ${attachment.basis.id}（${decisionStatusLabel(attachment.basis.status)}）`}
+        {attachment.basis === null ? (
+          "无拍板依据"
+        ) : (
+          <>
+            依据 {attachment.basis.id}（
+            <StatusTag status={attachment.basis.status} />）
+          </>
+        )}
       </span>
     </li>
   );

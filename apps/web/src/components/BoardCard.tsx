@@ -5,6 +5,7 @@ import { routeHash } from "../route.js";
 import { nextOwnersLabel } from "../status.js";
 import { ProduceOwners } from "./EmployeeIdentity.js";
 import { fullTime, StatusTag, Time } from "./Foundation.js";
+import { StatusIcon } from "./StatusIcon.js";
 import { Tooltip } from "./Tooltip.js";
 
 const paths = {
@@ -13,11 +14,8 @@ const paths = {
   next: "M6 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM1 17v-2a4 4 0 0 1 4-4h2m4 0h7m-3-3 3 3-3 3",
   clock: "M10 2a8 8 0 1 0 0 16 8 8 0 0 0 0-16Zm0 3v5l3 2",
   attachment: "m7 11 6-6a2 2 0 0 1 3 3l-7 7a4 4 0 0 1-6-6l7-7m-5 11 7-7",
-  decision: "M6 16H3V3h14v10H9l-3 3Zm4-10v2m0 2v.1",
   human_action:
     "M5 9V5a1 1 0 0 1 2 0v4-6a1 1 0 0 1 2 0v6-5a1 1 0 0 1 2 0v5-3a1 1 0 0 1 2 0v6l2-2a1 1 0 0 1 2 2l-4 5H7L3 12a1 1 0 0 1 2-1l2 2",
-  blocked: "M6 2h8l4 4v8l-4 4H6l-4-4V6l4-4Zm0 8h8",
-  superseded: "M3 6h13m-4-4 4 4-4 4m5 4H4m4-4-4 4 4 4",
   reason: "M10 2a8 8 0 1 0 0 16 8 8 0 0 0 0-16Zm0 6v6m0-9v.1",
 } as const;
 
@@ -174,7 +172,14 @@ export function BoardCard({
                   .filter((item) => item.kind === kind)
                   .map((item) => item.label)
                   .join("；")}`,
-                <Icon name={kind} />,
+                kind === "human_action" ? (
+                  <Icon name={kind} />
+                ) : (
+                  <StatusIcon
+                    status={kind === "blocked" ? "blocked" : "waiting_decision"}
+                    decorative
+                  />
+                ),
                 <span className="visually-hidden">{label}</span>,
                 kind === "blocked"
                   ? "board-card-blocked"
@@ -184,7 +189,7 @@ export function BoardCard({
         {superseded &&
           badge(
             superseded,
-            <Icon name="superseded" />,
+            <StatusIcon status="superseded" decorative />,
             <span className="visually-hidden">{superseded}</span>,
           )}
         {display.reason && badge(`原因：${card.why}`, <Icon name="reason" />)}

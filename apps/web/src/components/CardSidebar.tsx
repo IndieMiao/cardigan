@@ -2,7 +2,6 @@ import type { CardDetail } from "../api.js";
 import { decisionTitle } from "../decision-labels.js";
 import { isHttpLink } from "../markdown.js";
 import { routeHash } from "../route.js";
-import { statusLabel } from "../status.js";
 import { NextOwners } from "./EmployeeIdentity.js";
 import { EmptyState, IdTag, StatusTag } from "./Foundation.js";
 
@@ -63,9 +62,11 @@ export function CardSidebar({
                 return (
                   <li key={w.id}>
                     {w.role_id}：
-                    {latest?.verdict
-                      ? statusLabel(latest.verdict)
-                      : "还没有结论"}
+                    {latest?.verdict ? (
+                      <StatusTag status={latest.verdict} />
+                    ) : (
+                      "还没有结论"
+                    )}
                     {w.completion_criteria.length > 0 &&
                       `，依据 ${w.completion_criteria.join("；")}`}
                   </li>
@@ -136,7 +137,7 @@ export function CardSidebar({
                 <span className="plain-url">{p.pr_url}</span>
               )}
               <p>
-                {p.work_item_id}（{statusLabel(p.status)}）
+                {p.work_item_id}（<StatusTag status={p.status} />）
               </p>
             </li>
           ))}

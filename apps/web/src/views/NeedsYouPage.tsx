@@ -95,7 +95,9 @@ function DecisionMeta({
       <EmployeeIdentity {...q} showTitle={false} />
       <IdTag id={q.id} label={isMergeConfirmation(q) ? "合并确认" : "拍板"} />
       {q.blocking && <StatusTag status="blocked" />}
-      {isPausedReview(q) && <span className="hint">已暂停（临时决定）</span>}
+      {isPausedReview(q) && (
+        <StatusTag status="suspended" label="已暂停（临时决定）" />
+      )}
       <span className="hint">{waitLabel(q.waited_ms, elapsed)}</span>
       {q.auto_merge && (
         <span className="hint">
