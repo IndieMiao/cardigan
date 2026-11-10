@@ -129,9 +129,47 @@ beforeEach(async () => {
 });
 afterEach(async () => h?.close());
 
-test.each(["failed", "timed_out"] as const)(
-  "%s is displayed and rechecked once as human with a fresh snapshot",
-  async (status) => {
+test.each(
+  (["failed", "timed_out"] as const).flatMap((status) =>
+    (["open", "human", "pm"] as const).map((source) => ({ status, source })),
+  ),
+)(
+  "$status ($source confirmation) is displayed and rechecked once as human with a fresh snapshot",
+  async ({ status, source }) => {
+    if (source !== "open") {
+      h.store.uow.run((tx) => {
+        const q = tx.decisions.get(project_id, "q(2)");
+        if (!q) throw new Error("Missing confirmation");
+        tx.decisions.put(project_id, {
+          ...q,
+          status: "resolved",
+          decider: source === "pm" ? "role:pm" : "human",
+          resolution: {
+            option: "merge",
+            rationale: "合并",
+            raw_quote: "合并",
+            via_chain: [],
+            resolved_by: source === "pm" ? "assignment:A-9" : "human",
+            via: source === "pm" ? "delegated" : "needs_you",
+            at: NOW,
+          },
+        });
+      });
+      expect(
+        (
+          await call(h.port, path("/preferences"), {
+            cookie,
+            method: "POST",
+            body: JSON.stringify({ pm_merge_confirmation: false }),
+            headers: {
+              origin: h.server.url,
+              "content-type": "application/json",
+              "idempotency-key": "disable-merge-delegation",
+            },
+          })
+        ).status,
+      ).toBe(200);
+    }
     record("queued");
     record("running");
     record(status);

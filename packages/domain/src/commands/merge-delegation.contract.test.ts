@@ -14,6 +14,7 @@ import {
   notices,
   pmMergeBlockers,
   projectPreferences,
+  recheckMerge,
   recordDecision,
   recordMergeCheck,
   recordMergeResult,
@@ -1237,6 +1238,15 @@ test("PM Ops rechecks a timed-out confirmed merge once, then returns it after an
     clock: { now: () => new Date(Date.parse(now) + 60_000).toISOString() },
   };
   f.commit(autoConfirmMerge(f.state, system, { decision_id: q.id }, later));
+  // C-79: processing failures also needs the current PM authorization.
+  f.commit(
+    setProjectPreferences(
+      f.state,
+      human,
+      { pm_merge_confirmation: true },
+      f.io,
+    ),
+  );
   const authorization = confirmation().resolution;
   expect(authorization).toMatchObject({ option: "merge" });
   check("timed_out");
@@ -1326,6 +1336,144 @@ test("PM Ops rechecks a timed-out confirmed merge once, then returns it after an
   ).toBe(false);
 });
 
+test.each(
+  (["human", "pm", "timeout"] as const).flatMap((source) =>
+    (["failed", "timed_out"] as const).map((status) => ({ source, status })),
+  ),
+)(
+  "current preference controls a $source-confirmed $status merge",
+  async ({ source, status }) => {
+    const { f, confirmation, check, pmResolve } = setup();
+    if (source !== "pm")
+      f.commit(
+        setProjectPreferences(
+          f.state,
+          human,
+          {
+            pm_merge_confirmation: false,
+            auto_merge_after_minutes: 1,
+          },
+          f.io,
+        ),
+      );
+    await f.accept();
+    const q = confirmation();
+    if (source === "pm") {
+      check("passed");
+      f.commit(pmResolve("merge", { notice: "检查通过，确认合并。" }));
+    } else if (source === "timeout") {
+      f.commit(
+        autoConfirmMerge(
+          f.state,
+          system,
+          { decision_id: q.id },
+          {
+            ...f.io,
+            clock: {
+              now: () => new Date(Date.parse(now) + 60_000).toISOString(),
+            },
+          },
+        ),
+      );
+    } else {
+      f.commit(
+        recordDecision(
+          f.state,
+          human,
+          {
+            decision_id: q.id,
+            option: "merge",
+            rationale: "合并",
+            raw_quote: "合并",
+          },
+          f.io,
+        ),
+      );
+    }
+    const original = confirmation();
+    check(status);
+    // Turning off hands back every source without rewriting its original authorization.
+    f.commit(
+      setProjectPreferences(
+        f.state,
+        human,
+        { pm_merge_confirmation: false },
+        f.io,
+      ),
+    );
+    expect(confirmation()).toEqual(original);
+    expect(failedQueue(f.state)).toEqual([]);
+    const pending = value(listNeedsYou(f.state, human)).data.decisions;
+    expect(pending).toEqual([
+      expect.objectContaining({
+        id: q.id,
+        status: "resolved",
+        why: "合并检查失败或超时，可退回修改或重新检查",
+        options: [expect.objectContaining({ key: "request_changes" })],
+      }),
+    ]);
+    for (const option of ["request_changes", "recheck"]) {
+      const denied = pmResolve(option, { notice: "处理失败检查。" });
+      expect(denied.ok).toBe(false);
+      if (!denied.ok) expect(denied.error.code).toBe("unauthorized");
+    }
+    // Both human entry points remain valid against the same failed snapshot.
+    const returned = value(
+      recordDecision(
+        f.state,
+        human,
+        {
+          decision_id: q.id,
+          option: "request_changes",
+          rationale: "修复失败",
+          raw_quote: "修复失败",
+        },
+        f.io,
+      ),
+    );
+    expect(
+      returned.events.some((e) => e.type === "merge_changes_requested"),
+    ).toBe(true);
+    expect(returned.data).toMatchObject({
+      status: "superseded",
+      decider: original.decider,
+      resolution: original.resolution,
+    });
+    const rechecked = value(
+      recheckMerge(
+        {
+          ...f.state,
+          project_settings: { merge_gate_enabled: true },
+        },
+        human,
+        { card_id: f.card.id },
+        f.io,
+      ),
+    );
+    expect(
+      rechecked.events.some((e) => e.type === "merge_check_requeued"),
+    ).toBe(true);
+    // Re-enabling immediately restores PM's queue and both authorized actions.
+    f.commit(
+      setProjectPreferences(
+        f.state,
+        human,
+        { pm_merge_confirmation: true },
+        f.io,
+      ),
+    );
+    expect(confirmation()).toEqual(original);
+    expect(humanPending(f.state)).not.toContain(q.id);
+    expect(failedQueue(f.state)).toEqual([
+      expect.objectContaining({ decision_id: q.id }),
+    ]);
+    expect(pmResolve("request_changes", { notice: "退回修改。" }).ok).toBe(
+      true,
+    );
+    expect(pmResolve("recheck", { notice: "重新检查。" }).ok).toBe(true);
+  },
+);
+
 test("PM Ops cannot return a confirmed merge whose check passed", async () => {
   const { f, confirmation, check, pmResolve } = setup();
   await f.accept();
@@ -1376,14 +1524,6 @@ test.each([
 
 test("PM Ops may hand a failed confirmed merge to the human instead", async () => {
   const { f, confirmation, check, pmResolve } = setup();
-  f.commit(
-    setProjectPreferences(
-      f.state,
-      human,
-      { pm_merge_confirmation: false },
-      f.io,
-    ),
-  );
   await f.accept();
   const q = confirmation();
   f.commit(

@@ -35,6 +35,7 @@ export {
 export {
   pmFailedMergeCheck,
   pmMergeBlockers,
+  pmMergeCheckDelegationAllowed,
 } from "./commands/merge-delegation.js";
 export {
   beginMergePush,

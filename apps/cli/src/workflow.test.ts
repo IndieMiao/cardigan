@@ -906,6 +906,48 @@ test("needs-you lists 知会 newest first and marks them read like the Workbench
       await run(["needs-you", "read", "--all", "--project", "p-work"]),
     ).toBe(0);
     expect(printed()).toContain("没有未读的知会");
+    // Rendering follows the recorded action, including failures after confirmation.
+    store.uow.run((tx) => {
+      const project = human.project_id;
+      const q = tx.decisions.get(project, newer);
+      if (!q) throw new Error("Missing notice decision");
+      tx.decisions.put(project, {
+        ...q,
+        kind: "approve",
+        target: { delivery_id: "D-1" as never },
+        trigger: "merge_confirmation",
+      });
+      let at = Date.parse("2099-01-01T00:00:00Z");
+      for (const [type, option, actor] of [
+        ["decision_resolved", "merge", opsActor],
+        ["merge_changes_requested", "request_changes", opsActor],
+        ["merge_check_requeued", "recheck", opsActor],
+        ["decision_resolved", "merge", { kind: "system", project_id: project }],
+      ] as const) {
+        tx.events.append(project, {
+          id: tx.ids.nextEventId(),
+          seq: tx.ids.nextEventSequence(project, "C-1" as never),
+          card_id: "C-1" as never,
+          type,
+          actor,
+          created_at: new Date(at++).toISOString(),
+          payload: {
+            decision_id: newer,
+            option,
+            via: "delegated",
+            notice: "已处理。",
+          },
+        });
+      }
+    });
+    expect(await run(["needs-you", "--project", "p-work"])).toBe(0);
+    for (const label of [
+      "PM 代确认合并",
+      "PM 退回修改",
+      "PM 重新检查",
+      "超时自动合并",
+    ])
+      expect(printed()).toContain(`  ${label}  ${newer}`);
   } finally {
     store.close();
   }

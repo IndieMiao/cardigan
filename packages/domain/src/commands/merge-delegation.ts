@@ -1,5 +1,6 @@
 import { isReviewStale } from "../derived.js";
 import type { Decision, Delivery } from "../entities.js";
+import { pmMergeConfirmation } from "../preferences.js";
 import { attempt, type CommandState } from "./core.js";
 import { mergeRequiresHuman } from "./delegation.js";
 import { mergeContext } from "./merge.js";
@@ -95,12 +96,27 @@ export function pmMergeBlockers(
  * (`human_required_reason`) stay with the human.
  */
 export function pmFailedMergeCheck(state: CommandState, q: Decision) {
-  if (q.trigger !== "merge_confirmation" || mergeRequiresHuman(state, q))
-    return undefined;
+  if (!pmMergeCheckDelegationAllowed(state, q)) return undefined;
   if (q.status === "resolved") return failedConfirmedMergeCheck(state, q);
   return q.decider === "role:pm" && ["open", "provisional"].includes(q.status)
     ? failedCurrentMergeCheck(state, q)
     : undefined;
+}
+/** Shared by command authorization, queues and routing; read the current preference. */
+export function pmMergeCheckDelegationAllowed(
+  state: Pick<
+    CommandState,
+    "project_id" | "project_preferences" | "cards" | "decisions"
+  >,
+  q: Decision,
+) {
+  return (
+    q.trigger === "merge_confirmation" &&
+    pmMergeConfirmation(
+      state.project_preferences?.find((p) => p.id === state.project_id),
+    ) &&
+    !mergeRequiresHuman(state, q)
+  );
 }
 /** Policy evidence recorded when PM Ops handles a failed merge check. */
 export const pmMergeCheckFailureAuthority = (project_id: string) =>
