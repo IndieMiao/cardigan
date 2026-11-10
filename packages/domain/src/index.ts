@@ -14,6 +14,7 @@ export type {
 export * from "./commands/decision-followup.js";
 export * from "./commands/delivery.js";
 export * from "./commands/dispatch-recovery.js";
+export * from "./commands/dispatch-stop.js";
 export * from "./commands/employee.js";
 export * from "./commands/launch.js";
 export {

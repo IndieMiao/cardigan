@@ -12,6 +12,7 @@ import type {
 import {
   decisionFollowupBlocked,
   decisionFollowupPrompt,
+  dispatchRecoveryFailed,
   dispatchRun,
   obsoleteDispatchAttention,
   queueRun,
@@ -215,7 +216,8 @@ export class Dispatcher {
     const queued = this.queued(state, a);
     return state.runs.some(
       (r) =>
-        r.assignment_id === a.id && unfinishedRun(r) && r.id !== queued?.id,
+        r.assignment_id === a.id &&
+        (r.dispatch_stop || (unfinishedRun(r) && r.id !== queued?.id)),
     );
   }
   private async deliver(project: ProjectId, notes: readonly Notification[]) {
@@ -545,7 +547,12 @@ export class Dispatcher {
         failed ||= !sent && !acked;
       }
       const run = state.runs.find((r) => r.id === attempt.run_id);
-      if (failed && run?.status !== "dispatched" && run?.status !== "running")
+      if (
+        failed &&
+        run?.status !== "dispatched" &&
+        run?.status !== "running" &&
+        !(run && dispatchRecoveryFailed(state, run))
+      )
         this.escalate(tx, project, notes, attempt.assignment_id, reason);
     });
   }

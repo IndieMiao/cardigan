@@ -713,7 +713,7 @@ M3.4 重发策略：首次成功投递之外最多再重发 4 次，等待间隔
 
 C-56 失败恢复：每个 `dispatched` 且没有 `run_started` 的 Run，从持久化投递意图读取结果。失败后默认等待 30 秒、1、2、4 分钟，各重试一次（`deliveryRetryBaseMs` / `maxRetries` 可配置）；重试前查询终端，只在明确存活时按铃，沿用原 Run、通知和 worktree，不根据画面 idle/working 推断业务状态。每次重试先取得同一 Assignment 的投递租约，事务内重查 Run 尚未启动、引用未变、没有在途意图；等待查询或 Git 准备期间发生的 MCP 启动优先。显式 CLI 启动没有通知时，也使用其持久投递意图重试。
 
-连续失败达到首次加重试次数上限，或派发默认 10 分钟仍未启动（`dispatchTimeoutMs` / `CARDIGAN_DISPATCH_TIMEOUT_MS`，正整数毫秒），先取得持久投递租约，复核没有 MCP 启动后停止旧终端；只有独立状态查询确认 exited／runtime_not_found，才在同一事务取消旧 Run、撤销其 Assignment 的旧 Token、按原 kind 和执行快照排一个新的 queued Run，以 `run_dispatch_recovered` 记录旧新编号、原始触发事件和原因，并由 Router 通知原 Assignment。保留 worktree 和 Session 恢复信息，清除旧终端引用，由既有启动路径重新 provision／签发 Token。无法证明终端退出时保留原 Run 和凭据、停止自动恢复并升级；查询期间出现 MCP 启动则撤回本次停止。每个 Assignment 终身只自动重排一次，持久事件控制预算；已启动、暂停、释放或卡片关闭不恢复，在途投递租期内也不抢占。恢复 Run 若排队后仍无法派发，按相同超时升级；C-54 的 `queue_reason=concurrency_limit` 正常容量等待不计入此超时。重排只写 queued 与通知，不直接派发，继续由 Dispatcher 的统一 claim 路径接受容量限制。再次失败／超时写 `run_dispatch_stalled`：卡片时间线和事件都带卡号、Assignment、等待分钟数及 stop/start 建议，交活跃 PM Ops；没有可接手的 PM Ops（含后台自身失败）则创建实际的 HumanAction，进入 Needs You，沿用人工事项路由提示 Office。只发一次，不递归唤醒失败后台。
+连续失败达到首次加重试次数上限，或派发默认 10 分钟仍未启动（`dispatchTimeoutMs` / `CARDIGAN_DISPATCH_TIMEOUT_MS`，正整数毫秒），先持久化独立的 `Run.dispatch_stop`（原终端引用、原因、attempt、租期、stopping），复核没有 MCP 启动并提交 stopping 后停止旧终端；只有独立状态查询确认 exited／runtime_not_found，才在同一事务取消旧 Run、撤销其 Assignment 的旧 Token、按原 kind 和执行快照排一个新的 queued Run，以 `run_dispatch_recovered` 记录旧新编号、原始触发事件和原因，并由 Router 通知原 Assignment。保留 worktree 和 Session 恢复信息，清除旧终端引用，由既有启动路径重新 provision／签发 Token。无法证明终端退出时保留原 Run、凭据和 stopping 栅栏并升级；停止前查询期间出现 MCP 启动则撤回本次停止，stopping 提交后拒绝该 Run 的 acknowledge、finish、heartbeat 及交付等 Agent 写操作。停止租期独立于 BellAttempt，过期后可接管同一原终端，包含 monitor 已改为 unknown 的 Run；确认退出后取消、清除栅栏、撤销 Token 与重排在同一事务内提交。旧 attempt 的迟到结果不能覆盖新持有者；回写失败保留栅栏，重启可再次确认退出并结算。每个 Assignment 终身只自动重排一次，持久事件控制预算；已启动、暂停、释放或卡片关闭不恢复，在途投递租期内也不抢占。恢复 Run 若排队后仍无法派发，按相同超时升级；C-54 的 `queue_reason=concurrency_limit` 正常容量等待不计入此超时。重排只写 queued 与通知，不直接派发，继续由 Dispatcher 的统一 claim 路径接受容量限制。再次失败／超时写 `run_dispatch_stalled`：卡片时间线和事件都带卡号、Assignment、等待分钟数及 stop/start 建议，交活跃 PM Ops；没有可接手的 PM Ops（含后台自身失败）则创建实际的 HumanAction，进入 Needs You，沿用人工事项路由提示 Office。只发一次，不递归唤醒失败后台。自动恢复 Run 在主机启动补偿中被取消／失败（没有 started_at，且有 run_dispatch_aborted）也进入此升级路径，reason=recovery_startup_failed，不再依赖 dispatched 状态。
 
 MCP 看门狗只观察 running Run，按本次 started_at 与 Assignment 最近任意 MCP 调用时间的较晚者计算，默认 15 分钟（inactivityGraceMs 可配置）；超时产生 needs_attention 通知并交 PM Ops，每个 Run 用持久事件去重，不改变 Run 的业务结果。PM Ops 自身的投递失败、重发用尽或活跃度告警转交 Needs You，并给 PM Office 一条简短提示；PM Office 自身失败只进入 Needs You，避免两边循环升级。
 
@@ -1390,9 +1390,10 @@ status 先 hc get，再取 hc events 的初始快照，同时使用该快照的�
 ### 11.4 派发与 attention 诊断（C-56）
 
 - 自动停止复用 host 的 `stopRunRuntime`（停止前复核、release 后独立确认退出）及 `revokeStoppedRunTokens`（与取消同事务），领域取消复用 `cancelRunDispatch`／`abortDispatch` 的迁移和审计。C-54 失活回收与本卡派发超时合并时共用这些底层动作，各自保留宽限期、停止栅栏和告警策略。
+- 停止审计为 `run_dispatch_stop_requested/started/finished/withdrawn`，Run JSON 持久化停止栅栏，无须新增迁移。租约未过期不抢占；过期接管仍只操作冻结的原终端，停止期间 monitor 的 unknown 和普通投递租约结算都不能丢弃续办状态。Token 撤销失败会回滚取消、重排及 finished 审计，保留原停止栅栏以便下轮续办。
 - `cardigan attention` 中的 `delivery_failed` 表示调用失败，未必未送达；Dispatcher 使用持久投递历史计算下一次失败重试，不靠进程内计时器。`run_dispatch_recovered` 说明已使用一次自动重排，`run_dispatch_stalled` 说明仍未启动并已升级，事件和时间线保留中文处理指引。阈值由 `CARDIGAN_DISPATCH_TIMEOUT_MS` 配置，缺省 600000 毫秒。
 - 每轮清理已失效的 `needs_attention` / `delivery_failed`：关联 Run 已 completed/failed/cancelled，或 Assignment 已 released 时，经 `resolve` 变为 resolved。诊断转交通知按源事件里的 Run／Assignment 判断，不把 PM 读取告警所用的 Run 当成故障主体；原 Run 被自动取消的待投递通知也清除，防止再次按旧 Run 门铃。已结束 Run 的 ACK 重发告警会在下轮清除。
-- 已升级的派发 Run 迟到启动后，清除其派发告警并取消尚未处理的自动 HumanAction；Run 结束或 Assignment 释放同样关闭过期待办。清除保留历史与审计，不伪造 Agent ACK，不推进游标，也不自动标记业务工作完成。
+- 已升级的派发 Run 迟到启动后，清除其派发告警并取消尚未处理的自动 HumanAction；Run 结束或 Assignment 释放同样关闭过期待办。恢复启动失败是 Assignment 尚未恢复的事件，转交 PM Ops 的通知和 Needs You 待办不因补偿取消 Run 立即消失；只有同 Assignment 的后续 Run 真正启动、Assignment 释放或人工处理后才解除。原已结束 Run 的 attention 标记仍照常清除。清除保留历史与审计，不伪造 Agent ACK，不推进游标，也不自动标记业务工作完成。
 
 ---
 

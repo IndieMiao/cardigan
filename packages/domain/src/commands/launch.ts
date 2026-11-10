@@ -65,7 +65,7 @@ function exclusive(
 ) {
   ensure(
     !d.list("runs").some((r) => {
-      if (r.id === run_id || !unfinished(r)) return false;
+      if (r.id === run_id || (!unfinished(r) && !r.dispatch_stop)) return false;
       const owner = d.get("assignments", r.assignment_id);
       return (
         owner.id === assignment.id ||

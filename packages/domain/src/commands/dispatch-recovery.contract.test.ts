@@ -1,11 +1,15 @@
 import { beforeEach, expect, test } from "vitest";
 import {
   acknowledgeRun,
+  claimDispatchStop,
+  dispatchedAt,
+  finishRun,
   type Notification,
   obsoleteDispatchAttention,
   type Run,
   recoverDispatch,
   resolveDispatchAttention,
+  startDispatchStop,
 } from "../index.js";
 import { CommandDraft } from "./core.js";
 import {
@@ -27,8 +31,40 @@ beforeEach(() => {
   f.io = { ...f.io, clock: { now: () => new Date(now).toISOString() } };
   run = commit(dispatch(commit(queue())));
 });
-const recover = (target = run, failed_attempts = 0) =>
-  recoverDispatch(
+const recover = (target = run, failed_attempts = 0) => {
+  const current = f.state.runs.find((r) => r.id === target.id) ?? target;
+  const used = f.state.events.some((e) => e.type === "run_dispatch_recovered");
+  if (
+    !used &&
+    current.status === "dispatched" &&
+    (failed_attempts >= 5 ||
+      now - Date.parse(dispatchedAt(f.state, current) ?? f.io.clock.now()) >=
+        600000)
+  ) {
+    const claimed = commit(
+      claimDispatchStop(
+        f.state,
+        system,
+        {
+          run_id: current.id,
+          reason: "dispatch_timeout",
+          lease_ms: 60000,
+        },
+        f.io,
+      ),
+    );
+    if (claimed?.dispatch_stop)
+      commit(
+        startDispatchStop(
+          f.state,
+          system,
+          { run_id: current.id, attempt_id: claimed.dispatch_stop.attempt_id },
+          f.io,
+        ),
+      );
+  }
+  const stop = f.state.runs.find((r) => r.id === target.id)?.dispatch_stop;
+  return recoverDispatch(
     f.state,
     system,
     {
@@ -36,12 +72,13 @@ const recover = (target = run, failed_attempts = 0) =>
       timeout_ms: 600000,
       failed_attempts,
       max_failures: 5,
-      stopped_runtime:
-        f.state.assignments.find((a) => a.id === target.assignment_id)
-          ?.runtime_ref ?? null,
+      ...(stop
+        ? { stop_id: stop.attempt_id, stopped_runtime: stop.runtime_ref }
+        : {}),
     },
     f.io,
   );
+};
 
 test("timeout cancels and queues atomically, preserves snapshot and spends the Assignment's only recovery", () => {
   now += 599999;
@@ -206,4 +243,91 @@ test("dispatch recovery retains the original conflict fix's review exemption", (
   if (!replacement) throw new Error("Missing recovery");
   const draft = new CommandDraft(f.state, system, "recover_dispatch", f.io);
   expect(conflictRepairEvent(draft, item, replacement, false)).toBe(event.id);
+});
+
+test("started stop fences MCP acknowledgement and finish, but an unstarted claim can withdraw", () => {
+  const claimed = commit(
+    claimDispatchStop(
+      f.state,
+      system,
+      { run_id: run.id, reason: "dispatch_timeout", lease_ms: 60000 },
+      f.io,
+    ),
+  );
+  if (!claimed?.dispatch_stop) throw new Error("Missing stop");
+  commit(
+    startDispatchStop(
+      f.state,
+      system,
+      { run_id: run.id, attempt_id: claimed.dispatch_stop.attempt_id },
+      f.io,
+    ),
+  );
+  expect(
+    acknowledgeRun(f.state, actor(), { run_id: run.id }, f.io),
+  ).toMatchObject({ ok: false, error: { code: "illegal_transition" } });
+  expect(
+    finishRun(
+      f.state,
+      actor(),
+      { run_id: run.id, outcome: "completed", summary: "late" },
+      f.io,
+    ).ok,
+  ).toBe(false);
+  expect(f.state.runs[0]?.status).toBe("dispatched");
+});
+
+test("expired stop owner cannot settle after takeover; unknown Run resumes once", () => {
+  const first = commit(
+    claimDispatchStop(
+      f.state,
+      system,
+      { run_id: run.id, reason: "dispatch_timeout", lease_ms: 100 },
+      f.io,
+    ),
+  );
+  if (!first?.dispatch_stop) throw new Error("Missing stop");
+  commit(
+    startDispatchStop(
+      f.state,
+      system,
+      { run_id: run.id, attempt_id: first.dispatch_stop.attempt_id },
+      f.io,
+    ),
+  );
+  f.state = {
+    ...f.state,
+    runs: f.state.runs.map((r) => ({ ...r, status: "unknown" })),
+  };
+  now += 101;
+  const second = commit(
+    claimDispatchStop(
+      f.state,
+      system,
+      { run_id: run.id, reason: "dispatch_timeout", lease_ms: 100 },
+      f.io,
+    ),
+  );
+  if (!second?.dispatch_stop) throw new Error("Missing takeover");
+  const finish = (id: string) =>
+    recoverDispatch(
+      f.state,
+      system,
+      {
+        run_id: run.id,
+        timeout_ms: 100,
+        failed_attempts: 0,
+        max_failures: 5,
+        stop_id: id,
+        stopped_runtime: first.dispatch_stop?.runtime_ref ?? null,
+      },
+      f.io,
+    );
+  expect(commit(finish(first.dispatch_stop.attempt_id))).toBeUndefined();
+  expect(commit(finish(second.dispatch_stop.attempt_id))?.status).toBe(
+    "queued",
+  );
+  expect(commit(finish(second.dispatch_stop.attempt_id))).toBeUndefined();
+  expect(f.state.runs).toHaveLength(2);
+  expect(f.state.runs[0]?.dispatch_stop).toBeUndefined();
 });

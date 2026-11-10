@@ -250,6 +250,14 @@ export type Assignment = AssignmentFields &
   );
 export type RunOutcome = "completed" | "blocked" | "failed";
 export interface Run {
+  /** Durable automatic-stop fence; independent of bell delivery leases. */
+  readonly dispatch_stop?: {
+    readonly attempt_id: EventId;
+    readonly runtime_ref: RuntimeRef | null;
+    readonly lease_until: Timestamp;
+    readonly stopping: boolean;
+    readonly reason: "dispatch_timeout" | "delivery_retry_exhausted";
+  };
   readonly employee_id?: EmployeeId;
   /** Actual launch profile; absent on legacy runs. */
   readonly launch_profile_ref?: string;

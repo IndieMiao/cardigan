@@ -1,8 +1,12 @@
 import {
+  abortDispatch,
   acknowledgeRun,
+  claimDispatchStop,
   dispatchRun,
+  finishRun,
   listNeedsYou,
   queueRun,
+  startDispatchStop,
 } from "@cardigan/domain";
 import {
   beginLaunchAttempt,
@@ -345,7 +349,10 @@ test("unconfirmed terminal stop escalates without cancelling or requeuing", asyn
   });
   f.advance(100);
   await d.tick();
-  expect(f.latest()).toEqual(original);
+  expect(f.latest()).toMatchObject({
+    ...original,
+    dispatch_stop: { stopping: true },
+  });
   expect(count("run_dispatch_recovered")).toBe(0);
   expect(count("run_dispatch_stalled")).toBe(1);
   expect(
@@ -450,3 +457,272 @@ test("PM Ops delivery failure escalates to Needs You without notifying itself re
   expect(f.state().human_actions).toHaveLength(1);
   expect(f.options.startRun).toHaveBeenCalledOnce();
 });
+
+test("release in flight rejects late MCP start and finish before atomic recovery and revocation", async () => {
+  f.comment();
+  const d = dispatcher({ dispatchTimeoutMs: 100 });
+  await d.tick();
+  const run = f.latest();
+  f.store.issueToken({
+    project_id: f.project,
+    assignment_id: run.assignment_id,
+    role: { role_version: 1, allowed_tools: ["whoami"] },
+  });
+  const release = f.runtime.release;
+  f.runtime.release = vi.fn(async (...args) => {
+    const state = f.state(),
+      actor = f.actorFor(f.target.assignment);
+    f.store.uow.run((tx) => {
+      const ports = { clock: f.clock, ids: tx.ids };
+      expect(acknowledgeRun(state, actor, { run_id: run.id }, ports).ok).toBe(
+        false,
+      );
+      expect(
+        finishRun(
+          state,
+          actor,
+          { run_id: run.id, outcome: "completed", summary: "late" },
+          ports,
+        ).ok,
+      ).toBe(false);
+    });
+    return release(...args);
+  });
+  f.advance(100);
+  await d.tick();
+  expect(f.state().runs.find((r) => r.id === run.id)?.status).toBe("cancelled");
+  expect(
+    tokensForAssignment(f.store.database, f.project, run.assignment_id).every(
+      (t) => t.revoked_at !== null,
+    ),
+  ).toBe(true);
+  expect(count("run_dispatch_stop_finished")).toBe(1);
+  expect(count("run_dispatch_recovered")).toBe(1);
+});
+
+test("restart takes over an expired stop after monitor records unknown and ignores the original late result", async () => {
+  f.comment();
+  const options = { dispatchTimeoutMs: 100 };
+  await dispatcher(options).tick();
+  const run = f.latest();
+  f.store.issueToken({
+    project_id: f.project,
+    assignment_id: run.assignment_id,
+    role: { role_version: 1, allowed_tools: ["whoami"] },
+  });
+  let complete!: () => void;
+  const release = f.runtime.release;
+  f.runtime.release = vi.fn(async (...args) => {
+    await release(...args); // Terminal really exited before the response arrived.
+    f.store.uow.run((tx) => {
+      const current = tx.runs.get(f.project, run.id),
+        a = tx.assignments.get(f.project, run.assignment_id);
+      if (!current || !a) throw new Error("Missing stop target");
+      tx.runs.put(f.project, { ...current, status: "unknown" });
+      tx.assignments.put(f.project, { ...a, runtime_state: "unknown" });
+    });
+    await new Promise<void>((resolve) => {
+      complete = resolve;
+    });
+    return { ok: true, value: undefined };
+  });
+  f.advance(100);
+  const stopping = dispatcher(options).tick();
+  try {
+    await expect.poll(() => f.latest().status).toBe("unknown");
+    expect(unfinishedBellAttempts(f.store.database, f.project)).toEqual([]);
+    const reopened = Store.open({ dataDir: f.dataDir });
+    try {
+      await dispatcher({ ...options, store: reopened }).tick();
+      expect(count("run_dispatch_recovered")).toBe(0);
+      f.advance(60001);
+      await dispatcher({ ...options, store: reopened }).tick();
+    } finally {
+      reopened.close();
+    }
+    expect(count("run_dispatch_recovered")).toBe(1);
+    expect(f.state().runs.find((r) => r.id === run.id)?.status).toBe(
+      "cancelled",
+    );
+    expect(
+      tokensForAssignment(f.store.database, f.project, run.assignment_id).every(
+        (t) => t.revoked_at !== null,
+      ),
+    ).toBe(true);
+  } finally {
+    complete();
+    await stopping;
+  }
+  await dispatcher(options).tick();
+  expect(count("run_dispatch_recovered")).toBe(1);
+  expect(count("run_dispatch_stop_finished")).toBe(1);
+  expect(f.runtime.release).toHaveBeenCalledOnce();
+});
+
+test("persisted stop survives process loss with no live original call", async () => {
+  f.comment();
+  await dispatcher().tick();
+  const run = f.latest();
+  const claimed = f.apply(
+    (s, a, p) =>
+      claimDispatchStop(
+        s,
+        a,
+        {
+          run_id: run.id,
+          lease_ms: 100,
+          reason: "dispatch_timeout",
+        },
+        p,
+      ),
+    { kind: "system", project_id: f.project },
+  );
+  if (!claimed?.dispatch_stop) throw new Error("Missing stop");
+  f.apply(
+    (s, a, p) =>
+      startDispatchStop(
+        s,
+        a,
+        { run_id: run.id, attempt_id: claimed.dispatch_stop?.attempt_id ?? "" },
+        p,
+      ),
+    { kind: "system", project_id: f.project },
+  );
+  vi.mocked(f.runtime.status).mockResolvedValue({
+    ok: true,
+    value: { process: "exited", agent: "unknown", observed_seq: 3 },
+  });
+  f.advance(101);
+  const reopened = Store.open({ dataDir: f.dataDir });
+  try {
+    await dispatcher({ store: reopened }).tick();
+  } finally {
+    reopened.close();
+  }
+  expect(count("run_dispatch_recovered")).toBe(1);
+  expect(f.runtime.release).not.toHaveBeenCalled();
+});
+
+test("failed token revocation rolls back cancellation and requeue; persisted stop retries settlement", async () => {
+  f.comment();
+  const d = dispatcher({ dispatchTimeoutMs: 100 });
+  await d.tick();
+  const run = f.latest();
+  f.store.issueToken({
+    project_id: f.project,
+    assignment_id: run.assignment_id,
+    role: { role_version: 1, allowed_tools: ["whoami"] },
+  });
+  f.store.database.exec(
+    "CREATE TRIGGER fail_revoke BEFORE UPDATE OF revoked_at ON tokens BEGIN SELECT RAISE(ABORT, 'test revoke failure'); END",
+  );
+  f.advance(100);
+  try {
+    await expect(d.tick()).rejects.toThrow("test revoke failure");
+  } finally {
+    f.store.database.exec("DROP TRIGGER fail_revoke");
+  }
+  expect(f.latest()).toMatchObject({
+    id: run.id,
+    status: "dispatched",
+    dispatch_stop: { stopping: true },
+  });
+  expect(count("run_dispatch_recovered")).toBe(0);
+  expect(
+    tokensForAssignment(f.store.database, f.project, run.assignment_id).every(
+      (t) => t.revoked_at === null,
+    ),
+  ).toBe(true);
+  f.advance(60001);
+  await dispatcher({ dispatchTimeoutMs: 100 }).tick();
+  expect(count("run_dispatch_stop_finished")).toBe(1);
+  expect(count("run_dispatch_recovered")).toBe(1);
+  expect(f.runtime.release).toHaveBeenCalledOnce();
+});
+
+test("unconfirmed stop stays fenced and a later confirmed exit completes the same recovery", async () => {
+  f.comment();
+  const d = dispatcher({ dispatchTimeoutMs: 100 });
+  await d.tick();
+  vi.mocked(f.runtime.status).mockResolvedValue({
+    ok: true,
+    value: { process: "unknown", agent: "unknown", observed_seq: 2 },
+  });
+  f.advance(100);
+  await d.tick();
+  expect(f.state().human_actions[0]?.status).toBe("open");
+  expect(f.latest().dispatch_stop?.stopping).toBe(true);
+  vi.mocked(f.runtime.status).mockResolvedValue({
+    ok: true,
+    value: { process: "exited", agent: "unknown", observed_seq: 3 },
+  });
+  f.advance(60001);
+  await d.tick();
+  expect(count("run_dispatch_recovered")).toBe(1);
+  expect(count("run_dispatch_stop_finished")).toBe(1);
+  expect(f.state().human_actions[0]?.status).toBe("cancelled");
+  expect(f.latest().dispatch_stop).toBeUndefined();
+});
+
+test.each([false, true])(
+  "recovery startup compensation escalates once and remains actionable (Ops=%s)",
+  async (withOps) => {
+    if (withOps) {
+      const ops = f.pm();
+      f.store.uow.run((tx) =>
+        tx.assignments.put(f.project, { ...ops, standing_mode: "ops" }),
+      );
+      f.session(ops, false);
+      f.skipEvents();
+    }
+    f.comment();
+    const d = dispatcher({ dispatchTimeoutMs: 100 });
+    await d.tick();
+    vi.mocked(f.options.startRun).mockImplementationOnce(async ({ run }) => {
+      f.apply((s, a, p) =>
+        abortDispatch(s, a, { run_id: run.id, reason: "startup_failed" }, p),
+      );
+      throw new Error("host compensation");
+    });
+    f.advance(100);
+    await d.tick();
+    expect(f.latest().status).toBe("cancelled");
+    await d.tick();
+    f.advance(600000);
+    await d.tick();
+    expect(count("run_dispatch_stalled")).toBe(1);
+    const incident = f
+      .state()
+      .events.find((e) => e.type === "run_dispatch_stalled");
+    expect(incident?.payload).toMatchObject({
+      reason: "recovery_startup_failed",
+    });
+    if (withOps) {
+      expect(f.state().human_actions).toHaveLength(0);
+      expect(
+        f.store
+          .listNotifications({ project_id: f.project })
+          .some(
+            (n) =>
+              n.event_id === incident?.id &&
+              n.recipient.kind === "pm_ops" &&
+              n.status === "pending",
+          ),
+      ).toBe(true);
+    } else {
+      const needs = listNeedsYou(f.state(), {
+        kind: "human",
+        project_id: f.project,
+      });
+      expect(needs.ok && needs.value.data.human_actions).toHaveLength(1);
+      expect(f.state().human_actions[0]).toMatchObject({ status: "open" });
+      expect(f.state().human_actions[0]?.instructions).toContain(
+        "cardigan assignment start",
+      );
+      f.session(f.target.assignment);
+      f.skipEvents();
+      await d.tick();
+      expect(f.state().human_actions[0]?.status).toBe("cancelled");
+    }
+  },
+);

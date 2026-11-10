@@ -28,6 +28,29 @@ export const dispatchRecoveryQueuedAt = (state: CommandState, run: Run) =>
       field(e.payload, "replacement_run_id") === run.id,
   )?.created_at;
 
+export const dispatchRecoveryFailed = (state: CommandState, run: Run) =>
+  !run.started_at &&
+  ["cancelled", "failed"].includes(run.status) &&
+  !!dispatchRecoveryQueuedAt(state, run) &&
+  state.events.some(
+    (e) =>
+      e.type === "run_dispatch_aborted" &&
+      field(e.payload, "run_id") === run.id,
+  );
+
+function startupFailureResolved(state: CommandState, run: Run): boolean {
+  return (
+    state.assignments.find((a) => a.id === run.assignment_id)?.status ===
+      "released" ||
+    state.runs.some(
+      (r) =>
+        r.assignment_id === run.assignment_id &&
+        r.started_at &&
+        Number(r.id.slice(2)) > Number(run.id.slice(2)),
+    )
+  );
+}
+
 /** Host supplies durable delivery attempt counts; business eligibility is rechecked here. */
 export function recoverDispatch(
   state: CommandState,
@@ -39,6 +62,7 @@ export function recoverDispatch(
     max_failures: number;
     stopped_runtime?: RuntimeRef | null;
     stop_failed?: boolean;
+    stop_id?: string;
   },
   ports: CommandPorts,
 ) {
@@ -58,15 +82,23 @@ export function recoverDispatch(
       a.scope === "work_item"
         ? d.get("cards", d.get("work_items", a.work_item_id).card_id)
         : undefined;
-    if (
+    const stop = run.dispatch_stop;
+    if (p.stop_id !== undefined && stop?.attempt_id !== p.stop_id) return;
+    const stopping = !!(p.stop_id && stop?.stopping);
+    const stopped = stopping && "stopped_runtime" in p;
+    const startupFailed = dispatchRecoveryFailed(state, run);
+    if (stopping) {
+      ensure(
+        JSON.stringify(a.runtime_ref) === JSON.stringify(stop?.runtime_ref),
+        "invariant_violation",
+        "Stopped terminal reference changed",
+      );
+    } else if (
       a.status !== "active" ||
-      (run.status !== "dispatched" &&
-        !(
-          run.status === "unknown" &&
-          ("stopped_runtime" in p || p.stop_failed)
-        ) &&
-        !(run.status === "queued" && dispatchRecoveryQueuedAt(state, run))) ||
       run.started_at ||
+      (!["dispatched"].includes(run.status) &&
+        !startupFailed &&
+        !(run.status === "queued" && dispatchRecoveryQueuedAt(state, run))) ||
       (card && ["done", "cancelled"].includes(card.status))
     )
       return;
@@ -74,14 +106,19 @@ export function recoverDispatch(
       dispatchedAt(state, run) ?? dispatchRecoveryQueuedAt(state, run);
     if (!started) return;
     const elapsed = Date.parse(d.now) - Date.parse(started);
-    const reason =
-      elapsed >= p.timeout_ms
-        ? "dispatch_timeout"
-        : p.failed_attempts >= p.max_failures
-          ? "delivery_retry_exhausted"
-          : undefined;
+    const reason = startupFailed
+      ? "recovery_startup_failed"
+      : stopping
+        ? stop?.reason
+        : elapsed >= p.timeout_ms
+          ? "dispatch_timeout"
+          : p.failed_attempts >= p.max_failures
+            ? "delivery_retry_exhausted"
+            : undefined;
+    if (!reason) return;
+    // A prior unconfirmed-stop alert cannot prevent later exit settlement.
     if (
-      !reason ||
+      !stopped &&
       state.events.some(
         (e) =>
           e.type === "run_dispatch_stalled" &&
@@ -95,29 +132,24 @@ export function recoverDispatch(
         field(e.payload, "assignment_id") === a.id,
     );
     const minutes = Math.max(0, Math.floor(elapsed / 60000));
-    const context = `${card ? `${card.id}「${card.title}」` : "项目常驻任务"}的 ${a.id}（${run.id}）派发后已等待 ${minutes} 分钟，仍未开始工作`;
-    if (!recovered && !p.stop_failed) {
+    const context = `${card ? `${card.id}「${card.title}」` : "项目常驻任务"}的 ${a.id}（${run.id}）派发后已等待 ${minutes} 分钟，${startupFailed ? "自动恢复后的启动失败" : "仍未开始工作"}`;
+    if (!recovered && !p.stop_failed && !startupFailed) {
       ensure(
-        "stopped_runtime" in p &&
-          JSON.stringify(p.stopped_runtime) === JSON.stringify(a.runtime_ref),
+        stopped &&
+          JSON.stringify(p.stopped_runtime) ===
+            JSON.stringify(stop?.runtime_ref),
         "validation_failed",
-        "Automatic recovery requires confirmed exit of the current terminal",
+        "Automatic recovery requires a started stop fence and confirmed terminal exit",
       );
-      ensure(
-        !d
-          .list("runs")
-          .some(
-            (r) => r.id !== run.id && r.assignment_id === a.id && !finished(r),
-          ),
-        "invariant_violation",
-        "Assignment already has another unfinished Run",
-      );
-      cancelRunDispatch(
-        d,
-        run,
-        `${context}；${reason}，确认终端退出后自动重排一次。`,
-      );
-      // RuntimeMonitor may observe the terminal exit while release is awaited.
+      const { dispatch_stop: _stop, ...unfenced } = run;
+      if (finished(run)) d.put("runs", unfenced);
+      else
+        cancelRunDispatch(
+          d,
+          unfenced,
+          `${context}；${reason}，确认终端退出后自动重排一次。`,
+        );
+      // Preserve any host-recorded terminal outcome, but always settle credentials.
       if (["unknown", "lost"].includes(a.runtime_state))
         d.put("assignments", {
           ...a,
@@ -126,6 +158,32 @@ export function recoverDispatch(
           ),
           runtime_ref: null,
         });
+      else if (a.runtime_state === "idle")
+        d.put("assignments", { ...a, runtime_ref: null });
+      d.emit("run_dispatch_stop_finished", card?.id, {
+        run_id: run.id,
+        assignment_id: a.id,
+        attempt_id: stop?.attempt_id ?? "",
+        cancelled: !finished(run),
+      });
+      if (
+        finished(run) ||
+        a.status !== "active" ||
+        (card && ["done", "cancelled"].includes(card.status))
+      )
+        return;
+      ensure(
+        !d
+          .list("runs")
+          .some(
+            (r) =>
+              r.id !== run.id &&
+              r.assignment_id === a.id &&
+              (!finished(r) || r.dispatch_stop),
+          ),
+        "invariant_violation",
+        "Assignment already has another unfinished Run",
+      );
       const id = d.ids.next(state.project_id, "run");
       const body = `${context}；已取消旧执行并自动重排为 ${id}。此 Assignment 的自动恢复机会已使用。`;
       const event = d.emit(
@@ -204,6 +262,7 @@ export function recoverDispatch(
           human_action_id: id,
           blocked_work_items: [],
           dispatch_run_id: run.id,
+          dispatch_reason: reason,
         },
         { type: "human_action", body, human_action_id: id },
       );
@@ -239,6 +298,12 @@ export function obsoleteDispatchAttention(
         ? note.recipient.assignment_id
         : undefined));
   const a = state.assignments.find((a) => a.id === assignmentId);
+  if (
+    run &&
+    field(event?.payload, "reason") === "recovery_startup_failed" &&
+    note.recipient.kind !== "assignment"
+  )
+    return startupFailureResolved(state, run);
   return (
     a?.status === "released" ||
     !!(
@@ -268,7 +333,15 @@ export function resolveDispatchAttention(
       );
       if (!run) continue;
       const a = d.get("assignments", run.assignment_id);
-      if (a.status !== "released" && !finished(run) && run.status !== "running")
+      if (
+        field(source?.payload, "dispatch_reason") === "recovery_startup_failed"
+      ) {
+        if (!startupFailureResolved(state, run)) continue;
+      } else if (
+        a.status !== "released" &&
+        !finished(run) &&
+        run.status !== "running"
+      )
         continue;
       d.put("human_actions", { ...action, status: "cancelled" });
       d.emit(
