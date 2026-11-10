@@ -584,9 +584,8 @@ button.quiet,
   min-height: 0;
   display: flex;
   flex-direction: column;
-  background: var(--surface-muted);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
+  background: transparent;
+  border: 0;
   padding: 10px;
 }
 .board-column-collapsed {
@@ -640,6 +639,17 @@ button.quiet,
 .board-load-more {
   width: 100%;
   margin-top: var(--gap);
+}
+.board-column .column-toggle,
+.board-column .board-load-more {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  color: var(--text-muted);
+}
+.board-column .column-toggle:hover,
+.board-column .board-load-more:hover {
+  text-decoration: underline;
 }
 .board-lane-total {
   margin: var(--gap) 0 0;
