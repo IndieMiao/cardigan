@@ -199,6 +199,7 @@ export async function startCardiganServer(
     try {
       web = await startWebServer({
         store,
+        mergeGate,
         dataDir: config.dataDir,
         config: options.web.config,
         ...(options.web.log === undefined ? {} : { log: options.web.log }),

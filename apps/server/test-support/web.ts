@@ -8,7 +8,11 @@ import {
   type WebConfigOverrides,
   type WebEnv,
 } from "../src/web/config.js";
-import { type RunningWebServer, startWebServer } from "../src/web/server.js";
+import {
+  type RunningWebServer,
+  startWebServer,
+  type WebServerOptions,
+} from "../src/web/server.js";
 
 /**
  * Test support for the Workbench listener.
@@ -32,6 +36,7 @@ export interface WebHarness {
 }
 
 export interface HarnessOptions {
+  readonly mergeGate?: WebServerOptions["mergeGate"];
   readonly log?: (event: Readonly<Record<string, unknown>>) => void;
   readonly env?: WebEnv;
   readonly overrides?: WebConfigOverrides;
@@ -69,6 +74,7 @@ export async function webHarness(
     log: options.log ?? (() => undefined),
     store,
     dataDir,
+    ...(options.mergeGate ? { mergeGate: options.mergeGate } : {}),
     config: resolveWebConfig(options.env, {
       port: 0,
       staticDir,

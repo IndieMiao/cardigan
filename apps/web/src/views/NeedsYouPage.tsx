@@ -15,6 +15,7 @@ import {
   StatusTag,
   Time,
 } from "../components/Foundation.js";
+import { MergeCheck } from "../components/MergeCheck.js";
 import {
   CardLink,
   CopyCommand,
@@ -295,6 +296,7 @@ function MergeConfirmation({
   const [reason, setReason] = useState("");
   const action = useAction(done);
   const merge = q.merge_confirmation;
+  const check = merge?.merge_check;
   const confirmed = q.status === "resolved";
   const cardId = q.card_id ?? q.related_cards[0]?.id ?? null;
   const decide = (option: "merge" | "hold") =>
@@ -305,6 +307,9 @@ function MergeConfirmation({
     <article className="needs-item needs-merge" aria-label={`合并确认 ${q.id}`}>
       <DecisionMeta q={q} projectId={projectId} elapsed={elapsed} />
       <h3 className="needs-question">{decisionTitle(q)}</h3>
+      {merge?.merge_gate_enabled && (
+        <MergeCheck check={check ?? null} projectId={projectId} live />
+      )}
       <section className="needs-merge-section" aria-label="要合并的交付">
         <h4>要合并的交付</h4>
         {!merge || merge.deliveries.length === 0 ? (
@@ -403,6 +408,39 @@ function MergeConfirmation({
               确认合并
             </button>
           )}
+          {merge?.merge_gate_enabled && check?.status !== "passed" && (
+            <span className="hint">检查通过后才会合并</span>
+          )}
+          {merge?.merge_gate_enabled &&
+            check &&
+            ["failed", "timed_out"].includes(check.status) &&
+            cardId && (
+              <button
+                type="button"
+                className="quiet"
+                disabled={action.busy}
+                onClick={() =>
+                  void action.run(
+                    [
+                      projectId,
+                      cardId,
+                      "recheck",
+                      check.completion_id,
+                      check.attempt_id,
+                    ],
+                    (key) =>
+                      client.recheckMerge(
+                        projectId,
+                        cardId,
+                        check.completion_id,
+                        key,
+                      ),
+                  )
+                }
+              >
+                重新检查
+              </button>
+            )}
           {!confirmed && (
             <button
               type="button"

@@ -2210,6 +2210,7 @@ body[data-lightbox="open"] .drawer-overlay {
   background: var(--status-wait);
 }
 .status-failed::before,
+.status-timed_out::before,
 .status-blocked::before,
 .status-lost::before,
 .status-rejected::before,
@@ -2226,6 +2227,18 @@ body[data-lightbox="open"] .drawer-overlay {
 .status-acked::before,
 .status-online::before {
   background: var(--status-done);
+}
+.status-interrupted::before {
+  background: var(--status-muted);
+}
+.merge-check {
+  margin-block: 12px;
+  min-width: 0;
+}
+.merge-check-summary {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--danger);
 }
 .needs-item > header {
   display: flex;
