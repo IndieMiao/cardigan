@@ -321,7 +321,9 @@ test("merge status lists the card, the confirmation and the plan", async () => {
   expect(result.out).toContain("confirmation: q(1) open");
   expect(result.out).toContain("delivery: D-1 W-1 git_head=");
   expect(result.out).toContain("plan: not ready");
-  expect(result.out).toContain("Merge confirmation has not been granted");
+  expect(result.out).toContain(
+    `无法生成合并计划 ${card_id}：本次完成申请尚未获得合并确认（illegal_transition）`,
+  );
 });
 
 test("merge confirm records the merge decision with the command as the quote", async () => {

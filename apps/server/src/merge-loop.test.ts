@@ -19,6 +19,7 @@ import {
   completeHumanAction,
   latestMergeCheck,
   prepareMergePlan,
+  recordMergeResult,
   requestHumanAction,
   setProjectPreferences,
 } from "@cardigan/domain";
@@ -29,7 +30,13 @@ import {
 } from "@cardigan/git-service";
 import { CentralGitTransport } from "@cardigan/git-transport";
 import { loadMergeGateConfig } from "@cardigan/host";
-import { authenticate, getCardTool, unwrap } from "@cardigan/mcp-server";
+import {
+  authenticate,
+  getCardTool,
+  loadCommandState,
+  persistEffect,
+  unwrap,
+} from "@cardigan/mcp-server";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { createProcessIo, main } from "../../cli/src/index.js";
 import { ServerGit } from "./git.js";
@@ -439,6 +446,85 @@ async function gated(run = "true") {
     });
   return { options, errors, binding, cli };
 }
+
+test("a conflict before confirmation atomically supersedes the old question and permits a new completion", async () => {
+  const scenario = m4Scenario(f, "confirm");
+  const sha = agentCommit("agent/C-1/W-1", "README.md", "agent change\n");
+  const { product, completion } = await acceptThroughMergeGate(
+    f,
+    scenario,
+    sha,
+  );
+  await pin(product.id, sha);
+  commit(repos.source, "README.md", "baseline change\n");
+  const decision = mergeConfirmation(f, scenario.card.id);
+  if (!decision) throw new Error("Missing confirmation");
+  expect(
+    needsYou(f.state(), f.clock.now()).decisions.map((q) => q.id),
+  ).toContain(decision.id);
+
+  const before = f.state();
+  expect(() =>
+    f.store.uow.run((tx) => {
+      const effect = unwrap(
+        recordMergeResult(
+          loadCommandState(tx, f.project_id, { merge_gate_enabled: true }),
+          { kind: "system", project_id: f.project_id },
+          {
+            card_id: scenario.card.id,
+            completion_id: completion.id,
+            result: {
+              kind: "conflicted",
+              delivery_id: product.id,
+              files: ["README.md"],
+            },
+          },
+          { clock: f.clock, ids: tx.ids },
+        ),
+      );
+      persistEffect(tx, f.project_id, effect);
+      throw new Error("Abort invalidation transaction");
+    }),
+  ).toThrow("Abort invalidation transaction");
+  expect(f.state()).toEqual(before);
+
+  const c = await gated();
+  const loop = new MergeExecutor(c.options);
+  await loop.tick();
+  expect(c.errors).toEqual([]);
+  expect(f.card(scenario.card.id).status).toBe("in_progress");
+  expect(f.state().deliveries.find((v) => v.id === completion.id)?.status).toBe(
+    "superseded",
+  );
+  expect(mergeConfirmation(f, scenario.card.id)).toEqual({
+    ...decision,
+    status: "superseded",
+  });
+  expect(
+    needsYou(f.state(), f.clock.now()).decisions.map((q) => q.id),
+  ).not.toContain(decision.id);
+  expect(f.state().timeline).toContainEqual(
+    expect.objectContaining({
+      type: "system",
+      author: "system",
+      decision_id: decision.id,
+      delivery_id: completion.id,
+      body: expect.stringContaining("自动标记为已被取代"),
+    }),
+  );
+  await loop.tick();
+  expect(
+    f.state().events.filter((e) => e.type === "decision_superseded"),
+  ).toHaveLength(1);
+
+  const repaired = agentCommit("agent/C-1/W-1", "feature.txt", "repaired\n");
+  const next = await acceptThroughMergeGate(f, scenario, repaired);
+  expect(mergeConfirmation(f, scenario.card.id)).toMatchObject({
+    status: "open",
+    target: { delivery_id: next.completion.id },
+  });
+  expect(needsYou(f.state(), f.clock.now()).decisions).toHaveLength(1);
+}, 30_000);
 
 test("real checks fail, CLI requeues, and a restart publishes the checked tree after human confirmation", async () => {
   const scenario = m4Scenario(f, "confirm");

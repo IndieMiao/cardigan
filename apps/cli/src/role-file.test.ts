@@ -99,14 +99,60 @@ test("role add --file writes version 1 and update appends version 2", async () =
 test("role add refuses a role that already has a version", async () => {
   await run(["role", "add", "--file", roleFile]);
   expect(await run(["role", "add", "--file", roleFile])).toBe(2);
-  expect(errors.join("\n")).toContain("already exists");
-  expect(errors.join("\n")).toContain("role update");
+  expect(errors.at(-1)).toBe(
+    "无法创建角色 coder：角色已存在，请用 cardigan role update 添加新版本（validation_failed）",
+  );
 });
 
 test("role update refuses a role that was never added", async () => {
   expect(await run(["role", "update", "--file", roleFile])).toBe(2);
-  expect(errors.join("\n")).toContain("does not exist");
+  expect(errors.at(-1)).toBe(
+    "无法更新角色 coder：角色不存在，请先用 cardigan role add 创建（not_found）",
+  );
 });
+
+test.each([
+  {
+    args: ["copy", "coder", "coder"],
+    expected:
+      "无法复制角色 coder：角色已存在，请用 cardigan role update 添加新版本（validation_failed）",
+  },
+  {
+    args: ["activate", "missing"],
+    expected:
+      "无法恢复角色 missing：角色不存在，请先用 cardigan role add 创建（not_found）",
+  },
+  {
+    args: ["deactivate", "missing"],
+    expected:
+      "无法停用角色 missing：角色不存在，请先用 cardigan role add 创建（not_found）",
+  },
+  {
+    args: ["rollback", "coder", "--version", "99"],
+    expected:
+      "无法回退角色 coder：角色版本 v99 不存在，请用 cardigan role show coder --history 查看版本历史（not_found）",
+  },
+])(
+  "domain role rejection keeps the operation, target and code: $args",
+  async ({ args, expected }) => {
+    expect(await run(["role", "add", "--file", roleFile])).toBe(0);
+    const store = Store.open({ dataDir });
+    try {
+      const snapshot = () =>
+        store.uow.read((tx) => ({
+          roles: tx.roles.list("p-roles"),
+          events: tx.events.listAfter("p-roles", undefined, 0),
+        }));
+      const before = snapshot();
+      expect(await run(["role", ...args])).toBe(2);
+      expect(errors).toEqual([`数据目录：${dataDir}`, expected]);
+      expect(output).toEqual([]);
+      expect(snapshot()).toEqual(before);
+    } finally {
+      store.close();
+    }
+  },
+);
 
 test("a role file cannot pin a version", async () => {
   writeFileSync(roleFile, `${ROLE_YAML}version: 5\n`);
@@ -182,7 +228,9 @@ test("project set-repo needs --path and an absolute directory", async () => {
   expect(errors.join("\n")).toContain("--path");
 
   expect(await run(["project", "set-repo", "--path", "relative/repo"])).toBe(2);
-  expect(errors.join("\n")).toContain("absolute");
+  expect(errors.join("\n")).toContain(
+    "无法设置项目仓库 p-roles：仓库路径必须是绝对路径（validation_failed）",
+  );
 });
 
 test("a run pinned to an old version still resolves that version", async () => {

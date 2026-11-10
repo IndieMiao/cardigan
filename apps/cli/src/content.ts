@@ -18,7 +18,7 @@ import {
   ToolError,
 } from "@cardigan/mcp-server";
 import { openStore } from "@cardigan/store";
-import { CliError, EXIT } from "./errors.js";
+import { CliError, EXIT, formatCommandError } from "./errors.js";
 import {
   announceDataDir,
   humanActor,
@@ -139,37 +139,6 @@ async function readFile(path: string, io: CliIo, attachment: boolean) {
   }
 }
 
-const ERROR_MESSAGES: Readonly<Record<string, string>> = {
-  "Attachment exceeds 10 MiB": "附件超过 10 MiB",
-  "File must be canonical padded base64": "附件编码不合法",
-  "Attachment sha256 does not match content": "附件 SHA-256 校验失败",
-  "Attachment storage failed":
-    "附件存储失败，请检查数据目录权限和已存文件的完整性",
-  "Artifacts require a decision basis":
-    "artifact 附件必须提供 --basis 拍板编号",
-  "Attachment basis was not found": "附件依据的拍板在当前项目中不存在",
-  "Attachment target was not found": "附件挂载条目在当前项目中不存在",
-  "Attachment target belongs to another card": "附件挂载条目属于另一张卡片",
-  "original_filename must be at most 200 characters":
-    "附件文件名不能超过 200 字符",
-  "note must be at most 200 characters": "附件说明不能超过 200 字符",
-  "original_filename must not contain control characters":
-    "附件文件名不能包含控制字符",
-  "note must not contain control characters": "附件说明不能包含控制字符",
-};
-
-function must<T>(result: Result<T>): T {
-  if (result.ok) return result.value;
-  const { message, code } = result.error;
-  throw new CliError(
-    ERROR_MESSAGES[message] ??
-      (code === "not_found"
-        ? "卡片在当前项目中不存在"
-        : `${message}（${code}）`),
-    EXIT.usage,
-  );
-}
-
 export async function runContentCommand(
   command: "comment" | "attachment" | "card_done",
   args: readonly string[],
@@ -180,6 +149,13 @@ export async function runContentCommand(
     return EXIT.ok;
   }
   const p = parseArgs(command, args);
+  const must = <T>(result: Result<T>, operation: string): T => {
+    if (result.ok) return result.value;
+    throw new CliError(
+      formatCommandError(operation, p.cardId, result.error),
+      EXIT.usage,
+    );
+  };
   const dataDir = announceDataDir(io, p.flags["data-dir"]);
   const store = openStore({ dataDir });
   try {
@@ -216,15 +192,15 @@ export async function runContentCommand(
         });
       } catch (error) {
         if (error instanceof ToolError)
-          must({ ok: false, error: error.toDomainError() });
+          must({ ok: false, error: error.toDomainError() }, "上传附件");
         throw error;
       }
     }
     const output = store.uow.run((tx) => {
       const actor = humanActor(project);
       const ports = { clock: systemClock, ids: tx.ids };
-      const save = <T>(result: Result<CommandEffect<T>>) => {
-        const effect = must(result);
+      const save = <T>(result: Result<CommandEffect<T>>, operation: string) => {
+        const effect = must(result, operation);
         persistEffect(tx, project, effect);
         return effect.data;
       };
@@ -242,6 +218,7 @@ export async function runContentCommand(
             },
             ports,
           ),
+          command === "card_done" ? "完成卡片" : "发表评论",
         );
         if (!comment) throw new CliError("评论保存失败", EXIT.failure);
         entry = comment.id;
@@ -265,6 +242,7 @@ export async function runContentCommand(
             receipt,
             ports,
           ),
+          "上传附件",
         );
         attachments.push(attachment.id);
         lines.push(`已上传附件 ${attachment.id}（挂到 ${entry}）`);
@@ -277,6 +255,7 @@ export async function runContentCommand(
             { card_id: p.cardId, result: body, attachments },
             ports,
           ),
+          "完成卡片",
         );
         lines.push(`已完成卡片 ${p.cardId}`);
       }

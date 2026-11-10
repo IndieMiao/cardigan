@@ -16,7 +16,7 @@ import {
 } from "@cardigan/git-transport";
 import { HerdrRuntime, resolveExecutionConfig } from "@cardigan/runtime-herdr";
 import { openStore as openCardiganStore, type Store } from "@cardigan/store";
-import { CliError, EXIT } from "./errors.js";
+import { CliError, EXIT, formatCommandError } from "./errors.js";
 import {
   announceDataDir,
   humanActor,
@@ -224,7 +224,7 @@ async function diffCommand(
             });
             if (!created.ok)
               throw new CliError(
-                `运行时不可用：${created.error.code} ${created.error.message}`,
+                formatCommandError("连接运行时", "Herdr", created.error),
                 EXIT.failure,
               );
             return created.value;
@@ -245,8 +245,9 @@ async function diffCommand(
                 ...argv,
               ]);
               if (!result.ok)
-                throw new Error(
-                  `${result.error.code}: ${result.error.message}`,
+                throw new CliError(
+                  formatCommandError("读取工作区差异", id, result.error),
+                  EXIT.failure,
                 );
               return result.value;
             },
@@ -309,6 +310,8 @@ function cleanCommand(
       return EXIT.ok;
     }
     runCommand(store, {
+      operation: option === "keep" ? "保留工作区" : "清理工作区",
+      target: id,
       project_id,
       actor: humanActor(project_id),
       reduce: (state, actor, ports) =>

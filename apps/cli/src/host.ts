@@ -17,7 +17,7 @@ import type {
   Store,
   StoreTransactionContext,
 } from "@cardigan/store";
-import { CliError, EXIT } from "./errors.js";
+import { CliError, EXIT, formatCommandError } from "./errors.js";
 import type { CliIo } from "./io.js";
 
 /**
@@ -80,6 +80,9 @@ export function resolveProject(
 }
 
 export interface CommandRun<T> {
+  /** CLI commands provide context; programmatic callers may omit it. */
+  readonly operation?: string;
+  readonly target?: string;
   readonly project_id: ProjectId;
   readonly actor: Actor;
   /** The domain command, e.g. `createCard`, `assign`, `completeHumanAction`. */
@@ -108,7 +111,11 @@ export function runCommand<T>(store: Store, run: CommandRun<T>): T {
     const result = run.reduce(state, run.actor, ports);
     if (!result.ok) {
       throw new CliError(
-        `${result.error.code}: ${result.error.message}`,
+        formatCommandError(
+          run.operation ?? "执行操作",
+          run.target ?? `项目 ${run.project_id}`,
+          result.error,
+        ),
         EXIT.usage,
       );
     }

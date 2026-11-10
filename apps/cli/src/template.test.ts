@@ -95,7 +95,9 @@ test("all template CLI commands use persisted versions and YAML", async () => {
     stringify({ ...generalCardTemplate, title: "Attempt overwrite" }),
   );
   expect(await run(["template", "update", "--file", yaml])).toBe(2);
-  expect(errors.join("\n")).toContain("先复制");
+  expect(errors.at(-1)).toBe(
+    "无法更新模板 general：内置模板不能修改，请先复制成新编号（validation_failed）",
+  );
 });
 
 test("general is created without repo and human completion atomically records result and evidence", async () => {
@@ -151,12 +153,37 @@ test("general is created without repo and human completion atomically records re
       "proof.txt",
     ]),
   ).toBe(2);
+  expect(errors.at(-1)).toBe(
+    `无法完成卡片 ${created.id}：当前状态不允许执行此操作（illegal_transition）`,
+  );
   expect(
     store.uow.read((tx) => tx.events.listAfter("templates", created.id, 0)),
   ).toHaveLength(before);
   expect(store.uow.read((tx) => tx.attachments.list("templates"))).toHaveLength(
     2,
   );
+});
+
+test("missing completion and copy targets keep their command context and do not write", async () => {
+  const snapshot = () =>
+    store.uow.read((tx) => ({
+      templates: tx.card_templates.list("templates"),
+      cards: tx.cards.list("templates"),
+      timeline: tx.timeline.list("templates"),
+    }));
+  const before = snapshot();
+  expect(await run(["card", "done", "C-99", "--result", "Done"])).toBe(2);
+  expect(errors.at(-1)).toBe(
+    "无法完成卡片 C-99：卡片 C-99 在当前项目中不存在（not_found）",
+  );
+  expect(output).toEqual([]);
+  expect(snapshot()).toEqual(before);
+  expect(await run(["template", "copy", "missing", "new-template"])).toBe(2);
+  expect(errors.at(-1)).toBe(
+    "无法复制模板 missing：源模板版本不存在（not_found）",
+  );
+  expect(output).toEqual([]);
+  expect(snapshot()).toEqual(before);
 });
 
 test("invalid YAML and missing completion results leave no writes", async () => {
