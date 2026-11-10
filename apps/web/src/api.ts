@@ -85,6 +85,12 @@ export interface CardView {
 /** A list row: the card plus the fields the list filters and columns need. */
 export interface CardListItem extends CardView {
   readonly produce_owners?: readonly AuthorView[];
+  readonly participants?: readonly AuthorView[];
+  readonly work_items?: readonly Pick<
+    WorkItemView,
+    "id" | "title" | "status"
+  >[];
+  readonly attachment_count?: number;
   readonly progress: { readonly completed: number; readonly total: number };
   readonly updated_at: string;
   readonly roles: readonly string[];
@@ -140,6 +146,7 @@ export interface TimelineEntryView extends AuthorView {
   readonly review_id?: string;
   readonly attachment_id?: string;
   readonly decision_option?: string;
+  readonly decision_via?: "delegated";
   readonly type:
     | "comment"
     | "instruction"
@@ -211,6 +218,10 @@ export interface ReviewMatrixRow {
 }
 
 export interface DecisionView {
+  readonly auto_merge?: {
+    readonly minutes: number;
+    readonly due_at: string;
+  } | null;
   readonly trigger?: string | null;
   readonly id: string;
   readonly question: string;
@@ -243,6 +254,8 @@ export interface HumanActionView {
 /** Attachment metadata; the blob is a separate request (`download_path`). */
 export interface AttachmentView extends AuthorView {
   readonly id: string;
+  readonly original_filename?: string;
+  readonly note?: string;
   readonly mime: string;
   readonly size: number;
   readonly sha256: string;
@@ -321,6 +334,8 @@ export interface PostedComment {
 export interface UploadAttachmentInput {
   /** Canonical padded base64. */
   readonly file: string;
+  readonly original_filename?: string;
+  readonly note?: string;
   readonly mime: string;
   readonly kind: "artifact" | "evidence";
   readonly attach_to:
@@ -424,6 +439,7 @@ export interface NeedsAction
   readonly waited_ms: number | null;
   readonly due: string | null;
   readonly blocked_work_items: readonly string[];
+  readonly completion_notice?: string;
 }
 export interface NeedsPage {
   readonly decisions: readonly NeedsDecision[];
@@ -542,7 +558,18 @@ export interface CardUpdateInput {
   readonly priority: number;
 }
 
+export interface PreferencesView {
+  readonly auto_merge_after_minutes: number | null;
+  readonly merge_gate_enabled: boolean;
+}
+
 export interface CardiganClient {
+  preferences(projectId: string): Promise<PreferencesView>;
+  setPreferences(
+    projectId: string,
+    minutes: number | null,
+    idempotencyKey: string,
+  ): Promise<void>;
   updateCard(
     projectId: string,
     cardId: string,
@@ -709,6 +736,23 @@ export class HttpCardiganClient implements CardiganClient {
   execution(projectId: string): Promise<ExecutionData> {
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/execution`,
+    );
+  }
+  preferences(projectId: string): Promise<PreferencesView> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/preferences`,
+    );
+  }
+  async setPreferences(
+    projectId: string,
+    minutes: number | null,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      "preferences",
+      { auto_merge_after_minutes: minutes },
+      idempotencyKey,
     );
   }
   needsYou(projectId: string): Promise<NeedsPage> {

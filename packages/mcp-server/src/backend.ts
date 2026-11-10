@@ -19,6 +19,7 @@ import type {
   Machine,
   MachineId,
   ProjectId,
+  ProjectPreferences,
   Repository,
   Result,
   Review,
@@ -69,6 +70,10 @@ export type McpReadRepository<Entity, Key> = Pick<
 
 /** What a read transaction hands to its callback. */
 export interface McpReadContext {
+  readonly project_preferences?: McpReadRepository<
+    ProjectPreferences,
+    ProjectId
+  >;
   readonly card_templates?: McpReadRepository<
     CardTemplate,
     Pick<CardTemplate, "id" | "version">

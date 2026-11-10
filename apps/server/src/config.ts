@@ -21,9 +21,12 @@ export interface ServerConfig {
   readonly cleanupIntervalMs?: number;
   readonly reconcileIntervalMs?: number;
   readonly backupIntervalMs?: number;
+  /** Orphaned attachment blobs (§9.3); 6 hours by default. */
+  readonly attachmentIntervalMs?: number;
 }
 
 export interface ServerEnv extends ExecutionEnv {
+  readonly CARDIGAN_CONFIG_DIR?: string | undefined;
   readonly CARDIGAN_DATA_DIR?: string | undefined;
   readonly CARDIGAN_MCP_HOST?: string | undefined;
   readonly CARDIGAN_MCP_PORT?: string | undefined;
@@ -38,6 +41,7 @@ export interface ServerEnv extends ExecutionEnv {
   readonly CARDIGAN_CLEANUP_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_RECONCILE_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_BACKUP_INTERVAL_MS?: string | undefined;
+  readonly CARDIGAN_ATTACHMENT_GC_INTERVAL_MS?: string | undefined;
 }
 
 /** Default cadence of the M4.4 phase loops (plan §3.6, §3.7). */
@@ -46,6 +50,7 @@ export const DEFAULT_INTERVALS = {
   cleanup: 60_000,
   reconcile: 600_000,
   backup: 600_000,
+  attachment: 21_600_000,
 } as const;
 
 const nonEmpty = (value: string | undefined): string | undefined =>
@@ -85,6 +90,11 @@ export function resolveServerConfig(env: ServerEnv): ServerConfig {
       env.CARDIGAN_BACKUP_INTERVAL_MS,
       "CARDIGAN_BACKUP_INTERVAL_MS",
       DEFAULT_INTERVALS.backup,
+    ),
+    attachmentIntervalMs: interval(
+      env.CARDIGAN_ATTACHMENT_GC_INTERVAL_MS,
+      "CARDIGAN_ATTACHMENT_GC_INTERVAL_MS",
+      DEFAULT_INTERVALS.attachment,
     ),
   };
 }

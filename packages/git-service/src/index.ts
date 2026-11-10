@@ -27,6 +27,7 @@ export {
   type CentralProject,
   CentralRepositoryService,
   type MergeOutcome,
+  type PreparedMerge,
   type SourceSync,
 } from "./central.js";
 export {
@@ -40,6 +41,8 @@ export interface WorktreePlacement {
   readonly worktree_path: string;
   readonly branch?: string;
   readonly base_sha: string;
+  /** Current remote baseline; independent of the Assignment's original base. */
+  readonly baseline?: { readonly ref: string; readonly sha: string };
   /** Present only when a new writable worktree synchronizes its baseline. */
   readonly source_sync?: SourceSync;
 }
@@ -169,6 +172,7 @@ export class GitWorktreeService {
     const path = join(this.worktrees, input.project_id, a.id),
       repository = join(this.repositories, input.project_id);
     const branch = readonly ? undefined : `agent/${card.id}/${item.id}`;
+    const baselineRef = `origin/${card.base_branch}`;
     if (a.worktree_path && resolve(a.worktree_path) !== path)
       throw new Error("Assignment worktree root changed");
     if (a.branch && a.branch !== branch)
@@ -201,10 +205,24 @@ export class GitWorktreeService {
         );
         await this.git.checkoutDetached(path, target);
       }
+      // Refresh the shared clone before every writer Run without touching its
+      // branch, original base or uncommitted work. Agent mode pushes from host.
+      let baseline: WorktreePlacement["baseline"];
+      if (!readonly) {
+        await this.git.fetch(repository, central);
+        baseline = {
+          ref: baselineRef,
+          sha: await this.git.resolveCommit(
+            repository,
+            `refs/remotes/${baselineRef}`,
+          ),
+        };
+      }
       return {
         worktree_path: path,
         ...(branch ? { branch } : {}),
         base_sha: a.base_sha ?? existing.head,
+        ...(baseline ? { baseline } : {}),
       };
     }
     const source_sync = readonly
@@ -222,6 +240,7 @@ export class GitWorktreeService {
       worktree_path: path,
       ...(branch ? { branch } : {}),
       base_sha,
+      ...(!readonly ? { baseline: { ref: baselineRef, sha: base_sha } } : {}),
       ...(source_sync ? { source_sync } : {}),
     };
   }

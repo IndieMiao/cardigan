@@ -57,23 +57,7 @@ export function m3Fixture(project = "m3-acceptance", shared?: Store) {
       return result;
     });
   }
-  const card = apply((s, a, p) =>
-    createCard(
-      s,
-      a,
-      {
-        title: "Ship feature",
-        goal: "Deliver reviewed work",
-        acceptance_criteria: ["all verifiers pass"],
-        source: { kind: "quote", text: "acceptance scenario" },
-        repo: "fixture/repo",
-        base_branch: "main",
-      },
-      p,
-    ),
-  ).data;
-  const items = state().work_items;
-  for (const role_id of new Set(items.map((w) => w.role_id)))
+  for (const role_id of ["coder", "reviewer", "pm"])
     store.uow.run((tx) =>
       writeRole(
         tx,
@@ -105,6 +89,22 @@ export function m3Fixture(project = "m3-acceptance", shared?: Store) {
         { mode: "add" },
       ),
     );
+  const card = apply((s, a, p) =>
+    createCard(
+      s,
+      a,
+      {
+        title: "Ship feature",
+        goal: "Deliver reviewed work",
+        acceptance_criteria: ["all verifiers pass"],
+        source: { kind: "quote", text: "acceptance scenario" },
+        repo: "fixture/repo",
+        base_branch: "main",
+      },
+      p,
+    ),
+  ).data;
+  const items = state().work_items;
   const assignItem = (w: WorkItem) =>
     apply((s, a, p) =>
       assign(s, a, { work_item_id: w.id, role_id: w.role_id }, p),

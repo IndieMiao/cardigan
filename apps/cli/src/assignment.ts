@@ -244,6 +244,7 @@ export async function startAssignment(
         actor,
         {
           assignment_id: assignment.id,
+          reuse_queued: true,
           model,
           agent_cli_version: version,
           launch_profile_ref: profileRef,
@@ -253,14 +254,9 @@ export async function startAssignment(
       ),
   });
 
-  let delegated = false;
   try {
-    // 3. worktree (roles that do not need one skip it).
-    const worktree = await prepareWorktree(options, entities);
-
-    // 4–8. token, run directory, provision, dispatch, sentinel: one shared flow
-    // that compensates internally (`delegated` keeps the CLI from repeating it).
-    delegated = true;
+    // 3–8. Claim queued work before Git preparation, then use the shared
+    // token/provision/dispatch flow and its failure compensation.
     const launched = await launchRun(
       {
         store,
@@ -276,12 +272,13 @@ export async function startAssignment(
         assignment_id: assignment.id,
         run,
         actor: humanActor(project_id),
+        reuse_session: true,
+        prepare_worktree: () => prepareWorktree(options, entities),
         ...(resuming
           ? {
               first_prompt: resumedBells(store, project_id, assignment, run.id),
             }
           : {}),
-        ...(worktree === undefined ? {} : { worktree }),
       },
     );
     return {
@@ -295,16 +292,6 @@ export async function startAssignment(
       token_id: launched.token_id,
     };
   } catch (error) {
-    if (!delegated) {
-      // Nothing was written yet: cancel the queued Run and make sure no
-      // plaintext from a prepared directory survives (§4 step 9).
-      try {
-        await scrubRunCredentials(execution, project_id, assignment.id);
-      } catch {
-        io.stderr("凭据文件清理失败，需要人工检查");
-      }
-      abort(store, project_id, run.id, "worktree preparation failed");
-    }
     if (resuming) pauseStanding(store, project_id, assignment.id);
     const message = formatLaunchError(assignment.id, error);
     if (message) throw new CliError(message, EXIT.failure);

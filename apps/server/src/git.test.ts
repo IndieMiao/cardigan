@@ -11,6 +11,7 @@ import {
   chmodSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -273,4 +274,48 @@ test("the central repository is the only place host Git runs", async () => {
   // A host Git command never points at an Agent directory.
   expect(commands.every((call) => !call.cwd.startsWith(agentRoot))).toBe(true);
   expect(await central.hasCentral(project)).toBe(false);
+});
+
+test("merge candidates are pushed from the center through the Agent receive-pack entry", async () => {
+  const repository = join(agentRoot, "repos", f.project_id);
+  git(root, "clone", "-q", "--no-local", source, repository);
+  const entry = join(root, "receive"),
+    log = join(root, "receive.log");
+  writeFileSync(
+    entry,
+    `#!/bin/sh\nprintf '%s\\n' "$PWD" "$1" >> '${log}'\nexec git-receive-pack "$@"\n`,
+    { mode: 0o700 },
+  );
+  const requests: string[] = [];
+  const binding = new ServerGit({
+    store: f.store,
+    dataDir,
+    execution,
+    captureAgent: async () => {
+      throw new Error("Stream must not use text capture");
+    },
+    receivePack: async (path) => {
+      requests.push(path);
+      return `'${entry}'`;
+    },
+  });
+  const project = binding.projectOf(f.project_id);
+  if (!project) throw new Error("Missing project");
+  await binding.sync(project);
+  const center = join(dataDir, "central", `${f.project_id}.git`),
+    head = git(center, "rev-parse", "main");
+  git(center, "update-ref", "refs/cardigan/candidates/D-2", head);
+  const before = git(repository, "rev-parse", "HEAD");
+  writeFileSync(join(repository, "local-file"), "keep");
+  await binding.distribute(project);
+  expect(git(repository, "rev-parse", "refs/cardigan/candidates/D-2")).toBe(
+    head,
+  );
+  expect(git(repository, "rev-parse", "HEAD")).toBe(before);
+  expect(readFileSync(join(repository, "local-file"), "utf8")).toBe("keep");
+  expect(requests).toEqual([repository]);
+  expect(readFileSync(log, "utf8").trim().split("\n")).toEqual([
+    center,
+    repository,
+  ]);
 });

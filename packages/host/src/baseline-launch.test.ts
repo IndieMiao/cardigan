@@ -1,0 +1,275 @@
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type {
+  Assignment,
+  Card,
+  Role,
+  Runtime,
+  WorkItem,
+} from "@cardigan/domain";
+import { queueRun } from "@cardigan/domain";
+import { CentralRepositoryService } from "@cardigan/git-service";
+import { CentralGitTransport } from "@cardigan/git-transport";
+import { parseLaunchConfig } from "@cardigan/roles";
+import type { AgentExecution } from "@cardigan/runtime-herdr";
+import { Store, writeRole } from "@cardigan/store";
+import { afterEach, expect, test, vi } from "vitest";
+import { AgentGitTransport } from "./agent-git.js";
+import { applyCommand } from "./commands.js";
+import { launchRun } from "./launch.js";
+import { prepareRoleWorktree, worktreeBaselinePrompt } from "./worktree.js";
+
+const original = "a".repeat(40),
+  head = "b".repeat(40),
+  latest = "c".repeat(40);
+const project = "baseline";
+afterEach(() => vi.restoreAllMocks());
+
+async function fixture() {
+  const root = await mkdtemp(join(tmpdir(), "cg-baseline-"));
+  const dataDir = join(root, "data"),
+    agentRoot = join(root, "agent");
+  await mkdir(dataDir, { mode: 0o700 });
+  await mkdir(agentRoot, { mode: 0o2750 });
+  await chmod(agentRoot, 0o2750);
+  const central = join(dataDir, "central.git");
+  await mkdir(central);
+  const execution: AgentExecution = {
+    mode: "agent-ssh",
+    dataDir,
+    agentRoot,
+    gid: process.getgid?.() ?? 0,
+    machine: "fixture",
+    identityFile: join(root, "key"),
+    knownHostsFile: join(root, "known_hosts"),
+  };
+  for (const path of [execution.identityFile, execution.knownHostsFile])
+    await writeFile(path, "fixture", { mode: 0o600 });
+  const path = join(agentRoot, "worktrees", project, "A-1");
+  const branch = "agent/C-1/W-1";
+  const clock = { now: () => "2026-01-01T00:00:00.000Z" };
+  const assignment = {
+    id: "A-1",
+    scope: "work_item",
+    work_item_id: "W-1",
+    role_id: "coder",
+    role_version: 1,
+    status: "active",
+    runtime_state: "idle",
+    runtime_ref: null,
+    machine_id: "local",
+    mcp_token_id: "fixture",
+    created_at: clock.now(),
+    worktree_path: path,
+    branch,
+    base_sha: original,
+  } as Assignment;
+  const role: Role = {
+    role_id: "coder",
+    version: 1,
+    display_name: "Coder",
+    kind: "work",
+    harness: "codex",
+    core_prompt: "Fixture",
+    launch_profile_ref: "fixture",
+    allowed_tools: ["whoami", "finish_run"],
+    capabilities: [],
+    abilities: [],
+    worktree: "write",
+    required_machine_tags: [],
+  };
+  const store = Store.open({ dataDir });
+  store.createProject({ id: project, name: "Baseline" });
+  store.setProjectRepo({
+    project_id: project,
+    repo_path: central,
+    base_branch: "main",
+  });
+  store.uow.run((tx) => {
+    writeRole(tx, project, role, { mode: "add" });
+    tx.cards.put(project, {
+      id: "C-1",
+      project_id: project,
+      title: "Baseline",
+      goal: "Refresh",
+      acceptance_criteria: ["Refresh"],
+      source: { kind: "quote", text: "Fixture" },
+      repo: central,
+      base_branch: "main",
+      status: "in_progress",
+      priority: 0,
+      template: "dev",
+      merge_policy: "confirm",
+      out_of_scope: [],
+      related_cards: [],
+      created_by: "human",
+      created_at: clock.now(),
+    } as Card);
+    tx.work_items.put(project, {
+      id: "W-1",
+      card_id: "C-1",
+      title: "Implement",
+      kind: "produce",
+      role_id: "coder",
+      required: true,
+      depends_on: [],
+      completion_criteria: [],
+      status: "changes_requested",
+      assignment_id: assignment.id,
+    } as WorkItem);
+    tx.assignments.put(project, assignment);
+  });
+  vi.spyOn(
+    CentralRepositoryService.prototype,
+    "ensureCentral",
+  ).mockResolvedValue(central);
+  vi.spyOn(AgentGitTransport.prototype, "ensureClone").mockImplementation(
+    async (_, repository) => {
+      await mkdir(repository, { recursive: true });
+      await chmod(repository, 0o2770);
+    },
+  );
+  vi.spyOn(AgentGitTransport.prototype, "listWorktrees").mockResolvedValue([
+    { path, branch, head },
+  ]);
+  vi.spyOn(AgentGitTransport.prototype, "resolveCommit").mockResolvedValue(
+    latest,
+  );
+  const push = vi
+    .spyOn(CentralGitTransport.prototype, "pushBaseline")
+    .mockResolvedValue(undefined);
+  const provision = vi.fn(async () => {
+    expect(push).toHaveBeenCalled();
+    return {
+      ok: true,
+      value: {
+        machine_id: "local",
+        runtime_machine: "fixture",
+        terminal_ref: "fixture",
+        agent_name: "fixture",
+      },
+    };
+  });
+  const runtime = { provision, release: vi.fn() } as unknown as Runtime;
+  const host = {
+    store,
+    dataDir,
+    execution,
+    runtime,
+    clock,
+    mcpUrl: "http://localhost/mcp",
+    launch: {
+      config: parseLaunchConfig({
+        profiles: { fixture: { harness: "codex", model: "fixture" } },
+      }),
+      secrets: {},
+    },
+  };
+  const actor = { kind: "human" as const, project_id: project };
+  const run = applyCommand(store, {
+    project,
+    actor,
+    clock,
+    reduce: (s, a, p) =>
+      queueRun(
+        s,
+        a,
+        {
+          assignment_id: assignment.id,
+          model: "fixture",
+          agent_cli_version: "fixture",
+        },
+        p,
+      ),
+  });
+  return {
+    root,
+    host,
+    assignment,
+    actor,
+    run,
+    push,
+    provision,
+    central,
+    close: async () => {
+      store.close();
+      await rm(root, { recursive: true, force: true });
+    },
+  };
+}
+
+test.each(["fix", "followup"] as const)(
+  "%s Run pushes the baseline before provision and includes its SHA in the first prompt",
+  async (kind) => {
+    const s = await fixture();
+    try {
+      const run = { ...s.run, kind };
+      s.host.store.uow.run((tx) => tx.runs.put(project, run));
+      const launched = await launchRun(s.host, {
+        project,
+        assignment_id: s.assignment.id,
+        actor: s.actor,
+        run,
+        first_prompt: `[bell] kind=${kind}`,
+      });
+      expect(s.push).toHaveBeenCalledWith(
+        s.central,
+        join(s.host.execution.agentRoot, "repos", project),
+        expect.any(String),
+      );
+      const prompt = await readFile(join(launched.run_dir, "first.md"), "utf8");
+      expect(prompt).toContain(`[bell] kind=${kind}`);
+      expect(prompt).toContain(`origin/main：${latest}`);
+      expect(s.provision).toHaveBeenCalledTimes(1);
+      expect(
+        s.host.store.uow.read((tx) =>
+          tx.assignments.get(project, s.assignment.id),
+        ),
+      ).toMatchObject({ base_sha: original, branch: s.assignment.branch });
+      // The live-session beforeWake path uses the same preparation and prompt.
+      const worktree = await prepareRoleWorktree(
+        s.host,
+        project,
+        s.assignment.id,
+      );
+      expect(worktreeBaselinePrompt(worktree)).toContain(
+        `origin/main：${latest}`,
+      );
+      expect(s.push).toHaveBeenCalledTimes(2);
+    } finally {
+      await s.close();
+    }
+  },
+);
+
+test("baseline push failure aborts the queued launch without provisioning an Agent", async () => {
+  const s = await fixture();
+  try {
+    s.push.mockRejectedValue(new Error("baseline transfer failed"));
+    await expect(
+      launchRun(s.host, {
+        project,
+        assignment_id: s.assignment.id,
+        actor: s.actor,
+        run: s.run,
+      }),
+    ).rejects.toThrow("baseline transfer failed");
+    expect(s.provision).not.toHaveBeenCalled();
+    expect(
+      s.host.store.uow.read((tx) => tx.runs.get(project, s.run.id)),
+    ).toMatchObject({ status: "cancelled", outcome: "failed" });
+    await expect(
+      prepareRoleWorktree(s.host, project, s.assignment.id),
+    ).rejects.toThrow("baseline transfer failed");
+  } finally {
+    await s.close();
+  }
+});

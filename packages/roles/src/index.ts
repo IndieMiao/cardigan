@@ -36,17 +36,24 @@ export {
 export { REDACTED, redactLaunch } from "./redact.js";
 export {
   AGENT_PROTOCOL,
+  type ConvertedRoleInstructions,
+  composeRolePrompt,
+  convertLegacyRole,
   corePromptFor,
   type DefaultRoleId,
   type DefaultRoleOptions,
+  defaultRoleDefinition,
   defaultRoles,
   firstPrompt,
+  instructionsFor,
+  isDefaultRoleId,
   PM_DECISION_RULES,
   PM_DELEGATION_RULES,
   PM_OFFICE_REPORTING_RULES,
   PM_OPS_EVENT_RULES,
   PM_PLANNING_RULES,
   PM_VERIFICATION_RULES,
+  SHARED_BOUNDARIES,
 } from "./role-pack.js";
 export {
   type LaunchConfig,

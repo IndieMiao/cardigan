@@ -63,11 +63,11 @@ export interface DispatcherOptions {
     bell: string;
     replacement?: DispatchRunParams["replacement"];
   }) => Promise<void>;
-  /** Refresh a readonly review checkout after claiming an idle Run, before wake. */
+  /** Prepare Git after claiming an idle Run; append current baseline to its prompt. */
   readonly beforeWake?: (input: {
     project: ProjectId;
     assignment: Assignment;
-  }) => Promise<void>;
+  }) => Promise<string | undefined> | Promise<void>;
 }
 const sameRef = (a: Assignment, b: Assignment) =>
   JSON.stringify(a.runtime_ref) === JSON.stringify(b.runtime_ref);
@@ -162,26 +162,15 @@ export class Dispatcher {
     }
     for (const group of groups.values()) await this.deliver(project, group);
   }
-  private queued(
-    state: CommandState,
-    a: Assignment,
-    notes: readonly Notification[],
-  ) {
+  private queued(state: CommandState, a: Assignment) {
+    // Domain resumption can queue work before (or independently of) the
+    // pending notification. That Run is the work to dispatch, not a busy flag.
     return state.runs.find(
-      (r) =>
-        r.assignment_id === a.id &&
-        r.status === "queued" &&
-        notes.some(
-          (n) => n.run_id === r.id || n.event_id === r.trigger_event_id,
-        ),
+      (r) => r.assignment_id === a.id && r.status === "queued",
     );
   }
-  private busy(
-    state: CommandState,
-    a: Assignment,
-    notes: readonly Notification[],
-  ) {
-    const queued = this.queued(state, a, notes);
+  private busy(state: CommandState, a: Assignment) {
+    const queued = this.queued(state, a);
     return state.runs.some(
       (r) =>
         r.assignment_id === a.id && unfinishedRun(r) && r.id !== queued?.id,
@@ -198,7 +187,7 @@ export class Dispatcher {
       this.reject(project, notes, a, "assignment_released");
       return;
     }
-    if (a.status !== "active" || this.busy(state, a, notes)) return;
+    if (a.status !== "active" || this.busy(state, a)) return;
     let live = false;
     let replacement: DispatchRunParams["replacement"];
     if (a.runtime_ref) {
@@ -216,7 +205,7 @@ export class Dispatcher {
         };
       } else return;
     }
-    const queued = this.queued(state, a, notes);
+    const queued = this.queued(state, a);
     const prior = state.runs
       .filter(
         (r) =>
@@ -279,13 +268,13 @@ export class Dispatcher {
       reason = "delivery_failed";
     try {
       if (live && job.assignment.runtime_ref) {
-        await this.options.beforeWake?.({
+        const baseline = await this.options.beforeWake?.({
           project,
           assignment: job.assignment,
         });
         const result = await this.options.runtime.wake(
           job.assignment.runtime_ref,
-          job.bell,
+          [job.bell, baseline].filter(Boolean).join("\n"),
         );
         sent = result.ok && result.value.sent;
         if (!result.ok) reason = `wake_failed:${result.error.code}`;
@@ -341,7 +330,7 @@ export class Dispatcher {
           this.owner(n, state) === a.id &&
           !covered(n, state, a.id),
       );
-      if (!ready.length || this.busy(state, a, ready)) return;
+      if (!ready.length || this.busy(state, a)) return;
       if (
         unfinishedBellAttempts(store.database, project).some(
           (r) =>
@@ -353,7 +342,7 @@ export class Dispatcher {
       const cause = ready.find((n) => !n.run_id) ?? ready[0];
       if (!cause) return;
       let run =
-        this.queued(state, a, ready) ??
+        this.queued(state, a) ??
         state.runs.find(
           (r) =>
             r.assignment_id === a.id &&

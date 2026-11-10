@@ -14,8 +14,10 @@ import {
   type ReadableIdKind,
   type Result,
   recordDecision,
+  setProjectPreferences,
   supersedeCard,
   updateCard,
+  updateWorkItem,
   uploadAttachment,
 } from "@cardigan/domain";
 import {
@@ -79,6 +81,8 @@ const action = z.object({ text, attachments: z.array(text).optional() });
 const attachment = z.object({
   file: z.string().max(MAX_ATTACHMENT_BASE64),
   mime: text,
+  original_filename: z.string().optional(),
+  note: z.string().optional(),
   kind: z.enum(["artifact", "evidence"]),
   attach_to: z.discriminatedUnion("kind", [
     z.object({ kind: z.literal("delivery"), id: id("delivery") }),
@@ -214,6 +218,43 @@ export async function serveWrite(
   c: WriteContext,
   rest: string,
 ): Promise<boolean> {
+  if (rest === "/preferences") {
+    if (c.req.method === "GET") return false;
+    if (c.req.method !== "POST") methodNotAllowed(["GET", "POST"]);
+    c.authorize();
+    const body = await readJsonBody(c.req);
+    const key = parsed(
+      z
+        .string()
+        .min(1)
+        .max(256)
+        .refine((s) => s.trim().length > 0),
+      c.req.headers["idempotency-key"],
+      "偏好写入需要 Idempotency-Key",
+    );
+    const context: CommandContext = {
+      ...c,
+      idempotency: { key, request: { method: "POST", rest, body } },
+    };
+    const input = parsed(
+      z
+        .object({
+          auto_merge_after_minutes: z
+            .number()
+            .int()
+            .min(1)
+            .max(1440)
+            .nullable(),
+        })
+        .strict(),
+      body,
+    );
+    const output = run(context, (s, a, ports) =>
+      setProjectPreferences(s, a, input, ports),
+    );
+    sendJson(c.res, 200, output);
+    return true;
+  }
   const match = routes.exec(rest);
   if (!match) return false;
   const [, group, encoded, operation] = match;
@@ -352,26 +393,48 @@ export async function serveWrite(
     const decision_id = parsed(id("decision"), key);
     if (operation === "resolve") {
       const p = parsed(decision, body);
-      output = run(context, (s, a, ports) => {
-        const returning =
-          p.option === "request_changes" &&
-          s.decisions.find((q) => q.id === decision_id)?.trigger ===
-            "merge_confirmation";
-        const raw_quote =
-          p.raw_quote?.trim() || returning
-            ? (p.raw_quote ?? "")
-            : `在 Needs You 选择了 ${p.option}`;
-        return recordDecision(
-          s,
-          a,
-          {
-            decision_id,
-            option: p.option,
-            raw_quote,
-            rationale: p.rationale?.trim() ? p.rationale : raw_quote,
-          },
-          ports,
-        );
+      output = execute(context, (tx) => {
+        const q = tx.decisions.get(c.project_id, decision_id);
+        // Keep the limit audit and decision in one human, idempotent transaction.
+        // While the decision is still blocking, updateWorkItem cannot resume it.
+        if (q?.trigger === "review_limit" && p.option === "raise_limit") {
+          for (const work_item_id of new Set(q.affected_work_items)) {
+            applyCommand(context, tx, (s, a, ports) => {
+              const item = s.work_items.find((w) => w.id === work_item_id);
+              return updateWorkItem(
+                s,
+                a,
+                {
+                  work_item_id,
+                  max_review_rounds:
+                    item?.kind === "verify" ? item.max_review_rounds + 1 : 0,
+                },
+                ports,
+              );
+            });
+          }
+        }
+        return applyCommand(context, tx, (s, a, ports) => {
+          const returning =
+            p.option === "request_changes" &&
+            s.decisions.find((q) => q.id === decision_id)?.trigger ===
+              "merge_confirmation";
+          const raw_quote =
+            p.raw_quote?.trim() || returning
+              ? (p.raw_quote ?? "")
+              : `在 Needs You 选择了 ${p.option}`;
+          return recordDecision(
+            s,
+            a,
+            {
+              decision_id,
+              option: p.option,
+              raw_quote,
+              rationale: p.rationale?.trim() ? p.rationale : raw_quote,
+            },
+            ports,
+          );
+        });
       });
     } else {
       const p = parsed(clarification, body);

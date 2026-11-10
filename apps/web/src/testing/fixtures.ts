@@ -175,6 +175,11 @@ export function fakeClient(
       recent_deliveries: [],
     }),
     execution: async () => ({ assignments: [], runs: [], machines: [] }),
+    preferences: async () => ({
+      auto_merge_after_minutes: null,
+      merge_gate_enabled: false,
+    }),
+    setPreferences: async () => {},
     needsYou: async () => ({ decisions: [], human_actions: [], incidents: [] }),
     recordDecision: async () => undefined,
     decisionComment: async () => undefined,

@@ -5,9 +5,11 @@ import {
 } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { CardId, Clock, ProjectId } from "@cardigan/domain";
+import { projectPreferences } from "@cardigan/domain";
 import { resolveDataDirectory } from "@cardigan/runtime-herdr";
 import type { Store, WebSession } from "@cardigan/store";
 import { serveAttachment } from "./attachments.js";
+import { serveAvatar } from "./avatars.js";
 import {
   allowedHosts,
   bracket,
@@ -229,6 +231,15 @@ async function handleApi(context: RequestContext): Promise<void> {
   // Everything below needs a session; an MCP Bearer token does not count.
   const session = requireSession(context);
 
+  if (path.startsWith("/api/avatars/")) {
+    return serveAvatar(
+      req,
+      res,
+      context.dataDir,
+      path.slice("/api/avatars/".length),
+    );
+  }
+
   if (path === "/api/me") {
     if (req.method !== "GET") methodNotAllowed(["GET"]);
     sendJson(res, 200, {
@@ -417,6 +428,14 @@ async function serveProjectRoute(
     return;
   }
 
+  if (rest === "/preferences") {
+    // This baseline has no merge-gate executor/configuration yet.
+    sendJson(res, 200, {
+      ...projectPreferences(state),
+      merge_gate_enabled: false,
+    });
+    return;
+  }
   if (rest === "/needs-you") {
     sendJson(res, 200, { project_id, ...needsYou(state, now) });
     return;

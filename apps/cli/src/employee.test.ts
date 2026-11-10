@@ -1,4 +1,11 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "@cardigan/store";
@@ -48,7 +55,7 @@ afterEach(() => {
 
 test("human CLI creates, lists, updates, deactivates and activates global employees without a project", async () => {
   expect(
-    await run([...add, "--bio", "管理项目", "--avatar", "avatar:one"]),
+    await run([...add, "--bio", "管理项目", "--avatar", "library:zhuge-liang"]),
   ).toBe(0);
   expect(output.join("\n")).toContain("已创建员工 E-1：诸葛亮");
   expect(errors.join("\n")).toContain(`数据目录：${dataDir}`);
@@ -90,6 +97,78 @@ test("human CLI creates, lists, updates, deactivates and activates global employ
     "employee_activated",
   ]);
   expect(snapshot().events.every((e) => e.actor.kind === "human")).toBe(true);
+});
+
+test("avatar list exposes all bundled names and employee add/update persist library references", async () => {
+  output = [];
+  errors = [];
+  expect(await main(["avatar", "list"], io)).toBe(0);
+  expect(output.join("\n").split("\n")).toHaveLength(59);
+  expect(output.join("\n")).toContain("guan-yu  关羽  三国演义");
+  expect(await run([...add, "--avatar", "library:guan-yu"])).toBe(0);
+  expect(snapshot().employees[0]?.avatar).toBe("library:guan-yu");
+  expect(await run(["update", "E-1", "--avatar", "library:sun-wukong"])).toBe(
+    0,
+  );
+  expect(snapshot().employees[0]?.avatar).toBe("library:sun-wukong");
+  const before = snapshot();
+  for (const reference of [
+    "library:missing",
+    "library:../guan-yu",
+    "https://example.com/a.png",
+    `upload:${"a".repeat(64)}`,
+  ]) {
+    expect(await run(["update", "E-1", "--avatar", reference])).not.toBe(0);
+    expect(errors.join("\n")).toMatch(/头像素材库中没有人物|--avatar 请使用/);
+    expect(snapshot()).toEqual(before);
+    expect(await run([...add, "--avatar", reference])).not.toBe(0);
+    expect(snapshot()).toEqual(before);
+  }
+});
+
+test("avatar-file uses content and caller cwd on add/update, deduplicates, and may be cleared", async () => {
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
+    "base64",
+  );
+  const digest = createHash("sha256").update(png).digest("hex");
+  writeFileSync(join(dataDir, "actually-png.txt"), png);
+  expect(await run([...add, "--avatar-file", "actually-png.txt"])).toBe(0);
+  expect(snapshot().employees[0]?.avatar).toBe(`upload:${digest}`);
+  expect(readFileSync(join(dataDir, "avatars", `${digest}.png`))).toEqual(png);
+  expect(
+    await run(["update", "E-1", "--avatar-file", "actually-png.txt"]),
+  ).toBe(0);
+  expect(readdirSync(join(dataDir, "avatars"))).toEqual([`${digest}.png`]);
+  expect(await run(["update", "E-1", "--avatar", "library:guan-yu"])).toBe(0);
+  expect(
+    await run(["update", "E-1", "--avatar-file", "actually-png.txt"]),
+  ).toBe(0);
+  expect(snapshot().employees[0]?.avatar).toBe(`upload:${digest}`);
+  expect(await run(["update", "E-1", "--avatar", ""])).toBe(0);
+  expect(snapshot().employees[0]?.avatar).toBeNull();
+});
+
+test("invalid uploads and conflicting flags leave employee state unchanged", async () => {
+  expect(await run(add)).toBe(0);
+  const before = snapshot();
+  const fixtures = [
+    ["fake.png", Buffer.from("<svg></svg>"), "只支持 PNG、WebP 或 JPEG"],
+    ["large.webp", Buffer.alloc(2 * 1024 * 1024 + 1), "2 MiB"],
+  ] as const;
+  for (const [path, bytes, message] of fixtures) {
+    writeFileSync(join(dataDir, path), bytes);
+    expect(await run(["update", "E-1", "--avatar-file", path])).not.toBe(0);
+    expect(errors.join("\n")).toContain(message);
+    expect(snapshot()).toEqual(before);
+  }
+  expect(await run(["update", "E-1", "--avatar-file", "missing"])).not.toBe(0);
+  expect(errors.join("\n")).toContain("无法上传头像");
+  expect(
+    await run(["update", "E-1", "--avatar", "", "--avatar-file", "fake.png"]),
+  ).not.toBe(0);
+  expect(errors.join("\n")).toContain("不能同时使用");
+  expect(snapshot()).toEqual(before);
 });
 
 test("global list supports role filters and ignores project selection", async () => {

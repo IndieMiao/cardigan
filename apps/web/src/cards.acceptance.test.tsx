@@ -185,6 +185,32 @@ test.each(["board", "list"] as const)(
       name: new RegExp(f.card.title),
     });
     expect(link.getAttribute("href")).toContain(`/cards/${f.card.id}`);
+    const beforeRead = f.state();
+    const rows = await f.client.cards(project(), "all");
+    const row = rows.cards.find((item) => item.id === f.card.id);
+    const items = beforeRead.work_items.filter(
+      (item) => item.card_id === f.card.id,
+    );
+    expect(row?.work_items).toEqual(
+      items.map(({ id, title, status }) => ({ id, title, status })),
+    );
+    expect(row?.attachment_count).toBe(0);
+    const assignments = items.flatMap((item) =>
+      beforeRead.assignments.filter(
+        (assignment) =>
+          assignment.id === item.assignment_id &&
+          assignment.status !== "released",
+      ),
+    );
+    expect(row?.participants?.map((owner) => owner.author).sort()).toEqual(
+      assignments.map((assignment) => `assignment:${assignment.id}`).sort(),
+    );
+    expect(
+      row?.participants?.some((owner) => owner.author_role === "reviewer"),
+    ).toBe(true);
+    expect(JSON.stringify(row?.participants)).not.toContain("launch_profile");
+    expect(f.state().events).toEqual(beforeRead.events);
+    expect(f.state().cursors).toEqual(beforeRead.cursors);
     expect(screen.getAllByText(/待开始/).length).toBeGreaterThan(0);
     for (const name of [
       "状态：全部",
@@ -626,6 +652,10 @@ test("U11 §8.4: attachments show decision status, fold superseded versions and 
   const old = await upload("image/png", "old design"),
     current = await upload("image/png", "new design", old.id),
     svg = await upload("image/svg+xml", "<svg onload='bad()'></svg>");
+  const rows = await f.client.cards(project(), "all");
+  expect(
+    rows.cards.find((card) => card.id === f.card.id)?.attachment_count,
+  ).toBe(3);
   const page = detail();
   await screen.findByText("Design attachments");
   // Inspect the attachment's owning comment, not the separate upload-event

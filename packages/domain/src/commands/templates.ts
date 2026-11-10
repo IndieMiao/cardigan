@@ -82,10 +82,12 @@ export function validateCardTemplate(
     keys.add(w.key);
     const role = activeTemplateRole(roles, w.role_id);
     ensure(role, "validation_failed", `角色 ${w.role_id} 未登记或已停用`);
+    // Legacy roles did not declare work-item capabilities; this grants no tools.
     ensure(
-      role.allowed_tools.includes(
-        w.kind === "produce" ? "submit_delivery" : "submit_review",
-      ),
+      role.capabilities.length === 0 ||
+        role.allowed_tools.includes(
+          w.kind === "produce" ? "submit_delivery" : "submit_review",
+        ),
       "validation_failed",
       `角色 ${w.role_id} 不能承担${w.kind === "produce" ? "产出" : "验证"}`,
     );
@@ -130,7 +132,9 @@ export function validateCardTemplate(
     if (completion.reviewer !== "human") {
       const role = activeTemplateRole(roles, completion.reviewer.slice(5));
       ensure(
-        role?.allowed_tools.includes("submit_review"),
+        role &&
+          (role.capabilities.length === 0 ||
+            role.allowed_tools.includes("submit_review")),
         "validation_failed",
         "完成审核角色未登记、停用或不能验证",
       );

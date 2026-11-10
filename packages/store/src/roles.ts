@@ -1,4 +1,9 @@
-import type { ProjectId, Role, RoleReference } from "@cardigan/domain";
+import type {
+  ProjectId,
+  Role,
+  RoleEffect,
+  RoleReference,
+} from "@cardigan/domain";
 import type { StoreTransactionContext } from "./store.js";
 
 /**
@@ -25,10 +30,13 @@ export function roleFromDocument(document: unknown): Role {
   const record = document as RoleDocument;
   return {
     role_id: record.role_id,
-    version: record.version,
+    version: record.version ?? record.role_version,
     display_name: record.display_name,
     kind: record.kind,
     core_prompt: record.core_prompt,
+    ...(record.instructions === undefined
+      ? {}
+      : { instructions: record.instructions }),
     harness: record.harness,
     launch_profile_ref: record.launch_profile_ref,
     allowed_tools: record.allowed_tools,
@@ -40,6 +48,16 @@ export function roleFromDocument(document: unknown): Role {
   };
 }
 
+/** Command snapshots and project audit events commit together. */
+export function persistRoleEffect(
+  tx: StoreTransactionContext,
+  project_id: ProjectId,
+  effect: RoleEffect,
+): void {
+  for (const role of effect.roles) tx.roles.put(project_id, roleDocument(role));
+  for (const event of effect.events) tx.events.append(project_id, event);
+}
+
 export interface RoleVersionSummary {
   readonly role_id: string;
   readonly version: number;
@@ -47,10 +65,13 @@ export interface RoleVersionSummary {
   readonly harness: string;
   readonly launch_profile_ref: string;
 }
+type RoleReader = {
+  readonly roles: Pick<StoreTransactionContext["roles"], "list">;
+};
 
 /** Every role version of a project, oldest first. */
 export function listRoleVersions(
-  tx: StoreTransactionContext,
+  tx: RoleReader,
   project_id: ProjectId,
 ): Role[] {
   return tx.roles
@@ -65,7 +86,7 @@ export function listRoleVersions(
 
 /** One role version, or the latest version when `version` is omitted. */
 export function getRoleVersion(
-  tx: StoreTransactionContext,
+  tx: RoleReader,
   project_id: ProjectId,
   role_id: string,
   version?: number,
@@ -81,7 +102,7 @@ export function getRoleVersion(
 
 /** The version a new definition of this role would get. */
 export function nextRoleVersion(
-  tx: StoreTransactionContext,
+  tx: RoleReader,
   project_id: ProjectId,
   role_id: string,
 ): number {
@@ -97,7 +118,8 @@ export interface RoleWriteResult {
 }
 
 /**
- * Create or change a role definition.
+ * Low-level legacy writer for test fixtures; application writes must use domain
+ * role commands and persistRoleEffect so actor and permission checks cannot be skipped.
  *
  * - `add`: the role must not exist yet; the definition lands as version 1.
  * - `update`: writes `latest + 1`; earlier versions stay untouched.

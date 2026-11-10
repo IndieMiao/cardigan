@@ -246,16 +246,6 @@ test("P2a-6: CLI assign separates authors, reviewers and PM acceptance and rejec
   await bootstrap();
   expect(
     await run([
-      "role",
-      "add",
-      "p-work",
-      "reviewer",
-      "--allowed-tools",
-      "submit_review",
-    ]),
-  ).toBe(0);
-  expect(
-    await run([
       "card",
       "create",
       "--template",

@@ -100,6 +100,8 @@ test("every entity table round-trips its entity", () => {
       kind: "evidence" as const,
       sha256: "f".repeat(64),
       mime: "text/plain",
+      original_filename: "截图.txt",
+      note: "修复后的结果",
       size: 3,
       card_id: card().id,
       uploaded_by: "human",
@@ -119,6 +121,8 @@ test("every entity table round-trips its entity", () => {
       tx.decisions.put(project_id, decision);
       tx.human_actions.put(project_id, humanAction);
       tx.attachments.put(project_id, attachment);
+      const { original_filename: _name, note: _note, ...legacy } = attachment;
+      tx.attachments.put(project_id, { ...legacy, id: "attachment-legacy" });
     });
 
     store.uow.run((tx) => {
@@ -139,6 +143,13 @@ test("every entity table round-trips its entity", () => {
         humanAction,
       );
       expect(tx.attachments.get(project_id, attachment.id)).toEqual(attachment);
+      const legacy = tx.attachments.get(project_id, "attachment-legacy");
+      expect(legacy).toMatchObject({
+        sha256: attachment.sha256,
+        mime: attachment.mime,
+      });
+      expect(legacy).not.toHaveProperty("original_filename");
+      expect(legacy).not.toHaveProperty("note");
     });
   });
 });

@@ -641,3 +641,104 @@ test.each(["decision", "clarification", "completion"] as const)(
     expect(operation.mock.calls[2]?.at(-1)).not.toBe(firstKey);
   },
 );
+
+test.each(["pause", "raise_limit"])(
+  "review-limit options show Chinese labels and the server recommendation (%s)",
+  async (recommended) => {
+    const decision = q({
+      trigger: "review_limit",
+      question: "审核轮数已用完：W-1",
+      context: "已达到审核上限，上一轮结论已记录。",
+      options: [
+        {
+          key: "pause",
+          description: "暂停：保持停止，不安排返工",
+          impact: "保留阻塞",
+        },
+        { key: "raise_limit", description: "增加轮数", impact: "继续审核" },
+      ],
+      recommended,
+    });
+    render(
+      <NeedsYouPage
+        projectId="p-1"
+        client={fakeClient({ needsYou: async () => page([decision]) })}
+      />,
+    );
+    const article = within(
+      await screen.findByRole("article", { name: "拍板 q(1)" }),
+    );
+    const pause = article.getByRole("radio", { name: /暂停：保持停止/u });
+    const raise = article.getByRole("radio", { name: /增加一轮审核额度/u });
+    expect(
+      (recommended === "pause" ? pause : raise).getAttribute("value"),
+    ).toBe(recommended);
+    expect(article.getByText("推荐").closest("label")?.textContent).toContain(
+      recommended === "pause" ? "暂停" : "增加轮数",
+    );
+    expect(article.queryByText(/raise_limit|pause/u)).toBeNull();
+  },
+);
+
+test("a paused review-limit decision keeps only raise_limit and explains its automatic effect", async () => {
+  const decision = q({
+    trigger: "review_limit",
+    status: "provisional",
+    options: [
+      { key: "pause", description: "暂停", impact: "保留阻塞" },
+      { key: "raise_limit", description: "旧版说明", impact: "旧版后果" },
+    ],
+    recommended: "pause",
+  });
+  const recordDecision = vi.fn(async () => undefined);
+  render(
+    <NeedsYouPage
+      projectId="p-1"
+      client={fakeClient({
+        needsYou: async () => page([decision]),
+        recordDecision,
+      })}
+    />,
+  );
+  const article = within(
+    await screen.findByRole("article", { name: "拍板 q(1)" }),
+  );
+  expect(article.getByText("已暂停（临时决定）")).toBeTruthy();
+  expect(article.getAllByRole("radio")).toHaveLength(1);
+  expect(article.getAllByRole("button")).toHaveLength(1);
+  expect(article.getByText(/审核上限加 1；没有其他阻塞/u)).toBeTruthy();
+  expect(article.queryByText(/raise_limit|pause/u)).toBeNull();
+  fireEvent.click(article.getByRole("button", { name: "增加一轮审核额度" }));
+  await waitFor(() =>
+    expect(recordDecision).toHaveBeenCalledWith(
+      "p-1",
+      "q(1)",
+      "raise_limit",
+      "",
+      expect.any(String),
+    ),
+  );
+});
+
+test("merge confirmation shows due time and a decreasing countdown", async () => {
+  vi.useFakeTimers();
+  const data = page([
+    merge({
+      auto_merge: { minutes: 10, due_at: "2026-01-01T00:10:00.000Z" },
+      waited_ms: 120000,
+    }),
+  ]);
+  render(
+    <NeedsYouPage
+      client={fakeClient()}
+      projectId="p-1"
+      resource={{ data, pending: false, error: undefined, reload: () => {} }}
+    />,
+  );
+  expect(screen.getByText(/自动合并（偏好设置：10 分钟）/)).toBeTruthy();
+  expect(screen.getByText(/剩余 8 分钟/)).toBeTruthy();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(60000);
+  });
+  expect(screen.getByText(/剩余 7 分钟/)).toBeTruthy();
+});

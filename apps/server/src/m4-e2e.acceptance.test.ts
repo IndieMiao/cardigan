@@ -65,6 +65,15 @@ const ALL_TOOLS = [
   "assign",
   "record_decision",
 ] as const;
+const toolsFor = (role: string) =>
+  ALL_TOOLS.filter(
+    (tool) =>
+      role === "pm" ||
+      (tool !== "record_decision" &&
+        tool !== (role === "coder" ? "submit_review" : "submit_delivery")),
+  );
+const kindFor = (role: string) =>
+  role === "pm" ? "standing" : role === "coder" ? "produce" : "verify";
 
 const git = (cwd: string, ...args: string[]) =>
   execFileSync(
@@ -234,12 +243,12 @@ async function harness(): Promise<Harness> {
         [
           `role_id: ${role_id}`,
           `display_name: ${role_id}`,
-          "kind: work",
+          `kind: ${kindFor(role_id)}`,
           `core_prompt: |`,
           `  You are the ${role_id}.`,
           "harness: pi",
           "launch_profile_ref: fixture",
-          `allowed_tools: [${ALL_TOOLS.join(", ")}]`,
+          `allowed_tools: [${toolsFor(role_id).join(", ")}]`,
           `worktree: ${worktree}`,
           "",
         ].join("\n"),
@@ -419,11 +428,11 @@ async function harness(): Promise<Harness> {
           role_id: role.role_id,
           version: role.version,
           display_name: role.role_id,
-          kind: "work",
+          kind: kindFor(role.role_id),
           core_prompt: role.role_id,
           harness: "pi",
           launch_profile_ref: "fixture",
-          allowed_tools: ALL_TOOLS as never,
+          allowed_tools: toolsFor(role.role_id),
           capabilities: [],
           abilities: [],
           worktree: role.worktree as never,
@@ -432,6 +441,7 @@ async function harness(): Promise<Harness> {
         card: {
           id: card.id,
           project_id: project,
+          repo: source,
           base_branch: card.base_branch,
         } as never,
         work_item: item,

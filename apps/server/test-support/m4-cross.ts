@@ -58,6 +58,7 @@ import { Store } from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { expect, vi } from "vitest";
+import { createTestRuntime } from "../../../test-support/paths.js";
 import { ServerGit } from "../src/git.js";
 import { type CardiganServer, startCardiganServer } from "../src/index.js";
 import { HcCore, runCleanupSteps } from "./hc.js";
@@ -567,8 +568,14 @@ export async function m4Cross(options: { hc?: boolean; agent?: boolean } = {}) {
     );
     if (options.hc) {
       const session = `m4t2-${process.pid}-${root.slice(-6)}`,
-        socket = join(root, "hc.sock"),
-        env = { ...process.env, HC_SESSION: session, HC_SOCKET: socket };
+        runtimeDir = createTestRuntime(join(root, "runtime")),
+        socket = join(runtimeDir, "hc.sock"),
+        env = {
+          ...process.env,
+          HC_SESSION: session,
+          HC_SOCKET: socket,
+          XDG_RUNTIME_DIR: runtimeDir,
+        };
       core = new HcCore(session, socket, env);
       execFileSync("hc", ["server", "start", "--json"], {
         env,
@@ -630,11 +637,23 @@ const child=spawnSync('sh',['-c',args.slice(at+2).join(' ')],{cwd:${JSON.stringi
         JSON.stringify({
           role_id,
           display_name: role_id,
-          kind: role_id === "pm" ? "standing" : "work",
+          kind:
+            role_id === "pm"
+              ? "standing"
+              : role_id === "coder"
+                ? "produce"
+                : "verify",
           core_prompt: corePromptFor(role_id),
           harness: "pi",
           launch_profile_ref: "fixture",
-          allowed_tools: [...toolNames],
+          // Preserve collaboration tools, but do not give every role both work-item actions.
+          allowed_tools: toolNames.filter(
+            (tool) =>
+              role_id === "pm" ||
+              (tool !== "record_decision" &&
+                tool !==
+                  (role_id === "coder" ? "submit_review" : "submit_delivery")),
+          ),
           worktree: role_id === "coder" ? "write" : "none",
         }),
       );

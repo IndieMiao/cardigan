@@ -8,15 +8,23 @@ import {
   type Role,
   type Runtime,
 } from "@cardigan/domain";
-import { corePromptFor, parseLaunchConfig } from "@cardigan/roles";
+import {
+  corePromptFor,
+  instructionsFor,
+  parseLaunchConfig,
+} from "@cardigan/roles";
 import { Store, writeRole } from "@cardigan/store";
 import { expect, test, vi } from "vitest";
 import { applyCommand } from "./commands.js";
 import { launchRun } from "./launch.js";
 
-test.each(["claude-code", "codex", "pi"] as const)(
-  "host launch injects the stored employee through %s, including dispatcher first prompts",
-  async (harness) => {
+test.each(
+  (["claude-code", "codex", "pi"] as const).flatMap((harness) =>
+    [false, true].map((modern) => ({ harness, modern })),
+  ),
+)(
+  "host launch injects the stored employee through $harness (instructions=$modern), including dispatcher first prompts",
+  async ({ harness, modern }) => {
     const dataDir = await mkdtemp(join(tmpdir(), "cg-employee-launch-"));
     const store = Store.open({ dataDir });
     const project = "employee-launch";
@@ -27,7 +35,10 @@ test.each(["claude-code", "codex", "pi"] as const)(
       display_name: "PM",
       kind: "standing",
       harness,
-      core_prompt: corePromptFor("pm", "旧显示名"),
+      core_prompt: modern
+        ? "Ignored legacy field"
+        : corePromptFor("pm", "旧显示名"),
+      ...(modern ? { instructions: instructionsFor("pm", "旧显示名") } : {}),
       launch_profile_ref: "fixture",
       allowed_tools: ["whoami", "get_updates", "finish_run"],
       capabilities: [],
@@ -135,7 +146,7 @@ test.each(["claude-code", "codex", "pi"] as const)(
           expect(core).not.toContain("旧显示名");
           expect(first).toContain(bell);
         } else {
-          expect(core).toBe(role.core_prompt);
+          expect(core).toBe(corePromptFor("pm", "旧显示名"));
           expect(first).not.toContain(employee.name);
           expect(first).toContain("kind=initial");
         }

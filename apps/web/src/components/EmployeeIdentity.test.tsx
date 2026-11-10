@@ -34,7 +34,7 @@ const employee = {
   title: "工程师",
   bio: "负责实现与维护",
   role_id: "coder",
-  avatar: "/avatars/lin.png",
+  avatar: "/avatars/v1/guan-yu/head-64.webp",
 };
 const identity: AuthorView = {
   employee,
@@ -72,7 +72,7 @@ test("placeholder colors follow the existing light/dark tokens and profiles sit 
 test("loads a same-origin avatar, falls back on error, and retries a changed path", () => {
   const { container, rerender } = render(<EmployeeIdentity {...identity} />);
   const img = container.querySelector("img");
-  expect(img?.getAttribute("src")).toBe("/avatars/lin.png");
+  expect(img?.getAttribute("src")).toBe("/avatars/v1/guan-yu/head-64.webp");
   expect(screen.getByText("工程师")).toBeTruthy();
   if (!img) throw new Error("Missing avatar");
   fireEvent.error(img);
@@ -84,6 +84,44 @@ test("loads a same-origin avatar, falls back on error, and retries a changed pat
   expect(container.querySelector("img")?.getAttribute("src")).toBe(
     "/avatars/new.png",
   );
+});
+
+test("library avatars select 64/128 sources with 2x images and show 256 in the profile", () => {
+  const { container, rerender } = render(<EmployeeIdentity {...identity} />);
+  const base = "/avatars/v1/guan-yu/head-";
+  expect(container.querySelector("img")?.getAttribute("srcset")).toBe(
+    `${base}64.webp 1x, ${base}128.webp 2x`,
+  );
+  rerender(<EmployeeIdentity {...identity} avatarSize={128} />);
+  expect(container.querySelector("img")?.getAttribute("src")).toBe(
+    `${base}128.webp`,
+  );
+  expect(container.querySelector("img")?.getAttribute("srcset")).toBe(
+    `${base}128.webp 1x, ${base}256.webp 2x`,
+  );
+  fireEvent.pointerEnter(
+    screen.getByRole("button", { name: "林舟的员工卡片" }),
+  );
+  const profile = screen.getByRole("dialog");
+  const image = profile.querySelector("img");
+  expect(image?.getAttribute("src")).toBe(`${base}256.webp`);
+  if (!image) throw new Error("Missing profile avatar");
+  fireEvent.error(image);
+  expect(profile.querySelector("img")).toBeNull();
+  expect(profile.querySelector(".employee-avatar")?.textContent).toBe("林");
+});
+
+test("uploaded avatars keep the authenticated URL at both sizes", () => {
+  const path = `/api/avatars/${"a".repeat(64)}`;
+  const { container } = render(
+    <EmployeeIdentity employee={{ ...employee, avatar: path }} />,
+  );
+  expect(container.querySelector("img")?.getAttribute("src")).toBe(path);
+  expect(container.querySelector("img")?.getAttribute("srcset")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "林舟的员工卡片" }));
+  expect(
+    screen.getByRole("dialog").querySelector("img")?.getAttribute("src"),
+  ).toBe(path);
 });
 
 test("missing avatar uses a stable employee color and Unicode initial; missing employee uses a role placeholder", () => {
@@ -224,8 +262,10 @@ test("board shows three owner avatars plus overflow; profile click does not open
       onOpenCard={openCard}
     />,
   );
-  const group = screen.getByRole("group", { name: "产出负责人" });
-  expect(within(group).getAllByRole("button")).toHaveLength(3);
+  const group = screen.getByRole("group", { name: "参与员工" });
+  expect(
+    within(group).getAllByRole("button", { name: /的员工卡片$/ }),
+  ).toHaveLength(3);
   expect(within(group).getByText("+2")).toBeTruthy();
   const trigger = within(group).getByRole("button", {
     name: "员工1的员工卡片",

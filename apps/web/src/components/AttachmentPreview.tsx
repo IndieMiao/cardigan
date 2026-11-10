@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { AttachmentView } from "../api.js";
+import { AttachmentCaption, attachmentName } from "./AttachmentCaption.js";
 import { EmployeeIdentity } from "./EmployeeIdentity.js";
 import { Lightbox } from "./Lightbox.js";
 
@@ -27,10 +28,10 @@ export function AttachmentPreview({
       onIndexChange={setIndex}
       images={images.map((a) => ({
         src: a.download_path,
-        alt: `附件 ${a.id}`,
+        alt: `附件 ${attachmentName(a)}`,
         caption: (
           <>
-            {a.id}{" "}
+            <AttachmentCaption attachment={a} />
             <EmployeeIdentity
               {...a}
               author={a.uploaded_by}
@@ -47,11 +48,11 @@ export function AttachmentPreview({
         <button
           type="button"
           className="attachment-preview"
-          aria-label={`预览 ${attachment.id}`}
+          aria-label={`预览 ${attachmentName(attachment)}`}
         >
           <img
             src={attachment.download_path}
-            alt={`附件 ${attachment.id}`}
+            alt={`附件 ${attachmentName(attachment)}`}
             loading="lazy"
           />
         </button>

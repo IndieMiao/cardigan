@@ -56,6 +56,8 @@ export interface GitRef {
 export interface GitCentralPort {
   objectFormat(repository: string): Promise<"sha1" | "sha256">;
   objectType(repository: string, sha: string): Promise<string | undefined>;
+  /** Read the tree of a full commit SHA, never of an arbitrary ref or tag. */
+  treeOfCommit(repository: string, sha: string): Promise<string>;
   countCommits(repository: string, base: string, head: string): Promise<number>;
   ensureBare(
     source: string,

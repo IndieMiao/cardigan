@@ -9,7 +9,8 @@ import {
   text,
   unwrap,
 } from "./core.js";
-import { mergePlan } from "./merge.js";
+import { mergePlan, prepareMergePlan } from "./merge.js";
+import { hasPassedMergeCheck } from "./merge-check.js";
 import { reopenMerge } from "./merge-rework.js";
 
 export type MergeResult =
@@ -17,6 +18,10 @@ export type MergeResult =
       readonly kind: "merged";
       readonly merge_sha: string;
       readonly previous_sha: string;
+      /** Host reads this tree from the exact candidate being published. */
+      readonly tree_sha?: string;
+      /** Host verified every planned delivery is already an ancestor of this unchanged baseline. */
+      readonly noop?: boolean;
     }
   | {
       readonly kind: "conflicted";
@@ -43,11 +48,26 @@ export function recordMergeResult(
         "validation_failed",
         "Merge result requires full commit SHAs",
       );
+      ensure(
+        (r.noop === undefined || typeof r.noop === "boolean") &&
+          (r.tree_sha === undefined ||
+            (r.tree_sha.length === r.merge_sha.length &&
+              /^[a-f0-9]+$/u.test(r.tree_sha))),
+        "validation_failed",
+        "Invalid merged tree or no-op marker",
+      );
       result = {
         kind: r.kind,
         merge_sha: r.merge_sha,
         previous_sha: r.previous_sha,
+        ...(r.tree_sha ? { tree_sha: r.tree_sha } : {}),
+        ...(r.noop ? { noop: true } : {}),
       };
+      ensure(
+        !r.noop || r.merge_sha === r.previous_sha,
+        "invariant_violation",
+        "No-op cannot change the baseline",
+      );
     } else if (r.kind === "conflicted") {
       ensure(
         r.files.length > 0 && r.files.every((f) => f.trim()),
@@ -85,12 +105,32 @@ export function recordMergeResult(
       })
     )
       return card;
-    const plan = unwrap(mergePlan(state, card.id));
+    const plan = unwrap(
+      state.project_settings?.merge_gate_enabled && r.kind !== "merged"
+        ? prepareMergePlan(state, card.id)
+        : mergePlan(state, card.id),
+    );
     ensure(
       plan.completion_id === p.completion_id,
       "stale_target",
       "Merge result belongs to an older completion request",
     );
+    if (
+      r.kind === "merged" &&
+      state.project_settings?.merge_gate_enabled &&
+      !r.noop
+    )
+      ensure(
+        r.tree_sha &&
+          hasPassedMergeCheck(
+            state.events,
+            card.id,
+            p.completion_id,
+            r.tree_sha,
+          ),
+        "invariant_violation",
+        "Invariant 21: the merged tree requires a passed check for this completion",
+      );
     let next = card;
     let work_item_id: WorkItemId | undefined;
     if (r.kind === "merged")

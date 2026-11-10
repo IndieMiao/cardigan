@@ -10,6 +10,32 @@ import {
 } from "./core.js";
 
 const stored = Symbol("stored-attachment");
+
+function displayText(
+  value: string | undefined,
+  field: string,
+): string | undefined {
+  if (value === undefined) return undefined;
+  text(value, field);
+  ensure(
+    !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value),
+    "validation_failed",
+    `${field} must not contain control characters`,
+  );
+  // Both browser/Windows and POSIX paths may arrive through an upload adapter.
+  const normalized =
+    field === "original_filename"
+      ? (value.split(/[\\/]/u).at(-1) ?? "")
+      : value;
+  text(normalized, field);
+  ensure(
+    [...normalized].length <= 200,
+    "validation_failed",
+    `${field} must be at most 200 characters`,
+  );
+  return normalized;
+}
+
 export interface StoredAttachment {
   readonly [stored]: true;
   readonly sha256: string;
@@ -52,13 +78,20 @@ export function uploadAttachment(
   state: CommandState,
   actor: Actor,
   p: Pick<Attachment, "card_id" | "mime" | "kind" | "attach_to"> &
-    Partial<Pick<Attachment, "basis" | "supersedes">>,
+    Partial<
+      Pick<Attachment, "basis" | "supersedes" | "original_filename" | "note">
+    >,
   receipt: StoredAttachment,
   ports: CommandPorts,
 ) {
   return command(state, actor, "upload_attachment", ports, (d) => {
     d.card(p.card_id);
     text(p.mime, "mime");
+    const original_filename = displayText(
+      p.original_filename,
+      "original_filename",
+    );
+    const note = displayText(p.note, "note");
     ensure(
       receipt?.[stored],
       "validation_failed",
@@ -108,6 +141,8 @@ export function uploadAttachment(
       storage_path: receipt.storage_path,
       card_id: p.card_id,
       mime: p.mime,
+      ...(original_filename === undefined ? {} : { original_filename }),
+      ...(note === undefined ? {} : { note }),
       uploaded_by: d.author,
       attach_to: p.attach_to,
       ...(p.supersedes ? { supersedes: p.supersedes } : {}),

@@ -4,6 +4,7 @@ import type {
   CommandEffect,
   CommandState,
   Delivery,
+  Event,
   Result,
 } from "../../index.js";
 import {
@@ -21,7 +22,10 @@ import {
 import { apply, human, ports, role, value } from "../test-fixtures.js";
 
 /** Real create/assign/launch transitions; no pre-seeded in_progress entities. */
-export function mergeFixture(policy: "confirm" | "auto" = "confirm") {
+export function mergeFixture(
+  policy: "confirm" | "auto" = "confirm",
+  limit = 3,
+) {
   const io = {
     ...ports(),
     templates: [{ ...developmentCardTemplate, merge: policy }],
@@ -62,6 +66,13 @@ export function mergeFixture(policy: "confirm" | "auto" = "confirm") {
       io,
     ),
   );
+  // Initial control-plane budget; no review or workflow transitions are skipped.
+  state = {
+    ...state,
+    work_items: state.work_items.map((w) =>
+      w.kind === "verify" ? { ...w, max_review_rounds: limit } : w,
+    ),
+  };
   const owners = state.work_items.map((w) =>
     commit(
       assign(state, human, { work_item_id: w.id, role_id: w.role_id }, io),
@@ -76,7 +87,7 @@ export function mergeFixture(policy: "confirm" | "auto" = "confirm") {
     assignment_id: a.id,
     ...role(a.role_id),
   });
-  function start(a: Assignment) {
+  function start(a: Assignment, trigger?: Event) {
     for (const r of state.runs.filter(
       (r) => r.assignment_id === a.id && r.status === "running",
     ))
@@ -104,6 +115,16 @@ export function mergeFixture(policy: "confirm" | "auto" = "confirm") {
           io,
         ),
       );
+    // Model the Router's fix Run binding at the host/domain boundary.
+    if (trigger)
+      state = {
+        ...state,
+        runs: state.runs.map((r) =>
+          r.id === queued.id
+            ? { ...r, kind: "fix", trigger_event_id: trigger.id }
+            : r,
+        ),
+      };
     commit(
       dispatchRun(
         state,
@@ -127,8 +148,9 @@ export function mergeFixture(policy: "confirm" | "auto" = "confirm") {
     sha = "a".repeat(40),
     git = true,
     known_gaps: Delivery["known_gaps"] = [],
+    trigger?: Event,
   ) {
-    start(coder);
+    start(coder, trigger);
     const p = {
       work_item_id: coder.work_item_id as Delivery["work_item_id"],
       kind,

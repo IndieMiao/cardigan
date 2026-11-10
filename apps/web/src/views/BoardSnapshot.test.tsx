@@ -76,10 +76,21 @@ test("U4b cards show role, progress, update and a textual blocker; newly occupie
     <CardListPage client={client} projectId="p-1" view="board" />,
   );
   const link = await screen.findByRole("link", { name: /准备发布/ });
-  expect(link.textContent).toContain("负责角色：coder、reviewer");
-  expect(link.textContent).toContain("进度：2/5");
-  expect(link.querySelector(".status-blocked")?.textContent).toBe("阻塞");
-  expect(link.querySelector("time")?.getAttribute("datetime")).toBe(
+  const tile = link.closest(".card-tile");
+  if (!tile) throw new Error("Missing card tile");
+  expect(
+    within(tile as HTMLElement).getByRole("link", {
+      name: "负责角色：coder、reviewer",
+    }),
+  ).toBeTruthy();
+  expect(
+    within(tile as HTMLElement).getByRole("link", { name: "进度：2/5" }),
+  ).toBeTruthy();
+  expect(
+    within(tile as HTMLElement).getByRole("link", { name: "阻塞：等待权限" })
+      .className,
+  ).toContain("board-card-blocked");
+  expect(tile.querySelector("time")?.getAttribute("datetime")).toBe(
     active.updated_at,
   );
   cards = [
@@ -220,10 +231,14 @@ test.each([
         view="board"
       />,
     );
-    const tile = await screen.findByRole("link", { name: /准备发布/ });
+    const link = await screen.findByRole("link", { name: /准备发布/ });
+    const tile = link.closest<HTMLElement>(".card-tile");
+    if (!tile) throw new Error("Missing card tile");
     expect(
-      [...tile.querySelectorAll(".status")].map((tag) => tag.textContent),
-    ).toEqual(["进行中", ...labels]);
+      [
+        ...tile.querySelectorAll(".board-card-waiting, .board-card-blocked"),
+      ].map((tag) => tag.textContent),
+    ).toEqual(labels);
     expect(
       tile.closest(".card-tile")?.classList.contains("card-tile-blocked"),
     ).toBe(tone === "blocked");
@@ -232,7 +247,12 @@ test.each([
     ).toBe(tone === "waiting");
     for (const label of ["等你拍板", "待你执行"]) {
       const badge = within(tile).queryByText(label, { exact: true });
-      if (badge) expect(badge.classList.contains("status-waiting")).toBe(true);
+      if (badge)
+        expect(
+          badge
+            .closest(".board-card-badge")
+            ?.classList.contains("board-card-waiting"),
+        ).toBe(true);
     }
   },
 );

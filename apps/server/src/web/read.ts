@@ -12,10 +12,12 @@ import type {
 } from "@cardigan/domain";
 import {
   authorView,
+  autoMergeSchedule,
   deriveCardStatus,
   deriveReviewMatrix,
   extractReferences,
   listNeedsYou,
+  parseAvatarReference,
   projectSnapshot,
   type Result,
   resolveReferences,
@@ -71,7 +73,7 @@ export function projectState(
 function webAuthorView(state: CommandState, author: Author) {
   const view = authorView(state, author);
   const employee = state.employees?.find((e) => e.id === view.employee?.id);
-  const avatar = employee?.avatar;
+  const avatar = parseAvatarReference(employee?.avatar);
   return {
     ...view,
     author,
@@ -83,7 +85,11 @@ function webAuthorView(state: CommandState, author: Author) {
           bio: employee.bio,
           role_id: employee.role_id,
           avatar:
-            avatar && /^\/(?![/\\])[^\s\\]*$/.test(avatar) ? avatar : null,
+            avatar?.kind === "library"
+              ? `/avatars/v1/${avatar.id}/head-64.webp`
+              : avatar?.kind === "upload"
+                ? `/api/avatars/${avatar.sha256}`
+                : null,
         }
       : null,
   };
@@ -124,6 +130,9 @@ export function cardViews(state: CommandState): WebCardView[] {
 
 export interface CardListView extends WebCardView {
   readonly produce_owners: readonly WebAuthorView[];
+  readonly participants: readonly WebAuthorView[];
+  readonly work_items: readonly Pick<WorkItem, "id" | "title" | "status">[];
+  readonly attachment_count: number;
   readonly progress: { readonly completed: number; readonly total: number };
   readonly updated_at: string;
   readonly roles: readonly string[];
@@ -131,6 +140,39 @@ export interface CardListView extends WebCardView {
 
 /** Card rows plus the counts, timestamp and roles the list filters need (U2). */
 export function cardListViews(state: CommandState): CardListView[] {
+  const entryCard = new Map(
+    state.timeline.map((entry) => [entry.id, entry.card_id]),
+  );
+  const attachmentCounts = new Map<string, number>();
+  for (const attachment of state.attachments) {
+    const cardId =
+      attachment.card_id ??
+      (attachment.attach_to.kind === "timeline_entry"
+        ? entryCard.get(attachment.attach_to.id)
+        : undefined);
+    if (cardId)
+      attachmentCounts.set(cardId, (attachmentCounts.get(cardId) ?? 0) + 1);
+  }
+  const assignments = new Map(
+    state.assignments.map((assignment) => [assignment.id, assignment]),
+  );
+  const owners = (items: readonly WorkItem[]) => [
+    ...new Map(
+      items.flatMap((item) => {
+        const assignment = item.assignment_id
+          ? assignments.get(item.assignment_id)
+          : undefined;
+        return assignment && assignment.status !== "released"
+          ? [
+              [
+                assignment.employee_id ?? assignment.id,
+                webAuthorView(state, `assignment:${assignment.id}`),
+              ] as const,
+            ]
+          : [];
+      }),
+    ).values(),
+  ];
   return cardViews(state).map((card) => {
     const items = state.work_items.filter((item) => item.card_id === card.id),
       completed = items.filter(
@@ -144,25 +186,10 @@ export function cardListViews(state: CommandState): CardListView[] {
           .at(-1) ?? card.created_at;
     return {
       ...card,
-      produce_owners: [
-        ...new Map(
-          items
-            .filter((item) => item.kind === "produce")
-            .flatMap((item) => {
-              const assignment = state.assignments.find(
-                (a) => a.id === item.assignment_id && a.status !== "released",
-              );
-              return assignment
-                ? [
-                    [
-                      assignment.employee_id ?? assignment.id,
-                      webAuthorView(state, `assignment:${assignment.id}`),
-                    ] as const,
-                  ]
-                : [];
-            }),
-        ).values(),
-      ],
+      produce_owners: owners(items.filter((item) => item.kind === "produce")),
+      participants: owners(items),
+      work_items: items.map(({ id, title, status }) => ({ id, title, status })),
+      attachment_count: attachmentCounts.get(card.id) ?? 0,
       progress: { completed, total: items.length },
       updated_at,
       roles: [...new Set(items.map((item) => item.role_id))].sort(),
@@ -244,6 +271,8 @@ function affectsCard(
 /** Attachment metadata as the browser gets it; the blob is a separate request. */
 export interface AttachmentView extends WebAuthorView {
   readonly id: string;
+  readonly original_filename?: string;
+  readonly note?: string;
   readonly mime: string;
   readonly size: number;
   readonly sha256: string;
@@ -310,6 +339,10 @@ export function attachmentViews(
             };
       return {
         id: attachment.id,
+        ...(attachment.original_filename === undefined
+          ? {}
+          : { original_filename: attachment.original_filename }),
+        ...(attachment.note === undefined ? {} : { note: attachment.note }),
         mime: attachment.mime,
         size: attachment.size,
         sha256: attachment.sha256,
@@ -481,6 +514,13 @@ export function cardDetail(
       ...entry,
       ...webAuthorView(state, entry.author),
       event_type: event?.type ?? null,
+      ...(entry.type === "decision_resolved" &&
+      event?.payload &&
+      typeof event.payload === "object" &&
+      "via" in event.payload &&
+      event.payload.via === "delegated"
+        ? { decision_via: "delegated" }
+        : {}),
       ...(event?.type === "attachment_uploaded" &&
       typeof attachmentId === "string" &&
       state.attachments.some(
@@ -531,7 +571,15 @@ export function cardDetail(
       ...webRunAuthorView(state, r.run_id),
     })),
     review_matrix,
-    decisions,
+    decisions: decisions.map((decision) => {
+      const schedule = autoMergeSchedule(state, decision.id);
+      return {
+        ...decision,
+        auto_merge: schedule.ok
+          ? { minutes: schedule.value.minutes, due_at: schedule.value.due_at }
+          : null,
+      };
+    }),
     human_actions,
     attachments: attachmentViews(state, card_id),
     // §8.4 关联区: decisions, related cards and the deliveries that carry a PR.
@@ -582,7 +630,11 @@ export function needsYou(state: CommandState, now: string) {
   );
   const data = result.data;
   const decisions = data.decisions.map((decision) => {
+    const schedule = autoMergeSchedule(state, decision.id);
     return {
+      auto_merge: schedule.ok
+        ? { minutes: schedule.value.minutes, due_at: schedule.value.due_at }
+        : null,
       ...webAuthorView(
         state,
         state.decisions.find((d) => d.id === decision.id)?.raised_by ??
@@ -648,6 +700,9 @@ export function needsYou(state: CommandState, now: string) {
       why: clamp(action.why),
       expected_return: action.expected_return,
       blocked_work_items: action.blocked_work_items,
+      ...(action.completion_notice !== undefined
+        ? { completion_notice: action.completion_notice }
+        : {}),
       due: action.due ?? null,
       opened_at: opened ?? null,
       waited_ms: waitedMs(opened, now) ?? null,

@@ -81,6 +81,26 @@ describe("Chinese CLI errors", () => {
   });
 
   test.each([
+    [
+      "validation_failed",
+      "original_filename must be at most 200 characters",
+      "附件文件名不能超过 200 字符",
+    ],
+    [
+      "validation_failed",
+      "note must be at most 200 characters",
+      "附件说明不能超过 200 字符",
+    ],
+    [
+      "validation_failed",
+      "original_filename must not contain control characters",
+      "附件文件名不能包含控制字符",
+    ],
+    [
+      "validation_failed",
+      "note must not contain control characters",
+      "附件说明不能包含控制字符",
+    ],
     ["validation_failed", "title is required", "标题不能为空"],
     ["validation_failed", "goal is required", "目标不能为空"],
     [

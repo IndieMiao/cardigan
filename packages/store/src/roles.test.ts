@@ -283,7 +283,7 @@ describe("project repository registration", () => {
         base_branch: "main",
       });
       expect(store.migrate()).toEqual([]);
-      expect(store.schemaVersion()).toBe(11);
+      expect(store.schemaVersion()).toBe(12);
       expect(store.getProject(project_id)?.repo_path).toBe(
         "/srv/agent/repos/example",
       );
@@ -303,7 +303,7 @@ describe("project repository registration", () => {
 
       const reopened = Store.open({ dataDir });
       try {
-        expect(reopened.schemaVersion()).toBe(11);
+        expect(reopened.schemaVersion()).toBe(12);
         expect(reopened.getProject(project_id)?.repo_path).toBe(
           "/srv/agent/repos/example",
         );

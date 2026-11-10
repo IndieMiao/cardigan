@@ -12,6 +12,7 @@ import {
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { attachment, cardDetail, timelineEntry } from "../testing/fixtures.js";
 import { Timeline } from "./Timeline.js";
+import { TimelineContent } from "./TimelineContent.js";
 import { TimelineIcon } from "./TimelineHeader.js";
 
 beforeEach(() => {
@@ -220,6 +221,65 @@ test("U6b structural conclusions retain their result and share the comment heade
   }
 });
 
+test("attachment names and notes appear in comments and upload rows as plain text, with legacy fallback", () => {
+  const named = attachment({
+    id: "attachment-1",
+    original_filename: "截图.png",
+    note: "<script>plain text</script>",
+    attach_to: { kind: "timeline_entry", id: "comment" },
+  });
+  const document = attachment({
+    id: "attachment-2",
+    original_filename: "结果.txt",
+    note: "测试日志",
+    mime: "text/plain",
+    inline: false,
+  });
+  const legacy = attachment({
+    id: "attachment-3",
+    attach_to: { kind: "timeline_entry", id: "comment" },
+  });
+  const view = show(
+    [
+      timelineEntry({ id: "comment", type: "comment", body: "附件结果" }),
+      timelineEntry({
+        id: "upload",
+        event_seq: 2,
+        type: "system",
+        event_type: "attachment_uploaded",
+        attachment_id: named.id,
+        body: "Attached attachment-1",
+      }),
+      timelineEntry({
+        id: "upload-text",
+        event_seq: 3,
+        type: "system",
+        event_type: "attachment_uploaded",
+        attachment_id: document.id,
+        body: "Attached attachment-2",
+      }),
+    ],
+    [named, document, legacy],
+  );
+  const attached = view.container.querySelector(".attachments") as HTMLElement;
+  expect(within(attached).getByText("截图.png")).toBeTruthy();
+  expect(
+    within(attached).getByText("<script>plain text</script>"),
+  ).toBeTruthy();
+  expect(within(attached).getByText("attachment-3")).toBeTruthy();
+  const rows = view.container.querySelectorAll(".system-line");
+  expect(
+    [...rows].some(
+      (row) =>
+        row.textContent?.includes("截图.png") &&
+        row.textContent.includes("<script>plain text</script>"),
+    ),
+  ).toBe(true);
+  expect(screen.getByRole("link", { name: "下载 结果.txt" })).toBeTruthy();
+  expect(screen.getByText("测试日志")).toBeTruthy();
+  expect(view.container.querySelector("script")).toBeNull();
+});
+
 test("U6b system rows show the authenticated actor and exact upload thumbnail; previews exclude SVG and close to their trigger", async () => {
   const file = attachment({ id: "F-1" }),
     svg = attachment({ id: "F-2", mime: "image/svg+xml", inline: true });
@@ -284,4 +344,45 @@ test("U6b system rows show the authenticated actor and exact upload thumbnail; p
     within(rows[1] as HTMLElement).queryByRole("button", { name: "预览 F-2" }),
   ).toBeNull();
   expect(css).toContain(".system-details > summary::-webkit-details-marker");
+});
+
+test("merge timeline shows the deadline and distinguishes delegated from human confirmation", () => {
+  const decision = {
+    id: "q(1)",
+    trigger: "merge_confirmation",
+    question: "Merge C-1 into main?",
+    status: "open",
+    decider: "human",
+    blocking: true,
+    options: [{ key: "merge", description: "合并", impact: "更新基线" }],
+    recommended: "merge",
+    auto_merge: { minutes: 10, due_at: "2026-01-01T00:10:00.000Z" },
+  };
+  const detail = cardDetail({ decisions: [decision] });
+  const entry = timelineEntry({
+    type: "decision_request",
+    decision_id: decision.id,
+  });
+  const content = (item: typeof entry) => (
+    <TimelineContent
+      entry={item}
+      detail={detail}
+      projectId="p-1"
+      cardId="C-1"
+    />
+  );
+  const view = render(content(entry));
+  expect(screen.getByText(/自动合并（偏好设置：10 分钟）/)).toBeTruthy();
+  const resolved = {
+    ...entry,
+    type: "decision_resolved" as const,
+    decision_option: "merge",
+    author: "system",
+    body: "超过 10 分钟无人处理，按偏好设置自动确认合并",
+  };
+  view.rerender(content({ ...resolved, decision_via: "delegated" }));
+  expect(screen.getByText("自动合并（代批）")).toBeTruthy();
+  expect(screen.queryByText(/将于/)).toBeNull();
+  view.rerender(content({ ...resolved, author: "human" }));
+  expect(screen.queryByText("自动合并（代批）")).toBeNull();
 });

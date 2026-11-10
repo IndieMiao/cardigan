@@ -1,5 +1,6 @@
 /** Shared presentation vocabulary; raw event data remains available in details. */
 export const EVENT_LABELS: Readonly<Record<string, string>> = {
+  project_preferences_updated: "更新了项目偏好",
   card_created: "创建了卡片",
   card_updated: "更新了卡片",
   card_superseded: "标记了卡片的取代关系",

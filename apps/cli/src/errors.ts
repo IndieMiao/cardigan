@@ -66,6 +66,12 @@ const SPECIFIC_REASONS: Partial<Record<ErrorCode, Record<string, string>>> = {
     "Artifacts require a decision basis":
       "artifact 附件必须提供 --basis 拍板编号",
     "Attachment target belongs to another card": "附件挂载条目属于另一张卡片",
+    "original_filename must be at most 200 characters":
+      "附件文件名不能超过 200 字符",
+    "note must be at most 200 characters": "附件说明不能超过 200 字符",
+    "original_filename must not contain control characters":
+      "附件文件名不能包含控制字符",
+    "note must not contain control characters": "附件说明不能包含控制字符",
   },
   not_found: {
     "Role version was not found": "角色版本不存在，请先添加角色",
@@ -82,41 +88,6 @@ export function formatCommandError(
   error: CodedError,
 ): string {
   return `无法${operation} ${target}：${describeError(error)}（${error.code}）`;
-}
-
-/** The legacy store exception has no code; classify its business refusal at the CLI boundary. */
-export function formatRoleVersionError(
-  operation: string,
-  roleId: string,
-  error: { readonly message: string },
-): string {
-  const duplicate =
-    /^role .+ already exists at v(\d+); use "role update" to add a new version$/u.exec(
-      error.message,
-    );
-  const missing = /^role .+ does not exist; use "role add" first$/u.test(
-    error.message,
-  );
-  const version =
-    /^role .+ would be v(\d+); refusing to write v(\d+) \(versions are append-only\)$/u.exec(
-      error.message,
-    );
-  return formatCommandError(operation, roleId, {
-    // Match duplicate project validation; absent roles are lookup failures.
-    // A nonconsecutive version violates the append-only history invariant.
-    code: duplicate
-      ? "validation_failed"
-      : missing
-        ? "not_found"
-        : "invariant_violation",
-    message: duplicate
-      ? `角色已存在（v${duplicate[1]}），请用 cardigan role update 添加新版本`
-      : missing
-        ? "角色不存在，请先用 cardigan role add 创建"
-        : version
-          ? `角色版本只能追加，下一个版本应为 v${version[1]}，不能写入 v${version[2]}`
-          : `角色版本规则拒绝了操作：${error.message}`,
-  });
 }
 
 /** The host launch adapter wraps domain/Runtime errors as plain Error messages. */
@@ -166,6 +137,23 @@ function describeError({ code, message }: CodedError): string {
     if (transition)
       return `不允许从 ${transition[2]} 转为 ${transition[1] === "cancel" ? "cancelled" : transition[1]?.slice(4)}`;
   }
+  if (code === "not_found") {
+    const role =
+      /^role ([a-z0-9][a-z0-9._-]*)(?: v(\d+))? does not exist; use "role add" first$/u.exec(
+        message,
+      );
+    if (role)
+      return role[2]
+        ? `角色版本 v${role[2]} 不存在，请用 cardigan role show ${role[1]} --history 查看版本历史`
+        : "角色不存在，请先用 cardigan role add 创建";
+  }
+  if (
+    code === "validation_failed" &&
+    /^role [a-z0-9][a-z0-9._-]* already exists; use "role update" to add a new version$/u.test(
+      message,
+    )
+  )
+    return "角色已存在，请用 cardigan role update 添加新版本";
   if (code === "not_found") {
     const missingCard = /^cards:(C-[1-9]\d*) was not found$/u.exec(message);
     if (missingCard) return `卡片 ${missingCard[1]} 在当前项目中不存在`;

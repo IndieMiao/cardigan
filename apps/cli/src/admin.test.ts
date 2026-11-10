@@ -1,9 +1,8 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import * as roleStore from "@cardigan/store";
 import { Store } from "@cardigan/store";
-import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test } from "vitest";
 import { main } from "./index.js";
 import type { CliIo } from "./io.js";
 
@@ -31,7 +30,6 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  vi.restoreAllMocks();
   rmSync(dataDir, { recursive: true, force: true });
 });
 
@@ -42,11 +40,11 @@ function run(argv: string[]): Promise<number> {
 test("cardigan init creates the database and runs migrations", async () => {
   expect(await run(["init"])).toBe(0);
   expect(out.join("\n")).toContain(`数据库：${dataDir}`);
-  expect(out.join("\n")).toContain("schema 版本：11");
+  expect(out.join("\n")).toContain("schema 版本：12");
 
   const store = Store.open({ dataDir });
   try {
-    expect(store.schemaVersion()).toBe(11);
+    expect(store.schemaVersion()).toBe(12);
     expect(store.listProjects()).toEqual([]);
   } finally {
     store.close();
@@ -55,7 +53,7 @@ test("cardigan init creates the database and runs migrations", async () => {
   // Running it again is harmless and reports the same schema version.
   out = [];
   expect(await run(["init"])).toBe(0);
-  expect(out.join("\n")).toContain("schema 版本：11");
+  expect(out.join("\n")).toContain("schema 版本：12");
 });
 
 test("cardigan project create records a project", async () => {
@@ -89,23 +87,23 @@ test("cardigan role add writes allowed_tools and capabilities", async () => {
       "p-cli",
       "coder",
       "--version",
-      "3",
+      "1",
       "--allowed-tools",
       "whoami,get_card,get_updates",
       "--capabilities",
       "code, review",
     ]),
   ).toBe(0);
-  expect(out.join("\n")).toContain("已写入角色 coder v3");
+  expect(out.join("\n")).toContain("已写入角色 coder v1");
 
   const store = Store.open({ dataDir });
   try {
     const role = store.uow.read((tx) =>
-      tx.roles.get("p-cli" as never, { role_id: "coder", role_version: 3 }),
+      tx.roles.get("p-cli" as never, { role_id: "coder", role_version: 1 }),
     );
-    expect(role).toEqual({
+    expect(role).toMatchObject({
       role_id: "coder",
-      role_version: 3,
+      role_version: 1,
       allowed_tools: ["whoami", "get_card", "get_updates"],
       capabilities: ["code", "review"],
     });
@@ -140,7 +138,7 @@ test.each([
     scenario: "duplicate",
     command: "add",
     expected:
-      "无法创建角色 tester：角色已存在（v1），请用 cardigan role update 添加新版本（validation_failed）",
+      "无法创建角色 tester：角色已存在，请用 cardigan role update 添加新版本（validation_failed）",
   },
   {
     scenario: "missing",
@@ -150,9 +148,9 @@ test.each([
   },
   {
     scenario: "version",
-    command: "update",
+    command: "add",
     expected:
-      "无法更新角色 tester：角色版本只能追加，下一个版本应为 v2，不能写入 v4（invariant_violation）",
+      "无法创建角色 tester：--version 必须是下一个版本，不能覆盖或跳过版本（validation_failed）",
   },
 ])(
   "role rules report complete Chinese errors without changing history: $scenario",
@@ -172,22 +170,21 @@ worktree: none
     );
     if (scenario !== "missing")
       expect(await run(["role", "add", "--file", file])).toBe(0);
-    if (scenario === "version") {
-      // The CLI chooses the next version automatically. Exercise its exception
-      // boundary with a real store rejection, without adding a version flag.
-      const write = roleStore.writeRole;
-      vi.spyOn(roleStore, "writeRole").mockImplementationOnce(
-        (tx, project, role, options) =>
-          write(tx, project, role, { ...options, version: 4 }),
-      );
-    }
     const store = Store.open({ dataDir });
     try {
       const before = store.uow.read((tx) => tx.roles.list("p-cli"));
       out = [];
       err = [];
-      expect(await run(["role", command, "--file", file])).toBe(2);
-      expect(err).toEqual([`数据目录：${dataDir}`, expected]);
+      expect(
+        await run(
+          scenario === "version"
+            ? ["role", "add", "p-cli", "tester", "--version", "4"]
+            : ["role", command, "--file", file],
+        ),
+      ).toBe(2);
+      expect(err[0]).toBe(`数据目录：${dataDir}`);
+      expect(err[1]?.split("\n")[0]).toBe(expected);
+      expect(err).toHaveLength(2);
       expect(out).toEqual([]);
       expect(store.uow.read((tx) => tx.roles.list("p-cli"))).toEqual(before);
     } finally {

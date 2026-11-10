@@ -1,7 +1,9 @@
+export { fileAvatarStore, readAvatarFile } from "./avatars.js";
 export {
   type BeginBellAttempt,
   type BellAttempt,
   beginBellAttempt,
+  beginLaunchAttempt,
   finishBellAttempt,
   unfinishedBellAttempts,
 } from "./dispatcher.js";
@@ -47,6 +49,7 @@ export {
   getRoleVersion,
   listRoleVersions,
   nextRoleVersion,
+  persistRoleEffect,
   type RoleDocument,
   RoleVersionError,
   type RoleVersionSummary,

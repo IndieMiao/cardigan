@@ -10,8 +10,10 @@ import type {
   WorkItem,
 } from "../entities.js";
 import type { CardId } from "../ids.js";
+import { requesterNotificationRecipient } from "../notification.js";
 import type { Clock } from "../ports.js";
 import { type CommandDraft, type CommandState, command } from "./core.js";
+import { latestMergeCheck } from "./merge-check.js";
 import { resolveCardTemplate } from "./templates.js";
 
 function affects(d: CommandDraft, q: Decision, id: CardId) {
@@ -48,6 +50,9 @@ function cardView(d: CommandDraft, id: CardId): CommandCardView {
     .filter((v) => v.kind === "card_completion" && v.status !== "superseded")
     .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
   const status = deriveCardStatus(card.status, items, completion);
+  const merge_check = completion
+    ? latestMergeCheck(d.state.events, id, completion.id)
+    : undefined;
   const fields = deriveCardFields({
     card,
     template: resolveCardTemplate(d, card),
@@ -64,6 +69,7 @@ function cardView(d: CommandDraft, id: CardId): CommandCardView {
     status,
     open_decisions: open.map((q) => q.id),
     review_matrix: deriveReviewMatrix(deliveries, items, d.list("reviews")),
+    ...(merge_check ? { merge_check } : {}),
     ...fields,
   };
 }
@@ -300,8 +306,30 @@ export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
         }),
       human_actions: d
         .list("human_actions")
-        .filter((h) => h.status === "open")
-        .map((h) => ({ ...h, why: why(h.why_human) })),
+        .filter(
+          (h) =>
+            h.status === "open" ||
+            (h.status === "done" &&
+              requesterNotificationRecipient(h.requested_by, state.assignments)
+                ?.kind === "needs_you" &&
+              (!h.card_id ||
+                state.cards.some(
+                  (c) =>
+                    c.id === h.card_id &&
+                    !["done", "cancelled"].includes(c.status),
+                ))),
+        )
+        .map((h) => ({
+          ...h,
+          why: why(
+            h.status === "done"
+              ? "已完成，但发起方不可用且无活跃 PM Ops 接手"
+              : h.why_human,
+          ),
+          ...(h.status === "done"
+            ? { completion_notice: h.result?.text ?? "" }
+            : {}),
+        })),
     };
   });
 }

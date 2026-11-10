@@ -8,14 +8,15 @@ import { CliError, EXIT } from "./errors.js";
  * `role.yaml` (M2.2): the full Role definition from §10.1.
  *
  * `role add --file` and `role update --file` read this file; `version` is not
- * part of it because the store decides the next version (versions are
+ * part of it because the domain decides the next version (versions are
  * append-only). Optional lists default to empty.
  */
 export interface RoleFile {
   readonly role_id: string;
   readonly display_name: string;
-  readonly kind: "standing" | "work";
+  readonly kind: Role["kind"];
   readonly core_prompt: string;
+  readonly instructions?: string;
   readonly harness: Harness;
   readonly launch_profile_ref: string;
   readonly allowed_tools: readonly ToolName[];
@@ -96,12 +97,29 @@ export function parseRoleFile(source: string, path: string): RoleFile {
   if (record.version !== undefined) {
     fail("role.yaml 不要写 version：版本号由 store 决定（追加式）");
   }
+  if (
+    record.instructions !== undefined &&
+    typeof record.instructions !== "string"
+  ) {
+    fail("role.yaml 的 instructions 必须是字符串");
+  }
 
   return {
     role_id: roleId,
     display_name: text(record.display_name, "display_name"),
-    kind: oneOf(record.kind, "kind", ["standing", "work"] as const),
-    core_prompt: text(record.core_prompt, "core_prompt"),
+    kind: oneOf(record.kind, "kind", [
+      "standing",
+      "produce",
+      "verify",
+      "work",
+    ] as const),
+    core_prompt:
+      record.core_prompt === undefined && record.instructions !== undefined
+        ? ""
+        : text(record.core_prompt, "core_prompt"),
+    ...(record.instructions === undefined
+      ? {}
+      : { instructions: record.instructions as string }),
     harness: oneOf(record.harness, "harness", HARNESSES),
     launch_profile_ref: text(record.launch_profile_ref, "launch_profile_ref"),
     allowed_tools: tools(record.allowed_tools),
@@ -130,7 +148,7 @@ export async function readRoleFile(path: string): Promise<RoleFile> {
   return parseRoleFile(text, path);
 }
 
-/** Convert a parsed file into the domain shape; `version` is supplied by the store. */
+/** Legacy helper for callers that already hold a domain-assigned version. */
 export function roleFromFile(file: RoleFile, version: number): Role {
   return { ...file, version };
 }
