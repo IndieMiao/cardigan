@@ -292,14 +292,14 @@ describe("get_card", () => {
     };
 
     expect(payload.waiting_on).toEqual([
-      { kind: "decision", ref: "q(2)", label: "等你拍板 q(2)" },
+      { kind: "decision", ref: "q(2)", label: "等待 PM 代拍 q(2)" },
       { kind: "human_action", ref: "h(1)", label: "等你执行 h(1)" },
     ]);
     expect(payload.next_owners).toEqual([
       { kind: "role", ref: "pm" },
       { kind: "human", ref: "human" },
     ]);
-    expect(payload.why).toBe("等你拍板 q(2)");
+    expect(payload.why).toBe("等待 PM 代拍 q(2)");
     expect(Array.from(payload.why).length).toBeLessThanOrEqual(40);
   });
 

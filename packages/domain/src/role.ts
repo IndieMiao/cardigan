@@ -57,6 +57,8 @@ export const STANDING_ROLE_TOOLS = [
   "project_snapshot",
   "list_needs_you",
   "record_decision",
+  "resolve_delegated_decision",
+  "triage_human_action",
 ] as const satisfies readonly ToolName[];
 
 export const ROLE_TOOL_ALLOWLISTS: Readonly<

@@ -11,6 +11,7 @@ export type {
   EntityChange,
   TokenRequest,
 } from "./commands/core.js";
+export * from "./commands/decision-followup.js";
 export * from "./commands/delivery.js";
 export * from "./commands/employee.js";
 export * from "./commands/launch.js";

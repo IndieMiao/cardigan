@@ -140,6 +140,17 @@ test("roles tab lists name, kind, version and status", async () => {
   expect(rows[1]?.textContent).toContain("启用");
   expect(rows[2]?.textContent).toContain("验证");
   expect(rows[2]?.textContent).toContain("已停用");
+  // C-48 StatusTag: shared shape plus Chinese label, not plain text.
+  expect(
+    within(rows[1] as HTMLElement)
+      .getByText("启用")
+      .classList.contains("status-shape-success"),
+  ).toBe(true);
+  expect(
+    within(rows[2] as HTMLElement)
+      .getByText("已停用")
+      .classList.contains("status-shape-cancelled"),
+  ).toBe(true);
   expect(
     screen.getByRole("button", { name: "角色" }).getAttribute("aria-current"),
   ).toBe("page");

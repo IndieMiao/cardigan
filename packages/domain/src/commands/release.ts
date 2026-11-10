@@ -11,7 +11,7 @@ import {
   text,
   unwrap,
 } from "./core.js";
-import { handoffReviewLimitsWithoutOps } from "./review-limit.js";
+import { handoffWithoutOps } from "./delegation.js";
 
 export function releaseAssignment(
   state: CommandState,
@@ -45,7 +45,7 @@ export function releaseAssignment(
       "Automatic release requires a closed work-item card",
     );
     if (a.status === "released") {
-      handoffReviewLimitsWithoutOps(d, a);
+      handoffWithoutOps(d, a);
       return a;
     }
     ensure(
@@ -78,7 +78,7 @@ export function releaseAssignment(
       },
       { type: "status_change", body: `Released ${a.id}` },
     );
-    handoffReviewLimitsWithoutOps(d, next);
+    handoffWithoutOps(d, next);
     return next;
   });
 }

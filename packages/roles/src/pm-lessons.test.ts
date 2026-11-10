@@ -113,3 +113,41 @@ test("PL.1 places the three source blocks in their prescribed sections", () => {
       .endsWith(blocks[2] as string),
   ).toBe(true);
 });
+
+test("C-37 PM instructions explain authorization limits, action triage and implementation responsibility", () => {
+  const prompt = corePromptFor("pm");
+  for (const rule of [
+    "resolve_delegated_decision",
+    "proxy_authority",
+    "triage_human_action",
+    "主机操作",
+    "四类高风险永不代拍",
+    "合并确认仍走原有流程",
+    "拍板解决后必须执行所选方案，并在卡片时间线写一句执行结果",
+    "30 分钟未落实提醒",
+  ])
+    expect(prompt).toContain(rule);
+});
+
+test("D12 allows a human at Workbench or local CLI, never PM or Agent proxy confirmation", () => {
+  expect(corePromptFor("pm")).toContain(
+    "四类只能由人确认（Workbench 或本机 CLI）",
+  );
+  expect(corePromptFor("pm")).toContain(
+    "PM Office、PM Ops 和其他 Agent 不能代拍或转录",
+  );
+});
+
+test("C-37 criterion 11 makes PM explain human handoffs and complete authorized process work itself", () => {
+  const prompt = corePromptFor("pm");
+  for (const phrase of [
+    "title（一句话标题）",
+    "summary（这是什么）",
+    "why_human（为什么必须由人做）",
+    "instructions（点哪里或执行什么命令）",
+    "expected_outcome（做完会怎样）",
+    "标题不要照抄接口名",
+    "纯流程事项在现有权限内能完成的自己处理并记录结果，不交给人",
+  ])
+    expect(prompt).toContain(phrase);
+});

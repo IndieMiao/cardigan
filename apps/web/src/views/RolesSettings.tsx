@@ -9,7 +9,7 @@ import {
   type RoleListView,
   type RoleWorktree,
 } from "../api.js";
-import { Time } from "../components/Foundation.js";
+import { StatusTag, Time } from "../components/Foundation.js";
 import {
   parseList,
   ROLE_FIELD_LABELS,
@@ -186,7 +186,9 @@ function RoleList({
                 </td>
                 <td>{ROLE_KIND_LABELS[role.kind]}</td>
                 <td>v{role.version}</td>
-                <td>{role.status === "active" ? "启用" : "已停用"}</td>
+                <td>
+                  <RoleStatus status={role.status} />
+                </td>
               </tr>
             ))}
           </tbody>
@@ -465,7 +467,12 @@ function RoleDetail({
           <h3>
             {data.role.display_name} <code>{data.role.role_id}</code> v
             {data.role.version}
-            {data.role.status === "inactive" && "（已停用）"}
+            {data.role.status === "inactive" && (
+              <>
+                {" "}
+                <RoleStatus status="inactive" />
+              </>
+            )}
           </h3>
           <p className="notice">{ROLE_VERSION_PIN_NOTICE}</p>
           {editing ? (
@@ -572,6 +579,16 @@ function RoleDetail({
   );
 }
 
+/** C-48 shared status shape; roles read "启用" rather than the generic "有效". */
+function RoleStatus({ status }: { status: "active" | "inactive" }) {
+  return (
+    <StatusTag
+      status={status}
+      label={status === "active" ? "启用" : "已停用"}
+    />
+  );
+}
+
 function RoleFields({ role }: { role: RoleDetailView["role"] }) {
   const list = (values: readonly string[]) =>
     values.length ? values.join("、") : "（无）";
@@ -580,7 +597,9 @@ function RoleFields({ role }: { role: RoleDetailView["role"] }) {
       <dt>类型</dt>
       <dd>{ROLE_KIND_LABELS[role.kind]}</dd>
       <dt>状态</dt>
-      <dd>{role.status === "active" ? "启用" : "已停用"}</dd>
+      <dd>
+        <RoleStatus status={role.status} />
+      </dd>
       <dt>Harness / 启动配置</dt>
       <dd>
         {role.harness} / {role.launch_profile_ref}

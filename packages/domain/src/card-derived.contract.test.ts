@@ -646,7 +646,7 @@ describe("deriveCardFields", () => {
       "blocked",
     ]);
     expect(fields.next_owners[0]).toEqual({ kind: "role", ref: "pm" });
-    expect(fields.why).toBe("等你拍板 q(1)");
+    expect(fields.why).toBe("等待 PM 代拍 q(1)");
   });
 
   test("an empty card is in planning with nothing to wait for", () => {

@@ -96,6 +96,7 @@ const decision = z.object({
   option: text,
   rationale: z.string().optional(),
   raw_quote: z.string().optional(),
+  delegate_future: z.boolean().optional(),
 });
 const clarification = z.object({
   action: z.enum(["request_information", "explain"]),
@@ -257,6 +258,8 @@ function roleResult<T>(result: Result<T>, role_id: string): Result<T> {
           : "角色内容不符合要求，请检查后重试。";
   return { ok: false, error: { ...result.error, message: text } };
 }
+/** Project and role identifiers, as the CLI accepts them. */
+const IDENTIFIER = /^[a-z0-9][a-z0-9._-]*$/u;
 const roleList = z.array(z.string());
 const roleFields = {
   display_name: z.string(),
@@ -293,7 +296,7 @@ const roleCopy = z
       z
         .object({
           kind: z.literal("project"),
-          project_id: text.optional(),
+          project_id: z.string().optional(),
           role_id: z.string(),
           version: z.number().int().positive().optional(),
         })
@@ -344,6 +347,17 @@ async function serveRoleWrite(c: WriteContext, rest: string): Promise<boolean> {
   ) => Result<RoleEffect>;
   if (copy) {
     const input = parsed(roleCopy, body, ROLE_INPUT_MESSAGE);
+    // Same identifier rule as `cardigan project create`; checked before any lookup.
+    if (
+      input.source.kind === "project" &&
+      input.source.project_id !== undefined &&
+      !IDENTIFIER.test(input.source.project_id)
+    )
+      throw new HttpRejection(
+        400,
+        "validation_failed",
+        "来源项目编号不合法：只能用小写字母、数字、点、下划线和短横线，且以字母或数字开头。",
+      );
     role_id = input.role_id;
     command = (state, actor, ports, tx) => {
       let source: RoleDefinition;
@@ -480,13 +494,27 @@ export async function serveWrite(
             .int()
             .min(1)
             .max(1440)
-            .nullable(),
+            .nullable()
+            .optional(),
+          decision_delegation: z.record(z.string(), z.boolean()).optional(),
         })
         .strict(),
       body,
     );
     const output = run(context, (s, a, ports) =>
-      setProjectPreferences(s, a, input, ports),
+      setProjectPreferences(
+        s,
+        a,
+        {
+          ...(input.auto_merge_after_minutes !== undefined
+            ? { auto_merge_after_minutes: input.auto_merge_after_minutes }
+            : {}),
+          ...(input.decision_delegation !== undefined
+            ? { decision_delegation: input.decision_delegation }
+            : {}),
+        },
+        ports,
+      ),
     );
     sendJson(c.res, 200, output);
     return true;
@@ -717,10 +745,11 @@ export async function serveWrite(
             {
               decision_id,
               option: p.option,
+              ...(p.delegate_future ? { delegate_future: true } : {}),
               raw_quote,
               rationale: p.rationale?.trim() ? p.rationale : raw_quote,
             },
-            ports,
+            { ...ports, human_confirmation: "workbench" },
           );
         });
       });

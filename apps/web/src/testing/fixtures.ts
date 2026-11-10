@@ -207,6 +207,8 @@ export function fakeClient(
     rollbackRole: async () => {
       throw new Error("rollbackRole not stubbed");
     },
+    setDelegation: async () => {},
+    decisionHistory: async () => ({ decisions: [] }),
     needsYou: async () => ({ decisions: [], human_actions: [], incidents: [] }),
     recordDecision: async () => undefined,
     recheckMerge: async () => undefined,

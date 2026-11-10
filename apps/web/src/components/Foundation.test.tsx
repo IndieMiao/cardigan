@@ -191,6 +191,7 @@ test("U1 shell orders Needs You first with its count, then work and runtime grou
     "卡片",
     "执行视图",
     "项目动态",
+    "拍板记录",
     "项目快照",
     "设置",
   ]);

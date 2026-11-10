@@ -201,6 +201,10 @@ export function TimelineContent({
                   : decisionOption(decision, entry.decision_option)
               }
             />
+          ) : resolved &&
+            decision.trigger !== "merge_confirmation" &&
+            entry.decision_via === "delegated" ? (
+            <StatusTag status={status} label="已拍板（PM 代拍）" />
           ) : (
             <StatusTag status={status} />
           ),

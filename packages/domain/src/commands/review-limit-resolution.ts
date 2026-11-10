@@ -2,6 +2,7 @@ import type { Decision, WorkItem } from "../entities.js";
 import type { DecisionId } from "../ids.js";
 import { transition } from "../transitions.js";
 import { type CommandDraft, ensure, text, unwrap } from "./core.js";
+import { delegationAllowed, delegationAuthority } from "./delegation.js";
 import { queueResumedRun, resumeWork } from "./resumption.js";
 
 export interface ReviewLimitResolution {
@@ -28,6 +29,7 @@ export function resolveReviewLimit(
     item.kind === "verify" &&
       q.trigger === "review_limit" &&
       q.decider === "role:pm" &&
+      delegationAllowed(d, q) &&
       q.affected_work_items.length === 1 &&
       q.affected_work_items[0] === item.id &&
       ["open", "provisional"].includes(q.status),
@@ -121,6 +123,7 @@ export function resolveReviewLimit(
       raw_quote: p.rationale,
       resolved_by: d.author,
       via: "delegated",
+      proxy_authority: delegationAuthority(d, q.category ?? "general"),
       via_chain: [d.author],
       at: d.now,
     },
@@ -135,6 +138,13 @@ export function resolveReviewLimit(
     {
       decision_id: q.id,
       option: p.option,
+      option_description:
+        q.options.find((o) => o.key === p.option)?.description ?? "",
+      impact: q.options.find((o) => o.key === p.option)?.impact ?? "",
+      rationale: p.rationale,
+      raised_by: q.raised_by,
+      via: "delegated",
+      proxy_authority: result.resolution?.proxy_authority ?? "",
       status: result.status,
       resume_work_items: resumed ? [item.id] : [],
     },

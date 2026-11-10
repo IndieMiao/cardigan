@@ -53,8 +53,9 @@ import {
   runCommand,
   systemClock,
 } from "./host.js";
-import type { CliIo } from "./io.js";
+import type { CliIo, SpawnedChild } from "./io.js";
 import { resolveLaunchPaths } from "./paths.js";
+import { forwardSignals } from "./signals.js";
 
 /**
  * M2.6: one-command Assignment start (M2 plan §4).
@@ -469,33 +470,124 @@ export async function stopAssignment(input: {
   return { released: true, aborted: unfinished !== undefined };
 }
 
-/** `cardigan assignment attach`: print the command a human can paste. */
-export async function attachAssignment(input: {
+function attachRef(
+  store: Store,
+  project: ProjectId,
+  id: Assignment["id"],
+): RuntimeRef {
+  const assignment = store.uow.read((tx) => tx.assignments.get(project, id));
+  if (!assignment)
+    throw new CliError(
+      `Assignment ${id} 在当前项目中不存在；请检查编号和 --project，或用 cardigan assign 指派工作项。`,
+      EXIT.usage,
+    );
+  if (assignment.status !== "active")
+    throw new CliError(
+      `Assignment ${id} ${assignment.status === "released" ? "已释放" : "已暂停"}，无法接入；请在执行视图检查状态，需继续工作时重新指派。`,
+      EXIT.usage,
+    );
+  if (
+    assignment.runtime_ref === null ||
+    assignment.runtime_state === "released"
+  )
+    throw new CliError(
+      `Assignment ${id} 没有在运行的终端；请用 cardigan assignment start ${id} 启动。`,
+      EXIT.usage,
+    );
+  return assignment.runtime_ref;
+}
+
+function attachFailure(id: Assignment["id"], reason: string): CliError {
+  return new CliError(
+    `无法接入 ${id}：${reason}；请检查运行服务，终端已结束时用 cardigan assignment start ${id} 重新启动。`,
+    EXIT.failure,
+  );
+}
+
+interface AttachOptions {
   readonly store: Store;
   readonly project_id: ProjectId;
   readonly assignment_id: Assignment["id"];
-  readonly runtime: Runtime;
-}): Promise<string> {
-  const { assignment } = requireAssignment(
-    input.store,
-    input.project_id,
-    input.assignment_id,
-  );
-  const ref = assignment.runtime_ref;
-  if (ref === null) {
-    throw new CliError(
-      `Assignment ${assignment.id} 没有在运行的终端`,
-      EXIT.usage,
-    );
-  }
+  readonly runtime: Pick<HerdrRuntime, "human_entry" | "probeTerminal">;
+  readonly printOnly?: boolean;
+}
+
+/** Return a copyable command; an uncertain probe cannot block printing. */
+export async function attachAssignment(input: AttachOptions): Promise<string> {
+  return (await prepareAttach({ ...input, printOnly: true })).entry;
+}
+
+async function prepareAttach(input: AttachOptions) {
+  const ref = attachRef(input.store, input.project_id, input.assignment_id);
   const entry = await input.runtime.human_entry(ref);
   if (!entry.ok) {
-    throw new CliError(
-      formatCommandError("获取终端进入方式", assignment.id, entry.error),
-      EXIT.failure,
+    throw attachFailure(
+      input.assignment_id,
+      formatCommandError("获取终端进入方式", input.assignment_id, entry.error),
     );
   }
-  return entry.value;
+  // Attach needs only hc get's process state. Runtime.status also subscribes
+  // to events for an observed_seq; a wrapper's surviving stream can hold its
+  // pipes open during cleanup and prevent even a non-TTY CLI from exiting.
+  const status = await input.runtime.probeTerminal(ref);
+  if (status.ok && status.value === "exited")
+    throw attachFailure(input.assignment_id, "终端已结束");
+  if (!input.printOnly) {
+    if (!status.ok)
+      throw attachFailure(
+        input.assignment_id,
+        formatCommandError("查询终端", input.assignment_id, status.error),
+      );
+    if (status.value !== "alive")
+      throw attachFailure(input.assignment_id, "无法确认终端仍在运行");
+  }
+  return { ref, entry: entry.value };
+}
+
+async function enterAssignment(
+  io: CliIo,
+  runtime: HerdrRuntime,
+  ref: RuntimeRef,
+  id: Assignment["id"],
+  interactive: boolean,
+): Promise<number> {
+  io.stderr(
+    interactive
+      ? "将接管终端输入：你的输入会直接发给正在工作的 Agent；按 Ctrl+\\ 分离退出。"
+      : "只读观察（不发送输入）；按 Ctrl+\\ 分离退出；使用 --interactive 接管后，你的输入会直接发给正在工作的 Agent。",
+  );
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(io.env))
+    if (value !== undefined) env[key] = value;
+  env.HC_SESSION = runtime.session;
+  env.HC_SOCKET = runtime.socketPath;
+  let child: SpawnedChild | undefined;
+  const dispose = forwardSignals(
+    { kill: (signal) => child?.kill(signal) },
+    io.signals,
+  );
+  try {
+    child = io.spawnInherit(
+      "hc",
+      ["attach", ...(interactive ? [] : ["--observe"]), ref.terminal_ref],
+      // Keep stdin/stdout attached to the caller's TTY; translate hc failures,
+      // including a terminal disappearing after the preflight, on stderr.
+      { cwd: io.cwd, env, stderr: "ignore" },
+    );
+    const code = await child.exit;
+    if (code !== 0)
+      io.stderr(
+        attachFailure(id, `终端连接已中断或不可用（退出码 ${code}）`).message,
+      );
+    return code;
+  } catch {
+    throw attachFailure(
+      id,
+      "无法执行 hc，请确认已安装 hc 0.1.18 且可从 PATH 访问",
+    );
+  } finally {
+    dispose();
+  }
 }
 
 export { writeRole };
@@ -504,7 +596,9 @@ const USAGE = [
   "用法：",
   "  cardigan assignment start <A-n> [--project <p>] [--mcp-url <url>] [--hc-session <s>] [--data-dir <目录>]",
   "  cardigan assignment stop <A-n> [--project <p>] [--hc-session <s>] [--data-dir <目录>]",
-  "  cardigan assignment attach <A-n> [--project <p>] [--hc-session <s>] [--data-dir <目录>]",
+  "  cardigan assignment attach <A-n> [--print] [--interactive] [--project <p>] [--hc-session <s>] [--data-dir <目录>]",
+  "  attach：输入和输出均为终端（TTY）时直接只读观察；--interactive 允许输入，--print 或非 TTY 只打印命令（默认带 --observe）。",
+  "  按 Ctrl+\\ 分离退出；--interactive 下你的输入会直接发给正在工作的 Agent。",
 ].join("\n");
 
 const DEFAULT_MCP_URL = "http://127.0.0.1:3004/mcp";
@@ -522,6 +616,10 @@ function parseArgs(args: readonly string[]) {
   const positionals: string[] = [];
   for (let index = 0; index < rest.length; index += 1) {
     const token = rest[index] as string;
+    if (sub === "attach" && ["--print", "--interactive"].includes(token)) {
+      flags[token.slice(2)] = "true";
+      continue;
+    }
     if (!token.startsWith("--")) {
       positionals.push(token);
       continue;
@@ -545,6 +643,10 @@ export async function runAssignmentCommand(
   args: readonly string[],
   io: CliIo,
 ): Promise<number> {
+  if (args.includes("--help") || args.includes("-h")) {
+    io.stdout(USAGE);
+    return EXIT.ok;
+  }
   const { sub, assignmentId, flags } = parseArgs(args);
   const dataDir = announceDataDir(io, flags["data-dir"]);
   const execution = executionFor(io, dataDir);
@@ -552,6 +654,8 @@ export async function runAssignmentCommand(
   const store = Store.open({ dataDir });
   try {
     const project_id = resolveProject(store, io, flags.project);
+    // Report invalid Assignments even when hc itself is unavailable.
+    if (sub === "attach") attachRef(store, project_id, assignmentId);
     if (sub === "stop") {
       const { assignment } = requireAssignment(store, project_id, assignmentId);
       if (assignment.scope === "standing" && assignment.role_id === "pm") {
@@ -561,8 +665,21 @@ export async function runAssignmentCommand(
     }
     const session =
       flags["hc-session"] ?? io.env.CARDIGAN_HC_SESSION ?? "cardigan";
-    const created = await HerdrRuntime.create({ session, execution });
+    const created = await HerdrRuntime.create({
+      session,
+      execution,
+      env: io.env,
+    });
     if (!created.ok) {
+      if (sub === "attach")
+        throw attachFailure(
+          assignmentId,
+          formatCommandError(
+            "连接运行时",
+            "Herdr（请确认已安装 hc 0.1.18）",
+            created.error,
+          ),
+        );
       throw new CliError(
         formatCommandError("连接运行时", "Herdr", created.error),
         EXIT.failure,
@@ -586,15 +703,21 @@ export async function runAssignmentCommand(
       return EXIT.ok;
     }
     if (sub === "attach") {
-      io.stdout(
-        await attachAssignment({
-          store,
-          project_id,
-          assignment_id: assignmentId,
-          runtime,
-        }),
-      );
-      return EXIT.ok;
+      const printOnly =
+        flags.print === "true" || !io.stdinIsTTY || !io.stdoutIsTTY;
+      const { entry, ref } = await prepareAttach({
+        store,
+        project_id,
+        assignment_id: assignmentId,
+        runtime,
+        printOnly,
+      });
+      const interactive = flags.interactive === "true";
+      if (printOnly) {
+        io.stdout(`${entry}${interactive ? "" : " --observe"}`);
+        return EXIT.ok;
+      }
+      return await enterAssignment(io, runtime, ref, assignmentId, interactive);
     }
     return await startAssignmentCommand({
       store,

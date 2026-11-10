@@ -225,6 +225,49 @@ test("V9b role routes list, show, version history and run every write as the log
       created_at: expect.any(String),
     });
 
+    // Cross-project copy: invalid source ids are 400 before any lookup; a real
+    // copy reads the source role only and leaves the source project untouched.
+    for (const bad of ["bad/id", "../other", "Other", " "])
+      expect(
+        (
+          await write("/copy", {
+            role_id: "coder-x",
+            source: { kind: "project", project_id: bad, role_id: "coder" },
+          })
+        ).json,
+      ).toMatchObject({
+        error: {
+          code: "validation_failed",
+          message: expect.stringContaining("来源项目编号不合法"),
+        },
+      });
+    const source = f.project.project_id;
+    const snapshot = () =>
+      f.store().uow.read((tx) => ({
+        roles: tx.roles.list(source),
+        events: tx.events.listAfter(source, undefined, 0),
+      }));
+    f.store().createProject({ id: "other" });
+    const before = snapshot();
+    const crossed = await f.call("/api/projects/other/roles/copy", {
+      method: "POST",
+      body: {
+        role_id: "imported-writer",
+        source: { kind: "project", project_id: source, role_id: "writer" },
+      },
+      headers: { "idempotency-key": "cross-project" },
+    });
+    expect(crossed.status).toBe(200);
+    expect(crossed.json).toMatchObject({
+      role_id: "imported-writer",
+      version: 1,
+      instructions: "负责写文档。",
+    });
+    expect(snapshot()).toEqual(before);
+    expect(
+      ((await f.call("/api/projects/other/roles")).json as Json).roles,
+    ).toEqual([expect.objectContaining({ role_id: "imported-writer" })]);
+
     // Non-human callers: an Agent token, no session, or an actor field.
     const agent = await f.call(roles, {
       method: "POST",
