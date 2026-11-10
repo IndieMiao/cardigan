@@ -92,11 +92,17 @@ export function EmployeeIdentity({
           </button>
         </Tooltip>
       );
-    return (
-      <span className="employee-identity">
+    return avatarOnly ? (
+      <span
+        className="employee-identity"
+        role="img"
+        aria-label={name}
+        title={name}
+      >
         {identity}
-        {avatarOnly && <span className="visually-hidden">{name}</span>}
       </span>
+    ) : (
+      <span className="employee-identity">{identity}</span>
     );
   }
   return (
@@ -174,13 +180,16 @@ export function NextOwners({ owners }: { owners: readonly NextOwnerItem[] }) {
   );
 }
 
-export function ProduceOwners({ owners }: { owners: readonly AuthorView[] }) {
+export function ProduceOwners({
+  owners,
+  label = "产出负责人",
+}: {
+  owners: readonly AuthorView[];
+  label?: string;
+}) {
   if (!owners.length) return null;
   return (
-    <fieldset
-      className="employee-group employee-owners"
-      aria-label="产出负责人"
-    >
+    <fieldset className="employee-group employee-owners" aria-label={label}>
       {owners.slice(0, 3).map((owner, index) => (
         <EmployeeIdentity
           key={owner.employee?.id ?? owner.author ?? index}
@@ -189,12 +198,25 @@ export function ProduceOwners({ owners }: { owners: readonly AuthorView[] }) {
         />
       ))}
       {owners.length > 3 && (
-        <span
-          className="employee-overflow"
-          title={`另有 ${owners.length - 3} 位负责人`}
+        <Tooltip
+          content={owners
+            .slice(3)
+            .map(
+              (owner) =>
+                owner.employee?.name ??
+                owner.author_display ??
+                `未命名的 ${owner.author_role ?? "Agent"}`,
+            )
+            .join("、")}
         >
-          +{owners.length - 3}
-        </span>
+          <button
+            type="button"
+            className="quiet employee-overflow"
+            aria-label={`另有 ${owners.length - 3} 位${label}`}
+          >
+            +{owners.length - 3}
+          </button>
+        </Tooltip>
       )}
     </fieldset>
   );

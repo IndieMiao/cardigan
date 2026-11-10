@@ -85,6 +85,12 @@ export interface CardView {
 /** A list row: the card plus the fields the list filters and columns need. */
 export interface CardListItem extends CardView {
   readonly produce_owners?: readonly AuthorView[];
+  readonly participants?: readonly AuthorView[];
+  readonly work_items?: readonly Pick<
+    WorkItemView,
+    "id" | "title" | "status"
+  >[];
+  readonly attachment_count?: number;
   readonly progress: { readonly completed: number; readonly total: number };
   readonly updated_at: string;
   readonly roles: readonly string[];

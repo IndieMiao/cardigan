@@ -47,6 +47,19 @@ export function formatTime(value: string, now = Date.now()): string {
       : `${date.getFullYear()}-`;
   return `${year}${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
+export function fullTime(value: string): string {
+  if (!Number.isFinite(Date.parse(value))) return "时间未知";
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+    timeZoneName: "longOffset",
+  }).format(new Date(value));
+}
 export function Time({
   value,
   relative = false,
@@ -61,16 +74,7 @@ export function Time({
   }, []);
   if (!value || !Number.isFinite(Date.parse(value)))
     return <span>时间未知</span>;
-  const title = new Intl.DateTimeFormat("zh-CN", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hourCycle: "h23",
-    timeZoneName: "longOffset",
-  }).format(new Date(value));
+  const title = fullTime(value);
   return (
     <time dateTime={value} title={title}>
       {relative && now - Date.parse(value) >= 86400000

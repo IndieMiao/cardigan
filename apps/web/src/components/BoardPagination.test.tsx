@@ -91,7 +91,7 @@ async function start() {
 }
 function links(column: HTMLElement) {
   return within(column)
-    .getAllByRole("link")
+    .getAllByRole("link", { name: /卡片 \d+$/ })
     .map((link) => link.getAttribute("href"));
 }
 function observation(label = "进行中") {

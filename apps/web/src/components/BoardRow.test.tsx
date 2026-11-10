@@ -2,8 +2,14 @@
 /** Phase 1.5 §9 U.S-2 #1: the board is one row that scrolls inside its own strip. */
 import { readFileSync } from "node:fs";
 import { URL as NodeURL } from "node:url";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, expect, test } from "vitest";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from "@testing-library/react";
+import { afterEach, expect, test, vi } from "vitest";
 import type { CardListItem } from "../api.js";
 import { DEFAULT_CARD_DISPLAY } from "../card-display.js";
 import { card } from "../testing/fixtures.js";
@@ -66,6 +72,106 @@ test("lanes constrain card height and keep headings outside independent vertical
   expect(rule(".board-lane-cards")).toContain("overflow-y: auto;");
   expect(rule(".board-lane-cards")).toContain("min-height: 0;");
   expect(rule(".board-column-title")).toContain("flex-shrink: 0;");
+});
+
+test.each(["light", "dark"])(
+  "%s lanes and empty-column controls have no surface or frame, while compact cards retain their surface",
+  (theme) => {
+    // Check the cascade against the global quiet-button background as well as
+    // both theme palettes. Browser geometry is covered by the layout contracts.
+    const darkStart = styles.indexOf("@media (prefers-color-scheme: dark)");
+    const darkPalette = styles.slice(
+      darkStart,
+      styles.indexOf("\n}\n", darkStart),
+    );
+    const palette =
+      theme === "dark"
+        ? darkPalette.slice(darkPalette.indexOf(":root"))
+        : rule(":root");
+    const style = document.createElement("style");
+    style.textContent = [
+      palette,
+      rule("button"),
+      rule("button.quiet,\n.filter"),
+      rule(".board-column"),
+      rule(".board-column-collapsed"),
+      rule(".column-toggle"),
+      rule(".board-column .column-toggle,\n.board-column .board-load-more"),
+      rule(
+        ".board-column .column-toggle:hover,\n.board-column .board-load-more:hover",
+      ),
+      rule(".board-column-title"),
+      rule(".card-tile"),
+    ].join("\n");
+    document.head.append(style);
+    try {
+      render(
+        <Board
+          cards={Array.from({ length: 11 }, (_, index) => ({
+            ...card,
+            id: `C-${index + 1}`,
+          }))}
+          projectId="p-1"
+          expanded="todo"
+          onExpanded={() => {}}
+          display={DEFAULT_CARD_DISPLAY}
+        />,
+      );
+      const collapsed = screen.getByRole("region", { name: "待整理" });
+      const expanded = screen.getByRole("region", { name: "待开始" });
+      const active = screen.getByRole("region", { name: "进行中" });
+      for (const lane of [collapsed, expanded, active]) {
+        expect(getComputedStyle(lane).backgroundColor).toBe("rgba(0, 0, 0, 0)");
+        expect(getComputedStyle(lane).borderTopWidth).toBe("0px");
+        const heading = within(lane).getByRole("heading");
+        expect(getComputedStyle(heading).backgroundColor).toBe(
+          "rgba(0, 0, 0, 0)",
+        );
+      }
+      for (const control of [
+        screen.getByRole("button", { name: "展开待整理空列" }),
+        screen.getByRole("button", { name: "收起待开始空列" }),
+        screen.getByRole("button", { name: "加载更多进行中卡片" }),
+      ]) {
+        expect(getComputedStyle(control).backgroundColor).toBe(
+          "rgba(0, 0, 0, 0)",
+        );
+        expect(getComputedStyle(control).borderTopWidth).toBe("0px");
+      }
+      expect(rule(".card-tile")).toContain("background: var(--surface);");
+      expect(rule(".board-column-collapsed .status")).toContain(
+        "writing-mode: vertical-rl;",
+      );
+      for (const token of ["surface", "text", "text-muted", "accent"])
+        expect(palette).toContain(`--${token}:`);
+    } finally {
+      style.remove();
+    }
+  },
+);
+
+test("unframed empty lanes keep their count and expansion control", () => {
+  const onExpanded = vi.fn();
+  const props = {
+    cards,
+    projectId: "p-1",
+    expanded: "",
+    onExpanded,
+    display: DEFAULT_CARD_DISPLAY,
+  };
+  const view = render(<Board {...props} />);
+  const button = screen.getByRole("button", { name: "展开待整理空列" });
+  expect(button.getAttribute("aria-expanded")).toBe("false");
+  expect(button.textContent).toBe("待整理0");
+  fireEvent.click(button);
+  expect(onExpanded).toHaveBeenCalledWith("backlog");
+  view.rerender(<Board {...props} expanded="backlog" />);
+  const lane = screen.getByRole("region", { name: "待整理" });
+  expect(within(lane).getByText("已显示全部 0 张")).toBeTruthy();
+  const close = within(lane).getByRole("button", { name: "收起待整理空列" });
+  expect(close.getAttribute("aria-expanded")).toBe("true");
+  fireEvent.click(close);
+  expect(onExpanded).toHaveBeenLastCalledWith("");
 });
 
 test("narrow screens release the sidebar width and let filters wrap inside the page", () => {
