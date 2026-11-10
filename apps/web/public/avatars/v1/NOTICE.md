@@ -1,6 +1,6 @@
 # 头像素材说明
 
-本目录为 `cardigan-avatar-studio` 导出的第一期 59 位人物素材库。
+本目录为 `cardigan-avatar-studio` 导出的人物素材库：第一期 59 位人物，2026-11-10 增补张良（zhang-liang），共 60 位。
 
 来源：AI 生成（gpt-image-2）。权属：AI 生成、Cardigan 自有。
 生成仅使用文字风格规范，未将外部图片作为输入。
