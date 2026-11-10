@@ -752,6 +752,8 @@ MCP 看门狗观察 running Run，按本次 started_at、heartbeat_at 与 Assign
 
 确认退出后，在同一事务中将仍未结束的 Run 经 cancel 标为 cancelled、outcome=failed，撤销该 Assignment 的有效 Token，写明系统取消原因并释放停止意图。不接受 Agent 自报的退出证明，不伪造业务成功，不改工作项结果、不删除 worktree／分支／基线。停止调用期间已完成的 Run 保留原业务结果；已经发出的外部停止无法撤回，后续只收尾原 Run 和原 RuntimeRef，不触碰替换后的会话。取消及收尾写审计事件和系统时间线，并通知 PM／人。用户已接受无 MCP 心跳的合法长任务可能被打断的取舍。
 
+唤醒前准备与失败原因（C-68）：已有会话的投递在唤醒前先执行 beforeWake（准备 worktree、同步基线，见 §12.2、§12.8）。锁竞争（`repository_lock_timeout`、`git_lock_conflict`）和网络瞬时错误（`git_network`）在同一次投递内短暂重试 3 次，间隔 1、2、4 秒；其他错误不重试。仍失败时不唤醒 Agent，按以下 reason 结算：`before_wake_failed`（唤醒前准备失败）、`wake_failed`（Runtime.wake 返回失败或抛出）、`delivery_call_failed`（启动回调等其他投递调用失败）。首次投递和 C-56 的退避重试（dispatch-retry）共用这套归类和同一个结算入口。Run 仍为 dispatched、由上述 C-56 重试和超时恢复负责时，不逐次升级告警，只写审计事件 `bell_delivery_attempt_failed`（不产生通知）；其他失败照旧写会升级的 `bell_delivery_failed`。两种事件的 payload.error 都记录错误类别、Git 退出码（有时）和脱敏后的消息首行：只取 stderr 首个非空行，不取带完整 argv 的 `Command failed` 行；URL 中的用户信息、Bearer/Basic、名称含 token/secret/password/auth/key/header/cookie 的键值（含前缀、引号、JSON 和带空白的引号值）、私钥块、敏感环境变量的值和常见 Token 前缀替换为 `***`，保留路径，截断到 300 字符；Git 没有输出时只写“退出码 N、无诊断输出”，不回退到命令行。主机侧 Git 以 `LC_ALL=C` 运行，保证按英文消息分类；agent-ssh 的 `hc exec` 失败保留 Git 退出码和 stderr（RuntimeFailure.detail → agentCommandError），中心仓库命令的失败也带退出码，两条路径与本地 Git 走同一分类。同一行写入 server 日志（Dispatcher.onError → dispatch_error），投递路径不再有吞掉错误的空 catch。重试分两层，不重复：beforeWake 只在同一次投递内做秒级短重试；投递之间的退避重试、用尽后的停止与重排、再次失败时的 `run_dispatch_stalled` 升级都由 C-56 负责。所以唤醒前准备持续失败时，Run 不会永久停在 dispatched。
+
 M3.4 主机循环通过 startDispatchLoop 启动：默认每轮结束后等待 1 秒，串行执行 reconcile → Dispatcher.tick → reconcile，不堆积并发 tick。失败通过必填 onError 回调报告，下个间隔再试；回调抛出则停止并清理订阅。stop() 幂等，也可由 AbortSignal 触发：先停止调度和清除等待计时器，再等待本轮外部投递及意图结算，最后停止运行时订阅；done 返回相同的完成结果。M3.5 将它接到 server 的 SIGTERM／关闭流程，必须先 await stop() 再关闭 Store 等主机资源；本接口不注册全局信号、不关闭 Agent 终端。
 
 ### 6.2 门铃格式
@@ -1479,7 +1481,7 @@ M4.2 的 CentralRepositoryService 通过 domain 的 GitCentralPort 调用 Centra
 - worktree：`/srv/agent/worktrees/<project_id>/<assignment_id>`。Assignment 编号按项目分配，路径按项目分层。由主机的 Git 服务创建，不使用运行时的默认目录（两台机器上 Herdr 的默认目录并不一致，0.3 实测）
 - 分支：`agent/<card_id>/<work_item_id>`
 - provision 时记录 `base_sha`。
-- 基线同步：每个可写 worktree 的 Run 启动前（包括 fix、复用已有会话或已有 worktree），主机通过既有 fetch / pushBaseline 路径把中心仓库的 main 增量推到各工作机基础 clone 的 `refs/remotes/origin/main`。首条提示／唤醒提示包含同步后的 `origin/main` 完整 SHA；同步失败沿用启动或投递失败处理，不启动／唤醒 Agent。不移动工作分支、HEAD、未提交文件和 Assignment 原 `base_sha`；工作项显式从记录的基线建 worktree。不要通过关闭 `receive.denyCurrentBranch` 来同步工作目录（0.5b 实测）。
+- 基线同步：每个可写 worktree 的 Run 启动前（包括 fix、复用已有会话或已有 worktree），主机通过既有 fetch / pushBaseline 路径把中心仓库的 main 增量推到各工作机基础 clone 的 `refs/remotes/origin/main`。首条提示／唤醒提示包含同步后的 `origin/main` 完整 SHA；同步失败沿用启动或投递失败处理，不启动／唤醒 Agent；基础 clone 的并发操作由项目锁串行化（§12.8），唤醒前的锁竞争和网络瞬时失败在同一次投递内短暂重试（§6.1）。不移动工作分支、HEAD、未提交文件和 Assignment 原 `base_sha`；工作项显式从记录的基线建 worktree。不要通过关闭 `receive.denyCurrentBranch` 来同步工作目录（0.5b 实测）。
 - 只有 PM Ops 或 Router 明确要求时才 rebase 到最新基线，避免意外改动。
 
 GitWorktreeService 经 domain 的 GitWorktreePort 调用 LocalGitTransport，并由组装层注入 CentralRepositoryService 取得中心基线，不逆向引用 transport。默认目录为 CARDIGAN_DATA_DIR/agent/repos/<project_id> 和 agent/worktrees/<project_id>/<assignment_id>，可分别配置根目录；自定义 worktreesRoot 下同样按项目分层。project_id 入路径前校验为安全片段，拒绝空串、`.`、`..`、路径分隔符和以 `-` 开头的值。只接受绝对本地仓库路径，基础 clone 使用 --no-local --no-checkout 从中心仓库经临时目录发布；fetch 显式使用中心的本地路径，并同时拉取 heads 到 remotes/origin 及 refs/cardigan/deliveries/* 固定交付。现有 clone 必须匹配中心来源；M2 的旧来源 clone 拒绝复用并提示显式重建，不自动删除。
@@ -1579,6 +1581,8 @@ server 在合并循环旁启动独立的推送循环（默认 5 秒轮询，跟�
 ### 12.8 写锁
 
 同一个 worktree 已有写入型 Run 在执行时，Dispatcher 不派发新的写入型 Run，后来的事件进入 Inbox 排队。
+
+基础 clone 锁（C-68）：同一项目的所有 Assignment 共享一个基础 clone，并发的 fetch、`worktree add`、移除和清理前的备份会抢 Git 的 `*.lock` 文件而失败。GitWorktreeService 的 ensureWorktree、removeWorktree、diffWorktree，以及合并检查前把候选分发到基础 clone 的 ServerGit.distribute，都在项目锁内执行（分发只在传输期间持锁，不覆盖整个检查），锁分两层：进程内按基础 clone 路径排队（所有服务实例共享，先到先得）；主机再用 `flock --exclusive --wait` 跨进程加锁，覆盖 server 各循环和 CLI。锁文件为主机拥有的 `<CARDIGAN_DATA_DIR>/locks/repo-<project_id>.lock`（0600）：这把锁只在主机进程之间协调，放在 Agent 可写的命名空间之外，agent-ssh 模式下也由主机持有。flock 通过继承的文件描述符加锁，子进程退出后锁仍由主机句柄持有，关闭句柄即释放。两层合计最多等待 30 秒，超时抛出可重试的 `repository_lock_timeout`，由 §6.1 的唤醒前短暂重试处理。flock 层仅在 Linux 启用，与合并闸门一致；其他平台只有进程内排队。合并检查的临时 checkout（§12.2 的 runInTemporaryCheckout）仍只用合并闸门锁，不持有本锁，避免长时间检查阻塞唤醒。
 
 ---
 

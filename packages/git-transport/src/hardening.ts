@@ -18,5 +18,9 @@ export function gitEnvironment(): NodeJS.ProcessEnv {
     GIT_CONFIG_GLOBAL: "/dev/null",
     GIT_TERMINAL_PROMPT: "0",
     GIT_NO_REPLACE_OBJECTS: "1",
+    // Untranslated diagnostics: failure classification matches Git's English
+    // messages (as merge-push does), whatever the host's locale is.
+    LC_ALL: "C",
+    LANGUAGE: "C",
   };
 }

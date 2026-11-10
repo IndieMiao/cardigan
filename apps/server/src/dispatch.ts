@@ -26,7 +26,7 @@ import {
   remindDecisionFollowups,
   resolveDispatchAttention,
 } from "@cardigan/domain";
-import { runCapacitySnapshot } from "@cardigan/host";
+import { redactFailureLine, runCapacitySnapshot } from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import {
   mergeNotifications,
@@ -46,8 +46,14 @@ import {
 } from "@cardigan/store";
 import {
   alertAudience,
+  type DeliveryFailure,
+  type DeliveryStage,
+  deliveryAttemptFailed,
+  deliveryFailure,
+  deliveryFailureLine,
   dispatchAlert,
   unfinishedRun,
+  wakeFailure,
 } from "./dispatch-alert.js";
 import { InactiveRunReaper } from "./dispatch-inactive.js";
 import {
@@ -94,6 +100,8 @@ export interface DispatcherOptions {
     project: ProjectId;
     assignment: Assignment;
   }) => Promise<string | undefined> | Promise<void>;
+  /** Server log for a failed bell delivery (sanitized, one line). */
+  readonly onError?: (error: unknown) => void;
 }
 const sameRef = (a: Assignment, b: Assignment) =>
   JSON.stringify(a.runtime_ref) === JSON.stringify(b.runtime_ref);
@@ -263,7 +271,8 @@ export class Dispatcher {
         maxRetries: this.maxRetries,
         leaseMs: this.leaseMs,
       },
-      (attempt, sent, reason, bell) => this.settle(attempt, sent, reason, bell),
+      (attempt, sent, reason, bell, failure) =>
+        this.settle(attempt, sent, reason, bell, failure),
     );
     // Recovery and escalation are durable events, including CLI starts without an inbox row.
     routeProjectEvents(store, project, { clock: this.clock });
@@ -427,7 +436,12 @@ export class Dispatcher {
         }
         snapshot = prior;
       } else snapshot = await this.options.snapshot(a, project);
-    } catch {
+    } catch (error) {
+      this.options.onError?.(
+        new Error(
+          `bell delivery rejected: project=${project} asg=${a.id} reason=snapshot_unavailable message=${redactFailureLine(error instanceof Error ? error.message : String(error))}`,
+        ),
+      );
       this.reject(project, notes, a, "snapshot_unavailable");
       return;
     }
@@ -449,19 +463,23 @@ export class Dispatcher {
     }
     if (!job) return;
     let sent = false,
-      reason = "delivery_failed";
+      reason = "delivery_failed",
+      failure: DeliveryFailure | undefined,
+      stage: DeliveryStage = "delivery_call";
     try {
       if (live && job.assignment.runtime_ref) {
+        stage = "before_wake";
         const baseline = await this.options.beforeWake?.({
           project,
           assignment: job.assignment,
         });
+        stage = "wake";
         const result = await this.options.runtime.wake(
           job.assignment.runtime_ref,
           [job.bell, baseline].filter(Boolean).join("\n"),
         );
         sent = result.ok && result.value.sent;
-        if (!result.ok) reason = `wake_failed:${result.error.code}`;
+        if (!result.ok) ({ reason, failure } = wakeFailure(result.error));
       } else {
         if (replaceProfile && job.assignment.runtime_ref) {
           const released = await this.options.runtime.release(
@@ -488,10 +506,22 @@ export class Dispatcher {
           );
         reason = "startup_did_not_dispatch";
       }
-    } catch {
-      reason = "delivery_call_failed";
+    } catch (error) {
+      ({ reason, failure } = deliveryFailure(stage, error));
     }
-    this.settle(job.attempt, sent, reason, job.bell);
+    if (failure)
+      this.options.onError?.(
+        new Error(
+          deliveryFailureLine({
+            project,
+            assignment: job.assignment.id,
+            run: job.run.id,
+            reason,
+            failure,
+          }),
+        ),
+      );
+    this.settle(job.attempt, sent, reason, job.bell, failure);
   }
   private waitForRuntime(project: ProjectId, expected: Assignment) {
     this.options.store.uow.run((tx) => {
@@ -716,6 +746,7 @@ export class Dispatcher {
     sent: boolean,
     reason: string,
     bell?: string,
+    failure?: DeliveryFailure,
   ) {
     const { store } = this.options,
       project = attempt.project_id;
@@ -783,13 +814,36 @@ export class Dispatcher {
         failed ||= !sent && !acked;
       }
       const run = state.runs.find((r) => r.id === attempt.run_id);
-      if (
-        failed &&
-        run?.status !== "dispatched" &&
-        run?.status !== "running" &&
-        !(run && dispatchRecoveryFailed(state, run))
-      )
-        this.escalate(tx, project, notes, attempt.assignment_id, reason);
+      // C-56: a dispatched Run is retried with backoff and recovered by
+      // dispatch-retry; only escalate failures nobody else will handle.
+      const recovering =
+        run?.status === "dispatched" ||
+        run?.status === "running" ||
+        (run !== undefined && dispatchRecoveryFailed(state, run));
+      if (failed && !recovering)
+        this.escalate(
+          tx,
+          project,
+          notes,
+          attempt.assignment_id,
+          reason,
+          failure,
+        );
+      else if (failed && failure && run) {
+        // C-68: keep the real cause on the card without alerting anyone.
+        const a = state.assignments.find((x) => x.id === attempt.assignment_id);
+        if (a)
+          deliveryAttemptFailed(tx, state, at, {
+            assignment: a,
+            run_id: run.id,
+            reason,
+            error: failure,
+            notification_ids: attempt.notification_ids,
+            card_id:
+              notes[0]?.card_id ??
+              state.work_items.find((w) => w.id === a.work_item_id)?.card_id,
+          });
+      }
     });
   }
   private reject(
@@ -834,6 +888,7 @@ export class Dispatcher {
     notes: readonly Notification[],
     assignment: Assignment["id"],
     reason: string,
+    failure?: DeliveryFailure,
   ) {
     const state = loadCommandState(tx, project);
     const a = state.assignments.find((a) => a.id === assignment);
@@ -848,6 +903,7 @@ export class Dispatcher {
         state.work_items.find((w) => w.id === a.work_item_id)?.card_id,
       notification_ids: notes.map((n) => n.id),
       run_id: notes[0]?.run_id,
+      ...(failure ? { error: failure } : {}),
     });
   }
   private retryDelay(attempts: number) {

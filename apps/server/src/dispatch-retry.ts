@@ -25,6 +25,13 @@ import {
   unfinishedBellAttempts,
 } from "@cardigan/store";
 
+import {
+  type DeliveryFailure,
+  type DeliveryStage,
+  deliveryFailure,
+  deliveryFailureLine,
+  wakeFailure,
+} from "./dispatch-alert.js";
 import { runStopWorkflow } from "./dispatch-stop.js";
 
 /** Retry only unstarted Runs. Claims and recovery decisions share the SQLite write lock. */
@@ -37,6 +44,8 @@ export async function retryDispatchedRuns(
       project: ProjectId;
       assignment: Assignment;
     }) => Promise<string | undefined> | Promise<void>;
+    /** Sanitized one-line server log for a failed retry (C-68). */
+    onError?: (error: unknown) => void;
   },
   project: ProjectId,
   policy: {
@@ -50,6 +59,7 @@ export async function retryDispatchedRuns(
     sent: boolean,
     reason: string,
     bell: string,
+    failure?: DeliveryFailure,
   ) => void,
 ) {
   const { store, runtime, clock } = options;
@@ -300,12 +310,17 @@ export async function retryDispatchedRuns(
     });
     if (!job?.a.runtime_ref) continue;
     let sent = false,
-      reason = "delivery_call_failed";
+      reason = "delivery_call_failed",
+      failure: DeliveryFailure | undefined,
+      stage: DeliveryStage = "before_wake";
     try {
+      // C-68: beforeWake already retries lock/network failures for a few
+      // seconds; this loop only spaces whole deliveries (no double retry).
       const baseline = await options.beforeWake?.({
         project,
         assignment: job.a,
       });
+      stage = "wake";
       // MCP can start the Run while status/Git preparation is awaited; do not ring it again.
       if (read().runs.find((r) => r.id === job.run.id)?.status !== "dispatched")
         sent = true;
@@ -315,13 +330,25 @@ export async function retryDispatchedRuns(
           [job.bell, baseline].filter(Boolean).join("\n"),
         );
         sent = result.ok && result.value.sent;
-        reason = result.ok
-          ? "delivery_failed"
-          : `wake_failed:${result.error.code}`;
+        if (result.ok) reason = "delivery_failed";
+        else ({ reason, failure } = wakeFailure(result.error));
       }
-    } catch {
-      /* Only stable reason codes enter the audit record. */
+    } catch (error) {
+      // The reason stays a stable code; the cause is sanitized (C-68).
+      ({ reason, failure } = deliveryFailure(stage, error));
     }
-    settle(job.attempt, sent, reason, job.bell);
+    if (failure)
+      options.onError?.(
+        new Error(
+          deliveryFailureLine({
+            project,
+            assignment: job.a.id,
+            run: job.run.id,
+            reason,
+            failure,
+          }),
+        ),
+      );
+    settle(job.attempt, sent, reason, job.bell, failure);
   }
 }
