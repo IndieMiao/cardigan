@@ -18,6 +18,7 @@ import {
   clearAgentSentinel,
   prepareAgentCheckout,
   prepareAgentProject,
+  prepareCheckoutAlias,
   scrubAgentLaunch,
   secureDataDirectory,
   writeAgentLaunch,
@@ -48,6 +49,32 @@ describe.skipIf(process.platform !== "linux")("shared launch files", () => {
     await rm(root, { recursive: true, force: true });
   });
   const mode = async (path: string) => (await stat(path)).mode & 0o7777;
+  test.each(["local", "agent-ssh"] as const)(
+    "%s short namespace rejects existing aliases and preserves their contents",
+    async (modeName) => {
+      const execution =
+        modeName === "local"
+          ? { mode: "local" as const, dataDir: config.dataDir }
+          : config;
+      const path = await prepareCheckoutAlias(execution, "unique");
+      const base = modeName === "local" ? config.dataDir : config.agentRoot;
+      expect(path).toBe(join(base, "s", "unique"));
+      expect(await mode(path)).toBe(modeName === "local" ? 0o700 : 0o2770);
+      expect(await mode(join(base, "s"))).toBe(
+        modeName === "local" ? 0o700 : 0o2750,
+      );
+      await writeFile(join(path, "keep"), "existing attempt");
+      await expect(
+        prepareCheckoutAlias(execution, "unique"),
+      ).rejects.toMatchObject({ code: "EEXIST" });
+      expect(await readFile(join(path, "keep"), "utf8")).toBe(
+        "existing attempt",
+      );
+      await expect(
+        prepareCheckoutAlias(execution, "../escape"),
+      ).rejects.toThrow();
+    },
+  );
   test("temporary checkout namespaces are protected, exclusive and reject links", async () => {
     const path = await prepareAgentCheckout(config, "project", "attempt-1");
     expect(path).toBe(join(config.agentRoot, "checks", "project", "attempt-1"));

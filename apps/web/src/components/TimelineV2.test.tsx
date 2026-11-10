@@ -109,8 +109,8 @@ test.each(["comment", "instruction"] as const)(
       }),
     ]);
     const head = document.querySelector(".timeline-head") as HTMLElement;
-    expect(head.querySelector(".timeline-avatar")?.textContent).toBe("T");
-    expect(head.querySelector("strong")?.textContent).toBe("tester");
+    expect(head.querySelector(".employee-avatar")?.textContent).toBe("T");
+    expect(head.querySelector("strong")?.textContent).toBe("未命名的 tester");
     expect(within(head).getByText("A-14")).toBeTruthy();
     expect(head.textContent).toContain(
       `${type === "comment" ? "评论" : "指令"}于 23 小时前`,
@@ -211,7 +211,7 @@ test("U6b structural conclusions retain their result and share the comment heade
   );
   for (const [n, result] of ["已接受", "已驳回", "待拍板"].entries()) {
     const row = document.getElementById(`entry-e${n + 1}`) as HTMLElement;
-    expect(row.querySelector(".timeline-avatar")).toBeTruthy();
+    expect(row.querySelector(".employee-avatar")).toBeTruthy();
     expect(row.querySelector(".timeline-head strong")).toBeTruthy();
     expect(row.querySelector(".timeline-conclusion .status")?.textContent).toBe(
       result,
@@ -259,7 +259,7 @@ test("U6b system rows show the authenticated actor and exact upload thumbnail; p
   expect(rows.map((r) => r.querySelector("strong")?.textContent)).toEqual([
     "系统",
     "你",
-    "tester",
+    "未命名的 tester",
   ]);
   expect(rows[2]?.textContent).toContain("上传了附件");
   expect(rows[2]?.textContent).toContain("A-14");

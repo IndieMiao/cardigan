@@ -45,7 +45,7 @@ const USAGE = [
   "  cardigan card update <C-n> [--title <标题>] [--goal <目标>] [--acceptance <标准1;标准2>] [--priority <n>] [--status backlog|todo|cancelled] [--superseded-by <C-m>] [--project <p>]",
   "    update 至少提供一个修改字段；含分号的验收标准请加引号。",
   "    已完成卡片不能取消；请建新卡，再用 --superseded-by 标记已完成或已取消的旧卡。",
-  "  cardigan assign <W-n> --role <角色> [--machine local] [--start] [--project <p>]",
+  "  cardigan assign <W-n> --role <角色> [--employee <E-n 或名字>] [--machine local] [--start] [--project <p>]",
   "  cardigan token issue <A-n> [--project <p>]",
   "  cardigan pm create --office|--ops [--project <p>]",
   "  cardigan pm start [--office] [--ops] [--project <p>]  一键启动常驻 PM（已在运行就跳过）",
@@ -380,6 +380,7 @@ async function assignWorkItem(
   const workItemId = parseWorkItem(parsed.positionals[0]);
   const roleId = required(parsed.flags, "role");
   const machine = optional(parsed.flags, "machine");
+  const employee = optional(parsed.flags, "employee");
 
   if (start)
     await secureDataDirectory(
@@ -412,6 +413,7 @@ async function assignWorkItem(
           {
             work_item_id: workItemId,
             role_id: roleId,
+            ...(employee === undefined ? {} : { employee_id: employee }),
             ...(machine === undefined ? {} : { machine_id: machine }),
           },
           ports,
@@ -436,7 +438,7 @@ async function assignWorkItem(
 
     io.stdout(
       [
-        `已指派 ${workItemId} → ${assignment.id}（${assignment.role_id} v${assignment.role_version}）`,
+        `已指派 ${workItemId} → ${assignment.id}（${assignment.role_id} v${assignment.role_version}${assignment.employee_id ? `，员工 ${assignment.employee_id}` : ""}）`,
       ].join("\n"),
     );
     if (start) {

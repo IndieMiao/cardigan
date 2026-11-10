@@ -9,10 +9,10 @@ import type {
 import { toolNames } from "../entities.js";
 import type { Result } from "../errors.js";
 import {
+  type FormattedIdKind,
   formatId,
   formatTimelineEntryId,
   parseEventId,
-  type ReadableIdKind,
 } from "../ids.js";
 import type { CommandEffect, CommandPorts, CommandState } from "./core.js";
 
@@ -20,7 +20,7 @@ export function value<T>(result: Result<T>): T {
   if (!result.ok) throw new Error(result.error.message);
   return result.value;
 }
-export const id = <K extends ReadableIdKind>(kind: K, n: number) =>
+export const id = <K extends FormattedIdKind>(kind: K, n: number) =>
   value(formatId(kind, n));
 export const now = "2026-01-01T00:00:00.000Z";
 export const subject = { kind: "git_head" as const, value: "a".repeat(40) };
@@ -58,7 +58,10 @@ export function card(n = 1): Card {
     created_at: now,
   };
 }
-export function assignment(n = 1, role_id = "coder"): Assignment {
+export function assignment(
+  n = 1,
+  role_id = "coder",
+): Extract<Assignment, { scope: "work_item" }> {
   return {
     id: id("assignment", n),
     scope: "work_item",

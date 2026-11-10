@@ -7,6 +7,7 @@ import type {
   WorkItem,
 } from "../entities.js";
 import type { CardId, DecisionId, HumanActionId, WorkItemId } from "../ids.js";
+import { commentMentions } from "../mentions.js";
 import { extractReferences } from "../references.js";
 
 export { extractReferences } from "../references.js";
@@ -123,7 +124,12 @@ export function postComment(
         type: "comment",
         body: p.body,
         refs,
-        mentions: p.mentions ?? [],
+        mentions: commentMentions(
+          p.body,
+          p.mentions ?? [],
+          state.employees ?? [],
+          state.roles.map((role) => role.role_id),
+        ),
         ...(p.work_item_id ? { work_item_id: p.work_item_id } : {}),
         ...(p.reply_to ? { reply_to: p.reply_to } : {}),
         ...(p.supersedes ? { supersedes: p.supersedes } : {}),

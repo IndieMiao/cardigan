@@ -4,9 +4,9 @@
 
 ## M2.1 启动命令
 
-- queueRun / dispatchRun 只接受同项目 human/system Actor，不是 MCP 工具。queueRun 输入 assignment_id、model、agent_cli_version，生成 initial/queued Run 和 run_queued 事件（同时作为触发事件），快照固定的 Role 版本；拒绝 inactive Assignment、闭卡、归属变化和已有未结束 Run。
-- dispatchRun 输入 run_id、runtime_ref、可选 base_sha；RuntimeRef 携带 worktree_path / branch / agent_session_id，归约记录到 Assignment，工作目录存在时必须有有效基线 SHA。旧 worktree/branch 必须复用，同机器共享路径上有未结束 Run 时保守拒绝；所有状态变更走 transition。第一次派发从 not_provisioned 经 provisioning/idle 到 running；旧 Run 已结束时可把遗留 running 经 run_finished 归到 idle 再派发。unknown/lost/released 需另行恢复，不能跳过。
-- M5.6：dispatchRun 可由 system 携带 replacement（旧 RuntimeRef、runtime_not_found/runtime_unavailable 原因）；校验旧引用仍匹配且无其他未结束 Run 后，将 session_replaced 事件及系统 handoff 与当前 queued Run 的派发原子提交，清除旧 CLI 会话 ID。常驻 Assignment 无卡片时间线，交接正文保存在项目事件中。
+- queueRun / dispatchRun 只接受同项目 human/system Actor，不是 MCP 工具。queueRun 输入 assignment_id、model、agent_cli_version、可选 launch_profile_ref，生成 initial/queued Run 和 run_queued 事件（同时作为触发事件），快照固定的 Role 版本和 Assignment.employee_id；拒绝 inactive Assignment、闭卡、归属变化和已有未结束 Run。
+- dispatchRun 输入 run_id、runtime_ref、可选 base_sha 及主机实际编译的 launch_snapshot（model、agent_cli_version、launch_profile_ref），仅 queued Run 可在派发时记录它；RuntimeRef 携带 worktree_path / branch / agent_session_id，归约记录到 Assignment，工作目录存在时必须有有效基线 SHA。旧 worktree/branch 必须复用，同机器共享路径上有未结束 Run 时保守拒绝；所有状态变更走 transition。第一次派发从 not_provisioned 经 provisioning/idle 到 running；旧 Run 已结束时可把遗留 running 经 run_finished 归到 idle 再派发。unknown/lost/released 需另行恢复，不能跳过。
+- M5.6：dispatchRun 可由 system 携带 replacement（旧 RuntimeRef、runtime_not_found/runtime_unavailable/launch_profile_changed 原因）；校验旧引用仍匹配且无其他未结束 Run 后，将 session_replaced 事件及系统 handoff 与当前 queued Run 的派发原子提交，清除旧 CLI 会话 ID。常驻 Assignment 无卡片时间线，交接正文保存在项目事件中。
 - acknowledgeRun 输入 run_id，仅接受拥有该 Run 的 active Assignment Actor，供 MCP 认证后内部调用，无独立 MCP 工具名。dispatched 经 acknowledge/start 到 running（兼容 acked），写 started_at 和 run_started；复用 activeWork 检查依赖/审核预算并激活自己的可执行工作项，其他工作项不动。等待目标、暂停或已交付的工作项保持原状态。重复确认 running Run 无变更/事件；检查失败时不返回部分效果。
 - abortDispatch 输入 run_id/reason，只允许 human/system，经 cancel 标记 cancelled/outcome=failed、记录原因和结束时间。已 cancelled 可重试；completed/failed 拒绝。运行状态为 running 时经 run_finished 到 idle 并清空 runtime_ref，保留工作目录和 Session 元数据，允许后续排新 Run；不倒退工作项、不删除 worktree。外层负责 release 终端和撤销 Token，此命令不替代 IO 清理。
 - Runtime 的编译输入、端口错误与业务 Result 分开；domain 不启动终端、写文件或签发 Token。命令的快照读取、编号、实体和事件仍需外层同一事务提交；M2.6 接入真实启动和首次 MCP 调用。
@@ -99,3 +99,26 @@ M5.6：阻塞 Decision 和审核轮次上限的隐式 Run 结束与 finish_run �
 S24：`pauseStandingAssignment` 是只允许同项目 human 的主机命令，仅作用于常驻 pm。它经 suspend 暂停 Assignment、经 cancel 结束未完成 Run，保留 RuntimeRef 供主机回收。`queueRun(..., {resume:true})` 也仅允许人恢复 suspended 常驻 PM，并在同一个纯命令中恢复状态、排新 Run；系统派发不能使用该选项。CLI 在暂停事务内撤销 Token、结清被手动中断的投递意图，关闭失败会保持暂停；显式 start 失败也重新暂停。工作项 stop 保持原语义。
 
 S21：MCP create_card 可省略 repo／base_branch，适配层在命令事务内从 Token 所属项目登记信息分别补齐；显式字段保留，缺少登记默认值返回 validation_failed。domain createCard 仍接收完整参数并做原有校验，不做仓储 IO。幂等使用未补默认值的原始请求作为指纹；成功重放不重新读取项目配置。create_card／update_card 的 MCP 响应隐藏 repo，实体变更仍保存完整字段。
+
+## P2-V V1a 全局员工命令
+
+计划：[p2v-1-employee.md §3 V1a](../../docs/plans/p2v-1-employee.md)。入口均从 `@cardigan/domain` 导出，不增加 MCP 工具。
+
+- `createEmployee(employees, actor, input, ports)`：只有 human 可创建，`name/title/role_id` 必填，`bio` 默认空、`avatar/launch_profile_ref` 默认 null；产生 active 员工和 `employee_created`。编号由独立 `GlobalIdAllocator` 分配 `E-n`，不接受项目参数。
+- `updateEmployee(employees, actor, id, patch, ports)`：只有 human 可修改名字、职位、简介、头像引用和启动配置；至少一个字段，拒绝角色、状态、编号和审计字段。`avatar/launch_profile_ref=null` 清空，简介用空字符串。保留 `created_at`，更新 `updated_at`，产生 `employee_updated`。
+- `deactivateEmployee / activateEmployee(employees, actor, id, ports)`：只有 human 可停用／恢复，经 employee 状态机迁移，产生 `employee_deactivated / employee_activated`；重复设置已有状态无变化、无事件。没有删除入口，不修改任何 Assignment。
+- 名字／职位／简介上限为 40 / 40 / 200 个 Unicode 字符，拒绝控制和格式控制字符；去除首尾空白，名字的全角空格转半角。所有项目的 active 名字按 Unicode `toLowerCase()` 不区分大小写比较，显示名保留大小写；创建、重命名和恢复均检查，inactive 可以重名。
+- 设置非空配置引用必须存在于 `ports.launch_profiles`（主机读取 `launch.yaml` 后注入）。普通修改和停用／恢复不要求旧配置还存在。配置选择不改变角色。domain 不做文件 IO；项目角色登记由下述 assign 命令检查。
+- 归约返回 `EmployeeEffect`（data、employees、events），由 store 在同一 `uow.run` 事务内保存员工、全局计数器及全局事件。全局流独立于原有项目／卡片流，事件保存 human 身份、员工快照和审计时间；拒绝不返回部分效果，编号在字段校验之后分配。列表通过全局只读仓储读取，CLI 默认过滤 inactive，可用角色过滤和 `--all`。
+
+
+## P2-V V1b 员工指派与读取视图
+
+计划：[p2v-1-employee.md §3 V1b](../../docs/plans/p2v-1-employee.md)；大小写规则按 C-21 的用户拍板覆盖计划旧描述。
+
+- `assign` 新增可选 `employee_id`（员工 E-n 或在职名字）。新指派校验员工在职、角色与工作项一致且已在目标项目登记；重复指派保留原员工，不能在已有 Assignment 上添加、删除或替换员工，已停用员工可继续原责任。
+- 未指定员工时，从该角色在职员工中先排除审核冲突，再按有无未结束 Run、最近一次指派时间升序挑选；从未指派最优先，同时间按数字编号排序。CommandState 的 `employees` 和 `employee_activity` 是事务内全局只读快照，负载统计跨项目并正确区分项目内 Assignment 编号。无在职员工才退回匿名；全部候选冲突返回 invariant_violation。
+- 审核隔离双向检查：验证项员工不得是其目标产出项任何历史 Assignment 的员工（包括 released）；完成验收项与模板主产出项同理。不同员工放行，一方或双方匿名不猜测身份。assign 和提交交付／审核共用隔离校验；原 Assignment 级隔离不变。
+- Run 由 Assignment 复制 `employee_id`；主机在排队及派发时记录实际 `launch_profile_ref`。选择顺序为员工配置 → 固定 Role 版本配置，实际 Harness 取所选配置，工具权限仍取 Role。员工修改配置仅影响后续新 Run；继续使用旧会话前检查配置是否变化。
+- `authorView` / `runAuthorView` 只生成查询投影：employee 含 id/name/title/avatar，无员工为 null，author_display 为“未命名的 <角色>”。交付和审核按原 Run 归属解析，不修改 author 或权限。MCP whoami 的员工字段由 Token 所属 Assignment 查询。
+- 存储迁移 0010 使用与 domain 相同的 Unicode name_key 规则。旧库同名在职员工保留最小编号的原名，其他追加员工编号，冲突再追加序号，原名前缀按 40 字上限截短；保留身份与在职状态，每次改名写 system 全局事件和原名。重跑不重复改名或审计，规则详见开发方案 §4.3。

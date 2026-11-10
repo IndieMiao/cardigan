@@ -1,4 +1,4 @@
-import type { CardId } from "@cardigan/domain";
+import { authorView, type CardId } from "@cardigan/domain";
 import { z } from "zod";
 import { PROJECT_STREAM, requireCard } from "./shared.js";
 import { defineTool } from "./types.js";
@@ -48,12 +48,27 @@ export const getUpdatesTool = defineTool({
       since_seq: start,
     });
 
+    const authors = store.uow.read((tx) => ({
+      assignments: tx.assignments.list(project_id),
+      employees: tx.employees?.list() ?? [],
+    }));
     return {
       card_id: cardId ?? null,
       since_seq: start,
       latest_seq: updates.latest_seq,
-      events: updates.events,
-      timeline: updates.timeline,
+      events: updates.events.map((event) => ({
+        ...event,
+        ...authorView(
+          authors,
+          event.actor.kind === "assignment"
+            ? `assignment:${event.actor.assignment_id}`
+            : event.actor.kind,
+        ),
+      })),
+      timeline: updates.timeline.map((entry) => ({
+        ...entry,
+        ...authorView(authors, entry.author),
+      })),
     };
   },
 });

@@ -10,6 +10,8 @@ import type {
   Clock,
   Cursor,
   Event,
+  GlobalIdAllocator,
+  GlobalRepositories,
   NotificationStatus,
   ProjectId,
   Result,
@@ -18,6 +20,10 @@ import type {
   TransactionContext,
   UnitOfWork,
 } from "@cardigan/domain";
+import {
+  createGlobalIdAllocator,
+  createGlobalRepositories,
+} from "./employees.js";
 import { createIdAllocator, PROJECT_EVENT_STREAM } from "./ids.js";
 import {
   acknowledgeNotifications,
@@ -68,7 +74,11 @@ import {
 
 export const DEFAULT_DB_FILE = "cardigan.db";
 
-export interface StoreTransactionContext extends TransactionContext {
+export interface StoreTransactionContext
+  extends TransactionContext,
+    GlobalRepositories {
+  readonly employees: GlobalRepositories["employees"];
+  readonly global_ids: GlobalIdAllocator;
   /** Issue a token inside this transaction (assignment and token commit together). */
   issueToken(input: IssueTokenInput): IssuedToken;
   /** Every token row of an assignment, newest last; values are never exposed. */
@@ -264,6 +274,8 @@ export class Store {
     try {
       const result = operation({
         ...createRepositories(this.#db),
+        ...createGlobalRepositories(this.#db, "write"),
+        global_ids: createGlobalIdAllocator(this.#db),
         ids: createIdAllocator(this.#db),
         issueToken: (input) => {
           if (!active) throw new Error("Token transaction has ended");

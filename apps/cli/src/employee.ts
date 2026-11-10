@@ -1,0 +1,201 @@
+import {
+  activateEmployee,
+  createEmployee,
+  deactivateEmployee,
+  type Employee,
+  type EmployeeCommandPorts,
+  type EmployeeEffect,
+  type EmployeeId,
+  parseId,
+  type Result,
+  type UpdateEmployeeInput,
+  updateEmployee,
+} from "@cardigan/domain";
+import { persistEmployeeEffect, Store } from "@cardigan/store";
+import { loadConfig } from "./config.js";
+import { CliError, EXIT } from "./errors.js";
+import { announceDataDir, systemClock } from "./host.js";
+import type { CliIo } from "./io.js";
+import { resolveLaunchPaths } from "./paths.js";
+
+const USAGE = [
+  "用法：cardigan employee <命令>（全局员工，无需选择项目）",
+  "  add --name <名字> --title <职位> --role <角色> [--bio <简介>] [--avatar <引用>] [--launch-profile <名字>]",
+  "  list [--role <角色>] [--all]",
+  "  update <E-n> [--name <名字>] [--title <职位>] [--bio <简介>] [--avatar <引用>] [--launch-profile <名字>]",
+  "  deactivate <E-n> / activate <E-n>",
+  "可用 --data-dir <目录> 指定数据库；update 的简介、头像、启动配置传空字符串可清空。",
+].join("\n");
+const editableFlags = ["name", "title", "bio", "avatar", "launch-profile"];
+
+function parse(args: readonly string[]) {
+  const [command, ...rest] = args;
+  if (
+    !["add", "list", "update", "deactivate", "activate"].includes(command ?? "")
+  ) {
+    throw new CliError("请指定有效的员工命令", EXIT.usage, [USAGE]);
+  }
+  const allowed = new Set([
+    "data-dir",
+    ...(command === "add"
+      ? [...editableFlags, "role"]
+      : command === "update"
+        ? editableFlags
+        : command === "list"
+          ? ["role", "all"]
+          : []),
+  ]);
+  const flags: Record<string, string> = {};
+  const positionals: string[] = [];
+  for (let index = 0; index < rest.length; index++) {
+    const token = rest[index] as string;
+    if (!token.startsWith("--")) {
+      positionals.push(token);
+      continue;
+    }
+    const equals = token.indexOf("=");
+    const key = token.slice(2, equals < 0 ? undefined : equals);
+    if (!allowed.has(key))
+      throw new CliError(`不认识的选项：--${key}`, EXIT.usage, [USAGE]);
+    if (Object.hasOwn(flags, key))
+      throw new CliError(`选项 --${key} 不能重复`, EXIT.usage);
+    if (key === "all") {
+      if (equals >= 0) throw new CliError("--all 不接受值", EXIT.usage);
+      flags.all = "true";
+      continue;
+    }
+    const value = equals < 0 ? rest[++index] : token.slice(equals + 1);
+    if (value === undefined || (equals < 0 && value.startsWith("--")))
+      throw new CliError(`--${key} 需要一个值`, EXIT.usage);
+    if (
+      value.length === 0 &&
+      !(
+        command === "update" &&
+        ["bio", "avatar", "launch-profile"].includes(key)
+      )
+    )
+      throw new CliError(`--${key} 不能为空`, EXIT.usage);
+    flags[key] = value;
+  }
+  const needsId = command !== "add" && command !== "list";
+  if (positionals.length !== (needsId ? 1 : 0))
+    throw new CliError("员工命令的位置参数不正确", EXIT.usage, [USAGE]);
+  if (needsId && !parseId("employee", positionals[0]).ok)
+    throw new CliError("员工编号必须为 E-n（正整数）", EXIT.usage);
+  if (
+    command === "add" &&
+    ["name", "title", "role"].some((key) => flags[key] === undefined)
+  )
+    throw new CliError("新增员工需要 --name、--title 和 --role", EXIT.usage);
+  if (
+    command === "update" &&
+    !editableFlags.some((key) => flags[key] !== undefined)
+  )
+    throw new CliError("至少指定一个员工修改字段", EXIT.usage);
+  return { command, flags, id: positionals[0] as EmployeeId };
+}
+
+export async function runEmployeeCommand(
+  args: readonly string[],
+  io: CliIo,
+): Promise<number> {
+  if (args.length === 0 || args.includes("--help") || args.includes("-h")) {
+    io.stdout(USAGE);
+    return EXIT.ok;
+  }
+  const { command, flags, id } = parse(args);
+  // Configuration IO happens before the transaction; no secrets are needed.
+  const profile = flags["launch-profile"];
+  const profiles =
+    profile === undefined || profile === ""
+      ? undefined
+      : Object.keys((await loadConfig(resolveLaunchPaths(io.env))).profiles);
+  const store = Store.open({ dataDir: announceDataDir(io, flags["data-dir"]) });
+  try {
+    if (command === "list") {
+      const employees = store.uow
+        .read((tx) => tx.employees.list())
+        .filter(
+          (employee) =>
+            (flags.all !== undefined || employee.status === "active") &&
+            (flags.role === undefined || employee.role_id === flags.role),
+        );
+      io.stdout(
+        employees.length === 0
+          ? "没有符合条件的员工"
+          : employees
+              .map(
+                (employee) =>
+                  `${employee.id}  ${employee.name}  ${employee.title}  角色：${employee.role_id}  ${employee.status === "active" ? "在职" : "已停用"}`,
+              )
+              .join("\n"),
+      );
+      return EXIT.ok;
+    }
+    const employee = store.uow.run((tx) => {
+      const employees = tx.employees.list();
+      const ports: EmployeeCommandPorts = {
+        clock: systemClock,
+        ids: tx.global_ids,
+        ...(profiles === undefined ? {} : { launch_profiles: profiles }),
+      };
+      const actor = { kind: "human" } as const;
+      const patch: UpdateEmployeeInput = {
+        ...(flags.name === undefined ? {} : { name: flags.name }),
+        ...(flags.title === undefined ? {} : { title: flags.title }),
+        ...(flags.bio === undefined ? {} : { bio: flags.bio }),
+        ...(flags.avatar === undefined ? {} : { avatar: flags.avatar || null }),
+        ...(profile === undefined
+          ? {}
+          : { launch_profile_ref: profile || null }),
+      };
+      let result: Result<EmployeeEffect>;
+      switch (command) {
+        case "add":
+          result = createEmployee(
+            employees,
+            actor,
+            {
+              ...patch,
+              name: flags.name as string,
+              title: flags.title as string,
+              role_id: flags.role as string,
+            },
+            ports,
+          );
+          break;
+        case "update":
+          result = updateEmployee(employees, actor, id, patch, ports);
+          break;
+        case "activate":
+          result = activateEmployee(employees, actor, id, ports);
+          break;
+        default:
+          result = deactivateEmployee(employees, actor, id, ports);
+      }
+      if (!result.ok) throw new CliError(result.error.message, EXIT.usage);
+      persistEmployeeEffect(tx, result.value);
+      return result.value.data;
+    });
+    printEmployee(
+      io,
+      employee,
+      command === "add"
+        ? "已创建"
+        : command === "update"
+          ? "已更新"
+          : command === "activate"
+            ? "已恢复"
+            : "已停用",
+    );
+    return EXIT.ok;
+  } finally {
+    store.close();
+  }
+}
+
+function printEmployee(io: CliIo, employee: Employee, action: string): void {
+  io.stdout(
+    `${action}员工 ${employee.id}：${employee.name}（${employee.title}）；角色：${employee.role_id}`,
+  );
+}

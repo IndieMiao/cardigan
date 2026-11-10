@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 import type { CardiganClient, ExecutionAssignment, RunView } from "../api.js";
+import { EmployeeIdentity } from "../components/EmployeeIdentity.js";
 import { FilterBar } from "../components/FilterBar.js";
 import {
   EmptyState,
@@ -102,6 +103,7 @@ function AssignmentRow({
           >
             {expanded ? "收起" : "展开"}
           </button>
+          <EmployeeIdentity {...a} author_role={a.role_id} />
           <IdTag
             id={a.id}
             label={a.role_id}

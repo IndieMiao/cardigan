@@ -192,7 +192,7 @@ export async function startAssignment(
   await secureDataDirectory(execution);
 
   const entities = requireAssignment(store, project_id, options.assignment_id);
-  const { assignment, role } = entities;
+  const { assignment, role, employee } = entities;
   const resuming =
     assignment.scope === "standing" &&
     assignment.role_id === "pm" &&
@@ -205,11 +205,12 @@ export async function startAssignment(
   }
 
   // 2. queue the Run with a model/CLI snapshot (invariant 12).
-  const model = resolveProfile(options.launch.config, role.launch_profile_ref)
-    .profile.model;
+  const profileRef = employee?.launch_profile_ref ?? role.launch_profile_ref;
+  const profile = resolveProfile(options.launch.config, profileRef).profile;
+  const model = profile.model;
   if (model === undefined) {
     throw new CliError(
-      `启动配置 ${role.launch_profile_ref} 没有 model，Run 无法记录快照`,
+      `启动配置 ${profileRef} 没有 model，Run 无法记录快照`,
       EXIT.usage,
     );
   }
@@ -220,7 +221,7 @@ export async function startAssignment(
       captureAgent: options.runtime.captureAgent?.bind(options.runtime),
       captureLocal: (binary) => cliVersion(io, binary),
     },
-    harnessBinary(role.harness),
+    harnessBinary(profile.harness),
   ).catch((error: unknown) => {
     const message = formatLaunchError(assignment.id, error);
     if (message) throw new CliError(message, EXIT.failure);
@@ -241,6 +242,7 @@ export async function startAssignment(
           assignment_id: assignment.id,
           model,
           agent_cli_version: version,
+          launch_profile_ref: profileRef,
           ...(resuming ? { resume: true } : {}),
         },
         ports,

@@ -79,10 +79,14 @@ export function queueResumedRun(d: CommandDraft, item: WorkItem, event: Event) {
   d.put("runs", {
     id: d.ids.next(d.state.project_id, "run"),
     assignment_id: assignment.id,
+    ...(assignment.employee_id ? { employee_id: assignment.employee_id } : {}),
     trigger_event_id: event.id,
     kind: item.status === "waiting_decision" ? "decision_resumed" : "followup",
     status: "queued",
     role_version: previous.role_version,
+    ...(previous.launch_profile_ref && !assignment.employee_id
+      ? { launch_profile_ref: previous.launch_profile_ref }
+      : {}),
     model: previous.model,
     agent_cli_version: previous.agent_cli_version,
     outcome: null,

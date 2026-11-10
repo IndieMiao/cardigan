@@ -14,12 +14,14 @@ export function CardSectionNav({
   cardId,
   title,
   commentBox,
+  inDrawer = false,
 }: {
   sections: readonly CardSection[];
   article: RefObject<HTMLElement | null>;
   cardId: string;
   title: string;
   commentBox: RefObject<CommentBoxHandle | null>;
+  inDrawer?: boolean;
 }) {
   const nav = useRef<HTMLElement>(null);
   const [active, setActive] = useState(sections[0]?.id);
@@ -88,12 +90,14 @@ export function CardSectionNav({
   };
   return (
     <nav ref={nav} className="card-section-nav" aria-label="卡片区块导航">
-      <div className="card-nav-identity">
-        <span className="card-nav-id">{cardId}</span>
-        <span className="card-nav-title" title={title}>
-          {title}
-        </span>
-      </div>
+      {!inDrawer && (
+        <div className="card-nav-identity">
+          <span className="card-nav-id">{cardId}</span>
+          <span className="card-nav-title" title={title}>
+            {title}
+          </span>
+        </div>
+      )}
       <div className="card-nav-links">
         {sections.map((section) => (
           <button

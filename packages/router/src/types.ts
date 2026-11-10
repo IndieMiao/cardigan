@@ -5,6 +5,7 @@ import type {
   CardId,
   Decision,
   Delivery,
+  Employee,
   Event,
   EventId,
   HumanAction,
@@ -12,6 +13,7 @@ import type {
   ProjectId,
   Review,
   RoleId,
+  RoleReference,
   Run,
   TimelineEntry,
   WorkItem,
@@ -85,6 +87,9 @@ export type RuleId =
   | "6.5/no assignment for the role"
   | "6.5/several assignments for the role"
   | "6.5/explicit assignment or work item"
+  | "6.5/single assignment for the employee"
+  | "6.5/no assignment for the employee"
+  | "6.5/several assignments for the employee"
   // §7.2 escalations
   | "7.2/work conflict or priority contention"
   | "7.2/delivery rejected twice"
@@ -121,6 +126,7 @@ export interface RouteProblem {
   readonly code:
     | "unknown_mention"
     | "ambiguous_role_mention"
+    | "ambiguous_employee_mention"
     | "mentioned_work_item_unassigned";
   readonly detail: string;
 }
@@ -140,6 +146,8 @@ export interface RouterSnapshot {
   readonly cards: readonly Card[];
   readonly work_items: readonly WorkItem[];
   readonly assignments: readonly Assignment[];
+  readonly employees?: readonly Employee[];
+  readonly roles?: readonly RoleReference[];
   readonly deliveries: readonly Delivery[];
   readonly reviews: readonly Review[];
   readonly decisions: readonly Decision[];

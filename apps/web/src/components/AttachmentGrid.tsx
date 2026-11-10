@@ -1,15 +1,10 @@
 import type { AttachmentView } from "../api.js";
 import { statusLabel } from "../status.js";
 import { AttachmentPreview, isBitmap } from "./AttachmentPreview.js";
+import { EmployeeIdentity } from "./EmployeeIdentity.js";
 import { Time } from "./Foundation.js";
 import { splitSuperseded } from "./Timeline.js";
 
-const uploader = (a: AttachmentView) =>
-  a.uploaded_by === "human"
-    ? "你"
-    : a.uploaded_by.startsWith("assignment:")
-      ? `${a.uploader_role ?? "Agent"} ${a.uploaded_by.slice(11)}`
-      : "系统";
 const size = (bytes: number) =>
   bytes < 1024
     ? `${bytes} B`
@@ -41,7 +36,12 @@ function Gallery({ attachments }: { attachments: readonly AttachmentView[] }) {
             </div>
           )}
           <strong>{a.id}</strong>
-          <span>{uploader(a)}</span>
+          <EmployeeIdentity
+            {...a}
+            author={a.uploaded_by}
+            author_role={a.uploader_role}
+            showTitle={false}
+          />
           <Time value={a.uploaded_at} />
           <span>{size(a.size)}</span>
           {a.basis && (

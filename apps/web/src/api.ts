@@ -1,3 +1,17 @@
+export interface AuthorView {
+  readonly employee?: {
+    readonly id: string;
+    readonly name: string;
+    readonly title: string;
+    readonly avatar: string | null;
+    readonly bio?: string;
+    readonly role_id?: string;
+  } | null;
+  readonly author_display?: string;
+  readonly author?: string;
+  readonly author_role?: string | null;
+}
+
 import {
   browserStream,
   type StreamCallbacks,
@@ -31,7 +45,7 @@ export interface WaitingOnItem {
   readonly label: string;
 }
 
-export interface NextOwnerItem {
+export interface NextOwnerItem extends AuthorView {
   readonly kind: "human" | "role" | "assignment";
   readonly ref: string;
 }
@@ -70,6 +84,7 @@ export interface CardView {
 
 /** A list row: the card plus the fields the list filters and columns need. */
 export interface CardListItem extends CardView {
+  readonly produce_owners?: readonly AuthorView[];
   readonly progress: { readonly completed: number; readonly total: number };
   readonly updated_at: string;
   readonly roles: readonly string[];
@@ -116,7 +131,7 @@ export interface WorkItemView {
   readonly target_work_item_id?: string;
 }
 
-export interface TimelineEntryView {
+export interface TimelineEntryView extends AuthorView {
   readonly id: string;
   readonly card_id: string;
   readonly event_seq: number;
@@ -152,7 +167,7 @@ export interface TimelineEntryView {
   readonly created_at: string;
 }
 
-export interface DeliveryView {
+export interface DeliveryView extends AuthorView {
   readonly id: string;
   readonly work_item_id: string;
   readonly kind: string;
@@ -170,7 +185,7 @@ export interface DeliveryView {
   }[];
 }
 
-export interface ReviewView {
+export interface ReviewView extends AuthorView {
   readonly id: string;
   readonly delivery_id: string;
   readonly work_item_id: string;
@@ -226,7 +241,7 @@ export interface HumanActionView {
 }
 
 /** Attachment metadata; the blob is a separate request (`download_path`). */
-export interface AttachmentView {
+export interface AttachmentView extends AuthorView {
   readonly id: string;
   readonly mime: string;
   readonly size: number;
@@ -350,14 +365,14 @@ export interface NeedsCardRef {
   readonly id: string;
   readonly title: string;
 }
-export interface MergeConfirmationDelivery {
+export interface MergeConfirmationDelivery extends AuthorView {
   readonly id: string;
   readonly work_item_id: string;
   readonly work_item_title: string;
   readonly subject: { readonly kind: string; readonly value: string };
   readonly summary: string;
 }
-export interface MergeConfirmationReview {
+export interface MergeConfirmationReview extends AuthorView {
   readonly id: string;
   readonly delivery_id: string;
   readonly work_item_id: string;
@@ -389,7 +404,7 @@ export interface MergeConfirmationView {
     readonly precondition?: string;
   }[];
 }
-export interface NeedsDecision extends DecisionView {
+export interface NeedsDecision extends DecisionView, AuthorView {
   readonly card_id: string | null;
   readonly affected_cards: readonly string[];
   readonly context: string;
@@ -402,7 +417,8 @@ export interface NeedsDecision extends DecisionView {
   readonly merge_confirmation: MergeConfirmationView | null;
 }
 export interface NeedsAction
-  extends Pick<HumanActionView, "id" | "instructions" | "expected_return"> {
+  extends Pick<HumanActionView, "id" | "instructions" | "expected_return">,
+    AuthorView {
   readonly card_id: string | null;
   readonly why: string;
   readonly waited_ms: number | null;
@@ -412,7 +428,7 @@ export interface NeedsAction
 export interface NeedsPage {
   readonly decisions: readonly NeedsDecision[];
   readonly human_actions: readonly NeedsAction[];
-  readonly incidents: readonly {
+  readonly incidents: readonly (AuthorView & {
     readonly id: string;
     readonly role_id: string;
     readonly runtime_state: string;
@@ -421,7 +437,7 @@ export interface NeedsPage {
     readonly last_run?: RunView | null;
     readonly card_id: string | null;
     readonly waited_ms: number | null;
-  }[];
+  })[];
 }
 
 export interface SnapshotData {
@@ -445,6 +461,8 @@ export interface SnapshotData {
   }[];
 }
 export interface RunView {
+  readonly employee_id?: string;
+  readonly launch_profile_ref?: string;
   readonly id: string;
   readonly assignment_id: string;
   readonly status: string;
@@ -457,7 +475,7 @@ export interface RunView {
   readonly finished_at?: string;
   readonly summary: string;
 }
-export interface ExecutionAssignment {
+export interface ExecutionAssignment extends AuthorView {
   readonly id: string;
   readonly role_id: string;
   readonly role_version: number;
@@ -504,6 +522,8 @@ export interface ActivityData {
     role: string;
     created_at: string;
     payload: unknown;
+    employee?: AuthorView["employee"];
+    author_display?: string;
     actor: { kind: string; assignment_id?: string };
   }[];
   readonly next_before: string | null;
@@ -515,7 +535,32 @@ export interface CardReadOptions {
   readonly at?: string;
 }
 
+export interface CardUpdateInput {
+  readonly title: string;
+  readonly goal: string;
+  readonly acceptance_criteria: readonly string[];
+  readonly priority: number;
+}
+
 export interface CardiganClient {
+  updateCard(
+    projectId: string,
+    cardId: string,
+    input: CardUpdateInput,
+    idempotencyKey?: string,
+  ): Promise<void>;
+  cancelCard(
+    projectId: string,
+    cardId: string,
+    reason: string,
+    idempotencyKey?: string,
+  ): Promise<void>;
+  supersedeCard(
+    projectId: string,
+    cardId: string,
+    supersededBy: string,
+    idempotencyKey?: string,
+  ): Promise<void>;
   subscribe(projectId: string, callbacks: StreamCallbacks): () => void;
   activity(projectId: string, filters: ActivityFilter): Promise<ActivityData>;
   snapshot(projectId: string): Promise<SnapshotData>;
@@ -727,6 +772,46 @@ export class HttpCardiganClient implements CardiganClient {
     );
   }
 
+  async updateCard(
+    projectId: string,
+    cardId: string,
+    input: CardUpdateInput,
+    idempotencyKey = crypto.randomUUID(),
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      `cards/${encodeURIComponent(cardId)}/update`,
+      input,
+      idempotencyKey,
+    );
+  }
+  async cancelCard(
+    projectId: string,
+    cardId: string,
+    reason: string,
+    idempotencyKey = crypto.randomUUID(),
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      `cards/${encodeURIComponent(cardId)}/cancel`,
+      { reason },
+      idempotencyKey,
+    );
+  }
+  async supersedeCard(
+    projectId: string,
+    cardId: string,
+    supersededBy: string,
+    idempotencyKey = crypto.randomUUID(),
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      `cards/${encodeURIComponent(cardId)}/supersede`,
+      { superseded_by: supersededBy },
+      idempotencyKey,
+    );
+  }
+
   private async request<T>(
     path: string,
     init: { method?: string; body?: string; idempotencyKey?: string } = {},
@@ -788,4 +873,42 @@ export function describeError(error: unknown): string {
     return "连不上 Workbench 服务，确认 cardigan server 还在运行。";
   }
   return error instanceof Error ? error.message : String(error);
+}
+
+/** Only transport failures and 5xx responses leave a write's outcome uncertain. */
+export function describeWriteError(
+  error: unknown,
+  uncertainMessage = "操作可能已经成功，保留原内容重试不会重复提交。",
+): string {
+  const interrupted =
+    (error instanceof Error || error instanceof DOMException) &&
+    ["TimeoutError", "AbortError", "NetworkError"].includes(error.name);
+  const uncertain =
+    error instanceof ApiError
+      ? error.status >= 500 && error.status < 600
+      : error instanceof TypeError || interrupted;
+  let reason = describeError(error);
+  if (interrupted) {
+    reason = error.name === "TimeoutError" ? "请求超时。" : "请求连接已中断。";
+  } else if (
+    error instanceof ApiError &&
+    error.status !== 401 &&
+    error.status !== 403 &&
+    error.status !== 429 &&
+    !/\p{Script=Han}/u.test(error.message)
+  ) {
+    const reasons: Record<string, string> = {
+      validation_failed: "填写的内容不符合要求，请检查后重试。",
+      illegal_transition: "当前状态不允许此操作，请刷新后确认。",
+      invariant_violation: "此操作不符合业务约束，请刷新后确认。",
+      stale_target: "操作目标已有新版本，请刷新后确认。",
+      not_found: "操作目标不存在，请核对后重试。",
+      idempotency_conflict:
+        "上一次请求已成功，但内容与本次不同，请核对后再提交。",
+    };
+    reason =
+      reasons[error.code] ??
+      (uncertain ? "服务暂时异常。" : "请求被拒绝，请检查填写内容和当前状态。");
+  }
+  return uncertain ? `${reason} ${uncertainMessage}` : reason;
 }

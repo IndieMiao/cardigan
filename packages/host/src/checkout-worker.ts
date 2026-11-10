@@ -2,9 +2,9 @@
 export const CHECKOUT_WORKER = String.raw`
 const { spawn } = require('node:child_process');
 const { createHmac } = require('node:crypto');
-const { mkdir, rm } = require('node:fs/promises');
+const { chmod, lstat, mkdir, readFile, readdir, readlink, realpath, rm, symlink } = require('node:fs/promises');
 const { userInfo } = require('node:os');
-const { join } = require('node:path');
+const { basename, join, resolve } = require('node:path');
 const { createInterface } = require('node:readline');
 const input = createInterface({ input: process.stdin });
 let cancelled = false, current, deadline, totalExpired = false, nonce, authKey;
@@ -31,7 +31,9 @@ input.once('line', line => {
 async function main(p) {
   const checks = [], cleanup_errors = [];
   const runtime = join(p.container, 'runtime'), temporary = join(p.container, 'tmp');
-  const baseEnv = { PATH: p.path, HOME: userInfo().homedir, XDG_RUNTIME_DIR: runtime, TMPDIR: temporary };
+  const aliases = join(p.alias_container, 'u'), aliasRuntime = join(aliases, 'r'), aliasTmp = join(aliases, 't');
+  let ownsAliases = false;
+  const baseEnv = { PATH: p.path, HOME: userInfo().homedir, XDG_RUNTIME_DIR: aliasRuntime, TMPDIR: aliasTmp };
   Object.assign(process.env, baseEnv);
   const environment = { ...baseEnv, ...p.env };
   const gitEnv = { ...baseEnv, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
@@ -82,9 +84,61 @@ async function main(p) {
     return [head, tree, dirty].every(r => r.status === 'passed') &&
       head.output.trim() === p.sha && tree.output.trim() === p.tree && dirty.output.trim() === '';
   }
+  async function coreRecord(pid) {
+    try {
+      const proc = '/proc/' + pid;
+      if (basename(await readlink(proc + '/exe')) !== 'herdr-core') return;
+      if ((await lstat(proc)).uid !== process.getuid()) return;
+      const value = (await readFile(proc + '/environ', 'utf8')).split('\0').find(v => v.startsWith('XDG_RUNTIME_DIR='))?.slice(16);
+      if (!value?.startsWith('/')) return;
+      let path = resolve(value);
+      for (const [alias, target] of [[aliasRuntime, runtime], [aliasTmp, temporary]])
+        if (path === alias || path.startsWith(alias + '/')) path = target + path.slice(alias.length);
+      if (path !== p.container && !path.startsWith(p.container + '/')) return;
+      const stat = await readFile(proc + '/stat', 'utf8');
+      const fields = stat.slice(stat.lastIndexOf(') ') + 2).split(' ');
+      if (fields[0] === 'Z') return;
+      return { pid, start: fields[19] };
+    } catch { return; }
+  }
+  async function cores() {
+    const entries = await readdir('/proc');
+    return (await Promise.all(entries.filter(v => /^[1-9][0-9]*$/.test(v)).map(v => coreRecord(Number(v))))).filter(Boolean);
+  }
+  async function stopCores() {
+    if (process.platform !== 'linux') return;
+    for (let round = 0; round < 3; round++) {
+      const recorded = await cores();
+      if (!recorded.length) {
+        await new Promise(r => setTimeout(r, 150));
+        if (!(await cores()).length) return;
+        continue;
+      }
+      for (const signal of ['SIGTERM', 'SIGKILL']) {
+        for (const record of recorded) {
+          // Revalidate executable, runtime directory and Linux start time before each PID signal.
+          if ((await coreRecord(record.pid))?.start === record.start) {
+            try { process.kill(record.pid, signal); } catch {}
+            emit({ type: 'output', name: 'cleanup', text: 'Stopped check runtime PID ' + record.pid + ' (' + signal + ')\n' });
+          }
+        }
+        await new Promise(r => setTimeout(r, 150));
+      }
+    }
+    if ((await cores()).length) cleanup_errors.push('Check runtime processes did not stop');
+  }
   try {
     await mkdir(runtime, { mode: 0o700 });
     await mkdir(temporary, { mode: 0o700 });
+    for (const target of [runtime, temporary]) {
+      await chmod(target, 0o700);
+      const info = await lstat(target);
+      if (!info.isDirectory() || info.uid !== process.getuid() || (info.mode & 0o7777) !== 0o700 || await realpath(target) !== target)
+        throw new Error('Unsafe private check directory');
+    }
+    await mkdir(aliases, { mode: 0o700 }); ownsAliases = true;
+    await chmod(aliases, 0o700);
+    await symlink(runtime, aliasRuntime); await symlink(temporary, aliasTmp);
     const added = await git(p.repository, ['worktree', 'add', '--detach', '--', p.directory, p.sha]);
     if (added.status !== 'passed') { status = added.status; reason = 'Temporary checkout failed'; }
     else if (!await verify()) { status = 'failed'; reason = 'Checkout HEAD or tree does not match'; }
@@ -101,6 +155,7 @@ async function main(p) {
   } catch { status = 'failed'; reason = 'Checkout execution failed'; }
   finally {
     clearTimeout(deadline);
+    try { await stopCores(); } catch { cleanup_errors.push('Could not inspect check runtime processes'); }
     // Cleanup does not inherit cancellation. Git and recursive deletion run as the owner.
     const removed = await git(p.repository, ['worktree', 'remove', '--force', '--', p.directory], true);
     if (removed.status !== 'passed') cleanup_errors.push('Could not remove temporary worktree registration');
@@ -110,6 +165,8 @@ async function main(p) {
       try { await rm(path, { recursive: true, force: true }); }
       catch { cleanup_errors.push('Could not remove private check runtime files'); }
     }
+    if (ownsAliases) try { await rm(aliases, { recursive: true, force: true }); }
+    catch { cleanup_errors.push('Could not remove private runtime aliases'); }
   }
   emit({ type: 'result', nonce, status, checks, cleanup_errors, ...(reason ? { reason } : {}) });
 }

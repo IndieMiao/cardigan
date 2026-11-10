@@ -2,7 +2,8 @@ import type { CardDetail } from "../api.js";
 import { decisionTitle } from "../decision-labels.js";
 import { isHttpLink } from "../markdown.js";
 import { routeHash } from "../route.js";
-import { nextOwnersLabel, statusLabel } from "../status.js";
+import { statusLabel } from "../status.js";
+import { NextOwners } from "./EmployeeIdentity.js";
 import { EmptyState, IdTag, StatusTag } from "./Foundation.js";
 
 export function CardSidebar({
@@ -35,7 +36,9 @@ export function CardSidebar({
           </div>
           <div>
             <dt>下一步该谁做</dt>
-            <dd>{nextOwnersLabel(card.next_owners)}</dd>
+            <dd>
+              <NextOwners owners={card.next_owners} />
+            </dd>
           </div>
           <div>
             <dt>被什么阻塞</dt>

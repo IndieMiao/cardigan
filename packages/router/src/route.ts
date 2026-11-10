@@ -11,6 +11,7 @@ import type {
 import {
   canStartWork,
   developmentCardTemplate,
+  employeeNameKey,
   PM_ACCEPTANCE_WORK_ITEM_KEY,
 } from "@cardigan/domain";
 import {
@@ -165,8 +166,25 @@ function routeComment(input: RouteInput, draft: Draft): void {
   const entry = entryOf(input);
   const work_item_id =
     entry?.work_item_id ?? payloadString(input.event.payload, "work_item_id");
-  const mentions =
+  const rawMentions =
     entry?.mentions ?? payloadStrings(input.event.payload, "mentions");
+  // Employee status/name may have changed since posting. Unknown names still
+  // behave like ordinary text; only registered roles retain role routing.
+  const mentions =
+    input.snapshot.roles === undefined
+      ? rawMentions
+      : rawMentions.filter((mention) => {
+          const text = mention.replace(/^@/u, "");
+          return (
+            /^[AW]-\d+$/u.test(text) ||
+            input.snapshot.roles?.some((role) => role.role_id === text) ||
+            input.snapshot.employees?.some(
+              (employee) =>
+                employee.status === "active" &&
+                employeeNameKey(employee.name) === employeeNameKey(text),
+            )
+          );
+        });
   const item = itemOf(input, work_item_id as WorkItemId | undefined);
 
   if (item !== undefined) {
@@ -267,6 +285,50 @@ function routeMentions(
         "6.5/explicit assignment or work item",
         `mentioned in a comment on ${subject(input)}`,
       );
+      continue;
+    }
+
+    const employee = input.snapshot.employees?.find(
+      (candidate) =>
+        candidate.status === "active" &&
+        employeeNameKey(candidate.name) === employeeNameKey(text),
+    );
+    if (employee !== undefined) {
+      const candidates = input.snapshot.assignments.filter(
+        (candidate) =>
+          candidate.employee_id === employee.id &&
+          isActive(candidate) &&
+          candidate.scope === "work_item" &&
+          input.snapshot.work_items.some(
+            (item) =>
+              item.id === candidate.work_item_id &&
+              item.card_id === (card_id ?? input.event.card_id),
+          ),
+      );
+      if (candidates.length > 1) {
+        problem(
+          draft,
+          "6.5/several assignments for the employee",
+          "ambiguous_employee_mention",
+          `@${employee.name} 对应多个 active Assignment（${candidates.map((candidate) => candidate.id).join(", ")}）；请明确指定工作项 @W-n，不广播`,
+        );
+      } else {
+        const only = candidates[0];
+        note(
+          input,
+          draft,
+          only === undefined
+            ? recipient.pm_ops()
+            : recipient.assignment(only.id),
+          "comment",
+          only === undefined
+            ? "6.5/no assignment for the employee"
+            : "6.5/single assignment for the employee",
+          only === undefined
+            ? `@${employee.name} 在本卡没有 active Assignment，请 PM Ops 处理`
+            : `@${employee.name} mentioned on ${subject(input)}`,
+        );
+      }
       continue;
     }
 

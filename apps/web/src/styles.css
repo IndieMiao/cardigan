@@ -2626,3 +2626,158 @@ body[data-lightbox="open"] .drawer-overlay {
   color: var(--text-muted);
   font-size: var(--text-sm);
 }
+
+.card-actions {
+  margin-top: var(--gap);
+}
+.card-action-buttons,
+.card-criterion-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--gap);
+}
+.card-actions .danger {
+  color: var(--danger);
+  background: var(--danger-surface);
+}
+.card-action-form {
+  padding: var(--gap);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  font-size: var(--text-body);
+}
+.card-action-form fieldset {
+  display: grid;
+  gap: var(--gap);
+  min-width: 0;
+  border: 0;
+  padding: 0;
+  margin: 0;
+}
+.card-action-form label {
+  display: grid;
+  gap: calc(var(--gap) / 2);
+  flex: 1;
+  min-width: 0;
+}
+.card-action-form textarea {
+  resize: vertical;
+}
+.card-criteria-editor legend {
+  padding: var(--gap) 0;
+}
+
+/* P2-V V5: shared employee identity, using the existing theme palette. */
+.employee-identity {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  vertical-align: middle;
+  color: var(--text);
+  font-size: var(--text-body);
+  text-align: left;
+}
+.employee-trigger {
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+}
+.employee-trigger:hover {
+  background: var(--surface-muted);
+  color: var(--text);
+}
+.employee-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  overflow: hidden;
+  border-radius: 50%;
+  color: var(--employee-color, var(--text-muted));
+  background: color-mix(
+    in srgb,
+    var(--employee-color, var(--text-muted)) 14%,
+    var(--surface)
+  );
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+.employee-color-0 {
+  --employee-color: var(--accent);
+}
+.employee-color-1 {
+  --employee-color: var(--status-progress);
+}
+.employee-color-2 {
+  --employee-color: var(--status-review);
+}
+.employee-color-3 {
+  --employee-color: var(--status-done);
+}
+.employee-color-4 {
+  --employee-color: var(--status-wait);
+}
+.employee-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.employee-label {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.employee-title {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+.employee-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  width: 280px;
+  max-width: calc(100vw - 24px);
+  padding: 12px;
+  font-size: var(--text-body);
+  overflow-wrap: anywhere;
+  z-index: 210;
+}
+.employee-card :where(p) {
+  margin: 0;
+  white-space: pre-wrap;
+}
+.employee-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.employee-overflow {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+.card-tile-link {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: inherit;
+  text-decoration: none;
+}
+
+.employee-owners {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+.system-line .employee-identity {
+  font-size: var(--text-sm);
+}

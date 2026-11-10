@@ -16,6 +16,7 @@ import { describe, expect, test } from "vitest";
 import {
   AGENT_PROTOCOL,
   type AssignmentRoleInput,
+  type CompileAssignmentInput,
   type CompiledAssignmentLaunch,
   compileAssignmentLaunch,
   corePromptFor,
@@ -108,6 +109,7 @@ function compile(
   profile: string,
   first: string,
   roleId: DefaultRoleId = "coder",
+  employee?: CompileAssignmentInput["employee"],
 ): CompiledAssignmentLaunch {
   return compileAssignmentLaunch({
     assignment: {
@@ -117,6 +119,7 @@ function compile(
       work_item_id: "W-7",
       project_id: "p-demo",
     },
+    ...(employee === undefined ? {} : { employee }),
     role: roleFor(harness, profile, roleId),
     launch: launchConfig,
     mcp: { url: MCP_URL },
@@ -879,5 +882,112 @@ describe("provider credentials leave the run directory", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+test.each([null, "codex-agent"])(
+  "employee profile %s selects the compiler/CLI while preserving role permissions",
+  (profile) => {
+    const compiled = compileAssignmentLaunch({
+      assignment: { assignment_id: "A-12", run_id: "R-5" },
+      role: roleFor("pi", "pi-agent"),
+      employee: { launch_profile_ref: profile },
+      launch: launchConfig,
+      mcp: { url: MCP_URL },
+      run_dir: RUN_DIR,
+      work_dir: WORK_DIR,
+      first_prompt: "Fixture",
+      secrets,
+    });
+    expect(compiled.profile).toBe(profile ?? "pi-agent");
+    expect(compiled.harness).toBe(profile ? "codex" : "pi");
+    expect(compiled.command).toBe(profile ? "codex" : "pi");
+    expect(compiled.mcp_tool_names).toEqual(
+      TOOLS.map((t) => `mcp__card__${t}`),
+    );
+    expect(
+      compiled.files.find((f) => f.path.endsWith("/core.md"))?.content,
+    ).toBe(corePromptFor("coder"));
+  },
+);
+
+describe.each([
+  ["claude-code", "claude-agent"],
+  ["codex", "codex-agent"],
+  ["pi", "pi-agent"],
+] as const)("employee identity: %s", (harness, profile) => {
+  const identity = {
+    name: "诸葛亮 Mary",
+    title: "开发工程师",
+    bio: "负责实现和测试。",
+  };
+  const readPrompt = (result: CompiledAssignmentLaunch, name: string) =>
+    result.files.find((file) => file.path === join(RUN_DIR, name))?.content;
+
+  test("both Core Prompt and first message contain identity without changing launch options", () => {
+    const plain = compile(harness, profile, first);
+    const named = compile(harness, profile, first, "coder", {
+      launch_profile_ref: null,
+      identity,
+    });
+    for (const filename of ["core.md", "first.md"]) {
+      const prompt = readPrompt(named, filename);
+      expect(prompt).toContain('你是 "诸葛亮 Mary"，职位 "开发工程师"');
+      expect(prompt).toContain('简介："负责实现和测试。"');
+      expect(prompt).toContain("请在评论和交付摘要里用上述员工名字称呼自己");
+    }
+    expect(readPrompt(named, "core.md")).toContain('显示名："诸葛亮 Mary"');
+    expect(readPrompt(named, "first.md")).toContain(first);
+    expect(named.args).toEqual(plain.args);
+    expect(named.env).toEqual(plain.env);
+    expect(readPrompt(plain, "core.md")).toBe(corePromptFor("coder"));
+    expect(readPrompt(plain, "first.md")).toBe(`${first}\n`);
+  });
+
+  test("optional bio and shell/Markdown-looking text remain quoted data only", () => {
+    const name = '`name` $(touch nope) "quoted"';
+    const result = compile(harness, profile, first, "coder", {
+      launch_profile_ref: null,
+      identity: { name, title: "## title", bio: "" },
+    });
+    expect(readPrompt(result, "core.md")).toContain(
+      `显示名：${JSON.stringify(name)}`,
+    );
+    expect(readPrompt(result, "core.md")).not.toContain("简介：");
+    expect(
+      result.files.find((file) => file.path.endsWith("launch.sh"))?.content,
+    ).not.toContain(name);
+  });
+
+  test.each([
+    { name: "x".repeat(41) },
+    { title: "x".repeat(41) },
+    { bio: "x".repeat(201) },
+    { name: " " },
+    { title: " " },
+    { name: "a\nb" },
+    { title: "a\u0000b" },
+    { bio: "a\u202eb" },
+    { bio: "a\u2028b" },
+  ])("rejects invalid persisted identity before compiling (%j)", (invalid) => {
+    expect(() =>
+      compile(harness, profile, first, "coder", {
+        launch_profile_ref: null,
+        identity: { ...identity, ...invalid },
+      }),
+    ).toThrow();
+  });
+
+  test("Unicode lengths count characters, not UTF-16 units", () => {
+    expect(() =>
+      compile(harness, profile, first, "coder", {
+        launch_profile_ref: null,
+        identity: {
+          name: "😀".repeat(40),
+          title: "😀".repeat(40),
+          bio: "😀".repeat(200),
+        },
+      }),
+    ).not.toThrow();
   });
 });

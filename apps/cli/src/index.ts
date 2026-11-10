@@ -3,6 +3,7 @@ import { LaunchConfigError } from "@cardigan/roles";
 import { runAdminCommand } from "./admin.js";
 import { runAssignmentCommand } from "./assignment.js";
 import { runContentCommand } from "./content.js";
+import { runEmployeeCommand } from "./employee.js";
 import { CliError, EXIT } from "./errors.js";
 import { attentionCommand, inboxCommand } from "./inbox.js";
 import type { CliIo } from "./io.js";
@@ -47,6 +48,7 @@ export { runWorktreeCommand } from "./worktree.js";
 
 const TOP_LEVEL_USAGE = [
   "cardigan — 卡片式多 Agent 协作开发系统",
+  "  employee add|list|update|deactivate|activate  管理全局员工",
   "",
   "用法：cardigan <命令>",
   "",
@@ -208,6 +210,7 @@ export async function main(
     if (command === "launch") {
       return await runLaunchCommand(rest, io);
     }
+    if (command === "employee") return await runEmployeeCommand(rest, io);
     if (command === "init" || command === "project" || command === "role") {
       return await runAdminCommand([command, ...rest], io);
     }

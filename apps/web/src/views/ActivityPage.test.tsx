@@ -52,7 +52,9 @@ test("activity is collapsed, describes time/actor/action/card and escapes the pa
     />,
   );
   await screen.findByText("下达了指令");
-  expect(document.querySelector("summary")?.textContent).toContain("PM");
+  expect(document.querySelector("summary")?.textContent).toContain(
+    "未命名的 pm",
+  );
   expect(document.querySelector("summary")?.textContent).toContain("准备发布");
   expect(container.querySelector(".activity-list")).toBeTruthy();
   expect(container.querySelector("details")?.open).toBe(false);
