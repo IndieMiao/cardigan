@@ -167,18 +167,56 @@ test("pasted images are uploaded as evidence on the new comment", async () => {
   fireEvent.paste(input, { clipboardData: { files: [file] } });
   expect(screen.getByText(/已捕获 1 张图片/u)).toBeTruthy();
   expect((input as HTMLTextAreaElement).rows).toBe(6);
+  fireEvent.change(screen.getByLabelText("screenshot.png 的说明"), {
+    target: { value: "修复后的界面" },
+  });
 
   fireEvent.change(input, { target: { value: "贴一张图" } });
   fireEvent.click(screen.getByRole("button", { name: "发表评论" }));
 
   await waitFor(() => expect(uploads).toHaveLength(1));
   expect(uploads[0]).toMatchObject({
+    original_filename: "screenshot.png",
+    note: "修复后的界面",
     mime: "image/png",
     kind: "evidence",
     attach_to: { kind: "timeline_entry", id: "C-1#43" },
   });
   expect(uploads[0]?.file).toBe(btoa("png-bytes"));
   expect(screen.queryByText(/已捕获/u)).toBeNull();
+});
+
+test("invalid attachment notes are rejected before posting and a 200-character Unicode note can be sent", async () => {
+  const addComment = vi.fn(async () => ({
+    id: "C-1#43",
+    body: "Evidence",
+    created_at: "2026-01-01",
+  }));
+  const uploadAttachment = vi.fn(async () => ({ id: "attachment-1" }));
+  render(
+    <CommentBox
+      client={fakeClient({ addComment, uploadAttachment })}
+      projectId="p-1"
+      cardId="C-1"
+    />,
+  );
+  const input = screen.getByLabelText("评论正文");
+  fireEvent.paste(input, {
+    clipboardData: {
+      files: [new File(["png"], "image.png", { type: "image/png" })],
+    },
+  });
+  fireEvent.change(input, { target: { value: "Evidence" } });
+  const note = screen.getByLabelText("image.png 的说明");
+  for (const value of ["😀".repeat(201), "bad\u202e"]) {
+    fireEvent.change(note, { target: { value } });
+    fireEvent.click(screen.getByRole("button", { name: "发表评论" }));
+    expect(screen.getByRole("alert").textContent).toContain("最多 200 字符");
+    expect(addComment).not.toHaveBeenCalled();
+  }
+  fireEvent.change(note, { target: { value: "😀".repeat(200) } });
+  fireEvent.click(screen.getByRole("button", { name: "发表评论" }));
+  await waitFor(() => expect(uploadAttachment).toHaveBeenCalledOnce());
 });
 
 test("a rejected comment keeps the text and explains itself", async () => {

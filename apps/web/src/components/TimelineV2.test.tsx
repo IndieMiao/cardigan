@@ -221,6 +221,65 @@ test("U6b structural conclusions retain their result and share the comment heade
   }
 });
 
+test("attachment names and notes appear in comments and upload rows as plain text, with legacy fallback", () => {
+  const named = attachment({
+    id: "attachment-1",
+    original_filename: "截图.png",
+    note: "<script>plain text</script>",
+    attach_to: { kind: "timeline_entry", id: "comment" },
+  });
+  const document = attachment({
+    id: "attachment-2",
+    original_filename: "结果.txt",
+    note: "测试日志",
+    mime: "text/plain",
+    inline: false,
+  });
+  const legacy = attachment({
+    id: "attachment-3",
+    attach_to: { kind: "timeline_entry", id: "comment" },
+  });
+  const view = show(
+    [
+      timelineEntry({ id: "comment", type: "comment", body: "附件结果" }),
+      timelineEntry({
+        id: "upload",
+        event_seq: 2,
+        type: "system",
+        event_type: "attachment_uploaded",
+        attachment_id: named.id,
+        body: "Attached attachment-1",
+      }),
+      timelineEntry({
+        id: "upload-text",
+        event_seq: 3,
+        type: "system",
+        event_type: "attachment_uploaded",
+        attachment_id: document.id,
+        body: "Attached attachment-2",
+      }),
+    ],
+    [named, document, legacy],
+  );
+  const attached = view.container.querySelector(".attachments") as HTMLElement;
+  expect(within(attached).getByText("截图.png")).toBeTruthy();
+  expect(
+    within(attached).getByText("<script>plain text</script>"),
+  ).toBeTruthy();
+  expect(within(attached).getByText("attachment-3")).toBeTruthy();
+  const rows = view.container.querySelectorAll(".system-line");
+  expect(
+    [...rows].some(
+      (row) =>
+        row.textContent?.includes("截图.png") &&
+        row.textContent.includes("<script>plain text</script>"),
+    ),
+  ).toBe(true);
+  expect(screen.getByRole("link", { name: "下载 结果.txt" })).toBeTruthy();
+  expect(screen.getByText("测试日志")).toBeTruthy();
+  expect(view.container.querySelector("script")).toBeNull();
+});
+
 test("U6b system rows show the authenticated actor and exact upload thumbnail; previews exclude SVG and close to their trigger", async () => {
   const file = attachment({ id: "F-1" }),
     svg = attachment({ id: "F-2", mime: "image/svg+xml", inline: true });

@@ -323,6 +323,8 @@ test("attachment upload shares MCP storage, verifies digest and retains an unref
     digest = createHash("sha256").update(file).digest("hex");
   const p = {
     file: file.toString("base64"),
+    original_filename: "/browser/证据.txt",
+    note: "测试结果",
     mime: "text/plain",
     kind: "evidence",
     attach_to: { kind: "timeline_entry", id: comment.body.id },
@@ -340,8 +342,26 @@ test("attachment upload shares MCP storage, verifies digest and retains an unref
   expect(snapshot()).toBe(committed);
   expect(uploaded).toMatchObject({
     status: 200,
-    body: { sha256: digest, uploaded_by: "human" },
+    body: {
+      sha256: digest,
+      uploaded_by: "human",
+      original_filename: "证据.txt",
+      note: "测试结果",
+      storage_path: `attachments/${digest}`,
+    },
   });
+  const detail = await fetch(web.url + path(`/cards/${s.card.id}`), {
+    headers: { cookie },
+  });
+  expect((await detail.json()).attachments).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        id: uploaded.body.id,
+        original_filename: "证据.txt",
+        note: "测试结果",
+      }),
+    ]),
+  );
   const stored = join(s.dataDir, "attachments", digest);
   expect(readFileSync(stored)).toEqual(file);
   expect(statSync(stored).mode & 0o777).toBe(0o600);
@@ -368,6 +388,35 @@ test("attachment upload shares MCP storage, verifies digest and retains an unref
   expect(readFileSync(join(s.dataDir, "attachments", otherDigest))).toEqual(
     other,
   );
+});
+
+test("attachment metadata is optional and rejects invalid names and notes without records", async () => {
+  const comment = await request(cardPath("comments"), { body: "Target" });
+  const p = {
+    file: Buffer.from("metadata").toString("base64"),
+    mime: "text/plain",
+    kind: "evidence",
+    attach_to: { kind: "timeline_entry", id: comment.body.id },
+  };
+  const before = snapshot();
+  for (const metadata of [
+    { original_filename: "a".repeat(201) },
+    { original_filename: "bad\0.txt" },
+    { note: "a".repeat(201) },
+    { note: "line\nline" },
+  ]) {
+    expect(
+      await request(cardPath("attachments"), { ...p, ...metadata }),
+    ).toMatchObject({
+      status: 400,
+      body: { error: { code: "validation_failed" } },
+    });
+    expect(snapshot()).toBe(before);
+  }
+  const legacy = await request(cardPath("attachments"), p);
+  expect(legacy.status).toBe(200);
+  expect(legacy.body).not.toHaveProperty("original_filename");
+  expect(legacy.body).not.toHaveProperty("note");
 });
 
 test("attachment boundary rejects noncanonical base64 and files over 10 MiB", async () => {

@@ -1,5 +1,5 @@
 import { open } from "node:fs/promises";
-import { extname, resolve } from "node:path";
+import { basename, extname, resolve } from "node:path";
 import {
   type CommandEffect,
   markCardDone,
@@ -30,10 +30,11 @@ import type { CliIo } from "./io.js";
 const USAGE = [
   "用法：",
   "  cardigan card done <C-n> --result <文字> [--file <证据>]...",
-  "  cardigan comment add <C-n> (--text <内容> | --text-file <路径>) [--file <路径>]...",
-  "  cardigan attachment add <C-n> --file <路径> [--kind evidence|artifact] [--basis <q(n)>] [--entry <C-n#k>]",
+  "  cardigan comment add <C-n> (--text <内容> | --text-file <路径>) [--file <路径>]... [--note <说明>]",
+  "  cardigan attachment add <C-n> --file <路径> [--note <说明>] [--kind evidence|artifact] [--basis <q(n)>] [--entry <C-n#k>]",
   "",
   "评论正文二选一，支持 Markdown；--file 可重复，附件均为 evidence。",
+  "--note 为本次所有附件的一句话说明，最多 200 字符；文件名自动取本地文件名。",
   "单独上传默认 evidence；artifact 必须带 --basis（拍板编号请加引号）。",
   "省略 --entry 时创建一条“上传附件”评论；指定时挂到当前卡片的已有条目。",
   "附件每个不超过 10 MiB，按扩展名识别：png、jpg/jpeg、gif、webp、avif、svg、html/htm、md/markdown、txt/log、json、pdf。",
@@ -58,8 +59,8 @@ function parseArgs(command: string, args: readonly string[]) {
     ...(command === "card_done"
       ? ["result"]
       : command === "comment"
-        ? ["text", "text-file"]
-        : ["kind", "basis", "entry"]),
+        ? ["text", "text-file", "note"]
+        : ["kind", "basis", "entry", "note"]),
   ];
   for (let i = 1; i < args.length; i += 1) {
     const token = args[i] as string;
@@ -92,6 +93,8 @@ function parseArgs(command: string, args: readonly string[]) {
     usage("必须二选一：--text 或 --text-file");
   if (command === "attachment" && files.length !== 1)
     usage("attachment add 必须提供一个 --file；多个文件请用 comment add");
+  if (flags.note !== undefined && files.length === 0)
+    usage("--note 需要同时提供 --file");
   const kind = flags.kind ?? "evidence";
   if (kind !== "evidence" && kind !== "artifact")
     usage("--kind 只接受 evidence、artifact");
@@ -147,6 +150,12 @@ const ERROR_MESSAGES: Readonly<Record<string, string>> = {
   "Attachment basis was not found": "附件依据的拍板在当前项目中不存在",
   "Attachment target was not found": "附件挂载条目在当前项目中不存在",
   "Attachment target belongs to another card": "附件挂载条目属于另一张卡片",
+  "original_filename must be at most 200 characters":
+    "附件文件名不能超过 200 字符",
+  "note must be at most 200 characters": "附件说明不能超过 200 字符",
+  "original_filename must not contain control characters":
+    "附件文件名不能包含控制字符",
+  "note must not contain control characters": "附件说明不能包含控制字符",
 };
 
 function must<T>(result: Result<T>): T {
@@ -188,6 +197,7 @@ export async function runContentCommand(
     if (!body.trim()) usage("评论正文不能为空");
     const prepared: {
       mime: string;
+      original_filename: string;
       receipt: Awaited<ReturnType<typeof prepareAttachmentFile>>;
     }[] = [];
     for (const path of p.files) {
@@ -198,6 +208,7 @@ export async function runContentCommand(
       try {
         prepared.push({
           mime,
+          original_filename: basename(path),
           receipt: await prepareAttachmentFile(
             content.toString("base64"),
             dataDir,
@@ -237,7 +248,7 @@ export async function runContentCommand(
         lines.push(`已发表评论 ${entry}`);
       }
       const attachments = [];
-      for (const { mime, receipt } of prepared) {
+      for (const { mime, original_filename, receipt } of prepared) {
         const attachment = save(
           uploadAttachment(
             loadCommandState(tx, project),
@@ -245,6 +256,8 @@ export async function runContentCommand(
             {
               card_id: p.cardId,
               mime,
+              original_filename,
+              ...(p.flags.note === undefined ? {} : { note: p.flags.note }),
               kind: p.kind,
               attach_to: { kind: "timeline_entry", id: entry },
               ...(p.basis === undefined ? {} : { basis: p.basis }),

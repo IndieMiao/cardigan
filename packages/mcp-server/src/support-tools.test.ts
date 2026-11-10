@@ -172,12 +172,32 @@ afterEach(async () => {
   vi.unstubAllEnvs();
 });
 
+test("attachment metadata validation is shared with domain and rejects without records", async () => {
+  const before = counts();
+  for (const metadata of [
+    { original_filename: "a".repeat(201) },
+    { original_filename: "bad\n/name.txt" },
+    { note: "a".repeat(201) },
+    { note: "line\nline" },
+  ]) {
+    expect(
+      code(await call(coder, "upload_attachment", { ...upload, ...metadata })),
+    ).toBe("validation_failed");
+    expect(counts()).toEqual(before);
+  }
+  const legacy = await ok<Attachment>(coder, "upload_attachment", upload);
+  expect(legacy).not.toHaveProperty("original_filename");
+  expect(legacy).not.toHaveProperty("note");
+});
+
 test("legacy PM tools exclude Ops instructions; concurrent attachment uploads and replays commit once", async () => {
   expect((await office.listTools()).tools.map((t) => t.name).sort()).toEqual(
     toolNames.filter((name) => name !== "issue_instruction").sort(),
   );
   const args = {
     ...upload,
+    original_filename: "C:\\fakepath\\证据.txt",
+    note: "操作结果",
     sha256: sha256(content),
     storage_path: "ignored",
     uploaded_by: "human",
@@ -189,12 +209,17 @@ test("legacy PM tools exclude Ops instructions; concurrent attachment uploads an
     ),
   );
   expect(first).toMatchObject({
+    original_filename: "证据.txt",
+    note: "操作结果",
     sha256: sha256(content),
     size: content.length,
     uploaded_by: "assignment:A-1",
     storage_path: `attachments/${sha256(content)}`,
   });
   expect(second).toEqual(first);
+  expect(
+    store.uow.read((tx) => tx.attachments.get(project_id, first.id)),
+  ).toEqual(first);
   const writes = vi.mocked(blobs.put).mock.calls.length;
   expect(await ok(coder, "upload_attachment", args, "upload-once")).toEqual(
     first,
