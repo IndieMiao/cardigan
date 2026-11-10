@@ -137,3 +137,17 @@ test("D12 allows a human at Workbench or local CLI, never PM or Agent proxy conf
     "PM Office、PM Ops 和其他 Agent 不能代拍或转录",
   );
 });
+
+test("C-37 criterion 11 makes PM explain human handoffs and complete authorized process work itself", () => {
+  const prompt = corePromptFor("pm");
+  for (const phrase of [
+    "title（一句话标题）",
+    "summary（这是什么）",
+    "why_human（为什么必须由人做）",
+    "instructions（点哪里或执行什么命令）",
+    "expected_outcome（做完会怎样）",
+    "标题不要照抄接口名",
+    "纯流程事项在现有权限内能完成的自己处理并记录结果，不交给人",
+  ])
+    expect(prompt).toContain(phrase);
+});

@@ -562,13 +562,38 @@ function HumanAction({
       </header>
       <h3 className="needs-question">
         {item.triage === "host" ? "主机操作：" : ""}
-        {item.triage_rationale || item.why}
+        {item.handoff?.title ?? item.triage_rationale ?? item.why}
       </h3>
-      <details>
-        <summary>操作步骤与期望返回</summary>
-        <Markdown body={item.instructions} />
-        <p>期望返回：{item.expected_return}</p>
-      </details>
+      {item.handoff ? (
+        <section aria-label="项目经理说明">
+          <p className="hint">
+            项目经理已改写 · <Time value={item.handoff.rewritten_at} />
+          </p>
+          <h4>这是什么</h4>
+          <Markdown body={item.handoff.summary} />
+          <h4>为什么需要你</h4>
+          <Markdown body={item.handoff.why_human} />
+          <h4>怎么做</h4>
+          <Markdown body={item.instructions} />
+          <h4>做完会怎样</h4>
+          <Markdown body={item.handoff.expected_outcome} />
+          <p>完成后请回传：{item.expected_return}</p>
+        </section>
+      ) : (
+        <details>
+          <summary>操作步骤与期望返回</summary>
+          <Markdown body={item.instructions} />
+          <p>期望返回：{item.expected_return}</p>
+        </details>
+      )}
+      {item.original_request && (
+        <details>
+          <summary>查看改写前的内容</summary>
+          <Markdown body={item.original_request.instructions} />
+          <p>原请求原因：{item.original_request.why_human}</p>
+          <p>原期望返回：{item.original_request.expected_return}</p>
+        </details>
+      )}
       <form
         onSubmit={(e) => {
           e.preventDefault();

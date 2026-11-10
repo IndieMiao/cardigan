@@ -742,6 +742,10 @@ test("P07 §6.4/§7.3: decisions and human actions appear in needs-you, Office g
     human_action_id: action.id,
     disposition: "human",
     rationale: "The human must inspect the switch",
+    title: "Check the release switch",
+    summary: "The release needs a physical switch check.",
+    why_human: "Only you can access the physical switch.",
+    expected_outcome: "The release can continue after the check.",
     instructions: "Inspect the release switch",
     expected_return: "Result",
   });

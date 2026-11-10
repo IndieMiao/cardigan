@@ -461,7 +461,7 @@ Standing Assignment (scope=project): PM Office, PM Ops — not tied to a WorkIte
 - `id`、`key`、`card_id?`、`requested_by`
 - 内容：`instructions`（要执行的命令或操作，写完整）、`why_human`（为什么只能你做：权限、账号、实体设备等）、`expected_return`（做完回传什么）、`due?`
 - 影响：`blocked_work_items[]`
-- `triage?`：`pm_ops | host | human`。新请求先交有分拣工具的活跃 PM Ops，否则直接交人；旧记录缺失视为 human。`triage_rationale?` 保存分拣依据，原请求留在历史事件中。
+- `triage?`：`pm_ops | host | human`。新请求先交有分拣工具的活跃 PM Ops，否则直接交人；旧记录缺失视为 human。`triage_rationale?` 保存分拣依据。`handoff?` 保存 PM 的白话交接内容：`title`（单行、最多 80 字）、`summary`（这是什么）、`why_human`（为什么必须由人做）、`instructions`（点哪里或执行什么命令）、`expected_outcome`（做完会怎样）、`expected_return`（回传什么），以及服务端生成的 `rewritten_by/rewritten_at`。原始请求的 instructions/why_human/expected_return 不覆盖；旧记录缺少 handoff 时仍可读。
 - `status`：`open` | `done` | `cancelled`；`result?`：`{text, attachments[], at}`
 - 来源：0.2 回溯中，需要你介入的门铃有一半是只有你能做的操作，而不是拍板
 
@@ -568,7 +568,7 @@ todo / ready / in_progress / failed / blocked / waiting_decision --cancel--> can
 
 - PM Ops 用 `resolve_delegated_decision({decision_id, option, rationale, escalate?})` 处理尚交给后台的 open/provisional 拍板。每次重查当前授权、类别、身份与状态；非空理由必填，服务端生成 `resolution.via=delegated`、`resolved_by`、`proxy_authority`（项目、类别、默认规则或授权事件）。审核上限复用原专用状态迁移和额度逻辑；其他拍板复用解决、解除阻塞和排恢复 Run 的路径。完成验收仍检查绑定版本，拒绝作者自审。
 - `escalate=true` 保留原拍板编号与阻塞，追加理由并转回 human。后台暂停或释放后，若没有其他有能力处理该事项的活跃后台，同事务转交剩余拍板和待分拣操作；不把旧角色自动升级或扩大 Token 权限。
-- HumanAction 仍使用 open/done/cancelled 状态机，分拣是独立字段。PM Ops 用 `triage_human_action`：在自身已有权限内实际完成的记 done 和结果，沿用最后一个阻塞解除后的恢复逻辑；需要主机权限的记 host，需要人亲自操作的记 human，两者必须给出改写后的 `instructions`、`expected_return` 和理由。交给人的事项不允许 PM 再自行标完成，分拣本身不授予 Git、凭据或主机执行权限。
+- HumanAction 仍使用 open/done/cancelled 状态机，分拣是独立字段。PM Ops 用 `triage_human_action`：在自身已有权限内实际完成的记 done 和结果，沿用最后一个阻塞解除后的恢复逻辑；需要主机权限的记 host，需要人亲自操作的记 human，两者必须一次性给出完整白话标题、事项说明、人必须参与的原因、具体步骤、完成后的影响、回传要求和分拣理由；缺项或空白由 domain 拒绝，写入 handoff 及审计事件。PM 可以补充或改写仍 open 的交接（包括旧记录），不会覆盖请求字段；已交给人的事项不允许 PM 再自行标完成，done/cancelled 不得改写。纯流程工作在现有权限内实际做完后可直接记 done 和结果，无需给人编写交接说明。分拣本身不授予 Git、凭据或主机执行权限；按 q(70)，过期合并确认由 C-47 的系统作废流程负责，PM 仍不代拍合并确认。
 - 四类高风险确认按 Actor 身份校验：只接受 `human`，Workbench 与本机 CLI 同等有效；PM Office、PM Ops、其他 Agent 及 system 不能代拍，客户端参数不能伪造 human 身份。未授权的需求范围变化仍要求 human 身份及可信 Workbench 来源。人可在非高风险、非合并确认拍板上勾选 `delegate_future`，在同一事务记录选择和该类别授权。
 
 **Assignment**
@@ -962,7 +962,7 @@ M5.4 的 Needs You 使用 `#/p/<项目>/needs-you`：运行异常、阻塞/风�
 
 C-29：合并确认满足除超时以外的全部代批条件时，Needs You 和卡片时间线的确认条目显示“将于 HH:MM 自动合并（偏好设置：N 分钟）”；Needs You 每分钟刷新剩余分钟数。到期只是允许系统尝试，阻塞或检查仍可能延后实际合并。自动确认后的条目显示“自动合并（代批）”，与 human 确认区分，事件与决策保留授权依据。
 
-C-37：交给人的普通拍板增加“此类问题以后由 PM 代拍”勾选，选择和授权一次提交；四类高风险及合并确认不提供勾选，服务端同样拒绝。等待 PM 分拣的操作不进 Needs You；PM 转交的 host 操作显示“主机操作”及改写后的步骤、回传要求和分拣理由。看板中的 PM 待办不计入“需要我”，分别显示“等待 PM 代拍／分拣”。
+C-37：交给人的普通拍板增加“此类问题以后由 PM 代拍”勾选，选择和授权一次提交；四类高风险及合并确认不提供勾选，服务端同样拒绝。等待 PM 分拣的操作不进 Needs You；PM 转交的 host 操作显示“主机操作”。交人的事项使用 PM 写的一句话标题，展开显示“这是什么、为什么需要你、怎么做、做完会怎样”和回传要求，标记“项目经理已改写”及时间；不再用截断的技术原因作新交接的标题。改写前的内容在折叠区可查看，原始请求字段和历史时间线均保留；旧记录没有 handoff 时沿用原展示。CLI needs-you 同样展示白话交接与改写标记。看板中的 PM 待办不计入“需要我”，分别显示“等待 PM 代拍／分拣”。
 
 侧栏增加 `#/p/<项目>/decision-history` 拍板记录页，查询已解决的拍板，包含后来被取代或撤回但有已解决事件的历史决定，不提供撤销。`GET /api/projects/:id/decision-history` 支持决策人 `human | pm | system`、类别、卡片及起止时间筛选，按解决时间倒序显示选项、影响、理由、记录人和授权依据；Office 转录计为人，`resolved_by=system` 的超时自动合并计为系统代批。筛选同步到 URL，沿用 Workbench 登录与项目隔离。
 
@@ -1099,7 +1099,7 @@ Agent 只通过 Card MCP 读写，看板界面只服务你一个人，所以第�
 | `assign(work_item_id, role_id, machine_id?, employee_id?)` | PM | 登记指派（employee_id 可填 E-n 或在职名字，省略按 §4.3 挑选），Token 待主机侧签发；Agent/PM 经 MCP 指派后系统为该 Assignment 排 `initial` Run |
 | `project_snapshot()` / `list_needs_you()` | PM | 项目快照和待你处理的事项；PM Ops 响应另含 pm_queue，列出待代拍与待分拣详情 |
 | `resolve_delegated_decision(decision_id, option, rationale, escalate?)` | 仅 PM Ops | 重查类别授权后代拍，或附理由升级给人；系统生成授权依据 |
-| `triage_human_action(human_action_id, disposition, rationale, instructions?, expected_return?)` | 仅 PM Ops | 记录权限内已完成的操作，或改写步骤并转为 host/human |
+| `triage_human_action(human_action_id, disposition, rationale, title?, summary?, why_human?, instructions?, expected_outcome?, expected_return?)` | 仅 PM Ops | 记录权限内已完成的操作，或提交完整白话交接并转为 host/human（后两种 disposition 的六个文案字段都必填） |
 | `record_decision(decision_id, option, rationale, raw_quote, via_chain[]?, batch?)` | 仅 PM Office | 记录你在对话中做出的决定，`raw_quote` 为你的原话 |
 
 你在 Web 界面上的操作走 Workbench Web API，不经过 MCP。`recordDecision` 允许人记录 `decider=human` 的决策，四类高风险只要求 human 身份，Workbench 与本机 CLI 同等有效；未授权的需求范围变化仍要求可信 Workbench 来源。人的确认沿用 `via=needs_you` 并保留非空原话（CLI 记录明确的命令确认）；MCP 的 `record_decision` 仍限 PM Office。`issue_instruction` 同时校验角色/Token 工具许可和 Assignment 的持久模式 `standing_mode=ops`；Office 和工作项 Assignment 不显示也不能调用。工作项必须属于该卡、未 accepted/passed/cancelled，卡片不可已关闭或等待合并。

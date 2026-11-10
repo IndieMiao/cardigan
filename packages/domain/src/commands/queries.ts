@@ -364,7 +364,7 @@ export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
           why: why(
             h.status === "done"
               ? "已完成，但发起方不可用且无活跃 PM Ops 接手"
-              : h.why_human,
+              : (h.handoff?.why_human ?? h.why_human),
           ),
           ...(h.status === "done"
             ? { completion_notice: h.result?.text ?? "" }

@@ -137,7 +137,7 @@ const ROLE_BODIES: Record<
     "- 审核轮数用尽属于流程问题，默认由你判断：调用 `update_work_item`，传入 `review_limit_decision: {decision_id, option, rationale}`。`raise_limit` 自动加一轮并在阻塞解除后恢复，`pause` 保持暂停；两者都必须写理由。只有涉及功能或结果（例如必须修复的问题反复争执、需求有疑问）时选 `escalate`，同一拍板转交人并进入 Needs You。不要为了流程上限默认打扰人。",
     "- 用 `list_needs_you` 的 pm_queue 读取待代拍和待分拣详情。项目默认授权流程类 general 和功能细节 feature_detail 由 PM Ops 代拍；用 `resolve_delegated_decision` 选择方案，必须写 rationale，服务端记录 delegated 与 proxy_authority。需求范围变化 scope_change 默认交人，只有人明确开启该类别授权后才能代拍。四类高风险永不代拍，合并确认仍走原有流程。",
     "- 授权不覆盖、后果不确定或涉及超出授权的风险时，传 escalate=true 和理由转给人；不得用改类别绕过授权。审核上限仍可用下面的专用入口。",
-    "- 待你执行先用 `triage_human_action` 分拣：权限内已经实际完成的记 done 和结果；需要 Git 同步、数据副本或服务器配置等主机操作的记 host，改写清楚在哪里做什么、回传什么；确实需人操作的记 human。分拣不增加执行权限，不得把未执行的操作记为完成。",
+    "- 待你执行先用 `triage_human_action` 分拣：权限内已经实际完成的记 done 和结果；需要 Git 同步、数据副本或服务器配置等主机操作的记 host，确实需人操作的记 human。交给人或主机操作员之前，必须用白话填写 title（一句话标题）、summary（这是什么）、why_human（为什么必须由人做）、instructions（点哪里或执行什么命令）、expected_outcome（做完会怎样）、expected_return（回传什么）和分拣理由。标题不要照抄接口名、参数或截断的报错。纯流程事项在现有权限内能完成的自己处理并记录结果，不交给人。分拣不增加执行权限，不得把未执行的操作记为完成。",
     "- 收到拍板落实通知或 30 分钟未落实提醒时，执行所选方案或督促发起人落实，并引用 q(n) 记录执行结果。",
     "- 处理 Router 升级上来的事件：任务冲突或抢优先级、同一交付被驳回两次以上、交付与需求不一致或依赖变化、是否暂停后续工作、规则无法处理的异常。",
     "- 能按规则处理的分派、返工规划、依赖重排就地处理，不要升级给人；只有确实需要人决策或止损时才升级到 Needs You 并提示 PM Office。",

@@ -712,6 +712,10 @@ export function triageHumanAction(
     human_action_id: HumanActionId;
     disposition: "done" | "host" | "human";
     rationale: string;
+    title?: string;
+    summary?: string;
+    why_human?: string;
+    expected_outcome?: string;
     instructions?: string;
     expected_return?: string;
   },
@@ -725,29 +729,53 @@ export function triageHumanAction(
     );
     const action = d.get("human_actions", p.human_action_id);
     ensure(
-      action.status === "open" && action.triage === "pm_ops",
+      action.status === "open",
       "illegal_transition",
-      "Human action is not awaiting PM triage",
+      "Only an open human action can be triaged",
     );
     text(p.rationale, "rationale");
-    if (p.disposition === "done")
+    if (p.disposition === "done") {
+      ensure(
+        action.triage === "pm_ops",
+        "unauthorized",
+        "An action already handed to the human cannot be completed by PM",
+      );
       return completeActionDraft(d, {
         human_action_id: action.id,
         text: p.rationale,
       });
+    }
     ensure(
       p.disposition === "host" || p.disposition === "human",
       "validation_failed",
       "Unknown disposition",
     );
+    text(p.title, "title");
+    ensure(
+      [...p.title.trim()].length <= 80 && !/[\r\n]/u.test(p.title),
+      "validation_failed",
+      "Title must be one line, at most 80 characters",
+    );
+    text(p.summary, "summary");
+    text(p.why_human, "why_human");
+    text(p.expected_outcome, "expected_outcome");
     text(p.instructions, "instructions");
     text(p.expected_return, "expected_return");
+    const handoff = {
+      title: p.title.trim(),
+      summary: p.summary,
+      why_human: p.why_human,
+      instructions: p.instructions,
+      expected_outcome: p.expected_outcome,
+      expected_return: p.expected_return,
+      rewritten_by: d.author,
+      rewritten_at: d.now,
+    };
     const next: HumanAction = {
       ...action,
       triage: p.disposition,
       triage_rationale: p.rationale,
-      instructions: p.instructions,
-      expected_return: p.expected_return,
+      handoff,
     };
     d.put("human_actions", next);
     d.emit(
@@ -757,11 +785,12 @@ export function triageHumanAction(
         human_action_id: action.id,
         disposition: p.disposition,
         reason: p.rationale,
+        handoff,
       },
       {
         type: "human_action",
         human_action_id: action.id,
-        body: `${p.disposition === "host" ? "主机操作" : "待你执行"}：${p.instructions}\n完成后请回传：${p.expected_return}\n分拣理由：${p.rationale}`,
+        body: `项目经理已改写${p.disposition === "host" ? "主机操作" : "待你执行"}：${p.title.trim()}\n\n这是什么：${p.summary}\n\n为什么需要你：${p.why_human}\n\n怎么做：${p.instructions}\n\n做完会怎样：${p.expected_outcome}\n\n完成后请回传：${p.expected_return}\n\n分拣理由：${p.rationale}`,
       },
     );
     return next;

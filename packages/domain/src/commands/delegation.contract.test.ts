@@ -371,6 +371,10 @@ test.each(["done", "host", "human"] as const)(
       human_action_id: action.id,
       disposition,
       rationale: "核实权限后处理",
+      title: "请同步主机上的最新代码",
+      summary: "开发工作需要最新的项目代码。",
+      why_human: "同步凭据只在主机上，项目经理无法代为执行。",
+      expected_outcome: "同步后开发者可以继续处理任务。",
       instructions: "在主机同步基线",
       expected_return: "回传 SHA",
     };
@@ -387,8 +391,14 @@ test.each(["done", "host", "human"] as const)(
         value(listNeedsYou(f.state, human)).data.human_actions[0],
       ).toMatchObject({
         triage: disposition,
-        instructions: params.instructions,
-        expected_return: params.expected_return,
+        instructions: "请处理",
+        expected_return: "结果",
+        handoff: {
+          title: params.title,
+          instructions: params.instructions,
+          expected_return: params.expected_return,
+          rewritten_by: "assignment:A-4",
+        },
       });
     }
   },
@@ -811,3 +821,125 @@ test.each(["spending", "account", "permission", "data_deletion"] as const)(
     expect(result.resolution?.proxy_authority).toBeUndefined();
   },
 );
+
+test("human handoffs require a complete plain-language brief and preserve the request and audit identity", () => {
+  const f = setup();
+  const original = {
+    card_id: id("card", 1),
+    instructions: "submit_delivery(kind=card_completion) blocked",
+    why_human: "Only host can supply repository data",
+    expected_return: "branch SHA",
+    blocked_work_items: [],
+  };
+  const action = f.commit(requestHumanAction(f.state, actor(), original, f.io));
+  const input = {
+    human_action_id: action.id,
+    disposition: "host" as const,
+    rationale: "需要主机上的代码副本",
+    title: "请提供项目的最新代码副本",
+    summary: "开发者缺少继续修改所需的代码。",
+    why_human: "只有你能读取主机上的仓库，项目经理没有该权限。",
+    instructions: "在主机终端导出代码副本，并把存放位置发回卡片。",
+    expected_outcome: "开发者拿到副本后就能继续修改。",
+    expected_return: "副本位置和版本号",
+  };
+  for (const field of [
+    "title",
+    "summary",
+    "why_human",
+    "instructions",
+    "expected_outcome",
+    "expected_return",
+  ] as const) {
+    const missing: Parameters<typeof triageHumanAction>[2] = { ...input };
+    delete missing[field];
+    expect(triageHumanAction(f.state, f.pm, missing, f.io).ok).toBe(false);
+    expect(
+      triageHumanAction(f.state, f.pm, { ...input, [field]: " " }, f.io).ok,
+    ).toBe(false);
+  }
+  for (const title of ["标题\n第二行", "字".repeat(81)])
+    expect(triageHumanAction(f.state, f.pm, { ...input, title }, f.io).ok).toBe(
+      false,
+    );
+  const before = f.state;
+  expect(triageHumanAction(f.state, actor(), input, f.io).ok).toBe(false);
+  expect(f.state).toEqual(before);
+  const handoff = f.commit(triageHumanAction(f.state, f.pm, input, f.io));
+  expect(handoff).toMatchObject({
+    ...original,
+    handoff: {
+      title: input.title,
+      summary: input.summary,
+      why_human: input.why_human,
+      instructions: input.instructions,
+      expected_outcome: input.expected_outcome,
+      expected_return: input.expected_return,
+      rewritten_by: "assignment:A-4",
+      rewritten_at: now,
+    },
+  });
+  expect(f.state.timeline.at(-1)?.body).toContain("项目经理已改写");
+  expect(f.state.events.at(-1)?.payload).toMatchObject({
+    handoff: { title: input.title, rewritten_by: "assignment:A-4" },
+  });
+  const clarified = f.commit(
+    triageHumanAction(
+      f.state,
+      f.pm,
+      { ...input, title: "请把项目的最新版本发给开发者" },
+      f.io,
+    ),
+  );
+  expect(clarified.instructions).toBe(original.instructions);
+  expect(clarified.handoff?.title).toBe("请把项目的最新版本发给开发者");
+  expect(
+    triageHumanAction(
+      f.state,
+      f.pm,
+      {
+        human_action_id: action.id,
+        disposition: "done",
+        rationale: "不能代人完成",
+      },
+      f.io,
+    ).ok,
+  ).toBe(false);
+});
+
+test("an authorized process action is completed by Ops without a human handoff or new copy requirements", () => {
+  const f = setup();
+  const action = f.commit(
+    requestHumanAction(
+      f.state,
+      actor(),
+      {
+        card_id: id("card", 1),
+        instructions: "整理审核记录",
+        why_human: "需要项目经理确认",
+        expected_return: "整理结果",
+        blocked_work_items: [],
+      },
+      f.io,
+    ),
+  );
+  const result = f.commit(
+    triageHumanAction(
+      f.state,
+      f.pm,
+      {
+        human_action_id: action.id,
+        disposition: "done",
+        rationale: "已在现有权限内整理审核记录",
+      },
+      f.io,
+    ),
+  );
+  expect(result).toMatchObject({
+    status: "done",
+    result: { text: "已在现有权限内整理审核记录" },
+  });
+  expect(value(listNeedsYou(f.state, human)).data.human_actions).toHaveLength(
+    0,
+  );
+});

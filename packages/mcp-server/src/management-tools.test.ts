@@ -751,11 +751,19 @@ test("category authorization uses PM Ops tools, rejects Office/high-risk bypasse
     human_action_id: action.id,
     disposition: "host",
     rationale: "需要主机同步",
+    title: "请同步主机上的最新代码",
+    summary: "开发者正在等待项目的新基线。",
+    why_human: "同步凭据只在主机上，需要你操作。",
+    expected_outcome: "同步完成后开发者可继续修改。",
     instructions: "请在主机同步当前项目基线",
     expected_return: "回传最新 main SHA",
   });
   expect(triage).toMatchObject({
     triage: "host",
-    instructions: "请在主机同步当前项目基线",
+    instructions: "同步代码",
+    handoff: {
+      title: "请同步主机上的最新代码",
+      instructions: "请在主机同步当前项目基线",
+    },
   });
 });

@@ -761,9 +761,16 @@ function needsYou(args: readonly string[], io: CliIo): number {
         lines.push(
           [
             `  ${action.id}${action.card_id === undefined ? "" : `  ${action.card_id}`}`,
-            `    ${action.instructions}`,
-            `    为什么需要你：${action.why_human}`,
-            `    期望返回：${action.expected_return}`,
+            ...(action.handoff
+              ? [
+                  `    ${action.handoff.title}（项目经理已改写）`,
+                  `    这是什么：${action.handoff.summary}`,
+                  `    做完会怎样：${action.handoff.expected_outcome}`,
+                ]
+              : []),
+            `    ${action.handoff?.instructions ?? action.instructions}`,
+            `    为什么需要你：${action.handoff?.why_human ?? action.why_human}`,
+            `    期望返回：${action.handoff?.expected_return ?? action.expected_return}`,
             ...(action.due === undefined ? [] : [`    截止：${action.due}`]),
           ].join("\n"),
         );

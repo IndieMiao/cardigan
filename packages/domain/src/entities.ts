@@ -430,6 +430,16 @@ export type Decision = DecisionFields &
           | { readonly subject: DeliverySubject };
       }
   );
+export interface HumanActionHandoff {
+  readonly title: string;
+  readonly summary: string;
+  readonly why_human: string;
+  readonly instructions: string;
+  readonly expected_outcome: string;
+  readonly expected_return: string;
+  readonly rewritten_by: Author;
+  readonly rewritten_at: Timestamp;
+}
 export interface HumanAction {
   readonly id: HumanActionId;
   readonly key: HumanActionId;
@@ -440,6 +450,8 @@ export interface HumanAction {
   readonly expected_return: string;
   readonly triage?: "pm_ops" | "human" | "host";
   readonly triage_rationale?: string;
+  /** PM-authored presentation; the request fields above remain intact. */
+  readonly handoff?: HumanActionHandoff;
   readonly due?: Timestamp;
   readonly blocked_work_items: readonly WorkItemId[];
   readonly status: HumanActionStatus;

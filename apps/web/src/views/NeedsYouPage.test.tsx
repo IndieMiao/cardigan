@@ -897,3 +897,62 @@ test("failed confirmed merges remain returnable beside read-only decision follow
   );
   expect(recordDecision).toHaveBeenCalledTimes(1);
 });
+
+test("a PM handoff shows a readable title and all four explanations, with the earlier request available separately", async () => {
+  const item = {
+    id: "h(3)",
+    card_id: "C-1",
+    instructions: "在主机终端执行 git fetch，然后回传最新版本号。",
+    expected_return: "最新版本号",
+    why: "需要主机权限",
+    triage: "host" as const,
+    waited_ms: 0,
+    due: null,
+    blocked_work_items: [],
+    handoff: {
+      title: "请同步主机上的最新项目代码",
+      summary: "开发者缺少继续修改所需的最新代码。",
+      why_human: "仓库凭据只在你的主机上，项目经理无法读取。",
+      instructions: "在主机终端执行 git fetch，然后回传最新版本号。",
+      expected_outcome: "同步完成后开发者就能继续工作。",
+      expected_return: "最新版本号",
+      rewritten_by: "assignment:A-4",
+      rewritten_at: "2026-11-10T09:00:00Z",
+    },
+    original_request: {
+      instructions: "submit_delivery(kind=card_completion) blocked",
+      why_human: "repository unavailable",
+      expected_return: "SHA",
+    },
+  };
+  render(
+    <NeedsYouPage
+      projectId="p-1"
+      client={fakeClient({
+        needsYou: async () => ({
+          decisions: [],
+          human_actions: [item],
+          incidents: [],
+        }),
+      })}
+    />,
+  );
+  const article = await screen.findByRole("article", { name: "执行 h(3)" });
+  expect(
+    within(article).getByRole("heading", {
+      name: "主机操作：请同步主机上的最新项目代码",
+    }),
+  ).toBeTruthy();
+  expect(within(article).getByText(/项目经理已改写/)).toBeTruthy();
+  for (const title of ["这是什么", "为什么需要你", "怎么做", "做完会怎样"])
+    expect(within(article).getByRole("heading", { name: title })).toBeTruthy();
+  expect(within(article).getByText(item.handoff.summary)).toBeTruthy();
+  expect(within(article).getByText(item.handoff.why_human)).toBeTruthy();
+  expect(within(article).getByText(item.handoff.expected_outcome)).toBeTruthy();
+  expect(within(article).getByText("完成后请回传：最新版本号")).toBeTruthy();
+  const prior = within(article)
+    .getByText(item.original_request.instructions)
+    .closest("details");
+  expect(prior?.open).toBe(false);
+  expect(within(article).getByText("查看改写前的内容")).toBeTruthy();
+});

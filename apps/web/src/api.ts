@@ -243,7 +243,18 @@ export interface DecisionView {
   };
 }
 
+export interface HumanActionHandoffView {
+  readonly title: string;
+  readonly summary: string;
+  readonly why_human: string;
+  readonly instructions: string;
+  readonly expected_outcome: string;
+  readonly expected_return: string;
+  readonly rewritten_by: string;
+  readonly rewritten_at: string;
+}
 export interface HumanActionView {
+  readonly handoff?: HumanActionHandoffView;
   readonly id: string;
   readonly instructions: string;
   readonly why_human: string;
@@ -437,7 +448,13 @@ export interface NeedsAction
     AuthorView {
   readonly card_id: string | null;
   readonly why: string;
-  readonly triage?: "human" | "host";
+  readonly triage?: "pm_ops" | "human" | "host";
+  readonly handoff?: HumanActionHandoffView;
+  readonly original_request?: {
+    readonly instructions: string;
+    readonly why_human: string;
+    readonly expected_return: string;
+  };
   readonly triage_rationale?: string | null;
   readonly waited_ms: number | null;
   readonly due: string | null;

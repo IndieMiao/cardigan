@@ -1,5 +1,6 @@
 import {
   type Decision,
+  type HumanAction,
   pauseStandingAssignment,
   postComment,
   requestDecision,
@@ -206,6 +207,98 @@ test("unclaimed completed decisions stay visible in Workbench and CLI without al
     expect((await f.call(f.projectPath("/needs-you"))).json).toMatchObject({
       decisions: [],
     });
+  } finally {
+    await f.close();
+  }
+});
+
+test("PM handoff copy persists through MCP, Workbench and CLI without replacing the request", async () => {
+  const f = await m5Cross();
+  try {
+    await f.password(TEST_PASSWORD);
+    await f.login();
+    await f.start(f.primary.owner);
+    const original = {
+      card_id: f.card.id,
+      instructions: "submit_delivery(kind=card_completion) needs repository",
+      why_human: "repository unavailable",
+      expected_return: "SHA",
+      blocked_work_items: [],
+    };
+    const action = await f.mcp<HumanAction>(
+      f.primary.owner,
+      "request_human_action",
+      original,
+    );
+    const ops = f
+      .state()
+      .assignments.find(
+        (a) => a.scope === "standing" && a.standing_mode === "ops",
+      );
+    if (!ops) throw new Error("Missing PM Ops");
+    await f.start(ops);
+    const handoff = {
+      human_action_id: action.id,
+      disposition: "host",
+      rationale: "开发者需要主机上的最新副本",
+      title: "请把最新项目代码同步给开发者",
+      summary: "开发任务正在等待最新的项目代码。",
+      why_human: "只有你能访问主机上的仓库凭据。",
+      instructions: "在主机终端同步代码，把最新版本号发回这张卡片。",
+      expected_outcome: "开发者将能继续完成修改。",
+      expected_return: "最新版本号",
+    };
+    const invalid = await f.raw(ops, "triage_human_action", {
+      ...handoff,
+      summary: " ",
+    });
+    expect(invalid.isError).toBe(true);
+    expect(
+      f.state().human_actions.find((h) => h.id === action.id)?.handoff,
+    ).toBeUndefined();
+    const result = await f.mcp<HumanAction>(ops, "triage_human_action", {
+      ...handoff,
+      rewritten_by: "human",
+    });
+    expect(result).toMatchObject({
+      instructions: original.instructions,
+      expected_return: original.expected_return,
+      handoff: { title: handoff.title, rewritten_by: `assignment:${ops.id}` },
+    });
+    const needs = await f.call(f.projectPath("/needs-you"));
+    expect(needs.json).toMatchObject({
+      human_actions: [
+        {
+          id: action.id,
+          handoff: {
+            title: handoff.title,
+            summary: handoff.summary,
+            why_human: handoff.why_human,
+            expected_outcome: handoff.expected_outcome,
+          },
+          instructions: handoff.instructions,
+          expected_return: handoff.expected_return,
+          original_request: {
+            instructions: original.instructions,
+            why_human: original.why_human,
+            expected_return: original.expected_return,
+          },
+        },
+      ],
+    });
+    const cli = await f.cli("needs-you");
+    expect(cli).toContain(`${handoff.title}（项目经理已改写）`);
+    expect(cli).toContain(handoff.expected_outcome);
+    expect(cli).not.toContain("submit_delivery(kind=card_completion)");
+    const done = await f.raw(ops, "triage_human_action", {
+      human_action_id: action.id,
+      disposition: "done",
+      rationale: "交给人之后不能代为确认",
+    });
+    expect(done.isError).toBe(true);
+    expect(
+      f.state().human_actions.find((h) => h.id === action.id)?.status,
+    ).toBe("open");
   } finally {
     await f.close();
   }

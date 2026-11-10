@@ -696,9 +696,20 @@ export function needsYou(state: CommandState, now: string) {
       kind: "human_action" as const,
       id: action.id,
       card_id: action.card_id ?? null,
-      instructions: action.instructions,
+      instructions: action.handoff?.instructions ?? action.instructions,
+      ...(action.handoff
+        ? {
+            handoff: action.handoff,
+            original_request: {
+              instructions: action.instructions,
+              why_human: action.why_human,
+              expected_return: action.expected_return,
+            },
+          }
+        : {}),
       why: clamp(action.why),
-      expected_return: action.expected_return,
+      expected_return:
+        action.handoff?.expected_return ?? action.expected_return,
       triage: action.triage ?? "human",
       triage_rationale: action.triage_rationale ?? null,
       blocked_work_items: action.blocked_work_items,
