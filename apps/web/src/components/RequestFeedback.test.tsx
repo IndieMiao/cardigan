@@ -11,7 +11,7 @@ import { StrictMode } from "react";
 import { afterAll, afterEach, beforeAll, expect, test, vi } from "vitest";
 import { flowLayout, installLayoutStyles } from "../../test-support/layout.js";
 import { Drawer } from "./Drawer.js";
-import { RequestFeedback } from "./RequestFeedback.js";
+import { RequestFeedback, RequestFeedbackScope } from "./RequestFeedback.js";
 
 let removeStyles: () => void;
 beforeAll(() => {
@@ -113,4 +113,31 @@ test("drawer feedback remains inside the accessible dialog and retry stays in it
   );
   fireEvent.click(within(alert).getByRole("button", { name: "重试" }));
   expect(retry).toHaveBeenCalledOnce();
+});
+
+test("hidden scopes suppress portals, announcements and timers, including nested visible scopes", () => {
+  vi.useFakeTimers();
+  const content = (hidden: boolean, error?: string) => (
+    <RequestFeedbackScope hidden={hidden}>
+      <RequestFeedbackScope hidden={false}>
+        <input aria-label="草稿" defaultValue="保留草稿" />
+        <RequestFeedback pending={!error} error={error} retry={() => {}} />
+      </RequestFeedbackScope>
+    </RequestFeedbackScope>
+  );
+  const view = render(content(false));
+  const draft = screen.getByLabelText("草稿");
+  expect(vi.getTimerCount()).toBe(1);
+  view.rerender(content(true));
+  expect(vi.getTimerCount()).toBe(0);
+  expect(screen.queryByRole("status")).toBeNull();
+  view.rerender(content(true, "迟到的错误"));
+  act(() => vi.advanceTimersByTime(1000));
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(document.querySelector("[aria-live]")).toBeNull();
+  expect(screen.queryByRole("button", { name: "重试" })).toBeNull();
+  view.rerender(content(false, "迟到的错误"));
+  expect(screen.getByRole("alert").textContent).toContain("迟到的错误");
+  expect(screen.getByRole("alert").getAttribute("aria-live")).toBe("polite");
+  expect(screen.getByLabelText("草稿")).toBe(draft);
 });

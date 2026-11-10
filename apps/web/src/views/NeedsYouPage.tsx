@@ -921,7 +921,12 @@ function Notices({
           全部标为已读
         </button>
       )}
-      {error && <p role="alert">{error}</p>}
+      <RequestFeedback
+        interactive
+        pending={busy}
+        pendingMessage="正在标记已读…"
+        error={error}
+      />
       {notices.map((n) => (
         <article
           key={n.id}

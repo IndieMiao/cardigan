@@ -1,7 +1,31 @@
-import { useEffect, useRef, useState } from "react";
+import {
+  createContext,
+  type ReactNode,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { createPortal } from "react-dom";
 
 const regions = new WeakMap<Element, { node: HTMLDivElement; users: number }>();
+const FeedbackVisible = createContext(true);
+
+/** Match a retained panel's visibility without unmounting its drafts or requests. */
+export function RequestFeedbackScope({
+  hidden,
+  children,
+}: {
+  hidden: boolean;
+  children: ReactNode;
+}) {
+  const parentVisible = useContext(FeedbackVisible);
+  return (
+    <FeedbackVisible.Provider value={parentVisible && !hidden}>
+      {children}
+    </FeedbackVisible.Provider>
+  );
+}
 
 /** Share a stack, inside the active dialog when applicable (Radix hides its siblings). */
 function useFeedbackRegion() {
@@ -50,20 +74,22 @@ export function RequestFeedback({
   retry,
   retryLabel = "重试",
 }: RequestFeedbackProps) {
+  const visible = useContext(FeedbackVisible);
   const { anchor, target } = useFeedbackRegion();
   const [slow, setSlow] = useState(false);
   useEffect(() => {
     setSlow(false);
-    if (!pending || interactive) return;
+    if (!visible || !pending || interactive) return;
     const timer = window.setTimeout(() => setSlow(true), 1000);
     return () => window.clearTimeout(timer);
-  }, [pending, interactive]);
+  }, [pending, interactive, visible]);
   const text =
     error || (pending ? (interactive || slow ? pendingMessage : "") : message);
   return (
     <>
       <span ref={anchor} hidden />
-      {target &&
+      {visible &&
+        target &&
         createPortal(
           <div
             className={`request-feedback${error ? " request-feedback-error" : ""}`}
