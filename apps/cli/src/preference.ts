@@ -2,6 +2,7 @@ import {
   type DecisionCategory,
   decisionCategories,
   decisionDelegation,
+  pmMergeConfirmation,
   projectPreferences,
   setProjectPreferences,
 } from "@cardigan/domain";
@@ -17,7 +18,7 @@ import {
 import type { CliIo } from "./io.js";
 
 const USAGE =
-  "cardigan preference get auto-merge-after | set auto-merge-after <分钟|off> | get decision-delegation | set decision-delegation <类别> <on|off> [--project <p>] [--data-dir <目录>]";
+  "cardigan preference get auto-merge-after | set auto-merge-after <分钟|off> | get decision-delegation | set decision-delegation <类别> <on|off> | get pm-merge-confirmation | set pm-merge-confirmation <on|off> [--project <p>] [--data-dir <目录>]";
 export function runPreferenceCommand(
   args: readonly string[],
   io: CliIo,
@@ -54,8 +55,9 @@ export function runPreferenceCommand(
   }
   const [action, preference, raw, toggle] = positions;
   const delegation = preference === "decision-delegation";
+  const pmMerge = preference === "pm-merge-confirmation";
   if (
-    (!delegation && preference !== "auto-merge-after") ||
+    (!delegation && !pmMerge && preference !== "auto-merge-after") ||
     !["get", "set"].includes(action ?? "") ||
     positions.length !== (action === "get" ? 2 : delegation ? 4 : 3)
   )
@@ -64,6 +66,7 @@ export function runPreferenceCommand(
   if (
     action === "set" &&
     !delegation &&
+    !pmMerge &&
     raw !== "off" &&
     (!/^\d+$/.test(raw ?? "") ||
       !Number.isInteger(minutes) ||
@@ -78,6 +81,7 @@ export function runPreferenceCommand(
       !["on", "off"].includes(toggle ?? ""))
   )
     fail();
+  if (pmMerge && action === "set" && !["on", "off"].includes(raw ?? "")) fail();
   const store = openStore({ dataDir: announceDataDir(io, flags["data-dir"]) });
   try {
     const project = resolveProject(store, io, flags.project);
@@ -85,7 +89,7 @@ export function runPreferenceCommand(
       action === "set"
         ? runCommand(store, {
             operation: "设置项目偏好",
-            target: `${project} auto-merge-after`,
+            target: `${project} ${preference}`,
             project_id: project,
             actor: humanActor(project),
             reduce: (s, a, ports) =>
@@ -98,7 +102,9 @@ export function runPreferenceCommand(
                         [raw as DecisionCategory]: toggle === "on",
                       },
                     }
-                  : { auto_merge_after_minutes: minutes },
+                  : pmMerge
+                    ? { pm_merge_confirmation: raw === "on" }
+                    : { auto_merge_after_minutes: minutes },
                 ports,
               ),
           })
@@ -113,7 +119,9 @@ export function runPreferenceCommand(
                 `${category}: ${enabled ? "on (PM 代拍)" : "off (由人确认)"}`,
             )
             .join("\n")
-        : `auto-merge-after: ${preferences.auto_merge_after_minutes ?? "off"}`,
+        : pmMerge
+          ? `pm-merge-confirmation: ${pmMergeConfirmation(preferences) ? "on (PM 代确认合并)" : "off (由人确认)"}`
+          : `auto-merge-after: ${preferences.auto_merge_after_minutes ?? "off"}`,
     );
     return EXIT.ok;
   } finally {

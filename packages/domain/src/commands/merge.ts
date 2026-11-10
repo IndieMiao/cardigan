@@ -12,6 +12,7 @@ import {
   ensure,
   unwrap,
 } from "./core.js";
+import { assignDecision, mergeNeedsHuman } from "./delegation.js";
 import { reopenMerge } from "./merge-rework.js";
 
 const newest = <T extends { readonly id: string }>(values: readonly T[]) =>
@@ -193,7 +194,12 @@ function requestConfirmation(d: CommandDraft, card: Card, target: Delivery) {
       status: unwrap(transition("decision", old.status, "supersede")),
     });
   const id = d.ids.next(d.state.project_id, "decision");
-  const q: Decision = {
+  const sensitive = mergeNeedsHuman(
+    d.list("decisions"),
+    d.list("cards"),
+    card.id,
+  );
+  const draft: Decision = {
     id,
     key: id,
     card_id: card.id,
@@ -203,7 +209,7 @@ function requestConfirmation(d: CommandDraft, card: Card, target: Delivery) {
     target: { delivery_id: target.id },
     category: "general",
     question: `将 ${card.id} 合并到 ${card.base_branch}？`,
-    context: target.summary,
+    context: sensitive ? `${target.summary}\n\n${sensitive}` : target.summary,
     options: [
       {
         key: "merge",
@@ -230,6 +236,8 @@ function requestConfirmation(d: CommandDraft, card: Card, target: Delivery) {
     status: "open",
     ...(old ? { amends: old.id } : {}),
   };
+  // §7.4: PM Ops confirms by default; D12, scope changes and the opt-out stay human.
+  const q = assignDecision(d, draft);
   d.put("decisions", q);
   d.emit(
     "decision_requested",

@@ -85,6 +85,7 @@ type CommandName =
   | "manage_dispatch_stop"
   | "resolve_dispatch_attention"
   | "set_project_preferences"
+  | "mark_notices_read"
   | "auto_confirm_merge"
   | "remind_decision_followups"
   | "request_merge"

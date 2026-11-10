@@ -753,7 +753,9 @@ function routeDecisionRequested(input: RouteInput, draft: Draft): void {
       recipient.pm_ops(),
       "decision",
       "6.4/decision requested",
-      `${decision.id} 等待项目经理按类别授权处理：${decision.question}`,
+      decision.trigger === "merge_confirmation"
+        ? `${decision.id} 等待项目经理确认合并：${decision.question}。闸门检查、验证全部通过且无 must_fix 才能选 merge，并写知会；否则 hold、request_changes 或交人。`
+        : `${decision.id} 等待项目经理按类别授权处理：${decision.question}`,
     );
     return;
   }
@@ -1195,6 +1197,26 @@ export function routeEvent(input: RouteInput): RouteResult {
           returned
             ? "Merge changes have no active producer"
             : "Merge conflict has no active producer",
+        );
+      break;
+    }
+    case "merge_check_finished": {
+      // §7.4: the PM-held merge confirmation can be answered once the check is known.
+      const q = input.snapshot.decisions.find(
+        (q) =>
+          q.trigger === "merge_confirmation" &&
+          q.card_id === input.event.card_id &&
+          q.decider === "role:pm" &&
+          q.status === "open",
+      );
+      if (q)
+        note(
+          input,
+          draft,
+          recipient.pm_ops(),
+          "decision",
+          "6.4/merge check finished",
+          `${subject(input)} 合并检查结果 ${payloadString(input.event.payload, "status") ?? "未知"}，请处理合并确认 ${q.id}。`,
         );
       break;
     }

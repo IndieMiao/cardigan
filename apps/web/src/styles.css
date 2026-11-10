@@ -2850,19 +2850,45 @@ body[data-lightbox="open"] .drawer-overlay {
 }
 .employee-card {
   display: flex;
-  flex-direction: column;
   align-items: flex-start;
-  gap: 8px;
-  width: 280px;
+  gap: 12px;
+  width: 300px;
   max-width: calc(100vw - 24px);
-  padding: 12px;
-  font-size: var(--text-body);
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  box-shadow: 0 4px 12px var(--overlay);
+  font-size: var(--text-sm);
   overflow-wrap: anywhere;
   z-index: 210;
 }
-.employee-card :where(p) {
+.employee-card-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.employee-card-body :where(p) {
   margin: 0;
-  white-space: pre-wrap;
+}
+.employee-card-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 6px;
+  font-size: var(--text-body);
+}
+.employee-card-bio {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  color: var(--text);
+}
+.employee-card-meta {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
 }
 .employee-group {
   display: inline-flex;

@@ -15,6 +15,7 @@ import {
   latestMergeCheck,
   manageCardTemplate,
   markCardDone,
+  markNoticesRead,
   parseId,
   parseTimelineEntryId,
   postComment,
@@ -601,6 +602,7 @@ export async function serveWrite(
             .nullable()
             .optional(),
           decision_delegation: z.record(z.string(), z.boolean()).optional(),
+          pm_merge_confirmation: z.boolean().optional(),
         })
         .strict(),
       body,
@@ -616,10 +618,29 @@ export async function serveWrite(
           ...(input.decision_delegation !== undefined
             ? { decision_delegation: input.decision_delegation }
             : {}),
+          ...(input.pm_merge_confirmation !== undefined
+            ? { pm_merge_confirmation: input.pm_merge_confirmation }
+            : {}),
         },
         ports,
       ),
     );
+    sendJson(c.res, 200, output);
+    return true;
+  }
+  if (rest === "/notices/read") {
+    if (c.req.method !== "POST") methodNotAllowed(["POST"]);
+    c.authorize();
+    const body = await readJsonBody(c.req);
+    const input = parsed(
+      z
+        .object({
+          notice_ids: z.array(z.string().min(1).max(64)).min(1).max(200),
+        })
+        .strict(),
+      body,
+    );
+    const output = run(c, (s, a, ports) => markNoticesRead(s, a, input, ports));
     sendJson(c.res, 200, output);
     return true;
   }

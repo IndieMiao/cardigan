@@ -148,6 +148,8 @@ export interface TimelineEntryView extends AuthorView {
   readonly attachment_id?: string;
   readonly decision_option?: string;
   readonly decision_via?: "delegated";
+  /** Who answered a delegated decision: PM Ops (C-37/C-49) or the system timeout. */
+  readonly decision_delegate?: "pm" | "system";
   readonly type:
     | "comment"
     | "instruction"
@@ -503,6 +505,8 @@ export interface NeedsPage {
   }[];
   readonly decisions: readonly NeedsDecision[];
   readonly human_actions: readonly NeedsAction[];
+  /** §7.4 知会: delegated resolutions; never blocking. */
+  readonly notices?: readonly NoticeView[];
   readonly incidents: readonly (AuthorView & {
     readonly id: string;
     readonly role_id: string;
@@ -513,6 +517,20 @@ export interface NeedsPage {
     readonly card_id: string | null;
     readonly waited_ms: number | null;
   })[];
+}
+
+export interface NoticeView {
+  readonly id: string;
+  readonly kind: "merge" | "decision";
+  readonly card_id: string | null;
+  readonly decision_id: string;
+  readonly question: string;
+  readonly option: string;
+  readonly resolved_by: "pm" | "system" | string;
+  readonly body: string;
+  readonly proxy_authority: string | null;
+  readonly at: string;
+  readonly read: boolean;
 }
 
 export interface SnapshotData {
@@ -673,6 +691,8 @@ export interface TemplateValidation {
 
 export interface PreferencesView {
   readonly decision_delegation?: Readonly<Record<string, boolean>>;
+  /** Merge confirmations go to PM Ops; missing means the default (on). */
+  readonly pm_merge_confirmation?: boolean;
   readonly auto_merge_after_minutes: number | null;
   readonly merge_gate_enabled: boolean;
 }
@@ -840,6 +860,15 @@ export interface CardiganClient {
     category: string,
     enabled: boolean,
     idempotencyKey: string,
+  ): Promise<void>;
+  setPmMergeConfirmation(
+    projectId: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void>;
+  markNoticesRead(
+    projectId: string,
+    noticeIds: readonly string[],
   ): Promise<void>;
   preferences(projectId: string): Promise<PreferencesView>;
   setPreferences(
@@ -1097,6 +1126,30 @@ export class HttpCardiganClient implements CardiganClient {
       `cards/${encodeURIComponent(cardId)}/mark-done`,
       { result, attachments },
       idempotencyKey,
+    );
+  }
+  async setPmMergeConfirmation(
+    projectId: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      "preferences",
+      { pm_merge_confirmation: enabled },
+      idempotencyKey,
+    );
+  }
+  async markNoticesRead(
+    projectId: string,
+    noticeIds: readonly string[],
+  ): Promise<void> {
+    // Marking read is idempotent in the domain; a fresh key per click is safe.
+    await this.write(
+      projectId,
+      "notices/read",
+      { notice_ids: noticeIds },
+      crypto.randomUUID(),
     );
   }
   preferences(projectId: string): Promise<PreferencesView> {

@@ -34,7 +34,12 @@ test("human preferences require session and idempotency, persist audit, and isol
     const events = f
       .store()
       .uow.read((tx) => tx.events.listAfter(f.project.project_id, undefined, 0))
-      .filter((e) => e.type === "project_preferences_updated");
+      .filter(
+        (e) =>
+          e.type === "project_preferences_updated" &&
+          (e.payload as { preference?: string }).preference ===
+            "auto_merge_after_minutes",
+      );
     expect(events).toMatchObject([
       {
         actor: { kind: "human" },

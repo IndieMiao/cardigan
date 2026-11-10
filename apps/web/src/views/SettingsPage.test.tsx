@@ -217,3 +217,24 @@ test("preferences, authorization, roles and templates coexist as separate settin
     screen.getByRole("checkbox", { name: "流程：由 PM 代拍" }),
   ).toBeTruthy();
 });
+
+test("PM merge confirmation defaults on and can be turned off", async () => {
+  const setPmMergeConfirmation = vi.fn().mockResolvedValue(undefined);
+  render(
+    <SettingsPage
+      projectId="p-1"
+      client={fakeClient({ setPmMergeConfirmation })}
+    />,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "授权", exact: true }));
+  const toggle = (await screen.findByRole("checkbox", {
+    name: "合并由 PM 代确认：由 PM 代确认",
+  })) as HTMLInputElement;
+  expect(toggle.checked).toBe(true);
+  fireEvent.click(toggle);
+  await waitFor(() => expect(setPmMergeConfirmation).toHaveBeenCalledTimes(1));
+  expect(setPmMergeConfirmation.mock.calls[0]?.slice(0, 2)).toEqual([
+    "p-1",
+    false,
+  ]);
+});
