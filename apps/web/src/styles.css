@@ -2626,3 +2626,45 @@ body[data-lightbox="open"] .drawer-overlay {
   color: var(--text-muted);
   font-size: var(--text-sm);
 }
+
+.card-actions {
+  margin-top: var(--gap);
+}
+.card-action-buttons,
+.card-criterion-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--gap);
+}
+.card-actions .danger {
+  color: var(--danger);
+  background: var(--danger-surface);
+}
+.card-action-form {
+  padding: var(--gap);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  font-size: var(--text-body);
+}
+.card-action-form fieldset {
+  display: grid;
+  gap: var(--gap);
+  min-width: 0;
+  border: 0;
+  padding: 0;
+  margin: 0;
+}
+.card-action-form label {
+  display: grid;
+  gap: calc(var(--gap) / 2);
+  flex: 1;
+  min-width: 0;
+}
+.card-action-form textarea {
+  resize: vertical;
+}
+.card-criteria-editor legend {
+  padding: var(--gap) 0;
+}

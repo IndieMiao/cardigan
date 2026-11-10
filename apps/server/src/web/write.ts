@@ -14,6 +14,8 @@ import {
   type ReadableIdKind,
   type Result,
   recordDecision,
+  supersedeCard,
+  updateCard,
   uploadAttachment,
 } from "@cardigan/domain";
 import {
@@ -53,6 +55,17 @@ const comment = z.object({
   supersedes: entryId.optional(),
 });
 const instruction = z.object({ body: text, work_item_id: id("work_item") });
+const cardUpdate = z
+  .object({
+    title: text.optional(),
+    goal: text.optional(),
+    acceptance_criteria: z.array(text).min(1).optional(),
+    priority: z.number().finite().optional(),
+  })
+  .strict()
+  .refine((p) => Object.keys(p).length > 0);
+const cardCancel = z.object({ reason: z.string().optional() }).strict();
+const cardSupersede = z.object({ superseded_by: id("card") }).strict();
 const decision = z.object({
   option: text,
   rationale: z.string().optional(),
@@ -86,13 +99,17 @@ function defined<T extends object>(
     Object.entries(input).filter(([, v]) => v !== undefined),
   ) as { [K in keyof T]: Exclude<T[K], undefined> };
 }
-function parsed<T>(schema: z.ZodType<T>, input: unknown): T {
+function parsed<T>(
+  schema: z.ZodType<T>,
+  input: unknown,
+  message = "Invalid request parameters",
+): T {
   const result = schema.safeParse(input);
   if (!result.success)
     throw new HttpRejection(
       400,
       "validation_failed",
-      "Invalid request parameters",
+      message,
       result.error.issues,
     );
   return result.data;
@@ -153,21 +170,45 @@ function run<T>(
     p: CommandPorts,
   ) => Result<CommandEffect<T>>,
 ): T {
-  return execute(c, (tx) => {
-    c.authorize();
-    const effect = must(
-      reduce(
-        loadCommandState(tx, c.project_id),
-        { kind: "human", project_id: c.project_id },
-        { clock: c.clock, ids: tx.ids },
-      ),
-    );
-    persistEffect(tx, c.project_id, effect);
-    return effect.data;
-  });
+  return execute(c, (tx) => applyCommand(c, tx, reduce));
+}
+function applyCommand<T>(
+  c: CommandContext,
+  tx: StoreTransactionContext,
+  reduce: (
+    s: CommandState,
+    a: Actor,
+    p: CommandPorts,
+  ) => Result<CommandEffect<T>>,
+): T {
+  c.authorize();
+  const effect = must(
+    reduce(
+      loadCommandState(tx, c.project_id),
+      { kind: "human", project_id: c.project_id },
+      { clock: c.clock, ids: tx.ids },
+    ),
+  );
+  persistEffect(tx, c.project_id, effect);
+  return effect.data;
+}
+function cardResult<T>(result: Result<T>, operation: string): Result<T> {
+  if (result.ok) return result;
+  const code = result.error.code;
+  const message =
+    code === "not_found"
+      ? "卡片在当前项目中不存在，请核对卡片编号。"
+      : code === "illegal_transition"
+        ? operation === "cancel"
+          ? "已完成卡片不能取消；请建新卡，再把旧卡标记为被取代。"
+          : "只有已完成或已取消的卡片才能标记为被取代。"
+        : code === "validation_failed" && operation === "supersede"
+          ? "卡片不能被自身取代，请填写同项目的另一张卡片编号。"
+          : "卡片操作被拒绝，请检查填写的内容和卡片状态。";
+  return { ok: false, error: { ...result.error, message } };
 }
 const routes =
-  /^\/(cards|decisions|human-actions)\/([^/]+)\/(comments|instructions|attachments|resolve|complete)$/u;
+  /^\/(cards|decisions|human-actions)\/([^/]+)\/(comments|instructions|attachments|resolve|complete|update|cancel|supersede)$/u;
 /** Returns false for read routes, leaving M5.1's handlers and method checks intact. */
 export async function serveWrite(
   c: WriteContext,
@@ -188,7 +229,14 @@ export async function serveWrite(
   }
   const supported =
     group === "cards"
-      ? ["comments", "instructions", "attachments"]
+      ? [
+          "comments",
+          "instructions",
+          "attachments",
+          "update",
+          "cancel",
+          "supersede",
+        ]
       : group === "decisions"
         ? ["comments", "resolve"]
         : ["complete"];
@@ -235,7 +283,48 @@ export async function serveWrite(
   let output: unknown;
   if (group === "cards") {
     const card_id = parsed(id("card"), key);
-    if (operation === "comments") {
+    if (operation === "update") {
+      const p = defined(
+        parsed(
+          cardUpdate,
+          body,
+          "请填写非空标题、目标、至少一条验收标准及有效的数字优先级。",
+        ),
+      );
+      output = run(context, (s, a, ports) =>
+        cardResult(updateCard(s, a, { ...p, card_id }, ports), "update"),
+      );
+    } else if (operation === "cancel") {
+      const { reason } = parsed(cardCancel, body, "取消原因须为文字，可留空。");
+      // Cancellation and its optional explanation share the idempotent transaction.
+      output = execute(context, (tx) => {
+        const card = applyCommand(context, tx, (s, a, ports) =>
+          cardResult(
+            updateCard(s, a, { card_id, status: "cancelled" }, ports),
+            "cancel",
+          ),
+        );
+        if (reason?.trim())
+          applyCommand(context, tx, (s, a, ports) =>
+            postComment(
+              s,
+              a,
+              { card_id, body: `取消卡片原因：${reason}` },
+              ports,
+            ),
+          );
+        return card;
+      });
+    } else if (operation === "supersede") {
+      const p = parsed(
+        cardSupersede,
+        body,
+        "请填写同项目的卡片编号，例如 C-123。",
+      );
+      output = run(context, (s, a, ports) =>
+        cardResult(supersedeCard(s, a, { ...p, card_id }, ports), "supersede"),
+      );
+    } else if (operation === "comments") {
       const p = defined(parsed(comment, body));
       output = run(context, (s, a, ports) =>
         postComment(s, a, { ...p, card_id }, ports),

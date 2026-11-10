@@ -7,6 +7,7 @@ import {
   type PostedComment,
 } from "../api.js";
 import { AttachmentGrid } from "../components/AttachmentGrid.js";
+import { CardActions } from "../components/CardActions.js";
 import { CardSource, RecentConclusions } from "../components/CardIntro.js";
 import { CardRecords } from "../components/CardRecords.js";
 import { CardSectionNav } from "../components/CardSectionNav.js";
@@ -345,6 +346,12 @@ function CardContent({
               </>
             }
           />
+          <CardActions
+            card={card}
+            client={client}
+            projectId={projectId}
+            onSaved={reload}
+          />
         </header>
         <CardSectionNav
           article={article}
@@ -352,6 +359,7 @@ function CardContent({
           cardId={card.id}
           title={card.title}
           commentBox={commentBox}
+          inDrawer={inDrawer}
         />
         <section
           id={sectionId("overview")}
