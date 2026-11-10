@@ -1557,3 +1557,32 @@ test("a normal decision named raise_limit does not change review budgets", async
   ).toBe(200);
   expect(s.state().work_items).toEqual(items);
 });
+
+test("a failed review-limit resolution transaction rolls back its budget, audit and resumed Run", async () => {
+  const q = await reviewLimit();
+  const before = snapshot();
+  const headers = { "Idempotency-Key": "raise-rollback" };
+  const payload = { option: "raise_limit", raw_quote: "增加一轮" };
+  s.store().database.exec(
+    "CREATE TRIGGER reject_limit_resolution BEFORE INSERT ON timeline WHEN json_extract(NEW.doc, '$.type') = 'decision_resolved' BEGIN SELECT RAISE(ABORT, 'resolution failure'); END",
+  );
+  expect(await request(resolvePath(q), payload, headers)).toMatchObject({
+    status: 500,
+  });
+  expect(snapshot()).toBe(before);
+  s.store().database.exec("DROP TRIGGER reject_limit_resolution");
+  expect(await request(resolvePath(q), payload, headers)).toMatchObject({
+    status: 200,
+  });
+  expect(
+    s.state().work_items.find((w) => w.id === s.primary.verifier.work_item_id),
+  ).toMatchObject({ max_review_rounds: 2, status: "ready" });
+  expect(
+    s
+      .state()
+      .runs.filter(
+        (r) =>
+          r.assignment_id === s.primary.verifier.id && r.status === "queued",
+      ),
+  ).toHaveLength(1);
+});

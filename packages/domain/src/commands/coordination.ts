@@ -38,6 +38,7 @@ import { resolveHumanCompletionReview } from "./human-completion.js";
 import { requestMergeChanges } from "./merge.js";
 import { failedConfirmedMergeCheck } from "./merge-check.js";
 import { queueResumedRun, resumeWork } from "./resumption.js";
+import { recordDecisionResolution } from "./review-limit-resolution.js";
 import { activeWork } from "./workflow.js";
 
 export function issueInstruction(
@@ -459,82 +460,28 @@ function resolveDecisionDraft(
   delegated: boolean,
 ) {
   const actor = d.actor;
-  const result: Decision = {
-    ...decision,
-    status: unwrap(
-      transition(
-        "decision",
-        decision.status,
-        decision.trigger === "review_limit" && p.option === "pause"
-          ? "provisionally_resolve"
-          : "resolve",
-      ),
-    ),
-    resolution: {
-      option: p.option,
-      rationale: p.rationale,
-      resolved_by: decision.decider === "human" ? "human" : d.author,
-      via: delegated
-        ? "delegated"
-        : actor.kind === "human"
-          ? "needs_you"
-          : "pm_office_chat",
-      ...(delegated
-        ? {
-            proxy_authority: delegationAuthority(
-              d,
-              decision.category ?? "general",
-            ),
-          }
-        : {}),
-      raw_quote: p.raw_quote,
-      via_chain: [...(p.via_chain ?? []), d.author],
-      ...(p.batch ? { batch: p.batch } : {}),
-      at: d.now,
-    },
-  };
-  d.put("decisions", result);
-  const resumed: WorkItem[] = [];
-  for (const id of decision.affected_work_items) {
-    const item = d.work(id);
-    if (decision.blocking && resumeWork(d, item)) resumed.push(item);
-  }
-  const cards = [
-    ...new Set([
-      ...(decision.card_id ? [decision.card_id] : []),
-      ...decision.affected_cards,
-    ]),
-  ];
-  for (const card of cards.length ? cards : [undefined]) {
-    const unblocked = resumed.filter((w) => w.card_id === card);
-    const event = d.emit(
-      result.status === "provisional"
-        ? "decision_provisionally_resolved"
-        : "decision_resolved",
-      card,
-      {
-        decision_id: decision.id,
-        option: p.option,
-        option_description:
-          decision.options.find((o) => o.key === p.option)?.description ?? "",
-        impact: decision.options.find((o) => o.key === p.option)?.impact ?? "",
-        rationale: p.rationale,
-        raised_by: decision.raised_by,
-        via: result.resolution?.via ?? "needs_you",
-        ...(result.resolution?.proxy_authority
-          ? { proxy_authority: result.resolution.proxy_authority }
-          : {}),
-        status: result.status,
-        resume_work_items: unblocked.map((w) => w.id),
-      },
-      {
-        type: "decision_resolved",
-        body: p.raw_quote,
-        decision_id: decision.id,
-      },
-    );
-    for (const item of unblocked) queueResumedRun(d, item, event);
-  }
+  const result = recordDecisionResolution(d, decision, {
+    option: p.option,
+    rationale: p.rationale,
+    resolved_by: decision.decider === "human" ? "human" : d.author,
+    via: delegated
+      ? "delegated"
+      : actor.kind === "human"
+        ? "needs_you"
+        : "pm_office_chat",
+    ...(delegated
+      ? {
+          proxy_authority: delegationAuthority(
+            d,
+            decision.category ?? "general",
+          ),
+        }
+      : {}),
+    raw_quote: p.raw_quote,
+    via_chain: [...(p.via_chain ?? []), d.author],
+    ...(p.batch ? { batch: p.batch } : {}),
+    at: d.now,
+  });
   if (
     decision.trigger === "merge_confirmation" &&
     p.option === "request_changes"

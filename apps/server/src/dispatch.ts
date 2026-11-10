@@ -47,6 +47,7 @@ import {
   type StandingResolver,
 } from "./dispatch-inbox.js";
 import { retryDispatchedRuns } from "./dispatch-retry.js";
+import { escalateReviewLimitWaits } from "./review-limit-attention.js";
 
 export interface DispatcherOptions {
   readonly store: Store;
@@ -622,6 +623,7 @@ export class Dispatcher {
             at,
           });
       }
+      escalateReviewLimitWaits(tx, store, state, at);
       const attempts = unfinishedBellAttempts(store.database, project);
       for (const n of store.listNotifications({
         project_id: project,

@@ -18,7 +18,9 @@ export {
   moveNotification,
   type NotificationQuery,
   notificationsByRecipient,
+  type ReassignNotificationsInput,
   type RecordNotificationInput,
+  reassignNotifications,
   recordNotification,
   routerCursor,
 } from "./inbox.js";

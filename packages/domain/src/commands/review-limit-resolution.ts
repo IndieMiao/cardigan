@@ -66,16 +66,39 @@ export function resolveReviewLimit(
     );
     return item;
   }
-  let next = item;
-  if (p.option === "raise_limit") {
+  recordDecisionResolution(d, q, {
+    option: p.option,
+    rationale: p.rationale,
+    raw_quote: p.rationale,
+    resolved_by: d.author,
+    via: "delegated",
+    proxy_authority: delegationAuthority(d, q.category ?? "general"),
+    via_chain: [d.author],
+    at: d.now,
+  });
+  return d.work(item.id);
+}
+
+function raiseReviewLimit(d: CommandDraft, q: Decision, rationale: string) {
+  for (const id of new Set(q.affected_work_items)) {
+    const item = d.work(id);
+    ensure(
+      !["done", "cancelled"].includes(d.card(item.card_id).status),
+      "illegal_transition",
+      "Card is closed",
+    );
+    ensure(
+      item.kind === "verify",
+      "validation_failed",
+      "Review limits require a verifier",
+    );
     const limit = item.max_review_rounds + 1;
     ensure(
       Number.isSafeInteger(limit),
       "validation_failed",
       "Review limit is too large",
     );
-    next = { ...item, max_review_rounds: limit };
-    d.put("work_items", next);
+    d.put("work_items", { ...item, max_review_rounds: limit });
     const event = d.emit(
       "work_item_updated",
       item.card_id,
@@ -87,7 +110,7 @@ export function resolveReviewLimit(
       {
         type: "status_change",
         work_item_id: item.id,
-        body: `审核上限增加到 ${limit} 轮：${p.rationale}`,
+        body: `审核上限增加到 ${limit} 轮：${rationale}`,
       },
     );
     const run = d
@@ -108,53 +131,76 @@ export function resolveReviewLimit(
         ],
       });
   }
+}
+
+/** All authorized decision entry points share the budget, audit and resumption effects. */
+export function recordDecisionResolution(
+  d: CommandDraft,
+  q: Decision,
+  resolution: NonNullable<Decision["resolution"]>,
+): Decision {
   const result: Decision = {
     ...q,
     status: unwrap(
       transition(
         "decision",
         q.status,
-        p.option === "pause" ? "provisionally_resolve" : "resolve",
+        q.trigger === "review_limit" && resolution.option === "pause"
+          ? "provisionally_resolve"
+          : "resolve",
       ),
     ),
-    resolution: {
-      option: p.option,
-      rationale: p.rationale,
-      raw_quote: p.rationale,
-      resolved_by: d.author,
-      via: "delegated",
-      proxy_authority: delegationAuthority(d, q.category ?? "general"),
-      via_chain: [d.author],
-      at: d.now,
-    },
+    resolution,
   };
+  // Validate the transition before incrementing; repeat resolutions cannot add rounds.
+  if (q.trigger === "review_limit" && resolution.option === "raise_limit")
+    raiseReviewLimit(d, q, resolution.rationale);
   d.put("decisions", result);
-  const resumed = resumeWork(d, next);
-  const event = d.emit(
-    result.status === "provisional"
-      ? "decision_provisionally_resolved"
-      : "decision_resolved",
-    item.card_id,
-    {
-      decision_id: q.id,
-      option: p.option,
-      option_description:
-        q.options.find((o) => o.key === p.option)?.description ?? "",
-      impact: q.options.find((o) => o.key === p.option)?.impact ?? "",
-      rationale: p.rationale,
-      raised_by: q.raised_by,
-      via: "delegated",
-      proxy_authority: result.resolution?.proxy_authority ?? "",
-      status: result.status,
-      resume_work_items: resumed ? [item.id] : [],
-    },
-    {
-      type: "decision_resolved",
-      decision_id: q.id,
-      work_item_id: item.id,
-      body: p.rationale,
-    },
-  );
-  if (resumed) queueResumedRun(d, item, event);
-  return resumed ?? next;
+  const resumed: WorkItem[] = [];
+  for (const id of new Set(q.affected_work_items)) {
+    const item = d.work(id);
+    if (q.blocking && resumeWork(d, item)) resumed.push(item);
+  }
+  const cards = [
+    ...new Set([...(q.card_id ? [q.card_id] : []), ...q.affected_cards]),
+  ];
+  const reviewItemId =
+    q.trigger === "review_limit" &&
+    resolution.via === "delegated" &&
+    q.affected_work_items.length === 1
+      ? q.affected_work_items[0]
+      : undefined;
+  for (const card of cards.length ? cards : [undefined]) {
+    const unblocked = resumed.filter((w) => w.card_id === card);
+    const event = d.emit(
+      result.status === "provisional"
+        ? "decision_provisionally_resolved"
+        : "decision_resolved",
+      card,
+      {
+        decision_id: q.id,
+        option: resolution.option,
+        option_description:
+          q.options.find((o) => o.key === resolution.option)?.description ?? "",
+        impact:
+          q.options.find((o) => o.key === resolution.option)?.impact ?? "",
+        rationale: resolution.rationale,
+        raised_by: q.raised_by,
+        via: resolution.via,
+        ...(resolution.proxy_authority
+          ? { proxy_authority: resolution.proxy_authority }
+          : {}),
+        status: result.status,
+        resume_work_items: unblocked.map((w) => w.id),
+      },
+      {
+        type: "decision_resolved",
+        decision_id: q.id,
+        ...(reviewItemId ? { work_item_id: reviewItemId } : {}),
+        body: resolution.raw_quote,
+      },
+    );
+    for (const item of unblocked) queueResumedRun(d, item, event);
+  }
+  return result;
 }
