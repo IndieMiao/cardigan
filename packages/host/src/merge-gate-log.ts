@@ -10,6 +10,7 @@ import {
 } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
+import { MIN_REDACTED_ENV_BYTES } from "./check-environment.js";
 import type { CheckoutResult } from "./temporary-checkout.js";
 
 export const CHECK_OUTPUT_LIMIT = 2 * 1024 * 1024;
@@ -21,7 +22,9 @@ function redactor(env: Readonly<Record<string, string>>) {
   const values = [
     ...new Set(
       Object.values(env)
-        .filter(Boolean)
+        .filter(
+          (value) => Buffer.byteLength(value, "utf8") >= MIN_REDACTED_ENV_BYTES,
+        )
         .flatMap((value) => {
           let uri = value;
           try {

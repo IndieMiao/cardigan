@@ -3,7 +3,10 @@ import { lstat, open } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { parseDocument } from "yaml";
-import { checkEnvironment } from "./check-environment.js";
+import {
+  checkEnvironment,
+  MIN_REDACTED_ENV_BYTES,
+} from "./check-environment.js";
 import type { CheckoutCheck } from "./temporary-checkout.js";
 
 export type ProjectMergeGate =
@@ -74,6 +77,16 @@ function projectConfig(raw: unknown): ProjectMergeGate {
   } catch {
     return invalid("env 包含非字符串、非法名称或受控运行变量");
   }
+  if (
+    Object.values(env).some(
+      (value) =>
+        value.length > 0 &&
+        Buffer.byteLength(value, "utf8") < MIN_REDACTED_ENV_BYTES,
+    )
+  )
+    invalid(
+      `env 非空值必须至少 ${MIN_REDACTED_ENV_BYTES} 个 UTF-8 字节，短值不能可靠脱敏`,
+    );
   return {
     status: "enabled",
     checks,

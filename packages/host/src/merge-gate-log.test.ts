@@ -157,3 +157,36 @@ test("retention removes only old project logs, and unsafe paths or links are rej
     createMergeCheckLog({ dataDir, project: "p", attempt: "unsafe" }),
   ).rejects.toThrow(/private/);
 });
+
+test("short env values do not corrupt output; the eight-byte boundary and multibyte values are redacted", async () => {
+  const dataDir = await fixture();
+  const log = await createMergeCheckLog({
+    dataDir,
+    project: "p",
+    attempt: "short-env",
+    env: {
+      CI: "1",
+      MODE: "a",
+      SHORT: "abcdefg",
+      EMPTY: "",
+      ASCII: "abcdefgh",
+      UNICODE: "中文值",
+    },
+  });
+  log.append("test", "FAIL a command returned 1\nabcdefg\nabcdefgh\n中文值\n");
+  const result = await log.finish({
+    status: "failed",
+    checks: [{ name: "test", status: "failed", exit_code: 1 }],
+    cleanup_errors: [],
+  });
+  const text = await readFile(
+    join(dataDir, "merge-gate/logs/p", log.log_ref),
+    "utf8",
+  );
+  expect(text).toContain(
+    "FAIL a command returned 1\nabcdefg\n[REDACTED]\n[REDACTED]\n",
+  );
+  expect(result.summary).toContain("FAIL a command returned 1");
+  expect(text).not.toContain("abcdefgh");
+  expect(text).not.toContain("中文值");
+});

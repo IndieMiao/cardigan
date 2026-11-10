@@ -41,7 +41,7 @@ test("missing configuration preserves legacy behavior; enabled projects get boun
     f.file,
     JSON.stringify({
       projects: {
-        p: { ...valid, env: { CI: "yes" } },
+        p: { ...valid, env: { CHECK_VALUE: "explicit" } },
         q: {
           checks: [{ name: "build", run: "pnpm build", timeout_minutes: 2 }],
           total_timeout_minutes: 5,
@@ -55,7 +55,7 @@ test("missing configuration preserves legacy behavior; enabled projects get boun
   expect(config.forProject("p")).toEqual({
     status: "enabled",
     checks: [{ name: "test", run: "pnpm test", timeoutMs: 1800000 }],
-    env: { CI: "yes" },
+    env: { CHECK_VALUE: "explicit" },
     totalTimeoutMs: 3600000,
   });
   expect(config.forProject("q")).toMatchObject({
@@ -119,5 +119,36 @@ test("unknown projects report invalid configuration; symlink or writable configu
     JSON.stringify({ projects: { p: valid } }),
   );
   await symlink(join(other, "config"), f.file);
+  expect((await f.load()).forProject("p").status).toBe("invalid");
+});
+
+test.each(["1", "a", "1234567", "中文"])(
+  "short env values are rejected without echoing them: %s",
+  async (value) => {
+    const f = await fixture({
+      projects: { p: { ...valid, env: { VALUE: value } }, q: valid },
+    });
+    const config = await f.load();
+    expect(config.forProject("p")).toEqual({
+      status: "invalid",
+      reason:
+        "项目 p 的合并闸门无效：env 非空值必须至少 8 个 UTF-8 字节，短值不能可靠脱敏",
+    });
+    expect(config.forProject("q").status).toBe("enabled");
+  },
+);
+test("the env threshold is UTF-8 bytes, permits empty values and rejects __proto__", async () => {
+  const f = await fixture({
+    projects: {
+      p: { ...valid, env: { EMPTY: "", ASCII: "12345678", UNICODE: "中文值" } },
+    },
+  });
+  expect((await f.load()).forProject("p").status).toBe("enabled");
+  await writeFile(
+    f.file,
+    JSON.stringify({
+      projects: { p: { ...valid, env: { ["__proto__"]: "12345678" } } },
+    }),
+  );
   expect((await f.load()).forProject("p").status).toBe("invalid");
 });

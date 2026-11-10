@@ -388,6 +388,7 @@ test("invalid input and reserved runtime variables fail before creating a checko
     ...[
       "PATH",
       "HOME",
+      "__proto__",
       "TMPDIR",
       "HC_SESSION",
       "HC_SOCKET",
