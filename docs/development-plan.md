@@ -1112,10 +1112,6 @@ Agent 只通过 Card MCP 读写，看板界面只服务你一个人，所以第�
 
 接口：`GET /api/projects/:id/roles`（列表，附默认角色包编号、Harness 列表和各类型白名单）；`GET /api/projects/:id/roles/:role`（最新版本完整定义、上一版本、该类型白名单、旧角色的转换建议）；`GET /api/projects/:id/roles/:role/history`（全部版本，含每版完整定义、动作摘要、改动字段、操作者和时间，取自 `role_*` 事件）。写接口均为 POST：`/roles`（完整定义创建）、`/roles/copy`（`source.kind=default|project`）、`/roles/:role/update`（只接受可编辑字段）、`/roles/:role/activate`、`/roles/:role/deactivate`、`/roles/:role/rollback`（`{ version }`）。写接口直接调用 `createRole / copyRole / updateRole / activateRole / deactivateRole / rollbackRole`，actor 固定为当前会话的 `{ kind: "human" }`，请求体不接受 actor、version、status 等字段（严格校验，多余字段 400）；MCP Token 访问一律 401。强制 `Idempotency-Key`，沿用 C-16 的人类幂等表与事务。领域拒绝映射为 400（校验）／403／404，英文的领域消息（如编号已存在、必填项）在服务端换成中文。前端按操作内容保留失败请求的键，成功后释放。
 
-V10b“卡片模板”，角色管理留到 V9b。偏好栏提供超时自动合并开关、1–1440 分钟输入与保存，默认关闭。项目未启用合并闸门时显示：“没有合并闸门时，自动合并会合并未经全量测试和 e2e 的代码”。是否启用以主机当前项目的合并闸门配置为准。
-
-`GET /api/projects/:id/preferences` 返回当前偏好与 `merge_gate_enabled`；同路径 POST 接受 `auto_merge_after_minutes` 和 `decision_delegation` 的部分修改，沿用人类会话与 Origin 校验，强制 `Idempotency-Key`，同键重试与偏好及审计同事务处理。前端按操作内容保留失败请求的键，成功后释放，切换项目重建页面状态。授权栏列出每个类别当前由 PM 还是人处理，可开关三个非高风险类别，四类高风险固定由人确认（Workbench 或本机 CLI）。
-
 V10b“卡片模板”列表显示编号、标题、来源、仓库要求、合并方式、完成方式、版本和启停状态；内置 dev／general／artifact 标注“内置，只读”，详情只有“复制为项目模板”操作。项目模板支持编辑、停用／启用及选择历史版本回退；回退追加新版本并保留当前启停状态。详情显示工作项的 key、标题、类型、角色、必需标记、验证目标、主产出 key、完成方式和验收标准要求；历史版本显示摘要、生成时间及与前版的字段差异。时间来自 `card_template_changed` 事件；内置迁移等没有时间事件的版本明确显示未知，不推测时间。
 
 `GET /api/projects/:id/card-templates`、`/card-templates/:template`、`/card-templates/:template/history` 分别读取项目模板列表、详情和历史；同一模板的旧卡继续读取固定版本。`POST /card-templates` 接收 V10a `TemplateChange` 并调用 `manageCardTemplate`，强制 `Idempotency-Key`；`GET /card-templates/validate` 与其他合法编号一样读取名为 `validate` 的模板详情；同路径的 `POST` 才是只读预检，表单输入后短暂防抖调用同一命令，显示 key 唯一、目标与主产出、仓库／合并约束及角色登记／启停／能力等原有中文错误，不维护第二套校验规则。过时响应不能覆盖新草稿的校验结果，最终保存仍在新鲜事务快照内校验。`POST /cards/:card/mark-done` 同样强制幂等键并调用 `markCardDone`。以上入口沿用 human 会话和 Origin 校验，身份不接受客户端覆盖，Agent Token 不能调用。

@@ -165,13 +165,14 @@ test("authorization exposes defaults, retries safely, and fixes high-risk catego
   );
 });
 
-test("preferences, authorization and templates coexist as separate settings tabs", async () => {
+test("preferences, authorization, roles and templates coexist as separate settings tabs", async () => {
   render(<SettingsPage client={fakeClient()} projectId="p-1" />);
   const preferences = screen.getByRole("button", { name: "偏好", exact: true });
   const authorization = screen.getByRole("button", {
     name: "授权",
     exact: true,
   });
+  const roles = screen.getByRole("button", { name: "角色", exact: true });
   const templates = screen.getByRole("button", {
     name: "卡片模板",
     exact: true,
@@ -187,8 +188,19 @@ test("preferences, authorization and templates coexist as separate settings tabs
   expect(
     screen.getByRole("checkbox", { name: "流程：由 PM 代拍" }),
   ).toBeTruthy();
+  fireEvent.click(roles);
+  await screen.findByText("本项目还没有登记角色。");
+  expect(roles.getAttribute("aria-current")).toBe("page");
+  expect(
+    screen.getByRole("heading", { name: "角色", exact: true }),
+  ).toBeTruthy();
+  expect(screen.getByRole("button", { name: "新建角色" })).toBeTruthy();
+  expect(
+    screen.queryByRole("heading", { name: "授权", exact: true }),
+  ).toBeNull();
   fireEvent.click(templates);
   await screen.findByRole("table", { name: "项目卡片模板" });
+  expect(screen.queryByRole("button", { name: "新建角色" })).toBeNull();
   expect(templates.getAttribute("aria-current")).toBe("page");
   expect(
     screen.queryByRole("heading", { name: "授权", exact: true }),
@@ -197,4 +209,11 @@ test("preferences, authorization and templates coexist as separate settings tabs
   expect(preferences.getAttribute("aria-current")).toBe("page");
   expect(screen.getByRole("checkbox", { name: "超时自动合并" })).toBeTruthy();
   expect(screen.queryByRole("table", { name: "项目卡片模板" })).toBeNull();
+  fireEvent.click(roles);
+  await screen.findByText("本项目还没有登记角色。");
+  expect(screen.queryByRole("checkbox", { name: "超时自动合并" })).toBeNull();
+  fireEvent.click(authorization);
+  expect(
+    screen.getByRole("checkbox", { name: "流程：由 PM 代拍" }),
+  ).toBeTruthy();
 });

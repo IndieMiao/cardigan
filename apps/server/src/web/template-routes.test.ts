@@ -497,3 +497,46 @@ test("required work must be accepted or passed; optional work does not block hum
       .status,
   ).toBe(409);
 });
+
+test("role and template routes coexist: human role lifecycle changes reach template validation immediately", async () => {
+  const change = {
+    action: "add",
+    definition: definition({
+      work_items: [
+        {
+          key: "work",
+          title: "产出",
+          role_id: "coder",
+          kind: "produce",
+          required: true,
+        },
+      ],
+    }),
+  };
+  expect((await read("/roles/coder")).status).toBe(200);
+  expect((await write("/card-templates/validate", change, null)).json).toEqual({
+    valid: true,
+    reason: null,
+  });
+  expect((await write("/roles/coder/deactivate", {})).json).toMatchObject({
+    role_id: "coder",
+    status: "inactive",
+  });
+  expect((await write("/card-templates/validate", change, null)).json).toEqual({
+    valid: false,
+    reason: "角色 coder 未登记或已停用",
+  });
+  expect((await write("/card-templates", change)).status).toBe(400);
+  expect((await write("/roles/coder/activate", {})).json).toMatchObject({
+    role_id: "coder",
+    status: "active",
+  });
+  expect((await write("/card-templates", change)).json).toMatchObject({
+    id: "custom",
+    version: 1,
+  });
+  expect((await read("/roles/coder/history")).status).toBe(200);
+  expect((await read("/card-templates/custom/history")).json).toMatchObject({
+    versions: [{ id: "custom", version: 1 }],
+  });
+});
