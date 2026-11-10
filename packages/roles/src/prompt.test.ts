@@ -87,6 +87,34 @@ test.each(["claude-code", "codex", "pi"] as const)(
       expect(core.split(rule)).toHaveLength(2);
     expect(core.split("## 协作规则")).toHaveLength(2);
     expect(core.split("## 协议（每个 Run 都要遵守）")).toHaveLength(2);
+    // Full old prompts, individual headings and copied rule lines are all rejected
+    // before any harness-specific files can be generated for a new-format role.
+    for (const embedded of [
+      corePromptFor("coder"),
+      "## 协作规则",
+      "## 协议（每个 Run 都要遵守）",
+      ...SHARED_BOUNDARIES,
+      ...AGENT_PROTOCOL,
+    ]) {
+      expect(() =>
+        compileAssignmentLaunch({
+          ...common,
+          role: { ...role, instructions: `Custom role.\n${embedded}` },
+        }),
+      ).toThrow("instructions 不得包含");
+    }
+    expect(() => composeRolePrompt(corePromptFor("coder"))).toThrow(
+      "instructions 不得包含",
+    );
+    const converted = convertLegacyRole({
+      core_prompt: corePromptFor("coder"),
+    });
+    expect(
+      compileAssignmentLaunch({
+        ...common,
+        role: { ...role, instructions: converted.instructions },
+      }),
+    ).toEqual(legacy);
     // Compare to the original compiler's observable behavior for a custom prompt.
     const custom = "Legacy content\n\n## Custom heading\nVerbatim body  \n";
     const unchanged = compileAssignmentLaunch({

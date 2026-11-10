@@ -133,6 +133,7 @@ S21：MCP create_card 可省略 repo／base_branch，适配层在命令事务内
 - `copyRole(state, actor, {source, role_id, display_name?}, ports)`：source 由主机从默认包或同一事务内的源项目读取；新编号从 v1 开始、状态 active；源后续变化不影响副本。重新按目标编号校验权限，不能通过复制 pm 给其他编号授予 record_decision。
 - `deactivateRole / activateRole(state, actor, id, ports)` 追加 inactive / active 版本；重复设置已有状态无版本和事件。`rollbackRole(state, actor, id, version, ports)` 复制历史内容到 latest+1，重新校验权限，保留当前启停状态。
 - `validateRole` 覆盖系统工具白名单：produce 禁 submit_review，verify 禁 submit_delivery，standing 以上述 PM 固定列表为上限；任意未知名称拒绝；record_decision 仅 pm；验证型 worktree 只允许 readonly/none。旧 kind=work 保存时通过工具／验证能力标记转成明确类型，不能绕过验证型限制。Token 的 office 作用域继续在主机签发时收窄。
+- `instructions` 禁止包含系统协作规则／协议的标题和任意一条规则原文，`roleInstructionsError` 与系统文本常量由 domain 共用；新建、修改、复制、回退及启停写入均返回 validation_failed。roles 启动编译复查同一边界，确保三种 Harness 不输出重复段落。只有 core_prompt 的旧角色不受影响；完整旧提示词应通过显式转换剥离系统段落，不能直接粘贴到 instructions。
 - 新指派前 `isRoleActive` 始终检查最新版，即便显式要求旧版也不能绕过停用；重复指派复用原 Assignment，已有 Assignment 与 Run 保持固定版本和历史权限。不存在角色仍为 not_found。
 - 事件为 role_created、role_copied、role_updated、role_deactivated、role_activated、role_rolled_back；保存 Actor 和完整版本快照。验证失败无部分效果。
 - instructions/status 存入原 roles.doc，不改表；旧记录缺省 active，没有 instructions 就继续使用原 core_prompt，转换和启动拼接位于 roles 包。迁移不重写旧文档，不自动把旧提示词当作新格式。

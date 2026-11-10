@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { corePromptFor } from "@cardigan/roles";
 import { getRoleVersion, listRoleVersions, Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { main } from "./index.js";
@@ -406,4 +407,35 @@ test("deactivation blocks new work and standing assignments but preserves existi
   expect(await run(["pm", "create", "--office"])).toBe(0);
   expect(await run(["pm", "create", "--ops"])).toBe(2);
   expect(errors.join("\n")).toContain("停用");
+});
+
+test("file writes reject pasted system sections; explicit legacy conversion removes them", async () => {
+  const prompt = corePromptFor("coder");
+  const instructionsFile = ROLE_YAML.replace(
+    "core_prompt: |\n  实现并交付。",
+    `instructions: ${JSON.stringify(prompt)}`,
+  );
+  writeFileSync(roleFile, instructionsFile);
+  expect(await run(["role", "add", "--file", roleFile])).toBe(2);
+  expect(errors.join("\n")).toContain("instructions 不得包含");
+  // Old full prompts still save as legacy roles and can be converted explicitly.
+  writeFileSync(
+    roleFile,
+    ROLE_YAML.replace(
+      "core_prompt: |\n  实现并交付。",
+      `core_prompt: ${JSON.stringify(prompt)}`,
+    ),
+  );
+  expect(await run(["role", "add", "--file", roleFile])).toBe(0);
+  writeFileSync(roleFile, instructionsFile);
+  expect(await run(["role", "update", "--file", roleFile])).toBe(2);
+  expect(errors.join("\n")).toContain("instructions 不得包含");
+  expect(await run(["role", "show", "coder", "--history"])).toBe(0);
+  expect(JSON.parse(printed())).toHaveLength(1);
+  expect(await run(["role", "update", "coder", "--convert-legacy"])).toBe(0);
+  expect(await run(["role", "show", "coder"])).toBe(0);
+  const converted = JSON.parse(printed());
+  expect(converted).toMatchObject({ version: 2, core_prompt: prompt });
+  expect(converted.instructions).not.toContain("## 协作规则");
+  expect(converted.instructions).not.toContain("## 协议（每个 Run 都要遵守）");
 });

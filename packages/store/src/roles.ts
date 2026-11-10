@@ -118,7 +118,8 @@ export interface RoleWriteResult {
 }
 
 /**
- * Create or change a role definition.
+ * Low-level legacy writer for test fixtures; application writes must use domain
+ * role commands and persistRoleEffect so actor and permission checks cannot be skipped.
  *
  * - `add`: the role must not exist yet; the definition lands as version 1.
  * - `update`: writes `latest + 1`; earlier versions stay untouched.

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import type { Employee } from "../employee.js";
 import { type Actor, type ToolName, toolNames } from "../entities.js";
 import {
   canManageRoles,
@@ -7,6 +8,7 @@ import {
   roleReference,
   STANDING_ROLE_TOOLS,
 } from "../role.js";
+import { AGENT_PROTOCOL, SHARED_BOUNDARIES } from "../role-prompt.js";
 import { assign } from "./pm.js";
 import {
   activateRole,
@@ -41,6 +43,56 @@ function definition(patch: Partial<RoleDefinition> = {}): RoleDefinition {
 const empty: RoleCommandState = { project_id: human.project_id, roles: [] };
 const first = (): Role =>
   value(createRole(empty, human, definition(), ports())).data;
+
+test.each([
+  "## 协作规则",
+  "## 协议（每个 Run 都要遵守）",
+  ...SHARED_BOUNDARIES,
+  ...AGENT_PROTOCOL,
+])(
+  "rejects system prompt content through every role write: %s",
+  (systemText) => {
+    const instructions = `Custom role.\n\n${systemText}\n`;
+    const original = first();
+    const invalid = { ...original, instructions };
+    const state = { ...empty, roles: [original] };
+    const commands = [
+      createRole(empty, human, definition({ instructions }), ports()),
+      updateRole(state, human, "coder", { instructions }, ports()),
+      copyRole(empty, human, { source: invalid, role_id: "copy" }, ports()),
+      rollbackRole({ ...empty, roles: [invalid] }, human, "coder", 1, ports()),
+      deactivateRole({ ...empty, roles: [invalid] }, human, "coder", ports()),
+      activateRole(
+        { ...empty, roles: [{ ...invalid, status: "inactive" as const }] },
+        human,
+        "coder",
+        ports(),
+      ),
+    ];
+    for (const result of commands) {
+      expect(result).toMatchObject({
+        ok: false,
+        error: {
+          code: "validation_failed",
+          message: expect.stringContaining("instructions 不得包含"),
+        },
+      });
+    }
+    expect(state.roles).toEqual([original]);
+    // The same text is legal in an old, complete core_prompt, with no instructions.
+    const { instructions: _instructions, ...legacy } = definition();
+    expect(
+      value(
+        createRole(
+          empty,
+          human,
+          { ...legacy, core_prompt: instructions },
+          ports(),
+        ),
+      ).data.core_prompt,
+    ).toBe(instructions);
+  },
+);
 
 describe("human-only role management", () => {
   test.each<Actor>([
@@ -288,6 +340,20 @@ test("latest inactive version blocks new assignments even when requesting an old
   ];
   const state = {
     ...before,
+    employees: [
+      {
+        id: id("employee", 1),
+        name: "Alice",
+        title: "Coder",
+        bio: "",
+        avatar: null,
+        role_id: "coder",
+        launch_profile_ref: null,
+        status: "active",
+        created_at: "2026-01-01T00:00:00.000Z",
+        updated_at: "2026-01-01T00:00:00.000Z",
+      } satisfies Employee,
+    ],
     roles,
     assignments: [],
     runs: [],
@@ -295,19 +361,25 @@ test("latest inactive version blocks new assignments even when requesting an old
       ({ assignment_id: _old, ...item }) => item,
     ),
   };
-  for (const role_version of [undefined, 1, 2]) {
-    expect(
-      assign(
-        state,
-        human,
-        {
-          work_item_id: id("work_item", 1),
-          role_id: "coder",
-          ...(role_version === undefined ? {} : { role_version }),
-        },
-        ports(),
-      ),
-    ).toMatchObject({ ok: false, error: { code: "validation_failed" } });
+  for (const employee_id of [undefined, "E-1", "Alice"]) {
+    for (const role_version of [undefined, 1, 2]) {
+      expect(
+        assign(
+          state,
+          human,
+          {
+            work_item_id: id("work_item", 1),
+            role_id: "coder",
+            ...(employee_id === undefined ? {} : { employee_id }),
+            ...(role_version === undefined ? {} : { role_version }),
+          },
+          ports(),
+        ),
+      ).toMatchObject({
+        ok: false,
+        error: { code: "validation_failed", message: "停用的角色不能被新指派" },
+      });
+    }
   }
   // Existing assignments still authenticate against their own version and can finish their run.
   const existing = {

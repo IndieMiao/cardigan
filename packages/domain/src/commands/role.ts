@@ -7,6 +7,7 @@ import {
   type Role,
   roleKind,
 } from "../role.js";
+import { roleInstructionsError } from "../role-prompt.js";
 import { attempt, type CommandPorts, ensure, text } from "./core.js";
 
 export interface RoleCommandState {
@@ -66,6 +67,12 @@ export function validateRole(role: RoleDefinition): Result<RoleDefinition> {
         typeof role.instructions === "string",
         "validation_failed",
         "instructions 必须是字符串",
+      );
+      const error = roleInstructionsError(role.instructions);
+      ensure(
+        error === undefined,
+        "validation_failed",
+        error ?? "instructions 不合法",
       );
     } else text(role.core_prompt, "core_prompt 或 instructions");
     ensure(

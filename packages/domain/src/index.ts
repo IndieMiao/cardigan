@@ -31,6 +31,7 @@ export * from "./notification.js";
 export * from "./ports.js";
 export { type ResolvedReference, resolveReferences } from "./references.js";
 export * from "./role.js";
+export * from "./role-prompt.js";
 export * from "./runtime-port.js";
 export * from "./standing.js";
 export * from "./states.js";
