@@ -54,7 +54,7 @@ const groups = {
     "withdrawn",
     "revoked",
     "released",
-    "skipped",
+    "not_run",
   ],
   idle: ["idle"],
   paused: ["suspended", "draining", "interrupted"],

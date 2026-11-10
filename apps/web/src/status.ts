@@ -73,7 +73,7 @@ export const STATUS_LABELS = {
   needs_attention: "需要关注",
   timed_out: "超时",
   interrupted: "已中断",
-  skipped: "未运行",
+  not_run: "未运行",
 } as const;
 export function statusLabel(status: string): string {
   return Object.hasOwn(STATUS_LABELS, status)

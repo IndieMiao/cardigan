@@ -913,7 +913,7 @@ C-48 用统一的 `StatusIcon`（自绘内联 SVG）及带中文标签的 `Statu
 | 圆内分支汇合箭头 | `awaiting_merge` 待合并 | 青绿 `#0f766e`／`#6dd9b7` |
 | 实心圆加对勾 | `done`、`completed`、`accepted`、`passed`、`pass`、`approve`、`resolved`、`active`、`online` | 绿 `#2e7d4f`／`#91cda5` |
 | 实心圆加感叹号 | `blocked`、`failed`、`timed_out`、`changes_requested`、`rejected`、`reject`、`lost`、`offline`、`degraded`、`delivery_failed` | 红 `#b42318`／`#ff9c91` |
-| 空心圆加斜线 | `cancelled`、`superseded`、`withdrawn`、`revoked`、`released`、`skipped` | 褐灰 `#78645e`／`#d1b4a6` |
+| 空心圆加斜线 | `cancelled`、`superseded`、`withdrawn`、`revoked`、`released`、`not_run` | 褐灰 `#78645e`／`#d1b4a6` |
 | 较小的细空心圆 | `idle` 空闲 | 浅灰 `#737e77`／`#95a39b` |
 | 圆内暂停双竖线 | `suspended`、`draining`、`interrupted` | 琥珀 `#b45309`／`#edb96d` |
 | 菱形加问号 | `unknown`、`needs_attention`、未识别状态 | 橙 `#9b5520`／`#f6b486` |
