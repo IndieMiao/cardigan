@@ -83,6 +83,9 @@ export function BoardCard({
   const waiting = reasons.has("decision") || reasons.has("human_action");
   const complete =
     card.progress.total > 0 && card.progress.completed === card.progress.total;
+  const queuedAhead = card.queued_runs?.length
+    ? Math.min(...card.queued_runs.map((run) => run.ahead))
+    : null;
   const superseded =
     card.resolution === "superseded"
       ? card.superseded_by
@@ -124,15 +127,6 @@ export function BoardCard({
           </span>
         </a>
       </Tooltip>
-      {card.queued_runs?.map((run) => (
-        <p
-          className="hint"
-          key={run.run_id}
-          title={`${run.assignment_id} / ${run.run_id}`}
-        >
-          排队中（前面还有 {run.ahead} 个）
-        </p>
-      ))}
       <div className="board-card-meta">
         {display.progress &&
           badge(
@@ -140,6 +134,14 @@ export function BoardCard({
             <ProgressPie {...card.progress} />,
             `${card.progress.completed}/${card.progress.total}`,
             complete ? "board-card-complete" : "",
+          )}
+        {queuedAhead !== null &&
+          badge(
+            queuedAhead === 0
+              ? "即将开始"
+              : `排队中（前面还有 ${queuedAhead} 个）`,
+            <StatusIcon status="queued" decorative />,
+            queuedAhead,
           )}
         <ProduceOwners
           owners={card.participants ?? card.produce_owners ?? []}
