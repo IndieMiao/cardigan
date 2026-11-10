@@ -51,6 +51,12 @@ export {
   runDirectory,
 } from "./naming.js";
 export {
+  acquireRepositoryFlock,
+  type FlockRunner,
+  hostRepositoryLock,
+  repositoryLockPath,
+} from "./repository-lock.js";
+export {
   MERGE_CHECK_RUN_SLOTS,
   readRunQueue,
   runCapacitySnapshot,
@@ -74,6 +80,15 @@ export {
   type CaptureAgent,
   harnessBinary,
 } from "./version.js";
+export {
+  describePreparationFailure,
+  PreparationError,
+  type PreparationFailure,
+  type PreparationRetryOptions,
+  redactFailureLine,
+  redactSecrets,
+  withPreparationRetry,
+} from "./wake-preparation.js";
 export {
   prepareReadonlyWorktree,
   prepareRoleWorktree,
