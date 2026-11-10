@@ -1,12 +1,16 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import {
   type Actor,
+  activateRole,
   type Clock,
   type CommandEffect,
   type CommandPorts,
   type CommandState,
   completeHumanAction,
+  copyRole,
+  createRole,
   type DomainError,
+  deactivateRole,
   issueInstruction,
   latestMergeCheck,
   parseId,
@@ -15,11 +19,16 @@ import {
   prepareMergePlan,
   type ReadableIdKind,
   type Result,
+  type RoleDefinition,
+  type RoleEffect,
+  type RolePatch,
   recheckMerge,
   recordDecision,
+  rollbackRole,
   setProjectPreferences,
   supersedeCard,
   updateCard,
+  updateRole,
   updateWorkItem,
   uploadAttachment,
 } from "@cardigan/domain";
@@ -32,7 +41,18 @@ import {
   prepareAttachmentFile,
   ToolError,
 } from "@cardigan/mcp-server";
-import type { Store, StoreTransactionContext } from "@cardigan/store";
+import {
+  defaultRoleDefinition,
+  HARNESSES,
+  isDefaultRoleId,
+} from "@cardigan/roles";
+import {
+  getRoleVersion,
+  listRoleVersions,
+  persistRoleEffect,
+  type Store,
+  type StoreTransactionContext,
+} from "@cardigan/store";
 import { z } from "zod";
 import {
   HttpRejection,
@@ -217,6 +237,228 @@ function cardResult<T>(result: Result<T>, operation: string): Result<T> {
           : "卡片操作被拒绝，请检查填写的内容和卡片状态。";
   return { ok: false, error: { ...result.error, message } };
 }
+const ROLE_FIELD_LABELS: Readonly<Record<string, string>> = {
+  role_id: "角色编号",
+  display_name: "显示名",
+  launch_profile_ref: "启动配置",
+  "core_prompt 或 instructions": "角色说明（instructions）",
+};
+/** Domain role errors are partly English; the Workbench always answers in Chinese. */
+function roleResult<T>(result: Result<T>, role_id: string): Result<T> {
+  if (result.ok || /\p{Script=Han}/u.test(result.error.message)) return result;
+  const { code, message } = result.error;
+  const required = /^(.+) is required$/u.exec(message)?.[1];
+  const text =
+    code === "not_found"
+      ? `角色 ${role_id} 或指定版本不存在，请刷新后重试。`
+      : /already exists/u.test(message)
+        ? `角色编号 ${role_id} 已存在，请换一个编号。`
+        : required !== undefined
+          ? `${ROLE_FIELD_LABELS[required] ?? required} 不能为空。`
+          : "角色内容不符合要求，请检查后重试。";
+  return { ok: false, error: { ...result.error, message: text } };
+}
+/** Project and role identifiers, as the CLI accepts them. */
+const IDENTIFIER = /^[a-z0-9][a-z0-9._-]*$/u;
+const roleList = z.array(z.string());
+const roleFields = {
+  display_name: z.string(),
+  kind: z.enum(["produce", "verify", "standing"]),
+  instructions: z.string(),
+  harness: z.enum(HARNESSES),
+  launch_profile_ref: z.string(),
+  allowed_tools: roleList,
+  capabilities: roleList,
+  abilities: roleList,
+  worktree: z.enum(["none", "readonly", "write"]),
+  required_machine_tags: roleList,
+};
+// No actor, version or status fields: the human session is the only actor.
+const roleCreate = z.object({ role_id: z.string(), ...roleFields }).strict();
+const rolePatch = z
+  .object(roleFields)
+  .partial()
+  .strict()
+  .refine((p) => Object.keys(p).length > 0);
+const roleCopy = z
+  .object({
+    role_id: z.string(),
+    display_name: z.string().optional(),
+    source: z.discriminatedUnion("kind", [
+      z
+        .object({
+          kind: z.literal("default"),
+          role_id: z.string(),
+          harness: z.enum(HARNESSES),
+          launch_profile_ref: text,
+        })
+        .strict(),
+      z
+        .object({
+          kind: z.literal("project"),
+          project_id: z.string().optional(),
+          role_id: z.string(),
+          version: z.number().int().positive().optional(),
+        })
+        .strict(),
+    ]),
+  })
+  .strict();
+const roleRoute =
+  /^\/roles(?:\/(copy)|\/([^/]+)\/(update|activate|deactivate|rollback))?$/u;
+const ROLE_INPUT_MESSAGE =
+  "角色内容格式不正确：请检查字段名称、类型（产出、验证或常驻）、worktree 模式和列表字段。";
+
+/** V9b: role writes call V9a's domain commands as the logged-in human, idempotently. */
+async function serveRoleWrite(c: WriteContext, rest: string): Promise<boolean> {
+  const match = roleRoute.exec(rest);
+  if (!match || c.req.method === "GET") return false;
+  if (c.req.method !== "POST") methodNotAllowed(["GET", "POST"]);
+  const [, copy, encoded, operation] = match;
+  if (!copy && !operation && rest !== "/roles") return false;
+  c.authorize();
+  const body = await readJsonBody(c.req);
+  c.authorize();
+  const key = parsed(
+    z
+      .string()
+      .min(1)
+      .max(256)
+      .refine((s) => s.trim().length > 0),
+    c.req.headers["idempotency-key"],
+    "角色写入需要 Idempotency-Key",
+  );
+  let target: string;
+  try {
+    target = decodeURIComponent(encoded ?? "");
+  } catch {
+    throw new HttpRejection(400, "validation_failed", "角色编号编码不正确");
+  }
+  const context: CommandContext = {
+    ...c,
+    idempotency: { key, request: { method: "POST", rest, body } },
+  };
+  let role_id: string;
+  let command: (
+    state: { project_id: string; roles: ReturnType<typeof listRoleVersions> },
+    actor: Actor,
+    ports: CommandPorts,
+    tx: StoreTransactionContext,
+  ) => Result<RoleEffect>;
+  if (copy) {
+    const input = parsed(roleCopy, body, ROLE_INPUT_MESSAGE);
+    // Same identifier rule as `cardigan project create`; checked before any lookup.
+    if (
+      input.source.kind === "project" &&
+      input.source.project_id !== undefined &&
+      !IDENTIFIER.test(input.source.project_id)
+    )
+      throw new HttpRejection(
+        400,
+        "validation_failed",
+        "来源项目编号不合法：只能用小写字母、数字、点、下划线和短横线，且以字母或数字开头。",
+      );
+    role_id = input.role_id;
+    command = (state, actor, ports, tx) => {
+      let source: RoleDefinition;
+      if (input.source.kind === "default") {
+        if (!isDefaultRoleId(input.source.role_id))
+          throw new HttpRejection(
+            404,
+            "not_found",
+            `默认角色包没有 ${input.source.role_id}`,
+          );
+        source = defaultRoleDefinition(input.source.role_id, {
+          harness: input.source.harness,
+          launch_profile_ref: input.source.launch_profile_ref,
+        });
+      } else {
+        const project = input.source.project_id ?? c.project_id;
+        if (!c.store.getProject(project))
+          throw new HttpRejection(
+            404,
+            "not_found",
+            `来源项目 ${project} 不存在`,
+          );
+        const found = getRoleVersion(
+          tx,
+          project,
+          input.source.role_id,
+          input.source.version,
+        );
+        if (!found)
+          throw new HttpRejection(
+            404,
+            "not_found",
+            `来源角色 ${input.source.role_id} 的指定版本不存在`,
+          );
+        source = found;
+      }
+      return copyRole(
+        state,
+        actor,
+        {
+          source,
+          role_id,
+          ...(input.display_name?.trim()
+            ? { display_name: input.display_name }
+            : {}),
+        },
+        ports,
+      );
+    };
+  } else if (!operation) {
+    const input = parsed(roleCreate, body, ROLE_INPUT_MESSAGE);
+    role_id = input.role_id;
+    command = (state, actor, ports) =>
+      createRole(state, actor, input as RoleDefinition, ports);
+  } else {
+    role_id = target;
+    if (operation === "update") {
+      const patch = parsed(rolePatch, body, ROLE_INPUT_MESSAGE) as RolePatch;
+      command = (state, actor, ports) =>
+        updateRole(state, actor, role_id, patch, ports);
+    } else if (operation === "rollback") {
+      const { version } = parsed(
+        z.object({ version: z.number().int().positive() }).strict(),
+        body,
+        "回退需要填写正整数版本号。",
+      );
+      command = (state, actor, ports) =>
+        rollbackRole(state, actor, role_id, version, ports);
+    } else {
+      parsed(z.object({}).strict(), body, "启用或停用不接受其他参数。");
+      command = (state, actor, ports) =>
+        (operation === "activate" ? activateRole : deactivateRole)(
+          state,
+          actor,
+          role_id,
+          ports,
+        );
+    }
+  }
+  const output = execute(context, (tx) => {
+    c.authorize();
+    const effect = must(
+      roleResult(
+        command(
+          {
+            project_id: c.project_id,
+            roles: listRoleVersions(tx, c.project_id),
+          },
+          { kind: "human", project_id: c.project_id },
+          { clock: c.clock, ids: tx.ids },
+          tx,
+        ),
+        role_id,
+      ),
+    );
+    persistRoleEffect(tx, c.project_id, effect);
+    return effect.data;
+  });
+  sendJson(c.res, 200, output);
+  return true;
+}
 const routes =
   /^\/(cards|decisions|human-actions)\/([^/]+)\/(comments|instructions|attachments|resolve|complete|update|cancel|supersede|recheck-merge)$/u;
 /** Returns false for read routes, leaving M5.1's handlers and method checks intact. */
@@ -224,6 +466,8 @@ export async function serveWrite(
   c: WriteContext,
   rest: string,
 ): Promise<boolean> {
+  if (rest === "/roles" || rest.startsWith("/roles/"))
+    return serveRoleWrite(c, rest);
   if (rest === "/preferences") {
     if (c.req.method === "GET") return false;
     if (c.req.method !== "POST") methodNotAllowed(["GET", "POST"]);

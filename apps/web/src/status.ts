@@ -47,6 +47,7 @@ export const STATUS_LABELS = {
   withdrawn: "已撤回",
   revoked: "已撤销",
   active: "有效",
+  inactive: "已停用",
   suspended: "已暂停",
   released: "已释放",
   not_provisioned: "未启动",

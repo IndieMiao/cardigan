@@ -13,7 +13,7 @@ import {
 } from "@cardigan/domain";
 import type { MergeGateConfiguration } from "@cardigan/host";
 import { resolveDataDirectory } from "@cardigan/runtime-herdr";
-import type { Store, WebSession } from "@cardigan/store";
+import { listRoleVersions, type Store, type WebSession } from "@cardigan/store";
 import { serveAttachment } from "./attachments.js";
 import { serveAvatar } from "./avatars.js";
 import { readCardDetail, readCardList } from "./card-state.js";
@@ -52,6 +52,9 @@ import {
   parseCardFilter,
   projectSnapshotView,
   projectState,
+  roleDetail,
+  roleHistory,
+  roleList,
   waitingOnAgent,
 } from "./read.js";
 import { serveStatic } from "./static.js";
@@ -482,6 +485,11 @@ async function serveProjectRoute(
     return;
   }
 
+  if (rest === "/roles" || rest.startsWith("/roles/")) {
+    serveRoleRead(context, project_id, rest);
+    return;
+  }
+
   const state = projectState(store, project_id);
   if (rest === "/preferences") {
     // This baseline has no merge-gate executor/configuration yet.
@@ -540,6 +548,41 @@ async function serveProjectRoute(
   }
 
   throw new HttpRejection(404, "not_found", "not found");
+}
+
+/** V9b 角色管理: list, one role's current definition, and its version history. */
+function serveRoleRead(
+  context: RequestContext,
+  project_id: ProjectId,
+  rest: string,
+): void {
+  const versions = context.store.uow.read((tx) =>
+    listRoleVersions(tx, project_id),
+  );
+  if (rest === "/roles") {
+    sendJson(context.res, 200, roleList(project_id, versions));
+    return;
+  }
+  const match = /^\/roles\/([^/]+)(\/history)?$/u.exec(rest);
+  let role_id: string | undefined;
+  try {
+    role_id = match ? decodeURIComponent(match[1] ?? "") : undefined;
+  } catch {
+    role_id = undefined;
+  }
+  const body =
+    role_id === undefined
+      ? undefined
+      : match?.[2]
+        ? roleHistory(
+            projectState(context.store, project_id),
+            versions,
+            role_id,
+          )
+        : roleDetail(versions, role_id);
+  if (body === undefined)
+    throw new HttpRejection(404, "not_found", "角色不存在，请核对角色编号。");
+  sendJson(context.res, 200, { project_id, ...body });
 }
 
 /** §8.6 filters: card, role, type, paging. Absent parameters mean "no filter". */
