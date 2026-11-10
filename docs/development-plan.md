@@ -282,6 +282,7 @@
 | Decision | 待拍板 / 决定 | 持久、可审计的业务决策 | 是 |
 | Event | 事件 | 按卡片单调递增编号的事实变化，用于路由、游标和 ACK | 否 |
 | Role | 角色 | 岗位说明书：Core Prompt、能力、Harness、模型、权限 | 配置页 |
+| Employee | 员工 | 全局团队成员：名字、职位、简介及角色编号，一支团队服务所有项目 | CLI（团队页后续实现） |
 | Machine | 机器 | 运行 Agent 的主机 | 执行视图 |
 
 记忆口诀：
@@ -304,6 +305,7 @@ Card 1---* WorkItem 1---0..1 Assignment *---1 (Role@version)
   +--* TimelineEntry (links: WorkItem? Delivery? Run? Decision?)
   +--* Event (seq per card) --- Cursor(Assignment, Card, acked_seq)
 
+Employee (global, E-n): role_id references a role identifier; assignment linkage follows in V1b
 Standing Assignment (scope=project): PM Office, PM Ops — not tied to a WorkItem
 ```
 
@@ -333,6 +335,15 @@ Standing Assignment (scope=project): PM Office, PM Ops — not tied to a WorkIte
 - `completion_criteria`、`status`、`assignment_id?`
 - `template_key?`：模板生成工作项的稳定键，用来识别主产出和本次完成申请的审核项。
 - `reported_blocker?`：`{reason, needs: role | human, reported_by, reported_at}`。报告者来自 Actor，时间来自 Clock；它是独立阻塞原因，其他阻塞解除不能清除它。重复上报更新当前报告，历史保留在时间线。
+
+**Employee（P2-V V1a）**
+
+- 全局实体，不含 `project_id`；`id` 为全局递增、不复用的 `E-n`，一支团队服务所有项目。
+- `name`、`title`、`bio`：名字、职位、简介，分别最多 40 / 40 / 200 个 Unicode 字符；去掉首尾空白，名字和职位必填，简介默认空字符串。拒绝控制字符及格式控制字符。在职员工名字全局唯一，比较时全角空格转半角空格并去掉首尾空白。
+- `avatar`：可空的头像引用字符串，不存图片；`role_id`：角色编号，创建后不可通过员工修改命令改变；`launch_profile_ref`：可空，设置时必须是主机 `launch.yaml` 中存在的配置名，不因选配置而改角色。角色是否登记在目标项目中的检查属于 V1b 指派流程。
+- `status`：`active | inactive`；`created_at`、`updated_at` 记录审计时间。只有人可创建、修改、停用和恢复，不提供删除。
+- 存储新增无项目键的 `employees`、`global_counters`、`global_events`。员工命令使用独立全局事件流，事件类型为 `employee_created / employee_updated / employee_deactivated / employee_activated`，保存 human 操作者和变更后的员工快照。选择全局流是为了让团队管理不依赖项目选择，避免把全局审计绑定某个项目；全局序号与原有项目／卡片流分别递增。员工、编号及事件在同一事务中提交或回滚；SQLite 部分唯一索引约束在职姓名。
+- V1a 不改变既有项目流的路由、ACK、Assignment、Run 或身份查询。旧数据升级只新增表和索引，历史记录保持可读；指派、启动配置优先级、`whoami` 和读取视图属于 V1b。
 
 **Assignment**
 
@@ -534,6 +545,8 @@ abortDispatch 只允许同项目 human/system，须带非空 reason，将未结�
 **Decision**：`open → resolved | provisional | withdrawn | superseded`；`provisional → resolved | revoked`；`resolved → revoked | superseded`。代批属于 `resolved`，由 `resolution.proxy_authority` 记录授权来源。
 
 **HumanAction**：`open → done | cancelled`。
+
+**Employee**：`active --deactivate--> inactive --activate--> active`。创建时在职；停用保留身份和历史，不改动已有 Assignment。恢复时重新检查全局在职名字唯一性；已处于目标状态的重复停用／恢复无新事件。普通修改不能直接设置状态或角色，不提供删除迁移。
 
 **Machine**：`online | degraded | offline | draining`。
 
@@ -1242,6 +1255,15 @@ CLI 与 server 的 `bin.ts` 先安装警告过滤，再动态导入业务模块�
 CLI、server 与运行时配置默认共用主机用户的 `~/.local/share/cardigan`，不随启动 cwd 改变。CLI 优先使用 `--data-dir`，其次 `CARDIGAN_DATA_DIR`；server 使用 `CARDIGAN_DATA_DIR`。显式相对路径按启动 cwd 解析为绝对路径。读取或写入数据的 CLI 命令在打开数据库前向 stderr 显示 `数据目录：<绝对路径>`；设置密码时在询问密码前显示，stdout 的 JSON 输出保持原格式。已有 `.data` 数据不自动搬迁；继续使用它时需显式指定目录，安装器若使用其他路径也应保持相同配置。
 
 人可用 `cardigan card update <C-n> [--title <标题>] [--goal <目标>] [--acceptance <标准1;标准2>] [--priority <n>] [--status backlog|todo|cancelled] [--superseded-by <C-m>] [--project <p>]` 修改、取消或标记被取代的卡片。至少指定一个修改字段，验收标准按分号拆分（命令行中需加引号）；项目省略时取 `CARDIGAN_PROJECT`，再取数据库里唯一的项目。CLI 以 human 身份在同一事务内调用 domain `updateCard` 和（指定 `--superseded-by` 时）`supersedeCard`；组合修改任一步失败则全部回滚。取消按状态机同步取消工作项，保留已通过的验证项；不开放手动设置执行进度或完成状态。对已完成卡片使用 `--status cancelled` 返回中文错误，提示建新卡并用 `--superseded-by` 标记旧卡。取代标记只接受已完成或已取消的原卡及同项目的另一张现存卡片；本次 Workbench 仅展示，不增加标记按钮。成功输出卡片编号及修改字段，非法参数或被领域状态机拒绝的转换返回中文错误和非零退出码，不写入部分改动。基础命令计划见 [C-3 CLI 修改卡片](plans/cli-card-update.md)，取代规则见 [Phase 2 P2a-5](plans/phase-2.md#2-p2a-自举做顺约-1-周)。
+
+人可用全局员工命令（[P2-V V1a](plans/p2v-1-employee.md)），沿用数据目录规则，无需 `--project`，也不按 `CARDIGAN_PROJECT` 筛选：
+
+- `cardigan employee add --name <名字> --title <职位> --role <角色> [--bio <简介>] [--avatar <引用>] [--launch-profile <名字>]`
+- `cardigan employee list [--role <角色>] [--all]`，默认只列在职。
+- `cardigan employee update <E-n> [--name <名字>] [--title <职位>] [--bio <简介>] [--avatar <引用>] [--launch-profile <名字>]`，至少提供一个修改字段；简介、头像或启动配置传空字符串可清空。
+- `cardigan employee deactivate <E-n>` / `cardigan employee activate <E-n>`。
+
+CLI 以 human 身份调用 domain 命令，使用全局员工仓储和事件流；中文输出，参数、字段、重名、编号或配置校验失败返回非零退出码且不写部分修改。设置非空 `--launch-profile` 时先读取 `CARDIGAN_CONFIG_DIR` 下（默认 `~/.config/cardigan`）的 `launch.yaml`，把已登记配置名传给 domain 校验，无需读取密钥。清空配置或修改其他字段不要求旧配置仍存在。员工 CLI 不启动 Agent；`assign --employee` 留给 V1b。
 
 人可用 `cardigan comment add <C-n> --text <内容> [--file <路径>]...` 发评论；正文也可用 `--text-file <路径>` 从 UTF-8 文件读取，两者必须二选一。重复 `--file` 可添加多个 evidence 附件，均挂到新评论。`cardigan attachment add <C-n> --file <路径> [--kind evidence|artifact] [--basis 'q(n)'] [--entry <C-n#k>]` 单独上传一个附件，默认 evidence；artifact 必须引用当前项目中存在的拍板。`--entry` 指向当前卡片已有条目，省略时创建“上传附件”评论作为挂载点。两个命令沿用上述项目选择和数据目录规则，以 human 身份调用 domain `postComment` / `uploadAttachment`；成功输出评论编号和附件编号，非法参数、文件读取及领域校验失败返回中文错误和非零退出码。
 

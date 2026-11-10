@@ -1,4 +1,12 @@
 import type { DatabaseSync } from "node:sqlite";
+import {
+  createGlobalRepositories,
+  type ReadGlobalRepositories,
+} from "./employees.js";
+import { ReadOnlyTransactionError } from "./read-only.js";
+
+export { ReadOnlyTransactionError } from "./read-only.js";
+
 import type {
   Assignment,
   AssignmentId,
@@ -32,14 +40,6 @@ import type {
 
 export type SqlValue = string | number | null;
 
-/** Thrown when a write method is called on a read-only transaction. */
-export class ReadOnlyTransactionError extends Error {
-  constructor(what: string) {
-    super(`${what} is not allowed in a read transaction`);
-    this.name = "ReadOnlyTransactionError";
-  }
-}
-
 /** A repository as seen from `uow.read`: reads only. */
 export type ReadRepository<Entity, Key> = Pick<
   Repository<Entity, Key>,
@@ -49,7 +49,7 @@ export type ReadRepository<Entity, Key> = Pick<
 export type ReadEventRepository = Pick<EventRepository, "listAfter">;
 
 /** Everything `uow.read` hands to its callback. */
-export interface ReadRepositories {
+export interface ReadRepositories extends ReadGlobalRepositories {
   readonly cards: ReadRepository<Card, CardId>;
   readonly work_items: ReadRepository<WorkItem, WorkItemId>;
   readonly assignments: ReadRepository<Assignment, AssignmentId>;
@@ -281,13 +281,10 @@ export function createRepositories(db: DatabaseSync): Repositories {
 
 /** Read-only repositories of one connection (inside `uow.read`). */
 export function createReadRepositories(db: DatabaseSync): ReadRepositories {
-  return create(db, "read");
+  return { ...create(db, "read"), ...createGlobalRepositories(db, "read") };
 }
 
-function create(
-  db: DatabaseSync,
-  mode: "read" | "write",
-): Repositories & ReadRepositories {
+function create(db: DatabaseSync, mode: "read" | "write"): Repositories {
   return {
     cards: jsonRepository<Card, CardId>(db, cardSpec, mode),
     work_items: jsonRepository<WorkItem, WorkItemId>(db, workItemSpec, mode),

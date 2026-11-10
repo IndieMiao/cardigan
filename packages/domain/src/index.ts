@@ -9,6 +9,7 @@ export type {
   TokenRequest,
 } from "./commands/core.js";
 export * from "./commands/delivery.js";
+export * from "./commands/employee.js";
 export * from "./commands/launch.js";
 export { type MergePlan, mergePlan, requestMerge } from "./commands/merge.js";
 export * from "./commands/merge-result.js";
@@ -19,6 +20,7 @@ export * from "./commands/runtime.js";
 export { pauseStandingAssignment } from "./commands/standing.js";
 export { canStartWork, workCompleted } from "./commands/workflow.js";
 export * from "./derived.js";
+export * from "./employee.js";
 export * from "./entities.js";
 export * from "./errors.js";
 export * from "./git-port.js";

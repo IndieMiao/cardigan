@@ -1,5 +1,6 @@
 // Shared vocabulary for entity types and the transition tables.
 export const states = {
+  employee: ["active", "inactive"],
   card: [
     "backlog",
     "todo",
@@ -73,6 +74,7 @@ export const states = {
   ],
 } as const;
 export type CardStatus = (typeof states.card)[number];
+export type EmployeeStatus = (typeof states.employee)[number];
 export type ProduceStatus = (typeof states.produce)[number];
 export type VerifyStatus = (typeof states.verify)[number];
 export type AssignmentStatus = (typeof states.assignment)[number];

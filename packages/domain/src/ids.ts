@@ -3,6 +3,7 @@ import { type Result, validationFailed } from "./errors.js";
 declare const idBrand: unique symbol;
 export type Id<Kind extends string> = string & { readonly [idBrand]: Kind };
 const formats = {
+  employee: ["E-", ""],
   card: ["C-", ""],
   work_item: ["W-", ""],
   assignment: ["A-", ""],
@@ -12,7 +13,10 @@ const formats = {
   decision: ["q(", ")"],
   human_action: ["h(", ")"],
 } as const;
-export type ReadableIdKind = keyof typeof formats;
+export type FormattedIdKind = keyof typeof formats;
+// Project-local allocation deliberately excludes global employee IDs.
+export type ReadableIdKind = Exclude<FormattedIdKind, "employee">;
+export type EmployeeId = Id<"employee">;
 export type CardId = Id<"card">;
 export type WorkItemId = Id<"work_item">;
 export type AssignmentId = Id<"assignment">;
@@ -36,7 +40,7 @@ const decimal = (value: string) =>
   positiveInteger(Number(value)) &&
   String(Number(value)) === value;
 
-export function formatId<K extends ReadableIdKind>(
+export function formatId<K extends FormattedIdKind>(
   kind: K,
   sequence: number,
 ): Result<Id<K>> {
@@ -47,7 +51,7 @@ export function formatId<K extends ReadableIdKind>(
   return { ok: true, value: `${prefix}${sequence}${suffix}` as Id<K> };
 }
 
-export function parseId<K extends ReadableIdKind>(
+export function parseId<K extends FormattedIdKind>(
   kind: K,
   input: unknown,
 ): Result<{ id: Id<K>; sequence: number }> {
