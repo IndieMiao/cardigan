@@ -15,7 +15,7 @@ import { persistEmployeeEffect, Store } from "@cardigan/store";
 import { uploadAvatarFile, validateLibraryAvatar } from "./avatar.js";
 import { loadConfig } from "./config.js";
 import { CliError, EXIT, formatCommandError } from "./errors.js";
-import { announceDataDir, systemClock } from "./host.js";
+import { announceDataDir, resolveGlobalActor, systemClock } from "./host.js";
 import type { CliIo } from "./io.js";
 import { resolveLaunchPaths } from "./paths.js";
 
@@ -119,6 +119,7 @@ export async function runEmployeeCommand(
     io.stdout(USAGE);
     return EXIT.ok;
   }
+  const actor = resolveGlobalActor(io);
   const { command, flags, id } = parse(args);
   // Configuration IO happens before the transaction; no secrets are needed.
   const profile = flags["launch-profile"];
@@ -160,7 +161,6 @@ export async function runEmployeeCommand(
         ids: tx.global_ids,
         ...(profiles === undefined ? {} : { launch_profiles: profiles }),
       };
-      const actor = { kind: "human" } as const;
       const patch: UpdateEmployeeInput = {
         ...(flags.name === undefined ? {} : { name: flags.name }),
         ...(flags.title === undefined ? {} : { title: flags.title }),

@@ -1,4 +1,5 @@
 import type {
+  Actor,
   Assignment,
   ProjectId,
   Runtime,
@@ -50,7 +51,7 @@ import {
 } from "./errors.js";
 import {
   announceDataDir,
-  humanActor,
+  resolveActor,
   resolveDataDir,
   resolveProject,
   runCommand,
@@ -196,6 +197,7 @@ export async function startAssignment(
   options: StartOptions,
 ): Promise<StartedAssignment> {
   const { store, io, project_id } = options;
+  const actor = resolveActor(io, project_id, store);
   rejectExternalTerminalAction(store, project_id, options.assignment_id);
   const capacity = await loadRunCapacityConfig({ env: io.env });
   for (const error of capacity.errors) io.stderr(error);
@@ -244,7 +246,7 @@ export async function startAssignment(
     operation: "启动 Assignment",
     target: assignment.id,
     project_id,
-    actor: humanActor(project_id),
+    actor,
     reduce: (state, actor, ports) =>
       queueRun(
         state,
@@ -279,7 +281,7 @@ export async function startAssignment(
         project: project_id,
         assignment_id: assignment.id,
         run,
-        actor: humanActor(project_id),
+        actor,
         reuse_session: true,
         prepare_worktree: () => prepareWorktree(options, entities),
         ...(resuming
@@ -300,7 +302,7 @@ export async function startAssignment(
       token_id: launched.token_id,
     };
   } catch (error) {
-    if (resuming) pauseStanding(store, project_id, assignment.id);
+    if (resuming) pauseStanding(store, project_id, assignment.id, actor);
     const message = formatLaunchError(assignment.id, error);
     if (message) throw new CliError(message, EXIT.failure);
     if (error instanceof HostLaunchError)
@@ -316,13 +318,14 @@ function pauseStanding(
   store: Store,
   project_id: ProjectId,
   assignment_id: Assignment["id"],
+  actor: Actor,
 ) {
   rejectExternalTerminalAction(store, project_id, assignment_id, "stop");
   return runCommand(store, {
     operation: "暂停常驻 PM",
     target: assignment_id,
     project_id,
-    actor: humanActor(project_id),
+    actor,
     reduce: (s, a, p) => pauseStandingAssignment(s, a, { assignment_id }, p),
     after: (tx) => {
       const at = systemClock.now();
@@ -393,11 +396,12 @@ export function abort(
   project_id: ProjectId,
   run_id: string,
   reason: string,
+  actor: Actor,
 ): void {
   try {
     applyCommand(store, {
       project: project_id,
-      actor: humanActor(project_id),
+      actor,
       clock: systemClock,
       reduce: (state, actor, ports) =>
         abortDispatch(state, actor, { run_id: run_id as never, reason }, ports),
@@ -414,7 +418,12 @@ export async function stopAssignment(input: {
   readonly assignment_id: Assignment["id"];
   readonly runtime: Runtime;
   readonly execution?: ExecutionConfig;
+  readonly actor?: Actor;
 }): Promise<{ released: boolean; aborted: boolean; paused?: boolean }> {
+  const actor = input.actor ?? {
+    kind: "human" as const,
+    project_id: input.project_id,
+  };
   const { assignment } = requireAssignment(
     input.store,
     input.project_id,
@@ -422,7 +431,12 @@ export async function stopAssignment(input: {
   );
   const ref = assignment.runtime_ref;
   if (assignment.scope === "standing" && assignment.role_id === "pm") {
-    const paused = pauseStanding(input.store, input.project_id, assignment.id);
+    const paused = pauseStanding(
+      input.store,
+      input.project_id,
+      assignment.id,
+      actor,
+    );
     try {
       if (ref) await closeStandingTerminal(input.runtime, ref);
     } finally {
@@ -458,7 +472,13 @@ export async function stopAssignment(input: {
       ),
   );
   if (unfinished !== undefined) {
-    abort(input.store, input.project_id, unfinished.id, "stopped by host");
+    abort(
+      input.store,
+      input.project_id,
+      unfinished.id,
+      "stopped by host",
+      actor,
+    );
   }
   // §9.1: the session is over, so its tokens die with it. A token that outlives
   // a stopped terminal could still read and write the project.
@@ -664,6 +684,7 @@ export async function runAssignmentCommand(
   const store = Store.open({ dataDir });
   try {
     const project_id = resolveProject(store, io, flags.project);
+    const actor = resolveActor(io, project_id, store);
     // Report invalid Assignments even when hc itself is unavailable.
     if (sub === "attach") attachRef(store, project_id, assignmentId);
     if (sub === "start")
@@ -671,7 +692,7 @@ export async function runAssignmentCommand(
     if (sub === "stop") {
       const { assignment } = requireAssignment(store, project_id, assignmentId);
       if (assignment.scope === "standing" && assignment.role_id === "pm") {
-        pauseStanding(store, project_id, assignment.id);
+        pauseStanding(store, project_id, assignment.id, actor);
         await scrubRunCredentials(execution, project_id, assignment.id);
       }
     }
@@ -701,6 +722,7 @@ export async function runAssignmentCommand(
 
     if (sub === "stop") {
       const result = await stopAssignment({
+        actor,
         store,
         project_id,
         assignment_id: assignmentId,

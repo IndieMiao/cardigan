@@ -14,7 +14,7 @@ import {
 import { persistMemberEffect, Store } from "@cardigan/store";
 import { uploadAvatarFile, validateLibraryAvatar } from "./avatar.js";
 import { CliError, EXIT, formatCommandError } from "./errors.js";
-import { announceDataDir, systemClock } from "./host.js";
+import { announceDataDir, resolveGlobalActor, systemClock } from "./host.js";
 import type { CliIo } from "./io.js";
 
 const USAGE = [
@@ -104,6 +104,7 @@ export async function runMemberCommand(
     io.stdout(USAGE);
     return EXIT.ok;
   }
+  const actor = resolveGlobalActor(io);
   const { command, flags, id } = parse(args);
   const dataDir = announceDataDir(io, flags["data-dir"]);
   const avatar =
@@ -138,7 +139,6 @@ export async function runMemberCommand(
         clock: systemClock,
         ids: tx.global_ids,
       };
-      const actor = { kind: "human" } as const;
       const patch: UpdateMemberInput = {
         ...(flags.name === undefined ? {} : { name: flags.name }),
         ...(flags.title === undefined ? {} : { title: flags.title }),

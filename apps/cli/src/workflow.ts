@@ -41,9 +41,10 @@ import { runContentCommand } from "./content.js";
 import { CliError, EXIT, formatCommandError } from "./errors.js";
 import {
   announceDataDir,
-  humanActor,
+  hasToken,
   issueTokenForAssignment,
   printToken,
+  resolveActor,
   resolveDataDir,
   resolveProject,
   roleInTransaction,
@@ -273,7 +274,7 @@ function cardSensitive(args: readonly string[], io: CliIo): number {
       operation: "修改敏感标记",
       target: card_id,
       project_id,
-      actor: humanActor(project_id),
+      actor: resolveActor(io, project_id, store),
       clock: systemClock,
       reduce: (state, actor, ports) => {
         const result = setCardSensitive(
@@ -388,8 +389,8 @@ function cardUpdate(args: readonly string[], io: CliIo): number {
   const store = openStoreFrom(io, flags);
   try {
     const project_id = resolveProject(store, io, optional(flags, "project"));
+    const actor = resolveActor(io, project_id, store);
     store.uow.run((tx) => {
-      const actor = humanActor(project_id);
       const ports = { clock: systemClock, ids: tx.ids };
       let state = loadCommandState(tx, project_id);
       if (changed.some((name) => name !== "superseded-by")) {
@@ -450,7 +451,7 @@ function cardCreate(args: readonly string[], io: CliIo): number {
       operation: "创建卡片",
       target: required(parsed.flags, "title"),
       project_id,
-      actor: humanActor(project_id),
+      actor: resolveActor(io, project_id, store),
       reduce: (state, actor, ports) =>
         createCard(
           state,
@@ -492,6 +493,8 @@ async function assignWorkItem(
 ): Promise<number> {
   // `--start` takes no value: assign and start the Assignment in one step.
   const start = args.includes("--start");
+  if (start && hasToken(io))
+    throw new CliError("Token 模式不能使用 assign --start。", EXIT.usage);
   const parsed = parseArgs(
     args.filter((argument) => argument !== "--start"),
     [],
@@ -519,14 +522,16 @@ async function assignWorkItem(
       io,
       optional(parsed.flags, "project"),
     );
+    const caller = resolveActor(io, project_id, store);
     let issued: ReturnType<typeof issueTokenForAssignment> | undefined;
+    let tokenStatus = "host_managed";
     const assignment = runCommand(store, {
       operation: "指派工作项",
       target: workItemId,
       project_id,
-      actor: humanActor(project_id),
-      reduce: (state, actor, ports) =>
-        assign(
+      actor: caller,
+      reduce: (state, actor, ports) => {
+        const result = assign(
           state,
           actor,
           {
@@ -536,11 +541,15 @@ async function assignWorkItem(
             ...(machine === undefined ? {} : { machine_id: machine }),
           },
           ports,
-        ),
+        );
+        if (result.ok && result.value.token_requests.length > 0)
+          tokenStatus = "pending_host_issuance";
+        return result;
+      },
       // `--start` issues the only token inside `startAssignment`, into the run
       // directory; issuing one here would print a token that is revoked at once.
       after: (tx, created) => {
-        if (start) return;
+        if (start || caller.kind !== "human") return;
         issued = issueTokenForAssignment(
           tx,
           project_id,
@@ -578,6 +587,10 @@ async function assignWorkItem(
           ? {}
           : { session: optional(parsed.flags, "hc-session") as string }),
       });
+    }
+    if (caller.kind === "assignment") {
+      io.stdout(`token_status=${tokenStatus}`);
+      return EXIT.ok;
     }
     if (issued === undefined) {
       throw new CliError("签发 Token 失败", EXIT.failure);
@@ -688,6 +701,7 @@ function pmRotate(args: readonly string[], io: CliIo): number {
       io,
       mode,
       rotateStandingPmInStore(store, project_id, mode, {
+        actor: resolveActor(io, project_id, store),
         ...(parsed.flags.external === true ? { external: true } : {}),
         ...(optional(parsed.flags, "employee") === undefined
           ? {}
@@ -845,6 +859,26 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
       io,
       optional(parsed.flags, "project"),
     );
+    const actor = resolveActor(io, project_id, store);
+    if (actor.kind === "assignment") {
+      // Token callers get exactly the domain view behind MCP list_needs_you,
+      // without the host-only diagnostics and notices appended below.
+      const view = store.uow.read((tx) => {
+        const result = listNeedsYou(
+          loadCommandState(tx, project_id),
+          actor,
+          systemClock,
+        );
+        if (!result.ok)
+          throw new CliError(
+            formatCommandError("读取待办", project_id, result.error),
+            EXIT.usage,
+          );
+        return result.value.data;
+      });
+      io.stdout(JSON.stringify(view, null, 2));
+      return EXIT.ok;
+    }
     const gate = (
       await loadMergeGateConfig({
         projectIds: store.listProjects().map((project) => project.id),
@@ -852,10 +886,7 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
       })
     ).forProject(project_id);
     const checks = store.uow.read((tx) => {
-      const view = projectSnapshot(
-        loadCommandState(tx, project_id),
-        humanActor(project_id),
-      );
+      const view = projectSnapshot(loadCommandState(tx, project_id), actor);
       return new Map(
         view.ok && gate.status === "enabled"
           ? view.value.data.cards.map((card) => [card.id, card.merge_check])
@@ -873,7 +904,7 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
     const { decisions, actions, incidents, noticeList, held } = store.uow.read(
       (tx) => {
         const state = loadCommandState(tx, project_id);
-        const needs = unwrap(listNeedsYou(state, humanActor(project_id))).data;
+        const needs = unwrap(listNeedsYou(state, actor)).data;
         return {
           held: needs.pm_held_merges,
           decisions: needs.decisions,
@@ -1069,7 +1100,7 @@ function needsYouRead(args: readonly string[], io: CliIo): number {
       operation: "标记知会已读",
       target: all ? "全部未读知会" : ids.join(", "),
       project_id,
-      actor: humanActor(project_id),
+      actor: resolveActor(io, project_id, store),
       reduce: (state, actor, ports) =>
         markNoticesRead(state, actor, { notice_ids: ids }, ports),
     });
@@ -1244,7 +1275,7 @@ function humanActionDone(args: readonly string[], io: CliIo): number {
       operation: "完成待办操作",
       target: humanActionId,
       project_id,
-      actor: humanActor(project_id),
+      actor: resolveActor(io, project_id, store),
       reduce: (state, actor, ports) =>
         completeHumanAction(
           state,

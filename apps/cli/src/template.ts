@@ -11,7 +11,7 @@ import { parse } from "yaml";
 import { CliError, EXIT } from "./errors.js";
 import {
   announceDataDir,
-  humanActor,
+  resolveActor,
   resolveProject,
   runCommand,
 } from "./host.js";
@@ -128,7 +128,7 @@ export async function runTemplateCommand(
             ? (params.definition.id ?? (flags.file as string))
             : params.template_id,
         project_id: project,
-        actor: humanActor(project),
+        actor: resolveActor(io, project, store),
         reduce: (s, a, p) => manageCardTemplate(s, a, params, p),
       });
       io.stdout(

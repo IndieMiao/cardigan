@@ -3,9 +3,11 @@ import { LaunchConfigError } from "@cardigan/roles";
 import { runAdminCommand } from "./admin.js";
 import { runAssignmentCommand } from "./assignment.js";
 import { runAvatarCommand } from "./avatar.js";
+import { tokenFileOption } from "./command-access.js";
 import { runContentCommand } from "./content.js";
 import { runEmployeeCommand } from "./employee.js";
 import { CliError, EXIT } from "./errors.js";
+import { authorizeCliInvocation } from "./host.js";
 import { attentionCommand, inboxCommand } from "./inbox.js";
 import type { CliIo } from "./io.js";
 import { runLaunchCommand } from "./launch.js";
@@ -32,6 +34,7 @@ export { CliError, EXIT } from "./errors.js";
 export {
   humanActor,
   issueTokenForAssignment,
+  resolveActor,
   resolveDataDir,
   resolveProject,
   runCommand,
@@ -57,6 +60,7 @@ const TOP_LEVEL_USAGE = [
   "  avatar list  列出内置头像素材库",
   "",
   "用法：cardigan <命令>",
+  "身份：CARDIGAN_TOKEN 或全局 --token-file <0600 文件>（二选一）；不提供时以人类身份操作。",
   "",
   "命令：",
   "  init             建库并执行迁移",
@@ -213,13 +217,14 @@ export async function main(
   io: CliIo = createProcessIo(),
   hooks: CliHooks = {},
 ): Promise<number> {
-  const [command, ...rest] = argv;
-
   try {
+    ({ argv, io } = tokenFileOption(argv, io));
+    const [command, ...rest] = argv;
     if (command === undefined || command === "--help" || command === "-h") {
       io.stdout(TOP_LEVEL_USAGE);
       return EXIT.ok;
     }
+    authorizeCliInvocation(argv, io);
     if (command === "launch") {
       return await runLaunchCommand(rest, io);
     }

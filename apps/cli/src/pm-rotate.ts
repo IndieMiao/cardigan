@@ -1,4 +1,5 @@
 import type {
+  Actor,
   ProjectId,
   RotateStandingPmResult,
   StandingMode,
@@ -15,7 +16,6 @@ import {
 } from "@cardigan/store";
 import { CliError, EXIT, formatCommandError } from "./errors.js";
 import {
-  humanActor,
   issueTokenForAssignment,
   printToken,
   roleInTransaction,
@@ -26,6 +26,7 @@ import type { CliIo } from "./io.js";
 const LABEL = { ops: "PM Ops", office: "PM Office" } as const;
 
 export interface RotateOptions {
+  readonly actor?: Actor;
   readonly external?: boolean;
   readonly employee_id?: string;
   /** Test seam: runs last inside the write transaction. */
@@ -50,7 +51,7 @@ export function rotateStandingPmInStore(
     const at = systemClock.now();
     const result = rotateStandingPm(
       loadCommandState(tx, project_id),
-      humanActor(project_id),
+      options.actor ?? { kind: "human", project_id },
       {
         standing_mode,
         ...(options.external === undefined

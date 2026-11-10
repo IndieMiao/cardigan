@@ -1,3 +1,11 @@
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  openSync,
+  readFileSync,
+} from "node:fs";
+import { resolve } from "node:path";
 import type {
   Actor,
   AssignmentId,
@@ -10,13 +18,19 @@ import type {
   RoleReference,
 } from "@cardigan/domain";
 import { issueTokenInTransaction } from "@cardigan/host";
-import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
+import {
+  authenticate,
+  loadCommandState,
+  persistEffect,
+} from "@cardigan/mcp-server";
 import { resolveDataDirectory } from "@cardigan/runtime-herdr";
 import type {
   IssuedToken,
   Store,
   StoreTransactionContext,
 } from "@cardigan/store";
+import { openStore } from "@cardigan/store";
+import { cliCommand, cliTool, requireCliTool } from "./command-access.js";
 import { CliError, EXIT, formatCommandError } from "./errors.js";
 import type { CliIo } from "./io.js";
 
@@ -29,6 +43,93 @@ export const systemClock: Clock = { now: () => new Date().toISOString() };
 
 export function humanActor(project_id: ProjectId): Actor {
   return { kind: "human", project_id };
+}
+
+export function hasToken(io: Pick<CliIo, "env" | "tokenFile">): boolean {
+  return io.env.CARDIGAN_TOKEN !== undefined || io.tokenFile !== undefined;
+}
+
+/** Global member/employee commands have no project to authenticate against. */
+export function resolveGlobalActor(io: Pick<CliIo, "env" | "tokenFile">): {
+  readonly kind: "human";
+} {
+  if (hasToken(io))
+    throw new CliError("此命令仅限人类操作，Token 模式不可用。", EXIT.usage);
+  return { kind: "human" };
+}
+
+/** Resolve the same identity as MCP; a supplied but unusable credential never
+ * falls back to human. Call before opening a command transaction. */
+export function resolveActor(
+  io: Pick<CliIo, "env" | "tokenFile" | "cwd">,
+  project_id: ProjectId,
+  store: Store,
+): Actor {
+  if (!hasToken(io)) return humanActor(project_id);
+  if (io.env.CARDIGAN_TOKEN !== undefined && io.tokenFile !== undefined)
+    throw new CliError(
+      "CARDIGAN_TOKEN 与 --token-file 不能同时提供。",
+      EXIT.usage,
+    );
+  let token = io.env.CARDIGAN_TOKEN;
+  if (io.tokenFile !== undefined) {
+    let fd: number | undefined;
+    try {
+      fd = openSync(
+        resolve(io.cwd, io.tokenFile),
+        constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+      );
+      const info = fstatSync(fd);
+      if (!info.isFile() || (info.mode & 0o7777) !== 0o600)
+        throw new CliError(
+          "Token 文件必须是权限为 0600 的普通文件。",
+          EXIT.usage,
+        );
+      token = readFileSync(fd, "utf8").trim();
+    } catch (error) {
+      if (error instanceof CliError) throw error;
+      throw new CliError("无法读取 Token 文件。", EXIT.usage);
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
+  }
+  const result = authenticate(store, token);
+  if (!result.ok)
+    throw new CliError(
+      "Token 无效、已撤销或所属 Assignment 非 active。",
+      EXIT.usage,
+    );
+  if (result.value.actor.project_id !== project_id)
+    throw new CliError("Token 无权访问此项目。", EXIT.usage);
+  return result.value.actor;
+}
+
+/** One fail-closed gate for every index.ts route, including commands that
+ * access the store/filesystem directly instead of running a domain command. */
+export function authorizeCliInvocation(
+  argv: readonly string[],
+  io: CliIo,
+): void {
+  if (!hasToken(io)) return;
+  const command = cliCommand(argv);
+  if (cliTool(command) === null)
+    throw new CliError("此命令仅限人类操作，Token 模式不可用。", EXIT.usage);
+  const flag = (name: string): string | undefined => {
+    let value: string | undefined;
+    for (let i = 0; i < argv.length; i++) {
+      const arg = argv[i] as string;
+      if (arg === `--${name}`) value = argv[++i];
+      else if (arg.startsWith(`--${name}=`)) value = arg.slice(name.length + 3);
+    }
+    return value;
+  };
+  const store = openStore({ dataDir: resolveDataDir(io, flag("data-dir")) });
+  try {
+    const project = resolveProject(store, io, flag("project"));
+    requireCliTool(resolveActor(io, project, store), command);
+  } finally {
+    store.close();
+  }
 }
 
 export function resolveDataDir(io: CliIo, override?: string): string {

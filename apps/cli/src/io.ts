@@ -41,6 +41,8 @@ export interface SignalHost {
  * signal functions so no real harness CLI is ever started.
  */
 export interface CliIo {
+  /** Global CLI option; contents are never included in diagnostics. */
+  readonly tokenFile?: string;
   readonly env: Record<string, string | undefined>;
   readonly cwd: string;
   readonly platform: NodeJS.Platform;

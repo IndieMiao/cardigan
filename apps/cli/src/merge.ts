@@ -14,7 +14,7 @@ import { openStore as openCardiganStore, type Store } from "@cardigan/store";
 import { CliError, EXIT, formatCommandError } from "./errors.js";
 import {
   announceDataDir,
-  humanActor,
+  resolveActor,
   resolveDataDir,
   resolveProject,
   runCommand,
@@ -148,7 +148,7 @@ async function mergeRecheck(
       operation: "重新检查合并",
       target: id,
       project_id,
-      actor: humanActor(project_id),
+      actor: resolveActor(io, project_id, store),
       clock: systemClock,
       reduce: (state, actor, ports) => {
         const plan = prepareMergePlan(state, id);
@@ -324,7 +324,7 @@ function mergeConfirm(
       operation: option === "merge" ? "确认合并" : "暂不合并",
       target: id,
       project_id,
-      actor: humanActor(project_id),
+      actor: resolveActor(io, project_id, store),
       reduce: (state, actor, ports) =>
         recordDecision(
           state,
@@ -371,7 +371,7 @@ function mergeRequest(args: readonly string[], io: CliIo): number {
       operation: "请求合并",
       target: id,
       project_id,
-      actor: humanActor(project_id),
+      actor: resolveActor(io, project_id, store),
       reduce: (state, actor, ports) =>
         requestMerge(state, actor, { card_id: id }, ports),
       clock: systemClock,
@@ -414,7 +414,7 @@ function mergeRequestChanges(args: readonly string[], io: CliIo): number {
       operation: "退回修改",
       target: id,
       project_id,
-      actor: humanActor(project_id),
+      actor: resolveActor(io, project_id, store),
       reduce: (state, actor, ports) =>
         recordDecision(
           state,

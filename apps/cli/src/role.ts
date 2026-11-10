@@ -29,7 +29,12 @@ import {
   Store,
 } from "@cardigan/store";
 import { CliError, EXIT, formatCommandError } from "./errors.js";
-import { announceDataDir, resolveProject, systemClock } from "./host.js";
+import {
+  announceDataDir,
+  resolveActor,
+  resolveProject,
+  systemClock,
+} from "./host.js";
 import type { CliIo } from "./io.js";
 import { readRoleFile } from "./role-file.js";
 
@@ -225,12 +230,12 @@ export async function runRoleCommand(
     }
     if (command === "upgrade")
       return upgradeFromDefault(store, io, project, id, !!flags["dry-run"]);
+    const actor = resolveActor(io, project, store);
     const role = store.uow.run((tx) => {
       const state = {
         project_id: project,
         roles: listRoleVersions(tx, project),
       };
-      const actor = { kind: "human", project_id: project } as const;
       const ports = { clock: systemClock, ids: tx.ids };
       let result: Result<RoleEffect>;
       switch (command) {
@@ -433,7 +438,7 @@ function upgradeFromDefault(
     fail(
       `${id} 不是默认角色包里的角色，不能按默认包升级；默认角色有：${DEFAULT_ROLE_IDS.filter(isDefaultRoleId).join("、")}`,
     );
-  const human = { kind: "human", project_id: project } as const;
+  const human = resolveActor(io, project, store);
   const source = (tx: Parameters<typeof listRoleVersions>[0]) => {
     const latest = getRoleVersion(tx, project, id);
     if (!latest)

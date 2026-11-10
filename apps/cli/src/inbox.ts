@@ -7,8 +7,9 @@ import {
   openStore,
   type Store,
 } from "@cardigan/store";
+import { requireCliTool } from "./command-access.js";
 import { CliError, EXIT } from "./errors.js";
-import { announceDataDir, resolveProject } from "./host.js";
+import { announceDataDir, resolveActor, resolveProject } from "./host.js";
 import type { CliIo } from "./io.js";
 
 /**
@@ -95,13 +96,25 @@ export function inboxCommand(args: readonly string[], io: CliIo): number {
   const store = open(io, flags);
   try {
     const project_id = resolveProject(store, io, flags.project);
-    const assignment = flags.assignment;
+    const actor = resolveActor(io, project_id, store);
+    requireCliTool(actor, "inbox");
+    if (
+      actor.kind === "assignment" &&
+      flags.assignment !== undefined &&
+      flags.assignment !== actor.assignment_id
+    )
+      throw new CliError(
+        "Token 模式只能读取所属 Assignment 的收件箱，不能指定其他 --assignment。",
+        EXIT.usage,
+      );
+    const assignment =
+      actor.kind === "assignment" ? actor.assignment_id : flags.assignment;
     const wanted: Assignment["id"] | undefined =
       assignment === undefined ? undefined : (assignment as Assignment["id"]);
     // §7.1: a standing PM is addressed logically (pm_office / pm_ops) as well as
     // directly, so asking for its Assignment must not hide those notifications.
     const logical =
-      wanted === undefined
+      wanted === undefined || actor.kind === "assignment"
         ? undefined
         : standingRecipient(store, project_id, wanted);
     const rows = store

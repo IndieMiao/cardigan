@@ -19,7 +19,7 @@ import { openStore as openCardiganStore, type Store } from "@cardigan/store";
 import { CliError, EXIT, formatCommandError } from "./errors.js";
 import {
   announceDataDir,
-  humanActor,
+  resolveActor,
   resolveDataDir,
   resolveProject,
   runCommand,
@@ -313,7 +313,7 @@ function cleanCommand(
       operation: option === "keep" ? "保留工作区" : "清理工作区",
       target: id,
       project_id,
-      actor: humanActor(project_id),
+      actor: resolveActor(io, project_id, store),
       reduce: (state, actor, ports) =>
         recordDecision(
           state,
