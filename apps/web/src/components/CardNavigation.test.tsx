@@ -420,6 +420,8 @@ test("U5b attachment grid retains true metadata, only previews bitmaps and resto
       attachments={[
         attachment({
           id: "F-1",
+          original_filename: "截图.png",
+          note: "修复后的界面",
           uploader_role: "tester",
           uploaded_at: when,
           supersedes: "F-0",
@@ -451,11 +453,16 @@ test("U5b attachment grid retains true metadata, only previews bitmaps and resto
     false,
   );
   expect(
-    screen.getByRole("link", { name: "下载 F-1" }).hasAttribute("download"),
+    screen
+      .getByRole("link", { name: "下载 截图.png" })
+      .hasAttribute("download"),
   ).toBe(true);
-  const trigger = screen.getByRole("button", { name: "预览 F-1" });
+  expect(screen.getByText("修复后的界面")).toBeTruthy();
+  expect(screen.getByText("F-2")).toBeTruthy();
+  const trigger = screen.getByRole("button", { name: "预览 截图.png" });
   fireEvent.click(trigger);
-  await screen.findByRole("dialog", { name: "附件 F-1" });
+  const preview = await screen.findByRole("dialog", { name: "附件 截图.png" });
+  expect(within(preview).getByText("修复后的界面")).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "下一张" }));
   const next = await screen.findByRole("dialog", { name: "附件 F-2" });
   expect(within(next).getByRole("img").getAttribute("src")).toBe(

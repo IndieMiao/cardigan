@@ -1,5 +1,6 @@
 import type { AttachmentView } from "../api.js";
 import { statusLabel } from "../status.js";
+import { AttachmentCaption, attachmentName } from "./AttachmentCaption.js";
 import { AttachmentPreview, isBitmap } from "./AttachmentPreview.js";
 import { EmployeeIdentity } from "./EmployeeIdentity.js";
 import { Time } from "./Foundation.js";
@@ -35,7 +36,7 @@ function Gallery({ attachments }: { attachments: readonly AttachmentView[] }) {
               </span>
             </div>
           )}
-          <strong>{a.id}</strong>
+          <AttachmentCaption attachment={a} />
           <EmployeeIdentity
             {...a}
             author={a.uploaded_by}
@@ -50,7 +51,7 @@ function Gallery({ attachments }: { attachments: readonly AttachmentView[] }) {
             </span>
           )}
           <a href={a.download_path} download>
-            下载 {a.id}
+            下载 {attachmentName(a)}
           </a>
         </li>
       ))}

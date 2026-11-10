@@ -64,6 +64,18 @@ export function supportTools(options: SupportToolOptions = {}) {
           .regex(/^[a-f0-9]{64}$/u)
           .optional(),
         mime: z.string().min(1),
+        original_filename: z
+          .string()
+          .optional()
+          .describe(
+            "Original filename for display; directory components are removed, max 200 characters, no control characters.",
+          ),
+        note: z
+          .string()
+          .optional()
+          .describe(
+            "One-line attachment description, max 200 characters, no control characters.",
+          ),
         kind: z.enum(["artifact", "evidence"]),
         attach_to: z.discriminatedUnion("kind", [
           z.object({ kind: z.literal("timeline_entry"), id: entryId }),

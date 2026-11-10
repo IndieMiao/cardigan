@@ -266,6 +266,8 @@ function affectsCard(
 /** Attachment metadata as the browser gets it; the blob is a separate request. */
 export interface AttachmentView extends WebAuthorView {
   readonly id: string;
+  readonly original_filename?: string;
+  readonly note?: string;
   readonly mime: string;
   readonly size: number;
   readonly sha256: string;
@@ -332,6 +334,10 @@ export function attachmentViews(
             };
       return {
         id: attachment.id,
+        ...(attachment.original_filename === undefined
+          ? {}
+          : { original_filename: attachment.original_filename }),
+        ...(attachment.note === undefined ? {} : { note: attachment.note }),
         mime: attachment.mime,
         size: attachment.size,
         sha256: attachment.sha256,
