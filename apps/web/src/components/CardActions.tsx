@@ -19,6 +19,22 @@ const labels = {
   supersede: "标记被取代",
 };
 
+/**
+ * C-69: unmarking restarts the auto-merge timeout; mention it only when the
+ * project has it on. The flag is already saved, so a failed read stays silent.
+ */
+async function unmarkNote(client: CardiganClient, projectId: string) {
+  try {
+    const minutes = (await client.preferences(projectId))
+      .auto_merge_after_minutes;
+    return minutes === null
+      ? ""
+      : `如有等你处理的合并确认，从现在起重新计时，${minutes} 分钟内无人处理将按项目设置自动合并。`;
+  } catch {
+    return "";
+  }
+}
+
 export function CardActions({
   card,
   client,
@@ -51,7 +67,9 @@ export function CardActions({
       await client.setCardSensitive(projectId, card.id, next, key);
       keys.current.delete(request);
       setMessage(
-        next ? "已标为敏感：合并确认将由你亲自处理。" : "已取消敏感标记。",
+        next
+          ? "已标为敏感：合并确认将由你亲自处理。"
+          : `已取消敏感标记。${await unmarkNote(client, projectId)}`,
       );
       onSaved();
     } catch (cause) {
