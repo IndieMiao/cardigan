@@ -3005,3 +3005,70 @@ body[data-lightbox="open"] .drawer-overlay {
   margin-inline-start: calc(var(--gap) / 3);
   font-size: var(--text-xs);
 }
+
+/* V10b: template management uses the shared theme and responsive settings shell. */
+.settings-layout:has(.template-settings) {
+  grid-template-columns: 8rem minmax(0, 1fr);
+}
+.template-settings,
+.template-detail,
+.template-form fieldset {
+  min-width: 0;
+}
+.template-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+.template-table-scroll {
+  overflow-x: auto;
+}
+.template-table-scroll table {
+  width: 100%;
+}
+.template-detail,
+.template-form {
+  margin-top: 1.5rem;
+}
+.template-form fieldset {
+  display: grid;
+  gap: 0.75rem;
+}
+.template-form label,
+.template-detail > label {
+  display: grid;
+  gap: 0.25rem;
+}
+.template-form label:has(input[type="checkbox"]) {
+  display: flex;
+  align-items: center;
+}
+.template-form input:not([type="checkbox"]),
+.template-form textarea,
+.template-settings .template-form select {
+  width: 100%;
+  min-width: 0;
+}
+.template-fields {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.5rem 1rem;
+}
+.template-fields dd,
+.template-diff dd {
+  margin: 0;
+}
+.template-settings .template-diff pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.card-template {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+@media (max-width: 640px) {
+  .settings-layout:has(.template-settings) {
+    grid-template-columns: 1fr;
+  }
+}

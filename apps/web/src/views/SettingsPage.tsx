@@ -6,6 +6,7 @@ import {
 } from "../api.js";
 import { PageTitle } from "../components/Foundation.js";
 import { useResource } from "../useResource.js";
+import { TemplateSettings } from "./TemplateSettings.js";
 
 export function SettingsPage({
   client,
@@ -16,6 +17,7 @@ export function SettingsPage({
   projectId: string;
   revision?: number;
 }) {
+  const [tab, setTab] = useState("preferences");
   const load = useCallback(
     () => client.preferences(projectId),
     [client, projectId],
@@ -23,20 +25,36 @@ export function SettingsPage({
   const resource = useResource(load, revision);
   return (
     <>
-      <PageTitle title="设置" description="管理当前项目的偏好。" />
+      <PageTitle title="设置" description="管理当前项目的偏好和卡片模板。" />
       <div className="settings-layout">
         <nav aria-label="设置分栏">
           <button
             type="button"
             onClick={() => {
-              document.getElementById("preferences")?.focus();
+              setTab("preferences");
             }}
-            aria-current="page"
+            aria-current={tab === "preferences" ? "page" : undefined}
           >
             偏好
           </button>
+          <button
+            type="button"
+            aria-current={tab === "templates" ? "page" : undefined}
+            onClick={() => setTab("templates")}
+          >
+            卡片模板
+          </button>
         </nav>
+        {tab === "templates" && (
+          <TemplateSettings
+            key={projectId}
+            client={client}
+            projectId={projectId}
+            revision={revision}
+          />
+        )}
         <section
+          hidden={tab !== "preferences"}
           id="preferences"
           tabIndex={-1}
           aria-labelledby="preferences-title"

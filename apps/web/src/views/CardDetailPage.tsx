@@ -13,6 +13,7 @@ import { CardRecords } from "../components/CardRecords.js";
 import { CardSectionNav } from "../components/CardSectionNav.js";
 import { CardSidebar, CardWorkItems } from "../components/CardSidebar.js";
 import { CardSuperseded } from "../components/CardSuperseded.js";
+import { CardTemplate } from "../components/CardTemplate.js";
 import {
   CommentBox,
   type CommentBoxHandle,
@@ -360,6 +361,13 @@ function CardContent({
                 </span>
               </>
             }
+          />
+          <CardTemplate
+            key={card.id}
+            detail={detail}
+            client={client}
+            projectId={projectId}
+            onSaved={reload}
           />
           <CardActions
             card={card}

@@ -9,6 +9,8 @@ import {
   type DomainError,
   issueInstruction,
   latestMergeCheck,
+  manageCardTemplate,
+  markCardDone,
   parseId,
   parseTimelineEntryId,
   postComment,
@@ -19,6 +21,7 @@ import {
   recordDecision,
   setProjectPreferences,
   supersedeCard,
+  type TemplateChange,
   updateCard,
   updateWorkItem,
   uploadAttachment,
@@ -41,6 +44,8 @@ import {
   sendJson,
 } from "./http.js";
 
+import { previewPorts } from "./read.js";
+
 const text = z
   .string()
   .refine((s) => s.trim().length > 0, "Text must not be blank");
@@ -53,6 +58,66 @@ const entryId = z
   .string()
   .refine((s) => parseTimelineEntryId(s).ok)
   .transform((s) => must(parseTimelineEntryId(s)).id);
+// Transport shape only; all template rules stay in the V10a domain command.
+const templateDefinition = z
+  .object({
+    id: z.string(),
+    title: z.string(),
+    description: z.string(),
+    requires_repo: z.boolean(),
+    merge: z.enum(["none", "confirm", "auto"]),
+    require_acceptance_criteria: z.boolean(),
+    work_items: z.array(
+      z
+        .object({
+          key: z.string(),
+          title: z.string(),
+          role_id: z.string(),
+          required: z.boolean(),
+          kind: z.enum(["produce", "verify"]),
+          target_work_item_key: z.string().optional(),
+        })
+        .strict(),
+    ),
+    primary_work_item_key: z.string().nullable(),
+    completion: z.discriminatedUnion("mode", [
+      z.object({ mode: z.literal("human_mark_done") }).strict(),
+      z.object({ mode: z.literal("review"), reviewer: z.string() }).strict(),
+    ]),
+  })
+  .strict();
+const templateChange = z.discriminatedUnion("action", [
+  z
+    .object({ action: z.literal("add"), definition: templateDefinition })
+    .strict(),
+  z
+    .object({ action: z.literal("update"), definition: templateDefinition })
+    .strict(),
+  z
+    .object({
+      action: z.literal("copy"),
+      template_id: z.string(),
+      new_id: z.string(),
+      version: z.number().int().positive().optional(),
+    })
+    .strict(),
+  z.object({ action: z.literal("activate"), template_id: z.string() }).strict(),
+  z
+    .object({ action: z.literal("deactivate"), template_id: z.string() })
+    .strict(),
+  z
+    .object({
+      action: z.literal("rollback"),
+      template_id: z.string(),
+      version: z.number().int().positive(),
+    })
+    .strict(),
+]);
+const requiredKey = z
+  .string()
+  .min(1)
+  .max(256)
+  .refine((s) => s.trim().length > 0);
 const comment = z.object({
   body: text,
   work_item_id: id("work_item").optional(),
@@ -217,12 +282,51 @@ function cardResult<T>(result: Result<T>, operation: string): Result<T> {
   return { ok: false, error: { ...result.error, message } };
 }
 const routes =
-  /^\/(cards|decisions|human-actions)\/([^/]+)\/(comments|instructions|attachments|resolve|complete|update|cancel|supersede|recheck-merge)$/u;
+  /^\/(cards|decisions|human-actions)\/([^/]+)\/(comments|instructions|attachments|resolve|complete|update|cancel|supersede|recheck-merge|mark-done)$/u;
 /** Returns false for read routes, leaving M5.1's handlers and method checks intact. */
 export async function serveWrite(
   c: WriteContext,
   rest: string,
 ): Promise<boolean> {
+  if (rest === "/card-templates" || rest === "/card-templates/validate") {
+    if (rest === "/card-templates" && c.req.method === "GET") return false;
+    if (c.req.method !== "POST") methodNotAllowed(["POST"]);
+    c.authorize();
+    const body = await readJsonBody(c.req);
+    // Zod checks transport types; domain rejects invalid unions, references and lifecycle changes.
+    const input = parsed(
+      templateChange,
+      body,
+      "模板字段格式不正确，请检查表单。",
+    ) as TemplateChange;
+    if (rest.endsWith("/validate")) {
+      c.authorize();
+      const result = c.store.uow.read((tx) =>
+        manageCardTemplate(
+          loadCommandState(tx, c.project_id),
+          { kind: "human", project_id: c.project_id },
+          input,
+          previewPorts(c.clock.now()),
+        ),
+      );
+      sendJson(c.res, 200, {
+        valid: result.ok,
+        reason: result.ok ? null : result.error.message,
+      });
+    } else {
+      const key = parsed(
+        requiredKey,
+        c.req.headers["idempotency-key"],
+        "模板写入需要 Idempotency-Key",
+      );
+      const output = run(
+        { ...c, idempotency: { key, request: { method: "POST", rest, body } } },
+        (s, a, ports) => manageCardTemplate(s, a, input, ports),
+      );
+      sendJson(c.res, 200, output);
+    }
+    return true;
+  }
   if (rest === "/preferences") {
     if (c.req.method === "GET") return false;
     if (c.req.method !== "POST") methodNotAllowed(["GET", "POST"]);
@@ -283,6 +387,7 @@ export async function serveWrite(
           "cancel",
           "supersede",
           "recheck-merge",
+          "mark-done",
         ]
       : group === "decisions"
         ? ["comments", "resolve"]
@@ -296,6 +401,8 @@ export async function serveWrite(
   );
   c.authorize();
   const header = c.req.headers["idempotency-key"];
+  if (operation === "mark-done")
+    parsed(requiredKey, header, "标记完成需要 Idempotency-Key");
   const context: CommandContext = {
     ...c,
     ...(header === undefined
@@ -330,7 +437,23 @@ export async function serveWrite(
   let output: unknown;
   if (group === "cards") {
     const card_id = parsed(id("card"), key);
-    if (operation === "recheck-merge") {
+    if (operation === "mark-done") {
+      const input = defined(
+        parsed(
+          z
+            .object({
+              result: text,
+              attachments: z.array(z.string()).optional(),
+            })
+            .strict(),
+          body,
+          "请填写非空完成结果，并选择同卡证据附件。",
+        ),
+      );
+      output = run(context, (s, a, ports) =>
+        markCardDone(s, a, { card_id, ...input }, ports),
+      );
+    } else if (operation === "recheck-merge") {
       const input = parsed(
         z.object({ completion_id: id("delivery") }).strict(),
         body,
