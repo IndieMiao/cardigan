@@ -16,6 +16,7 @@ export * from "./commands/delivery.js";
 export * from "./commands/employee.js";
 export * from "./commands/inactive-run.js";
 export * from "./commands/launch.js";
+export * from "./commands/member.js";
 export {
   type MergePlan,
   mergePlan,
@@ -46,6 +47,7 @@ export * from "./commands/queries.js";
 export * from "./commands/release.js";
 export * from "./commands/role.js";
 export * from "./commands/runtime.js";
+export * from "./commands/sensitive.js";
 export { pauseStandingAssignment } from "./commands/standing.js";
 export * from "./commands/templates.js";
 export { canStartWork, workCompleted } from "./commands/workflow.js";
@@ -55,6 +57,7 @@ export * from "./entities.js";
 export * from "./errors.js";
 export * from "./git-port.js";
 export * from "./ids.js";
+export * from "./member.js";
 export * from "./notification.js";
 export * from "./ports.js";
 export * from "./preferences.js";

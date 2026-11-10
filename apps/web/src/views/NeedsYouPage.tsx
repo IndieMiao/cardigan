@@ -353,6 +353,13 @@ function MergeConfirmation({
     <article className="needs-item needs-merge" aria-label={`合并确认 ${q.id}`}>
       <DecisionMeta q={q} projectId={projectId} elapsed={elapsed} />
       <h3 className="needs-question">{decisionTitle(q)}</h3>
+      {q.decider === "role:pm" && !confirmed && (
+        <p className="hint">
+          PM
+          正在代确认。你可以直接选择合并、暂不合并或退回修改，按你的拍板记录，PM
+          之后不能再处理这一条；选择合并仍要通过合并闸门检查。
+        </p>
+      )}
       {merge?.merge_gate_invalid && (
         <p className="error">合并闸门配置无效，请查看 server 启动日志</p>
       )}
@@ -845,6 +852,18 @@ function NeedsContent({
               ))}
             </section>
           )}
+          {!!data.pm_held_merges?.length && (
+            <section className="needs-group" aria-label="PM 代确认中的合并">
+              <h2>PM 代确认中的合并（{data.pm_held_merges.length}）</h2>
+              <p className="hint">
+                不需要你处理；想自己拍板时可以直接处理，不用关闭“合并由 PM
+                代确认”。
+              </p>
+              {data.pm_held_merges.map((q) => (
+                <MergeConfirmation key={q.id} q={q} {...props} />
+              ))}
+            </section>
+          )}
           {!!other.length && (
             <section className="needs-group" aria-label="其他拍板">
               <h2>其他拍板（{other.length}）</h2>
@@ -944,6 +963,7 @@ function Notices({
                   : "PM 代拍"
               }
             />
+            <EmployeeIdentity {...n} showTitle={false} />
             <IdTag id={n.decision_id} label="拍板" />
             {n.card_id && <CardLink projectId={projectId} id={n.card_id} />}
             <Time value={n.at} />

@@ -51,6 +51,7 @@ export const getUpdatesTool = defineTool({
     const authors = store.uow.read((tx) => ({
       assignments: tx.assignments.list(project_id),
       employees: tx.employees?.list() ?? [],
+      members: tx.members?.list() ?? [],
     }));
     return {
       card_id: cardId ?? null,

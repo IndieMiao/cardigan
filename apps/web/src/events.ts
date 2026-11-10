@@ -4,6 +4,7 @@ export const EVENT_LABELS: Readonly<Record<string, string>> = {
   card_created: "创建了卡片",
   card_updated: "更新了卡片",
   card_superseded: "标记了卡片的取代关系",
+  card_sensitivity_changed: "修改了卡片的敏感标记",
   work_item_created: "创建了工作项",
   work_item_updated: "更新了工作项",
   work_item_assigned: "指派了工作项",

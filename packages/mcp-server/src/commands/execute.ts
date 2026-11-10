@@ -30,6 +30,7 @@ export function loadCommandState(
     project_preferences: tx.project_preferences?.list(project_id) ?? [],
     card_templates: tx.card_templates?.list(project_id) ?? [],
     employees: tx.employees?.list() ?? [],
+    members: tx.members?.list() ?? [],
     employee_activity: tx.employees?.assignmentActivity?.() ?? [],
     ...(project_settings ? { project_settings } : {}),
     cards,

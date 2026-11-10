@@ -9,6 +9,7 @@ import { CliError, EXIT } from "./errors.js";
 import { attentionCommand, inboxCommand } from "./inbox.js";
 import type { CliIo } from "./io.js";
 import { runLaunchCommand } from "./launch.js";
+import { runMemberCommand } from "./member.js";
 import { runMergeCommand } from "./merge.js";
 import { runPreferenceCommand } from "./preference.js";
 import { runTemplateCommand } from "./template.js";
@@ -51,6 +52,7 @@ export { runWorktreeCommand } from "./worktree.js";
 
 const TOP_LEVEL_USAGE = [
   "cardigan — 卡片式多 Agent 协作开发系统",
+  "  member add|list|update|deactivate|activate  管理全局成员（当前所有者）",
   "  employee add|list|update|deactivate|activate  管理全局员工",
   "  avatar list  列出内置头像素材库",
   "",
@@ -68,6 +70,7 @@ const TOP_LEVEL_USAGE = [
   "  card create      按模板建卡（默认 dev）",
   "  card done        用 --result 记录结果并完成人工完成的卡片，可重复 --file 附证据",
   "  card update      修改或取消卡片；--superseded-by <C-m> 标记取代（已完成卡片不能取消；见 cardigan card --help）",
+  "  card sensitive   <C-n> on|off 标记或取消敏感：被标记卡片的合并确认一律由你亲自处理",
   "  comment add      发评论：--text <内容> 或 --text-file <路径>，可重复 --file 附文件，--note <说明>",
   "  attachment add   上传附件：--file <路径> [--note <说明>] [--kind evidence|artifact] [--basis <q(n)>] [--entry <C-n#k>]",
   "  assign           建 Assignment 并在同一事务里签发 Token",
@@ -77,7 +80,7 @@ const TOP_LEVEL_USAGE = [
   "  inbox            待投递和投递失败的通知（--assignment A-n 只看一个）",
   "  attention        升级通知与失联的 Assignment",
   "  assignment start|stop|attach  启动/停止/观察终端；attach --interactive 接管输入，--print 只打印命令",
-  "  merge status|confirm|request|request-changes  查看或确认合并、重新发起确认、退回修改（--reason 必填）",
+  "  merge status|confirm|hold|request|request-changes  查看、确认或暂不合并、重新发起确认、退回修改（--reason 必填）；PM 代确认中的合并也可直接处理",
   "  worktree diff|clean|keep      看 worktree 改动、强制清理或保留（M4）",
   "  web set-password 交互式设置 Workbench 登录密码（M5）",
   "  launch           按启动配置启动 Agent CLI（见 cardigan launch --help）",
@@ -220,6 +223,7 @@ export async function main(
     if (command === "launch") {
       return await runLaunchCommand(rest, io);
     }
+    if (command === "member") return await runMemberCommand(rest, io);
     if (command === "employee") return await runEmployeeCommand(rest, io);
     if (command === "avatar") return runAvatarCommand(rest, io);
     if (command === "init" || command === "project" || command === "role") {

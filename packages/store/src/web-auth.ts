@@ -5,6 +5,8 @@ import {
   timingSafeEqual,
 } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
+import { activeOwner, type MemberId } from "@cardigan/domain";
+import { createMemberRepository } from "./members.js";
 
 /**
  * The human's Workbench password and its sessions (§14, M5 plan §3.2).
@@ -33,6 +35,7 @@ export interface WebCredential {
 }
 
 export interface WebSession {
+  readonly member_id: MemberId | null;
   readonly created_at: string;
   readonly last_seen_at: string;
   readonly expires_at: string;
@@ -190,19 +193,22 @@ export function createWebSession(
   const token = randomBytes(32).toString("base64url");
   const created_at = now();
   const session: WebSession = {
+    member_id:
+      activeOwner(createMemberRepository(db, "read").list())?.id ?? null,
     created_at,
     last_seen_at: created_at,
     expires_at: new Date(Date.parse(created_at) + ttlMs).toISOString(),
     revoked_at: null,
   };
   db.prepare(
-    "INSERT INTO web_sessions (id_hash, created_at, last_seen_at, expires_at, revoked_at) " +
-      "VALUES (?, ?, ?, ?, NULL)",
+    "INSERT INTO web_sessions (id_hash, created_at, last_seen_at, expires_at, revoked_at, member_id) " +
+      "VALUES (?, ?, ?, ?, NULL, ?)",
   ).run(
     hashWebSessionToken(token),
     session.created_at,
     session.last_seen_at,
     session.expires_at,
+    session.member_id,
   );
   return { token, session };
 }
@@ -222,10 +228,11 @@ export function findWebSession(
   const id_hash = hashWebSessionToken(token);
   const row = db
     .prepare(
-      "SELECT created_at, last_seen_at, expires_at, revoked_at FROM web_sessions WHERE id_hash = ?",
+      "SELECT created_at, last_seen_at, expires_at, revoked_at, member_id FROM web_sessions WHERE id_hash = ?",
     )
     .get(id_hash) as
     | {
+        member_id: MemberId | null;
         created_at: string;
         last_seen_at: string;
         expires_at: string;
@@ -236,6 +243,7 @@ export function findWebSession(
     return undefined;
   }
   const session: WebSession = {
+    member_id: row.member_id,
     created_at: String(row.created_at),
     last_seen_at: String(row.last_seen_at),
     expires_at: String(row.expires_at),
@@ -248,6 +256,16 @@ export function findWebSession(
   ) {
     return undefined;
   }
+  let member_id = session.member_id;
+  if (member_id === null) {
+    member_id =
+      activeOwner(createMemberRepository(db, "read").list())?.id ?? null;
+    if (member_id !== null) {
+      db.prepare(
+        "UPDATE web_sessions SET member_id = ? WHERE id_hash = ? AND member_id IS NULL",
+      ).run(member_id, id_hash);
+    }
+  }
   const staleBefore = new Date(
     Date.parse(at) - TOUCH_INTERVAL_MS,
   ).toISOString();
@@ -256,7 +274,7 @@ export function findWebSession(
       "UPDATE web_sessions SET last_seen_at = ? WHERE id_hash = ? AND last_seen_at < ?",
     ).run(at, id_hash, staleBefore);
   }
-  return session;
+  return { ...session, member_id };
 }
 
 /** Log out one session; a second call is a no-op. */

@@ -1,5 +1,6 @@
 // Shared vocabulary for entity types and the transition tables.
 export const states = {
+  member: ["active", "inactive"],
   employee: ["active", "inactive"],
   card: [
     "backlog",
@@ -87,3 +88,4 @@ export type HumanActionStatus = (typeof states.human_action)[number];
 export type MachineStatus = (typeof states.machine)[number];
 export type ApprovalStatus = (typeof states.approval)[number];
 export type ReviewVerdict = (typeof states.verdict)[number];
+export type MemberStatus = (typeof states.member)[number];

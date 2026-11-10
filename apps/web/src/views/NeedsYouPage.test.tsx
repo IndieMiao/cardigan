@@ -1244,3 +1244,48 @@ test("notices list delegated merges and decisions without blocking, and can be m
   const read = within(group).getByRole("article", { name: "知会 q(8)" });
   expect(within(read).queryByRole("button", { name: "标为已读" })).toBeNull();
 });
+
+test("PM-held merges are listed without counting as waiting, and the human can answer them directly", async () => {
+  const recordDecision = vi.fn().mockResolvedValue(undefined);
+  render(
+    <NeedsYouPage
+      client={fakeClient({
+        needsYou: async () => ({
+          ...page([]),
+          human_actions: [],
+          pm_held_merges: [
+            q({ id: "q(9)", decider: "role:pm", blocking: false }),
+          ],
+        }),
+        recordDecision,
+      })}
+      projectId="p-1"
+    />,
+  );
+  const group = await screen.findByRole("region", {
+    name: "PM 代确认中的合并",
+  });
+  expect(screen.queryByText(/件事等你处理/)).toBeNull();
+  const item = within(group).getByRole("article", { name: "合并确认 q(9)" });
+  expect(within(item).getByText(/PM 正在代确认/)).toBeTruthy();
+  fireEvent.click(within(item).getByRole("button", { name: "暂不合并" }));
+  await waitFor(() =>
+    expect(recordDecision).toHaveBeenCalledWith(
+      "p-1",
+      "q(9)",
+      "hold",
+      "",
+      expect.any(String),
+    ),
+  );
+  fireEvent.click(within(item).getByRole("button", { name: "确认合并" }));
+  await waitFor(() =>
+    expect(recordDecision).toHaveBeenCalledWith(
+      "p-1",
+      "q(9)",
+      "merge",
+      "",
+      expect.any(String),
+    ),
+  );
+});

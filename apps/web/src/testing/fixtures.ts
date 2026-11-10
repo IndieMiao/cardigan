@@ -229,6 +229,7 @@ export function fakeClient(
     updateCard: async () => undefined,
     cancelCard: async () => undefined,
     supersedeCard: async () => undefined,
+    setCardSensitive: async () => undefined,
     session: loggedIn,
     login: async () => undefined,
     logout: async () => undefined,

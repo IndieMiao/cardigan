@@ -144,14 +144,53 @@ export function templateList(state: CommandState) {
     );
 }
 
+/** Members use the same avatar references and authenticated upload route as employees. */
+export function webMemberView(
+  member: import("@cardigan/domain").MemberView | null,
+) {
+  if (!member) return null;
+  const avatar = parseAvatarReference(member.avatar);
+  return {
+    id: member.id,
+    name: member.name,
+    title: member.title,
+    avatar:
+      avatar?.kind === "library"
+        ? `/avatars/v1/${avatar.id}/head-64.webp`
+        : avatar?.kind === "upload"
+          ? `/api/avatars/${avatar.sha256}`
+          : null,
+  };
+}
+export function webDecisionView(
+  state: CommandState,
+  decision: import("@cardigan/domain").Decision,
+) {
+  return {
+    ...decision,
+    ...webAuthorView(state, decision.raised_by ?? "system"),
+    decider_view:
+      decision.decider === "human" ? webAuthorView(state, "human") : null,
+    ...(decision.resolution
+      ? {
+          resolution: {
+            ...decision.resolution,
+            ...webAuthorView(state, decision.resolution.resolved_by),
+          },
+        }
+      : {}),
+  };
+}
+
 /** Public employee profile only; opaque references and external URLs are not images. */
-function webAuthorView(state: CommandState, author: Author) {
+export function webAuthorView(state: CommandState, author: Author) {
   const view = authorView(state, author);
   const employee = state.employees?.find((e) => e.id === view.employee?.id);
   const avatar = parseAvatarReference(employee?.avatar);
   return {
     ...view,
     author,
+    member: webMemberView(view.member),
     employee: employee
       ? {
           id: employee.id,
@@ -694,13 +733,16 @@ export function cardDetail(
     decisions: decisions.map((decision) => {
       const schedule = autoMergeSchedule(state, decision.id);
       return {
-        ...decision,
+        ...webDecisionView(state, decision),
         auto_merge: schedule.ok
           ? { minutes: schedule.value.minutes, due_at: schedule.value.due_at }
           : null,
       };
     }),
-    human_actions,
+    human_actions: human_actions.map((action) => ({
+      ...action,
+      ...webAuthorView(state, action.requested_by),
+    })),
     attachments: attachmentViews(state, card_id),
     // §8.4 关联区: decisions, related cards and the deliveries that carry a PR.
     relations: {
@@ -753,13 +795,24 @@ export function needsYou(
     listNeedsYou(state, human(state.project_id), { now: () => now }),
   );
   const data = result.data;
-  const noticeList = notices(state);
+  const noticeList = notices(state).map((notice) => {
+    const event = state.events.find((event) => event.id === notice.id);
+    return {
+      ...notice,
+      ...webAuthorView(
+        state,
+        event?.actor.kind === "assignment"
+          ? `assignment:${event.actor.assignment_id}`
+          : (event?.actor.kind ?? "system"),
+      ),
+    };
+  });
   const checks = new Map(
     mergeGateStatus === "enabled"
       ? cardViews(state).map((card) => [card.id, card.merge_check])
       : [],
   );
-  const decisions = data.decisions.map((decision) => {
+  const decisionView = (decision: (typeof data.decisions)[number]) => {
     const schedule = autoMergeSchedule(state, decision.id);
     const check = decision.card_id ? checks.get(decision.card_id) : undefined;
     return {
@@ -774,7 +827,12 @@ export function needsYou(
       ...(decision.followup_notice
         ? {
             followup_notice: decision.followup_notice,
-            resolution: decision.resolution,
+            resolution: decision.resolution
+              ? {
+                  ...decision.resolution,
+                  ...webAuthorView(state, decision.resolution.resolved_by),
+                }
+              : undefined,
           }
         : {}),
       kind: "decision" as const,
@@ -787,6 +845,8 @@ export function needsYou(
       status: decision.status,
       blocking: decision.blocking,
       decider: decision.decider,
+      decider_view:
+        decision.decider === "human" ? webAuthorView(state, "human") : null,
       options: decision.options,
       recommended: decision.recommended,
       trigger: decision.trigger ?? null,
@@ -831,7 +891,10 @@ export function needsYou(
           }
         : null,
     };
-  });
+  };
+  const decisions = data.decisions.map(decisionView);
+  // §7.4 (C-65): PM-held merge confirmations the human may answer directly.
+  const pm_held_merges = data.pm_held_merges.map(decisionView);
   const human_actions = data.human_actions.map((action) => {
     const opened = openedAt(
       state.timeline,
@@ -900,6 +963,9 @@ export function needsYou(
     // Batched, non-urgent decisions come after the blocking ones (§8.2).
     decisions: [...decisions].sort(blockingFirst),
     human_actions: [...human_actions].sort(
+      (left, right) => (right.waited_ms ?? 0) - (left.waited_ms ?? 0),
+    ),
+    pm_held_merges: [...pm_held_merges].sort(
       (left, right) => (right.waited_ms ?? 0) - (left.waited_ms ?? 0),
     ),
     // §7.4 知会: delegated resolutions, newest first; never blocking.
@@ -1365,15 +1431,14 @@ export function roleHistory(
           changes,
           created_at: event?.created_at ?? null,
           actor: event?.actor.kind ?? null,
-          author_display:
-            event === undefined
-              ? null
-              : authorView(
-                  state,
-                  event.actor.kind === "assignment"
-                    ? `assignment:${event.actor.assignment_id}`
-                    : event.actor.kind,
-                ).author_display,
+          ...(event === undefined
+            ? { author_display: null }
+            : webAuthorView(
+                state,
+                event.actor.kind === "assignment"
+                  ? `assignment:${event.actor.assignment_id}`
+                  : event.actor.kind,
+              )),
         };
       })
       .reverse(),

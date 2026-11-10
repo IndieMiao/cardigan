@@ -28,6 +28,7 @@ import {
   recheckMerge,
   recordDecision,
   rollbackRole,
+  setCardSensitive,
   setProjectPreferences,
   supersedeCard,
   type TemplateChange,
@@ -157,6 +158,7 @@ const cardUpdate = z
   .refine((p) => Object.keys(p).length > 0);
 const cardCancel = z.object({ reason: z.string().optional() }).strict();
 const cardSupersede = z.object({ superseded_by: id("card") }).strict();
+const cardSensitive = z.object({ sensitive: z.boolean() }).strict();
 const decision = z.object({
   option: text,
   rationale: z.string().optional(),
@@ -525,7 +527,7 @@ async function serveRoleWrite(c: WriteContext, rest: string): Promise<boolean> {
   return true;
 }
 const routes =
-  /^\/(cards|decisions|human-actions)\/([^/]+)\/(comments|instructions|attachments|resolve|complete|update|cancel|supersede|recheck-merge|mark-done)$/u;
+  /^\/(cards|decisions|human-actions)\/([^/]+)\/(comments|instructions|attachments|resolve|complete|update|cancel|supersede|recheck-merge|mark-done|sensitive)$/u;
 /** Returns false for read routes, leaving M5.1's handlers and method checks intact. */
 export async function serveWrite(
   c: WriteContext,
@@ -668,6 +670,7 @@ export async function serveWrite(
           "supersede",
           "recheck-merge",
           "mark-done",
+          "sensitive",
         ]
       : group === "decisions"
         ? ["comments", "resolve"]
@@ -816,6 +819,12 @@ export async function serveWrite(
           );
         return card;
       });
+    } else if (operation === "sensitive") {
+      // C-65: human-only; the domain rejects any agent actor.
+      const p = parsed(cardSensitive, body, "sensitive 须为 true 或 false。");
+      output = run(context, (s, a, ports) =>
+        setCardSensitive(s, a, { ...p, card_id }, ports),
+      );
     } else if (operation === "supersede") {
       const p = parsed(
         cardSupersede,

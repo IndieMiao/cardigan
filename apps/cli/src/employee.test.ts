@@ -91,12 +91,17 @@ test("human CLI creates, lists, updates, deactivates and activates global employ
   expect(await run(["activate", "E-1"])).toBe(0);
   expect(output.join("\n")).toContain("已恢复员工 E-1");
   expect(snapshot().events.map((e) => e.type)).toEqual([
+    "member_created",
     "employee_created",
     "employee_updated",
     "employee_deactivated",
     "employee_activated",
   ]);
-  expect(snapshot().events.every((e) => e.actor.kind === "human")).toBe(true);
+  expect(
+    snapshot()
+      .events.filter((e) => e.type.startsWith("employee_"))
+      .every((e) => e.actor.kind === "human"),
+  ).toBe(true);
 });
 
 test("avatar list exposes all bundled names and employee add/update persist library references", async () => {
