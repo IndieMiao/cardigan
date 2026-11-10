@@ -11,6 +11,7 @@ import {
 } from "./core.js";
 import { mergePlan, prepareMergePlan } from "./merge.js";
 import { hasPassedMergeCheck } from "./merge-check.js";
+import { queueMergedPush } from "./merge-push.js";
 import { reopenMerge } from "./merge-rework.js";
 
 export type MergeResult =
@@ -158,7 +159,7 @@ export function recordMergeResult(
       );
     }
     if (next !== card) d.put("cards", next);
-    d.emit(
+    const event = d.emit(
       type,
       card.id,
       {
@@ -172,6 +173,13 @@ export function recordMergeResult(
         ...(work_item_id ? { work_item_id } : {}),
       },
     );
+    if (r.kind === "merged")
+      queueMergedPush(d, {
+        merge_event_id: event.id,
+        card_id: card.id,
+        completion_id: p.completion_id,
+        sha: r.merge_sha,
+      });
     return next;
   });
 }

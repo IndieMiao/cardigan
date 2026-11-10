@@ -155,3 +155,9 @@ S21 / V10a：MCP create_card 可省略 repo／base_branch。需要仓库的模�
 - `merge=none` 模板及无仓库卡拒绝 git_head；artifact_sha256/doc_version 的产出仍先交付、再由主产出提交完成申请。验收项从模板指定角色和无产出目标的工作项确定，不能混入普通产出审核。完成审核通过且没有 Git 候选时复用 merge_not_required 进入 done，无仓库卡及 worktree=none 角色不建 worktree。
 - `completion={mode:review, reviewer:human}` 的申请 requested_verifiers 为空，系统创建绑定本次交付的 completion_review Decision，沿用 recordDecision 的原话和身份审计；approve 接受申请并走同一完成路径，reject 将申请拒绝、卡片退回 in_progress，completion_reviewed 事件复用驳回路由为主产出安排 rework。新产出／新完成申请使旧未决验收失效；过期批准拒绝，不自动完成。
 - 存储迁移 0011 建立 `(project_id, template_id, version)` 主键及版本不可覆盖约束；为每个老项目和新建项目写入 dev/general/artifact v1，老卡 template 不变、补 template_version=1。无仓库视图省略 repo/base_branch，CLI 显示合并基线缺省为“无”。
+
+### P2a-1b 合并后推送
+
+- `recordMergeResult(merged)` 在可信 `project_settings.merge_push` 存在时同事务追加项目级 `merge_push_queued`，绑定成功合并事件与 SHA；失败、冲突和重复结果不新建队列。
+- `beginMergePush` / `recordMergePushResult` 只允许 system，前者选择并持久化队首范围，重启返回同一未完成 attempt；后者记录 `merge_pushed` / `merge_push_failed`，重复同结果幂等，不改卡片状态。
+- rejected / auth / other 建 HumanAction 暂停该目标，只有 human 完成事项才能进行一次合并积压范围的重试。network 退避上限 30 分钟，连续两小时以上建一条事项，成功后撤销仍 open 的网络事项。重试时间和计数均保存在事件中；不把远程或命令原始错误传给 domain。

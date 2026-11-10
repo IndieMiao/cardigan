@@ -1,7 +1,19 @@
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
 import { afterAll } from "vitest";
 import { createPrivateTestRoot, removeEmptyTestRoot } from "./paths.js";
 
 const root = createPrivateTestRoot();
+const configHome = join(root, "config");
+const configDir = join(configHome, "cardigan");
+const dataDir = join(root, "data");
+for (const path of [configHome, configDir, dataDir])
+  mkdirSync(path, { mode: 0o700 });
+// Override inherited application paths too: tests must never discover host
+// launch secrets, gate settings or the Workbench database by default.
+process.env.CARDIGAN_CONFIG_DIR = configDir;
+process.env.XDG_CONFIG_HOME = configHome;
+process.env.CARDIGAN_DATA_DIR = dataDir;
 // Node-based child CLIs can enable a cache in TMPDIR after fixtures have removed
 // their own data. Disable it in this worker's descendants so empty-root cleanup
 // remains safe; do not recursively delete unknown data or active hc sockets.
@@ -11,5 +23,9 @@ process.env.NODE_DISABLE_COMPILE_CACHE = "1";
 process.env.TMPDIR = root;
 process.env.TEMP = root;
 process.env.TMP = root;
-afterAll(() => removeEmptyTestRoot(root));
-process.once("exit", () => removeEmptyTestRoot(root));
+const cleanup = () => {
+  for (const path of [configDir, configHome, dataDir, root])
+    removeEmptyTestRoot(path);
+};
+afterAll(cleanup);
+process.once("exit", cleanup);

@@ -15,6 +15,7 @@ import { CliError, EXIT, formatCommandError } from "./errors.js";
 import {
   announceDataDir,
   humanActor,
+  resolveDataDir,
   resolveProject,
   runCommand,
   systemClock,
@@ -126,6 +127,10 @@ async function mergeRecheck(
     );
     requireMergeCard(store, project_id, id);
     const config = await loadMergeGateConfig({
+      dataDir: resolveDataDir(io, optional(parsed.flags, "data-dir")),
+      baseBranches: Object.fromEntries(
+        store.listProjects().map((p) => [p.id, p.base_branch ?? "main"]),
+      ),
       projectIds: store.listProjects().map((project) => project.id),
       env: io.env,
     });
