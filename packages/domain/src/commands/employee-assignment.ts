@@ -1,11 +1,9 @@
 import { type Employee, employeeNameKey } from "../employee.js";
 import type { WorkItem } from "../entities.js";
 import type { EmployeeId } from "../ids.js";
-import {
-  developmentCardTemplate,
-  PM_ACCEPTANCE_WORK_ITEM_KEY,
-} from "../templates.js";
+import { isCompletionVerifier } from "../templates.js";
 import { type CommandDraft, ensure } from "./core.js";
+import { resolveCardTemplate } from "./templates.js";
 
 /** Resolve an explicit ID, or an active display name, without accepting identity claims. */
 export function resolveEmployee(d: CommandDraft, reference: string): Employee {
@@ -24,11 +22,9 @@ export function resolveEmployee(d: CommandDraft, reference: string): Employee {
 function target(d: CommandDraft, item: WorkItem): string | undefined {
   if (item.kind !== "verify") return;
   if (item.target_work_item_id) return item.target_work_item_id;
-  if (item.template_key !== PM_ACCEPTANCE_WORK_ITEM_KEY) return;
   const card = d.get("cards", item.card_id);
-  const template =
-    d.ports?.templates?.find((t) => t.id === card.template) ??
-    developmentCardTemplate;
+  const template = resolveCardTemplate(d, card);
+  if (!isCompletionVerifier(template, item)) return;
   return d
     .list("work_items")
     .find(

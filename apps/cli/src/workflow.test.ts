@@ -84,6 +84,16 @@ async function bootstrap(project = "p-work"): Promise<void> {
       "submit_delivery,post_comment,get_card",
     ]),
   ).toBe(0);
+  expect(
+    await run([
+      "role",
+      "add",
+      project,
+      "reviewer",
+      "--allowed-tools",
+      "submit_review",
+    ]),
+  ).toBe(0);
 }
 
 test("card create builds a dev card and lists its work items", async () => {
@@ -126,12 +136,12 @@ test("card create builds a dev card and lists its work items", async () => {
       "x",
     ]),
   ).toBe(2);
-  expect(errors.join("\n")).toContain("dev 模板");
+  expect(errors.join("\n")).toContain("模板不存在");
 });
 
 test("the project falls back to CARDIGAN_PROJECT and complains when ambiguous", async () => {
   await bootstrap("p-one");
-  expect(await run(["project", "create", "p-two"])).toBe(0);
+  await bootstrap("p-two");
   expect(
     await run([
       "card",

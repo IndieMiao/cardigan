@@ -153,7 +153,11 @@ async function prepareWorktree(
   const { assignment, role, card, workItem } = entities;
   // A standing Assignment has no work item to check out; keep it in the run
   // directory even when its role is readonly (M5.S S13).
-  if (role.worktree === "none" || assignment.scope !== "work_item")
+  if (
+    role.worktree === "none" ||
+    assignment.scope !== "work_item" ||
+    !card?.repo
+  )
     return undefined;
   if (options.worktree === undefined)
     throw new CliError(

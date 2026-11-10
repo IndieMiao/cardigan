@@ -375,7 +375,9 @@ export class Dispatcher {
             : event?.type === "merge_conflicted" ||
                 event?.type === "merge_changes_requested"
               ? "fix"
-              : event?.type === "review_submitted" && cause.kind === "review"
+              : (event?.type === "review_submitted" ||
+                    event?.type === "completion_reviewed") &&
+                  cause.kind === "review"
                 ? "rework"
                 : event?.type === "decision_resolved" && a.scope === "work_item"
                   ? "decision_resumed"

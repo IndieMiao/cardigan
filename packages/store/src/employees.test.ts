@@ -174,12 +174,15 @@ test("v8 migration preserves old project data, assignments, event streams, token
   try {
     const upgraded = Store.open({ dataDir });
     try {
-      expect(upgraded.schemaVersion()).toBe(10);
+      expect(upgraded.schemaVersion()).toBe(11);
       expect(upgraded.migrate()).toEqual([]);
       expect(upgraded.getProject(project_id)?.id).toBe(project_id);
       expect(upgraded.verifyToken(token)).toBeDefined();
       upgraded.uow.read((tx) => {
-        expect(tx.cards.get(project_id, card().id)).toEqual(card());
+        expect(tx.cards.get(project_id, card().id)).toEqual({
+          ...card(),
+          template_version: 1,
+        });
         expect(tx.work_items.get(project_id, workItem().id)).toEqual(
           workItem(),
         );

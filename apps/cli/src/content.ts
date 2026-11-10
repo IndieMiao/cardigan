@@ -2,6 +2,7 @@ import { open } from "node:fs/promises";
 import { extname, resolve } from "node:path";
 import {
   type CommandEffect,
+  markCardDone,
   parseId,
   parseTimelineEntryId,
   postComment,
@@ -28,6 +29,7 @@ import type { CliIo } from "./io.js";
 
 const USAGE = [
   "用法：",
+  "  cardigan card done <C-n> --result <文字> [--file <证据>]...",
   "  cardigan comment add <C-n> (--text <内容> | --text-file <路径>) [--file <路径>]...",
   "  cardigan attachment add <C-n> --file <路径> [--kind evidence|artifact] [--basis <q(n)>] [--entry <C-n#k>]",
   "",
@@ -44,7 +46,8 @@ function usage(message: string): never {
 }
 
 function parseArgs(command: string, args: readonly string[]) {
-  if (args[0] !== "add") usage(`用法：cardigan ${command} add ...`);
+  if (args[0] !== (command === "card_done" ? "done" : "add"))
+    usage(`用法：cardigan ${command} add ...`);
   const flags: Record<string, string> = {};
   const files: string[] = [],
     positionals: string[] = [];
@@ -52,9 +55,11 @@ function parseArgs(command: string, args: readonly string[]) {
     "project",
     "data-dir",
     "file",
-    ...(command === "comment"
-      ? ["text", "text-file"]
-      : ["kind", "basis", "entry"]),
+    ...(command === "card_done"
+      ? ["result"]
+      : command === "comment"
+        ? ["text", "text-file"]
+        : ["kind", "basis", "entry"]),
   ];
   for (let i = 1; i < args.length; i += 1) {
     const token = args[i] as string;
@@ -75,6 +80,8 @@ function parseArgs(command: string, args: readonly string[]) {
       flags[name] = value;
     }
   }
+  if (command === "card_done" && !flags.result?.trim())
+    usage("--result 必须填写完成结果");
   const card = parseId("card", positionals[0]);
   if (positionals.length !== 1 || !card.ok)
     usage("请提供一个合法的卡片编号（形如 C-3）");
@@ -130,7 +137,7 @@ async function readFile(path: string, io: CliIo, attachment: boolean) {
 }
 
 export async function runContentCommand(
-  command: "comment" | "attachment",
+  command: "comment" | "attachment" | "card_done",
   args: readonly string[],
   io: CliIo,
 ): Promise<number> {
@@ -151,11 +158,15 @@ export async function runContentCommand(
   try {
     const project = resolveProject(store, io, p.flags.project);
     const body =
-      command === "attachment"
-        ? "上传附件"
-        : p.flags["text-file"] === undefined
-          ? (p.flags.text as string)
-          : (await readFile(p.flags["text-file"], io, false)).toString("utf8");
+      command === "card_done"
+        ? (p.flags.result as string)
+        : command === "attachment"
+          ? "上传附件"
+          : p.flags["text-file"] === undefined
+            ? (p.flags.text as string)
+            : (await readFile(p.flags["text-file"], io, false)).toString(
+                "utf8",
+              );
     if (!body.trim()) usage("评论正文不能为空");
     const prepared: {
       mime: string;
@@ -202,12 +213,13 @@ export async function runContentCommand(
             },
             ports,
           ),
-          "发表评论",
+          command === "card_done" ? "完成卡片" : "发表评论",
         );
         if (!comment) throw new CliError("评论保存失败", EXIT.failure);
         entry = comment.id;
         lines.push(`已发表评论 ${entry}`);
       }
+      const attachments = [];
       for (const { mime, receipt } of prepared) {
         const attachment = save(
           uploadAttachment(
@@ -225,7 +237,20 @@ export async function runContentCommand(
           ),
           "上传附件",
         );
+        attachments.push(attachment.id);
         lines.push(`已上传附件 ${attachment.id}（挂到 ${entry}）`);
+      }
+      if (command === "card_done") {
+        save(
+          markCardDone(
+            loadCommandState(tx, project),
+            actor,
+            { card_id: p.cardId, result: body, attachments },
+            ports,
+          ),
+          "完成卡片",
+        );
+        lines.push(`已完成卡片 ${p.cardId}`);
       }
       return lines;
     });

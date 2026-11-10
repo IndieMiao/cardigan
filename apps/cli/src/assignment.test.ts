@@ -34,6 +34,7 @@ import {
 } from "./assignment.js";
 import { humanActor, runCommand } from "./host.js";
 import type { CapturedOutput, CliIo } from "./io.js";
+import { registerTemplateRoles } from "./template-fixtures.js";
 
 const project_id = "p-one" as never;
 
@@ -149,7 +150,7 @@ function roleFor(worktree: Role["worktree"]): Role {
     core_prompt: corePromptFor("coder"),
     harness: "pi",
     launch_profile_ref: "pi-agent",
-    allowed_tools: ["whoami", "get_card"],
+    allowed_tools: ["whoami", "get_card", "submit_delivery"],
     capabilities: [],
     abilities: [],
     worktree,
@@ -163,6 +164,7 @@ function assignWorkItem(worktree: Role["worktree"]): Assignment {
   store.uow.run((tx) =>
     writeRole(tx, project_id, roleFor(worktree), { mode: "add" }),
   );
+  registerTemplateRoles(store, project_id);
   const card = runCommand(store, {
     project_id,
     actor: humanActor(project_id),

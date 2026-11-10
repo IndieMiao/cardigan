@@ -236,7 +236,7 @@ async function seatAwaitingMerge() {
       ),
     );
   const templates: readonly CardTemplate[] = [
-    { ...developmentCardTemplate, merge_policy: "confirm" },
+    { ...developmentCardTemplate, merge: "confirm" },
   ];
   const card = apply(
     (s, a, p) =>

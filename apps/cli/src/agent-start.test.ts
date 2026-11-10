@@ -31,6 +31,7 @@ import {
 } from "./assignment.js";
 import { humanActor, runCommand } from "./host.js";
 import type { CliIo } from "./io.js";
+import { registerTemplateRoles } from "./template-fixtures.js";
 import { runWorkflowCommand } from "./workflow.js";
 
 const exec = promisify(execFile);
@@ -144,7 +145,7 @@ describe.skipIf(process.platform !== "linux" || process.getgid?.() === 0)(
             core_prompt: corePromptFor("coder"),
             harness,
             launch_profile_ref: harness === "codex" ? "codex-agent" : "agent",
-            allowed_tools: ["whoami", "get_card"],
+            allowed_tools: ["whoami", "get_card", "submit_delivery"],
             capabilities: ["code"],
             abilities: [],
             worktree,
@@ -153,6 +154,7 @@ describe.skipIf(process.platform !== "linux" || process.getgid?.() === 0)(
           { mode: "add" },
         ),
       );
+      registerTemplateRoles(store, project_id);
       const card = runCommand(store, {
         project_id,
         actor: humanActor(project_id),
