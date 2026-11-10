@@ -21,6 +21,7 @@ import { join } from "node:path";
 import { agentNameFor, main as cli } from "@cardigan/cli";
 import { Store } from "@cardigan/store";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { createTestRuntime } from "../../../test-support/paths.js";
 import { HcCore, runCleanupSteps } from "../test-support/hc.js";
 import { type CardiganServer, startCardiganServer } from "./server.js";
 
@@ -237,7 +238,7 @@ describe.skipIf(!available)("assignment start end to end", () => {
   beforeAll(async () => {
     root = mkdtempSync(join(tmpdir(), "cardigan-m26-"));
     dataDir = join(root, "data");
-    runtimeDir = join(root, "run");
+    runtimeDir = createTestRuntime(join(root, "run"));
     socketPath = join(runtimeDir, "cardigan", `${SESSION}.sock`);
     core = new HcCore(SESSION, socketPath, {});
     hostEnv = {

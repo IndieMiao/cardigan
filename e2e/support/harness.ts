@@ -46,6 +46,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { resolveWebConfig } from "../../apps/server/src/web/config.js";
 import { HcCore, runCleanupSteps } from "../../apps/server/test-support/hc.js";
+import { createTestRuntime } from "../../test-support/paths.js";
 
 const exec = promisify(execFile);
 
@@ -147,7 +148,7 @@ export async function createHarness(
   const root = mkdtempSync(join(tmpdir(), "cardigan-e2e-"));
   const dataDir = join(root, "data");
   const configDir = join(root, "config");
-  const runtimeDir = join(root, "run");
+  const runtimeDir = createTestRuntime(join(root, "run"));
   const binDir = join(root, "bin");
   const agentDir = join(root, "agent-state");
   const source = join(root, "source");
