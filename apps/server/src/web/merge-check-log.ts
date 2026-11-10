@@ -10,18 +10,24 @@ export async function serveMergeCheckLog(input: {
   readonly dataDir: string;
   readonly projectId: string;
   readonly attempt: string;
+  readonly hasAttempt: (attempt: string) => boolean;
   readonly authorize: () => unknown;
 }): Promise<void> {
   const { res, projectId, attempt } = input;
   if (
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(
       attempt,
     )
   )
-    throw new HttpRejection(400, "validation_failed", "检查编号必须为 UUID。");
+    throw new HttpRejection(
+      400,
+      "validation_failed",
+      "检查编号必须为小写 UUID。",
+    );
   const missing = () =>
     new HttpRejection(404, "not_found", "检查日志不存在或已清理。");
   if (!/^[A-Za-z0-9_][A-Za-z0-9._-]*$/u.test(projectId)) throw missing();
+  if (!input.hasAttempt(attempt)) throw missing();
   let path = resolve(input.dataDir);
   let contents: Buffer;
   try {

@@ -372,6 +372,24 @@ async function serveProjectRoute(
       dataDir: context.dataDir,
       projectId: project_id,
       attempt: rest.slice("/merge-checks/".length),
+      hasAttempt: (attempt) =>
+        projectState(store, project_id).events.some((event) => {
+          const payload = event.payload;
+          return (
+            event.card_id &&
+            event.actor.project_id === project_id &&
+            [
+              "merge_check_queued",
+              "merge_check_started",
+              "merge_check_finished",
+              "merge_check_requeued",
+            ].includes(event.type) &&
+            payload !== null &&
+            typeof payload === "object" &&
+            "attempt_id" in payload &&
+            payload.attempt_id === attempt
+          );
+        }),
       authorize: () => requireSession(context),
     });
   }

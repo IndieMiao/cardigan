@@ -6,6 +6,7 @@ import {
   type Delivery,
   type DeliveryId,
   type MergeCheckView,
+  type ProjectId,
   type RunId,
   recordMergeCheck,
   type WorkItemId,
@@ -223,6 +224,7 @@ test("disabled/invalid gates refuse rechecks and leave Needs You unchanged", asy
 });
 
 test("logs require a session, are plain text, read only and isolated to the project", async () => {
+  record("queued");
   const dir = join(h.dataDir, "merge-gate", "logs", project_id);
   await mkdir(dir, { recursive: true });
   await writeFile(
@@ -254,16 +256,29 @@ test("logs require a session, are plain text, read only and isolated to the proj
       })
     ).status,
   ).toBe(404);
-  const otherProject = "_other.project";
+  const otherProject = "_other.project" as ProjectId;
   h.store.createProject({ id: otherProject, name: "Named project" });
   const otherDir = join(h.dataDir, "merge-gate", "logs", otherProject);
   await mkdir(otherDir, { recursive: true });
   await writeFile(join(otherDir, `${attempt}.log`), "Other project log");
-  const other = await call(
-    h.port,
-    `/api/projects/${otherProject}/merge-checks/${attempt}`,
-    { cookie },
-  );
+  // Even a copied log must not make an attempt readable in another project.
+  const otherPath = `/api/projects/${otherProject}/merge-checks/${attempt}`;
+  expect((await call(h.port, otherPath, { cookie })).status).toBe(404);
+  h.store.uow.run((tx) => {
+    const source = tx.cards.get(project_id, identity.card_id);
+    if (!source) throw new Error("Missing fixture card");
+    tx.cards.put(otherProject, { ...source, project_id: otherProject });
+    tx.events.append(otherProject, {
+      id: tx.ids.nextEventId(),
+      seq: tx.ids.nextEventSequence(otherProject, identity.card_id),
+      card_id: identity.card_id,
+      type: "merge_check_queued",
+      actor: { kind: "system", project_id: otherProject },
+      payload: { ...identity, status: "queued" },
+      created_at: NOW,
+    });
+  });
+  const other = await call(h.port, otherPath, { cookie });
   expect(other.status).toBe(200);
   expect(other.body).toBe("Other project log");
   expect(
@@ -288,6 +303,11 @@ test("logs require a session, are plain text, read only and isolated to the proj
 });
 
 test("logs reject traversal, non-UUID names, symlinks and directories", async () => {
+  record("queued");
+  expect((await read(`/merge-checks/${attempt.toUpperCase()}`)).status).toBe(
+    400,
+  );
+  expect((await read(`/merge-checks/${attempt}`)).status).toBe(404);
   for (const value of [
     "",
     "not-a-uuid",
