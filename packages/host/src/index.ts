@@ -33,6 +33,11 @@ export {
 } from "./merge-gate-config.js";
 export { CHECK_OUTPUT_LIMIT, createMergeCheckLog } from "./merge-gate-log.js";
 export {
+  type MergePushConfig,
+  parseMergePushConfig,
+  validateMergePushConfig,
+} from "./merge-push-config.js";
+export {
   agentNameFor,
   projectSegment,
   projectShortCode,

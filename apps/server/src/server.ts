@@ -110,6 +110,10 @@ export async function startCardiganServer(
   // routing and token issuance only ever read the field.
   store.backfillStandingModes();
   const mergeGate = await loadMergeGateConfig({
+    dataDir: config.dataDir,
+    baseBranches: Object.fromEntries(
+      store.listProjects().map((p) => [p.id, p.base_branch ?? "main"]),
+    ),
     projectIds: store.listProjects().map((project) => project.id),
     env: { ...(options.env ?? process.env) },
   });
