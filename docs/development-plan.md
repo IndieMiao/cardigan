@@ -1234,6 +1234,32 @@ V10b“卡片模板”列表显示编号、标题、来源、仓库要求、合�
 - 第一版可以用无状态的 Streamable HTTP：每个请求独立认证，写操作重试依靠 `idempotency_key`。
 - 服务只监听局域网接口，不对公网开放；不信任的网络环境加 TLS 或走 Tailscale 之类的通道。
 
+**本机 CLI Token 身份模式（V11c）**
+
+CLI 接受 `CARDIGAN_TOKEN` 或全局 `--token-file <path>`，同时提供时拒绝；文件须为权限恰好 `0600` 的普通文件，拒绝符号链接，在同一文件描述符上先检查元数据再读取。未提供凭据时保留 human 行为；提供空值、无效、撤销或非 active Assignment 的凭据时非零退出，绝不回退为 human。`resolveActor` 复用 MCP 的 `authenticate`，项目、Assignment 和工具范围均来自 Token，不接受参数自报；错误不包含凭据或文件内容。
+
+`apps/cli/src/command-access.ts` 是完整命令映射；`index.ts` 在分派任何业务入口前检查，未知命令也按仅人类处理。下表中列出的子命令及其所有选项遵守同一规则，例外单列。领域命令继续检查角色、项目及卡片作用域，不以 CLI 检查替代。顶层帮助不访问控制面。
+
+| CLI 命令 | MCP tool / Token 行为 |
+|---|---|
+| `card create` | `create_card` |
+| `card update` | `update_card`；带 `--superseded-by` 仅人类 |
+| `comment add` | `post_comment`；带文件还须 `upload_attachment` |
+| `attachment add` | `upload_attachment`；省略 `--entry` 创建评论锚点时还须 `post_comment` |
+| `assign` | `assign`；例外：只执行领域指派，不签发、返回或轮换凭据。新建输出 `token_status=pending_host_issuance`，复用输出 `host_managed`；`--start` 仅人类。与 MCP 的凭据边界一致（C-81#10） |
+| `needs-you` | `list_needs_you`；Token 模式输出该领域查询的 JSON，不附加主机诊断和人类知会 |
+| `inbox` | 例外：计划明确允许此入口，读取许可用 `get_updates`。仅显示直接发给 Token 所属 Assignment ID 的通知，排除逻辑 Office/Ops 接收者；指定不同 `--assignment` 拒绝。无 Token 保留项目视图和逻辑接收者规则（C-81#10） |
+| `init`；`project create/set-repo` | 仅人类，无对应 MCP 工具 |
+| `role list/show/add/copy/update/deactivate/activate/rollback/upgrade` | 仅人类 |
+| `member add/list/update/deactivate/activate`；`employee add/list/update/deactivate/activate`；`avatar list` | 仅人类 |
+| `pm create/start/rotate`；`token issue` | 仅人类 |
+| `preference get/set`（所有偏好）；`template list/show/add/copy/update/deactivate/activate/rollback` | 仅人类 |
+| `card done/sensitive`；`human-action done`；`needs-you read` | 仅人类 |
+| `attention`；`assignment start/stop/attach` | 仅人类 |
+| `merge status/confirm/hold/request/request-changes/recheck` | 仅人类；不把 human 合并确认映射成 Agent 代拍 |
+| `worktree diff/clean/keep`；`web set-password` | 仅人类；高风险清理确认不接受 Token |
+| `launch <profile>/list/--list/check/import-claude-settings`（含 `--print`） | 仅人类，无对应 MCP 工具 |
+
 ### 9.2 工具清单（初版）
 
 | 工具 | 可用角色 | 作用 |

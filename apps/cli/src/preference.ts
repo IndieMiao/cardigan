@@ -11,7 +11,7 @@ import { openStore } from "@cardigan/store";
 import { CliError, EXIT } from "./errors.js";
 import {
   announceDataDir,
-  humanActor,
+  resolveActor,
   resolveProject,
   runCommand,
 } from "./host.js";
@@ -91,7 +91,7 @@ export function runPreferenceCommand(
             operation: "设置项目偏好",
             target: `${project} ${preference}`,
             project_id: project,
-            actor: humanActor(project),
+            actor: resolveActor(io, project, store),
             reduce: (s, a, ports) =>
               setProjectPreferences(
                 s,

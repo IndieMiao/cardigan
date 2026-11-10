@@ -18,10 +18,11 @@ import {
   ToolError,
 } from "@cardigan/mcp-server";
 import { openStore } from "@cardigan/store";
+import { requireCliTool } from "./command-access.js";
 import { CliError, EXIT, formatCommandError } from "./errors.js";
 import {
   announceDataDir,
-  humanActor,
+  resolveActor,
   resolveProject,
   systemClock,
 } from "./host.js";
@@ -160,6 +161,13 @@ export async function runContentCommand(
   const store = openStore({ dataDir });
   try {
     const project = resolveProject(store, io, p.flags.project);
+    const actor = resolveActor(io, project, store);
+    requireCliTool(
+      actor,
+      command === "card_done" ? "card done" : `${command} add`,
+    );
+    if (p.files.length > 0) requireCliTool(actor, "attachment add");
+    if (p.entry === undefined) requireCliTool(actor, "comment add");
     const body =
       command === "card_done"
         ? (p.flags.result as string)
@@ -197,7 +205,6 @@ export async function runContentCommand(
       }
     }
     const output = store.uow.run((tx) => {
-      const actor = humanActor(project);
       const ports = { clock: systemClock, ids: tx.ids };
       const save = <T>(result: Result<CommandEffect<T>>, operation: string) => {
         const effect = must(result, operation);
