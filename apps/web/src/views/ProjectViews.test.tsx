@@ -437,3 +437,20 @@ test("execution includes unprovisioned queued work in the default view and shows
   fireEvent.click(screen.getByRole("button", { name: "展开 A-1 详情" }));
   expect(screen.getAllByText("排队中（前面还有 2 个）")).toHaveLength(2);
 });
+
+test("execution distinguishes an unavailable runtime from capacity waiting", async () => {
+  render(
+    <ExecutionPage
+      projectId="p-1"
+      client={fakeClient({
+        execution: async () => ({
+          assignments: [assignment],
+          machines: [],
+          runs: [{ ...run, queue_reason: "runtime_unavailable" }],
+        }),
+      })}
+    />,
+  );
+  expect(await screen.findByText("等待运行环境恢复")).toBeTruthy();
+  expect(screen.queryByText(/排队中（前面还有/)).toBeNull();
+});

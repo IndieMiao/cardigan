@@ -10,6 +10,7 @@ import type {
   Runtime,
 } from "@cardigan/domain";
 import {
+  abortDispatch,
   canDispatchRun,
   compareDispatchOrder,
   DEFAULT_RUN_LIMIT,
@@ -243,7 +244,7 @@ export class Dispatcher {
     // if its trigger notification was acknowledged while it waited.
     for (const assignment of state.assignments)
       if (
-        this.queued(state, assignment)?.queue_reason === "concurrency_limit" &&
+        this.queued(state, assignment)?.queue_reason !== undefined &&
         !candidates.some((c) => c.assignment.id === assignment.id)
       )
         add(assignment, []);
@@ -279,9 +280,18 @@ export class Dispatcher {
     let live = false;
     let replacement: DispatchRunParams["replacement"];
     if (a.runtime_ref) {
-      const observed = await this.options.runtime.status(a.runtime_ref);
+      const observed = await this.options.runtime
+        .status(a.runtime_ref)
+        .catch(() => undefined);
+      if (!observed) {
+        this.waitForRuntime(project, a);
+        return;
+      }
       if (observed.ok) {
-        if (observed.value.process === "unknown") return;
+        if (observed.value.process === "unknown") {
+          this.waitForRuntime(project, a);
+          return;
+        }
         live = observed.value.process === "alive";
       } else if (
         observed.error.code === "runtime_not_found" ||
@@ -291,7 +301,10 @@ export class Dispatcher {
           previous: a.runtime_ref,
           reason: observed.error.code,
         };
-      } else return;
+      } else {
+        this.waitForRuntime(project, a);
+        return;
+      }
     }
     const queued = this.queued(state, a);
     const prior = state.runs
@@ -397,6 +410,33 @@ export class Dispatcher {
     }
     this.settle(job.attempt, sent, reason, job.bell);
   }
+  private waitForRuntime(project: ProjectId, expected: Assignment) {
+    this.options.store.uow.run((tx) => {
+      const state = loadCommandState(tx, project);
+      const a = state.assignments.find((a) => a.id === expected.id);
+      if (!a || !sameRef(a, expected)) return;
+      const run = this.queued(state, a);
+      if (!run || run.queue_reason === "runtime_unavailable") return;
+      tx.runs.put(project, { ...run, queue_reason: "runtime_unavailable" });
+      if (
+        !state.events.some(
+          (e) =>
+            e.type === "queued_runtime_unavailable" &&
+            payloadString(e.payload, "run_id") === run.id,
+        )
+      )
+        dispatchAlert(tx, this.options.store, state, this.clock.now(), {
+          assignment: a,
+          type: "queued_runtime_unavailable",
+          reason: "runtime_status_unknown",
+          audience: alertAudience(a, state, this.options.standing),
+          mark: true,
+          card_id: state.work_items.find((w) => w.id === a.work_item_id)
+            ?.card_id,
+          run_id: run.id,
+        });
+    });
+  }
   private claim(
     project: ProjectId,
     notes: readonly Notification[],
@@ -421,7 +461,7 @@ export class Dispatcher {
       );
       const waiting = this.queued(state, a);
       if (
-        (!ready.length && waiting?.queue_reason !== "concurrency_limit") ||
+        (!ready.length && waiting?.queue_reason === undefined) ||
         this.busy(state, a)
       )
         return;
@@ -577,7 +617,7 @@ export class Dispatcher {
         );
       const followup = decisionFollowupPrompt(
         state,
-        ready.map((n) => n.event_id),
+        [...new Set([run.trigger_event_id, ...ready.map((n) => n.event_id)])],
         a.id,
       );
       return {
@@ -608,8 +648,29 @@ export class Dispatcher {
         )
       )
         return;
-      const state = loadCommandState(tx, project),
-        ids = new Set(attempt.notification_ids);
+      let state = loadCommandState(tx, project);
+      // A queued Run has never crossed dispatch/sentinel. Fence it atomically
+      // with lease recovery so a late provision cannot dispatch after its slot
+      // has been handed to another Run. Dispatched/unknown work stays uncertain.
+      if (
+        !sent &&
+        state.runs.find((r) => r.id === attempt.run_id)?.status === "queued"
+      ) {
+        persistEffect(
+          tx,
+          project,
+          unwrap(
+            abortDispatch(
+              state,
+              { kind: "system", project_id: project },
+              { run_id: attempt.run_id, reason },
+              { ids: tx.ids, clock: this.clock },
+            ),
+          ),
+        );
+        state = loadCommandState(tx, project);
+      }
+      const ids = new Set(attempt.notification_ids);
       const notes = store
         .listNotifications({ project_id: project })
         .filter((n) => ids.has(n.id));
@@ -661,7 +722,7 @@ export class Dispatcher {
           (r) =>
             r.assignment_id === a.id &&
             r.status === "queued" &&
-            r.queue_reason === "concurrency_limit",
+            r.queue_reason !== undefined,
         );
       if (!current.length && !queued) return;
       if (queued) {

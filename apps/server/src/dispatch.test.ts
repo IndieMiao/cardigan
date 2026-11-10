@@ -15,8 +15,11 @@ import {
   finishRun,
   postComment,
   queueRun,
+  updateCard,
 } from "@cardigan/domain";
 import {
+  acquireMergeCheckCapacity,
+  executionOwner,
   launchRun,
   RunCapacityDeferred,
   readRunQueue,
@@ -32,6 +35,13 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { attentionCommand } from "../../cli/src/inbox.js";
 import { dispatchFixture } from "../test-support/dispatch.js";
 import { Dispatcher, type DispatcherOptions } from "./dispatch.js";
+import {
+  acceptThroughMergeGate,
+  m4Fixture,
+  m4Scenario,
+  mergeConfirmation,
+} from "./m4-fixtures.js";
+import { MergeChecks } from "./merge-checks.js";
 import { readCardList } from "./web/card-state.js";
 import { executionView } from "./web/read.js";
 
@@ -622,28 +632,17 @@ test("standing PM dispatches beyond the cap and counts against subsequent ordina
 
 test("running merge checks occupy two slots across projects until their attempt finishes", async () => {
   const other = secondProject();
-  const emit = (type: string) =>
-    f.store.uow.run((tx) =>
-      tx.events.append(other.project, {
-        id: tx.ids.nextEventId(),
-        seq: tx.ids.nextEventSequence(other.project, other.card.id),
-        card_id: other.card.id,
-        type,
-        actor: { kind: "system", project_id: other.project },
-        created_at: f.clock.now(),
-        payload: {
-          attempt_id: "merge-test",
-          status: type === "merge_check_started" ? "running" : "passed",
-        },
-      }),
-    );
-  emit("merge_check_started");
+  const release = acquireMergeCheckCapacity(
+    f.store,
+    other.project,
+    "merge-test",
+  );
   comment();
   const dispatcher = new Dispatcher({ ...options, runLimit: () => 2 });
   await dispatcher.tick();
   expect(runtime.wake).not.toHaveBeenCalled();
   expect(readRunQueue(f.store)[0]?.ahead).toBe(0);
-  emit("merge_check_finished");
+  release();
   await dispatcher.tick();
   expect(runtime.wake).toHaveBeenCalledOnce();
 });
@@ -755,4 +754,238 @@ test("ACK while waiting neither loses nor recreates the queued Run", async () =>
   );
   expect(runtime.wake).toHaveBeenCalledOnce();
   expect(ownNotes()[0]?.status).toBe("acked");
+});
+
+test("expired queued startup is cancelled before capacity is reused; late dispatch cannot cross the fence", async () => {
+  const extra = f.create();
+  comment();
+  f.advance(1);
+  f.apply((s, a, p) =>
+    postComment(
+      s,
+      a,
+      { card_id: extra.card.id, work_item_id: extra.item.id, body: "next" },
+      p,
+    ),
+  );
+  vi.mocked(runtime.status).mockResolvedValue({
+    ok: true,
+    value: { process: "exited", agent: "unknown", observed_seq: 1 },
+  });
+  let release = () => {};
+  const hold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const original = options.startRun;
+  const startRun = vi.fn(
+    async (input: Parameters<DispatcherOptions["startRun"]>[0]) => {
+      if (input.assignment.id === target.assignment.id) await hold;
+      await original(input);
+    },
+  );
+  const settings = { ...options, startRun, runLimit: () => 1 };
+  const first = new Dispatcher(settings).tick();
+  try {
+    await expect.poll(() => startRun.mock.calls.length).toBe(1);
+    f.advance(1001);
+    await new Dispatcher(settings).tick();
+    expect(
+      f.state().runs.find((r) => r.id === startRun.mock.calls[0]?.[0].run.id)
+        ?.status,
+    ).toBe("cancelled");
+    release();
+    await first;
+    expect(
+      f.store.uow.read((tx) =>
+        runCapacitySnapshot(f.store, tx).occupied.get("local"),
+      ),
+    ).toBe(1);
+    expect(
+      f
+        .state()
+        .runs.filter((r) => r.status === "dispatched")
+        .map((r) => r.assignment_id),
+    ).toEqual([extra.assignment.id]);
+  } finally {
+    release();
+    await first;
+  }
+});
+
+test("an unavailable queue head yields to healthy work, stays visible, and resumes with its original Run", async () => {
+  const busy = f.create();
+  f.session(busy.assignment, false);
+  comment();
+  f.advance(1);
+  const extra = f.create();
+  f.session(extra.assignment);
+  f.apply((s, a, p) =>
+    postComment(
+      s,
+      a,
+      { card_id: extra.card.id, work_item_id: extra.item.id, body: "next" },
+      p,
+    ),
+  );
+  const dispatcher = new Dispatcher({ ...options, runLimit: () => 1 });
+  await dispatcher.tick();
+  const before = readRunQueue(f.store);
+  expect(before.map((r) => r.assignment_id)).toEqual([
+    target.assignment.id,
+    extra.assignment.id,
+  ]);
+  finish(busy.assignment);
+  vi.mocked(runtime.status).mockImplementation(async (ref) => ({
+    ok: true,
+    value: {
+      process:
+        ref.terminal_ref === f.refFor(target.assignment).terminal_ref
+          ? "unknown"
+          : "alive",
+      agent: "idle",
+      observed_seq: 1,
+    },
+  }));
+  await dispatcher.tick();
+  const deferred = f.state().runs.find((r) => r.id === before[0]?.run_id);
+  expect(deferred).toMatchObject({
+    status: "queued",
+    queue_reason: "runtime_unavailable",
+  });
+  expect(readRunQueue(f.store)).toEqual([]);
+  expect(f.state().runs.find((r) => r.id === before[1]?.run_id)?.status).toBe(
+    "dispatched",
+  );
+  await dispatcher.tick();
+  expect(
+    f.state().events.filter((e) => e.type === "queued_runtime_unavailable"),
+  ).toHaveLength(1);
+  expect(runtime.wake).toHaveBeenCalledOnce();
+  vi.mocked(runtime.status).mockResolvedValue({
+    ok: true,
+    value: { process: "alive", agent: "idle", observed_seq: 2 },
+  });
+  await new Dispatcher({ ...options, runLimit: () => 2 }).tick();
+  expect(f.state().runs.find((r) => r.id === deferred?.id)).toMatchObject({
+    status: "dispatched",
+  });
+  expect(runtime.wake).toHaveBeenCalledTimes(2);
+});
+
+test.each(["request_changes", "cancelled"] as const)(
+  "merge execution releases its slots even when %s invalidates its business result",
+  async (action) => {
+    const m = m4Fixture();
+    try {
+      const scenario = m4Scenario(m, "confirm");
+      await acceptThroughMergeGate(m, scenario, "a".repeat(40));
+      const occupied = () =>
+        m.store.uow.read((tx) =>
+          runCapacitySnapshot(m.store, tx).occupied.get("local"),
+        );
+      const errors = vi.fn();
+      const gate = new MergeChecks({
+        store: m.store,
+        clock: m.clock,
+        onError: errors,
+        execution: { mode: "local", dataDir: m.dataDir },
+        configuration: {
+          errors: [],
+          forProject: () => ({
+            status: "enabled",
+            checks: [{ name: "fixture", run: "true" }],
+            env: {},
+            totalTimeoutMs: 1000,
+          }),
+        },
+        git: {
+          projectOf: (project_id) => ({
+            project_id,
+            source_repo: "fixture",
+            base_branch: "main",
+          }),
+          sync: async () => "up_to_date",
+          merge: async () => {
+            throw new Error("not used");
+          },
+          baseline: async () => "a".repeat(40),
+          prepare: async () => ({
+            status: "candidate",
+            candidate_sha: "b".repeat(40),
+            tree_sha: "c".repeat(40),
+            previous_sha: "a".repeat(40),
+          }),
+          distribute: async () => {},
+          publish: async () => {
+            throw new Error("must not publish");
+          },
+        },
+        run: async (input) => {
+          expect(occupied()).toBe(0);
+          input.onReady?.();
+          expect(occupied()).toBe(2);
+          if (action === "cancelled")
+            m.apply((s, a, p) =>
+              updateCard(
+                s,
+                a,
+                { card_id: scenario.card.id, status: "cancelled" },
+                p,
+              ),
+            );
+          else {
+            const decision = mergeConfirmation(m, scenario.card.id);
+            if (!decision) throw new Error("Missing confirmation");
+            m.decide(decision, "request_changes");
+          }
+          expect(occupied()).toBe(2); // Target invalidation must not release a still-running executor.
+          return { status: "failed", checks: [], cleanup_errors: [] };
+        },
+      });
+      await gate.tick([m.project_id]);
+      expect(errors).toHaveBeenCalled(); // The existing merge state machine still rejects its stale result.
+      expect(occupied()).toBe(0);
+      expect(
+        m.state().events.filter((e) => e.type === "merge_check_started"),
+      ).toHaveLength(1);
+      expect(
+        m.state().events.filter((e) => e.type === "merge_check_finished"),
+      ).toHaveLength(0);
+    } finally {
+      m.close();
+    }
+  },
+);
+
+test("reopened capacity view releases dead or reused process owners, while keeping a live check", () => {
+  const owner = executionOwner(process.pid);
+  if (!owner) throw new Error("Missing process identity");
+  const release = acquireMergeCheckCapacity(f.store, f.project, "live", owner);
+  const stale = acquireMergeCheckCapacity(f.store, f.project, "stale", {
+    ...owner,
+    start: `${owner.start}-previous`,
+  });
+  const dead = acquireMergeCheckCapacity(f.store, f.project, "dead", {
+    pid: 2147483647,
+    start: "gone",
+  });
+  const reopened = Store.open({ dataDir: f.dataDir });
+  try {
+    expect(
+      reopened.uow.read((tx) =>
+        runCapacitySnapshot(reopened, tx).occupied.get("local"),
+      ),
+    ).toBe(2);
+    release();
+    expect(
+      reopened.uow.read((tx) =>
+        runCapacitySnapshot(reopened, tx).occupied.get("local"),
+      ),
+    ).toBe(0);
+  } finally {
+    reopened.close();
+    release();
+    stale();
+    dead();
+  }
 });

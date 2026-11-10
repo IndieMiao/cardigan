@@ -28,6 +28,11 @@ export {
   scrubRunCredentials,
 } from "./launch.js";
 export {
+  acquireMergeCheckCapacity,
+  type ExecutionOwner,
+  executionOwner,
+} from "./merge-check-capacity.js";
+export {
   loadMergeGateConfig,
   type MergeGateConfiguration,
   type ProjectMergeGate,

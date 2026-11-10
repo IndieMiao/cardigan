@@ -141,7 +141,9 @@ function AssignmentRow({
           {run ? (
             <span className="execution-run">
               <IdTag id={run.id} label={runKind(run)} />
-              {run.queue_ahead !== undefined ? (
+              {run.queue_reason === "runtime_unavailable" ? (
+                <span>等待运行环境恢复</span>
+              ) : run.queue_ahead !== undefined ? (
                 <span>排队中（前面还有 {run.queue_ahead} 个）</span>
               ) : (
                 <StatusTag status={run.outcome ?? run.status} />
@@ -194,7 +196,9 @@ function AssignmentRow({
                         <li key={entry.id}>
                           <div className="execution-run-head">
                             <IdTag id={entry.id} label={runKind(entry)} />
-                            {entry.queue_ahead !== undefined ? (
+                            {entry.queue_reason === "runtime_unavailable" ? (
+                              <span>等待运行环境恢复</span>
+                            ) : entry.queue_ahead !== undefined ? (
                               <span>
                                 排队中（前面还有 {entry.queue_ahead} 个）
                               </span>

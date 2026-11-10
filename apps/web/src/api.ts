@@ -530,6 +530,7 @@ export interface SnapshotData {
   }[];
 }
 export interface RunView {
+  readonly queue_reason?: "concurrency_limit" | "runtime_unavailable";
   readonly queue_ahead?: number;
   readonly employee_id?: string;
   readonly launch_profile_ref?: string;

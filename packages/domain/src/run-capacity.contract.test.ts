@@ -6,6 +6,7 @@ import {
   queue,
   setup,
 } from "./commands/launch/test-fixtures.js";
+import { abortDispatch } from "./commands/launch.js";
 import type { Assignment, Run } from "./entities.js";
 import {
   canDispatchRun,
@@ -104,4 +105,28 @@ test("dispatch consumes the original queued Run and clears only its capacity wai
   expect(started.trigger_event_id).toBe(run.trigger_event_id);
   expect(started.status).toBe("dispatched");
   expect(started).not.toHaveProperty("queue_reason");
+});
+
+test("cancelling a queued startup fences every later dispatch of that Run", () => {
+  const run = commit(queue());
+  commit(
+    abortDispatch(
+      f.state,
+      { kind: "system", project_id: f.state.project_id },
+      {
+        run_id: run.id,
+        reason: "startup lease expired",
+      },
+      f.io,
+    ),
+  );
+  expect(dispatch(run)).toMatchObject({
+    ok: false,
+    error: { code: "illegal_transition" },
+  });
+  expect(f.state.runs[0]).toMatchObject({
+    status: "cancelled",
+    outcome: "failed",
+    trigger_event_id: run.trigger_event_id,
+  });
 });

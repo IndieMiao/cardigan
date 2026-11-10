@@ -13,6 +13,8 @@ import {
   unfinishedBellAttempts,
 } from "@cardigan/store";
 
+import { runningMergeChecks } from "./merge-check-capacity.js";
+
 // P2a-9 / phase-2 §2.1: merge checks build and test the entire repository.
 // Reserve the suggested two slots while actually running; tune after measurement.
 export const MERGE_CHECK_RUN_SLOTS = 2;
@@ -78,20 +80,12 @@ export function runCapacitySnapshot(store: Store, tx: ReadRepositories) {
       );
     }
   }
-  // P2a has only the local execution machine. Count attempts even when their
-  // completion was superseded: checks keep occupying CPU until they finish.
-  const checks = store.database
-    .prepare(`SELECT COUNT(*) AS count FROM events AS started
-    WHERE started.type = 'merge_check_started' AND NOT EXISTS (
-      SELECT 1 FROM events AS finished WHERE finished.project_id = started.project_id
-      AND finished.type = 'merge_check_finished'
-      AND json_extract(finished.doc, '$.payload.attempt_id') = json_extract(started.doc, '$.payload.attempt_id')
-    )`)
-    .get();
+  // Runtime occupancy is independent of whether a card still accepts a merge
+  // result. Dead process incarnations (including PID reuse) release on restart.
   occupied.set(
     "local",
     (occupied.get("local") ?? 0) +
-      Number(checks?.count ?? 0) * MERGE_CHECK_RUN_SLOTS,
+      runningMergeChecks(store) * MERGE_CHECK_RUN_SLOTS,
   );
   return { occupied, queue: queueSnapshot(store) };
 }

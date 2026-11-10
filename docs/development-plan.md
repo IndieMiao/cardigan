@@ -582,7 +582,7 @@ todo / ready / in_progress / failed / blocked / waiting_decision --cancel--> can
 
 **Run**：`queued → dispatched → acked → running → completed | failed | cancelled`；运行环境失联时进入 `unknown`；确认重新连通时 `unknown --reconnected--> running`。重连不表示业务完成，已结束的 Run 不通过 reconnected 恢复。
 
-P2a-9：`queued` 也表示等待全机并发名额，不新增状态。Dispatcher 为达到上限的候选保留原 Run、kind、触发事件和待投递通知，不调用 `dispatchRun`、不按铃。可选调度元数据 `queue_reason=concurrency_limit` 标识这一等待原因，派发时清除；只在 queued 时参与位次计算。上限、计数和排队顺序见 §13.8。
+P2a-9：`queued` 也表示等待全机并发名额，不新增状态。Dispatcher 为达到上限的候选保留原 Run、kind、触发事件和待投递通知，不调用 `dispatchRun`、不按铃。可选调度元数据 `queue_reason=concurrency_limit` 标识这一等待原因，派发时清除；只在 queued 时参与位次计算。运行环境暂不可确认的候选改记 `queue_reason=runtime_unavailable`，仍是 queued，但不占容量队列的位次；定期探测恢复后再按原触发事件时间参与派发。上限、计数和排队顺序见 §13.8。
 
 M5.6：显式 finish_run（completed / blocked / failed）、阻塞 Decision 和审核轮次上限结束 Run 时，Assignment 的 running 经 run_finished 回到 idle，保留 RuntimeRef；这只表示没有在途业务 Run，不代表终端在线。系统在两个 Run 之间替换 Session 后，dispatchRun 校验旧 RuntimeRef 未变化、没有其他未结束 Run，若旧环境为 unknown/lost，只在原在途 Run 已明确结束后才允许经 session_replaced 回 idle，再将原 queued Run 派发与交接事件原子提交；卡片流记录系统 handoff（原因、旧 RuntimeRef、最近 Run/outcome、新 Session 先读卡片和 get_updates），常驻 PM 无卡片时间线时把同一交接正文保存在项目事件中。
 
@@ -810,7 +810,7 @@ M5.S 起，工作项被指派（Agent 或 PM 经 MCP 调用 `assign`）也走这
 | 已交付、尚未清理 | 复用原 Session 和 worktree，创建返工 Run |
 | 卡片已关闭、worktree 已清理 | 创建后续工作项和新 Assignment，并引用历史 |
 
-M3.4 的 Runtime 接线根据已派发的业务 Run（dispatched / acked / running / unknown）判断忙碌，不用 Harness 的 working/idle 画面状态。domain 预排的 queued Run（包括 decision_resumed、rework、fix）是本次待投递工作，不能阻塞自己；按 Assignment 复用它，不要求待投递通知的 event_id 与 trigger_event_id 相同（触发事件可能已经被读取和 ACK）。保留原 Run 的 ID、kind 和触发事件；事务内仍校验其他未结束 Run、共享 worktree 排他和持久投递意图，异常的多个 queued Run 不并发启动。已有会话派发后唤醒；进程已退出、没有会话或需要替换时，通过主机启动回调接收同一个 queued Run 和首条门铃，由回调完成凭据、provision 与 dispatch，不能再建一个 Run。首次 MCP 确认再将 dispatched 推进到 running。投递结果与通知在事务中结算；真实 ACK 优先于迟到失败，租期过期的不确定意图保留原 Run 并升级 PM Ops。
+M3.4 的 Runtime 接线根据已派发的业务 Run（dispatched / acked / running / unknown）判断忙碌，不用 Harness 的 working/idle 画面状态。domain 预排的 queued Run（包括 decision_resumed、rework、fix）是本次待投递工作，不能阻塞自己；按 Assignment 复用它，不要求待投递通知的 event_id 与 trigger_event_id 相同（触发事件可能已经被读取和 ACK）。保留原 Run 的 ID、kind 和触发事件；事务内仍校验其他未结束 Run、共享 worktree 排他和持久投递意图，异常的多个 queued Run 不并发启动。已有会话派发后唤醒；进程已退出、没有会话或需要替换时，通过主机启动回调接收同一个 queued Run 和首条门铃，由回调完成凭据、provision 与 dispatch，不能再建一个 Run。首次 MCP 确认再将 dispatched 推进到 running。投递结果与通知在事务中结算；真实 ACK 优先于迟到失败，租期过期时，已派发的不确定意图保留原 Run 并升级 PM Ops；仍为 queued 的启动则与意图结算同事务经 abortDispatch 取消，标记 outcome=failed。取消发生在启动哨兵之前，迟到的 provision 无法再通过 dispatchRun；不把取消当成业务完成。
 
 ### 6.7 合并与串行
 
@@ -1631,11 +1631,11 @@ M2.7 采用 [ADR 0002](adr/0002-agent-account-isolation.md)：Linux 安装器由
 
 P2a-9 全机并发配置为主机 `CARDIGAN_CONFIG_DIR/run-capacity.yaml`，配置目录默认 `~/.config/cardigan`，不放进被开发项目仓库。格式为 `machines` 映射，键为 Machine 编号、值为正整数，例如 `machines: { local: 4 }`；文件缺失或未列出的机器默认 4。沿用合并闸门的可信文件边界（普通文件、可信属主、拒绝符号链接和组／其他用户可写文件及目录），配置无效时报告固定错误并暂停普通 Run 派发，常驻 PM 仍豁免。server 启动只加载一次，修改后重启生效；显式 CLI 启动按本次调用加载。domain 不读配置和存储，只用显式传入的上限、占用数和常驻 PM 标记判断，传入上限改变后下一次判断即生效。
 
-计数跨项目汇总同一 Machine 上 Assignment 的 `dispatched`／`acked`／`running` Run，不计 queued、unknown 或已结束 Run。常驻 PM（`scope=standing` 且 `role_id=pm`，含 Office／Ops）不受这条上限限制，但其在途 Run 仍占名额；工作项级 PM 不豁免。外部新会话启动期间，尚未派发的 Run 由已有持久 BellAttempt 临时预留一个名额，与事务内计数和领取一起提交；正式派发后只按 Run 计一次，避免两个 Dispatcher／CLI 同时抢到最后一个名额。
+计数跨项目汇总同一 Machine 上 Assignment 的 `dispatched`／`acked`／`running` Run，不计 queued、unknown 或已结束 Run。常驻 PM（`scope=standing` 且 `role_id=pm`，含 Office／Ops）不受这条上限限制，但其在途 Run 仍占名额；工作项级 PM 不豁免。外部新会话启动期间，尚未派发的 Run 由已有持久 BellAttempt 临时预留一个名额，与事务内计数和领取一起提交；正式派发后只按 Run 计一次，避免两个 Dispatcher／CLI 同时抢到最后一个名额。未派发启动的意图回收必须在同一写事务内取消该 queued Run，再释放预留；迟到启动因 Run 已取消而被状态机拒绝，不能抢用已经分配给其他工作的名额。已派发／已确认／运行中或状态未知的 Run 不因投递意图过期而自动取消。
 
-Dispatcher 每轮先汇集所有项目待投递候选，再按 Run 原触发事件的 `created_at` 排序；尚未创建 Run 的候选采用将要绑定的触发事件时间。同时间依次以事件编号、项目编号、Assignment 编号稳定排序，不比较跨卡片 seq。名额不足时保持原 queued Run 的身份和相对顺序，空位释放后下轮继续；降低上限不会停止已派发 Run。常驻 PM 跳过并发排队判断。显式 CLI 启动也检查名额，延迟时保留 queued Run，由 server 接续；读取和 ACK 通知不会取消已排队的工作。
+Dispatcher 每轮先汇集所有项目待投递候选，再按 Run 原触发事件的 `created_at` 排序；尚未创建 Run 的候选采用将要绑定的触发事件时间。同时间依次以事件编号、项目编号、Assignment 编号稳定排序，不比较跨卡片 seq。名额不足时保持原 queued Run 的身份和相对顺序，空位释放后下轮继续；降低上限不会停止已派发 Run。常驻 PM 跳过并发排队判断。显式 CLI 启动也检查名额，延迟时保留 queued Run，由 server 接续；读取和 ACK 通知不会取消已排队的工作。queued 候选的运行环境返回 unknown 或查询失败时，保留 Run 与原触发事件，改记 runtime_unavailable、一次性告警，不再阻塞后续可派发候选；后续 tick 继续探测，恢复后按原时间重新入队。执行视图将其显示为“等待运行环境恢复”，不误标为并发排队。
 
-P2a-1 合并检查实际进入 running 到记录完成期间计为 **2 个名额**，依据 Phase 2 §2.1 对全仓构建／测试 CPU 消耗的建议值，后续可按实测调整。只读取现有检查事件，不改变合并闸门的排队、失败处理或状态机；已作废完成申请的检查在执行结束前仍计入。P2a 仅有 `local` 执行机器，后续多机再扩展检查的机器归属。合并检查和 PM 开始执行可能让占用超过配置值，本规则只限制新普通 Run，不抢占正在执行的工作。
+P2a-1 合并检查实际执行期间计为 **2 个名额**，依据 Phase 2 §2.1 对全仓构建／测试 CPU 消耗的建议值，后续可按实测调整。迁移 0014 的 merge_check_capacity 保存独立运行占用：取得执行锁且收到认证 ready 后登记，执行器结束后的 finally 释放，不依赖卡片是否仍允许记录合并结果。卡片退回／取消时仍在执行的检查继续计数，执行结束后即释放；不改变合并闸门的排队、失败处理或状态机。占用绑定主机侧监督进程／SSH 客户端的 PID、Linux boot ID 与进程启动时刻，查询时排除已退出进程及 PID 重用，主机重启不会因缺少业务 finished 事件永久泄漏名额。主机退出导致管道关闭时，既有检查监督进程按取消路径收尾；只要原执行进程仍存活，占用仍保留。P2a 仅有 `local` 执行机器，后续多机再扩展检查的机器归属。合并检查和 PM 开始执行可能让占用超过配置值，本规则只限制新普通 Run，不抢占正在执行的工作。
 
 Workbench 执行视图、看板卡片和 `cardigan attention` 共用跨项目的等待队列投影，显示“排队中（前面还有 N 个）”。N 只数同机等待的普通 Run，不含已运行工作或常驻 PM；队首为 0。同卡多个排队 Run 分别展示，暂停／释放 Assignment 与启动中的 Run 不列入。队列变化通过独立只读 SSE 刷新信号同步到项目视图，不伪造项目／卡片事件 seq，不写时间线巡检消息。
 
