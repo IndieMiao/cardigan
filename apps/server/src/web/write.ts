@@ -14,6 +14,7 @@ import {
   type ReadableIdKind,
   type Result,
   recordDecision,
+  setProjectPreferences,
   supersedeCard,
   updateCard,
   updateWorkItem,
@@ -215,6 +216,43 @@ export async function serveWrite(
   c: WriteContext,
   rest: string,
 ): Promise<boolean> {
+  if (rest === "/preferences") {
+    if (c.req.method === "GET") return false;
+    if (c.req.method !== "POST") methodNotAllowed(["GET", "POST"]);
+    c.authorize();
+    const body = await readJsonBody(c.req);
+    const key = parsed(
+      z
+        .string()
+        .min(1)
+        .max(256)
+        .refine((s) => s.trim().length > 0),
+      c.req.headers["idempotency-key"],
+      "偏好写入需要 Idempotency-Key",
+    );
+    const context: CommandContext = {
+      ...c,
+      idempotency: { key, request: { method: "POST", rest, body } },
+    };
+    const input = parsed(
+      z
+        .object({
+          auto_merge_after_minutes: z
+            .number()
+            .int()
+            .min(1)
+            .max(1440)
+            .nullable(),
+        })
+        .strict(),
+      body,
+    );
+    const output = run(context, (s, a, ports) =>
+      setProjectPreferences(s, a, input, ports),
+    );
+    sendJson(c.res, 200, output);
+    return true;
+  }
   const match = routes.exec(rest);
   if (!match) return false;
   const [, group, encoded, operation] = match;

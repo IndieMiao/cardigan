@@ -144,6 +144,20 @@ export function mergePlan(state: CommandState, card_id: CardId) {
       "illegal_transition",
       "Card has an unresolved blocking decision",
     );
+    ensure(
+      !state.human_actions.some(
+        (action) =>
+          action.status === "open" &&
+          (action.card_id === card.id ||
+            action.blocked_work_items.some((id) =>
+              state.work_items.some(
+                (w) => w.id === id && w.card_id === card.id,
+              ),
+            )),
+      ),
+      "illegal_transition",
+      "Card has an open human action",
+    );
     return {
       card_id,
       title: card.title,

@@ -1,0 +1,108 @@
+// @vitest-environment jsdom
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import { afterEach, expect, test, vi } from "vitest";
+import { App } from "../App.js";
+import { HttpCardiganClient } from "../api.js";
+import { fakeClient } from "../testing/fixtures.js";
+import { SettingsPage } from "./SettingsPage.js";
+
+afterEach(() => {
+  cleanup();
+  window.location.hash = "";
+});
+test("settings navigation opens preferences, default off with the missing-gate warning", async () => {
+  window.location.hash = "#/p/p-1/settings";
+  render(<App client={fakeClient()} />);
+  expect(await screen.findByRole("heading", { name: "设置" })).toBeTruthy();
+  expect(
+    screen.getByRole("link", { name: "设置" }).getAttribute("aria-current"),
+  ).toBe("page");
+  const toggle = await screen.findByRole("checkbox", { name: "超时自动合并" });
+  expect((toggle as HTMLInputElement).checked).toBe(false);
+  expect(
+    (screen.getByLabelText("等待分钟数") as HTMLInputElement).disabled,
+  ).toBe(true);
+  expect(
+    screen.getByText("没有合并闸门时，自动合并会合并未经全量测试和 e2e 的代码"),
+  ).toBeTruthy();
+});
+
+test("enable, validate, retry with the same idempotency key, then disable", async () => {
+  const setPreferences = vi
+    .fn()
+    .mockRejectedValueOnce(new TypeError("offline"))
+    .mockResolvedValue(undefined);
+  render(
+    <SettingsPage projectId="p-1" client={fakeClient({ setPreferences })} />,
+  );
+  fireEvent.click(await screen.findByRole("checkbox"));
+  const minutes = screen.getByLabelText("等待分钟数");
+  fireEvent.change(minutes, { target: { value: "1.5" } });
+  expect(
+    (screen.getByRole("button", { name: "保存偏好" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+  fireEvent.change(minutes, { target: { value: "20" } });
+  fireEvent.click(screen.getByRole("button", { name: "保存偏好" }));
+  await screen.findByRole("alert");
+  fireEvent.click(screen.getByRole("button", { name: "保存偏好" }));
+  await waitFor(() => expect(setPreferences).toHaveBeenCalledTimes(2));
+  expect(setPreferences.mock.calls[0]?.slice(0, 2)).toEqual(["p-1", 20]);
+  expect(setPreferences.mock.calls[1]?.[2]).toBe(
+    setPreferences.mock.calls[0]?.[2],
+  );
+  await waitFor(() =>
+    expect(
+      (screen.getByRole("button", { name: "保存偏好" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(false),
+  );
+  fireEvent.click(screen.getByRole("checkbox"));
+  fireEvent.click(screen.getByRole("button", { name: "保存偏好" }));
+  await waitFor(() => expect(setPreferences).toHaveBeenCalledTimes(3));
+  expect(setPreferences.mock.calls[2]?.slice(0, 2)).toEqual(["p-1", null]);
+  expect(setPreferences.mock.calls[2]?.[2]).not.toBe(
+    setPreferences.mock.calls[0]?.[2],
+  );
+});
+
+test("existing setting loads and a configured gate hides the warning", async () => {
+  render(
+    <SettingsPage
+      projectId="p-1"
+      client={fakeClient({
+        preferences: async () => ({
+          auto_merge_after_minutes: 30,
+          merge_gate_enabled: true,
+        }),
+      })}
+    />,
+  );
+  expect(
+    ((await screen.findByRole("checkbox")) as HTMLInputElement).checked,
+  ).toBe(true);
+  expect((screen.getByLabelText("等待分钟数") as HTMLInputElement).value).toBe(
+    "30",
+  );
+  expect(screen.queryByText(/没有合并闸门时/)).toBeNull();
+});
+
+test("HTTP preferences carry the required key and encoded project", async () => {
+  const fetcher = vi
+    .fn<typeof fetch>()
+    .mockResolvedValue(new Response("{}", { status: 200 }));
+  const client = new HttpCardiganClient(fetcher);
+  await client.setPreferences("a/b", 10, "preference-key");
+  const [url, init] = fetcher.mock.calls[0] ?? [];
+  expect(url).toBe("/api/projects/a%2Fb/preferences");
+  expect(new Headers(init?.headers).get("Idempotency-Key")).toBe(
+    "preference-key",
+  );
+  expect(init?.body).toBe('{"auto_merge_after_minutes":10}');
+});

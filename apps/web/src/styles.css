@@ -2862,3 +2862,27 @@ body[data-lightbox="open"] .drawer-overlay {
 .system-line .employee-identity {
   font-size: var(--text-sm);
 }
+
+.settings-layout {
+  display: grid;
+  grid-template-columns: 8rem minmax(0, 40rem);
+  gap: 2rem;
+}
+.settings-layout nav {
+  display: flex;
+  flex-direction: column;
+}
+.settings-layout form {
+  display: grid;
+  gap: 1rem;
+}
+.settings-layout input[type="number"] {
+  display: block;
+  width: 10rem;
+}
+@media (max-width: 640px) {
+  .settings-layout {
+    grid-template-columns: 1fr;
+    gap: 1rem;
+  }
+}
