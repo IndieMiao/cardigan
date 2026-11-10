@@ -101,7 +101,7 @@ test("P2a-5: legacy superseded cards without a replacement do not infer it from 
 
 test("shows a loading state while the card is on its way", () => {
   renderCard({ card: () => new Promise(() => undefined) });
-  expect(screen.getByRole("status").textContent).toContain("正在加载卡片 C-1");
+  expect(screen.getByRole("status").textContent).toBe("");
 });
 
 test("a missing card explains itself and offers the way back", async () => {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   type CardiganClient,
   describeError,
@@ -6,7 +6,8 @@ import {
   type ProjectSummary,
   type SessionInfo,
 } from "./api.js";
-import { EmptyState, StatusTag } from "./components/Foundation.js";
+import { EmptyState } from "./components/Foundation.js";
+import { RequestFeedback } from "./components/RequestFeedback.js";
 import { routeHash, useRoute } from "./route.js";
 import { useProjectStream } from "./useProjectStream.js";
 import { useResource } from "./useResource.js";
@@ -32,7 +33,7 @@ import { SnapshotPage } from "./views/SnapshotPage.js";
 const defaultClient = new HttpCardiganClient();
 
 type SessionState =
-  | { readonly kind: "loading" }
+  | { readonly kind: "loading"; readonly interactive?: boolean }
   | { readonly kind: "error"; readonly message: string }
   | { readonly kind: "ready"; readonly info: SessionInfo };
 
@@ -44,36 +45,40 @@ export interface AppProps {
 export function App({ client = defaultClient }: AppProps = {}) {
   const [session, setSession] = useState<SessionState>({ kind: "loading" });
 
-  const loadSession = useCallback(async () => {
-    try {
-      setSession({ kind: "ready", info: await client.session() });
-    } catch (error) {
-      setSession({ kind: "error", message: describeError(error) });
-    }
-  }, [client]);
+  const loadSession = useCallback(
+    async (interactive = true) => {
+      setSession({ kind: "loading", interactive });
+      try {
+        setSession({ kind: "ready", info: await client.session() });
+      } catch (error) {
+        setSession({ kind: "error", message: describeError(error) });
+      }
+    },
+    [client],
+  );
 
   useEffect(() => {
-    void loadSession();
+    void loadSession(false);
   }, [loadSession]);
 
   if (session.kind === "loading") {
     return (
       <main className="centered">
-        <p className="loading" role="status">
-          正在检查登录状态…
-        </p>
+        <RequestFeedback
+          pending
+          interactive={session.interactive}
+          pendingMessage="正在检查登录状态…"
+        />
       </main>
     );
   }
   if (session.kind === "error") {
     return (
       <main className="centered">
-        <div className="error-panel" role="alert">
-          <p>{session.message}</p>
-          <button type="button" onClick={() => void loadSession()}>
-            重试
-          </button>
-        </div>
+        <RequestFeedback
+          error={session.message}
+          retry={() => void loadSession()}
+        />
       </main>
     );
   }
@@ -102,31 +107,14 @@ function Workbench({
   readonly onLoggedOut: () => void | Promise<void>;
 }) {
   const [route, navigate, invalidHash] = useRoute();
-  const [projects, setProjects] = useState<ProjectsState>({ kind: "loading" });
   const [loggingOut, setLoggingOut] = useState(false);
-  const latest = useRef(0);
-
-  const loadProjects = useCallback(() => {
-    const request = latest.current + 1;
-    latest.current = request;
-    setProjects({ kind: "loading" });
-    client.projects().then(
-      (list) => {
-        if (latest.current === request) {
-          setProjects({ kind: "ready", projects: list });
-        }
-      },
-      (error: unknown) => {
-        if (latest.current === request) {
-          setProjects({ kind: "error", message: describeError(error) });
-        }
-      },
-    );
-  }, [client]);
-
-  useEffect(() => {
-    loadProjects();
-  }, [loadProjects]);
+  const loadProjects = useCallback(() => client.projects(), [client]);
+  const projectResource = useResource(loadProjects);
+  const projects: ProjectsState = projectResource.data
+    ? { kind: "ready", projects: projectResource.data }
+    : projectResource.error
+      ? { kind: "error", message: projectResource.error }
+      : { kind: "loading" };
 
   const selected =
     projects.kind === "ready"
@@ -265,50 +253,36 @@ function Workbench({
         )}
         <div className="sidebar-footer">
           {selected && (
-            <span role="status">
-              <StatusTag
-                status={
-                  live.status === "live"
-                    ? "online"
-                    : live.status === "retrying"
-                      ? "degraded"
-                      : "provisioning"
-                }
-                label={
-                  live.status === "live"
-                    ? "实时更新已连接"
-                    : live.status === "retrying"
-                      ? "连接中断，正在重连"
-                      : "正在连接实时更新"
-                }
-              />
-            </span>
+            <RequestFeedback
+              pending={live.status !== "live"}
+              pendingMessage="正在连接实时更新…"
+              error={
+                live.status === "retrying" ? "连接中断，正在重连" : undefined
+              }
+            />
           )}
+          <RequestFeedback
+            interactive
+            pending={loggingOut}
+            pendingMessage="登出中…"
+          />
           <button
             type="button"
             className="logout"
             onClick={() => void logout()}
             disabled={loggingOut}
           >
-            {loggingOut ? "登出中…" : "登出"}
+            登出
           </button>
         </div>
       </aside>
 
       <main className="content">
-        {projects.kind === "loading" && (
-          <p className="loading" role="status">
-            正在加载项目…
-          </p>
-        )}
-        {projects.kind === "error" && (
-          <div className="error-panel" role="alert">
-            <p>{projects.message}</p>
-            <button type="button" onClick={loadProjects}>
-              重试
-            </button>
-          </div>
-        )}
+        <RequestFeedback
+          {...projectResource}
+          retry={projectResource.reload}
+          pendingMessage="正在加载项目…"
+        />
         {projects.kind === "ready" && projects.projects.length === 0 && (
           <EmptyState>
             还没有项目。先在终端运行{" "}
@@ -316,9 +290,9 @@ function Workbench({
           </EmptyState>
         )}
         {invalidHash !== undefined && route === undefined && (
-          <div className="error-panel" role="alert">
-            <p>无法识别链接 {invalidHash}；请从项目导航重新进入。</p>
-          </div>
+          <RequestFeedback
+            error={`无法识别链接 ${invalidHash}；请从项目导航重新进入。`}
+          />
         )}
         {selected && route?.kind === "decision-history" && (
           <DecisionHistoryPage

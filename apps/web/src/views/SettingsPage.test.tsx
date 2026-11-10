@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -238,3 +239,74 @@ test("PM merge confirmation defaults on and can be turned off", async () => {
     false,
   ]);
 });
+
+test("hidden preferences suppress validation feedback and retain the draft when returning", async () => {
+  render(<SettingsPage client={fakeClient()} projectId="p-1" />);
+  const enabled = await screen.findByRole("checkbox", { name: "超时自动合并" });
+  fireEvent.click(enabled);
+  const minutes = screen.getByLabelText("等待分钟数") as HTMLInputElement;
+  fireEvent.change(minutes, { target: { value: "0" } });
+  expect(screen.getByRole("alert").textContent).toContain("请输入 1 到 1440");
+  for (const tab of ["授权", "角色", "卡片模板"]) {
+    fireEvent.click(screen.getByRole("button", { name: tab, exact: true }));
+    expect(document.getElementById("preferences")?.hidden).toBe(true);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(
+      document.querySelector(".request-feedback-region")?.textContent,
+    ).not.toContain("请输入 1 到 1440");
+    fireEvent.click(screen.getByRole("button", { name: "偏好", exact: true }));
+    expect(screen.getByLabelText("等待分钟数")).toBe(minutes);
+    expect(minutes.value).toBe("0");
+    expect((enabled as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByRole("alert").textContent).toContain("请输入 1 到 1440");
+  }
+});
+
+test.each([
+  ["偏好", "setPreferences", "保存偏好"],
+  ["授权", "setDelegation", "流程：由 PM 代拍"],
+  ["授权", "setPmMergeConfirmation", "合并由 PM 代确认：由 PM 代确认"],
+] as const)(
+  "%s hides pending and late %s errors outside its tab without losing the form",
+  async (tab, method, control) => {
+    const request = Promise.withResolvers<void>();
+    const save = vi.fn(() => request.promise);
+    render(
+      <SettingsPage client={fakeClient({ [method]: save })} projectId="p-1" />,
+    );
+    const minutes = (await screen.findByLabelText(
+      "等待分钟数",
+    )) as HTMLInputElement;
+    fireEvent.click(screen.getByRole("checkbox", { name: "超时自动合并" }));
+    fireEvent.change(minutes, { target: { value: "23" } });
+    fireEvent.click(screen.getByRole("button", { name: tab, exact: true }));
+    fireEvent.click(
+      screen.getByRole(method === "setPreferences" ? "button" : "checkbox", {
+        name: control,
+      }),
+    );
+    expect(save).toHaveBeenCalledOnce();
+    expect(screen.getByText(/保存.*中…/)).toBeTruthy();
+    fireEvent.click(
+      screen.getByRole("button", { name: "卡片模板", exact: true }),
+    );
+    expect(screen.queryByText(/保存.*中…/)).toBeNull();
+    await act(async () => request.reject(new Error("设置保存失败")));
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(
+      document.querySelector(".request-feedback-region")?.textContent,
+    ).not.toContain("设置保存失败");
+    fireEvent.click(screen.getByRole("button", { name: tab, exact: true }));
+    expect(screen.getByRole("alert").textContent).toContain("设置保存失败");
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: tab === "偏好" ? "授权" : "偏好",
+        exact: true,
+      }),
+    );
+    expect(screen.queryByRole("alert")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "偏好", exact: true }));
+    expect(screen.getByLabelText("等待分钟数")).toBe(minutes);
+    expect(minutes.value).toBe("23");
+  },
+);

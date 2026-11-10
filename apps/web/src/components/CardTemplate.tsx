@@ -4,6 +4,7 @@ import {
   type CardiganClient,
   describeWriteError,
 } from "../api.js";
+import { RequestFeedback } from "./RequestFeedback.js";
 
 export function CardTemplate({
   detail,
@@ -116,7 +117,7 @@ export function CardTemplate({
                 </fieldset>
                 <div className="card-action-buttons">
                   <button type="submit" disabled={!allowed || !result.trim()}>
-                    {busy ? "正在提交…" : "确认标记完成"}
+                    确认标记完成
                   </button>
                   <button
                     type="button"
@@ -127,12 +128,17 @@ export function CardTemplate({
                   </button>
                 </div>
               </fieldset>
-              {error && <p role="alert">{error}</p>}
+              <RequestFeedback
+                interactive
+                pending={busy}
+                pendingMessage="正在提交…"
+                error={error}
+              />
             </form>
           )}
         </>
       )}
-      {message && <p role="status">{message}</p>}
+      <RequestFeedback message={message} />
     </div>
   );
 }
