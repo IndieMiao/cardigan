@@ -3,6 +3,8 @@
 export interface SpawnInheritOptions {
   readonly cwd: string;
   readonly env: Record<string, string>;
+  /** Commands with localized failure handling can suppress raw diagnostics. */
+  readonly stderr?: "ignore";
 }
 
 export interface CaptureOptions {
@@ -43,6 +45,8 @@ export interface CliIo {
   readonly cwd: string;
   readonly platform: NodeJS.Platform;
   readonly signals: SignalHost;
+  readonly stdinIsTTY?: boolean;
+  readonly stdoutIsTTY?: boolean;
   stdout(text: string): void;
   stderr(text: string): void;
   spawnInherit(

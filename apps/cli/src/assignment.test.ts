@@ -15,6 +15,7 @@ import type {
   Assignment,
   Runtime,
   RuntimeLaunch,
+  RuntimeObservation,
   RuntimeRef,
   RuntimeResult,
 } from "@cardigan/domain";
@@ -65,10 +66,10 @@ class FakeRuntime implements Runtime {
   async wake(): Promise<RuntimeResult<{ readonly sent: boolean }>> {
     return { ok: true, value: { sent: true } };
   }
-  async status(): Promise<RuntimeResult<never>> {
+  async status(): Promise<RuntimeResult<RuntimeObservation>> {
     return {
-      ok: false,
-      error: { code: "runtime_not_found", message: "not used" },
+      ok: true,
+      value: { process: "alive", agent: "idle", observed_seq: 1 },
     };
   }
   async interrupt(): Promise<RuntimeResult<void>> {

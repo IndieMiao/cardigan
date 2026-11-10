@@ -75,7 +75,7 @@ const TOP_LEVEL_USAGE = [
   "  needs-you        看待你拍板和待你执行的事项",
   "  inbox            待投递和投递失败的通知（--assignment A-n 只看一个）",
   "  attention        升级通知与失联的 Assignment",
-  "  assignment start|stop|attach  一键启动/停止/接管 Assignment 的运行时（M2）",
+  "  assignment start|stop|attach  启动/停止/观察终端；attach --interactive 接管输入，--print 只打印命令",
   "  merge status|confirm|request|request-changes  查看或确认合并、重新发起确认、退回修改（--reason 必填）",
   "  worktree diff|clean|keep      看 worktree 改动、强制清理或保留（M4）",
   "  web set-password 交互式设置 Workbench 登录密码（M5）",
@@ -88,6 +88,8 @@ export function createProcessIo(): CliIo {
     env: process.env,
     cwd: process.cwd(),
     platform: process.platform,
+    stdinIsTTY: process.stdin.isTTY === true,
+    stdoutIsTTY: process.stdout.isTTY === true,
     stdout: (text) => {
       process.stdout.write(`${text}\n`);
     },
@@ -102,7 +104,7 @@ export function createProcessIo(): CliIo {
       const child = spawn(command, args, {
         cwd: options.cwd,
         env: options.env,
-        stdio: "inherit",
+        stdio: ["inherit", "inherit", options.stderr ?? "inherit"],
       });
       const exit = new Promise<number>((resolve, reject) => {
         child.once("error", reject);
