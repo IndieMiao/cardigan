@@ -9,6 +9,7 @@ import {
   ensure,
   unwrap,
 } from "./core.js";
+import { cancelRunDispatch } from "./launch.js";
 
 // q(88) explicitly selects 60 minutes despite observed legitimate silence of
 // 48 minutes. The 15-minute alert remains separate from this configurable deadline.
@@ -78,6 +79,7 @@ export function claimInactiveRunStop(
     );
     const run = d.get("runs", p.run_id),
       a = d.get("assignments", run.assignment_id);
+    if (run.dispatch_stop) return undefined;
     const old = run.inactivity_stop;
     if (old && old.lease_until > d.now) return undefined;
     if (old && !sameRef(a.runtime_ref, old.runtime_ref))
@@ -181,13 +183,11 @@ export function finishInactiveRunStop(
     const cancelled = !ended(run);
     const { inactivity_stop: _stop, ...previous } = run;
     const next: Run = cancelled
-      ? {
-          ...previous,
-          status: unwrap(transition("run", run.status, "cancel")),
-          outcome: "failed",
-          summary: "MCP 长期无活动；主机确认终端退出后自动取消 Run",
-          finished_at: d.now,
-        }
+      ? cancelRunDispatch(
+          d,
+          previous,
+          "MCP 长期无活动；主机确认终端退出后自动取消 Run",
+        )
       : previous;
     d.put("runs", next);
     // Unknown/lost retains the old reference so the existing replacement path

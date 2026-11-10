@@ -75,8 +75,15 @@ const comment = () =>
       p,
     ),
   );
+// C-56 owns a dispatched Run's retries, so a live-session failure is an
+// audit-only event with its real cause, not a per-attempt alert.
 const failures = () =>
+  f.state().events.filter((e) => e.type === "bell_delivery_attempt_failed");
+const alerts = () =>
   f.state().events.filter((e) => e.type === "bell_delivery_failed");
+afterEach(() => {
+  expect(alerts()).toEqual([]);
+});
 
 test("a Git lock conflict in beforeWake is recorded as before_wake_failed with its real category", async () => {
   comment();

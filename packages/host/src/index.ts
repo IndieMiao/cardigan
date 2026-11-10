@@ -65,6 +65,7 @@ export {
   loadRunCapacityConfig,
   type RunCapacityConfiguration,
 } from "./run-capacity-config.js";
+export { revokeStoppedRunTokens, stopRunRuntime } from "./stop-run.js";
 export {
   type CheckoutCheck,
   type CheckoutInput,

@@ -21,6 +21,7 @@ test("S10 defaults to loopback, port 3004 and the same user data directory as th
     reconcileIntervalMs: DEFAULT_INTERVALS.reconcile,
     backupIntervalMs: DEFAULT_INTERVALS.backup,
     attachmentIntervalMs: DEFAULT_INTERVALS.attachment,
+    dispatchTimeoutMs: 600_000,
   });
 });
 
@@ -87,6 +88,7 @@ test("reads data dir and port from the environment", () => {
     reconcileIntervalMs: DEFAULT_INTERVALS.reconcile,
     backupIntervalMs: DEFAULT_INTERVALS.backup,
     attachmentIntervalMs: DEFAULT_INTERVALS.attachment,
+    dispatchTimeoutMs: 600_000,
   });
 });
 
