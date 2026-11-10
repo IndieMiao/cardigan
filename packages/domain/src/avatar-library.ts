@@ -59,4 +59,5 @@ export const AVATAR_LIBRARY = [
   ["ping-er", "平儿", "红楼梦"],
   ["jia-mu", "贾母", "红楼梦"],
   ["liu-laolao", "刘姥姥", "红楼梦"],
+  ["zhang-liang", "张良", "史记·留侯世家"],
 ] as const;

@@ -44,6 +44,7 @@ export class InactiveRunReaper {
         const a = state.assignments.find((a) => a.id === run.assignment_id);
         if (
           !a ||
+          a.external ||
           (!run.inactivity_stop &&
             !inactiveRunDue(run, a, this.options.clock.now(), afterMs))
         )

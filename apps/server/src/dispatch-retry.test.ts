@@ -1,4 +1,5 @@
 import {
+  type Assignment,
   abortDispatch,
   acknowledgeRun,
   claimDispatchStop,
@@ -6,10 +7,12 @@ import {
   finishRun,
   listNeedsYou,
   queueRun,
+  type Run,
   startDispatchStop,
 } from "@cardigan/domain";
 import { runCapacitySnapshot } from "@cardigan/host";
 import {
+  beginDispatchRetry,
   beginLaunchAttempt,
   finishBellAttempt,
   listBellAttempts,
@@ -930,5 +933,153 @@ test.each([false, true])(
       await d.tick();
       expect(f.state().human_actions[0]?.status).toBe("cancelled");
     }
+  },
+);
+
+test.each([
+  "retry",
+  "timeout",
+  "stopping",
+  "recovery_failed",
+  "running",
+  "expired_lease",
+] as const)(
+  "external Office ignores stale %s records across dispatcher restarts",
+  async (scenario) => {
+    const pm = f.pm();
+    const previousRun = f.latest();
+    // Seed legacy host records directly: normal queue/launch already rejects external identities.
+    const external = f.store.uow.run((tx) => {
+      const base: Assignment = {
+        ...pm,
+        id: tx.ids.next(f.project, "assignment"),
+        standing_mode: "office",
+        external: true,
+        runtime_state: "running",
+      };
+      const a = {
+        ...base,
+        runtime_ref: f.refFor(base),
+        session_ref: "external-session",
+      };
+      tx.assignments.put(f.project, a);
+      const runId = tx.ids.next(f.project, "run");
+      const emit = (type: string, payload: Record<string, string>) => {
+        const event = {
+          id: tx.ids.nextEventId(),
+          seq: tx.ids.nextEventSequence(f.project),
+          type,
+          actor: { kind: "system" as const, project_id: f.project },
+          payload,
+          created_at: f.clock.now(),
+        };
+        tx.events.append(f.project, event);
+        return event;
+      };
+      const event = emit("run_dispatched", {
+        run_id: runId,
+        assignment_id: a.id,
+      });
+      const {
+        started_at: _started,
+        finished_at: _finished,
+        ...snapshot
+      } = previousRun;
+      const run: Run = {
+        ...snapshot,
+        id: runId,
+        assignment_id: a.id,
+        trigger_event_id: event.id,
+        status:
+          scenario === "recovery_failed"
+            ? "cancelled"
+            : scenario === "running"
+              ? "running"
+              : scenario === "expired_lease"
+                ? "queued"
+                : "dispatched",
+        outcome: null,
+        ...(scenario === "running" ? { started_at: f.clock.now() } : {}),
+        ...(scenario === "stopping"
+          ? {
+              dispatch_stop: {
+                attempt_id: event.id,
+                runtime_ref: a.runtime_ref,
+                lease_until: f.clock.now(),
+                stopping: true,
+                reason: "dispatch_timeout" as const,
+              },
+            }
+          : {}),
+      };
+      tx.runs.put(f.project, run);
+      if (scenario === "recovery_failed") {
+        emit("run_dispatch_recovered", {
+          replacement_run_id: runId,
+          assignment_id: a.id,
+        });
+        emit("run_dispatch_aborted", { run_id: runId });
+      }
+      if (["retry", "timeout", "expired_lease"].includes(scenario)) {
+        const intent = {
+          id: "external-intent",
+          project_id: f.project,
+          assignment_id: a.id,
+          run_id: run.id,
+          started_at: f.clock.now(),
+          lease_until: new Date(Date.parse(f.clock.now()) + 1).toISOString(),
+        };
+        if (scenario === "expired_lease")
+          beginLaunchAttempt(f.store.database, intent);
+        else {
+          beginDispatchRetry(f.store.database, {
+            ...intent,
+            notification_ids: [],
+          });
+          finishBellAttempt(
+            f.store.database,
+            f.project,
+            intent.id,
+            scenario === "retry" ? "failed" : "sent",
+            f.clock.now(),
+          );
+        }
+      }
+      return a;
+    });
+    const issued = f.store.issueToken({
+      project_id: f.project,
+      assignment_id: external.id,
+      role: { role_version: 1, allowed_tools: ["whoami"] },
+    });
+    f.skipEvents();
+    const snapshot = () => ({
+      state: f.state(),
+      tokens: tokensForAssignment(f.store.database, f.project, external.id),
+      attempts: listBellAttempts(f.store.database, f.project),
+      notes: f.store.listNotifications({ project_id: f.project }),
+    });
+    const before = snapshot();
+    const beforeWake = vi.fn(async () => "prepared");
+    for (const elapsed of [scenario === "retry" ? 20 : 3_600_001, 3_600_001]) {
+      f.advance(elapsed);
+      await dispatcher({
+        dispatchTimeoutMs: 100,
+        deliveryRetryBaseMs: 10,
+        beforeWake,
+      }).tick();
+      expect(snapshot()).toEqual(before);
+      expect(f.store.verifyToken(issued.token)).toBeDefined();
+    }
+    for (const method of [
+      f.runtime.status,
+      f.runtime.wake,
+      f.runtime.release,
+      f.runtime.provision,
+      f.runtime.resume_or_replace,
+      f.options.startRun,
+      beforeWake,
+    ])
+      expect(method).not.toHaveBeenCalled();
   },
 );

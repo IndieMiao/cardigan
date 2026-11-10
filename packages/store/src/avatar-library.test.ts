@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { AVATAR_LIBRARY } from "@cardigan/domain";
 import { expect, test } from "vitest";
 
-test("the original 59-character manifest matches the catalog and all 236 bundled images", async () => {
+test("the 60-character manifest matches the catalog and all 240 bundled images", async () => {
   const root = new URL("../../../apps/web/public/avatars/v1/", import.meta.url);
   type File = {
     path: string;
@@ -25,7 +25,7 @@ test("the original 59-character manifest matches the catalog and all 236 bundled
   expect(
     manifest.characters.map(({ id, name, novel }) => [id, name, novel]),
   ).toEqual(AVATAR_LIBRARY);
-  expect(manifest.characters).toHaveLength(59);
+  expect(manifest.characters).toHaveLength(60);
   for (const character of manifest.characters) {
     expect(Object.keys(character.files.head).sort()).toEqual([
       "128",
