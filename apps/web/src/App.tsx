@@ -137,14 +137,20 @@ function Workbench({
     () =>
       selected
         ? client.needsYou(selected.id)
-        : Promise.resolve({ decisions: [], human_actions: [], incidents: [] }),
+        : Promise.resolve({
+            decisions: [],
+            human_actions: [],
+            incidents: [],
+            attention: [],
+          }),
     [client, selected],
   );
   const needs = useResource(loadNeeds, live.revision);
   const needsCount = needs.data
     ? needs.data.decisions.length +
       needs.data.human_actions.length +
-      needs.data.incidents.length
+      needs.data.incidents.length +
+      (needs.data.attention?.length ?? 0)
     : 0;
 
   // Land on the first project's board when the URL names no project (or one

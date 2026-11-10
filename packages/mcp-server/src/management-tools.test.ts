@@ -647,3 +647,101 @@ test("Agent comments discover full employee names without trusting the client's 
     store.uow.read((tx) => tx.timeline.get(project, comment.id))?.mentions,
   ).toEqual(comment.mentions);
 });
+
+test.each([false, true])(
+  "record_decision raises review limits once through PM Office (paused=%s)",
+  async (paused) => {
+    const reviewer = work("reviewer");
+    if (reviewer.kind !== "verify") throw new Error("Missing verifier");
+    const assignment = await ok<AssignmentReply>(office, "assign", {
+      work_item_id: reviewer.id,
+      role_id: "reviewer",
+    });
+    const q = await ok<Decision>(office, "request_decision", {
+      card_id: card.id,
+      kind: "choose",
+      category: "general",
+      question: "Review limit",
+      context: "Review budget exhausted",
+      options: [
+        { key: "raise_limit", description: "Add a round", impact: "Resume" },
+        { key: "pause", description: "Pause", impact: "Wait" },
+      ],
+      recommended: "raise_limit",
+      affected_cards: [card.id],
+      affected_work_items: [],
+      blocking: true,
+      decider: "human",
+    });
+    // Trusted control-plane fixture; request_decision cannot forge the trigger.
+    store.uow.run((tx) => {
+      tx.decisions.put(project, {
+        ...q,
+        trigger: "review_limit",
+        affected_work_items: [reviewer.id],
+      });
+      tx.work_items.put(project, {
+        ...reviewer,
+        assignment_id: assignment.id,
+        status: "waiting_decision",
+        max_review_rounds: 1,
+      });
+      tx.runs.put(project, {
+        id: tx.ids.next(project, "run"),
+        assignment_id: assignment.id,
+        trigger_event_id: tx.ids.nextEventId(),
+        kind: "initial",
+        status: "completed",
+        role_version: 1,
+        model: "fixture-model",
+        agent_cli_version: "1",
+        outcome: "blocked",
+        summary: "Review limit",
+      });
+    });
+    if (paused)
+      await ok(office, "record_decision", {
+        decision_id: q.id,
+        option: "pause",
+        rationale: "Check first",
+        raw_quote: "Wait",
+      });
+    const params = {
+      decision_id: q.id,
+      option: "raise_limit",
+      rationale: "Confirmed",
+      raw_quote: "One more round",
+    };
+    const result = await ok<Decision>(
+      office,
+      "record_decision",
+      params,
+      "raise-once",
+    );
+    expect(result).toMatchObject({
+      status: "resolved",
+      resolution: { via: "pm_office_chat", raw_quote: params.raw_quote },
+    });
+    expect(work("reviewer")).toMatchObject({
+      max_review_rounds: 2,
+      status: "ready",
+    });
+    expect(
+      store.uow.read((tx) =>
+        tx.runs.list(project).filter((r) => r.status === "queued"),
+      ),
+    ).toHaveLength(1);
+    expect(await ok(office, "record_decision", params, "raise-once")).toEqual(
+      result,
+    );
+    expect((await raw(office, "record_decision", params)).isError).toBe(true);
+    expect(work("reviewer")).toMatchObject({ max_review_rounds: 2 });
+    expect(
+      store.uow.read((tx) =>
+        tx.events
+          .listAfter(project, card.id, 0)
+          .filter((e) => e.type === "work_item_updated"),
+      ),
+    ).toHaveLength(1);
+  },
+);

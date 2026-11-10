@@ -46,6 +46,7 @@ export * from "./notification.js";
 export * from "./ports.js";
 export * from "./preferences.js";
 export { type ResolvedReference, resolveReferences } from "./references.js";
+export { reviewLimitAttention } from "./review-limit-attention.js";
 export * from "./role.js";
 export * from "./role-prompt.js";
 export * from "./runtime-port.js";

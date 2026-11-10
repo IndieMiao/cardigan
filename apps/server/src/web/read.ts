@@ -724,6 +724,7 @@ export function needsYou(state: CommandState, now: string) {
     return (right.waited_ms ?? 0) - (left.waited_ms ?? 0);
   };
   return {
+    attention: data.attention,
     incidents: data.incidents.map((incident) => ({
       ...incident,
       ...webAuthorView(state, `assignment:${incident.id}`),

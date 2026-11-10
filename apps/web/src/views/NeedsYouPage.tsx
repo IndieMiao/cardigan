@@ -627,7 +627,10 @@ function NeedsContent({
   }, [data]);
   const props = { client, projectId, done: reload, elapsed };
   const total = data
-    ? data.decisions.length + data.human_actions.length + data.incidents.length
+    ? data.decisions.length +
+      data.human_actions.length +
+      data.incidents.length +
+      (data.attention?.length ?? 0)
     : 0;
   const blocking = (data?.decisions ?? []).filter(
     (q) => q.blocking && !isMergeConfirmation(q),
@@ -664,6 +667,26 @@ function NeedsContent({
                   projectId={projectId}
                   elapsed={elapsed}
                 />
+              ))}
+            </section>
+          )}
+          {!!data.attention?.length && (
+            <section className="needs-group" aria-label="审核恢复异常">
+              <h2>审核恢复异常（{data.attention.length}）</h2>
+              {data.attention.map((finding) => (
+                <article
+                  className="needs-item urgent"
+                  key={`${finding.decision_id}/${finding.work_item_id}`}
+                >
+                  <header className="needs-meta">
+                    <IdTag id={finding.work_item_id} label="审核工作项" />
+                    <span className="hint">
+                      {waitLabel(finding.waited_ms, elapsed)}
+                    </span>
+                    <CardLink projectId={projectId} id={finding.card_id} />
+                  </header>
+                  <p>{finding.detail}</p>
+                </article>
               ))}
             </section>
           )}

@@ -131,14 +131,6 @@ test.each([
     deactivate();
     expect(f.state).toEqual(before);
     f.commit(
-      updateWorkItem(
-        f.state,
-        human,
-        { work_item_id: work.id, max_review_rounds: 2 },
-        f.io,
-      ),
-    );
-    f.commit(
       recordDecision(
         f.state,
         human,
