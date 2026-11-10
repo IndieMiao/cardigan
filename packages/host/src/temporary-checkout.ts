@@ -9,6 +9,7 @@ import {
   type ExecutionConfig,
   LOCAL_RUNTIME_WARNING,
   prepareAgentCheckout,
+  prepareCheckLock,
   prepareCheckoutAlias,
   secureDataDirectory,
 } from "@cardigan/runtime-herdr";
@@ -43,6 +44,10 @@ export interface CheckoutInput {
   readonly env?: Readonly<Record<string, string>>;
   readonly totalTimeoutMs?: number;
   readonly signal?: AbortSignal;
+  /** Merge checks share one OS lock across projects and controller processes. */
+  readonly serialize?: boolean;
+  /** Called only after the execution account acquired the slot and authenticated itself. */
+  readonly onReady?: () => void;
   /** Private stream: the log consumer must redact configured env values before persistence. */
   readonly onOutput?: (name: string, text: string) => void;
 }
@@ -84,10 +89,19 @@ export async function runInTemporaryCheckout(
     execution.mode === "agent-ssh"
       ? AGENT_PATH
       : "/usr/local/bin:/usr/bin:/bin";
+  const lock = input.serialize ? await prepareCheckLock(execution) : undefined;
+  const worker = [
+    execution.mode === "agent-ssh" ? "node" : process.execPath,
+    "-e",
+    CHECKOUT_WORKER,
+  ];
+  const argv = lock
+    ? ["flock", "--exclusive", "--no-fork", "--", lock, ...worker]
+    : worker;
   const command =
     execution.mode === "agent-ssh"
-      ? await agentProcessCommand(execution, ["node", "-e", CHECKOUT_WORKER])
-      : { file: process.execPath, args: ["-e", CHECKOUT_WORKER] };
+      ? await agentProcessCommand(execution, argv)
+      : { file: argv[0] as string, args: argv.slice(1) };
   const root =
     execution.mode === "agent-ssh"
       ? execution.agentRoot
@@ -123,7 +137,12 @@ export async function runInTemporaryCheckout(
       let result: CheckoutResult | undefined;
       let resultCount = 0,
         protocolFailed = false;
+      let ready = false;
       const cancel = () => {
+        if (input.serialize && !ready) {
+          child.kill("SIGTERM");
+          return;
+        }
         if (!child.stdin.destroyed) child.stdin.write("cancel\n");
       };
       signal?.addEventListener("abort", cancel, { once: true });
@@ -142,6 +161,11 @@ export async function runInTemporaryCheckout(
             resultCount > 1
           )
             throw new Error("Invalid checkout message");
+          if (event.type === "ready") {
+            if (ready) throw new Error("Duplicate checkout readiness");
+            ready = true;
+            input.onReady?.();
+          }
           if (event.type === "output") input.onOutput?.(event.name, event.text);
           if (event.type === "result") {
             if (event.nonce !== nonce)
@@ -161,8 +185,16 @@ export async function runInTemporaryCheckout(
       child.once("close", (code) => {
         signal?.removeEventListener("abort", cancel);
         lines.close();
-        if (code === 0 && !protocolFailed && resultCount === 1 && result)
+        if (
+          code === 0 &&
+          ready &&
+          !protocolFailed &&
+          resultCount === 1 &&
+          result
+        )
           resolve(result);
+        else if (signal?.aborted && !protocolFailed)
+          resolve({ status: "interrupted", checks: [], cleanup_errors: [] });
         else
           reject(
             new Error(

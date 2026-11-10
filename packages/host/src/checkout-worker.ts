@@ -16,12 +16,14 @@ const cancel = () => { cancelled = true; current?.('interrupted'); };
 input.on('close', cancel);
 process.on('SIGTERM', cancel);
 process.on('SIGINT', cancel);
+process.on('SIGHUP', cancel);
 process.stdout.on('error', cancel);
 input.once('line', line => {
   input.on('line', cancel);
   const payload = JSON.parse(line);
   nonce = payload.nonce;
   authKey = payload.auth_key;
+  emit({ type: 'ready' });
   main(payload).catch(() => { process.exitCode = 1; }).finally(() => {
     clearTimeout(deadline);
     input.close();

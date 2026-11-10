@@ -275,6 +275,46 @@ export async function prepareCheckoutAlias(
     await root.close();
   }
 }
+
+/** Persistent empty lock inode shared by every project in this machine's execution root. */
+export async function prepareCheckLock(
+  config: ExecutionConfig,
+): Promise<string> {
+  if (process.platform !== "linux")
+    throw new Error("Serialized checks require Linux flock");
+  await secureDataDirectory(config);
+  const path = config.mode === "agent-ssh" ? config.agentRoot : config.dataDir;
+  const root =
+    config.mode === "agent-ssh"
+      ? await agentRoot(config)
+      : await absoluteDirectory(path);
+  try {
+    const file = await open(
+      at(root, "merge-check.lock"),
+      constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW,
+      0o600,
+    );
+    try {
+      const entry = await file.stat();
+      if (
+        !entry.isFile() ||
+        entry.uid !== process.getuid?.() ||
+        entry.nlink !== 1 ||
+        entry.size !== 0 ||
+        ![0o600, 0o660].includes(entry.mode & 0o7777)
+      )
+        throw new Error("Unsafe merge check lock");
+      if (config.mode === "agent-ssh")
+        await file.chown(process.getuid?.() ?? -1, config.gid);
+      await file.chmod(config.mode === "agent-ssh" ? 0o660 : 0o600);
+    } finally {
+      await file.close();
+    }
+    return join(path, "merge-check.lock");
+  } finally {
+    await root.close();
+  }
+}
 async function writeAt(
   parent: FileHandle,
   name: string,

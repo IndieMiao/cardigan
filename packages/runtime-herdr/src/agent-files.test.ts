@@ -18,6 +18,7 @@ import {
   clearAgentSentinel,
   prepareAgentCheckout,
   prepareAgentProject,
+  prepareCheckLock,
   prepareCheckoutAlias,
   scrubAgentLaunch,
   secureDataDirectory,
@@ -49,6 +50,21 @@ describe.skipIf(process.platform !== "linux")("shared launch files", () => {
     await rm(root, { recursive: true, force: true });
   });
   const mode = async (path: string) => (await stat(path)).mode & 0o7777;
+  test("machine lock is a stable host-owned inode; unsafe existing files are preserved and rejected", async () => {
+    const [first, second] = await Promise.all([
+      prepareCheckLock(config),
+      prepareCheckLock(config),
+    ]);
+    expect(first).toBe(second);
+    expect(await mode(first)).toBe(0o660);
+    expect((await stat(first)).gid).toBe(config.gid);
+    const inode = (await stat(first)).ino;
+    expect(await prepareCheckLock(config)).toBe(first);
+    expect((await stat(first)).ino).toBe(inode);
+    await writeFile(first, "not a lock");
+    await expect(prepareCheckLock(config)).rejects.toThrow(/Unsafe/);
+    expect(await readFile(first, "utf8")).toBe("not a lock");
+  });
   test.each(["local", "agent-ssh"] as const)(
     "%s short namespace rejects existing aliases and preserves their contents",
     async (modeName) => {
