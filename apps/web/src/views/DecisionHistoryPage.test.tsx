@@ -92,3 +92,39 @@ test("empty and failed history queries have readable states", async () => {
   expect(await screen.findByRole("alert")).toBeTruthy();
   expect(screen.getByRole("button", { name: "重试" })).toBeTruthy();
 });
+
+test("human decision records display the owner's profile instead of the raw human author", async () => {
+  const { container } = render(
+    <DecisionHistoryPage
+      projectId="p-1"
+      client={fakeClient({
+        decisionHistory: async () => ({
+          decisions: [
+            {
+              ...record,
+              decision_maker: "human",
+              decider: "human",
+              resolution: {
+                ...record.resolution,
+                resolved_by: "human",
+                via: "needs_you",
+                author_display: "邵杰",
+                member: {
+                  id: "M-1",
+                  name: "邵杰",
+                  title: "所有者",
+                  avatar: "/avatars/v1/liu-bei/head-64.webp",
+                },
+              },
+            },
+          ],
+        }),
+      })}
+    />,
+  );
+  expect(await screen.findByText("邵杰")).toBeTruthy();
+  expect(container.querySelector("img")?.getAttribute("src")).toBe(
+    "/avatars/v1/liu-bei/head-64.webp",
+  );
+  expect(screen.queryByText(/^(你|人|human)$/)).toBeNull();
+});

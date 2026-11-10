@@ -4,6 +4,7 @@ declare const idBrand: unique symbol;
 export type Id<Kind extends string> = string & { readonly [idBrand]: Kind };
 const formats = {
   employee: ["E-", ""],
+  member: ["M-", ""],
   card: ["C-", ""],
   work_item: ["W-", ""],
   assignment: ["A-", ""],
@@ -14,8 +15,9 @@ const formats = {
   human_action: ["h(", ")"],
 } as const;
 export type FormattedIdKind = keyof typeof formats;
-// Project-local allocation deliberately excludes global employee IDs.
-export type ReadableIdKind = Exclude<FormattedIdKind, "employee">;
+// Project-local allocation deliberately excludes global identity IDs.
+export type ReadableIdKind = Exclude<FormattedIdKind, "employee" | "member">;
+export type MemberId = Id<"member">;
 export type EmployeeId = Id<"employee">;
 export type CardId = Id<"card">;
 export type WorkItemId = Id<"work_item">;

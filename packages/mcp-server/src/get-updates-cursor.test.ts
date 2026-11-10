@@ -275,3 +275,31 @@ test("acknowledging everything leaves an empty read", async () => {
   expect(updates.timeline).toEqual([]);
   expect(updates.latest_seq).toBe(3);
 });
+
+test("human authors in historical updates resolve the global owner's latest name and avatar", async () => {
+  const before = await call(tokens.one, "get_updates", { card_id: CARD });
+  expect((before.timeline as unknown[])[0]).toMatchObject({
+    author: "human",
+    author_display: "所有者",
+    member: { id: "M-1" },
+  });
+  store.uow.run((tx) => {
+    const owner = tx.members.list()[0];
+    if (!owner) throw new Error("Missing owner");
+    tx.members.put({ ...owner, name: "邵杰", avatar: "library:liu-bei" });
+  });
+  const after = await call(tokens.one, "get_updates", { card_id: CARD });
+  expect((after.timeline as unknown[])[0]).toMatchObject({
+    author: "human",
+    author_display: "邵杰",
+    member: {
+      id: "M-1",
+      name: "邵杰",
+      title: "所有者",
+      avatar: "library:liu-bei",
+    },
+  });
+  expect(store.uow.read((tx) => tx.timeline.list(PROJECT))[0]?.author).toBe(
+    "human",
+  );
+});

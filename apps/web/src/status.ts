@@ -85,8 +85,9 @@ export const cardStatusLabel = statusLabel;
 
 /** Who acts next, in the words the card page uses. */
 export function nextOwnerLabel(owner: NextOwnerItem): string {
+  if (owner.member) return owner.member.name;
   if (owner.employee) return owner.employee.name;
-  if (owner.kind === "human") return "你";
+  if (owner.kind === "human") return owner.author_display ?? "所有者";
   if (owner.kind === "role") return owner.ref;
   return `${owner.ref} Assignment`;
 }

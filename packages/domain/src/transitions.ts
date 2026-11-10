@@ -6,6 +6,7 @@ import type {
   DeliveryStatus,
   EmployeeStatus,
   HumanActionStatus,
+  MemberStatus,
   NotificationStatus,
   ProduceStatus,
   RunStatus,
@@ -15,6 +16,7 @@ import type {
 
 interface MachineStates {
   employee: EmployeeStatus;
+  member: MemberStatus;
   produce: ProduceStatus;
   verify: VerifyStatus;
   delivery: DeliveryStatus;
@@ -32,6 +34,10 @@ type Table<S extends string> = Readonly<
 export const transitionTables: {
   readonly [M in keyof MachineStates]: Table<MachineStates[M]>;
 } = {
+  member: {
+    active: { deactivate: "inactive" },
+    inactive: { activate: "active" },
+  },
   employee: {
     active: { deactivate: "inactive" },
     inactive: { activate: "active" },

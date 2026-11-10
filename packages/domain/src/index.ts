@@ -17,6 +17,7 @@ export * from "./commands/delivery.js";
 export * from "./commands/employee.js";
 export * from "./commands/inactive-run.js";
 export * from "./commands/launch.js";
+export * from "./commands/member.js";
 export {
   type MergePlan,
   mergePlan,
@@ -60,6 +61,7 @@ export * from "./entities.js";
 export * from "./errors.js";
 export * from "./git-port.js";
 export * from "./ids.js";
+export * from "./member.js";
 export * from "./notification.js";
 export * from "./ports.js";
 export * from "./preferences.js";

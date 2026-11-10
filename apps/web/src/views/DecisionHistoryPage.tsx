@@ -1,5 +1,6 @@
 import { useCallback } from "react";
 import type { CardiganClient } from "../api.js";
+import { EmployeeIdentity } from "../components/EmployeeIdentity.js";
 import {
   EmptyState,
   PageTitle,
@@ -41,7 +42,7 @@ export function DecisionHistoryPage({
   const resource = useResource(load, revision);
   const select = (name: string, value: string) =>
     setFilters({ ...filters, [name]: value });
-  const makerLabels = { human: "人", pm: "PM 代拍", system: "系统代批" };
+  const makerLabels = { human: "所有者", pm: "PM 代拍", system: "系统代批" };
   return (
     <section>
       <PageTitle
@@ -144,7 +145,13 @@ export function DecisionHistoryPage({
             影响：{q.options.find((o) => o.key === q.resolution.option)?.impact}
           </p>
           <Markdown body={`理由：${q.resolution.rationale}`} />
-          <p>记录人：{q.resolution.resolved_by}</p>
+          <p>
+            记录人：
+            <EmployeeIdentity
+              {...q.resolution}
+              author={q.resolution.resolved_by}
+            />
+          </p>
           {q.resolution.proxy_authority && (
             <p>授权依据：{q.resolution.proxy_authority}</p>
           )}
