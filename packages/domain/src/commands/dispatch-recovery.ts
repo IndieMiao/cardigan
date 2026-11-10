@@ -131,7 +131,19 @@ export function recoverDispatch(
         e.type === "run_dispatch_recovered" &&
         field(e.payload, "assignment_id") === a.id,
     );
-    const minutes = Math.max(0, Math.floor(elapsed / 60000));
+    // Report the whole recovery episode without changing this Run's timeout.
+    const recovery = state.events.find(
+      (e) =>
+        e.type === "run_dispatch_recovered" &&
+        field(e.payload, "replacement_run_id") === run.id,
+    );
+    const original = state.runs.find(
+      (r) =>
+        r.id === field(recovery?.payload, "run_id") && r.assignment_id === a.id,
+    );
+    const waitingSince = (original && dispatchedAt(state, original)) ?? started;
+    const waitedMs = Date.parse(d.now) - Date.parse(waitingSince);
+    const minutes = Math.max(0, Math.floor(waitedMs / 60000));
     const context = `${card ? `${card.id}「${card.title}」` : "项目常驻任务"}的 ${a.id}（${run.id}）派发后已等待 ${minutes} 分钟，${startupFailed ? "自动恢复后的启动失败" : "仍未开始工作"}`;
     if (!recovered && !p.stop_failed && !startupFailed) {
       ensure(
@@ -235,7 +247,7 @@ export function recoverDispatch(
         assignment_id: a.id,
         run_id: run.id,
         reason,
-        waited_ms: elapsed,
+        waited_ms: waitedMs,
         body,
         audience: ops ? "pm_ops" : "needs_you",
       },

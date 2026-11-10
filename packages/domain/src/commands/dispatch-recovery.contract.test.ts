@@ -248,16 +248,83 @@ test("timeout cancels and queues atomically, preserves snapshot and spends the A
   expect(commit(recover())).toBeUndefined();
   if (!replacement) throw new Error("Missing recovery");
   commit(dispatch(replacement));
-  now += 600000;
+  now += 599999;
+  expect(commit(recover(replacement))).toBeUndefined();
+  expect(f.state.human_actions).toEqual([]);
+  now++;
   expect(commit(recover(replacement))).toBeUndefined();
   expect(f.state.runs).toHaveLength(2);
   expect(f.state.human_actions).toHaveLength(1);
   expect(f.state.human_actions[0]?.instructions).toContain(
     `cardigan assignment stop ${f.coder.id}`,
   );
-  expect(f.state.human_actions[0]?.instructions).toContain("10 分钟");
+  expect(f.state.human_actions[0]?.instructions).toContain("20 分钟");
+  expect(
+    f.state.events.find((e) => e.type === "run_dispatch_stalled")?.payload,
+  ).toMatchObject({ reason: "dispatch_timeout", waited_ms: 1200000 });
   commit(recover(replacement));
   expect(f.state.human_actions).toHaveLength(1);
+});
+
+test.each([false, true])(
+  "startup failure includes original dispatch and replacement queue time (dispatched=%s)",
+  (dispatched) => {
+    now += 600000;
+    const replacement = commit(recover());
+    if (!replacement) throw new Error("Missing recovery");
+    now += 120000;
+    if (dispatched) commit(dispatch(replacement));
+    now += 60000;
+    commit(
+      abortDispatch(
+        f.state,
+        system,
+        { run_id: replacement.id, reason: "startup_failed" },
+        f.io,
+      ),
+    );
+    commit(recover(replacement));
+    expect(
+      f.state.events.find((e) => e.type === "run_dispatch_stalled")?.payload,
+    ).toMatchObject({
+      run_id: replacement.id,
+      reason: "recovery_startup_failed",
+      waited_ms: 780000,
+      body: expect.stringContaining("派发后已等待 13 分钟"),
+      audience: "needs_you",
+    });
+    expect(f.state.human_actions[0]?.instructions).toContain(
+      "派发后已等待 13 分钟，自动恢复后的启动失败",
+    );
+  },
+);
+
+test("a later independent Run does not inherit a previous recovery's waiting time", () => {
+  now += 600000;
+  const replacement = commit(recover());
+  if (!replacement) throw new Error("Missing recovery");
+  commit(dispatch(replacement));
+  commit(acknowledgeRun(f.state, actor(), { run_id: replacement.id }, f.io));
+  commit(
+    finishRun(
+      f.state,
+      actor(),
+      { run_id: replacement.id, outcome: "completed", summary: "Recovered" },
+      f.io,
+    ),
+  );
+  now += 600000;
+  const later = commit(dispatch(commit(queue())));
+  now += 120000;
+  commit(recover(later, 5));
+  expect(
+    f.state.events.find((e) => e.type === "run_dispatch_stalled")?.payload,
+  ).toMatchObject({
+    run_id: later.id,
+    reason: "delivery_retry_exhausted",
+    waited_ms: 120000,
+    body: expect.stringContaining("派发后已等待 2 分钟"),
+  });
 });
 
 test("consecutive failure threshold recovers before timeout; a real MCP start wins", () => {
