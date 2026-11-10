@@ -2390,6 +2390,34 @@ body[data-lightbox="open"] .drawer-overlay {
 .board-column-collapsed .board-column-title {
   margin: 0;
 }
+/* C-64: the whole folded strip is the expand control. */
+.lane-toggle-icon {
+  flex: none;
+}
+.board-column-collapsed .board-column-title {
+  flex: 1;
+  min-height: 0;
+}
+.board-column-collapsed .lane-strip {
+  height: 100%;
+  cursor: pointer;
+}
+.board-column-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.board-column .lane-fold {
+  flex: none;
+  width: auto;
+  padding: 2px;
+  border-radius: var(--radius);
+}
+.board-column .lane-fold:hover,
+.board-column .lane-strip:hover .lane-toggle-icon {
+  color: var(--text);
+}
 .delivery-table .id-tag > span:first-child {
   white-space: nowrap;
   flex: none;

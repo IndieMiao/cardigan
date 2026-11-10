@@ -73,3 +73,53 @@ test("human preferences require session and idempotency, persist audit, and isol
     await f.close();
   }
 });
+
+test("board lane folding persists across sessions as a per-lane patch and is validated", async () => {
+  const f = await m5Cross();
+  try {
+    const path = f.projectPath("/preferences");
+    await f.password(TEST_PASSWORD);
+    await f.login();
+    const write = (lanes: unknown, key: string) =>
+      f.call(path, {
+        method: "POST",
+        body: { board_collapsed_lanes: lanes },
+        headers: { "idempotency-key": key },
+      });
+    expect((await write({ backlog: false }, "lane-1")).status).toBe(200);
+    expect((await write({ in_progress: true }, "lane-2")).status).toBe(200);
+    for (const [i, invalid] of [
+      { archived: true },
+      { done: "yes" },
+      ["done"],
+      null,
+    ].entries())
+      expect((await write(invalid, `lane-bad-${i}`)).status).toBe(400);
+    // A second login stands in for another device: the server keeps the lanes.
+    await f.login();
+    expect((await f.call(path)).json).toMatchObject({
+      auto_merge_after_minutes: null,
+      board_collapsed_lanes: { backlog: false, in_progress: true },
+    });
+    expect((await write({ backlog: null }, "lane-3")).status).toBe(200);
+    expect((await f.call(path)).json).toMatchObject({
+      board_collapsed_lanes: { in_progress: true },
+    });
+    expect(
+      (await f.call(path)).json as { board_collapsed_lanes: object },
+    ).not.toHaveProperty("board_collapsed_lanes.backlog");
+    const events = f
+      .store()
+      .uow.read((tx) => tx.events.listAfter(f.project.project_id, undefined, 0))
+      .filter(
+        (e) =>
+          e.type === "project_preferences_updated" &&
+          (e.payload as { preference?: string }).preference ===
+            "board_collapsed_lanes",
+      );
+    // Folding is a view setting: it never feeds the activity stream.
+    expect(events).toEqual([]);
+  } finally {
+    await f.close();
+  }
+});

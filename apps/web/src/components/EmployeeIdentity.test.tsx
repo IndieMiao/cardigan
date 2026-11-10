@@ -374,8 +374,8 @@ test("board shows three owner avatars plus overflow; profile click does not open
     <Board
       cards={[{ ...card, produce_owners: owners }]}
       projectId="p-1"
-      expanded=""
-      onExpanded={() => {}}
+      lanes={{}}
+      onLaneChange={() => {}}
       display={DEFAULT_CARD_DISPLAY}
       onOpenCard={openCard}
     />,

@@ -603,6 +603,9 @@ export async function serveWrite(
             .optional(),
           decision_delegation: z.record(z.string(), z.boolean()).optional(),
           pm_merge_confirmation: z.boolean().optional(),
+          board_collapsed_lanes: z
+            .record(z.string().max(64), z.boolean().nullable())
+            .optional(),
         })
         .strict(),
       body,
@@ -620,6 +623,9 @@ export async function serveWrite(
             : {}),
           ...(input.pm_merge_confirmation !== undefined
             ? { pm_merge_confirmation: input.pm_merge_confirmation }
+            : {}),
+          ...(input.board_collapsed_lanes !== undefined
+            ? { board_collapsed_lanes: input.board_collapsed_lanes }
             : {}),
         },
         ports,

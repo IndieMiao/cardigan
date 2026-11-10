@@ -1,4 +1,5 @@
 import type { ProjectId } from "./ids.js";
+import { type CardStatus, states } from "./states.js";
 
 export const decisionCategories = [
   "general",
@@ -36,6 +37,17 @@ export interface ProjectPreferences {
   >;
   /** Merge confirmations go to PM Ops unless this is explicitly false (§7.4). */
   readonly pm_merge_confirmation?: boolean;
+  /**
+   * Board lanes the human folded (true) or unfolded (false) by hand. A lane
+   * without an entry follows the default: empty lanes start collapsed.
+   */
+  readonly board_collapsed_lanes?: Readonly<
+    Partial<Record<CardStatus, boolean>>
+  >;
+}
+/** Lane status keys accepted in `board_collapsed_lanes`. */
+export function isBoardLane(value: string): value is CardStatus {
+  return (states.card as readonly string[]).includes(value);
 }
 export function pmMergeConfirmation(preferences?: ProjectPreferences): boolean {
   return preferences?.pm_merge_confirmation !== false;

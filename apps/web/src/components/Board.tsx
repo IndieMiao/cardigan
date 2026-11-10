@@ -1,4 +1,5 @@
 import {
+  type MouseEvent,
   type ReactNode,
   useCallback,
   useEffect,
@@ -11,8 +12,44 @@ import type { CardDisplay } from "../card-display.js";
 import { BOARD_STATUSES, cardStatusLabel } from "../status.js";
 import { BoardCard } from "./BoardCard.js";
 import { StatusTag } from "./Foundation.js";
+import { Tooltip } from "./Tooltip.js";
 
 const BATCH_SIZE = 10;
+
+/** Board lane settings: true = folded, false = unfolded; missing = default. */
+export type BoardLanes = Readonly<Record<string, boolean>>;
+
+/** Empty lanes start folded unless the human has set the lane by hand. */
+export function laneCollapsed(
+  lanes: BoardLanes,
+  status: string,
+  count: number,
+): boolean {
+  return Object.hasOwn(lanes, status) ? lanes[status] === true : count === 0;
+}
+
+const laneIcon = (path: string) => (
+  <svg
+    className="lane-toggle-icon"
+    viewBox="0 0 20 20"
+    width="16"
+    height="16"
+    aria-hidden="true"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.8"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
+    <path d={path} />
+  </svg>
+);
+// Original geometry in the StatusIcon stroke style: two chevrons meeting on a
+// centre rule (fold) or leaving it (unfold).
+const FoldIcon = () =>
+  laneIcon("M10 3v14M3 6.5 6.5 10 3 13.5M17 6.5 13.5 10l3.5 3.5");
+const UnfoldIcon = () =>
+  laneIcon("M10 3v14M6.5 6.5 3 10l3.5 3.5M13.5 6.5 17 10l-3.5 3.5");
 
 /** The lane owns its scroll root and batch size; headings stay outside it. */
 function BoardLaneCards({
@@ -94,23 +131,27 @@ function BoardLaneCards({
 export function Board({
   cards,
   projectId,
-  expanded,
-  onExpanded,
+  lanes,
+  onLaneChange,
   display,
   onOpenCard,
   resetKey = "",
 }: {
   cards: readonly CardListItem[];
   projectId: string;
-  expanded: string;
-  onExpanded: (value: string) => void;
+  /** The human's lane settings; they override the empty-lane default. */
+  lanes: BoardLanes;
+  onLaneChange: (status: string, collapsed: boolean) => void;
   display: CardDisplay;
   onOpenCard?: (cardId: string, trigger: HTMLElement) => void;
   /** Only filtering/sorting resets batches, not live refresh or the drawer. */
   resetKey?: string;
 }) {
   const id = useId();
-  const open = new Set(expanded.split(","));
+  const [announcement, setAnnouncement] = useState("");
+  // The toggled control is replaced by its counterpart; keep focus on it.
+  const focusLane = useRef<string | null>(null);
+  const toggles = useRef(new Map<string, HTMLButtonElement>());
   /** §9 U6a: one row that scrolls inside the board; the hint only flags more columns. */
   const scroller = useRef<HTMLElement>(null);
   const [more, setMore] = useState(false);
@@ -155,9 +196,24 @@ export function Board({
   }, [measure]);
   // Columns change width when a strip expands or a status fills up.
   useEffect(measure);
+  useEffect(() => {
+    const status = focusLane.current;
+    if (status === null) return;
+    focusLane.current = null;
+    toggles.current.get(status)?.focus();
+  });
+  const toggleRef = (status: string) => (node: HTMLButtonElement | null) => {
+    if (node) toggles.current.set(status, node);
+    else toggles.current.delete(status);
+  };
   return (
     <>
-      <p className="hint board-hint">空列默认收起。</p>
+      <p className="hint board-hint">
+        空列默认收起；可手动折叠或展开任一列，设置按项目保存。
+      </p>
+      <p className="visually-hidden" role="status" aria-live="polite">
+        {announcement}
+      </p>
       <div className="board-scroll">
         <section
           className="board"
@@ -168,45 +224,69 @@ export function Board({
         >
           {BOARD_STATUSES.map((status) => {
             const column = cards.filter((c) => c.status === status),
-              collapsed = !column.length && !open.has(status);
-            const toggle = () => {
-              if (open.has(status)) open.delete(status);
-              else open.add(status);
-              onExpanded(BOARD_STATUSES.filter((s) => open.has(s)).join(","));
+              label = cardStatusLabel(status),
+              collapsed = laneCollapsed(lanes, status, column.length);
+            const toggle = (event: MouseEvent<HTMLButtonElement>) => {
+              // Keyboard / assistive activation (detail 0) keeps focus on the
+              // replacement control; a mouse click would only pop its tooltip.
+              if (event.detail === 0) focusLane.current = status;
+              setAnnouncement(`${collapsed ? "已展开" : "已折叠"} ${label}列`);
+              onLaneChange(status, !collapsed);
             };
             return (
               <section
                 key={status}
                 className={`board-column${collapsed ? " board-column-collapsed" : ""}`}
-                aria-label={cardStatusLabel(status)}
+                aria-label={label}
               >
                 <h3 className="board-column-title">
-                  {!column.length ? (
-                    <button
-                      type="button"
-                      className="quiet column-toggle"
-                      aria-label={`${collapsed ? "展开" : "收起"}${cardStatusLabel(status)}空列`}
-                      aria-expanded={!collapsed}
-                      aria-controls={`${id}-${status}`}
-                      onClick={toggle}
-                    >
-                      <StatusTag status={status} />
-                      <span className="board-column-count">0</span>
-                      {!collapsed && <span aria-hidden="true">−</span>}
-                    </button>
+                  {collapsed ? (
+                    // The whole strip is the expand control.
+                    <Tooltip content="展开此列" side="right">
+                      <button
+                        ref={toggleRef(status)}
+                        type="button"
+                        className="quiet column-toggle lane-strip"
+                        aria-label={`展开${label}列`}
+                        aria-expanded={false}
+                        aria-controls={`${id}-${status}`}
+                        onClick={toggle}
+                      >
+                        <UnfoldIcon />
+                        <StatusTag status={status} />
+                        <span className="board-column-count">
+                          {column.length}
+                        </span>
+                      </button>
+                    </Tooltip>
                   ) : (
                     <>
-                      <StatusTag status={status} />
-                      <span className="board-column-count">
-                        {column.length}
+                      <span className="board-column-heading">
+                        <StatusTag status={status} />
+                        <span className="board-column-count">
+                          {column.length}
+                        </span>
                       </span>
+                      <Tooltip content="折叠此列">
+                        <button
+                          ref={toggleRef(status)}
+                          type="button"
+                          className="quiet column-toggle lane-fold"
+                          aria-label={`折叠${label}列`}
+                          aria-expanded={true}
+                          aria-controls={`${id}-${status}`}
+                          onClick={toggle}
+                        >
+                          <FoldIcon />
+                        </button>
+                      </Tooltip>
                     </>
                   )}
                 </h3>
                 <BoardLaneCards
                   key={resetKey}
                   id={`${id}-${status}`}
-                  label={cardStatusLabel(status)}
+                  label={label}
                   cards={column}
                   collapsed={collapsed}
                 >
