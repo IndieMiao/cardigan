@@ -11,10 +11,12 @@ import {
   createCard,
   isRoleActive,
   parseId,
+  projectSnapshot,
   standingTools,
   supersedeCard,
   updateCard,
 } from "@cardigan/domain";
+import { loadMergeGateConfig } from "@cardigan/host";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import {
   resolveExecutionConfig,
@@ -683,7 +685,7 @@ async function pmStart(
  * `cardigan needs-you` — M3.5 read-only view until M5 builds the page
  * (development plan §7.3): open human decisions and pending human actions.
  */
-function needsYou(args: readonly string[], io: CliIo): number {
+async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
   const parsed = parseArgs(args, []);
   const store = openStoreFrom(io, parsed.flags);
   try {
@@ -692,6 +694,31 @@ function needsYou(args: readonly string[], io: CliIo): number {
       io,
       optional(parsed.flags, "project"),
     );
+    const gate = (
+      await loadMergeGateConfig({
+        projectIds: store.listProjects().map((project) => project.id),
+        env: io.env,
+      })
+    ).forProject(project_id);
+    const checks = store.uow.read((tx) => {
+      const view = projectSnapshot(
+        loadCommandState(tx, project_id),
+        humanActor(project_id),
+      );
+      return new Map(
+        view.ok && gate.status === "enabled"
+          ? view.value.data.cards.map((card) => [card.id, card.merge_check])
+          : [],
+      );
+    });
+    const checkLabels = {
+      queued: "排队",
+      running: "运行中",
+      passed: "通过",
+      failed: "失败",
+      timed_out: "超时",
+      interrupted: "中断",
+    };
     const { decisions, actions, incidents } = store.uow.read((tx) => ({
       decisions: tx.decisions
         .list(project_id)
@@ -726,10 +753,17 @@ function needsYou(args: readonly string[], io: CliIo): number {
     if (decisions.length > 0) {
       lines.push(`待你拍板（${decisions.length}）`);
       for (const decision of decisions) {
+        const check = decision.card_id
+          ? checks.get(decision.card_id)
+          : undefined;
         lines.push(
           [
             `  ${decision.id}${decision.card_id === undefined ? "" : `  ${decision.card_id}`}`,
             `    ${decision.question}`,
+            ...(decision.trigger === "merge_confirmation" &&
+            gate.status === "enabled"
+              ? [`    合并检查：${check ? checkLabels[check.status] : "排队"}`]
+              : []),
             ...(decision.status === "provisional"
               ? ["    状态：等待确认（条件性拍板）"]
               : []),

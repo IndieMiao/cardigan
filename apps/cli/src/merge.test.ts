@@ -559,3 +559,31 @@ test.each(["failed", "timed_out"] as const)(
     expect(JSON.stringify(state())).toBe(before);
   },
 );
+
+test.each([
+  ["queued", "排队"],
+  ["running", "运行中"],
+  ["passed", "通过"],
+  ["failed", "失败"],
+  ["timed_out", "超时"],
+  ["interrupted", "中断"],
+] as const)(
+  "needs-you includes the current merge check %s",
+  async (status, label) => {
+    await seatAwaitingMerge();
+    enableMergeGate();
+    recordCheck("queued");
+    if (status !== "queued") recordCheck("running");
+    if (status !== "queued" && status !== "running") recordCheck(status);
+    const result = await cardigan("needs-you");
+    expect(result.code).toBe(0);
+    expect(result.out).toContain(`合并检查：${label}`);
+  },
+);
+
+test("needs-you leaves projects without a gate unchanged and shows queued before the first event", async () => {
+  await seatAwaitingMerge();
+  expect((await cardigan("needs-you")).out).not.toContain("合并检查");
+  enableMergeGate();
+  expect((await cardigan("needs-you")).out).toContain("合并检查：排队");
+});

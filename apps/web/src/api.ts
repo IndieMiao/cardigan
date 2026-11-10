@@ -138,6 +138,7 @@ export interface WorkItemView {
 }
 
 export interface TimelineEntryView extends AuthorView {
+  readonly merge_check?: MergeCheckView;
   readonly id: string;
   readonly card_id: string;
   readonly event_seq: number;
@@ -404,7 +405,24 @@ export interface MergeConfirmationReview extends AuthorView {
     readonly proof?: string;
   }[];
 }
+export interface MergeCheckView {
+  readonly attempt_id: string;
+  readonly completion_id: string;
+  readonly status:
+    | "queued"
+    | "running"
+    | "passed"
+    | "failed"
+    | "timed_out"
+    | "interrupted";
+  readonly checks: readonly { readonly duration_ms?: number }[];
+  readonly summary?: string;
+  readonly log_ref?: string;
+  readonly updated_at: string;
+}
 export interface MergeConfirmationView {
+  readonly merge_gate_enabled?: boolean;
+  readonly merge_check?: MergeCheckView | null;
   readonly completion: {
     readonly id: string;
     readonly work_item_id: string;
@@ -592,6 +610,12 @@ export interface CardiganClient {
   snapshot(projectId: string): Promise<SnapshotData>;
   execution(projectId: string): Promise<ExecutionData>;
   needsYou(projectId: string): Promise<NeedsPage>;
+  recheckMerge(
+    projectId: string,
+    cardId: string,
+    completionId: string,
+    idempotencyKey?: string,
+  ): Promise<void>;
   recordDecision(
     projectId: string,
     id: string,
@@ -757,6 +781,19 @@ export class HttpCardiganClient implements CardiganClient {
   needsYou(projectId: string): Promise<NeedsPage> {
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/needs-you`,
+    );
+  }
+  async recheckMerge(
+    projectId: string,
+    cardId: string,
+    completionId: string,
+    idempotencyKey = crypto.randomUUID(),
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      `cards/${encodeURIComponent(cardId)}/recheck-merge`,
+      { completion_id: completionId },
+      idempotencyKey,
     );
   }
   async recordDecision(

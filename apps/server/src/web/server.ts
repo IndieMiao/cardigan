@@ -6,6 +6,7 @@ import {
 import type { AddressInfo } from "node:net";
 import type { CardId, Clock, ProjectId } from "@cardigan/domain";
 import { projectPreferences } from "@cardigan/domain";
+import type { MergeGateConfiguration } from "@cardigan/host";
 import { resolveDataDirectory } from "@cardigan/runtime-herdr";
 import type { Store, WebSession } from "@cardigan/store";
 import { serveAttachment } from "./attachments.js";
@@ -32,6 +33,7 @@ import {
   unauthorized,
 } from "./http.js";
 import { LoginLimiter } from "./login-limiter.js";
+import { serveMergeCheckLog } from "./merge-check-log.js";
 import {
   type ActivityQuery,
   activity,
@@ -69,6 +71,7 @@ export interface WebServerOptions {
   readonly loginLimiter?: LoginLimiter;
   /** Attachment blobs live beside the database (§9.3). */
   readonly dataDir?: string;
+  readonly mergeGate?: MergeGateConfiguration;
   /** SSE cadence; tests shorten it, production uses the plan's 500 ms / 15 s. */
   readonly stream?: {
     readonly pollMs?: number;
@@ -95,6 +98,7 @@ interface RequestContext {
   readonly clock: Clock;
   readonly limiter: LoginLimiter;
   readonly dataDir: string;
+  readonly mergeGate: MergeGateConfiguration | undefined;
   readonly stream: WebServerOptions["stream"];
   /** Only the validated Host and explicit configuration decide cookie flags. */
   readonly secureCookie: boolean;
@@ -180,6 +184,7 @@ export async function startWebServer(
         clock,
         limiter,
         dataDir,
+        mergeGate: options.mergeGate,
         stream: options.stream,
         secureCookie: config.publicOrigins.includes(`https://${hostHeader}`),
         log,
@@ -351,6 +356,7 @@ async function serveProjectRoute(
         project_id,
         clock,
         dataDir: context.dataDir,
+        mergeGate: context.mergeGate?.forProject(project_id),
         authorize: () => requireSession(context),
       },
       rest,
@@ -359,6 +365,16 @@ async function serveProjectRoute(
     return;
 
   if (req.method !== "GET") methodNotAllowed(["GET"]);
+
+  if (rest.startsWith("/merge-checks/")) {
+    return serveMergeCheckLog({
+      res,
+      dataDir: context.dataDir,
+      projectId: project_id,
+      attempt: rest.slice("/merge-checks/".length),
+      authorize: () => requireSession(context),
+    });
+  }
 
   const attachment = /^\/attachments\/([^/]+)$/.exec(rest);
   if (attachment !== null) {
@@ -437,7 +453,14 @@ async function serveProjectRoute(
     return;
   }
   if (rest === "/needs-you") {
-    sendJson(res, 200, { project_id, ...needsYou(state, now) });
+    sendJson(res, 200, {
+      project_id,
+      ...needsYou(
+        state,
+        now,
+        context.mergeGate?.forProject(project_id).status === "enabled",
+      ),
+    });
     return;
   }
 
