@@ -15,7 +15,6 @@ import type { CardListItem } from "../api.js";
 import { DEFAULT_CARD_DISPLAY } from "../card-display.js";
 import { card } from "../testing/fixtures.js";
 import { BoardCard } from "./BoardCard.js";
-import { fullTime } from "./Foundation.js";
 
 afterEach(cleanup);
 if (!globalThis.ResizeObserver)
@@ -61,7 +60,7 @@ const renderCard = (item = example, onOpenCard = vi.fn()) =>
   );
 
 test.each(["hover", "focus"])(
-  "%s exposes the full title, work item states, next owner, blockers and full time",
+  "%s exposes only the full title and preserves the accessible link name",
   async (mode) => {
     const { container } = renderCard();
     const link = screen.getByRole("link", { name: new RegExp(example.title) });
@@ -73,20 +72,11 @@ test.each(["hover", "focus"])(
     if (mode === "focus") act(() => link.focus());
     else fireEvent.pointerMove(link, { pointerType: "mouse" });
     const tooltip = await screen.findByRole("tooltip");
-    for (const text of [
-      example.title,
-      "负责角色：coder、reviewer",
-      "进度：2/3",
-      "W-1 实现：已接受",
-      "W-2 审核：已通过",
-      "W-3 验收：等待拍板",
-      "下一步：你、reviewer",
-      "需要访问权限",
-      "选择发布窗口",
-      fullTime(example.updated_at),
-    ]) {
-      expect(tooltip.textContent).toContain(text);
-    }
+    expect(tooltip.textContent).toBe(example.title);
+    expect(link.getAttribute("aria-describedby")).toBe(tooltip.id);
+    expect(screen.getByRole("link", { name: new RegExp(example.title) })).toBe(
+      link,
+    );
     fireEvent.keyDown(document, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("tooltip")).toBeNull());
   },
@@ -204,7 +194,7 @@ test("three participant avatars plus overflow preserve employee navigation indep
   expect(link.getAttribute("href")).toBe("#/p/p-1/cards/C-1");
 });
 
-test("display preferences hide tags while keyboard preview retains detail; empty cards do not invent metadata", async () => {
+test("display preferences hide tags while keyboard tooltip retains the full title; empty cards do not invent metadata", async () => {
   const { container, rerender } = render(
     <BoardCard
       card={{ ...example, attachment_count: 0 }}
@@ -223,9 +213,7 @@ test("display preferences hide tags while keyboard preview retains detail; empty
   expect(container.querySelectorAll(".board-card-badge")).toHaveLength(0);
   expect(container.querySelector(".card-id")).toBeNull();
   act(() => screen.getByRole("link").focus());
-  expect((await screen.findByRole("tooltip")).textContent).toContain(
-    "W-1 实现：已接受",
-  );
+  expect((await screen.findByRole("tooltip")).textContent).toBe(example.title);
   act(() => screen.getByRole("link").blur());
   rerender(
     <BoardCard
@@ -275,9 +263,6 @@ test("compact styles clamp two readable lines, wrap metadata and use existing th
   expect(compact).toContain("flex-wrap: wrap");
   expect(compact).toContain("min-width: 0");
   expect(compact).toContain("margin-inline-start: calc(var(--gap) / -2)");
-  expect(compact).toContain(
-    "max-width: min(360px, calc(100vw - var(--gap) * 2))",
-  );
   expect(compact).not.toMatch(/#[0-9a-f]{3,8}\b|rgba?\(/i);
   for (const token of [
     "status-done",
