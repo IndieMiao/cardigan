@@ -527,6 +527,8 @@ C-46：已确认合并（人工确认或超时代批）的当前完成申请，�
 
 C-66（试行发现 43）：当前完成申请的最新检查为 `failed` 或 `timed_out` 时，PM Ops 也可经 `resolve_delegated_decision` 处理，范围为交给 PM 的 open 确认和任何已确认为 `merge` 的确认（人确认、PM 代确认或超时代批，不论 `decider`）。选 `request_changes` 时与人走同一迁移：open 确认按普通退回修改解决，已确认的确认调用与人相同的退回函数（`merge_changes_requested`、旧完成申请 supersede、确认标记为 `superseded` 并保留原授权）；选 `recheck` 时调用与人相同的重新排队逻辑写 `merge_check_requeued`。两者 `rationale`（失败用例、真实问题或偶发的判断）和 `notice` 均必填，事件带 `via=delegated`、`notice` 和 `proxy_authority=project:<id>/pm-ops-merge-check-failure`。卡片涉及 D12 四类或需求范围变化、被人标为敏感（C-65），或确认已交人（`human_required_reason`）时 PM 不能退回或重新检查，判断复用 `mergeRequiresHuman`。已确认项检查失败时 PM 只能 `request_changes`、`recheck` 或 `escalate`；检查通过、排队、运行、缺失或中断时同样拒绝。
 
+C-79：上述失败检查的 PM 处理也受当前 `pm_merge_confirmation` 偏好约束。关闭时，已确认合并不进入 `pm_queue.failed_merge_checks`，不因检查失败或随后确认而通知 PM 接手，PM 的退回和重查命令同样拒绝；人的 Needs You 展示该确认，保留“退回修改”和“重新检查”。覆盖人确认、PM 代确认和超时代批，不以历史 `decider` 排除记录；切换偏好不改写原合并授权。开启时沿用 C-66，既有敏感／高风险／需求范围变化及主动交人规则、超时自动合并授权不变。
+
 C-47：完成申请经冲突、退回修改、新完成申请或新产出交付取代而作废时，在同一事务内将所有绑定该申请且仍为 `open` 的 `merge_confirmation` 标记为 `superseded`；不代填 merge、hold 或 request_changes，也不改写已经 resolved 的历史决定。人主动选择退回所记录的决定及 C-46 的显式撤回规则仍按原流程处理。每个自动关闭的确认写入 `decision_superseded` 事件（关联确认及完成申请）和系统时间线说明，Needs You 随状态更新移除。新版完成申请在旧版本及其未决确认作废后校验前置条件；校验失败时全部回滚，其他阻塞照常生效。新申请验收通过后生成自己的新确认，旧确认不再阻塞它。
 
 P2a-1 的检查排队、运行、失败、超时及中断均不改变 Card 状态。新增 `merge_check_queued`、`merge_check_started`、`merge_check_finished`、`merge_check_requeued` 事件与系统时间线；卡片视图的可选 `merge_check` 从当前未被取代的完成申请最新检查事件派生，包含 attempt、候选／tree SHA、状态、逐项结果、摘要与安全日志引用。人可对 awaiting_merge 且当前完成申请已有失败／超时结果的卡片请求重新检查（`recheck_merge` 仅 human；PM Ops 按 C-66 经 `resolve_delegated_decision(option=recheck)` 发起同一重新排队）；返回执行阶段或形成新完成申请后，旧检查不得授权新合并。
@@ -685,7 +687,7 @@ abortDispatch 只允许同项目 human/system，须带非空 reason，将未结�
 
 22. PM 代拍必须在解决事务内重查项目类别授权、PM Ops 身份和目标状态，记录理由与授权依据；四类高风险不可纳入此授权。PM 分拣人工操作不增加执行权限。
 
-23. 合并确认由 PM Ops 选择 `merge` 时，domain 必须在同一事务内校验当前完成申请的合并检查已通过、所有未取消的验证项通过（不论是否必需）、无未处理的 must_fix，并要求知会正文；不满足时只能 hold、退回修改或交人。卡片涉及 D12 四类或需求范围变化（含卡片来源拍板）、偏好关闭或没有活跃 PM Ops 时，合并确认由人确认；敏感卡片（含人标记的敏感卡片）和 PM 主动交人的确认只接受 human Actor，不适用超时自动合并，也不接受 PM Office 代记。敏感标记只能由 human Actor 设置或取消。当前检查失败或超时后，PM Ops 可退回修改或重新检查（含已确认合并），理由和知会必填，敏感卡片（含人标记的敏感卡片）和已交人的确认除外（C-66）。
+23. 合并确认由 PM Ops 选择 `merge` 时，domain 必须在同一事务内校验当前完成申请的合并检查已通过、所有未取消的验证项通过（不论是否必需）、无未处理的 must_fix，并要求知会正文；不满足时只能 hold、退回修改或交人。卡片涉及 D12 四类或需求范围变化（含卡片来源拍板）、偏好关闭或没有活跃 PM Ops 时，合并确认由人确认；敏感卡片（含人标记的敏感卡片）和 PM 主动交人的确认只接受 human Actor，不适用超时自动合并，也不接受 PM Office 代记。敏感标记只能由 human Actor 设置或取消。当前检查失败或超时后，`pm_merge_confirmation` 开启时 PM Ops 可退回修改或重新检查（含已确认合并），理由和知会必填，敏感卡片（含人标记的敏感卡片）和已交人的确认除外（C-66）。
 
 24. 全局恰好一个 `role=owner` 且 `status=active` 的成员。迁移为新旧库初始化占位 owner；成员命令只接受 human，并与全局审计及编号同事务。成员身份只影响读取与展示，不增加任何 Agent 权限，不改变已有 Actor / Author 或 D12 的 human 检查。
 
@@ -797,7 +799,7 @@ M3.4 主机循环通过 startDispatchLoop 启动：默认每轮结束后等待 1
 | Review 驳回 | 产生被审核 Delivery 的 Assignment（返工 Run） |
 | Review 有条件通过（`conditional`） | 需要复查时通知被审 Delivery 的产出方 Assignment（`run_kind=rework`），无 active 负责人时交 PM Ops；无需复查时视同通过，保留依赖完成通知和完成申请提醒，另给 PM Ops 审核摘要，不产生返工 Run |
 | Decision 请求 | 已授权类别和 PM 代确认的合并确认只交 PM Ops；人决策的进入 Needs You 并提示 Office |
-| 合并检查结束（`merge_check_finished`） | 卡片有交给 PM 的 open 合并确认时通知 PM Ops 处理 |
+| 合并检查结束（`merge_check_finished`） | 卡片有交给 PM 的 open 合并确认时通知 PM Ops；已确认项检查失败／超时且当前允许 PM 处理时也通知，开关关闭或须交人时不通知 PM 接手 |
 | Decision 已解决 | 被解除阻塞的 Assignment 与发起拍板的 Assignment；发起人无 active 身份时给 PM Ops 落实通知，无活跃 PM Ops 时进入 Needs You |
 | 依赖完成 | 下游工作项的 Assignment；没有 Assignment 时交给 PM Ops |
 | 所有必需工作项都已通过 | 提醒主产出工作项的负责人提交完成申请（不自动关卡） |
@@ -974,7 +976,7 @@ M3.4 的 Runtime 接线根据已派发的业务 Run（dispatched / acked / runni
 4. 设置页“授权”栏可关闭“合并由 PM 代确认”（默认开），关闭后回到人确认；C-29 超时自动合并保留为人确认模式下的兜底。
 5. 人可以把卡片标为“敏感”（C-65，q(95)：“被标记的卡合并时一定由你确认”），入口为 Workbench 卡片详情和本机 CLI，Agent 不能设置或取消。被标记卡片的合并确认一律交人，PM 不能代确认，也不会超时自动合并；确认已在 PM 手上时打标记，立即转给人；PM 已代确认但还没合并时打标记，PM 的确认作废，重新交人确认。模板为自动合并的卡被标记后也要人确认。
 6. PM 持有合并确认期间，人可以在 Needs You 的“PM 代确认中的合并”分组或本机 CLI（`cardigan merge confirm|hold|request-changes <C-n>`）直接处理，按人的拍板记录，PM 不能再处理同一条；选 merge 仍要通过合并闸门检查。
-7. 合并闸门检查失败或超时（C-66，试行发现 43）：无论合并确认还未处理还是已确认（包括超时代批），都由 PM 处理，不留给人点。PM 先看失败用例和本卡改动的关系：真实问题就退回修改并写清修复方向；偶发（超时、负载）先重新检查一次，再失败就退回。处理后在知会区同步一句话（哪张卡、检查失败的原因、已退回或已重新检查）。第 2 条和第 5 条（人标记为敏感）的卡片仍由人处理，PM 不能退回或重新检查。
+7. 合并闸门检查失败或超时（C-66，试行发现 43）：“合并由 PM 代确认”开启时，交给 PM 的未处理确认和已确认合并（包括超时代批）由 PM 处理；关闭时由人退回修改或重新检查（C-79）。PM 先看失败用例和本卡改动的关系：真实问题就退回修改并写清修复方向；偶发（超时、负载）先重新检查一次，再失败就退回。处理后在知会区同步一句话（哪张卡、检查失败的原因、已退回或已重新检查）。第 2 条和第 5 条（人标记为敏感）的卡片仍由人处理，PM 不能退回或重新检查。
 
 ---
 
@@ -1052,7 +1054,7 @@ C-71：Workbench 作者展示优先使用绑定的员工名；没有员工的常
 - 每一项只显示一句原因（≤40 字，来自标准原因或 Agent 原问题的裁剪），全文留在卡片页（0.5a §9.1）。
 - 不紧急的拍板合并成批次呈现；阻塞性的拍板和风险立即提醒（0.2 回溯：需要你介入的事项中，72% 可以合并或延后）。
 - 在 Needs You 里作答时，系统自动记录你的原话。
-- 当前完成申请的合并确认已解决为 `merge`，但最新检查失败／超时时，Needs You 重新展示该确认并说明可退回修改，只提供填写原因后的退回入口。沿用已有 `/decisions/:decision/resolve` 与领域校验；退回后从列表消失，原授权保留为被取代的决定，退回原因与原话写入事件。
+- 当前完成申请的合并确认已解决为 `merge`，但最新检查失败／超时时，当前未由 PM 接手时，Needs You 重新展示该确认并说明可退回修改或重新检查；退回入口先填写原因，重查沿用合并检查入口，不重复提供确认合并。沿用已有 `/decisions/:decision/resolve` 与领域校验；退回后从列表消失，原授权保留为被取代的决定，退回原因与原话写入事件。
 - `review_limit` 选择 `pause` 后保留在此处，明确显示“已暂停（临时决定）”，只保留 `raise_limit` 操作；按钮旁说明上限加 1、额度可用且无其他阻塞时自动恢复审核。直接选择或暂停后再选择 `raise_limit` 都按 §4.4 在同一事务中更新额度和记录决定，重试不会重复加额度。已确认增加轮数但超过 10 分钟仍未恢复的项显示在“审核恢复异常”中，供核查额度与其他阻塞。
 - 显示已等待多久。
 - Decision 的 opened_at 从对应 decision_requested 事件的 created_at 取得，项目级拍板使用项目事件流；缺少事件的旧卡片数据可回退到时间线。Web 与 MCP list_needs_you 共用领域查询，由适配层注入当前时间计算非负 waited_ms；只有缺少起始事实时才返回未知，不因为没有卡片时间线而丢失等待时间。
@@ -1084,7 +1086,7 @@ C-29：合并确认满足除超时以外的全部代批条件时，Needs You 和
 
 C-37：交给人的普通拍板增加“此类问题以后由 PM 代拍”勾选，选择和授权一次提交；四类高风险及合并确认不提供勾选，服务端同样拒绝。等待 PM 分拣的操作不进 Needs You；PM 转交的 host 操作显示“主机操作”。交人的事项使用 PM 写的一句话标题，展开显示“这是什么、为什么需要你、怎么做、做完会怎样”和回传要求，标记“项目经理已改写”及时间；不再用截断的技术原因作新交接的标题。改写前的内容在折叠区可查看，原始请求字段和历史时间线均保留；旧记录没有 handoff 时沿用原展示。CLI needs-you 同样展示白话交接与改写标记。看板中的 PM 待办不计入“需要我”，分别显示“等待 PM 代拍／分拣”。授权、分拣、改写完成及代拍状态统一使用 C-48 的 StatusTag，以形状和文字共同表达；拍板记录的决策人与类别仍作为文字元数据。
 
-C-49：Needs You 末尾新增“知会”区，列出 PM 代确认的合并、C-37 代拍、审核上限代判和超时自动合并。C-71 将 Workbench 的固定 50 条改为服务端分页：未读始终全部置顶，已读默认最近 10 条，两组各按时间倒序、同一时间按事件编号倒序；首屏 `/needs-you` 返回 `notices` 和 `notices_next_cursor`，“显示更多”经 `GET /api/projects/:id/notices?before=<游标>` 每次追加 10 条已读，游标为上一页末条的事件编号，响应 `next_cursor=null` 时隐藏按钮。新增记录不改变游标边界；非法或不属于本项目的游标拒绝。刷新保留已展开历史，加载及失败沿用 `RequestFeedback`，不占据内容布局。标题显示“知会（未读 N）”，每条显示类型（PM 代确认合并／超时自动合并／PM 代拍）、拍板编号、卡片、时间和知会正文，链接到按卡片筛选的拍板记录页。知会不计入待处理总数，不阻塞；可逐条或全部经 `POST /api/projects/:id/notices/read`（`notice_ids`）标为已读，已读条目保留并去掉按钮。交给 PM 的合并确认不进待处理列表，PM 交人或偏好关闭后按原合并确认展示。本机 `cardigan needs-you` 用同一份 domain `notices()` 数据在末尾列出知会（倒序，最多 50 条，标出已读／未读、知会编号、类型、拍板编号、卡片、时间和正文）；`cardigan needs-you read <知会编号...>` 或 `--all` 以 human 身份调用与 Workbench 相同的 `markNoticesRead`。C-65：Needs You 在“合并确认”后显示“PM 代确认中的合并（N）”分组（数据来自 `pm_held_merges`，不计入待处理总数），每条与合并确认相同的展示和按钮，并提示“PM 正在代确认，你可以直接处理”；卡片详情的操作区提供“标为敏感／取消敏感标记”按钮，被标记时显示“敏感卡片：合并确认由你亲自处理”。
+C-49：Needs You 末尾新增“知会”区，列出 PM 代确认的合并、C-37 代拍、审核上限代判和超时自动合并。C-71 将 Workbench 的固定 50 条改为服务端分页：未读始终全部置顶，已读默认最近 10 条，两组各按时间倒序、同一时间按事件编号倒序；首屏 `/needs-you` 返回 `notices` 和 `notices_next_cursor`，“显示更多”经 `GET /api/projects/:id/notices?before=<游标>` 每次追加 10 条已读，游标为上一页末条的事件编号，响应 `next_cursor=null` 时隐藏按钮。新增记录不改变游标边界；非法或不属于本项目的游标拒绝。刷新保留已展开历史，加载及失败沿用 `RequestFeedback`，不占据内容布局。标题显示“知会（未读 N）”，每条显示类型（PM 代确认合并／PM 退回修改／PM 重新检查／超时自动合并／PM 代拍；C-79 按实际操作区分）、拍板编号、卡片、时间和知会正文，链接到按卡片筛选的拍板记录页。知会不计入待处理总数，不阻塞；可逐条或全部经 `POST /api/projects/:id/notices/read`（`notice_ids`）标为已读，已读条目保留并去掉按钮。交给 PM 的合并确认不进待处理列表，PM 交人或偏好关闭后按原合并确认展示。本机 `cardigan needs-you` 用同一份 domain `notices()` 数据在末尾列出知会（倒序，最多 50 条，标出已读／未读、知会编号、类型、拍板编号、卡片、时间和正文）；`cardigan needs-you read <知会编号...>` 或 `--all` 以 human 身份调用与 Workbench 相同的 `markNoticesRead`。C-65：Needs You 在“合并确认”后显示“PM 代确认中的合并（N）”分组（数据来自 `pm_held_merges`，不计入待处理总数），每条与合并确认相同的展示和按钮，并提示“PM 正在代确认，你可以直接处理”；卡片详情的操作区提供“标为敏感／取消敏感标记”按钮，被标记时显示“敏感卡片：合并确认由你亲自处理”。
 
 侧栏增加 `#/p/<项目>/decision-history` 拍板记录页，查询已解决的拍板，包含后来被取代或撤回但有已解决事件的历史决定，不提供撤销。`GET /api/projects/:id/decision-history` 支持决策人 `human | pm | system`、类别、卡片及起止时间筛选，按解决时间倒序显示选项、影响、理由、记录人和授权依据；Office 转录计为人，`resolved_by=system` 的超时自动合并计为系统代批。筛选同步到 URL，沿用 Workbench 登录与项目隔离。
 
@@ -1551,7 +1553,7 @@ CLI 启动、server 新开／替换审核会话、已有会话每次按铃前，
 `GitCentralPort.treeOfCommit` 只接受完整 commit SHA，拒绝 ref、tag 和 tree 对象，防止把待检查树和候选提交混用。准备发生冲突时不改任何 ref；交付已全部在当前基线中时返回 noop，不新建候选。重新计算可能生成不同 SHA 但相同 tree，供闸门按完成申请／tree 复用通过记录。兼容入口 `mergeIntoBase` 依次调用 prepare／publish，保留原来的 merged／conflicted／stale／noop 返回形式；闸门组装改用拆分入口后才会在两步之间插入检查。
 
 - 前提：整卡完成审核通过、处于 awaiting_merge。模板 merge 为 none / confirm / auto，开发卡默认 confirm；创建卡片时固定版本及 Card.merge_policy，旧卡缺省 confirm。配置来自项目版本化模板，MCP 参数不能改策略；none 模板只接收非 Git 交付。
-- confirm 自动生成 trigger=merge_confirmation 的人类 Decision（merge / hold / request_changes），绑定当前完成申请。人或 PM Office 记录 merge，或 C-29 按人预先设置的偏好超时代批后才可合并；hold 保留待合并状态，人或 PM Ops 可用 requestMerge 重开一份确认，旧决定被 supersede。request_changes 必须附非空原因，按 §4.4 退回主产出修改；CLI 为 `cardigan merge request-changes <C-n> --reason <原因> [--project <p>]`，Workbench 的“退回修改”先要求填写原因再提交。已确认但最新检查失败／超时的确认按 §4.4 允许人退回，Needs You 重新展示该项且只提供退回入口；领域命令在写入事务内重查当前完成申请与最新结果，避免使用过期失败结果撤回正在检查或已通过的合并。
+- confirm 自动生成 trigger=merge_confirmation 的人类 Decision（merge / hold / request_changes），绑定当前完成申请。人或 PM Office 记录 merge，或 C-29 按人预先设置的偏好超时代批后才可合并；hold 保留待合并状态，人或 PM Ops 可用 requestMerge 重开一份确认，旧决定被 supersede。request_changes 必须附非空原因，按 §4.4 退回主产出修改；CLI 为 `cardigan merge request-changes <C-n> --reason <原因> [--project <p>]`，Workbench 的“退回修改”先要求填写原因再提交。已确认但最新检查失败／超时的确认按 §4.4 允许人退回，当前未由 PM 接手时，Needs You 重新展示该项，提供退回修改与重新检查入口；领域命令在写入事务内重查当前完成申请与最新结果，避免使用过期失败结果撤回正在检查或已通过的合并。
 - 纯函数 mergePlan 校验待合并状态、当前已接受的完成申请、确认及其他阻塞；返回每个 produce 最新未 supersede 的已接受、Git 提交形式的交付（`subject.kind=git_head`，不按 `kind` 分类），按工作项数字编号排序。未接受或尚无交付的工作项跳过，不因已知遗留阻止完成审核；前置条件仍由完成申请的 known_gaps 和后续卡片校验。没有可合并交付时同命令经 merge_not_required 完成；组装层还须校验固定 ref 与 SHA 一致。
 - recordMergeResult 只允许 system，必须携带 mergePlan 的 completion_id；合并成功到 done 并发 card_merged，失败保持卡片并发 merge_failed，冲突让卡片回 in_progress、冲突产出 accepted → changes_requested。冲突会 supersede 旧完成申请、将其验收项通过 target_withdrawn 退回 todo；重新交付使旧代码审核失效，再次完成需重新确认。
 - 完成申请的所有 supersede 入口共用 §4.4 的未决合并确认关闭规则，实体变更、`decision_superseded` 事件和系统说明与作废一起提交；检查先于人工确认发现冲突时，也不会遗留 open 确认或要求人手动清理。

@@ -986,7 +986,8 @@ function Notices({
     <section className="needs-group" aria-label="知会">
       <h2>知会（未读 {unread.length}）</h2>
       <p className="hint">
-        PM 代为确认的合并和代拍的决定，不需要你处理；有疑问可在卡片里追问。
+        PM
+        处理的合并、代拍的决定和超时自动合并，不需要你处理；有疑问可在卡片里追问。
       </p>
       {unread.length > 1 && (
         <button
@@ -1016,7 +1017,11 @@ function Notices({
                 n.kind === "merge"
                   ? n.resolved_by === "system"
                     ? "超时自动合并"
-                    : "PM 代确认合并"
+                    : n.option === "request_changes"
+                      ? "PM 退回修改"
+                      : n.option === "recheck"
+                        ? "PM 重新检查"
+                        : "PM 代确认合并"
                   : "PM 代拍"
               }
             />

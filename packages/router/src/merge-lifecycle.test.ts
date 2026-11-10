@@ -87,9 +87,19 @@ test("M4.1 reconciliation findings route to PM Ops without a card", () => {
 });
 
 // P2a-1 §2.6 / C-66: a check that failed before the merge was confirmed.
-test.each(["human", "timeout", "sensitive"] as const)(
-  "a merge confirmed (%s) after its check failed wakes PM Ops unless human-only",
-  async (mode) => {
+test.each(
+  (["human", "timeout", "sensitive"] as const).flatMap((mode) =>
+    [false, true].flatMap((enabled) =>
+      (["failed", "timed_out"] as const).map((status) => ({
+        mode,
+        enabled,
+        status,
+      })),
+    ),
+  ),
+)(
+  "a $mode-confirmed $status merge wakes PM Ops only when enabled=$enabled and not human-only",
+  async ({ mode, enabled, status }) => {
     const f = mergeFixture("confirm");
     const human = { kind: "human", project_id: f.state.project_id } as const;
     const system = { kind: "system", project_id: f.state.project_id } as const;
@@ -102,15 +112,14 @@ test.each(["human", "timeout", "sensitive"] as const)(
           f.io,
         ),
       );
-    if (mode === "timeout")
-      f.commit(
-        setProjectPreferences(
-          f.state,
-          human,
-          { auto_merge_after_minutes: 1 },
-          f.io,
-        ),
-      );
+    f.commit(
+      setProjectPreferences(
+        f.state,
+        human,
+        { auto_merge_after_minutes: 1, pm_merge_confirmation: enabled },
+        f.io,
+      ),
+    );
     const { completion } = await f.accept();
     const q = f.state.decisions.findLast(
       (d) => d.trigger === "merge_confirmation",
@@ -150,12 +159,10 @@ test.each(["human", "timeout", "sensitive"] as const)(
         system,
         {
           ...identity,
-          status: "failed",
+          status,
           summary: "test failed",
           log_ref: "attempt-1.log",
-          checks: [
-            { name: "test", status: "failed", exit_code: 1, duration_ms: 1 },
-          ],
+          checks: [{ name: "test", status, exit_code: 1, duration_ms: 1 }],
         },
         f.io,
       ),
@@ -201,7 +208,7 @@ test.each(["human", "timeout", "sensitive"] as const)(
       event: resolved,
       snapshot: f.state,
     }).notifications;
-    if (mode === "sensitive") expect(routed).toEqual([]);
+    if (mode === "sensitive" || !enabled) expect(routed).toEqual([]);
     else
       expect(routed).toEqual([
         expect.objectContaining({
@@ -209,5 +216,11 @@ test.each(["human", "timeout", "sensitive"] as const)(
           summary: expect.stringContaining("退回修改或重新检查"),
         }),
       ]);
+    // The check-finished path reads the same current preference as confirmation.
+    expect(
+      routeEvent({ event: finished, snapshot: f.state }).notifications,
+    ).toEqual(
+      routed.map((n) => ({ ...n, event_id: finished.id, seq: finished.seq })),
+    );
   },
 );

@@ -12,6 +12,7 @@ import type {
   HumanAction,
   JsonValue,
   ProjectId,
+  ProjectPreferences,
   Review,
   RoleId,
   RoleReference,
@@ -148,6 +149,7 @@ export interface RouteResult {
 export interface RouterSnapshot {
   readonly card_templates?: readonly CardTemplate[];
   readonly project_id: ProjectId;
+  readonly project_preferences?: readonly ProjectPreferences[];
   readonly cards: readonly Card[];
   readonly work_items: readonly WorkItem[];
   readonly assignments: readonly Assignment[];

@@ -415,8 +415,16 @@ export function recordDecision(
       held.trigger === "merge_confirmation" &&
       ["open", "provisional"].includes(held.status);
     const decision: Decision = takenOver ? { ...held, decider: "human" } : held;
+    // C-79: a confirmed merge handed back after failure may still retain
+    // role:pm as its historical decider. Preserve that authorization record.
+    const returningConfirmed =
+      decision.trigger === "merge_confirmation" &&
+      decision.status === "resolved" &&
+      decision.resolution?.option === "merge" &&
+      p.option === "request_changes";
     ensure(
-      (actor.kind === "human" && decision.decider === "human") ||
+      (actor.kind === "human" &&
+        (decision.decider === "human" || returningConfirmed)) ||
         (actor.kind === "assignment" &&
           actor.role_id === "pm" &&
           d.assignment?.scope === "standing" &&
@@ -452,12 +460,7 @@ export function recordDecision(
       "未授权的需求范围变化只能由人在 Workbench 确认",
     );
     if (p.delegate_future) grantDecisionCategory(d, decision);
-    if (
-      decision.trigger === "merge_confirmation" &&
-      decision.status === "resolved" &&
-      decision.resolution?.option === "merge" &&
-      p.option === "request_changes"
-    ) {
+    if (returningConfirmed) {
       ensure(
         actor.kind === "human",
         "forbidden_tool",

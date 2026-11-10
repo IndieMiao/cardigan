@@ -270,7 +270,9 @@ export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
             }
           : {}),
         why: why(
-          failedConfirmation ? "合并检查失败或超时，可以退回修改" : q.question,
+          failedConfirmation
+            ? "合并检查失败或超时，可退回修改或重新检查"
+            : q.question,
         ),
         opened_at: opened ?? null,
         waited_ms: Number.isFinite(elapsed) ? Math.max(0, elapsed) : null,
@@ -369,13 +371,13 @@ export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
         .filter(
           (q) =>
             (q.decider === "human" &&
-              (["open", "provisional"].includes(q.status) ||
-                (failedConfirmedMergeCheck(state, q) &&
-                  // PM Ops handles it and syncs a notice (P2a-1 §2.6).
-                  !(
-                    hasActivePmOps(d, "resolve_delegated_decision") &&
-                    pmFailedMergeCheck(state, q)
-                  )))) ||
+              ["open", "provisional"].includes(q.status)) ||
+            (failedConfirmedMergeCheck(state, q) &&
+              // PM Ops handles it and syncs a notice (P2a-1 §2.6).
+              !(
+                hasActivePmOps(d, "resolve_delegated_decision") &&
+                pmFailedMergeCheck(state, q)
+              )) ||
             decisionFollowupNeedsHuman(state, q),
         )
         .map(view),

@@ -14,7 +14,7 @@ import {
   employeeNameKey,
   isCompletionVerifier,
   latestMergeCheck,
-  mergeRequiresHuman,
+  pmMergeCheckDelegationAllowed,
   requesterNotificationRecipient,
 } from "@cardigan/domain";
 import {
@@ -797,7 +797,7 @@ function routeDecisionResolved(input: RouteInput, draft: Draft): void {
     q.resolution?.option === "merge" &&
     q.kind === "approve" &&
     "delivery_id" in q.target &&
-    !mergeRequiresHuman(input.snapshot, q)
+    pmMergeCheckDelegationAllowed(input.snapshot, q)
   ) {
     const check = latestMergeCheck(
       input.snapshot.events,
@@ -1264,7 +1264,7 @@ export function routeEvent(input: RouteInput): RouteResult {
               q.kind === "approve" &&
               "delivery_id" in q.target &&
               q.target.delivery_id === completion &&
-              !mergeRequiresHuman(input.snapshot, q))),
+              pmMergeCheckDelegationAllowed(input.snapshot, q))),
       );
       if (q)
         note(

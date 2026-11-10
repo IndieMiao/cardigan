@@ -259,9 +259,13 @@ test("merge confirmation uses the same human decision path and unlocks the accep
   expect(s.plan().deliveries.map((d) => d.delivery_id)).toContain(d.id);
 });
 
-test.each(["failed", "timed_out"] as const)(
-  "Workbench returns a confirmed merge after a %s check through the shared domain command",
-  async (status) => {
+test.each(
+  (["failed", "timed_out"] as const).flatMap((status) =>
+    [false, true].map((enabled) => ({ status, enabled })),
+  ),
+)(
+  "Workbench returns a confirmed $status merge with PM delegation enabled=$enabled",
+  async ({ status, enabled }) => {
     const delivery = await s.deliver(
       s.primary,
       await s.change(s.primary.owner, "feature.txt", "done\n"),
@@ -275,6 +279,15 @@ test.each(["failed", "timed_out"] as const)(
     expect(await request(resolvePath(q), { option: "merge" })).toMatchObject({
       status: 200,
     });
+    expect(
+      await request(
+        "/preferences",
+        {
+          pm_merge_confirmation: enabled,
+        },
+        { "Idempotency-Key": "set-merge-delegation" },
+      ),
+    ).toMatchObject({ status: 200 });
     const identity = {
       card_id: s.card.id,
       completion_id: s.plan().completion_id,
@@ -311,20 +324,20 @@ test.each(["failed", "timed_out"] as const)(
         expect(snapshot()).toBe(before);
       }
     }
-    // C-66: this fixture runs an active PM Ops and the card is not
-    // human-only, so the failed confirmed merge is PM's to return or recheck
-    // (pm_queue.failed_merge_checks) and leaves the human's Needs You.
+    // C-79: current preferences decide who handles the failed confirmation.
     const confirmed = s.state().decisions.find((d) => d.id === q.id);
     if (!confirmed) throw new Error("No confirmation");
-    expect(pmFailedMergeCheck(s.state(), confirmed)).toMatchObject({
-      status,
-    });
+    if (enabled)
+      expect(pmFailedMergeCheck(s.state(), confirmed)).toMatchObject({
+        status,
+      });
+    else expect(pmFailedMergeCheck(s.state(), confirmed)).toBeUndefined();
     const needs = await fetch(web.url + path("/needs-you"), {
       headers: { cookie },
     });
     const needsBody = await needs.json();
-    expect(needsBody.decisions.map((d: { id: string }) => d.id)).not.toContain(
-      q.id,
+    expect(needsBody.decisions.some((d: { id: string }) => d.id === q.id)).toBe(
+      !enabled,
     );
     // Without an active PM Ops the human still gets the C-46 return entry.
     const human = { kind: "human", project_id: s.state().project_id } as const;
