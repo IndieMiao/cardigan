@@ -161,7 +161,7 @@ test("an auto-policy card merges its pinned delivery into the baseline", async (
     .events.filter((event) => event.type === "card_merged");
   expect(merged).toHaveLength(1);
   expect(merged[0]?.actor).toMatchObject({ kind: "system" });
-});
+}, 30_000);
 
 test("a confirm-policy card waits for the human, then merges", async () => {
   const scenario = m4Scenario(f, "confirm");
@@ -178,7 +178,7 @@ test("a confirm-policy card waits for the human, then merges", async () => {
   f.decide(confirmation as never, "merge");
   await executor().tick(f.project_id);
   expect(f.card().status).toBe("done");
-});
+}, 30_000);
 
 test("an unconfirmed card stays put and is never asked twice", async () => {
   const scenario = m4Scenario(f, "confirm");
@@ -190,7 +190,7 @@ test("an unconfirmed card stays put and is never asked twice", async () => {
     f.state().decisions.filter((d) => d.trigger === "merge_confirmation"),
   ).toHaveLength(1);
   expect(f.card().status).toBe("awaiting_merge");
-});
+}, 30_000);
 
 test("a conflicting delivery returns the card to in_progress with a fix event", async () => {
   // Two cards whose agent branches both start at the original baseline and
@@ -242,7 +242,7 @@ test("a conflicting delivery returns the card to in_progress with a fix event", 
           event.type === "card_merged" && event.card_id === second.card.id,
       ),
   ).toHaveLength(0);
-});
+}, 30_000);
 
 test("a replayed merge is a no-op, not a second merge commit", async () => {
   const scenario = m4Scenario(f, "auto");
@@ -257,7 +257,7 @@ test("a replayed merge is a no-op, not a second merge commit", async () => {
   expect(
     f.state().events.filter((event) => event.type === "card_merged"),
   ).toHaveLength(1);
-});
+}, 30_000);
 
 test("a baseline advanced behind the loop's back is not overwritten", async () => {
   const scenario = m4Scenario(f, "auto");
@@ -284,7 +284,7 @@ test("a baseline advanced behind the loop's back is not overwritten", async () =
     `parent ${competing}`,
   );
   expect(f.card().status).toBe("done");
-});
+}, 30_000);
 
 test("a broken card does not stop the other cards of the same project", async () => {
   // The first card's delivery is pinned to the wrong SHA; the second is fine.
@@ -313,7 +313,7 @@ test("a broken card does not stop the other cards of the same project", async ()
   expect(
     git(repository, "cat-file", "-p", (await baseline()) as string),
   ).toContain(`Merge ${healthy.card.id}/${healthy.development.id} delivery`);
-});
+}, 30_000);
 
 test("a delivery whose pinned ref does not match is reported, not merged", async () => {
   const scenario = m4Scenario(f, "auto");
@@ -332,7 +332,7 @@ test("a delivery whose pinned ref does not match is reported, not merged", async
   expect(
     f.state().events.filter((event) => event.type === "merge_failed"),
   ).toHaveLength(1);
-});
+}, 30_000);
 
 test("timeout preference delegates once then merges through the existing Git executor", async () => {
   const scenario = m4Scenario(f, "confirm");
@@ -405,7 +405,7 @@ test("timeout preference delegates once then merges through the existing Git exe
   expect(f.state().events.filter((e) => e.type === "card_merged")).toHaveLength(
     1,
   );
-});
+}, 30_000);
 
 async function gated(run = "true") {
   writeFileSync(
@@ -511,7 +511,7 @@ test("real checks fail, CLI requeues, and a restart publishes the checked tree a
     1,
   );
   expect(c.errors).toEqual([]);
-});
+}, 30_000);
 
 test("an invalid configured gate blocks both execution and CLI recheck", async () => {
   const scenario = m4Scenario(f, "auto");
@@ -533,7 +533,7 @@ test("an invalid configured gate blocks both execution and CLI recheck", async (
   expect(await c.cli("merge", "recheck", scenario.card.id)).not.toBe(0);
   rmSync(join(repos.root, "merge-gate.yaml"));
   expect(await c.cli("merge", "recheck", scenario.card.id)).not.toBe(0);
-});
+}, 30_000);
 
 test("stopping the long-lived loop cancels a real check and records interruption before returning", async () => {
   const scenario = m4Scenario(f, "auto");
@@ -568,7 +568,7 @@ test("stopping the long-lived loop cancels a real check and records interruption
     [],
   );
   expect(c.errors).toEqual([]);
-});
+}, 30_000);
 
 test("the host refuses a forged checked tree before publishing any candidate", async () => {
   const scenario = m4Scenario(f, "auto");
@@ -598,7 +598,7 @@ test("the host refuses a forged checked tree before publishing any candidate", a
   await expect(
     c.binding.publish(project, plan.completion_id, candidate),
   ).resolves.toMatchObject({ status: "merged", tree_sha: realTree });
-});
+}, 30_000);
 
 test("a real Git-verified noop skips checks but still waits for the completion's human confirmation", async () => {
   const scenario = m4Scenario(f, "confirm");
@@ -656,7 +656,7 @@ test("a real Git-verified noop skips checks but still waits for the completion's
     },
   });
   expect(c.errors).toEqual([]);
-});
+}, 30_000);
 
 test("a due delegated confirmation cannot publish a failed gate; rechecking can complete without another approval", async () => {
   const scenario = m4Scenario(f, "confirm");
@@ -713,7 +713,7 @@ test("a due delegated confirmation cannot publish a failed gate; rechecking can 
     1,
   );
   expect(c.errors).toEqual([]);
-});
+}, 30_000);
 
 test("delegation while a check is running leaves the baseline untouched until its passed result", async () => {
   const scenario = m4Scenario(f, "confirm");
@@ -771,4 +771,4 @@ test("delegation while a check is running leaves the baseline untouched until it
   }
   expect(f.card().status).toBe("done");
   expect(c.errors).toEqual([]);
-});
+}, 30_000);

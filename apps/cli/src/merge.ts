@@ -1,7 +1,9 @@
 import type { Card, CardId, Decision, ProjectId } from "@cardigan/domain";
 import {
+  latestMergeCheck,
   mergePlan,
   parseId,
+  prepareMergePlan,
   recheckMerge,
   recordDecision,
   requestMerge,
@@ -122,6 +124,7 @@ async function mergeRecheck(
       io,
       optional(parsed.flags, "project"),
     );
+    requireMergeCard(store, project_id, id);
     const config = await loadMergeGateConfig({
       projectIds: store.listProjects().map((project) => project.id),
       env: io.env,
@@ -136,13 +139,30 @@ async function mergeRecheck(
       project_id,
       actor: humanActor(project_id),
       clock: systemClock,
-      reduce: (state, actor, ports) =>
-        recheckMerge(
+      reduce: (state, actor, ports) => {
+        const plan = prepareMergePlan(state, id);
+        if (!plan.ok)
+          throw new CliError(
+            `${id} 暂时无法重新检查：请确认当前完成申请已通过审核，且没有待处理的阻塞事项。`,
+            EXIT.usage,
+          );
+        const latest = latestMergeCheck(
+          state.events,
+          id,
+          plan.value.completion_id,
+        );
+        if (!latest || !["failed", "timed_out"].includes(latest.status))
+          throw new CliError(
+            `${id} 当前完成申请没有失败或超时的检查结果，不能重新检查。`,
+            EXIT.usage,
+          );
+        return recheckMerge(
           { ...state, project_settings: { merge_gate_enabled: true } },
           actor,
           { card_id: id },
           ports,
-        ),
+        );
+      },
     });
     io.stdout(`已将 ${id} 的合并候选重新排队检查。`);
     return EXIT.ok;
@@ -380,7 +400,7 @@ function requireMergeCard(
   if (card === undefined) throw new CliError(`${id} 不存在`, EXIT.usage);
   if (card.status !== "awaiting_merge")
     throw new CliError(
-      `${id} 当前状态是 ${card.status}，只有 awaiting_merge 才能确认、退回修改或重新发起合并`,
+      `${id} 当前状态是 ${card.status}，只有 awaiting_merge 才能确认、退回修改、重新发起合并或重新检查`,
       EXIT.usage,
     );
   return card;
