@@ -103,6 +103,7 @@ const schemas = {
     option: text,
     rationale: text,
     escalate: z.boolean().optional(),
+    notice: text.optional(),
   },
   triage_human_action: {
     human_action_id: id("human_action"),
@@ -265,7 +266,7 @@ export function managementTools(clock?: Clock) {
     wire("report_blocker", "Report a work item blocker.", reportBlocker),
     wire(
       "resolve_delegated_decision",
-      "Resolve an authorized decision as PM Ops, with a rationale, or escalate it to the human.",
+      "Resolve an authorized decision as PM Ops, with a rationale, or escalate it to the human. Merge confirmations: choose merge only when list_needs_you shows no merge_blockers, and pass a notice (what changed, impact on the human, risks or follow-ups) for the Needs You notices.",
       resolveDelegatedDecision,
     ),
     wire(

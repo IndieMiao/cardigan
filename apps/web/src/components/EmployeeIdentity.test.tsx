@@ -86,7 +86,7 @@ test("loads a same-origin avatar, falls back on error, and retries a changed pat
   );
 });
 
-test("library avatars select 64/128 sources with 2x images and show 256 in the profile", () => {
+test("library avatars select 64/128 sources with 2x images, including the 64px profile avatar", () => {
   const { container, rerender } = render(<EmployeeIdentity {...identity} />);
   const base = "/avatars/v1/guan-yu/head-";
   expect(container.querySelector("img")?.getAttribute("srcset")).toBe(
@@ -104,7 +104,13 @@ test("library avatars select 64/128 sources with 2x images and show 256 in the p
   );
   const profile = screen.getByRole("dialog");
   const image = profile.querySelector("img");
-  expect(image?.getAttribute("src")).toBe(`${base}256.webp`);
+  expect(image?.getAttribute("src")).toBe(`${base}64.webp`);
+  expect(image?.getAttribute("srcset")).toBe(
+    `${base}64.webp 1x, ${base}128.webp 2x`,
+  );
+  expect(
+    profile.querySelector<HTMLElement>(".employee-avatar")?.style.width,
+  ).toBe("64px");
   if (!image) throw new Error("Missing profile avatar");
   fireEvent.error(image);
   expect(profile.querySelector("img")).toBeNull();
@@ -171,8 +177,10 @@ test("hover and click reveal a profile, Escape/outside dismiss it, and keyboard 
   fireEvent.pointerEnter(trigger);
   const profile = await screen.findByRole("dialog", { name: "林舟的员工卡片" });
   expect(profile.textContent).toContain("负责实现与维护");
-  expect(profile.textContent).toContain("担任角色：coder");
+  expect(profile.textContent).toContain("角色：coder");
   expect(profile.querySelector("a")).toBeNull();
+  expect(within(profile).queryByRole("button")).toBeNull();
+  expect(profile.textContent).not.toContain("关闭");
   fireEvent.pointerLeave(trigger);
   fireEvent.pointerEnter(profile);
   await new Promise((resolve) => setTimeout(resolve, 220));
@@ -197,6 +205,116 @@ test("hover and click reveal a profile, Escape/outside dismiss it, and keyboard 
   });
   fireEvent.click(screen.getByRole("button", { name: "其他" }));
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+});
+
+test("outside clicks close the click-opened profile and return focus to the avatar unless another control takes it", async () => {
+  render(
+    <>
+      <EmployeeIdentity {...identity} />
+      <p>空白区域</p>
+      <button type="button">其他</button>
+    </>,
+  );
+  const trigger = screen.getByRole("button", { name: "林舟的员工卡片" });
+  const blank = screen.getByText("空白区域");
+  const other = screen.getByRole("button", { name: "其他" });
+  // Mirrors the browser: pointerdown, then the default focus move, then click.
+  const clickOutside = (target: HTMLElement, focusable: boolean) => {
+    fireEvent.pointerDown(target, { button: 0, pointerType: "mouse" });
+    if (focusable) target.focus();
+    else (document.activeElement as HTMLElement | null)?.blur();
+    fireEvent.mouseDown(target);
+    fireEvent.mouseUp(target);
+    fireEvent.click(target);
+  };
+  const open = async () => {
+    trigger.focus();
+    fireEvent.click(trigger);
+    await screen.findByRole("dialog");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  };
+
+  await open();
+  clickOutside(blank, false);
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  expect(document.activeElement).toBe(trigger);
+
+  await open();
+  clickOutside(other, true);
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  expect(document.activeElement).toBe(other);
+});
+
+test("compact profile lays out name, title, bio and role without empty rows", async () => {
+  const { rerender } = render(<EmployeeIdentity {...identity} />);
+  fireEvent.click(screen.getByRole("button", { name: "林舟的员工卡片" }));
+  let profile = await screen.findByRole("dialog");
+  const body = profile.querySelector(".employee-card-body");
+  expect(profile.firstElementChild?.classList).toContain("employee-avatar");
+  expect(body?.querySelector(".employee-card-heading")?.textContent).toBe(
+    "林舟工程师",
+  );
+  expect(body?.querySelector(".employee-card-bio")?.textContent).toBe(
+    "负责实现与维护",
+  );
+  expect(
+    [...(body?.querySelectorAll(".employee-card-meta") ?? [])].map(
+      (node) => node.textContent,
+    ),
+  ).toEqual(["角色：coder"]);
+
+  rerender(
+    <EmployeeIdentity
+      employee={{
+        ...employee,
+        title: "",
+        bio: "  ",
+        avatar: null,
+        role_id: undefined,
+      }}
+      author_role="reviewer"
+      metadata="2 分钟前"
+    />,
+  );
+  profile = screen.getByRole("dialog");
+  expect(profile.querySelector("img")).toBeNull();
+  expect(profile.querySelector(".employee-avatar")?.textContent).toBe("林");
+  expect(profile.querySelector(".employee-title")).toBeNull();
+  expect(profile.querySelector(".employee-card-bio")).toBeNull();
+  expect(profile.textContent).not.toContain("暂无简介");
+  expect(
+    [...profile.querySelectorAll(".employee-card-body > *")].map(
+      (node) => node.textContent,
+    ),
+  ).toEqual(["林舟", "角色：reviewer", "2 分钟前"]);
+  for (const node of profile.querySelectorAll(".employee-card-body > *"))
+    expect(node.textContent?.trim()).not.toBe("");
+
+  rerender(
+    <EmployeeIdentity
+      employee={{ ...employee, bio: undefined, role_id: undefined }}
+    />,
+  );
+  expect(screen.getByRole("dialog").textContent).toBe("林舟工程师角色：Agent");
+});
+
+test("profile CSS is a compact horizontal card that clamps the bio to two lines", () => {
+  const css = readFileSync(
+    new NodeURL("../styles.css", import.meta.url),
+    "utf8",
+  );
+  const rule = (selector: string) => {
+    const start = css.indexOf(`${selector} {`);
+    return css.slice(start, css.indexOf("}", start));
+  };
+  const card = rule(".employee-card");
+  expect(card).not.toContain("flex-direction: column");
+  const width = Number(card.match(/\bwidth: (\d+)px/)?.[1]);
+  expect(width).toBeGreaterThanOrEqual(280);
+  expect(width).toBeLessThanOrEqual(320);
+  expect(rule(".employee-card-bio")).toContain("-webkit-line-clamp: 2");
 });
 
 test.each(["comment", "delivery", "review"] as const)(

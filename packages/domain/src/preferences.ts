@@ -34,6 +34,11 @@ export interface ProjectPreferences {
   readonly decision_delegation?: Readonly<
     Partial<Record<DecisionCategory, boolean>>
   >;
+  /** Merge confirmations go to PM Ops unless this is explicitly false (§7.4). */
+  readonly pm_merge_confirmation?: boolean;
+}
+export function pmMergeConfirmation(preferences?: ProjectPreferences): boolean {
+  return preferences?.pm_merge_confirmation !== false;
 }
 export function decisionDelegation(
   preferences?: ProjectPreferences,

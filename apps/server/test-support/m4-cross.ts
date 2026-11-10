@@ -34,6 +34,7 @@ import {
   type Runtime,
   type RuntimeRef,
   releaseAssignment,
+  setProjectPreferences,
   toolNames,
   updateCard,
 } from "@cardigan/domain";
@@ -99,7 +100,14 @@ export function value<T>(r: Result<T>): T {
 export type Producer = { owner: Assignment; verifier: Assignment };
 const ok = <T>(v: T) => ({ ok: true as const, value: v });
 
-export async function m4Cross(options: { hc?: boolean; agent?: boolean } = {}) {
+export async function m4Cross(
+  options: {
+    hc?: boolean;
+    agent?: boolean;
+    /** C-49 defaults merge confirmation to PM Ops; these fixtures cover the human path. */
+    pmMergeConfirmation?: boolean;
+  } = {},
+) {
   const root = await mkdtemp(join(tmpdir(), "cardigan-m4-cross-"));
   const source = join(root, "source"),
     dataDir = join(root, "data"),
@@ -666,6 +674,10 @@ const child=spawnSync('sh',['-c',args.slice(at+2).join(' ')],{cwd:${JSON.stringi
     await cli("pm", "create", "--office");
     await cli("pm", "create", "--ops");
     store = Store.open({ dataDir });
+    if (options.pmMergeConfirmation !== true)
+      command((s, a, p) =>
+        setProjectPreferences(s, a, { pm_merge_confirmation: false }, p),
+      );
     const card = command((s, a, p) =>
       createCard(
         s,

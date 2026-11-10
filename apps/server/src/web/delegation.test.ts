@@ -128,7 +128,12 @@ test("Workbench answers and grants atomically, enforces fixed risks and filters 
     ).toBe(401);
     const grants = f
       .state()
-      .events.filter((e) => e.type === "project_preferences_updated");
+      .events.filter(
+        (e) =>
+          e.type === "project_preferences_updated" &&
+          (e.payload as { preference?: string }).preference ===
+            "decision_delegation",
+      );
     expect(grants).toHaveLength(1);
   } finally {
     await f.close();
@@ -299,6 +304,110 @@ test("PM handoff copy persists through MCP, Workbench and CLI without replacing 
     expect(
       f.state().human_actions.find((h) => h.id === action.id)?.status,
     ).toBe("open");
+  } finally {
+    await f.close();
+  }
+});
+
+test("PM merge confirmation setting round-trips and delegated answers become readable notices", async () => {
+  const f = await m5Cross();
+  try {
+    await f.password(TEST_PASSWORD);
+    await f.login();
+    // The shared fixture covers the human merge path, so it starts switched off.
+    expect((await f.call(f.projectPath("/preferences"))).json).toMatchObject({
+      pm_merge_confirmation: false,
+    });
+    const set = await f.call(f.projectPath("/preferences"), {
+      method: "POST",
+      headers: { "idempotency-key": "pm-merge-on" },
+      body: { pm_merge_confirmation: true },
+    });
+    expect(set.status).toBe(200);
+    expect((await f.call(f.projectPath("/preferences"))).json).toMatchObject({
+      pm_merge_confirmation: true,
+    });
+    expect(
+      (
+        await f.call(f.projectPath("/preferences"), {
+          method: "POST",
+          headers: { "idempotency-key": "pm-merge-bad" },
+          body: { pm_merge_confirmation: "yes" },
+        })
+      ).status,
+    ).toBe(400);
+    const q = f.command((s, a, p) =>
+      requestDecision(
+        s,
+        a,
+        {
+          card_id: f.card.id,
+          category: "general",
+          kind: "choose",
+          question: "流程如何处理",
+          context: "已明确选项",
+          options: [{ key: "go", description: "继续", impact: "推进当前卡" }],
+          recommended: "go",
+          decider: "human",
+          affected_cards: [f.card.id],
+          affected_work_items: [],
+          blocking: false,
+        },
+        p,
+      ),
+    );
+    expect(q.decider).toBe("role:pm");
+    const ops = f
+      .state()
+      .assignments.find(
+        (a) => a.scope === "standing" && a.standing_mode === "ops",
+      );
+    if (!ops) throw new Error("Missing PM Ops");
+    await f.start(ops);
+    await f.mcp(ops, "resolve_delegated_decision", {
+      decision_id: q.id,
+      option: "go",
+      rationale: "流程类，按惯例处理",
+    });
+    const needs = (await f.call(f.projectPath("/needs-you"))).json as {
+      notices: {
+        id: string;
+        decision_id: string;
+        body: string;
+        read: boolean;
+      }[];
+      counts: { notices_unread: number };
+    };
+    expect(needs.notices).toMatchObject([
+      {
+        decision_id: q.id,
+        body: "继续。理由：流程类，按惯例处理",
+        read: false,
+      },
+    ]);
+    expect(needs.counts.notices_unread).toBe(1);
+    const notice = needs.notices[0]?.id ?? "";
+    expect(
+      (
+        await f.call(f.projectPath("/notices/read"), {
+          method: "POST",
+          body: { notice_ids: [notice] },
+          anonymous: true,
+        })
+      ).status,
+    ).toBe(401);
+    expect(
+      (
+        await f.call(f.projectPath("/notices/read"), {
+          method: "POST",
+          body: { notice_ids: [notice] },
+        })
+      ).status,
+    ).toBe(200);
+    expect((await f.call(f.projectPath("/needs-you"))).json).toMatchObject({
+      notices: [{ id: notice, read: true }],
+      counts: { notices_unread: 0 },
+    });
   } finally {
     await f.close();
   }
