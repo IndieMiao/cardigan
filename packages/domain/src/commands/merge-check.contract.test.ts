@@ -21,6 +21,54 @@ import { human, value } from "./test-fixtures.js";
 const system: Actor = { kind: "system", project_id: human.project_id };
 const tree = "c".repeat(40),
   candidate = "b".repeat(40);
+
+test("a queued attempt can fail before any command starts, but cannot claim executed checks", async () => {
+  const { f, state, identity, record } = await fixture();
+  record("queued");
+  const failure = {
+    ...identity,
+    status: "failed" as const,
+    checks: [],
+    summary: "Candidate synchronization failed before execution",
+    log_ref: "attempt-1.log",
+  };
+  expect(
+    recordMergeCheck(
+      state(),
+      system,
+      {
+        ...failure,
+        checks: [{ name: "test", status: "failed", exit_code: 1 }],
+      },
+      f.io,
+    ).ok,
+  ).toBe(false);
+  expect(
+    recordMergeCheck(state(), system, { ...failure, status: "passed" }, f.io)
+      .ok,
+  ).toBe(false);
+  f.commit(recordMergeCheck(state(), system, failure, f.io));
+  expect(
+    latestMergeCheck(f.state.events, f.card.id, identity.completion_id)?.status,
+  ).toBe("failed");
+  expect(
+    recordMergeCheck(
+      state(),
+      system,
+      { ...identity, attempt_id: "auto-retry", status: "queued" },
+      f.io,
+    ).ok,
+  ).toBe(false);
+  f.commit(recheckMerge(state(), human, { card_id: f.card.id }, f.io));
+  f.commit(
+    recordMergeCheck(
+      state(),
+      system,
+      { ...identity, attempt_id: "manual-retry", status: "queued" },
+      f.io,
+    ),
+  );
+});
 async function fixture(policy: "auto" | "confirm" = "auto") {
   const f = mergeFixture(policy),
     { completion, product } = await f.accept();
