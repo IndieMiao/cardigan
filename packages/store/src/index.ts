@@ -22,6 +22,7 @@ export {
   recordNotification,
   routerCursor,
 } from "./inbox.js";
+export { persistMemberEffect } from "./members.js";
 export {
   type AppliedMigration,
   defaultMigrationsDir,

@@ -1,4 +1,11 @@
+export interface MemberView {
+  readonly id: string;
+  readonly name: string;
+  readonly title: string;
+  readonly avatar: string | null;
+}
 export interface AuthorView {
+  readonly member?: MemberView | null;
   readonly employee?: {
     readonly id: string;
     readonly name: string;
@@ -231,6 +238,7 @@ export interface DecisionView {
   readonly status: string;
   readonly blocking: boolean;
   readonly decider: string;
+  readonly decider_view?: AuthorView | null;
   readonly options: readonly {
     readonly key: string;
     readonly description: string;
@@ -238,7 +246,7 @@ export interface DecisionView {
   }[];
   readonly recommended: string;
   readonly context?: string;
-  readonly resolution?: {
+  readonly resolution?: AuthorView & {
     option: string;
     rationale: string;
     raw_quote: string;
@@ -519,7 +527,7 @@ export interface NeedsPage {
   })[];
 }
 
-export interface NoticeView {
+export interface NoticeView extends AuthorView {
   readonly id: string;
   readonly kind: "merge" | "decision";
   readonly card_id: string | null;
@@ -616,6 +624,7 @@ export interface ActivityData {
     created_at: string;
     payload: unknown;
     employee?: AuthorView["employee"];
+    member?: MemberView | null;
     author_display?: string;
     actor: { kind: string; assignment_id?: string };
   }[];
@@ -754,7 +763,7 @@ export interface RoleDetailView {
   } | null;
 }
 
-export interface RoleHistoryEntry {
+export interface RoleHistoryEntry extends Omit<AuthorView, "author_display"> {
   readonly version: number;
   readonly role: RoleDefinitionView;
   readonly action: string;

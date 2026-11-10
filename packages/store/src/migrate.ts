@@ -2,7 +2,13 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
+import { createMember } from "@cardigan/domain";
 import { migrateEmployeeNames } from "./employee-migration.js";
+import {
+  createGlobalIdAllocator,
+  createGlobalRepositories,
+} from "./employees.js";
+import { persistMemberEffect } from "./members.js";
 import { seedCardTemplates } from "./templates.js";
 
 /** Directory shipped next to the compiled package: `packages/store/migrations`. */
@@ -60,6 +66,30 @@ export function migrate(
           )
           .all())
           seedCardTemplates(db, String(row.id));
+      if (migration.version === 14 && migration.name === "members") {
+        const effect = createMember(
+          [],
+          { kind: "human" },
+          {
+            name: "所有者",
+            title: "所有者",
+            role: "owner",
+          },
+          { clock: { now }, ids: createGlobalIdAllocator(db) },
+        );
+        if (!effect.ok) throw new Error(effect.error.message);
+        persistMemberEffect(createGlobalRepositories(db, "write"), {
+          ...effect.value,
+          events: effect.value.events.map((event) => ({
+            ...event,
+            actor: { kind: "system" },
+            payload: {
+              member: { ...effect.value.data },
+              reason: "owner_identity_migration",
+            },
+          })),
+        });
+      }
       db.prepare(
         "INSERT INTO schema_version (version, name, applied_at) VALUES (?, ?, ?)",
       ).run(migration.version, migration.name, now());

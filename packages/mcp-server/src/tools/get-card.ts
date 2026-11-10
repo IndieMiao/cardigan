@@ -1,6 +1,7 @@
 import type { CardId, CardStatus, CardView, Delivery } from "@cardigan/domain";
 import {
   cardTemplate,
+  decisionAuthorView,
   deriveCardFields,
   deriveCardStatus,
   deriveReviewMatrix,
@@ -43,6 +44,7 @@ export const getCardTool = defineTool({
       templates: tx.card_templates?.list(identity.actor.project_id) ?? [],
       runs: tx.runs.list(identity.actor.project_id),
       employees: tx.employees?.list() ?? [],
+      members: tx.members?.list() ?? [],
     }));
 
     // The newest completion request decides whether the card is waiting for
@@ -95,7 +97,10 @@ export const getCardTool = defineTool({
       next_owners: derived.next_owners,
       why: derived.why,
       work_items,
-      open_decisions: decisions,
+      open_decisions: decisions.map((decision) => ({
+        ...decision,
+        ...decisionAuthorView(authors, decision),
+      })),
       deliveries: [...deliveries]
         .sort((left, right) => idNumber(right.id) - idNumber(left.id))
         .slice(0, RECENT_DELIVERY_LIMIT)

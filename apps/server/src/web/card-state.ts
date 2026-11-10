@@ -16,6 +16,7 @@ function cardState(tx: ReadRepositories, project_id: ProjectId): CommandState {
     cards: tx.cards.list(project_id),
     card_templates: tx.card_templates.list(project_id),
     employees: tx.employees.list(),
+    members: tx.members.list(),
     work_items: tx.work_items.list(project_id),
     assignments: tx.assignments.list(project_id),
     deliveries: tx.deliveries.list(project_id),

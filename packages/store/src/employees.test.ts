@@ -62,9 +62,9 @@ test("employees and audit sequence stay global across projects, connections and 
       ).toEqual(["E-1", "E-2"]);
       expect(
         other.uow
-          .read((tx) => tx.global_events.listAfter(1))
+          .read((tx) => tx.global_events.listAfter(2))
           .map((e) => [e.seq, e.type]),
-      ).toEqual([[2, "employee_created"]]);
+      ).toEqual([[3, "employee_created"]]);
       expect(store.getUpdates({ project_id: "p-one" }).events).toEqual([]);
       expect(store.getUpdates({ project_id: "p-two" }).events).toEqual([]);
     } finally {
@@ -88,7 +88,7 @@ test("failed writes roll back employees, events and global counters together", (
       }),
     ).toThrow("abort");
     expect(store.uow.read((tx) => tx.employees.list())).toEqual([]);
-    expect(store.uow.read((tx) => tx.global_events.listAfter(0))).toEqual([]);
+    expect(store.uow.read((tx) => tx.global_events.listAfter(1))).toEqual([]);
     expect(add(store).id).toBe("E-1");
     expect(() =>
       store.uow.run((tx) => {
@@ -102,7 +102,7 @@ test("failed writes roll back employees, events and global counters together", (
     expect(add(store, "刘备").id).toBe("E-2");
     expect(
       store.uow.read((tx) => tx.global_events.listAfter(0)).map((e) => e.seq),
-    ).toEqual([1, 2]);
+    ).toEqual([1, 2, 3]);
   });
 });
 
@@ -174,7 +174,7 @@ test("v8 migration preserves old project data, assignments, event streams, token
   try {
     const upgraded = Store.open({ dataDir });
     try {
-      expect(upgraded.schemaVersion()).toBe(13);
+      expect(upgraded.schemaVersion()).toBe(14);
       expect(upgraded.migrate()).toEqual([]);
       expect(upgraded.getProject(project_id)?.id).toBe(project_id);
       expect(upgraded.verifyToken(token)).toBeDefined();
@@ -191,7 +191,7 @@ test("v8 migration preserves old project data, assignments, event streams, token
         );
         expect(tx.events.listAfter(project_id, card().id, 0)).toHaveLength(1);
         expect(tx.employees.list()).toEqual([]);
-        expect(tx.global_events.listAfter(0)).toEqual([]);
+        expect(tx.global_events.listAfter(1)).toEqual([]);
       });
       expect(upgraded.uow.run((tx) => tx.ids.next(project_id, "card"))).toBe(
         "C-2",
@@ -283,7 +283,7 @@ test("v9 case-insensitive migration resolves collisions, preserves identities/st
         "inactive",
       ]);
       const events = upgraded.uow.read((tx) => tx.global_events.listAfter(0));
-      expect(events).toHaveLength(2);
+      expect(events).toHaveLength(3);
       expect(events[0]).toMatchObject({
         actor: { kind: "system" },
         payload: {

@@ -220,7 +220,28 @@ test("U6a only the search box takes the remaining width of the filter row", asyn
 });
 
 test("the board groups cards by status and links each one", async () => {
-  const api = client(async () => page());
+  const api = client(async () => {
+    const result = page();
+    return {
+      ...result,
+      cards: result.cards.map((card) => ({
+        ...card,
+        next_owners: card.next_owners.map((owner) =>
+          owner.kind === "human"
+            ? {
+                ...owner,
+                member: {
+                  id: "M-1",
+                  name: "邵杰",
+                  title: "所有者",
+                  avatar: null,
+                },
+              }
+            : owner,
+        ),
+      })),
+    };
+  });
   render(<CardListPage client={api} projectId="p-1" view="board" />);
   expect(screen.getByRole("heading", { name: /卡片.*张卡片/u })).toBeTruthy();
   const inProgress = await screen.findByRole("region", { name: "进行中" });
@@ -235,7 +256,7 @@ test("the board groups cards by status and links each one", async () => {
   const link = screen.getByRole("link", { name: /准备发布/u });
   expect(link.getAttribute("href")).toBe("#/p/p-1/cards/C-1");
   expect(
-    within(inProgress).getByRole("link", { name: "下一步：你" }),
+    within(inProgress).getByRole("link", { name: "下一步：邵杰" }),
   ).toBeTruthy();
 });
 

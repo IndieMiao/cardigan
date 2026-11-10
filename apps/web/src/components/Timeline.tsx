@@ -41,9 +41,9 @@ const TYPE_LABELS: Readonly<Record<string, string>> = {
 
 export const decisionStatusLabel = statusLabel;
 
-/** `assignment:A-1` → `A-1`; `human` → 你; `system` → 系统. */
+/** `assignment:A-1` → `A-1`; `human` → 所有者; `system` → 系统. */
 export function authorLabel(author: string): string {
-  if (author === "human") return "你";
+  if (author === "human") return "所有者";
   if (author === "system") return "系统";
   return author.startsWith("assignment:")
     ? author.slice("assignment:".length)

@@ -116,6 +116,13 @@ test("Workbench answers and grants atomically, enforces fixed risks and filters 
         )
       ).decisions.map((q) => q.id),
     ).toEqual([q.id]);
+    expect(
+      (await history("decider=human")).decisions[0]?.resolution,
+    ).toMatchObject({
+      resolved_by: "human",
+      author_display: "所有者",
+      member: { id: "M-1", name: "所有者", title: "所有者", avatar: null },
+    });
     expect((await history("decider=system")).decisions).toEqual([]);
     expect((await history("from=2099-01-01T00:00:00Z")).decisions).toEqual([]);
     expect((await history("card_id=C-999")).decisions).toEqual([]);

@@ -71,7 +71,17 @@ test("card reads equal the full snapshot, preserve cross-card links and upload d
         readCardDetail(store, project_id, "C-999" as CardId),
       ).toBeUndefined();
     };
+    store.uow.run((tx) => {
+      const owner = tx.members.list()[0];
+      if (!owner) throw new Error("Missing owner");
+      tx.members.put({ ...owner, name: "邵杰", avatar: "library:liu-bei" });
+    });
     check();
+    expect(
+      readCardDetail(store, project_id, firstId)?.timeline.find(
+        (entry) => entry.author === "human",
+      ),
+    ).toMatchObject({ author_display: "邵杰", member: { name: "邵杰" } });
     expect(
       readCardList(store, project_id).find((card) => card.id === firstId)
         ?.attachment_count,

@@ -9,6 +9,7 @@ import { CliError, EXIT } from "./errors.js";
 import { attentionCommand, inboxCommand } from "./inbox.js";
 import type { CliIo } from "./io.js";
 import { runLaunchCommand } from "./launch.js";
+import { runMemberCommand } from "./member.js";
 import { runMergeCommand } from "./merge.js";
 import { runPreferenceCommand } from "./preference.js";
 import { runTemplateCommand } from "./template.js";
@@ -51,6 +52,7 @@ export { runWorktreeCommand } from "./worktree.js";
 
 const TOP_LEVEL_USAGE = [
   "cardigan — 卡片式多 Agent 协作开发系统",
+  "  member add|list|update|deactivate|activate  管理全局成员（当前所有者）",
   "  employee add|list|update|deactivate|activate  管理全局员工",
   "  avatar list  列出内置头像素材库",
   "",
@@ -220,6 +222,7 @@ export async function main(
     if (command === "launch") {
       return await runLaunchCommand(rest, io);
     }
+    if (command === "member") return await runMemberCommand(rest, io);
     if (command === "employee") return await runEmployeeCommand(rest, io);
     if (command === "avatar") return runAvatarCommand(rest, io);
     if (command === "init" || command === "project" || command === "role") {

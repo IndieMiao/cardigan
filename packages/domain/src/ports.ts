@@ -104,6 +104,7 @@ export interface Repositories {
 }
 export interface TransactionContext extends Repositories {
   readonly employees?: EmployeeRepository;
+  readonly members?: import("./member.js").MemberRepository;
   readonly ids: IdAllocator;
 }
 export interface UnitOfWork {

@@ -9,6 +9,7 @@ import {
   type RoleListView,
   type RoleWorktree,
 } from "../api.js";
+import { EmployeeIdentity } from "../components/EmployeeIdentity.js";
 import { StatusTag, Time } from "../components/Foundation.js";
 import {
   parseList,
@@ -535,7 +536,17 @@ function RoleDetail({
               {history.data.versions.map((entry) => (
                 <li key={entry.version}>
                   <strong>v{entry.version}</strong> {entry.summary}
-                  {entry.author_display && ` · ${entry.author_display}`}
+                  {entry.author_display && (
+                    <>
+                      {" "}
+                      ·{" "}
+                      <EmployeeIdentity
+                        {...entry}
+                        author_display={entry.author_display}
+                        showTitle={false}
+                      />
+                    </>
+                  )}
                   {entry.created_at && (
                     <>
                       {" · "}
