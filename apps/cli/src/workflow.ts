@@ -26,6 +26,7 @@ import {
   type Store,
 } from "@cardigan/store";
 import { type StartById, startAssignmentById } from "./assignment.js";
+import { runContentCommand } from "./content.js";
 import { CliError, EXIT } from "./errors.js";
 import {
   announceDataDir,
@@ -42,7 +43,7 @@ import type { CliIo } from "./io.js";
 
 const USAGE = [
   "用法：",
-  "  cardigan card create --template dev --title <标题> --goal <目标> --acceptance <标准1;标准2> --repo <仓库> [--base-branch main] [--project <p>]",
+  "  cardigan card create [--template <id>] --title <标题> --goal <目标> [--acceptance <标准1;标准2>] [--repo <仓库>] [--base-branch main] [--project <p>]",
   "  cardigan card update <C-n> [--title <标题>] [--goal <目标>] [--acceptance <标准1;标准2>] [--priority <n>] [--status backlog|todo|cancelled] [--superseded-by <C-m>] [--project <p>]",
   "    update 至少提供一个修改字段；含分号的验收标准请加引号。",
   "    已完成卡片不能取消；请建新卡，再用 --superseded-by 标记已完成或已取消的旧卡。",
@@ -182,12 +183,16 @@ export async function runWorkflowCommand(
   }
 }
 
-function cardCommand(args: readonly string[], io: CliIo): number {
+function cardCommand(
+  args: readonly string[],
+  io: CliIo,
+): number | Promise<number> {
   const [sub, ...rest] = args;
   if (args.includes("--help") || args.includes("-h")) {
     io.stdout(USAGE);
     return EXIT.ok;
   }
+  if (sub === "done") return runContentCommand("card_done", args, io);
   if (sub === "create") return cardCreate(rest, io);
   if (sub === "update") return cardUpdate(rest, io);
   throw new CliError("用法：cardigan card create|update ...", EXIT.usage, [
@@ -329,14 +334,11 @@ function cardUpdate(args: readonly string[], io: CliIo): number {
 
 function cardCreate(args: readonly string[], io: CliIo): number {
   const parsed = parseArgs(args, []);
-  const template = required(parsed.flags, "template");
-  if (template !== "dev") {
-    throw new CliError("M1 只有 dev 模板", EXIT.usage, [USAGE]);
-  }
-  const acceptance = list(required(parsed.flags, "acceptance"));
-  if (acceptance.length === 0) {
-    throw new CliError("--acceptance 至少写一条标准", EXIT.usage, [USAGE]);
-  }
+  const template = optional(parsed.flags, "template") ?? "dev";
+  const acceptance = list(optional(parsed.flags, "acceptance") ?? "");
+  const repo = optional(parsed.flags, "repo");
+  const base =
+    optional(parsed.flags, "base-branch") ?? (repo ? "main" : undefined);
 
   const store = openStoreFrom(io, parsed.flags);
   try {
@@ -357,9 +359,9 @@ function cardCreate(args: readonly string[], io: CliIo): number {
             goal: required(parsed.flags, "goal"),
             acceptance_criteria: acceptance,
             source: { kind: "quote", text: required(parsed.flags, "goal") },
-            repo: required(parsed.flags, "repo"),
-            base_branch: optional(parsed.flags, "base-branch") ?? "main",
-            template,
+            ...(repo === undefined ? {} : { repo }),
+            ...(base === undefined ? {} : { base_branch: base }),
+            template_id: template,
           },
           ports,
         ),

@@ -188,10 +188,14 @@ export function apply(
   };
   for (const { collection, entity } of effect.changes) {
     const key = (e: typeof entity) =>
-      "id" in e ? e.id : `${e.assignment_id}/${e.card_id}`;
+      "version" in e
+        ? `${e.id}@${e.version}`
+        : "id" in e
+          ? e.id
+          : `${e.assignment_id}/${e.card_id}`;
     Object.assign(next, {
       [collection]: [
-        ...next[collection].filter((e) => key(e) !== key(entity)),
+        ...(next[collection] ?? []).filter((e) => key(e) !== key(entity)),
         entity,
       ],
     });

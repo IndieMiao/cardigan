@@ -121,7 +121,7 @@ test("D4 and invariant 13: the development template requires human-facing comple
   const template = developmentCardTemplate;
   expect(template.id).toBe("dev");
   expect(template.require_acceptance_criteria).toBe(true);
-  expect(template.completion_reviewer).toBe("role:pm");
+  expect(template.completion.reviewer).toBe("role:pm");
   expect(template.work_items).toEqual([
     {
       key: "development",

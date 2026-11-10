@@ -37,11 +37,11 @@ export function roleFromDocument(document: unknown): Role {
     ...(record.instructions === undefined
       ? {}
       : { instructions: record.instructions }),
-    ...(record.status === undefined ? {} : { status: record.status }),
     harness: record.harness,
     launch_profile_ref: record.launch_profile_ref,
     allowed_tools: record.allowed_tools,
     capabilities: record.capabilities,
+    ...(record.status === undefined ? {} : { status: record.status }),
     abilities: record.abilities,
     worktree: record.worktree,
     required_machine_tags: record.required_machine_tags,

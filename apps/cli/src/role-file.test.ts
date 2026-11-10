@@ -366,7 +366,23 @@ test("role add/update and copy cannot bypass domain permission or version checks
 
 test("deactivation blocks new work and standing assignments but preserves existing ones", async () => {
   expect(await run(["role", "add", "--file", roleFile])).toBe(0);
-  expect(await run(["role", "deactivate", "coder"])).toBe(0);
+  // Templates now validate their roles at card creation; deactivate afterwards
+  // to exercise assignment policy against an already-existing card.
+  for (const role of ["reviewer", "pm"]) {
+    expect(
+      await run([
+        "role",
+        "copy",
+        role,
+        role,
+        "--from-default",
+        "--harness",
+        "codex",
+        "--launch-profile",
+        "fixture",
+      ]),
+    ).toBe(0);
+  }
   expect(
     await run([
       "card",
@@ -383,25 +399,13 @@ test("deactivation blocks new work and standing assignments but preserves existi
       "fixture/repo",
     ]),
   ).toBe(0);
+  expect(await run(["role", "deactivate", "coder"])).toBe(0);
   expect(await run(["assign", "W-1", "--role", "coder"])).toBe(2);
   expect(errors.join("\n")).toContain("停用");
   expect(await run(["role", "activate", "coder"])).toBe(0);
   expect(await run(["assign", "W-1", "--role", "coder"])).toBe(0);
   expect(await run(["role", "deactivate", "coder"])).toBe(0);
   expect(await run(["assign", "W-1", "--role", "coder"])).toBe(0);
-  expect(
-    await run([
-      "role",
-      "copy",
-      "pm",
-      "pm",
-      "--from-default",
-      "--harness",
-      "codex",
-      "--launch-profile",
-      "fixture",
-    ]),
-  ).toBe(0);
   expect(await run(["pm", "create", "--office"])).toBe(0);
   expect(await run(["role", "deactivate", "pm"])).toBe(0);
   expect(await run(["pm", "create", "--office"])).toBe(0);

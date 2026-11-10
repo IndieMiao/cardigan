@@ -43,7 +43,7 @@ const role: Role = {
   core_prompt: "Fictional core prompt.",
   harness: "pi",
   launch_profile_ref: "pi-agent",
-  allowed_tools: ["whoami", "get_card"],
+  allowed_tools: ["whoami", "get_card", "submit_delivery"],
   capabilities: [],
   abilities: [],
   worktree: "none",
@@ -103,6 +103,15 @@ function dispatchedRun(
       ),
     );
   }
+  store.uow.run((tx) => {
+    for (const role_id of ["pm", "reviewer"])
+      tx.roles.put(project_id, {
+        role_id,
+        role_version: 1,
+        allowed_tools: ["submit_review"],
+        capabilities: [],
+      });
+  });
   const card = apply((state, actor, p) =>
     createCard(
       state,
@@ -272,7 +281,7 @@ describe("the HTTP layer", () => {
       assignment_id: seeded.assignment.id,
       role: {
         role_version: seeded.assignment.role_version,
-        allowed_tools: ["whoami", "get_card"],
+        allowed_tools: ["whoami", "get_card", "submit_delivery"],
       },
     }).token;
     running = await startMcpServer({

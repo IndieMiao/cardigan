@@ -495,7 +495,7 @@ describe("next_owners", () => {
     const owners = deriveNextOwners(
       input({
         deliveries: [delivery("D-9", { kind: "card_completion" })],
-        template: { completion_reviewer: "human" },
+        template: { completion: { mode: "review", reviewer: "human" } },
       }),
     );
     expect(owners).toEqual([{ kind: "human", ref: "human" }]);

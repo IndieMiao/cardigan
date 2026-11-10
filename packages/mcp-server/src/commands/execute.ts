@@ -26,6 +26,7 @@ export function loadCommandState(
   const cards = tx.cards.list(project_id);
   return {
     project_id,
+    card_templates: tx.card_templates?.list(project_id) ?? [],
     employees: tx.employees?.list() ?? [],
     employee_activity: tx.employees?.assignmentActivity?.() ?? [],
     cards,

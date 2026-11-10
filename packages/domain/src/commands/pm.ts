@@ -1,7 +1,7 @@
 import type { Actor, Assignment, Card, WorkItem } from "../entities.js";
 import type { WorkItemId } from "../ids.js";
 import { isRoleActive } from "../role.js";
-import { developmentCardTemplate } from "../templates.js";
+import { builtinCardTemplates, latestCardTemplate } from "../templates.js";
 import { DEFAULT_MAX_REVIEW_ROUNDS, transition } from "../transitions.js";
 import {
   type CommandPorts,
@@ -17,17 +17,23 @@ import {
   selectEmployee,
 } from "./employee-assignment.js";
 import { canResume, queueResumedRun, resumeWork } from "./resumption.js";
+import { resolveCardTemplate, validateCardTemplate } from "./templates.js";
 
 export type CreateCardParams = Pick<
   Card,
-  "title" | "goal" | "acceptance_criteria" | "source" | "repo" | "base_branch"
+  "title" | "goal" | "source" | "repo" | "base_branch"
 > &
   Partial<
     Pick<
       Card,
-      "out_of_scope" | "related_cards" | "priority" | "deadline" | "template"
+      | "out_of_scope"
+      | "related_cards"
+      | "priority"
+      | "deadline"
+      | "template"
+      | "acceptance_criteria"
     >
-  >;
+  > & { readonly template_id?: string };
 export function createCard(
   state: CommandState,
   actor: Actor,
@@ -37,21 +43,44 @@ export function createCard(
   return command(state, actor, "create_card", ports, (d) => {
     d.pm();
     d.projectAccess();
+    const acceptance = p.acceptance_criteria ?? [];
     text(p.title, "title");
     text(p.goal, "goal");
-    text(p.repo, "repo");
-    text(p.base_branch, "base_branch");
     ensure(
-      Array.isArray(p.acceptance_criteria) &&
-        p.acceptance_criteria.length > 0 &&
-        p.acceptance_criteria.every((s) => typeof s === "string" && s.trim()),
+      !p.template || !p.template_id || p.template === p.template_id,
       "validation_failed",
-      "Acceptance criteria are required",
+      "template 与 template_id 不一致",
+    );
+    const templateId = p.template_id ?? p.template ?? "dev";
+    const template =
+      latestCardTemplate(ports.templates ?? [], templateId) ??
+      latestCardTemplate(d.list("card_templates"), templateId) ??
+      latestCardTemplate(builtinCardTemplates, templateId);
+    ensure(template, "not_found", "模板不存在");
+    ensure(
+      template.status === "active",
+      "validation_failed",
+      "停用模板不能建卡",
+    );
+    validateCardTemplate(template, state.roles);
+    if (template.requires_repo || p.repo !== undefined) text(p.repo, "repo");
+    if (
+      template.requires_repo ||
+      p.repo !== undefined ||
+      p.base_branch !== undefined
+    )
+      text(p.base_branch, "base_branch");
+    ensure(
+      p.base_branch === undefined || p.repo !== undefined,
+      "validation_failed",
+      "基线分支需要仓库",
     );
     ensure(
-      !p.template || p.template === "dev",
+      Array.isArray(acceptance) &&
+        (!template.require_acceptance_criteria || acceptance.length > 0) &&
+        acceptance.every((s) => typeof s === "string" && s.trim()),
       "validation_failed",
-      "Only the dev template is available",
+      "Acceptance criteria are required",
     );
     ensure(
       p.source &&
@@ -69,27 +98,21 @@ export function createCard(
       "Invalid priority",
     );
     for (const id of p.related_cards ?? []) d.card(id);
-    const template =
-      ports.templates?.find((t) => t.id === "dev") ?? developmentCardTemplate;
-    ensure(
-      ["confirm", "auto"].includes(template.merge_policy),
-      "validation_failed",
-      "Invalid template merge policy",
-    );
     const id = d.ids.next(state.project_id, "card");
     const card: Card = {
       id,
       project_id: state.project_id,
       title: p.title,
       goal: p.goal,
-      acceptance_criteria: [...p.acceptance_criteria],
+      acceptance_criteria: [...acceptance],
       source: p.source,
-      repo: p.repo,
-      base_branch: p.base_branch,
+      ...(p.repo === undefined ? {} : { repo: p.repo }),
+      ...(p.base_branch === undefined ? {} : { base_branch: p.base_branch }),
       priority: p.priority ?? 0,
       status: "todo",
-      template: "dev",
-      merge_policy: template.merge_policy,
+      template: template.id,
+      template_version: template.version,
+      merge_policy: template.merge,
       out_of_scope: p.out_of_scope ?? [],
       related_cards: p.related_cards ?? [],
       created_by: d.author,
@@ -98,12 +121,12 @@ export function createCard(
     };
     d.put("cards", card);
     const ids = new Map(
-      developmentCardTemplate.work_items.map((w) => [
+      template.work_items.map((w) => [
         w.key,
         d.ids.next(state.project_id, "work_item"),
       ]),
     );
-    for (const w of developmentCardTemplate.work_items) {
+    for (const w of template.work_items) {
       const itemId = ids.get(w.key);
       ensure(itemId, "invariant_violation", "Missing template item");
       const common = {
@@ -113,7 +136,7 @@ export function createCard(
         role_id: w.role_id,
         required: w.required,
         depends_on: [],
-        completion_criteria: [...p.acceptance_criteria],
+        completion_criteria: [...acceptance],
         template_key: w.key,
         status: "todo" as const,
       };
@@ -124,7 +147,7 @@ export function createCard(
           ...common,
           kind: "verify",
           max_review_rounds: DEFAULT_MAX_REVIEW_ROUNDS,
-          ...("target_work_item_key" in w
+          ...(w.target_work_item_key !== undefined
             ? {
                 target_work_item_id: ids.get(
                   w.target_work_item_key,
@@ -136,7 +159,11 @@ export function createCard(
     d.emit(
       "card_created",
       id,
-      { card_id: id, template: "dev" },
+      {
+        card_id: id,
+        template: template.id,
+        template_version: template.version,
+      },
       { type: "system", body: p.title },
     );
     return card;
@@ -162,7 +189,8 @@ export function updateCard(
     if (p.goal !== undefined) text(p.goal, "goal");
     if (p.acceptance_criteria !== undefined)
       ensure(
-        p.acceptance_criteria.length > 0 &&
+        (!resolveCardTemplate(d, card).require_acceptance_criteria ||
+          p.acceptance_criteria.length > 0) &&
           p.acceptance_criteria.every((s) => s.trim()),
         "validation_failed",
         "Acceptance criteria are required",

@@ -34,6 +34,7 @@ import {
   runCommand,
   startAssignment,
 } from "./index.js";
+import { registerTemplateRoles } from "./template-fixtures.js";
 
 const sdk = createRequire(resolve("packages/mcp-server/package.json"));
 const sdkUrl = (name: string) => pathToFileURL(sdk.resolve(name)).href;
@@ -71,7 +72,7 @@ function seed(worktree: Role["worktree"] = "none") {
         core_prompt: corePromptFor("coder"),
         harness: "pi",
         launch_profile_ref: "fixture",
-        allowed_tools: ["whoami", "get_card"],
+        allowed_tools: ["whoami", "get_card", "submit_delivery"],
         capabilities: ["code"],
         abilities: [],
         worktree,
@@ -80,6 +81,7 @@ function seed(worktree: Role["worktree"] = "none") {
       { mode: "add" },
     ),
   );
+  registerTemplateRoles(store, project_id);
   const actor = humanActor(project_id);
   const card = runCommand(store, {
     project_id,
@@ -300,7 +302,10 @@ test.skipIf(!hc)(
     const old = store.issueToken({
       project_id,
       assignment_id: assignment.id,
-      role: { role_version: 1, allowed_tools: ["whoami", "get_card"] },
+      role: {
+        role_version: 1,
+        allowed_tools: ["whoami", "get_card", "submit_delivery"],
+      },
     }).token;
     await writeFile(join(launchDir, "launch.yaml"), JSON.stringify(config));
     await writeFile(join(launchDir, "secrets.env"), "key=fixture-key\n", {
@@ -531,7 +536,7 @@ test.each(["claude-code", "codex", "pi"] as const)(
         harness,
         launch_profile: "fixture",
         core_prompt: corePromptFor("coder"),
-        allowed_tools: ["whoami", "get_card"],
+        allowed_tools: ["whoami", "get_card", "submit_delivery"],
         worktree: "none",
       },
       launch: parseLaunchConfig({

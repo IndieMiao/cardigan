@@ -75,7 +75,7 @@ CLI 的 `cardigan card update <C-n> [--title <标题>] [--goal <目标>] [--acce
 
 ## M4.1 合并确认与计划
 
-- CardTemplate.merge_policy 为 confirm / auto，开发卡默认 confirm。createCard 将主机 CommandPorts.templates 中 dev 模板的策略固定到 Card.merge_policy，旧卡缺省 confirm；MCP 参数不能覆盖。
+- CardTemplate.merge 为 none / confirm / auto，开发卡默认 confirm。createCard 从项目当前启用模板固定 template/template_version 和 Card.merge_policy，旧卡按 dev v1、confirm 读取；MCP 参数不能覆盖策略。
 - 完成审核通过后先发 review_submitted，再按策略发 decision_requested；确认绑定当前完成申请，merge / hold 均保留 awaiting_merge，只有 merge 允许执行。recordDecision 对合并确认开放 human 入口，记录原话和 needs_you 来源；原有 Office 入口保持。requestMerge 仅人或常驻 PM Ops 可用，仅对已 hold 的确认重新申请。新增 request_changes（退回修改），rationale 和 raw_quote 均须非空；Web 不为此选项生成默认原话。确认必须绑定当前已接受的完成申请。退回时卡片经 request_changes 回 in_progress，完成申请所属的主产出 accepted → changes_requested，旧完成申请 supersede，PM 验收经 target_withdrawn 回 todo。与 merge_conflicted 共用 reopenMerge 迁移；发出 decision_resolved 后再发 merge_changes_requested，payload 带 decision_id/completion_id/work_item_id/run_kind=fix/reason，时间线记原因。Router 和 Dispatcher 为原 Assignment 排 fix Run，trigger_event_id 关联含原因的事件，不在 domain 重复排 Run。
 - mergePlan(state, card_id) 无 IO，返回 card_id/title/base_branch/completion_id 和按工作项编号排序的 deliveries（delivery_id/work_item_id/sha）。只收最新未被取代且已接受的 Git 提交形式的交付（subject.kind=git_head，不按 kind 分类）；未接受或尚无交付的工作项跳过，known_gaps 仍由完成申请校验。没有可合并交付时直接 done。检查当前完成申请及确认，未决阻塞会拒绝；M4.4 负责一致快照和固定 ref 校验。待合并期间冻结交付与审核，冲突或退回修改后才能重新交付；之后需重新审核、申请完成和确认合并。
 
@@ -98,7 +98,7 @@ M5.6：阻塞 Decision 和审核轮次上限的隐式 Run 结束与 finish_run �
 
 S24：`pauseStandingAssignment` 是只允许同项目 human 的主机命令，仅作用于常驻 pm。它经 suspend 暂停 Assignment、经 cancel 结束未完成 Run，保留 RuntimeRef 供主机回收。`queueRun(..., {resume:true})` 也仅允许人恢复 suspended 常驻 PM，并在同一个纯命令中恢复状态、排新 Run；系统派发不能使用该选项。CLI 在暂停事务内撤销 Token、结清被手动中断的投递意图，关闭失败会保持暂停；显式 start 失败也重新暂停。工作项 stop 保持原语义。
 
-S21：MCP create_card 可省略 repo／base_branch，适配层在命令事务内从 Token 所属项目登记信息分别补齐；显式字段保留，缺少登记默认值返回 validation_failed。domain createCard 仍接收完整参数并做原有校验，不做仓储 IO。幂等使用未补默认值的原始请求作为指纹；成功重放不重新读取项目配置。create_card／update_card 的 MCP 响应隐藏 repo，实体变更仍保存完整字段。
+S21 / V10a：MCP create_card 可省略 repo／base_branch。需要仓库的模板由适配层在命令事务内从 Token 所属项目登记信息补齐；显式字段保留，缺少登记默认值返回 validation_failed。不需要仓库的模板不自动绑定项目仓库。domain createCard 按模板检查字段，不做仓储 IO。幂等使用未补默认值的原始请求作为指纹；成功重放不重新读取项目配置。create_card／update_card 的 MCP 响应隐藏 repo，实体变更仍保存完整字段。
 
 ## P2-V V1a 全局员工命令
 
@@ -138,3 +138,13 @@ S21：MCP create_card 可省略 repo／base_branch，适配层在命令事务内
 - 事件为 role_created、role_copied、role_updated、role_deactivated、role_activated、role_rolled_back；保存 Actor 和完整版本快照。验证失败无部分效果。
 - instructions/status 存入原 roles.doc，不改表；旧记录缺省 active，没有 instructions 就继续使用原 core_prompt，转换和启动拼接位于 roles 包。迁移不重写旧文档，不自动把旧提示词当作新格式。
 - 工具白名单是新版本写入边界：旧库已有角色在读取、assign、queueRun 和主机启动时不调用 validateRole，不因历史宽工具范围或旧 kind 被拒绝。写入同一内容的新版本仍需通过校验，既有 Token 作用域控制不变。回归覆盖旧 schema 升级后的 coder/reviewer/pm 与三种 Harness。
+
+## P2-V V10a 卡片模板与无仓库流程
+
+- `manageCardTemplate(state, actor, params, ports)` 只允许 `canManageCardTemplates(actor)` 为真的 human，输出版本及 `card_template_changed` 项目事件，不向 MCP 注册。params 为 `add|update` 加 definition、`copy` 加 template_id/new_id/可选 version、`activate|deactivate` 加 template_id，或 `rollback` 加 template_id/version。写入 card_templates 与事件同事务；编号冲突、找不到版本、直接修改内置模板均拒绝。更新、停用、恢复、回退追加版本，回退保留当前启停状态，复制生成启用的自定义 v1。
+- definition 包含 id/title/description、requires_repo、merge、require_acceptance_criteria、work_items、primary_work_item_key（可为 null）、completion。校验 key 唯一、验证目标为同模板产出项、主产出类型、review 必须有主产出、非 none 合并需要仓库。角色检查使用项目最新版本，缺省 status 为 active；未登记／inactive 拒绝，产出需 submit_delivery、验证需 submit_review。角色完成审核必须有对应必需验收项。停用无需角色仍有效；其他写入及建卡均校验。
+- `createCard` 增加 template_id，缺省 dev，兼容 template（同时提供必须一致）。按当前启用模板生成工作项并记录 template_version；停用不能建卡。repo/base_branch 可缺省，但 requires_repo 时必填，分支不能脱离仓库；验收标准可缺省为空，仅 require_acceptance_criteria 模板强制非空。旧卡按 v1 解析。后续完成申请、审核、员工隔离与读取视图均解析卡片固定版本。
+- `markCardDone(state, actor, {card_id, result, attachments?}, ports)` 只允许 `canMarkCardDone(actor)` 为真的 human，且模板为 human_mark_done。结果必须非空，附件必须已上传且属于本卡；必需工作项全部 accepted/passed，无项可直接完成。经 human_mark_done 状态迁移写 done/resolution、card_marked_done（result/attachments）及状态时间线。已完成／取消卡拒绝，updateCard 仍不能直接写 done。
+- `merge=none` 模板及无仓库卡拒绝 git_head；artifact_sha256/doc_version 的产出仍先交付、再由主产出提交完成申请。验收项从模板指定角色和无产出目标的工作项确定，不能混入普通产出审核。完成审核通过且没有 Git 候选时复用 merge_not_required 进入 done，无仓库卡及 worktree=none 角色不建 worktree。
+- `completion={mode:review, reviewer:human}` 的申请 requested_verifiers 为空，系统创建绑定本次交付的 completion_review Decision，沿用 recordDecision 的原话和身份审计；approve 接受申请并走同一完成路径，reject 将申请拒绝、卡片退回 in_progress，completion_reviewed 事件复用驳回路由为主产出安排 rework。新产出／新完成申请使旧未决验收失效；过期批准拒绝，不自动完成。
+- 存储迁移 0011 建立 `(project_id, template_id, version)` 主键及版本不可覆盖约束；为每个老项目和新建项目写入 dev/general/artifact v1，老卡 template 不变、补 template_version=1。无仓库视图省略 repo/base_branch，CLI 显示合并基线缺省为“无”。

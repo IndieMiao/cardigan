@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { migrateEmployeeNames } from "./employee-migration.js";
+import { seedCardTemplates } from "./templates.js";
 
 /** Directory shipped next to the compiled package: `packages/store/migrations`. */
 export const defaultMigrationsDir = fileURLToPath(
@@ -52,6 +53,13 @@ export function migrate(
       db.exec(migration.sql);
       if (migration.version === 10 && migration.name === "employee_assignment")
         migrateEmployeeNames(db, now());
+      if (migration.version === 11 && migration.name === "card_templates")
+        for (const row of db
+          .prepare(
+            "SELECT id FROM projects UNION SELECT project_id AS id FROM cards",
+          )
+          .all())
+          seedCardTemplates(db, String(row.id));
       db.prepare(
         "INSERT INTO schema_version (version, name, applied_at) VALUES (?, ?, ?)",
       ).run(migration.version, migration.name, now());
