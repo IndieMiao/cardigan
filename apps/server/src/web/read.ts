@@ -17,6 +17,7 @@ import {
   deriveReviewMatrix,
   extractReferences,
   listNeedsYou,
+  parseAvatarReference,
   projectSnapshot,
   type Result,
   resolveReferences,
@@ -72,7 +73,7 @@ export function projectState(
 function webAuthorView(state: CommandState, author: Author) {
   const view = authorView(state, author);
   const employee = state.employees?.find((e) => e.id === view.employee?.id);
-  const avatar = employee?.avatar;
+  const avatar = parseAvatarReference(employee?.avatar);
   return {
     ...view,
     author,
@@ -84,7 +85,11 @@ function webAuthorView(state: CommandState, author: Author) {
           bio: employee.bio,
           role_id: employee.role_id,
           avatar:
-            avatar && /^\/(?![/\\])[^\s\\]*$/.test(avatar) ? avatar : null,
+            avatar?.kind === "library"
+              ? `/avatars/v1/${avatar.id}/head-64.webp`
+              : avatar?.kind === "upload"
+                ? `/api/avatars/${avatar.sha256}`
+                : null,
         }
       : null,
   };

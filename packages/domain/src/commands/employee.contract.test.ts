@@ -8,6 +8,7 @@ import {
   type EmployeeCommandPorts,
   type EmployeeId,
   formatId,
+  parseAvatarReference,
   parseId,
   transition,
   type UpdateEmployeeInput,
@@ -34,6 +35,29 @@ const created = (p = ports(), fields = input) =>
   value(createEmployee([], human, fields, p)).data;
 const rejects = (result: unknown, code = "validation_failed") =>
   expect(result).toMatchObject({ ok: false, error: { code } });
+
+test("avatar changes retain employee identity and human-only auditing", () => {
+  const p = ports();
+  const first = value(
+    createEmployee([], human, { ...input, avatar: "library:guan-yu" }, p),
+  );
+  const before = JSON.stringify(first);
+  const avatar = `upload:${"a".repeat(64)}`;
+  rejects(
+    updateEmployee([first.data], actor(), first.data.id, { avatar }, p),
+    "forbidden_tool",
+  );
+  const changed = value(
+    updateEmployee([first.data], human, first.data.id, { avatar }, p),
+  );
+  expect(changed.data).toEqual({ ...first.data, avatar });
+  expect(changed.events[0]).toMatchObject({
+    actor: human,
+    payload: { employee: { avatar } },
+  });
+  expect(parseAvatarReference(changed.data.avatar)?.kind).toBe("upload");
+  expect(JSON.stringify(first)).toBe(before);
+});
 
 test("global employee lifecycle preserves identity, role, creation time and audit snapshots", () => {
   const p = ports();

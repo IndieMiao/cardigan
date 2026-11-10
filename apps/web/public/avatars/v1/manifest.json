@@ -1,0 +1,2310 @@
+{
+  "schema_version": 1,
+  "ownership": "AI 生成、Cardigan 自有",
+  "model": "gpt-image-2",
+  "exported_at": "2026-11-10T06:16:45.429Z",
+  "source_export": "out/export/2026-11-10/v1",
+  "characters": [
+    {
+      "id": "sun-wukong",
+      "name": "孙悟空",
+      "novel": "西游记",
+      "bio": "机敏桀骜的取经护法，以金箍棒和变化本领闻名。",
+      "background": "#8FD9C4",
+      "files": {
+        "full": {
+          "path": "sun-wukong/full.webp",
+          "sha256": "823bbdc86612a905af2de10956e77cb7503b743aa7af13678886a498d20de1ce",
+          "bytes": 35586,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "sun-wukong/head-64.webp",
+            "sha256": "809fe254f4b1e838280bf09d04df1ca635d442bcaf52c144ed333ee6572394e1",
+            "bytes": 1294,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "sun-wukong/head-128.webp",
+            "sha256": "da86491a5afffa74681e0e5d52ad22956fcf4a072fe6511fc8cafcaa2a9e983d",
+            "bytes": 3798,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "sun-wukong/head-256.webp",
+            "sha256": "b1989d4608699d0dc8a704e7b791794a9f12426774c7d0feca56bc1fbcdecc19",
+            "bytes": 11590,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "tang-seng",
+      "name": "唐僧",
+      "novel": "西游记",
+      "bio": "坚定温和的取经僧人，带领师徒远行。",
+      "background": "#D7C4ED",
+      "files": {
+        "full": {
+          "path": "tang-seng/full.webp",
+          "sha256": "83124a789f3126e6beae2ac8b09f6d9e32462f79b8109fda0217fd66383c70cb",
+          "bytes": 35278,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "tang-seng/head-64.webp",
+            "sha256": "30a424ac02db890786b4c93cefd9a96fbab5a8de58c5f11a60adfbfbb145de2b",
+            "bytes": 1398,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "tang-seng/head-128.webp",
+            "sha256": "5462efaf500bf84494ff163d4b74eb283773621bb4e63f8aab98580c42855966",
+            "bytes": 3760,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "tang-seng/head-256.webp",
+            "sha256": "a91d6ed502ef8fd11c86e4a101857c824737c996b2932ed8c942a27efca56991",
+            "bytes": 10356,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "zhu-bajie",
+      "name": "猪八戒",
+      "novel": "西游记",
+      "bio": "憨直爱吃的取经伙伴，幽默而富有人情味。",
+      "background": "#F3D188",
+      "files": {
+        "full": {
+          "path": "zhu-bajie/full.webp",
+          "sha256": "6b5d827ae3af0774f8d6d0181658ab0c830aa4dfbc4f2cb7df4a14c79a455150",
+          "bytes": 47638,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "zhu-bajie/head-64.webp",
+            "sha256": "79c44820f16a47e0e9e6f18666addf528452e67e7d06d52f7c1e9800130435e6",
+            "bytes": 1440,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "zhu-bajie/head-128.webp",
+            "sha256": "dee837b771e373e3bc3b314c6a52073048dd8a3a7925ea2e63445e0845c90072",
+            "bytes": 3626,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "zhu-bajie/head-256.webp",
+            "sha256": "8fb27aacf24bc853d6c691feaeebf71f46c5bec945ab6516f91c2d004b6aa8fa",
+            "bytes": 9030,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "sha-seng",
+      "name": "沙僧",
+      "novel": "西游记",
+      "bio": "寡言可靠的行者，耐心承担旅途事务。",
+      "background": "#B3D6D2",
+      "files": {
+        "full": {
+          "path": "sha-seng/full.webp",
+          "sha256": "2efda69f81b13c1d089441598b84e816d3237f3ed66a95ae28c6d415f121fbf8",
+          "bytes": 42074,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "sha-seng/head-64.webp",
+            "sha256": "38e72034adee13e01c3e84b5d73dc028f844115181f6e41bc081c62437c0bb90",
+            "bytes": 1470,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "sha-seng/head-128.webp",
+            "sha256": "916babb0cc7a97a9dabe6804d72c6314a6e8a58e3061461b85efbe0068b76ee2",
+            "bytes": 3830,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "sha-seng/head-256.webp",
+            "sha256": "68f39ae7a72e13bd2e9bdf0b695e27b3d852acee4539d29f2e9441942a332a69",
+            "bytes": 10438,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "bai-longma",
+      "name": "白龙马（小白龙）",
+      "novel": "西游记",
+      "bio": "化身坐骑护送取经的龙族少年。",
+      "background": "#ADCFE8",
+      "files": {
+        "full": {
+          "path": "bai-longma/full.webp",
+          "sha256": "b429ee5f9eb5e19b1dbe870b844e878768f022ec742fab3dd24f3ca44ea016ca",
+          "bytes": 40212,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "bai-longma/head-64.webp",
+            "sha256": "33aeefe5533ac6ec9f817debcb5d2d8bb49f0f4312245663779c1d6989089f40",
+            "bytes": 1086,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "bai-longma/head-128.webp",
+            "sha256": "2027f15af7a409e8d284c11aeef6150ebf29e7e56f8188fd7d599241a9925268",
+            "bytes": 3070,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "bai-longma/head-256.webp",
+            "sha256": "8a609304b786e4017e9a1c4af0e125b8945411632665464feb9d4a57214ad769",
+            "bytes": 8782,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "nezha",
+      "name": "哪吒",
+      "novel": "西游记",
+      "bio": "勇敢敏捷的少年将领，具有鲜明的莲花装束。",
+      "background": "#91C8D8",
+      "files": {
+        "full": {
+          "path": "nezha/full.webp",
+          "sha256": "272b6ef1f9a7c632d891539ef814fedfe71297d5f0554363fedc69184403bb5f",
+          "bytes": 38936,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "nezha/head-64.webp",
+            "sha256": "05568477c0a34302be0d75726961e0caaba4f3b7906d68a56d37c749c76da290",
+            "bytes": 1832,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "nezha/head-128.webp",
+            "sha256": "787e9a35f9ab8c58041f5ba0cdcbdc12fd2f57e0f9caee82cd37384fc637b8ae",
+            "bytes": 4962,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "nezha/head-256.webp",
+            "sha256": "e8696708c6461bd88f963d91515961266214e376320fffa5009bb8db598b28a0",
+            "bytes": 13132,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "erlang-shen",
+      "name": "二郎神",
+      "novel": "西游记",
+      "bio": "冷静果断的神将，以三眼与哮天犬为标志。",
+      "background": "#B8C8EB",
+      "files": {
+        "full": {
+          "path": "erlang-shen/full.webp",
+          "sha256": "a030737c3e25a0a1669990fd6a64ea4209d2a31460bc8e75c0fe701c9c789dd6",
+          "bytes": 41362,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "erlang-shen/head-64.webp",
+            "sha256": "9f22e6cfbe140e111e088813c9596016d531a7c6a816ad36caaf98bd7ecc43e7",
+            "bytes": 1582,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "erlang-shen/head-128.webp",
+            "sha256": "c416edf619b2ac1e7b55c3be1f501256695557a20de3d46288ad4181785bb776",
+            "bytes": 4230,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "erlang-shen/head-256.webp",
+            "sha256": "14a56826ced83d7c18935e029bf0e4b15411d0a389074d2d46293f4c21e58f4d",
+            "bytes": 11826,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "niu-mowang",
+      "name": "牛魔王",
+      "novel": "西游记",
+      "bio": "雄壮自信的牛族首领。",
+      "background": "#C6D6A0",
+      "files": {
+        "full": {
+          "path": "niu-mowang/full.webp",
+          "sha256": "e7cb3fafbdaa54040155c758242a76df7d36bd8648183c0552b03c4145c8bbdd",
+          "bytes": 44394,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "niu-mowang/head-64.webp",
+            "sha256": "fc29fbc612972c2364344dd69dc83aa95891c929e6818dfe23f82de82f7f0f4c",
+            "bytes": 1572,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "niu-mowang/head-128.webp",
+            "sha256": "50bf81499f1586b137a7cdb0f09630d7e9141a1a500a7fd05a978e678a11bdb0",
+            "bytes": 4316,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "niu-mowang/head-256.webp",
+            "sha256": "b0788843980f4304fa08f038be8d8d871652dda416647284ffa0e89a30d75fe6",
+            "bytes": 12070,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "tieshan-gongzhu",
+      "name": "铁扇公主",
+      "novel": "西游记",
+      "bio": "意志鲜明的女主人，以芭蕉扇守护家园。",
+      "background": "#E5BFA9",
+      "files": {
+        "full": {
+          "path": "tieshan-gongzhu/full.webp",
+          "sha256": "aa9c329a3609255f2e3c2c8b1cf3fcd221290ec9b9d868f5c8327f2dac4160f3",
+          "bytes": 32822,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "tieshan-gongzhu/head-64.webp",
+            "sha256": "f19addf2616891b37740e41c7678a56d54808b999f67e550fa95011d7ff9209d",
+            "bytes": 1342,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "tieshan-gongzhu/head-128.webp",
+            "sha256": "e7bbd1a822f4a07906b557bd10f611d3d73f48406debf27c882894c4647ffd6c",
+            "bytes": 3556,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "tieshan-gongzhu/head-256.webp",
+            "sha256": "c2ca123e59eb4c3c5ab111dc9a18a417dac99c02801d904938b2e6904249712f",
+            "bytes": 9444,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "hong-haier",
+      "name": "红孩儿",
+      "novel": "西游记",
+      "bio": "活泼机警的少年，火焰纹样是其标志。",
+      "background": "#ACDCDD",
+      "files": {
+        "full": {
+          "path": "hong-haier/full.webp",
+          "sha256": "7827553c8b3ce0229e316f7ef5f392c3bbe88f6ff20734888366fb6990399f23",
+          "bytes": 56086,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "hong-haier/head-64.webp",
+            "sha256": "32e4d69a9677af635faff17583e98f3f1dcce322ca36f6e82dd649ac1cc3a679",
+            "bytes": 1934,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "hong-haier/head-128.webp",
+            "sha256": "2d4be7b9e5078af434e886ea12b07edea2bf828260eafe5f59f04896ea303d62",
+            "bytes": 5346,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "hong-haier/head-256.webp",
+            "sha256": "eec06ddc9a42abbe3858528fea4197363d1c2ea32fd2084b24d585f6a1daf322",
+            "bytes": 14844,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "baigujing",
+      "name": "白骨精",
+      "novel": "西游记",
+      "bio": "善于伪装的精怪，以冷静优雅的气质示人。",
+      "background": "#D4C3E6",
+      "files": {
+        "full": {
+          "path": "baigujing/full.webp",
+          "sha256": "bd2a2223e02cc169c9723fc47ff59aafdddc728ff07a6204b76669eae8af6894",
+          "bytes": 22316,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "baigujing/head-64.webp",
+            "sha256": "b2255254a6298aa079d25c8fcfcf851a6e09df047cc8da169fed10cec32a8ac1",
+            "bytes": 1100,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "baigujing/head-128.webp",
+            "sha256": "8a31500bf60211768dc1efc4cd58b8b728d9e1ab0b961e0a784b9a51625baae5",
+            "bytes": 3072,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "baigujing/head-256.webp",
+            "sha256": "f0d676115d5fbdafcfd734231263dbcce5e1c185162998d513407ae1078cad5a",
+            "bytes": 8886,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "change",
+      "name": "嫦娥",
+      "novel": "西游记",
+      "bio": "清冷优雅的月宫仙子，与玉兔相伴。",
+      "background": "#B6C4E4",
+      "files": {
+        "full": {
+          "path": "change/full.webp",
+          "sha256": "f137be0e748c060192df98c408a8f63592585b5480bcc57427054b8336aba342",
+          "bytes": 31466,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "change/head-64.webp",
+            "sha256": "cb0c4190024b5e59b41530477d62d99e86e3cc1132518f9c75614ff133d79459",
+            "bytes": 1216,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "change/head-128.webp",
+            "sha256": "ffba6a6ba7ba27bcbfaa09d810637c0326fdd2b6ff670668b428ad553c4ad8f5",
+            "bytes": 3136,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "change/head-256.webp",
+            "sha256": "37517e8d2f1cfd3503ae1c90db74002da62d038e73f5cd79ca3fd21a18362017",
+            "bytes": 8760,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "liu-bei",
+      "name": "刘备",
+      "novel": "三国演义",
+      "bio": "以仁厚与坚持凝聚伙伴的领导者。",
+      "background": "#BFD8BB",
+      "files": {
+        "full": {
+          "path": "liu-bei/full.webp",
+          "sha256": "90b80c0f1908f823f1c9b3450234d5294e521d3b5404eb2d4de46abb4c2827e3",
+          "bytes": 30074,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "liu-bei/head-64.webp",
+            "sha256": "3ed2f607437234602d124fcbf2cc73c7b5c16d0dac9a5d01dc4f9eb6fcf9962c",
+            "bytes": 1170,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "liu-bei/head-128.webp",
+            "sha256": "75257dab8d3a1fd1d133b6469020cccf32bbb75eaab23082404b183dbccc3169",
+            "bytes": 3072,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "liu-bei/head-256.webp",
+            "sha256": "69e746795a68c9f15300278392a334964b66aabe12dc35f72c1ecb68955a7c90",
+            "bytes": 8746,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "guan-yu",
+      "name": "关羽",
+      "novel": "三国演义",
+      "bio": "忠义沉稳的武将，以长髯和青袍著称。",
+      "background": "#E3C78F",
+      "files": {
+        "full": {
+          "path": "guan-yu/full.webp",
+          "sha256": "8229a41758dfe2168a9eeba1460bc3726c5a4f4c9b8fb8708342eeabc135f586",
+          "bytes": 32380,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "guan-yu/head-64.webp",
+            "sha256": "3f209356ea1ec5b3c0351dbad8cd5546f5cd61e4fa9edf19a536ae12536861a3",
+            "bytes": 1244,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "guan-yu/head-128.webp",
+            "sha256": "ae15450dde3a79b120f7c59c4e37893406c3e2b05debba34cd0acce906cefad4",
+            "bytes": 3276,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "guan-yu/head-256.webp",
+            "sha256": "bd654c38a7d6cd13c37d13f9ff6e28afdeb7faf9b3b76a5941b3b071d3879356",
+            "bytes": 8876,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "zhang-fei",
+      "name": "张飞",
+      "novel": "三国演义",
+      "bio": "直率豪爽的猛将，性格热烈。",
+      "background": "#A9CDD1",
+      "files": {
+        "full": {
+          "path": "zhang-fei/full.webp",
+          "sha256": "2fe14e74946c74e112516a89fbc713896f7f265d81c184d637e01332c2a7d750",
+          "bytes": 43250,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "zhang-fei/head-64.webp",
+            "sha256": "a0508829bc33b5b83d5924ea9733c849179ed80f884c0a4fc75fe1a8e9e8cd93",
+            "bytes": 1514,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "zhang-fei/head-128.webp",
+            "sha256": "2e265b8c46b1d0639de82bb8ceb01b6bdec83952a48c04c6cd26422bc197526b",
+            "bytes": 4402,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "zhang-fei/head-256.webp",
+            "sha256": "7132f4e55626000e4974b6e27874f1d5b43e24d18eb0e369f361e7ccb1e4b2e7",
+            "bytes": 12572,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "zhuge-liang",
+      "name": "诸葛亮",
+      "novel": "三国演义",
+      "bio": "沉着睿智的军师，以羽扇和纶巾著称。",
+      "background": "#AFCFEC",
+      "files": {
+        "full": {
+          "path": "zhuge-liang/full.webp",
+          "sha256": "6756f21faab1819978831d12c1fed250c33970af0d537edd51108637f79df6f7",
+          "bytes": 26730,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "zhuge-liang/head-64.webp",
+            "sha256": "f0316559bb607ee7d5414c43be43503e9f74211d5c5d16a1efe46c05430a01ca",
+            "bytes": 1324,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "zhuge-liang/head-128.webp",
+            "sha256": "406de4c455e443ada6a53fc381375f6cd639e4310f3b9a175257c5d0f7d0c60f",
+            "bytes": 3234,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "zhuge-liang/head-256.webp",
+            "sha256": "a881801f1534af0b7b48e963ffe3ee0aa807ef8c8ec842eaa542e765ea8872c6",
+            "bytes": 8292,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "zhao-yun",
+      "name": "赵云",
+      "novel": "三国演义",
+      "bio": "沉稳勇敢的青年武将，以白袍银甲为标志。",
+      "background": "#D9C5EC",
+      "files": {
+        "full": {
+          "path": "zhao-yun/full.webp",
+          "sha256": "cd6ab37eb7e8794425d483a3638ef9d1ce4b5c14d8955bf096b2ac2ffa44ba7a",
+          "bytes": 35064,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "zhao-yun/head-64.webp",
+            "sha256": "d3963e3bc1669ecc3287daf8a8293336f5b8eae2f6a3413e3652cfd54a92e991",
+            "bytes": 1456,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "zhao-yun/head-128.webp",
+            "sha256": "08b9d5f2e0df843488a38299fe5efd637e416a8d0205d27f93a36817c7665c23",
+            "bytes": 4076,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "zhao-yun/head-256.webp",
+            "sha256": "38dcbc589efa0251aae4b545ff6b3f4714e783a9409e99b18612df02c6a73065",
+            "bytes": 11524,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "cao-cao",
+      "name": "曹操",
+      "novel": "三国演义",
+      "bio": "果断多谋、兼具诗人气质的领袖。",
+      "background": "#C8D3A5",
+      "files": {
+        "full": {
+          "path": "cao-cao/full.webp",
+          "sha256": "8f1a776e07393fb6db390de6be5b284695e30e9be8e7bfec1f57f68ecf7276f6",
+          "bytes": 25786,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "cao-cao/head-64.webp",
+            "sha256": "f5176b206cd109108b85d08bda4c3f2433034b2cd94ba26d9e7bb12c4f88afe2",
+            "bytes": 1332,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "cao-cao/head-128.webp",
+            "sha256": "6e2522f68e2bb04ea219e7067d7548312710272851b2de832396e401ada433c8",
+            "bytes": 3324,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "cao-cao/head-256.webp",
+            "sha256": "8ac1a68c8bfd3b66de25d97b1973e72819559ce7978698ec9a8cdea590e6c03a",
+            "bytes": 8820,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "sun-quan",
+      "name": "孙权",
+      "novel": "三国演义",
+      "bio": "稳健务实的江东之主。",
+      "background": "#C5D8E2",
+      "files": {
+        "full": {
+          "path": "sun-quan/full.webp",
+          "sha256": "dbeeee6ef281f0e3eeeb3a31dd4c3fdb4e34c32d3d7269f4350cbdfd68753a77",
+          "bytes": 40068,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "sun-quan/head-64.webp",
+            "sha256": "53361ccb997b359652da3a8a9b5cc19adb637f225373ac95708bd0538b13d634",
+            "bytes": 1428,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "sun-quan/head-128.webp",
+            "sha256": "4a87606821a94be4a60a5eb6540ecd5f45412de294203520bec9f71e49717601",
+            "bytes": 3966,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "sun-quan/head-256.webp",
+            "sha256": "29379432bc6ec69a319ff5319760af2f8bbff60feb852b3358a1ff70245139a7",
+            "bytes": 11518,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "zhou-yu",
+      "name": "周瑜",
+      "novel": "三国演义",
+      "bio": "气度洒脱的儒将，兼擅音乐与谋略。",
+      "background": "#C4DEC9",
+      "files": {
+        "full": {
+          "path": "zhou-yu/full.webp",
+          "sha256": "35967968703f872fe1c2c0e5c1e233b8c591c96d014c42fafa75f10bdf6ab88f",
+          "bytes": 36140,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "zhou-yu/head-64.webp",
+            "sha256": "207debf3394d061b49d53febf0572c3a82dfe1ef09619ec3f7ed19482f412729",
+            "bytes": 1628,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "zhou-yu/head-128.webp",
+            "sha256": "deea04875619b9b28e767ce2622632945c267ca7622fa6a48e0ac034a7e84bd7",
+            "bytes": 4500,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "zhou-yu/head-256.webp",
+            "sha256": "badffef1c3816c6ac6e5cb4147a0038333e5d78bb6c8eaa22ff4d5369f79b736",
+            "bytes": 12548,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "lv-bu",
+      "name": "吕布",
+      "novel": "三国演义",
+      "bio": "身手卓绝的武将，以双羽冠和方天画戟闻名。",
+      "background": "#9FC9CF",
+      "files": {
+        "full": {
+          "path": "lv-bu/full.webp",
+          "sha256": "592a31834d79ea95451f421e99a90e09b48a83c5d3a82eeaa47174661f5a96f6",
+          "bytes": 43310,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "lv-bu/head-64.webp",
+            "sha256": "a86467158e0290bef94e80548d114475d95299d08dda661d832a23fa4c5ff856",
+            "bytes": 1510,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "lv-bu/head-128.webp",
+            "sha256": "caa489146c135d51ba645ff1de8a07237b76f28ad44ed384cf1ac8d737eb57e6",
+            "bytes": 4066,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "lv-bu/head-256.webp",
+            "sha256": "ee1c7a6289cb7e35329ae061026c8125bb9e2afdbb806e431a67d9c53bc3b065",
+            "bytes": 11204,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "diao-chan",
+      "name": "貂蝉",
+      "novel": "三国演义",
+      "bio": "聪慧坚韧的女子，善于审时度势。",
+      "background": "#E7C9AE",
+      "files": {
+        "full": {
+          "path": "diao-chan/full.webp",
+          "sha256": "5a76b88af9c9e36ac12b133bc3ce9165894088227d27928e339aa960d84fad0f",
+          "bytes": 28834,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "diao-chan/head-64.webp",
+            "sha256": "77ff86a164bd5502d7989148d480f6fcff8054e7de5144f66500f24f997c1e56",
+            "bytes": 1354,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "diao-chan/head-128.webp",
+            "sha256": "e291913d51acebdff441470266e8f98a6722b0019dd69c186148348e859b4c71",
+            "bytes": 3448,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "diao-chan/head-256.webp",
+            "sha256": "71b343d29d66407c6fd7b55ac9e7889a9a79765689103be897f8b6de20a1ece1",
+            "bytes": 9546,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "sima-yi",
+      "name": "司马懿",
+      "novel": "三国演义",
+      "bio": "冷静耐心的谋士，擅长长远布局。",
+      "background": "#C4CAD5",
+      "files": {
+        "full": {
+          "path": "sima-yi/full.webp",
+          "sha256": "6f3d914069c4f26ce997397895a91a37cc779a658496f8af3f8e0f9446bf1bf2",
+          "bytes": 22314,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "sima-yi/head-64.webp",
+            "sha256": "bae6c81a6b03661a9fdff401c395e693696300f6ff728c69e2aa36bd9aa32c57",
+            "bytes": 1046,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "sima-yi/head-128.webp",
+            "sha256": "b37839c9df914f7627c305e94bac50c29efc612a3365006b55f8b7279adda695",
+            "bytes": 2778,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "sima-yi/head-256.webp",
+            "sha256": "23c998027bde1f797528966e1d521171befcf63b337cc89b1765a3d5b7edfb24",
+            "bytes": 7376,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "huang-zhong",
+      "name": "黄忠",
+      "novel": "三国演义",
+      "bio": "精神矍铄的老将，以精湛箭术著称。",
+      "background": "#B9D4B5",
+      "files": {
+        "full": {
+          "path": "huang-zhong/full.webp",
+          "sha256": "cfca17b7693edec4300a0a75f3dd3170dbbea2ae8be6e18d2fd4f7d37e9a256e",
+          "bytes": 62944,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "huang-zhong/head-64.webp",
+            "sha256": "83e94f88a516739d0541ca613f79b11cfae40f6774de43737d482ff634f2216c",
+            "bytes": 1600,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "huang-zhong/head-128.webp",
+            "sha256": "40d2f1f210ff454eaa89bcdc89bd17fc4c538d26a7a7117ca485650528d1a531",
+            "bytes": 4552,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "huang-zhong/head-256.webp",
+            "sha256": "d9c1fffcfab612d0027c657d72340c4cf13bc60ec17996c2256058ccdf51df96",
+            "bytes": 13242,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "ma-chao",
+      "name": "马超",
+      "novel": "三国演义",
+      "bio": "英勇挺拔的青年骑将。",
+      "background": "#D9C7A7",
+      "files": {
+        "full": {
+          "path": "ma-chao/full.webp",
+          "sha256": "b48ebedf216ce7d5f2df62012142d3669a3abafb834c3ec0b7d05c5f948c52bc",
+          "bytes": 34134,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "ma-chao/head-64.webp",
+            "sha256": "e50e4c2fbdf4406376ea24dff53ec9687af8c80853073f2c7e481f28e1210909",
+            "bytes": 1410,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "ma-chao/head-128.webp",
+            "sha256": "840464c912a9fe6e8de16fb90a4fe438b360219dd4a213761d78ecb603b8d045",
+            "bytes": 3626,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "ma-chao/head-256.webp",
+            "sha256": "6fcd8555ccc876655262140bea18a8405d0031aef85c9764e6ce8e46be620849",
+            "bytes": 10054,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "sun-shangxiang",
+      "name": "孙尚香",
+      "novel": "三国演义",
+      "bio": "独立果敢、喜爱武艺的江东女子。",
+      "background": "#BCDACC",
+      "files": {
+        "full": {
+          "path": "sun-shangxiang/full.webp",
+          "sha256": "1410840c2e429245a487abdf64e31a01825b64e028d3323c8c7252e46a4b7cb1",
+          "bytes": 37256,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "sun-shangxiang/head-64.webp",
+            "sha256": "451913e87368d12b1a96569166891a368fe57cbb7776799d864a9992b024fa42",
+            "bytes": 1710,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "sun-shangxiang/head-128.webp",
+            "sha256": "3908ea3f78e6d660e0a50e18d59663b3653ae54e1cf608ab817199ba75b67d3e",
+            "bytes": 4518,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "sun-shangxiang/head-256.webp",
+            "sha256": "a7f3bd6b3a79fe93164a189f7fb2be89c09683644d06e6993f241adcbdefde87",
+            "bytes": 11778,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "da-qiao",
+      "name": "大乔",
+      "novel": "三国演义",
+      "bio": "温婉端庄的江东女子。",
+      "background": "#E9CBC4",
+      "files": {
+        "full": {
+          "path": "da-qiao/full.webp",
+          "sha256": "09774e80e30067a22674fbd2bca312c425f5f8c995011301ecfc8442a4754c5f",
+          "bytes": 20386,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "da-qiao/head-64.webp",
+            "sha256": "daf95aa55f5c55a7b84b5c48af1165fab412e5434329c4cb816e39bb971f8806",
+            "bytes": 1090,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "da-qiao/head-128.webp",
+            "sha256": "44427ddaadba049874914ca9e525da75ab4e7693f67c56b93c452d94f34bae7d",
+            "bytes": 2976,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "da-qiao/head-256.webp",
+            "sha256": "3135331de8a4eadc79a161644e9091a3a4fdc09282416cb201ffca4957aa3fe3",
+            "bytes": 8462,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "xiao-qiao",
+      "name": "小乔",
+      "novel": "三国演义",
+      "bio": "灵动明朗的江东女子。",
+      "background": "#C2DBE8",
+      "files": {
+        "full": {
+          "path": "xiao-qiao/full.webp",
+          "sha256": "51dd38604d31174d5e3b3d63bae06b0d63dbf116387f41d449144028a95b88ec",
+          "bytes": 28450,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "xiao-qiao/head-64.webp",
+            "sha256": "e8f52c17c0f2a563f9c7430ee9f0aa8563f086c5123262df03075c3a3185ae22",
+            "bytes": 1264,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "xiao-qiao/head-128.webp",
+            "sha256": "9cad5c39cd2d2fd5f62e1e2d682b33c4e691806f4f7027ca8540d5a1791a0553",
+            "bytes": 3526,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "xiao-qiao/head-256.webp",
+            "sha256": "2dc971a6116d008ad0ee1159b4e8a70395bf5733e82ce98d5cfef0aa5b3ad824",
+            "bytes": 10664,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "dian-wei",
+      "name": "典韦",
+      "novel": "三国演义",
+      "bio": "忠诚厚实的勇士，以双戟著称。",
+      "background": "#D7D3AD",
+      "files": {
+        "full": {
+          "path": "dian-wei/full.webp",
+          "sha256": "f2daf299ba7ba697d92b0063f0772519eedb6c0b1c104f589dd91a6d4e60a93f",
+          "bytes": 34840,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "dian-wei/head-64.webp",
+            "sha256": "5c566dcd0fdd7d7f2bc46316120095083af74fe9ce6bbcaca7e0f0a525aeb6fc",
+            "bytes": 1370,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "dian-wei/head-128.webp",
+            "sha256": "0a25cc37ee1bfb4162aa109e7851626d456363518794a2987eb9ed99e68eed80",
+            "bytes": 3558,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "dian-wei/head-256.webp",
+            "sha256": "5bee1dcae068eecc0d77cb3e947fb1f7583fb96a31f590239e3343288ee298ed",
+            "bytes": 9504,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "xu-chu",
+      "name": "许褚",
+      "novel": "三国演义",
+      "bio": "憨直强壮的护卫，行事踏实。",
+      "background": "#C9D7BB",
+      "files": {
+        "full": {
+          "path": "xu-chu/full.webp",
+          "sha256": "987ffdd085c9bcf61bb0c22beec9d4965cd9d629ad97b07eac63b2784150e66a",
+          "bytes": 34974,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "xu-chu/head-64.webp",
+            "sha256": "b522d490ab7db5f5481e61927c78ac850bfaaf9a5e5676b9c88fea696ec9ec2a",
+            "bytes": 1214,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "xu-chu/head-128.webp",
+            "sha256": "6d26cb63c58733ea07b7ea0ac926b84549b6743b8f6ef0f20f9a0f87cb11ded3",
+            "bytes": 2990,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "xu-chu/head-256.webp",
+            "sha256": "592c06b9b841db945f9e36452305f34d63ba8992e47f9ad12c412dddd34ff620",
+            "bytes": 7706,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "lu-su",
+      "name": "鲁肃",
+      "novel": "三国演义",
+      "bio": "宽厚审慎的谋臣，善于协调合作。",
+      "background": "#C0D7E5",
+      "files": {
+        "full": {
+          "path": "lu-su/full.webp",
+          "sha256": "9498a7e6e617a487473d04eb67830c5de3ffe50a273bcd103b1e33baa376ca18",
+          "bytes": 31988,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "lu-su/head-64.webp",
+            "sha256": "232eae2005294c4d0984f4b022f0a626eda24f6f158374dcf85ab2a19ab189dc",
+            "bytes": 1136,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "lu-su/head-128.webp",
+            "sha256": "ed2ada8e82c7eec9ea4aac0f0038cacd254d2d0a7f03adec656548293f1d2d4d",
+            "bytes": 2916,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "lu-su/head-256.webp",
+            "sha256": "ae4a5efe144388bbed684c5cf3701ab4f3d3d23eb71cbdec42f6428bb19ab2b7",
+            "bytes": 8118,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "pang-tong",
+      "name": "庞统",
+      "novel": "三国演义",
+      "bio": "才思敏捷、气质不拘的谋士。",
+      "background": "#DDC4AD",
+      "files": {
+        "full": {
+          "path": "pang-tong/full.webp",
+          "sha256": "c92cfc9ba3293dd4b956829e40dd9370758ad594d42d5fa496f593ca259dd187",
+          "bytes": 35962,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "pang-tong/head-64.webp",
+            "sha256": "f80299fb00cf23bb9ea5945e9bc7aff940a5ff29cd1f521ff66e475dce5462d8",
+            "bytes": 1496,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "pang-tong/head-128.webp",
+            "sha256": "bd9bf4d1b79424ffc0d9ed454a391a2e6d8ea7a01fec578446eb87b494b3267c",
+            "bytes": 4130,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "pang-tong/head-256.webp",
+            "sha256": "11e74d419069334cccdb98c0d015fc84c8a163a31f2eb9034aa0c50ad4e12949",
+            "bytes": 11320,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "song-jiang",
+      "name": "宋江",
+      "novel": "水浒传",
+      "bio": "重情义、善于协调众人的梁山首领。",
+      "background": "#C1D4C4",
+      "files": {
+        "full": {
+          "path": "song-jiang/full.webp",
+          "sha256": "b7e12d9b5631e442c6d74e90eb8cfec17a5fa46ced66bce88b98e25e4d5eab98",
+          "bytes": 23688,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "song-jiang/head-64.webp",
+            "sha256": "a3f53f040367c80b8a15b6c8e5447d2a132bc00b89bd655333b0524a3cc57466",
+            "bytes": 1056,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "song-jiang/head-128.webp",
+            "sha256": "469f124112617f5b33f0b5277e2008c31dd80710eaa6a23c05bab7d3e26614f7",
+            "bytes": 2628,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "song-jiang/head-256.webp",
+            "sha256": "49f2b228b7966a3b1e195c7fd8f7c65b0425622e38aa7088ac94a9dcea2d47f0",
+            "bytes": 7806,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "lu-junyi",
+      "name": "卢俊义",
+      "novel": "水浒传",
+      "bio": "沉稳大方、武艺出众的豪杰。",
+      "background": "#D8C7A9",
+      "files": {
+        "full": {
+          "path": "lu-junyi/full.webp",
+          "sha256": "7ca0d916be7b4eff7f68575ef77891da675db24fceb46a1e60cbe03b98fcc53b",
+          "bytes": 43312,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "lu-junyi/head-64.webp",
+            "sha256": "20dcb206e0c2684f522efbd23ab1b72324f7c72b3a78e528f50e68f196d319a0",
+            "bytes": 1130,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "lu-junyi/head-128.webp",
+            "sha256": "e83cdfa87b7566979cbb18ecf2f63bb59317e3b410254f33e8aa4e915a3e96cf",
+            "bytes": 3050,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "lu-junyi/head-256.webp",
+            "sha256": "38b8a13562195ce409d0402f772d6923c20a63987083ade1d7edb0832f393459",
+            "bytes": 8546,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "wu-yong",
+      "name": "吴用",
+      "novel": "水浒传",
+      "bio": "机敏周全的军师，长于谋划。",
+      "background": "#D4CCEA",
+      "files": {
+        "full": {
+          "path": "wu-yong/full.webp",
+          "sha256": "e63490cdc0ad531cc655035a67b543941febd61d1aa32a15857bdcf0c3eaeebe",
+          "bytes": 22792,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "wu-yong/head-64.webp",
+            "sha256": "6d510274628e2b36dc90c0b46a7b686c3c8724835214464a67b60b1d14e8573b",
+            "bytes": 1088,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "wu-yong/head-128.webp",
+            "sha256": "1172b2de3d092d8cdb889c49d29e93997ba8a1024daa8b463d8ad233e30ff553",
+            "bytes": 2902,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "wu-yong/head-256.webp",
+            "sha256": "f14ad5d5ada83bdf0a2e255794d492ee01ea30e968ba0696735acd767133614a",
+            "bytes": 8534,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "gongsun-sheng",
+      "name": "公孙胜",
+      "novel": "水浒传",
+      "bio": "超然洒脱的道人，行止从容。",
+      "background": "#B9D6C9",
+      "files": {
+        "full": {
+          "path": "gongsun-sheng/full.webp",
+          "sha256": "416a737291f1c702a6e13527a21c48354bdc4454895851fe08e0d169fa220321",
+          "bytes": 38330,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "gongsun-sheng/head-64.webp",
+            "sha256": "470a2a5317e966ea28fead088c318b82bc2ff9caaf9befcd496a33fbf370088b",
+            "bytes": 1216,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "gongsun-sheng/head-128.webp",
+            "sha256": "dccfe462bc29990b68968c2f521c459e36bbf339563d0cbbe5afac76258aa42b",
+            "bytes": 3454,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "gongsun-sheng/head-256.webp",
+            "sha256": "384f99e0697686334705c9b383c8e2e6c2ef69384aff1ebd39a649369d0559ba",
+            "bytes": 9608,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "lin-chong",
+      "name": "林冲",
+      "novel": "水浒传",
+      "bio": "沉毅克制的禁军教头，枪法出众。",
+      "background": "#E8C59B",
+      "files": {
+        "full": {
+          "path": "lin-chong/full.webp",
+          "sha256": "eb03f8d37f3efe2626457f8c4120bcb790ee68f00a002ea5d94cf7bb691e5355",
+          "bytes": 32616,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "lin-chong/head-64.webp",
+            "sha256": "e29d5c17d4dba4eb273a1415e8f555a04ce1701e45ce98812d6104212af1982b",
+            "bytes": 1424,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "lin-chong/head-128.webp",
+            "sha256": "6c5fecdb3043acc1ed33a1583c56baf92838cc0af57b685c9320024755b9c2f3",
+            "bytes": 3912,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "lin-chong/head-256.webp",
+            "sha256": "00b50511b68cff66e75e683f223d5be714448ecab6da71ed1986f7a8fe30a0a7",
+            "bytes": 10956,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "wu-song",
+      "name": "武松",
+      "novel": "水浒传",
+      "bio": "正直刚毅的行者，以勇敢和原则著称。",
+      "background": "#C5DAB3",
+      "files": {
+        "full": {
+          "path": "wu-song/full.webp",
+          "sha256": "66cb8ae0fd0ca6a8e500fb5070086adffcfae31b650205356d1484c2faad3356",
+          "bytes": 48358,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "wu-song/head-64.webp",
+            "sha256": "f46f78748b6d3da482fa83c358ab47046968e27a052ee68e8e4121cb901fa0c9",
+            "bytes": 1460,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "wu-song/head-128.webp",
+            "sha256": "eeba369547e463edfac356050bbda4bf9dddfef018d60e8e9f9f276bbe11dcf0",
+            "bytes": 3840,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "wu-song/head-256.webp",
+            "sha256": "82992a325e71d751f1a56f6da6bac6610ffd2b795d31c4abbd096d2ca6647672",
+            "bytes": 10658,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "lu-zhishen",
+      "name": "鲁智深",
+      "novel": "水浒传",
+      "bio": "豪爽仁厚的僧人，爱护弱者。",
+      "background": "#BBD8D0",
+      "files": {
+        "full": {
+          "path": "lu-zhishen/full.webp",
+          "sha256": "cd32cd583b4e93f552a04b4a4717ca45760457168d9c23fe6e26be62a96e7da9",
+          "bytes": 41232,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "lu-zhishen/head-64.webp",
+            "sha256": "fbf3f0b44d15a65c123fc0c7b538883782b09d48efa814b50f04bdaa77628d2c",
+            "bytes": 1286,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "lu-zhishen/head-128.webp",
+            "sha256": "1b58e7723d1e997f93fbb6030d1ddd6d0c955122f6a9e324f6a6dc62a825db66",
+            "bytes": 3350,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "lu-zhishen/head-256.webp",
+            "sha256": "91befa402e5dd06e70a319715ac00a91439829338ad1cff8009c57fb5d5d7e72",
+            "bytes": 9062,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "li-kui",
+      "name": "李逵",
+      "novel": "水浒传",
+      "bio": "直来直去、重情重义的壮汉。",
+      "background": "#E6CA90",
+      "files": {
+        "full": {
+          "path": "li-kui/full.webp",
+          "sha256": "dd06dbc67280a170c0da54aab1727011d589f34a2320baea3b9b58825180f464",
+          "bytes": 40372,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "li-kui/head-64.webp",
+            "sha256": "ddaf4b9f9b04716b4be7a6f9011b0d7e76bb545ab26212ef324cb51c37d13256",
+            "bytes": 1258,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "li-kui/head-128.webp",
+            "sha256": "c6ce5c75f9e511757148c2e0eeda48f98888300d6252fecba5eb785d6e177b60",
+            "bytes": 3434,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "li-kui/head-256.webp",
+            "sha256": "9503d35e538981682d58c0a1fc8418ccccf3254d095137ea87e0c490deba38eb",
+            "bytes": 9508,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "yan-qing",
+      "name": "燕青",
+      "novel": "水浒传",
+      "bio": "灵巧聪慧、多才多艺的青年。",
+      "background": "#E2C7DA",
+      "files": {
+        "full": {
+          "path": "yan-qing/full.webp",
+          "sha256": "2a5821998b8d9fd76e2e41c985edb572095c631a5a6ea8da7966fb3abedeea8e",
+          "bytes": 53346,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "yan-qing/head-64.webp",
+            "sha256": "cfe1ded0ca437b21641ab01f67faa90a70809931ea0757d46f0a1cd6f74e1833",
+            "bytes": 1350,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "yan-qing/head-128.webp",
+            "sha256": "f4151ebf8a2e1d51c995508a07ca0d544d018857947cbc9160e7c3f91d964765",
+            "bytes": 3852,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "yan-qing/head-256.webp",
+            "sha256": "688236a1bf83dbb46a2d9e86e90128461c2618f5f0682c1ffdf1c5fdf887f7a6",
+            "bytes": 11194,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "hua-rong",
+      "name": "花荣",
+      "novel": "水浒传",
+      "bio": "专注敏捷的神箭手。",
+      "background": "#DFCEAD",
+      "files": {
+        "full": {
+          "path": "hua-rong/full.webp",
+          "sha256": "e560102cd37e7a034c1d15451191026b90e81403d7a52fb03a9577c990834075",
+          "bytes": 59014,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "hua-rong/head-64.webp",
+            "sha256": "570af9586af5c08aa7886a47be3309e0842457c0223cf8c57bc580a0aca80b6b",
+            "bytes": 1408,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "hua-rong/head-128.webp",
+            "sha256": "fa753102d4584ae822b3b436c98a8cd0fe08b9dec58de560b1a1620c9e80c076",
+            "bytes": 3992,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "hua-rong/head-256.webp",
+            "sha256": "2da3ef92820100ed1060ddd5e2897b01b220df3d112caba7f429c2b782621b95",
+            "bytes": 11340,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "yang-zhi",
+      "name": "杨志",
+      "novel": "水浒传",
+      "bio": "历经坎坷仍认真尽责的武人。",
+      "background": "#CFD4B2",
+      "files": {
+        "full": {
+          "path": "yang-zhi/full.webp",
+          "sha256": "857b37587d8827f5888d930d3c986a8e96a4c11428810d3ff966faf06ba9b627",
+          "bytes": 24110,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "yang-zhi/head-64.webp",
+            "sha256": "ef6870a173cb8842f9b3d87facc7c00d566213aea8a57756597dbf0511ec5db2",
+            "bytes": 1026,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "yang-zhi/head-128.webp",
+            "sha256": "5cc2cfd5eac043037a006da6b1aad0d8b501eeec4a5ab7312ffba5c9dd4046e0",
+            "bytes": 2656,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "yang-zhi/head-256.webp",
+            "sha256": "e1ef3cf4449254f449d423642bb98a8e226e6133b2dc1e9654b91ecbc77c61b3",
+            "bytes": 6782,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "ruan-xiaoqi",
+      "name": "阮小七",
+      "novel": "水浒传",
+      "bio": "爽朗机灵的水上好汉。",
+      "background": "#B8DCE3",
+      "files": {
+        "full": {
+          "path": "ruan-xiaoqi/full.webp",
+          "sha256": "ba47ad461eac1993a009560b03bc238800c956085e6ac2b5fedce8b02445e79b",
+          "bytes": 61902,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "ruan-xiaoqi/head-64.webp",
+            "sha256": "9868d40e5153c3b14f7c23e6a2c736fa77c4ff74e64375be6445672d0a293bb6",
+            "bytes": 1640,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "ruan-xiaoqi/head-128.webp",
+            "sha256": "12fd76db922bb42df77309a1bff28f5aa358f930b24a45306c9b4686a4abe35b",
+            "bytes": 4570,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "ruan-xiaoqi/head-256.webp",
+            "sha256": "2d5a4c7197b61b7faed8a996b321bd7a1134be135a619361036b3eaab6b034dd",
+            "bytes": 12750,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "shi-qian",
+      "name": "时迁",
+      "novel": "水浒传",
+      "bio": "身手轻巧、善于侦察的行动者。",
+      "background": "#D4C9E3",
+      "files": {
+        "full": {
+          "path": "shi-qian/full.webp",
+          "sha256": "f9ee97ec81a84b5aef51d8c54ed857578e1ab15b6afa572ab95a4f29ec7c1fb5",
+          "bytes": 26618,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "shi-qian/head-64.webp",
+            "sha256": "55d2b9704434b60bfd2cccb878e4c92ffc85024be5405517605899cbb36ac9c7",
+            "bytes": 890,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "shi-qian/head-128.webp",
+            "sha256": "47e6f01a8e9e76d62b0f21edffd8338b65a0a9bd9bc0e26950fb42db734e782e",
+            "bytes": 2200,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "shi-qian/head-256.webp",
+            "sha256": "8e10ac2cac96804a6fb0ef0a80ac13e187cfb71ee44b3cb836901f1d7e97d975",
+            "bytes": 5858,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "hu-sanniang",
+      "name": "扈三娘",
+      "novel": "水浒传",
+      "bio": "英姿飒爽、行动果断的女将。",
+      "background": "#BED7B6",
+      "files": {
+        "full": {
+          "path": "hu-sanniang/full.webp",
+          "sha256": "0f402ca7bba0b5dcc5e8a3e76f20310b4aee9bc2e84f6a9a50fd41649b1da589",
+          "bytes": 36004,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "hu-sanniang/head-64.webp",
+            "sha256": "ad54dcdd7c8fe195b6930265adc371b2b4f7b00573f28ca26e8da00304b9e01c",
+            "bytes": 1500,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "hu-sanniang/head-128.webp",
+            "sha256": "81bd41908c20d50515258c7156ff2ae1c1c00eefc49be48768792dfcc9dcf68d",
+            "bytes": 3966,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "hu-sanniang/head-256.webp",
+            "sha256": "27a3d0c90cd71a1a99bdc3b1e9e882a9b5050b175d51d127c5f7b421fbec4f52",
+            "bytes": 10736,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "sun-erniang",
+      "name": "孙二娘",
+      "novel": "水浒传",
+      "bio": "爽利精干的店主，性格豪迈。",
+      "background": "#D7C4E4",
+      "files": {
+        "full": {
+          "path": "sun-erniang/full.webp",
+          "sha256": "e8ac555d0140e9038c2b74c76e9c10035923c4371bbda73e43b69a28ca57b41b",
+          "bytes": 37334,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "sun-erniang/head-64.webp",
+            "sha256": "1b4380730a5d7c88f17047244b49f4bfbeab9692f1c0ad3ef43056f6112b6f20",
+            "bytes": 1560,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "sun-erniang/head-128.webp",
+            "sha256": "edadf027eb0af3e5e82e3cda11f28744fd3f5c3dbf161edca22d07a1a1326775",
+            "bytes": 4298,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "sun-erniang/head-256.webp",
+            "sha256": "31de47897120d0a51bd9f0ee8d179d6ad5a8f7c5ccab558a26b9d2ea20612590",
+            "bytes": 11710,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "jia-baoyu",
+      "name": "贾宝玉",
+      "novel": "红楼梦",
+      "bio": "敏感真诚、珍视情谊的贵族少年。",
+      "background": "#BED9D3",
+      "files": {
+        "full": {
+          "path": "jia-baoyu/full.webp",
+          "sha256": "d28b2a3b6c08f2fac4b038566dd6404e9f8b711e96362f5896fdd1093b8bac7d",
+          "bytes": 26022,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "jia-baoyu/head-64.webp",
+            "sha256": "1974489c3911190a880a033cc3d60a48bf605a2fd359d6df0c83319d3641b883",
+            "bytes": 1270,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "jia-baoyu/head-128.webp",
+            "sha256": "1132fee62554aada1de541fdaad26374d3dc273b1e647d87a4eeaf6f74d6023a",
+            "bytes": 3696,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "jia-baoyu/head-256.webp",
+            "sha256": "51e19414b455490f50abd78167545abaa2877eede2997f3243aebc55180afbec",
+            "bytes": 11480,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "lin-daiyu",
+      "name": "林黛玉",
+      "novel": "红楼梦",
+      "bio": "才情敏锐、真挚有骨气的少女诗人。",
+      "background": "#EDB9CC",
+      "files": {
+        "full": {
+          "path": "lin-daiyu/full.webp",
+          "sha256": "0feb20ed95e6d5622d39e95db63b9210e8ba164863f14a47a584105ebbe6dc2e",
+          "bytes": 29214,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "lin-daiyu/head-64.webp",
+            "sha256": "d2a64486e24743f92451f98adc66943440fb507e3d8193ffb4b4f7fed7c5d688",
+            "bytes": 1256,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "lin-daiyu/head-128.webp",
+            "sha256": "30a1931ddfbfd0ec1d399c59a849e3384dbba78ab38f8f9cb5d684b26ff179e6",
+            "bytes": 3618,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "lin-daiyu/head-256.webp",
+            "sha256": "5c0e23d6fa5171138b10343216a50fb7fc88e3df3c77b3e892680b51c5e1c813",
+            "bytes": 10724,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "xue-baochai",
+      "name": "薛宝钗",
+      "novel": "红楼梦",
+      "bio": "沉静周全、举止端庄的少女。",
+      "background": "#C6D5E3",
+      "files": {
+        "full": {
+          "path": "xue-baochai/full.webp",
+          "sha256": "350024a707867f8a5e1cc4292f8c8a30171a6a074d7d788a90884418743dd6d0",
+          "bytes": 23990,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "xue-baochai/head-64.webp",
+            "sha256": "8f2cdbd7e7601a373c7593446e14bd325f8a8bd4b3b889a460d1408f36e854dd",
+            "bytes": 1106,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "xue-baochai/head-128.webp",
+            "sha256": "549d11def4a0c19d4651f3df31bcb6e460cefcdf9796095f9eed90e740e3cfdb",
+            "bytes": 2776,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "xue-baochai/head-256.webp",
+            "sha256": "db22878b10a9092a164bb7ba54c63e8b00310b1eec07c576bae78006dffe3e15",
+            "bytes": 7696,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "wang-xifeng",
+      "name": "王熙凤",
+      "novel": "红楼梦",
+      "bio": "精明能干、善于管理事务的女子。",
+      "background": "#D7C59D",
+      "files": {
+        "full": {
+          "path": "wang-xifeng/full.webp",
+          "sha256": "c76321fa27c6ad9f7771ab2461a4da6377a8f633c5fa07e77eaceb3b5a409b72",
+          "bytes": 30482,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "wang-xifeng/head-64.webp",
+            "sha256": "f7ee497f2f64091286a956014184652865034f47fcdd1d5a5c46af40eeee334e",
+            "bytes": 1370,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "wang-xifeng/head-128.webp",
+            "sha256": "0c31f5303e9f01a4298eae118730f4b27aea8afecf116f2abf06aec2775d8f4b",
+            "bytes": 3562,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "wang-xifeng/head-256.webp",
+            "sha256": "c4a89d038464c8d93b288910777d8f359e39e533cabb45e38a00bd45774405b9",
+            "bytes": 9616,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "shi-xiangyun",
+      "name": "史湘云",
+      "novel": "红楼梦",
+      "bio": "豁达爽朗、率性开朗的少女。",
+      "background": "#B4D6D9",
+      "files": {
+        "full": {
+          "path": "shi-xiangyun/full.webp",
+          "sha256": "1c23e37ae7e8660c0b1448e72dc13423ff00f07c3b39450d42f3d9b4ba9d82ab",
+          "bytes": 33736,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "shi-xiangyun/head-64.webp",
+            "sha256": "8655390e3c76c9f8046d6716d31ac6c560e77cadb90c68baa8d21d5f3b71d1ac",
+            "bytes": 1474,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "shi-xiangyun/head-128.webp",
+            "sha256": "5b7f08f0758972147b770a12ff4ba86da70abc67f5771cb0c4b137deeca63a1d",
+            "bytes": 4222,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "shi-xiangyun/head-256.webp",
+            "sha256": "1988878a008d547faa12c07c2391d6c976db354b00621c9ceabfa1db017a856f",
+            "bytes": 12470,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "jia-tanchun",
+      "name": "贾探春",
+      "novel": "红楼梦",
+      "bio": "思路清晰、勇于担当的少女。",
+      "background": "#D5DAB0",
+      "files": {
+        "full": {
+          "path": "jia-tanchun/full.webp",
+          "sha256": "7b5c9b63162fbe2c9f9f910f37a38df6e2b3722fa3d43758648bedc6836a6965",
+          "bytes": 21810,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "jia-tanchun/head-64.webp",
+            "sha256": "9f2d470e9864ba8c69c0905d107b377730196e42ffa1f02466485b4c1d3cf329",
+            "bytes": 1140,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "jia-tanchun/head-128.webp",
+            "sha256": "fca8fad1577fb18ca321794e10aaa83d104b4e39fe6ab148b49fc54521775172",
+            "bytes": 2866,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "jia-tanchun/head-256.webp",
+            "sha256": "5ef34502dbc9c52e76ef2df6138a318f5fe481ff89fa024184689fd647397609",
+            "bytes": 7610,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "miaoyu",
+      "name": "妙玉",
+      "novel": "红楼梦",
+      "bio": "清雅独立、讲究茶事的女子。",
+      "background": "#C5D3E0",
+      "files": {
+        "full": {
+          "path": "miaoyu/full.webp",
+          "sha256": "d30839f672a76c225f5d58e05006905ef78e5b8c93a85ea309e4b3549d86d1f0",
+          "bytes": 26524,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "miaoyu/head-64.webp",
+            "sha256": "4f8985a828764995985ac130fafc779ac10ba9f0cf1dd48c123d5912e7323f11",
+            "bytes": 928,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "miaoyu/head-128.webp",
+            "sha256": "c9be4f0354bbddcea877830badc1c20df812225cbf61afbd55c8971897b3c5a3",
+            "bytes": 2376,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "miaoyu/head-256.webp",
+            "sha256": "11eb4fb7eaf6bdfdc9ff8ec15421a8b0e1814f919c831d87d3216b3dd384e98f",
+            "bytes": 7376,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "qingwen",
+      "name": "晴雯",
+      "novel": "红楼梦",
+      "bio": "心直口快、针线手艺出众的少女。",
+      "background": "#E8C7B8",
+      "files": {
+        "full": {
+          "path": "qingwen/full.webp",
+          "sha256": "f9c10567b7fff482d55866061c1b03686d4533c76483a3a749b4fe9d801b05b3",
+          "bytes": 35986,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "qingwen/head-64.webp",
+            "sha256": "0241252cbc119483297d41cf564c4ab03dd161fa5d67afa67f692430e5ed483f",
+            "bytes": 1532,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "qingwen/head-128.webp",
+            "sha256": "594aa0d8991b0ec6c239c04d35277003d3205cfb7991ee0a36f0a60f8f73f900",
+            "bytes": 4148,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "qingwen/head-256.webp",
+            "sha256": "3b369acdb2239486435ae41ebac2ba23d054445e123b416701b73f9797060dc4",
+            "bytes": 11932,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "xiren",
+      "name": "袭人",
+      "novel": "红楼梦",
+      "bio": "细心温和、善于照顾日常事务的少女。",
+      "background": "#D1C6E3",
+      "files": {
+        "full": {
+          "path": "xiren/full.webp",
+          "sha256": "9265083dfdff0bbe41c45a5a7f7873d508a3568c81592777b251a3fb66701399",
+          "bytes": 41480,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "xiren/head-64.webp",
+            "sha256": "def4549da449963fb5be58096cab1aeb3824896f9dc5ce899ef24bdb6b22284a",
+            "bytes": 1140,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "xiren/head-128.webp",
+            "sha256": "a8620ad8487a047c8f7e2a85089f15f64e624609cc36abf3ed2ecd8a9c105c1e",
+            "bytes": 2922,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "xiren/head-256.webp",
+            "sha256": "d9efdb6ae87d032bb0eb5af46a5e1865c321445e282238e60eb8c2c75668eab6",
+            "bytes": 8280,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "ping-er",
+      "name": "平儿",
+      "novel": "红楼梦",
+      "bio": "公正体贴、善于调和事务的女子。",
+      "background": "#E2D3AC",
+      "files": {
+        "full": {
+          "path": "ping-er/full.webp",
+          "sha256": "d35a697fd318805059638834d13a5e85c2855e08a2da74b61d8571f83dd33924",
+          "bytes": 27478,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "ping-er/head-64.webp",
+            "sha256": "9993e7ba6079ec20d44330118cd5b8c50e27fbf0af5c8f2a06276c668099ebd2",
+            "bytes": 1130,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "ping-er/head-128.webp",
+            "sha256": "9030ac72999f22d7c41914f8997d962ba704aa1aa9fa8dda8fc730f277e6801f",
+            "bytes": 2846,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "ping-er/head-256.webp",
+            "sha256": "b9ed3b48b68527e2322cb6963cffd7897e93106706222026b8700470c79fc75a",
+            "bytes": 7906,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "jia-mu",
+      "name": "贾母",
+      "novel": "红楼梦",
+      "bio": "慈爱而有威望的家族长辈。",
+      "background": "#BFD7C5",
+      "files": {
+        "full": {
+          "path": "jia-mu/full.webp",
+          "sha256": "5a3866fe8fb8a4f601c60057f6a2d6eabc9745edca5e65af6a4a539d559c4f47",
+          "bytes": 26564,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "jia-mu/head-64.webp",
+            "sha256": "25418485d58d5a7965633a7190b6a8a60e9640abb07b4566621a9a907c718041",
+            "bytes": 1064,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "jia-mu/head-128.webp",
+            "sha256": "1af6d93ffbd8724e3d29a7c82d5359736e0792b0cdc9ec9bc3b44c2db805a4f4",
+            "bytes": 2780,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "jia-mu/head-256.webp",
+            "sha256": "a5276e55be8a16273bf42e3427cdb85fa361e32e550b08033ec5b740f0e646d7",
+            "bytes": 7564,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "liu-laolao",
+      "name": "刘姥姥",
+      "novel": "红楼梦",
+      "bio": "朴实幽默、懂得体恤他人的乡间长者。",
+      "background": "#DDD1B6",
+      "files": {
+        "full": {
+          "path": "liu-laolao/full.webp",
+          "sha256": "896e4cfaf00d58bb8d1f69ee7b99999185c8c3211d80e590f20d3107218a96fb",
+          "bytes": 32614,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "liu-laolao/head-64.webp",
+            "sha256": "2763e2e269aafe5b04059f3adb2516c7bd4157e3c61fe4dd4b6bb9f26c390098",
+            "bytes": 1256,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "liu-laolao/head-128.webp",
+            "sha256": "3b4d611dc4081a65b0fb030c97520d3d5e9e1915a51b3645d6463cd34b936688",
+            "bytes": 3310,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "liu-laolao/head-256.webp",
+            "sha256": "6c8c34f67b310a85c6a38c389609d6035cb80eafe8b156e7e3a03cef81d054b9",
+            "bytes": 8960,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    }
+  ]
+}

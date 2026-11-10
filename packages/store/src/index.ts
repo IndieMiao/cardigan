@@ -1,3 +1,4 @@
+export { fileAvatarStore, readAvatarFile } from "./avatars.js";
 export {
   type BeginBellAttempt,
   type BellAttempt,
