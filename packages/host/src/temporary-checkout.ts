@@ -15,6 +15,7 @@ import {
 } from "@cardigan/runtime-herdr";
 import { checkEnvironment } from "./check-environment.js";
 import { CHECKOUT_WORKER } from "./checkout-worker.js";
+import { type ExecutionOwner, executionOwner } from "./merge-check-capacity.js";
 
 export interface CheckoutCheck {
   readonly name: string;
@@ -47,7 +48,7 @@ export interface CheckoutInput {
   /** Merge checks share one OS lock across projects and controller processes. */
   readonly serialize?: boolean;
   /** Called only after the execution account acquired the slot and authenticated itself. */
-  readonly onReady?: () => void;
+  readonly onReady?: (owner?: ExecutionOwner) => void;
   /** Private stream: the log consumer must redact configured env values before persistence. */
   readonly onOutput?: (name: string, text: string) => void;
 }
@@ -134,6 +135,15 @@ export async function runInTemporaryCheckout(
     completed = await new Promise<CheckoutResult>((resolve, reject) => {
       // No ambient environment, even for the SSH client or local supervisor.
       const child = start(command.file, command.args, { PATH: path });
+      let owner: ExecutionOwner | undefined;
+      let ownerError: unknown;
+      try {
+        owner = child.pid ? executionOwner(child.pid) : undefined;
+      } catch (error) {
+        // Keep the child under the normal protocol/cancellation lifecycle even
+        // when its process identity cannot be read.
+        ownerError = error;
+      }
       let result: CheckoutResult | undefined;
       let resultCount = 0,
         protocolFailed = false;
@@ -163,8 +173,9 @@ export async function runInTemporaryCheckout(
             throw new Error("Invalid checkout message");
           if (event.type === "ready") {
             if (ready) throw new Error("Duplicate checkout readiness");
+            if (ownerError) throw ownerError;
             ready = true;
-            input.onReady?.();
+            input.onReady?.(owner);
           }
           if (event.type === "output") input.onOutput?.(event.name, event.text);
           if (event.type === "result") {

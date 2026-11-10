@@ -124,6 +124,15 @@ export function BoardCard({
           </span>
         </a>
       </Tooltip>
+      {card.queued_runs?.map((run) => (
+        <p
+          className="hint"
+          key={run.run_id}
+          title={`${run.assignment_id} / ${run.run_id}`}
+        >
+          排队中（前面还有 {run.ahead} 个）
+        </p>
+      ))}
       <div className="board-card-meta">
         {display.progress &&
           badge(

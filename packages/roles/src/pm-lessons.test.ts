@@ -158,6 +158,16 @@ test("C-66 PM instructions cover returning or rechecking failed merge checks", (
     expect(prompt).toContain(rule);
 });
 
+test("C-65 PM instructions hand sensitive cards' merges to the human", () => {
+  const prompt = corePromptFor("pm");
+  for (const rule of [
+    "被人标为敏感的卡，确认直接交给人",
+    "不能设置或取消敏感标记",
+    "人也可能直接处理你手上的合并确认",
+  ])
+    expect(prompt).toContain(rule);
+});
+
 test("D12 allows a human at Workbench or local CLI, never PM or Agent proxy confirmation", () => {
   expect(corePromptFor("pm")).toContain(
     "四类只能由人确认（Workbench 或本机 CLI）",

@@ -20,6 +20,7 @@ import {
   assignment,
   card,
   event,
+  latestSchemaVersion,
   project_id,
   withTempStore,
   workItem,
@@ -151,7 +152,7 @@ test("v8 migration preserves old project data, assignments, event streams, token
   const old = Store.open({ dataDir, migrationsDir: oldMigrations });
   let token: string;
   try {
-    expect(old.schemaVersion()).toBe(8);
+    expect(old.schemaVersion()).toBe(latestSchemaVersion(oldMigrations));
     old.createProject({ id: project_id });
     old.uow.run((tx) => {
       tx.cards.put(project_id, card());
@@ -174,7 +175,7 @@ test("v8 migration preserves old project data, assignments, event streams, token
   try {
     const upgraded = Store.open({ dataDir });
     try {
-      expect(upgraded.schemaVersion()).toBe(13);
+      expect(upgraded.schemaVersion()).toBe(latestSchemaVersion());
       expect(upgraded.migrate()).toEqual([]);
       expect(upgraded.getProject(project_id)?.id).toBe(project_id);
       expect(upgraded.verifyToken(token)).toBeDefined();

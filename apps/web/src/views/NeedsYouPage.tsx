@@ -24,6 +24,7 @@ import {
   Feedback,
   Markdown,
 } from "../components/Operations.js";
+import { RequestFeedback } from "../components/RequestFeedback.js";
 import { decisionTitle, delegableCategories } from "../decision-labels.js";
 import { routeHash } from "../route.js";
 import { useResource } from "../useResource.js";
@@ -290,12 +291,13 @@ function Decision({
           command={cliCommand(projectId, "worktree diff", q.assignment_id)}
         />
       )}
-      {action.error && (
-        <p role="alert" className="error-panel">
-          {action.error}
-        </p>
-      )}
-      <span role="status">{action.busy ? "提交中…" : action.message}</span>
+      <RequestFeedback
+        interactive
+        pending={action.busy}
+        pendingMessage="提交中…"
+        error={action.error}
+        message={action.message}
+      />
     </article>
   );
 }
@@ -351,6 +353,13 @@ function MergeConfirmation({
     <article className="needs-item needs-merge" aria-label={`合并确认 ${q.id}`}>
       <DecisionMeta q={q} projectId={projectId} elapsed={elapsed} />
       <h3 className="needs-question">{decisionTitle(q)}</h3>
+      {q.decider === "role:pm" && !confirmed && (
+        <p className="hint">
+          PM
+          正在代确认。你可以直接选择合并、暂不合并或退回修改，按你的拍板记录，PM
+          之后不能再处理这一条；选择合并仍要通过合并闸门检查。
+        </p>
+      )}
       {merge?.merge_gate_invalid && (
         <p className="error">合并闸门配置无效，请查看 server 启动日志</p>
       )}
@@ -550,12 +559,13 @@ function MergeConfirmation({
           </div>
         </form>
       )}
-      {action.error && (
-        <p role="alert" className="error-panel">
-          {action.error}
-        </p>
-      )}
-      <span role="status">{action.busy ? "提交中…" : action.message}</span>
+      <RequestFeedback
+        interactive
+        pending={action.busy}
+        pendingMessage="提交中…"
+        error={action.error}
+        message={action.message}
+      />
     </article>
   );
 }
@@ -660,12 +670,13 @@ function HumanAction({
           确认已完成
         </button>
       </form>
-      {action.error && (
-        <p role="alert" className="error-panel">
-          {action.error}
-        </p>
-      )}
-      <span role="status">{action.busy ? "提交中…" : action.message}</span>
+      <RequestFeedback
+        interactive
+        pending={action.busy}
+        pendingMessage="提交中…"
+        error={action.error}
+        message={action.message}
+      />
     </article>
   );
 }
@@ -743,7 +754,7 @@ function NeedsContent({
   projectId,
   resource,
 }: Props & { resource: NeedsResource }) {
-  const { data, pending, error, reload } = resource;
+  const { data, pending, error, reload, interactive } = resource;
   const [elapsed, setElapsed] = useState(0);
   useEffect(() => {
     setElapsed(0);
@@ -779,7 +790,12 @@ function NeedsContent({
             : "在这里拍板、确认合并和回报执行结果。"
         }
       />
-      <Feedback pending={pending} error={error} retry={reload} />
+      <Feedback
+        pending={pending}
+        interactive={interactive}
+        error={error}
+        retry={reload}
+      />
       {data && (
         <>
           {total === 0 && (
@@ -832,6 +848,18 @@ function NeedsContent({
             <section className="needs-group" aria-label="合并确认">
               <h2>合并确认（{merges.length}）</h2>
               {merges.map((q) => (
+                <MergeConfirmation key={q.id} q={q} {...props} />
+              ))}
+            </section>
+          )}
+          {!!data.pm_held_merges?.length && (
+            <section className="needs-group" aria-label="PM 代确认中的合并">
+              <h2>PM 代确认中的合并（{data.pm_held_merges.length}）</h2>
+              <p className="hint">
+                不需要你处理；想自己拍板时可以直接处理，不用关闭“合并由 PM
+                代确认”。
+              </p>
+              {data.pm_held_merges.map((q) => (
                 <MergeConfirmation key={q.id} q={q} {...props} />
               ))}
             </section>
@@ -912,7 +940,12 @@ function Notices({
           全部标为已读
         </button>
       )}
-      {error && <p role="alert">{error}</p>}
+      <RequestFeedback
+        interactive
+        pending={busy}
+        pendingMessage="正在标记已读…"
+        error={error}
+      />
       {notices.map((n) => (
         <article
           key={n.id}

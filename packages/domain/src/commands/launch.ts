@@ -65,7 +65,8 @@ function exclusive(
 ) {
   ensure(
     !d.list("runs").some((r) => {
-      if (r.id === run_id || !unfinished(r)) return false;
+      if (r.id === run_id || (!unfinished(r) && !r.inactivity_stop))
+        return false;
       const owner = d.get("assignments", r.assignment_id);
       return (
         owner.id === assignment.id ||
@@ -338,6 +339,7 @@ export function dispatchRun(
         ? { employee_id: assignment.employee_id }
         : {}),
     };
+    delete next.queue_reason;
     d.put("runs", next);
     d.emit("run_dispatched", cardId(d, assignment), {
       run_id: run.id,

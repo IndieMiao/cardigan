@@ -59,7 +59,10 @@ export function SnapshotPage({
     () => client.snapshot(projectId),
     [client, projectId],
   );
-  const { data, pending, error, reload } = useResource(load, revision);
+  const { data, pending, error, reload, interactive } = useResource(
+    load,
+    revision,
+  );
   const hasItems =
     data &&
     data.waiting.human.length +
@@ -75,7 +78,12 @@ export function SnapshotPage({
         title="项目快照"
         description="查看当前进度、等待事项与最近交付。"
       />
-      <Feedback pending={pending} error={error} retry={reload} />
+      <Feedback
+        pending={pending}
+        interactive={interactive}
+        error={error}
+        retry={reload}
+      />
       {data && <Overview data={data} projectId={projectId} />}
       {data &&
         (!data.cards.length ? (

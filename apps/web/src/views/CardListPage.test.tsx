@@ -160,7 +160,7 @@ test("shows a loading state while the cards are on their way", () => {
   render(
     <CardListPage client={client(() => never)} projectId="p-1" view="board" />,
   );
-  expect(screen.getByRole("status").textContent).toContain("正在加载卡片");
+  expect(screen.getByRole("status").textContent).toBe("");
 });
 
 test("shows the server's error and can retry", async () => {

@@ -4,6 +4,7 @@ import { useState } from "react";
 import { renderMarkdown } from "../markdown.js";
 import { routeHash } from "../route.js";
 import { IdTag, LongContent } from "./Foundation.js";
+import { RequestFeedback } from "./RequestFeedback.js";
 export function Markdown({ body }: { body: string }) {
   return (
     <LongContent>
@@ -37,23 +38,20 @@ export function Feedback({
   pending,
   error,
   retry,
+  interactive,
 }: {
+  interactive?: boolean;
   pending: boolean;
   error: string | undefined;
   retry: () => void;
 }) {
   return (
-    <>
-      {pending && <p role="status">正在加载…</p>}
-      {error && (
-        <div role="alert" className="error-panel">
-          {error}{" "}
-          <button type="button" onClick={retry}>
-            重试
-          </button>
-        </div>
-      )}
-    </>
+    <RequestFeedback
+      pending={pending}
+      interactive={interactive}
+      error={error}
+      retry={retry}
+    />
   );
 }
 const quote = (s: string) => `'${s.replaceAll("'", "'\\''")}'`;
@@ -86,7 +84,7 @@ export function CopyCommand({
       >
         复制
       </button>{" "}
-      <span role="status">{message}</span>
+      <RequestFeedback message={message} />
       <p className="copy-command-hint">
         需要先用 <code>deploy/install-cli.sh</code> 安装 cardigan 命令。
       </p>

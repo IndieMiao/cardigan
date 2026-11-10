@@ -359,3 +359,66 @@ test.each([
     }
   },
 );
+
+test("the human marks and unmarks a card sensitive from the card detail", async () => {
+  const setCardSensitive = vi.fn().mockResolvedValue(undefined);
+  const onSaved = vi.fn();
+  const card = cardDetail().card;
+  const { rerender } = render(
+    <CardActions
+      card={card}
+      client={fakeClient({ setCardSensitive })}
+      projectId="p-1"
+      onSaved={onSaved}
+    />,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "标为敏感" }));
+  await waitFor(() =>
+    expect(setCardSensitive).toHaveBeenCalledWith(
+      "p-1",
+      card.id,
+      true,
+      expect.any(String),
+    ),
+  );
+  expect(await screen.findByRole("status")).toHaveProperty(
+    "textContent",
+    "已标为敏感：合并确认将由你亲自处理。",
+  );
+  expect(onSaved).toHaveBeenCalled();
+  rerender(
+    <CardActions
+      card={{ ...card, sensitive: true }}
+      client={fakeClient({ setCardSensitive })}
+      projectId="p-1"
+      onSaved={onSaved}
+    />,
+  );
+  expect(screen.getByText("敏感卡片：合并确认由你亲自处理。")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "取消敏感标记" }));
+  await waitFor(() =>
+    expect(setCardSensitive).toHaveBeenLastCalledWith(
+      "p-1",
+      card.id,
+      false,
+      expect.any(String),
+    ),
+  );
+});
+
+test("the sensitive toggle posts to the human-only card route", async () => {
+  const fetchImpl = vi.fn(
+    async () => new Response("{}", { status: 200 }),
+  ) as unknown as typeof fetch;
+  await new HttpCardiganClient(fetchImpl).setCardSensitive(
+    "p-1",
+    "C-1",
+    true,
+    "k-1",
+  );
+  const [url, init] = (fetchImpl as unknown as ReturnType<typeof vi.fn>).mock
+    .calls[0] as [string, RequestInit];
+  expect(url).toBe("/api/projects/p-1/cards/C-1/sensitive");
+  expect(init.method).toBe("POST");
+  expect(JSON.parse(String(init.body))).toEqual({ sensitive: true });
+});
