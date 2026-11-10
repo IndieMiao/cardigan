@@ -23,6 +23,7 @@ import {
   Feedback,
   Markdown,
 } from "../components/Operations.js";
+import { RequestFeedback } from "../components/RequestFeedback.js";
 import { decisionTitle, delegableCategories } from "../decision-labels.js";
 import { routeHash } from "../route.js";
 import { useResource } from "../useResource.js";
@@ -289,12 +290,13 @@ function Decision({
           command={cliCommand(projectId, "worktree diff", q.assignment_id)}
         />
       )}
-      {action.error && (
-        <p role="alert" className="error-panel">
-          {action.error}
-        </p>
-      )}
-      <span role="status">{action.busy ? "提交中…" : action.message}</span>
+      <RequestFeedback
+        interactive
+        pending={action.busy}
+        pendingMessage="提交中…"
+        error={action.error}
+        message={action.message}
+      />
     </article>
   );
 }
@@ -549,12 +551,13 @@ function MergeConfirmation({
           </div>
         </form>
       )}
-      {action.error && (
-        <p role="alert" className="error-panel">
-          {action.error}
-        </p>
-      )}
-      <span role="status">{action.busy ? "提交中…" : action.message}</span>
+      <RequestFeedback
+        interactive
+        pending={action.busy}
+        pendingMessage="提交中…"
+        error={action.error}
+        message={action.message}
+      />
     </article>
   );
 }
@@ -659,12 +662,13 @@ function HumanAction({
           确认已完成
         </button>
       </form>
-      {action.error && (
-        <p role="alert" className="error-panel">
-          {action.error}
-        </p>
-      )}
-      <span role="status">{action.busy ? "提交中…" : action.message}</span>
+      <RequestFeedback
+        interactive
+        pending={action.busy}
+        pendingMessage="提交中…"
+        error={action.error}
+        message={action.message}
+      />
     </article>
   );
 }
@@ -742,7 +746,7 @@ function NeedsContent({
   projectId,
   resource,
 }: Props & { resource: NeedsResource }) {
-  const { data, pending, error, reload } = resource;
+  const { data, pending, error, reload, interactive } = resource;
   const [elapsed, setElapsed] = useState(0);
   useEffect(() => {
     setElapsed(0);
@@ -778,7 +782,12 @@ function NeedsContent({
             : "在这里拍板、确认合并和回报执行结果。"
         }
       />
-      <Feedback pending={pending} error={error} retry={reload} />
+      <Feedback
+        pending={pending}
+        interactive={interactive}
+        error={error}
+        retry={reload}
+      />
       {data && (
         <>
           {total === 0 && (

@@ -292,7 +292,10 @@ export function ExecutionPage({
     () => client.execution(projectId),
     [client, projectId],
   );
-  const { data, pending, error, reload } = useResource(load, revision);
+  const { data, pending, error, reload, interactive } = useResource(
+    load,
+    revision,
+  );
   const assignments = (data?.assignments ?? []).filter((assignment) =>
     matchesView(assignment, view),
   );
@@ -323,7 +326,12 @@ export function ExecutionPage({
         values={{ ...filters, view }}
         onChange={setFilters}
       />
-      <Feedback pending={pending} error={error} retry={reload} />
+      <Feedback
+        pending={pending}
+        interactive={interactive}
+        error={error}
+        retry={reload}
+      />
       {data && (
         <>
           <p className="metadata">

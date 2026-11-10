@@ -5,6 +5,7 @@ import {
   type PreferencesView,
 } from "../api.js";
 import { PageTitle, StatusTag } from "../components/Foundation.js";
+import { RequestFeedback } from "../components/RequestFeedback.js";
 import {
   categoryLabels,
   defaultDelegation,
@@ -94,6 +95,13 @@ export function SettingsPage({
             revision={revision}
           />
         )}
+        {(tab === "preferences" || tab === "authorization") && (
+          <RequestFeedback
+            {...resource}
+            retry={resource.reload}
+            pendingMessage="正在加载偏好…"
+          />
+        )}
         <div hidden={tab === "templates" || tab === "roles"}>
           <section
             hidden={tab !== "preferences"}
@@ -102,17 +110,6 @@ export function SettingsPage({
             aria-labelledby="preferences-title"
           >
             <h2 id="preferences-title">偏好</h2>
-            {resource.error && (
-              <p role="alert">
-                {resource.error}
-                <button type="button" onClick={resource.reload}>
-                  重试
-                </button>
-              </p>
-            )}
-            {!resource.data && !resource.error && (
-              <p role="status">正在加载偏好…</p>
-            )}
             {resource.data && (
               <PreferenceForm
                 key={String(resource.data.auto_merge_after_minutes)}
@@ -237,12 +234,19 @@ function PreferenceForm({
           onChange={(e) => setMinutes(e.target.value)}
         />
       </label>
-      {!valid && <p role="alert">请输入 1 到 1440 的整数分钟。</p>}
+      <RequestFeedback
+        error={!valid ? "请输入 1 到 1440 的整数分钟。" : undefined}
+      />
       <button type="submit" disabled={busy || !valid}>
-        {busy ? "保存中…" : "保存偏好"}
+        保存偏好
       </button>
-      {error && <p role="alert">{error}</p>}
-      {message && <p role="status">{message}</p>}
+      <RequestFeedback
+        interactive
+        pending={busy}
+        pendingMessage="保存中…"
+        error={error}
+        message={message}
+      />
     </form>
   );
 }
@@ -310,7 +314,12 @@ function DelegationSetting({
           }
         />
       </label>
-      {error && <p role="alert">{error}</p>}
+      <RequestFeedback
+        interactive
+        pending={busy}
+        pendingMessage="保存授权中…"
+        error={error}
+      />
     </div>
   );
 }
