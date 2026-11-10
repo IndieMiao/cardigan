@@ -227,7 +227,7 @@ export async function main(
     if (command === "comment" || command === "attachment") {
       return await runContentCommand(command, rest, io);
     }
-    if (command === "merge") return runMergeCommand(rest, io);
+    if (command === "merge") return await runMergeCommand(rest, io);
     if (command === "web") return await runWebCommand(rest, io);
     if (command === "worktree") return await runWorktreeCommand(rest, io);
     if (command === "inbox") return inboxCommand(rest, io);

@@ -183,7 +183,24 @@ export class MergeChecks {
     this.prepared.set(id, { key, value });
     return value;
   }
-  private interrupt(task: Task, check: MergeCheckView) {
+  private async interrupt(task: Task, check: MergeCheckView) {
+    // A queued attempt has no writer; preserve any existing crashed-attempt log.
+    try {
+      const log = await createMergeCheckLog({
+        dataDir: this.options.execution.dataDir,
+        project: task.project.project_id,
+        attempt: check.attempt_id,
+        env: task.settings.env,
+      });
+      await log.finish({
+        status: "interrupted",
+        checks: [],
+        cleanup_errors: [],
+      });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST")
+        this.options.onError(new Error("中断检查的日志无法创建"));
+    }
     this.check(task, {
       ...check,
       status: "interrupted",
@@ -191,8 +208,12 @@ export class MergeChecks {
       summary: "检查中断或候选已改变，重新排队",
       log_ref: `${check.attempt_id}.log`,
     });
+    this.seen.delete(check.attempt_id);
   }
-  private queue(task: Task, candidate: Candidate): MergeCheckView | undefined {
+  private async queue(
+    task: Task,
+    candidate: Candidate,
+  ): Promise<MergeCheckView | undefined> {
     const { plan } = task;
     const events = this.state(task.project.project_id).events;
     const latest = latestMergeCheck(events, plan.card_id, plan.completion_id);
@@ -208,7 +229,7 @@ export class MergeChecks {
         latest.tree_sha === candidate.tree_sha
       )
         return latest;
-      this.interrupt(task, latest);
+      await this.interrupt(task, latest);
     }
     if (this.passed(task, candidate.tree_sha)) return undefined;
     const previous = latestMergeCheck(
@@ -314,6 +335,7 @@ export class MergeChecks {
       summary: finished.summary,
       log_ref: finished.log_ref,
     });
+    this.seen.delete(check.attempt_id);
   }
   private async publish(task: Task) {
     if (this.abort.signal.aborted || !this.valid(task, true)) return;
@@ -323,7 +345,7 @@ export class MergeChecks {
       return;
     }
     if (!this.passed(task, candidate.tree_sha)) {
-      this.queue(task, candidate);
+      await this.queue(task, candidate);
       return;
     }
     // Re-read confirmation/state after Git IO. CAS protects against another baseline writer.
@@ -395,7 +417,7 @@ export class MergeChecks {
       try {
         const prepared = await this.prepare(task);
         if (!this.valid(task)) continue;
-        if (prepared.status === "candidate") this.queue(task, prepared);
+        if (prepared.status === "candidate") await this.queue(task, prepared);
         else this.terminal(task, prepared);
       } catch (error) {
         this.failure(task, error);
@@ -411,7 +433,7 @@ export class MergeChecks {
           this.terminal(task, prepared);
           continue;
         }
-        const check = this.queue(task, prepared);
+        const check = await this.queue(task, prepared);
         if (check) await this.execute(task, check);
         await this.publish(task);
       } catch (error) {
