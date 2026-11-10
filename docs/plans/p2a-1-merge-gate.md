@@ -82,13 +82,14 @@ projects:
   - **重新检查**（新操作）：同一候选再排一次队，用于偶发失败；
   - **退回修改**：当前完成申请的最新检查为 `failed` 或 `timed_out` 时，未处理的确认和已确认合并（人确认或超时代批）的确认均可退回。CLI `merge request-changes` 与 Workbench 共用 `recordDecision`，原因必填；完成申请作废、主产出回到 `changes_requested`、验收项回到 `todo`，沿用 `merge_changes_requested` 通知原实现方并记录时间线；
   - **暂缓**（已有）。
-- 已确认合并的退回仅允许 human：旧确认标记为 `superseded`，保留原合并授权（包括超时代批依据）；退回原因另存事件与时间线。Needs You 重新展示可退回的已确认项，只提供“退回修改”，不重复确认合并。
+- PM Ops 处理（C-66，试行发现 43）：最新检查为 `failed` 或 `timed_out` 时，PM Ops 也可用 `resolve_delegated_decision` 对交给 PM 的未处理确认和已确认合并（人确认、PM 代确认或超时代批）选 `request_changes`（退回修改）或 `recheck`（重新检查）。两者与人走同一领域函数和效果（退回修改同下条；重新检查同上面的重新排队），`rationale`（失败用例、真实问题还是偶发）和 `notice` 必填，事件带 `via=delegated` 并派生 Needs You 知会。卡片涉及花钱、账号、权限、删除数据或需求范围变化、被人标为敏感（C-65 `sensitive`），或确认已交人时仍由人处理，PM 不能退回或重新检查（复用 `mergeRequiresHuman`）。PM 可处理时这类已确认项进入 `pm_queue.failed_merge_checks`，不再进入人的 Needs You；检查以失败／超时结束时，或检查先失败、之后才由人或超时代批确认合并时，Router 通知 PM Ops。判断要点：先看失败用例和本卡改动的关系，真实问题退回并写清修复方向，偶发（超时、负载）先重新检查一次，再失败就退回。
+- 人对已确认合并的退回：旧确认标记为 `superseded`，保留原合并授权（包括超时代批依据）；退回原因另存事件与时间线。Needs You 重新展示可退回的已确认项，只提供“退回修改”，不重复确认合并。
 - 已确认合并时，最新检查为 `passed`、`queued`、`running`，或没有检查／检查中断，均不允许退回，并给出中文说明；显式重新检查后立即按 `queued` 拒绝，不能沿用更早的失败结果。未确认项仍保持已有退回行为；`hold` 仍须先重新发起确认。
 - 新的完成申请（退回修改后再次交付）产生新的 `completion_id` 和新的合并确认，自然重新检查；旧确认和旧检查不能授权新申请。
 
 ### 2.7 记录和领域模型
 
-- 新增事件（domain 定义，主机以 system 身份记录）：`merge_check_queued`、`merge_check_started`、`merge_check_finished`（`result: passed | failed | timed_out | interrupted`，带 `completion_id`、`candidate_sha`、`tree_sha`、每条检查的名称 / 退出码 / 用时、失败摘要、日志引用）、`merge_check_requeued`（人点了重新检查）。
+- 新增事件（domain 定义，主机以 system 身份记录）：`merge_check_queued`、`merge_check_started`、`merge_check_finished`（`result: passed | failed | timed_out | interrupted`，带 `completion_id`、`candidate_sha`、`tree_sha`、每条检查的名称 / 退出码 / 用时、失败摘要、日志引用）、`merge_check_requeued`（人点了重新检查，或 PM Ops 按 C-66 请求重新检查）。
 - 卡片状态机不变；卡片视图新增派生字段 `merge_check`（当前完成申请最新一次检查的状态和摘要）。
 - 新增 §4.5 不变量：**项目启用了合并闸门时，`recordMergeResult(kind=merged)` 的 `merge_sha` 的 tree 必须有一条同一 `completion_id` 的 `passed` 检查记录**；domain 拒绝不满足的记录。唯一例外是 `noop`：所有计划交付都已是当前基线的祖先，基线没有任何新代码，此时按现有做法以 `merge_sha == previous_sha` 收尾并在结果里标明 `noop`，不需要也不伪造 `passed` 检查记录（2026-11-09 实现中确认）。项目是否启用闸门由主机在加载命令状态时作为项目设置传入（domain 不读文件）。
 - 日志：`<dataDir>/merge-gate/logs/<project>/<attempt>.log`，0600；每条检查的输出各自截断到 2 MB（保留首尾）；每个项目保留最近 50 次，旧的删除。日志写入前过滤配置里 `env` 的值和推送密钥路径以外的任何密钥内容（检查进程拿不到密钥，这条是兜底）。

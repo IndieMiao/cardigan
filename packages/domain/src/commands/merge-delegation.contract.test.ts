@@ -90,7 +90,10 @@ function setup(withOps = true, policy: "confirm" | "auto" = "confirm") {
     if (!q) throw new Error("Missing merge confirmation");
     return q;
   };
-  const check = (status: "passed" | "failed") => {
+  const check = (
+    status: "passed" | "failed" | "timed_out",
+    attempt: string = status,
+  ) => {
     const q = confirmation();
     if (!("target" in q) || !("delivery_id" in q.target))
       throw new Error("Missing completion");
@@ -101,7 +104,7 @@ function setup(withOps = true, policy: "confirm" | "auto" = "confirm") {
     const identity = {
       card_id: f.card.id,
       completion_id: q.target.delivery_id,
-      attempt_id: `attempt-${status}`,
+      attempt_id: `attempt-${attempt}`,
       candidate_sha: "b".repeat(40),
       tree_sha: (status === "passed" ? "c" : "d").repeat(40),
     };
@@ -1149,4 +1152,310 @@ test("a merge the human already confirmed stands when the card is marked", async
   );
   expect(confirmation()).toMatchObject({ id: held.id, status: "resolved" });
   expect(mergePlan(f.state, f.card.id).ok).toBe(true);
+});
+
+// P2a-1 §2.6 / 试行发现 43: PM Ops handles failed or timed-out merge checks.
+const failedQueue = (state: CommandState) =>
+  value(listNeedsYou(state, opsActor)).data.pm_queue?.failed_merge_checks ?? [];
+const humanPending = (state: CommandState) =>
+  value(listNeedsYou(state, human)).data.decisions.map((q) => q.id);
+
+test("PM Ops returns a PM-held confirmation whose check failed, with reason and notice", async () => {
+  const { f, confirmation, check, pmResolve } = setup();
+  const { product } = await f.accept();
+  // No check yet: recheck is refused and nothing is offered.
+  expect(pmResolve("recheck", { notice: "n" }).ok).toBe(false);
+  check("failed");
+  const q = confirmation();
+  expect(failedQueue(f.state)).toEqual([
+    expect.objectContaining({
+      decision_id: q.id,
+      card_id: f.card.id,
+      confirmation_status: "open",
+      options: ["request_changes", "recheck"],
+      check: expect.objectContaining({ status: "failed" }),
+    }),
+  ]);
+  // Reason and notice are both mandatory.
+  const blank = resolveDelegatedDecision(
+    f.state,
+    opsActor,
+    {
+      decision_id: q.id,
+      option: "request_changes",
+      rationale: " ",
+      notice: "n",
+    },
+    f.io,
+  );
+  expect(blank.ok).toBe(false);
+  expect(pmResolve("request_changes").ok).toBe(false);
+  const effect = value(
+    pmResolve("request_changes", {
+      notice: `${f.card.id} 合并检查失败（test 用例与本卡改动相关），已退回修改。`,
+    }),
+  );
+  f.commit({ ok: true, value: effect });
+  // Same effects as the human return: completion superseded, producer reworks.
+  expect(effect.events.map((e) => e.type)).toContain("merge_changes_requested");
+  expect(f.state.cards.find((c) => c.id === f.card.id)?.status).toBe(
+    "in_progress",
+  );
+  expect(
+    f.state.work_items.find((w) => w.id === product.work_item_id)?.status,
+  ).toBe("changes_requested");
+  expect(confirmation().resolution).toMatchObject({
+    option: "request_changes",
+    via: "delegated",
+  });
+  expect(notices(f.state)[0]).toMatchObject({
+    kind: "merge",
+    option: "request_changes",
+    resolved_by: "pm",
+    card_id: f.card.id,
+    body: expect.stringContaining("已退回修改"),
+  });
+  expect(failedQueue(f.state)).toEqual([]);
+});
+
+test("PM Ops rechecks a timed-out confirmed merge once, then returns it after another failure", async () => {
+  const { f, confirmation, check, pmResolve } = setup();
+  // Human mode with the C-29 timeout: the confirmation is auto-approved.
+  f.commit(
+    setProjectPreferences(
+      f.state,
+      human,
+      { pm_merge_confirmation: false, auto_merge_after_minutes: 1 },
+      f.io,
+    ),
+  );
+  const { product } = await f.accept();
+  const q = confirmation();
+  expect(q.decider).toBe("human");
+  const later = {
+    ...f.io,
+    clock: { now: () => new Date(Date.parse(now) + 60_000).toISOString() },
+  };
+  f.commit(autoConfirmMerge(f.state, system, { decision_id: q.id }, later));
+  const authorization = confirmation().resolution;
+  expect(authorization).toMatchObject({ option: "merge" });
+  check("timed_out");
+  // PM Ops picks it up instead of leaving it for the human.
+  expect(failedQueue(f.state)).toEqual([
+    expect.objectContaining({
+      decision_id: q.id,
+      confirmation_status: "resolved",
+    }),
+  ]);
+  expect(humanPending(f.state)).not.toContain(q.id);
+  // A confirmed merge cannot be merged or held again by PM.
+  expect(pmResolve("hold", { notice: "n" }).ok).toBe(false);
+  expect(pmResolve("recheck").ok).toBe(false);
+  const recheck = value(
+    pmResolve("recheck", {
+      notice: `${f.card.id} 合并检查超时（负载导致），已重新检查。`,
+    }),
+  );
+  f.commit({ ok: true, value: recheck });
+  expect(recheck.events).toContainEqual(
+    expect.objectContaining({
+      type: "merge_check_requeued",
+      payload: expect.objectContaining({
+        status: "queued",
+        recheck_requested: true,
+        via: "delegated",
+        decision_id: q.id,
+      }),
+    }),
+  );
+  expect(notices(f.state).find((n) => n.option === "recheck")).toMatchObject({
+    option: "recheck",
+    resolved_by: "pm",
+    body: expect.stringContaining("已重新检查"),
+  });
+  // While the recheck is queued nothing may be returned or rechecked again.
+  expect(pmResolve("request_changes", { notice: "n" }).ok).toBe(false);
+  expect(pmResolve("recheck", { notice: "n" }).ok).toBe(false);
+  expect(failedQueue(f.state)).toEqual([]);
+  check("failed", "retry");
+  const back = value(
+    pmResolve("request_changes", {
+      notice: `${f.card.id} 重新检查仍失败，已退回修改。`,
+    }),
+  );
+  f.commit({ ok: true, value: back });
+  // Same effects as the human return of a confirmed merge.
+  expect(confirmation()).toMatchObject({
+    status: "superseded",
+    resolution: authorization,
+  });
+  expect(
+    f.state.work_items.find((w) => w.id === product.work_item_id)?.status,
+  ).toBe("changes_requested");
+  expect(back.events).toContainEqual(
+    expect.objectContaining({
+      type: "merge_changes_requested",
+      payload: expect.objectContaining({
+        decision_id: q.id,
+        run_kind: "fix",
+        reason: "选择 request_changes",
+        via: "delegated",
+      }),
+    }),
+  );
+  expect(
+    notices(f.state).find((n) => n.option === "request_changes"),
+  ).toMatchObject({
+    option: "request_changes",
+    body: expect.stringContaining("仍失败"),
+  });
+  expect(pmResolve("request_changes", { notice: "n" }).ok).toBe(false);
+  // Only one side takes effect: the human can no longer return it either.
+  expect(
+    recordDecision(
+      f.state,
+      human,
+      {
+        decision_id: q.id,
+        option: "request_changes",
+        rationale: "退回",
+        raw_quote: "退回",
+      },
+      f.io,
+    ).ok,
+  ).toBe(false);
+});
+
+test("PM Ops cannot return a confirmed merge whose check passed", async () => {
+  const { f, confirmation, check, pmResolve } = setup();
+  await f.accept();
+  check("passed");
+  f.commit(pmResolve("merge", { notice: "已合并" }));
+  expect(confirmation().status).toBe("resolved");
+  expect(pmResolve("request_changes", { notice: "n" }).ok).toBe(false);
+  expect(pmResolve("recheck", { notice: "n" }).ok).toBe(false);
+  expect(failedQueue(f.state)).toEqual([]);
+});
+
+test.each([
+  "spending",
+  "account",
+  "permission",
+  "data_deletion",
+  "scope_change",
+] as const)(
+  "a failed check on a %s card stays with the human",
+  async (category) => {
+    const { f, confirmation, raise, check, pmResolve } = setup();
+    raise(category);
+    await f.accept();
+    const q = confirmation();
+    f.commit(
+      recordDecision(
+        f.state,
+        human,
+        {
+          decision_id: q.id,
+          option: "merge",
+          rationale: "合并",
+          raw_quote: "合并",
+        },
+        { ...f.io, human_confirmation: "workbench" },
+      ),
+    );
+    check("failed");
+    expect(failedQueue(f.state)).toEqual([]);
+    for (const option of ["request_changes", "recheck"]) {
+      const result = pmResolve(option, { notice: "n" });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.code).toBe("unauthorized");
+    }
+    expect(humanPending(f.state)).toContain(q.id);
+  },
+);
+
+test("PM Ops may hand a failed confirmed merge to the human instead", async () => {
+  const { f, confirmation, check, pmResolve } = setup();
+  f.commit(
+    setProjectPreferences(
+      f.state,
+      human,
+      { pm_merge_confirmation: false },
+      f.io,
+    ),
+  );
+  await f.accept();
+  const q = confirmation();
+  f.commit(
+    recordDecision(
+      f.state,
+      human,
+      {
+        decision_id: q.id,
+        option: "merge",
+        rationale: "合并",
+        raw_quote: "合并",
+      },
+      f.io,
+    ),
+  );
+  check("failed");
+  expect(humanPending(f.state)).not.toContain(q.id);
+  f.commit(pmResolve("request_changes", { escalate: true }));
+  expect(confirmation()).toMatchObject({
+    status: "resolved",
+    decider: "human",
+    human_required_reason: expect.stringContaining("项目经理升级给你"),
+  });
+  expect(failedQueue(f.state)).toEqual([]);
+  expect(humanPending(f.state)).toContain(q.id);
+  expect(pmResolve("request_changes", { notice: "n" }).ok).toBe(false);
+  // Without an active PM Ops the human keeps the item, as before.
+  const noOps = setup(false);
+  await noOps.f.accept();
+  const nq = noOps.confirmation();
+  noOps.f.commit(
+    recordDecision(
+      noOps.f.state,
+      human,
+      {
+        decision_id: nq.id,
+        option: "merge",
+        rationale: "合并",
+        raw_quote: "合并",
+      },
+      noOps.f.io,
+    ),
+  );
+  noOps.check("failed");
+  expect(humanPending(noOps.f.state)).toContain(nq.id);
+});
+
+test("a failed check on a card the human flagged sensitive stays with the human (C-65)", async () => {
+  const { f, confirmation, check, pmResolve } = setup();
+  f.commit(sensitive(f.state, human, f.card.id, true));
+  await f.accept();
+  const q = confirmation();
+  expect(q.decider).toBe("human");
+  f.commit(
+    recordDecision(
+      f.state,
+      human,
+      {
+        decision_id: q.id,
+        option: "merge",
+        rationale: "合并",
+        raw_quote: "合并",
+      },
+      f.io,
+    ),
+  );
+  check("failed");
+  expect(failedQueue(f.state)).toEqual([]);
+  for (const option of ["request_changes", "recheck"]) {
+    const result = pmResolve(option, { notice: "n" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("unauthorized");
+  }
+  expect(humanPending(f.state)).toContain(q.id);
 });

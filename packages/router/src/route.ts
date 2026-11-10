@@ -13,6 +13,8 @@ import {
   cardTemplate,
   employeeNameKey,
   isCompletionVerifier,
+  latestMergeCheck,
+  mergeRequiresHuman,
   requesterNotificationRecipient,
 } from "@cardigan/domain";
 import {
@@ -785,6 +787,33 @@ function routeDecisionRequested(input: RouteInput, draft: Draft): void {
 function routeDecisionResolved(input: RouteInput, draft: Draft): void {
   const decision_id = payloadString(input.event.payload, "decision_id");
   const q = input.snapshot.decisions.find((q) => q.id === decision_id);
+  // P2a-1 §2.6: the check failed before the merge was confirmed (human or
+  // timeout); the item now belongs to PM Ops, so wake it here as well.
+  if (
+    input.event.type === "decision_resolved" &&
+    q?.trigger === "merge_confirmation" &&
+    q.card_id &&
+    q.status === "resolved" &&
+    q.resolution?.option === "merge" &&
+    q.kind === "approve" &&
+    "delivery_id" in q.target &&
+    !mergeRequiresHuman(input.snapshot, q)
+  ) {
+    const check = latestMergeCheck(
+      input.snapshot.events,
+      q.card_id,
+      q.target.delivery_id,
+    );
+    if (check && (check.status === "failed" || check.status === "timed_out"))
+      note(
+        input,
+        draft,
+        recipient.pm_ops(),
+        "decision",
+        "6.4/merge check finished",
+        `${subject(input)} 已确认合并，但合并检查结果 ${check.status}，请判断后退回修改或重新检查（${q.id}）。`,
+      );
+  }
   if (
     input.event.type === "decision_resolved" &&
     q?.raised_by?.startsWith("assignment:") &&
@@ -1201,13 +1230,23 @@ export function routeEvent(input: RouteInput): RouteResult {
       break;
     }
     case "merge_check_finished": {
-      // §7.4: the PM-held merge confirmation can be answered once the check is known.
+      // §7.4: the PM-held merge confirmation can be answered once the check is
+      // known; a failed or timed-out check on a confirmed merge is PM's to
+      // return or recheck unless the card is human-only (P2a-1 §2.6).
+      const status = payloadString(input.event.payload, "status");
+      const completion = payloadString(input.event.payload, "completion_id");
       const q = input.snapshot.decisions.find(
         (q) =>
           q.trigger === "merge_confirmation" &&
           q.card_id === input.event.card_id &&
-          q.decider === "role:pm" &&
-          q.status === "open",
+          ((q.decider === "role:pm" && q.status === "open") ||
+            (q.status === "resolved" &&
+              q.resolution?.option === "merge" &&
+              (status === "failed" || status === "timed_out") &&
+              q.kind === "approve" &&
+              "delivery_id" in q.target &&
+              q.target.delivery_id === completion &&
+              !mergeRequiresHuman(input.snapshot, q))),
       );
       if (q)
         note(
@@ -1216,7 +1255,9 @@ export function routeEvent(input: RouteInput): RouteResult {
           recipient.pm_ops(),
           "decision",
           "6.4/merge check finished",
-          `${subject(input)} 合并检查结果 ${payloadString(input.event.payload, "status") ?? "未知"}，请处理合并确认 ${q.id}。`,
+          q.status === "resolved"
+            ? `${subject(input)} 已确认合并，但合并检查结果 ${status}，请判断后退回修改或重新检查（${q.id}）。`
+            : `${subject(input)} 合并检查结果 ${status ?? "未知"}，请处理合并确认 ${q.id}。`,
         );
       break;
     }

@@ -143,6 +143,21 @@ test("C-49 PM instructions cover merge confirmation preconditions and notices", 
     expect(prompt).toContain(rule);
 });
 
+test("C-66 PM instructions cover returning or rechecking failed merge checks", () => {
+  const prompt = corePromptFor("pm");
+  for (const rule of [
+    "failed_merge_checks",
+    "先看失败用例和本卡改动的关系",
+    "选 request_changes 退回修改",
+    "修复方向",
+    "选 recheck 重新检查一次",
+    "重新检查再失败就退回",
+    "哪张卡、检查失败的原因、已退回或已重新检查",
+    "你不能退回或重新检查",
+  ])
+    expect(prompt).toContain(rule);
+});
+
 test("C-65 PM instructions hand sensitive cards' merges to the human", () => {
   const prompt = corePromptFor("pm");
   for (const rule of [

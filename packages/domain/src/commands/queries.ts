@@ -15,9 +15,9 @@ import type { Clock } from "../ports.js";
 import { reviewLimitAttention } from "../review-limit-attention.js";
 import { type CommandDraft, type CommandState, command } from "./core.js";
 import { decisionFollowupNeedsHuman } from "./decision-followup.js";
-import { isPmOps } from "./delegation.js";
+import { hasActivePmOps, isPmOps } from "./delegation.js";
 import { failedConfirmedMergeCheck, latestMergeCheck } from "./merge-check.js";
-import { pmMergeBlockers } from "./merge-delegation.js";
+import { pmFailedMergeCheck, pmMergeBlockers } from "./merge-delegation.js";
 import { resolveCardTemplate } from "./templates.js";
 
 function affects(d: CommandDraft, q: Decision, id: CardId) {
@@ -307,6 +307,22 @@ export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
                   )
                   .map((q) => [q.id, pmMergeBlockers(state, q)]),
               ),
+              // P2a-1 §2.6: failed or timed-out checks PM Ops may return
+              // (request_changes) or recheck, including confirmed merges.
+              failed_merge_checks: d.list("decisions").flatMap((q) => {
+                const check = pmFailedMergeCheck(state, q);
+                return check
+                  ? [
+                      {
+                        decision_id: q.id,
+                        card_id: q.card_id,
+                        confirmation_status: q.status,
+                        check,
+                        options: ["request_changes", "recheck"],
+                      },
+                    ]
+                  : [];
+              }),
               human_actions: d
                 .list("human_actions")
                 .filter((h) => h.status === "open" && h.triage === "pm_ops"),
@@ -354,7 +370,12 @@ export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
           (q) =>
             (q.decider === "human" &&
               (["open", "provisional"].includes(q.status) ||
-                failedConfirmedMergeCheck(state, q))) ||
+                (failedConfirmedMergeCheck(state, q) &&
+                  // PM Ops handles it and syncs a notice (P2a-1 §2.6).
+                  !(
+                    hasActivePmOps(d, "resolve_delegated_decision") &&
+                    pmFailedMergeCheck(state, q)
+                  )))) ||
             decisionFollowupNeedsHuman(state, q),
         )
         .map(view),

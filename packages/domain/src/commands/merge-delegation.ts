@@ -1,8 +1,13 @@
 import { isReviewStale } from "../derived.js";
 import type { Decision, Delivery } from "../entities.js";
 import { attempt, type CommandState } from "./core.js";
+import { mergeRequiresHuman } from "./delegation.js";
 import { mergeContext } from "./merge.js";
-import { latestMergeCheck } from "./merge-check.js";
+import {
+  failedConfirmedMergeCheck,
+  failedCurrentMergeCheck,
+  latestMergeCheck,
+} from "./merge-check.js";
 
 const newest = (values: readonly Delivery[]) =>
   [...values].sort(
@@ -81,3 +86,22 @@ export function pmMergeBlockers(
   }
   return [...new Set(blockers)];
 }
+
+/**
+ * §7.4 / P2a-1 §2.6: a merge confirmation whose current check failed or timed
+ * out that PM Ops may return (`request_changes`) or recheck — the PM-held open
+ * confirmation, or any confirmed merge (human, PM or timeout) whatever its
+ * decider. D12 / scope-change cards and confirmations handed to the human
+ * (`human_required_reason`) stay with the human.
+ */
+export function pmFailedMergeCheck(state: CommandState, q: Decision) {
+  if (q.trigger !== "merge_confirmation" || mergeRequiresHuman(state, q))
+    return undefined;
+  if (q.status === "resolved") return failedConfirmedMergeCheck(state, q);
+  return q.decider === "role:pm" && ["open", "provisional"].includes(q.status)
+    ? failedCurrentMergeCheck(state, q)
+    : undefined;
+}
+/** Policy evidence recorded when PM Ops handles a failed merge check. */
+export const pmMergeCheckFailureAuthority = (project_id: string) =>
+  `project:${project_id}/pm-ops-merge-check-failure`;
