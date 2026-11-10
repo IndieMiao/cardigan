@@ -3,6 +3,7 @@ import { decisionOption } from "../decision-labels.js";
 import { routeHash } from "../route.js";
 import { statusLabel } from "../status.js";
 import { LongContent } from "./Foundation.js";
+import { StatusIcon } from "./StatusIcon.js";
 
 export function CardSource({
   detail,
@@ -94,10 +95,7 @@ export function RecentConclusions({
       <ul>
         {rows.map(({ entry, label, tone }) => (
           <li key={entry.id}>
-            <span
-              className={`status conclusion-dot${tone ? ` status-${tone}` : ""}`}
-              aria-hidden="true"
-            />
+            <StatusIcon status={tone ?? "unknown"} decorative />
             <a
               title={label}
               href={routeHash({

@@ -1,13 +1,5 @@
 import type { MergeCheckView } from "../api.js";
-
-const labels = {
-  queued: "排队",
-  running: "运行中",
-  passed: "通过",
-  failed: "失败",
-  timed_out: "超时",
-  interrupted: "中断",
-} as const;
+import { StatusTag } from "./Foundation.js";
 
 function duration(check: MergeCheckView | null, live: boolean): string {
   if (!check || check.status === "queued") return "尚未开始";
@@ -42,10 +34,10 @@ export function MergeCheck({
       check?.attempt_id ?? "",
     );
   return (
-    <div className="merge-check">
+    <section className="merge-check" aria-label="合并检查">
       <div className="action-row">
         <span>合并检查</span>
-        <span className={`status status-${status}`}>{labels[status]}</span>
+        <StatusTag status={status} />
         <span className="hint">用时：{duration(check, live)}</span>
         {hasLog && check && (
           <a
@@ -57,10 +49,20 @@ export function MergeCheck({
           </a>
         )}
       </div>
+      {!!check?.checks.length && (
+        <ul className="merge-check-items" aria-label="单项检查">
+          {check.checks.map((item) => (
+            <li key={item.name}>
+              <span>{item.name}</span>
+              <StatusTag status={item.status} />
+            </li>
+          ))}
+        </ul>
+      )}
       {["failed", "timed_out", "interrupted"].includes(status) &&
         check?.summary && (
           <p className="merge-check-summary">{check.summary}</p>
         )}
-    </div>
+    </section>
   );
 }

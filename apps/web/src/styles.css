@@ -24,15 +24,21 @@
   --tooltip-text: #f5f7f6;
   --tooltip-border: #72877a;
   --status-wait: #b45309;
-  --status-progress: #2563a8;
+  --status-progress: #087e8b;
   --status-review: #6b4fb3;
   --status-done: #2e7d4f;
   --status-muted: #6b7280;
-  --status-backlog: var(--status-muted);
-  --status-todo: var(--status-wait);
+  --status-backlog: #64716b;
+  --status-pending: #2563a8;
+  --status-dispatched: #4f46bd;
+  --status-merge: #0f766e;
+  --status-cancelled: #78645e;
+  --status-idle: #737e77;
+  --status-unknown: #9b5520;
+  --status-cutout: #ffffff;
+  --status-todo: var(--status-pending);
   --status-in_progress: var(--status-progress);
-  --status-awaiting_merge: var(--status-review);
-  --status-cancelled: var(--status-muted);
+  --status-awaiting_merge: var(--status-merge);
   --radius: 8px;
   --gap: 12px;
   --font:
@@ -70,10 +76,18 @@
     --tooltip-text: #f5f7f6;
     --tooltip-border: #72877a;
     --status-wait: #edb96d;
-    --status-progress: #94bde9;
+    --status-progress: #65d3e0;
     --status-review: #c5b0f1;
     --status-done: #91cda5;
     --status-muted: #abb5b0;
+    --status-backlog: #acb8b1;
+    --status-pending: #94bde9;
+    --status-dispatched: #b6b0ff;
+    --status-merge: #6dd9b7;
+    --status-cancelled: #d1b4a6;
+    --status-idle: #95a39b;
+    --status-unknown: #f6b486;
+    --status-cutout: #171e1b;
   }
 }
 
@@ -758,7 +772,7 @@ button.quiet,
   font-weight: 600;
 }
 
-/* Status chips: a colour plus the label, never colour alone (§3.7). */
+/* C-48: shape + colour + visible text, shared by every status surface. */
 .status {
   display: inline-flex;
   align-items: center;
@@ -767,35 +781,56 @@ button.quiet,
   color: var(--text);
 }
 
-.status::before {
-  content: "";
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--status-backlog);
+.status-icon {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
   flex: none;
+  vertical-align: -3px;
+  color: var(--status-color);
 }
-
-.status-backlog::before {
-  background: var(--status-backlog);
+.status-cutout {
+  stroke: var(--status-cutout);
+  stroke-width: 2;
 }
-.status-todo::before {
-  background: var(--status-todo);
+.status-subdued {
+  color: var(--text-muted);
 }
-.status-in_progress::before {
-  background: var(--status-in_progress);
+.status-shape-backlog {
+  --status-color: var(--status-backlog);
 }
-.status-review::before {
-  background: var(--status-review);
+.status-shape-pending {
+  --status-color: var(--status-pending);
 }
-.status-awaiting_merge::before {
-  background: var(--status-awaiting_merge);
+.status-shape-dispatched {
+  --status-color: var(--status-dispatched);
 }
-.status-done::before {
-  background: var(--status-done);
+.status-shape-progress {
+  --status-color: var(--status-progress);
 }
-.status-cancelled::before {
-  background: var(--status-cancelled);
+.status-shape-review {
+  --status-color: var(--status-review);
+}
+.status-shape-merge {
+  --status-color: var(--status-merge);
+}
+.status-shape-success {
+  --status-color: var(--status-done);
+}
+.status-shape-error {
+  --status-color: var(--danger);
+}
+.status-shape-cancelled {
+  --status-color: var(--status-cancelled);
+}
+.status-shape-idle {
+  --status-color: var(--status-idle);
+}
+.status-shape-paused {
+  --status-color: var(--status-wait);
+}
+.status-shape-unknown {
+  --status-color: var(--status-unknown);
 }
 
 .visually-hidden {
@@ -1253,7 +1288,7 @@ fieldset.filters {
   border-left-color: var(--status-done);
 }
 .timeline-retracted {
-  opacity: 0.6;
+  color: var(--text-muted);
 }
 .timeline-head {
   display: grid;
@@ -1327,28 +1362,16 @@ fieldset.filters {
   font-weight: 400;
   color: var(--text-muted);
 }
+.timeline-entry .status {
+  font-size: var(--text-sm);
+}
 .timeline-conclusion .status {
   font-size: var(--text-sm);
   font-weight: 600;
-  color: var(--status-muted);
+  color: var(--status-color);
   padding: 3px 8px;
   border-radius: 4px;
   background: color-mix(in srgb, currentColor 12%, var(--timeline-card));
-}
-.timeline-conclusion .status::before {
-  background: currentColor;
-}
-.timeline-conclusion :is(.status-pass, .status-accepted, .status-resolved) {
-  color: var(--status-done);
-}
-.timeline-conclusion :is(.status-reject, .status-rejected, .status-revoked) {
-  color: var(--danger);
-}
-.timeline-conclusion :is(.status-open, .status-provisional) {
-  color: var(--status-wait);
-}
-.timeline-conclusion :is(.status-conditional, .status-submitted) {
-  color: var(--status-review);
 }
 .timeline-retracted-label {
   color: var(--danger);
@@ -2188,52 +2211,20 @@ body[data-lightbox="open"] .drawer-overlay {
   fill: var(--tooltip-bg);
 }
 
-/* One colour role per state across all views; text stays readable without colour. */
-.status-ready::before,
-.status-running::before,
-.status-dispatched::before,
-.status-provisioning::before {
-  background: var(--status-progress);
-}
-.status-submitted::before,
-.status-delivered::before,
-.status-conditional::before {
-  background: var(--status-review);
-}
-.status-waiting::before,
-.status-open::before,
-.status-provisional::before,
-.status-waiting_decision::before,
-.status-needs_attention::before,
-.status-queued::before,
-.status-pending::before {
-  background: var(--status-wait);
-}
-.status-failed::before,
-.status-timed_out::before,
-.status-blocked::before,
-.status-lost::before,
-.status-rejected::before,
-.status-reject::before,
-.status-delivery_failed::before,
-.status-changes_requested::before {
-  background: var(--danger);
-}
-.status-passed::before,
-.status-pass::before,
-.status-accepted::before,
-.status-resolved::before,
-.status-completed::before,
-.status-acked::before,
-.status-online::before {
-  background: var(--status-done);
-}
-.status-interrupted::before {
-  background: var(--status-muted);
-}
 .merge-check {
   margin-block: 12px;
   min-width: 0;
+}
+.merge-check-items {
+  list-style: none;
+  padding: 0;
+  margin-block: 8px;
+}
+.merge-check-items li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
 }
 .merge-check-summary {
   white-space: pre-wrap;
@@ -2584,10 +2575,10 @@ body[data-lightbox="open"] .drawer-overlay {
   gap: 8px;
   min-width: 0;
 }
-.recent-conclusions .conclusion-dot {
+.recent-conclusions .status-icon {
   flex: none;
 }
-/* §9 U6a: the result dot carries the outcome; the link underlines on hover. */
+/* The status icon carries the outcome; the link underlines on hover. */
 .recent-conclusions a {
   display: block;
   min-width: 0;
@@ -2735,10 +2726,6 @@ body[data-lightbox="open"] .drawer-overlay {
 .card-superseded .card-field > :last-child,
 .card-superseded .card-table-title {
   color: var(--text-muted);
-}
-
-.card-superseded .status::before {
-  background: var(--status-muted);
 }
 
 .card-superseded-notice {

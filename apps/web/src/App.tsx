@@ -6,7 +6,7 @@ import {
   type ProjectSummary,
   type SessionInfo,
 } from "./api.js";
-import { EmptyState } from "./components/Foundation.js";
+import { EmptyState, StatusTag } from "./components/Foundation.js";
 import { routeHash, useRoute } from "./route.js";
 import { useProjectStream } from "./useProjectStream.js";
 import { useResource } from "./useResource.js";
@@ -257,15 +257,23 @@ function Workbench({
         )}
         <div className="sidebar-footer">
           {selected && (
-            <span
-              className={`status status-${live.status === "live" ? "done" : "todo"}`}
-              role="status"
-            >
-              {live.status === "live"
-                ? "实时更新已连接"
-                : live.status === "retrying"
-                  ? "连接中断，正在重连"
-                  : "正在连接实时更新"}
+            <span role="status">
+              <StatusTag
+                status={
+                  live.status === "live"
+                    ? "online"
+                    : live.status === "retrying"
+                      ? "degraded"
+                      : "provisioning"
+                }
+                label={
+                  live.status === "live"
+                    ? "实时更新已连接"
+                    : live.status === "retrying"
+                      ? "连接中断，正在重连"
+                      : "正在连接实时更新"
+                }
+              />
             </span>
           )}
           <button

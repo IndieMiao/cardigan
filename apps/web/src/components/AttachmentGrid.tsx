@@ -1,9 +1,8 @@
 import type { AttachmentView } from "../api.js";
-import { statusLabel } from "../status.js";
 import { AttachmentCaption, attachmentName } from "./AttachmentCaption.js";
 import { AttachmentPreview, isBitmap } from "./AttachmentPreview.js";
 import { EmployeeIdentity } from "./EmployeeIdentity.js";
-import { Time } from "./Foundation.js";
+import { StatusTag, Time } from "./Foundation.js";
 import { splitSuperseded } from "./Timeline.js";
 
 const size = (bytes: number) =>
@@ -47,7 +46,7 @@ function Gallery({ attachments }: { attachments: readonly AttachmentView[] }) {
           <span>{size(a.size)}</span>
           {a.basis && (
             <span>
-              依据 {a.basis.id}（{statusLabel(a.basis.status)}）
+              依据 {a.basis.id}（<StatusTag status={a.basis.status} />）
             </span>
           )}
           <a href={a.download_path} download>

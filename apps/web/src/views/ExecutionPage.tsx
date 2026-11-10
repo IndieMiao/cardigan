@@ -133,7 +133,7 @@ function AssignmentRow({
             </dd>
             <dt>Assignment</dt>
             <dd>
-              <StatusTag status={a.status} />
+              <StatusTag status={a.status} subdued={a.status === "active"} />
             </dd>
           </dl>
         </td>

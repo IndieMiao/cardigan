@@ -508,7 +508,7 @@ test("U5b recent conclusions are capped, link to their event and disappear when 
   );
 });
 
-test("U6a recent conclusions carry a result dot and only underline the link on hover", () => {
+test("recent conclusions share status shapes and only underline the link on hover", () => {
   const base = cardDetail(),
     pass = timelineEntry({
       id: "C-1#6",
@@ -552,16 +552,16 @@ test("U6a recent conclusions carry a result dot and only underline the link on h
   );
   const rows = [...document.querySelectorAll(".recent-conclusions li")];
   expect(
-    rows.map((row) => row.querySelector(".conclusion-dot")?.className),
+    rows.map((row) => row.querySelector(".status-icon")?.getAttribute("class")),
   ).toEqual([
-    "status conclusion-dot status-pass",
-    "status conclusion-dot status-reject",
+    "status-icon status-shape-success",
+    "status-icon status-shape-error",
   ]);
   // Decorative: the row text already states the outcome.
   for (const row of rows)
-    expect(
-      row.querySelector(".conclusion-dot")?.getAttribute("aria-hidden"),
-    ).toBe("true");
+    expect(row.querySelector(".status-icon")?.getAttribute("aria-hidden")).toBe(
+      "true",
+    );
   const css = readFileSync(
     new NodeURL("../styles.css", import.meta.url),
     "utf8",
@@ -571,7 +571,7 @@ test("U6a recent conclusions carry a result dot and only underline the link on h
   const link = css.slice(linkStart, css.indexOf("}", linkStart) + 1);
   expect(link).toContain("text-decoration: none;");
   expect(css).toContain(".recent-conclusions a:hover {");
-  expect(css).toContain(".status-reject::before");
+  expect(css).toContain(".status-shape-error");
 });
 
 test("U5b a conclusion outside the drawer window loads and scrolls its original entry without leaving the drawer", async () => {

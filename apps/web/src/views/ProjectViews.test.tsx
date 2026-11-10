@@ -170,6 +170,16 @@ test("execution shows working assignments in a table and expands the newest Run,
   expect(row?.textContent).toContain("排队中");
   expect(row?.textContent).toContain("运行");
   expect(row?.textContent).toContain("Assignment");
+  expect(
+    row?.querySelector(".status-active")?.classList.contains("status-subdued"),
+  ).toBe(true);
+  expect(row?.querySelector(".status-active svg")).toBeNull();
+  expect(
+    row?.querySelector(".status-idle svg.status-shape-idle"),
+  ).not.toBeNull();
+  expect(
+    row?.querySelector(".status-queued svg.status-shape-pending"),
+  ).not.toBeNull();
   expect(screen.getByRole("columnheader", { name: "最近 Run" })).toBeTruthy();
   fireEvent.click(toggle);
   const expanded = await screen.findByRole("button", {
@@ -193,6 +203,43 @@ test("execution shows working assignments in a table and expands the newest Run,
   expect(
     screen.getByText("cardigan assignment stop 'A-1' --project 'p-1'"),
   ).toBeTruthy();
+});
+
+test("execution keeps suspended assignments, lost runtimes and blocked Run outcomes prominent", async () => {
+  window.location.hash = "#/p/p-1/execution?view=all";
+  render(
+    <ExecutionPage
+      client={fakeClient({
+        execution: async () => ({
+          assignments: [
+            { ...assignment, status: "suspended", runtime_state: "lost" },
+          ],
+          runs: [{ ...run, status: "completed", outcome: "blocked" }],
+          machines: [],
+        }),
+      })}
+      projectId="p-1"
+    />,
+  );
+  const row = (
+    await screen.findByRole("button", { name: "展开 A-1 详情" })
+  ).closest("tr");
+  expect(
+    row?.querySelector(".status-suspended svg.status-shape-paused"),
+  ).not.toBeNull();
+  expect(
+    row?.querySelector(".status-lost svg.status-shape-error"),
+  ).not.toBeNull();
+  expect(
+    row?.querySelector(".status-blocked svg.status-shape-error"),
+  ).not.toBeNull();
+  expect(row?.querySelector(".status-subdued")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "展开 A-1 详情" }));
+  expect(
+    screen
+      .getByRole("region", { name: "A-1 Run 历史" })
+      .querySelector(".status-blocked svg.status-shape-error"),
+  ).not.toBeNull();
 });
 
 test.each([
