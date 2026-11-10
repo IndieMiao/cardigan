@@ -68,12 +68,14 @@ test.each(
     const link = await screen.findByRole("link", { name: "已被 C-2 取代" });
     expect(link.closest(".card-header")).toBeTruthy();
     const nav = screen.getByRole("navigation", { name: "卡片区块导航" });
-    expect(nav.querySelector(".card-nav-id")?.textContent).toBe("C-1");
+    expect(nav.querySelector(".card-nav-id")?.textContent).toBe(
+      inDrawer ? undefined : "C-1",
+    );
     expect(nav.querySelector(".card-nav-title")?.textContent).toBe(
-      detail.card.title,
+      inDrawer ? undefined : detail.card.title,
     );
     expect(nav.querySelector(".card-nav-title")?.getAttribute("title")).toBe(
-      detail.card.title,
+      inDrawer ? undefined : detail.card.title,
     );
     expect(within(nav).queryByText(/已被.*取代/)).toBeNull();
     expect(link.getAttribute("href")).toBe("#/p/p-1/cards/C-2");

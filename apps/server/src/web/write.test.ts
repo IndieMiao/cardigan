@@ -8,6 +8,7 @@ import {
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import {
+  type Card,
   type Decision,
   requestDecision,
   requestHumanAction,
@@ -393,6 +394,9 @@ test("every write route enforces cookie authentication, Origin and JSON before a
       cardPath("comments"),
       cardPath("instructions"),
       cardPath("attachments"),
+      cardPath("update"),
+      cardPath("cancel"),
+      cardPath("supersede"),
       "/decisions/q(1)/resolve",
       "/decisions/q(1)/comments",
       "/human-actions/h(1)/complete",
@@ -729,4 +733,197 @@ test("invalid keys are rejected and validation failures do not consume a key", a
   expect(
     await request(cardPath("comments"), { body: "修正正文" }, headers),
   ).toMatchObject({ status: 200 });
+});
+
+test("K2 updates every field as human and replays without overwriting later changes", async () => {
+  const payload = {
+    title: "新标题",
+    goal: "新目标",
+    acceptance_criteria: ["第一条", "第二条", "新增一条"],
+    priority: 3,
+  };
+  const headers = { "Idempotency-Key": "card-edit" };
+  const first = await request(cardPath("update"), payload, headers);
+  expect(first).toMatchObject({ status: 200, body: payload });
+  expect(s.state().events.at(-1)).toMatchObject({
+    type: "card_updated",
+    actor: { kind: "human" },
+  });
+  const removed = { acceptance_criteria: ["修改后的唯一一条"] };
+  expect(await request(cardPath("update"), removed)).toMatchObject({
+    status: 200,
+    body: removed,
+  });
+  const before = snapshot();
+  expect(await request(cardPath("update"), payload, headers)).toEqual(first);
+  expect(
+    await request(cardPath("update"), { title: "冲突" }, headers),
+  ).toMatchObject({
+    status: 409,
+    body: { error: { code: "idempotency_conflict" } },
+  });
+  expect(snapshot()).toBe(before);
+  expect(s.state().cards.find((card) => card.id === s.card.id)).toMatchObject(
+    removed,
+  );
+});
+
+test("K2 rejects empty fields and manual progress without partial changes", async () => {
+  const before = snapshot();
+  for (const payload of [
+    {},
+    { title: " " },
+    { goal: "" },
+    { acceptance_criteria: [] },
+    { acceptance_criteria: [""] },
+    { priority: "high" },
+    { title: "valid", status: "done" },
+  ]) {
+    expect(await request(cardPath("update"), payload)).toMatchObject({
+      status: 400,
+    });
+    expect(snapshot()).toBe(before);
+  }
+});
+
+test.each([undefined, "", "不再需要这个目标"])(
+  "K2 cancellation records its optional reason once (%s)",
+  async (reason) => {
+    // A passed verifier survives cancellation; other work follows the domain transition.
+    s.store().uow.run((tx) => {
+      const workItemId = s.primary.verifier.work_item_id;
+      if (!workItemId) throw new Error("Missing verifier work item");
+      const item = tx.work_items.get(s.project.project_id, workItemId);
+      if (!item) throw new Error("Missing verifier");
+      tx.work_items.put(s.project.project_id, { ...item, status: "passed" });
+    });
+    const payload = reason === undefined ? {} : { reason };
+    const headers = { "Idempotency-Key": "cancel-once" };
+    const before = s.state();
+    const first = await request(cardPath("cancel"), payload, headers);
+    expect(first).toMatchObject({ status: 200, body: { status: "cancelled" } });
+    const committed = snapshot();
+    expect(await request(cardPath("cancel"), payload, headers)).toEqual(first);
+    expect(snapshot()).toBe(committed);
+    expect(
+      s
+        .state()
+        .work_items.filter((item) => item.card_id === s.card.id)
+        .every((item) =>
+          item.id === s.primary.verifier.work_item_id
+            ? item.status === "passed"
+            : item.status === "cancelled",
+        ),
+    ).toBe(true);
+    const timeline = s.state().timeline.slice(before.timeline.length);
+    expect(timeline).toHaveLength(reason ? 2 : 1);
+    if (reason)
+      expect(timeline).toContainEqual(
+        expect.objectContaining({
+          type: "comment",
+          author: "human",
+          body: `取消卡片原因：${reason}`,
+        }),
+      );
+  },
+);
+
+test("K2 cancelled card and explanation roll back together, leaving the retry key usable", async () => {
+  const before = snapshot();
+  const headers = { "Idempotency-Key": "cancel-rollback" };
+  const payload = { reason: "需同时保存" };
+  s.store().database.exec(
+    "CREATE TRIGGER reject_cancel_reason BEFORE INSERT ON timeline WHEN json_extract(NEW.doc, '$.type') = 'comment' BEGIN SELECT RAISE(ABORT, 'reason failure'); END",
+  );
+  expect(await request(cardPath("cancel"), payload, headers)).toMatchObject({
+    status: 500,
+  });
+  expect(snapshot()).toBe(before);
+  s.store().database.exec("DROP TRIGGER reject_cancel_reason");
+  expect(await request(cardPath("cancel"), payload, headers)).toMatchObject({
+    status: 200,
+  });
+});
+
+test("K2 refuses cancellation of done cards in Chinese and suggests superseding", async () => {
+  s.store().uow.run((tx) =>
+    tx.cards.put(s.project.project_id, {
+      ...s.card,
+      status: "done",
+      resolution: "done",
+    }),
+  );
+  const before = snapshot();
+  expect(
+    await request(cardPath("cancel"), { reason: "已完成后尝试" }),
+  ).toMatchObject({
+    status: 409,
+    body: {
+      error: {
+        code: "illegal_transition",
+        message: "已完成卡片不能取消；请建新卡，再把旧卡标记为被取代。",
+      },
+    },
+  });
+  expect(snapshot()).toBe(before);
+});
+
+test.each(["done", "cancelled"] as const)(
+  "K2 supersedes a %s card with a same-project card, preserving status and work",
+  async (status) => {
+    s.store().uow.run((tx) => {
+      tx.cards.put(s.project.project_id, { ...s.card, status });
+      tx.cards.put(s.project.project_id, {
+        ...s.card,
+        id: "C-98" as Card["id"],
+      });
+      tx.cards.put("other-project", {
+        ...s.card,
+        project_id: "other-project",
+        id: "C-99" as Card["id"],
+      });
+    });
+    const before = snapshot();
+    for (const target of [s.card.id, "C-99", "C-100", "other-project/C-98"]) {
+      const response = await request(cardPath("supersede"), {
+        superseded_by: target,
+      });
+      expect(response.status).toBeGreaterThanOrEqual(400);
+      expect(snapshot()).toBe(before);
+    }
+    const work = s.state().work_items;
+    const payload = { superseded_by: "C-98" };
+    const headers = { "Idempotency-Key": "supersede-once" };
+    const first = await request(cardPath("supersede"), payload, headers);
+    expect(first).toMatchObject({
+      status: 200,
+      body: {
+        ...payload,
+        resolution: "superseded",
+        status,
+        related_cards: expect.arrayContaining(["C-98"]),
+      },
+    });
+    expect(s.state().work_items).toEqual(work);
+    expect(s.state().timeline.at(-1)).toMatchObject({
+      body: "已被 C-98 取代",
+      author: "human",
+    });
+    const committed = snapshot();
+    expect(await request(cardPath("supersede"), payload, headers)).toEqual(
+      first,
+    );
+    expect(snapshot()).toBe(committed);
+  },
+);
+
+test("K2 cannot supersede an unfinished card", async () => {
+  const before = snapshot();
+  expect(
+    await request(cardPath("supersede"), { superseded_by: "C-98" }),
+  ).toMatchObject({
+    status: 409,
+    body: { error: { message: "只有已完成或已取消的卡片才能标记为被取代。" } },
+  });
+  expect(snapshot()).toBe(before);
 });

@@ -515,7 +515,32 @@ export interface CardReadOptions {
   readonly at?: string;
 }
 
+export interface CardUpdateInput {
+  readonly title: string;
+  readonly goal: string;
+  readonly acceptance_criteria: readonly string[];
+  readonly priority: number;
+}
+
 export interface CardiganClient {
+  updateCard(
+    projectId: string,
+    cardId: string,
+    input: CardUpdateInput,
+    idempotencyKey?: string,
+  ): Promise<void>;
+  cancelCard(
+    projectId: string,
+    cardId: string,
+    reason: string,
+    idempotencyKey?: string,
+  ): Promise<void>;
+  supersedeCard(
+    projectId: string,
+    cardId: string,
+    supersededBy: string,
+    idempotencyKey?: string,
+  ): Promise<void>;
   subscribe(projectId: string, callbacks: StreamCallbacks): () => void;
   activity(projectId: string, filters: ActivityFilter): Promise<ActivityData>;
   snapshot(projectId: string): Promise<SnapshotData>;
@@ -724,6 +749,46 @@ export class HttpCardiganClient implements CardiganClient {
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/${rest}`,
       { method: "POST", body: JSON.stringify(body), idempotencyKey },
+    );
+  }
+
+  async updateCard(
+    projectId: string,
+    cardId: string,
+    input: CardUpdateInput,
+    idempotencyKey = crypto.randomUUID(),
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      `cards/${encodeURIComponent(cardId)}/update`,
+      input,
+      idempotencyKey,
+    );
+  }
+  async cancelCard(
+    projectId: string,
+    cardId: string,
+    reason: string,
+    idempotencyKey = crypto.randomUUID(),
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      `cards/${encodeURIComponent(cardId)}/cancel`,
+      { reason },
+      idempotencyKey,
+    );
+  }
+  async supersedeCard(
+    projectId: string,
+    cardId: string,
+    supersededBy: string,
+    idempotencyKey = crypto.randomUUID(),
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      `cards/${encodeURIComponent(cardId)}/supersede`,
+      { superseded_by: supersededBy },
+      idempotencyKey,
     );
   }
 
