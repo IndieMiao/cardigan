@@ -1,6 +1,11 @@
 import { type ToolName, toolNames } from "@cardigan/domain";
 import { RoleVersionError, Store, writeRole } from "@cardigan/store";
-import { CliError, EXIT, formatCommandError } from "./errors.js";
+import {
+  CliError,
+  EXIT,
+  formatCommandError,
+  formatRoleVersionError,
+} from "./errors.js";
 import { announceDataDir, resolveProject } from "./host.js";
 import type { CliIo } from "./io.js";
 import { readRoleFile, roleFromFile } from "./role-file.js";
@@ -370,7 +375,14 @@ async function writeRoleFile(
         );
       } catch (error) {
         if (error instanceof RoleVersionError) {
-          throw new CliError(error.message, EXIT.usage);
+          throw new CliError(
+            formatRoleVersionError(
+              isUpdate ? "更新角色" : "创建角色",
+              definition.role_id,
+              error,
+            ),
+            EXIT.usage,
+          );
         }
         throw error;
       }

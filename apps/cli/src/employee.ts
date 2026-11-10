@@ -13,7 +13,7 @@ import {
 } from "@cardigan/domain";
 import { persistEmployeeEffect, Store } from "@cardigan/store";
 import { loadConfig } from "./config.js";
-import { CliError, EXIT } from "./errors.js";
+import { CliError, EXIT, formatCommandError } from "./errors.js";
 import { announceDataDir, systemClock } from "./host.js";
 import type { CliIo } from "./io.js";
 import { resolveLaunchPaths } from "./paths.js";
@@ -173,7 +173,21 @@ export async function runEmployeeCommand(
         default:
           result = deactivateEmployee(employees, actor, id, ports);
       }
-      if (!result.ok) throw new CliError(result.error.message, EXIT.usage);
+      if (!result.ok)
+        throw new CliError(
+          formatCommandError(
+            command === "add"
+              ? "创建员工"
+              : command === "update"
+                ? "更新员工"
+                : command === "activate"
+                  ? "恢复员工"
+                  : "停用员工",
+            command === "add" ? (flags.name as string) : id,
+            result.error,
+          ),
+          EXIT.usage,
+        );
       persistEmployeeEffect(tx, result.value);
       return result.value.data;
     });

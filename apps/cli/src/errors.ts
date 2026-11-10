@@ -84,6 +84,41 @@ export function formatCommandError(
   return `无法${operation} ${target}：${describeError(error)}（${error.code}）`;
 }
 
+/** The legacy store exception has no code; classify its business refusal at the CLI boundary. */
+export function formatRoleVersionError(
+  operation: string,
+  roleId: string,
+  error: { readonly message: string },
+): string {
+  const duplicate =
+    /^role .+ already exists at v(\d+); use "role update" to add a new version$/u.exec(
+      error.message,
+    );
+  const missing = /^role .+ does not exist; use "role add" first$/u.test(
+    error.message,
+  );
+  const version =
+    /^role .+ would be v(\d+); refusing to write v(\d+) \(versions are append-only\)$/u.exec(
+      error.message,
+    );
+  return formatCommandError(operation, roleId, {
+    // Match duplicate project validation; absent roles are lookup failures.
+    // A nonconsecutive version violates the append-only history invariant.
+    code: duplicate
+      ? "validation_failed"
+      : missing
+        ? "not_found"
+        : "invariant_violation",
+    message: duplicate
+      ? `角色已存在（v${duplicate[1]}），请用 cardigan role update 添加新版本`
+      : missing
+        ? "角色不存在，请先用 cardigan role add 创建"
+        : version
+          ? `角色版本只能追加，下一个版本应为 v${version[1]}，不能写入 v${version[2]}`
+          : `角色版本规则拒绝了操作：${error.message}`,
+  });
+}
+
 /** The host launch adapter wraps domain/Runtime errors as plain Error messages. */
 export function formatLaunchError(
   target: string,

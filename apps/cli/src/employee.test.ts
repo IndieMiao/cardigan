@@ -104,8 +104,12 @@ test("global list supports role filters and ignores project selection", async ()
   expect(await run(["list", "--role", "coder"])).toBe(0);
   expect(output.join("\n")).toContain("关羽");
   expect(output.join("\n")).not.toContain("诸葛亮");
-  expect(await run(add)).not.toBe(0);
-  expect(errors.join("\n")).toContain("在职员工已使用名字");
+  const before = snapshot();
+  expect(await run(add)).toBe(2);
+  expect(errors.at(-1)).toBe(
+    "无法创建员工 诸葛亮：在职员工已使用名字：诸葛亮（validation_failed）",
+  );
+  expect(snapshot()).toEqual(before);
 });
 
 test("launch-profile is checked on add and update, clearing is explicit and role stays unchanged", async () => {

@@ -98,13 +98,16 @@ test("role add --file writes version 1 and update appends version 2", async () =
 test("role add refuses a role that already has a version", async () => {
   await run(["role", "add", "--file", roleFile]);
   expect(await run(["role", "add", "--file", roleFile])).toBe(2);
-  expect(errors.join("\n")).toContain("already exists");
-  expect(errors.join("\n")).toContain("role update");
+  expect(errors.at(-1)).toBe(
+    "无法创建角色 coder：角色已存在（v1），请用 cardigan role update 添加新版本（validation_failed）",
+  );
 });
 
 test("role update refuses a role that was never added", async () => {
   expect(await run(["role", "update", "--file", roleFile])).toBe(2);
-  expect(errors.join("\n")).toContain("does not exist");
+  expect(errors.at(-1)).toBe(
+    "无法更新角色 coder：角色不存在，请先用 cardigan role add 创建（not_found）",
+  );
 });
 
 test("a role file cannot pin a version", async () => {

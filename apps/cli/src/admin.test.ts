@@ -1,8 +1,9 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import * as roleStore from "@cardigan/store";
 import { Store } from "@cardigan/store";
-import { afterEach, beforeEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { main } from "./index.js";
 import type { CliIo } from "./io.js";
 
@@ -30,6 +31,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   rmSync(dataDir, { recursive: true, force: true });
 });
 
@@ -132,6 +134,67 @@ test("role add requires the project to exist", async () => {
   expect(await run(["role", "add", "p-missing", "coder"])).toBe(2);
   expect(err.join("\n")).toContain("项目 p-missing 不存在");
 });
+
+test.each([
+  {
+    scenario: "duplicate",
+    command: "add",
+    expected:
+      "无法创建角色 tester：角色已存在（v1），请用 cardigan role update 添加新版本（validation_failed）",
+  },
+  {
+    scenario: "missing",
+    command: "update",
+    expected:
+      "无法更新角色 tester：角色不存在，请先用 cardigan role add 创建（not_found）",
+  },
+  {
+    scenario: "version",
+    command: "update",
+    expected:
+      "无法更新角色 tester：角色版本只能追加，下一个版本应为 v2，不能写入 v4（invariant_violation）",
+  },
+])(
+  "role rules report complete Chinese errors without changing history: $scenario",
+  async ({ scenario, command, expected }) => {
+    await run(["project", "create", "p-cli"]);
+    const file = join(dataDir, "tester.yaml");
+    writeFileSync(
+      file,
+      `role_id: tester
+display_name: Tester
+kind: work
+core_prompt: Test the delivery.
+harness: codex
+launch_profile_ref: test-agent
+worktree: none
+`,
+    );
+    if (scenario !== "missing")
+      expect(await run(["role", "add", "--file", file])).toBe(0);
+    if (scenario === "version") {
+      // The CLI chooses the next version automatically. Exercise its exception
+      // boundary with a real store rejection, without adding a version flag.
+      const write = roleStore.writeRole;
+      vi.spyOn(roleStore, "writeRole").mockImplementationOnce(
+        (tx, project, role, options) =>
+          write(tx, project, role, { ...options, version: 4 }),
+      );
+    }
+    const store = Store.open({ dataDir });
+    try {
+      const before = store.uow.read((tx) => tx.roles.list("p-cli"));
+      out = [];
+      err = [];
+      expect(await run(["role", command, "--file", file])).toBe(2);
+      expect(err).toEqual([`数据目录：${dataDir}`, expected]);
+      expect(out).toEqual([]);
+      expect(store.uow.read((tx) => tx.roles.list("p-cli"))).toEqual(before);
+    } finally {
+      store.close();
+    }
+  },
+);
 
 test("invalid identifiers and flags are usage errors", async () => {
   expect(await run(["project", "create", "Bad Id"])).toBe(2);
