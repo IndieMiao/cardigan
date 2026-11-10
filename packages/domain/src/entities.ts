@@ -474,6 +474,9 @@ export interface Machine {
 }
 interface AttachmentFields {
   readonly id: AttachmentId;
+  /** Display metadata only; storage is addressed by sha256. */
+  readonly original_filename?: string;
+  readonly note?: string;
   readonly sha256: string;
   readonly mime: string;
   readonly size: number;

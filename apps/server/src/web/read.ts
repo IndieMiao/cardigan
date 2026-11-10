@@ -17,6 +17,7 @@ import {
   deriveReviewMatrix,
   extractReferences,
   listNeedsYou,
+  parseAvatarReference,
   projectSnapshot,
   type Result,
   resolveReferences,
@@ -72,7 +73,7 @@ export function projectState(
 function webAuthorView(state: CommandState, author: Author) {
   const view = authorView(state, author);
   const employee = state.employees?.find((e) => e.id === view.employee?.id);
-  const avatar = employee?.avatar;
+  const avatar = parseAvatarReference(employee?.avatar);
   return {
     ...view,
     author,
@@ -84,7 +85,11 @@ function webAuthorView(state: CommandState, author: Author) {
           bio: employee.bio,
           role_id: employee.role_id,
           avatar:
-            avatar && /^\/(?![/\\])[^\s\\]*$/.test(avatar) ? avatar : null,
+            avatar?.kind === "library"
+              ? `/avatars/v1/${avatar.id}/head-64.webp`
+              : avatar?.kind === "upload"
+                ? `/api/avatars/${avatar.sha256}`
+                : null,
         }
       : null,
   };
@@ -271,6 +276,8 @@ function affectsCard(
 /** Attachment metadata as the browser gets it; the blob is a separate request. */
 export interface AttachmentView extends WebAuthorView {
   readonly id: string;
+  readonly original_filename?: string;
+  readonly note?: string;
   readonly mime: string;
   readonly size: number;
   readonly sha256: string;
@@ -337,6 +344,10 @@ export function attachmentViews(
             };
       return {
         id: attachment.id,
+        ...(attachment.original_filename === undefined
+          ? {}
+          : { original_filename: attachment.original_filename }),
+        ...(attachment.note === undefined ? {} : { note: attachment.note }),
         mime: attachment.mime,
         size: attachment.size,
         sha256: attachment.sha256,

@@ -5,6 +5,7 @@ import { project_id, seedWebProject } from "../../test-support/web-data.js";
 test("Workbench logs one duration and fixed route per read/write/error without request secrets", async () => {
   const entries: Readonly<Record<string, unknown>>[] = [];
   const password = "fictional-password-for-log-test";
+  const avatarId = "a".repeat(64);
   const f = await webHarness({ password, log: (event) => entries.push(event) });
   try {
     seedWebProject(f.store, f.dataDir);
@@ -67,6 +68,13 @@ test("Workbench logs one duration and fixed route per read/write/error without r
       route: "/api/projects/:project_id/preferences",
       status: 200,
     });
+    expect(
+      await request(`/api/avatars/${avatarId}?token=query-secret`),
+    ).toMatchObject({
+      route: "/api/avatars/:sha256",
+      code: "not_found",
+      status: 404,
+    });
     const spy = vi
       .spyOn(f.store.database, "prepare")
       .mockImplementationOnce(() => {
@@ -89,6 +97,7 @@ test("Workbench logs one duration and fixed route per read/write/error without r
       "body-secret",
       "path-secret",
       "error-secret",
+      avatarId,
     ])
       expect(logs).not.toContain(secret);
     expect(entries[0]).toMatchObject({

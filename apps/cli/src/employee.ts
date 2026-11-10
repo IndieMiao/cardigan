@@ -12,6 +12,7 @@ import {
   updateEmployee,
 } from "@cardigan/domain";
 import { persistEmployeeEffect, Store } from "@cardigan/store";
+import { uploadAvatarFile, validateLibraryAvatar } from "./avatar.js";
 import { loadConfig } from "./config.js";
 import { CliError, EXIT } from "./errors.js";
 import { announceDataDir, systemClock } from "./host.js";
@@ -20,13 +21,20 @@ import { resolveLaunchPaths } from "./paths.js";
 
 const USAGE = [
   "用法：cardigan employee <命令>（全局员工，无需选择项目）",
-  "  add --name <名字> --title <职位> --role <角色> [--bio <简介>] [--avatar <引用>] [--launch-profile <名字>]",
+  "  add --name <名字> --title <职位> --role <角色> [--bio <简介>] [--avatar library:<人物 id> | --avatar-file <路径>] [--launch-profile <名字>]",
   "  list [--role <角色>] [--all]",
-  "  update <E-n> [--name <名字>] [--title <职位>] [--bio <简介>] [--avatar <引用>] [--launch-profile <名字>]",
+  "  update <E-n> [--name <名字>] [--title <职位>] [--bio <简介>] [--avatar library:<人物 id> | --avatar-file <路径>] [--launch-profile <名字>]",
   "  deactivate <E-n> / activate <E-n>",
   "可用 --data-dir <目录> 指定数据库；update 的简介、头像、启动配置传空字符串可清空。",
 ].join("\n");
-const editableFlags = ["name", "title", "bio", "avatar", "launch-profile"];
+const editableFlags = [
+  "name",
+  "title",
+  "bio",
+  "avatar",
+  "avatar-file",
+  "launch-profile",
+];
 
 function parse(args: readonly string[]) {
   const [command, ...rest] = args;
@@ -92,6 +100,9 @@ function parse(args: readonly string[]) {
     !editableFlags.some((key) => flags[key] !== undefined)
   )
     throw new CliError("至少指定一个员工修改字段", EXIT.usage);
+  if (flags.avatar !== undefined && flags["avatar-file"] !== undefined)
+    throw new CliError("--avatar 和 --avatar-file 不能同时使用", EXIT.usage);
+  validateLibraryAvatar(flags.avatar);
   return { command, flags, id: positionals[0] as EmployeeId };
 }
 
@@ -110,7 +121,12 @@ export async function runEmployeeCommand(
     profile === undefined || profile === ""
       ? undefined
       : Object.keys((await loadConfig(resolveLaunchPaths(io.env))).profiles);
-  const store = Store.open({ dataDir: announceDataDir(io, flags["data-dir"]) });
+  const dataDir = announceDataDir(io, flags["data-dir"]);
+  const avatar =
+    flags["avatar-file"] === undefined
+      ? flags.avatar
+      : await uploadAvatarFile(flags["avatar-file"], dataDir, io);
+  const store = Store.open({ dataDir });
   try {
     if (command === "list") {
       const employees = store.uow
@@ -144,7 +160,7 @@ export async function runEmployeeCommand(
         ...(flags.name === undefined ? {} : { name: flags.name }),
         ...(flags.title === undefined ? {} : { title: flags.title }),
         ...(flags.bio === undefined ? {} : { bio: flags.bio }),
-        ...(flags.avatar === undefined ? {} : { avatar: flags.avatar || null }),
+        ...(avatar === undefined ? {} : { avatar: avatar || null }),
         ...(profile === undefined
           ? {}
           : { launch_profile_ref: profile || null }),

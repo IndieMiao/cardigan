@@ -6,8 +6,9 @@ import { eventLabel } from "../events.js";
 import { renderMarkdown } from "../markdown.js";
 import { linkableReferences, linkifyReferences } from "../refs.js";
 import { statusLabel } from "../status.js";
+import { AttachmentCaption, attachmentName } from "./AttachmentCaption.js";
 import { AttachmentPreview, isBitmap } from "./AttachmentPreview.js";
-import { EmptyState, IdTag, LongContent, Time } from "./Foundation.js";
+import { EmptyState, LongContent, Time } from "./Foundation.js";
 import { TimelineContent } from "./TimelineContent.js";
 import {
   TimelineActor,
@@ -317,19 +318,18 @@ export function Timeline({
                     <TimelineActor entry={first} compact />
                     <span>{label}</span>
                     <Time value={first.created_at} relative />
-                    {uploaded.map((a) =>
-                      isBitmap(a) ? (
-                        <AttachmentPreview
-                          key={a.id}
-                          attachment={a}
-                          images={images}
-                        />
-                      ) : (
-                        <a key={a.id} href={a.download_path} download>
-                          {a.id}
-                        </a>
-                      ),
-                    )}
+                    {uploaded.map((a) => (
+                      <span className="attachment-caption" key={a.id}>
+                        {isBitmap(a) ? (
+                          <AttachmentPreview attachment={a} images={images} />
+                        ) : (
+                          <a href={a.download_path} download>
+                            下载 {attachmentName(a)}
+                          </a>
+                        )}
+                        <AttachmentCaption attachment={a} />
+                      </span>
+                    ))}
                   </div>
                   {hasDetails && (
                     <details className="system-details">
@@ -369,10 +369,10 @@ function AttachmentItem({
           href={attachment.download_path}
           rel="noopener noreferrer"
         >
-          下载 {attachment.id}（{attachment.mime}）
+          下载 {attachmentName(attachment)}（{attachment.mime}）
         </a>
       )}
-      <IdTag id={attachment.id} label="附件" detail={attachment.mime} />
+      <AttachmentCaption attachment={attachment} />
       <span className="attachment-basis">
         {attachment.basis === null
           ? "无拍板依据"

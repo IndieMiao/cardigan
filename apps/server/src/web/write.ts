@@ -81,6 +81,8 @@ const action = z.object({ text, attachments: z.array(text).optional() });
 const attachment = z.object({
   file: z.string().max(MAX_ATTACHMENT_BASE64),
   mime: text,
+  original_filename: z.string().optional(),
+  note: z.string().optional(),
   kind: z.enum(["artifact", "evidence"]),
   attach_to: z.discriminatedUnion("kind", [
     z.object({ kind: z.literal("delivery"), id: id("delivery") }),

@@ -254,6 +254,8 @@ export interface HumanActionView {
 /** Attachment metadata; the blob is a separate request (`download_path`). */
 export interface AttachmentView extends AuthorView {
   readonly id: string;
+  readonly original_filename?: string;
+  readonly note?: string;
   readonly mime: string;
   readonly size: number;
   readonly sha256: string;
@@ -332,6 +334,8 @@ export interface PostedComment {
 export interface UploadAttachmentInput {
   /** Canonical padded base64. */
   readonly file: string;
+  readonly original_filename?: string;
+  readonly note?: string;
   readonly mime: string;
   readonly kind: "artifact" | "evidence";
   readonly attach_to:

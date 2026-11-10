@@ -151,6 +151,7 @@ test("attaches multiple binary/text files to the new comment using shared verifi
       "--file",
       file("image.PNG", binary),
       `--file=${file("report=a.md", "# Report")}`,
+      "--note=测试证据",
     ]),
   ).toBe(0);
   const state = snapshot(),
@@ -164,6 +165,8 @@ test("attaches multiple binary/text files to the new comment using shared verifi
       kind: "evidence",
       sha256: digest,
       mime: i === 0 ? "image/png" : "text/markdown",
+      original_filename: i === 0 ? "image.PNG" : "report=a.md",
+      note: "测试证据",
       size: content.length,
       attach_to: { kind: "timeline_entry", id: comment?.id },
     });
@@ -175,13 +178,44 @@ test("attaches multiple binary/text files to the new comment using shared verifi
   expect(output.join("\n")).toContain(`已发表评论 ${comment?.id}`);
 });
 
+test.each(["a".repeat(201), "line\nline"])(
+  "invalid attachment notes roll back the comment and attachments",
+  async (note) => {
+    const before = snapshot();
+    expect(
+      await run([
+        "attachment",
+        "add",
+        "C-1",
+        "--file",
+        file("note.txt"),
+        "--note",
+        note,
+      ]),
+    ).toBe(2);
+    expect(snapshot()).toEqual(before);
+  },
+);
+
 test("standalone evidence creates an anchor or uses the requested existing entry", async () => {
   const path = file("evidence.log");
-  expect(await run(["attachment", "add", "C-1", "--file", path])).toBe(0);
+  expect(
+    await run([
+      "attachment",
+      "add",
+      "C-1",
+      "--file",
+      path,
+      "--note",
+      "日志说明",
+    ]),
+  ).toBe(0);
   const first = snapshot();
   const comment = first.timeline.find((e) => e.type === "comment");
   expect(comment).toMatchObject({ body: "上传附件", author: "human" });
   expect(first.attachments[0]).toMatchObject({
+    original_filename: "evidence.log",
+    note: "日志说明",
     kind: "evidence",
     mime: "text/plain",
     attach_to: { id: comment?.id },

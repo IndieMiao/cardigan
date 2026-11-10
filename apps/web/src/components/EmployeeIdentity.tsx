@@ -15,6 +15,54 @@ function colorIndex(id: string) {
   return hash % 5;
 }
 
+function avatarVariant(src: string | undefined, size: 64 | 128 | 256) {
+  return src?.replace(
+    /^(\/avatars\/v1\/[a-z0-9-]+\/)head-(64|128|256)\.webp$/,
+    `$1head-${size}.webp`,
+  );
+}
+
+function EmployeeAvatar({
+  src,
+  initial,
+  color,
+  size,
+  profile = false,
+}: {
+  src: string | undefined;
+  initial: string | undefined;
+  color: number | "role";
+  size?: 32 | 64 | 128 | undefined;
+  profile?: boolean;
+}) {
+  const [failedImage, setFailedImage] = useState<string>();
+  const pixels = (size ?? 32) > 64 ? 128 : 64;
+  const image = avatarVariant(src, profile ? 256 : pixels);
+  const retina = avatarVariant(src, pixels === 64 ? 128 : 256);
+  return (
+    <span
+      className={`employee-avatar employee-color-${color}`}
+      style={size ? { width: size, height: size } : undefined}
+      aria-hidden="true"
+    >
+      {image && failedImage !== image ? (
+        <img
+          src={image}
+          srcSet={
+            !profile && retina !== image
+              ? `${image} 1x, ${retina} 2x`
+              : undefined
+          }
+          alt=""
+          onError={() => setFailedImage(image)}
+        />
+      ) : (
+        <span>{initial}</span>
+      )}
+    </span>
+  );
+}
+
 export function EmployeeIdentity({
   employee,
   author,
@@ -23,9 +71,11 @@ export function EmployeeIdentity({
   metadata,
   showTitle = true,
   avatarOnly = false,
+  avatarSize,
 }: { [K in keyof AuthorView]?: AuthorView[K] | undefined } & {
   showTitle?: boolean;
   avatarOnly?: boolean;
+  avatarSize?: 32 | 64 | 128;
   metadata?: string;
 }) {
   const [open, setOpen] = useState<"hover" | "click" | null>(null);
@@ -33,7 +83,6 @@ export function EmployeeIdentity({
     undefined,
   );
   const returnFocus = useRef(false);
-  const [failedImage, setFailedImage] = useState<string>();
   useEffect(() => () => clearTimeout(closeTimer.current), []);
   const role = employee?.role_id ?? author_role ?? "Agent";
   const name =
@@ -44,6 +93,10 @@ export function EmployeeIdentity({
         ? "系统"
         : (author_display ?? `未命名的 ${role}`));
   const src = avatarPath(employee?.avatar);
+  const initial = Array.from(
+    employee?.name ?? (name === "你" ? "人" : name === "系统" ? "系" : role),
+  )[0]?.toUpperCase();
+  const color = employee ? colorIndex(employee.id) : "role";
   const keepOpen = () => clearTimeout(closeTimer.current);
   const leave = () => {
     keepOpen();
@@ -54,21 +107,12 @@ export function EmployeeIdentity({
   };
   const identity = (
     <>
-      <span
-        className={`employee-avatar employee-color-${employee ? colorIndex(employee.id) : "role"}`}
-        aria-hidden="true"
-      >
-        {src && failedImage !== src ? (
-          <img src={src} alt="" onError={() => setFailedImage(src)} />
-        ) : (
-          <span>
-            {Array.from(
-              employee?.name ??
-                (name === "你" ? "人" : name === "系统" ? "系" : role),
-            )[0]?.toUpperCase()}
-          </span>
-        )}
-      </span>
+      <EmployeeAvatar
+        src={src}
+        initial={initial}
+        color={color}
+        size={avatarSize}
+      />
       {!avatarOnly && (
         <span className="employee-label">
           <strong>{name}</strong>
@@ -147,6 +191,13 @@ export function EmployeeIdentity({
           }}
           onClick={(event) => event.stopPropagation()}
         >
+          <EmployeeAvatar
+            src={src}
+            initial={initial}
+            color={color}
+            size={128}
+            profile
+          />
           <strong>{employee.name}</strong>
           <span>{employee.title}</span>
           <p>{employee.bio || "暂无简介"}</p>

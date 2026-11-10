@@ -48,6 +48,7 @@ export const SESSION_COOKIE = "cardigan_session";
 /** Fixed templates only: neither identifiers nor query strings reach logs. */
 export function requestRoute(path: string): string {
   if (/^\/api\/(login|logout|session|me|projects)$/.test(path)) return path;
+  if (/^\/api\/avatars\/[^/]+$/.test(path)) return "/api/avatars/:sha256";
   const project = /^\/api\/projects\/[^/]+(\/.*)$/.exec(path);
   const rest = project?.[1];
   if (rest) {
