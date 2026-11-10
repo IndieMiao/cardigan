@@ -1,12 +1,12 @@
 import { describe, expect, test } from "vitest";
 import {
   type CardId,
+  type FormattedIdKind,
   formatId,
   formatTimelineEntryId,
   parseEventId,
   parseId,
   parseTimelineEntryId,
-  type ReadableIdKind,
   type Result,
 } from "./index.js";
 
@@ -21,6 +21,7 @@ function invalid(result: Result<unknown>) {
   });
 }
 const examples = [
+  ["employee", "E-1"],
   ["card", "C-1"],
   ["work_item", "W-1"],
   ["assignment", "A-1"],
@@ -29,12 +30,12 @@ const examples = [
   ["review", "V-1"],
   ["decision", "q(1)"],
   ["human_action", "h(1)"],
-] as const satisfies readonly (readonly [ReadableIdKind, string])[];
+] as const satisfies readonly (readonly [FormattedIdKind, string])[];
 
 test("unknown and inherited ID kinds return validation errors", () => {
   for (const kind of ["unknown", "toString", "__proto__"]) {
-    invalid(formatId(kind as ReadableIdKind, 1));
-    invalid(parseId(kind as ReadableIdKind, "C-1"));
+    invalid(formatId(kind as FormattedIdKind, 1));
+    invalid(parseId(kind as FormattedIdKind, "C-1"));
   }
 });
 

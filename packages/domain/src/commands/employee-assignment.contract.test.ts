@@ -75,9 +75,7 @@ test("explicit employee ID and normalized name bind identity; replay cannot chan
   }
   rejected(assignItem(next, 1, "E-1"));
   const unnamed = value(assignItem({ ...s, employees: [] }));
-  rejected(
-    assignItem({ ...apply(s, unnamed), employees: s.employees }, 1, "E-1"),
-  );
+  rejected(assignItem(apply(s, unnamed), 1, "E-1"));
 });
 
 test("new assignments reject inactive employees, role mismatch and unregistered project roles", () => {

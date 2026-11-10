@@ -7,10 +7,15 @@ import {
   type DecisionId,
   type Delivery,
   developmentCardTemplate,
+  type EmployeeId,
+  formatId,
   type GitCentralPort,
   type GitWorktreePort,
+  type GlobalIdAllocator,
   type IdAllocator,
+  parseId,
   type Repositories,
+  type Result,
   type Review,
   type RoleReference,
   type Run,
@@ -18,6 +23,19 @@ import {
   type WorkItem,
   type WorkItemId,
 } from "./index.js";
+
+test("employee IDs can be formatted and parsed but are allocated globally", () => {
+  expectTypeOf(formatId("employee", 1)).toEqualTypeOf<Result<EmployeeId>>();
+  expectTypeOf(parseId("employee", "E-1")).toEqualTypeOf<
+    Result<{ id: EmployeeId; sequence: number }>
+  >();
+  expectTypeOf<
+    GlobalIdAllocator["nextEmployeeId"]
+  >().returns.toEqualTypeOf<EmployeeId>();
+  expectTypeOf<Parameters<IdAllocator["next"]>[1]>()
+    .extract<"employee">()
+    .toEqualTypeOf<never>();
+});
 
 test("invariants 5, 9: Git ports never push and deletion is an explicit, forced decision", () => {
   expectTypeOf<GitWorktreePort>().not.toHaveProperty("push");
