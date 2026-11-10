@@ -1,4 +1,11 @@
-import { access, mkdir, readdir, rmdir, writeFile } from "node:fs/promises";
+import {
+  access,
+  lstat,
+  mkdir,
+  readdir,
+  rmdir,
+  writeFile,
+} from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type {
   Assignment,
@@ -40,6 +47,8 @@ export {
   repositoryLock,
 } from "./lock.js";
 export {
+  DEFAULT_CHECK_CLEANUP_GRACE_MS,
+  type ReconcileChecks,
   type ReconcileFinding,
   type ReconcileFindingKind,
   reconcile,
@@ -69,6 +78,7 @@ export interface WorktreeOptions {
   readonly dataDir?: string;
   readonly repositoriesRoot?: string;
   readonly worktreesRoot?: string;
+  readonly checksRoot?: string;
   /** Where force-clean patches are written; defaults to `<dataDir>/cleanup`. */
   readonly cleanupRoot?: string;
   /**
@@ -127,6 +137,7 @@ async function subdirectories(path: string): Promise<readonly string[]> {
 export class GitWorktreeService {
   private readonly repositories: string;
   private readonly worktrees: string;
+  private readonly checks: string;
   private readonly cleanup: string;
   private readonly lock: RepositoryLock;
   constructor(
@@ -140,6 +151,9 @@ export class GitWorktreeService {
     );
     this.worktrees = resolve(
       options.worktreesRoot ?? join(dataDir, "agent", "worktrees"),
+    );
+    this.checks = resolve(
+      options.checksRoot ?? join(dataDir, "agent", "checks"),
     );
     this.cleanup = resolve(options.cleanupRoot ?? join(dataDir, "cleanup"));
     this.lock = options.lock ?? defaultRepositoryLock;
@@ -485,35 +499,58 @@ export class GitWorktreeService {
   /** §3.6: gather the facts `reconcile` needs; this method never deletes. */
   async listWorktreeState(project: CentralProject): Promise<WorktreeState> {
     const root = join(this.worktrees, project.project_id),
+      checksRoot = join(this.checks, project.project_id),
       clone = join(this.repositories, project.project_id),
       hasClone = await access(clone).then(
         () => true,
         () => false,
       ),
-      [registered, directories, clones, central] = await Promise.all([
-        // The base clone is itself a worktree of its own repository; only the
-        // per-Assignment worktrees belong in the state.
-        hasClone
-          ? this.git
-              .listWorktrees(clone)
-              .then((entries) =>
-                entries.filter((entry) => resolve(entry.path) !== clone),
-              )
-          : Promise.resolve([] as readonly GitWorktree[]),
-        subdirectories(root),
-        subdirectories(this.repositories),
-        this.central.hasCentral(project),
-      ]),
-      state: WorktreeState = {
-        project_id: project.project_id,
-        worktrees_root: root,
-        registered,
-        directories,
-        failed_clones: clones.filter((path) =>
-          basename(path).startsWith(".clone-"),
-        ),
-        pinned: [],
-      };
+      [registered, directories, checkAttempts, clones, central] =
+        await Promise.all([
+          // The base clone is itself a worktree; only linked worktrees belong
+          // in the state, including checks outside the Assignment root.
+          hasClone
+            ? this.git
+                .listWorktrees(clone)
+                .then((entries) =>
+                  entries.filter((entry) => resolve(entry.path) !== clone),
+                )
+            : Promise.resolve([] as readonly GitWorktree[]),
+          subdirectories(root),
+          subdirectories(checksRoot),
+          subdirectories(this.repositories),
+          this.central.hasCentral(project),
+        ]);
+    // Git lists checks outside the Assignment root as well. Probe each path;
+    // absence from a root listing is not evidence that its directory is gone.
+    const candidates = new Set([
+      ...directories,
+      ...checkAttempts.map((attempt) => join(attempt, "worktree")),
+      ...registered.map((entry) => entry.path),
+    ]);
+    const existing = await Promise.all(
+      [...candidates].map(async (path) => {
+        try {
+          return (await lstat(path)).isDirectory() ? path : undefined;
+        } catch (error) {
+          if (code(error) === "ENOENT") return undefined;
+          throw error;
+        }
+      }),
+    );
+    const state: WorktreeState = {
+      project_id: project.project_id,
+      worktrees_root: root,
+      checks_root: checksRoot,
+      registered,
+      directories: existing.filter(
+        (path): path is string => path !== undefined,
+      ),
+      failed_clones: clones.filter((path) =>
+        basename(path).startsWith(".clone-"),
+      ),
+      pinned: [],
+    };
     if (!central) return state;
     const pinned = await this.central.pinnedDeliveries(project);
     return {

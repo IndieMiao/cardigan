@@ -16,10 +16,12 @@ import {
   GitWorktreeService,
   type MergeOutcome,
   type PreparedMerge,
+  type ReconcileChecks,
   type ReconcileFinding,
   type RemoveWorktreeInput,
   type RemoveWorktreeOutcome,
   type RepositoryLock,
+  reconcile,
   type SourceSync,
   type WorktreeDiff,
 } from "@cardigan/git-service";
@@ -54,6 +56,7 @@ import type { ProjectRecord, Store } from "@cardigan/store";
 export interface ServerGitOptions {
   readonly store: Pick<Store, "getProject" | "listProjects">;
   readonly dataDir: string;
+  readonly checkCleanupGraceMs?: number;
   /** Defaults to local mode; `agent-ssh` routes workspace Git via the Agent. */
   readonly execution?: ExecutionConfig;
   /**
@@ -119,6 +122,8 @@ export interface ReconcileGit {
     project: CentralProject,
     assignments: readonly Assignment[],
     deliveries: readonly Delivery[],
+    /** The loop supplies current check ownership after the filesystem scan. */
+    readChecks?: () => ReconcileChecks,
   ): Promise<readonly ReconcileFinding[]>;
   removeWorktree(input: RemoveWorktreeInput): Promise<RemoveWorktreeOutcome>;
   diffWorktree(input: {
@@ -138,12 +143,13 @@ export interface ReconcileGit {
 export function gitRoots(
   execution: ExecutionConfig,
   dataDir: string,
-): { repositoriesRoot: string; worktreesRoot: string } {
+): { repositoriesRoot: string; worktreesRoot: string; checksRoot: string } {
   const root =
     execution.mode === "local" ? join(dataDir, "agent") : execution.agentRoot;
   return {
     repositoriesRoot: join(root, "repos"),
     worktreesRoot: join(root, "worktrees"),
+    checksRoot: join(root, "checks"),
   };
 }
 
@@ -438,8 +444,24 @@ export class ServerGit implements GitBinding {
     project: CentralProject,
     assignments: readonly Assignment[],
     deliveries: readonly Delivery[],
+    readChecks?: () => ReconcileChecks,
   ): Promise<readonly ReconcileFinding[]> {
-    return this.worktrees.reconcile(project, assignments, deliveries);
+    const state = await this.worktrees.listWorktreeState(project);
+    // Read ownership after filesystem IO so a newly queued check is protected.
+    const checks = readChecks?.();
+    return reconcile(
+      state,
+      assignments,
+      deliveries,
+      checks && {
+        ...checks,
+        ...(this.options.checkCleanupGraceMs === undefined
+          ? {}
+          : {
+              cleanupGraceMs: this.options.checkCleanupGraceMs,
+            }),
+      },
+    );
   }
   async removeWorktree(
     input: RemoveWorktreeInput,

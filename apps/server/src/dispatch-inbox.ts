@@ -13,6 +13,7 @@ import {
   moveNotification,
   PROJECT_EVENT_STREAM,
   recordNotification,
+  retireReconcileNotifications,
   type Store,
   unfinishedBellAttempts,
 } from "@cardigan/store";
@@ -135,14 +136,12 @@ export function acknowledgeInbox(
   clock: Clock = dispatcherClock,
 ): number {
   return store.uow.run((tx) => {
+    retireReconcileNotifications(store.database, project, clock.now());
     const state = loadCommandState(tx, project);
     const attempts = unfinishedBellAttempts(store.database, project);
     let count = 0;
     for (const note of store.listNotifications({ project_id: project })) {
-      if (
-        !note.card_id ||
-        !["pending", "belled", "delivery_failed"].includes(note.status)
-      )
+      if (!["pending", "belled", "delivery_failed"].includes(note.status))
         continue;
       const owner =
         attempts.find((a) => a.notification_ids.includes(note.id))
@@ -150,7 +149,7 @@ export function acknowledgeInbox(
       if (!owner) continue;
       const cursor = tx.cursors.get(project, {
         assignment_id: owner,
-        card_id: note.card_id,
+        card_id: (note.card_id ?? PROJECT_EVENT_STREAM) as CardId,
       });
       if (cursor && cursor.acked_seq >= note.seq) {
         moveNotification(store.database, {

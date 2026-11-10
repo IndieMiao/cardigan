@@ -158,78 +158,93 @@ test("unresolved routing is retained as an Ops escalation instead of silently ad
   ]);
 });
 
-test("logical PM ACK uses the in-flight receiver even if the configured PM changes", () => {
-  const target = f.create();
-  f.apply((s, a, p) =>
-    postComment(s, a, { card_id: target.card.id, body: "For Ops" }, p),
-  );
-  routeProjectEvents(f.store, f.project);
-  const note = notes().find((n) => n.recipient.kind === "pm_ops");
-  if (!note) throw new Error("Missing PM notification");
-  const owners = f.store.uow.run((tx) => {
-    // f.create() registered the PM role; this scenario replaces its Assignment.
-    const role = getRoleVersion(tx, f.project, "pm");
-    if (!role) throw new Error("Missing PM role");
-    return [0, 1].map(() => {
-      const id = tx.ids.next(f.project, "assignment");
-      tx.assignments.put(f.project, {
-        id,
-        scope: "standing",
-        role_id: "pm",
-        role_version: role.version,
-        status: "active",
-        runtime_state: "not_provisioned",
-        runtime_ref: null,
-        machine_id: "local",
-        mcp_token_id: `reserved:${id}`,
-        created_at: f.clock.now(),
+test.each([false, true])(
+  "logical PM ACK uses the in-flight receiver even if the configured PM changes (project stream=%s)",
+  (projectStream) => {
+    const target = f.create();
+    if (projectStream)
+      f.store.uow.run((tx) =>
+        tx.events.append(f.project, {
+          id: tx.ids.nextEventId(),
+          seq: tx.ids.nextEventSequence(f.project),
+          type: "reconcile_finding",
+          actor: { kind: "system", project_id: f.project },
+          payload: { kind: "orphan_worktree", path: "/fixture/unowned" },
+          created_at: f.clock.now(),
+        }),
+      );
+    else
+      f.apply((s, a, p) =>
+        postComment(s, a, { card_id: target.card.id, body: "For Ops" }, p),
+      );
+    routeProjectEvents(f.store, f.project);
+    const note = notes().find((n) => n.recipient.kind === "pm_ops");
+    if (!note) throw new Error("Missing PM notification");
+    const owners = f.store.uow.run((tx) => {
+      // f.create() registered the PM role; this scenario replaces its Assignment.
+      const role = getRoleVersion(tx, f.project, "pm");
+      if (!role) throw new Error("Missing PM role");
+      return [0, 1].map(() => {
+        const id = tx.ids.next(f.project, "assignment");
+        tx.assignments.put(f.project, {
+          id,
+          scope: "standing",
+          role_id: "pm",
+          role_version: role.version,
+          status: "active",
+          runtime_state: "not_provisioned",
+          runtime_ref: null,
+          machine_id: "local",
+          mcp_token_id: `reserved:${id}`,
+          created_at: f.clock.now(),
+        });
+        return id;
       });
-      return id;
     });
-  });
-  const original = owners[0],
-    replacement = owners[1];
-  if (!original || !replacement) throw new Error("Missing PMs");
-  const run = f.apply((s, a, p) =>
-    queueRun(
-      s,
-      a,
-      {
+    const original = owners[0],
+      replacement = owners[1];
+    if (!original || !replacement) throw new Error("Missing PMs");
+    const run = f.apply((s, a, p) =>
+      queueRun(
+        s,
+        a,
+        {
+          assignment_id: original,
+          trigger_event_id: note.event_id,
+          model: "fixture",
+          agent_cli_version: "fixture",
+        },
+        p,
+      ),
+    );
+    f.store.uow.run(() =>
+      beginBellAttempt(f.store.database, {
+        id: "in-flight",
+        project_id: f.project,
         assignment_id: original,
-        trigger_event_id: note.event_id,
-        model: "fixture",
-        agent_cli_version: "fixture",
-      },
-      p,
-    ),
-  );
-  f.store.uow.run(() =>
-    beginBellAttempt(f.store.database, {
-      id: "in-flight",
+        run_id: run.id,
+        notification_ids: [note.id],
+        started_at: f.clock.now(),
+        lease_until: "2030-01-01T00:01:00.000Z",
+      }),
+    );
+    f.store.ackEvents({
+      project_id: f.project,
+      assignment_id: replacement,
+      card_id: projectStream ? PROJECT_EVENT_STREAM : target.card.id,
+      up_to_seq: note.seq,
+    });
+    expect(acknowledgeInbox(f.store, f.project, () => replacement)).toBe(0);
+    f.store.ackEvents({
       project_id: f.project,
       assignment_id: original,
-      run_id: run.id,
-      notification_ids: [note.id],
-      started_at: f.clock.now(),
-      lease_until: "2030-01-01T00:01:00.000Z",
-    }),
-  );
-  f.store.ackEvents({
-    project_id: f.project,
-    assignment_id: replacement,
-    card_id: target.card.id,
-    up_to_seq: note.seq,
-  });
-  expect(acknowledgeInbox(f.store, f.project, () => replacement)).toBe(0);
-  f.store.ackEvents({
-    project_id: f.project,
-    assignment_id: original,
-    card_id: target.card.id,
-    up_to_seq: note.seq,
-  });
-  expect(acknowledgeInbox(f.store, f.project, () => replacement)).toBe(1);
-  expect(notes().find((n) => n.id === note.id)?.status).toBe("acked");
-});
+      card_id: projectStream ? PROJECT_EVENT_STREAM : target.card.id,
+      up_to_seq: note.seq,
+    });
+    expect(acknowledgeInbox(f.store, f.project, () => replacement)).toBe(1);
+    expect(notes().find((n) => n.id === note.id)?.status).toBe("acked");
+  },
+);
 
 test("stream pages commit independently and preserve seq order inside each stream", () => {
   const routed = vi.spyOn(router, "routeEvent");
