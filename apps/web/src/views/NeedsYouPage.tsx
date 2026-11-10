@@ -512,6 +512,18 @@ function HumanAction({
 }: Props & { item: NeedsAction; done: () => void; elapsed: number }) {
   const [text, setText] = useState("");
   const action = useAction(done);
+  if (item.completion_notice !== undefined)
+    return (
+      <article className="needs-item" aria-label={`执行结果待接手 ${item.id}`}>
+        <header className="needs-meta">
+          <IdTag id={item.id} label="已完成" />
+          {item.card_id && <CardLink projectId={projectId} id={item.card_id} />}
+        </header>
+        <h3 className="needs-question">{item.why}</h3>
+        <Markdown body={item.completion_notice} />
+        <p>请恢复发起方或启动项目的 PM Ops，继续处理这项执行结果。</p>
+      </article>
+    );
   return (
     <article className="needs-item" aria-label={`执行 ${item.id}`}>
       <header className="needs-meta">

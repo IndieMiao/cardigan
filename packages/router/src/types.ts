@@ -75,6 +75,7 @@ export type RuleId =
   | "6.4/all required work items passed"
   | "6.4/completion request"
   | "6.4/human action requested"
+  | "6.4/human action completed"
   | "6.4/bell delivery failed"
   | "6.4/run finished without output"
   | "6.4/agent idle without finish_run"

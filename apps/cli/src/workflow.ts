@@ -10,6 +10,7 @@ import {
   completeHumanAction,
   createCard,
   isRoleActive,
+  listNeedsYou,
   parseId,
   projectSnapshot,
   standingTools,
@@ -17,7 +18,7 @@ import {
   updateCard,
 } from "@cardigan/domain";
 import { loadMergeGateConfig } from "@cardigan/host";
-import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
+import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import {
   resolveExecutionConfig,
   secureDataDirectory,
@@ -727,9 +728,9 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
             decision.decider === "human" &&
             ["open", "provisional"].includes(decision.status),
         ),
-      actions: tx.human_actions
-        .list(project_id)
-        .filter((action) => action.status === "open"),
+      actions: unwrap(
+        listNeedsYou(loadCommandState(tx, project_id), humanActor(project_id)),
+      ).data.human_actions,
       // §13.9: a lost runtime needs the human to decide whether to take over,
       // so it belongs on the same page as decisions and human actions.
       incidents: tx.assignments
@@ -781,6 +782,12 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
     if (actions.length > 0) {
       lines.push(`待你执行（${actions.length}）`);
       for (const action of actions) {
+        if (action.completion_notice !== undefined) {
+          lines.push(
+            `  ${action.id}  ${action.card_id ?? "项目"}\n    ${action.why}\n    执行结果：${action.completion_notice}\n    请恢复发起方或启动项目的 PM Ops。`,
+          );
+          continue;
+        }
         lines.push(
           [
             `  ${action.id}${action.card_id === undefined ? "" : `  ${action.card_id}`}`,

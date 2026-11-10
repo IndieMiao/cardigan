@@ -457,6 +457,7 @@ export interface NeedsAction
   readonly waited_ms: number | null;
   readonly due: string | null;
   readonly blocked_work_items: readonly string[];
+  readonly completion_notice?: string;
 }
 export interface NeedsPage {
   readonly decisions: readonly NeedsDecision[];
