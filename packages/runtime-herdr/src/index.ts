@@ -409,6 +409,18 @@ export class HerdrRuntime implements Runtime {
       };
     });
   }
+  /** One-shot process probe for human entry; no event subscription or sequence. */
+  probeTerminal(ref: RuntimeRef) {
+    return result<RuntimeObservation["process"]>(async () => {
+      this.checkRef(ref);
+      const terminal: Terminal = await this.json(["get", ref.terminal_ref]);
+      return terminal.state === "live"
+        ? "alive"
+        : terminal.state === "finished"
+          ? "exited"
+          : "unknown";
+    });
+  }
   human_entry(ref: RuntimeRef) {
     return result(async () => {
       this.checkRef(ref);

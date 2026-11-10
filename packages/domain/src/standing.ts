@@ -22,7 +22,11 @@ export function standingTools(
 ): readonly ToolName[] {
   return roleTools.filter((tool) =>
     mode === "office"
-      ? tool !== "issue_instruction"
+      ? ![
+          "issue_instruction",
+          "resolve_delegated_decision",
+          "triage_human_action",
+        ].includes(tool)
       : tool !== OFFICE_ONLY_TOOL,
   );
 }

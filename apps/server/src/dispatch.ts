@@ -13,9 +13,12 @@ import {
   canDispatchRun,
   compareDispatchOrder,
   DEFAULT_RUN_LIMIT,
+  decisionFollowupBlocked,
+  decisionFollowupPrompt,
   dispatchRun,
   isStandingPm,
   queueRun,
+  remindDecisionFollowups,
 } from "@cardigan/domain";
 import { runCapacitySnapshot } from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
@@ -163,6 +166,16 @@ export class Dispatcher {
   }
   private project(project: ProjectId): Candidate[] {
     const { store, standing } = this.options;
+    store.uow.run((tx) => {
+      const effect = unwrap(
+        remindDecisionFollowups(
+          loadCommandState(tx, project),
+          { kind: "system", project_id: project },
+          { clock: this.clock, ids: tx.ids },
+        ),
+      );
+      persistEffect(tx, project, effect);
+    });
     routeProjectEvents(store, project, { clock: this.clock });
     acknowledgeInbox(store, project, standing, this.clock);
     for (const attempt of unfinishedBellAttempts(store.database, project))
@@ -187,7 +200,7 @@ export class Dispatcher {
     })) {
       if (claimed.has(n.id)) continue;
       const owner = this.owner(n, state);
-      if (!owner) continue;
+      if (!owner || decisionFollowupBlocked(state, n.event_id, owner)) continue;
       const key = `${owner}/${n.card_id ?? ""}/${n.attempts ? n.run_id : ""}`;
       groups.set(key, [...(groups.get(key) ?? []), n]);
     }
@@ -403,7 +416,8 @@ export class Dispatcher {
           requested.has(n.id) &&
           n.status === "pending" &&
           this.owner(n, state) === a.id &&
-          !covered(n, state, a.id),
+          !covered(n, state, a.id) &&
+          !decisionFollowupBlocked(state, n.event_id, a.id),
       );
       const waiting = this.queued(state, a);
       if (
@@ -561,7 +575,17 @@ export class Dispatcher {
           project,
           unwrap(dispatchRun(state, actor, { run_id: run.id }, ports)),
         );
-      return { attempt, run, assignment: a, bell };
+      const followup = decisionFollowupPrompt(
+        state,
+        ready.map((n) => n.event_id),
+        a.id,
+      );
+      return {
+        attempt,
+        run,
+        assignment: a,
+        bell: [bell, followup].filter(Boolean).join("\n"),
+      };
     });
   }
   private settle(

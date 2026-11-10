@@ -741,7 +741,7 @@ test("needs-you lists open human decisions and pending human actions", async () 
     expect(text).toContain("Connect the device");
     expect(text).toContain("Only a human has hands");
     expect(text).toContain("a photo");
-    expect(text).not.toContain("Internal choice");
+    expect(text).toContain("Internal choice"); // No active PM Ops: human fallback.
 
     // Answering the decision clears it from the view; only Office may record it.
     runCommand(store, {

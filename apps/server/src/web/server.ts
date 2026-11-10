@@ -5,7 +5,12 @@ import {
 } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { CardId, Clock, ProjectId } from "@cardigan/domain";
-import { projectPreferences } from "@cardigan/domain";
+import {
+  decisionCategories,
+  decisionDelegation,
+  decisionHistory,
+  projectPreferences,
+} from "@cardigan/domain";
 import type { MergeGateConfiguration } from "@cardigan/host";
 import { readRunQueue } from "@cardigan/host";
 import { resolveDataDirectory } from "@cardigan/runtime-herdr";
@@ -483,7 +488,31 @@ async function serveProjectRoute(
     // This baseline has no merge-gate executor/configuration yet.
     sendJson(res, 200, {
       ...projectPreferences(state),
+      decision_delegation: decisionDelegation(projectPreferences(state)),
       merge_gate_enabled: false,
+    });
+    return;
+  }
+  if (rest === "/decision-history") {
+    const decider = url.searchParams.get("decider") || undefined;
+    const category = url.searchParams.get("category") || undefined;
+    const card_id = url.searchParams.get("card_id") || undefined;
+    const from = url.searchParams.get("from") || undefined;
+    const to = url.searchParams.get("to") || undefined;
+    if (
+      (decider && !["human", "pm", "system"].includes(decider)) ||
+      (category && !decisionCategories.includes(category as never)) ||
+      [from, to].some((v) => v && !Number.isFinite(Date.parse(v)))
+    )
+      throw new HttpRejection(400, "validation_failed", "拍板记录筛选条件无效");
+    sendJson(res, 200, {
+      decisions: decisionHistory(state, {
+        ...(decider ? { decider: decider as "human" | "pm" | "system" } : {}),
+        ...(category ? { category } : {}),
+        ...(card_id ? { card_id } : {}),
+        ...(from ? { from: new Date(from).toISOString() } : {}),
+        ...(to ? { to: new Date(to).toISOString() } : {}),
+      }),
     });
     return;
   }

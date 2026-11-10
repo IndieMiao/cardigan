@@ -752,6 +752,228 @@ test("merge confirmation shows due time and a decreasing countdown", async () =>
   expect(screen.getByText(/剩余 7 分钟/)).toBeTruthy();
 });
 
+test("answering a human scope decision can grant future PM authority in the same request", async () => {
+  const recordDecision = vi.fn().mockResolvedValue(undefined);
+  render(
+    <NeedsYouPage
+      projectId="p-1"
+      client={fakeClient({
+        recordDecision,
+        needsYou: async () => ({
+          decisions: [q({ trigger: null, category: "scope_change" })],
+          human_actions: [],
+          incidents: [],
+        }),
+      })}
+    />,
+  );
+  fireEvent.click(
+    await screen.findByRole("checkbox", { name: "此类问题以后由 PM 代拍" }),
+  );
+  fireEvent.click(screen.getByRole("radio", { name: /merge/ }));
+  fireEvent.click(screen.getByRole("button", { name: "按所选拍板" }));
+  await waitFor(() =>
+    expect(recordDecision).toHaveBeenCalledWith(
+      "p-1",
+      "q(1)",
+      "merge",
+      "",
+      expect.any(String),
+      true,
+    ),
+  );
+});
+test.each(["spending", "account", "permission", "data_deletion"])(
+  "%s never offers the delegation checkbox",
+  async (category) => {
+    render(
+      <NeedsYouPage
+        projectId="p-1"
+        client={fakeClient({
+          needsYou: async () => ({
+            decisions: [q({ trigger: null, category })],
+            human_actions: [],
+            incidents: [],
+          }),
+        })}
+      />,
+    );
+    await screen.findByRole("article", { name: "拍板 q(1)" });
+    expect(
+      screen.queryByRole("checkbox", { name: "此类问题以后由 PM 代拍" }),
+    ).toBeNull();
+  },
+);
+
+test("unclaimed decision follow-up displays its outcome without offering a second decision", async () => {
+  const recordDecision = vi.fn();
+  render(
+    <NeedsYouPage
+      projectId="p-1"
+      client={fakeClient({
+        recordDecision,
+        needsYou: async () => ({
+          decisions: [
+            q({
+              trigger: null,
+              status: "resolved",
+              followup_notice: "无 PM Ops 接手，请跟进落实",
+              resolution: {
+                option: "merge",
+                rationale: "已确认",
+                raw_quote: "同意",
+                at: "2026-11-10T00:00:00Z",
+              },
+            }),
+          ],
+          human_actions: [],
+          incidents: [],
+        }),
+      })}
+    />,
+  );
+  const notice = await screen.findByRole("article", { name: "拍板落实 q(1)" });
+  expect(within(notice).getByText("已选方案：合并")).toBeTruthy();
+  expect(within(notice).getByText("影响：更新基线")).toBeTruthy();
+  expect(within(notice).queryByRole("radio")).toBeNull();
+  expect(screen.queryByRole("button", { name: "按所选拍板" })).toBeNull();
+  expect(recordDecision).not.toHaveBeenCalled();
+});
+
+test("failed confirmed merges remain returnable beside read-only decision follow-up notices", async () => {
+  const recordDecision = vi.fn().mockResolvedValue(undefined);
+  const followup = q({
+    trigger: null,
+    status: "resolved",
+    followup_notice: "当前无 PM Ops 接手，请安排落实",
+    resolution: {
+      option: "merge",
+      rationale: "已决定",
+      raw_quote: "同意",
+      at: "2026-11-10T00:00:00Z",
+    },
+  });
+  const failed = merge({
+    status: "resolved",
+    why: "合并检查失败或超时，可以退回修改",
+    options: [
+      { key: "request_changes", description: "退回修改", impact: "重新交付" },
+    ],
+    recommended: "request_changes",
+  });
+  render(
+    <NeedsYouPage
+      projectId="p-1"
+      client={fakeClient({
+        recordDecision,
+        needsYou: async () => page([followup, failed]),
+      })}
+    />,
+  );
+  const notice = await screen.findByRole("article", { name: "拍板落实 q(1)" });
+  expect(within(notice).queryByRole("radio")).toBeNull();
+  expect(within(notice).queryByRole("button", { name: "退回修改" })).toBeNull();
+  const confirmation = screen.getByRole("article", { name: "合并确认 q(3)" });
+  expect(
+    within(confirmation).queryByRole("button", { name: "确认合并" }),
+  ).toBeNull();
+  fireEvent.click(
+    within(confirmation).getByRole("button", { name: "退回修改" }),
+  );
+  fireEvent.change(within(confirmation).getByLabelText("q(3) 退回原因"), {
+    target: { value: "修复检查失败" },
+  });
+  fireEvent.click(
+    within(confirmation).getByRole("button", { name: "确认退回修改" }),
+  );
+  await waitFor(() =>
+    expect(recordDecision).toHaveBeenCalledWith(
+      "p-1",
+      "q(3)",
+      "request_changes",
+      "修复检查失败",
+      expect.any(String),
+    ),
+  );
+  expect(recordDecision).toHaveBeenCalledTimes(1);
+});
+
+test.each(["host", "human"] as const)(
+  "a PM %s handoff shows a readable title, explanations and shared status icons, with the earlier request available separately",
+  async (triage) => {
+    const item = {
+      id: "h(3)",
+      card_id: "C-1",
+      instructions: "在主机终端执行 git fetch，然后回传最新版本号。",
+      expected_return: "最新版本号",
+      why: "需要主机权限",
+      triage,
+      waited_ms: 0,
+      due: null,
+      blocked_work_items: [],
+      handoff: {
+        title: "请同步主机上的最新项目代码",
+        summary: "开发者缺少继续修改所需的最新代码。",
+        why_human: "仓库凭据只在你的主机上，项目经理无法读取。",
+        instructions: "在主机终端执行 git fetch，然后回传最新版本号。",
+        expected_outcome: "同步完成后开发者就能继续工作。",
+        expected_return: "最新版本号",
+        rewritten_by: "assignment:A-4",
+        rewritten_at: "2026-11-10T09:00:00Z",
+      },
+      original_request: {
+        instructions: "submit_delivery(kind=card_completion) blocked",
+        why_human: "repository unavailable",
+        expected_return: "SHA",
+      },
+    };
+    render(
+      <NeedsYouPage
+        projectId="p-1"
+        client={fakeClient({
+          needsYou: async () => ({
+            decisions: [],
+            human_actions: [item],
+            incidents: [],
+          }),
+        })}
+      />,
+    );
+    const article = await screen.findByRole("article", { name: "执行 h(3)" });
+    expect(
+      within(article).getByRole("heading", {
+        name: `${triage === "host" ? "主机操作：" : ""}请同步主机上的最新项目代码`,
+      }),
+    ).toBeTruthy();
+    expect(
+      within(article)
+        .getByText("项目经理已改写")
+        .querySelector("svg.status-shape-success")
+        ?.getAttribute("aria-hidden"),
+    ).toBe("true");
+    expect(
+      within(article)
+        .getByText(triage === "host" ? "待主机操作" : "待你执行")
+        .querySelector("svg.status-shape-pending"),
+    ).toBeTruthy();
+    for (const title of ["这是什么", "为什么需要你", "怎么做", "做完会怎样"])
+      expect(
+        within(article).getByRole("heading", { name: title }),
+      ).toBeTruthy();
+    expect(within(article).getByText(item.handoff.summary)).toBeTruthy();
+    expect(within(article).getByText(item.handoff.why_human)).toBeTruthy();
+    expect(
+      within(article).getByText(item.handoff.expected_outcome),
+    ).toBeTruthy();
+    expect(within(article).getByText("完成后请回传：最新版本号")).toBeTruthy();
+    const prior = within(article)
+      .getByText(item.original_request.instructions)
+      .closest("details");
+    expect(prior?.open).toBe(false);
+    expect(within(article).getByText("查看改写前的内容")).toBeTruthy();
+  },
+);
+
 const checkStates = [
   ["queued", "排队中", "pending"],
   ["running", "运行中", "progress"],

@@ -180,6 +180,8 @@ export function fakeClient(
       merge_gate_enabled: false,
     }),
     setPreferences: async () => {},
+    setDelegation: async () => {},
+    decisionHistory: async () => ({ decisions: [] }),
     needsYou: async () => ({ decisions: [], human_actions: [], incidents: [] }),
     recordDecision: async () => undefined,
     recheckMerge: async () => undefined,
