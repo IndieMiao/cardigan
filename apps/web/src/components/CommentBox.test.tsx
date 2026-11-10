@@ -15,10 +15,11 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import {
   ApiError,
   type CommentInput,
+  HttpCardiganClient,
   type UploadAttachmentInput,
 } from "../api.js";
 import { fakeClient } from "../testing/fixtures.js";
@@ -208,4 +209,80 @@ test("mentions are parsed without duplicates or trailing punctuation", () => {
   expect(mentionsIn("邮箱 foo@bar.com 不是提及")).toEqual([]);
   // Two mentions written without a separating space: the first token wins.
   expect(mentionsIn("@coder@A-1")).toEqual(["coder"]);
+});
+
+test("an uncertain comment retries with the draft's key and the next draft gets a new key", async () => {
+  const fetcher = vi
+    .fn<typeof fetch>()
+    .mockRejectedValueOnce(new TypeError("connection dropped after commit"))
+    .mockImplementation(async () =>
+      Response.json({ id: "C-1#7", body: "原文" }),
+    );
+  const client = new HttpCardiganClient(fetcher);
+  render(<CommentBox client={client} projectId="p-1" cardId="C-1" />);
+  const input = screen.getByLabelText("评论正文") as HTMLTextAreaElement;
+  fireEvent.change(input, { target: { value: "原文" } });
+  fireEvent.click(screen.getByRole("button", { name: "发表评论" }));
+  expect((await screen.findByRole("alert")).textContent).toContain(
+    "发表可能已经成功，重试不会重复发表",
+  );
+  expect(input.value).toBe("原文");
+  fireEvent.click(screen.getByRole("button", { name: "发表评论" }));
+  await waitFor(() => expect(input.value).toBe(""));
+  fireEvent.change(input, { target: { value: "下一条" } });
+  fireEvent.click(screen.getByRole("button", { name: "发表评论" }));
+  await waitFor(() => expect(input.value).toBe(""));
+  const keys = fetcher.mock.calls.map(([, init]) =>
+    new Headers(init?.headers).get("Idempotency-Key"),
+  );
+  expect(keys[0]).toMatch(/^[0-9a-f-]{36}$/u);
+  expect(keys[1]).toBe(keys[0]);
+  expect(keys[2]).not.toBe(keys[0]);
+  expect(fetcher.mock.calls[1]?.[1]?.body).toBe(
+    fetcher.mock.calls[0]?.[1]?.body,
+  );
+});
+
+test("partial upload failure retains comment and individual image keys on retry", async () => {
+  let uploads = 0;
+  const fetcher = vi.fn<typeof fetch>().mockImplementation(async (url) => {
+    if (String(url).endsWith("/comments"))
+      return Response.json({ id: "C-1#8" });
+    uploads++;
+    if (uploads === 2) throw new DOMException("Timed out", "TimeoutError");
+    return Response.json({ id: "F-1" });
+  });
+  render(
+    <CommentBox
+      client={new HttpCardiganClient(fetcher)}
+      projectId="p-1"
+      cardId="C-1"
+    />,
+  );
+  const input = screen.getByLabelText("评论正文") as HTMLTextAreaElement;
+  fireEvent.change(input, { target: { value: "两张图片" } });
+  fireEvent.paste(input, {
+    clipboardData: {
+      files: [
+        new File(["first"], "one.png", { type: "image/png" }),
+        new File(["second"], "two.png", { type: "image/png" }),
+      ],
+    },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "发表评论" }));
+  expect((await screen.findByRole("alert")).textContent).toContain(
+    "重试不会重复发表",
+  );
+  expect(input.value).toBe("两张图片");
+  fireEvent.click(screen.getByRole("button", { name: "发表评论" }));
+  await waitFor(() => expect(input.value).toBe(""));
+  expect(fetcher.mock.calls).toHaveLength(6);
+  const keys = fetcher.mock.calls.map(([, init]) =>
+    new Headers(init?.headers).get("Idempotency-Key"),
+  );
+  expect(new Set(keys.slice(0, 3)).size).toBe(3);
+  expect(keys.slice(3)).toEqual(keys.slice(0, 3));
+  expect(fetcher.mock.calls.slice(3).map(([, init]) => init?.body)).toEqual(
+    fetcher.mock.calls.slice(0, 3).map(([, init]) => init?.body),
+  );
 });

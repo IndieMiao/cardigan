@@ -385,10 +385,43 @@ export class Store {
     params: IdempotentParams<unknown>,
     operation: (tx: StoreTransactionContext) => T,
   ): Result<IdempotentResult<T>> {
+    return this.#runIdempotent(params, operation);
+  }
+
+  /** The single Workbench human is independent of sessions and MCP Assignments. */
+  runHumanIdempotent<T>(
+    params: Omit<IdempotentParams<unknown>, "assignment_id">,
+    operation: (tx: StoreTransactionContext) => T,
+  ): Result<IdempotentResult<T>> {
+    return this.#runIdempotent(
+      { ...params, assignment_id: "human" },
+      operation,
+      24 * 60 * 60 * 1000,
+    );
+  }
+
+  #runIdempotent<T>(
+    params: Omit<IdempotentParams<unknown>, "assignment_id"> & {
+      readonly assignment_id: string;
+    },
+    operation: (tx: StoreTransactionContext) => T,
+    retentionMs?: number,
+  ): Result<IdempotentResult<T>> {
     const request_hash = hashRequest(params.request);
     // The lookup, the operation and the row that records it share one
     // transaction, so a competing writer cannot slip a second execution in.
     return this.#run((tx) => {
+      if (retentionMs !== undefined) {
+        this.#db
+          .prepare(
+            "DELETE FROM idempotency WHERE project_id = ? AND assignment_id = ? AND created_at <= ?",
+          )
+          .run(
+            params.project_id,
+            params.assignment_id,
+            new Date(Date.parse(this.#clock.now()) - retentionMs).toISOString(),
+          );
+      }
       const existing = this.#db
         .prepare(
           "SELECT request_hash, response FROM idempotency " +

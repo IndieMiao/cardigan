@@ -45,6 +45,7 @@ export interface CommentBoxHandle {
 }
 
 interface PastedImage {
+  readonly idempotencyKey: string;
   readonly name: string;
   readonly mime: string;
   readonly file: File;
@@ -71,6 +72,9 @@ export function CommentBox({
   );
   const textarea = useRef<HTMLTextAreaElement>(null);
   const section = useRef<HTMLElement>(null);
+  const draftKey = useRef<string | undefined>(undefined);
+  const sending = useRef(false);
+  const startDraft = () => (draftKey.current ??= crypto.randomUUID());
   const expanded = focused || body.length > 0 || images.length > 0;
 
   useImperativeHandle(
@@ -97,6 +101,7 @@ export function CommentBox({
   const canSubmit = body.trim().length > 0 && !submitting;
 
   function insertMention(mention: string): void {
+    startDraft();
     const field = textarea.current;
     const at = field?.selectionStart ?? body.length;
     // Replace the `@` that opened the suggestion list.
@@ -108,34 +113,53 @@ export function CommentBox({
   }
 
   async function submit(): Promise<void> {
-    if (!canSubmit) return;
+    if (!canSubmit || sending.current) return;
+    sending.current = true;
     setSubmitting(true);
     setError(undefined);
     try {
-      const comment = await client.addComment(projectId, cardId, {
-        body,
-        ...(mentionsIn(body).length > 0 ? { mentions: mentionsIn(body) } : {}),
-      });
+      const comment = await client.addComment(
+        projectId,
+        cardId,
+        {
+          body,
+          ...(mentionsIn(body).length > 0
+            ? { mentions: mentionsIn(body) }
+            : {}),
+        },
+        startDraft(),
+      );
       for (const image of images) {
-        await client.uploadAttachment(projectId, cardId, {
-          file: await toBase64(image.file),
-          mime: image.mime,
-          kind: "evidence",
-          attach_to: { kind: "timeline_entry", id: comment.id },
-        });
+        await client.uploadAttachment(
+          projectId,
+          cardId,
+          {
+            file: await toBase64(image.file),
+            mime: image.mime,
+            kind: "evidence",
+            attach_to: { kind: "timeline_entry", id: comment.id },
+          },
+          image.idempotencyKey,
+        );
       }
       setBody("");
       setImages([]);
+      draftKey.current = undefined;
       setTab("write");
       setSuggesting(false);
       if (section.current?.contains(document.activeElement))
         (document.activeElement as HTMLElement).blur();
       setFocused(false);
-      await onPosted?.(comment);
+      try {
+        await onPosted?.(comment);
+      } catch (failure) {
+        setError(`评论已发表，但刷新失败：${describeError(failure)}`);
+      }
     } catch (failure) {
       // The text stays in the box: a failed submit must not lose the comment.
-      setError(describeError(failure));
+      setError(`${describeError(failure)} 发表可能已经成功，重试不会重复发表`);
     } finally {
+      sending.current = false;
       setSubmitting(false);
     }
   }
@@ -183,7 +207,9 @@ export function CommentBox({
             placeholder="支持 Markdown；@ 提及角色或 Assignment；可以直接粘贴图片"
             rows={expanded ? 6 : 2}
             value={body}
+            disabled={submitting}
             onChange={(event) => {
+              startDraft();
               const value = event.target.value;
               setBody(value);
               setSuggesting(/@[^\s@]*$/u.test(value));
@@ -193,9 +219,11 @@ export function CommentBox({
                 (file) => file.type.startsWith("image/"),
               );
               if (files.length === 0) return;
+              startDraft();
               setImages((current) => [
                 ...current,
                 ...files.map((file) => ({
+                  idempotencyKey: crypto.randomUUID(),
                   name: file.name || file.type,
                   mime: file.type,
                   file,
@@ -210,6 +238,7 @@ export function CommentBox({
                   <button
                     type="button"
                     className="quiet"
+                    disabled={submitting}
                     onClick={() => insertMention(mention.value)}
                   >
                     {mention.label}

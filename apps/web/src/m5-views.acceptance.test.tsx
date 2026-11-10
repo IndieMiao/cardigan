@@ -120,7 +120,11 @@ test("§3.6: 选方案 posts the human's option and exact words to the decision 
   expect(server.posts()[0]).toEqual({
     path: "/api/projects/p-1/decisions/q(1)/resolve",
     body: { option: "hold", raw_quote: "先别发，等我确认" },
-    headers: { accept: "application/json", "content-type": "application/json" },
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+      "Idempotency-Key": expect.any(String),
+    },
     credentials: "same-origin",
   });
   // The list reloads from the server after a successful write.

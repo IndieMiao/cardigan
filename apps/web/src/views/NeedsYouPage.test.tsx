@@ -236,6 +236,7 @@ test.each(["approve", "reject", "merge", "keep", "force_clean"])(
       "q(1)",
       option,
       "  我选这个  ",
+      expect.any(String),
     );
     expect(needsYou).toHaveBeenCalledTimes(2);
   },
@@ -281,6 +282,7 @@ test("merge confirmation lists the deliveries, reviews and known gaps and record
       "q(3)",
       "merge",
       " 可以合并 ",
+      expect.any(String),
     ),
   );
 });
@@ -310,6 +312,7 @@ test.each([
       "q(1)",
       action,
       "请说明影响",
+      expect.any(String),
     ),
   );
 });
@@ -344,6 +347,7 @@ test("returning a merge requires a nonblank reason and submits the exact explana
       "q(3)",
       "request_changes",
       " 请补齐空输入校验 ",
+      expect.any(String),
     ),
   );
 });
@@ -365,7 +369,13 @@ test("hold still submits without a reason after cancelling the return form", asy
   expect(recordDecision).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button", { name: "暂不合并" }));
   await waitFor(() =>
-    expect(recordDecision).toHaveBeenCalledWith("p-1", "q(3)", "hold", ""),
+    expect(recordDecision).toHaveBeenCalledWith(
+      "p-1",
+      "q(3)",
+      "hold",
+      "",
+      expect.any(String),
+    ),
   );
 });
 
@@ -392,7 +402,12 @@ test("execution results require text; errors preserve the draft for retry", asyn
   ).toBe("设备已连接");
   fireEvent.click(submit);
   await waitFor(() => expect(completeAction).toHaveBeenCalledTimes(2));
-  expect(completeAction).toHaveBeenLastCalledWith("p-1", "h(1)", "设备已连接");
+  expect(completeAction).toHaveBeenLastCalledWith(
+    "p-1",
+    "h(1)",
+    "设备已连接",
+    expect.any(String),
+  );
 });
 
 test("handles loading, failed reads with retry, and empty data", async () => {
@@ -537,3 +552,49 @@ test("waiting durations advance without changing the decision draft", async () =
     (screen.getByLabelText("q(1) 原话或补充说明") as HTMLTextAreaElement).value,
   ).toBe("未提交");
 });
+
+test.each(["decision", "clarification", "completion"] as const)(
+  "%s retries keep their key and a later successful operation gets a new one",
+  async (kind) => {
+    const operation = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError("offline"))
+      .mockResolvedValue(undefined);
+    render(
+      <NeedsYouPage
+        client={fakeClient({
+          needsYou: async () => page([q({ trigger: null })]),
+          recordDecision: operation,
+          decisionComment: operation,
+          completeAction: operation,
+        })}
+        projectId="p-1"
+      />,
+    );
+    await screen.findByText("需要连接设备");
+    if (kind === "decision")
+      fireEvent.click(screen.getByRole("radio", { name: /merge/u }));
+    const input =
+      kind === "completion" ? "h(1) 执行结果" : "q(1) 原话或补充说明";
+    const button =
+      kind === "completion"
+        ? "确认已完成"
+        : kind === "clarification"
+          ? "要求补充信息"
+          : "按所选拍板";
+    fireEvent.change(screen.getByLabelText(input), {
+      target: { value: "同一次操作" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: button }));
+    await screen.findByRole("alert");
+    fireEvent.click(screen.getByRole("button", { name: button }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    const firstKey = operation.mock.calls[0]?.at(-1);
+    expect(firstKey).toMatch(/^[0-9a-f-]{36}$/u);
+    expect(operation.mock.calls[1]?.at(-1)).toBe(firstKey);
+    await screen.findByText("已提交");
+    fireEvent.click(screen.getByRole("button", { name: button }));
+    await waitFor(() => expect(operation).toHaveBeenCalledTimes(3));
+    expect(operation.mock.calls[2]?.at(-1)).not.toBe(firstKey);
+  },
+);

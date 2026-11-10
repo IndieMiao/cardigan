@@ -24,7 +24,7 @@ import {
   prepareAttachmentFile,
   ToolError,
 } from "@cardigan/mcp-server";
-import type { Store } from "@cardigan/store";
+import type { Store, StoreTransactionContext } from "@cardigan/store";
 import { z } from "zod";
 import {
   HttpRejection,
@@ -122,16 +122,38 @@ export interface WriteContext {
   /** Recheck the session after body/file IO and inside the command transaction. */
   readonly authorize: () => unknown;
 }
+interface CommandContext extends WriteContext {
+  readonly idempotency?: { readonly key: string; readonly request: unknown };
+}
+function execute<T>(
+  c: CommandContext,
+  operation: (tx: StoreTransactionContext) => T,
+): T {
+  // This synchronous check also applies to cached responses and conflicts.
+  c.authorize();
+  if (!c.idempotency) return c.store.uow.run(operation);
+  const result = c.store.runHumanIdempotent(
+    { project_id: c.project_id, ...c.idempotency },
+    operation,
+  );
+  if (!result.ok && result.error.code === "idempotency_conflict")
+    throw new HttpRejection(
+      409,
+      "idempotency_conflict",
+      "这次操作的幂等键已用于不同的请求内容，请恢复原内容后重试。",
+    );
+  return must(result).value;
+}
 /** One human command, one fresh project snapshot and one atomic effect; failures roll back. */
 function run<T>(
-  c: WriteContext,
+  c: CommandContext,
   reduce: (
     s: CommandState,
     a: Actor,
     p: CommandPorts,
   ) => Result<CommandEffect<T>>,
 ): T {
-  return c.store.uow.run((tx) => {
+  return execute(c, (tx) => {
     c.authorize();
     const effect = must(
       reduce(
@@ -178,17 +200,49 @@ export async function serveWrite(
     operation === "attachments" ? MAX_MCP_BODY_BYTES : undefined,
   );
   c.authorize();
+  const header = c.req.headers["idempotency-key"];
+  const context: CommandContext = {
+    ...c,
+    ...(header === undefined
+      ? {}
+      : {
+          idempotency: {
+            key: parsed(
+              z
+                .string()
+                .min(1)
+                .max(256)
+                .refine((s) => s.trim().length > 0),
+              header,
+            ),
+            request: { method: "POST", group, key, operation, body },
+          },
+        }),
+  };
+  if (context.idempotency) {
+    const missing = Symbol("uncached request");
+    try {
+      // A replay needs no file IO or command validation against newer state.
+      const cached = execute(context, () => {
+        throw missing;
+      });
+      sendJson(c.res, 200, cached);
+      return true;
+    } catch (error) {
+      if (error !== missing) throw error;
+    }
+  }
   let output: unknown;
   if (group === "cards") {
     const card_id = parsed(id("card"), key);
     if (operation === "comments") {
       const p = defined(parsed(comment, body));
-      output = run(c, (s, a, ports) =>
+      output = run(context, (s, a, ports) =>
         postComment(s, a, { ...p, card_id }, ports),
       );
     } else if (operation === "instructions") {
       const p = parsed(instruction, body);
-      output = run(c, (s, a, ports) =>
+      output = run(context, (s, a, ports) =>
         issueInstruction(s, a, { ...p, card_id }, ports),
       );
     } else {
@@ -201,7 +255,7 @@ export async function serveWrite(
         throw error;
       }
       // Published content-addressed blobs remain on rejection: another upload may already share them.
-      output = run(c, (s, a, ports) =>
+      output = run(context, (s, a, ports) =>
         uploadAttachment(s, a, { ...p, card_id }, receipt, ports),
       );
     }
@@ -209,7 +263,7 @@ export async function serveWrite(
     const decision_id = parsed(id("decision"), key);
     if (operation === "resolve") {
       const p = parsed(decision, body);
-      output = run(c, (s, a, ports) => {
+      output = run(context, (s, a, ports) => {
         const returning =
           p.option === "request_changes" &&
           s.decisions.find((q) => q.id === decision_id)?.trigger ===
@@ -232,7 +286,7 @@ export async function serveWrite(
       });
     } else {
       const p = parsed(clarification, body);
-      output = run(c, (s, a, ports) => {
+      output = run(context, (s, a, ports) => {
         const q = s.decisions.find((q) => q.id === decision_id);
         if (!q) throw new HttpRejection(404, "not_found", "Decision not found");
         if (!q.card_id)
@@ -279,7 +333,7 @@ export async function serveWrite(
   } else {
     const human_action_id = parsed(id("human_action"), key),
       p = defined(parsed(action, body));
-    output = run(c, (s, a, ports) =>
+    output = run(context, (s, a, ports) =>
       completeHumanAction(s, a, { ...p, human_action_id }, ports),
     );
   }
