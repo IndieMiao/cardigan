@@ -113,3 +113,17 @@ test("delegation preferences persist separately from merge settings and reject f
     await run(["preference", "set", "decision-delegation", "unknown", "on"]),
   ).not.toBe(0);
 });
+
+test("PM merge confirmation defaults on and the human can switch it from the CLI", async () => {
+  expect(await run(["preference", "get", "pm-merge-confirmation"])).toBe(0);
+  expect(output).toEqual(["pm-merge-confirmation: on (PM 代确认合并)"]);
+  expect(await run(["preference", "set", "pm-merge-confirmation", "off"])).toBe(
+    0,
+  );
+  expect(output).toContain("pm-merge-confirmation: off (由人确认)");
+  expect(await run(["preference", "get", "pm-merge-confirmation"])).toBe(0);
+  expect(output).toEqual(["pm-merge-confirmation: off (由人确认)"]);
+  expect(
+    await run(["preference", "set", "pm-merge-confirmation", "maybe"]),
+  ).not.toBe(0);
+});

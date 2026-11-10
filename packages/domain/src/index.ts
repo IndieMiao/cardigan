@@ -28,6 +28,7 @@ export {
   recheckMerge,
   recordMergeCheck,
 } from "./commands/merge-check.js";
+export { pmMergeBlockers } from "./commands/merge-delegation.js";
 export {
   beginMergePush,
   type MergePushAttempt,
@@ -37,6 +38,7 @@ export {
   recordMergePushResult,
 } from "./commands/merge-push.js";
 export * from "./commands/merge-result.js";
+export * from "./commands/notices.js";
 export * from "./commands/pm.js";
 export * from "./commands/pm-rotate.js";
 export * from "./commands/preferences.js";

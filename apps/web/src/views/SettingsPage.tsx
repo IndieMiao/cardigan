@@ -132,8 +132,17 @@ export function SettingsPage({
             <h2 id="authorization-title">授权</h2>
             <p>
               PM 代拍时必须写明理由并保留授权依据。没有活跃 PM Ops
-              时交给你；合并确认沿用原有设置。
+              时交给你。代拍和代确认的合并都会在 Needs You 的知会区同步给你。
             </p>
+            {resource.data && (
+              <PmMergeSetting
+                key={`pm-merge:${resource.data.pm_merge_confirmation}`}
+                enabled={resource.data.pm_merge_confirmation !== false}
+                client={client}
+                projectId={projectId}
+                saved={resource.reload}
+              />
+            )}
             {resource.data &&
               Object.entries(categoryLabels).map(([category, label]) => (
                 <DelegationSetting
@@ -244,6 +253,62 @@ function PreferenceForm({
       {error && <p role="alert">{error}</p>}
       {message && <p role="status">{message}</p>}
     </form>
+  );
+}
+
+function PmMergeSetting({
+  enabled,
+  client,
+  projectId,
+  saved,
+}: {
+  enabled: boolean;
+  client: CardiganClient;
+  projectId: string;
+  saved: () => void;
+}) {
+  const [busy, setBusy] = useState(false),
+    [error, setError] = useState("");
+  const sending = useRef(false),
+    key = useRef<string | undefined>(undefined);
+  return (
+    <div>
+      <label>
+        <input
+          type="checkbox"
+          checked={enabled}
+          disabled={busy}
+          onChange={async (e) => {
+            if (sending.current) return;
+            const next = e.target.checked;
+            sending.current = true;
+            setBusy(true);
+            setError("");
+            key.current ??= crypto.randomUUID();
+            try {
+              await client.setPmMergeConfirmation(projectId, next, key.current);
+              key.current = undefined;
+              saved();
+            } catch (cause) {
+              setError(describeWriteError(cause));
+            } finally {
+              sending.current = false;
+              setBusy(false);
+            }
+          }}
+        />
+        合并由 PM 代确认：
+        <StatusTag
+          status={enabled ? "active" : "waiting_decision"}
+          label={enabled ? "由 PM 代确认" : "由人确认"}
+        />
+      </label>
+      <p className="hint">
+        默认开启。PM 只有在合并闸门检查、全部验证通过且没有未处理的 must_fix
+        时才能确认合并；涉及花钱、账号、权限、删除数据或需求范围变化的卡片始终由你确认。关闭后由你确认，超时自动合并作为兜底。
+      </p>
+      {error && <p role="alert">{error}</p>}
+    </div>
   );
 }
 

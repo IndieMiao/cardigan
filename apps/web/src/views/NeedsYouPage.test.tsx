@@ -1196,3 +1196,51 @@ test("an invalid merge gate shows a fixed warning without a queued badge or rech
   expect(article.queryByRole("button", { name: "重新检查" })).toBeNull();
   expect(article.getByRole("button", { name: "确认合并" })).toBeTruthy();
 });
+
+test("notices list delegated merges and decisions without blocking, and can be marked read", async () => {
+  const markNoticesRead = vi.fn().mockResolvedValue(undefined);
+  const notice = (id: string, kind: "merge" | "decision", read = false) => ({
+    id,
+    kind,
+    card_id: "C-1",
+    decision_id: kind === "merge" ? "q(7)" : "q(8)",
+    question: "",
+    option: "merge",
+    resolved_by: "pm",
+    body: kind === "merge" ? "改了登录页；无风险。" : "方案 A。理由：按惯例",
+    proxy_authority: null,
+    at: "2026-01-01T00:00:00.000Z",
+    read,
+  });
+  render(
+    <NeedsYouPage
+      client={fakeClient({
+        needsYou: async () => ({
+          ...page([]),
+          human_actions: [],
+          notices: [notice("E-2", "merge"), notice("E-1", "decision", true)],
+        }),
+        markNoticesRead,
+      })}
+      projectId="p-1"
+    />,
+  );
+  const group = await screen.findByRole("region", { name: "知会" });
+  expect(within(group).getByText("知会（未读 1）")).toBeTruthy();
+  expect(within(group).getByText("PM 代确认合并")).toBeTruthy();
+  expect(within(group).getByText("改了登录页；无风险。")).toBeTruthy();
+  // Notices do not count as things waiting on the human.
+  expect(screen.queryByText(/件事等你处理/)).toBeNull();
+  const merge = within(group).getByRole("article", { name: "知会 q(7)" });
+  expect(
+    within(merge)
+      .getByRole("link", { name: "查看拍板记录" })
+      .getAttribute("href"),
+  ).toContain("decision-history");
+  fireEvent.click(within(merge).getByRole("button", { name: "标为已读" }));
+  await waitFor(() =>
+    expect(markNoticesRead).toHaveBeenCalledWith("p-1", ["E-2"]),
+  );
+  const read = within(group).getByRole("article", { name: "知会 q(8)" });
+  expect(within(read).queryByRole("button", { name: "标为已读" })).toBeNull();
+});

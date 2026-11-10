@@ -44,6 +44,7 @@
 | P2a-6 审核者不是作者（C7） | 核实 `assign` 是否允许同一个 Assignment（或同一员工）既做产出项又做验证它的工作项；允许就补一条不变量 | Cardigan | 契约测试覆盖；开发方案 §4.5 补不变量 |
 | P2a-8 CLI 评论和附件（试行发现 14） | 人在命令行给卡片发评论（`cardigan comment add <C-n> --text <内容>`）和上传附件（`cardigan attachment add <C-n> --file <路径> [--kind evidence] [--note <说明>]`），复用 Workbench 的同一段处理代码，身份是人 | Cardigan | 不登录 Workbench 也能完成；附件类型校验、大小上限与 Workbench 一致；artifact 仍必须挂拍板 |
 | P2a-9 全机同时运行的 Run 上限（试行发现 35，细化见下方 §2.1） | 主机按机器配置全机同时处于 `dispatched`／`acked`／`running` 态的 Run 数上限，默认 4；超过时新 Run 留在 `queued`、不按铃，按创建时间跨项目排队；常驻 PM 的 Run 不受限但计入计数 | Codex 或 Pi | 契约测试覆盖排队顺序、PM 豁免、改配置后下一次调度生效；执行视图／看板／CLI 能看到排队位次；验证时不得人为制造 CPU 负载 |
+| P2a-10 主机运维角色（试行发现 35/40/41，细化计划：[p2a-10-host-ops-role.md](p2a-10-host-ops-role.md)） | 先补确定性自动化（部署后刷新常驻会话工具清单）；再引入运维角色 `host_ops`（员工"大乔"，职位"主机运维"），处理 Run 卡在 dispatched、失控进程、偶发合并检查失败、attention 积压；不派活、不审核合并、不建卡、不定口径，高风险报人 | Cardigan（分三张卡） | 契约测试覆盖 host_ops 角色权限边界的六条不变量；`cardigan` 项目开出 host_ops Assignment 并观察一周，发现 35/40/41 不再需要 Claude 手动处理 |
 
 ### 2.1 全机同时运行的 Run 上限（P2a-9 细化）
 
@@ -95,6 +96,7 @@
 |---|---|---|
 | V9 Workbench 角色管理（细化计划：[p2v-9-10-roles-templates.md](p2v-9-10-roles-templates.md)） | 管理员新建、编辑角色：名称、类型（产出 / 验证 / 常驻）、角色说明、能承担的工作项种类、能力标签、worktree 模式、可用工具、机器标签；默认角色可"复制后修改"。每次保存生成新版本，进行中的 Run 继续用旧版本，可看历史和回退。可用工具只能从系统白名单里选，界面不能突破系统级约束（Agent 不能推送、只有 PM Office 能记录人的拍板、验证方只读）；§6.3 协议部分由系统固定拼接，管理员只改角色说明。模型不放在角色上（见 V1、V2，放在员工上） | Cardigan（V9a、V9b 两张卡）|
 | V10 Workbench 卡片模板（细化计划同上） | 管理员新建、编辑卡片模板：名称、说明、是否需要仓库、合并方式（不合并 / 确认后合并 / 自动合并）、默认工作项（标题、产出或验证、角色、是否必需、验证哪个产出项）、完成方式（完成申请经 PM 或人验收；或人直接标记完成，必须写一句结果，可附证据）。模板有版本，卡片创建时记下模板和版本，改模板不影响已有卡片。内置三个模板：`dev`（现有）、**通用任务**（不需要仓库，默认没有工作项，人标记完成）、**产出物**（产出方可以是 designer 等非开发角色，交付对象是文件或文档，验收后完成，不走合并）。建卡时（Workbench、CLI、PM 的 MCP 工具）可以选模板。domain 新增"人标记完成"命令，只对允许它的模板开放，附契约测试 | Cardigan（V10a、V10b 两张卡）|
+| V11 成员身份与外接 Assignment（细化计划：[p2v-11-members-identity.md](p2v-11-members-identity.md)） | 新增全局"成员（Member）"实体表示真人（现在只有所有者"邵杰"），Workbench 登录和本机 CLI 默认身份对应到成员，时间线、拍板记录、知会显示成员名字和头像，老数据 `author=human` 按所有者显示；员工"张良"担任 cardigan 项目 PM Office，持有"外接"Assignment，Cardigan 为它签发 Token，本机 CLI 支持用 `CARDIGAN_TOKEN`／`--token-file` 以该身份操作，Dispatcher 不为外接 Assignment 起终端，门铃落入 `cardigan inbox`；停用旧的 A-36 | Cardigan（V11a、V11b、V11c 三张卡）|
 
 V9、V10 是 Phase 3"PM 按任务创建、修改流程"的前提：先把角色和模板做成有版本、有边界的数据，之后才能让 PM 在边界内改。因此角色和模板的增删改都实现为 domain 命令，Workbench 和 CLI（`cardigan role ...`、`cardigan template ...`）共用；Phase 3 让 PM 经 CLI 或 MCP 调用同一批命令（用户 2026-11-09 要求 PM 能通过 Cardigan CLI 等方式改流程）。Agent 侧的 CLI 必须凭该 Assignment 的 Token 走与 MCP 相同的权限检查，不能使用主机上以人的身份直接读写数据库的 `cardigan`。
 
@@ -120,6 +122,7 @@ V9、V10 是 Phase 3"PM 按任务创建、修改流程"的前提：先把角色�
 | 任务 | 内容 | 负责 |
 |---|---|---|
 | C-D11 常驻授权代拍板（C-37，提前） | 复用 C-36：流程 general、功能细节 feature_detail 默认由 PM Ops 先审；scope_change 默认交人，可在拍板时或设置页授权。代拍写理由、delegated、proxy_authority；无可处理的后台／授权关闭时交人。合并确认排除，C-29 逻辑不变。设置页与 preference CLI 管理授权；HumanAction 先分拣；需要交人时必填白话标题、事项说明、人必须参与的原因、具体步骤、完成影响与回传要求，展示 PM 改写标记并保留原请求；权限内的纯流程操作由 PM 完成，过期合并确认由 C-47 系统作废，PM 不代拍合并；Workbench 查询拍板记录并按决策人、类别、卡片、时间筛选，无撤销。拍板解决后通知发起人落实，首提示含选项和影响，30 分钟无落实信号提醒 PM Ops | Codex |
+| C-49 合并默认由 PM 推进（2026-11-10 用户拍板，取代 C-37 中“合并确认排除、PM 不代拍合并”） | 合并确认默认 decider 为 PM Ops；domain 强制合并检查通过、必需验证全部通过、无未处理 must_fix 才能选 merge，否则只能 hold／退回修改／交人。卡片涉及 D12 四类或需求范围变化时由人确认（Workbench 或本机 CLI），PM 可写理由主动交人，交人后不适用超时自动合并。PM 代确认合并和各类代拍在 Needs You“知会”区同步，可标为已读；设置页可关闭 PM 代确认，关闭后回到人确认，C-29 超时自动合并保留为兜底。pm 角色包补充合并判断要点和知会写法 | Cardigan |
 | C-D12 高风险只能由人确认（随 C-37，2026-11-10 更新） | spending/account/permission/data_deletion 四类永不授权给 PM；只接受 human 身份，Workbench 与本机 CLI 同等有效，PM Office/PM Ops/其他 Agent 不得代拍或转录。未经类别授权的需求范围变化仍要求 Workbench 确认 | Cardigan |
 | C-due 拍板截止时间（C5） | `request_decision` 加 `due`；Needs You 按截止时间排序和提示 | Cardigan |
 | C-remind 人工动作提醒（C4） | HumanAction 到期前提醒一次，到点没开始再提醒一次 | Cardigan |

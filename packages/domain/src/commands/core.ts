@@ -83,6 +83,7 @@ type CommandName =
   | "abort_dispatch"
   | "manage_inactive_run_stop"
   | "set_project_preferences"
+  | "mark_notices_read"
   | "auto_confirm_merge"
   | "remind_decision_followups"
   | "request_merge"

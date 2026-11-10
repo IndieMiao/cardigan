@@ -385,6 +385,17 @@ test("merge timeline shows the deadline and distinguishes delegated from human c
   expect(screen.queryByText(/将于/)).toBeNull();
   view.rerender(content({ ...resolved, author: "human" }));
   expect(screen.queryByText("自动合并（代批）")).toBeNull();
+  // C-49: a PM Ops merge confirmation is not labelled as the timeout approval.
+  view.rerender(
+    content({
+      ...resolved,
+      author: "assignment:A-4",
+      decision_via: "delegated",
+      decision_delegate: "pm",
+    }),
+  );
+  expect(screen.getByText(/^PM 代确认：/)).toBeTruthy();
+  expect(screen.queryByText("自动合并（代批）")).toBeNull();
 });
 
 test("a PM delegated decision uses a shared status icon and remains distinct from automatic merge approval", () => {

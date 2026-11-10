@@ -121,6 +121,9 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
       ops = await h.connect(
         lastLine(await h.cardigan("pm", "create", "--ops")),
       );
+      // Appendix A walks the human merge confirmation (step 10); C-49 made
+      // PM Ops the default confirmer, so this run uses the human mode.
+      await h.cardigan("preference", "set", "pm-merge-confirmation", "off");
     }, 180_000);
 
     afterAll(async () => {

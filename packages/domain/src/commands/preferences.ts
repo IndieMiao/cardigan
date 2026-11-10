@@ -4,6 +4,7 @@ import {
   decisionCategories,
   decisionDelegation,
   highRiskCategories,
+  pmMergeConfirmation,
   validAutoMergeMinutes,
 } from "../preferences.js";
 import {
@@ -29,6 +30,7 @@ export function setProjectPreferences(
   input: {
     auto_merge_after_minutes?: number | null;
     decision_delegation?: Partial<Record<DecisionCategory, boolean>>;
+    pm_merge_confirmation?: boolean;
   },
   ports: CommandPorts,
 ) {
@@ -47,9 +49,16 @@ export function setProjectPreferences(
     const old = projectPreferences(state);
     ensure(
       input.auto_merge_after_minutes !== undefined ||
-        input.decision_delegation !== undefined,
+        input.decision_delegation !== undefined ||
+        input.pm_merge_confirmation !== undefined,
       "validation_failed",
       "No preference supplied",
+    );
+    ensure(
+      input.pm_merge_confirmation === undefined ||
+        typeof input.pm_merge_confirmation === "boolean",
+      "validation_failed",
+      "pm_merge_confirmation must be a boolean",
     );
     const delegation = { ...decisionDelegation(old) };
     for (const [category, enabled] of Object.entries(
@@ -75,13 +84,18 @@ export function setProjectPreferences(
           ? old.auto_merge_after_minutes
           : input.auto_merge_after_minutes,
       ...(input.decision_delegation ? { decision_delegation: delegation } : {}),
+      ...(input.pm_merge_confirmation !== undefined
+        ? { pm_merge_confirmation: input.pm_merge_confirmation }
+        : {}),
     };
     const mergeChanged =
       old.auto_merge_after_minutes !== next.auto_merge_after_minutes;
     const delegationChanged = decisionCategories.some(
       (c) => decisionDelegation(old)[c] !== delegation[c],
     );
-    if (!mergeChanged && !delegationChanged) return old;
+    const pmMergeChanged =
+      pmMergeConfirmation(old) !== pmMergeConfirmation(next);
+    if (!mergeChanged && !delegationChanged && !pmMergeChanged) return old;
     d.put("project_preferences", next);
     if (mergeChanged)
       d.emit("project_preferences_updated", undefined, {
@@ -96,6 +110,18 @@ export function setProjectPreferences(
         preference: "decision_delegation",
       });
       handoffUnauthorizedDecisions(d, "项目授权已关闭，此拍板转交给你。");
+    }
+    if (pmMergeChanged) {
+      d.emit("project_preferences_updated", undefined, {
+        old_value: pmMergeConfirmation(old),
+        new_value: pmMergeConfirmation(next),
+        preference: "pm_merge_confirmation",
+      });
+      // Turning it off returns open PM merge confirmations to the human.
+      handoffUnauthorizedDecisions(
+        d,
+        "合并由 PM 代确认已关闭，此合并确认转交给你。",
+      );
     }
     return next;
   });

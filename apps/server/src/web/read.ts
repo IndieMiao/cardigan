@@ -26,6 +26,7 @@ import {
   latestCardTemplate,
   listNeedsYou,
   markCardDone,
+  notices,
   parseAvatarReference,
   projectSnapshot,
   type Result,
@@ -614,7 +615,10 @@ export function cardDetail(
       typeof event.payload === "object" &&
       "via" in event.payload &&
       event.payload.via === "delegated"
-        ? { decision_via: "delegated" }
+        ? {
+            decision_via: "delegated",
+            decision_delegate: event.actor.kind === "system" ? "system" : "pm",
+          }
         : {}),
       ...(event?.type === "attachment_uploaded" &&
       typeof attachmentId === "string" &&
@@ -749,6 +753,7 @@ export function needsYou(
     listNeedsYou(state, human(state.project_id), { now: () => now }),
   );
   const data = result.data;
+  const noticeList = notices(state);
   const checks = new Map(
     mergeGateStatus === "enabled"
       ? cardViews(state).map((card) => [card.id, card.merge_check])
@@ -897,9 +902,12 @@ export function needsYou(
     human_actions: [...human_actions].sort(
       (left, right) => (right.waited_ms ?? 0) - (left.waited_ms ?? 0),
     ),
+    // §7.4 知会: delegated resolutions, newest first; never blocking.
+    notices: noticeList.slice(0, 50),
     counts: {
       decisions: decisions.length,
       human_actions: human_actions.length,
+      notices_unread: noticeList.filter((n) => !n.read).length,
     },
   };
 }

@@ -197,7 +197,9 @@ export function TimelineContent({
               status={status}
               label={
                 entry.decision_via === "delegated"
-                  ? "自动合并（代批）"
+                  ? entry.decision_delegate === "pm"
+                    ? `PM 代确认：${decisionOption(decision, entry.decision_option)}`
+                    : "自动合并（代批）"
                   : decisionOption(decision, entry.decision_option)
               }
             />
