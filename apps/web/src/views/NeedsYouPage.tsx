@@ -350,6 +350,9 @@ function MergeConfirmation({
     <article className="needs-item needs-merge" aria-label={`合并确认 ${q.id}`}>
       <DecisionMeta q={q} projectId={projectId} elapsed={elapsed} />
       <h3 className="needs-question">{decisionTitle(q)}</h3>
+      {merge?.merge_gate_invalid && (
+        <p className="error">合并闸门配置无效，请查看 server 启动日志</p>
+      )}
       {merge?.merge_gate_enabled && (
         <MergeCheck check={check ?? null} projectId={projectId} live />
       )}

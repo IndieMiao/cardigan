@@ -765,6 +765,10 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
             gate.status === "enabled"
               ? [`    合并检查：${check ? checkLabels[check.status] : "排队"}`]
               : []),
+            ...(decision.trigger === "merge_confirmation" &&
+            gate.status === "invalid"
+              ? ["    合并闸门配置无效，请查看 server 启动日志"]
+              : []),
             ...(decision.status === "provisional"
               ? ["    状态：等待确认（条件性拍板）"]
               : []),

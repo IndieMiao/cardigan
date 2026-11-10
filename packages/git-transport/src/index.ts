@@ -253,3 +253,11 @@ export class LocalGitTransport implements GitWorktreePort {
     await this.git(repository, ["branch", "-D", branch]);
   }
 }
+
+export {
+  classifyPushFailure,
+  mergePushCommand,
+  type PushFailure,
+  type PushRequest,
+  type PushResult,
+} from "./merge-push.js";

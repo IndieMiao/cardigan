@@ -999,9 +999,9 @@ C-37：交给人的普通拍板增加“此类问题以后由 PM 代拍”勾选
 
 侧栏增加 `#/p/<项目>/decision-history` 拍板记录页，查询已解决的拍板，包含后来被取代或撤回但有已解决事件的历史决定，不提供撤销。`GET /api/projects/:id/decision-history` 支持决策人 `human | pm | system`、类别、卡片及起止时间筛选，按解决时间倒序显示选项、影响、理由、记录人和授权依据；Office 转录计为人，`resolved_by=system` 的超时自动合并计为系统代批。筛选同步到 URL，沿用 Workbench 登录与项目隔离。
 
-P2a-1c：启用合并闸门的项目，Needs You 合并确认显示当前完成申请的 `merge_check` 徽标（排队中、运行中、已通过、失败、超时、已中断）、检查用时、失败摘要及日志链接。首个检查事件尚未写入时显示排队；运行用时从开始事件计算，结束后汇总逐项用时。确认按钮仍可用，检查未通过时旁注“检查通过后才会合并”。仅失败或超时提供“重新检查”，以 human 身份经 `POST /cards/:card/recheck-merge` 调用与 CLI 相同的 `recheckMerge`；请求携带 completion_id 和幂等键，事务内核对当前完成申请，过期或不满足重试条件时用中文说明。未启用闸门时保持原界面。时间线从对应 `merge_check_*` 事件展示当次检查徽标，不解析正文或另存状态；`cardigan needs-you` 的合并项同步显示检查状态。
+P2a-1c：启用合并闸门的项目，Needs You 合并确认显示当前完成申请的 `merge_check` 徽标（排队中、运行中、已通过、失败、超时、已中断）、检查用时、失败摘要及日志链接。首个检查事件尚未写入时显示排队；运行用时从开始事件计算，结束后汇总逐项用时。确认按钮仍可用，检查未通过时旁注“检查通过后才会合并”。仅失败或超时提供“重新检查”，以 human 身份经 `POST /cards/:card/recheck-merge` 调用与 CLI 相同的 `recheckMerge`；请求携带 completion_id 和幂等键，事务内核对当前完成申请，过期或不满足重试条件时用中文说明。未配置闸门时保持原界面。配置无效时，Needs You 合并卡片和 `cardigan needs-you` 显示固定提示“合并闸门配置无效，请查看 server 启动日志”；只读接口只传递无效状态，不回显配置内容或具体解析错误，也不显示排队或提供重新检查。时间线从对应 `merge_check_*` 事件展示当次检查徽标，不解析正文或另存状态；`cardigan needs-you` 的合并项同步显示检查状态。
 
-日志只读接口为 `GET /api/projects/:project/merge-checks/:attempt`：要求有效 Workbench 登录，attempt 仅接受主机生成格式的小写 UUID，并反查当前项目的 `merge_check_*` 事件确认 attempt 归属；只有日志文件而没有本项目检查记录时也返回 404。路径固定为数据目录内 `merge-gate/logs/<当前项目>/<attempt>.log`；拒绝目录和文件符号链接，不接受外部日志路径。返回 `text/plain; charset=utf-8`、`X-Content-Type-Options: nosniff`、私有不缓存及禁脚本 CSP；文件读取后再次检查会话。日志缺失或已被保留策略清理返回中文 404。
+日志只读接口为 `GET /api/projects/:project/merge-checks/:attempt`：要求有效 Workbench 登录，attempt 仅接受主机生成格式的小写 UUID，并反查当前项目的 `merge_check_*` 事件确认 attempt 归属；只有日志文件而没有本项目检查记录时也返回 404。路径固定为数据目录内 `merge-gate/logs/<当前项目>/<attempt>.log`；拒绝目录和文件符号链接，不接受外部日志路径。返回 `text/plain; charset=utf-8`、`X-Content-Type-Options: nosniff`、私有不缓存及禁脚本 CSP；处理器在查询归属及访问文件系统前检查会话，文件读取后再次检查会话。响应总量最多 8 MiB（含截断提示）；按文件大小快照有界读取，超过上限时只读取首尾（首段额外读取一个前瞻字节判断 UTF-8 边界），将两处切点收缩到完整字符边界；中间提示“日志已截断”，写明原文件大小（字节）及中间内容已省略，提示后接日志尾部。按动态提示的实际字节长度扣除正文预算，读取期间追加的内容留待下次请求。前端日志链接同样只接受小写 UUID。日志缺失或已被保留策略清理返回中文 404。
 
 ### 8.3 项目快照（不是消息流）
 
@@ -1449,7 +1449,21 @@ P2a-1a 的检查队列按当前完成申请最后一条审核事件的时间跨�
 - 循环周期都可配置：合并 `CARDIGAN_MERGE_INTERVAL_MS`（默认 5 秒）、清理 `CARDIGAN_CLEANUP_INTERVAL_MS`（默认 60 秒）、对账 `CARDIGAN_RECONCILE_INTERVAL_MS` 与备份 `CARDIGAN_BACKUP_INTERVAL_MS`（默认各 10 分钟）、附件清理 `CARDIGAN_ATTACHMENT_GC_INTERVAL_MS`（默认 6 小时，见 §9.3）。停止信号到来时先停派发，再依次等合并、清理、对账、备份、附件清理的当前一轮结束；附件清理不依赖 Git，项目没有登记仓库时也照常运行。
 - `cardigan worktree diff <A-n>` 走同一份改动摘要和补丁；`cardigan worktree clean <A-n> --force` 与 `cardigan worktree keep <A-n>` 以本机 human 身份确认 data_deletion 拍板，与 Workbench 同等有效；命令保留原话和审计记录；实际删除仍由清理循环执行，命令本身不删文件。
 
-### 12.7 写锁
+### 12.7 推送到外部远程
+
+P2a-1b 的主机配置在项目闸门下增加可选 `push`：`remote` 只接受显式 SSH 地址或本地 `file://` URL，拒绝 HTTP 凭据 URL、Git helper 与嵌入密码；`branch` 缺省取登记基线，禁止无效 ref 名。SSH 的 `key_file`、`known_hosts_file` 必须相对数据目录，路径从数据根逐层检查，文件为主机拥有的 0600 单链接普通文件，目录 0700，不允许符号链接或越界；仅检查元数据，不读密钥内容，执行前再验证一次。测试用本地 bare 仓库作为 file 远程，此模式不需要密钥。
+
+外部推送只在主机独占中心 bare 仓库执行，发送显式完整 commit SHA 到 `refs/heads/<branch>`，不使用 force 或 `+` refspec，不隐式推送标签。Git/SSH 环境从固定 PATH、C locale 和必要 Git 隔离变量构造，不继承 SSH_AUTH_SOCK 或主机凭据变量；Git 禁用系统／全局配置、hook 和替换对象，协议默认拒绝，只为指定传输启用 file 或 SSH。SSH 使用 `-F /dev/null`、专用 `-i`、`IdentitiesOnly=yes`、`IdentityAgent=none`、`StrictHostKeyChecking=yes`、独立 UserKnownHostsFile，禁用交互认证和转发。原始 stdout/stderr 仅在内存分类为 rejected／network／auth／other，不能直接写入日志、事件或界面。
+
+启用推送时，主机将目标指纹（remote + branch）和分支作为可信项目设置载入；recordMergeResult 成功写 card_merged 的同一事务向项目事件流追加 merge_push_queued。队列按该流 seq 排序，不比较不同卡片的 seq；未配置时不追加队列，不自动补推启用前的历史结果。beginMergePush 只允许 system，先持久化 merge_push_started，再做外部 IO；重启重试同一 attempt 的同一 SHA，Git 已成功但记录前崩溃时再次推送为幂等操作。结果记录为 merge_pushed 或 merge_push_failed，带 SHA、分支、固定中文说明和有界类别，不改变 done 卡片；同 attempt 同结果重放无操作，异结果拒绝。
+
+rejected、auth 和 other 立即创建无阻塞工作项的项目级 HumanAction，进入 Needs You 并沿用路由提示 PM Office；期间后面的合并照常，推送暂停。人标记完成后只重试一次，可以将已有积压队列合为最新已记录合并提交（主机须实际验证前面的 SHA 都是它的祖先）；再次失败建新事项，不循环重试。network 按 1、2、4、8、16、30 分钟退避，之后上限 30 分钟；保持原队首，不跳过失败项。连续失败超过两小时只创建一条未决人工事项，仍按退避重试；恢复成功后取消尚未处理的网络事项，避免已恢复告警继续占据 Needs You。开始前将要推的范围固定到事件，结果只接受当前 attempt。首次成功后才处理后续范围；配置目标变化不会把旧目标队列误推到新远程。
+
+server 在合并循环旁启动独立的推送循环（默认 5 秒轮询，跟随合并循环周期配置），只消费合并事务已落库的项目队列；每个项目串行，不同项目互不阻塞，网络等待不阻塞中心合并。Git 提交实际存在和积压范围的祖先关系都在中心实查后才推送。每次调用前重验凭据元数据，权限改变按 auth 失败交给人，不继承检查进程的环境或输出。配置 invalid 的项目既不合并也不推送；没有 push 配置的项目仍保持原行为。
+
+停止时取消推送 IO 并等待当前轮结束后才关闭 Store。若停止发生在外部结果已生效、记录尚未完成之间，保留 started attempt，重启再发送同一 SHA；远程已含此提交会幂等成功。推送结果和人工事项均只记录固定中文原因，不记录远程原始诊断。配置仍在启动时读取；修改远程目标不会将旧目标队列偷偷迁移。
+
+### 12.8 写锁
 
 同一个 worktree 已有写入型 Run 在执行时，Dispatcher 不派发新的写入型 Run，后来的事件进入 Inbox 排队。
 
@@ -1459,7 +1473,7 @@ P2a-1a 的检查队列按当前完成申请最后一条审核事件的时间跨�
 
 ### 13.1 单机（Phase 1）
 
-P2a-1 的主机配置读取层从 `CARDIGAN_CONFIG_DIR/merge-gate.yaml`（默认 `~/.config/cardigan/merge-gate.yaml`）按项目加载检查；server 在启动时读取，CLI 每次调用读取，修复配置后需重启 server。未找到文件或项目未配置时为 disabled；已配置但项目不存在、检查为空／名称重复／命令为空、超时不是正整数、env 非字符串或含受控运行变量时为 invalid，组装层必须停止该项目的合并，不能当作 disabled。整份 YAML 无法读取／解析或顶层格式无效时，对所有项目返回 invalid。只输出固定中文错误，不回显配置正文、命令或 env 值。配置文件须为可信属主的普通文件，不可由组／其他用户写，路径祖先不可被不可信用户替换；拒绝链接、YAML 重复键／别名／警告及超大文件。1a 只接受 checks、env、total_timeout_minutes，不接受 push；单条默认 30 分钟、总计默认 60 分钟。
+P2a-1 的主机配置读取层从 `CARDIGAN_CONFIG_DIR/merge-gate.yaml`（默认 `~/.config/cardigan/merge-gate.yaml`）按项目加载检查；server 在启动时读取，CLI 每次调用读取，修复配置后需重启 server。未找到文件或项目未配置时为 disabled；已配置但项目不存在、检查为空／名称重复／命令为空、超时不是正整数、env 非字符串或含受控运行变量时为 invalid，组装层必须停止该项目的合并，不能当作 disabled。整份 YAML 无法读取／解析或顶层格式无效时，对所有项目返回 invalid。只输出固定中文错误，不回显配置正文、命令或 env 值。配置文件须为可信属主的普通文件，不可由组／其他用户写，路径祖先不可被不可信用户替换；拒绝链接、YAML 重复键／别名／警告及超大文件。P2a-1b 增加可选 push，非法推送配置同样使项目闸门 invalid；单条默认 30 分钟、总计默认 60 分钟。
 
 合并检查日志保存在 `<dataDir>/merge-gate/logs/<project>/<attempt>.log`，目录 0700、文件 0600，独占创建、不覆盖已有 attempt。写入前过滤配置 env 的原值及 URI／JSON／Base64 表达，并屏蔽常见认证字段和私钥块；每条输出按 UTF-8 字节限制为 2 MiB，保留首尾，边缘留重叠以先脱敏后截断。失败摘要包含检查名、退出码及末尾 40 行中的 FAIL／Error／× 错误行，总计最多 20 行。清理警告写入日志但不改检查结论。每项目仅保留最近 50 个日志；日志路径不得包含链接，日志引用只返回文件名。原始输出不写临时文件或错误信息，检查中断时至少保留已创建的日志头，完成时写入脱敏的有界输出。
 
@@ -1639,7 +1653,7 @@ resume_or_replace 在旧终端不存在时可重开；release 返回 runtime_una
 | 高风险业务拍板（D12） | 只允许 human Actor 通过 Workbench 或本机 CLI 确认；不接受 PM Office、PM Ops 或其他 Agent 的转录与代拍，不因接口参数或 CLI 命令文字自称 human 而改变身份 |
 | Card MCP | Token 仅由主机侧签发；MCP 不签发或返回明文，PM 不能借 assign 获取其他 Assignment 的凭据；身份和状态迁移由服务端校验 |
 | Web Workbench | 仍只监听回环地址（127.0.0.1），配置成非回环地址拒绝启动；外部访问可经本机 HTTPS 反向代理，必须用 `CARDIGAN_WEB_PUBLIC_ORIGINS` 显式配置来源（格式见 §8.1），未配置时保持原有回环访问，也可用 `ssh -L` 隧道；Host/Origin 只放行原有回环值与配置来源，不信任转发头；登录用 scrypt 加盐密码哈希，会话 Cookie 为 HttpOnly + SameSite=Strict + Path=/，请求 Host 属于配置的 HTTPS 来源时登录及登出均加 Secure；数据库只存会话标识的哈希，登出和改密码立即失效；MCP Token 与会话凭据互不通用 |
-| Git | 工作机和 Agent 不持有任何 Git 凭据；主机 Git 使用独占中心仓库，Agent 可写仓库内的 Git 由 Agent 执行；主机拉取／增量推送分别通过专用 SSH 的 upload-pack／receive-pack，绑定基础 clone 路径，推送只更新基线镜像和固定交付 ref；从 Agent 仓库拉取通过绑定专用 SSH 入口的 upload-pack 传递 pack 数据；中心操作清空继承的 GIT_*，禁用系统／全局配置及 hook，只允许 file 协议，启用 transfer.fsckObjects；M4 不推送外部平台 |
+| Git | 工作机和 Agent 不持有任何 Git 凭据；主机 Git 使用独占中心仓库，Agent 可写仓库内的 Git 由 Agent 执行；主机拉取／增量推送分别通过专用 SSH 的 upload-pack／receive-pack，绑定基础 clone 路径，推送只更新基线镜像和固定交付 ref；从 Agent 仓库拉取通过绑定专用 SSH 入口的 upload-pack 传递 pack 数据；中心操作清空继承的 GIT_*，禁用系统／全局配置及 hook，常规内部同步只允许 file 协议，启用 transfer.fsckObjects；P2a-1b 的外部推送按 §12.7 单独启用明确的 SSH 端点和专用凭据 |
 | 模型密钥 | 只放在环境变量或网关；不写进数据库、评论和仓库 |
 | 合并闸门配置和日志 | 主机可信配置分清 disabled／invalid，配置错误时停止合并；检查环境仍走白名单。日志仅主机可读写，配置 env 值（至少 8 个 UTF-8 字节）及常见凭据标记先脱敏再截断；加载配置拒绝非空短值与保留名 __proto__，空值允许，日志引用不携带绝对路径；不把原始 YAML 或检查输出放进异常 |
 | 临时检查代码 | Agent 模式只经固定 SSH 入口在隔离账号下执行，主机不在临时 worktree 运行 Git 或项目命令；白名单环境不继承正式 hc 会话、Cardigan 配置或凭据。local 不提供账号隔离，明确警告。检查目录独占且按 attempt 隔离，用后由执行账号清理，主机只删空容器 |

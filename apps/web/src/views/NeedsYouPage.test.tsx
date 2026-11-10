@@ -1160,4 +1160,39 @@ test("a gate waiting for its first event shows queued, while disabled projects a
   await screen.findByRole("button", { name: "确认合并" });
   expect(screen.queryByText("合并检查")).toBeNull();
   expect(screen.queryByText("检查通过后才会合并")).toBeNull();
+  expect(
+    screen.queryByText("合并闸门配置无效，请查看 server 启动日志"),
+  ).toBeNull();
+});
+
+test("an invalid merge gate shows a fixed warning without a queued badge or recheck", async () => {
+  const decision = merge();
+  const confirmation = decision.merge_confirmation;
+  if (!confirmation) throw new Error("Missing fixture");
+  render(
+    <NeedsYouPage
+      projectId="p-1"
+      client={fakeClient({
+        needsYou: async () =>
+          page([
+            {
+              ...decision,
+              merge_confirmation: {
+                ...confirmation,
+                merge_gate_invalid: true,
+              },
+            },
+          ]),
+      })}
+    />,
+  );
+  const article = within(
+    await screen.findByRole("article", { name: "合并确认 q(3)" }),
+  );
+  expect(
+    article.getByText("合并闸门配置无效，请查看 server 启动日志"),
+  ).toBeTruthy();
+  expect(article.queryByText("排队中")).toBeNull();
+  expect(article.queryByRole("button", { name: "重新检查" })).toBeNull();
+  expect(article.getByRole("button", { name: "确认合并" })).toBeTruthy();
 });

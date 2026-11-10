@@ -7,6 +7,10 @@ import {
   checkEnvironment,
   MIN_REDACTED_ENV_BYTES,
 } from "./check-environment.js";
+import {
+  type MergePushConfig,
+  parseMergePushConfig,
+} from "./merge-push-config.js";
 import type { CheckoutCheck } from "./temporary-checkout.js";
 
 export type ProjectMergeGate =
@@ -17,6 +21,7 @@ export type ProjectMergeGate =
       readonly checks: readonly CheckoutCheck[];
       readonly env: Readonly<Record<string, string>>;
       readonly totalTimeoutMs: number;
+      readonly push?: MergePushConfig;
     };
 export interface MergeGateConfiguration {
   readonly errors: readonly string[];
@@ -42,11 +47,15 @@ const minutes = (value: unknown, fallback: number) => {
 };
 const only = (value: Record<string, unknown>, keys: readonly string[]) => {
   if (Object.keys(value).some((key) => !keys.includes(key)))
-    invalid("含有本阶段不支持的配置字段（不支持 push）");
+    invalid("含有不支持的配置字段");
 };
-function projectConfig(raw: unknown): ProjectMergeGate {
+async function projectConfig(
+  raw: unknown,
+  dataDir: string,
+  baseBranch: string,
+): Promise<ProjectMergeGate> {
   if (!object(raw)) invalid("项目配置必须是对象");
-  only(raw, ["checks", "env", "total_timeout_minutes"]);
+  only(raw, ["checks", "env", "total_timeout_minutes", "push"]);
   if (!Array.isArray(raw.checks) || !raw.checks.length)
     invalid("checks 必须是非空列表");
   const names = new Set<string>();
@@ -92,6 +101,9 @@ function projectConfig(raw: unknown): ProjectMergeGate {
     checks,
     env,
     totalTimeoutMs: minutes(raw.total_timeout_minutes, 60),
+    ...(raw.push === undefined
+      ? {}
+      : { push: await parseMergePushConfig(raw.push, dataDir, baseBranch) }),
   };
 }
 
@@ -99,6 +111,8 @@ function projectConfig(raw: unknown): ProjectMergeGate {
 export async function loadMergeGateConfig(input: {
   readonly projectIds: readonly string[];
   readonly configDir?: string;
+  readonly dataDir?: string;
+  readonly baseBranches?: Readonly<Record<string, string>>;
   readonly env?: Readonly<Record<string, string | undefined>>;
 }): Promise<MergeGateConfiguration> {
   const env = input.env ?? process.env;
@@ -179,7 +193,16 @@ export async function loadMergeGateConfig(input: {
   for (const [project, value] of Object.entries(raw.projects)) {
     try {
       if (!input.projectIds.includes(project)) invalid("项目未登记");
-      projects.set(project, projectConfig(value));
+      projects.set(
+        project,
+        await projectConfig(
+          value,
+          input.dataDir ??
+            env.CARDIGAN_DATA_DIR ??
+            join(homedir(), ".local/share/cardigan"),
+          input.baseBranches?.[project] ?? "main",
+        ),
+      );
     } catch (error) {
       // Only validation messages from above; never echo YAML, commands or env values.
       const reason = `项目 ${project} 的合并闸门无效：${(error as Error).message}`;

@@ -29,7 +29,10 @@ export type CommandState = {
   readonly employees?: readonly Employee[];
   readonly employee_activity?: readonly EmployeeActivity[];
   /** Loaded by the host from trusted configuration; never supplied by MCP callers. */
-  readonly project_settings?: { readonly merge_gate_enabled?: boolean };
+  readonly project_settings?: {
+    readonly merge_gate_enabled?: boolean;
+    readonly merge_push?: { readonly target: string; readonly branch: string };
+  };
   readonly roles: readonly E.RoleReference[];
   readonly events: readonly E.Event[];
   readonly timeline: readonly E.TimelineEntry[];
@@ -82,6 +85,8 @@ type CommandName =
   | "remind_decision_followups"
   | "request_merge"
   | "record_merge_result"
+  | "begin_merge_push"
+  | "record_merge_push_result"
   | "record_merge_check"
   | "recheck_merge"
   | "release_assignment"
@@ -169,6 +174,8 @@ export class CommandDraft {
       "remind_decision_followups",
       "record_merge_result",
       "record_merge_check",
+      "begin_merge_push",
+      "record_merge_push_result",
       "request_worktree_cleanup",
     ].includes(tool);
     ensure(

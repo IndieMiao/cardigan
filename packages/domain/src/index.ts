@@ -27,6 +27,14 @@ export {
   recheckMerge,
   recordMergeCheck,
 } from "./commands/merge-check.js";
+export {
+  beginMergePush,
+  type MergePushAttempt,
+  type MergePushDestination,
+  type MergePushFailure,
+  mergePushMessage,
+  recordMergePushResult,
+} from "./commands/merge-push.js";
 export * from "./commands/merge-result.js";
 export * from "./commands/pm.js";
 export * from "./commands/preferences.js";

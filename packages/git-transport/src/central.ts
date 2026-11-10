@@ -9,6 +9,12 @@ import type {
   GitTreeMerge,
 } from "@cardigan/domain";
 import { gitEnvironment, gitSafetyArguments } from "./hardening.js";
+import {
+  classifyPushFailure,
+  mergePushCommand,
+  type PushRequest,
+  type PushResult,
+} from "./merge-push.js";
 import { type GitTimeoutOptions, withGitTimeout } from "./timeouts.js";
 
 const exec = promisify(execFile);
@@ -98,6 +104,54 @@ export class CentralGitTransport implements GitCentralPort {
         stdout: e.stdout?.trimEnd() ?? "",
         stderr: e.stderr ?? "Git failed",
       };
+    }
+  }
+  /** Explicit external publication: host center only, no ambient env or raw diagnostics. */
+  async pushMergedCommit(
+    repository: string,
+    input: PushRequest,
+  ): Promise<PushResult> {
+    try {
+      if (dirname(repository) !== this.root)
+        throw new Error("Unexpected center");
+      await this.privateDirectory(this.root);
+      await this.privateDirectory(repository);
+      if ((await this.objectType(repository, input.sha)) !== "commit")
+        throw new Error("Missing commit");
+      const command = mergePushCommand(repository, input);
+      const outcome = await withGitTimeout(
+        "push",
+        this.options,
+        async (timeout) => {
+          try {
+            await exec("git", command.args, {
+              env: command.env,
+              timeout,
+              killSignal: "SIGKILL",
+              maxBuffer: 1024 * 1024,
+              ...(input.signal ? { signal: input.signal } : {}),
+            });
+            return { status: "pushed" } as const;
+          } catch (error) {
+            const e = error as {
+              stdout?: string;
+              stderr?: string;
+              killed?: boolean;
+              name?: string;
+            };
+            return {
+              status: "failed",
+              reason: classifyPushFailure(
+                `${e.stdout ?? ""}\n${e.stderr ?? ""}`,
+                e.killed || e.name === "AbortError",
+              ),
+            } as const;
+          }
+        },
+      );
+      return outcome;
+    } catch {
+      return { status: "failed", reason: "other" };
     }
   }
   private async checked(

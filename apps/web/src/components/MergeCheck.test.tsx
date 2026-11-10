@@ -178,3 +178,20 @@ test("unsafe or mismatching log references cannot become links", () => {
   );
   expect(screen.queryByRole("link")).toBeNull();
 });
+
+test.each([
+  "E42DE008-2C67-49E2-A59D-077A0F7936DE",
+  "E42de008-2c67-49e2-a59d-077a0f7936de",
+])("uppercase UUIDs cannot become log links: %s", (attempt) => {
+  const { rerender } = render(
+    <MergeCheck
+      projectId="p-1"
+      check={{ ...check, attempt_id: attempt, log_ref: `${attempt}.log` }}
+    />,
+  );
+  expect(screen.queryByRole("link", { name: "查看日志" })).toBeNull();
+  rerender(<MergeCheck projectId="p-1" check={check} />);
+  expect(
+    screen.getByRole("link", { name: "查看日志" }).getAttribute("href"),
+  ).toBe(`/api/projects/p-1/merge-checks/${check.attempt_id}`);
+});

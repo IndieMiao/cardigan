@@ -1,8 +1,51 @@
 import { constants } from "node:fs";
-import { lstat, open } from "node:fs/promises";
+import { type FileHandle, lstat, open } from "node:fs/promises";
 import type { ServerResponse } from "node:http";
 import { join, resolve } from "node:path";
 import { HttpRejection } from "./http.js";
+
+const MAX_LOG_BYTES = 8 * 1024 * 1024;
+const isUtf8Continuation = (byte: number | undefined) =>
+  byte !== undefined && (byte & 0xc0) === 0x80;
+
+async function readRange(file: FileHandle, position: number, length: number) {
+  const buffer = Buffer.alloc(length);
+  let offset = 0;
+  while (offset < length) {
+    const { bytesRead } = await file.read(
+      buffer,
+      offset,
+      length - offset,
+      position + offset,
+    );
+    if (!bytesRead) break;
+    offset += bytesRead;
+  }
+  return buffer.subarray(0, offset);
+}
+
+async function readLog(file: FileHandle, size: number): Promise<Buffer> {
+  // Read only the stat snapshot, even if a running check appends more output.
+  if (size <= MAX_LOG_BYTES) return readRange(file, 0, size);
+  const marker = Buffer.from(
+    `\n\n[日志已截断：原大小 ${size} 字节，超过 8 MiB，已省略中间内容，以下为日志尾部]\n\n`,
+  );
+  const available = MAX_LOG_BYTES - marker.length;
+  const head = Math.floor(available / 2);
+  const tail = available - head;
+  // One lookahead byte tells us whether the head ends inside a UTF-8 character.
+  const headBytes = await readRange(file, 0, head + 1);
+  let headEnd = Math.min(head, headBytes.length);
+  while (headEnd > 0 && isUtf8Continuation(headBytes[headEnd])) headEnd--;
+  const tailBytes = await readRange(file, size - tail, tail);
+  let tailStart = 0;
+  while (isUtf8Continuation(tailBytes[tailStart])) tailStart++;
+  return Buffer.concat([
+    headBytes.subarray(0, headEnd),
+    marker,
+    tailBytes.subarray(tailStart),
+  ]);
+}
 
 /** The route has already authenticated and resolved the current project. */
 export async function serveMergeCheckLog(input: {
@@ -13,6 +56,7 @@ export async function serveMergeCheckLog(input: {
   readonly hasAttempt: (attempt: string) => boolean;
   readonly authorize: () => unknown;
 }): Promise<void> {
+  input.authorize();
   const { res, projectId, attempt } = input;
   if (
     !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(
@@ -41,8 +85,9 @@ export async function serveMergeCheckLog(input: {
       constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
     );
     try {
-      if (!(await file.stat()).isFile()) throw missing();
-      contents = await file.readFile();
+      const info = await file.stat();
+      if (!info.isFile()) throw missing();
+      contents = await readLog(file, info.size);
     } finally {
       await file.close();
     }

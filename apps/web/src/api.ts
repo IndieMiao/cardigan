@@ -442,6 +442,7 @@ export interface MergeCheckView {
 }
 export interface MergeConfirmationView {
   readonly merge_gate_enabled?: boolean;
+  readonly merge_gate_invalid?: boolean;
   readonly merge_check?: MergeCheckView | null;
   readonly completion: {
     readonly id: string;
