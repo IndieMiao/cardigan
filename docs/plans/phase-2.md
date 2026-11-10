@@ -122,7 +122,7 @@ V9、V10 是 Phase 3"PM 按任务创建、修改流程"的前提：先把角色�
 | 任务 | 内容 | 负责 |
 |---|---|---|
 | C-D11 常驻授权代拍板（C-37，提前） | 复用 C-36：流程 general、功能细节 feature_detail 默认由 PM Ops 先审；scope_change 默认交人，可在拍板时或设置页授权。代拍写理由、delegated、proxy_authority；无可处理的后台／授权关闭时交人。合并确认排除，C-29 逻辑不变。设置页与 preference CLI 管理授权；HumanAction 先分拣；需要交人时必填白话标题、事项说明、人必须参与的原因、具体步骤、完成影响与回传要求，展示 PM 改写标记并保留原请求；权限内的纯流程操作由 PM 完成，过期合并确认由 C-47 系统作废，PM 不代拍合并；Workbench 查询拍板记录并按决策人、类别、卡片、时间筛选，无撤销。拍板解决后通知发起人落实，首提示含选项和影响，30 分钟无落实信号提醒 PM Ops | Codex |
-| C-49 合并默认由 PM 推进（2026-11-10 用户拍板，取代 C-37 中“合并确认排除、PM 不代拍合并”） | 合并确认默认 decider 为 PM Ops；domain 强制合并检查通过、必需验证全部通过、无未处理 must_fix 才能选 merge，否则只能 hold／退回修改／交人。卡片涉及 D12 四类或需求范围变化时由人确认（Workbench 或本机 CLI），PM 可写理由主动交人，交人后不适用超时自动合并。PM 代确认合并和各类代拍在 Needs You“知会”区同步，可标为已读；设置页可关闭 PM 代确认，关闭后回到人确认，C-29 超时自动合并保留为兜底。pm 角色包补充合并判断要点和知会写法 | Cardigan |
+| C-49 合并默认由 PM 推进（2026-11-10 用户拍板，取代 C-37 中“合并确认排除、PM 不代拍合并”） | 合并确认默认 decider 为 PM Ops；domain 强制合并检查通过、所有未取消的验证项全部通过、无未处理 must_fix 才能选 merge，否则只能 hold／退回修改／交人。卡片涉及 D12 四类或需求范围变化时由人确认（Workbench 或本机 CLI），PM 可写理由主动交人，交人后不适用超时自动合并。PM 代确认合并和各类代拍在 Needs You“知会”区同步，可标为已读；设置页可关闭 PM 代确认，关闭后回到人确认，C-29 超时自动合并保留为兜底。pm 角色包补充合并判断要点和知会写法 | Cardigan |
 | C-D12 高风险只能由人确认（随 C-37，2026-11-10 更新） | spending/account/permission/data_deletion 四类永不授权给 PM；只接受 human 身份，Workbench 与本机 CLI 同等有效，PM Office/PM Ops/其他 Agent 不得代拍或转录。未经类别授权的需求范围变化仍要求 Workbench 确认 | Cardigan |
 | C-due 拍板截止时间（C5） | `request_decision` 加 `due`；Needs You 按截止时间排序和提示 | Cardigan |
 | C-remind 人工动作提醒（C4） | HumanAction 到期前提醒一次，到点没开始再提醒一次 | Cardigan |

@@ -349,7 +349,7 @@ test("new role copies from the default pack or from an existing role in another 
   fireEvent.change(within(form).getByLabelText("新角色编号"), {
     target: { value: "Bad Id" },
   });
-  expect(within(form).getByText(/角色编号只能用小写字母/)).toBeTruthy();
+  expect(screen.getByText(/角色编号只能用小写字母/)).toBeTruthy();
   fireEvent.change(within(form).getByLabelText("新角色编号"), {
     target: { value: "designer-x" },
   });

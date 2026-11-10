@@ -1,13 +1,17 @@
 import { beforeEach, expect, test } from "vitest";
 import {
+  abortDispatch,
   acknowledgeRun,
   claimDispatchStop,
+  claimInactiveRunStop,
   dispatchedAt,
   finishRun,
   type Notification,
   obsoleteDispatchAttention,
+  occupiedRunSlots,
   type Run,
   recoverDispatch,
+  releaseAssignment,
   resolveDispatchAttention,
   startDispatchStop,
 } from "../index.js";
@@ -30,6 +34,147 @@ beforeEach(() => {
   now = Date.parse(f.io.clock.now());
   f.io = { ...f.io, clock: { now: () => new Date(now).toISOString() } };
   run = commit(dispatch(commit(queue())));
+});
+
+test("dispatch stop reserves capacity and excludes launches until unknown Run recovery settles", () => {
+  now += 600000;
+  const claimed = commit(
+    claimDispatchStop(
+      f.state,
+      system,
+      {
+        run_id: run.id,
+        reason: "dispatch_timeout",
+        lease_ms: 60000,
+      },
+      f.io,
+    ),
+  );
+  if (!claimed?.dispatch_stop) throw new Error("Missing stop");
+  commit(
+    startDispatchStop(
+      f.state,
+      system,
+      {
+        run_id: run.id,
+        attempt_id: claimed.dispatch_stop.attempt_id,
+      },
+      f.io,
+    ),
+  );
+  f.state = {
+    ...f.state,
+    runs: f.state.runs.map((r) => ({ ...r, status: "unknown" })),
+  };
+  expect(occupiedRunSlots(f.state.assignments, f.state.runs, "local")).toBe(1);
+  expect(queue()).toMatchObject({
+    ok: false,
+    error: { code: "invariant_violation" },
+  });
+  const next = commit(recover());
+  expect(next?.status).toBe("queued");
+  expect(occupiedRunSlots(f.state.assignments, f.state.runs, "local")).toBe(0);
+  expect(
+    f.state.events.find((e) => e.type === "run_dispatch_recovered")?.actor,
+  ).toMatchObject({ kind: "system" });
+  if (!next) throw new Error("Missing recovery");
+  commit(dispatch(next));
+  expect(occupiedRunSlots(f.state.assignments, f.state.runs, "local")).toBe(1);
+});
+
+test("inactivity cannot claim a second stop while a dispatch stop waits for preflight", () => {
+  const claimed = commit(
+    claimDispatchStop(
+      f.state,
+      system,
+      {
+        run_id: run.id,
+        reason: "dispatch_timeout",
+        lease_ms: 60000,
+      },
+      f.io,
+    ),
+  );
+  if (!claimed?.dispatch_stop) throw new Error("Missing stop");
+  commit(acknowledgeRun(f.state, actor(), { run_id: run.id }, f.io));
+  now += 600000;
+  expect(
+    commit(
+      claimInactiveRunStop(
+        f.state,
+        system,
+        {
+          run_id: run.id,
+          after_ms: 100,
+        },
+        f.io,
+      ),
+    ),
+  ).toBeUndefined();
+  expect(f.state.runs[0]?.inactivity_stop).toBeUndefined();
+  expect(f.state.runs[0]?.dispatch_stop).toEqual(claimed.dispatch_stop);
+});
+
+test("host cancellation retains a dispatch stop target and capacity until confirmed settlement", () => {
+  now += 600000;
+  const claimed = commit(
+    claimDispatchStop(
+      f.state,
+      system,
+      {
+        run_id: run.id,
+        reason: "dispatch_timeout",
+        lease_ms: 60000,
+      },
+      f.io,
+    ),
+  );
+  if (!claimed?.dispatch_stop) throw new Error("Missing stop");
+  commit(
+    startDispatchStop(
+      f.state,
+      system,
+      {
+        run_id: run.id,
+        attempt_id: claimed.dispatch_stop.attempt_id,
+      },
+      f.io,
+    ),
+  );
+  commit(
+    abortDispatch(
+      f.state,
+      system,
+      { run_id: run.id, reason: "host stopped" },
+      f.io,
+    ),
+  );
+  expect(
+    f.state.assignments.find((a) => a.id === run.assignment_id)?.runtime_ref,
+  ).toEqual(claimed.dispatch_stop.runtime_ref);
+  expect(occupiedRunSlots(f.state.assignments, f.state.runs, "local")).toBe(1);
+  expect(queue()).toMatchObject({
+    ok: false,
+    error: { code: "invariant_violation" },
+  });
+  expect(
+    releaseAssignment(
+      f.state,
+      { kind: "human", project_id: f.state.project_id },
+      {
+        assignment_id: run.assignment_id,
+      },
+      f.io,
+    ),
+  ).toMatchObject({ ok: false, error: { code: "illegal_transition" } });
+  expect(commit(recover())).toBeUndefined();
+  expect(f.state.runs).toHaveLength(1);
+  expect(f.state.runs[0]).toMatchObject({
+    status: "cancelled",
+    summary: "host stopped",
+  });
+  expect(f.state.runs[0]?.dispatch_stop).toBeUndefined();
+  expect(occupiedRunSlots(f.state.assignments, f.state.runs, "local")).toBe(0);
 });
 const recover = (target = run, failed_attempts = 0) => {
   const current = f.state.runs.find((r) => r.id === target.id) ?? target;

@@ -65,7 +65,11 @@ function exclusive(
 ) {
   ensure(
     !d.list("runs").some((r) => {
-      if (r.id === run_id || (!unfinished(r) && !r.dispatch_stop)) return false;
+      if (
+        r.id === run_id ||
+        (!unfinished(r) && !r.dispatch_stop && !r.inactivity_stop)
+      )
+        return false;
       const owner = d.get("assignments", r.assignment_id);
       return (
         owner.id === assignment.id ||
@@ -338,6 +342,7 @@ export function dispatchRun(
         ? { employee_id: assignment.employee_id }
         : {}),
     };
+    delete next.queue_reason;
     d.put("runs", next);
     d.emit("run_dispatched", cardId(d, assignment), {
       run_id: run.id,
@@ -409,7 +414,11 @@ export function cancelRunDispatch(
     d.put("assignments", {
       ...assignment,
       runtime_state: unwrap(transition("runtime", "running", "run_finished")),
-      runtime_ref: null,
+      // A concurrent host abort cannot erase an automatic stop's exit target.
+      runtime_ref:
+        run.dispatch_stop || run.inactivity_stop
+          ? assignment.runtime_ref
+          : null,
     });
   d.put("runs", next);
   d.emit("run_dispatch_aborted", cardId(d, assignment), {

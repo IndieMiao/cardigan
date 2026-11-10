@@ -1,5 +1,6 @@
 import { type FormEvent, useState } from "react";
 import { type CardiganClient, describeError } from "../api.js";
+import { RequestFeedback } from "../components/RequestFeedback.js";
 
 /**
  * Login page (M5 plan §4 M5.1/M5.3, §3.2).
@@ -62,14 +63,15 @@ export function LoginPage({
           onChange={(event) => setPassword(event.target.value)}
         />
         <button type="submit" disabled={submitting || password.length === 0}>
-          {submitting ? "登录中…" : "登录"}
+          登录
         </button>
       </form>
-      {error !== undefined && (
-        <p role="alert" className="error">
-          {error}
-        </p>
-      )}
+      <RequestFeedback
+        interactive
+        pending={submitting}
+        pendingMessage="登录中…"
+        error={error}
+      />
       <p className="hint">
         这个页面只在本机回环地址上提供；从别的设备访问请用 ssh -L 隧道。
       </p>

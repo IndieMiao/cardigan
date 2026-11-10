@@ -170,7 +170,7 @@ test("activity shows loading and errors, retries, and handles empty results", as
     .mockRejectedValueOnce(new Error("事件读取失败"))
     .mockResolvedValue(empty);
   render(<ActivityPage client={fakeClient({ activity })} projectId="p-1" />);
-  expect(screen.getByText("正在加载…")).toBeTruthy();
+  expect(screen.queryByText("正在加载…")).toBeNull();
   await screen.findByText("事件读取失败");
   fireEvent.click(screen.getByRole("button", { name: "重试" }));
   await screen.findByText("没有符合条件的事件。调整筛选，或等待新的项目动态。");

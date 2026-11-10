@@ -43,6 +43,7 @@ export function claimDispatchStop(
     const run = d.get("runs", p.run_id),
       a = d.get("assignments", run.assignment_id),
       old = run.dispatch_stop;
+    if (run.inactivity_stop) return;
     const card = cardOf(d, run);
     const closed =
       card && ["done", "cancelled"].includes(d.get("cards", card).status);

@@ -185,7 +185,10 @@ export function ActivityPage({
     () => client.activity(projectId, filters),
     [client, projectId, filters],
   );
-  const { data, pending, error, reload } = useResource(load, revision);
+  const { data, pending, error, reload, interactive } = useResource(
+    load,
+    revision,
+  );
   const days = new Map<string, ActivityEvent[]>();
   for (const event of data?.events ?? []) {
     const key = dayKey(event.created_at);
@@ -239,7 +242,12 @@ export function ActivityPage({
           清除筛选
         </button>
       </FilterBar>
-      <Feedback pending={pending} error={error} retry={reload} />
+      <Feedback
+        pending={pending}
+        interactive={interactive}
+        error={error}
+        retry={reload}
+      />
       {data && (
         <>
           <p className="metadata">

@@ -179,9 +179,34 @@ test.each([
   { maxRetries: -1 },
   { retryBaseMs: 0 },
   { inactivityGraceMs: Number.NaN },
+  { inactivityGraceMs: Number.POSITIVE_INFINITY },
   { maxRetries: 1.5 },
-])("rejects invalid policy %j", (policy) => {
+])("rejects invalid policy %o", (policy) => {
   expect(() => new Dispatcher({ ...f.options, ...policy })).toThrow(
     "Invalid dispatcher",
   );
+});
+
+test.each([Number.NaN, Number.POSITIVE_INFINITY])(
+  "rejects invalid cancellation grace %s independently of watchdog settings",
+  (inactiveCancelAfterMs) => {
+    expect(
+      () => new Dispatcher({ ...f.options, inactiveCancelAfterMs }),
+    ).toThrow("Invalid inactive Run cancellation grace");
+  },
+);
+
+test("disabling inactive cancellation keeps the watchdog active", async () => {
+  f.session(f.target.assignment, false);
+  f.skipEvents();
+  const d = new Dispatcher({
+    ...f.options,
+    inactivityGraceMs: 100,
+    inactiveCancelAfterMs: null,
+  });
+  f.advance(2 * 60 * 60_000);
+  await d.tick();
+  expect(alerts()).toHaveLength(1);
+  expect(f.latest().status).toBe("running");
+  expect(f.runtime.release).not.toHaveBeenCalled();
 });

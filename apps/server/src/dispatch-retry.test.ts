@@ -8,6 +8,7 @@ import {
   queueRun,
   startDispatchStop,
 } from "@cardigan/domain";
+import { runCapacitySnapshot } from "@cardigan/host";
 import {
   beginLaunchAttempt,
   finishBellAttempt,
@@ -47,6 +48,147 @@ const dispatcher = (extra: Partial<typeof f.options> = {}) =>
     standing: standingResolver(f.store),
     ...extra,
   });
+
+const occupied = () =>
+  f.store.uow.read((tx) =>
+    runCapacitySnapshot(f.store, tx).occupied.get("local"),
+  );
+
+test("timeout recovery queues behind occupied capacity and dispatches once when the slot opens", async () => {
+  f.comment();
+  await dispatcher().tick();
+  const original = f.latest();
+  const busy = f.create();
+  const running = f.session(busy.assignment, false);
+  f.skipEvents();
+  const d = dispatcher({
+    runLimit: () => 1,
+    dispatchTimeoutMs: 100,
+    inactiveCancelAfterMs: null,
+  });
+  f.advance(100);
+  await d.tick();
+  const replacement = f.latest();
+  expect(replacement).toMatchObject({
+    status: "queued",
+    queue_reason: "concurrency_limit",
+  });
+  expect(f.state().runs.find((r) => r.id === original.id)?.status).toBe(
+    "cancelled",
+  );
+  expect(occupied()).toBe(1);
+  expect(f.options.startRun).not.toHaveBeenCalled();
+  expect(
+    f.state().events.find((e) => e.type === "run_dispatch_recovered")?.actor,
+  ).toMatchObject({ kind: "system" });
+  // A healthy capacity wait must outlive the dispatch timeout without escalation.
+  f.advance(600000);
+  await d.tick();
+  expect(f.latest()).toMatchObject({ id: replacement.id, status: "queued" });
+  expect(count("run_dispatch_stalled")).toBe(0);
+  f.apply(
+    (s, a, p) =>
+      finishRun(
+        s,
+        a,
+        {
+          run_id: running.id,
+          outcome: "completed",
+          summary: "slot available",
+        },
+        p,
+      ),
+    f.actorFor(busy.assignment),
+  );
+  expect(occupied()).toBe(0);
+  await d.tick();
+  expect(f.latest()).toMatchObject({
+    id: replacement.id,
+    status: "dispatched",
+  });
+  expect(f.options.startRun).toHaveBeenCalledOnce();
+  expect(occupied()).toBe(1);
+  expect(count("run_dispatch_recovered")).toBe(1);
+});
+
+test("unconfirmed dispatch stop holds capacity through unknown status and restart", async () => {
+  f.comment();
+  await dispatcher().tick();
+  const original = f.latest();
+  const token = f.store.issueToken({
+    project_id: f.project,
+    assignment_id: original.assignment_id,
+    role: { role_version: 1, allowed_tools: ["whoami"] },
+  });
+  const other = f.create();
+  f.session(other.assignment);
+  const waiting = f.apply((s, a, p) =>
+    queueRun(
+      s,
+      a,
+      {
+        assignment_id: other.assignment.id,
+        model: "fixture",
+        agent_cli_version: "fixture",
+      },
+      p,
+    ),
+  );
+  f.store.uow.run((tx) =>
+    tx.runs.put(f.project, { ...waiting, queue_reason: "concurrency_limit" }),
+  );
+  f.skipEvents();
+  const release = vi.mocked(f.runtime.release).getMockImplementation();
+  if (!release) throw new Error("Missing release fixture");
+  vi.mocked(f.runtime.release).mockImplementation(async () => {
+    f.store.uow.run((tx) => {
+      const run = tx.runs.get(f.project, original.id);
+      if (run) tx.runs.put(f.project, { ...run, status: "unknown" });
+    });
+    return {
+      ok: false,
+      error: { code: "runtime_timeout", message: "unconfirmed" },
+    };
+  });
+  const options = {
+    runLimit: () => 1,
+    dispatchTimeoutMs: 100,
+    inactiveCancelAfterMs: null,
+  };
+  f.advance(100);
+  await dispatcher(options).tick();
+  expect(f.latest()).toMatchObject({
+    id: original.id,
+    status: "unknown",
+    dispatch_stop: { stopping: true },
+  });
+  expect(occupied()).toBe(1);
+  expect(f.store.verifyToken(token.token)).toBeDefined();
+  expect(f.state().runs.find((r) => r.id === waiting.id)?.status).toBe(
+    "queued",
+  );
+  vi.mocked(f.runtime.release).mockImplementation(release);
+  f.advance(60001);
+  const reopened = Store.open({ dataDir: f.dataDir });
+  try {
+    await dispatcher({ ...options, store: reopened }).tick();
+  } finally {
+    reopened.close();
+  }
+  expect(f.store.verifyToken(token.token)).toBeUndefined();
+  expect(
+    f.state().runs.find((r) => r.id === original.id)?.dispatch_stop,
+  ).toBeUndefined();
+  expect(f.state().runs.find((r) => r.id === waiting.id)?.status).toBe(
+    "dispatched",
+  );
+  expect(f.latest()).toMatchObject({
+    status: "queued",
+    queue_reason: "concurrency_limit",
+  });
+  expect(occupied()).toBe(1);
+  expect(count("run_dispatch_recovered")).toBe(1);
+});
 
 test("failed attempts persist through backoff and one recovery, then escalate after retry exhaustion", async () => {
   fail();
@@ -315,7 +457,8 @@ test("active PM Ops receives plain language escalation in its inbox", async () =
 test("500-minute-old watchdog attention resolves after the Run finishes or the Assignment releases", async () => {
   f.session(f.target.assignment, false);
   f.skipEvents();
-  const d = dispatcher({ inactivityGraceMs: 1 });
+  // Preserve the legacy alert scenario independently of C-54's optional reaper.
+  const d = dispatcher({ inactivityGraceMs: 1, inactiveCancelAfterMs: null });
   f.advance(500 * 60000);
   await d.tick();
   expect(f.notes()[0]?.status).toBe("needs_attention");

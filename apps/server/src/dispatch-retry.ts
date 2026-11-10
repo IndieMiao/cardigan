@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import {
   type Assignment,
   type Clock,
+  type CommandEffect,
   claimDispatchStop,
   dispatchedAt,
   dispatchRecoveryFailed,
@@ -12,7 +13,6 @@ import {
   recoverDispatch,
   startDispatchStop,
 } from "@cardigan/domain";
-import { revokeStoppedRunTokens, stopRunRuntime } from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import {
   type BellAttempt,
@@ -24,6 +24,8 @@ import {
   type StoreTransactionContext,
   unfinishedBellAttempts,
 } from "@cardigan/store";
+
+import { runStopWorkflow } from "./dispatch-stop.js";
 
 /** Retry only unstarted Runs. Claims and recovery decisions share the SQLite write lock. */
 export async function retryDispatchedRuns(
@@ -57,11 +59,6 @@ export async function retryDispatchedRuns(
     tx: StoreTransactionContext,
     runId: RunId,
     failures: number,
-    proof: {
-      stopped_runtime?: Assignment["runtime_ref"];
-      stop_failed?: boolean;
-      stop_id?: string;
-    } = {},
   ) => {
     const state = loadCommandState(tx, project);
     const run = state.runs.find((r) => r.id === runId);
@@ -75,14 +72,17 @@ export async function retryDispatchedRuns(
           timeout_ms: policy.timeoutMs,
           failed_attempts: failures,
           max_failures: policy.maxRetries + 1,
-          ...proof,
         },
         { clock, ids: tx.ids },
       ),
     );
     persistEffect(tx, project, effect);
-    if (effect.events.some((e) => e.type === "run_dispatch_stop_finished"))
-      revokeStoppedRunTokens(tx, project, run.assignment_id);
+    recordStall(run, effect);
+  };
+  const recordStall = (
+    run: { id: RunId; assignment_id: Assignment["id"] },
+    effect: CommandEffect<unknown>,
+  ) => {
     const alert = effect.events.find((e) => e.type === "run_dispatch_stalled");
     if (!alert) return;
     const n = recordNotification(store.database, {
@@ -106,52 +106,58 @@ export async function retryDispatchedRuns(
     runId: RunId,
     reason: "dispatch_timeout" | "delivery_retry_exhausted",
   ) => {
-    const claimed = store.uow.run((tx) => {
-      const state = loadCommandState(tx, project);
-      const run = state.runs.find((r) => r.id === runId);
-      if (
-        !run ||
-        unfinishedBellAttempts(store.database, project).some(
-          (t) => t.assignment_id === run.assignment_id,
+    await runStopWorkflow({ store, runtime, clock }, project, {
+      claim: (state, ports) => {
+        const run = state.runs.find((r) => r.id === runId);
+        if (
+          !run ||
+          unfinishedBellAttempts(store.database, project).some(
+            (t) => t.assignment_id === run.assignment_id,
+          )
         )
-      )
-        return;
-      const effect = unwrap(
-        claimDispatchStop(
+          return;
+        return claimDispatchStop(
           state,
           actor,
-          { run_id: runId, reason, lease_ms: policy.leaseMs },
-          { clock, ids: tx.ids },
-        ),
-      );
-      persistEffect(tx, project, effect);
-      return effect.data;
-    });
-    const stop = claimed?.dispatch_stop;
-    if (!stop) return;
-    const result = await stopRunRuntime(runtime, stop.runtime_ref, () =>
-      store.uow.run((tx) => {
-        const effect = unwrap(
-          startDispatchStop(
-            loadCommandState(tx, project),
-            actor,
-            { run_id: runId, attempt_id: stop.attempt_id },
-            { clock, ids: tx.ids },
-          ),
+          {
+            run_id: runId,
+            reason,
+            lease_ms: policy.leaseMs,
+          },
+          ports,
         );
-        persistEffect(tx, project, effect);
-        return effect.data;
-      }),
-    );
-    if (result !== "withdrawn")
-      store.uow.run((tx) =>
-        finishRecovery(tx, runId, 0, {
-          stop_id: stop.attempt_id,
-          ...(result === "exited"
-            ? { stopped_runtime: stop.runtime_ref }
-            : { stop_failed: true }),
-        }),
-      );
+      },
+      fence: (run) => run.dispatch_stop,
+      start: (state, ports, run, stop) =>
+        startDispatchStop(
+          state,
+          actor,
+          {
+            run_id: run.id,
+            attempt_id: stop.attempt_id,
+          },
+          ports,
+        ),
+      finish: (state, ports, run, stop, exited) =>
+        recoverDispatch(
+          state,
+          actor,
+          {
+            run_id: run.id,
+            timeout_ms: policy.timeoutMs,
+            failed_attempts: 0,
+            max_failures: policy.maxRetries + 1,
+            stop_id: stop.attempt_id,
+            ...(exited
+              ? { stopped_runtime: stop.runtime_ref }
+              : { stop_failed: true }),
+          },
+          ports,
+        ),
+      afterSettle: (_tx, _state, run, _stop, effect) => {
+        if (effect) recordStall(run, effect);
+      },
+    });
   };
   const candidates = read();
   for (const candidate of candidates.runs) {
@@ -175,6 +181,7 @@ export async function retryDispatchedRuns(
           !(run.status === "queued" && dispatchRecoveryQueuedAt(state, run))) ||
         run.started_at ||
         run.dispatch_stop ||
+        run.inactivity_stop ||
         // C-54 owns capacity waits; a healthy queued recovery must wait its turn.
         ("queue_reason" in run && run.queue_reason === "concurrency_limit") ||
         a?.status !== "active" ||

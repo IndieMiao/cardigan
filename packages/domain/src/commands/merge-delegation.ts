@@ -11,9 +11,10 @@ const newest = (values: readonly Delivery[]) =>
 
 /**
  * §7.4: PM Ops may choose `merge` only when the merge gate passed for the
- * current completion, every required verification passed and no must_fix
- * remains open. An empty list means merge is allowed; otherwise PM Ops can
- * only hold, request changes or hand the confirmation to the human.
+ * current completion, every non-cancelled verify item passed (required or
+ * not) and no must_fix remains open. An empty list means merge is allowed;
+ * otherwise PM Ops can only hold, request changes or hand the confirmation
+ * to the human.
  */
 export function pmMergeBlockers(
   state: CommandState,

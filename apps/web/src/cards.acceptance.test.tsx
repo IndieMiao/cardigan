@@ -99,7 +99,7 @@ test("U01 §8.1: shell shows session loading, failure, login, then project navig
   const shell = render(
     <App client={decorate(f.client, { session: () => pending.promise })} />,
   );
-  expect(screen.getByRole("status").textContent).toMatch(/加载|检查/);
+  expect(screen.getByRole("status").textContent).toBe("");
   await act(async () => pending.reject(new Error("Session unavailable")));
   expect(screen.getByRole("alert").textContent).toContain(
     "Session unavailable",
@@ -174,7 +174,7 @@ test.each(["board", "list"] as const)(
         client={decorate(f.client, { cards: () => pending.promise })}
       />,
     );
-    expect(textOf(screen.getByRole("status"))).toMatch(/加载/);
+    expect(textOf(screen.getByRole("status"))).toBe("");
     await act(async () => pending.reject(new Error("Board unavailable")));
     expect(textOf(screen.getByRole("alert"))).toContain("Board unavailable");
     page.unmount();
@@ -252,7 +252,7 @@ test("U04 §8.4: card detail handles loading, transport errors, missing cards an
   await f.loginBrowser();
   const pending = deferred<CardDetail>();
   let page = detail(decorate(f.client, { card: () => pending.promise }));
-  expect(textOf(screen.getByRole("status"))).toMatch(/加载/);
+  expect(textOf(screen.getByRole("status"))).toBe("");
   await act(async () => pending.reject(new Error("Card unavailable")));
   expect(textOf(screen.getByRole("alert"))).toContain("Card unavailable");
   page.unmount();

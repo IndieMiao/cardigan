@@ -6,6 +6,10 @@ import {
 } from "../api.js";
 import { PageTitle, StatusTag } from "../components/Foundation.js";
 import {
+  RequestFeedback,
+  RequestFeedbackScope,
+} from "../components/RequestFeedback.js";
+import {
   categoryLabels,
   defaultDelegation,
   delegableCategories,
@@ -94,72 +98,72 @@ export function SettingsPage({
             revision={revision}
           />
         )}
+        {(tab === "preferences" || tab === "authorization") && (
+          <RequestFeedback
+            {...resource}
+            retry={resource.reload}
+            pendingMessage="正在加载偏好…"
+          />
+        )}
         <div hidden={tab === "templates" || tab === "roles"}>
-          <section
-            hidden={tab !== "preferences"}
-            id="preferences"
-            tabIndex={-1}
-            aria-labelledby="preferences-title"
-          >
-            <h2 id="preferences-title">偏好</h2>
-            {resource.error && (
-              <p role="alert">
-                {resource.error}
-                <button type="button" onClick={resource.reload}>
-                  重试
-                </button>
-              </p>
-            )}
-            {!resource.data && !resource.error && (
-              <p role="status">正在加载偏好…</p>
-            )}
-            {resource.data && (
-              <PreferenceForm
-                key={String(resource.data.auto_merge_after_minutes)}
-                initial={resource.data}
-                client={client}
-                projectId={projectId}
-                saved={resource.reload}
-              />
-            )}
-          </section>
-          <section
-            hidden={tab !== "authorization"}
-            id="authorization"
-            tabIndex={-1}
-            aria-labelledby="authorization-title"
-          >
-            <h2 id="authorization-title">授权</h2>
-            <p>
-              PM 代拍时必须写明理由并保留授权依据。没有活跃 PM Ops
-              时交给你。代拍和代确认的合并都会在 Needs You 的知会区同步给你。
-            </p>
-            {resource.data && (
-              <PmMergeSetting
-                key={`pm-merge:${resource.data.pm_merge_confirmation}`}
-                enabled={resource.data.pm_merge_confirmation !== false}
-                client={client}
-                projectId={projectId}
-                saved={resource.reload}
-              />
-            )}
-            {resource.data &&
-              Object.entries(categoryLabels).map(([category, label]) => (
-                <DelegationSetting
-                  key={`${category}:${resource.data?.decision_delegation?.[category]}`}
-                  category={category}
-                  label={label}
-                  enabled={
-                    resource.data?.decision_delegation?.[category] ??
-                    defaultDelegation[category] ??
-                    false
-                  }
+          <RequestFeedbackScope hidden={tab !== "preferences"}>
+            <section
+              hidden={tab !== "preferences"}
+              id="preferences"
+              tabIndex={-1}
+              aria-labelledby="preferences-title"
+            >
+              <h2 id="preferences-title">偏好</h2>
+              {resource.data && (
+                <PreferenceForm
+                  key={String(resource.data.auto_merge_after_minutes)}
+                  initial={resource.data}
                   client={client}
                   projectId={projectId}
                   saved={resource.reload}
                 />
-              ))}
-          </section>
+              )}
+            </section>
+          </RequestFeedbackScope>
+          <RequestFeedbackScope hidden={tab !== "authorization"}>
+            <section
+              hidden={tab !== "authorization"}
+              id="authorization"
+              tabIndex={-1}
+              aria-labelledby="authorization-title"
+            >
+              <h2 id="authorization-title">授权</h2>
+              <p>
+                PM 代拍时必须写明理由并保留授权依据。没有活跃 PM Ops
+                时交给你。代拍和代确认的合并都会在 Needs You 的知会区同步给你。
+              </p>
+              {resource.data && (
+                <PmMergeSetting
+                  key={`pm-merge:${resource.data.pm_merge_confirmation}`}
+                  enabled={resource.data.pm_merge_confirmation !== false}
+                  client={client}
+                  projectId={projectId}
+                  saved={resource.reload}
+                />
+              )}
+              {resource.data &&
+                Object.entries(categoryLabels).map(([category, label]) => (
+                  <DelegationSetting
+                    key={`${category}:${resource.data?.decision_delegation?.[category]}`}
+                    category={category}
+                    label={label}
+                    enabled={
+                      resource.data?.decision_delegation?.[category] ??
+                      defaultDelegation[category] ??
+                      false
+                    }
+                    client={client}
+                    projectId={projectId}
+                    saved={resource.reload}
+                  />
+                ))}
+            </section>
+          </RequestFeedbackScope>
         </div>
       </div>
     </>
@@ -246,12 +250,19 @@ function PreferenceForm({
           onChange={(e) => setMinutes(e.target.value)}
         />
       </label>
-      {!valid && <p role="alert">请输入 1 到 1440 的整数分钟。</p>}
+      <RequestFeedback
+        error={!valid ? "请输入 1 到 1440 的整数分钟。" : undefined}
+      />
       <button type="submit" disabled={busy || !valid}>
-        {busy ? "保存中…" : "保存偏好"}
+        保存偏好
       </button>
-      {error && <p role="alert">{error}</p>}
-      {message && <p role="status">{message}</p>}
+      <RequestFeedback
+        interactive
+        pending={busy}
+        pendingMessage="保存中…"
+        error={error}
+        message={message}
+      />
     </form>
   );
 }
@@ -307,7 +318,12 @@ function PmMergeSetting({
         默认开启。PM 只有在合并闸门检查、全部验证通过且没有未处理的 must_fix
         时才能确认合并；涉及花钱、账号、权限、删除数据或需求范围变化的卡片始终由你确认。关闭后由你确认，超时自动合并作为兜底。
       </p>
-      {error && <p role="alert">{error}</p>}
+      <RequestFeedback
+        interactive
+        pending={busy}
+        pendingMessage="保存合并授权中…"
+        error={error}
+      />
     </div>
   );
 }
@@ -375,7 +391,12 @@ function DelegationSetting({
           }
         />
       </label>
-      {error && <p role="alert">{error}</p>}
+      <RequestFeedback
+        interactive
+        pending={busy}
+        pendingMessage="保存授权中…"
+        error={error}
+      />
     </div>
   );
 }

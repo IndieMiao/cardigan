@@ -179,7 +179,7 @@ export function recoverDispatch(
             (r) =>
               r.id !== run.id &&
               r.assignment_id === a.id &&
-              (!finished(r) || r.dispatch_stop),
+              (!finished(r) || r.dispatch_stop || r.inactivity_stop),
           ),
         "invariant_violation",
         "Assignment already has another unfinished Run",

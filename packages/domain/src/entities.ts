@@ -258,6 +258,15 @@ export interface Run {
     readonly stopping: boolean;
     readonly reason: "dispatch_timeout" | "delivery_retry_exhausted";
   };
+  /** Durable host stop intent. Keeps its slot and blocks another launch until exit is confirmed. */
+  readonly inactivity_stop?: {
+    readonly attempt_id: string;
+    readonly runtime_ref: RuntimeRef;
+    readonly stopping: boolean;
+    readonly lease_until: Timestamp;
+  };
+  /** Host scheduling metadata; only meaningful while status is queued. */
+  readonly queue_reason?: "concurrency_limit" | "runtime_unavailable";
   readonly employee_id?: EmployeeId;
   /** Actual launch profile; absent on legacy runs. */
   readonly launch_profile_ref?: string;

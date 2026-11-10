@@ -16,10 +16,15 @@ export async function stopRunRuntime(
   runtime: Runtime,
   ref: RuntimeRef | null,
   mayStop: () => boolean,
+  alreadyStopping = false,
 ) {
   const observe = () =>
     ref ? runtime.status(ref).catch(() => undefined) : undefined;
   const before = await observe();
+  // A previous release may finish after fresh activity or process loss. Settle
+  // its original fence without asking to issue another stop; ownership and the
+  // exact runtime reference are checked again by the settlement transaction.
+  if (alreadyStopping && (!ref || exited(before))) return "exited" as const;
   if (!mayStop()) return "withdrawn" as const;
   if (!ref || exited(before)) return "exited" as const;
   await runtime.release(ref, { force: true }).catch(() => undefined);

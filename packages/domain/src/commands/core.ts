@@ -84,6 +84,7 @@ type CommandName =
   | "recover_dispatch"
   | "manage_dispatch_stop"
   | "resolve_dispatch_attention"
+  | "manage_inactive_run_stop"
   | "set_project_preferences"
   | "mark_notices_read"
   | "auto_confirm_merge"
@@ -175,6 +176,7 @@ export class CommandDraft {
       "pause_standing_assignment",
     ].includes(tool);
     const systemOnly = [
+      "manage_inactive_run_stop",
       "auto_confirm_merge",
       "recover_dispatch",
       "manage_dispatch_stop",
