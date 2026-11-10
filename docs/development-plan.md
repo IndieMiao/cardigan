@@ -388,7 +388,7 @@ Standing Assignment (scope=project): PM Office, PM Ops — not tied to a WorkIte
 - 标识：`id`、`scope`（`work_item` | `standing`）、`work_item_id?`
 - 常驻模式（M4.5）：`standing_mode?`（`office` | `ops`），仅常驻 `pm` Assignment 使用，由 `cardigan pm create --office|--ops` 写入，之后不能修改；工作项级 Assignment 没有这个字段。旧的常驻行没有它时，按最新 Token 的工具范围推断一次并写回
 - 角色：`role_id`、`role_version`；员工：`employee_id?`，创建后不可修改，domain 复用校验和 SQLite 更新触发器共同约束（包括旧匿名 Assignment）。重复指派复用原员工，停用不妨碍原 Assignment 继续工作。
-- 外接身份（V11b）：`external?: boolean`，创建后不可修改，缺省按非外接处理。`true` 只允许 `scope=standing` 且 `standing_mode=office`；domain 写入校验和 SQLite 触发器共同约束，旧 JSON 不批量改写。外接身份不拥有 Cardigan 管理的终端或 Session。
+- 外接身份（V11b）：`external?: boolean`，创建后不可修改，缺省按非外接处理。`true` 只允许 `scope=standing` 且 `standing_mode=office`；domain 写入校验和迁移 `0016_external_assignment` 的 SQLite 触发器共同约束，旧 JSON 不批量改写。外接身份不拥有 Cardigan 管理的终端或 Session。
 - 状态：`status`（业务状态）、`runtime_state`（运行状态）
 - 运行位置：`machine_id`、`runtime_ref`（JSON，见 §11.1）、`session_ref?`（Agent CLI 的会话 ID，由控制面记录，恢复时使用，见 D5）、`eta?`
 - 代码：`worktree_path?`、`branch?`、`base_sha?`
@@ -875,7 +875,7 @@ M3.4 的 Runtime 接线根据已派发的业务 Run（dispatched / acked / runni
 
 **外接 Office（P2-V V11b）。** cardigan 项目计划由员工“张良”（平台负责人）接任 PM Office；员工由上线步骤使用已有 `employee add` 创建，不随程序初始化，其他项目及 PM Ops 不变。`cardigan pm rotate --office --external --employee <E-n 或名字>` 在上述同一事务里创建外接身份并指定在职、角色为 pm 的员工。名字解析复用指派规则。指定的员工或外接性质不同，即使角色版本相同也轮换；配置完全相同则无操作。转为外接前要求原身份没有未结束 Run（含 queued / unknown），否则中文拒绝并要求先收尾。未加新参数时沿用旧员工，仍按原换版本流程，新建 Assignment 不写 external。
 
-外接轮换同步撤销旧 Token、迁移游标与未结束通知，并签发新 Office Token，只向主机 CLI 输出一次；不输出启动命令，改为提示查看 `cardigan inbox`。普通轮换仍由后续启动签发 Token。`assignment start`、`pm start` 和复用已有外接身份的 `pm create --office` 在启动／重签前中文拒绝：“这是外接 Assignment，没有可以启动的终端，用 `cardigan inbox` 查看待处理通知”。不为外接身份扩充任何工具或跨项目权限。
+外接轮换同步撤销旧 Token、迁移游标与未结束通知，并签发新 Office Token，只向主机 CLI 输出一次；不输出启动命令，改为提示查看 `cardigan inbox`。普通轮换仍由后续启动签发 Token。`assignment start`、显式 `pm start --office` 和复用已有外接身份的 `pm create --office` 在启动／重签前中文拒绝：“这是外接 Assignment，没有可以启动的终端，用 `cardigan inbox` 查看待处理通知”。不带模式的 `pm start`（或同时选两种模式）跳过外接 Office，提示从收件箱读取，继续启动普通 Ops；仅有外接身份时也正常返回。`assignment stop` 对外接身份在暂停、撤销 Token 或触碰运行时之前中文拒绝，Assignment 状态与凭据保持不变。不为外接身份扩充任何工具或跨项目权限。
 
 流程和功能细节默认由 PM Ops 先审，合并确认默认由 PM Ops 在闸门、验证通过后代为确认（C-49），需要人决策的才进入 Needs You；PM 的代拍和代确认以知会同步给人。后台用 `list_needs_you.pm_queue` 读取包括项目级拍板在内的完整待办、选项和人工操作详情，用代拍与分拣专用工具处理；Office 不参与后台代拍。
 

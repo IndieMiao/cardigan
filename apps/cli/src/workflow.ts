@@ -686,8 +686,14 @@ async function pmStart(
     let started = 0;
     for (const entry of wanted) {
       const label = entry.office ? "PM Office" : "PM Ops";
-      if (entry.assignment.external)
-        throw new CliError(EXTERNAL_ASSIGNMENT_START_ERROR, EXIT.usage);
+      if (entry.assignment.external) {
+        if (onlyOffice && !onlyOps)
+          throw new CliError(EXTERNAL_ASSIGNMENT_START_ERROR, EXIT.usage);
+        io.stdout(
+          `${label}（${entry.assignment.id}）是外接身份，跳过终端启动；用 cardigan inbox 查看待处理通知。`,
+        );
+        continue;
+      }
       if (hasUnfinishedRun(store, project_id, entry.assignment.id)) {
         io.stdout(`${label}（${entry.assignment.id}）已在运行，跳过`);
         continue;

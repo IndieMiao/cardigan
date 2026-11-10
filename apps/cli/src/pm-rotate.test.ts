@@ -5,19 +5,22 @@ import {
   type EventId,
   type ProjectId,
   queueRun,
+  type Runtime,
   recordDecision,
   requestDecision,
   resolveDelegatedDecision,
 } from "@cardigan/domain";
 import { authenticate, loadCommandState } from "@cardigan/mcp-server";
 import { defaultRoleDefinition } from "@cardigan/roles";
+import { HerdrRuntime } from "@cardigan/runtime-herdr";
 import {
   getRoleVersion,
   listRoleVersions,
   Store,
   tokensForAssignment,
 } from "@cardigan/store";
-import { afterEach, beforeEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { stopAssignment } from "./assignment.js";
 import { humanActor, runCommand } from "./host.js";
 import { main } from "./index.js";
 import type { CliIo } from "./io.js";
@@ -46,7 +49,10 @@ beforeEach(() => {
     captureCommand: async () => ({ code: 1, stdout: "", stderr: "" }),
   };
 });
-afterEach(() => rmSync(root, { recursive: true, force: true }));
+afterEach(() => {
+  vi.restoreAllMocks();
+  rmSync(root, { recursive: true, force: true });
+});
 
 async function run(argv: string[]): Promise<number> {
   output = [];
@@ -540,4 +546,84 @@ test("external rotation rolls back new tokens, identity and inbox on a late fail
       [],
     );
   });
+});
+
+test.each(["cli", "reusable"])(
+  "external Office stop through %s preserves identity and token",
+  async (entry) => {
+    await bootstrap();
+    expect(await run(["pm", "create", "--office"])).toBe(0);
+    expect(await run(["pm", "rotate", "--office", "--external"])).toBe(0);
+    const lines = printed().split("\n");
+    const token =
+      lines[lines.findIndex((line) => line.startsWith("token_id：")) + 2];
+    const connect = vi
+      .spyOn(HerdrRuntime, "create")
+      .mockImplementation(async () => {
+        throw new Error("must not connect");
+      });
+    const release = vi.fn(async () => {
+      throw new Error("must not release");
+    });
+    const store = Store.open({ dataDir: join(root, "data") });
+    try {
+      const snapshot = () => ({
+        state: store.uow.read((tx) => loadCommandState(tx, project)),
+        tokens: tokensForAssignment(store.database, project, "A-2" as never),
+      });
+      const before = snapshot();
+      expect(authenticate(store, token).ok).toBe(true);
+      if (entry === "cli") {
+        expect(await run(["assignment", "stop", "A-2"])).toBe(2);
+        expect(failed()).toContain("没有可以停止的终端");
+        expect(failed()).toContain("cardigan inbox");
+      } else {
+        await expect(
+          stopAssignment({
+            store,
+            project_id: project,
+            assignment_id: "A-2" as never,
+            runtime: { release } as unknown as Runtime,
+          }),
+        ).rejects.toThrow("没有可以停止的终端");
+      }
+      expect(snapshot()).toEqual(before);
+      expect(authenticate(store, token).ok).toBe(true);
+      expect(connect).not.toHaveBeenCalled();
+      expect(release).not.toHaveBeenCalled();
+    } finally {
+      store.close();
+    }
+  },
+);
+
+test("batch pm start skips external Office and continues to ordinary Ops", async () => {
+  await bootstrap();
+  expect(await run(["pm", "create", "--office"])).toBe(0);
+  expect(await run(["pm", "rotate", "--office", "--external"])).toBe(0);
+  const calls: string[] = [];
+  const hooks = {
+    start: async (options: { assignment_id: string }) => {
+      calls.push(options.assignment_id);
+      return 0;
+    },
+  };
+  // An external-only project has no managed terminal to start.
+  expect(await main(["pm", "start"], io, hooks)).toBe(0);
+  expect(calls).toEqual([]);
+  expect(printed()).toContain("cardigan inbox");
+  expect(await run(["pm", "create", "--ops"])).toBe(0);
+  for (const flags of [[], ["--office", "--ops"], ["--ops"]]) {
+    calls.length = 0;
+    output = [];
+    expect(await main(["pm", "start", ...flags], io, hooks)).toBe(0);
+    expect(calls).toEqual(["A-3"]);
+    expect(printed()).toContain("已启动 1 个常驻 PM");
+    if (!flags.includes("--ops") || flags.includes("--office"))
+      expect(printed()).toContain("外接身份，跳过终端启动");
+  }
+  calls.length = 0;
+  expect(await main(["pm", "start", "--office"], io, hooks)).toBe(2);
+  expect(calls).toEqual([]);
+  expect(failed()).toContain("没有可以启动的终端");
 });
