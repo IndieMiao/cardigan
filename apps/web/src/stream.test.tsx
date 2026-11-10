@@ -284,3 +284,15 @@ test("switching project cancels old retries and cursors; expired sessions leave 
   expect(connections.all).toHaveLength(stoppedCount);
   expect(connections.all.every((c) => c.closed)).toBe(true);
 });
+
+test("cross-project queue changes refresh views without fabricating a project event cursor", () => {
+  const p = pool(),
+    c = callbacks();
+  const stop = subscribeProject("p-1", c, p.create);
+  p.last.emit("queue");
+  expect(c.ready).toHaveBeenCalledOnce();
+  expect(c.change).not.toHaveBeenCalled();
+  stop();
+  p.last.emit("queue");
+  expect(c.ready).toHaveBeenCalledOnce();
+});

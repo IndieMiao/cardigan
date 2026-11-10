@@ -233,6 +233,56 @@ export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
     d.projectAccess();
     const now = clock?.now();
     const why = (text: string) => [...text].slice(0, 40).join("");
+    const view = (q: Decision) => {
+      const failedConfirmation = failedConfirmedMergeCheck(state, q);
+      const followup =
+        !failedConfirmation && decisionFollowupNeedsHuman(state, q);
+      // Project decisions have no card timeline; their request event is the creation fact.
+      const opened =
+        state.events
+          .filter(
+            (e) =>
+              e.type === "decision_requested" &&
+              typeof e.payload === "object" &&
+              e.payload !== null &&
+              "decision_id" in e.payload &&
+              e.payload.decision_id === q.id,
+          )
+          .sort((a, b) => a.created_at.localeCompare(b.created_at))[0]
+          ?.created_at ??
+        state.timeline
+          .filter((e) => e.decision_id === q.id)
+          .sort((a, b) => a.event_seq - b.event_seq)[0]?.created_at;
+      const elapsed =
+        opened && now ? Date.parse(now) - Date.parse(opened) : Number.NaN;
+      return {
+        ...q,
+        ...(failedConfirmation
+          ? {
+              options: q.options.filter((o) => o.key === "request_changes"),
+              recommended: "request_changes",
+            }
+          : {}),
+        ...(followup
+          ? {
+              followup_notice:
+                "拍板已完成，尚无落实结果；当前无 PM Ops 接手，请安排跟进。",
+            }
+          : {}),
+        why: why(
+          failedConfirmation ? "合并检查失败或超时，可以退回修改" : q.question,
+        ),
+        opened_at: opened ?? null,
+        waited_ms: Number.isFinite(elapsed) ? Math.max(0, elapsed) : null,
+        related_cards: relatedCards(d.list("cards"), q),
+        merge_confirmation: mergeConfirmation(
+          q,
+          d.list("work_items"),
+          d.list("deliveries"),
+          d.list("reviews"),
+        ),
+      };
+    };
     return {
       attention: now ? reviewLimitAttention(state, now) : [],
       ...(isPmOps(d)
@@ -307,58 +357,21 @@ export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
                 failedConfirmedMergeCheck(state, q))) ||
             decisionFollowupNeedsHuman(state, q),
         )
-        .map((q) => {
-          const failedConfirmation = failedConfirmedMergeCheck(state, q);
-          const followup =
-            !failedConfirmation && decisionFollowupNeedsHuman(state, q);
-          // Project decisions have no card timeline; their request event is the creation fact.
-          const opened =
-            state.events
+        .map(view),
+      // §7.4 (C-65): merge confirmations PM Ops still holds. Not counted as
+      // waiting on the human, but the human may answer them directly.
+      pm_held_merges:
+        actor.kind === "human"
+          ? d
+              .list("decisions")
               .filter(
-                (e) =>
-                  e.type === "decision_requested" &&
-                  typeof e.payload === "object" &&
-                  e.payload !== null &&
-                  "decision_id" in e.payload &&
-                  e.payload.decision_id === q.id,
+                (q) =>
+                  q.decider === "role:pm" &&
+                  q.trigger === "merge_confirmation" &&
+                  ["open", "provisional"].includes(q.status),
               )
-              .sort((a, b) => a.created_at.localeCompare(b.created_at))[0]
-              ?.created_at ??
-            state.timeline
-              .filter((e) => e.decision_id === q.id)
-              .sort((a, b) => a.event_seq - b.event_seq)[0]?.created_at;
-          const elapsed =
-            opened && now ? Date.parse(now) - Date.parse(opened) : Number.NaN;
-          return {
-            ...q,
-            ...(failedConfirmation
-              ? {
-                  options: q.options.filter((o) => o.key === "request_changes"),
-                  recommended: "request_changes",
-                }
-              : {}),
-            ...(followup
-              ? {
-                  followup_notice:
-                    "拍板已完成，尚无落实结果；当前无 PM Ops 接手，请安排跟进。",
-                }
-              : {}),
-            why: why(
-              failedConfirmation
-                ? "合并检查失败或超时，可以退回修改"
-                : q.question,
-            ),
-            opened_at: opened ?? null,
-            waited_ms: Number.isFinite(elapsed) ? Math.max(0, elapsed) : null,
-            related_cards: relatedCards(d.list("cards"), q),
-            merge_confirmation: mergeConfirmation(
-              q,
-              d.list("work_items"),
-              d.list("deliveries"),
-              d.list("reviews"),
-            ),
-          };
-        }),
+              .map(view)
+          : [],
       human_actions: d
         .list("human_actions")
         .filter(

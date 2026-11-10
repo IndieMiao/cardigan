@@ -10,7 +10,7 @@ import {
   writeRole,
 } from "./roles.js";
 import { Store } from "./store.js";
-import { withTempStore } from "./test-support.js";
+import { latestSchemaVersion, withTempStore } from "./test-support.js";
 
 const project_id = "p-roles" as ProjectId;
 
@@ -283,7 +283,7 @@ describe("project repository registration", () => {
         base_branch: "main",
       });
       expect(store.migrate()).toEqual([]);
-      expect(store.schemaVersion()).toBe(13);
+      expect(store.schemaVersion()).toBe(latestSchemaVersion());
       expect(store.getProject(project_id)?.repo_path).toBe(
         "/srv/agent/repos/example",
       );
@@ -303,7 +303,7 @@ describe("project repository registration", () => {
 
       const reopened = Store.open({ dataDir });
       try {
-        expect(reopened.schemaVersion()).toBe(13);
+        expect(reopened.schemaVersion()).toBe(latestSchemaVersion());
         expect(reopened.getProject(project_id)?.repo_path).toBe(
           "/srv/agent/repos/example",
         );

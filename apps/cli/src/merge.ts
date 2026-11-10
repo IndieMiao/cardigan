@@ -33,10 +33,12 @@ const USAGE = [
   "用法：",
   "  cardigan merge status [C-n] [--project <p>]       看待合并的卡片、确认和合并计划",
   "  cardigan merge confirm <C-n> [--quote <原话>]     以人的身份确认合并",
+  "  cardigan merge hold <C-n> [--quote <原话>]        以人的身份暂不合并",
   "  cardigan merge request <C-n>                      hold 之后重新发起合并确认",
   "  cardigan merge recheck <C-n> [--project <p>]       重查失败或超时的合并候选",
   "  cardigan merge request-changes <C-n> --reason <原因> [--project <p>]  退回修改（原因必填）",
   "",
+  "PM 代确认中的合并也可以直接 confirm、hold 或 request-changes，按你的拍板记录。",
   "通用：--project 省略时取 CARDIGAN_PROJECT，再取数据库里唯一的项目；",
   "      --data-dir 省略时取 CARDIGAN_DATA_DIR，再取 ~/.local/share/cardigan。",
 ].join("\n");
@@ -96,7 +98,9 @@ export async function runMergeCommand(
     case "status":
       return mergeStatus(rest, io);
     case "confirm":
-      return mergeConfirm(rest, io);
+      return mergeConfirm(rest, io, "merge");
+    case "hold":
+      return mergeConfirm(rest, io, "hold");
     case "request":
       return mergeRequest(rest, io);
     case "recheck":
@@ -105,7 +109,7 @@ export async function runMergeCommand(
       return mergeRequestChanges(rest, io);
     default:
       throw new CliError(
-        "用法：cardigan merge status|confirm|request|request-changes|recheck",
+        "用法：cardigan merge status|confirm|hold|request|request-changes|recheck",
         EXIT.usage,
         [USAGE],
       );
@@ -257,6 +261,12 @@ function describe(
             confirmation.resolution === undefined
               ? ""
               : ` (${confirmation.resolution.option})`
+          }${
+            confirmation.status === "open"
+              ? confirmation.decider === "role:pm"
+                ? " decider=PM（可直接处理）"
+                : " decider=human"
+              : ""
           }`
     }`,
   ];
@@ -280,7 +290,11 @@ function describe(
   return lines;
 }
 
-function mergeConfirm(args: readonly string[], io: CliIo): number {
+function mergeConfirm(
+  args: readonly string[],
+  io: CliIo,
+  option: "merge" | "hold",
+): number {
   const parsed = parseArgs(args);
   const id = cardId(parsed.positionals[0]);
   const store = open(io, parsed.flags);
@@ -305,8 +319,9 @@ function mergeConfirm(args: readonly string[], io: CliIo): number {
       );
       return EXIT.ok;
     }
+    const held = confirmation.decider === "role:pm";
     const decision = runCommand(store, {
-      operation: "确认合并",
+      operation: option === "merge" ? "确认合并" : "暂不合并",
       target: id,
       project_id,
       actor: humanActor(project_id),
@@ -316,17 +331,24 @@ function mergeConfirm(args: readonly string[], io: CliIo): number {
           actor,
           {
             decision_id: confirmation.id,
-            option: "merge",
-            rationale: `命令行确认合并 ${id}`,
+            option,
+            rationale:
+              option === "merge"
+                ? `命令行确认合并 ${id}`
+                : `命令行暂不合并 ${id}`,
             raw_quote:
-              optional(parsed.flags, "quote") ?? `cardigan merge confirm ${id}`,
+              optional(parsed.flags, "quote") ??
+              `cardigan merge ${option === "merge" ? "confirm" : "hold"} ${id}`,
           },
           ports,
         ),
       clock: systemClock,
     });
+    const takeover = held ? "（PM 代确认中，已按你的拍板记录）" : "";
     io.stdout(
-      `已确认合并 ${id}（${decision.id} ${decision.status}）；合并循环会把交付合进 ${card.base_branch ?? "无"}。`,
+      option === "merge"
+        ? `已确认合并 ${id}（${decision.id} ${decision.status}）${takeover}；合并循环会把交付合进 ${card.base_branch ?? "无"}。`
+        : `已暂不合并 ${id}（${decision.id}）${takeover}；需要时运行 cardigan merge request ${id}`,
     );
     return EXIT.ok;
   } finally {

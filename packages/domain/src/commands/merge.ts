@@ -81,6 +81,16 @@ function completion(
   );
   return value;
 }
+/** C-65: a sensitive card needs a confirmation whatever its template says. */
+function confirmsMerge(card: Card) {
+  return !!card.sensitive || (card.merge_policy ?? "confirm") === "confirm";
+}
+/** The human answered personally in Workbench or the local CLI. */
+function answeredByHuman(q: Decision) {
+  return (
+    q.resolution?.resolved_by === "human" && q.resolution.via === "needs_you"
+  );
+}
 function confirmation(
   decisions: readonly Decision[],
   card: Card,
@@ -132,12 +142,19 @@ function planFor(state: CommandState, card_id: CardId, confirmed: boolean) {
       "invariant_violation",
       "No accepted Git delivery to merge",
     );
-    if (confirmed && (card.merge_policy ?? "confirm") === "confirm") {
+    if (confirmed && confirmsMerge(card)) {
       const q = confirmation(state.decisions, card, target);
       ensure(
         q?.status === "resolved" && q.resolution?.option === "merge",
         "illegal_transition",
         "Merge confirmation has not been granted for this completion",
+      );
+      // C-65: checked again at publication, so an earlier PM, Office or
+      // timeout answer cannot outlive a flag set before the merge lands.
+      ensure(
+        !card.sensitive || answeredByHuman(q),
+        "illegal_transition",
+        "敏感卡片的合并须由人亲自确认",
       );
     }
     ensure(
@@ -311,9 +328,54 @@ export function completionPassed(
       status: unwrap(transition("card", next.status, "merge_not_required")),
       resolution: "done",
     };
-  else if ((card.merge_policy ?? "confirm") === "confirm")
-    requestConfirmation(d, card, target);
+  else if (confirmsMerge(card)) requestConfirmation(d, card, target);
   d.put("cards", next);
+}
+/**
+ * C-65: after the sensitive flag changes on a card awaiting merge, make the
+ * current completion's confirmation match it. Marking supersedes a merge not
+ * answered by the human personally (PM Ops, Office, timeout; the record is
+ * kept) and asks the human again; an auto-policy card gets its first
+ * confirmation. Unmarking an auto-policy card withdraws the unanswered one,
+ * so the template's auto merge applies again. PM-held open confirmations are
+ * handed over by the caller.
+ */
+export function syncSensitiveMerge(d: CommandDraft, card: Card) {
+  if (card.status !== "awaiting_merge" || card.merge_policy === "none") return;
+  const state = {
+    work_items: d.list("work_items"),
+    deliveries: d.list("deliveries"),
+  };
+  const target = attempt(() => completion(state, card));
+  if (!target.ok || candidates(state, card).length === 0) return;
+  const q = confirmation(d.list("decisions"), card, target.value);
+  if (q && !["open", "provisional", "resolved"].includes(q.status)) return;
+  if (card.sensitive) {
+    if (
+      !q ||
+      (q.status === "resolved" &&
+        q.resolution?.option === "merge" &&
+        !answeredByHuman(q))
+    )
+      requestConfirmation(d, card, target.value);
+    return;
+  }
+  if (q?.status === "open" && !confirmsMerge(card)) {
+    d.put("decisions", {
+      ...q,
+      status: unwrap(transition("decision", q.status, "supersede")),
+    });
+    d.emit(
+      "decision_superseded",
+      card.id,
+      { decision_id: q.id, reason: "card_not_sensitive" },
+      {
+        type: "status_change",
+        decision_id: q.id,
+        body: `${q.id} 已作废：卡片不再敏感，按模板自动合并。`,
+      },
+    );
+  }
 }
 export function requestMerge(
   state: CommandState,

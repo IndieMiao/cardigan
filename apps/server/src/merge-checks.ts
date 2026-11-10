@@ -26,6 +26,7 @@ import type {
   PreparedMerge,
 } from "@cardigan/git-service";
 import {
+  acquireMergeCheckCapacity,
   createMergeCheckLog,
   type MergeGateConfiguration,
   type ProjectMergeGate,
@@ -280,6 +281,7 @@ export class MergeChecks {
   private async execute(task: Task, check: MergeCheckView): Promise<void> {
     let log: Awaited<ReturnType<typeof createMergeCheckLog>> | undefined;
     let result: Awaited<ReturnType<typeof runInTemporaryCheckout>>;
+    let releaseCapacity = () => {};
     try {
       log = await createMergeCheckLog({
         dataDir: this.options.execution.dataDir,
@@ -300,7 +302,13 @@ export class MergeChecks {
         totalTimeoutMs: task.settings.totalTimeoutMs,
         serialize: true,
         signal: this.abort.signal,
-        onReady: () => {
+        onReady: (owner) => {
+          releaseCapacity = acquireMergeCheckCapacity(
+            this.options.store,
+            task.project.project_id as ProjectId,
+            check.attempt_id,
+            owner,
+          );
           this.check(task, { ...check, status: "running" });
         },
         onOutput: (name, text) => log?.append(name, text),
@@ -313,6 +321,10 @@ export class MergeChecks {
         cleanup_errors: [],
         reason: "候选同步或检查执行入口失败，请检查执行环境",
       };
+    } finally {
+      // Always release runtime occupancy, even if a returned/cancelled target
+      // makes the subsequent business result command reject.
+      releaseCapacity();
     }
     let finished: {
       status: Exclude<MergeCheckView["status"], "running" | "queued">;

@@ -14,6 +14,7 @@ export type {
 export * from "./commands/decision-followup.js";
 export * from "./commands/delivery.js";
 export * from "./commands/employee.js";
+export * from "./commands/inactive-run.js";
 export * from "./commands/launch.js";
 export {
   type MergePlan,
@@ -45,6 +46,7 @@ export * from "./commands/queries.js";
 export * from "./commands/release.js";
 export * from "./commands/role.js";
 export * from "./commands/runtime.js";
+export * from "./commands/sensitive.js";
 export { pauseStandingAssignment } from "./commands/standing.js";
 export * from "./commands/templates.js";
 export { canStartWork, workCompleted } from "./commands/workflow.js";
@@ -61,6 +63,7 @@ export { type ResolvedReference, resolveReferences } from "./references.js";
 export { reviewLimitAttention } from "./review-limit-attention.js";
 export * from "./role.js";
 export * from "./role-prompt.js";
+export * from "./run-capacity.js";
 export * from "./runtime-port.js";
 export * from "./standing.js";
 export * from "./states.js";

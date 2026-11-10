@@ -24,8 +24,14 @@ export {
   launchRun,
   type PreparedWorktree,
   projectActor,
+  RunCapacityDeferred,
   scrubRunCredentials,
 } from "./launch.js";
+export {
+  acquireMergeCheckCapacity,
+  type ExecutionOwner,
+  executionOwner,
+} from "./merge-check-capacity.js";
 export {
   loadMergeGateConfig,
   type MergeGateConfiguration,
@@ -44,6 +50,15 @@ export {
   type RunDirectory,
   runDirectory,
 } from "./naming.js";
+export {
+  MERGE_CHECK_RUN_SLOTS,
+  readRunQueue,
+  runCapacitySnapshot,
+} from "./run-capacity.js";
+export {
+  loadRunCapacityConfig,
+  type RunCapacityConfiguration,
+} from "./run-capacity-config.js";
 export {
   type CheckoutCheck,
   type CheckoutInput,

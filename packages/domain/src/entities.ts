@@ -120,6 +120,11 @@ export interface Card {
   readonly template_version?: number;
   /** Template policy fixed at creation; legacy cards default to confirm. */
   readonly merge_policy?: "none" | "confirm" | "auto";
+  /**
+   * Human-only flag (C-65, §7.4): the merge confirmation of a sensitive card
+   * always goes to the human, never to PM Ops or the auto-merge timeout.
+   */
+  readonly sensitive?: boolean;
   readonly created_by: Author;
   readonly created_at: Timestamp;
 }
@@ -250,6 +255,15 @@ export type Assignment = AssignmentFields &
   );
 export type RunOutcome = "completed" | "blocked" | "failed";
 export interface Run {
+  /** Durable host stop intent. Keeps its slot and blocks another launch until exit is confirmed. */
+  readonly inactivity_stop?: {
+    readonly attempt_id: string;
+    readonly runtime_ref: RuntimeRef;
+    readonly stopping: boolean;
+    readonly lease_until: Timestamp;
+  };
+  /** Host scheduling metadata; only meaningful while status is queued. */
+  readonly queue_reason?: "concurrency_limit" | "runtime_unavailable";
   readonly employee_id?: EmployeeId;
   /** Actual launch profile; absent on legacy runs. */
   readonly launch_profile_ref?: string;
@@ -380,6 +394,8 @@ export interface DecisionResolution {
   readonly proxy_authority?: string;
   /** Notice shown to the human after a delegated resolution (§7.4). */
   readonly notice?: string;
+  /** The human answered a confirmation PM Ops still held (§7.4). */
+  readonly taken_over_from?: "role:pm";
   readonly at: Timestamp;
 }
 interface DecisionFields {

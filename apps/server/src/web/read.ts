@@ -10,6 +10,7 @@ import type {
   Machine,
   MergeCheckView,
   ProjectId,
+  RunQueuePosition,
   TimelineEntry,
   WorkItem,
 } from "@cardigan/domain";
@@ -203,6 +204,7 @@ export function cardViews(state: CommandState): WebCardView[] {
 }
 
 export interface CardListView extends WebCardView {
+  readonly queued_runs?: readonly RunQueuePosition[];
   readonly produce_owners: readonly WebAuthorView[];
   readonly participants: readonly WebAuthorView[];
   readonly work_items: readonly Pick<WorkItem, "id" | "title" | "status">[];
@@ -216,6 +218,7 @@ export interface CardListView extends WebCardView {
 export function cardListViews(
   state: CommandState,
   updatedAt?: ReadonlyMap<string, string>,
+  queue: readonly RunQueuePosition[] = [],
 ): CardListView[] {
   const entryCard = new Map(
     state.timeline.map((entry) => [entry.id, entry.card_id]),
@@ -265,6 +268,15 @@ export function cardListViews(
         card.created_at;
     return {
       ...card,
+      ...(queue.some(
+        (r) => r.project_id === state.project_id && r.card_id === card.id,
+      )
+        ? {
+            queued_runs: queue.filter(
+              (r) => r.project_id === state.project_id && r.card_id === card.id,
+            ),
+          }
+        : {}),
       produce_owners: owners(items.filter((item) => item.kind === "produce")),
       participants: owners(items),
       work_items: items.map(({ id, title, status }) => ({ id, title, status })),
@@ -747,7 +759,7 @@ export function needsYou(
       ? cardViews(state).map((card) => [card.id, card.merge_check])
       : [],
   );
-  const decisions = data.decisions.map((decision) => {
+  const decisionView = (decision: (typeof data.decisions)[number]) => {
     const schedule = autoMergeSchedule(state, decision.id);
     const check = decision.card_id ? checks.get(decision.card_id) : undefined;
     return {
@@ -819,7 +831,10 @@ export function needsYou(
           }
         : null,
     };
-  });
+  };
+  const decisions = data.decisions.map(decisionView);
+  // §7.4 (C-65): PM-held merge confirmations the human may answer directly.
+  const pm_held_merges = data.pm_held_merges.map(decisionView);
   const human_actions = data.human_actions.map((action) => {
     const opened = openedAt(
       state.timeline,
@@ -888,6 +903,9 @@ export function needsYou(
     // Batched, non-urgent decisions come after the blocking ones (§8.2).
     decisions: [...decisions].sort(blockingFirst),
     human_actions: [...human_actions].sort(
+      (left, right) => (right.waited_ms ?? 0) - (left.waited_ms ?? 0),
+    ),
+    pm_held_merges: [...pm_held_merges].sort(
       (left, right) => (right.waited_ms ?? 0) - (left.waited_ms ?? 0),
     ),
     // §7.4 知会: delegated resolutions, newest first; never blocking.
@@ -978,6 +996,7 @@ export function executionView(
   state: CommandState,
   now: string,
   machines: readonly Machine[] = [],
+  queue: readonly RunQueuePosition[] = [],
 ) {
   // §8.5: the newest Run is the one created last, not the one that started
   // last. A Run that is still queued has no `started_at`, and ordering by it
@@ -992,12 +1011,16 @@ export function executionView(
     machines,
     assignments: state.assignments.map((assignment) => {
       const run = latestRun(assignment.id);
+      const waiting = queue.find(
+        (r) => r.project_id === state.project_id && r.run_id === run?.id,
+      );
       const card_id =
         state.work_items.find((w) => w.id === assignment.work_item_id)
           ?.card_id ?? null;
       return {
         card_id,
         card_status: state.cards.find((c) => c.id === card_id)?.status ?? null,
+        ...(waiting ? { queue_ahead: waiting.ahead } : {}),
         standing_mode:
           assignment.scope === "standing"
             ? (assignment.standing_mode ?? null)
@@ -1039,7 +1062,15 @@ export function executionView(
           })),
       };
     }),
-    runs: [...state.runs].sort(byId).reverse(),
+    runs: [...state.runs]
+      .sort(byId)
+      .reverse()
+      .map((run) => {
+        const waiting = queue.find(
+          (r) => r.project_id === state.project_id && r.run_id === run.id,
+        );
+        return { ...run, ...(waiting ? { queue_ahead: waiting.ahead } : {}) };
+      }),
   };
 }
 
@@ -1098,6 +1129,12 @@ const EVENT_CATEGORIES: Readonly<Record<string, readonly string[]>> = {
     "run_finished",
     "run_dispatch_aborted",
     "run_inactive",
+    "run_inactivity_stop_requested",
+    "run_inactivity_stop_started",
+    "run_inactivity_stop_withdrawn",
+    "run_inactivity_stop_finished",
+    "inactive_stop_unconfirmed",
+    "inactive_stop_confirmed",
     "session_replaced",
     "runtime_unknown",
     "runtime_lost",
