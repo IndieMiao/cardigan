@@ -96,7 +96,9 @@ function DecisionMeta({
       <EmployeeIdentity {...q} showTitle={false} />
       <IdTag id={q.id} label={isMergeConfirmation(q) ? "合并确认" : "拍板"} />
       {q.blocking && !q.followup_notice && <StatusTag status="blocked" />}
-      {isPausedReview(q) && <span className="hint">已暂停（临时决定）</span>}
+      {isPausedReview(q) && (
+        <StatusTag status="suspended" label="已暂停（临时决定）" />
+      )}
       <span className="hint">{waitLabel(q.waited_ms, elapsed)}</span>
       {q.auto_merge && (
         <span className="hint">
@@ -566,7 +568,8 @@ function HumanAction({
     return (
       <article className="needs-item" aria-label={`执行结果待接手 ${item.id}`}>
         <header className="needs-meta">
-          <IdTag id={item.id} label="已完成" />
+          <IdTag id={item.id} label="执行结果" />
+          <StatusTag status="completed" />
           {item.card_id && <CardLink projectId={projectId} id={item.card_id} />}
         </header>
         <h3 className="needs-question">{item.why}</h3>
@@ -578,11 +581,11 @@ function HumanAction({
     <article className="needs-item" aria-label={`执行 ${item.id}`}>
       <header className="needs-meta">
         <EmployeeIdentity {...item} showTitle={false} />
-        <IdTag
-          id={item.id}
-          label={item.triage === "host" ? "主机操作" : "待你执行"}
+        <IdTag id={item.id} label="操作" />
+        <StatusTag
+          status="todo"
+          label={item.triage === "host" ? "待主机操作" : "待你执行"}
         />
-        <StatusTag status="todo" />
         <span className="hint">{waitLabel(item.waited_ms, elapsed)}</span>
         <span className="needs-cards">
           {item.card_id ? (
@@ -605,7 +608,8 @@ function HumanAction({
       {item.handoff ? (
         <section aria-label="项目经理说明">
           <p className="hint">
-            项目经理已改写 · <Time value={item.handoff.rewritten_at} />
+            <StatusTag status="completed" label="项目经理已改写" /> ·{" "}
+            <Time value={item.handoff.rewritten_at} />
           </p>
           <h4>这是什么</h4>
           <Markdown body={item.handoff.summary} />

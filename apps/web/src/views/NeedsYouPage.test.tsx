@@ -898,72 +898,89 @@ test("failed confirmed merges remain returnable beside read-only decision follow
   expect(recordDecision).toHaveBeenCalledTimes(1);
 });
 
-test("a PM handoff shows a readable title and all four explanations, with the earlier request available separately", async () => {
-  const item = {
-    id: "h(3)",
-    card_id: "C-1",
-    instructions: "在主机终端执行 git fetch，然后回传最新版本号。",
-    expected_return: "最新版本号",
-    why: "需要主机权限",
-    triage: "host" as const,
-    waited_ms: 0,
-    due: null,
-    blocked_work_items: [],
-    handoff: {
-      title: "请同步主机上的最新项目代码",
-      summary: "开发者缺少继续修改所需的最新代码。",
-      why_human: "仓库凭据只在你的主机上，项目经理无法读取。",
+test.each(["host", "human"] as const)(
+  "a PM %s handoff shows a readable title, explanations and shared status icons, with the earlier request available separately",
+  async (triage) => {
+    const item = {
+      id: "h(3)",
+      card_id: "C-1",
       instructions: "在主机终端执行 git fetch，然后回传最新版本号。",
-      expected_outcome: "同步完成后开发者就能继续工作。",
       expected_return: "最新版本号",
-      rewritten_by: "assignment:A-4",
-      rewritten_at: "2026-11-10T09:00:00Z",
-    },
-    original_request: {
-      instructions: "submit_delivery(kind=card_completion) blocked",
-      why_human: "repository unavailable",
-      expected_return: "SHA",
-    },
-  };
-  render(
-    <NeedsYouPage
-      projectId="p-1"
-      client={fakeClient({
-        needsYou: async () => ({
-          decisions: [],
-          human_actions: [item],
-          incidents: [],
-        }),
-      })}
-    />,
-  );
-  const article = await screen.findByRole("article", { name: "执行 h(3)" });
-  expect(
-    within(article).getByRole("heading", {
-      name: "主机操作：请同步主机上的最新项目代码",
-    }),
-  ).toBeTruthy();
-  expect(within(article).getByText(/项目经理已改写/)).toBeTruthy();
-  for (const title of ["这是什么", "为什么需要你", "怎么做", "做完会怎样"])
-    expect(within(article).getByRole("heading", { name: title })).toBeTruthy();
-  expect(within(article).getByText(item.handoff.summary)).toBeTruthy();
-  expect(within(article).getByText(item.handoff.why_human)).toBeTruthy();
-  expect(within(article).getByText(item.handoff.expected_outcome)).toBeTruthy();
-  expect(within(article).getByText("完成后请回传：最新版本号")).toBeTruthy();
-  const prior = within(article)
-    .getByText(item.original_request.instructions)
-    .closest("details");
-  expect(prior?.open).toBe(false);
-  expect(within(article).getByText("查看改写前的内容")).toBeTruthy();
-});
+      why: "需要主机权限",
+      triage,
+      waited_ms: 0,
+      due: null,
+      blocked_work_items: [],
+      handoff: {
+        title: "请同步主机上的最新项目代码",
+        summary: "开发者缺少继续修改所需的最新代码。",
+        why_human: "仓库凭据只在你的主机上，项目经理无法读取。",
+        instructions: "在主机终端执行 git fetch，然后回传最新版本号。",
+        expected_outcome: "同步完成后开发者就能继续工作。",
+        expected_return: "最新版本号",
+        rewritten_by: "assignment:A-4",
+        rewritten_at: "2026-11-10T09:00:00Z",
+      },
+      original_request: {
+        instructions: "submit_delivery(kind=card_completion) blocked",
+        why_human: "repository unavailable",
+        expected_return: "SHA",
+      },
+    };
+    render(
+      <NeedsYouPage
+        projectId="p-1"
+        client={fakeClient({
+          needsYou: async () => ({
+            decisions: [],
+            human_actions: [item],
+            incidents: [],
+          }),
+        })}
+      />,
+    );
+    const article = await screen.findByRole("article", { name: "执行 h(3)" });
+    expect(
+      within(article).getByRole("heading", {
+        name: `${triage === "host" ? "主机操作：" : ""}请同步主机上的最新项目代码`,
+      }),
+    ).toBeTruthy();
+    expect(
+      within(article)
+        .getByText("项目经理已改写")
+        .querySelector("svg.status-shape-success")
+        ?.getAttribute("aria-hidden"),
+    ).toBe("true");
+    expect(
+      within(article)
+        .getByText(triage === "host" ? "待主机操作" : "待你执行")
+        .querySelector("svg.status-shape-pending"),
+    ).toBeTruthy();
+    for (const title of ["这是什么", "为什么需要你", "怎么做", "做完会怎样"])
+      expect(
+        within(article).getByRole("heading", { name: title }),
+      ).toBeTruthy();
+    expect(within(article).getByText(item.handoff.summary)).toBeTruthy();
+    expect(within(article).getByText(item.handoff.why_human)).toBeTruthy();
+    expect(
+      within(article).getByText(item.handoff.expected_outcome),
+    ).toBeTruthy();
+    expect(within(article).getByText("完成后请回传：最新版本号")).toBeTruthy();
+    const prior = within(article)
+      .getByText(item.original_request.instructions)
+      .closest("details");
+    expect(prior?.open).toBe(false);
+    expect(within(article).getByText("查看改写前的内容")).toBeTruthy();
+  },
+);
 
 const checkStates = [
-  ["queued", "排队"],
-  ["running", "运行中"],
-  ["passed", "通过"],
-  ["failed", "失败"],
-  ["timed_out", "超时"],
-  ["interrupted", "中断"],
+  ["queued", "排队中", "pending"],
+  ["running", "运行中", "progress"],
+  ["passed", "已通过", "success"],
+  ["failed", "失败", "error"],
+  ["timed_out", "超时", "error"],
+  ["interrupted", "已中断", "paused"],
 ] as const;
 const attempt = "e42de008-2c67-49e2-a59d-077a0f7936de";
 function checkedMerge(status: (typeof checkStates)[number][0]) {
@@ -978,7 +995,9 @@ function checkedMerge(status: (typeof checkStates)[number][0]) {
         status,
         attempt_id: attempt,
         completion_id: "D-9",
-        checks: [{ duration_ms: 65000 }],
+        checks: [
+          { name: "Web", status: "passed" as const, duration_ms: 65000 },
+        ],
         updated_at: new Date().toISOString(),
         summary: "Error: test failed\n<script>unsafe</script>",
         log_ref: `${attempt}.log`,
@@ -989,7 +1008,7 @@ function checkedMerge(status: (typeof checkStates)[number][0]) {
 
 test.each(checkStates)(
   "merge gate %s shows a badge and only retryable failures offer recheck",
-  async (status, label) => {
+  async (status, label, shape) => {
     const recordDecision = vi.fn(async () => undefined);
     const { container } = render(
       <NeedsYouPage
@@ -1004,7 +1023,22 @@ test.each(checkStates)(
       name: "合并确认 q(3)",
     });
     const content = within(article);
-    expect(content.getByText(label).className).toContain(`status-${status}`);
+    const checkGroup = content.getByRole("region", { name: "合并检查" });
+    const badge = within(checkGroup).getByText(label, {
+      selector: ".action-row > .status",
+    });
+    expect(badge.className).toContain(`status-${status}`);
+    const icon = badge.querySelector(`svg.status-shape-${shape}`);
+    expect(icon?.getAttribute("aria-hidden")).toBe("true");
+    expect(icon?.getAttribute("aria-label")).toBeNull();
+    const items = within(content.getByRole("list", { name: "单项检查" }));
+    expect(items.getByText("Web")).toBeTruthy();
+    expect(
+      items
+        .getByText("已通过")
+        .querySelector("svg.status-shape-success")
+        ?.getAttribute("aria-hidden"),
+    ).toBe("true");
     expect(content.queryByRole("button", { name: "重新检查" }) !== null).toBe(
       ["failed", "timed_out"].includes(status),
     );
@@ -1062,7 +1096,7 @@ test("recheck preserves its idempotency key on uncertain failure and refreshes o
     expect.any(String),
   ]);
   expect(retry.mock.calls[1]).toEqual(retry.mock.calls[0]);
-  expect(screen.getByText("排队")).toBeTruthy();
+  expect(screen.getByText("排队中")).toBeTruthy();
 });
 
 test.each(["failed", "timed_out"] as const)(
@@ -1113,7 +1147,7 @@ test("a gate waiting for its first event shows queued, while disabled projects a
       ]),
   });
   const view = render(<NeedsYouPage projectId="p-1" client={client} />);
-  expect(await screen.findByText("排队")).toBeTruthy();
+  expect(await screen.findByText("排队中")).toBeTruthy();
   expect(screen.getByText("用时：尚未开始")).toBeTruthy();
   expect(screen.queryByRole("link", { name: "查看日志" })).toBeNull();
   view.unmount();

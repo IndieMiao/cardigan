@@ -126,20 +126,30 @@ test("authorization exposes defaults, retries safely, and fixes high-risk catego
   });
   expect((process as HTMLInputElement).checked).toBe(true);
   expect(
+    process.closest("label")?.querySelector("svg.status-shape-success"),
+  ).toBeTruthy();
+  expect(
+    screen.getByText("由人拍板").querySelector("svg.status-shape-review"),
+  ).toBeTruthy();
+  expect(
     (
       screen.getByRole("checkbox", {
         name: "需求范围变化：由人拍板",
       }) as HTMLInputElement
     ).checked,
   ).toBe(false);
-  for (const category of ["花钱", "账号", "权限", "删除数据"])
+  for (const category of ["花钱", "账号", "权限", "删除数据"]) {
+    const toggle = screen.getByRole("checkbox", {
+      name: `${category}：固定由人确认（Workbench 或本机 CLI）`,
+    });
+    expect((toggle as HTMLInputElement).disabled).toBe(true);
     expect(
-      (
-        screen.getByRole("checkbox", {
-          name: `${category}：固定由人确认（Workbench 或本机 CLI）`,
-        }) as HTMLInputElement
-      ).disabled,
-    ).toBe(true);
+      toggle
+        .closest("label")
+        ?.querySelector("svg.status-shape-review")
+        ?.getAttribute("aria-hidden"),
+    ).toBe("true");
+  }
   fireEvent.click(process);
   await screen.findByRole("alert");
   fireEvent.click(process);

@@ -4,7 +4,7 @@ import {
   describeWriteError,
   type PreferencesView,
 } from "../api.js";
-import { PageTitle } from "../components/Foundation.js";
+import { PageTitle, StatusTag } from "../components/Foundation.js";
 import {
   categoryLabels,
   defaultDelegation,
@@ -250,11 +250,16 @@ function DelegationSetting({
           }}
         />
         {label}：
-        {fixed
-          ? "固定由人确认（Workbench 或本机 CLI）"
-          : enabled
-            ? "由 PM 代拍"
-            : "由人拍板"}
+        <StatusTag
+          status={!fixed && enabled ? "active" : "waiting_decision"}
+          label={
+            fixed
+              ? "固定由人确认（Workbench 或本机 CLI）"
+              : enabled
+                ? "由 PM 代拍"
+                : "由人拍板"
+          }
+        />
       </label>
       {error && <p role="alert">{error}</p>}
     </div>

@@ -193,11 +193,18 @@ export function TimelineContent({
           resolved &&
             decision.trigger === "merge_confirmation" &&
             entry.decision_option ? (
-            <span className={`status status-${status}`}>
-              {entry.decision_via === "delegated"
-                ? "自动合并（代批）"
-                : decisionOption(decision, entry.decision_option)}
-            </span>
+            <StatusTag
+              status={status}
+              label={
+                entry.decision_via === "delegated"
+                  ? "自动合并（代批）"
+                  : decisionOption(decision, entry.decision_option)
+              }
+            />
+          ) : resolved &&
+            decision.trigger !== "merge_confirmation" &&
+            entry.decision_via === "delegated" ? (
+            <StatusTag status={status} label="已拍板（PM 代拍）" />
           ) : (
             <StatusTag status={status} />
           ),

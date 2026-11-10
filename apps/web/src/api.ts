@@ -426,7 +426,16 @@ export interface MergeCheckView {
     | "failed"
     | "timed_out"
     | "interrupted";
-  readonly checks: readonly { readonly duration_ms?: number }[];
+  readonly checks: readonly {
+    readonly name: string;
+    readonly status:
+      | "passed"
+      | "failed"
+      | "timed_out"
+      | "interrupted"
+      | "not_run";
+    readonly duration_ms?: number;
+  }[];
   readonly summary?: string;
   readonly log_ref?: string;
   readonly updated_at: string;

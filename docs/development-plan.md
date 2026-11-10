@@ -919,7 +919,36 @@ M5.1 实现的骨架（实现细节见 `docs/plans/phase-1-m5.md` §3.1–§3.3�
 - **只读接口**：`GET /api/projects`；`GET /api/projects/:id/cards`（`filter=needs_me|agent`，每张卡带 domain 派生的 `status`、`waiting_on`、`next_owners`、`why`）；`GET /api/projects/:id/cards/:card`（工作项、时间线、交付、审核、决策、附件和 §8.4 的关联区）；`GET /api/projects/:id/needs-you`（含一句话原因和已等待时长）；`GET /api/projects/:id/snapshot`（§8.3）；`GET /api/projects/:id/execution`（§8.5 的 Assignment、Run、runtime、worktree、游标）；`GET /api/projects/:id/activity`（§8.6，按卡片、角色、类型过滤并分页）。全部以 `{ kind: "human" }` 身份复用 domain 已有的查询（`projectSnapshot`、`listNeedsYou`），只读事务，不推进任何 Agent 游标。
 - **实时刷新**：`GET /api/projects/:id/stream?after=<流:seq,...>`（SSE，`project` 代表项目级流），心跳 15 秒，断线重连按流补发缺失的 seq；不带 `after` 时从当前最新事件开始，不重放历史。
 - **附件下载**：`GET /api/projects/:id/attachments/:id`；只有已知位图类型（png/jpeg/gif/webp/avif）可以内联，SVG、HTML 等一律 `Content-Disposition: attachment`，并附 `default-src 'none'; sandbox` 的 CSP，避免 Agent 写的文档在本站执行脚本。
-- **前端**：`apps/web` 是纯 SPA，不引带样式的组件库、状态管理库和路由库；抽屉、菜单、弹出层、提示框等交互组件用 Radix 的无样式单独包（版本写死，不引 Radix Themes、Tailwind 或其他样式库），外观由自己的 CSS 变量控制（Phase 1.5 U.S-1，2026-11-08 用户拍板）。三个界面用哈希路由（`#/p/<项目>/cards?view=list|board`、`#/p/<项目>/cards/<编号>`，约 40 行解析；旧的 `board`/`list` 路由重定向到 `cards` 并保留筛选），状态放在页面组件的局部 state 里。卡片页内定位用卡片路由的 `?at=<元素 id>` 参数（例如 `#/p/<项目>/cards/<编号>?at=decision-q(2)`），不用额外的 `#fragment`：哈希本身就是路由，额外片段会替换路由并让 Workbench 回退到别的项目；解析失败时保留当前页面，不静默切换项目。Markdown 用 `markdown-it`（`html: false`，`validateLink` 只放行 http、https 和站内路径，外链自动加 `rel="noopener noreferrer"`）。样式是一份 CSS 变量表，跟随 `prefers-color-scheme` 切换深色；状态一律"文字 + 颜色"，不只靠颜色。
+- **前端**：`apps/web` 是纯 SPA，不引带样式的组件库、状态管理库和路由库；抽屉、菜单、弹出层、提示框等交互组件用 Radix 的无样式单独包（版本写死，不引 Radix Themes、Tailwind 或其他样式库），外观由自己的 CSS 变量控制（Phase 1.5 U.S-1，2026-11-08 用户拍板）。三个界面用哈希路由（`#/p/<项目>/cards?view=list|board`、`#/p/<项目>/cards/<编号>`，约 40 行解析；旧的 `board`/`list` 路由重定向到 `cards` 并保留筛选），状态放在页面组件的局部 state 里。卡片页内定位用卡片路由的 `?at=<元素 id>` 参数（例如 `#/p/<项目>/cards/<编号>?at=decision-q(2)`），不用额外的 `#fragment`：哈希本身就是路由，额外片段会替换路由并让 Workbench 回退到别的项目；解析失败时保留当前页面，不静默切换项目。Markdown 用 `markdown-it`（`html: false`，`validateLink` 只放行 http、https 和站内路径，外链自动加 `rel="noopener noreferrer"`）。样式是一份 CSS 变量表，跟随 `prefers-color-scheme` 切换深色；状态一律“形状 + 颜色 + 文字”，不只靠颜色。
+
+C-48 用统一的 `StatusIcon`（自绘内联 SVG）及带中文标签的 `StatusTag` 替换状态圆点。看板列头／卡片、列表、详情、工作项、交付／审核／拍板、Run 状态与结果、Assignment、机器及实时连接提示共用映射。独立图标提供中文 `aria-label`；旁边已有文字时图标对读屏隐藏，避免重复播报。未知值回退到带问号的菱形及“状态未知”。不新增图标库或接口。
+
+| 形状类别 | 状态（领域值） | 浅色／深色图标颜色 |
+|---|---|---|
+| 虚线圆 | `backlog` 待整理 | 灰 `#64716b`／`#acb8b1` |
+| 空心圆 | `todo`、`ready`、`queued`、`pending`、`not_provisioned` | 蓝 `#2563a8`／`#94bde9` |
+| 点线圆环 | `dispatched`、`acked`、`belled` | 靛 `#4f46bd`／`#b6b0ff` |
+| 四分之一填充圆 | `in_progress`、`running`、`provisioning` | 青 `#087e8b`／`#65d3e0` |
+| 圆环套实心小圆 | `review`、`submitted`、`delivered`、`conditional`、`waiting_decision`、`open`、`provisional` | 紫 `#6b4fb3`／`#c5b0f1` |
+| 圆内分支汇合箭头 | `awaiting_merge` 待合并 | 青绿 `#0f766e`／`#6dd9b7` |
+| 实心圆加对勾 | `done`、`completed`、`accepted`、`passed`、`pass`、`approve`、`resolved`、`active`、`online` | 绿 `#2e7d4f`／`#91cda5` |
+| 实心圆加感叹号 | `blocked`、`failed`、`timed_out`、`changes_requested`、`rejected`、`reject`、`lost`、`offline`、`degraded`、`delivery_failed` | 红 `#b42318`／`#ff9c91` |
+| 空心圆加斜线 | `cancelled`、`superseded`、`withdrawn`、`revoked`、`released`、`not_run` | 褐灰 `#78645e`／`#d1b4a6` |
+| 较小的细空心圆 | `idle` 空闲 | 浅灰 `#737e77`／`#95a39b` |
+| 圆内暂停双竖线 | `suspended`、`draining`、`interrupted` | 琥珀 `#b45309`／`#edb96d` |
+| 菱形加问号 | `unknown`、`needs_attention`、未识别状态 | 橙 `#9b5520`／`#f6b486` |
+
+两套主题分别定义颜色；图标对页面、面板、次要面板、时间线及其状态标签浅底色均至少 3:1，实心圆内的对勾／感叹号也至少 3:1。状态测试从实际 CSS 变量计算对比度。撤回记录用次要文字色弱化，不再对整条记录降透明度，以保留状态图标对比度。C-43 合并检查界面合入后，Needs You 和时间线复用的 `MergeCheck` 也统一使用 `StatusTag`；检查单项显示名称与同一套状态标签。整体检查、单项检查均保留中文可访问文本，旁边的 SVG 为装饰图标；分组与列表提供中文 aria 名称。用时、失败摘要、日志链接、未通过说明、失败／超时的重新检查，以及已确认后隐藏确认／暂不合并而保留退回修改的逻辑继续沿用 C-43／C-32。
+
+| 合并检查状态 | 显示文字 | 形状 | 用于 |
+|---|---|---|---|
+| `queued` | 排队中 | 蓝色空心圆 | 整体 |
+| `running` | 运行中 | 青色四分之一填充圆 | 整体 |
+| `passed` | 已通过 | 绿色实心圆加对勾 | 整体、单项 |
+| `failed` | 失败 | 红色实心圆加感叹号 | 整体、单项 |
+| `timed_out` | 超时 | 红色实心圆加感叹号 | 整体、单项 |
+| `interrupted` | 已中断 | 琥珀色圆内暂停双竖线 | 整体、单项 |
+| `not_run` | 未运行 | 褐灰色空心圆加斜线 | 单项 |
 
 Phase 1.5 U5a 把看板和列表合并为一个“卡片”页：标题显示卡片总数，右侧用带文字的列表/看板切换；筛选栏使用“名称：当前值”下拉按钮、可拉伸搜索框和“显示”菜单（默认勾选编号、等待标记、负责角色、进度、更新时间和下一步，“原因”默认不勾选，其余字段仍全开；已经存在浏览器里的选择保持不变，2026-11-09 用户拍板），点卡片从右侧抽屉打开同一份卡片详情组件（`card=<编号>` 写进卡片页路由，刷新/后退可恢复或关闭）。看板空列收成竖排窄条，列表使用浅色表头、行尾箭头和总数行；抽屉顶部右侧依次为在完整页面打开、复制链接、分隔线和关闭图标。完整的视觉细节以 `docs/plans/phase-1.5-ui.md` §8.2 为准。
 
@@ -966,11 +995,11 @@ M5.4 的 Needs You 使用 `#/p/<项目>/needs-you`：运行异常、阻塞/风�
 
 C-29：合并确认满足除超时以外的全部代批条件时，Needs You 和卡片时间线的确认条目显示“将于 HH:MM 自动合并（偏好设置：N 分钟）”；Needs You 每分钟刷新剩余分钟数。到期只是允许系统尝试，阻塞或检查仍可能延后实际合并。自动确认后的条目显示“自动合并（代批）”，与 human 确认区分，事件与决策保留授权依据。
 
-C-37：交给人的普通拍板增加“此类问题以后由 PM 代拍”勾选，选择和授权一次提交；四类高风险及合并确认不提供勾选，服务端同样拒绝。等待 PM 分拣的操作不进 Needs You；PM 转交的 host 操作显示“主机操作”。交人的事项使用 PM 写的一句话标题，展开显示“这是什么、为什么需要你、怎么做、做完会怎样”和回传要求，标记“项目经理已改写”及时间；不再用截断的技术原因作新交接的标题。改写前的内容在折叠区可查看，原始请求字段和历史时间线均保留；旧记录没有 handoff 时沿用原展示。CLI needs-you 同样展示白话交接与改写标记。看板中的 PM 待办不计入“需要我”，分别显示“等待 PM 代拍／分拣”。
+C-37：交给人的普通拍板增加“此类问题以后由 PM 代拍”勾选，选择和授权一次提交；四类高风险及合并确认不提供勾选，服务端同样拒绝。等待 PM 分拣的操作不进 Needs You；PM 转交的 host 操作显示“主机操作”。交人的事项使用 PM 写的一句话标题，展开显示“这是什么、为什么需要你、怎么做、做完会怎样”和回传要求，标记“项目经理已改写”及时间；不再用截断的技术原因作新交接的标题。改写前的内容在折叠区可查看，原始请求字段和历史时间线均保留；旧记录没有 handoff 时沿用原展示。CLI needs-you 同样展示白话交接与改写标记。看板中的 PM 待办不计入“需要我”，分别显示“等待 PM 代拍／分拣”。授权、分拣、改写完成及代拍状态统一使用 C-48 的 StatusTag，以形状和文字共同表达；拍板记录的决策人与类别仍作为文字元数据。
 
 侧栏增加 `#/p/<项目>/decision-history` 拍板记录页，查询已解决的拍板，包含后来被取代或撤回但有已解决事件的历史决定，不提供撤销。`GET /api/projects/:id/decision-history` 支持决策人 `human | pm | system`、类别、卡片及起止时间筛选，按解决时间倒序显示选项、影响、理由、记录人和授权依据；Office 转录计为人，`resolved_by=system` 的超时自动合并计为系统代批。筛选同步到 URL，沿用 Workbench 登录与项目隔离。
 
-P2a-1c：启用合并闸门的项目，Needs You 合并确认显示当前完成申请的 `merge_check` 徽标（排队、运行中、通过、失败、超时、中断）、检查用时、失败摘要及日志链接。首个检查事件尚未写入时显示排队；运行用时从开始事件计算，结束后汇总逐项用时。确认按钮仍可用，检查未通过时旁注“检查通过后才会合并”。仅失败或超时提供“重新检查”，以 human 身份经 `POST /cards/:card/recheck-merge` 调用与 CLI 相同的 `recheckMerge`；请求携带 completion_id 和幂等键，事务内核对当前完成申请，过期或不满足重试条件时用中文说明。未启用闸门时保持原界面。时间线从对应 `merge_check_*` 事件展示当次检查徽标，不解析正文或另存状态；`cardigan needs-you` 的合并项同步显示检查状态。
+P2a-1c：启用合并闸门的项目，Needs You 合并确认显示当前完成申请的 `merge_check` 徽标（排队中、运行中、已通过、失败、超时、已中断）、检查用时、失败摘要及日志链接。首个检查事件尚未写入时显示排队；运行用时从开始事件计算，结束后汇总逐项用时。确认按钮仍可用，检查未通过时旁注“检查通过后才会合并”。仅失败或超时提供“重新检查”，以 human 身份经 `POST /cards/:card/recheck-merge` 调用与 CLI 相同的 `recheckMerge`；请求携带 completion_id 和幂等键，事务内核对当前完成申请，过期或不满足重试条件时用中文说明。未启用闸门时保持原界面。时间线从对应 `merge_check_*` 事件展示当次检查徽标，不解析正文或另存状态；`cardigan needs-you` 的合并项同步显示检查状态。
 
 日志只读接口为 `GET /api/projects/:project/merge-checks/:attempt`：要求有效 Workbench 登录，attempt 仅接受主机生成格式的小写 UUID，并反查当前项目的 `merge_check_*` 事件确认 attempt 归属；只有日志文件而没有本项目检查记录时也返回 404。路径固定为数据目录内 `merge-gate/logs/<当前项目>/<attempt>.log`；拒绝目录和文件符号链接，不接受外部日志路径。返回 `text/plain; charset=utf-8`、`X-Content-Type-Options: nosniff`、私有不缓存及禁脚本 CSP；文件读取后再次检查会话。日志缺失或已被保留策略清理返回中文 404。
 
@@ -1029,6 +1058,8 @@ U3 卡片读模型补充 `updated_at`（本卡事件的最后时间，空流回�
 | 任意 Assignment | 在 Herdr 中打开（给出命令或机器 + workspace） |
 
 Workbench 的 `#/p/<项目>/execution` 展示 Assignment 的持久 PM 模式、机器、Session、登记工作树、分支、最近 MCP 活动、Run 快照/历史和 ACK 游标。最新 Run 从按编号倒序的完整列表读取，排队但尚无 started_at 的 Run 不会被旧 Run 遮住。已有未结束 Run 或卡片已关闭/等待合并时不提供启动命令；运行环境异常提供终端/attention 检查，实际停止、启动和清理由人执行现有 CLI 或 Needs You 决策。命令仅复制、不自动运行。执行视图与 Needs You 的 CLI 命令旁提示先用 `deploy/install-cli.sh` 安装 `cardigan`（§13.1），复制按钮只复制命令本身。
+
+C-48：执行表中正常的 “Assignment 有效” 使用统一状态标签的弱化模式，仅显示次要颜色文字；暂停、释放、未知和失联仍显示形状。运行状态、最近 Run 及展开后的 Run 历史始终保留图标与文字，异常使用红色感叹号或橙色问号。
 
 ### 8.6 项目动态
 
