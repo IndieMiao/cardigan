@@ -73,6 +73,11 @@ class FakeRuntime implements Runtime {
   async status(): Promise<RuntimeResult<RuntimeObservation>> {
     return this.statusResult;
   }
+  async probeTerminal(): Promise<RuntimeResult<RuntimeObservation["process"]>> {
+    return this.statusResult.ok
+      ? { ok: true, value: this.statusResult.value.process }
+      : this.statusResult;
+  }
   async interrupt(): Promise<RuntimeResult<void>> {
     return { ok: true, value: undefined };
   }
@@ -643,6 +648,25 @@ describe("stopAssignment and attachAssignment", () => {
         runtime,
       }),
     ).resolves.toBe("hc attach t1");
+
+    for (const code of [
+      "runtime_timeout",
+      "runtime_unavailable",
+      "runtime_not_found",
+    ] as const) {
+      runtime.statusResult = {
+        ok: false,
+        error: { code, message: "probe failed" },
+      };
+      await expect(
+        attachAssignment({
+          store,
+          project_id,
+          assignment_id: assignment.id,
+          runtime,
+        }),
+      ).resolves.toBe("hc attach t1");
+    }
 
     await stopAssignment({
       store,

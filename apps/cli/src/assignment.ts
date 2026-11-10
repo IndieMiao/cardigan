@@ -508,33 +508,38 @@ interface AttachOptions {
   readonly store: Store;
   readonly project_id: ProjectId;
   readonly assignment_id: Assignment["id"];
-  readonly runtime: Runtime;
+  readonly runtime: Pick<HerdrRuntime, "human_entry" | "probeTerminal">;
+  readonly printOnly?: boolean;
 }
 
-/** Validate the live terminal before returning a copyable command. */
+/** Return a copyable command; an uncertain probe cannot block printing. */
 export async function attachAssignment(input: AttachOptions): Promise<string> {
-  return (await prepareAttach(input)).entry;
+  return (await prepareAttach({ ...input, printOnly: true })).entry;
 }
 
 async function prepareAttach(input: AttachOptions) {
   const ref = attachRef(input.store, input.project_id, input.assignment_id);
-  const status = await input.runtime.status(ref);
-  if (!status.ok)
-    throw attachFailure(
-      input.assignment_id,
-      formatCommandError("查询终端", input.assignment_id, status.error),
-    );
-  if (status.value.process !== "alive")
-    throw attachFailure(
-      input.assignment_id,
-      status.value.process === "exited" ? "终端已结束" : "无法确认终端仍在运行",
-    );
   const entry = await input.runtime.human_entry(ref);
   if (!entry.ok) {
     throw attachFailure(
       input.assignment_id,
       formatCommandError("获取终端进入方式", input.assignment_id, entry.error),
     );
+  }
+  // Attach needs only hc get's process state. Runtime.status also subscribes
+  // to events for an observed_seq; a wrapper's surviving stream can hold its
+  // pipes open during cleanup and prevent even a non-TTY CLI from exiting.
+  const status = await input.runtime.probeTerminal(ref);
+  if (status.ok && status.value === "exited")
+    throw attachFailure(input.assignment_id, "终端已结束");
+  if (!input.printOnly) {
+    if (!status.ok)
+      throw attachFailure(
+        input.assignment_id,
+        formatCommandError("查询终端", input.assignment_id, status.error),
+      );
+    if (status.value !== "alive")
+      throw attachFailure(input.assignment_id, "无法确认终端仍在运行");
   }
   return { ref, entry: entry.value };
 }
@@ -592,7 +597,7 @@ const USAGE = [
   "  cardigan assignment start <A-n> [--project <p>] [--mcp-url <url>] [--hc-session <s>] [--data-dir <目录>]",
   "  cardigan assignment stop <A-n> [--project <p>] [--hc-session <s>] [--data-dir <目录>]",
   "  cardigan assignment attach <A-n> [--print] [--interactive] [--project <p>] [--hc-session <s>] [--data-dir <目录>]",
-  "  attach：输入和输出均为终端（TTY）时直接只读观察；--interactive 允许输入，--print 或非 TTY 只打印命令。",
+  "  attach：输入和输出均为终端（TTY）时直接只读观察；--interactive 允许输入，--print 或非 TTY 只打印命令（默认带 --observe）。",
   "  按 Ctrl+\\ 分离退出；--interactive 下你的输入会直接发给正在工作的 Agent。",
 ].join("\n");
 
@@ -698,14 +703,17 @@ export async function runAssignmentCommand(
       return EXIT.ok;
     }
     if (sub === "attach") {
+      const printOnly =
+        flags.print === "true" || !io.stdinIsTTY || !io.stdoutIsTTY;
       const { entry, ref } = await prepareAttach({
         store,
         project_id,
         assignment_id: assignmentId,
         runtime,
+        printOnly,
       });
       const interactive = flags.interactive === "true";
-      if (flags.print === "true" || !io.stdinIsTTY || !io.stdoutIsTTY) {
+      if (printOnly) {
         io.stdout(`${entry}${interactive ? "" : " --observe"}`);
         return EXIT.ok;
       }

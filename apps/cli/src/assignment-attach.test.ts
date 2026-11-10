@@ -82,7 +82,7 @@ if (args[0] === '--version') {
     console.error(JSON.stringify({error: {kind: 'not_found', message: 'RAW HC ERROR'}}));
     process.exit(1);
   }
-  console.log(process.env.FIXTURE_STATE === 'invalid-json' ? 'RAW HC NON-JSON' : '{}');
+  console.log(process.env.FIXTURE_STATE === 'invalid-json' ? 'RAW HC NON-JSON' : JSON.stringify({state: process.env.FIXTURE_STATE}));
 } else if (args[0] === 'events') {
   console.log(JSON.stringify({seq: 1, terminals: [{address: process.env.FIXTURE_TERMINAL || 't7', state: process.env.FIXTURE_STATE}]}));
 } else if (args[0] === 'machine') {
@@ -208,6 +208,12 @@ describe("assignment attach", () => {
       expect(result.output).toContain("cardigan assignment start A-1");
       expect(result.output).not.toContain("RAW HC ERROR");
       expect(result.output).not.toContain("HC_SESSION=");
+      expect(
+        readFileSync(join(root, "calls"), "utf8")
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line)[0]),
+      ).toEqual(["--version", "get", "attach"]);
     },
   );
 
@@ -276,8 +282,14 @@ describe("assignment attach", () => {
     const result = run(flags);
     expect(result.code).toBe(0);
     expect(result.output).toContain(
-      `HC_SESSION='attach-fixture' HC_SOCKET=${quote(socketPath)} 'hc' attach 't7'${flags.includes("--interactive") ? "" : " --observe"}`,
+      `HC_SESSION='attach-fixture' HC_SOCKET=${quote(socketPath)} 'hc' attach 't7'${flags.includes("--interactive") ? "" : " --observe"}\n`,
     );
+    expect(
+      readFileSync(join(root, "calls"), "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line)[0]),
+    ).toEqual(["--version", "get"]);
     expect(existsSync(join(root, "attached"))).toBe(false);
     expect(result.output).not.toContain("分离退出");
   });
@@ -329,7 +341,7 @@ describe("assignment attach", () => {
     },
   );
 
-  test.each([
+  test.skipIf(process.platform !== "linux").each([
     ["finished", "终端已结束"],
     ["missing", "终端不存在或已结束"],
     ["unknown", "无法确认终端仍在运行"],
@@ -338,7 +350,7 @@ describe("assignment attach", () => {
     "%s terminal has a Chinese reason and recovery command",
     (state, reason) => {
       env.FIXTURE_STATE = state;
-      const result = run();
+      const result = run([], "tty");
       expect(result.code).toBe(1);
       expect(result.output).toContain(reason);
       expect(result.output).toContain("cardigan assignment start A-1");
@@ -347,14 +359,64 @@ describe("assignment attach", () => {
     },
   );
 
-  test("missing socket refuses without hc get or attach", async () => {
+  test.skipIf(process.platform !== "linux")(
+    "missing socket refuses direct entry without hc get or attach",
+    async () => {
+      await new Promise<void>((resolve) => socket.close(() => resolve()));
+      const result = run([], "tty");
+      expect(result.code).toBe(1);
+      expect(result.output).toContain("运行时不可用");
+      expect(result.output).toContain("cardigan assignment start A-1");
+      expect(readFileSync(join(root, "calls"), "utf8")).toBe('["--version"]\n');
+    },
+  );
+
+  test.each(["missing", "unknown", "invalid-json"])(
+    "non-TTY printing tolerates a %s probe",
+    (state) => {
+      env.FIXTURE_STATE = state;
+      const result = run();
+      expect(result.code).toBe(0);
+      expect(result.output).toContain("'hc' attach 't7' --observe\n");
+      expect(result.output).not.toContain("RAW HC");
+      expect(existsSync(join(root, "attached"))).toBe(false);
+    },
+  );
+
+  test
+    .skipIf(process.platform !== "linux")
+    .each(["missing", "unknown", "invalid-json"])(
+    "TTY --print tolerates a %s probe",
+    (state) => {
+      env.FIXTURE_STATE = state;
+      expect(run(["--print"], "tty")).toMatchObject({
+        code: 0,
+        output: expect.stringContaining("'hc' attach 't7' --observe\n"),
+      });
+      expect(existsSync(join(root, "attached"))).toBe(false);
+    },
+  );
+
+  test("printing tolerates a missing socket without starting a core", async () => {
     await new Promise<void>((resolve) => socket.close(() => resolve()));
-    const result = run();
-    expect(result.code).toBe(1);
-    expect(result.output).toContain("运行时不可用");
-    expect(result.output).toContain("cardigan assignment start A-1");
+    expect(run()).toMatchObject({
+      code: 0,
+      output: expect.stringContaining("'hc' attach 't7' --observe\n"),
+    });
     expect(readFileSync(join(root, "calls"), "utf8")).toBe('["--version"]\n');
   });
+
+  test.each([false, true])(
+    "printing rejects a confirmed finished terminal (--print=%s)",
+    (print) => {
+      env.FIXTURE_STATE = "finished";
+      const result = run(print ? ["--print"] : []);
+      expect(result.code).toBe(1);
+      expect(result.output).toContain("终端已结束");
+      expect(result.output).toContain("cardigan assignment start A-1");
+      expect(result.output).not.toContain("HC_SESSION=");
+    },
+  );
 
   test("incompatible hc version gets a Chinese diagnosis", () => {
     env.FIXTURE_VERSION = "hc 0.0.0";
