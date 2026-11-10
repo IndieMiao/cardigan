@@ -24,7 +24,7 @@ import {
   persistRoleEffect,
   Store,
 } from "@cardigan/store";
-import { CliError, EXIT } from "./errors.js";
+import { CliError, EXIT, formatCommandError } from "./errors.js";
 import { announceDataDir, resolveProject, systemClock } from "./host.js";
 import type { CliIo } from "./io.js";
 import { readRoleFile } from "./role-file.js";
@@ -243,7 +243,14 @@ export async function runRoleCommand(
           }
           const previous = getRoleVersion(tx, project, definition.role_id);
           if (version !== undefined && version !== (previous?.version ?? 0) + 1)
-            fail("--version 必须是下一个版本，不能覆盖或跳过版本");
+            throw new CliError(
+              formatCommandError("创建角色", definition.role_id, {
+                code: "validation_failed",
+                message: "--version 必须是下一个版本，不能覆盖或跳过版本",
+              }),
+              EXIT.usage,
+              [USAGE],
+            );
           const { role_id: roleId, ...patch } = definition;
           result =
             legacyAdd && previous && version !== undefined
@@ -312,7 +319,31 @@ export async function runRoleCommand(
         default:
           result = rollbackRole(state, actor, id, version as number, ports);
       }
-      if (!result.ok) throw new CliError(result.error.message, EXIT.usage);
+      if (!result.ok)
+        throw new CliError(
+          formatCommandError(
+            {
+              add: "创建角色",
+              update: "更新角色",
+              copy: "复制角色",
+              activate: "恢复角色",
+              deactivate: "停用角色",
+              rollback: "回退角色",
+            }[
+              command as
+                | "add"
+                | "update"
+                | "copy"
+                | "activate"
+                | "deactivate"
+                | "rollback"
+            ],
+            file?.role_id ??
+              (command === "copy" ? (positionals[1] as string) : id),
+            result.error,
+          ),
+          EXIT.usage,
+        );
       persistRoleEffect(tx, project, result.value);
       return result.value.data;
     });

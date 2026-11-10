@@ -28,7 +28,7 @@ import {
 } from "@cardigan/store";
 import { type StartById, startAssignmentById } from "./assignment.js";
 import { runContentCommand } from "./content.js";
-import { CliError, EXIT } from "./errors.js";
+import { CliError, EXIT, formatCommandError } from "./errors.js";
 import {
   announceDataDir,
   humanActor,
@@ -277,7 +277,6 @@ function cardUpdate(args: readonly string[], io: CliIo): number {
       const actor = humanActor(project_id);
       const ports = { clock: systemClock, ids: tx.ids };
       let state = loadCommandState(tx, project_id);
-      const card = state.cards.find((item) => item.id === cardId);
       if (changed.some((name) => name !== "superseded-by")) {
         const result = updateCard(
           state,
@@ -286,16 +285,8 @@ function cardUpdate(args: readonly string[], io: CliIo): number {
           ports,
         );
         if (!result.ok) {
-          const reason =
-            result.error.code === "illegal_transition"
-              ? card?.status === "done" && status === "cancelled"
-                ? "已完成卡片不能取消；请建新卡（例如回滚卡），再用 --superseded-by <C-m> 标记旧卡"
-                : `不允许从 ${card?.status} 转为 ${status}`
-              : result.error.code === "not_found"
-                ? "卡片不存在"
-                : `更新被拒绝：${result.error.message}`;
           throw new CliError(
-            `无法更新卡片 ${cardId}：${reason}（${result.error.code}）`,
+            formatCommandError("更新卡片", cardId, result.error),
             EXIT.usage,
           );
         }
@@ -310,16 +301,8 @@ function cardUpdate(args: readonly string[], io: CliIo): number {
           ports,
         );
         if (!result.ok) {
-          const reason =
-            result.error.code === "illegal_transition"
-              ? "只有已完成或已取消的卡片才能标记为被取代"
-              : result.error.code === "not_found"
-                ? "原卡片或取代它的卡片在当前项目中不存在"
-                : result.error.code === "validation_failed"
-                  ? "卡片不能被自身取代"
-                  : "只能标记同项目的卡片";
           throw new CliError(
-            `无法更新卡片 ${cardId}：${reason}（${result.error.code}）`,
+            formatCommandError("更新卡片", cardId, result.error),
             EXIT.usage,
           );
         }
@@ -349,6 +332,8 @@ function cardCreate(args: readonly string[], io: CliIo): number {
       optional(parsed.flags, "project"),
     );
     const card = runCommand(store, {
+      operation: "创建卡片",
+      target: required(parsed.flags, "title"),
       project_id,
       actor: humanActor(project_id),
       reduce: (state, actor, ports) =>
@@ -421,6 +406,8 @@ async function assignWorkItem(
     );
     let issued: ReturnType<typeof issueTokenForAssignment> | undefined;
     const assignment = runCommand(store, {
+      operation: "指派工作项",
+      target: workItemId,
       project_id,
       actor: humanActor(project_id),
       reduce: (state, actor, ports) =>
@@ -505,11 +492,20 @@ function tokenIssue(args: readonly string[], io: CliIo): number {
     const issued = store.uow.run((tx) => {
       const assignment = tx.assignments.get(project_id, assignmentId);
       if (assignment === undefined) {
-        throw new CliError(`Assignment ${assignmentId} 不存在`, EXIT.usage);
+        throw new CliError(
+          formatCommandError("签发 Token", assignmentId, {
+            code: "not_found",
+            message: `Assignment ${assignmentId} 不存在`,
+          }),
+          EXIT.usage,
+        );
       }
       if (assignment.status !== "active") {
         throw new CliError(
-          `Assignment ${assignmentId} 状态是 ${assignment.status}，只有 active 才能签发 Token`,
+          formatCommandError("签发 Token", assignmentId, {
+            code: "illegal_transition",
+            message: `Assignment ${assignmentId} 状态是 ${assignment.status}，只有 active 才能签发 Token`,
+          }),
           EXIT.usage,
         );
       }
@@ -863,7 +859,15 @@ function pmCreate(args: readonly string[], io: CliIo): number {
               mode,
             )
           : applyStandingMode(existing, mode);
-      if (!stamped.ok) throw new CliError(stamped.error.message, EXIT.usage);
+      if (!stamped.ok)
+        throw new CliError(
+          formatCommandError(
+            "创建常驻 PM",
+            office ? "Office" : "Ops",
+            stamped.error,
+          ),
+          EXIT.usage,
+        );
       const assignment: Assignment = stamped.value;
       if (existing === undefined) {
         tx.assignments.put(project_id, assignment);
@@ -912,6 +916,8 @@ function humanActionDone(args: readonly string[], io: CliIo): number {
       optional(parsed.flags, "project"),
     );
     const action = runCommand(store, {
+      operation: "完成待办操作",
+      target: humanActionId,
       project_id,
       actor: humanActor(project_id),
       reduce: (state, actor, ports) =>

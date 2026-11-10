@@ -432,6 +432,35 @@ describe("startAssignment", () => {
     expect(runs.length).toBeGreaterThanOrEqual(0);
   });
 
+  test("worktree runtime failures keep compensation and report Chinese errors", async () => {
+    const assignment = assignWorkItem("write");
+    store.setProjectRepo({ project_id, repo_path: dataDir });
+    await expect(
+      startAssignment({
+        store,
+        io,
+        project_id,
+        assignment_id: assignment.id,
+        launch: {
+          config: launchConfig,
+          secrets: { provider: "sk-fictional-secret" },
+        },
+        mcpUrl: "http://127.0.0.1:3004/mcp",
+        runtime: new FakeRuntime(),
+        dataDir,
+        worktree: async () => {
+          throw new Error("runtime_timeout: Git timed out");
+        },
+      }),
+    ).rejects.toMatchObject({
+      exitCode: 1,
+      message: `无法启动 Assignment ${assignment.id}：运行时响应超时，请稍后重试（runtime_timeout）`,
+    });
+    expect(
+      store.uow.read((tx) => tx.runs.list(project_id)).map((run) => run.status),
+    ).toEqual(["cancelled"]);
+  });
+
   test("a provision failure cancels the Run and revokes the token", async () => {
     const assignment = assignWorkItem("none");
     const runtime = new FakeRuntime();
@@ -454,7 +483,10 @@ describe("startAssignment", () => {
         runtime,
         dataDir,
       }),
-    ).rejects.toThrow(/runtime_unavailable/);
+    ).rejects.toMatchObject({
+      exitCode: 1,
+      message: `无法启动 Assignment ${assignment.id}：运行时不可用，请检查运行服务（runtime_unavailable）`,
+    });
 
     const runs = store.uow.read((tx) => tx.runs.list(project_id));
     expect(runs.map((run) => run.status)).toEqual(["cancelled"]);
@@ -489,7 +521,10 @@ describe("startAssignment", () => {
         runtime,
         dataDir,
       }),
-    ).rejects.toThrow();
+    ).rejects.toMatchObject({
+      exitCode: 1,
+      message: `无法启动 Assignment ${assignment.id}：参数未通过校验，请检查输入（validation_failed）`,
+    });
 
     expect(runtime.released).toHaveLength(1);
     const runs = store.uow.read((tx) => tx.runs.list(project_id));

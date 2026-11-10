@@ -1,5 +1,5 @@
 import { Store } from "@cardigan/store";
-import { CliError, EXIT } from "./errors.js";
+import { CliError, EXIT, formatCommandError } from "./errors.js";
 import { announceDataDir, resolveProject } from "./host.js";
 import type { CliIo } from "./io.js";
 import { runRoleCommand } from "./role.js";
@@ -204,7 +204,10 @@ function createProject(
       ...(options.flags.name === undefined ? {} : { name: options.flags.name }),
     });
     if (!created.ok) {
-      throw new CliError(created.error.message, EXIT.usage);
+      throw new CliError(
+        formatCommandError("创建项目", projectId, created.error),
+        EXIT.usage,
+      );
     }
     io.stdout(
       `已创建项目 ${created.value.id}（${created.value.name}）\n数据库：${dataDir}`,
@@ -247,7 +250,7 @@ function setProjectRepo(
     });
     if (!result.ok) {
       throw new CliError(
-        `${result.error.code}: ${result.error.message}`,
+        formatCommandError("设置项目仓库", projectId, result.error),
         EXIT.usage,
       );
     }
