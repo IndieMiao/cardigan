@@ -1046,11 +1046,13 @@ test.each([
       notes: f.store.listNotifications({ project_id: f.project }),
     });
     const before = snapshot();
+    const beforeWake = vi.fn(async () => "prepared");
     for (const elapsed of [scenario === "retry" ? 20 : 3_600_001, 3_600_001]) {
       f.advance(elapsed);
       await dispatcher({
         dispatchTimeoutMs: 100,
         deliveryRetryBaseMs: 10,
+        beforeWake,
       }).tick();
       expect(snapshot()).toEqual(before);
       expect(f.store.verifyToken(issued.token)).toBeDefined();
@@ -1062,6 +1064,7 @@ test.each([
       f.runtime.provision,
       f.runtime.resume_or_replace,
       f.options.startRun,
+      beforeWake,
     ])
       expect(method).not.toHaveBeenCalled();
   },
