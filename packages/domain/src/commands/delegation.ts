@@ -33,8 +33,9 @@ export function isPmOps(d: CommandDraft) {
     d.assignment.standing_mode === "ops"
   );
 }
+export const SENSITIVE_CARD_REASON = "卡片已被人标为敏感，合并须由人亲自确认。";
 /**
- * D12 high-risk categories and scope changes on a card keep its merge
+ * Human-flagged sensitive cards, D12 high-risk categories and scope changes on a card keep its merge
  * confirmation with the human (§7.4): decisions on or affecting the card,
  * plus the decision the card was created from (`source.kind=decision`), so
  * work derived from a project-level sensitive decision is not "ordinary".
@@ -42,10 +43,12 @@ export function isPmOps(d: CommandDraft) {
  */
 export function mergeNeedsHuman(
   decisions: readonly Decision[],
-  cards: readonly Pick<Card, "id" | "source">[],
+  cards: readonly Pick<Card, "id" | "source" | "sensitive">[],
   card_id: CardId,
 ): string | undefined {
   const card = cards.find((c) => c.id === card_id);
+  // C-65: the human's own flag wins over any category; agents cannot set it.
+  if (card?.sensitive) return SENSITIVE_CARD_REASON;
   const sourceId =
     card?.source.kind === "decision" ? card.source.decision_id : undefined;
   const sensitive = decisions.find(
@@ -67,7 +70,7 @@ export function mergeNeedsHuman(
 export function mergeRequiresHuman(
   state: {
     readonly decisions: readonly Decision[];
-    readonly cards: readonly Pick<Card, "id" | "source">[];
+    readonly cards: readonly Pick<Card, "id" | "source" | "sensitive">[];
   },
   q: Decision,
 ): boolean {

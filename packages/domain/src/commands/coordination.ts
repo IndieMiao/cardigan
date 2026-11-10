@@ -402,7 +402,15 @@ export function recordDecision(
   ports: CommandPorts,
 ) {
   return command(state, actor, "record_decision", ports, (d) => {
-    const decision = d.get("decisions", p.decision_id);
+    const held = d.get("decisions", p.decision_id);
+    // §7.4 (C-65): the human may answer a merge confirmation PM Ops still
+    // holds without turning delegation off; it becomes the human's answer.
+    const takenOver =
+      actor.kind === "human" &&
+      held.decider === "role:pm" &&
+      held.trigger === "merge_confirmation" &&
+      ["open", "provisional"].includes(held.status);
+    const decision: Decision = takenOver ? { ...held, decider: "human" } : held;
     ensure(
       (actor.kind === "human" && decision.decider === "human") ||
         (actor.kind === "assignment" &&
@@ -464,7 +472,12 @@ export function recordDecision(
       d.put("decisions", superseded);
       return superseded;
     }
-    return resolveDecisionDraft(d, decision, p, false);
+    return resolveDecisionDraft(
+      d,
+      decision,
+      takenOver ? { ...p, taken_over_from: "role:pm" } : p,
+      false,
+    );
   });
 }
 function resolveDecisionDraft(
@@ -477,6 +490,7 @@ function resolveDecisionDraft(
     via_chain?: readonly Author[];
     batch?: string;
     notice?: string;
+    taken_over_from?: "role:pm";
   },
   delegated: boolean,
 ) {
@@ -499,6 +513,7 @@ function resolveDecisionDraft(
         }
       : {}),
     ...(delegated && p.notice?.trim() ? { notice: p.notice.trim() } : {}),
+    ...(p.taken_over_from ? { taken_over_from: p.taken_over_from } : {}),
     raw_quote: p.raw_quote,
     via_chain: [...(p.via_chain ?? []), d.author],
     ...(p.batch ? { batch: p.batch } : {}),

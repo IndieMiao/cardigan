@@ -83,6 +83,7 @@ type CommandName =
   | "abort_dispatch"
   | "set_project_preferences"
   | "mark_notices_read"
+  | "set_card_sensitive"
   | "auto_confirm_merge"
   | "remind_decision_followups"
   | "request_merge"
