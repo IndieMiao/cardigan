@@ -95,13 +95,15 @@ function links(column: HTMLElement) {
     .map((link) => link.getAttribute("href"));
 }
 function observation(label = "进行中") {
-  const current = observations.findLast(
-    (item) =>
-      !item.disconnected &&
-      item.root === screen.getByRole("region", { name: `${label}卡片` }),
-  );
-  if (!current) throw new Error(`Missing observer for ${label}`);
-  return current;
+  // The lane DOM can appear before its useEffect registers the observer.
+  return waitFor(() => {
+    const root = screen.getByRole("region", { name: `${label}卡片` });
+    const current = observations.findLast(
+      (item) => !item.disconnected && item.root === root,
+    );
+    if (!current) throw new Error(`Missing observer for ${label}`);
+    return current;
+  });
 }
 
 test("each lane starts with the newest 10 cards and its heading shows the full count", async () => {
@@ -115,14 +117,15 @@ test("each lane starts with the newest 10 cards and its heading shows the full c
   );
   const root = screen.getByRole("region", { name: "进行中卡片" });
   expect(root.contains(within(column).getByRole("heading"))).toBe(false);
-  expect(observation().root).toBe(root);
-  expect(observation().margin).toBe("0px 0px 100px 0px");
+  const current = await observation();
+  expect(current.root).toBe(root);
+  expect(current.margin).toBe("0px 0px 100px 0px");
   expect(column.querySelector(".board-lane-total")).toBeNull();
 });
 
 test("approaching the lane bottom adds one batch, then the remainder and total, without loading other lanes", async () => {
   const { page, column } = await start();
-  const first = observation();
+  const first = await observation();
   act(() => first.emit(false));
   expect(links(column)).toHaveLength(10);
   act(() => first.emit(true));
@@ -133,7 +136,8 @@ test("approaching the lane bottom adds one batch, then the remainder and total, 
   expect(links(screen.getByRole("region", { name: "已完成" }))).toHaveLength(
     10,
   );
-  act(() => observation().emit(true));
+  const next = await observation();
+  act(() => next.emit(true));
   expect(links(column)).toHaveLength(25);
   expect(within(column).getByText("已显示全部 25 张")).toBeTruthy();
   expect(within(column).queryByRole("button", { name: /加载更多/ })).toBeNull();
@@ -154,9 +158,10 @@ test.each([
   "changing %s=%s resets batches and scrolling even when the matched lane stays the same",
   async (key, value) => {
     const { column } = await start();
-    const old = observation();
-    act(() => old.emit(true));
+    const first = await observation();
+    act(() => first.emit(true));
     expect(links(column)).toHaveLength(20);
+    const old = await observation();
     const oldRoot = screen.getByRole("region", { name: "进行中卡片" });
     oldRoot.scrollTop = 500;
     act(() => {
@@ -168,16 +173,24 @@ test.each([
       0,
     );
     expect(oldRoot.isConnected).toBe(false);
+    expect(old.disconnected).toBe(true);
     const firstId = value === "id" ? 1 : value === "priority" ? 5 : 25;
     expect(links(column)[0]).toBe(`#/p/p-1/cards/C-${firstId}`);
     act(() => old.emit(true));
     expect(links(column)).toHaveLength(10);
+    const current = await observation();
+    expect(current.target).toBe(
+      within(column).getByRole("button", { name: "加载更多进行中卡片" }),
+    );
+    act(() => current.emit(true));
+    expect(links(column)).toHaveLength(20);
   },
 );
 
 test("narrowing the search updates total counts, and clearing it restarts at 10", async () => {
   const { column } = await start();
-  act(() => observation().emit(true));
+  const first = await observation();
+  act(() => first.emit(true));
   fireEvent.change(screen.getByLabelText("搜索标题或编号"), {
     target: { value: "C-2" },
   });
@@ -192,7 +205,8 @@ test("narrowing the search updates total counts, and clearing it restarts at 10"
 
 test("live refresh and unrelated route changes keep loaded cards and the scroll root", async () => {
   const { page, column } = await start();
-  act(() => observation().emit(true));
+  const first = await observation();
+  act(() => first.emit(true));
   const root = screen.getByRole("region", { name: "进行中卡片" });
   root.scrollTop = 300;
   page.rerender(<CardListPage client={client} projectId="p-1" revision={1} />);

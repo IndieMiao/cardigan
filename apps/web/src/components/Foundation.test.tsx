@@ -186,7 +186,14 @@ test("U1 shell orders Needs You first with its count, then work and runtime grou
     within(sidebar)
       .getAllByRole("link")
       .map((a) => a.textContent?.trim()),
-  ).toEqual(["Needs You 1", "卡片", "执行视图", "项目动态", "项目快照"]);
+  ).toEqual([
+    "Needs You 1",
+    "卡片",
+    "执行视图",
+    "项目动态",
+    "项目快照",
+    "设置",
+  ]);
   expect(within(sidebar).getByRole("heading", { name: "工作" })).toBeTruthy();
   expect(within(sidebar).getByRole("heading", { name: "运行" })).toBeTruthy();
   expect(await screen.findByRole("heading", { name: /卡片/u })).toBeTruthy();

@@ -12,6 +12,7 @@ import {
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { attachment, cardDetail, timelineEntry } from "../testing/fixtures.js";
 import { Timeline } from "./Timeline.js";
+import { TimelineContent } from "./TimelineContent.js";
 import { TimelineIcon } from "./TimelineHeader.js";
 
 beforeEach(() => {
@@ -284,4 +285,45 @@ test("U6b system rows show the authenticated actor and exact upload thumbnail; p
     within(rows[1] as HTMLElement).queryByRole("button", { name: "预览 F-2" }),
   ).toBeNull();
   expect(css).toContain(".system-details > summary::-webkit-details-marker");
+});
+
+test("merge timeline shows the deadline and distinguishes delegated from human confirmation", () => {
+  const decision = {
+    id: "q(1)",
+    trigger: "merge_confirmation",
+    question: "Merge C-1 into main?",
+    status: "open",
+    decider: "human",
+    blocking: true,
+    options: [{ key: "merge", description: "合并", impact: "更新基线" }],
+    recommended: "merge",
+    auto_merge: { minutes: 10, due_at: "2026-01-01T00:10:00.000Z" },
+  };
+  const detail = cardDetail({ decisions: [decision] });
+  const entry = timelineEntry({
+    type: "decision_request",
+    decision_id: decision.id,
+  });
+  const content = (item: typeof entry) => (
+    <TimelineContent
+      entry={item}
+      detail={detail}
+      projectId="p-1"
+      cardId="C-1"
+    />
+  );
+  const view = render(content(entry));
+  expect(screen.getByText(/自动合并（偏好设置：10 分钟）/)).toBeTruthy();
+  const resolved = {
+    ...entry,
+    type: "decision_resolved" as const,
+    decision_option: "merge",
+    author: "system",
+    body: "超过 10 分钟无人处理，按偏好设置自动确认合并",
+  };
+  view.rerender(content({ ...resolved, decision_via: "delegated" }));
+  expect(screen.getByText("自动合并（代批）")).toBeTruthy();
+  expect(screen.queryByText(/将于/)).toBeNull();
+  view.rerender(content({ ...resolved, author: "human" }));
+  expect(screen.queryByText("自动合并（代批）")).toBeNull();
 });

@@ -146,6 +146,7 @@ export interface TimelineEntryView extends AuthorView {
   readonly review_id?: string;
   readonly attachment_id?: string;
   readonly decision_option?: string;
+  readonly decision_via?: "delegated";
   readonly type:
     | "comment"
     | "instruction"
@@ -217,6 +218,10 @@ export interface ReviewMatrixRow {
 }
 
 export interface DecisionView {
+  readonly auto_merge?: {
+    readonly minutes: number;
+    readonly due_at: string;
+  } | null;
   readonly trigger?: string | null;
   readonly id: string;
   readonly question: string;
@@ -548,7 +553,18 @@ export interface CardUpdateInput {
   readonly priority: number;
 }
 
+export interface PreferencesView {
+  readonly auto_merge_after_minutes: number | null;
+  readonly merge_gate_enabled: boolean;
+}
+
 export interface CardiganClient {
+  preferences(projectId: string): Promise<PreferencesView>;
+  setPreferences(
+    projectId: string,
+    minutes: number | null,
+    idempotencyKey: string,
+  ): Promise<void>;
   updateCard(
     projectId: string,
     cardId: string,
@@ -715,6 +731,23 @@ export class HttpCardiganClient implements CardiganClient {
   execution(projectId: string): Promise<ExecutionData> {
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/execution`,
+    );
+  }
+  preferences(projectId: string): Promise<PreferencesView> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/preferences`,
+    );
+  }
+  async setPreferences(
+    projectId: string,
+    minutes: number | null,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      "preferences",
+      { auto_merge_after_minutes: minutes },
+      idempotencyKey,
     );
   }
   needsYou(projectId: string): Promise<NeedsPage> {

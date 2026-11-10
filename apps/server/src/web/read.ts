@@ -12,6 +12,7 @@ import type {
 } from "@cardigan/domain";
 import {
   authorView,
+  autoMergeSchedule,
   deriveCardStatus,
   deriveReviewMatrix,
   extractReferences,
@@ -502,6 +503,13 @@ export function cardDetail(
       ...entry,
       ...webAuthorView(state, entry.author),
       event_type: event?.type ?? null,
+      ...(entry.type === "decision_resolved" &&
+      event?.payload &&
+      typeof event.payload === "object" &&
+      "via" in event.payload &&
+      event.payload.via === "delegated"
+        ? { decision_via: "delegated" }
+        : {}),
       ...(event?.type === "attachment_uploaded" &&
       typeof attachmentId === "string" &&
       state.attachments.some(
@@ -552,7 +560,15 @@ export function cardDetail(
       ...webRunAuthorView(state, r.run_id),
     })),
     review_matrix,
-    decisions,
+    decisions: decisions.map((decision) => {
+      const schedule = autoMergeSchedule(state, decision.id);
+      return {
+        ...decision,
+        auto_merge: schedule.ok
+          ? { minutes: schedule.value.minutes, due_at: schedule.value.due_at }
+          : null,
+      };
+    }),
     human_actions,
     attachments: attachmentViews(state, card_id),
     // §8.4 关联区: decisions, related cards and the deliveries that carry a PR.
@@ -603,7 +619,11 @@ export function needsYou(state: CommandState, now: string) {
   );
   const data = result.data;
   const decisions = data.decisions.map((decision) => {
+    const schedule = autoMergeSchedule(state, decision.id);
     return {
+      auto_merge: schedule.ok
+        ? { minutes: schedule.value.minutes, due_at: schedule.value.due_at }
+        : null,
       ...webAuthorView(
         state,
         state.decisions.find((d) => d.id === decision.id)?.raised_by ??

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type {
@@ -35,7 +36,12 @@ import {
   writeAgentLaunch,
   writeAgentSentinel,
 } from "@cardigan/runtime-herdr";
-import type { Store } from "@cardigan/store";
+import {
+  beginLaunchAttempt,
+  finishBellAttempt,
+  type Store,
+  unfinishedBellAttempts,
+} from "@cardigan/store";
 import {
   applyCommand,
   issueAssignmentToken,
@@ -90,9 +96,13 @@ export interface LaunchRunInput {
   readonly actor: Actor;
   /** Set when the caller prepared a worktree (M2.5); otherwise the Assignment's. */
   readonly worktree?: PreparedWorktree | undefined;
+  /** CLI preparation runs only after its queued Run has been claimed. */
+  readonly prepare_worktree?: () => Promise<PreparedWorktree | undefined>;
   /** The doorbell (M3 §3.2); without it the M2 initial prompt is generated. */
   readonly first_prompt?: string | undefined;
   readonly replacement?: DispatchRunParams["replacement"];
+  /** Explicit assignment start can wake an existing idle business session. */
+  readonly reuse_session?: boolean;
 }
 
 export interface LaunchedRun {
@@ -188,6 +198,61 @@ export async function launchRun(
   host: LaunchHost,
   input: LaunchRunInput,
 ): Promise<LaunchedRun> {
+  if (!input.reuse_session) return launch(host, input);
+  // CLI starts share the Dispatcher's durable exclusion while the Run is
+  // still queued. Otherwise two starts could rotate tokens/provision at once.
+  const clock = host.clock ?? wallClock;
+  const attempt = host.store.uow.run((tx) => {
+    const run = tx.runs.get(input.project, input.run.id);
+    if (
+      run?.status !== "queued" ||
+      run.assignment_id !== input.assignment_id ||
+      unfinishedBellAttempts(host.store.database, input.project).some(
+        (a) => a.assignment_id === input.assignment_id,
+      )
+    )
+      throw new HostLaunchError(
+        "dispatch",
+        "Assignment delivery is in progress",
+      );
+    const at = clock.now();
+    const attempt = {
+      id: randomUUID(),
+      project_id: input.project,
+      assignment_id: input.assignment_id,
+      run_id: run.id,
+      notification_ids: [],
+      started_at: at,
+      // Startup can include the host's 30-minute Git transfer timeout.
+      lease_until: new Date(Date.parse(at) + 60 * 60_000).toISOString(),
+      finished_at: null,
+      outcome: null,
+    };
+    beginLaunchAttempt(host.store.database, attempt);
+    return attempt;
+  });
+  let sent = false;
+  try {
+    const result = await launch(host, input);
+    sent = true;
+    return result;
+  } finally {
+    host.store.uow.run(() =>
+      finishBellAttempt(
+        host.store.database,
+        input.project,
+        attempt.id,
+        sent ? "sent" : "failed",
+        clock.now(),
+      ),
+    );
+  }
+}
+
+async function launch(
+  host: LaunchHost,
+  input: LaunchRunInput,
+): Promise<LaunchedRun> {
   const clock = host.clock ?? wallClock;
   const execution: ExecutionConfig = host.execution ?? {
     mode: "local",
@@ -210,7 +275,7 @@ export async function launchRun(
   const current = host.store.uow.read((tx) =>
     tx.runs.get(project, input.run.id),
   );
-  if (current?.status !== "queued")
+  if (current?.status !== "queued" || current.assignment_id !== assignment.id)
     throw new HostLaunchError(
       "directory preparation",
       `Run ${input.run.id} is not queued`,
@@ -239,8 +304,85 @@ export async function launchRun(
     project,
     assignment.id,
   );
+  const prompt =
+    input.first_prompt ||
+    firstPrompt({
+      assignment_id: assignment.id,
+      run_id: current.id,
+      kind: current.kind,
+      ...(card ? { card_id: card.id } : {}),
+      ...(workItem ? { work_item_id: workItem.id } : {}),
+    });
   let worktree = input.worktree;
   let workDir = worktree?.path ?? assignment.worktree_path ?? runDir;
+  const prepare = () =>
+    input.prepare_worktree
+      ? input.prepare_worktree()
+      : prepareRoleWorktree(
+          { store: host.store, execution, runtime: host.runtime },
+          project,
+          assignment.id,
+        );
+  if (input.reuse_session && assignment.runtime_ref) {
+    const observed = await host.runtime.status(assignment.runtime_ref);
+    if (observed.ok && observed.value.process === "alive") {
+      const token = host.store.uow.run((tx) =>
+        tx
+          .tokensForAssignment(project, assignment.id)
+          .findLast((t) => t.revoked_at === null),
+      );
+      if (!token)
+        throw new HostLaunchError(
+          "dispatch",
+          "Live session has no active token",
+        );
+      // Claim through the state machine before touching Git or waking. A
+      // concurrent start must fail without rotating this session's credentials.
+      const run = applyCommand(host.store, {
+        project,
+        actor: input.actor,
+        clock,
+        reduce: (state, actor, ports) =>
+          dispatchRun(state, actor, { run_id: current.id }, ports),
+      });
+      try {
+        worktree ??= await prepare();
+        const result = await host.runtime.wake(
+          assignment.runtime_ref,
+          [prompt, worktreeBaselinePrompt(worktree)].filter(Boolean).join("\n"),
+        );
+        if (!result.ok || !result.value.sent)
+          throw new Error("Session wake failed; delivery may have occurred");
+      } catch (error) {
+        // A failed wake does not prove non-delivery (§6.8). Keep the dispatched
+        // Run and credentials so a late MCP acknowledgement remains valid.
+        throw new HostLaunchError("dispatch", messageOf(error), {
+          cause: error,
+        });
+      }
+      return {
+        assignment: launchEntities(host.store, project, assignment.id)
+          .assignment,
+        run,
+        runtime_ref: assignment.runtime_ref,
+        run_dir: runDir,
+        work_dir: worktree?.path ?? workDir,
+        ...(worktree ? { worktree_path: worktree.path } : {}),
+        token_id: token.id,
+      };
+    }
+    if (
+      (observed.ok && observed.value.process === "unknown") ||
+      (!observed.ok &&
+        !["runtime_not_found", "runtime_unavailable"].includes(
+          observed.error.code,
+        ))
+    )
+      throw new HostLaunchError(
+        "dispatch",
+        "Cannot determine session liveness",
+      );
+  }
   const agentName = agentNameFor({
     role_id: role.role_id,
     project_id: project,
@@ -258,11 +400,7 @@ export async function launchRun(
 
     // The Dispatcher passes no worktree: the host prepares what the Role needs
     // (a writer's branch, or a readonly reviewer at the current delivery).
-    worktree ??= await prepareRoleWorktree(
-      { store: host.store, execution, runtime: host.runtime },
-      project,
-      assignment.id,
-    );
+    worktree ??= await prepare();
     workDir = worktree?.path ?? workDir;
 
     step = "token issuance";
@@ -318,15 +456,7 @@ export async function launchRun(
         : { repository_root: join(repositoriesRoot, project) }),
       // The merged bell is the first prompt when the caller has one (M3 §3.2).
       first_prompt: [
-        input.first_prompt ||
-          firstPrompt({
-            assignment_id: assignment.id,
-            run_id: input.run.id,
-            ...(card?.id === undefined ? {} : { card_id: card.id }),
-            ...(workItem?.id === undefined
-              ? {}
-              : { work_item_id: workItem.id }),
-          }),
+        prompt,
         standingModeLine(currentAssignment, standingModeOf(currentAssignment)),
         worktreeBaselinePrompt(worktree),
       ]

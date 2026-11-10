@@ -35,6 +35,7 @@ import type {
   TimelineEntryId,
   WorkItemId,
 } from "./ids.js";
+import type { ProjectPreferences } from "./preferences.js";
 import type { CardTemplate } from "./templates.js";
 
 export type { Clock } from "./clock.js";
@@ -75,6 +76,7 @@ export interface EventRepository {
   ): readonly Event[];
 }
 export interface Repositories {
+  readonly project_preferences: Repository<ProjectPreferences, ProjectId>;
   readonly card_templates: Repository<
     CardTemplate,
     Pick<CardTemplate, "id" | "version">

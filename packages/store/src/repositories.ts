@@ -26,6 +26,8 @@ import type {
   HumanActionId,
   Machine,
   MachineId,
+  ProjectId,
+  ProjectPreferences,
   Repositories,
   Repository,
   Review,
@@ -51,6 +53,7 @@ export type ReadEventRepository = Pick<EventRepository, "listAfter">;
 
 /** Everything `uow.read` hands to its callback. */
 export interface ReadRepositories extends ReadGlobalRepositories {
+  readonly project_preferences: ReadRepository<ProjectPreferences, ProjectId>;
   readonly card_templates: ReadRepository<
     CardTemplate,
     Pick<CardTemplate, "id" | "version">
@@ -291,6 +294,7 @@ export function createReadRepositories(db: DatabaseSync): ReadRepositories {
 
 function create(db: DatabaseSync, mode: "read" | "write"): Repositories {
   return {
+    project_preferences: preferenceRepository(db, mode),
     card_templates: templateRepository(db, mode),
     cards: jsonRepository<Card, CardId>(db, cardSpec, mode),
     work_items: jsonRepository<WorkItem, WorkItemId>(db, workItemSpec, mode),
@@ -369,4 +373,35 @@ function templateRepository(
     get: (project, key) =>
       repository.get(project, { template_id: key.id, version: key.version }),
   };
+}
+
+function preferenceRepository(
+  db: DatabaseSync,
+  mode: "read" | "write",
+): Repository<ProjectPreferences, ProjectId> {
+  // Historical migration fixtures deliberately open older schemas.
+  if (
+    !db
+      .prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'project_preferences'",
+      )
+      .get()
+  )
+    return {
+      get: () => undefined,
+      list: () => [],
+      put: () => {
+        throw new Error("Project preferences migration is required");
+      },
+    };
+  return jsonRepository(
+    db,
+    {
+      table: "project_preferences",
+      key: ["id"],
+      columns: ["id"],
+      values: (p: ProjectPreferences) => [p.id],
+    },
+    mode,
+  );
 }

@@ -14,8 +14,11 @@ import {
   requestHumanAction,
   requestWorktreeCleanup,
 } from "@cardigan/domain";
-import { afterEach, beforeEach, expect, test } from "vitest";
+import { parseLaunchConfig } from "@cardigan/roles";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { type M4Cross, m4Cross } from "../../test-support/m4-cross.js";
+import { Dispatcher } from "../dispatch.js";
+import { startQueuedRun } from "../host-start.js";
 import { resolveWebConfig } from "./config.js";
 import { HttpRejection } from "./http.js";
 import { type RunningWebServer, startWebServer } from "./server.js";
@@ -928,7 +931,7 @@ test("K2 cannot supersede an unfinished card", async () => {
   expect(snapshot()).toBe(before);
 });
 
-test("human comments parse Chinese and spaced employee names on the server", async () => {
+test("Workbench body mentions use the shared parser for IDs, roles and employee names", async () => {
   s.store().uow.run((tx) =>
     tx.employees.put({
       id: "E-1",
@@ -944,14 +947,19 @@ test("human comments parse Chinese and spaced employee names on the server", asy
     }),
   );
   const response = await request(cardPath("comments"), {
-    body: "请 @诸葛亮　mARY 检查",
+    body: `请 @${s.primary.owner.id}、@${s.primary.owner.work_item_id}、@coder 和 @诸葛亮　mARY 检查`,
     mentions: [],
   });
   expect(response).toMatchObject({
     status: 200,
     body: {
       author: "human",
-      mentions: ["@诸葛亮 Mary"],
+      mentions: [
+        `@${s.primary.owner.id}`,
+        `@${s.primary.owner.work_item_id}`,
+        "@coder",
+        "@诸葛亮 Mary",
+      ],
     },
   });
 });
@@ -1035,6 +1043,104 @@ test.each([false, true])(
     // A second request without the original key fails and rolls back its attempted increment.
     expect((await request(resolvePath(q), payload)).status).toBe(409);
     expect(snapshot()).toBe(before);
+  },
+);
+
+test.each(["alive", "exited"] as const)(
+  "raise_limit dispatches the same queued recovery Run on an %s session after its trigger was ACKed",
+  async (process) => {
+    const q = await reviewLimit();
+    const reviewer = s.primary.verifier;
+    expect(
+      (await request(resolvePath(q), { option: "raise_limit" })).status,
+    ).toBe(200);
+    const queued = s
+      .state()
+      .runs.find(
+        (r) => r.assignment_id === reviewer.id && r.status === "queued",
+      );
+    if (!queued) throw new Error("Missing queued recovery Run");
+    expect(queued.kind).toBe("decision_resumed");
+    // An idle Agent can read/ACK the decision before the Dispatcher gets to
+    // it. Subsequent pending instructions must still start the queued work.
+    await s.call(reviewer, "ack_events", {
+      card_id: s.card.id,
+      up_to_seq: s
+        .store()
+        .getUpdates({ project_id: s.project.project_id, card_id: s.card.id })
+        .latest_seq,
+    });
+    expect(
+      (
+        await request(cardPath("comments"), {
+          work_item_id: reviewer.work_item_id,
+          body: "继续审核",
+        })
+      ).status,
+    ).toBe(200);
+    const count = s.state().runs.length;
+    const startRun = vi.fn(
+      async (input: Parameters<typeof startQueuedRun>[1]) =>
+        startQueuedRun(
+          {
+            store: s.store(),
+            runtime: s.runtime,
+            launch: {
+              config: parseLaunchConfig({
+                profiles: {
+                  fixture: { harness: "pi", model: "fixture-model" },
+                },
+              }),
+              secrets: {},
+            },
+            dataDir: s.dataDir,
+            mcpUrl: s.url(),
+          },
+          input,
+        ),
+    );
+    const dispatcher = new Dispatcher({
+      store: s.store(),
+      runtime: {
+        ...s.runtime,
+        status: async () => ({
+          ok: true,
+          value: { process, agent: "idle", observed_seq: 2 },
+        }),
+      },
+      snapshot: async () => ({
+        model: "fixture-model",
+        agent_cli_version: "fixture-1",
+      }),
+      startRun,
+    });
+    await dispatcher.tick();
+    expect(s.state().runs.find((r) => r.id === queued.id)?.status).toBe(
+      "dispatched",
+    );
+    await s.call(reviewer, "whoami");
+    await dispatcher.tick();
+    expect(s.state().runs).toHaveLength(count);
+    expect(s.state().runs.find((r) => r.id === queued.id)).toMatchObject({
+      status: "running",
+      kind: "decision_resumed",
+      trigger_event_id: queued.trigger_event_id,
+    });
+    expect(
+      s.store().listNotifications({
+        project_id: s.project.project_id,
+        assignment_id: reviewer.id,
+      }),
+    ).toContainEqual(
+      expect.objectContaining({
+        run_id: queued.id,
+        status: "belled",
+        attempts: 1,
+      }),
+    );
+    expect(startRun).toHaveBeenCalledTimes(process === "exited" ? 1 : 0);
+    if (process === "alive")
+      expect(s.bells.at(-1)?.text).toContain(`run=${queued.id}`);
   },
 );
 
