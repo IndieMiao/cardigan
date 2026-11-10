@@ -4,6 +4,7 @@ import {
   fireEvent,
   render,
   screen,
+  waitFor,
   within,
 } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
@@ -203,6 +204,65 @@ test("execution shows working assignments in a table and expands the newest Run,
   expect(
     screen.getByText("cardigan assignment stop 'A-1' --project 'p-1'"),
   ).toBeTruthy();
+});
+
+test("execution copies observe by default and reveals warned interactive access only on expansion", async () => {
+  const writeText = vi.fn(async () => {});
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText },
+  });
+  render(
+    <ExecutionPage
+      client={fakeClient({
+        execution: async () => ({
+          assignments: [assignment],
+          runs: [],
+          machines: [],
+        }),
+      })}
+      projectId="p-1"
+    />,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "展开 A-1 详情" }));
+  const command = "cardigan assignment attach 'A-1' --project 'p-1'";
+  expect(screen.getByText(command)).toBeTruthy();
+  const observe = screen.getByRole("button", {
+    name: "复制在 Herdr 中打开（只看不动）",
+  });
+  const summary = screen.getByText("需要接管输入？");
+  const details = summary.closest("details") as HTMLDetailsElement;
+  expect(details.open).toBe(false);
+  expect(observe.closest("details")).toBeNull();
+  expect(
+    screen.getByRole("button", { name: "复制接管输入" }).closest("details"),
+  ).toBe(details);
+  expect(screen.queryByText("deploy/install-cli.sh")).toBeNull();
+  fireEvent.click(observe);
+  await waitFor(() => expect(writeText).toHaveBeenLastCalledWith(command));
+
+  fireEvent.click(summary);
+  expect(details.open).toBe(true);
+  const warning = within(details).getByText(
+    "你的输入会直接发给正在工作的 Agent，可能打断它",
+  );
+  const interactiveCommand = within(details).getByText(
+    `${command} --interactive`,
+  );
+  expect(warning.tagName).toBe("STRONG");
+  expect(
+    warning.compareDocumentPosition(interactiveCommand) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+  fireEvent.click(
+    within(details).getByRole("button", { name: "复制接管输入" }),
+  );
+  await waitFor(() =>
+    expect(writeText).toHaveBeenLastCalledWith(`${command} --interactive`),
+  );
+  expect(writeText).toHaveBeenCalledTimes(2);
+  fireEvent.click(summary);
+  expect(details.open).toBe(false);
 });
 
 test("execution keeps suspended assignments, lost runtimes and blocked Run outcomes prominent", async () => {

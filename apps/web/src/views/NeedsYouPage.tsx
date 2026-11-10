@@ -18,6 +18,7 @@ import {
 } from "../components/Foundation.js";
 import { MergeCheck } from "../components/MergeCheck.js";
 import {
+  AttachCommands,
   CardLink,
   CopyCommand,
   cliCommand,
@@ -720,9 +721,10 @@ function Incident({
           {incident.last_run.summary}
         </p>
       )}
-      <CopyCommand
+      <AttachCommands
         label="查看终端"
-        command={cliCommand(projectId, "assignment attach", incident.id)}
+        projectId={projectId}
+        assignmentId={incident.id}
       />
       <CopyCommand
         label="检查异常"
