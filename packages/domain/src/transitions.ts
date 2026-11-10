@@ -4,6 +4,7 @@ import type {
   CardStatus,
   DecisionStatus,
   DeliveryStatus,
+  EmployeeStatus,
   HumanActionStatus,
   NotificationStatus,
   ProduceStatus,
@@ -13,6 +14,7 @@ import type {
 } from "./states.js";
 
 interface MachineStates {
+  employee: EmployeeStatus;
   produce: ProduceStatus;
   verify: VerifyStatus;
   delivery: DeliveryStatus;
@@ -30,6 +32,10 @@ type Table<S extends string> = Readonly<
 export const transitionTables: {
   readonly [M in keyof MachineStates]: Table<MachineStates[M]>;
 } = {
+  employee: {
+    active: { deactivate: "inactive" },
+    inactive: { activate: "active" },
+  },
   produce: {
     todo: { dependencies_met: "ready", cancel: "cancelled" },
     ready: { run_started: "in_progress", cancel: "cancelled" },
