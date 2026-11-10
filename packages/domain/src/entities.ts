@@ -121,6 +121,7 @@ export interface Card {
   readonly created_at: Timestamp;
 }
 export interface CardView extends Card {
+  readonly merge_check?: MergeCheckView;
   /** Derived by `deriveWaitingOn` in `card-derived.ts`. */
   readonly waiting_on: readonly WaitingOnItem[];
   /** Derived by `deriveNextOwners` in `card-derived.ts`. */
@@ -134,6 +135,34 @@ export interface CardView extends Card {
     readonly verdict: ReviewVerdict | null;
   }[];
   readonly why: string;
+}
+export interface MergeCheckView {
+  readonly attempt_id: string;
+  readonly completion_id: DeliveryId;
+  readonly candidate_sha: string;
+  readonly tree_sha: string;
+  readonly status:
+    | "queued"
+    | "running"
+    | "passed"
+    | "failed"
+    | "timed_out"
+    | "interrupted";
+  readonly checks: readonly {
+    readonly name: string;
+    readonly status:
+      | "passed"
+      | "failed"
+      | "timed_out"
+      | "interrupted"
+      | "not_run";
+    readonly exit_code?: number | null;
+    readonly duration_ms?: number;
+  }[];
+  readonly summary?: string;
+  readonly log_ref?: string;
+  readonly updated_at: Timestamp;
+  readonly recheck_requested?: boolean;
 }
 interface WorkItemFields {
   readonly id: WorkItemId;

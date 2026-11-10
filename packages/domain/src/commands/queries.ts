@@ -12,6 +12,7 @@ import type {
 import type { CardId } from "../ids.js";
 import type { Clock } from "../ports.js";
 import { type CommandDraft, type CommandState, command } from "./core.js";
+import { latestMergeCheck } from "./merge-check.js";
 import { resolveCardTemplate } from "./templates.js";
 
 function affects(d: CommandDraft, q: Decision, id: CardId) {
@@ -48,6 +49,9 @@ function cardView(d: CommandDraft, id: CardId): CommandCardView {
     .filter((v) => v.kind === "card_completion" && v.status !== "superseded")
     .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
   const status = deriveCardStatus(card.status, items, completion);
+  const merge_check = completion
+    ? latestMergeCheck(d.state.events, id, completion.id)
+    : undefined;
   const fields = deriveCardFields({
     card,
     template: resolveCardTemplate(d, card),
@@ -64,6 +68,7 @@ function cardView(d: CommandDraft, id: CardId): CommandCardView {
     status,
     open_decisions: open.map((q) => q.id),
     review_matrix: deriveReviewMatrix(deliveries, items, d.list("reviews")),
+    ...(merge_check ? { merge_check } : {}),
     ...fields,
   };
 }

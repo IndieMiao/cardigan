@@ -28,6 +28,8 @@ export type CommandState = {
   readonly card_templates?: readonly CardTemplate[];
   readonly employees?: readonly Employee[];
   readonly employee_activity?: readonly EmployeeActivity[];
+  /** Loaded by the host from trusted configuration; never supplied by MCP callers. */
+  readonly project_settings?: { readonly merge_gate_enabled?: boolean };
   readonly roles: readonly E.RoleReference[];
   readonly events: readonly E.Event[];
   readonly timeline: readonly E.TimelineEntry[];
@@ -77,6 +79,8 @@ type CommandName =
   | "auto_confirm_merge"
   | "request_merge"
   | "record_merge_result"
+  | "record_merge_check"
+  | "recheck_merge"
   | "release_assignment"
   | "supersede_card"
   | "manage_templates"
@@ -159,8 +163,14 @@ export class CommandDraft {
     const systemOnly = [
       "auto_confirm_merge",
       "record_merge_result",
+      "record_merge_check",
       "request_worktree_cleanup",
     ].includes(tool);
+    ensure(
+      tool !== "recheck_merge" || actor.kind === "human",
+      "unauthorized",
+      "Only the human can request another merge check",
+    );
     ensure(
       !systemOnly || actor.kind === "system",
       "unauthorized",

@@ -13,7 +13,18 @@ export type {
 export * from "./commands/delivery.js";
 export * from "./commands/employee.js";
 export * from "./commands/launch.js";
-export { type MergePlan, mergePlan, requestMerge } from "./commands/merge.js";
+export {
+  type MergePlan,
+  mergePlan,
+  prepareMergePlan,
+  requestMerge,
+} from "./commands/merge.js";
+export {
+  hasPassedMergeCheck,
+  latestMergeCheck,
+  recheckMerge,
+  recordMergeCheck,
+} from "./commands/merge-check.js";
 export * from "./commands/merge-result.js";
 export * from "./commands/pm.js";
 export * from "./commands/preferences.js";

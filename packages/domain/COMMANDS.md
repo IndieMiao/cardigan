@@ -86,6 +86,13 @@ CLI 的 `cardigan card update <C-n> [--title <标题>] [--goal <目标>] [--acce
 - releaseAssignment({ assignment_id }) 允许人／常驻 PM Ops／system，无未结束 Run 才迁移两个 Assignment 状态并写 assignment_released。system 只自动释放闭卡的工作项 Assignment；PM Ops 只能释放 scope=work_item，常驻 Assignment 仅允许 human 释放；重复释放前也先校验这一权限。事件携带 token_id（非明文）、runtime_ref、worktree_path、branch；M4.4 沿用 M2 stop 方式撤销该 Assignment 的全部 Token 并释放终端，domain 不证明外部清理已完成。
 - requestWorktreeCleanup({ assignment_id, reason }) 只允许 system；要求已 released 且有工作目录，创建绑定 Assignment 的人类 keep/force_clean 决策。未决或已解决决定均复用，keep 不再重复询问。recordDecision 对此类决策开放 human 入口；不扩充 MCP 工具。
 
+## P2a-1a 合并检查
+
+- 主机加载命令状态时可提供 `project_settings.merge_gate_enabled`；MCP 参数不能配置该字段，未启用项目的原行为保持。
+- `prepareMergePlan` 仅忽略当前完成申请的合并确认，其他阻塞仍拒绝；正式 `mergePlan` 继续要求确认。启用闸门后，冲突／失败可以在确认前记录，成功必须满足确认及不变量 21。
+- `recordMergeCheck(state, system, input, ports)` 记录 queued／running／passed／failed／timed_out／interrupted，绑定 card、completion、attempt、candidate 和 tree。结束结果只接受一次，精确重放无事件；failed／timed_out 的同树重试必须先由人 `recheckMerge({card_id})`，中断可自动重排。每次重排使用全新 attempt，未结束检查不能并发替换。
+- `recordMergeResult(merged)` 在启用闸门时要求同完成申请、同 tree 的 passed 记录；`noop=true` 必须 merge_sha == previous_sha，由主机证明交付均已包含，不创建虚假的检查记录。`latestMergeCheck` 和 `hasPassedMergeCheck` 是无 IO 的事件投影。
+
 ## M5.2 人的操作与编号
 
 `issueInstruction(state, actor, {card_id, work_item_id, body}, ports)` 仅接受人或常驻 PM Ops（持久 standing_mode=ops），校验工具许可、同卡和未结束状态；closed/awaiting_merge 卡片不能下指令。输出 instruction_issued 事件及 instruction 时间线；不直接排 Run，复用 Router 指令规则。MCP 名称为 issue_instruction，复用幂等事务；Office、工作项 Assignment 不显示且不能调用。
