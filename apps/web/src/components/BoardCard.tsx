@@ -2,7 +2,7 @@ import type { MouseEvent, ReactNode } from "react";
 import type { CardListItem } from "../api.js";
 import type { CardDisplay } from "../card-display.js";
 import { routeHash } from "../route.js";
-import { nextOwnersLabel, statusLabel } from "../status.js";
+import { nextOwnersLabel } from "../status.js";
 import { ProduceOwners } from "./EmployeeIdentity.js";
 import { fullTime, StatusTag, Time } from "./Foundation.js";
 import { Tooltip } from "./Tooltip.js";
@@ -52,40 +52,6 @@ function ProgressPie({ completed, total }: CardListItem["progress"]) {
         />
       ) : null}
     </svg>
-  );
-}
-
-function CardPreview({ card }: { card: CardListItem }) {
-  return (
-    <div className="board-card-preview">
-      <strong>{card.title}</strong>
-      <span>负责角色：{card.roles.join("、") || "尚未配置"}</span>
-      <span>
-        进度：{card.progress.completed}/{card.progress.total}
-      </span>
-      {card.work_items?.length ? (
-        <ul>
-          {card.work_items.map((item) => (
-            <li key={item.id}>
-              {item.id} {item.title}：{statusLabel(item.status)}
-            </li>
-          ))}
-        </ul>
-      ) : (
-        <span>
-          {card.progress.total ? "工作项明细请打开卡片查看" : "尚无工作项"}
-        </span>
-      )}
-      <span>下一步：{nextOwnersLabel(card.next_owners)}</span>
-      <span>
-        等待与阻塞：
-        {card.waiting_on.length
-          ? card.waiting_on.map((item) => item.label).join("；")
-          : "无"}
-      </span>
-      <span>原因：{card.why}</span>
-      <span>更新时间：{fullTime(card.updated_at)}</span>
-    </div>
   );
 }
 
@@ -145,10 +111,7 @@ export function BoardCard({
     <div
       className={`card-tile board-card${blocked ? " card-tile-blocked" : waiting ? " card-tile-waiting" : ""}${superseded ? " card-superseded" : ""}`}
     >
-      <Tooltip
-        content={<CardPreview card={card} />}
-        className="board-card-tooltip"
-      >
+      <Tooltip content={card.title}>
         <a className="card-tile-link" href={href} onClick={openCard}>
           <span className="card-tile-head">
             {display.number && (
