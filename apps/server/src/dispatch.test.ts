@@ -1,5 +1,10 @@
 import type { Runtime } from "@cardigan/domain";
-import { dispatchRun, postComment } from "@cardigan/domain";
+import {
+  acknowledgeRun,
+  dispatchRun,
+  postComment,
+  queueRun,
+} from "@cardigan/domain";
 import {
   PROJECT_EVENT_STREAM,
   Store,
@@ -119,6 +124,57 @@ test("§3.1 an unfinished business Run holds notifications even if Runtime repor
   expect(ownNotes()[0]?.status).toBe("pending");
   expect(f.state().runs).toHaveLength(2);
 });
+test.each(
+  (["decision_resumed", "rework", "fix"] as const).flatMap((kind) =>
+    [true, false].map((live) => ({ kind, live })),
+  ),
+)(
+  "prequeued $kind starts (live=$live) even when its cause is not in the inbox",
+  async ({ kind, live }) => {
+    const run = f.apply((s, a, p) =>
+      queueRun(
+        s,
+        a,
+        {
+          assignment_id: target.assignment.id,
+          kind,
+          model: "session-model",
+          agent_cli_version: "session-cli",
+        },
+        p,
+      ),
+    );
+    comment("Continue the already queued work");
+    // The queue event is not a routed bell. Test both existing-session and
+    // host-start paths without allowing either path to manufacture a new Run.
+    vi.mocked(runtime.status).mockResolvedValue({
+      ok: true,
+      value: {
+        process: live ? "alive" : "exited",
+        agent: "idle",
+        observed_seq: 2,
+      },
+    });
+    await new Dispatcher(options).tick();
+    expect(f.state().runs.find((r) => r.id === run.id)?.status).toBe(
+      "dispatched",
+    );
+    f.apply(
+      (s, a, p) => acknowledgeRun(s, a, { run_id: run.id }, p),
+      f.actorFor(target.assignment),
+    );
+    await new Dispatcher(options).tick();
+    expect(f.state().runs).toHaveLength(2);
+    expect(f.state().runs.at(-1)).toMatchObject({ ...run, status: "running" });
+    expect(ownNotes()[0]).toMatchObject({
+      run_id: run.id,
+      status: "belled",
+      attempts: 1,
+    });
+    expect(ownNotes()[0]?.event_id).not.toBe(run.trigger_event_id);
+    expect(live ? runtime.wake : options.startRun).toHaveBeenCalledOnce();
+  },
+);
 test("§3.1 exited terminal starts exactly the queued Run with the merged bell as its first prompt", async () => {
   comment();
   vi.mocked(runtime.status).mockResolvedValue({
