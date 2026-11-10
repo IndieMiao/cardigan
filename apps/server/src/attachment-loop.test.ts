@@ -143,25 +143,58 @@ test("removes an unreferenced blob once it is older than the grace period", asyn
   expect(messages[0]).not.toContain(orphan);
 });
 
-test("re-checks references inside the transaction right before deleting", async () => {
+test("an upload that records the blob before the delete wins", async () => {
   const f = fixture();
   const rescued = digest("2");
   const path = blob(f.directory, rescued, 2 * DAY);
-  let reads = 0;
-  // Second read = the pre-delete confirmation: the upload records its blob then.
+  let hooked = false;
+  // First write transaction is the deletion: an upload commits its record then.
   const store: Pick<Store, "listProjects" | "uow"> = {
     listProjects: () => f.store.listProjects(),
     uow: {
-      read: (operation) => {
-        reads += 1;
-        if (reads === 2) record(f.store, "F-late", rescued);
-        return f.store.uow.read(operation);
+      read: (operation) => f.store.uow.read(operation),
+      run: async (operation) => {
+        if (!hooked) {
+          hooked = true;
+          record(f.store, "F-late", rescued);
+        }
+        return f.store.uow.run(operation);
       },
-      run: (operation) => f.store.uow.run(operation),
     } as Store["uow"],
   };
   const result = await sweep({ dataDir: f.dataDir, store });
-  expect(reads).toBeGreaterThanOrEqual(2);
+  expect(hooked).toBe(true);
+  expect(result.deleted).toEqual([]);
+  expect(existsSync(path)).toBe(true);
+});
+
+test("a reuse upload between selection and deletion refreshes the grace period", async () => {
+  const f = fixture();
+  const reused = digest("9");
+  const path = blob(f.directory, reused, 2 * DAY);
+  let hooked = false;
+  const store: Pick<Store, "listProjects" | "uow"> = {
+    listProjects: () => f.store.listProjects(),
+    uow: {
+      read: (operation) => f.store.uow.read(operation),
+      run: async (operation) => {
+        if (!hooked) {
+          hooked = true;
+          // Exactly what `put()` does when it reuses an existing blob: refresh
+          // the mtime (packages/mcp-server/src/attachments.test.ts covers that)
+          // and then record the attachment.
+          const fresh = new Date();
+          utimesSync(path, fresh, fresh);
+        }
+        return f.store.uow.run(operation);
+      },
+    } as Store["uow"],
+  };
+  const result = await sweep({ dataDir: f.dataDir, store });
+  expect(hooked).toBe(true);
+  // The blob was a candidate, but the reuse made it young again before the
+  // deletion transaction re-read its age.
+  expect(result.candidates).toBe(1);
   expect(result.deleted).toEqual([]);
   expect(existsSync(path)).toBe(true);
 });

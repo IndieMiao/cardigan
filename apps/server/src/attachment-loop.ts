@@ -1,5 +1,6 @@
 import type { Dirent, Stats } from "node:fs";
-import { lstat, readdir, unlink } from "node:fs/promises";
+import { lstatSync, unlinkSync } from "node:fs";
+import { lstat, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { Clock } from "@cardigan/domain";
 import type { Store } from "@cardigan/store";
@@ -88,18 +89,46 @@ export class AttachmentGc {
     return digests;
   }
 
-  /** Confirmation read for one digest, taken right before its unlink (§9.3). */
-  private referencedNow(digest: string): boolean {
-    for (const project of this.options.store.listProjects())
-      if (
-        this.options.store.uow.read((tx) =>
+  /**
+   * Delete one candidate inside a write transaction (§9.3).
+   *
+   * `BEGIN IMMEDIATE` blocks every other writer, so an upload cannot record a
+   * reference between this check and the unlink, and a blob reused meanwhile
+   * carries a fresh mtime that fails the grace-period test.
+   */
+  private async removeIfStillOrphaned(
+    digest: string,
+    grace: number,
+  ): Promise<boolean> {
+    const path = join(this.directory, digest);
+    const removed = await this.options.store.uow.run((tx) => {
+      let stats: Stats;
+      try {
+        stats = lstatSync(path);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+        throw error;
+      }
+      // Re-read the type and age under the write lock: a swap for a symlink or
+      // a reuse (which refreshes mtime) must both stop the deletion.
+      if (!stats.isFile()) return false;
+      if (Date.parse(this.clock.now()) - stats.mtimeMs < grace) return false;
+      for (const project of this.options.store.listProjects())
+        if (
           tx.attachments
             .list(project.id)
-            .some((attachment) => attachment.sha256 === digest),
+            .some((attachment) => attachment.sha256 === digest)
         )
-      )
-        return true;
-    return false;
+          return false;
+      try {
+        unlinkSync(path);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+        throw error;
+      }
+      return true;
+    });
+    return Boolean(removed);
   }
 
   private async sweep(): Promise<AttachmentSweep> {
@@ -146,16 +175,9 @@ export class AttachmentGc {
 
     const deleted: string[] = [];
     for (const candidate of candidates.slice(0, limit)) {
-      // §9.3: confirm inside a transaction right before removing the blob, so an
-      // attachment recorded after the scan is never orphaned.
-      if (this.referencedNow(candidate.digest)) continue;
-      try {
-        await unlink(join(this.directory, candidate.digest));
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
-        throw error;
-      }
-      deleted.push(candidate.digest);
+      // Deletion re-checks type, age and references under a write lock (§9.3).
+      const removed = await this.removeIfStillOrphaned(candidate.digest, grace);
+      if (removed) deleted.push(candidate.digest);
     }
     const truncated = candidates.length > limit;
     if (deleted.length > 0 || truncated)
