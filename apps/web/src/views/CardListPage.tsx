@@ -256,7 +256,10 @@ export function CardListPage({
     (card) => card.id === openCardId,
   );
   return (
-    <section className="cards-page" aria-label="卡片">
+    <section
+      className={`cards-page${view === "board" ? " cards-page-board" : ""}`}
+      aria-label="卡片"
+    >
       <PageTitle
         title={
           <span className="cards-title">
@@ -438,6 +441,12 @@ export function CardListPage({
       {state.kind === "ready" &&
         (view === "board" ? (
           <Board
+            resetKey={JSON.stringify([
+              projectId,
+              ...["status", "overview", "next", "role", "q", "sort"].map(
+                (key) => filters[key] ?? "",
+              ),
+            ])}
             cards={cards}
             projectId={projectId}
             expanded={filters.expanded ?? ""}

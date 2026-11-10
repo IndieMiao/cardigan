@@ -520,16 +520,33 @@ button.quiet,
   gap: 6px;
 }
 
+.content:has(.cards-page-board) {
+  padding: calc(var(--gap) * 2);
+}
+.cards-page-board {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  height: calc(100dvh - var(--gap) * 4);
+}
+.cards-page-board > :not(.board-scroll) {
+  flex-shrink: 0;
+}
 .board-scroll {
   position: relative;
   min-width: 0;
+  width: 100%;
+  flex: 1;
+  min-height: calc(var(--gap) * 12);
 }
 /* U6a: one row of fixed-width columns; only the board scrolls sideways. */
 .board {
   display: flex;
   flex-wrap: nowrap;
   gap: var(--gap);
-  align-items: flex-start;
+  align-items: stretch;
+  height: 100%;
+  max-width: 100%;
   overflow-x: auto;
   overflow-y: hidden;
   padding-bottom: 10px;
@@ -562,11 +579,15 @@ button.quiet,
 .board-column {
   flex: 0 0 280px;
   width: 280px;
+  min-width: 280px;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   background: var(--surface-muted);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 10px;
-  min-height: 120px;
 }
 .board-column-collapsed {
   flex: 0 0 48px;
@@ -591,6 +612,7 @@ button.quiet,
 
 .board-column-title {
   display: flex;
+  flex-shrink: 0;
   align-items: center;
   justify-content: space-between;
   margin: 0 0 8px;
@@ -605,6 +627,25 @@ button.quiet,
   margin: 0;
   color: var(--text-muted);
   font-size: var(--text-xs);
+}
+
+.board-lane-cards {
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior-y: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--text-muted) transparent;
+}
+.board-load-more {
+  width: 100%;
+  margin-top: var(--gap);
+}
+.board-lane-total {
+  margin: var(--gap) 0 0;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  text-align: center;
 }
 
 .board-list {
@@ -2329,13 +2370,21 @@ body[data-lightbox="open"] .drawer-overlay {
 }
 
 .cards-page .filter-bar .filter-controls {
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
 }
 .cards-page .filter-custom {
   display: flex;
   align-items: end;
+}
+.cards-page-board .filter-custom {
+  min-width: 0;
+  max-width: 100%;
+}
+.cards-page-board :is(.filter-select-trigger, .multiselect-trigger) {
+  max-width: 100%;
+  white-space: normal;
 }
 .cards-page .filter-custom-grow {
   flex: 1 1 220px;
@@ -2363,6 +2412,38 @@ body[data-lightbox="open"] .drawer-overlay {
 }
 .cards-page .filter-controls select {
   min-height: 34px;
+}
+
+/* The board keeps its own width and scrolling when the sidebar moves above it. */
+@media (max-width: 760px) {
+  .app:has(.cards-page-board) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .app:has(.cards-page-board) .sidebar {
+    position: static;
+    width: auto;
+    min-width: 0;
+    padding: var(--gap);
+    gap: var(--gap);
+  }
+  .app:has(.cards-page-board) :is(.nav, .nav-group, .sidebar-footer) {
+    display: flex;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--gap);
+  }
+  .content:has(.cards-page-board) {
+    grid-column: 1;
+    padding: var(--gap);
+  }
+  .cards-page-board {
+    height: calc(100dvh - var(--gap) * 2);
+  }
+  .cards-page-board .page-title {
+    flex-wrap: wrap;
+    gap: var(--gap);
+  }
 }
 .card-tile-head .status {
   margin-left: auto;
