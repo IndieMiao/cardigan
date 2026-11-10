@@ -307,6 +307,7 @@ export async function launchRun(
         worktree: role.worktree,
       },
       launch: host.launch.config,
+      agent_nice: execution.agentNice ?? 10,
       mcp: { url: host.mcpUrl },
       run_dir: runDir,
       work_dir: workDir,

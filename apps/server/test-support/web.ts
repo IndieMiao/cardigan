@@ -32,6 +32,7 @@ export interface WebHarness {
 }
 
 export interface HarnessOptions {
+  readonly log?: (event: Readonly<Record<string, unknown>>) => void;
   readonly env?: WebEnv;
   readonly overrides?: WebConfigOverrides;
   readonly password?: string;
@@ -65,6 +66,7 @@ export async function webHarness(
     store.setWebPassword(options.password);
   }
   const server = await startWebServer({
+    log: options.log ?? (() => undefined),
     store,
     dataDir,
     config: resolveWebConfig(options.env, {

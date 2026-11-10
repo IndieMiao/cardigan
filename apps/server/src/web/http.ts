@@ -45,6 +45,26 @@ export const MAX_JSON_BODY_BYTES = 64 * 1024;
 /** Session cookie name (§3.2). */
 export const SESSION_COOKIE = "cardigan_session";
 
+/** Fixed templates only: neither identifiers nor query strings reach logs. */
+export function requestRoute(path: string): string {
+  if (/^\/api\/(login|logout|session|me|projects)$/.test(path)) return path;
+  const project = /^\/api\/projects\/[^/]+(\/.*)$/.exec(path);
+  const rest = project?.[1];
+  if (rest) {
+    const prefix = "/api/projects/:project_id";
+    if (/^\/(cards|needs-you|snapshot|execution|activity|stream)$/.test(rest))
+      return prefix + rest;
+    const entity = /^\/(cards|attachments)\/[^/]+$/.exec(rest);
+    if (entity) return `${prefix}/${entity[1]}/:id`;
+    const write =
+      /^\/(cards|decisions|human-actions)\/[^/]+\/(comments|instructions|attachments|resolve|complete|update|cancel|supersede)$/.exec(
+        rest,
+      );
+    if (write) return `${prefix}/${write[1]}/:id/${write[2]}`;
+  }
+  return path.startsWith("/api") ? "unmatched" : "/static/*";
+}
+
 export interface ErrorBody {
   readonly error: {
     readonly code: string;

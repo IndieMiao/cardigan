@@ -88,6 +88,8 @@ export interface CompileAssignmentInput {
   readonly first_prompt: string;
   /** Values from `secrets.env`, keyed by secret name. */
   readonly secrets: Readonly<Record<string, string>>;
+  /** CPU niceness increment for the Agent and its children; defaults to 10. */
+  readonly agent_nice?: number;
 }
 
 export interface CompiledAssignmentLaunch {
@@ -122,6 +124,9 @@ export interface CompiledAssignmentLaunch {
 export function compileAssignmentLaunch(
   input: CompileAssignmentInput,
 ): CompiledAssignmentLaunch {
+  const agentNice = input.agent_nice ?? 10;
+  if (!Number.isInteger(agentNice) || agentNice < 0 || agentNice > 19)
+    throw new Error("Agent niceness must be an integer from 0 to 19");
   const identity = employeeIdentityPrompt(input.employee?.identity);
   const corePrompt =
     identity === undefined
@@ -364,6 +369,7 @@ export function compileAssignmentLaunch(
       {
         path: launchScript,
         content: launchScriptContent({
+          agentNice,
           tokenFile,
           firstPromptFile: firstFile,
           startFile,
@@ -467,6 +473,7 @@ function codexConfig(
  * pass through unchanged. The token is never written into this script.
  */
 function launchScriptContent(options: {
+  readonly agentNice: number;
   readonly tokenFile: string;
   readonly firstPromptFile: string;
   readonly startFile: string;
@@ -565,7 +572,7 @@ while [ ! -f "$start_file" ]; do
   waited=$((waited + 1))
 done
 rm -f "$start_file"
-${claudeConfig}exec ${quote(options.command)}${args ? ` ${args}` : ""} "$first_message"
+${claudeConfig}exec nice -n ${options.agentNice} ${quote(options.command)}${args ? ` ${args}` : ""} "$first_message"
 `;
 }
 
