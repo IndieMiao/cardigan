@@ -477,7 +477,8 @@ test("U09 §3.7: a failed comment keeps its draft and queued image, then retry w
     },
   });
   fireEvent.click(screen.getByRole("button", { name: /^发表|^发送|提交评论/ }));
-  expect(textOf(await screen.findByRole("alert"))).toContain("Try again");
+  expect(textOf(await screen.findByRole("alert"))).toContain("服务暂时异常");
+  expect(textOf(screen.getByRole("alert"))).toContain("可能已经成功");
   expect((input as HTMLTextAreaElement).value).toBe("Keep this draft");
   expect(screen.getByText(/retry.png/)).toBeTruthy();
   expect(f.state().attachments).toHaveLength(0);
@@ -488,6 +489,81 @@ test("U09 §3.7: a failed comment keeps its draft and queued image, then retry w
     f.state().timeline.filter((e) => e.body === "Keep this draft"),
   ).toHaveLength(1);
 });
+
+test.each([false, true])(
+  "C-20: lost comment response, edited retry and fresh submission recover without remounting (drawer=%s)",
+  async (inDrawer) => {
+    await f.loginBrowser();
+    const old = await f.client.addComment(project(), f.card.id, {
+      body: "之前的评论",
+    });
+    const addComment = vi
+      .fn<CardiganClient["addComment"]>()
+      .mockImplementation(async (...args) => {
+        const receipt = await f.client.addComment(...args);
+        if (addComment.mock.calls.length === 1)
+          throw new DOMException("Response lost after commit", "TimeoutError");
+        return receipt;
+      });
+    const read = vi
+      .fn<CardiganClient["card"]>()
+      .mockImplementation((...args) => f.client.card(...args));
+    render(
+      <CardDetailPage
+        client={decorate(f.client, { addComment, card: read })}
+        projectId={project()}
+        cardId={f.card.id}
+        inDrawer={inDrawer}
+        anchor={`entry-${old.id}`}
+      />,
+    );
+    const input = (await screen.findByLabelText(
+      "评论正文",
+    )) as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "最初评论" } });
+    fireEvent.click(screen.getByRole("button", { name: "发表评论" }));
+    expect(textOf(await screen.findByRole("alert"))).toContain("可能已经成功");
+    expect(
+      screen.queryByText("最初评论", { selector: ".timeline-records p" }),
+    ).toBeNull();
+    fireEvent.change(input, { target: { value: "编辑后的评论" } });
+    fireEvent.click(screen.getByRole("button", { name: "发表评论" }));
+    await screen.findByText(/上一次的评论已经发表/u);
+    await screen.findByText("最初评论", { selector: ".timeline-records p" });
+    expect(textOf(screen.getByRole("alert"))).not.toContain("可能已经成功");
+    expect(input.value).toBe("编辑后的评论");
+    expect(read.mock.calls.at(-1)?.[2]?.at).toBeUndefined();
+    expect(addComment).toHaveBeenCalledTimes(2);
+    expect(
+      f.state().timeline.filter((entry) => entry.body === "编辑后的评论"),
+    ).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: "发表评论" }));
+    await waitFor(() => expect(input.value).toBe(""));
+    await screen.findByText("编辑后的评论", {
+      selector: ".timeline-records p",
+    });
+    expect(
+      screen.getAllByText("最初评论", { selector: ".timeline-records p" }),
+    ).toHaveLength(1);
+    for (const body of ["最初评论", "编辑后的评论"]) {
+      expect(
+        f.state().timeline.filter((entry) => entry.body === body),
+      ).toHaveLength(1);
+      expect(
+        f
+          .state()
+          .events.filter(
+            (event) =>
+              event.type === "comment_posted" && event.payload.body === body,
+          ),
+      ).toHaveLength(1);
+    }
+    const keys = addComment.mock.calls.map((args) => args[3]);
+    expect(keys[0]).toMatch(/^[0-9a-f-]{36}$/u);
+    expect(keys[1]).toBe(keys[0]);
+    expect(keys[2]).not.toBe(keys[0]);
+  },
+);
 
 test("U10 §8.1: an authenticated fresh Workbench explains its empty project list", async () => {
   await f.close();

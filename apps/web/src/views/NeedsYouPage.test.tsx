@@ -12,6 +12,7 @@ import { afterEach, expect, test, vi } from "vitest";
 import { App } from "../App.js";
 import type { NeedsDecision, NeedsPage } from "../api.js";
 import { fakeClient } from "../testing/fixtures.js";
+import { writeFailures } from "../testing/write-errors.js";
 import { NeedsYouPage } from "./NeedsYouPage.js";
 
 const q = (overrides: Partial<NeedsDecision> = {}): NeedsDecision => ({
@@ -97,6 +98,48 @@ afterEach(() => {
   vi.useRealTimers();
   window.location.hash = "";
 });
+
+test.each(
+  writeFailures.flatMap((failure) =>
+    ["decision", "comment", "action"].map((operation) => ({
+      ...failure,
+      operation,
+    })),
+  ),
+)(
+  "$operation shows the right write failure for $label",
+  async ({ operation, error, uncertain, reason }) => {
+    const fail = async () => {
+      throw error;
+    };
+    render(
+      <NeedsYouPage
+        client={fakeClient({
+          needsYou: async () => page([q({ trigger: null })]),
+          recordDecision: fail,
+          decisionComment: fail,
+          completeAction: fail,
+        })}
+        projectId="p-1"
+      />,
+    );
+    await screen.findByRole("article", { name: "执行 h(1)" });
+    if (operation === "action") {
+      fireEvent.change(screen.getByLabelText("h(1) 执行结果"), {
+        target: { value: "已完成" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "确认已完成" }));
+    } else if (operation === "comment") {
+      fireEvent.click(screen.getByRole("button", { name: "要求补充信息" }));
+    } else {
+      fireEvent.click(screen.getByRole("radio", { name: /合并/u }));
+      fireEvent.click(screen.getByRole("button", { name: "按所选拍板" }));
+    }
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent?.includes("可能已经成功")).toBe(uncertain);
+    expect(alert.textContent).toContain(reason);
+  },
+);
 
 test("groups runtime incidents, blocking decisions, merge confirmations, other decisions and actions in order", async () => {
   const data = page([

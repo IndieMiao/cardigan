@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type CardiganClient,
-  describeError,
+  describeWriteError,
   type MergeConfirmationReview,
   type NeedsAction,
   type NeedsDecision,
@@ -66,7 +66,7 @@ function useAction(done: () => void) {
         setMessage("已提交");
         done();
       } catch (e) {
-        setError(describeError(e));
+        setError(describeWriteError(e));
       } finally {
         sending.current = false;
         setBusy(false);

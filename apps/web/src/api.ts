@@ -854,3 +854,41 @@ export function describeError(error: unknown): string {
   }
   return error instanceof Error ? error.message : String(error);
 }
+
+/** Only transport failures and 5xx responses leave a write's outcome uncertain. */
+export function describeWriteError(
+  error: unknown,
+  uncertainMessage = "操作可能已经成功，保留原内容重试不会重复提交。",
+): string {
+  const interrupted =
+    (error instanceof Error || error instanceof DOMException) &&
+    ["TimeoutError", "AbortError", "NetworkError"].includes(error.name);
+  const uncertain =
+    error instanceof ApiError
+      ? error.status >= 500 && error.status < 600
+      : error instanceof TypeError || interrupted;
+  let reason = describeError(error);
+  if (interrupted) {
+    reason = error.name === "TimeoutError" ? "请求超时。" : "请求连接已中断。";
+  } else if (
+    error instanceof ApiError &&
+    error.status !== 401 &&
+    error.status !== 403 &&
+    error.status !== 429 &&
+    !/\p{Script=Han}/u.test(error.message)
+  ) {
+    const reasons: Record<string, string> = {
+      validation_failed: "填写的内容不符合要求，请检查后重试。",
+      illegal_transition: "当前状态不允许此操作，请刷新后确认。",
+      invariant_violation: "此操作不符合业务约束，请刷新后确认。",
+      stale_target: "操作目标已有新版本，请刷新后确认。",
+      not_found: "操作目标不存在，请核对后重试。",
+      idempotency_conflict:
+        "上一次请求已成功，但内容与本次不同，请核对后再提交。",
+    };
+    reason =
+      reasons[error.code] ??
+      (uncertain ? "服务暂时异常。" : "请求被拒绝，请检查填写内容和当前状态。");
+  }
+  return uncertain ? `${reason} ${uncertainMessage}` : reason;
+}
