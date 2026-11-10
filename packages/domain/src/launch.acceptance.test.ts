@@ -107,6 +107,7 @@ const roles: readonly RoleReference[] = [
     role_id: "pm",
     role_version: 1,
     allowed_tools: [
+      "submit_review",
       "create_card",
       "create_work_item",
       "update_work_item",
@@ -119,6 +120,12 @@ const roles: readonly RoleReference[] = [
     role_id: "coder",
     role_version: 1,
     allowed_tools: ["submit_delivery", "post_comment", "get_updates"],
+    capabilities: [],
+  },
+  {
+    role_id: "reviewer",
+    role_version: 1,
+    allowed_tools: ["submit_review"],
     capabilities: [],
   },
 ];

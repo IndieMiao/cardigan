@@ -40,6 +40,7 @@ export function dispatchFixture() {
         launch_profile_ref: "fixture",
         core_prompt: "fixture",
         allowed_tools: [
+          "submit_delivery",
           "whoami",
           "get_card",
           "get_updates",
@@ -72,6 +73,15 @@ export function dispatchFixture() {
     });
   }
   function create() {
+    store.uow.run((tx) => {
+      for (const role_id of ["pm", "reviewer"])
+        tx.roles.put(project, {
+          role_id,
+          role_version: 1,
+          allowed_tools: ["submit_review"],
+          capabilities: [],
+        });
+    });
     const card = apply((s, a, p) =>
       createCard(
         s,

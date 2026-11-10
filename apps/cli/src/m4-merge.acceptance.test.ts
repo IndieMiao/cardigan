@@ -307,7 +307,7 @@ async function scenario(
   const office = await seatStanding(true);
   const ops = await seatStanding(false);
   const templates: readonly CardTemplate[] = [
-    { ...developmentCardTemplate, merge_policy: policy },
+    { ...developmentCardTemplate, merge: policy },
   ];
   const created = apply(
     (s, a, p) =>

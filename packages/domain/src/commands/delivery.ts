@@ -10,10 +10,7 @@ import type {
 } from "../entities.js";
 import type { Result } from "../errors.js";
 import type { DeliveryVerifier } from "../ports.js";
-import {
-  developmentCardTemplate,
-  PM_ACCEPTANCE_WORK_ITEM_KEY,
-} from "../templates.js";
+import { isCompletionVerifier } from "../templates.js";
 import { DEFAULT_MAX_REVIEW_ROUNDS, transition } from "../transitions.js";
 import { isHttpUrl } from "../url.js";
 import {
@@ -27,9 +24,10 @@ import {
   unwrap,
 } from "./core.js";
 import { checkEmployeeSeparation } from "./employee-assignment.js";
-
+import { requestHumanCompletionReview } from "./human-completion.js";
 import { completionPassed } from "./merge.js";
 import { pendingReviewLimit, requestReviewLimit } from "./review-limit.js";
+import { resolveCardTemplate } from "./templates.js";
 import { activeWork, reviewRound, workCompleted } from "./workflow.js";
 
 export type SubmitDeliveryParams = Pick<
@@ -103,7 +101,18 @@ function inspect(d: CommandDraft, p: SubmitDeliveryParams) {
     "Invalid subject digest",
   );
   const completion = p.kind === "card_completion";
-  const template = developmentCardTemplate;
+  const template = resolveCardTemplate(d, card);
+  ensure(
+    p.subject.kind !== "git_head" ||
+      (template.merge !== "none" && card.repo && card.base_branch),
+    "validation_failed",
+    "该模板或无仓库卡片不能提交 Git 交付",
+  );
+  ensure(
+    !completion || template.completion.mode === "review",
+    "illegal_transition",
+    "该模板不使用完成申请",
+  );
   // §4.4 (user ruling): a produce work item that no verification points at is
   // done when it is delivered, so it requests no verifiers at all. Everything
   // else keeps the "explicit distinct verifiers" rule.
@@ -114,7 +123,7 @@ function inspect(d: CommandDraft, p: SubmitDeliveryParams) {
         w.card_id === card.id &&
         w.kind === "verify" &&
         (completion
-          ? w.template_key === PM_ACCEPTANCE_WORK_ITEM_KEY
+          ? isCompletionVerifier(template, w)
           : w.target_work_item_id === item.id),
     );
   ensure(
@@ -135,7 +144,7 @@ function inspect(d: CommandDraft, p: SubmitDeliveryParams) {
         w.card_id === card.id &&
         w.kind === "verify" &&
         (completion
-          ? w.role_id === "pm" && w.template_key === PM_ACCEPTANCE_WORK_ITEM_KEY
+          ? isCompletionVerifier(template, w)
           : w.target_work_item_id === item.id)
       ),
   );
@@ -341,6 +350,23 @@ export function submitDelivery(
         ...old,
         status: unwrap(transition("delivery", old.status, "supersede")),
       });
+    for (const decision of d.list("decisions")) {
+      if (
+        decision.trigger === "completion_review" &&
+        decision.kind === "approve" &&
+        "delivery_id" in decision.target &&
+        ["open", "provisional"].includes(decision.status)
+      ) {
+        const targetId = decision.target.delivery_id;
+        if (previous.some((old) => old.id === targetId))
+          d.put("decisions", {
+            ...decision,
+            status: unwrap(
+              transition("decision", decision.status, "supersede"),
+            ),
+          });
+      }
+    }
     for (const verifier of verifiers)
       d.put("work_items", readyVerifier(d, verifier));
     // A new product withdraws the old completion target until a new request arrives.
@@ -416,6 +442,7 @@ export function submitDelivery(
         run_id: run.id,
       },
     );
+    if (completion) requestHumanCompletionReview(d, card, value);
     for (const verifier of verifiers) {
       const current = d.work(verifier.id);
       if (
@@ -459,8 +486,7 @@ export function submitReview(
       item.kind === "verify" &&
         target.requested_verifiers.includes(item.id) &&
         (target.kind === "card_completion"
-          ? item.template_key === PM_ACCEPTANCE_WORK_ITEM_KEY &&
-            item.role_id === "pm"
+          ? isCompletionVerifier(resolveCardTemplate(d, card), item)
           : item.target_work_item_id === producer.id),
       "unauthorized",
       "Assignment is not a verifier for this delivery",

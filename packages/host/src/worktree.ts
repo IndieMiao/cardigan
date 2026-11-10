@@ -150,7 +150,8 @@ export async function prepareRoleWorktree(
   // the completion's SHA.
   if (
     entities.role.worktree === "none" ||
-    entities.assignment.scope !== "work_item"
+    entities.assignment.scope !== "work_item" ||
+    !entities.card?.repo
   )
     return undefined;
   const source = host.store.getProject(project)?.repo_path;

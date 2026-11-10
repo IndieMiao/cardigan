@@ -3,6 +3,7 @@ import type {
   AssignmentId,
   Card,
   CardId,
+  CardTemplate,
   Decision,
   Delivery,
   Employee,
@@ -143,6 +144,7 @@ export interface RouteResult {
  * domain entities the rules need, not the live `CommandState`.
  */
 export interface RouterSnapshot {
+  readonly card_templates?: readonly CardTemplate[];
   readonly project_id: ProjectId;
   readonly cards: readonly Card[];
   readonly work_items: readonly WorkItem[];

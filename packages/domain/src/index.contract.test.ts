@@ -53,7 +53,7 @@ test("invariants 5, 9: Git ports never push and deletion is an explicit, forced 
 
 test("invariant 1: roles contain capabilities and permissions, not runtime ownership", () => {
   expectTypeOf<keyof RoleReference>().toEqualTypeOf<
-    "role_id" | "role_version" | "allowed_tools" | "capabilities"
+    "role_id" | "role_version" | "allowed_tools" | "capabilities" | "status"
   >();
   expectTypeOf<RoleReference>().not.toHaveProperty("session_ref");
   expectTypeOf<RoleReference>().not.toHaveProperty("worktree_path");
@@ -121,7 +121,7 @@ test("D4 and invariant 13: the development template requires human-facing comple
   const template = developmentCardTemplate;
   expect(template.id).toBe("dev");
   expect(template.require_acceptance_criteria).toBe(true);
-  expect(template.completion_reviewer).toBe("role:pm");
+  expect(template.completion.reviewer).toBe("role:pm");
   expect(template.work_items).toEqual([
     {
       key: "development",

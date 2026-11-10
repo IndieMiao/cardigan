@@ -138,7 +138,7 @@ export class GitWorktreeService {
       throw new Error(
         "Worktree requires an active local Assignment and its fixed Role version",
       );
-    if (role.worktree === "none") return undefined;
+    if (role.worktree === "none" || (card && !card.repo)) return undefined;
     if (
       !parseId("assignment", a.id).ok ||
       !/^[a-zA-Z0-9_][a-zA-Z0-9._-]*$/u.test(input.project_id)
@@ -158,6 +158,8 @@ export class GitWorktreeService {
       throw new Error(
         "Worktree must belong to the Assignment's card and work item",
       );
+    if (!card.base_branch)
+      throw new Error("Repository card requires a base branch");
     const readonly = role.worktree === "readonly";
     if (
       readonly &&

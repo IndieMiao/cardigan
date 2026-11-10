@@ -10,9 +10,9 @@ import type {
 } from "@cardigan/domain";
 import {
   canStartWork,
-  developmentCardTemplate,
+  cardTemplate,
   employeeNameKey,
-  PM_ACCEPTANCE_WORK_ITEM_KEY,
+  isCompletionVerifier,
 } from "@cardigan/domain";
 import {
   payloadObject,
@@ -456,6 +456,13 @@ function routeCompletionRequest(
   delivery_id: string,
 ): void {
   const delivery = input.snapshot.deliveries.find((d) => d.id === delivery_id);
+  const card = input.snapshot.cards.find((c) => c.id === input.event.card_id);
+  const template = card && cardTemplate(card, input.snapshot.card_templates);
+  if (
+    template?.completion.mode === "review" &&
+    template.completion.reviewer === "human"
+  )
+    return;
   const items = input.snapshot.work_items.filter(
     (item) =>
       item.card_id === input.event.card_id &&
@@ -545,12 +552,14 @@ function routeCompletionReminder(input: RouteInput, draft: Draft): void {
     )
   )
     return;
+  const card = input.snapshot.cards.find((c) => c.id === card_id);
+  const template = card && cardTemplate(card, input.snapshot.card_templates);
+  if (template?.completion.mode !== "review") return;
   const items = input.snapshot.work_items.filter(
     (item) => item.card_id === card_id,
   );
   const required = items.filter(
-    (item) =>
-      item.required && item.template_key !== PM_ACCEPTANCE_WORK_ITEM_KEY,
+    (item) => item.required && !isCompletionVerifier(template, item),
   );
   const allPassed = required.length > 0 && required.every(succeeded);
   if (!allPassed) return;
@@ -558,7 +567,7 @@ function routeCompletionReminder(input: RouteInput, draft: Draft): void {
     items.find(
       (item) =>
         item.kind === "produce" &&
-        item.template_key === developmentCardTemplate.primary_work_item_key,
+        item.template_key === template.primary_work_item_key,
     ) ?? items.find((item) => item.kind === "produce");
   if (producer === undefined) return;
   noteAssignment(
@@ -937,6 +946,7 @@ export function routeEvent(input: RouteInput): RouteResult {
       routeDelivery(input, draft);
       break;
     case "review_submitted":
+    case "completion_reviewed":
       routeReview(input, draft);
       break;
     case "delivery_accepted":
