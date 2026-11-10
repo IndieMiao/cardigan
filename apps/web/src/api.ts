@@ -591,7 +591,138 @@ export interface PreferencesView {
   readonly merge_gate_enabled: boolean;
 }
 
+export type RoleKind = "produce" | "verify" | "standing";
+export type RoleWorktree = "none" | "readonly" | "write";
+export type RoleAllowlists = Readonly<Record<RoleKind, readonly string[]>>;
+
+export interface RoleSummary {
+  readonly role_id: string;
+  readonly display_name: string;
+  readonly kind: RoleKind;
+  readonly status: "active" | "inactive";
+  readonly version: number;
+  readonly harness: string;
+  readonly launch_profile_ref: string;
+}
+
+export interface RoleListView {
+  readonly project_id: string;
+  readonly roles: readonly RoleSummary[];
+  readonly default_roles: readonly string[];
+  readonly harnesses: readonly string[];
+  readonly allowlists: RoleAllowlists;
+}
+
+/** One saved role version (V9a `Role`). */
+export interface RoleDefinitionView {
+  readonly role_id: string;
+  readonly version: number;
+  readonly display_name: string;
+  readonly kind: RoleKind | "work";
+  readonly status?: "active" | "inactive";
+  readonly instructions?: string;
+  readonly core_prompt: string;
+  readonly harness: string;
+  readonly launch_profile_ref: string;
+  readonly allowed_tools: readonly string[];
+  readonly capabilities: readonly string[];
+  readonly abilities: readonly string[];
+  readonly worktree: RoleWorktree;
+  readonly required_machine_tags: readonly string[];
+}
+
+export interface RoleDetailView {
+  readonly project_id: string;
+  readonly role: RoleDefinitionView & {
+    readonly kind: RoleKind;
+    readonly status: "active" | "inactive";
+  };
+  readonly previous: RoleDefinitionView | null;
+  readonly allowlist: readonly string[];
+  readonly allowlists: RoleAllowlists;
+  readonly harnesses: readonly string[];
+  /** Present for legacy roles that only have `core_prompt`. */
+  readonly legacy_conversion: {
+    readonly instructions: string;
+    readonly warnings: readonly string[];
+  } | null;
+}
+
+export interface RoleHistoryEntry {
+  readonly version: number;
+  readonly role: RoleDefinitionView;
+  readonly action: string;
+  readonly summary: string;
+  readonly changes: readonly string[];
+  readonly created_at: string | null;
+  readonly actor: string | null;
+  readonly author_display: string | null;
+}
+
+export interface RoleHistoryView {
+  readonly project_id: string;
+  readonly role_id: string;
+  readonly versions: readonly RoleHistoryEntry[];
+}
+
+export interface RoleEditInput {
+  readonly display_name?: string;
+  readonly kind?: RoleKind;
+  readonly instructions?: string;
+  readonly harness?: string;
+  readonly launch_profile_ref?: string;
+  readonly allowed_tools?: readonly string[];
+  readonly capabilities?: readonly string[];
+  readonly abilities?: readonly string[];
+  readonly worktree?: RoleWorktree;
+  readonly required_machine_tags?: readonly string[];
+}
+
+export interface RoleCopyInput {
+  readonly role_id: string;
+  readonly display_name?: string;
+  readonly source:
+    | {
+        readonly kind: "default";
+        readonly role_id: string;
+        readonly harness: string;
+        readonly launch_profile_ref: string;
+      }
+    | {
+        readonly kind: "project";
+        readonly project_id?: string;
+        readonly role_id: string;
+        readonly version?: number;
+      };
+}
+
 export interface CardiganClient {
+  roles(projectId: string): Promise<RoleListView>;
+  role(projectId: string, roleId: string): Promise<RoleDetailView>;
+  roleHistory(projectId: string, roleId: string): Promise<RoleHistoryView>;
+  copyRole(
+    projectId: string,
+    input: RoleCopyInput,
+    idempotencyKey: string,
+  ): Promise<RoleDefinitionView>;
+  updateRole(
+    projectId: string,
+    roleId: string,
+    patch: RoleEditInput,
+    idempotencyKey: string,
+  ): Promise<RoleDefinitionView>;
+  setRoleActive(
+    projectId: string,
+    roleId: string,
+    active: boolean,
+    idempotencyKey: string,
+  ): Promise<RoleDefinitionView>;
+  rollbackRole(
+    projectId: string,
+    roleId: string,
+    version: number,
+    idempotencyKey: string,
+  ): Promise<RoleDefinitionView>;
   preferences(projectId: string): Promise<PreferencesView>;
   setPreferences(
     projectId: string,
@@ -788,6 +919,70 @@ export class HttpCardiganClient implements CardiganClient {
       { auto_merge_after_minutes: minutes },
       idempotencyKey,
     );
+  }
+  roles(projectId: string): Promise<RoleListView> {
+    return this.request(`/api/projects/${encodeURIComponent(projectId)}/roles`);
+  }
+  role(projectId: string, roleId: string): Promise<RoleDetailView> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/roles/${encodeURIComponent(roleId)}`,
+    );
+  }
+  roleHistory(projectId: string, roleId: string): Promise<RoleHistoryView> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/roles/${encodeURIComponent(roleId)}/history`,
+    );
+  }
+  copyRole(
+    projectId: string,
+    input: RoleCopyInput,
+    idempotencyKey: string,
+  ): Promise<RoleDefinitionView> {
+    return this.write(
+      projectId,
+      "roles/copy",
+      input,
+      idempotencyKey,
+    ) as Promise<RoleDefinitionView>;
+  }
+  updateRole(
+    projectId: string,
+    roleId: string,
+    patch: RoleEditInput,
+    idempotencyKey: string,
+  ): Promise<RoleDefinitionView> {
+    return this.write(
+      projectId,
+      `roles/${encodeURIComponent(roleId)}/update`,
+      patch,
+      idempotencyKey,
+    ) as Promise<RoleDefinitionView>;
+  }
+  setRoleActive(
+    projectId: string,
+    roleId: string,
+    active: boolean,
+    idempotencyKey: string,
+  ): Promise<RoleDefinitionView> {
+    return this.write(
+      projectId,
+      `roles/${encodeURIComponent(roleId)}/${active ? "activate" : "deactivate"}`,
+      {},
+      idempotencyKey,
+    ) as Promise<RoleDefinitionView>;
+  }
+  rollbackRole(
+    projectId: string,
+    roleId: string,
+    version: number,
+    idempotencyKey: string,
+  ): Promise<RoleDefinitionView> {
+    return this.write(
+      projectId,
+      `roles/${encodeURIComponent(roleId)}/rollback`,
+      { version },
+      idempotencyKey,
+    ) as Promise<RoleDefinitionView>;
   }
   needsYou(projectId: string): Promise<NeedsPage> {
     return this.request(

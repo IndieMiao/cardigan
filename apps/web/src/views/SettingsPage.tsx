@@ -6,6 +6,7 @@ import {
 } from "../api.js";
 import { PageTitle } from "../components/Foundation.js";
 import { useResource } from "../useResource.js";
+import { RolesSettings } from "./RolesSettings.js";
 
 export function SettingsPage({
   client,
@@ -21,48 +22,71 @@ export function SettingsPage({
     [client, projectId],
   );
   const resource = useResource(load, revision);
+  const [tab, setTab] = useState<"preferences" | "roles">("preferences");
   return (
     <>
-      <PageTitle title="设置" description="管理当前项目的偏好。" />
+      <PageTitle title="设置" description="管理当前项目的偏好和角色。" />
       <div className="settings-layout">
         <nav aria-label="设置分栏">
-          <button
-            type="button"
-            onClick={() => {
-              document.getElementById("preferences")?.focus();
-            }}
-            aria-current="page"
-          >
-            偏好
-          </button>
+          {(
+            [
+              ["preferences", "偏好"],
+              ["roles", "角色"],
+            ] as const
+          ).map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              onClick={() => {
+                setTab(value);
+                requestAnimationFrame(() =>
+                  document.getElementById(value)?.focus(),
+                );
+              }}
+              {...(tab === value ? { "aria-current": "page" as const } : {})}
+            >
+              {label}
+            </button>
+          ))}
         </nav>
-        <section
-          id="preferences"
-          tabIndex={-1}
-          aria-labelledby="preferences-title"
-        >
-          <h2 id="preferences-title">偏好</h2>
-          {resource.error && (
-            <p role="alert">
-              {resource.error}
-              <button type="button" onClick={resource.reload}>
-                重试
-              </button>
-            </p>
-          )}
-          {!resource.data && !resource.error && (
-            <p role="status">正在加载偏好…</p>
-          )}
-          {resource.data && (
-            <PreferenceForm
-              key={String(resource.data.auto_merge_after_minutes)}
-              initial={resource.data}
+        {tab === "roles" ? (
+          <section id="roles" tabIndex={-1} aria-labelledby="roles-title">
+            <h2 id="roles-title">角色</h2>
+            <RolesSettings
               client={client}
               projectId={projectId}
-              saved={resource.reload}
+              revision={revision}
             />
-          )}
-        </section>
+          </section>
+        ) : (
+          <section
+            id="preferences"
+            tabIndex={-1}
+            aria-labelledby="preferences-title"
+          >
+            <h2 id="preferences-title">偏好</h2>
+            {resource.error && (
+              <p role="alert">
+                {resource.error}
+                <button type="button" onClick={resource.reload}>
+                  重试
+                </button>
+              </p>
+            )}
+            {!resource.data && !resource.error && (
+              <p role="status">正在加载偏好…</p>
+            )}
+            {resource.data && (
+              <PreferenceForm
+                key={String(resource.data.auto_merge_after_minutes)}
+                initial={resource.data}
+                client={client}
+                projectId={projectId}
+                saved={resource.reload}
+              />
+            )}
+          </section>
+        )}
       </div>
     </>
   );
