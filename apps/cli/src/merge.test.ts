@@ -735,4 +735,21 @@ test("card sensitive on|off is recorded and hands a PM-held merge to the human",
     ["human", false],
   ]);
   expect((await cardigan("card", "sensitive", card_id, "maybe")).code).toBe(2);
+  // C-69: auto-merge is off here, so the unmark says nothing about a timeout.
+  expect(off.out).not.toContain("分钟");
+});
+
+test("C-69: unmarking says when the timeout will auto-merge, only if it is on", async () => {
+  await seatAwaitingMerge();
+  expect(
+    (await cardigan("preference", "set", "auto-merge-after", "15")).code,
+  ).toBe(0);
+  expect(
+    (await cardigan("card", "sensitive", card_id, "on")).out,
+  ).not.toContain("15 分钟");
+  const off = await cardigan("card", "sensitive", card_id, "off");
+  expect(off.code).toBe(0);
+  expect(off.out).toContain(
+    `已取消 ${card_id} 的敏感标记。如有等你处理的合并确认，从现在起重新计时，15 分钟内无人处理将按项目设置自动合并。`,
+  );
 });

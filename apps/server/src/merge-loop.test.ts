@@ -21,6 +21,7 @@ import {
   prepareMergePlan,
   recordMergeResult,
   requestHumanAction,
+  setCardSensitive,
   setProjectPreferences,
 } from "@cardigan/domain";
 
@@ -37,6 +38,7 @@ import {
   persistEffect,
   unwrap,
 } from "@cardigan/mcp-server";
+import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { createProcessIo, main } from "../../cli/src/index.js";
 import { ServerGit } from "./git.js";
@@ -412,6 +414,61 @@ test("timeout preference delegates once then merges through the existing Git exe
   expect(f.state().events.filter((e) => e.type === "card_merged")).toHaveLength(
     1,
   );
+}, 30_000);
+
+test("C-69: unmarking restarts the timeout from the unmark, and a restarted server agrees", async () => {
+  const scenario = m4Scenario(f, "confirm");
+  const sha = agentCommit("agent/C-1/W-1", "c69.txt", "c69 feature\n");
+  const { product } = await acceptThroughMergeGate(f, scenario, sha);
+  await pin(product.id, sha);
+  f.apply((s, a, p) =>
+    setProjectPreferences(s, a, { auto_merge_after_minutes: 10 }, p),
+  );
+  const start = Date.parse(f.clock.now());
+  const at = (minutes: number) =>
+    new Date(start + minutes * 60_000).toISOString();
+  const flag = (sensitive: boolean, minutes: number) =>
+    f.store.uow.run((tx) => {
+      const effect = unwrap(
+        setCardSensitive(
+          loadCommandState(tx, f.project_id),
+          { kind: "human", project_id: f.project_id },
+          { card_id: scenario.card.id, sensitive },
+          { clock: { now: () => at(minutes) }, ids: tx.ids },
+        ),
+      );
+      persistEffect(tx, f.project_id, effect);
+    });
+  const tick = (store: Store, minutes: number) =>
+    new MergeExecutor({
+      store,
+      git: new ServerGit({ store, dataDir: f.dataDir }),
+      clock: { now: () => at(minutes) },
+    }).tick();
+  flag(true, 1);
+  await tick(f.store, 20);
+  expect(f.card().status).toBe("awaiting_merge");
+  // Unmarked at +30, long after the original +10 deadline.
+  flag(false, 30);
+  await tick(f.store, 30);
+  expect(f.card().status).toBe("awaiting_merge");
+  expect(needsYou(f.state(), at(30)).decisions[0]?.auto_merge).toEqual({
+    minutes: 10,
+    due_at: at(40),
+  });
+  // A fresh Store over the same data directory computes the same due time.
+  const restarted = Store.open({ dataDir: f.dataDir, clock: f.clock });
+  try {
+    await tick(restarted, 39.99);
+    expect(f.card().status).toBe("awaiting_merge");
+    await tick(restarted, 40);
+  } finally {
+    restarted.close();
+  }
+  expect(f.card().status).toBe("done");
+  expect(
+    JSON.parse(f.state().decisions[0]?.resolution?.proxy_authority ?? ""),
+  ).toMatchObject({ waiting_since: at(30), due_at: at(40) });
 }, 30_000);
 
 async function gated(run = "true") {
