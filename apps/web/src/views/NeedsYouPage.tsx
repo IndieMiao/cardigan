@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type CardiganClient,
+  describeError,
   describeWriteError,
   type MergeConfirmationReview,
   type NeedsAction,
@@ -891,7 +892,12 @@ function NeedsContent({
             </section>
           )}
           {!!data.notices?.length && (
-            <Notices notices={data.notices} {...props} />
+            <Notices
+              key={projectId}
+              notices={data.notices}
+              nextCursor={data.notices_next_cursor ?? null}
+              {...props}
+            />
           )}
         </>
       )}
@@ -899,19 +905,68 @@ function NeedsContent({
   );
 }
 
+function mergeNotices(...pages: readonly (readonly NoticeView[])[]) {
+  return [...new Map(pages.flat().map((n) => [n.id, n])).values()].sort(
+    (a, b) =>
+      Number(a.read) - Number(b.read) ||
+      Date.parse(b.at) - Date.parse(a.at) ||
+      (a.id < b.id ? 1 : a.id > b.id ? -1 : 0),
+  );
+}
+
 /** §7.4 知会: delegated merges and decisions; informational, never blocking. */
 function Notices({
   notices,
+  nextCursor,
   client,
   projectId,
   done,
 }: {
   notices: readonly NoticeView[];
+  nextCursor: string | null;
   client: CardiganClient;
   projectId: string;
   done: () => void;
 }) {
   const unread = notices.filter((n) => !n.read);
+  const [history, setHistory] = useState<{
+    items: readonly NoticeView[];
+    cursor: string | null;
+  }>({ items: notices, cursor: nextCursor });
+  // The first page always contains every unread notice. Keep expanded history
+  // across refreshes, updating read status even when an item leaves that page.
+  // Its pagination boundary is retained from the first render too: marking
+  // unread items read can move the refreshed first page back over visible rows.
+  const unreadIds = new Set(unread.map((n) => n.id));
+  const visible = mergeNotices(
+    history.items.map((n) => ({ ...n, read: !unreadIds.has(n.id) })),
+    notices,
+  );
+  useEffect(() => {
+    setHistory((old) => ({ ...old, items: mergeNotices(old.items, notices) }));
+  }, [notices]);
+  const cursor = history.cursor;
+  const loading = useRef(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [loadError, setLoadError] = useState("");
+  const more = async () => {
+    if (loading.current || !cursor) return;
+    loading.current = true;
+    setLoadingMore(true);
+    setLoadError("");
+    try {
+      const page = await client.notices(projectId, cursor);
+      setHistory((old) => ({
+        items: mergeNotices(old.items, page.notices),
+        cursor: page.next_cursor,
+      }));
+    } catch (cause) {
+      setLoadError(describeError(cause));
+    } finally {
+      loading.current = false;
+      setLoadingMore(false);
+    }
+  };
   const [busy, setBusy] = useState(false),
     [error, setError] = useState("");
   const mark = async (ids: readonly string[]) => {
@@ -948,7 +1003,7 @@ function Notices({
         pendingMessage="正在标记已读…"
         error={error}
       />
-      {notices.map((n) => (
+      {visible.map((n) => (
         <article
           key={n.id}
           className={n.read ? "needs-item read" : "needs-item"}
@@ -994,6 +1049,18 @@ function Notices({
           </footer>
         </article>
       ))}
+      {cursor && (
+        <button type="button" disabled={loadingMore} onClick={more}>
+          显示更多
+        </button>
+      )}
+      <RequestFeedback
+        interactive
+        pending={loadingMore}
+        pendingMessage="正在加载更多知会…"
+        error={loadError}
+        retry={more}
+      />
     </section>
   );
 }

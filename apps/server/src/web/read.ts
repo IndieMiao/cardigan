@@ -185,10 +185,25 @@ export function webDecisionView(
 /** Public employee profile only; opaque references and external URLs are not images. */
 export function webAuthorView(state: CommandState, author: Author) {
   const view = authorView(state, author);
+  const assignment = author.startsWith("assignment:")
+    ? state.assignments.find((a) => a.id === author.slice(11))
+    : undefined;
+  const standingName =
+    assignment?.scope === "standing" && assignment.role_id === "pm"
+      ? assignment.standing_mode === "ops"
+        ? "PM 后台（PM Ops）"
+        : assignment.standing_mode === "office"
+          ? "PM 前台（PM Office）"
+          : undefined
+      : undefined;
   const employee = state.employees?.find((e) => e.id === view.employee?.id);
   const avatar = parseAvatarReference(employee?.avatar);
   return {
     ...view,
+    author_display:
+      view.employee || view.member || author === "human" || author === "system"
+        ? view.author_display
+        : (standingName ?? `未命名的 ${assignment?.role_id ?? "未知角色"}`),
     author,
     member: webMemberView(view.member),
     employee: employee
@@ -785,6 +800,37 @@ export function cardDetail(
   };
 }
 
+/** All unread notices on the first page, then ten read notices per page. */
+export function noticePage(state: CommandState, before?: string) {
+  const all = notices(state);
+  const anchor =
+    before === undefined ? -1 : all.findIndex((n) => n.id === before);
+  if (before !== undefined && anchor < 0)
+    throw new InvalidQuery("知会分页游标无效，请刷新后重试");
+  const unread = all.filter((n) => !n.read);
+  const read = all.slice(anchor + 1).filter((n) => n.read);
+  const page = read.slice(0, 10);
+  const events = new Map(state.events.map((event) => [event.id, event]));
+  return {
+    notices: [...(before === undefined ? unread : []), ...page].map(
+      (notice) => {
+        const event = events.get(notice.id);
+        return {
+          ...notice,
+          ...webAuthorView(
+            state,
+            event?.actor.kind === "assignment"
+              ? `assignment:${event.actor.assignment_id}`
+              : (event?.actor.kind ?? "system"),
+          ),
+        };
+      },
+    ),
+    next_cursor: read.length > page.length ? (page.at(-1)?.id ?? null) : null,
+    unread_count: unread.length,
+  };
+}
+
 /** `listNeedsYou` plus the one-line reason and how long each item has waited. */
 export function needsYou(
   state: CommandState,
@@ -795,18 +841,7 @@ export function needsYou(
     listNeedsYou(state, human(state.project_id), { now: () => now }),
   );
   const data = result.data;
-  const noticeList = notices(state).map((notice) => {
-    const event = state.events.find((event) => event.id === notice.id);
-    return {
-      ...notice,
-      ...webAuthorView(
-        state,
-        event?.actor.kind === "assignment"
-          ? `assignment:${event.actor.assignment_id}`
-          : (event?.actor.kind ?? "system"),
-      ),
-    };
-  });
+  const noticeList = noticePage(state);
   const checks = new Map(
     mergeGateStatus === "enabled"
       ? cardViews(state).map((card) => [card.id, card.merge_check])
@@ -969,11 +1004,12 @@ export function needsYou(
       (left, right) => (right.waited_ms ?? 0) - (left.waited_ms ?? 0),
     ),
     // §7.4 知会: delegated resolutions, newest first; never blocking.
-    notices: noticeList.slice(0, 50),
+    notices: noticeList.notices,
+    notices_next_cursor: noticeList.next_cursor,
     counts: {
       decisions: decisions.length,
       human_actions: human_actions.length,
-      notices_unread: noticeList.filter((n) => !n.read).length,
+      notices_unread: noticeList.unread_count,
     },
   };
 }

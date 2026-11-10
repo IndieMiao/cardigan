@@ -89,7 +89,7 @@ test("snapshot separates human/agent waits, shows next owners, blocked work and 
   expect(agent.getByRole("link", { name: /^C-2 / })).toBeTruthy();
   expect(
     screen.getByRole("region", { name: "审核与待合并" }).textContent,
-  ).toContain("未命名的 Agent");
+  ).toContain("未命名的 未知角色");
   expect(
     screen.getByRole("region", { name: "阻塞事项" }).textContent,
   ).toContain("等待权限");

@@ -71,6 +71,11 @@ function parse(args: readonly string[]) {
     flags[key] = value;
   }
   const needsId = command !== "add" && command !== "list";
+  if (needsId && positionals.length === 0)
+    throw new CliError(
+      `缺少成员编号：cardigan member ${command} M-1${command === "update" ? " --name 邵杰" : ""}（用 cardigan member list 查看编号）`,
+      EXIT.usage,
+    );
   if (positionals.length !== (needsId ? 1 : 0))
     throw new CliError("成员命令的位置参数不正确", EXIT.usage, [USAGE]);
   if (needsId && !parseId("member", positionals[0]).ok)

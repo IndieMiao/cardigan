@@ -18,6 +18,15 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+test("notice pagination encodes the project and server cursor and uses the session", async () => {
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response("{}"));
+  await new HttpCardiganClient(fetcher).notices("p/a", "event/+?");
+  expect(fetcher).toHaveBeenCalledWith(
+    "/api/projects/p%2Fa/notices?before=event%2F%2B%3F",
+    expect.objectContaining({ credentials: "same-origin" }),
+  );
+});
+
 test("Needs You client writes the right routes and JSON with the browser session", async () => {
   const fetcher = vi
     .fn<typeof fetch>()

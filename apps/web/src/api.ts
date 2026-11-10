@@ -530,6 +530,7 @@ export interface NeedsPage {
   readonly pm_held_merges?: readonly NeedsDecision[];
   /** §7.4 知会: delegated resolutions; never blocking. */
   readonly notices?: readonly NoticeView[];
+  readonly notices_next_cursor?: string | null;
   readonly incidents: readonly (AuthorView & {
     readonly id: string;
     readonly role_id: string;
@@ -554,6 +555,12 @@ export interface NoticeView extends AuthorView {
   readonly proxy_authority: string | null;
   readonly at: string;
   readonly read: boolean;
+}
+
+export interface NoticesPage {
+  readonly notices: readonly NoticeView[];
+  readonly next_cursor: string | null;
+  readonly unread_count: number;
 }
 
 export interface SnapshotData {
@@ -940,6 +947,7 @@ export interface CardiganClient {
   snapshot(projectId: string): Promise<SnapshotData>;
   execution(projectId: string): Promise<ExecutionData>;
   needsYou(projectId: string): Promise<NeedsPage>;
+  notices(projectId: string, before: string): Promise<NoticesPage>;
   recheckMerge(
     projectId: string,
     cardId: string,
@@ -1290,6 +1298,11 @@ export class HttpCardiganClient implements CardiganClient {
   needsYou(projectId: string): Promise<NeedsPage> {
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/needs-you`,
+    );
+  }
+  notices(projectId: string, before: string): Promise<NoticesPage> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/notices?${new URLSearchParams({ before })}`,
     );
   }
   async recheckMerge(
