@@ -489,11 +489,7 @@ async function serveProjectRoute(
   if (rest === "/needs-you") {
     sendJson(res, 200, {
       project_id,
-      ...needsYou(
-        state,
-        now,
-        context.mergeGate?.forProject(project_id).status === "enabled",
-      ),
+      ...needsYou(state, now, context.mergeGate?.forProject(project_id).status),
     });
     return;
   }

@@ -30,7 +30,7 @@ export function MergeCheck({
   const status = check?.status ?? "queued";
   const hasLog =
     check?.log_ref === `${check?.attempt_id}.log` &&
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(
       check?.attempt_id ?? "",
     );
   return (
