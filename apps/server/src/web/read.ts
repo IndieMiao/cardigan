@@ -139,7 +139,10 @@ export interface CardListView extends WebCardView {
 }
 
 /** Card rows plus the counts, timestamp and roles the list filters need (U2). */
-export function cardListViews(state: CommandState): CardListView[] {
+export function cardListViews(
+  state: CommandState,
+  updatedAt?: ReadonlyMap<string, string>,
+): CardListView[] {
   const entryCard = new Map(
     state.timeline.map((entry) => [entry.id, entry.card_id]),
   );
@@ -179,11 +182,13 @@ export function cardListViews(state: CommandState): CardListView[] {
         (item) => item.status === "accepted" || item.status === "passed",
       ).length,
       updated_at =
+        updatedAt?.get(card.id) ??
         state.events
           .filter((event) => event.card_id === card.id)
           .map((event) => event.created_at)
           .sort()
-          .at(-1) ?? card.created_at;
+          .at(-1) ??
+        card.created_at;
     return {
       ...card,
       produce_owners: owners(items.filter((item) => item.kind === "produce")),
@@ -374,7 +379,10 @@ export function cardDetail(
     readonly now?: string;
   } = {},
 ) {
-  const card = cardViews(state).find((view) => view.id === card_id);
+  const card = cardViews({
+    ...state,
+    cards: state.cards.filter((c) => c.id === card_id),
+  })[0];
   if (card === undefined) {
     return undefined;
   }

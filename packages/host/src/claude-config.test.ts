@@ -9,7 +9,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { getPriority, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { compileAssignmentLaunch, parseLaunchConfig } from "@cardigan/roles";
 import {
@@ -36,7 +36,7 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-async function fixture(mode: "local" | "agent-ssh") {
+async function fixture(mode: "local" | "agent-ssh", agentNice?: number) {
   const dataDir = join(root, "data"),
     agentRoot = join(root, "agent");
   await mkdir(dataDir, { mode: 0o700 });
@@ -77,12 +77,15 @@ const record = path.join(directory, 'sessions', 'fixture-session.json');
 const visits = fs.existsSync(record) ? Number(fs.readFileSync(record, 'utf8')) + 1 : 1;
 fs.writeFileSync(record, String(visits));
 fs.writeFileSync(path.join(directory, '.claude.json'), '{}');
-console.log(JSON.stringify({directory, visits, initial, settings, prompt: process.argv.at(-1)}));
+const niceness = require('node:os').getPriority();
+const childNiceness = Number(require('node:child_process').execFileSync(process.execPath, ['-e', "console.log(require('node:os').getPriority())"]));
+console.log(JSON.stringify({directory, visits, initial, settings, niceness, childNiceness, prompt: process.argv.at(-1)}));
 `,
     { mode: 0o700 },
   );
   async function prepare(run: string) {
     const compiled = compileAssignmentLaunch({
+      ...(agentNice === undefined ? {} : { agent_nice: agentNice }),
       assignment: { assignment_id: assignment.id, run_id: run },
       role: {
         role_id: "coder",
@@ -142,6 +145,8 @@ console.log(JSON.stringify({directory, visits, initial, settings, prompt: proces
     initial: unknown;
     settings: unknown;
     prompt: string;
+    niceness: number;
+    childNiceness: number;
   }[] = [];
   const launches: (readonly string[])[] = [];
   const runtime = value(
@@ -198,7 +203,9 @@ describe.skipIf(process.platform !== "linux")(
     test.each(["local", "agent-ssh"] as const)(
       "%s creates private state as the CLI user and preserves it across resume_or_replace",
       async (mode) => {
-        const f = await fixture(mode);
+        const parentNiceness = getPriority();
+        const agentNice = mode === "agent-ssh" ? 17 : undefined;
+        const f = await fixture(mode, agentNice);
         const first = await f.prepare("R-1");
         await expect(stat(f.configDir)).rejects.toMatchObject({
           code: "ENOENT",
@@ -212,6 +219,13 @@ describe.skipIf(process.platform !== "linux")(
           ),
         );
         const initial = await stat(f.configDir);
+        expect(f.observations[0]?.niceness).toBe(
+          Math.min(19, parentNiceness + (agentNice ?? 10)),
+        );
+        expect(f.observations[0]?.childNiceness).toBe(
+          f.observations[0]?.niceness,
+        );
+        expect(getPriority()).toBe(parentNiceness);
         expect(initial.mode & 0o7777).toBe(0o700);
         expect(initial.uid).toBe(process.getuid?.());
         for (const name of [".claude.json", "settings.json"]) {
@@ -237,7 +251,7 @@ describe.skipIf(process.platform !== "linux")(
           await f.runtime.resume_or_replace(firstRef, next),
         );
         expect(replaced.terminal_ref).not.toBe(firstRef.terminal_ref);
-        expect(f.observations).toEqual([
+        expect(f.observations).toMatchObject([
           {
             directory: f.configDir,
             visits: 1,

@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Store } from "@cardigan/store";
+import { defaultMigrationsDir, listMigrations, Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { main } from "./index.js";
 import type { CliIo } from "./io.js";
@@ -38,13 +38,18 @@ function run(argv: string[]): Promise<number> {
 }
 
 test("cardigan init creates the database and runs migrations", async () => {
+  const latestVersion = Math.max(
+    ...listMigrations(defaultMigrationsDir).map(
+      (migration) => migration.version,
+    ),
+  );
   expect(await run(["init"])).toBe(0);
   expect(out.join("\n")).toContain(`数据库：${dataDir}`);
-  expect(out.join("\n")).toContain("schema 版本：12");
+  expect(out.join("\n")).toContain(`schema 版本：${latestVersion}`);
 
   const store = Store.open({ dataDir });
   try {
-    expect(store.schemaVersion()).toBe(12);
+    expect(store.schemaVersion()).toBe(latestVersion);
     expect(store.listProjects()).toEqual([]);
   } finally {
     store.close();
@@ -53,7 +58,7 @@ test("cardigan init creates the database and runs migrations", async () => {
   // Running it again is harmless and reports the same schema version.
   out = [];
   expect(await run(["init"])).toBe(0);
-  expect(out.join("\n")).toContain("schema 版本：12");
+  expect(out.join("\n")).toContain(`schema 版本：${latestVersion}`);
 });
 
 test("cardigan project create records a project", async () => {

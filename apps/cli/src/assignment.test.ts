@@ -621,90 +621,102 @@ describe("stopAssignment and attachAssignment", () => {
   });
 });
 
-test("employee launch overrides role CLI/model, snapshots the Run and only changes later Runs", async () => {
-  store.uow.run((tx) =>
-    tx.employees.put({
-      id: "E-1" as never,
-      name: "Alice",
-      title: "开发",
-      bio: "",
-      avatar: null,
-      role_id: "coder",
+test.each([
+  { label: "default", configuredNice: undefined, expectedNice: 10 },
+  { label: "configured", configuredNice: "17", expectedNice: 17 },
+])(
+  "employee launch overrides role CLI/model, snapshots the Run and only changes later Runs ($label niceness)",
+  async ({ configuredNice, expectedNice }) => {
+    store.uow.run((tx) =>
+      tx.employees.put({
+        id: "E-1" as never,
+        name: "Alice",
+        title: "开发",
+        bio: "",
+        avatar: null,
+        role_id: "coder",
+        launch_profile_ref: "employee-codex",
+        status: "active",
+        created_at: "2026-01-01",
+        updated_at: "2026-01-01",
+      }),
+    );
+    const assignment = assignWorkItem("none");
+    expect(assignment.employee_id).toBe("E-1");
+    const runtime = new FakeRuntime();
+    const probes: string[] = [];
+    io = {
+      ...io,
+      env: {
+        ...io.env,
+        ...(configuredNice === undefined
+          ? {}
+          : { CARDIGAN_AGENT_NICE: configuredNice }),
+      },
+      captureCommand: async (binary) => {
+        probes.push(binary);
+        return { code: 0, stdout: `${binary} fixture-version`, stderr: "" };
+      },
+    };
+    const config = parseLaunchConfig({
+      ...launchConfig,
+      profiles: {
+        ...launchConfig.profiles,
+        "employee-codex": { harness: "codex", model: "employee-model" },
+      },
+    });
+    const start = () =>
+      startAssignment({
+        store,
+        io,
+        project_id,
+        assignment_id: assignment.id,
+        launch: { config, secrets: { provider: "fixture-provider" } },
+        mcpUrl: "http://localhost/mcp",
+        runtime,
+        dataDir,
+      });
+    const first = await start();
+    const firstRun = store.uow.read((tx) => tx.runs.list(project_id))[0];
+    expect(firstRun).toMatchObject({
+      employee_id: "E-1",
       launch_profile_ref: "employee-codex",
-      status: "active",
-      created_at: "2026-01-01",
-      updated_at: "2026-01-01",
-    }),
-  );
-  const assignment = assignWorkItem("none");
-  expect(assignment.employee_id).toBe("E-1");
-  const runtime = new FakeRuntime();
-  const probes: string[] = [];
-  io = {
-    ...io,
-    captureCommand: async (binary) => {
-      probes.push(binary);
-      return { code: 0, stdout: `${binary} fixture-version`, stderr: "" };
-    },
-  };
-  const config = parseLaunchConfig({
-    ...launchConfig,
-    profiles: {
-      ...launchConfig.profiles,
-      "employee-codex": { harness: "codex", model: "employee-model" },
-    },
-  });
-  const start = () =>
-    startAssignment({
-      store,
-      io,
-      project_id,
-      assignment_id: assignment.id,
-      launch: { config, secrets: { provider: "fixture-provider" } },
-      mcpUrl: "http://localhost/mcp",
-      runtime,
-      dataDir,
+      model: "employee-model",
+      agent_cli_version: "codex fixture-version",
     });
-  const first = await start();
-  const firstRun = store.uow.read((tx) => tx.runs.list(project_id))[0];
-  expect(firstRun).toMatchObject({
-    employee_id: "E-1",
-    launch_profile_ref: "employee-codex",
-    model: "employee-model",
-    agent_cli_version: "codex fixture-version",
-  });
-  expect(readFileSync(join(first.run_dir, "launch.sh"), "utf8")).toContain(
-    "exec 'codex'",
-  );
-  store.uow.run((tx) => {
-    const employee = tx.employees.list()[0];
-    if (!employee || !firstRun) throw new Error("Missing fixture");
-    tx.employees.put({
-      ...employee,
-      launch_profile_ref: null,
-      status: "inactive",
+    expect(readFileSync(join(first.run_dir, "launch.sh"), "utf8")).toContain(
+      `exec nice -n ${expectedNice} 'codex'`,
+    );
+    store.uow.run((tx) => {
+      const employee = tx.employees.list()[0];
+      if (!employee || !firstRun) throw new Error("Missing fixture");
+      tx.employees.put({
+        ...employee,
+        launch_profile_ref: null,
+        status: "inactive",
+      });
+      expect(tx.runs.get(project_id, firstRun.id)).toEqual(firstRun);
+      tx.runs.put(project_id, {
+        ...firstRun,
+        status: "completed",
+        outcome: "completed",
+      });
     });
-    expect(tx.runs.get(project_id, firstRun.id)).toEqual(firstRun);
-    tx.runs.put(project_id, {
-      ...firstRun,
-      status: "completed",
-      outcome: "completed",
-    });
-  });
-  const second = await start();
-  expect(probes).toEqual(["codex", "pi"]);
-  expect(store.uow.read((tx) => tx.runs.list(project_id)).at(-1)).toMatchObject(
-    {
+    const second = await start();
+    expect(probes).toEqual(["codex", "pi"]);
+    expect(
+      store.uow.read((tx) => tx.runs.list(project_id)).at(-1),
+    ).toMatchObject({
       employee_id: "E-1",
       launch_profile_ref: "pi-agent",
       model: "fictional-model",
       agent_cli_version: "pi fixture-version",
-    },
-  );
-  expect(readFileSync(join(second.run_dir, "launch.sh"), "utf8")).toContain(
-    "exec 'pi'",
-  );
-  expect(
-    store.uow.read((tx) => tx.runs.list(project_id))[0]?.launch_profile_ref,
-  ).toBe("employee-codex");
-});
+    });
+    expect(readFileSync(join(second.run_dir, "launch.sh"), "utf8")).toContain(
+      `exec nice -n ${expectedNice} 'pi'`,
+    );
+    expect(
+      store.uow.read((tx) => tx.runs.list(project_id))[0]?.launch_profile_ref,
+    ).toBe("employee-codex");
+  },
+);
