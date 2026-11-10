@@ -10,7 +10,9 @@ import { Readable } from "node:stream";
 import {
   type Card,
   type Decision,
+  listNeedsYou,
   pauseStandingAssignment,
+  pmFailedMergeCheck,
   recordMergeCheck,
   releaseAssignment,
   requestDecision,
@@ -309,20 +311,42 @@ test.each(["failed", "timed_out"] as const)(
         expect(snapshot()).toBe(before);
       }
     }
+    // C-66: this fixture runs an active PM Ops and the card is not
+    // human-only, so the failed confirmed merge is PM's to return or recheck
+    // (pm_queue.failed_merge_checks) and leaves the human's Needs You.
+    const confirmed = s.state().decisions.find((d) => d.id === q.id);
+    if (!confirmed) throw new Error("No confirmation");
+    expect(pmFailedMergeCheck(s.state(), confirmed)).toMatchObject({
+      status,
+    });
     const needs = await fetch(web.url + path("/needs-you"), {
       headers: { cookie },
     });
     const needsBody = await needs.json();
-    expect(needsBody.decisions[0]?.followup_notice).toBeUndefined();
-    expect(needsBody).toMatchObject({
-      decisions: [
-        expect.objectContaining({
-          id: q.id,
-          status: "resolved",
-          options: [expect.objectContaining({ key: "request_changes" })],
-        }),
-      ],
-    });
+    expect(needsBody.decisions.map((d: { id: string }) => d.id)).not.toContain(
+      q.id,
+    );
+    // Without an active PM Ops the human still gets the C-46 return entry.
+    const human = { kind: "human", project_id: s.state().project_id } as const;
+    const withoutOps = {
+      ...s.state(),
+      assignments: s
+        .state()
+        .assignments.filter(
+          (a) => !(a.scope === "standing" && a.standing_mode === "ops"),
+        ),
+    };
+    const pending = listNeedsYou(withoutOps, human);
+    if (!pending.ok) throw pending.error;
+    expect(pending.value.data.decisions).toEqual([
+      expect.objectContaining({
+        id: q.id,
+        status: "resolved",
+        options: [expect.objectContaining({ key: "request_changes" })],
+      }),
+    ]);
+    expect(pending.value.data.decisions[0]?.followup_notice).toBeUndefined();
+    // The human can still return it directly through the Workbench.
     const headers = { "Idempotency-Key": "return-failed-merge" };
     const response = await request(resolvePath(q), returning, headers);
     expect(response).toMatchObject({
