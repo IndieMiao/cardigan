@@ -12,6 +12,7 @@ import {
   prepareCheckoutAlias,
   secureDataDirectory,
 } from "@cardigan/runtime-herdr";
+import { checkEnvironment } from "./check-environment.js";
 import { CHECKOUT_WORKER } from "./checkout-worker.js";
 
 export interface CheckoutCheck {
@@ -69,17 +70,7 @@ export async function runInTemporaryCheckout(
     ![sha, tree].every((v) => /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(v))
   )
     throw new Error("Invalid temporary checkout identity");
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(input.env ?? {})) {
-    if (
-      !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(key) ||
-      /^(PATH|PWD|HOME|TMPDIR|HC_.*|CARDIGAN_.*|XDG_RUNTIME_DIR)$/u.test(key) ||
-      typeof value !== "string" ||
-      value.includes("\0")
-    )
-      throw new Error("Invalid or reserved check environment variable");
-    env[key] = value;
-  }
+  const env = checkEnvironment(input.env);
   const checks = input.checks.map((check) => {
     if (!check.name.trim() || !check.run.trim() || check.run.includes("\0"))
       throw new Error("Check name and command must be nonempty");
