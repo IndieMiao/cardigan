@@ -233,19 +233,25 @@ export function Timeline({
             <LongContent
               lines={["comment", "instruction"].includes(entry.type) ? 15 : 6}
             >
-              <div
-                className="timeline-body markdown"
-                dangerouslySetInnerHTML={{
-                  __html: renderMarkdown(
-                    linkifyReferences(
-                      entry.body,
-                      linkableReferences(entry.references ?? []),
-                      projectId,
-                      cardId,
+              {entry.event_type === "card_marked_done" ? (
+                <div className="timeline-body completion-result">
+                  {entry.body}
+                </div>
+              ) : (
+                <div
+                  className="timeline-body markdown"
+                  dangerouslySetInnerHTML={{
+                    __html: renderMarkdown(
+                      linkifyReferences(
+                        entry.body,
+                        linkableReferences(entry.references ?? []),
+                        projectId,
+                        cardId,
+                      ),
                     ),
-                  ),
-                }}
-              />
+                  }}
+                />
+              )}
             </LongContent>
           </>
         )}
@@ -308,6 +314,7 @@ export function Timeline({
                 group.some(
                   (entry) =>
                     entry.retracted ||
+                    entry.event_type === "card_marked_done" ||
                     (entry.body.trim() &&
                       ![
                         entry.event_type,

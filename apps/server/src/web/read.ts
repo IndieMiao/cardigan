@@ -3,8 +3,10 @@ import type {
   Author,
   CardId,
   CardView,
+  CommandPorts,
   CommandState,
   Decision,
+  EventId,
   Machine,
   MergeCheckView,
   ProjectId,
@@ -15,18 +17,27 @@ import type {
 import {
   authorView,
   autoMergeSchedule,
+  builtinCardTemplates,
+  cardTemplate,
   deriveCardStatus,
   deriveReviewMatrix,
   extractReferences,
+  formatTimelineEntryId,
+  latestCardTemplate,
   listNeedsYou,
+  markCardDone,
   parseAvatarReference,
   projectSnapshot,
   type Result,
+  ROLE_TOOL_ALLOWLISTS,
+  type Role,
   resolveReferences,
+  roleKind,
   runAuthorView,
 } from "@cardigan/domain";
 import type { ProjectMergeGate } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
+import { convertLegacyRole, HARNESSES, isDefaultRoleId } from "@cardigan/roles";
 import type { Store } from "@cardigan/store";
 
 /**
@@ -70,6 +81,66 @@ export function projectState(
   project_id: ProjectId,
 ): CommandState {
   return store.uow.read((tx) => loadCommandState(tx, project_id));
+}
+
+/** Preview pure commands without persisting effects or allocating database IDs. */
+export function previewPorts(now: string): CommandPorts {
+  return {
+    clock: { now: () => now },
+    ids: {
+      next: () => {
+        throw new Error("Preview cannot allocate entity IDs");
+      },
+      nextAttachmentId: () => {
+        throw new Error("Preview cannot allocate attachments");
+      },
+      nextEventId: () => "preview" as EventId,
+      nextEventSequence: () => 1,
+      nextTimelineEntryId: (_project, card) =>
+        unwrap(formatTimelineEntryId(card, 1)),
+    },
+  };
+}
+
+export function templateHistory(state: CommandState, id: string) {
+  const versions = new Map(
+    [...builtinCardTemplates, ...(state.card_templates ?? [])]
+      .filter((t) => t.id === id)
+      .map((t) => [t.version, t]),
+  );
+  return [...versions.values()]
+    .sort((a, b) => b.version - a.version)
+    .map((template) => {
+      const event = state.events.find((e) => {
+        const p = e.payload;
+        return (
+          e.type === "card_template_changed" &&
+          p &&
+          typeof p === "object" &&
+          "template_id" in p &&
+          p.template_id === id &&
+          "version" in p &&
+          p.version === template.version
+        );
+      });
+      return {
+        ...template,
+        summary: `${template.title} · ${template.work_items.length} 个工作项`,
+        // Builtin migration snapshots have no creation event; do not invent a date.
+        created_at: event?.created_at ?? null,
+      };
+    });
+}
+
+export function templateList(state: CommandState) {
+  const templates = [...builtinCardTemplates, ...(state.card_templates ?? [])];
+  return [...new Set(templates.map((t) => t.id))]
+    .sort()
+    .map(
+      (id) =>
+        latestCardTemplate(state.card_templates ?? [], id) ??
+        latestCardTemplate(builtinCardTemplates, id),
+    );
 }
 
 /** Public employee profile only; opaque references and external URLs are not images. */
@@ -575,7 +646,28 @@ export function cardDetail(
     sourceDecision?.card_id !== card_id
       ? state.cards.find((c) => c.id === sourceDecision?.card_id)
       : undefined;
+  const template = cardTemplate(card, state.card_templates);
+  const completionPreview =
+    template?.completion.mode === "human_mark_done"
+      ? markCardDone(
+          state,
+          human(state.project_id),
+          { card_id, result: "检查完成条件" },
+          previewPorts(options.now ?? card.created_at),
+        )
+      : undefined;
   return {
+    template: template ?? null,
+    mark_done: completionPreview
+      ? {
+          allowed: completionPreview.ok,
+          reason: completionPreview.ok
+            ? null
+            : completionPreview.error.code === "illegal_transition"
+              ? "当前卡片状态不允许标记完成。"
+              : completionPreview.error.message,
+        }
+      : null,
     updated_at,
     card: { ...card, references: references(description) },
     work_items,
@@ -1113,5 +1205,161 @@ export function activity(
     })),
     counts: { returned: page.length, matched: filtered.length },
     next_before: filtered.length > page.length ? (oldest?.id ?? null) : null,
+  };
+}
+
+/** Default role pack ids offered as copy sources (plan p2v-9-10 §2.1). */
+const DEFAULT_ROLE_CANDIDATES = [
+  "pm",
+  "coder",
+  "reviewer",
+  "designer",
+  "tester",
+];
+export const DEFAULT_ROLE_IDS = DEFAULT_ROLE_CANDIDATES.filter(isDefaultRoleId);
+
+/** Fields compared between versions; status changes are reported separately. */
+export const ROLE_FIELDS = [
+  "display_name",
+  "kind",
+  "instructions",
+  "core_prompt",
+  "harness",
+  "launch_profile_ref",
+  "allowed_tools",
+  "capabilities",
+  "abilities",
+  "worktree",
+  "required_machine_tags",
+] as const;
+
+const ROLE_ACTIONS: Readonly<Record<string, string>> = {
+  role_created: "创建",
+  role_copied: "复制",
+  role_updated: "编辑",
+  role_activated: "启用",
+  role_deactivated: "停用",
+  role_rolled_back: "回退",
+};
+
+function latestRoles(versions: readonly Role[]): Role[] {
+  const latest = new Map<string, Role>();
+  for (const role of versions) {
+    const seen = latest.get(role.role_id);
+    if (seen === undefined || seen.version < role.version)
+      latest.set(role.role_id, role);
+  }
+  return [...latest.values()].sort((a, b) =>
+    a.role_id.localeCompare(b.role_id),
+  );
+}
+
+function roleStatus(role: Role): "active" | "inactive" {
+  return role.status === "inactive" ? "inactive" : "active";
+}
+
+/** V9b 角色列表: the latest version of every role, inactive ones included. */
+export function roleList(project_id: ProjectId, versions: readonly Role[]) {
+  return {
+    project_id,
+    roles: latestRoles(versions).map((role) => ({
+      role_id: role.role_id,
+      display_name: role.display_name,
+      kind: roleKind(role),
+      status: roleStatus(role),
+      version: role.version,
+      harness: role.harness,
+      launch_profile_ref: role.launch_profile_ref,
+    })),
+    default_roles: DEFAULT_ROLE_IDS,
+    harnesses: HARNESSES,
+    allowlists: ROLE_TOOL_ALLOWLISTS,
+  };
+}
+
+function changedFields(previous: Role | undefined, role: Role): string[] {
+  if (previous === undefined) return [];
+  return ROLE_FIELDS.filter(
+    (field) =>
+      JSON.stringify(previous[field] ?? null) !==
+      JSON.stringify(role[field] ?? null),
+  );
+}
+
+function versionsOf(versions: readonly Role[], role_id: string): Role[] {
+  return versions
+    .filter((role) => role.role_id === role_id)
+    .sort((a, b) => a.version - b.version);
+}
+
+/** V9b 角色详情: the current definition, the one before it, and editing hints. */
+export function roleDetail(versions: readonly Role[], role_id: string) {
+  const own = versionsOf(versions, role_id);
+  const role = own.at(-1);
+  if (role === undefined) return undefined;
+  const kind = roleKind(role);
+  return {
+    role: { ...role, kind, status: roleStatus(role) },
+    previous: own.at(-2) ?? null,
+    allowlist: ROLE_TOOL_ALLOWLISTS[kind],
+    allowlists: ROLE_TOOL_ALLOWLISTS,
+    harnesses: HARNESSES,
+    // Legacy roles only carry core_prompt; V9a's converter proposes instructions.
+    legacy_conversion:
+      role.instructions === undefined ? convertLegacyRole(role) : null,
+  };
+}
+
+/** V9b 角色历史: every version, newest first, with who saved it and when. */
+export function roleHistory(
+  state: CommandState,
+  versions: readonly Role[],
+  role_id: string,
+) {
+  const own = versionsOf(versions, role_id);
+  if (own.length === 0) return undefined;
+  const events = state.events.filter((event) => {
+    if (!(event.type in ROLE_ACTIONS)) return false;
+    const payload = event.payload as { role?: Partial<Role> } | null;
+    return payload?.role?.role_id === role_id;
+  });
+  return {
+    role_id,
+    versions: own
+      .map((role, index) => {
+        const event = events.find(
+          (e) =>
+            (e.payload as { role?: Partial<Role> }).role?.version ===
+            role.version,
+        );
+        const previous = own[index - 1];
+        const changes = changedFields(previous, role);
+        const action =
+          event === undefined
+            ? "登记"
+            : (ROLE_ACTIONS[event.type] ?? event.type);
+        return {
+          version: role.version,
+          role: { ...role, status: roleStatus(role) },
+          action,
+          summary:
+            changes.length === 0
+              ? action
+              : `${action}：改动 ${changes.join("、")}`,
+          changes,
+          created_at: event?.created_at ?? null,
+          actor: event?.actor.kind ?? null,
+          author_display:
+            event === undefined
+              ? null
+              : authorView(
+                  state,
+                  event.actor.kind === "assignment"
+                    ? `assignment:${event.actor.assignment_id}`
+                    : event.actor.kind,
+                ).author_display,
+        };
+      })
+      .reverse(),
   };
 }

@@ -180,6 +180,43 @@ export function fakeClient(
       merge_gate_enabled: false,
     }),
     setPreferences: async () => {},
+    templates: async () => ({ templates: [] }),
+    template: async () => {
+      throw new Error("Missing template fixture");
+    },
+    templateHistory: async () => ({ versions: [] }),
+    validateTemplate: async () => ({ valid: true, reason: null }),
+    manageTemplate: async () => {
+      throw new Error("Missing template fixture");
+    },
+    markCardDone: async () => {},
+    roles: async (project_id) => ({
+      project_id,
+      roles: [],
+      default_roles: ["pm", "coder", "reviewer", "designer", "tester"],
+      harnesses: ["claude-code", "codex", "pi"],
+      allowlists: { produce: [], verify: [], standing: [] },
+    }),
+    role: async () => {
+      throw new Error("role not stubbed");
+    },
+    roleHistory: async (project_id, role_id) => ({
+      project_id,
+      role_id,
+      versions: [],
+    }),
+    copyRole: async () => {
+      throw new Error("copyRole not stubbed");
+    },
+    updateRole: async () => {
+      throw new Error("updateRole not stubbed");
+    },
+    setRoleActive: async () => {
+      throw new Error("setRoleActive not stubbed");
+    },
+    rollbackRole: async () => {
+      throw new Error("rollbackRole not stubbed");
+    },
     setDelegation: async () => {},
     decisionHistory: async () => ({ decisions: [] }),
     needsYou: async () => ({ decisions: [], human_actions: [], incidents: [] }),

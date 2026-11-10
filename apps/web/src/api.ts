@@ -314,6 +314,8 @@ export interface CardRelations {
 }
 
 export interface CardDetail {
+  readonly template?: TemplateView | null;
+  readonly mark_done?: { allowed: boolean; reason: string | null } | null;
   readonly updated_at?: string;
   readonly recent_conclusions?: readonly TimelineEntryView[];
   readonly project_id: string;
@@ -625,13 +627,209 @@ export interface DecisionHistoryRecord extends DecisionView {
     proxy_authority?: string;
   };
 }
+export interface TemplateDefinition {
+  id: string;
+  title: string;
+  description: string;
+  requires_repo: boolean;
+  merge: "none" | "confirm" | "auto";
+  require_acceptance_criteria: boolean;
+  work_items: {
+    key: string;
+    title: string;
+    kind: "produce" | "verify";
+    role_id: string;
+    required: boolean;
+    target_work_item_key?: string;
+  }[];
+  primary_work_item_key: string | null;
+  completion:
+    | { mode: "human_mark_done" }
+    | { mode: "review"; reviewer: string };
+}
+export interface TemplateView extends TemplateDefinition {
+  version: number;
+  builtin: boolean;
+  status: "active" | "inactive";
+}
+export interface TemplateVersion extends TemplateView {
+  summary: string;
+  created_at: string | null;
+}
+export type TemplateChange =
+  | { action: "add" | "update"; definition: TemplateDefinition }
+  | { action: "copy"; template_id: string; new_id: string; version?: number }
+  | { action: "activate" | "deactivate"; template_id: string }
+  | { action: "rollback"; template_id: string; version: number };
+export interface TemplateDetail {
+  template: TemplateVersion;
+  previous: TemplateVersion | null;
+}
+export interface TemplateValidation {
+  valid: boolean;
+  reason: string | null;
+}
+
 export interface PreferencesView {
   readonly decision_delegation?: Readonly<Record<string, boolean>>;
   readonly auto_merge_after_minutes: number | null;
   readonly merge_gate_enabled: boolean;
 }
 
+export type RoleKind = "produce" | "verify" | "standing";
+export type RoleWorktree = "none" | "readonly" | "write";
+export type RoleAllowlists = Readonly<Record<RoleKind, readonly string[]>>;
+
+export interface RoleSummary {
+  readonly role_id: string;
+  readonly display_name: string;
+  readonly kind: RoleKind;
+  readonly status: "active" | "inactive";
+  readonly version: number;
+  readonly harness: string;
+  readonly launch_profile_ref: string;
+}
+
+export interface RoleListView {
+  readonly project_id: string;
+  readonly roles: readonly RoleSummary[];
+  readonly default_roles: readonly string[];
+  readonly harnesses: readonly string[];
+  readonly allowlists: RoleAllowlists;
+}
+
+/** One saved role version (V9a `Role`). */
+export interface RoleDefinitionView {
+  readonly role_id: string;
+  readonly version: number;
+  readonly display_name: string;
+  readonly kind: RoleKind | "work";
+  readonly status?: "active" | "inactive";
+  readonly instructions?: string;
+  readonly core_prompt: string;
+  readonly harness: string;
+  readonly launch_profile_ref: string;
+  readonly allowed_tools: readonly string[];
+  readonly capabilities: readonly string[];
+  readonly abilities: readonly string[];
+  readonly worktree: RoleWorktree;
+  readonly required_machine_tags: readonly string[];
+}
+
+export interface RoleDetailView {
+  readonly project_id: string;
+  readonly role: RoleDefinitionView & {
+    readonly kind: RoleKind;
+    readonly status: "active" | "inactive";
+  };
+  readonly previous: RoleDefinitionView | null;
+  readonly allowlist: readonly string[];
+  readonly allowlists: RoleAllowlists;
+  readonly harnesses: readonly string[];
+  /** Present for legacy roles that only have `core_prompt`. */
+  readonly legacy_conversion: {
+    readonly instructions: string;
+    readonly warnings: readonly string[];
+  } | null;
+}
+
+export interface RoleHistoryEntry {
+  readonly version: number;
+  readonly role: RoleDefinitionView;
+  readonly action: string;
+  readonly summary: string;
+  readonly changes: readonly string[];
+  readonly created_at: string | null;
+  readonly actor: string | null;
+  readonly author_display: string | null;
+}
+
+export interface RoleHistoryView {
+  readonly project_id: string;
+  readonly role_id: string;
+  readonly versions: readonly RoleHistoryEntry[];
+}
+
+export interface RoleEditInput {
+  readonly display_name?: string;
+  readonly kind?: RoleKind;
+  readonly instructions?: string;
+  readonly harness?: string;
+  readonly launch_profile_ref?: string;
+  readonly allowed_tools?: readonly string[];
+  readonly capabilities?: readonly string[];
+  readonly abilities?: readonly string[];
+  readonly worktree?: RoleWorktree;
+  readonly required_machine_tags?: readonly string[];
+}
+
+export interface RoleCopyInput {
+  readonly role_id: string;
+  readonly display_name?: string;
+  readonly source:
+    | {
+        readonly kind: "default";
+        readonly role_id: string;
+        readonly harness: string;
+        readonly launch_profile_ref: string;
+      }
+    | {
+        readonly kind: "project";
+        readonly project_id?: string;
+        readonly role_id: string;
+        readonly version?: number;
+      };
+}
+
 export interface CardiganClient {
+  templates(projectId: string): Promise<{ templates: TemplateView[] }>;
+  template(projectId: string, id: string): Promise<TemplateDetail>;
+  templateHistory(
+    projectId: string,
+    id: string,
+  ): Promise<{ versions: TemplateVersion[] }>;
+  validateTemplate(
+    projectId: string,
+    change: TemplateChange,
+  ): Promise<TemplateValidation>;
+  manageTemplate(
+    projectId: string,
+    change: TemplateChange,
+    idempotencyKey: string,
+  ): Promise<TemplateView>;
+  markCardDone(
+    projectId: string,
+    cardId: string,
+    result: string,
+    attachments: string[],
+    idempotencyKey: string,
+  ): Promise<void>;
+  roles(projectId: string): Promise<RoleListView>;
+  role(projectId: string, roleId: string): Promise<RoleDetailView>;
+  roleHistory(projectId: string, roleId: string): Promise<RoleHistoryView>;
+  copyRole(
+    projectId: string,
+    input: RoleCopyInput,
+    idempotencyKey: string,
+  ): Promise<RoleDefinitionView>;
+  updateRole(
+    projectId: string,
+    roleId: string,
+    patch: RoleEditInput,
+    idempotencyKey: string,
+  ): Promise<RoleDefinitionView>;
+  setRoleActive(
+    projectId: string,
+    roleId: string,
+    active: boolean,
+    idempotencyKey: string,
+  ): Promise<RoleDefinitionView>;
+  rollbackRole(
+    projectId: string,
+    roleId: string,
+    version: number,
+    idempotencyKey: string,
+  ): Promise<RoleDefinitionView>;
   decisionHistory(
     projectId: string,
     filters: Readonly<Record<string, string>>,
@@ -847,6 +1045,59 @@ export class HttpCardiganClient implements CardiganClient {
       idempotencyKey,
     );
   }
+  templates(projectId: string): Promise<{ templates: TemplateView[] }> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/card-templates`,
+    );
+  }
+  template(projectId: string, id: string): Promise<TemplateDetail> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/card-templates/${encodeURIComponent(id)}`,
+    );
+  }
+  templateHistory(
+    projectId: string,
+    id: string,
+  ): Promise<{ versions: TemplateVersion[] }> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/card-templates/${encodeURIComponent(id)}/history`,
+    );
+  }
+  validateTemplate(
+    projectId: string,
+    change: TemplateChange,
+  ): Promise<TemplateValidation> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/card-templates/validate`,
+      { method: "POST", body: JSON.stringify(change) },
+    );
+  }
+  async manageTemplate(
+    projectId: string,
+    change: TemplateChange,
+    idempotencyKey: string,
+  ): Promise<TemplateView> {
+    return (await this.write(
+      projectId,
+      "card-templates",
+      change,
+      idempotencyKey,
+    )) as TemplateView;
+  }
+  async markCardDone(
+    projectId: string,
+    cardId: string,
+    result: string,
+    attachments: string[],
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      `cards/${encodeURIComponent(cardId)}/mark-done`,
+      { result, attachments },
+      idempotencyKey,
+    );
+  }
   preferences(projectId: string): Promise<PreferencesView> {
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/preferences`,
@@ -863,6 +1114,70 @@ export class HttpCardiganClient implements CardiganClient {
       { auto_merge_after_minutes: minutes },
       idempotencyKey,
     );
+  }
+  roles(projectId: string): Promise<RoleListView> {
+    return this.request(`/api/projects/${encodeURIComponent(projectId)}/roles`);
+  }
+  role(projectId: string, roleId: string): Promise<RoleDetailView> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/roles/${encodeURIComponent(roleId)}`,
+    );
+  }
+  roleHistory(projectId: string, roleId: string): Promise<RoleHistoryView> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/roles/${encodeURIComponent(roleId)}/history`,
+    );
+  }
+  copyRole(
+    projectId: string,
+    input: RoleCopyInput,
+    idempotencyKey: string,
+  ): Promise<RoleDefinitionView> {
+    return this.write(
+      projectId,
+      "roles/copy",
+      input,
+      idempotencyKey,
+    ) as Promise<RoleDefinitionView>;
+  }
+  updateRole(
+    projectId: string,
+    roleId: string,
+    patch: RoleEditInput,
+    idempotencyKey: string,
+  ): Promise<RoleDefinitionView> {
+    return this.write(
+      projectId,
+      `roles/${encodeURIComponent(roleId)}/update`,
+      patch,
+      idempotencyKey,
+    ) as Promise<RoleDefinitionView>;
+  }
+  setRoleActive(
+    projectId: string,
+    roleId: string,
+    active: boolean,
+    idempotencyKey: string,
+  ): Promise<RoleDefinitionView> {
+    return this.write(
+      projectId,
+      `roles/${encodeURIComponent(roleId)}/${active ? "activate" : "deactivate"}`,
+      {},
+      idempotencyKey,
+    ) as Promise<RoleDefinitionView>;
+  }
+  rollbackRole(
+    projectId: string,
+    roleId: string,
+    version: number,
+    idempotencyKey: string,
+  ): Promise<RoleDefinitionView> {
+    return this.write(
+      projectId,
+      `roles/${encodeURIComponent(roleId)}/rollback`,
+      { version },
+      idempotencyKey,
+    ) as Promise<RoleDefinitionView>;
   }
   needsYou(projectId: string): Promise<NeedsPage> {
     return this.request(

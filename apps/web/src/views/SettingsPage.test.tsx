@@ -121,6 +121,7 @@ test("authorization exposes defaults, retries safely, and fixes high-risk catego
   render(
     <SettingsPage projectId="p-1" client={fakeClient({ setDelegation })} />,
   );
+  fireEvent.click(screen.getByRole("button", { name: "授权", exact: true }));
   const process = await screen.findByRole("checkbox", {
     name: "流程：由 PM 代拍",
   });
@@ -162,4 +163,57 @@ test("authorization exposes defaults, retries safely, and fixes high-risk catego
   expect(setDelegation.mock.calls[1]?.[3]).toBe(
     setDelegation.mock.calls[0]?.[3],
   );
+});
+
+test("preferences, authorization, roles and templates coexist as separate settings tabs", async () => {
+  render(<SettingsPage client={fakeClient()} projectId="p-1" />);
+  const preferences = screen.getByRole("button", { name: "偏好", exact: true });
+  const authorization = screen.getByRole("button", {
+    name: "授权",
+    exact: true,
+  });
+  const roles = screen.getByRole("button", { name: "角色", exact: true });
+  const templates = screen.getByRole("button", {
+    name: "卡片模板",
+    exact: true,
+  });
+  expect(preferences.getAttribute("aria-current")).toBe("page");
+  await screen.findByRole("checkbox", { name: "超时自动合并" });
+  fireEvent.click(authorization);
+  expect(authorization.getAttribute("aria-current")).toBe("page");
+  expect(
+    screen.getByRole("heading", { name: "授权", exact: true }),
+  ).toBeTruthy();
+  expect(screen.queryByRole("checkbox", { name: "超时自动合并" })).toBeNull();
+  expect(
+    screen.getByRole("checkbox", { name: "流程：由 PM 代拍" }),
+  ).toBeTruthy();
+  fireEvent.click(roles);
+  await screen.findByText("本项目还没有登记角色。");
+  expect(roles.getAttribute("aria-current")).toBe("page");
+  expect(
+    screen.getByRole("heading", { name: "角色", exact: true }),
+  ).toBeTruthy();
+  expect(screen.getByRole("button", { name: "新建角色" })).toBeTruthy();
+  expect(
+    screen.queryByRole("heading", { name: "授权", exact: true }),
+  ).toBeNull();
+  fireEvent.click(templates);
+  await screen.findByRole("table", { name: "项目卡片模板" });
+  expect(screen.queryByRole("button", { name: "新建角色" })).toBeNull();
+  expect(templates.getAttribute("aria-current")).toBe("page");
+  expect(
+    screen.queryByRole("heading", { name: "授权", exact: true }),
+  ).toBeNull();
+  fireEvent.click(preferences);
+  expect(preferences.getAttribute("aria-current")).toBe("page");
+  expect(screen.getByRole("checkbox", { name: "超时自动合并" })).toBeTruthy();
+  expect(screen.queryByRole("table", { name: "项目卡片模板" })).toBeNull();
+  fireEvent.click(roles);
+  await screen.findByText("本项目还没有登记角色。");
+  expect(screen.queryByRole("checkbox", { name: "超时自动合并" })).toBeNull();
+  fireEvent.click(authorization);
+  expect(
+    screen.getByRole("checkbox", { name: "流程：由 PM 代拍" }),
+  ).toBeTruthy();
 });

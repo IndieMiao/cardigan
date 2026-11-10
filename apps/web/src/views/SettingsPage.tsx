@@ -11,6 +11,8 @@ import {
   delegableCategories,
 } from "../decision-labels.js";
 import { useResource } from "../useResource.js";
+import { RolesSettings } from "./RolesSettings.js";
+import { TemplateSettings } from "./TemplateSettings.js";
 
 export function SettingsPage({
   client,
@@ -21,6 +23,9 @@ export function SettingsPage({
   projectId: string;
   revision?: number;
 }) {
+  const [tab, setTab] = useState<
+    "preferences" | "authorization" | "roles" | "templates"
+  >("preferences");
   const load = useCallback(
     () => client.preferences(projectId),
     [client, projectId],
@@ -28,27 +33,70 @@ export function SettingsPage({
   const resource = useResource(load, revision);
   return (
     <>
-      <PageTitle title="设置" description="管理当前项目的偏好。" />
+      <PageTitle
+        title="设置"
+        description="管理当前项目的偏好、授权、角色和卡片模板。"
+      />
       <div className="settings-layout">
         <nav aria-label="设置分栏">
           <button
             type="button"
             onClick={() => {
-              document.getElementById("preferences")?.focus();
+              setTab("preferences");
             }}
-            aria-current="page"
+            aria-current={tab === "preferences" ? "page" : undefined}
           >
             偏好
           </button>
           <button
             type="button"
-            onClick={() => document.getElementById("authorization")?.focus()}
+            onClick={() => setTab("authorization")}
+            aria-current={tab === "authorization" ? "page" : undefined}
           >
             授权
           </button>
+          <button
+            type="button"
+            aria-current={tab === "roles" ? "page" : undefined}
+            onClick={() => {
+              setTab("roles");
+              requestAnimationFrame(() =>
+                document.getElementById("roles")?.focus(),
+              );
+            }}
+          >
+            角色
+          </button>
+          <button
+            type="button"
+            aria-current={tab === "templates" ? "page" : undefined}
+            onClick={() => setTab("templates")}
+          >
+            卡片模板
+          </button>
         </nav>
-        <div>
+        {tab === "roles" && (
+          <section id="roles" tabIndex={-1} aria-labelledby="roles-title">
+            <h2 id="roles-title">角色</h2>
+            <RolesSettings
+              key={projectId}
+              client={client}
+              projectId={projectId}
+              revision={revision}
+            />
+          </section>
+        )}
+        {tab === "templates" && (
+          <TemplateSettings
+            key={projectId}
+            client={client}
+            projectId={projectId}
+            revision={revision}
+          />
+        )}
+        <div hidden={tab === "templates" || tab === "roles"}>
           <section
+            hidden={tab !== "preferences"}
             id="preferences"
             tabIndex={-1}
             aria-labelledby="preferences-title"
@@ -76,6 +124,7 @@ export function SettingsPage({
             )}
           </section>
           <section
+            hidden={tab !== "authorization"}
             id="authorization"
             tabIndex={-1}
             aria-labelledby="authorization-title"
