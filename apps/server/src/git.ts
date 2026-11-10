@@ -16,9 +16,11 @@ import {
   GitWorktreeService,
   type MergeOutcome,
   type PreparedMerge,
+  type ReconcileChecks,
   type ReconcileFinding,
   type RemoveWorktreeInput,
   type RemoveWorktreeOutcome,
+  reconcile,
   type SourceSync,
   type WorktreeDiff,
 } from "@cardigan/git-service";
@@ -47,8 +49,9 @@ import type { ProjectRecord, Store } from "@cardigan/store";
  * for all projects (paths are project-scoped).
  */
 export interface ServerGitOptions {
-  readonly store: Pick<Store, "getProject" | "listProjects">;
+  readonly store: Pick<Store, "getProject" | "listProjects" | "uow">;
   readonly dataDir: string;
+  readonly checkCleanupGraceMs?: number;
   /** Defaults to local mode; `agent-ssh` routes workspace Git via the Agent. */
   readonly execution?: ExecutionConfig;
   /**
@@ -106,6 +109,7 @@ export interface ReconcileGit {
     project: CentralProject,
     assignments: readonly Assignment[],
     deliveries: readonly Delivery[],
+    at?: string,
   ): Promise<readonly ReconcileFinding[]>;
   removeWorktree(input: RemoveWorktreeInput): Promise<RemoveWorktreeOutcome>;
   diffWorktree(input: {
@@ -125,12 +129,13 @@ export interface ReconcileGit {
 export function gitRoots(
   execution: ExecutionConfig,
   dataDir: string,
-): { repositoriesRoot: string; worktreesRoot: string } {
+): { repositoriesRoot: string; worktreesRoot: string; checksRoot: string } {
   const root =
     execution.mode === "local" ? join(dataDir, "agent") : execution.agentRoot;
   return {
     repositoriesRoot: join(root, "repos"),
     worktreesRoot: join(root, "worktrees"),
+    checksRoot: join(root, "checks"),
   };
 }
 
@@ -403,8 +408,42 @@ export class ServerGit implements GitBinding {
     project: CentralProject,
     assignments: readonly Assignment[],
     deliveries: readonly Delivery[],
+    at = new Date().toISOString(),
   ): Promise<readonly ReconcileFinding[]> {
-    return this.worktrees.reconcile(project, assignments, deliveries);
+    const state = await this.worktrees.listWorktreeState(project);
+    // Read ownership after filesystem IO so a newly queued check is protected.
+    // Keep every attempt, including those of superseded completions/closed cards.
+    const attempts = this.options.store.uow.read((tx) => {
+      const id = project.project_id as ProjectId;
+      const latest = new Map<string, ReconcileChecks["attempts"][number]>();
+      for (const card of tx.cards.list(id))
+        for (const event of tx.events.listAfter(id, card.id, 0)) {
+          if (
+            event.actor.kind !== "system" ||
+            ![
+              "merge_check_queued",
+              "merge_check_started",
+              "merge_check_finished",
+            ].includes(event.type)
+          )
+            continue;
+          const check = event.payload as ReconcileChecks["attempts"][number];
+          latest.set(check.attempt_id, {
+            ...check,
+            updated_at: event.created_at,
+          });
+        }
+      return [...latest.values()];
+    });
+    return reconcile(state, assignments, deliveries, {
+      attempts,
+      now: at,
+      ...(this.options.checkCleanupGraceMs === undefined
+        ? {}
+        : {
+            cleanupGraceMs: this.options.checkCleanupGraceMs,
+          }),
+    });
   }
   async removeWorktree(
     input: RemoveWorktreeInput,

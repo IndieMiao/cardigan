@@ -1,3 +1,5 @@
+import { DEFAULT_CHECK_CLEANUP_GRACE_MS } from "@cardigan/git-service";
+
 export const DEFAULT_DATA_DIR = defaultDataDirectory();
 /**
  * M1 only listens on this machine (§3, §9.1): LAN listening arrives with the
@@ -20,6 +22,7 @@ export interface ServerConfig {
   readonly mergeIntervalMs?: number;
   readonly cleanupIntervalMs?: number;
   readonly reconcileIntervalMs?: number;
+  readonly checkCleanupGraceMs?: number;
   readonly backupIntervalMs?: number;
   /** Orphaned attachment blobs (§9.3); 6 hours by default. */
   readonly attachmentIntervalMs?: number;
@@ -40,6 +43,7 @@ export interface ServerEnv extends ExecutionEnv {
   readonly CARDIGAN_MERGE_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_CLEANUP_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_RECONCILE_INTERVAL_MS?: string | undefined;
+  readonly CARDIGAN_CHECK_CLEANUP_GRACE_MS?: string | undefined;
   readonly CARDIGAN_BACKUP_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_ATTACHMENT_GC_INTERVAL_MS?: string | undefined;
 }
@@ -90,6 +94,11 @@ export function resolveServerConfig(env: ServerEnv): ServerConfig {
       env.CARDIGAN_BACKUP_INTERVAL_MS,
       "CARDIGAN_BACKUP_INTERVAL_MS",
       DEFAULT_INTERVALS.backup,
+    ),
+    checkCleanupGraceMs: interval(
+      env.CARDIGAN_CHECK_CLEANUP_GRACE_MS,
+      "CARDIGAN_CHECK_CLEANUP_GRACE_MS",
+      DEFAULT_CHECK_CLEANUP_GRACE_MS,
     ),
     attachmentIntervalMs: interval(
       env.CARDIGAN_ATTACHMENT_GC_INTERVAL_MS,

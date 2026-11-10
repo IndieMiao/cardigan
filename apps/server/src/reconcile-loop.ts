@@ -1,6 +1,6 @@
 import type { Clock, ProjectId } from "@cardigan/domain";
 import type { ReconcileFinding } from "@cardigan/git-service";
-import type { Store } from "@cardigan/store";
+import { retireReconcileNotifications, type Store } from "@cardigan/store";
 import type { ReconcileGit } from "./git.js";
 import { startTimerLoop, type TimerLoop } from "./loop.js";
 import { systemClock } from "./merge-loop.js";
@@ -98,6 +98,7 @@ export class ReconcileExecutor {
         project_id,
         findings,
       );
+      retireReconcileNotifications(this.options.store.database, project_id, at);
       for (const finding of created) {
         const seq = tx.ids.nextEventSequence(project_id, undefined);
         tx.events.append(project_id, {
@@ -132,6 +133,7 @@ export class ReconcileExecutor {
       project,
       state.assignments,
       state.deliveries,
+      this.clock.now(),
     );
     if (await this.repair(project_id, findings)) {
       const current = this.state(project_id);
@@ -139,6 +141,7 @@ export class ReconcileExecutor {
         project,
         current.assignments,
         current.deliveries,
+        this.clock.now(),
       );
     }
     this.record(project_id, findings);

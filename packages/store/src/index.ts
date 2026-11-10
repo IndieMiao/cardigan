@@ -20,6 +20,7 @@ export {
   type RecordNotificationInput,
   reassignNotifications,
   recordNotification,
+  retireReconcileNotifications,
   routerCursor,
 } from "./inbox.js";
 export { persistMemberEffect } from "./members.js";

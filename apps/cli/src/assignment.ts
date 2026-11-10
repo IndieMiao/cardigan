@@ -35,6 +35,7 @@ import {
 } from "@cardigan/runtime-herdr";
 import {
   finishBellAttempt,
+  retireReconcileNotifications,
   Store,
   unfinishedBellAttempts,
   writeRole,
@@ -354,6 +355,8 @@ function resumedBells(
   a: Assignment,
   run: string,
 ): string {
+  store.acknowledgeNotifications(project, a.id);
+  store.uow.run(() => retireReconcileNotifications(store.database, project));
   const recipient = standingModeOf(a) === "office" ? "pm_office" : "pm_ops";
   const owners = new Map(
     store.uow

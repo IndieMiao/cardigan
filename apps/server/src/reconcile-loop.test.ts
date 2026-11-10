@@ -18,6 +18,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { MergeCheckView } from "@cardigan/domain";
 import {
   type CentralProject,
   CentralRepositoryService,
@@ -156,6 +157,112 @@ test("an orphan directory and a manual project directory are reported", async ()
   const open = f.store.listReconcileFindings(f.project_id, { openOnly: true });
   expect(open.map((entry) => entry.kind)).toEqual(["failed_clone"]);
 });
+
+test.each(["local", "agent-ssh"] as const)(
+  "%s check worktrees are protected while active, then report only real leftovers after grace",
+  async (mode) => {
+    await centralWithBaseClone();
+    const agentRoot = join(root, "custom-agent");
+    const clone =
+      mode === "local" ? base : join(agentRoot, "repos", f.project_id);
+    if (mode === "agent-ssh") {
+      mkdirSync(join(agentRoot, "repos"), { recursive: true });
+      git(
+        root,
+        "clone",
+        "-q",
+        "--no-local",
+        await central.ensureCentral(project),
+        clone,
+      );
+    }
+    const binding = new ServerGit({
+      store: f.store,
+      dataDir: f.dataDir,
+      checkCleanupGraceMs: 1000,
+      ...(mode === "agent-ssh"
+        ? {
+            execution: {
+              mode,
+              dataDir: f.dataDir,
+              agentRoot,
+              gid: 2001,
+              machine: "fixture-agent",
+              identityFile: join(root, "no-key"),
+              knownHostsFile: join(root, "no-known-hosts"),
+            },
+            captureAgent: async (_command: "git", args: readonly string[]) => ({
+              ok: true as const,
+              value: git(root, ...args),
+            }),
+          }
+        : {}),
+    });
+    const checks = join(
+      mode === "local" ? join(f.dataDir, "agent") : agentRoot,
+      "checks",
+      f.project_id,
+    );
+    const path = join(checks, "attempt-1", "worktree");
+    git(clone, "worktree", "add", "--detach", path, "HEAD");
+    let at = f.clock.now();
+    const update = (status: MergeCheckView["status"]) =>
+      f.store.uow.run((tx) => {
+        tx.events.append(f.project_id, {
+          id: tx.ids.nextEventId(),
+          card_id: scenario.card.id,
+          seq: tx.ids.nextEventSequence(f.project_id, scenario.card.id),
+          type:
+            status === "queued"
+              ? "merge_check_queued"
+              : status === "running"
+                ? "merge_check_started"
+                : "merge_check_finished",
+          actor: { kind: "system", project_id: f.project_id },
+          payload: { attempt_id: "attempt-1", status },
+          created_at: at,
+        });
+      });
+    const executor = new ReconcileExecutor({
+      store: f.store,
+      git: binding,
+      clock: { now: () => at },
+    });
+    const open = () =>
+      f.store.listReconcileFindings(f.project_id, { openOnly: true });
+    update("queued");
+    await executor.tick(f.project_id);
+    expect(open()).toEqual([]);
+    update("running");
+    await executor.tick(f.project_id);
+    expect(open()).toEqual([]);
+    update("passed");
+    at = new Date(Date.parse(at) + 1000).toISOString();
+    await executor.tick(f.project_id);
+    expect(open()).toEqual([]);
+    at = new Date(Date.parse(at) + 1).toISOString();
+    await executor.tick(f.project_id);
+    expect(open()).toEqual([
+      expect.objectContaining({ kind: "orphan_worktree", path }),
+    ]);
+    expect(existsSync(path)).toBe(true);
+    rmSync(path, { recursive: true });
+    await executor.tick(f.project_id);
+    expect(open()).toEqual([
+      expect.objectContaining({ kind: "stale_registration", path }),
+    ]);
+    git(clone, "worktree", "prune");
+    // A leftover directory without a Git registration is still discovered.
+    mkdirSync(path);
+    await executor.tick(f.project_id);
+    expect(open()).toEqual([
+      expect.objectContaining({ kind: "orphan_worktree", path }),
+    ]);
+    rmSync(path, { recursive: true });
+    await executor.tick(f.project_id);
+    expect(open()).toEqual([]);
+  },
+);
 
 test("a Git delivery without a fixed ref is repaired from its candidate", async () => {
   const repository = await centralWithBaseClone();

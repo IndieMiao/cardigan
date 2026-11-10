@@ -1,3 +1,4 @@
+import { DEFAULT_CHECK_CLEANUP_GRACE_MS } from "@cardigan/git-service";
 import { expect, test } from "vitest";
 import {
   DEFAULT_INTERVALS,
@@ -19,6 +20,7 @@ test("S10 defaults to loopback, port 3004 and the same user data directory as th
     mergeIntervalMs: DEFAULT_INTERVALS.merge,
     cleanupIntervalMs: DEFAULT_INTERVALS.cleanup,
     reconcileIntervalMs: DEFAULT_INTERVALS.reconcile,
+    checkCleanupGraceMs: DEFAULT_CHECK_CLEANUP_GRACE_MS,
     backupIntervalMs: DEFAULT_INTERVALS.backup,
     attachmentIntervalMs: DEFAULT_INTERVALS.attachment,
   });
@@ -85,6 +87,7 @@ test("reads data dir and port from the environment", () => {
     mergeIntervalMs: DEFAULT_INTERVALS.merge,
     cleanupIntervalMs: DEFAULT_INTERVALS.cleanup,
     reconcileIntervalMs: DEFAULT_INTERVALS.reconcile,
+    checkCleanupGraceMs: DEFAULT_CHECK_CLEANUP_GRACE_MS,
     backupIntervalMs: DEFAULT_INTERVALS.backup,
     attachmentIntervalMs: DEFAULT_INTERVALS.attachment,
   });
@@ -130,4 +133,15 @@ test("the attachment sweep defaults to six hours and can be overridden", () => {
       CARDIGAN_ATTACHMENT_GC_INTERVAL_MS: "0",
     }),
   ).toThrow(/CARDIGAN_ATTACHMENT_GC_INTERVAL_MS/);
+});
+
+test("check cleanup grace is configurable and rejects invalid durations", () => {
+  expect(
+    resolveServerConfig({ CARDIGAN_CHECK_CLEANUP_GRACE_MS: "1234" })
+      .checkCleanupGraceMs,
+  ).toBe(1234);
+  for (const value of ["0", "-1", "1.5", "NaN", "2147483648"])
+    expect(() =>
+      resolveServerConfig({ CARDIGAN_CHECK_CLEANUP_GRACE_MS: value }),
+    ).toThrow(/CARDIGAN_CHECK_CLEANUP_GRACE_MS/);
 });

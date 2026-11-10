@@ -132,6 +132,9 @@ export async function startCardiganServer(
       store,
       dataDir: config.dataDir,
       execution,
+      ...(config.checkCleanupGraceMs === undefined
+        ? {}
+        : { checkCleanupGraceMs: config.checkCleanupGraceMs }),
       ...(options.captureAgent === undefined
         ? {}
         : { captureAgent: options.captureAgent }),
