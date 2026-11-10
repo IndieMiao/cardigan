@@ -10,6 +10,7 @@ import type {
   WorkItem,
 } from "../entities.js";
 import type { CardId } from "../ids.js";
+import { requesterNotificationRecipient } from "../notification.js";
 import type { Clock } from "../ports.js";
 import { type CommandDraft, type CommandState, command } from "./core.js";
 import { latestMergeCheck } from "./merge-check.js";
@@ -305,8 +306,30 @@ export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
         }),
       human_actions: d
         .list("human_actions")
-        .filter((h) => h.status === "open")
-        .map((h) => ({ ...h, why: why(h.why_human) })),
+        .filter(
+          (h) =>
+            h.status === "open" ||
+            (h.status === "done" &&
+              requesterNotificationRecipient(h.requested_by, state.assignments)
+                ?.kind === "needs_you" &&
+              (!h.card_id ||
+                state.cards.some(
+                  (c) =>
+                    c.id === h.card_id &&
+                    !["done", "cancelled"].includes(c.status),
+                ))),
+        )
+        .map((h) => ({
+          ...h,
+          why: why(
+            h.status === "done"
+              ? "已完成，但发起方不可用且无活跃 PM Ops 接手"
+              : h.why_human,
+          ),
+          ...(h.status === "done"
+            ? { completion_notice: h.result?.text ?? "" }
+            : {}),
+        })),
     };
   });
 }
