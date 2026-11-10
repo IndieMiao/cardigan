@@ -1065,6 +1065,18 @@ export function executionView(
     [...state.runs]
       .filter((run) => run.assignment_id === assignment_id)
       .sort((left, right) => (left.id === right.id ? 0 : byId(right, left)))[0];
+  // §8.5: a queued Run has neither started_at nor finished_at; its queue time
+  // (the run_queued event) is its activity time for the default sort.
+  const queuedAt = new Map<string, string>();
+  for (const event of state.events) {
+    if (event.type !== "run_queued") continue;
+    const runId = (event.payload as { readonly run_id?: unknown }).run_id;
+    if (typeof runId === "string") queuedAt.set(runId, event.created_at);
+  }
+  const withQueuedAt = (run_id: string) => {
+    const at = queuedAt.get(run_id);
+    return at === undefined ? {} : { queued_at: at };
+  };
   return {
     project_id: state.project_id,
     generated_at: now,
@@ -1110,6 +1122,7 @@ export function executionView(
                 kind: run.kind,
                 started_at: run.started_at ?? null,
                 finished_at: run.finished_at ?? null,
+                ...withQueuedAt(run.id),
                 heartbeat_at: run.heartbeat_at ?? null,
                 heartbeat_note: run.heartbeat_note ?? null,
                 outcome: run.outcome,
@@ -1129,7 +1142,11 @@ export function executionView(
         const waiting = queue.find(
           (r) => r.project_id === state.project_id && r.run_id === run.id,
         );
-        return { ...run, ...(waiting ? { queue_ahead: waiting.ahead } : {}) };
+        return {
+          ...run,
+          ...withQueuedAt(run.id),
+          ...(waiting ? { queue_ahead: waiting.ahead } : {}),
+        };
       }),
   };
 }

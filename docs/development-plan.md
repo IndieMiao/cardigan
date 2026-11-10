@@ -1127,7 +1127,7 @@ U3 卡片读模型补充 `updated_at`（本卡事件的最后时间，空流回�
 | 所有必需项完成 | 最终验收并关闭 |
 | 任意 Assignment | 在 Herdr 中打开（给出命令或机器 + workspace） |
 
-Workbench 的 `#/p/<项目>/execution` 展示 Assignment 的持久 PM 模式、机器、Session、登记工作树、分支、最近 MCP 活动、Run 快照/历史和 ACK 游标。最新 Run 从按编号倒序的完整列表读取，排队但尚无 started_at 的 Run 不会被旧 Run 遮住。已有未结束 Run 或卡片已关闭/等待合并时不提供启动命令；运行环境异常提供终端/attention 检查，实际停止、启动和清理由人执行现有 CLI 或 Needs You 决策。命令仅复制、不自动运行。执行视图与 Needs You 的 CLI 命令旁提示先用 `deploy/install-cli.sh` 安装 `cardigan`（§13.1），复制按钮只复制命令本身。
+Workbench 的 `#/p/<项目>/execution` 展示 Assignment 的持久 PM 模式、机器、Session、登记工作树、分支、最近 MCP 活动、Run 快照/历史和 ACK 游标。最新 Run 从按编号倒序的完整列表读取，排队但尚无 started_at 的 Run 不会被旧 Run 遮住。已有未结束 Run 或卡片已关闭/等待合并时不提供启动命令；运行环境异常提供终端/attention 检查，实际停止、启动和清理由人执行现有 CLI 或 Needs You 决策。命令仅复制、不自动运行。Assignment 列表默认按“最近活动”倒序（最新在前）：最近活动取 MCP 活动和最新 Run 的排队、开始、结束时间中最晚的一个，排队时间来自该 Run 的 `run_queued` 事件（读取接口在 Run 上附加可选的 `queued_at`），运行中和排队中的不单独置顶；没有任何活动的排在最后。列头可切换升降序并标出 `aria-sort`，选择按项目存在本机 localStorage，读不到时用默认倒序。筛选只过滤、不改变顺序；列表一次取全，没有分页。执行视图与 Needs You 的 CLI 命令旁提示先用 `deploy/install-cli.sh` 安装 `cardigan`（§13.1），复制按钮只复制命令本身。
 
 C-48：执行表中正常的 “Assignment 有效” 使用统一状态标签的弱化模式，仅显示次要颜色文字；暂停、释放、未知和失联仍显示形状。运行状态、最近 Run 及展开后的 Run 历史始终保留图标与文字，异常使用红色感叹号或橙色问号。
 
