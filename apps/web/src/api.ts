@@ -68,6 +68,8 @@ export interface CardView {
   readonly status: CardStatus;
   readonly resolution?: "done" | "superseded" | "duplicate" | "wontdo";
   readonly superseded_by?: string;
+  /** C-65: human-only flag; its merge confirmation always goes to the human. */
+  readonly sensitive?: boolean;
   readonly priority: number;
   readonly repo: string;
   readonly base_branch: string;
@@ -505,6 +507,8 @@ export interface NeedsPage {
   }[];
   readonly decisions: readonly NeedsDecision[];
   readonly human_actions: readonly NeedsAction[];
+  /** §7.4 (C-65): merge confirmations PM Ops holds; the human may answer them. */
+  readonly pm_held_merges?: readonly NeedsDecision[];
   /** §7.4 知会: delegated resolutions; never blocking. */
   readonly notices?: readonly NoticeView[];
   readonly incidents: readonly (AuthorView & {
@@ -892,6 +896,12 @@ export interface CardiganClient {
     projectId: string,
     cardId: string,
     supersededBy: string,
+    idempotencyKey?: string,
+  ): Promise<void>;
+  setCardSensitive(
+    projectId: string,
+    cardId: string,
+    sensitive: boolean,
     idempotencyKey?: string,
   ): Promise<void>;
   subscribe(projectId: string, callbacks: StreamCallbacks): () => void;
@@ -1345,6 +1355,19 @@ export class HttpCardiganClient implements CardiganClient {
       projectId,
       `cards/${encodeURIComponent(cardId)}/supersede`,
       { superseded_by: supersededBy },
+      idempotencyKey,
+    );
+  }
+  async setCardSensitive(
+    projectId: string,
+    cardId: string,
+    sensitive: boolean,
+    idempotencyKey = crypto.randomUUID(),
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      `cards/${encodeURIComponent(cardId)}/sensitive`,
+      { sensitive },
       idempotencyKey,
     );
   }

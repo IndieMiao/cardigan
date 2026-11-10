@@ -34,6 +34,31 @@ export function CardActions({
   // Retain uncertain requests even if the user closes and reopens the form.
   const keys = useRef(new Map<string, string>());
   const closed = card.status === "done" || card.status === "cancelled";
+  const [flagging, setFlagging] = useState(false);
+  const [flagError, setFlagError] = useState("");
+  // C-65: human-only; the Workbench is the human's surface.
+  const toggleSensitive = async () => {
+    if (flagging) return;
+    const next = !card.sensitive;
+    const request = JSON.stringify({ mode: "sensitive", next });
+    const key = keys.current.get(request) ?? crypto.randomUUID();
+    keys.current.set(request, key);
+    setFlagging(true);
+    setFlagError("");
+    setMessage("");
+    try {
+      await client.setCardSensitive(projectId, card.id, next, key);
+      keys.current.delete(request);
+      setMessage(
+        next ? "已标为敏感：合并确认将由你亲自处理。" : "已取消敏感标记。",
+      );
+      onSaved();
+    } catch (cause) {
+      setFlagError(describeWriteError(cause));
+    } finally {
+      setFlagging(false);
+    }
+  };
   const perform = async (operation: Operation) => {
     const request = JSON.stringify(operation);
     const key = keys.current.get(request) ?? crypto.randomUUID();
@@ -85,8 +110,22 @@ export function CardActions({
               取消卡片
             </button>
           )}
+          <button
+            type="button"
+            className="quiet"
+            aria-pressed={!!card.sensitive}
+            disabled={flagging}
+            title="被标为敏感的卡，合并确认一律由你亲自处理，PM 不能代确认，也不会超时自动合并"
+            onClick={() => void toggleSensitive()}
+          >
+            {card.sensitive ? "取消敏感标记" : "标为敏感"}
+          </button>
         </div>
       )}
+      {card.sensitive && (
+        <p className="hint">敏感卡片：合并确认由你亲自处理。</p>
+      )}
+      {flagError && <p role="alert">{flagError}</p>}
       {message && <p role="status">{message}</p>}
       {mode && (
         <CardActionForm

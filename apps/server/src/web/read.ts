@@ -747,7 +747,7 @@ export function needsYou(
       ? cardViews(state).map((card) => [card.id, card.merge_check])
       : [],
   );
-  const decisions = data.decisions.map((decision) => {
+  const decisionView = (decision: (typeof data.decisions)[number]) => {
     const schedule = autoMergeSchedule(state, decision.id);
     const check = decision.card_id ? checks.get(decision.card_id) : undefined;
     return {
@@ -819,7 +819,10 @@ export function needsYou(
           }
         : null,
     };
-  });
+  };
+  const decisions = data.decisions.map(decisionView);
+  // §7.4 (C-65): PM-held merge confirmations the human may answer directly.
+  const pm_held_merges = data.pm_held_merges.map(decisionView);
   const human_actions = data.human_actions.map((action) => {
     const opened = openedAt(
       state.timeline,
@@ -888,6 +891,9 @@ export function needsYou(
     // Batched, non-urgent decisions come after the blocking ones (§8.2).
     decisions: [...decisions].sort(blockingFirst),
     human_actions: [...human_actions].sort(
+      (left, right) => (right.waited_ms ?? 0) - (left.waited_ms ?? 0),
+    ),
+    pm_held_merges: [...pm_held_merges].sort(
       (left, right) => (right.waited_ms ?? 0) - (left.waited_ms ?? 0),
     ),
     // §7.4 知会: delegated resolutions, newest first; never blocking.

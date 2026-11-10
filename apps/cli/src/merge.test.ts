@@ -648,3 +648,91 @@ test.each(["queued", "running", "passed"] as const)(
     expect(JSON.stringify(state())).toBe(before);
   },
 );
+
+// C-65: the human answers PM-held merges directly and flags sensitive cards.
+const holdWithPm = () =>
+  store.uow.run((tx) => {
+    const q = tx.decisions.get(project, "q(1)");
+    if (!q) throw new Error("Missing confirmation");
+    tx.decisions.put(project, { ...q, decider: "role:pm" });
+  });
+
+test.each([
+  ["confirm", "merge"],
+  ["hold", "hold"],
+] as const)(
+  "merge %s answers a PM-held confirmation as the human",
+  async (sub, option) => {
+    await seatAwaitingMerge();
+    holdWithPm();
+    expect((await cardigan("merge", "status", card_id)).out).toContain(
+      "confirmation: q(1) open decider=PM（可直接处理）",
+    );
+    const needs = await cardigan("needs-you");
+    expect(needs.out).toContain("PM 代确认中的合并（1");
+    expect(needs.out).toContain(`cardigan merge confirm|hold ${card_id}`);
+    const result = await cardigan("merge", sub, card_id);
+    expect(result.code).toBe(0);
+    expect(result.out).toContain("PM 代确认中，已按你的拍板记录");
+    expect(state().decisions.find((d) => d.id === "q(1)")).toMatchObject({
+      decider: "human",
+      status: "resolved",
+      resolution: {
+        option,
+        resolved_by: "human",
+        via: "needs_you",
+        taken_over_from: "role:pm",
+      },
+    });
+    expect((await cardigan("needs-you")).out).not.toContain(
+      "PM 代确认中的合并",
+    );
+  },
+);
+
+test("merge request-changes answers a PM-held confirmation as the human", async () => {
+  await seatAwaitingMerge();
+  holdWithPm();
+  const result = await cardigan(
+    "merge",
+    "request-changes",
+    card_id,
+    "--reason",
+    "我来退回",
+  );
+  expect(result.code).toBe(0);
+  expect(state().decisions.find((d) => d.id === "q(1)")).toMatchObject({
+    decider: "human",
+    resolution: { option: "request_changes", taken_over_from: "role:pm" },
+  });
+});
+
+test("card sensitive on|off is recorded and hands a PM-held merge to the human", async () => {
+  await seatAwaitingMerge();
+  holdWithPm();
+  const on = await cardigan("card", "sensitive", card_id, "on");
+  expect(on.code).toBe(0);
+  expect(on.out).toContain(`已将 ${card_id} 标为敏感`);
+  expect(state().cards.find((c) => c.id === card_id)?.sensitive).toBe(true);
+  expect(state().decisions.find((d) => d.id === "q(1)")).toMatchObject({
+    decider: "human",
+    status: "open",
+  });
+  const off = await cardigan("card", "sensitive", card_id, "off");
+  expect(off.code).toBe(0);
+  expect(
+    state().cards.find((c) => c.id === card_id)?.sensitive,
+  ).toBeUndefined();
+  expect(
+    state()
+      .events.filter((e) => e.type === "card_sensitivity_changed")
+      .map((e) => [
+        e.actor.kind,
+        (e.payload as { sensitive: boolean }).sensitive,
+      ]),
+  ).toEqual([
+    ["human", true],
+    ["human", false],
+  ]);
+  expect((await cardigan("card", "sensitive", card_id, "maybe")).code).toBe(2);
+});
