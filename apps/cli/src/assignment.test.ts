@@ -15,6 +15,7 @@ import type {
   Assignment,
   Runtime,
   RuntimeLaunch,
+  RuntimeObservation,
   RuntimeRef,
   RuntimeResult,
 } from "@cardigan/domain";
@@ -43,6 +44,10 @@ class FakeRuntime implements Runtime {
   readonly provisions: RuntimeLaunch[] = [];
   readonly released: RuntimeRef[] = [];
   provisionResult: RuntimeResult<RuntimeRef> | undefined;
+  statusResult: RuntimeResult<RuntimeObservation> = {
+    ok: false,
+    error: { code: "runtime_not_found", message: "not used" },
+  };
   /** Return a ref that the domain rejects (machine mismatch). */
   badMachine = false;
 
@@ -65,11 +70,13 @@ class FakeRuntime implements Runtime {
   async wake(): Promise<RuntimeResult<{ readonly sent: boolean }>> {
     return { ok: true, value: { sent: true } };
   }
-  async status(): Promise<RuntimeResult<never>> {
-    return {
-      ok: false,
-      error: { code: "runtime_not_found", message: "not used" },
-    };
+  async status(): Promise<RuntimeResult<RuntimeObservation>> {
+    return this.statusResult;
+  }
+  async probeTerminal(): Promise<RuntimeResult<RuntimeObservation["process"]>> {
+    return this.statusResult.ok
+      ? { ok: true, value: this.statusResult.value.process }
+      : this.statusResult;
   }
   async interrupt(): Promise<RuntimeResult<void>> {
     return { ok: true, value: undefined };
@@ -629,6 +636,10 @@ describe("stopAssignment and attachAssignment", () => {
       dataDir,
     });
 
+    runtime.statusResult = {
+      ok: true,
+      value: { process: "alive", agent: "idle", observed_seq: 1 },
+    };
     await expect(
       attachAssignment({
         store,
@@ -637,6 +648,25 @@ describe("stopAssignment and attachAssignment", () => {
         runtime,
       }),
     ).resolves.toBe("hc attach t1");
+
+    for (const code of [
+      "runtime_timeout",
+      "runtime_unavailable",
+      "runtime_not_found",
+    ] as const) {
+      runtime.statusResult = {
+        ok: false,
+        error: { code, message: "probe failed" },
+      };
+      await expect(
+        attachAssignment({
+          store,
+          project_id,
+          assignment_id: assignment.id,
+          runtime,
+        }),
+      ).resolves.toBe("hc attach t1");
+    }
 
     await stopAssignment({
       store,
