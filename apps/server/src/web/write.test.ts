@@ -11,6 +11,7 @@ import {
   type Card,
   type Decision,
   pauseStandingAssignment,
+  recordMergeCheck,
   releaseAssignment,
   requestDecision,
   requestHumanAction,
@@ -255,6 +256,93 @@ test("merge confirmation uses the same human decision path and unlocks the accep
   });
   expect(s.plan().deliveries.map((d) => d.delivery_id)).toContain(d.id);
 });
+
+test.each(["failed", "timed_out"] as const)(
+  "Workbench returns a confirmed merge after a %s check through the shared domain command",
+  async (status) => {
+    const delivery = await s.deliver(
+      s.primary,
+      await s.change(s.primary.owner, "feature.txt", "done\n"),
+    );
+    await s.review(s.primary.verifier, delivery);
+    await s.complete(delivery);
+    const q = s
+      .state()
+      .decisions.find((q) => q.trigger === "merge_confirmation");
+    if (!q) throw new Error("No confirmation");
+    expect(await request(resolvePath(q), { option: "merge" })).toMatchObject({
+      status: 200,
+    });
+    const identity = {
+      card_id: s.card.id,
+      completion_id: s.plan().completion_id,
+      attempt_id: "web-check",
+      candidate_sha: "a".repeat(40),
+      tree_sha: "b".repeat(40),
+    };
+    const returning = { option: "request_changes", raw_quote: "修复检查失败" };
+    for (const checkStatus of ["queued", "running", status] as const) {
+      s.command((state, _actor, ports) =>
+        recordMergeCheck(
+          { ...state, project_settings: { merge_gate_enabled: true } },
+          { kind: "system", project_id: state.project_id },
+          checkStatus === "queued" || checkStatus === "running"
+            ? { ...identity, status: checkStatus }
+            : {
+                ...identity,
+                status: checkStatus,
+                checks: [],
+                summary: "检查失败",
+                log_ref: "web-check.log",
+              },
+          ports,
+        ),
+      );
+      if (checkStatus === "queued" || checkStatus === "running") {
+        const before = snapshot();
+        expect(await request(resolvePath(q), returning)).toMatchObject({
+          status: 409,
+          body: {
+            error: { message: expect.stringContaining("最新检查失败或超时") },
+          },
+        });
+        expect(snapshot()).toBe(before);
+      }
+    }
+    const needs = await fetch(web.url + path("/needs-you"), {
+      headers: { cookie },
+    });
+    expect(await needs.json()).toMatchObject({
+      decisions: [
+        expect.objectContaining({
+          id: q.id,
+          status: "resolved",
+          options: [expect.objectContaining({ key: "request_changes" })],
+        }),
+      ],
+    });
+    const headers = { "Idempotency-Key": "return-failed-merge" };
+    const response = await request(resolvePath(q), returning, headers);
+    expect(response).toMatchObject({
+      status: 200,
+      body: { status: "superseded", resolution: { option: "merge" } },
+    });
+    const committed = snapshot();
+    expect(await request(resolvePath(q), returning, headers)).toEqual(response);
+    expect(snapshot()).toBe(committed);
+    expect(s.state().cards.find((c) => c.id === s.card.id)?.status).toBe(
+      "in_progress",
+    );
+    expect(
+      s.state().events.findLast((e) => e.type === "merge_changes_requested")
+        ?.payload,
+    ).toMatchObject({
+      reason: returning.raw_quote,
+      run_kind: "fix",
+      completion_id: identity.completion_id,
+    });
+  },
+);
 
 test.each(["keep", "force_clean"])(
   "cleanup choice %s records the decision and leaves deletion to the executor",
