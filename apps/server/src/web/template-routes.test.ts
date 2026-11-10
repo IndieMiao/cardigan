@@ -122,6 +122,56 @@ test("list, details and version history preserve project boundaries and do not m
   expect((await call(h.port, path("/card-templates"))).status).toBe(401);
 });
 
+test.each(["copy", "add"] as const)(
+  "a template named validate supports %s, reads and later edits without shadowing preview POST",
+  async (action) => {
+    expect((await read("/card-templates/validate")).status).toBe(404);
+    const change =
+      action === "copy"
+        ? { action, template_id: "general", new_id: "validate" }
+        : { action, definition: definition({ id: "validate" }) };
+    expect(
+      (await write("/card-templates/validate", change, null)).json,
+    ).toEqual({ valid: true, reason: null });
+    expect((await read("/card-templates/validate")).status).toBe(404);
+    expect((await write("/card-templates", change)).json).toMatchObject({
+      id: "validate",
+      version: 1,
+    });
+    const detail = await read("/card-templates/validate");
+    expect(detail.status).toBe(200);
+    expect(detail.json).toMatchObject({
+      template: { id: "validate", version: 1 },
+      previous: null,
+    });
+    expect((await read("/card-templates/validate/history")).json).toMatchObject(
+      { versions: [{ id: "validate", version: 1 }] },
+    );
+    const update = {
+      action: "update",
+      definition: definition({ id: "validate", title: "修改后的模板" }),
+    };
+    expect(
+      (await write("/card-templates/validate", update, null)).json,
+    ).toEqual({ valid: true, reason: null });
+    expect((await read("/card-templates/validate")).json).toMatchObject({
+      template: { version: 1 },
+    });
+    expect((await write("/card-templates", update)).json).toMatchObject({
+      id: "validate",
+      title: "修改后的模板",
+      version: 2,
+    });
+    expect((await read("/card-templates/validate")).json).toMatchObject({
+      template: { version: 2 },
+      previous: { version: 1 },
+    });
+    expect((await read("/card-templates/validate/history")).json).toMatchObject(
+      { versions: [{ version: 2 }, { version: 1 }] },
+    );
+  },
+);
+
 test("copy, edit, deactivate, activate and rollback append versions; writes replay with human audit", async () => {
   const copy = { action: "copy", template_id: "dev", new_id: "project-dev" };
   expect((await write("/card-templates", copy, null)).status).toBe(400);

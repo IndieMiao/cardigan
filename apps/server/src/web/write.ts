@@ -290,8 +290,9 @@ export async function serveWrite(
   rest: string,
 ): Promise<boolean> {
   if (rest === "/card-templates" || rest === "/card-templates/validate") {
-    if (rest === "/card-templates" && c.req.method === "GET") return false;
-    if (c.req.method !== "POST") methodNotAllowed(["POST"]);
+    // "validate" is also a legal template ID: GET reads its details, POST previews.
+    if (c.req.method === "GET") return false;
+    if (c.req.method !== "POST") methodNotAllowed(["GET", "POST"]);
     c.authorize();
     const body = await readJsonBody(c.req);
     // Zod checks transport types; domain rejects invalid unions, references and lifecycle changes.

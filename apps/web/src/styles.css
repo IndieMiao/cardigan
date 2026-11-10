@@ -1382,6 +1382,9 @@ fieldset.filters {
   line-height: 1.7;
   color: var(--text);
 }
+.completion-result {
+  white-space: pre-wrap;
+}
 .timeline-entry :where(.markdown) :is(ul, ol) {
   padding-left: 1.6em;
   margin: 12px 0;
