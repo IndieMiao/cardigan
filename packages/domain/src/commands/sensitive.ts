@@ -7,13 +7,16 @@ import {
   ensure,
 } from "./core.js";
 import { handoffDecision } from "./delegation.js";
+import { syncSensitiveMerge } from "./merge.js";
 
 /**
  * C-65 (§7.4): only the human marks or unmarks a card as sensitive, from the
  * Workbench card detail or the local CLI. A sensitive card's merge
  * confirmation always goes to the human: PM Ops cannot confirm it and the
  * auto-merge timeout does not apply. Marking a card whose confirmation PM Ops
- * still holds hands that confirmation to the human at once.
+ * still holds hands that confirmation to the human at once; a merge already
+ * answered by PM Ops or the timeout is superseded and asked again
+ * (`syncSensitiveMerge`), and publication re-checks the flag (`mergePlan`).
  */
 export function setCardSensitive(
   state: CommandState,
@@ -61,6 +64,7 @@ export function setCardSensitive(
             q,
             "卡片已被人标为敏感，此合并确认转交给你亲自处理。",
           );
+    syncSensitiveMerge(d, next);
     return next;
   });
 }

@@ -65,7 +65,7 @@ const officeActor: Actor = {
   allowed_tools: standingTools(role("pm").allowed_tools, "office"),
 };
 
-function setup(withOps = true) {
+function setup(withOps = true, policy: "confirm" | "auto" = "confirm") {
   const empty: CommandState = {
     project_id: human.project_id,
     roles: [role("coder"), role("reviewer"), role("pm")],
@@ -82,7 +82,7 @@ function setup(withOps = true) {
     timeline: [],
     events: [],
   };
-  const f = mergeFixture("confirm", 3, { state: empty, ports: ports() });
+  const f = mergeFixture(policy, 3, { state: empty, ports: ports() });
   const confirmation = () => {
     const q = f.state.decisions
       .filter((q) => q.trigger === "merge_confirmation")
@@ -988,4 +988,165 @@ test("a human merge of a PM-held confirmation still has to pass the merge gate",
   check("passed");
   f.commit(recordMergeResult(gated(), system, merged("c"), f.io));
   expect(f.state.cards.find((c) => c.id === f.card.id)?.status).toBe("done");
+});
+
+// C-65 review V-189: the flag must hold for auto-policy cards and for a merge
+// PM Ops already confirmed but the host has not published yet.
+const humanMerge = (
+  f: ReturnType<typeof setup>["f"],
+  decision_id: Decision["id"],
+) =>
+  f.commit(
+    recordDecision(
+      f.state,
+      human,
+      { decision_id, option: "merge", rationale: "我确认", raw_quote: "合并" },
+      f.io,
+    ),
+  );
+
+test("a sensitive auto-policy card still needs the human to confirm its merge", async () => {
+  const { f, confirmation, pmResolve } = setup(true, "auto");
+  f.commit(
+    setCardSensitive(
+      f.state,
+      human,
+      { card_id: f.card.id, sensitive: true },
+      f.io,
+    ),
+  );
+  await f.accept();
+  expect(confirmation()).toMatchObject({ decider: "human", status: "open" });
+  expect(mergePlan(f.state, f.card.id).ok).toBe(false);
+  expect(pmResolve("merge", { notice: "n" }).ok).toBe(false);
+  humanMerge(f, confirmation().id);
+  expect(mergePlan(f.state, f.card.id).ok).toBe(true);
+});
+
+test("an unmarked auto-policy card keeps merging without confirmation", async () => {
+  const { f } = setup(true, "auto");
+  await f.accept();
+  expect(
+    f.state.decisions.filter((q) => q.trigger === "merge_confirmation"),
+  ).toEqual([]);
+  expect(mergePlan(f.state, f.card.id).ok).toBe(true);
+});
+
+test("marking an auto-policy card awaiting merge asks the human; unmarking restores auto merge", async () => {
+  const { f, confirmation } = setup(true, "auto");
+  await f.accept();
+  expect(mergePlan(f.state, f.card.id).ok).toBe(true);
+  f.commit(
+    setCardSensitive(
+      f.state,
+      human,
+      { card_id: f.card.id, sensitive: true },
+      f.io,
+    ),
+  );
+  const asked = confirmation();
+  expect(asked).toMatchObject({ decider: "human", status: "open" });
+  expect(mergePlan(f.state, f.card.id).ok).toBe(false);
+  f.commit(
+    setCardSensitive(
+      f.state,
+      human,
+      { card_id: f.card.id, sensitive: false },
+      f.io,
+    ),
+  );
+  expect(confirmation()).toMatchObject({ id: asked.id, status: "superseded" });
+  expect(mergePlan(f.state, f.card.id).ok).toBe(true);
+});
+
+test("marking after PM Ops confirmed but before publication supersedes PM's answer and asks the human", async () => {
+  const { f, confirmation, check, pmResolve } = setup();
+  await f.accept();
+  check("passed");
+  f.commit(pmResolve("merge", { notice: "常规合并" }));
+  const delegated = confirmation();
+  expect(delegated.resolution?.via).toBe("delegated");
+  expect(mergePlan(f.state, f.card.id).ok).toBe(true);
+  f.commit(
+    setCardSensitive(
+      f.state,
+      human,
+      { card_id: f.card.id, sensitive: true },
+      f.io,
+    ),
+  );
+  // PM's answer stays on record but no longer authorizes publication.
+  const old = f.state.decisions.find((q) => q.id === delegated.id);
+  expect(old).toMatchObject({
+    status: "superseded",
+    resolution: { via: "delegated", option: "merge" },
+  });
+  const asked = confirmation();
+  expect(asked).toMatchObject({
+    decider: "human",
+    status: "open",
+    amends: delegated.id,
+  });
+  expect(mergePlan(f.state, f.card.id).ok).toBe(false);
+  const completion_id =
+    "target" in asked && "delivery_id" in asked.target
+      ? asked.target.delivery_id
+      : undefined;
+  if (!completion_id) throw new Error("Missing completion");
+  const merged = {
+    card_id: f.card.id,
+    completion_id,
+    result: {
+      kind: "merged" as const,
+      merge_sha: "b".repeat(40),
+      previous_sha: "a".repeat(40),
+      tree_sha: "c".repeat(40),
+    },
+  };
+  const gated = () => ({
+    ...f.state,
+    project_settings: { merge_gate_enabled: true },
+  });
+  expect(recordMergeResult(gated(), system, merged, f.io).ok).toBe(false);
+  expect(pmResolve("merge", { notice: "n" }).ok).toBe(false);
+  humanMerge(f, asked.id);
+  f.commit(recordMergeResult(gated(), system, merged, f.io));
+  expect(f.state.cards.find((c) => c.id === f.card.id)?.status).toBe("done");
+});
+
+test("publication re-checks the flag against a non-human merge answer", async () => {
+  const { f, confirmation, check, pmResolve } = setup();
+  await f.accept();
+  check("passed");
+  f.commit(pmResolve("merge", { notice: "常规合并" }));
+  // Even if the flag landed without the sync (e.g. an older writer), the
+  // publication check refuses PM's answer for a sensitive card.
+  const raw: CommandState = {
+    ...f.state,
+    cards: f.state.cards.map((c) =>
+      c.id === f.card.id ? { ...c, sensitive: true } : c,
+    ),
+  };
+  expect(confirmation().resolution?.via).toBe("delegated");
+  const plan = mergePlan(raw, f.card.id);
+  expect(plan.ok).toBe(false);
+  if (!plan.ok) expect(plan.error.message).toContain("由人亲自确认");
+});
+
+test("a merge the human already confirmed stands when the card is marked", async () => {
+  const { f, confirmation, check } = setup();
+  await f.accept();
+  check("passed");
+  const held = confirmation();
+  humanMerge(f, held.id);
+  f.commit(
+    setCardSensitive(
+      f.state,
+      human,
+      { card_id: f.card.id, sensitive: true },
+      f.io,
+    ),
+  );
+  expect(confirmation()).toMatchObject({ id: held.id, status: "resolved" });
+  expect(mergePlan(f.state, f.card.id).ok).toBe(true);
 });
