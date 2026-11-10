@@ -23,6 +23,7 @@ import {
   type UploadAttachmentInput,
 } from "../api.js";
 import { fakeClient } from "../testing/fixtures.js";
+import { writeFailures } from "../testing/write-errors.js";
 import { CommentBox, type MentionOption, mentionsIn } from "./CommentBox.js";
 
 afterEach(cleanup);
@@ -185,7 +186,7 @@ test("a rejected comment keeps the text and explains itself", async () => {
     <CommentBox
       client={fakeClient({
         addComment: async () => {
-          throw new ApiError(409, "illegal_transition", "card is closed");
+          throw new ApiError(409, "illegal_transition", "卡片已关闭");
         },
       })}
       projectId="p-1"
@@ -198,7 +199,7 @@ test("a rejected comment keeps the text and explains itself", async () => {
   fireEvent.click(screen.getByRole("button", { name: "发表评论" }));
 
   const alert = await screen.findByRole("alert");
-  expect(alert.textContent).toContain("card is closed");
+  expect(alert.textContent).toBe("请求失败：卡片已关闭");
   expect((screen.getByLabelText("评论正文") as HTMLTextAreaElement).value).toBe(
     "这张卡已经关了",
   );
@@ -271,7 +272,7 @@ test("partial upload failure retains comment and individual image keys on retry"
   });
   fireEvent.click(screen.getByRole("button", { name: "发表评论" }));
   expect((await screen.findByRole("alert")).textContent).toContain(
-    "重试不会重复发表",
+    "上传可能已经成功，保留原内容重试不会重复上传",
   );
   expect(input.value).toBe("两张图片");
   fireEvent.click(screen.getByRole("button", { name: "发表评论" }));
@@ -286,3 +287,85 @@ test("partial upload failure retains comment and individual image keys on retry"
     fetcher.mock.calls.slice(0, 3).map(([, init]) => init?.body),
   );
 });
+
+test.each(["", "   "])(
+  "clearing a failed draft to %j starts a new comment and attachment operation",
+  async (empty) => {
+    const addComment = vi.fn().mockResolvedValue({ id: "C-1#8" });
+    const uploadAttachment = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError("Lost response"))
+      .mockResolvedValue({ id: "F-1" });
+    box({ addComment, uploadAttachment });
+    const input = screen.getByLabelText("评论正文");
+    fireEvent.change(input, { target: { value: "原评论" } });
+    fireEvent.paste(input, {
+      clipboardData: {
+        files: [new File(["png"], "one.png", { type: "image/png" })],
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发表评论" }));
+    await screen.findByRole("alert");
+    fireEvent.change(input, { target: { value: empty } });
+    fireEvent.change(input, { target: { value: "重新开始" } });
+    fireEvent.click(screen.getByRole("button", { name: "发表评论" }));
+    await waitFor(() => expect(uploadAttachment).toHaveBeenCalledTimes(2));
+    expect(addComment.mock.calls[1]?.[3]).not.toBe(
+      addComment.mock.calls[0]?.[3],
+    );
+    expect(uploadAttachment.mock.calls[1]?.[3]).not.toBe(
+      uploadAttachment.mock.calls[0]?.[3],
+    );
+  },
+);
+
+test.each(
+  writeFailures.flatMap((failure) =>
+    [false, true].map((upload) => ({ ...failure, upload })),
+  ),
+)(
+  "$label only warns of uncertain writes when appropriate (upload=$upload)",
+  async ({ error, uncertain, reason, upload }) => {
+    const conflict = vi.fn();
+    render(
+      <CommentBox
+        client={fakeClient(
+          upload
+            ? {
+                uploadAttachment: async () => {
+                  throw error;
+                },
+              }
+            : {
+                addComment: async () => {
+                  throw error;
+                },
+              },
+        )}
+        projectId="p-1"
+        cardId="C-1"
+        onConflict={conflict}
+      />,
+    );
+    const input = screen.getByLabelText("评论正文");
+    fireEvent.change(input, { target: { value: "保留正文" } });
+    if (upload)
+      fireEvent.paste(input, {
+        clipboardData: {
+          files: [new File(["png"], "one.png", { type: "image/png" })],
+        },
+      });
+    fireEvent.click(screen.getByRole("button", { name: "发表评论" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent?.includes("可能已经成功")).toBe(uncertain);
+    const commentConflict =
+      !upload &&
+      error instanceof ApiError &&
+      error.code === "idempotency_conflict";
+    expect(alert.textContent).toContain(
+      commentConflict ? "上一次的评论已经发表" : reason,
+    );
+    expect(conflict).toHaveBeenCalledTimes(commentConflict ? 1 : 0);
+    expect((input as HTMLTextAreaElement).value).toBe("保留正文");
+  },
+);

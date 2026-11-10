@@ -10,7 +10,9 @@ import {
 import { afterEach, expect, test, vi } from "vitest";
 import { ApiError, type CardiganClient, HttpCardiganClient } from "../api.js";
 import { cardDetail, fakeClient } from "../testing/fixtures.js";
+import { writeFailures } from "../testing/write-errors.js";
 import { CardDetailPage } from "../views/CardDetailPage.js";
+import { CardActions } from "./CardActions.js";
 import { Drawer } from "./Drawer.js";
 
 afterEach(() => {
@@ -18,6 +20,65 @@ afterEach(() => {
   vi.restoreAllMocks();
   window.history.replaceState(null, "", "/");
 });
+
+test.each(
+  writeFailures.flatMap((failure) =>
+    ["edit", "cancel", "supersede"].map((mode) => ({ ...failure, mode })),
+  ),
+)(
+  "$mode shows the right write failure for $label",
+  async ({ mode, error, uncertain, reason }) => {
+    const card = cardDetail().card;
+    const fail = async () => {
+      throw error;
+    };
+    render(
+      <CardActions
+        card={mode === "supersede" ? { ...card, status: "done" } : card}
+        client={fakeClient({
+          updateCard: fail,
+          cancelCard: fail,
+          supersedeCard: fail,
+        })}
+        projectId="p-1"
+        onSaved={() => {}}
+      />,
+    );
+    fireEvent.click(
+      screen.getByRole("button", {
+        name:
+          mode === "edit"
+            ? "编辑"
+            : mode === "cancel"
+              ? "取消卡片"
+              : "标记被取代",
+      }),
+    );
+    if (mode === "supersede")
+      fireEvent.change(screen.getByLabelText("被哪张卡取代"), {
+        target: { value: "C-2" },
+      });
+    fireEvent.click(
+      screen.getByRole("button", {
+        name:
+          mode === "edit"
+            ? "保存修改"
+            : mode === "cancel"
+              ? "确认取消卡片"
+              : "标记被取代",
+      }),
+    );
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent?.includes("可能已经成功")).toBe(uncertain);
+    expect(alert.textContent).toContain(
+      mode === "cancel" &&
+        error instanceof ApiError &&
+        error.code === "illegal_transition"
+        ? "已完成卡片不能取消"
+        : reason,
+    );
+  },
+);
 
 test.each([false, true])(
   "K2 edits all fields and criteria in shared detail (drawer=%s)",

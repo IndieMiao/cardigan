@@ -4,7 +4,7 @@ import {
   type CardiganClient,
   type CardUpdateInput,
   type CardView,
-  describeError,
+  describeWriteError,
 } from "../api.js";
 
 type Mode = "edit" | "cancel" | "supersede";
@@ -176,7 +176,7 @@ function CardActionForm({
               failure instanceof ApiError &&
               failure.code === "illegal_transition"
               ? "已完成卡片不能取消；请建新卡，再把旧卡标记为被取代。"
-              : describeError(failure),
+              : describeWriteError(failure),
           );
         } finally {
           sending.current = false;
@@ -318,7 +318,6 @@ function CardActionForm({
       {error && (
         <div role="alert" className="error-panel">
           {error}
-          <p>操作可能已经成功，保留原内容重试不会重复提交。</p>
         </div>
       )}
     </form>

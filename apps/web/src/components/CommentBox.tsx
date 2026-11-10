@@ -9,8 +9,10 @@ import {
   useState,
 } from "react";
 import {
+  ApiError,
   type CardiganClient,
   describeError,
+  describeWriteError,
   type PostedComment,
 } from "../api.js";
 import { renderMarkdown } from "../markdown.js";
@@ -38,6 +40,8 @@ export interface CommentBoxProps {
   readonly mentions?: readonly MentionOption[];
   /** Called after the comment and its images were accepted. */
   readonly onPosted?: (comment: PostedComment) => void | Promise<void>;
+  /** Refresh the timeline when a previous comment was accepted with different text. */
+  readonly onConflict?: () => void | Promise<void>;
 }
 
 export interface CommentBoxHandle {
@@ -58,6 +62,7 @@ export function CommentBox({
   cardId,
   mentions = [],
   onPosted,
+  onConflict,
 }: CommentBoxProps) {
   const [body, setBody] = useState("");
   const [tab, setTab] = useState<"write" | "preview">("write");
@@ -75,6 +80,16 @@ export function CommentBox({
   const draftKey = useRef<string | undefined>(undefined);
   const sending = useRef(false);
   const startDraft = () => (draftKey.current ??= crypto.randomUUID());
+  const resetDraftKey = () => {
+    draftKey.current = undefined;
+    // Retained files will attach to a new comment, so they need new keys too.
+    setImages((current) =>
+      current.map((image) => ({
+        ...image,
+        idempotencyKey: crypto.randomUUID(),
+      })),
+    );
+  };
   const expanded = focused || body.length > 0 || images.length > 0;
 
   useImperativeHandle(
@@ -117,8 +132,9 @@ export function CommentBox({
     sending.current = true;
     setSubmitting(true);
     setError(undefined);
+    let comment: PostedComment | undefined;
     try {
-      const comment = await client.addComment(
+      comment = await client.addComment(
         projectId,
         cardId,
         {
@@ -157,7 +173,29 @@ export function CommentBox({
       }
     } catch (failure) {
       // The text stays in the box: a failed submit must not lose the comment.
-      setError(`${describeError(failure)} 发表可能已经成功，重试不会重复发表`);
+      if (
+        !comment &&
+        failure instanceof ApiError &&
+        failure.code === "idempotency_conflict"
+      ) {
+        resetDraftKey();
+        const message =
+          "上一次的评论已经发表。当前正文已保留，再次点击发表评论会作为新评论发表。";
+        setError(message);
+        try {
+          await onConflict?.();
+        } catch (refreshFailure) {
+          setError(
+            `${message} 时间线刷新失败：${describeError(refreshFailure)}`,
+          );
+        }
+      } else {
+        setError(
+          comment
+            ? `评论已发表，附件上传失败：${describeWriteError(failure, "上传可能已经成功，保留原内容重试不会重复上传。")}`
+            : describeWriteError(failure, "发表可能已经成功，重试不会重复发表"),
+        );
+      }
     } finally {
       sending.current = false;
       setSubmitting(false);
@@ -209,8 +247,11 @@ export function CommentBox({
             value={body}
             disabled={submitting}
             onChange={(event) => {
-              startDraft();
               const value = event.target.value;
+              if (!value.trim()) {
+                resetDraftKey();
+                setError(undefined);
+              } else startDraft();
               setBody(value);
               setSuggesting(/@[^\s@]*$/u.test(value));
             }}

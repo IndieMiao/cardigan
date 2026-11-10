@@ -52,7 +52,7 @@ export function CardDetailPage(props: CardDetailPageProps) {
   const [routeFilters] = useRouteFilters({ kind: "card", projectId, cardId });
   const routeLocation = `${projectId}/${cardId}/${routeAnchor ?? ""}/${routeFilters.type ?? ""}/${routeFilters.author ?? ""}`;
   const [localAnchor, setLocalAnchor] = useState<{
-    id: string;
+    id: string | undefined;
     routeLocation: string;
   }>();
   const anchor =
@@ -62,7 +62,8 @@ export function CardDetailPage(props: CardDetailPageProps) {
       current?.routeLocation === routeLocation ? current : undefined,
     );
   }, [routeLocation]);
-  const locate = (id: string) => setLocalAnchor({ id, routeLocation });
+  const locate = (id: string | undefined) =>
+    setLocalAnchor({ id, routeLocation });
   const pageSize = [20, 50, 100].includes(Number(routeFilters.count))
     ? Number(routeFilters.count)
     : 20;
@@ -139,6 +140,18 @@ export function CardDetailPage(props: CardDetailPageProps) {
             filters: routeFilters,
           });
       }}
+      onCommentConflict={() => {
+        locate(undefined);
+        query.current = { limit: pageSize };
+        if (!inDrawer)
+          window.location.hash = routeHash({
+            kind: "card",
+            projectId,
+            cardId,
+            filters: routeFilters,
+          });
+        reload();
+      }}
       error={error}
       reload={reload}
       pending={pending}
@@ -166,6 +179,7 @@ function CardContent({
   inDrawer,
   onLocate,
   onPosted,
+  onCommentConflict,
   error,
   reload,
   pending,
@@ -181,6 +195,7 @@ function CardContent({
   inDrawer: boolean;
   onLocate: ((anchor: string) => void) | undefined;
   onPosted: (comment: PostedComment) => void;
+  onCommentConflict: () => void;
   error: string | undefined;
   reload: () => void;
   anchorReady: boolean;
@@ -444,6 +459,7 @@ function CardContent({
             cardId={cardId}
             mentions={mentionOptions(detail)}
             onPosted={onPosted}
+            onConflict={onCommentConflict}
           />
           {anchor && (filters.type || filters.author) && (
             <p className="hint">
