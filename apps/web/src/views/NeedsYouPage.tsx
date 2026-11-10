@@ -929,10 +929,12 @@ function Notices({
   const unread = notices.filter((n) => !n.read);
   const [history, setHistory] = useState<{
     items: readonly NoticeView[];
-    cursor?: string | null;
-  }>({ items: [] });
+    cursor: string | null;
+  }>({ items: notices, cursor: nextCursor });
   // The first page always contains every unread notice. Keep expanded history
   // across refreshes, updating read status even when an item leaves that page.
+  // Its pagination boundary is retained from the first render too: marking
+  // unread items read can move the refreshed first page back over visible rows.
   const unreadIds = new Set(unread.map((n) => n.id));
   const visible = mergeNotices(
     history.items.map((n) => ({ ...n, read: !unreadIds.has(n.id) })),
@@ -941,7 +943,7 @@ function Notices({
   useEffect(() => {
     setHistory((old) => ({ ...old, items: mergeNotices(old.items, notices) }));
   }, [notices]);
-  const cursor = history.cursor === undefined ? nextCursor : history.cursor;
+  const cursor = history.cursor;
   const loading = useRef(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [loadError, setLoadError] = useState("");

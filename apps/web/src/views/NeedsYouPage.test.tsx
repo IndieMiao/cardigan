@@ -1265,6 +1265,115 @@ const pagedNotice = (n: number, read = true): NoticeView => ({
   read,
 });
 
+test.each(["all", "one"])(
+  "marking %s notices read before expanding preserves the loaded history boundary",
+  async (mark) => {
+    const unread = Array.from({ length: 25 }, (_, i) =>
+      pagedNotice(53 - i, false),
+    );
+    const first = Array.from({ length: 10 }, (_, i) => pagedNotice(28 - i));
+    let current: NeedsPage = {
+      ...page([]),
+      human_actions: [],
+      notices: [...unread, ...first],
+      notices_next_cursor: "notice-19",
+    };
+    const markNoticesRead = vi.fn().mockImplementation(async () => {
+      current = {
+        ...current,
+        notices:
+          mark === "all"
+            ? Array.from({ length: 10 }, (_, i) => pagedNotice(53 - i))
+            : [...unread.slice(1), pagedNotice(53), ...first.slice(0, 9)],
+        notices_next_cursor: mark === "all" ? "notice-44" : "notice-20",
+      };
+    });
+    const notices = vi
+      .fn()
+      .mockResolvedValueOnce({
+        notices: Array.from({ length: 10 }, (_, i) => pagedNotice(18 - i)),
+        next_cursor: "notice-9",
+        unread_count: mark === "all" ? 0 : 24,
+      })
+      .mockResolvedValueOnce({
+        notices: Array.from({ length: 8 }, (_, i) => pagedNotice(8 - i)),
+        next_cursor: null,
+        unread_count: mark === "all" ? 0 : 24,
+      });
+    render(
+      <NeedsYouPage
+        projectId="p-1"
+        client={fakeClient({
+          needsYou: async () => current,
+          notices,
+          markNoticesRead,
+        })}
+      />,
+    );
+    const group = await screen.findByRole("region", { name: "知会" });
+    const rows = () => within(group).getAllByRole("article");
+    const initialRows = rows();
+    expect(initialRows).toHaveLength(35);
+    fireEvent.click(
+      mark === "all"
+        ? within(group).getByRole("button", { name: "全部标为已读" })
+        : within(initialRows[0] as HTMLElement).getByRole("button", {
+            name: "标为已读",
+          }),
+    );
+    await within(group).findByText(`知会（未读 ${mark === "all" ? 0 : 24}）`);
+    expect(rows()).toHaveLength(35);
+    expect(notices).not.toHaveBeenCalled();
+    fireEvent.click(within(group).getByRole("button", { name: "显示更多" }));
+    await waitFor(() => expect(rows()).toHaveLength(45));
+    expect(notices).toHaveBeenNthCalledWith(1, "p-1", "notice-19");
+    expect(initialRows.every((row) => rows().includes(row))).toBe(true);
+    fireEvent.click(within(group).getByRole("button", { name: "显示更多" }));
+    await waitFor(() => expect(rows()).toHaveLength(53));
+    expect(notices).toHaveBeenNthCalledWith(2, "p-1", "notice-9");
+    expect(
+      within(group).queryByRole("button", { name: "显示更多" }),
+    ).toBeNull();
+  },
+);
+
+test("marking all notices read does not reopen pagination when every notice was already visible", async () => {
+  const unread = Array.from({ length: 25 }, (_, i) =>
+    pagedNotice(35 - i, false),
+  );
+  const first = Array.from({ length: 10 }, (_, i) => pagedNotice(10 - i));
+  let current: NeedsPage = {
+    ...page([]),
+    human_actions: [],
+    notices: [...unread, ...first],
+    notices_next_cursor: null,
+  };
+  const notices = vi.fn();
+  render(
+    <NeedsYouPage
+      projectId="p-1"
+      client={fakeClient({
+        needsYou: async () => current,
+        notices,
+        markNoticesRead: async () => {
+          current = {
+            ...current,
+            notices: Array.from({ length: 10 }, (_, i) => pagedNotice(35 - i)),
+            notices_next_cursor: "notice-26",
+          };
+        },
+      })}
+    />,
+  );
+  const group = await screen.findByRole("region", { name: "知会" });
+  expect(within(group).queryByRole("button", { name: "显示更多" })).toBeNull();
+  fireEvent.click(within(group).getByRole("button", { name: "全部标为已读" }));
+  await within(group).findByText("知会（未读 0）");
+  expect(within(group).getAllByRole("article")).toHaveLength(35);
+  expect(within(group).queryByRole("button", { name: "显示更多" })).toBeNull();
+  expect(notices).not.toHaveBeenCalled();
+});
+
 test("notices append server pages, keep all unread first and retain visible rows during requests and refreshes", async () => {
   const unread = Array.from({ length: 12 }, (_, i) =>
     pagedNotice(12 - i, false),
