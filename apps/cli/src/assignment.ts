@@ -19,6 +19,7 @@ import {
   type LaunchEntities,
   launchEntities,
   launchRun,
+  loadRunCapacityConfig,
   messageOf,
   type PreparedWorktree,
   reviewTargetSha,
@@ -195,6 +196,8 @@ export async function startAssignment(
 ): Promise<StartedAssignment> {
   const { store, io, project_id } = options;
   rejectExternalTerminalAction(store, project_id, options.assignment_id);
+  const capacity = await loadRunCapacityConfig({ env: io.env });
+  for (const error of capacity.errors) io.stderr(error);
   const execution = executionFor(io, options.dataDir);
   await secureDataDirectory(execution);
 
@@ -264,6 +267,7 @@ export async function startAssignment(
       {
         store,
         runtime: options.runtime,
+        runLimit: capacity.forMachine,
         launch: options.launch,
         mcpUrl: options.mcpUrl,
         dataDir: options.dataDir,

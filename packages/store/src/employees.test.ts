@@ -152,7 +152,7 @@ test("v8 migration preserves old project data, assignments, event streams, token
   const old = Store.open({ dataDir, migrationsDir: oldMigrations });
   let token: string;
   try {
-    expect(old.schemaVersion()).toBe(8);
+    expect(old.schemaVersion()).toBe(latestSchemaVersion(oldMigrations));
     old.createProject({ id: project_id });
     old.uow.run((tx) => {
       tx.cards.put(project_id, card());

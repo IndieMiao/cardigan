@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Event, ProjectId } from "@cardigan/domain";
+import { readRunQueue } from "@cardigan/host";
 import type { Store } from "@cardigan/store";
 import { PROJECT_EVENT_STREAM } from "@cardigan/store";
 
@@ -107,6 +108,9 @@ export async function serveStream(options: StreamOptions): Promise<void> {
     });
   }
 
+  let queueRevision = JSON.stringify(
+    readRunQueue(store).filter((r) => r.project_id === project_id),
+  );
   let closed = false;
   let poll: NodeJS.Timeout | undefined;
   let heartbeat: NodeJS.Timeout | undefined;
@@ -126,6 +130,14 @@ export async function serveStream(options: StreamOptions): Promise<void> {
     if (closed || res.writableEnded) return;
     let batch: Event[];
     try {
+      const nextQueue = JSON.stringify(
+        readRunQueue(store).filter((r) => r.project_id === project_id),
+      );
+      if (nextQueue !== queueRevision) {
+        queueRevision = nextQueue;
+        // Cross-project capacity changes have no seq in this project's streams.
+        res.write("event: queue\ndata: {}\n\n");
+      }
       batch = store.uow.read((tx) => {
         const streams = [
           { card_id: undefined, key: PROJECT_EVENT_STREAM },

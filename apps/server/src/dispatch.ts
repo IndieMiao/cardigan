@@ -10,12 +10,20 @@ import type {
   Runtime,
 } from "@cardigan/domain";
 import {
+  abortDispatch,
+  canDispatchRun,
+  compareDispatchOrder,
+  DEFAULT_INACTIVE_CANCEL_AFTER_MS,
+  DEFAULT_RUN_LIMIT,
   decisionFollowupBlocked,
   decisionFollowupPrompt,
   dispatchRun,
+  isStandingPm,
+  lastRunActivity,
   queueRun,
   remindDecisionFollowups,
 } from "@cardigan/domain";
+import { runCapacitySnapshot } from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import {
   mergeNotifications,
@@ -26,6 +34,7 @@ import {
 import {
   type BellAttempt,
   beginBellAttempt,
+  beginLaunchAttempt,
   finishBellAttempt,
   moveNotification,
   type Store,
@@ -37,6 +46,7 @@ import {
   dispatchAlert,
   unfinishedRun,
 } from "./dispatch-alert.js";
+import { InactiveRunReaper } from "./dispatch-inactive.js";
 import {
   acknowledgeInbox,
   dispatcherClock,
@@ -55,7 +65,10 @@ export interface DispatcherOptions {
   readonly retryBaseMs?: number;
   /** Retries after the initial send; zero disables retries. */
   readonly maxRetries?: number;
+  /** Loaded once by the host; the decision reads the supplied limit on every claim. */
+  readonly runLimit?: (machine: string) => number;
   readonly inactivityGraceMs?: number;
+  readonly inactiveCancelAfterMs?: number | null;
   /** Snapshot for a NEW terminal; an existing session keeps its previous Run's snapshot. */
   readonly snapshot: (
     assignment: Assignment,
@@ -86,6 +99,17 @@ const covered = (n: Notification, s: CommandState, owner: Assignment["id"]) =>
       c.card_id === n.card_id &&
       c.acked_seq >= n.seq,
   );
+interface Candidate {
+  project: ProjectId;
+  notes: Notification[];
+  assignment: Assignment;
+  order: {
+    project_id: string;
+    assignment_id: string;
+    created_at: string;
+    trigger_event_id: string;
+  };
+}
 interface Job {
   attempt: BellAttempt;
   run: Run;
@@ -100,12 +124,14 @@ export class Dispatcher {
   private readonly retryBaseMs: number;
   private readonly maxRetries: number;
   private readonly inactivityGraceMs: number;
+  private readonly inactive: InactiveRunReaper;
   constructor(readonly options: DispatcherOptions) {
     this.clock = options.clock ?? dispatcherClock;
     this.leaseMs = options.deliveryLeaseMs ?? 60_000;
     this.retryBaseMs = options.retryBaseMs ?? 60_000;
     this.maxRetries = options.maxRetries ?? 4;
     this.inactivityGraceMs = options.inactivityGraceMs ?? 15 * 60_000;
+    // Reject invalid source settings before deriving the cancellation grace.
     if (
       !Number.isSafeInteger(this.maxRetries) ||
       this.maxRetries < 0 ||
@@ -119,14 +145,67 @@ export class Dispatcher {
       throw new Error("Invalid dispatcher retry/watchdog settings");
     if (!Number.isFinite(this.leaseMs) || this.leaseMs <= 0)
       throw new Error("Invalid delivery lease");
+    const cancelAfterMs =
+      options.inactiveCancelAfterMs === undefined
+        ? Math.max(DEFAULT_INACTIVE_CANCEL_AFTER_MS, this.inactivityGraceMs)
+        : options.inactiveCancelAfterMs;
+    if (
+      cancelAfterMs !== null &&
+      (!Number.isSafeInteger(cancelAfterMs) || cancelAfterMs < 1)
+    )
+      throw new Error("Invalid inactive Run cancellation grace");
+    this.inactive = new InactiveRunReaper({
+      store: options.store,
+      runtime: options.runtime,
+      clock: this.clock,
+      afterMs: cancelAfterMs,
+      alert: (tx, state, assignment, run, reason) => {
+        if (
+          state.events.some(
+            (e) =>
+              e.type === reason &&
+              payloadString(e.payload, "run_id") === run.id,
+          )
+        )
+          return;
+        const audience = isStandingPm(assignment)
+          ? assignment.standing_mode === "office"
+            ? "human_only"
+            : "human"
+          : alertAudience(assignment, state, options.standing);
+        dispatchAlert(tx, options.store, state, this.clock.now(), {
+          assignment,
+          type: reason,
+          reason,
+          audience,
+          run_id: run.id,
+          mark: reason === "inactive_stop_unconfirmed",
+          card_id: state.work_items.find(
+            (w) => w.id === assignment.work_item_id,
+          )?.card_id,
+        });
+      },
+    });
   }
   /** Calls on one instance serialize; cross-process attempts are guarded in SQLite. */
-  tick(project?: ProjectId): Promise<void> {
+  // Keep the legacy argument for callers; scheduling always spans all projects.
+  tick(_project?: ProjectId): Promise<void> {
     const next = this.serial.then(async () => {
-      for (const id of project
-        ? [project]
-        : this.options.store.listProjects().map((p) => p.id))
-        await this.project(id);
+      // Route every project before choosing any winner. Project enumeration is
+      // not a scheduling priority, even when a caller requests a project tick.
+      const candidates = this.options.store
+        .listProjects()
+        .flatMap((p) => this.project(p.id));
+      await this.inactive.tick(
+        this.options.store.listProjects().map((p) => p.id),
+      );
+      candidates.sort((a, b) => compareDispatchOrder(a.order, b.order));
+      for (const candidate of candidates)
+        await this.deliver(
+          candidate.project,
+          candidate.notes,
+          candidate.assignment,
+        );
     });
     this.serial = next.catch(() => {});
     return next;
@@ -137,7 +216,7 @@ export class Dispatcher {
   private owner(n: Notification, state: CommandState) {
     return notificationOwner(n, state, this.options.standing);
   }
-  private async project(project: ProjectId) {
+  private project(project: ProjectId): Candidate[] {
     const { store, standing } = this.options;
     store.uow.run((tx) => {
       const effect = unwrap(
@@ -180,7 +259,50 @@ export class Dispatcher {
       const key = `${owner}/${n.card_id ?? ""}/${n.attempts ? n.run_id : ""}`;
       groups.set(key, [...(groups.get(key) ?? []), n]);
     }
-    for (const group of groups.values()) await this.deliver(project, group);
+    const candidates: Candidate[] = [];
+    const add = (assignment: Assignment, notes: Notification[]) => {
+      const queued = this.queued(state, assignment);
+      const cause = notes.find((n) => !n.run_id) ?? notes[0];
+      const trigger = queued?.trigger_event_id ?? cause?.event_id;
+      const event = state.events.find((e) => e.id === trigger);
+      if (!event) return;
+      candidates.push({
+        project,
+        notes,
+        assignment,
+        order: {
+          project_id: project,
+          assignment_id: assignment.id,
+          created_at: event.created_at,
+          trigger_event_id: event.id,
+        },
+      });
+    };
+    for (const notes of groups.values()) {
+      notes.sort((a, b) => {
+        const left = state.events.find((e) => e.id === a.event_id);
+        const right = state.events.find((e) => e.id === b.event_id);
+        return (
+          (left?.created_at ?? a.created_at).localeCompare(
+            right?.created_at ?? b.created_at,
+          ) || a.event_id.localeCompare(b.event_id)
+        );
+      });
+      const first = notes[0];
+      const assignment =
+        first &&
+        state.assignments.find((a) => a.id === this.owner(first, state));
+      if (assignment) add(assignment, notes);
+    }
+    // ACK is not cancellation: a Run deferred for capacity still needs dispatch
+    // if its trigger notification was acknowledged while it waited.
+    for (const assignment of state.assignments)
+      if (
+        this.queued(state, assignment)?.queue_reason !== undefined &&
+        !candidates.some((c) => c.assignment.id === assignment.id)
+      )
+        add(assignment, []);
+    return candidates;
   }
   private queued(state: CommandState, a: Assignment) {
     // Domain resumption can queue work before (or independently of) the
@@ -193,15 +315,17 @@ export class Dispatcher {
     const queued = this.queued(state, a);
     return state.runs.some(
       (r) =>
-        r.assignment_id === a.id && unfinishedRun(r) && r.id !== queued?.id,
+        r.assignment_id === a.id &&
+        (r.inactivity_stop || (unfinishedRun(r) && r.id !== queued?.id)),
     );
   }
-  private async deliver(project: ProjectId, notes: readonly Notification[]) {
-    const state = this.state(project),
-      first = notes[0];
-    if (!first) return;
-    const id = this.owner(first, state),
-      a = state.assignments.find((a) => a.id === id);
+  private async deliver(
+    project: ProjectId,
+    notes: readonly Notification[],
+    expected: Assignment,
+  ) {
+    const state = this.state(project);
+    const a = state.assignments.find((a) => a.id === expected.id);
     if (!a) return;
     if (a.status === "released") {
       this.reject(project, notes, a, "assignment_released");
@@ -211,9 +335,18 @@ export class Dispatcher {
     let live = false;
     let replacement: DispatchRunParams["replacement"];
     if (a.runtime_ref) {
-      const observed = await this.options.runtime.status(a.runtime_ref);
+      const observed = await this.options.runtime
+        .status(a.runtime_ref)
+        .catch(() => undefined);
+      if (!observed) {
+        this.waitForRuntime(project, a);
+        return;
+      }
       if (observed.ok) {
-        if (observed.value.process === "unknown") return;
+        if (observed.value.process === "unknown") {
+          this.waitForRuntime(project, a);
+          return;
+        }
         live = observed.value.process === "alive";
       } else if (
         observed.error.code === "runtime_not_found" ||
@@ -223,7 +356,10 @@ export class Dispatcher {
           previous: a.runtime_ref,
           reason: observed.error.code,
         };
-      } else return;
+      } else {
+        this.waitForRuntime(project, a);
+        return;
+      }
     }
     const queued = this.queued(state, a);
     const prior = state.runs
@@ -329,6 +465,33 @@ export class Dispatcher {
     }
     this.settle(job.attempt, sent, reason, job.bell);
   }
+  private waitForRuntime(project: ProjectId, expected: Assignment) {
+    this.options.store.uow.run((tx) => {
+      const state = loadCommandState(tx, project);
+      const a = state.assignments.find((a) => a.id === expected.id);
+      if (!a || !sameRef(a, expected)) return;
+      const run = this.queued(state, a);
+      if (!run || run.queue_reason === "runtime_unavailable") return;
+      tx.runs.put(project, { ...run, queue_reason: "runtime_unavailable" });
+      if (
+        !state.events.some(
+          (e) =>
+            e.type === "queued_runtime_unavailable" &&
+            payloadString(e.payload, "run_id") === run.id,
+        )
+      )
+        dispatchAlert(tx, this.options.store, state, this.clock.now(), {
+          assignment: a,
+          type: "queued_runtime_unavailable",
+          reason: "runtime_status_unknown",
+          audience: alertAudience(a, state, this.options.standing),
+          mark: true,
+          card_id: state.work_items.find((w) => w.id === a.work_item_id)
+            ?.card_id,
+          run_id: run.id,
+        });
+    });
+  }
   private claim(
     project: ProjectId,
     notes: readonly Notification[],
@@ -351,7 +514,12 @@ export class Dispatcher {
           !covered(n, state, a.id) &&
           !decisionFollowupBlocked(state, n.event_id, a.id),
       );
-      if (!ready.length || this.busy(state, a)) return;
+      const waiting = this.queued(state, a);
+      if (
+        (!ready.length && waiting?.queue_reason === undefined) ||
+        this.busy(state, a)
+      )
+        return;
       if (
         unfinishedBellAttempts(store.database, project).some(
           (r) =>
@@ -361,18 +529,18 @@ export class Dispatcher {
       )
         return;
       const cause = ready.find((n) => !n.run_id) ?? ready[0];
-      if (!cause) return;
+      if (!cause && !waiting) return;
       let run =
         this.queued(state, a) ??
         state.runs.find(
           (r) =>
             r.assignment_id === a.id &&
-            (r.id === cause.run_id || r.trigger_event_id === cause.event_id),
+            (r.id === cause?.run_id || r.trigger_event_id === cause?.event_id),
         );
       const at = this.clock.now(),
         ports = { clock: { now: () => at }, ids: tx.ids },
         actor = { kind: "system" as const, project_id: project };
-      if (!run) {
+      if (!run && cause) {
         const event = state.events.find((e) => e.id === cause.event_id);
         // §6.4: merge conflicts and returned merges wake the coder for a fix Run.
         // The router marks this as run_kind=fix; the trigger event is
@@ -413,6 +581,43 @@ export class Dispatcher {
         run = effect.data;
         state = loadCommandState(tx, project);
       }
+      if (!run) return;
+      if (run.status === "queued") {
+        const capacity = runCapacitySnapshot(store, tx);
+        const trigger = state.events.find(
+          (e) => e.id === run?.trigger_event_id,
+        );
+        const order = {
+          project_id: project,
+          assignment_id: a.id,
+          created_at: trigger?.created_at ?? a.created_at,
+          trigger_event_id: run.trigger_event_id,
+        };
+        const earlier = capacity.queue.some(
+          (entry) =>
+            entry.machine_id === a.machine_id &&
+            compareDispatchOrder(entry, order) < 0,
+        );
+        if (
+          (!isStandingPm(a) && earlier) ||
+          !canDispatchRun(
+            this.options.runLimit?.(a.machine_id) ?? DEFAULT_RUN_LIMIT,
+            capacity.occupied.get(a.machine_id) ?? 0,
+            isStandingPm(a),
+          )
+        ) {
+          if (run.queue_reason !== "concurrency_limit")
+            tx.runs.put(project, { ...run, queue_reason: "concurrency_limit" });
+          return;
+        }
+        // A pending launch is reserved by its BellAttempt until dispatchRun
+        // commits. It must no longer appear as a capacity wait in read views.
+        const cleared = { ...run };
+        delete cleared.queue_reason;
+        run = cleared;
+        tx.runs.put(project, run);
+        state = loadCommandState(tx, project);
+      }
       if (run.status === "queued" && snapshot.launch_profile_ref) {
         run = {
           ...run,
@@ -425,12 +630,6 @@ export class Dispatcher {
       }
       if (!live && run.status !== "queued")
         throw { code: "finished_run_needs_attention" };
-      if (live && run.status === "queued")
-        persistEffect(
-          tx,
-          project,
-          unwrap(dispatchRun(state, actor, { run_id: run.id }, ports)),
-        );
       const kinds = ready.map((n) => ({
         seq: n.seq,
         kind: n.kind as NotificationKind,
@@ -438,14 +637,19 @@ export class Dispatcher {
       }));
       // §6.2: the bell names the Run, because the Agent needs it for
       // finish_run and heartbeat even when the host started the session.
-      const bell = cause.card_id
-        ? mergeNotifications({
-            card_id: cause.card_id,
-            assignment_id: a.id,
-            run_id: run.id,
-            notifications: kinds,
-          })?.text
-        : `[bell] project=${project} asg=${a.id} run=${run.id} seq=${Math.min(...ready.map((n) => n.seq))}..${Math.max(...ready.map((n) => n.seq))} summary=${JSON.stringify(summarizeNotifications(kinds))}\n→ 请调用 get_updates 读取项目更新`;
+      const runCard = state.work_items.find(
+        (w) => w.id === a.work_item_id,
+      )?.card_id;
+      const bell = !ready.length
+        ? `[bell] ${runCard ? `card=${runCard} wi=${a.work_item_id}` : `project=${project}`} asg=${a.id} run=${run.id} kind=${run.kind}\n→ 请调用 whoami、get_card、get_updates 继续已排队工作`
+        : cause?.card_id
+          ? mergeNotifications({
+              card_id: cause.card_id,
+              assignment_id: a.id,
+              run_id: run.id,
+              notifications: kinds,
+            })?.text
+          : `[bell] project=${project} asg=${a.id} run=${run.id} seq=${Math.min(...ready.map((n) => n.seq))}..${Math.max(...ready.map((n) => n.seq))} summary=${JSON.stringify(summarizeNotifications(kinds))}\n→ 请调用 get_updates 读取项目更新`;
       if (!bell) throw new Error("Missing bell");
       const attempt: BellAttempt = {
         id: randomUUID(),
@@ -458,10 +662,17 @@ export class Dispatcher {
         finished_at: null,
         outcome: null,
       };
-      beginBellAttempt(store.database, attempt);
+      if (ready.length) beginBellAttempt(store.database, attempt);
+      else beginLaunchAttempt(store.database, attempt);
+      if (live && run.status === "queued")
+        persistEffect(
+          tx,
+          project,
+          unwrap(dispatchRun(state, actor, { run_id: run.id }, ports)),
+        );
       const followup = decisionFollowupPrompt(
         state,
-        ready.map((n) => n.event_id),
+        [...new Set([run.trigger_event_id, ...ready.map((n) => n.event_id)])],
         a.id,
       );
       return {
@@ -492,12 +703,33 @@ export class Dispatcher {
         )
       )
         return;
-      const state = loadCommandState(tx, project),
-        ids = new Set(attempt.notification_ids);
+      let state = loadCommandState(tx, project);
+      // A queued Run has never crossed dispatch/sentinel. Fence it atomically
+      // with lease recovery so a late provision cannot dispatch after its slot
+      // has been handed to another Run. Dispatched/unknown work stays uncertain.
+      if (
+        !sent &&
+        state.runs.find((r) => r.id === attempt.run_id)?.status === "queued"
+      ) {
+        persistEffect(
+          tx,
+          project,
+          unwrap(
+            abortDispatch(
+              state,
+              { kind: "system", project_id: project },
+              { run_id: attempt.run_id, reason },
+              { ids: tx.ids, clock: this.clock },
+            ),
+          ),
+        );
+        state = loadCommandState(tx, project);
+      }
+      const ids = new Set(attempt.notification_ids);
       const notes = store
         .listNotifications({ project_id: project })
         .filter((n) => ids.has(n.id));
-      let failed = false;
+      let failed = !sent && notes.length === 0;
       for (const n of notes) {
         if (!["pending", "belled", "delivery_failed"].includes(n.status))
           continue;
@@ -539,7 +771,20 @@ export class Dispatcher {
         current = store
           .listNotifications({ project_id: project })
           .filter((n) => ids.has(n.id) && n.status === "pending");
-      if (!current.length) return;
+      const queued = tx.runs
+        .list(project)
+        .find(
+          (r) =>
+            r.assignment_id === a.id &&
+            r.status === "queued" &&
+            r.queue_reason !== undefined,
+        );
+      if (!current.length && !queued) return;
+      if (queued) {
+        const cleared = { ...queued };
+        delete cleared.queue_reason;
+        tx.runs.put(project, cleared);
+      }
       for (const n of current)
         moveNotification(store.database, {
           project_id: project,
@@ -565,7 +810,9 @@ export class Dispatcher {
       type: "bell_delivery_failed",
       reason,
       audience: alertAudience(a, state, this.options.standing, notes),
-      card_id: notes[0]?.card_id,
+      card_id:
+        notes[0]?.card_id ??
+        state.work_items.find((w) => w.id === a.work_item_id)?.card_id,
       notification_ids: notes.map((n) => n.id),
     });
   }
@@ -624,10 +871,7 @@ export class Dispatcher {
         if (r.status !== "running") continue;
         const a = state.assignments.find((a) => a.id === r.assignment_id);
         if (a?.status !== "active" || a.external) continue;
-        const last = Math.max(
-          Date.parse(r.started_at ?? a.created_at),
-          Date.parse(a.last_mcp_activity_at ?? a.created_at),
-        );
+        const last = lastRunActivity(r, a);
         if (
           Date.parse(at) - last < this.inactivityGraceMs ||
           state.events.some(

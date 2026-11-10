@@ -59,6 +59,9 @@ export function subscribeProject(
         callbacks.ready();
       }
     });
+    connection.addEventListener("queue", () => {
+      if (current()) callbacks.ready();
+    });
     connection.addEventListener("change", (event) => {
       if (!current()) return;
       let change: Partial<ProjectChange>;

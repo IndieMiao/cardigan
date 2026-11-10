@@ -14,12 +14,13 @@ import type {
 import { defaultMigrationsDir, listMigrations } from "./migrate.js";
 import { Store } from "./store.js";
 
-export function latestSchemaVersion(): number {
+/** Expected schema from migration files, independent of the database under test. */
+export function latestSchemaVersion(
+  migrationsDir: string = defaultMigrationsDir,
+): number {
   return Math.max(
     0,
-    ...listMigrations(defaultMigrationsDir).map(
-      (migration) => migration.version,
-    ),
+    ...listMigrations(migrationsDir).map((migration) => migration.version),
   );
 }
 

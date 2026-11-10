@@ -450,3 +450,45 @@ test("execution describes an external Office as an inbox identity", async () => 
   ).toBeNull();
   expect(screen.getByRole("button", { name: "复制查看收件箱" })).toBeTruthy();
 });
+
+test("execution includes unprovisioned queued work in the default view and shows its global position", async () => {
+  render(
+    <ExecutionPage
+      projectId="p-1"
+      client={fakeClient({
+        execution: async () => ({
+          machines: [],
+          assignments: [
+            {
+              ...assignment,
+              runtime_ref: null,
+              runtime_state: "not_provisioned",
+              queue_ahead: 2,
+            },
+          ],
+          runs: [{ ...run, queue_ahead: 2 }],
+        }),
+      })}
+    />,
+  );
+  expect(await screen.findByText("排队中（前面还有 2 个）")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "展开 A-1 详情" }));
+  expect(screen.getAllByText("排队中（前面还有 2 个）")).toHaveLength(2);
+});
+
+test("execution distinguishes an unavailable runtime from capacity waiting", async () => {
+  render(
+    <ExecutionPage
+      projectId="p-1"
+      client={fakeClient({
+        execution: async () => ({
+          assignments: [assignment],
+          machines: [],
+          runs: [{ ...run, queue_reason: "runtime_unavailable" }],
+        }),
+      })}
+    />,
+  );
+  expect(await screen.findByText("等待运行环境恢复")).toBeTruthy();
+  expect(screen.queryByText(/排队中（前面还有/)).toBeNull();
+});

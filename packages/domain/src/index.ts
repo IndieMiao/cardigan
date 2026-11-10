@@ -14,6 +14,7 @@ export type {
 export * from "./commands/decision-followup.js";
 export * from "./commands/delivery.js";
 export * from "./commands/employee.js";
+export * from "./commands/inactive-run.js";
 export * from "./commands/launch.js";
 export {
   type MergePlan,
@@ -61,6 +62,7 @@ export { type ResolvedReference, resolveReferences } from "./references.js";
 export { reviewLimitAttention } from "./review-limit-attention.js";
 export * from "./role.js";
 export * from "./role-prompt.js";
+export * from "./run-capacity.js";
 export * from "./runtime-port.js";
 export * from "./standing.js";
 export * from "./states.js";

@@ -1,5 +1,6 @@
 import type { Assignment, Notification } from "@cardigan/domain";
 import { reviewLimitAttention } from "@cardigan/domain";
+import { readRunQueue } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
 import {
   backfillStandingModesInTransaction,
@@ -177,6 +178,9 @@ export function attentionCommand(args: readonly string[], io: CliIo): number {
             a.status === "suspended",
         ),
     );
+    const queued = readRunQueue(store).filter(
+      (run) => run.project_id === project_id,
+    );
     // M4.4: reconciliation findings and a diverged registered source.
     const findings = store.listReconcileFindings(project_id, {
       openOnly: true,
@@ -186,7 +190,8 @@ export function attentionCommand(args: readonly string[], io: CliIo): number {
       escalated.length === 0 &&
       lost.length === 0 &&
       findings.length === 0 &&
-      paused.length === 0
+      paused.length === 0 &&
+      queued.length === 0
     ) {
       io.stdout(
         "没有需要关注的项：没有升级通知，没有失联的 Assignment，也没有对账发现。",
@@ -199,6 +204,13 @@ export function attentionCommand(args: readonly string[], io: CliIo): number {
       for (const finding of attention)
         lines.push(
           `  ${finding.kind} ${finding.card_id} age=${ageMinutes(finding.resolved_at, now)}m ${finding.detail}`,
+        );
+    }
+    if (queued.length) {
+      lines.push(`等待并发名额（${queued.length}）`);
+      for (const run of queued)
+        lines.push(
+          `  ${run.run_id} ${run.assignment_id}${run.card_id ? ` ${run.card_id}` : ""} ${run.machine_id} 排队中（前面还有 ${run.ahead} 个）`,
         );
     }
     if (paused.length) {

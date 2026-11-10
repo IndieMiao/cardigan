@@ -82,6 +82,7 @@ type CommandName =
   | "dispatch_run"
   | "acknowledge_run"
   | "abort_dispatch"
+  | "manage_inactive_run_stop"
   | "set_project_preferences"
   | "mark_notices_read"
   | "auto_confirm_merge"
@@ -173,6 +174,7 @@ export class CommandDraft {
       "pause_standing_assignment",
     ].includes(tool);
     const systemOnly = [
+      "manage_inactive_run_stop",
       "auto_confirm_merge",
       "remind_decision_followups",
       "record_merge_result",
