@@ -44,7 +44,11 @@ import {
 } from "./commands.js";
 import { HostLaunchError, type LaunchStep, messageOf } from "./errors.js";
 import { agentNameFor } from "./naming.js";
-import { type PreparedWorktree, prepareRoleWorktree } from "./worktree.js";
+import {
+  type PreparedWorktree,
+  prepareRoleWorktree,
+  worktreeBaselinePrompt,
+} from "./worktree.js";
 
 export type { PreparedWorktree } from "./worktree.js";
 
@@ -324,6 +328,7 @@ export async function launchRun(
               : { work_item_id: workItem.id }),
           }),
         standingModeLine(currentAssignment, standingModeOf(currentAssignment)),
+        worktreeBaselinePrompt(worktree),
       ]
         .filter((line): line is string => line !== undefined)
         .join("\n"),

@@ -27,6 +27,16 @@ export interface PreparedWorktree {
   readonly path: string;
   readonly branch?: string | undefined;
   readonly base_sha: string;
+  readonly baseline?: { readonly ref: string; readonly sha: string };
+}
+
+export function worktreeBaselinePrompt(
+  worktree?: PreparedWorktree,
+): string | undefined {
+  const baseline = worktree?.baseline;
+  return baseline
+    ? `当前基线 ${baseline.ref}：${baseline.sha}（已由主机同步）。`
+    : undefined;
 }
 
 export interface WorktreeRequest {
@@ -124,6 +134,7 @@ export function worktreeProvider(
       placed && {
         path: placed.worktree_path,
         base_sha: placed.base_sha,
+        ...(placed.baseline ? { baseline: placed.baseline } : {}),
         ...(placed.branch ? { branch: placed.branch } : {}),
       }
     );
