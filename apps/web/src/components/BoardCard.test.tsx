@@ -278,22 +278,78 @@ test("compact styles clamp two readable lines, wrap metadata and use existing th
   }
 });
 
-test("board cards show capacity queue positions, including the first waiting Run", () => {
-  const { rerender } = renderCard({
-    ...example,
-    queued_runs: [{ run_id: "R-1", assignment_id: "A-1", ahead: 0 }],
-  });
-  expect(screen.getByText("排队中（前面还有 0 个）")).toBeTruthy();
+test.each([
+  { ahead: 2, label: "排队中（前面还有 2 个）", mode: "hover" },
+  { ahead: 2, label: "排队中（前面还有 2 个）", mode: "focus" },
+  { ahead: 0, label: "即将开始", mode: "hover" },
+  { ahead: 0, label: "即将开始", mode: "focus" },
+])(
+  "queue badge at $ahead exposes its full label on $mode",
+  async ({ ahead, label, mode }) => {
+    const onOpenCard = vi.fn();
+    const { container } = renderCard(
+      {
+        ...example,
+        queued_runs: [{ run_id: "R-1", assignment_id: "A-1", ahead }],
+      },
+      onOpenCard,
+    );
+    const badge = screen.getByRole("link", { name: label });
+    expect(badge.closest(".board-card-meta")).toBeTruthy();
+    expect(badge.textContent).toBe(String(ahead));
+    expect(badge.getAttribute("aria-label")).toBe(label);
+    expect(badge.getAttribute("title")).toBe(label);
+    const icon = badge.querySelector("svg.status-shape-pending");
+    expect(icon?.getAttribute("aria-hidden")).toBe("true");
+    expect(icon?.querySelector("circle")).toBeTruthy();
+    expect(container.querySelector("p.hint")).toBeNull();
+    expect(screen.queryByText(label)).toBeNull();
+
+    if (mode === "focus") act(() => badge.focus());
+    else fireEvent.pointerMove(badge, { pointerType: "mouse" });
+    const tooltip = await screen.findByRole("tooltip");
+    expect(tooltip.textContent).toBe(label);
+    expect(tooltip.closest(".tooltip-content")).toBeTruthy();
+    expect(badge.getAttribute("aria-describedby")).toBe(tooltip.id);
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("tooltip")).toBeNull());
+    fireEvent.click(badge);
+    expect(onOpenCard).toHaveBeenCalledWith(example.id, badge);
+  },
+);
+
+test("queue badge selects the nearest Run regardless of input order and follows queue updates", () => {
+  const queuedRuns = [7, 2, 5].map((ahead) => ({
+    run_id: `R-${ahead}`,
+    assignment_id: `A-${ahead}`,
+    ahead,
+  }));
+  const { rerender } = renderCard({ ...example, queued_runs: queuedRuns });
+  expect(screen.getAllByRole("link", { name: /^排队中/ })).toHaveLength(1);
+  expect(
+    screen.getByRole("link", { name: "排队中（前面还有 2 个）" }).textContent,
+  ).toBe("2");
+  expect(queuedRuns.map((run) => run.ahead)).toEqual([7, 2, 5]);
   rerender(
     <BoardCard
       card={{
         ...example,
-        queued_runs: [{ run_id: "R-1", assignment_id: "A-1", ahead: 3 }],
+        queued_runs: [
+          ...queuedRuns,
+          { run_id: "R-0", assignment_id: "A-0", ahead: 0 },
+        ],
       }}
       projectId="p-1"
       display={DEFAULT_CARD_DISPLAY}
     />,
   );
-  expect(screen.getByText("排队中（前面还有 3 个）")).toBeTruthy();
-  expect(screen.queryByText("排队中（前面还有 0 个）")).toBeNull();
+  expect(screen.getAllByRole("link", { name: "即将开始" })).toHaveLength(1);
+  expect(screen.getByRole("link", { name: "即将开始" }).textContent).toBe("0");
+  expect(screen.queryByRole("link", { name: /^排队中/ })).toBeNull();
+  for (const item of [{ ...example, queued_runs: [] }, example]) {
+    rerender(
+      <BoardCard card={item} projectId="p-1" display={DEFAULT_CARD_DISPLAY} />,
+    );
+    expect(screen.queryByRole("link", { name: /排队中|即将开始/ })).toBeNull();
+  }
 });
