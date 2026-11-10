@@ -22,10 +22,11 @@ import type { MergeCheckView } from "@cardigan/domain";
 import {
   type CentralProject,
   CentralRepositoryService,
+  GitWorktreeService,
 } from "@cardigan/git-service";
 import { CentralGitTransport } from "@cardigan/git-transport";
 import { PROJECT_EVENT_STREAM } from "@cardigan/store";
-import { afterEach, beforeEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { ServerGit } from "./git.js";
 import {
   acceptThroughMergeGate,
@@ -91,6 +92,7 @@ beforeEach(() => {
   errors = [];
 });
 afterEach(() => {
+  vi.restoreAllMocks();
   f.close();
   rmSync(root, { recursive: true, force: true });
 });
@@ -159,7 +161,7 @@ test("an orphan directory and a manual project directory are reported", async ()
 });
 
 test.each(["local", "agent-ssh"] as const)(
-  "%s check worktrees are protected while active, then report only real leftovers after grace",
+  "%s project-only Git binding protects checks queued during the scan, then reports leftovers after grace",
   async (mode) => {
     await centralWithBaseClone();
     const agentRoot = join(root, "custom-agent");
@@ -177,7 +179,10 @@ test.each(["local", "agent-ssh"] as const)(
       );
     }
     const binding = new ServerGit({
-      store: f.store,
+      store: {
+        getProject: (id) => f.store.getProject(id),
+        listProjects: () => f.store.listProjects(),
+      },
       dataDir: f.dataDir,
       checkCleanupGraceMs: 1000,
       ...(mode === "agent-ssh"
@@ -230,7 +235,20 @@ test.each(["local", "agent-ssh"] as const)(
     });
     const open = () =>
       f.store.listReconcileFindings(f.project_id, { openOnly: true });
-    update("queued");
+    const scan = GitWorktreeService.prototype.listWorktreeState;
+    vi.spyOn(
+      GitWorktreeService.prototype,
+      "listWorktreeState",
+    ).mockImplementationOnce(async function (
+      this: GitWorktreeService,
+      project,
+    ) {
+      const snapshot = await scan.call(this, project);
+      // A check can be queued while filesystem IO is in flight. Its new
+      // ownership must be read from the loop's Store after that IO completes.
+      update("queued");
+      return snapshot;
+    });
     await executor.tick(f.project_id);
     expect(open()).toEqual([]);
     update("running");

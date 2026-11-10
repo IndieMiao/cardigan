@@ -54,7 +54,7 @@ import type { ProjectRecord, Store } from "@cardigan/store";
  * for all projects (paths are project-scoped).
  */
 export interface ServerGitOptions {
-  readonly store: Pick<Store, "getProject" | "listProjects" | "uow">;
+  readonly store: Pick<Store, "getProject" | "listProjects">;
   readonly dataDir: string;
   readonly checkCleanupGraceMs?: number;
   /** Defaults to local mode; `agent-ssh` routes workspace Git via the Agent. */
@@ -122,7 +122,8 @@ export interface ReconcileGit {
     project: CentralProject,
     assignments: readonly Assignment[],
     deliveries: readonly Delivery[],
-    at?: string,
+    /** The loop supplies current check ownership after the filesystem scan. */
+    readChecks?: () => ReconcileChecks,
   ): Promise<readonly ReconcileFinding[]>;
   removeWorktree(input: RemoveWorktreeInput): Promise<RemoveWorktreeOutcome>;
   diffWorktree(input: {
@@ -443,42 +444,24 @@ export class ServerGit implements GitBinding {
     project: CentralProject,
     assignments: readonly Assignment[],
     deliveries: readonly Delivery[],
-    at = new Date().toISOString(),
+    readChecks?: () => ReconcileChecks,
   ): Promise<readonly ReconcileFinding[]> {
     const state = await this.worktrees.listWorktreeState(project);
     // Read ownership after filesystem IO so a newly queued check is protected.
-    // Keep every attempt, including those of superseded completions/closed cards.
-    const attempts = this.options.store.uow.read((tx) => {
-      const id = project.project_id as ProjectId;
-      const latest = new Map<string, ReconcileChecks["attempts"][number]>();
-      for (const card of tx.cards.list(id))
-        for (const event of tx.events.listAfter(id, card.id, 0)) {
-          if (
-            event.actor.kind !== "system" ||
-            ![
-              "merge_check_queued",
-              "merge_check_started",
-              "merge_check_finished",
-            ].includes(event.type)
-          )
-            continue;
-          const check = event.payload as ReconcileChecks["attempts"][number];
-          latest.set(check.attempt_id, {
-            ...check,
-            updated_at: event.created_at,
-          });
-        }
-      return [...latest.values()];
-    });
-    return reconcile(state, assignments, deliveries, {
-      attempts,
-      now: at,
-      ...(this.options.checkCleanupGraceMs === undefined
-        ? {}
-        : {
-            cleanupGraceMs: this.options.checkCleanupGraceMs,
-          }),
-    });
+    const checks = readChecks?.();
+    return reconcile(
+      state,
+      assignments,
+      deliveries,
+      checks && {
+        ...checks,
+        ...(this.options.checkCleanupGraceMs === undefined
+          ? {}
+          : {
+              cleanupGraceMs: this.options.checkCleanupGraceMs,
+            }),
+      },
+    );
   }
   async removeWorktree(
     input: RemoveWorktreeInput,

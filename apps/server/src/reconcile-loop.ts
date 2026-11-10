@@ -1,5 +1,5 @@
 import type { Clock, ProjectId } from "@cardigan/domain";
-import type { ReconcileFinding } from "@cardigan/git-service";
+import type { ReconcileChecks, ReconcileFinding } from "@cardigan/git-service";
 import { retireReconcileNotifications, type Store } from "@cardigan/store";
 import type { ReconcileGit } from "./git.js";
 import { startTimerLoop, type TimerLoop } from "./loop.js";
@@ -42,6 +42,32 @@ export class ReconcileExecutor {
       work_items: tx.work_items.list(project_id),
       deliveries: tx.deliveries.list(project_id),
     }));
+  }
+
+  /** The loop owns database access; ServerGit only needs project lookup. */
+  private checks(project_id: ProjectId): ReconcileChecks {
+    return this.options.store.uow.read((tx) => {
+      // Keep old attempts too, including superseded completions/closed cards.
+      const latest = new Map<string, ReconcileChecks["attempts"][number]>();
+      for (const card of tx.cards.list(project_id))
+        for (const event of tx.events.listAfter(project_id, card.id, 0)) {
+          if (
+            event.actor.kind !== "system" ||
+            ![
+              "merge_check_queued",
+              "merge_check_started",
+              "merge_check_finished",
+            ].includes(event.type)
+          )
+            continue;
+          const check = event.payload as ReconcileChecks["attempts"][number];
+          latest.set(check.attempt_id, {
+            ...check,
+            updated_at: event.created_at,
+          });
+        }
+      return { attempts: [...latest.values()], now: this.clock.now() };
+    });
   }
 
   tick(project_id?: ProjectId): Promise<void> {
@@ -133,7 +159,7 @@ export class ReconcileExecutor {
       project,
       state.assignments,
       state.deliveries,
-      this.clock.now(),
+      () => this.checks(project_id),
     );
     if (await this.repair(project_id, findings)) {
       const current = this.state(project_id);
@@ -141,7 +167,7 @@ export class ReconcileExecutor {
         project,
         current.assignments,
         current.deliveries,
-        this.clock.now(),
+        () => this.checks(project_id),
       );
     }
     this.record(project_id, findings);
