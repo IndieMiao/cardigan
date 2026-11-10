@@ -294,6 +294,11 @@ test.each(["keep", "force_clean"])(
       decider: "human",
       blocking: false,
     });
+    expect(q.question).toBe(`保留还是强制清理 ${f.coder.id} 的工作区？`);
+    for (const option of q.options) {
+      expect(option.description).toMatch(/^[\u4e00-\u9fff]+$/u);
+      expect(option.impact).toMatch(/^[\u4e00-\u9fff，]+$/u);
+    }
     expect(
       value(requestWorktreeCleanup(f.state, system, p, f.io)),
     ).toMatchObject({ data: q, changes: [], events: [] });
