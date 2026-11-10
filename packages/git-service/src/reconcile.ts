@@ -1,5 +1,10 @@
-import { resolve } from "node:path";
-import type { Assignment, Delivery, GitWorktree } from "@cardigan/domain";
+import { join, resolve } from "node:path";
+import type {
+  Assignment,
+  Delivery,
+  GitWorktree,
+  MergeCheckView,
+} from "@cardigan/domain";
 import type { SourceSync } from "./central.js";
 
 /**
@@ -27,9 +32,10 @@ export interface ReconcileFinding {
 export interface WorktreeState {
   readonly project_id: string;
   readonly worktrees_root: string;
+  readonly checks_root?: string;
   /** Worktrees registered in the base clone. */
   readonly registered: readonly GitWorktree[];
-  /** Directories that actually exist under the worktree root. */
+  /** Existing assignment/check directories, including registered paths outside those roots. */
   readonly directories: readonly string[];
   /** Failed staging clones left behind by M2.7 (`.clone-*` in the clone root). */
   readonly failed_clones: readonly string[];
@@ -44,10 +50,22 @@ export interface WorktreeState {
 
 const sorted = (values: Iterable<string>) => [...values].sort();
 
+/** Allow one default reconciliation interval for the check's own cleanup. */
+export const DEFAULT_CHECK_CLEANUP_GRACE_MS = 600_000;
+export interface ReconcileChecks {
+  readonly attempts: readonly Pick<
+    MergeCheckView,
+    "attempt_id" | "status" | "updated_at"
+  >[];
+  readonly now: string;
+  readonly cleanupGraceMs?: number;
+}
+
 export function reconcile(
   state: WorktreeState,
   assignments: readonly Assignment[],
   deliveries: readonly Delivery[],
+  checks?: ReconcileChecks,
 ): readonly ReconcileFinding[] {
   const owned = new Set(
       assignments
@@ -58,20 +76,57 @@ export function reconcile(
     directories = new Set(state.directories.map((entry) => resolve(entry))),
     findings: ReconcileFinding[] = [];
 
-  // A path Git knows or the filesystem shows, but no Assignment owns.
-  for (const path of sorted(new Set([...registered, ...directories])))
-    if (!owned.has(path))
+  const attempts = new Map(
+    state.checks_root && checks
+      ? checks.attempts
+          .filter((check) =>
+            /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(check.attempt_id),
+          )
+          .map(
+            (check) =>
+              [
+                resolve(
+                  join(
+                    state.checks_root as string,
+                    check.attempt_id,
+                    "worktree",
+                  ),
+                ),
+                check,
+              ] as const,
+          )
+      : [],
+  );
+  const protectedChecks = new Set(
+    [...attempts]
+      .filter(
+        ([, check]) =>
+          check.status === "queued" ||
+          check.status === "running" ||
+          Date.parse(checks?.now ?? "") - Date.parse(check.updated_at) <=
+            (checks?.cleanupGraceMs ?? DEFAULT_CHECK_CLEANUP_GRACE_MS),
+      )
+      .map(([path]) => path),
+  );
+
+  // Presence decides the finding: a missing registration cannot also be an orphan.
+  for (const path of sorted(directories))
+    if (!owned.has(path) && !protectedChecks.has(path))
       findings.push({
         kind: "orphan_worktree",
-        detail: "Worktree exists but no Assignment owns it",
+        detail: attempts.has(path)
+          ? `Finished merge check ${attempts.get(path)?.attempt_id} left a directory after cleanup grace; Git registration ${registered.has(path) ? "present" : "missing"}`
+          : "Worktree exists but no Assignment owns it",
         path,
       });
   // Git registered it, the directory is gone: the base clone needs pruning.
   for (const path of sorted(registered))
-    if (!directories.has(path))
+    if (!directories.has(path) && !protectedChecks.has(path))
       findings.push({
         kind: "stale_registration",
-        detail: "Worktree is registered in Git but its directory is missing",
+        detail: attempts.has(path)
+          ? `Finished merge check ${attempts.get(path)?.attempt_id} left a Git registration after cleanup grace; directory missing`
+          : "Worktree is registered in Git but its directory is missing",
         path,
       });
   // §3.6: a worktree is "missing" when its directory is gone, whatever Git

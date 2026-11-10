@@ -4,9 +4,11 @@ import {
   decisionCategories,
   decisionDelegation,
   highRiskCategories,
+  isBoardLane,
   pmMergeConfirmation,
   validAutoMergeMinutes,
 } from "../preferences.js";
+import { states } from "../states.js";
 import {
   type CommandPorts,
   type CommandState,
@@ -31,6 +33,8 @@ export function setProjectPreferences(
     auto_merge_after_minutes?: number | null;
     decision_delegation?: Partial<Record<DecisionCategory, boolean>>;
     pm_merge_confirmation?: boolean;
+    /** A patch: only the listed lanes change; null forgets the human setting. */
+    board_collapsed_lanes?: Readonly<Record<string, boolean | null>>;
   },
   ports: CommandPorts,
 ) {
@@ -50,7 +54,8 @@ export function setProjectPreferences(
     ensure(
       input.auto_merge_after_minutes !== undefined ||
         input.decision_delegation !== undefined ||
-        input.pm_merge_confirmation !== undefined,
+        input.pm_merge_confirmation !== undefined ||
+        input.board_collapsed_lanes !== undefined,
       "validation_failed",
       "No preference supplied",
     );
@@ -77,6 +82,21 @@ export function setProjectPreferences(
       );
       delegation[category as DecisionCategory] = enabled;
     }
+    const lanes: Partial<Record<string, boolean>> = {
+      ...old.board_collapsed_lanes,
+    };
+    for (const [lane, collapsed] of Object.entries(
+      input.board_collapsed_lanes ?? {},
+    )) {
+      ensure(
+        isBoardLane(lane) &&
+          (collapsed === null || typeof collapsed === "boolean"),
+        "validation_failed",
+        "Unknown board lane or collapse setting",
+      );
+      if (collapsed === null) delete lanes[lane];
+      else lanes[lane] = collapsed;
+    }
     const next = {
       ...old,
       auto_merge_after_minutes:
@@ -87,6 +107,7 @@ export function setProjectPreferences(
       ...(input.pm_merge_confirmation !== undefined
         ? { pm_merge_confirmation: input.pm_merge_confirmation }
         : {}),
+      ...(input.board_collapsed_lanes ? { board_collapsed_lanes: lanes } : {}),
     };
     const mergeChanged =
       old.auto_merge_after_minutes !== next.auto_merge_after_minutes;
@@ -95,7 +116,15 @@ export function setProjectPreferences(
     );
     const pmMergeChanged =
       pmMergeConfirmation(old) !== pmMergeConfirmation(next);
-    if (!mergeChanged && !delegationChanged && !pmMergeChanged) return old;
+    const oldLanes: Partial<Record<string, boolean>> =
+      old.board_collapsed_lanes ?? {};
+    const lanesChanged =
+      input.board_collapsed_lanes !== undefined &&
+      states.card.some((lane) => oldLanes[lane] !== lanes[lane]);
+    if (!mergeChanged && !delegationChanged && !pmMergeChanged && !lanesChanged)
+      return old;
+    // Lane folding is a view setting: it is stored for every device but emits
+    // no audit event, so toggling a lane never feeds the activity stream.
     d.put("project_preferences", next);
     if (mergeChanged)
       d.emit("project_preferences_updated", undefined, {

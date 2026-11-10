@@ -723,6 +723,8 @@ export interface PreferencesView {
   readonly pm_merge_confirmation?: boolean;
   readonly auto_merge_after_minutes: number | null;
   readonly merge_gate_enabled: boolean;
+  /** Lanes the human folded (true) or unfolded (false); missing = default. */
+  readonly board_collapsed_lanes?: Readonly<Record<string, boolean>>;
 }
 
 export type RoleKind = "produce" | "verify" | "standing";
@@ -892,6 +894,12 @@ export interface CardiganClient {
   setPmMergeConfirmation(
     projectId: string,
     enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void>;
+  setBoardLane(
+    projectId: string,
+    lane: string,
+    collapsed: boolean,
     idempotencyKey: string,
   ): Promise<void>;
   markNoticesRead(
@@ -1171,6 +1179,19 @@ export class HttpCardiganClient implements CardiganClient {
       projectId,
       "preferences",
       { pm_merge_confirmation: enabled },
+      idempotencyKey,
+    );
+  }
+  async setBoardLane(
+    projectId: string,
+    lane: string,
+    collapsed: boolean,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      "preferences",
+      { board_collapsed_lanes: { [lane]: collapsed } },
       idempotencyKey,
     );
   }

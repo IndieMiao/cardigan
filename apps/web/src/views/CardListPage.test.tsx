@@ -104,6 +104,11 @@ function client(
     card: async () => {
       throw new Error("the list view must not open a card");
     },
+    preferences: async () => ({
+      auto_merge_after_minutes: null,
+      merge_gate_enabled: false,
+    }),
+    setBoardLane: async () => undefined,
   };
 }
 

@@ -30,6 +30,7 @@ import { ViewSwitch } from "../components/ViewSwitch.js";
 import { routeHash, useRouteFilters } from "../route.js";
 import { inSnapshotGroup, SNAPSHOT_GROUPS } from "../snapshot-groups.js";
 import { BOARD_STATUSES, cardStatusLabel } from "../status.js";
+import { useBoardLanes } from "../useBoardLanes.js";
 import { useResource } from "../useResource.js";
 import { CardDetailPage } from "./CardDetailPage.js";
 
@@ -211,6 +212,7 @@ export function CardListPage({
     load,
     revision,
   );
+  const boardLanes = useBoardLanes(client, projectId, revision);
   useEffect(() => {
     writeCardDisplay(display);
   }, [display]);
@@ -297,6 +299,19 @@ export function CardListPage({
         retry={reload}
         pendingMessage="正在加载卡片…"
       />
+      {boardLanes.error && (
+        <RequestFeedback
+          error={boardLanes.error}
+          retry={boardLanes.retry}
+          retryLabel="重新保存"
+        />
+      )}
+      {view === "board" && boardLanes.readError && (
+        <RequestFeedback
+          error={boardLanes.readError}
+          retry={boardLanes.reload}
+        />
+      )}
       <FilterBar
         fields={[
           ...(filters.overview
@@ -428,20 +443,22 @@ export function CardListPage({
       )}
       {state.kind === "ready" &&
         (view === "board" ? (
-          <Board
-            resetKey={JSON.stringify([
-              projectId,
-              ...["status", "overview", "next", "role", "q", "sort"].map(
-                (key) => filters[key] ?? "",
-              ),
-            ])}
-            cards={cards}
-            projectId={projectId}
-            expanded={filters.expanded ?? ""}
-            onExpanded={(expanded) => setFilters({ ...filters, expanded })}
-            display={display}
-            onOpenCard={openCard}
-          />
+          boardLanes.ready && (
+            <Board
+              resetKey={JSON.stringify([
+                projectId,
+                ...["status", "overview", "next", "role", "q", "sort"].map(
+                  (key) => filters[key] ?? "",
+                ),
+              ])}
+              cards={cards}
+              projectId={projectId}
+              lanes={boardLanes.lanes}
+              onLaneChange={boardLanes.setLane}
+              display={display}
+              onOpenCard={openCard}
+            />
+          )
         ) : cards.length > 0 ? (
           <CardTable
             cards={cards}

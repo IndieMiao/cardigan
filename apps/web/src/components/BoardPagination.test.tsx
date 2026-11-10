@@ -211,10 +211,15 @@ test("live refresh and unrelated route changes keep loaded cards and the scroll 
   root.scrollTop = 300;
   page.rerender(<CardListPage client={client} projectId="p-1" revision={1} />);
   act(() => {
+    // A legacy `expanded` link parameter is unrelated to the board now.
     window.location.hash = "#/p/p-1/cards?view=board&expanded=backlog";
     window.dispatchEvent(new HashChangeEvent("hashchange"));
   });
-  await screen.findByRole("button", { name: "收起待整理空列" });
+  // Folding another lane by hand does not reset this lane either.
+  fireEvent.click(screen.getByRole("button", { name: "展开待整理列" }), {
+    detail: 1,
+  });
+  await screen.findByRole("button", { name: "折叠待整理列" });
   expect(links(column)).toHaveLength(20);
   expect(screen.getByRole("region", { name: "进行中卡片" })).toBe(root);
   expect(root.scrollTop).toBe(300);

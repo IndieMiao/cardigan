@@ -24,6 +24,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { dispatchFixture } from "../test-support/dispatch.js";
 import { standingResolver } from "./assembly.js";
 import { Dispatcher } from "./dispatch.js";
+import { routeProjectEvents } from "./dispatch-inbox.js";
 import { executionView } from "./web/read.js";
 
 let f: ReturnType<typeof dispatchFixture>,
@@ -138,6 +139,75 @@ const start = (pm: Assignment) =>
       secrets: {},
     },
   });
+
+test("Ops resume omits acknowledged and resolved project findings but keeps unread ones", async () => {
+  const { pm } = await setup("ops");
+  const run = f.state().runs.find((r) => r.assignment_id === pm.id);
+  if (!run) throw new Error("Missing PM Run");
+  const findings = ["read", "resolved", "unread"].map((name) => ({
+    kind: "orphan_worktree",
+    path: `/fixture/${name}`,
+    detail: name,
+  }));
+  f.store.recordReconcileFindings(f.project, findings);
+  const events = f.store.uow.run((tx) =>
+    findings.map((finding) => {
+      const event = {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(f.project),
+        type: "reconcile_finding",
+        actor: { kind: "system" as const, project_id: f.project },
+        payload: { ...finding, first_seen_at: f.clock.now() },
+        created_at: f.clock.now(),
+      };
+      tx.events.append(f.project, event);
+      return event;
+    }),
+  );
+  const [read, resolved, unread] = events;
+  if (!read || !resolved || !unread) throw new Error("Missing findings");
+  routeProjectEvents(f.store, f.project);
+  const notes = f.store
+    .listNotifications({ project_id: f.project })
+    .filter((n) => events.some((e) => e.id === n.event_id));
+  for (const note of notes)
+    f.store.moveNotification({
+      project_id: f.project,
+      id: note.id,
+      event: "bell",
+      patch: { run_id: run.id },
+    });
+  expect(
+    f.store.ackEvents({
+      project_id: f.project,
+      assignment_id: pm.id,
+      card_id: "",
+      up_to_seq: read.seq,
+    }).ok,
+  ).toBe(true);
+  f.store.recordReconcileFindings(
+    f.project,
+    findings.filter((finding) => finding.detail !== "resolved"),
+  );
+  await stopAssignment({
+    store: f.store,
+    project_id: f.project,
+    assignment_id: pm.id,
+    runtime,
+  });
+  await start(pm);
+  const prompt = readFileSync(
+    join(f.dataDir, "runs", f.project, pm.id, "first.md"),
+    "utf8",
+  );
+  expect(prompt).not.toContain(`seq=${read.seq}\n`);
+  expect(prompt).not.toContain(`seq=${resolved.seq}\n`);
+  expect(prompt).toContain(`seq=${unread.seq}\n`);
+  const rows = f.store.listNotifications({ project_id: f.project });
+  expect(
+    notes.map((note) => rows.find((row) => row.id === note.id)?.status),
+  ).toEqual(["acked", "acked", "belled"]);
+});
 
 test.each(["office", "ops"] as const)(
   "S24 stopped %s stays paused across dispatcher restarts; explicit start reads queued bells",

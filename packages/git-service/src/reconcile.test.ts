@@ -9,7 +9,12 @@
  */
 import type { Assignment, Delivery, GitWorktree } from "@cardigan/domain";
 import { expect, test } from "vitest";
-import { reconcile, type WorktreeState } from "./reconcile.js";
+import {
+  DEFAULT_CHECK_CLEANUP_GRACE_MS,
+  type ReconcileChecks,
+  reconcile,
+  type WorktreeState,
+} from "./reconcile.js";
 
 const project_id = "p-fictional";
 const root = "/srv/agent/worktrees/p-fictional";
@@ -154,4 +159,105 @@ test("orphans and failed clones keep their old reporting", () => {
     expect.objectContaining({ kind: "orphan_worktree", path: orphan }),
     expect.objectContaining({ kind: "failed_clone", path: failed }),
   ]);
+});
+
+test("an unowned missing registration is only stale, never also an orphan", () => {
+  expect(
+    reconcile(state({ registered: [registered(worktree)] }), [], []),
+  ).toEqual([
+    expect.objectContaining({ kind: "stale_registration", path: worktree }),
+  ]);
+});
+
+const checksRoot = "/fixture/checks/p-fictional";
+const checkPath = `${checksRoot}/attempt-1/worktree`;
+const checkState = (present: boolean, listed: boolean) =>
+  state({
+    checks_root: checksRoot,
+    directories: present ? [checkPath] : [],
+    registered: listed ? [registered(checkPath)] : [],
+  });
+const checks = (
+  status: ReconcileChecks["attempts"][number]["status"],
+  age: number,
+): ReconcileChecks => ({
+  now: new Date(age).toISOString(),
+  attempts: [
+    {
+      attempt_id: "attempt-1",
+      status,
+      updated_at: new Date(0).toISOString() as never,
+    },
+  ],
+});
+
+test.each(["queued", "running"] as const)(
+  "%s checks stay protected regardless of age or cleanup snapshot",
+  (status) => {
+    for (const present of [true, false])
+      for (const listed of [true, false])
+        expect(
+          reconcile(
+            checkState(present, listed),
+            [],
+            [],
+            checks(status, 86_400_000),
+          ),
+        ).toEqual([]);
+  },
+);
+
+test.each(["passed", "failed", "timed_out", "interrupted"] as const)(
+  "%s check leftovers report once only after the cleanup grace",
+  (status) => {
+    for (const [present, listed, kind] of [
+      [true, true, "orphan_worktree"],
+      [true, false, "orphan_worktree"],
+      [false, true, "stale_registration"],
+    ] as const) {
+      const snapshot = checkState(present, listed);
+      expect(
+        reconcile(
+          snapshot,
+          [],
+          [],
+          checks(status, DEFAULT_CHECK_CLEANUP_GRACE_MS),
+        ),
+      ).toEqual([]);
+      expect(
+        reconcile(
+          snapshot,
+          [],
+          [],
+          checks(status, DEFAULT_CHECK_CLEANUP_GRACE_MS + 1),
+        ),
+      ).toEqual([expect.objectContaining({ kind, path: checkPath })]);
+      expect(
+        reconcile(snapshot, [], [], {
+          ...checks(status, 101),
+          cleanupGraceMs: 100,
+        }),
+      ).toHaveLength(1);
+    }
+    expect(
+      reconcile(checkState(false, false), [], [], checks(status, 86_400_000)),
+    ).toEqual([]);
+  },
+);
+
+test("a check owns only its exact project/attempt path", () => {
+  const other = `${checksRoot}/attempt-2/worktree`;
+  expect(
+    reconcile(
+      state({
+        checks_root: checksRoot,
+        directories: [checkPath, other, worktree],
+      }),
+      [],
+      [],
+      checks("running", 0),
+    )
+      .map((finding) => finding.path)
+      .sort(),
+  ).toEqual([other, worktree].sort());
 });

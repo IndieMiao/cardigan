@@ -871,18 +871,24 @@ test.each([false, true])(
       f.skipEvents();
     }
     f.comment();
-    const d = dispatcher({ dispatchTimeoutMs: 100 });
+    const d = dispatcher({ dispatchTimeoutMs: 600000 });
     await d.tick();
     vi.mocked(f.options.startRun).mockImplementationOnce(async ({ run }) => {
+      f.advance(65000);
       f.apply((s, a, p) =>
         abortDispatch(s, a, { run_id: run.id, reason: "startup_failed" }, p),
       );
       throw new Error("host compensation");
     });
-    f.advance(100);
+    f.advance(600000);
     await d.tick();
     expect(f.latest().status).toBe("cancelled");
-    await d.tick();
+    const reopened = Store.open({ dataDir: f.dataDir });
+    try {
+      await dispatcher({ store: reopened, dispatchTimeoutMs: 600000 }).tick();
+    } finally {
+      reopened.close();
+    }
     f.advance(600000);
     await d.tick();
     expect(count("run_dispatch_stalled")).toBe(1);
@@ -891,6 +897,11 @@ test.each([false, true])(
       .events.find((e) => e.type === "run_dispatch_stalled");
     expect(incident?.payload).toMatchObject({
       reason: "recovery_startup_failed",
+      waited_ms: 665000,
+      body: expect.stringContaining(
+        "派发后已等待 11 分钟，自动恢复后的启动失败",
+      ),
+      audience: withOps ? "pm_ops" : "needs_you",
     });
     if (withOps) {
       expect(f.state().human_actions).toHaveLength(0);
@@ -913,6 +924,9 @@ test.each([false, true])(
       expect(f.state().human_actions[0]).toMatchObject({ status: "open" });
       expect(f.state().human_actions[0]?.instructions).toContain(
         "cardigan assignment start",
+      );
+      expect(f.state().human_actions[0]?.instructions).toContain(
+        "派发后已等待 11 分钟，自动恢复后的启动失败",
       );
       f.session(f.target.assignment);
       f.skipEvents();

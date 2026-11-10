@@ -5,6 +5,7 @@ import {
   advanceRouterCursor,
   reassignNotifications,
   recordNotification,
+  retireReconcileNotifications,
 } from "./inbox.js";
 import { Store } from "./store.js";
 import {
@@ -391,4 +392,131 @@ test("reassignNotifications hands failed deliveries to the new Assignment as pen
     ]);
     expect(handed.every((n) => n.run_id === undefined)).toBe(true);
   });
+});
+
+test.each(["pending", "belled", "delivery_failed"] as const)(
+  "rotation does not re-deliver %s project notices already read by the old PM",
+  (status) => {
+    withTempStore((store) => {
+      seed(store);
+      const old = assignment().id;
+      const message = store.uow.run((tx) => {
+        const e = {
+          ...event({ seq: 1 }),
+          id: tx.ids.nextEventId(),
+          card_id: undefined,
+          seq: 1,
+        };
+        tx.events.append(project_id, e);
+        return e;
+      });
+      const notice = store.recordNotification({
+        project_id,
+        event_id: message.id,
+        seq: 1,
+        kind: "escalation",
+        recipient: { kind: "pm_ops" },
+      }).notification;
+      store.moveNotification({
+        project_id,
+        id: notice.id,
+        event: "bell",
+        patch: { run_id: "R-9" as never },
+      });
+      if (status === "pending")
+        store.moveNotification({ project_id, id: notice.id, event: "retry" });
+      if (status === "delivery_failed")
+        store.moveNotification({
+          project_id,
+          id: notice.id,
+          event: "deliver_failed",
+        });
+      expect(
+        store.ackEvents({
+          project_id,
+          assignment_id: old,
+          card_id: PROJECT_EVENT_STREAM,
+          up_to_seq: 1,
+        }).ok,
+      ).toBe(true);
+      expect(
+        store.uow.run(() =>
+          reassignNotifications(store.database, {
+            project_id,
+            from: old,
+            to: "A-99" as never,
+            run_ids: ["R-9"],
+          }),
+        ),
+      ).toBe(0);
+      expect(
+        store.listNotifications({ project_id }).find((n) => n.id === notice.id)
+          ?.status,
+      ).toBe("acked");
+    });
+  },
+);
+
+test("resolved reconcile notices and old occurrences retire; the new unresolved occurrence survives", () => {
+  let time = "2030-01-01T00:00:00.000Z";
+  withTempStore(
+    (store) => {
+      seed(store);
+      const finding = {
+        kind: "orphan_worktree",
+        path: "/fixture/check/worktree",
+        detail: "Leftover",
+      };
+      const announce = () =>
+        store.uow.run((tx) => {
+          store.recordReconcileFindings(project_id, [finding]);
+          const e = {
+            id: tx.ids.nextEventId(),
+            seq: tx.ids.nextEventSequence(project_id),
+            type: "reconcile_finding",
+            actor: { kind: "system" as const, project_id },
+            payload: { ...finding, first_seen_at: time },
+            created_at: time,
+          };
+          tx.events.append(project_id, e);
+          return recordNotification(store.database, {
+            project_id,
+            event_id: e.id,
+            seq: e.seq,
+            kind: "escalation",
+            recipient: { kind: "pm_ops" },
+          }).notification;
+        });
+      const first = announce();
+      store.recordReconcileFindings(project_id, []);
+      expect(
+        store.uow.run(() =>
+          retireReconcileNotifications(store.database, project_id),
+        ),
+      ).toBe(1);
+      time = "2030-01-01T00:01:00.000Z";
+      const second = announce();
+      store.recordReconcileFindings(project_id, []);
+      time = "2030-01-01T00:02:00.000Z";
+      const third = announce();
+      expect(
+        store.uow.run(() =>
+          retireReconcileNotifications(store.database, project_id),
+        ),
+      ).toBe(1);
+      const rows = store.listNotifications({ project_id });
+      expect(rows.find((n) => n.id === first.id)?.status).toBe("acked");
+      expect(rows.find((n) => n.id === second.id)?.status).toBe("acked");
+      expect(rows.find((n) => n.id === third.id)?.status).toBe("pending");
+      expect(
+        store.uow.read((tx) =>
+          tx.cursors.get(project_id, {
+            assignment_id: assignment().id,
+            card_id: "" as CardId,
+          }),
+        ),
+      ).toBeUndefined();
+    },
+    { clock: { now: () => time } },
+  );
 });

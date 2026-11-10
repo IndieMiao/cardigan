@@ -3,6 +3,7 @@ import type { DatabaseSync } from "node:sqlite";
 import type {
   AssignmentId,
   CardId,
+  Event,
   EventId,
   Notification,
   NotificationEvent,
@@ -13,6 +14,12 @@ import {
   isTerminalNotification,
   nextNotificationStatus,
 } from "@cardigan/domain";
+import { unfinishedBellAttempts } from "./dispatcher.js";
+import {
+  findingKey,
+  listFindings,
+  type ReconcileFindingInput,
+} from "./reconcile.js";
 
 /**
  * M3.3: the router inbox (M3 plan §3.2) and the Router cursor.
@@ -207,13 +214,32 @@ export function acknowledgeNotifications(
   assignment_id: AssignmentId,
   at: string = new Date().toISOString(),
 ): number {
-  const rows = listNotifications(db, { project_id, assignment_id });
+  const rows = listNotifications(db, { project_id });
+  const attempts = unfinishedBellAttempts(db, project_id);
   let acked = 0;
   for (const notification of rows) {
-    if (notification.recipient.kind !== "assignment") continue;
+    if (notification.recipient.kind === "needs_you") continue;
     // Escalated (and already acked) rows are terminal: an ACK cursor must not
     // try to move them, or the reconciliation would throw on a valid inbox.
     if (isTerminalNotification(notification.status)) continue;
+    const owner =
+      attempts.find((attempt) =>
+        attempt.notification_ids.includes(notification.id),
+      )?.assignment_id ??
+      (notification.recipient.kind === "assignment"
+        ? notification.recipient.assignment_id
+        : notification.run_id
+          ? (
+              db
+                .prepare(
+                  "SELECT assignment_id FROM runs WHERE project_id = ? AND id = ?",
+                )
+                .get(project_id, notification.run_id) as
+                | { assignment_id: string }
+                | undefined
+            )?.assignment_id
+          : undefined);
+    if (owner !== assignment_id) continue;
     const cursor = db
       .prepare(
         "SELECT acked_seq FROM cursors WHERE project_id = ? AND assignment_id = ? AND card_id = ?",
@@ -230,6 +256,43 @@ export function acknowledgeNotifications(
     acked += 1;
   }
   return acked;
+}
+
+/** Retire resolved/previous occurrences without advancing any Agent read cursor.
+ * Call in the same transaction as routing, reconciliation or inbox handover.
+ */
+export function retireReconcileNotifications(
+  db: DatabaseSync,
+  project_id: ProjectId,
+  at: string = new Date().toISOString(),
+): number {
+  const findings = new Map(
+    listFindings(db, project_id).map((finding) => [finding.id, finding]),
+  );
+  let retired = 0;
+  for (const note of listNotifications(db, { project_id })) {
+    if (isTerminalNotification(note.status)) continue;
+    const row = db
+      .prepare(
+        "SELECT doc FROM events WHERE project_id = ? AND id = ? AND type = 'reconcile_finding'",
+      )
+      .get(project_id, note.event_id) as { doc: string } | undefined;
+    if (!row) continue;
+    const payload = (JSON.parse(row.doc) as Event)
+      .payload as unknown as ReconcileFindingInput & { first_seen_at?: string };
+    const finding = findings.get(findingKey(payload));
+    // Missing ledger data is not proof of resolution. Preserve such notices.
+    if (
+      !finding ||
+      (finding.resolved_at === null &&
+        (!payload.first_seen_at ||
+          payload.first_seen_at === finding.first_seen_at))
+    )
+      continue;
+    moveNotification(db, { project_id, id: note.id, event: "ack", at });
+    retired++;
+  }
+  return retired;
 }
 
 /**
@@ -297,6 +360,7 @@ export function reassignNotifications(
   now: () => string = () => new Date().toISOString(),
 ): number {
   const at = input.at ?? now();
+  retireReconcileNotifications(db, input.project_id, at);
   let moved = 0;
   for (const current of listNotifications(db, {
     project_id: input.project_id,
@@ -308,6 +372,22 @@ export function reassignNotifications(
     const pinned =
       current.run_id !== undefined && input.run_ids.includes(current.run_id);
     if (!addressed && !pinned) continue;
+    const cursor = db
+      .prepare(
+        "SELECT acked_seq FROM cursors WHERE project_id = ? AND assignment_id = ? AND card_id = ?",
+      )
+      .get(input.project_id, input.from, current.card_id ?? "") as
+      | { acked_seq: number }
+      | undefined;
+    if (cursor && cursor.acked_seq >= current.seq) {
+      moveNotification(db, {
+        project_id: input.project_id,
+        id: current.id,
+        event: "ack",
+        at,
+      });
+      continue;
+    }
     if (current.status === "delivery_failed") {
       // The state machine has no way back to pending from a failed delivery:
       // close the old row as handed over and ring the new Assignment afresh.
