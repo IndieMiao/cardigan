@@ -77,7 +77,17 @@ export function EmployeeIdentity({
     undefined,
   );
   const returnFocus = useRef(false);
-  useEffect(() => () => clearTimeout(closeTimer.current), []);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const focusTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
+  useEffect(
+    () => () => {
+      clearTimeout(closeTimer.current);
+      clearTimeout(focusTimer.current);
+    },
+    [],
+  );
   const role = employee?.role_id ?? author_role ?? "Agent";
   const name =
     employee?.name ??
@@ -150,6 +160,7 @@ export function EmployeeIdentity({
     >
       <Popover.Trigger asChild>
         <button
+          ref={trigger}
           type="button"
           className="employee-identity employee-trigger"
           aria-label={`${name}的员工卡片`}
@@ -181,7 +192,20 @@ export function EmployeeIdentity({
           onPointerLeave={leave}
           onOpenAutoFocus={(event) => event.preventDefault()}
           onCloseAutoFocus={(event) => {
-            if (!returnFocus.current) event.preventDefault();
+            // Radix skips focus return after an outside click. Restore it
+            // (now and after the click's own default focus) unless the click
+            // deliberately focused another control, which keeps its focus.
+            event.preventDefault();
+            if (!returnFocus.current) return;
+            const target = trigger.current;
+            const restore = () => {
+              const active = document.activeElement;
+              if (target?.isConnected && (!active || active === document.body))
+                target.focus();
+            };
+            restore();
+            clearTimeout(focusTimer.current);
+            focusTimer.current = setTimeout(restore, 0);
           }}
           onClick={(event) => event.stopPropagation()}
         >

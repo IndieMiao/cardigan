@@ -207,6 +207,46 @@ test("hover and click reveal a profile, Escape/outside dismiss it, and keyboard 
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 });
 
+test("outside clicks close the click-opened profile and return focus to the avatar unless another control takes it", async () => {
+  render(
+    <>
+      <EmployeeIdentity {...identity} />
+      <p>空白区域</p>
+      <button type="button">其他</button>
+    </>,
+  );
+  const trigger = screen.getByRole("button", { name: "林舟的员工卡片" });
+  const blank = screen.getByText("空白区域");
+  const other = screen.getByRole("button", { name: "其他" });
+  // Mirrors the browser: pointerdown, then the default focus move, then click.
+  const clickOutside = (target: HTMLElement, focusable: boolean) => {
+    fireEvent.pointerDown(target, { button: 0, pointerType: "mouse" });
+    if (focusable) target.focus();
+    else (document.activeElement as HTMLElement | null)?.blur();
+    fireEvent.mouseDown(target);
+    fireEvent.mouseUp(target);
+    fireEvent.click(target);
+  };
+  const open = async () => {
+    trigger.focus();
+    fireEvent.click(trigger);
+    await screen.findByRole("dialog");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  };
+
+  await open();
+  clickOutside(blank, false);
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  expect(document.activeElement).toBe(trigger);
+
+  await open();
+  clickOutside(other, true);
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  expect(document.activeElement).toBe(other);
+});
+
 test("compact profile lays out name, title, bio and role without empty rows", async () => {
   const { rerender } = render(<EmployeeIdentity {...identity} />);
   fireEvent.click(screen.getByRole("button", { name: "林舟的员工卡片" }));
