@@ -5,7 +5,6 @@ import {
   getRoleVersion,
   PROJECT_EVENT_STREAM,
   Store,
-  writeRole,
 } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { dispatchFixture } from "../test-support/dispatch.js";
@@ -168,21 +167,16 @@ test("logical PM ACK uses the in-flight receiver even if the configured PM chang
   const note = notes().find((n) => n.recipient.kind === "pm_ops");
   if (!note) throw new Error("Missing PM notification");
   const owners = f.store.uow.run((tx) => {
-    const role = getRoleVersion(tx, f.project, "coder");
-    if (!role) throw new Error("Missing role");
-    writeRole(
-      tx,
-      f.project,
-      { ...role, role_id: "pm", kind: "standing", capabilities: ["manage"] },
-      { mode: "add" },
-    );
+    // f.create() registered the PM role; this scenario replaces its Assignment.
+    const role = getRoleVersion(tx, f.project, "pm");
+    if (!role) throw new Error("Missing PM role");
     return [0, 1].map(() => {
       const id = tx.ids.next(f.project, "assignment");
       tx.assignments.put(f.project, {
         id,
         scope: "standing",
         role_id: "pm",
-        role_version: 1,
+        role_version: role.version,
         status: "active",
         runtime_state: "not_provisioned",
         runtime_ref: null,
