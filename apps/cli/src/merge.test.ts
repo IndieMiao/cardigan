@@ -17,6 +17,7 @@ import type {
   CommandPorts,
   CommandState,
   Decision,
+  DecisionId,
   Delivery,
   ProjectId,
   Result,
@@ -26,6 +27,7 @@ import type {
 import {
   acknowledgeRun,
   assign,
+  autoMergeSchedule,
   createCard,
   developmentCardTemplate,
   dispatchRun,
@@ -752,4 +754,36 @@ test("C-69: unmarking says when the timeout will auto-merge, only if it is on", 
   expect(off.out).toContain(
     `已取消 ${card_id} 的敏感标记。如有等你处理的合并确认，从现在起重新计时，15 分钟内无人处理将按项目设置自动合并。`,
   );
+});
+
+test("C-72: a repeated unmark does not promise a restarted timeout", async () => {
+  await seatAwaitingMerge();
+  expect(
+    (await cardigan("preference", "set", "auto-merge-after", "15")).code,
+  ).toBe(0);
+  expect((await cardigan("card", "sensitive", card_id, "on")).code).toBe(0);
+  const first = await cardigan("card", "sensitive", card_id, "off");
+  expect(first.out).toContain("从现在起重新计时");
+  const changes = () =>
+    state().events.filter((e) => e.type === "card_sensitivity_changed").length;
+  const before = changes();
+  const again = await cardigan("card", "sensitive", card_id, "off");
+  expect(again.code).toBe(0);
+  expect(changes()).toBe(before);
+  expect(again.out).not.toContain("重新计时，");
+  expect(again.out).toContain(
+    `${card_id} 本来就没有敏感标记，这次没有改动，合并确认的超时计时也没有重新开始。`,
+  );
+  // The actual due time is unchanged by the no-op and shown as is.
+  const due = unwrap(autoMergeSchedule(state(), "q(1)" as DecisionId)).due_at;
+  expect(again.out).toContain(`当前合并确认将于 ${due} 按项目设置自动合并。`);
+});
+
+test("C-72: unmarking a never-sensitive card with the timeout off says so", async () => {
+  await seatAwaitingMerge();
+  const off = await cardigan("card", "sensitive", card_id, "off");
+  expect(off.code).toBe(0);
+  expect(off.out).toContain(`${card_id} 本来就没有敏感标记`);
+  expect(off.out).not.toContain("重新计时，");
+  expect(off.out).not.toContain("自动合并。");
 });

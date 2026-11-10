@@ -1,5 +1,7 @@
 import type {
   Assignment,
+  CardId,
+  CommandState,
   HumanActionId,
   ProjectId,
   WorkItemId,
@@ -7,6 +9,7 @@ import type {
 import {
   applyStandingMode,
   assign,
+  autoMergeSchedule,
   completeHumanAction,
   createCard,
   isRoleActive,
@@ -221,6 +224,26 @@ export function unmarkAutoMergeNote(minutes: number) {
   return `如有等你处理的合并确认，从现在起重新计时，${minutes} 分钟内无人处理将按项目设置自动合并。`;
 }
 
+/** C-72: an unmark that changed nothing must not promise a restarted timeout. */
+export function alreadyUnmarkedNote(due_at: string | null) {
+  return `本来就没有敏感标记，这次没有改动，合并确认的超时计时也没有重新开始。${due_at === null ? "" : `当前合并确认将于 ${due_at} 按项目设置自动合并。`}`;
+}
+
+/** Earliest auto-merge time among the card's merge confirmations, if any. */
+function earliestAutoMergeDue(state: CommandState, card_id: CardId) {
+  let due: string | null = null;
+  for (const q of state.decisions) {
+    if (q.trigger !== "merge_confirmation" || q.card_id !== card_id) continue;
+    const schedule = autoMergeSchedule(state, q.id);
+    if (
+      schedule.ok &&
+      (due === null || Date.parse(schedule.value.due_at) < Date.parse(due))
+    )
+      due = schedule.value.due_at;
+  }
+  return due;
+}
+
 /** C-65: human-only sensitive flag; the local CLI acts as the human. */
 function cardSensitive(args: readonly string[], io: CliIo): number {
   const { flags, positionals } = parseArgs(args, []);
@@ -243,23 +266,36 @@ function cardSensitive(args: readonly string[], io: CliIo): number {
   const store = openStoreFrom(io, flags);
   try {
     const project_id = resolveProject(store, io, optional(flags, "project"));
+    let changed = false;
+    let due_at: string | null = null;
     runCommand(store, {
       operation: "修改敏感标记",
       target: card_id,
       project_id,
       actor: humanActor(project_id),
       clock: systemClock,
-      reduce: (state, actor, ports) =>
-        setCardSensitive(
+      reduce: (state, actor, ports) => {
+        const result = setCardSensitive(
           state,
           actor,
           { card_id, sensitive: value === "on" },
           ports,
-        ),
+        );
+        // C-72: only an emitted change restarts the timeout; a no-op leaves
+        // the state as read, so its schedule is the one that still applies.
+        if (result.ok) {
+          changed = result.value.events.some(
+            (e) => e.type === "card_sensitivity_changed",
+          );
+          if (!changed && value === "off")
+            due_at = earliestAutoMergeDue(state, card_id);
+        }
+        return result;
+      },
     });
     // C-69: the timeout restarts at the unmark; say so only when it is on.
     const minutes =
-      value === "off"
+      value === "off" && changed
         ? store.uow.read(
             (tx) =>
               projectPreferences(loadCommandState(tx, project_id))
@@ -269,7 +305,9 @@ function cardSensitive(args: readonly string[], io: CliIo): number {
     io.stdout(
       value === "on"
         ? `已将 ${card_id} 标为敏感：合并确认将由你亲自处理，PM 不能代确认，也不会超时自动合并。`
-        : `已取消 ${card_id} 的敏感标记。${minutes === null ? "" : unmarkAutoMergeNote(minutes)}`,
+        : changed
+          ? `已取消 ${card_id} 的敏感标记。${minutes === null ? "" : unmarkAutoMergeNote(minutes)}`
+          : `${card_id} ${alreadyUnmarkedNote(due_at)}`,
     );
     return EXIT.ok;
   } finally {
