@@ -7,10 +7,12 @@ import {
   type RoleDefinition,
   type RoleEffect,
   type RolePatch,
+  type RoleUpgradeEffect,
   rollbackRole,
   type ToolName,
   toolNames,
   updateRole,
+  upgradeRole,
 } from "@cardigan/domain";
 import {
   convertLegacyRole,
@@ -36,6 +38,10 @@ const USAGE = [
   "  add|update --file <role.yaml>",
   "  copy <源角色> <新角色> [--from-project <项目> | --from-default --harness <CLI> --launch-profile <配置>] [--version <n>] [--name <显示名>]",
   "  update <角色> --convert-legacy",
+  "  upgrade <角色> --from-default [--dry-run]",
+  "    为已有默认角色（pm、coder、reviewer、designer、tester）追加新版本：instructions、allowed_tools、",
+  "    capabilities、kind、worktree 取当前默认角色包；harness、launch_profile_ref、display_name、abilities、",
+  "    required_machine_tags 保留项目自己的。先打印变化和放宽项；内容相同时不追加。--dry-run 只打印不写入。",
   "  deactivate|activate <角色>",
   "  rollback <角色> --version <n>",
   "兼容：role add <项目> <角色> [--version <下一个版本>] [--allowed-tools a,b] [--capabilities x,y]",
@@ -56,6 +62,7 @@ function parse(args: readonly string[]) {
       "deactivate",
       "activate",
       "rollback",
+      "upgrade",
     ].includes(command ?? "")
   )
     fail("请指定有效的角色命令");
@@ -73,6 +80,7 @@ function parse(args: readonly string[]) {
       "name",
     ],
     rollback: ["version"],
+    upgrade: ["from-default", "dry-run"],
     deactivate: [],
     activate: [],
   };
@@ -81,7 +89,13 @@ function parse(args: readonly string[]) {
     "project",
     ...(perCommand[command as string] ?? []),
   ];
-  const boolean = ["all", "history", "from-default", "convert-legacy"];
+  const boolean = [
+    "all",
+    "history",
+    "from-default",
+    "convert-legacy",
+    "dry-run",
+  ];
   const flags: Record<string, string> = {};
   const positionals: string[] = [];
   for (let index = 0; index < rest.length; index++) {
@@ -114,6 +128,8 @@ function parse(args: readonly string[]) {
   if (command === "update" && !flags.file && !flags["convert-legacy"])
     fail("role update 需要 --file <role.yaml> 或 --convert-legacy");
   if (command === "rollback" && !flags.version) fail("回退需要 --version");
+  if (command === "upgrade" && !flags["from-default"])
+    fail("role upgrade 目前只支持 --from-default（按默认角色包升级）");
   if (flags["from-project"] && flags["from-default"])
     fail("只能选择一个复制来源");
   if (flags.history && flags.version)
@@ -126,7 +142,10 @@ function parse(args: readonly string[]) {
       flags.capabilities)
   )
     fail("--file 不能与其他写入选项混用");
-  if ((flags.harness || flags["launch-profile"]) && !flags["from-default"])
+  if (
+    (flags.harness || flags["launch-profile"]) &&
+    (!flags["from-default"] || command !== "copy")
+  )
     fail("启动配置选项只用于从默认角色包复制");
   let version: number | undefined;
   if (flags.version !== undefined) {
@@ -202,6 +221,8 @@ export async function runRoleCommand(
       }
       return EXIT.ok;
     }
+    if (command === "upgrade")
+      return upgradeFromDefault(store, io, project, id, !!flags["dry-run"]);
     const role = store.uow.run((tx) => {
       const state = {
         project_id: project,
@@ -367,4 +388,80 @@ export async function runRoleCommand(
   } finally {
     store.close();
   }
+}
+
+const DEFAULT_ROLE_IDS = ["pm", "coder", "reviewer", "designer", "tester"];
+
+function printUpgrade(io: CliIo, result: RoleUpgradeEffect): void {
+  const { previous, diff } = result;
+  const list = (values: readonly string[]) =>
+    values.length ? values.join(", ") : "无";
+  io.stdout(
+    [
+      `角色 ${previous.role_id} 当前 v${previous.version}，对照默认角色包的变化：`,
+      `  新增工具：${list(diff.added_tools)}`,
+      `  移除工具：${list(diff.removed_tools)}`,
+      `  新增能力：${list(diff.added_capabilities)}`,
+      `  移除能力：${list(diff.removed_capabilities)}`,
+      ...diff.fields.map(
+        (change) => `  ${change.field}：${change.from} → ${change.to}`,
+      ),
+      ...(diff.relaxations.length
+        ? [
+            "【注意：以下变化会放宽权限】",
+            ...diff.relaxations.map((line) => `  ！${line}`),
+          ]
+        : ["没有放宽权限的变化"]),
+    ].join("\n"),
+  );
+}
+
+/** `role upgrade <id> --from-default`: one more version, never a rewrite. */
+function upgradeFromDefault(
+  store: Store,
+  io: CliIo,
+  project: string,
+  id: string,
+  dryRun: boolean,
+): number {
+  if (!isDefaultRoleId(id))
+    fail(
+      `${id} 不是默认角色包里的角色，不能按默认包升级；默认角色有：${DEFAULT_ROLE_IDS.filter(isDefaultRoleId).join("、")}`,
+    );
+  return store.uow.run((tx) => {
+    const latest = getRoleVersion(tx, project, id);
+    if (!latest)
+      fail(`项目 ${project} 还没有角色 ${id}，先用 cardigan role add 创建`);
+    const result = upgradeRole(
+      { project_id: project, roles: listRoleVersions(tx, project) },
+      { kind: "human", project_id: project },
+      id,
+      defaultRoleDefinition(id, {
+        harness: latest.harness,
+        launch_profile_ref: latest.launch_profile_ref,
+      }),
+      { clock: systemClock, ids: tx.ids },
+    );
+    if (!result.ok)
+      throw new CliError(
+        formatCommandError("升级角色", id, result.error),
+        EXIT.usage,
+      );
+    if (result.value.unchanged) {
+      io.stdout(
+        `角色 ${id} v${latest.version} 已是默认包内容，没有追加新版本（项目 ${project}）`,
+      );
+      return EXIT.ok;
+    }
+    printUpgrade(io, result.value);
+    if (dryRun) {
+      io.stdout("--dry-run：只打印变化，没有写入");
+      return EXIT.ok;
+    }
+    persistRoleEffect(tx, project, result.value.effect);
+    io.stdout(
+      `已按默认角色包升级 ${id} 到 v${result.value.effect.data.version}（项目 ${project}）`,
+    );
+    return EXIT.ok;
+  });
 }
