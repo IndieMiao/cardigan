@@ -14,6 +14,7 @@ import {
   markNoticesRead,
   notices,
   parseId,
+  projectPreferences,
   projectSnapshot,
   setCardSensitive,
   standingTools,
@@ -215,6 +216,11 @@ function cardCommand(
   );
 }
 
+/** C-69: matches the Workbench wording. */
+export function unmarkAutoMergeNote(minutes: number) {
+  return `如有等你处理的合并确认，从现在起重新计时，${minutes} 分钟内无人处理将按项目设置自动合并。`;
+}
+
 /** C-65: human-only sensitive flag; the local CLI acts as the human. */
 function cardSensitive(args: readonly string[], io: CliIo): number {
   const { flags, positionals } = parseArgs(args, []);
@@ -251,10 +257,19 @@ function cardSensitive(args: readonly string[], io: CliIo): number {
           ports,
         ),
     });
+    // C-69: the timeout restarts at the unmark; say so only when it is on.
+    const minutes =
+      value === "off"
+        ? store.uow.read(
+            (tx) =>
+              projectPreferences(loadCommandState(tx, project_id))
+                .auto_merge_after_minutes,
+          )
+        : null;
     io.stdout(
       value === "on"
         ? `已将 ${card_id} 标为敏感：合并确认将由你亲自处理，PM 不能代确认，也不会超时自动合并。`
-        : `已取消 ${card_id} 的敏感标记。`,
+        : `已取消 ${card_id} 的敏感标记。${minutes === null ? "" : unmarkAutoMergeNote(minutes)}`,
     );
     return EXIT.ok;
   } finally {
