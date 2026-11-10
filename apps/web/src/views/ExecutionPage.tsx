@@ -40,10 +40,11 @@ const runTime = (run: RunView) =>
   run.finished_at ?? run.started_at ?? run.queued_at;
 const working = (a: ExecutionAssignment) =>
   a.status === "active" &&
-  (a.queue_ahead !== undefined ||
+  (a.external ||
+    a.queue_ahead !== undefined ||
     (a.runtime_ref !== null && !["lost", "unknown"].includes(a.runtime_state)));
 const lost = (a: ExecutionAssignment) =>
-  ["lost", "unknown"].includes(a.runtime_state);
+  !a.external && ["lost", "unknown"].includes(a.runtime_state);
 const viewLabel: Readonly<Record<string, string>> = {
   working: "工作中",
   all: "全部",
@@ -138,7 +139,11 @@ function AssignmentRow({
           <dl className="execution-status">
             <dt>运行</dt>
             <dd>
-              <StatusTag status={a.runtime_state} />
+              {a.external ? (
+                <span>外接身份，由对接的 Agent 自行拉取</span>
+              ) : (
+                <StatusTag status={a.runtime_state} />
+              )}
             </dd>
             <dt>Assignment</dt>
             <dd>
@@ -251,10 +256,13 @@ function AssignmentRow({
               </section>
             </div>
             <div className="execution-actions">
-              {a.status === "active" && a.runtime_ref && (
+              {a.external ? (
+                <p className="hint">外接身份，没有可接入的终端</p>
+              ) : a.status === "active" && a.runtime_ref ? (
                 <AttachCommands projectId={projectId} assignmentId={a.id} />
-              )}
-              {a.status === "active" &&
+              ) : null}
+              {!a.external &&
+                a.status === "active" &&
                 !live &&
                 ["idle", "not_provisioned"].includes(a.runtime_state) &&
                 !["done", "cancelled", "awaiting_merge"].includes(
@@ -265,12 +273,15 @@ function AssignmentRow({
                     command={cliCommand(projectId, "assignment start", a.id)}
                   />
                 )}
-              {a.status === "active" && a.runtime_ref && live && (
-                <CopyCommand
-                  label="停止终端并取消当前 Run"
-                  command={cliCommand(projectId, "assignment stop", a.id)}
-                />
-              )}
+              {!a.external &&
+                a.status === "active" &&
+                a.runtime_ref &&
+                live && (
+                  <CopyCommand
+                    label="停止终端并取消当前 Run"
+                    command={cliCommand(projectId, "assignment stop", a.id)}
+                  />
+                )}
               <CopyCommand
                 label="查看收件箱"
                 command={cliCommand(projectId, "inbox --assignment", a.id)}

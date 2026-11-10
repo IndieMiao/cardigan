@@ -6,6 +6,7 @@ import type {
 } from "@cardigan/domain";
 import {
   abortDispatch,
+  EXTERNAL_ASSIGNMENT_START_ERROR,
   pauseStandingAssignment,
   queueRun,
   standingModeOf,
@@ -195,6 +196,7 @@ export async function startAssignment(
   options: StartOptions,
 ): Promise<StartedAssignment> {
   const { store, io, project_id } = options;
+  rejectExternalTerminalAction(store, project_id, options.assignment_id);
   const capacity = await loadRunCapacityConfig({ env: io.env });
   for (const error of capacity.errors) io.stderr(error);
   const execution = executionFor(io, options.dataDir);
@@ -315,6 +317,7 @@ function pauseStanding(
   project_id: ProjectId,
   assignment_id: Assignment["id"],
 ) {
+  rejectExternalTerminalAction(store, project_id, assignment_id, "stop");
   return runCommand(store, {
     operation: "暂停常驻 PM",
     target: assignment_id,
@@ -663,6 +666,8 @@ export async function runAssignmentCommand(
     const project_id = resolveProject(store, io, flags.project);
     // Report invalid Assignments even when hc itself is unavailable.
     if (sub === "attach") attachRef(store, project_id, assignmentId);
+    if (sub === "start")
+      rejectExternalTerminalAction(store, project_id, assignmentId);
     if (sub === "stop") {
       const { assignment } = requireAssignment(store, project_id, assignmentId);
       if (assignment.scope === "standing" && assignment.role_id === "pm") {
@@ -755,6 +760,7 @@ export async function startAssignmentCommand(
   options: StartCommandOptions,
 ): Promise<number> {
   const { store, io, project_id, assignment_id, runtime } = options;
+  rejectExternalTerminalAction(store, project_id, assignment_id);
   const paths = resolveLaunchPaths(io.env);
   const dataDir = resolveDataDir(io, options.dataDir);
   const execution = executionFor(io, dataDir);
@@ -802,6 +808,11 @@ export type StartById = (options: StartByIdOptions) => Promise<number>;
 export async function startAssignmentById(
   options: StartByIdOptions,
 ): Promise<number> {
+  rejectExternalTerminalAction(
+    options.store,
+    options.project_id,
+    options.assignment_id,
+  );
   const dataDir = resolveDataDir(options.io, options.dataDir);
   const execution = executionFor(options.io, dataDir);
   await secureDataDirectory(execution);
@@ -821,4 +832,19 @@ export async function startAssignmentById(
     runtime: created.value,
     dataDir,
   });
+}
+
+function rejectExternalTerminalAction(
+  store: Store,
+  project: ProjectId,
+  id: Assignment["id"],
+  action: "start" | "stop" = "start",
+): void {
+  if (store.uow.read((tx) => tx.assignments.get(project, id))?.external)
+    throw new CliError(
+      action === "start"
+        ? EXTERNAL_ASSIGNMENT_START_ERROR
+        : "这是外接 Assignment，没有可以停止的终端，用 `cardigan inbox` 查看待处理通知",
+      EXIT.usage,
+    );
 }

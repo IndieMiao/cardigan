@@ -473,6 +473,50 @@ test("U1 a project with only inactive cards explains its empty snapshot without 
   expect(document.querySelectorAll("h2")).toHaveLength(0);
 });
 
+test.each([null, assignment.runtime_ref])(
+  "execution keeps external Office out of terminal commands (ref=%j)",
+  async (runtime_ref) => {
+    render(
+      <ExecutionPage
+        projectId="p-1"
+        client={fakeClient({
+          execution: async () => ({
+            assignments: [
+              {
+                ...assignment,
+                role_id: "pm",
+                standing_mode: "office",
+                external: true,
+                runtime_ref,
+                runtime_state: "not_provisioned",
+                work_item_id: null,
+                card_id: null,
+              },
+            ],
+            runs: [],
+            machines: [],
+          }),
+        })}
+      />,
+    );
+    expect(
+      await screen.findByText("外接身份，由对接的 Agent 自行拉取"),
+    ).toBeTruthy();
+    expect(screen.queryByText("已暂停")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "展开 A-1 详情" }));
+    expect(
+      screen.queryByRole("button", { name: "复制启动或恢复会话" }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "复制在 Herdr 中打开" }),
+    ).toBeNull();
+    expect(screen.getByText("外接身份，没有可接入的终端")).toBeTruthy();
+    expect(screen.queryByText(/cardigan assignment attach/)).toBeNull();
+    expect(screen.queryByText("需要接管输入？")).toBeNull();
+    expect(screen.getByRole("button", { name: "复制查看收件箱" })).toBeTruthy();
+  },
+);
+
 test("execution includes unprovisioned queued work in the default view and shows its global position", async () => {
   render(
     <ExecutionPage

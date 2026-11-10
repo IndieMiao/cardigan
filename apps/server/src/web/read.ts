@@ -1148,6 +1148,7 @@ export function executionView(
         role_id: assignment.role_id,
         role_version: assignment.role_version,
         status: assignment.status,
+        external: assignment.external ?? false,
         runtime_state: assignment.runtime_state,
         machine_id: assignment.machine_id,
         runtime_ref: assignment.runtime_ref ?? null,

@@ -2,12 +2,13 @@
  * M4.5: backfilling `standing_mode` for rows written before the field existed
  * (M4 plan §4 M4.5, development plan §7.1).
  */
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Assignment, ProjectId } from "@cardigan/domain";
 import { afterEach, beforeEach, expect, test } from "vitest";
-import { Store } from "./index.js";
+import { defaultMigrationsDir, listMigrations, Store } from "./index.js";
+import { latestSchemaVersion } from "./test-support.js";
 
 const project = "p-standing" as ProjectId;
 let dataDir: string;
@@ -103,4 +104,114 @@ test("rows that already carry a mode are left exactly as they are", () => {
   ]);
   expect(store.backfillStandingModes()).toEqual([]);
   expect(modeOf("A-1")).toBe("ops");
+});
+
+test("external rows enforce Office scope and immutable JSON across writes", () => {
+  const external = standing("A-1", { standing_mode: "office", external: true });
+  seat(external, ["whoami"]);
+  expect(() =>
+    seat({ ...external, status: "released" }, undefined),
+  ).not.toThrow();
+  for (const update of [
+    { external: false },
+    { external: undefined },
+    { standing_mode: "ops" as const },
+  ])
+    expect(() => seat({ ...external, ...update }, undefined)).toThrow();
+  seat(standing("A-2", { standing_mode: "office" }), undefined);
+  expect(() =>
+    seat(
+      standing("A-2", { standing_mode: "office", external: true }),
+      undefined,
+    ),
+  ).toThrow(/immutable/);
+  for (const invalid of [
+    standing("A-3", { external: true }),
+    standing("A-3", { standing_mode: "ops", external: true }),
+    {
+      ...external,
+      id: "A-3",
+      scope: "work_item",
+      work_item_id: "W-1",
+      standing_mode: undefined,
+    },
+    { ...external, id: "A-3", external: 1 },
+  ])
+    expect(() => seat(invalid as Assignment, undefined)).toThrow();
+  expect(store.migrate()).toEqual([]);
+});
+
+test("external migration upgrades the preceding schema without losing identity or tokens", () => {
+  const previousDir = join(dataDir, "previous-migrations");
+  mkdirSync(previousDir);
+  const migrations = listMigrations(defaultMigrationsDir);
+  expect(new Set(migrations.map((m) => m.version)).size).toBe(
+    migrations.length,
+  );
+  expect(
+    migrations.find((m) => m.name === "external_assignment")?.version,
+  ).toBe(16);
+  for (const migration of migrations.filter((m) => m.version < 16))
+    writeFileSync(
+      join(
+        previousDir,
+        `${String(migration.version).padStart(4, "0")}_${migration.name}.sql`,
+      ),
+      migration.sql,
+    );
+  const oldData = join(dataDir, "upgrade");
+  const old = Store.open({ dataDir: oldData, migrationsDir: previousDir });
+  const original = standing("A-1", { standing_mode: "office" });
+  let token: string;
+  try {
+    old.createProject({ id: project });
+    old.uow.run((tx) => tx.assignments.put(project, original));
+    token = old.issueToken({
+      project_id: project,
+      assignment_id: original.id,
+      role: { role_version: 1, allowed_tools: ["whoami"] },
+    }).token;
+  } finally {
+    old.close();
+  }
+  const upgraded = Store.open({ dataDir: oldData });
+  try {
+    expect(upgraded.schemaVersion()).toBe(latestSchemaVersion());
+    expect(upgraded.migrate()).toEqual([]);
+    const applied = upgraded.database
+      .prepare("SELECT version, name FROM schema_version ORDER BY version")
+      .all();
+    expect(applied.map((m) => [m.version, m.name])).toEqual(
+      migrations.map((m) => [m.version, m.name]),
+    );
+    expect(
+      upgraded.uow.read((tx) => tx.assignments.get(project, original.id)),
+    ).toEqual(original);
+    expect(upgraded.verifyToken(token)).toBeDefined();
+    expect(() =>
+      upgraded.uow.run((tx) =>
+        tx.assignments.put(project, { ...original, external: true }),
+      ),
+    ).toThrow(/immutable/);
+    const external = standing("A-2", {
+      standing_mode: "office",
+      external: true,
+    });
+    upgraded.uow.run((tx) => tx.assignments.put(project, external));
+    expect(() =>
+      upgraded.uow.run((tx) =>
+        tx.assignments.put(project, { ...external, external: false }),
+      ),
+    ).toThrow(/immutable/);
+    expect(() =>
+      upgraded.uow.run((tx) =>
+        tx.assignments.put(
+          project,
+          standing("A-3", { standing_mode: "ops", external: true }),
+        ),
+      ),
+    ).toThrow(/standing Office/);
+  } finally {
+    upgraded.close();
+  }
 });

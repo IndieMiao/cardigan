@@ -251,14 +251,17 @@ export class Dispatcher {
     });
     routeProjectEvents(store, project, { clock: this.clock });
     acknowledgeInbox(store, project, standing, this.clock);
-    for (const attempt of unfinishedBellAttempts(store.database, project))
+    for (const attempt of unfinishedBellAttempts(store.database, project)) {
+      const assignment = this.state(project).assignments.find(
+        (a) => a.id === attempt.assignment_id,
+      );
       if (
         attempt.lease_until <= this.clock.now() &&
-        this.state(project).assignments.find(
-          (a) => a.id === attempt.assignment_id,
-        )?.status !== "suspended"
+        assignment?.status !== "suspended" &&
+        !assignment?.external
       )
         this.settle(attempt, false, "interrupted_delivery");
+    }
     await retryDispatchedRuns(
       { ...this.options, clock: this.clock },
       project,
@@ -365,7 +368,7 @@ export class Dispatcher {
       this.reject(project, notes, a, "assignment_released");
       return;
     }
-    if (a.status !== "active" || this.busy(state, a)) return;
+    if (a.external || a.status !== "active" || this.busy(state, a)) return;
     let live = false;
     let replacement: DispatchRunParams["replacement"];
     if (a.runtime_ref) {
@@ -558,7 +561,7 @@ export class Dispatcher {
     return store.uow.run((tx) => {
       let state = loadCommandState(tx, project);
       const a = state.assignments.find((a) => a.id === expected.id);
-      if (a?.status !== "active" || !sameRef(a, expected)) return;
+      if (a?.status !== "active" || a.external || !sameRef(a, expected)) return;
       const all = store.listNotifications({ project_id: project }),
         requested = new Set(notes.map((n) => n.id));
       const ready = all.filter(
@@ -946,6 +949,7 @@ export class Dispatcher {
           a = state.assignments.find((a) => a.id === owner);
         if (
           a?.status !== "active" ||
+          a.external ||
           state.runs.some(
             (r) => r.assignment_id === a.id && unfinishedRun(r),
           ) ||
@@ -976,7 +980,7 @@ export class Dispatcher {
       for (const r of state.runs) {
         if (r.status !== "running") continue;
         const a = state.assignments.find((a) => a.id === r.assignment_id);
-        if (a?.status !== "active") continue;
+        if (a?.status !== "active" || a.external) continue;
         const last = lastRunActivity(r, a);
         if (
           Date.parse(at) - last < this.inactivityGraceMs ||

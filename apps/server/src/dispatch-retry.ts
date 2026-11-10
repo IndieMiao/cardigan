@@ -171,6 +171,12 @@ export async function retryDispatchedRuns(
   };
   const candidates = read();
   for (const candidate of candidates.runs) {
+    // External identities have no managed terminal, including stale recovery records.
+    if (
+      candidates.assignments.find((a) => a.id === candidate.assignment_id)
+        ?.external
+    )
+      continue;
     if (candidate.dispatch_stop) {
       // Resume the original target even after monitor changed status or a host cancelled it.
       await stopRun(candidate.id, candidate.dispatch_stop.reason);

@@ -84,6 +84,7 @@ export class RuntimeMonitor {
       for (const a of state.assignments) {
         if (
           a.status !== "active" ||
+          a.external ||
           !a.runtime_ref ||
           ["lost", "released"].includes(a.runtime_state) ||
           !activeRuns(state, a).length

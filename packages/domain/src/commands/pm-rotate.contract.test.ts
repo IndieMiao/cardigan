@@ -354,3 +354,108 @@ test("a review-limit item needs update_work_item, not resolve_delegated_decision
   expect(result.ok).toBe(false);
   if (!result.ok) expect(result.error.message).toContain("update_work_item");
 });
+
+test("external Office rotates at the same version, validates employee, and preserves Ops", () => {
+  const x = setup();
+  const employee = {
+    id: id("employee", 1),
+    name: "Office Agent",
+    avatar: null,
+    launch_profile_ref: null,
+    title: "PM",
+    bio: "",
+    role_id: "pm",
+    status: "active" as const,
+    created_at: now,
+    updated_at: now,
+  };
+  const state = {
+    ...x.state,
+    roles: x.state.roles.filter((r) => r.role_version !== 3),
+    employees: [employee],
+  };
+  const effect = value(
+    rotateStandingPm(
+      state,
+      human,
+      { standing_mode: "office", external: true, employee_id: employee.name },
+      ports(),
+    ),
+  );
+  expect(effect.data.assignment).toMatchObject({
+    external: true,
+    employee_id: employee.id,
+    role_version: 2,
+  });
+  const after = apply(state, effect);
+  expect(hasActivePmOps(draft(after))).toBe(true);
+  expect(after.decisions).toEqual(state.decisions);
+  expect(after.human_actions).toEqual(state.human_actions);
+  expect(after.assignments.find((a) => a.id === x.ops.id)).toEqual(x.ops);
+  const repeated = value(
+    rotateStandingPm(
+      after,
+      human,
+      { standing_mode: "office", external: true, employee_id: employee.id },
+      ports(),
+    ),
+  );
+  expect(repeated.data.unchanged).toBe(true);
+  expect(repeated.changes).toEqual([]);
+  expect(
+    value(rotateStandingPm(after, human, { standing_mode: "office" }, ports()))
+      .data.unchanged,
+  ).toBe(true);
+  const named = value(
+    rotateStandingPm(
+      state,
+      human,
+      { standing_mode: "office", employee_id: employee.id },
+      ports(),
+    ),
+  );
+  expect(named.data.assignment.employee_id).toBe(employee.id);
+  expect(named.data.assignment.external).toBeUndefined();
+  const upgraded = value(
+    rotateStandingPm(
+      { ...apply(state, named), roles: x.state.roles },
+      human,
+      { standing_mode: "office" },
+      ports(),
+    ),
+  );
+  expect(upgraded.data.assignment.employee_id).toBe(employee.id);
+  expect(upgraded.data.assignment.external).toBeUndefined();
+  for (const invalid of [
+    { ...employee, status: "inactive" as const },
+    { ...employee, role_id: "coder" },
+  ]) {
+    expect(
+      rotateStandingPm(
+        { ...state, employees: [invalid] },
+        human,
+        { standing_mode: "office", external: true, employee_id: employee.id },
+        ports(),
+      ).ok,
+    ).toBe(false);
+  }
+  expect(
+    rotateStandingPm(
+      state,
+      human,
+      { standing_mode: "ops", external: true },
+      ports(),
+    ).ok,
+  ).toBe(false);
+  expect(
+    rotateStandingPm(
+      { ...state, runs: [...state.runs, { ...run(21, 11), role_version: 2 }] },
+      human,
+      { standing_mode: "office", external: true },
+      ports(),
+    ),
+  ).toMatchObject({
+    ok: false,
+    error: { message: expect.stringContaining("未结束的 Run") },
+  });
+});
