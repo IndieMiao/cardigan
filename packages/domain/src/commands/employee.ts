@@ -5,6 +5,7 @@ import {
   type EmployeeEffect,
   employeeDisplayName,
   employeeNameKey,
+  employeeTextError,
 } from "../employee.js";
 import type { Result } from "../errors.js";
 import { type EmployeeId, parseId } from "../ids.js";
@@ -33,22 +34,8 @@ function field(
   limit?: number,
   required = false,
 ): asserts value is string {
-  ensure(typeof value === "string", "validation_failed", `${label}必须是文本`);
-  ensure(
-    !/[\p{Cc}\p{Cf}]/u.test(value),
-    "validation_failed",
-    `${label}不能含控制字符`,
-  );
-  ensure(
-    !required || value.trim().length > 0,
-    "validation_failed",
-    `${label}不能为空`,
-  );
-  ensure(
-    limit === undefined || Array.from(value.trim()).length <= limit,
-    "validation_failed",
-    `${label}最多 ${limit} 字`,
-  );
+  const error = employeeTextError(value, label, limit, required);
+  ensure(error === undefined, "validation_failed", error ?? "员工字段不合法");
 }
 
 function validate(

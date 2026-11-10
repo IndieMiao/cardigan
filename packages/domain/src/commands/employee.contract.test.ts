@@ -184,6 +184,8 @@ test.each([
   { bio: "a\u0000b" },
   { bio: "a\u0085b" },
   { bio: "a\u202eb" },
+  { name: "a\u2028b" },
+  { title: "a\u2029b" },
   { avatar: "a\u001bb" },
   { role_id: "bad role" },
   { launch_profile_ref: "missing" },

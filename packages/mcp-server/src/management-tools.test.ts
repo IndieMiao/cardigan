@@ -618,3 +618,32 @@ test("MCP assign accepts employee IDs/names, auto selects globally and whoami/re
   });
   expect(failed.isError).toBe(true);
 });
+
+test("Agent comments discover full employee names without trusting the client's truncated mentions", async () => {
+  store.uow.run((tx) =>
+    tx.employees.put({
+      id: "E-1",
+      name: "Mary Jane",
+      title: "开发",
+      bio: "",
+      avatar: null,
+      role_id: "coder",
+      launch_profile_ref: null,
+      status: "active",
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+    }),
+  );
+  const comment = await ok<TimelineEntry>(office, "post_comment", {
+    card_id: card.id,
+    body: "请 @MARY　JANE 和 @reviewer 检查",
+    mentions: ["MARY", "reviewer"],
+  });
+  expect(comment.mentions).toContain("@Mary Jane");
+  expect(comment.mentions).toContain("reviewer");
+  expect(comment.mentions).not.toContain("MARY");
+  expect(comment.author).toBe("assignment:A-1");
+  expect(
+    store.uow.read((tx) => tx.timeline.get(project, comment.id))?.mentions,
+  ).toEqual(comment.mentions);
+});

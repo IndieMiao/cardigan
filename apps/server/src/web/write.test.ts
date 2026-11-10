@@ -927,3 +927,31 @@ test("K2 cannot supersede an unfinished card", async () => {
   });
   expect(snapshot()).toBe(before);
 });
+
+test("human comments parse Chinese and spaced employee names on the server", async () => {
+  s.store().uow.run((tx) =>
+    tx.employees.put({
+      id: "E-1",
+      name: "诸葛亮 Mary",
+      title: "开发",
+      bio: "",
+      avatar: null,
+      role_id: "coder",
+      launch_profile_ref: null,
+      status: "active",
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+    }),
+  );
+  const response = await request(cardPath("comments"), {
+    body: "请 @诸葛亮　mARY 检查",
+    mentions: [],
+  });
+  expect(response).toMatchObject({
+    status: 200,
+    body: {
+      author: "human",
+      mentions: ["@诸葛亮 Mary"],
+    },
+  });
+});
