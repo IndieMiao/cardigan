@@ -27,6 +27,7 @@ import { checkEmployeeSeparation } from "./employee-assignment.js";
 import { requestHumanCompletionReview } from "./human-completion.js";
 import { completionPassed } from "./merge.js";
 import { pendingReviewLimit, requestReviewLimit } from "./review-limit.js";
+import { conflictRepairEvent } from "./review-round.js";
 import { resolveCardTemplate } from "./templates.js";
 import { activeWork, reviewRound, workCompleted } from "./workflow.js";
 
@@ -268,6 +269,7 @@ export function submitDelivery(
       d,
       p,
     );
+    const conflictEvent = conflictRepairEvent(d, item, run, completion);
     ensure(
       verified?.[proof] && verified.binding === binding(d, p.subject),
       "stale_target",
@@ -387,6 +389,7 @@ export function submitDelivery(
       // Accepted on arrival when nothing verifies the work item (§4.4).
       status: unreviewed ? "accepted" : "submitted",
       requested_verifiers: [...p.requested_verifiers],
+      ...(conflictEvent ? { merge_conflict_event_id: conflictEvent } : {}),
       attachments: [...(p.attachments ?? [])],
       known_gaps: [...(p.known_gaps ?? [])],
       evidence: [
@@ -536,7 +539,7 @@ export function submitReview(
       "invariant_violation",
       "A Run may submit only one review",
     );
-    const round = reviewRound(d, item);
+    const round = reviewRound(d, item, target);
     ensure(
       round <= item.max_review_rounds,
       "illegal_transition",

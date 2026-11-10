@@ -16,6 +16,10 @@ import {
   selectEmployee,
 } from "./employee-assignment.js";
 import { canResume, queueResumedRun, resumeWork } from "./resumption.js";
+import {
+  type ReviewLimitResolution,
+  resolveReviewLimit,
+} from "./review-limit-resolution.js";
 import { resolveCardTemplate, validateCardTemplate } from "./templates.js";
 
 export type CreateCardParams = Pick<
@@ -397,6 +401,7 @@ export function updateWorkItem(
     completion_criteria?: readonly string[];
     required?: boolean;
     max_review_rounds?: number;
+    review_limit_decision?: ReviewLimitResolution;
   },
   ports: CommandPorts,
 ) {
@@ -423,6 +428,19 @@ export function updateWorkItem(
       "illegal_transition",
       "Card is closed",
     );
+    if (p.review_limit_decision) {
+      const {
+        work_item_id: _id,
+        review_limit_decision: resolution,
+        ...updates
+      } = p;
+      ensure(
+        Object.values(updates).every((v) => v === undefined),
+        "validation_failed",
+        "Review limit decisions cannot be combined with other updates",
+      );
+      return resolveReviewLimit(d, item, resolution);
+    }
     ensure(
       !(item.template_key && p.required === false),
       "invariant_violation",

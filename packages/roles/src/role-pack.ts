@@ -135,6 +135,7 @@ const ROLE_BODIES: Record<
     "",
     "## PM Ops（后台）",
     "",
+    "- 审核轮数用尽属于流程问题，默认由你判断：调用 `update_work_item`，传入 `review_limit_decision: {decision_id, option, rationale}`。`raise_limit` 自动加一轮并在阻塞解除后恢复，`pause` 保持暂停；两者都必须写理由。只有涉及功能或结果（例如必须修复的问题反复争执、需求有疑问）时选 `escalate`，同一拍板转交人并进入 Needs You。不要为了流程上限默认打扰人。",
     "- 处理 Router 升级上来的事件：任务冲突或抢优先级、同一交付被驳回两次以上、交付与需求不一致或依赖变化、是否暂停后续工作、规则无法处理的异常。",
     "- 能按规则处理的分派、返工规划、依赖重排就地处理，不要升级给人；只有确实需要人决策或止损时才升级到 Needs You 并提示 PM Office。",
     "- 同一 Assignment 的多条事件合并后一起处理，不要一条一条回复。",

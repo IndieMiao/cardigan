@@ -40,6 +40,10 @@ const isMergeConfirmation = (q: NeedsDecision) =>
   q.trigger === "merge_confirmation";
 const isPausedReview = (q: NeedsDecision) =>
   q.trigger === "review_limit" && q.status === "provisional";
+const reviewOptionLabels: Record<string, string> = {
+  pause: "暂停",
+  raise_limit: "增加轮数",
+};
 type Props = { client: CardiganClient; projectId: string; revision?: number };
 function useAction(done: () => void) {
   const keys = useRef(new Map<string, string>());
@@ -178,7 +182,11 @@ function Decision({
               />
               <span>
                 <span className="needs-option-head">
-                  <strong>{o.key}</strong>
+                  <strong>
+                    {q.trigger === "review_limit"
+                      ? (reviewOptionLabels[o.key] ?? o.key)
+                      : o.key}
+                  </strong>
                   <span>
                     {q.trigger === "review_limit" && o.key === "raise_limit"
                       ? "增加一轮审核额度"
@@ -208,7 +216,7 @@ function Decision({
         </label>
         <div className="action-row">
           <button type="submit" disabled={action.busy || selected === ""}>
-            {paused ? "raise_limit · 增加一轮审核额度" : "按所选拍板"}
+            {paused ? "增加一轮审核额度" : "按所选拍板"}
           </button>
           {!paused &&
             (["request_information", "explain"] as const).map((kind) => (

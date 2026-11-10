@@ -228,12 +228,10 @@ export class CleanupExecutor {
       // Dirty or unreachable: ask the human once, with the reason.
       const summary = outcome.summary;
       const reason = [
-        `worktree has local changes: tracked=${summary.tracked.length}`,
-        `untracked=${summary.untracked.length}`,
-        summary.reachable
-          ? "commits backed up"
-          : "branch tip not in the central repository",
-      ].join(", ");
+        `工作区本地改动：已跟踪文件 ${summary.tracked.length} 个`,
+        `未跟踪文件 ${summary.untracked.length} 个`,
+        summary.reachable ? "提交已备份" : "分支最新提交尚未备份到中心仓库",
+      ].join("，");
       const asked = runSystemCommand(
         this.options.store,
         project_id,

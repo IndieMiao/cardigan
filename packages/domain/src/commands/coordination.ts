@@ -383,6 +383,10 @@ export function recordDecision(
         (actor.kind === "assignment" &&
           actor.role_id === "pm" &&
           d.assignment?.scope === "standing" &&
+          !(
+            decision.trigger === "review_limit" &&
+            decision.decider === "role:pm"
+          ) &&
           actor.allowed_tools.includes("record_decision")),
       "forbidden_tool",
       "Only PM Office or the designated human can record decisions",

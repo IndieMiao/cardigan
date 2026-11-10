@@ -114,18 +114,18 @@ export function requestWorktreeCleanup(
       assignment_id: a.id,
       kind: "choose",
       category: "data_deletion",
-      question: `Keep or force-clean worktree for ${a.id}?`,
+      question: `保留还是强制清理 ${a.id} 的工作区？`,
       context: p.reason,
       options: [
         {
           key: "keep",
-          description: "Keep the worktree",
-          impact: "Retain local files",
+          description: "保留工作区",
+          impact: "保留本地文件",
         },
         {
           key: "force_clean",
-          description: "Back up and remove the worktree",
-          impact: "Save a patch before deleting files",
+          description: "备份并清理工作区",
+          impact: "先保存补丁，再删除工作区文件",
         },
       ],
       recommended: "keep",

@@ -307,6 +307,8 @@ export interface Delivery {
     readonly precondition?: string;
   }[];
   readonly requested_verifiers: readonly WorkItemId[];
+  /** Control-plane provenance; never accepted from submit_delivery parameters. */
+  readonly merge_conflict_event_id?: EventId;
   readonly supersedes?: DeliveryId;
   readonly status: DeliveryStatus;
 }

@@ -10,11 +10,13 @@ import { Readable } from "node:stream";
 import {
   type Card,
   type Decision,
+  pauseStandingAssignment,
   requestDecision,
   requestHumanAction,
   requestWorktreeCleanup,
 } from "@cardigan/domain";
 import { parseLaunchConfig } from "@cardigan/roles";
+import { routeEvent } from "@cardigan/router";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { type M4Cross, m4Cross } from "../../test-support/m4-cross.js";
 import { Dispatcher } from "../dispatch.js";
@@ -964,8 +966,19 @@ test("Workbench body mentions use the shared parser for IDs, roles and employee 
   });
 });
 
-async function reviewLimit() {
+async function reviewLimit(delegated = false) {
   const reviewer = s.primary.verifier;
+  if (!delegated) {
+    const ops = s
+      .state()
+      .assignments.find(
+        (a) => a.scope === "standing" && a.standing_mode === "ops",
+      );
+    if (!ops) throw new Error("Missing PM Ops");
+    s.command((state, actor, ports) =>
+      pauseStandingAssignment(state, actor, { assignment_id: ops.id }, ports),
+    );
+  }
   // A one-round budget keeps this fixture small; normal updates only raise it.
   s.store().uow.run((tx) => {
     const item = tx.work_items.get(
@@ -989,6 +1002,104 @@ async function reviewLimit() {
   if (!q) throw new Error("Missing review-limit decision");
   return q;
 }
+
+test.each([false, true])(
+  "PM Ops handles review limits through MCP and routes only human escalations to Needs You (escalate=%s)",
+  async (escalate) => {
+    const q = await reviewLimit(true);
+    expect(q.decider).toBe("role:pm");
+    const ops = s
+      .state()
+      .assignments.find(
+        (a) => a.scope === "standing" && a.standing_mode === "ops",
+      );
+    if (!ops) throw new Error("Missing PM Ops");
+    const recipients = () => {
+      const state = s.state();
+      const event = state.events.findLast(
+        (e) =>
+          e.type === "decision_requested" && e.payload.decision_id === q.id,
+      );
+      if (!event) throw new Error("Missing decision event");
+      return routeEvent({ event, snapshot: state }).notifications.map(
+        (n) => n.recipient.kind,
+      );
+    };
+    const needsYou = async () =>
+      (await (
+        await fetch(web.url + path("/needs-you"), { headers: { cookie } })
+      ).json()) as { decisions: { id: string }[] };
+    expect(recipients()).toEqual(["pm_ops"]);
+    expect((await needsYou()).decisions.some((d) => d.id === q.id)).toBe(false);
+    const before = snapshot();
+    expect(
+      (await request(resolvePath(q), { option: "raise_limit" })).status,
+    ).toBe(403);
+    expect(snapshot()).toBe(before);
+    await s.start(ops);
+    const args = {
+      work_item_id: s.primary.verifier.work_item_id,
+      review_limit_decision: {
+        decision_id: q.id,
+        option: "pause",
+        rationale: "先核对上一轮结论",
+      },
+    };
+    await s.call(ops, "update_work_item", args);
+    expect(s.state().decisions.find((d) => d.id === q.id)).toMatchObject({
+      status: "provisional",
+    });
+    await s.call(ops, "update_work_item", {
+      ...args,
+      review_limit_decision: {
+        decision_id: q.id,
+        option: escalate ? "escalate" : "raise_limit",
+        rationale: escalate
+          ? "需求有疑问，请确认预期结果"
+          : "审核无必须修复问题，继续确认交付",
+      },
+    });
+    if (escalate) {
+      expect(recipients()).toEqual(["needs_you", "pm_office"]);
+      expect((await needsYou()).decisions).toContainEqual(
+        expect.objectContaining({ id: q.id }),
+      );
+      expect(
+        (
+          await request(resolvePath(q), {
+            option: "raise_limit",
+            raw_quote: "确认继续",
+          })
+        ).status,
+      ).toBe(200);
+    } else {
+      expect((await needsYou()).decisions.some((d) => d.id === q.id)).toBe(
+        false,
+      );
+      const duplicate = await s.raw(ops, "update_work_item", {
+        ...args,
+        review_limit_decision: {
+          ...args.review_limit_decision,
+          option: "raise_limit",
+        },
+      });
+      expect(duplicate.isError).toBe(true);
+    }
+    expect(
+      s
+        .state()
+        .work_items.find((w) => w.id === s.primary.verifier.work_item_id),
+    ).toMatchObject({ status: "ready", max_review_rounds: 2 });
+    expect(
+      s
+        .state()
+        .runs.filter(
+          (r) =>
+            r.assignment_id === s.primary.verifier.id && r.status === "queued",
+        ),
+    ).toHaveLength(1);
+  },
+);
 
 test.each([false, true])(
   "Needs You raises the limit and resumes atomically (previously paused=%s), exactly once",

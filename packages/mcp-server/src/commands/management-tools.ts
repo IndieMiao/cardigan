@@ -168,6 +168,16 @@ const schemas = {
     required: z.boolean().optional(),
     status: z.enum([...states.produce, ...states.verify]).optional(),
     max_review_rounds: z.number().int().positive().optional(),
+    review_limit_decision: z
+      .object({
+        decision_id: id("decision"),
+        option: z.enum(["raise_limit", "pause", "escalate"]),
+        rationale: text,
+      })
+      .describe(
+        "PM Ops only: resolve a delegated review limit with a reason; raise_limit adds one round, pause keeps it blocked, escalate sends the same decision to the human.",
+      )
+      .optional(),
   },
   assign: {
     employee_id: text

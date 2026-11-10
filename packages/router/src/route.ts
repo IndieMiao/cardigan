@@ -745,6 +745,17 @@ function routeDecisionRequested(input: RouteInput, draft: Draft): void {
     );
     return;
   }
+  if (decision.trigger === "review_limit" && decision.decider === "role:pm") {
+    note(
+      input,
+      draft,
+      recipient.pm_ops(),
+      "decision",
+      "6.4/decision requested",
+      `${decision.id} 等待项目经理判断审核轮数上限`,
+    );
+    return;
+  }
   for (const assignment of assignmentsForRole(
     input,
     decision.decider.replace(/^role:/u, ""),
