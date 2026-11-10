@@ -8,7 +8,7 @@ import {
   agentSshCommand,
   agentUploadPack,
 } from "./agent-ssh.js";
-import type { HcClient } from "./client.js";
+import { agentCommandError, type HcClient, processClient } from "./client.js";
 import {
   type ExecutionConfig,
   executionPaths,
@@ -335,3 +335,47 @@ test.each([agentUploadPack, agentReceivePack])(
     ).rejects.toThrow(/0600/);
   },
 );
+
+test("a failed Agent Git command keeps its exit status and stderr through the real hc client", async () => {
+  // A stand-in hc: `exec` runs a "git" that fails like a real ref lock.
+  const hc = join(root, "hc");
+  await writeFile(
+    hc,
+    `#!/bin/sh\nif [ "$1" = exec ]; then\n  echo "fatal: cannot lock ref 'refs/remotes/origin/main': File exists" >&2\n  exit 128\nfi\necho '{"error":{"kind":"not_found"}}' >&2\nexit 1\n`,
+    { mode: 0o700 },
+  );
+  const real = processClient(hc, { PATH: "/usr/bin:/bin" }, root, 5_000);
+  const runtime = value(
+    await HerdrRuntime.create({
+      client: {
+        ...client,
+        exec: (args, timeout) =>
+          args[0] === "exec" ? real.exec(args, timeout) : client.exec(args),
+      },
+      execution,
+    }),
+  );
+  const failed = await runtime.captureAgent("git", ["fetch"], 1234);
+  expect(failed).toEqual({
+    ok: false,
+    error: {
+      code: "runtime_unavailable",
+      message: "hc refused the operation (unavailable)",
+      detail: {
+        exit_code: 128,
+        stderr:
+          "fatal: cannot lock ref 'refs/remotes/origin/main': File exists\n",
+      },
+    },
+  });
+  if (failed.ok) throw new Error("expected failure");
+  expect(agentCommandError(failed.error)).toMatchObject({
+    code: 128,
+    stderr: expect.stringContaining("cannot lock ref"),
+  });
+  // A structured hc refusal is the runtime's own error, with no program detail.
+  await expect(real.exec(["get", "x"])).rejects.toMatchObject({
+    code: "runtime_not_found",
+    detail: undefined,
+  });
+});

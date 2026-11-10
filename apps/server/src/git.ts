@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type {
   Assignment,
   Delivery,
@@ -19,6 +19,7 @@ import {
   type ReconcileFinding,
   type RemoveWorktreeInput,
   type RemoveWorktreeOutcome,
+  type RepositoryLock,
   type SourceSync,
   type WorktreeDiff,
 } from "@cardigan/git-service";
@@ -28,7 +29,11 @@ import {
   type PushResult,
   type WorkspaceGit as WorkspaceGitPort,
 } from "@cardigan/git-transport";
-import { type MergePushConfig, validateMergePushConfig } from "@cardigan/host";
+import {
+  hostRepositoryLock,
+  type MergePushConfig,
+  validateMergePushConfig,
+} from "@cardigan/host";
 import type { DeliveryVerifierFor } from "@cardigan/mcp-server";
 import {
   type AgentExecution,
@@ -63,7 +68,15 @@ export interface ServerGitOptions {
     | { readonly ok: true; readonly value: string }
     | {
         readonly ok: false;
-        readonly error: { readonly code: string; readonly message: string };
+        readonly error: {
+          readonly code: string;
+          readonly message: string;
+          /** The Agent-side Git exit status and stderr (redact before use). */
+          readonly detail?: {
+            readonly exit_code?: number;
+            readonly stderr: string;
+          };
+        };
       }
   >;
   /**
@@ -156,7 +169,10 @@ function agentWorkspace(
       if (!result.ok)
         throw Object.assign(
           new Error(`${result.error.code}: ${result.error.message}`),
-          { code: result.error.code },
+          {
+            code: result.error.detail?.exit_code ?? result.error.code,
+            stderr: result.error.detail?.stderr ?? "",
+          },
         );
       return result.value;
     },
@@ -183,6 +199,8 @@ export class ServerGit implements GitBinding {
   private readonly central: CentralRepositoryService;
   private readonly transport: CentralGitTransport;
   private readonly worktrees: GitWorktreeService;
+  /** §12.8: one per-project lock for every write to the shared base clone. */
+  private readonly lock: RepositoryLock;
 
   constructor(private readonly options: ServerGitOptions) {
     const execution =
@@ -214,6 +232,7 @@ export class ServerGit implements GitBinding {
           }
         : {}),
     });
+    this.lock = hostRepositoryLock(options.dataDir);
     const workspace =
       execution.mode === "agent-ssh" && options.captureAgent !== undefined
         ? agentWorkspace(options.captureAgent)
@@ -221,7 +240,12 @@ export class ServerGit implements GitBinding {
     this.worktrees = new GitWorktreeService(
       new LocalGitTransport("git", {}, workspace),
       this.central,
-      { dataDir: options.dataDir, ...roots },
+      {
+        dataDir: options.dataDir,
+        ...roots,
+        // Same per-project lock as the wake/start path (§12.8).
+        lock: this.lock,
+      },
     );
   }
 
@@ -327,10 +351,21 @@ export class ServerGit implements GitBinding {
       dataDir: this.options.dataDir,
     };
     const source = await this.central.ensureCentral(project);
-    const repository = join(
+    const repository = resolve(
       gitRoots(execution, this.options.dataDir).repositoriesRoot,
       project.project_id,
     );
+    // Candidate distribution updates the base clone's refs: it shares the
+    // wake path's project lock, held only for the transfer, not the checks.
+    await this.lock({ project_id: project.project_id, repository }, () =>
+      this.transfer(execution, source, repository),
+    );
+  }
+  private async transfer(
+    execution: ExecutionConfig,
+    source: string,
+    repository: string,
+  ): Promise<void> {
     if (execution.mode === "agent-ssh") {
       // Accepted Git deliveries already have a base clone. If it disappeared,
       // fail this attempt; never recreate an Agent repository as the host.

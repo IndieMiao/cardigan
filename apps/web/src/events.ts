@@ -36,6 +36,7 @@ export const EVENT_LABELS: Readonly<Record<string, string>> = {
   runtime_lost: "运行环境失联",
   runtime_reconnected: "运行环境重新连接",
   bell_delivery_failed: "门铃投递失败",
+  bell_delivery_attempt_failed: "门铃投递失败（自动重试中）",
   bell_retry_exhausted: "门铃重发已用尽",
   run_inactive: "Run 长时间无活动",
   reconcile_finding: "发现了对账差异",

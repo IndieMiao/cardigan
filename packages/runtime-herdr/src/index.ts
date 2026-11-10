@@ -6,6 +6,7 @@ import type {
   Machine,
   Role,
   Runtime,
+  RuntimeError,
   RuntimeLaunch,
   RuntimeObservation,
   RuntimeRef,
@@ -20,10 +21,22 @@ export {
   agentUploadPack,
 } from "./agent-ssh.js";
 
-import { fail, type HcClient, processClient, result } from "./client.js";
+import {
+  type AgentCommandFailure,
+  fail,
+  type HcClient,
+  processClient,
+  RuntimeFailure,
+  result,
+} from "./client.js";
 
 // The test harnesses wrap the real client so a late call cannot restart a core.
-export { type HcClient, processClient } from "./client.js";
+export {
+  type AgentCommandFailure,
+  agentCommandError,
+  type HcClient,
+  processClient,
+} from "./client.js";
 
 import {
   type ExecutionConfig,
@@ -283,12 +296,21 @@ export class HerdrRuntime implements Runtime {
     });
   }
   /** Host orchestration only: run Git or inspect an installed Agent CLI as agent. */
-  captureAgent(
+  async captureAgent(
     command: "git" | "claude" | "codex" | "pi",
     args: readonly string[],
     timeoutMs?: number,
-  ) {
-    return result(async () => {
+  ): Promise<
+    | { readonly ok: true; readonly value: string }
+    | {
+        readonly ok: false;
+        readonly error: RuntimeError & {
+          readonly detail?: AgentCommandFailure;
+        };
+      }
+  > {
+    let detail: AgentCommandFailure | undefined;
+    const captured = await result(async () => {
       if (
         this.execution.mode !== "agent-ssh" ||
         !["git", "claude", "codex", "pi"].includes(command)
@@ -307,10 +329,18 @@ export class HerdrRuntime implements Runtime {
         command,
         ...args,
       ];
-      return timeoutMs === undefined
-        ? this.client.exec(input)
-        : this.client.exec(input, timeoutMs);
+      try {
+        return await (timeoutMs === undefined
+          ? this.client.exec(input)
+          : this.client.exec(input, timeoutMs));
+      } catch (error) {
+        if (error instanceof RuntimeFailure) detail = error.detail;
+        throw error;
+      }
     });
+    return !captured.ok && detail
+      ? { ok: false, error: { ...captured.error, detail } }
+      : captured;
   }
   async *events(
     ref: RuntimeRef,

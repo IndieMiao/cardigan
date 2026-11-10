@@ -3,13 +3,36 @@ import { stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import type { RuntimeErrorCode, RuntimeResult } from "@cardigan/domain";
 
+/** What an Agent command (`hc exec`) printed and returned when it failed. */
+export interface AgentCommandFailure {
+  /** The program's exit status, when hc propagated one. */
+  readonly exit_code?: number;
+  /** Last 8 KiB of stderr; callers must redact before logging or storing. */
+  readonly stderr: string;
+}
 export class RuntimeFailure extends Error {
   constructor(
     readonly code: RuntimeErrorCode,
     message: string,
+    readonly detail?: AgentCommandFailure,
   ) {
     super(message);
   }
+}
+/**
+ * Turn a failed Agent command into an execFile-shaped error (`code` is the
+ * exit status when known, `stderr` the program output), so Git failure
+ * classification works the same for local and agent-ssh Git.
+ */
+export function agentCommandError(error: {
+  readonly code: RuntimeErrorCode;
+  readonly message: string;
+  readonly detail?: AgentCommandFailure;
+}): Error & { code: number | RuntimeErrorCode; stderr: string } {
+  return Object.assign(new Error(`${error.code}: ${error.message}`), {
+    code: error.detail?.exit_code ?? error.code,
+    stderr: error.detail?.stderr ?? "",
+  });
 }
 export function fail(code: RuntimeErrorCode, message: string): never {
   throw new RuntimeFailure(code, message);
@@ -60,12 +83,15 @@ export async function result<T>(
     };
   }
 }
-function hcError(stderr: string): RuntimeFailure {
-  let kind = "unavailable";
+function hcError(stderr: string, exit?: unknown): RuntimeFailure {
+  let kind = "unavailable",
+    structured = true;
   try {
     kind = JSON.parse(stderr).error.kind;
   } catch {
-    /* Non-JSON CLI errors stay unavailable. */
+    // Non-JSON output is the executed program's own failure (hc exec
+    // propagates its exit status); keep it for the caller to classify.
+    structured = false;
   }
   const code: RuntimeErrorCode =
     kind === "not_found"
@@ -81,7 +107,16 @@ function hcError(stderr: string): RuntimeFailure {
         : ["invalid_params", "invalid_template", "usage"].includes(kind)
           ? "invalid_launch"
           : "runtime_unavailable";
-  return new RuntimeFailure(code, `hc refused the operation (${kind})`);
+  return new RuntimeFailure(
+    code,
+    `hc refused the operation (${kind})`,
+    structured
+      ? undefined
+      : {
+          ...(typeof exit === "number" ? { exit_code: exit } : {}),
+          stderr: stderr.slice(-8192),
+        },
+  );
 }
 export interface HcClient {
   exec(args: readonly string[], timeoutMs?: number): Promise<string>;
@@ -121,7 +156,7 @@ export function processClient(
                       "runtime_timeout",
                       "hc command timed out",
                     )
-                  : hcError(stderr),
+                  : hcError(stderr, error.code),
               );
             else resolve(stdout);
           },
