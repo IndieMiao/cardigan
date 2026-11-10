@@ -205,7 +205,7 @@ export function deriveWaitingOn(input: CardDerivedInput): WaitingOnItem[] {
     waiting.push({
       kind: "decision",
       ref: decision.id,
-      label: `等你拍板 ${decision.id}`,
+      label: `${decision.decider === "role:pm" ? "等待 PM 代拍" : "等你拍板"} ${decision.id}`,
     });
   }
 
@@ -213,7 +213,7 @@ export function deriveWaitingOn(input: CardDerivedInput): WaitingOnItem[] {
     waiting.push({
       kind: "human_action",
       ref: action.id,
-      label: `等你执行 ${action.id}`,
+      label: `${action.triage === "pm_ops" ? "等待 PM 分拣" : action.triage === "host" ? "等待主机操作" : "等你执行"} ${action.id}`,
     });
   }
 
@@ -266,8 +266,12 @@ export function deriveNextOwners(input: CardDerivedInput): NextOwnerItem[] {
   for (const decision of unresolvedBlockingDecisions(input)) {
     add(deciderOwner(decision.decider));
   }
-  if (pendingHumanActions(input).length > 0) {
-    add({ kind: "human", ref: "human" });
+  for (const action of pendingHumanActions(input)) {
+    add(
+      action.triage === "pm_ops"
+        ? { kind: "role", ref: "pm" }
+        : { kind: "human", ref: "human" },
+    );
   }
 
   const assignments = new Map(
@@ -319,16 +323,20 @@ export function deriveWhy(input: CardDerivedInput): string {
   const decisions = unresolvedBlockingDecisions(input);
   if (decisions.length > 0) {
     const first = decisions[0]?.id ?? "";
+    const who =
+      decisions[0]?.decider === "role:pm" ? "等待 PM 代拍" : "等你拍板";
     return clamp(
       decisions.length > 1
-        ? `等你拍板 ${first} 等 ${decisions.length} 项`
-        : `等你拍板 ${first}`,
+        ? `${who} ${first} 等 ${decisions.length} 项`
+        : `${who} ${first}`,
     );
   }
 
   const actions = pendingHumanActions(input);
   if (actions.length > 0) {
-    return clamp(`等你执行 ${actions[0]?.id ?? ""}`);
+    return clamp(
+      `${actions[0]?.triage === "pm_ops" ? "等待 PM 分拣" : actions[0]?.triage === "host" ? "等待主机操作" : "等你执行"} ${actions[0]?.id ?? ""}`,
+    );
   }
 
   if (submittedCompletion(input) !== undefined) {

@@ -76,6 +76,7 @@ const decision = z.object({
   option: text,
   rationale: z.string().optional(),
   raw_quote: z.string().optional(),
+  delegate_future: z.boolean().optional(),
 });
 const clarification = z.object({
   action: z.enum(["request_information", "explain"]),
@@ -249,13 +250,27 @@ export async function serveWrite(
             .int()
             .min(1)
             .max(1440)
-            .nullable(),
+            .nullable()
+            .optional(),
+          decision_delegation: z.record(z.string(), z.boolean()).optional(),
         })
         .strict(),
       body,
     );
     const output = run(context, (s, a, ports) =>
-      setProjectPreferences(s, a, input, ports),
+      setProjectPreferences(
+        s,
+        a,
+        {
+          ...(input.auto_merge_after_minutes !== undefined
+            ? { auto_merge_after_minutes: input.auto_merge_after_minutes }
+            : {}),
+          ...(input.decision_delegation !== undefined
+            ? { decision_delegation: input.decision_delegation }
+            : {}),
+        },
+        ports,
+      ),
     );
     sendJson(c.res, 200, output);
     return true;
@@ -486,10 +501,11 @@ export async function serveWrite(
             {
               decision_id,
               option: p.option,
+              ...(p.delegate_future ? { delegate_future: true } : {}),
               raw_quote,
               rationale: p.rationale?.trim() ? p.rationale : raw_quote,
             },
-            ports,
+            { ...ports, human_confirmation: "workbench" },
           );
         });
       });

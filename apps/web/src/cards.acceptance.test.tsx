@@ -611,7 +611,7 @@ test("U11 §8.4: attachments show decision status, fold superseded versions and 
       a,
       {
         card_id: f.card.id,
-        category: "general",
+        category: "scope_change",
         kind: "choose",
         question: "Approve image direction",
         context: "Choose a design",
@@ -635,7 +635,7 @@ test("U11 §8.4: attachments show decision status, fold superseded versions and 
         rationale: "Approved",
         raw_quote: "Use it",
       },
-      p,
+      { ...p, human_confirmation: "workbench" },
     ),
   );
   const comment = await f.agentComment("Design attachments");

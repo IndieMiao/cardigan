@@ -15,3 +15,23 @@ export function decisionOption(q: DecisionView, key: string): string {
   }
   return q.options.find((o) => o.key === key)?.description ?? key;
 }
+
+export const categoryLabels: Readonly<Record<string, string>> = {
+  general: "流程",
+  feature_detail: "功能细节",
+  scope_change: "需求范围变化",
+  spending: "花钱",
+  account: "账号",
+  permission: "权限",
+  data_deletion: "删除数据",
+};
+export const delegableCategories = [
+  "general",
+  "feature_detail",
+  "scope_change",
+];
+export const defaultDelegation: Readonly<Record<string, boolean>> = {
+  general: true,
+  feature_detail: true,
+  scope_change: false,
+};

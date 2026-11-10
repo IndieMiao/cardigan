@@ -716,27 +716,22 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
       timed_out: "超时",
       interrupted: "中断",
     };
-    const { decisions, actions, incidents } = store.uow.read((tx) => ({
-      decisions: tx.decisions
-        .list(project_id)
-        .filter(
-          (decision) =>
-            decision.decider === "human" &&
-            ["open", "provisional"].includes(decision.status),
-        ),
-      actions: unwrap(
+    const { decisions, actions, incidents } = store.uow.read((tx) => {
+      const needs = unwrap(
         listNeedsYou(loadCommandState(tx, project_id), humanActor(project_id)),
-      ).data.human_actions,
-      // §13.9: a lost runtime needs the human to decide whether to take over,
-      // so it belongs on the same page as decisions and human actions.
-      incidents: tx.assignments
-        .list(project_id)
-        .filter(
-          (assignment) =>
-            assignment.status === "active" &&
-            ["lost", "unknown"].includes(assignment.runtime_state),
-        ),
-    }));
+      ).data;
+      return {
+        decisions: needs.decisions,
+        actions: needs.human_actions,
+        incidents: tx.assignments
+          .list(project_id)
+          .filter(
+            (a) =>
+              a.status === "active" &&
+              ["lost", "unknown"].includes(a.runtime_state),
+          ),
+      };
+    });
 
     if (
       decisions.length === 0 &&
@@ -747,9 +742,18 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
       return EXIT.ok;
     }
     const lines: string[] = [];
-    if (decisions.length > 0) {
-      lines.push(`待你拍板（${decisions.length}）`);
-      for (const decision of decisions) {
+    const pending = decisions.filter((q) => !q.followup_notice);
+    const followups = decisions.filter((q) => q.followup_notice);
+    if (followups.length) {
+      lines.push(`拍板落实（${followups.length}）`);
+      for (const q of followups)
+        lines.push(
+          `  ${q.id}  ${q.card_id ?? "项目"}\n    ${q.followup_notice}\n    已选方案：${q.resolution?.option}\n    请安排落实，并在时间线引用 ${q.id} 记录结果。`,
+        );
+    }
+    if (pending.length > 0) {
+      lines.push(`待你拍板（${pending.length}）`);
+      for (const decision of pending) {
         const check = decision.card_id
           ? checks.get(decision.card_id)
           : undefined;
@@ -791,9 +795,16 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
         lines.push(
           [
             `  ${action.id}${action.card_id === undefined ? "" : `  ${action.card_id}`}`,
-            `    ${action.instructions}`,
-            `    为什么需要你：${action.why_human}`,
-            `    期望返回：${action.expected_return}`,
+            ...(action.handoff
+              ? [
+                  `    ${action.handoff.title}（项目经理已改写）`,
+                  `    这是什么：${action.handoff.summary}`,
+                  `    做完会怎样：${action.handoff.expected_outcome}`,
+                ]
+              : []),
+            `    ${action.handoff?.instructions ?? action.instructions}`,
+            `    为什么需要你：${action.handoff?.why_human ?? action.why_human}`,
+            `    期望返回：${action.handoff?.expected_return ?? action.expected_return}`,
             ...(action.due === undefined ? [] : [`    截止：${action.due}`]),
           ].join("\n"),
         );

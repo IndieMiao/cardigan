@@ -49,6 +49,8 @@ export type EntityChange = {
   };
 }[keyof CommandEntities];
 export interface CommandPorts {
+  /** Workbench confirmation for ungranted scope changes. D12 high risks are gated by the actor. */
+  readonly human_confirmation?: "workbench";
   readonly clock: Clock;
   readonly ids: IdAllocator;
   /** Host-provided template configuration, never MCP parameters. */
@@ -80,6 +82,7 @@ type CommandName =
   | "abort_dispatch"
   | "set_project_preferences"
   | "auto_confirm_merge"
+  | "remind_decision_followups"
   | "request_merge"
   | "record_merge_result"
   | "begin_merge_push"
@@ -168,6 +171,7 @@ export class CommandDraft {
     ].includes(tool);
     const systemOnly = [
       "auto_confirm_merge",
+      "remind_decision_followups",
       "record_merge_result",
       "record_merge_check",
       "begin_merge_push",
