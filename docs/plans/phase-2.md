@@ -43,6 +43,19 @@
 | P2a-7 HTTPS 外部访问 | Workbench 支持配置的外部 HTTPS 来源（C-8，已在做）；Claude 配置 Tailscale Serve 和 server 启动环境 | Cardigan + Claude | 只监听回环地址；未配置时行为不变；经 HTTPS 访问的 cookie 带 Secure；从 MacBook 用 https 地址能登录和操作 |
 | P2a-6 审核者不是作者（C7） | 核实 `assign` 是否允许同一个 Assignment（或同一员工）既做产出项又做验证它的工作项；允许就补一条不变量 | Cardigan | 契约测试覆盖；开发方案 §4.5 补不变量 |
 | P2a-8 CLI 评论和附件（试行发现 14） | 人在命令行给卡片发评论（`cardigan comment add <C-n> --text <内容>`）和上传附件（`cardigan attachment add <C-n> --file <路径> [--kind evidence] [--note <说明>]`），复用 Workbench 的同一段处理代码，身份是人 | Cardigan | 不登录 Workbench 也能完成；附件类型校验、大小上限与 Workbench 一致；artifact 仍必须挂拍板 |
+| P2a-9 全机同时运行的 Run 上限（试行发现 35，细化见下方 §2.1） | 主机按机器配置全机同时处于 `dispatched`／`acked`／`running` 态的 Run 数上限，默认 4；超过时新 Run 留在 `queued`、不按铃，按创建时间跨项目排队；常驻 PM 的 Run 不受限但计入计数 | Codex 或 Pi | 契约测试覆盖排队顺序、PM 豁免、改配置后下一次调度生效；执行视图／看板／CLI 能看到排队位次；验证时不得人为制造 CPU 负载 |
+
+### 2.1 全机同时运行的 Run 上限（P2a-9 细化）
+
+- **背景**：试行发现 35（2026-11-10）——系统没有全局并发上限，PM Ops 和 Claude 各自派活，加上一次验收里要求的人为加负载，同一时间有 6 个 Run 在跑测试，主机（12 线程笔记本 GS66）负载 39、CPU 95°C 热降频，Workbench 变慢。
+- **配置**：`CARDIGAN_CONFIG_DIR`（默认 `~/.config/cardigan`，见 §13.1）下新增一份配置文件，按机器（Machine，§4.3，现在只有 `local` 一台）设上限，省略时默认 4；不进被开发项目的仓库；和 `merge-gate.yaml` 一样不做热加载，改配置后重启 server 生效。
+- **计数口径**：不新增 Run 状态，复用现有 `queued`（§4.4）。占用名额的是 Assignment 所在机器上处于 `dispatched`／`acked`／`running` 的 Run；达到上限后 Dispatcher 对新的待投递通知保持 `queued`、不调用 `dispatchRun`、不按铃，按 Run 对应触发事件的创建时间先后排队，跨项目一起排，不是哪个项目先到就一直占着。
+- **豁免**：常驻 PM（PM Office、PM Ops，`scope=standing`）的 Run 不受上限限制、不会被这条规则挡在 `queued`——它们负责派活和处理拍板，被排队会饿死整条流水线；但它们占用的名额仍计入当前运行数，其他 Run 的排队判断要把它们算进去，不能当作不存在。
+- **和合并闸门的关系**：P2a-1 §2.5 的合并检查已经全机串行、吃 CPU 多；**建议**检查运行时计为占用 2 个名额，具体数值实现时按实测调整，不是硬性约定。
+- **domain 边界**：domain 不读配置；上限的值由主机在加载命令状态或调度（Dispatcher.tick）时作为参数传入，domain 只判断"给定上限和当前占用，这个 Assignment 能不能派发"，不新增状态机分支。
+- **界面和 CLI**：指派（`assign`）不受影响，只是指派后的 Run 可能排队；Workbench 执行视图和看板卡片在 Run 排队时显示"排队中（前面还有 N 个）"；`cardigan attention` 或现有状态命令能看到排队情况。
+- **测试**：契约测试覆盖排队顺序（跨项目按创建时间）、PM 豁免、上限改变后下一次调度判断立即生效。
+- **Agent 规则补充**：P2a-4 注入的项目规则补一句——验证时不得人为制造 CPU 负载（空转、压测）；偶发失败只重复运行，次数不超过 20。
 
 ## 3. P2-V 虚拟员工和看板强化（约 2–3 周）
 
