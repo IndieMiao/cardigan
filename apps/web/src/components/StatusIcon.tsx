@@ -87,7 +87,7 @@ const statusShapes = {
   withdrawn: "cancelled",
   revoked: "cancelled",
   active: "success",
-  inactive: "paused",
+  inactive: "cancelled",
   suspended: "paused",
   released: "cancelled",
   not_provisioned: "pending",

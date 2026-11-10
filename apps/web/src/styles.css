@@ -2909,6 +2909,80 @@ body[data-lightbox="open"] .drawer-overlay {
   display: block;
   width: 10rem;
 }
+/* C-52 V9b: role management inside settings. */
+.settings-layout .link-button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  text-decoration: underline;
+}
+.role-toolbar,
+.role-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gap);
+  align-items: center;
+}
+.role-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.role-table th,
+.role-table td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.role-fields {
+  display: grid;
+  grid-template-columns: minmax(8rem, max-content) minmax(0, 1fr);
+  gap: 6px 1rem;
+}
+.role-fields dd {
+  margin: 0;
+  min-width: 0;
+}
+.role-text {
+  font-family: var(--font-code);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 0;
+}
+.role-tools {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr));
+  gap: 4px 1rem;
+}
+.role-form textarea {
+  width: 100%;
+  font-family: var(--font-code);
+}
+.role-warning {
+  border: 2px solid var(--danger);
+  background: var(--danger-surface);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  color: var(--text);
+}
+.role-flat {
+  margin: 0;
+}
+.role-warning-text,
+.role-hints,
+.role-outside,
+.role-diff-remove {
+  color: var(--danger);
+}
+.role-diff-add {
+  color: var(--status-done);
+}
+.role-history li {
+  margin-bottom: 4px;
+}
+.role-history button {
+  margin-left: var(--gap);
+}
 @media (max-width: 640px) {
   .settings-layout {
     grid-template-columns: 1fr;

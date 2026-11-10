@@ -54,10 +54,11 @@ const groups = {
     "withdrawn",
     "revoked",
     "released",
+    "inactive",
     "not_run",
   ],
   idle: ["idle"],
-  paused: ["suspended", "inactive", "draining", "interrupted"],
+  paused: ["suspended", "draining", "interrupted"],
   unknown: ["unknown", "needs_attention"],
 };
 const states = Object.entries(groups).flatMap(([shape, statuses]) =>
