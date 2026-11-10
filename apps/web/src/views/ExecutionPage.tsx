@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { CardiganClient, ExecutionAssignment, RunView } from "../api.js";
 import { EmployeeIdentity } from "../components/EmployeeIdentity.js";
 import { FilterBar } from "../components/FilterBar.js";
@@ -16,6 +16,13 @@ import {
   cliCommand,
   Feedback,
 } from "../components/Operations.js";
+import {
+  assignmentActivity,
+  type ExecutionSort,
+  readExecutionSort,
+  sortByActivity,
+  writeExecutionSort,
+} from "../execution-sort.js";
 import { routeHash, useRouteFilters } from "../route.js";
 import { useResource } from "../useResource.js";
 
@@ -29,7 +36,8 @@ const kinds: Readonly<Record<string, string>> = {
 const unfinished = (run: RunView) =>
   !["completed", "failed", "cancelled"].includes(run.status);
 const runKind = (run: RunView) => kinds[run.kind] ?? "执行";
-const runTime = (run: RunView) => run.finished_at ?? run.started_at;
+const runTime = (run: RunView) =>
+  run.finished_at ?? run.started_at ?? run.queued_at;
 const working = (a: ExecutionAssignment) =>
   a.status === "active" &&
   (a.queue_ahead !== undefined ||
@@ -86,7 +94,7 @@ function AssignmentRow({
   const assignmentsRuns = runs.filter((run) => run.assignment_id === a.id),
     run = assignmentsRuns[0],
     live = assignmentsRuns.some(unfinished),
-    lastActivity = a.last_mcp_activity_at ?? (run ? runTime(run) : undefined),
+    lastActivity = assignmentActivity(a, run),
     [showAllRuns, setShowAllRuns] = useState(false);
   return (
     <>
@@ -310,8 +318,24 @@ export function ExecutionPage({
     load,
     revision,
   );
-  const assignments = (data?.assignments ?? []).filter((assignment) =>
-    matchesView(assignment, view),
+  const [sort, setSort] = useState<ExecutionSort>(() =>
+    readExecutionSort(projectId),
+  );
+  useEffect(() => setSort(readExecutionSort(projectId)), [projectId]);
+  const toggleSort = () => {
+    const next: ExecutionSort = sort === "desc" ? "asc" : "desc";
+    setSort(next);
+    writeExecutionSort(projectId, next);
+  };
+  // Runs arrive newest first, so the first match is the Assignment's latest.
+  const latestRun = (assignmentId: string) =>
+    data?.runs.find((run) => run.assignment_id === assignmentId);
+  const assignments = sortByActivity(
+    (data?.assignments ?? []).filter((assignment) =>
+      matchesView(assignment, view),
+    ),
+    (assignment) => assignmentActivity(assignment, latestRun(assignment.id)),
+    sort,
   );
   const toggle = (id: string) =>
     setExpanded((current) => {
@@ -382,7 +406,26 @@ export function ExecutionPage({
                   <th scope="col">卡片和工作项</th>
                   <th scope="col">运行状态</th>
                   <th scope="col">最近 Run</th>
-                  <th scope="col">最近活动</th>
+                  <th
+                    scope="col"
+                    aria-sort={sort === "desc" ? "descending" : "ascending"}
+                  >
+                    <button
+                      type="button"
+                      className="quiet execution-sort"
+                      title={
+                        sort === "desc"
+                          ? "当前从新到旧，点击改为从旧到新"
+                          : "当前从旧到新，点击改为从新到旧"
+                      }
+                      onClick={toggleSort}
+                    >
+                      最近活动
+                      <span aria-hidden="true">
+                        {sort === "desc" ? " ↓" : " ↑"}
+                      </span>
+                    </button>
+                  </th>
                 </tr>
               </thead>
               <tbody>

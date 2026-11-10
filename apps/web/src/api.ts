@@ -598,6 +598,8 @@ export interface RunView {
   readonly agent_cli_version: string;
   readonly started_at?: string;
   readonly finished_at?: string;
+  /** When the Run was queued (its run_queued event); older servers omit it. */
+  readonly queued_at?: string;
   readonly summary: string;
 }
 export interface ExecutionAssignment extends AuthorView {

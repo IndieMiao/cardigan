@@ -10,6 +10,7 @@ import type {
   Machine,
   MergeCheckView,
   ProjectId,
+  Run,
   RunQueuePosition,
   TimelineEntry,
   WorkItem,
@@ -1101,6 +1102,25 @@ export function executionView(
     [...state.runs]
       .filter((run) => run.assignment_id === assignment_id)
       .sort((left, right) => (left.id === right.id ? 0 : byId(right, left)))[0];
+  // §8.5: a queued Run has neither started_at nor finished_at; its queue time
+  // is its activity time for the default sort. launchRun records it as a
+  // run_queued event. Resumption after a decision/unblock (queueResumedRun)
+  // and dispatch recovery create the queued Run in the same command that
+  // emits its trigger event, without a run_queued event, so that trigger's
+  // time is when the Run was queued.
+  const queuedAt = new Map<string, string>();
+  const eventAt = new Map<string, string>();
+  for (const event of state.events) {
+    eventAt.set(event.id, event.created_at);
+    if (event.type !== "run_queued") continue;
+    const runId = (event.payload as { readonly run_id?: unknown }).run_id;
+    if (typeof runId === "string" && !queuedAt.has(runId))
+      queuedAt.set(runId, event.created_at);
+  }
+  const withQueuedAt = (run: Run) => {
+    const at = queuedAt.get(run.id) ?? eventAt.get(run.trigger_event_id);
+    return at === undefined ? {} : { queued_at: at };
+  };
   return {
     project_id: state.project_id,
     generated_at: now,
@@ -1146,6 +1166,7 @@ export function executionView(
                 kind: run.kind,
                 started_at: run.started_at ?? null,
                 finished_at: run.finished_at ?? null,
+                ...withQueuedAt(run),
                 heartbeat_at: run.heartbeat_at ?? null,
                 heartbeat_note: run.heartbeat_note ?? null,
                 outcome: run.outcome,
@@ -1165,7 +1186,11 @@ export function executionView(
         const waiting = queue.find(
           (r) => r.project_id === state.project_id && r.run_id === run.id,
         );
-        return { ...run, ...(waiting ? { queue_ahead: waiting.ahead } : {}) };
+        return {
+          ...run,
+          ...withQueuedAt(run),
+          ...(waiting ? { queue_ahead: waiting.ahead } : {}),
+        };
       }),
   };
 }
