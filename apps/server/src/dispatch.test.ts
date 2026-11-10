@@ -225,7 +225,7 @@ test("§3.1 released Assignment is not started or woken and the failure reaches 
     }).length,
   ).toBeGreaterThan(0);
 });
-test("§3.3 wake failure preserves its Run, records failure once and never silently retries", async () => {
+test("C-56 wake failure retries the same Run after backoff without immediate escalation", async () => {
   comment();
   vi.mocked(runtime.wake).mockResolvedValue({
     ok: false,
@@ -235,11 +235,11 @@ test("§3.3 wake failure preserves its Run, records failure once and never silen
   await dispatcher.tick();
   f.advance(120000);
   await dispatcher.tick();
-  expect(runtime.wake).toHaveBeenCalledOnce();
+  expect(runtime.wake).toHaveBeenCalledTimes(2);
   expect(f.state().runs).toHaveLength(2);
   expect(ownNotes()[0]).toMatchObject({
     status: "delivery_failed",
-    attempts: 1,
+    attempts: 2,
   });
   expect(unfinishedBellAttempts(f.store.database, f.project)).toEqual([]);
   expect(
@@ -247,7 +247,7 @@ test("§3.3 wake failure preserves its Run, records failure once and never silen
       project_id: f.project,
       recipient_kind: "pm_ops",
     }),
-  ).toHaveLength(1);
+  ).toHaveLength(0);
 });
 test("an ACK during wake wins over its late failure response", async () => {
   comment();

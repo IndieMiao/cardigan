@@ -44,6 +44,7 @@ export {
   type RunDirectory,
   runDirectory,
 } from "./naming.js";
+export { revokeStoppedRunTokens, stopRunRuntime } from "./stop-run.js";
 export {
   type CheckoutCheck,
   type CheckoutInput,

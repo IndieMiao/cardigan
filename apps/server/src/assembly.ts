@@ -54,6 +54,8 @@ export interface ControlPlaneOptions {
   readonly retryBaseMs?: number;
   readonly maxRetries?: number;
   readonly inactivityGraceMs?: number;
+  readonly dispatchTimeoutMs?: number;
+  readonly deliveryRetryBaseMs?: number;
   readonly lossGraceMs?: number;
   readonly eventSilenceMs?: number;
   /**
@@ -148,6 +150,12 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
     standing,
     snapshot: options.snapshot,
     startRun: options.startRun,
+    ...(options.dispatchTimeoutMs === undefined
+      ? {}
+      : { dispatchTimeoutMs: options.dispatchTimeoutMs }),
+    ...(options.deliveryRetryBaseMs === undefined
+      ? {}
+      : { deliveryRetryBaseMs: options.deliveryRetryBaseMs }),
     ...(options.beforeWake ? { beforeWake: options.beforeWake } : {}),
     ...(options.deliveryLeaseMs === undefined
       ? {}

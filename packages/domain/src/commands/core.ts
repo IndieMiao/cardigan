@@ -80,6 +80,8 @@ type CommandName =
   | "dispatch_run"
   | "acknowledge_run"
   | "abort_dispatch"
+  | "recover_dispatch"
+  | "resolve_dispatch_attention"
   | "set_project_preferences"
   | "auto_confirm_merge"
   | "remind_decision_followups"
@@ -171,6 +173,8 @@ export class CommandDraft {
     ].includes(tool);
     const systemOnly = [
       "auto_confirm_merge",
+      "recover_dispatch",
+      "resolve_dispatch_attention",
       "remind_decision_followups",
       "record_merge_result",
       "record_merge_check",

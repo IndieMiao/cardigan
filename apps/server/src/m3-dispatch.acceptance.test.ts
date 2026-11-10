@@ -712,7 +712,7 @@ test("§3.3 no resend while the Assignment still has an unfinished Run", async (
   expect(runtime.wake).not.toHaveBeenCalled();
 });
 
-test("§3.3 a failed wake is marked delivery_failed, escalated, and never retried", async () => {
+test("C-56 a failed wake backs off and retries without a second Run", async () => {
   const runtime = fakeRuntime();
   runtime.wake.mockResolvedValue({
     ok: false,
@@ -729,12 +729,16 @@ test("§3.3 a failed wake is marked delivery_failed, escalated, and never retrie
   expect(f.notes().some((note) => note.status === "delivery_failed")).toBe(
     true,
   );
-  expect(alertsFor("pm_ops").length).toBeGreaterThan(0);
-  // Not silently retried, and no second Run was created for it.
+  expect(
+    f.store.uow
+      .read((tx) => tx.events.listAfter(project, f.card.id as never, 0))
+      .some((e) => e.type === "bell_delivery_failed"),
+  ).toBe(false);
+  // Backoff retry preserves the Run identity.
   const runsAfterFailure = f.runs(f.coder).length;
-  f.advance(30 * 60_000);
+  f.advance(30_000);
   await d.tick();
-  expect(runtime.wake).toHaveBeenCalledTimes(1);
+  expect(runtime.wake).toHaveBeenCalledTimes(2);
   expect(f.runs(f.coder).length).toBe(runsAfterFailure);
   expect(f.notes().some((note) => note.status === "needs_attention")).toBe(
     false,

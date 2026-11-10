@@ -1067,6 +1067,35 @@ export function escalation(
 export function routeEvent(input: RouteInput): RouteResult {
   const draft: Draft = { notifications: [], checks: [], problems: [] };
   switch (input.event.type) {
+    case "run_dispatch_recovered": {
+      const id = payloadString(input.event.payload, "assignment_id") as
+        | AssignmentId
+        | undefined;
+      const a = assignmentOf(input, id);
+      if (a?.status === "active")
+        note(
+          input,
+          draft,
+          recipient.assignment(a.id),
+          "assignment",
+          "6.4/bell delivery failed",
+          payloadString(input.event.payload, "body") ??
+            "派发超时，已自动重排一次",
+        );
+      break;
+    }
+    case "run_dispatch_stalled":
+      if (payloadString(input.event.payload, "audience") === "pm_ops")
+        note(
+          input,
+          draft,
+          recipient.pm_ops(),
+          "run_attention",
+          "6.4/bell delivery failed",
+          payloadString(input.event.payload, "body") ??
+            "派发恢复失败，请检查运行环境",
+        );
+      break;
     case "comment_posted":
       routeComment(input, draft);
       break;
@@ -1210,7 +1239,7 @@ export function routeEvent(input: RouteInput): RouteResult {
   return draft;
 }
 
-/** §6.4 / §3.3: a failed bell goes to PM Ops and is never retried silently. */
+/** §6.4: failures that cannot be recovered go to PM Ops. */
 export function routeBellFailure(input: {
   readonly event_id: EventId;
   readonly seq: number;

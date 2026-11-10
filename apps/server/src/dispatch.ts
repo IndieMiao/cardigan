@@ -13,8 +13,10 @@ import {
   decisionFollowupBlocked,
   decisionFollowupPrompt,
   dispatchRun,
+  obsoleteDispatchAttention,
   queueRun,
   remindDecisionFollowups,
+  resolveDispatchAttention,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import {
@@ -44,6 +46,7 @@ import {
   routeProjectEvents,
   type StandingResolver,
 } from "./dispatch-inbox.js";
+import { retryDispatchedRuns } from "./dispatch-retry.js";
 
 export interface DispatcherOptions {
   readonly store: Store;
@@ -55,6 +58,8 @@ export interface DispatcherOptions {
   /** Retries after the initial send; zero disables retries. */
   readonly maxRetries?: number;
   readonly inactivityGraceMs?: number;
+  readonly dispatchTimeoutMs?: number;
+  readonly deliveryRetryBaseMs?: number;
   /** Snapshot for a NEW terminal; an existing session keeps its previous Run's snapshot. */
   readonly snapshot: (
     assignment: Assignment,
@@ -99,12 +104,16 @@ export class Dispatcher {
   private readonly retryBaseMs: number;
   private readonly maxRetries: number;
   private readonly inactivityGraceMs: number;
+  private readonly dispatchTimeoutMs: number;
+  private readonly deliveryRetryBaseMs: number;
   constructor(readonly options: DispatcherOptions) {
     this.clock = options.clock ?? dispatcherClock;
     this.leaseMs = options.deliveryLeaseMs ?? 60_000;
     this.retryBaseMs = options.retryBaseMs ?? 60_000;
     this.maxRetries = options.maxRetries ?? 4;
     this.inactivityGraceMs = options.inactivityGraceMs ?? 15 * 60_000;
+    this.dispatchTimeoutMs = options.dispatchTimeoutMs ?? 10 * 60_000;
+    this.deliveryRetryBaseMs = options.deliveryRetryBaseMs ?? 30_000;
     if (
       !Number.isSafeInteger(this.maxRetries) ||
       this.maxRetries < 0 ||
@@ -112,6 +121,9 @@ export class Dispatcher {
       ![
         this.retryBaseMs,
         this.inactivityGraceMs,
+        this.dispatchTimeoutMs,
+        this.deliveryRetryBaseMs,
+        this.deliveryRetryBaseMs * 2 ** Math.max(0, this.maxRetries - 1),
         this.retryDelay(this.maxRetries + 1),
       ].every((n) => Number.isSafeInteger(n) && n > 0)
     )
@@ -158,6 +170,19 @@ export class Dispatcher {
         )?.status !== "suspended"
       )
         this.settle(attempt, false, "interrupted_delivery");
+    await retryDispatchedRuns(
+      { ...this.options, clock: this.clock },
+      project,
+      {
+        timeoutMs: this.dispatchTimeoutMs,
+        retryBaseMs: this.deliveryRetryBaseMs,
+        maxRetries: this.maxRetries,
+        leaseMs: this.leaseMs,
+      },
+      (attempt, sent, reason, bell) => this.settle(attempt, sent, reason, bell),
+    );
+    // Recovery and escalation are durable events, including CLI starts without an inbox row.
+    routeProjectEvents(store, project, { clock: this.clock });
     this.maintenance(project);
     const claimed = new Set(
       unfinishedBellAttempts(store.database, project).flatMap(
@@ -498,7 +523,6 @@ export class Dispatcher {
         if (!["pending", "belled", "delivery_failed"].includes(n.status))
           continue;
         const acked = covered(n, state, attempt.assignment_id);
-        if (!acked && !["pending", "belled"].includes(n.status)) continue;
         moveNotification(store.database, {
           project_id: project,
           id: n.id,
@@ -519,7 +543,8 @@ export class Dispatcher {
         });
         failed ||= !sent && !acked;
       }
-      if (failed)
+      const run = state.runs.find((r) => r.id === attempt.run_id);
+      if (failed && run?.status !== "dispatched" && run?.status !== "running")
         this.escalate(tx, project, notes, attempt.assignment_id, reason);
     });
   }
@@ -563,6 +588,7 @@ export class Dispatcher {
       audience: alertAudience(a, state, this.options.standing, notes),
       card_id: notes[0]?.card_id,
       notification_ids: notes.map((n) => n.id),
+      run_id: notes[0]?.run_id,
     });
   }
   private retryDelay(attempts: number) {
@@ -576,6 +602,26 @@ export class Dispatcher {
     store.uow.run((tx) => {
       const state = loadCommandState(tx, project),
         at = this.clock.now();
+      persistEffect(
+        tx,
+        project,
+        unwrap(
+          resolveDispatchAttention(
+            state,
+            { kind: "system", project_id: project },
+            { clock: this.clock, ids: tx.ids },
+          ),
+        ),
+      );
+      for (const n of store.listNotifications({ project_id: project })) {
+        if (obsoleteDispatchAttention(state, n))
+          moveNotification(store.database, {
+            project_id: project,
+            id: n.id,
+            event: "resolve",
+            at,
+          });
+      }
       const attempts = unfinishedBellAttempts(store.database, project);
       for (const n of store.listNotifications({
         project_id: project,

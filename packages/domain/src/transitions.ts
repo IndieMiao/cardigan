@@ -164,18 +164,28 @@ export const transitionTables: {
       ack: "acked",
       deliver_failed: "delivery_failed",
       needs_attention: "needs_attention",
+      resolve: "resolved",
     },
     belled: {
       ack: "acked",
       retry: "pending",
       deliver_failed: "delivery_failed",
       needs_attention: "needs_attention",
+      resolve: "resolved",
     },
     // A failed wake may still have landed (§6.8): the Agent can ack it later.
-    delivery_failed: { ack: "acked", needs_attention: "needs_attention" },
+    delivery_failed: {
+      ack: "acked",
+      retry: "pending",
+      bell: "belled",
+      deliver_failed: "delivery_failed",
+      needs_attention: "needs_attention",
+      resolve: "resolved",
+    },
     // Terminal: an acked or escalated notification never rings again.
     acked: {},
-    needs_attention: {},
+    needs_attention: { resolve: "resolved" },
+    resolved: {},
   },
   card: {
     backlog: { human_mark_done: "done", set_todo: "todo", cancel: "cancelled" },

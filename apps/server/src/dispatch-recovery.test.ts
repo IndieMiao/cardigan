@@ -1,4 +1,4 @@
-import { acknowledgeRun, postComment } from "@cardigan/domain";
+import { acknowledgeRun } from "@cardigan/domain";
 import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { recoveryFixture } from "../test-support/recovery.js";
@@ -35,7 +35,7 @@ test("§3.3 retries at 1/2/4/8 minutes, reuses the original Run and escalates on
   f.advance(1);
   await new Dispatcher(f.options).tick();
   await new Dispatcher(f.options).tick();
-  expect(f.notes()[0]?.status).toBe("needs_attention");
+  expect(f.notes()[0]?.status).toBe("resolved");
   expect(f.runtime.wake).toHaveBeenCalledTimes(5);
   expect(alerts()).toHaveLength(1);
 });
@@ -44,7 +44,11 @@ test.each([false, true])(
   "§3.3 an unfinished dispatched/running Run prevents retry (running=%s)",
   async (running) => {
     f.comment();
-    const d = new Dispatcher({ ...f.options, inactivityGraceMs: 86400000 });
+    const d = new Dispatcher({
+      ...f.options,
+      inactivityGraceMs: 86400000,
+      dispatchTimeoutMs: 86400000,
+    });
     await d.tick();
     const run = f.latest();
     if (running)
@@ -83,7 +87,7 @@ test("§3.3 configurable retry base/limit and ACK before exhaustion stop deliver
   expect(alerts()).toEqual([]);
 });
 
-test("§3.3 retries never reset a failed wake or create a replacement terminal/Run", async () => {
+test("C-56 failure on an already completed Run resolves obsolete attention", async () => {
   f.comment();
   const d = new Dispatcher(f.options);
   await d.tick();
@@ -99,7 +103,7 @@ test("§3.3 retries never reset a failed wake or create a replacement terminal/R
   await d.tick();
   expect(f.runtime.wake).toHaveBeenCalledTimes(2);
   expect(f.state().runs).toHaveLength(2);
-  expect(f.notes()[0]?.status).toBe("delivery_failed");
+  expect(f.notes()[0]?.status).toBe("resolved");
   expect(alerts()).toHaveLength(1);
 });
 
@@ -149,35 +153,6 @@ test("§3.3 watchdog grace is configurable, uses the new Run start and ignores c
   f.advance(1);
   await d.tick();
   expect(alerts()).toHaveLength(1);
-});
-
-test("§3.3 PM Ops bell failure goes to Needs You and Office; Office failure cannot recurse", async () => {
-  const ops = f.pm(),
-    office = f.pm();
-  f.session(ops);
-  f.session(office);
-  f.skipEvents();
-  f.apply((s, a, p) =>
-    postComment(s, a, { card_id: f.target.card.id, body: "For Ops" }, p),
-  );
-  vi.mocked(f.runtime.wake).mockResolvedValue({
-    ok: false,
-    error: { code: "runtime_timeout", message: "uncertain" },
-  });
-  const d = new Dispatcher({
-    ...f.options,
-    standing: (_p, kind) => (kind === "pm_ops" ? ops.id : office.id),
-  });
-  await d.tick();
-  expect(alerts("needs_you")).toHaveLength(1);
-  expect(alerts("pm_office")).toHaveLength(1);
-  expect(alerts()[0]?.status).toBe("delivery_failed");
-  await d.tick();
-  await d.tick();
-  expect(alerts("pm_office")[0]?.status).toBe("delivery_failed");
-  expect(alerts("needs_you")).toHaveLength(2);
-  expect(alerts()).toHaveLength(1);
-  expect(f.runtime.wake).toHaveBeenCalledTimes(2);
 });
 
 test("§3.3 zero retries escalates after the first ACK window and concurrent retry claims send once", async () => {

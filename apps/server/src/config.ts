@@ -23,6 +23,7 @@ export interface ServerConfig {
   readonly backupIntervalMs?: number;
   /** Orphaned attachment blobs (§9.3); 6 hours by default. */
   readonly attachmentIntervalMs?: number;
+  readonly dispatchTimeoutMs?: number;
 }
 
 export interface ServerEnv extends ExecutionEnv {
@@ -42,6 +43,7 @@ export interface ServerEnv extends ExecutionEnv {
   readonly CARDIGAN_RECONCILE_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_BACKUP_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_ATTACHMENT_GC_INTERVAL_MS?: string | undefined;
+  readonly CARDIGAN_DISPATCH_TIMEOUT_MS?: string | undefined;
 }
 
 /** Default cadence of the M4.4 phase loops (plan §3.6, §3.7). */
@@ -71,6 +73,11 @@ export function resolveServerConfig(env: ServerEnv): ServerConfig {
     execution: resolveExecutionConfig({ ...env, CARDIGAN_DATA_DIR: dataDir }),
     host: resolveHost(env.CARDIGAN_MCP_HOST),
     port,
+    dispatchTimeoutMs: interval(
+      env.CARDIGAN_DISPATCH_TIMEOUT_MS,
+      "CARDIGAN_DISPATCH_TIMEOUT_MS",
+      600_000,
+    ),
     mergeIntervalMs: interval(
       env.CARDIGAN_MERGE_INTERVAL_MS,
       "CARDIGAN_MERGE_INTERVAL_MS",
