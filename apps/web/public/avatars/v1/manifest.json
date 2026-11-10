@@ -2305,6 +2305,45 @@
           }
         }
       }
+    },
+    {
+      "id": "zhang-liang",
+      "name": "张良",
+      "novel": "史记·留侯世家",
+      "bio": "汉初谋士，字子房；运筹帷幄之中，决胜千里之外。Cardigan 中担任 PM Office 兼平台负责人。",
+      "background": "#BED8D2",
+      "files": {
+        "full": {
+          "path": "zhang-liang/full.webp",
+          "sha256": "8f425039cf9a6d60a028941f162a2ba00da5fc2cf04c88ab73d18b0b6d3473a3",
+          "bytes": 23804,
+          "width": 768,
+          "height": 1152
+        },
+        "head": {
+          "64": {
+            "path": "zhang-liang/head-64.webp",
+            "sha256": "0684883b81c6103770328ef9c9ce096e4075d02f2154a6f1b0abe2d0e74c6add",
+            "bytes": 898,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "zhang-liang/head-128.webp",
+            "sha256": "684e5e6e55eda43fdefbecbadfd31429e0b122b1b828f9bc76b6af8fe4755830",
+            "bytes": 2316,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "zhang-liang/head-256.webp",
+            "sha256": "82da7462361d28a66bc3cfcbcbed205306f92aa7433a1dd49e07f3198f1d6965",
+            "bytes": 5896,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
     }
   ]
 }
