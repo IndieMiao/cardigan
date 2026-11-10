@@ -2,6 +2,7 @@ import { join } from "node:path";
 import type {
   Assignment,
   Delivery,
+  DeliveryId,
   DeliverySubject,
   DeliveryVerifier,
   MergePlan,
@@ -81,8 +82,14 @@ export interface MergeGit {
   prepare?(project: CentralProject, plan: MergePlan): Promise<PreparedMerge>;
   publish?(
     project: CentralProject,
+    completion: DeliveryId,
     candidate: Extract<PreparedMerge, { status: "candidate" }>,
-  ): Promise<MergeOutcome>;
+  ): Promise<
+    | Extract<MergeOutcome, { status: "stale" }>
+    | (Extract<MergeOutcome, { status: "merged" }> & {
+        readonly tree_sha: string;
+      })
+  >;
   distribute?(project: CentralProject): Promise<void>;
 }
 export interface ReconcileGit {
@@ -284,15 +291,27 @@ export class ServerGit implements GitBinding {
   prepare(project: CentralProject, plan: MergePlan): Promise<PreparedMerge> {
     return this.central.prepareMerge(project, plan);
   }
-  publish(
+  async publish(
     project: CentralProject,
+    completion: DeliveryId,
     candidate: Extract<PreparedMerge, { status: "candidate" }>,
-  ): Promise<MergeOutcome> {
-    return this.central.publishMerge(
+  ) {
+    const repository = await this.central.ensureCentral(project);
+    // Re-read the immutable commit in the host-owned center before any ref
+    // mutation. Never accept a caller's tree as proof of what will be published.
+    const tree = await this.transport.treeOfCommit(
+      repository,
+      candidate.candidate_sha,
+    );
+    if (tree !== candidate.tree_sha)
+      throw new Error("Candidate tree does not match the checked tree");
+    const result = await this.central.publishMerge(
       project,
+      completion,
       candidate.candidate_sha,
       candidate.previous_sha,
     );
+    return result.status === "merged" ? { ...result, tree_sha: tree } : result;
   }
   async distribute(project: CentralProject): Promise<void> {
     const execution = this.options.execution ?? {

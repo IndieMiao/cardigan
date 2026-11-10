@@ -18,9 +18,11 @@ import { join } from "node:path";
 import {
   completeHumanAction,
   latestMergeCheck,
+  prepareMergePlan,
   requestHumanAction,
   setProjectPreferences,
 } from "@cardigan/domain";
+
 import {
   type CentralProject,
   CentralRepositoryService,
@@ -565,5 +567,93 @@ test("stopping the long-lived loop cancels a real check and records interruption
   expect(readdirSync(join(f.dataDir, "agent", "checks", f.project_id))).toEqual(
     [],
   );
+  expect(c.errors).toEqual([]);
+});
+
+test("the host refuses a forged checked tree before publishing any candidate", async () => {
+  const scenario = m4Scenario(f, "auto");
+  const sha = agentCommit("agent/C-1/W-1", "feature.txt", "new tree\n");
+  const { product } = await acceptThroughMergeGate(f, scenario, sha);
+  await pin(product.id, sha);
+  const c = await gated(),
+    plan = unwrap(prepareMergePlan(f.state(), scenario.card.id));
+  const candidate = await c.binding.prepare(project, plan);
+  if (candidate.status !== "candidate") throw new Error("Missing candidate");
+  const repository = await central.ensureCentral(project);
+  const realTree = git(
+    repository,
+    "rev-parse",
+    `${candidate.candidate_sha}^{tree}`,
+  );
+  expect(candidate.tree_sha).toBe(realTree);
+  const forgedTree = git(repository, "rev-parse", `${repos.base}^{tree}`);
+  expect(forgedTree).not.toBe(realTree);
+  await expect(
+    c.binding.publish(project, plan.completion_id, {
+      ...candidate,
+      tree_sha: forgedTree,
+    }),
+  ).rejects.toThrow(/tree does not match/);
+  expect(await baseline()).toBe(repos.base);
+  await expect(
+    c.binding.publish(project, plan.completion_id, candidate),
+  ).resolves.toMatchObject({ status: "merged", tree_sha: realTree });
+});
+
+test("a real Git-verified noop skips checks but still waits for the completion's human confirmation", async () => {
+  const scenario = m4Scenario(f, "confirm");
+  const sha = agentCommit(
+    "agent/C-1/W-1",
+    "feature.txt",
+    "already incorporated\n",
+  );
+  const { product, completion } = await acceptThroughMergeGate(
+    f,
+    scenario,
+    sha,
+  );
+  await pin(product.id, sha);
+  const plan = unwrap(prepareMergePlan(f.state(), scenario.card.id));
+  // Simulate the central publication surviving a controller crash before its
+  // domain result. No domain rows or flags are patched to manufacture noop.
+  const incorporated = await central.mergeIntoBase(project, plan);
+  if (incorporated.status !== "merged") throw new Error("Missing merge");
+  const c = await gated("exit 99");
+  const prepared = await c.binding.prepare(project, plan);
+  expect(prepared).toEqual({
+    status: "noop",
+    branch_sha: incorporated.merge_sha,
+  });
+  const repository = await central.ensureCentral(project);
+  for (const delivery of plan.deliveries)
+    expect(
+      git(
+        repository,
+        "merge-base",
+        "--is-ancestor",
+        delivery.sha,
+        incorporated.merge_sha,
+      ),
+    ).toBe("");
+  await new MergeExecutor(c.options).tick();
+  expect(f.card().status).toBe("awaiting_merge");
+  expect(await c.cli("merge", "confirm", scenario.card.id)).toBe(0);
+  await new MergeExecutor(c.options).tick();
+  expect(f.card().status).toBe("done");
+  expect(await baseline()).toBe(incorporated.merge_sha);
+  expect(
+    latestMergeCheck(f.state().events, scenario.card.id, completion.id),
+  ).toBeUndefined();
+  expect(
+    f.state().events.find((e) => e.type === "card_merged")?.payload,
+  ).toMatchObject({
+    completion_id: completion.id,
+    result: {
+      kind: "merged",
+      noop: true,
+      merge_sha: incorporated.merge_sha,
+      previous_sha: incorporated.merge_sha,
+    },
+  });
   expect(c.errors).toEqual([]);
 });
