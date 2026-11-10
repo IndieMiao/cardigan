@@ -15,6 +15,7 @@ import {
   PM_ACCEPTANCE_WORK_ITEM_KEY,
 } from "@cardigan/domain";
 import {
+  payloadObject,
   payloadString,
   payloadStrings,
   type Recipient,
@@ -98,7 +99,10 @@ function note(
   kind: RoutedNotification["kind"],
   rule: RuleId,
   summary: string,
-  extra: { work_item_id?: WorkItemId; run_kind?: "fix" } = {},
+  extra: {
+    work_item_id?: WorkItemId;
+    run_kind?: RoutedNotification["run_kind"];
+  } = {},
 ): void {
   // Never notify an Assignment about its own action (§6.4).
   if (
@@ -146,6 +150,7 @@ function noteAssignment(
   kind: RoutedNotification["kind"],
   rule: RuleId,
   summary: string,
+  run_kind?: RoutedNotification["run_kind"],
 ): void {
   const assignment = assignmentOf(input, item?.assignment_id);
   if (item === undefined || assignment === undefined || !isActive(assignment)) {
@@ -155,6 +160,7 @@ function noteAssignment(
   }
   note(input, draft, recipient.assignment(assignment.id), kind, rule, summary, {
     work_item_id: item.id,
+    ...(run_kind ? { run_kind } : {}),
   });
 }
 
@@ -609,7 +615,42 @@ function routeReview(input: RouteInput, draft: Draft): void {
     return;
   }
 
-  if (verdict === "conditional") return;
+  if (verdict === "conditional") {
+    const payload = payloadObject(input.event.payload);
+    const review = reviews.find((r) => r.id === payload.review_id);
+    const recheck = payload.recheck_required ?? review?.recheck_required;
+    if (recheck === false) {
+      draft.checks.push({
+        rule: "6.4/review passed",
+        card_id: input.event.card_id,
+        detail: "check whether every delivery passed and the card is done",
+      });
+      note(
+        input,
+        draft,
+        recipient.pm_ops(),
+        "review",
+        "6.4/review conditional",
+        `${delivery_id ?? "the delivery"} passed conditionally; no recheck is needed`,
+      );
+      return;
+    }
+    // The final non-pass round is handled by the blocking review-limit Decision.
+    if (payload.rework_allowed === false) return;
+    const delivery = input.snapshot.deliveries.find(
+      (candidate) => candidate.id === delivery_id,
+    );
+    noteAssignment(
+      input,
+      draft,
+      itemOf(input, delivery?.work_item_id),
+      "review",
+      "6.4/review conditional",
+      `${delivery_id ?? "the delivery"} needs its review conditions addressed and rechecked`,
+      "rework",
+    );
+    return;
+  }
 
   // §6.4: a rejection produces a rework Run for the delivery's Assignment.
   const delivery = input.snapshot.deliveries.find(

@@ -928,7 +928,7 @@ test("K2 cannot supersede an unfinished card", async () => {
   expect(snapshot()).toBe(before);
 });
 
-test("human comments parse Chinese and spaced employee names on the server", async () => {
+test("Workbench body mentions use the shared parser for IDs, roles and employee names", async () => {
   s.store().uow.run((tx) =>
     tx.employees.put({
       id: "E-1",
@@ -944,14 +944,19 @@ test("human comments parse Chinese and spaced employee names on the server", asy
     }),
   );
   const response = await request(cardPath("comments"), {
-    body: "请 @诸葛亮　mARY 检查",
+    body: `请 @${s.primary.owner.id}、@${s.primary.owner.work_item_id}、@coder 和 @诸葛亮　mARY 检查`,
     mentions: [],
   });
   expect(response).toMatchObject({
     status: 200,
     body: {
       author: "human",
-      mentions: ["@诸葛亮 Mary"],
+      mentions: [
+        `@${s.primary.owner.id}`,
+        `@${s.primary.owner.work_item_id}`,
+        "@coder",
+        "@诸葛亮 Mary",
+      ],
     },
   });
 });
