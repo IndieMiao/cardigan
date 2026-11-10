@@ -12,6 +12,7 @@ import type {
 import type { CardId } from "../ids.js";
 import { requesterNotificationRecipient } from "../notification.js";
 import type { Clock } from "../ports.js";
+import { reviewLimitAttention } from "../review-limit-attention.js";
 import { type CommandDraft, type CommandState, command } from "./core.js";
 import { decisionFollowupNeedsHuman } from "./decision-followup.js";
 import { isPmOps } from "./delegation.js";
@@ -232,6 +233,7 @@ export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
     const now = clock?.now();
     const why = (text: string) => [...text].slice(0, 40).join("");
     return {
+      attention: now ? reviewLimitAttention(state, now) : [],
       ...(isPmOps(d)
         ? {
             pm_queue: {
