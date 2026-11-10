@@ -641,3 +641,65 @@ test.each(["decision", "clarification", "completion"] as const)(
     expect(operation.mock.calls[2]?.at(-1)).not.toBe(firstKey);
   },
 );
+
+test("a paused review-limit decision keeps only raise_limit and explains its automatic effect", async () => {
+  const decision = q({
+    trigger: "review_limit",
+    status: "provisional",
+    options: [
+      { key: "pause", description: "暂停", impact: "保留阻塞" },
+      { key: "raise_limit", description: "旧版说明", impact: "旧版后果" },
+    ],
+    recommended: "pause",
+  });
+  const recordDecision = vi.fn(async () => undefined);
+  render(
+    <NeedsYouPage
+      projectId="p-1"
+      client={fakeClient({
+        needsYou: async () => page([decision]),
+        recordDecision,
+      })}
+    />,
+  );
+  const article = within(
+    await screen.findByRole("article", { name: "拍板 q(1)" }),
+  );
+  expect(article.getByText("已暂停（临时决定）")).toBeTruthy();
+  expect(article.getAllByRole("radio")).toHaveLength(1);
+  expect(article.getAllByRole("button")).toHaveLength(1);
+  expect(article.getByText(/审核上限加 1；没有其他阻塞/u)).toBeTruthy();
+  fireEvent.click(article.getByRole("button", { name: /raise_limit/u }));
+  await waitFor(() =>
+    expect(recordDecision).toHaveBeenCalledWith(
+      "p-1",
+      "q(1)",
+      "raise_limit",
+      "",
+      expect.any(String),
+    ),
+  );
+});
+
+test("merge confirmation shows due time and a decreasing countdown", async () => {
+  vi.useFakeTimers();
+  const data = page([
+    merge({
+      auto_merge: { minutes: 10, due_at: "2026-01-01T00:10:00.000Z" },
+      waited_ms: 120000,
+    }),
+  ]);
+  render(
+    <NeedsYouPage
+      client={fakeClient()}
+      projectId="p-1"
+      resource={{ data, pending: false, error: undefined, reload: () => {} }}
+    />,
+  );
+  expect(screen.getByText(/自动合并（偏好设置：10 分钟）/)).toBeTruthy();
+  expect(screen.getByText(/剩余 8 分钟/)).toBeTruthy();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(60000);
+  });
+  expect(screen.getByText(/剩余 7 分钟/)).toBeTruthy();
+});

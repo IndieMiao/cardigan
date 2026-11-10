@@ -9,7 +9,7 @@ import {
 import { recordDecision } from "./coordination.js";
 import type { CommandState } from "./core.js";
 import { prepareDelivery, submitDelivery, submitReview } from "./delivery.js";
-import { createCard } from "./pm.js";
+import { assign, createCard } from "./pm.js";
 import { manageCardTemplate, markCardDone } from "./templates.js";
 import {
   actor,
@@ -42,6 +42,110 @@ const params = {
 };
 const create = (state: CommandState, template_id = "general") =>
   createCard(state, human, { ...params, template_id }, ports());
+
+test("legacy roles with empty capabilities can create dev cards and be assigned without gaining tools", () => {
+  const clock = ports();
+  let state: CommandState = {
+    ...initial(),
+    roles: ["coder", "reviewer", "pm"].map((role_id) => ({
+      ...role(role_id),
+      capabilities: [],
+      // Old roles may only have the tools needed by their original workflow.
+      allowed_tools: ["whoami"],
+    })),
+  };
+  const created = value(
+    createCard(
+      state,
+      human,
+      { ...params, repo: "fixture/repo", base_branch: "main" },
+      clock,
+    ),
+  );
+  state = apply(state, created);
+  expect(state.work_items.map((w) => [w.role_id, w.kind])).toEqual([
+    ["coder", "produce"],
+    ["reviewer", "verify"],
+    ["pm", "verify"],
+  ]);
+  for (const item of state.work_items) {
+    const assigned = value(
+      assign(
+        state,
+        human,
+        { work_item_id: item.id, role_id: item.role_id },
+        clock,
+      ),
+    );
+    expect(assigned.data).toMatchObject({
+      role_id: item.role_id,
+      role_version: 1,
+    });
+    expect(assigned.token_requests[0]?.allowed_tools).toEqual(["whoami"]);
+    state = apply(state, assigned);
+  }
+  expect(state.assignments).toHaveLength(3);
+  const copied = value(
+    manageCardTemplate(
+      state,
+      human,
+      { action: "copy", template_id: "dev", new_id: "legacy-dev" },
+      clock,
+    ),
+  );
+  state = apply(state, copied);
+  state = apply(
+    state,
+    value(
+      manageCardTemplate(
+        state,
+        human,
+        { action: "deactivate", template_id: "legacy-dev" },
+        clock,
+      ),
+    ),
+  );
+  expect(
+    manageCardTemplate(
+      state,
+      human,
+      { action: "activate", template_id: "legacy-dev" },
+      clock,
+    ).ok,
+  ).toBe(true);
+});
+
+test.each(["coder", "reviewer", "pm"])(
+  "dev creation still rejects missing, inactive or explicitly restricted %s roles atomically",
+  (role_id) => {
+    const base = initial();
+    for (const roles of [
+      base.roles.filter((r) => r.role_id !== role_id),
+      [
+        ...base.roles,
+        {
+          ...role(role_id),
+          role_version: 2,
+          capabilities: [],
+          status: "inactive" as const,
+        },
+      ],
+      [...base.roles, { ...role(role_id), role_version: 2, allowed_tools: [] }],
+    ]) {
+      const state = { ...base, roles },
+        before = JSON.parse(JSON.stringify(state));
+      expect(
+        createCard(
+          state,
+          human,
+          { ...params, repo: "fixture/repo", base_branch: "main" },
+          ports(),
+        ),
+      ).toMatchObject({ ok: false, error: { code: "validation_failed" } });
+      expect(state).toEqual(before);
+    }
+  },
+);
 
 describe("template validation contracts", () => {
   test.each<[string, Partial<CardTemplateDefinition>]>([

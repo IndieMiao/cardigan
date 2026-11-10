@@ -47,12 +47,62 @@ test("U6a board columns stay in one row inside a horizontally scrollable strip",
   expect(board).toContain("scrollbar-width: thin;");
   expect(styles).toContain(".board::-webkit-scrollbar {");
   expect(rule(".board-column")).toContain("flex: 0 0 280px;");
+  expect(rule(".board-column")).toContain("min-width: 280px;");
   const collapsed = rule(".board-column-collapsed");
   expect(collapsed).toContain("flex: 0 0 48px;");
   expect(collapsed).toContain("min-width: 48px;");
   expect(rule(".board-scroll")).toContain("min-width: 0;");
   // The page itself never scrolls sideways: the strip cannot widen the content.
   expect(rule(".content")).toContain("min-width: 0;");
+});
+
+test("lanes constrain card height and keep headings outside independent vertical scroll roots", () => {
+  expect(rule(".cards-page-board")).toContain("100dvh");
+  expect(rule(".cards-page-board")).toContain("flex-direction: column;");
+  expect(rule(".board-scroll")).toContain("flex: 1;");
+  expect(rule(".board")).toContain("height: 100%;");
+  expect(rule(".board-column")).toContain("height: 100%;");
+  expect(rule(".board-column")).toContain("min-height: 0;");
+  expect(rule(".board-lane-cards")).toContain("overflow-y: auto;");
+  expect(rule(".board-lane-cards")).toContain("min-height: 0;");
+  expect(rule(".board-column-title")).toContain("flex-shrink: 0;");
+});
+
+test("narrow screens release the sidebar width and let filters wrap inside the page", () => {
+  const mobile = styles.slice(styles.indexOf("@media (max-width: 760px)"));
+  expect(mobile).toContain("grid-template-columns: minmax(0, 1fr);");
+  expect(mobile).toContain("position: static;");
+  expect(mobile).toContain("grid-column: 1;");
+  expect(rule(".cards-page .filter-bar .filter-controls")).toContain(
+    "flex-wrap: wrap;",
+  );
+  expect(rule(".board")).toContain("max-width: 100%;");
+  expect(rule(".board-scroll")).toContain("width: 100%;");
+});
+
+test("Shift+wheel reaches the right end on a phone-width board without hijacking ordinary or horizontal wheel events", () => {
+  renderBoard();
+  const strip = screen.getByRole("region", { name: "看板" });
+  Object.defineProperties(strip, {
+    scrollWidth: { configurable: true, value: 1800 },
+    clientWidth: { configurable: true, value: 320 },
+  });
+  const lane = screen.getByRole("region", { name: "进行中卡片" });
+  expect(fireEvent.wheel(lane, { deltaY: 300, cancelable: true })).toBe(true);
+  expect(strip.scrollLeft).toBe(0);
+  expect(
+    fireEvent.wheel(lane, { shiftKey: true, deltaY: 5000, cancelable: true }),
+  ).toBe(false);
+  expect(strip.scrollLeft).toBe(1480);
+  expect(document.querySelector(".board-fade")).toBeNull();
+  expect(
+    fireEvent.wheel(lane, { shiftKey: true, deltaX: -100, cancelable: true }),
+  ).toBe(true);
+  fireEvent.wheel(lane, { shiftKey: true, deltaY: -1, deltaMode: 2 });
+  expect(strip.scrollLeft).toBe(1160);
+  expect(document.querySelector(".board-fade")).toBeTruthy();
+  fireEvent.wheel(lane, { shiftKey: true, deltaY: -5000 });
+  expect(strip.scrollLeft).toBe(0);
 });
 
 test("U6a every status column renders as one child of the single board strip", () => {

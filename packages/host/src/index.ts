@@ -53,5 +53,6 @@ export {
   reviewTargetSha,
   type WorktreeProvider,
   type WorktreeRequest,
+  worktreeBaselinePrompt,
   worktreeProvider,
 } from "./worktree.js";

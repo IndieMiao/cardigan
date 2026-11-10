@@ -18,7 +18,7 @@ import {
   type RuntimeRef,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
-import { Store, writeRole } from "@cardigan/store";
+import { getRoleVersion, Store, writeRole } from "@cardigan/store";
 
 export function dispatchFixture() {
   const dataDir = mkdtempSync(join(tmpdir(), "cg-dispatch-"));
@@ -27,7 +27,7 @@ export function dispatchFixture() {
     project = "p-dispatch" as never;
   const store = Store.open({ dataDir, clock });
   store.createProject({ id: project, name: "Dispatcher" });
-  store.uow.run((tx) =>
+  const { role: coderRole } = store.uow.run((tx) =>
     writeRole(
       tx,
       project,
@@ -56,6 +56,25 @@ export function dispatchFixture() {
       { mode: "add" },
     ),
   );
+  function ensureVerifier(role_id: "pm" | "reviewer") {
+    store.uow.run((tx) => {
+      if (getRoleVersion(tx, project, role_id)) return;
+      writeRole(
+        tx,
+        project,
+        {
+          ...coderRole,
+          role_id,
+          display_name: role_id,
+          kind: role_id === "pm" ? "standing" : "work",
+          allowed_tools: ["submit_review", "finish_run"],
+          capabilities: [],
+        },
+        { mode: "add" },
+      );
+    });
+  }
+  ensureVerifier("reviewer");
   function apply<T>(
     reduce: (
       state: CommandState,
@@ -73,15 +92,7 @@ export function dispatchFixture() {
     });
   }
   function create() {
-    store.uow.run((tx) => {
-      for (const role_id of ["pm", "reviewer"])
-        tx.roles.put(project, {
-          role_id,
-          role_version: 1,
-          allowed_tools: ["submit_review"],
-          capabilities: [],
-        });
-    });
+    ensureVerifier("pm");
     const card = apply((s, a, p) =>
       createCard(
         s,

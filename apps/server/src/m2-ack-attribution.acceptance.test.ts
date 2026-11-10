@@ -161,6 +161,16 @@ describe("an Assignment may only acknowledge its own Run", () => {
     ).toBe(0);
     expect(
       await cardigan([
+        "role",
+        "add",
+        project_id,
+        "reviewer",
+        "--allowed-tools",
+        "submit_review",
+      ]),
+    ).toBe(0);
+    expect(
+      await cardigan([
         "card",
         "create",
         "--template",

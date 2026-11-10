@@ -1,6 +1,7 @@
 export * from "./author-view.js";
 export * from "./card-derived.js";
 export * from "./commands/attachments.js";
+export * from "./commands/auto-merge.js";
 export * from "./commands/coordination.js";
 export type {
   CommandEffect,
@@ -15,6 +16,7 @@ export * from "./commands/launch.js";
 export { type MergePlan, mergePlan, requestMerge } from "./commands/merge.js";
 export * from "./commands/merge-result.js";
 export * from "./commands/pm.js";
+export * from "./commands/preferences.js";
 export * from "./commands/queries.js";
 export * from "./commands/release.js";
 export * from "./commands/role.js";
@@ -30,6 +32,7 @@ export * from "./git-port.js";
 export * from "./ids.js";
 export * from "./notification.js";
 export * from "./ports.js";
+export * from "./preferences.js";
 export { type ResolvedReference, resolveReferences } from "./references.js";
 export * from "./role.js";
 export * from "./role-prompt.js";

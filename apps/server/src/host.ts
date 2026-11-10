@@ -13,7 +13,8 @@ import type {
 import {
   agentCliVersion,
   harnessBinary,
-  prepareReadonlyWorktree,
+  prepareRoleWorktree,
+  worktreeBaselinePrompt,
 } from "@cardigan/host";
 import {
   type LaunchConfig,
@@ -140,11 +141,12 @@ export async function createHostWiring(options: {
   return {
     runtime,
     beforeWake: async ({ project, assignment }) => {
-      await prepareReadonlyWorktree(
+      const worktree = await prepareRoleWorktree(
         { store: options.store, execution, runtime },
         project,
         assignment.id,
       );
+      return worktreeBaselinePrompt(worktree);
     },
     standing: standingResolver(options.store),
     snapshot: async (assignment, project) => {

@@ -147,6 +147,58 @@ test("invariant 4: dispatch refuses another Assignment's occupied worktree", () 
   reject(dispatch(r), "invariant_violation");
 });
 
+test.each(["queued", "dispatched", "acked", "running", "unknown"] as const)(
+  "explicit start reuses only queued work, preserving exclusivity (%s)",
+  (status) => {
+    const run = commit(queue());
+    f.state = { ...f.state, runs: [{ ...run, status }] };
+    const result = queueRun(
+      f.state,
+      human,
+      {
+        assignment_id: f.coder.id,
+        reuse_queued: true,
+        model: "replacement-model",
+        agent_cli_version: "replacement-cli",
+      },
+      f.io,
+    );
+    if (status !== "queued") reject(result, "invariant_violation");
+    else {
+      const effect = value(result);
+      expect(effect.data).toEqual(run);
+      expect(effect.events).toEqual([]);
+      expect(apply(f.state, effect)).toEqual(f.state);
+    }
+  },
+);
+
+test("reusing queued work still rejects another Run occupying the same worktree", () => {
+  commit(dispatch(commit(queue())));
+  const queued = commit(queue(f.reviewer));
+  f.state = {
+    ...f.state,
+    assignments: f.state.assignments.map((a) => ({
+      ...a,
+      worktree_path: "/fixture/worktree",
+    })),
+  };
+  reject(
+    queueRun(
+      f.state,
+      human,
+      {
+        assignment_id: queued.assignment_id,
+        reuse_queued: true,
+        model: "m",
+        agent_cli_version: "v",
+      },
+      f.io,
+    ),
+    "invariant_violation",
+  );
+});
+
 test.each([
   "suspended",
   "released",
@@ -331,7 +383,7 @@ test("invariant 5: dispatch validates runtime transitions and keeps the worktree
   commit(dispatch(next));
   expect(f.state.assignments.find((a) => a.id === f.coder.id)).toMatchObject({
     session_ref: "session-1",
-    worktree_path: ref.worktree_path,
+    worktree_path: "/fixture/worktree",
     branch: ref.branch,
   });
 });

@@ -10,6 +10,11 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  completeHumanAction,
+  requestHumanAction,
+  setProjectPreferences,
+} from "@cardigan/domain";
+import {
   type CentralProject,
   CentralRepositoryService,
 } from "@cardigan/git-service";
@@ -24,6 +29,7 @@ import {
   mergeConfirmation,
 } from "./m4-fixtures.js";
 import { MergeExecutor } from "./merge-loop.js";
+import { cardDetail, needsYou } from "./web/read.js";
 
 const git = (cwd: string, ...args: string[]) =>
   execFileSync(
@@ -314,4 +320,77 @@ test("a delivery whose pinned ref does not match is reported, not merged", async
   expect(
     f.state().events.filter((event) => event.type === "merge_failed"),
   ).toHaveLength(1);
+});
+
+test("timeout preference delegates once then merges through the existing Git executor", async () => {
+  const scenario = m4Scenario(f, "confirm");
+  const sha = agentCommit("agent/C-1/W-1", "timeout.txt", "timeout feature\n");
+  const { product } = await acceptThroughMergeGate(f, scenario, sha);
+  await pin(product.id, sha);
+  const start = Date.parse(f.clock.now());
+  let time = start + 10 * 60_000 - 1;
+  const loop = () =>
+    new MergeExecutor({
+      store: f.store,
+      git: new ServerGit({ store: f.store, dataDir: f.dataDir }),
+      clock: { now: () => new Date(time).toISOString() },
+    });
+  await loop().tick();
+  expect(f.card().status).toBe("awaiting_merge");
+  f.apply((s, a, p) =>
+    setProjectPreferences(s, a, { auto_merge_after_minutes: 10 }, p),
+  );
+  expect(needsYou(f.state(), f.clock.now()).decisions[0]?.auto_merge).toEqual({
+    minutes: 10,
+    due_at: new Date(start + 10 * 60_000).toISOString(),
+  });
+  expect(
+    cardDetail(f.state(), scenario.card.id)?.decisions[0]?.auto_merge?.minutes,
+  ).toBe(10);
+  await loop().tick();
+  expect(f.card().status).toBe("awaiting_merge");
+  const action = f.apply((s, a, p) =>
+    requestHumanAction(
+      s,
+      a,
+      {
+        card_id: scenario.card.id,
+        instructions: "Confirm access",
+        why_human: "Manual",
+        expected_return: "Done",
+        blocked_work_items: [],
+      },
+      p,
+    ),
+  );
+  time++;
+  await loop().tick();
+  expect(f.state().decisions[0]?.status).toBe("open");
+  expect(
+    needsYou(f.state(), f.clock.now()).decisions[0]?.auto_merge,
+  ).toBeNull();
+  f.apply((s, a, p) =>
+    completeHumanAction(s, a, { human_action_id: action.id, text: "Done" }, p),
+  );
+  await loop().tick();
+  expect(f.card().status).toBe("done");
+  expect(await baseline()).not.toBe(repos.base);
+  expect(f.state().decisions[0]?.resolution).toMatchObject({
+    via: "delegated",
+    resolved_by: "system",
+    option: "merge",
+  });
+  expect(
+    cardDetail(f.state(), scenario.card.id)?.timeline.some(
+      (e) =>
+        e.decision_via === "delegated" && e.body.includes("自动合并（代批）"),
+    ),
+  ).toBe(true);
+  await loop().tick();
+  expect(
+    f.state().events.filter((e) => e.type === "decision_resolved"),
+  ).toHaveLength(1);
+  expect(f.state().events.filter((e) => e.type === "card_merged")).toHaveLength(
+    1,
+  );
 });

@@ -338,7 +338,7 @@ export interface DecisionResolution {
   readonly option: string;
   readonly rationale: string;
   readonly resolved_by: Author;
-  readonly via: "needs_you" | "pm_office_chat" | "external";
+  readonly via: "needs_you" | "pm_office_chat" | "external" | "delegated";
   readonly raw_quote: string;
   readonly via_chain: readonly Author[];
   readonly external_ref?: string;

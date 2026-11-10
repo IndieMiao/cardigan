@@ -189,6 +189,19 @@ async function seedProject(
       ])
     ).code,
   ).toBe(0);
+  for (const role of ["reviewer", "pm"])
+    expect(
+      (
+        await cardigan([
+          "role",
+          "add",
+          project,
+          role,
+          "--allowed-tools",
+          "submit_review",
+        ])
+      ).code,
+    ).toBe(0);
   expect(
     (
       await cardigan([

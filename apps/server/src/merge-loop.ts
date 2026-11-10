@@ -11,7 +11,11 @@ import type {
   ProjectId,
   Result,
 } from "@cardigan/domain";
-import { mergePlan, recordMergeResult } from "@cardigan/domain";
+import {
+  autoConfirmMerge,
+  mergePlan,
+  recordMergeResult,
+} from "@cardigan/domain";
 import type { CentralProject, MergeOutcome } from "@cardigan/git-service";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
@@ -194,7 +198,23 @@ export class MergeExecutor {
           .sort((a, b) => Number(a.id.slice(2)) - Number(b.id.slice(2)))[0];
       if (card === undefined) return;
       attempted.add(card.id);
-      const plan = mergePlan(state, card.id);
+      for (const decision of state.decisions.filter(
+        (q) =>
+          q.card_id === card.id &&
+          q.trigger === "merge_confirmation" &&
+          q.status === "open",
+      )) {
+        // Every attempt rechecks preferences and blockers in the write transaction.
+        // Ineligible or not-yet-due confirmations simply wait for a later tick.
+        runSystemCommand(
+          this.options.store,
+          project_id,
+          (s, a, ports) =>
+            autoConfirmMerge(s, a, { decision_id: decision.id }, ports),
+          this.clock,
+        );
+      }
+      const plan = mergePlan(this.state(project_id), card.id);
       if (!plan.ok) continue;
       if (!(await this.merge(project, plan.value))) return;
     }

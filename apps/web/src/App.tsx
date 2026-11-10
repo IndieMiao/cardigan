@@ -16,6 +16,7 @@ import { CardListPage } from "./views/CardListPage.js";
 import { ExecutionPage } from "./views/ExecutionPage.js";
 import { LoginPage } from "./views/LoginPage.js";
 import { NeedsYouPage } from "./views/NeedsYouPage.js";
+import { SettingsPage } from "./views/SettingsPage.js";
 import { SnapshotPage } from "./views/SnapshotPage.js";
 
 /**
@@ -236,6 +237,7 @@ function Workbench({
                     ["snapshot", "项目快照"],
                   ],
                 ],
+                ["项目", [["settings", "设置"]]],
               ] as const
             ).map(([group, links]) => (
               <div className="nav-group" key={group}>
@@ -301,6 +303,14 @@ function Workbench({
           <div className="error-panel" role="alert">
             <p>无法识别链接 {invalidHash}；请从项目导航重新进入。</p>
           </div>
+        )}
+        {selected && route?.kind === "settings" && (
+          <SettingsPage
+            key={selected.id}
+            client={client}
+            projectId={selected.id}
+            revision={live.revision}
+          />
         )}
         {selected && route?.kind === "activity" && (
           <ActivityPage

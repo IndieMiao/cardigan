@@ -96,6 +96,8 @@ function snapshot(run: Run, a: Assignment) {
 export type RunKind = Run["kind"];
 
 export interface QueueRunParams {
+  /** Explicit host start may consume the Assignment's already queued work. */
+  readonly reuse_queued?: boolean;
   /** Explicit human start after a standing PM pause; never set by Dispatcher. */
   readonly resume?: boolean;
   readonly assignment_id: AssignmentId;
@@ -121,6 +123,18 @@ export function queueRun(
   return command(state, actor, "queue_run", ports, (d) => {
     if (p.resume) resumeStanding(d, p.assignment_id);
     const assignment = target(d, p.assignment_id);
+    if (p.reuse_queued) {
+      const queued = d
+        .list("runs")
+        .find(
+          (r) => r.assignment_id === assignment.id && r.status === "queued",
+        );
+      if (queued) {
+        exclusive(d, assignment, queued.id);
+        snapshot(queued, assignment);
+        return queued;
+      }
+    }
     text(p.model, "model");
     text(p.agent_cli_version, "agent_cli_version");
     if (p.launch_profile_ref !== undefined)
