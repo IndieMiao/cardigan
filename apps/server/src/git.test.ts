@@ -17,8 +17,14 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Assignment, Card, Role, WorkItem } from "@cardigan/domain";
 import { CentralRepositoryService } from "@cardigan/git-service";
 import { CentralGitTransport } from "@cardigan/git-transport";
+import {
+  acquireRepositoryFlock,
+  repositoryLockPath,
+  worktreeProvider,
+} from "@cardigan/host";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { ServerGit } from "./git.js";
@@ -319,3 +325,89 @@ test("merge candidates are pushed from the center through the Agent receive-pack
     repository,
   ]);
 });
+
+test.runIf(process.platform === "linux")(
+  "candidate distribution waits for the project's base-clone lock and runs alongside wakes",
+  async () => {
+    const local = { mode: "local", dataDir } as const;
+    const binding = new ServerGit({
+      store: f.store,
+      dataDir,
+      execution: local,
+    });
+    const project = binding.projectOf(f.project_id);
+    if (!project) throw new Error("Missing project");
+    await binding.sync(project);
+    await binding.distribute(project);
+    const repository = join(dataDir, "agent", "repos", f.project_id);
+    writeFileSync(join(source, "NEXT.md"), "next\n");
+    git(source, "add", "NEXT.md");
+    git(source, "commit", "-qm", "next");
+    await binding.sync(project);
+    const next = git(source, "rev-parse", "HEAD");
+    // Another host process (a wake in the CLI or server) holds the lock.
+    const held = await acquireRepositoryFlock(
+      repositoryLockPath(dataDir, f.project_id),
+      1_000,
+    );
+    let done = false;
+    const distributing = binding.distribute(project).then(() => {
+      done = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(done).toBe(false);
+    expect(git(repository, "rev-parse", "refs/remotes/origin/main")).not.toBe(
+      next,
+    );
+    await held();
+    await distributing;
+    expect(git(repository, "rev-parse", "refs/remotes/origin/main")).toBe(next);
+    // Distribution and live-session wakes of one project interleave safely.
+    const role = { role_id: "coder", version: 1, worktree: "write" } as Role;
+    const card = {
+      id: "C-1",
+      project_id: f.project_id,
+      repo: "example/repo",
+      base_branch: "main",
+    } as Card;
+    const provide = worktreeProvider(
+      local,
+      {} as Parameters<typeof worktreeProvider>[1],
+    );
+    const wake = (n: number) =>
+      provide({
+        project_id: f.project_id,
+        source_repo: source,
+        assignment: {
+          id: `A-${n}`,
+          scope: "work_item",
+          work_item_id: `W-${n}`,
+          role_id: "coder",
+          role_version: 1,
+          status: "active",
+          machine_id: "local",
+          runtime_ref: null,
+        } as unknown as Assignment,
+        role,
+        card,
+        work_item: {
+          id: `W-${n}`,
+          card_id: "C-1",
+          assignment_id: `A-${n}`,
+        } as WorkItem,
+      });
+    const results = await Promise.all([
+      wake(1),
+      binding.distribute(project),
+      wake(2),
+      binding.distribute(project),
+      wake(3),
+    ]);
+    expect(
+      results
+        .filter(Boolean)
+        .map((r) => (r as { baseline?: { sha: string } }).baseline?.sha),
+    ).toEqual([next, next, next]);
+  },
+  60_000,
+);

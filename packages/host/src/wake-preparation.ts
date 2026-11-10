@@ -17,29 +17,54 @@ export interface PreparationFailure {
 }
 
 const LOCK_CONFLICT =
-  /\.lock'?:? File exists|cannot lock ref|Unable to create '[^']*\.lock'|could not lock|another git process seems to be running/iu;
+  /\.lock'?:? File exists|cannot lock ref|Unable to create '[^']*\.lock'|could not lock|failed to lock|another git process seems to be running|\.lock'?[:：]\s*文件已存在|无法锁定|另一个 git 进程/iu;
 const NETWORK =
-  /Could not resolve host|Connection (?:refused|reset|timed out|closed)|early EOF|remote end hung up|unable to access|RPC failed|Network is unreachable|ssh: connect to host|Broken pipe|Temporary failure in name resolution/iu;
+  /Could not resolve host|Connection (?:refused|reset|timed out|closed)|early EOF|remote end hung up|unable to access|RPC failed|Network is unreachable|ssh: connect to host|Broken pipe|Temporary failure in name resolution|远程意外挂断|无法访问/iu;
+
+const SECRET_KEY =
+  "[\\w.-]*(?:token|secret|password|passwd|pwd|api[_-]?key|private[_-]?key|authorization|auth|credential|cookie|header)[\\w.-]*";
+const SECRET_VALUE = `("(?:\\\\.|[^"\\\\])*"?|'(?:\\\\.|[^'\\\\])*'?|[^\\s,;&"']+)`;
+// key=value, key: value, "key":"value", key="quoted value", ?access_token=...
+const SECRET_PAIR = new RegExp(
+  `(${SECRET_KEY}["']?\\s*[:=]\\s*)${SECRET_VALUE}`,
+  "giu",
+);
+const SECRET_ENV = /token|secret|password|(?:api|private)_?key|auth/iu;
+
+/** Remove credentials from free text; used before anything is logged or stored. */
+export function redactSecrets(
+  text: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  let out = text;
+  // Exact values of secret-looking environment variables, longest first.
+  for (const value of Object.entries(env)
+    .filter(([key, value]) => SECRET_ENV.test(key) && (value?.length ?? 0) >= 6)
+    .map(([, value]) => value as string)
+    .sort((a, b) => b.length - a.length))
+    out = out.replaceAll(value, "***");
+  return out
+    .replace(
+      /-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-]*PRIVATE KEY-----|$)/gu,
+      "***",
+    )
+    .replace(/([a-z][a-z0-9+.-]*:\/\/)[^/@\s]+@/giu, "$1***@")
+    .replace(/\b(Bearer|Basic|token)\s+[^\s"',;]+/giu, "$1 ***")
+    .replace(SECRET_PAIR, "$1***")
+    .replace(
+      /\b(?:gh[pousr]_|github_pat_|glpat-|sk-|xox[abprs]-)[A-Za-z0-9_-]{8,}/gu,
+      "***",
+    );
+}
 
 /** Redact credentials and keep one bounded line; paths stay for diagnosis. */
 export function redactFailureLine(text: string): string {
   const line =
-    text
+    redactSecrets(text)
       .split(/\r?\n/u)
       .map((l) => l.trim())
       .find((l) => l.length > 0) ?? "";
-  return line
-    .replace(/([a-z][a-z0-9+.-]*:\/\/)[^/@\s]+@/giu, "$1***@")
-    .replace(/\b(Bearer|Basic)\s+\S+/giu, "$1 ***")
-    .replace(
-      /\b(token|password|passwd|secret|api[_-]?key|authorization)(\s*[=:]\s*)\S+/giu,
-      "$1$2***",
-    )
-    .replace(
-      /\b(?:gh[pousr]_|github_pat_|glpat-|sk-)[A-Za-z0-9_-]{8,}/gu,
-      "***",
-    )
-    .slice(0, 300);
+  return line.slice(0, 300);
 }
 
 /** Classify a worktree preparation error from its Git exit code and output. */
@@ -56,16 +81,22 @@ export function describePreparationFailure(error: unknown): PreparationFailure {
   // execFile puts the whole argv on the first message line; stderr says why.
   const text = [stderr, message].join("\n");
   const exit_code = typeof e.code === "number" ? e.code : undefined;
-  const line = redactFailureLine(
-    stderr.trim() ? stderr : message.replace(/^Command failed: [^\n]*\n?/u, ""),
-  );
+  // Never fall back to the argv line: it can carry `-c` options with secrets.
+  const withoutArgv = message.startsWith("Command failed:")
+    ? message.split(/\r?\n/u).slice(1).join("\n")
+    : message;
+  const line =
+    redactFailureLine(stderr.trim() ? stderr : withoutArgv) ||
+    (exit_code === undefined
+      ? "failed without diagnostic output"
+      : `git exited with ${exit_code} without diagnostic output`);
   const shape = (
     category: PreparationFailure["category"],
     retryable: boolean,
   ): PreparationFailure => ({
     category,
     ...(exit_code === undefined ? {} : { exit_code }),
-    message: line || redactFailureLine(message),
+    message: line,
     retryable,
   });
   if (e.code === "repository_lock_timeout")

@@ -15,6 +15,7 @@ import {
   LocalGitTransport,
 } from "@cardigan/git-transport";
 import {
+  agentCommandError,
   type ExecutionConfig,
   executionPaths,
   type HerdrRuntime,
@@ -102,10 +103,8 @@ export function worktreeProvider(
                   "agent-ssh worktree requires the Agent execution entry",
                 );
               const result = await runtime.captureAgent("git", args, timeout);
-              if (!result.ok)
-                throw new Error(
-                  `${result.error.code}: ${result.error.message}`,
-                );
+              // Keep Git's exit status and stderr for failure classification.
+              if (!result.ok) throw agentCommandError(result.error);
               return result.value;
             },
           );

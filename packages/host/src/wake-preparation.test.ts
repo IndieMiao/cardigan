@@ -1,11 +1,24 @@
-import { RepositoryLockTimeoutError } from "@cardigan/git-service";
+import { execFile } from "node:child_process";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
+import {
+  CentralRepositoryService,
+  RepositoryLockTimeoutError,
+} from "@cardigan/git-service";
+import { CentralGitTransport } from "@cardigan/git-transport";
+import { agentCommandError, processClient } from "@cardigan/runtime-herdr";
 import { expect, test, vi } from "vitest";
 import {
   describePreparationFailure,
   PreparationError,
   redactFailureLine,
+  redactSecrets,
   withPreparationRetry,
 } from "./wake-preparation.js";
+
+const exec = promisify(execFile);
 
 const gitError = (stderr: string, code = 128) =>
   Object.assign(
@@ -122,3 +135,144 @@ test("returns the first successful attempt", async () => {
   ).resolves.toBe("ready");
   expect(prepare).toHaveBeenCalledTimes(2);
 });
+
+test.each([
+  [
+    "fatal: unable to access https://example.invalid/repo?access_token=FAKE_REVIEW_SECRET",
+    "access_token=***",
+  ],
+  ['fatal: {"token":"FAKE_REVIEW_SECRET"}', '"token":***'],
+  ['fatal: password="FAKE FIRST SECOND" rest', "password=*** rest"],
+  ["fatal: password='FAKE FIRST' rest", "password=*** rest"],
+  [
+    "error: http.extraHeader=X-Custom:FAKE_REVIEW_SECRET rejected",
+    "http.extraHeader=*** rejected",
+  ],
+  ["Authorization: Bearer FAKE_REVIEW_SECRET", "Authorization: ***"],
+  ["remote: x-api-key: FAKE_REVIEW_SECRET", "x-api-key: ***"],
+  ["fatal: https://bot:FAKE_REVIEW_SECRET@git.example/x", "https://***@"],
+])("redacts %s", (input, kept) => {
+  const line = redactFailureLine(input);
+  expect(line).not.toContain("FAKE");
+  expect(line).not.toContain("SECOND");
+  expect(line).toContain(kept);
+});
+
+test("redacts values of secret-looking environment variables", () => {
+  expect(
+    redactSecrets("fatal: bad header abcdef123456", {
+      CARDIGAN_PUSH_TOKEN: "abcdef123456",
+    }),
+  ).toBe("fatal: bad header ***");
+});
+
+test("never falls back to the argv line when Git printed nothing", () => {
+  const failure = describePreparationFailure(
+    Object.assign(
+      new Error(
+        "Command failed: git -c http.extraHeader=X-Custom:FAKE_REVIEW_SECRET fetch",
+      ),
+      { code: 128, stderr: "" },
+    ),
+  );
+  expect(failure).toEqual({
+    category: "git_failed",
+    exit_code: 128,
+    message: "git exited with 128 without diagnostic output",
+    retryable: false,
+  });
+});
+
+test("an Agent Git lock error through the real hc client is classified and retried", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cardigan-hc-"));
+  try {
+    const hc = join(dir, "hc");
+    await writeFile(
+      hc,
+      `#!/bin/sh\necho "fatal: cannot lock ref 'refs/remotes/origin/main': File exists" >&2\nexit 128\n`,
+      { mode: 0o700 },
+    );
+    const client = processClient(hc, { PATH: "/usr/bin:/bin" }, dir, 5_000);
+    // The same conversion worktreeProvider applies to a failed captureAgent.
+    const run = async () => {
+      try {
+        return await client.exec(["exec", "--", "git", "fetch"]);
+      } catch (error) {
+        const e = error as { code: never; message: string; detail?: never };
+        throw agentCommandError({
+          code: e.code,
+          message: e.message,
+          ...(e.detail ? { detail: e.detail } : {}),
+        });
+      }
+    };
+    const sleep = vi.fn(async () => undefined);
+    await expect(withPreparationRetry(run, { sleep })).rejects.toMatchObject({
+      attempts: 4,
+      failure: {
+        category: "git_lock_conflict",
+        exit_code: 128,
+        message:
+          "fatal: cannot lock ref 'refs/remotes/origin/main': File exists",
+      },
+    });
+    expect(sleep).toHaveBeenCalledTimes(3);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a central Git failure keeps its exit status", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cardigan-central-"));
+  try {
+    const dataDir = join(dir, "data"),
+      source = join(dir, "source");
+    await mkdir(dataDir, { mode: 0o700 });
+    await exec("git", ["init", "-q", "-b", "main", source]);
+    await writeFile(join(source, "README.md"), "x\n");
+    await exec("git", ["-C", source, "add", "README.md"]);
+    await exec("git", [
+      "-C",
+      source,
+      "-c",
+      "user.name=F",
+      "-c",
+      "user.email=f@example.invalid",
+      "commit",
+      "-qm",
+      "init",
+    ]);
+    const transport = new CentralGitTransport({ dataDir });
+    const repository = await new CentralRepositoryService(transport, {
+      dataDir,
+    }).ensureCentral({
+      project_id: "p",
+      source_repo: source,
+      base_branch: "main",
+    });
+    const error = await transport
+      .fetchRefs(repository, source, ["refs/heads/missing:refs/x"])
+      .catch((e: unknown) => e);
+    expect(describePreparationFailure(error)).toMatchObject({
+      category: "git_failed",
+      exit_code: 128,
+      message: expect.stringContaining("couldn't find remote ref"),
+    });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test.each([
+  "fatal: 无法创建 '/data/agent/repos/p/.git/index.lock'：文件已存在。",
+  "error: 无法锁定引用 'refs/remotes/origin/main'",
+])(
+  "an Agent-side zh_CN Git lock message is still a lock conflict: %s",
+  (stderr) => {
+    expect(
+      describePreparationFailure(
+        Object.assign(new Error("x"), { code: 128, stderr }),
+      ),
+    ).toMatchObject({ category: "git_lock_conflict", retryable: true });
+  },
+);

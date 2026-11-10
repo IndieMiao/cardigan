@@ -85,6 +85,7 @@ export {
   type PreparationFailure,
   type PreparationRetryOptions,
   redactFailureLine,
+  redactSecrets,
   withPreparationRetry,
 } from "./wake-preparation.js";
 export {
