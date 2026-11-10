@@ -273,13 +273,7 @@ export function cardListViews(
 
 /** A card is "needs me" when the next actor is the human or something waits on them. */
 export function needsMe(card: CardView): boolean {
-  return (
-    card.next_owners.some((owner) => owner.kind === "human") ||
-    card.waiting_on.some(
-      (waiting) =>
-        waiting.kind === "decision" || waiting.kind === "human_action",
-    )
-  );
+  return card.next_owners.some((owner) => owner.kind === "human");
 }
 
 /** A card is "waiting on an agent" when a role or an assignment acts next. */
@@ -756,6 +750,12 @@ export function needsYou(
         state.decisions.find((d) => d.id === decision.id)?.raised_by ??
           "system",
       ),
+      ...(decision.followup_notice
+        ? {
+            followup_notice: decision.followup_notice,
+            resolution: decision.resolution,
+          }
+        : {}),
       kind: "decision" as const,
       id: decision.id,
       card_id: decision.card_id ?? null,
@@ -825,9 +825,22 @@ export function needsYou(
       kind: "human_action" as const,
       id: action.id,
       card_id: action.card_id ?? null,
-      instructions: action.instructions,
+      instructions: action.handoff?.instructions ?? action.instructions,
+      ...(action.handoff
+        ? {
+            handoff: action.handoff,
+            original_request: {
+              instructions: action.instructions,
+              why_human: action.why_human,
+              expected_return: action.expected_return,
+            },
+          }
+        : {}),
       why: clamp(action.why),
-      expected_return: action.expected_return,
+      expected_return:
+        action.handoff?.expected_return ?? action.expected_return,
+      triage: action.triage ?? "human",
+      triage_rationale: action.triage_rationale ?? null,
       blocked_work_items: action.blocked_work_items,
       ...(action.completion_notice !== undefined
         ? { completion_notice: action.completion_notice }

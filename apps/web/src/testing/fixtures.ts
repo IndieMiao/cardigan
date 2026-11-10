@@ -190,6 +190,8 @@ export function fakeClient(
       throw new Error("Missing template fixture");
     },
     markCardDone: async () => {},
+    setDelegation: async () => {},
+    decisionHistory: async () => ({ decisions: [] }),
     needsYou: async () => ({ decisions: [], human_actions: [], incidents: [] }),
     recordDecision: async () => undefined,
     recheckMerge: async () => undefined,

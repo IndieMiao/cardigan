@@ -507,6 +507,9 @@ for (const approval of ["open", "human", "delegated"] as const) {
       record(status);
       const pending = value(listNeedsYou(state(), human)).data.decisions;
       expect(pending.map((q) => q.id)).toContain(decision.id);
+      expect(
+        pending.find((q) => q.id === decision.id)?.followup_notice,
+      ).toBeUndefined();
       if (approval !== "open")
         expect(pending[0]?.options.map((o) => o.key)).toEqual([
           "request_changes",

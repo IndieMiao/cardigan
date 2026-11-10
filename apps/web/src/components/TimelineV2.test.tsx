@@ -386,3 +386,35 @@ test("merge timeline shows the deadline and distinguishes delegated from human c
   view.rerender(content({ ...resolved, author: "human" }));
   expect(screen.queryByText("自动合并（代批）")).toBeNull();
 });
+
+test("a PM delegated decision uses a shared status icon and remains distinct from automatic merge approval", () => {
+  const decision = {
+    id: "q(2)",
+    question: "选用哪个展示方式？",
+    status: "resolved",
+    decider: "pm",
+    blocking: false,
+    options: [{ key: "compact", description: "紧凑展示", impact: "减少留白" }],
+  };
+  render(
+    <TimelineContent
+      entry={timelineEntry({
+        type: "decision_resolved",
+        decision_id: decision.id,
+        decision_via: "delegated",
+        decision_option: "compact",
+        author: "assignment:A-4",
+      })}
+      detail={cardDetail({ decisions: [decision] })}
+      projectId="p-1"
+      cardId="C-1"
+    />,
+  );
+  expect(
+    screen
+      .getByText("已拍板（PM 代拍）")
+      .querySelector("svg.status-shape-success")
+      ?.getAttribute("aria-hidden"),
+  ).toBe("true");
+  expect(screen.queryByText("自动合并（代批）")).toBeNull();
+});

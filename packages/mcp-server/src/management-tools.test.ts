@@ -647,3 +647,123 @@ test("Agent comments discover full employee names without trusting the client's 
     store.uow.read((tx) => tx.timeline.get(project, comment.id))?.mentions,
   ).toEqual(comment.mentions);
 });
+
+test("category authorization uses PM Ops tools, rejects Office/high-risk bypasses, and replays once", async () => {
+  const opsAssignment = store.uow.run((tx): Assignment => {
+    const front = tx.assignments.list(project)[0];
+    if (!front) throw new Error("Missing Office");
+    const ops: Assignment = {
+      ...front,
+      id: tx.ids.next(project, "assignment"),
+      scope: "standing",
+      standing_mode: "ops",
+      mcp_token_id: "fixture-delegation-ops",
+    };
+    tx.assignments.put(project, ops);
+    return ops;
+  });
+  const ops = await connect(opsAssignment, true);
+  const question = {
+    card_id: card.id,
+    kind: "choose",
+    question: "如何继续",
+    context: "已确认可选方案",
+    options: [{ key: "go", description: "继续", impact: "推进工作" }],
+    recommended: "go",
+    affected_cards: [card.id],
+    affected_work_items: [],
+    blocking: false,
+    decider: "human",
+  };
+  expect((await raw(office, "request_decision", question)).isError).toBe(true);
+  const q = await ok<Decision>(office, "request_decision", {
+    ...question,
+    category: "feature_detail",
+  });
+  expect(q.decider).toBe("role:pm");
+  const p = {
+    decision_id: q.id,
+    option: "go",
+    rationale: "确认属于功能细节授权",
+  };
+  expect((await raw(office, "resolve_delegated_decision", p)).isError).toBe(
+    true,
+  );
+  const resolved = await ok<Decision>(
+    ops,
+    "resolve_delegated_decision",
+    p,
+    "delegation-answer",
+  );
+  expect(resolved.resolution).toMatchObject({
+    via: "delegated",
+    proxy_authority: expect.stringContaining("feature_detail"),
+    rationale: p.rationale,
+  });
+  expect(
+    await ok(ops, "resolve_delegated_decision", p, "delegation-answer"),
+  ).toEqual(resolved);
+  const agent = await coder();
+  for (const category of [
+    "spending",
+    "account",
+    "permission",
+    "data_deletion",
+  ]) {
+    const risk = await ok<Decision>(office, "request_decision", {
+      ...question,
+      category,
+    });
+    for (const client of [ops, office, agent]) {
+      expect(
+        (
+          await raw(client, "resolve_delegated_decision", {
+            ...p,
+            decision_id: risk.id,
+          })
+        ).isError,
+      ).toBe(true);
+      expect(
+        (
+          await raw(client, "record_decision", {
+            ...p,
+            decision_id: risk.id,
+            raw_quote: "同意",
+            actor: { kind: "human" },
+            human_confirmation: "workbench",
+          })
+        ).isError,
+      ).toBe(true);
+    }
+    expect(
+      store.uow.read((tx) => tx.decisions.get(project, risk.id))?.status,
+    ).toBe("open");
+  }
+  const action = await ok<HumanAction>(office, "request_human_action", {
+    card_id: card.id,
+    instructions: "同步代码",
+    why_human: "主机持有凭据",
+    expected_return: "SHA",
+    blocked_work_items: [],
+  });
+  expect(action.triage).toBe("pm_ops");
+  const triage = await ok<HumanAction>(ops, "triage_human_action", {
+    human_action_id: action.id,
+    disposition: "host",
+    rationale: "需要主机同步",
+    title: "请同步主机上的最新代码",
+    summary: "开发者正在等待项目的新基线。",
+    why_human: "同步凭据只在主机上，需要你操作。",
+    expected_outcome: "同步完成后开发者可继续修改。",
+    instructions: "请在主机同步当前项目基线",
+    expected_return: "回传最新 main SHA",
+  });
+  expect(triage).toMatchObject({
+    triage: "host",
+    instructions: "同步代码",
+    handoff: {
+      title: "请同步主机上的最新代码",
+      instructions: "请在主机同步当前项目基线",
+    },
+  });
+});

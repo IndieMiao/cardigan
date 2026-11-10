@@ -354,7 +354,7 @@ if(process.argv.includes('--version')) { console.log('pi acceptance-1'); process
       warn() {},
       log() {},
     });
-    const cli = (sub: string) =>
+    const cli = (sub: string, flags: string[] = []) =>
       exec(
         process.execPath,
         [
@@ -370,6 +370,7 @@ if(process.argv.includes('--version')) { console.log('pi acceptance-1'); process
           session,
           "--mcp-url",
           server.url,
+          ...flags,
         ],
         { env, timeout: 20000 },
       );
@@ -407,6 +408,8 @@ if(process.argv.includes('--version')) { console.log('pi acceptance-1'); process
       const entry = await cli("attach");
       expect(entry.stdout).toContain("attach");
       expect(entry.stdout).toContain(ref.terminal_ref);
+      expect(entry.stdout.trimEnd()).toMatch(/ --observe$/);
+      expect((await cli("attach", ["--print"])).stdout).toBe(entry.stdout);
       const terminal = JSON.parse(
         (await exec(hc as string, ["get", ref.terminal_ref, "--json"], { env }))
           .stdout,

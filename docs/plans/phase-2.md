@@ -119,11 +119,13 @@ V9、V10 是 Phase 3"PM 按任务创建、修改流程"的前提：先把角色�
 
 | 任务 | 内容 | 负责 |
 |---|---|---|
-| C-D11 常驻授权代拍板 | 书面授权记录（类别、期限、例外）；PM 按授权代批 `decider=human` 的拍板，标 `delegated`，你回来时汇总；花钱、账号、权限、删除数据四类永不代批 | Codex |
-| C-D12 高风险只在 Workbench 确认 | 上述四类拍板，PM 在对话里转述的 `record_decision` 不能解决 | Cardigan |
+| C-D11 常驻授权代拍板（C-37，提前） | 复用 C-36：流程 general、功能细节 feature_detail 默认由 PM Ops 先审；scope_change 默认交人，可在拍板时或设置页授权。代拍写理由、delegated、proxy_authority；无可处理的后台／授权关闭时交人。合并确认排除，C-29 逻辑不变。设置页与 preference CLI 管理授权；HumanAction 先分拣；需要交人时必填白话标题、事项说明、人必须参与的原因、具体步骤、完成影响与回传要求，展示 PM 改写标记并保留原请求；权限内的纯流程操作由 PM 完成，过期合并确认由 C-47 系统作废，PM 不代拍合并；Workbench 查询拍板记录并按决策人、类别、卡片、时间筛选，无撤销。拍板解决后通知发起人落实，首提示含选项和影响，30 分钟无落实信号提醒 PM Ops | Codex |
+| C-D12 高风险只能由人确认（随 C-37，2026-11-10 更新） | spending/account/permission/data_deletion 四类永不授权给 PM；只接受 human 身份，Workbench 与本机 CLI 同等有效，PM Office/PM Ops/其他 Agent 不得代拍或转录。未经类别授权的需求范围变化仍要求 Workbench 确认 | Cardigan |
 | C-due 拍板截止时间（C5） | `request_decision` 加 `due`；Needs You 按截止时间排序和提示 | Cardigan |
 | C-remind 人工动作提醒（C4） | HumanAction 到期前提醒一次，到点没开始再提醒一次 | Cardigan |
 | C-S22 拍板之前不许开工 | 允许对尚未开工（`todo`、`ready`）的工作项发起阻塞型拍板，拍板解决前不派 Run、不能开始；开发方案 §4.4、§4.5 补对应迁移和不变量 | Codex |
+
+C-37 验证范围：`pnpm exec vitest run packages/domain packages/roles packages/router packages/mcp-server apps/cli apps/web apps/server/src/web`、domain `test:types`、`pnpm lint`、`pnpm check:deps`；不运行真实 hc、全量或 e2e。覆盖授权和撤回、四类高风险边界、勾选与拍板原子性、PM 缺席、分拣、历史筛选、发起人通知及超时提醒。旧 JSON 缺省兼容，不改写固定角色版本；部署时由人更新 PM 默认角色并新建对应常驻 Assignment 取得专用工具。
 
 ## 6. P2d PM 能力
 
