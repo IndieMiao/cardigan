@@ -13,6 +13,7 @@ import {
   cardTemplate,
   employeeNameKey,
   isCompletionVerifier,
+  latestMergeCheck,
   mergeRequiresHuman,
   requesterNotificationRecipient,
 } from "@cardigan/domain";
@@ -786,6 +787,33 @@ function routeDecisionRequested(input: RouteInput, draft: Draft): void {
 function routeDecisionResolved(input: RouteInput, draft: Draft): void {
   const decision_id = payloadString(input.event.payload, "decision_id");
   const q = input.snapshot.decisions.find((q) => q.id === decision_id);
+  // P2a-1 §2.6: the check failed before the merge was confirmed (human or
+  // timeout); the item now belongs to PM Ops, so wake it here as well.
+  if (
+    input.event.type === "decision_resolved" &&
+    q?.trigger === "merge_confirmation" &&
+    q.card_id &&
+    q.status === "resolved" &&
+    q.resolution?.option === "merge" &&
+    q.kind === "approve" &&
+    "delivery_id" in q.target &&
+    !mergeRequiresHuman(input.snapshot, q)
+  ) {
+    const check = latestMergeCheck(
+      input.snapshot.events,
+      q.card_id,
+      q.target.delivery_id,
+    );
+    if (check && (check.status === "failed" || check.status === "timed_out"))
+      note(
+        input,
+        draft,
+        recipient.pm_ops(),
+        "decision",
+        "6.4/merge check finished",
+        `${subject(input)} 已确认合并，但合并检查结果 ${check.status}，请判断后退回修改或重新检查（${q.id}）。`,
+      );
+  }
   if (
     input.event.type === "decision_resolved" &&
     q?.raised_by?.startsWith("assignment:") &&

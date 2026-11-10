@@ -82,7 +82,7 @@ projects:
   - **重新检查**（新操作）：同一候选再排一次队，用于偶发失败；
   - **退回修改**：当前完成申请的最新检查为 `failed` 或 `timed_out` 时，未处理的确认和已确认合并（人确认或超时代批）的确认均可退回。CLI `merge request-changes` 与 Workbench 共用 `recordDecision`，原因必填；完成申请作废、主产出回到 `changes_requested`、验收项回到 `todo`，沿用 `merge_changes_requested` 通知原实现方并记录时间线；
   - **暂缓**（已有）。
-- PM Ops 处理（C-66，试行发现 43）：最新检查为 `failed` 或 `timed_out` 时，PM Ops 也可用 `resolve_delegated_decision` 对交给 PM 的未处理确认和已确认合并（人确认、PM 代确认或超时代批）选 `request_changes`（退回修改）或 `recheck`（重新检查）。两者与人走同一领域函数和效果（退回修改同下条；重新检查同上面的重新排队），`rationale`（失败用例、真实问题还是偶发）和 `notice` 必填，事件带 `via=delegated` 并派生 Needs You 知会。卡片涉及花钱、账号、权限、删除数据或需求范围变化、被人标为敏感（C-65 `sensitive`），或确认已交人时仍由人处理，PM 不能退回或重新检查（复用 `mergeRequiresHuman`）。PM 可处理时这类已确认项进入 `pm_queue.failed_merge_checks`，不再进入人的 Needs You；检查以失败／超时结束时 Router 通知 PM Ops。判断要点：先看失败用例和本卡改动的关系，真实问题退回并写清修复方向，偶发（超时、负载）先重新检查一次，再失败就退回。
+- PM Ops 处理（C-66，试行发现 43）：最新检查为 `failed` 或 `timed_out` 时，PM Ops 也可用 `resolve_delegated_decision` 对交给 PM 的未处理确认和已确认合并（人确认、PM 代确认或超时代批）选 `request_changes`（退回修改）或 `recheck`（重新检查）。两者与人走同一领域函数和效果（退回修改同下条；重新检查同上面的重新排队），`rationale`（失败用例、真实问题还是偶发）和 `notice` 必填，事件带 `via=delegated` 并派生 Needs You 知会。卡片涉及花钱、账号、权限、删除数据或需求范围变化、被人标为敏感（C-65 `sensitive`），或确认已交人时仍由人处理，PM 不能退回或重新检查（复用 `mergeRequiresHuman`）。PM 可处理时这类已确认项进入 `pm_queue.failed_merge_checks`，不再进入人的 Needs You；检查以失败／超时结束时，或检查先失败、之后才由人或超时代批确认合并时，Router 通知 PM Ops。判断要点：先看失败用例和本卡改动的关系，真实问题退回并写清修复方向，偶发（超时、负载）先重新检查一次，再失败就退回。
 - 人对已确认合并的退回：旧确认标记为 `superseded`，保留原合并授权（包括超时代批依据）；退回原因另存事件与时间线。Needs You 重新展示可退回的已确认项，只提供“退回修改”，不重复确认合并。
 - 已确认合并时，最新检查为 `passed`、`queued`、`running`，或没有检查／检查中断，均不允许退回，并给出中文说明；显式重新检查后立即按 `queued` 拒绝，不能沿用更早的失败结果。未确认项仍保持已有退回行为；`hold` 仍须先重新发起确认。
 - 新的完成申请（退回修改后再次交付）产生新的 `completion_id` 和新的合并确认，自然重新检查；旧确认和旧检查不能授权新申请。
