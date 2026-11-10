@@ -82,7 +82,7 @@ if (args[0] === '--version') {
     console.error(JSON.stringify({error: {kind: 'not_found', message: 'RAW HC ERROR'}}));
     process.exit(1);
   }
-  console.log('{}');
+  console.log(process.env.FIXTURE_STATE === 'invalid-json' ? 'RAW HC NON-JSON' : '{}');
 } else if (args[0] === 'events') {
   console.log(JSON.stringify({seq: 1, terminals: [{address: process.env.FIXTURE_TERMINAL || 't7', state: process.env.FIXTURE_STATE}]}));
 } else if (args[0] === 'machine') {
@@ -333,6 +333,7 @@ describe("assignment attach", () => {
     ["finished", "终端已结束"],
     ["missing", "终端不存在或已结束"],
     ["unknown", "无法确认终端仍在运行"],
+    ["invalid-json", "运行时不可用"],
   ])(
     "%s terminal has a Chinese reason and recovery command",
     (state, reason) => {
@@ -341,7 +342,7 @@ describe("assignment attach", () => {
       expect(result.code).toBe(1);
       expect(result.output).toContain(reason);
       expect(result.output).toContain("cardigan assignment start A-1");
-      expect(result.output).not.toContain("RAW HC ERROR");
+      expect(result.output).not.toContain("RAW HC");
       expect(existsSync(join(root, "attached"))).toBe(false);
     },
   );

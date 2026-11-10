@@ -44,6 +44,10 @@ class FakeRuntime implements Runtime {
   readonly provisions: RuntimeLaunch[] = [];
   readonly released: RuntimeRef[] = [];
   provisionResult: RuntimeResult<RuntimeRef> | undefined;
+  statusResult: RuntimeResult<RuntimeObservation> = {
+    ok: false,
+    error: { code: "runtime_not_found", message: "not used" },
+  };
   /** Return a ref that the domain rejects (machine mismatch). */
   badMachine = false;
 
@@ -67,10 +71,7 @@ class FakeRuntime implements Runtime {
     return { ok: true, value: { sent: true } };
   }
   async status(): Promise<RuntimeResult<RuntimeObservation>> {
-    return {
-      ok: true,
-      value: { process: "alive", agent: "idle", observed_seq: 1 },
-    };
+    return this.statusResult;
   }
   async interrupt(): Promise<RuntimeResult<void>> {
     return { ok: true, value: undefined };
@@ -630,6 +631,10 @@ describe("stopAssignment and attachAssignment", () => {
       dataDir,
     });
 
+    runtime.statusResult = {
+      ok: true,
+      value: { process: "alive", agent: "idle", observed_seq: 1 },
+    };
     await expect(
       attachAssignment({
         store,
