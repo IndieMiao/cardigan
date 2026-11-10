@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "vitest";
 import { listMigrations, migrate, Store } from "./index.js";
+import { latestSchemaVersion } from "./test-support.js";
 
 function tempDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -13,7 +14,7 @@ test("migrates an empty database and creates every M1 table", () => {
   const store = Store.open({ dataDir });
   try {
     expect(existsSync(join(dataDir, "cardigan.db"))).toBe(true);
-    expect(store.schemaVersion()).toBe(14);
+    expect(store.schemaVersion()).toBe(latestSchemaVersion());
 
     const tables = store.database
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
@@ -64,7 +65,7 @@ test("re-running migrations is a no-op and keeps data", () => {
       .run("p", "card", 7);
 
     expect(store.migrate()).toEqual([]);
-    expect(store.schemaVersion()).toBe(14);
+    expect(store.schemaVersion()).toBe(latestSchemaVersion());
     const row = store.database
       .prepare(
         "SELECT value FROM id_counters WHERE project_id = ? AND kind = ?",

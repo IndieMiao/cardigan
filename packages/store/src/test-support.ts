@@ -11,7 +11,13 @@ import type {
   TimelineEntry,
   WorkItem,
 } from "@cardigan/domain";
+import { defaultMigrationsDir, listMigrations } from "./migrate.js";
 import { Store } from "./store.js";
+
+/** Latest bundled schema; historical upgrade fixtures keep their explicit versions. */
+export function latestSchemaVersion(): number {
+  return listMigrations(defaultMigrationsDir).at(-1)?.version ?? 0;
+}
 
 /**
  * Test support: every test gets its own temporary directory, so databases never

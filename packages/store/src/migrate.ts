@@ -66,7 +66,7 @@ export function migrate(
           )
           .all())
           seedCardTemplates(db, String(row.id));
-      if (migration.version === 14 && migration.name === "members") {
+      if (migration.version === 15 && migration.name === "members") {
         const effect = createMember(
           [],
           { kind: "human" },
