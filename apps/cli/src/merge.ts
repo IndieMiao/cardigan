@@ -169,7 +169,7 @@ function describe(
     .at(-1);
   const plan = mergePlan(state, card.id);
   const lines = [
-    `${card.id} ${card.status} merge_policy=${card.merge_policy ?? "confirm"} base=${card.base_branch} — ${card.title}`,
+    `${card.id} ${card.status} merge_policy=${card.merge_policy ?? "confirm"} base=${card.base_branch ?? "无"} — ${card.title}`,
     `  confirmation: ${
       confirmation === undefined
         ? "none"
@@ -244,7 +244,7 @@ function mergeConfirm(args: readonly string[], io: CliIo): number {
       clock: systemClock,
     });
     io.stdout(
-      `已确认合并 ${id}（${decision.id} ${decision.status}）；合并循环会把交付合进 ${card.base_branch}。`,
+      `已确认合并 ${id}（${decision.id} ${decision.status}）；合并循环会把交付合进 ${card.base_branch ?? "无"}。`,
     );
     return EXIT.ok;
   } finally {

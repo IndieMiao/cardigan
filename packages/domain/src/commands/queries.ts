@@ -12,6 +12,7 @@ import type {
 import type { CardId } from "../ids.js";
 import type { Clock } from "../ports.js";
 import { type CommandDraft, type CommandState, command } from "./core.js";
+import { resolveCardTemplate } from "./templates.js";
 
 function affects(d: CommandDraft, q: Decision, id: CardId) {
   return (
@@ -49,6 +50,7 @@ function cardView(d: CommandDraft, id: CardId): CommandCardView {
   const status = deriveCardStatus(card.status, items, completion);
   const fields = deriveCardFields({
     card,
+    template: resolveCardTemplate(d, card),
     work_items: items,
     assignments: d.list("assignments"),
     deliveries,

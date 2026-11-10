@@ -49,7 +49,7 @@ test("Role definitions preserve RoleReference compatibility; Runtime exposes sev
     capabilities: ["code"],
   });
   expectTypeOf<keyof RoleReference>().toEqualTypeOf<
-    "role_id" | "role_version" | "allowed_tools" | "capabilities"
+    "role_id" | "role_version" | "allowed_tools" | "capabilities" | "status"
   >();
   expectTypeOf<keyof Runtime>().toEqualTypeOf<
     | "provision"

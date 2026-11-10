@@ -108,6 +108,11 @@ export function mergePlan(state: CommandState, card_id: CardId) {
       "illegal_transition",
       "Card is not awaiting merge",
     );
+    ensure(
+      card.repo && card.base_branch && card.merge_policy !== "none",
+      "invariant_violation",
+      "Git 合并需要仓库、基线和合并策略",
+    );
     const target = completion(state, card);
     const deliveries = candidates(state, card);
     ensure(

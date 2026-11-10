@@ -23,6 +23,7 @@ import {
   unwrap,
 } from "./core.js";
 import { endRun } from "./end-run.js";
+import { resolveHumanCompletionReview } from "./human-completion.js";
 import { requestMergeChanges } from "./merge.js";
 import { queueResumedRun, resumeWork } from "./resumption.js";
 import { activeWork } from "./workflow.js";
@@ -455,6 +456,8 @@ export function recordDecision(
       p.option === "request_changes"
     )
       requestMergeChanges(d, decision, p.rationale);
+    if (decision.trigger === "completion_review")
+      resolveHumanCompletionReview(d, decision, p.option);
     return result;
   });
 }

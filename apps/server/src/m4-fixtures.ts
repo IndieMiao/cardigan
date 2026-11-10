@@ -402,7 +402,7 @@ export function m4Scenario(
   policy: "confirm" | "auto" = "confirm",
 ): M4Scenario {
   const templates: readonly CardTemplate[] = [
-    { ...developmentCardTemplate, merge_policy: policy },
+    { ...developmentCardTemplate, merge: policy },
   ];
   const card = fixture.apply(
     (s, a, p) =>

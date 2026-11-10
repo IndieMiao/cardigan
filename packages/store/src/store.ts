@@ -49,6 +49,7 @@ import {
   type ReadRepositories,
 } from "./repositories.js";
 import { backfillStandingModesInTransaction } from "./standing.js";
+import { seedCardTemplates } from "./templates.js";
 import {
   findTokenByHash,
   type IssuedToken,
@@ -507,9 +508,12 @@ export class Store {
       repo_path: null,
       base_branch: null,
     };
-    this.#db
-      .prepare("INSERT INTO projects (id, name, created_at) VALUES (?, ?, ?)")
-      .run(record.id, record.name, record.created_at);
+    this.uow.run(() => {
+      this.#db
+        .prepare("INSERT INTO projects (id, name, created_at) VALUES (?, ?, ?)")
+        .run(record.id, record.name, record.created_at);
+      seedCardTemplates(this.#db, record.id);
+    });
     return { ok: true, value: record };
   }
 

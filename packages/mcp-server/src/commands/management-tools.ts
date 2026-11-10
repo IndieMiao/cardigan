@@ -1,6 +1,7 @@
 import {
   type Actor,
   assign,
+  builtinCardTemplates,
   type Clock,
   type CommandEffect,
   type CommandPorts,
@@ -8,6 +9,7 @@ import {
   createCard,
   createWorkItem,
   issueInstruction,
+  latestCardTemplate,
   parseId,
   postComment,
   type Result,
@@ -118,7 +120,7 @@ const schemas = {
   create_card: {
     title: text,
     goal: text,
-    acceptance_criteria: z.array(text).min(1),
+    acceptance_criteria: z.array(text).default([]),
     source: z.discriminatedUnion("kind", [
       z.object({ kind: z.literal("quote"), text }),
       z.object({ kind: z.literal("decision"), decision_id: id("decision") }),
@@ -138,6 +140,7 @@ const schemas = {
     priority: z.number().optional(),
     deadline: text.optional(),
     template: text.optional(),
+    template_id: text.optional(),
   },
   update_card: {
     card_id: id("card"),
@@ -250,7 +253,7 @@ export function managementTools(clock?: Clock) {
     defineTool({
       name: "create_card",
       description:
-        "Create a card from the development template. Omit repo to use this project's registered repository; omit base_branch to use its default base branch. Explicit values keep the existing validation rules.",
+        "Create a card from a project template (default dev). Non-repository templates can omit repo and base_branch. Omit repo to use this project's registered repository; omit base_branch to use its default base branch. Explicit values keep the existing validation rules.",
       input: z.object({ ...schemas.create_card, idempotency_key }),
       handler: ({ idempotency_key, ...params }, context) =>
         executeCommand(
@@ -265,13 +268,27 @@ export function managementTools(clock?: Clock) {
               p.repo === undefined || p.base_branch === undefined
                 ? context.store.getProject?.(actor.project_id)
                 : undefined;
-            const repo = p.repo ?? project?.repo_path;
-            const base_branch = p.base_branch ?? project?.base_branch;
-            if (!repo)
+            const selectedTemplate =
+              latestCardTemplate(
+                state.card_templates ?? [],
+                p.template_id ?? p.template ?? "dev",
+              ) ??
+              latestCardTemplate(
+                builtinCardTemplates,
+                p.template_id ?? p.template ?? "dev",
+              );
+            const repo =
+              p.repo ??
+              (selectedTemplate?.requires_repo
+                ? project?.repo_path
+                : undefined);
+            const base_branch =
+              p.base_branch ?? (repo ? project?.base_branch : undefined);
+            if (selectedTemplate?.requires_repo && !repo)
               return validationFailed(
                 "No registered repository; register the project repository or provide repo explicitly",
               );
-            if (!base_branch)
+            if (repo && !base_branch)
               return validationFailed(
                 "No default base branch; register the project baseline or provide base_branch explicitly",
               );
@@ -281,6 +298,9 @@ export function managementTools(clock?: Clock) {
               priority,
               deadline,
               template,
+              template_id,
+              repo: _repo,
+              base_branch: _base,
               ...required
             } = p;
             return cardReply(
@@ -289,13 +309,14 @@ export function managementTools(clock?: Clock) {
                 actor,
                 {
                   ...required,
-                  repo,
-                  base_branch,
+                  ...(repo == null ? {} : { repo }),
+                  ...(base_branch == null ? {} : { base_branch }),
                   ...(out_of_scope === undefined ? {} : { out_of_scope }),
                   ...(related_cards === undefined ? {} : { related_cards }),
                   ...(priority === undefined ? {} : { priority }),
                   ...(deadline === undefined ? {} : { deadline }),
                   ...(template === undefined ? {} : { template }),
+                  ...(template_id === undefined ? {} : { template_id }),
                 },
                 ports,
               ),

@@ -9,6 +9,7 @@ import { attentionCommand, inboxCommand } from "./inbox.js";
 import type { CliIo } from "./io.js";
 import { runLaunchCommand } from "./launch.js";
 import { runMergeCommand } from "./merge.js";
+import { runTemplateCommand } from "./template.js";
 import { runWebCommand } from "./web.js";
 import { type CliHooks, runWorkflowCommand } from "./workflow.js";
 import { runWorktreeCommand } from "./worktree.js";
@@ -58,7 +59,9 @@ const TOP_LEVEL_USAGE = [
   "  role add         写入角色定义（allowed_tools、capabilities）",
   "  pm create        建常驻 PM Assignment 并签发 Token（--office / --ops）",
   "  pm start         一键启动 PM Office 与 PM Ops（已在运行就跳过）",
-  "  card create      按 dev 模板建卡",
+  "  template list|show|add|copy|update|deactivate|activate|rollback  管理项目模板",
+  "  card create      按模板建卡（默认 dev）",
+  "  card done        用 --result 记录结果并完成人工完成的卡片，可重复 --file 附证据",
   "  card update      修改或取消卡片；--superseded-by <C-m> 标记取代（已完成卡片不能取消；见 cardigan card --help）",
   "  comment add      发评论：--text <内容> 或 --text-file <路径>，可重复 --file 附文件",
   "  attachment add   上传附件：--file <路径> [--kind evidence|artifact] [--basis <q(n)>] [--entry <C-n#k>]",
@@ -217,6 +220,7 @@ export async function main(
     if (command === "assignment") {
       return await runAssignmentCommand(rest, io);
     }
+    if (command === "template") return await runTemplateCommand(rest, io);
     if (command === "comment" || command === "attachment") {
       return await runContentCommand(command, rest, io);
     }

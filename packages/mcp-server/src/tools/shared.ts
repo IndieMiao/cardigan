@@ -72,7 +72,7 @@ function inScope(identity: Identity, work_items: readonly WorkItem[]): boolean {
  * An Agent finds its own checkout through `whoami().worktree_path`, never by
  * reading the project's registered repository from the card.
  */
-export function agentCard<T extends { readonly repo: string }>(
+export function agentCard<T extends { readonly repo?: string }>(
   card: T,
 ): Omit<T, "repo"> {
   const { repo: _hostPath, ...rest } = card;
