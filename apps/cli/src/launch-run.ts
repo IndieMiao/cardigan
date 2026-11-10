@@ -113,22 +113,16 @@ async function launchCompiled(
     await writeFileWithMode(file.path, file.content, file.mode);
   }
 
-  let child: SpawnedChild;
+  // The OS can deliver SIGINT even during synchronous spawn: the child may
+  // already be running while the parent has not returned from spawn yet.
+  // Install handlers first, then resolve the forwarding target when called.
+  let child: SpawnedChild | undefined;
+  const disposeSignals = forwardSignals(
+    { kill: (signal) => child?.kill(signal) },
+    io.signals,
+  );
   try {
     child = io.spawnInherit(compiled.command, compiled.args, { cwd, env });
-  } catch (error) {
-    for (const file of compiled.files) {
-      await removeFileIfExists(file.path);
-    }
-    throw spawnFailure(compiled, error);
-  }
-
-  // Handlers are installed synchronously right after spawn, so no signal can be
-  // dispatched in between. Then the child owns the terminal: the parent ignores
-  // SIGINT/SIGQUIT (the terminal sends them to the child too), forwards
-  // SIGTERM/SIGHUP, and keeps waiting so the settings file outlives the CLI.
-  const disposeSignals = forwardSignals(child, io.signals);
-  try {
     return await child.exit;
   } catch (error) {
     throw spawnFailure(compiled, error);
