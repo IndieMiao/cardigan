@@ -5,9 +5,8 @@ import { join, resolve } from "node:path";
 import { HttpRejection } from "./http.js";
 
 const MAX_LOG_BYTES = 8 * 1024 * 1024;
-const TRUNCATION_MARKER = Buffer.from(
-  "\n\n[日志已截断：超过 8 MiB，仅保留首尾内容]\n\n",
-);
+const isUtf8Continuation = (byte: number | undefined) =>
+  byte !== undefined && (byte & 0xc0) === 0x80;
 
 async function readRange(file: FileHandle, position: number, length: number) {
   const buffer = Buffer.alloc(length);
@@ -28,13 +27,23 @@ async function readRange(file: FileHandle, position: number, length: number) {
 async function readLog(file: FileHandle, size: number): Promise<Buffer> {
   // Read only the stat snapshot, even if a running check appends more output.
   if (size <= MAX_LOG_BYTES) return readRange(file, 0, size);
-  const available = MAX_LOG_BYTES - TRUNCATION_MARKER.length;
+  const marker = Buffer.from(
+    `\n\n[日志已截断：原大小 ${size} 字节，超过 8 MiB，已省略中间内容，以下为日志尾部]\n\n`,
+  );
+  const available = MAX_LOG_BYTES - marker.length;
   const head = Math.floor(available / 2);
   const tail = available - head;
+  // One lookahead byte tells us whether the head ends inside a UTF-8 character.
+  const headBytes = await readRange(file, 0, head + 1);
+  let headEnd = Math.min(head, headBytes.length);
+  while (headEnd > 0 && isUtf8Continuation(headBytes[headEnd])) headEnd--;
+  const tailBytes = await readRange(file, size - tail, tail);
+  let tailStart = 0;
+  while (isUtf8Continuation(tailBytes[tailStart])) tailStart++;
   return Buffer.concat([
-    await readRange(file, 0, head),
-    TRUNCATION_MARKER,
-    await readRange(file, size - tail, tail),
+    headBytes.subarray(0, headEnd),
+    marker,
+    tailBytes.subarray(tailStart),
   ]);
 }
 

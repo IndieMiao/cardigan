@@ -261,12 +261,71 @@ test.each([0, 1])(
     expect(response.body.startsWith("log start")).toBe(true);
     expect(response.body.endsWith("log end")).toBe(true);
     if (overflow) {
-      expect(response.body).toContain("日志已截断：超过 8 MiB，仅保留首尾内容");
+      expect(response.body).toContain(
+        `日志已截断：原大小 ${limit + overflow} 字节`,
+      );
+      expect(response.body).toContain("已省略中间内容，以下为日志尾部");
       expect(response.body).not.toContain("omitted middle");
     } else {
       expect(response.body).not.toContain("日志已截断");
       expect(response.body).toContain("omitted middle");
     }
+  },
+);
+
+test.each([
+  ["é", 1],
+  ["中", 1],
+  ["中", 2],
+  ["😀", 1],
+  ["😀", 2],
+  ["😀", 3],
+] as const)(
+  "log truncation preserves UTF-8 when %s is split after byte %i",
+  async (character, split) => {
+    record("queued");
+    const limit = 8 * 1024 * 1024;
+    const size = limit + 1;
+    const marker = `\n\n[日志已截断：原大小 ${size} 字节，超过 8 MiB，已省略中间内容，以下为日志尾部]\n\n`;
+    const available = limit - Buffer.byteLength(marker);
+    const headEnd = Math.floor(available / 2);
+    const tailStart = size - (available - headEnd);
+    const dir = join(h.dataDir, "merge-gate", "logs", project_id);
+    await mkdir(dir, { recursive: true });
+    const file = await open(join(dir, `${attempt}.log`), "w", 0o600);
+    try {
+      await file.truncate(size);
+      await file.write("完整开头", 0);
+      // Keep complete neighbours as well as a character crossing each cut.
+      const bytes = Buffer.from(`界${character}界`);
+      await file.write(
+        bytes,
+        0,
+        bytes.length,
+        headEnd - split - Buffer.byteLength("界"),
+      );
+      await file.write(
+        bytes,
+        0,
+        bytes.length,
+        tailStart - split - Buffer.byteLength("界"),
+      );
+      await file.write("完整结尾", size - Buffer.byteLength("完整结尾"));
+    } finally {
+      await file.close();
+    }
+    // Do not use call(): it decodes to a string and masks malformed wire bytes.
+    const response = await fetch(`${h.server.url}${logPath}`, {
+      headers: { cookie },
+    });
+    expect(response.status).toBe(200);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    expect(bytes.byteLength).toBeLessThanOrEqual(limit);
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    expect(text.startsWith("完整开头")).toBe(true);
+    expect(text.endsWith("完整结尾")).toBe(true);
+    expect(text).toContain(`界${marker}界`);
+    expect(text).not.toContain("\uFFFD");
   },
 );
 
