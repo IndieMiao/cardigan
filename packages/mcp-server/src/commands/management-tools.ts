@@ -167,6 +167,9 @@ const schemas = {
     max_review_rounds: z.number().int().positive().optional(),
   },
   assign: {
+    employee_id: text
+      .describe("Employee ID (E-n) or active name; omitted selects by role.")
+      .optional(),
     work_item_id: id("work_item"),
     role_id: text,
     role_version: z.number().int().positive().optional(),

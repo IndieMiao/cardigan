@@ -104,7 +104,9 @@ function AssignmentRow({
           </button>
           <IdTag
             id={a.id}
-            label={a.role_id}
+            label={
+              a.employee?.name ?? a.author_display ?? `未命名的 ${a.role_id}`
+            }
             detail={`${a.role_id} v${a.role_version}`}
           />
           {a.standing_mode && (

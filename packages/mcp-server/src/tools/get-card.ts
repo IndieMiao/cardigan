@@ -3,6 +3,7 @@ import {
   deriveCardFields,
   deriveCardStatus,
   deriveReviewMatrix,
+  runAuthorView,
 } from "@cardigan/domain";
 import { z } from "zod";
 import { agentCard, readCardRelations, requireCard } from "./shared.js";
@@ -34,6 +35,12 @@ export const getCardTool = defineTool({
     const { card, work_items } = requireCard(store, identity, cardId);
     const { assignments, deliveries, reviews, decisions, human_actions } =
       readCardRelations(store, identity.actor.project_id, cardId, work_items);
+
+    const authors = store.uow.read((tx) => ({
+      assignments,
+      runs: tx.runs.list(identity.actor.project_id),
+      employees: tx.employees?.list() ?? [],
+    }));
 
     // The newest completion request decides whether the card is waiting for
     // acceptance (invariant 13: derivation never produces `done`).
@@ -75,7 +82,14 @@ export const getCardTool = defineTool({
       deliveries: [...deliveries]
         .sort((left, right) => idNumber(right.id) - idNumber(left.id))
         .slice(0, RECENT_DELIVERY_LIMIT)
-        .map((delivery) => summarizeDelivery(delivery)),
+        .map((delivery) => ({
+          ...summarizeDelivery(delivery),
+          ...runAuthorView(authors, delivery.run_id),
+        })),
+      reviews: reviews.map((review) => ({
+        ...review,
+        ...runAuthorView(authors, review.run_id),
+      })),
       review_matrix: deriveReviewMatrix(deliveries, work_items, reviews),
       counts: {
         work_items: work_items.length,

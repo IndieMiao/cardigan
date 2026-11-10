@@ -1,6 +1,6 @@
+import type { Clock } from "./clock.js";
 import type { Actor, Event, Timestamp } from "./entities.js";
 import type { EmployeeId, EventId, RoleId } from "./ids.js";
-import type { Clock } from "./ports.js";
 import type { EmployeeStatus } from "./states.js";
 
 /** A global identity, independent of project-local roles and assignments. */
@@ -19,18 +19,31 @@ export interface Employee {
 
 export type EmployeeActor = Actor | { readonly kind: "human" };
 export type GlobalEvent = Omit<Event, "card_id" | "actor"> & {
-  readonly actor: { readonly kind: "human" };
+  readonly actor: { readonly kind: "human" | "system" };
 };
 
-/** Full-width and ASCII spaces compare equally; surrounding whitespace is ignored. */
-export function employeeNameKey(name: string): string {
+/** Preserve display case while normalizing surrounding and full-width spaces. */
+export function employeeDisplayName(name: string): string {
   return name.replace(/\u3000/gu, " ").trim();
+}
+
+/** Name uniqueness and lookup use Unicode lowercase, independent of locale. */
+export function employeeNameKey(name: string): string {
+  return employeeDisplayName(name).toLowerCase();
+}
+
+export interface EmployeeActivity {
+  readonly employee_id: EmployeeId;
+  readonly last_assigned_at: Timestamp | null;
+  readonly unfinished_runs: number;
 }
 
 export interface EmployeeRepository {
   get(id: EmployeeId): Employee | undefined;
   list(): readonly Employee[];
   put(employee: Employee): void;
+  /** Across all projects, read in the same transaction as assign. */
+  assignmentActivity?(): readonly EmployeeActivity[];
 }
 export interface GlobalEventRepository {
   append(event: GlobalEvent): void;

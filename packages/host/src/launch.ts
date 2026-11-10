@@ -193,7 +193,7 @@ export async function launchRun(
   const project = input.project;
 
   await secureDataDirectory(execution);
-  const { assignment, role, card, workItem } = launchEntities(
+  const { assignment, role, employee, card, workItem } = launchEntities(
     host.store,
     project,
     input.assignment_id,
@@ -274,11 +274,17 @@ export async function launchRun(
       assignment;
 
     step = "launch compilation";
-    const model = resolveProfile(host.launch.config, role.launch_profile_ref)
-      .profile.model;
+    const profileRef =
+      current.launch_profile_ref ??
+      employee?.launch_profile_ref ??
+      role.launch_profile_ref;
+    const model = resolveProfile(host.launch.config, profileRef).profile.model;
     if (model === undefined)
-      throw new Error(`Launch profile ${role.launch_profile_ref} has no model`);
+      throw new Error(`Launch profile ${profileRef} has no model`);
     const compiled = compileAssignmentLaunch({
+      ...(assignment.employee_id
+        ? { employee: { launch_profile_ref: profileRef } }
+        : {}),
       assignment: {
         assignment_id: assignment.id,
         run_id: input.run.id,
@@ -289,7 +295,7 @@ export async function launchRun(
       role: {
         role_id: role.role_id,
         harness: role.harness,
-        launch_profile: role.launch_profile_ref,
+        launch_profile: profileRef,
         core_prompt: role.core_prompt,
         // The harness advertises the tool scope the token actually carries, so
         // a rotated Ops session never even sees record_decision (§7.1).
@@ -349,17 +355,18 @@ export async function launchRun(
         run: input.run.id,
       },
     };
-    const provisioned = input.replacement
-      ? await host.runtime.resume_or_replace(
-          input.replacement.previous,
-          launchDesc,
-        )
-      : await host.runtime.provision(
-          assignment,
-          role,
-          localMachine(clock),
-          launchDesc,
-        );
+    const provisioned =
+      input.replacement && input.replacement.reason !== "launch_profile_changed"
+        ? await host.runtime.resume_or_replace(
+            input.replacement.previous,
+            launchDesc,
+          )
+        : await host.runtime.provision(
+            assignment,
+            role,
+            localMachine(clock),
+            launchDesc,
+          );
     if (!provisioned.ok)
       throw new Error(
         `provision failed: ${provisioned.error.code} ${provisioned.error.message}`,
@@ -390,6 +397,11 @@ export async function launchRun(
           actor,
           {
             run_id: input.run.id,
+            launch_snapshot: {
+              model,
+              agent_cli_version: current.agent_cli_version,
+              launch_profile_ref: compiled.profile,
+            },
             runtime_ref: dispatchRef,
             ...(baseSha === undefined ? {} : { base_sha: baseSha }),
             ...(input.replacement ? { replacement: input.replacement } : {}),

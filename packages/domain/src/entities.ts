@@ -5,6 +5,7 @@ import type {
   CardId,
   DecisionId,
   DeliveryId,
+  EmployeeId,
   EventId,
   HumanActionId,
   MachineId,
@@ -172,6 +173,8 @@ export interface RuntimeRef {
   readonly branch?: string;
 }
 interface AssignmentFields {
+  /** Immutable identity; absent on legacy assignments. */
+  readonly employee_id?: EmployeeId;
   readonly id: AssignmentId;
   readonly role_id: RoleId;
   readonly role_version: number;
@@ -212,6 +215,9 @@ export type Assignment = AssignmentFields &
   );
 export type RunOutcome = "completed" | "blocked" | "failed";
 export interface Run {
+  readonly employee_id?: EmployeeId;
+  /** Actual launch profile; absent on legacy runs. */
+  readonly launch_profile_ref?: string;
   readonly id: RunId;
   readonly assignment_id: AssignmentId;
   readonly trigger_event_id: EventId;

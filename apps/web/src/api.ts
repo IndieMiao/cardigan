@@ -1,3 +1,13 @@
+export interface AuthorView {
+  readonly employee?: {
+    readonly id: string;
+    readonly name: string;
+    readonly title: string;
+    readonly avatar: string | null;
+  } | null;
+  readonly author_display?: string;
+}
+
 import {
   browserStream,
   type StreamCallbacks,
@@ -116,7 +126,7 @@ export interface WorkItemView {
   readonly target_work_item_id?: string;
 }
 
-export interface TimelineEntryView {
+export interface TimelineEntryView extends AuthorView {
   readonly id: string;
   readonly card_id: string;
   readonly event_seq: number;
@@ -152,7 +162,7 @@ export interface TimelineEntryView {
   readonly created_at: string;
 }
 
-export interface DeliveryView {
+export interface DeliveryView extends AuthorView {
   readonly id: string;
   readonly work_item_id: string;
   readonly kind: string;
@@ -170,7 +180,7 @@ export interface DeliveryView {
   }[];
 }
 
-export interface ReviewView {
+export interface ReviewView extends AuthorView {
   readonly id: string;
   readonly delivery_id: string;
   readonly work_item_id: string;
@@ -226,7 +236,7 @@ export interface HumanActionView {
 }
 
 /** Attachment metadata; the blob is a separate request (`download_path`). */
-export interface AttachmentView {
+export interface AttachmentView extends AuthorView {
   readonly id: string;
   readonly mime: string;
   readonly size: number;
@@ -445,6 +455,8 @@ export interface SnapshotData {
   }[];
 }
 export interface RunView {
+  readonly employee_id?: string;
+  readonly launch_profile_ref?: string;
   readonly id: string;
   readonly assignment_id: string;
   readonly status: string;
@@ -457,7 +469,7 @@ export interface RunView {
   readonly finished_at?: string;
   readonly summary: string;
 }
-export interface ExecutionAssignment {
+export interface ExecutionAssignment extends AuthorView {
   readonly id: string;
   readonly role_id: string;
   readonly role_version: number;
@@ -504,6 +516,8 @@ export interface ActivityData {
     role: string;
     created_at: string;
     payload: unknown;
+    employee?: AuthorView["employee"];
+    author_display?: string;
     actor: { kind: string; assignment_id?: string };
   }[];
   readonly next_before: string | null;

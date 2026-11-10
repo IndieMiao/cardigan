@@ -10,6 +10,7 @@ import type {
   DecisionId,
   Delivery,
   DeliveryId,
+  EmployeeRepository,
   Event,
   EventRepository,
   HumanAction,
@@ -67,6 +68,10 @@ export type McpReadRepository<Entity, Key> = Pick<
 
 /** What a read transaction hands to its callback. */
 export interface McpReadContext {
+  readonly employees?: Pick<
+    EmployeeRepository,
+    "get" | "list" | "assignmentActivity"
+  >;
   readonly cards: McpReadRepository<Card, CardId>;
   readonly work_items: McpReadRepository<WorkItem, WorkItemId>;
   readonly assignments: McpReadRepository<Assignment, AssignmentId>;

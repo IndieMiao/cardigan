@@ -6,6 +6,7 @@ import type {
   CommandEffect,
   CommandPorts,
   CommandState,
+  Employee,
   ProjectId,
   Result,
   Role,
@@ -32,6 +33,7 @@ export const wallClock: Clock = { now: () => new Date().toISOString() };
 export interface LaunchEntities {
   readonly assignment: Assignment;
   readonly role: Role;
+  readonly employee?: Employee | undefined;
   readonly card?: Card | undefined;
   readonly workItem?: WorkItem | undefined;
 }
@@ -55,13 +57,16 @@ export function launchEntities(
       throw new Error(
         `角色 ${assignment.role_id} v${assignment.role_version} 不存在`,
       );
-    if (assignment.scope !== "work_item") return { assignment, role };
+    const employee = assignment.employee_id
+      ? tx.employees.get(assignment.employee_id)
+      : undefined;
+    if (assignment.scope !== "work_item") return { assignment, role, employee };
     const workItem = tx.work_items.get(project, assignment.work_item_id);
     const card =
       workItem === undefined
         ? undefined
         : tx.cards.get(project, workItem.card_id);
-    return { assignment, role, workItem, card };
+    return { assignment, role, employee, workItem, card };
   });
 }
 

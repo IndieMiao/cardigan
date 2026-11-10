@@ -32,9 +32,9 @@ const actorLabel = (event: ActivityData["events"][number]): string =>
     ? "你"
     : event.actor.kind === "system"
       ? "系统"
-      : event.role === "pm"
-        ? "PM"
-        : "Agent";
+      : (event.employee?.name ??
+        event.author_display ??
+        `未命名的 ${event.role}`);
 const dayKey = (value: string): string => {
   const date = new Date(value);
   if (!Number.isFinite(date.getTime())) return "时间未知";

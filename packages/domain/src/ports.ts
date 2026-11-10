@@ -1,3 +1,4 @@
+import type { EmployeeRepository } from "./employee.js";
 import type {
   Assignment,
   Attachment,
@@ -14,7 +15,6 @@ import type {
   RoleReference,
   Run,
   TimelineEntry,
-  Timestamp,
   WorkItem,
 } from "./entities.js";
 import type { Result } from "./errors.js";
@@ -36,9 +36,7 @@ import type {
   WorkItemId,
 } from "./ids.js";
 
-export interface Clock {
-  now(): Timestamp;
-}
+export type { Clock } from "./clock.js";
 // Implementations allocate within the same transaction as the entity changes.
 export interface IdAllocator {
   next<K extends ReadableIdKind>(project_id: ProjectId, kind: K): Id<K>;
@@ -98,6 +96,7 @@ export interface Repositories {
   readonly events: EventRepository;
 }
 export interface TransactionContext extends Repositories {
+  readonly employees?: EmployeeRepository;
   readonly ids: IdAllocator;
 }
 export interface UnitOfWork {

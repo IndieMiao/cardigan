@@ -3,6 +3,7 @@ import {
   type EmployeeActor,
   type EmployeeCommandPorts,
   type EmployeeEffect,
+  employeeDisplayName,
   employeeNameKey,
 } from "../employee.js";
 import type { Result } from "../errors.js";
@@ -147,7 +148,7 @@ export function createEmployee(
       {
         ...employee,
         id: ports.ids.nextEmployeeId(),
-        name: employeeNameKey(employee.name),
+        name: employeeDisplayName(employee.name),
         title: employee.title.trim(),
         bio: employee.bio.trim(),
       },
@@ -186,7 +187,7 @@ export function updateEmployee(
     return effect(
       {
         ...employee,
-        name: employeeNameKey(employee.name),
+        name: employeeDisplayName(employee.name),
         title: employee.title.trim(),
         bio: employee.bio.trim(),
       },

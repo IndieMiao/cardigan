@@ -881,3 +881,29 @@ describe("provider credentials leave the run directory", () => {
     }
   });
 });
+
+test.each([null, "codex-agent"])(
+  "employee profile %s selects the compiler/CLI while preserving role permissions",
+  (profile) => {
+    const compiled = compileAssignmentLaunch({
+      assignment: { assignment_id: "A-12", run_id: "R-5" },
+      role: roleFor("pi", "pi-agent"),
+      employee: { launch_profile_ref: profile },
+      launch: launchConfig,
+      mcp: { url: MCP_URL },
+      run_dir: RUN_DIR,
+      work_dir: WORK_DIR,
+      first_prompt: "Fixture",
+      secrets,
+    });
+    expect(compiled.profile).toBe(profile ?? "pi-agent");
+    expect(compiled.harness).toBe(profile ? "codex" : "pi");
+    expect(compiled.command).toBe(profile ? "codex" : "pi");
+    expect(compiled.mcp_tool_names).toEqual(
+      TOOLS.map((t) => `mcp__card__${t}`),
+    );
+    expect(
+      compiled.files.find((f) => f.path.endsWith("/core.md"))?.content,
+    ).toBe(corePromptFor("coder"));
+  },
+);

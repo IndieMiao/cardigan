@@ -33,7 +33,7 @@ export function AttachmentPreview({
             {a.uploaded_by === "human"
               ? "你"
               : a.uploaded_by.startsWith("assignment:")
-                ? `${a.uploader_role ?? "Agent"} ${a.uploaded_by.slice(11)}`
+                ? `${a.employee?.name ?? a.author_display ?? `未命名的 ${a.uploader_role ?? "Agent"}`} ${a.uploaded_by.slice(11)}`
                 : "系统"}{" "}
             <a href={a.download_path} download>
               下载

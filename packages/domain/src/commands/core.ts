@@ -1,4 +1,5 @@
 import { deriveCardStatus } from "../derived.js";
+import type { Employee, EmployeeActivity } from "../employee.js";
 import type * as E from "../entities.js";
 import type { DomainError, ErrorCode, Result } from "../errors.js";
 import type * as I from "../ids.js";
@@ -20,6 +21,8 @@ export interface CommandEntities {
 }
 export type CommandState = {
   readonly project_id: I.ProjectId;
+  readonly employees?: readonly Employee[];
+  readonly employee_activity?: readonly EmployeeActivity[];
   readonly roles: readonly E.RoleReference[];
   readonly events: readonly E.Event[];
   readonly timeline: readonly E.TimelineEntry[];

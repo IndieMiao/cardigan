@@ -839,3 +839,87 @@ test("M4.5: a legacy standing row is inferred from its newest token once", async
     reopened.close();
   }
 });
+
+test("assign --employee accepts IDs and case-insensitive names and explains rejection in Chinese", async () => {
+  await bootstrap();
+  for (const name of ["Alice", "Bob"])
+    expect(
+      await run([
+        "employee",
+        "add",
+        "--name",
+        name,
+        "--title",
+        "开发",
+        "--role",
+        "coder",
+      ]),
+    ).toBe(0);
+  expect(
+    await run([
+      "employee",
+      "add",
+      "--name",
+      "alice",
+      "--title",
+      "开发",
+      "--role",
+      "coder",
+    ]),
+  ).not.toBe(0);
+  expect(errors.join("\n")).toContain("在职员工");
+  for (const reference of ["aLIce", "E-2", undefined]) {
+    expect(
+      await run([
+        "card",
+        "create",
+        "--template",
+        "dev",
+        "--title",
+        "Employee",
+        "--goal",
+        "Ship",
+        "--acceptance",
+        "Pass",
+        "--repo",
+        "fixture",
+      ]),
+    ).toBe(0);
+    const n = reference === "aLIce" ? 1 : reference === "E-2" ? 4 : 7;
+    expect(
+      await run([
+        "assign",
+        `W-${n}`,
+        "--role",
+        "coder",
+        ...(reference ? ["--employee", reference] : []),
+      ]),
+    ).toBe(0);
+    expect(printed()).toContain(`员工 ${reference === "E-2" ? "E-2" : "E-1"}`);
+  }
+  expect(
+    await run(["assign", "W-1", "--role", "coder", "--employee", "E-2"]),
+  ).not.toBe(0);
+  expect(errors.join("\n")).toContain("员工创建后不能修改");
+  expect(await run(["employee", "deactivate", "E-2"])).toBe(0);
+  expect(
+    await run([
+      "card",
+      "create",
+      "--template",
+      "dev",
+      "--title",
+      "Inactive",
+      "--goal",
+      "Ship",
+      "--acceptance",
+      "Pass",
+      "--repo",
+      "fixture",
+    ]),
+  ).toBe(0);
+  expect(
+    await run(["assign", "W-10", "--role", "coder", "--employee", "E-2"]),
+  ).not.toBe(0);
+  expect(errors.join("\n")).toContain("已停用");
+});

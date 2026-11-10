@@ -21,7 +21,15 @@ export const whoamiTool = defineTool({
           )
         : undefined;
 
+    const employee = store.uow.read((tx) =>
+      assignment.employee_id
+        ? tx.employees?.get(assignment.employee_id)
+        : undefined,
+    );
     return {
+      employee_id: employee?.id ?? null,
+      employee_name: employee?.name ?? null,
+      employee_title: employee?.title ?? null,
       project_id: actor.project_id,
       assignment_id: assignment.id,
       role_id: role.role_id,

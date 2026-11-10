@@ -26,6 +26,7 @@ import {
   text,
   unwrap,
 } from "./core.js";
+import { checkEmployeeSeparation } from "./employee-assignment.js";
 
 import { completionPassed } from "./merge.js";
 import { pendingReviewLimit, requestReviewLimit } from "./review-limit.js";
@@ -50,6 +51,7 @@ const sameSubject = (a: DeliverySubject, b: DeliverySubject) =>
   a.kind === b.kind && a.value === b.value;
 function inspect(d: CommandDraft, p: SubmitDeliveryParams) {
   const item = d.ownWork(p.work_item_id);
+  checkEmployeeSeparation(d, item, d.assignment?.employee_id);
   ensure(
     item.kind === "produce",
     "unauthorized",
@@ -452,6 +454,7 @@ export function submitReview(
       "A verification assignment is required",
     );
     let item = d.ownWork(d.assignment.work_item_id);
+    checkEmployeeSeparation(d, item, d.assignment.employee_id);
     ensure(
       item.kind === "verify" &&
         target.requested_verifiers.includes(item.id) &&

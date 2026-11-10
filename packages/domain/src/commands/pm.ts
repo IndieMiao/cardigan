@@ -10,6 +10,11 @@ import {
   text,
   unwrap,
 } from "./core.js";
+import {
+  checkEmployeeSeparation,
+  resolveEmployee,
+  selectEmployee,
+} from "./employee-assignment.js";
 import { canResume, queueResumedRun, resumeWork } from "./resumption.js";
 
 export type CreateCardParams = Pick<
@@ -492,6 +497,7 @@ export function assign(
     work_item_id: WorkItemId;
     role_id: string;
     role_version?: number;
+    employee_id?: string;
     machine_id?: string;
   },
   ports: CommandPorts,
@@ -533,6 +539,13 @@ export function assign(
         "invariant_violation",
         "A work item has one persistent assignment",
       );
+      ensure(
+        p.employee_id === undefined ||
+          resolveEmployee(d, p.employee_id).id === current.employee_id,
+        "invariant_violation",
+        "Assignment 的员工创建后不能修改",
+      );
+      checkEmployeeSeparation(d, item, current.employee_id);
       return current;
     }
     const card = d.card(item.card_id);
@@ -541,12 +554,14 @@ export function assign(
       "illegal_transition",
       "Card is closed",
     );
+    const employee = selectEmployee(d, item, p.employee_id);
     const id = d.ids.next(state.project_id, "assignment");
     const token_id = `assignment:${JSON.stringify([state.project_id, id])}`;
     const assignment: Assignment = {
       id,
       scope: "work_item" as const,
       work_item_id: item.id,
+      ...(employee ? { employee_id: employee.id } : {}),
       role_id: role.role_id,
       role_version: role.role_version,
       status: "active" as const,
@@ -567,7 +582,11 @@ export function assign(
     d.emit(
       "work_item_assigned",
       card.id,
-      { work_item_id: item.id, assignment_id: id },
+      {
+        work_item_id: item.id,
+        assignment_id: id,
+        ...(employee ? { employee_id: employee.id } : {}),
+      },
       {
         type: "status_change",
         body: `Assigned ${item.id} to ${role.role_id}`,

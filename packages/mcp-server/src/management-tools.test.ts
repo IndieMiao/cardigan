@@ -159,12 +159,14 @@ const work = (role: string) => {
   if (!found) throw new Error("Missing work item");
   return found;
 };
-async function coder() {
+async function coder(reused = false) {
   const assignment = await ok<AssignmentReply>(office, "assign", {
     work_item_id: work("coder").id,
     role_id: "coder",
   });
-  expect(assignment.token_status).toBe("pending_host_issuance");
+  expect(assignment.token_status).toBe(
+    reused ? "host_managed" : "pending_host_issuance",
+  );
   store.uow.run((tx) =>
     tx.runs.put(project, {
       id: tx.ids.next(project, "run"),
@@ -538,4 +540,81 @@ test("S21 tools/list advertises optional project defaults", async () => {
   expect(tool?.inputSchema.required).not.toContain("base_branch");
   expect(tool?.description).toMatch(/registered repository/);
   expect(tool?.description).toMatch(/default base branch/);
+});
+
+test("MCP assign accepts employee IDs/names, auto selects globally and whoami/read views resolve trusted identity", async () => {
+  const employee = store.uow.run((tx) => {
+    const e = {
+      id: tx.global_ids.nextEmployeeId(),
+      name: "Alice",
+      title: "开发工程师",
+      bio: "private bio",
+      avatar: "avatar:alice",
+      role_id: "coder",
+      launch_profile_ref: "private-profile",
+      status: "active" as const,
+      created_at: "2026-01-01",
+      updated_at: "2026-01-01",
+    };
+    tx.employees.put(e);
+    return e;
+  });
+  const assigned = await ok<AssignmentReply>(office, "assign", {
+    work_item_id: work("coder").id,
+    role_id: "coder",
+    employee_id: " ALICE ",
+  });
+  expect(assigned.employee_id).toBe(employee.id);
+  const client = await coder(true);
+  expect(await ok(client, "whoami", { employee_id: "E-999" })).toMatchObject({
+    employee_id: employee.id,
+    employee_name: "Alice",
+    employee_title: "开发工程师",
+  });
+  expect(await ok(office, "whoami", {})).toMatchObject({
+    employee_id: null,
+    employee_name: null,
+    employee_title: null,
+  });
+  await ok(client, "post_comment", {
+    card_id: card.id,
+    body: "I am somebody else",
+    work_item_id: work("coder").id,
+  });
+  const updates = await ok<{
+    timeline: (TimelineEntry & { employee: unknown; author_display: string })[];
+  }>(office, "get_updates", { card_id: card.id, since_seq: 0 });
+  expect(updates.timeline.at(-1)).toMatchObject({
+    author: `assignment:${assigned.id}`,
+    author_display: "Alice",
+    employee: {
+      id: employee.id,
+      name: "Alice",
+      title: "开发工程师",
+      avatar: "avatar:alice",
+    },
+  });
+  expect(JSON.stringify(updates)).not.toContain("private-profile");
+  expect(JSON.stringify(updates)).not.toContain("private bio");
+  const delivery = await ok(client, "submit_delivery", {
+    work_item_id: work("coder").id,
+    kind: "code",
+    summary: "Done",
+    subject: { kind: "doc_version", value: "v1" },
+    requested_verifiers: [work("reviewer").id],
+  });
+  expect(delivery).toBeDefined();
+  const detail = await ok<{
+    deliveries: { employee: { id: string }; author: string }[];
+  }>(office, "get_card", { card_id: card.id });
+  expect(detail.deliveries[0]).toMatchObject({
+    author: `assignment:${assigned.id}`,
+    employee: { id: employee.id, name: "Alice" },
+  });
+  const failed = await raw(office, "assign", {
+    work_item_id: work("reviewer").id,
+    role_id: "reviewer",
+    employee_id: employee.id,
+  });
+  expect(failed.isError).toBe(true);
 });

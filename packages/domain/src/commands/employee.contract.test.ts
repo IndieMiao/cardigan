@@ -267,3 +267,23 @@ test("unrelated edits and deactivation do not depend on an old launch profile st
     ),
   );
 });
+
+test.each([
+  ["Alice", "alice"],
+  ["Élodie", "éLODIE"],
+  [" Alice　Smith ", "alice Smith"],
+])(
+  "case-insensitive names reject create/update/activate while preserving display case: %s",
+  (name, duplicate) => {
+    const p = ports();
+    const first = created(p, { ...input, name });
+    expect(first.name).toBe(name.replace(/\u3000/gu, " ").trim());
+    rejects(createEmployee([first], human, { ...input, name: duplicate }, p));
+    const other = created(p, { ...input, name: "Bob" });
+    rejects(
+      updateEmployee([first, other], human, other.id, { name: duplicate }, p),
+    );
+    const inactive = { ...other, name: duplicate, status: "inactive" as const };
+    rejects(activateEmployee([first, inactive], human, inactive.id, p));
+  },
+);

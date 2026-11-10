@@ -50,12 +50,16 @@ export function TimelineActor({
     ? entry.author.slice(11)
     : undefined;
   const name = assignment
-    ? (entry.author_role ?? "Agent")
+    ? (entry.employee?.name ??
+      entry.author_display ??
+      `未命名的 ${entry.author_role ?? "Agent"}`)
     : entry.author === "human"
       ? "你"
       : "系统";
-  const role = ["pm", "coder", "reviewer", "tester"].includes(name)
-    ? name
+  const role = ["pm", "coder", "reviewer", "tester"].includes(
+    entry.author_role ?? "",
+  )
+    ? entry.author_role
     : assignment
       ? "agent"
       : entry.author;
@@ -69,7 +73,9 @@ export function TimelineActor({
             ? "人"
             : name === "系统"
               ? "系"
-              : name.charAt(0).toUpperCase()}
+              : (entry.employee?.name ?? entry.author_role ?? "Agent")
+                  .charAt(0)
+                  .toUpperCase()}
         </span>
       )}
       <Tooltip

@@ -174,7 +174,7 @@ test("v8 migration preserves old project data, assignments, event streams, token
   try {
     const upgraded = Store.open({ dataDir });
     try {
-      expect(upgraded.schemaVersion()).toBe(9);
+      expect(upgraded.schemaVersion()).toBe(10);
       expect(upgraded.migrate()).toEqual([]);
       expect(upgraded.getProject(project_id)?.id).toBe(project_id);
       expect(upgraded.verifyToken(token)).toBeDefined();
@@ -206,4 +206,159 @@ test("v8 migration preserves old project data, assignments, event streams, token
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
   }
+});
+
+test("v9 case-insensitive migration resolves collisions, preserves identities/status and audits each rename once", () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "cardigan-name-migration-"));
+  const oldMigrations = join(dataDir, "v9");
+  mkdirSync(oldMigrations);
+  for (const m of listMigrations(defaultMigrationsDir).filter(
+    (m) => m.version <= 9,
+  ))
+    writeFileSync(
+      join(
+        oldMigrations,
+        `${String(m.version).padStart(4, "0")}_${m.name}.sql`,
+      ),
+      m.sql,
+    );
+  try {
+    const old = Store.open({ dataDir, migrationsDir: oldMigrations });
+    try {
+      for (const [i, name] of [
+        "Alice",
+        "alice",
+        "alice (E-2)",
+        "Änne",
+        "änne",
+        "ALICE",
+      ].entries()) {
+        // Reproduce v9 name_key, before JS normalization changed in this version.
+        const e = {
+          id: `E-${i + 1}`,
+          name,
+          title: "Dev",
+          bio: "",
+          avatar: null,
+          role_id: "coder",
+          launch_profile_ref: null,
+          status: i === 5 ? "inactive" : "active",
+          created_at: clock.now(),
+          updated_at: clock.now(),
+        };
+        old.database
+          .prepare(
+            "INSERT INTO employees (id, name_key, status, doc) VALUES (?, ?, ?, ?)",
+          )
+          .run(e.id, name, e.status, JSON.stringify(e));
+      }
+      old.database
+        .prepare(
+          "INSERT INTO global_counters (kind, value) VALUES ('employee', 6)",
+        )
+        .run();
+    } finally {
+      old.close();
+    }
+    const upgraded = Store.open({ dataDir });
+    try {
+      const employees = upgraded.uow.read((tx) => tx.employees.list());
+      expect(employees.map((e) => e.name)).toEqual([
+        "Alice",
+        "alice (E-2-1)",
+        "alice (E-2)",
+        "Änne",
+        "änne (E-5)",
+        "ALICE",
+      ]);
+      expect(employees.map((e) => e.status)).toEqual([
+        "active",
+        "active",
+        "active",
+        "active",
+        "active",
+        "inactive",
+      ]);
+      const events = upgraded.uow.read((tx) => tx.global_events.listAfter(0));
+      expect(events).toHaveLength(2);
+      expect(events[0]).toMatchObject({
+        actor: { kind: "system" },
+        payload: {
+          previous_name: "alice",
+          reason: "case_insensitive_name_migration",
+        },
+      });
+      expect(upgraded.migrate()).toEqual([]);
+      expect(upgraded.uow.read((tx) => tx.global_events.listAfter(0))).toEqual(
+        events,
+      );
+      expect(() => add(upgraded, "ALIce")).toThrow("在职员工");
+      expect(() => add(upgraded, "ÄNNE")).toThrow("在职员工");
+      expect(add(upgraded, "Bob").id).toBe("E-7");
+    } finally {
+      upgraded.close();
+    }
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("employee activity spans projects without confusing project-local Assignment IDs", () => {
+  withTempStore((store) => {
+    const e = add(store);
+    for (const project of ["one", "two"]) {
+      store.createProject({ id: project });
+      store.uow.run((tx) => {
+        tx.assignments.put(
+          project,
+          assignment({
+            employee_id: e.id,
+            created_at: project === "one" ? "2026-01-01" : "2026-01-02",
+          }),
+        );
+        tx.runs.put(project, {
+          id: "R-1" as never,
+          assignment_id: assignment().id,
+          trigger_event_id: event({ seq: 1 }).id,
+          kind: "initial",
+          status: project === "one" ? "unknown" : "completed",
+          role_version: 1,
+          model: "fixture",
+          agent_cli_version: "1",
+          outcome: null,
+          summary: "",
+        });
+      });
+    }
+    expect(store.uow.read((tx) => tx.employees.assignmentActivity?.())).toEqual(
+      [
+        {
+          employee_id: e.id,
+          last_assigned_at: "2026-01-02",
+          unfinished_runs: 1,
+        },
+      ],
+    );
+    expect(() =>
+      store.uow.run((tx) =>
+        tx.assignments.put(
+          "one",
+          assignment({ employee_id: "E-999" as never }),
+        ),
+      ),
+    ).toThrow("employee_id is immutable");
+    expect(() =>
+      store.uow.run((tx) => tx.assignments.put("one", assignment())),
+    ).toThrow("employee_id is immutable");
+    store.uow.run((tx) =>
+      tx.assignments.put(
+        "one",
+        assignment({ employee_id: e.id, status: "released" }),
+      ),
+    );
+    expect(
+      store.uow.read((tx) => tx.assignments.get("one", assignment().id))
+        ?.employee_id,
+    ).toBe(e.id);
+  });
 });

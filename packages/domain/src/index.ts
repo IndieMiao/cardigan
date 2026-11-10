@@ -1,3 +1,4 @@
+export * from "./author-view.js";
 export * from "./card-derived.js";
 export * from "./commands/attachments.js";
 export * from "./commands/coordination.js";
