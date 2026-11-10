@@ -267,7 +267,7 @@ test.each([{ ids: [] }, { ids: ["W-1"] }, { ids: ["C-99"] }])(
       2,
     );
     expect(errors.join("\n")).toContain(
-      ids[0] === "C-99" ? "卡片不存在" : "合法的卡片编号",
+      ids[0] === "C-99" ? "卡片在当前项目中不存在" : "合法的卡片编号",
     );
     expect(snapshot()).toEqual(before);
   },

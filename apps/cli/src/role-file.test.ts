@@ -181,7 +181,9 @@ test("project set-repo needs --path and an absolute directory", async () => {
   expect(errors.join("\n")).toContain("--path");
 
   expect(await run(["project", "set-repo", "--path", "relative/repo"])).toBe(2);
-  expect(errors.join("\n")).toContain("absolute");
+  expect(errors.join("\n")).toContain(
+    "无法设置项目仓库 p-roles：仓库路径必须是绝对路径（validation_failed）",
+  );
 });
 
 test("a run pinned to an old version still resolves that version", async () => {

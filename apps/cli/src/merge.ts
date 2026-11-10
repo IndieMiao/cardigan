@@ -7,7 +7,7 @@ import {
 } from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
 import { openStore as openCardiganStore, type Store } from "@cardigan/store";
-import { CliError, EXIT } from "./errors.js";
+import { CliError, EXIT, formatCommandError } from "./errors.js";
 import {
   announceDataDir,
   humanActor,
@@ -195,7 +195,7 @@ function describe(
   lines.push(
     plan.ok
       ? `  plan: ready (completion ${plan.value.completion_id}, ${plan.value.deliveries.length} deliveries)`
-      : `  plan: not ready — ${plan.error.code}: ${plan.error.message}`,
+      : `  plan: not ready — ${formatCommandError("生成合并计划", card.id, plan.error)}`,
   );
   return lines;
 }
@@ -226,6 +226,8 @@ function mergeConfirm(args: readonly string[], io: CliIo): number {
       return EXIT.ok;
     }
     const decision = runCommand(store, {
+      operation: "确认合并",
+      target: id,
       project_id,
       actor: humanActor(project_id),
       reduce: (state, actor, ports) =>
@@ -264,6 +266,8 @@ function mergeRequest(args: readonly string[], io: CliIo): number {
     );
     requireMergeCard(store, project_id, id);
     const decision: Decision = runCommand(store, {
+      operation: "请求合并",
+      target: id,
       project_id,
       actor: humanActor(project_id),
       reduce: (state, actor, ports) =>
@@ -298,6 +302,8 @@ function mergeRequestChanges(args: readonly string[], io: CliIo): number {
         EXIT.usage,
       );
     const decision = runCommand(store, {
+      operation: "退回修改",
+      target: id,
       project_id,
       actor: humanActor(project_id),
       reduce: (state, actor, ports) =>

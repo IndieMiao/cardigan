@@ -39,7 +39,12 @@ import {
   writeRole,
 } from "@cardigan/store";
 import { loadConfig, loadSecrets } from "./config.js";
-import { CliError, EXIT } from "./errors.js";
+import {
+  CliError,
+  EXIT,
+  formatCommandError,
+  formatLaunchError,
+} from "./errors.js";
 import {
   announceDataDir,
   humanActor,
@@ -216,10 +221,16 @@ export async function startAssignment(
       captureLocal: (binary) => cliVersion(io, binary),
     },
     harnessBinary(role.harness),
-  );
+  ).catch((error: unknown) => {
+    const message = formatLaunchError(assignment.id, error);
+    if (message) throw new CliError(message, EXIT.failure);
+    throw error;
+  });
   if (resuming && assignment.runtime_ref)
     await closeStandingTerminal(options.runtime, assignment.runtime_ref);
   const run = runCommand(store, {
+    operation: "启动 Assignment",
+    target: assignment.id,
     project_id,
     actor: humanActor(project_id),
     reduce: (state, actor, ports) =>
@@ -289,6 +300,8 @@ export async function startAssignment(
       abort(store, project_id, run.id, "worktree preparation failed");
     }
     if (resuming) pauseStanding(store, project_id, assignment.id);
+    const message = formatLaunchError(assignment.id, error);
+    if (message) throw new CliError(message, EXIT.failure);
     if (error instanceof HostLaunchError)
       throw new CliError(
         `启动失败（${error.step}）：${error.message}`,
@@ -304,6 +317,8 @@ function pauseStanding(
   assignment_id: Assignment["id"],
 ) {
   return runCommand(store, {
+    operation: "暂停常驻 PM",
+    target: assignment_id,
     project_id,
     actor: humanActor(project_id),
     reduce: (s, a, p) => pauseStandingAssignment(s, a, { assignment_id }, p),
@@ -331,7 +346,7 @@ async function closeStandingTerminal(runtime: Runtime, ref: RuntimeRef) {
   const result = await runtime.release(ref, { force: true });
   if (!result.ok && result.error.code !== "runtime_not_found")
     throw new CliError(
-      `常驻 PM 已暂停，但终端关闭失败：${result.error.code} ${result.error.message}`,
+      formatCommandError("关闭终端", "常驻 PM（已暂停）", result.error),
       EXIT.failure,
     );
 }
@@ -425,7 +440,7 @@ export async function stopAssignment(input: {
   const released = await input.runtime.release(ref, { force: true });
   if (!released.ok && released.error.code !== "runtime_not_found") {
     throw new CliError(
-      `释放终端失败：${released.error.code} ${released.error.message}`,
+      formatCommandError("释放终端", assignment.id, released.error),
       EXIT.failure,
     );
   }
@@ -483,7 +498,7 @@ export async function attachAssignment(input: {
   const entry = await input.runtime.human_entry(ref);
   if (!entry.ok) {
     throw new CliError(
-      `无法给出进入方式：${entry.error.code} ${entry.error.message}`,
+      formatCommandError("获取终端进入方式", assignment.id, entry.error),
       EXIT.failure,
     );
   }
@@ -556,7 +571,7 @@ export async function runAssignmentCommand(
     const created = await HerdrRuntime.create({ session, execution });
     if (!created.ok) {
       throw new CliError(
-        `运行时不可用：${created.error.code} ${created.error.message}`,
+        formatCommandError("连接运行时", "Herdr", created.error),
         EXIT.failure,
       );
     }
@@ -674,7 +689,7 @@ export async function startAssignmentById(
   });
   if (!created.ok) {
     throw new CliError(
-      `运行时不可用：${created.error.code} ${created.error.message}`,
+      formatCommandError("连接运行时", "Herdr", created.error),
       EXIT.failure,
     );
   }

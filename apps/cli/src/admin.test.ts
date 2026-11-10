@@ -73,7 +73,9 @@ test("cardigan project create records a project", async () => {
 test("creating the same project twice fails", async () => {
   expect(await run(["project", "create", "p-cli"])).toBe(0);
   expect(await run(["project", "create", "p-cli"])).toBe(2);
-  expect(err.join("\n")).toContain("already exists");
+  expect(err.join("\n")).toContain(
+    "无法创建项目 p-cli：项目已存在，不能重复创建（validation_failed）",
+  );
 });
 
 test("cardigan role add writes allowed_tools and capabilities", async () => {

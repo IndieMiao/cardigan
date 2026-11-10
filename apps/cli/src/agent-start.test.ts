@@ -346,7 +346,10 @@ process.exit(child.status ?? 98);
       const first = await startAssignment(options());
       const token = await readFile(join(runDir, "token"), "utf8");
       expect(vi.mocked(runtime.provision).mock.calls[0]?.[3].cwd).toBe(runDir);
-      await expect(startAssignment(options())).rejects.toThrow(/Run/);
+      await expect(startAssignment(options())).rejects.toMatchObject({
+        exitCode: 2,
+        message: `无法启动 Assignment ${assignment.id}：这个 Assignment 或工作区已有尚未结束的 Run，不能重复启动（invariant_violation）`,
+      });
       expect(await readFile(join(runDir, "token"), "utf8")).toBe(token);
       expect(state().runs).toHaveLength(1);
       expect(
@@ -422,9 +425,10 @@ process.exit(child.status ?? 98);
         ok: false,
         error: { code: "runtime_unavailable", message: "offline" },
       });
-      await expect(startAssignment(options())).rejects.toThrow(
-        /runtime_unavailable/,
-      );
+      await expect(startAssignment(options())).rejects.toMatchObject({
+        exitCode: 1,
+        message: `无法启动 Assignment ${assignment.id}：运行时不可用，请检查运行服务（runtime_unavailable）`,
+      });
       expect(state().runs).toEqual([]);
       expect(state().tokens).toEqual([]);
       expect(io.captureCommand).not.toHaveBeenCalled();

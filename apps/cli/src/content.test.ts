@@ -287,6 +287,9 @@ test("enforces card and entry scope without writing partial records", async () =
     expect(snapshot()).toEqual(before);
   }
   expect(await run(["comment", "add", "C-99", "--text=x"])).toBe(2);
+  expect(errors.join("\n")).toContain(
+    "无法发表评论 C-99：卡片在当前项目中不存在（not_found）",
+  );
   expect(snapshot()).toEqual(before);
 });
 
@@ -321,7 +324,9 @@ test("rejects corrupted existing blobs without posting a second comment", async 
     attachment = before.attachments[0];
   writeFileSync(join(dataDir, attachment?.storage_path ?? ""), "corrupt");
   expect(await run(args)).toBe(2);
-  expect(errors.join("\n")).toContain("附件存储失败");
+  expect(errors.join("\n")).toContain(
+    "无法上传附件 C-1：附件存储失败，请检查数据目录权限和已存文件的完整性（validation_failed）",
+  );
   expect(snapshot()).toEqual(before);
 });
 
