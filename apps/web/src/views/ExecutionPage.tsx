@@ -237,15 +237,23 @@ function RunHistory({
     };
   }, [client, projectId, assignmentId, revision]);
   const more = () => {
-    if (!state?.next) return;
+    const before = state?.next;
+    if (!before) return;
     setLoadingMore(true);
     client
-      .executionRuns(projectId, assignmentId, state.next)
+      .executionRuns(projectId, assignmentId, before)
       .then(
         (page) => {
           setError(undefined);
+          // The page continues the chain it was asked for only if the list
+          // still ends at that cursor. A refresh that restarted from a new
+          // first page meanwhile makes this response stale: appending it
+          // would skip the Runs in between, so it is dropped and the new
+          // chain's own 显示更多 reads them.
           setState((current) =>
-            current === undefined
+            current === undefined ||
+            current.next !== before ||
+            current.runs.at(-1)?.id !== before
               ? current
               : {
                   runs: [

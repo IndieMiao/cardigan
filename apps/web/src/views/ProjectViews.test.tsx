@@ -601,6 +601,83 @@ test("C-75: a live refresh with more new Runs than one page leaves no gap in the
   ).toBeNull();
 });
 
+test("C-75: a 显示更多 response that arrives after a refresh restarted the history is dropped, leaving no gap", async () => {
+  const make = (n: number) => ({
+    ...run,
+    id: `R-${n}`,
+    status: "completed",
+    summary: `run ${n}`,
+  });
+  const page = (all: ReturnType<typeof make>[], before?: string) => {
+    const start =
+      before === undefined ? 0 : all.findIndex((r) => r.id === before) + 1;
+    const runs = all.slice(start, start + 10);
+    return {
+      runs,
+      total: all.length,
+      next_cursor:
+        start + runs.length < all.length ? (runs.at(-1)?.id ?? null) : null,
+    };
+  };
+  let all = Array.from({ length: 20 }, (_, i) => make(20 - i));
+  let releaseOld: (() => void) | undefined;
+  const executionRuns = vi.fn(
+    async (_projectId: string, _assignmentId: string, before?: string) => {
+      const snapshot = all;
+      // Hold the first 显示更多 (before=R-11) until the test releases it.
+      if (before === "R-11" && releaseOld === undefined)
+        await new Promise<void>((resolve) => {
+          releaseOld = resolve;
+        });
+      return page(snapshot, before);
+    },
+  );
+  const client = fakeClient({
+    execution: async () => ({
+      assignments: [assignment],
+      runs: all,
+      machines: [],
+    }),
+    executionRuns,
+  });
+  const { rerender } = render(
+    <ExecutionPage client={client} projectId="p-1" revision={0} />,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "查看 A-1 详情" }));
+  const history = await screen.findByRole("region", { name: "A-1 Run 历史" });
+  const ids = () =>
+    [...history.querySelectorAll(".execution-runs li")].map(
+      (li) => /R-\d+/.exec(li.textContent ?? "")?.[0],
+    );
+  await waitFor(() => expect(ids()).toHaveLength(10));
+  // ① 显示更多 is in flight (R-10…R-1 against the old data) …
+  fireEvent.click(within(history).getByRole("button", { name: "显示更多" }));
+  await waitFor(() => expect(releaseOld).toBeDefined());
+  // ② … when eleven new Runs arrive and the refresh restarts the history.
+  all = Array.from({ length: 31 }, (_, i) => make(31 - i));
+  rerender(<ExecutionPage client={client} projectId="p-1" revision={1} />);
+  await within(history).findByText("R-31", { exact: false });
+  expect(ids()).toEqual(Array.from({ length: 10 }, (_, i) => `R-${31 - i}`));
+  // ③ The stale page lands late and must not be glued on.
+  await act(async () => {
+    releaseOld?.();
+    await new Promise((r) => setTimeout(r, 10));
+  });
+  expect(ids()).toEqual(Array.from({ length: 10 }, (_, i) => `R-${31 - i}`));
+  expect(history.textContent).toContain("10 / 31");
+  // The new chain still reads everything in order.
+  for (const length of [20, 30, 31]) {
+    fireEvent.click(
+      await within(history).findByRole("button", { name: "显示更多" }),
+    );
+    await waitFor(() => expect(ids()).toHaveLength(length));
+  }
+  expect(ids()).toEqual(Array.from({ length: 31 }, (_, i) => `R-${31 - i}`));
+  expect(
+    within(history).queryByRole("button", { name: "显示更多" }),
+  ).toBeNull();
+});
+
 test("C-75: ACK cursors fold into one line and expand to the ten newest with 显示更多", async () => {
   const cursors = Array.from({ length: 23 }, (_, index) => ({
     card_id: `C-${index + 1}`,
