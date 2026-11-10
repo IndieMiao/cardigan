@@ -155,6 +155,7 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
     ...(options.runLimit ? { runLimit: options.runLimit } : {}),
     startRun: options.startRun,
     ...(options.beforeWake ? { beforeWake: options.beforeWake } : {}),
+    onError: (error) => options.onError?.(error),
     ...(options.deliveryLeaseMs === undefined
       ? {}
       : { deliveryLeaseMs: options.deliveryLeaseMs }),

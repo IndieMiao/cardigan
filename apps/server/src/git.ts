@@ -28,7 +28,11 @@ import {
   type PushResult,
   type WorkspaceGit as WorkspaceGitPort,
 } from "@cardigan/git-transport";
-import { type MergePushConfig, validateMergePushConfig } from "@cardigan/host";
+import {
+  hostRepositoryLock,
+  type MergePushConfig,
+  validateMergePushConfig,
+} from "@cardigan/host";
 import type { DeliveryVerifierFor } from "@cardigan/mcp-server";
 import {
   type AgentExecution,
@@ -221,7 +225,12 @@ export class ServerGit implements GitBinding {
     this.worktrees = new GitWorktreeService(
       new LocalGitTransport("git", {}, workspace),
       this.central,
-      { dataDir: options.dataDir, ...roots },
+      {
+        dataDir: options.dataDir,
+        ...roots,
+        // Same per-project lock as the wake/start path (§12).
+        lock: hostRepositoryLock(options.dataDir),
+      },
     );
   }
 

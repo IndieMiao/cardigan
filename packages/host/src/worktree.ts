@@ -22,6 +22,7 @@ import {
 import type { Store } from "@cardigan/store";
 import { AgentGitTransport } from "./agent-git.js";
 import { launchEntities } from "./commands.js";
+import { hostRepositoryLock } from "./repository-lock.js";
 /** The host-owned placement passed to launch and persisted by dispatchRun. */
 export interface PreparedWorktree {
   readonly path: string;
@@ -120,6 +121,7 @@ export function worktreeProvider(
     const service = new GitWorktreeService(transport, central, {
       dataDir,
       ...executionPaths(execution, project_id, assignment.id),
+      lock: hostRepositoryLock(dataDir),
     });
     const placed = await service.ensureWorktree({
       project_id,

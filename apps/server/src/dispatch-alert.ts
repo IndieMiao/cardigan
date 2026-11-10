@@ -15,6 +15,12 @@ import {
 } from "@cardigan/store";
 import type { StandingResolver } from "./dispatch-inbox.js";
 
+/** Sanitized cause of a failed bell delivery, stored on the failure event. */
+export interface DeliveryFailure {
+  readonly category: string;
+  readonly exit_code?: number;
+  readonly message: string;
+}
 export const unfinishedRun = (r: Run) =>
   !["completed", "failed", "cancelled"].includes(r.status);
 export type AlertAudience = "ops" | "human" | "human_only";
@@ -51,6 +57,7 @@ export function dispatchAlert(
     run_id?: RunId | undefined;
     notification_ids?: readonly string[];
     mark?: boolean;
+    error?: DeliveryFailure;
   },
 ) {
   const project = state.project_id;
@@ -66,6 +73,7 @@ export function dispatchAlert(
       reason: input.reason,
       ...(input.run_id ? { run_id: input.run_id } : {}),
       notification_ids: input.notification_ids ?? [],
+      ...(input.error ? { error: { ...input.error } } : {}),
     },
   };
   tx.events.append(project, event);

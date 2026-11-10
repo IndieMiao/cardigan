@@ -23,7 +23,11 @@ import {
   queueRun,
   remindDecisionFollowups,
 } from "@cardigan/domain";
-import { runCapacitySnapshot } from "@cardigan/host";
+import {
+  describePreparationFailure,
+  redactFailureLine,
+  runCapacitySnapshot,
+} from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import {
   mergeNotifications,
@@ -43,6 +47,7 @@ import {
 } from "@cardigan/store";
 import {
   alertAudience,
+  type DeliveryFailure,
   dispatchAlert,
   unfinishedRun,
 } from "./dispatch-alert.js";
@@ -88,6 +93,8 @@ export interface DispatcherOptions {
     project: ProjectId;
     assignment: Assignment;
   }) => Promise<string | undefined> | Promise<void>;
+  /** Server log for a failed bell delivery (sanitized, one line). */
+  readonly onError?: (error: unknown) => void;
 }
 const sameRef = (a: Assignment, b: Assignment) =>
   JSON.stringify(a.runtime_ref) === JSON.stringify(b.runtime_ref);
@@ -396,7 +403,12 @@ export class Dispatcher {
         }
         snapshot = prior;
       } else snapshot = await this.options.snapshot(a, project);
-    } catch {
+    } catch (error) {
+      this.options.onError?.(
+        new Error(
+          `bell delivery rejected: project=${project} asg=${a.id} reason=snapshot_unavailable message=${redactFailureLine(error instanceof Error ? error.message : String(error))}`,
+        ),
+      );
       this.reject(project, notes, a, "snapshot_unavailable");
       return;
     }
@@ -418,19 +430,29 @@ export class Dispatcher {
     }
     if (!job) return;
     let sent = false,
-      reason = "delivery_failed";
+      reason = "delivery_failed",
+      failure: DeliveryFailure | undefined,
+      stage: "before_wake" | "wake" | "delivery_call" = "delivery_call";
     try {
       if (live && job.assignment.runtime_ref) {
+        stage = "before_wake";
         const baseline = await this.options.beforeWake?.({
           project,
           assignment: job.assignment,
         });
+        stage = "wake";
         const result = await this.options.runtime.wake(
           job.assignment.runtime_ref,
           [job.bell, baseline].filter(Boolean).join("\n"),
         );
         sent = result.ok && result.value.sent;
-        if (!result.ok) reason = `wake_failed:${result.error.code}`;
+        if (!result.ok) {
+          reason = "wake_failed";
+          failure = {
+            category: result.error.code,
+            message: redactFailureLine(result.error.message),
+          };
+        }
       } else {
         if (replaceProfile && job.assignment.runtime_ref) {
           const released = await this.options.runtime.release(
@@ -457,10 +479,18 @@ export class Dispatcher {
           );
         reason = "startup_did_not_dispatch";
       }
-    } catch {
-      reason = "delivery_call_failed";
+    } catch (error) {
+      reason = `${stage}_failed`;
+      const { retryable: _, ...described } = describePreparationFailure(error);
+      failure = described;
     }
-    this.settle(job.attempt, sent, reason, job.bell);
+    if (failure)
+      this.options.onError?.(
+        new Error(
+          `bell delivery failed: project=${project} asg=${job.assignment.id} run=${job.run.id} reason=${reason} category=${failure.category}${failure.exit_code === undefined ? "" : ` exit=${failure.exit_code}`} message=${failure.message}`,
+        ),
+      );
+    this.settle(job.attempt, sent, reason, job.bell, failure);
   }
   private waitForRuntime(project: ProjectId, expected: Assignment) {
     this.options.store.uow.run((tx) => {
@@ -685,6 +715,7 @@ export class Dispatcher {
     sent: boolean,
     reason: string,
     bell?: string,
+    failure?: DeliveryFailure,
   ) {
     const { store } = this.options,
       project = attempt.project_id;
@@ -753,7 +784,14 @@ export class Dispatcher {
         failed ||= !sent && !acked;
       }
       if (failed)
-        this.escalate(tx, project, notes, attempt.assignment_id, reason);
+        this.escalate(
+          tx,
+          project,
+          notes,
+          attempt.assignment_id,
+          reason,
+          failure,
+        );
     });
   }
   private reject(
@@ -798,6 +836,7 @@ export class Dispatcher {
     notes: readonly Notification[],
     assignment: Assignment["id"],
     reason: string,
+    failure?: DeliveryFailure,
   ) {
     const state = loadCommandState(tx, project);
     const a = state.assignments.find((a) => a.id === assignment);
@@ -811,6 +850,7 @@ export class Dispatcher {
         notes[0]?.card_id ??
         state.work_items.find((w) => w.id === a.work_item_id)?.card_id,
       notification_ids: notes.map((n) => n.id),
+      ...(failure ? { error: failure } : {}),
     });
   }
   private retryDelay(attempts: number) {
