@@ -11,10 +11,11 @@ import {
 import { loadMergeGateConfig } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
 import { openStore as openCardiganStore, type Store } from "@cardigan/store";
-import { CliError, EXIT } from "./errors.js";
+import { CliError, EXIT, formatCommandError } from "./errors.js";
 import {
   announceDataDir,
   humanActor,
+  resolveDataDir,
   resolveProject,
   runCommand,
   systemClock,
@@ -126,6 +127,10 @@ async function mergeRecheck(
     );
     requireMergeCard(store, project_id, id);
     const config = await loadMergeGateConfig({
+      dataDir: resolveDataDir(io, optional(parsed.flags, "data-dir")),
+      baseBranches: Object.fromEntries(
+        store.listProjects().map((p) => [p.id, p.base_branch ?? "main"]),
+      ),
       projectIds: store.listProjects().map((project) => project.id),
       env: io.env,
     });
@@ -136,6 +141,8 @@ async function mergeRecheck(
         EXIT.usage,
       );
     runCommand(store, {
+      operation: "重新检查合并",
+      target: id,
       project_id,
       actor: humanActor(project_id),
       clock: systemClock,
@@ -143,7 +150,10 @@ async function mergeRecheck(
         const plan = prepareMergePlan(state, id);
         if (!plan.ok)
           throw new CliError(
-            `${id} 暂时无法重新检查：请确认当前完成申请已通过审核，且没有待处理的阻塞事项。`,
+            formatCommandError("重新检查合并", id, {
+              ...plan.error,
+              message: "请确认当前完成申请已通过审核，且没有待处理的阻塞事项。",
+            }),
             EXIT.usage,
           );
         const latest = latestMergeCheck(
@@ -265,7 +275,7 @@ function describe(
   lines.push(
     plan.ok
       ? `  plan: ready (completion ${plan.value.completion_id}, ${plan.value.deliveries.length} deliveries)`
-      : `  plan: not ready — ${plan.error.code}: ${plan.error.message}`,
+      : `  plan: not ready — ${formatCommandError("生成合并计划", card.id, plan.error)}`,
   );
   return lines;
 }
@@ -296,6 +306,8 @@ function mergeConfirm(args: readonly string[], io: CliIo): number {
       return EXIT.ok;
     }
     const decision = runCommand(store, {
+      operation: "确认合并",
+      target: id,
       project_id,
       actor: humanActor(project_id),
       reduce: (state, actor, ports) =>
@@ -334,6 +346,8 @@ function mergeRequest(args: readonly string[], io: CliIo): number {
     );
     requireMergeCard(store, project_id, id);
     const decision: Decision = runCommand(store, {
+      operation: "请求合并",
+      target: id,
       project_id,
       actor: humanActor(project_id),
       reduce: (state, actor, ports) =>
@@ -375,6 +389,8 @@ function mergeRequestChanges(args: readonly string[], io: CliIo): number {
         EXIT.usage,
       );
     const decision = runCommand(store, {
+      operation: "退回修改",
+      target: id,
       project_id,
       actor: humanActor(project_id),
       reduce: (state, actor, ports) =>

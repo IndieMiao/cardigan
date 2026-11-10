@@ -116,6 +116,11 @@ test.each(
             store,
             runtime,
             dataDir,
+            execution: {
+              mode: "local",
+              dataDir,
+              ...(named ? { agentNice: 17 } : {}),
+            },
             clock,
             mcpUrl: "http://localhost/mcp",
             launch: {
@@ -134,6 +139,11 @@ test.each(
           },
         );
         const core = await readFile(join(launched.run_dir, "core.md"), "utf8");
+        const script = await readFile(
+          join(launched.run_dir, "launch.sh"),
+          "utf8",
+        );
+        expect(script).toContain(`exec nice -n ${named ? 17 : 10} `);
         const first = await readFile(
           join(launched.run_dir, "first.md"),
           "utf8",

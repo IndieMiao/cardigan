@@ -23,6 +23,7 @@ import {
   text,
   unwrap,
 } from "./core.js";
+import { supersedeDelivery } from "./delivery-invalidation.js";
 import { checkEmployeeSeparation } from "./employee-assignment.js";
 import { requestHumanCompletionReview } from "./human-completion.js";
 import { completionPassed } from "./merge.js";
@@ -293,6 +294,9 @@ export function submitDelivery(
     );
     const predecessor =
       predecessors.find((v) => v.id === p.supersedes) ?? predecessors[0];
+    // Superseded confirmations cannot block their replacement's preconditions.
+    // A later rejection discards this entire draft, including the invalidation.
+    for (const old of previous) supersedeDelivery(d, card, old);
     const checks: { key: string; passed: boolean }[] = [];
     if (completion) {
       const product = d
@@ -347,11 +351,6 @@ export function submitDelivery(
         );
       }
     }
-    for (const old of previous)
-      d.put("deliveries", {
-        ...old,
-        status: unwrap(transition("delivery", old.status, "supersede")),
-      });
     for (const decision of d.list("decisions")) {
       if (
         decision.trigger === "completion_review" &&

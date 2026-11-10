@@ -321,7 +321,9 @@ test("merge status lists the card, the confirmation and the plan", async () => {
   expect(result.out).toContain("confirmation: q(1) open");
   expect(result.out).toContain("delivery: D-1 W-1 git_head=");
   expect(result.out).toContain("plan: not ready");
-  expect(result.out).toContain("Merge confirmation has not been granted");
+  expect(result.out).toContain(
+    `无法生成合并计划 ${card_id}：本次完成申请尚未获得合并确认（illegal_transition）`,
+  );
 });
 
 test("merge confirm records the merge decision with the command as the quote", async () => {
@@ -575,6 +577,56 @@ test.each(["failed", "timed_out"] as const)(
   },
 );
 
+test.each([
+  ["queued", "排队"],
+  ["running", "运行中"],
+  ["passed", "通过"],
+  ["failed", "失败"],
+  ["timed_out", "超时"],
+  ["interrupted", "中断"],
+] as const)(
+  "needs-you includes the current merge check %s",
+  async (status, label) => {
+    await seatAwaitingMerge();
+    enableMergeGate();
+    recordCheck("queued");
+    if (status !== "queued") recordCheck("running");
+    if (status !== "queued" && status !== "running") recordCheck(status);
+    const result = await cardigan("needs-you");
+    expect(result.code).toBe(0);
+    expect(result.out).toContain(`合并检查：${label}`);
+  },
+);
+
+test("needs-you leaves projects without a gate unchanged and shows queued before the first event", async () => {
+  await seatAwaitingMerge();
+  expect((await cardigan("needs-you")).out).not.toContain("合并检查");
+  enableMergeGate();
+  expect((await cardigan("needs-you")).out).toContain("合并检查：排队");
+});
+
+test.each([
+  "projects: [private-config-fixture",
+  JSON.stringify({
+    projects: {
+      [project]: { checks: [], env: { PRIVATE: "private-config-fixture" } },
+    },
+  }),
+])(
+  "needs-you warns about invalid configuration without echoing it (%s)",
+  async (config) => {
+    await seatAwaitingMerge();
+    writeFileSync(join(dataDir, "merge-gate.yaml"), config, { mode: 0o600 });
+    const before = JSON.stringify(state());
+    const result = await cardigan("needs-you");
+    expect(result.code).toBe(0);
+    expect(result.out).toContain(card_id);
+    expect(result.out).toContain("合并闸门配置无效，请查看 server 启动日志");
+    expect(result.out).not.toContain("合并检查：排队");
+    expect(result.out + result.err).not.toContain("private-config-fixture");
+    expect(JSON.stringify(state())).toBe(before);
+  },
+);
 test.each(["queued", "running", "passed"] as const)(
   "merge request-changes refuses a confirmed %s check in Chinese without writes",
   async (status) => {

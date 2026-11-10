@@ -4,8 +4,15 @@ import {
   describeWriteError,
   type PreferencesView,
 } from "../api.js";
-import { PageTitle } from "../components/Foundation.js";
+import { PageTitle, StatusTag } from "../components/Foundation.js";
+import {
+  categoryLabels,
+  defaultDelegation,
+  delegableCategories,
+} from "../decision-labels.js";
 import { useResource } from "../useResource.js";
+import { RolesSettings } from "./RolesSettings.js";
+import { TemplateSettings } from "./TemplateSettings.js";
 
 export function SettingsPage({
   client,
@@ -16,6 +23,9 @@ export function SettingsPage({
   projectId: string;
   revision?: number;
 }) {
+  const [tab, setTab] = useState<
+    "preferences" | "authorization" | "roles" | "templates"
+  >("preferences");
   const load = useCallback(
     () => client.preferences(projectId),
     [client, projectId],
@@ -23,46 +33,125 @@ export function SettingsPage({
   const resource = useResource(load, revision);
   return (
     <>
-      <PageTitle title="设置" description="管理当前项目的偏好。" />
+      <PageTitle
+        title="设置"
+        description="管理当前项目的偏好、授权、角色和卡片模板。"
+      />
       <div className="settings-layout">
         <nav aria-label="设置分栏">
           <button
             type="button"
             onClick={() => {
-              document.getElementById("preferences")?.focus();
+              setTab("preferences");
             }}
-            aria-current="page"
+            aria-current={tab === "preferences" ? "page" : undefined}
           >
             偏好
           </button>
+          <button
+            type="button"
+            onClick={() => setTab("authorization")}
+            aria-current={tab === "authorization" ? "page" : undefined}
+          >
+            授权
+          </button>
+          <button
+            type="button"
+            aria-current={tab === "roles" ? "page" : undefined}
+            onClick={() => {
+              setTab("roles");
+              requestAnimationFrame(() =>
+                document.getElementById("roles")?.focus(),
+              );
+            }}
+          >
+            角色
+          </button>
+          <button
+            type="button"
+            aria-current={tab === "templates" ? "page" : undefined}
+            onClick={() => setTab("templates")}
+          >
+            卡片模板
+          </button>
         </nav>
-        <section
-          id="preferences"
-          tabIndex={-1}
-          aria-labelledby="preferences-title"
-        >
-          <h2 id="preferences-title">偏好</h2>
-          {resource.error && (
-            <p role="alert">
-              {resource.error}
-              <button type="button" onClick={resource.reload}>
-                重试
-              </button>
-            </p>
-          )}
-          {!resource.data && !resource.error && (
-            <p role="status">正在加载偏好…</p>
-          )}
-          {resource.data && (
-            <PreferenceForm
-              key={String(resource.data.auto_merge_after_minutes)}
-              initial={resource.data}
+        {tab === "roles" && (
+          <section id="roles" tabIndex={-1} aria-labelledby="roles-title">
+            <h2 id="roles-title">角色</h2>
+            <RolesSettings
+              key={projectId}
               client={client}
               projectId={projectId}
-              saved={resource.reload}
+              revision={revision}
             />
-          )}
-        </section>
+          </section>
+        )}
+        {tab === "templates" && (
+          <TemplateSettings
+            key={projectId}
+            client={client}
+            projectId={projectId}
+            revision={revision}
+          />
+        )}
+        <div hidden={tab === "templates" || tab === "roles"}>
+          <section
+            hidden={tab !== "preferences"}
+            id="preferences"
+            tabIndex={-1}
+            aria-labelledby="preferences-title"
+          >
+            <h2 id="preferences-title">偏好</h2>
+            {resource.error && (
+              <p role="alert">
+                {resource.error}
+                <button type="button" onClick={resource.reload}>
+                  重试
+                </button>
+              </p>
+            )}
+            {!resource.data && !resource.error && (
+              <p role="status">正在加载偏好…</p>
+            )}
+            {resource.data && (
+              <PreferenceForm
+                key={String(resource.data.auto_merge_after_minutes)}
+                initial={resource.data}
+                client={client}
+                projectId={projectId}
+                saved={resource.reload}
+              />
+            )}
+          </section>
+          <section
+            hidden={tab !== "authorization"}
+            id="authorization"
+            tabIndex={-1}
+            aria-labelledby="authorization-title"
+          >
+            <h2 id="authorization-title">授权</h2>
+            <p>
+              PM 代拍时必须写明理由并保留授权依据。没有活跃 PM Ops
+              时交给你；合并确认沿用原有设置。
+            </p>
+            {resource.data &&
+              Object.entries(categoryLabels).map(([category, label]) => (
+                <DelegationSetting
+                  key={`${category}:${resource.data?.decision_delegation?.[category]}`}
+                  category={category}
+                  label={label}
+                  enabled={
+                    resource.data?.decision_delegation?.[category] ??
+                    defaultDelegation[category] ??
+                    false
+                  }
+                  client={client}
+                  projectId={projectId}
+                  saved={resource.reload}
+                />
+              ))}
+          </section>
+        </div>
       </div>
     </>
   );
@@ -155,5 +244,73 @@ function PreferenceForm({
       {error && <p role="alert">{error}</p>}
       {message && <p role="status">{message}</p>}
     </form>
+  );
+}
+
+function DelegationSetting({
+  category,
+  label,
+  enabled,
+  client,
+  projectId,
+  saved,
+}: {
+  category: string;
+  label: string;
+  enabled: boolean;
+  client: CardiganClient;
+  projectId: string;
+  saved: () => void;
+}) {
+  const fixed = !delegableCategories.includes(category);
+  const [busy, setBusy] = useState(false),
+    [error, setError] = useState("");
+  const sending = useRef(false),
+    key = useRef<string | undefined>(undefined);
+  return (
+    <div>
+      <label>
+        <input
+          type="checkbox"
+          checked={!fixed && enabled}
+          disabled={fixed || busy}
+          onChange={async (e) => {
+            if (sending.current) return;
+            const next = e.target.checked;
+            sending.current = true;
+            setBusy(true);
+            setError("");
+            key.current ??= crypto.randomUUID();
+            try {
+              await client.setDelegation(
+                projectId,
+                category,
+                next,
+                key.current,
+              );
+              key.current = undefined;
+              saved();
+            } catch (cause) {
+              setError(describeWriteError(cause));
+            } finally {
+              sending.current = false;
+              setBusy(false);
+            }
+          }}
+        />
+        {label}：
+        <StatusTag
+          status={!fixed && enabled ? "active" : "waiting_decision"}
+          label={
+            fixed
+              ? "固定由人确认（Workbench 或本机 CLI）"
+              : enabled
+                ? "由 PM 代拍"
+                : "由人拍板"
+          }
+        />
+      </label>
+      {error && <p role="alert">{error}</p>}
+    </div>
   );
 }

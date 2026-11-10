@@ -386,3 +386,62 @@ test("merge timeline shows the deadline and distinguishes delegated from human c
   view.rerender(content({ ...resolved, author: "human" }));
   expect(screen.queryByText("自动合并（代批）")).toBeNull();
 });
+
+test("a PM delegated decision uses a shared status icon and remains distinct from automatic merge approval", () => {
+  const decision = {
+    id: "q(2)",
+    question: "选用哪个展示方式？",
+    status: "resolved",
+    decider: "pm",
+    blocking: false,
+    options: [{ key: "compact", description: "紧凑展示", impact: "减少留白" }],
+  };
+  render(
+    <TimelineContent
+      entry={timelineEntry({
+        type: "decision_resolved",
+        decision_id: decision.id,
+        decision_via: "delegated",
+        decision_option: "compact",
+        author: "assignment:A-4",
+      })}
+      detail={cardDetail({ decisions: [decision] })}
+      projectId="p-1"
+      cardId="C-1"
+    />,
+  );
+  expect(
+    screen
+      .getByText("已拍板（PM 代拍）")
+      .querySelector("svg.status-shape-success")
+      ?.getAttribute("aria-hidden"),
+  ).toBe("true");
+  expect(screen.queryByText("自动合并（代批）")).toBeNull();
+});
+
+test("human completion results render literally, including Markdown, references and HTML", () => {
+  const body =
+    "**确认完成** <img src=x onerror=alert(1)>\n[证据](https://example.test) C-2";
+  const { container } = show([
+    timelineEntry({
+      type: "status_change",
+      event_type: "card_marked_done",
+      author: "human",
+      body,
+      references: [
+        {
+          kind: "card",
+          id: "C-2",
+          exists: true,
+          status: "done",
+          card_id: "C-2",
+        },
+      ],
+    }),
+  ]);
+  fireEvent.click(screen.getByText("详情"));
+  const content = container.querySelector(".timeline-body");
+  expect(content?.textContent).toBe(body);
+  expect(content?.querySelector("strong, a, img, script")).toBeNull();
+  expect(content?.classList.contains("markdown")).toBe(false);
+});

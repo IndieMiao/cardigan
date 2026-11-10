@@ -2,6 +2,7 @@ import type { Decision, WorkItem } from "../entities.js";
 import type { DecisionId } from "../ids.js";
 import { transition } from "../transitions.js";
 import { type CommandDraft, ensure, text, unwrap } from "./core.js";
+import { delegationAllowed, delegationAuthority } from "./delegation.js";
 import { queueResumedRun, resumeWork } from "./resumption.js";
 
 export interface ReviewLimitResolution {
@@ -28,6 +29,7 @@ export function resolveReviewLimit(
     item.kind === "verify" &&
       q.trigger === "review_limit" &&
       q.decider === "role:pm" &&
+      delegationAllowed(d, q) &&
       q.affected_work_items.length === 1 &&
       q.affected_work_items[0] === item.id &&
       ["open", "provisional"].includes(q.status),
@@ -70,6 +72,7 @@ export function resolveReviewLimit(
     raw_quote: p.rationale,
     resolved_by: d.author,
     via: "delegated",
+    proxy_authority: delegationAuthority(d, q.category ?? "general"),
     via_chain: [d.author],
     at: d.now,
   });
@@ -161,6 +164,12 @@ export function recordDecisionResolution(
   const cards = [
     ...new Set([...(q.card_id ? [q.card_id] : []), ...q.affected_cards]),
   ];
+  const reviewItemId =
+    q.trigger === "review_limit" &&
+    resolution.via === "delegated" &&
+    q.affected_work_items.length === 1
+      ? q.affected_work_items[0]
+      : undefined;
   for (const card of cards.length ? cards : [undefined]) {
     const unblocked = resumed.filter((w) => w.card_id === card);
     const event = d.emit(
@@ -171,12 +180,23 @@ export function recordDecisionResolution(
       {
         decision_id: q.id,
         option: resolution.option,
+        option_description:
+          q.options.find((o) => o.key === resolution.option)?.description ?? "",
+        impact:
+          q.options.find((o) => o.key === resolution.option)?.impact ?? "",
+        rationale: resolution.rationale,
+        raised_by: q.raised_by,
+        via: resolution.via,
+        ...(resolution.proxy_authority
+          ? { proxy_authority: resolution.proxy_authority }
+          : {}),
         status: result.status,
         resume_work_items: unblocked.map((w) => w.id),
       },
       {
         type: "decision_resolved",
         decision_id: q.id,
+        ...(reviewItemId ? { work_item_id: reviewItemId } : {}),
         body: resolution.raw_quote,
       },
     );

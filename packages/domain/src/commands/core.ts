@@ -29,7 +29,10 @@ export type CommandState = {
   readonly employees?: readonly Employee[];
   readonly employee_activity?: readonly EmployeeActivity[];
   /** Loaded by the host from trusted configuration; never supplied by MCP callers. */
-  readonly project_settings?: { readonly merge_gate_enabled?: boolean };
+  readonly project_settings?: {
+    readonly merge_gate_enabled?: boolean;
+    readonly merge_push?: { readonly target: string; readonly branch: string };
+  };
   readonly roles: readonly E.RoleReference[];
   readonly events: readonly E.Event[];
   readonly timeline: readonly E.TimelineEntry[];
@@ -46,6 +49,8 @@ export type EntityChange = {
   };
 }[keyof CommandEntities];
 export interface CommandPorts {
+  /** Workbench confirmation for ungranted scope changes. D12 high risks are gated by the actor. */
+  readonly human_confirmation?: "workbench";
   readonly clock: Clock;
   readonly ids: IdAllocator;
   /** Host-provided template configuration, never MCP parameters. */
@@ -77,8 +82,11 @@ type CommandName =
   | "abort_dispatch"
   | "set_project_preferences"
   | "auto_confirm_merge"
+  | "remind_decision_followups"
   | "request_merge"
   | "record_merge_result"
+  | "begin_merge_push"
+  | "record_merge_push_result"
   | "record_merge_check"
   | "recheck_merge"
   | "release_assignment"
@@ -113,8 +121,9 @@ export function attempt<T>(operation: () => T): Result<T> {
   }
 }
 
-type Entry = Pick<E.TimelineEntry, "type" | "body"> &
-  Partial<
+type Entry = Pick<E.TimelineEntry, "type" | "body"> & {
+  readonly author?: "system";
+} & Partial<
     Pick<
       E.TimelineEntry,
       | "work_item_id"
@@ -162,8 +171,11 @@ export class CommandDraft {
     ].includes(tool);
     const systemOnly = [
       "auto_confirm_merge",
+      "remind_decision_followups",
       "record_merge_result",
       "record_merge_check",
+      "begin_merge_push",
+      "record_merge_push_result",
       "request_worktree_cleanup",
     ].includes(tool);
     ensure(
@@ -379,7 +391,7 @@ export class CommandDraft {
         short_id: id,
         card_id,
         event_seq: event.seq,
-        author: this.author,
+        author: entry.author ?? this.author,
         refs: entry.refs ?? [],
         mentions: entry.mentions ?? [],
         retracted: false,

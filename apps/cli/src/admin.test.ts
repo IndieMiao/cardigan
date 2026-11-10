@@ -1,7 +1,7 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Store } from "@cardigan/store";
+import { defaultMigrationsDir, listMigrations, Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { main } from "./index.js";
 import type { CliIo } from "./io.js";
@@ -38,13 +38,18 @@ function run(argv: string[]): Promise<number> {
 }
 
 test("cardigan init creates the database and runs migrations", async () => {
+  const latestVersion = Math.max(
+    ...listMigrations(defaultMigrationsDir).map(
+      (migration) => migration.version,
+    ),
+  );
   expect(await run(["init"])).toBe(0);
   expect(out.join("\n")).toContain(`数据库：${dataDir}`);
-  expect(out.join("\n")).toContain("schema 版本：12");
+  expect(out.join("\n")).toContain(`schema 版本：${latestVersion}`);
 
   const store = Store.open({ dataDir });
   try {
-    expect(store.schemaVersion()).toBe(12);
+    expect(store.schemaVersion()).toBe(latestVersion);
     expect(store.listProjects()).toEqual([]);
   } finally {
     store.close();
@@ -53,7 +58,7 @@ test("cardigan init creates the database and runs migrations", async () => {
   // Running it again is harmless and reports the same schema version.
   out = [];
   expect(await run(["init"])).toBe(0);
-  expect(out.join("\n")).toContain("schema 版本：12");
+  expect(out.join("\n")).toContain(`schema 版本：${latestVersion}`);
 });
 
 test("cardigan project create records a project", async () => {
@@ -73,7 +78,9 @@ test("cardigan project create records a project", async () => {
 test("creating the same project twice fails", async () => {
   expect(await run(["project", "create", "p-cli"])).toBe(0);
   expect(await run(["project", "create", "p-cli"])).toBe(2);
-  expect(err.join("\n")).toContain("already exists");
+  expect(err.join("\n")).toContain(
+    "无法创建项目 p-cli：项目已存在，不能重复创建（validation_failed）",
+  );
 });
 
 test("cardigan role add writes allowed_tools and capabilities", async () => {
@@ -130,6 +137,66 @@ test("role add requires the project to exist", async () => {
   expect(await run(["role", "add", "p-missing", "coder"])).toBe(2);
   expect(err.join("\n")).toContain("项目 p-missing 不存在");
 });
+
+test.each([
+  {
+    scenario: "duplicate",
+    command: "add",
+    expected:
+      "无法创建角色 tester：角色已存在，请用 cardigan role update 添加新版本（validation_failed）",
+  },
+  {
+    scenario: "missing",
+    command: "update",
+    expected:
+      "无法更新角色 tester：角色不存在，请先用 cardigan role add 创建（not_found）",
+  },
+  {
+    scenario: "version",
+    command: "add",
+    expected:
+      "无法创建角色 tester：--version 必须是下一个版本，不能覆盖或跳过版本（validation_failed）",
+  },
+])(
+  "role rules report complete Chinese errors without changing history: $scenario",
+  async ({ scenario, command, expected }) => {
+    await run(["project", "create", "p-cli"]);
+    const file = join(dataDir, "tester.yaml");
+    writeFileSync(
+      file,
+      `role_id: tester
+display_name: Tester
+kind: work
+core_prompt: Test the delivery.
+harness: codex
+launch_profile_ref: test-agent
+worktree: none
+`,
+    );
+    if (scenario !== "missing")
+      expect(await run(["role", "add", "--file", file])).toBe(0);
+    const store = Store.open({ dataDir });
+    try {
+      const before = store.uow.read((tx) => tx.roles.list("p-cli"));
+      out = [];
+      err = [];
+      expect(
+        await run(
+          scenario === "version"
+            ? ["role", "add", "p-cli", "tester", "--version", "4"]
+            : ["role", command, "--file", file],
+        ),
+      ).toBe(2);
+      expect(err[0]).toBe(`数据目录：${dataDir}`);
+      expect(err[1]?.split("\n")[0]).toBe(expected);
+      expect(err).toHaveLength(2);
+      expect(out).toEqual([]);
+      expect(store.uow.read((tx) => tx.roles.list("p-cli"))).toEqual(before);
+    } finally {
+      store.close();
+    }
+  },
+);
 
 test("invalid identifiers and flags are usage errors", async () => {
   expect(await run(["project", "create", "Bad Id"])).toBe(2);

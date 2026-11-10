@@ -1,6 +1,7 @@
 import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { isHttpLink } from "../markdown.js";
 import { statusLabel } from "../status.js";
+import { StatusIcon, statusShape } from "./StatusIcon.js";
 
 export function PageTitle({
   title,
@@ -24,9 +25,22 @@ export function PageTitle({
 export function EmptyState({ children }: { children: ReactNode }) {
   return <p className="empty">{children}</p>;
 }
-export function StatusTag({ status }: { status: string }) {
+export function StatusTag({
+  status,
+  label = statusLabel(status),
+  subdued = false,
+}: {
+  status: string;
+  label?: string;
+  subdued?: boolean;
+}) {
   return (
-    <span className={`status status-${status}`}>{statusLabel(status)}</span>
+    <span
+      className={`status status-${status} status-shape-${statusShape(status)}${subdued ? " status-subdued" : ""}`}
+    >
+      {!subdued && <StatusIcon status={status} decorative />}
+      {label}
+    </span>
   );
 }
 

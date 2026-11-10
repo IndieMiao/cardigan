@@ -191,6 +191,7 @@ test("U1 shell orders Needs You first with its count, then work and runtime grou
     "卡片",
     "执行视图",
     "项目动态",
+    "拍板记录",
     "项目快照",
     "设置",
   ]);
@@ -313,9 +314,8 @@ test("U1 shell fixes the sidebar to the viewport and maps pass to the done colou
   expect(multi).toContain("display: grid;");
   expect(css).toContain(".filter-multi-options {");
   expect(css).toContain(".activity-list .event-details {");
-  const doneStart = css.indexOf(".status-passed::before"),
-    doneGroup = css.slice(doneStart, css.indexOf("}", doneStart));
-  expect(doneGroup).toContain(".status-pass::before");
+  expect(css).toContain(".status-shape-success");
+  expect(css).not.toMatch(/\.status[^{}]*::before/);
 });
 
 test("U1 base text wrapping protects card header panels from unbroken commit SHAs", async () => {

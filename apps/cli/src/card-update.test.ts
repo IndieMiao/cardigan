@@ -274,7 +274,7 @@ test.each([{ ids: [] }, { ids: ["W-1"] }, { ids: ["C-99"] }])(
       2,
     );
     expect(errors.join("\n")).toContain(
-      ids[0] === "C-99" ? "卡片不存在" : "合法的卡片编号",
+      ids[0] === "C-99" ? "卡片 C-99 在当前项目中不存在" : "合法的卡片编号",
     );
     expect(snapshot()).toEqual(before);
   },
@@ -427,6 +427,41 @@ test("cancels unfinished cards and marks their replacement in one transaction", 
     superseded_by: "C-2",
   });
 });
+
+test.each([
+  { card: "C-1", replacement: "C-99", missing: "C-99", changes: [] },
+  {
+    card: "C-1",
+    replacement: "C-99",
+    missing: "C-99",
+    changes: ["--title", "Must roll back"],
+  },
+  { card: "C-99", replacement: "C-2", missing: "C-99", changes: [] },
+])(
+  "identifies the missing card when superseding $card with $replacement ($changes)",
+  async ({ card, replacement, missing, changes }) => {
+    await createCard();
+    expect(await run(["card", "update", "C-1", "--status", "cancelled"])).toBe(
+      0,
+    );
+    const before = snapshot();
+    expect(
+      await run([
+        "card",
+        "update",
+        card,
+        ...changes,
+        "--superseded-by",
+        replacement,
+      ]),
+    ).toBe(2);
+    expect(errors.at(-1)).toBe(
+      `无法更新卡片 ${card}：卡片 ${missing} 在当前项目中不存在（not_found）`,
+    );
+    expect(output).toEqual([]);
+    expect(snapshot()).toEqual(before);
+  },
+);
 
 test("does not resolve a replacement from another project and rolls back cancellation", async () => {
   const otherProject = "p-other" as ProjectId;

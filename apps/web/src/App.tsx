@@ -6,13 +6,14 @@ import {
   type ProjectSummary,
   type SessionInfo,
 } from "./api.js";
-import { EmptyState } from "./components/Foundation.js";
+import { EmptyState, StatusTag } from "./components/Foundation.js";
 import { routeHash, useRoute } from "./route.js";
 import { useProjectStream } from "./useProjectStream.js";
 import { useResource } from "./useResource.js";
 import { ActivityPage } from "./views/ActivityPage.js";
 import { CardDetailPage } from "./views/CardDetailPage.js";
 import { CardListPage } from "./views/CardListPage.js";
+import { DecisionHistoryPage } from "./views/DecisionHistoryPage.js";
 import { ExecutionPage } from "./views/ExecutionPage.js";
 import { LoginPage } from "./views/LoginPage.js";
 import { NeedsYouPage } from "./views/NeedsYouPage.js";
@@ -240,6 +241,7 @@ function Workbench({
                   [
                     ["execution", "执行视图"],
                     ["activity", "项目动态"],
+                    ["decision-history", "拍板记录"],
                     ["snapshot", "项目快照"],
                   ],
                 ],
@@ -263,15 +265,23 @@ function Workbench({
         )}
         <div className="sidebar-footer">
           {selected && (
-            <span
-              className={`status status-${live.status === "live" ? "done" : "todo"}`}
-              role="status"
-            >
-              {live.status === "live"
-                ? "实时更新已连接"
-                : live.status === "retrying"
-                  ? "连接中断，正在重连"
-                  : "正在连接实时更新"}
+            <span role="status">
+              <StatusTag
+                status={
+                  live.status === "live"
+                    ? "online"
+                    : live.status === "retrying"
+                      ? "degraded"
+                      : "provisioning"
+                }
+                label={
+                  live.status === "live"
+                    ? "实时更新已连接"
+                    : live.status === "retrying"
+                      ? "连接中断，正在重连"
+                      : "正在连接实时更新"
+                }
+              />
             </span>
           )}
           <button
@@ -309,6 +319,13 @@ function Workbench({
           <div className="error-panel" role="alert">
             <p>无法识别链接 {invalidHash}；请从项目导航重新进入。</p>
           </div>
+        )}
+        {selected && route?.kind === "decision-history" && (
+          <DecisionHistoryPage
+            client={client}
+            projectId={selected.id}
+            revision={live.revision}
+          />
         )}
         {selected && route?.kind === "settings" && (
           <SettingsPage

@@ -12,10 +12,12 @@ import {
   isRoleActive,
   listNeedsYou,
   parseId,
+  projectSnapshot,
   standingTools,
   supersedeCard,
   updateCard,
 } from "@cardigan/domain";
+import { loadMergeGateConfig } from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import {
   resolveExecutionConfig,
@@ -28,7 +30,7 @@ import {
 } from "@cardigan/store";
 import { type StartById, startAssignmentById } from "./assignment.js";
 import { runContentCommand } from "./content.js";
-import { CliError, EXIT } from "./errors.js";
+import { CliError, EXIT, formatCommandError } from "./errors.js";
 import {
   announceDataDir,
   humanActor,
@@ -277,7 +279,6 @@ function cardUpdate(args: readonly string[], io: CliIo): number {
       const actor = humanActor(project_id);
       const ports = { clock: systemClock, ids: tx.ids };
       let state = loadCommandState(tx, project_id);
-      const card = state.cards.find((item) => item.id === cardId);
       if (changed.some((name) => name !== "superseded-by")) {
         const result = updateCard(
           state,
@@ -286,16 +287,8 @@ function cardUpdate(args: readonly string[], io: CliIo): number {
           ports,
         );
         if (!result.ok) {
-          const reason =
-            result.error.code === "illegal_transition"
-              ? card?.status === "done" && status === "cancelled"
-                ? "已完成卡片不能取消；请建新卡（例如回滚卡），再用 --superseded-by <C-m> 标记旧卡"
-                : `不允许从 ${card?.status} 转为 ${status}`
-              : result.error.code === "not_found"
-                ? "卡片不存在"
-                : `更新被拒绝：${result.error.message}`;
           throw new CliError(
-            `无法更新卡片 ${cardId}：${reason}（${result.error.code}）`,
+            formatCommandError("更新卡片", cardId, result.error),
             EXIT.usage,
           );
         }
@@ -310,16 +303,8 @@ function cardUpdate(args: readonly string[], io: CliIo): number {
           ports,
         );
         if (!result.ok) {
-          const reason =
-            result.error.code === "illegal_transition"
-              ? "只有已完成或已取消的卡片才能标记为被取代"
-              : result.error.code === "not_found"
-                ? "原卡片或取代它的卡片在当前项目中不存在"
-                : result.error.code === "validation_failed"
-                  ? "卡片不能被自身取代"
-                  : "只能标记同项目的卡片";
           throw new CliError(
-            `无法更新卡片 ${cardId}：${reason}（${result.error.code}）`,
+            formatCommandError("更新卡片", cardId, result.error),
             EXIT.usage,
           );
         }
@@ -349,6 +334,8 @@ function cardCreate(args: readonly string[], io: CliIo): number {
       optional(parsed.flags, "project"),
     );
     const card = runCommand(store, {
+      operation: "创建卡片",
+      target: required(parsed.flags, "title"),
       project_id,
       actor: humanActor(project_id),
       reduce: (state, actor, ports) =>
@@ -421,6 +408,8 @@ async function assignWorkItem(
     );
     let issued: ReturnType<typeof issueTokenForAssignment> | undefined;
     const assignment = runCommand(store, {
+      operation: "指派工作项",
+      target: workItemId,
       project_id,
       actor: humanActor(project_id),
       reduce: (state, actor, ports) =>
@@ -505,11 +494,20 @@ function tokenIssue(args: readonly string[], io: CliIo): number {
     const issued = store.uow.run((tx) => {
       const assignment = tx.assignments.get(project_id, assignmentId);
       if (assignment === undefined) {
-        throw new CliError(`Assignment ${assignmentId} 不存在`, EXIT.usage);
+        throw new CliError(
+          formatCommandError("签发 Token", assignmentId, {
+            code: "not_found",
+            message: `Assignment ${assignmentId} 不存在`,
+          }),
+          EXIT.usage,
+        );
       }
       if (assignment.status !== "active") {
         throw new CliError(
-          `Assignment ${assignmentId} 状态是 ${assignment.status}，只有 active 才能签发 Token`,
+          formatCommandError("签发 Token", assignmentId, {
+            code: "illegal_transition",
+            message: `Assignment ${assignmentId} 状态是 ${assignment.status}，只有 active 才能签发 Token`,
+          }),
           EXIT.usage,
         );
       }
@@ -684,7 +682,7 @@ async function pmStart(
  * `cardigan needs-you` — M3.5 read-only view until M5 builds the page
  * (development plan §7.3): open human decisions and pending human actions.
  */
-function needsYou(args: readonly string[], io: CliIo): number {
+async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
   const parsed = parseArgs(args, []);
   const store = openStoreFrom(io, parsed.flags);
   try {
@@ -693,27 +691,47 @@ function needsYou(args: readonly string[], io: CliIo): number {
       io,
       optional(parsed.flags, "project"),
     );
-    const { decisions, actions, incidents } = store.uow.read((tx) => ({
-      decisions: tx.decisions
-        .list(project_id)
-        .filter(
-          (decision) =>
-            decision.decider === "human" &&
-            ["open", "provisional"].includes(decision.status),
-        ),
-      actions: unwrap(
+    const gate = (
+      await loadMergeGateConfig({
+        projectIds: store.listProjects().map((project) => project.id),
+        env: io.env,
+      })
+    ).forProject(project_id);
+    const checks = store.uow.read((tx) => {
+      const view = projectSnapshot(
+        loadCommandState(tx, project_id),
+        humanActor(project_id),
+      );
+      return new Map(
+        view.ok && gate.status === "enabled"
+          ? view.value.data.cards.map((card) => [card.id, card.merge_check])
+          : [],
+      );
+    });
+    const checkLabels = {
+      queued: "排队",
+      running: "运行中",
+      passed: "通过",
+      failed: "失败",
+      timed_out: "超时",
+      interrupted: "中断",
+    };
+    const { decisions, actions, incidents } = store.uow.read((tx) => {
+      const needs = unwrap(
         listNeedsYou(loadCommandState(tx, project_id), humanActor(project_id)),
-      ).data.human_actions,
-      // §13.9: a lost runtime needs the human to decide whether to take over,
-      // so it belongs on the same page as decisions and human actions.
-      incidents: tx.assignments
-        .list(project_id)
-        .filter(
-          (assignment) =>
-            assignment.status === "active" &&
-            ["lost", "unknown"].includes(assignment.runtime_state),
-        ),
-    }));
+      ).data;
+      return {
+        decisions: needs.decisions,
+        actions: needs.human_actions,
+        incidents: tx.assignments
+          .list(project_id)
+          .filter(
+            (a) =>
+              a.status === "active" &&
+              ["lost", "unknown"].includes(a.runtime_state),
+          ),
+      };
+    });
 
     if (
       decisions.length === 0 &&
@@ -724,13 +742,33 @@ function needsYou(args: readonly string[], io: CliIo): number {
       return EXIT.ok;
     }
     const lines: string[] = [];
-    if (decisions.length > 0) {
-      lines.push(`待你拍板（${decisions.length}）`);
-      for (const decision of decisions) {
+    const pending = decisions.filter((q) => !q.followup_notice);
+    const followups = decisions.filter((q) => q.followup_notice);
+    if (followups.length) {
+      lines.push(`拍板落实（${followups.length}）`);
+      for (const q of followups)
+        lines.push(
+          `  ${q.id}  ${q.card_id ?? "项目"}\n    ${q.followup_notice}\n    已选方案：${q.resolution?.option}\n    请安排落实，并在时间线引用 ${q.id} 记录结果。`,
+        );
+    }
+    if (pending.length > 0) {
+      lines.push(`待你拍板（${pending.length}）`);
+      for (const decision of pending) {
+        const check = decision.card_id
+          ? checks.get(decision.card_id)
+          : undefined;
         lines.push(
           [
             `  ${decision.id}${decision.card_id === undefined ? "" : `  ${decision.card_id}`}`,
             `    ${decision.question}`,
+            ...(decision.trigger === "merge_confirmation" &&
+            gate.status === "enabled"
+              ? [`    合并检查：${check ? checkLabels[check.status] : "排队"}`]
+              : []),
+            ...(decision.trigger === "merge_confirmation" &&
+            gate.status === "invalid"
+              ? ["    合并闸门配置无效，请查看 server 启动日志"]
+              : []),
             ...(decision.status === "provisional"
               ? ["    状态：等待确认（条件性拍板）"]
               : []),
@@ -757,9 +795,16 @@ function needsYou(args: readonly string[], io: CliIo): number {
         lines.push(
           [
             `  ${action.id}${action.card_id === undefined ? "" : `  ${action.card_id}`}`,
-            `    ${action.instructions}`,
-            `    为什么需要你：${action.why_human}`,
-            `    期望返回：${action.expected_return}`,
+            ...(action.handoff
+              ? [
+                  `    ${action.handoff.title}（项目经理已改写）`,
+                  `    这是什么：${action.handoff.summary}`,
+                  `    做完会怎样：${action.handoff.expected_outcome}`,
+                ]
+              : []),
+            `    ${action.handoff?.instructions ?? action.instructions}`,
+            `    为什么需要你：${action.handoff?.why_human ?? action.why_human}`,
+            `    期望返回：${action.handoff?.expected_return ?? action.expected_return}`,
             ...(action.due === undefined ? [] : [`    截止：${action.due}`]),
           ].join("\n"),
         );
@@ -863,7 +908,15 @@ function pmCreate(args: readonly string[], io: CliIo): number {
               mode,
             )
           : applyStandingMode(existing, mode);
-      if (!stamped.ok) throw new CliError(stamped.error.message, EXIT.usage);
+      if (!stamped.ok)
+        throw new CliError(
+          formatCommandError(
+            "创建常驻 PM",
+            office ? "Office" : "Ops",
+            stamped.error,
+          ),
+          EXIT.usage,
+        );
       const assignment: Assignment = stamped.value;
       if (existing === undefined) {
         tx.assignments.put(project_id, assignment);
@@ -912,6 +965,8 @@ function humanActionDone(args: readonly string[], io: CliIo): number {
       optional(parsed.flags, "project"),
     );
     const action = runCommand(store, {
+      operation: "完成待办操作",
+      target: humanActionId,
       project_id,
       actor: humanActor(project_id),
       reduce: (state, actor, ports) =>

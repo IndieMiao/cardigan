@@ -8,7 +8,8 @@ import { linkableReferences, linkifyReferences } from "../refs.js";
 import { statusLabel } from "../status.js";
 import { AttachmentCaption, attachmentName } from "./AttachmentCaption.js";
 import { AttachmentPreview, isBitmap } from "./AttachmentPreview.js";
-import { EmptyState, LongContent, Time } from "./Foundation.js";
+import { EmptyState, LongContent, StatusTag, Time } from "./Foundation.js";
+import { MergeCheck } from "./MergeCheck.js";
 import { TimelineContent } from "./TimelineContent.js";
 import {
   TimelineActor,
@@ -211,7 +212,12 @@ export function Timeline({
             <span key={id} id={id} className="anchor-target" />
           ) : null,
         )}
-        {structured && detail ? (
+        {entry.merge_check ? (
+          <>
+            <TimelineHeader entry={entry} action="合并检查" />
+            <MergeCheck check={entry.merge_check} projectId={projectId} />
+          </>
+        ) : structured && detail ? (
           <TimelineContent
             entry={entry}
             detail={detail}
@@ -227,19 +233,25 @@ export function Timeline({
             <LongContent
               lines={["comment", "instruction"].includes(entry.type) ? 15 : 6}
             >
-              <div
-                className="timeline-body markdown"
-                dangerouslySetInnerHTML={{
-                  __html: renderMarkdown(
-                    linkifyReferences(
-                      entry.body,
-                      linkableReferences(entry.references ?? []),
-                      projectId,
-                      cardId,
+              {entry.event_type === "card_marked_done" ? (
+                <div className="timeline-body completion-result">
+                  {entry.body}
+                </div>
+              ) : (
+                <div
+                  className="timeline-body markdown"
+                  dangerouslySetInnerHTML={{
+                    __html: renderMarkdown(
+                      linkifyReferences(
+                        entry.body,
+                        linkableReferences(entry.references ?? []),
+                        projectId,
+                        cardId,
+                      ),
                     ),
-                  ),
-                }}
-              />
+                  }}
+                />
+              )}
             </LongContent>
           </>
         )}
@@ -287,7 +299,8 @@ export function Timeline({
             {day.groups.map((group) => {
               const first = group[0];
               if (!first) return null;
-              if (timelineCategory(first) !== "system") return row(first);
+              if (timelineCategory(first) !== "system" || first.merge_check)
+                return group.map((entry) => row(entry));
               const label =
                 first.event_type === "assignment_released" && group.length > 1
                   ? `释放了 ${group.length} 个 Assignment`
@@ -301,6 +314,7 @@ export function Timeline({
                 group.some(
                   (entry) =>
                     entry.retracted ||
+                    entry.event_type === "card_marked_done" ||
                     (entry.body.trim() &&
                       ![
                         entry.event_type,
@@ -374,9 +388,14 @@ function AttachmentItem({
       )}
       <AttachmentCaption attachment={attachment} />
       <span className="attachment-basis">
-        {attachment.basis === null
-          ? "无拍板依据"
-          : `依据 ${attachment.basis.id}（${decisionStatusLabel(attachment.basis.status)}）`}
+        {attachment.basis === null ? (
+          "无拍板依据"
+        ) : (
+          <>
+            依据 {attachment.basis.id}（
+            <StatusTag status={attachment.basis.status} />）
+          </>
+        )}
       </span>
     </li>
   );

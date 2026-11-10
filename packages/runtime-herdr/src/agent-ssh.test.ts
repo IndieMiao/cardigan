@@ -130,6 +130,34 @@ test("unknown modes, missing settings and overlapping private/shared roots fail 
     expect(() => executionPaths(execution, project, "A-1")).toThrow();
 });
 
+test("Agent niceness is configurable in both modes and rejects unsafe values", () => {
+  const env = {
+    CARDIGAN_DATA_DIR: execution.dataDir,
+    CARDIGAN_AGENT_ROOT: execution.agentRoot,
+    CARDIGAN_AGENT_GID: "2001",
+    CARDIGAN_AGENT_IDENTITY: execution.identityFile,
+    CARDIGAN_AGENT_KNOWN_HOSTS: execution.knownHostsFile,
+  };
+  for (const mode of ["local", "agent-ssh"]) {
+    for (const value of ["0", "10", "19"])
+      expect(
+        resolveExecutionConfig({
+          ...env,
+          CARDIGAN_RUNTIME_MODE: mode,
+          CARDIGAN_AGENT_NICE: value,
+        }).agentNice,
+      ).toBe(Number(value));
+    for (const value of ["", "-1", "20", "1.5", "NaN", "10; echo bad"])
+      expect(() =>
+        resolveExecutionConfig({
+          ...env,
+          CARDIGAN_RUNTIME_MODE: mode,
+          CARDIGAN_AGENT_NICE: value,
+        }),
+      ).toThrow(/CARDIGAN_AGENT_NICE/);
+  }
+});
+
 test("agent registration uses only the dedicated key and pinned host; arbitrary existing endpoints are refused", async () => {
   const runtime = await HerdrRuntime.create({
     client,

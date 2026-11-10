@@ -14,6 +14,8 @@ import { requesterNotificationRecipient } from "../notification.js";
 import type { Clock } from "../ports.js";
 import { reviewLimitAttention } from "../review-limit-attention.js";
 import { type CommandDraft, type CommandState, command } from "./core.js";
+import { decisionFollowupNeedsHuman } from "./decision-followup.js";
+import { isPmOps } from "./delegation.js";
 import { failedConfirmedMergeCheck, latestMergeCheck } from "./merge-check.js";
 import { resolveCardTemplate } from "./templates.js";
 
@@ -232,6 +234,22 @@ export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
     const why = (text: string) => [...text].slice(0, 40).join("");
     return {
       attention: now ? reviewLimitAttention(state, now) : [],
+      ...(isPmOps(d)
+        ? {
+            pm_queue: {
+              decisions: d
+                .list("decisions")
+                .filter(
+                  (q) =>
+                    q.decider === "role:pm" &&
+                    ["open", "provisional"].includes(q.status),
+                ),
+              human_actions: d
+                .list("human_actions")
+                .filter((h) => h.status === "open" && h.triage === "pm_ops"),
+            },
+          }
+        : {}),
       incidents: d
         .list("assignments")
         .filter(
@@ -271,11 +289,15 @@ export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
         .list("decisions")
         .filter(
           (q) =>
-            q.decider === "human" &&
-            (["open", "provisional"].includes(q.status) ||
-              failedConfirmedMergeCheck(state, q)),
+            (q.decider === "human" &&
+              (["open", "provisional"].includes(q.status) ||
+                failedConfirmedMergeCheck(state, q))) ||
+            decisionFollowupNeedsHuman(state, q),
         )
         .map((q) => {
+          const failedConfirmation = failedConfirmedMergeCheck(state, q);
+          const followup =
+            !failedConfirmation && decisionFollowupNeedsHuman(state, q);
           // Project decisions have no card timeline; their request event is the creation fact.
           const opened =
             state.events
@@ -296,14 +318,20 @@ export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
             opened && now ? Date.parse(now) - Date.parse(opened) : Number.NaN;
           return {
             ...q,
-            ...(q.status === "resolved"
+            ...(failedConfirmation
               ? {
                   options: q.options.filter((o) => o.key === "request_changes"),
                   recommended: "request_changes",
                 }
               : {}),
+            ...(followup
+              ? {
+                  followup_notice:
+                    "拍板已完成，尚无落实结果；当前无 PM Ops 接手，请安排跟进。",
+                }
+              : {}),
             why: why(
-              q.status === "resolved"
+              failedConfirmation
                 ? "合并检查失败或超时，可以退回修改"
                 : q.question,
             ),
@@ -322,7 +350,7 @@ export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
         .list("human_actions")
         .filter(
           (h) =>
-            h.status === "open" ||
+            (h.status === "open" && h.triage !== "pm_ops") ||
             (h.status === "done" &&
               requesterNotificationRecipient(h.requested_by, state.assignments)
                 ?.kind === "needs_you" &&
@@ -338,7 +366,7 @@ export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
           why: why(
             h.status === "done"
               ? "已完成，但发起方不可用且无活跃 PM Ops 接手"
-              : h.why_human,
+              : (h.handoff?.why_human ?? h.why_human),
           ),
           ...(h.status === "done"
             ? { completion_notice: h.result?.text ?? "" }

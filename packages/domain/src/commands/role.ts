@@ -101,7 +101,13 @@ export function validateRole(role: RoleDefinition): Result<RoleDefinition> {
       `${kind} 角色含有白名单之外的工具`,
     );
     ensure(
-      !role.allowed_tools.includes("record_decision") || role.role_id === "pm",
+      !role.allowed_tools.some((t) =>
+        [
+          "record_decision",
+          "resolve_delegated_decision",
+          "triage_human_action",
+        ].includes(t),
+      ) || role.role_id === "pm",
       "validation_failed",
       "record_decision 只能授予 pm 角色",
     );

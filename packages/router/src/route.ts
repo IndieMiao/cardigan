@@ -746,14 +746,14 @@ function routeDecisionRequested(input: RouteInput, draft: Draft): void {
     );
     return;
   }
-  if (decision.trigger === "review_limit" && decision.decider === "role:pm") {
+  if (decision.decider === "role:pm") {
     note(
       input,
       draft,
       recipient.pm_ops(),
       "decision",
       "6.4/decision requested",
-      `${decision.id} 等待项目经理判断审核轮数上限`,
+      `${decision.id} 等待项目经理按类别授权处理：${decision.question}`,
     );
     return;
   }
@@ -782,6 +782,39 @@ function routeDecisionRequested(input: RouteInput, draft: Draft): void {
  */
 function routeDecisionResolved(input: RouteInput, draft: Draft): void {
   const decision_id = payloadString(input.event.payload, "decision_id");
+  const q = input.snapshot.decisions.find((q) => q.id === decision_id);
+  if (
+    input.event.type === "decision_resolved" &&
+    q?.raised_by?.startsWith("assignment:") &&
+    q.resolution
+  ) {
+    const id = q.raised_by.slice(11) as AssignmentId;
+    const owner = assignmentOf(input, id);
+    const ownerItem =
+      owner?.scope === "work_item"
+        ? itemOf(input, owner.work_item_id)
+        : undefined;
+    const ownerCard = input.snapshot.cards.find(
+      (c) => c.id === ownerItem?.card_id,
+    );
+    const to = requesterNotificationRecipient(
+      q.raised_by,
+      input.snapshot.assignments,
+      {
+        skip_requester: ["done", "cancelled"].includes(ownerCard?.status ?? ""),
+      },
+    );
+    if (!to) return;
+    const option = q.options.find((o) => o.key === q.resolution?.option);
+    note(
+      input,
+      draft,
+      to,
+      to.kind === "needs_you" ? "needs_you" : "decision",
+      "6.4/decision resolved",
+      `${q.id} 已选择 ${q.resolution.option}：${option?.description ?? ""}。影响：${option?.impact ?? ""}。请发起人落实，并在时间线引用 ${q.id} 记录执行结果。`,
+    );
+  }
   const resolved = payloadStrings(input.event.payload, "resume_work_items");
   for (const id of resolved) {
     const item = itemOf(input, id as WorkItemId);
@@ -912,6 +945,17 @@ function routeHumanAction(input: RouteInput, draft: Draft): void {
   const action = input.snapshot.human_actions.find(
     (candidate) => candidate.id === action_id,
   );
+  if (action?.triage === "pm_ops") {
+    note(
+      input,
+      draft,
+      recipient.pm_ops(),
+      "human_action",
+      "6.4/human action requested",
+      `${action.id} 等待分拣：${action.instructions}`,
+    );
+    return;
+  }
   note(
     input,
     draft,
@@ -1043,6 +1087,28 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "decision_requested":
       routeDecisionRequested(input, draft);
       break;
+    case "decision_followup_due": {
+      const q = input.snapshot.decisions.find(
+        (q) => q.id === payloadString(input.event.payload, "decision_id"),
+      );
+      const to =
+        q &&
+        requesterNotificationRecipient(
+          q.raised_by,
+          input.snapshot.assignments,
+          { skip_requester: true },
+        );
+      if (to)
+        note(
+          input,
+          draft,
+          to,
+          to.kind === "needs_you" ? "needs_you" : "decision",
+          "6.4/decision resolved",
+          `${q.id} 已拍板超过 30 分钟，尚无落实结果，请跟进发起人。`,
+        );
+      break;
+    }
     case "decision_resolved":
     case "decision_provisionally_resolved":
       routeDecisionResolved(input, draft);

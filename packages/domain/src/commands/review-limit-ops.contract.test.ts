@@ -7,6 +7,7 @@ import {
   recordDecision,
   releaseAssignment,
   requestHumanAction,
+  resolveDelegatedDecision,
   standingTools,
   submitReview,
   updateWorkItem,
@@ -218,6 +219,10 @@ test.each([false, true])(
         actor: "assignment:A-4",
       }),
     ]);
+    expect(f.state.timeline.at(-1)).toMatchObject({
+      decision_id: decision.id,
+      work_item_id: work.id,
+    });
     expect(f.state.runs.filter((r) => r.status === "queued")).toHaveLength(1);
     expect(resolve("raise_limit").ok).toBe(false);
     expect(f.state.work_items.find((w) => w.id === work.id)).toMatchObject({
@@ -346,3 +351,73 @@ test("raising a delegated review limit does not bypass another blocker", async (
   });
   expect(f.state.runs.filter((r) => r.status === "queued")).toEqual([]);
 });
+
+test.each([false, true])(
+  "PM Ops resolve_delegated_decision raises the review budget once and preserves authorization audit (paused=%s)",
+  async (paused) => {
+    const { f, actor, decision, work } = await limited();
+    const rationale = "按流程授权继续审核";
+    const resolve = (option: string) =>
+      resolveDelegatedDecision(
+        f.state,
+        actor,
+        { decision_id: decision.id, option, rationale },
+        f.io,
+      );
+    if (paused) {
+      expect(f.commit(resolve("pause"))).toMatchObject({
+        status: "provisional",
+      });
+      expect(f.state.work_items.find((w) => w.id === work.id)).toMatchObject({
+        status: "waiting_decision",
+        max_review_rounds: 1,
+      });
+      expect(f.state.runs.filter((r) => r.status === "queued")).toEqual([]);
+    }
+    const result = f.commit(resolve("raise_limit"));
+    const proxy_authority = `project:${f.state.project_id}/default-decision-delegation/general`;
+    expect(result).toMatchObject({
+      status: "resolved",
+      resolution: {
+        via: "delegated",
+        resolved_by: "assignment:A-4",
+        raw_quote: rationale,
+        proxy_authority,
+      },
+    });
+    expect(f.state.work_items.find((w) => w.id === work.id)).toMatchObject({
+      status: "ready",
+      max_review_rounds: 2,
+    });
+    expect(f.state.events.at(-1)).toMatchObject({
+      type: "decision_resolved",
+      payload: {
+        decision_id: decision.id,
+        option: "raise_limit",
+        option_description: decision.options.find(
+          (o) => o.key === "raise_limit",
+        )?.description,
+        impact: decision.options.find((o) => o.key === "raise_limit")?.impact,
+        raised_by: decision.raised_by,
+        rationale,
+        via: "delegated",
+        proxy_authority,
+        resume_work_items: [work.id],
+      },
+    });
+    expect(f.state.timeline.at(-1)).toMatchObject({
+      decision_id: decision.id,
+      work_item_id: work.id,
+    });
+    expect(f.state.runs.filter((r) => r.status === "queued")).toHaveLength(1);
+    expect(f.state.runs.flatMap((r) => r.review_limit_changes ?? [])).toEqual([
+      expect.objectContaining({
+        max_review_rounds: 2,
+        actor: "assignment:A-4",
+      }),
+    ]);
+    const before = f.state;
+    expect(resolve("raise_limit").ok).toBe(false);
+    expect(f.state).toEqual(before);
+  },
+);

@@ -9,3 +9,5 @@ P2a-1a 的检查进程继承 attempt 专属的短 `TMPDIR` / `XDG_RUNTIME_DIR` �
 - `HcCore.finalStop` 或 runtime 包的 `stopCore` 先按已记录 PID 停止并验证 core，再移除自己分配的运行目录。测试中途模拟失联的 `stop()` 不删除目录，仍可重启。
 - worker 收尾只删除空的数据根；不会递归删除尚未完成的夹具或 socket。e2e 仍单独运行，不加入普通测试命令。
 - 测试 worker 设置 `NODE_DISABLE_COMPILE_CACHE=1`，子进程即使调用 `module.enableCompileCache()` 或继承 `NODE_COMPILE_CACHE` 也不会在私有 TMPDIR 留下 `node-compile-cache`；不改主机环境，不额外递归删除缓存目录。
+- 测试入口覆盖继承的 `CARDIGAN_CONFIG_DIR`、`XDG_CONFIG_HOME` 和 `CARDIGAN_DATA_DIR`，分别指向 worker 私有根内的空配置／数据目录（0700），避免默认读取主机的合并闸门、启动凭据或数据库。收尾按子目录到父目录只删除空目录。需要自定义配置的夹具仍显式覆盖；测试默认路径时使用临时或虚构 HOME。
+- 不改 worker 的 HOME：真实 hc 测试仍可定位执行账号安装的二进制。若测试给函数传入独立的 `env` 对象，需显式提供配置／数据路径，或把测试进程 HOME 指向临时目录；它不会自动继承 worker 的隔离变量。

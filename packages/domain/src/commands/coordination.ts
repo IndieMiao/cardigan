@@ -8,7 +8,18 @@ import type {
 } from "../entities.js";
 import type { CardId, DecisionId, HumanActionId, WorkItemId } from "../ids.js";
 import { commentMentions } from "../mentions.js";
+import { decisionCategories, highRiskCategories } from "../preferences.js";
 import { extractReferences } from "../references.js";
+import {
+  assignDecision,
+  delegationAllowed,
+  delegationAuthority,
+  grantDecisionCategory,
+  handoffDecision,
+  hasActivePmOps,
+  isPmOps,
+} from "./delegation.js";
+import { resolveReviewLimit } from "./review-limit-resolution.js";
 
 export { extractReferences } from "../references.js";
 
@@ -248,13 +259,7 @@ export function requestDecision(
     text(p.context, "context");
     text(p.decider, "decider");
     ensure(
-      [
-        "general",
-        "spending",
-        "account",
-        "permission",
-        "data_deletion",
-      ].includes(p.category),
+      decisionCategories.includes(p.category),
       "validation_failed",
       "Decision category is required",
     );
@@ -266,7 +271,9 @@ export function requestDecision(
       "Unknown decider",
     );
     ensure(
-      p.category === "general" || p.decider === "human",
+      (!highRiskCategories.includes(p.category) &&
+        (p.category !== "scope_change" || p.decider === "role:pm")) ||
+        p.decider === "human",
       "unauthorized",
       "Sensitive decisions require the human",
     );
@@ -346,14 +353,16 @@ export function requestDecision(
       doc_refs: [],
       status: "open" as const,
     };
-    const decision: Decision =
+    const decision: Decision = assignDecision(
+      d,
       p.kind === "approve"
         ? {
             ...base,
             kind: "approve",
             target: p.target as NonNullable<typeof p.target>,
           }
-        : { ...base, kind: "choose" };
+        : { ...base, kind: "choose" },
+    );
     d.put("decisions", decision);
     for (const card of cards.length ? cards : [undefined])
       d.emit(
@@ -375,6 +384,7 @@ export function recordDecision(
     raw_quote: string;
     via_chain?: readonly Author[];
     batch?: string;
+    delegate_future?: boolean;
   },
   ports: CommandPorts,
 ) {
@@ -385,10 +395,10 @@ export function recordDecision(
         (actor.kind === "assignment" &&
           actor.role_id === "pm" &&
           d.assignment?.scope === "standing" &&
-          !(
-            decision.trigger === "review_limit" &&
-            decision.decider === "role:pm"
-          ) &&
+          d.assignment.standing_mode !== "ops" &&
+          decision.decider !== "role:pm" &&
+          decision.category !== "scope_change" &&
+          !highRiskCategories.includes(decision.category ?? "general") &&
           actor.allowed_tools.includes("record_decision")),
       "forbidden_tool",
       "Only PM Office or the designated human can record decisions",
@@ -402,6 +412,14 @@ export function recordDecision(
       "validation_failed",
       "Option is not part of this decision",
     );
+    // D12 permits human CLI confirmation; scope changes retain the browser-only rule.
+    ensure(
+      decision.category !== "scope_change" ||
+        (actor.kind === "human" && ports.human_confirmation === "workbench"),
+      "unauthorized",
+      "未授权的需求范围变化只能由人在 Workbench 确认",
+    );
+    if (p.delegate_future) grantDecisionCategory(d, decision);
     if (
       decision.trigger === "merge_confirmation" &&
       decision.status === "resolved" &&
@@ -426,26 +444,109 @@ export function recordDecision(
       d.put("decisions", superseded);
       return superseded;
     }
-    const result = recordDecisionResolution(d, decision, {
-      option: p.option,
-      rationale: p.rationale,
-      resolved_by: decision.decider === "human" ? "human" : d.author,
-      via: actor.kind === "human" ? "needs_you" : "pm_office_chat",
-      raw_quote: p.raw_quote,
-      via_chain: [...(p.via_chain ?? []), d.author],
-      ...(p.batch ? { batch: p.batch } : {}),
-      at: d.now,
-    });
-    if (
-      decision.trigger === "merge_confirmation" &&
-      p.option === "request_changes"
-    )
-      requestMergeChanges(d, decision, p.rationale, p.raw_quote);
-    if (decision.trigger === "completion_review")
-      resolveHumanCompletionReview(d, decision, p.option);
-    return result;
+    return resolveDecisionDraft(d, decision, p, false);
   });
 }
+function resolveDecisionDraft(
+  d: CommandDraft,
+  decision: Decision,
+  p: {
+    option: string;
+    rationale: string;
+    raw_quote: string;
+    via_chain?: readonly Author[];
+    batch?: string;
+  },
+  delegated: boolean,
+) {
+  const actor = d.actor;
+  const result = recordDecisionResolution(d, decision, {
+    option: p.option,
+    rationale: p.rationale,
+    resolved_by: decision.decider === "human" ? "human" : d.author,
+    via: delegated
+      ? "delegated"
+      : actor.kind === "human"
+        ? "needs_you"
+        : "pm_office_chat",
+    ...(delegated
+      ? {
+          proxy_authority: delegationAuthority(
+            d,
+            decision.category ?? "general",
+          ),
+        }
+      : {}),
+    raw_quote: p.raw_quote,
+    via_chain: [...(p.via_chain ?? []), d.author],
+    ...(p.batch ? { batch: p.batch } : {}),
+    at: d.now,
+  });
+  if (
+    decision.trigger === "merge_confirmation" &&
+    p.option === "request_changes"
+  )
+    requestMergeChanges(d, decision, p.rationale, p.raw_quote);
+  if (decision.trigger === "completion_review")
+    resolveHumanCompletionReview(d, decision, p.option);
+  return result;
+}
+
+export function resolveDelegatedDecision(
+  state: CommandState,
+  actor: Actor,
+  p: {
+    decision_id: DecisionId;
+    option: string;
+    rationale: string;
+    escalate?: boolean;
+  },
+  ports: CommandPorts,
+) {
+  return command(state, actor, "resolve_delegated_decision", ports, (d) => {
+    ensure(
+      isPmOps(d),
+      "forbidden_tool",
+      "Only standing PM Ops can decide under project authorization",
+    );
+    const q = d.get("decisions", p.decision_id);
+    ensure(
+      q.decider === "role:pm" &&
+        ["open", "provisional"].includes(q.status) &&
+        delegationAllowed(d, q),
+      "unauthorized",
+      "Decision is not authorized for PM Ops",
+    );
+    text(p.rationale, "rationale");
+    if (p.escalate) {
+      handoffDecision(d, q, `项目经理升级给你：${p.rationale}`);
+      return d.get("decisions", q.id);
+    }
+    if (q.trigger === "review_limit") {
+      ensure(
+        p.option === "raise_limit" || p.option === "pause",
+        "validation_failed",
+        "Unknown review limit option",
+      );
+      const id = q.affected_work_items[0];
+      ensure(id, "invariant_violation", "Missing review limit target");
+      const item = d.work(id);
+      resolveReviewLimit(d, item, {
+        decision_id: q.id,
+        option: p.option,
+        rationale: p.rationale,
+      });
+      return d.get("decisions", q.id);
+    }
+    ensure(
+      q.options.some((o) => o.key === p.option),
+      "validation_failed",
+      "Option is not part of this decision",
+    );
+    return resolveDecisionDraft(d, q, { ...p, raw_quote: p.rationale }, true);
+  });
+}
+
 export function requestHumanAction(
   state: CommandState,
   actor: Actor,
@@ -478,6 +579,7 @@ export function requestHumanAction(
       expected_return: p.expected_return,
       blocked_work_items: items.map((w) => w.id),
       status: "open",
+      triage: hasActivePmOps(d, "triage_human_action") ? "pm_ops" : "human",
       ...(p.due ? { due: p.due } : {}),
     };
     d.put("human_actions", action);
@@ -507,36 +609,137 @@ export function completeHumanAction(
       "unauthorized",
       "Only the human can complete a human action",
     );
+    return completeActionDraft(d, p);
+  });
+}
+function completeActionDraft(
+  d: CommandDraft,
+  p: {
+    human_action_id: HumanActionId;
+    text: string;
+    attachments?: readonly string[];
+  },
+) {
+  const action = d.get("human_actions", p.human_action_id);
+  text(p.text, "result");
+  if (action.card_id) d.card(action.card_id);
+  for (const id of p.attachments ?? [])
+    ensure(
+      d.get("attachments", id).card_id === action.card_id,
+      "validation_failed",
+      "Attachment belongs to another card",
+    );
+  const result: HumanAction = {
+    ...action,
+    status: unwrap(transition("human_action", action.status, "complete")),
+    result: { text: p.text, attachments: p.attachments ?? [], at: d.now },
+  };
+  d.put("human_actions", result);
+  const resumed: WorkItem[] = [];
+  for (const id of action.blocked_work_items) {
+    const item = d.work(id);
+    if (resumeWork(d, item)) resumed.push(item);
+  }
+  const event = d.emit(
+    "human_action_completed",
+    action.card_id,
+    {
+      human_action_id: action.id,
+      resume_work_items: resumed.map((item) => item.id),
+    },
+    { type: "human_action", body: p.text, human_action_id: action.id },
+  );
+  for (const item of resumed) queueResumedRun(d, item, event);
+  return result;
+}
+export function triageHumanAction(
+  state: CommandState,
+  actor: Actor,
+  p: {
+    human_action_id: HumanActionId;
+    disposition: "done" | "host" | "human";
+    rationale: string;
+    title?: string;
+    summary?: string;
+    why_human?: string;
+    expected_outcome?: string;
+    instructions?: string;
+    expected_return?: string;
+  },
+  ports: CommandPorts,
+) {
+  return command(state, actor, "triage_human_action", ports, (d) => {
+    ensure(
+      isPmOps(d),
+      "forbidden_tool",
+      "Only PM Ops can triage human actions",
+    );
     const action = d.get("human_actions", p.human_action_id);
-    text(p.text, "result");
-    if (action.card_id) d.card(action.card_id);
-    for (const id of p.attachments ?? [])
+    ensure(
+      action.status === "open",
+      "illegal_transition",
+      "Only an open human action can be triaged",
+    );
+    text(p.rationale, "rationale");
+    if (p.disposition === "done") {
       ensure(
-        d.get("attachments", id).card_id === action.card_id,
-        "validation_failed",
-        "Attachment belongs to another card",
+        action.triage === "pm_ops",
+        "unauthorized",
+        "An action already handed to the human cannot be completed by PM",
       );
-    const result: HumanAction = {
-      ...action,
-      status: unwrap(transition("human_action", action.status, "complete")),
-      result: { text: p.text, attachments: p.attachments ?? [], at: d.now },
-    };
-    d.put("human_actions", result);
-    const resumed: WorkItem[] = [];
-    for (const id of action.blocked_work_items) {
-      const item = d.work(id);
-      if (resumeWork(d, item)) resumed.push(item);
+      return completeActionDraft(d, {
+        human_action_id: action.id,
+        text: p.rationale,
+      });
     }
-    const event = d.emit(
-      "human_action_completed",
+    ensure(
+      p.disposition === "host" || p.disposition === "human",
+      "validation_failed",
+      "Unknown disposition",
+    );
+    text(p.title, "title");
+    ensure(
+      [...p.title.trim()].length <= 80 && !/[\r\n]/u.test(p.title),
+      "validation_failed",
+      "Title must be one line, at most 80 characters",
+    );
+    text(p.summary, "summary");
+    text(p.why_human, "why_human");
+    text(p.expected_outcome, "expected_outcome");
+    text(p.instructions, "instructions");
+    text(p.expected_return, "expected_return");
+    const handoff = {
+      title: p.title.trim(),
+      summary: p.summary,
+      why_human: p.why_human,
+      instructions: p.instructions,
+      expected_outcome: p.expected_outcome,
+      expected_return: p.expected_return,
+      rewritten_by: d.author,
+      rewritten_at: d.now,
+    };
+    const next: HumanAction = {
+      ...action,
+      triage: p.disposition,
+      triage_rationale: p.rationale,
+      handoff,
+    };
+    d.put("human_actions", next);
+    d.emit(
+      "human_action_requested",
       action.card_id,
       {
         human_action_id: action.id,
-        resume_work_items: resumed.map((item) => item.id),
+        disposition: p.disposition,
+        reason: p.rationale,
+        handoff,
       },
-      { type: "human_action", body: p.text, human_action_id: action.id },
+      {
+        type: "human_action",
+        human_action_id: action.id,
+        body: `项目经理已改写${p.disposition === "host" ? "主机操作" : "待你执行"}：${p.title.trim()}\n\n这是什么：${p.summary}\n\n为什么需要你：${p.why_human}\n\n怎么做：${p.instructions}\n\n做完会怎样：${p.expected_outcome}\n\n完成后请回传：${p.expected_return}\n\n分拣理由：${p.rationale}`,
+      },
     );
-    for (const item of resumed) queueResumedRun(d, item, event);
-    return result;
+    return next;
   });
 }
