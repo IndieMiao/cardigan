@@ -10,6 +10,7 @@ import type {
   Machine,
   MergeCheckView,
   ProjectId,
+  Run,
   RunQueuePosition,
   TimelineEntry,
   WorkItem,
@@ -185,10 +186,25 @@ export function webDecisionView(
 /** Public employee profile only; opaque references and external URLs are not images. */
 export function webAuthorView(state: CommandState, author: Author) {
   const view = authorView(state, author);
+  const assignment = author.startsWith("assignment:")
+    ? state.assignments.find((a) => a.id === author.slice(11))
+    : undefined;
+  const standingName =
+    assignment?.scope === "standing" && assignment.role_id === "pm"
+      ? assignment.standing_mode === "ops"
+        ? "PM 后台（PM Ops）"
+        : assignment.standing_mode === "office"
+          ? "PM 前台（PM Office）"
+          : undefined
+      : undefined;
   const employee = state.employees?.find((e) => e.id === view.employee?.id);
   const avatar = parseAvatarReference(employee?.avatar);
   return {
     ...view,
+    author_display:
+      view.employee || view.member || author === "human" || author === "system"
+        ? view.author_display
+        : (standingName ?? `未命名的 ${assignment?.role_id ?? "未知角色"}`),
     author,
     member: webMemberView(view.member),
     employee: employee
@@ -785,6 +801,37 @@ export function cardDetail(
   };
 }
 
+/** All unread notices on the first page, then ten read notices per page. */
+export function noticePage(state: CommandState, before?: string) {
+  const all = notices(state);
+  const anchor =
+    before === undefined ? -1 : all.findIndex((n) => n.id === before);
+  if (before !== undefined && anchor < 0)
+    throw new InvalidQuery("知会分页游标无效，请刷新后重试");
+  const unread = all.filter((n) => !n.read);
+  const read = all.slice(anchor + 1).filter((n) => n.read);
+  const page = read.slice(0, 10);
+  const events = new Map(state.events.map((event) => [event.id, event]));
+  return {
+    notices: [...(before === undefined ? unread : []), ...page].map(
+      (notice) => {
+        const event = events.get(notice.id);
+        return {
+          ...notice,
+          ...webAuthorView(
+            state,
+            event?.actor.kind === "assignment"
+              ? `assignment:${event.actor.assignment_id}`
+              : (event?.actor.kind ?? "system"),
+          ),
+        };
+      },
+    ),
+    next_cursor: read.length > page.length ? (page.at(-1)?.id ?? null) : null,
+    unread_count: unread.length,
+  };
+}
+
 /** `listNeedsYou` plus the one-line reason and how long each item has waited. */
 export function needsYou(
   state: CommandState,
@@ -795,18 +842,7 @@ export function needsYou(
     listNeedsYou(state, human(state.project_id), { now: () => now }),
   );
   const data = result.data;
-  const noticeList = notices(state).map((notice) => {
-    const event = state.events.find((event) => event.id === notice.id);
-    return {
-      ...notice,
-      ...webAuthorView(
-        state,
-        event?.actor.kind === "assignment"
-          ? `assignment:${event.actor.assignment_id}`
-          : (event?.actor.kind ?? "system"),
-      ),
-    };
-  });
+  const noticeList = noticePage(state);
   const checks = new Map(
     mergeGateStatus === "enabled"
       ? cardViews(state).map((card) => [card.id, card.merge_check])
@@ -969,11 +1005,12 @@ export function needsYou(
       (left, right) => (right.waited_ms ?? 0) - (left.waited_ms ?? 0),
     ),
     // §7.4 知会: delegated resolutions, newest first; never blocking.
-    notices: noticeList.slice(0, 50),
+    notices: noticeList.notices,
+    notices_next_cursor: noticeList.next_cursor,
     counts: {
       decisions: decisions.length,
       human_actions: human_actions.length,
-      notices_unread: noticeList.filter((n) => !n.read).length,
+      notices_unread: noticeList.unread_count,
     },
   };
 }
@@ -1065,6 +1102,25 @@ export function executionView(
     [...state.runs]
       .filter((run) => run.assignment_id === assignment_id)
       .sort((left, right) => (left.id === right.id ? 0 : byId(right, left)))[0];
+  // §8.5: a queued Run has neither started_at nor finished_at; its queue time
+  // is its activity time for the default sort. launchRun records it as a
+  // run_queued event. Resumption after a decision/unblock (queueResumedRun)
+  // and dispatch recovery create the queued Run in the same command that
+  // emits its trigger event, without a run_queued event, so that trigger's
+  // time is when the Run was queued.
+  const queuedAt = new Map<string, string>();
+  const eventAt = new Map<string, string>();
+  for (const event of state.events) {
+    eventAt.set(event.id, event.created_at);
+    if (event.type !== "run_queued") continue;
+    const runId = (event.payload as { readonly run_id?: unknown }).run_id;
+    if (typeof runId === "string" && !queuedAt.has(runId))
+      queuedAt.set(runId, event.created_at);
+  }
+  const withQueuedAt = (run: Run) => {
+    const at = queuedAt.get(run.id) ?? eventAt.get(run.trigger_event_id);
+    return at === undefined ? {} : { queued_at: at };
+  };
   return {
     project_id: state.project_id,
     generated_at: now,
@@ -1111,6 +1167,7 @@ export function executionView(
                 kind: run.kind,
                 started_at: run.started_at ?? null,
                 finished_at: run.finished_at ?? null,
+                ...withQueuedAt(run),
                 heartbeat_at: run.heartbeat_at ?? null,
                 heartbeat_note: run.heartbeat_note ?? null,
                 outcome: run.outcome,
@@ -1130,7 +1187,11 @@ export function executionView(
         const waiting = queue.find(
           (r) => r.project_id === state.project_id && r.run_id === run.id,
         );
-        return { ...run, ...(waiting ? { queue_ahead: waiting.ahead } : {}) };
+        return {
+          ...run,
+          ...withQueuedAt(run),
+          ...(waiting ? { queue_ahead: waiting.ahead } : {}),
+        };
       }),
   };
 }

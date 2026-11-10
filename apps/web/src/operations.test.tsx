@@ -18,6 +18,15 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+test("notice pagination encodes the project and server cursor and uses the session", async () => {
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response("{}"));
+  await new HttpCardiganClient(fetcher).notices("p/a", "event/+?");
+  expect(fetcher).toHaveBeenCalledWith(
+    "/api/projects/p%2Fa/notices?before=event%2F%2B%3F",
+    expect.objectContaining({ credentials: "same-origin" }),
+  );
+});
+
 test("Needs You client writes the right routes and JSON with the browser session", async () => {
   const fetcher = vi
     .fn<typeof fetch>()
@@ -84,6 +93,14 @@ test("resource changes ignore slow old responses and retain data on a failed ref
 });
 
 test("commands quote project values, copy explicitly and fall back to visible text", async () => {
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  );
   const writeText = vi.fn().mockResolvedValue(undefined);
   vi.stubGlobal("navigator", { clipboard: { writeText } });
   const command = cliCommand("p'$(echo injected)", "worktree diff", "A-1");
@@ -91,9 +108,13 @@ test("commands quote project values, copy explicitly and fall back to visible te
     "cardigan worktree diff 'A-1' --project 'p'\\''$(echo injected)'",
   );
   render(<CopyCommand label="查看 Diff" command={command} />);
-  expect(
-    screen.getByText("deploy/install-cli.sh").parentElement?.textContent,
-  ).toBe("需要先用 deploy/install-cli.sh 安装 cardigan 命令。");
+  expect(screen.queryByText("deploy/install-cli.sh")).toBeNull();
+  const copy = screen.getByRole("button", { name: "复制查看 Diff" });
+  act(() => copy.focus());
+  expect((await screen.findByRole("tooltip")).textContent).toBe(
+    "需要先用 deploy/install-cli.sh 安装 cardigan 命令。",
+  );
+  act(() => copy.blur());
   fireEvent.click(screen.getByRole("button", { name: "复制查看 Diff" }));
   await screen.findByText("已复制");
   expect(writeText).toHaveBeenCalledWith(command);

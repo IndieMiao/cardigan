@@ -92,7 +92,7 @@ export function EmployeeIdentity({
   const profile = member ?? employee;
   const role = member
     ? "所有者"
-    : (employee?.role_id ?? author_role ?? "Agent");
+    : (employee?.role_id ?? author_role ?? "未知角色");
   const name =
     profile?.name ??
     author_display ??
@@ -279,7 +279,7 @@ export function ProduceOwners({
               (owner) =>
                 owner.employee?.name ??
                 owner.author_display ??
-                `未命名的 ${owner.author_role ?? "Agent"}`,
+                `未命名的 ${owner.author_role ?? "未知角色"}`,
             )
             .join("、")}
         >

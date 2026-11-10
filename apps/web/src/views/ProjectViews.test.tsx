@@ -4,6 +4,7 @@ import {
   fireEvent,
   render,
   screen,
+  waitFor,
   within,
 } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
@@ -88,7 +89,7 @@ test("snapshot separates human/agent waits, shows next owners, blocked work and 
   expect(agent.getByRole("link", { name: /^C-2 / })).toBeTruthy();
   expect(
     screen.getByRole("region", { name: "审核与待合并" }).textContent,
-  ).toContain("未命名的 Agent");
+  ).toContain("未命名的 未知角色");
   expect(
     screen.getByRole("region", { name: "阻塞事项" }).textContent,
   ).toContain("等待权限");
@@ -203,6 +204,65 @@ test("execution shows working assignments in a table and expands the newest Run,
   expect(
     screen.getByText("cardigan assignment stop 'A-1' --project 'p-1'"),
   ).toBeTruthy();
+});
+
+test("execution copies observe by default and reveals warned interactive access only on expansion", async () => {
+  const writeText = vi.fn(async () => {});
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText },
+  });
+  render(
+    <ExecutionPage
+      client={fakeClient({
+        execution: async () => ({
+          assignments: [assignment],
+          runs: [],
+          machines: [],
+        }),
+      })}
+      projectId="p-1"
+    />,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "展开 A-1 详情" }));
+  const command = "cardigan assignment attach 'A-1' --project 'p-1'";
+  expect(screen.getByText(command)).toBeTruthy();
+  const observe = screen.getByRole("button", {
+    name: "复制在 Herdr 中打开（只看不动）",
+  });
+  const summary = screen.getByText("需要接管输入？");
+  const details = summary.closest("details") as HTMLDetailsElement;
+  expect(details.open).toBe(false);
+  expect(observe.closest("details")).toBeNull();
+  expect(
+    screen.getByRole("button", { name: "复制接管输入" }).closest("details"),
+  ).toBe(details);
+  expect(screen.queryByText("deploy/install-cli.sh")).toBeNull();
+  fireEvent.click(observe);
+  await waitFor(() => expect(writeText).toHaveBeenLastCalledWith(command));
+
+  fireEvent.click(summary);
+  expect(details.open).toBe(true);
+  const warning = within(details).getByText(
+    "你的输入会直接发给正在工作的 Agent，可能打断它",
+  );
+  const interactiveCommand = within(details).getByText(
+    `${command} --interactive`,
+  );
+  expect(warning.tagName).toBe("STRONG");
+  expect(
+    warning.compareDocumentPosition(interactiveCommand) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+  fireEvent.click(
+    within(details).getByRole("button", { name: "复制接管输入" }),
+  );
+  await waitFor(() =>
+    expect(writeText).toHaveBeenLastCalledWith(`${command} --interactive`),
+  );
+  expect(writeText).toHaveBeenCalledTimes(2);
+  fireEvent.click(summary);
+  expect(details.open).toBe(false);
 });
 
 test("execution keeps suspended assignments, lost runtimes and blocked Run outcomes prominent", async () => {
@@ -413,43 +473,49 @@ test("U1 a project with only inactive cards explains its empty snapshot without 
   expect(document.querySelectorAll("h2")).toHaveLength(0);
 });
 
-test("execution describes an external Office as an inbox identity", async () => {
-  render(
-    <ExecutionPage
-      projectId="p-1"
-      client={fakeClient({
-        execution: async () => ({
-          assignments: [
-            {
-              ...assignment,
-              role_id: "pm",
-              standing_mode: "office",
-              external: true,
-              runtime_ref: null,
-              runtime_state: "not_provisioned",
-              work_item_id: null,
-              card_id: null,
-            },
-          ],
-          runs: [],
-          machines: [],
-        }),
-      })}
-    />,
-  );
-  expect(
-    await screen.findByText("外接身份，由对接的 Agent 自行拉取"),
-  ).toBeTruthy();
-  expect(screen.queryByText("已暂停")).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "展开 A-1 详情" }));
-  expect(
-    screen.queryByRole("button", { name: "复制启动或恢复会话" }),
-  ).toBeNull();
-  expect(
-    screen.queryByRole("button", { name: "复制在 Herdr 中打开" }),
-  ).toBeNull();
-  expect(screen.getByRole("button", { name: "复制查看收件箱" })).toBeTruthy();
-});
+test.each([null, assignment.runtime_ref])(
+  "execution keeps external Office out of terminal commands (ref=%j)",
+  async (runtime_ref) => {
+    render(
+      <ExecutionPage
+        projectId="p-1"
+        client={fakeClient({
+          execution: async () => ({
+            assignments: [
+              {
+                ...assignment,
+                role_id: "pm",
+                standing_mode: "office",
+                external: true,
+                runtime_ref,
+                runtime_state: "not_provisioned",
+                work_item_id: null,
+                card_id: null,
+              },
+            ],
+            runs: [],
+            machines: [],
+          }),
+        })}
+      />,
+    );
+    expect(
+      await screen.findByText("外接身份，由对接的 Agent 自行拉取"),
+    ).toBeTruthy();
+    expect(screen.queryByText("已暂停")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "展开 A-1 详情" }));
+    expect(
+      screen.queryByRole("button", { name: "复制启动或恢复会话" }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "复制在 Herdr 中打开" }),
+    ).toBeNull();
+    expect(screen.getByText("外接身份，没有可接入的终端")).toBeTruthy();
+    expect(screen.queryByText(/cardigan assignment attach/)).toBeNull();
+    expect(screen.queryByText("需要接管输入？")).toBeNull();
+    expect(screen.getByRole("button", { name: "复制查看收件箱" })).toBeTruthy();
+  },
+);
 
 test("execution includes unprovisioned queued work in the default view and shows its global position", async () => {
   render(

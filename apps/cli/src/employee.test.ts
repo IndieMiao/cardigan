@@ -53,6 +53,20 @@ afterEach(() => {
   rmSync(dataDir, { recursive: true, force: true });
 });
 
+test.each(["update", "activate", "deactivate"])(
+  "%s explains the missing employee ID with a command example",
+  async (command) => {
+    const before = snapshot();
+    expect(await run([command])).toBe(2);
+    expect(errors.join("\n")).toContain(
+      `缺少员工编号：cardigan employee ${command} E-1${command === "update" ? " --name 诸葛亮" : ""}（用 cardigan employee list 查看编号）`,
+    );
+    expect(await run(["update", "--name", "诸葛亮"])).toBe(2);
+    expect(errors.join("\n")).toContain("缺少员工编号");
+    expect(snapshot()).toEqual(before);
+  },
+);
+
 test("human CLI creates, lists, updates, deactivates and activates global employees without a project", async () => {
   expect(
     await run([...add, "--bio", "管理项目", "--avatar", "library:zhuge-liang"]),
