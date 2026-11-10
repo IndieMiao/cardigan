@@ -115,14 +115,18 @@ test("R01 §8.1: both board filters identify the actual next human or Agent and 
   expect(human.cards[0]?.waiting_on).toContainEqual(
     expect.objectContaining({ kind: "decision", ref: q.id }),
   );
-  expect(human.cards[0]?.next_owners).toContainEqual({
-    kind: "human",
-    ref: "human",
-  });
-  expect(agent.cards[0]?.next_owners).toContainEqual({
-    kind: "assignment",
-    ref: other.owner.id,
-  });
+  expect(human.cards[0]?.next_owners).toContainEqual(
+    expect.objectContaining({
+      kind: "human",
+      ref: "human",
+    }),
+  );
+  expect(agent.cards[0]?.next_owners).toContainEqual(
+    expect.objectContaining({
+      kind: "assignment",
+      ref: other.owner.id,
+    }),
+  );
   expect(f.state().cursors).toEqual(before);
 });
 
@@ -136,10 +140,12 @@ test("R02 §8.4: card detail answers goal, progress, next owner, blocker and fin
     acceptance_criteria: f.card.acceptance_criteria,
     status: "awaiting_merge",
   });
-  expect(detail.card.next_owners).toContainEqual({
-    kind: "human",
-    ref: "human",
-  });
+  expect(detail.card.next_owners).toContainEqual(
+    expect.objectContaining({
+      kind: "human",
+      ref: "human",
+    }),
+  );
   expect(detail.card.waiting_on).toContainEqual(
     expect.objectContaining({ ref: q?.id }),
   );
@@ -297,7 +303,9 @@ test("R04 §8.3: snapshot separates waiting actors, review and progress, and inc
   ]);
   expect(
     view.cards.find((c) => c.id === other.card.id)?.next_owners,
-  ).toContainEqual({ kind: "assignment", ref: other.owner.id });
+  ).toContainEqual(
+    expect.objectContaining({ kind: "assignment", ref: other.owner.id }),
+  );
   await f.mcp(other.owner, "report_blocker", {
     work_item_id: other.owner.work_item_id,
     reason: "Waiting for a specialist",

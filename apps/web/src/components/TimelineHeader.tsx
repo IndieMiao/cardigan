@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import type { TimelineEntryView } from "../api.js";
+import { EmployeeIdentity } from "./EmployeeIdentity.js";
 import { Time } from "./Foundation.js";
-import { Tooltip } from "./Tooltip.js";
 
 const paths: Record<string, string> = {
   comment: "M4 4h16v12H9l-5 4V4Z M8 8h8 M8 12h5",
@@ -49,13 +49,6 @@ export function TimelineActor({
   const assignment = entry.author.startsWith("assignment:")
     ? entry.author.slice(11)
     : undefined;
-  const name = assignment
-    ? (entry.employee?.name ??
-      entry.author_display ??
-      `未命名的 ${entry.author_role ?? "Agent"}`)
-    : entry.author === "human"
-      ? "你"
-      : "系统";
   const role = ["pm", "coder", "reviewer", "tester"].includes(
     entry.author_role ?? "",
   )
@@ -67,24 +60,11 @@ export function TimelineActor({
     <div
       className={`timeline-identity actor-${role}${compact ? " compact" : ""}`}
     >
-      {!compact && (
-        <span className="timeline-avatar" aria-hidden="true">
-          {name === "你"
-            ? "人"
-            : name === "系统"
-              ? "系"
-              : (entry.employee?.name ?? entry.author_role ?? "Agent")
-                  .charAt(0)
-                  .toUpperCase()}
-        </span>
-      )}
-      <Tooltip
-        content={`${entry.author}，${entry.id}，序号 ${entry.event_seq}`}
-      >
-        <button type="button" className="quiet timeline-author">
-          <strong>{name}</strong>
-        </button>
-      </Tooltip>
+      <EmployeeIdentity
+        {...entry}
+        showTitle={!compact}
+        metadata={`${entry.author}，${entry.id}，序号 ${entry.event_seq}`}
+      />
       {assignment && <span className="timeline-role">{assignment}</span>}
     </div>
   );
