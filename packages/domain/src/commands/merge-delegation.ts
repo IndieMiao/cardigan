@@ -41,8 +41,11 @@ export function pmMergeBlockers(
         : "合并闸门检查尚无结果（未开启闸门的项目须交人确认）",
     );
   const items = state.work_items.filter(
-    (w) => w.card_id === card_id && w.required && w.status !== "cancelled",
+    (w) => w.card_id === card_id && w.status !== "cancelled",
   );
+  // Every live verifier counts, required or not: `required` is editable by
+  // PM Ops on added items, so it cannot waive verification here. Waiving one
+  // is the human's call (escalate).
   for (const w of items.filter((w) => w.kind === "verify"))
     if (w.status !== "passed") blockers.push(`验证项 ${w.id} 未通过`);
   const current = items
@@ -57,7 +60,7 @@ export function pmMergeBlockers(
       ),
     )
     .filter((v): v is Delivery => !!v);
-  for (const w of items.filter((w) => w.kind === "produce"))
+  for (const w of items.filter((w) => w.kind === "produce" && w.required))
     if (
       !current.some((v) => v.work_item_id === w.id && v.status === "accepted")
     )

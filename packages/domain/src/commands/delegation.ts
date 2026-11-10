@@ -1,4 +1,4 @@
-import type { Assignment, Decision, ToolName } from "../entities.js";
+import type { Assignment, Card, Decision, ToolName } from "../entities.js";
 import type { CardId } from "../ids.js";
 import {
   type DecisionCategory,
@@ -35,25 +35,48 @@ export function isPmOps(d: CommandDraft) {
 }
 /**
  * D12 high-risk categories and scope changes on a card keep its merge
- * confirmation with the human (§7.4); withdrawn questions no longer count.
+ * confirmation with the human (§7.4): decisions on or affecting the card,
+ * plus the decision the card was created from (`source.kind=decision`), so
+ * work derived from a project-level sensitive decision is not "ordinary".
+ * Withdrawn questions on the card no longer count.
  */
 export function mergeNeedsHuman(
   decisions: readonly Decision[],
+  cards: readonly Pick<Card, "id" | "source">[],
   card_id: CardId,
 ): string | undefined {
+  const card = cards.find((c) => c.id === card_id);
+  const sourceId =
+    card?.source.kind === "decision" ? card.source.decision_id : undefined;
   const sensitive = decisions.find(
     (q) =>
-      q.status !== "withdrawn" &&
       // System confirmations (merge, worktree cleanup) are not card content.
       q.trigger !== "merge_confirmation" &&
       q.trigger !== "worktree_cleanup" &&
-      (q.card_id === card_id || q.affected_cards.includes(card_id)) &&
+      (q.id === sourceId ||
+        (q.status !== "withdrawn" &&
+          (q.card_id === card_id || q.affected_cards.includes(card_id)))) &&
       (q.category === "scope_change" ||
         (!!q.category && highRiskCategories.includes(q.category))),
   );
   return sensitive
-    ? `卡片涉及${sensitive.category === "scope_change" ? "需求范围变化" : "高风险事项（花钱、账号、权限或删除数据）"}（${sensitive.id}），合并须由人确认。`
+    ? `卡片${sensitive.id === sourceId ? "来源拍板" : ""}涉及${sensitive.category === "scope_change" ? "需求范围变化" : "高风险事项（花钱、账号、权限或删除数据）"}（${sensitive.id}），合并须由人确认。`
     : undefined;
+}
+/** Human-only merge confirmation: sensitive card or PM handed it over (§7.4). */
+export function mergeRequiresHuman(
+  state: {
+    readonly decisions: readonly Decision[];
+    readonly cards: readonly Pick<Card, "id" | "source">[];
+  },
+  q: Decision,
+): boolean {
+  return (
+    q.trigger === "merge_confirmation" &&
+    (!!q.human_required_reason ||
+      !q.card_id ||
+      !!mergeNeedsHuman(state.decisions, state.cards, q.card_id))
+  );
 }
 type DelegationSubject = Pick<
   Decision,
@@ -69,7 +92,7 @@ export function delegationAllowed(d: CommandDraft, q: DelegationSubject) {
       pmMergeConfirmation(projectPreference(d)) &&
       !q.human_required_reason &&
       !!q.card_id &&
-      !mergeNeedsHuman(d.list("decisions"), q.card_id)
+      !mergeNeedsHuman(d.list("decisions"), d.list("cards"), q.card_id)
     );
   return (
     !!q.category &&

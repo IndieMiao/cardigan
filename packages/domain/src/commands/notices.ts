@@ -61,7 +61,14 @@ export function notices(state: CommandState): readonly Notice[] {
   const read = readIds(state.events);
   const seen = new Set<string>();
   const out: Notice[] = [];
-  for (const e of [...state.events].sort((a, b) => a.seq - b.seq)) {
+  // seq is per card stream (§6.1); order across cards by time, then by the
+  // time-ordered event id, so a newer notice is never pushed out by older ones.
+  const chronological = [...state.events].sort(
+    (a, b) =>
+      Date.parse(a.created_at) - Date.parse(b.created_at) ||
+      (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+  );
+  for (const e of chronological) {
     if (
       !["decision_resolved", "decision_provisionally_resolved"].includes(
         e.type,

@@ -194,7 +194,11 @@ function requestConfirmation(d: CommandDraft, card: Card, target: Delivery) {
       status: unwrap(transition("decision", old.status, "supersede")),
     });
   const id = d.ids.next(d.state.project_id, "decision");
-  const sensitive = mergeNeedsHuman(d.list("decisions"), card.id);
+  const sensitive = mergeNeedsHuman(
+    d.list("decisions"),
+    d.list("cards"),
+    card.id,
+  );
   const draft: Decision = {
     id,
     key: id,

@@ -20,6 +20,7 @@ import {
   hasActivePmOps,
   isPmOps,
   mergeDelegationAuthority,
+  mergeRequiresHuman,
 } from "./delegation.js";
 import { pmMergeBlockers } from "./merge-delegation.js";
 import { resolveReviewLimit } from "./review-limit-resolution.js";
@@ -414,6 +415,13 @@ export function recordDecision(
           actor.allowed_tools.includes("record_decision")),
       "forbidden_tool",
       "Only PM Office or the designated human can record decisions",
+    );
+    // §7.4: a sensitive or PM-escalated merge needs a human Actor; PM Office
+    // transcription would record resolved_by=human without one.
+    ensure(
+      actor.kind === "human" || !mergeRequiresHuman(state, decision),
+      "forbidden_tool",
+      "此合并确认须由人在 Workbench 或本机 CLI 确认，PM 不能代记",
     );
     if (decision.card_id) d.card(decision.card_id);
     else d.projectAccess();

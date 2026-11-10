@@ -12,7 +12,7 @@ import {
   ensure,
   unwrap,
 } from "./core.js";
-import { mergeNeedsHuman } from "./delegation.js";
+import { mergeRequiresHuman } from "./delegation.js";
 import { mergePlan } from "./merge.js";
 import { projectPreferences } from "./preferences.js";
 
@@ -54,8 +54,7 @@ export function autoMergeSchedule(
     );
     // §7.4: PM handoffs, D12 and scope changes need an explicit human answer.
     ensure(
-      !decision.human_required_reason &&
-        !mergeNeedsHuman(state.decisions, card.id),
+      !mergeRequiresHuman(state, decision),
       "illegal_transition",
       "此合并须由人明确确认，不适用超时自动合并",
     );

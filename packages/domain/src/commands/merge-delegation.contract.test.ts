@@ -48,13 +48,27 @@ const opsActor: Actor = {
   allowed_tools: standingTools(role("pm").allowed_tools, "ops"),
 };
 
+const office: Assignment = {
+  ...base,
+  id: id("assignment", 901),
+  scope: "standing",
+  standing_mode: "office",
+};
+const officeActor: Actor = {
+  kind: "assignment",
+  project_id: human.project_id,
+  assignment_id: office.id,
+  ...role("pm"),
+  allowed_tools: standingTools(role("pm").allowed_tools, "office"),
+};
+
 function setup(withOps = true) {
   const empty: CommandState = {
     project_id: human.project_id,
     roles: [role("coder"), role("reviewer"), role("pm")],
     cards: [],
     work_items: [],
-    assignments: withOps ? [ops] : [],
+    assignments: withOps ? [ops, office] : [office],
     runs: [],
     deliveries: [],
     reviews: [],
@@ -498,4 +512,165 @@ test("delegated resolutions become non-blocking notices the human can mark read"
   expect(again.events).toEqual([]);
   // Reading never touches decisions.
   expect(again.changes).toEqual([]);
+});
+
+const officeRecord = (state: CommandState, decision_id: Decision["id"]) =>
+  recordDecision(
+    state,
+    officeActor,
+    {
+      decision_id,
+      option: "merge",
+      rationale: "前台代记",
+      raw_quote: "合并",
+    },
+    ports(),
+  );
+
+test.each([
+  "spending",
+  "account",
+  "permission",
+  "data_deletion",
+  "scope_change",
+] as const)(
+  "PM Office cannot transcribe the human-only merge of a %s card",
+  async (category) => {
+    const { f, confirmation, raise, check } = setup();
+    raise(category);
+    await f.accept();
+    check("passed");
+    expect(confirmation().decider).toBe("human");
+    const office = officeRecord(f.state, confirmation().id);
+    expect(office.ok).toBe(false);
+    if (!office.ok) expect(office.error.code).toBe("forbidden_tool");
+    // The human still answers through Workbench or the local CLI.
+    f.commit(
+      recordDecision(
+        f.state,
+        human,
+        {
+          decision_id: confirmation().id,
+          option: "merge",
+          rationale: "确认",
+          raw_quote: "合并",
+        },
+        f.io,
+      ),
+    );
+    expect(mergePlan(f.state, f.card.id).ok).toBe(true);
+  },
+);
+
+test("PM Office cannot transcribe a merge PM Ops handed to the human", async () => {
+  const { f, confirmation, pmResolve } = setup();
+  await f.accept();
+  f.commit(pmResolve("merge", { escalate: true }));
+  expect(officeRecord(f.state, confirmation().id).ok).toBe(false);
+});
+
+test("a card created from a sensitive decision keeps its merge with the human", async () => {
+  const { f, confirmation, check, pmResolve } = setup();
+  const source = f.commit(
+    requestDecision(
+      f.state,
+      human,
+      {
+        category: "permission",
+        kind: "choose",
+        question: "开放管理员权限？",
+        context: "项目级",
+        options: [{ key: "yes", description: "开放", impact: "建卡实施" }],
+        recommended: "yes",
+        affected_cards: [],
+        affected_work_items: [],
+        blocking: false,
+        decider: "human",
+      },
+      f.io,
+    ),
+  ) as Decision;
+  await f.accept();
+  check("passed");
+  const derived: CommandState = {
+    ...f.state,
+    cards: f.state.cards.map((c) =>
+      c.id === f.card.id
+        ? { ...c, source: { kind: "decision", decision_id: source.id } }
+        : c,
+    ),
+  };
+  // A confirmation already with PM Ops is no longer authorized for it.
+  const pm = pmResolve("merge", { notice: "n" }, derived);
+  expect(pm.ok).toBe(false);
+  // A newly requested confirmation goes straight to the human.
+  const held = value(pmResolve("hold"));
+  const afterHold = {
+    ...derived,
+    decisions: derived.decisions.map(
+      (q) =>
+        held.changes.find(
+          (c) => c.collection === "decisions" && c.entity.id === q.id,
+        )?.entity ?? q,
+    ) as Decision[],
+    events: [...derived.events, ...held.events],
+  };
+  const again = value(
+    requestMerge(afterHold, human, { card_id: f.card.id }, f.io),
+  ).data;
+  expect(again.decider).toBe("human");
+  expect(again.context).toContain("来源拍板");
+  expect(confirmation().id).not.toBe(again.id);
+});
+
+test("a non-required verifier that has not passed still blocks a PM merge", async () => {
+  const { f, confirmation, check } = setup();
+  await f.accept();
+  check("passed");
+  const template = f.state.work_items.find(
+    (w) => w.card_id === f.card.id && w.kind === "verify",
+  );
+  if (!template) throw new Error("Missing verifier");
+  const optional = {
+    ...template,
+    id: id("work_item", 998),
+    template_key: undefined,
+    required: false,
+    status: "todo",
+  } as unknown as WorkItem;
+  const state: CommandState = {
+    ...f.state,
+    work_items: [...f.state.work_items, optional],
+  };
+  expect(pmMergeBlockers(state, confirmation())).toEqual([
+    `验证项 ${optional.id} 未通过`,
+  ]);
+});
+
+test("notices are ordered by resolution time across cards, not by per-card seq", () => {
+  const base = setup().f.state;
+  const resolved = (n: number, card: string, seq: number, at: string) => ({
+    id: String(n).padStart(26, "0"),
+    card_id: card,
+    seq,
+    type: "decision_resolved",
+    actor: opsActor,
+    payload: {
+      decision_id: `q(${n})`,
+      option: "a",
+      option_description: `决定 ${n}`,
+      rationale: "r",
+      via: "delegated",
+    },
+    created_at: at,
+  });
+  const events = [
+    ...Array.from({ length: 50 }, (_, i) =>
+      resolved(i + 1, "C-101", 100 + i, "2026-01-01T00:00:00.000Z"),
+    ),
+    resolved(99, "C-156", 3, "2026-01-02T00:00:00.000Z"),
+  ] as unknown as CommandState["events"];
+  const list = notices({ ...base, events });
+  expect(list[0]?.decision_id).toBe("q(99)");
+  expect(list.slice(0, 50).map((n) => n.decision_id)).toContain("q(99)");
 });
