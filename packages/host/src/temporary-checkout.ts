@@ -9,6 +9,7 @@ import {
   type ExecutionConfig,
   LOCAL_RUNTIME_WARNING,
   prepareAgentCheckout,
+  prepareCheckoutAlias,
   secureDataDirectory,
 } from "@cardigan/runtime-herdr";
 import { CHECKOUT_WORKER } from "./checkout-worker.js";
@@ -117,7 +118,12 @@ export async function runInTemporaryCheckout(
   const cleanupErrors: string[] = [];
   const nonce = randomBytes(32).toString("hex");
   const authKey = randomBytes(32).toString("hex");
+  let aliasContainer: string | undefined;
   try {
+    aliasContainer = await prepareCheckoutAlias(
+      execution,
+      `a${randomBytes(7).toString("base64url")}`,
+    );
     if (execution.mode === "local")
       input.onOutput?.("system", `${LOCAL_RUNTIME_WARNING}\n`);
     completed = await new Promise<CheckoutResult>((resolve, reject) => {
@@ -178,6 +184,7 @@ export async function runInTemporaryCheckout(
           nonce,
           auth_key: authKey,
           container,
+          alias_container: aliasContainer,
           repository,
           directory,
           sha,
@@ -192,12 +199,14 @@ export async function runInTemporaryCheckout(
     });
   } finally {
     // Host removes only an empty protected leaf, never Agent-controlled contents.
-    await rmdir(container).catch((error: NodeJS.ErrnoException) => {
-      if (error.code !== "ENOENT") {
-        cleanupErrors.push("Could not remove temporary checkout container");
-        input.onOutput?.("cleanup", `${cleanupErrors[0]}\n`);
-      }
-    });
+    for (const path of [aliasContainer, container])
+      if (path)
+        await rmdir(path).catch((error: NodeJS.ErrnoException) => {
+          if (error.code !== "ENOENT") {
+            cleanupErrors.push("Could not remove temporary checkout container");
+            input.onOutput?.("cleanup", `${cleanupErrors[0]}\n`);
+          }
+        });
   }
   return {
     ...completed,
