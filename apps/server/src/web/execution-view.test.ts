@@ -192,3 +192,24 @@ test("C-73: a replacement Run from dispatch recovery counts from its recovery ev
     id("assignment", 2),
   ]);
 });
+
+test("C-106: the execution view passes the Run's launch settings snapshot through", () => {
+  const base = fixture();
+  const state: CommandState = {
+    ...base,
+    runs: base.runs.map((run) =>
+      run.id === id("run", 1)
+        ? { ...run, harness: "claude-code", effort: "xhigh" }
+        : run,
+    ),
+  };
+  const view = executionView(state, at(30));
+  expect(view.runs.find((run) => run.id === id("run", 1))).toMatchObject({
+    harness: "claude-code",
+    effort: "xhigh",
+  });
+  // Legacy Runs carry neither field; the Workbench shows "—".
+  const legacy = view.runs.find((run) => run.id === id("run", 2));
+  expect(legacy).not.toHaveProperty("harness");
+  expect(legacy).not.toHaveProperty("effort");
+});

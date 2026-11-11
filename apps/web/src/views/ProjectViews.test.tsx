@@ -490,7 +490,13 @@ test("C-75: one detail drawer at a time; another row stays clickable and replace
     />,
   );
   const first = await screen.findByRole("button", { name: "查看 A-1 详情" });
-  expect(first.textContent).toBe("详情");
+  // C-106: the Assignment id is the trigger; the 详情 button is gone.
+  expect(first.textContent).toBe("A-1");
+  expect(
+    [...document.querySelectorAll(".execution-table button")].some(
+      (button) => button.textContent === "详情",
+    ),
+  ).toBe(false);
   const rowsBefore = document.querySelectorAll(".execution-table tr").length;
   /** Click like a pointer would: Radix dismisses on pointerdown outside. */
   const press = (element: Element) => {
