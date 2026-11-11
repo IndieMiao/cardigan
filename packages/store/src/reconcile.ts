@@ -76,6 +76,14 @@ export function recordFindings(
   project_id: ProjectId,
   findings: readonly ReconcileFindingInput[],
   at: string = new Date().toISOString(),
+  options: {
+    /**
+     * P2a-12 C: path prefixes this pass could not scan (an unreachable
+     * executor). Open findings below them stay open with their first-seen
+     * time; absence from an incomplete scan is not a resolution.
+     */
+    readonly unscanned?: readonly string[];
+  } = {},
 ): { readonly created: readonly ReconcileFindingRecord[] } {
   const created: ReconcileFindingRecord[] = [];
   const seen = new Set<string>();
@@ -115,12 +123,19 @@ export function recordFindings(
     if (before === undefined || before.resolved_at !== null)
       created.push(record(find.get(project_id, id) as Record<string, unknown>));
   }
+  const unscanned = options.unscanned ?? [];
   const open = db
     .prepare(
-      "SELECT id FROM reconcile_findings WHERE project_id = ? AND resolved_at IS NULL",
+      "SELECT id, path FROM reconcile_findings WHERE project_id = ? AND resolved_at IS NULL",
     )
     .all(project_id)
-    .map((row) => String((row as { id: unknown }).id));
+    .map((row) => row as { id: unknown; path: unknown })
+    .filter(
+      (row) =>
+        typeof row.path !== "string" ||
+        !unscanned.some((prefix) => (row.path as string).startsWith(prefix)),
+    )
+    .map((row) => String(row.id));
   const resolve = db.prepare(
     "UPDATE reconcile_findings SET resolved_at = ? WHERE project_id = ? AND id = ? AND resolved_at IS NULL",
   );

@@ -220,10 +220,21 @@ export type AgentListRunner = (
 ) => Promise<{ readonly code: number | null; readonly stdout: Buffer }>;
 const LIST_SCRIPT = [
   "set -u",
-  // A missing checks root is an empty listing; anything else unreadable fails.
-  'if [ -d "$1" ]; then find "$1" -mindepth 2 -maxdepth 2 -name worktree -type d -print0 || exit 3; elif [ -e "$1" ]; then exit 3; fi',
+  // present PATH CODE: 0 for a real directory, 1 only when absence is
+  // confirmed (a searchable parent or agent root shows the name missing);
+  // anything unknown (EACCES, symlink, wrong type) exits with CODE.
+  "present() {",
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: POSIX sh parameter expansion.
+  "  p=$1; parent=${p%/*}; root=${parent%/*}",
+  '  if [ -L "$p" ]; then exit "$2"; fi',
+  '  if [ -d "$p" ]; then return 0; fi',
+  '  if [ -d "$parent" ] && [ ! -L "$parent" ] && [ -x "$parent" ] && [ ! -e "$p" ]; then return 1; fi',
+  '  if [ -d "$root" ] && [ -x "$root" ] && [ ! -e "$parent" ] && [ ! -L "$parent" ]; then return 1; fi',
+  '  exit "$2"',
+  "}",
+  'if present "$1" 3; then find "$1" -mindepth 2 -maxdepth 2 -name worktree -type d -print0 || exit 3; fi',
   "printf '%s\\0' --",
-  'if [ -d "$2" ]; then git -c "safe.directory=$2" -c core.hooksPath=/dev/null -C "$2" worktree list --porcelain -z || exit 4; fi',
+  'if present "$2" 4; then git -c "safe.directory=$2" -c core.hooksPath=/dev/null -C "$2" worktree list --porcelain -z || exit 4; fi',
   "printf '%s\\0' --end",
 ].join("\n");
 const runListing: AgentListRunner = (file, args, timeoutMs) =>

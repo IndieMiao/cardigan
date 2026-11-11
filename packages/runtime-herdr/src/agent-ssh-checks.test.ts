@@ -1,5 +1,12 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, test } from "vitest";
@@ -188,7 +195,18 @@ test("the SSH listing reports check directories and their Git registrations belo
   });
 });
 
-test("a project that never ran checks on the executor lists nothing", async () => {
+test("a project that never ran checks on the executor lists nothing; a missing agent root is unknown", async () => {
+  // The agent root itself is provisioned by the operator; without it nothing
+  // can be confirmed absent.
+  await expect(
+    agentListChecks(execution, "project", { run: localShell }),
+  ).rejects.toThrow(/listing failed/);
+  await mkdir(execution.agentRoot);
+  await expect(
+    agentListChecks(execution, "project", { run: localShell }),
+  ).resolves.toEqual({ directories: [], registered: [] });
+  await mkdir(join(execution.agentRoot, "checks"));
+  await mkdir(join(execution.agentRoot, "repos"));
   await expect(
     agentListChecks(execution, "project", { run: localShell }),
   ).resolves.toEqual({ directories: [], registered: [] });
@@ -269,4 +287,77 @@ test("SSH user never contains @, a colon or control characters", async () => {
     await expect(
       agentProcessCommand({ ...execution, user, host: "::1" }, ["true"]),
     ).rejects.toThrow(/Invalid SSH user/);
+});
+
+const gitEnv = {
+  PATH: "/usr/local/bin:/usr/bin:/bin",
+  GIT_CONFIG_NOSYSTEM: "1",
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_AUTHOR_NAME: "t",
+  GIT_AUTHOR_EMAIL: "t@example.test",
+  GIT_COMMITTER_NAME: "t",
+  GIT_COMMITTER_EMAIL: "t@example.test",
+};
+async function registeredCheck() {
+  const checks = join(execution.agentRoot, "checks", "project"),
+    clone = join(execution.agentRoot, "repos", "project");
+  await mkdir(clone, { recursive: true });
+  const git = (...args: string[]) =>
+    execFileSync("git", args, { cwd: clone, env: gitEnv });
+  git("init", "-q");
+  git("commit", "-q", "--allow-empty", "-m", "base");
+  await mkdir(join(checks, "old"), { recursive: true });
+  git("worktree", "add", "-q", "--detach", join(checks, "old", "worktree"));
+  return { checks, clone };
+}
+
+test.runIf(process.getuid?.() !== 0).each([
+  ["checks root without search permission", "checks", 0o600],
+  [
+    "project checks directory without search permission",
+    "checks/project",
+    0o600,
+  ],
+  ["project checks directory without read permission", "checks/project", 0o300],
+  ["attempt directory without read permission", "checks/project/old", 0o300],
+  ["repos root without search permission", "repos", 0o600],
+  ["base clone without read permission", "repos/project", 0o000],
+])(
+  "%s fails the listing instead of reporting missing directories",
+  async (_name, relative, mode) => {
+    await registeredCheck();
+    const target = join(execution.agentRoot, relative);
+    await chmod(target, mode);
+    try {
+      await expect(
+        agentListChecks(execution, "project", { run: localShell }),
+      ).rejects.toThrow(/listing failed/);
+    } finally {
+      await chmod(target, 0o700);
+    }
+  },
+);
+
+test("symlinked or non-directory checks paths fail the listing; confirmed absence lists nothing", async () => {
+  const { checks } = await registeredCheck();
+  const other = join(root, "elsewhere");
+  await mkdir(other);
+  await rm(checks, { recursive: true });
+  await symlink(other, checks);
+  await expect(
+    agentListChecks(execution, "project", { run: localShell }),
+  ).rejects.toThrow(/listing failed/);
+  await rm(checks);
+  await writeFile(checks, "not a directory");
+  await expect(
+    agentListChecks(execution, "project", { run: localShell }),
+  ).rejects.toThrow(/listing failed/);
+  await rm(checks);
+  // Confirmed absent (searchable parent): the registration is reported.
+  await expect(
+    agentListChecks(execution, "project", { run: localShell }),
+  ).resolves.toEqual({
+    directories: [],
+    registered: [join(checks, "old", "worktree")],
+  });
 });
