@@ -60,6 +60,7 @@ export const toolNames = [
   "create_work_item",
   "update_work_item",
   "assign",
+  "release_assignment",
   "project_snapshot",
   "list_needs_you",
   "record_decision",
@@ -288,6 +289,16 @@ export interface Run {
   /** Actual launch profile; absent on legacy runs. */
   readonly launch_profile_ref?: string;
   /**
+   * C-106: the harness the Run's session was launched with, snapshotted with
+   * `model`; absent on legacy runs and wherever the host did not record it.
+   */
+  readonly harness?: "claude-code" | "codex" | "pi";
+  /**
+   * C-106: the reasoning effort in effect at launch, when the launch profile
+   * states it unambiguously; absent when unknown.
+   */
+  readonly effort?: string;
+  /**
    * P2a-10 A: fingerprint of the MCP tools/list the Run's session saw when it
    * started. A reused session carries its previous Run's value; absent on
    * legacy runs, which never trigger a catalog replacement.
@@ -454,6 +465,11 @@ interface DecisionFields {
   readonly preconditions?: readonly string[];
   readonly affected_cards: readonly CardId[];
   readonly affected_work_items: readonly WorkItemId[];
+  /**
+   * Existing card attachments shown with the question, in display order (§6).
+   * Absent when the decision references none.
+   */
+  readonly attachment_ids?: readonly AttachmentId[];
   readonly blocking: boolean;
   readonly decider: Decider;
   readonly doc_refs: readonly {

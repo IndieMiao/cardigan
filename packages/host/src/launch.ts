@@ -27,6 +27,7 @@ import { defaultToolCatalog } from "@cardigan/mcp-server";
 import {
   type CompiledAssignmentLaunch,
   compileAssignmentLaunch,
+  compiledLaunchSettings,
   firstPrompt,
   type LaunchConfig,
   resolveProfile,
@@ -656,6 +657,8 @@ async function launch(
               model,
               agent_cli_version: current.agent_cli_version,
               launch_profile_ref: compiled.profile,
+              // C-106: what this session was actually started with.
+              ...compiledLaunchSettings(compiled.harness, compiled.args),
               // P2a-10 A: the new session lists exactly this token's tools.
               ...(toolCatalog === undefined
                 ? {}

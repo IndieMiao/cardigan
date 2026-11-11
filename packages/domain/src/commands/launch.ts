@@ -93,6 +93,29 @@ const cardId = (d: CommandDraft, a: Assignment) =>
   a.scope === "work_item"
     ? d.get("work_items", a.work_item_id).card_id
     : undefined;
+interface LaunchSettingsSource {
+  readonly harness?: Run["harness"] | undefined;
+  readonly effort?: string | undefined;
+}
+/** C-106: the launch settings snapshot travels with model; absent stays absent. */
+export function launchSettings(
+  source: LaunchSettingsSource,
+): Pick<Run, "harness" | "effort"> {
+  return {
+    ...(source.harness === undefined ? {} : { harness: source.harness }),
+    ...(source.effort === undefined ? {} : { effort: source.effort }),
+  };
+}
+const HARNESS_VALUES: readonly string[] = ["claude-code", "codex", "pi"];
+function settingsValid(source: LaunchSettingsSource) {
+  if (source.harness !== undefined)
+    ensure(
+      HARNESS_VALUES.includes(source.harness),
+      "validation_failed",
+      "harness must be claude-code, codex or pi",
+    );
+  if (source.effort !== undefined) text(source.effort, "effort");
+}
 function snapshot(run: Run, a: Assignment) {
   ensure(
     run.role_version === a.role_version &&
@@ -115,6 +138,9 @@ export interface QueueRunParams {
   readonly model: string;
   readonly agent_cli_version: string;
   readonly launch_profile_ref?: string;
+  /** C-106: launch settings snapshot; omit when unknown. */
+  readonly harness?: Run["harness"] | undefined;
+  readonly effort?: string | undefined;
   /** Defaults to `initial` (a host-started Assignment). */
   readonly kind?: RunKind;
   /**
@@ -155,6 +181,7 @@ export function queueRun(
     text(p.agent_cli_version, "agent_cli_version");
     if (p.launch_profile_ref !== undefined)
       text(p.launch_profile_ref, "launch_profile_ref");
+    settingsValid(p);
     if (p.trigger_event_id !== undefined) {
       ensure(
         !d
@@ -187,6 +214,7 @@ export function queueRun(
       ...(p.launch_profile_ref
         ? { launch_profile_ref: p.launch_profile_ref }
         : {}),
+      ...launchSettings(p),
       trigger_event_id: p.trigger_event_id ?? event.id,
       kind: p.kind ?? "initial",
       status: "queued",
@@ -205,7 +233,12 @@ export interface DispatchRunParams {
   /** Host compilation snapshot, recorded atomically before a queued Run starts. */
   readonly launch_snapshot?: Pick<
     Run,
-    "model" | "agent_cli_version" | "launch_profile_ref" | "tool_catalog"
+    | "model"
+    | "agent_cli_version"
+    | "launch_profile_ref"
+    | "tool_catalog"
+    | "harness"
+    | "effort"
   >;
   readonly run_id: RunId;
   /**
@@ -232,9 +265,13 @@ export function dispatchRun(
 ) {
   return command(state, actor, "dispatch_run", ports, (d) => {
     const stored = d.get("runs", p.run_id);
-    const launched = p.launch_snapshot
+    // C-106: a launch snapshot replaces the stored settings as a whole, so a
+    // fresh session never keeps a previous session's harness or effort.
+    const { harness: _harness, effort: _effort, ...unset } = stored;
+    const launched: Run = p.launch_snapshot
       ? {
-          ...stored,
+          ...unset,
+          ...launchSettings(p.launch_snapshot),
           model: p.launch_snapshot.model,
           agent_cli_version: p.launch_snapshot.agent_cli_version,
           ...(p.launch_snapshot.launch_profile_ref
@@ -249,8 +286,8 @@ export function dispatchRun(
     // same session, so it keeps the tools/list fingerprint that session
     // recorded (the latest started Run on the same Role version). Any entry
     // point that reuses a session (Dispatcher or CLI) therefore keeps it.
-    const session =
-      p.runtime_ref === undefined && launched.tool_catalog === undefined
+    const previous =
+      p.runtime_ref === undefined
         ? d
             .list("runs")
             .filter(
@@ -262,14 +299,25 @@ export function dispatchRun(
             )
             .sort((x, y) => Number(y.id.slice(2)) - Number(x.id.slice(2)))[0]
         : undefined;
-    const run =
+    const session = launched.tool_catalog === undefined ? previous : undefined;
+    const catalogued =
       session?.tool_catalog !== undefined
         ? { ...launched, tool_catalog: session.tool_catalog }
         : launched;
+    // C-106: likewise the harness and effort belong to the session. A Run
+    // dispatched onto the existing terminal without a launch snapshot takes
+    // the session's values (absent on legacy sessions), whatever was queued.
+    const run: Run = (() => {
+      if (previous === undefined || p.launch_snapshot !== undefined)
+        return catalogued;
+      const { harness: _h, effort: _e, ...rest } = catalogued;
+      return { ...rest, ...launchSettings(previous) };
+    })();
     if (p.launch_snapshot?.tool_catalog !== undefined)
       text(p.launch_snapshot.tool_catalog, "tool_catalog");
     if (p.launch_snapshot?.launch_profile_ref !== undefined)
       text(p.launch_snapshot.launch_profile_ref, "launch_profile_ref");
+    if (p.launch_snapshot) settingsValid(p.launch_snapshot);
     const assignment = target(d, run.assignment_id);
     ensure(
       hasRunTarget(assignment, d.state),

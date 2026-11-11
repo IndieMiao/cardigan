@@ -1,6 +1,7 @@
 import type { Event, WorkItem } from "../entities.js";
 import { hasRunTarget } from "../run-target.js";
 import { type CommandDraft, ensure } from "./core.js";
+import { launchSettings } from "./launch.js";
 import { reviewRound } from "./workflow.js";
 
 export function canResume(d: CommandDraft, item: WorkItem): boolean {
@@ -101,6 +102,7 @@ export function queueResumedRun(d: CommandDraft, item: WorkItem, event: Event) {
       ? { launch_profile_ref: previous.launch_profile_ref }
       : {}),
     model: previous.model,
+    ...launchSettings(previous),
     agent_cli_version: previous.agent_cli_version,
     outcome: null,
     summary: "",
