@@ -237,3 +237,36 @@ test("the listing command is the pinned SSH entry with a fixed read-only script 
       }),
     ).rejects.toThrow(/agent-ssh project/);
 });
+
+test("IPv6 hosts must be exact isIPv6 literals: brackets, zones and other decorations are rejected", async () => {
+  for (const host of [
+    "[::1]",
+    "[::1]:22",
+    "::1]",
+    "[::1",
+    "fe80::1%eth0",
+    "fe80::1%25eth0",
+    "::1:",
+    ":::1",
+    "::1 ",
+    "::g",
+    "1::2::3",
+    "::1/128",
+  ])
+    await expect(
+      agentProcessCommand({ ...execution, host }, ["true"]),
+    ).rejects.toThrow(/Invalid SSH host/);
+  for (const host of ["::1", "fd7a:115c:a1e0::1", "::ffff:192.0.2.1"]) {
+    const { args } = await agentProcessCommand({ ...execution, host }, [
+      "true",
+    ]);
+    expect(args.slice(-3, -1)).toEqual(["--", `agent@${host}`]);
+  }
+});
+
+test("SSH user never contains @, a colon or control characters", async () => {
+  for (const user of ["a@b", "a:b", "agent@::1", "a\u0001b", "a\u007fb", ":"])
+    await expect(
+      agentProcessCommand({ ...execution, user, host: "::1" }, ["true"]),
+    ).rejects.toThrow(/Invalid SSH user/);
+});
