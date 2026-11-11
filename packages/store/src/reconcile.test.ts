@@ -91,3 +91,27 @@ test("kinds without a subject are one finding each and do not collide", () => {
   );
   expect(findingKey(diverged)).toBe("source_diverged:");
 });
+
+test("open findings below an unscanned prefix stay open; others still resolve", () => {
+  const remote = {
+    kind: "orphan_worktree",
+    detail: "Executor ci: Worktree exists but no Assignment owns it",
+    path: "ci:/srv/agent/checks/p/old/worktree",
+  };
+  store.recordReconcileFindings(project, [orphan, remote]);
+  time += 60_000;
+  const outage = store.recordReconcileFindings(project, [], {
+    unscanned: ["ci:/srv/agent/checks/p/"],
+  });
+  expect(outage.created).toEqual([]);
+  const open = store.listReconcileFindings(project, { openOnly: true });
+  expect(open.map((x) => [x.path, x.first_seen_at])).toEqual([
+    [remote.path, "2030-01-01T00:00:00.000Z"],
+  ]);
+  // A sibling prefix is not covered.
+  time += 60_000;
+  store.recordReconcileFindings(project, [], {
+    unscanned: ["ci:/srv/agent/checks/p-other/"],
+  });
+  expect(store.listReconcileFindings(project, { openOnly: true })).toEqual([]);
+});

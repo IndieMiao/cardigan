@@ -19,7 +19,9 @@ export type ReconcileFindingKind =
   | "stale_registration"
   | "missing_delivery_ref"
   | "failed_clone"
-  | "source_diverged";
+  | "source_diverged"
+  /** P2a-12 C: a merge-check executor's directories could not be listed. */
+  | "executor_unreachable";
 
 export interface ReconcileFinding {
   readonly kind: ReconcileFindingKind;
@@ -171,4 +173,68 @@ export function reconcile(
       detail: "Registered source and central baseline diverged",
     });
   return findings;
+}
+
+/**
+ * P2a-12 C: the check directories of one project on a non-local merge-check
+ * executor, listed over that executor's SSH entry. `unreachable` means the
+ * listing failed; it is never evidence that a directory is gone.
+ */
+export interface ExecutorCheckState {
+  readonly executor: string;
+  /** `<agent_root>/checks/<project>` on the executor machine. */
+  readonly checks_root: string;
+  readonly listing:
+    | {
+        readonly status: "listed";
+        /** Existing `<attempt>/worktree` directories. */
+        readonly directories: readonly string[];
+        /** Registrations of the executor's base clone below `checks_root`. */
+        readonly registered: readonly string[];
+      }
+    | { readonly status: "unreachable" };
+}
+
+/**
+ * Same Store-driven judgement as the local scan (queued/running and the
+ * cleanup grace are protected), for directories on another machine. Paths are
+ * reported as `<executor>:<path>` so they never collide with host paths.
+ */
+export function reconcileExecutorChecks(
+  state: ExecutorCheckState,
+  project_id: string,
+  checks?: ReconcileChecks,
+): readonly ReconcileFinding[] {
+  if (state.listing.status === "unreachable")
+    return [
+      {
+        kind: "executor_unreachable",
+        detail: `Merge check executor ${state.executor} is unreachable; its check directories were not scanned, so no orphan or stale registration is reported for them`,
+        path: `${state.executor}:${state.checks_root}`,
+      },
+    ];
+  const root = resolve(state.checks_root),
+    below = (path: string) => resolve(path).startsWith(`${root}/`);
+  return reconcile(
+    {
+      project_id,
+      worktrees_root: root,
+      checks_root: root,
+      registered: state.listing.registered
+        .filter(below)
+        .map((path) => ({ path, head: "" })),
+      directories: state.listing.directories.filter(below),
+      failed_clones: [],
+      pinned: [],
+    },
+    [],
+    [],
+    checks,
+  ).map((finding) => ({
+    ...finding,
+    detail: `Executor ${state.executor}: ${finding.detail}`,
+    ...(finding.path === undefined
+      ? {}
+      : { path: `${state.executor}:${finding.path}` }),
+  }));
 }

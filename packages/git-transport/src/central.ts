@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { lstat, mkdir, mkdtemp, realpath, rename, rm } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, posix, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import type {
   GitCentralPort,
@@ -27,6 +27,16 @@ const exists = async (path: string) => {
     throw e;
   }
 };
+/** A normalized `<root>/repos/<name>` path; no resolution on this disk. */
+const executorTarget = (root: string, target: string) =>
+  posix.isAbsolute(root) &&
+  posix.normalize(root) === root &&
+  root !== "/" &&
+  !root.endsWith("/") &&
+  posix.isAbsolute(target) &&
+  posix.normalize(target) === target &&
+  posix.dirname(target) === posix.join(root, "repos") &&
+  /^[a-zA-Z0-9_][a-zA-Z0-9._-]*$/u.test(posix.basename(target));
 const within = (root: string, path: string) =>
   path === root || path.startsWith(root + sep);
 const fullSha = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u;
@@ -271,9 +281,24 @@ export class CentralGitTransport implements GitCentralPort {
       );
   }
   /** Host pushes only baseline snapshots and pinned deliveries, never Agent branches. */
-  async pushBaseline(repository: string, target: string, receivePack: string) {
-    const local = await this.source(target);
-    if (!receivePack || !(await this.agentSource(target, local)))
+  /**
+   * `executorRoot` (P2a-12 C) names another execution target's agent root.
+   * Its base clone may live on another machine, so the target is checked
+   * lexically against `<executorRoot>/repos/<name>` instead of resolved on
+   * this disk; `receivePack` is bound to that path and ignores Git's.
+   */
+  async pushBaseline(
+    repository: string,
+    target: string,
+    receivePack: string,
+    executorRoot?: string,
+  ) {
+    if (
+      !receivePack ||
+      !(executorRoot === undefined
+        ? await this.agentSource(target, await this.source(target))
+        : executorTarget(executorRoot, target))
+    )
       throw new Error(
         "Baseline push requires an Agent repository and receive-pack entry",
       );

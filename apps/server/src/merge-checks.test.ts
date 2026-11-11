@@ -642,3 +642,71 @@ test("a background round whose error reporter also throws never rejects unhandle
   await expect(loop.loop.done).resolves.toBeUndefined();
   expect(c.run).not.toHaveBeenCalled();
 });
+
+test("without a project executor, candidates and checks use the default execution (regression)", async () => {
+  const { f, check } = await fixture("auto");
+  const c = controller(f);
+  await c.gate.tick([f.project_id]);
+  expect(check()?.status).toBe("passed");
+  expect(c.git.distribute).toHaveBeenCalledTimes(1);
+  expect(c.git.distribute.mock.calls[0]).toEqual([
+    expect.objectContaining({ project_id: f.project_id }),
+    c.options.execution,
+  ]);
+  expect(c.run.mock.calls[0]?.[0].execution).toBe(c.options.execution);
+});
+
+test("a project executor receives the candidates and runs the checks; logs stay in the host data directory", async () => {
+  const { f, check } = await fixture("auto");
+  const c = controller(f);
+  const executor = {
+    name: "cardigan-ci",
+    host: "cardigan-ci",
+    port: 2222,
+    user: "agent",
+    hostKeyAlias: "cardigan-ci",
+    identityFile: "/data/ssh/ci.key",
+    knownHostsFile: "/data/ssh/ci.known_hosts",
+    agentRoot: "/srv/cardigan-agent",
+    maxConcurrent: 1,
+  };
+  c.setConfig({
+    status: "enabled",
+    checks: [{ name: "test", run: "true" }],
+    env: {},
+    totalTimeoutMs: 1000,
+    executor,
+  });
+  await c.gate.tick([f.project_id]);
+  expect(check()?.status).toBe("passed");
+  const target = {
+    mode: "agent-ssh",
+    dataDir: f.dataDir,
+    agentRoot: "/srv/cardigan-agent",
+    machine: "cardigan-ci",
+    identityFile: "/data/ssh/ci.key",
+    knownHostsFile: "/data/ssh/ci.known_hosts",
+    host: "cardigan-ci",
+    port: 2222,
+    user: "agent",
+    hostKeyAlias: "cardigan-ci",
+  };
+  expect(c.git.distribute.mock.calls[0]?.[1]).toMatchObject(target);
+  expect(c.run.mock.calls[0]?.[0].execution).toMatchObject(target);
+  // Same target object for distribution and execution: no silent fallback.
+  expect(c.run.mock.calls[0]?.[0].execution).toEqual(
+    c.git.distribute.mock.calls[0]?.[1],
+  );
+  await expect(
+    readFile(
+      join(
+        f.dataDir,
+        "merge-gate",
+        "logs",
+        f.project_id,
+        required(check()?.log_ref),
+      ),
+      "utf8",
+    ),
+  ).resolves.toBeTypeOf("string");
+});
