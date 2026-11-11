@@ -8,6 +8,21 @@ import {
   resolveServerConfig,
 } from "./config.js";
 
+test("dispatcher interval is optional, defaults in the loop to 1000ms and accepts positive milliseconds", () => {
+  expect(
+    resolveServerConfig({ CARDIGAN_DISPATCH_INTERVAL_MS: "2500" })
+      .dispatchIntervalMs,
+  ).toBe(2500);
+  expect(
+    resolveServerConfig({ CARDIGAN_DISPATCH_INTERVAL_MS: " " })
+      .dispatchIntervalMs,
+  ).toBeUndefined();
+  for (const value of ["0", "-1", "1.5", "NaN", "2147483648"])
+    expect(() =>
+      resolveServerConfig({ CARDIGAN_DISPATCH_INTERVAL_MS: value }),
+    ).toThrow("CARDIGAN_DISPATCH_INTERVAL_MS");
+});
+
 test("S10 defaults to loopback, port 3004 and the same user data directory as the CLI", () => {
   expect(resolveServerConfig({ HOME: "/fixture/home" })).toEqual({
     dataDir: "/fixture/home/.local/share/cardigan",

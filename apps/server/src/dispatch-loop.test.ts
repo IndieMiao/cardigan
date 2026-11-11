@@ -17,6 +17,36 @@ const deferred = () => {
   return { promise, resolve };
 };
 
+test("slow ticks report only duration, then continue at the configured interval", async () => {
+  vi.useFakeTimers();
+  const onSlowTick = vi.fn(),
+    onError = vi.fn();
+  const elapsed = vi
+    .spyOn(performance, "now")
+    .mockReturnValueOnce(10)
+    .mockReturnValueOnce(1210)
+    .mockReturnValue(1300);
+  const tick = vi.fn(async () => {});
+  try {
+    loop = startDispatchLoop({
+      dispatcher: { tick },
+      intervalMs: 2500,
+      onSlowTick,
+      onError,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onSlowTick).toHaveBeenCalledExactlyOnceWith(1200);
+    expect(onError).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(2499);
+    expect(tick).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(tick).toHaveBeenCalledTimes(2);
+    expect(onSlowTick).toHaveBeenCalledOnce();
+  } finally {
+    elapsed.mockRestore();
+  }
+});
+
 test("the loop serializes slow ticks, reconciles subscriptions and cancels its timer on stop", async () => {
   vi.useFakeTimers();
   const hold = deferred(),

@@ -233,6 +233,13 @@ export async function startCardiganServer(
           options.dispatcher.hostOpsPatrolIntervalMs ??
           config.hostOpsPatrolIntervalMs ??
           1_800_000,
+        ...((options.dispatcher.intervalMs ?? config.dispatchIntervalMs) ===
+        undefined
+          ? {}
+          : {
+              intervalMs:
+                options.dispatcher.intervalMs ?? config.dispatchIntervalMs,
+            }),
         ...((options.dispatcher.dispatchTimeoutMs ??
           config.dispatchTimeoutMs) === undefined
           ? {}

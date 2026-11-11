@@ -29,6 +29,7 @@ export interface ServerConfig {
   readonly dispatchTimeoutMs?: number;
   readonly hostOpsPatrolIntervalMs?: number;
   readonly hostOpsContextThresholdPct?: number;
+  readonly dispatchIntervalMs?: number;
   /**
    * After SIGTERM, how long in-flight Workbench requests may run before their
    * connections are cut; SSE streams end at once. 10 seconds by default.
@@ -57,6 +58,7 @@ export interface ServerEnv extends ExecutionEnv {
   readonly CARDIGAN_DISPATCH_TIMEOUT_MS?: string | undefined;
   readonly CARDIGAN_HOST_OPS_PATROL_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_HOST_OPS_CONTEXT_THRESHOLD_PCT?: string | undefined;
+  readonly CARDIGAN_DISPATCH_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_SHUTDOWN_GRACE_MS?: string | undefined;
 }
 
@@ -97,6 +99,15 @@ export function resolveServerConfig(env: ServerEnv): ServerConfig {
       "CARDIGAN_HOST_OPS_PATROL_INTERVAL_MS",
       1_800_000,
     ),
+    ...(nonEmpty(env.CARDIGAN_DISPATCH_INTERVAL_MS) === undefined
+      ? {}
+      : {
+          dispatchIntervalMs: interval(
+            env.CARDIGAN_DISPATCH_INTERVAL_MS,
+            "CARDIGAN_DISPATCH_INTERVAL_MS",
+            1000,
+          ),
+        }),
     dispatchTimeoutMs: interval(
       env.CARDIGAN_DISPATCH_TIMEOUT_MS,
       "CARDIGAN_DISPATCH_TIMEOUT_MS",

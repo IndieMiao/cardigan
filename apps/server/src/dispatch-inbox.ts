@@ -24,6 +24,8 @@ import {
   unfinishedBellAttempts,
 } from "@cardigan/store";
 
+import type { StateLoader } from "./dispatch-state.js";
+
 export const dispatcherClock: Clock = { now: () => new Date().toISOString() };
 
 /** The caller's transaction keeps the audit and its visible explanation together. */
@@ -86,6 +88,7 @@ export function recordRoute(
   });
 }
 interface RoutePageOptions {
+  loadState?: StateLoader;
   clock?: Clock;
   batchSize?: number;
 }
@@ -105,7 +108,7 @@ export function routeStreamEvents(
       .listAfter(project, card, store.routerCursor(project, stream))
       .slice(0, size);
     if (events.length === 0) return 0;
-    const snapshot = loadCommandState(tx, project),
+    const snapshot = (options.loadState ?? loadCommandState)(tx, project),
       at = (options.clock ?? dispatcherClock).now();
     for (const event of events) {
       const routed = routeEvent({ event, snapshot });
@@ -219,9 +222,10 @@ export function resolveUnreadableNotifications(
   store: Store,
   project: ProjectId,
   clock: Clock = dispatcherClock,
+  loadState: StateLoader = loadCommandState,
 ): number {
   return store.uow.run((tx) => {
-    const state = loadCommandState(tx, project),
+    const state = loadState(tx, project),
       at = clock.now();
     let count = 0;
     for (const note of store.listNotifications({ project_id: project })) {
@@ -271,10 +275,11 @@ export function acknowledgeInbox(
   project: ProjectId,
   standing?: StandingResolver,
   clock: Clock = dispatcherClock,
+  loadState: StateLoader = loadCommandState,
 ): number {
   return store.uow.run((tx) => {
     retireReconcileNotifications(store.database, project, clock.now());
-    const state = loadCommandState(tx, project);
+    const state = loadState(tx, project);
     const attempts = unfinishedBellAttempts(store.database, project);
     let count = 0;
     for (const note of store.listNotifications({ project_id: project })) {

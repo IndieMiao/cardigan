@@ -1,6 +1,7 @@
 import { type Clock, hostOpsPending, type ProjectId } from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
 import { recordNotification, type Store } from "@cardigan/store";
+import type { StateLoader } from "./dispatch-state.js";
 
 export const DEFAULT_HOST_OPS_PATROL_INTERVAL_MS = 30 * 60_000;
 /** Uses the dispatcher clock and inbox; no extra timer and no run-finished self wake. */
@@ -9,11 +10,12 @@ export function patrolHostOps(
   project: ProjectId,
   clock: Clock,
   intervalMs = DEFAULT_HOST_OPS_PATROL_INTERVAL_MS,
+  loadState: StateLoader = loadCommandState,
 ) {
   if (!Number.isSafeInteger(intervalMs) || intervalMs <= 0)
     throw new Error("Invalid host ops patrol interval");
   store.uow.run((tx) => {
-    const state = loadCommandState(tx, project);
+    const state = loadState(tx, project);
     const a = state.assignments.find(
       (a) =>
         a.scope === "standing" &&
