@@ -26,7 +26,7 @@ function avatarVariant(src: string | undefined, size: 64 | 128 | 256) {
  * Cardigan's own rule logic (scheduler, merge gate, reconciliation, timers)
  * is not a person: it gets one fixed gear icon instead of a lettered avatar.
  */
-function SystemAvatar({ size }: { size?: 32 | 64 | 128 | undefined }) {
+export function SystemAvatar({ size }: { size?: 32 | 64 | 128 | undefined }) {
   return (
     <span
       className="employee-avatar employee-system"

@@ -4,9 +4,10 @@ import { URL as NodeURL } from "node:url";
 import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, expect, test } from "vitest";
 import type { ActivityData, NeedsPage, NoticeView } from "../api.js";
-import { fakeClient, timelineEntry } from "../testing/fixtures.js";
+import { cardDetail, fakeClient, timelineEntry } from "../testing/fixtures.js";
 import { ActivityPage } from "../views/ActivityPage.js";
 import { NeedsYouPage } from "../views/NeedsYouPage.js";
+import { RecentConclusions } from "./CardIntro.js";
 import { EmployeeIdentity } from "./EmployeeIdentity.js";
 import { Timeline } from "./Timeline.js";
 import { TimelineActor } from "./TimelineHeader.js";
@@ -180,4 +181,56 @@ test("system icon is a token-coloured rounded square, not a person circle", () =
   expect(rule).toMatch(/color: var\(--text\)/);
   expect(rule).toMatch(/background: var\(--surface-muted\)/);
   expect(rule).not.toMatch(/50%|#[0-9a-f]{3,8}\b/i);
+});
+
+test("card detail recent conclusions show the gear for a system decision only", () => {
+  const decision = {
+    id: "q(7)",
+    question: "合并？",
+    status: "resolved",
+    blocking: false,
+    decider: "human",
+    options: [{ key: "merge", description: "合并", impact: "上线" }],
+    recommended: "merge",
+    trigger: "merge_confirmation",
+  };
+  const byPm = { ...decision, id: "q(8)" };
+  const detail = cardDetail({
+    decisions: [decision, byPm],
+    recent_conclusions: [
+      timelineEntry({
+        id: "C-1#9",
+        event_seq: 9,
+        type: "decision_resolved",
+        author: "system",
+        author_display: "系统",
+        decision_id: "q(7)",
+        decision_option: "merge",
+      }),
+      timelineEntry({
+        id: "C-1#8",
+        event_seq: 8,
+        type: "decision_resolved",
+        author: "assignment:A-9",
+        author_role: "pm",
+        author_display: "王熙凤",
+        decision_id: "q(8)",
+        decision_option: "merge",
+      }),
+    ],
+  });
+  render(
+    <RecentConclusions detail={detail} projectId="p-1" onLocate={undefined} />,
+  );
+  const [system, pm] = [...document.querySelectorAll(".recent-conclusions li")];
+  expect(system?.querySelector('[data-system-icon="gear"]')).toBeTruthy();
+  expect(
+    system?.querySelector(".employee-system")?.getAttribute("aria-hidden"),
+  ).toBe("true");
+  expect(system?.querySelector(".status-icon")).toBeTruthy();
+  const link = within(system as HTMLElement).getByRole("link");
+  expect(link.textContent).toBe("q(7) 系统 确认合并");
+  expect(link.getAttribute("href")).toBe("#/p/p-1/cards/C-1?at=entry-C-1%239");
+  expect(pm?.querySelector(".employee-system")).toBeNull();
+  expect(pm?.textContent).toBe("q(8) 王熙凤 确认合并");
 });
