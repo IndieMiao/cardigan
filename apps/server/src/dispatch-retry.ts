@@ -14,7 +14,9 @@ import {
   type Runtime,
   recoverDispatch,
   refreshRunTargetWait,
+  retireUnreadableQueuedRun,
   startDispatchStop,
+  unreadableCommentTrigger,
 } from "@cardigan/domain";
 import { deferTargetAttempt, refreshTargetWait } from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
@@ -185,6 +187,32 @@ export async function retryDispatchedRuns(
       await stopRun(candidate.id, candidate.dispatch_stop.reason);
       continue;
     }
+    if (
+      candidate.status === "queued" &&
+      unreadableCommentTrigger(candidates, candidate)
+    ) {
+      store.uow.run((tx) => {
+        if (
+          unfinishedBellAttempts(store.database, project).some(
+            (a) => a.assignment_id === candidate.assignment_id,
+          )
+        )
+          return;
+        persistEffect(
+          tx,
+          project,
+          unwrap(
+            retireUnreadableQueuedRun(
+              loadCommandState(tx, project),
+              actor,
+              { run_id: candidate.id },
+              { clock, ids: tx.ids },
+            ),
+          ),
+        );
+      });
+      continue;
+    }
     if (dispatchRecoveryFailed(candidates, candidate)) {
       store.uow.run((tx) => finishRecovery(tx, candidate.id, 0));
       continue;
@@ -268,7 +296,19 @@ export async function retryDispatchedRuns(
         Date.parse(at) >=
           Date.parse(last.finished_at) +
             policy.retryBaseMs * 2 ** Math.max(0, failures - 1);
-      return { state, run, a, failures, recover, retry, at, last };
+      // C-120: an obsolete cross-card bell cannot be retried as an empty launch.
+      // Timeout recovery safely stops its terminal, then cancels without requeueing.
+      const unreadable = unreadableCommentTrigger(state, run);
+      return {
+        state,
+        run,
+        a,
+        failures,
+        recover,
+        retry: retry && !unreadable,
+        at,
+        last,
+      };
     };
     const observed = inspect();
     if (!observed) continue;
@@ -281,7 +321,7 @@ export async function retryDispatchedRuns(
           "assignment_id" in e.payload &&
           e.payload.assignment_id === observed.a.id,
       );
-      if (used)
+      if (used && !unreadableCommentTrigger(observed.state, observed.run))
         store.uow.run((tx) => {
           const current = inspect(loadCommandState(tx, project), tx);
           if (current?.recover)

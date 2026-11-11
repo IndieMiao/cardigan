@@ -28,6 +28,7 @@ import {
   refreshRunTargetWait,
   remindDecisionFollowups,
   resolveDispatchAttention,
+  unreadableCommentTrigger,
 } from "@cardigan/domain";
 import {
   deferTargetAttempt,
@@ -71,6 +72,7 @@ import {
   acknowledgeInbox,
   dispatcherClock,
   notificationOwner,
+  resolveUnreadableNotifications,
   routeProjectEvents,
   type StandingResolver,
 } from "./dispatch-inbox.js";
@@ -276,6 +278,7 @@ export class Dispatcher {
       persistEffect(tx, project, effect);
     });
     routeProjectEvents(store, project, { clock: this.clock });
+    resolveUnreadableNotifications(store, project, this.clock);
     acknowledgeInbox(store, project, standing, this.clock);
     for (const attempt of unfinishedBellAttempts(store.database, project)) {
       const assignment = this.state(project).assignments.find(
@@ -324,6 +327,7 @@ export class Dispatcher {
     const add = (assignment: Assignment, notes: Notification[]) => {
       if (!hasRunTarget(assignment, state)) return;
       const queued = this.queued(state, assignment);
+      if (queued && unreadableCommentTrigger(state, queued)) return;
       const cause = notes.find((n) => !n.run_id) ?? notes[0];
       const trigger = queued?.trigger_event_id ?? cause?.event_id;
       const event = state.events.find((e) => e.id === trigger);
@@ -761,6 +765,7 @@ export class Dispatcher {
         state = loadCommandState(tx, project);
       }
       if (!run) return;
+      if (unreadableCommentTrigger(state, run)) return;
       if (run.status === "queued") {
         const capacity = runCapacitySnapshot(store, tx);
         const trigger = state.events.find(

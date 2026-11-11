@@ -6,6 +6,7 @@
  * pending notifications become one merged bell (§6.7, M3 plan §3.2).
  */
 
+export { assignmentCanReadCard } from "@cardigan/domain";
 export {
   type BellMessage,
   mergeNotifications,
