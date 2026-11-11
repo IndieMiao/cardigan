@@ -103,7 +103,9 @@ export interface McpReadContext {
     Cursor,
     Pick<Cursor, "assignment_id" | "card_id">
   >;
-  readonly events: Pick<EventRepository, "listAfter">;
+  readonly events: Pick<EventRepository, "listAfter"> & {
+    listStreams?(project: ProjectId): ReadonlyMap<string, readonly Event[]>;
+  };
 }
 
 /**

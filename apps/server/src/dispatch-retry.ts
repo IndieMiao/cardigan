@@ -24,7 +24,6 @@ import {
   type StoreTransactionContext,
   unfinishedBellAttempts,
 } from "@cardigan/store";
-
 import {
   type DeliveryFailure,
   type DeliveryStage,
@@ -32,11 +31,13 @@ import {
   deliveryFailureLine,
   wakeFailure,
 } from "./dispatch-alert.js";
+import type { StateLoader } from "./dispatch-state.js";
 import { runStopWorkflow } from "./dispatch-stop.js";
 
 /** Retry only unstarted Runs. Claims and recovery decisions share the SQLite write lock. */
 export async function retryDispatchedRuns(
   options: {
+    loadState?: StateLoader;
     store: Store;
     runtime: Runtime;
     clock: Clock;
@@ -62,15 +63,15 @@ export async function retryDispatchedRuns(
     failure?: DeliveryFailure,
   ) => void,
 ) {
-  const { store, runtime, clock } = options;
-  const read = () => store.uow.read((tx) => loadCommandState(tx, project));
+  const { store, runtime, clock, loadState = loadCommandState } = options;
+  const read = () => store.uow.read((tx) => loadState(tx, project));
   const actor = { kind: "system" as const, project_id: project };
   const finishRecovery = (
     tx: StoreTransactionContext,
     runId: RunId,
     failures: number,
   ) => {
-    const state = loadCommandState(tx, project);
+    const state = loadState(tx, project);
     const run = state.runs.find((r) => r.id === runId);
     if (!run) return;
     const effect = unwrap(
@@ -116,7 +117,7 @@ export async function retryDispatchedRuns(
     runId: RunId,
     reason: "dispatch_timeout" | "delivery_retry_exhausted",
   ) => {
-    await runStopWorkflow({ store, runtime, clock }, project, {
+    await runStopWorkflow({ store, runtime, clock, loadState }, project, {
       claim: (state, ports) => {
         const run = state.runs.find((r) => r.id === runId);
         if (
@@ -250,7 +251,7 @@ export async function retryDispatchedRuns(
       );
       if (used)
         store.uow.run((tx) => {
-          const current = inspect(loadCommandState(tx, project));
+          const current = inspect(loadState(tx, project));
           if (current?.recover)
             finishRecovery(tx, current.run.id, current.failures);
         });
@@ -267,7 +268,7 @@ export async function retryDispatchedRuns(
     const status = await runtime.status(observed.a.runtime_ref);
     if (!status.ok || status.value.process !== "alive") continue;
     const job = store.uow.run((tx) => {
-      const current = inspect(loadCommandState(tx, project));
+      const current = inspect(loadState(tx, project));
       if (
         !current?.retry ||
         current.recover ||

@@ -12,6 +12,7 @@ import type {
 import { revokeStoppedRunTokens, stopRunRuntime } from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import type { Store, StoreTransactionContext } from "@cardigan/store";
+import type { StateLoader } from "./dispatch-state.js";
 
 interface StopIntent {
   attempt_id: string;
@@ -21,7 +22,12 @@ interface StopIntent {
 
 /** Both recovery policies use the same claim, stop, exit proof and atomic settlement. */
 export async function runStopWorkflow<S extends StopIntent>(
-  options: { store: Store; runtime: Runtime; clock: Clock },
+  options: {
+    store: Store;
+    runtime: Runtime;
+    clock: Clock;
+    loadState?: StateLoader;
+  },
   project: ProjectId,
   policy: {
     claim(
@@ -51,9 +57,9 @@ export async function runStopWorkflow<S extends StopIntent>(
     ): void;
   },
 ) {
-  const { store, runtime, clock } = options;
+  const { store, runtime, clock, loadState = loadCommandState } = options;
   const run = store.uow.run((tx) => {
-    const result = policy.claim(loadCommandState(tx, project), {
+    const result = policy.claim(loadState(tx, project), {
       ids: tx.ids,
       clock,
     });
@@ -71,7 +77,7 @@ export async function runStopWorkflow<S extends StopIntent>(
       store.uow.run((tx) => {
         const effect = unwrap(
           policy.start(
-            loadCommandState(tx, project),
+            loadState(tx, project),
             { ids: tx.ids, clock },
             run,
             stop,
@@ -84,7 +90,7 @@ export async function runStopWorkflow<S extends StopIntent>(
   );
   if (result === "withdrawn") return;
   store.uow.run((tx) => {
-    const state = loadCommandState(tx, project);
+    const state = loadState(tx, project);
     const current = state.runs.find((r) => r.id === run.id);
     // A stale external result cannot settle or alert for the new lease owner.
     if (!current || policy.fence(current)?.attempt_id !== stop.attempt_id)
