@@ -9,6 +9,7 @@ import {
   type NeedsPage,
   type NoticeView,
 } from "../api.js";
+import { DecisionAttachments } from "../components/DecisionAttachments.js";
 import { EmployeeIdentity } from "../components/EmployeeIdentity.js";
 import {
   EmptyState,
@@ -183,6 +184,7 @@ function Decision({
           <Markdown body={q.context} />
         </details>
       )}
+      <DecisionAttachments attachments={q.attachments} />
       <form
         onSubmit={(e) => {
           e.preventDefault();

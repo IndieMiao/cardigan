@@ -6,7 +6,13 @@ import type {
   TimelineEntry,
   WorkItem,
 } from "../entities.js";
-import type { CardId, DecisionId, HumanActionId, WorkItemId } from "../ids.js";
+import type {
+  AttachmentId,
+  CardId,
+  DecisionId,
+  HumanActionId,
+  WorkItemId,
+} from "../ids.js";
 import { commentMentions } from "../mentions.js";
 import { decisionCategories, highRiskCategories } from "../preferences.js";
 import { extractReferences } from "../references.js";
@@ -238,6 +244,11 @@ export function reportBlocker(
     };
   });
 }
+/**
+ * Upper bound on attachments one decision may reference (C-95). The product
+ * limit is still open; keep it adjustable here only.
+ */
+export const MAX_DECISION_ATTACHMENTS = 6;
 export type RequestDecisionParams = Pick<
   Decision,
   | "kind"
@@ -253,7 +264,36 @@ export type RequestDecisionParams = Pick<
   readonly card_id?: CardId;
   readonly category: NonNullable<Decision["category"]>;
   readonly target?: Extract<Decision, { kind: "approve" }>["target"];
+  readonly attachment_ids?: readonly AttachmentId[];
 };
+/**
+ * §6: a decision may only show attachments already on this project's decision
+ * card or its affected cards; the project-scoped state rejects other projects.
+ */
+function decisionAttachments(
+  d: CommandDraft,
+  ids: readonly AttachmentId[] | undefined,
+  cards: readonly CardId[],
+): readonly AttachmentId[] {
+  if (!ids?.length) return [];
+  ensure(
+    ids.length <= MAX_DECISION_ATTACHMENTS,
+    "validation_failed",
+    `A decision can reference at most ${MAX_DECISION_ATTACHMENTS} attachments`,
+  );
+  ensure(
+    new Set(ids).size === ids.length,
+    "validation_failed",
+    "Duplicate attachment reference",
+  );
+  for (const id of ids)
+    ensure(
+      cards.includes(d.get("attachments", id).card_id),
+      "validation_failed",
+      `Attachment ${id} does not belong to the decision's cards`,
+    );
+  return [...ids];
+}
 export function requestDecision(
   state: CommandState,
   actor: Actor,
@@ -347,6 +387,7 @@ export function requestDecision(
       ]),
     ];
     for (const id of cards) d.card(id);
+    const attachment_ids = decisionAttachments(d, p.attachment_ids, cards);
     if (p.blocking) {
       for (const item of items) paused(d, item, "waiting_decision");
       endForDecision(d, p.question, items);
@@ -364,6 +405,7 @@ export function requestDecision(
       recommended: p.recommended,
       affected_cards: cards,
       affected_work_items: items.map((w) => w.id),
+      ...(attachment_ids.length ? { attachment_ids } : {}),
       blocking: p.blocking,
       decider: p.decider,
       doc_refs: [],

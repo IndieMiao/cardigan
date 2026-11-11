@@ -303,6 +303,32 @@ test("artifacts require an existing basis and support both attachment target typ
   ]);
 });
 
+test("C-95: request_decision references card attachments and rejects others without writes", async () => {
+  const first = await ok<Attachment>(coder, "upload_attachment", upload);
+  const params = { ...decision, blocking: false };
+  const before = counts();
+  for (const [attachment_ids, expected] of [
+    [["A-missing"], "not_found"],
+    [[first.id, first.id], "validation_failed"],
+    [Array.from({ length: 7 }, (_, i) => `x-${i}`), "validation_failed"],
+  ] as const) {
+    expect(
+      code(
+        await call(office, "request_decision", { ...params, attachment_ids }),
+      ),
+    ).toBe(expected);
+    expect(counts()).toEqual(before);
+  }
+  const q = await ok<Decision>(office, "request_decision", {
+    ...params,
+    attachment_ids: [first.id],
+  });
+  expect(q.attachment_ids).toEqual([first.id]);
+  expect(
+    store.uow.run((tx) => tx.decisions.get(project_id, q.id))?.attachment_ids,
+  ).toEqual([first.id]);
+});
+
 test("10 MiB passes through HTTP; oversized, malformed and checksum-mismatched content is refused", async () => {
   const large = Buffer.alloc(MAX_ATTACHMENT_BYTES, 0x61);
   expect(

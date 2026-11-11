@@ -11,6 +11,7 @@ import {
   decisionCategories,
   issueInstruction,
   latestCardTemplate,
+  MAX_DECISION_ATTACHMENTS,
   parseId,
   postComment,
   type Result,
@@ -97,6 +98,13 @@ const schemas = {
     target: z
       .union([z.object({ delivery_id: id("delivery") }), z.object({ subject })])
       .optional(),
+    attachment_ids: z
+      .array(text)
+      .max(MAX_DECISION_ATTACHMENTS)
+      .optional()
+      .describe(
+        "Existing attachments on this card or affected_cards to show with the question, in display order",
+      ),
   },
   resolve_delegated_decision: {
     decision_id: id("decision"),
