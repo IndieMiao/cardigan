@@ -23,7 +23,6 @@ import {
 } from "./config.js";
 import { type GitBinding, ServerGit } from "./git.js";
 import type { WebConfig } from "./web/config.js";
-import type { LaunchLookup } from "./web/launch-summary.js";
 import { type RunningWebServer, startWebServer } from "./web/server.js";
 
 export interface StartServerOptions {
@@ -65,8 +64,6 @@ export interface StartServerOptions {
    */
   readonly web?: {
     readonly config: WebConfig;
-    /** C-106: the host's launch profiles, for the execution view. */
-    readonly launch?: LaunchLookup;
     readonly log?: (event: Readonly<Record<string, unknown>>) => void;
     /** SSE cadence; tests shorten it. */
     readonly stream?: {
@@ -245,9 +242,6 @@ export async function startCardiganServer(
         mergeGate,
         dataDir: config.dataDir,
         config: options.web.config,
-        ...(options.web.launch === undefined
-          ? {}
-          : { launch: options.web.launch }),
         ...(options.web.log === undefined ? {} : { log: options.web.log }),
         ...(options.web.stream === undefined
           ? {}

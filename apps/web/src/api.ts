@@ -602,8 +602,8 @@ export interface RunView {
   readonly queued_at?: string;
   readonly summary: string;
   /**
-   * C-106: from the Run's launch profile; null when the profile is unknown or
-   * changed since the Run. Older servers omit them.
+   * C-106: snapshotted on the Run when its session was launched; absent on
+   * legacy Runs, and effort is absent when the launch did not state it.
    */
   readonly harness?: string | null;
   readonly effort?: string | null;
