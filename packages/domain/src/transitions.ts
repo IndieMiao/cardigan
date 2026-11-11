@@ -91,7 +91,11 @@ export const transitionTables: {
       review_limit_exceeded: "waiting_decision",
       cancel: "cancelled",
     },
-    passed: { target_redelivered: "ready", target_withdrawn: "todo" },
+    passed: {
+      target_redelivered: "ready",
+      target_withdrawn: "todo",
+      withdraw_pass: "ready",
+    },
     blocked: { resume: "in_progress", cancel: "cancelled" },
     waiting_decision: { decision_resolved: "ready", cancel: "cancelled" },
   },

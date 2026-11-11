@@ -3,10 +3,12 @@ import {
   type CommandEffect,
   completeHumanAction,
   finishRun,
+  prepareDelivery,
   recordDecision,
   reportBlocker,
   requestDecision,
   requestHumanAction,
+  submitDelivery,
   updateWorkItem,
 } from "../index.js";
 import {
@@ -17,30 +19,60 @@ import {
   id,
   now,
   ports,
+  subject,
   value,
 } from "./test-fixtures.js";
 
 const cases = ["produce", "verify"].flatMap((kind) =>
-  ["decision", "human"].flatMap((other) =>
-    [false, true].flatMap((reportFirst) =>
-      [false, true].map((confirmFirst) => ({
-        kind,
-        other,
-        reportFirst,
-        confirmFirst,
-      })),
+  (kind === "verify"
+    ? ["missing", "current", "superseded"]
+    : ["missing"]
+  ).flatMap((target) =>
+    ["decision", "human"].flatMap((other) =>
+      [false, true].flatMap((reportFirst) =>
+        [false, true].map((confirmFirst) => ({
+          kind,
+          other,
+          reportFirst,
+          confirmFirst,
+          target,
+        })),
+      ),
     ),
   ),
 );
 test.each(cases)(
-  "invariants 10, 11, 12: $kind report and $other (reportFirst=$reportFirst, confirmFirst=$confirmFirst) clear independently",
-  ({ kind, other, reportFirst, confirmFirst }) => {
+  "invariants 10, 11, 12: $kind report and $other (reportFirst=$reportFirst, confirmFirst=$confirmFirst) clear independently (target=$target)",
+  async ({ kind, other, reportFirst, confirmFirst, target }) => {
     const io = ports();
     let state = fixture();
     const commit = <T>(effect: CommandEffect<T>) => {
       state = apply(state, effect);
       return effect;
     };
+    if (target !== "missing") {
+      const params = {
+        work_item_id: id("work_item", 1),
+        kind: "code" as const,
+        summary: "Ready",
+        subject,
+        requested_verifiers: [id("work_item", 2)],
+      };
+      const proof = value(
+        await prepareDelivery(state, actor(), params, {
+          verify: async () => ({ ok: true, value: [] }),
+        }),
+      );
+      commit(value(submitDelivery(state, actor(), params, proof, io)));
+      if (target === "superseded")
+        state = {
+          ...state,
+          deliveries: state.deliveries.map((d) => ({
+            ...d,
+            status: "superseded",
+          })),
+        };
+    }
     const n = kind === "produce" ? 1 : 2;
     const work_item_id = id("work_item", n);
     const caller = actor(n, kind === "produce" ? "coder" : "reviewer");
@@ -186,14 +218,18 @@ test.each(cases)(
       resume_work_items: [work_item_id],
     });
     expect(state.runs.find((r) => r.id === id("run", n))).toEqual(ended);
-    expect(state.runs.filter((r) => r.status === "queued")).toEqual([
-      expect.objectContaining({
-        assignment_id: id("assignment", n),
-        trigger_event_id: last.events[0]?.id,
-        role_version: 1,
-        model: "fixture-model",
-        agent_cli_version: "1.0",
-      }),
-    ]);
+    expect(state.runs.filter((r) => r.status === "queued")).toEqual(
+      kind === "verify" && target !== "current"
+        ? []
+        : [
+            expect.objectContaining({
+              assignment_id: id("assignment", n),
+              trigger_event_id: last.events[0]?.id,
+              role_version: 1,
+              model: "fixture-model",
+              agent_cli_version: "1.0",
+            }),
+          ],
+    );
   },
 );

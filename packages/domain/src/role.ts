@@ -51,6 +51,7 @@ export const STANDING_ROLE_TOOLS = [
   "finish_run",
   "submit_delivery",
   "submit_review",
+  "withdraw_review",
   "create_card",
   "update_card",
   "create_work_item",
@@ -68,7 +69,10 @@ export const ROLE_TOOL_ALLOWLISTS: Readonly<
   Record<RoleKind, readonly ToolName[]>
 > = {
   produce: toolNames.filter(
-    (tool) => tool !== "submit_review" && !tool.startsWith("host_ops_"),
+    (tool) =>
+      tool !== "submit_review" &&
+      tool !== "withdraw_review" &&
+      !tool.startsWith("host_ops_"),
   ),
   verify: toolNames.filter(
     (tool) => tool !== "submit_delivery" && !tool.startsWith("host_ops_"),

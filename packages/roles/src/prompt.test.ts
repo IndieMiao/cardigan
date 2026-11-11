@@ -27,6 +27,27 @@ test.each(["coder", "reviewer", "pm"] as const)(
 );
 
 test.each([
+  "reviewer",
+  "designer",
+  "tester",
+  "pm",
+  "coder",
+  "host_ops",
+] as const)(
+  "%s default tools include withdrawal exactly when they include review submission",
+  (id) => {
+    const role = defaultRoleDefinition(id, {
+      harness: "codex",
+      launch_profile_ref: "fixture",
+    });
+    expect(role.allowed_tools.includes("withdraw_review")).toBe(
+      role.allowed_tools.includes("submit_review"),
+    );
+    expect(validateRole(role).ok).toBe(true);
+  },
+);
+
+test.each([
   "pm",
   "coder",
   "reviewer",

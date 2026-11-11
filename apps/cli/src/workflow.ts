@@ -14,6 +14,7 @@ import {
   createCard,
   createHostOpsAssignment,
   EXTERNAL_ASSIGNMENT_START_ERROR,
+  hasVerifiedMergeNoop,
   isRoleActive,
   listNeedsYou,
   markNoticesRead,
@@ -977,12 +978,20 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
       optional(parsed.flags, "project"),
     );
     const actor = resolveActor(io, project_id, store);
+    const gate = (
+      await loadMergeGateConfig({
+        projectIds: store.listProjects().map((project) => project.id),
+        env: io.env,
+      })
+    ).forProject(project_id);
     if (actor.kind === "assignment") {
       // Token callers get exactly the domain view behind MCP list_needs_you,
       // without the host-only diagnostics and notices appended below.
       const view = store.uow.read((tx) => {
         const result = listNeedsYou(
-          loadCommandState(tx, project_id),
+          loadCommandState(tx, project_id, {
+            merge_gate_enabled: gate.status !== "disabled",
+          }),
           actor,
           systemClock,
         );
@@ -996,12 +1005,6 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
       io.stdout(JSON.stringify(view, null, 2));
       return EXIT.ok;
     }
-    const gate = (
-      await loadMergeGateConfig({
-        projectIds: store.listProjects().map((project) => project.id),
-        env: io.env,
-      })
-    ).forProject(project_id);
     const checks = store.uow.read((tx) => {
       const view = projectSnapshot(loadCommandState(tx, project_id), actor);
       return new Map(
@@ -1018,13 +1021,27 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
       timed_out: "超时",
       interrupted: "中断",
     };
-    const { decisions, actions, incidents, noticeList, held } = store.uow.read(
-      (tx) => {
-        const state = loadCommandState(tx, project_id);
+    const { decisions, actions, incidents, noticeList, held, waiting } =
+      store.uow.read((tx) => {
+        const state = loadCommandState(tx, project_id, {
+          merge_gate_enabled: gate.status !== "disabled",
+        });
         const needs = unwrap(listNeedsYou(state, actor)).data;
         return {
           held: needs.pm_held_merges,
-          decisions: needs.decisions,
+          waiting: needs.waiting_merge_checks_count,
+          decisions: needs.decisions.map((q) => ({
+            ...q,
+            merge_noop:
+              !!q.card_id &&
+              q.kind === "approve" &&
+              "delivery_id" in q.target &&
+              hasVerifiedMergeNoop(
+                state.events,
+                q.card_id,
+                q.target.delivery_id,
+              ),
+          })),
           actions: needs.human_actions,
           // Same source as the Workbench 知会 section (§7.4): newest first.
           noticeList: notices(state),
@@ -1036,9 +1053,17 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
                 ["lost", "unknown"].includes(a.runtime_state),
             ),
         };
-      },
-    );
+      });
 
+    const gateWarnings =
+      gate.status === "invalid"
+        ? ["合并闸门配置无效，请查看 server 启动日志"]
+        : [];
+    const waitingLines = waiting
+      ? [
+          `还有 ${waiting} 条合并确认在等检查；检查通过后会出现，可到卡片详情处理。`,
+        ]
+      : [];
     // §7.4 (C-65): not waiting on the human, but answerable directly.
     const heldLines = held.length
       ? [
@@ -1065,12 +1090,14 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
       io.stdout(
         [
           "Needs You 是空的：没有待你拍板的事项，也没有待你执行的操作。",
+          ...gateWarnings,
+          ...waitingLines,
           ...heldLines,
         ].join("\n"),
       );
       return EXIT.ok;
     }
-    const lines: string[] = [];
+    const lines: string[] = [...gateWarnings, ...waitingLines];
     const pending = decisions.filter((q) => !q.followup_notice);
     const followups = decisions.filter((q) => q.followup_notice);
     if (followups.length) {
@@ -1092,7 +1119,11 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
             `    ${decision.question}`,
             ...(decision.trigger === "merge_confirmation" &&
             gate.status === "enabled"
-              ? [`    合并检查：${check ? checkLabels[check.status] : "排队"}`]
+              ? [
+                  decision.merge_noop
+                    ? "    交付已在基线中，无需合并检查"
+                    : `    合并检查：${check ? checkLabels[check.status] : "排队"}`,
+                ]
               : []),
             ...(decision.trigger === "merge_confirmation" &&
             gate.status === "invalid"

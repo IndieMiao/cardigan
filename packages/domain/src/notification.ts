@@ -1,8 +1,22 @@
-import type { Assignment, Author, Timestamp } from "./entities.js";
+import type { Assignment, Author, Timestamp, WorkItem } from "./entities.js";
 import { type Result, validationFailed } from "./errors.js";
 import type { AssignmentId, CardId, EventId, ProjectId, RunId } from "./ids.js";
 import type { NotificationStatus } from "./states.js";
 import { transition } from "./transitions.js";
+
+/** Match Card MCP's requireCard scope check within a project snapshot. */
+export function assignmentCanReadCard(
+  assignment: Assignment,
+  card_id: CardId,
+  work_items: readonly WorkItem[],
+): boolean {
+  return (
+    assignment.scope === "standing" ||
+    work_items.some(
+      (item) => item.id === assignment.work_item_id && item.card_id === card_id,
+    )
+  );
+}
 
 /**
  * M3.2: the notification (and escalation) state machine.

@@ -62,6 +62,12 @@ import { HostLaunchError, type LaunchStep, messageOf } from "./errors.js";
 import { agentNameFor } from "./naming.js";
 import { runCapacitySnapshot } from "./run-capacity.js";
 import {
+  deferTargetAttempt,
+  RunTargetDeferred,
+  refreshTargetWait,
+} from "./run-target.js";
+import { stopRunRuntime } from "./stop-run.js";
+import {
   type PreparedWorktree,
   prepareRoleWorktree,
   worktreeBaselinePrompt,
@@ -297,22 +303,28 @@ export async function launchRun(
     throw new RunCapacityDeferred(input.run.id, waiting?.ahead ?? 0);
   }
   let sent = false;
+  let deferred = false;
   try {
     // Report the claim-time snapshot, including this Run's durable reservation.
     if (attempt.capacity_notice) host.report?.(attempt.capacity_notice);
     const result = await launch(host, input);
     sent = true;
     return result;
+  } catch (error) {
+    deferred = error instanceof RunTargetDeferred;
+    throw error;
   } finally {
-    host.store.uow.run(() =>
-      finishBellAttempt(
-        host.store.database,
-        input.project,
-        attempt.id,
-        sent ? "sent" : "failed",
-        clock.now(),
-      ),
-    );
+    if (deferred) deferTargetAttempt(host.store, attempt, clock);
+    else
+      host.store.uow.run(() =>
+        finishBellAttempt(
+          host.store.database,
+          input.project,
+          attempt.id,
+          sent ? "sent" : "failed",
+          clock.now(),
+        ),
+      );
   }
 }
 
@@ -327,6 +339,11 @@ async function launch(
   };
   const report = host.report ?? (() => undefined);
   const project = input.project;
+  const requireTarget = () => {
+    if (refreshTargetWait(host.store, project, input.run.id, clock))
+      throw new RunTargetDeferred();
+  };
+  requireTarget();
 
   await secureDataDirectory(execution);
   const { assignment, role, employee, card, workItem } = launchEntities(
@@ -418,17 +435,23 @@ async function launch(
           "dispatch",
           "Live session has no active token",
         );
-      // Claim through the state machine before touching Git or waking. A
-      // concurrent start must fail without rotating this session's credentials.
-      const run = applyCommand(host.store, {
-        project,
-        actor: input.actor,
-        clock,
-        reduce: (state, actor, ports) =>
-          dispatchRun(state, actor, { run_id: current.id }, ports),
-      });
+      // The persistent attempt excludes concurrent starts throughout preparation.
+      const dispatch = () =>
+        applyCommand(host.store, {
+          project,
+          actor: input.actor,
+          clock,
+          reduce: (state, actor, ports) =>
+            dispatchRun(state, actor, { run_id: current.id }, ports),
+        });
+      let run: Run | undefined =
+        workItem?.kind === "verify" ? undefined : dispatch();
+      let waking = false;
       try {
         worktree ??= await prepare();
+        requireTarget();
+        run ??= dispatch();
+        waking = true;
         const result = await host.runtime.wake(
           assignment.runtime_ref,
           [prompt, worktreeBaselinePrompt(worktree)].filter(Boolean).join("\n"),
@@ -436,6 +459,11 @@ async function launch(
         if (!result.ok || !result.value.sent)
           throw new Error("Session wake failed; delivery may have occurred");
       } catch (error) {
+        if (!waking) {
+          requireTarget();
+          // Genuine preparation failures keep the established retry protocol.
+          run ??= dispatch();
+        }
         // A failed wake does not prove non-delivery (§6.8). Keep the dispatched
         // Run and credentials so a late MCP acknowledgement remains valid.
         throw new HostLaunchError("dispatch", messageOf(error), {
@@ -483,6 +511,7 @@ async function launch(
     // The Dispatcher passes no worktree: the host prepares what the Role needs
     // (a writer's branch, or a readonly reviewer at the current delivery).
     worktree ??= await prepare();
+    requireTarget();
     workDir = worktree?.path ?? workDir;
 
     step = "token issuance";
@@ -566,6 +595,7 @@ async function launch(
         issued.token,
       );
     else await writeRunDirectory(compiled, issued.token);
+    requireTarget();
 
     step = "runtime provision";
     const launchDesc: RuntimeLaunch = {
@@ -597,6 +627,7 @@ async function launch(
         `provision failed: ${provisioned.error.code} ${provisioned.error.message}`,
       );
     ref = provisioned.value;
+    requireTarget();
 
     // The worktree is the host's fact, not the runtime's: hand it to dispatch
     // through the ref so the assignment records path, branch and base SHA.
@@ -659,6 +690,10 @@ async function launch(
       token_id: tokenId,
     };
   } catch (error) {
+    const deferred =
+      step !== "sentinel write" &&
+      (error instanceof RunTargetDeferred ||
+        refreshTargetWait(host.store, project, input.run.id, clock));
     await compensate({
       host,
       execution,
@@ -669,9 +704,11 @@ async function launch(
       clock,
       step,
       report,
+      keepRun: deferred,
       ...(ref === undefined ? {} : { ref }),
       ...(tokenId === undefined ? {} : { tokenId }),
     });
+    if (deferred) throw new RunTargetDeferred();
     throw error instanceof HostLaunchError
       ? error
       : new HostLaunchError(step, messageOf(error), { cause: error });
@@ -690,12 +727,26 @@ interface Compensation {
   readonly report: (message: string) => void;
   readonly ref?: RuntimeRef | undefined;
   readonly tokenId?: string | undefined;
+  readonly keepRun?: boolean;
 }
 
 /** §4 step 9 / §13.4: release, scrub, revoke, cancel — each step independently. */
 async function compensate(input: Compensation): Promise<void> {
   const { host, report } = input;
-  if (input.ref !== undefined) {
+  if (input.keepRun && input.ref !== undefined) {
+    if (
+      (await stopRunRuntime(host.runtime, input.ref, () => true)) !== "exited"
+    ) {
+      // This is a real cleanup failure, not a target wait: do not allow another
+      // launch to publish a sentinel for an unconfirmed old wrapper.
+      await compensate({ ...input, keepRun: false });
+      throw new HostLaunchError(
+        input.step,
+        "Deferred terminal exit could not be confirmed",
+      );
+    }
+  }
+  if (input.ref !== undefined && !input.keepRun) {
     try {
       const released = await host.runtime.release(input.ref, { force: true });
       if (!released.ok) report(`终端回收失败：${released.error.code}`);
@@ -703,6 +754,8 @@ async function compensate(input: Compensation): Promise<void> {
       report("终端回收失败，需要人工检查");
     }
   }
+  if (input.keepRun && input.tokenId === undefined) return;
+  let cleanupFailed = false;
   try {
     await scrubRunCredentials(
       input.execution,
@@ -710,16 +763,21 @@ async function compensate(input: Compensation): Promise<void> {
       input.assignment.id,
     );
   } catch {
+    cleanupFailed = true;
     report("凭据文件清理失败，需要人工检查");
   }
   if (input.tokenId !== undefined) {
     try {
-      if (!host.store.revokeToken(input.tokenId))
+      if (!host.store.revokeToken(input.tokenId)) {
+        cleanupFailed = true;
         report("Token 作废失败，需要人工检查");
+      }
     } catch {
+      cleanupFailed = true;
       report("Token 作废失败，需要人工检查");
     }
   }
+  if (input.keepRun && !cleanupFailed) return;
   try {
     applyCommand(host.store, {
       project: input.project,
@@ -736,6 +794,11 @@ async function compensate(input: Compensation): Promise<void> {
   } catch {
     // The Run may already be gone; the caller reports the original failure.
   }
+  if (input.keepRun && cleanupFailed)
+    throw new HostLaunchError(
+      input.step,
+      "Deferred launch credential cleanup failed",
+    );
 }
 
 /**

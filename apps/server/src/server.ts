@@ -22,6 +22,7 @@ import {
   type ServerEnv,
 } from "./config.js";
 import { type GitBinding, ServerGit } from "./git.js";
+import type { ShutdownTimer } from "./lifecycle.js";
 import type { WebConfig } from "./web/config.js";
 import { type RunningWebServer, startWebServer } from "./web/server.js";
 
@@ -70,6 +71,8 @@ export interface StartServerOptions {
       readonly pollMs?: number;
       readonly heartbeatMs?: number;
     };
+    /** Drives the request grace period after `close()`; tests control it. */
+    readonly shutdownTimer?: ShutdownTimer;
   };
 }
 
@@ -151,6 +154,10 @@ export async function startCardiganServer(
       dataDir: config.dataDir,
       host: config.host,
       port: config.port,
+      projectSettings: (projectId) => ({
+        merge_gate_enabled:
+          mergeGate.forProject(projectId).status !== "disabled",
+      }),
       // §3.3: production always verifies against the real Git service, and the
       // verifier follows the project the request belongs to.
       deliveryVerifier: git.verifierFor,
@@ -202,6 +209,13 @@ export async function startCardiganServer(
             : served.toolCatalog(allowed, assignment);
         },
         ...options.dispatcher,
+        ...((options.dispatcher.intervalMs ?? config.dispatchIntervalMs) ===
+        undefined
+          ? {}
+          : {
+              intervalMs:
+                options.dispatcher.intervalMs ?? config.dispatchIntervalMs,
+            }),
         ...((options.dispatcher.dispatchTimeoutMs ??
           config.dispatchTimeoutMs) === undefined
           ? {}
@@ -246,6 +260,12 @@ export async function startCardiganServer(
         ...(options.web.stream === undefined
           ? {}
           : { stream: options.web.stream }),
+        ...(config.shutdownGraceMs === undefined
+          ? {}
+          : { shutdownGraceMs: config.shutdownGraceMs }),
+        ...(options.web.shutdownTimer === undefined
+          ? {}
+          : { shutdownTimer: options.web.shutdownTimer }),
       });
     } catch (error) {
       await plane?.stop();
@@ -262,15 +282,18 @@ export async function startCardiganServer(
     store,
     ...(web === undefined ? {} : { web }),
     close: async () => {
-      // Order matters: stop scheduling and drain the current delivery first,
-      // then stop serving the UI, then stop accepting tool calls, then close
-      // the database.
-      await plane?.stop();
-      await web?.close();
+      // The Workbench closes first, alongside the control plane: it stops
+      // accepting connections and ends every SSE stream at once, so an open
+      // browser tab cannot hold the restart while the phase loops drain their
+      // current tick (a merge is never cut in half). In-flight requests get
+      // the grace period. The MCP endpoint and the store close after both.
+      const results = await Promise.allSettled([web?.close(), plane?.stop()]);
       await mcp.close();
       if (ownsStore) {
         store.close();
       }
+      const failed = results.find((result) => result.status === "rejected");
+      if (failed !== undefined) throw failed.reason;
     },
   };
 }

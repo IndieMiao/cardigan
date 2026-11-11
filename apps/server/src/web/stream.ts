@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Event, ProjectId } from "@cardigan/domain";
 import { readRunQueue } from "@cardigan/host";
@@ -61,7 +62,15 @@ export interface StreamOptions {
   readonly pollMs?: number;
   readonly heartbeatMs?: number;
   readonly log?: (event: Readonly<Record<string, unknown>>) => void;
+  /**
+   * Aborted when the server shuts down: the stream sends `event: shutdown` and
+   * ends at once, so a long-lived browser connection never holds a restart
+   * open; the client reconnects to the next server with its cursors.
+   */
+  readonly signal?: AbortSignal;
 }
+
+export const SSE_SHUTDOWN_FRAME = "event: shutdown\ndata: {}\n\n";
 
 /**
  * Open the stream and keep it open until the client goes away. Resolves when the
@@ -108,9 +117,23 @@ export async function serveStream(options: StreamOptions): Promise<void> {
     });
   }
 
-  let queueRevision = JSON.stringify(
-    readRunQueue(store).filter((r) => r.project_id === project_id),
-  );
+  // The run queue has no seq, so a reconnecting client cannot ask for what it
+  // missed. Instead every connection opens with the queue's revision and every
+  // change carries the new one: the client compares it with the revision it
+  // last saw and refreshes only when they differ (C-117).
+  const queueRevisionOf = (): string =>
+    createHash("sha256")
+      .update(
+        JSON.stringify(
+          readRunQueue(store).filter((r) => r.project_id === project_id),
+        ),
+      )
+      .digest("hex")
+      .slice(0, 16);
+  const queueFrame = (revision: string): string =>
+    `event: queue\ndata: ${JSON.stringify({ revision })}\n\n`;
+  let queueRevision = queueRevisionOf();
+  res.write(queueFrame(queueRevision));
   let closed = false;
   let poll: NodeJS.Timeout | undefined;
   let heartbeat: NodeJS.Timeout | undefined;
@@ -130,13 +153,11 @@ export async function serveStream(options: StreamOptions): Promise<void> {
     if (closed || res.writableEnded) return;
     let batch: Event[];
     try {
-      const nextQueue = JSON.stringify(
-        readRunQueue(store).filter((r) => r.project_id === project_id),
-      );
+      const nextQueue = queueRevisionOf();
       if (nextQueue !== queueRevision) {
         queueRevision = nextQueue;
         // Cross-project capacity changes have no seq in this project's streams.
-        res.write("event: queue\ndata: {}\n\n");
+        res.write(queueFrame(queueRevision));
       }
       batch = store.uow.read((tx) => {
         const streams = [
@@ -198,7 +219,18 @@ export async function serveStream(options: StreamOptions): Promise<void> {
     }
   }, heartbeatMs);
 
+  const shutdown = (): void => {
+    if (!closed && !res.writableEnded) res.write(SSE_SHUTDOWN_FRAME);
+    close();
+  };
+  if (options.signal?.aborted) shutdown();
+  else options.signal?.addEventListener("abort", shutdown, { once: true });
+
   await new Promise<void>((resolve) => {
+    if (closed) {
+      resolve();
+      return;
+    }
     req.on("close", () => {
       close();
       resolve();
@@ -208,6 +240,10 @@ export async function serveStream(options: StreamOptions): Promise<void> {
       closed = true;
       resolve();
     });
+    // A shutdown ends the response ourselves; the socket may stay open as an
+    // idle keep-alive connection, so do not wait for it.
+    res.on("finish", resolve);
   });
+  options.signal?.removeEventListener("abort", shutdown);
   close();
 }

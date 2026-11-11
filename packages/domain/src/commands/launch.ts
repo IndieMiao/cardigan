@@ -1,5 +1,6 @@
 import type { Actor, Assignment, Run, RuntimeRef } from "../entities.js";
 import type { AssignmentId, EventId, RunId } from "../ids.js";
+import { hasRunTarget } from "../run-target.js";
 import { EXTERNAL_ASSIGNMENT_START_ERROR } from "../standing.js";
 import { transition } from "../transitions.js";
 import {
@@ -159,6 +160,11 @@ export function queueRun(
   return command(state, actor, "queue_run", ports, (d) => {
     if (p.resume) resumeStanding(d, p.assignment_id);
     const assignment = target(d, p.assignment_id);
+    ensure(
+      hasRunTarget(assignment, d.state),
+      "illegal_transition",
+      "验证工作项尚无当前可审交付，请等待交付后再启动",
+    );
     if (p.reuse_queued) {
       const queued = d
         .list("runs")
@@ -313,6 +319,11 @@ export function dispatchRun(
       text(p.launch_snapshot.launch_profile_ref, "launch_profile_ref");
     if (p.launch_snapshot) settingsValid(p.launch_snapshot);
     const assignment = target(d, run.assignment_id);
+    ensure(
+      hasRunTarget(assignment, d.state),
+      "illegal_transition",
+      "验证工作项尚无当前可审交付，请等待交付后再启动",
+    );
     snapshot(run, assignment);
     const status = unwrap(transition("run", run.status, "dispatch"));
     const ref = p.runtime_ref ?? assignment.runtime_ref;
@@ -426,6 +437,7 @@ export function dispatchRun(
         : {}),
     };
     delete next.queue_reason;
+    delete next.dispatch_target_wait;
     d.put("runs", next);
     d.emit("run_dispatched", cardId(d, assignment), {
       run_id: run.id,
