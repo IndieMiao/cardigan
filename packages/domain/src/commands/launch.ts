@@ -389,6 +389,7 @@ export function dispatchRun(
         : {}),
     };
     delete next.queue_reason;
+    delete next.dispatch_target_wait;
     d.put("runs", next);
     d.emit("run_dispatched", cardId(d, assignment), {
       run_id: run.id,

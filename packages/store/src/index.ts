@@ -8,6 +8,7 @@ export {
   finishBellAttempt,
   listBellAttempts,
   unfinishedBellAttempts,
+  withdrawBellAttempt,
 } from "./dispatcher.js";
 export { persistEmployeeEffect } from "./employees.js";
 export { createIdAllocator, PROJECT_EVENT_STREAM } from "./ids.js";

@@ -60,6 +60,7 @@ export * from "./commands/preferences.js";
 export * from "./commands/queries.js";
 export * from "./commands/release.js";
 export * from "./commands/role.js";
+export * from "./commands/run-target-wait.js";
 export * from "./commands/runtime.js";
 export * from "./commands/sensitive.js";
 export { pauseStandingAssignment } from "./commands/standing.js";

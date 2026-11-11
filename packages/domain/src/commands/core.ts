@@ -84,6 +84,7 @@ type CommandName =
   | "create_host_ops_assignment"
   | "queue_run"
   | "dispatch_run"
+  | "refresh_run_target_wait"
   | "acknowledge_run"
   | "abort_dispatch"
   | "recover_dispatch"
@@ -185,6 +186,7 @@ export class CommandDraft {
     const hostOnly = [
       "queue_run",
       "dispatch_run",
+      "refresh_run_target_wait",
       "abort_dispatch",
       "pause_standing_assignment",
     ].includes(tool);

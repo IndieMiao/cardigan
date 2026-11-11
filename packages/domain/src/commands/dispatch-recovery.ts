@@ -11,6 +11,7 @@ import {
   unwrap,
 } from "./core.js";
 import { cancelRunDispatch } from "./launch.js";
+import { dispatchTargetWaitMs } from "./run-target-wait.js";
 
 const field = (payload: unknown, name: string): unknown =>
   payload && typeof payload === "object"
@@ -106,7 +107,10 @@ export function recoverDispatch(
     const started =
       dispatchedAt(state, run) ?? dispatchRecoveryQueuedAt(state, run);
     if (!started) return;
-    const elapsed = Date.parse(d.now) - Date.parse(started);
+    const elapsed =
+      Date.parse(d.now) -
+      Date.parse(started) -
+      dispatchTargetWaitMs(run, d.now);
     const reason = startupFailed
       ? "recovery_startup_failed"
       : stopping
