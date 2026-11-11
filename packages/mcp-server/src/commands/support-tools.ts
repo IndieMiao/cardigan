@@ -157,7 +157,7 @@ export function supportTools(options: SupportToolOptions = {}) {
     defineTool({
       name: "project_snapshot",
       description:
-        "Read the current project and derived card states (PM only).",
+        "Read the current project, derived card states and available_employees for work-item assignment (PM only). External employees are excluded; assign also checks author/reviewer separation for the chosen item.",
       input: z.object({}),
       handler: (_params, context) => {
         const snapshot = readProject(context, projectSnapshot) as {

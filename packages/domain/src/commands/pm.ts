@@ -12,6 +12,7 @@ import {
   unwrap,
 } from "./core.js";
 import {
+  checkEmployeeNotExternal,
   checkEmployeeSeparation,
   resolveEmployee,
   selectEmployee,
@@ -591,9 +592,13 @@ export function assign(
         "invariant_violation",
         "A work item has one persistent assignment",
       );
+      const employee_id =
+        p.employee_id === undefined
+          ? current.employee_id
+          : resolveEmployee(d, p.employee_id).id;
+      checkEmployeeNotExternal(d, employee_id);
       ensure(
-        p.employee_id === undefined ||
-          resolveEmployee(d, p.employee_id).id === current.employee_id,
+        p.employee_id === undefined || employee_id === current.employee_id,
         "invariant_violation",
         "Assignment 的员工创建后不能修改",
       );

@@ -13,7 +13,7 @@ import type { CardId } from "../ids.js";
 import { requesterNotificationRecipient } from "../notification.js";
 import type { Clock } from "../ports.js";
 import { reviewLimitAttention } from "../review-limit-attention.js";
-import { type Role, roleKind } from "../role.js";
+import { isRoleActive, type Role, roleKind } from "../role.js";
 import {
   builtinCardTemplates,
   type CardTemplate,
@@ -22,6 +22,7 @@ import {
 import { type CommandDraft, type CommandState, command } from "./core.js";
 import { decisionFollowupNeedsHuman } from "./decision-followup.js";
 import { hasActivePmOps, isPmOps } from "./delegation.js";
+import { availableWorkItemEmployees } from "./employee-assignment.js";
 import { failedConfirmedMergeCheck, latestMergeCheck } from "./merge-check.js";
 import { pmFailedMergeCheck, pmMergeBlockers } from "./merge-delegation.js";
 import { resolveCardTemplate } from "./templates.js";
@@ -89,6 +90,13 @@ export function projectSnapshot(state: CommandState, actor: Actor) {
     d.projectAccess();
     return {
       project_id: state.project_id,
+      available_employees: availableWorkItemEmployees(state)
+        .filter(
+          (employee) =>
+            employee.role_id !== "host_ops" &&
+            isRoleActive(state.roles, employee.role_id),
+        )
+        .map(({ id, name, title, role_id }) => ({ id, name, title, role_id })),
       cards: d.list("cards").map((c) => cardView(d, c.id)),
     };
   });
@@ -157,10 +165,11 @@ export function listRoles(state: CommandState, actor: Actor) {
     const roles = [...new Set(stored.map((r) => r.role_id))]
       .sort()
       .flatMap((id) => {
+        if (!isRoleActive(stored, id)) return [];
         const role = stored
           .filter((r) => r.role_id === id)
           .sort((a, b) => b.role_version - a.role_version)[0];
-        if (role === undefined || role.status === "inactive") return [];
+        if (role === undefined) return [];
         return [
           {
             role_id: role.role_id,

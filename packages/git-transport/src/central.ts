@@ -31,6 +31,13 @@ const within = (root: string, path: string) =>
   path === root || path.startsWith(root + sep);
 const fullSha = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u;
 const conflictRecord = /^[0-7]{6} [a-f0-9]+ [1-3]\t/u;
+export interface FirstParentCommit {
+  readonly sha: string;
+  readonly parent?: string;
+  readonly author: string;
+  readonly committer: string;
+  readonly subject: string;
+}
 export interface CentralGitOptions extends GitTimeoutOptions {
   dataDir: string;
   centralRoot?: string;
@@ -369,6 +376,48 @@ export class CentralGitTransport implements GitCentralPort {
         "--",
       ]),
     );
+  }
+  /**
+   * First-parent commits of `head` not reachable from `base`, newest first,
+   * at most `limit`. Author/committer are display-only; callers identify by SHA.
+   */
+  async firstParentChain(
+    repository: string,
+    base: string,
+    head: string,
+    limit: number,
+  ): Promise<readonly FirstParentCommit[]> {
+    if (
+      ![base, head].every((sha) => fullSha.test(sha)) ||
+      !Number.isInteger(limit) ||
+      limit < 1
+    )
+      throw new Error("Invalid first-parent range");
+    const out = await this.checked(repository, [
+      "rev-list",
+      "--first-parent",
+      "--no-commit-header",
+      `--max-count=${limit}`,
+      "--format=%H%x1f%P%x1f%an <%ae>%x1f%cn <%ce>%x1f%s",
+      "--end-of-options",
+      `${base}..${head}`,
+      "--",
+    ]);
+    if (!out) return [];
+    return out.split("\n").map((line) => {
+      const [sha = "", parents = "", author = "", committer = "", ...rest] =
+        line.split("\x1f");
+      const parent = parents.split(" ")[0] ?? "";
+      if (!fullSha.test(sha) || (parent && !fullSha.test(parent)))
+        throw new Error("Unexpected rev-list record");
+      return {
+        sha,
+        ...(parent ? { parent } : {}),
+        author: author.slice(0, 200),
+        committer: committer.slice(0, 200),
+        subject: rest.join("\x1f").slice(0, 200),
+      };
+    });
   }
   async treeOfCommit(repository: string, sha: string): Promise<string> {
     if (
