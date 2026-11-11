@@ -57,6 +57,38 @@ function bracket(host: string): string {
   return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
 }
 
+/** The tool set the endpoint serves when the caller does not inject one. */
+export function serverTools(
+  options: DeliveryToolOptions & SupportToolOptions,
+): readonly ToolDefinition[] {
+  return [
+    ...readOnlyTools,
+    ...deliveryTools(options),
+    ...managementTools(options.clock),
+    ...supportTools(options),
+  ];
+}
+
+let defaultCatalogTools: readonly ToolDefinition[] | undefined;
+
+/**
+ * P2a-10 A: the fingerprint of the default endpoint's `tools/list` for
+ * `allowed`, computed without a running server. Host launch paths (CLI and
+ * Dispatcher alike) record it for a new session. Descriptions and schemas do
+ * not depend on the options, and no handler ever runs here.
+ */
+export function defaultToolCatalog(
+  allowed: readonly string[],
+  assignment: Parameters<typeof toolCatalogFingerprint>[2],
+): string {
+  defaultCatalogTools ??= serverTools({
+    deliveryVerifier: () => {
+      throw new Error("catalog tools never run");
+    },
+  });
+  return toolCatalogFingerprint(defaultCatalogTools, allowed, assignment);
+}
+
 /**
  * Stateless Streamable HTTP MCP endpoint with Bearer Token auth (§9.1).
  *
@@ -68,12 +100,7 @@ export async function startMcpServer(
 ): Promise<RunningServer> {
   const host = options.host ?? "127.0.0.1";
   const log = options.log ?? stdoutLogger;
-  const tools = options.tools ?? [
-    ...readOnlyTools,
-    ...deliveryTools({ ...options, log }),
-    ...managementTools(options.clock),
-    ...supportTools(options),
-  ];
+  const tools = options.tools ?? serverTools({ ...options, log });
 
   const catalogs = new Map<string, string>();
 

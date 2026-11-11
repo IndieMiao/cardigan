@@ -8,7 +8,11 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { memoryLogger } from "./log.js";
-import { type RunningServer, startMcpServer } from "./server.js";
+import {
+  defaultToolCatalog,
+  type RunningServer,
+  startMcpServer,
+} from "./server.js";
 import {
   acceptingVerifierFor,
   project_id,
@@ -127,5 +131,15 @@ test("P2a-10 A: a changed description changes the fingerprint and a new session 
   const other = await deploy(unrelated);
   expect(other.toolCatalog(allowed, assignment)).toBe(
     before.toolCatalog(allowed, assignment),
+  );
+});
+
+test("P2a-10 A: host launches compute the same fingerprint as the default endpoint", async () => {
+  const server = await deploy();
+  expect(defaultToolCatalog(allowed, assignment)).toBe(
+    server.toolCatalog(allowed, assignment),
+  );
+  expect(defaultToolCatalog(allowed, assignment)).toBe(
+    hash(await listed(server)),
   );
 });

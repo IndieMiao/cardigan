@@ -43,8 +43,10 @@ export {
   stdoutLogger,
 } from "./log.js";
 export {
+  defaultToolCatalog,
   type McpServerOptions,
   type RunningServer,
+  serverTools,
   startMcpServer,
 } from "./server.js";
 export {
