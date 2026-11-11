@@ -236,12 +236,22 @@ export function finishHostOpsAction(
         action_id,
         assignment_id: a.id,
         ...(run ? { run_id: run.id } : {}),
+        ...(run && previous
+          ? {
+              previous_run_id: previous.id,
+              original_trigger_event_id: previous.trigger_event_id,
+            }
+          : {}),
       },
       {
         type: "system",
         body: `主机运维已处理 ${action.target_id}：${action.reason}`,
       },
     );
+    if (run) {
+      run = { ...run, trigger_event_id: event.id };
+      d.put("runs", run);
+    }
     return { assignment_id: a.id, run, event };
   });
 }

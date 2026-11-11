@@ -5,7 +5,7 @@ import {
   type HostOpsExecutionTool,
   hostOpsPending,
 } from "../host-ops.js";
-import type { CommandState } from "./core.js";
+import { CommandDraft, type CommandState } from "./core.js";
 import {
   beginHostOpsAction,
   finishHostOpsAction,
@@ -13,6 +13,7 @@ import {
   prepareHostOpsAction,
 } from "./host-ops-actions.js";
 import { abortDispatch, acknowledgeRun, queueRun } from "./launch.js";
+import { conflictRepairEvent } from "./review-round.js";
 import { pauseStandingAssignment } from "./standing.js";
 import {
   actor,
@@ -346,3 +347,82 @@ test("preflight refuses a conflicting pending worktree stop and an invalid launc
   );
   expect(settled.data.run?.status).toBe("queued");
 });
+
+test.each(["actor", "assignment", "replacement", "source", "cycle"])(
+  "restart provenance rejects a broken %s binding",
+  (broken) => {
+    const io = ports(),
+      source = base();
+    const conflict = {
+      id: io.ids.nextEventId(),
+      card_id: id("card", 1),
+      seq: 1,
+      type: "merge_conflicted",
+      actor: { kind: "system" as const, project_id: source.project_id },
+      payload: { work_item_id: id("work_item", 1) },
+      created_at: now,
+    };
+    const initial: CommandState = {
+      ...source,
+      events: [conflict],
+      runs: source.runs.map((r) =>
+        r.id === id("run", 1)
+          ? { ...r, kind: "fix", trigger_event_id: conflict.id }
+          : r,
+      ),
+    };
+    const intent = value(
+      beginHostOpsAction(
+        initial,
+        caller,
+        params("host_ops_restart_assignment"),
+        io,
+      ),
+    );
+    const pending = apply(initial, intent);
+    const finish = value(
+      finishHostOpsAction(pending, conflict.actor, intent.data.action_id, io),
+    );
+    const state = apply(pending, finish),
+      replacement = finish.data.run;
+    if (!replacement) throw new Error("Missing replacement Run");
+    const item = state.work_items.find((w) => w.id === id("work_item", 1));
+    if (!item) throw new Error("Missing work item");
+    const read = (s: CommandState) =>
+      conflictRepairEvent(
+        new CommandDraft(s, conflict.actor, "manage_host_ops_action", io),
+        item,
+        replacement,
+        false,
+      );
+    expect(read(state)).toBe(conflict.id);
+    const invalid: CommandState = {
+      ...state,
+      events: state.events.map((e) =>
+        e.id !== finish.data.event.id
+          ? e
+          : {
+              ...e,
+              actor: broken === "actor" ? human : e.actor,
+              payload: {
+                ...(e.payload as Record<string, string>),
+                ...(broken === "assignment"
+                  ? { assignment_id: id("assignment", 2) }
+                  : {}),
+                ...(broken === "replacement" ? { run_id: id("run", 999) } : {}),
+                ...(broken === "source"
+                  ? { original_trigger_event_id: io.ids.nextEventId() }
+                  : {}),
+                ...(broken === "cycle"
+                  ? {
+                      previous_run_id: replacement.id,
+                      original_trigger_event_id: finish.data.event.id,
+                    }
+                  : {}),
+              },
+            },
+      ),
+    };
+    expect(read(invalid)).toBeUndefined();
+  },
+);

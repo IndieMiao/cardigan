@@ -1,3 +1,5 @@
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import {
   type Assignment,
   acknowledgeRun,
@@ -10,13 +12,23 @@ import {
   type Runtime,
   type ToolName,
 } from "@cardigan/domain";
-import { HostOpsService, runCapacitySnapshot } from "@cardigan/host";
+import {
+  HostOpsService,
+  runCapacitySnapshot,
+  scrubRunCredentials,
+} from "@cardigan/host";
 import {
   authenticate,
   hostOpsTools,
   type ToolContext,
   unwrap,
 } from "@cardigan/mcp-server";
+import {
+  SECRETS_FILE_NAME,
+  START_FILE_NAME,
+  TOKEN_FILE_NAME,
+} from "@cardigan/roles";
+import { executionPaths } from "@cardigan/runtime-herdr";
 import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { dispatchFixture } from "../test-support/dispatch.js";
@@ -520,4 +532,100 @@ test("delivery failures stay read-only and outside patrol work; context estimate
   expect(() =>
     resolveServerConfig({ CARDIGAN_HOST_OPS_CONTEXT_THRESHOLD_PCT: "101" }),
   ).toThrow();
+});
+
+test("a delayed credential scrub cannot outlive takeover and delete the replacement Run's files", async () => {
+  const { assignment, run } = dispatched();
+  const execution = { mode: "local" as const, dataDir: f.dataDir };
+  const { runDir } = executionPaths(execution, f.project, assignment.id);
+  const files = [START_FILE_NAME, SECRETS_FILE_NAME, TOKEN_FILE_NAME];
+  await mkdir(runDir, { recursive: true });
+  for (const name of files)
+    await writeFile(join(runDir, name), "old non-sensitive fixture marker");
+  let continueScrub!: () => void;
+  const delayed = new Promise<void>((resolve) => {
+    continueScrub = resolve;
+  });
+  const scrub = vi.fn(async () => {
+    await delayed;
+    await scrubRunCredentials(execution, f.project, assignment.id);
+  });
+  service = new HostOpsService({
+    store: f.store,
+    runtime,
+    snapshot,
+    clock: f.clock,
+    scrubCredentials: scrub,
+  });
+  await call("host_ops_restart_assignment", {
+    assignment_id: assignment.id,
+    reason: "Restart",
+    idempotency_key: "late-scrub",
+  });
+  const first = service.tick();
+  const reopened = Store.open({ dataDir: f.dataDir, clock: f.clock });
+  try {
+    await vi.waitFor(() => expect(scrub).toHaveBeenCalledOnce());
+    f.advance(60_001);
+    const secondScrub = vi.fn(() =>
+      scrubRunCredentials(execution, f.project, assignment.id),
+    );
+    const second = new HostOpsService({
+      store: reopened,
+      runtime,
+      snapshot,
+      clock: f.clock,
+      scrubCredentials: secondScrub,
+    });
+    await second.tick();
+    expect(secondScrub).not.toHaveBeenCalled();
+    expect(
+      f.state().events.filter((e) => e.type === "host_ops_action_claimed"),
+    ).toHaveLength(1);
+    expect(f.state().runs.find((r) => r.id === run.id)?.status).toBe(
+      "dispatched",
+    );
+    continueScrub();
+    await first;
+    const replacement = f
+      .state()
+      .runs.find(
+        (r) => r.assignment_id === assignment.id && r.status === "queued",
+      );
+    if (!replacement) throw new Error("Missing replacement Run");
+    f.apply((s, a, p) =>
+      dispatchRun(
+        s,
+        a,
+        {
+          run_id: replacement.id,
+          runtime_ref: {
+            ...f.refFor(assignment),
+            terminal_ref: "replacement-terminal",
+          },
+        },
+        p,
+      ),
+    );
+    for (const name of files)
+      await writeFile(
+        join(runDir, name),
+        "replacement non-sensitive fixture marker",
+      );
+    await second.tick();
+    for (const name of files)
+      expect(await readFile(join(runDir, name), "utf8")).toBe(
+        "replacement non-sensitive fixture marker",
+      );
+    expect(f.state().runs.find((r) => r.id === replacement.id)?.status).toBe(
+      "dispatched",
+    );
+    expect(
+      f.state().events.filter((e) => e.type === "host_ops_action_finished"),
+    ).toHaveLength(1);
+  } finally {
+    continueScrub();
+    await first;
+    reopened.close();
+  }
 });

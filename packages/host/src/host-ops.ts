@@ -33,6 +33,7 @@ import {
   unfinishedBellAttempts,
 } from "@cardigan/store";
 import { readAttention } from "./attention.js";
+import { tryHostOpsLock } from "./host-ops-lock.js";
 import { revokeStoppedRunTokens, stopRunRuntime } from "./stop-run.js";
 
 interface Options {
@@ -287,92 +288,110 @@ export class HostOpsService {
       const read = () =>
         store.uow.read((tx) => loadCommandState(tx, project.id));
       for (const action of pendingHostOpsActions(read().events)) {
-        const lease = store.uow.run((tx) => {
-          const effect = unwrap(
-            claimHostOpsAction(
-              loadCommandState(tx, project.id),
-              { kind: "system", project_id: project.id },
-              action.action_id,
-              { clock: this.clock, ids: tx.ids },
-            ),
-          );
-          persistEffect(tx, project.id, effect);
-          return effect.data;
-        });
-        if (!lease) continue;
-        const current = () => {
-          const state = read();
-          return (
-            state.events.findLast(
-              (e) =>
-                e.type === "host_ops_action_claimed" &&
-                (e.payload as { action_id: string }).action_id ===
-                  action.action_id,
-            )?.id === lease &&
-            pendingHostOpsActions(state.events).some(
-              (a) => a.action_id === action.action_id,
-            ) &&
-            JSON.stringify(
-              state.assignments.find((a) => a.id === action.assignment_id)
-                ?.runtime_ref,
-            ) === JSON.stringify(action.runtime_ref)
-          );
-        };
-        // Do not revoke credentials or release the Run slot until exit is proven.
-        if (!current()) continue;
-        if (
-          (await stopRunRuntime(runtime, action.runtime_ref, current)) !==
-          "exited"
-        ) {
-          this.defer(project.id, action.action_id, "terminal_exit_unconfirmed");
-          continue;
-        }
-        if (!current()) continue;
+        const unlock = await tryHostOpsLock(
+          store,
+          project.id,
+          action.assignment_id,
+        );
+        if (!unlock) continue;
         try {
-          await this.options.scrubCredentials?.(
-            project.id,
-            action.assignment_id,
-          );
-        } catch {
-          this.defer(project.id, action.action_id, "credential_cleanup_failed");
-          continue;
-        }
-        store.uow.run((tx) => {
-          const state = loadCommandState(tx, project.id);
+          const lease = store.uow.run((tx) => {
+            const effect = unwrap(
+              claimHostOpsAction(
+                loadCommandState(tx, project.id),
+                { kind: "system", project_id: project.id },
+                action.action_id,
+                { clock: this.clock, ids: tx.ids },
+              ),
+            );
+            persistEffect(tx, project.id, effect);
+            return effect.data;
+          });
+          if (!lease) continue;
+          const current = () => {
+            const state = read();
+            return (
+              state.events.findLast(
+                (e) =>
+                  e.type === "host_ops_action_claimed" &&
+                  (e.payload as { action_id: string }).action_id ===
+                    action.action_id,
+              )?.id === lease &&
+              pendingHostOpsActions(state.events).some(
+                (a) => a.action_id === action.action_id,
+              ) &&
+              JSON.stringify(
+                state.assignments.find((a) => a.id === action.assignment_id)
+                  ?.runtime_ref,
+              ) === JSON.stringify(action.runtime_ref)
+            );
+          };
+          // Do not revoke credentials or release the Run slot until exit is proven.
+          if (!current()) continue;
           if (
-            state.events.findLast(
-              (e) =>
-                e.type === "host_ops_action_claimed" &&
-                (e.payload as { action_id: string }).action_id ===
-                  action.action_id,
-            )?.id !== lease
-          )
-            return;
-          const effect = unwrap(
-            finishHostOpsAction(
-              loadCommandState(tx, project.id),
-              { kind: "system", project_id: project.id },
+            (await stopRunRuntime(runtime, action.runtime_ref, current)) !==
+            "exited"
+          ) {
+            this.defer(
+              project.id,
               action.action_id,
-              { clock: this.clock, ids: tx.ids },
-            ),
-          );
-          revokeStoppedRunTokens(tx, project.id, action.assignment_id);
-          persistEffect(tx, project.id, effect);
-          const { run, event } = effect.data;
-          if (run)
-            recordNotification(store.database, {
-              project_id: project.id,
-              event_id: event.id,
-              seq: event.seq,
-              kind: "assignment",
-              at: this.clock.now(),
-              recipient: {
+              "terminal_exit_unconfirmed",
+            );
+            continue;
+          }
+          if (!current()) continue;
+          try {
+            await this.options.scrubCredentials?.(
+              project.id,
+              action.assignment_id,
+            );
+          } catch {
+            this.defer(
+              project.id,
+              action.action_id,
+              "credential_cleanup_failed",
+            );
+            continue;
+          }
+          store.uow.run((tx) => {
+            const state = loadCommandState(tx, project.id);
+            if (
+              state.events.findLast(
+                (e) =>
+                  e.type === "host_ops_action_claimed" &&
+                  (e.payload as { action_id: string }).action_id ===
+                    action.action_id,
+              )?.id !== lease
+            )
+              return;
+            const effect = unwrap(
+              finishHostOpsAction(
+                loadCommandState(tx, project.id),
+                { kind: "system", project_id: project.id },
+                action.action_id,
+                { clock: this.clock, ids: tx.ids },
+              ),
+            );
+            revokeStoppedRunTokens(tx, project.id, action.assignment_id);
+            persistEffect(tx, project.id, effect);
+            const { run, event } = effect.data;
+            if (run)
+              recordNotification(store.database, {
+                project_id: project.id,
+                event_id: event.id,
+                seq: event.seq,
                 kind: "assignment",
-                assignment_id: action.assignment_id,
-              },
-              ...(event.card_id ? { card_id: event.card_id } : {}),
-            });
-        });
+                at: this.clock.now(),
+                recipient: {
+                  kind: "assignment",
+                  assignment_id: action.assignment_id,
+                },
+                ...(event.card_id ? { card_id: event.card_id } : {}),
+              });
+          });
+        } finally {
+          await unlock();
+        }
       }
     }
   }
