@@ -340,6 +340,7 @@ test("employee activity spans projects without confusing project-local Assignmen
           employee_id: e.id,
           last_assigned_at: "2026-01-02",
           unfinished_runs: 1,
+          has_external_standing_assignment: false,
         },
       ],
     );
@@ -364,5 +365,32 @@ test("employee activity spans projects without confusing project-local Assignmen
       store.uow.read((tx) => tx.assignments.get("one", assignment().id))
         ?.employee_id,
     ).toBe(e.id);
+  });
+});
+
+test("employee activity tracks unreleased external standing bindings across projects", () => {
+  withTempStore((store) => {
+    const e = add(store);
+    store.createProject({ id: "external-project" });
+    const { work_item_id: _workItem, ...base } = assignment();
+    for (const status of ["active", "suspended", "released"] as const) {
+      store.uow.run((tx) =>
+        tx.assignments.put("external-project", {
+          ...base,
+          scope: "standing",
+          standing_mode: "office",
+          employee_id: e.id,
+          external: true,
+          status,
+        }),
+      );
+      expect(
+        store.uow.read((tx) => tx.employees.assignmentActivity?.())?.[0],
+      ).toMatchObject({
+        employee_id: e.id,
+        unfinished_runs: 0,
+        has_external_standing_assignment: status !== "released",
+      });
+    }
   });
 });

@@ -71,6 +71,7 @@ export const CLI_TOOLS = {
   "merge request": null,
   "merge request-changes": null,
   "merge recheck": null,
+  "merge push-accept": null,
   "worktree diff": null,
   "worktree clean": null,
   "worktree keep": null,
