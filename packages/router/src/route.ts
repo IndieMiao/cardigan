@@ -9,6 +9,7 @@ import type {
   WorkItemId,
 } from "@cardigan/domain";
 import {
+  assignmentCanReadCard,
   canStartWork,
   cardTemplate,
   employeeNameKey,
@@ -47,20 +48,6 @@ const succeeded = (item: WorkItem) =>
 
 const isActive = (assignment: Assignment): boolean =>
   assignment.status === "active";
-
-/** Match Card MCP's requireCard scope check; standing identities read the project. */
-export function assignmentCanReadCard(
-  assignment: Assignment,
-  card_id: CardId,
-  work_items: readonly WorkItem[],
-): boolean {
-  return (
-    assignment.scope === "standing" ||
-    work_items.some(
-      (item) => item.id === assignment.work_item_id && item.card_id === card_id,
-    )
-  );
-}
 
 const actorAssignmentId = (input: RouteInput): AssignmentId | undefined =>
   input.event.actor.kind === "assignment"

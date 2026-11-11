@@ -750,7 +750,9 @@ M3.4 的持久化边界见 [ADR 0003](adr/0003-dispatch-delivery-boundary.md)：
 
 M3.4 重发策略：首次成功投递之外最多再重发 4 次，等待间隔默认 1、2、4、8 分钟（retryBaseMs / maxRetries 可配置）；最后一次重发再等待最后一档间隔仍无 ACK 才标记 needs_attention。到期时存在任何未结束 Run 或投递意图则等待，ACK 优先；重发沿用原 Run，不重开已结束 Run、不创建第二个 Run。项目级通知仍只首次投递；项目级 ACK 使用独立的空流键，与卡片流同样结算 pending / belled / delivery_failed。逻辑 PM 收件人已投递的通知以实际 Run 或在途投递的 Assignment 为准，不能由新 PM 的游标代确认。
 
-C-120：每轮派发前检查已有显式 Assignment 通知的卡片读取范围。工作项 Assignment 的所属工作项不在通知卡片时，将 `pending / belled / delivery_failed / needs_attention` 经既有 `resolve` 收尾，同事务记录 `notification_resolved` 事件和原卡系统时间线，原因 `recipient_cannot_read_card`，保留原通知、来源事件、接收者和旧状态；不推进 ACK 游标。重复 tick、重启及迟到投递结果不会重开该通知。常驻 Assignment、项目级流及已 ACK 通知保持原规则。失败投递的 Run 若触发事件属于无权读取的卡片，不再重发门铃；已存在终端仍由既有 Run 超时与停止恢复流程处理，不以通知收尾伪造 Run 完成。
+C-120：每轮派发前检查已有显式 Assignment 通知的卡片读取范围。工作项 Assignment 的所属工作项不在通知卡片时，将 `pending / belled / delivery_failed / needs_attention` 经既有 `resolve` 收尾，同事务记录 `notification_resolved` 事件和原卡系统时间线，原因 `recipient_cannot_read_card`，保留原通知、来源事件、接收者和旧状态；不推进 ACK 游标。重复 tick、重启及迟到投递结果不会重开该通知。常驻 Assignment、项目级流及已 ACK 通知保持原规则。
+
+关联 Run 的取消与重排由 domain 校验：仅针对源于无权读取卡片的 `comment_posted` 的执行，沿匹配 Assignment／Run 的 `run_dispatch_recovered` 记录追溯原评论，不影响跨卡依赖等业务触发。尚未派发的 queued Run（含容量／运行环境等待）在同事务确认没有在途投递意图后，经 cancel 置为 cancelled、outcome=failed，保留已有空闲会话、凭据及工作项；候选选择和 claim 也阻止它通过空通知门铃派发。已 dispatched 且未 MCP 启动的 Run 不再重试门铃；到既有超时／失败阈值后沿用停止租约、原终端引用与独立退出确认流程，无法确认退出时保留凭据和容量并升级。确认退出后取消旧 Run、撤销旧 Token 并清除停止栅栏，但不创建替换 Run、不消耗自动恢复预算。取消原因写入 `run_unreadable_trigger_cancelled` 事件和原评论卡时间线。外接身份不由主机停止或取消；MCP 已启动的 Run 及合法业务 Run 保留原流程，不代 ACK、不伪造业务完成。
 
 C-56 失败恢复：外接 Assignment 跳过失败重试、派发超时恢复及遗留停止记录的续跑，不查询／停止终端、不撤销凭据、不自动取消或重排 Run。其他 Assignment 的每个 `dispatched` 且没有 `run_started` 的 Run，从持久化投递意图读取结果。失败后默认等待 30 秒、1、2、4 分钟，各重试一次（`deliveryRetryBaseMs` / `maxRetries` 可配置）；重试前查询终端，只在明确存活时按铃，沿用原 Run、通知和 worktree，不根据画面 idle/working 推断业务状态。每次重试先取得同一 Assignment 的投递租约，事务内重查 Run 尚未启动、引用未变、没有在途意图；等待查询或 Git 准备期间发生的 MCP 启动优先。显式 CLI 启动没有通知时，也使用其持久投递意图重试。
 
