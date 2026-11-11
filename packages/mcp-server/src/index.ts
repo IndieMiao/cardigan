@@ -47,7 +47,11 @@ export {
   type RunningServer,
   startMcpServer,
 } from "./server.js";
-export { createMcpServer, type ToolServerOptions } from "./tool-server.js";
+export {
+  createMcpServer,
+  type ToolServerOptions,
+  toolCatalogFingerprint,
+} from "./tool-server.js";
 export {
   ackEventsTool,
   defineTool,

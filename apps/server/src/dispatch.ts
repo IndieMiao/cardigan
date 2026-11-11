@@ -86,6 +86,15 @@ export interface DispatcherOptions {
     assignment: Assignment,
     project: ProjectId,
   ) => Promise<Pick<Run, "model" | "agent_cli_version" | "launch_profile_ref">>;
+  /**
+   * P2a-10 A: fingerprint of the MCP tools/list this deploy serves to the
+   * Assignment. A live session whose recorded fingerprint differs is replaced
+   * on its next natural wake. Absent (or undefined) disables the check.
+   */
+  readonly toolCatalog?: (
+    assignment: Assignment,
+    project: ProjectId,
+  ) => string | undefined;
   /** M3.5 host adapter: provision and dispatch THIS queued Run with bell as first prompt.
    * Never queue another Run. Own token/terminal compensation on startup failure. */
   readonly startRun: (input: {
@@ -412,6 +421,16 @@ export class Dispatcher {
       "model" | "agent_cli_version" | "launch_profile_ref"
     >;
     let replaceProfile = false;
+    // P2a-10 A (finding 40): the Harness lists MCP tools once per session, so
+    // a session started under an older deploy keeps the old tools/list. Only a
+    // recorded fingerprint that differs from this deploy's counts; legacy Runs
+    // without one never trigger a replacement.
+    const catalog = this.catalog(a, project);
+    const replaceCatalog =
+      live &&
+      catalog !== undefined &&
+      prior?.tool_catalog !== undefined &&
+      prior.tool_catalog !== catalog;
     try {
       if (a.employee_id) {
         snapshot = await this.options.snapshot(a, project);
@@ -427,9 +446,9 @@ export class Dispatcher {
               previous: a.runtime_ref,
               reason: "launch_profile_changed",
             };
-        } else if (live && prior) snapshot = prior;
+        } else if (live && prior && !replaceCatalog) snapshot = prior;
       } else if (queued) snapshot = queued;
-      else if (live) {
+      else if (live && !replaceCatalog) {
         if (!prior) {
           this.reject(project, notes, a, "missing_session_snapshot");
           return;
@@ -445,9 +464,18 @@ export class Dispatcher {
       this.reject(project, notes, a, "snapshot_unavailable");
       return;
     }
+    if (replaceCatalog && !replaceProfile && a.runtime_ref) {
+      // Same replacement path as a lost runtime: resume_or_replace force-
+      // releases the live terminal and starts a fresh CLI session, so the new
+      // session lists the current tools.
+      live = false;
+      replacement = { previous: a.runtime_ref, reason: "tool_catalog_changed" };
+    }
+    // A reused session keeps the catalog it listed; a new one lists this deploy's.
+    const sessionCatalog = live ? prior?.tool_catalog : catalog;
     let job: Job | undefined;
     try {
-      job = this.claim(project, notes, a, snapshot, live);
+      job = this.claim(project, notes, a, snapshot, live, sessionCatalog);
     } catch (error) {
       if (
         error &&
@@ -523,6 +551,19 @@ export class Dispatcher {
       );
     this.settle(job.attempt, sent, reason, job.bell, failure);
   }
+  private catalog(a: Assignment, project: ProjectId): string | undefined {
+    try {
+      return this.options.toolCatalog?.(a, project);
+    } catch (error) {
+      // A fingerprint failure must not block delivery; it only skips the check.
+      this.options.onError?.(
+        new Error(
+          `tool catalog unavailable: project=${project} asg=${a.id} message=${redactFailureLine(error instanceof Error ? error.message : String(error))}`,
+        ),
+      );
+      return undefined;
+    }
+  }
   private waitForRuntime(project: ProjectId, expected: Assignment) {
     this.options.store.uow.run((tx) => {
       const state = loadCommandState(tx, project);
@@ -556,6 +597,7 @@ export class Dispatcher {
     expected: Assignment,
     snapshot: Pick<Run, "model" | "agent_cli_version" | "launch_profile_ref">,
     live: boolean,
+    catalog: string | undefined,
   ): Job | undefined {
     const { store } = this.options;
     return store.uow.run((tx) => {
@@ -683,6 +725,15 @@ export class Dispatcher {
           agent_cli_version: snapshot.agent_cli_version,
           launch_profile_ref: snapshot.launch_profile_ref,
         };
+        tx.runs.put(project, run);
+        state = loadCommandState(tx, project);
+      }
+      if (
+        run.status === "queued" &&
+        catalog !== undefined &&
+        run.tool_catalog !== catalog
+      ) {
+        run = { ...run, tool_catalog: catalog };
         tx.runs.put(project, run);
         state = loadCommandState(tx, project);
       }

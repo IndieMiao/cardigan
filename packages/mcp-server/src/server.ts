@@ -20,7 +20,7 @@ import {
 } from "./commands/support-tools.js";
 import { ToolError } from "./errors.js";
 import { type Logger, stdoutLogger } from "./log.js";
-import { createMcpServer } from "./tool-server.js";
+import { createMcpServer, toolCatalogFingerprint } from "./tool-server.js";
 import { readOnlyTools } from "./tools/index.js";
 import type { ToolDefinition } from "./tools/types.js";
 
@@ -42,6 +42,11 @@ export interface RunningServer {
   readonly url: string;
   readonly port: number;
   readonly host: string;
+  /** P2a-10 A: fingerprint of the `tools/list` this endpoint serves to `allowed`. */
+  toolCatalog(
+    allowed: readonly string[],
+    assignment: Parameters<typeof toolCatalogFingerprint>[2],
+  ): string;
   close(): Promise<void>;
 }
 
@@ -69,6 +74,8 @@ export async function startMcpServer(
     ...managementTools(options.clock),
     ...supportTools(options),
   ];
+
+  const catalogs = new Map<string, string>();
 
   // Filled in once the socket is bound; the DNS rebinding check needs the port.
   let boundPort = 0;
@@ -172,6 +179,21 @@ export async function startMcpServer(
     host,
     port: address.port,
     url: `http://${bracket(host)}:${address.port}${MCP_PATH}`,
+    toolCatalog: (allowed, assignment) => {
+      // `tools` is fixed for the process, so the fingerprint is too.
+      const key = JSON.stringify([
+        [...allowed].sort(),
+        assignment.scope,
+        assignment.role_id,
+        assignment.standing_mode ?? null,
+      ]);
+      let fingerprint = catalogs.get(key);
+      if (fingerprint === undefined) {
+        fingerprint = toolCatalogFingerprint(tools, allowed, assignment);
+        catalogs.set(key, fingerprint);
+      }
+      return fingerprint;
+    },
     close: () =>
       new Promise<void>((resolve, reject) => {
         http.close((error) => (error ? reject(error) : resolve()));

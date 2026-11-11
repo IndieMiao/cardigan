@@ -214,7 +214,8 @@ export interface DispatchRunParams {
     readonly reason:
       | "runtime_not_found"
       | "runtime_unavailable"
-      | "launch_profile_changed";
+      | "launch_profile_changed"
+      | "tool_catalog_changed";
   };
 }
 export function dispatchRun(
@@ -302,7 +303,9 @@ export function dispatchRun(
       const reason =
         p.replacement.reason === "launch_profile_changed"
           ? "员工启动配置已变更"
-          : `运行时失联（${p.replacement.reason}）`;
+          : p.replacement.reason === "tool_catalog_changed"
+            ? "部署后工具清单已变更"
+            : `运行时失联（${p.replacement.reason}）`;
       const body = `${reason}，替换 Session。旧 RuntimeRef：${JSON.stringify(p.replacement.previous)}。最近 Run：${previousRun?.id ?? "无"}，outcome：${previousRun?.outcome ?? "无"}。新 Session 先读卡片和 get_updates。`;
       d.emit(
         "session_replaced",

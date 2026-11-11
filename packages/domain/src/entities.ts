@@ -277,6 +277,12 @@ export interface Run {
   readonly employee_id?: EmployeeId;
   /** Actual launch profile; absent on legacy runs. */
   readonly launch_profile_ref?: string;
+  /**
+   * P2a-10 A: fingerprint of the MCP tools/list the Run's session saw when it
+   * started. A reused session carries its previous Run's value; absent on
+   * legacy runs, which never trigger a catalog replacement.
+   */
+  readonly tool_catalog?: string;
   readonly id: RunId;
   readonly assignment_id: AssignmentId;
   readonly trigger_event_id: EventId;

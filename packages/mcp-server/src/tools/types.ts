@@ -48,13 +48,29 @@ export function allowedTools(
   tools: readonly ToolDefinition[],
   identity: Identity,
 ): readonly ToolDefinition[] {
-  const allowed = identity.actor.allowed_tools;
+  return visibleTools(tools, identity.actor.allowed_tools, identity.assignment);
+}
+
+/**
+ * The tools an Assignment holding `allowed` sees in `tools/list`. Split out of
+ * `allowedTools` so the tool catalog fingerprint (P2a-10 A) applies the exact
+ * rule the endpoint applies.
+ */
+export function visibleTools(
+  tools: readonly ToolDefinition[],
+  allowed: readonly string[],
+  assignment: {
+    readonly scope: string;
+    readonly role_id: string;
+    readonly standing_mode?: string | undefined;
+  },
+): readonly ToolDefinition[] {
   return tools.filter(
     (tool) =>
       allowed.includes(tool.name) &&
       (tool.name !== "issue_instruction" ||
-        (identity.assignment.scope === "standing" &&
-          identity.assignment.role_id === "pm" &&
-          identity.assignment.standing_mode === "ops")),
+        (assignment.scope === "standing" &&
+          assignment.role_id === "pm" &&
+          assignment.standing_mode === "ops")),
   );
 }
