@@ -1358,9 +1358,14 @@ test.each(["all", "one"])(
     expect(rows()).toHaveLength(35);
     expect(notices).not.toHaveBeenCalled();
     fireEvent.click(within(group).getByRole("button", { name: "显示更多" }));
-    await waitFor(() => expect(rows()).toHaveLength(45));
+    const expandedRows = await waitFor(() => {
+      const current = rows();
+      expect(current).toHaveLength(45);
+      return current;
+    });
     expect(notices).toHaveBeenNthCalledWith(1, "p-1", "notice-19");
-    expect(initialRows.every((row) => rows().includes(row))).toBe(true);
+    // Query once per state, not once per old row (35 full visibility scans).
+    expect(initialRows.every((row) => expandedRows.includes(row))).toBe(true);
     fireEvent.click(within(group).getByRole("button", { name: "显示更多" }));
     await waitFor(() => expect(rows()).toHaveLength(53));
     expect(notices).toHaveBeenNthCalledWith(2, "p-1", "notice-9");
@@ -1465,8 +1470,9 @@ test("notices append server pages, keep all unread first and retain visible rows
       unread_count: 12,
     }),
   );
-  expect(rows()).toHaveLength(32);
-  expect(rows().slice(0, 22)).toEqual(initialRows);
+  const expandedRows = rows();
+  expect(expandedRows).toHaveLength(32);
+  expect(expandedRows.slice(0, 22)).toEqual(initialRows);
   fireEvent.click(within(group).getByRole("button", { name: "显示更多" }));
   expect((await screen.findByRole("alert")).textContent).toContain("暂时离线");
   expect(rows()).toHaveLength(32);

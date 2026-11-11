@@ -1,9 +1,11 @@
 import { expect, test } from "vitest";
 import {
+  type Assignment,
   assign,
   type CommandState,
   dispatchRun,
   type Employee,
+  projectSnapshot,
   queueRun,
   submitReview,
 } from "../index.js";
@@ -62,6 +64,97 @@ const assignItem = (s: CommandState, n = 1, reference?: string, io = ports()) =>
   );
 const rejected = (result: unknown, code = "invariant_violation") =>
   expect(result).toMatchObject({ ok: false, error: { code } });
+
+function externalOffice(status: Assignment["status"] = "active"): Assignment {
+  const { work_item_id: _workItem, ...base } = assignment(90, "pm");
+  return {
+    ...base,
+    scope: "standing",
+    standing_mode: "office",
+    employee_id: id("employee", 1),
+    external: true,
+    status,
+  };
+}
+
+test.each(["active", "suspended"] as const)(
+  "an external employee with a %s standing binding cannot be assigned to any work-item kind",
+  (status) => {
+    const s = { ...state(), assignments: [externalOffice(status)] };
+    for (const item of [1, 2, 3]) {
+      for (const reference of ["E-1", " PERSON 1 "]) {
+        expect(assignItem(s, item, reference)).toMatchObject({
+          ok: false,
+          error: {
+            code: "invariant_violation",
+            message: "这是外接员工，不由 Cardigan 启动，不能指派工作项",
+          },
+        });
+      }
+      expect(value(assignItem(s, item)).data.employee_id).toBe("E-2");
+    }
+    expect(assignItem({ ...s, employees: [employee(1)] })).toMatchObject({
+      ok: false,
+      error: { message: expect.stringContaining("均为外接员工") },
+    });
+    expect(value(projectSnapshot(s, human)).data.available_employees).toEqual([
+      { id: "E-2", name: "Person 2", title: "Developer", role_id: "pm" },
+    ]);
+  },
+);
+
+test("global external bindings exclude candidates even without local assignments; released bindings do not", () => {
+  const s = {
+    ...state(),
+    employee_activity: [
+      {
+        employee_id: id("employee", 1),
+        last_assigned_at: null,
+        unfinished_runs: 0,
+        has_external_standing_assignment: true,
+      },
+    ],
+  };
+  rejected(assignItem(s, 1, "E-1"));
+  expect(value(assignItem(s)).data.employee_id).toBe("E-2");
+  expect(
+    value(projectSnapshot(s, human)).data.available_employees.map((e) => e.id),
+  ).toEqual(["E-2"]);
+  const released = { ...state(), assignments: [externalOffice("released")] };
+  expect(value(assignItem(released, 1, "E-1")).data.employee_id).toBe("E-1");
+  expect(
+    value(projectSnapshot(released, human)).data.available_employees.map(
+      (e) => e.id,
+    ),
+  ).toEqual(["E-1", "E-2"]);
+});
+
+test("reassigning a legacy work-item binding cannot select an external employee again", () => {
+  const s = state();
+  const assigned = value(assignItem(s, 1, "E-1"));
+  const legacy = apply(s, assigned);
+  const external = {
+    ...legacy,
+    assignments: [...legacy.assignments, externalOffice()],
+  };
+  for (const reference of [undefined, "E-1", "Person 1"])
+    rejected(assignItem(external, 1, reference));
+  expect(external.assignments[0]).toEqual(assigned.data);
+  const internal = apply(state(), value(assignItem(state(), 1, "E-2")));
+  expect(
+    assignItem(
+      {
+        ...internal,
+        assignments: [...internal.assignments, externalOffice()],
+      },
+      1,
+      "E-1",
+    ),
+  ).toMatchObject({
+    ok: false,
+    error: { message: "这是外接员工，不由 Cardigan 启动，不能指派工作项" },
+  });
+});
 
 test("explicit employee ID and normalized name bind identity; replay cannot change it", () => {
   const s = state();
