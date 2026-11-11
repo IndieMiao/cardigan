@@ -9,8 +9,10 @@ import {
   type GlobalIdAllocator,
   type GlobalRepositories,
 } from "@cardigan/domain";
+import type { SnapshotTransaction } from "./command-snapshots.js";
 import { createMemberRepository } from "./members.js";
 import { ReadOnlyTransactionError } from "./read-only.js";
+import { prepare } from "./statements.js";
 import { newUlid } from "./ulid.js";
 
 export interface ReadGlobalRepositories {
@@ -28,6 +30,7 @@ export interface ReadGlobalRepositories {
 export function createGlobalRepositories(
   db: DatabaseSync,
   mode: "read" | "write",
+  snapshots?: SnapshotTransaction,
 ): GlobalRepositories {
   function writable(operation: string): void {
     if (mode === "read") throw new ReadOnlyTransactionError(operation);
@@ -38,8 +41,27 @@ export function createGlobalRepositories(
     members: createMemberRepository(db, mode),
     employees: {
       assignmentActivity: () =>
-        db
-          .prepare(`
+        snapshots
+          ? snapshots.global(["employees", "assignment_activity"], () =>
+              prepare(
+                db,
+                `SELECT e.id AS employee_id, MAX(a.last_assigned_at) AS last_assigned_at,
+          COALESCE(SUM(a.unfinished_runs), 0) AS unfinished_runs,
+          COALESCE(MAX(a.external_standing), 0) AS has_external_standing_assignment
+          FROM employees e LEFT JOIN assignment_activity a ON a.employee_id = e.id GROUP BY e.id`,
+              )
+                .all()
+                .map((row) => ({
+                  employee_id: row.employee_id as Employee["id"],
+                  last_assigned_at: row.last_assigned_at as string | null,
+                  unfinished_runs: Number(row.unfinished_runs),
+                  has_external_standing_assignment:
+                    Number(row.has_external_standing_assignment) === 1,
+                })),
+            )
+          : prepare(
+              db,
+              `
         SELECT e.id AS employee_id,
           MAX(json_extract(a.doc, '$.created_at')) AS last_assigned_at,
           COUNT(r.id) AS unfinished_runs,
@@ -52,31 +74,33 @@ export function createGlobalRepositories(
         LEFT JOIN runs r ON r.project_id = a.project_id AND r.assignment_id = a.id
           AND json_extract(r.doc, '$.status') NOT IN ('completed', 'failed', 'cancelled')
         GROUP BY e.id
-      `)
-          .all()
-          .map((row) => ({
-            employee_id: row.employee_id as Employee["id"],
-            last_assigned_at: row.last_assigned_at as string | null,
-            unfinished_runs: Number(row.unfinished_runs),
-            has_external_standing_assignment:
-              Number(row.has_external_standing_assignment) === 1,
-          })),
+      `,
+            )
+              .all()
+              .map((row) => ({
+                employee_id: row.employee_id as Employee["id"],
+                last_assigned_at: row.last_assigned_at as string | null,
+                unfinished_runs: Number(row.unfinished_runs),
+                has_external_standing_assignment:
+                  Number(row.has_external_standing_assignment) === 1,
+              })),
       get: (id) => {
-        const row = db
-          .prepare("SELECT doc FROM employees WHERE id = ?")
-          .get(id) as { doc: string } | undefined;
+        const row = prepare(db, "SELECT doc FROM employees WHERE id = ?").get(
+          id,
+        ) as { doc: string } | undefined;
         return row === undefined ? undefined : employee(row);
       },
       list: () =>
-        db
-          .prepare(
-            "SELECT doc FROM employees ORDER BY CAST(substr(id, 3) AS INTEGER)",
-          )
+        prepare(
+          db,
+          "SELECT doc FROM employees ORDER BY CAST(substr(id, 3) AS INTEGER)",
+        )
           .all()
           .map((row) => employee(row as { doc: string })),
       put: (value) => {
         writable("employees.put");
-        db.prepare(
+        prepare(
+          db,
           "INSERT INTO employees (id, name_key, status, doc) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name_key = excluded.name_key, status = excluded.status, doc = excluded.doc",
         ).run(
           value.id,
@@ -88,13 +112,13 @@ export function createGlobalRepositories(
     },
     global_events: {
       listAfter: (seq) =>
-        db
-          .prepare("SELECT doc FROM global_events WHERE seq > ? ORDER BY seq")
+        prepare(db, "SELECT doc FROM global_events WHERE seq > ? ORDER BY seq")
           .all(seq)
           .map((row) => JSON.parse(row.doc as string) as GlobalEvent),
       append: (event) => {
         writable("global_events.append");
-        db.prepare(
+        prepare(
+          db,
           "INSERT INTO global_events (id, seq, type, doc) VALUES (?, ?, ?, ?)",
         ).run(event.id, event.seq, event.type, JSON.stringify(event));
       },
@@ -105,11 +129,10 @@ export function createGlobalRepositories(
 /** Allocations share the employee/event write transaction; no project argument exists. */
 export function createGlobalIdAllocator(db: DatabaseSync): GlobalIdAllocator {
   function next(kind: string): number {
-    const row = db
-      .prepare(
-        "INSERT INTO global_counters (kind, value) VALUES (?, 1) ON CONFLICT(kind) DO UPDATE SET value = value + 1 RETURNING value",
-      )
-      .get(kind);
+    const row = prepare(
+      db,
+      "INSERT INTO global_counters (kind, value) VALUES (?, 1) ON CONFLICT(kind) DO UPDATE SET value = value + 1 RETURNING value",
+    ).get(kind);
     return Number(row?.value);
   }
   return {

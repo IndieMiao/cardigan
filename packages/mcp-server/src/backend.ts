@@ -6,6 +6,7 @@ import type {
   Card,
   CardId,
   CardTemplate,
+  CommandState,
   Cursor,
   Decision,
   DecisionId,
@@ -71,6 +72,10 @@ export type McpReadRepository<Entity, Key> = Pick<
 
 /** What a read transaction hands to its callback. */
 export interface McpReadContext {
+  readonly cachedCommandState?: (
+    project: ProjectId,
+    build: () => CommandState,
+  ) => CommandState;
   readonly members?: Pick<MemberRepository, "get" | "list">;
   readonly project_preferences?: McpReadRepository<
     ProjectPreferences,

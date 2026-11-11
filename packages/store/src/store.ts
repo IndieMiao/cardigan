@@ -22,6 +22,10 @@ import type {
 } from "@cardigan/domain";
 import { CommandEvents } from "./command-events.js";
 import {
+  CommandSnapshots,
+  type SnapshotTransaction,
+} from "./command-snapshots.js";
+import {
   createGlobalIdAllocator,
   createGlobalRepositories,
 } from "./employees.js";
@@ -45,6 +49,7 @@ import {
   recordFindings,
 } from "./reconcile.js";
 import {
+  clearRepositoryCache,
   createReadRepositories,
   createRepositories,
   type ReadEventRepository,
@@ -83,6 +88,7 @@ export interface StoreTransactionContext
   readonly events: TransactionContext["events"] & ReadEventRepository;
   readonly employees: GlobalRepositories["employees"];
   readonly members: GlobalRepositories["members"];
+  readonly cachedCommandState?: SnapshotTransaction["state"];
   readonly global_ids: GlobalIdAllocator;
   /** Issue a token inside this transaction (assignment and token commit together). */
   issueToken(input: IssueTokenInput): IssuedToken;
@@ -204,16 +210,13 @@ export class Store {
   readonly #migrationsDir: string | undefined;
   #inTransaction = false;
   #rollbacks = 0;
+  #snapshots: CommandSnapshots | undefined;
   readonly #commandEvents = new CommandEvents();
 
   /** Call inside the consuming transaction: covers local writes and other connections. */
-  snapshotVersion(): string {
-    const row = this.#db
-      .prepare(
-        "SELECT total_changes() AS writes, data_version FROM pragma_data_version",
-      )
-      .get() as { writes: number; data_version: number };
-    return `${row.data_version}:${row.writes}:${this.#rollbacks}`;
+  snapshotVersion(project: ProjectId): string | undefined {
+    if (!this.#snapshots) return undefined;
+    return `${this.#snapshots.version(project)}:${this.#rollbacks}`;
   }
 
   private constructor(db: DatabaseSync, clock: Clock, migrationsDir?: string) {
@@ -255,7 +258,16 @@ export class Store {
   }
 
   migrate(): AppliedMigration[] {
-    return migrate(this.#db, this.#migrationsDir, () => this.#clock.now());
+    const applied = migrate(this.#db, this.#migrationsDir, () =>
+      this.#clock.now(),
+    );
+    clearRepositoryCache(this.#db);
+    this.#snapshots = this.#db
+      .prepare("SELECT 1 FROM sqlite_master WHERE name = 'command_versions'")
+      .get()
+      ? new CommandSnapshots(this.#db)
+      : undefined;
+    return applied;
   }
 
   /** Latest applied migration version, `0` for an empty database. */
@@ -289,12 +301,14 @@ export class Store {
     this.#inTransaction = true;
     let active = true;
     const events = this.#commandEvents.transaction(this.#db);
+    const snapshots = this.#snapshots?.transaction();
     try {
-      const repositories = createRepositories(this.#db);
+      const repositories = createRepositories(this.#db, snapshots);
       const result = operation({
         ...repositories,
+        ...(snapshots ? { cachedCommandState: snapshots.state } : {}),
         events: { ...repositories.events, listStreams: events.listStreams },
-        ...createGlobalRepositories(this.#db, "write"),
+        ...createGlobalRepositories(this.#db, "write", snapshots),
         global_ids: createGlobalIdAllocator(this.#db),
         ids: createIdAllocator(this.#db),
         issueToken: (input) => {
@@ -312,6 +326,7 @@ export class Store {
       });
       this.#db.exec("COMMIT");
       events.commit();
+      snapshots?.commit();
       return result;
     } catch (error) {
       this.#db.exec("ROLLBACK");
@@ -335,14 +350,17 @@ export class Store {
     this.#db.exec("BEGIN DEFERRED");
     this.#inTransaction = true;
     const events = this.#commandEvents.transaction(this.#db);
+    const snapshots = this.#snapshots?.transaction();
     try {
-      const repositories = createReadRepositories(this.#db);
+      const repositories = createReadRepositories(this.#db, snapshots);
       const result = operation({
         ...repositories,
+        ...(snapshots ? { cachedCommandState: snapshots.state } : {}),
         events: { ...repositories.events, listStreams: events.listStreams },
       });
       this.#db.exec("COMMIT");
       events.commit();
+      snapshots?.commit();
       return result;
     } catch (error) {
       this.#db.exec("ROLLBACK");

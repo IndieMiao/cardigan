@@ -236,6 +236,7 @@ export function startReconcileLoop(options: {
     ...(options.report === undefined ? {} : { report: options.report }),
   });
   const loop = startTimerLoop({
+    name: "reconcile",
     tick: () => executor.tick(),
     intervalMs: options.intervalMs ?? DEFAULT_RECONCILE_INTERVAL_MS,
     onError: options.onError ?? (() => undefined),
@@ -261,6 +262,7 @@ export function startBackupLoop(options: {
     ...(options.report === undefined ? {} : { report: options.report }),
   });
   const loop = startTimerLoop({
+    name: "backup",
     tick: () => executor.tick(),
     intervalMs: options.intervalMs ?? DEFAULT_BACKUP_INTERVAL_MS,
     onError: options.onError ?? (() => undefined),

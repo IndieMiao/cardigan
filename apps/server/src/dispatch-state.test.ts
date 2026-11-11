@@ -3,10 +3,134 @@ import * as mcp from "@cardigan/mcp-server";
 import { Store } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
 import { dispatchFixture } from "../test-support/dispatch.js";
+import { CleanupExecutor } from "./cleanup-loop.js";
 import { Dispatcher } from "./dispatch.js";
+import { RuntimeMonitor } from "./dispatch-monitor.js";
 import { dispatchStateLoader } from "./dispatch-state.js";
+import { MergeExecutor } from "./merge-loop.js";
+import { MergePushExecutor } from "./merge-push-loop.js";
 
 afterEach(() => vi.restoreAllMocks());
+
+test("project cache ignores local and external unrelated writes and refreshes only changed tables", () => {
+  const f = dispatchFixture();
+  const other = Store.open({ dataDir: f.dataDir });
+  try {
+    const target = f.create();
+    const initial = f.state();
+    const read = dispatchStateLoader(f.store);
+    const load = vi.spyOn(mcp, "loadCommandState");
+    f.store.uow.read((tx) => expect(read(tx, f.project)).toBe(initial));
+    for (const writer of [f.store, other]) {
+      writer.uow.run((tx) =>
+        tx.cards.put("other" as never, {
+          ...target.card,
+          project_id: "other" as never,
+        }),
+      );
+      writer.advanceRouterCursor(f.project, target.card.id, 1);
+      f.store.uow.read((tx) => expect(read(tx, f.project)).toBe(initial));
+    }
+    expect(load).toHaveBeenCalledOnce();
+    other.uow.run((tx) =>
+      tx.cards.put(f.project, { ...target.card, title: "committed" }),
+    );
+    f.store.uow.read((tx) => {
+      const cards = vi.spyOn(tx.cards, "list");
+      const fresh = read(tx, f.project);
+      expect(cards).toHaveBeenCalledOnce();
+      expect(fresh.cards[0]?.title).toBe("committed");
+      expect(fresh.assignments).toBe(initial.assignments);
+      expect(fresh.timeline).toBe(initial.timeline);
+      expect(mcp.loadCommandState(tx, f.project)).toBe(fresh);
+      expect(cards).toHaveBeenCalledOnce();
+    });
+  } finally {
+    other.close();
+    f.close();
+  }
+});
+
+test("monitor, dispatch, merge, merge-push and cleanup reuse Store snapshots across rounds", async () => {
+  const f = dispatchFixture();
+  const monitor = new RuntimeMonitor({
+    store: f.store,
+    clock: f.clock,
+    runtime: {} as never,
+  });
+  try {
+    f.create();
+    const git = {
+      projectOf: () => ({ project_id: f.project, base_branch: "main" }),
+    } as never;
+    const dispatcher = new Dispatcher({
+      store: f.store,
+      clock: f.clock,
+      runtime: {} as never,
+      snapshot: async () => {
+        throw new Error("idle");
+      },
+      startRun: async () => {
+        throw new Error("idle");
+      },
+    });
+    const merge = new MergeExecutor({ store: f.store, clock: f.clock, git });
+    const cleanup = new CleanupExecutor({
+      store: f.store,
+      clock: f.clock,
+      git,
+      runtime: {} as never,
+    });
+    const onError = vi.fn();
+    const push = new MergePushExecutor({
+      store: f.store,
+      clock: f.clock,
+      git,
+      onError,
+      configuration: {
+        errors: [],
+        forProject: () => ({
+          status: "enabled",
+          checks: [],
+          env: {},
+          totalTimeoutMs: 1000,
+          push: { target: "a".repeat(64), branch: "main" } as never,
+        }),
+      },
+    });
+    await dispatcher.tick();
+    const initial = f.state();
+    const load = vi.spyOn(mcp, "loadCommandState");
+    for (let i = 0; i < 2; i++) {
+      monitor.reconcile();
+      await dispatcher.tick();
+      monitor.reconcile();
+      await merge.tick();
+      await push.tick();
+      await cleanup.tick();
+    }
+    expect(onError).not.toHaveBeenCalled();
+    expect(load.mock.results.length).toBeGreaterThan(10);
+    for (const result of load.mock.results) {
+      expect(result.value.cards).toBe(initial.cards);
+      expect(result.value.runs).toBe(initial.runs);
+      expect(result.value.timeline).toBe(initial.timeline);
+      expect(result.value.employee_activity).toBe(initial.employee_activity);
+    }
+    f.store.uow.read((tx) => {
+      const configured = mcp.loadCommandState(tx, f.project, {
+        merge_gate_enabled: true,
+      });
+      expect(configured.project_settings?.merge_gate_enabled).toBe(true);
+      expect(
+        mcp.loadCommandState(tx, f.project).project_settings,
+      ).toBeUndefined();
+    });
+  } finally {
+    await monitor.stop();
+    f.close();
+  }
+});
 
 test("an idle tick loads each project's command state once across all phases", async () => {
   const f = dispatchFixture();
