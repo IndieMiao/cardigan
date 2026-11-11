@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import type { Actor, Assignment } from "../entities.js";
+import type { Actor, Assignment, Delivery } from "../entities.js";
 import {
   HOST_OPS_ROLE_TOOLS,
   type HostOpsExecutionTool,
@@ -25,6 +25,7 @@ import {
   now,
   ports,
   role,
+  subject,
   value,
 } from "./test-fixtures.js";
 
@@ -463,3 +464,84 @@ test("host restarts validate launch settings before intent and retain the host s
     effort: "high",
   });
 });
+
+test.each([2, 3])(
+  "invariants 11, 14: verifier A-%i needs a current target before restart and cannot requeue after withdrawal",
+  (n) => {
+    const s = base(),
+      io = ports(),
+      owner = id("assignment", n),
+      system = { kind: "system" as const, project_id: s.project_id };
+    const p = { ...params("host_ops_restart_assignment"), target_id: owner };
+    const before = JSON.stringify(s);
+    expect(prepareHostOpsAction(s, caller, p)).toMatchObject({
+      ok: false,
+      error: { code: "illegal_transition" },
+    });
+    expect(beginHostOpsAction(s, caller, p, io)).toMatchObject({
+      ok: false,
+      error: { code: "illegal_transition" },
+    });
+    expect(JSON.stringify(s)).toBe(before);
+    // A missing review target must not prevent an explicit cancellation.
+    expect(
+      beginHostOpsAction(
+        s,
+        caller,
+        { ...params("host_ops_cancel_run"), target_id: id("run", n) },
+        io,
+      ).ok,
+    ).toBe(true);
+    const delivery: Delivery = {
+      id: id("delivery", 1),
+      work_item_id: id("work_item", 1),
+      run_id: id("run", 1),
+      kind: n === 2 ? "code" : "card_completion",
+      summary: "Review target",
+      subject,
+      status: "accepted",
+      requested_verifiers: [id("work_item", n)],
+      attachments: [],
+      known_gaps: [],
+      evidence: [],
+    };
+    const ready = { ...s, deliveries: [delivery] };
+    const intent = value(beginHostOpsAction(ready, caller, p, io));
+    const pending = apply(ready, intent);
+    expect(
+      value(finishHostOpsAction(pending, system, intent.data.action_id, io))
+        .data.run?.status,
+    ).toBe("queued");
+    const withdrawn: CommandState = {
+      ...pending,
+      deliveries: [{ ...delivery, status: "superseded" }],
+    };
+    const finished = value(
+      finishHostOpsAction(withdrawn, system, intent.data.action_id, io),
+    );
+    expect(finished.data.run).toBeUndefined();
+    const settled = apply(withdrawn, finished);
+    expect(hostOpsPending(settled.events, owner)).toBe(false);
+    expect(settled.runs.find((r) => r.id === id("run", n))?.status).toBe(
+      "cancelled",
+    );
+    expect(settled.runs.filter((r) => r.assignment_id === owner)).toHaveLength(
+      1,
+    );
+    expect(
+      queueRun(settled, human, { ...snapshot, assignment_id: owner }, io).ok,
+    ).toBe(false);
+    const restored = {
+      ...settled,
+      deliveries: [
+        ...settled.deliveries,
+        { ...delivery, id: id("delivery", 2) },
+      ],
+    };
+    expect(
+      value(
+        queueRun(restored, human, { ...snapshot, assignment_id: owner }, io),
+      ).data.status,
+    ).toBe("queued");
+  },
+);

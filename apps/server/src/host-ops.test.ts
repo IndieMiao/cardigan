@@ -3,6 +3,7 @@ import { join } from "node:path";
 import {
   type Assignment,
   acknowledgeRun,
+  assign,
   createHostOpsAssignment,
   dispatchRun,
   HOST_OPS_ROLE_TOOLS,
@@ -244,6 +245,73 @@ test("cancel waits for proven exit; restart of the service resumes the durable a
   } finally {
     reopened.close();
   }
+});
+
+test("target withdrawal while stopping a reviewer settles credentials without queuing a replacement", async () => {
+  const source = f.create();
+  const sourceRun = f.session(source.assignment);
+  const item = f
+    .state()
+    .work_items.find(
+      (w) => w.kind === "verify" && w.target_work_item_id === source.item.id,
+    );
+  if (!item) throw new Error("Missing reviewer work item");
+  const reviewer = f.apply((s, a, p) =>
+    assign(s, a, { work_item_id: item.id, role_id: item.role_id }, p),
+  );
+  const delivery = f.store.uow.run((tx) => {
+    const delivery = {
+      id: tx.ids.next(f.project, "delivery"),
+      work_item_id: source.item.id,
+      run_id: sourceRun.id,
+      kind: "code" as const,
+      summary: "Review target",
+      subject: { kind: "git_head" as const, value: "a".repeat(40) },
+      status: "accepted" as const,
+      requested_verifiers: [item.id],
+      evidence: [],
+      attachments: [],
+      known_gaps: [],
+    };
+    tx.deliveries.put(f.project, delivery);
+    return delivery;
+  });
+  const oldRun = f.session(reviewer, false);
+  const oldToken = connect(reviewer, ["finish_run"]);
+  await call("host_ops_restart_assignment", {
+    assignment_id: reviewer.id,
+    reason: "Refresh review session",
+    idempotency_key: "restart-reviewer",
+  });
+  vi.mocked(runtime.release).mockImplementationOnce(async () => {
+    f.store.uow.run((tx) =>
+      tx.deliveries.put(f.project, { ...delivery, status: "superseded" }),
+    );
+    alive = false;
+    return { ok: true, value: undefined };
+  });
+  const scrubCredentials = vi.fn(async () => {});
+  service = new HostOpsService({
+    store: f.store,
+    runtime,
+    snapshot,
+    clock: f.clock,
+    scrubCredentials,
+  });
+  await service.tick();
+  const state = f.state();
+  expect(scrubCredentials).toHaveBeenCalledExactlyOnceWith(
+    f.project,
+    reviewer.id,
+  );
+  expect(state.runs.filter((r) => r.assignment_id === reviewer.id)).toEqual([
+    expect.objectContaining({ id: oldRun.id, status: "cancelled" }),
+  ]);
+  expect(hostOpsPending(state.events, reviewer.id)).toBe(false);
+  expect(() => oldToken.revalidateToken?.()).toThrow();
+  expect(() => context.revalidateToken?.()).not.toThrow();
+  await service.tick();
+  expect(runtime.release).toHaveBeenCalledOnce();
 });
 
 test("failed preflight and authorization have no events, cancellation, revocation or runtime effects", async () => {

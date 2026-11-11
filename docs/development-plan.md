@@ -647,7 +647,7 @@ abortDispatch 允许同项目 human/system，或持有 `host_ops_cancel_run` 许
 
 P2a-10 B2（C-85）：运维重启／取消先在同一事务按 Assignment／Run 编号核对目标、项目、状态、角色版本和执行快照，拒绝外接身份、其他自动停止意图、在途投递及工作目录冲突。成功受理写 `host_ops_action_taken`（tool、target_id、reason、actor），保存所要停止的准确 RuntimeRef 和必要的启动快照（包含 C-106 的 harness／effort，未知时保持缺省，写意图前校验，重排时完整保留）；MCP 返回 pending。Dispatcher 在既有循环消费这些持久意图，以 60 秒租约安排失败重试，服务重启可接续。主机在领取租约前另取得按数据库、项目及 Assignment 定位的执行互斥（进程内共享，Linux 追加主机 locks 目录的 flock），一直持有到终端停止、凭据清理和事务收尾全部结束；租约过期不能抢走仍在执行外部清理的互斥，竞争者跳过本轮，避免迟到清理删除替代 Run 的文件。意图期间禁止该目标启动、ACK／结束 Run、另行停止／释放，也阻止同目录启动；原 Run 因其他业务动作结束时仍保留实际终端的容量占用。
 
-主机只关闭记录的终端，并独立查询确认 exited／runtime_not_found；无法证明退出时保留意图、原 Run 与凭据，租约到期后重试。确认退出后清理该 Assignment 运行目录中的凭据，再同事务撤销目标 Token、复用取消及排队迁移并写 `host_ops_action_finished`；重启产生 queued Run 和定向通知，继续经过普通 Dispatcher 的容量限制和启动流程。普通 Assignment 保留原 worktree、分支及会话恢复信息；常驻 PM 重启只接受 `role_id=pm` 的 standing 目标，复用暂停／恢复迁移并清掉旧 Session 引用，以加载最新工具。已关闭卡片或已释放目标不重新启动。合并重查只重排当前失败／超时检查，并记录同一审计事件，不改变合并授权。重启产生的新 Run 绑定 `host_ops_action_finished`，该系统事件记录原 Run 及原触发事件；审核逻辑验证每一段 Run／Assignment 绑定并追溯混合的运维重启与自动恢复链，保留 C-36 的冲突修复免费复核。同一冲突仍只豁免一次，不因反复重启而重置审核额度。
+主机只关闭记录的终端，并独立查询确认 exited／runtime_not_found；无法证明退出时保留意图、原 Run 与凭据，租约到期后重试。确认退出后清理该 Assignment 运行目录中的凭据，再同事务撤销目标 Token、复用取消及排队迁移并写 `host_ops_action_finished`；重启产生 queued Run 和定向通知，继续经过普通 Dispatcher 的容量限制和启动流程。普通 Assignment 保留原 worktree、分支及会话恢复信息；常驻 PM 重启只接受 `role_id=pm` 的 standing 目标，复用暂停／恢复迁移并清掉旧 Session 引用，以加载最新工具。已关闭卡片或已释放目标不重新启动。C-88 的当前审核目标检查同样用于运维重启：验证工作项无当前目标时，在写意图前拒绝重启，显式取消仍允许；意图受理后若目标被撤回，确认退出、凭据清理、旧 Run 取消及审计照常收尾，不创建替代 Run，待新交付到来后由普通派发恢复。合并重查只重排当前失败／超时检查，并记录同一审计事件，不改变合并授权。重启产生的新 Run 绑定 `host_ops_action_finished`，该系统事件记录原 Run 及原触发事件；审核逻辑验证每一段 Run／Assignment 绑定并追溯混合的运维重启与自动恢复链，保留 C-36 的冲突修复免费复核。同一冲突仍只豁免一次，不因反复重启而重置审核额度。
 
 **Delivery**：`submitted → accepted | rejected | superseded`。
 
@@ -846,6 +846,10 @@ HumanAction 完成的 CLI 与 Workbench 入口共用 `completeHumanAction`，先
 其他等待方只选同卡当前工作项的 active Assignment：`blocked`、`waiting_decision`、等待审核的 `delivered`，以及尚未提交结论的验证项 `todo`／`ready`／`in_progress`。其他卡片、暂停或释放的 Assignment、已有结论的 `failed`／`passed`、已接受或取消的工作项不广播。通知本身不解除其他 Decision、HumanAction 或 reported_blocker；`resume_work_items` 仍只列真正恢复的项。发起方通知接收者解析集中在 domain 的 `requesterNotificationRecipient`，供后续 Decision 完成通知复用。
 
 C-77：上述接收者若为验证工作项，须有同卡未被 supersede 的目标交付：普通审核按 `target_work_item_id` 匹配产出交付，完成验收只匹配 `requested_verifiers` 包含自身的完成申请。有目标时沿用原通知、恢复和派发路径；没有目标时只保留完成事件及时间线供 `get_updates` 读取，不创建该验证方的通知、Run 或门铃，等目标交付到来再唤醒。不能用其他工作项的交付、普通代码交付代替完成申请或已作废交付触发审核。此筛选在路由阶段完成，不改 §6.1 的 C-56／C-68 重试、恢复和失败归类。
+
+C-88：所有验证型工作项的 Run 排队与派发都必须满足上述当前目标匹配条件，不以角色名或工作项的 ready 状态替代交付检查。PM 指派、工作项评论、@提及、指令、拍板解决等通知在无目标时留在持久收件箱，不分配 Run、不创建投递尝试；交付到来后合并待投递通知，沿用事件去重与 ACK 规则派发一次。领域层的显式启动及阻塞解除后的恢复排队使用同一检查，Dispatcher 在领取投递事务内再次检查，防止异步准备期间目标被取代。已有 queued Run 在目标撤回后保留等待，不因准备只读目录失败而取消，也不阻挡其他有目标的任务；新目标到来后复用该 Run。C-77 人工操作完成时不创建无目标验证方通知的规则、产出项派发与审核轮次规则保持原状。
+
+C-88 异步准备与重试：领取投递意图后，在 `beforeWake` 返回、主机准备目录／编译完成及 provision 返回时重新检查目标；复用会话的验证 Run 在准备结束后、调用 wake 前才进入 dispatched，产出项及常驻任务保持原派发时序。确认尚未调用 wake、也未放行新终端 start 哨兵时，目标撤回按等待处理：同一事务撤回未结束的 BellAttempt 预留并写 `run_dispatch_deferred` 审计，保留 Run 和通知状态／次数，不记成功、失败或升级告警。新终端若已 provision，先确认包装进程退出、清理凭据并撤销本次 Token，再释放预留；真实清理失败仍沿用启动失败补偿。已经调用 wake 或放行哨兵的结果仍按原有不确定投递规则处理，不因目标后来撤回而抹掉尝试。失败重试在候选检查、领取事务和准备后都检查当前目标；无目标期间不重试、不因派发超时取消重排，Run JSON 保存等待起点和累计等待毫秒，并以 `run_target_wait_started/finished` 记录，恢复后只扣除实际等待时间，不重置真实失败次数或审核轮数。首次真正派发时清除排队阶段的等待计时。新交付到来后沿用原 Run；已 ACK 的通知仍以游标为准。
 
 M3.4 按每条流自身的 seq 分页；每条流分别在事务内读取当前项目快照、路由、写通知并推进 `(project_id, stream)` 游标。该流的一页中任一写入失败时，通知与该流游标一起回滚；其他流已提交的进度不受影响，重放由通知唯一约束去重。无法解析的路由保留为 PM Ops 升级。完成申请按交付自身的 requested_verifiers 投递；成功工作项使用领域状态 accepted / passed，提醒主产出申请完成时排除本次 PM 完成审核项，已关闭的卡片不再提醒。卡片 ACK 可确认 pending / belled / delivery_failed，已升级的终态不回退。ACK 游标按流分开：`ack_events` 不带 `card_id` 时推进项目级流（流键为 `""`），项目级通知同样按该游标确认。
 

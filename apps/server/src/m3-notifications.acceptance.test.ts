@@ -121,7 +121,7 @@ test.each(kinds.map((kind, i) => ({ id: `N${31 + i}`, kind })))(
     });
   },
 );
-test("[N36] M3.2 repeated bells cannot create a duplicate Run even after the first Run completes", () => {
+test("[N36] M3.2 repeated bells cannot create a duplicate Run even after the first Run completes", async () => {
   const trigger = f.comment(),
     params = {
       assignment_id: f.coder.id,
@@ -132,6 +132,7 @@ test("[N36] M3.2 repeated bells cannot create a duplicate Run even after the fir
     };
   f.apply((s, a, p) => queueRun(s, a, params, p));
   f.start(f.coder);
+  await f.delivery();
   f.finish(f.coder);
   const result = f.store.uow.run((tx) =>
     queueRun(loadCommandState(tx, f.id), f.human, params, {

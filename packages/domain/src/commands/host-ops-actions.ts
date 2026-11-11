@@ -7,6 +7,7 @@ import {
   pendingHostOpsActions,
 } from "../host-ops.js";
 import type { AssignmentId, RunId } from "../ids.js";
+import { hasRunTarget } from "../run-target.js";
 import { transition } from "../transitions.js";
 import {
   type CommandDraft,
@@ -77,6 +78,11 @@ function target(d: CommandDraft, p: HostOpsActionParams) {
     ),
     "not_found",
     "Target role version is missing",
+  );
+  ensure(
+    p.tool === "host_ops_cancel_run" || hasRunTarget(a, d.state),
+    "illegal_transition",
+    "验证工作项尚无当前可审交付，请等待交付后再启动",
   );
   ensure(
     !hostOpsPending(d.state.events, a.id),
@@ -209,11 +215,12 @@ export function finishHostOpsAction(
       a.scope === "work_item"
         ? d.get("cards", d.get("work_items", a.work_item_id).card_id)
         : undefined;
-    // A concurrent human release/closure wins. Never resurrect abandoned work.
+    // A concurrent release, closure or target withdrawal wins over restarting.
     let run: Run | undefined;
     if (
       action.tool !== "host_ops_cancel_run" &&
       a.status !== "released" &&
+      hasRunTarget(a, d.state) &&
       (!card || !["done", "cancelled"].includes(card.status)) &&
       (a.status === "active" || action.tool === "host_ops_restart_standing_pm")
     ) {

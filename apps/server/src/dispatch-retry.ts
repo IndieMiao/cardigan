@@ -7,15 +7,19 @@ import {
   dispatchedAt,
   dispatchRecoveryFailed,
   dispatchRecoveryQueuedAt,
+  dispatchTargetWaitMs,
+  hasRunTarget,
   hostOpsPending,
   type ProjectId,
   type RunId,
   type Runtime,
   recoverDispatch,
+  refreshRunTargetWait,
   retireUnreadableQueuedRun,
   startDispatchStop,
   unreadableCommentTrigger,
 } from "@cardigan/domain";
+import { deferTargetAttempt, refreshTargetWait } from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import {
   type BellAttempt,
@@ -176,12 +180,11 @@ export async function retryDispatchedRuns(
   const candidates = read();
   for (const candidate of candidates.runs) {
     if (hostOpsPending(read().events, candidate.assignment_id)) continue;
+    const owner = candidates.assignments.find(
+      (a) => a.id === candidate.assignment_id,
+    );
     // External identities have no managed terminal, including stale recovery records.
-    if (
-      candidates.assignments.find((a) => a.id === candidate.assignment_id)
-        ?.external
-    )
-      continue;
+    if (owner?.external) continue;
     if (candidate.dispatch_stop) {
       // Resume the original target even after monitor changed status or a host cancelled it.
       await stopRun(candidate.id, candidate.dispatch_stop.reason);
@@ -218,9 +221,34 @@ export async function retryDispatchedRuns(
       continue;
     }
     if (!["dispatched", "queued"].includes(candidate.status)) continue;
-    const inspect = (state = read()) => {
+    if (
+      (candidate.dispatch_target_wait ||
+        (owner && !hasRunTarget(owner, candidates))) &&
+      refreshTargetWait(store, project, candidate.id, clock)
+    )
+      continue;
+    const inspect = (state = read(), tx?: StoreTransactionContext) => {
       const run = state.runs.find((r) => r.id === candidate.id);
       const a = state.assignments.find((a) => a.id === run?.assignment_id);
+      if (run && a && !hasRunTarget(a, state)) {
+        // Persist the pause at the observation, including after awaited status.
+        // A restart must not count the intervening target wait as a timeout.
+        if (tx)
+          persistEffect(
+            tx,
+            project,
+            unwrap(
+              refreshRunTargetWait(
+                state,
+                actor,
+                { run_id: run.id },
+                { clock, ids: tx.ids },
+              ),
+            ),
+          );
+        else refreshTargetWait(store, project, run.id, clock);
+        return;
+      }
       const attempts = listBellAttempts(store.database, project);
       if (
         !run ||
@@ -232,6 +260,7 @@ export async function retryDispatchedRuns(
         // C-54 owns capacity waits; a healthy queued recovery must wait its turn.
         ("queue_reason" in run && run.queue_reason === "concurrency_limit") ||
         a?.status !== "active" ||
+        !hasRunTarget(a, state) ||
         attempts.some(
           (t) => t.assignment_id === a.id && t.finished_at === null,
         ) ||
@@ -257,7 +286,11 @@ export async function retryDispatchedRuns(
         started =
           dispatchedAt(state, run) ?? dispatchRecoveryQueuedAt(state, run);
       const recover =
-        (started && Date.parse(at) - Date.parse(started) >= policy.timeoutMs) ||
+        (started &&
+          Date.parse(at) -
+            Date.parse(started) -
+            dispatchTargetWaitMs(run, at) >=
+            policy.timeoutMs) ||
         failures >= policy.maxRetries + 1;
       const retry =
         run.status === "dispatched" &&
@@ -293,7 +326,7 @@ export async function retryDispatchedRuns(
       );
       if (used && !unreadableCommentTrigger(observed.state, observed.run))
         store.uow.run((tx) => {
-          const current = inspect(loadState(tx, project));
+          const current = inspect(loadState(tx, project), tx);
           if (current?.recover)
             finishRecovery(tx, current.run.id, current.failures);
         });
@@ -310,7 +343,7 @@ export async function retryDispatchedRuns(
     const status = await runtime.status(observed.a.runtime_ref);
     if (!status.ok || status.value.process !== "alive") continue;
     const job = store.uow.run((tx) => {
-      const current = inspect(loadState(tx, project));
+      const current = inspect(loadState(tx, project), tx);
       if (
         !current?.retry ||
         current.recover ||
@@ -363,6 +396,10 @@ export async function retryDispatchedRuns(
         project,
         assignment: job.a,
       });
+      if (refreshTargetWait(store, project, job.run.id, clock)) {
+        deferTargetAttempt(store, job.attempt, clock);
+        continue;
+      }
       stage = "wake";
       // MCP can start the Run while status/Git preparation is awaited; do not ring it again.
       if (read().runs.find((r) => r.id === job.run.id)?.status !== "dispatched")
@@ -377,6 +414,13 @@ export async function retryDispatchedRuns(
         else ({ reason, failure } = wakeFailure(result.error));
       }
     } catch (error) {
+      if (
+        stage === "before_wake" &&
+        refreshTargetWait(store, project, job.run.id, clock)
+      ) {
+        deferTargetAttempt(store, job.attempt, clock);
+        continue;
+      }
       // The reason stays a stable code; the cause is sanitized (C-68).
       ({ reason, failure } = deliveryFailure(stage, error));
     }

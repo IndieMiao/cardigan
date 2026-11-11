@@ -20,12 +20,30 @@ test("M5.2: only standing Ops sees and calls issue_instruction; replay routes on
     .assignments.find((a) => a.standing_mode === "office");
   if (!ops || !office) throw new Error("Missing standing PM");
   for (const a of [office, s.primary.owner, s.pm, ops]) {
-    await s.start(a);
+    // Tool visibility can be checked before an acceptance target exists.
+    // Issuing a credential does not need to start a verification Run.
+    let token: string | undefined;
+    if (a.id === s.pm.id) {
+      const role = s
+        .state()
+        .roles.find(
+          (r) => r.role_id === a.role_id && r.role_version === a.role_version,
+        );
+      if (!role) throw new Error("Missing acceptance role");
+      token = s.store().issueToken({
+        project_id: s.card.project_id,
+        assignment_id: a.id,
+        role,
+      }).token;
+    } else {
+      await s.start(a);
+      token = s.token(a);
+    }
     const client = new Client({ name: "instruction", version: "1" });
     try {
       await client.connect(
         new StreamableHTTPClientTransport(new URL(s.url()), {
-          requestInit: { headers: { Authorization: `Bearer ${s.token(a)}` } },
+          requestInit: { headers: { Authorization: `Bearer ${token}` } },
         }),
       );
       const listed = (await client.listTools()).tools.map((t) => t.name);

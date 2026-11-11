@@ -1,6 +1,7 @@
 import type { Actor, Run } from "../entities.js";
 import { hostOpsPending } from "../host-ops.js";
 import type { RunId } from "../ids.js";
+import { hasRunTarget } from "../run-target.js";
 import {
   type CommandDraft,
   type CommandPorts,
@@ -49,6 +50,10 @@ export function claimDispatchStop(
     const card = cardOf(d, run);
     const closed =
       card && ["done", "cancelled"].includes(d.get("cards", card).status);
+    if (!old?.stopping && !hasRunTarget(a, state)) {
+      if (old) clear(d, run, "review_target_unavailable");
+      return;
+    }
     if (old && old.lease_until > d.now) return;
     if (
       old &&
@@ -103,6 +108,10 @@ export function startDispatchStop(
       stop = run.dispatch_stop;
     if (!stop || stop.attempt_id !== p.attempt_id || stop.lease_until <= d.now)
       return false;
+    if (!stop.stopping && !hasRunTarget(a, state)) {
+      clear(d, run, "review_target_unavailable");
+      return false;
+    }
     if (JSON.stringify(a.runtime_ref) !== JSON.stringify(stop.runtime_ref)) {
       clear(d, run, "runtime_changed");
       return false;
