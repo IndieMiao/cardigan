@@ -9,6 +9,7 @@ import {
   createGlobalRepositories,
 } from "./employees.js";
 import { persistMemberEffect } from "./members.js";
+import { installSnapshotTriggers } from "./snapshot-migration.js";
 import { seedCardTemplates } from "./templates.js";
 
 /** Directory shipped next to the compiled package: `packages/store/migrations`. */
@@ -90,6 +91,8 @@ export function migrate(
           })),
         });
       }
+      if (migration.version === 17 && migration.name === "command_snapshots")
+        installSnapshotTriggers(db);
       db.prepare(
         "INSERT INTO schema_version (version, name, applied_at) VALUES (?, ?, ?)",
       ).run(migration.version, migration.name, now());

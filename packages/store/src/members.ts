@@ -6,6 +6,7 @@ import type {
   MemberRepository,
 } from "@cardigan/domain";
 import { ReadOnlyTransactionError } from "./read-only.js";
+import { prepare } from "./statements.js";
 
 export function createMemberRepository(
   db: DatabaseSync,
@@ -13,19 +14,20 @@ export function createMemberRepository(
 ): MemberRepository {
   return {
     get: (id) => {
-      const row = db.prepare("SELECT doc FROM members WHERE id = ?").get(id);
+      const row = prepare(db, "SELECT doc FROM members WHERE id = ?").get(id);
       return row ? (JSON.parse(row.doc as string) as Member) : undefined;
     },
     list: () =>
-      db
-        .prepare(
-          "SELECT doc FROM members ORDER BY CAST(substr(id, 3) AS INTEGER)",
-        )
+      prepare(
+        db,
+        "SELECT doc FROM members ORDER BY CAST(substr(id, 3) AS INTEGER)",
+      )
         .all()
         .map((row) => JSON.parse(row.doc as string) as Member),
     put: (member) => {
       if (mode === "read") throw new ReadOnlyTransactionError("members.put");
-      db.prepare(
+      prepare(
+        db,
         "INSERT INTO members (id, role, status, doc) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET role = excluded.role, status = excluded.status, doc = excluded.doc",
       ).run(member.id, member.role, member.status, JSON.stringify(member));
     },
