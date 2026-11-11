@@ -21,7 +21,7 @@ import {
   mergeConfirmation,
 } from "./m4-fixtures.js";
 import { MergeChecks } from "./merge-checks.js";
-import { MergeExecutor } from "./merge-loop.js";
+import { MergeExecutor, startMergeLoop } from "./merge-loop.js";
 
 const required = <T>(value: T | undefined): T => {
   if (value === undefined) throw new Error("Missing fixture value");
@@ -467,4 +467,50 @@ test("a background round that throws is reported, frees the slot and never rejec
   await c.gate.tick([f.project_id]);
   expect(check()?.status).toBe("passed");
   expect(f.card().status).toBe("done");
+});
+
+test("a background round whose error reporter also throws never rejects unhandled", async () => {
+  const { f } = await fixture("auto");
+  const c = controller(f);
+  const unhandled: unknown[] = [];
+  const record = (reason: unknown) => unhandled.push(reason);
+  process.on("unhandledRejection", record);
+  const reported = Promise.withResolvers<void>();
+  let calls = 0;
+  const git = {
+    ...c.git,
+    // confirmDue skips the project; the background round then throws.
+    projectOf: (id: string) => {
+      calls += 1;
+      if (calls === 1) return undefined;
+      throw new Error(`background-round-error ${id}`);
+    },
+  };
+  const loop = startMergeLoop({
+    store: f.store,
+    git,
+    clock: f.clock,
+    intervalMs: 60_000,
+    onError: () => {
+      reported.resolve();
+      throw new Error("error-reporter-threw");
+    },
+    gate: {
+      configuration: c.options.configuration,
+      execution: c.options.execution,
+      run: c.run,
+    },
+  });
+  try {
+    await reported.promise;
+    await new Promise((resolve) => setImmediate(resolve));
+    await loop.executor.idle();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(unhandled).toEqual([]);
+  } finally {
+    await loop.loop.stop();
+    process.off("unhandledRejection", record);
+  }
+  await expect(loop.loop.done).resolves.toBeUndefined();
+  expect(c.run).not.toHaveBeenCalled();
 });

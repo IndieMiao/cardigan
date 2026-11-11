@@ -466,9 +466,16 @@ export class MergeChecks {
       });
       return { done: Promise.resolve() };
     }
-    // Nobody may await a background round: report, never reject unhandled.
+    // Nobody may await a background round: it must never reject, even when
+    // the error reporter itself throws.
     const round = this.run(projects)
-      .catch((error: unknown) => this.options.onError(error))
+      .catch((error: unknown) => {
+        try {
+          this.options.onError(error);
+        } catch {
+          // The reporter failed too; there is nobody left to tell.
+        }
+      })
       .finally(() => {
         if (this.round === round) this.round = undefined;
       });
