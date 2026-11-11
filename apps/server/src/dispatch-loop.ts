@@ -1,4 +1,5 @@
 import type { Dispatcher } from "./dispatch.js";
+import { DEFAULT_SLOW_TICK_MS } from "./loop.js";
 
 export interface DispatchLoopOptions {
   dispatcher: Pick<Dispatcher, "tick">;
@@ -23,7 +24,7 @@ export function startDispatchLoop(options: DispatchLoopOptions): DispatchLoop {
   const interval = options.intervalMs ?? 1000;
   if (!Number.isSafeInteger(interval) || interval < 1 || interval > 2147483647)
     throw new Error("Invalid dispatcher interval");
-  const slowTickMs = options.slowTickMs ?? 1000;
+  const slowTickMs = options.slowTickMs ?? DEFAULT_SLOW_TICK_MS;
   if (!Number.isFinite(slowTickMs) || slowTickMs <= 0)
     throw new Error("Invalid dispatcher slow tick threshold");
   let stopping = options.signal?.aborted ?? false,

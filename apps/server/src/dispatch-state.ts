@@ -15,9 +15,10 @@ export function dispatchStateLoader(store: Store): StateLoader {
   >();
   return (tx, project) => {
     // Recheck inside every consuming transaction, including after awaits.
-    // Writes (also external commits or rollbacks) require an on-demand refresh;
+    // Relevant project/global writes (including other connections) refresh;
     // never reuse a pre-write snapshot for a claim, ACK or stop decision.
-    const version = store.snapshotVersion();
+    const version = store.snapshotVersion(project);
+    if (version === undefined) return loadCommandState(tx, project);
     const cached = snapshots.get(project);
     if (cached?.version === version) return cached.state;
     const state = loadCommandState(tx, project);
