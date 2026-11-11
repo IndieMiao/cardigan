@@ -292,6 +292,9 @@ export function defaultRoleDefinition(
     "request_human_action",
     "request_decision",
     "upload_attachment",
+    ...(role === "coder" || role === "reviewer"
+      ? (["read_attachment"] as const)
+      : []),
   ];
   return {
     role_id: role,

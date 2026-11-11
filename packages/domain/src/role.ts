@@ -46,6 +46,7 @@ export const STANDING_ROLE_TOOLS = [
   "request_human_action",
   "request_decision",
   "upload_attachment",
+  "read_attachment",
   "heartbeat",
   "finish_run",
   "submit_delivery",
