@@ -101,7 +101,6 @@ type CommandName =
   | "record_merge_push_result"
   | "record_merge_check"
   | "recheck_merge"
-  | "release_assignment"
   | "supersede_card"
   | "manage_templates"
   | "mark_card_done"
@@ -259,7 +258,6 @@ export class CommandDraft {
         role &&
           (tool === "acknowledge_run" ||
             tool === "request_merge" ||
-            tool === "release_assignment" ||
             (role.allowed_tools.includes(tool as E.ToolName) &&
               actor.allowed_tools.includes(tool as E.ToolName))),
         "forbidden_tool",

@@ -15,6 +15,7 @@ import {
   postComment,
   type Result,
   recordDecision,
+  releaseAssignment,
   reportBlocker,
   requestDecision,
   requestHumanAction,
@@ -203,6 +204,9 @@ const schemas = {
     role_version: z.number().int().positive().optional(),
     machine_id: text.optional(),
   },
+  release_assignment: {
+    assignment_id: id("assignment"),
+  },
 };
 
 function assignPending(...args: Parameters<typeof assign>) {
@@ -257,6 +261,11 @@ export function managementTools(clock?: Clock) {
     });
   }
   return [
+    wire(
+      "release_assignment",
+      "Release a work-item Assignment as PM Ops. Unfinished Runs must first be stopped with cardigan assignment stop <A-n>. Standing Assignments can only be released by the human.",
+      releaseAssignment,
+    ),
     wire("post_comment", "Post a comment and references.", postComment),
     wire(
       "issue_instruction",
