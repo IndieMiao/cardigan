@@ -24,10 +24,10 @@ const ci = {
   known_hosts_file: "ssh/ci.known_hosts",
   agent_root: "/srv/cardigan-agent",
 };
-async function fixture() {
+async function fixture(dataName = "data") {
   const root = await mkdtemp(join(tmpdir(), "cg-gate-executors-"));
   roots.push(root);
-  const dataDir = join(root, "data"),
+  const dataDir = join(root, dataName),
     ssh = join(dataDir, "ssh"),
     configDir = join(root, "config");
   for (const path of [dataDir, ssh, configDir])
@@ -273,5 +273,53 @@ test.each([
     expect(config.forProject("future").status).toBe("invalid");
     expect(config.errors.join(" ")).not.toContain("-evil");
     expect(config.errors.join(" ")).toContain("所有项目暂停合并");
+  },
+);
+
+// Control characters in the configured name are already refused by secureCredentialFile;
+// U+200B (format character) passes that check and must be caught here.
+const sshUnsafe = [" ", "%", "$", '"', "'", "\\", "\u200b"];
+test.each(
+  sshUnsafe.flatMap((c) =>
+    (["identity_file", "known_hosts_file"] as const).map(
+      (field) => [field, c] as const,
+    ),
+  ),
+)(
+  "%s whose file name contains %j is rejected even though permissions are safe",
+  async (field, c) => {
+    const f = await fixture();
+    const name = `ci${c}x`;
+    await writeFile(join(f.ssh, name), "fictional-not-a-key", { mode: 0o600 });
+    await f.save({
+      executors: { "cardigan-ci": { ...ci, [field]: `ssh/${name}` } },
+      projects: { p: { checks, executor: "cardigan-ci" }, q: { checks } },
+    });
+    const config = await f.load();
+    const p = config.forProject("p");
+    expect(p).toEqual({
+      status: "invalid",
+      reason: `项目 p 的合并闸门无效：执行目标 cardigan-ci 无效：${field} 无效：数据目录和文件名的完整路径不能含空白、控制字符、引号、反斜杠、% 或 $，不会回退到本机`,
+    });
+    expect(config.forProject("q").status).toBe("enabled");
+    expect(config.errors.join(" ")).not.toContain(name);
+  },
+);
+
+test.each(["da ta", "data%h", "data$X", "data'q"])(
+  "a data directory ancestor %j that ssh would expand invalidates both credentials",
+  async (dataName) => {
+    const f = await fixture(dataName);
+    await f.save({
+      executors: { "cardigan-ci": ci },
+      projects: { p: { checks, executor: "cardigan-ci" } },
+    });
+    const config = await f.load();
+    const p = config.forProject("p");
+    expect(p.status).toBe("invalid");
+    expect(p.status === "invalid" && p.reason).toContain(
+      "identity_file 无效：数据目录和文件名的完整路径",
+    );
+    expect(config.errors.join(" ")).not.toContain(dataName);
   },
 );

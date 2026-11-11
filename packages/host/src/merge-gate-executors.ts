@@ -55,6 +55,15 @@ const validAgentRoot = (value: unknown): value is string =>
   posix.normalize(value) === value &&
   !value.endsWith("/") &&
   !value.split("/").some((part) => part === "." || part === "..");
+/**
+ * ssh expands %-tokens and ${VAR} in -i / UserKnownHostsFile=, and -o values have their own quoting.
+ * Mirrors the agent-ssh known_hosts rule (C-118 validateSshConfig) on the resolved absolute path,
+ * so a configuration that loads here is never rejected later when the SSH command is built.
+ */
+const sshLiteralPath = (path: string) =>
+  posix.isAbsolute(path) &&
+  path !== "/" &&
+  !/[\s\p{Cc}\p{Cf}"'\\%$]/u.test(path);
 const integer = (
   value: unknown,
   fallback: number,
@@ -119,14 +128,20 @@ async function parseExecutor(
     `max_concurrent 必须是 1 到 ${MAX_EXECUTOR_CONCURRENCY} 的整数`,
   );
   const credential = async (field: string) => {
+    let file: string;
     try {
-      return await secureCredentialFile(dataDir, entry[field]);
+      file = await secureCredentialFile(dataDir, entry[field]);
     } catch {
       // Never echo the configured path or filesystem errors.
       return fail(
         `${field} 无效：路径须相对数据目录且无链接，文件 0600、目录 0700，属主须为主机账号`,
       );
     }
+    if (!sshLiteralPath(file))
+      fail(
+        `${field} 无效：数据目录和文件名的完整路径不能含空白、控制字符、引号、反斜杠、% 或 $`,
+      );
+    return file;
   };
   const identityFile = await credential("identity_file");
   const knownHostsFile = await credential("known_hosts_file");
