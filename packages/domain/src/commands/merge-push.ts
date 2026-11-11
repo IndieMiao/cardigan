@@ -21,8 +21,10 @@ export interface MergePushAttempt extends MergePushDestination {
   readonly failure_count: number;
   readonly first_failed_at?: string;
   readonly human_action_id?: HumanActionId;
-  /** First-parent boundary already published (or the pre-push baseline). */
+  /** First-parent boundary of the pre-push check. */
   readonly base_sha?: string;
+  /** Only a pushed SHA or a human-accepted boundary is trusted. */
+  readonly base_trusted?: boolean;
 }
 /** One first-parent commit of central main; names are display-only. */
 export interface MergePushCommit {
@@ -32,17 +34,33 @@ export interface MergePushCommit {
   readonly committer: string;
   readonly subject: string;
 }
-/** Most first-parent commits the host reads for one pre-push check. */
-export const MERGE_PUSH_RANGE_LIMIT = 200;
+/** Most first-parent commits one pre-push check reads (host pages them). */
+export const MERGE_PUSH_RANGE_LIMIT = 20_000;
+/** Most foreign commits a single accept may trust. */
+const ACCEPT_LIMIT = 1_000;
+/** Commits shown in an event or Needs You item. */
+const SHOWN = 200;
+export type MergePushHoldReason =
+  | "boundary"
+  | "foreign"
+  | "stale"
+  | "broken"
+  | "too_long"
+  | "too_many";
 interface Held extends MergePushAttempt {
+  readonly head: string;
+  readonly reasons: readonly MergePushHoldReason[];
+  readonly acceptable: boolean;
   readonly foreign: readonly MergePushCommit[];
-  readonly broken: boolean;
+  readonly foreign_count: number;
+  readonly foreign_shas: readonly string[];
   readonly human_action_id: HumanActionId;
 }
 interface Resolved {
   readonly mode: "accept" | "reverted";
   readonly held_event_id: EventId;
   readonly accepted: readonly string[];
+  readonly boundary?: string;
   readonly dropped_queue_ids: readonly EventId[];
 }
 interface Queued extends MergePushDestination {
@@ -73,21 +91,39 @@ const fullSha = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
 const control = (records: readonly Event[]) =>
   records.filter((e) => e.type !== "merge_push_queued").at(-1);
 
-/** Last published SHA, else the baseline the first queued merge was built on. */
-function pushBase(state: CommandState, events: readonly Event[]) {
-  const pushed = events.filter((e) => e.type === "merge_pushed").at(-1);
-  if (pushed) return (pushed.payload as unknown as Finished).sha;
-  const first = events.find((e) => e.type === "merge_push_queued");
-  const id = (first?.payload as unknown as Queued | undefined)?.merge_event_id;
+/**
+ * The pre-push boundary. Only evidence counts as trusted: the last SHA this
+ * target pushed, or a boundary the human accepted. Without either, the first
+ * pending merge's previous_sha is merely a candidate and the check holds.
+ */
+function pushBase(
+  state: CommandState,
+  events: readonly Event[],
+  pending: readonly Event[],
+): { readonly sha: string; readonly trusted: boolean } | undefined {
+  for (const e of [...events].reverse()) {
+    if (e.type === "merge_pushed")
+      return { sha: (e.payload as unknown as Finished).sha, trusted: true };
+    const boundary =
+      e.type === "merge_push_hold_resolved"
+        ? (e.payload as unknown as Resolved).boundary
+        : undefined;
+    if (boundary) return { sha: boundary, trusted: true };
+  }
+  const id = (pending[0]?.payload as unknown as Queued | undefined)
+    ?.merge_event_id;
   const merge = state.events.find((e) => e.id === id);
-  return (merge?.payload as { result?: { previous_sha?: string } } | null)
-    ?.result?.previous_sha;
+  const previous = (
+    merge?.payload as { result?: { previous_sha?: string } } | null
+  )?.result?.previous_sha;
+  return previous ? { sha: previous, trusted: false } : undefined;
 }
 
 /**
  * Foreign = a first-parent commit outside every merge-loop segment
  * (`previous_sha`, `merge_sha`] recorded by card_merged, and not accepted by
- * the human. Identity is the SHA only; author and committer never matter.
+ * the human. A segment is trusted only if its previous_sha actually closes on
+ * the chain (or is the boundary itself). Identity is the SHA only.
  */
 export function foreignMergePushCommits(
   state: CommandState,
@@ -113,22 +149,29 @@ export function foreignMergePushCommits(
       .filter((e) => e.type === "merge_push_hold_resolved")
       .flatMap((e) => (e.payload as unknown as Resolved).accepted),
   );
-  const broken =
-    chain.length > MERGE_PUSH_RANGE_LIMIT ||
-    chain.some(
-      (c, i) => c.parent !== (i + 1 < chain.length ? chain[i + 1]?.sha : base),
-    );
+  const broken = chain.some(
+    (c, i) => c.parent !== (i + 1 < chain.length ? chain[i + 1]?.sha : base),
+  );
   const foreign: MergePushCommit[] = [];
-  let stop: string | undefined;
+  let stop: string | undefined,
+    inside: MergePushCommit[] = [];
   for (const c of chain) {
-    // Inside a recorded segment every first parent was written by the loop.
-    if (stop !== undefined && c.sha !== stop) continue;
-    stop = undefined;
+    if (stop !== undefined) {
+      if (c.sha !== stop) {
+        inside.push(c);
+        continue;
+      }
+      // The recorded segment closed on the real chain: its interior is the loop's.
+      stop = undefined;
+      inside = [];
+    }
     if (accepted.has(c.sha)) continue;
     const previous = segments.get(c.sha);
     if (previous !== undefined) stop = previous;
     else foreign.push(c);
   }
+  // An unclosed segment proves nothing about the commits it would have covered.
+  if (stop !== undefined && stop !== base) foreign.push(...inside);
   return { foreign, broken };
 }
 
@@ -173,13 +216,18 @@ export function beginMergePush(
       "Push destination is not enabled",
     );
     const events = records(state, p.target),
-      last = control(events),
-      base = pushBase(state, events);
+      last = control(events);
     if (last?.type === "merge_push_started") {
       const started = last.payload as unknown as MergePushAttempt;
-      return started.base_sha || !base
-        ? started
-        : { ...started, base_sha: base };
+      if (started.base_sha) return started;
+      const base = pushBase(
+        state,
+        events,
+        events.filter((e) => started.queue_ids.includes(e.id)),
+      );
+      return base
+        ? { ...started, base_sha: base.sha, base_trusted: base.trusted }
+        : started;
     }
     const done = new Set(
       events.flatMap((e) =>
@@ -219,6 +267,7 @@ export function beginMergePush(
       resumed = true;
     }
     if (!pending.length) return undefined;
+    const base = pushBase(state, events, pending);
     ensure(base, "invariant_violation", "Push has no first-parent boundary");
     const failed =
       last?.type === "merge_push_failed"
@@ -273,7 +322,8 @@ export function beginMergePush(
       ...(!blocked && failed?.human_action_id
         ? { human_action_id: failed.human_action_id }
         : {}),
-      base_sha: base,
+      base_sha: base.sha,
+      base_trusted: base.trusted,
     };
     d.emit("merge_push_started", undefined, {
       ...attempt,
@@ -428,40 +478,55 @@ export function recordMergePushResult(
 const short = (sha: string) => sha.slice(0, 12);
 function holdInstructions(
   action: HumanActionId,
-  branch: string,
-  base: string,
-  foreign: readonly MergePushCommit[],
-  broken: boolean,
+  held: Omit<Held, "human_action_id">,
 ) {
-  const shown = foreign
-    .slice(0, 20)
-    .map(
-      (c) =>
-        `- ${short(c.sha)}  作者 ${c.author}，提交者 ${c.committer}：${c.subject}`,
+  const { branch, base_sha = "", sha, foreign, foreign_count, reasons } = held;
+  const lines = [`自动推送到远程 ${branch} 已暂停，系统没有推送。原因：`];
+  if (reasons.includes("boundary"))
+    lines.push(
+      `- 这是该远程第一次自动推送（或之前没有成功推送记录），系统无法证明中心 ${branch} 在 ${short(base_sha)} 及以前的历史都可以发布。请先在主机上核对远程 ${branch} 已包含 ${short(base_sha)}（例如 git ls-remote 对比），或确认这段历史可以公开。`,
     );
-  if (foreign.length > shown.length)
-    shown.push(
-      `- 另有 ${foreign.length - shown.length} 个，完整列表见事件 merge_push_held`,
+  if (reasons.includes("foreign")) {
+    lines.push(
+      `- 中心 ${branch} 上有 ${foreign_count} 个提交不是合并流程产生的（新的在前）：`,
     );
-  return [
-    `自动推送到远程 ${branch} 已暂停：中心仓库的 ${branch} 上出现了不是合并流程产生的提交，系统没有推送。`,
-    `从上次推送点 ${short(base)} 起的外来提交（共 ${foreign.length} 个，新的在前）：`,
-    ...shown,
-    ...(broken
-      ? [
-          `另外，中心 ${branch} 已接不上上次推送点（历史被改写或提交超过 ${MERGE_PUSH_RANGE_LIMIT} 个），只能按下面第 2 种方式处理。`,
-        ]
-      : [
-          `处理方式一：确认接受这些提交，运行 cardigan merge push-accept ${action} --text <说明>；系统随后把它们和排队的合并一起推送。`,
-        ]),
-    `处理方式${broken ? "" : "二"}：不接受。先在主机上把中心仓库 ${branch} 恢复到不含这些提交的状态（例如回到 ${short(base)}，再重新合并需要的卡片），然后在 Workbench 或用 cardigan human-action done ${action} 标记此事项完成；系统会丢弃已排队的这批推送，之后的合并重新核对后再推送。`,
-  ].join("\n");
+    for (const c of foreign.slice(0, 20))
+      lines.push(
+        `  ${short(c.sha)}  作者 ${c.author}，提交者 ${c.committer}：${c.subject}`,
+      );
+    if (foreign_count > 20)
+      lines.push(
+        `  另有 ${foreign_count - 20} 个，完整列表见事件 merge_push_held`,
+      );
+  }
+  if (reasons.includes("stale"))
+    lines.push(
+      `- 中心 ${branch} 已不再包含排队待推的合并 ${short(sha)}（可能被 reset 或强制改写）。`,
+    );
+  if (reasons.includes("broken"))
+    lines.push(
+      `- 中心 ${branch} 已接不上上次推送点 ${short(base_sha)}（历史被改写），远程也不会接受这样的推送。`,
+    );
+  if (reasons.includes("too_long") || reasons.includes("too_many"))
+    lines.push(
+      `- 待核对的提交超过 ${MERGE_PUSH_RANGE_LIMIT} 个或外来提交超过 ${ACCEPT_LIMIT} 个，无法逐个核对。`,
+    );
+  lines.push("处理方式：");
+  if (held.acceptable)
+    lines.push(
+      `1）确认接受：运行 cardigan merge push-accept ${action} --text <说明>（只能由你本人在主机上执行），上面列出的提交${reasons.includes("boundary") ? `和 ${short(base_sha)} 以前的历史` : ""}从此视为可以发布，系统随后重新核对并推送。`,
+    );
+  lines.push(
+    `${held.acceptable ? "2）" : ""}不接受：先在主机上把中心仓库 ${branch} 恢复到不含这些提交、且包含上次推送点的状态（例如回到 ${short(base_sha)}，再重新合并需要的卡片），然后在 Workbench 或用 cardigan human-action done ${action} 标记此事项完成。系统会丢弃这批已排队的推送，不信任任何提交；之后的合并推送前仍会重新核对中心 ${branch} 当前的最新提交。`,
+  );
+  return lines.join("\n");
 }
 
 /**
- * Pre-push check of the active attempt: `chain` is central main's first-parent
- * path from attempt.sha down to (excluding) base_sha, as read by the host.
- * Any commit outside the merge loop's recorded segments holds the target.
+ * Pre-push check of the active attempt. The host reads, under the publication
+ * lock, central main's current `head` and its whole first-parent chain down
+ * to (excluding) base_sha. Everything on it must be loop-recorded or accepted,
+ * the pushed SHA must still be on it, and the boundary must be evidenced.
  */
 export function checkMergePushRange(
   state: CommandState,
@@ -469,14 +534,18 @@ export function checkMergePushRange(
   p: {
     target: string;
     attempt_id: string;
+    head: string;
     chain: readonly MergePushCommit[];
+    truncated?: boolean;
   },
   ports: CommandPorts,
 ) {
   return command(state, actor, "check_merge_push_range", ports, (d) => {
     ensure(
-      Array.isArray(p.chain) &&
-        p.chain.length <= MERGE_PUSH_RANGE_LIMIT + 1 &&
+      fullSha.test(p.head) &&
+        Array.isArray(p.chain) &&
+        p.chain.length <= MERGE_PUSH_RANGE_LIMIT &&
+        (p.truncated === undefined || typeof p.truncated === "boolean") &&
         p.chain.every(
           (c) =>
             fullSha.test(c.sha) &&
@@ -503,12 +572,12 @@ export function checkMergePushRange(
       "Range check does not belong to the active attempt",
     );
     const attempt = last.payload as unknown as MergePushAttempt,
-      base = attempt.base_sha ?? pushBase(state, events);
+      base = attempt.base_sha;
     ensure(base, "invariant_violation", "Push has no first-parent boundary");
     ensure(
-      p.chain.length === 0 || p.chain[0]?.sha === attempt.sha,
+      p.chain.length === 0 ? p.head === base : p.chain[0]?.sha === p.head,
       "validation_failed",
-      "Range must start at the pushed SHA",
+      "Range must start at the current head",
     );
     const { foreign, broken } = foreignMergePushCommits(
       state,
@@ -516,16 +585,37 @@ export function checkMergePushRange(
       base,
       p.chain,
     );
-    if (!foreign.length && !broken) return { status: "clear" as const };
+    const reasons: MergePushHoldReason[] = [];
+    if (attempt.base_trusted !== true) reasons.push("boundary");
+    if (foreign.length) reasons.push("foreign");
+    if (attempt.sha !== base && !p.chain.some((c) => c.sha === attempt.sha))
+      reasons.push("stale");
+    if (p.truncated) reasons.push("too_long");
+    else if (broken) reasons.push("broken");
+    if (foreign.length > ACCEPT_LIMIT) reasons.push("too_many");
+    if (!reasons.length) return { status: "clear" as const };
+    const acceptable = !reasons.some((r) =>
+      ["stale", "broken", "too_long", "too_many"].includes(r),
+    );
     const id = d.ids.next(d.state.project_id, "human_action");
+    const body: Omit<Held, "human_action_id"> = {
+      ...attempt,
+      base_sha: base,
+      head: p.head,
+      reasons,
+      acceptable,
+      foreign: foreign.slice(0, SHOWN).map((c) => ({ ...c })),
+      foreign_count: foreign.length,
+      foreign_shas: acceptable ? foreign.map((c) => c.sha) : [],
+    };
     const action: HumanAction = {
       id,
       key: id,
       requested_by: "system",
       status: "open",
       blocked_work_items: [],
-      instructions: holdInstructions(id, attempt.branch, base, foreign, broken),
-      why_human: "中心仓库被绕过合并流程写入，只有人能决定接受还是回退",
+      instructions: holdInstructions(id, body),
+      why_human: "中心仓库可能被绕过合并流程写入，只有人能决定接受还是回退",
       expected_return: "说明接受或回退的结果并完成此事项",
     };
     d.put("human_actions", action);
@@ -533,24 +623,20 @@ export function checkMergePushRange(
       human_action_id: id,
       blocked_work_items: [],
     });
-    const held: Held = {
-      ...attempt,
-      base_sha: base,
-      foreign: foreign.map((c) => ({ ...c })),
-      broken,
-      human_action_id: id,
-    };
+    const held: Held = { ...body, human_action_id: id };
     d.emit("merge_push_held", undefined, {
       ...held,
       queue_ids: [...held.queue_ids],
+      reasons: [...held.reasons],
       foreign: held.foreign.map((c) => ({ ...c })),
-      description: `中心 ${attempt.branch} 出现 ${foreign.length} 个非合并流程提交，自动推送已暂停`,
+      foreign_shas: [...held.foreign_shas],
+      description: `中心 ${attempt.branch} 未通过推送前核对（${reasons.join("、")}），自动推送已暂停`,
     });
     return { status: "held" as const, held };
   });
 }
 
-/** Human-only: trust exactly the held foreign SHAs and resume pushing. */
+/** Human-only: trust exactly the held foreign SHAs (and an unevidenced boundary). */
 export function acceptMergePushHold(
   state: CommandState,
   actor: Actor,
@@ -579,9 +665,9 @@ export function acceptMergePushHold(
       "This push hold was already resolved",
     );
     ensure(
-      !held.broken,
+      held.acceptable === true,
       "illegal_transition",
-      "A broken range cannot be accepted; restore central main instead",
+      "This hold cannot be accepted; restore central main instead",
     );
     const action = completeActionDraft(d, {
       human_action_id: p.human_action_id,
@@ -593,9 +679,12 @@ export function acceptMergePushHold(
       held_event_id: event.id,
       human_action_id: p.human_action_id,
       mode: "accept",
-      accepted: held.foreign.map((c) => c.sha),
+      accepted: [...held.foreign_shas],
+      ...(held.reasons.includes("boundary") && held.base_sha
+        ? { boundary: held.base_sha }
+        : {}),
       dropped_queue_ids: [],
-      description: `已确认接受 ${held.foreign.length} 个外来提交，恢复自动推送`,
+      description: `已确认接受 ${held.foreign_count} 个外来提交${held.reasons.includes("boundary") ? "和首次推送起点" : ""}，恢复自动推送`,
     });
     return action;
   });

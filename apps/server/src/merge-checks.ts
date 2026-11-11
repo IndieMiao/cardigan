@@ -38,6 +38,7 @@ import type { Store } from "@cardigan/store";
 import type { MergeGit } from "./git.js";
 
 import { mergeProjectSettings } from "./merge-push-loop.js";
+import { withPublication } from "./publication-lock.js";
 
 type Candidate = Extract<PreparedMerge, { status: "candidate" }>;
 type Settings = Extract<ProjectMergeGate, { status: "enabled" }>;
@@ -370,18 +371,22 @@ export class MergeChecks {
     }
     // Re-read confirmation/state after Git IO. CAS protects against another baseline writer.
     if (!this.valid(task, true)) return;
-    const result = await this.git().publish(
-      task.project,
-      task.plan.completion_id,
-      candidate,
-    );
-    if (result.status === "merged")
-      this.record(task, {
-        kind: "merged",
-        merge_sha: result.merge_sha,
-        previous_sha: result.previous_sha,
-        tree_sha: result.tree_sha,
-      });
+    // C-94: moving central main and recording the move share one lock with
+    // the pre-push check, so an unrecorded window is never observed.
+    await withPublication(task.project.project_id, async () => {
+      const result = await this.git().publish(
+        task.project,
+        task.plan.completion_id,
+        candidate,
+      );
+      if (result.status === "merged")
+        this.record(task, {
+          kind: "merged",
+          merge_sha: result.merge_sha,
+          previous_sha: result.previous_sha,
+          tree_sha: result.tree_sha,
+        });
+    });
   }
   private failure(task: Task, error: unknown) {
     this.options.onError(error);

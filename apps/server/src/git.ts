@@ -116,12 +116,16 @@ export interface MergeGit {
     config: MergePushConfig,
     signal?: AbortSignal,
   ): Promise<PushResult>;
-  /** Central main's first-parent commits in (base, sha], newest first. */
+  /** Current central baseline head plus its first-parent commits down to base. */
   pushRange?(
     project: CentralProject,
-    input: { base: string; sha: string },
+    base: string,
     limit: number,
-  ): Promise<readonly MergePushCommit[]>;
+  ): Promise<{
+    readonly head: string;
+    readonly chain: readonly MergePushCommit[];
+    readonly truncated: boolean;
+  }>;
 }
 export interface ReconcileGit {
   projectOf(project_id: ProjectId): CentralProject | undefined;
@@ -427,21 +431,37 @@ export class ServerGit implements GitBinding {
   }
   async pushRange(
     project: CentralProject,
-    input: { base: string; sha: string },
+    base: string,
     limit: number,
-  ): Promise<readonly MergePushCommit[]> {
+    pageSize = 1_000,
+  ) {
     const repository = await this.central.ensureCentral(project);
+    const head = await this.central.git.readRef(
+      repository,
+      `refs/heads/${project.base_branch}`,
+    );
     if (
-      (await this.transport.objectType(repository, input.sha)) !== "commit" ||
-      (await this.transport.objectType(repository, input.base)) !== "commit"
+      !head ||
+      (await this.transport.objectType(repository, head)) !== "commit" ||
+      (await this.transport.objectType(repository, base)) !== "commit"
     )
       throw new Error("Push range endpoints must be commits");
-    return this.transport.firstParentChain(
-      repository,
-      input.base,
-      input.sha,
-      limit,
-    );
+    // Page down the first-parent chain; each page continues from the last
+    // parent, so the whole chain is read in linear time up to `limit`.
+    const chain: MergePushCommit[] = [];
+    let tip: string | undefined = head;
+    while (tip && tip !== base && chain.length < limit) {
+      const page = await this.transport.firstParentChain(
+        repository,
+        base,
+        tip,
+        Math.min(pageSize, limit - chain.length),
+      );
+      chain.push(...page);
+      tip = page.length ? page.at(-1)?.parent : undefined;
+    }
+    const truncated = Boolean(tip && tip !== base && chain.length >= limit);
+    return { head, chain, truncated };
   }
   async backup(project: CentralProject): Promise<void> {
     await this.central.backupAgentBranches(project, "local");

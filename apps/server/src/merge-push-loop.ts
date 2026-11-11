@@ -18,6 +18,7 @@ import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
 import type { MergeGit } from "./git.js";
 import { startTimerLoop } from "./loop.js";
+import { withPublication } from "./publication-lock.js";
 
 export function mergeProjectSettings(
   configuration: MergeGateConfiguration,
@@ -113,29 +114,37 @@ export class MergePushExecutor {
       if (!attempt || this.abort.signal.aborted) return;
       let outcome: PushResult;
       try {
-        // C-94: publish only first-parent history the merge loop recorded.
-        // A foreign commit holds the target instead of reaching the remote.
+        // C-94: read current central main under the publication lock and
+        // publish only if its whole first-parent history since a trusted
+        // boundary was recorded by the merge loop (or accepted by the human).
         const { base_sha } = attempt;
-        if (!base_sha || !this.options.git.pushRange)
+        const range = this.options.git.pushRange;
+        if (!base_sha || !range)
           throw new Error("Push range cannot be checked");
-        const chain = await this.options.git.pushRange(
-          project,
-          { base: base_sha, sha: attempt.sha },
-          MERGE_PUSH_RANGE_LIMIT + 1,
-        );
-        if (this.abort.signal.aborted) return;
-        const checked = this.command(id, (s, a, ports) =>
-          checkMergePushRange(
-            s,
-            a,
-            {
-              target: attempt.target,
-              attempt_id: attempt.attempt_id,
-              chain,
-            },
-            ports,
-          ),
-        );
+        const checked = await withPublication(id, async () => {
+          const read = await range.call(
+            this.options.git,
+            project,
+            base_sha,
+            MERGE_PUSH_RANGE_LIMIT,
+          );
+          if (this.abort.signal.aborted) return undefined;
+          return this.command(id, (s, a, ports) =>
+            checkMergePushRange(
+              s,
+              a,
+              {
+                target: attempt.target,
+                attempt_id: attempt.attempt_id,
+                head: read.head,
+                chain: read.chain,
+                truncated: read.truncated,
+              },
+              ports,
+            ),
+          );
+        });
+        if (!checked) return;
         if (checked.status === "held") return;
         const included = this.options.store.uow.read((tx) => {
           const events = tx.events.listAfter(id, undefined, 0);

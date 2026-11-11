@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import {
   acceptMergePushHold,
   completeHumanAction,
+  type HumanActionId,
   recheckMerge,
 } from "@cardigan/domain";
 import { CentralRepositoryService } from "@cardigan/git-service";
@@ -45,6 +46,28 @@ afterEach(() => {
   vi.restoreAllMocks();
   for (const dispose of disposers.splice(0).reverse()) dispose();
 });
+/** C-94: a new push target needs the human to confirm its first boundary once. */
+async function confirmFirstPush(
+  f: ReturnType<typeof m4Fixture>,
+  push: MergePushExecutor,
+) {
+  await push.tick();
+  const held = f
+    .state()
+    .events.filter((e) => e.type === "merge_push_held")
+    .at(-1)?.payload as { reasons?: string[]; human_action_id?: string };
+  if (!held?.reasons?.includes("boundary") || !held.human_action_id)
+    throw new Error("Expected a first-push boundary hold");
+  const human_action_id = held.human_action_id as HumanActionId;
+  f.apply((s, a, p) =>
+    acceptMergePushHold(
+      s,
+      a,
+      { human_action_id, text: "远程为空，确认可以发布" },
+      p,
+    ),
+  );
+}
 async function fixture(run = "true") {
   const root = mkdtempSync(join(tmpdir(), "cg-push-loop-")),
     f = m4Fixture(),
@@ -155,6 +178,8 @@ async function fixture(run = "true") {
     events,
     card,
     push: () => new MergePushExecutor(options()),
+    confirmFirstPush: () =>
+      confirmFirstPush(f, new MergePushExecutor(options())),
     advance: (minutes: number) => {
       time += minutes * 60_000;
     },
@@ -201,6 +226,7 @@ test("real checks fail, recheck passes, confirmation merges and only the recorde
   await merger.tick();
   expect(c.f.card().status).toBe("done");
   expect(c.events("merge_push_queued")).toHaveLength(1);
+  await c.confirmFirstPush();
   const push = vi.spyOn(c.binding, "push");
   c.reopen();
   await c.push().tick();
@@ -217,6 +243,7 @@ test("non-fast-forward blocks later pushes but not merges; a human repair releas
   const c = await fixture();
   await c.card();
   await c.merge().tick();
+  await c.confirmFirstPush();
   await c.push().tick();
   const outside = join(c.root, "outside");
   git(c.root, "clone", "-b", "main", c.remote, outside);
@@ -266,6 +293,11 @@ test("non-fast-forward blocks later pushes but not merges; a human repair releas
 
 test("a network failure persists backoff across Store reopen and never skips the first queued SHA", async () => {
   const c = await fixture();
+  // Publish a first merge so the scenario starts from a trusted boundary.
+  await c.card();
+  await c.merge().tick();
+  await c.confirmFirstPush();
+  await c.push().tick();
   await c.card();
   await c.merge().tick();
   const first = git(c.center, "rev-parse", "main");
@@ -285,7 +317,7 @@ test("a network failure persists backoff across Store reopen and never skips the
   expect(git(c.remote, "rev-parse", "main")).toBe(
     git(c.center, "rev-parse", "main"),
   );
-  expect(c.events("merge_pushed")).toHaveLength(2);
+  expect(c.events("merge_pushed")).toHaveLength(3);
   expect(c.errors).toEqual([]);
 }, 30_000);
 
@@ -293,6 +325,7 @@ test("stopping after remote success but before recording preserves the attempt f
   const c = await fixture();
   await c.card();
   await c.merge().tick();
+  await c.confirmFirstPush();
   const real = c.binding.push.bind(c.binding),
     entered = Promise.withResolvers<void>();
   const push = vi
@@ -311,12 +344,13 @@ test("stopping after remote success but before recording preserves the attempt f
   } finally {
     await loop.loop.stop();
   }
-  expect(c.events("merge_push_started")).toHaveLength(1);
+  // One attempt was held for the first-push boundary, one is in flight.
+  expect(c.events("merge_push_started")).toHaveLength(2);
   expect(c.events("merge_pushed")).toHaveLength(0);
   c.reopen();
   await c.push().tick();
   expect(push).toHaveBeenCalledTimes(2);
-  expect(c.events("merge_push_started")).toHaveLength(1);
+  expect(c.events("merge_push_started")).toHaveLength(2);
   expect(c.events("merge_pushed")).toHaveLength(1);
   expect(c.errors).toEqual([]);
 }, 30_000);
@@ -325,6 +359,7 @@ test("unclassified exceptions are sanitized into a paused Needs You item", async
   const c = await fixture();
   await c.card();
   await c.merge().tick();
+  await c.confirmFirstPush();
   const push = vi
     .spyOn(c.binding, "push")
     .mockRejectedValue(new Error("sensitive fixture diagnostic"));
@@ -346,6 +381,7 @@ test("credential permission changes pause pushing as auth without reading the cr
   const c = await fixture();
   await c.card();
   await c.merge().tick();
+  await c.confirmFirstPush();
   const keyFile = join(c.f.dataDir, "dummy-key"),
     knownHostsFile = join(c.f.dataDir, "dummy-known");
   writeFileSync(keyFile, "synthetic-secret-must-not-appear", { mode: 0o644 });
@@ -417,6 +453,7 @@ test("one paused project cannot block another project's push queue", async () =>
   const c = await fixture();
   await c.card();
   await c.merge().tick();
+  await c.confirmFirstPush();
   const send = vi
     .spyOn(c.binding, "push")
     .mockResolvedValueOnce({ status: "failed", reason: "auth" });
@@ -459,6 +496,10 @@ test("one paused project cannot block another project's push queue", async () =>
     ...c.options(),
     gate: { configuration, execution: { mode: "local", dataDir: c.f.dataDir } },
   }).tick();
+  await confirmFirstPush(
+    other,
+    new MergePushExecutor({ ...c.options(), configuration }),
+  );
   await new MergePushExecutor({ ...c.options(), configuration }).tick();
   expect(send).toHaveBeenCalledTimes(2);
   expect(send.mock.calls[1]?.[0].project_id).toBe(other.project_id);
@@ -469,6 +510,12 @@ test("one paused project cannot block another project's push queue", async () =>
   expect(c.errors).toEqual([]);
 }, 30_000);
 
+const foreignHolds = (c: Awaited<ReturnType<typeof fixture>>) =>
+  c
+    .events("merge_push_held")
+    .filter((e) =>
+      (e.payload as { reasons?: string[] }).reasons?.includes("foreign"),
+    );
 /** C-94: write straight into the central main, bypassing the merge loop. */
 function bypass(c: Awaited<ReturnType<typeof fixture>>, who: string) {
   const outside = join(c.root, `bypass-${c.events("card_merged").length}`);
@@ -493,6 +540,7 @@ test("a commit written into central main outside the merge loop holds the push u
   const c = await fixture();
   await c.card();
   await c.merge().tick();
+  await c.confirmFirstPush();
   await c.push().tick();
   const published = git(c.remote, "rev-parse", "main");
   expect(published).toBe(git(c.center, "rev-parse", "main"));
@@ -505,7 +553,7 @@ test("a commit written into central main outside the merge loop holds the push u
   await c.push().tick();
   expect(push).not.toHaveBeenCalled();
   expect(git(c.remote, "rev-parse", "main")).toBe(published);
-  const held = c.events("merge_push_held");
+  const held = foreignHolds(c);
   expect(held).toHaveLength(1);
   expect(held[0]?.payload).toMatchObject({
     base_sha: published,
@@ -543,13 +591,14 @@ test("reverting central main and closing the action drops the held push; the nex
   const c = await fixture();
   await c.card();
   await c.merge().tick();
+  await c.confirmFirstPush();
   await c.push().tick();
   const published = git(c.remote, "rev-parse", "main");
   const foreign = bypass(c, "UI Audit");
   await c.card();
   await c.merge().tick();
   await c.push().tick();
-  expect(c.events("merge_push_held")).toHaveLength(1);
+  expect(foreignHolds(c)).toHaveLength(1);
   const action = c.f.state().human_actions.find((a) => a.status === "open");
   if (!action) throw new Error("Missing Needs You");
   // The human restores the central baseline, then marks the item done.
@@ -564,7 +613,7 @@ test("reverting central main and closing the action drops the held push; the nex
   );
   await c.push().tick();
   expect(git(c.remote, "rev-parse", "main")).toBe(published);
-  expect(c.events("merge_push_hold_resolved")[0]?.payload).toMatchObject({
+  expect(c.events("merge_push_hold_resolved").at(-1)?.payload).toMatchObject({
     mode: "reverted",
   });
   await c.card();
@@ -579,4 +628,49 @@ test("reverting central main and closing the action drops the held push; the nex
     git(c.center, "merge-base", "--is-ancestor", foreign, head),
   ).toThrow();
   expect(c.errors).toEqual([]);
+}, 30_000);
+
+test("a foreign commit above the queued merge pauses the project even though the queued SHA is clean", async () => {
+  const c = await fixture();
+  await c.card();
+  await c.merge().tick();
+  await c.confirmFirstPush();
+  await c.push().tick();
+  const published = git(c.remote, "rev-parse", "main");
+  await c.card();
+  await c.merge().tick();
+  const queued = git(c.center, "rev-parse", "main");
+  const foreign = bypass(c, "UI Audit");
+  const push = vi.spyOn(c.binding, "push");
+  await c.push().tick();
+  expect(push).not.toHaveBeenCalled();
+  expect(git(c.remote, "rev-parse", "main")).toBe(published);
+  expect(foreignHolds(c)[0]?.payload).toMatchObject({
+    sha: queued,
+    head: foreign,
+    foreign: [expect.objectContaining({ sha: foreign })],
+  });
+  expect(c.errors).toEqual([]);
+}, 30_000);
+
+test("the host reads the whole first-parent chain in pages and reports truncation", async () => {
+  const c = await fixture();
+  const project = c.binding.projectOf(c.f.project_id);
+  if (!project) throw new Error("Missing project");
+  const base = git(c.center, "rev-parse", "main");
+  const tree = git(c.center, "rev-parse", "main^{tree}");
+  let tip = base;
+  const made: string[] = [];
+  for (let i = 0; i < 5; i++) {
+    tip = git(c.center, "commit-tree", tree, "-p", tip, "-m", `c${i}`);
+    made.unshift(tip);
+  }
+  git(c.center, "update-ref", "refs/heads/main", tip);
+  const full = await c.binding.pushRange(project, base, 100, 2);
+  expect(full).toMatchObject({ head: tip, truncated: false });
+  expect(full.chain.map((x) => x.sha)).toEqual(made);
+  expect(full.chain.at(-1)?.parent).toBe(base);
+  const cut = await c.binding.pushRange(project, base, 3, 2);
+  expect(cut.truncated).toBe(true);
+  expect(cut.chain).toHaveLength(3);
 }, 30_000);

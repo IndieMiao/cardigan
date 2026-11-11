@@ -48,6 +48,7 @@ export {
   type MergePushCommit,
   type MergePushDestination,
   type MergePushFailure,
+  type MergePushHoldReason,
   mergePushMessage,
   recordMergePushResult,
 } from "./commands/merge-push.js";
