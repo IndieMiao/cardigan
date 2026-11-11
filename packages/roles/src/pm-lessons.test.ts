@@ -5,6 +5,9 @@ import {
   compileAssignmentLaunch,
   corePromptFor,
   firstPrompt,
+  P2A_PM_DECISION_RULES,
+  P2A_PM_OPS_RULES,
+  P2A_PM_PLANNING_RULES,
   PM_DECISION_RULES,
   PM_DELEGATION_RULES,
   PM_OFFICE_REPORTING_RULES,
@@ -94,7 +97,18 @@ test.each(rules.map((rule, index) => ({ rule, number: index + 1 })))(
 );
 
 test("PL.1 places the three source blocks in their prescribed sections", () => {
-  const prompt = corePromptFor("pm");
+  // C-86 appends P2a rules to section ends; strip them so the PL.1 blocks stay contiguous.
+  const p2a = new Set(
+    [
+      ...P2A_PM_PLANNING_RULES,
+      ...P2A_PM_DECISION_RULES,
+      ...P2A_PM_OPS_RULES,
+    ].map((line) => `- ${line}`),
+  );
+  const prompt = corePromptFor("pm")
+    .split("\n")
+    .filter((line) => !p2a.has(line))
+    .join("\n");
   const common = prompt.indexOf(blocks[0] as string);
   const office = prompt.indexOf("## PM Office（前台）");
   const ops = prompt.indexOf("## PM Ops（后台）");
@@ -189,4 +203,70 @@ test("C-37 criterion 11 makes PM explain human handoffs and complete authorized 
     "纯流程事项在现有权限内能完成的自己处理并记录结果，不交给人",
   ])
     expect(prompt).toContain(phrase);
+});
+
+// C-86: draft §4 wording, copied independently of role-pack.ts.
+const P2A_DRAFT = {
+  planning: [
+    '写卡时的测试范围，要包含"可能对改动断言了旧行为"的相关包，不要只列改动本身所在的包；闸门检查失败后，先判断是真实回归还是偶发，再决定退回修改还是重新检查。',
+  ],
+  decision: [
+    '拍板解决、ACK 提醒或收到"30 分钟未落实"提醒之后，必须在卡片时间线产生一条可验证的落实记录（建卡、取消卡片、合并、或写明"评估后决定不做"并说明理由）；仅确认收到提醒不算落实，没有产生记录就继续按提醒节奏升级。',
+  ],
+  ops: [
+    "指派验证型工作项前，先用 `get_card` 确认产出项已经交付（状态为 `delivered` 及以上）；还没有可审的交付时，先不指派，等交付后再指派。",
+    "卡片上出现没有 @ 自己、但也没有被任何 Assignment 认领的人类评论时，主动看一眼并回应，不要只处理带 @ 的事件。",
+  ],
+};
+
+test("C-86 appends the four P2a rules verbatim at the end of their sections", () => {
+  expect([...P2A_PM_PLANNING_RULES]).toEqual(P2A_DRAFT.planning);
+  expect([...P2A_PM_DECISION_RULES]).toEqual(P2A_DRAFT.decision);
+  expect([...P2A_PM_OPS_RULES]).toEqual(P2A_DRAFT.ops);
+  const prompt = corePromptFor("pm");
+  const bullets = (lines: string[]) => lines.map((l) => `- ${l}`).join("\n");
+  const sectionOf = (heading: string) => {
+    const start = prompt.indexOf(heading);
+    const next = prompt.indexOf("\n## ", start + heading.length);
+    return prompt.slice(start, next === -1 ? undefined : next).trimEnd();
+  };
+  expect(
+    sectionOf("## 拆卡和派活").endsWith(
+      bullets([...PM_PLANNING_RULES, ...P2A_DRAFT.planning]),
+    ),
+  ).toBe(true);
+  expect(
+    sectionOf("## 拍板和汇报").endsWith(
+      bullets([...PM_DECISION_RULES, ...P2A_DRAFT.decision]),
+    ),
+  ).toBe(true);
+  expect(
+    sectionOf("## PM Ops（后台）").endsWith(
+      bullets([...PM_OPS_EVENT_RULES, ...P2A_DRAFT.ops]),
+    ),
+  ).toBe(true);
+  for (const { mode, prompt: modePrompt } of modePrompts)
+    for (const rule of Object.values(P2A_DRAFT).flat())
+      expect(modePrompt, mode).toContain(`- ${rule}`);
+  for (const role of ["coder", "reviewer"] as const)
+    for (const rule of Object.values(P2A_DRAFT).flat())
+      expect(corePromptFor(role), role).not.toContain(rule);
+});
+
+test("C-86 PM Ops gives final merge confirmation, including UI cards after a PM Office screenshot check", () => {
+  const prompt = corePromptFor("pm");
+  for (const phrase of [
+    "合并默认由你最终确认，界面卡（改动用户可见界面的卡）也一样",
+    "先在卡上 @张良 请 PM Office 做截图核对",
+    "等张良把核对结论写进卡片后，你据此确认或退回",
+    "仍交给人的只有被人标为敏感的卡、D12 四类高风险（花钱、账号、权限、删除数据）、安全相关改动、对外发布和需求范围变化",
+  ])
+    expect(prompt).toContain(phrase);
+  expect(prompt).not.toContain("用户可见的大改动");
+});
+
+test("C-86 reviewers treat swallowed errors and missing tests as must_fix", () => {
+  expect(corePromptFor("reviewer")).toContain(
+    "评审中涉及“错误被吞、没有测试”的问题，即使看起来是 minor，也按 must_fix 处理。",
+  );
 });
