@@ -259,6 +259,8 @@ export interface DecisionView {
   }[];
   readonly recommended: string;
   readonly context?: string;
+  /** Card attachments the requester referenced, in display order (§6). */
+  readonly attachments?: readonly AttachmentView[];
   readonly resolution?: AuthorView & {
     option: string;
     rationale: string;

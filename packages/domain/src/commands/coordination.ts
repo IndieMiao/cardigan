@@ -6,10 +6,17 @@ import type {
   TimelineEntry,
   WorkItem,
 } from "../entities.js";
-import type { CardId, DecisionId, HumanActionId, WorkItemId } from "../ids.js";
+import type {
+  AttachmentId,
+  CardId,
+  DecisionId,
+  HumanActionId,
+  WorkItemId,
+} from "../ids.js";
 import { commentMentions } from "../mentions.js";
 import { decisionCategories, highRiskCategories } from "../preferences.js";
 import { extractReferences } from "../references.js";
+import { decisionAttachments } from "./decision-attachments.js";
 import {
   assignDecision,
   delegationAllowed,
@@ -30,6 +37,10 @@ import {
 import { resolveReviewLimit } from "./review-limit-resolution.js";
 
 export { extractReferences } from "../references.js";
+export {
+  decisionAttachments,
+  MAX_DECISION_ATTACHMENTS,
+} from "./decision-attachments.js";
 
 import { transition } from "../transitions.js";
 import {
@@ -253,6 +264,7 @@ export type RequestDecisionParams = Pick<
   readonly card_id?: CardId;
   readonly category: NonNullable<Decision["category"]>;
   readonly target?: Extract<Decision, { kind: "approve" }>["target"];
+  readonly attachment_ids?: readonly AttachmentId[];
 };
 export function requestDecision(
   state: CommandState,
@@ -347,6 +359,7 @@ export function requestDecision(
       ]),
     ];
     for (const id of cards) d.card(id);
+    const attachment_ids = decisionAttachments(d, p.attachment_ids, cards);
     if (p.blocking) {
       for (const item of items) paused(d, item, "waiting_decision");
       endForDecision(d, p.question, items);
@@ -364,6 +377,7 @@ export function requestDecision(
       recommended: p.recommended,
       affected_cards: cards,
       affected_work_items: items.map((w) => w.id),
+      ...(attachment_ids.length ? { attachment_ids } : {}),
       blocking: p.blocking,
       decider: p.decider,
       doc_refs: [],
@@ -569,6 +583,8 @@ export function resolveDelegatedDecision(
     escalate?: boolean;
     /** Needs You notice; required when PM Ops confirms a merge (§7.4). */
     notice?: string;
+    /** C-95: card attachments to show the human; only with `escalate`. */
+    attachment_ids?: readonly AttachmentId[];
   },
   ports: CommandPorts,
 ) {
@@ -600,6 +616,11 @@ export function resolveDelegatedDecision(
         : "Decision is not authorized for PM Ops",
     );
     text(p.rationale, "rationale");
+    ensure(
+      !p.attachment_ids?.length || !!p.escalate,
+      "validation_failed",
+      "attachment_ids 只能在交给人（escalate）时提供",
+    );
     if (failed && !p.escalate) {
       ensure(
         !confirmedFailed ||
@@ -641,9 +662,13 @@ export function resolveDelegatedDecision(
       "只有当前完成申请的最新检查失败或超时时才能重新检查",
     );
     if (p.escalate) {
+      const attachment_ids = decisionAttachments(d, p.attachment_ids, [
+        ...(q.card_id ? [q.card_id] : []),
+        ...q.affected_cards,
+      ]);
       handoffDecision(
         d,
-        q,
+        attachment_ids.length ? { ...q, attachment_ids } : q,
         `项目经理升级给你：${p.rationale}`,
         undefined,
         q.trigger === "merge_confirmation",

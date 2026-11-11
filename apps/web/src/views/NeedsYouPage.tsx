@@ -9,6 +9,7 @@ import {
   type NeedsPage,
   type NoticeView,
 } from "../api.js";
+import { DecisionAttachments } from "../components/DecisionAttachments.js";
 import { EmployeeIdentity } from "../components/EmployeeIdentity.js";
 import {
   EmptyState,
@@ -183,6 +184,7 @@ function Decision({
           <Markdown body={q.context} />
         </details>
       )}
+      <DecisionAttachments attachments={q.attachments} />
       <form
         onSubmit={(e) => {
           e.preventDefault();
@@ -363,6 +365,7 @@ export function MergeConfirmation({
           之后不能再处理这一条；选择合并仍要通过合并闸门检查。
         </p>
       )}
+      <DecisionAttachments attachments={q.attachments} />
       {merge?.merge_gate_invalid && (
         <p className="error">合并闸门配置无效，请查看 server 启动日志</p>
       )}

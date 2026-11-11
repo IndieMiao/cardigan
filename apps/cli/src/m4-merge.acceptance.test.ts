@@ -77,6 +77,7 @@ const pmTools: readonly ToolName[] = [
   "update_card",
   "create_work_item",
   "assign",
+  "release_assignment",
   "record_decision",
   "resolve_delegated_decision",
   "submit_review",
@@ -1134,13 +1135,13 @@ test("§12.6 releaseAssignment: permissions are checked and an unfinished Run bl
         actor,
       ).code,
     ).toBe("illegal_transition");
-  // A work Assignment is never a releaser.
+  // A work Assignment has no release tool and is never a releaser.
   expect(
     reject(
       (st, a, p) => releaseAssignment(st, a, { assignment_id: s.office.id }, p),
       actorFor(s.coder),
     ).code,
-  ).toBe("unauthorized");
+  ).toBe("forbidden_tool");
   expect(state().assignments.find((a) => a.id === s.coder.id)?.status).toBe(
     "active",
   );

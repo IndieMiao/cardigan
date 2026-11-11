@@ -24,6 +24,9 @@ export function subscribeProject(
   retryMs = 3000,
 ): () => void {
   const seen = new Map<string, number>();
+  // Last run-queue revision the server announced. The queue has no seq, so a
+  // resumed connection relies on this to notice changes made while away.
+  let queueRevision: string | undefined;
   let source: EventConnection | undefined,
     timer: ReturnType<typeof setTimeout> | undefined,
     stopped = false;
@@ -38,6 +41,7 @@ export function subscribeProject(
   function connect(retry: boolean) {
     if (stopped) return;
     const cursors = [...seen].sort(([a], [b]) => a.localeCompare(b));
+    const resumed = retry && cursors.length > 0;
     // No events observed before disconnect: requesting an explicit zero avoids "start at now".
     const after = (cursors.length ? cursors : [["project", 0]])
       .map(([s, n]) => `${s}:${n}`)
@@ -54,13 +58,38 @@ export function subscribeProject(
     source = connection;
     const current = () => !stopped && source === connection;
     connection.addEventListener("open", () => {
-      if (current()) {
-        callbacks.status("live");
-        callbacks.ready();
-      }
+      if (!current()) return;
+      callbacks.status("live");
+      // A connection resumed from known cursors replays exactly the seqs
+      // missed while away, so the views already on screen stay as they are.
+      // The first connection, and a retry with no cursor yet (which replays
+      // from zero anyway), re-read to cover the window before the stream.
+      if (!resumed) callbacks.ready();
     });
-    connection.addEventListener("queue", () => {
-      if (current()) callbacks.ready();
+    connection.addEventListener("queue", (event) => {
+      if (!current()) return;
+      let revision: unknown;
+      try {
+        revision = (
+          JSON.parse((event as MessageEvent<string>).data) as {
+            revision?: unknown;
+          }
+        ).revision;
+      } catch {
+        revision = undefined;
+      }
+      if (typeof revision !== "string") {
+        // No revision to compare (older server): always refresh.
+        callbacks.ready();
+        return;
+      }
+      const known = queueRevision;
+      queueRevision = revision;
+      if (known === revision) return;
+      // The first revision of the first connection is already covered by the
+      // re-read on open; on a resumed connection any revision we did not have
+      // yet means the queue may have changed while we were away.
+      if (known !== undefined || resumed) callbacks.ready();
     });
     connection.addEventListener("change", (event) => {
       if (!current()) return;
@@ -90,12 +119,16 @@ export function subscribeProject(
         type: change.type,
       });
     });
-    connection.addEventListener("error", () => {
+    const lost = () => {
       if (!current()) return;
       source = undefined;
       connection.close();
       reconnect();
-    });
+    };
+    connection.addEventListener("error", lost);
+    // The server is restarting: drop this connection now and resume on the
+    // next server with the same cursors, without a page reload.
+    connection.addEventListener("shutdown", lost);
   }
   connect(false);
   return () => {

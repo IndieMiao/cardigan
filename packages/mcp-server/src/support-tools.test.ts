@@ -197,7 +197,9 @@ test("attachment metadata validation is shared with domain and rejects without r
 
 test("legacy PM tools exclude Ops instructions; concurrent attachment uploads and replays commit once", async () => {
   expect((await office.listTools()).tools.map((t) => t.name).sort()).toEqual(
-    STANDING_ROLE_TOOLS.filter((name) => name !== "issue_instruction").sort(),
+    STANDING_ROLE_TOOLS.filter(
+      (name) => !["issue_instruction", "release_assignment"].includes(name),
+    ).sort(),
   );
   const args = {
     ...upload,
@@ -304,6 +306,73 @@ test("artifacts require an existing basis and support both attachment target typ
   expect(await readdir(join(dataDir, "attachments"))).toEqual([
     sha256(content),
   ]);
+});
+
+test("C-95: request_decision only references this project's decision cards; rejections leave no writes", async () => {
+  const own = await ok<Attachment>(coder, "upload_attachment", upload);
+  const foreignProject = "p-foreign" as typeof project_id;
+  const stored = (id: string, card: string) =>
+    ({
+      ...own,
+      id,
+      card_id: card,
+    }) as Attachment;
+  store.uow.run((tx) => {
+    // Same card ID, different project: the project-scoped snapshot must not see it.
+    tx.cards.put(foreignProject, serverCard);
+    tx.attachments.put(foreignProject, stored("F-foreign", card_id));
+    tx.cards.put(project_id, { ...serverCard, id: "C-2" as never });
+    tx.attachments.put(project_id, stored("F-unrelated", "C-2"));
+  });
+  const snapshot = () =>
+    store.uow.read((tx) => ({
+      decisions: tx.decisions.list(project_id),
+      work_items: tx.work_items.list(project_id),
+      runs: tx.runs.list(project_id),
+      events: [undefined, card_id, "C-2"].map(
+        (card) => tx.events.listAfter(project_id, card as never, 0).length,
+      ),
+      timeline: tx.timeline.list(project_id).length,
+      cache: store.database
+        .prepare("SELECT COUNT(*) AS n FROM idempotency")
+        .get()?.n,
+    }));
+  const params = { ...decision, blocking: true };
+  const before = snapshot();
+  for (const [extra, expected] of [
+    [{ attachment_ids: ["F-foreign"] }, "not_found"],
+    [{ attachment_ids: [own.id, "F-foreign"] }, "not_found"],
+    [{ attachment_ids: ["F-unrelated"] }, "validation_failed"],
+    [{ attachment_ids: [own.id, "F-unrelated"] }, "validation_failed"],
+    [{ affected_cards: ["C-9"], attachment_ids: [own.id] }, "not_found"],
+    [{ attachment_ids: ["A-missing"] }, "not_found"],
+    [{ attachment_ids: [own.id, own.id] }, "validation_failed"],
+    [
+      { attachment_ids: Array.from({ length: 7 }, (_, i) => `x-${i}`) },
+      "validation_failed",
+    ],
+  ] as const) {
+    expect(
+      code(await call(office, "request_decision", { ...params, ...extra })),
+      JSON.stringify(extra),
+    ).toBe(expected);
+    expect(snapshot()).toEqual(before);
+  }
+  // Naming the related card in affected_cards is what allows its attachments.
+  const related = await ok<Decision>(office, "request_decision", {
+    ...decision,
+    blocking: false,
+    affected_cards: ["C-2"],
+    attachment_ids: ["F-unrelated", own.id],
+  });
+  expect(related.attachment_ids).toEqual(["F-unrelated", own.id]);
+  const q = await ok<Decision>(office, "request_decision", {
+    ...params,
+    attachment_ids: [own.id],
+  });
+  expect(
+    store.uow.read((tx) => tx.decisions.get(project_id, q.id))?.attachment_ids,
+  ).toEqual([own.id]);
 });
 
 test("10 MiB passes through HTTP; oversized, malformed and checksum-mismatched content is refused", async () => {

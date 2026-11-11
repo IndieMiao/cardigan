@@ -60,6 +60,7 @@ export const toolNames = [
   "create_work_item",
   "update_work_item",
   "assign",
+  "release_assignment",
   "project_snapshot",
   "list_needs_you",
   "record_decision",
@@ -459,6 +460,11 @@ interface DecisionFields {
   readonly preconditions?: readonly string[];
   readonly affected_cards: readonly CardId[];
   readonly affected_work_items: readonly WorkItemId[];
+  /**
+   * Existing card attachments shown with the question, in display order (§6).
+   * Absent when the decision references none.
+   */
+  readonly attachment_ids?: readonly AttachmentId[];
   readonly blocking: boolean;
   readonly decider: Decider;
   readonly doc_refs: readonly {

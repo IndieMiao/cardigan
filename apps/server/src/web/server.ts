@@ -16,6 +16,8 @@ import type { MergeGateConfiguration } from "@cardigan/host";
 import { readRunQueue } from "@cardigan/host";
 import { resolveDataDirectory } from "@cardigan/runtime-herdr";
 import { listRoleVersions, type Store, type WebSession } from "@cardigan/store";
+import { DEFAULT_SHUTDOWN_GRACE_MS } from "../config.js";
+import { type ShutdownTimer, systemShutdownTimer } from "../lifecycle.js";
 import { serveAttachment } from "./attachments.js";
 import { serveAvatar } from "./avatars.js";
 import { readCardDetail, readCardList } from "./card-state.js";
@@ -93,6 +95,13 @@ export interface WebServerOptions {
     readonly pollMs?: number;
     readonly heartbeatMs?: number;
   };
+  /**
+   * How long in-flight requests may run after `close()` before their
+   * connections are cut. SSE streams never get it: they end at once.
+   */
+  readonly shutdownGraceMs?: number;
+  /** Grace-period timer; tests drive it by hand. */
+  readonly shutdownTimer?: ShutdownTimer;
 }
 
 export interface RunningWebServer {
@@ -116,6 +125,7 @@ interface RequestContext {
   readonly dataDir: string;
   readonly mergeGate: MergeGateConfiguration | undefined;
   readonly stream: WebServerOptions["stream"];
+  readonly shutdown: AbortSignal;
   /** Only the validated Host and explicit configuration decide cookie flags. */
   readonly secureCookie: boolean;
   readonly log: (event: Readonly<Record<string, unknown>>) => void;
@@ -145,8 +155,17 @@ export async function startWebServer(
   const host = config.host;
   // Filled in once the socket is bound: the Host allow-list needs the port.
   let boundPort = 0;
+  // Aborted by close(): SSE streams end, and responses stop keeping sockets.
+  const shutdown = new AbortController();
 
   const http = createServer((req, res) => {
+    if (shutdown.signal.aborted) res.setHeader("Connection", "close");
+    // While closing, a finished keep-alive socket is idle; close it so
+    // `http.close()` does not wait for the browser to hang up.
+    res.once("close", () => {
+      if (shutdown.signal.aborted)
+        setImmediate(() => http.closeIdleConnections());
+    });
     const startedAt = performance.now();
     let code = "ok";
     let route = "unmatched";
@@ -219,6 +238,7 @@ export async function startWebServer(
         dataDir,
         mergeGate: options.mergeGate,
         stream: options.stream,
+        shutdown: shutdown.signal,
         secureCookie: config.publicOrigins.includes(`https://${hostHeader}`),
         log,
       });
@@ -240,16 +260,28 @@ export async function startWebServer(
   });
   const address = http.address() as AddressInfo;
   boundPort = address.port;
+  const graceMs = options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
+  const timer = options.shutdownTimer ?? systemShutdownTimer;
+  let closing: Promise<void> | undefined;
 
   return {
     host,
     port: address.port,
     url: `http://${bracket(host)}:${address.port}`,
     close: () =>
-      new Promise<void>((resolve, reject) => {
-        http.close((error) => (error ? reject(error) : resolve()));
-        http.closeAllConnections();
-      }),
+      (closing ??= new Promise<void>((resolve, reject) => {
+        let cancel = (): void => {};
+        // Stop listening first, then end the streams; `close` also drops the
+        // connections that are already idle.
+        http.close((error) => {
+          cancel();
+          if (error) reject(error);
+          else resolve();
+        });
+        shutdown.abort();
+        http.closeIdleConnections();
+        cancel = timer(graceMs, () => http.closeAllConnections());
+      })),
   };
 }
 
@@ -383,6 +415,7 @@ async function serveProjectRoute(
         ? {}
         : { heartbeatMs: context.stream.heartbeatMs }),
       log: context.log,
+      signal: context.shutdown,
     });
     return;
   }
