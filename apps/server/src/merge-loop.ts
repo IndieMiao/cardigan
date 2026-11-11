@@ -22,6 +22,7 @@ import type { Store } from "@cardigan/store";
 import type { MergeGit } from "./git.js";
 import { startTimerLoop, type TimerLoop } from "./loop.js";
 import { type MergeCheckOptions, MergeChecks } from "./merge-checks.js";
+import { withPublication } from "./publication-lock.js";
 
 /** Default cadence: one pass is cheap when no card is ready. */
 export const DEFAULT_MERGE_INTERVAL_MS = 5_000;
@@ -190,29 +191,34 @@ export class MergeExecutor {
     const project_id = project.project_id as ProjectId;
     try {
       await this.options.git.sync(project);
-      const outcome: MergeOutcome = await this.options.git.merge(project, plan);
-      if (outcome.status === "stale") return false;
-      if (outcome.status === "merged")
-        this.record(project_id, plan, {
-          kind: "merged",
-          merge_sha: outcome.merge_sha,
-          previous_sha: outcome.previous_sha,
-        });
-      else if (outcome.status === "noop")
-        // Every planned delivery is already an ancestor of the baseline; the
-        // card still has to reach `done`, so the result names the current tip.
-        this.record(project_id, plan, {
-          kind: "merged",
-          merge_sha: outcome.branch_sha,
-          previous_sha: outcome.branch_sha,
-        });
-      else
-        this.record(project_id, plan, {
-          kind: "conflicted",
-          delivery_id: outcome.delivery_id as DeliveryId,
-          files: outcome.files,
-        });
-      return true;
+      return await withPublication(project_id, async () => {
+        const outcome: MergeOutcome = await this.options.git.merge(
+          project,
+          plan,
+        );
+        if (outcome.status === "stale") return false;
+        if (outcome.status === "merged")
+          this.record(project_id, plan, {
+            kind: "merged",
+            merge_sha: outcome.merge_sha,
+            previous_sha: outcome.previous_sha,
+          });
+        else if (outcome.status === "noop")
+          // Every planned delivery is already an ancestor of the baseline; the
+          // card still has to reach `done`, so the result names the current tip.
+          this.record(project_id, plan, {
+            kind: "merged",
+            merge_sha: outcome.branch_sha,
+            previous_sha: outcome.branch_sha,
+          });
+        else
+          this.record(project_id, plan, {
+            kind: "conflicted",
+            delivery_id: outcome.delivery_id as DeliveryId,
+            files: outcome.files,
+          });
+        return true;
+      });
     } catch (error) {
       this.recordFailure(
         project_id,
