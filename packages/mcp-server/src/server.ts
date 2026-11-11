@@ -20,7 +20,7 @@ import {
 } from "./commands/support-tools.js";
 import { ToolError } from "./errors.js";
 import { type Logger, stdoutLogger } from "./log.js";
-import { createMcpServer } from "./tool-server.js";
+import { createMcpServer, toolCatalogFingerprint } from "./tool-server.js";
 import { readOnlyTools } from "./tools/index.js";
 import type { ToolDefinition } from "./tools/types.js";
 
@@ -42,6 +42,11 @@ export interface RunningServer {
   readonly url: string;
   readonly port: number;
   readonly host: string;
+  /** P2a-10 A: fingerprint of the `tools/list` this endpoint serves to `allowed`. */
+  toolCatalog(
+    allowed: readonly string[],
+    assignment: Parameters<typeof toolCatalogFingerprint>[2],
+  ): string;
   close(): Promise<void>;
 }
 
@@ -50,6 +55,38 @@ const MCP_PATH = "/mcp";
 /** IPv6 literals need brackets in a URL and in a Host header. */
 function bracket(host: string): string {
   return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+}
+
+/** The tool set the endpoint serves when the caller does not inject one. */
+export function serverTools(
+  options: DeliveryToolOptions & SupportToolOptions,
+): readonly ToolDefinition[] {
+  return [
+    ...readOnlyTools,
+    ...deliveryTools(options),
+    ...managementTools(options.clock),
+    ...supportTools(options),
+  ];
+}
+
+let defaultCatalogTools: readonly ToolDefinition[] | undefined;
+
+/**
+ * P2a-10 A: the fingerprint of the default endpoint's `tools/list` for
+ * `allowed`, computed without a running server. Host launch paths (CLI and
+ * Dispatcher alike) record it for a new session. Descriptions and schemas do
+ * not depend on the options, and no handler ever runs here.
+ */
+export function defaultToolCatalog(
+  allowed: readonly string[],
+  assignment: Parameters<typeof toolCatalogFingerprint>[2],
+): string {
+  defaultCatalogTools ??= serverTools({
+    deliveryVerifier: () => {
+      throw new Error("catalog tools never run");
+    },
+  });
+  return toolCatalogFingerprint(defaultCatalogTools, allowed, assignment);
 }
 
 /**
@@ -63,12 +100,9 @@ export async function startMcpServer(
 ): Promise<RunningServer> {
   const host = options.host ?? "127.0.0.1";
   const log = options.log ?? stdoutLogger;
-  const tools = options.tools ?? [
-    ...readOnlyTools,
-    ...deliveryTools({ ...options, log }),
-    ...managementTools(options.clock),
-    ...supportTools(options),
-  ];
+  const tools = options.tools ?? serverTools({ ...options, log });
+
+  const catalogs = new Map<string, string>();
 
   // Filled in once the socket is bound; the DNS rebinding check needs the port.
   let boundPort = 0;
@@ -172,6 +206,21 @@ export async function startMcpServer(
     host,
     port: address.port,
     url: `http://${bracket(host)}:${address.port}${MCP_PATH}`,
+    toolCatalog: (allowed, assignment) => {
+      // `tools` is fixed for the process, so the fingerprint is too.
+      const key = JSON.stringify([
+        [...allowed].sort(),
+        assignment.scope,
+        assignment.role_id,
+        assignment.standing_mode ?? null,
+      ]);
+      let fingerprint = catalogs.get(key);
+      if (fingerprint === undefined) {
+        fingerprint = toolCatalogFingerprint(tools, allowed, assignment);
+        catalogs.set(key, fingerprint);
+      }
+      return fingerprint;
+    },
     close: () =>
       new Promise<void>((resolve, reject) => {
         http.close((error) => (error ? reject(error) : resolve()));

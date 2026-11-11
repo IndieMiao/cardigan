@@ -45,6 +45,7 @@ export interface ControlPlaneOptions {
   readonly runtime: DispatcherOptions["runtime"] &
     RuntimeMonitorOptions["runtime"];
   readonly snapshot: DispatcherOptions["snapshot"];
+  readonly toolCatalog?: DispatcherOptions["toolCatalog"];
   readonly runLimit?: DispatcherOptions["runLimit"];
   readonly startRun: DispatcherOptions["startRun"];
   readonly beforeWake?: DispatcherOptions["beforeWake"];
@@ -151,6 +152,7 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
     clock,
     standing,
     snapshot: options.snapshot,
+    ...(options.toolCatalog ? { toolCatalog: options.toolCatalog } : {}),
     ...(options.inactiveCancelAfterMs === undefined
       ? {}
       : { inactiveCancelAfterMs: options.inactiveCancelAfterMs }),

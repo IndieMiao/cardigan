@@ -43,11 +43,17 @@ export {
   stdoutLogger,
 } from "./log.js";
 export {
+  defaultToolCatalog,
   type McpServerOptions,
   type RunningServer,
+  serverTools,
   startMcpServer,
 } from "./server.js";
-export { createMcpServer, type ToolServerOptions } from "./tool-server.js";
+export {
+  createMcpServer,
+  type ToolServerOptions,
+  toolCatalogFingerprint,
+} from "./tool-server.js";
 export {
   ackEventsTool,
   defineTool,
