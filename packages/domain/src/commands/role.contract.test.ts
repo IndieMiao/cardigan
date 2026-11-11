@@ -156,6 +156,26 @@ describe("tool and worktree boundaries", () => {
     );
     expect(created.data.allowed_tools).toEqual(tools);
   });
+  test.each(["host_ops", "planner"])(
+    "standing role %s cannot be granted the V12b catalog tools",
+    (role_id) => {
+      for (const tool of ["list_templates", "list_roles"] as const)
+        expect(
+          validateRole(
+            definition({
+              role_id,
+              kind: "standing",
+              worktree: "none",
+              allowed_tools: [tool],
+            }),
+          ),
+          tool,
+        ).toMatchObject({
+          ok: false,
+          error: { code: "validation_failed" },
+        });
+    },
+  );
   test.each<RoleKind>(["produce", "verify", "standing"])(
     "checks every system tool for %s",
     (kind) => {

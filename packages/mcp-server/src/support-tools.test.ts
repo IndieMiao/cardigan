@@ -636,8 +636,14 @@ test("V12b list_templates and list_roles only show this project's catalog", asyn
   });
   expect(JSON.stringify(roles)).not.toContain("Private");
   expect(JSON.stringify(roles)).not.toContain("spy");
-  for (const name of ["list_templates", "list_roles"])
+  // The work-item token carries every standing tool, yet never sees these two.
+  const coderTools = (await coder.listTools()).tools.map((t) => t.name);
+  const officeTools = (await office.listTools()).tools.map((t) => t.name);
+  for (const name of ["list_templates", "list_roles"]) {
+    expect(coderTools).not.toContain(name);
+    expect(officeTools).toContain(name);
     expect(code(await call(coder, name))).toBe("forbidden_tool");
+  }
   expect(writes).not.toHaveBeenCalled();
   expect(counts()).toEqual(before);
 });

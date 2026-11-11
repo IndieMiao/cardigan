@@ -63,3 +63,40 @@ test("a revoked token is rejected before the assignment is consulted", () => {
   store.revokeToken(issued.record.id);
   expect(authenticate(store, issued.token).ok).toBe(false);
 });
+
+// V12b: work-item PMs and host_ops never authenticate with the catalog tools,
+// even when an older or hand-made token carries them.
+test.each([
+  { scope: "work_item", role_id: "pm", kept: false },
+  { scope: "standing", role_id: "host_ops", kept: false },
+  { scope: "work_item", role_id: "coder", kept: false },
+  { scope: "standing", role_id: "pm", kept: true },
+] as const)(
+  "catalog tools on a $scope $role_id token are kept=$kept",
+  ({ scope, role_id, kept }) => {
+    const catalog = ["list_templates", "list_roles"] as const;
+    store.uow.run((tx) => {
+      const assignment = tx.assignments.get(project_id, "A-1" as never);
+      if (assignment === undefined) throw new Error("missing assignment");
+      tx.assignments.put(project_id, {
+        ...assignment,
+        scope,
+        role_id,
+        ...(scope === "standing"
+          ? { standing_mode: "ops", work_item_id: undefined }
+          : {}),
+      } as never);
+    });
+    const issued = store.issueToken({
+      project_id,
+      assignment_id: "A-1" as never,
+      role: { role_version: 1, allowed_tools: ["whoami", ...catalog] },
+    });
+    const identity = authenticate(store, issued.token);
+    expect(identity.ok).toBe(true);
+    if (!identity.ok) return;
+    expect(identity.value.actor.allowed_tools).toEqual(
+      kept ? ["whoami", ...catalog] : ["whoami"],
+    );
+  },
+);

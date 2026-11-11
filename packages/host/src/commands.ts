@@ -15,6 +15,8 @@ import type {
 } from "@cardigan/domain";
 import {
   applyStandingMode,
+  holdsStandingOnlyTools,
+  isStandingOnlyTool,
   standingModeFromTools,
   standingTools,
 } from "@cardigan/domain";
@@ -173,7 +175,13 @@ function modeScopedTools(
     assignment.role_id !== "pm" ||
     assignment.standing_mode === undefined
   ) {
-    return allowed_tools.filter((tool) => tool !== "record_decision");
+    // V12b: work-item PMs share the pm role but never hold standing-only tools.
+    return allowed_tools.filter(
+      (tool) =>
+        tool !== "record_decision" &&
+        (!isStandingOnlyTool(tool) ||
+          (assignment !== undefined && holdsStandingOnlyTools(assignment))),
+    );
   }
   const permitted = standingTools(
     allowed_tools as never,
