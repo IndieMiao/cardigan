@@ -257,10 +257,24 @@ process.exit(child.status ?? 98);
     ).toBe(source);
   });
   test("M4.2 verification and backup use streaming Agent upload-pack, never host Git in shared repositories", async () => {
+    // C-127: paths with quotes or whitespace are refused before any SSH
+    // command is built (identity: literal-path rule; agent root: also the
+    // [A-Za-z0-9._/-] charset), so they never reach shell quoting.
+    for (const unsafe of [
+      { agentRoot: join(root, "agent's workspace") },
+      { identityFile: join(root, "key's file") },
+      { identityFile: join(root, "key file") },
+    ])
+      await expect(
+        agentUploadPack(
+          { ...config, ...unsafe },
+          join(unsafe.agentRoot ?? config.agentRoot, "repos", "project"),
+        ),
+      ).rejects.toThrow(/Invalid SSH (identity|agent root) path/);
     config = {
       ...config,
-      agentRoot: join(root, "agent's workspace"),
-      identityFile: join(root, "key's file"),
+      agentRoot: join(root, "agent-workspace"),
+      identityFile: join(root, "key-file"),
     };
     await mkdir(config.agentRoot);
     await chmod(config.agentRoot, 0o2750);
