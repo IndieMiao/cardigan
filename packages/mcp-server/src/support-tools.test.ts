@@ -625,6 +625,106 @@ test("PM queries derive current project views without writes or idempotency keys
   expect(counts()).toEqual(before);
 });
 
+test("V12b list_templates and list_roles only show this project's catalog", async () => {
+  const template = (project: string, id: string, title: string) => ({
+    id,
+    version: 1,
+    builtin: false,
+    status: "active" as const,
+    title,
+    description: `${project} template`,
+    requires_repo: false,
+    merge: "none" as const,
+    require_acceptance_criteria: false,
+    primary_work_item_key: "make",
+    completion: { mode: "human_mark_done" as const },
+    work_items: [
+      {
+        key: "make",
+        title: "Make",
+        kind: "produce" as const,
+        role_id: "coder",
+        required: true,
+      },
+    ],
+  });
+  store.uow.run((tx) => {
+    tx.card_templates.put(project_id, template(project_id, "ours", "Ours"));
+    tx.card_templates.put(
+      "other-project",
+      template("other-project", "theirs", "Private other template"),
+    );
+    tx.roles.put(project_id, {
+      role_id: "painter",
+      role_version: 1,
+      allowed_tools: ["whoami"],
+      capabilities: ["paint"],
+      display_name: "Painter",
+      kind: "produce",
+      worktree: "write",
+      abilities: ["image"],
+      core_prompt: "Private painter prompt",
+    } as never);
+    tx.roles.put("other-project", {
+      role_id: "spy",
+      role_version: 1,
+      allowed_tools: ["whoami"],
+      capabilities: ["Private other role"],
+    });
+  });
+  const before = counts();
+  const writes = vi.spyOn(store, "runIdempotent");
+  const templates = await office.callTool({
+    name: "list_templates",
+    arguments: { project_id: "other-project" },
+  });
+  expect(templates.isError).not.toBe(true);
+  const listed = templates.structuredContent as {
+    project_id: string;
+    templates: { id: string }[];
+  };
+  expect(listed.project_id).toBe(project_id);
+  expect(listed.templates.map((t) => t.id)).toEqual([
+    "artifact",
+    "dev",
+    "general",
+    "ours",
+  ]);
+  expect(JSON.stringify(templates)).not.toContain("Private other template");
+  const roles = await office.callTool({
+    name: "list_roles",
+    arguments: {},
+  });
+  expect(roles.isError).not.toBe(true);
+  expect(roles.structuredContent).toMatchObject({
+    project_id,
+    roles: [
+      { role_id: "coder" },
+      {
+        role_id: "painter",
+        display_name: "Painter",
+        kind: "produce",
+        capabilities: ["paint"],
+        worktree: "write",
+        abilities: ["image"],
+      },
+      { role_id: "pm" },
+    ],
+  });
+  expect(JSON.stringify(roles)).not.toContain("Private");
+  expect(JSON.stringify(roles)).not.toContain("spy");
+  // The work-item token carries every standing tool, yet never sees these two.
+  const coderTools = (await coder.listTools()).tools.map((t) => t.name);
+  const officeTools = (await office.listTools()).tools.map((t) => t.name);
+  for (const name of ["list_templates", "list_roles"]) {
+    expect(coderTools).not.toContain(name);
+    expect(officeTools).toContain(name);
+    expect(code(await call(coder, name))).toBe("forbidden_tool");
+  }
+  expect(writes).not.toHaveBeenCalled();
+  expect(counts()).toEqual(before);
+});
+
 test("C-115: list_needs_you uses host gate settings without hiding card decisions", async () => {
   const q = await ok<Decision>(office, "request_decision", {
     ...decision,

@@ -60,10 +60,35 @@ export const STANDING_ROLE_TOOLS = [
   "release_assignment",
   "project_snapshot",
   "list_needs_you",
+  "list_templates",
+  "list_roles",
   "record_decision",
   "resolve_delegated_decision",
   "triage_human_action",
 ] as const satisfies readonly ToolName[];
+
+/** V12b: read-only template/role catalog, standing PM only (plan §2.1). */
+export const STANDING_ONLY_TOOLS = [
+  "list_templates",
+  "list_roles",
+] as const satisfies readonly ToolName[];
+/**
+ * Who may hold a standing-only tool: the project's standing PM (Office or
+ * Ops). Work-item PMs reuse the `pm` role and host_ops is also standing, so
+ * token issuance, authentication and tools/list all apply this check too.
+ */
+export function holdsStandingOnlyTools(assignment: {
+  readonly scope: string;
+  readonly role_id: string;
+}): boolean {
+  return assignment.scope === "standing" && assignment.role_id === "pm";
+}
+export function isStandingOnlyTool(tool: string): boolean {
+  return (STANDING_ONLY_TOOLS as readonly string[]).includes(tool);
+}
+const workItemTool = (tool: ToolName): boolean =>
+  !tool.startsWith("host_ops_") &&
+  !(STANDING_ONLY_TOOLS as readonly ToolName[]).includes(tool);
 
 export const ROLE_TOOL_ALLOWLISTS: Readonly<
   Record<RoleKind, readonly ToolName[]>
@@ -73,13 +98,13 @@ export const ROLE_TOOL_ALLOWLISTS: Readonly<
       tool !== "submit_review" &&
       tool !== "replace_verification_work_item" &&
       tool !== "withdraw_review" &&
-      !tool.startsWith("host_ops_"),
+      workItemTool(tool),
   ),
   verify: toolNames.filter(
     (tool) =>
       tool !== "submit_delivery" &&
       tool !== "replace_verification_work_item" &&
-      !tool.startsWith("host_ops_"),
+      workItemTool(tool),
   ),
   standing: [...STANDING_ROLE_TOOLS, ...HOST_OPS_TOOLS],
 };

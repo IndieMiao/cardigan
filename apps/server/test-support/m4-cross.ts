@@ -34,6 +34,7 @@ import {
   type Runtime,
   type RuntimeRef,
   releaseAssignment,
+  STANDING_ONLY_TOOLS,
   STANDING_ROLE_TOOLS,
   setProjectPreferences,
   updateCard,
@@ -664,6 +665,7 @@ const child=spawnSync('sh',['-c',args.slice(at+2).join(' ')],{cwd:${JSON.stringi
                 "triage_human_action",
                 "replace_verification_work_item",
               ].includes(tool) &&
+                !(STANDING_ONLY_TOOLS as readonly string[]).includes(tool) &&
                 !(
                   role_id === "coder"
                     ? ["submit_review", "withdraw_review"]
