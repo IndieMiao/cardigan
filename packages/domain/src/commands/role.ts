@@ -1,5 +1,6 @@
 import type { Actor, Event } from "../entities.js";
 import type { Result } from "../errors.js";
+import { HOST_OPS_FORBIDDEN_TOOLS } from "../host-ops.js";
 import type { ProjectId } from "../ids.js";
 import {
   canManageRoles,
@@ -94,6 +95,21 @@ export function validateRole(role: RoleDefinition): Result<RoleDefinition> {
       );
     }
     const kind = roleKind(role);
+    ensure(
+      role.role_id === "host_ops" ||
+        !role.allowed_tools.some((tool) => tool.startsWith("host_ops_")),
+      "validation_failed",
+      "host_ops_* 工具只能授予 host_ops 角色",
+    );
+    ensure(
+      role.role_id !== "host_ops" ||
+        (kind === "standing" &&
+          !role.allowed_tools.some((tool) =>
+            (HOST_OPS_FORBIDDEN_TOOLS as readonly string[]).includes(tool),
+          )),
+      "validation_failed",
+      "host_ops 只能是常驻角色，不能派活、交付、审核、建卡或拍板",
+    );
     const allowed = ROLE_TOOL_ALLOWLISTS[kind];
     ensure(
       role.allowed_tools.every((tool) => allowed.includes(tool)),

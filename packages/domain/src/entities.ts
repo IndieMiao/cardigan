@@ -65,6 +65,11 @@ export const toolNames = [
   "record_decision",
   "resolve_delegated_decision",
   "triage_human_action",
+  "host_ops_read_diagnostics",
+  "host_ops_restart_assignment",
+  "host_ops_cancel_run",
+  "host_ops_recheck_merge",
+  "host_ops_restart_standing_pm",
 ] as const;
 export type ToolName = (typeof toolNames)[number];
 export interface RoleReference {

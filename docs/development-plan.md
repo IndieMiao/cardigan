@@ -921,6 +921,8 @@ M3.4 的 Runtime 接线根据已派发的业务 Run（dispatched / acked / runni
 
 审核轮数上限由 PM Ops 作流程判断，使用 `update_work_item.review_limit_decision` 的限定入口（§4.4），不借用前台代记人的权限。后台在流程类别授权开启时可以附理由增加一轮或暂停；仅涉及功能、结果或需求疑问时，才将原拍板升级给人。没有活跃后台时由系统直接交人。
 
+P2a-10 B1（C-84，q(139)）：主机运维是独立的常驻角色 `host_ops`，员工“大乔”的身份由 Employee 提供；它没有 PM 的 `standing_mode`，不参与 Office/Ops 的模式回填。只负责本项目、本机的会话健康，向 PM Ops 汇报；不派活、不建卡、不交付或审核、不确认合并、不代拍。口径和权限内处理不了的事项沿用评论与人工操作请求交给 PM Ops，高风险继续交人。五个专用 MCP 工具、主机执行、定时巡检及 host 分拣通知的接线由 C-85 承接，B1 不改变现有路由与 human-only 执行权限。
+
 ### 7.2 Event Router：先规则，后 PM
 
 能由规则确定处理的事件不调用 PM，见 §6.4。只有以下情况才升级给 PM Ops：
@@ -1252,7 +1254,7 @@ CLI 接受 `CARDIGAN_TOKEN` 或全局 `--token-file <path>`，同时提供时拒
 | `init`；`project create/set-repo` | 仅人类，无对应 MCP 工具 |
 | `role list/show/add/copy/update/deactivate/activate/rollback/upgrade` | 仅人类 |
 | `member add/list/update/deactivate/activate`；`employee add/list/update/deactivate/activate`；`avatar list` | 仅人类 |
-| `pm create/start/rotate`；`token issue` | 仅人类 |
+| `pm create/start/rotate`；`host-ops create/start`；`token issue` | 仅人类；创建与启动可签发凭据，Token 模式拒绝 |
 | `preference get/set`（所有偏好）；`template list/show/add/copy/update/deactivate/activate/rollback` | 仅人类 |
 | `card done/sensitive`；`human-action done`；`needs-you read` | 仅人类 |
 | `attention`；`assignment start/stop/attach` | 仅人类 |
@@ -1261,6 +1263,8 @@ CLI 接受 `CARDIGAN_TOKEN` 或全局 `--token-file <path>`，同时提供时拒
 | `launch <profile>/list/--list/check/import-claude-settings`（含 `--print`） | 仅人类，无对应 MCP 工具 |
 
 ### 9.2 工具清单（初版）
+
+P2a-10 B1 在 domain 的 `toolNames` 中预留 `host_ops_read_diagnostics`、`host_ops_restart_assignment`、`host_ops_cancel_run`、`host_ops_recheck_merge`、`host_ops_restart_standing_pm` 五个名称，只允许 `host_ops` 角色配置。它们目前没有 CLI 映射或 MCP handler，不出现在服务的可调用工具清单中；实际调用入口由 C-85 接线。`host_ops_action_taken` 领域事件类型预定义 `tool`、`target_id`、`reason`，操作者和时间沿用 Event 的 `actor/created_at`；B1 没有执行路径写入该事件。
 
 | 工具 | 可用角色 | 作用 |
 |---|---|---|
@@ -1328,6 +1332,8 @@ M1.6c 的 `heartbeat`、`finish_run` 与附件上传复用写命令的幂等事�
 - 其他：`budget?`、`launch_profile_ref`
 
 Role 修改后版本号递增，Run 记录所用版本。`createRole / copyRole / updateRole / deactivateRole / activateRole / rollbackRole` 统一进行 domain 校验；文件导入、默认角色包复制、跨项目复制和历史回退都不能绕过边界。
+
+`host_ops` 只能使用 `kind=standing`，不能被 `assign` 指派到任何产出或验证工作项。默认包设置 `worktree=none`、`capabilities=[]`；工具为通用读写沟通、Run 协议和五个预留运维名称，不携带 PM 的管理或决定权限。创建常驻身份与启动均只允许人通过 CLI 执行，角色和员工在创建后固定。
 
 角色更新只影响之后的新指派，已有 Assignment 固定使用指派时的版本；要让已有工作用上新版本，需要重新指派，常驻 PM 用 `cardigan pm rotate`（§7.1）。按默认角色包追加版本用 `cardigan role upgrade <角色> --from-default`（§4.3）。重复执行 assign 会复用原 Assignment，不是版本升级入口。V9a 沿用这一现有机制，不自动替换既有会话、Token 或 worktree（C-25 的 PM 指令）；系统共用协议的更新仍随下一次启动编译生效。
 
@@ -1414,14 +1420,15 @@ Assignment 的 `launch.sh` 用 `exec nice -n <值> <Agent CLI> ...` 启动 Claud
 |---|---|---|---|---|
 | pm（office） | standing | 常驻不需要；工作项验收只读（按完成申请 SHA 检出） | PM 工具 + `record_decision` | Claude Code（Opus） |
 | pm（ops） | standing | 常驻不需要；工作项验收只读（按完成申请 SHA 检出） | PM 工具（不能记录人的决定） | Claude Code（Opus） |
+| 主机运维（host_ops） | standing | 不建 | 会话健康、报告异常；专用执行工具待 C-85 接线 | Codex（gpt-6.1-sol）；`codex-sol` 由上线人员登记 |
 | designer | work | 只读（按 SHA 检出） | 设计走查：界面、交互和文案验证；设计工具 MCP；截图 | 接入移动端项目时再定 |
 | coder | work | 需要 | 代码产出；只在本地 commit，没有任何推送权限 | Codex（GPT-6-Astra） |
 | reviewer | work | 只读（按 SHA 检出） | 代码审核 | Claude Code（和 coder 用不同模型，交叉检查） |
 | tester | work | 只读（按 SHA 检出） | 测试验收；需要带对应能力标签的机器（如真机） | 接入移动端项目时再定 |
 
-默认角色包（`packages/roles`）已包含 `pm`、`coder`、`reviewer`、`designer`、`tester` 五个 Core Prompt。`designer` 和 `tester` 都是验证型角色：在只读 worktree 里工作，用 `submit_review` 审核当前版本，`target_sha` 必须等于被审交付的 `subject`，`verdict` 由服务端计算。
+默认角色包（`packages/roles`）已包含 `pm`、`coder`、`reviewer`、`designer`、`tester`、`host_ops` 六个 Core Prompt。`designer` 和 `tester` 都是验证型角色：在只读 worktree 里工作，用 `submit_review` 审核当前版本，`target_sha` 必须等于被审交付的 `subject`，`verdict` 由服务端计算。主机运维通过编号定位目标，只使用当前已提供的白名单工具，不通过 shell、sudo、Git 推送或终端按键替代工具；未提供的运维能力不能宣称已执行。
 
-五个默认角色共享以下协作规则，随 Core Prompt 注入 `claude-code`、`codex`、`pi` 三种 Harness 的启动配置：
+六个默认角色共享以下协作规则，随 Core Prompt 注入 `claude-code`、`codex`、`pi` 三种 Harness 的启动配置：
 
 - 不新建任务计划文件（例如 `docs/plans/` 下的计划）；任务计划由人或 PM 维护，设计改动只更新卡片要求的正文文档。
 - 只运行卡片或工作项写明范围的测试；未写明范围时只运行改动所在包的测试。全量测试和端到端测试由合并前的主机检查负责。
@@ -1638,6 +1645,8 @@ server 在合并循环旁启动独立的推送循环（默认 5 秒轮询，跟�
 
 ### 13.1 单机（Phase 1）
 
+P2a-10 B1 新增仅人类 CLI：先用 `cardigan role copy host_ops host_ops --from-default --harness codex --launch-profile <配置名>` 登记默认角色，再用 `cardigan host-ops create [--employee <E-n>] [--project <p>]` 创建常驻身份。省略员工时绑定唯一的在职 `host_ops` 员工；没有该角色员工时保留无员工身份，有多个时要求显式指定。新身份固定角色最新启用版本，不写 PM 的 `standing_mode`；重复创建复用原身份及其版本，不改派员工。Assignment、创建事件与 Token 签发在同一事务内完成，明文仅向 CLI 输出一次，不进事件或错误。`cardigan host-ops start [--project <p>]` 复用既有 Assignment 启动流程，已有未结束 Run 时跳过；也支持启动入口已有的 `--data-dir`、`--mcp-url`、`--hc-session` 参数。两条命令都拒绝 Token 模式。专用执行工具与巡检唤醒由 C-85 接线后才能使用。
+
 V11b：主机用 `cardigan pm rotate --office --external --employee <E-n 或名字> [--project <p>]` 接入外接 Office；Token 只显示一次，保存到仓库外的安全位置并用于 MCP，通知用现有收件箱协议读取。CLI Token 身份模式由 V11c 另行实现。
 
 P2a-1 的主机配置读取层从 `CARDIGAN_CONFIG_DIR/merge-gate.yaml`（默认 `~/.config/cardigan/merge-gate.yaml`）按项目加载检查；server 在启动时读取，CLI 每次调用读取，修复配置后需重启 server。未找到文件或项目未配置时为 disabled；已配置但项目不存在、检查为空／名称重复／命令为空、超时不是正整数、env 非字符串或含受控运行变量时为 invalid，组装层必须停止该项目的合并，不能当作 disabled。整份 YAML 无法读取／解析或顶层格式无效时，对所有项目返回 invalid。只输出固定中文错误，不回显配置正文、命令或 env 值。配置文件须为可信属主的普通文件，不可由组／其他用户写，路径祖先不可被不可信用户替换；拒绝链接、YAML 重复键／别名／警告及超大文件。P2a-1b 增加可选 push，非法推送配置同样使项目闸门 invalid；单条默认 30 分钟、总计默认 60 分钟。
@@ -1688,7 +1697,7 @@ CLI 评论与 Workbench 写接口共用 domain `postComment` 内的正文提及�
 - `cardigan role list [--all]` 默认只列启用角色的最新版；`show <角色> [--version <n> | --history]` 查看内容或完整历史。
 - `cardigan role add|update --file <role.yaml>` 使用同一批 domain 命令；YAML 可使用 instructions 或旧 core_prompt，版本由命令递增，不能通过文件指定版本或启停状态。
 - `cardigan role copy <源角色> <新角色> [--from-project <p>] [--version <n>] [--name <显示名>]`，未指定来源项目时复制当前项目；源版本缺省为最新。
-- 从代码默认包复制：`cardigan role copy coder builder --from-default --harness codex --launch-profile <配置名>`。显式选主机上的启动配置；默认包包含 pm、coder、reviewer、designer、tester。复制后的编号仍须满足权限边界，例如带 record_decision 的 pm 不能直接复制成其他编号。
+- 从代码默认包复制：`cardigan role copy coder builder --from-default --harness codex --launch-profile <配置名>`。显式选主机上的启动配置；默认包包含 pm、coder、reviewer、designer、tester、host_ops。复制后的编号仍须满足权限边界，例如带 record_decision 的 pm 或带 host_ops_* 的 host_ops 不能直接复制成其他编号。
 - `cardigan role update <角色> --convert-legacy` 显式转换旧提示词，无法拆分时在 stderr 提示重复风险。
 - `cardigan role deactivate <角色>` / `activate <角色>`；`rollback <角色> --version <n>` 用指定历史内容追加新版本，恢复状态需单独 activate。
 - 兼容 `role add <项目> <角色> [--version <下一个版本>] [--allowed-tools a,b] [--capabilities x,y]`：也走 domain 新建或修改；不允许覆盖、跳过版本。该旧简写使用 codex / codex-agent 的完整角色定义，需要其他配置时用 YAML。
@@ -1860,6 +1869,8 @@ resume_or_replace 在旧终端不存在时可重开；release 返回 runtime_una
 | standing 常驻 | 固定的 STANDING_ROLE_TOOLS（现有 PM 上限）：whoami、get_card、get_updates、ack_events、post_comment、issue_instruction、report_blocker、request_human_action、request_decision、upload_attachment、heartbeat、finish_run、submit_delivery、submit_review、create_card、update_card、create_work_item、update_work_item、assign、project_snapshot、list_needs_you、record_decision、resolve_delegated_decision、triage_human_action |
 
 所有类型均额外要求：record_decision、resolve_delegated_decision、triage_human_action 只能配置在编号为 pm 的角色上；后两者的命令只允许 active、standing_mode=ops 的常驻 PM，Office Token 不签发。主机只对 standing_mode=office 的常驻 PM 签发 record_decision。Ops、工作项 PM 和其他角色不能取得它。现有命令对工作项类型、项目作用域及作者／审核者隔离的校验继续生效，角色白名单不会绕过这些约束。角色 CRUD 权限独立于工具清单，当前只接受同项目 human，Agent 和 system 均拒绝。
+
+P2a-10 B1：produce/verify 上限另排除所有 `host_ops_*` 工具；standing 类型上限增加五个预留运维工具，现有 PM 默认工具清单不变。所有角色写入均强制 `host_ops_*` 只能属于 `role_id=host_ops`，且该角色必须为 standing；它禁止配置 `record_decision`、`resolve_delegated_decision`、`triage_human_action`、`submit_delivery`、`submit_review`、`create_card`、`update_card`、`create_work_item`、`update_work_item`、`assign`、`issue_instruction`。命令层再次核对运维角色边界和常驻作用域，`assign` 即使由人调用也不能把它指派到工作项。它可在项目内读取、评论和请求协作，但发起拍板的 `decider` 只能是 human 或 role:pm；任何请求都不能把 host_ops 设为决策人。请求仍记录 assignment 作者，D12 四类高风险继续只认 human。`recheck_merge`、常驻 PM 暂停与恢复的原有 human-only 校验在 B1 保持不变。
 
 ## 15. 决策（Phase 0 已全部敲定）
 

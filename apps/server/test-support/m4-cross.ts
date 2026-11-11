@@ -34,8 +34,8 @@ import {
   type Runtime,
   type RuntimeRef,
   releaseAssignment,
+  STANDING_ROLE_TOOLS,
   setProjectPreferences,
-  toolNames,
   updateCard,
 } from "@cardigan/domain";
 import {
@@ -655,7 +655,7 @@ const child=spawnSync('sh',['-c',args.slice(at+2).join(' ')],{cwd:${JSON.stringi
           harness: "pi",
           launch_profile_ref: "fixture",
           // Preserve collaboration tools, but do not give every role both work-item actions.
-          allowed_tools: toolNames.filter(
+          allowed_tools: STANDING_ROLE_TOOLS.filter(
             (tool) =>
               role_id === "pm" ||
               (![

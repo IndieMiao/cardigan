@@ -33,6 +33,8 @@ export const CLI_TOOLS = {
   "pm create": null,
   "pm start": null,
   "pm rotate": null,
+  "host-ops create": null,
+  "host-ops start": null,
   "preference get": null,
   "preference set": null,
   "template list": null,

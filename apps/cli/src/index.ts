@@ -69,6 +69,7 @@ const TOP_LEVEL_USAGE = [
   "  pm create        建常驻 PM Assignment 并签发 Token（--office / --ops）",
   "  pm start         一键启动 PM Office 与 PM Ops（已在运行就跳过）",
   "  pm rotate        把常驻 PM 换到 pm 最新版本（--office / --ops），事项转给新 Assignment",
+  "  host-ops create|start  创建或启动常驻主机运维 Assignment（仅人类）",
   "  preference get|set auto-merge-after  查看或修改超时自动合并偏好",
   "  template list|show|add|copy|update|deactivate|activate|rollback  管理项目模板",
   "  card create      按模板建卡（默认 dev）",
@@ -252,6 +253,7 @@ export async function main(
       command === "assign" ||
       command === "token" ||
       command === "pm" ||
+      command === "host-ops" ||
       command === "needs-you" ||
       command === "human-action"
     ) {

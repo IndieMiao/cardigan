@@ -607,6 +607,12 @@ describe("default role pack", () => {
 
   test("defaultRoles builds every default role from the given harness mappings", () => {
     const roles = defaultRoles({
+      host_ops: {
+        harness: "codex",
+        launch_profile: "codex-agent",
+        worktree: "none",
+        allowed_tools: ["whoami"],
+      },
       pm: {
         harness: "claude-code",
         launch_profile: "claude-agent",
@@ -645,6 +651,7 @@ describe("default role pack", () => {
       "reviewer",
       "designer",
       "tester",
+      "host_ops",
     ]);
     expect(roles.map((role) => role.worktree)).toEqual([
       "none",
@@ -652,6 +659,7 @@ describe("default role pack", () => {
       "readonly",
       "readonly",
       "readonly",
+      "none",
     ]);
     for (const role of roles) {
       for (const rule of AGENT_PROTOCOL) {

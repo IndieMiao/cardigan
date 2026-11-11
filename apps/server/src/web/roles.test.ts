@@ -42,7 +42,9 @@ test("V9b role routes list, show, version history and run every write as the log
         expect.objectContaining({ role_id: "pm", kind: "standing" }),
       ]),
     );
-    expect(list.default_roles).toEqual(expect.arrayContaining(["coder"]));
+    expect(list.default_roles).toEqual(
+      expect.arrayContaining(["coder", "host_ops"]),
+    );
     expect((list.allowlists as Record<string, string[]>).produce).not.toContain(
       "submit_review",
     );

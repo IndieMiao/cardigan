@@ -1,4 +1,5 @@
 import {
+  HOST_OPS_ROLE_TOOLS,
   type RoleDefinition,
   type RoleKind,
   STANDING_ROLE_TOOLS,
@@ -17,8 +18,7 @@ export {
 } from "./prompt.js";
 
 /**
- * Default role pack (M2.4 / M5.S): `pm`, `coder`, `reviewer`, `designer` and
- * `tester` Core Prompts.
+ * Default role pack, including the standing host operations role.
  *
  * Every Core Prompt must carry the Agent-side protocol from development plan
  * §6.3, so the protocol lives in one place here and is appended to each role's
@@ -69,7 +69,7 @@ export const PM_OPS_EVENT_RULES = [
 ] as const;
 
 const ROLE_BODIES: Record<
-  "pm" | "coder" | "reviewer" | "designer" | "tester",
+  "pm" | "coder" | "reviewer" | "designer" | "tester" | "host_ops",
   string
 > = {
   pm: [
@@ -206,6 +206,21 @@ const ROLE_BODIES: Record<
     "- 第二轮起只复查上一轮的问题是否修好；要新开问题必须是 critical 并带 proof。",
     "- 不改代码，不 push，不修改交付内容。",
   ].join("\n"),
+  host_ops: [
+    "# 角色：主机运维",
+    "",
+    "你是本项目的常驻主机运维（host_ops），负责本机 Agent 会话健康，向 PM Ops 汇报。员工姓名和职位以注入资料为准。",
+    "",
+    "## 你的职责",
+    "",
+    "- 只使用当前服务实际提供的白名单工具；没有出现在工具清单中的能力尚不可用，不声称已完成对应操作。",
+    "- 可用时通过 host_ops_read_diagnostics 巡检 attention、Run 和会话状态；上下文用量标为估算时，不当作真实 Token 用量。投递失败由已有自动恢复负责，避免重复操作。",
+    "- 恢复卡住的会话用 host_ops_restart_assignment；只取消 Run 用 host_ops_cancel_run；偶发合并检查失败可用 host_ops_recheck_merge 重查；常驻 PM 会话过期用 host_ops_restart_standing_pm。先核实目标、原因和当前状态，失败后核对最新记录，不能盲目重试。",
+    "- 目标只能用 Assignment、Run、Card 编号；不按员工名字、目录名、终端标题或模式猜目标，不直接发终端按键，不用 shell、sudo、Git 推送或凭据操作代替专用工具。",
+    "- 不派活、不建卡、不提交交付、不审核、不确认合并、不定需求口径；不能成为 Decision 的决策人，不能代拍或转录人的确认。",
+    "- 常规异常、口径问题和权限内处理不了的事项，通过 post_comment 提及 @pm 或 request_human_action 转交 PM Ops；涉及部署、主机配置、花钱、账号、权限或删除数据，按人工操作流程交人，不能自行执行。request_decision 的 decider 只能是 human 或 role:pm，四类高风险必须是 human。",
+    "- 巡检结果和处置证据写入相关卡片时间线；执行动作由服务端写 host_ops_action_taken 审计事件。没有可用工具或无法确认结果时明确记录未完成，再结束本次 Run；不因自己的 Run 结束反复唤醒自己。",
+  ].join("\n"),
 };
 
 export type DefaultRoleId = keyof typeof ROLE_BODIES;
@@ -241,7 +256,11 @@ export function defaultRoleDefinition(
   launch: { readonly harness: Harness; readonly launch_profile_ref: string },
 ): RoleDefinition {
   const kind: RoleKind =
-    role === "pm" ? "standing" : role === "coder" ? "produce" : "verify";
+    role === "pm" || role === "host_ops"
+      ? "standing"
+      : role === "coder"
+        ? "produce"
+        : "verify";
   const common: readonly ToolName[] = [
     "whoami",
     "get_card",
@@ -257,18 +276,25 @@ export function defaultRoleDefinition(
   ];
   return {
     role_id: role,
-    display_name: role,
+    display_name: role === "host_ops" ? "主机运维" : role,
     kind,
     instructions: instructionsFor(role),
     ...launch,
     abilities: [],
     required_machine_tags: [],
-    worktree: role === "coder" ? "write" : "readonly",
-    capabilities: [kind === "standing" ? "verify" : kind],
+    worktree:
+      role === "host_ops" ? "none" : role === "coder" ? "write" : "readonly",
+    capabilities:
+      role === "host_ops" ? [] : [kind === "standing" ? "verify" : kind],
     allowed_tools:
-      kind === "standing"
-        ? STANDING_ROLE_TOOLS
-        : [...common, kind === "produce" ? "submit_delivery" : "submit_review"],
+      role === "host_ops"
+        ? HOST_OPS_ROLE_TOOLS
+        : kind === "standing"
+          ? STANDING_ROLE_TOOLS
+          : [
+              ...common,
+              kind === "produce" ? "submit_delivery" : "submit_review",
+            ],
   };
 }
 

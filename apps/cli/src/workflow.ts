@@ -12,6 +12,7 @@ import {
   autoMergeSchedule,
   completeHumanAction,
   createCard,
+  createHostOpsAssignment,
   EXTERNAL_ASSIGNMENT_START_ERROR,
   isRoleActive,
   listNeedsYou,
@@ -46,6 +47,7 @@ import {
   printToken,
   resolveActor,
   resolveDataDir,
+  resolveGlobalActor,
   resolveProject,
   roleInTransaction,
   runCommand,
@@ -64,6 +66,8 @@ const USAGE = [
   "  cardigan assign <W-n> --role <角色> [--employee <E-n 或名字>] [--machine local] [--start] [--project <p>]",
   "  cardigan token issue <A-n> [--project <p>]",
   "  cardigan pm create --office|--ops [--project <p>]",
+  "  cardigan host-ops create [--employee <E-n>] [--project <p>]  创建常驻主机运维并签发 Token",
+  "  cardigan host-ops start [--project <p>]  启动常驻主机运维（已在运行就跳过）",
   "  cardigan pm start [--office] [--ops] [--project <p>]  一键启动常驻 PM（已在运行就跳过）",
   "  cardigan pm rotate --office|--ops [--external] [--employee <E-n 或名字>] [--project <p>]     把常驻 PM 换到 pm 角色的最新版本",
   "    新建固定最新版本的常驻 Assignment，待处理的 PM 事项转给它，旧的释放并作废 Token；",
@@ -190,6 +194,8 @@ export async function runWorkflowCommand(
       return tokenIssue(rest, io);
     case "pm":
       return await pmCommand(rest, io, hooks);
+    case "host-ops":
+      return await hostOpsCommand(rest, io, hooks);
     case "needs-you":
       return needsYou(rest, io);
     case "human-action":
@@ -666,6 +672,117 @@ function tokenIssue(args: readonly string[], io: CliIo): number {
     );
     printToken(io, issued);
     return EXIT.ok;
+  } finally {
+    store.close();
+  }
+}
+
+/** Human-only bootstrap and launch for the project's standing operations identity. */
+async function hostOpsCommand(
+  args: readonly string[],
+  io: CliIo,
+  hooks: CliHooks,
+): Promise<number> {
+  // Also protect direct workflow callers before opening the store or issuing credentials.
+  resolveGlobalActor(io);
+  if (args.includes("--help") || args.includes("-h")) {
+    io.stdout(USAGE);
+    return EXIT.ok;
+  }
+  const [sub, ...rest] = args;
+  const parsed = parseArgs(rest, []);
+  const allowed =
+    sub === "create"
+      ? ["project", "data-dir", "employee"]
+      : ["project", "data-dir", "mcp-url", "hc-session"];
+  if (
+    !["create", "start"].includes(sub ?? "") ||
+    parsed.positionals.length ||
+    Object.keys(parsed.flags).some((key) => !allowed.includes(key))
+  )
+    throw new CliError(
+      "请使用 host-ops create 或 start 及其支持的选项",
+      EXIT.usage,
+      [USAGE],
+    );
+  const store = openStoreFrom(io, parsed.flags);
+  try {
+    const project_id = resolveProject(
+      store,
+      io,
+      optional(parsed.flags, "project"),
+    );
+    if (sub === "create") {
+      const issued = store.uow.run((tx) => {
+        const employee_id = optional(parsed.flags, "employee");
+        const result = createHostOpsAssignment(
+          loadCommandState(tx, project_id),
+          resolveActor(io, project_id, store),
+          employee_id === undefined ? {} : { employee_id },
+          { clock: systemClock, ids: tx.ids },
+        );
+        if (!result.ok)
+          throw new CliError(
+            formatCommandError("创建主机运维", project_id, result.error),
+            EXIT.usage,
+          );
+        const effect = result.value;
+        persistEffect(tx, project_id, effect);
+        const { assignment } = effect.data;
+        const role = roleInTransaction(
+          tx,
+          project_id,
+          "host_ops",
+          assignment.role_version,
+        );
+        return {
+          ...effect.data,
+          token: issueTokenForAssignment(tx, project_id, assignment.id, role),
+        };
+      });
+      io.stdout(
+        `${issued.reused ? "复用" : "已创建"}常驻主机运维：${issued.assignment.id}（host_ops v${issued.assignment.role_version}）`,
+      );
+      printToken(io, issued.token);
+      return EXIT.ok;
+    }
+    const candidates = store.uow.read((tx) =>
+      tx.assignments
+        .list(project_id)
+        .filter(
+          (a) =>
+            a.scope === "standing" &&
+            a.role_id === "host_ops" &&
+            a.status === "active",
+        ),
+    );
+    const assignment = candidates[0];
+    if (candidates.length !== 1 || !assignment)
+      throw new CliError(
+        candidates.length
+          ? "有多个常驻主机运维 Assignment，无法确定启动对象"
+          : "还没有常驻主机运维，先运行 cardigan host-ops create",
+        EXIT.usage,
+      );
+    if (hasUnfinishedRun(store, project_id, assignment.id)) {
+      io.stdout(`主机运维（${assignment.id}）已在运行，跳过`);
+      return EXIT.ok;
+    }
+    return await (hooks.start ?? startAssignmentById)({
+      store,
+      io,
+      project_id,
+      assignment_id: assignment.id,
+      ...(optional(parsed.flags, "data-dir")
+        ? { dataDir: optional(parsed.flags, "data-dir") as string }
+        : {}),
+      ...(optional(parsed.flags, "mcp-url")
+        ? { mcpUrl: optional(parsed.flags, "mcp-url") as string }
+        : {}),
+      ...(optional(parsed.flags, "hc-session")
+        ? { session: optional(parsed.flags, "hc-session") as string }
+        : {}),
+    });
   } finally {
     store.close();
   }

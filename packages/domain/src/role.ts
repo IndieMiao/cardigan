@@ -4,6 +4,7 @@ import {
   type ToolName,
   toolNames,
 } from "./entities.js";
+import { HOST_OPS_TOOLS } from "./host-ops.js";
 import type { ProjectId } from "./ids.js";
 
 export type RoleKind = "produce" | "verify" | "standing";
@@ -64,9 +65,13 @@ export const STANDING_ROLE_TOOLS = [
 export const ROLE_TOOL_ALLOWLISTS: Readonly<
   Record<RoleKind, readonly ToolName[]>
 > = {
-  produce: toolNames.filter((tool) => tool !== "submit_review"),
-  verify: toolNames.filter((tool) => tool !== "submit_delivery"),
-  standing: STANDING_ROLE_TOOLS,
+  produce: toolNames.filter(
+    (tool) => tool !== "submit_review" && !tool.startsWith("host_ops_"),
+  ),
+  verify: toolNames.filter(
+    (tool) => tool !== "submit_delivery" && !tool.startsWith("host_ops_"),
+  ),
+  standing: [...STANDING_ROLE_TOOLS, ...HOST_OPS_TOOLS],
 };
 
 export function roleKind(

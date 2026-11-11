@@ -4,7 +4,9 @@ import {
   type Assignment,
   acknowledgeRun,
   type CommandState,
+  createHostOpsAssignment,
   dispatchRun,
+  HOST_OPS_ROLE_TOOLS,
   pauseStandingAssignment,
   queueRun,
 } from "../index.js";
@@ -29,6 +31,26 @@ function fixture() {
   let state: CommandState = {
     ...f.state,
     assignments: [...f.state.assignments, pm],
+    roles: [
+      ...f.state.roles,
+      {
+        role_id: "host_ops",
+        role_version: 1,
+        allowed_tools: HOST_OPS_ROLE_TOOLS,
+        capabilities: [],
+      },
+    ],
+  };
+  const ops = value(createHostOpsAssignment(state, human, {}, f.io));
+  state = apply(state, ops);
+  const hostOps: Actor = {
+    kind: "assignment",
+    project_id: state.project_id,
+    assignment_id: ops.data.assignment.id,
+    role_id: "host_ops",
+    role_version: 1,
+    allowed_tools: HOST_OPS_ROLE_TOOLS,
+    capabilities: [],
   };
   const actor: Actor = {
     kind: "assignment",
@@ -64,7 +86,7 @@ function fixture() {
     state,
     value(acknowledgeRun(state, actor, { run_id: run.data.id }, f.io)),
   );
-  return { f, pm, actor, params, state, run: run.data };
+  return { f, pm, actor, hostOps, params, state, run: run.data };
 }
 
 test("S24 invariants 5, 11, 12: pause cancels the Run; only human resume can atomically queue another", () => {
@@ -97,6 +119,7 @@ test("S24 invariants 5, 11, 12: pause cancels the Run; only human resume can ato
   });
   for (const actor of [
     x.actor,
+    x.hostOps,
     { kind: "system", project_id: state.project_id } as const,
   ]) {
     expect(
