@@ -1880,6 +1880,8 @@ resume_or_replace 在旧终端不存在时可重开；release 返回 runtime_una
 | 运行时 | herdr-app 默认开启使用遥测，部署时必须关闭；herdr-core 的状态目录含终端输出和屏幕存档，按机密目录处理 |
 | 运行目录和凭据副本 | local 使用 0700 / 0600；agent-ssh 使用主机与 agent 专用组的 2770 / 0660（脚本 0770），父层 2750；写入不跟随链接，读取后删除凭据；日志脱敏；release 时清理 |
 
+P2a-12 A：`ExecutionConfig` 的 `agent-ssh` 分支可选 `host`、`port`、`user`、`hostKeyAlias`，复用必填的 `identityFile`、`knownHostsFile`。缺省仍是 `agent@localhost`、端口 22、别名 `cardigan-agent-local`，未传端口时不追加参数，保持原 SSH 命令逐字节一致。目标字段只接受安全字符（主机也支持 IPv6 字面量），拒绝选项前缀、空白、控制字符和 shell 元字符；端口限定为 1–65535 整数。`knownHostsFile` 必须是单个绝对非根路径，拒绝空白、引号、反斜杠、控制字符和 SSH 的 `%`／`$` 展开，避免实际读取的文件偏离所校验的文件。身份文件和 known_hosts 继续检查主机所有、普通文件、0600，固定严格主机密钥检查和原有 SSH 安全参数。进程执行、运行时入口和 Git pack 共用这一通道；本步不改变环境变量解析，不接入合并闸门，也不切换现有执行目标。
+
 ---
 
 ### 14.1 角色权限边界（V9a）
