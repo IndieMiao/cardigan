@@ -120,9 +120,17 @@ export class ReconcileExecutor {
   private record(project_id: ProjectId, findings: readonly ReconcileFinding[]) {
     const at = this.clock.now();
     return this.options.store.uow.run((tx) => {
+      // P2a-12 C: an unreachable executor's directories were not scanned;
+      // keep its open findings instead of resolving them.
+      const unscanned = findings
+        .filter((finding) => finding.kind === "executor_unreachable")
+        .flatMap((finding) =>
+          finding.path === undefined ? [] : [`${finding.path}/`],
+        );
       const { created } = this.options.store.recordReconcileFindings(
         project_id,
         findings,
+        { unscanned },
       );
       retireReconcileNotifications(this.options.store.database, project_id, at);
       for (const finding of created) {

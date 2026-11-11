@@ -701,8 +701,15 @@ export class Store {
   recordReconcileFindings(
     project_id: ProjectId,
     findings: readonly ReconcileFindingInput[],
+    options: { readonly unscanned?: readonly string[] } = {},
   ) {
-    return recordFindings(this.#db, project_id, findings, this.#clock.now());
+    return recordFindings(
+      this.#db,
+      project_id,
+      findings,
+      this.#clock.now(),
+      options,
+    );
   }
 
   listReconcileFindings(

@@ -1,4 +1,5 @@
 import { posix } from "node:path";
+import type { AgentExecution, ExecutionConfig } from "@cardigan/runtime-herdr";
 import { secureCredentialFile } from "./merge-push-config.js";
 
 /** Parsed `executors.<name>` entry of merge-gate.yaml. Not wired into the runtime yet (P2a-12 B). */
@@ -209,4 +210,30 @@ export function resolveProjectExecutor(
   if (entry.status === "invalid")
     return fail(`${entry.reason}，不会回退到本机`);
   return entry.executor;
+}
+
+/**
+ * P2a-12 C: the agent-ssh execution for a project's merge-check executor.
+ * Host-side fields (data directory, shared group, niceness) come from the
+ * server's default execution; the SSH target, credentials and agent root come
+ * from the executor. The machine name is the executor name.
+ */
+export function executorExecution(
+  executor: MergeGateExecutor,
+  base: ExecutionConfig,
+): AgentExecution {
+  return {
+    mode: "agent-ssh",
+    dataDir: base.dataDir,
+    agentRoot: executor.agentRoot,
+    gid: base.mode === "agent-ssh" ? base.gid : (process.getgid?.() ?? 0),
+    machine: executor.name,
+    identityFile: executor.identityFile,
+    knownHostsFile: executor.knownHostsFile,
+    host: executor.host,
+    port: executor.port,
+    user: executor.user,
+    hostKeyAlias: executor.hostKeyAlias,
+    ...(base.agentNice === undefined ? {} : { agentNice: base.agentNice }),
+  };
 }

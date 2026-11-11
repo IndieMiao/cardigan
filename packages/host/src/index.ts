@@ -38,6 +38,7 @@ export {
   type ProjectMergeGate,
 } from "./merge-gate-config.js";
 export {
+  executorExecution,
   LOCAL_EXECUTOR,
   MAX_EXECUTOR_CONCURRENCY,
   type MergeGateExecutor,
