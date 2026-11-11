@@ -14,9 +14,11 @@ import {
 } from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
 import type { Store, StoreTransactionContext } from "@cardigan/store";
+import type { StateLoader } from "./dispatch-state.js";
 import { runStopWorkflow } from "./dispatch-stop.js";
 
 interface ReaperOptions {
+  loadState?: StateLoader;
   store: Store;
   runtime: Runtime;
   clock: Clock;
@@ -38,7 +40,7 @@ export class InactiveRunReaper {
     if (afterMs === null) return;
     for (const project of projects) {
       const state = this.options.store.uow.read((tx) =>
-        loadCommandState(tx, project),
+        (this.options.loadState ?? loadCommandState)(tx, project),
       );
       for (const run of state.runs) {
         const a = state.assignments.find((a) => a.id === run.assignment_id);
