@@ -1258,6 +1258,7 @@ CLI 接受 `CARDIGAN_TOKEN` 或全局 `--token-file <path>`，同时提供时拒
 | `comment add` | `post_comment`；带文件还须 `upload_attachment` |
 | `attachment add` | `upload_attachment`；省略 `--entry` 创建评论锚点时还须 `post_comment` |
 | `assign` | `assign`；例外：只执行领域指派，不签发、返回或轮换凭据。新建输出 `token_status=pending_host_issuance`，复用输出 `host_managed`；`--start` 仅人类。与 MCP 的凭据边界一致（C-81#10） |
+| `assignment release <A-n>` | `release_assignment`；只调用领域释放，Token 模式仅常驻 PM Ops 可释放工作项 Assignment，常驻 Assignment 只允许人释放 |
 | `needs-you` | `list_needs_you`；Token 模式输出该领域查询的 JSON，不附加主机诊断和人类知会 |
 | `inbox` | 例外：计划明确允许此入口，读取许可用 `get_updates`。仅显示直接发给 Token 所属 Assignment ID 的通知，排除逻辑 Office/Ops 接收者；指定不同 `--assignment` 拒绝。无 Token 保留项目视图和逻辑接收者规则（C-81#10） |
 | `init`；`project create/set-repo` | 仅人类，无对应 MCP 工具 |
@@ -1272,6 +1273,8 @@ CLI 接受 `CARDIGAN_TOKEN` 或全局 `--token-file <path>`，同时提供时拒
 | `launch <profile>/list/--list/check/import-claude-settings`（含 `--print`） | 仅人类，无对应 MCP 工具 |
 
 ### 9.2 工具清单（初版）
+
+C-108：`release_assignment({assignment_id, idempotency_key})` 接入既有领域释放命令，只对常驻 PM Ops 开放。角色与 Token 都须包含该工具；PM Office 和工作项角色调用被拒。存在未结束 Run（含停止收尾标记）时拒绝并提示先由主机执行 `cardigan assignment stop <A-n>`；释放产生既有审计事件，终端、Token 和工作区沿用主机清理流程，不在 MCP 内执行运行时或 Git 操作。释放不改变工作项归属，不允许在原工作项上换人，遵守 §4.5 第 15 条。
 
 P2a-10 B1 在 domain 的 `toolNames` 中预留 `host_ops_read_diagnostics`、`host_ops_restart_assignment`、`host_ops_cancel_run`、`host_ops_recheck_merge`、`host_ops_restart_standing_pm` 五个名称，只允许 `host_ops` 角色配置。它们目前没有 CLI 映射或 MCP handler，不出现在服务的可调用工具清单中；实际调用入口由 C-85 接线。`host_ops_action_taken` 领域事件类型预定义 `tool`、`target_id`、`reason`，操作者和时间沿用 Event 的 `actor/created_at`；B1 没有执行路径写入该事件。
 
@@ -1892,9 +1895,9 @@ P2a-12 A：`ExecutionConfig` 的 `agent-ssh` 分支可选 `host`、`port`、`use
 |---|---|
 | produce 产出 | 系统白名单去掉 submit_review |
 | verify 验证 | 系统白名单去掉 submit_delivery；worktree 只能为 readonly 或 none |
-| standing 常驻 | 固定的 STANDING_ROLE_TOOLS（现有 PM 上限）：whoami、get_card、get_updates、ack_events、post_comment、issue_instruction、report_blocker、request_human_action、request_decision、upload_attachment、heartbeat、finish_run、submit_delivery、submit_review、create_card、update_card、create_work_item、update_work_item、assign、project_snapshot、list_needs_you、record_decision、resolve_delegated_decision、triage_human_action |
+| standing 常驻 | 固定的 STANDING_ROLE_TOOLS（现有 PM 上限）：whoami、get_card、get_updates、ack_events、post_comment、issue_instruction、report_blocker、request_human_action、request_decision、upload_attachment、heartbeat、finish_run、submit_delivery、submit_review、create_card、update_card、create_work_item、update_work_item、assign、release_assignment、project_snapshot、list_needs_you、record_decision、resolve_delegated_decision、triage_human_action |
 
-所有类型均额外要求：record_decision、resolve_delegated_decision、triage_human_action 只能配置在编号为 pm 的角色上；后两者的命令只允许 active、standing_mode=ops 的常驻 PM，Office Token 不签发。主机只对 standing_mode=office 的常驻 PM 签发 record_decision。Ops、工作项 PM 和其他角色不能取得它。现有命令对工作项类型、项目作用域及作者／审核者隔离的校验继续生效，角色白名单不会绕过这些约束。角色 CRUD 权限独立于工具清单，当前只接受同项目 human，Agent 和 system 均拒绝。
+所有类型均额外要求：record_decision、resolve_delegated_decision、triage_human_action 只能配置在编号为 pm 的角色上；后两者的命令只允许 active、standing_mode=ops 的常驻 PM，Office Token 不签发。`release_assignment` 只对 active、standing_mode=ops 的常驻 PM 开放，Office 的工具范围排除它；命令只释放工作项 Assignment，常驻 Assignment 仍仅允许 human 释放。主机只对 standing_mode=office 的常驻 PM 签发 record_decision。Ops、工作项 PM 和其他角色不能取得它。现有命令对工作项类型、项目作用域及作者／审核者隔离的校验继续生效，角色白名单不会绕过这些约束。角色 CRUD 权限独立于工具清单，当前只接受同项目 human，Agent 和 system 均拒绝。
 
 P2a-10 B1：produce/verify 上限另排除所有 `host_ops_*` 工具；standing 类型上限增加五个预留运维工具，现有 PM 默认工具清单不变。所有角色写入均强制 `host_ops_*` 只能属于 `role_id=host_ops`，且该角色必须为 standing；它禁止配置 `record_decision`、`resolve_delegated_decision`、`triage_human_action`、`submit_delivery`、`submit_review`、`create_card`、`update_card`、`create_work_item`、`update_work_item`、`assign`、`issue_instruction`。命令层再次核对运维角色边界和常驻作用域，`assign` 即使由人调用也不能把它指派到工作项。它可在项目内读取、评论和请求协作，但发起拍板的 `decider` 只能是 human 或 role:pm；任何请求都不能把 host_ops 设为决策人。请求仍记录 assignment 作者，D12 四类高风险继续只认 human。`recheck_merge`、常驻 PM 暂停与恢复的原有 human-only 校验在 B1 保持不变。
 

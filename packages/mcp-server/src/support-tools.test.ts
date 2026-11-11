@@ -194,7 +194,9 @@ test("attachment metadata validation is shared with domain and rejects without r
 
 test("legacy PM tools exclude Ops instructions; concurrent attachment uploads and replays commit once", async () => {
   expect((await office.listTools()).tools.map((t) => t.name).sort()).toEqual(
-    STANDING_ROLE_TOOLS.filter((name) => name !== "issue_instruction").sort(),
+    STANDING_ROLE_TOOLS.filter(
+      (name) => !["issue_instruction", "release_assignment"].includes(name),
+    ).sort(),
   );
   const args = {
     ...upload,
