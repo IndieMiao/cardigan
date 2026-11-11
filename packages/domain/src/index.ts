@@ -40,10 +40,16 @@ export {
   pmMergeCheckDelegationAllowed,
 } from "./commands/merge-delegation.js";
 export {
+  acceptMergePushHold,
   beginMergePush,
+  checkMergePushRange,
+  foreignMergePushCommits,
+  MERGE_PUSH_RANGE_LIMIT,
   type MergePushAttempt,
+  type MergePushCommit,
   type MergePushDestination,
   type MergePushFailure,
+  type MergePushHoldReason,
   mergePushMessage,
   recordMergePushResult,
 } from "./commands/merge-push.js";

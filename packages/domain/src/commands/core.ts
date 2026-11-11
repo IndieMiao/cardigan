@@ -100,6 +100,8 @@ type CommandName =
   | "record_merge_result"
   | "begin_merge_push"
   | "record_merge_push_result"
+  | "check_merge_push_range"
+  | "accept_merge_push_hold"
   | "record_merge_check"
   | "recheck_merge"
   | "release_assignment"
@@ -199,6 +201,7 @@ export class CommandDraft {
       "record_merge_check",
       "begin_merge_push",
       "record_merge_push_result",
+      "check_merge_push_range",
       "request_worktree_cleanup",
     ].includes(tool);
     const hostTool = (
@@ -208,6 +211,11 @@ export class CommandDraft {
         pause_standing_assignment: "host_ops_restart_standing_pm",
       } as const
     )[tool as "recheck_merge" | "abort_dispatch" | "pause_standing_assignment"];
+    ensure(
+      tool !== "accept_merge_push_hold" || actor.kind === "human",
+      "unauthorized",
+      "Only the human can accept foreign commits",
+    );
     ensure(
       !tool.startsWith("host_ops_") || actor.kind === "assignment",
       "unauthorized",

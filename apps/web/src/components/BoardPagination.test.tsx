@@ -10,6 +10,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { CardListItem } from "../api.js";
+import { DEFAULT_CARD_DISPLAY, writeCardDisplay } from "../card-display.js";
 import { card, fakeClient } from "../testing/fixtures.js";
 import { CardListPage } from "../views/CardListPage.js";
 
@@ -84,7 +85,17 @@ afterEach(() => {
   vi.unstubAllGlobals();
   window.history.replaceState(null, "", "/");
 });
-async function start() {
+// Pagination needs the real cards and links, but not every metadata Tooltip.
+// Keep the default-field check below; BoardCard.test covers the optional fields.
+const paginationDisplay = {
+  ...DEFAULT_CARD_DISPLAY,
+  roles: false,
+  progress: false,
+  updated: false,
+  next: false,
+};
+async function start(display = paginationDisplay) {
+  writeCardDisplay(display);
   const page = render(<CardListPage client={client} projectId="p-1" />);
   const column = await screen.findByRole("region", { name: "进行中" });
   return { page, column };
@@ -107,7 +118,7 @@ function observation(label = "进行中") {
 }
 
 test("each lane starts with the newest 10 cards and its heading shows the full count", async () => {
-  const { column } = await start();
+  const { column } = await start(DEFAULT_CARD_DISPLAY);
   expect(links(column)).toEqual(
     Array.from({ length: 10 }, (_, index) => `#/p/p-1/cards/C-${25 - index}`),
   );

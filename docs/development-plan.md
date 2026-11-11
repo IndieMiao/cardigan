@@ -392,6 +392,7 @@ Standing Assignment (scope=project): PM Office, PM Ops — not tied to a WorkIte
 - 存储新增无项目键的 `employees`、`global_counters`、`global_events`。员工命令使用独立全局事件流，事件类型为 `employee_created / employee_updated / employee_deactivated / employee_activated`，保存 human 操作者和变更后的员工快照。选择全局流是为了让团队管理不依赖项目选择，避免把全局审计绑定某个项目；全局序号与原有项目／卡片流分别递增。员工、编号及事件在同一事务中提交或回滚；SQLite 部分唯一索引约束在职姓名。
 - V1b 的迁移 0010 在事务中重算所有 `name_key`，重建在职姓名唯一索引。若旧库已有大小写不同的同名在职员工，编号最小者保留原名，其余在名字末尾追加 ` (E-n)`，必要时截短原名以保持 40 字上限；若后缀与任何原有在职名碰撞，再追加序号（如 ` (E-2-1)`），直到唯一。保留员工编号、角色、在职状态和所有历史归属；每次自动改名写全局 `employee_updated`，操作者为 system，记录原名和 `case_insensitive_name_migration` 原因。停用员工可重名，恢复时仍检查唯一性；迁移重跑无变化。没有员工的旧 Assignment / Run 不补造身份。
 - 员工指派选择在与写入相同的事务中读取全局员工和跨项目负载：先按角色筛选在职员工并排除审核冲突，再优先无未结束 Run（queued / unknown 也算未结束）者，最后选最近一次指派时间最早者。从未指派优先于曾指派；同一时间按员工数字编号排序。没有该角色在职员工时保持不带员工的旧行为；有员工但都不符合隔离规则时拒绝，不退回匿名身份。一个员工可同时持有多个 Assignment。
+- C-107：员工在任一项目绑定了尚未 released 的外接常驻 Assignment（`scope=standing, external=true`，包括 suspended）时，视为外接员工。判定复用现有绑定，在指派事务内随全局员工负载一起读取，不另增员工标记或迁移；所有绑定都释放后不再按外接员工排除。工作项 `assign` 的编号／姓名显式选择和自动选择均排除外接员工，中文说明“不由 Cardigan 启动”；该角色仅有外接员工时拒绝，不退回匿名身份。既有错误工作项绑定不自动迁移或修改，但再次 `assign` 同样拒绝；既有 Run 不在本次改动范围内。`pm rotate --office --external --employee` 仍可绑定该员工。
 
 **Assignment**
 
@@ -679,7 +680,7 @@ P2a-10 B2（C-85）：运维重启／取消先在同一事务按 Assignment／Ru
 14. 交付和审核绑定到版本（SHA）：交付有新版本后，针对旧版本的审核结论自动失效。产物类附件必须带 `basis`（对应的拍板编号）。
 15. 审核者不能是作者：验证工作项不能使用其目标产出项当前或曾经的 Assignment；产出项也不能使用已经验证过它的 Assignment。完成申请的 PM 验收项与模板指定的主产出项同样必须使用不同 Assignment。当前 `assign` 不接受既有 `assignment_id`，只为新工作项分配新身份，或复用该工作项唯一且仍 active 的原身份；Assignment 的 `work_item_id` 不可改派，释放后也保留归属，因此现有规则已阻止上述身份复用。归属不一致或试图复用已释放身份时返回 `invariant_violation`，产出方调用 `submitReview` 自审返回 `unauthorized`。CLI `cardigan assign` 与 MCP `assign` 共用这条 domain 路径；即使两个工作项使用同一 Role，也必须分配不同身份。本条的员工级补充见第 16 条。
 16. 员工级审核隔离：验证工作项的员工不得出现在目标产出项任何当前或曾经（包括已释放）的 Assignment 上；完成申请验收项与模板主产出项同样隔离。反向先指派验证方、再指派产出方也检查；提交交付／审核时重查。不带员工的一方不凭角色推断身份，双方均无员工继续沿用第 15 条。
-17. 新指派的员工必须在职，员工角色、工作项角色和目标项目登记的角色一致；员工编号在 Assignment 创建后不可修改。停用只阻止新指派，不取消既有责任和 Run。
+17. 新指派的员工必须在职，员工角色、工作项角色和目标项目登记的角色一致；绑定尚未 released 的外接常驻 Assignment 的员工不能被指派到工作项（包括跨项目和重复指派）。员工编号在 Assignment 创建后不可修改。停用只阻止新指派，不取消既有责任和 Run。
 18. 模板按项目、编号和版本隔离；已有卡片固定模板版本，修改／停用不改旧卡。内置模板只能复制；所有模板写操作和人标记完成都由 domain 校验 human 身份。需要 Git 合并的卡片必须有仓库和基线，非 Git 模板不能用 Git 交付绕过完成方式。
 19. 模板引用的角色（含完成审核者）必须在目标项目登记，且最新版本未停用；没有 `status` 的老角色按启用处理，未登记仍拒绝，与 V1b 指派的项目角色登记要求一致。`capabilities=[]` 表示老角色未声明工作项能力，兼容其承担模板指定的产出／验证，不以工具列表阻止模板创建、启用或建卡；非空时仍严格要求产出允许 `submit_delivery`、验证及完成审核允许 `submit_review`。这只是模板适配规则，不扩充角色、Assignment 或 Token 的 `allowed_tools`，实际交付／审核仍须通过原有工具权限校验。
 
@@ -695,7 +696,7 @@ P2a-10 B2（C-85）：运维重启／取消先在同一事务按 Assignment／Ru
 
 24. 全局恰好一个 `role=owner` 且 `status=active` 的成员。迁移为新旧库初始化占位 owner；成员命令只接受 human，并与全局审计及编号同事务。成员身份只影响读取与展示，不增加任何 Agent 权限，不改变已有 Actor / Author 或 D12 的 human 检查。
 
-24. `Assignment.external` 只决定是否由 Cardigan 启动终端，不参与身份或权限判断；外接 Token 仍是 assignment Actor，工具范围与同配置的普通 Office 一致，不能转录或代拍四类高风险。
+24. `Assignment.external` 是调度约束：不由 Cardigan 启动终端，其绑定员工也不能被指派到工作项（C-107，见第 17 条）；不参与身份或权限判断。外接 Token 仍是 assignment Actor，工具范围与同配置的普通 Office 一致，不能转录或代拍四类高风险。
 
 ---
 
@@ -794,6 +795,7 @@ M3.4 主机循环通过 startDispatchLoop 启动：默认每轮结束后等待 1
 
 | 发生的事 | 默认通知对象 |
 |---|---|
+| 新建卡片（人或 Agent）、卡片转入 todo | 当前 PM Ops 安排工作；通过逻辑 pm_ops 收件人投递，轮换时沿用未确认通知的交接；在岗 Ops 自己建卡或改为 todo 不通知自己，已关闭卡片不再提醒 |
 | 工作项下的新评论 | 该工作项的 Assignment（作者是它自己时不通知） |
 | 卡片级普通评论，没有 @ | 不按门铃；随下一次 `get_updates` 一并读到。作者是人时，合并通知 PM Ops |
 | 指令（`instruction_issued`） | 人或常驻 PM Ops 下达；对应未结束工作项的 Assignment，未指派时交给 PM Ops 分配 |
@@ -905,6 +907,8 @@ M3.4 的 Runtime 接线根据已派发的业务 Run（dispatched / acked / runni
 | Session 生命周期 | 长期 | 可以定期重建（事实都在控制面，重建成本低） |
 
 两者使用同一个 Role、同一套项目规则和同一个 Card MCP。
+
+C-89：PM Ops 每轮开始和结束用 `project_snapshot` 检查 backlog、todo 与尚未指派的工作项，轮换后的首轮同样执行；收到新卡通知后先用 `get_card` 查当前状态，再为可开工的产出项指派执行者。backlog 保留待规划，不自动启动；未能派发的 todo 记录原因。这样此前未生成通知的旧卡也能由快照盘点发现，不把“在制卡片为空”当作“没有待安排工作”。
 
 > 它们共享"项目事实"，不共享"对话噪声"。
 
@@ -1313,6 +1317,8 @@ M1.5 已负责 `whoami`、`get_card`、`get_updates`、`ack_events` 的实现与
 
 M1.6c 的 `heartbeat`、`finish_run` 与附件上传复用写命令的幂等事务；心跳不生成事件或时间线，结束 Run 不代表业务完成。`project_snapshot`、`list_needs_you` 不要求幂等键，在同一个只读事务中加载完整项目 CommandState 并执行 domain 查询，具有下述完整快照的规模成本。
 
+C-107：`project_snapshot.available_employees` 为 PM 提供可指派工作项的在职员工，排除外接员工、项目未登记／停用的角色和仅常驻的 host_ops；只返回编号、名字、职位和角色，不带启动配置或简介。该列表不针对特定工作项，具体指派仍由 `assign` 检查角色及作者／审核者隔离；员工管理列表和历史作者展示保持完整。
+
 ### 9.3 服务端校验（不依赖 Agent 自觉）
 
 - 状态迁移必须符合 §4.4 的状态机。`assign` 的员工校验、审核隔离及自动挑选由 domain 在事务快照中执行，CLI 与 MCP 共用；员工身份不扩大 Token 权限。
@@ -1644,6 +1650,17 @@ P2a-1b 的主机配置在项目闸门下增加可选 `push`：`remote` 只接受
 启用推送时，主机将目标指纹（remote + branch）和分支作为可信项目设置载入；recordMergeResult 成功写 card_merged 的同一事务向项目事件流追加 merge_push_queued。队列按该流 seq 排序，不比较不同卡片的 seq；未配置时不追加队列，不自动补推启用前的历史结果。beginMergePush 只允许 system，先持久化 merge_push_started，再做外部 IO；重启重试同一 attempt 的同一 SHA，Git 已成功但记录前崩溃时再次推送为幂等操作。结果记录为 merge_pushed 或 merge_push_failed，带 SHA、分支、固定中文说明和有界类别，不改变 done 卡片；同 attempt 同结果重放无操作，异结果拒绝。
 
 rejected、auth 和 other 立即创建无阻塞工作项的项目级 HumanAction，进入 Needs You 并沿用路由提示 PM Office；期间后面的合并照常，推送暂停。人标记完成后只重试一次，可以将已有积压队列合为最新已记录合并提交（主机须实际验证前面的 SHA 都是它的祖先）；再次失败建新事项，不循环重试。network 按 1、2、4、8、16、30 分钟退避，之后上限 30 分钟；保持原队首，不跳过失败项。连续失败超过两小时只创建一条未决人工事项，仍按退避重试；恢复成功后取消尚未处理的网络事项，避免已恢复告警继续占据 Needs You。开始前将要推的范围固定到事件，结果只接受当前 attempt。首次成功后才处理后续范围；配置目标变化不会把旧目标队列误推到新远程。
+
+**只推合并循环产生的提交（C-94，试行发现 47，用户拍板 F1）。** 合并循环每次 publishMerge 成功都由 card_merged 记录 `previous_sha` 和 `merge_sha`；同一完成申请内多个交付的中间合并提交都在这段第一父链上，也算合并循环产生。识别只看 SHA，不看作者或提交者名字。
+
+- 可信边界：attempt 开始时固定 `base_sha`。只有证据才算可信：该目标上次 merge_pushed 的 SHA，或人用 push-accept 接受过的边界。都没有时（新目标第一次推送），第一条待推合并的 `previous_sha` 只是候选边界，核对必然暂停，等人确认一次起点；已有推送记录的项目（含试行中的 cardigan，事故提交已在上次推送点之前）不受影响。
+- 核对范围：推送前主机在与合并发布共用的项目级发布锁内（publishMerge 到 card_merged 落库是一个临界区，避免把刚发布未记录的合并误判为外来），实读中心基线当前 head，并分页读出 head 到 `base_sha` 的完整第一父链（上限 20000 个），交给 domain 的 checkMergePushRange（只允许 system）。链上每个提交都必须落在某个已记录段内，且该段的 `previous_sha` 必须真实出现在链上或恰为边界，否则段内提交按外来处理；待推 SHA 必须仍在链上；链必须接回 `base_sha`。经第二父进入的交付提交（含从远程分叉带来的）不在第一父链上，不受影响。从源仓库快进同步进中心的提交不是合并循环产生的，同样会暂停等人确认。
+- 暂停：任一条件不满足即不推送，写项目级 merge_push_held（原因 boundary／foreign／stale／broken／too_long／too_many，列出外来提交的 SHA、作者、提交者和标题，最多展示 200 个），建项目级 HumanAction 进 Needs You，用白话说明是哪些提交、谁提交的、怎么处理。该目标自动推送暂停，合并照常。
+
+人有两种处理：
+
+- 接受：`cardigan merge push-accept <h(n)> --text <说明>`（只允许 human，Token 模式拒绝）完成该事项并写 merge_push_hold_resolved(mode=accept)，被列出的 SHA（及首次推送的候选边界）从此可信；下一轮重新读取当前 head 再核对，通过后把积压队列合为一次推送。待推合并已不在 main 上（stale）、历史接不上（broken）、超过读取上限或外来提交超过 1000 个时不能接受。
+- 回退：人在主机上把中心 main 恢复到不含这些提交、且包含上次推送点的状态，再在 Workbench 或用 `cardigan human-action done` 完成该事项。凡不是 push-accept 的关闭（含 PM 分诊取消）都按回退处理：beginMergePush 写 merge_push_hold_resolved(mode=reverted)，不信任任何提交，丢弃暂停时及以前排队的推送。之后任何推送前仍重新核对当前 head：如果人只关掉事项、外来提交其实还在，下一次推送会再次暂停，不会推上远程。
 
 server 在合并循环旁启动独立的推送循环（默认 5 秒轮询，跟随合并循环周期配置），只消费合并事务已落库的项目队列；每个项目串行，不同项目互不阻塞，网络等待不阻塞中心合并。Git 提交实际存在和积压范围的祖先关系都在中心实查后才推送。每次调用前重验凭据元数据，权限改变按 auth 失败交给人，不继承检查进程的环境或输出。配置 invalid 的项目既不合并也不推送；没有 push 配置的项目仍保持原行为。
 

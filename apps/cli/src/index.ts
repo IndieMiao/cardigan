@@ -85,7 +85,7 @@ const TOP_LEVEL_USAGE = [
   "  inbox            待投递和投递失败的通知（--assignment A-n 只看一个）",
   "  attention        升级通知与失联的 Assignment",
   "  assignment start|stop|attach  启动/停止/观察终端；attach --interactive 接管输入，--print 只打印命令",
-  "  merge status|confirm|hold|request|request-changes  查看、确认或暂不合并、重新发起确认、退回修改（--reason 必填）；PM 代确认中的合并也可直接处理",
+  "  merge status|confirm|hold|request|request-changes  查看、确认或暂不合并、重新发起确认、退回修改（--reason 必填）；PM 代确认中的合并也可直接处理；push-accept <h(n)> 接受暂停推送里的外来提交",
   "  worktree diff|clean|keep      看 worktree 改动、强制清理或保留（M4）",
   "  web set-password 交互式设置 Workbench 登录密码（M5）",
   "  launch           按启动配置启动 Agent CLI（见 cardigan launch --help）",

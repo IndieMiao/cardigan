@@ -2,7 +2,7 @@ import { type Employee, employeeNameKey } from "../employee.js";
 import type { WorkItem } from "../entities.js";
 import type { EmployeeId } from "../ids.js";
 import { isCompletionVerifier } from "../templates.js";
-import { type CommandDraft, ensure } from "./core.js";
+import { type CommandDraft, type CommandState, ensure } from "./core.js";
 import { resolveCardTemplate } from "./templates.js";
 
 /** Resolve an explicit ID, or an active display name, without accepting identity claims. */
@@ -17,6 +17,47 @@ export function resolveEmployee(d: CommandDraft, reference: string): Employee {
     );
   ensure(employee, "not_found", `员工 ${reference} 不存在或名字不属于在职员工`);
   return employee;
+}
+
+function isExternalEmployee(
+  state: CommandState,
+  employee_id: EmployeeId,
+): boolean {
+  return (
+    state.employee_activity?.some(
+      (activity) =>
+        activity.employee_id === employee_id &&
+        activity.has_external_standing_assignment,
+    ) === true ||
+    state.assignments.some(
+      (assignment) =>
+        assignment.employee_id === employee_id &&
+        assignment.scope === "standing" &&
+        assignment.external === true &&
+        assignment.status !== "released",
+    )
+  );
+}
+
+export function checkEmployeeNotExternal(
+  d: CommandDraft,
+  employee_id?: EmployeeId,
+): void {
+  ensure(
+    !employee_id || !isExternalEmployee(d.state, employee_id),
+    "invariant_violation",
+    "这是外接员工，不由 Cardigan 启动，不能指派工作项",
+  );
+}
+
+/** General work-item candidates; author/reviewer separation is checked per item. */
+export function availableWorkItemEmployees(
+  state: CommandState,
+): readonly Employee[] {
+  return (state.employees ?? []).filter(
+    (employee) =>
+      employee.status === "active" && !isExternalEmployee(state, employee.id),
+  );
 }
 
 function target(d: CommandDraft, item: WorkItem): string | undefined {
@@ -77,6 +118,7 @@ export function selectEmployee(
 ): Employee | undefined {
   if (reference !== undefined) {
     const employee = resolveEmployee(d, reference);
+    checkEmployeeNotExternal(d, employee.id);
     ensure(
       employee.status === "active",
       "invariant_violation",
@@ -94,7 +136,15 @@ export function selectEmployee(
     (e) => e.status === "active" && e.role_id === item.role_id,
   );
   if (!active.length) return;
-  const eligible = active.filter((e) => !employeeConflicts(d, item, e.id));
+  const internal = availableWorkItemEmployees(d.state).filter(
+    (e) => e.role_id === item.role_id,
+  );
+  ensure(
+    internal.length,
+    "invariant_violation",
+    "该角色的在职员工均为外接员工，不由 Cardigan 启动，请指派其他员工",
+  );
+  const eligible = internal.filter((e) => !employeeConflicts(d, item, e.id));
   ensure(
     eligible.length,
     "invariant_violation",
