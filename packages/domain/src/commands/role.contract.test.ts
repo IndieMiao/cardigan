@@ -15,6 +15,7 @@ import {
   copyRole,
   createRole,
   deactivateRole,
+  previewRoleUpgrade,
   type RoleCommandState,
   type RoleDefinition,
   rollbackRole,
@@ -134,6 +135,51 @@ describe("human-only role management", () => {
 });
 
 describe("tool and worktree boundaries", () => {
+  test("all role saves derive withdrawal without mutating historical versions", () => {
+    const source = definition({
+      role_id: "reviewer",
+      kind: "verify",
+      worktree: "readonly",
+      allowed_tools: ["submit_review"],
+    });
+    const previous: Role = { ...source, core_prompt: "", version: 1 };
+    const state = { ...empty, roles: [previous] };
+    for (const result of [
+      createRole(empty, human, source, ports()),
+      updateRole(
+        state,
+        human,
+        "reviewer",
+        { display_name: "Reviewer" },
+        ports(),
+      ),
+      copyRole(empty, human, { source, role_id: "copied" }, ports()),
+      rollbackRole(state, human, "reviewer", 1, ports()),
+    ]) {
+      const saved = value(result).data;
+      expect(saved.allowed_tools).toEqual(["submit_review", "withdraw_review"]);
+      expect(value(validateRole(saved)).allowed_tools).toEqual(
+        saved.allowed_tools,
+      );
+    }
+    expect(previous.allowed_tools).toEqual(["submit_review"]);
+    expect(source.allowed_tools).toEqual(["submit_review"]);
+    expect(
+      value(previewRoleUpgrade(state, human, "reviewer", source)),
+    ).toMatchObject({
+      unchanged: false,
+      diff: { added_tools: ["withdraw_review"] },
+      patch: { allowed_tools: ["submit_review", "withdraw_review"] },
+    });
+    expect(
+      validateRole({
+        ...source,
+        role_id: "host_ops",
+        kind: "standing",
+        allowed_tools: ["withdraw_review"],
+      }).ok,
+    ).toBe(false);
+  });
   test("verifiers may collaborate, upload evidence and request decisions", () => {
     const tools = [
       "submit_review",
@@ -154,7 +200,7 @@ describe("tool and worktree boundaries", () => {
         ports(),
       ),
     );
-    expect(created.data.allowed_tools).toEqual(tools);
+    expect(created.data.allowed_tools).toEqual([...tools, "withdraw_review"]);
   });
   test.each<RoleKind>(["produce", "verify", "standing"])(
     "checks every system tool for %s",
@@ -165,7 +211,7 @@ describe("tool and worktree boundaries", () => {
           : tool === "replace_verification_work_item"
             ? kind === "standing"
             : kind === "produce"
-              ? tool !== "submit_review"
+              ? !["submit_review", "withdraw_review"].includes(tool)
               : kind === "verify"
                 ? tool !== "submit_delivery"
                 : (STANDING_ROLE_TOOLS as readonly string[]).includes(tool);

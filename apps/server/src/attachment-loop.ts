@@ -213,6 +213,7 @@ export function startAttachmentLoop(
 ): AttachmentLoop {
   const executor = new AttachmentGc(options);
   const loop = startTimerLoop({
+    name: "attachments",
     tick: () => executor.tick().then(() => undefined),
     intervalMs: options.intervalMs ?? DEFAULT_ATTACHMENT_GC_INTERVAL_MS,
     onError: options.onError ?? (() => undefined),

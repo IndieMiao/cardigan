@@ -8,6 +8,7 @@ import {
   type SubmitReviewParams,
   submitDelivery,
   submitReview,
+  withdrawReview,
 } from "@cardigan/domain";
 import { z } from "zod";
 import type { Logger } from "../log.js";
@@ -152,6 +153,24 @@ export function deliveryTools(options: DeliveryToolOptions) {
           idempotency_key,
           params as SubmitReviewParams,
           submitReview,
+          options.clock,
+        ),
+    }),
+    defineTool({
+      name: "withdraw_review",
+      description: "Withdraw your own passed review with a required rationale.",
+      input: z.object({
+        idempotency_key,
+        work_item_id: id("work_item"),
+        rationale: z.string().trim().min(1),
+      }),
+      handler: ({ idempotency_key, ...params }, context) =>
+        executeCommand(
+          context,
+          "withdraw_review",
+          idempotency_key,
+          params,
+          withdrawReview,
           options.clock,
         ),
     }),

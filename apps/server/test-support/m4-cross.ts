@@ -664,8 +664,11 @@ const child=spawnSync('sh',['-c',args.slice(at+2).join(' ')],{cwd:${JSON.stringi
                 "triage_human_action",
                 "replace_verification_work_item",
               ].includes(tool) &&
-                tool !==
-                  (role_id === "coder" ? "submit_review" : "submit_delivery")),
+                !(
+                  role_id === "coder"
+                    ? ["submit_review", "withdraw_review"]
+                    : ["submit_delivery"]
+                ).includes(tool)),
           ),
           worktree: role_id === "coder" ? "write" : "none",
         }),

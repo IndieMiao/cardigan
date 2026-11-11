@@ -1,9 +1,12 @@
 import type { DatabaseSync } from "node:sqlite";
+import type { SnapshotTransaction } from "./command-snapshots.js";
 import {
   createGlobalRepositories,
   type ReadGlobalRepositories,
 } from "./employees.js";
 import { ReadOnlyTransactionError } from "./read-only.js";
+import { snapshotTables } from "./snapshot-migration.js";
+import { prepare } from "./statements.js";
 
 export { ReadOnlyTransactionError } from "./read-only.js";
 
@@ -49,10 +52,14 @@ export type ReadRepository<Entity, Key> = Pick<
   "get" | "list"
 >;
 
-export type ReadEventRepository = Pick<EventRepository, "listAfter">;
+export type ReadEventRepository = Pick<EventRepository, "listAfter"> & {
+  /** Optional bulk history reader supplied by Store's transaction cache. */
+  listStreams?(project: ProjectId): ReadonlyMap<string, readonly Event[]>;
+};
 
 /** Everything `uow.read` hands to its callback. */
 export interface ReadRepositories extends ReadGlobalRepositories {
+  readonly cachedCommandState?: SnapshotTransaction["state"];
   readonly project_preferences: ReadRepository<ProjectPreferences, ProjectId>;
   readonly card_templates: ReadRepository<
     CardTemplate,
@@ -102,10 +109,12 @@ export function jsonRepository<Entity, Key>(
   mode: "read" | "write" = "write",
 ): Repository<Entity, Key> {
   const keyMatch = spec.key.map((column) => `${column} = ?`).join(" AND ");
-  const selectByKey = db.prepare(
+  const selectByKey = prepare(
+    db,
     `SELECT doc FROM ${spec.table} WHERE project_id = ? AND ${keyMatch}`,
   );
-  const selectAll = db.prepare(
+  const selectAll = prepare(
+    db,
     `SELECT doc FROM ${spec.table} WHERE project_id = ?`,
   );
   const updates = spec.columns
@@ -115,7 +124,8 @@ export function jsonRepository<Entity, Key>(
     .join(", ");
   const upsert =
     mode === "write"
-      ? db.prepare(
+      ? prepare(
+          db,
           `INSERT INTO ${spec.table} (project_id, ${spec.columns.join(", ")}, doc) ` +
             `VALUES (?, ${placeholders(spec.columns.length)}, ?) ` +
             `ON CONFLICT (project_id, ${spec.key.join(", ")}) DO UPDATE SET ${updates}`,
@@ -168,12 +178,14 @@ export function eventRepository(
 ): EventRepository {
   const insert =
     mode === "write"
-      ? db.prepare(
+      ? prepare(
+          db,
           "INSERT INTO events (project_id, id, card_id, stream, seq, type, doc) " +
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
       : undefined;
-  const after = db.prepare(
+  const after = prepare(
+    db,
     "SELECT doc FROM events WHERE project_id = ? AND stream = ? AND seq > ? ORDER BY seq",
   );
 
@@ -283,13 +295,70 @@ const cursorSpec: TableSpec<Cursor> = {
 };
 
 /** Write-capable repositories of one connection (inside `uow.run`). */
-export function createRepositories(db: DatabaseSync): Repositories {
-  return create(db, "write") as Repositories;
+export function createRepositories(
+  db: DatabaseSync,
+  snapshots?: SnapshotTransaction,
+): Repositories {
+  return snapshotRepositories(baseRepositories(db, "write"), snapshots);
 }
 
 /** Read-only repositories of one connection (inside `uow.read`). */
-export function createReadRepositories(db: DatabaseSync): ReadRepositories {
-  return { ...create(db, "read"), ...createGlobalRepositories(db, "read") };
+export function createReadRepositories(
+  db: DatabaseSync,
+  snapshots?: SnapshotTransaction,
+): ReadRepositories {
+  return {
+    ...snapshotRepositories(baseRepositories(db, "read"), snapshots),
+    ...createGlobalRepositories(db, "read", snapshots),
+  };
+}
+
+const repositories = new WeakMap<
+  DatabaseSync,
+  Partial<Record<"read" | "write", Repositories>>
+>();
+function baseRepositories(
+  db: DatabaseSync,
+  mode: "read" | "write",
+): Repositories {
+  let modes = repositories.get(db);
+  if (!modes) {
+    modes = {};
+    repositories.set(db, modes);
+  }
+  const existing = modes[mode];
+  if (existing) return existing;
+  const created = create(db, mode);
+  modes[mode] = created;
+  return created;
+}
+
+/** Each transaction gets its own snapshot readers; prepared repositories are reusable. */
+function snapshotRepositories(
+  base: Repositories,
+  snapshots?: SnapshotTransaction,
+): Repositories {
+  if (!snapshots) return base;
+  return Object.fromEntries(
+    Object.entries(base).map(([table, repository]) => {
+      const keys = snapshotTables[table];
+      return [
+        table,
+        keys && table !== "events"
+          ? {
+              ...repository,
+              list: (project: ProjectId) =>
+                snapshots.list(table, keys, project),
+            }
+          : repository,
+      ];
+    }),
+  ) as unknown as Repositories;
+}
+
+/** Migrations may add repositories that were unavailable in an old schema. */
+export function clearRepositoryCache(db: DatabaseSync): void {
+  repositories.delete(db);
 }
 
 function create(db: DatabaseSync, mode: "read" | "write"): Repositories {
@@ -342,11 +411,10 @@ function templateRepository(
 ): Repository<CardTemplate, Pick<CardTemplate, "id" | "version">> {
   // Historical migration fixtures may open a pre-template schema.
   if (
-    !db
-      .prepare(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'card_templates'",
-      )
-      .get()
+    !prepare(
+      db,
+      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'card_templates'",
+    ).get()
   )
     return {
       get: () => undefined,
@@ -381,11 +449,10 @@ function preferenceRepository(
 ): Repository<ProjectPreferences, ProjectId> {
   // Historical migration fixtures deliberately open older schemas.
   if (
-    !db
-      .prepare(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'project_preferences'",
-      )
-      .get()
+    !prepare(
+      db,
+      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'project_preferences'",
+    ).get()
   )
     return {
       get: () => undefined,

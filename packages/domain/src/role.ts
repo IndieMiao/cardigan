@@ -50,6 +50,7 @@ export const STANDING_ROLE_TOOLS = [
   "finish_run",
   "submit_delivery",
   "submit_review",
+  "withdraw_review",
   "create_card",
   "update_card",
   "create_work_item",
@@ -71,6 +72,7 @@ export const ROLE_TOOL_ALLOWLISTS: Readonly<
     (tool) =>
       tool !== "submit_review" &&
       tool !== "replace_verification_work_item" &&
+      tool !== "withdraw_review" &&
       !tool.startsWith("host_ops_"),
   ),
   verify: toolNames.filter(

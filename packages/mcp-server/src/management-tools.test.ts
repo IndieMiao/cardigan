@@ -716,15 +716,29 @@ test("MCP hides globally external employees from PM candidates and rejects expli
   ).toMatchObject({ employee_id: "E-2" });
 });
 
-test.each([false, true])(
-  "record_decision raises review limits once through PM Office (paused=%s)",
-  async (paused) => {
+test.each(
+  [false, true].flatMap((paused) =>
+    ["current", "missing"].map((target) => ({ paused, target })),
+  ),
+)(
+  "record_decision raises review limits once through PM Office (paused=$paused, target=$target)",
+  async ({ paused, target }) => {
     const reviewer = work("reviewer");
     if (reviewer.kind !== "verify") throw new Error("Missing verifier");
     const assignment = await ok<AssignmentReply>(office, "assign", {
       work_item_id: reviewer.id,
       role_id: "reviewer",
     });
+    if (target === "current") {
+      const producer = await coder();
+      await ok(producer, "submit_delivery", {
+        work_item_id: work("coder").id,
+        kind: "code",
+        summary: "Current review target",
+        subject: { kind: "doc_version", value: "v1" },
+        requested_verifiers: [reviewer.id],
+      });
+    }
     const q = await ok<Decision>(office, "request_decision", {
       card_id: card.id,
       kind: "choose",
@@ -794,16 +808,30 @@ test.each([false, true])(
       max_review_rounds: 2,
       status: "ready",
     });
-    expect(
+    const queued = () =>
       store.uow.read((tx) =>
-        tx.runs.list(project).filter((r) => r.status === "queued"),
-      ),
-    ).toHaveLength(1);
+        tx.runs
+          .list(project)
+          .filter(
+            (r) => r.assignment_id === assignment.id && r.status === "queued",
+          ),
+      );
+    const resumed = queued();
+    // Raising the budget resumes work, but only a current target permits a Run.
+    expect(resumed).toHaveLength(target === "current" ? 1 : 0);
+    if (target === "current")
+      expect(resumed[0]).toMatchObject({
+        kind: "decision_resumed",
+        role_version: 1,
+        model: "fixture-model",
+        agent_cli_version: "1",
+      });
     expect(await ok(office, "record_decision", params, "raise-once")).toEqual(
       result,
     );
     expect((await raw(office, "record_decision", params)).isError).toBe(true);
     expect(work("reviewer")).toMatchObject({ max_review_rounds: 2 });
+    expect(queued()).toEqual(resumed);
     expect(
       store.uow.read((tx) =>
         tx.events

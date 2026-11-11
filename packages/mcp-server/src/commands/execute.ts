@@ -4,6 +4,7 @@ import type {
   CommandEffect,
   CommandPorts,
   CommandState,
+  Event,
   ProjectId,
   Repository,
   Result,
@@ -24,7 +25,23 @@ export function loadCommandState(
   project_id: ProjectId,
   project_settings?: CommandState["project_settings"],
 ): CommandState {
+  // Resolve the transaction's event history even on a state cache hit. A
+  // backend without this bulk port keeps the original per-stream read path.
+  const streams = tx.events.listStreams?.(project_id);
+  const build = () => readCommandState(tx, project_id, streams);
+  const state =
+    (streams && tx.cachedCommandState?.(project_id, build)) || build();
+  return project_settings ? { ...state, project_settings } : state;
+}
+
+function readCommandState(
+  tx: McpReadContext,
+  project_id: ProjectId,
+  streams: ReadonlyMap<string, readonly Event[]> | undefined,
+): CommandState {
   const cards = tx.cards.list(project_id);
+  // Store reads only newly appended rows. Keep the original project/card/seq
+  // order, including filtering out streams whose card is absent from this snapshot.
   return {
     project_id,
     project_preferences: tx.project_preferences?.list(project_id) ?? [],
@@ -32,7 +49,6 @@ export function loadCommandState(
     employees: tx.employees?.list() ?? [],
     members: tx.members?.list() ?? [],
     employee_activity: tx.employees?.assignmentActivity?.() ?? [],
-    ...(project_settings ? { project_settings } : {}),
     cards,
     work_items: tx.work_items.list(project_id),
     assignments: tx.assignments.list(project_id),
@@ -46,7 +62,9 @@ export function loadCommandState(
     cursors: tx.cursors.list(project_id),
     timeline: tx.timeline.list(project_id),
     events: [undefined, ...cards.map((c) => c.id)].flatMap((id) =>
-      tx.events.listAfter(project_id, id, 0),
+      streams
+        ? (streams.get(id ?? "") ?? [])
+        : tx.events.listAfter(project_id, id, 0),
     ),
   };
 }

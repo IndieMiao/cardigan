@@ -154,6 +154,10 @@ export async function startCardiganServer(
       dataDir: config.dataDir,
       host: config.host,
       port: config.port,
+      projectSettings: (projectId) => ({
+        merge_gate_enabled:
+          mergeGate.forProject(projectId).status !== "disabled",
+      }),
       // §3.3: production always verifies against the real Git service, and the
       // verifier follows the project the request belongs to.
       deliveryVerifier: git.verifierFor,
@@ -205,6 +209,13 @@ export async function startCardiganServer(
             : served.toolCatalog(allowed, assignment);
         },
         ...options.dispatcher,
+        ...((options.dispatcher.intervalMs ?? config.dispatchIntervalMs) ===
+        undefined
+          ? {}
+          : {
+              intervalMs:
+                options.dispatcher.intervalMs ?? config.dispatchIntervalMs,
+            }),
         ...((options.dispatcher.dispatchTimeoutMs ??
           config.dispatchTimeoutMs) === undefined
           ? {}

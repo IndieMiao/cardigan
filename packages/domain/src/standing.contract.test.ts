@@ -50,6 +50,12 @@ test("the legacy inference reads record_decision from a token scope", () => {
   expect(standingModeFromTools([])).toBe("ops");
 });
 
+test("review withdrawal is not exposed to the PM Office chat token", () => {
+  const tools = ["submit_review", "withdraw_review"] as const;
+  expect(standingTools(tools, "office")).toEqual(["submit_review"]);
+  expect(standingTools(tools, "ops")).toEqual(tools);
+});
+
 test("release_assignment belongs to Ops only and is never added to older roles", () => {
   const tools: readonly ToolName[] = [...pmTools, "release_assignment"];
   expect(standingTools(tools, "office")).not.toContain("release_assignment");

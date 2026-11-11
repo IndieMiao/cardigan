@@ -14,7 +14,12 @@ import {
   serverCard,
 } from "./test-support.js";
 
-const allowed = ["submit_delivery", "submit_review", "get_card"] as const;
+const allowed = [
+  "submit_delivery",
+  "submit_review",
+  "withdraw_review",
+  "get_card",
+] as const;
 let store: Store;
 let server: RunningServer;
 let clients: Client[];
@@ -149,6 +154,76 @@ const counts = () =>
     events: tx.events.listAfter(project_id, card_id, 0).length,
     timeline: tx.timeline.list(project_id).length,
   }));
+
+test("withdraw_review persists the audit marker and replay is idempotent over MCP", async () => {
+  const coder = await connect();
+  const reviewer = await connect(1);
+  const pm = await connect(2);
+  expect((await reviewer.listTools()).tools.map((tool) => tool.name)).toContain(
+    "withdraw_review",
+  );
+  await call(coder, "submit_delivery", delivery);
+  await call(reviewer, "submit_review", review);
+  const params = {
+    idempotency_key: "withdraw-1",
+    work_item_id: "W-2",
+    rationale: "需要重新核查",
+  };
+  const before = counts();
+  expect(code(await call(pm, "withdraw_review", params))).toBe("unauthorized");
+  expect(code(await call(coder, "withdraw_review", params))).toBe(
+    "unauthorized",
+  );
+  expect(
+    (await call(reviewer, "withdraw_review", { ...params, rationale: "  " }))
+      .isError,
+  ).toBe(true);
+  expect(counts()).toEqual(before);
+  const result = await call(reviewer, "withdraw_review", {
+    ...params,
+    assignment_id: "A-1",
+    author: "human",
+  });
+  expect(result.isError).not.toBe(true);
+  expect(result.structuredContent).toMatchObject({
+    verdict: "pass",
+    withdrawn: { at: NOW, rationale: params.rationale },
+  });
+  const after = counts();
+  expect(after).toEqual({
+    ...before,
+    events: before.events + 1,
+    timeline: before.timeline + 1,
+  });
+  expect(
+    (await call(reviewer, "withdraw_review", params)).structuredContent,
+  ).toEqual(result.structuredContent);
+  expect(
+    code(
+      await call(reviewer, "withdraw_review", {
+        ...params,
+        idempotency_key: "withdraw-again",
+      }),
+    ),
+  ).toBe("illegal_transition");
+  expect(counts()).toEqual(after);
+  expect(
+    store.uow.read(
+      (tx) => tx.work_items.get(project_id, "W-2" as never)?.status,
+    ),
+  ).toBe("ready");
+  expect(store.uow.read((tx) => tx.reviews.list(project_id))).toMatchObject([
+    { withdrawn: { rationale: params.rationale } },
+  ]);
+  const card = await call(reviewer, "get_card", { card_id });
+  expect(card.structuredContent).toMatchObject({
+    reviews: [{ withdrawn: { rationale: params.rationale } }],
+    review_matrix: [{ verdict: null }],
+  });
+  expect(
+    store.uow.read((tx) => tx.timeline.list(project_id).at(-1)?.author),
+  ).toBe("assignment:A-2");
+});
 
 /**
  * §4.4: a produce work item that nothing verifies is accepted on delivery, so

@@ -70,6 +70,11 @@ export {
   loadRunCapacityConfig,
   type RunCapacityConfiguration,
 } from "./run-capacity-config.js";
+export {
+  deferTargetAttempt,
+  RunTargetDeferred,
+  refreshTargetWait,
+} from "./run-target.js";
 export { revokeStoppedRunTokens, stopRunRuntime } from "./stop-run.js";
 export {
   type CheckoutCheck,
