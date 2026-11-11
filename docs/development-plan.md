@@ -1314,6 +1314,7 @@ P2a-10 B1 在 domain 的 `toolNames` 中预留 `host_ops_read_diagnostics`、`ho
 | `request_human_action(card_id, instructions, why_human, expected_return, blocked_work_items[], due?) → key` | 全部 | 先交 PM Ops 分拣，转交人或主机操作后进入 Needs You |
 | `request_decision(card_id?, kind, category, question, context, options[], recommended, affected_cards[], affected_work_items[], blocking, decider, attachment_ids?) → key` | 全部 | 发起拍板，返回编号；`attachment_ids` 引用已有卡片附件，顺序即展示顺序 |
 | `upload_attachment(card_id, file, mime, kind, attach_to, basis?, sha256?, supersedes?)` | 全部 | 返回附件元数据；file 为标准带填充 base64，解码后 ≤10MiB（10×1024×1024 字节）；artifact 必须有 basis |
+| `read_attachment(attachment_id)` | 工具白名单允许的 Assignment（默认 coder、reviewer、pm） | 只读本项目且有权访问卡片的附件；返回原始字节的 base64、SHA-256、字节数和 MIME，校验摘要及大小，最大 10 MiB |
 | `heartbeat(run_id, note?)` | 全部 | 心跳 |
 | `finish_run(run_id, outcome: completed\|blocked\|failed, summary)` | 全部 | 结束本次 Run |
 | `submit_delivery(work_item_id, kind, summary, subject, requested_verifiers[], branch?, pr_url?, test_results?, attachments[], known_gaps[], supersedes?)` | 产出型角色 | 提交交付。`kind=card_completion` 即卡片的完成申请，只有主产出工作项的负责人可以提交。`summary` 面向人且不超过 160 字；长内容放 `test_results`、`known_gaps` 或附件 |
@@ -1334,6 +1335,10 @@ S21：MCP `create_card` 的 `repo`、`base_branch` 都可省略，分别使用 T
 M1.5 已负责 `whoami`、`get_card`、`get_updates`、`ack_events` 的实现与测试；domain 不再提供第二套同名命令。M1.3 的项目查询仅保留 `project_snapshot`、`list_needs_you`。
 
 M1.6c 的 `heartbeat`、`finish_run` 与附件上传复用写命令的幂等事务；心跳不生成事件或时间线，结束 Run 不代表业务完成。`project_snapshot`、`list_needs_you` 不要求幂等键，在同一个只读事务中加载完整项目 CommandState 并执行 domain 查询，具有下述完整快照的规模成本。
+
+C-87：只读工具 `read_attachment(attachment_id)` 返回 `{attachment_id, card_id, encoding:"base64", file, sha256, size, mime}`，`file` 解码后即上传时的原始字节，不要求幂等键。默认角色包的 coder、reviewer、pm 增加该工具；已有角色版本和 Token 不自动升级，沿用人工角色升级和会话换版流程。工具不接受服务端文件路径，不提供公开下载地址；Agent 需要落盘时自行将返回的 base64 解码到自己的工作区。
+
+读取先按 Token 所属项目查附件，并复用 `get_card` 的卡片可见性：工作项 Assignment 仅本卡，常驻 Assignment 为本项目。不存在、跨项目和无权卡片统一返回不含所属卡号的 `not_found`，鉴权通过前不读文件。随后校验元数据（SHA-256 格式、0–10 MiB 整数字节数、MIME 类型语法），按摘要读取内容，重算 SHA-256 并核对上传记录的字节数。MIME 保留上传时声明的类型和参数，不作内容嗅探或格式转换。文件读取在数据库事务外进行，只接受普通文件，拒绝文件符号链接；同一文件描述符先检查大小、再有界读取，读取期间文件增长也不能突破上限。读取后重查 Token 和 Assignment 状态及卡片可见性。响应不包含存储路径，日志不记录字节内容；不写附件记录、业务事件或幂等缓存。
 
 C-107：`project_snapshot.available_employees` 为 PM 提供可指派工作项的在职员工，排除外接员工、项目未登记／停用的角色和仅常驻的 host_ops；只返回编号、名字、职位和角色，不带启动配置或简介。该列表不针对特定工作项，具体指派仍由 `assign` 检查角色及作者／审核者隔离；员工管理列表和历史作者展示保持完整。
 
@@ -1927,7 +1932,7 @@ P2a-12 C：`identityFile` 与 `knownHostsFile` 用同一条字面路径规则：
 |---|---|
 | produce 产出 | 系统白名单去掉 submit_review、withdraw_review |
 | verify 验证 | 系统白名单去掉 submit_delivery；worktree 只能为 readonly 或 none |
-| standing 常驻 | 固定的 STANDING_ROLE_TOOLS（现有 PM 上限）：whoami、get_card、get_updates、ack_events、post_comment、issue_instruction、report_blocker、request_human_action、request_decision、upload_attachment、heartbeat、finish_run、submit_delivery、submit_review、withdraw_review、create_card、update_card、create_work_item、update_work_item、assign、release_assignment、project_snapshot、list_needs_you、record_decision、resolve_delegated_decision、triage_human_action |
+| standing 常驻 | 固定的 STANDING_ROLE_TOOLS（现有 PM 上限）：whoami、get_card、get_updates、ack_events、post_comment、issue_instruction、report_blocker、request_human_action、request_decision、upload_attachment、read_attachment、heartbeat、finish_run、submit_delivery、submit_review、withdraw_review、create_card、update_card、create_work_item、update_work_item、assign、release_assignment、project_snapshot、list_needs_you、record_decision、resolve_delegated_decision、triage_human_action |
 
 所有类型均额外要求：record_decision、resolve_delegated_decision、triage_human_action 只能配置在编号为 pm 的角色上；后两者的命令只允许 active、standing_mode=ops 的常驻 PM，Office Token 不签发。`release_assignment` 只对 active、standing_mode=ops 的常驻 PM 开放，Office 的工具范围排除它；命令只释放工作项 Assignment，常驻 Assignment 仍仅允许 human 释放。主机只对 standing_mode=office 的常驻 PM 签发 record_decision。Ops、工作项 PM 和其他角色不能取得它。现有命令对工作项类型、项目作用域及作者／审核者隔离的校验继续生效，角色白名单不会绕过这些约束。角色 CRUD 权限独立于工具清单，当前只接受同项目 human，Agent 和 system 均拒绝。
 

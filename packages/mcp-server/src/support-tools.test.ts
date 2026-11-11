@@ -8,7 +8,13 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Assignment, Attachment, Decision, Run } from "@cardigan/domain";
+import type {
+  Assignment,
+  Attachment,
+  Decision,
+  Run,
+  ToolName,
+} from "@cardigan/domain";
 import { STANDING_ROLE_TOOLS } from "@cardigan/domain";
 import { Store } from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -58,12 +64,15 @@ const decision = {
   blocking: true,
   decider: "human",
 };
-async function connect(assignment: Assignment) {
+async function connect(
+  assignment: Assignment,
+  allowed_tools: readonly ToolName[] = STANDING_ROLE_TOOLS,
+) {
   const issued = store.issueToken({
     id: assignment.mcp_token_id,
     project_id,
     assignment_id: assignment.id,
-    role: { role_version: 1, allowed_tools: STANDING_ROLE_TOOLS },
+    role: { role_version: 1, allowed_tools },
   });
   const client = new Client({ name: "support-test", version: "1" });
   clients.push(client);
@@ -176,6 +185,177 @@ afterEach(async () => {
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
 });
+
+test.each([Buffer.alloc(0), Buffer.from([0, 255, 128, 10, 13]), content])(
+  "read_attachment returns original bytes and metadata without writing records: %j",
+  async (bytes) => {
+    const uploaded = await ok<Attachment>(coder, "upload_attachment", {
+      ...upload,
+      file: bytes.toString("base64"),
+      mime: "application/octet-stream",
+    });
+    // Human uploads and old records without display fields have the same access.
+    store.uow.run((tx) =>
+      tx.attachments.put(project_id, { ...uploaded, uploaded_by: "human" }),
+    );
+    const before = counts();
+    for (const client of [coder, office]) {
+      const result = await client.callTool({
+        name: "read_attachment",
+        arguments: { attachment_id: uploaded.id },
+      });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toEqual({
+        attachment_id: uploaded.id,
+        card_id,
+        encoding: "base64",
+        file: bytes.toString("base64"),
+        size: bytes.length,
+        sha256: sha256(bytes),
+        mime: "application/octet-stream",
+      });
+      expect(JSON.stringify(result)).not.toContain("storage_path");
+    }
+    expect(counts()).toEqual(before);
+  },
+);
+
+test("read_attachment enforces token tool, card and project scope before reading blobs", async () => {
+  const uploaded = await ok<Attachment>(coder, "upload_attachment", upload);
+  const foreignProject = "foreign-project" as never;
+  store.createProject({ id: foreignProject, name: "Foreign" });
+  store.uow.run((tx) => {
+    tx.cards.put(project_id, { ...serverCard, id: "C-2" as never });
+    tx.attachments.put(project_id, {
+      ...uploaded,
+      id: "F-other-card" as never,
+      card_id: "C-2" as never,
+    });
+    tx.cards.put(foreignProject, { ...serverCard, project_id: foreignProject });
+    tx.attachments.put(foreignProject, {
+      ...uploaded,
+      id: "F-foreign" as never,
+    });
+  });
+  const get = vi.spyOn(blobs, "get");
+  for (const attachment_id of [
+    "F-other-card",
+    "F-foreign",
+    "F-missing",
+    "../outside",
+    "/etc/passwd",
+  ]) {
+    const result = await call(coder, "read_attachment", {
+      attachment_id,
+      project_id: foreignProject,
+      assignment_id: "A-2",
+      card_id: "C-2",
+    });
+    expect(result.structuredContent).toEqual({
+      error: { code: "not_found", message: "Attachment not found" },
+    });
+  }
+  expect(get).not.toHaveBeenCalled();
+  expect(
+    code(await call(office, "read_attachment", { attachment_id: "F-foreign" })),
+  ).toBe("not_found");
+  expect(get).not.toHaveBeenCalled();
+  expect(
+    await ok(office, "read_attachment", { attachment_id: "F-other-card" }),
+  ).toMatchObject({ file: upload.file });
+  const assignment = store.uow.read((tx) =>
+    tx.assignments.get(project_id, "A-1" as never),
+  );
+  if (!assignment) throw new Error("Missing fixture");
+  const restricted = await connect(
+    { ...assignment, mcp_token_id: "restricted-token" },
+    ["whoami"],
+  );
+  expect(
+    (await restricted.listTools()).tools.map((tool) => tool.name),
+  ).not.toContain("read_attachment");
+  get.mockClear();
+  expect(
+    code(
+      await call(restricted, "read_attachment", { attachment_id: uploaded.id }),
+    ),
+  ).toBe("forbidden_tool");
+  expect(get).not.toHaveBeenCalled();
+});
+
+test.each([
+  { size: MAX_ATTACHMENT_BYTES + 1 },
+  { size: -1 },
+  { size: 1.5 },
+  { sha256: "../outside" },
+  { sha256: `${sha256(content)}\n` },
+  { mime: "text/plain\r\nsecret" },
+  { mime: "text/plain\n" },
+  { mime: "invalid" },
+])("read_attachment rejects invalid metadata before IO: %j", async (patch) => {
+  const uploaded = await ok<Attachment>(coder, "upload_attachment", upload);
+  store.uow.run((tx) =>
+    tx.attachments.put(project_id, { ...uploaded, ...patch }),
+  );
+  const get = vi.spyOn(blobs, "get");
+  expect(
+    code(await call(coder, "read_attachment", { attachment_id: uploaded.id })),
+  ).toBe("validation_failed");
+  expect(get).not.toHaveBeenCalled();
+});
+
+test.each(["missing", "checksum", "size", "exception"])(
+  "read_attachment refuses %s blobs without exposing host paths",
+  async (failure) => {
+    const uploaded = await ok<Attachment>(coder, "upload_attachment", upload);
+    const get = vi.spyOn(blobs, "get");
+    if (failure === "missing") get.mockResolvedValueOnce(undefined);
+    if (failure === "checksum")
+      get.mockResolvedValueOnce(Buffer.alloc(content.length));
+    if (failure === "size")
+      store.uow.run((tx) =>
+        tx.attachments.put(project_id, {
+          ...uploaded,
+          size: content.length + 1,
+        }),
+      );
+    if (failure === "exception")
+      get.mockRejectedValueOnce(new Error(`Private ${dataDir}`));
+    const result = await call(coder, "read_attachment", {
+      attachment_id: uploaded.id,
+    });
+    expect(code(result)).toBe(
+      failure === "missing" ? "not_found" : "validation_failed",
+    );
+    expect(JSON.stringify(result)).not.toContain(upload.file);
+    expect(JSON.stringify(result)).not.toContain(dataDir);
+  },
+);
+
+test.each(["revoked", "suspended"])(
+  "read_attachment rechecks %s access after IO",
+  async (change) => {
+    const uploaded = await ok<Attachment>(coder, "upload_attachment", upload);
+    vi.spyOn(blobs, "get").mockImplementationOnce(async () => {
+      if (change === "revoked") store.revokeToken("tok_coder");
+      else
+        store.uow.run((tx) => {
+          const assignment = tx.assignments.get(project_id, "A-1" as never);
+          if (assignment)
+            tx.assignments.put(project_id, {
+              ...assignment,
+              status: "suspended",
+            });
+        });
+      return content;
+    });
+    expect(
+      code(
+        await call(coder, "read_attachment", { attachment_id: uploaded.id }),
+      ),
+    ).toBe("unauthorized");
+  },
+);
 
 test("attachment metadata validation is shared with domain and rejects without records", async () => {
   const before = counts();

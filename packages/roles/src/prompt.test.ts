@@ -14,6 +14,18 @@ import {
 } from "./role-pack.js";
 import { parseLaunchConfig } from "./schema.js";
 
+test.each(["coder", "reviewer", "pm"] as const)(
+  "%s defaults grant valid attachment read permission",
+  (id) => {
+    const role = defaultRoleDefinition(id, {
+      harness: "codex",
+      launch_profile_ref: "fixture",
+    });
+    expect(role.allowed_tools).toContain("read_attachment");
+    expect(validateRole(role).ok).toBe(true);
+  },
+);
+
 test.each([
   "reviewer",
   "designer",

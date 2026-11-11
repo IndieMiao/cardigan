@@ -23,6 +23,7 @@ import {
   fileAttachmentStore,
   MAX_ATTACHMENT_BASE64,
 } from "../attachments.js";
+import { readAttachmentTool } from "../tools/read-attachment.js";
 import { agentCard } from "../tools/shared.js";
 import { defineTool, type ToolContext } from "../tools/types.js";
 import {
@@ -55,6 +56,7 @@ export function supportTools(options: SupportToolOptions = {}) {
   const attachments =
     options.attachmentStore ?? fileAttachmentStore(options.dataDir);
   return [
+    readAttachmentTool(attachments),
     defineTool({
       name: "upload_attachment",
       description:

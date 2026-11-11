@@ -45,6 +45,25 @@ const empty: RoleCommandState = { project_id: human.project_id, roles: [] };
 const first = (): Role =>
   value(createRole(empty, human, definition(), ports())).data;
 
+test.each<RoleKind>(["produce", "verify", "standing"])(
+  "attachment read permission preserves human-only role management for %s",
+  (kind) => {
+    const role = definition({
+      kind,
+      worktree: "none",
+      allowed_tools: ["read_attachment"],
+    });
+    expect(
+      value(createRole(empty, human, role, ports())).data.allowed_tools,
+    ).toEqual(["read_attachment"]);
+    expect(createRole(empty, actor(), role, ports())).toMatchObject({
+      ok: false,
+      error: { code: "forbidden_tool" },
+    });
+    expect(empty.roles).toEqual([]);
+  },
+);
+
 test.each([
   "## 协作规则",
   "## 协议（每个 Run 都要遵守）",
