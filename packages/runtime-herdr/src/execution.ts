@@ -37,6 +37,11 @@ export type ExecutionConfig = { readonly agentNice?: number } & (
       readonly machine: string;
       readonly identityFile: string;
       readonly knownHostsFile: string;
+      /** Omitted fields preserve the local isolated-account SSH endpoint. */
+      readonly host?: string;
+      readonly port?: number;
+      readonly user?: string;
+      readonly hostKeyAlias?: string;
     }
 );
 export const LOCAL_RUNTIME_WARNING =
