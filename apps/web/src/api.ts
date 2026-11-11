@@ -332,6 +332,7 @@ export interface CardRelations {
 }
 
 export interface CardDetail {
+  readonly merge_confirmations?: readonly NeedsDecision[];
   readonly template?: TemplateView | null;
   readonly mark_done?: { allowed: boolean; reason: string | null } | null;
   readonly updated_at?: string;
@@ -466,6 +467,7 @@ export interface MergeCheckView {
   readonly updated_at: string;
 }
 export interface MergeConfirmationView {
+  readonly merge_noop?: boolean;
   readonly merge_gate_enabled?: boolean;
   readonly merge_gate_invalid?: boolean;
   readonly merge_check?: MergeCheckView | null;

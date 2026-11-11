@@ -20,10 +20,13 @@ import {
   autoMergeSchedule,
   builtinCardTemplates,
   cardTemplate,
+  currentMergeConfirmations,
+  decisionActionView,
   deriveCardStatus,
   deriveReviewMatrix,
   extractReferences,
   formatTimelineEntryId,
+  hasVerifiedMergeNoop,
   latestCardTemplate,
   listNeedsYou,
   markCardDone,
@@ -509,6 +512,7 @@ export function cardDetail(
   state: CommandState,
   card_id: CardId,
   options: {
+    readonly mergeGateStatus?: ProjectMergeGate["status"];
     readonly timelineLimit?: number;
     readonly timelineAnchor?: string;
     readonly now?: string;
@@ -717,6 +721,13 @@ export function cardDetail(
       : undefined;
   return {
     template: template ?? null,
+    merge_confirmations: currentMergeConfirmations(state, card_id).map((q) =>
+      decisionActionWebView(
+        state,
+        decisionActionView(state, q, options.now),
+        options.mergeGateStatus ?? "disabled",
+      ),
+    ),
     mark_done: completionPreview
       ? {
           allowed: completionPreview.ok,
@@ -832,6 +843,104 @@ export function noticePage(state: CommandState, before?: string) {
   };
 }
 
+function decisionActionWebView(
+  state: CommandState,
+  decision: ReturnType<typeof decisionActionView>,
+  mergeGateStatus: ProjectMergeGate["status"],
+) {
+  const schedule = autoMergeSchedule(state, decision.id);
+  const check =
+    decision.card_id && mergeGateStatus === "enabled"
+      ? cardViews({
+          ...state,
+          cards: state.cards.filter((c) => c.id === decision.card_id),
+        })[0]?.merge_check
+      : undefined;
+  return {
+    auto_merge: schedule.ok
+      ? { minutes: schedule.value.minutes, due_at: schedule.value.due_at }
+      : null,
+    ...webAuthorView(
+      state,
+      state.decisions.find((d) => d.id === decision.id)?.raised_by ?? "system",
+    ),
+    ...(decision.followup_notice
+      ? {
+          followup_notice: decision.followup_notice,
+          resolution: decision.resolution
+            ? {
+                ...decision.resolution,
+                ...webAuthorView(state, decision.resolution.resolved_by),
+              }
+            : undefined,
+        }
+      : {}),
+    kind: "decision" as const,
+    id: decision.id,
+    card_id: decision.card_id ?? null,
+    affected_cards: decision.affected_cards,
+    question: decision.question,
+    context: decision.context,
+    why: clamp(decision.why),
+    status: decision.status,
+    blocking: decision.blocking,
+    decider: decision.decider,
+    decider_view:
+      decision.decider === "human" ? webAuthorView(state, "human") : null,
+    options: decision.options,
+    recommended: decision.recommended,
+    trigger: decision.trigger ?? null,
+    category: decision.category ?? "general",
+    assignment_id: decision.assignment_id ?? null,
+    opened_at: decision.opened_at,
+    waited_ms: decision.waited_ms,
+    related_cards: decision.related_cards,
+    merge_confirmation: decision.merge_confirmation
+      ? {
+          ...decision.merge_confirmation,
+          ...(mergeGateStatus === "enabled"
+            ? {
+                merge_gate_enabled: true,
+                merge_noop:
+                  !!decision.card_id &&
+                  !!decision.merge_confirmation.completion &&
+                  hasVerifiedMergeNoop(
+                    state.events,
+                    decision.card_id,
+                    decision.merge_confirmation.completion.id,
+                  ),
+                merge_check:
+                  check?.completion_id ===
+                  decision.merge_confirmation.completion?.id
+                    ? (check ?? null)
+                    : null,
+              }
+            : {}),
+          ...(mergeGateStatus === "invalid"
+            ? { merge_gate_invalid: true }
+            : {}),
+          deliveries: decision.merge_confirmation.deliveries.map(
+            (delivery) => ({
+              ...delivery,
+              ...webRunAuthorView(
+                state,
+                state.deliveries.find((d) => d.id === delivery.id)?.run_id ??
+                  "",
+              ),
+            }),
+          ),
+          reviews: decision.merge_confirmation.reviews.map((review) => ({
+            ...review,
+            ...webRunAuthorView(
+              state,
+              state.reviews.find((r) => r.id === review.id)?.run_id ?? "",
+            ),
+          })),
+        }
+      : null,
+  };
+}
+
 /** `listNeedsYou` plus the one-line reason and how long each item has waited. */
 export function needsYou(
   state: CommandState,
@@ -852,91 +961,8 @@ export function needsYou(
   );
   const data = result.data;
   const noticeList = noticePage(state);
-  const checks = new Map(
-    mergeGateStatus === "enabled"
-      ? cardViews(state).map((card) => [card.id, card.merge_check])
-      : [],
-  );
-  const decisionView = (decision: (typeof data.decisions)[number]) => {
-    const schedule = autoMergeSchedule(state, decision.id);
-    const check = decision.card_id ? checks.get(decision.card_id) : undefined;
-    return {
-      auto_merge: schedule.ok
-        ? { minutes: schedule.value.minutes, due_at: schedule.value.due_at }
-        : null,
-      ...webAuthorView(
-        state,
-        state.decisions.find((d) => d.id === decision.id)?.raised_by ??
-          "system",
-      ),
-      ...(decision.followup_notice
-        ? {
-            followup_notice: decision.followup_notice,
-            resolution: decision.resolution
-              ? {
-                  ...decision.resolution,
-                  ...webAuthorView(state, decision.resolution.resolved_by),
-                }
-              : undefined,
-          }
-        : {}),
-      kind: "decision" as const,
-      id: decision.id,
-      card_id: decision.card_id ?? null,
-      affected_cards: decision.affected_cards,
-      question: decision.question,
-      context: decision.context,
-      why: clamp(decision.why),
-      status: decision.status,
-      blocking: decision.blocking,
-      decider: decision.decider,
-      decider_view:
-        decision.decider === "human" ? webAuthorView(state, "human") : null,
-      options: decision.options,
-      recommended: decision.recommended,
-      trigger: decision.trigger ?? null,
-      category: decision.category ?? "general",
-      assignment_id: decision.assignment_id ?? null,
-      opened_at: decision.opened_at,
-      waited_ms: decision.waited_ms,
-      related_cards: decision.related_cards,
-      merge_confirmation: decision.merge_confirmation
-        ? {
-            ...decision.merge_confirmation,
-            ...(mergeGateStatus === "enabled"
-              ? {
-                  merge_gate_enabled: true,
-                  merge_check:
-                    check?.completion_id ===
-                    decision.merge_confirmation.completion?.id
-                      ? (check ?? null)
-                      : null,
-                }
-              : {}),
-            ...(mergeGateStatus === "invalid"
-              ? { merge_gate_invalid: true }
-              : {}),
-            deliveries: decision.merge_confirmation.deliveries.map(
-              (delivery) => ({
-                ...delivery,
-                ...webRunAuthorView(
-                  state,
-                  state.deliveries.find((d) => d.id === delivery.id)?.run_id ??
-                    "",
-                ),
-              }),
-            ),
-            reviews: decision.merge_confirmation.reviews.map((review) => ({
-              ...review,
-              ...webRunAuthorView(
-                state,
-                state.reviews.find((r) => r.id === review.id)?.run_id ?? "",
-              ),
-            })),
-          }
-        : null,
-    };
-  };
+  const decisionView = (decision: ReturnType<typeof decisionActionView>) =>
+    decisionActionWebView(state, decision, mergeGateStatus);
   const decisions = data.decisions.map(decisionView);
   // §7.4 (C-65): PM-held merge confirmations the human may answer directly.
   const pm_held_merges = data.pm_held_merges.map(decisionView);

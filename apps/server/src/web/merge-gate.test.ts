@@ -238,6 +238,20 @@ test.each(
     ).toBe(false);
     const detail = await read("/cards/C-2");
     expect(detail.json).toMatchObject({
+      merge_confirmations: [
+        expect.objectContaining({
+          id: "q(2)",
+          status: source === "open" ? "open" : "resolved",
+          merge_confirmation: expect.objectContaining({
+            completion: expect.objectContaining({ id: "D-2" }),
+            merge_gate_enabled: true,
+            merge_check: expect.objectContaining({
+              status,
+              completion_id: "D-2",
+            }),
+          }),
+        }),
+      ],
       decisions: expect.arrayContaining([
         expect.objectContaining({ id: "q(2)" }),
       ]),
@@ -249,6 +263,10 @@ test.each(
       ]),
     });
     expect((await recheck()).status).toBe(200);
+    if (source !== "open")
+      expect((await read("/cards/C-2")).json).toMatchObject({
+        merge_confirmations: [],
+      });
     expect((await recheck()).status).toBe(200);
     const again = await recheck("D-2", "another");
     expect(again.status).toBe(409);
@@ -278,6 +296,9 @@ test("only the current completion is shown and a stale request is rejected", asy
     decisions: { id: string }[];
   };
   expect(pending.decisions.some((q) => q.id === "q(2)")).toBe(false);
+  expect((await read("/cards/C-2")).json).toMatchObject({
+    merge_confirmations: [],
+  });
   expect((await recheck()).status).toBe(409);
 });
 

@@ -332,7 +332,8 @@ function ReviewLine({ review }: { readonly review: MergeConfirmationReview }) {
     </li>
   );
 }
-function MergeConfirmation({
+/** Shared by Needs You and card details so human writes use the same controls. */
+export function MergeConfirmation({
   q,
   client,
   projectId,
@@ -365,7 +366,12 @@ function MergeConfirmation({
       {merge?.merge_gate_invalid && (
         <p className="error">合并闸门配置无效，请查看 server 启动日志</p>
       )}
-      {merge?.merge_gate_enabled && (
+      {merge?.merge_noop && (
+        <p className="hint">
+          主机已验证交付均在基线中，无需合并检查；请确认是否完成此次合并。
+        </p>
+      )}
+      {merge?.merge_gate_enabled && !merge.merge_noop && (
         <MergeCheck check={check ?? null} projectId={projectId} live />
       )}
       <section className="needs-merge-section" aria-label="要合并的交付">
@@ -466,10 +472,13 @@ function MergeConfirmation({
               确认合并
             </button>
           )}
-          {merge?.merge_gate_enabled && check?.status !== "passed" && (
-            <span className="hint">检查通过后才会合并</span>
-          )}
           {merge?.merge_gate_enabled &&
+            !merge.merge_noop &&
+            check?.status !== "passed" && (
+              <span className="hint">检查通过后才会合并</span>
+            )}
+          {merge?.merge_gate_enabled &&
+            !merge.merge_noop &&
             check &&
             ["failed", "timed_out"].includes(check.status) &&
             cardId && (

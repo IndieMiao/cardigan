@@ -241,6 +241,64 @@ function mergeConfirmation(
   };
 }
 
+/** Shared decision presentation for the task list and actionable card details. */
+export function decisionActionView(
+  state: CommandState,
+  q: Decision,
+  now?: string,
+) {
+  const why = (text: string) => [...text].slice(0, 40).join("");
+  const failedConfirmation = failedConfirmedMergeCheck(state, q);
+  const followup = !failedConfirmation && decisionFollowupNeedsHuman(state, q);
+  // Project decisions have no card timeline; their request event is the creation fact.
+  const opened =
+    state.events
+      .filter(
+        (e) =>
+          e.type === "decision_requested" &&
+          typeof e.payload === "object" &&
+          e.payload !== null &&
+          "decision_id" in e.payload &&
+          e.payload.decision_id === q.id,
+      )
+      .sort((a, b) => a.created_at.localeCompare(b.created_at))[0]
+      ?.created_at ??
+    state.timeline
+      .filter((e) => e.decision_id === q.id)
+      .sort((a, b) => a.event_seq - b.event_seq)[0]?.created_at;
+  const elapsed =
+    opened && now ? Date.parse(now) - Date.parse(opened) : Number.NaN;
+  return {
+    ...q,
+    ...(failedConfirmation
+      ? {
+          options: q.options.filter((o) => o.key === "request_changes"),
+          recommended: "request_changes",
+        }
+      : {}),
+    ...(followup
+      ? {
+          followup_notice:
+            "拍板已完成，尚无落实结果；当前无 PM Ops 接手，请安排跟进。",
+        }
+      : {}),
+    why: why(
+      failedConfirmation
+        ? "合并检查失败或超时，可退回修改或重新检查"
+        : q.question,
+    ),
+    opened_at: opened ?? null,
+    waited_ms: Number.isFinite(elapsed) ? Math.max(0, elapsed) : null,
+    related_cards: relatedCards(state.cards, q),
+    merge_confirmation: mergeConfirmation(
+      q,
+      state.work_items,
+      state.deliveries,
+      state.reviews,
+    ),
+  };
+}
+
 export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
   return command(state, actor, "list_needs_you", undefined, (d) => {
     d.pm();
@@ -257,58 +315,7 @@ export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
           mergeConfirmationWaitingForCheck(state, q),
       );
     const why = (text: string) => [...text].slice(0, 40).join("");
-    const view = (q: Decision) => {
-      const failedConfirmation = failedConfirmedMergeCheck(state, q);
-      const followup =
-        !failedConfirmation && decisionFollowupNeedsHuman(state, q);
-      // Project decisions have no card timeline; their request event is the creation fact.
-      const opened =
-        state.events
-          .filter(
-            (e) =>
-              e.type === "decision_requested" &&
-              typeof e.payload === "object" &&
-              e.payload !== null &&
-              "decision_id" in e.payload &&
-              e.payload.decision_id === q.id,
-          )
-          .sort((a, b) => a.created_at.localeCompare(b.created_at))[0]
-          ?.created_at ??
-        state.timeline
-          .filter((e) => e.decision_id === q.id)
-          .sort((a, b) => a.event_seq - b.event_seq)[0]?.created_at;
-      const elapsed =
-        opened && now ? Date.parse(now) - Date.parse(opened) : Number.NaN;
-      return {
-        ...q,
-        ...(failedConfirmation
-          ? {
-              options: q.options.filter((o) => o.key === "request_changes"),
-              recommended: "request_changes",
-            }
-          : {}),
-        ...(followup
-          ? {
-              followup_notice:
-                "拍板已完成，尚无落实结果；当前无 PM Ops 接手，请安排跟进。",
-            }
-          : {}),
-        why: why(
-          failedConfirmation
-            ? "合并检查失败或超时，可退回修改或重新检查"
-            : q.question,
-        ),
-        opened_at: opened ?? null,
-        waited_ms: Number.isFinite(elapsed) ? Math.max(0, elapsed) : null,
-        related_cards: relatedCards(d.list("cards"), q),
-        merge_confirmation: mergeConfirmation(
-          q,
-          d.list("work_items"),
-          d.list("deliveries"),
-          d.list("reviews"),
-        ),
-      };
-    };
+    const view = (q: Decision) => decisionActionView(state, q, now);
     return {
       attention: now ? reviewLimitAttention(state, now) : [],
       ...(isPmOps(d)

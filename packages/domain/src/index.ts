@@ -34,10 +34,15 @@ export {
   recordMergeCheck,
 } from "./commands/merge-check.js";
 export {
+  currentMergeConfirmations,
   pmFailedMergeCheck,
   pmMergeBlockers,
   pmMergeCheckDelegationAllowed,
 } from "./commands/merge-delegation.js";
+export {
+  hasVerifiedMergeNoop,
+  recordMergePreparation,
+} from "./commands/merge-preparation.js";
 export {
   acceptMergePushHold,
   beginMergePush,

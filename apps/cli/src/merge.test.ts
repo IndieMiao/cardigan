@@ -36,6 +36,7 @@ import {
   prepareMergePlan,
   queueRun,
   recordMergeCheck,
+  recordMergePreparation,
   submitDelivery,
   submitReview,
 } from "@cardigan/domain";
@@ -603,6 +604,33 @@ test.each([
     }
   },
 );
+
+test("C-115: a host-verified noop is actionable in needs-you without a fabricated pass", async () => {
+  await seatAwaitingMerge();
+  enableMergeGate();
+  const plan = unwrap(prepareMergePlan(state(), card_id as never));
+  apply(
+    (s, a, p) =>
+      recordMergePreparation(
+        { ...s, project_settings: { merge_gate_enabled: true } },
+        a,
+        {
+          card_id: plan.card_id,
+          completion_id: plan.completion_id,
+          base_sha: SHA,
+          noop: true,
+        },
+        p,
+      ),
+    { kind: "system", project_id: project },
+  );
+  const result = await cardigan("needs-you");
+  expect(result.code).toBe(0);
+  expect(result.out).toContain("待你拍板");
+  expect(result.out).toContain("交付已在基线中，无需合并检查");
+  expect(result.out).not.toContain("在等检查");
+  expect(result.out).not.toContain("合并检查：通过");
+});
 
 test("needs-you leaves projects without a gate unchanged and counts pending checks", async () => {
   await seatAwaitingMerge();

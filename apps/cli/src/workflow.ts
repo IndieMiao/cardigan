@@ -14,6 +14,7 @@ import {
   createCard,
   createHostOpsAssignment,
   EXTERNAL_ASSIGNMENT_START_ERROR,
+  hasVerifiedMergeNoop,
   isRoleActive,
   listNeedsYou,
   markNoticesRead,
@@ -1029,7 +1030,18 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
         return {
           held: needs.pm_held_merges,
           waiting: needs.waiting_merge_checks_count,
-          decisions: needs.decisions,
+          decisions: needs.decisions.map((q) => ({
+            ...q,
+            merge_noop:
+              !!q.card_id &&
+              q.kind === "approve" &&
+              "delivery_id" in q.target &&
+              hasVerifiedMergeNoop(
+                state.events,
+                q.card_id,
+                q.target.delivery_id,
+              ),
+          })),
           actions: needs.human_actions,
           // Same source as the Workbench 知会 section (§7.4): newest first.
           noticeList: notices(state),
@@ -1107,7 +1119,11 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
             `    ${decision.question}`,
             ...(decision.trigger === "merge_confirmation" &&
             gate.status === "enabled"
-              ? [`    合并检查：${check ? checkLabels[check.status] : "排队"}`]
+              ? [
+                  decision.merge_noop
+                    ? "    交付已在基线中，无需合并检查"
+                    : `    合并检查：${check ? checkLabels[check.status] : "排队"}`,
+                ]
               : []),
             ...(decision.trigger === "merge_confirmation" &&
             gate.status === "invalid"

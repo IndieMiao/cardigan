@@ -1,5 +1,6 @@
 import { isReviewStale } from "../derived.js";
 import type { Decision, Delivery, MergeCheckView } from "../entities.js";
+import type { CardId } from "../ids.js";
 import { pmMergeConfirmation } from "../preferences.js";
 import { attempt, type CommandState } from "./core.js";
 import { mergeRequiresHuman } from "./delegation.js";
@@ -9,6 +10,7 @@ import {
   failedCurrentMergeCheck,
   latestMergeCheck,
 } from "./merge-check.js";
+import { hasVerifiedMergeNoop } from "./merge-preparation.js";
 
 const newest = (values: readonly Delivery[]) =>
   [...values].sort(
@@ -139,8 +141,9 @@ export function mergeConfirmationWaitingForCheck(
   return (
     !context.ok ||
     context.value.target.id !== q.target.delivery_id ||
-    latestMergeCheck(state.events, q.card_id, q.target.delivery_id)?.status !==
-      "passed"
+    (!hasVerifiedMergeNoop(state.events, q.card_id, q.target.delivery_id) &&
+      latestMergeCheck(state.events, q.card_id, q.target.delivery_id)
+        ?.status !== "passed")
   );
 }
 
@@ -148,6 +151,24 @@ export function pmFailedMergeCheckOptions(state: CommandState, q: Decision) {
   return mergeRequiresHuman(state, q)
     ? ["recheck"]
     : ["request_changes", "recheck"];
+}
+/** Card details keep current human actions even while Needs You waits for checks. */
+export function currentMergeConfirmations(
+  state: CommandState,
+  card: CardId,
+): readonly Decision[] {
+  const context = attempt(() => mergeContext(state, card));
+  if (!context.ok) return [];
+  return state.decisions.filter(
+    (q) =>
+      q.trigger === "merge_confirmation" &&
+      q.card_id === card &&
+      q.kind === "approve" &&
+      "delivery_id" in q.target &&
+      q.target.delivery_id === context.value.target.id &&
+      (["open", "provisional"].includes(q.status) ||
+        !!failedConfirmedMergeCheck(state, q)),
+  );
 }
 /** Shared by command authorization, queues and routing; read the current preference. */
 export function pmMergeCheckDelegationAllowed(
