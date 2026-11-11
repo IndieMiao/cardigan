@@ -3,7 +3,11 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { completeHumanAction, recheckMerge } from "@cardigan/domain";
+import {
+  acceptMergePushHold,
+  completeHumanAction,
+  recheckMerge,
+} from "@cardigan/domain";
 import { CentralRepositoryService } from "@cardigan/git-service";
 import { CentralGitTransport } from "@cardigan/git-transport";
 import { loadMergeGateConfig, parseMergePushConfig } from "@cardigan/host";
@@ -462,5 +466,117 @@ test("one paused project cannot block another project's push queue", async () =>
     git(center, "rev-parse", "main"),
   );
   expect(c.events("merge_push_failed")).toHaveLength(1);
+  expect(c.errors).toEqual([]);
+}, 30_000);
+
+/** C-94: write straight into the central main, bypassing the merge loop. */
+function bypass(c: Awaited<ReturnType<typeof fixture>>, who: string) {
+  const outside = join(c.root, `bypass-${c.events("card_merged").length}`);
+  git(c.root, "clone", "-q", "-b", "main", c.center, outside);
+  writeFileSync(join(outside, "ui-audit"), who);
+  git(outside, "add", ".");
+  git(
+    outside,
+    "-c",
+    `user.name=${who}`,
+    "-c",
+    `user.email=${who === "Cardigan" ? "cardigan@localhost" : "audit@example.invalid"}`,
+    "commit",
+    "-m",
+    "audit change",
+  );
+  git(outside, "push", "-q", "origin", "main");
+  return git(outside, "rev-parse", "HEAD");
+}
+
+test("a commit written into central main outside the merge loop holds the push until the human accepts it", async () => {
+  const c = await fixture();
+  await c.card();
+  await c.merge().tick();
+  await c.push().tick();
+  const published = git(c.remote, "rev-parse", "main");
+  expect(published).toBe(git(c.center, "rev-parse", "main"));
+  // The committer copies the loop's merge identity; only recorded SHAs count.
+  const foreign = bypass(c, "Cardigan");
+  await c.card();
+  await c.merge().tick();
+  const push = vi.spyOn(c.binding, "push");
+  await c.push().tick();
+  await c.push().tick();
+  expect(push).not.toHaveBeenCalled();
+  expect(git(c.remote, "rev-parse", "main")).toBe(published);
+  const held = c.events("merge_push_held");
+  expect(held).toHaveLength(1);
+  expect(held[0]?.payload).toMatchObject({
+    base_sha: published,
+    foreign: [
+      expect.objectContaining({
+        sha: foreign,
+        committer: "Cardigan <cardigan@localhost>",
+      }),
+    ],
+  });
+  const action = c.f.state().human_actions.find((a) => a.status === "open");
+  if (!action) throw new Error("Missing Needs You");
+  expect(action.instructions).toContain(foreign.slice(0, 12));
+  expect(needsYou(c.f.state(), c.f.clock.now()).human_actions).toEqual(
+    expect.arrayContaining([expect.objectContaining({ id: action.id })]),
+  );
+  c.f.apply((s, a, p) =>
+    acceptMergePushHold(
+      s,
+      a,
+      { human_action_id: action.id, text: "确认接受界面核对的提交" },
+      p,
+    ),
+  );
+  await c.push().tick();
+  expect(push).toHaveBeenCalledTimes(1);
+  expect(git(c.remote, "rev-parse", "main")).toBe(
+    git(c.center, "rev-parse", "main"),
+  );
+  expect(c.events("merge_pushed")).toHaveLength(2);
+  expect(c.errors).toEqual([]);
+}, 30_000);
+
+test("reverting central main and closing the action drops the held push; the next clean merge publishes without the foreign commit", async () => {
+  const c = await fixture();
+  await c.card();
+  await c.merge().tick();
+  await c.push().tick();
+  const published = git(c.remote, "rev-parse", "main");
+  const foreign = bypass(c, "UI Audit");
+  await c.card();
+  await c.merge().tick();
+  await c.push().tick();
+  expect(c.events("merge_push_held")).toHaveLength(1);
+  const action = c.f.state().human_actions.find((a) => a.status === "open");
+  if (!action) throw new Error("Missing Needs You");
+  // The human restores the central baseline, then marks the item done.
+  git(c.center, "update-ref", "refs/heads/main", published);
+  c.f.apply((s, a, p) =>
+    completeHumanAction(
+      s,
+      a,
+      { human_action_id: action.id, text: "已回退中心 main" },
+      p,
+    ),
+  );
+  await c.push().tick();
+  expect(git(c.remote, "rev-parse", "main")).toBe(published);
+  expect(c.events("merge_push_hold_resolved")[0]?.payload).toMatchObject({
+    mode: "reverted",
+  });
+  await c.card();
+  await c.merge().tick();
+  await c.push().tick();
+  const head = git(c.remote, "rev-parse", "main");
+  expect(head).toBe(git(c.center, "rev-parse", "main"));
+  expect(head).not.toBe(published);
+  // The foreign object still exists in the center, but not in what was published.
+  expect(git(c.center, "cat-file", "-t", foreign)).toBe("commit");
+  expect(() =>
+    git(c.center, "merge-base", "--is-ancestor", foreign, head),
+  ).toThrow();
   expect(c.errors).toEqual([]);
 }, 30_000);

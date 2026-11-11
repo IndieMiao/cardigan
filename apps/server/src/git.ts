@@ -6,6 +6,7 @@ import type {
   DeliverySubject,
   DeliveryVerifier,
   MergePlan,
+  MergePushCommit,
   ProjectId,
 } from "@cardigan/domain";
 import { validationFailed } from "@cardigan/domain";
@@ -115,6 +116,12 @@ export interface MergeGit {
     config: MergePushConfig,
     signal?: AbortSignal,
   ): Promise<PushResult>;
+  /** Central main's first-parent commits in (base, sha], newest first. */
+  pushRange?(
+    project: CentralProject,
+    input: { base: string; sha: string },
+    limit: number,
+  ): Promise<readonly MergePushCommit[]>;
 }
 export interface ReconcileGit {
   projectOf(project_id: ProjectId): CentralProject | undefined;
@@ -417,6 +424,24 @@ export class ServerGit implements GitBinding {
     } catch {
       return { status: "failed", reason: "other" };
     }
+  }
+  async pushRange(
+    project: CentralProject,
+    input: { base: string; sha: string },
+    limit: number,
+  ): Promise<readonly MergePushCommit[]> {
+    const repository = await this.central.ensureCentral(project);
+    if (
+      (await this.transport.objectType(repository, input.sha)) !== "commit" ||
+      (await this.transport.objectType(repository, input.base)) !== "commit"
+    )
+      throw new Error("Push range endpoints must be commits");
+    return this.transport.firstParentChain(
+      repository,
+      input.base,
+      input.sha,
+      limit,
+    );
   }
   async backup(project: CentralProject): Promise<void> {
     await this.central.backupAgentBranches(project, "local");

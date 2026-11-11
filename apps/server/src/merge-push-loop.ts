@@ -6,6 +6,8 @@ import {
   type CommandEffect,
   type CommandPorts,
   type CommandState,
+  checkMergePushRange,
+  MERGE_PUSH_RANGE_LIMIT,
   type ProjectId,
   type Result,
   recordMergePushResult,
@@ -38,7 +40,7 @@ export function mergeProjectSettings(
 }
 export interface MergePushOptions {
   readonly store: Store;
-  readonly git: Pick<MergeGit, "projectOf" | "push">;
+  readonly git: Pick<MergeGit, "projectOf" | "push" | "pushRange">;
   readonly configuration: MergeGateConfiguration;
   readonly clock?: Clock;
   readonly onError?: (error: unknown) => void;
@@ -111,6 +113,30 @@ export class MergePushExecutor {
       if (!attempt || this.abort.signal.aborted) return;
       let outcome: PushResult;
       try {
+        // C-94: publish only first-parent history the merge loop recorded.
+        // A foreign commit holds the target instead of reaching the remote.
+        const { base_sha } = attempt;
+        if (!base_sha || !this.options.git.pushRange)
+          throw new Error("Push range cannot be checked");
+        const chain = await this.options.git.pushRange(
+          project,
+          { base: base_sha, sha: attempt.sha },
+          MERGE_PUSH_RANGE_LIMIT + 1,
+        );
+        if (this.abort.signal.aborted) return;
+        const checked = this.command(id, (s, a, ports) =>
+          checkMergePushRange(
+            s,
+            a,
+            {
+              target: attempt.target,
+              attempt_id: attempt.attempt_id,
+              chain,
+            },
+            ports,
+          ),
+        );
+        if (checked.status === "held") return;
         const included = this.options.store.uow.read((tx) => {
           const events = tx.events.listAfter(id, undefined, 0);
           return attempt.queue_ids.map((queueId) => {
