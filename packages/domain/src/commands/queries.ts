@@ -1,5 +1,9 @@
 import { type CardDerivedFields, deriveCardFields } from "../card-derived.js";
-import { deriveCardStatus, deriveReviewMatrix } from "../derived.js";
+import {
+  deriveCardStatus,
+  deriveReviewMatrix,
+  isReviewStale,
+} from "../derived.js";
 import type {
   Actor,
   Card,
@@ -182,12 +186,7 @@ function mergeConfirmation(
   const latest = new Map<string, Review>();
   for (const review of reviews) {
     const delivery = current.get(review.delivery_id);
-    if (
-      delivery === undefined ||
-      review.target_sha !== delivery.subject.value ||
-      delivery.status === "superseded"
-    )
-      continue;
+    if (delivery === undefined || isReviewStale(review, delivery)) continue;
     const previous = latest.get(review.work_item_id);
     if (previous === undefined || numericId(review.id) > numericId(previous.id))
       latest.set(review.work_item_id, review);

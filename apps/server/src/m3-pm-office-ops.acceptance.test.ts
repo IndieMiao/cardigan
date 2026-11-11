@@ -210,8 +210,11 @@ async function pmFixture() {
               "resolve_delegated_decision",
               "triage_human_action",
             ].includes(tool) &&
-              tool !==
-                (role_id === "coder" ? "submit_review" : "submit_delivery")),
+              !(
+                role_id === "coder"
+                  ? ["submit_review", "withdraw_review"]
+                  : ["submit_delivery"]
+              ).includes(tool)),
         ),
         capabilities: [],
         abilities: [],

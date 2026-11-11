@@ -1,5 +1,5 @@
 import type { NextOwnerItem, WaitingOnItem } from "./card-derived-types.js";
-import { deriveCardStatus } from "./derived.js";
+import { deriveCardStatus, isReviewStale } from "./derived.js";
 import type {
   Assignment,
   Card,
@@ -93,7 +93,7 @@ function isPendingHumanAction(
   );
 }
 
-/** The delivery that is still current for a work item: nothing supersedes it. */
+/** The current product delivery; a completion request is a separate review target. */
 function currentDelivery(
   workItemId: string,
   deliveries: readonly Delivery[],
@@ -107,6 +107,7 @@ function currentDelivery(
     .filter(
       (delivery) =>
         delivery.work_item_id === workItemId &&
+        delivery.kind !== "card_completion" &&
         delivery.status !== "superseded" &&
         !superseded.has(delivery.id),
     )
@@ -139,8 +140,7 @@ function reviewedDelivery(
   return reviews.some(
     (review) =>
       review.work_item_id === verifyWorkItemId &&
-      review.delivery_id === delivery.id &&
-      review.target_sha === delivery.subject.value,
+      !isReviewStale(review, delivery),
   );
 }
 

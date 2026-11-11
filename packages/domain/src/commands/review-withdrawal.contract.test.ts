@@ -4,6 +4,8 @@ import {
   type CommandState,
   deriveReviewMatrix,
   isReviewStale,
+  listNeedsYou,
+  projectSnapshot,
   recordMergeCheck,
   recordMergeResult,
   withdrawReview,
@@ -48,6 +50,13 @@ test("owner withdrawal preserves the review and makes the matrix await verificat
       verdict: null,
     },
   ]);
+  expect(value(projectSnapshot(after, human)).data.cards).toMatchObject([
+    {
+      waiting_on: [{ kind: "review", ref: review.work_item_id }],
+      next_owners: [{ kind: "assignment", ref: f.reviewer.id }],
+      why: `等待 reviewer 审核 ${delivery.id}`,
+    },
+  ]);
   expect(effect.events).toMatchObject([
     {
       type: "review_withdrawn",
@@ -73,6 +82,61 @@ test("owner withdrawal preserves the review and makes the matrix await verificat
     ok: false,
     error: { code: "illegal_transition" },
   });
+});
+
+test("withdrawn ordinary reviews disappear from merge summaries while their product awaits review", async () => {
+  const f = mergeFixture("confirm");
+  const { product, completion } = await f.accept();
+  const review = f.state.reviews.find((r) => r.delivery_id === product.id);
+  if (!review) throw new Error("Expected product review");
+  const summaries = () =>
+    value(listNeedsYou(f.state, human)).data.decisions.find(
+      (q) => q.trigger === "merge_confirmation",
+    )?.merge_confirmation;
+  expect(summaries()?.reviews).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ id: review.id, verdict: "pass" }),
+    ]),
+  );
+  const before = snapshot(f.state);
+  f.commit(
+    withdrawReview(
+      f.state,
+      f.actor(f.reviewer),
+      {
+        work_item_id: review.work_item_id,
+        rationale,
+      },
+      f.io,
+    ),
+  );
+  expect(summaries()?.reviews).toMatchObject([
+    {
+      delivery_id: completion.id,
+      work_item_id: f.pm.work_item_id,
+      verdict: "pass",
+    },
+  ]);
+  expect(value(projectSnapshot(f.state, human)).data.cards[0]).toMatchObject({
+    status: "awaiting_merge",
+    waiting_on: expect.arrayContaining([
+      {
+        kind: "review",
+        ref: review.work_item_id,
+        label: `等待 reviewer 审核 ${product.id}`,
+      },
+    ]),
+    next_owners: expect.arrayContaining([
+      { kind: "assignment", ref: f.reviewer.id },
+    ]),
+  });
+  // The summary omits withdrawn conclusions; the audit record and completion remain intact.
+  expect(f.state.reviews.find((r) => r.id === review.id)).toEqual({
+    ...review,
+    withdrawn: { at: now, rationale },
+  });
+  expect(f.state.deliveries).toEqual(before.deliveries);
+  expect(f.state.decisions).toEqual(before.decisions);
 });
 
 test("no human, system, producer, PM or other verifier may withdraw on the owner's behalf", async () => {
