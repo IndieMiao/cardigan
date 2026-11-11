@@ -27,6 +27,7 @@ const SUMMARY_LABELS: readonly {
   readonly kind: NotificationKind;
   readonly label: readonly [singular: string, plural: string];
 }[] = [
+  { kind: "card", label: ["card", "cards"] },
   { kind: "assignment", label: ["assignment", "assignments"] },
   { kind: "delivery", label: ["delivery", "deliveries"] },
   { kind: "review", label: ["review", "reviews"] },

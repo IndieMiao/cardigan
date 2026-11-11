@@ -2,6 +2,7 @@ import type { CardDetail } from "../api.js";
 import { decisionOption } from "../decision-labels.js";
 import { routeHash } from "../route.js";
 import { statusLabel } from "../status.js";
+import { SystemAvatar } from "./EmployeeIdentity.js";
 import { LongContent } from "./Foundation.js";
 import { StatusIcon } from "./StatusIcon.js";
 
@@ -96,6 +97,7 @@ export function RecentConclusions({
         {rows.map(({ entry, label, tone }) => (
           <li key={entry.id}>
             <StatusIcon status={tone ?? "unknown"} decorative />
+            {entry.author === "system" && <SystemAvatar />}
             <a
               title={label}
               href={routeHash({
