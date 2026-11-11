@@ -585,6 +585,19 @@ async function remoteFixture() {
     hostKeyAlias: "cardigan-ci",
   };
   const calls: string[][] = [];
+  /**
+   * Operator provisioning (§12.5 C-130): empty read-only slot locks. The test
+   * account owns its temporary agent root, so the fake SSH stubs exactly the
+   * "lock and ancestors are not the account's" rule; runtime-herdr tests run
+   * that rule unmodified.
+   */
+  const provision = async (...names: string[]) => {
+    for (const name of names) {
+      const path = join(execution.agentRoot, name);
+      await writeFile(path, "", { mode: 0o444 });
+      await chmod(path, 0o444);
+    }
+  };
   /** Fake SSH: runs the remote half locally, standing in for the executor's disk. */
   const ssh =
     (fail: (index: number) => boolean = () => false) =>
@@ -600,22 +613,30 @@ async function remoteFixture() {
       );
       const remote = fail(calls.length - 1)
         ? "exit 255"
-        : (args.at(-1) ?? "").replace(
-            "'node' '-e'",
-            `${quote(process.execPath)} '-e'`,
-          );
+        : (args.at(-1) ?? "")
+            .replace("'node' '-e'", `${quote(process.execPath)} '-e'`)
+            .replace("anchored() {", "anchored() { return 0;")
+            .replace('foreign() { [ ! -O "$1" ]; }', "foreign() { :; }");
       return spawn("/bin/sh", ["-c", remote], {
         env,
         stdio: ["pipe", "pipe", "pipe"],
       });
     };
-  return { ...f, input: { ...f.input, execution }, execution, calls, ssh };
+  return {
+    ...f,
+    input: { ...f.input, execution },
+    execution,
+    calls,
+    ssh,
+    provision,
+  };
 }
 
 test.skipIf(process.platform !== "linux")(
   "a remote executor prepares, runs and cleans up the checkout entirely over its SSH entry",
   async () => {
     const f = await remoteFixture();
+    await f.provision("merge-check-1.lock");
     let ready = false;
     const result = await runInTemporaryCheckout(
       {
@@ -638,7 +659,7 @@ test.skipIf(process.platform !== "linux")(
     );
     expect(f.calls[2]?.at(-1)).toContain(quote(f.container));
     const lock = await stat(join(f.execution.agentRoot, "merge-check-1.lock"));
-    expect(lock.mode & 0o777).toBe(0o600);
+    expect([lock.mode & 0o777, lock.size]).toEqual([0o444, 0]);
     await f.clean();
   },
 );
@@ -713,3 +734,60 @@ test("remote executor path injection is rejected before any SSH command", async 
     ).rejects.toThrow();
   expect(f.calls).toEqual([]);
 });
+
+test.skipIf(process.platform !== "linux")(
+  "V-405: a check that unlinks the slot lock cannot let a second same-slot check run alongside it",
+  async () => {
+    const f = await remoteFixture();
+    await f.provision("merge-check.lock");
+    const lock = join(f.execution.agentRoot, "merge-check.lock"),
+      unlinked = join(f.root, "unlinked"),
+      release = join(f.root, "release");
+    let secondReady = false;
+    const first = runInTemporaryCheckout(
+      {
+        ...f.input,
+        serialize: true,
+        checks: [
+          {
+            name: "unlink",
+            // On a correctly provisioned executor this unlink is refused;
+            // here it succeeds, so the next preparation must still fail.
+            run: node(
+              `const fs=require('node:fs');fs.rmSync(${JSON.stringify(lock)});fs.writeFileSync(${JSON.stringify(unlinked)},'');const t=setInterval(()=>{if(fs.existsSync(${JSON.stringify(release)}))clearInterval(t)},20)`,
+            ),
+          },
+        ],
+      },
+      f.ssh(),
+    );
+    while (
+      !(await stat(unlinked).then(
+        () => true,
+        () => false,
+      ))
+    )
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    try {
+      await expect(
+        runInTemporaryCheckout(
+          {
+            ...f.input,
+            attempt: "attempt-2",
+            serialize: true,
+            onReady: () => {
+              secondReady = true;
+            },
+            checks: [{ name: "must-not-run", run: "exit 99" }],
+          },
+          f.ssh(),
+        ),
+      ).rejects.toThrow("Executor checkout preparation failed");
+      expect(secondReady).toBe(false);
+      await expect(stat(lock)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await writeFile(release, "");
+    }
+    expect((await first).status).toBe("passed");
+  },
+);

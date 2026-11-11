@@ -324,9 +324,18 @@ const CHECK_ATTEMPT = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/u;
 const CHECK_ALIAS = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}$/u;
 /**
  * Runs as the executor account. There is no host account on a remote
- * executor, so the account owns its namespace: parents must be real
- * directories (never symlinks), leaves are created exclusively as 0700.
- * Every path is a positional argument; the script itself is constant.
+ * executor: the account owns its check namespace (`checks`, `s`), where
+ * parents must be real directories (never symlinks) and leaves are created
+ * exclusively as 0700. Every path is a positional argument; the script
+ * itself is constant.
+ *
+ * The slot lock is different: mutual exclusion needs one persistent inode
+ * that candidate code (running as this account) can never unlink, rename or
+ * replace. So the lock is never created here. The operator provisions it,
+ * and the lock and every ancestor up to `/` must be neither owned nor
+ * writable by the account (a sticky ancestor is fine when the next component
+ * is not the account's) — the remote counterpart of the host-owned 2750
+ * agent root that protects the local lock (§12.2).
  */
 const PREPARE_SCRIPT = [
   "set -u",
@@ -334,13 +343,26 @@ const PREPARE_SCRIPT = [
   "root=$1 project=$2 attempt=$3 alias=$4 lock=$5",
   'real() { [ ! -L "$1" ] && [ -d "$1" ] || exit 3; }',
   'parent() { [ -L "$1" ] && exit 3; [ -e "$1" ] || mkdir -m 0700 -- "$1" 2>/dev/null || :; real "$1"; }',
+  'foreign() { [ ! -O "$1" ]; }',
+  // anchored DIR CHILD: DIR cannot be used by this account to replace CHILD.
+  "anchored() {",
+  '  [ ! -L "$1" ] && foreign "$1" || return 1',
+  '  [ ! -w "$1" ] || { [ -k "$1" ] && [ -n "$2" ] && foreign "$2"; }',
+  "}",
   'real "$root"',
-  'parent "$root/checks"; parent "$root/checks/$project"; parent "$root/s"',
   'if [ -n "$lock" ]; then',
-  '  [ -L "$root/$lock" ] && exit 4',
-  '  [ -e "$root/$lock" ] || (set -C; : > "$root/$lock") 2>/dev/null || :',
-  '  [ -f "$root/$lock" ] && [ ! -L "$root/$lock" ] && [ ! -s "$root/$lock" ] || exit 4',
+  '  d=$root c="$root/$lock"',
+  "  while :; do",
+  '    anchored "$d" "$c" || exit 4',
+  '    [ "$d" = / ] && break',
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: POSIX sh parameter expansion.
+  '    c=$d d=${d%/*}; [ -n "$d" ] || d=/',
+  "  done",
+  // Never created or repaired here: a missing or replaced lock is a start failure.
+  '  l="$root/$lock"',
+  '  [ -f "$l" ] && [ ! -L "$l" ] && foreign "$l" && [ -r "$l" ] && [ ! -w "$l" ] && [ ! -s "$l" ] || exit 7',
   "fi",
+  'parent "$root/checks"; parent "$root/checks/$project"; parent "$root/s"',
   // A check never reuses a previous attempt (same rule as prepareAgentCheckout).
   'mkdir -m 0700 -- "$root/checks/$project/$attempt" || exit 5',
   'if ! mkdir -m 0700 -- "$root/s/$alias"; then rmdir -- "$root/checks/$project/$attempt"; exit 5; fi',

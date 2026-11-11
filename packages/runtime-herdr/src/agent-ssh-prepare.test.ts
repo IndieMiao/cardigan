@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import {
+  chmod,
   lstat,
   mkdir,
   mkdtemp,
@@ -49,18 +50,50 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-const remote = (args: readonly string[]) => {
-  const result = spawnSync("sh", ["-c", args.at(-1) as string], {
+/**
+ * The test account owns its temporary directories, so it can never satisfy
+ * the real "lock and ancestors are not the account's" rule. `operator`
+ * simulates an operator-provisioned layout by stubbing exactly that rule;
+ * `ancestors` stubs only the ancestor walk. Tests without a stub run the
+ * script unmodified.
+ */
+type Stub = "operator" | "ancestors";
+const remote = (args: readonly string[], stub?: Stub) => {
+  let script = args.at(-1) as string;
+  if (stub) {
+    const anchored = "anchored() {";
+    expect(script).toContain(anchored);
+    script = script.replace(anchored, `${anchored} return 0;`);
+  }
+  if (stub === "operator") {
+    const foreign = 'foreign() { [ ! -O "$1" ]; }';
+    expect(script).toContain(foreign);
+    script = script.replace(foreign, "foreign() { :; }");
+  }
+  const result = spawnSync("sh", ["-c", script], {
     env: { PATH: "/usr/local/bin:/usr/bin:/bin" },
     encoding: "utf8",
   });
   return { code: result.status, stdout: result.stdout };
 };
 const input = { project: "project", attempt: "attempt-1", alias: "aAlias_-1" };
+/** Operator provisioning: an empty, read-only lock the account cannot write. */
+const provisionLock = async (name = "merge-check.lock") => {
+  const path = join(execution.agentRoot, name);
+  await writeFile(path, "", { mode: 0o444 });
+  await chmod(path, 0o444);
+  return path;
+};
+const leaves = async () => ({
+  checks: await readdir(join(execution.agentRoot, "checks")).catch(() => []),
+  s: await readdir(join(execution.agentRoot, "s")).catch(() => []),
+});
 
 test.skipIf(process.platform !== "linux")(
-  "preparation runs on the executor through the pinned SSH entry and creates private leaves and the slot lock",
+  "preparation runs on the executor through the pinned SSH entry, creates private leaves and uses the provisioned slot lock",
   async () => {
+    const lock = await provisionLock("merge-check-2.lock");
+    const inode = (await lstat(lock)).ino;
     const command = await agentPrepareCheckCommand(execution, {
       ...input,
       slot: 2,
@@ -79,17 +112,24 @@ test.skipIf(process.platform !== "linux")(
     expect(command.paths).toEqual({
       container: join(execution.agentRoot, "checks", "project", "attempt-1"),
       alias: join(execution.agentRoot, "s", "aAlias_-1"),
-      lock: join(execution.agentRoot, "merge-check-2.lock"),
+      lock,
     });
-    expect(remote(command.args)).toEqual({ code: 0, stdout: command.expect });
+    expect(remote(command.args, "operator")).toEqual({
+      code: 0,
+      stdout: command.expect,
+    });
     for (const path of [command.paths.container, command.paths.alias]) {
       const info = await lstat(path);
       expect(info.isDirectory()).toBe(true);
       expect(info.mode & 0o7777).toBe(0o700);
     }
-    const lock = await lstat(command.paths.lock as string);
-    expect(lock.isFile() && lock.size === 0).toBe(true);
-    expect(lock.mode & 0o777).toBe(0o600);
+    // The provisioned inode is used as is, never replaced or modified.
+    const after = await lstat(lock);
+    expect([after.ino, after.size, after.mode & 0o777]).toEqual([
+      inode,
+      0,
+      0o444,
+    ]);
 
     // A check never reuses an attempt; the new alias is rolled back.
     const again = await agentPrepareCheckCommand(execution, {
@@ -97,7 +137,7 @@ test.skipIf(process.platform !== "linux")(
       alias: "aOther",
       slot: 2,
     });
-    expect(remote(again.args).code).toBe(5);
+    expect(remote(again.args, "operator").code).toBe(5);
     expect(await readdir(join(execution.agentRoot, "s"))).toEqual([
       "aAlias_-1",
     ]);
@@ -113,7 +153,69 @@ test.skipIf(process.platform !== "linux")(
   },
 );
 
-test("an unserialized check prepares no lock", async () => {
+test("V-405: a missing or unlinked slot lock is never created or recreated; preparation fails", async () => {
+  const command = await agentPrepareCheckCommand(execution, {
+    ...input,
+    slot: 0,
+  });
+  // Never provisioned.
+  expect(remote(command.args, "operator").code).toBe(7);
+  expect(await readdir(execution.agentRoot)).toEqual([]);
+  // Provisioned, used, then unlinked (as a candidate could if the agent root
+  // were the account's): the next attempt must not get a fresh inode.
+  const lock = await provisionLock();
+  expect(remote(command.args, "operator").code).toBe(0);
+  await rm(lock);
+  const next = await agentPrepareCheckCommand(execution, {
+    ...input,
+    attempt: "attempt-2",
+    alias: "aNext",
+    slot: 0,
+  });
+  expect(remote(next.args, "operator").code).toBe(7);
+  await expect(lstat(lock)).rejects.toMatchObject({ code: "ENOENT" });
+  expect(await leaves()).toEqual({ checks: ["project"], s: ["aAlias_-1"] });
+  expect(await readdir(join(execution.agentRoot, "checks", "project"))).toEqual(
+    ["attempt-1"],
+  );
+});
+
+test("V-405: an agent root the account owns (so it could unlink or replace the lock) is refused for serialized checks", async () => {
+  await provisionLock();
+  const command = await agentPrepareCheckCommand(execution, {
+    ...input,
+    slot: 0,
+  });
+  // Unmodified script: the test account owns the agent root and its parent.
+  expect(remote(command.args).code).toBe(4);
+  expect(await leaves()).toEqual({ checks: [], s: [] });
+  // Even read-only, an owned directory can be chmod-ed back by its owner.
+  await chmod(execution.agentRoot, 0o555);
+  try {
+    expect(remote(command.args).code).toBe(4);
+  } finally {
+    await chmod(execution.agentRoot, 0o755);
+  }
+});
+
+test.runIf(
+  process.platform === "linux" &&
+    process.getuid?.() !== 0 &&
+    spawnSync("sh", ["-c", "[ ! -O /usr ] && [ ! -w /usr ] && [ ! -w / ]"])
+      .status === 0,
+)(
+  "an ancestor chain the account neither owns nor can write passes the walk (unmodified script)",
+  async () => {
+    const command = await agentPrepareCheckCommand(
+      { ...execution, agentRoot: "/usr" },
+      { ...input, slot: 0 },
+    );
+    // The walk succeeds; /usr has no provisioned merge-check lock.
+    expect(remote(command.args).code).toBe(7);
+  },
+);
+
+test("an unserialized check needs no lock", async () => {
   const command = await agentPrepareCheckCommand(execution, input);
   expect(command.paths.lock).toBeUndefined();
   expect(remote(command.args).code).toBe(0);
@@ -132,41 +234,82 @@ test("cleanup never removes contents: a non-empty leaf is reported", async () =>
 });
 
 test.each([
-  ["checks", (r: string) => symlink(join(r, "elsewhere"), join(r, "checks"))],
+  [
+    "checks",
+    3,
+    (r: string) => symlink(join(r, "elsewhere"), join(r, "checks")),
+  ],
   [
     "project",
+    3,
     async (r: string) => {
       await mkdir(join(r, "checks"));
       await symlink(join(r, "elsewhere"), join(r, "checks", "project"));
     },
   ],
-  ["alias parent", (r: string) => symlink(join(r, "elsewhere"), join(r, "s"))],
+  [
+    "alias parent",
+    3,
+    (r: string) => symlink(join(r, "elsewhere"), join(r, "s")),
+  ],
+  ["file parent", 3, (r: string) => writeFile(join(r, "checks"), "x")],
   [
     "lock",
-    (r: string) =>
-      symlink(join(r, "elsewhere", "f"), join(r, "merge-check.lock")),
+    7,
+    async (r: string) => {
+      await rm(join(r, "merge-check.lock"));
+      await symlink(join(r, "elsewhere", "f"), join(r, "merge-check.lock"));
+    },
   ],
   [
     "non-empty lock",
-    (r: string) => writeFile(join(r, "merge-check.lock"), "x"),
+    7,
+    async (r: string) => {
+      await rm(join(r, "merge-check.lock"));
+      await writeFile(join(r, "merge-check.lock"), "x", { mode: 0o444 });
+    },
   ],
-  ["file parent", (r: string) => writeFile(join(r, "checks"), "x")],
-])(
+  [
+    "writable lock",
+    7,
+    (r: string) => chmod(join(r, "merge-check.lock"), 0o644),
+  ],
+  [
+    "directory lock",
+    7,
+    async (r: string) => {
+      await rm(join(r, "merge-check.lock"));
+      await mkdir(join(r, "merge-check.lock"));
+    },
+  ],
+] as const)(
   "a symlinked or unsafe %s fails preparation without creating leaves",
-  async (_name, plant) => {
+  async (_name, code, plant) => {
     await mkdir(join(root, "elsewhere", "project"), { recursive: true });
+    await provisionLock();
     await plant(execution.agentRoot);
     const command = await agentPrepareCheckCommand(execution, {
       ...input,
       slot: 0,
     });
-    expect(remote(command.args).code).not.toBe(0);
+    expect(remote(command.args, "operator").code).toBe(code);
     expect(await readdir(join(root, "elsewhere", "project"))).toEqual([]);
     await expect(lstat(command.paths.alias)).rejects.toMatchObject({
       code: expect.stringMatching(/ENOENT|ENOTDIR/u),
     });
   },
 );
+
+test("the lock owner check itself is not stubbed by the ancestor stub", async () => {
+  // The test account owns this lock: only the operator stub can accept it.
+  await provisionLock();
+  const command = await agentPrepareCheckCommand(execution, {
+    ...input,
+    slot: 0,
+  });
+  expect(remote(command.args, "ancestors").code).toBe(7);
+  expect(remote(command.args, "operator").code).toBe(0);
+});
 
 test("a missing agent root is never recreated", async () => {
   await rm(execution.agentRoot, { recursive: true });
