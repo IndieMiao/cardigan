@@ -1813,6 +1813,7 @@ fieldset.filters {
 }
 .execution-table {
   width: 100%;
+  min-width: 1080px;
   border-collapse: collapse;
   font-size: var(--text-sm);
   line-height: 1.45;
@@ -1846,10 +1847,28 @@ fieldset.filters {
 .execution-row:hover {
   background: var(--surface-muted);
 }
-.execution-toggle {
-  margin-right: 8px;
-  padding: 2px 8px;
-  font-size: var(--text-xs);
+/* C-106: the Assignment id is the row's drawer trigger. */
+.execution-assignment {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.execution-open {
+  padding: 0 4px;
+  font-family: var(--font-code);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  white-space: nowrap;
+}
+/* C-106: nine columns scroll sideways on narrow screens instead of
+   stretching the page. */
+.execution-table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+}
+.execution-table td[data-column] {
+  white-space: nowrap;
 }
 .execution-run {
   display: inline-flex;
