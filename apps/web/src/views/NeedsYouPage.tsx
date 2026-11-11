@@ -801,6 +801,12 @@ function NeedsContent({
       />
       {data && (
         <>
+          {!!data.waiting_merge_checks_count && (
+            <p className="hint" role="status">
+              还有 {data.waiting_merge_checks_count}{" "}
+              条合并确认在等检查。检查通过后会出现在这里，也可以到卡片详情查看和处理。
+            </p>
+          )}
           {total === 0 && (
             <EmptyState>
               没有需要你处理的事。Agent 提出拍板或需要你确认合并时会出现在这里。

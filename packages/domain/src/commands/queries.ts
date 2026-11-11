@@ -19,7 +19,12 @@ import { decisionFollowupNeedsHuman } from "./decision-followup.js";
 import { hasActivePmOps, isPmOps } from "./delegation.js";
 import { availableWorkItemEmployees } from "./employee-assignment.js";
 import { failedConfirmedMergeCheck, latestMergeCheck } from "./merge-check.js";
-import { pmFailedMergeCheck, pmMergeBlockers } from "./merge-delegation.js";
+import {
+  mergeConfirmationWaitingForCheck,
+  pmFailedMergeCheck,
+  pmFailedMergeCheckOptions,
+  pmMergeBlockers,
+} from "./merge-delegation.js";
 import { resolveCardTemplate } from "./templates.js";
 
 function affects(d: CommandDraft, q: Decision, id: CardId) {
@@ -241,6 +246,16 @@ export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
     d.pm();
     d.projectAccess();
     const now = clock?.now();
+    const waiting = d
+      .list("decisions")
+      .filter(
+        (q) =>
+          q.trigger === "merge_confirmation" &&
+          ((q.decider === "human" &&
+            ["open", "provisional"].includes(q.status)) ||
+            !!failedConfirmedMergeCheck(state, q)) &&
+          mergeConfirmationWaitingForCheck(state, q),
+      );
     const why = (text: string) => [...text].slice(0, 40).join("");
     const view = (q: Decision) => {
       const failedConfirmation = failedConfirmedMergeCheck(state, q);
@@ -299,6 +314,7 @@ export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
       ...(isPmOps(d)
         ? {
             pm_queue: {
+              waiting_merge_checks: waiting,
               decisions: d
                 .list("decisions")
                 .filter(
@@ -329,7 +345,7 @@ export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
                         card_id: q.card_id,
                         confirmation_status: q.status,
                         check,
-                        options: ["request_changes", "recheck"],
+                        options: pmFailedMergeCheckOptions(state, q),
                       },
                     ]
                   : [];
@@ -389,7 +405,9 @@ export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
               )) ||
             decisionFollowupNeedsHuman(state, q),
         )
+        .filter((q) => !mergeConfirmationWaitingForCheck(state, q))
         .map(view),
+      waiting_merge_checks_count: waiting.length,
       // §7.4 (C-65): merge confirmations PM Ops still holds. Not counted as
       // waiting on the human, but the human may answer them directly.
       pm_held_merges:

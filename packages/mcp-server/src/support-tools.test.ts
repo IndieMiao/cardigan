@@ -34,6 +34,7 @@ import {
 let store: Store, server: RunningServer, coder: Client, office: Client;
 let dataDir: string, token: string, sequence: number;
 let clients: Client[];
+let mergeGateEnabled = false;
 let blobs: ReturnType<typeof fileAttachmentStore>;
 let logger: ReturnType<typeof memoryLogger>;
 const content = Buffer.from("Private attachment fixture content");
@@ -106,6 +107,7 @@ beforeEach(async () => {
   dataDir = await mkdtemp(join(tmpdir(), "cardigan-attachments-"));
   store = Store.open({ dbPath: ":memory:" });
   clients = [];
+  mergeGateEnabled = false;
   sequence = 0;
   logger = memoryLogger();
   const { assignment } = seedProject(store, {
@@ -157,6 +159,7 @@ beforeEach(async () => {
     deliveryVerifier: acceptingVerifierFor,
     dataDir,
     attachmentStore: blobs,
+    projectSettings: () => ({ merge_gate_enabled: mergeGateEnabled }),
     clock: { now: () => NOW },
     log: logger.log,
   });
@@ -546,4 +549,43 @@ test("PM queries derive current project views without writes or idempotency keys
     expect(code(await call(coder, name))).toBe("forbidden_tool");
   expect(writes).not.toHaveBeenCalled();
   expect(counts()).toEqual(before);
+});
+
+test("C-115: list_needs_you uses host gate settings without hiding card decisions", async () => {
+  const q = await ok<Decision>(office, "request_decision", {
+    ...decision,
+    blocking: false,
+  });
+  store.uow.run((tx) => {
+    tx.decisions.put(project_id, {
+      ...q,
+      trigger: "merge_confirmation",
+      kind: "approve",
+      target: { delivery_id: "D-99" as never },
+    });
+  });
+  const read = () => office.callTool({ name: "list_needs_you", arguments: {} });
+  expect((await read()).structuredContent).toMatchObject({
+    waiting_merge_checks_count: 0,
+    decisions: [expect.objectContaining({ id: q.id })],
+  });
+  mergeGateEnabled = true;
+  const before = counts();
+  expect((await read()).structuredContent).toMatchObject({
+    waiting_merge_checks_count: 1,
+    decisions: [],
+  });
+  const card = await coder.callTool({
+    name: "get_card",
+    arguments: { card_id },
+  });
+  expect(card.structuredContent).toMatchObject({
+    open_decisions: [expect.objectContaining({ id: q.id })],
+  });
+  expect(counts()).toEqual(before);
+  mergeGateEnabled = false;
+  expect((await read()).structuredContent).toMatchObject({
+    waiting_merge_checks_count: 0,
+    decisions: [expect.objectContaining({ id: q.id })],
+  });
 });

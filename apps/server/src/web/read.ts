@@ -839,7 +839,16 @@ export function needsYou(
   mergeGateStatus: ProjectMergeGate["status"] = "disabled",
 ) {
   const result = unwrap(
-    listNeedsYou(state, human(state.project_id), { now: () => now }),
+    listNeedsYou(
+      {
+        ...state,
+        project_settings: {
+          merge_gate_enabled: mergeGateStatus !== "disabled",
+        },
+      },
+      human(state.project_id),
+      { now: () => now },
+    ),
   );
   const data = result.data;
   const noticeList = noticePage(state);
@@ -1004,6 +1013,7 @@ export function needsYou(
     pm_held_merges: [...pm_held_merges].sort(
       (left, right) => (right.waited_ms ?? 0) - (left.waited_ms ?? 0),
     ),
+    waiting_merge_checks_count: data.waiting_merge_checks_count,
     // §7.4 知会: delegated resolutions, newest first; never blocking.
     notices: noticeList.notices,
     notices_next_cursor: noticeList.next_cursor,

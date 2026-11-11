@@ -515,6 +515,7 @@ export interface NeedsAction
   readonly completion_notice?: string;
 }
 export interface NeedsPage {
+  readonly waiting_merge_checks_count?: number;
   readonly attention?: readonly {
     readonly kind: "review_limit_not_resumed";
     readonly card_id: string;

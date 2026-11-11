@@ -549,15 +549,10 @@ for (const approval of ["open", "human", "delegated"] as const) {
       record("queued");
       record("running");
       record(status);
-      const pending = value(listNeedsYou(state(), human)).data.decisions;
-      expect(pending.map((q) => q.id)).toContain(decision.id);
-      expect(
-        pending.find((q) => q.id === decision.id)?.followup_notice,
-      ).toBeUndefined();
-      if (approval !== "open")
-        expect(pending[0]?.options.map((o) => o.key)).toEqual([
-          "request_changes",
-        ]);
+      const needs = value(listNeedsYou(state(), human)).data;
+      expect(needs.decisions.map((q) => q.id)).not.toContain(decision.id);
+      expect(needs.waiting_merge_checks_count).toBe(1);
+      // C-115 only changes presentation; the human return below is still authorized.
       const params = {
         decision_id: decision.id,
         option: "request_changes",
