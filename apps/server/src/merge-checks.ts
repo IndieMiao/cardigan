@@ -83,10 +83,18 @@ interface Task {
 export class MergeChecks {
   private readonly abort = new AbortController();
   private readonly seen = new Set<string>();
-  /** The in-flight check round; publication must never wait for it (C-113). */
-  private round: Promise<void> | undefined;
-  /** Card whose check is executing outside the mutex. */
-  private active: string | undefined;
+  /**
+   * P2a-12 D: one in-flight lane per project (a project never checks or
+   * merges two cards in parallel); publication must never wait for it (C-113).
+   */
+  private readonly lanes = new Map<string, Promise<void>>();
+  /** Cards whose check is executing outside the mutex. */
+  private readonly active = new Set<string>();
+  /** P2a-12 D: per execution target, which `max_concurrent` slots are held, and FIFO waiters. */
+  private readonly slots = new Map<
+    string,
+    { used: boolean[]; waiting: ((slot: number | undefined) => void)[] }
+  >();
   /** Serializes every Git/state step; only the check command runs outside. */
   private exclusive: Promise<void> = Promise.resolve();
   private readonly prepared = new Map<
@@ -104,10 +112,12 @@ export class MergeChecks {
 
   stop(): void {
     this.abort.abort();
+    for (const pool of this.slots.values())
+      for (const wake of pool.waiting.splice(0)) wake(undefined);
   }
-  /** Resolves when no check round is in flight. */
-  idle(): Promise<void> {
-    return this.round ?? Promise.resolve();
+  /** Resolves when no check lane is in flight. */
+  async idle(): Promise<void> {
+    while (this.lanes.size) await Promise.all(this.lanes.values());
   }
   private serial<T>(work: () => Promise<T>): Promise<T> {
     const next = this.exclusive.then(work);
@@ -332,9 +342,52 @@ export class MergeChecks {
       : this.options.execution;
   }
   /**
-   * P2a-12 D: a remote executor runs at most `max_concurrent` checks across
-   * all projects; a full target leaves the check queued for a later round.
-   * Local checks keep today's behavior (no separate limit).
+   * P2a-12 D: hold one of the target's `max_concurrent` slots (local: one,
+   * as before). Waits FIFO for a free slot; undefined after shutdown.
+   */
+  private async slot(
+    task: Task,
+  ): Promise<{ index: number; release: () => void } | undefined> {
+    const bucket = task.settings.executor?.name ?? LOCAL_EXECUTOR;
+    const limit = task.settings.executor?.maxConcurrent ?? 1;
+    let pool = this.slots.get(bucket);
+    if (!pool) {
+      pool = { used: [], waiting: [] };
+      this.slots.set(bucket, pool);
+    }
+    const held = pool;
+    let index: number | undefined;
+    for (let i = 0; i < limit; i++)
+      if (!held.used[i]) {
+        index = i;
+        break;
+      }
+    if (index === undefined) {
+      if (this.abort.signal.aborted) return undefined;
+      // A released slot is handed over directly, so nobody can jump the queue.
+      index = await new Promise<number | undefined>((resolve) =>
+        held.waiting.push(resolve),
+      );
+      if (index === undefined) return undefined;
+    }
+    held.used[index] = true;
+    const taken = index;
+    let released = false;
+    return {
+      index: taken,
+      release: () => {
+        if (released) return;
+        released = true;
+        const next = held.waiting.shift();
+        if (next) next(taken);
+        else held.used[taken] = false;
+      },
+    };
+  }
+  /**
+   * P2a-12 D: live checks recorded by other controller processes also count
+   * against a remote executor's `max_concurrent`; a full target leaves the
+   * check queued for a later pass. Local checks keep today's behavior.
    */
   private capacity(task: Task): boolean {
     const executor = task.settings.executor;
@@ -347,7 +400,11 @@ export class MergeChecks {
       )
     );
   }
-  private async execute(task: Task, check: MergeCheckView): Promise<void> {
+  private async execute(
+    task: Task,
+    check: MergeCheckView,
+    slot: number,
+  ): Promise<void> {
     let log: Awaited<ReturnType<typeof createMergeCheckLog>> | undefined;
     let result: Awaited<ReturnType<typeof runInTemporaryCheckout>>;
     let releaseCapacity = () => {};
@@ -374,6 +431,7 @@ export class MergeChecks {
         env: task.settings.env,
         totalTimeoutMs: task.settings.totalTimeoutMs,
         serialize: true,
+        lockSlot: slot,
         signal: this.abort.signal,
         onReady: (owner) => {
           releaseCapacity = acquireMergeCheckCapacity(
@@ -502,20 +560,28 @@ export class MergeChecks {
     await (await this.schedule(projects)).done;
   }
   /**
-   * One scheduling pass. While a check round is running, only publish
-   * confirmed candidates whose tree already passed; never wait for the round
-   * (C-113). Otherwise start a new round in the background.
+   * One scheduling pass. For a project whose lane is running, only publish
+   * confirmed candidates whose tree already passed; never wait for the lane
+   * (C-113). Other projects start a new lane in the background, so checks on
+   * different execution targets (or free slots of one target) overlap.
    */
   async schedule(
     projects: readonly ProjectId[],
   ): Promise<{ readonly done: Promise<void> }> {
     if (this.abort.signal.aborted) return { done: Promise.resolve() };
-    if (this.round) {
-      const tasks = this.tasks(projects);
+    let tasks: Task[];
+    try {
+      tasks = this.tasks(projects);
+    } catch (error) {
+      this.report(error);
+      return { done: Promise.resolve() };
+    }
+    const busy = tasks.filter((t) => this.lanes.has(t.project.project_id));
+    if (busy.length)
       await this.serial(async () => {
-        for (const task of tasks) {
+        for (const task of busy) {
           if (this.abort.signal.aborted) return;
-          if (this.key(task) === this.active) continue;
+          if (this.active.has(this.key(task))) continue;
           try {
             await this.ready(task);
           } catch (error) {
@@ -523,23 +589,42 @@ export class MergeChecks {
           }
         }
       });
-      return { done: Promise.resolve() };
+    const fresh = new Map<string, Task[]>();
+    for (const task of tasks) {
+      const id = task.project.project_id;
+      if (this.lanes.has(id)) continue;
+      fresh.set(id, [...(fresh.get(id) ?? []), task]);
     }
-    // Nobody may await a background round: it must never reject, even when
-    // the error reporter itself throws.
-    const round = this.run(projects)
-      .catch((error: unknown) => {
-        try {
-          this.options.onError(error);
-        } catch {
-          // The reporter failed too; there is nobody left to tell.
-        }
-      })
-      .finally(() => {
-        if (this.round === round) this.round = undefined;
-      });
-    this.round = round;
-    return { done: round };
+    const live = new Set(tasks.map((t) => this.key(t)));
+    for (const key of this.prepared.keys()) {
+      const project = key.slice(0, key.indexOf("/"));
+      if (
+        projects.includes(project as ProjectId) &&
+        !this.lanes.has(project) &&
+        !live.has(key)
+      )
+        this.prepared.delete(key);
+    }
+    const started: Promise<void>[] = [];
+    for (const [id, list] of fresh) {
+      // Nobody may await a background lane: it must never reject, even when
+      // the error reporter itself throws.
+      const lane = this.run(list)
+        .catch((error: unknown) => this.report(error))
+        .finally(() => {
+          if (this.lanes.get(id) === lane) this.lanes.delete(id);
+        });
+      this.lanes.set(id, lane);
+      started.push(lane);
+    }
+    return { done: Promise.all(started).then(() => {}) };
+  }
+  private report(error: unknown): void {
+    try {
+      this.options.onError(error);
+    } catch {
+      // The reporter failed too; there is nobody left to tell.
+    }
   }
   private key(task: Task): string {
     return `${task.project.project_id}/${task.plan.card_id}`;
@@ -577,9 +662,9 @@ export class MergeChecks {
         a.plan.card_id.localeCompare(b.plan.card_id),
     );
   }
-  private async run(projects: readonly ProjectId[]): Promise<void> {
-    const tasks = this.tasks(projects);
-    // Persist the entire queue before starting the first expensive command.
+  /** One project's cards, in order. */
+  private async run(tasks: readonly Task[]): Promise<void> {
+    // Persist the project's queue before starting its first expensive command.
     await this.serial(async () => {
       for (const task of tasks) {
         if (this.abort.signal.aborted) return;
@@ -607,13 +692,20 @@ export class MergeChecks {
           return { check: await this.queue(task, prepared) };
         });
         if (!check) continue;
-        if (check.check && !this.capacity(task)) continue;
         if (check.check) {
-          this.active = this.key(task);
+          const slot = await this.slot(task);
+          if (!slot) return;
           try {
-            await this.execute(task, check.check);
+            // Keep this and later cards queued, in order, for a later pass.
+            if (!this.capacity(task)) return;
+            this.active.add(this.key(task));
+            try {
+              await this.execute(task, check.check, slot.index);
+            } finally {
+              this.active.delete(this.key(task));
+            }
           } finally {
-            this.active = undefined;
+            slot.release();
           }
         }
         await this.serial(() => this.publish(task));
@@ -621,8 +713,5 @@ export class MergeChecks {
         this.failure(task, error);
       }
     }
-    const live = new Set(tasks.map((t) => this.key(t)));
-    for (const key of this.prepared.keys())
-      if (!live.has(key)) this.prepared.delete(key);
   }
 }

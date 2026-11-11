@@ -65,6 +65,16 @@ describe.skipIf(process.platform !== "linux")("shared launch files", () => {
     await expect(prepareCheckLock(config)).rejects.toThrow(/Unsafe/);
     expect(await readFile(first, "utf8")).toBe("not a lock");
   });
+  test("P2a-12 D: each concurrency slot has its own lock; slot 0 keeps the historical name", async () => {
+    const zero = await prepareCheckLock(config);
+    expect(await prepareCheckLock(config, 0)).toBe(zero);
+    expect(zero).toBe(join(config.agentRoot, "merge-check.lock"));
+    const one = await prepareCheckLock(config, 1);
+    expect(one).toBe(join(config.agentRoot, "merge-check-1.lock"));
+    expect((await stat(one)).ino).not.toBe((await stat(zero)).ino);
+    for (const slot of [-1, 1.5, 64])
+      await expect(prepareCheckLock(config, slot)).rejects.toThrow(/slot/);
+  });
   test.each(["local", "agent-ssh"] as const)(
     "%s short namespace rejects existing aliases and preserves their contents",
     async (modeName) => {
