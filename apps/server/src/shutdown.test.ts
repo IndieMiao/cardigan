@@ -4,8 +4,8 @@
  * The server stops accepting connections, ends every SSE stream at once with
  * `event: shutdown`, lets in-flight requests finish within the grace period and
  * cuts what is left when it runs out. No test waits on real time: the grace
- * timer is driven by hand, and in-flight requests are held open by sending
- * their body in two parts.
+ * timer is driven by hand, and in-flight requests are held open with
+ * `Expect: 100-continue` until the test sends their body.
  */
 import { mkdtempSync, rmSync } from "node:fs";
 import { type ClientRequest, request as httpRequest } from "node:http";
@@ -17,11 +17,7 @@ import { call } from "../test-support/web.js";
 import { project_id, seedWebProject } from "../test-support/web-data.js";
 import { stubGit } from "./git-test-support.js";
 import { awaitShutdown } from "./index.js";
-import {
-  closeWithin,
-  SHUTDOWN_EXIT_MARGIN_MS,
-  type ShutdownTimer,
-} from "./lifecycle.js";
+import { SHUTDOWN_EXIT_MARGIN_MS, type ShutdownTimer } from "./lifecycle.js";
 import { type CardiganServer, startCardiganServer } from "./server.js";
 import { resolveWebConfig } from "./web/config.js";
 
@@ -181,12 +177,13 @@ interface HeldRequest {
 }
 
 /**
- * A login whose body is only half sent: the server is inside the request
- * (reading the body) until `req.end(rest)` sends the remainder.
+ * A login that waits for `100 Continue` before sending its body. Node answers
+ * `100 Continue` and calls the request handler in the same step, so once the
+ * client sees it the server is provably inside the request (waiting for the
+ * body) until `req.end(rest)` sends it — no sleep, no guessing.
  */
 async function heldLogin(): Promise<{ held: HeldRequest; rest: string }> {
   const body = JSON.stringify({ password: PASSWORD });
-  const half = Math.floor(body.length / 2);
   const req = httpRequest({
     host: "127.0.0.1",
     port: webPort,
@@ -199,6 +196,7 @@ async function heldLogin(): Promise<{ held: HeldRequest; rest: string }> {
       "content-type": "application/json",
       "content-length": String(Buffer.byteLength(body)),
       origin: `http://127.0.0.1:${webPort}`,
+      expect: "100-continue",
     },
   });
   const result = new Promise<number | "cut">((resolve) => {
@@ -208,15 +206,10 @@ async function heldLogin(): Promise<{ held: HeldRequest; rest: string }> {
     });
     req.on("error", () => resolve("cut"));
   });
-  // Wait until the server has accepted the request line before shutting down.
-  const accepted = new Promise<void>((resolve) =>
-    req.on("socket", (socket) => socket.on("connect", () => resolve())),
-  );
-  req.write(body.slice(0, half));
-  await accepted;
-  // Let the server parse the headers and enter the handler.
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  return { held: { req, result }, rest: body.slice(half) };
+  const entered = new Promise<void>((resolve) => req.on("continue", resolve));
+  req.flushHeaders();
+  await entered;
+  return { held: { req, result }, rest: body };
 }
 
 function fakeSignals() {
@@ -265,10 +258,38 @@ test("with an SSE stream open, SIGTERM closes the stream and the server exits wi
   expect(exits).toEqual([]);
   expect(storeClosed).toBe(true);
   expect(lines).toEqual([JSON.stringify({ shutting_down: "SIGTERM" })]);
-  // Both timers were armed and cancelled once the close finished.
-  expect(clock.armed).toEqual([]);
+  // The request grace timer is cancelled; the process deadline stays armed
+  // (unref'd in production, so it never delays a clean exit).
+  expect(clock.armed).toEqual([10_000 + SHUTDOWN_EXIT_MARGIN_MS]);
   // No new connection is accepted after the signal.
   await expect(call(webPort, "/api/session")).rejects.toThrow();
+});
+
+test("a handle left alive after a successful close cannot keep the process past the deadline", async () => {
+  const signals = fakeSignals();
+  const lines: string[] = [];
+  const exits: number[] = [];
+  const code = awaitShutdown({
+    // The listeners close at once, but something keeps the event loop busy.
+    server: { close: async () => {} },
+    store: { close: () => {} },
+    write: (line) => lines.push(line),
+    graceMs: 10_000,
+    signals: signals.host,
+    timer: clock.timer,
+    exit: (value) => exits.push(value),
+  });
+  signals.send("SIGTERM");
+  expect(await code).toBe(0);
+  expect(exits).toEqual([]);
+
+  // Still alive when the deadline comes: exit with the code already decided.
+  clock.fire(10_000 + SHUTDOWN_EXIT_MARGIN_MS);
+  expect(exits).toEqual([0]);
+  expect(lines).toEqual([
+    JSON.stringify({ shutting_down: "SIGTERM" }),
+    JSON.stringify({ shutdown_forced: "SIGTERM", after_close: true }),
+  ]);
 });
 
 test("SSE streams end while the control plane is still draining its current tick", async () => {
@@ -329,18 +350,20 @@ test("an in-flight request finishes normally within the grace period", async () 
   await stream.ended;
   expect(stream.frames).toContain("event: shutdown\ndata: {}");
 
-  // Still waiting for the request; the grace timer is armed, not fired.
+  // The grace timer is armed, not fired, and the request is still open: had
+  // the close cut it, the result below would be "cut" instead of 200.
   let done = false;
   void closing.then(() => {
     done = true;
   });
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  expect(done).toBe(false);
   expect(clock.armed).toEqual([10_000]);
 
   held.req.end(rest);
   expect(await held.result).toBe(200);
   await closing;
+  expect(done).toBe(true);
+  // Finished by the request completing, not by the grace period.
+  expect(clock.armed).toEqual([]);
   expect(clock.armed).toEqual([]);
 });
 
@@ -388,12 +411,25 @@ test("a close that never finishes is forced after the grace period and its margi
   ]);
 });
 
-test("closeWithin reports a failing close without waiting for the deadline", async () => {
-  const outcome = await closeWithin(
-    () => Promise.reject(new Error("boom")),
-    1_000,
-    clock.timer,
-  );
-  expect(outcome).toEqual({ kind: "failed", error: new Error("boom") });
-  expect(clock.armed).toEqual([]);
+test("a failing close is reported, closes the store and exits with 1", async () => {
+  const signals = fakeSignals();
+  const lines: string[] = [];
+  let storeClosed = false;
+  const code = awaitShutdown({
+    server: { close: () => Promise.reject(new Error("boom")) },
+    store: {
+      close: () => {
+        storeClosed = true;
+      },
+    },
+    write: (line) => lines.push(line),
+    graceMs: 10_000,
+    signals: signals.host,
+    timer: clock.timer,
+    exit: () => {},
+  });
+  signals.send("SIGTERM");
+  expect(await code).toBe(1);
+  expect(storeClosed).toBe(true);
+  expect(lines.at(-1)).toBe(JSON.stringify({ shutdown_failed: "Error: boom" }));
 });

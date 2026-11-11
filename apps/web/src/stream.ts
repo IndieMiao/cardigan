@@ -24,6 +24,9 @@ export function subscribeProject(
   retryMs = 3000,
 ): () => void {
   const seen = new Map<string, number>();
+  // Last run-queue revision the server announced. The queue has no seq, so a
+  // resumed connection relies on this to notice changes made while away.
+  let queueRevision: string | undefined;
   let source: EventConnection | undefined,
     timer: ReturnType<typeof setTimeout> | undefined,
     stopped = false;
@@ -63,8 +66,30 @@ export function subscribeProject(
       // from zero anyway), re-read to cover the window before the stream.
       if (!resumed) callbacks.ready();
     });
-    connection.addEventListener("queue", () => {
-      if (current()) callbacks.ready();
+    connection.addEventListener("queue", (event) => {
+      if (!current()) return;
+      let revision: unknown;
+      try {
+        revision = (
+          JSON.parse((event as MessageEvent<string>).data) as {
+            revision?: unknown;
+          }
+        ).revision;
+      } catch {
+        revision = undefined;
+      }
+      if (typeof revision !== "string") {
+        // No revision to compare (older server): always refresh.
+        callbacks.ready();
+        return;
+      }
+      const known = queueRevision;
+      queueRevision = revision;
+      if (known === revision) return;
+      // The first revision of the first connection is already covered by the
+      // re-read on open; on a resumed connection any revision we did not have
+      // yet means the queue may have changed while we were away.
+      if (known !== undefined || resumed) callbacks.ready();
     });
     connection.addEventListener("change", (event) => {
       if (!current()) return;

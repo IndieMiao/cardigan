@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Event, ProjectId } from "@cardigan/domain";
 import { readRunQueue } from "@cardigan/host";
@@ -116,9 +117,23 @@ export async function serveStream(options: StreamOptions): Promise<void> {
     });
   }
 
-  let queueRevision = JSON.stringify(
-    readRunQueue(store).filter((r) => r.project_id === project_id),
-  );
+  // The run queue has no seq, so a reconnecting client cannot ask for what it
+  // missed. Instead every connection opens with the queue's revision and every
+  // change carries the new one: the client compares it with the revision it
+  // last saw and refreshes only when they differ (C-117).
+  const queueRevisionOf = (): string =>
+    createHash("sha256")
+      .update(
+        JSON.stringify(
+          readRunQueue(store).filter((r) => r.project_id === project_id),
+        ),
+      )
+      .digest("hex")
+      .slice(0, 16);
+  const queueFrame = (revision: string): string =>
+    `event: queue\ndata: ${JSON.stringify({ revision })}\n\n`;
+  let queueRevision = queueRevisionOf();
+  res.write(queueFrame(queueRevision));
   let closed = false;
   let poll: NodeJS.Timeout | undefined;
   let heartbeat: NodeJS.Timeout | undefined;
@@ -138,13 +153,11 @@ export async function serveStream(options: StreamOptions): Promise<void> {
     if (closed || res.writableEnded) return;
     let batch: Event[];
     try {
-      const nextQueue = JSON.stringify(
-        readRunQueue(store).filter((r) => r.project_id === project_id),
-      );
+      const nextQueue = queueRevisionOf();
       if (nextQueue !== queueRevision) {
         queueRevision = nextQueue;
         // Cross-project capacity changes have no seq in this project's streams.
-        res.write("event: queue\ndata: {}\n\n");
+        res.write(queueFrame(queueRevision));
       }
       batch = store.uow.read((tx) => {
         const streams = [

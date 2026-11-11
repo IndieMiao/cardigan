@@ -1008,7 +1008,7 @@ M5.1 实现的骨架（实现细节见 `docs/plans/phase-1-m5.md` §3.1–§3.3�
 - **只读接口**：`GET /api/projects`；`GET /api/projects/:id/cards`（`filter=needs_me|agent`，每张卡带 domain 派生的 `status`、`waiting_on`、`next_owners`、`why`）；`GET /api/projects/:id/cards/:card`（工作项、时间线、交付、审核、决策、附件和 §8.4 的关联区）；`GET /api/projects/:id/needs-you`（含一句话原因和已等待时长）；`GET /api/projects/:id/snapshot`（§8.3）；`GET /api/projects/:id/execution`（§8.5 的 Assignment、Run、runtime、worktree、游标）；`GET /api/projects/:id/activity`（§8.6，按卡片、角色、类型过滤并分页）；`GET /api/projects/:id/preferences` 及 V9b 的 `roles` 读接口见 §8.8。全部以 `{ kind: "human" }` 身份复用 domain 已有的查询（`projectSnapshot`、`listNeedsYou`），只读事务，不推进任何 Agent 游标。
 - **卡片模板设置（V10b）**：设置页提供“偏好”、“授权”、“角色”和“卡片模板”分栏；模板列表与详情展示版本、状态和流程定义，内置模板只读并提供复制入口，项目模板支持新建、编辑、停用／启用和回退（见 §8.8）。
 - **实时刷新**：`GET /api/projects/:id/stream?after=<流:seq,...>`（SSE，`project` 代表项目级流），心跳 15 秒，断线重连按流补发缺失的 seq；不带 `after` 时从当前最新事件开始，不重放历史。
-- **关闭（C-117）**：server 收到 SIGTERM／SIGINT 后，Workbench 监听器先停止接受新连接，并立即给每条 SSE 连接发送 `event: shutdown` 后结束，不等浏览器断开；这一步和控制面停止同时开始，控制面仍按既有顺序等各循环当前一轮结束。进行中的普通请求有宽限期 `CARDIGAN_SHUTDOWN_GRACE_MS`（正整数毫秒，默认 10000），宽限期内正常完成，超时则断开连接。宽限期再加 2 秒仍未关闭完（例如某个循环卡在当前一轮里），进程记 `shutdown_forced` 并以退出码 1 强制退出，不关闭仍可能被使用的 Store；被截断的合并检查由现有的启动规则记 interrupted 并重新排队。
+- **关闭（C-117）**：server 收到 SIGTERM／SIGINT 后，Workbench 监听器先停止接受新连接，并立即给每条 SSE 连接发送 `event: shutdown` 后结束，不等浏览器断开；这一步和控制面停止同时开始，控制面仍按既有顺序等各循环当前一轮结束。进行中的普通请求有宽限期 `CARDIGAN_SHUTDOWN_GRACE_MS`（正整数毫秒，默认 10000），宽限期内正常完成，超时则断开连接。从收到信号起，进程最晚在宽限期再加 2 秒时退出：仍未关闭完（例如某个循环卡在当前一轮里）时记 `shutdown_forced` 并以退出码 1 退出，不关闭仍可能被使用的 Store；已经关闭完但仍有残留句柄（例如被截断的请求留下的定时器）时记 `shutdown_forced`、`after_close: true`，按已确定的退出码退出。这个计时器不阻止进程自然退出；被截断的合并检查由现有的启动规则记 interrupted 并重新排队。
 - **请求状态提示（C-57）**：Workbench 的读取、同步、保存、提交结果及错误共用 `RequestFeedback`，在右上角脱离文档流的提示区排列；抽屉内的提示留在对话框内部，保持读屏及重试按钮可访问。后台刷新和 SSE 引发的读取默认静默，连续等待 1 秒才显示进度；用户提交、保存和手动重试立即反馈。刷新及失败保留已有内容，错误醒目且不挤动页面。提示使用 `aria-live="polite"`，空闲时保留空的播报节点。用 `hidden` 保留表单的设置分栏同时通过 `RequestFeedbackScope` 控制其 Portal 提示：隐藏时不渲染提示或播报节点，迟到的操作结果也不串到当前分栏；表单及请求继续保留，切回后恢复对应反馈和草稿。组件测试用受控 Promise 和计时器，比较刷新前、等待中、完成或失败后的文档流布局结构，避免把 jsdom 恒为零的 `offsetTop` 当作浏览器布局证据。
 
 - **附件下载**：`GET /api/projects/:id/attachments/:id`；只有已知位图类型（png/jpeg/gif/webp/avif）可以内联，SVG、HTML 等一律 `Content-Disposition: attachment`，并附 `default-src 'none'; sandbox` 的 CSP，避免 Agent 写的文档在本站执行脚本。
@@ -1172,7 +1172,7 @@ C-75：执行视图每行的“详情”打开右侧抽屉（复用 Workbench �
 
 完整事件流，可按卡片、角色、类型过滤，默认折叠。PM Ops 做过的调度和理由也记录在这里。M5.4 使用 `#/p/<项目>/activity`，按卡片编号、角色、事件类型筛选，通过 before 游标查看更早事件或返回最新；事件负载作为转义文本展开显示，保留调度理由和 actor/seq，链接回关联卡片。筛选/翻页只读，不推进 Agent 的 ACK。
 
-M5.4 的实时刷新由当前项目共用一个 SSE 订阅：按 stream 保存已见最大 seq，断线或收到 server 的 `shutdown` 帧后主动关闭旧连接，3 秒后用各流游标重连，新 server 未就绪时继续按同样间隔重试，不需要刷新页面；尚未收到任何事件时显式发送 project:0，避免从“现在”开始漏掉断线变化。初次连接（以及尚无游标、从 project:0 重连）成功时重新读取当前视图，补上建连窗口；带游标的重连成功后不再整体重读，只靠补发的缺失 seq 刷新受影响的视图，已加载的数据和页面状态保持不变（C-117；断线期间只有跨项目排队变化而没有事件时，要等下一次变化才刷新）；100ms 内的事件合并刷新。卡片详情只响应本卡和项目级流，其余项目视图响应项目内事件；重复/乱序 seq 不回退游标。切换项目、登出时关闭连接和重连计时器，游标不跨项目复用。刷新保留已有数据与表单，错误可重试；连接中断时复核登录，会话失效返回登录页。
+M5.4 的实时刷新由当前项目共用一个 SSE 订阅：按 stream 保存已见最大 seq，断线或收到 server 的 `shutdown` 帧后主动关闭旧连接，3 秒后用各流游标重连，新 server 未就绪时继续按同样间隔重试，不需要刷新页面；尚未收到任何事件时显式发送 project:0，避免从“现在”开始漏掉断线变化。初次连接（以及尚无游标、从 project:0 重连）成功时重新读取当前视图，补上建连窗口；带游标的重连成功后不再整体重读，只靠补发的缺失 seq 刷新受影响的视图，已加载的数据和页面状态保持不变（C-117）。排队变化没有 seq：每条连接先发一条带 `revision`（本项目排队投影的摘要）的 `queue` 帧，之后每次变化再发新的 revision；客户端记住上次的 revision，重连后不一致就刷新一次，一致则不重读；100ms 内的事件合并刷新。卡片详情只响应本卡和项目级流，其余项目视图响应项目内事件；重复/乱序 seq 不回退游标。切换项目、登出时关闭连接和重连计时器，游标不跨项目复用。刷新保留已有数据与表单，错误可重试；连接中断时复核登录，会话失效返回登录页。
 
 ### 8.7 看板第一版范围（自研）
 

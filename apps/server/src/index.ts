@@ -7,11 +7,11 @@ import {
 } from "./config.js";
 import { createHostWiring } from "./host.js";
 import {
-  closeWithin,
   installShutdownHandlers,
   SHUTDOWN_EXIT_MARGIN_MS,
   type ShutdownTimer,
   type SignalHost,
+  systemShutdownTimer,
 } from "./lifecycle.js";
 import { type CardiganServer, startCardiganServer } from "./server.js";
 import { resolveWebConfig } from "./web/config.js";
@@ -36,34 +36,59 @@ export interface ShutdownOptions {
 /**
  * Wait for SIGTERM/SIGINT, close the server and resolve with the exit code.
  *
- * The close is bounded: in-flight requests get `graceMs`, and if the server is
- * still not closed `SHUTDOWN_EXIT_MARGIN_MS` later (a phase loop stuck in its
- * tick, say) the process exits anyway. The store is left open in that case —
- * the loops may still be using it, and SQLite recovers on the next start; the
- * existing startup rules mark a cut-off merge check interrupted and queue it
- * again.
+ * The process lifetime is bounded, not just `server.close()`: in-flight
+ * requests get `graceMs`, and `SHUTDOWN_EXIT_MARGIN_MS` later the process
+ * exits no matter what is still alive — a phase loop stuck in its tick, or a
+ * timer a cut-off request left behind after the listeners closed. The deadline
+ * is never cancelled; its timer does not keep the process alive, so a clean
+ * shutdown simply ends before it fires. When the close itself did not finish,
+ * the store is left open — the loops may still be using it, SQLite recovers on
+ * the next start, and the existing startup rules mark a cut-off merge check
+ * interrupted and queue it again.
  */
 export function awaitShutdown(options: ShutdownOptions): Promise<number> {
   const { server, store, write } = options;
+  const timer = options.timer ?? systemShutdownTimer;
+  const exit = options.exit ?? ((code: number) => process.exit(code));
   return new Promise<number>((resolve) => {
     installShutdownHandlers(options.signals ?? process, (signal) => {
       write(JSON.stringify({ shutting_down: signal }));
-      void closeWithin(
-        () => server.close(),
-        options.graceMs + SHUTDOWN_EXIT_MARGIN_MS,
-        options.timer,
-      ).then((outcome) => {
-        if (outcome.kind === "forced") {
-          write(JSON.stringify({ shutdown_forced: signal }));
-          resolve(1);
-          (options.exit ?? ((code) => process.exit(code)))(1);
-          return;
-        }
-        if (outcome.kind === "failed")
-          write(JSON.stringify({ shutdown_failed: String(outcome.error) }));
-        store.close();
-        resolve(outcome.kind === "closed" ? 0 : 1);
+      let code: number | undefined;
+      const finish = (value: number): void => {
+        if (code !== undefined) return;
+        code = value;
+        resolve(value);
+      };
+      timer(options.graceMs + SHUTDOWN_EXIT_MARGIN_MS, () => {
+        const closed = code !== undefined;
+        write(
+          JSON.stringify({
+            shutdown_forced: signal,
+            ...(closed ? { after_close: true } : {}),
+          }),
+        );
+        finish(1);
+        exit(code ?? 1);
       });
+      let closing: Promise<void>;
+      try {
+        closing = server.close();
+      } catch (error) {
+        closing = Promise.reject(error);
+      }
+      closing.then(
+        () => {
+          if (code !== undefined) return;
+          store.close();
+          finish(0);
+        },
+        (error: unknown) => {
+          if (code !== undefined) return;
+          write(JSON.stringify({ shutdown_failed: String(error) }));
+          store.close();
+          finish(1);
+        },
+      );
     });
   });
 }
@@ -174,11 +199,9 @@ export {
   loadLaunchFiles,
 } from "./host.js";
 export {
-  closeWithin,
   installShutdownHandlers,
   SHUTDOWN_EXIT_MARGIN_MS,
   SHUTDOWN_SIGNALS,
-  type ShutdownOutcome,
   type ShutdownTimer,
   systemShutdownTimer,
 } from "./lifecycle.js";
