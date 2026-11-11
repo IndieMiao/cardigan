@@ -202,17 +202,41 @@ describe("tool and worktree boundaries", () => {
     );
     expect(created.data.allowed_tools).toEqual([...tools, "withdraw_review"]);
   });
+  test.each(["host_ops", "planner"])(
+    "standing role %s cannot be granted the V12b catalog tools",
+    (role_id) => {
+      for (const tool of ["list_templates", "list_roles"] as const)
+        expect(
+          validateRole(
+            definition({
+              role_id,
+              kind: "standing",
+              worktree: "none",
+              allowed_tools: [tool],
+            }),
+          ),
+          tool,
+        ).toMatchObject({
+          ok: false,
+          error: { code: "validation_failed" },
+        });
+    },
+  );
   test.each<RoleKind>(["produce", "verify", "standing"])(
     "checks every system tool for %s",
     (kind) => {
       for (const tool of toolNames) {
+        // V12b: the template/role catalog is standing-only.
+        const standingOnly = ["list_templates", "list_roles"].includes(tool);
         const expected = tool.startsWith("host_ops_")
           ? false
-          : kind === "produce"
-            ? !["submit_review", "withdraw_review"].includes(tool)
-            : kind === "verify"
-              ? tool !== "submit_delivery"
-              : (STANDING_ROLE_TOOLS as readonly string[]).includes(tool);
+          : standingOnly && kind !== "standing"
+            ? false
+            : kind === "produce"
+              ? !["submit_review", "withdraw_review"].includes(tool)
+              : kind === "verify"
+                ? tool !== "submit_delivery"
+                : (STANDING_ROLE_TOOLS as readonly string[]).includes(tool);
         expect(
           validateRole(
             definition({

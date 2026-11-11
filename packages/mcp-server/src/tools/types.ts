@@ -1,4 +1,8 @@
-import type { ToolName } from "@cardigan/domain";
+import {
+  holdsStandingOnlyTools,
+  isStandingOnlyTool,
+  type ToolName,
+} from "@cardigan/domain";
 import type { z } from "zod";
 import type { Identity } from "../auth.js";
 import type { McpBackend } from "../backend.js";
@@ -71,6 +75,7 @@ export function visibleTools(
       (!["issue_instruction", "release_assignment"].includes(tool.name) ||
         (assignment.scope === "standing" &&
           assignment.role_id === "pm" &&
-          assignment.standing_mode === "ops")),
+          assignment.standing_mode === "ops")) &&
+      (!isStandingOnlyTool(tool.name) || holdsStandingOnlyTools(assignment)),
   );
 }

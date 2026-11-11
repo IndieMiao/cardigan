@@ -9,6 +9,7 @@ import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { authenticate } from "./auth.js";
 import { project_id, seedProject } from "./test-support.js";
+import { type ToolDefinition, visibleTools } from "./tools/types.js";
 
 let store: Store;
 let token: string;
@@ -63,3 +64,62 @@ test("a revoked token is rejected before the assignment is consulted", () => {
   store.revokeToken(issued.record.id);
   expect(authenticate(store, issued.token).ok).toBe(false);
 });
+
+// V12b: work-item PMs and host_ops never authenticate with the catalog tools,
+// even when an older or hand-made token carries them.
+test.each([
+  { scope: "work_item", role_id: "pm", kept: false },
+  { scope: "standing", role_id: "host_ops", kept: false },
+  { scope: "work_item", role_id: "coder", kept: false },
+  { scope: "standing", role_id: "pm", kept: true },
+] as const)(
+  "catalog tools on a $scope $role_id token are kept=$kept",
+  ({ scope, role_id, kept }) => {
+    const catalog = ["list_templates", "list_roles"] as const;
+    store.uow.run((tx) => {
+      const assignment = tx.assignments.get(project_id, "A-1" as never);
+      if (assignment === undefined) throw new Error("missing assignment");
+      tx.assignments.put(project_id, {
+        ...assignment,
+        scope,
+        role_id,
+        ...(scope === "standing"
+          ? { standing_mode: "ops", work_item_id: undefined }
+          : {}),
+      } as never);
+    });
+    const issued = store.issueToken({
+      project_id,
+      assignment_id: "A-1" as never,
+      role: { role_version: 1, allowed_tools: ["whoami", ...catalog] },
+    });
+    const identity = authenticate(store, issued.token);
+    expect(identity.ok).toBe(true);
+    if (!identity.ok) return;
+    expect(identity.value.actor.allowed_tools).toEqual(
+      kept ? ["whoami", ...catalog] : ["whoami"],
+    );
+  },
+);
+
+// V12b / V-309: tools/list applies the same standing-PM rule on its own.
+test.each([
+  { scope: "work_item", role_id: "pm", standing_mode: undefined, kept: false },
+  {
+    scope: "standing",
+    role_id: "host_ops",
+    standing_mode: undefined,
+    kept: false,
+  },
+  { scope: "standing", role_id: "pm", standing_mode: "office", kept: true },
+  { scope: "standing", role_id: "pm", standing_mode: "ops", kept: true },
+] as const)(
+  "tools/list for $scope $role_id ($standing_mode) shows catalog=$kept",
+  (assignment) => {
+    const names = ["whoami", "list_templates", "list_roles"] as const;
+    const tools = names.map((name) => ({ name }) as ToolDefinition);
+    expect(
+      visibleTools(tools, names, assignment).map((tool) => tool.name),
+    ).toEqual(assignment.kept ? [...names] : ["whoami"]);
+  },
+);

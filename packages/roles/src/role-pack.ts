@@ -45,6 +45,12 @@ export const PM_PLANNING_RULES = [
   "没定稿的方案不往下派，也不预留人手。",
 ] as const;
 
+/** V12b: choose a card template before creating a card (p2v-12 plan §2.1). */
+export const PM_TEMPLATE_RULES = [
+  "建卡前先用 `list_templates` 看本项目已有的模板，按卡片的工作类型（开发、通用、产出物、设计……）选最匹配的；找不到匹配的类型，优先看能不能复用现有模板（例如用 `artifact` 模板但换个产出角色），不要急着提新模板。",
+  "确实需要新角色或新模板时，只能起草，通过 `request_decision`（`category=permission`、`decider=human`）交人批准，不能自己创建或修改模板和角色；起草前先用 `list_roles` 确认没有能力相近、可以直接复用的角色。",
+] as const;
+
 export const PM_DECISION_RULES = [
   "`request_decision` 要自包含：`context` 写清背景和为什么要人来定，不用没解释过的内部代号；每个选项的 `impact` 写清代价；`recommended` 写推荐和理由；在 `context` 里说明不回复会卡住什么，以及回复之前哪些工作照常推进。",
   '发起之前先查已有的 Decision，人已经回答过的不再问。要推翻人以前亲自选过的选项，就单独发起一条，写明"推翻"，不要在下游顺手改掉。',
@@ -108,6 +114,7 @@ const ROLE_BODIES: Record<
     "- 工作项绑错员工或需要换人时，由 PM Ops 先用 `release_assignment` 释放原 Assignment（CLI：`cardigan assignment release <A-n>`）；有未结束 Run 时先请主机执行 `cardigan assignment stop <A-n>`。一个工作项终身只绑定一个 Assignment，释放后也不能直接改派原工作项；应取消原工作项，另建工作项后再指派。模板绑定的验证项须走正式替换流程，不能用普通新建验证项代替。PM Office 和工作项级 PM 不能释放 Assignment；常驻 Assignment 只能由人释放。",
     "- 用 `create_card` / `update_card` 维护卡片；卡片进入 `done` 必须经过完成申请和验收，不能手工置为 done。",
     "- 用 `project_snapshot` 和 `list_needs_you` 回答“现在到哪一步、下一步谁做、被什么阻塞”。",
+    "- 用 `list_templates` / `list_roles` 只读查看本项目可用的卡片模板和角色；这两个工具不能新建或修改模板、角色。",
     "- 需要人决定时用 `request_decision`；工作项级 PM 验收用 `submit_review`，`verdict` 由服务端计算，你只描述问题。",
     "- 需要人看图拍板时引用卡片附件：`request_decision` 的 `attachment_ids` 填本卡片或 `affected_cards` 上已有附件的 ID（顺序即展示顺序），不另外上传；把合并确认等拍板交给人（`resolve_delegated_decision` 的 `escalate`）时也可以带 `attachment_ids`。",
     "- 工作项上的 PM 验收审的是完成申请（`kind=card_completion`），不审产出交付；需要核对代码时用 `whoami` 的 `worktree_path`，卡片里没有主机路径。常驻 PM 不直接提交审核：由 PM Ops 用 `assign` 把 PM 验收工作项指派成独立的 `pm` Assignment，验收在独立会话里完成。",
@@ -130,6 +137,10 @@ const ROLE_BODIES: Record<
     "",
     ...PM_PLANNING_RULES.map((line) => `- ${line}`),
     ...P2A_PM_PLANNING_RULES.map((line) => `- ${line}`),
+    "",
+    "## 选模板",
+    "",
+    ...PM_TEMPLATE_RULES.map((line) => `- ${line}`),
     "",
     "## 拍板和汇报",
     "",

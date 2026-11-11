@@ -184,3 +184,33 @@ test.each(["coder", "pm"])(
     expect(issued.record.allowed_tools).toEqual(["whoami", "create_card"]);
   },
 );
+
+// V12b: the template/role catalog belongs to the standing PM only.
+const catalog = ["list_templates", "list_roles"] as const;
+test.each([
+  { scope: "standing", role_id: "pm", mode: "office", kept: true },
+  { scope: "standing", role_id: "pm", mode: "ops", kept: true },
+  { scope: "work_item", role_id: "pm", mode: undefined, kept: false },
+  { scope: "standing", role_id: "host_ops", mode: undefined, kept: false },
+] as const)(
+  "catalog tools for a $scope $role_id ($mode) Assignment are kept=$kept",
+  ({ scope, role_id, mode, kept }) => {
+    const target = standing({
+      id: "A-3" as never,
+      scope,
+      role_id,
+      standing_mode: mode,
+      ...(scope === "work_item" ? { work_item_id: "W-1" as never } : {}),
+    });
+    store.uow.run((tx) => tx.assignments.put(project, target));
+    const issued = store.uow.run((tx) =>
+      issueTokenInTransaction(tx, project, target.id, {
+        role_version: 1,
+        allowed_tools: ["whoami", ...catalog],
+      }),
+    );
+    expect(issued.record.allowed_tools).toEqual(
+      kept ? ["whoami", ...catalog] : ["whoami"],
+    );
+  },
+);

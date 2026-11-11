@@ -4,6 +4,7 @@ import { HOST_OPS_FORBIDDEN_TOOLS } from "../host-ops.js";
 import type { ProjectId } from "../ids.js";
 import {
   canManageRoles,
+  isStandingOnlyTool,
   ROLE_TOOL_ALLOWLISTS,
   type Role,
   roleKind,
@@ -134,6 +135,11 @@ export function validateRole(role: RoleDefinition): Result<RoleDefinition> {
       ) || role.role_id === "pm",
       "validation_failed",
       "record_decision 只能授予 pm 角色",
+    );
+    ensure(
+      role.role_id === "pm" || !role.allowed_tools.some(isStandingOnlyTool),
+      "validation_failed",
+      "list_templates、list_roles 只能授予 pm 角色",
     );
     ensure(
       ["none", "readonly", "write"].includes(role.worktree),

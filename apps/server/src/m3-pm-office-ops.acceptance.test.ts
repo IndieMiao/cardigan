@@ -27,6 +27,7 @@ import {
   type RuntimeLaunch,
   type RuntimeRef,
   type RuntimeResult,
+  STANDING_ONLY_TOOLS,
   STANDING_ROLE_TOOLS,
 } from "@cardigan/domain";
 import { launchRun } from "@cardigan/host";
@@ -210,6 +211,7 @@ async function pmFixture() {
               "resolve_delegated_decision",
               "triage_human_action",
             ].includes(tool) &&
+              !(STANDING_ONLY_TOOLS as readonly string[]).includes(tool) &&
               !(
                 role_id === "coder"
                   ? ["submit_review", "withdraw_review"]

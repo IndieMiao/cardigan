@@ -5,6 +5,7 @@ import type {
   Result,
   RoleReference,
 } from "@cardigan/domain";
+import { holdsStandingOnlyTools, isStandingOnlyTool } from "@cardigan/domain";
 import type { McpBackend, McpToken } from "./backend.js";
 
 /** MCP callers are always assignments: a token belongs to one assignment. */
@@ -88,10 +89,12 @@ export function authenticate(
         // capabilities and the human-readable role id.
         allowed_tools: record.allowed_tools.filter(
           (tool) =>
-            tool !== "issue_instruction" ||
-            (lookup.assignment.scope === "standing" &&
-              lookup.assignment.role_id === "pm" &&
-              lookup.assignment.standing_mode === "ops"),
+            (tool !== "issue_instruction" ||
+              (lookup.assignment.scope === "standing" &&
+                lookup.assignment.role_id === "pm" &&
+                lookup.assignment.standing_mode === "ops")) &&
+            (!isStandingOnlyTool(tool) ||
+              holdsStandingOnlyTools(lookup.assignment)),
         ),
         capabilities: role.capabilities,
       },
