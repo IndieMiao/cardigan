@@ -71,7 +71,7 @@ export function visibleTools(
       (!tool.name.startsWith("host_ops_") ||
         (assignment.role_id === "host_ops" &&
           assignment.scope === "standing")) &&
-      (tool.name !== "issue_instruction" ||
+      (!["issue_instruction", "release_assignment"].includes(tool.name) ||
         (assignment.scope === "standing" &&
           assignment.role_id === "pm" &&
           assignment.standing_mode === "ops")),

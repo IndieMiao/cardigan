@@ -24,6 +24,7 @@ export function releaseAssignment(
     ensure(
       actor.kind !== "assignment" ||
         (d.assignment?.scope === "standing" &&
+          d.assignment.standing_mode === "ops" &&
           actor.role_id === "pm" &&
           !actor.allowed_tools.includes("record_decision")),
       "unauthorized",
@@ -65,7 +66,7 @@ export function releaseAssignment(
               !["completed", "failed", "cancelled"].includes(r.status)),
         ),
       "illegal_transition",
-      "Assignment has an unfinished Run",
+      `Assignment ${a.id} 还有未结束的 Run；请先执行 cardigan assignment stop ${a.id}，再释放。`,
     );
     const next = {
       ...a,

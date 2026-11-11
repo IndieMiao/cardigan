@@ -218,14 +218,15 @@ test("invariant 11: PM Ops can release work items, but only the human can releas
   const f = mergeFixture();
   // Standing PM assignments are host bootstrap records, not work-item assignments.
   const { work_item_id: _item, ...base } = f.pm;
-  const standing = (token: string): Assignment => ({
+  const standing = (mode: "office" | "ops"): Assignment => ({
     ...base,
     id: f.io.ids.next(f.state.project_id, "assignment"),
     scope: "standing",
-    mcp_token_id: token,
+    standing_mode: mode,
+    mcp_token_id: `${mode}-token-reference`,
   });
-  const office = standing("office-token-reference");
-  const ops = standing("ops-token-reference");
+  const office = standing("office");
+  const ops = standing("ops");
   const state = {
     ...f.state,
     assignments: [...f.state.assignments, office, ops],
@@ -245,6 +246,39 @@ test("invariant 11: PM Ops can release work items, but only the human can releas
       ok: false,
       error: { code: "unauthorized" },
     });
+  // A narrow Office token without record_decision must not become Ops.
+  expect(
+    releaseAssignment(
+      state,
+      { ...opsActor, assignment_id: office.id },
+      { assignment_id: f.coder.id },
+      f.io,
+    ),
+  ).toMatchObject({ ok: false, error: { code: "unauthorized" } });
+  for (const boundary of ["token", "role"]) {
+    const withoutRelease = role("pm").allowed_tools.filter(
+      (tool) => tool !== "release_assignment" && tool !== "record_decision",
+    );
+    expect(
+      releaseAssignment(
+        boundary === "role"
+          ? {
+              ...state,
+              roles: state.roles.map((r) =>
+                r.role_id === "pm"
+                  ? { ...r, allowed_tools: withoutRelease }
+                  : r,
+              ),
+            }
+          : state,
+        boundary === "token"
+          ? { ...opsActor, allowed_tools: withoutRelease }
+          : opsActor,
+        { assignment_id: f.coder.id },
+        f.io,
+      ),
+    ).toMatchObject({ ok: false, error: { code: "forbidden_tool" } });
+  }
   const released = value(releaseAssignment(state, human, target, f.io));
   expect(released.data).toMatchObject({
     id: office.id,

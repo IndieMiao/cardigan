@@ -9,12 +9,12 @@ import {
   claimHostOpsAction,
   dispatchRecoveryQueuedAt,
   finishHostOpsAction,
+  type HostOpsExecution,
   type HostOpsExecutionTool,
   hostOpsReadDiagnostics,
   type ProjectId,
   pendingHostOpsActions,
   prepareHostOpsAction,
-  type Run,
   type RunId,
   type Runtime,
   recheckMerge,
@@ -42,7 +42,7 @@ interface Options {
   snapshot: (
     a: Assignment,
     project: ProjectId,
-  ) => Promise<Pick<Run, "model" | "agent_cli_version" | "launch_profile_ref">>;
+  ) => Promise<NonNullable<HostOpsExecution["snapshot"]>>;
   settings?: (project: ProjectId) => CommandState["project_settings"];
   clock?: Clock;
   contextThresholdPct?: number;

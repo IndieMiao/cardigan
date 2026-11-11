@@ -22,6 +22,7 @@ import {
   hostOpsPending,
   isStandingPm,
   lastRunActivity,
+  launchSettings,
   obsoleteDispatchAttention,
   queueRun,
   remindDecisionFollowups,
@@ -68,6 +69,12 @@ import { retryDispatchedRuns } from "./dispatch-retry.js";
 import { patrolHostOps } from "./host-ops-patrol.js";
 import { escalateReviewLimitWaits } from "./review-limit-attention.js";
 
+/** The model/CLI snapshot a queued Run records; C-106 adds harness and effort. */
+export type LaunchSnapshot = Pick<
+  Run,
+  "model" | "agent_cli_version" | "launch_profile_ref" | "harness" | "effort"
+>;
+
 export interface DispatcherOptions {
   readonly hostOpsTick?: () => Promise<void>;
   readonly hostOpsPatrolIntervalMs?: number;
@@ -89,7 +96,7 @@ export interface DispatcherOptions {
   readonly snapshot: (
     assignment: Assignment,
     project: ProjectId,
-  ) => Promise<Pick<Run, "model" | "agent_cli_version" | "launch_profile_ref">>;
+  ) => Promise<LaunchSnapshot>;
   /**
    * P2a-10 A: fingerprint of the MCP tools/list this deploy serves to the
    * Assignment. A live session whose recorded fingerprint differs is replaced
@@ -428,10 +435,7 @@ export class Dispatcher {
           r.role_version === a.role_version,
       )
       .sort((x, y) => Number(y.id.slice(2)) - Number(x.id.slice(2)))[0];
-    let snapshot: Pick<
-      Run,
-      "model" | "agent_cli_version" | "launch_profile_ref"
-    >;
+    let snapshot: LaunchSnapshot;
     let replaceProfile = false;
     // P2a-10 A (finding 40): the Harness lists MCP tools once per session, so
     // a session started under an older deploy keeps the old tools/list. Only a
@@ -607,7 +611,7 @@ export class Dispatcher {
     project: ProjectId,
     notes: readonly Notification[],
     expected: Assignment,
-    snapshot: Pick<Run, "model" | "agent_cli_version" | "launch_profile_ref">,
+    snapshot: LaunchSnapshot,
     live: boolean,
     catalog: string | undefined,
   ): Job | undefined {
@@ -685,6 +689,7 @@ export class Dispatcher {
               ...(snapshot.launch_profile_ref
                 ? { launch_profile_ref: snapshot.launch_profile_ref }
                 : {}),
+              ...launchSettings(snapshot),
             },
             ports,
           ),
@@ -731,8 +736,10 @@ export class Dispatcher {
         state = loadCommandState(tx, project);
       }
       if (run.status === "queued" && snapshot.launch_profile_ref) {
+        const { harness: _harness, effort: _effort, ...rest } = run;
         run = {
-          ...run,
+          ...rest,
+          ...launchSettings(snapshot),
           model: snapshot.model,
           agent_cli_version: snapshot.agent_cli_version,
           launch_profile_ref: snapshot.launch_profile_ref,

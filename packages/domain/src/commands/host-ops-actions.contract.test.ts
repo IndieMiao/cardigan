@@ -426,3 +426,40 @@ test.each(["actor", "assignment", "replacement", "source", "cycle"])(
     expect(read(invalid)).toBeUndefined();
   },
 );
+
+test("host restarts validate launch settings before intent and retain the host snapshot", () => {
+  const s = base(),
+    io = ports(),
+    p = params("host_ops_restart_assignment");
+  for (const settings of [{ harness: "unsupported" }, { effort: " " }]) {
+    const result = beginHostOpsAction(
+      s,
+      caller,
+      { ...p, snapshot: { ...snapshot, ...(settings as object) } },
+      io,
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "validation_failed" },
+    });
+    expect(s.events).toEqual([]);
+  }
+  const configured = { ...snapshot, harness: "codex" as const, effort: "high" };
+  const intent = value(
+    beginHostOpsAction(s, caller, { ...p, snapshot: configured }, io),
+  );
+  expect(intent.events[0]).toMatchObject({ payload: { snapshot: configured } });
+  const settled = value(
+    finishHostOpsAction(
+      apply(s, intent),
+      { kind: "system", project_id: s.project_id },
+      intent.data.action_id,
+      io,
+    ),
+  );
+  expect(settled.data.run).toMatchObject({
+    status: "queued",
+    harness: "codex",
+    effort: "high",
+  });
+});

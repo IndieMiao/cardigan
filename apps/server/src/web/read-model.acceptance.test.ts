@@ -620,6 +620,35 @@ test("R10 §8.1: project reads isolate card numbers and return empty collections
   });
 });
 
+test("R11b §6 C-95: decisions carry referenced attachments in order behind the same protected download", async () => {
+  await f.start(f.primary.owner);
+  const image = await f.attachment("image/png", "png bytes"),
+    file = await f.attachment("application/pdf", "pdf bytes");
+  const q = await f.mcp<Decision>(f.primary.owner, "request_decision", {
+    ...question,
+    card_id: f.card.id,
+    attachment_ids: [file.id, image.id],
+  });
+  const plain = await f.mcp<Decision>(f.primary.owner, "request_decision", {
+    ...question,
+    card_id: f.card.id,
+  });
+  const needs = await read<NeedsPage>("/needs-you"),
+    detail = await read<CardDetail>(`/cards/${f.card.id}`);
+  for (const views of [needs.decisions, detail.decisions]) {
+    const view = views.find((d) => d.id === q.id);
+    expect(view?.attachments?.map((a) => [a.id, a.inline])).toEqual([
+      [file.id, false],
+      [image.id, true],
+    ]);
+    expect(views.find((d) => d.id === plain.id)?.attachments).toEqual([]);
+    const path = view?.attachments?.[1]?.download_path as string;
+    expect(path).toBe(f.projectPath(`/attachments/${image.id}`));
+    expect((await f.call(path)).status).toBe(200);
+    expect((await f.call(path, { anonymous: true })).status).toBe(401);
+  }
+});
+
 test.each([
   "image/png",
   "image/jpeg",

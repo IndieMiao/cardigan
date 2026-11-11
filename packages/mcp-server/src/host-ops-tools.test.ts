@@ -148,3 +148,22 @@ test("released host_ops credentials are rejected before invoking the host", asyn
   ).rejects.toThrow();
   expect(read).not.toHaveBeenCalled();
 });
+
+test("host_ops cannot discover or invoke the PM Ops release tool with a broad legacy token", async () => {
+  const { c } = await client("host_ops", [
+    ...HOST_OPS_TOOLS,
+    "release_assignment",
+  ]);
+  expect(
+    (await c.listTools()).tools.some((t) => t.name === "release_assignment"),
+  ).toBe(false);
+  expect(
+    (
+      await c.callTool({
+        name: "release_assignment",
+        arguments: { assignment_id: "A-2", idempotency_key: "release-denied" },
+      })
+    ).isError,
+  ).toBe(true);
+  expect(execute).not.toHaveBeenCalled();
+});

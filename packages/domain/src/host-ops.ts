@@ -67,7 +67,7 @@ export interface HostOpsExecution {
   readonly runtime_ref: RuntimeRef | null;
   readonly snapshot?: Pick<
     Run,
-    "model" | "agent_cli_version" | "launch_profile_ref"
+    "model" | "agent_cli_version" | "launch_profile_ref" | "harness" | "effort"
   >;
 }
 export function pendingHostOpsActions(

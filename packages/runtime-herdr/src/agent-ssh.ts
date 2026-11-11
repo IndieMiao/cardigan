@@ -1,4 +1,5 @@
 import { lstat } from "node:fs/promises";
+import { isIP } from "node:net";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fail, type HcClient } from "./client.js";
 import { type ExecutionConfig, shellQuote } from "./execution.js";
@@ -6,7 +7,41 @@ import { type ExecutionConfig, shellQuote } from "./execution.js";
 type AgentConfig = Extract<ExecutionConfig, { mode: "agent-ssh" }>;
 export const AGENT_PATH =
   "/var/lib/cardigan-agent/.local/bin:/usr/local/bin:/usr/bin:/bin";
+function validateSshConfig(config: AgentConfig) {
+  for (const [name, value] of [
+    ["host", config.host],
+    ["user", config.user],
+    ["hostKeyAlias", config.hostKeyAlias],
+  ] as const) {
+    if (
+      value !== undefined &&
+      (typeof value !== "string" ||
+        (!/^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$/u.test(value) &&
+          !(
+            name !== "user" &&
+            /^[a-fA-F0-9:.]+$/u.test(value) &&
+            isIP(value) === 6
+          )))
+    )
+      fail("invalid_launch", `Invalid SSH ${name}`);
+  }
+  if (
+    config.port !== undefined &&
+    (!Number.isInteger(config.port) || config.port < 1 || config.port > 65535)
+  )
+    fail("invalid_launch", "SSH port must be an integer from 1 to 65535");
+  // -o values have their own parser and expand tokens/environment variables.
+  // Require one literal absolute path, not a list or an expanded filename.
+  if (
+    typeof config.knownHostsFile !== "string" ||
+    !isAbsolute(config.knownHostsFile) ||
+    resolve(config.knownHostsFile) === "/" ||
+    /[\s\p{Cc}\p{Cf}"'\\%$]/u.test(config.knownHostsFile)
+  )
+    fail("invalid_launch", "Invalid SSH known_hosts path");
+}
 function sshArguments(config: AgentConfig): string[] {
+  validateSshConfig(config);
   return [
     "-F",
     "/dev/null",
@@ -24,12 +59,13 @@ function sshArguments(config: AgentConfig): string[] {
       "StrictHostKeyChecking=yes",
       `UserKnownHostsFile=${config.knownHostsFile}`,
       "GlobalKnownHostsFile=/dev/null",
-      "HostKeyAlias=cardigan-agent-local",
+      `HostKeyAlias=${config.hostKeyAlias ?? "cardigan-agent-local"}`,
       "HostKeyAlgorithms=ssh-ed25519",
       "ConnectTimeout=10",
     ].flatMap((option) => ["-o", option]),
+    ...(config.port === undefined ? [] : ["-p", String(config.port)]),
     "--",
-    "agent@localhost",
+    `${config.user ?? "agent"}@${config.host ?? "localhost"}`,
   ];
 }
 export function agentSshCommand(config: AgentConfig): string {
@@ -99,6 +135,7 @@ export async function registerAgentMachine(
 }
 
 async function checkAgentFiles(config: AgentConfig) {
+  validateSshConfig(config);
   if (process.platform !== "linux")
     fail("invalid_launch", "agent-ssh currently requires Linux");
   for (const path of [config.identityFile, config.knownHostsFile]) {

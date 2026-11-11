@@ -17,7 +17,7 @@ import {
   text,
   unwrap,
 } from "./core.js";
-import { cancelRunDispatch, queueRunInDraft } from "./launch.js";
+import { cancelRunDispatch, queueRunInDraft, settingsValid } from "./launch.js";
 import { needsYouView } from "./queries.js";
 import { pauseStandingInDraft } from "./standing.js";
 
@@ -149,6 +149,7 @@ export function beginHostOpsAction(
       ensure(p.snapshot, "validation_failed", "Launch snapshot is required");
       text(p.snapshot.model, "model");
       text(p.snapshot.agent_cli_version, "agent_cli_version");
+      settingsValid(p.snapshot);
       if (p.snapshot.launch_profile_ref !== undefined)
         text(p.snapshot.launch_profile_ref, "launch_profile_ref");
     }
