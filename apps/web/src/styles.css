@@ -2638,6 +2638,12 @@ body[data-lightbox="open"] .drawer-overlay {
 .recent-conclusions .status-icon {
   flex: none;
 }
+/* The label already says 系统; the gear sits inline at text size. */
+.recent-conclusions .employee-system {
+  align-self: center;
+  width: 20px;
+  height: 20px;
+}
 /* The status icon carries the outcome; the link underlines on hover. */
 .recent-conclusions a {
   display: block;
@@ -2889,6 +2895,17 @@ body[data-lightbox="open"] .drawer-overlay {
 }
 .employee-color-4 {
   --employee-color: var(--status-wait);
+}
+.employee-avatar.employee-system {
+  /* A rounded square, never a circle: the system is not a person. */
+  border: 1px solid var(--border);
+  border-radius: 25%;
+  color: var(--text);
+  background: var(--surface-muted);
+}
+.employee-system svg {
+  width: 62%;
+  height: 62%;
 }
 .employee-avatar img {
   width: 100%;
