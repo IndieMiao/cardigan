@@ -116,6 +116,97 @@ const update = ["card", "update", "C-1", "--title", "Changed"];
 const comment = ["comment", "add", "C-1", "--text", "Identity check"];
 const accessCases = Object.entries(CLI_TOOLS);
 
+async function releaseTarget() {
+  expect(await run(["assign", "W-1", "--role", "coder"])).toBe(0);
+  const target = store.uow
+    .read((tx) => tx.assignments.list(project))
+    .find((a) => a.scope === "work_item" && a.work_item_id === "W-1");
+  if (!target) throw new Error("Missing target Assignment");
+  return target;
+}
+
+function opsIdentity() {
+  assignment = store.uow.run((tx) => {
+    const ops: Assignment = {
+      ...assignment,
+      id: tx.ids.next(project, "assignment"),
+      external: false,
+      standing_mode: "ops",
+    };
+    tx.assignments.put(project, ops);
+    return ops;
+  });
+  return issue(["release_assignment"]).token;
+}
+
+test.each(["human", "ops"] as const)(
+  "%s can release through CLI without a runtime, and repeating is harmless",
+  async (caller) => {
+    const target = await releaseTarget();
+    const input = caller === "ops" ? tokenIo(opsIdentity()) : io;
+    for (let i = 0; i < 2; i++) {
+      expect(await run(["assignment", "release", target.id], input)).toBe(0);
+      expect(output.join("\n")).toContain(`已释放 Assignment ${target.id}`);
+    }
+    expect(
+      store.uow.read((tx) => tx.assignments.get(project, target.id))?.status,
+    ).toBe("released");
+    expect(
+      store.uow
+        .read((tx) => tx.events.listAfter(project, "C-1" as never, 0))
+        .filter((e) => e.type === "assignment_released"),
+    ).toHaveLength(1);
+  },
+);
+
+test("CLI checks Office identity even when its Token contains release_assignment", async () => {
+  const target = await releaseTarget();
+  expect(
+    await run(
+      ["assignment", "release", target.id],
+      tokenIo(issue(["release_assignment"]).token),
+    ),
+  ).toBe(2);
+  expect(errors.join("\n")).toContain("unauthorized");
+  expect(
+    store.uow.read((tx) => tx.assignments.get(project, target.id))?.status,
+  ).toBe("active");
+});
+
+test("only human can release a standing Assignment through CLI", async () => {
+  const office = assignment;
+  const ops = opsIdentity();
+  expect(await run(["assignment", "release", office.id], tokenIo(ops))).toBe(2);
+  expect(errors.join("\n")).toContain("unauthorized");
+  expect(await run(["assignment", "release", office.id])).toBe(0);
+  expect(
+    store.uow.read((tx) => tx.assignments.get(project, office.id))?.status,
+  ).toBe("released");
+});
+
+test("CLI release with an unfinished Run explains the stop command and keeps state", async () => {
+  const target = await releaseTarget();
+  store.uow.run((tx) =>
+    tx.runs.put(project, {
+      id: tx.ids.next(project, "run"),
+      assignment_id: target.id,
+      trigger_event_id: tx.ids.nextEventId(),
+      kind: "initial",
+      status: "queued",
+      role_version: 1,
+      model: "fixture",
+      agent_cli_version: "1",
+      outcome: null,
+      summary: "",
+    }),
+  );
+  expect(await run(["assignment", "release", target.id])).toBe(2);
+  expect(errors.join("\n")).toContain(`cardigan assignment stop ${target.id}`);
+  expect(
+    store.uow.read((tx) => tx.assignments.get(project, target.id))?.status,
+  ).toBe("active");
+});
+
 test.each(accessCases)("command permission: %s → %s", async (command, tool) => {
   const token = issue(
     tool === null ? toolNames : toolNames.filter((name) => name !== tool),

@@ -83,7 +83,7 @@ CLI 的 `cardigan card update <C-n> [--title <标题>] [--goal <目标>] [--acce
 
 - recordMergeResult(state, system, { card_id, completion_id, result }, ports)：result 为 merged { merge_sha, previous_sha } / conflicted { delivery_id, files } / failed { reason }（用 kind 区分）。检查当前 mergePlan 及完成版本；只允许 system。除已记录结果的精确重放外，非 awaiting_merge 拒绝。以完成版本和规范化结果去重，旧结果不能完成新版本；事件 payload 为 completion_id、result，冲突另带 work_item_id/run_kind=fix。
 - merged 写 done/resolution；failed 仅写事件；conflicted 回 in_progress，冲突产出经 merge_conflicted 返工，旧完成申请 supersede、PM 验收经 target_withdrawn 等待新目标。Router 输出原产出 Assignment 的 fix 通知；真正排 Run、按铃属于 M4.4，未在命令里另建第二个 Run。
-- releaseAssignment({ assignment_id }) 允许人／常驻 PM Ops／system，无未结束 Run 才迁移两个 Assignment 状态并写 assignment_released。system 只自动释放闭卡的工作项 Assignment；PM Ops 只能释放 scope=work_item，常驻 Assignment 仅允许 human 释放；重复释放前也先校验这一权限。事件携带 token_id（非明文）、runtime_ref、worktree_path、branch；M4.4 沿用 M2 stop 方式撤销该 Assignment 的全部 Token 并释放终端，domain 不证明外部清理已完成。
+- releaseAssignment({ assignment_id }) 允许人／常驻 PM Ops／system，无未结束 Run 才迁移两个 Assignment 状态并写 assignment_released。system 只自动释放闭卡的工作项 Assignment；PM Ops 必须为 standing_mode=ops，且角色和 Token 都包含 release_assignment；只能释放 scope=work_item，常驻 Assignment 仅允许 human 释放；重复释放前也先校验这一权限。事件携带 token_id（非明文）、runtime_ref、worktree_path、branch；M4.4 沿用 M2 stop 方式撤销该 Assignment 的全部 Token 并释放终端，domain 不证明外部清理已完成。
 - requestWorktreeCleanup({ assignment_id, reason }) 只允许 system；要求已 released 且有工作目录，创建绑定 Assignment 的人类 keep/force_clean 决策。未决或已解决决定均复用，keep 不再重复询问。recordDecision 对此类决策开放 human 入口；不扩充 MCP 工具。
 
 ## P2a-1a 合并检查

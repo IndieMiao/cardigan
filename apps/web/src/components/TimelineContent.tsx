@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 import type { CardDetail, TimelineEntryView } from "../api.js";
 import { decisionOption, decisionTitle } from "../decision-labels.js";
 import { routeHash } from "../route.js";
+import { DecisionAttachments } from "./DecisionAttachments.js";
 import { EmployeeIdentity } from "./EmployeeIdentity.js";
 import { IdTag, LongContent, StatusTag } from "./Foundation.js";
 import { Markdown } from "./Operations.js";
@@ -214,6 +215,9 @@ export function TimelineContent({
           ),
         )}
         <p className="entry-summary">{decisionTitle(decision)}</p>
+        {!resolved && (
+          <DecisionAttachments attachments={decision.attachments} />
+        )}
         {!resolved && decision.auto_merge && (
           <p className="hint">
             将于{" "}
