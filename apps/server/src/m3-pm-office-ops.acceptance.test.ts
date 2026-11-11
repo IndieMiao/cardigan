@@ -209,6 +209,7 @@ async function pmFixture() {
               "record_decision",
               "resolve_delegated_decision",
               "triage_human_action",
+              "replace_verification_work_item",
             ].includes(tool) &&
               tool !==
                 (role_id === "coder" ? "submit_review" : "submit_delivery")),
