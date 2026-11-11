@@ -99,6 +99,8 @@ type CommandName =
   | "record_merge_result"
   | "begin_merge_push"
   | "record_merge_push_result"
+  | "check_merge_push_range"
+  | "accept_merge_push_hold"
   | "record_merge_check"
   | "recheck_merge"
   | "supersede_card"
@@ -196,8 +198,14 @@ export class CommandDraft {
       "record_merge_check",
       "begin_merge_push",
       "record_merge_push_result",
+      "check_merge_push_range",
       "request_worktree_cleanup",
     ].includes(tool);
+    ensure(
+      tool !== "accept_merge_push_hold" || actor.kind === "human",
+      "unauthorized",
+      "Only the human can accept foreign commits",
+    );
     ensure(
       tool !== "recheck_merge" || actor.kind === "human",
       "unauthorized",

@@ -6,6 +6,8 @@ import {
   type CommandEffect,
   type CommandPorts,
   type CommandState,
+  checkMergePushRange,
+  MERGE_PUSH_RANGE_LIMIT,
   type ProjectId,
   type Result,
   recordMergePushResult,
@@ -16,6 +18,7 @@ import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
 import type { MergeGit } from "./git.js";
 import { startTimerLoop } from "./loop.js";
+import { withPublication } from "./publication-lock.js";
 
 export function mergeProjectSettings(
   configuration: MergeGateConfiguration,
@@ -38,7 +41,7 @@ export function mergeProjectSettings(
 }
 export interface MergePushOptions {
   readonly store: Store;
-  readonly git: Pick<MergeGit, "projectOf" | "push">;
+  readonly git: Pick<MergeGit, "projectOf" | "push" | "pushRange">;
   readonly configuration: MergeGateConfiguration;
   readonly clock?: Clock;
   readonly onError?: (error: unknown) => void;
@@ -111,6 +114,38 @@ export class MergePushExecutor {
       if (!attempt || this.abort.signal.aborted) return;
       let outcome: PushResult;
       try {
+        // C-94: read current central main under the publication lock and
+        // publish only if its whole first-parent history since a trusted
+        // boundary was recorded by the merge loop (or accepted by the human).
+        const { base_sha } = attempt;
+        const range = this.options.git.pushRange;
+        if (!base_sha || !range)
+          throw new Error("Push range cannot be checked");
+        const checked = await withPublication(id, async () => {
+          const read = await range.call(
+            this.options.git,
+            project,
+            base_sha,
+            MERGE_PUSH_RANGE_LIMIT,
+          );
+          if (this.abort.signal.aborted) return undefined;
+          return this.command(id, (s, a, ports) =>
+            checkMergePushRange(
+              s,
+              a,
+              {
+                target: attempt.target,
+                attempt_id: attempt.attempt_id,
+                head: read.head,
+                chain: read.chain,
+                truncated: read.truncated,
+              },
+              ports,
+            ),
+          );
+        });
+        if (!checked) return;
+        if (checked.status === "held") return;
         const included = this.options.store.uow.read((tx) => {
           const events = tx.events.listAfter(id, undefined, 0);
           return attempt.queue_ids.map((queueId) => {

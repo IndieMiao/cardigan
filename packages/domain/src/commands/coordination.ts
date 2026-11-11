@@ -743,7 +743,8 @@ export function completeHumanAction(
     return completeActionDraft(d, p);
   });
 }
-function completeActionDraft(
+/** Internal: shared by human-only commands that also complete a Needs You item. */
+export function completeActionDraft(
   d: CommandDraft,
   p: {
     human_action_id: HumanActionId;

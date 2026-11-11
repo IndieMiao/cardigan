@@ -46,6 +46,7 @@
 | P2a-9 全机同时运行的 Run 上限（试行发现 35，细化见下方 §2.1） | 主机按机器配置全机同时处于 `dispatched`／`acked`／`running` 态的 Run 数上限，默认 4；超过时新 Run 留在 `queued`、不按铃，按创建时间跨项目排队；常驻 PM 的 Run 不受限但计入计数 | Codex 或 Pi | 契约测试覆盖排队顺序、PM 豁免、改配置后下一次调度生效；执行视图／看板／CLI 能看到排队位次；验证时不得人为制造 CPU 负载 |
 | P2a-10 主机运维角色（试行发现 35/40/41，细化计划：[p2a-10-host-ops-role.md](p2a-10-host-ops-role.md)） | 先补确定性自动化（部署后刷新常驻会话工具清单）；再引入运维角色 `host_ops`（员工"大乔"，职位"主机运维"），处理 Run 卡在 dispatched、失控进程、偶发合并检查失败、attention 积压；不派活、不审核合并、不建卡、不定口径，高风险报人 | Cardigan（分三张卡） | 契约测试覆盖 host_ops 角色权限边界的六条不变量；`cardigan` 项目开出 host_ops Assignment 并观察一周，发现 35/40/41 不再需要 Claude 手动处理 |
 | P2a-11 验证方撤回已通过的审核（细化计划：[p2a-11-verify-withdraw-pass.md](p2a-11-verify-withdraw-pass.md)） | 验证方在合并开始前撤回本人已通过的审核，恢复可处理状态；按依赖作废完成申请和合并确认，保留审计并在 Needs You 提示 | Cardigan（分四张卡） | 契约测试覆盖本人权限、合并开始闸门、完成申请级联和审核轮次上限；撤回不触发代码返工 |
+| P2a-12 合并检查派到远程 CI 机器（细化计划：[p2a-12-remote-merge-check-host.md](p2a-12-remote-merge-check-host.md)） | 合并检查不再和开发 Agent 的 Run 抢主机 CPU：`merge-gate.yaml` 新增 `executors`/`executor`，项目可把合并检查经主机发起的 SSH 派到远程 CI 虚拟机 `cardigan-ci`；agent-ssh 去掉 localhost 硬编码；对账按执行目标列目录；并发名额按机器分桶；远程不可达时排队退避，不回退本机，超过 30 分钟进 Needs You | Cardigan（分五张卡） | 不配置 `executor` 时行为和现在完全一致；远程机器不持有 Git 凭据；对账不把远程正在跑的检查误报成孤儿；主机 Run 并发名额不被远程检查占用 |
 
 ### 2.1 全机同时运行的 Run 上限（P2a-9 细化）
 

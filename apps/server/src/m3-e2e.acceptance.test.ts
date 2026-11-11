@@ -64,14 +64,24 @@ let savedEnv: NodeJS.ProcessEnv;
 let hostEnv: Record<string, string> = {};
 let core: HcCore;
 
-const launch = parseLaunchConfig({
-  providers: {
-    fake: { harness: "pi", env: {}, secret_env: {} },
-  },
-  profiles: {
-    "pi-agent": { harness: "pi", provider: "fake", model: "fixture-model" },
-  },
-});
+// Every launch path needs the fixture endpoint explicitly: the first terminal
+// may now be Ops, before the CLI starts the coder and its configured environment.
+const agentLaunch = (url: string) =>
+  parseLaunchConfig({
+    providers: {
+      fake: {
+        harness: "pi",
+        env: {
+          CARDIGAN_MCP_URL: url,
+          CARDIGAN_AGENT_DIR: join(root, "agent-state"),
+        },
+        secret_env: {},
+      },
+    },
+    profiles: {
+      "pi-agent": { harness: "pi", provider: "fake", model: "fixture-model" },
+    },
+  });
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -189,7 +199,12 @@ await client.connect(
   }),
 );
 const text = (result) => JSON.parse(result.content[0].text);
-const call = async (name, args) => text(await client.callTool({ name, arguments: args }));
+const call = async (name, args) => {
+  const result = await client.callTool({ name, arguments: args });
+  const data = text(result);
+  if (result.isError) throw new Error(name + ": " + JSON.stringify(data));
+  return data;
+};
 
 const who = await call("whoami", {});
 log("who=" + JSON.stringify(who).slice(0, 300));
@@ -202,9 +217,13 @@ async function workOn(prompt) {
   }
   const run_id = match[1];
   try {
-    // Standing Assignments (PM Office / Ops) have no card to read here.
-    const card = who.card_id
-      ? await call("get_card", { card_id: who.card_id })
+    // Standing PMs also receive card-stream bells. Read and ACK the bell's
+    // stream, not just the work-item card returned by whoami.
+    const card_id = who.card_id || prompt.match(/card=(C-[0-9]+)/)?.[1];
+    const stream = card_id ? { card_id } : {};
+    await call("get_updates", stream);
+    const card = card_id
+      ? await call("get_card", { card_id })
       : { work_items: [], deliveries: [] };
     // One delivery and one review are enough to drive the pipeline; repeating
     // them would loop forever.
@@ -239,7 +258,8 @@ async function workOn(prompt) {
         writeFileSync(marker("reviewed"), "1");
       }
     }
-    await call("ack_events", { card_id: who.card_id });
+    const updates = await call("get_updates", stream);
+    await call("ack_events", { ...stream, up_to_seq: updates.latest_seq });
     const finished = await call("finish_run", {
       idempotency_key: "finish-" + run_id,
       run_id,
@@ -425,7 +445,7 @@ describe.skipIf(!available)("M3.5 router and dispatcher end to end", () => {
             {
               store,
               runtime,
-              launch: { config: launch, secrets: {} },
+              launch: { config: agentLaunch(server.url), secrets: {} },
               mcpUrl: server.url,
               dataDir,
             },
@@ -437,27 +457,11 @@ describe.skipIf(!available)("M3.5 router and dispatcher end to end", () => {
         onError: (error) => errors.push(String(error)),
       },
     });
-    // The wrapper inherits the launch env; the fake Agent needs the endpoint
-    // that is only known once the server listens.
+    // CLI and Dispatcher launches use the same explicit fixture environment.
     writeFile(
       join(root, "config", "launch.yaml"),
-      [
-        "providers:",
-        "  fake:",
-        "    harness: pi",
-        "    env:",
-        `      CARDIGAN_MCP_URL: ${server.url}`,
-        `      CARDIGAN_AGENT_DIR: ${join(root, "agent-state")}`,
-        "profiles:",
-        "  pi-agent:",
-        "    harness: pi",
-        "    provider: fake",
-        "    model: fixture-model",
-        "",
-      ].join("\n"),
+      JSON.stringify(agentLaunch(server.url)),
     );
-    process.env.CARDIGAN_MCP_URL = server.url;
-    process.env.CARDIGAN_AGENT_DIR = join(root, "agent-state");
   });
 
   afterAll(async () => {
@@ -509,6 +513,28 @@ describe.skipIf(!available)("M3.5 router and dispatcher end to end", () => {
             candidate.role_id === role && candidate.scope === "work_item",
         ),
     );
+
+  test("a new card starts Ops before any coder and is read and acknowledged", async () => {
+    const note = await until("the acknowledged new-card bell", () =>
+      notes().find((n) => n.kind === "card" && n.status === "acked"),
+    );
+    expect(note.recipient).toEqual({ kind: "pm_ops" });
+    expect(note.card_id).toBe("C-1");
+    const ops = store.uow.read((tx) =>
+      tx.assignments
+        .list(project_id as never)
+        .find((a) => a.standing_mode === "ops"),
+    );
+    expect(ops).toBeDefined();
+    const run = await until("Ops to finish handling the new card", () =>
+      runsFor(ops?.id as string).find(
+        (r) => r.id === note.run_id && r.status === "completed",
+      ),
+    );
+    expect(run.trigger_event_id).toBe(note.event_id);
+    expect(assignmentOf("coder")).toBeUndefined();
+    expect(notes().filter((n) => n.recipient.kind === "pm_office")).toEqual([]);
+  }, 60_000);
 
   test("a delivery wakes the reviewer with a new Run", async () => {
     const started = await cardigan([
@@ -576,30 +602,50 @@ describe.skipIf(!available)("M3.5 router and dispatcher end to end", () => {
   }, 120_000);
 
   test("replaying the routed events creates no second Run", async () => {
-    // Wait until the bell exchange of the first three tests has finished.
-    await until("the pipeline to settle", () =>
-      store.uow
+    // A terminal Run can still have an unrouted run_finished event. Drain the
+    // resulting Ops attention too, before taking the replay baseline.
+    await until("the pipeline to settle", () => {
+      const finished = store.uow
         .read((tx) => tx.runs.list(project_id as never))
         .every((run) =>
           ["completed", "failed", "cancelled"].includes(run.status),
-        )
+        );
+      const streams = store.uow.read((tx) => [
+        undefined,
+        ...tx.cards.list(project_id as never).map((card) => card.id),
+      ]);
+      const routed = streams.every(
+        (card_id) =>
+          store.routerCursor(project_id, card_id ?? "") >=
+          store.getUpdates({ project_id, card_id }).latest_seq,
+      );
+      return finished &&
+        routed &&
+        notes().every((note) => note.status === "acked")
         ? true
-        : undefined,
-    );
+        : undefined;
+    });
     const before = new Map(notes().map((note) => [note.id, note.kind]));
-    // Rewind every stream to the start: the router must not duplicate work.
-    for (const stream of store.uow.read((tx) => [
-      "",
-      ...tx.cards.list(project_id as never).map((card) => card.id as string),
-    ]))
-      store.advanceRouterCursor(project_id as never, stream, 0);
-    await sleep(1200);
-    routeProjectEvents(store, project_id as never);
+    const runIds = () =>
+      store.uow
+        .read((tx) => tx.runs.list(project_id as never))
+        .map((r) => r.id);
+    const beforeRuns = runIds();
+    // Fault-inject an old persisted cursor. advanceRouterCursor is monotonic
+    // and calling it with zero does NOT rewind or exercise replay.
+    store.uow.run(() => {
+      store.database
+        .prepare("UPDATE router_cursors SET last_seq = 0 WHERE project_id = ?")
+        .run(project_id);
+    });
+    expect(routeProjectEvents(store, project_id as never)).toBeGreaterThan(0);
     await sleep(800);
 
     // The (event, recipient) key makes re-routing a no-op: same rows, and no
     // extra work for the delivery/review events that drove the pipeline.
     const after = notes();
+    expect(after).toHaveLength(before.size);
+    expect(runIds()).toEqual(beforeRuns);
     for (const [id, kind] of before) {
       expect(after.find((note) => note.id === id)?.kind, id).toBe(kind);
     }

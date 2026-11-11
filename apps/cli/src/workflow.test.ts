@@ -1108,3 +1108,82 @@ test("assign --employee accepts IDs and case-insensitive names and explains reje
   ).not.toBe(0);
   expect(errors.join("\n")).toContain("已停用");
 });
+
+test("assign excludes external Office employees while external rotation and ordinary assignment still work", async () => {
+  await bootstrap();
+  expect(await run(["pm", "create", "--office"])).toBe(0);
+  expect(
+    await run([
+      "employee",
+      "add",
+      "--name",
+      "External Office",
+      "--title",
+      "PM",
+      "--role",
+      "pm",
+    ]),
+  ).toBe(0);
+  const rotate = [
+    "pm",
+    "rotate",
+    "--office",
+    "--external",
+    "--employee",
+    "E-1",
+  ];
+  expect(await run(rotate)).toBe(0);
+  expect(await run(rotate)).toBe(0);
+  expect(
+    await run([
+      "card",
+      "create",
+      "--template",
+      "dev",
+      "--title",
+      "External employee",
+      "--goal",
+      "Ship",
+      "--acceptance",
+      "Pass",
+      "--repo",
+      "fixture",
+    ]),
+  ).toBe(0);
+  for (const reference of ["E-1", "external office", undefined]) {
+    expect(
+      await run([
+        "assign",
+        "W-3",
+        "--role",
+        "pm",
+        ...(reference ? ["--employee", reference] : []),
+      ]),
+    ).toBe(2);
+    expect(errors.join("\n")).toContain("外接员工，不由 Cardigan 启动");
+  }
+  const store = Store.open({ dataDir });
+  try {
+    expect(
+      store.uow
+        .read((tx) => tx.work_items.list("p-work"))
+        .find((w) => w.id === "W-3")?.assignment_id,
+    ).toBeUndefined();
+  } finally {
+    store.close();
+  }
+  expect(
+    await run([
+      "employee",
+      "add",
+      "--name",
+      "Internal PM",
+      "--title",
+      "PM",
+      "--role",
+      "pm",
+    ]),
+  ).toBe(0);
+  expect(await run(["assign", "W-3", "--role", "pm"])).toBe(0);
+  expect(printed()).toContain("员工 E-2");
+});

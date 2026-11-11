@@ -170,6 +170,28 @@ function noteAssignment(
 const subject = (input: RouteInput): string =>
   input.event.card_id ?? "the project";
 
+/** New work belongs to the current Ops, including cards created by Office. */
+function routeCardPlanning(input: RouteInput, draft: Draft): void {
+  const card = input.snapshot.cards.find((c) => c.id === input.event.card_id);
+  if (!card || ["done", "cancelled"].includes(card.status)) return;
+  const author = assignmentOf(input, actorAssignmentId(input));
+  if (
+    author?.status === "active" &&
+    author.scope === "standing" &&
+    author.role_id === "pm" &&
+    author.standing_mode === "ops"
+  )
+    return;
+  note(
+    input,
+    draft,
+    recipient.pm_ops(),
+    "card",
+    "6.4/card needs planning",
+    `${card.id} 有待安排的卡片更新，请读取当前状态并安排工作。`,
+  );
+}
+
 /** §6.4: a comment on a work item wakes that work item's Assignment. */
 function routeComment(input: RouteInput, draft: Draft): void {
   const entry = entryOf(input);
@@ -1116,6 +1138,25 @@ export function escalation(
 export function routeEvent(input: RouteInput): RouteResult {
   const draft: Draft = { notifications: [], checks: [], problems: [] };
   switch (input.event.type) {
+    case "card_created":
+      routeCardPlanning(input, draft);
+      break;
+    case "card_updated":
+      if (payloadString(input.event.payload, "status") === "todo") {
+        // updateCard also emits status on title-only edits. Compare the last
+        // planning event in this card's stream, not the current snapshot.
+        const previous = input.snapshot.events
+          .filter(
+            (e) =>
+              e.card_id === input.event.card_id &&
+              e.seq < input.event.seq &&
+              ["card_created", "card_updated"].includes(e.type),
+          )
+          .sort((a, b) => b.seq - a.seq)[0];
+        if (previous && payloadString(previous.payload, "status") === "backlog")
+          routeCardPlanning(input, draft);
+      }
+      break;
     case "run_dispatch_recovered": {
       const id = payloadString(input.event.payload, "assignment_id") as
         | AssignmentId
@@ -1313,7 +1354,7 @@ export function routeEvent(input: RouteInput): RouteResult {
       routeRunFinished(input, draft);
       break;
     default:
-      // card_created, card_updated, work_item_created, blocker_reported,
+      // work_item_created, blocker_reported,
       // attachments and the run lifecycle events do not change who acts next.
       break;
   }
