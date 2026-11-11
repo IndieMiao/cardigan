@@ -100,6 +100,48 @@ function RunLine({ run }: { readonly run: RunView }) {
     </>
   );
 }
+const NONE = "—";
+const harnessLabel: Readonly<Record<string, string>> = {
+  "claude-code": "claude",
+  codex: "codex",
+  pi: "pi",
+};
+/** C-106: the Harness column; unknown or missing shows "—". */
+export function runHarness(run: RunView | undefined): string {
+  if (!run?.harness) return NONE;
+  return harnessLabel[run.harness] ?? run.harness;
+}
+/** C-106: "model / effort"; an unknown part shows "—". */
+export function runModelEffort(run: RunView | undefined): string {
+  if (!run?.model) return NONE;
+  return `${run.model} / ${run.effort || NONE}`;
+}
+const windowSize = (tokens: number) => {
+  const [unit, size] =
+    tokens >= 1_000_000
+      ? ["M", 1_000_000]
+      : tokens >= 1_000
+        ? ["K", 1_000]
+        : ["", 1];
+  return `${Number((tokens / size).toFixed(1))}${unit}`;
+};
+/** C-106: "90%（1M）"; no recorded or invalid value shows "—", never a guess. */
+export function contextUsage(run: RunView | undefined): string {
+  const usage = run?.context_usage;
+  if (
+    !usage ||
+    !Number.isFinite(usage.used_ratio) ||
+    !Number.isFinite(usage.window_tokens) ||
+    usage.used_ratio < 0 ||
+    usage.window_tokens <= 0
+  )
+    return NONE;
+  return `${Math.round(usage.used_ratio * 100)}%（${windowSize(usage.window_tokens)}）`;
+}
+/** Clicks on the row's own links and buttons do their own thing. */
+const interactive = (target: EventTarget | null) =>
+  target instanceof Element &&
+  target.closest("a, button, input, select, textarea, summary") !== null;
 function AssignmentRow({
   a,
   run,
@@ -118,35 +160,39 @@ function AssignmentRow({
   return (
     <tr
       className={`execution-row${open ? " selected" : ""}`}
-      onClick={() => {
-        if (button.current) onOpen(button.current);
+      onClick={(event) => {
+        if (!interactive(event.target) && button.current)
+          onOpen(button.current);
       }}
     >
       <td>
-        <button
-          ref={button}
-          type="button"
-          className="quiet execution-toggle"
-          aria-haspopup="dialog"
-          aria-label={`查看 ${a.id} 详情`}
-          onClick={(event) => {
-            event.stopPropagation();
-            onOpen(event.currentTarget);
-          }}
-        >
-          详情
-        </button>
         <EmployeeIdentity {...a} author_role={a.role_id} />
-        <IdTag
-          id={a.id}
-          label={a.role_id}
-          detail={`${a.role_id} v${a.role_version}`}
-        />
-        {a.standing_mode && (
-          <span className="hint">
-            {a.standing_mode === "office" ? "PM 前台" : "PM 后台"}
-          </span>
-        )}
+      </td>
+      <td>
+        <div className="execution-assignment">
+          {/* C-106: the Assignment id opens the drawer; no separate 详情 button. */}
+          <button
+            ref={button}
+            type="button"
+            className="quiet execution-open"
+            aria-haspopup="dialog"
+            aria-expanded={open}
+            aria-label={`查看 ${a.id} 详情`}
+            title={`${a.role_id} v${a.role_version}`}
+            onClick={(event) => {
+              event.stopPropagation();
+              onOpen(event.currentTarget);
+            }}
+          >
+            {a.id}
+          </button>
+          <span className="id-description">{a.role_id}</span>
+          {a.standing_mode && (
+            <span className="hint">
+              {a.standing_mode === "office" ? "PM 前台" : "PM 后台"}
+            </span>
+          )}
+        </div>
       </td>
       <td>
         {a.work_item_id ? (
@@ -174,6 +220,9 @@ function AssignmentRow({
           </dd>
         </dl>
       </td>
+      <td data-column="harness">{runHarness(run)}</td>
+      <td data-column="model">{runModelEffort(run)}</td>
+      <td data-column="context">{contextUsage(run)}</td>
       <td>
         {run ? (
           <span className="execution-run">
@@ -604,48 +653,54 @@ export function ExecutionPage({
                 : `没有符合条件的 Assignment（${viewLabel[view] ?? view}）。`}
             </EmptyState>
           ) : (
-            <table className="execution-table">
-              <thead>
-                <tr>
-                  <th scope="col">Assignment</th>
-                  <th scope="col">卡片和工作项</th>
-                  <th scope="col">运行状态</th>
-                  <th scope="col">最近 Run</th>
-                  <th
-                    scope="col"
-                    aria-sort={sort === "desc" ? "descending" : "ascending"}
-                  >
-                    <button
-                      type="button"
-                      className="quiet execution-sort"
-                      title={
-                        sort === "desc"
-                          ? "当前从新到旧，点击改为从旧到新"
-                          : "当前从旧到新，点击改为从新到旧"
-                      }
-                      onClick={toggleSort}
+            <div className="execution-table-scroll">
+              <table className="execution-table">
+                <thead>
+                  <tr>
+                    <th scope="col">员工</th>
+                    <th scope="col">Assignment</th>
+                    <th scope="col">卡片和工作项</th>
+                    <th scope="col">运行状态</th>
+                    <th scope="col">Harness</th>
+                    <th scope="col">模型和 effort</th>
+                    <th scope="col">上下文用量</th>
+                    <th scope="col">最近 Run</th>
+                    <th
+                      scope="col"
+                      aria-sort={sort === "desc" ? "descending" : "ascending"}
                     >
-                      最近活动
-                      <span aria-hidden="true">
-                        {sort === "desc" ? " ↓" : " ↑"}
-                      </span>
-                    </button>
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {assignments.map((assignment) => (
-                  <AssignmentRow
-                    key={assignment.id}
-                    a={assignment}
-                    run={latestRun(assignment.id)}
-                    projectId={projectId}
-                    open={assignment.id === selected}
-                    onOpen={(trigger) => open(assignment.id, trigger)}
-                  />
-                ))}
-              </tbody>
-            </table>
+                      <button
+                        type="button"
+                        className="quiet execution-sort"
+                        title={
+                          sort === "desc"
+                            ? "当前从新到旧，点击改为从旧到新"
+                            : "当前从旧到新，点击改为从新到旧"
+                        }
+                        onClick={toggleSort}
+                      >
+                        最近活动
+                        <span aria-hidden="true">
+                          {sort === "desc" ? " ↓" : " ↑"}
+                        </span>
+                      </button>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {assignments.map((assignment) => (
+                    <AssignmentRow
+                      key={assignment.id}
+                      a={assignment}
+                      run={latestRun(assignment.id)}
+                      projectId={projectId}
+                      open={assignment.id === selected}
+                      onOpen={(trigger) => open(assignment.id, trigger)}
+                    />
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </>
       )}
@@ -656,7 +711,7 @@ export function ExecutionPage({
         }}
         className="execution-drawer-content"
         // C-75: rows stay usable while the drawer is open, so another row's
-        // 详情 replaces the content; any other outside click closes it.
+        // Assignment replaces the content; any other outside click closes it.
         modal={false}
         onInteractOutside={(event) => {
           const target = event.target;

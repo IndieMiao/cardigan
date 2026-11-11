@@ -168,7 +168,14 @@ async function fixture() {
     mcpUrl: "http://localhost/mcp",
     launch: {
       config: parseLaunchConfig({
-        profiles: { fixture: { harness: "codex", model: "fixture" } },
+        profiles: {
+          fixture: {
+            harness: "codex",
+            model: "fixture",
+            config: { model_reasoning_effort: "high" },
+            args: ["-c", 'model_reasoning_effort="low"'],
+          },
+        },
       }),
       secrets: {},
     },
@@ -234,6 +241,11 @@ test.each(["fix", "followup"] as const)(
           tx.assignments.get(project, s.assignment.id),
         ),
       ).toMatchObject({ base_sha: original, branch: s.assignment.branch });
+      // C-106: the Run records the launched session's harness and the effort
+      // its compiled arguments actually pass (the later override wins).
+      expect(
+        s.host.store.uow.read((tx) => tx.runs.get(project, run.id)),
+      ).toMatchObject({ harness: "codex", effort: "low" });
       // The live-session beforeWake path uses the same preparation and prompt.
       const worktree = await prepareRoleWorktree(
         s.host,

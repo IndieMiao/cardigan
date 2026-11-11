@@ -398,6 +398,47 @@ test("merge timeline shows the deadline and distinguishes delegated from human c
   expect(screen.queryByText("自动合并（代批）")).toBeNull();
 });
 
+test("C-95: an open decision shows referenced attachments in the card timeline; plain ones stay unchanged", () => {
+  const decision = {
+    id: "q(3)",
+    question: "选哪张稿子？",
+    status: "open",
+    decider: "human",
+    blocking: false,
+    options: [{ key: "a", description: "稿子 A", impact: "无" }],
+    recommended: "a",
+    attachments: [
+      attachment({ id: "F-1", original_filename: "a.png" }),
+      attachment({
+        id: "F-2",
+        original_filename: "notes.txt",
+        mime: "text/plain",
+        inline: false,
+        download_path: "/api/projects/p-1/attachments/F-2",
+      }),
+    ],
+  };
+  const plain = { ...decision, id: "q(4)", attachments: [] };
+  const content = (id: string) => (
+    <TimelineContent
+      entry={timelineEntry({ type: "decision_request", decision_id: id })}
+      detail={cardDetail({ decisions: [decision, plain] })}
+      projectId="p-1"
+      cardId="C-1"
+    />
+  );
+  const view = render(content(decision.id));
+  const list = screen.getByRole("list", { name: "拍板附件" });
+  expect(within(list).getByRole("button", { name: "预览 a.png" })).toBeTruthy();
+  expect(
+    within(list)
+      .getByRole("link", { name: "▤ notes.txt" })
+      .getAttribute("href"),
+  ).toBe("/api/projects/p-1/attachments/F-2");
+  view.rerender(content(plain.id));
+  expect(screen.queryByRole("list", { name: "拍板附件" })).toBeNull();
+});
+
 test("a PM delegated decision uses a shared status icon and remains distinct from automatic merge approval", () => {
   const decision = {
     id: "q(2)",

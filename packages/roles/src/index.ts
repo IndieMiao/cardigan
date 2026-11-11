@@ -69,3 +69,9 @@ export {
   requiredSecretKeys,
   resolveProfile,
 } from "./schema.js";
+export {
+  compiledLaunchSettings,
+  effortFromArgs,
+  type LaunchSettings,
+  profileLaunchSettings,
+} from "./settings.js";

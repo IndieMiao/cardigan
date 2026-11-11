@@ -72,7 +72,7 @@ export function visibleTools(
   return tools.filter(
     (tool) =>
       allowed.includes(tool.name) &&
-      (tool.name !== "issue_instruction" ||
+      (!["issue_instruction", "release_assignment"].includes(tool.name) ||
         (assignment.scope === "standing" &&
           assignment.role_id === "pm" &&
           assignment.standing_mode === "ops")) &&
