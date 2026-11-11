@@ -41,6 +41,7 @@ import {
   sessionCookie,
   unauthorized,
 } from "./http.js";
+import type { LaunchLookup } from "./launch-summary.js";
 import { LoginLimiter } from "./login-limiter.js";
 import { serveMergeCheckLog } from "./merge-check-log.js";
 import {
@@ -88,6 +89,11 @@ export interface WebServerOptions {
   /** Attachment blobs live beside the database (§9.3). */
   readonly dataDir?: string;
   readonly mergeGate?: MergeGateConfiguration;
+  /**
+   * C-106: resolves a Run's launch profile to its harness and effort for the
+   * execution view. Absent (tests, or no launch configuration) means unknown.
+   */
+  readonly launch?: LaunchLookup;
   /** SSE cadence; tests shorten it, production uses the plan's 500 ms / 15 s. */
   readonly stream?: {
     readonly pollMs?: number;
@@ -115,6 +121,7 @@ interface RequestContext {
   readonly limiter: LoginLimiter;
   readonly dataDir: string;
   readonly mergeGate: MergeGateConfiguration | undefined;
+  readonly launch: LaunchLookup | undefined;
   readonly stream: WebServerOptions["stream"];
   /** Only the validated Host and explicit configuration decide cookie flags. */
   readonly secureCookie: boolean;
@@ -218,6 +225,7 @@ export async function startWebServer(
         limiter,
         dataDir,
         mergeGate: options.mergeGate,
+        launch: options.launch,
         stream: options.stream,
         secureCookie: config.publicOrigins.includes(`https://${hostHeader}`),
         log,
@@ -593,7 +601,7 @@ async function serveProjectRoute(
     sendJson(
       res,
       200,
-      executionView(state, now, machines, readRunQueue(store)),
+      executionView(state, now, machines, readRunQueue(store), context.launch),
     );
     return;
   }
@@ -613,6 +621,7 @@ async function serveProjectRoute(
         assignment_id,
         url.searchParams.get("before") ?? undefined,
         readRunQueue(store),
+        context.launch,
       );
     } catch (error) {
       if (error instanceof InvalidQuery)

@@ -50,7 +50,7 @@ export async function runServer(
       // resolved execution it uses for the rest of startup.
       captureAgent: (command, args, timeout) =>
         host.runtime.captureAgent(command, args, timeout),
-      web: { config: webConfig },
+      web: { config: webConfig, launch: host.launch },
       dispatcher: {
         runtime: host.runtime,
         snapshot: host.snapshot,

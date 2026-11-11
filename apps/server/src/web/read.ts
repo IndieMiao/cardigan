@@ -41,6 +41,7 @@ import type { ProjectMergeGate } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
 import { convertLegacyRole, HARNESSES, isDefaultRoleId } from "@cardigan/roles";
 import type { Store } from "@cardigan/store";
+import { type LaunchLookup, runLaunchFields } from "./launch-summary.js";
 
 /**
  * The Workbench read model (M5 plan §4 M5.1: 只读接口).
@@ -1111,6 +1112,7 @@ export function executionView(
   now: string,
   machines: readonly Machine[] = [],
   queue: readonly RunQueuePosition[] = [],
+  launch?: LaunchLookup,
 ) {
   // §8.5: the newest Run is the one created last, not the one that started
   // last. A Run that is still queued has no `started_at`, and ordering by it
@@ -1196,6 +1198,8 @@ export function executionView(
           ...run,
           ...withQueuedAt(run),
           ...(waiting ? { queue_ahead: waiting.ahead } : {}),
+          // C-106: harness and effort from the Run's launch profile.
+          ...runLaunchFields(run, launch),
         };
       }),
   };
@@ -1214,6 +1218,7 @@ export function executionRunPage(
   assignment_id: string,
   before?: string,
   queue: readonly RunQueuePosition[] = [],
+  launch?: LaunchLookup,
 ) {
   if (!state.assignments.some((assignment) => assignment.id === assignment_id))
     return undefined;
@@ -1239,6 +1244,7 @@ export function executionRunPage(
         ...run,
         ...queuedAt(run),
         ...(waiting ? { queue_ahead: waiting.ahead } : {}),
+        ...runLaunchFields(run, launch),
       };
     }),
     next_cursor: rest.length > page.length ? (page.at(-1)?.id ?? null) : null,

@@ -36,6 +36,7 @@ import { standingResolver } from "./assembly.js";
 import type { ServerEnv } from "./config.js";
 import type { DispatcherOptions } from "./dispatch.js";
 import { startQueuedRun } from "./host-start.js";
+import { type LaunchLookup, launchLookup } from "./web/launch-summary.js";
 
 const exec = promisify(execFile);
 
@@ -59,6 +60,8 @@ export interface HostWiring {
     replacement?: DispatchRunParams["replacement"];
   }) => Promise<void>;
   readonly standing: ReturnType<typeof standingResolver>;
+  /** C-106: the startup launch profiles, read-only, for the execution view. */
+  readonly launch: LaunchLookup;
 }
 
 export interface HostEnv extends ServerEnv {
@@ -144,6 +147,7 @@ export async function createHostWiring(options: {
 
   return {
     runtime,
+    launch: launchLookup(launch.config),
     // Lock contention and transient network errors retry briefly inside this
     // delivery; the final error carries a sanitized category (§6.5, §12.4).
     beforeWake: async ({ project, assignment }) => {

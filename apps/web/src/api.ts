@@ -601,6 +601,23 @@ export interface RunView {
   /** When the Run was queued (its run_queued event); older servers omit it. */
   readonly queued_at?: string;
   readonly summary: string;
+  /**
+   * C-106: from the Run's launch profile; null when the profile is unknown or
+   * changed since the Run. Older servers omit them.
+   */
+  readonly harness?: string | null;
+  readonly effort?: string | null;
+  /**
+   * C-106: the session's context use when the Run was last observed. No
+   * server collects it yet, so the column shows "—" until one does.
+   */
+  readonly context_usage?: ContextUsage | null;
+}
+export interface ContextUsage {
+  /** Share of the context window in use, 0..1. */
+  readonly used_ratio: number;
+  /** Context window size in tokens. */
+  readonly window_tokens: number;
 }
 export interface ExecutionAssignment extends AuthorView {
   readonly queue_ahead?: number;
