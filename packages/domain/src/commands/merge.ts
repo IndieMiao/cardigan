@@ -12,6 +12,7 @@ import {
   ensure,
   unwrap,
 } from "./core.js";
+import { MAX_DECISION_ATTACHMENTS } from "./decision-attachments.js";
 import { assignDecision, mergeNeedsHuman } from "./delegation.js";
 import { reopenMerge } from "./merge-rework.js";
 
@@ -203,6 +204,22 @@ function planFor(state: CommandState, card_id: CardId, confirmed: boolean) {
     };
   });
 }
+/**
+ * C-95: the human sees the completion request's own card attachments
+ * (screenshots, designs) on the merge confirmation, up to the shared limit.
+ */
+function completionAttachments(d: CommandDraft, card: Card, target: Delivery) {
+  const own = new Set(
+    d
+      .list("attachments")
+      .filter((a) => a.card_id === card.id)
+      .map((a) => a.id),
+  );
+  const attachment_ids = [...new Set(target.attachments)]
+    .filter((id) => own.has(id))
+    .slice(0, MAX_DECISION_ATTACHMENTS);
+  return attachment_ids.length ? { attachment_ids } : {};
+}
 function requestConfirmation(d: CommandDraft, card: Card, target: Delivery) {
   const old = confirmation(d.list("decisions"), card, target);
   if (old)
@@ -247,6 +264,7 @@ function requestConfirmation(d: CommandDraft, card: Card, target: Delivery) {
     recommended: "merge",
     affected_cards: [card.id],
     affected_work_items: [],
+    ...completionAttachments(d, card, target),
     blocking: true,
     decider: "human",
     doc_refs: [],

@@ -56,6 +56,7 @@ export const STANDING_ROLE_TOOLS = [
   "update_work_item",
   "replace_verification_work_item",
   "assign",
+  "release_assignment",
   "project_snapshot",
   "list_needs_you",
   "record_decision",

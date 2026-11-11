@@ -187,6 +187,8 @@ export function compileLaunch(input: CompileLaunchInput): CompiledLaunch {
 }
 
 /** Codex `-c` values: strings are quoted, numbers and booleans stay literal. */
-function formatCodexConfigValue(value: string | number | boolean): string {
+export function formatCodexConfigValue(
+  value: string | number | boolean,
+): string {
   return typeof value === "string" ? JSON.stringify(value) : String(value);
 }

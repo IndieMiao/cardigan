@@ -24,6 +24,7 @@ export function standingTools(
     mode === "office"
       ? ![
           "issue_instruction",
+          "release_assignment",
           "resolve_delegated_decision",
           "triage_human_action",
           "replace_verification_work_item",

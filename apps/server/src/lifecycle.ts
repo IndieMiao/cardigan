@@ -34,3 +34,19 @@ export function installShutdownHandlers(
 
   return remove;
 }
+
+/** Run `fire` after `ms`; the returned function cancels it. */
+export type ShutdownTimer = (ms: number, fire: () => void) => () => void;
+
+/** A real timer that never keeps the process alive on its own. */
+export const systemShutdownTimer: ShutdownTimer = (ms, fire) => {
+  const handle = setTimeout(fire, ms);
+  handle.unref();
+  return () => clearTimeout(handle);
+};
+
+/**
+ * Extra time after the request grace period for the listeners and the store to
+ * close normally before the process gives up and exits.
+ */
+export const SHUTDOWN_EXIT_MARGIN_MS = 2_000;
