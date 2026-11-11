@@ -45,6 +45,7 @@
 | P2a-8 CLI 评论和附件（试行发现 14） | 人在命令行给卡片发评论（`cardigan comment add <C-n> --text <内容>`）和上传附件（`cardigan attachment add <C-n> --file <路径> [--kind evidence] [--note <说明>]`），复用 Workbench 的同一段处理代码，身份是人 | Cardigan | 不登录 Workbench 也能完成；附件类型校验、大小上限与 Workbench 一致；artifact 仍必须挂拍板 |
 | P2a-9 全机同时运行的 Run 上限（试行发现 35，细化见下方 §2.1） | 主机按机器配置全机同时处于 `dispatched`／`acked`／`running` 态的 Run 数上限，默认 4；超过时新 Run 留在 `queued`、不按铃，按创建时间跨项目排队；常驻 PM 的 Run 不受限但计入计数 | Codex 或 Pi | 契约测试覆盖排队顺序、PM 豁免、改配置后下一次调度生效；执行视图／看板／CLI 能看到排队位次；验证时不得人为制造 CPU 负载 |
 | P2a-10 主机运维角色（试行发现 35/40/41，细化计划：[p2a-10-host-ops-role.md](p2a-10-host-ops-role.md)） | 先补确定性自动化（部署后刷新常驻会话工具清单）；再引入运维角色 `host_ops`（员工"大乔"，职位"主机运维"），处理 Run 卡在 dispatched、失控进程、偶发合并检查失败、attention 积压；不派活、不审核合并、不建卡、不定口径，高风险报人 | Cardigan（分三张卡） | 契约测试覆盖 host_ops 角色权限边界的六条不变量；`cardigan` 项目开出 host_ops Assignment 并观察一周，发现 35/40/41 不再需要 Claude 手动处理 |
+| P2a-11 验证方撤回已通过的审核（细化计划：[p2a-11-verify-withdraw-pass.md](p2a-11-verify-withdraw-pass.md)） | 验证方在合并开始前撤回本人已通过的审核，恢复可处理状态；按依赖作废完成申请和合并确认，保留审计并在 Needs You 提示 | Cardigan（分四张卡） | 契约测试覆盖本人权限、合并开始闸门、完成申请级联和审核轮次上限；撤回不触发代码返工 |
 
 ### 2.1 全机同时运行的 Run 上限（P2a-9 细化）
 
@@ -97,6 +98,7 @@
 | V9 Workbench 角色管理（细化计划：[p2v-9-10-roles-templates.md](p2v-9-10-roles-templates.md)） | 管理员新建、编辑角色：名称、类型（产出 / 验证 / 常驻）、角色说明、能承担的工作项种类、能力标签、worktree 模式、可用工具、机器标签；默认角色可"复制后修改"。每次保存生成新版本，进行中的 Run 继续用旧版本，可看历史和回退。可用工具只能从系统白名单里选，界面不能突破系统级约束（Agent 不能推送、只有 PM Office 能记录人的拍板、验证方只读）；§6.3 协议部分由系统固定拼接，管理员只改角色说明。模型不放在角色上（见 V1、V2，放在员工上） | Cardigan（V9a、V9b 两张卡）|
 | V10 Workbench 卡片模板（细化计划同上） | 管理员新建、编辑卡片模板：名称、说明、是否需要仓库、合并方式（不合并 / 确认后合并 / 自动合并）、默认工作项（标题、产出或验证、角色、是否必需、验证哪个产出项）、完成方式（完成申请经 PM 或人验收；或人直接标记完成，必须写一句结果，可附证据）。模板有版本，卡片创建时记下模板和版本，改模板不影响已有卡片。内置三个模板：`dev`（现有）、**通用任务**（不需要仓库，默认没有工作项，人标记完成）、**产出物**（产出方可以是 designer 等非开发角色，交付对象是文件或文档，验收后完成，不走合并）。建卡时（Workbench、CLI、PM 的 MCP 工具）可以选模板。domain 新增"人标记完成"命令，只对允许它的模板开放，附契约测试 | Cardigan（V10a、V10b 两张卡）|
 | V11 成员身份与外接 Assignment（细化计划：[p2v-11-members-identity.md](p2v-11-members-identity.md)） | 新增全局"成员（Member）"实体表示真人（现在只有所有者"邵杰"），Workbench 登录和本机 CLI 默认身份对应到成员，时间线、拍板记录、知会显示成员名字和头像，老数据 `author=human` 按所有者显示；员工"张良"担任 cardigan 项目 PM Office，持有"外接"Assignment，Cardigan 为它签发 Token，本机 CLI 支持用 `CARDIGAN_TOKEN`／`--token-file` 以该身份操作，Dispatcher 不为外接 Assignment 起终端，门铃落入 `cardigan inbox`；停用旧的 A-36 | Cardigan（V11a、V11b、V11c 三张卡）|
+| V12 设计流程与模板选择（细化计划：[p2v-12-design-flow-templates.md](p2v-12-design-flow-templates.md)） | 新增 UI/UX 设计师、设计总监和设计模板，设计经总监审核后交人验收；PM 查询并复用模板，新角色或模板草案交人批准；接入浏览器截图和主机代调用的出图服务，服务端强制项目月度预算 | Cardigan（V12a–V12e、V12f1、V12f2 七张卡） |
 
 V9、V10 是 Phase 3"PM 按任务创建、修改流程"的前提：先把角色和模板做成有版本、有边界的数据，之后才能让 PM 在边界内改。因此角色和模板的增删改都实现为 domain 命令，Workbench 和 CLI（`cardigan role ...`、`cardigan template ...`）共用；Phase 3 让 PM 经 CLI 或 MCP 调用同一批命令（用户 2026-11-09 要求 PM 能通过 Cardigan CLI 等方式改流程）。Agent 侧的 CLI 必须凭该 Assignment 的 Token 走与 MCP 相同的权限检查，不能使用主机上以人的身份直接读写数据库的 `cardigan`。
 
