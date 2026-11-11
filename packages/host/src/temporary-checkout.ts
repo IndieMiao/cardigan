@@ -47,6 +47,8 @@ export interface CheckoutInput {
   readonly signal?: AbortSignal;
   /** Merge checks share one OS lock across projects and controller processes. */
   readonly serialize?: boolean;
+  /** P2a-12 D: which of the target's `max_concurrent` slot locks to hold (default 0). */
+  readonly lockSlot?: number;
   /** Called only after the execution account acquired the slot and authenticated itself. */
   readonly onReady?: (owner?: ExecutionOwner) => void;
   /** Private stream: the log consumer must redact configured env values before persistence. */
@@ -90,7 +92,9 @@ export async function runInTemporaryCheckout(
     execution.mode === "agent-ssh"
       ? AGENT_PATH
       : "/usr/local/bin:/usr/bin:/bin";
-  const lock = input.serialize ? await prepareCheckLock(execution) : undefined;
+  const lock = input.serialize
+    ? await prepareCheckLock(execution, input.lockSlot ?? 0)
+    : undefined;
   const worker = [
     execution.mode === "agent-ssh" ? "node" : process.execPath,
     "-e",

@@ -276,10 +276,22 @@ export async function prepareCheckoutAlias(
   }
 }
 
-/** Persistent empty lock inode shared by every project in this machine's execution root. */
+/** Lock file of a merge-check slot; slot 0 keeps the historical name. */
+export function checkLockName(slot = 0): string {
+  if (!Number.isSafeInteger(slot) || slot < 0 || slot > 63)
+    throw new Error("Invalid merge check slot");
+  return slot === 0 ? "merge-check.lock" : `merge-check-${slot}.lock`;
+}
+
+/**
+ * Persistent empty lock inode shared by every project in this machine's execution root.
+ * P2a-12 D: an execution target with `max_concurrent` > 1 has one lock per slot.
+ */
 export async function prepareCheckLock(
   config: ExecutionConfig,
+  slot = 0,
 ): Promise<string> {
+  const name = checkLockName(slot);
   if (process.platform !== "linux")
     throw new Error("Serialized checks require Linux flock");
   await secureDataDirectory(config);
@@ -290,7 +302,7 @@ export async function prepareCheckLock(
       : await absoluteDirectory(path);
   try {
     const file = await open(
-      at(root, "merge-check.lock"),
+      at(root, name),
       constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW,
       0o600,
     );
@@ -310,7 +322,7 @@ export async function prepareCheckLock(
     } finally {
       await file.close();
     }
-    return join(path, "merge-check.lock");
+    return join(path, name);
   } finally {
     await root.close();
   }
