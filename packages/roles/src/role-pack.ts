@@ -314,7 +314,9 @@ export function defaultRoleDefinition(
           ? STANDING_ROLE_TOOLS
           : [
               ...common,
-              kind === "produce" ? "submit_delivery" : "submit_review",
+              ...(kind === "produce"
+                ? (["submit_delivery"] as const)
+                : (["submit_review", "withdraw_review"] as const)),
             ],
   };
 }
