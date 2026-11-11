@@ -270,6 +270,15 @@ async function pmFixture() {
   const ops = assignments().filter(
     (a) => a.scope === "standing",
   )[1] as Assignment;
+  // Setup has already assigned every item. Mark this initial card as read so
+  // its new-card bell cannot race the explicit PM starts under test.
+  store.ackEvents({
+    project_id: project,
+    assignment_id: ops.id,
+    card_id: card.id,
+    up_to_seq: store.getUpdates({ project_id: project, card_id: card.id })
+      .latest_seq,
+  });
   const coder = assignments().find((a) => a.role_id === "coder") as Assignment;
   const reviewer = assignments().find(
     (a) => a.role_id === "reviewer",
