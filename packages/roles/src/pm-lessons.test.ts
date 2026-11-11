@@ -276,3 +276,14 @@ test("C-86 reviewers treat swallowed errors and missing tests as must_fix", () =
     "评审中涉及“错误被吞、没有测试”的问题，即使看起来是 minor，也按 must_fix 处理。",
   );
 });
+
+test("C-110: PM instructions use the replacement command for verifier handoffs", () => {
+  const prompt = corePromptFor("pm");
+  for (const rule of [
+    "replace_verification_work_item",
+    "验证项换人",
+    "已有工作项不能改绑 Assignment",
+    "待合并卡先按现有流程退回修改",
+  ])
+    expect(prompt).toContain(rule);
+});

@@ -865,3 +865,120 @@ test("category authorization uses PM Ops tools, rejects Office/high-risk bypasse
     },
   });
 });
+
+test("C-110: only standing PM Ops can replace a template verifier; invalid attempts and persistence failure roll back", async () => {
+  const tool = "replace_verification_work_item";
+  const old = work("pm");
+  const opsAssignment = store.uow.run((tx): Assignment => {
+    const front = tx.assignments.list(project)[0];
+    if (!front) throw new Error("Missing Office");
+    const ops: Assignment = {
+      ...front,
+      id: tx.ids.next(project, "assignment"),
+      scope: "standing",
+      standing_mode: "ops",
+      mcp_token_id: "fixture-replacement-ops",
+    };
+    tx.assignments.put(project, ops);
+    return ops;
+  });
+  const ops = await connect(opsAssignment, true);
+  const p = {
+    work_item_id: old.id,
+    card_id: card.id,
+    template_key: old.template_key,
+    reason: "原验证项取消后换人",
+  };
+  const agent = await coder();
+  const reviewer = await ok<AssignmentReply>(office, "assign", {
+    work_item_id: work("reviewer").id,
+    role_id: "reviewer",
+  });
+  const acceptance = await ok<AssignmentReply>(office, "assign", {
+    work_item_id: old.id,
+    role_id: "pm",
+  });
+  for (const client of [
+    office,
+    agent,
+    await connect(reviewer),
+    await connect(acceptance),
+  ]) {
+    expect((await client.listTools()).tools.some((t) => t.name === tool)).toBe(
+      false,
+    );
+    expect((await raw(client, tool, p)).isError).toBe(true);
+  }
+  expect((await ops.listTools()).tools.some((t) => t.name === tool)).toBe(true);
+  const snapshot = () =>
+    store.uow.read((tx) => ({
+      items: tx.work_items.list(project),
+      assignments: tx.assignments
+        .list(project)
+        .map(({ last_mcp_activity_at: _activity, ...assignment }) => assignment)
+        .sort((a, b) => a.id.localeCompare(b.id)),
+      deliveries: tx.deliveries.list(project),
+      events: tx.events.listAfter(project, card.id, 0),
+      timeline: tx.timeline.list(project),
+      id_counters: store.database
+        .prepare("SELECT * FROM id_counters ORDER BY project_id, kind")
+        .all(),
+      event_counters: store.database
+        .prepare("SELECT * FROM event_counters ORDER BY project_id, stream")
+        .all(),
+    }));
+  const beforeActive = snapshot();
+  expect((await raw(ops, tool, p)).isError).toBe(true);
+  expect(snapshot()).toEqual(beforeActive);
+  store.uow.run((tx) => {
+    const current = tx.work_items.get(project, old.id);
+    if (!current) throw new Error("Missing original");
+    tx.work_items.put(project, { ...current, status: "cancelled" });
+  });
+  const before = snapshot();
+  for (const invalid of [
+    { ...p, card_id: "C-999" },
+    { ...p, template_key: "code_review" },
+    { ...p, work_item_id: work("coder").id },
+  ]) {
+    const r = await raw(ops, tool, invalid);
+    expect(r.isError).toBe(true);
+    expect(JSON.stringify(r)).toMatch(/[\u4e00-\u9fff]/u);
+    expect(snapshot()).toEqual(before);
+  }
+  store.database.exec(
+    "CREATE TRIGGER fail_replace BEFORE INSERT ON events WHEN NEW.type = 'work_item_replaced' BEGIN SELECT RAISE(ABORT, 'replacement fixture failure'); END",
+  );
+  expect((await raw(ops, tool, p, "replace-once")).isError).toBe(true);
+  expect(snapshot()).toEqual(before);
+  store.database.exec("DROP TRIGGER fail_replace");
+  const replacement = await ok<WorkItem>(ops, tool, p, "replace-once");
+  expect(replacement).toMatchObject({
+    template_key: old.template_key,
+    card_id: card.id,
+    required: true,
+    status: "todo",
+  });
+  expect(replacement.assignment_id).toBeUndefined();
+  expect(await ok<WorkItem>(ops, tool, p, "replace-once")).toEqual(replacement);
+  expect((await raw(ops, tool, p)).isError).toBe(true);
+  expect(
+    store.uow.read((tx) => tx.work_items.get(project, old.id)),
+  ).toMatchObject({
+    required: false,
+    replaced_by_work_item_id: replacement.id,
+    assignment_id: acceptance.id,
+  });
+  expect(
+    store.uow.read((tx) =>
+      tx.events
+        .listAfter(project, card.id, 0)
+        .filter((e) => e.type === "work_item_replaced"),
+    ),
+  ).toHaveLength(1);
+  const assigned = await ok<AssignmentReply>(ops, "assign", {
+    work_item_id: replacement.id,
+    role_id: "pm",
+  });
+  expect(assigned.id).not.toBe(acceptance.id);
+});

@@ -162,11 +162,13 @@ describe("tool and worktree boundaries", () => {
       for (const tool of toolNames) {
         const expected = tool.startsWith("host_ops_")
           ? false
-          : kind === "produce"
-            ? tool !== "submit_review"
-            : kind === "verify"
-              ? tool !== "submit_delivery"
-              : (STANDING_ROLE_TOOLS as readonly string[]).includes(tool);
+          : tool === "replace_verification_work_item"
+            ? kind === "standing"
+            : kind === "produce"
+              ? tool !== "submit_review"
+              : kind === "verify"
+                ? tool !== "submit_delivery"
+                : (STANDING_ROLE_TOOLS as readonly string[]).includes(tool);
         expect(
           validateRole(
             definition({
@@ -189,6 +191,7 @@ describe("tool and worktree boundaries", () => {
         "git_credentials",
         "launch_rocket",
         "record_decision",
+        "replace_verification_work_item",
       ]) {
         expect(
           validateRole(

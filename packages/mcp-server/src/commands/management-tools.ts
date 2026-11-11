@@ -15,6 +15,7 @@ import {
   postComment,
   type Result,
   recordDecision,
+  replaceVerificationWorkItem,
   reportBlocker,
   requestDecision,
   requestHumanAction,
@@ -193,6 +194,12 @@ const schemas = {
         "PM Ops only: resolve a delegated review limit with a reason; raise_limit adds one round, pause keeps it blocked, escalate sends the same decision to the human.",
       )
       .optional(),
+  },
+  replace_verification_work_item: {
+    work_item_id: id("work_item"),
+    card_id: id("card"),
+    template_key: text,
+    reason: text,
   },
   assign: {
     employee_id: text
@@ -380,6 +387,11 @@ export function managementTools(clock?: Clock) {
       "assign",
       "Assign work; credentials must be provisioned by the host.",
       assignPending,
+    ),
+    wire(
+      "replace_verification_work_item",
+      "PM Ops: replace a cancelled or released template verifier with a new unassigned item on the same card and template key. Inherits its target and requirements; invalidates affected deliveries and completion requests, which must be submitted again.",
+      replaceVerificationWorkItem,
     ),
   ];
 }

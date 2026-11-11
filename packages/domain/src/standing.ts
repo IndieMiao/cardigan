@@ -26,6 +26,7 @@ export function standingTools(
           "issue_instruction",
           "resolve_delegated_decision",
           "triage_human_action",
+          "replace_verification_work_item",
         ].includes(tool)
       : tool !== OFFICE_ONLY_TOOL,
   );
