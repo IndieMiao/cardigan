@@ -5,6 +5,9 @@ export interface DispatchLoopOptions {
   /** RuntimeMonitor implements this lifecycle; assembly remains in M3.5. */
   monitor?: { reconcile(): void; stop(): Promise<void> };
   intervalMs?: number;
+  /** Report only elapsed time, never command, prompt or runtime contents. */
+  slowTickMs?: number;
+  onSlowTick?(durationMs: number): void;
   signal?: AbortSignal;
   /** Tick failures are reported and retried on the next interval; throwing stops the loop. */
   onError(error: unknown): void;
@@ -20,6 +23,9 @@ export function startDispatchLoop(options: DispatchLoopOptions): DispatchLoop {
   const interval = options.intervalMs ?? 1000;
   if (!Number.isSafeInteger(interval) || interval < 1 || interval > 2147483647)
     throw new Error("Invalid dispatcher interval");
+  const slowTickMs = options.slowTickMs ?? 1000;
+  if (!Number.isFinite(slowTickMs) || slowTickMs <= 0)
+    throw new Error("Invalid dispatcher slow tick threshold");
   let stopping = options.signal?.aborted ?? false,
     wake = () => {};
   const requestStop = () => {
@@ -30,6 +36,7 @@ export function startDispatchLoop(options: DispatchLoopOptions): DispatchLoop {
   const done = (async () => {
     try {
       while (!stopping) {
+        const started = performance.now();
         try {
           options.monitor?.reconcile();
           // One global tick preserves FIFO across projects and rechecks freed slots.
@@ -37,6 +44,9 @@ export function startDispatchLoop(options: DispatchLoopOptions): DispatchLoop {
           if (!stopping) options.monitor?.reconcile();
         } catch (error) {
           options.onError(error);
+        } finally {
+          const elapsed = performance.now() - started;
+          if (elapsed > slowTickMs) options.onSlowTick?.(Math.round(elapsed));
         }
         if (!stopping)
           await new Promise<void>((resolve) => {

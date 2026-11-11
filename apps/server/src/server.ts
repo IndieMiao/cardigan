@@ -205,6 +205,13 @@ export async function startCardiganServer(
             : served.toolCatalog(allowed, assignment);
         },
         ...options.dispatcher,
+        ...((options.dispatcher.intervalMs ?? config.dispatchIntervalMs) ===
+        undefined
+          ? {}
+          : {
+              intervalMs:
+                options.dispatcher.intervalMs ?? config.dispatchIntervalMs,
+            }),
         ...((options.dispatcher.dispatchTimeoutMs ??
           config.dispatchTimeoutMs) === undefined
           ? {}

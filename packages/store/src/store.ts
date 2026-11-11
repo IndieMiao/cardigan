@@ -20,6 +20,7 @@ import type {
   TransactionContext,
   UnitOfWork,
 } from "@cardigan/domain";
+import { CommandEvents } from "./command-events.js";
 import {
   createGlobalIdAllocator,
   createGlobalRepositories,
@@ -46,6 +47,7 @@ import {
 import {
   createReadRepositories,
   createRepositories,
+  type ReadEventRepository,
   type ReadRepositories,
 } from "./repositories.js";
 import { backfillStandingModesInTransaction } from "./standing.js";
@@ -78,6 +80,7 @@ export const DEFAULT_DB_FILE = "cardigan.db";
 export interface StoreTransactionContext
   extends TransactionContext,
     GlobalRepositories {
+  readonly events: TransactionContext["events"] & ReadEventRepository;
   readonly employees: GlobalRepositories["employees"];
   readonly members: GlobalRepositories["members"];
   readonly global_ids: GlobalIdAllocator;
@@ -200,6 +203,18 @@ export class Store {
   readonly #clock: Clock;
   readonly #migrationsDir: string | undefined;
   #inTransaction = false;
+  #rollbacks = 0;
+  readonly #commandEvents = new CommandEvents();
+
+  /** Call inside the consuming transaction: covers local writes and other connections. */
+  snapshotVersion(): string {
+    const row = this.#db
+      .prepare(
+        "SELECT total_changes() AS writes, data_version FROM pragma_data_version",
+      )
+      .get() as { writes: number; data_version: number };
+    return `${row.data_version}:${row.writes}:${this.#rollbacks}`;
+  }
 
   private constructor(db: DatabaseSync, clock: Clock, migrationsDir?: string) {
     this.#db = db;
@@ -273,9 +288,12 @@ export class Store {
     this.#db.exec("BEGIN IMMEDIATE");
     this.#inTransaction = true;
     let active = true;
+    const events = this.#commandEvents.transaction(this.#db);
     try {
+      const repositories = createRepositories(this.#db);
       const result = operation({
-        ...createRepositories(this.#db),
+        ...repositories,
+        events: { ...repositories.events, listStreams: events.listStreams },
         ...createGlobalRepositories(this.#db, "write"),
         global_ids: createGlobalIdAllocator(this.#db),
         ids: createIdAllocator(this.#db),
@@ -293,9 +311,11 @@ export class Store {
         },
       });
       this.#db.exec("COMMIT");
+      events.commit();
       return result;
     } catch (error) {
       this.#db.exec("ROLLBACK");
+      this.#rollbacks++;
       throw error;
     } finally {
       active = false;
@@ -314,12 +334,19 @@ export class Store {
     }
     this.#db.exec("BEGIN DEFERRED");
     this.#inTransaction = true;
+    const events = this.#commandEvents.transaction(this.#db);
     try {
-      const result = operation(createReadRepositories(this.#db));
+      const repositories = createReadRepositories(this.#db);
+      const result = operation({
+        ...repositories,
+        events: { ...repositories.events, listStreams: events.listStreams },
+      });
       this.#db.exec("COMMIT");
+      events.commit();
       return result;
     } catch (error) {
       this.#db.exec("ROLLBACK");
+      this.#rollbacks++;
       throw error;
     } finally {
       this.#inTransaction = false;

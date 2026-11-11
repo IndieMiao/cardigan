@@ -194,6 +194,12 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
   const loopOptions: DispatchLoopOptions = {
     dispatcher,
     monitor,
+    onSlowTick: (durationMs) =>
+      options.onError?.(
+        new Error(
+          `dispatcher slow tick: duration_ms=${durationMs} threshold_ms=1000`,
+        ),
+      ),
     ...(options.intervalMs === undefined
       ? {}
       : { intervalMs: options.intervalMs }),

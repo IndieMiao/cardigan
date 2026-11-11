@@ -49,7 +49,10 @@ export type ReadRepository<Entity, Key> = Pick<
   "get" | "list"
 >;
 
-export type ReadEventRepository = Pick<EventRepository, "listAfter">;
+export type ReadEventRepository = Pick<EventRepository, "listAfter"> & {
+  /** Optional bulk history reader supplied by Store's transaction cache. */
+  listStreams?(project: ProjectId): ReadonlyMap<string, readonly Event[]>;
+};
 
 /** Everything `uow.read` hands to its callback. */
 export interface ReadRepositories extends ReadGlobalRepositories {

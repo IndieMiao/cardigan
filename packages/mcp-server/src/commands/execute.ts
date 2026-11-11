@@ -25,6 +25,9 @@ export function loadCommandState(
   project_settings?: CommandState["project_settings"],
 ): CommandState {
   const cards = tx.cards.list(project_id);
+  // Store reads only newly appended rows. Keep the original project/card/seq
+  // order, including filtering out streams whose card is absent from this snapshot.
+  const streams = tx.events.listStreams?.(project_id);
   return {
     project_id,
     project_preferences: tx.project_preferences?.list(project_id) ?? [],
@@ -46,7 +49,9 @@ export function loadCommandState(
     cursors: tx.cursors.list(project_id),
     timeline: tx.timeline.list(project_id),
     events: [undefined, ...cards.map((c) => c.id)].flatMap((id) =>
-      tx.events.listAfter(project_id, id, 0),
+      streams
+        ? (streams.get(id ?? "") ?? [])
+        : tx.events.listAfter(project_id, id, 0),
     ),
   };
 }
