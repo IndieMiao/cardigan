@@ -2871,6 +2871,17 @@ body[data-lightbox="open"] .drawer-overlay {
 .employee-color-4 {
   --employee-color: var(--status-wait);
 }
+.employee-avatar.employee-system {
+  /* A rounded square, never a circle: the system is not a person. */
+  border: 1px solid var(--border);
+  border-radius: 25%;
+  color: var(--text);
+  background: var(--surface-muted);
+}
+.employee-system svg {
+  width: 62%;
+  height: 62%;
+}
 .employee-avatar img {
   width: 100%;
   height: 100%;
