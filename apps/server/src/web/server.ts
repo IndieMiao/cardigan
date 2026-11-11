@@ -520,6 +520,8 @@ async function serveProjectRoute(
     const card_id = decodeURIComponent(card[1] ?? "") as CardId;
     const limit = numberParam(url.searchParams.get("limit"));
     const detail = readCardDetail(store, project_id, card_id, {
+      mergeGateStatus:
+        context.mergeGate?.forProject(project_id).status ?? "disabled",
       now,
       ...(limit === undefined ? {} : { timelineLimit: limit }),
       ...(url.searchParams.get("at")

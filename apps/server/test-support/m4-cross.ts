@@ -34,6 +34,7 @@ import {
   type Runtime,
   type RuntimeRef,
   releaseAssignment,
+  STANDING_ONLY_TOOLS,
   STANDING_ROLE_TOOLS,
   setProjectPreferences,
   updateCard,
@@ -663,8 +664,12 @@ const child=spawnSync('sh',['-c',args.slice(at+2).join(' ')],{cwd:${JSON.stringi
                 "resolve_delegated_decision",
                 "triage_human_action",
               ].includes(tool) &&
-                tool !==
-                  (role_id === "coder" ? "submit_review" : "submit_delivery")),
+                !(STANDING_ONLY_TOOLS as readonly string[]).includes(tool) &&
+                !(
+                  role_id === "coder"
+                    ? ["submit_review", "withdraw_review"]
+                    : ["submit_delivery"]
+                ).includes(tool)),
           ),
           worktree: role_id === "coder" ? "write" : "none",
         }),

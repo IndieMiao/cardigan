@@ -1,9 +1,10 @@
-import type { Actor, Event } from "../entities.js";
+import type { Actor, Event, ToolName } from "../entities.js";
 import type { Result } from "../errors.js";
 import { HOST_OPS_FORBIDDEN_TOOLS } from "../host-ops.js";
 import type { ProjectId } from "../ids.js";
 import {
   canManageRoles,
+  isStandingOnlyTool,
   ROLE_TOOL_ALLOWLISTS,
   type Role,
   roleKind,
@@ -41,6 +42,12 @@ const editable = [
   "worktree",
   "required_machine_tags",
 ];
+
+function reviewTools(tools: readonly ToolName[]): readonly ToolName[] {
+  return tools.includes("submit_review") && !tools.includes("withdraw_review")
+    ? [...tools, "withdraw_review"]
+    : tools;
+}
 
 /** Validate every write, including a copy or rollback of an older definition. */
 export function validateRole(role: RoleDefinition): Result<RoleDefinition> {
@@ -94,6 +101,8 @@ export function validateRole(role: RoleDefinition): Result<RoleDefinition> {
         `${key} 必须是非空字符串数组`,
       );
     }
+    // Save the derived permission in this new version; old roles/tokens stay fixed.
+    role = { ...role, allowed_tools: reviewTools(role.allowed_tools) };
     const kind = roleKind(role);
     ensure(
       role.role_id === "host_ops" ||
@@ -126,6 +135,11 @@ export function validateRole(role: RoleDefinition): Result<RoleDefinition> {
       ) || role.role_id === "pm",
       "validation_failed",
       "record_decision 只能授予 pm 角色",
+    );
+    ensure(
+      role.role_id === "pm" || !role.allowed_tools.some(isStandingOnlyTool),
+      "validation_failed",
+      "list_templates、list_roles 只能授予 pm 角色",
     );
     ensure(
       ["none", "readonly", "write"].includes(role.worktree),
@@ -488,7 +502,7 @@ export function previewRoleUpgrade(
     const previous = find(state, id);
     const patch: DefaultPackPatch = {
       instructions: source.instructions,
-      allowed_tools: [...source.allowed_tools],
+      allowed_tools: [...reviewTools(source.allowed_tools)],
       capabilities: [...source.capabilities],
       kind: source.kind,
       worktree: source.worktree,

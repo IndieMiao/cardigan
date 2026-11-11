@@ -10,6 +10,8 @@ import {
   finishRun,
   heartbeat,
   listNeedsYou,
+  listRoles,
+  listTemplates,
   prepareAttachment,
   projectSnapshot,
   type Result,
@@ -35,6 +37,9 @@ export interface SupportToolOptions {
   readonly dataDir?: string;
   readonly attachmentStore?: AttachmentStore;
   readonly clock?: Clock;
+  readonly projectSettings?: (
+    projectId: string,
+  ) => CommandState["project_settings"];
 }
 function readProject(
   context: ToolContext,
@@ -168,6 +173,20 @@ export function supportTools(options: SupportToolOptions = {}) {
       },
     }),
     defineTool({
+      name: "list_templates",
+      description:
+        "List the latest active card templates of this project with their work items (PM only, read-only).",
+      input: z.object({}),
+      handler: (_params, context) => readProject(context, listTemplates),
+    }),
+    defineTool({
+      name: "list_roles",
+      description:
+        "List the latest active roles of this project with kind, capabilities and abilities; prompts are not included (PM only, read-only).",
+      input: z.object({}),
+      handler: (_params, context) => readProject(context, listRoles),
+    }),
+    defineTool({
       name: "list_needs_you",
       description:
         "List open human decisions and actions in this project (PM only).",
@@ -175,7 +194,11 @@ export function supportTools(options: SupportToolOptions = {}) {
       handler: (_params, context) =>
         readProject(context, (state, actor) => {
           const result = listNeedsYou(
-            state,
+            {
+              ...state,
+              project_settings:
+                options.projectSettings?.(state.project_id) ?? {},
+            },
             actor,
             options.clock ?? { now: () => new Date().toISOString() },
           );

@@ -653,6 +653,7 @@ const events = [
   "target_delivered",
   "target_redelivered",
   "target_withdrawn",
+  "withdraw_pass",
   "decision_resolved",
   "block",
   "request_decision",

@@ -55,6 +55,7 @@ export const toolNames = [
   "finish_run",
   "submit_delivery",
   "submit_review",
+  "withdraw_review",
   "create_card",
   "update_card",
   "create_work_item",
@@ -63,6 +64,8 @@ export const toolNames = [
   "release_assignment",
   "project_snapshot",
   "list_needs_you",
+  "list_templates",
+  "list_roles",
   "record_decision",
   "resolve_delegated_decision",
   "triage_human_action",
@@ -414,6 +417,7 @@ export interface Review {
   readonly verdict: ReviewVerdict;
   readonly blocking: boolean;
   readonly recheck_required: boolean;
+  readonly withdrawn?: { readonly at: string; readonly rationale: string };
   readonly attachments: readonly AttachmentId[];
 }
 export interface ReviewView extends Review {

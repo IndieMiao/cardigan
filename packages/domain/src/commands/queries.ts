@@ -1,5 +1,9 @@
 import { type CardDerivedFields, deriveCardFields } from "../card-derived.js";
-import { deriveCardStatus, deriveReviewMatrix } from "../derived.js";
+import {
+  deriveCardStatus,
+  deriveReviewMatrix,
+  isReviewStale,
+} from "../derived.js";
 import type {
   Actor,
   Card,
@@ -13,13 +17,23 @@ import type { CardId } from "../ids.js";
 import { requesterNotificationRecipient } from "../notification.js";
 import type { Clock } from "../ports.js";
 import { reviewLimitAttention } from "../review-limit-attention.js";
-import { isRoleActive } from "../role.js";
+import { isRoleActive, type Role, roleKind } from "../role.js";
+import {
+  builtinCardTemplates,
+  type CardTemplate,
+  latestCardTemplate,
+} from "../templates.js";
 import { type CommandDraft, type CommandState, command } from "./core.js";
 import { decisionFollowupNeedsHuman } from "./decision-followup.js";
 import { hasActivePmOps, isPmOps } from "./delegation.js";
 import { availableWorkItemEmployees } from "./employee-assignment.js";
 import { failedConfirmedMergeCheck, latestMergeCheck } from "./merge-check.js";
-import { pmFailedMergeCheck, pmMergeBlockers } from "./merge-delegation.js";
+import {
+  mergeConfirmationWaitingForCheck,
+  pmFailedMergeCheck,
+  pmFailedMergeCheckOptions,
+  pmMergeBlockers,
+} from "./merge-delegation.js";
 import { resolveCardTemplate } from "./templates.js";
 
 function affects(d: CommandDraft, q: Decision, id: CardId) {
@@ -94,6 +108,102 @@ export function projectSnapshot(state: CommandState, actor: Actor) {
         .map(({ id, name, title, role_id }) => ({ id, name, title, role_id })),
       cards: d.list("cards").map((c) => cardView(d, c.id)),
     };
+  });
+}
+
+/** One template as `list_templates` shows it: enough for a PM to pick one. */
+function templateSummary(template: CardTemplate) {
+  return {
+    id: template.id,
+    version: template.version,
+    title: template.title,
+    description: template.description,
+    builtin: template.builtin,
+    requires_repo: template.requires_repo,
+    merge: template.merge,
+    primary_work_item_key: template.primary_work_item_key,
+    work_items: template.work_items.map((item) => ({
+      key: item.key,
+      title: item.title,
+      role_id: item.role_id,
+      kind: item.kind,
+      required: item.required,
+    })),
+  };
+}
+
+/**
+ * V12b: the latest active version of every card template this project can
+ * use (host-provided, project-stored, builtin). Read-only; standing PM only.
+ */
+export function listTemplates(state: CommandState, actor: Actor) {
+  return command(state, actor, "list_templates", undefined, (d) => {
+    d.pm();
+    d.projectAccess();
+    const all = [
+      ...(d.ports?.templates ?? []),
+      ...d.list("card_templates"),
+      ...builtinCardTemplates,
+    ];
+    const templates = [...new Set(all.map((t) => t.id))]
+      .sort()
+      .flatMap((id) => {
+        const latest = latestCardTemplate(all, id);
+        return latest?.status === "active" ? [templateSummary(latest)] : [];
+      });
+    return { project_id: state.project_id, templates };
+  });
+}
+
+/**
+ * Stored role documents are full `Role`s; pre-M2 rows may only carry the
+ * `RoleReference` fields, so every descriptive field is optional here.
+ */
+type StoredRole = CommandState["roles"][number] &
+  Partial<Pick<Role, "display_name" | "kind" | "worktree" | "abilities">>;
+
+/**
+ * V12b: the latest active version of every role in this project. Prompts
+ * (`core_prompt`, `instructions`) and launch policy are deliberately omitted.
+ */
+export function listRoles(state: CommandState, actor: Actor) {
+  return command(state, actor, "list_roles", undefined, (d) => {
+    d.pm();
+    d.projectAccess();
+    const stored = state.roles as readonly StoredRole[];
+    const roles = [...new Set(stored.map((r) => r.role_id))]
+      .sort()
+      .flatMap((id) => {
+        if (!isRoleActive(stored, id)) return [];
+        const role = stored
+          .filter((r) => r.role_id === id)
+          .sort((a, b) => b.role_version - a.role_version)[0];
+        if (role === undefined) return [];
+        return [
+          {
+            role_id: role.role_id,
+            version: role.role_version,
+            ...(role.display_name === undefined
+              ? {}
+              : { display_name: role.display_name }),
+            ...(role.kind === undefined
+              ? {}
+              : {
+                  kind: roleKind({
+                    kind: role.kind,
+                    allowed_tools: role.allowed_tools,
+                    capabilities: role.capabilities,
+                  }),
+                }),
+            capabilities: [...role.capabilities],
+            ...(role.worktree === undefined ? {} : { worktree: role.worktree }),
+            ...(role.abilities === undefined
+              ? {}
+              : { abilities: [...role.abilities] }),
+          },
+        ];
+      });
+    return { project_id: state.project_id, roles };
   });
 }
 
@@ -191,12 +301,7 @@ function mergeConfirmation(
   const latest = new Map<string, Review>();
   for (const review of reviews) {
     const delivery = current.get(review.delivery_id);
-    if (
-      delivery === undefined ||
-      review.target_sha !== delivery.subject.value ||
-      delivery.status === "superseded"
-    )
-      continue;
+    if (delivery === undefined || isReviewStale(review, delivery)) continue;
     const previous = latest.get(review.work_item_id);
     if (previous === undefined || numericId(review.id) > numericId(previous.id))
       latest.set(review.work_item_id, review);
@@ -236,6 +341,64 @@ function mergeConfirmation(
   };
 }
 
+/** Shared decision presentation for the task list and actionable card details. */
+export function decisionActionView(
+  state: CommandState,
+  q: Decision,
+  now?: string,
+) {
+  const why = (text: string) => [...text].slice(0, 40).join("");
+  const failedConfirmation = failedConfirmedMergeCheck(state, q);
+  const followup = !failedConfirmation && decisionFollowupNeedsHuman(state, q);
+  // Project decisions have no card timeline; their request event is the creation fact.
+  const opened =
+    state.events
+      .filter(
+        (e) =>
+          e.type === "decision_requested" &&
+          typeof e.payload === "object" &&
+          e.payload !== null &&
+          "decision_id" in e.payload &&
+          e.payload.decision_id === q.id,
+      )
+      .sort((a, b) => a.created_at.localeCompare(b.created_at))[0]
+      ?.created_at ??
+    state.timeline
+      .filter((e) => e.decision_id === q.id)
+      .sort((a, b) => a.event_seq - b.event_seq)[0]?.created_at;
+  const elapsed =
+    opened && now ? Date.parse(now) - Date.parse(opened) : Number.NaN;
+  return {
+    ...q,
+    ...(failedConfirmation
+      ? {
+          options: q.options.filter((o) => o.key === "request_changes"),
+          recommended: "request_changes",
+        }
+      : {}),
+    ...(followup
+      ? {
+          followup_notice:
+            "拍板已完成，尚无落实结果；当前无 PM Ops 接手，请安排跟进。",
+        }
+      : {}),
+    why: why(
+      failedConfirmation
+        ? "合并检查失败或超时，可退回修改或重新检查"
+        : q.question,
+    ),
+    opened_at: opened ?? null,
+    waited_ms: Number.isFinite(elapsed) ? Math.max(0, elapsed) : null,
+    related_cards: relatedCards(state.cards, q),
+    merge_confirmation: mergeConfirmation(
+      q,
+      state.work_items,
+      state.deliveries,
+      state.reviews,
+    ),
+  };
+}
+
 export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
   return command(state, actor, "list_needs_you", undefined, (d) => {
     d.pm();
@@ -248,64 +411,24 @@ export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
 export function needsYouView(d: CommandDraft, now?: string) {
   const state = d.state,
     actor = d.actor;
+  const waiting = d
+    .list("decisions")
+    .filter(
+      (q) =>
+        q.trigger === "merge_confirmation" &&
+        ((q.decider === "human" &&
+          ["open", "provisional"].includes(q.status)) ||
+          !!failedConfirmedMergeCheck(state, q)) &&
+        mergeConfirmationWaitingForCheck(state, q),
+    );
   const why = (text: string) => [...text].slice(0, 40).join("");
-  const view = (q: Decision) => {
-    const failedConfirmation = failedConfirmedMergeCheck(state, q);
-    const followup =
-      !failedConfirmation && decisionFollowupNeedsHuman(state, q);
-    // Project decisions have no card timeline; their request event is the creation fact.
-    const opened =
-      state.events
-        .filter(
-          (e) =>
-            e.type === "decision_requested" &&
-            typeof e.payload === "object" &&
-            e.payload !== null &&
-            "decision_id" in e.payload &&
-            e.payload.decision_id === q.id,
-        )
-        .sort((a, b) => a.created_at.localeCompare(b.created_at))[0]
-        ?.created_at ??
-      state.timeline
-        .filter((e) => e.decision_id === q.id)
-        .sort((a, b) => a.event_seq - b.event_seq)[0]?.created_at;
-    const elapsed =
-      opened && now ? Date.parse(now) - Date.parse(opened) : Number.NaN;
-    return {
-      ...q,
-      ...(failedConfirmation
-        ? {
-            options: q.options.filter((o) => o.key === "request_changes"),
-            recommended: "request_changes",
-          }
-        : {}),
-      ...(followup
-        ? {
-            followup_notice:
-              "拍板已完成，尚无落实结果；当前无 PM Ops 接手，请安排跟进。",
-          }
-        : {}),
-      why: why(
-        failedConfirmation
-          ? "合并检查失败或超时，可退回修改或重新检查"
-          : q.question,
-      ),
-      opened_at: opened ?? null,
-      waited_ms: Number.isFinite(elapsed) ? Math.max(0, elapsed) : null,
-      related_cards: relatedCards(d.list("cards"), q),
-      merge_confirmation: mergeConfirmation(
-        q,
-        d.list("work_items"),
-        d.list("deliveries"),
-        d.list("reviews"),
-      ),
-    };
-  };
+  const view = (q: Decision) => decisionActionView(state, q, now);
   return {
     attention: now ? reviewLimitAttention(state, now) : [],
     ...(isPmOps(d)
       ? {
           pm_queue: {
+            waiting_merge_checks: waiting,
             decisions: d
               .list("decisions")
               .filter(
@@ -336,7 +459,7 @@ export function needsYouView(d: CommandDraft, now?: string) {
                       card_id: q.card_id,
                       confirmation_status: q.status,
                       check,
-                      options: ["request_changes", "recheck"],
+                      options: pmFailedMergeCheckOptions(state, q),
                     },
                   ]
                 : [];
@@ -396,7 +519,9 @@ export function needsYouView(d: CommandDraft, now?: string) {
             )) ||
           decisionFollowupNeedsHuman(state, q),
       )
+      .filter((q) => !mergeConfirmationWaitingForCheck(state, q))
       .map(view),
+    waiting_merge_checks_count: waiting.length,
     // §7.4 (C-65): merge confirmations PM Ops still holds. Not counted as
     // waiting on the human, but the human may answer them directly.
     pm_held_merges:

@@ -35,10 +35,15 @@ export {
   recordMergeCheck,
 } from "./commands/merge-check.js";
 export {
+  currentMergeConfirmations,
   pmFailedMergeCheck,
   pmMergeBlockers,
   pmMergeCheckDelegationAllowed,
 } from "./commands/merge-delegation.js";
+export {
+  hasVerifiedMergeNoop,
+  recordMergePreparation,
+} from "./commands/merge-preparation.js";
 export {
   acceptMergePushHold,
   beginMergePush,
@@ -60,6 +65,7 @@ export * from "./commands/pm-rotate.js";
 export * from "./commands/preferences.js";
 export * from "./commands/queries.js";
 export * from "./commands/release.js";
+export * from "./commands/review-withdrawal.js";
 export * from "./commands/role.js";
 export * from "./commands/run-target-wait.js";
 export * from "./commands/runtime.js";
