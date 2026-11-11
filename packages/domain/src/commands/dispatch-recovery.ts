@@ -9,7 +9,7 @@ import {
   ensure,
   unwrap,
 } from "./core.js";
-import { cancelRunDispatch } from "./launch.js";
+import { cancelRunDispatch, launchSettings } from "./launch.js";
 
 const field = (payload: unknown, name: string): unknown =>
   payload && typeof payload === "object"
@@ -219,6 +219,7 @@ export function recoverDispatch(
         kind: run.kind,
         status: "queued",
         model: run.model,
+        ...launchSettings(run),
         role_version: run.role_version,
         agent_cli_version: run.agent_cli_version,
         outcome: null,

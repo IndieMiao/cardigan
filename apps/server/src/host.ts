@@ -22,6 +22,7 @@ import {
   type LaunchConfig,
   parseLaunchConfig,
   parseSecretsText,
+  profileLaunchSettings,
   resolveProfile,
 } from "@cardigan/roles";
 import {
@@ -34,7 +35,7 @@ import { getRoleVersion, type Store } from "@cardigan/store";
 import { parse as parseYaml } from "yaml";
 import { standingResolver } from "./assembly.js";
 import type { ServerEnv } from "./config.js";
-import type { DispatcherOptions } from "./dispatch.js";
+import type { DispatcherOptions, LaunchSnapshot } from "./dispatch.js";
 import { startQueuedRun } from "./host-start.js";
 
 const exec = promisify(execFile);
@@ -50,7 +51,7 @@ export interface HostWiring {
   readonly snapshot: (
     assignment: Assignment,
     project: ProjectId,
-  ) => Promise<Pick<Run, "model" | "agent_cli_version" | "launch_profile_ref">>;
+  ) => Promise<LaunchSnapshot>;
   readonly startRun: (input: {
     project: string;
     assignment: Assignment;
@@ -200,6 +201,8 @@ export async function createHostWiring(options: {
         model: profile.model,
         agent_cli_version: version,
         launch_profile_ref: profileRef,
+        // C-106: the launch replaces these with the compiled arguments' values.
+        ...profileLaunchSettings(profile),
       };
     },
     startRun: (input) =>
