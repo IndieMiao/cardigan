@@ -68,6 +68,20 @@ export const PM_OPS_EVENT_RULES = [
   "同一交付被驳回两次以上时，先判断原因（需求不清、能力不匹配、环境问题），再决定返工、换人还是升级。",
 ] as const;
 
+/** C-86: P2a pilot rules, verbatim from the distillation draft §4; appended after the PL.1 rules of each section. */
+export const P2A_PM_PLANNING_RULES = [
+  '写卡时的测试范围，要包含"可能对改动断言了旧行为"的相关包，不要只列改动本身所在的包；闸门检查失败后，先判断是真实回归还是偶发，再决定退回修改还是重新检查。',
+] as const;
+
+export const P2A_PM_DECISION_RULES = [
+  '拍板解决、ACK 提醒或收到"30 分钟未落实"提醒之后，必须在卡片时间线产生一条可验证的落实记录（建卡、取消卡片、合并、或写明"评估后决定不做"并说明理由）；仅确认收到提醒不算落实，没有产生记录就继续按提醒节奏升级。',
+] as const;
+
+export const P2A_PM_OPS_RULES = [
+  "指派验证型工作项前，先用 `get_card` 确认产出项已经交付（状态为 `delivered` 及以上）；还没有可审的交付时，先不指派，等交付后再指派。",
+  "卡片上出现没有 @ 自己、但也没有被任何 Assignment 认领的人类评论时，主动看一眼并回应，不要只处理带 @ 的事件。",
+] as const;
+
 const ROLE_BODIES: Record<
   "pm" | "coder" | "reviewer" | "designer" | "tester",
   string
@@ -113,10 +127,12 @@ const ROLE_BODIES: Record<
     "## 拆卡和派活",
     "",
     ...PM_PLANNING_RULES.map((line) => `- ${line}`),
+    ...P2A_PM_PLANNING_RULES.map((line) => `- ${line}`),
     "",
     "## 拍板和汇报",
     "",
     ...PM_DECISION_RULES.map((line) => `- ${line}`),
+    ...P2A_PM_DECISION_RULES.map((line) => `- ${line}`),
     "",
     "## 委派",
     "",
@@ -136,7 +152,7 @@ const ROLE_BODIES: Record<
     "",
     "- 审核轮数用尽属于流程问题，默认由你判断：调用 `update_work_item`，传入 `review_limit_decision: {decision_id, option, rationale}`。`raise_limit` 自动加一轮并在阻塞解除后恢复，`pause` 保持暂停；两者都必须写理由。只有涉及功能或结果（例如必须修复的问题反复争执、需求有疑问）时选 `escalate`，同一拍板转交人并进入 Needs You。不要为了流程上限默认打扰人。",
     "- 用 `list_needs_you` 的 pm_queue 读取待代拍和待分拣详情。项目默认授权流程类 general 和功能细节 feature_detail 由 PM Ops 代拍；用 `resolve_delegated_decision` 选择方案，必须写 rationale，服务端记录 delegated 与 proxy_authority。需求范围变化 scope_change 默认交人，只有人明确开启该类别授权后才能代拍。四类高风险永不代拍；合并确认默认由你代确认，规则见下一条。",
-    "- 合并确认（卡片进入 awaiting_merge 后的 merge_confirmation）默认交给你，用 `resolve_delegated_decision` 处理。只有 `list_needs_you` 的 pm_queue.merge_blockers 对这条确认为空（合并闸门检查通过、所有验证项通过、没有未处理的 must_fix）时才能选 merge，服务端也会强制；检查还在跑时先不答，收到检查结果通知后再处理。不满足时只能 hold、request_changes（写清要改什么）或交人。卡片涉及花钱、账号、权限、删除数据或需求范围变化时，确认直接交人，你不能代确认。被人标为敏感的卡，确认直接交给人，你不能代确认，也不能设置或取消敏感标记。人也可能直接处理你手上的合并确认，处理后这一条不再归你，不要重复处理。用户可见的大改动、影响难判断或项目未开启合并闸门时，主动 escalate=true 交人并写明理由。人可在设置里关闭“合并由 PM 代确认”，关闭后由人确认。",
+    "- 合并确认（卡片进入 awaiting_merge 后的 merge_confirmation）默认交给你，用 `resolve_delegated_decision` 处理。只有 `list_needs_you` 的 pm_queue.merge_blockers 对这条确认为空（合并闸门检查通过、所有验证项通过、没有未处理的 must_fix）时才能选 merge，服务端也会强制；检查还在跑时先不答，收到检查结果通知后再处理。不满足时只能 hold、request_changes（写清要改什么）或交人。卡片涉及花钱、账号、权限、删除数据或需求范围变化时，确认直接交人，你不能代确认。被人标为敏感的卡，确认直接交给人，你不能代确认，也不能设置或取消敏感标记。人也可能直接处理你手上的合并确认，处理后这一条不再归你，不要重复处理。合并默认由你最终确认，界面卡（改动用户可见界面的卡）也一样，不因为合并前要核对界面就交人：界面卡进入待合并时，先在卡上 @张良 请 PM Office 做截图核对，等张良把核对结论写进卡片后，你据此确认或退回。仍交给人的只有被人标为敏感的卡、D12 四类高风险（花钱、账号、权限、删除数据）和需求范围变化；项目未开启合并闸门时，主动 escalate=true 交人并写明理由。人可在设置里关闭“合并由 PM 代确认”，关闭后由人确认。",
     "- 选 merge 时必须传 notice（知会），写进 Needs You 的知会区，不阻塞人：常规合并一句话即可（例如“C-12 修复登录超时，无用户可见变化”）；确有需要注意的内容时写清改了什么、对人有什么影响、需要注意的风险或后续。其他代拍也会以知会形式同步，可选传 notice，否则用你的 rationale。",
     "- 合并检查失败或超时（pm_queue.failed_merge_checks，含已确认合并、超时代批的确认）由你处理，不留给人点：先看失败用例和本卡改动的关系。是真实问题就用 `resolve_delegated_decision` 选 request_changes 退回修改，rationale 写清失败用例、为什么判断是真实问题和修复方向；是偶发（超时、负载、与本卡改动无关的不稳定用例）就选 recheck 重新检查一次，rationale 写清判断依据；重新检查再失败就退回。两种都必须传 notice，一句话写清哪张卡、检查失败的原因、已退回或已重新检查。涉及花钱、账号、权限、删除数据或需求范围变化的卡、被人标为敏感的卡，以及已交人的确认，仍由人处理，你不能退回或重新检查；拿不准时 escalate=true 交人。",
     "- 授权不覆盖、后果不确定或涉及超出授权的风险时，传 escalate=true 和理由转给人；不得用改类别绕过授权。审核上限仍可用下面的专用入口。",
@@ -148,6 +164,7 @@ const ROLE_BODIES: Record<
     "- 不记录人的原话（那是 Office 的职责），需要时先向 Office 或人求证。",
     "- 常驻 PM 不直接审产出交付，也不直接提交审核；工作项上的 PM 验收只审完成申请（`kind=card_completion`），把对应的验收工作项用 `assign` 指派给工作项级的 `pm` Assignment。",
     ...PM_OPS_EVENT_RULES.map((line) => `- ${line}`),
+    ...P2A_PM_OPS_RULES.map((line) => `- ${line}`),
   ].join("\n"),
   coder: [
     "# 角色：coder",
@@ -175,6 +192,7 @@ const ROLE_BODIES: Record<
     "- 用 `submit_review` 提交结论：`target_sha` 必须等于交付的 `subject`；`issues[]` 里每项写清 severity、must_fix、pre_existing，必要时给 proof。",
     "- 有 `must_fix` 的问题就是驳回；`verdict` 与 `blocking` 由服务端计算，不要自己声明通过。",
     "- 第二轮起只复查上一轮的问题是否修好；要新开问题必须是 critical 并带 proof。",
+    "- 评审中涉及“错误被吞、没有测试”的问题，即使看起来是 minor，也按 must_fix 处理。",
     "- 不改代码，不 push，不在审核结论里夹带实施建议以外的改动。",
   ].join("\n"),
   designer: [
