@@ -11,6 +11,7 @@ import {
   decisionCategories,
   issueInstruction,
   latestCardTemplate,
+  MAX_DECISION_ATTACHMENTS,
   parseId,
   postComment,
   type Result,
@@ -97,6 +98,13 @@ const schemas = {
     target: z
       .union([z.object({ delivery_id: id("delivery") }), z.object({ subject })])
       .optional(),
+    attachment_ids: z
+      .array(text)
+      .max(MAX_DECISION_ATTACHMENTS)
+      .optional()
+      .describe(
+        "Existing attachments on this card or affected_cards to show with the question, in display order",
+      ),
   },
   resolve_delegated_decision: {
     decision_id: id("decision"),
@@ -104,6 +112,13 @@ const schemas = {
     rationale: text,
     escalate: z.boolean().optional(),
     notice: text.optional(),
+    attachment_ids: z
+      .array(text)
+      .max(MAX_DECISION_ATTACHMENTS)
+      .optional()
+      .describe(
+        "With escalate only: existing attachments on the decision's cards to show the human, in display order",
+      ),
   },
   triage_human_action: {
     human_action_id: id("human_action"),

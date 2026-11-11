@@ -155,6 +155,7 @@ export function mergeFixture(
     git = true,
     known_gaps: Delivery["known_gaps"] = [],
     trigger?: Event,
+    attachments?: Delivery["attachments"],
   ) {
     start(coder, trigger);
     const p = {
@@ -162,6 +163,7 @@ export function mergeFixture(
       kind,
       summary: "Ready",
       known_gaps,
+      ...(attachments ? { attachments } : {}),
       subject: {
         kind: git ? ("git_head" as const) : ("doc_version" as const),
         value: sha,

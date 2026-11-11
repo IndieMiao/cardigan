@@ -1,5 +1,6 @@
 import type {
   Actor,
+  Attachment,
   Author,
   CardId,
   CardView,
@@ -170,6 +171,7 @@ export function webDecisionView(
   return {
     ...decision,
     ...webAuthorView(state, decision.raised_by ?? "system"),
+    attachments: decisionAttachmentViews(state, decision),
     decider_view:
       decision.decider === "human" ? webAuthorView(state, "human") : null,
     ...(decision.resolution
@@ -437,10 +439,7 @@ export const INLINE_MIME_TYPES: ReadonlySet<string> = new Set([
   "image/avif",
 ]);
 
-export function attachmentViews(
-  state: CommandState,
-  card_id: CardId,
-): AttachmentView[] {
+function attachmentViewMapper(state: CommandState) {
   const roles = new Map(
     state.assignments.map((a) => [String(a.id), a.role_id]),
   );
@@ -457,6 +456,46 @@ export function attachmentViews(
     }
   }
   const decisions = new Map(state.decisions.map((q) => [q.id, q]));
+  return (attachment: Attachment): AttachmentView => {
+    const basis =
+      attachment.basis === undefined
+        ? null
+        : {
+            id: attachment.basis,
+            status: decisions.get(attachment.basis)?.status ?? "unknown",
+          };
+    return {
+      id: attachment.id,
+      ...(attachment.original_filename === undefined
+        ? {}
+        : { original_filename: attachment.original_filename }),
+      ...(attachment.note === undefined ? {} : { note: attachment.note }),
+      mime: attachment.mime,
+      size: attachment.size,
+      sha256: attachment.sha256,
+      kind: attachment.kind,
+      attach_to: attachment.attach_to,
+      uploaded_by: attachment.uploaded_by,
+      ...webAuthorView(state, attachment.uploaded_by),
+      uploader_role: attachment.uploaded_by.startsWith("assignment:")
+        ? (roles.get(attachment.uploaded_by.slice(11)) ?? null)
+        : null,
+      uploaded_at: uploaded.get(attachment.id) ?? null,
+      basis,
+      supersedes: attachment.supersedes ?? null,
+      inline: INLINE_MIME_TYPES.has(attachment.mime.toLowerCase()),
+      // §6 C-95: the same authenticated download route serves decision previews.
+      download_path: `/api/projects/${encodeURIComponent(
+        state.project_id,
+      )}/attachments/${encodeURIComponent(attachment.id)}`,
+    };
+  };
+}
+
+export function attachmentViews(
+  state: CommandState,
+  card_id: CardId,
+): AttachmentView[] {
   const entryCard = new Map(
     state.timeline.map((entry) => [entry.id, entry.card_id]),
   );
@@ -469,39 +508,21 @@ export function attachmentViews(
       return false;
     })
     .sort(byId)
-    .map((attachment) => {
-      const basis =
-        attachment.basis === undefined
-          ? null
-          : {
-              id: attachment.basis,
-              status: decisions.get(attachment.basis)?.status ?? "unknown",
-            };
-      return {
-        id: attachment.id,
-        ...(attachment.original_filename === undefined
-          ? {}
-          : { original_filename: attachment.original_filename }),
-        ...(attachment.note === undefined ? {} : { note: attachment.note }),
-        mime: attachment.mime,
-        size: attachment.size,
-        sha256: attachment.sha256,
-        kind: attachment.kind,
-        attach_to: attachment.attach_to,
-        uploaded_by: attachment.uploaded_by,
-        ...webAuthorView(state, attachment.uploaded_by),
-        uploader_role: attachment.uploaded_by.startsWith("assignment:")
-          ? (roles.get(attachment.uploaded_by.slice(11)) ?? null)
-          : null,
-        uploaded_at: uploaded.get(attachment.id) ?? null,
-        basis,
-        supersedes: attachment.supersedes ?? null,
-        inline: INLINE_MIME_TYPES.has(attachment.mime.toLowerCase()),
-        download_path: `/api/projects/${encodeURIComponent(
-          state.project_id,
-        )}/attachments/${encodeURIComponent(attachment.id)}`,
-      };
-    });
+    .map(attachmentViewMapper(state));
+}
+
+/** Attachments a decision references, in the order the requester chose (§6). */
+export function decisionAttachmentViews(
+  state: CommandState,
+  decision: Pick<Decision, "attachment_ids"> | undefined,
+): AttachmentView[] {
+  const ids = decision?.attachment_ids ?? [];
+  if (!ids.length) return [];
+  const view = attachmentViewMapper(state);
+  return ids.flatMap((id) => {
+    const attachment = state.attachments.find((a) => a.id === id);
+    return attachment ? [view(attachment)] : [];
+  });
 }
 
 /** Work items, deliveries, reviews and decisions of one card (§8.4). */
@@ -874,6 +895,10 @@ export function needsYou(
       kind: "decision" as const,
       id: decision.id,
       card_id: decision.card_id ?? null,
+      attachments: decisionAttachmentViews(
+        state,
+        state.decisions.find((d) => d.id === decision.id),
+      ),
       affected_cards: decision.affected_cards,
       question: decision.question,
       context: decision.context,
