@@ -21,6 +21,7 @@ import {
   mergeConfirmation,
 } from "./m4-fixtures.js";
 import { MergeChecks } from "./merge-checks.js";
+import { MergeExecutor } from "./merge-loop.js";
 
 const required = <T>(value: T | undefined): T => {
   if (value === undefined) throw new Error("Missing fixture value");
@@ -378,5 +379,76 @@ test.each(["failed", "timed_out"] as const)(
     expect(f.state().decisions.find((q) => q.id === decision.id)?.status).toBe(
       "superseded",
     );
+  },
+);
+
+test.each(["checks", "executor"] as const)(
+  "a passed, confirmed card publishes while another card's check is still running, exactly once (%s)",
+  async (via) => {
+    const { f: blocked, check: blockedCheck } = await fixture("auto", {
+      project_id: "a-blocked",
+    });
+    const {
+      f: ready,
+      scenario,
+      check: readyCheck,
+    } = await fixture("confirm", {
+      project_id: "z-ready",
+      dataDir: blocked.dataDir,
+      clock: { now: () => "2030-01-02T00:00:00.000Z" },
+    });
+    const c = controller(blocked);
+    const executor = new MergeExecutor({
+      store: c.options.store,
+      git: c.git,
+      clock: c.options.clock,
+      onError: c.errors,
+      gate: {
+        configuration: c.options.configuration,
+        execution: c.options.execution,
+        run: c.run,
+      },
+    });
+    const projects = [blocked.project_id, ready.project_id];
+    // The executor's own background round must not hold up its next pass.
+    const tick = () =>
+      via === "checks" ? c.gate.tick(projects) : executor.tick();
+    // The ready card passes its checks first, then the human confirms it.
+    await c.gate.tick([ready.project_id]);
+    expect(readyCheck()?.status).toBe("passed");
+    ready.decide(required(mergeConfirmation(ready, scenario.card.id)), "merge");
+
+    const started = Promise.withResolvers<void>(),
+      finish = Promise.withResolvers<void>();
+    c.run.mockImplementationOnce(async (input) => {
+      input.onReady?.();
+      started.resolve();
+      await finish.promise;
+      return passed;
+    });
+    const round = tick();
+    try {
+      await started.promise;
+      expect(blockedCheck()?.status).toBe("running");
+      expect(ready.card().status).toBe("awaiting_merge");
+      // Two overlapping passes while the other card's check is running.
+      await Promise.all([tick(), tick()]);
+      expect(ready.card().status).toBe("done");
+      expect(blockedCheck()?.status).toBe("running");
+      expect(c.git.publish).toHaveBeenCalledTimes(1);
+      expect(c.git.publish.mock.calls[0]?.[0]).toMatchObject({
+        project_id: ready.project_id,
+      });
+    } finally {
+      finish.resolve();
+      await round;
+    }
+    await tick();
+    expect(blocked.card().status).toBe("done");
+    expect(
+      c.git.publish.mock.calls.map(([project]) => project.project_id).sort(),
+    ).toEqual([blocked.project_id, ready.project_id]);
+    expect(c.run).toHaveBeenCalledTimes(2);
+    expect(c.errors).not.toHaveBeenCalled();
   },
 );
