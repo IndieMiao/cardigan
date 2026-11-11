@@ -259,7 +259,7 @@ test("C-86 PM Ops gives final merge confirmation, including UI cards after a PM 
     "合并默认由你最终确认，界面卡（改动用户可见界面的卡）也一样",
     "先在卡上 @张良 请 PM Office 做截图核对",
     "等张良把核对结论写进卡片后，你据此确认或退回",
-    "仍交给人的只有被人标为敏感的卡、D12 四类高风险（花钱、账号、权限、删除数据）和需求范围变化",
+    "仍交给人的只有被人标为敏感的卡、D12 四类高风险（花钱、账号、权限、删除数据）、安全相关改动、对外发布和需求范围变化",
   ])
     expect(prompt).toContain(phrase);
   expect(prompt).not.toContain("用户可见的大改动");
