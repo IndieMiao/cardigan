@@ -19,6 +19,7 @@ import {
   decisionFollowupPrompt,
   dispatchRecoveryFailed,
   dispatchRun,
+  hasRunTarget,
   isStandingPm,
   lastRunActivity,
   obsoleteDispatchAttention,
@@ -305,6 +306,7 @@ export class Dispatcher {
     }
     const candidates: Candidate[] = [];
     const add = (assignment: Assignment, notes: Notification[]) => {
+      if (!hasRunTarget(assignment, state)) return;
       const queued = this.queued(state, assignment);
       const cause = notes.find((n) => !n.run_id) ?? notes[0];
       const trigger = queued?.trigger_event_id ?? cause?.event_id;
@@ -377,7 +379,13 @@ export class Dispatcher {
       this.reject(project, notes, a, "assignment_released");
       return;
     }
-    if (a.external || a.status !== "active" || this.busy(state, a)) return;
+    if (
+      a.external ||
+      a.status !== "active" ||
+      this.busy(state, a) ||
+      !hasRunTarget(a, state)
+    )
+      return;
     let live = false;
     let replacement: DispatchRunParams["replacement"];
     if (a.runtime_ref) {
@@ -604,6 +612,9 @@ export class Dispatcher {
       let state = loadCommandState(tx, project);
       const a = state.assignments.find((a) => a.id === expected.id);
       if (a?.status !== "active" || a.external || !sameRef(a, expected)) return;
+      // A delivery may have been superseded while runtime/snapshot IO was in flight.
+      // Keep notifications pending without allocating a Run or a bell attempt.
+      if (!hasRunTarget(a, state)) return;
       const all = store.listNotifications({ project_id: project }),
         requested = new Set(notes.map((n) => n.id));
       const ready = all.filter(
@@ -696,7 +707,15 @@ export class Dispatcher {
         const earlier = capacity.queue.some(
           (entry) =>
             entry.machine_id === a.machine_id &&
-            compareDispatchOrder(entry, order) < 0,
+            compareDispatchOrder(entry, order) < 0 &&
+            tx.assignments.list(entry.project_id).some(
+              (owner) =>
+                owner.id === entry.assignment_id &&
+                hasRunTarget(owner, {
+                  work_items: tx.work_items.list(entry.project_id),
+                  deliveries: tx.deliveries.list(entry.project_id),
+                }),
+            ),
         );
         if (
           (!isStandingPm(a) && earlier) ||

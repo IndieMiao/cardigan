@@ -665,9 +665,9 @@ test.each(["comment", "delivery", "pass", "reject", "execution failure"])(
 
 test("P06 §7.2/§6.7: Ops escalations wait while busy, then merge into one delivery", async () => {
   const s = await routingSetup(false);
-  await s.provision(s.reviewer);
   await s.finish(s.coder);
-  await s.finish(s.reviewer);
+  await s.provision(s.coder);
+  await s.finish(s.coder);
   await s.routed();
   const pending = notices(s, s.ops).filter((n) => n.kind === "run_attention");
   expect(pending.length).toBeGreaterThanOrEqual(2);

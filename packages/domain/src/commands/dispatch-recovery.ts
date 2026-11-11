@@ -1,6 +1,7 @@
 import type { Actor, Run, RuntimeRef } from "../entities.js";
 import type { RunId } from "../ids.js";
 import type { Notification } from "../notification.js";
+import { hasRunTarget } from "../run-target.js";
 import { transition } from "../transitions.js";
 import {
   type CommandPorts,
@@ -181,6 +182,7 @@ export function recoverDispatch(
       if (
         finished(run) ||
         a.status !== "active" ||
+        !hasRunTarget(a, d.state) ||
         (card && ["done", "cancelled"].includes(card.status))
       )
         return;

@@ -575,8 +575,8 @@ const idOf = (value: unknown): string => {
 };
 
 /**
- * Seat the whole card: a coder worktree and Run, plus the reviewer's and PM's
- * Runs, each with an MCP client.
+ * Seat the coder and connect the reviewers. Verification Runs wait for their
+ * deliveries and are started by Dispatcher.
  */
 async function seatAll() {
   const { card, items, coder, reviewer, pm } = positions();
@@ -594,12 +594,9 @@ async function seatAll() {
     version: coder.role_version,
   });
   const coderClient = await h.connect(seated.token);
-  await h.start(reviewer);
   const reviewerClient = await h.connect(await tokenOf(reviewer));
-  await h.start(pm);
   const pmClient = await h.connect(await tokenOf(pm));
-  for (const client of [coderClient, reviewerClient, pmClient])
-    expectOk(await call(client, "whoami"));
+  expectOk(await call(coderClient, "whoami"));
   return {
     card,
     coder,
@@ -645,6 +642,17 @@ async function deliverAndApprove(
     }),
   );
   const deliveryId = idOf(delivered.structuredContent?.id);
+  await expect
+    .poll(() =>
+      h
+        .state()
+        .runs.some(
+          (r) =>
+            r.assignment_id === seeded.reviewer.id && r.status === "dispatched",
+        ),
+    )
+    .toBe(true);
+  expectOk(await call(seeded.reviewerClient, "whoami"));
   expectOk(
     await call(seeded.reviewerClient, "submit_review", {
       idempotency_key: idem(),
@@ -668,6 +676,16 @@ async function deliverAndApprove(
   );
   const completionId = idOf(completion.structuredContent?.id);
   await h.finish(seeded.coder, seeded.coderClient);
+  await expect
+    .poll(() =>
+      h
+        .state()
+        .runs.some(
+          (r) => r.assignment_id === seeded.pm.id && r.status === "dispatched",
+        ),
+    )
+    .toBe(true);
+  expectOk(await call(seeded.pmClient, "whoami"));
   expectOk(
     await call(seeded.pmClient, "submit_review", {
       idempotency_key: idem(),

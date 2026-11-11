@@ -1,4 +1,5 @@
 import type { Event, WorkItem } from "../entities.js";
+import { hasRunTarget } from "../run-target.js";
 import { type CommandDraft, ensure } from "./core.js";
 import { reviewRound } from "./workflow.js";
 
@@ -42,6 +43,13 @@ export function resumeWork(
 export function queueResumedRun(d: CommandDraft, item: WorkItem, event: Event) {
   if (!item.assignment_id) return;
   const assignment = d.get("assignments", item.assignment_id);
+  if (
+    !hasRunTarget(assignment, {
+      work_items: d.list("work_items"),
+      deliveries: d.list("deliveries"),
+    })
+  )
+    return;
   const runs = d.list("runs").filter((r) => r.assignment_id === assignment.id);
   if (
     assignment.status !== "active" ||
