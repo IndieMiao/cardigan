@@ -17,8 +17,11 @@ import { registerAgentMachine } from "./agent-ssh.js";
 export {
   AGENT_PATH,
   type AgentCheckListing,
+  type AgentCheckPaths,
   type AgentListRunner,
+  agentCleanupCheckCommand,
   agentListChecks,
+  agentPrepareCheckCommand,
   agentProcessCommand,
   agentReceivePack,
   agentUploadPack,
@@ -49,6 +52,7 @@ import {
 
 export {
   type AgentExecution,
+  checkLockName,
   clearAgentSentinel,
   type LaunchFile,
   prepareAgentCheckout,

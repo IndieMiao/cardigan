@@ -647,6 +647,30 @@ test("a project executor receives the candidates and runs the checks; logs stay 
   ).resolves.toBeTypeOf("string");
 });
 
+test("C-130: an executor whose SSH preparation fails records a start failure and never falls back to the host", async () => {
+  const { f, check } = await fixture("auto");
+  const c = controller(f);
+  c.setConfig({
+    status: "enabled",
+    checks: [{ name: "test", run: "true" }],
+    env: {},
+    totalTimeoutMs: 1000,
+    executor: ciExecutor(1),
+  });
+  c.run.mockRejectedValueOnce(
+    new Error("Executor checkout preparation failed"),
+  );
+  await c.gate.tick([f.project_id]);
+  expect(check()?.status).toBe("failed");
+  expect(check()?.summary).not.toContain("preparation");
+  expect(c.run).toHaveBeenCalledTimes(1);
+  expect(c.run.mock.calls[0]?.[0].execution).toMatchObject({
+    mode: "agent-ssh",
+    host: "cardigan-ci",
+  });
+  expect(c.git.publish).not.toHaveBeenCalled();
+});
+
 const ciExecutor = (maxConcurrent: number) => ({
   name: "cardigan-ci",
   host: "cardigan-ci",

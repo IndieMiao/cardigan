@@ -66,7 +66,12 @@
 
 ### 2.4 远程机器的目录布局、依赖缓存、清理和对账
 
-- 目录布局照抄现有 agent-ssh 约定（§12.2），只是物理上搬到另一台机器：基础 clone `<agent_root>/repos/<project>`、检查容器 `<agent_root>/checks/<project>/<attempt>`。`CHECKOUT_WORKER`（`packages/host/src/checkout-worker.ts`）是作为内联脚本通过 SSH 会话 `node -e` 执行的（`packages/host/src/temporary-checkout.ts:92-100` 的 `worker`/`command` 构造），这段代码**目标无感**：SSH 连到哪台机器，它就在哪台机器上跑、在哪台机器上清理自己的 attempt 目录，§2.2 做完之后这部分不用改一行。
+- 目录布局照抄现有 agent-ssh 约定（§12.2），只是物理上搬到另一台机器：基础 clone `<agent_root>/repos/<project>`、检查容器 `<agent_root>/checks/<project>/<attempt>`。`CHECKOUT_WORKER`（`packages/host/src/checkout-worker.ts`）作为内联脚本，在 SSH 会话里用 `node -e` 执行，它本身不关心目标：SSH 连到哪台机器，它就在哪台机器上运行，并在那台机器上清理 attempt 内的内容。
+- **修正（C-130，依据 C-127#12、C-127#14）**：原文写的“§2.2 做完之后这部分不用改一行”不对。原文只考虑了 worker，漏掉了 `runInTemporaryCheckout` 在启动 worker 前后直接操作主机文件系统的几步，这几步默认主机和执行目标共用磁盘。远程执行目标（agent-ssh 且带 `host`）下，各步分工如下：
+  - 在**执行目标**上做，通过该目标同一个固定 SSH 入口执行：① 槽位锁 `<agent_root>/merge-check[-<i>].lock`，原来由主机侧 `prepareCheckLock` 完成；② attempt 容器 `<agent_root>/checks/<project>/<attempt>`，原来由主机侧 `prepareAgentCheckout` 完成；③ 短别名容器 `<agent_root>/s/<随机名>`，原来由主机侧 `prepareCheckoutAlias` 完成；④ 检查结束后 rmdir 这两个空容器，原来由主机直接 `rmdir`。①～③ 合成一次 SSH 准备命令，④ 是一次 SSH 清理命令，worker 本身仍是单独一次 SSH 会话。
+  - 留在**主机**上做：主机数据目录校验（`secureDataDirectory`）、参数校验、SSH 凭据文件校验（`checkAgentFiles`）、检查日志。远程路径不检查主机是否属于共享组，因为远程机器没有这层关系。
+  - 远程机器上没有主机账号，所以目录由执行账号自己创建：容器和锁的权限为 0700／0600，拒绝符号链接，已存在的 attempt 不复用。拼进远程命令的路径按 C-127 的规则校验，只作为位置参数传入。准备失败按启动前失败记录，不回退本机。
+  - local 模式和不带 `host` 的本机隔离账号 agent-ssh 保持原来的主机侧路径。正文见开发方案 §12.5“C-130”段和 §12.6“C-130”条。
 - 依赖缓存（pnpm store）、Playwright 浏览器缓存：和现状一样，放在执行账号自己的配置目录下（`~agent/.local/share/pnpm`、`~agent/.cache/ms-playwright` 之类），**不随每次检查的临时容器一起清理**，只在初始化时装一次（见 §3）；本计划不改变"缓存属于账号持久状态"这条约定。
 - 清理：检查结束（通过/失败/超时/取消）照常由 `CHECKOUT_WORKER` 自己删除 attempt 目录，和本机场景一样"用后就地清理"，不依赖对账。
 - 对账（C-67）**需要改的部分**：`packages/git-service/src/index.ts` 扫描 `checksRoot` 目前是直接 `readdir` 本机目录（现状第 5 点）。远程目标下主机进程读不到对方磁盘，必须把这一步换成"通过该执行目标的 SSH 通道跑一次只读列目录命令"（例如 `find <agent_root>/checks -mindepth 2 -maxdepth 2 -type d`），结果按现有逻辑继续和 Store 里的 queued/started/finished 事件比对，`CARDIGAN_CHECK_CLEANUP_GRACE_MS` 的宽限期判定不变。这是本计划里**对现有热路径改动最大的一块**，单独拆一张卡（见 §4 PR C），且要覆盖"远程不可达时对账怎么表现"（不应该把"连不上"报成"孤儿"或"失效登记"，应该是独立的第三种诊断，见 §2.6）。

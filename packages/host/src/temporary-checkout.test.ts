@@ -570,3 +570,146 @@ test("cleanup failure is reported without changing a passed conclusion", async (
     "Could not remove temporary worktree registration",
   );
 });
+
+/** C-130: an executor with a host shares no disk with the host. */
+async function remoteFixture() {
+  const f = await fixture(true);
+  const execution: AgentExecution = {
+    ...(f.input.execution as AgentExecution),
+    // Not the host's group: host-side Agent root checks must not run.
+    gid: 2_000_001,
+    machine: "cardigan-ci",
+    host: "cardigan-ci",
+    port: 22,
+    user: "agent",
+    hostKeyAlias: "cardigan-ci",
+  };
+  const calls: string[][] = [];
+  /** Fake SSH: runs the remote half locally, standing in for the executor's disk. */
+  const ssh =
+    (fail: (index: number) => boolean = () => false) =>
+    (file: string, args: readonly string[], env: NodeJS.ProcessEnv) => {
+      calls.push([file, ...args]);
+      expect(file).toBe("ssh");
+      expect(env).toEqual({ PATH: AGENT_PATH });
+      expect(args).toEqual(
+        expect.arrayContaining([
+          "HostKeyAlias=cardigan-ci",
+          "agent@cardigan-ci",
+        ]),
+      );
+      const remote = fail(calls.length - 1)
+        ? "exit 255"
+        : (args.at(-1) ?? "").replace(
+            "'node' '-e'",
+            `${quote(process.execPath)} '-e'`,
+          );
+      return spawn("/bin/sh", ["-c", remote], {
+        env,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    };
+  return { ...f, input: { ...f.input, execution }, execution, calls, ssh };
+}
+
+test.skipIf(process.platform !== "linux")(
+  "a remote executor prepares, runs and cleans up the checkout entirely over its SSH entry",
+  async () => {
+    const f = await remoteFixture();
+    let ready = false;
+    const result = await runInTemporaryCheckout(
+      {
+        ...f.input,
+        serialize: true,
+        lockSlot: 1,
+        onReady: () => {
+          ready = true;
+        },
+      },
+      f.ssh(),
+    );
+    expect(result).toMatchObject({ status: "passed", cleanup_errors: [] });
+    expect(ready).toBe(true);
+    // prepare, worker, cleanup — every step on the executor.
+    expect(f.calls).toHaveLength(3);
+    expect(f.calls[0]?.at(-1)).toContain(quote(f.execution.agentRoot));
+    expect(f.calls[1]?.at(-1)).toContain(
+      quote(join(f.execution.agentRoot, "merge-check-1.lock")),
+    );
+    expect(f.calls[2]?.at(-1)).toContain(quote(f.container));
+    const lock = await stat(join(f.execution.agentRoot, "merge-check-1.lock"));
+    expect(lock.mode & 0o777).toBe(0o600);
+    await f.clean();
+  },
+);
+
+test.skipIf(process.platform !== "linux")(
+  "a failed SSH preparation is a start failure: no worker, no host-side checkout, no local fallback",
+  async () => {
+    const f = await remoteFixture();
+    let ready = false;
+    await expect(
+      runInTemporaryCheckout(
+        {
+          ...f.input,
+          serialize: true,
+          onReady: () => {
+            ready = true;
+          },
+        },
+        f.ssh(() => true),
+      ),
+    ).rejects.toThrow("Executor checkout preparation failed");
+    expect(ready).toBe(false);
+    expect(f.calls).toHaveLength(1);
+    expect(f.calls[0]?.[0]).toBe("ssh");
+    expect((await readdir(f.execution.agentRoot)).sort()).toEqual(["repos"]);
+    await expect(
+      stat(join(f.execution.dataDir, "agent")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readdir(f.execution.dataDir)).toEqual([]);
+  },
+);
+
+test.skipIf(process.platform !== "linux")(
+  "a failed SSH cleanup is reported without changing a passed conclusion",
+  async () => {
+    const f = await remoteFixture();
+    const result = await runInTemporaryCheckout(
+      f.input,
+      f.ssh((index) => index === 2),
+    );
+    expect(result.status).toBe("passed");
+    expect(result.cleanup_errors).toEqual([
+      "Could not remove temporary checkout container",
+    ]);
+    expect(f.calls).toHaveLength(3);
+  },
+);
+
+test("remote executor path injection is rejected before any SSH command", async () => {
+  const f = await remoteFixture();
+  for (const agentRoot of [
+    "/srv/agent;touch /tmp/pwn",
+    "/srv/agent$(id)",
+    "/srv/a'b",
+    "/srv/agent/../etc",
+  ])
+    await expect(
+      runInTemporaryCheckout(
+        { ...f.input, execution: { ...f.execution, agentRoot } },
+        f.ssh(),
+      ),
+    ).rejects.toThrow();
+  for (const patch of [
+    { project: "p;id" },
+    { project: "../escape" },
+    { attempt: "a$(id)" },
+    { attempt: "../escape" },
+    { lockSlot: 64, serialize: true },
+  ])
+    await expect(
+      runInTemporaryCheckout({ ...f.input, ...patch }, f.ssh()),
+    ).rejects.toThrow();
+  expect(f.calls).toEqual([]);
+});
