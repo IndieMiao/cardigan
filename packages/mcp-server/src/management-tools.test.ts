@@ -648,6 +648,74 @@ test("Agent comments discover full employee names without trusting the client's 
   ).toEqual(comment.mentions);
 });
 
+test("MCP hides globally external employees from PM candidates and rejects explicit or automatic assignment", async () => {
+  store.createProject({ id: "external-project" });
+  store.uow.run((tx) => {
+    tx.employees.put({
+      id: "E-1",
+      name: "External Office",
+      title: "PM",
+      bio: "private bio",
+      avatar: null,
+      role_id: "pm",
+      launch_profile_ref: "private-profile",
+      status: "active",
+      created_at: "2026-01-01",
+      updated_at: "2026-01-01",
+    });
+    tx.assignments.put("external-project", {
+      id: "A-1",
+      scope: "standing",
+      standing_mode: "office",
+      employee_id: "E-1",
+      external: true,
+      role_id: "pm",
+      role_version: 1,
+      status: "active",
+      runtime_state: "not_provisioned",
+      runtime_ref: null,
+      machine_id: "local",
+      mcp_token_id: "external-office",
+      created_at: "2026-01-01",
+    });
+  });
+  const before = rows();
+  for (const employee_id of ["E-1", "external office", undefined]) {
+    const result = await raw(office, "assign", {
+      work_item_id: work("pm").id,
+      role_id: "pm",
+      ...(employee_id ? { employee_id } : {}),
+    });
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result)).toContain("外接员工，不由 Cardigan 启动");
+    expect(rows()).toEqual(before);
+  }
+  expect(await ok(office, "project_snapshot", {})).toMatchObject({
+    available_employees: [],
+  });
+  store.uow.run((tx) => {
+    const external = tx.employees.get("E-1");
+    if (!external) throw new Error("Missing employee");
+    tx.employees.put({ ...external, id: "E-2", name: "Internal PM" });
+  });
+  const snapshot = await ok<{ available_employees: unknown[] }>(
+    office,
+    "project_snapshot",
+    {},
+  );
+  expect(snapshot.available_employees).toEqual([
+    { id: "E-2", name: "Internal PM", title: "PM", role_id: "pm" },
+  ]);
+  expect(JSON.stringify(snapshot)).not.toContain("private-profile");
+  expect(JSON.stringify(snapshot)).not.toContain("private bio");
+  expect(
+    await ok(office, "assign", {
+      work_item_id: work("pm").id,
+      role_id: "pm",
+    }),
+  ).toMatchObject({ employee_id: "E-2" });
+});
+
 test.each([false, true])(
   "record_decision raises review limits once through PM Office (paused=%s)",
   async (paused) => {

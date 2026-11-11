@@ -22,6 +22,7 @@ import type { Store } from "@cardigan/store";
 import type { MergeGit } from "./git.js";
 import { startTimerLoop, type TimerLoop } from "./loop.js";
 import { type MergeCheckOptions, MergeChecks } from "./merge-checks.js";
+import { withPublication } from "./publication-lock.js";
 
 /** Default cadence: one pass is cheap when no card is ready. */
 export const DEFAULT_MERGE_INTERVAL_MS = 5_000;
@@ -89,8 +90,18 @@ export class MergeExecutor {
     this.checks?.stop();
   }
 
-  /** Serialize ticks: one project never merges two cards in parallel. */
-  tick(project_id?: ProjectId): Promise<void> {
+  /**
+   * Serialize ticks: one project never merges two cards in parallel. Resolves
+   * after the check round this tick started, if any (see `schedule`).
+   */
+  async tick(project_id?: ProjectId): Promise<void> {
+    await (await this.schedule(project_id)).done;
+  }
+  /**
+   * One serialized pass. A gated check round keeps running in the background,
+   * so the next pass can publish already-checked cards without waiting (C-113).
+   */
+  schedule(project_id?: ProjectId): Promise<{ readonly done: Promise<void> }> {
     const next = this.serial.then(async () => {
       const projects = project_id
         ? [project_id]
@@ -99,10 +110,21 @@ export class MergeExecutor {
         this.confirmDue(id);
         if (!this.checks?.configured(id)) await this.project(id);
       }
-      await this.checks?.tick(projects);
+      return (
+        (await this.checks?.schedule(projects)) ?? {
+          done: Promise.resolve(),
+        }
+      );
     });
-    this.serial = next.catch(() => {});
+    this.serial = next.then(
+      () => {},
+      () => {},
+    );
     return next;
+  }
+  /** Resolves when no background check round is in flight. */
+  idle(): Promise<void> {
+    return this.checks?.idle() ?? Promise.resolve();
   }
 
   private get clock(): Clock {
@@ -190,29 +212,34 @@ export class MergeExecutor {
     const project_id = project.project_id as ProjectId;
     try {
       await this.options.git.sync(project);
-      const outcome: MergeOutcome = await this.options.git.merge(project, plan);
-      if (outcome.status === "stale") return false;
-      if (outcome.status === "merged")
-        this.record(project_id, plan, {
-          kind: "merged",
-          merge_sha: outcome.merge_sha,
-          previous_sha: outcome.previous_sha,
-        });
-      else if (outcome.status === "noop")
-        // Every planned delivery is already an ancestor of the baseline; the
-        // card still has to reach `done`, so the result names the current tip.
-        this.record(project_id, plan, {
-          kind: "merged",
-          merge_sha: outcome.branch_sha,
-          previous_sha: outcome.branch_sha,
-        });
-      else
-        this.record(project_id, plan, {
-          kind: "conflicted",
-          delivery_id: outcome.delivery_id as DeliveryId,
-          files: outcome.files,
-        });
-      return true;
+      return await withPublication(project_id, async () => {
+        const outcome: MergeOutcome = await this.options.git.merge(
+          project,
+          plan,
+        );
+        if (outcome.status === "stale") return false;
+        if (outcome.status === "merged")
+          this.record(project_id, plan, {
+            kind: "merged",
+            merge_sha: outcome.merge_sha,
+            previous_sha: outcome.previous_sha,
+          });
+        else if (outcome.status === "noop")
+          // Every planned delivery is already an ancestor of the baseline; the
+          // card still has to reach `done`, so the result names the current tip.
+          this.record(project_id, plan, {
+            kind: "merged",
+            merge_sha: outcome.branch_sha,
+            previous_sha: outcome.branch_sha,
+          });
+        else
+          this.record(project_id, plan, {
+            kind: "conflicted",
+            delivery_id: outcome.delivery_id as DeliveryId,
+            files: outcome.files,
+          });
+        return true;
+      });
     } catch (error) {
       this.recordFailure(
         project_id,
@@ -266,21 +293,30 @@ export function startMergeLoop(
   options.signal?.addEventListener("abort", cancel, { once: true });
   if (options.signal?.aborted) cancel();
   const loop = startTimerLoop({
-    tick: () => executor.tick(),
+    tick: async () => {
+      await executor.schedule();
+    },
     intervalMs: options.intervalMs ?? DEFAULT_MERGE_INTERVAL_MS,
     onError: options.onError ?? (() => undefined),
     ...(options.signal === undefined ? {} : { signal: options.signal }),
   });
-  void loop.done
+  // A background check round is part of the loop: stopping waits for it to
+  // record its interruption, so SIGTERM never leaves a check half-recorded.
+  const done = loop.done.finally(async () => {
+    cancel();
+    await executor.idle();
+  });
+  void done
     .finally(() => options.signal?.removeEventListener("abort", cancel))
     .catch(() => {});
   return {
     executor,
     loop: {
-      done: loop.done,
+      done,
       stop: () => {
         cancel();
-        return loop.stop();
+        void loop.stop();
+        return done;
       },
     },
   };

@@ -31,7 +31,12 @@ const comment = (target: ReturnType<typeof f.create>, body = "Please check") =>
       p,
     ),
   );
-const notes = () => f.store.listNotifications({ project_id: f.project });
+// These scenarios exercise comments/escalations; new-card routing has its own
+// rotation tests in card-planning.test.ts.
+const notes = () =>
+  f.store
+    .listNotifications({ project_id: f.project })
+    .filter((n) => n.kind !== "card");
 
 test("high card seq does not hide a new card or project events, including after restart", () => {
   const older = f.create();
@@ -75,7 +80,7 @@ test("high card seq does not hide a new card or project events, including after 
   try {
     expect(routeProjectEvents(reopened, f.project)).toBe(0);
     expect(reopened.listNotifications({ project_id: f.project })).toEqual(
-      notes(),
+      f.store.listNotifications({ project_id: f.project }),
     );
   } finally {
     reopened.close();
@@ -88,7 +93,7 @@ test("a failed inbox write rolls back the whole page and its cursor", () => {
   comment(target, "one");
   comment(target, "two");
   f.store.database.exec(`CREATE TEMP TRIGGER fail_page BEFORE INSERT ON notifications
-    WHEN (SELECT count(*) FROM notifications) >= 1 BEGIN SELECT RAISE(ABORT, 'inbox unavailable'); END;`);
+    WHEN (SELECT count(*) FROM notifications WHERE json_extract(doc, '$.kind') != 'card') >= 1 BEGIN SELECT RAISE(ABORT, 'inbox unavailable'); END;`);
   expect(() => routeProjectEvents(f.store, f.project)).toThrow(
     /inbox unavailable/,
   );
@@ -234,7 +239,12 @@ test.each([false, true])(
       card_id: projectStream ? PROJECT_EVENT_STREAM : target.card.id,
       up_to_seq: note.seq,
     });
-    expect(acknowledgeInbox(f.store, f.project, () => replacement)).toBe(0);
+    // A pending new-card notice follows the current Ops cursor; the comment
+    // pinned to an in-flight delivery still belongs to its original receiver.
+    expect(acknowledgeInbox(f.store, f.project, () => replacement)).toBe(
+      projectStream ? 0 : 1,
+    );
+    expect(notes().find((n) => n.id === note.id)?.status).toBe("pending");
     f.store.ackEvents({
       project_id: f.project,
       assignment_id: original,
