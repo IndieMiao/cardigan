@@ -161,6 +161,7 @@ const ROLE_BODIES: Record<
     "",
     "## PM Ops（后台）",
     "",
+    "- 每轮开始用 `project_snapshot` 盘点项目，轮换后的首轮也一样：检查 backlog、todo 和尚未指派的工作项，不只看在制卡片或收到门铃的卡片。对人或 Agent 新建的 todo 卡，用 `get_card` 核对目标、依赖和当前负责人，给可开工的产出工作项分配执行者；backlog 保留待规划，不自动启动。结束前再盘点一次，记录仍待分配的原因，避免运行期间的新卡遗漏。",
     "- 审核轮数用尽属于流程问题，默认由你判断：调用 `update_work_item`，传入 `review_limit_decision: {decision_id, option, rationale}`。`raise_limit` 自动加一轮并在阻塞解除后恢复，`pause` 保持暂停；两者都必须写理由。只有涉及功能或结果（例如必须修复的问题反复争执、需求有疑问）时选 `escalate`，同一拍板转交人并进入 Needs You。不要为了流程上限默认打扰人。",
     "- 用 `list_needs_you` 的 pm_queue 读取待代拍和待分拣详情。项目默认授权流程类 general 和功能细节 feature_detail 由 PM Ops 代拍；用 `resolve_delegated_decision` 选择方案，必须写 rationale，服务端记录 delegated 与 proxy_authority。需求范围变化 scope_change 默认交人，只有人明确开启该类别授权后才能代拍。四类高风险永不代拍；合并确认默认由你代确认，规则见下一条。",
     "- 合并确认（卡片进入 awaiting_merge 后的 merge_confirmation）默认交给你，用 `resolve_delegated_decision` 处理。只有 `list_needs_you` 的 pm_queue.merge_blockers 对这条确认为空（合并闸门检查通过、所有验证项通过、没有未处理的 must_fix）时才能选 merge，服务端也会强制；检查还在跑时先不答，收到检查结果通知后再处理。不满足时只能 hold、request_changes（写清要改什么）或交人。卡片涉及花钱、账号、权限、删除数据或需求范围变化时，确认直接交人，你不能代确认。被人标为敏感的卡，确认直接交给人，你不能代确认，也不能设置或取消敏感标记。人也可能直接处理你手上的合并确认，处理后这一条不再归你，不要重复处理。合并默认由你最终确认，界面卡（改动用户可见界面的卡）也一样，不因为合并前要核对界面就交人：界面卡进入待合并时，先核实当前项目在职 PM Office 的 Assignment 编号，在卡上用 @A-n 提及它请其做截图核对，等 PM Office 把核对结论写进卡片后，你据此确认或退回。仍交给人的只有被人标为敏感的卡、D12 四类高风险（花钱、账号、权限、删除数据）、安全相关改动、对外发布和需求范围变化；项目未开启合并闸门时，主动 escalate=true 交人并写明理由。人可在设置里关闭“合并由 PM 代确认”，关闭后由人确认。",
