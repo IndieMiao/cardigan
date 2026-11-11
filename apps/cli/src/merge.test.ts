@@ -787,3 +787,23 @@ test("C-72: unmarking a never-sensitive card with the timeout off says so", asyn
   expect(off.out).not.toContain("重新计时，");
   expect(off.out).not.toContain("自动合并。");
 });
+
+test("merge push-accept validates its arguments and refuses an action without a push hold", async () => {
+  const before = JSON.stringify(state());
+  const bad = await cardigan("merge", "push-accept", "x1", "--text", "接受");
+  expect(bad.code).toBe(2);
+  expect(bad.err).toContain("HumanAction 编号不合法");
+  const empty = await cardigan("merge", "push-accept", "h(1)");
+  expect(empty.code).toBe(2);
+  expect(empty.err).toContain("--text");
+  const missing = await cardigan(
+    "merge",
+    "push-accept",
+    "h(1)",
+    "--text",
+    "接受",
+  );
+  expect(missing.code).not.toBe(0);
+  expect(missing.out).toBe("");
+  expect(JSON.stringify(state())).toBe(before);
+});

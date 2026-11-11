@@ -1,5 +1,12 @@
-import type { Card, CardId, Decision, ProjectId } from "@cardigan/domain";
+import type {
+  Card,
+  CardId,
+  Decision,
+  HumanActionId,
+  ProjectId,
+} from "@cardigan/domain";
 import {
+  acceptMergePushHold,
   latestMergeCheck,
   mergePlan,
   parseId,
@@ -37,6 +44,7 @@ const USAGE = [
   "  cardigan merge request <C-n>                      hold 之后重新发起合并确认",
   "  cardigan merge recheck <C-n> [--project <p>]       重查失败或超时的合并候选",
   "  cardigan merge request-changes <C-n> --reason <原因> [--project <p>]  退回修改（原因必填）",
+  "  cardigan merge push-accept <h(n)> --text <说明> [--project <p>]  确认接受暂停推送里列出的外来提交并恢复自动推送",
   "",
   "PM 代确认中的合并也可以直接 confirm、hold 或 request-changes，按你的拍板记录。",
   "通用：--project 省略时取 CARDIGAN_PROJECT，再取数据库里唯一的项目；",
@@ -107,9 +115,11 @@ export async function runMergeCommand(
       return mergeRecheck(rest, io);
     case "request-changes":
       return mergeRequestChanges(rest, io);
+    case "push-accept":
+      return mergePushAccept(rest, io);
     default:
       throw new CliError(
-        "用法：cardigan merge status|confirm|hold|request|request-changes|recheck",
+        "用法：cardigan merge status|confirm|hold|request|request-changes|recheck|push-accept",
         EXIT.usage,
         [USAGE],
       );
@@ -349,6 +359,46 @@ function mergeConfirm(
       option === "merge"
         ? `已确认合并 ${id}（${decision.id} ${decision.status}）${takeover}；合并循环会把交付合进 ${card.base_branch ?? "无"}。`
         : `已暂不合并 ${id}（${decision.id}）${takeover}；需要时运行 cardigan merge request ${id}`,
+    );
+    return EXIT.ok;
+  } finally {
+    store.close();
+  }
+}
+
+/** C-94: the human accepts the listed foreign commits; reverting uses human-action done. */
+function mergePushAccept(args: readonly string[], io: CliIo): number {
+  const parsed = parseArgs(args);
+  const raw = parsed.positionals[0];
+  const id = parseId("human_action", raw);
+  if (!id.ok)
+    throw new CliError(
+      `HumanAction 编号不合法：${JSON.stringify(raw)}（形如 h(3)）`,
+      EXIT.usage,
+      [USAGE],
+    );
+  const text = optional(parsed.flags, "text");
+  if (!text)
+    throw new CliError("确认接受必须提供非空的 --text", EXIT.usage, [USAGE]);
+  const human_action_id: HumanActionId = id.value.id;
+  const store = open(io, parsed.flags);
+  try {
+    const project_id = resolveProject(
+      store,
+      io,
+      optional(parsed.flags, "project"),
+    );
+    runCommand(store, {
+      operation: "接受外来提交并恢复推送",
+      target: human_action_id,
+      project_id,
+      actor: resolveActor(io, project_id, store),
+      clock: systemClock,
+      reduce: (state, actor, ports) =>
+        acceptMergePushHold(state, actor, { human_action_id, text }, ports),
+    });
+    io.stdout(
+      `已接受 ${human_action_id} 列出的外来提交；自动推送会在下一轮恢复。`,
     );
     return EXIT.ok;
   } finally {
