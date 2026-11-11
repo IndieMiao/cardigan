@@ -56,6 +56,13 @@ test("review withdrawal is not exposed to the PM Office chat token", () => {
   expect(standingTools(tools, "ops")).toEqual(tools);
 });
 
+test("release_assignment belongs to Ops only and is never added to older roles", () => {
+  const tools: readonly ToolName[] = [...pmTools, "release_assignment"];
+  expect(standingTools(tools, "office")).not.toContain("release_assignment");
+  expect(standingTools(tools, "ops")).toContain("release_assignment");
+  expect(standingTools(pmTools, "ops")).not.toContain("release_assignment");
+});
+
 test("applying a mode stamps a standing pm Assignment", () => {
   const office = applyStandingMode(standing(), "office");
   expect(office.ok).toBe(true);

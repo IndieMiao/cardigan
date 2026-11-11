@@ -64,6 +64,7 @@ export const CLI_TOOLS = {
   attention: null,
   "assignment start": null,
   "assignment stop": null,
+  "assignment release": "release_assignment",
   "assignment attach": null,
   "merge status": null,
   "merge confirm": null,

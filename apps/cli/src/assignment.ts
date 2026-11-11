@@ -10,6 +10,7 @@ import {
   EXTERNAL_ASSIGNMENT_START_ERROR,
   pauseStandingAssignment,
   queueRun,
+  releaseAssignment,
   standingModeOf,
 } from "@cardigan/domain";
 import {
@@ -626,6 +627,7 @@ const USAGE = [
   "用法：",
   "  cardigan assignment start <A-n> [--project <p>] [--mcp-url <url>] [--hc-session <s>] [--data-dir <目录>]",
   "  cardigan assignment stop <A-n> [--project <p>] [--hc-session <s>] [--data-dir <目录>]",
+  "  cardigan assignment release <A-n> [--project <p>] [--data-dir <目录>]",
   "  cardigan assignment attach <A-n> [--print] [--interactive] [--project <p>] [--hc-session <s>] [--data-dir <目录>]",
   "  attach：输入和输出均为终端（TTY）时直接只读观察；--interactive 允许输入，--print 或非 TTY 只打印命令（默认带 --observe）。",
   "  按 Ctrl+\\ 分离退出；--interactive 下你的输入会直接发给正在工作的 Agent。",
@@ -635,9 +637,14 @@ const DEFAULT_MCP_URL = "http://127.0.0.1:3004/mcp";
 
 function parseArgs(args: readonly string[]) {
   const [sub, ...rest] = args;
-  if (sub !== "start" && sub !== "stop" && sub !== "attach") {
+  if (
+    sub !== "start" &&
+    sub !== "stop" &&
+    sub !== "attach" &&
+    sub !== "release"
+  ) {
     throw new CliError(
-      "用法：cardigan assignment start|stop|attach",
+      "用法：cardigan assignment start|stop|attach|release",
       EXIT.usage,
       [USAGE],
     );
@@ -668,7 +675,7 @@ function parseArgs(args: readonly string[]) {
   return { sub, assignmentId: assignmentId as Assignment["id"], flags };
 }
 
-/** `cardigan assignment start|stop|attach` (M2.6). */
+/** `cardigan assignment start|stop|attach|release`. */
 export async function runAssignmentCommand(
   args: readonly string[],
   io: CliIo,
@@ -679,6 +686,32 @@ export async function runAssignmentCommand(
   }
   const { sub, assignmentId, flags } = parseArgs(args);
   const dataDir = announceDataDir(io, flags["data-dir"]);
+  if (sub === "release") {
+    const store = Store.open({ dataDir });
+    try {
+      const project_id = resolveProject(store, io, flags.project);
+      const actor = resolveActor(io, project_id, store);
+      runCommand(store, {
+        project_id,
+        actor,
+        operation: "释放 Assignment",
+        target: assignmentId,
+        reduce: (state, caller, ports) =>
+          releaseAssignment(
+            state,
+            caller,
+            { assignment_id: assignmentId },
+            ports,
+          ),
+      });
+      io.stdout(
+        `已释放 Assignment ${assignmentId}；终端和工作区由主机清理流程处理。`,
+      );
+      return EXIT.ok;
+    } finally {
+      store.close();
+    }
+  }
   const execution = executionFor(io, dataDir);
   await secureDataDirectory(execution);
   const store = Store.open({ dataDir });

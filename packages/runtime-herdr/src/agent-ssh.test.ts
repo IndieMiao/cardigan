@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { RuntimeRef } from "@cardigan/domain";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import {
+  agentProcessCommand,
   agentReceivePack,
   agentSshCommand,
   agentUploadPack,
@@ -14,6 +15,7 @@ import {
   executionPaths,
   executionPermissions,
   resolveExecutionConfig,
+  shellQuote,
 } from "./execution.js";
 import { HerdrRuntime } from "./index.js";
 import { assignment, launch, machine, role, value } from "./test-support.js";
@@ -155,6 +157,211 @@ test("Agent niceness is configurable in both modes and rejects unsafe values", (
           CARDIGAN_AGENT_NICE: value,
         }),
       ).toThrow(/CARDIGAN_AGENT_NICE/);
+  }
+});
+
+// The pre-P2a-12 argv is deliberately fixed, including ordering and no -p flag.
+function legacySshArguments() {
+  return [
+    "-F",
+    "/dev/null",
+    "-T",
+    "-i",
+    execution.identityFile,
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "IdentitiesOnly=yes",
+    "-o",
+    "IdentityAgent=none",
+    "-o",
+    "ForwardAgent=no",
+    "-o",
+    "ClearAllForwardings=yes",
+    "-o",
+    "PasswordAuthentication=no",
+    "-o",
+    "KbdInteractiveAuthentication=no",
+    "-o",
+    "StrictHostKeyChecking=yes",
+    "-o",
+    `UserKnownHostsFile=${execution.knownHostsFile}`,
+    "-o",
+    "GlobalKnownHostsFile=/dev/null",
+    "-o",
+    "HostKeyAlias=cardigan-agent-local",
+    "-o",
+    "HostKeyAlgorithms=ssh-ed25519",
+    "-o",
+    "ConnectTimeout=10",
+    "--",
+    "agent@localhost",
+  ];
+}
+const expectedAgentPath =
+  "PATH=/var/lib/cardigan-agent/.local/bin:/usr/local/bin:/usr/bin:/bin";
+
+test("omitted target fields preserve SSH command bytes and streaming argv", async () => {
+  for (const key of ["host", "port", "user", "hostKeyAlias"])
+    expect(execution).not.toHaveProperty(key);
+  expect(agentSshCommand(execution)).toBe(
+    ["ssh", ...legacySshArguments(), "env", expectedAgentPath]
+      .map(shellQuote)
+      .join(" "),
+  );
+  expect(
+    await agentProcessCommand(execution, ["printf", "a 'quoted' value"]),
+  ).toEqual({
+    file: "ssh",
+    args: [
+      "-o",
+      "ServerAliveInterval=5",
+      "-o",
+      "ServerAliveCountMax=3",
+      ...legacySshArguments(),
+      ["env", "-i", expectedAgentPath, "printf", "a 'quoted' value"]
+        .map(shellQuote)
+        .join(" "),
+    ],
+  });
+});
+
+test("remote targets use the selected credentials, port and pinned alias in every SSH entry", async () => {
+  const remote = {
+    ...execution,
+    host: "worker.example.test",
+    port: 2222,
+    user: "check-runner",
+    hostKeyAlias: "check-host",
+    knownHostsFile: join(root, "remote_known_hosts"),
+  };
+  await writeFile(remote.knownHostsFile, "fixture-only", { mode: 0o600 });
+  const expected = legacySshArguments()
+    .slice(0, -2)
+    .map((arg) => {
+      if (arg.startsWith("UserKnownHostsFile="))
+        return `UserKnownHostsFile=${remote.knownHostsFile}`;
+      if (arg.startsWith("HostKeyAlias=")) return "HostKeyAlias=check-host";
+      return arg;
+    });
+  expected.push("-p", "2222", "--", "check-runner@worker.example.test");
+  const entry = ["ssh", ...expected, "env", expectedAgentPath]
+    .map(shellQuote)
+    .join(" ");
+  expect(agentSshCommand(remote)).toBe(entry);
+  expect((await agentProcessCommand(remote, ["true"])).args).toEqual([
+    "-o",
+    "ServerAliveInterval=5",
+    "-o",
+    "ServerAliveCountMax=3",
+    ...expected,
+    ["env", "-i", expectedAgentPath, "true"].map(shellQuote).join(" "),
+  ]);
+  for (const pack of [agentUploadPack, agentReceivePack]) {
+    const command = await pack(
+      remote,
+      join(remote.agentRoot, "repos", "project"),
+    );
+    expect(command).toContain(shellQuote(entry).slice(1, -1));
+  }
+  await chmod(remote.knownHostsFile, 0o644);
+  await expect(agentProcessCommand(remote, ["true"])).rejects.toThrow(/0600/);
+});
+
+test.each([
+  [
+    { host: "worker.example.test" },
+    "agent@worker.example.test",
+    "cardigan-agent-local",
+  ],
+  [{ host: "::1" }, "agent@::1", "cardigan-agent-local"],
+  [{ user: "check-runner" }, "check-runner@localhost", "cardigan-agent-local"],
+  [{ hostKeyAlias: "check-host" }, "agent@localhost", "check-host"],
+] as const)(
+  "partial target %j retains other defaults",
+  async (target, destination, alias) => {
+    const { args } = await agentProcessCommand({ ...execution, ...target }, [
+      "true",
+    ]);
+    expect(args.at(-2)).toBe(destination);
+    expect(args).toContain(`HostKeyAlias=${alias}`);
+    expect(args).toContain("StrictHostKeyChecking=yes");
+    expect(args).not.toContain("-p");
+  },
+);
+
+test.each([1, 22, 65535])("explicit SSH port %s is emitted", async (port) => {
+  const { args } = await agentProcessCommand({ ...execution, port }, ["true"]);
+  expect(args.slice(-5, -1)).toEqual([
+    "-p",
+    String(port),
+    "--",
+    "agent@localhost",
+  ]);
+});
+
+test("unsafe targets, ports and known_hosts paths fail before command generation or execution", async () => {
+  const patches: Record<string, unknown>[] = [];
+  for (const field of ["host", "user", "hostKeyAlias"]) {
+    for (const value of [
+      "",
+      "-oProxyCommand=bad",
+      "x y",
+      "x\n",
+      "x\r",
+      "x\ny",
+      "x\ry",
+      "x\ty",
+      "x\0y",
+      "x\u00a0y",
+      "x\u200by",
+      "user@host",
+      "x;bad",
+      "$(bad)",
+      "`bad`",
+      "'bad'",
+      '"bad"',
+      "x\\y",
+      null,
+    ])
+      patches.push({ [field]: value });
+  }
+  for (const port of [
+    0,
+    -1,
+    65536,
+    1.5,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    "22",
+    "22 -oStrictHostKeyChecking=no",
+    null,
+  ])
+    patches.push({ port });
+  for (const knownHostsFile of [
+    "",
+    "relative",
+    "/",
+    "/tmp/..",
+    "-hosts",
+    "/tmp/hosts other",
+    "/tmp/hosts\nother",
+    "/tmp/hosts\0other",
+    '/tmp/"hosts"',
+    "/tmp/'hosts'",
+    "/tmp/hosts\\other",
+    "/tmp/%h",
+    `/tmp/\${HOSTS}`,
+  ])
+    patches.push({ knownHostsFile });
+  for (const patch of patches) {
+    const invalid = { ...execution, ...patch } as typeof execution;
+    expect(() => agentSshCommand(invalid)).toThrow(/SSH/);
+    await expect(agentProcessCommand(invalid, ["true"])).rejects.toThrow(/SSH/);
+    for (const pack of [agentUploadPack, agentReceivePack])
+      await expect(
+        pack(invalid, join(execution.agentRoot, "repos", "project")),
+      ).rejects.toThrow(/SSH/);
   }
 });
 

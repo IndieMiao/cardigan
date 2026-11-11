@@ -25,6 +25,7 @@ export function standingTools(
       ? ![
           "issue_instruction",
           "withdraw_review",
+          "release_assignment",
           "resolve_delegated_decision",
           "triage_human_action",
         ].includes(tool)
