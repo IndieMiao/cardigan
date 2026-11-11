@@ -39,6 +39,7 @@ export {
   pmMergeBlockers,
   pmMergeCheckDelegationAllowed,
 } from "./commands/merge-delegation.js";
+export * from "./commands/merge-executor.js";
 export {
   hasVerifiedMergeNoop,
   recordMergePreparation,

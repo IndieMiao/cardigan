@@ -24,7 +24,7 @@ export interface CheckoutCheck {
 }
 export type CheckoutStatus = "passed" | "failed" | "timed_out" | "interrupted";
 export interface CheckoutResult {
-  readonly status: CheckoutStatus;
+  readonly status: CheckoutStatus | "executor_unreachable";
   readonly checks: readonly {
     readonly name: string;
     readonly status: CheckoutStatus | "not_run";
@@ -210,6 +210,17 @@ export async function runInTemporaryCheckout(
           resolve(result);
         else if (signal?.aborted && !protocolFailed)
           resolve({ status: "interrupted", checks: [], cleanup_errors: [] });
+        else if (
+          execution.mode === "agent-ssh" &&
+          code === 255 &&
+          !protocolFailed
+        )
+          resolve({
+            status: "executor_unreachable",
+            checks: [],
+            cleanup_errors: [],
+            reason: "远程检查机 SSH 连接失败，合并检查排队等待重试",
+          });
         else
           reject(
             new Error(

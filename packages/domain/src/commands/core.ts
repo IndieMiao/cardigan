@@ -102,6 +102,7 @@ type CommandName =
   | "record_merge_push_result"
   | "check_merge_push_range"
   | "accept_merge_push_hold"
+  | "record_merge_executor"
   | "record_merge_check"
   | "record_merge_preparation"
   | "recheck_merge"
@@ -198,6 +199,7 @@ export class CommandDraft {
       "resolve_dispatch_attention",
       "remind_decision_followups",
       "record_merge_result",
+      "record_merge_executor",
       "record_merge_check",
       "record_merge_preparation",
       "begin_merge_push",

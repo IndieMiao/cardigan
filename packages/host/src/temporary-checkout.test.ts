@@ -570,3 +570,38 @@ test("cleanup failure is reported without changing a passed conclusion", async (
     "Could not remove temporary worktree registration",
   );
 });
+
+test.skipIf(process.platform !== "linux")(
+  "SSH connection failure returns a distinct terminal result without running locally",
+  async () => {
+    const f = await fixture(true);
+    const output = vi.fn();
+    const ready = vi.fn();
+    const start = vi.fn(
+      (file: string, _args: readonly string[], env: NodeJS.ProcessEnv) => {
+        expect(file).toBe("ssh");
+        return spawn(
+          process.execPath,
+          [
+            "-e",
+            "process.stderr.write('private SSH diagnostic'); process.exit(255)",
+          ],
+          { env, stdio: ["pipe", "pipe", "pipe"] },
+        );
+      },
+    );
+    const result = await runInTemporaryCheckout(
+      { ...f.input, onReady: ready, onOutput: output },
+      start,
+    );
+    expect(result).toMatchObject({
+      status: "executor_unreachable",
+      checks: [],
+    });
+    expect(JSON.stringify(result)).not.toContain("private SSH diagnostic");
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(ready).not.toHaveBeenCalled();
+    expect(output).not.toHaveBeenCalled();
+    await f.clean();
+  },
+);

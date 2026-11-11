@@ -1020,6 +1020,7 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
       failed: "失败",
       timed_out: "超时",
       interrupted: "中断",
+      executor_unreachable: "远程检查机不可达",
     };
     const { decisions, actions, incidents, noticeList, held, waiting } =
       store.uow.read((tx) => {

@@ -17,6 +17,7 @@ export {
   type LaunchStep,
   messageOf,
 } from "./errors.js";
+export { classifyExecutorFailure } from "./executor-failure.js";
 export {
   type LaunchedRun,
   type LaunchHost,

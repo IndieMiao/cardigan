@@ -230,7 +230,7 @@ async function fixture(policy: "auto" | "confirm" = "auto") {
     tree_sha: tree,
   };
   const record = (
-    status: MergeCheckView["status"],
+    status: Exclude<MergeCheckView["status"], "executor_unreachable">,
     attempt_id = "attempt-1",
     tree_sha = tree,
   ) =>
@@ -810,4 +810,36 @@ test("failed confirmed returns still reject blank reasons, agents, stale checks 
     recordDecision(state(), human, { ...params, option: "hold" }, f.io).ok,
   ).toBe(false);
   expect(JSON.stringify(f.state)).toBe(before);
+});
+
+test("unreachable attempts never authorize a merge or require manual same-tree recheck", async () => {
+  const { f, state, identity, record, merged } = await fixture();
+  record("queued");
+  const unreachable = {
+    ...identity,
+    status: "executor_unreachable" as const,
+    checks: [],
+    summary: "远程检查机不可达",
+    log_ref: "attempt-1.log",
+  };
+  f.commit(recordMergeCheck(state(), system, unreachable, f.io));
+  expect(
+    hasPassedMergeCheck(
+      state().events,
+      identity.card_id,
+      identity.completion_id,
+      tree,
+    ),
+  ).toBe(false);
+  expect(recordMergeResult(state(), system, merged, f.io).ok).toBe(false);
+  expect(
+    recheckMerge(state(), human, { card_id: identity.card_id }, f.io).ok,
+  ).toBe(false);
+  expect(
+    value(recordMergeCheck(state(), system, unreachable, f.io)).events,
+  ).toEqual([]);
+  record("queued", "attempt-2");
+  record("running", "attempt-2");
+  record("passed", "attempt-2");
+  expect(recordMergeResult(state(), system, merged, f.io).ok).toBe(true);
 });

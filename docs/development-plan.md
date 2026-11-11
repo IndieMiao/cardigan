@@ -535,6 +535,8 @@ C-47：完成申请经冲突、退回修改、新完成申请或新产出交付�
 
 P2a-1 的检查排队、运行、失败、超时及中断均不改变 Card 状态。新增 `merge_check_queued`、`merge_check_started`、`merge_check_finished`、`merge_check_requeued` 事件与系统时间线；卡片视图的可选 `merge_check` 从当前未被取代的完成申请最新检查事件派生，包含 attempt、候选／tree SHA、状态、逐项结果、摘要与安全日志引用。人可对 awaiting_merge 且当前完成申请已有失败／超时结果的卡片请求重新检查（`recheck_merge` 仅 human；PM Ops 按 C-66 经 `resolve_delegated_decision(option=recheck)` 发起同一重新排队）；返回执行阶段或形成新完成申请后，旧检查不得授权新合并。
 
+P2a-12 E：远程执行目标 SSH 不可达时，检查 attempt 进入终止状态 `executor_unreachable`，随后用新 attempt 保持候选 `queued`。此状态不代表代码失败，不授权合并，也不要求人手动重查；同完成申请／同树可自动重新检查。退避与项目级人工事项见 §12.5。
+
 **WorkItem（produce，产出型）**
 
 ```
@@ -1650,6 +1652,10 @@ P2a-1a 的检查队列按当前完成申请最后一条审核事件的时间跨�
 
 P2a-12 C（检查执行目标）：`distribute(project, execution?)` 可由调用方传入执行目标覆盖，不传时仍用 ServerGit 构造时的默认 execution，开发 Agent 的分发、交付验证和唤醒路径不变。合并检查按项目选目标：`merge-gate.yaml` 中项目配置了 `executor`（已解析为 `ProjectMergeGate.executor`）时，用它生成一份 agent-ssh 执行配置（SSH 目标、凭据、`agent_root` 来自执行目标，数据目录、共享组和 niceness 沿用默认 execution，机器名为执行目标名），候选分发和检查执行使用同一份；未配置或 `executor: local` 时仍用默认 execution，绝不在两者之间回退。覆盖目标的基础 clone 可能在另一台机器上，主机不在本机磁盘解析该路径，只按 `<agent_root>/repos/<project>` 做字面校验，经绑定该路径的 receive-pack 入口推送；该基础 clone 须由操作员预先建好，缺失时本次检查以启动前失败记录。检查日志仍写主机数据目录。
 
+P2a-12 E：显式配置远程 executor 的项目在候选分发或检查 SSH 连接失败（含主机密钥校验、认证失败）时，不回退本机，也不提供临时回退开关。每次失败结束当前 attempt 为 `executor_unreachable`，新 attempt 留在 `queued`，保持原审核时间的排队顺序并释放执行容量。项目按 executor 的事件记录累计不可达起点、失败次数和下次重试时间，依次等待 1、2、4、8、16、30 分钟，之后上限 30 分钟；重启后沿用这些记录，不重置预算。候选／tree 改变也不跳过执行目标的退避。`executor_unreachable` 不参与同树通过或失败结果的复用，连接恢复后自动执行，不需要人工重排。未配置 executor 的项目沿用原有失败处理。
+
+连续不可达超过 30 分钟时，调度轮在重试间隔内也检查阈值，按 §12.7 模式创建一条项目级、`blocked_work_items=[]` 的系统 HumanAction，提示远程检查机不可达、合并检查正在排队以及恢复后会自动继续。一次连续故障最多创建一条；人工关闭不重置重试计时。项目事件 `merge_executor_unreachable` 记录开始与各次失败的退避，`merge_executor_attention_required` 记录定时升级；已确认连通后写 `merge_executor_recovered`，同事务取消仍 open 的事项并写 `human_action_cancelled`。基础 clone 缺失或无效是独立环境错误：检查为 `failed`，提示初始化基础仓库后重新检查，不误记不可达或自动循环重试。原始 SSH／Git 诊断只在内存分类，事件、日志和 Needs You 仅保留固定说明与执行目标名称。
+
 ### 12.6 清理与对账
 
 - releaseAssignment 允许人、常驻 PM Ops 或 system；必须没有任何未结束 Run（含 queued/unknown）。system 只自动释放 done/cancelled 卡片的工作项 Assignment，不释放常驻 PM；PM Ops 只能手动释放 scope=work_item 的 Assignment；常驻 Assignment（包括 PM Office）仅允许 human 释放。Assignment 与 runtime 都经 release 迁移，保留工作目录、分支和运行时引用供清理；assignment_released 带 worktree_path/branch/token_id/runtime_ref。M4.4 在同一轮清理中作废该 Assignment 的所有 Token、释放终端。终端回收不依赖项目是否登记仓库或 Assignment 是否有 worktree；每轮也补查所有已释放 Assignment（包括由人释放的常驻项）。运行时仍存活时执行 force release，业务无未结束 Run 的前置条件仍由 domain 保证，不受 Harness 的 working 标签阻挡。terminal 不存在视为完成；失败逐项报告并在下一轮重试，不缓存失败或仅凭上次成功跳过补查，关闭未确认前不删除其 worktree。
@@ -1673,6 +1679,8 @@ P2a-1b 的主机配置在项目闸门下增加可选 `push`：`remote` 只接受
 启用推送时，主机将目标指纹（remote + branch）和分支作为可信项目设置载入；recordMergeResult 成功写 card_merged 的同一事务向项目事件流追加 merge_push_queued。队列按该流 seq 排序，不比较不同卡片的 seq；未配置时不追加队列，不自动补推启用前的历史结果。beginMergePush 只允许 system，先持久化 merge_push_started，再做外部 IO；重启重试同一 attempt 的同一 SHA，Git 已成功但记录前崩溃时再次推送为幂等操作。结果记录为 merge_pushed 或 merge_push_failed，带 SHA、分支、固定中文说明和有界类别，不改变 done 卡片；同 attempt 同结果重放无操作，异结果拒绝。
 
 rejected、auth 和 other 立即创建无阻塞工作项的项目级 HumanAction，进入 Needs You 并沿用路由提示 PM Office；期间后面的合并照常，推送暂停。人标记完成后只重试一次，可以将已有积压队列合为最新已记录合并提交（主机须实际验证前面的 SHA 都是它的祖先）；再次失败建新事项，不循环重试。network 按 1、2、4、8、16、30 分钟退避，之后上限 30 分钟；保持原队首，不跳过失败项。连续失败超过两小时只创建一条未决人工事项，仍按退避重试；恢复成功后取消尚未处理的网络事项，避免已恢复告警继续占据 Needs You。开始前将要推的范围固定到事件，结果只接受当前 attempt。首次成功后才处理后续范围；配置目标变化不会把旧目标队列误推到新远程。
+
+P2a-12 E 的远程合并检查复用上述非阻塞 HumanAction 和网络退避模式，但阈值按用户拍板固定为超过 30 分钟；恢复记录同事务取消未决事项，见 §12.5。检查不可达不改变外部推送队列的退避或两小时阈值。
 
 **只推合并循环产生的提交（C-94，试行发现 47，用户拍板 F1）。** 合并循环每次 publishMerge 成功都由 card_merged 记录 `previous_sha` 和 `merge_sha`；同一完成申请内多个交付的中间合并提交都在这段第一父链上，也算合并循环产生。识别只看 SHA，不看作者或提交者名字。
 
@@ -1918,6 +1926,8 @@ P2a-12 A：`ExecutionConfig` 的 `agent-ssh` 分支可选 `host`、`port`、`use
 P2a-12 C：`identityFile` 与 `knownHostsFile` 用同一条字面路径规则：单个绝对非根路径，拒绝空白、引号、反斜杠、控制／格式字符和 SSH 的 `%`／`$` 展开。`agentRoot` 在拼进任何远程命令（Git pack 入口、检查目录列举）之前，除这条规则外还须是规范化路径、不以 `/` 结尾、只含字母数字和 `. _ - /`（与 `merge-gate.yaml` 的 `agent_root` 规则一致），不合规时在生成 SSH 命令前拒绝。IPv6 字面量必须通过 `net.isIPv6` 严格校验（拒绝方括号、zone 和其他附加字符），作为 `user@host` 目标放在 `--` 之后且不加方括号：OpenSSH 按最后一个 `@` 切分用户，user 不允许 `@`、冒号和控制字符，端口只经 `-p` 传递，不存在 `host:port` 歧义；加方括号反而会让 OpenSSH 把方括号当成主机名的一部分而无法解析（实测 OpenSSH 10.2）。这是对 C-118/C-119 安全审核“加方括号”原文的有据偏差，经 C-127 q(176) 拍板。远程检查机只运行候选代码，不持有 Git 凭据；主机经执行目标自己的身份文件和固定 known_hosts（严格主机密钥检查）单向连接，对账只在远程执行只读的列目录和 `git worktree list`。
 
 ---
+
+P2a-12 E：远程检查连接失败始终保持原 executor，不允许自动或临时回退本机。SSH 退出码与 Git 传输诊断在主机侧分类，不把原始诊断、凭据路径或配置环境写入事件与 Needs You。不可达、恢复和定时升级的领域命令只接受同项目 system，不作为 MCP 工具暴露。
 
 ### 14.1 角色权限边界（V9a）
 
