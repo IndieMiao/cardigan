@@ -291,6 +291,27 @@ test("C-95: referenced images show as thumbnails that open the lightbox; other f
   ).toBe("lightbox-image");
 });
 
+test("C-95: merge confirmations show the completion request's attachments", async () => {
+  const data = page([
+    merge({
+      attachments: [attachment({ id: "F-7", original_filename: "after.png" })],
+    }),
+  ]);
+  render(
+    <NeedsYouPage
+      client={fakeClient({ needsYou: async () => data })}
+      projectId="p-1"
+    />,
+  );
+  const card = await screen.findByRole("article", { name: "合并确认 q(3)" });
+  expect(
+    within(within(card).getByRole("list", { name: "拍板附件" })).getByRole(
+      "button",
+      { name: "预览 after.png" },
+    ),
+  ).toBeTruthy();
+});
+
 test.each(["approve", "reject", "merge", "keep", "force_clean"])(
   "submits %s with the exact quote and reloads Needs You",
   async (option) => {

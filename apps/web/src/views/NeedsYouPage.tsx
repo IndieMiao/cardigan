@@ -364,6 +364,7 @@ function MergeConfirmation({
           之后不能再处理这一条；选择合并仍要通过合并闸门检查。
         </p>
       )}
+      <DecisionAttachments attachments={q.attachments} />
       {merge?.merge_gate_invalid && (
         <p className="error">合并闸门配置无效，请查看 server 启动日志</p>
       )}

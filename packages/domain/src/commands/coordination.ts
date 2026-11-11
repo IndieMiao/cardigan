@@ -16,6 +16,7 @@ import type {
 import { commentMentions } from "../mentions.js";
 import { decisionCategories, highRiskCategories } from "../preferences.js";
 import { extractReferences } from "../references.js";
+import { decisionAttachments } from "./decision-attachments.js";
 import {
   assignDecision,
   delegationAllowed,
@@ -36,6 +37,10 @@ import {
 import { resolveReviewLimit } from "./review-limit-resolution.js";
 
 export { extractReferences } from "../references.js";
+export {
+  decisionAttachments,
+  MAX_DECISION_ATTACHMENTS,
+} from "./decision-attachments.js";
 
 import { transition } from "../transitions.js";
 import {
@@ -244,11 +249,6 @@ export function reportBlocker(
     };
   });
 }
-/**
- * Upper bound on attachments one decision may reference (C-95). The product
- * limit is still open; keep it adjustable here only.
- */
-export const MAX_DECISION_ATTACHMENTS = 6;
 export type RequestDecisionParams = Pick<
   Decision,
   | "kind"
@@ -266,34 +266,6 @@ export type RequestDecisionParams = Pick<
   readonly target?: Extract<Decision, { kind: "approve" }>["target"];
   readonly attachment_ids?: readonly AttachmentId[];
 };
-/**
- * §6: a decision may only show attachments already on this project's decision
- * card or its affected cards; the project-scoped state rejects other projects.
- */
-function decisionAttachments(
-  d: CommandDraft,
-  ids: readonly AttachmentId[] | undefined,
-  cards: readonly CardId[],
-): readonly AttachmentId[] {
-  if (!ids?.length) return [];
-  ensure(
-    ids.length <= MAX_DECISION_ATTACHMENTS,
-    "validation_failed",
-    `A decision can reference at most ${MAX_DECISION_ATTACHMENTS} attachments`,
-  );
-  ensure(
-    new Set(ids).size === ids.length,
-    "validation_failed",
-    "Duplicate attachment reference",
-  );
-  for (const id of ids)
-    ensure(
-      cards.includes(d.get("attachments", id).card_id),
-      "validation_failed",
-      `Attachment ${id} does not belong to the decision's cards`,
-    );
-  return [...ids];
-}
 export function requestDecision(
   state: CommandState,
   actor: Actor,
@@ -611,6 +583,8 @@ export function resolveDelegatedDecision(
     escalate?: boolean;
     /** Needs You notice; required when PM Ops confirms a merge (§7.4). */
     notice?: string;
+    /** C-95: card attachments to show the human; only with `escalate`. */
+    attachment_ids?: readonly AttachmentId[];
   },
   ports: CommandPorts,
 ) {
@@ -636,6 +610,11 @@ export function resolveDelegatedDecision(
         : "Decision is not authorized for PM Ops",
     );
     text(p.rationale, "rationale");
+    ensure(
+      !p.attachment_ids?.length || !!p.escalate,
+      "validation_failed",
+      "attachment_ids 只能在交给人（escalate）时提供",
+    );
     if (failed && !p.escalate) {
       ensure(
         !confirmedFailed ||
@@ -677,9 +656,13 @@ export function resolveDelegatedDecision(
       "只有当前完成申请的最新检查失败或超时时才能重新检查",
     );
     if (p.escalate) {
+      const attachment_ids = decisionAttachments(d, p.attachment_ids, [
+        ...(q.card_id ? [q.card_id] : []),
+        ...q.affected_cards,
+      ]);
       handoffDecision(
         d,
-        q,
+        attachment_ids.length ? { ...q, attachment_ids } : q,
         `项目经理升级给你：${p.rationale}`,
         undefined,
         q.trigger === "merge_confirmation",

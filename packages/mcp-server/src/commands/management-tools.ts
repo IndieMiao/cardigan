@@ -112,6 +112,13 @@ const schemas = {
     rationale: text,
     escalate: z.boolean().optional(),
     notice: text.optional(),
+    attachment_ids: z
+      .array(text)
+      .max(MAX_DECISION_ATTACHMENTS)
+      .optional()
+      .describe(
+        "With escalate only: existing attachments on the decision's cards to show the human, in display order",
+      ),
   },
   triage_human_action: {
     human_action_id: id("human_action"),
