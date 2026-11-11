@@ -28,6 +28,7 @@ import type {
 import {
   acquireMergeCheckCapacity,
   createMergeCheckLog,
+  executorExecution,
   type MergeGateConfiguration,
   type ProjectMergeGate,
   runInTemporaryCheckout,
@@ -57,10 +58,14 @@ export interface MergeCheckGit {
         readonly tree_sha: string;
       })
   >;
-  distribute(project: CentralProject): Promise<void>;
+  distribute(
+    project: CentralProject,
+    execution?: ExecutionConfig,
+  ): Promise<void>;
 }
 export interface MergeCheckOptions {
   readonly configuration: MergeGateConfiguration;
+  /** Default target; a project's `executor` overrides it (P2a-12 C). */
   readonly execution: ExecutionConfig;
   readonly run?: typeof runInTemporaryCheckout;
 }
@@ -297,6 +302,15 @@ export class MergeChecks {
         noop: true,
       });
   }
+  /**
+   * P2a-12 C: the project's configured executor, else the default execution.
+   * Never falls back from a configured executor to the default.
+   */
+  private target(task: Task): ExecutionConfig {
+    return task.settings.executor
+      ? executorExecution(task.settings.executor, this.options.execution)
+      : this.options.execution;
+  }
   private async execute(task: Task, check: MergeCheckView): Promise<void> {
     let log: Awaited<ReturnType<typeof createMergeCheckLog>> | undefined;
     let result: Awaited<ReturnType<typeof runInTemporaryCheckout>>;
@@ -308,12 +322,14 @@ export class MergeChecks {
         attempt: check.attempt_id,
         env: task.settings.env,
       });
+      // Candidates go to the same target the checks then run on.
+      const execution = this.target(task);
       await this.serial(async () => {
-        await this.git().distribute(task.project);
+        await this.git().distribute(task.project, execution);
         if (!this.valid(task)) throw new Error("Merge target changed");
       });
       result = await (this.options.run ?? runInTemporaryCheckout)({
-        execution: this.options.execution,
+        execution,
         project: task.project.project_id,
         attempt: check.attempt_id,
         sha: check.candidate_sha,

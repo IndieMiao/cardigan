@@ -1,4 +1,8 @@
-import { loadMergeGateConfig, loadRunCapacityConfig } from "@cardigan/host";
+import {
+  executorExecution,
+  loadMergeGateConfig,
+  loadRunCapacityConfig,
+} from "@cardigan/host";
 import type { McpBackend } from "@cardigan/mcp-server";
 import {
   type Logger,
@@ -135,6 +139,13 @@ export async function startCardiganServer(
       store,
       dataDir: config.dataDir,
       execution,
+      // P2a-12 C: reconcile a project's remote check directories over SSH.
+      checkExecutor: (project_id) => {
+        const settings = mergeGate.forProject(project_id);
+        return settings.status === "enabled" && settings.executor
+          ? executorExecution(settings.executor, execution)
+          : undefined;
+      },
       ...(config.checkCleanupGraceMs === undefined
         ? {}
         : { checkCleanupGraceMs: config.checkCleanupGraceMs }),

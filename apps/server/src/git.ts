@@ -23,6 +23,7 @@ import {
   type RemoveWorktreeOutcome,
   type RepositoryLock,
   reconcile,
+  reconcileExecutorChecks,
   type SourceSync,
   type WorktreeDiff,
 } from "@cardigan/git-service";
@@ -39,7 +40,9 @@ import {
 } from "@cardigan/host";
 import type { DeliveryVerifierFor } from "@cardigan/mcp-server";
 import {
+  type AgentCheckListing,
   type AgentExecution,
+  agentListChecks,
   agentReceivePack,
   agentUploadPack,
   type ExecutionConfig,
@@ -89,7 +92,20 @@ export interface ServerGitOptions {
    * real fetch against a real Agent-layout clone.
    */
   readonly uploadPack?: (repository: string) => Promise<string>;
-  readonly receivePack?: (repository: string) => Promise<string>;
+  readonly receivePack?: (
+    repository: string,
+    execution: AgentExecution,
+  ) => Promise<string>;
+  /**
+   * P2a-12 C: the non-local merge-check executor of a project, if any. Its
+   * check directories live on another machine and are listed over SSH.
+   */
+  readonly checkExecutor?: (project_id: string) => AgentExecution | undefined;
+  /** Test seam for the SSH listing; production uses `agentListChecks`. */
+  readonly listChecks?: (
+    execution: AgentExecution,
+    project_id: string,
+  ) => Promise<AgentCheckListing>;
 }
 
 /** What the loops need; tests substitute a plain object. */
@@ -109,7 +125,11 @@ export interface MergeGit {
         readonly tree_sha: string;
       })
   >;
-  distribute?(project: CentralProject): Promise<void>;
+  /** `execution` overrides the server's default target (P2a-12 C). */
+  distribute?(
+    project: CentralProject,
+    execution?: ExecutionConfig,
+  ): Promise<void>;
   push?(
     project: CentralProject,
     input: { sha: string; included: readonly string[] },
@@ -362,11 +382,20 @@ export class ServerGit implements GitBinding {
     );
     return result.status === "merged" ? { ...result, tree_sha: tree } : result;
   }
-  async distribute(project: CentralProject): Promise<void> {
-    const execution = this.options.execution ?? {
-      mode: "local",
-      dataDir: this.options.dataDir,
-    };
+  /**
+   * Push candidates to an execution target's base clone. Without `override`
+   * this is the server's default execution, exactly as for development
+   * Agents; a merge check passes its project's executor instead (P2a-12 C).
+   */
+  async distribute(
+    project: CentralProject,
+    override?: ExecutionConfig,
+  ): Promise<void> {
+    const execution = override ??
+      this.options.execution ?? {
+        mode: "local",
+        dataDir: this.options.dataDir,
+      };
     const source = await this.central.ensureCentral(project);
     const repository = resolve(
       gitRoots(execution, this.options.dataDir).repositoriesRoot,
@@ -386,13 +415,15 @@ export class ServerGit implements GitBinding {
     if (execution.mode === "agent-ssh") {
       // Accepted Git deliveries already have a base clone. If it disappeared,
       // fail this attempt; never recreate an Agent repository as the host.
+      // An overriding executor's clone may be on another machine (P2a-12 C).
       await this.transport.pushBaseline(
         source,
         repository,
         await (
           this.options.receivePack ??
           ((path: string) => agentReceivePack(execution, path))
-        )(repository),
+        )(repository, execution),
+        execution === this.options.execution ? undefined : execution.agentRoot,
       );
     } else {
       const local = new LocalGitTransport();
@@ -491,22 +522,33 @@ export class ServerGit implements GitBinding {
     deliveries: readonly Delivery[],
     readChecks?: () => ReconcileChecks,
   ): Promise<readonly ReconcileFinding[]> {
+    // The local scan (readdir) always runs: it covers the default execution.
     const state = await this.worktrees.listWorktreeState(project);
-    // Read ownership after filesystem IO so a newly queued check is protected.
-    const checks = readChecks?.();
-    return reconcile(
-      state,
-      assignments,
-      deliveries,
-      checks && {
-        ...checks,
-        ...(this.options.checkCleanupGraceMs === undefined
-          ? {}
-          : {
-              cleanupGraceMs: this.options.checkCleanupGraceMs,
-            }),
-      },
-    );
+    const executor = this.options.checkExecutor?.(project.project_id);
+    const remote =
+      executor &&
+      (await this.worktrees.listExecutorChecks(project, {
+        name: executor.machine,
+        agentRoot: executor.agentRoot,
+        list: (project_id) =>
+          (this.options.listChecks ?? agentListChecks)(executor, project_id),
+      }));
+    // Read ownership after all directory IO so a newly queued check is protected.
+    const read = readChecks?.();
+    const checks = read && {
+      ...read,
+      ...(this.options.checkCleanupGraceMs === undefined
+        ? {}
+        : {
+            cleanupGraceMs: this.options.checkCleanupGraceMs,
+          }),
+    };
+    return [
+      ...reconcile(state, assignments, deliveries, checks),
+      ...(remote
+        ? reconcileExecutorChecks(remote, project.project_id, checks)
+        : []),
+    ];
   }
   async removeWorktree(
     input: RemoveWorktreeInput,

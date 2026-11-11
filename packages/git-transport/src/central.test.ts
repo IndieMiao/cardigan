@@ -177,6 +177,43 @@ test("incremental Agent distribution includes merge candidates without moving th
   expect(await git(base, "rev-parse", "HEAD")).toBe(previous);
 });
 
+test("an executor target on another machine is checked lexically and reached only through the bound receive-pack", async () => {
+  const repo = await f.central.ensureCentral(f.project),
+    actual = join(f.root, "elsewhere.git");
+  await git(f.root, "init", "-q", "--bare", actual);
+  const sha = await commit(f.source, "candidate");
+  await f.transport.fetchRefs(repo, f.source, [
+    "refs/heads/main:refs/cardigan/candidates/D-3",
+  ]);
+  const transport = new CentralGitTransport({
+    dataDir: f.dataDir,
+    agentRoot: join(f.root, "agent"),
+  });
+  const bound = `sh -c 'exec git receive-pack ${actual}' --`;
+  // The executor root does not exist on this disk: nothing is resolved here.
+  await transport.pushBaseline(
+    repo,
+    "/srv/remote-agent/repos/project",
+    bound,
+    "/srv/remote-agent",
+  );
+  expect(await git(actual, "rev-parse", "refs/cardigan/candidates/D-3")).toBe(
+    sha,
+  );
+  for (const [root, target] of [
+    ["/srv/remote-agent", "/srv/remote-agent/worktrees/project"],
+    ["/srv/remote-agent", "/srv/remote-agent/repos/../repos/project"],
+    ["/srv/remote-agent", "/srv/remote-agent/repos/-project"],
+    ["/srv/remote-agent", "/srv/other/repos/project"],
+    ["/srv/remote-agent/", "/srv/remote-agent/repos/project"],
+    ["relative", "relative/repos/project"],
+    ["/", "/repos/project"],
+  ])
+    await expect(
+      transport.pushBaseline(repo, target, bound, root),
+    ).rejects.toThrow(/Agent repository/);
+});
+
 test("a missing initial baseline never publishes a partial center and can be retried after the first commit", async () => {
   const source = join(f.root, "empty");
   await git(f.root, "init", "-b", "main", source);

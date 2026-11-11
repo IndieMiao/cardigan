@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
 import { loadMergeGateConfig } from "./merge-gate-config.js";
+import { executorExecution } from "./merge-gate-executors.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -323,3 +324,51 @@ test.each(["da ta", "data%h", "data$X", "data'q"])(
     expect(config.errors.join(" ")).not.toContain(dataName);
   },
 );
+
+test("executorExecution targets the executor over agent-ssh and keeps host-side fields of the default execution", async () => {
+  const f = await fixture();
+  await f.save({
+    executors: { "cardigan-ci": { ...ci, port: 2222, user: "runner" } },
+    projects: { p: { checks, executor: "cardigan-ci" } },
+  });
+  const settings = (await f.load()).forProject("p");
+  if (settings.status !== "enabled" || !settings.executor)
+    throw new Error("expected an executor");
+  const base = {
+    mode: "agent-ssh",
+    dataDir: f.dataDir,
+    agentRoot: "/var/lib/cardigan-agent",
+    gid: 2001,
+    machine: "cardigan-agent",
+    identityFile: "/host/agent.key",
+    knownHostsFile: "/host/agent.known_hosts",
+    agentNice: 10,
+  } as const;
+  const execution = executorExecution(settings.executor, base);
+  expect(execution).toEqual({
+    mode: "agent-ssh",
+    dataDir: f.dataDir,
+    agentRoot: "/srv/cardigan-agent",
+    gid: 2001,
+    machine: "cardigan-ci",
+    identityFile: join(f.ssh, "ci.key"),
+    knownHostsFile: join(f.ssh, "ci.known_hosts"),
+    host: "cardigan-ci",
+    port: 2222,
+    user: "runner",
+    hostKeyAlias: "cardigan-ci",
+    agentNice: 10,
+  });
+  // The default execution is never modified.
+  expect(base.agentRoot).toBe("/var/lib/cardigan-agent");
+  const fromLocal = executorExecution(settings.executor, {
+    mode: "local",
+    dataDir: f.dataDir,
+  });
+  expect(fromLocal).toMatchObject({
+    mode: "agent-ssh",
+    dataDir: f.dataDir,
+    agentRoot: "/srv/cardigan-agent",
+  });
+  expect(fromLocal).not.toHaveProperty("agentNice");
+});

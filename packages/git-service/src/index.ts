@@ -25,6 +25,7 @@ import type {
 } from "./central.js";
 import { defaultRepositoryLock, type RepositoryLock } from "./lock.js";
 import {
+  type ExecutorCheckState,
   type ReconcileFinding,
   reconcile as reconcileState,
   type WorktreeState,
@@ -48,10 +49,12 @@ export {
 } from "./lock.js";
 export {
   DEFAULT_CHECK_CLEANUP_GRACE_MS,
+  type ExecutorCheckState,
   type ReconcileChecks,
   type ReconcileFinding,
   type ReconcileFindingKind,
   reconcile,
+  reconcileExecutorChecks,
   type WorktreeState,
 } from "./reconcile.js";
 
@@ -132,6 +135,17 @@ async function subdirectories(path: string): Promise<readonly string[]> {
     if (code(error) === "ENOENT") return [];
     throw error;
   }
+}
+/** A non-local merge-check executor; `list` runs over its SSH entry. */
+export interface ExecutorCheckScanner {
+  readonly name: string;
+  /** Absolute POSIX path on the executor machine. */
+  readonly agentRoot: string;
+  /** Throws on any failure; must never report a failure as empty. */
+  list(project_id: string): Promise<{
+    readonly directories: readonly string[];
+    readonly registered: readonly string[];
+  }>;
 }
 /** Application policy; Git process/file IO is injected through the domain port. */
 export class GitWorktreeService {
@@ -558,6 +572,32 @@ export class GitWorktreeService {
       source_sync: await this.central.sourceStatus(project),
       pinned: [...pinned].map(([delivery_id, sha]) => ({ delivery_id, sha })),
     };
+  }
+
+  /**
+   * P2a-12 C: a non-local merge-check executor's check directories. The host
+   * cannot read that disk, so the injected SSH listing replaces `readdir`;
+   * any listing failure becomes `unreachable`, never an empty directory.
+   */
+  async listExecutorChecks(
+    project: CentralProject,
+    executor: ExecutorCheckScanner,
+  ): Promise<ExecutorCheckState> {
+    const checks_root = `${executor.agentRoot}/checks/${project.project_id}`;
+    try {
+      const listing = await executor.list(project.project_id);
+      return {
+        executor: executor.name,
+        checks_root,
+        listing: { status: "listed", ...listing },
+      };
+    } catch {
+      return {
+        executor: executor.name,
+        checks_root,
+        listing: { status: "unreachable" },
+      };
+    }
   }
 
   /** Gather the state and run the pure `reconcile` (report only, never delete). */
