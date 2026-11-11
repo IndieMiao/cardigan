@@ -29,6 +29,7 @@ export const card = (overrides: Overrides<Card> = {}): Card =>
     id: CARD_ID,
     project_id,
     title: "Routing card",
+    source: { kind: "quote", text: "Routing request" } satisfies Card["source"],
     template: "dev",
     status: "in_progress",
     ...overrides,

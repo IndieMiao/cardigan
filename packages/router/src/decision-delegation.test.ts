@@ -179,7 +179,7 @@ test("a failed check on a confirmed merge wakes PM Ops unless the card is human-
     routeEvent({
       event: event("merge_check_finished", { status, completion_id }),
       snapshot: snapshot({
-        cards: [card({ source: { kind: "human" } } as never)],
+        cards: [card()],
         decisions,
       }),
     }).notifications;
@@ -203,3 +203,38 @@ test("a failed check on a confirmed merge wakes PM Ops unless the card is human-
   });
   expect(finished("failed", [q, sensitive])).toEqual([]);
 });
+
+test.each(["permission", "scope_change"])(
+  "a card sourced from a %s decision keeps real merge failures with the human",
+  (category) => {
+    const source = decision({
+      id: "q(2)",
+      card_id: undefined,
+      affected_cards: [],
+      category,
+      status: "resolved",
+    });
+    const q = decision({
+      decider: "human",
+      trigger: "merge_confirmation",
+      kind: "approve",
+      status: "resolved",
+      target: { delivery_id: "D-9" },
+      resolution: { option: "merge" },
+    });
+    expect(
+      routeEvent({
+        event: event("merge_check_finished", {
+          status: "failed",
+          completion_id: "D-9",
+        }),
+        snapshot: snapshot({
+          cards: [
+            card({ source: { kind: "decision", decision_id: source.id } }),
+          ],
+          decisions: [q, source],
+        }),
+      }).notifications,
+    ).toEqual([]);
+  },
+);
