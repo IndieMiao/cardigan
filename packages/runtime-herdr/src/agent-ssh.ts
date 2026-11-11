@@ -1,6 +1,7 @@
+import { spawn } from "node:child_process";
 import { lstat } from "node:fs/promises";
 import { isIP } from "node:net";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, posix, resolve } from "node:path";
 import { fail, type HcClient } from "./client.js";
 import { type ExecutionConfig, shellQuote } from "./execution.js";
 
@@ -30,15 +31,34 @@ function validateSshConfig(config: AgentConfig) {
     (!Number.isInteger(config.port) || config.port < 1 || config.port > 65535)
   )
     fail("invalid_launch", "SSH port must be an integer from 1 to 65535");
-  // -o values have their own parser and expand tokens/environment variables.
-  // Require one literal absolute path, not a list or an expanded filename.
-  if (
-    typeof config.knownHostsFile !== "string" ||
-    !isAbsolute(config.knownHostsFile) ||
-    resolve(config.knownHostsFile) === "/" ||
-    /[\s\p{Cc}\p{Cf}"'\\%$]/u.test(config.knownHostsFile)
-  )
+  // -i and -o values expand %-tokens and ${VAR}; -o values have their own
+  // parser. Require one literal absolute path, not a list or expanded name.
+  if (!literalPath(config.knownHostsFile))
     fail("invalid_launch", "Invalid SSH known_hosts path");
+  if (!literalPath(config.identityFile))
+    fail("invalid_launch", "Invalid SSH identity path");
+  // agentRoot is joined into remote commands (pack services, check listing):
+  // the literal-path rule plus merge-gate.yaml's agent_root charset, and
+  // normalized so the joined path is the checked one.
+  if (
+    !literalPath(config.agentRoot) ||
+    !/^\/[A-Za-z0-9._/-]+$/u.test(config.agentRoot) ||
+    posix.normalize(config.agentRoot) !== config.agentRoot ||
+    config.agentRoot.endsWith("/")
+  )
+    fail("invalid_launch", "Invalid SSH agent root path");
+}
+/**
+ * One literal absolute non-root path: no whitespace, control/format
+ * characters, quotes, backslashes or the `%` / `$` expansions of ssh.
+ */
+function literalPath(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    isAbsolute(value) &&
+    resolve(value) !== "/" &&
+    !/[\s\p{Cc}\p{Cf}"'\\%$]/u.test(value)
+  );
 }
 function sshArguments(config: AgentConfig): string[] {
   validateSshConfig(config);
@@ -169,6 +189,8 @@ async function agentPack(
   repository: string,
   service: "upload-pack" | "receive-pack",
 ): Promise<string> {
+  // Validate agentRoot before it is used to bound the repository path.
+  if (config.mode === "agent-ssh") validateSshConfig(config);
   if (
     config.mode !== "agent-ssh" ||
     !isAbsolute(repository) ||
@@ -182,4 +204,96 @@ async function agentPack(
   const remote = `GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -c ${shellQuote(`safe.directory=${repository}`)} -c core.hooksPath=/dev/null -c transfer.fsckObjects=true ${service} -- ${shellQuote(repository)}`;
   // Ignore Git's appended path; the command is bound to the host-selected repository.
   return `sh -c ${shellQuote(`exec ${agentSshCommand(config)} ${shellQuote(remote)}`)} --`;
+}
+
+/** Read-only listing of one project's merge-check directories on an executor. */
+export interface AgentCheckListing {
+  /** Existing `<agentRoot>/checks/<project>/<attempt>/worktree` directories. */
+  readonly directories: readonly string[];
+  /** Worktrees registered in the executor's base clone below the checks root. */
+  readonly registered: readonly string[];
+}
+export type AgentListRunner = (
+  file: string,
+  args: readonly string[],
+  timeoutMs: number,
+) => Promise<{ readonly code: number | null; readonly stdout: Buffer }>;
+const LIST_SCRIPT = [
+  "set -u",
+  // A missing checks root is an empty listing; anything else unreadable fails.
+  'if [ -d "$1" ]; then find "$1" -mindepth 2 -maxdepth 2 -name worktree -type d -print0 || exit 3; elif [ -e "$1" ]; then exit 3; fi',
+  "printf '%s\\0' --",
+  'if [ -d "$2" ]; then git -c "safe.directory=$2" -c core.hooksPath=/dev/null -C "$2" worktree list --porcelain -z || exit 4; fi',
+  "printf '%s\\0' --end",
+].join("\n");
+const runListing: AgentListRunner = (file, args, timeoutMs) =>
+  new Promise((resolvePromise, reject) => {
+    const child = spawn(file, args, {
+      env: { PATH: "/usr/local/bin:/usr/bin:/bin" },
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: timeoutMs,
+      killSignal: "SIGKILL",
+    });
+    const chunks: Buffer[] = [];
+    let size = 0;
+    child.stdout.on("data", (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > 16 * 1024 * 1024) child.kill("SIGKILL");
+      else chunks.push(chunk);
+    });
+    child.once("error", reject);
+    child.once("close", (code) =>
+      resolvePromise({ code, stdout: Buffer.concat(chunks) }),
+    );
+  });
+/**
+ * P2a-12 C: list a project's check directories over the executor's pinned SSH
+ * entry. Any failure (connection, permission, truncated output) throws: the
+ * caller must report "unreachable", never treat it as an empty directory.
+ */
+export async function agentListChecks(
+  config: AgentConfig,
+  project: string,
+  options: { readonly run?: AgentListRunner; readonly timeoutMs?: number } = {},
+): Promise<AgentCheckListing> {
+  if (
+    config.mode !== "agent-ssh" ||
+    !/^[a-zA-Z0-9_][a-zA-Z0-9._-]*$/u.test(project)
+  )
+    fail("invalid_launch", "Check listing requires an agent-ssh project");
+  const checks = posix.join(config.agentRoot, "checks", project),
+    clone = posix.join(config.agentRoot, "repos", project);
+  const command = await agentProcessCommand(config, [
+    "GIT_CONFIG_NOSYSTEM=1",
+    "GIT_CONFIG_GLOBAL=/dev/null",
+    "sh",
+    "-c",
+    LIST_SCRIPT,
+    "sh",
+    checks,
+    clone,
+  ]);
+  const { code, stdout } = await (options.run ?? runListing)(
+    command.file,
+    command.args,
+    options.timeoutMs ?? 60_000,
+  );
+  const fields = stdout.toString("utf8").split("\0");
+  // Complete output ends with the trailer and one empty field after its NUL.
+  if (code !== 0 || fields.pop() !== "" || fields.pop() !== "--end")
+    fail("runtime_unavailable", "Executor check listing failed");
+  const separator = fields.indexOf("--");
+  if (separator < 0)
+    fail("runtime_unavailable", "Executor check listing failed");
+  const below = (path: string) =>
+    path.startsWith(`${checks}/`) && posix.normalize(path) === path;
+  return {
+    directories: fields.slice(0, separator).filter(below).sort(),
+    registered: fields
+      .slice(separator + 1)
+      .filter((field) => field.startsWith("worktree "))
+      .map((field) => field.slice("worktree ".length))
+      .filter(below)
+      .sort(),
+  };
 }
