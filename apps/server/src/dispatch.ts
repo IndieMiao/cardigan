@@ -19,6 +19,7 @@ import {
   decisionFollowupPrompt,
   dispatchRecoveryFailed,
   dispatchRun,
+  hostOpsPending,
   isStandingPm,
   lastRunActivity,
   obsoleteDispatchAttention,
@@ -64,9 +65,12 @@ import {
   type StandingResolver,
 } from "./dispatch-inbox.js";
 import { retryDispatchedRuns } from "./dispatch-retry.js";
+import { patrolHostOps } from "./host-ops-patrol.js";
 import { escalateReviewLimitWaits } from "./review-limit-attention.js";
 
 export interface DispatcherOptions {
+  readonly hostOpsTick?: () => Promise<void>;
+  readonly hostOpsPatrolIntervalMs?: number;
   readonly store: Store;
   readonly runtime: Runtime;
   readonly clock?: Clock;
@@ -221,6 +225,7 @@ export class Dispatcher {
   // Keep the legacy argument for callers; scheduling always spans all projects.
   tick(_project?: ProjectId): Promise<void> {
     const next = this.serial.then(async () => {
+      await this.options.hostOpsTick?.();
       // Route every project before choosing any winner. Project enumeration is
       // not a scheduling priority, even when a caller requests a project tick.
       const candidates: Candidate[] = [];
@@ -248,6 +253,12 @@ export class Dispatcher {
   }
   private async project(project: ProjectId): Promise<Candidate[]> {
     const { store, standing } = this.options;
+    patrolHostOps(
+      store,
+      project,
+      this.clock,
+      this.options.hostOpsPatrolIntervalMs,
+    );
     store.uow.run((tx) => {
       const effect = unwrap(
         remindDecisionFollowups(
@@ -356,6 +367,7 @@ export class Dispatcher {
     );
   }
   private busy(state: CommandState, a: Assignment) {
+    if (hostOpsPending(state.events, a.id)) return true;
     const queued = this.queued(state, a);
     return state.runs.some(
       (r) =>

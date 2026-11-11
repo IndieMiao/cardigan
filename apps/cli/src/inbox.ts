@@ -1,7 +1,5 @@
 import type { Assignment, Notification } from "@cardigan/domain";
-import { reviewLimitAttention } from "@cardigan/domain";
-import { readRunQueue } from "@cardigan/host";
-import { loadCommandState } from "@cardigan/mcp-server";
+import { readAttention } from "@cardigan/host";
 import {
   backfillStandingModesInTransaction,
   openStore,
@@ -164,40 +162,8 @@ export function attentionCommand(args: readonly string[], io: CliIo): number {
   try {
     const project_id = resolveProject(store, io, flags.project);
     const now = new Date().toISOString();
-    const attention = store.uow.read((tx) =>
-      reviewLimitAttention(loadCommandState(tx, project_id), now),
-    );
-    const escalated = store
-      .listNotifications({ project_id })
-      .filter((notification) =>
-        ["needs_attention", "delivery_failed"].includes(notification.status),
-      );
-    const lost = store.uow.read((tx) =>
-      tx.assignments
-        .list(project_id)
-        .filter(
-          (candidate) =>
-            candidate.status === "active" &&
-            ["lost", "unknown"].includes(candidate.runtime_state),
-        ),
-    );
-    const paused = store.uow.read((tx) =>
-      tx.assignments
-        .list(project_id)
-        .filter(
-          (a) =>
-            a.scope === "standing" &&
-            a.role_id === "pm" &&
-            a.status === "suspended",
-        ),
-    );
-    const queued = readRunQueue(store).filter(
-      (run) => run.project_id === project_id,
-    );
-    // M4.4: reconciliation findings and a diverged registered source.
-    const findings = store.listReconcileFindings(project_id, {
-      openOnly: true,
-    });
+    const { attention, escalated, lost, paused, queued, findings } =
+      readAttention(store, project_id, now);
     if (
       attention.length === 0 &&
       escalated.length === 0 &&

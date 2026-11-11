@@ -41,6 +41,8 @@ import {
  * `stop()` (loop + monitor drain) → close the MCP endpoint → close the Store.
  */
 export interface ControlPlaneOptions {
+  readonly hostOpsTick?: () => Promise<void>;
+  readonly hostOpsPatrolIntervalMs?: number;
   readonly store: Store;
   readonly runtime: DispatcherOptions["runtime"] &
     RuntimeMonitorOptions["runtime"];
@@ -147,6 +149,10 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
   const clock = options.clock ?? dispatcherClock;
   const standing = options.standing ?? standingResolver(options.store);
   const dispatcher = new Dispatcher({
+    ...(options.hostOpsTick ? { hostOpsTick: options.hostOpsTick } : {}),
+    ...(options.hostOpsPatrolIntervalMs === undefined
+      ? {}
+      : { hostOpsPatrolIntervalMs: options.hostOpsPatrolIntervalMs }),
     store: options.store,
     runtime: options.runtime,
     clock,

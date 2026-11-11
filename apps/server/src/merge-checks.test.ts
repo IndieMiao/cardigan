@@ -380,3 +380,70 @@ test.each(["failed", "timed_out"] as const)(
     );
   },
 );
+
+test("fake host_ops MCP recheck retries a failed check and the existing merge gate passes it", async () => {
+  const { f, scenario, check } = await fixture();
+  const c = controller(f);
+  c.run.mockImplementationOnce(async (input) => {
+    input.onReady?.();
+    return {
+      status: "failed",
+      checks: [{ name: "test", status: "failed", exit_code: 1 }],
+      cleanup_errors: [],
+    };
+  });
+  await c.gate.tick([f.project_id]);
+  expect(check()?.status).toBe("failed");
+  const { createHostOpsAssignment, HOST_OPS_ROLE_TOOLS } = await import(
+    "@cardigan/domain"
+  );
+  const { HostOpsService } = await import("@cardigan/host");
+  const { authenticate, hostOpsTools, unwrap } = await import(
+    "@cardigan/mcp-server"
+  );
+  f.store.uow.run((tx) =>
+    tx.roles.put(f.project_id, {
+      role_id: "host_ops",
+      role_version: 1,
+      allowed_tools: HOST_OPS_ROLE_TOOLS,
+      capabilities: [],
+    }),
+  );
+  const ops = f.apply((s, a, p) =>
+    createHostOpsAssignment(s, a, {}, p),
+  ).assignment;
+  const issued = f.store.issueToken({
+    project_id: f.project_id,
+    assignment_id: ops.id,
+    role: { role_version: 1, allowed_tools: HOST_OPS_ROLE_TOOLS },
+  });
+  const host = new HostOpsService({
+    store: f.store,
+    runtime: {} as never,
+    snapshot: async () => {
+      throw new Error("Recheck must not launch terminals");
+    },
+    settings: () => ({ merge_gate_enabled: true }),
+    clock: f.clock,
+  });
+  const tool = required(
+    hostOpsTools({ hostOps: host.tools }).find(
+      (t) => t.name === "host_ops_recheck_merge",
+    ),
+  );
+  await tool.handler(
+    { card_id: scenario.card.id, idempotency_key: "retry-check" },
+    { store: f.store, identity: unwrap(authenticate(f.store, issued.token)) },
+  );
+  expect(check()?.status).toBe("queued");
+  expect(
+    f.state().events.find((e) => e.type === "host_ops_action_taken"),
+  ).toMatchObject({
+    actor: { assignment_id: ops.id },
+    payload: { tool: "host_ops_recheck_merge", target_id: scenario.card.id },
+  });
+  await c.gate.tick([f.project_id]);
+  expect(check()?.status).toBe("passed");
+  expect(c.git.publish).not.toHaveBeenCalled();
+  expect(c.errors).not.toHaveBeenCalled();
+});

@@ -2,7 +2,7 @@ import { deriveCardStatus } from "../derived.js";
 import type { Employee, EmployeeActivity } from "../employee.js";
 import type * as E from "../entities.js";
 import type { DomainError, ErrorCode, Result } from "../errors.js";
-import { HOST_OPS_FORBIDDEN_TOOLS } from "../host-ops.js";
+import { HOST_OPS_FORBIDDEN_TOOLS, hostOpsPending } from "../host-ops.js";
 import type * as I from "../ids.js";
 import type { Member } from "../member.js";
 import type { Clock, IdAllocator } from "../ports.js";
@@ -82,6 +82,7 @@ type CommandName =
   | "pause_standing_assignment"
   | "rotate_standing_pm"
   | "create_host_ops_assignment"
+  | "manage_host_ops_action"
   | "queue_run"
   | "dispatch_run"
   | "acknowledge_run"
@@ -167,7 +168,7 @@ export class CommandDraft {
   constructor(
     readonly state: CommandState,
     readonly actor: E.Actor,
-    tool: CommandName,
+    readonly tool: CommandName,
     readonly ports?: CommandPorts,
   ) {
     ensure(
@@ -187,6 +188,7 @@ export class CommandDraft {
       "pause_standing_assignment",
     ].includes(tool);
     const systemOnly = [
+      "manage_host_ops_action",
       "manage_inactive_run_stop",
       "auto_confirm_merge",
       "recover_dispatch",
@@ -199,10 +201,24 @@ export class CommandDraft {
       "record_merge_push_result",
       "request_worktree_cleanup",
     ].includes(tool);
+    const hostTool = (
+      {
+        recheck_merge: "host_ops_recheck_merge",
+        abort_dispatch: "host_ops_cancel_run",
+        pause_standing_assignment: "host_ops_restart_standing_pm",
+      } as const
+    )[tool as "recheck_merge" | "abort_dispatch" | "pause_standing_assignment"];
     ensure(
-      tool !== "recheck_merge" || actor.kind === "human",
+      !tool.startsWith("host_ops_") || actor.kind === "assignment",
       "unauthorized",
-      "Only the human can request another merge check",
+      "Host operations tools require an authenticated host_ops Assignment",
+    );
+    ensure(
+      tool !== "recheck_merge" ||
+        actor.kind === "human" ||
+        (actor.kind === "assignment" && actor.role_id === "host_ops"),
+      "unauthorized",
+      "Only the human or authorized host_ops can request another merge check",
     );
     ensure(
       !systemOnly || actor.kind === "system",
@@ -219,7 +235,9 @@ export class CommandDraft {
       "Actor cannot access this project",
     );
     ensure(
-      !hostOnly || actor.kind !== "assignment",
+      !hostOnly ||
+        actor.kind !== "assignment" ||
+        (hostTool !== undefined && actor.role_id === "host_ops"),
       "unauthorized",
       "Only the host can manage launch runs",
     );
@@ -260,8 +278,8 @@ export class CommandDraft {
           (tool === "acknowledge_run" ||
             tool === "request_merge" ||
             tool === "release_assignment" ||
-            (role.allowed_tools.includes(tool as E.ToolName) &&
-              actor.allowed_tools.includes(tool as E.ToolName))),
+            (role.allowed_tools.includes(hostTool ?? (tool as E.ToolName)) &&
+              actor.allowed_tools.includes(hostTool ?? (tool as E.ToolName)))),
         "forbidden_tool",
         `Tool ${tool} is not allowed`,
       );
@@ -377,7 +395,8 @@ export class CommandDraft {
   ownRun(id: I.RunId): E.Run {
     const run = this.get("runs", id);
     ensure(
-      !run.dispatch_stop?.stopping,
+      !run.dispatch_stop?.stopping &&
+        !hostOpsPending(this.state.events, run.assignment_id),
       "illegal_transition",
       "Run terminal stop is in progress",
     );

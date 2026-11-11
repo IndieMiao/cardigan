@@ -231,196 +231,202 @@ export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
   return command(state, actor, "list_needs_you", undefined, (d) => {
     d.pm();
     d.projectAccess();
-    const now = clock?.now();
-    const why = (text: string) => [...text].slice(0, 40).join("");
-    const view = (q: Decision) => {
-      const failedConfirmation = failedConfirmedMergeCheck(state, q);
-      const followup =
-        !failedConfirmation && decisionFollowupNeedsHuman(state, q);
-      // Project decisions have no card timeline; their request event is the creation fact.
-      const opened =
-        state.events
-          .filter(
-            (e) =>
-              e.type === "decision_requested" &&
-              typeof e.payload === "object" &&
-              e.payload !== null &&
-              "decision_id" in e.payload &&
-              e.payload.decision_id === q.id,
-          )
-          .sort((a, b) => a.created_at.localeCompare(b.created_at))[0]
-          ?.created_at ??
-        state.timeline
-          .filter((e) => e.decision_id === q.id)
-          .sort((a, b) => a.event_seq - b.event_seq)[0]?.created_at;
-      const elapsed =
-        opened && now ? Date.parse(now) - Date.parse(opened) : Number.NaN;
-      return {
-        ...q,
-        ...(failedConfirmation
-          ? {
-              options: q.options.filter((o) => o.key === "request_changes"),
-              recommended: "request_changes",
-            }
-          : {}),
-        ...(followup
-          ? {
-              followup_notice:
-                "拍板已完成，尚无落实结果；当前无 PM Ops 接手，请安排跟进。",
-            }
-          : {}),
-        why: why(
-          failedConfirmation
-            ? "合并检查失败或超时，可退回修改或重新检查"
-            : q.question,
-        ),
-        opened_at: opened ?? null,
-        waited_ms: Number.isFinite(elapsed) ? Math.max(0, elapsed) : null,
-        related_cards: relatedCards(d.list("cards"), q),
-        merge_confirmation: mergeConfirmation(
-          q,
-          d.list("work_items"),
-          d.list("deliveries"),
-          d.list("reviews"),
-        ),
-      };
-    };
+    return needsYouView(d, clock?.now());
+  });
+}
+
+/** Shared read model; callers enforce their own entry-point authorization. */
+export function needsYouView(d: CommandDraft, now?: string) {
+  const state = d.state,
+    actor = d.actor;
+  const why = (text: string) => [...text].slice(0, 40).join("");
+  const view = (q: Decision) => {
+    const failedConfirmation = failedConfirmedMergeCheck(state, q);
+    const followup =
+      !failedConfirmation && decisionFollowupNeedsHuman(state, q);
+    // Project decisions have no card timeline; their request event is the creation fact.
+    const opened =
+      state.events
+        .filter(
+          (e) =>
+            e.type === "decision_requested" &&
+            typeof e.payload === "object" &&
+            e.payload !== null &&
+            "decision_id" in e.payload &&
+            e.payload.decision_id === q.id,
+        )
+        .sort((a, b) => a.created_at.localeCompare(b.created_at))[0]
+        ?.created_at ??
+      state.timeline
+        .filter((e) => e.decision_id === q.id)
+        .sort((a, b) => a.event_seq - b.event_seq)[0]?.created_at;
+    const elapsed =
+      opened && now ? Date.parse(now) - Date.parse(opened) : Number.NaN;
     return {
-      attention: now ? reviewLimitAttention(state, now) : [],
-      ...(isPmOps(d)
+      ...q,
+      ...(failedConfirmation
         ? {
-            pm_queue: {
-              decisions: d
-                .list("decisions")
-                .filter(
-                  (q) =>
-                    q.decider === "role:pm" &&
-                    ["open", "provisional"].includes(q.status),
-                ),
-              // §7.4: why PM Ops cannot choose merge yet (empty = allowed).
-              merge_blockers: Object.fromEntries(
-                d
-                  .list("decisions")
-                  .filter(
-                    (q) =>
-                      q.decider === "role:pm" &&
-                      q.trigger === "merge_confirmation" &&
-                      q.status === "open",
-                  )
-                  .map((q) => [q.id, pmMergeBlockers(state, q)]),
-              ),
-              // P2a-1 §2.6: failed or timed-out checks PM Ops may return
-              // (request_changes) or recheck, including confirmed merges.
-              failed_merge_checks: d.list("decisions").flatMap((q) => {
-                const check = pmFailedMergeCheck(state, q);
-                return check
-                  ? [
-                      {
-                        decision_id: q.id,
-                        card_id: q.card_id,
-                        confirmation_status: q.status,
-                        check,
-                        options: ["request_changes", "recheck"],
-                      },
-                    ]
-                  : [];
-              }),
-              human_actions: d
-                .list("human_actions")
-                .filter((h) => h.status === "open" && h.triage === "pm_ops"),
-            },
+            options: q.options.filter((o) => o.key === "request_changes"),
+            recommended: "request_changes",
           }
         : {}),
-      incidents: d
-        .list("assignments")
-        .filter(
-          (a) =>
-            a.status === "active" &&
-            ["unknown", "lost"].includes(a.runtime_state),
-        )
-        .map((a) => {
-          const fact = (type: string) =>
-            state.events.findLast(
-              (e) =>
-                e.type === type &&
-                typeof e.payload === "object" &&
-                e.payload !== null &&
-                "assignment_id" in e.payload &&
-                e.payload.assignment_id === a.id,
-            );
-          return {
-            id: a.id,
-            role_id: a.role_id,
-            runtime_state: a.runtime_state,
-            card_id:
-              d.list("work_items").find((w) => w.id === a.work_item_id)
-                ?.card_id ?? null,
-            disconnected_at: fact("runtime_disconnected")?.created_at ?? null,
-            lost_at: fact("runtime_lost")?.created_at ?? null,
-            last_run:
-              d
-                .list("runs")
-                .filter((r) => r.assignment_id === a.id)
-                .sort(
-                  (x, y) => Number(y.id.slice(2)) - Number(x.id.slice(2)),
-                )[0] ?? null,
-          };
-        }),
-      decisions: d
-        .list("decisions")
-        .filter(
-          (q) =>
-            (q.decider === "human" &&
-              ["open", "provisional"].includes(q.status)) ||
-            (failedConfirmedMergeCheck(state, q) &&
-              // PM Ops handles it and syncs a notice (P2a-1 §2.6).
-              !(
-                hasActivePmOps(d, "resolve_delegated_decision") &&
-                pmFailedMergeCheck(state, q)
-              )) ||
-            decisionFollowupNeedsHuman(state, q),
-        )
-        .map(view),
-      // §7.4 (C-65): merge confirmations PM Ops still holds. Not counted as
-      // waiting on the human, but the human may answer them directly.
-      pm_held_merges:
-        actor.kind === "human"
-          ? d
+      ...(followup
+        ? {
+            followup_notice:
+              "拍板已完成，尚无落实结果；当前无 PM Ops 接手，请安排跟进。",
+          }
+        : {}),
+      why: why(
+        failedConfirmation
+          ? "合并检查失败或超时，可退回修改或重新检查"
+          : q.question,
+      ),
+      opened_at: opened ?? null,
+      waited_ms: Number.isFinite(elapsed) ? Math.max(0, elapsed) : null,
+      related_cards: relatedCards(d.list("cards"), q),
+      merge_confirmation: mergeConfirmation(
+        q,
+        d.list("work_items"),
+        d.list("deliveries"),
+        d.list("reviews"),
+      ),
+    };
+  };
+  return {
+    attention: now ? reviewLimitAttention(state, now) : [],
+    ...(isPmOps(d)
+      ? {
+          pm_queue: {
+            decisions: d
               .list("decisions")
               .filter(
                 (q) =>
                   q.decider === "role:pm" &&
-                  q.trigger === "merge_confirmation" &&
                   ["open", "provisional"].includes(q.status),
-              )
-              .map(view)
-          : [],
-      human_actions: d
-        .list("human_actions")
-        .filter(
-          (h) =>
-            (h.status === "open" && h.triage !== "pm_ops") ||
-            (h.status === "done" &&
-              requesterNotificationRecipient(h.requested_by, state.assignments)
-                ?.kind === "needs_you" &&
-              (!h.card_id ||
-                state.cards.some(
-                  (c) =>
-                    c.id === h.card_id &&
-                    !["done", "cancelled"].includes(c.status),
-                ))),
-        )
-        .map((h) => ({
-          ...h,
-          why: why(
-            h.status === "done"
-              ? "已完成，但发起方不可用且无活跃 PM Ops 接手"
-              : (h.handoff?.why_human ?? h.why_human),
-          ),
-          ...(h.status === "done"
-            ? { completion_notice: h.result?.text ?? "" }
-            : {}),
-        })),
-    };
-  });
+              ),
+            // §7.4: why PM Ops cannot choose merge yet (empty = allowed).
+            merge_blockers: Object.fromEntries(
+              d
+                .list("decisions")
+                .filter(
+                  (q) =>
+                    q.decider === "role:pm" &&
+                    q.trigger === "merge_confirmation" &&
+                    q.status === "open",
+                )
+                .map((q) => [q.id, pmMergeBlockers(state, q)]),
+            ),
+            // P2a-1 §2.6: failed or timed-out checks PM Ops may return
+            // (request_changes) or recheck, including confirmed merges.
+            failed_merge_checks: d.list("decisions").flatMap((q) => {
+              const check = pmFailedMergeCheck(state, q);
+              return check
+                ? [
+                    {
+                      decision_id: q.id,
+                      card_id: q.card_id,
+                      confirmation_status: q.status,
+                      check,
+                      options: ["request_changes", "recheck"],
+                    },
+                  ]
+                : [];
+            }),
+            human_actions: d
+              .list("human_actions")
+              .filter((h) => h.status === "open" && h.triage === "pm_ops"),
+          },
+        }
+      : {}),
+    incidents: d
+      .list("assignments")
+      .filter(
+        (a) =>
+          a.status === "active" &&
+          ["unknown", "lost"].includes(a.runtime_state),
+      )
+      .map((a) => {
+        const fact = (type: string) =>
+          state.events.findLast(
+            (e) =>
+              e.type === type &&
+              typeof e.payload === "object" &&
+              e.payload !== null &&
+              "assignment_id" in e.payload &&
+              e.payload.assignment_id === a.id,
+          );
+        return {
+          id: a.id,
+          role_id: a.role_id,
+          runtime_state: a.runtime_state,
+          card_id:
+            d.list("work_items").find((w) => w.id === a.work_item_id)
+              ?.card_id ?? null,
+          disconnected_at: fact("runtime_disconnected")?.created_at ?? null,
+          lost_at: fact("runtime_lost")?.created_at ?? null,
+          last_run:
+            d
+              .list("runs")
+              .filter((r) => r.assignment_id === a.id)
+              .sort(
+                (x, y) => Number(y.id.slice(2)) - Number(x.id.slice(2)),
+              )[0] ?? null,
+        };
+      }),
+    decisions: d
+      .list("decisions")
+      .filter(
+        (q) =>
+          (q.decider === "human" &&
+            ["open", "provisional"].includes(q.status)) ||
+          (failedConfirmedMergeCheck(state, q) &&
+            // PM Ops handles it and syncs a notice (P2a-1 §2.6).
+            !(
+              hasActivePmOps(d, "resolve_delegated_decision") &&
+              pmFailedMergeCheck(state, q)
+            )) ||
+          decisionFollowupNeedsHuman(state, q),
+      )
+      .map(view),
+    // §7.4 (C-65): merge confirmations PM Ops still holds. Not counted as
+    // waiting on the human, but the human may answer them directly.
+    pm_held_merges:
+      actor.kind === "human"
+        ? d
+            .list("decisions")
+            .filter(
+              (q) =>
+                q.decider === "role:pm" &&
+                q.trigger === "merge_confirmation" &&
+                ["open", "provisional"].includes(q.status),
+            )
+            .map(view)
+        : [],
+    human_actions: d
+      .list("human_actions")
+      .filter(
+        (h) =>
+          (h.status === "open" && h.triage !== "pm_ops") ||
+          (h.status === "done" &&
+            requesterNotificationRecipient(h.requested_by, state.assignments)
+              ?.kind === "needs_you" &&
+            (!h.card_id ||
+              state.cards.some(
+                (c) =>
+                  c.id === h.card_id &&
+                  !["done", "cancelled"].includes(c.status),
+              ))),
+      )
+      .map((h) => ({
+        ...h,
+        why: why(
+          h.status === "done"
+            ? "已完成，但发起方不可用且无活跃 PM Ops 接手"
+            : (h.handoff?.why_human ?? h.why_human),
+        ),
+        ...(h.status === "done"
+          ? { completion_notice: h.result?.text ?? "" }
+          : {}),
+      })),
+  };
 }

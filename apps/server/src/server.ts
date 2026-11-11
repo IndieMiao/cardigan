@@ -1,4 +1,9 @@
-import { loadMergeGateConfig, loadRunCapacityConfig } from "@cardigan/host";
+import {
+  HostOpsService,
+  loadMergeGateConfig,
+  loadRunCapacityConfig,
+  scrubRunCredentials,
+} from "@cardigan/host";
 import type { McpBackend } from "@cardigan/mcp-server";
 import {
   type Logger,
@@ -142,6 +147,23 @@ export async function startCardiganServer(
 
   // Assigned once, read from `close()`; the compiler cannot see through the
   // callback, so use `let` with a definite type.
+  const hostOps = options.dispatcher
+    ? new HostOpsService({
+        store,
+        runtime: options.dispatcher.runtime,
+        snapshot: options.dispatcher.snapshot,
+        contextThresholdPct: config.hostOpsContextThresholdPct ?? 80,
+        scrubCredentials: (project, assignment) =>
+          scrubRunCredentials(execution, project, assignment),
+        settings: (project) => ({
+          merge_gate_enabled:
+            mergeGate.forProject(project).status === "enabled",
+        }),
+        ...(options.dispatcher.clock
+          ? { clock: options.dispatcher.clock }
+          : {}),
+      })
+    : undefined;
   let mcp: RunningServer;
   try {
     mcp = await startMcpServer({
@@ -154,6 +176,7 @@ export async function startCardiganServer(
       // §3.3: production always verifies against the real Git service, and the
       // verifier follows the project the request belongs to.
       deliveryVerifier: git.verifierFor,
+      ...(hostOps ? { hostOps: hostOps.tools } : {}),
       pinDelivery: (request) => git.pinDelivery(request),
       ...(options.log === undefined ? {} : { log: options.log }),
     });
@@ -202,6 +225,11 @@ export async function startCardiganServer(
             : served.toolCatalog(allowed, assignment);
         },
         ...options.dispatcher,
+        ...(hostOps ? { hostOpsTick: () => hostOps.tick() } : {}),
+        hostOpsPatrolIntervalMs:
+          options.dispatcher.hostOpsPatrolIntervalMs ??
+          config.hostOpsPatrolIntervalMs ??
+          1_800_000,
         ...((options.dispatcher.dispatchTimeoutMs ??
           config.dispatchTimeoutMs) === undefined
           ? {}

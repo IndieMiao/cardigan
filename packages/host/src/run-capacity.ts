@@ -3,6 +3,7 @@ import {
   type Event,
   isStandingPm,
   occupiedRunSlots,
+  pendingHostOpsActions,
   type QueuedRun,
   type Run,
   runQueuePositions,
@@ -59,6 +60,11 @@ export function runCapacitySnapshot(store: Store, tx: ReadRepositories) {
   for (const project of store.listProjects()) {
     const assignments = tx.assignments.list(project.id);
     const runs = tx.runs.list(project.id);
+    const actions = pendingHostOpsActions(
+      [undefined, ...tx.cards.list(project.id).map((card) => card.id)].flatMap(
+        (card) => tx.events.listAfter(project.id, card, 0),
+      ),
+    );
     const reserved = new Set(
       unfinishedBellAttempts(store.database, project.id).map((a) => a.run_id),
     );
@@ -76,6 +82,16 @@ export function runCapacitySnapshot(store: Store, tx: ReadRepositories) {
         machine,
         (occupied.get(machine) ?? 0) +
           occupiedRunSlots(assignments, runs, machine) +
+          actions.filter(
+            (action) =>
+              owners.has(action.assignment_id) &&
+              action.runtime_ref !== null &&
+              occupiedRunSlots(
+                assignments,
+                runs.filter((r) => r.assignment_id === action.assignment_id),
+                machine,
+              ) === 0,
+          ).length +
           launching,
       );
     }

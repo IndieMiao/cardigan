@@ -1,4 +1,5 @@
 import type { Actor, Run, RuntimeRef } from "../entities.js";
+import { hostOpsPending } from "../host-ops.js";
 import type { RunId } from "../ids.js";
 import type { Notification } from "../notification.js";
 import { transition } from "../transitions.js";
@@ -82,6 +83,7 @@ export function recoverDispatch(
       a.scope === "work_item"
         ? d.get("cards", d.get("work_items", a.work_item_id).card_id)
         : undefined;
+    if (hostOpsPending(state.events, a.id)) return;
     const stop = run.dispatch_stop;
     if (p.stop_id !== undefined && stop?.attempt_id !== p.stop_id) return;
     const stopping = !!(p.stop_id && stop?.stopping);

@@ -1,5 +1,6 @@
 import type { Actor, Assignment } from "../entities.js";
 import type { Result } from "../errors.js";
+import { hostOpsPending } from "../host-ops.js";
 import type { AssignmentId } from "../ids.js";
 import { transition } from "../transitions.js";
 import {
@@ -15,11 +16,19 @@ import { handoffWithoutOps } from "./delegation.js";
 
 function standing(d: CommandDraft, id: AssignmentId) {
   ensure(
-    d.actor.kind === "human",
+    d.actor.kind === "human" ||
+      (d.assignment?.role_id === "host_ops" &&
+        d.assignment.status === "active") ||
+      (d.actor.kind === "system" && d.tool === "manage_host_ops_action"),
     "unauthorized",
-    "Only the human can pause or resume a standing PM",
+    "Only the human or authorized host_ops can pause or resume a standing PM",
   );
   const a = d.get("assignments", id);
+  ensure(
+    d.tool === "manage_host_ops_action" || !hostOpsPending(d.state.events, id),
+    "illegal_transition",
+    "A host operation is pending",
+  );
   ensure(
     a.scope === "standing" && a.role_id === "pm",
     "unauthorized",
@@ -35,43 +44,59 @@ export function pauseStandingAssignment(
   ports: CommandPorts,
 ): Result<CommandEffect<{ assignment: Assignment; aborted: boolean }>> {
   return command(state, actor, "pause_standing_assignment", ports, (d) => {
-    const a = standing(d, p.assignment_id);
-    if (a.status === "suspended") {
-      handoffWithoutOps(d, a);
-      return { assignment: a, aborted: false };
-    }
-    const status = unwrap(transition("assignment", a.status, "suspend"));
-    const runs = d
-      .list("runs")
-      .filter(
-        (r) =>
-          r.assignment_id === a.id &&
-          !["completed", "failed", "cancelled"].includes(r.status),
-      );
-    for (const r of runs)
-      d.put("runs", {
-        ...r,
-        status: unwrap(transition("run", r.status, "cancel")),
-        outcome: "failed",
-        summary: "Standing PM paused by human",
-        finished_at: d.now,
+    const result = pauseStandingInDraft(d, p.assignment_id);
+    if (actor.kind === "assignment")
+      d.emit("host_ops_action_taken", undefined, {
+        tool: "host_ops_restart_standing_pm",
+        target_id: p.assignment_id,
+        reason: "Pause standing PM for restart",
       });
-    const next = {
-      ...a,
-      status,
-      runtime_state:
-        a.runtime_state === "running"
-          ? unwrap(transition("runtime", a.runtime_state, "run_finished"))
-          : a.runtime_state,
-    };
-    d.put("assignments", next);
-    d.emit("assignment_paused", undefined, {
-      assignment_id: a.id,
-      cancelled_run_ids: runs.map((r) => r.id),
-    });
-    handoffWithoutOps(d, next);
-    return { assignment: next, aborted: runs.length > 0 };
+    return result;
   });
+}
+export function pauseStandingInDraft(
+  d: CommandDraft,
+  id: AssignmentId,
+): { assignment: Assignment; aborted: boolean } {
+  const a = standing(d, id);
+  if (a.status === "suspended") {
+    handoffWithoutOps(d, a);
+    return { assignment: a, aborted: false };
+  }
+  const status = unwrap(transition("assignment", a.status, "suspend"));
+  const runs = d
+    .list("runs")
+    .filter(
+      (r) =>
+        r.assignment_id === a.id &&
+        !["completed", "failed", "cancelled"].includes(r.status),
+    );
+  for (const r of runs)
+    d.put("runs", {
+      ...r,
+      status: unwrap(transition("run", r.status, "cancel")),
+      outcome: "failed",
+      summary:
+        d.actor.kind === "human"
+          ? "Standing PM paused by human"
+          : "Standing PM paused by host_ops",
+      finished_at: d.now,
+    });
+  const next = {
+    ...a,
+    status,
+    runtime_state:
+      a.runtime_state === "running"
+        ? unwrap(transition("runtime", a.runtime_state, "run_finished"))
+        : a.runtime_state,
+  };
+  d.put("assignments", next);
+  d.emit("assignment_paused", undefined, {
+    assignment_id: a.id,
+    cancelled_run_ids: runs.map((r) => r.id),
+  });
+  handoffWithoutOps(d, next);
+  return { assignment: next, aborted: runs.length > 0 };
 }
 /** Called inside queueRun so resuming and reserving the new Run are atomic. */
 export function resumeStanding(d: CommandDraft, id: AssignmentId): void {
@@ -85,7 +110,6 @@ export function resumeStanding(d: CommandDraft, id: AssignmentId): void {
   d.emit("assignment_resumed", undefined, {
     assignment_id: a.id,
     old_runtime_ref: a.runtime_ref ? { ...a.runtime_ref } : null,
-    handoff:
-      "常驻 PM 由人恢复。读取排队门铃对应的 get_updates，再 ack_events；配置与会话历史保留在原 Assignment 运行目录。",
+    handoff: `常驻 PM 由${d.actor.kind === "human" ? "人" : "主机运维"}恢复。读取排队门铃对应的 get_updates，再 ack_events；配置与会话历史保留在原 Assignment 运行目录。`,
   });
 }

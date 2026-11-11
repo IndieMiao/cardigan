@@ -27,6 +27,8 @@ export interface ServerConfig {
   /** Orphaned attachment blobs (§9.3); 6 hours by default. */
   readonly attachmentIntervalMs?: number;
   readonly dispatchTimeoutMs?: number;
+  readonly hostOpsPatrolIntervalMs?: number;
+  readonly hostOpsContextThresholdPct?: number;
 }
 
 export interface ServerEnv extends ExecutionEnv {
@@ -48,6 +50,8 @@ export interface ServerEnv extends ExecutionEnv {
   readonly CARDIGAN_BACKUP_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_ATTACHMENT_GC_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_DISPATCH_TIMEOUT_MS?: string | undefined;
+  readonly CARDIGAN_HOST_OPS_PATROL_INTERVAL_MS?: string | undefined;
+  readonly CARDIGAN_HOST_OPS_CONTEXT_THRESHOLD_PCT?: string | undefined;
 }
 
 /** Default cadence of the M4.4 phase loops (plan §3.6, §3.7). */
@@ -77,6 +81,14 @@ export function resolveServerConfig(env: ServerEnv): ServerConfig {
     execution: resolveExecutionConfig({ ...env, CARDIGAN_DATA_DIR: dataDir }),
     host: resolveHost(env.CARDIGAN_MCP_HOST),
     port,
+    hostOpsContextThresholdPct: percentage(
+      env.CARDIGAN_HOST_OPS_CONTEXT_THRESHOLD_PCT,
+    ),
+    hostOpsPatrolIntervalMs: interval(
+      env.CARDIGAN_HOST_OPS_PATROL_INTERVAL_MS,
+      "CARDIGAN_HOST_OPS_PATROL_INTERVAL_MS",
+      1_800_000,
+    ),
     dispatchTimeoutMs: interval(
       env.CARDIGAN_DISPATCH_TIMEOUT_MS,
       "CARDIGAN_DISPATCH_TIMEOUT_MS",
@@ -153,3 +165,12 @@ import {
   resolveDataDirectory,
   resolveExecutionConfig,
 } from "@cardigan/runtime-herdr";
+
+function percentage(value?: string): number {
+  const result = Number(nonEmpty(value) ?? "80");
+  if (!Number.isFinite(result) || result < 1 || result > 100)
+    throw new Error(
+      "CARDIGAN_HOST_OPS_CONTEXT_THRESHOLD_PCT must be between 1 and 100",
+    );
+  return result;
+}

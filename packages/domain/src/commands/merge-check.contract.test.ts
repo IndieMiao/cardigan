@@ -25,7 +25,7 @@ const system: Actor = { kind: "system", project_id: human.project_id };
 const tree = "c".repeat(40),
   candidate = "b".repeat(40);
 
-test("C-84 reserves host_ops tools without relaxing human-only merge rechecks", async () => {
+test("C-85 grants only the exact active host_ops permission and preserves human rechecks", async () => {
   const { f, state, record } = await fixture();
   record("queued");
   record("running");
@@ -53,9 +53,36 @@ test("C-84 reserves host_ops tools without relaxing human-only merge rechecks", 
     allowed_tools: HOST_OPS_ROLE_TOOLS,
     capabilities: [],
   };
-  expect(
+  const granted = value(
     recheckMerge(current, actor, { card_id: f.card.id }, f.io),
-  ).toMatchObject({ ok: false, error: { code: "unauthorized" } });
+  );
+  expect(
+    granted.events.find((e) => e.type === "host_ops_action_taken"),
+  ).toMatchObject({
+    actor,
+    payload: { tool: "host_ops_recheck_merge", target_id: f.card.id },
+  });
+  for (const denied of [
+    { ...actor, allowed_tools: ["host_ops_cancel_run"] },
+    { ...actor, project_id: "other" },
+    { ...actor, role_id: "pm" },
+  ])
+    expect(
+      recheckMerge(current, denied as Actor, { card_id: f.card.id }, f.io).ok,
+    ).toBe(false);
+  expect(
+    recheckMerge(
+      {
+        ...current,
+        assignments: current.assignments.map((a) =>
+          a.id === actor.assignment_id ? { ...a, status: "released" } : a,
+        ),
+      },
+      actor,
+      { card_id: f.card.id },
+      f.io,
+    ).ok,
+  ).toBe(false);
   const effect = value(
     recheckMerge(current, human, { card_id: f.card.id }, f.io),
   );

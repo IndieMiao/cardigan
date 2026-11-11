@@ -7,6 +7,7 @@ import {
   dispatchedAt,
   dispatchRecoveryFailed,
   dispatchRecoveryQueuedAt,
+  hostOpsPending,
   type ProjectId,
   type RunId,
   type Runtime,
@@ -171,6 +172,7 @@ export async function retryDispatchedRuns(
   };
   const candidates = read();
   for (const candidate of candidates.runs) {
+    if (hostOpsPending(read().events, candidate.assignment_id)) continue;
     // External identities have no managed terminal, including stale recovery records.
     if (
       candidates.assignments.find((a) => a.id === candidate.assignment_id)
