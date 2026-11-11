@@ -17,9 +17,11 @@ import type { CardId } from "../ids.js";
 import { requesterNotificationRecipient } from "../notification.js";
 import type { Clock } from "../ports.js";
 import { reviewLimitAttention } from "../review-limit-attention.js";
+import { isRoleActive } from "../role.js";
 import { type CommandDraft, type CommandState, command } from "./core.js";
 import { decisionFollowupNeedsHuman } from "./decision-followup.js";
 import { hasActivePmOps, isPmOps } from "./delegation.js";
+import { availableWorkItemEmployees } from "./employee-assignment.js";
 import { failedConfirmedMergeCheck, latestMergeCheck } from "./merge-check.js";
 import { pmFailedMergeCheck, pmMergeBlockers } from "./merge-delegation.js";
 import { resolveCardTemplate } from "./templates.js";
@@ -87,6 +89,13 @@ export function projectSnapshot(state: CommandState, actor: Actor) {
     d.projectAccess();
     return {
       project_id: state.project_id,
+      available_employees: availableWorkItemEmployees(state)
+        .filter(
+          (employee) =>
+            employee.role_id !== "host_ops" &&
+            isRoleActive(state.roles, employee.role_id),
+        )
+        .map(({ id, name, title, role_id }) => ({ id, name, title, role_id })),
       cards: d.list("cards").map((c) => cardView(d, c.id)),
     };
   });

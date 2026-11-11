@@ -145,7 +145,7 @@ function DayGroup({
               <details className="event-details">
                 <summary className="activity-summary">
                   <Time value={first?.created_at} />
-                  <strong>系统</strong>
+                  <EmployeeIdentity author="system" showTitle={false} />
                   <span>{groupedLabel(row.type, row.events.length)}</span>
                   <CardLink
                     projectId={projectId}

@@ -10,7 +10,11 @@ import type {
 import { gitEnvironment, gitSafetyArguments } from "./hardening.js";
 import { type GitTimeoutOptions, withGitTimeout } from "./timeouts.js";
 
-export { type CentralGitOptions, CentralGitTransport } from "./central.js";
+export {
+  type CentralGitOptions,
+  CentralGitTransport,
+  type FirstParentCommit,
+} from "./central.js";
 export { gitEnvironment, gitSafetyArguments } from "./hardening.js";
 export { type GitTimeoutOptions, withGitTimeout } from "./timeouts.js";
 

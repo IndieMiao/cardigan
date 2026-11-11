@@ -54,6 +54,8 @@ export interface EmployeeActivity {
   readonly employee_id: EmployeeId;
   readonly last_assigned_at: Timestamp | null;
   readonly unfinished_runs: number;
+  /** Any unreleased external standing assignment, across all projects. */
+  readonly has_external_standing_assignment?: boolean;
 }
 
 export interface EmployeeRepository {

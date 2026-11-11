@@ -162,6 +162,7 @@ S21 / V10a：MCP create_card 可省略 repo／base_branch。需要仓库的模�
 
 - `recordMergeResult(merged)` 在可信 `project_settings.merge_push` 存在时同事务追加项目级 `merge_push_queued`，绑定成功合并事件与 SHA；失败、冲突和重复结果不新建队列。
 - `beginMergePush` / `recordMergePushResult` 只允许 system，前者选择并持久化队首范围，重启返回同一未完成 attempt；后者记录 `merge_pushed` / `merge_push_failed`，重复同结果幂等，不改卡片状态。
+- `checkMergePushRange` 只允许 system：输入主机在发布锁内读到的中心基线当前 head 及其到 `base_sha` 的完整第一父链。边界须有证据（上次 merge_pushed 或人接受的边界），链上每个提交须落在 card_merged 记录且 previous_sha 在链上闭合的段内或已被接受，待推 SHA 须仍在链上；否则写 `merge_push_held`（reasons）和项目级 HumanAction，该目标暂停。`acceptMergePushHold` 只允许 human，完成该事项并信任列出的 SHA 及候选边界；stale／broken／超限不可接受。以其他方式关闭事项视为回退，`beginMergePush` 写 `merge_push_hold_resolved(mode=reverted)` 并丢弃暂停及以前的队列。
 - rejected / auth / other 建 HumanAction 暂停该目标，只有 human 完成事项才能进行一次合并积压范围的重试。network 退避上限 30 分钟，连续两小时以上建一条事项，成功后撤销仍 open 的网络事项。重试时间和计数均保存在事件中；不把远程或命令原始错误传给 domain。
 
 ## C-55 常驻 PM 换版本
