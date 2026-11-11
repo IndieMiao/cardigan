@@ -1032,6 +1032,7 @@ test.each([false, true])(
       status: "executor_unreachable",
       checks: [],
       cleanup_errors: [],
+      reason: "远程检查机 SSH 连接失败，合并检查排队等待重试",
     }));
     await c.gate.tick([f.project_id]);
     expect(check()?.status).toBe(remote ? "queued" : "failed");
@@ -1039,6 +1040,10 @@ test.each([false, true])(
     await c.gate.tick([f.project_id]);
     expect(c.run).toHaveBeenCalledTimes(remote ? 2 : 1);
     expect(check()?.status).toBe(remote ? "passed" : "failed");
+    if (!remote) {
+      expect(check()?.summary).toContain("修复执行环境后重新检查");
+      expect(check()?.summary).not.toContain("排队等待重试");
+    }
     expect(c.errors).not.toHaveBeenCalled();
   },
 );
@@ -1067,3 +1072,99 @@ test("a previously passed card awaiting confirmation does not block a later outa
   ).toBe("done");
   expect(c.errors).not.toHaveBeenCalled();
 });
+
+test.each([false, true])(
+  "an earlier outage does not block confirmed passed candidates; changed trees still wait (changed=%s)",
+  async (changed) => {
+    let time = Date.parse("2030-01-01T00:00:00.000Z");
+    const {
+      f,
+      scenario: first,
+      check,
+    } = await fixture("confirm", {
+      clock: { now: () => new Date(time).toISOString() },
+    });
+    const second = m4Scenario(f, "confirm");
+    const { completion: secondCompletion } = await acceptThroughMergeGate(
+      f,
+      second,
+      "a".repeat(40),
+    );
+    const secondCheck = () =>
+      latestMergeCheck(f.state().events, second.card.id, secondCompletion.id);
+    const c = controller(f);
+    c.setConfig(remoteSettings());
+    c.run.mockImplementationOnce(async (input) => {
+      input.onReady?.();
+      return {
+        status: "failed",
+        checks: [{ name: "test", status: "failed", exit_code: 1 }],
+        cleanup_errors: [],
+      };
+    });
+    await c.gate.tick([f.project_id]);
+    expect(check()?.status).toBe("failed");
+    expect(secondCheck()?.status).toBe("passed");
+    f.apply((s, a, p) =>
+      recheckMerge(
+        { ...s, project_settings: { merge_gate_enabled: true } },
+        a,
+        { card_id: first.card.id },
+        p,
+      ),
+    );
+    c.git.distribute.mockRejectedValue(
+      new Error("ssh: connect to host: Connection refused"),
+    );
+    await c.gate.tick([f.project_id]);
+    expect(check()?.status).toBe("queued");
+    expect(c.git.publish).not.toHaveBeenCalled();
+    const third = m4Scenario(f, "auto");
+    const { completion: thirdCompletion } = await acceptThroughMergeGate(
+      f,
+      third,
+      "a".repeat(40),
+    );
+    f.decide(required(mergeConfirmation(f, second.card.id)), "merge");
+    if (changed) c.advance(true);
+    await c.gate.tick([f.project_id]);
+    await c.gate.tick([f.project_id]);
+    expect(
+      f.state().cards.find((card) => card.id === second.card.id)?.status,
+    ).toBe(changed ? "awaiting_merge" : "done");
+    expect(secondCheck()?.status).toBe(changed ? "queued" : "passed");
+    expect(c.git.publish).toHaveBeenCalledTimes(changed ? 0 : 1);
+    expect(c.git.distribute).toHaveBeenCalledTimes(3);
+    expect(c.run).toHaveBeenCalledTimes(2);
+    expect(check()?.status).toBe("queued");
+    expect(
+      latestMergeCheck(f.state().events, third.card.id, thirdCompletion.id)
+        ?.status,
+    ).toBe("queued");
+    // Publication can pass the waiting queue, but remote checks retain FIFO.
+    const order: (string | undefined)[] = [];
+    c.run.mockImplementation(async (input) => {
+      order.push(
+        f
+          .state()
+          .events.find(
+            (e) =>
+              e.type === "merge_check_queued" &&
+              (e.payload as { attempt_id?: string }).attempt_id ===
+                input.attempt,
+          )?.card_id,
+      );
+      input.onReady?.();
+      return passed;
+    });
+    c.git.distribute.mockResolvedValue();
+    time += 60_000;
+    await c.gate.tick([f.project_id]);
+    expect(order).toEqual(
+      changed
+        ? [first.card.id, second.card.id, third.card.id]
+        : [first.card.id, third.card.id],
+    );
+    expect(c.errors).not.toHaveBeenCalled();
+  },
+);

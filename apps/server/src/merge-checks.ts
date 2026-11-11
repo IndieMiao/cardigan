@@ -498,7 +498,11 @@ export class MergeChecks {
     }
     // Unconfigured projects keep their previous entry-failure behavior.
     if (!task.settings.executor && result.status === "executor_unreachable")
-      result = { ...result, status: "failed" };
+      result = {
+        ...result,
+        status: "failed",
+        reason: "检查执行入口 SSH 连接失败，请修复执行环境后重新检查",
+      };
     if (result.status === "executor_unreachable")
       this.executor(task, "unreachable", check.attempt_id);
     else if (connected && !this.abort.signal.aborted)
@@ -609,10 +613,10 @@ export class MergeChecks {
     await (await this.schedule(projects)).done;
   }
   /**
-   * One scheduling pass. For a project whose lane is running, only publish
-   * confirmed candidates whose tree already passed; never wait for the lane
-   * (C-113). Other projects start a new lane in the background, so checks on
-   * different execution targets (or free slots of one target) overlap.
+   * Each pass independently publishes confirmed candidates whose tree passed,
+   * including projects waiting in executor backoff or running another check
+   * (C-113). Idle projects then start check lanes in the background; unchecked
+   * candidates retain their FIFO order and the executor's retry deadline.
    */
   async schedule(
     projects: readonly ProjectId[],
@@ -625,10 +629,9 @@ export class MergeChecks {
       this.report(error);
       return { done: Promise.resolve() };
     }
-    const busy = tasks.filter((t) => this.lanes.has(t.project.project_id));
-    if (busy.length)
+    if (tasks.length)
       await this.serial(async () => {
-        for (const task of busy) {
+        for (const task of tasks) {
           if (this.abort.signal.aborted) return;
           if (this.active.has(this.key(task))) continue;
           try {
@@ -641,7 +644,7 @@ export class MergeChecks {
     const fresh = new Map<string, Task[]>();
     for (const task of tasks) {
       const id = task.project.project_id;
-      if (this.lanes.has(id)) continue;
+      if (this.lanes.has(id) || !this.valid(task)) continue;
       fresh.set(id, [...(fresh.get(id) ?? []), task]);
     }
     const live = new Set(tasks.map((t) => this.key(t)));
