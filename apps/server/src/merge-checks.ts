@@ -30,7 +30,9 @@ import {
   acquireMergeCheckCapacity,
   createMergeCheckLog,
   executorExecution,
+  LOCAL_EXECUTOR,
   type MergeGateConfiguration,
+  mergeCheckCapacityAvailable,
   type ProjectMergeGate,
   runInTemporaryCheckout,
 } from "@cardigan/host";
@@ -329,6 +331,22 @@ export class MergeChecks {
       ? executorExecution(task.settings.executor, this.options.execution)
       : this.options.execution;
   }
+  /**
+   * P2a-12 D: a remote executor runs at most `max_concurrent` checks across
+   * all projects; a full target leaves the check queued for a later round.
+   * Local checks keep today's behavior (no separate limit).
+   */
+  private capacity(task: Task): boolean {
+    const executor = task.settings.executor;
+    return (
+      !executor ||
+      mergeCheckCapacityAvailable(
+        this.options.store,
+        executor.name,
+        executor.maxConcurrent,
+      )
+    );
+  }
   private async execute(task: Task, check: MergeCheckView): Promise<void> {
     let log: Awaited<ReturnType<typeof createMergeCheckLog>> | undefined;
     let result: Awaited<ReturnType<typeof runInTemporaryCheckout>>;
@@ -363,6 +381,8 @@ export class MergeChecks {
             task.project.project_id as ProjectId,
             check.attempt_id,
             owner,
+            // P2a-12 D: charge the target that actually runs the check.
+            task.settings.executor?.name ?? LOCAL_EXECUTOR,
           );
           this.check(task, { ...check, status: "running" });
         },
@@ -587,6 +607,7 @@ export class MergeChecks {
           return { check: await this.queue(task, prepared) };
         });
         if (!check) continue;
+        if (check.check && !this.capacity(task)) continue;
         if (check.check) {
           this.active = this.key(task);
           try {

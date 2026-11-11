@@ -8,10 +8,12 @@ import {
   recordMergeCheck,
 } from "@cardigan/domain";
 import type { CentralProject, PreparedMerge } from "@cardigan/git-service";
-import type {
-  CheckoutInput,
-  CheckoutResult,
-  ProjectMergeGate,
+import {
+  acquireMergeCheckCapacity,
+  type CheckoutInput,
+  type CheckoutResult,
+  type ProjectMergeGate,
+  runCapacitySnapshot,
 } from "@cardigan/host";
 import { afterEach, expect, test, vi } from "vitest";
 import {
@@ -642,4 +644,115 @@ test("a project executor receives the candidates and runs the checks; logs stay 
       "utf8",
     ),
   ).resolves.toBeTypeOf("string");
+});
+
+const ciExecutor = (maxConcurrent: number) => ({
+  name: "cardigan-ci",
+  host: "cardigan-ci",
+  port: 22,
+  user: "agent",
+  hostKeyAlias: "cardigan-ci",
+  identityFile: "/data/ssh/ci.key",
+  knownHostsFile: "/data/ssh/ci.known_hosts",
+  agentRoot: "/srv/cardigan-agent",
+  maxConcurrent,
+});
+const otherProject = (f: M4Fixture) => {
+  const id = "p-other" as typeof f.project_id;
+  if (!f.store.listProjects().some((p) => p.id === id))
+    f.store.createProject({ id, name: "Other project" });
+  return id;
+};
+const capacity = (f: M4Fixture) =>
+  f.store.uow.read((tx) => {
+    const s = runCapacitySnapshot(f.store, tx);
+    return {
+      local: s.occupied.get("local"),
+      checks: Object.fromEntries(s.mergeChecks),
+    };
+  });
+
+test("P2a-12 D: a full executor (max_concurrent) leaves the check queued; it runs once a slot frees", async () => {
+  const { f, check } = await fixture("auto");
+  const c = controller(f);
+  c.setConfig({
+    status: "enabled",
+    checks: [{ name: "test", run: "true" }],
+    env: {},
+    totalTimeoutMs: 1000,
+    executor: ciExecutor(1),
+  });
+  // Another project's check already holds the executor's only slot.
+  const busy = acquireMergeCheckCapacity(
+    f.store,
+    otherProject(f),
+    "busy",
+    undefined,
+    "cardigan-ci",
+  );
+  try {
+    await c.gate.tick([f.project_id]);
+    expect(c.run).not.toHaveBeenCalled();
+    expect(c.git.distribute).not.toHaveBeenCalled();
+    expect(check()?.status).toBe("queued");
+  } finally {
+    busy();
+  }
+  const seen: ReturnType<typeof capacity>[] = [];
+  c.run.mockImplementation(async (input: CheckoutInput) => {
+    input.onReady?.();
+    seen.push(capacity(f));
+    return passed;
+  });
+  await c.gate.tick([f.project_id]);
+  expect(c.run).toHaveBeenCalledOnce();
+  expect(check()?.status).toBe("passed");
+  // Charged to the executor's bucket, not the host's local Run slots.
+  expect(seen).toEqual([{ local: 0, checks: { "cardigan-ci": 1 } }]);
+  expect(capacity(f)).toEqual({ local: 0, checks: {} });
+});
+
+test("P2a-12 D: max_concurrent above the running count admits the check", async () => {
+  const { f, check } = await fixture("auto");
+  const c = controller(f);
+  c.setConfig({
+    status: "enabled",
+    checks: [{ name: "test", run: "true" }],
+    env: {},
+    totalTimeoutMs: 1000,
+    executor: ciExecutor(2),
+  });
+  const busy = acquireMergeCheckCapacity(
+    f.store,
+    otherProject(f),
+    "busy",
+    undefined,
+    "cardigan-ci",
+  );
+  try {
+    await c.gate.tick([f.project_id]);
+    expect(c.run).toHaveBeenCalledOnce();
+    expect(check()?.status).toBe("passed");
+  } finally {
+    busy();
+  }
+});
+
+test("P2a-12 D: without an executor, checks are charged to local and never gated (regression)", async () => {
+  const { f, check } = await fixture("auto");
+  const c = controller(f);
+  const busy = acquireMergeCheckCapacity(f.store, otherProject(f), "busy");
+  const seen: ReturnType<typeof capacity>[] = [];
+  c.run.mockImplementation(async (input: CheckoutInput) => {
+    input.onReady?.();
+    seen.push(capacity(f));
+    return passed;
+  });
+  try {
+    await c.gate.tick([f.project_id]);
+  } finally {
+    busy();
+  }
+  expect(check()?.status).toBe("passed");
+  expect(seen).toEqual([{ local: 4, checks: { local: 2 } }]);
 });
