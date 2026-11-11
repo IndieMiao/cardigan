@@ -1,7 +1,9 @@
 import { beforeEach, expect, expectTypeOf, test } from "vitest";
 import {
   type Actor,
+  acknowledgeRun,
   dispatchRun,
+  prepareDelivery,
   queueRun,
   type Result,
   type Role,
@@ -9,6 +11,7 @@ import {
   type Runtime,
   roleReference,
   runtimeErrorCodes,
+  submitDelivery,
   transition,
 } from "../index.js";
 import {
@@ -27,6 +30,24 @@ import { apply, human, id, subject, value } from "./test-fixtures.js";
 const reject = (r: Result<unknown>, code: string) =>
   expect(r).toMatchObject({ ok: false, error: { code } });
 beforeEach(setup);
+async function deliverForReviewer() {
+  const run = f.state.runs.find((r) => r.assignment_id === f.coder.id);
+  if (!run) throw new Error("Missing coder Run");
+  commit(acknowledgeRun(f.state, actor(), { run_id: run.id }, f.io));
+  const params = {
+    work_item_id: item().id,
+    kind: "code" as const,
+    summary: "Ready",
+    subject,
+    requested_verifiers: [item(f.reviewer).id],
+  };
+  const proof = value(
+    await prepareDelivery(f.state, actor(), params, {
+      verify: async () => ({ ok: true, value: [] }),
+    }),
+  );
+  commit(submitDelivery(f.state, actor(), params, proof, f.io));
+}
 test("Role definitions preserve RoleReference compatibility; Runtime exposes seven typed ports", () => {
   const definition: Role = {
     role_id: "coder",
@@ -141,8 +162,9 @@ test.each(["queued", "dispatched", "acked", "running", "unknown"] as const)(
   },
 );
 
-test("invariant 4: dispatch refuses another Assignment's occupied worktree", () => {
+test("invariant 4: dispatch refuses another Assignment's occupied worktree", async () => {
   commit(dispatch(commit(queue())));
+  await deliverForReviewer();
   const r = commit(queue(f.reviewer));
   reject(dispatch(r), "invariant_violation");
 });
@@ -173,8 +195,9 @@ test.each(["queued", "dispatched", "acked", "running", "unknown"] as const)(
   },
 );
 
-test("reusing queued work still rejects another Run occupying the same worktree", () => {
+test("reusing queued work still rejects another Run occupying the same worktree", async () => {
   commit(dispatch(commit(queue())));
+  await deliverForReviewer();
   const queued = commit(queue(f.reviewer));
   f.state = {
     ...f.state,

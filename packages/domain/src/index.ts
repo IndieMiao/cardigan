@@ -34,10 +34,15 @@ export {
   recordMergeCheck,
 } from "./commands/merge-check.js";
 export {
+  currentMergeConfirmations,
   pmFailedMergeCheck,
   pmMergeBlockers,
   pmMergeCheckDelegationAllowed,
 } from "./commands/merge-delegation.js";
+export {
+  hasVerifiedMergeNoop,
+  recordMergePreparation,
+} from "./commands/merge-preparation.js";
 export {
   acceptMergePushHold,
   beginMergePush,
@@ -59,7 +64,9 @@ export * from "./commands/pm-rotate.js";
 export * from "./commands/preferences.js";
 export * from "./commands/queries.js";
 export * from "./commands/release.js";
+export * from "./commands/review-withdrawal.js";
 export * from "./commands/role.js";
+export * from "./commands/run-target-wait.js";
 export * from "./commands/runtime.js";
 export * from "./commands/sensitive.js";
 export { pauseStandingAssignment } from "./commands/standing.js";
@@ -81,6 +88,7 @@ export { reviewLimitAttention } from "./review-limit-attention.js";
 export * from "./role.js";
 export * from "./role-prompt.js";
 export * from "./run-capacity.js";
+export { hasRunTarget } from "./run-target.js";
 export * from "./runtime-port.js";
 export * from "./standing.js";
 export * from "./states.js";

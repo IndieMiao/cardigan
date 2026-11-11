@@ -84,6 +84,7 @@ type CommandName =
   | "create_host_ops_assignment"
   | "queue_run"
   | "dispatch_run"
+  | "refresh_run_target_wait"
   | "acknowledge_run"
   | "abort_dispatch"
   | "recover_dispatch"
@@ -102,6 +103,7 @@ type CommandName =
   | "check_merge_push_range"
   | "accept_merge_push_hold"
   | "record_merge_check"
+  | "record_merge_preparation"
   | "recheck_merge"
   | "supersede_card"
   | "manage_templates"
@@ -184,6 +186,7 @@ export class CommandDraft {
     const hostOnly = [
       "queue_run",
       "dispatch_run",
+      "refresh_run_target_wait",
       "abort_dispatch",
       "pause_standing_assignment",
     ].includes(tool);
@@ -196,6 +199,7 @@ export class CommandDraft {
       "remind_decision_followups",
       "record_merge_result",
       "record_merge_check",
+      "record_merge_preparation",
       "begin_merge_push",
       "record_merge_push_result",
       "check_merge_push_range",

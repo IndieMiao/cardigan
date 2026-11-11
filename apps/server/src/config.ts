@@ -27,6 +27,12 @@ export interface ServerConfig {
   /** Orphaned attachment blobs (§9.3); 6 hours by default. */
   readonly attachmentIntervalMs?: number;
   readonly dispatchTimeoutMs?: number;
+  readonly dispatchIntervalMs?: number;
+  /**
+   * After SIGTERM, how long in-flight Workbench requests may run before their
+   * connections are cut; SSE streams end at once. 10 seconds by default.
+   */
+  readonly shutdownGraceMs?: number;
 }
 
 export interface ServerEnv extends ExecutionEnv {
@@ -48,7 +54,11 @@ export interface ServerEnv extends ExecutionEnv {
   readonly CARDIGAN_BACKUP_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_ATTACHMENT_GC_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_DISPATCH_TIMEOUT_MS?: string | undefined;
+  readonly CARDIGAN_DISPATCH_INTERVAL_MS?: string | undefined;
+  readonly CARDIGAN_SHUTDOWN_GRACE_MS?: string | undefined;
 }
+
+export const DEFAULT_SHUTDOWN_GRACE_MS = 10_000;
 
 /** Default cadence of the M4.4 phase loops (plan §3.6, §3.7). */
 export const DEFAULT_INTERVALS = {
@@ -77,6 +87,15 @@ export function resolveServerConfig(env: ServerEnv): ServerConfig {
     execution: resolveExecutionConfig({ ...env, CARDIGAN_DATA_DIR: dataDir }),
     host: resolveHost(env.CARDIGAN_MCP_HOST),
     port,
+    ...(nonEmpty(env.CARDIGAN_DISPATCH_INTERVAL_MS) === undefined
+      ? {}
+      : {
+          dispatchIntervalMs: interval(
+            env.CARDIGAN_DISPATCH_INTERVAL_MS,
+            "CARDIGAN_DISPATCH_INTERVAL_MS",
+            1000,
+          ),
+        }),
     dispatchTimeoutMs: interval(
       env.CARDIGAN_DISPATCH_TIMEOUT_MS,
       "CARDIGAN_DISPATCH_TIMEOUT_MS",
@@ -111,6 +130,11 @@ export function resolveServerConfig(env: ServerEnv): ServerConfig {
       env.CARDIGAN_ATTACHMENT_GC_INTERVAL_MS,
       "CARDIGAN_ATTACHMENT_GC_INTERVAL_MS",
       DEFAULT_INTERVALS.attachment,
+    ),
+    shutdownGraceMs: interval(
+      env.CARDIGAN_SHUTDOWN_GRACE_MS,
+      "CARDIGAN_SHUTDOWN_GRACE_MS",
+      DEFAULT_SHUTDOWN_GRACE_MS,
     ),
   };
 }

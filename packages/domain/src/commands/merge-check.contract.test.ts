@@ -3,8 +3,10 @@ import {
   type Actor,
   autoConfirmMerge,
   createHostOpsAssignment,
+  currentMergeConfirmations,
   HOST_OPS_ROLE_TOOLS,
   hasPassedMergeCheck,
+  hasVerifiedMergeNoop,
   latestMergeCheck,
   listNeedsYou,
   type MergeCheckView,
@@ -14,6 +16,7 @@ import {
   recheckMerge,
   recordDecision,
   recordMergeCheck,
+  recordMergePreparation,
   recordMergeResult,
   requestDecision,
   setProjectPreferences,
@@ -24,6 +27,104 @@ import { apply, human, value } from "./test-fixtures.js";
 const system: Actor = { kind: "system", project_id: human.project_id };
 const tree = "c".repeat(40),
   candidate = "b".repeat(40);
+
+test("C-115: only host-verified current noop becomes visible without authorizing a merge", async () => {
+  const { f, state, identity } = await fixture("confirm");
+  const p = {
+    card_id: f.card.id,
+    completion_id: identity.completion_id,
+    base_sha: "a".repeat(40),
+    noop: true,
+  };
+  const q = currentMergeConfirmations(state(), f.card.id)[0];
+  if (!q) throw new Error("Missing confirmation");
+  expect(
+    value(listNeedsYou(state(), human)).data.waiting_merge_checks_count,
+  ).toBe(1);
+  for (const actor of [human, f.actor(f.coder)])
+    expect(recordMergePreparation(state(), actor, p, f.io)).toMatchObject({
+      ok: false,
+      error: { code: "unauthorized" },
+    });
+  expect(
+    recordMergePreparation(
+      state(),
+      system,
+      { ...p, completion_id: "D-999" as never },
+      f.io,
+    ).ok,
+  ).toBe(false);
+  expect(
+    recordMergePreparation(state(), system, { ...p, base_sha: "invalid" }, f.io)
+      .ok,
+  ).toBe(false);
+  f.commit(recordMergePreparation(state(), system, p, f.io));
+  expect(
+    value(recordMergePreparation(state(), system, p, f.io)).events,
+  ).toEqual([]);
+  const needs = value(listNeedsYou(state(), human)).data;
+  expect(needs.decisions.map((q) => q.id)).toContain(q.id);
+  expect(needs.waiting_merge_checks_count).toBe(0);
+  expect(
+    latestMergeCheck(state().events, f.card.id, p.completion_id),
+  ).toBeUndefined();
+  expect(
+    hasPassedMergeCheck(state().events, f.card.id, p.completion_id, tree),
+  ).toBe(false);
+  expect(mergePlan(state(), f.card.id).ok).toBe(false);
+  expect(
+    hasVerifiedMergeNoop(state().events, f.card.id, "D-999" as never),
+  ).toBe(false);
+  // A new non-noop candidate invalidates the display exception immediately.
+  f.commit(
+    recordMergePreparation(
+      state(),
+      system,
+      { ...p, noop: false, base_sha: "d".repeat(40) },
+      f.io,
+    ),
+  );
+  expect(
+    value(listNeedsYou(state(), human)).data.decisions.map((q) => q.id),
+  ).not.toContain(q.id);
+});
+
+test("C-115: detail actions track current completion and confirmed failure, not history", async () => {
+  const { f, state, identity, record } = await fixture("confirm");
+  const q = currentMergeConfirmations(state(), f.card.id)[0];
+  if (!q) throw new Error("Missing confirmation");
+  f.commit(
+    recordDecision(
+      state(),
+      human,
+      {
+        decision_id: q.id,
+        option: "merge",
+        rationale: "合并",
+        raw_quote: "合并",
+      },
+      f.io,
+    ),
+  );
+  expect(currentMergeConfirmations(state(), f.card.id)).toEqual([]);
+  record("queued");
+  record("running");
+  record("failed");
+  expect(
+    currentMergeConfirmations(state(), f.card.id).map((q) => q.id),
+  ).toEqual([q.id]);
+  f.commit(recheckMerge(state(), human, { card_id: f.card.id }, f.io));
+  expect(currentMergeConfirmations(state(), f.card.id)).toEqual([]);
+  const stale = {
+    ...state(),
+    deliveries: state().deliveries.map((d) =>
+      d.id === identity.completion_id
+        ? { ...d, status: "superseded" as const }
+        : d,
+    ),
+  };
+  expect(currentMergeConfirmations(stale, f.card.id)).toEqual([]);
+});
 
 test("C-84 reserves host_ops tools without relaxing human-only merge rechecks", async () => {
   const { f, state, record } = await fixture();
@@ -549,15 +650,10 @@ for (const approval of ["open", "human", "delegated"] as const) {
       record("queued");
       record("running");
       record(status);
-      const pending = value(listNeedsYou(state(), human)).data.decisions;
-      expect(pending.map((q) => q.id)).toContain(decision.id);
-      expect(
-        pending.find((q) => q.id === decision.id)?.followup_notice,
-      ).toBeUndefined();
-      if (approval !== "open")
-        expect(pending[0]?.options.map((o) => o.key)).toEqual([
-          "request_changes",
-        ]);
+      const needs = value(listNeedsYou(state(), human)).data;
+      expect(needs.decisions.map((q) => q.id)).not.toContain(decision.id);
+      expect(needs.waiting_merge_checks_count).toBe(1);
+      // C-115 only changes presentation; the human return below is still authorized.
       const params = {
         decision_id: decision.id,
         option: "request_changes",

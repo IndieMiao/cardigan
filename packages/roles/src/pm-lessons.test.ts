@@ -193,9 +193,24 @@ test("C-66 PM instructions cover returning or rechecking failed merge checks", (
     "选 recheck 重新检查一次",
     "重新检查再失败就退回",
     "哪张卡、检查失败的原因、已退回或已重新检查",
-    "你不能退回或重新检查",
   ])
     expect(prompt).toContain(rule);
+});
+
+test("C-115 PM instructions limit human-only merge handling to structured timeout rechecks", () => {
+  const prompt = corePromptFor("pm");
+  for (const rule of [
+    "交给人之前先等当前完成申请的闸门检查通过",
+    "只能重新检查明确的超时失败，不能退回修改，也不能代确认合并",
+    "只有 recheck 时不能选其他动作",
+    "整体或步骤 timed_out，且不能混有 failed/interrupted",
+    "日志里出现 timeout 不够",
+    "重查仍须 rationale 和 notice",
+    "检查通过后自动出现在人的 Needs You",
+    "waiting_merge_checks 是等检查的人工确认，decider 不变",
+  ])
+    expect(prompt).toContain(rule);
+  expect(prompt).not.toContain("你不能退回或重新检查");
 });
 
 test("C-65 PM instructions hand sensitive cards' merges to the human", () => {
@@ -285,7 +300,7 @@ test("C-86 PM Ops gives final merge confirmation, including UI cards after a PM 
     "合并默认由你最终确认，界面卡（改动用户可见界面的卡）也一样",
     "先核实当前项目在职 PM Office 的 Assignment 编号，在卡上用 @A-n 提及它请其做截图核对",
     "等 PM Office 把核对结论写进卡片后，你据此确认或退回",
-    "被人标为敏感的卡、涉及 D12 四类高风险（花钱、账号、权限、删除数据）的卡、安全相关改动、对外发布和需求范围变化的卡，以及已交人的确认，仍由人处理",
+    "被人标为敏感的卡、涉及 D12 四类高风险（花钱、账号、权限、删除数据）的卡、安全相关改动、对外发布和需求范围变化的卡，以及已交人的确认，只能重新检查明确的超时失败，不能退回修改，也不能代确认合并",
     "仍交给人的只有被人标为敏感的卡、D12 四类高风险（花钱、账号、权限、删除数据）、安全相关改动、对外发布和需求范围变化",
   ])
     expect(prompt).toContain(phrase);

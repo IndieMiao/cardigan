@@ -11,6 +11,7 @@ import {
 test.each([
   ["produce", "todo", "dependencies_met", "ready"],
   ["verify", "in_progress", "review_passed", "passed"],
+  ["verify", "passed", "withdraw_pass", "ready"],
   ["delivery", "submitted", "accept", "accepted"],
   ["decision", "open", "provisionally_resolve", "provisional"],
   ["human_action", "open", "complete", "done"],
@@ -291,6 +292,21 @@ test.each(["blocked", "waiting_decision", "cancelled"] as const)(
     });
   },
 );
+
+test.each([
+  "todo",
+  "ready",
+  "in_progress",
+  "failed",
+  "blocked",
+  "waiting_decision",
+  "cancelled",
+] as const)("only passed verification can withdraw, not %s", (from) => {
+  expect(transition("verify", from, "withdraw_pass")).toMatchObject({
+    ok: false,
+    error: { code: "illegal_transition" },
+  });
+});
 
 test("transition lookup rejects inherited object properties", () => {
   expect(transition("produce", "__proto__" as ProduceStatus, "cancel").ok).toBe(

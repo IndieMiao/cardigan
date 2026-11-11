@@ -36,6 +36,7 @@ import {
   prepareMergePlan,
   queueRun,
   recordMergeCheck,
+  recordMergePreparation,
   submitDelivery,
   submitReview,
 } from "@cardigan/domain";
@@ -587,7 +588,7 @@ test.each([
   ["timed_out", "超时"],
   ["interrupted", "中断"],
 ] as const)(
-  "needs-you includes the current merge check %s",
+  "needs-you waits until the current merge check passes (%s)",
   async (status, label) => {
     await seatAwaitingMerge();
     enableMergeGate();
@@ -596,15 +597,48 @@ test.each([
     if (status !== "queued" && status !== "running") recordCheck(status);
     const result = await cardigan("needs-you");
     expect(result.code).toBe(0);
-    expect(result.out).toContain(`合并检查：${label}`);
+    if (status === "passed") expect(result.out).toContain(`合并检查：${label}`);
+    else {
+      expect(result.out).toContain("还有 1 条合并确认在等检查");
+      expect(result.out).not.toContain("待你拍板（");
+    }
   },
 );
 
-test("needs-you leaves projects without a gate unchanged and shows queued before the first event", async () => {
+test("C-115: a host-verified noop is actionable in needs-you without a fabricated pass", async () => {
+  await seatAwaitingMerge();
+  enableMergeGate();
+  const plan = unwrap(prepareMergePlan(state(), card_id as never));
+  apply(
+    (s, a, p) =>
+      recordMergePreparation(
+        { ...s, project_settings: { merge_gate_enabled: true } },
+        a,
+        {
+          card_id: plan.card_id,
+          completion_id: plan.completion_id,
+          base_sha: SHA,
+          noop: true,
+        },
+        p,
+      ),
+    { kind: "system", project_id: project },
+  );
+  const result = await cardigan("needs-you");
+  expect(result.code).toBe(0);
+  expect(result.out).toContain("待你拍板");
+  expect(result.out).toContain("交付已在基线中，无需合并检查");
+  expect(result.out).not.toContain("在等检查");
+  expect(result.out).not.toContain("合并检查：通过");
+});
+
+test("needs-you leaves projects without a gate unchanged and counts pending checks", async () => {
   await seatAwaitingMerge();
   expect((await cardigan("needs-you")).out).not.toContain("合并检查");
   enableMergeGate();
-  expect((await cardigan("needs-you")).out).toContain("合并检查：排队");
+  expect((await cardigan("needs-you")).out).toContain(
+    "还有 1 条合并确认在等检查",
+  );
 });
 
 test.each([
@@ -622,7 +656,7 @@ test.each([
     const before = JSON.stringify(state());
     const result = await cardigan("needs-you");
     expect(result.code).toBe(0);
-    expect(result.out).toContain(card_id);
+    expect(result.out).toContain("还有 1 条合并确认在等检查");
     expect(result.out).toContain("合并闸门配置无效，请查看 server 启动日志");
     expect(result.out).not.toContain("合并检查：排队");
     expect(result.out + result.err).not.toContain("private-config-fixture");

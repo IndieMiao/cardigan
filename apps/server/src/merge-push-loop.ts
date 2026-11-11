@@ -194,6 +194,7 @@ export function startMergePushLoop(
 ) {
   const executor = new MergePushExecutor(options);
   const loop = startTimerLoop({
+    name: "merge-push",
     tick: () => executor.tick(),
     intervalMs: options.intervalMs ?? 5_000,
     onError: options.onError ?? (() => {}),

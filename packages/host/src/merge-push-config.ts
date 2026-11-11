@@ -65,20 +65,26 @@ export function pushProtocol(remote: unknown): "file" | "ssh" {
     return "ssh";
   return fail("push.remote 必须是显式 SSH 地址或本地 file:// URL");
 }
-/** Metadata only: never read key bytes, not even for validation or diagnostics. */
-async function credential(dataDir: string, name: unknown): Promise<string> {
+/**
+ * Resolve a host-only credential file below the data directory (deploy keys, executor SSH keys, known_hosts).
+ * Metadata only: never read key bytes, not even for validation or diagnostics.
+ */
+export async function secureCredentialFile(
+  dataDir: string,
+  name: unknown,
+): Promise<string> {
   if (
     typeof name !== "string" ||
     !name ||
     isAbsolute(name) ||
     [...name].some((c) => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127)
   )
-    return fail("推送凭据路径必须相对数据目录");
+    return fail("凭据路径必须相对数据目录");
   const root = resolve(dataDir),
     file = resolve(root, name),
     part = relative(root, file);
   if (!part || part === ".." || part.startsWith(`..${sep}`))
-    return fail("推送凭据不能越出数据目录");
+    return fail("凭据不能越出数据目录");
   for (let path = file; ; path = dirname(path)) {
     const entry = await lstat(path);
     if (path === file) {
@@ -88,7 +94,7 @@ async function credential(dataDir: string, name: unknown): Promise<string> {
         entry.uid !== process.getuid?.() ||
         (entry.mode & 0o7777) !== 0o600
       )
-        return fail("推送凭据必须是主机独占的普通文件，权限 0600，不能是链接");
+        return fail("凭据必须是主机独占的普通文件，权限 0600，不能是链接");
     } else if (
       !entry.isDirectory() ||
       (path === root || path.startsWith(root + sep)
@@ -97,7 +103,7 @@ async function credential(dataDir: string, name: unknown): Promise<string> {
           Boolean(entry.mode & 0o022 && !(entry.mode & 0o1000)))
     ) {
       return fail(
-        "推送凭据目录须为主机独占的 0700 目录，祖先不能是链接或不可信可写目录",
+        "凭据目录须为主机独占的 0700 目录，祖先不能是链接或不可信可写目录",
       );
     }
     if (path === dirname(path)) break;
@@ -131,8 +137,8 @@ export async function parseMergePushConfig(
   ) {
     try {
       keys = {
-        keyFile: await credential(dataDir, p.key_file),
-        knownHostsFile: await credential(dataDir, p.known_hosts_file),
+        keyFile: await secureCredentialFile(dataDir, p.key_file),
+        knownHostsFile: await secureCredentialFile(dataDir, p.known_hosts_file),
       };
     } catch {
       return fail(

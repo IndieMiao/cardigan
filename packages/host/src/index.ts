@@ -37,6 +37,11 @@ export {
   type MergeGateConfiguration,
   type ProjectMergeGate,
 } from "./merge-gate-config.js";
+export {
+  LOCAL_EXECUTOR,
+  MAX_EXECUTOR_CONCURRENCY,
+  type MergeGateExecutor,
+} from "./merge-gate-executors.js";
 export { CHECK_OUTPUT_LIMIT, createMergeCheckLog } from "./merge-gate-log.js";
 export {
   type MergePushConfig,
@@ -65,6 +70,11 @@ export {
   loadRunCapacityConfig,
   type RunCapacityConfiguration,
 } from "./run-capacity-config.js";
+export {
+  deferTargetAttempt,
+  RunTargetDeferred,
+  refreshTargetWait,
+} from "./run-target.js";
 export { revokeStoppedRunTokens, stopRunRuntime } from "./stop-run.js";
 export {
   type CheckoutCheck,

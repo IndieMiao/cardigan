@@ -5,8 +5,10 @@
  * tick that is currently running — SIGTERM must not cut a merge in half.
  */
 export interface TimerLoopOptions {
+  readonly name: string;
   readonly tick: () => Promise<void>;
   readonly intervalMs?: number;
+  readonly slowTickMs?: number;
   /** Tick failures are reported and retried on the next interval. */
   readonly onError: (error: unknown) => void;
   readonly signal?: AbortSignal;
@@ -17,6 +19,7 @@ export interface TimerLoop {
   stop(): Promise<void>;
 }
 const MAX_INTERVAL = 2_147_483_647;
+export const DEFAULT_SLOW_TICK_MS = 1000;
 
 export function startTimerLoop(options: TimerLoopOptions): TimerLoop {
   const interval = options.intervalMs ?? 600_000;
@@ -26,6 +29,9 @@ export function startTimerLoop(options: TimerLoopOptions): TimerLoop {
     interval > MAX_INTERVAL
   )
     throw new Error("Invalid loop interval");
+  const slowTickMs = options.slowTickMs ?? DEFAULT_SLOW_TICK_MS;
+  if (!Number.isFinite(slowTickMs) || slowTickMs <= 0)
+    throw new Error("Invalid loop slow tick threshold");
   let stopping = options.signal?.aborted ?? false,
     wake = () => {};
   const requestStop = () => {
@@ -36,10 +42,19 @@ export function startTimerLoop(options: TimerLoopOptions): TimerLoop {
   const done = (async () => {
     try {
       while (!stopping) {
+        const started = performance.now();
         try {
           await options.tick();
         } catch (error) {
           options.onError(error);
+        } finally {
+          const elapsed = performance.now() - started;
+          if (elapsed > slowTickMs)
+            options.onError(
+              new Error(
+                `${options.name} slow tick: duration_ms=${Math.round(elapsed)} threshold_ms=${slowTickMs}`,
+              ),
+            );
         }
         if (!stopping)
           await new Promise<void>((resolve) => {

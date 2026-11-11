@@ -293,6 +293,7 @@ export function startMergeLoop(
   options.signal?.addEventListener("abort", cancel, { once: true });
   if (options.signal?.aborted) cancel();
   const loop = startTimerLoop({
+    name: "merge",
     tick: async () => {
       await executor.schedule();
     },

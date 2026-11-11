@@ -1,5 +1,6 @@
 import { isReviewStale } from "../derived.js";
-import type { Decision, Delivery } from "../entities.js";
+import type { Decision, Delivery, MergeCheckView } from "../entities.js";
+import type { CardId } from "../ids.js";
 import { pmMergeConfirmation } from "../preferences.js";
 import { attempt, type CommandState } from "./core.js";
 import { mergeRequiresHuman } from "./delegation.js";
@@ -9,6 +10,7 @@ import {
   failedCurrentMergeCheck,
   latestMergeCheck,
 } from "./merge-check.js";
+import { hasVerifiedMergeNoop } from "./merge-preparation.js";
 
 const newest = (values: readonly Delivery[]) =>
   [...values].sort(
@@ -92,15 +94,81 @@ export function pmMergeBlockers(
  * §7.4 / P2a-1 §2.6: a merge confirmation whose current check failed or timed
  * out that PM Ops may return (`request_changes`) or recheck — the PM-held open
  * confirmation, or any confirmed merge (human, PM or timeout) whatever its
- * decider. D12 / scope-change cards and confirmations handed to the human
- * (`human_required_reason`) stay with the human.
+ * decider. Human-only confirmations permit only structured timeout rechecks (C-115).
  */
 export function pmFailedMergeCheck(state: CommandState, q: Decision) {
-  if (!pmMergeCheckDelegationAllowed(state, q)) return undefined;
-  if (q.status === "resolved") return failedConfirmedMergeCheck(state, q);
-  return q.decider === "role:pm" && ["open", "provisional"].includes(q.status)
-    ? failedCurrentMergeCheck(state, q)
+  const check =
+    q.status === "resolved"
+      ? failedConfirmedMergeCheck(state, q)
+      : ["open", "provisional"].includes(q.status)
+        ? failedCurrentMergeCheck(state, q)
+        : undefined;
+  if (!check || !pmMergeCheckDelegationAllowed(state, q, check))
+    return undefined;
+  return q.status === "resolved" ||
+    q.decider === "role:pm" ||
+    mergeRequiresHuman(state, q)
+    ? check
     : undefined;
+}
+/** C-115 / q(158): trust structured supervisor results, never log prose. */
+function timeoutOnly(check: MergeCheckView | undefined): boolean {
+  return (
+    !!check &&
+    (check.status === "timed_out" ||
+      (check.status === "failed" &&
+        check.checks.some((c) => c.status === "timed_out"))) &&
+    check.checks.every((c) =>
+      ["passed", "timed_out", "not_run"].includes(c.status),
+    )
+  );
+}
+
+/** Presentation only: human commands and the card detail retain their authority. */
+export function mergeConfirmationWaitingForCheck(
+  state: CommandState,
+  q: Decision,
+): boolean {
+  if (
+    !state.project_settings?.merge_gate_enabled ||
+    q.trigger !== "merge_confirmation"
+  )
+    return false;
+  if (!q.card_id || q.kind !== "approve" || !("delivery_id" in q.target))
+    return true;
+  const cardId = q.card_id;
+  const context = attempt(() => mergeContext(state, cardId));
+  return (
+    !context.ok ||
+    context.value.target.id !== q.target.delivery_id ||
+    (!hasVerifiedMergeNoop(state.events, q.card_id, q.target.delivery_id) &&
+      latestMergeCheck(state.events, q.card_id, q.target.delivery_id)
+        ?.status !== "passed")
+  );
+}
+
+export function pmFailedMergeCheckOptions(state: CommandState, q: Decision) {
+  return mergeRequiresHuman(state, q)
+    ? ["recheck"]
+    : ["request_changes", "recheck"];
+}
+/** Card details keep current human actions even while Needs You waits for checks. */
+export function currentMergeConfirmations(
+  state: CommandState,
+  card: CardId,
+): readonly Decision[] {
+  const context = attempt(() => mergeContext(state, card));
+  if (!context.ok) return [];
+  return state.decisions.filter(
+    (q) =>
+      q.trigger === "merge_confirmation" &&
+      q.card_id === card &&
+      q.kind === "approve" &&
+      "delivery_id" in q.target &&
+      q.target.delivery_id === context.value.target.id &&
+      (["open", "provisional"].includes(q.status) ||
+        !!failedConfirmedMergeCheck(state, q)),
+  );
 }
 /** Shared by command authorization, queues and routing; read the current preference. */
 export function pmMergeCheckDelegationAllowed(
@@ -109,13 +177,14 @@ export function pmMergeCheckDelegationAllowed(
     "project_id" | "project_preferences" | "cards" | "decisions"
   >,
   q: Decision,
+  check?: MergeCheckView,
 ) {
   return (
     q.trigger === "merge_confirmation" &&
     pmMergeConfirmation(
       state.project_preferences?.find((p) => p.id === state.project_id),
     ) &&
-    !mergeRequiresHuman(state, q)
+    (!mergeRequiresHuman(state, q) || timeoutOnly(check))
   );
 }
 /** Policy evidence recorded when PM Ops handles a failed merge check. */

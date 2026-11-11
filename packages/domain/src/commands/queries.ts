@@ -1,5 +1,9 @@
 import { type CardDerivedFields, deriveCardFields } from "../card-derived.js";
-import { deriveCardStatus, deriveReviewMatrix } from "../derived.js";
+import {
+  deriveCardStatus,
+  deriveReviewMatrix,
+  isReviewStale,
+} from "../derived.js";
 import type {
   Actor,
   Card,
@@ -24,7 +28,12 @@ import { decisionFollowupNeedsHuman } from "./decision-followup.js";
 import { hasActivePmOps, isPmOps } from "./delegation.js";
 import { availableWorkItemEmployees } from "./employee-assignment.js";
 import { failedConfirmedMergeCheck, latestMergeCheck } from "./merge-check.js";
-import { pmFailedMergeCheck, pmMergeBlockers } from "./merge-delegation.js";
+import {
+  mergeConfirmationWaitingForCheck,
+  pmFailedMergeCheck,
+  pmFailedMergeCheckOptions,
+  pmMergeBlockers,
+} from "./merge-delegation.js";
 import { resolveCardTemplate } from "./templates.js";
 
 function affects(d: CommandDraft, q: Decision, id: CardId) {
@@ -292,12 +301,7 @@ function mergeConfirmation(
   const latest = new Map<string, Review>();
   for (const review of reviews) {
     const delivery = current.get(review.delivery_id);
-    if (
-      delivery === undefined ||
-      review.target_sha !== delivery.subject.value ||
-      delivery.status === "superseded"
-    )
-      continue;
+    if (delivery === undefined || isReviewStale(review, delivery)) continue;
     const previous = latest.get(review.work_item_id);
     if (previous === undefined || numericId(review.id) > numericId(previous.id))
       latest.set(review.work_item_id, review);
@@ -337,69 +341,87 @@ function mergeConfirmation(
   };
 }
 
+/** Shared decision presentation for the task list and actionable card details. */
+export function decisionActionView(
+  state: CommandState,
+  q: Decision,
+  now?: string,
+) {
+  const why = (text: string) => [...text].slice(0, 40).join("");
+  const failedConfirmation = failedConfirmedMergeCheck(state, q);
+  const followup = !failedConfirmation && decisionFollowupNeedsHuman(state, q);
+  // Project decisions have no card timeline; their request event is the creation fact.
+  const opened =
+    state.events
+      .filter(
+        (e) =>
+          e.type === "decision_requested" &&
+          typeof e.payload === "object" &&
+          e.payload !== null &&
+          "decision_id" in e.payload &&
+          e.payload.decision_id === q.id,
+      )
+      .sort((a, b) => a.created_at.localeCompare(b.created_at))[0]
+      ?.created_at ??
+    state.timeline
+      .filter((e) => e.decision_id === q.id)
+      .sort((a, b) => a.event_seq - b.event_seq)[0]?.created_at;
+  const elapsed =
+    opened && now ? Date.parse(now) - Date.parse(opened) : Number.NaN;
+  return {
+    ...q,
+    ...(failedConfirmation
+      ? {
+          options: q.options.filter((o) => o.key === "request_changes"),
+          recommended: "request_changes",
+        }
+      : {}),
+    ...(followup
+      ? {
+          followup_notice:
+            "拍板已完成，尚无落实结果；当前无 PM Ops 接手，请安排跟进。",
+        }
+      : {}),
+    why: why(
+      failedConfirmation
+        ? "合并检查失败或超时，可退回修改或重新检查"
+        : q.question,
+    ),
+    opened_at: opened ?? null,
+    waited_ms: Number.isFinite(elapsed) ? Math.max(0, elapsed) : null,
+    related_cards: relatedCards(state.cards, q),
+    merge_confirmation: mergeConfirmation(
+      q,
+      state.work_items,
+      state.deliveries,
+      state.reviews,
+    ),
+  };
+}
+
 export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
   return command(state, actor, "list_needs_you", undefined, (d) => {
     d.pm();
     d.projectAccess();
     const now = clock?.now();
+    const waiting = d
+      .list("decisions")
+      .filter(
+        (q) =>
+          q.trigger === "merge_confirmation" &&
+          ((q.decider === "human" &&
+            ["open", "provisional"].includes(q.status)) ||
+            !!failedConfirmedMergeCheck(state, q)) &&
+          mergeConfirmationWaitingForCheck(state, q),
+      );
     const why = (text: string) => [...text].slice(0, 40).join("");
-    const view = (q: Decision) => {
-      const failedConfirmation = failedConfirmedMergeCheck(state, q);
-      const followup =
-        !failedConfirmation && decisionFollowupNeedsHuman(state, q);
-      // Project decisions have no card timeline; their request event is the creation fact.
-      const opened =
-        state.events
-          .filter(
-            (e) =>
-              e.type === "decision_requested" &&
-              typeof e.payload === "object" &&
-              e.payload !== null &&
-              "decision_id" in e.payload &&
-              e.payload.decision_id === q.id,
-          )
-          .sort((a, b) => a.created_at.localeCompare(b.created_at))[0]
-          ?.created_at ??
-        state.timeline
-          .filter((e) => e.decision_id === q.id)
-          .sort((a, b) => a.event_seq - b.event_seq)[0]?.created_at;
-      const elapsed =
-        opened && now ? Date.parse(now) - Date.parse(opened) : Number.NaN;
-      return {
-        ...q,
-        ...(failedConfirmation
-          ? {
-              options: q.options.filter((o) => o.key === "request_changes"),
-              recommended: "request_changes",
-            }
-          : {}),
-        ...(followup
-          ? {
-              followup_notice:
-                "拍板已完成，尚无落实结果；当前无 PM Ops 接手，请安排跟进。",
-            }
-          : {}),
-        why: why(
-          failedConfirmation
-            ? "合并检查失败或超时，可退回修改或重新检查"
-            : q.question,
-        ),
-        opened_at: opened ?? null,
-        waited_ms: Number.isFinite(elapsed) ? Math.max(0, elapsed) : null,
-        related_cards: relatedCards(d.list("cards"), q),
-        merge_confirmation: mergeConfirmation(
-          q,
-          d.list("work_items"),
-          d.list("deliveries"),
-          d.list("reviews"),
-        ),
-      };
-    };
+    const view = (q: Decision) => decisionActionView(state, q, now);
     return {
       attention: now ? reviewLimitAttention(state, now) : [],
       ...(isPmOps(d)
         ? {
             pm_queue: {
+              waiting_merge_checks: waiting,
               decisions: d
                 .list("decisions")
                 .filter(
@@ -430,7 +452,7 @@ export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
                         card_id: q.card_id,
                         confirmation_status: q.status,
                         check,
-                        options: ["request_changes", "recheck"],
+                        options: pmFailedMergeCheckOptions(state, q),
                       },
                     ]
                   : [];
@@ -490,7 +512,9 @@ export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
               )) ||
             decisionFollowupNeedsHuman(state, q),
         )
+        .filter((q) => !mergeConfirmationWaitingForCheck(state, q))
         .map(view),
+      waiting_merge_checks_count: waiting.length,
       // §7.4 (C-65): merge confirmations PM Ops still holds. Not counted as
       // waiting on the human, but the human may answer them directly.
       pm_held_merges:

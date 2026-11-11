@@ -132,6 +132,7 @@ export interface RouteProblem {
   readonly rule: RuleId;
   readonly code:
     | "unknown_mention"
+    | "assignment_cannot_read_card"
     | "ambiguous_role_mention"
     | "ambiguous_employee_mention"
     | "mentioned_work_item_unassigned";

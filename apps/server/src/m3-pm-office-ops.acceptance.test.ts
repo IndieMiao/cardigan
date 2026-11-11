@@ -212,8 +212,11 @@ async function pmFixture() {
               "triage_human_action",
             ].includes(tool) &&
               !(STANDING_ONLY_TOOLS as readonly string[]).includes(tool) &&
-              tool !==
-                (role_id === "coder" ? "submit_review" : "submit_delivery")),
+              !(
+                role_id === "coder"
+                  ? ["submit_review", "withdraw_review"]
+                  : ["submit_delivery"]
+              ).includes(tool)),
         ),
         capabilities: [],
         abilities: [],
@@ -667,9 +670,9 @@ test.each(["comment", "delivery", "pass", "reject", "execution failure"])(
 
 test("P06 §7.2/§6.7: Ops escalations wait while busy, then merge into one delivery", async () => {
   const s = await routingSetup(false);
-  await s.provision(s.reviewer);
   await s.finish(s.coder);
-  await s.finish(s.reviewer);
+  await s.provision(s.coder);
+  await s.finish(s.coder);
   await s.routed();
   const pending = notices(s, s.ops).filter((n) => n.kind === "run_attention");
   expect(pending.length).toBeGreaterThanOrEqual(2);

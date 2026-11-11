@@ -283,6 +283,7 @@ export function startCleanupLoop(options: {
     ...(options.report === undefined ? {} : { report: options.report }),
   });
   const loop = startTimerLoop({
+    name: "cleanup",
     tick: () => executor.tick(),
     intervalMs: options.intervalMs ?? DEFAULT_CLEANUP_INTERVAL_MS,
     onError: options.onError ?? (() => undefined),
