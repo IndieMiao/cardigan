@@ -19,16 +19,25 @@ import {
   decisionFollowupPrompt,
   dispatchRecoveryFailed,
   dispatchRun,
+  hasRunTarget,
   isStandingPm,
   lastRunActivity,
   launchSettings,
   obsoleteDispatchAttention,
   queueRun,
+  refreshRunTargetWait,
   remindDecisionFollowups,
   resolveDispatchAttention,
   unreadableCommentTrigger,
 } from "@cardigan/domain";
-import { redactFailureLine, runCapacitySnapshot } from "@cardigan/host";
+import {
+  deferTargetAttempt,
+  HostLaunchError,
+  RunTargetDeferred,
+  redactFailureLine,
+  refreshTargetWait,
+  runCapacitySnapshot,
+} from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import {
   mergeNotifications,
@@ -45,6 +54,7 @@ import {
   type Store,
   type StoreTransactionContext,
   unfinishedBellAttempts,
+  withdrawBellAttempt,
 } from "@cardigan/store";
 import {
   alertAudience,
@@ -329,6 +339,7 @@ export class Dispatcher {
     }
     const candidates: Candidate[] = [];
     const add = (assignment: Assignment, notes: Notification[]) => {
+      if (!hasRunTarget(assignment, state)) return;
       const queued = this.queued(state, assignment);
       if (queued && unreadableCommentTrigger(state, queued)) return;
       const cause = notes.find((n) => !n.run_id) ?? notes[0];
@@ -367,7 +378,8 @@ export class Dispatcher {
     // if its trigger notification was acknowledged while it waited.
     for (const assignment of state.assignments)
       if (
-        this.queued(state, assignment)?.queue_reason !== undefined &&
+        (this.queued(state, assignment)?.queue_reason !== undefined ||
+          this.queued(state, assignment)?.dispatch_target_wait !== undefined) &&
         !candidates.some((c) => c.assignment.id === assignment.id)
       )
         add(assignment, []);
@@ -402,7 +414,13 @@ export class Dispatcher {
       this.reject(project, notes, a, "assignment_released");
       return;
     }
-    if (a.external || a.status !== "active" || this.busy(state, a)) return;
+    if (
+      a.external ||
+      a.status !== "active" ||
+      this.busy(state, a) ||
+      !hasRunTarget(a, state)
+    )
+      return;
     let live = false;
     let replacement: DispatchRunParams["replacement"];
     if (a.runtime_ref) {
@@ -523,6 +541,13 @@ export class Dispatcher {
           project,
           assignment: job.assignment,
         });
+        if (
+          refreshTargetWait(this.options.store, project, job.run.id, this.clock)
+        ) {
+          deferTargetAttempt(this.options.store, job.attempt, this.clock);
+          return;
+        }
+        if (!this.activate(job)) return;
         stage = "wake";
         const result = await this.options.runtime.wake(
           job.assignment.runtime_ref,
@@ -554,9 +579,37 @@ export class Dispatcher {
           ["dispatched", "acked", "running", "completed"].includes(
             actual.status,
           );
+        if (
+          !sent &&
+          actual?.status === "queued" &&
+          refreshTargetWait(this.options.store, project, job.run.id, this.clock)
+        ) {
+          deferTargetAttempt(this.options.store, job.attempt, this.clock);
+          return;
+        }
         reason = "startup_did_not_dispatch";
       }
     } catch (error) {
+      // Only pre-delivery waits can withdraw an intent. A failed wake is still
+      // ambiguous and must retain its attempt and normal retry semantics.
+      if (
+        stage !== "wake" &&
+        (error instanceof RunTargetDeferred ||
+          ((stage === "before_wake" ||
+            this.state(project).runs.find((r) => r.id === job.run.id)
+              ?.status === "queued") &&
+            (stage === "before_wake" || !(error instanceof HostLaunchError)) &&
+            refreshTargetWait(
+              this.options.store,
+              project,
+              job.run.id,
+              this.clock,
+            )))
+      ) {
+        deferTargetAttempt(this.options.store, job.attempt, this.clock);
+        return;
+      }
+      if (live && stage !== "wake" && !this.activate(job)) return;
       ({ reason, failure } = deliveryFailure(stage, error));
     }
     if (failure)
@@ -626,6 +679,25 @@ export class Dispatcher {
       let state = this.loadState(tx, project);
       const a = state.assignments.find((a) => a.id === expected.id);
       if (a?.status !== "active" || a.external || !sameRef(a, expected)) return;
+      // A delivery may have been superseded while runtime/snapshot IO was in flight.
+      // Keep notifications pending without allocating a Run or a bell attempt.
+      if (!hasRunTarget(a, state)) {
+        const waiting = this.queued(state, a);
+        if (waiting)
+          persistEffect(
+            tx,
+            project,
+            unwrap(
+              refreshRunTargetWait(
+                state,
+                { kind: "system", project_id: project },
+                { run_id: waiting.id },
+                { ids: tx.ids, clock: this.clock },
+              ),
+            ),
+          );
+        return;
+      }
       const all = store.listNotifications({ project_id: project }),
         requested = new Set(notes.map((n) => n.id));
       const ready = all.filter(
@@ -638,7 +710,9 @@ export class Dispatcher {
       );
       const waiting = this.queued(state, a);
       if (
-        (!ready.length && waiting?.queue_reason === undefined) ||
+        (!ready.length &&
+          waiting?.queue_reason === undefined &&
+          !waiting?.dispatch_target_wait) ||
         this.busy(state, a)
       )
         return;
@@ -720,7 +794,15 @@ export class Dispatcher {
         const earlier = capacity.queue.some(
           (entry) =>
             entry.machine_id === a.machine_id &&
-            compareDispatchOrder(entry, order) < 0,
+            compareDispatchOrder(entry, order) < 0 &&
+            tx.assignments.list(entry.project_id).some(
+              (owner) =>
+                owner.id === entry.assignment_id &&
+                hasRunTarget(owner, {
+                  work_items: tx.work_items.list(entry.project_id),
+                  deliveries: tx.deliveries.list(entry.project_id),
+                }),
+            ),
         );
         if (
           (!isStandingPm(a) && earlier) ||
@@ -799,7 +881,13 @@ export class Dispatcher {
       };
       if (ready.length) beginBellAttempt(store.database, attempt);
       else beginLaunchAttempt(store.database, attempt);
-      if (live && run.status === "queued")
+      // Keep producer/standing dispatch timing unchanged. Only verification
+      // needs to remain queued until asynchronous target preparation finishes.
+      if (
+        live &&
+        run.status === "queued" &&
+        state.work_items.find((w) => w.id === a.work_item_id)?.kind !== "verify"
+      )
         persistEffect(
           tx,
           project,
@@ -816,6 +904,52 @@ export class Dispatcher {
         assignment: a,
         bell: [bell, followup].filter(Boolean).join("\n"),
       };
+    });
+  }
+  /** The lease reserves a queued Run during preparation; dispatch immediately before wake. */
+  private activate(job: Job): boolean {
+    const { store } = this.options;
+    const project = job.attempt.project_id;
+    return store.uow.run((tx) => {
+      if (
+        !unfinishedBellAttempts(store.database, project).some(
+          (a) => a.id === job.attempt.id,
+        )
+      )
+        return false;
+      const state = loadCommandState(tx, project);
+      const run = state.runs.find((r) => r.id === job.run.id);
+      const owner = state.assignments.find((a) => a.id === job.assignment.id);
+      if (run && owner && !hasRunTarget(owner, state)) {
+        if (withdrawBellAttempt(store.database, project, job.attempt.id))
+          persistEffect(
+            tx,
+            project,
+            unwrap(
+              refreshRunTargetWait(
+                state,
+                { kind: "system", project_id: project },
+                { run_id: run.id, withdrawn_attempt_id: job.attempt.id },
+                { ids: tx.ids, clock: this.clock },
+              ),
+            ),
+          );
+        return false;
+      }
+      if (run?.status === "queued")
+        persistEffect(
+          tx,
+          project,
+          unwrap(
+            dispatchRun(
+              state,
+              { kind: "system", project_id: project },
+              { run_id: run.id },
+              { ids: tx.ids, clock: this.clock },
+            ),
+          ),
+        );
+      return true;
     });
   }
   private settle(
@@ -1027,6 +1161,7 @@ export class Dispatcher {
         if (
           a?.status !== "active" ||
           a.external ||
+          !hasRunTarget(a, state) ||
           state.runs.some(
             (r) => r.assignment_id === a.id && unfinishedRun(r),
           ) ||

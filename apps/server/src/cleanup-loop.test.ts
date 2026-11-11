@@ -294,15 +294,10 @@ test("S17 sweeps an already released terminal even in a project with no reposito
   const noGit = m4Fixture();
   try {
     const s = m4Scenario(noGit);
-    noGit.startRun(s.pmAcceptance);
-    noGit.endRun(s.pmAcceptance);
+    noGit.startRun(s.coder);
+    noGit.endRun(s.coder);
     noGit.apply((state, actor, ports) =>
-      releaseAssignment(
-        state,
-        actor,
-        { assignment_id: s.pmAcceptance.id },
-        ports,
-      ),
+      releaseAssignment(state, actor, { assignment_id: s.coder.id }, ports),
     );
     const closed = vi.fn(runtime.release);
     const executor = new CleanupExecutor({
@@ -315,7 +310,7 @@ test("S17 sweeps an already released terminal even in a project with no reposito
     // The fake runtime still reports alive: a prior success must not suppress repair.
     expect(closed).toHaveBeenCalledTimes(2);
     expect(closed).toHaveBeenLastCalledWith(
-      expect.objectContaining({ terminal_ref: `t-${s.pmAcceptance.id}` }),
+      expect.objectContaining({ terminal_ref: `t-${s.coder.id}` }),
       { force: true },
     );
   } finally {

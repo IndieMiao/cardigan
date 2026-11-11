@@ -280,6 +280,11 @@ export interface Run {
   };
   /** Host scheduling metadata; only meaningful while status is queued. */
   readonly queue_reason?: "concurrency_limit" | "runtime_unavailable";
+  /** Host-only target wait; elapsed time is excluded from dispatch recovery. */
+  readonly dispatch_target_wait?: {
+    readonly since?: Timestamp;
+    readonly elapsed_ms: number;
+  };
   readonly employee_id?: EmployeeId;
   /** Actual launch profile; absent on legacy runs. */
   readonly launch_profile_ref?: string;

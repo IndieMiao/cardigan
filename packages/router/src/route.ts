@@ -984,10 +984,9 @@ function routeHumanActionCompleted(input: RouteInput, draft: Draft): void {
  * Run from the host, so the new Assignment is woken right away and the
  * Dispatcher opens the terminal with the same `launchRun` the CLI uses.
  *
- * The rule only rings when the work item can start now: a verify item waits for
- * its target delivery and a produce item for its dependencies, and both get
- * their own bell when that happens. A human assigning from the CLI starts the
- * Assignment explicitly (`assign --start` or `assignment start`), so it is not
+ * Produce items wait for their dependencies. Verification notices are retained
+ * until Dispatcher finds a current target delivery. A human assigning from the
+ * CLI starts the Assignment explicitly (`assign --start` or `assignment start`), so it is not
  * woken here and never gets a second Run from this route.
  */
 function routeAssignment(input: RouteInput, draft: Draft): void {
@@ -1001,7 +1000,13 @@ function routeAssignment(input: RouteInput, draft: Draft): void {
   if (item === undefined) return;
   const assignment = assignmentOf(input, item.assignment_id);
   if (assignment === undefined || !isActive(assignment)) return;
-  if (!canStartWork({ item, work_items: input.snapshot.work_items })) return;
+  // Verification assignment notices wait in the inbox until a current target
+  // exists. Dispatcher checks the fresh delivery state before queuing a Run.
+  if (
+    item.kind !== "verify" &&
+    !canStartWork({ item, work_items: input.snapshot.work_items })
+  )
+    return;
   note(
     input,
     draft,
