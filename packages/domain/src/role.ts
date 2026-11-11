@@ -57,19 +57,30 @@ export const STANDING_ROLE_TOOLS = [
   "assign",
   "project_snapshot",
   "list_needs_you",
+  "list_templates",
+  "list_roles",
   "record_decision",
   "resolve_delegated_decision",
   "triage_human_action",
 ] as const satisfies readonly ToolName[];
 
+/** V12b: read-only template/role catalog, standing PM only (plan §2.1). */
+export const STANDING_ONLY_TOOLS = [
+  "list_templates",
+  "list_roles",
+] as const satisfies readonly ToolName[];
+const workItemTool = (tool: ToolName): boolean =>
+  !tool.startsWith("host_ops_") &&
+  !(STANDING_ONLY_TOOLS as readonly ToolName[]).includes(tool);
+
 export const ROLE_TOOL_ALLOWLISTS: Readonly<
   Record<RoleKind, readonly ToolName[]>
 > = {
   produce: toolNames.filter(
-    (tool) => tool !== "submit_review" && !tool.startsWith("host_ops_"),
+    (tool) => tool !== "submit_review" && workItemTool(tool),
   ),
   verify: toolNames.filter(
-    (tool) => tool !== "submit_delivery" && !tool.startsWith("host_ops_"),
+    (tool) => tool !== "submit_delivery" && workItemTool(tool),
   ),
   standing: [...STANDING_ROLE_TOOLS, ...HOST_OPS_TOOLS],
 };

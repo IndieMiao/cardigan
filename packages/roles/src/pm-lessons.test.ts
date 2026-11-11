@@ -13,6 +13,7 @@ import {
   PM_OFFICE_REPORTING_RULES,
   PM_OPS_EVENT_RULES,
   PM_PLANNING_RULES,
+  PM_TEMPLATE_RULES,
   PM_VERIFICATION_RULES,
   parseLaunchConfig,
 } from "./index.js";
@@ -96,6 +97,29 @@ test.each(rules.map((rule, index) => ({ rule, number: index + 1 })))(
   },
 );
 
+const templateSection = [
+  "## 选模板",
+  "",
+  ...PM_TEMPLATE_RULES.map((line) => `- ${line}`),
+  "",
+  "",
+].join("\n");
+
+test("V12b template rules follow planning in the PM prompt only", () => {
+  const prompt = corePromptFor("pm");
+  const section = prompt.indexOf(templateSection);
+  expect(section).toBeGreaterThan(prompt.indexOf("## 拆卡和派活"));
+  expect(section).toBeLessThan(prompt.indexOf("## 拍板和汇报"));
+  for (const { mode, prompt: launched } of modePrompts)
+    expect(launched, mode).toContain(templateSection);
+  for (const tool of ["list_templates", "list_roles"]) {
+    expect(prompt).toContain(`\`${tool}\``);
+    for (const role of ["coder", "reviewer"] as const)
+      expect(corePromptFor(role), role).not.toContain(tool);
+  }
+  expect(PM_TEMPLATE_RULES.join("")).toContain("不能自己创建或修改模板和角色");
+});
+
 test("PL.1 places the three source blocks in their prescribed sections", () => {
   // C-86 appends P2a rules to section ends; strip them so the PL.1 blocks stay contiguous.
   const p2a = new Set(
@@ -105,7 +129,9 @@ test("PL.1 places the three source blocks in their prescribed sections", () => {
       ...P2A_PM_OPS_RULES,
     ].map((line) => `- ${line}`),
   );
+  // V12b inserts its own section after planning; strip it the same way.
   const prompt = corePromptFor("pm")
+    .replace(templateSection, "")
     .split("\n")
     .filter((line) => !p2a.has(line))
     .join("\n");

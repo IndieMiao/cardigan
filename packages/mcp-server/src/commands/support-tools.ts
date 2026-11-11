@@ -10,6 +10,8 @@ import {
   finishRun,
   heartbeat,
   listNeedsYou,
+  listRoles,
+  listTemplates,
   prepareAttachment,
   projectSnapshot,
   type Result,
@@ -166,6 +168,20 @@ export function supportTools(options: SupportToolOptions = {}) {
         // repository path (M5.S S13).
         return { ...snapshot, cards: snapshot.cards.map(agentCard) };
       },
+    }),
+    defineTool({
+      name: "list_templates",
+      description:
+        "List the latest active card templates of this project with their work items (PM only, read-only).",
+      input: z.object({}),
+      handler: (_params, context) => readProject(context, listTemplates),
+    }),
+    defineTool({
+      name: "list_roles",
+      description:
+        "List the latest active roles of this project with kind, capabilities and abilities; prompts are not included (PM only, read-only).",
+      input: z.object({}),
+      handler: (_params, context) => readProject(context, listRoles),
     }),
     defineTool({
       name: "list_needs_you",

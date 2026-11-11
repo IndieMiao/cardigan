@@ -62,6 +62,8 @@ export const toolNames = [
   "assign",
   "project_snapshot",
   "list_needs_you",
+  "list_templates",
+  "list_roles",
   "record_decision",
   "resolve_delegated_decision",
   "triage_human_action",

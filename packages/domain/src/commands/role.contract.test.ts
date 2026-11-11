@@ -160,13 +160,17 @@ describe("tool and worktree boundaries", () => {
     "checks every system tool for %s",
     (kind) => {
       for (const tool of toolNames) {
+        // V12b: the template/role catalog is standing-only.
+        const standingOnly = ["list_templates", "list_roles"].includes(tool);
         const expected = tool.startsWith("host_ops_")
           ? false
-          : kind === "produce"
-            ? tool !== "submit_review"
-            : kind === "verify"
-              ? tool !== "submit_delivery"
-              : (STANDING_ROLE_TOOLS as readonly string[]).includes(tool);
+          : standingOnly && kind !== "standing"
+            ? false
+            : kind === "produce"
+              ? tool !== "submit_review"
+              : kind === "verify"
+                ? tool !== "submit_delivery"
+                : (STANDING_ROLE_TOOLS as readonly string[]).includes(tool);
         expect(
           validateRole(
             definition({

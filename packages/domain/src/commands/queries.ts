@@ -13,6 +13,12 @@ import type { CardId } from "../ids.js";
 import { requesterNotificationRecipient } from "../notification.js";
 import type { Clock } from "../ports.js";
 import { reviewLimitAttention } from "../review-limit-attention.js";
+import { type Role, roleKind } from "../role.js";
+import {
+  builtinCardTemplates,
+  type CardTemplate,
+  latestCardTemplate,
+} from "../templates.js";
 import { type CommandDraft, type CommandState, command } from "./core.js";
 import { decisionFollowupNeedsHuman } from "./decision-followup.js";
 import { hasActivePmOps, isPmOps } from "./delegation.js";
@@ -85,6 +91,101 @@ export function projectSnapshot(state: CommandState, actor: Actor) {
       project_id: state.project_id,
       cards: d.list("cards").map((c) => cardView(d, c.id)),
     };
+  });
+}
+
+/** One template as `list_templates` shows it: enough for a PM to pick one. */
+function templateSummary(template: CardTemplate) {
+  return {
+    id: template.id,
+    version: template.version,
+    title: template.title,
+    description: template.description,
+    builtin: template.builtin,
+    requires_repo: template.requires_repo,
+    merge: template.merge,
+    primary_work_item_key: template.primary_work_item_key,
+    work_items: template.work_items.map((item) => ({
+      key: item.key,
+      title: item.title,
+      role_id: item.role_id,
+      kind: item.kind,
+      required: item.required,
+    })),
+  };
+}
+
+/**
+ * V12b: the latest active version of every card template this project can
+ * use (host-provided, project-stored, builtin). Read-only; standing PM only.
+ */
+export function listTemplates(state: CommandState, actor: Actor) {
+  return command(state, actor, "list_templates", undefined, (d) => {
+    d.pm();
+    d.projectAccess();
+    const all = [
+      ...(d.ports?.templates ?? []),
+      ...d.list("card_templates"),
+      ...builtinCardTemplates,
+    ];
+    const templates = [...new Set(all.map((t) => t.id))]
+      .sort()
+      .flatMap((id) => {
+        const latest = latestCardTemplate(all, id);
+        return latest?.status === "active" ? [templateSummary(latest)] : [];
+      });
+    return { project_id: state.project_id, templates };
+  });
+}
+
+/**
+ * Stored role documents are full `Role`s; pre-M2 rows may only carry the
+ * `RoleReference` fields, so every descriptive field is optional here.
+ */
+type StoredRole = CommandState["roles"][number] &
+  Partial<Pick<Role, "display_name" | "kind" | "worktree" | "abilities">>;
+
+/**
+ * V12b: the latest active version of every role in this project. Prompts
+ * (`core_prompt`, `instructions`) and launch policy are deliberately omitted.
+ */
+export function listRoles(state: CommandState, actor: Actor) {
+  return command(state, actor, "list_roles", undefined, (d) => {
+    d.pm();
+    d.projectAccess();
+    const stored = state.roles as readonly StoredRole[];
+    const roles = [...new Set(stored.map((r) => r.role_id))]
+      .sort()
+      .flatMap((id) => {
+        const role = stored
+          .filter((r) => r.role_id === id)
+          .sort((a, b) => b.role_version - a.role_version)[0];
+        if (role === undefined || role.status === "inactive") return [];
+        return [
+          {
+            role_id: role.role_id,
+            version: role.role_version,
+            ...(role.display_name === undefined
+              ? {}
+              : { display_name: role.display_name }),
+            ...(role.kind === undefined
+              ? {}
+              : {
+                  kind: roleKind({
+                    kind: role.kind,
+                    allowed_tools: role.allowed_tools,
+                    capabilities: role.capabilities,
+                  }),
+                }),
+            capabilities: [...role.capabilities],
+            ...(role.worktree === undefined ? {} : { worktree: role.worktree }),
+            ...(role.abilities === undefined
+              ? {}
+              : { abilities: [...role.abilities] }),
+          },
+        ];
+      });
+    return { project_id: state.project_id, roles };
   });
 }
 
