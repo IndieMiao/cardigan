@@ -86,20 +86,53 @@ test("M4.1 reconciliation findings route to PM Ops without a card", () => {
   });
 });
 
-// P2a-1 §2.6 / C-66: a check that failed before the merge was confirmed.
+// C-66 / C-115: ordinary failures allow PM handling after confirmation;
+// human-only merges allow only structured timeout rechecks, even before it.
+const failureCases = [
+  {
+    failure: "failed",
+    status: "failed",
+    steps: ["failed"],
+    timeoutOnly: false,
+  },
+  {
+    failure: "timed_out",
+    status: "timed_out",
+    steps: ["timed_out"],
+    timeoutOnly: true,
+  },
+  {
+    failure: "step timeout",
+    status: "failed",
+    steps: ["passed", "timed_out", "not_run"],
+    timeoutOnly: true,
+  },
+  {
+    failure: "timeout with failed step",
+    status: "timed_out",
+    steps: ["failed", "timed_out"],
+    timeoutOnly: false,
+  },
+  {
+    failure: "timeout with interrupted step",
+    status: "timed_out",
+    steps: ["interrupted", "timed_out"],
+    timeoutOnly: false,
+  },
+] as const;
 test.each(
   (["human", "timeout", "sensitive"] as const).flatMap((mode) =>
     [false, true].flatMap((enabled) =>
-      (["failed", "timed_out"] as const).map((status) => ({
+      failureCases.map((failure) => ({
         mode,
         enabled,
-        status,
+        ...failure,
       })),
     ),
   ),
 )(
-  "a $mode-confirmed $status merge wakes PM Ops only when enabled=$enabled and not human-only",
-  async ({ mode, enabled, status }) => {
+  "a $mode-confirmed merge with $failure respects PM authorization when enabled=$enabled",
+  async ({ mode, enabled, status, steps, timeoutOnly }) => {
     const f = mergeFixture("confirm");
     const human = { kind: "human", project_id: f.state.project_id } as const;
     const system = { kind: "system", project_id: f.state.project_id } as const;
@@ -160,9 +193,15 @@ test.each(
         {
           ...identity,
           status,
-          summary: "test failed",
+          // Log text must never authorize timeout handling on its own.
+          summary: "test failed: timeout",
           log_ref: "attempt-1.log",
-          checks: [{ name: "test", status, exit_code: 1, duration_ms: 1 }],
+          checks: steps.map((status, index) => ({
+            name: `check-${index}`,
+            status,
+            exit_code: status === "passed" ? 0 : null,
+            duration_ms: 1,
+          })),
         },
         f.io,
       ),
@@ -172,10 +211,17 @@ test.each(
       (e) => e.type === "merge_check_finished",
     );
     if (!finished) throw new Error("Missing finished event");
-    // Still open with the human: nothing for PM Ops yet.
-    expect(
-      routeEvent({ event: finished, snapshot: f.state }).notifications,
-    ).toEqual([]);
+    const timeoutNotice = expect.objectContaining({
+      recipient: { kind: "pm_ops" },
+      summary: expect.stringMatching(/仅可重新检查.*不能退回或代确认合并/),
+    });
+    const pending = routeEvent({
+      event: finished,
+      snapshot: f.state,
+    }).notifications;
+    if (mode === "sensitive" && enabled && timeoutOnly)
+      expect(pending).toEqual([timeoutNotice]);
+    else expect(pending).toEqual([]);
     const confirmed = value(
       mode === "timeout"
         ? autoConfirmMerge(
@@ -208,7 +254,9 @@ test.each(
       event: resolved,
       snapshot: f.state,
     }).notifications;
-    if (mode === "sensitive" || !enabled) expect(routed).toEqual([]);
+    if (!enabled || (mode === "sensitive" && !timeoutOnly))
+      expect(routed).toEqual([]);
+    else if (mode === "sensitive") expect(routed).toEqual([timeoutNotice]);
     else
       expect(routed).toEqual([
         expect.objectContaining({
@@ -220,7 +268,17 @@ test.each(
     expect(
       routeEvent({ event: finished, snapshot: f.state }).notifications,
     ).toEqual(
-      routed.map((n) => ({ ...n, event_id: finished.id, seq: finished.seq })),
+      routed.map((n) => ({
+        ...n,
+        event_id: finished.id,
+        seq: finished.seq,
+        // Completion and confirmation describe different events, but both
+        // must tell PM Ops that human-only cards permit rechecking only.
+        summary:
+          mode === "sensitive"
+            ? expect.stringMatching(/仅可重新检查.*不能退回或代确认合并/)
+            : n.summary,
+      })),
     );
   },
 );

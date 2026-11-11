@@ -15,6 +15,7 @@ import {
   employeeNameKey,
   isCompletionVerifier,
   latestMergeCheck,
+  mergeRequiresHuman,
   pmMergeCheckDelegationAllowed,
   requesterNotificationRecipient,
 } from "@cardigan/domain";
@@ -844,22 +845,25 @@ function routeDecisionResolved(input: RouteInput, draft: Draft): void {
     q.status === "resolved" &&
     q.resolution?.option === "merge" &&
     q.kind === "approve" &&
-    "delivery_id" in q.target &&
-    pmMergeCheckDelegationAllowed(input.snapshot, q)
+    "delivery_id" in q.target
   ) {
     const check = latestMergeCheck(
       input.snapshot.events,
       q.card_id,
       q.target.delivery_id,
     );
-    if (check && (check.status === "failed" || check.status === "timed_out"))
+    if (
+      check &&
+      (check.status === "failed" || check.status === "timed_out") &&
+      pmMergeCheckDelegationAllowed(input.snapshot, q, check)
+    )
       note(
         input,
         draft,
         recipient.pm_ops(),
         "decision",
         "6.4/merge check finished",
-        `${subject(input)} 已确认合并，但合并检查结果 ${check.status}，请判断后退回修改或重新检查（${q.id}）。`,
+        `${subject(input)} 已确认合并，但合并检查结果 ${check.status}，${mergeRequiresHuman(input.snapshot, q) ? "仅可重新检查超时，不能退回或代确认合并" : "请判断后退回修改或重新检查"}（${q.id}）。`,
       );
   }
   if (
@@ -1325,19 +1329,36 @@ export function routeEvent(input: RouteInput): RouteResult {
       // return or recheck unless the card is human-only (P2a-1 §2.6).
       const status = payloadString(input.event.payload, "status");
       const completion = payloadString(input.event.payload, "completion_id");
-      const q = input.snapshot.decisions.find(
-        (q) =>
-          q.trigger === "merge_confirmation" &&
-          q.card_id === input.event.card_id &&
-          ((q.decider === "role:pm" && q.status === "open") ||
-            (q.status === "resolved" &&
-              q.resolution?.option === "merge" &&
-              (status === "failed" || status === "timed_out") &&
-              q.kind === "approve" &&
-              "delivery_id" in q.target &&
-              q.target.delivery_id === completion &&
-              pmMergeCheckDelegationAllowed(input.snapshot, q))),
-      );
+      const q = input.snapshot.decisions.find((q) => {
+        if (
+          q.trigger !== "merge_confirmation" ||
+          !q.card_id ||
+          q.card_id !== input.event.card_id
+        )
+          return false;
+        if (q.decider === "role:pm" && q.status === "open") return true;
+        const eligible =
+          (q.status === "resolved" && q.resolution?.option === "merge") ||
+          (mergeRequiresHuman(input.snapshot, q) &&
+            ["open", "provisional"].includes(q.status));
+        if (
+          !eligible ||
+          (status !== "failed" && status !== "timed_out") ||
+          q.kind !== "approve" ||
+          !("delivery_id" in q.target) ||
+          q.target.delivery_id !== completion
+        )
+          return false;
+        return pmMergeCheckDelegationAllowed(
+          input.snapshot,
+          q,
+          latestMergeCheck(
+            input.snapshot.events,
+            q.card_id,
+            q.target.delivery_id,
+          ),
+        );
+      });
       if (q)
         note(
           input,
@@ -1345,9 +1366,11 @@ export function routeEvent(input: RouteInput): RouteResult {
           recipient.pm_ops(),
           "decision",
           "6.4/merge check finished",
-          q.status === "resolved"
-            ? `${subject(input)} 已确认合并，但合并检查结果 ${status}，请判断后退回修改或重新检查（${q.id}）。`
-            : `${subject(input)} 合并检查结果 ${status ?? "未知"}，请处理合并确认 ${q.id}。`,
+          mergeRequiresHuman(input.snapshot, q)
+            ? `${subject(input)} 合并检查超时，PM 仅可重新检查，不能退回或代确认合并（${q.id}）。`
+            : q.status === "resolved"
+              ? `${subject(input)} 已确认合并，但合并检查结果 ${status}，请判断后退回修改或重新检查（${q.id}）。`
+              : `${subject(input)} 合并检查结果 ${status ?? "未知"}，请处理合并确认 ${q.id}。`,
         );
       break;
     }
