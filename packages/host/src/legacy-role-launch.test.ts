@@ -159,22 +159,59 @@ test.each(["codex", "claude-code", "pi"] as const)(
         expect(launchEntities(store, project, assignment.id).role).toEqual(
           role,
         );
-        const run = applyCommand(store, {
-          project,
-          actor,
-          clock,
-          reduce: (state, who, ports) =>
-            queueRun(
-              state,
-              who,
-              {
-                assignment_id: assignment.id,
-                model: "fixture",
-                agent_cli_version: "fixture",
-              },
-              ports,
-            ),
-        });
+        const queue = () =>
+          applyCommand(store, {
+            project,
+            actor,
+            clock,
+            reduce: (state, who, ports) =>
+              queueRun(
+                state,
+                who,
+                {
+                  assignment_id: assignment.id,
+                  model: "fixture",
+                  agent_cli_version: "fixture",
+                },
+                ports,
+              ),
+          });
+        if (item.kind === "verify") {
+          // Legacy role compatibility does not bypass the current-target rule.
+          expect(queue).toThrow("验证工作项尚无当前可审交付");
+          store.uow.run((tx) => {
+            const producer = tx.work_items
+              .list(project)
+              .find(
+                (candidate) =>
+                  candidate.card_id === item.card_id &&
+                  candidate.kind === "produce" &&
+                  (!item.target_work_item_id ||
+                    candidate.id === item.target_work_item_id),
+              );
+            const producerRun = tx.runs
+              .list(project)
+              .find((run) => run.assignment_id === producer?.assignment_id);
+            if (!producer || !producerRun)
+              throw new Error("Missing producer launch fixture");
+            // Seed the persisted target independently of role write validation:
+            // code review needs code, while PM acceptance needs a completion.
+            tx.deliveries.put(project, {
+              id: tx.ids.next(project, "delivery"),
+              work_item_id: producer.id,
+              run_id: producerRun.id,
+              kind: item.target_work_item_id ? "code" : "card_completion",
+              summary: "Legacy role launch target",
+              subject: { kind: "git_head", value: "a".repeat(40) },
+              status: "submitted",
+              requested_verifiers: [item.id],
+              evidence: [],
+              attachments: [],
+              known_gaps: [],
+            });
+          });
+        }
+        const run = queue();
         const worktree = join(root, assignment.id);
         await mkdir(worktree);
         const launched = await launchRun(
