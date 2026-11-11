@@ -175,8 +175,8 @@ export const snapshot = (
       }),
     ],
     assignments: [
-      assignment("A-1"),
-      assignment("A-2", { role_id: "reviewer" }),
+      assignment("A-1", { work_item_id: "W-1" }),
+      assignment("A-2", { role_id: "reviewer", work_item_id: "W-2" }),
       assignment("A-3", { scope: "standing", role_id: "pm" }),
     ],
     deliveries: [],

@@ -2,6 +2,7 @@ import { beforeEach, expect, test } from "vitest";
 import {
   abortDispatch,
   acknowledgeRun,
+  type CardId,
   claimDispatchStop,
   claimInactiveRunStop,
   dispatchedAt,
@@ -13,7 +14,9 @@ import {
   recoverDispatch,
   releaseAssignment,
   resolveDispatchAttention,
+  retireUnreadableQueuedRun,
   startDispatchStop,
+  unreadableCommentTrigger,
 } from "../index.js";
 import { CommandDraft } from "./core.js";
 import {
@@ -559,3 +562,200 @@ test("C-106: a recovery replacement Run keeps the original Run's launch settings
     effort: "high",
   });
 });
+
+function foreignTrigger(type = "comment_posted") {
+  const source = {
+    id: f.io.ids.nextEventId(),
+    seq: 1,
+    card_id: "C-999" as CardId,
+    type,
+    actor: system,
+    payload: {},
+    created_at: f.io.clock.now(),
+  };
+  run = {
+    ...(f.state.runs.find((r) => r.id === run.id) ?? run),
+    trigger_event_id: source.id,
+    kind: "followup",
+  };
+  f.state = {
+    ...f.state,
+    events: [...f.state.events, source],
+    runs: f.state.runs.map((r) => (r.id === run.id ? run : r)),
+  };
+  return source;
+}
+
+test("C-120: unreadable comment timeout cancels after exact exit proof without requeueing or spending recovery budget", () => {
+  const source = foreignTrigger();
+  const before = f.state;
+  expect(
+    recoverDispatch(
+      f.state,
+      system,
+      {
+        run_id: run.id,
+        timeout_ms: 1,
+        failed_attempts: 5,
+        max_failures: 5,
+      },
+      f.io,
+    ),
+  ).toMatchObject({ ok: false, error: { code: "validation_failed" } });
+  now += 600000;
+  expect(commit(recover())).toBeUndefined();
+  expect(f.state.runs).toHaveLength(before.runs.length);
+  expect(f.state.runs[0]).toMatchObject({
+    status: "cancelled",
+    outcome: "failed",
+  });
+  expect(f.state.runs[0]?.dispatch_stop).toBeUndefined();
+  expect(f.state.cursors).toEqual(before.cursors);
+  expect(f.state.work_items).toEqual(before.work_items);
+  expect(
+    f.state.events.filter((e) => e.type === "run_dispatch_recovered"),
+  ).toEqual([]);
+  expect(
+    f.state.events.find((e) => e.type === "run_unreadable_trigger_cancelled")
+      ?.payload,
+  ).toMatchObject({
+    source_event_id: source.id,
+    reason: "recipient_cannot_read_card",
+    run_id: run.id,
+  });
+  expect(commit(recover())).toBeUndefined();
+});
+
+test("C-120: host-only queued cancellation preserves the existing session and business state", () => {
+  setup();
+  run = commit(queue());
+  foreignTrigger();
+  const before = f.state;
+  expect(
+    retireUnreadableQueuedRun(f.state, actor(), { run_id: run.id }, f.io).ok,
+  ).toBe(false);
+  commit(retireUnreadableQueuedRun(f.state, system, { run_id: run.id }, f.io));
+  expect(f.state.runs[0]).toMatchObject({
+    status: "cancelled",
+    outcome: "failed",
+  });
+  expect(f.state.assignments).toEqual(before.assignments);
+  expect(f.state.work_items).toEqual(before.work_items);
+  expect(f.state.cursors).toEqual(before.cursors);
+  const count = f.state.events.length;
+  commit(retireUnreadableQueuedRun(f.state, system, { run_id: run.id }, f.io));
+  expect(f.state.events).toHaveLength(count);
+});
+
+test("C-120: queued cleanup cannot cancel a dispatched, started, external or readable Run", () => {
+  foreignTrigger();
+  const before = f.state;
+  commit(retireUnreadableQueuedRun(f.state, system, { run_id: run.id }, f.io));
+  expect(f.state.runs).toEqual(before.runs);
+  for (const variant of [
+    "started",
+    "external",
+    "readable",
+    "standing",
+  ] as const) {
+    setup();
+    run = commit(queue());
+    foreignTrigger(
+      variant === "readable" ? "dependency_completed" : "comment_posted",
+    );
+    if (variant === "started")
+      f.state = {
+        ...f.state,
+        runs: [{ ...run, started_at: f.io.clock.now() }],
+      };
+    if (variant === "external" || variant === "standing")
+      f.state = {
+        ...f.state,
+        assignments: f.state.assignments.map((a) => {
+          if (a.id !== run.assignment_id) return a;
+          if (variant === "external") return { ...a, external: true };
+          const { work_item_id: _, ...rest } = a;
+          return { ...rest, scope: "standing" as const };
+        }),
+      };
+    const current = f.state;
+    commit(
+      retireUnreadableQueuedRun(f.state, system, { run_id: run.id }, f.io),
+    );
+    expect(f.state.runs).toEqual(current.runs);
+    expect(f.state.events).toEqual(current.events);
+  }
+});
+
+test("C-120: legitimate cross-card business triggers retain automatic recovery", () => {
+  foreignTrigger("dependency_completed");
+  expect(unreadableCommentTrigger(f.state, run)).toBeUndefined();
+  now += 600000;
+  expect(commit(recover())?.status).toBe("queued");
+});
+
+test.each([false, true])(
+  "C-120: an already recovered Run retains its unreadable comment ancestry (dispatched=%s)",
+  (dispatched) => {
+    const replacement = commit(recover(run, 5));
+    if (!replacement) throw new Error("Missing replacement");
+    const source = foreignTrigger();
+    f.state = {
+      ...f.state,
+      events: f.state.events.map((e) =>
+        e.type === "run_dispatch_recovered"
+          ? {
+              ...e,
+              payload: {
+                assignment_id: run.assignment_id,
+                run_id: run.id,
+                replacement_run_id: replacement.id,
+                original_trigger_event_id: source.id,
+              },
+            }
+          : e,
+      ),
+    };
+    expect(unreadableCommentTrigger(f.state, replacement)).toEqual(source);
+    if (dispatched) {
+      commit(dispatch(replacement));
+      const claimed = commit(
+        claimDispatchStop(
+          f.state,
+          system,
+          {
+            run_id: replacement.id,
+            reason: "dispatch_timeout",
+            lease_ms: 60000,
+          },
+          f.io,
+        ),
+      );
+      if (!claimed?.dispatch_stop) throw new Error("Missing stop");
+      commit(
+        startDispatchStop(
+          f.state,
+          system,
+          {
+            run_id: replacement.id,
+            attempt_id: claimed.dispatch_stop.attempt_id,
+          },
+          f.io,
+        ),
+      );
+      expect(commit(recover(replacement))).toBeUndefined();
+    } else
+      commit(
+        retireUnreadableQueuedRun(
+          f.state,
+          system,
+          { run_id: replacement.id },
+          f.io,
+        ),
+      );
+    expect(f.state.runs.find((r) => r.id === replacement.id)?.status).toBe(
+      "cancelled",
+    );
+    expect(f.state.runs).toHaveLength(2);
+  },
+);

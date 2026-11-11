@@ -3,11 +3,16 @@ import type {
   CardId,
   Clock,
   CommandState,
+  Event,
   Notification,
   ProjectId,
 } from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
-import { type RoutedNotification, routeEvent } from "@cardigan/router";
+import {
+  assignmentCanReadCard,
+  type RoutedNotification,
+  routeEvent,
+} from "@cardigan/router";
 import {
   advanceRouterCursor,
   moveNotification,
@@ -15,12 +20,49 @@ import {
   recordNotification,
   retireReconcileNotifications,
   type Store,
+  type StoreTransactionContext,
   unfinishedBellAttempts,
 } from "@cardigan/store";
 
 import type { StateLoader } from "./dispatch-state.js";
 
 export const dispatcherClock: Clock = { now: () => new Date().toISOString() };
+
+/** The caller's transaction keeps the audit and its visible explanation together. */
+function recordInboxNotice(
+  tx: StoreTransactionContext,
+  project: ProjectId,
+  card: CardId,
+  at: string,
+  type: string,
+  payload: Event["payload"],
+  body: string,
+) {
+  const event: Event = {
+    id: tx.ids.nextEventId(),
+    seq: tx.ids.nextEventSequence(project, card),
+    card_id: card,
+    type,
+    actor: { kind: "system", project_id: project },
+    payload,
+    created_at: at,
+  };
+  tx.events.append(project, event);
+  const id = tx.ids.nextTimelineEntryId(project, card);
+  tx.timeline.put(project, {
+    id,
+    short_id: id,
+    card_id: card,
+    event_seq: event.seq,
+    type: "system",
+    author: "system",
+    body,
+    refs: [],
+    mentions: [],
+    retracted: false,
+    created_at: at,
+  });
+}
 export function recordRoute(
   store: Store,
   project: ProjectId,
@@ -70,6 +112,23 @@ export function routeStreamEvents(
       at = (options.clock ?? dispatcherClock).now();
     for (const event of events) {
       const routed = routeEvent({ event, snapshot });
+      const unreadable = routed.problems.filter(
+        (p) => p.code === "assignment_cannot_read_card",
+      );
+      if (event.card_id && unreadable.length)
+        recordInboxNotice(
+          tx,
+          project,
+          event.card_id,
+          at,
+          "comment_mention_redirected",
+          {
+            source_event_id: event.id,
+            source_seq: event.seq,
+            problems: unreadable.map((p) => ({ ...p })),
+          },
+          `评论（事件 #${event.seq}）提及未送达：${unreadable.map((p) => p.detail).join("\n")}`,
+        );
       // Ambiguous/unresolved routing must remain visible to Ops, even if no
       // concrete Assignment could be chosen. The source event retains details.
       if (routed.problems.length)
@@ -130,6 +189,59 @@ export function notificationOwner(
   )
     ? id
     : undefined;
+}
+
+/** Retire legacy cross-card deliveries without impersonating an Agent ACK. */
+export function resolveUnreadableNotifications(
+  store: Store,
+  project: ProjectId,
+  clock: Clock = dispatcherClock,
+  loadState: StateLoader = loadCommandState,
+): number {
+  return store.uow.run((tx) => {
+    const state = loadState(tx, project),
+      at = clock.now();
+    let count = 0;
+    for (const note of store.listNotifications({ project_id: project })) {
+      if (
+        !note.card_id ||
+        note.recipient.kind !== "assignment" ||
+        note.status === "acked" ||
+        note.status === "resolved"
+      )
+        continue;
+      const ownerId = note.recipient.assignment_id;
+      const owner = state.assignments.find((a) => a.id === ownerId);
+      if (
+        !owner ||
+        assignmentCanReadCard(owner, note.card_id, state.work_items)
+      )
+        continue;
+      moveNotification(store.database, {
+        project_id: project,
+        id: note.id,
+        event: "resolve",
+        at,
+      });
+      recordInboxNotice(
+        tx,
+        project,
+        note.card_id,
+        at,
+        "notification_resolved",
+        {
+          notification_id: note.id,
+          source_event_id: note.event_id,
+          assignment_id: owner.id,
+          reason: "recipient_cannot_read_card",
+          previous_status: note.status,
+        },
+        `${owner.id} 无权读取本卡，通知 ${note.id} 已收尾，停止重推；未代为确认。`,
+      );
+      count++;
+    }
+    return count;
+  });
 }
 /** ACK wins over a late delivery failure; escalated terminal rows are left alone. */
 export function acknowledgeInbox(

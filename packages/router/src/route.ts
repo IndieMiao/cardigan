@@ -9,6 +9,7 @@ import type {
   WorkItemId,
 } from "@cardigan/domain";
 import {
+  assignmentCanReadCard,
   canStartWork,
   cardTemplate,
   employeeNameKey,
@@ -268,6 +269,31 @@ function routeMentions(
             code: "unknown_mention",
             detail: `@${text} is not an active Assignment`,
           });
+          continue;
+        }
+        if (
+          input.event.card_id &&
+          !assignmentCanReadCard(
+            target,
+            input.event.card_id,
+            input.snapshot.work_items,
+          )
+        ) {
+          const detail = `@${text} 无权读取本卡，未向其投递；已转交 PM Ops，请在该 Assignment 所属卡片联系，或指定本卡负责人。`;
+          problem(
+            draft,
+            "6.5/explicit assignment or work item",
+            "assignment_cannot_read_card",
+            detail,
+          );
+          note(
+            input,
+            draft,
+            recipient.pm_ops(),
+            "escalation",
+            "6.5/explicit assignment or work item",
+            detail,
+          );
           continue;
         }
         note(
