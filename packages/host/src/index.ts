@@ -39,6 +39,11 @@ export {
   type MergeGateConfiguration,
   type ProjectMergeGate,
 } from "./merge-gate-config.js";
+export {
+  LOCAL_EXECUTOR,
+  MAX_EXECUTOR_CONCURRENCY,
+  type MergeGateExecutor,
+} from "./merge-gate-executors.js";
 export { CHECK_OUTPUT_LIMIT, createMergeCheckLog } from "./merge-gate-log.js";
 export {
   type MergePushConfig,

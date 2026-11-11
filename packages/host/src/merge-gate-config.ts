@@ -8,6 +8,12 @@ import {
   MIN_REDACTED_ENV_BYTES,
 } from "./check-environment.js";
 import {
+  type ExecutorEntry,
+  type MergeGateExecutor,
+  parseMergeGateExecutors,
+  resolveProjectExecutor,
+} from "./merge-gate-executors.js";
+import {
   type MergePushConfig,
   parseMergePushConfig,
 } from "./merge-push-config.js";
@@ -22,6 +28,8 @@ export type ProjectMergeGate =
       readonly env: Readonly<Record<string, string>>;
       readonly totalTimeoutMs: number;
       readonly push?: MergePushConfig;
+      /** Absent for `executor: local` or no executor: exactly today's behavior. */
+      readonly executor?: MergeGateExecutor;
     };
 export interface MergeGateConfiguration {
   readonly errors: readonly string[];
@@ -53,9 +61,11 @@ async function projectConfig(
   raw: unknown,
   dataDir: string,
   baseBranch: string,
+  executors: ReadonlyMap<string, ExecutorEntry>,
 ): Promise<ProjectMergeGate> {
   if (!object(raw)) invalid("项目配置必须是对象");
-  only(raw, ["checks", "env", "total_timeout_minutes", "push"]);
+  only(raw, ["checks", "env", "total_timeout_minutes", "push", "executor"]);
+  const executor = resolveProjectExecutor(raw.executor, executors);
   if (!Array.isArray(raw.checks) || !raw.checks.length)
     invalid("checks 必须是非空列表");
   const names = new Set<string>();
@@ -104,6 +114,7 @@ async function projectConfig(
     ...(raw.push === undefined
       ? {}
       : { push: await parseMergePushConfig(raw.push, dataDir, baseBranch) }),
+    ...(executor === undefined ? {} : { executor }),
   };
 }
 
@@ -183,10 +194,24 @@ export async function loadMergeGateConfig(input: {
   if (
     !object(raw) ||
     !object(raw.projects) ||
-    Object.keys(raw).some((key) => key !== "projects")
+    Object.keys(raw).some((key) => !["projects", "executors"].includes(key))
   ) {
     globalError =
-      "merge-gate.yaml 顶层必须只包含 projects 映射，所有项目暂停合并";
+      "merge-gate.yaml 顶层只能包含 projects 映射和可选的 executors 映射，所有项目暂停合并";
+    errors.push(globalError);
+    return result();
+  }
+  const dataDir =
+    input.dataDir ??
+    env.CARDIGAN_DATA_DIR ??
+    join(homedir(), ".local/share/cardigan");
+  let executors: ReadonlyMap<string, ExecutorEntry>;
+  try {
+    const parsed = await parseMergeGateExecutors(raw.executors, dataDir);
+    executors = parsed.entries;
+    errors.push(...parsed.errors);
+  } catch (error) {
+    globalError = `merge-gate.yaml 的 ${(error as Error).message}，所有项目暂停合并`;
     errors.push(globalError);
     return result();
   }
@@ -197,10 +222,9 @@ export async function loadMergeGateConfig(input: {
         project,
         await projectConfig(
           value,
-          input.dataDir ??
-            env.CARDIGAN_DATA_DIR ??
-            join(homedir(), ".local/share/cardigan"),
+          dataDir,
           input.baseBranches?.[project] ?? "main",
+          executors,
         ),
       );
     } catch (error) {

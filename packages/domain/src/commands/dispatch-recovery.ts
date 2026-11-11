@@ -1,7 +1,7 @@
 import type { Actor, Run, RuntimeRef } from "../entities.js";
 import { hostOpsPending } from "../host-ops.js";
 import type { RunId } from "../ids.js";
-import type { Notification } from "../notification.js";
+import { assignmentCanReadCard, type Notification } from "../notification.js";
 import { transition } from "../transitions.js";
 import {
   type CommandPorts,
@@ -18,6 +18,83 @@ const field = (payload: unknown, name: string): unknown =>
     : undefined;
 const finished = (run: Run) =>
   ["completed", "failed", "cancelled"].includes(run.status);
+
+/** Only comment-triggered work is obsolete; cross-card business events remain valid. */
+export function unreadableCommentTrigger(state: CommandState, run: Run) {
+  const a = state.assignments.find((a) => a.id === run.assignment_id);
+  if (!a) return undefined;
+  let source = run;
+  const visited = new Set<RunId>();
+  while (!visited.has(source.id)) {
+    visited.add(source.id);
+    const event = state.events.find((e) => e.id === source.trigger_event_id);
+    if (event?.type === "comment_posted")
+      return event.card_id &&
+        !assignmentCanReadCard(a, event.card_id, state.work_items)
+        ? event
+        : undefined;
+    if (
+      event?.type !== "run_dispatch_recovered" ||
+      field(event.payload, "assignment_id") !== a.id ||
+      field(event.payload, "replacement_run_id") !== source.id
+    )
+      return undefined;
+    const original = state.runs.find(
+      (r) =>
+        r.id === field(event.payload, "run_id") &&
+        r.assignment_id === a.id &&
+        r.trigger_event_id ===
+          field(event.payload, "original_trigger_event_id"),
+    );
+    if (!original) return undefined;
+    source = original;
+  }
+  return undefined;
+}
+
+/** Host must also exclude in-flight BellAttempts in the same store transaction. */
+export function retireUnreadableQueuedRun(
+  state: CommandState,
+  actor: Actor,
+  p: { run_id: RunId },
+  ports: CommandPorts,
+) {
+  return command(state, actor, "recover_dispatch", ports, (d) => {
+    const run = d.get("runs", p.run_id),
+      a = d.get("assignments", run.assignment_id);
+    const source = unreadableCommentTrigger(state, run);
+    if (
+      !source ||
+      a.external ||
+      run.status !== "queued" ||
+      run.started_at ||
+      run.dispatch_stop ||
+      run.inactivity_stop
+    )
+      return;
+    const { queue_reason: _queue, ...rest } = run;
+    const body = `${a.id}（${run.id}）无权读取触发评论所在卡片 ${source.card_id}，已取消尚未派发的执行，不再重排。`;
+    // A queued Run owns no terminal. Preserve the Assignment's existing idle session.
+    d.put("runs", {
+      ...rest,
+      status: unwrap(transition("run", run.status, "cancel")),
+      outcome: "failed",
+      summary: body,
+      finished_at: d.now,
+    });
+    d.emit(
+      "run_unreadable_trigger_cancelled",
+      source.card_id,
+      {
+        run_id: run.id,
+        assignment_id: a.id,
+        source_event_id: source.id,
+        reason: "recipient_cannot_read_card",
+      },
+      { type: "system", body, run_id: run.id },
+    );
+  });
+}
 export const dispatchedAt = (state: CommandState, run: Run) =>
   state.events.findLast(
     (e) => e.type === "run_dispatched" && field(e.payload, "run_id") === run.id,
@@ -133,6 +210,7 @@ export function recoverDispatch(
         e.type === "run_dispatch_recovered" &&
         field(e.payload, "assignment_id") === a.id,
     );
+    const unreadable = unreadableCommentTrigger(state, run);
     // Report the whole recovery episode without changing this Run's timeout.
     const recovery = state.events.find(
       (e) =>
@@ -147,7 +225,7 @@ export function recoverDispatch(
     const waitedMs = Date.parse(d.now) - Date.parse(waitingSince);
     const minutes = Math.max(0, Math.floor(waitedMs / 60000));
     const context = `${card ? `${card.id}「${card.title}」` : "项目常驻任务"}的 ${a.id}（${run.id}）派发后已等待 ${minutes} 分钟，${startupFailed ? "自动恢复后的启动失败" : "仍未开始工作"}`;
-    if (!recovered && !p.stop_failed && !startupFailed) {
+    if ((!recovered || unreadable) && !p.stop_failed && !startupFailed) {
       ensure(
         stopped &&
           JSON.stringify(p.stopped_runtime) ===
@@ -161,7 +239,9 @@ export function recoverDispatch(
         cancelRunDispatch(
           d,
           unfenced,
-          `${context}；${reason}，确认终端退出后自动重排一次。`,
+          unreadable
+            ? `${context}；无权读取触发评论所在卡片，确认终端退出后取消，不再重排。`
+            : `${context}；${reason}，确认终端退出后自动重排一次。`,
         );
       // Preserve any host-recorded terminal outcome, but always settle credentials.
       if (["unknown", "lost"].includes(a.runtime_state))
@@ -180,6 +260,21 @@ export function recoverDispatch(
         attempt_id: stop?.attempt_id ?? "",
         cancelled: !finished(run),
       });
+      if (unreadable) {
+        const body = `${a.id}（${run.id}）无权读取触发评论所在卡片 ${unreadable.card_id}，已确认旧终端退出并收尾，不再重排。`;
+        d.emit(
+          "run_unreadable_trigger_cancelled",
+          unreadable.card_id,
+          {
+            run_id: run.id,
+            assignment_id: a.id,
+            source_event_id: unreadable.id,
+            reason: "recipient_cannot_read_card",
+          },
+          { type: "system", body, run_id: run.id },
+        );
+        return;
+      }
       if (
         finished(run) ||
         a.status !== "active" ||

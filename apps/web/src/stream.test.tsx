@@ -28,7 +28,7 @@ class Connection extends EventTarget {
   }
   emit(type: string, data?: unknown) {
     this.dispatchEvent(
-      type === "change"
+      type === "change" || (type === "queue" && data !== undefined)
         ? new MessageEvent(type, { data: JSON.stringify(data) })
         : new Event(type),
     );
@@ -106,11 +106,44 @@ test("stream resumes every observed cursor, ignores duplicates/stale sources, an
   p.last.emit("open");
   p.last.emit("change", change("C-1", 6));
   expect(c.change).toHaveBeenCalledTimes(4);
-  expect(c.ready).toHaveBeenCalledTimes(2);
+  // Only the first open re-reads; the resumed one relies on the replay.
+  expect(c.ready).toHaveBeenCalledTimes(1);
   p.last.emit("error");
   stop();
   vi.advanceTimersByTime(10000);
   expect(p.all).toHaveLength(2);
+});
+
+test("a server shutdown frame drops the connection and resumes on the next server with the same cursors", () => {
+  vi.useFakeTimers();
+  const p = pool(),
+    c = callbacks(),
+    stop = subscribeProject("p-1", c, p.create);
+  const first = p.last;
+  first.emit("open");
+  first.emit("change", change("C-3", 9));
+  first.emit("change", change("project", 2));
+  first.emit("shutdown");
+  expect(first.closed).toBe(true);
+  expect(c.status).toHaveBeenLastCalledWith("retrying");
+  // The next server is not up yet: keep retrying, no page reload needed.
+  vi.advanceTimersByTime(3000);
+  const second = p.last;
+  expect(second).not.toBe(first);
+  second.emit("error");
+  vi.advanceTimersByTime(3000);
+  const third = p.last;
+  expect(third).not.toBe(second);
+  expect(
+    new URL(third.url, "https://workbench.invalid").searchParams.get("after"),
+  ).toBe("C-3:9,project:2");
+  // A late frame from the old connection is ignored.
+  first.emit("shutdown");
+  expect(p.all).toHaveLength(3);
+  third.emit("open");
+  expect(c.status).toHaveBeenLastCalledWith("live");
+  expect(c.ready).toHaveBeenCalledTimes(1);
+  stop();
 });
 
 test("a disconnect before any event reconnects from zero; malformed changes cannot advance a cursor", () => {
@@ -251,6 +284,80 @@ test("card streams filter unrelated events and preserve a comment draft and pend
   await waitFor(() => expect(field.value).toBe(""));
 });
 
+test("after a server restart the Workbench reconnects without re-reading loaded views or losing a draft", async () => {
+  window.location.hash = "#/p/p-1/cards/C-1";
+  const read = vi.fn<CardiganClient["card"]>().mockResolvedValue(cardDetail());
+  const cards = vi.spyOn(fakeClient(), "cards");
+  const { client, connections } = live({ card: read, cards });
+  render(<App client={client} />);
+  const field = (await screen.findByLabelText(
+    "评论正文",
+  )) as HTMLTextAreaElement;
+  act(() => connections.last.emit("open"));
+  act(() => connections.last.emit("change", change("C-1", 4)));
+  await settle();
+  fireEvent.change(field, { target: { value: "重启期间的草稿" } });
+  const reads = read.mock.calls.length,
+    lists = cards.mock.calls.length;
+
+  const old = connections.last;
+  act(() => old.emit("shutdown"));
+  await waitFor(() => expect(connections.last).not.toBe(old));
+  expect(
+    new URL(connections.last.url, "https://workbench.invalid").searchParams.get(
+      "after",
+    ),
+  ).toBe("C-1:4");
+  act(() => connections.last.emit("open"));
+  await settle();
+  // Nothing changed while away: nothing is fetched again.
+  expect(read).toHaveBeenCalledTimes(reads);
+  expect(cards).toHaveBeenCalledTimes(lists);
+  expect(screen.getByLabelText("评论正文")).toBe(field);
+  expect(field.value).toBe("重启期间的草稿");
+
+  // A change replayed by the new server refreshes the card once.
+  act(() => connections.last.emit("change", change("C-1", 5)));
+  await waitFor(() => expect(read).toHaveBeenCalledTimes(reads + 1));
+  expect(field.value).toBe("重启期间的草稿");
+});
+
+test("a queue change made during a restart reaches the view after the reconnect", async () => {
+  window.location.hash = "#/p/p-1/cards";
+  let ahead = 1;
+  const cards = vi
+    .fn<CardiganClient["cards"]>()
+    .mockImplementation(async (id, filter) => ({
+      project_id: id,
+      filter,
+      cards: [{ ...card, title: `前面还有 ${ahead} 个` }],
+      counts: { total: 1, needs_me: 1, agent: 0 },
+    }));
+  const { client, connections } = live({ cards });
+  render(<App client={client} />);
+  await screen.findByText("前面还有 1 个");
+  act(() => {
+    connections.last.emit("open");
+    connections.last.emit("queue", { revision: "q1" });
+    connections.last.emit("change", change("project", 2));
+  });
+  await settle();
+  const before = cards.mock.calls.length;
+
+  // Another project's Run leaves the queue while the server restarts; this
+  // project has no event to replay.
+  ahead = 0;
+  const old = connections.last;
+  act(() => old.emit("shutdown"));
+  await waitFor(() => expect(connections.last).not.toBe(old));
+  act(() => {
+    connections.last.emit("open");
+    connections.last.emit("queue", { revision: "q2" });
+  });
+  await screen.findByText("前面还有 0 个");
+  expect(cards).toHaveBeenCalledTimes(before + 1);
+});
+
 test("switching project cancels old retries and cursors; expired sessions leave the live Workbench", async () => {
   window.location.hash = "#/p/p-1/cards";
   let authenticated = true;
@@ -283,6 +390,39 @@ test("switching project cancels old retries and cursors; expired sessions leave 
   await settle();
   expect(connections.all).toHaveLength(stoppedCount);
   expect(connections.all.every((c) => c.closed)).toBe(true);
+});
+
+test("queue revisions refresh only when they change, including changes made while disconnected", () => {
+  vi.useFakeTimers();
+  const p = pool(),
+    c = callbacks(),
+    stop = subscribeProject("p-1", c, p.create);
+  const first = p.last;
+  first.emit("open");
+  first.emit("queue", { revision: "r1" });
+  // The opening revision is covered by the re-read on open.
+  expect(c.ready).toHaveBeenCalledTimes(1);
+  first.emit("queue", { revision: "r1" });
+  expect(c.ready).toHaveBeenCalledTimes(1);
+  first.emit("queue", { revision: "r2" });
+  expect(c.ready).toHaveBeenCalledTimes(2);
+  first.emit("change", change("C-1", 3));
+
+  // Restart with no queue change: a resumed connection reads nothing again.
+  first.emit("shutdown");
+  vi.advanceTimersByTime(3000);
+  p.last.emit("open");
+  p.last.emit("queue", { revision: "r2" });
+  expect(c.ready).toHaveBeenCalledTimes(2);
+
+  // Another project's Run left the queue while we were away.
+  p.last.emit("shutdown");
+  vi.advanceTimersByTime(3000);
+  p.last.emit("open");
+  expect(c.ready).toHaveBeenCalledTimes(2);
+  p.last.emit("queue", { revision: "r3" });
+  expect(c.ready).toHaveBeenCalledTimes(3);
+  stop();
 });
 
 test("cross-project queue changes refresh views without fabricating a project event cursor", () => {

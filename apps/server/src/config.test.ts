@@ -26,6 +26,7 @@ test("S10 defaults to loopback, port 3004 and the same user data directory as th
     dispatchTimeoutMs: 600_000,
     hostOpsPatrolIntervalMs: 1_800_000,
     hostOpsContextThresholdPct: 80,
+    shutdownGraceMs: 10_000,
   });
 });
 
@@ -96,6 +97,7 @@ test("reads data dir and port from the environment", () => {
     dispatchTimeoutMs: 600_000,
     hostOpsPatrolIntervalMs: 1_800_000,
     hostOpsContextThresholdPct: 80,
+    shutdownGraceMs: 10_000,
   });
 });
 
@@ -150,4 +152,17 @@ test("check cleanup grace is configurable and rejects invalid durations", () => 
     expect(() =>
       resolveServerConfig({ CARDIGAN_CHECK_CLEANUP_GRACE_MS: value }),
     ).toThrow(/CARDIGAN_CHECK_CLEANUP_GRACE_MS/);
+});
+
+test("the shutdown grace period defaults to 10 seconds and is configurable", () => {
+  expect(resolveServerConfig({ HOME: "/fixture/home" }).shutdownGraceMs).toBe(
+    10_000,
+  );
+  expect(
+    resolveServerConfig({ CARDIGAN_SHUTDOWN_GRACE_MS: "2500" }).shutdownGraceMs,
+  ).toBe(2500);
+  for (const value of ["0", "-1", "1.5", "abc"])
+    expect(() =>
+      resolveServerConfig({ CARDIGAN_SHUTDOWN_GRACE_MS: value }),
+    ).toThrow(/CARDIGAN_SHUTDOWN_GRACE_MS/);
 });
