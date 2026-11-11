@@ -24,6 +24,7 @@ export function standingTools(
     mode === "office"
       ? ![
           "issue_instruction",
+          "withdraw_review",
           "resolve_delegated_decision",
           "triage_human_action",
         ].includes(tool)

@@ -30,6 +30,7 @@
 - 新产出替代该工作项的旧产出和旧完成申请：产出验证项回到 ready，失去完成申请目标的 PM 验收项回到 todo，等新完成申请再 ready。supersedes 只指向同类上一版（产出 / 完成申请），显式传入时也校验类型。完成申请只替代旧完成申请，绑定当前产出的相同 subject，保留已经通过的代码审核。
 - 主产出及 PM 验收项通过模板稳定键识别。按用户确认，前置条件排除本次 PM 验收项；其余未满足项必须有精确 precondition 键、说明及同项目后续卡片。检查结果加入 evidence，不能由调用者伪造“已通过”。
 - `submitReview`：只允许该交付请求的验证 Assignment；SHA/交付版本过期拒绝。verdict/blocking 通过 M1.2 计算，忽略客户端同名字段；普通审核使产出被接受或返工，完成审核后进入 awaiting_merge；无 Git 提交形式的交付（subject.kind=git_head，不按 kind 分类）时同命令直接 done，其余经合并后才 done。
+- `withdrawReview`（P2a-11 卡 1）：只有普通验证项的当前持有者可撤回有效的最新 pass；理由必填。校验卡片未关闭、当前完成申请无 running 检查且未合并后，原 Review 追加 withdrawn、工作项 passed→ready，写 review_withdrawn 和时间线。完成验收撤回、产出回退与完成申请级联由后续卡片补齐；所有失败无部分效果。
 - conditional 不算必需验证通过。已终结的交付不能继续改结论，需要新交付版本；每个 Run 只提交一次审核，请求重放由外层幂等处理。
 - 第二轮起沿用问题描述（去除首尾空白）作为复查匹配依据；新增非 pre_existing 问题必须 critical 且有 proof。此处不做语义相似度判定。
 - 达到上限且仍为 reject 或 conditional 时，在下一轮开始前生成阻塞 Decision、验证项进入 waiting_decision，当前审核 Run 以 blocked 结束；先发 review_submitted（rework_allowed=false），再发 decision_requested，不创建返工 Run。最后一轮 pass 正常通过；换新 Run 不能绕过上限。不存在用户可写的“自动通过”开关。
@@ -139,7 +140,7 @@ S21 / V10a：MCP create_card 可省略 repo／base_branch。需要仓库的模�
 - `createRole(state, actor, definition, ports)` 新建 v1；`updateRole(state, actor, id, patch, ports)` 追加 latest+1。拒绝修改编号、版本和状态；可编辑显示名、类型、instructions、兼容 core_prompt、Harness／启动配置引用、capabilities、abilities、worktree、allowed_tools 和机器标签。
 - `copyRole(state, actor, {source, role_id, display_name?}, ports)`：source 由主机从默认包或同一事务内的源项目读取；新编号从 v1 开始、状态 active；源后续变化不影响副本。重新按目标编号校验权限，不能通过复制 pm 给其他编号授予 record_decision。
 - `deactivateRole / activateRole(state, actor, id, ports)` 追加 inactive / active 版本；重复设置已有状态无版本和事件。`rollbackRole(state, actor, id, version, ports)` 复制历史内容到 latest+1，重新校验权限，保留当前启停状态。
-- `validateRole` 覆盖系统工具白名单：produce 禁 submit_review，verify 禁 submit_delivery，standing 以上述 PM 固定列表为上限；任意未知名称拒绝；record_decision 仅 pm；验证型 worktree 只允许 readonly/none。旧 kind=work 保存时通过工具／验证能力标记转成明确类型，不能绕过验证型限制。Token 的 office 作用域继续在主机签发时收窄。
+- `validateRole` 覆盖系统工具白名单：produce 禁 submit_review/withdraw_review，verify 禁 submit_delivery，standing 以上述 PM 固定列表为上限；任意未知名称拒绝；record_decision 仅 pm；验证型 worktree 只允许 readonly/none。旧 kind=work 保存时通过工具／验证能力标记转成明确类型，不能绕过验证型限制。保存角色版本时，submit_review 自动推导 withdraw_review，历史版本和 Token 不变。Token 的 office 作用域继续在主机签发时收窄，并排除 withdraw_review。
 - `instructions` 禁止包含系统协作规则／协议的标题和任意一条规则原文，`roleInstructionsError` 与系统文本常量由 domain 共用；新建、修改、复制、回退及启停写入均返回 validation_failed。roles 启动编译复查同一边界，确保三种 Harness 不输出重复段落。只有 core_prompt 的旧角色不受影响；完整旧提示词应通过显式转换剥离系统段落，不能直接粘贴到 instructions。
 - 新指派前 `isRoleActive` 始终检查最新版，即便显式要求旧版也不能绕过停用；重复指派复用原 Assignment，已有 Assignment 与 Run 保持固定版本和历史权限。不存在角色仍为 not_found。
 - 事件为 role_created、role_copied、role_updated、role_deactivated、role_activated、role_rolled_back；保存 Actor 和完整版本快照。验证失败无部分效果。

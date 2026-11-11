@@ -31,10 +31,11 @@ export function deriveReview(
 
 // Pass the current delivery; a new ID invalidates reviews even if the SHA stayed the same.
 export function isReviewStale(
-  review: Pick<Review, "delivery_id" | "target_sha">,
+  review: Pick<Review, "delivery_id" | "target_sha" | "withdrawn">,
   current: Pick<Delivery, "id" | "subject" | "status">,
 ): boolean {
   return (
+    review.withdrawn !== undefined ||
     review.delivery_id !== current.id ||
     review.target_sha !== current.subject.value ||
     current.status === "superseded"
@@ -73,7 +74,7 @@ type MatrixWorkItem = Pick<WorkItem, "id" | "kind"> & {
 };
 type MatrixReview = Pick<
   Review,
-  "id" | "delivery_id" | "work_item_id" | "target_sha" | "verdict"
+  "id" | "delivery_id" | "work_item_id" | "target_sha" | "verdict" | "withdrawn"
 >;
 /**
  * Only the verifiers that review this delivery (§4.4, M5.S S16): a completion

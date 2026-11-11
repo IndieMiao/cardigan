@@ -50,6 +50,12 @@ test("the legacy inference reads record_decision from a token scope", () => {
   expect(standingModeFromTools([])).toBe("ops");
 });
 
+test("review withdrawal is not exposed to the PM Office chat token", () => {
+  const tools = ["submit_review", "withdraw_review"] as const;
+  expect(standingTools(tools, "office")).toEqual(["submit_review"]);
+  expect(standingTools(tools, "ops")).toEqual(tools);
+});
+
 test("applying a mode stamps a standing pm Assignment", () => {
   const office = applyStandingMode(standing(), "office");
   expect(office.ok).toBe(true);
