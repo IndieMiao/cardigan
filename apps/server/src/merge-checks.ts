@@ -466,9 +466,12 @@ export class MergeChecks {
       });
       return { done: Promise.resolve() };
     }
-    const round = this.run(projects).finally(() => {
-      if (this.round === round) this.round = undefined;
-    });
+    // Nobody may await a background round: report, never reject unhandled.
+    const round = this.run(projects)
+      .catch((error: unknown) => this.options.onError(error))
+      .finally(() => {
+        if (this.round === round) this.round = undefined;
+      });
     this.round = round;
     return { done: round };
   }

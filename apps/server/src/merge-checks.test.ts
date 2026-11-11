@@ -452,3 +452,19 @@ test.each(["checks", "executor"] as const)(
     expect(c.errors).not.toHaveBeenCalled();
   },
 );
+
+test("a background round that throws is reported, frees the slot and never rejects unhandled", async () => {
+  const { f, check } = await fixture("auto");
+  const c = controller(f);
+  const projectOf = c.git.projectOf;
+  c.git.projectOf = () => {
+    throw new Error("fixture-boom");
+  };
+  const { done } = await c.gate.schedule([f.project_id]);
+  await expect(done).resolves.toBeUndefined();
+  expect(c.errors).toHaveBeenCalledWith(new Error("fixture-boom"));
+  c.git.projectOf = projectOf;
+  await c.gate.tick([f.project_id]);
+  expect(check()?.status).toBe("passed");
+  expect(f.card().status).toBe("done");
+});
