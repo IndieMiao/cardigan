@@ -1,3 +1,4 @@
+import { HOST_OPS_ROLE_TOOLS, validateRole } from "@cardigan/domain";
 import { expect, test } from "vitest";
 import { compileAssignmentLaunch } from "./assignment.js";
 import {
@@ -13,7 +14,14 @@ import {
 } from "./role-pack.js";
 import { parseLaunchConfig } from "./schema.js";
 
-test.each(["pm", "coder", "reviewer", "designer", "tester"] as const)(
+test.each([
+  "pm",
+  "coder",
+  "reviewer",
+  "designer",
+  "tester",
+  "host_ops",
+] as const)(
   "converts the default %s format without carrying system sections",
   (id) => {
     const old = corePromptFor(id, "Display name");
@@ -26,6 +34,34 @@ test.each(["pm", "coder", "reviewer", "designer", "tester"] as const)(
     expect(convertLegacyRole({ core_prompt: historical })).toEqual(converted);
   },
 );
+
+test("host_ops defaults describe the operations boundary without granting PM or work-item powers", () => {
+  const role = defaultRoleDefinition("host_ops", {
+    harness: "codex",
+    launch_profile_ref: "fixture",
+  });
+  expect(validateRole(role).ok).toBe(true);
+  expect(role).toMatchObject({
+    kind: "standing",
+    worktree: "none",
+    capabilities: [],
+    allowed_tools: HOST_OPS_ROLE_TOOLS,
+  });
+  const prompt = corePromptFor("host_ops");
+  for (const phrase of [
+    "PM Ops",
+    "不派活",
+    "不建卡",
+    "不审核",
+    "Assignment、Run、Card 编号",
+    "不按员工名字",
+    "高风险必须是 human",
+    "尚不可用",
+  ])
+    expect(prompt).toContain(phrase);
+  for (const rule of [...SHARED_BOUNDARIES, ...AGENT_PROTOCOL])
+    expect(prompt.split(rule)).toHaveLength(2);
+});
 
 test("unknown legacy structure is preserved with a warning; explicit instructions are left alone", () => {
   const unknown =

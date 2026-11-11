@@ -2,6 +2,7 @@ import { deriveCardStatus } from "../derived.js";
 import type { Employee, EmployeeActivity } from "../employee.js";
 import type * as E from "../entities.js";
 import type { DomainError, ErrorCode, Result } from "../errors.js";
+import { HOST_OPS_FORBIDDEN_TOOLS } from "../host-ops.js";
 import type * as I from "../ids.js";
 import type { Member } from "../member.js";
 import type { Clock, IdAllocator } from "../ports.js";
@@ -80,6 +81,7 @@ type CommandName =
   | E.ToolName
   | "pause_standing_assignment"
   | "rotate_standing_pm"
+  | "create_host_ops_assignment"
   | "queue_run"
   | "dispatch_run"
   | "acknowledge_run"
@@ -173,6 +175,11 @@ export class CommandDraft {
       "forbidden_tool",
       "Only the human can supersede a card",
     );
+    ensure(
+      tool !== "create_host_ops_assignment" || actor.kind === "human",
+      "unauthorized",
+      "Only the human can create a standing host_ops Assignment",
+    );
     const hostOnly = [
       "queue_run",
       "dispatch_run",
@@ -235,6 +242,14 @@ export class CommandDraft {
           this.assignment.role_version === actor.role_version,
         "unauthorized",
         "Assignment or role version is no longer active",
+      );
+      ensure(
+        (!tool.startsWith("host_ops_") || actor.role_id === "host_ops") &&
+          (actor.role_id !== "host_ops" ||
+            (this.assignment.scope === "standing" &&
+              !(HOST_OPS_FORBIDDEN_TOOLS as readonly string[]).includes(tool))),
+        "forbidden_tool",
+        "Tool is outside the host_ops role boundary",
       );
       const role = state.roles.find(
         (r) =>
@@ -321,9 +336,9 @@ export class CommandDraft {
       this.actor.kind === "human" ||
         this.actor.kind === "system" ||
         (this.assignment?.scope === "standing" &&
-          this.assignment.role_id === "pm"),
+          ["pm", "host_ops"].includes(this.assignment.role_id)),
       "unauthorized",
-      "A project-scoped PM assignment is required",
+      "A project-scoped PM or host_ops assignment is required",
     );
   }
   card(id: I.CardId): E.Card {

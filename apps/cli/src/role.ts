@@ -46,7 +46,7 @@ const USAGE = [
   "  copy <源角色> <新角色> [--from-project <项目> | --from-default --harness <CLI> --launch-profile <配置>] [--version <n>] [--name <显示名>]",
   "  update <角色> --convert-legacy",
   "  upgrade <角色> --from-default [--dry-run]",
-  "    为已有默认角色（pm、coder、reviewer、designer、tester）追加新版本：instructions、allowed_tools、",
+  "    为已有默认角色（pm、coder、reviewer、designer、tester、host_ops）追加新版本：instructions、allowed_tools、",
   "    capabilities、kind、worktree 取当前默认角色包；harness、launch_profile_ref、display_name、abilities、",
   "    required_machine_tags 保留项目自己的。先打印变化和放宽项；内容相同时不追加。--dry-run 只打印不写入。",
   "  deactivate|activate <角色>",
@@ -397,7 +397,14 @@ export async function runRoleCommand(
   }
 }
 
-const DEFAULT_ROLE_IDS = ["pm", "coder", "reviewer", "designer", "tester"];
+const DEFAULT_ROLE_IDS = [
+  "pm",
+  "coder",
+  "reviewer",
+  "designer",
+  "tester",
+  "host_ops",
+];
 
 function printUpgrade(
   io: CliIo,

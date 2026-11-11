@@ -267,6 +267,14 @@ export function requestDecision(
     text(p.context, "context");
     text(p.decider, "decider");
     ensure(
+      p.decider !== "role:host_ops" &&
+        (d.assignment?.role_id !== "host_ops" ||
+          p.decider === "human" ||
+          p.decider === "role:pm"),
+      "unauthorized",
+      "主机运维不能作为决策人，只能向人或 PM 请求拍板",
+    );
+    ensure(
       decisionCategories.includes(p.category),
       "validation_failed",
       "Decision category is required",

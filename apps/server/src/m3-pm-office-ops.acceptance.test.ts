@@ -27,7 +27,7 @@ import {
   type RuntimeLaunch,
   type RuntimeRef,
   type RuntimeResult,
-  toolNames,
+  STANDING_ROLE_TOOLS,
 } from "@cardigan/domain";
 import { launchRun } from "@cardigan/host";
 import {
@@ -202,7 +202,7 @@ async function pmFixture() {
         harness: "claude-code",
         launch_profile_ref: "fixture",
         worktree: "none",
-        allowed_tools: toolNames.filter(
+        allowed_tools: STANDING_ROLE_TOOLS.filter(
           (tool) =>
             role_id === "pm" ||
             (![

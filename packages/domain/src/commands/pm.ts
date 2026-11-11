@@ -551,6 +551,11 @@ export function assign(
 ) {
   return command(state, actor, "assign", ports, (d) => {
     d.pm();
+    ensure(
+      p.role_id !== "host_ops",
+      "validation_failed",
+      "host_ops 只能创建常驻 Assignment，不能指派工作项",
+    );
     const item = d.work(p.work_item_id);
     ensure(
       p.machine_id === undefined || p.machine_id === "local",

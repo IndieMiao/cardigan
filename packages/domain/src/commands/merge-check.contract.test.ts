@@ -2,6 +2,8 @@ import { expect, test } from "vitest";
 import {
   type Actor,
   autoConfirmMerge,
+  createHostOpsAssignment,
+  HOST_OPS_ROLE_TOOLS,
   hasPassedMergeCheck,
   latestMergeCheck,
   listNeedsYou,
@@ -17,11 +19,53 @@ import {
   setProjectPreferences,
 } from "../index.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
-import { human, value } from "./test-fixtures.js";
+import { apply, human, value } from "./test-fixtures.js";
 
 const system: Actor = { kind: "system", project_id: human.project_id };
 const tree = "c".repeat(40),
   candidate = "b".repeat(40);
+
+test("C-84 reserves host_ops tools without relaxing human-only merge rechecks", async () => {
+  const { f, state, record } = await fixture();
+  record("queued");
+  record("running");
+  record("failed");
+  const base = {
+    ...state(),
+    roles: [
+      ...state().roles,
+      {
+        role_id: "host_ops",
+        role_version: 1,
+        allowed_tools: HOST_OPS_ROLE_TOOLS,
+        capabilities: [],
+      },
+    ],
+  };
+  const created = value(createHostOpsAssignment(base, human, {}, f.io));
+  const current = apply(base, created);
+  const actor: Actor = {
+    kind: "assignment",
+    project_id: base.project_id,
+    assignment_id: created.data.assignment.id,
+    role_id: "host_ops",
+    role_version: 1,
+    allowed_tools: HOST_OPS_ROLE_TOOLS,
+    capabilities: [],
+  };
+  expect(
+    recheckMerge(current, actor, { card_id: f.card.id }, f.io),
+  ).toMatchObject({ ok: false, error: { code: "unauthorized" } });
+  const effect = value(
+    recheckMerge(current, human, { card_id: f.card.id }, f.io),
+  );
+  expect(effect.events.some((e) => e.type === "merge_check_requeued")).toBe(
+    true,
+  );
+  expect(effect.events.some((e) => e.type === "host_ops_action_taken")).toBe(
+    false,
+  );
+});
 
 test("a queued attempt can fail before any command starts, but cannot claim executed checks", async () => {
   const { f, state, identity, record } = await fixture();

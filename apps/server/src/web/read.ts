@@ -1408,6 +1408,7 @@ const DEFAULT_ROLE_CANDIDATES = [
   "reviewer",
   "designer",
   "tester",
+  "host_ops",
 ];
 export const DEFAULT_ROLE_IDS = DEFAULT_ROLE_CANDIDATES.filter(isDefaultRoleId);
 

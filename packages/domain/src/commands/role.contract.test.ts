@@ -160,8 +160,9 @@ describe("tool and worktree boundaries", () => {
     "checks every system tool for %s",
     (kind) => {
       for (const tool of toolNames) {
-        const expected =
-          kind === "produce"
+        const expected = tool.startsWith("host_ops_")
+          ? false
+          : kind === "produce"
             ? tool !== "submit_review"
             : kind === "verify"
               ? tool !== "submit_delivery"

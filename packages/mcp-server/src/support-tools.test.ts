@@ -9,7 +9,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Assignment, Attachment, Decision, Run } from "@cardigan/domain";
-import { toolNames } from "@cardigan/domain";
+import { STANDING_ROLE_TOOLS } from "@cardigan/domain";
 import { Store } from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -62,7 +62,7 @@ async function connect(assignment: Assignment) {
     id: assignment.mcp_token_id,
     project_id,
     assignment_id: assignment.id,
-    role: { role_version: 1, allowed_tools: toolNames },
+    role: { role_version: 1, allowed_tools: STANDING_ROLE_TOOLS },
   });
   const client = new Client({ name: "support-test", version: "1" });
   clients.push(client);
@@ -108,7 +108,9 @@ beforeEach(async () => {
   clients = [];
   sequence = 0;
   logger = memoryLogger();
-  const { assignment } = seedProject(store, { allowed_tools: toolNames });
+  const { assignment } = seedProject(store, {
+    allowed_tools: STANDING_ROLE_TOOLS,
+  });
   const pm: Assignment = {
     id: "A-2" as never,
     scope: "standing",
@@ -126,7 +128,7 @@ beforeEach(async () => {
     tx.roles.put(project_id, {
       role_id: "pm",
       role_version: 1,
-      allowed_tools: toolNames,
+      allowed_tools: STANDING_ROLE_TOOLS,
       capabilities: [],
     });
     for (const a of [assignment, pm])
@@ -192,7 +194,7 @@ test("attachment metadata validation is shared with domain and rejects without r
 
 test("legacy PM tools exclude Ops instructions; concurrent attachment uploads and replays commit once", async () => {
   expect((await office.listTools()).tools.map((t) => t.name).sort()).toEqual(
-    toolNames.filter((name) => name !== "issue_instruction").sort(),
+    STANDING_ROLE_TOOLS.filter((name) => name !== "issue_instruction").sort(),
   );
   const args = {
     ...upload,
