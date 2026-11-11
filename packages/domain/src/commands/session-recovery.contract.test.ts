@@ -202,6 +202,121 @@ test("M5.6 invariants 4, 5, 12: replacement dispatch records one system handoff 
   ).toBe(false);
 });
 
+test("P2a-10 A: a tool catalog replacement is system-only, keeps the queued snapshot and names its reason", () => {
+  const previous = start();
+  end(previous, "completed");
+  const queued = commit(queue());
+  const withCatalog = { ...queued, tool_catalog: "new-catalog" };
+  f.state = {
+    ...f.state,
+    runs: f.state.runs.map((r) => (r.id === queued.id ? withCatalog : r)),
+  };
+  const replacement = {
+    previous: ref,
+    reason: "tool_catalog_changed" as const,
+  };
+  const nextRef = { ...ref, terminal_ref: "t2" };
+  delete nextRef.agent_session_id;
+  const before = JSON.stringify(f.state);
+  // Not even the Assignment itself can ask for its own replacement.
+  expect(
+    dispatchRun(
+      f.state,
+      actor(),
+      { run_id: queued.id, runtime_ref: nextRef, replacement },
+      f.io,
+    ).ok,
+  ).toBe(false);
+  expect(
+    dispatchRun(
+      f.state,
+      human,
+      { run_id: queued.id, runtime_ref: nextRef, replacement },
+      f.io,
+    ).ok,
+  ).toBe(false);
+  expect(JSON.stringify(f.state)).toBe(before);
+  const effect = value(
+    dispatchRun(
+      f.state,
+      system,
+      {
+        run_id: queued.id,
+        runtime_ref: nextRef,
+        replacement,
+        launch_snapshot: {
+          model: queued.model,
+          agent_cli_version: queued.agent_cli_version,
+        },
+      },
+      f.io,
+    ),
+  );
+  const body = effect.timeline[0]?.body;
+  expect(body).toContain("部署后工具清单已变更");
+  expect(body).not.toContain("运行时失联");
+  commit(
+    dispatchRun(
+      f.state,
+      system,
+      {
+        run_id: queued.id,
+        runtime_ref: nextRef,
+        replacement,
+        launch_snapshot: {
+          model: queued.model,
+          agent_cli_version: queued.agent_cli_version,
+        },
+      },
+      f.io,
+    ),
+  );
+  expect(
+    f.state.events.filter((e) => e.type === "session_replaced").at(-1)?.payload,
+  ).toMatchObject({ reason: "tool_catalog_changed", run_id: queued.id });
+  expect(f.state.runs.find((r) => r.id === queued.id)).toMatchObject({
+    tool_catalog: "new-catalog",
+    status: "dispatched",
+  });
+  expect(owner()?.runtime_ref).toMatchObject({ terminal_ref: "t2" });
+});
+
+test("P2a-10 A: a new terminal records the launch catalog and a reused session inherits it", () => {
+  // `start` provisions on ref with a launch catalog, as the host does.
+  const first = commit(queue());
+  commit(
+    dispatchRun(
+      f.state,
+      system,
+      {
+        run_id: first.id,
+        runtime_ref: ref,
+        base_sha: subject.value,
+        launch_snapshot: {
+          model: first.model,
+          agent_cli_version: first.agent_cli_version,
+          tool_catalog: "session-catalog",
+        },
+      },
+      f.io,
+    ),
+  );
+  commit(acknowledgeRun(f.state, actor(), { run_id: first.id }, f.io));
+  expect(f.state.runs.find((r) => r.id === first.id)?.tool_catalog).toBe(
+    "session-catalog",
+  );
+  end(
+    f.state.runs.find((r) => r.id === first.id) as ReturnType<typeof start>,
+    "completed",
+  );
+  // Any entry point that reuses the terminal (no runtime_ref) keeps it.
+  const next = commit(queue());
+  commit(dispatchRun(f.state, human, { run_id: next.id }, f.io));
+  expect(f.state.runs.find((r) => r.id === next.id)?.tool_catalog).toBe(
+    "session-catalog",
+  );
+});
+
 test("M5.6 invariant 11: stale runtime replacement and Agent attempts are rejected without a handoff", () => {
   const previous = start();
   end(previous, "completed");

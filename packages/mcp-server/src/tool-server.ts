@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { toJsonSchemaCompat } from "@modelcontextprotocol/sdk/server/zod-json-schema-compat.js";
 import {
@@ -13,6 +14,7 @@ import {
   allowedTools,
   type ToolContext,
   type ToolDefinition,
+  visibleTools,
 } from "./tools/types.js";
 
 export interface ToolServerOptions {
@@ -27,6 +29,47 @@ export interface ToolServerOptions {
    * Run look started.
    */
   readonly onToolCall?: () => void;
+}
+
+/** The `tools/list` entries for an already filtered tool set. */
+function listedTools(visible: readonly ToolDefinition[]) {
+  return visible.map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    inputSchema: toJsonSchemaCompat(tool.input),
+  }));
+}
+
+/**
+ * P2a-10 A: a stable hash of exactly what `tools/list` returns to an
+ * Assignment holding `allowed`. Harnesses such as Claude Code list tools once
+ * per session and this stateless endpoint cannot send `list_changed`, so a
+ * session started under another deploy keeps the old list. Comparing this
+ * fingerprint with the one recorded when the session started tells the
+ * Dispatcher whether that list actually changed. Order-insensitive.
+ */
+export function toolCatalogFingerprint(
+  tools: readonly ToolDefinition[],
+  allowed: readonly string[],
+  assignment: Parameters<typeof visibleTools>[2],
+): string {
+  const listed = listedTools(visibleTools(tools, allowed, assignment)).sort(
+    (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0),
+  );
+  return createHash("sha256").update(canonicalJson(listed)).digest("hex");
+}
+
+/** JSON with object keys sorted, so key order never changes the hash. */
+export function canonicalJson(value: unknown): string {
+  return JSON.stringify(value, (_key, v: unknown) =>
+    v !== null && typeof v === "object" && !Array.isArray(v)
+      ? Object.fromEntries(
+          Object.entries(v as Record<string, unknown>).sort(([a], [b]) =>
+            a < b ? -1 : a > b ? 1 : 0,
+          ),
+        )
+      : v,
+  );
 }
 
 /**
@@ -51,11 +94,7 @@ export function createMcpServer(options: ToolServerOptions): Server {
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: visible.map((tool) => ({
-      name: tool.name,
-      description: tool.description,
-      inputSchema: toJsonSchemaCompat(tool.input),
-    })),
+    tools: listedTools(visible),
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {

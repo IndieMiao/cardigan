@@ -23,6 +23,7 @@ import {
   isStandingPm,
   standingModeOf,
 } from "@cardigan/domain";
+import { defaultToolCatalog } from "@cardigan/mcp-server";
 import {
   type CompiledAssignmentLaunch,
   compileAssignmentLaunch,
@@ -494,6 +495,10 @@ async function launch(
     const currentAssignment =
       host.store.uow.read((tx) => tx.assignments.get(project, assignment.id)) ??
       assignment;
+    const toolCatalog = sessionToolCatalog(
+      issued.record.allowed_tools,
+      currentAssignment,
+    );
 
     step = "launch compilation";
     const profileRef =
@@ -620,6 +625,10 @@ async function launch(
               model,
               agent_cli_version: current.agent_cli_version,
               launch_profile_ref: compiled.profile,
+              // P2a-10 A: the new session lists exactly this token's tools.
+              ...(toolCatalog === undefined
+                ? {}
+                : { tool_catalog: toolCatalog }),
             },
             runtime_ref: dispatchRef,
             ...(baseSha === undefined ? {} : { base_sha: baseSha }),
@@ -723,5 +732,21 @@ async function compensate(input: Compensation): Promise<void> {
     });
   } catch {
     // The Run may already be gone; the caller reports the original failure.
+  }
+}
+
+/**
+ * P2a-10 A: fingerprint of the tools/list a new session will receive. A
+ * failure only drops the fingerprint (no catalog replacement later); it never
+ * blocks the launch.
+ */
+function sessionToolCatalog(
+  allowed: readonly string[],
+  assignment: Assignment,
+): string | undefined {
+  try {
+    return defaultToolCatalog(allowed, assignment);
+  } catch {
+    return undefined;
   }
 }

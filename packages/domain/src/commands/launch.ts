@@ -199,7 +199,7 @@ export interface DispatchRunParams {
   /** Host compilation snapshot, recorded atomically before a queued Run starts. */
   readonly launch_snapshot?: Pick<
     Run,
-    "model" | "agent_cli_version" | "launch_profile_ref"
+    "model" | "agent_cli_version" | "launch_profile_ref" | "tool_catalog"
   >;
   readonly run_id: RunId;
   /**
@@ -214,7 +214,8 @@ export interface DispatchRunParams {
     readonly reason:
       | "runtime_not_found"
       | "runtime_unavailable"
-      | "launch_profile_changed";
+      | "launch_profile_changed"
+      | "tool_catalog_changed";
   };
 }
 export function dispatchRun(
@@ -225,7 +226,7 @@ export function dispatchRun(
 ) {
   return command(state, actor, "dispatch_run", ports, (d) => {
     const stored = d.get("runs", p.run_id);
-    const run = p.launch_snapshot
+    const launched = p.launch_snapshot
       ? {
           ...stored,
           model: p.launch_snapshot.model,
@@ -233,8 +234,34 @@ export function dispatchRun(
           ...(p.launch_snapshot.launch_profile_ref
             ? { launch_profile_ref: p.launch_snapshot.launch_profile_ref }
             : {}),
+          ...(p.launch_snapshot.tool_catalog
+            ? { tool_catalog: p.launch_snapshot.tool_catalog }
+            : {}),
         }
       : stored;
+    // P2a-10 A: a Run dispatched onto the existing terminal belongs to the
+    // same session, so it keeps the tools/list fingerprint that session
+    // recorded (the latest started Run on the same Role version). Any entry
+    // point that reuses a session (Dispatcher or CLI) therefore keeps it.
+    const session =
+      p.runtime_ref === undefined && launched.tool_catalog === undefined
+        ? d
+            .list("runs")
+            .filter(
+              (r) =>
+                r.assignment_id === launched.assignment_id &&
+                r.id !== launched.id &&
+                r.started_at !== undefined &&
+                r.role_version === launched.role_version,
+            )
+            .sort((x, y) => Number(y.id.slice(2)) - Number(x.id.slice(2)))[0]
+        : undefined;
+    const run =
+      session?.tool_catalog !== undefined
+        ? { ...launched, tool_catalog: session.tool_catalog }
+        : launched;
+    if (p.launch_snapshot?.tool_catalog !== undefined)
+      text(p.launch_snapshot.tool_catalog, "tool_catalog");
     if (p.launch_snapshot?.launch_profile_ref !== undefined)
       text(p.launch_snapshot.launch_profile_ref, "launch_profile_ref");
     const assignment = target(d, run.assignment_id);
@@ -302,7 +329,9 @@ export function dispatchRun(
       const reason =
         p.replacement.reason === "launch_profile_changed"
           ? "员工启动配置已变更"
-          : `运行时失联（${p.replacement.reason}）`;
+          : p.replacement.reason === "tool_catalog_changed"
+            ? "部署后工具清单已变更"
+            : `运行时失联（${p.replacement.reason}）`;
       const body = `${reason}，替换 Session。旧 RuntimeRef：${JSON.stringify(p.replacement.previous)}。最近 Run：${previousRun?.id ?? "无"}，outcome：${previousRun?.outcome ?? "无"}。新 Session 先读卡片和 get_updates。`;
       d.emit(
         "session_replaced",

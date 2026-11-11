@@ -10,7 +10,7 @@ import {
   resolveExecutionConfig,
   secureDataDirectory,
 } from "@cardigan/runtime-herdr";
-import { Store } from "@cardigan/store";
+import { getRoleVersion, Store, tokensForAssignment } from "@cardigan/store";
 import {
   type ControlPlane,
   type ControlPlaneOptions,
@@ -180,7 +180,27 @@ export async function startCardiganServer(
         attachmentIntervalMs =
           options.dispatcher.attachmentIntervalMs ??
           config.attachmentIntervalMs;
+      const served = mcp;
       plane = startControlPlane({
+        // P2a-10 A: the fingerprint comes from the endpoint's own tool set, so
+        // it always matches what a new session would list.
+        toolCatalog: (assignment, project) => {
+          const allowed =
+            tokensForAssignment(store.database, project, assignment.id).at(-1)
+              ?.allowed_tools ??
+            store.uow.read(
+              (tx) =>
+                getRoleVersion(
+                  tx,
+                  project,
+                  assignment.role_id,
+                  assignment.role_version,
+                )?.allowed_tools,
+            );
+          return allowed === undefined
+            ? undefined
+            : served.toolCatalog(allowed, assignment);
+        },
         ...options.dispatcher,
         ...((options.dispatcher.dispatchTimeoutMs ??
           config.dispatchTimeoutMs) === undefined
