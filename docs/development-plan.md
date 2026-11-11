@@ -750,6 +750,8 @@ M3.4 的持久化边界见 [ADR 0003](adr/0003-dispatch-delivery-boundary.md)：
 
 M3.4 重发策略：首次成功投递之外最多再重发 4 次，等待间隔默认 1、2、4、8 分钟（retryBaseMs / maxRetries 可配置）；最后一次重发再等待最后一档间隔仍无 ACK 才标记 needs_attention。到期时存在任何未结束 Run 或投递意图则等待，ACK 优先；重发沿用原 Run，不重开已结束 Run、不创建第二个 Run。项目级通知仍只首次投递；项目级 ACK 使用独立的空流键，与卡片流同样结算 pending / belled / delivery_failed。逻辑 PM 收件人已投递的通知以实际 Run 或在途投递的 Assignment 为准，不能由新 PM 的游标代确认。
 
+C-120：每轮派发前检查已有显式 Assignment 通知的卡片读取范围。工作项 Assignment 的所属工作项不在通知卡片时，将 `pending / belled / delivery_failed / needs_attention` 经既有 `resolve` 收尾，同事务记录 `notification_resolved` 事件和原卡系统时间线，原因 `recipient_cannot_read_card`，保留原通知、来源事件、接收者和旧状态；不推进 ACK 游标。重复 tick、重启及迟到投递结果不会重开该通知。常驻 Assignment、项目级流及已 ACK 通知保持原规则。失败投递的 Run 若触发事件属于无权读取的卡片，不再重发门铃；已存在终端仍由既有 Run 超时与停止恢复流程处理，不以通知收尾伪造 Run 完成。
+
 C-56 失败恢复：外接 Assignment 跳过失败重试、派发超时恢复及遗留停止记录的续跑，不查询／停止终端、不撤销凭据、不自动取消或重排 Run。其他 Assignment 的每个 `dispatched` 且没有 `run_started` 的 Run，从持久化投递意图读取结果。失败后默认等待 30 秒、1、2、4 分钟，各重试一次（`deliveryRetryBaseMs` / `maxRetries` 可配置）；重试前查询终端，只在明确存活时按铃，沿用原 Run、通知和 worktree，不根据画面 idle/working 推断业务状态。每次重试先取得同一 Assignment 的投递租约，事务内重查 Run 尚未启动、引用未变、没有在途意图；等待查询或 Git 准备期间发生的 MCP 启动优先。显式 CLI 启动没有通知时，也使用其持久投递意图重试。
 
 连续失败达到首次加重试次数上限，或派发默认 10 分钟仍未启动（`dispatchTimeoutMs` / `CARDIGAN_DISPATCH_TIMEOUT_MS`，正整数毫秒），先持久化独立的 `Run.dispatch_stop`（原终端引用、原因、attempt、租期、stopping），复核没有 MCP 启动并提交 stopping 后停止旧终端；只有独立状态查询确认 exited／runtime_not_found，才在同一事务取消旧 Run、撤销其 Assignment 的旧 Token、按原 kind 和执行快照排一个新的 queued Run，以 `run_dispatch_recovered` 记录旧新编号、原始触发事件和原因，并由 Router 通知原 Assignment。保留 worktree 和 Session 恢复信息，清除旧终端引用，由既有启动路径重新 provision／签发 Token。无法证明终端退出时保留原 Run、凭据和 stopping 栅栏并升级；停止前查询期间出现 MCP 启动则撤回本次停止，stopping 提交后拒绝该 Run 的 acknowledge、finish、heartbeat 及交付等 Agent 写操作。停止租期独立于 BellAttempt，过期后可接管同一原终端，包含 monitor 已改为 unknown 的 Run；确认退出后取消、清除栅栏、撤销 Token 与重排在同一事务内提交。旧 attempt 的迟到结果不能覆盖新持有者；回写失败保留栅栏，重启可再次确认退出并结算。每个 Assignment 终身只自动重排一次，持久事件控制预算；已启动、暂停、释放或卡片关闭不恢复，在途投递租期内也不抢占。恢复 Run 若排队后仍无法派发，按相同超时升级；C-54 的 `queue_reason=concurrency_limit` 正常容量等待不计入此超时。自动重排使用 system Actor，只写 queued 与通知，不直接派发；继续由 Dispatcher 的统一 claim 路径接受跨项目容量与先后顺序限制，不走 human 启动豁免。停止栅栏存在时无论 Run 是否转为 unknown／cancelled，都继续计占用；确认退出、撤销 Token 和取消重排的事务成功后才让出名额。再次失败／超时写 `run_dispatch_stalled`：卡片时间线和事件都带卡号、Assignment、等待分钟数及 stop/start 建议，交活跃 PM Ops；没有可接手的 PM Ops（含后台自身失败）则创建实际的 HumanAction，进入 Needs You，沿用人工事项路由提示 Office。只发一次，不递归唤醒失败后台。自动恢复 Run 在主机启动补偿中被取消／失败（没有 started_at，且有 run_dispatch_aborted）也进入此升级路径，reason=recovery_startup_failed，不再依赖 dispatched 状态。
@@ -854,9 +856,12 @@ M5.S 起，工作项被指派（Agent 或 PM 经 MCP 调用 `assign`）也走这
 | 只有一个该角色的 Assignment | 通知它 |
 | 没有该角色的 Assignment | 交给 PM Ops 决定是否创建 |
 | 有多个该角色的 Assignment | 要求发言人明确指定工作项；不广播 |
-| 明确指定了 @A-17 或 @W-4 | 直接通知 |
+| 明确指定了 @A-17 | active 且可读取本卡时直接通知；无权读取时转交 PM Ops，并在原卡提示评论者 |
+| 明确指定了 @W-4 | 沿用工作项负责人通知规则 |
 
 显式 Assignment／工作项编号优先；其他提及先匹配在职员工名，再匹配角色。同条评论可以同时提及员工和角色，沿用同一事件同一接收者去重及不通知作者自身的规则。角色的常驻 Assignment 规则保持原状。歧义沿用路由问题交 PM Ops 澄清的路径；Workbench 的 `@` 自动补全留到 V8。
+
+C-120 的显式 `@A-n` 校验与 Card MCP 读取范围一致：工作项 Assignment 必须关联本卡的工作项，常驻 Assignment 可读取本项目卡片。无权限提及不授予访问权、不创建给该 Assignment 的通知；选择转交 PM Ops 是为了让需要协调的评论继续进入既有澄清流程。一条评论提及多个无权限 Assignment 时，PM Ops 只收一条通知；`comment_mention_redirected` 事件及原卡系统时间线列出未送达对象、转交结果和在所属卡片联系的建议，供评论者经 Workbench 或 `get_updates` 读取。提示、通知和路由游标同事务写入，提示本身不再触发门铃；不改无提及评论的路由。
 
 ### 6.6 Assignment 运行状态与投递策略
 

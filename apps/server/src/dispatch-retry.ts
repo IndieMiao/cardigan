@@ -14,6 +14,7 @@ import {
   startDispatchStop,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
+import { assignmentCanReadCard } from "@cardigan/router";
 import {
   type BellAttempt,
   beginDispatchRetry,
@@ -235,7 +236,22 @@ export async function retryDispatchedRuns(
         Date.parse(at) >=
           Date.parse(last.finished_at) +
             policy.retryBaseMs * 2 ** Math.max(0, failures - 1);
-      return { state, run, a, failures, recover, retry, at, last };
+      const cause = state.events.find((e) => e.id === run.trigger_event_id);
+      // C-120: an obsolete cross-card bell cannot be retried as an empty launch.
+      // Existing timeout/stop recovery still owns any unstarted terminal.
+      const unreadable =
+        cause?.card_id &&
+        !assignmentCanReadCard(a, cause.card_id, state.work_items);
+      return {
+        state,
+        run,
+        a,
+        failures,
+        recover,
+        retry: retry && !unreadable,
+        at,
+        last,
+      };
     };
     const observed = inspect();
     if (!observed) continue;

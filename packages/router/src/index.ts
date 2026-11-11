@@ -12,6 +12,7 @@ export {
   summarizeNotifications,
 } from "./merge.js";
 export {
+  assignmentCanReadCard,
   type EscalationReason,
   escalation,
   routeBellFailure,

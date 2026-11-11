@@ -61,6 +61,7 @@ import {
   acknowledgeInbox,
   dispatcherClock,
   notificationOwner,
+  resolveUnreadableNotifications,
   routeProjectEvents,
   type StandingResolver,
 } from "./dispatch-inbox.js";
@@ -266,6 +267,7 @@ export class Dispatcher {
       persistEffect(tx, project, effect);
     });
     routeProjectEvents(store, project, { clock: this.clock });
+    resolveUnreadableNotifications(store, project, this.clock);
     acknowledgeInbox(store, project, standing, this.clock);
     for (const attempt of unfinishedBellAttempts(store.database, project)) {
       const assignment = this.state(project).assignments.find(

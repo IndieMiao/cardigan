@@ -48,6 +48,20 @@ const succeeded = (item: WorkItem) =>
 const isActive = (assignment: Assignment): boolean =>
   assignment.status === "active";
 
+/** Match Card MCP's requireCard scope check; standing identities read the project. */
+export function assignmentCanReadCard(
+  assignment: Assignment,
+  card_id: CardId,
+  work_items: readonly WorkItem[],
+): boolean {
+  return (
+    assignment.scope === "standing" ||
+    work_items.some(
+      (item) => item.id === assignment.work_item_id && item.card_id === card_id,
+    )
+  );
+}
+
 const actorAssignmentId = (input: RouteInput): AssignmentId | undefined =>
   input.event.actor.kind === "assignment"
     ? input.event.actor.assignment_id
@@ -268,6 +282,31 @@ function routeMentions(
             code: "unknown_mention",
             detail: `@${text} is not an active Assignment`,
           });
+          continue;
+        }
+        if (
+          input.event.card_id &&
+          !assignmentCanReadCard(
+            target,
+            input.event.card_id,
+            input.snapshot.work_items,
+          )
+        ) {
+          const detail = `@${text} 无权读取本卡，未向其投递；已转交 PM Ops，请在该 Assignment 所属卡片联系，或指定本卡负责人。`;
+          problem(
+            draft,
+            "6.5/explicit assignment or work item",
+            "assignment_cannot_read_card",
+            detail,
+          );
+          note(
+            input,
+            draft,
+            recipient.pm_ops(),
+            "escalation",
+            "6.5/explicit assignment or work item",
+            detail,
+          );
           continue;
         }
         note(
