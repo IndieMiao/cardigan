@@ -13,6 +13,7 @@ import {
 } from "@cardigan/domain";
 import type { ProjectMergeGate } from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
+import { routeEvent } from "@cardigan/router";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { call, type WebHarness, webHarness } from "../../test-support/web.js";
 import {
@@ -129,12 +130,67 @@ beforeEach(async () => {
 });
 afterEach(async () => h?.close());
 
+test.each(["failed", "timed_out"] as const)(
+  "C-115: sensitive %s routes only authorized rechecks to PM",
+  (status) => {
+    h.store.uow.run((tx) => {
+      const card = tx.cards.get(project_id, "C-2");
+      if (!card) throw new Error("Missing card");
+      tx.cards.put(project_id, { ...card, sensitive: true });
+    });
+    record("queued");
+    record("running");
+    record(status);
+    const state = h.store.uow.read((tx) => loadCommandState(tx, project_id));
+    const event = state.events.findLast(
+      (e) => e.type === "merge_check_finished",
+    );
+    if (!event) throw new Error("Missing result");
+    const notes = routeEvent({ event, snapshot: state }).notifications;
+    expect(notes.map((n) => n.recipient.kind)).toEqual(
+      status === "timed_out" ? ["pm_ops"] : [],
+    );
+    const off = {
+      ...state,
+      project_preferences: [
+        {
+          id: project_id,
+          auto_merge_after_minutes: null,
+          pm_merge_confirmation: false,
+        },
+      ],
+    };
+    expect(routeEvent({ event, snapshot: off }).notifications).toEqual([]);
+  },
+);
+
+test("C-115: queued and running confirmations become human tasks only after passing", async () => {
+  for (const status of [undefined, "queued", "running", "passed"] as const) {
+    if (status) record(status);
+    const needs = await read("/needs-you");
+    const visible = status === "passed";
+    expect(
+      (needs.json as { decisions: { id: string }[] }).decisions.some(
+        (q) => q.id === "q(2)",
+      ),
+    ).toBe(visible);
+    expect(needs.json).toMatchObject({
+      waiting_merge_checks_count: visible ? 0 : 1,
+    });
+    expect((await read("/cards/C-2")).json).toMatchObject({
+      decisions: expect.arrayContaining([
+        expect.objectContaining({ id: "q(2)" }),
+      ]),
+    });
+  }
+});
+
 test.each(
   (["failed", "timed_out"] as const).flatMap((status) =>
     (["open", "human", "pm"] as const).map((source) => ({ status, source })),
   ),
 )(
-  "$status ($source confirmation) is displayed and rechecked once as human with a fresh snapshot",
+  "$status ($source confirmation) waits outside Needs You and is rechecked once from its card",
   async ({ status, source }) => {
     if (source !== "open") {
       h.store.uow.run((tx) => {
@@ -174,23 +230,31 @@ test.each(
     record("running");
     record(status);
     const needs = await read("/needs-you");
-    expect(needs.json).toMatchObject({
-      decisions: expect.arrayContaining([
+    expect(needs.json).toMatchObject({ waiting_merge_checks_count: 1 });
+    expect(
+      (needs.json as { decisions: { id: string }[] }).decisions.some(
+        (q) => q.id === "q(2)",
+      ),
+    ).toBe(false);
+    const detail = await read("/cards/C-2");
+    expect(detail.json).toMatchObject({
+      merge_confirmations: [
         expect.objectContaining({
           id: "q(2)",
+          status: source === "open" ? "open" : "resolved",
           merge_confirmation: expect.objectContaining({
+            completion: expect.objectContaining({ id: "D-2" }),
             merge_gate_enabled: true,
             merge_check: expect.objectContaining({
               status,
-              attempt_id: attempt,
               completion_id: "D-2",
             }),
           }),
         }),
+      ],
+      decisions: expect.arrayContaining([
+        expect.objectContaining({ id: "q(2)" }),
       ]),
-    });
-    const detail = await read("/cards/C-2");
-    expect(detail.json).toMatchObject({
       timeline: expect.arrayContaining([
         expect.objectContaining({
           event_type: "merge_check_finished",
@@ -199,6 +263,10 @@ test.each(
       ]),
     });
     expect((await recheck()).status).toBe(200);
+    if (source !== "open")
+      expect((await read("/cards/C-2")).json).toMatchObject({
+        merge_confirmations: [],
+      });
     expect((await recheck()).status).toBe(200);
     const again = await recheck("D-2", "another");
     expect(again.status).toBe(409);
@@ -224,13 +292,12 @@ test("only the current completion is shown and a stale request is rejected", asy
     tx.deliveries.put(project_id, { ...old, status: "superseded" });
     tx.deliveries.put(project_id, { ...old, id: "D-3" as DeliveryId });
   });
-  expect((await read("/needs-you")).json).toMatchObject({
-    decisions: expect.arrayContaining([
-      expect.objectContaining({
-        id: "q(2)",
-        merge_confirmation: expect.objectContaining({ merge_check: null }),
-      }),
-    ]),
+  const pending = (await read("/needs-you")).json as {
+    decisions: { id: string }[];
+  };
+  expect(pending.decisions.some((q) => q.id === "q(2)")).toBe(false);
+  expect((await read("/cards/C-2")).json).toMatchObject({
+    merge_confirmations: [],
   });
   expect((await recheck()).status).toBe(409);
 });
@@ -259,18 +326,22 @@ test("disabled gates stay unchanged; invalid gates expose only a safe flag", asy
     expect(needs.body).not.toContain('"merge_gate_enabled"');
     expect(needs.body).not.toContain("private-config-fixture");
     if (setting.status === "invalid") {
-      expect(needs.json).toMatchObject({
-        decisions: expect.arrayContaining([
-          expect.objectContaining({
-            id: "q(2)",
-            merge_confirmation: expect.objectContaining({
-              merge_gate_invalid: true,
-            }),
-          }),
-        ]),
-      });
+      expect(needs.json).toMatchObject({ waiting_merge_checks_count: 1 });
+      expect(
+        (needs.json as { decisions: { id: string }[] }).decisions.some(
+          (q) => q.id === "q(2)",
+        ),
+      ).toBe(false);
+      expect((await read("/cards/C-2")).body).not.toContain(
+        "private-config-fixture",
+      );
     } else {
       expect(needs.body).not.toContain('"merge_gate_invalid"');
+      expect(
+        (needs.json as { decisions: { id: string }[] }).decisions.some(
+          (q) => q.id === "q(2)",
+        ),
+      ).toBe(true);
     }
     expect((await recheck()).status).toBe(409);
   }

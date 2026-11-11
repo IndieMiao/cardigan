@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   latestMergeCheck,
+  listNeedsYou,
   prepareMergePlan,
   recheckMerge,
   recordMergeCheck,
@@ -22,6 +23,7 @@ import {
 } from "./m4-fixtures.js";
 import { MergeChecks } from "./merge-checks.js";
 import { MergeExecutor, startMergeLoop } from "./merge-loop.js";
+import { needsYou } from "./web/read.js";
 
 const required = <T>(value: T | undefined): T => {
   if (value === undefined) throw new Error("Missing fixture value");
@@ -341,12 +343,71 @@ test("invalid config never falls back, and verified noop still requires confirma
   });
   await c.gate.tick([f.project_id]);
   expect(f.card().status).toBe("awaiting_merge");
+  const visible = () =>
+    listNeedsYou(
+      { ...f.state(), project_settings: { merge_gate_enabled: true } },
+      { kind: "human", project_id: f.project_id },
+    );
+  const before = visible();
+  expect(before.ok && before.value.data.decisions.map((q) => q.id)).toContain(
+    required(mergeConfirmation(f, scenario.card.id)).id,
+  );
+  expect(before.ok && before.value.data.waiting_merge_checks_count).toBe(0);
+  expect(
+    needsYou(f.state(), f.clock.now(), "enabled").decisions,
+  ).toContainEqual(
+    expect.objectContaining({
+      merge_confirmation: expect.objectContaining({
+        merge_noop: true,
+        merge_check: null,
+      }),
+    }),
+  );
+  await c.gate.tick([f.project_id]);
+  const restarted = new MergeChecks(c.options);
+  await restarted.tick([f.project_id]);
+  expect(
+    f.state().events.filter((e) => e.type === "merge_preparation_recorded"),
+  ).toHaveLength(1);
+  expect(
+    f.state().events.filter((e) => e.type === "merge_check_finished"),
+  ).toHaveLength(0);
+  expect(f.card().status).toBe("awaiting_merge");
   f.decide(required(mergeConfirmation(f, scenario.card.id)), "merge");
   await c.gate.tick([f.project_id]);
   expect(f.card().status).toBe("done");
   expect(c.run).not.toHaveBeenCalled();
   expect(c.git.publish).not.toHaveBeenCalled();
   expect(prepareMergePlan(f.state(), scenario.card.id).ok).toBe(false);
+});
+
+test("C-115: a noop confirmation returns to waiting when the baseline requires checks again", async () => {
+  const { f, scenario } = await fixture();
+  const c = controller(f);
+  c.git.prepare.mockResolvedValueOnce({
+    status: "noop",
+    branch_sha: "a".repeat(40),
+  });
+  await c.gate.tick([f.project_id]);
+  const q = required(mergeConfirmation(f, scenario.card.id));
+  expect(
+    needsYou(f.state(), f.clock.now(), "enabled").decisions.map((q) => q.id),
+  ).toContain(q.id);
+  c.advance(true);
+  c.run.mockResolvedValue({
+    ...passed,
+    status: "failed",
+    checks: [{ name: "test", status: "failed", exit_code: 1 }],
+  });
+  await c.gate.tick([f.project_id]);
+  expect(
+    needsYou(f.state(), f.clock.now(), "enabled").decisions.map((q) => q.id),
+  ).not.toContain(q.id);
+  expect(
+    needsYou(f.state(), f.clock.now(), "enabled").waiting_merge_checks_count,
+  ).toBe(1);
+  expect(f.card().status).toBe("awaiting_merge");
+  expect(c.git.publish).not.toHaveBeenCalled();
 });
 
 test.each(["failed", "timed_out"] as const)(

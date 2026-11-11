@@ -18,6 +18,7 @@ import {
   mergePlan,
   prepareMergePlan,
   recordMergeCheck,
+  recordMergePreparation,
   recordMergeResult,
 } from "@cardigan/domain";
 import type {
@@ -211,8 +212,25 @@ export class MergeChecks {
       id = `${task.project.project_id}/${task.plan.card_id}`;
     const key = JSON.stringify([task.project, task.plan, baseline]);
     const cached = this.prepared.get(id);
-    if (cached?.key === key) return cached.value;
-    const value = await git.prepare(task.project, task.plan);
+    const value =
+      cached?.key === key
+        ? cached.value
+        : await git.prepare(task.project, task.plan);
+    if (value.status !== "conflicted" && this.valid(task))
+      this.command(task.project.project_id, (s, a, p) =>
+        recordMergePreparation(
+          s,
+          a,
+          {
+            card_id: task.plan.card_id,
+            completion_id: task.plan.completion_id,
+            base_sha:
+              value.status === "noop" ? value.branch_sha : value.previous_sha,
+            noop: value.status === "noop",
+          },
+          p,
+        ),
+      );
     this.prepared.set(id, { key, value });
     return value;
   }

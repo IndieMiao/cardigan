@@ -9,6 +9,7 @@ import {
   type Decision,
   type DecisionCategory,
   listNeedsYou,
+  type MergeCheckView,
   markNoticesRead,
   mergePlan,
   notices,
@@ -92,8 +93,9 @@ function setup(withOps = true, policy: "confirm" | "auto" = "confirm") {
     return q;
   };
   const check = (
-    status: "passed" | "failed" | "timed_out",
+    status: MergeCheckView["status"],
     attempt: string = status,
+    checks?: MergeCheckView["checks"],
   ) => {
     const q = confirmation();
     if (!("target" in q) || !("delivery_id" in q.target))
@@ -112,6 +114,7 @@ function setup(withOps = true, policy: "confirm" | "auto" = "confirm") {
     f.commit(
       recordMergeCheck(gated, system, { ...identity, status: "queued" }, f.io),
     );
+    if (status === "queued") return;
     f.commit(
       recordMergeCheck(
         { ...f.state, project_settings: { merge_gate_enabled: true } },
@@ -120,6 +123,7 @@ function setup(withOps = true, policy: "confirm" | "auto" = "confirm") {
         f.io,
       ),
     );
+    if (status === "running") return;
     f.commit(
       recordMergeCheck(
         { ...f.state, project_settings: { merge_gate_enabled: true } },
@@ -129,7 +133,7 @@ function setup(withOps = true, policy: "confirm" | "auto" = "confirm") {
           status,
           summary: status,
           log_ref: `${identity.attempt_id}.log`,
-          checks: [
+          checks: checks ?? [
             {
               name: "test",
               status,
@@ -1160,6 +1164,215 @@ const failedQueue = (state: CommandState) =>
   value(listNeedsYou(state, opsActor)).data.pm_queue?.failed_merge_checks ?? [];
 const humanPending = (state: CommandState) =>
   value(listNeedsYou(state, human)).data.decisions.map((q) => q.id);
+
+test.each([
+  undefined,
+  "queued",
+  "running",
+  "failed",
+  "timed_out",
+  "interrupted",
+  "passed",
+] as const)(
+  "C-115: human merge confirmation waits for the current check (%s)",
+  async (status) => {
+    const { f, confirmation, check } = setup();
+    f.commit(sensitive(f.state, human, f.card.id, true));
+    await f.accept();
+    if (status) check(status);
+    const state = {
+      ...f.state,
+      project_settings: { merge_gate_enabled: true },
+    };
+    const needs = value(listNeedsYou(state, human)).data;
+    const visible = status === "passed";
+    expect(needs.decisions.some((q) => q.id === confirmation().id)).toBe(
+      visible,
+    );
+    expect(needs.waiting_merge_checks_count).toBe(visible ? 0 : 1);
+    expect(
+      value(
+        listNeedsYou(state, opsActor),
+      ).data.pm_queue?.waiting_merge_checks.map((q) => q.id),
+    ).toEqual(visible ? [] : [confirmation().id]);
+    // Disabled projects and direct human commands retain their behavior.
+    expect(humanPending(f.state)).toContain(confirmation().id);
+    expect(
+      recordDecision(
+        state,
+        human,
+        {
+          decision_id: confirmation().id,
+          option: "merge",
+          rationale: "合并",
+          raw_quote: "合并",
+        },
+        f.io,
+      ).ok,
+    ).toBe(true);
+  },
+);
+
+test("C-115: a previous pass cannot expose a new tree or completion", async () => {
+  const { f, confirmation, check } = setup();
+  f.commit(sensitive(f.state, human, f.card.id, true));
+  await f.accept();
+  check("passed");
+  check("queued", "new-tree");
+  const state = { ...f.state, project_settings: { merge_gate_enabled: true } };
+  expect(humanPending(state)).not.toContain(confirmation().id);
+  const oldEvents = state.events.filter(
+    (e) =>
+      e.type !== "merge_check_queued" ||
+      (e.payload as { attempt_id?: string }).attempt_id !== "attempt-new-tree",
+  );
+  const completion = state.deliveries.find((d) => d.kind === "card_completion");
+  if (!completion) throw new Error("Missing completion");
+  const newer = { ...completion, id: id("delivery", 999) };
+  expect(
+    humanPending({
+      ...state,
+      events: oldEvents,
+      deliveries: [...state.deliveries, newer],
+      decisions: state.decisions.map((q) =>
+        q.id === confirmation().id
+          ? { ...q, target: { delivery_id: newer.id } }
+          : q,
+      ),
+    }),
+  ).not.toContain(confirmation().id);
+});
+
+test.each([
+  "sensitive",
+  "spending",
+  "account",
+  "permission",
+  "data_deletion",
+  "scope_change",
+  "escalated",
+] as const)(
+  "C-115: %s only permits PM Ops to recheck structured timeouts",
+  async (kind) => {
+    for (const confirmed of [false, true]) {
+      const { f, confirmation, check, pmResolve, raise } = setup();
+      if (kind === "sensitive")
+        f.commit(sensitive(f.state, human, f.card.id, true));
+      else if (kind !== "escalated") raise(kind);
+      await f.accept();
+      if (kind === "escalated") f.commit(pmResolve("hold", { escalate: true }));
+      if (confirmed)
+        f.commit(
+          recordDecision(
+            f.state,
+            human,
+            {
+              decision_id: confirmation().id,
+              option: "merge",
+              rationale: "合并",
+              raw_quote: "合并",
+            },
+            f.io,
+          ),
+        );
+      check("timed_out");
+      const original = confirmation();
+      expect(failedQueue(f.state)).toEqual([
+        expect.objectContaining({
+          decision_id: original.id,
+          options: ["recheck"],
+        }),
+      ]);
+      for (const option of ["merge", "hold", "request_changes"])
+        expect(pmResolve(option, { notice: "n" }).ok).toBe(false);
+      expect(pmResolve("recheck").ok).toBe(false);
+      expect(pmResolve("recheck", { notice: "n", escalate: true }).ok).toBe(
+        false,
+      );
+      for (const actor of [
+        officeActor,
+        { kind: "system", project_id: human.project_id } as Actor,
+      ])
+        expect(
+          resolveDelegatedDecision(
+            f.state,
+            actor,
+            {
+              decision_id: original.id,
+              option: "recheck",
+              rationale: "超时",
+              notice: "重新检查",
+            },
+            f.io,
+          ).ok,
+        ).toBe(false);
+      const off = {
+        ...f.state,
+        project_preferences: [
+          {
+            id: f.state.project_id,
+            auto_merge_after_minutes: null,
+            pm_merge_confirmation: false,
+          },
+        ],
+      };
+      expect(pmResolve("recheck", { notice: "n" }, off).ok).toBe(false);
+      const disabled = {
+        ...f.state,
+        assignments: f.state.assignments.map((a) =>
+          a.id === ops.id ? { ...a, status: "suspended" as const } : a,
+        ),
+      };
+      expect(pmResolve("recheck", { notice: "n" }, disabled).ok).toBe(false);
+      f.commit(pmResolve("recheck", { notice: "检查步骤超时，已重新检查。" }));
+      expect(confirmation()).toEqual(original);
+      expect(notices(f.state)).toContainEqual(
+        expect.objectContaining({
+          option: "recheck",
+          body: "检查步骤超时，已重新检查。",
+        }),
+      );
+      expect(pmResolve("recheck", { notice: "n" }).ok).toBe(false);
+      expect(failedQueue(f.state)).toEqual([]);
+    }
+  },
+);
+
+test.each([
+  { status: "timed_out" as const, checks: [], allowed: true },
+  {
+    status: "failed" as const,
+    checks: [
+      { name: "test", status: "timed_out" as const },
+      { name: "lint", status: "not_run" as const },
+    ],
+    allowed: true,
+  },
+  {
+    status: "timed_out" as const,
+    checks: [{ name: "test", status: "failed" as const }],
+    allowed: false,
+  },
+  {
+    status: "failed" as const,
+    checks: [{ name: "timeout in log", status: "failed" as const }],
+    allowed: false,
+  },
+  {
+    status: "timed_out" as const,
+    checks: [{ name: "test", status: "interrupted" as const }],
+    allowed: false,
+  },
+])(
+  "C-115: timeout eligibility is structured and rejects mixed failures ($allowed)",
+  async ({ status, checks, allowed }) => {
+    const { f, check, pmResolve } = setup();
+    f.commit(sensitive(f.state, human, f.card.id, true));
+    await f.accept();
+    check(status, "classification", checks);
+    expect(pmResolve("recheck", { notice: "重新检查" }).ok).toBe(allowed);
+  },
+);
 
 test("PM Ops returns a PM-held confirmation whose check failed, with reason and notice", async () => {
   const { f, confirmation, check, pmResolve } = setup();

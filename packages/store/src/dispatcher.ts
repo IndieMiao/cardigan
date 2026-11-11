@@ -124,6 +124,24 @@ export function finishBellAttempt(
     .run(outcome, at, project, id, at);
   return Number(result.changes) === 1;
 }
+/** Withdraw a reservation only when the caller proved no external delivery occurred.
+ * Caller records the withdrawal with the Run wait in the same transaction. */
+export function withdrawBellAttempt(
+  db: DatabaseSync,
+  project: ProjectId,
+  id: string,
+): boolean {
+  requireTransaction(db);
+  return (
+    Number(
+      db
+        .prepare(
+          "DELETE FROM bell_attempts WHERE project_id = ? AND id = ? AND finished_at IS NULL",
+        )
+        .run(project, id).changes,
+    ) === 1
+  );
+}
 /** Unfinished intents survive restart; only expired leases may be recovered. */
 export function unfinishedBellAttempts(
   db: DatabaseSync,

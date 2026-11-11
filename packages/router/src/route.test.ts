@@ -368,7 +368,7 @@ test("§6.4/S6 an MCP assign wakes the new Assignment so the host can start it",
   expect(result.notifications[0]?.work_item_id).toBe("W-1");
 });
 
-test("§6.4/S6 a verify Assignment assigned before its delivery is not woken", () => {
+test("§6.4/C-88 a verification assignment notice is retained for dispatch after delivery", () => {
   const result = routeEvent({
     event: event(
       "work_item_assigned",
@@ -386,8 +386,9 @@ test("§6.4/S6 a verify Assignment assigned before its delivery is not woken", (
       ],
     }),
   });
-  // The delivery bell of §6.4 wakes it later, when the target is delivered.
-  expect(result.notifications).toEqual([]);
+  // Dispatcher retains this notice until the target delivery exists.
+  expect(recipients(result)).toEqual(["assignment:A-2"]);
+  expect(result.notifications[0]?.kind).toBe("assignment");
 });
 
 test("§6.4/S6 a human `assign` stays an explicit start, so it wakes nobody", () => {

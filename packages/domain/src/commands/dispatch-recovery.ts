@@ -1,6 +1,7 @@
 import type { Actor, Run, RuntimeRef } from "../entities.js";
 import type { RunId } from "../ids.js";
 import { assignmentCanReadCard, type Notification } from "../notification.js";
+import { hasRunTarget } from "../run-target.js";
 import { transition } from "../transitions.js";
 import {
   type CommandPorts,
@@ -10,6 +11,7 @@ import {
   unwrap,
 } from "./core.js";
 import { cancelRunDispatch, launchSettings } from "./launch.js";
+import { dispatchTargetWaitMs } from "./run-target-wait.js";
 
 const field = (payload: unknown, name: string): unknown =>
   payload && typeof payload === "object"
@@ -182,7 +184,10 @@ export function recoverDispatch(
     const started =
       dispatchedAt(state, run) ?? dispatchRecoveryQueuedAt(state, run);
     if (!started) return;
-    const elapsed = Date.parse(d.now) - Date.parse(started);
+    const elapsed =
+      Date.parse(d.now) -
+      Date.parse(started) -
+      dispatchTargetWaitMs(run, d.now);
     const reason = startupFailed
       ? "recovery_startup_failed"
       : stopping
@@ -276,6 +281,7 @@ export function recoverDispatch(
       if (
         finished(run) ||
         a.status !== "active" ||
+        !hasRunTarget(a, d.state) ||
         (card && ["done", "cancelled"].includes(card.status))
       )
         return;

@@ -98,6 +98,25 @@ const page = (decisions = [q()]): NeedsPage => ({
   ],
   incidents: [],
 });
+
+test("pending merge checks show a count without adding a human task, then refresh after passing", async () => {
+  let data: NeedsPage = {
+    ...page([]),
+    human_actions: [],
+    waiting_merge_checks_count: 2,
+  };
+  const client = fakeClient({ needsYou: async () => data });
+  const view = render(
+    <NeedsYouPage client={client} projectId="p-1" revision={0} />,
+  );
+  expect(await screen.findByText(/还有 2 条合并确认在等检查/)).toBeTruthy();
+  expect(screen.queryByRole("region", { name: "合并确认" })).toBeNull();
+  expect(screen.getByText(/没有需要你处理的事/)).toBeTruthy();
+  data = { ...page([merge()]), waiting_merge_checks_count: 0 };
+  view.rerender(<NeedsYouPage client={client} projectId="p-1" revision={1} />);
+  expect(await screen.findByRole("region", { name: "合并确认" })).toBeTruthy();
+  expect(screen.queryByText(/还有 2 条合并确认在等检查/)).toBeNull();
+});
 afterEach(() => {
   cleanup();
   vi.useRealTimers();

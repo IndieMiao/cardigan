@@ -55,6 +55,7 @@ export const toolNames = [
   "finish_run",
   "submit_delivery",
   "submit_review",
+  "withdraw_review",
   "create_card",
   "update_card",
   "create_work_item",
@@ -280,6 +281,11 @@ export interface Run {
   };
   /** Host scheduling metadata; only meaningful while status is queued. */
   readonly queue_reason?: "concurrency_limit" | "runtime_unavailable";
+  /** Host-only target wait; elapsed time is excluded from dispatch recovery. */
+  readonly dispatch_target_wait?: {
+    readonly since?: Timestamp;
+    readonly elapsed_ms: number;
+  };
   readonly employee_id?: EmployeeId;
   /** Actual launch profile; absent on legacy runs. */
   readonly launch_profile_ref?: string;
@@ -409,6 +415,7 @@ export interface Review {
   readonly verdict: ReviewVerdict;
   readonly blocking: boolean;
   readonly recheck_required: boolean;
+  readonly withdrawn?: { readonly at: string; readonly rationale: string };
   readonly attachments: readonly AttachmentId[];
 }
 export interface ReviewView extends Review {

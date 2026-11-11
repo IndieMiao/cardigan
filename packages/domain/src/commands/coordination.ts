@@ -599,14 +599,20 @@ export function resolveDelegatedDecision(
     // confirmed merge, whoever confirmed it; D12/scope cards stay human.
     const failed = pmFailedMergeCheck(state, q);
     const confirmedFailed = !!failed && q.status === "resolved";
+    const timeoutRecheck =
+      !!failed &&
+      mergeRequiresHuman(state, q) &&
+      p.option === "recheck" &&
+      !p.escalate;
     ensure(
-      confirmedFailed ||
+      timeoutRecheck ||
+        (confirmedFailed && !mergeRequiresHuman(state, q)) ||
         (q.decider === "role:pm" &&
           ["open", "provisional"].includes(q.status) &&
           delegationAllowed(d, q)),
       "unauthorized",
       q.trigger === "merge_confirmation" && mergeRequiresHuman(state, q)
-        ? "此合并确认须由人处理（高风险、需求范围变化或已交人），PM 不能退回或重新检查"
+        ? "此合并确认须由人处理，PM 只能重新检查明确的超时失败，不能退回或代确认合并"
         : "Decision is not authorized for PM Ops",
     );
     text(p.rationale, "rationale");

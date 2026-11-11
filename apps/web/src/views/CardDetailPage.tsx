@@ -32,6 +32,7 @@ import { Timeline } from "../components/Timeline.js";
 import { TimelineControls } from "../components/TimelineControls.js";
 import { routeHash, useRouteFilters } from "../route.js";
 import { useResource } from "../useResource.js";
+import { MergeConfirmation } from "./NeedsYouPage.js";
 
 export interface CardDetailPageProps {
   readonly client: CardiganClient;
@@ -293,6 +294,9 @@ function CardContent({
   const sectionId = (name: string) => `card-${cardId}-${name}`;
   const sections = [
     { id: sectionId("overview"), label: "概览" },
+    ...(detail.merge_confirmations?.length
+      ? [{ id: sectionId("merge"), label: "合并处理" }]
+      : []),
     ...(detail.work_items.length
       ? [
           {
@@ -420,6 +424,25 @@ function CardContent({
             onLocate={onLocate}
           />
         </section>
+        {!!detail.merge_confirmations?.length && (
+          <section
+            id={sectionId("merge")}
+            className="card-section"
+            aria-label="合并处理"
+          >
+            <h2>合并处理</h2>
+            {detail.merge_confirmations.map((q) => (
+              <MergeConfirmation
+                key={`${q.id}/${q.status}/${q.merge_confirmation?.merge_check?.attempt_id ?? ""}`}
+                q={q}
+                client={client}
+                projectId={projectId}
+                done={reload}
+                elapsed={0}
+              />
+            ))}
+          </section>
+        )}
         {!!detail.work_items.length && (
           <div id={sectionId("work")}>
             <CardWorkItems

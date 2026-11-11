@@ -29,7 +29,11 @@ import {
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import { Store, writeRole } from "@cardigan/store";
 
-export function m3Fixture(project = "m3-acceptance", shared?: Store) {
+export function m3Fixture(
+  project = "m3-acceptance",
+  shared?: Store,
+  assignVerifiersAsPm = false,
+) {
   const dataDir = shared
     ? undefined
     : mkdtempSync(join(tmpdir(), "cg-m3-acceptance-"));
@@ -76,6 +80,9 @@ export function m3Fixture(project = "m3-acceptance", shared?: Store) {
           capabilities: ["code", "review", "manage"],
           allowed_tools: [
             "post_comment",
+            ...(role_id === "pm" && assignVerifiersAsPm
+              ? ["assign" as const]
+              : []),
             "submit_delivery",
             "submit_review",
             "request_decision",
@@ -105,9 +112,36 @@ export function m3Fixture(project = "m3-acceptance", shared?: Store) {
     ),
   ).data;
   const items = state().work_items;
+  const pmAssigner: Actor = assignVerifiersAsPm
+    ? store.uow.run((tx) => {
+        const owner: Assignment = {
+          id: tx.ids.next(id, "assignment"),
+          scope: "standing",
+          standing_mode: "ops",
+          role_id: "pm",
+          role_version: 1,
+          status: "active",
+          runtime_state: "not_provisioned",
+          machine_id: "local",
+          runtime_ref: null,
+          mcp_token_id: "fixture-pm",
+          created_at: clock.now(),
+        };
+        tx.assignments.put(id, owner);
+        const role = tx.roles.get(id, { role_id: "pm", role_version: 1 });
+        if (!role) throw new Error("Missing PM role");
+        return {
+          ...role,
+          kind: "assignment",
+          assignment_id: owner.id,
+          project_id: id,
+        };
+      })
+    : human;
   const assignItem = (w: WorkItem) =>
-    apply((s, a, p) =>
-      assign(s, a, { work_item_id: w.id, role_id: w.role_id }, p),
+    apply(
+      (s, a, p) => assign(s, a, { work_item_id: w.id, role_id: w.role_id }, p),
+      w.kind === "verify" ? pmAssigner : human,
     ).data;
   const produce = items.find((w) => w.kind === "produce"),
     verify = items.find((w) => w.kind === "verify" && w.role_id !== "pm"),
