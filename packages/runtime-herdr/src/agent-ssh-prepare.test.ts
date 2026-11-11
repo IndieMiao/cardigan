@@ -58,8 +58,12 @@ afterEach(async () => {
  * script unmodified.
  */
 type Stub = "operator" | "ancestors";
-const remote = (args: readonly string[], stub?: Stub) => {
-  let script = args.at(-1) as string;
+const remote = (
+  args: readonly string[],
+  stub?: Stub,
+  edit: (script: string) => string = (script) => script,
+) => {
+  let script = edit(args.at(-1) as string);
   if (stub) {
     const anchored = "anchored() {";
     expect(script).toContain(anchored);
@@ -391,4 +395,59 @@ test("cleanup only accepts the exact leaves preparation returns", async () => {
     await expect(agentCleanupCheckCommand(execution, paths)).rejects.toThrow(
       /check path component/u,
     );
+});
+
+/** Insert shell text before a unique line of the remote script (a race window). */
+const before = (anchor: string, text: string) => (script: string) => {
+  expect(script.split(anchor)).toHaveLength(2);
+  return script.replace(anchor, `${text}\n${anchor}`);
+};
+
+test("C-130#15: a level swapped for a symlink right before the attempt is created cannot redirect it", async () => {
+  const elsewhere = join(root, "elsewhere");
+  await mkdir(elsewhere);
+  const command = await agentPrepareCheckCommand(execution, input);
+  // A concurrent same-account check renames the validated level and plants a symlink.
+  const swap = `mv "$R/checks/$project" "$R/checks/$project.old" && ln -s ${elsewhere} "$R/checks/$project"`;
+  const result = remote(
+    command.args,
+    undefined,
+    before('mkdir -m 0700 -- "$attempt" || exit 5', swap),
+  );
+  expect(result.code).toBe(8);
+  expect(await readdir(elsewhere)).toEqual([]);
+  // Created in the pinned, validated directory, not through the symlink.
+  expect(
+    await readdir(join(execution.agentRoot, "checks", "project.old")),
+  ).toEqual(["attempt-1"]);
+});
+
+test("C-130#15: a level swapped between its check and entering it is refused", async () => {
+  const elsewhere = join(root, "elsewhere");
+  await mkdir(elsewhere);
+  const command = await agentPrepareCheckCommand(execution, input);
+  const swap = `[ "$1" = project ] && mv project project.old && ln -s ${elsewhere} project`;
+  const result = remote(command.args, undefined, before("  h=$(pwd -P)", swap));
+  expect(result.code).toBe(3);
+  expect(await readdir(elsewhere)).toEqual([]);
+  expect(await leaves()).toEqual({
+    checks: ["project", "project.old"],
+    s: [],
+  });
+});
+
+test("C-130#15: cleanup never removes through a swapped intermediate level", async () => {
+  const command = await agentPrepareCheckCommand(execution, input);
+  expect(remote(command.args).code).toBe(0);
+  const project = join(execution.agentRoot, "checks", "project"),
+    elsewhere = join(root, "elsewhere");
+  await mkdir(join(elsewhere, "attempt-1"), { recursive: true });
+  await rm(join(project, "attempt-1"), { recursive: true });
+  await rm(project, { recursive: true });
+  await symlink(elsewhere, project);
+  const cleanup = await agentCleanupCheckCommand(execution, command.paths);
+  expect(remote(cleanup.args).code).toBe(6);
+  expect(await readdir(elsewhere)).toEqual(["attempt-1"]);
+  // The alias, under an intact parent, is still removed.
+  expect(await readdir(join(execution.agentRoot, "s"))).toEqual([]);
 });
