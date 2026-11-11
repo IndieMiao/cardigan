@@ -75,6 +75,12 @@ interface Task {
 export class MergeChecks {
   private readonly abort = new AbortController();
   private readonly seen = new Set<string>();
+  /** The in-flight check round; publication must never wait for it (C-113). */
+  private round: Promise<void> | undefined;
+  /** Card whose check is executing outside the mutex. */
+  private active: string | undefined;
+  /** Serializes every Git/state step; only the check command runs outside. */
+  private exclusive: Promise<void> = Promise.resolve();
   private readonly prepared = new Map<
     string,
     { key: string; value: PreparedMerge }
@@ -90,6 +96,18 @@ export class MergeChecks {
 
   stop(): void {
     this.abort.abort();
+  }
+  /** Resolves when no check round is in flight. */
+  idle(): Promise<void> {
+    return this.round ?? Promise.resolve();
+  }
+  private serial<T>(work: () => Promise<T>): Promise<T> {
+    const next = this.exclusive.then(work);
+    this.exclusive = next.then(
+      () => {},
+      () => {},
+    );
+    return next;
   }
   configured(project: ProjectId): boolean {
     return this.options.configuration.forProject(project).status !== "disabled";
@@ -290,8 +308,10 @@ export class MergeChecks {
         attempt: check.attempt_id,
         env: task.settings.env,
       });
-      await this.git().distribute(task.project);
-      if (!this.valid(task)) throw new Error("Merge target changed");
+      await this.serial(async () => {
+        await this.git().distribute(task.project);
+        if (!this.valid(task)) throw new Error("Merge target changed");
+      });
       result = await (this.options.run ?? runInTemporaryCheckout)({
         execution: this.options.execution,
         project: task.project.project_id,
@@ -369,6 +389,25 @@ export class MergeChecks {
       await this.queue(task, candidate);
       return;
     }
+    await this.release(task, candidate);
+  }
+  /** Publish only a confirmed candidate whose exact tree already passed. */
+  private async ready(task: Task) {
+    if (this.abort.signal.aborted || !this.valid(task, true)) return;
+    const latest = latestMergeCheck(
+      this.state(task.project.project_id).events,
+      task.plan.card_id,
+      task.plan.completion_id,
+    );
+    if (latest?.status !== "passed") return;
+    const candidate = await this.prepare(task);
+    if (
+      candidate.status === "candidate" &&
+      this.passed(task, candidate.tree_sha)
+    )
+      await this.release(task, candidate);
+  }
+  private async release(task: Task, candidate: Candidate) {
     // Re-read confirmation/state after Git IO. CAS protects against another baseline writer.
     if (!this.valid(task, true)) return;
     // C-94: moving central main and recording the move share one lock with
@@ -404,7 +443,54 @@ export class MergeChecks {
         reason: "合并候选准备或结果记录失败，未发布未经检查的代码",
       });
   }
+  /** Awaits the check round this call started, or only the publish pass. */
   async tick(projects: readonly ProjectId[]): Promise<void> {
+    await (await this.schedule(projects)).done;
+  }
+  /**
+   * One scheduling pass. While a check round is running, only publish
+   * confirmed candidates whose tree already passed; never wait for the round
+   * (C-113). Otherwise start a new round in the background.
+   */
+  async schedule(
+    projects: readonly ProjectId[],
+  ): Promise<{ readonly done: Promise<void> }> {
+    if (this.abort.signal.aborted) return { done: Promise.resolve() };
+    if (this.round) {
+      const tasks = this.tasks(projects);
+      await this.serial(async () => {
+        for (const task of tasks) {
+          if (this.abort.signal.aborted) return;
+          if (this.key(task) === this.active) continue;
+          try {
+            await this.ready(task);
+          } catch (error) {
+            this.failure(task, error);
+          }
+        }
+      });
+      return { done: Promise.resolve() };
+    }
+    // Nobody may await a background round: it must never reject, even when
+    // the error reporter itself throws.
+    const round = this.run(projects)
+      .catch((error: unknown) => {
+        try {
+          this.options.onError(error);
+        } catch {
+          // The reporter failed too; there is nobody left to tell.
+        }
+      })
+      .finally(() => {
+        if (this.round === round) this.round = undefined;
+      });
+    this.round = round;
+    return { done: round };
+  }
+  private key(task: Task): string {
+    return `${task.project.project_id}/${task.plan.card_id}`;
+  }
+  private tasks(projects: readonly ProjectId[]): Task[] {
     const tasks: Task[] = [];
     for (const id of projects) {
       const settings = this.options.configuration.forProject(id),
@@ -430,44 +516,57 @@ export class MergeChecks {
         tasks.push({ project, plan: plan.value, settings, entered });
       }
     }
-    tasks.sort(
+    return tasks.sort(
       (a, b) =>
         a.entered.localeCompare(b.entered) ||
         a.project.project_id.localeCompare(b.project.project_id) ||
         a.plan.card_id.localeCompare(b.plan.card_id),
     );
+  }
+  private async run(projects: readonly ProjectId[]): Promise<void> {
+    const tasks = this.tasks(projects);
     // Persist the entire queue before starting the first expensive command.
-    for (const task of tasks) {
-      if (this.abort.signal.aborted) return;
-      try {
-        const prepared = await this.prepare(task);
-        if (!this.valid(task)) continue;
-        if (prepared.status === "candidate") await this.queue(task, prepared);
-        else this.terminal(task, prepared);
-      } catch (error) {
-        this.failure(task, error);
-      }
-    }
-    for (const task of tasks) {
-      if (this.abort.signal.aborted) return;
-      try {
-        if (!this.valid(task)) continue;
-        // Earlier cards may have advanced this project's baseline while queued.
-        const prepared = await this.prepare(task);
-        if (prepared.status !== "candidate") {
-          this.terminal(task, prepared);
-          continue;
+    await this.serial(async () => {
+      for (const task of tasks) {
+        if (this.abort.signal.aborted) return;
+        try {
+          const prepared = await this.prepare(task);
+          if (!this.valid(task)) continue;
+          if (prepared.status === "candidate") await this.queue(task, prepared);
+          else this.terminal(task, prepared);
+        } catch (error) {
+          this.failure(task, error);
         }
-        const check = await this.queue(task, prepared);
-        if (check) await this.execute(task, check);
-        await this.publish(task);
+      }
+    });
+    for (const task of tasks) {
+      if (this.abort.signal.aborted) return;
+      try {
+        // Earlier cards may have advanced this project's baseline while queued.
+        const check = await this.serial(async () => {
+          if (!this.valid(task)) return undefined;
+          const prepared = await this.prepare(task);
+          if (prepared.status !== "candidate") {
+            this.terminal(task, prepared);
+            return undefined;
+          }
+          return { check: await this.queue(task, prepared) };
+        });
+        if (!check) continue;
+        if (check.check) {
+          this.active = this.key(task);
+          try {
+            await this.execute(task, check.check);
+          } finally {
+            this.active = undefined;
+          }
+        }
+        await this.serial(() => this.publish(task));
       } catch (error) {
         this.failure(task, error);
       }
     }
-    const live = new Set(
-      tasks.map((t) => `${t.project.project_id}/${t.plan.card_id}`),
-    );
+    const live = new Set(tasks.map((t) => this.key(t)));
     for (const key of this.prepared.keys())
       if (!live.has(key)) this.prepared.delete(key);
   }

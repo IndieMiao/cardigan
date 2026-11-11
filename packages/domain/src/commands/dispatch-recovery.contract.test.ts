@@ -543,3 +543,19 @@ test("expired stop owner cannot settle after takeover; unknown Run resumes once"
   expect(f.state.runs).toHaveLength(2);
   expect(f.state.runs[0]?.dispatch_stop).toBeUndefined();
 });
+
+test("C-106: a recovery replacement Run keeps the original Run's launch settings", () => {
+  f.state = {
+    ...f.state,
+    runs: f.state.runs.map((r) =>
+      r.id === run.id ? { ...r, harness: "codex", effort: "high" } : r,
+    ),
+  };
+  now += 600000;
+  const next = commit(recover());
+  expect(next).toMatchObject({
+    status: "queued",
+    harness: "codex",
+    effort: "high",
+  });
+});

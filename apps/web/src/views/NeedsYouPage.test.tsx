@@ -16,7 +16,7 @@ import type {
   NoticesPage,
   NoticeView,
 } from "../api.js";
-import { fakeClient } from "../testing/fixtures.js";
+import { attachment, fakeClient } from "../testing/fixtures.js";
 import { writeFailures } from "../testing/write-errors.js";
 import { NeedsYouPage } from "./NeedsYouPage.js";
 
@@ -243,6 +243,73 @@ test("decision cards collapse the background, do not preselect an option and exp
   expect((submit as HTMLButtonElement).disabled).toBe(true);
   fireEvent.click(radios[1] as HTMLInputElement);
   expect((submit as HTMLButtonElement).disabled).toBe(false);
+});
+
+test("C-95: referenced images show as thumbnails that open the lightbox; other files are download links", async () => {
+  const file = (id: string, mime: string, name: string) =>
+    attachment({
+      id,
+      original_filename: name,
+      mime,
+      inline: mime.startsWith("image/"),
+      download_path: `/api/projects/p-1/attachments/${id}`,
+    });
+  const data = page([
+    q({
+      id: "q(1)",
+      trigger: null,
+      attachments: [
+        file("F-2", "application/pdf", "spec.pdf"),
+        file("F-1", "image/png", "before.png"),
+      ],
+    }),
+    q({ id: "q(2)", trigger: null, question: "不带附件" }),
+  ]);
+  render(
+    <NeedsYouPage
+      client={fakeClient({ needsYou: async () => data })}
+      projectId="p-1"
+    />,
+  );
+  const card = await screen.findByRole("article", { name: "拍板 q(1)" });
+  const list = within(card).getByRole("list", { name: "拍板附件" });
+  const items = within(list).getAllByRole("listitem");
+  expect(items.map((li) => li.textContent)).toEqual(["▤ spec.pdf", ""]);
+  const link = within(list).getByRole("link", { name: "▤ spec.pdf" });
+  expect(link.getAttribute("href")).toBe("/api/projects/p-1/attachments/F-2");
+  expect(link.hasAttribute("download")).toBe(true);
+  const thumb = within(list).getByRole("button", { name: "预览 before.png" });
+  expect(within(thumb).getByRole("img").getAttribute("src")).toBe(
+    "/api/projects/p-1/attachments/F-1",
+  );
+  const plain = screen.getByRole("article", { name: "拍板 q(2)" });
+  expect(within(plain).queryByRole("list", { name: "拍板附件" })).toBeNull();
+  fireEvent.click(thumb);
+  const dialog = await screen.findByRole("dialog");
+  expect(
+    within(dialog).getByRole("img", { name: "附件 before.png" }).className,
+  ).toBe("lightbox-image");
+});
+
+test("C-95: merge confirmations show the completion request's attachments", async () => {
+  const data = page([
+    merge({
+      attachments: [attachment({ id: "F-7", original_filename: "after.png" })],
+    }),
+  ]);
+  render(
+    <NeedsYouPage
+      client={fakeClient({ needsYou: async () => data })}
+      projectId="p-1"
+    />,
+  );
+  const card = await screen.findByRole("article", { name: "合并确认 q(3)" });
+  expect(
+    within(within(card).getByRole("list", { name: "拍板附件" })).getByRole(
+      "button",
+      { name: "预览 after.png" },
+    ),
+  ).toBeTruthy();
 });
 
 test.each(["approve", "reject", "merge", "keep", "force_clean"])(
@@ -1358,9 +1425,14 @@ test.each(["all", "one"])(
     expect(rows()).toHaveLength(35);
     expect(notices).not.toHaveBeenCalled();
     fireEvent.click(within(group).getByRole("button", { name: "显示更多" }));
-    await waitFor(() => expect(rows()).toHaveLength(45));
+    const expandedRows = await waitFor(() => {
+      const current = rows();
+      expect(current).toHaveLength(45);
+      return current;
+    });
     expect(notices).toHaveBeenNthCalledWith(1, "p-1", "notice-19");
-    expect(initialRows.every((row) => rows().includes(row))).toBe(true);
+    // Query once per state, not once per old row (35 full visibility scans).
+    expect(initialRows.every((row) => expandedRows.includes(row))).toBe(true);
     fireEvent.click(within(group).getByRole("button", { name: "显示更多" }));
     await waitFor(() => expect(rows()).toHaveLength(53));
     expect(notices).toHaveBeenNthCalledWith(2, "p-1", "notice-9");
@@ -1465,8 +1537,9 @@ test("notices append server pages, keep all unread first and retain visible rows
       unread_count: 12,
     }),
   );
-  expect(rows()).toHaveLength(32);
-  expect(rows().slice(0, 22)).toEqual(initialRows);
+  const expandedRows = rows();
+  expect(expandedRows).toHaveLength(32);
+  expect(expandedRows.slice(0, 22)).toEqual(initialRows);
   fireEvent.click(within(group).getByRole("button", { name: "显示更多" }));
   expect((await screen.findByRole("alert")).textContent).toContain("暂时离线");
   expect(rows()).toHaveLength(32);

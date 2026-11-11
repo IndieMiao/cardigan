@@ -42,7 +42,11 @@ export function createGlobalRepositories(
           .prepare(`
         SELECT e.id AS employee_id,
           MAX(json_extract(a.doc, '$.created_at')) AS last_assigned_at,
-          COUNT(r.id) AS unfinished_runs
+          COUNT(r.id) AS unfinished_runs,
+          MAX(CASE WHEN json_extract(a.doc, '$.scope') = 'standing'
+            AND json_extract(a.doc, '$.external') = 1
+            AND json_extract(a.doc, '$.status') != 'released'
+            THEN 1 ELSE 0 END) AS has_external_standing_assignment
         FROM employees e
         LEFT JOIN assignments a ON json_extract(a.doc, '$.employee_id') = e.id
         LEFT JOIN runs r ON r.project_id = a.project_id AND r.assignment_id = a.id
@@ -54,6 +58,8 @@ export function createGlobalRepositories(
             employee_id: row.employee_id as Employee["id"],
             last_assigned_at: row.last_assigned_at as string | null,
             unfinished_runs: Number(row.unfinished_runs),
+            has_external_standing_assignment:
+              Number(row.has_external_standing_assignment) === 1,
           })),
       get: (id) => {
         const row = db
