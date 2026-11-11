@@ -61,7 +61,15 @@ export interface StreamOptions {
   readonly pollMs?: number;
   readonly heartbeatMs?: number;
   readonly log?: (event: Readonly<Record<string, unknown>>) => void;
+  /**
+   * Aborted when the server shuts down: the stream sends `event: shutdown` and
+   * ends at once, so a long-lived browser connection never holds a restart
+   * open; the client reconnects to the next server with its cursors.
+   */
+  readonly signal?: AbortSignal;
 }
+
+export const SSE_SHUTDOWN_FRAME = "event: shutdown\ndata: {}\n\n";
 
 /**
  * Open the stream and keep it open until the client goes away. Resolves when the
@@ -198,7 +206,18 @@ export async function serveStream(options: StreamOptions): Promise<void> {
     }
   }, heartbeatMs);
 
+  const shutdown = (): void => {
+    if (!closed && !res.writableEnded) res.write(SSE_SHUTDOWN_FRAME);
+    close();
+  };
+  if (options.signal?.aborted) shutdown();
+  else options.signal?.addEventListener("abort", shutdown, { once: true });
+
   await new Promise<void>((resolve) => {
+    if (closed) {
+      resolve();
+      return;
+    }
     req.on("close", () => {
       close();
       resolve();
@@ -208,6 +227,10 @@ export async function serveStream(options: StreamOptions): Promise<void> {
       closed = true;
       resolve();
     });
+    // A shutdown ends the response ourselves; the socket may stay open as an
+    // idle keep-alive connection, so do not wait for it.
+    res.on("finish", resolve);
   });
+  options.signal?.removeEventListener("abort", shutdown);
   close();
 }

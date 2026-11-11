@@ -1,14 +1,71 @@
 import { stdoutLogger } from "@cardigan/mcp-server";
 import { Store } from "@cardigan/store";
-import { resolveServerConfig, type ServerEnv } from "./config.js";
+import {
+  DEFAULT_SHUTDOWN_GRACE_MS,
+  resolveServerConfig,
+  type ServerEnv,
+} from "./config.js";
 import { createHostWiring } from "./host.js";
-import { installShutdownHandlers } from "./lifecycle.js";
+import {
+  closeWithin,
+  installShutdownHandlers,
+  SHUTDOWN_EXIT_MARGIN_MS,
+  type ShutdownTimer,
+  type SignalHost,
+} from "./lifecycle.js";
 import { type CardiganServer, startCardiganServer } from "./server.js";
 import { resolveWebConfig } from "./web/config.js";
 
 export interface RunServerOptions {
   readonly env?: ServerEnv;
   readonly log?: (line: string) => void;
+}
+
+export interface ShutdownOptions {
+  readonly server: Pick<CardiganServer, "close">;
+  readonly store: Pick<Store, "close">;
+  readonly write: (line: string) => void;
+  /** Request grace period; the process exits at most a margin later. */
+  readonly graceMs: number;
+  readonly signals?: SignalHost;
+  readonly timer?: ShutdownTimer;
+  /** Ends the process when the close is cut off; defaults to `process.exit`. */
+  readonly exit?: (code: number) => void;
+}
+
+/**
+ * Wait for SIGTERM/SIGINT, close the server and resolve with the exit code.
+ *
+ * The close is bounded: in-flight requests get `graceMs`, and if the server is
+ * still not closed `SHUTDOWN_EXIT_MARGIN_MS` later (a phase loop stuck in its
+ * tick, say) the process exits anyway. The store is left open in that case —
+ * the loops may still be using it, and SQLite recovers on the next start; the
+ * existing startup rules mark a cut-off merge check interrupted and queue it
+ * again.
+ */
+export function awaitShutdown(options: ShutdownOptions): Promise<number> {
+  const { server, store, write } = options;
+  return new Promise<number>((resolve) => {
+    installShutdownHandlers(options.signals ?? process, (signal) => {
+      write(JSON.stringify({ shutting_down: signal }));
+      void closeWithin(
+        () => server.close(),
+        options.graceMs + SHUTDOWN_EXIT_MARGIN_MS,
+        options.timer,
+      ).then((outcome) => {
+        if (outcome.kind === "forced") {
+          write(JSON.stringify({ shutdown_forced: signal }));
+          resolve(1);
+          (options.exit ?? ((code) => process.exit(code)))(1);
+          return;
+        }
+        if (outcome.kind === "failed")
+          write(JSON.stringify({ shutdown_failed: String(outcome.error) }));
+        store.close();
+        resolve(outcome.kind === "closed" ? 0 : 1);
+      });
+    });
+  });
 }
 
 /**
@@ -79,21 +136,11 @@ export async function runServer(
     }),
   );
 
-  return new Promise<number>((resolve) => {
-    installShutdownHandlers(process, (signal) => {
-      write(JSON.stringify({ shutting_down: signal }));
-      void server.close().then(
-        () => {
-          store.close();
-          resolve(0);
-        },
-        (error: unknown) => {
-          write(JSON.stringify({ shutdown_failed: String(error) }));
-          store.close();
-          resolve(1);
-        },
-      );
-    });
+  return awaitShutdown({
+    server,
+    store,
+    write,
+    graceMs: config.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS,
   });
 }
 
@@ -126,7 +173,15 @@ export {
   type HostWiring,
   loadLaunchFiles,
 } from "./host.js";
-export { installShutdownHandlers, SHUTDOWN_SIGNALS } from "./lifecycle.js";
+export {
+  closeWithin,
+  installShutdownHandlers,
+  SHUTDOWN_EXIT_MARGIN_MS,
+  SHUTDOWN_SIGNALS,
+  type ShutdownOutcome,
+  type ShutdownTimer,
+  systemShutdownTimer,
+} from "./lifecycle.js";
 export { type CardiganServer, startCardiganServer } from "./server.js";
 export {
   allowedHosts,

@@ -22,6 +22,7 @@ import {
   type ServerEnv,
 } from "./config.js";
 import { type GitBinding, ServerGit } from "./git.js";
+import type { ShutdownTimer } from "./lifecycle.js";
 import type { WebConfig } from "./web/config.js";
 import { type RunningWebServer, startWebServer } from "./web/server.js";
 
@@ -70,6 +71,8 @@ export interface StartServerOptions {
       readonly pollMs?: number;
       readonly heartbeatMs?: number;
     };
+    /** Drives the request grace period after `close()`; tests control it. */
+    readonly shutdownTimer?: ShutdownTimer;
   };
 }
 
@@ -246,6 +249,12 @@ export async function startCardiganServer(
         ...(options.web.stream === undefined
           ? {}
           : { stream: options.web.stream }),
+        ...(config.shutdownGraceMs === undefined
+          ? {}
+          : { shutdownGraceMs: config.shutdownGraceMs }),
+        ...(options.web.shutdownTimer === undefined
+          ? {}
+          : { shutdownTimer: options.web.shutdownTimer }),
       });
     } catch (error) {
       await plane?.stop();
@@ -262,15 +271,18 @@ export async function startCardiganServer(
     store,
     ...(web === undefined ? {} : { web }),
     close: async () => {
-      // Order matters: stop scheduling and drain the current delivery first,
-      // then stop serving the UI, then stop accepting tool calls, then close
-      // the database.
-      await plane?.stop();
-      await web?.close();
+      // The Workbench closes first, alongside the control plane: it stops
+      // accepting connections and ends every SSE stream at once, so an open
+      // browser tab cannot hold the restart while the phase loops drain their
+      // current tick (a merge is never cut in half). In-flight requests get
+      // the grace period. The MCP endpoint and the store close after both.
+      const results = await Promise.allSettled([web?.close(), plane?.stop()]);
       await mcp.close();
       if (ownsStore) {
         store.close();
       }
+      const failed = results.find((result) => result.status === "rejected");
+      if (failed !== undefined) throw failed.reason;
     },
   };
 }

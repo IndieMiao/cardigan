@@ -38,6 +38,7 @@ export function subscribeProject(
   function connect(retry: boolean) {
     if (stopped) return;
     const cursors = [...seen].sort(([a], [b]) => a.localeCompare(b));
+    const resumed = retry && cursors.length > 0;
     // No events observed before disconnect: requesting an explicit zero avoids "start at now".
     const after = (cursors.length ? cursors : [["project", 0]])
       .map(([s, n]) => `${s}:${n}`)
@@ -54,10 +55,13 @@ export function subscribeProject(
     source = connection;
     const current = () => !stopped && source === connection;
     connection.addEventListener("open", () => {
-      if (current()) {
-        callbacks.status("live");
-        callbacks.ready();
-      }
+      if (!current()) return;
+      callbacks.status("live");
+      // A connection resumed from known cursors replays exactly the seqs
+      // missed while away, so the views already on screen stay as they are.
+      // The first connection, and a retry with no cursor yet (which replays
+      // from zero anyway), re-read to cover the window before the stream.
+      if (!resumed) callbacks.ready();
     });
     connection.addEventListener("queue", () => {
       if (current()) callbacks.ready();
@@ -90,12 +94,16 @@ export function subscribeProject(
         type: change.type,
       });
     });
-    connection.addEventListener("error", () => {
+    const lost = () => {
       if (!current()) return;
       source = undefined;
       connection.close();
       reconnect();
-    });
+    };
+    connection.addEventListener("error", lost);
+    // The server is restarting: drop this connection now and resume on the
+    // next server with the same cursors, without a page reload.
+    connection.addEventListener("shutdown", lost);
   }
   connect(false);
   return () => {
