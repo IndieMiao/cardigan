@@ -2,6 +2,7 @@ import type { CardDetail } from "../api.js";
 import { decisionTitle } from "../decision-labels.js";
 import { isHttpLink } from "../markdown.js";
 import { routeHash } from "../route.js";
+import { DecisionAffectedCards } from "./DecisionAffectedCards.js";
 import { NextOwners } from "./EmployeeIdentity.js";
 import { EmptyState, IdTag, StatusTag } from "./Foundation.js";
 
@@ -104,6 +105,10 @@ export function CardSidebar({
                     detail.decisions.find((q) => q.id === d.id) ?? d,
                   )}
                 </p>
+                <DecisionAffectedCards
+                  decision={detail.decisions.find((q) => q.id === d.id)}
+                  projectId={projectId}
+                />
               </li>
             ))}
           </ul>

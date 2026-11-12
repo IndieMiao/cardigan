@@ -11,6 +11,8 @@
  * Needs You ordering, the snapshot split between you and the Agents, and the
  * execution view's Assignment/Run/cursor rows.
  */
+
+import type { CardId } from "@cardigan/domain";
 import { expect, test } from "vitest";
 import { call, type WebHarness, webHarness } from "../../test-support/web.js";
 import {
@@ -34,6 +36,93 @@ async function seeded(): Promise<{
   const cookie = await harness.login(PASSWORD);
   return { harness, cookie, seeded };
 }
+
+test("C-133: decision impact resolves current titles and derived states in Needs You and card detail", async () => {
+  const { harness, cookie } = await seeded();
+  const read = async (path: string) => {
+    const response = await call(
+      harness.port,
+      `/api/projects/${project_id}${path}`,
+      { cookie },
+    );
+    expect(response.status).toBe(200);
+    return response.json as ReadBody;
+  };
+  try {
+    for (const ids of [[], ["C-1"], ["C-3", "C-1", "C-2", "C-2", "C-404"]]) {
+      harness.store.uow.run((tx) => {
+        const decision = tx.decisions.list(project_id)[0];
+        const card = tx.cards.get(project_id, "C-2" as CardId);
+        if (!decision || !card) throw new Error("Missing fixture");
+        tx.decisions.put(project_id, {
+          ...decision,
+          affected_cards: ids as CardId[],
+        });
+        // The live work item makes this in_progress despite its stored status.
+        tx.cards.put(project_id, {
+          ...card,
+          title: "Current affected title",
+          status: "todo",
+        });
+      });
+      const needs = await read("/needs-you");
+      const detail = await read("/cards/C-1");
+      const expected =
+        ids.length > 1
+          ? [
+              { id: "C-3", title: "Card C-3", status: "done" },
+              {
+                id: "C-1",
+                title: "Prepare the release",
+                status: "in_progress",
+              },
+              {
+                id: "C-2",
+                title: "Current affected title",
+                status: "in_progress",
+              },
+            ]
+          : ids.map((id) => ({
+              id,
+              title: "Prepare the release",
+              status: "in_progress",
+            }));
+      for (const decision of [needs.decisions[0], detail.decisions[0]]) {
+        expect(decision.card_id).toBe("C-1");
+        expect(decision.affected_cards).toEqual(ids);
+        expect(decision.affected_card_views).toEqual(expected);
+      }
+      if (ids.length > 1) {
+        // Viewing an affected card must retain the decision's actual owner.
+        expect((await read("/cards/C-2")).decisions[0]).toMatchObject({
+          card_id: "C-1",
+          affected_card_views: expected,
+        });
+      }
+    }
+    harness.store.uow.run((tx) => {
+      const card = tx.cards.get(project_id, "C-2" as CardId);
+      if (!card) throw new Error("Missing fixture");
+      tx.cards.put(project_id, {
+        ...card,
+        title: "Finished affected card",
+        status: "done",
+        resolution: "done",
+      });
+    });
+    for (const path of ["/needs-you", "/cards/C-1"]) {
+      expect(
+        (await read(path)).decisions[0].affected_card_views,
+      ).toContainEqual({
+        id: "C-2",
+        title: "Finished affected card",
+        status: "done",
+      });
+    }
+  } finally {
+    await harness.close();
+  }
+});
 
 test("every read endpoint requires a session", async () => {
   const harness = await webHarness({ password: PASSWORD });

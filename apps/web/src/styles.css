@@ -1688,6 +1688,46 @@ fieldset.filters {
   gap: 6px;
   flex-wrap: wrap;
 }
+.decision-affected-cards {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  margin: 8px 0;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+.decision-affected-card {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  max-width: 100%;
+  min-width: 0;
+}
+.decision-affected-cards ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  min-width: 0;
+  flex: 1;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.decision-affected-cards li {
+  min-width: 0;
+  max-width: 100%;
+}
+.decision-affected-card > :not(.decision-affected-title) {
+  flex-shrink: 0;
+}
+.decision-affected-title {
+  min-width: 0;
+  max-width: 14em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .needs-question {
   max-width: 680px;
   margin: 12px 0;

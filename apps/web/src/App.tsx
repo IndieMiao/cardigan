@@ -350,7 +350,7 @@ function Workbench({
             key={`${selected.id}/${route.cardId}`}
             client={client}
             projectId={selected.id}
-            revision={live.cardRevision(route.cardId)}
+            cardRevision={live.cardRevision}
             cardId={route.cardId}
             {...(route.anchor === undefined ? {} : { anchor: route.anchor })}
           />

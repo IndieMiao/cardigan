@@ -6,17 +6,26 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { StrictMode } from "react";
 import { afterEach, expect, test, vi } from "vitest";
 import { App } from "./App.js";
 import {
+  type CardDetail,
   type CardiganClient,
   HttpCardiganClient,
+  type NeedsDecision,
   type PostedComment,
 } from "./api.js";
 import { type StreamFactory, subscribeProject } from "./stream.js";
-import { card, cardDetail, fakeClient, project } from "./testing/fixtures.js";
+import {
+  card,
+  cardDetail,
+  fakeClient,
+  project,
+  timelineEntry,
+} from "./testing/fixtures.js";
 
 class Connection extends EventTarget {
   closed = false;
@@ -283,6 +292,147 @@ test("card streams filter unrelated events and preserve a comment draft and pend
   );
   await waitFor(() => expect(field.value).toBe(""));
 });
+
+test.each([
+  { view: "full detail", path: "cards/C-1", merge: false, drawer: false },
+  { view: "drawer", path: "cards?card=C-1", merge: false, drawer: true },
+  { view: "merge confirmation", path: "cards/C-1", merge: true, drawer: false },
+])(
+  "C-133: $view refreshes decision impact on affected-card events",
+  async ({ path, merge, drawer }) => {
+    window.location.hash = `#/p/p-1/${path}`;
+    let affected = [{ id: "C-2", title: "旧标题", status: "review" }];
+    const snapshot = () => {
+      const decision: NeedsDecision = {
+        id: "Q-1",
+        card_id: "C-1",
+        question: "影响范围",
+        context: "",
+        why: "等待拍板",
+        status: "open",
+        blocking: false,
+        decider: "human",
+        options: [],
+        recommended: "",
+        category: "general",
+        waited_ms: 0,
+        assignment_id: null,
+        trigger: merge ? "merge_confirmation" : null,
+        affected_cards: ["C-1", ...affected.map((c) => c.id)],
+        affected_card_views: [
+          { id: "C-1", title: "所属卡片", status: "in_progress" },
+          ...affected,
+        ],
+        related_cards: [{ id: "C-1", title: "所属卡片" }],
+        merge_confirmation: merge
+          ? { completion: null, deliveries: [], reviews: [], known_gaps: [] }
+          : null,
+      };
+      return cardDetail({
+        // Exercise actionable confirmations even when absent from the timeline index.
+        decisions: merge ? [] : [decision],
+        merge_confirmations: merge ? [decision] : [],
+        relations: {
+          decisions: merge ? [] : [decision],
+          cards: [],
+          pull_requests: [],
+        },
+        timeline: merge
+          ? []
+          : [
+              timelineEntry({
+                id: "C-1#1",
+                event_seq: 1,
+                type: "decision_request",
+                decision_id: decision.id,
+              }),
+              timelineEntry({
+                id: "C-1#2",
+                event_seq: 2,
+                type: "decision_resolved",
+                decision_id: decision.id,
+              }),
+            ],
+      });
+    };
+    const read = vi
+      .fn<CardiganClient["card"]>()
+      .mockImplementation(async () => snapshot());
+    const { client, connections } = live({ card: read });
+    render(<App client={client} />);
+    const rows = await screen.findAllByRole("list", { name: "影响的卡片" });
+    expect(rows).toHaveLength(merge ? 1 : 3);
+    for (const row of rows)
+      expect(within(row).getByText("旧标题")).toBeTruthy();
+    const field = screen.getByLabelText("评论正文") as HTMLTextAreaElement;
+    fireEvent.change(field, { target: { value: "跨卡刷新期间保留的草稿" } });
+    act(() => connections.last.emit("open"));
+    await settle();
+    let before = read.mock.calls.length;
+    if (!drawer) {
+      act(() => connections.last.emit("change", change("C-99", 1)));
+      await settle();
+      expect(read).toHaveBeenCalledTimes(before);
+    }
+    affected = [{ id: "C-2", title: "新标题", status: "done" }];
+    act(() =>
+      connections.last.emit("change", {
+        stream: "C-2",
+        seq: 1,
+        type: "card_updated",
+      }),
+    );
+    expect(
+      await screen.findAllByRole("link", { name: "C-2 新标题 已完成" }),
+    ).toHaveLength(merge ? 1 : 3);
+    expect(read).toHaveBeenCalledTimes(before + 1);
+    expect(screen.getByLabelText("评论正文")).toBe(field);
+    expect(field.value).toBe("跨卡刷新期间保留的草稿");
+
+    if (!drawer) {
+      // C-3 changes while the response introducing it is in flight. Its first
+      // event must not tie with C-2's first event and leave the stale response.
+      affected = [{ id: "C-3", title: "新的影响卡片", status: "review" }];
+      const stale = snapshot();
+      const pending = Promise.withResolvers<CardDetail>();
+      read.mockReturnValueOnce(pending.promise);
+      before = read.mock.calls.length;
+      act(() => connections.last.emit("change", change("C-1", 1)));
+      await waitFor(() => expect(read).toHaveBeenCalledTimes(before + 1));
+      affected = [{ id: "C-3", title: "加载期间已经完成", status: "done" }];
+      act(() => connections.last.emit("change", change("C-3", 1)));
+      await settle();
+      expect(read).toHaveBeenCalledTimes(before + 1);
+      await act(async () => pending.resolve(stale));
+      expect(
+        await screen.findAllByRole("link", {
+          name: "C-3 加载期间已经完成 已完成",
+        }),
+      ).toHaveLength(merge ? 1 : 3);
+      expect(read).toHaveBeenCalledTimes(before + 2);
+
+      // The new snapshot replaces the dependency set: no longer watch C-2.
+      before = read.mock.calls.length;
+      act(() => connections.last.emit("change", change("C-2", 2)));
+      await settle();
+      expect(read).toHaveBeenCalledTimes(before);
+      affected = [{ id: "C-3", title: "新的影响卡片已完成", status: "done" }];
+      act(() =>
+        connections.last.emit("change", {
+          stream: "C-3",
+          seq: 2,
+          type: "card_updated",
+        }),
+      );
+      expect(
+        await screen.findAllByRole("link", {
+          name: "C-3 新的影响卡片已完成 已完成",
+        }),
+      ).toHaveLength(merge ? 1 : 3);
+      expect(read).toHaveBeenCalledTimes(before + 1);
+    }
+  },
+);
 
 test("after a server restart the Workbench reconnects without re-reading loaded views or losing a draft", async () => {
   window.location.hash = "#/p/p-1/cards/C-1";

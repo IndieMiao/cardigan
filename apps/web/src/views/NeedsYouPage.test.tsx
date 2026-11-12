@@ -139,7 +139,10 @@ test("pending merge checks show a count without adding a human task, then refres
 });
 
 test("C-171: a failed human merge check is listed with return, hold and recheck", async () => {
-  const failed = merge();
+  const failed = merge({
+    affected_cards: ["C-1", "C-2"],
+    affected_card_views: [{ id: "C-2", title: "受影响卡", status: "review" }],
+  });
   if (!failed.merge_confirmation) throw new Error("Missing fixture");
   render(
     <NeedsYouPage
@@ -178,8 +181,88 @@ test("C-171: a failed human merge check is listed with return, hold and recheck"
   for (const name of ["确认合并", "退回修改", "暂不合并", "重新检查"])
     expect(article.getByRole("button", { name })).toBeTruthy();
   expect(article.getByText("检查通过后才会合并")).toBeTruthy();
+  expect(
+    within(article.getByRole("list", { name: "影响的卡片" }))
+      .getByRole("link", { name: /C-2 受影响卡 审核中/ })
+      .getAttribute("href"),
+  ).toBe("#/p/p-1/cards/C-2");
   expect(screen.queryByText(/排队或运行中/)).toBeNull();
 });
+test.each([null, "merge_confirmation"])(
+  "C-133: %s separates the owning card from affected cards and refreshes their status",
+  async (trigger) => {
+    const affected = [
+      { id: "C-1", title: "所属卡", status: "in_progress" },
+      { id: "C-2", title: "标题很长的受影响卡片", status: "review" },
+      { id: "C-3", title: "另一张卡", status: "done" },
+    ];
+    let data = page([
+      q({
+        trigger,
+        affected_cards: affected.map((c) => c.id),
+        affected_card_views: affected,
+        related_cards: affected,
+      }),
+    ]);
+    const client = fakeClient({ needsYou: async () => data });
+    const view = render(
+      <NeedsYouPage client={client} projectId="p-1" revision={0} />,
+    );
+    const row = within(await screen.findByRole("list", { name: "影响的卡片" }));
+    expect(row.getAllByRole("link")).toHaveLength(2);
+    expect(row.queryByText("C-1")).toBeNull();
+    expect(
+      row
+        .getByRole("link", { name: /C-2 标题很长的受影响卡片 审核中/ })
+        .getAttribute("href"),
+    ).toBe("#/p/p-1/cards/C-2");
+    expect(row.getByText("已完成")).toBeTruthy();
+    expect(document.querySelector(".needs-meta")?.textContent).toContain("C-1");
+    expect(document.querySelector(".needs-meta")?.textContent).not.toContain(
+      "C-2",
+    );
+    data = page([
+      q({
+        trigger,
+        affected_cards: ["C-2"],
+        affected_card_views: [{ id: "C-2", title: "新标题", status: "done" }],
+      }),
+    ]);
+    view.rerender(
+      <NeedsYouPage client={client} projectId="p-1" revision={1} />,
+    );
+    expect(
+      await screen.findByRole("link", { name: /C-2 新标题 已完成/ }),
+    ).toBeTruthy();
+  },
+);
+
+test.each([[], ["C-1"]].map((ids) => ({ ids })))(
+  "C-133: no impact row for $ids",
+  async ({ ids }) => {
+    render(
+      <NeedsYouPage
+        projectId="p-1"
+        client={fakeClient({
+          needsYou: async () =>
+            page([
+              q({
+                affected_cards: ids,
+                affected_card_views: ids.map((id) => ({
+                  id,
+                  title: "所属卡",
+                  status: "in_progress",
+                })),
+              }),
+            ]),
+        })}
+      />,
+    );
+    await screen.findByRole("article", { name: "合并确认 Q-1" });
+    expect(screen.queryByRole("list", { name: "影响的卡片" })).toBeNull();
+    expect(screen.getByRole("link", { name: "C-1 发布卡" })).toBeTruthy();
+  },
+);
 afterEach(() => {
   cleanup();
   vi.useRealTimers();

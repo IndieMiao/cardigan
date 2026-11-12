@@ -5,7 +5,7 @@ import type { StreamStatus } from "./stream.js";
 const initial = (project: string | undefined) => ({
   project,
   revision: 0,
-  connections: 0,
+  connectionRevision: 0,
   streams: new Map<string, number>(),
   status: "connecting" as StreamStatus,
 });
@@ -35,12 +35,16 @@ export function useProjectStream(
         setState((old) => {
           const current = old.project === project ? old : initial(project),
             streams = new Map(current.streams);
+          // One shared clock also orders events for dependencies discovered
+          // after a pending card read; independent stream counts could tie.
           for (const stream of changes)
-            streams.set(stream, (streams.get(stream) ?? 0) + 1);
+            streams.set(stream, current.revision + 1);
           const next = {
             ...current,
             revision: current.revision + 1,
-            connections: current.connections + (ready ? 1 : 0),
+            connectionRevision: ready
+              ? current.revision + 1
+              : current.connectionRevision,
             streams,
           };
           return next;
@@ -78,9 +82,13 @@ export function useProjectStream(
   return {
     revision: current.revision,
     status: current.status,
-    cardRevision: (id: string) =>
-      current.connections +
-      (current.streams.get("project") ?? 0) +
-      (current.streams.get(id) ?? 0),
+    cardRevision: (id: string, affectedCards: readonly string[] = []) =>
+      [...new Set([id, ...affectedCards])].reduce(
+        (latest, card) => Math.max(latest, current.streams.get(card) ?? 0),
+        Math.max(
+          current.connectionRevision,
+          current.streams.get("project") ?? 0,
+        ),
+      ),
   };
 }

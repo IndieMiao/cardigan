@@ -12,6 +12,7 @@ import {
   type NoticeView,
   type PreMergeCheckView,
 } from "../api.js";
+import { DecisionAffectedCards } from "../components/DecisionAffectedCards.js";
 import { DecisionAttachments } from "../components/DecisionAttachments.js";
 import { EmployeeIdentity } from "../components/EmployeeIdentity.js";
 import {
@@ -104,49 +105,52 @@ function DecisionMeta({
   readonly elapsed: number;
 }) {
   return (
-    <header className="needs-meta">
-      <EmployeeIdentity {...q} showTitle={false} />
-      <IdTag id={q.id} label={isMergeConfirmation(q) ? "合并确认" : "拍板"} />
-      {q.blocking && !q.followup_notice && <StatusTag status="blocked" />}
-      {isPausedReview(q) && (
-        <StatusTag status="suspended" label="已暂停（临时决定）" />
-      )}
-      {q.handed_over_from_pm && (
-        <span className="hint" title={q.handed_over_from_pm.reason}>
-          由 PM 转交
-        </span>
-      )}
-      <span className="hint">{waitLabel(q.waited_ms, elapsed)}</span>
-      {q.auto_merge && (
-        <span className="hint">
-          将于{" "}
-          {new Date(q.auto_merge.due_at).toLocaleTimeString("zh-CN", {
-            hour: "2-digit",
-            minute: "2-digit",
-            hour12: false,
-          })}{" "}
-          自动合并（偏好设置：{q.auto_merge.minutes} 分钟）
-          {q.auto_merge.remaining_ms !== undefined
-            ? ` · 剩余 ${Math.max(0, Math.ceil((q.auto_merge.remaining_ms - elapsed) / 60_000))} 分钟`
-            : q.waited_ms !== null &&
-              ` · 剩余 ${Math.max(0, Math.ceil((q.auto_merge.minutes * 60_000 - q.waited_ms - elapsed) / 60_000))} 分钟`}
-        </span>
-      )}
-      <span className="needs-cards">
-        {q.related_cards.length === 0 ? (
-          <span>项目级事项</span>
-        ) : (
-          q.related_cards.map((card) => (
-            <CardLink
-              key={card.id}
-              projectId={projectId}
-              id={card.id}
-              label={card.title}
-            />
-          ))
+    <>
+      <header className="needs-meta">
+        <EmployeeIdentity {...q} showTitle={false} />
+        <IdTag id={q.id} label={isMergeConfirmation(q) ? "合并确认" : "拍板"} />
+        {q.blocking && !q.followup_notice && <StatusTag status="blocked" />}
+        {isPausedReview(q) && (
+          <StatusTag status="suspended" label="已暂停（临时决定）" />
         )}
-      </span>
-    </header>
+        {q.handed_over_from_pm && (
+          <span className="hint" title={q.handed_over_from_pm.reason}>
+            由 PM 转交
+          </span>
+        )}
+        <span className="hint">{waitLabel(q.waited_ms, elapsed)}</span>
+        {q.auto_merge && (
+          <span className="hint">
+            将于{" "}
+            {new Date(q.auto_merge.due_at).toLocaleTimeString("zh-CN", {
+              hour: "2-digit",
+              minute: "2-digit",
+              hour12: false,
+            })}{" "}
+            自动合并（偏好设置：{q.auto_merge.minutes} 分钟）
+            {q.auto_merge.remaining_ms !== undefined
+              ? ` · 剩余 ${Math.max(0, Math.ceil((q.auto_merge.remaining_ms - elapsed) / 60_000))} 分钟`
+              : q.waited_ms !== null &&
+                ` · 剩余 ${Math.max(0, Math.ceil((q.auto_merge.minutes * 60_000 - q.waited_ms - elapsed) / 60_000))} 分钟`}
+          </span>
+        )}
+        <span className="needs-cards">
+          {!q.card_id ? (
+            <span>项目级事项</span>
+          ) : (
+            <CardLink
+              projectId={projectId}
+              id={q.card_id}
+              label={
+                q.related_cards.find((card) => card.id === q.card_id)?.title ??
+                "卡片"
+              }
+            />
+          )}
+        </span>
+      </header>
+      <DecisionAffectedCards decision={q} projectId={projectId} />
+    </>
   );
 }
 function Decision({

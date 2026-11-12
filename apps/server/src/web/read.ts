@@ -175,6 +175,7 @@ export function webDecisionView(
 ) {
   return {
     ...decision,
+    affected_card_views: affectedCardViews(state, decision.affected_cards),
     ...webAuthorView(state, decision.raised_by ?? "system"),
     attachments: decisionAttachmentViews(state, decision),
     decider_view:
@@ -188,6 +189,20 @@ export function webDecisionView(
         }
       : {}),
   };
+}
+
+/** Current card summaries for explicit decision impact, from the same snapshot. */
+function affectedCardViews(state: CommandState, ids: readonly CardId[]) {
+  const cards = cardViews({
+    ...state,
+    cards: state.cards.filter((card) => ids.includes(card.id)),
+  });
+  return [...new Set(ids)].flatMap((id) => {
+    const card = cards.find((candidate) => candidate.id === id);
+    return card
+      ? [{ id: card.id, title: card.title, status: card.status }]
+      : [];
+  });
 }
 
 /** Public employee profile only; opaque references and external URLs are not images. */
@@ -945,6 +960,7 @@ function decisionActionWebView(
       state.decisions.find((d) => d.id === decision.id),
     ),
     affected_cards: decision.affected_cards,
+    affected_card_views: affectedCardViews(state, decision.affected_cards),
     question: decision.question,
     context: decision.context,
     why: clamp(decision.why),

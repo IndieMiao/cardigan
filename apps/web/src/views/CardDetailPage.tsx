@@ -42,6 +42,11 @@ export interface CardDetailPageProps {
   /** Embedded in a drawer: do not auto-scroll to the latest timeline entry. */
   readonly inDrawer?: boolean;
   readonly revision?: number;
+  /** Include the displayed decision impact in the shared project's live revision. */
+  readonly cardRevision?: (
+    id: string,
+    affectedCards: readonly string[],
+  ) => number;
 }
 export function CardDetailPage(props: CardDetailPageProps) {
   const {
@@ -51,7 +56,9 @@ export function CardDetailPage(props: CardDetailPageProps) {
     anchor: routeAnchor,
     inDrawer = false,
     revision = 0,
+    cardRevision,
   } = props;
+  const [affectedCards, setAffectedCards] = useState<readonly string[]>([]);
   const [routeFilters] = useRouteFilters({ kind: "card", projectId, cardId });
   const routeLocation = `${projectId}/${cardId}/${routeAnchor ?? ""}/${routeFilters.type ?? ""}/${routeFilters.author ?? ""}`;
   const [localAnchor, setLocalAnchor] = useState<{
@@ -85,8 +92,26 @@ export function CardDetailPage(props: CardDetailPageProps) {
   }, [client, projectId, cardId]);
   const { data, error, reload, pending, interactive } = useResource(
     load,
-    revision,
+    cardRevision ? cardRevision(cardId, affectedCards) : revision,
   );
+  useEffect(() => {
+    if (!data) return;
+    const ids = [
+      ...new Set(
+        [...data.decisions, ...(data.merge_confirmations ?? [])].flatMap(
+          (decision) =>
+            (decision.affected_card_views ?? [])
+              .filter((card) => card.id !== decision.card_id)
+              .map((card) => card.id),
+        ),
+      ),
+    ].sort();
+    setAffectedCards((current) =>
+      current.length === ids.length && current.every((id, i) => id === ids[i])
+        ? current
+        : ids,
+    );
+  }, [data]);
   useEffect(() => {
     if (query.current.at === anchor && previousSize.current === pageSize)
       return;

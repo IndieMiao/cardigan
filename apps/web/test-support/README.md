@@ -1,5 +1,7 @@
 # Workbench 布局回归
 
+C-133 拍板影响范围人工截图：运行 `pnpm --filter @cardigan/web dev --host localhost`，打开 Vite 地址下的 `/test-support/decision-impact.html`。这是本地夹具，不连接业务服务或正式数据库，也不进入产品构建。分别在 1440px、390px 下模拟 `prefers-color-scheme: light/dark`，截取 Needs You 和点击 C-1 后的卡片详情（含合并处理、侧栏拍板和请求／解决时间线）。Q-1 和失败合并确认 Q-2 显示 C-2、C-3、C-4 的链接、缩略标题与状态；Q-3 为空列表、Q-4 仅含所属卡片，均不显示影响行。检查无水平溢出、状态文字不截断、长标题悬停可读，点击 C-2 可打开详情，影响行仍只排除拍板所属的 C-1。
+
 `pnpm --filter @cardigan/web test:layout` 在真实 Chromium 中加载 App、字体和 CSS，使用非空测试夹具；不启动业务服务、Dispatcher，也不连接正式数据库。它与 jsdom 组件测试互补，不加入默认的无浏览器测试流程。
 
 前置条件：已有 Node 24、workspace 依赖和本地 Chromium。默认执行 PATH 中的 `chromium`；使用其他安装位置时设置 `CHROMIUM_PATH` 为浏览器可执行文件路径。测试通过 Chromium 自带的 DevTools pipe 控制浏览器，不需要 Playwright 或新增 npm 依赖。浏览器使用临时 profile，以无沙箱模式运行本地测试代码，结束后关闭浏览器并删除 profile。
