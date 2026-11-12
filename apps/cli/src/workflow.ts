@@ -70,6 +70,7 @@ const USAGE = [
   "  cardigan host-ops start [--project <p>]  启动常驻主机运维（已在运行就跳过）",
   "  cardigan pm start [--office] [--ops] [--project <p>]  一键启动常驻 PM（已在运行就跳过）",
   "  cardigan pm rotate --office|--ops [--external] [--employee <E-n 或名字>] [--project <p>]     把常驻 PM 换到 pm 角色的最新版本",
+  "  cardigan pm restart --office|--ops [--project <p>]     重开常驻 PM 会话（不暂停、不转交事项、不换版本）",
   "    新建固定最新版本的常驻 Assignment，待处理的 PM 事项转给它，旧的释放并作废 Token；",
   "    已是最新版本时不做改动。先用 cardigan role upgrade pm --from-default 追加新版本。",
   "  cardigan needs-you [--project <p>]                   看待你拍板、待你执行的事项和知会",
@@ -798,7 +799,78 @@ async function pmCommand(
   const [sub] = args;
   if (sub === "start") return await pmStart(args.slice(1), io, hooks);
   if (sub === "rotate") return await pmRotate(args.slice(1), io);
+  if (sub === "restart") return await pmRestart(args.slice(1), io, hooks);
   return pmCreate(args, io);
+}
+
+/**
+ * C-154 `cardigan pm restart --office|--ops`: a fresh session for the same
+ * standing PM. Nothing is paused or handed to the human, and it works without
+ * a role version change (unlike `pm rotate`).
+ */
+async function pmRestart(
+  args: readonly string[],
+  io: CliIo,
+  hooks: CliHooks,
+): Promise<number> {
+  const parsed = parseArgs(args, ["office", "ops"]);
+  const office = parsed.flags.office === true;
+  if (office === (parsed.flags.ops === true) || parsed.positionals.length > 0)
+    throw new CliError("必须二选一：--office 或 --ops", EXIT.usage, [USAGE]);
+  const label = office ? "PM Office" : "PM Ops";
+  const store = openStoreFrom(io, parsed.flags);
+  try {
+    const project_id = resolveProject(
+      store,
+      io,
+      optional(parsed.flags, "project"),
+    );
+    const entries = standingPmAssignments(store, project_id).filter(
+      (entry) => entry.office === office,
+    );
+    const active = entries.filter((e) => e.assignment.status === "active");
+    if (active.length === 0)
+      throw new CliError(
+        entries.length > 0
+          ? `${label} 已暂停，用 cardigan pm start --${office ? "office" : "ops"} 恢复`
+          : `没有在岗的 ${label}，先运行 cardigan pm create`,
+        EXIT.usage,
+      );
+    if (active.length > 1)
+      throw new CliError(
+        `有多个在岗的 ${label}，无法确定要重开哪一个`,
+        EXIT.failure,
+      );
+    const { assignment } = active[0] as StandingPm;
+    if (assignment.external)
+      throw new CliError(
+        `${label}（${assignment.id}）是外接身份，没有主机终端可重开；在外接客户端里新开会话即可。`,
+        EXIT.usage,
+      );
+    const result = await (hooks.start ?? startAssignmentById)({
+      store,
+      io,
+      project_id,
+      assignment_id: assignment.id,
+      restart_session: true,
+      ...(optional(parsed.flags, "data-dir") === undefined
+        ? {}
+        : { dataDir: optional(parsed.flags, "data-dir") as string }),
+      ...(optional(parsed.flags, "mcp-url") === undefined
+        ? {}
+        : { mcpUrl: optional(parsed.flags, "mcp-url") as string }),
+      ...(optional(parsed.flags, "hc-session") === undefined
+        ? {}
+        : { session: optional(parsed.flags, "hc-session") as string }),
+    });
+    if (result === EXIT.ok)
+      io.stdout(
+        `已重开 ${label}（${assignment.id}）的会话：Assignment 不变，待处理事项没有转交。`,
+      );
+    return result;
+  } finally {
+    store.close();
+  }
 }
 
 /** `cardigan pm rotate --office|--ops`: human-only, one write transaction. */

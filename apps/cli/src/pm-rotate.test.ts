@@ -175,6 +175,8 @@ test("pm rotate moves Ops to the newest pm version in one transaction", async ()
   expect(await run(["pm", "create", "--ops"])).toBe(0);
   expect(await run(["pm", "rotate", "--ops"])).toBe(0);
   expect(printed()).toContain("已是最新版本 pm v1");
+  // C-154: an unchanged rotate points to the session restart entry.
+  expect(printed()).toContain("cardigan pm restart --ops");
 
   expect(await run(["role", "upgrade", "pm", "--from-default"])).toBe(0);
   withStore((s) =>

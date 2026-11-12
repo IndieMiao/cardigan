@@ -1,5 +1,6 @@
 import {
   type Assignment,
+  DEFAULT_RUN_LIMIT,
   type Event,
   isStandingPm,
   occupiedRunSlots,
@@ -10,6 +11,7 @@ import {
 } from "@cardigan/domain";
 import {
   type ReadRepositories,
+  readRunLimit,
   type Store,
   unfinishedBellAttempts,
 } from "@cardigan/store";
@@ -20,6 +22,23 @@ import { LOCAL_EXECUTOR } from "./merge-gate-executors.js";
 // P2a-9 / phase-2 §2.1: merge checks build and test the entire repository.
 // Reserve the suggested two slots while actually running; tune after measurement.
 export const MERGE_CHECK_RUN_SLOTS = 2;
+
+/** Legacy/default local assignments can exist before a Machine row is registered. */
+export function runCapacityMachines(store: Store, tx: ReadRepositories) {
+  const machines = new Map<string, { id: string; label: string }>();
+  for (const project of store.listProjects()) {
+    for (const assignment of tx.assignments.list(project.id))
+      if (!machines.has(assignment.machine_id))
+        machines.set(assignment.machine_id, {
+          id: assignment.machine_id,
+          label: assignment.machine_id,
+        });
+  }
+  for (const project of store.listProjects())
+    for (const machine of tx.machines.list(project.id))
+      machines.set(machine.id, { id: machine.id, label: machine.label });
+  return [...machines.values()].sort((a, b) => a.id.localeCompare(b.id));
+}
 
 function queueSnapshot(store: Store) {
   // Read only waiting rows, including their original trigger time. The stream
@@ -104,15 +123,28 @@ export function runCapacitySnapshot(store: Store, tx: ReadRepositories) {
   // P2a-12 D: only checks executed locally consume the host's `local` Run
   // slots; a remote executor's checks are counted in its own bucket and never
   // in `occupied`, even if an agent machine happens to share its name.
+  const agentOccupied = new Map(occupied);
   const mergeChecks = runningMergeChecks(store);
   occupied.set(
     LOCAL_EXECUTOR,
     (occupied.get(LOCAL_EXECUTOR) ?? 0) +
       (mergeChecks.get(LOCAL_EXECUTOR) ?? 0) * MERGE_CHECK_RUN_SLOTS,
   );
-  return { occupied, mergeChecks, queue: queueSnapshot(store) };
+  return { occupied, agentOccupied, mergeChecks, queue: queueSnapshot(store) };
 }
 
 export function readRunQueue(store: Store, tx?: ReadRepositories) {
   return tx ? queueSnapshot(store) : store.uow.read(() => queueSnapshot(store));
+}
+
+/** YAML is the default; invalid trusted config still fails closed, even with an override. */
+export function effectiveRunLimit(
+  store: Store,
+  machine: string,
+  defaults: (machine: string) => number = () => DEFAULT_RUN_LIMIT,
+): number {
+  const fallback = defaults(machine);
+  return fallback > 0
+    ? (readRunLimit(store.database, machine)?.limit ?? fallback)
+    : 0;
 }

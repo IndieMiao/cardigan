@@ -14,7 +14,7 @@ export interface RunCapacityConfiguration {
   readonly inactiveCancelAfterMs: number | null;
 }
 
-/** Same trust boundary as merge-gate.yaml. Read once; changing the file needs a restart. */
+/** Trusted YAML defaults read at startup; effectiveRunLimit applies live database overrides. */
 export async function loadRunCapacityConfig(
   input: {
     readonly configDir?: string;

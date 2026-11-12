@@ -26,20 +26,25 @@ import {
   type PreparedWorktree,
   reviewTargetSha,
   scrubRunCredentials,
+  stopRunRuntime,
+  tryHostOpsLock,
   type WorktreeProvider,
   worktreeProvider,
 } from "@cardigan/host";
 import { type LaunchConfig, resolveProfile } from "@cardigan/roles";
 import {
   DEFAULT_HC_SESSION,
+  describeRuntime,
   type ExecutionConfig,
   HerdrRuntime,
+  runtimeOwnsRef,
   secureDataDirectory,
 } from "@cardigan/runtime-herdr";
 import {
   finishBellAttempt,
   retireReconcileNotifications,
   Store,
+  type StoreTransactionContext,
   unfinishedBellAttempts,
   writeRole,
 } from "@cardigan/store";
@@ -101,6 +106,8 @@ export interface StartOptions {
   readonly runtime: LaunchRuntime;
   readonly dataDir: string;
   readonly worktree?: WorktreeProvider;
+  /** C-154: fresh session for an active standing PM, without pausing it. */
+  readonly restart_session?: boolean;
   /** Already checked against the server registration by the caller. */
   readonly execution?: ExecutionConfig;
 }
@@ -201,6 +208,35 @@ async function prepareWorktree(
 export async function startAssignment(
   options: StartOptions,
 ): Promise<StartedAssignment> {
+  if (options.restart_session !== true) return await startUnlocked(options);
+  // C-154: one restart at a time per Assignment, from reading the current
+  // session to launching the new one. The host_ops service takes the same
+  // lock, so a pending host restart and a human restart never interleave.
+  if (!/^A-[1-9][0-9]*$/u.test(options.assignment_id))
+    throw new CliError(
+      `不认识的 Assignment：${options.assignment_id}`,
+      EXIT.usage,
+    );
+  const unlock = await tryHostOpsLock(
+    options.store,
+    options.project_id,
+    options.assignment_id,
+  );
+  if (unlock === undefined)
+    throw new CliError(
+      `${options.assignment_id} 正在被另一个重开会话或主机运维操作处理，没有改动；稍后再试`,
+      EXIT.failure,
+    );
+  try {
+    return await startUnlocked(options);
+  } finally {
+    await unlock();
+  }
+}
+
+async function startUnlocked(
+  options: StartOptions,
+): Promise<StartedAssignment> {
   const { store, io, project_id } = options;
   const actor = resolveActor(io, project_id, store);
   rejectExternalTerminalAction(store, project_id, options.assignment_id);
@@ -216,6 +252,21 @@ export async function startAssignment(
     assignment.scope === "standing" &&
     assignment.role_id === "pm" &&
     assignment.status === "suspended";
+  const restarting = options.restart_session === true;
+  if (
+    restarting &&
+    !(
+      assignment.scope === "standing" &&
+      assignment.role_id === "pm" &&
+      assignment.status === "active"
+    )
+  )
+    throw new CliError(
+      resuming
+        ? `${assignment.id} 已暂停，用 cardigan pm start 恢复`
+        : `${assignment.id} 不是在岗的常驻 PM，不能重开会话`,
+      EXIT.usage,
+    );
   if (assignment.status !== "active" && !resuming) {
     throw new CliError(
       `Assignment 状态是 ${assignment.status}，只有 active 能启动`,
@@ -248,6 +299,36 @@ export async function startAssignment(
   });
   if (resuming && assignment.runtime_ref)
     await closeStandingTerminal(options.runtime, assignment.runtime_ref);
+  // C-154: replace the session only after independently proving the old
+  // terminal exited (same primitive as the host_ops restart); otherwise keep
+  // the Assignment, its RuntimeRef and its tokens so the stop can be retried.
+  const stoppedRef = assignment.runtime_ref;
+  if (restarting) {
+    // C-152 × C-154: a terminal recorded on another runtime cannot be seen
+    // from here, so "not found" would not prove it exited. Leave it to the
+    // host_ops restart, which asks the human to confirm the exit first.
+    if (stoppedRef && !runtimeOwnsRef(execution, stoppedRef))
+      throw new CliError(
+        `${assignment.id} 的终端 ${stoppedRef.terminal_ref} 记录在运行时机器 ${stoppedRef.runtime_machine}，不属于当前运行时 ${describeRuntime(execution)}，无法确认它已退出，没有替换会话。请让主机运维用 host_ops_restart_standing_pm 重启，按 Needs You 中的步骤确认旧终端已退出。`,
+        EXIT.failure,
+      );
+    const stopped = await stopRunRuntime(
+      options.runtime,
+      stoppedRef,
+      () =>
+        JSON.stringify(
+          requireAssignment(store, project_id, assignment.id).assignment
+            .runtime_ref,
+        ) === JSON.stringify(stoppedRef),
+    );
+    if (stopped !== "exited")
+      throw new CliError(
+        stopped === "withdrawn"
+          ? `${assignment.id} 的会话已变化，没有替换；请重新运行 cardigan pm restart`
+          : `${assignment.id} 的旧终端没有确认退出，没有替换会话；Assignment、事项和 Token 都没动，稍后重试 cardigan pm restart`,
+        EXIT.failure,
+      );
+  }
   const run = runCommand(store, {
     operation: "启动 Assignment",
     target: assignment.id,
@@ -264,9 +345,19 @@ export async function startAssignment(
           agent_cli_version: version,
           launch_profile_ref: profileRef,
           ...(resuming ? { resume: true } : {}),
+          ...(restarting
+            ? { restart_session: true, expected_runtime_ref: stoppedRef }
+            : {}),
         },
         ports,
       ),
+    // C-154: the old session can no longer report or escalate anything.
+    ...(restarting
+      ? {
+          after: (tx: StoreTransactionContext) =>
+            retireOldSession(tx, store, project_id, assignment.id),
+        }
+      : {}),
   });
 
   try {
@@ -290,9 +381,17 @@ export async function startAssignment(
         actor,
         reuse_session: true,
         prepare_worktree: () => prepareWorktree(options, entities),
-        ...(resuming
+        ...(resuming || restarting
           ? {
-              first_prompt: resumedBells(store, project_id, assignment, run.id),
+              first_prompt: resumedBells(
+                store,
+                project_id,
+                assignment,
+                run.id,
+                restarting
+                  ? "常驻 PM 会话已由人重开（Assignment 不变，事项仍归你）。请调用 whoami，再逐条读取这些流的 get_updates 并 ack_events，接着处理。"
+                  : undefined,
+              ),
             }
           : {}),
       },
@@ -333,25 +432,32 @@ function pauseStanding(
     project_id,
     actor,
     reduce: (s, a, p) => pauseStandingAssignment(s, a, { assignment_id }, p),
-    after: (tx) => {
-      const at = systemClock.now();
-      for (const token of tx.tokensForAssignment(project_id, assignment_id))
-        if (token.revoked_at === null) tx.revokeToken(token.id);
-      // A late external result from an interrupted attempt must not escalate a manual stop.
-      for (const attempt of unfinishedBellAttempts(store.database, project_id))
-        if (attempt.assignment_id === assignment_id)
-          finishBellAttempt(
-            store.database,
-            project_id,
-            attempt.id,
-            "failed",
-            // Keep the intent timestamp monotonic if the host clock moved back.
-            new Date(
-              Math.max(Date.parse(at), Date.parse(attempt.started_at)),
-            ).toISOString(),
-          );
-    },
+    after: (tx) => retireOldSession(tx, store, project_id, assignment_id),
   });
+}
+/** Revoke the old session's tokens and settle its unfinished bell attempts. */
+function retireOldSession(
+  tx: StoreTransactionContext,
+  store: Store,
+  project_id: ProjectId,
+  assignment_id: Assignment["id"],
+) {
+  const at = systemClock.now();
+  for (const token of tx.tokensForAssignment(project_id, assignment_id))
+    if (token.revoked_at === null) tx.revokeToken(token.id);
+  // A late external result from an interrupted attempt must not escalate a manual stop.
+  for (const attempt of unfinishedBellAttempts(store.database, project_id))
+    if (attempt.assignment_id === assignment_id)
+      finishBellAttempt(
+        store.database,
+        project_id,
+        attempt.id,
+        "failed",
+        // Keep the intent timestamp monotonic if the host clock moved back.
+        new Date(
+          Math.max(Date.parse(at), Date.parse(attempt.started_at)),
+        ).toISOString(),
+      );
 }
 async function closeStandingTerminal(runtime: Runtime, ref: RuntimeRef) {
   const result = await runtime.release(ref, { force: true });
@@ -366,6 +472,7 @@ function resumedBells(
   project: ProjectId,
   a: Assignment,
   run: string,
+  note = "常驻 PM 已由人恢复。请调用 whoami，再逐条读取这些流的 get_updates 并 ack_events，处理暂停期间的更新。",
 ): string {
   store.acknowledgeNotifications(project, a.id);
   store.uow.run(() => retireReconcileNotifications(store.database, project));
@@ -392,7 +499,7 @@ function resumedBells(
       (n) =>
         `[bell] ${n.card_id ? `card=${n.card_id}` : `project=${project}`} asg=${a.id} run=${run} seq=${n.seq}`,
     ),
-    "常驻 PM 已由人恢复。请调用 whoami，再逐条读取这些流的 get_updates 并 ack_events，处理暂停期间的更新。",
+    note,
   ].join("\n");
 }
 
@@ -848,6 +955,7 @@ export interface StartCommandOptions {
   readonly runtime: LaunchRuntime;
   readonly dataDir: string;
   readonly mcpUrl?: string;
+  readonly restart_session?: boolean;
   readonly execution?: ExecutionConfig;
 }
 
@@ -874,6 +982,7 @@ export async function startAssignmentCommand(
     runtime,
     dataDir,
     worktree: worktreeProvider(execution, runtime),
+    ...(options.restart_session ? { restart_session: true } : {}),
   });
 
   io.stdout(
@@ -898,6 +1007,8 @@ export interface StartByIdOptions {
   readonly dataDir?: string;
   readonly mcpUrl?: string;
   readonly session?: string;
+  /** C-154: `cardigan pm restart` — fresh session, same standing PM. */
+  readonly restart_session?: boolean;
 }
 export type StartById = (options: StartByIdOptions) => Promise<number>;
 

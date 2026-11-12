@@ -17,6 +17,7 @@ import {
   finishRun,
   postComment,
   queueRun,
+  setRunLimit,
   updateCard,
 } from "@cardigan/domain";
 import {
@@ -31,6 +32,7 @@ import {
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import {
   PROJECT_EVENT_STREAM,
+  persistRunLimitEffect,
   Store,
   unfinishedBellAttempts,
 } from "@cardigan/store";
@@ -47,6 +49,7 @@ import {
 } from "./m4-fixtures.js";
 import { MergeChecks } from "./merge-checks.js";
 import { readCardList } from "./web/card-state.js";
+import { executionCapacity } from "./web/execution-capacity.js";
 import { executionView } from "./web/read.js";
 
 let f: ReturnType<typeof dispatchFixture>,
@@ -79,7 +82,7 @@ beforeEach(() => {
     provision: async () => {
       throw new Error("use host callback");
     },
-    release: async () => ({ ok: true, value: undefined }),
+    release: vi.fn(async () => ({ ok: true, value: undefined })),
     interrupt: async () => ({ ok: true, value: undefined }),
     resume_or_replace: async () => {
       throw new Error("unused");
@@ -122,6 +125,52 @@ const ownNotes = () =>
     project_id: f.project,
     assignment_id: target.assignment.id,
   });
+
+function saveLimit(limit: number) {
+  f.store.uow.run((tx) => {
+    const effect = unwrap(
+      setRunLimit(
+        { kind: "human" },
+        { machine_id: "local", limit },
+        {
+          machines: [{ id: "local" }],
+          previous: 4,
+          member_id: "M-1",
+          clock: f.clock,
+          ids: tx.global_ids,
+        },
+      ),
+    );
+    persistRunLimitEffect(f.store.database, tx, effect);
+  });
+}
+
+test("C-145 persisted limits affect the next tick without restart or cancelling running work", async () => {
+  const busy = f.create();
+  f.session(busy.assignment, false);
+  const dispatcher = new Dispatcher({ ...options, runLimit: () => 4 });
+  saveLimit(1);
+  const before = f.state().runs.filter((run) => run.status === "running");
+  comment();
+  await dispatcher.tick();
+  expect(runtime.wake).not.toHaveBeenCalled();
+  expect(readRunQueue(f.store)).toHaveLength(1);
+  const queued = readRunQueue(f.store)[0]?.run_id;
+  saveLimit(2);
+  await dispatcher.tick();
+  expect(runtime.wake).toHaveBeenCalledOnce();
+  expect(f.state().runs.find((run) => run.id === queued)?.status).toBe(
+    "dispatched",
+  );
+  saveLimit(1);
+  await dispatcher.tick();
+  for (const run of before)
+    expect(f.state().runs.find((entry) => entry.id === run.id)).toEqual(run);
+  expect(f.state().runs.find((run) => run.id === queued)?.status).toBe(
+    "dispatched",
+  );
+  expect(runtime.release).not.toHaveBeenCalled();
+});
 
 test("§3.1 live session: merges one Assignment's events, preserves its snapshot and never duplicates a Run", async () => {
   comment("one");
@@ -516,6 +565,16 @@ test("cross-project event FIFO survives full ticks, changed limits, restart, and
   expect(before.map((r) => [r.project_id, r.ahead])).toEqual([
     [other.project, 0],
     [f.project, 1],
+  ]);
+  expect(executionCapacity(f.store, () => limit).agents).toEqual([
+    {
+      machine_id: "local",
+      label: "local",
+      running: 1,
+      limit: 1,
+      queued: 2,
+      merge_check_slots: 0,
+    },
   ]);
   const rows = readCardList(f.store, f.project);
   expect(
@@ -1401,114 +1460,120 @@ test("Q-88 the 60-minute default tolerates 48-minute silence and restarts on fre
   expect(slots()).toBe(1);
 });
 
-test("Q-88 a full machine permits human CLI start, reports excess, and still queues concurrent automatic work", async () => {
-  const busy = f.create();
-  f.session(busy.assignment, false);
-  const automatic = f.create();
-  f.session(automatic.assignment);
-  f.apply((s, a, p) =>
-    postComment(
-      s,
-      a,
-      {
-        card_id: automatic.card.id,
-        work_item_id: automatic.item.id,
-        body: "automatic work",
+test.each([false, true])(
+  "Q-88/C-145 human CLI start shares the effective cap (database override: %s)",
+  async (override) => {
+    const busy = f.create();
+    f.session(busy.assignment, false);
+    const automatic = f.create();
+    f.session(automatic.assignment);
+    f.apply((s, a, p) =>
+      postComment(
+        s,
+        a,
+        {
+          card_id: automatic.card.id,
+          work_item_id: automatic.item.id,
+          body: "automatic work",
+        },
+        p,
+      ),
+    );
+    f.store.issueToken({
+      project_id: f.project,
+      assignment_id: target.assignment.id,
+      role: {
+        role_version: target.assignment.role_version,
+        allowed_tools: ["whoami"],
       },
-      p,
-    ),
-  );
-  f.store.issueToken({
-    project_id: f.project,
-    assignment_id: target.assignment.id,
-    role: {
-      role_version: target.assignment.role_version,
-      allowed_tools: ["whoami"],
-    },
-  });
-  const configDir = join(f.dataDir, "config");
-  await mkdir(configDir, { mode: 0o700 });
-  await writeFile(
-    join(configDir, "run-capacity.yaml"),
-    "machines: { local: 1 }\n",
-    { mode: 0o600 },
-  );
-  await writeFile(
-    join(configDir, "launch.yaml"),
-    "profiles:\n  fixture:\n    harness: pi\n    model: fixture-model\n",
-    { mode: 0o600 },
-  );
-  const output: string[] = [];
-  let release = () => {};
-  const hold = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  vi.mocked(runtime.wake).mockImplementationOnce(async () => {
-    await hold;
-    return { ok: true, value: { sent: true } };
-  });
-  const manual = startAssignmentCommand({
-    store: f.store,
-    project_id: f.project,
-    assignment_id: target.assignment.id,
-    runtime,
-    dataDir: f.dataDir,
-    io: {
-      cwd: f.dataDir,
-      platform: "linux",
-      signals: { on() {}, off() {} },
-      env: {
-        CARDIGAN_CONFIG_DIR: configDir,
-        CARDIGAN_DATA_DIR: f.dataDir,
-        CARDIGAN_RUNTIME_MODE: "local",
+    });
+    const configDir = join(f.dataDir, "config");
+    await mkdir(configDir, { mode: 0o700 });
+    await writeFile(
+      join(configDir, "run-capacity.yaml"),
+      `machines: { local: ${override ? 4 : 1} }\n`,
+      { mode: 0o600 },
+    );
+    await writeFile(
+      join(configDir, "launch.yaml"),
+      "profiles:\n  fixture:\n    harness: pi\n    model: fixture-model\n",
+      { mode: 0o600 },
+    );
+    if (override) saveLimit(1);
+    const output: string[] = [];
+    let release = () => {};
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.mocked(runtime.wake).mockImplementationOnce(async () => {
+      await hold;
+      return { ok: true, value: { sent: true } };
+    });
+    const manual = startAssignmentCommand({
+      store: f.store,
+      project_id: f.project,
+      assignment_id: target.assignment.id,
+      runtime,
+      dataDir: f.dataDir,
+      io: {
+        cwd: f.dataDir,
+        platform: "linux",
+        signals: { on() {}, off() {} },
+        env: {
+          CARDIGAN_CONFIG_DIR: configDir,
+          CARDIGAN_DATA_DIR: f.dataDir,
+          CARDIGAN_RUNTIME_MODE: "local",
+        },
+        stdout: (line) => output.push(line),
+        stderr: (line) => output.push(line),
+        captureCommand: async () => ({
+          code: 0,
+          stdout: "fixture-cli 1.0\n",
+          stderr: "",
+        }),
+        spawnInherit: () => {
+          throw new Error("No real process in this test");
+        },
       },
-      stdout: (line) => output.push(line),
-      stderr: (line) => output.push(line),
-      captureCommand: async () => ({
-        code: 0,
-        stdout: "fixture-cli 1.0\n",
-        stderr: "",
-      }),
-      spawnInherit: () => {
-        throw new Error("No real process in this test");
-      },
-    },
-  });
-  void manual.catch(() => {});
-  try {
-    await expect.poll(() => vi.mocked(runtime.wake).mock.calls.length).toBe(1);
-    expect(
-      f
-        .state()
-        .runs.some(
-          (r) =>
-            r.assignment_id === target.assignment.id &&
-            r.status === "dispatched",
-        ),
-    ).toBe(true);
-    expect(slots()).toBe(2);
-    // The CLI uses the wall clock. Keep recovery leases on that same clock;
-    // fixture Run timestamps are later and cannot accidentally become inactive.
-    await new Dispatcher({
-      ...options,
-      clock: { now: () => new Date().toISOString() },
-      runLimit: () => 1,
-    }).tick();
-    expect(readRunQueue(f.store).map((r) => r.assignment_id)).toEqual([
-      automatic.assignment.id,
-    ]);
-    expect(runtime.wake).toHaveBeenCalledOnce();
-    release();
-    expect(await manual).toBe(0);
-    expect(output.join("\n")).toContain("已超过全机上限（当前 2/上限 1）");
-    expect(output.join("\n")).toContain(`已启动 ${target.assignment.id}`);
-    expect(output.join("\n")).not.toContain("排队中");
-    expect(slots()).toBe(2);
-  } finally {
-    release();
-    await manual;
-  }
-});
+    });
+    void manual.catch(() => {});
+    try {
+      await expect
+        .poll(() => vi.mocked(runtime.wake).mock.calls.length)
+        .toBe(1);
+      expect(
+        f
+          .state()
+          .runs.some(
+            (r) =>
+              r.assignment_id === target.assignment.id &&
+              r.status === "dispatched",
+          ),
+      ).toBe(true);
+      expect(slots()).toBe(2);
+      // The CLI uses the wall clock. Keep recovery leases on that same clock;
+      // fixture Run timestamps are later and cannot accidentally become inactive.
+      await new Dispatcher({
+        ...options,
+        clock: { now: () => new Date().toISOString() },
+        runLimit: () => 1,
+      }).tick();
+      expect(readRunQueue(f.store).map((r) => r.assignment_id)).toEqual([
+        automatic.assignment.id,
+      ]);
+      expect(runtime.wake).toHaveBeenCalledOnce();
+      release();
+      expect(await manual).toBe(0);
+      expect(output.join("\n")).toContain("已超过全机上限（当前 2/上限 1）");
+      expect(output.join("\n")).toContain(`已启动 ${target.assignment.id}`);
+      expect(output.join("\n")).not.toContain("排队中");
+      expect(slots()).toBe(2);
+    } finally {
+      release();
+      await manual;
+    }
+  },
+);
 
 test("live card priority reorders the saturated cross-project queue without replacing Runs", async () => {
   const other = secondProject();

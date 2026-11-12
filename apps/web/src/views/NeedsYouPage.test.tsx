@@ -1649,3 +1649,39 @@ test("PM-held merges are listed without counting as waiting, and the human can a
     ),
   );
 });
+
+test("C-154: a confirmation handed over by the PM is labelled and counts down from the restarted due time", async () => {
+  render(
+    <NeedsYouPage
+      client={fakeClient({
+        needsYou: async () =>
+          page([
+            merge({
+              id: "Q-3",
+              // Opened long ago: a countdown from creation would show 0.
+              waited_ms: 3_600_000,
+              handed_over_from_pm: {
+                at: "2026-01-01T01:00:00.000Z",
+                reason:
+                  "后台项目经理 A-2 已暂停，项目已无活跃后台，待处理事项转交给你。",
+              },
+              auto_merge: {
+                minutes: 5,
+                due_at: "2026-01-01T01:05:00.000Z",
+                remaining_ms: 4 * 60_000 + 30_000,
+              },
+            }),
+            merge({ id: "Q-4", card_id: "C-4" }),
+          ]),
+      })}
+      projectId="p-1"
+    />,
+  );
+  const handed = await screen.findByRole("article", { name: "合并确认 Q-3" });
+  expect(
+    within(handed).getByText("由 PM 转交").getAttribute("title"),
+  ).toContain("已暂停");
+  expect(handed.textContent).toContain("剩余 5 分钟");
+  const direct = screen.getByRole("article", { name: "合并确认 Q-4" });
+  expect(within(direct).queryByText("由 PM 转交")).toBeNull();
+});
