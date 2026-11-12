@@ -68,6 +68,7 @@ import {
   type StoreTransactionContext,
 } from "@cardigan/store";
 import { z } from "zod";
+import { serveEmployees } from "./employees.js";
 import {
   HttpRejection,
   methodNotAllowed,
@@ -545,6 +546,7 @@ export async function serveWrite(
   c: WriteContext,
   rest: string,
 ): Promise<boolean> {
+  if (await serveEmployees(c, rest)) return true;
   if (rest === "/card-templates" || rest === "/card-templates/validate") {
     // "validate" is also a legal template ID: GET reads its details, POST previews.
     if (c.req.method === "GET") return false;

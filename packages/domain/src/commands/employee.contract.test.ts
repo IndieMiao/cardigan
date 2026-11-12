@@ -36,6 +36,53 @@ const created = (p = ports(), fields = input) =>
 const rejects = (result: unknown, code = "validation_failed") =>
   expect(result).toMatchObject({ ok: false, error: { code } });
 
+test.each(["active", "inactive"] as const)(
+  "library characters remain exclusive for %s employees",
+  (status) => {
+    const p = ports();
+    const first = value(
+      createEmployee([], human, { ...input, avatar: "library:guan-yu" }, p),
+    ).data;
+    const occupied = { ...first, status };
+    const before = JSON.stringify(occupied);
+    const secondInput = { ...input, name: "另一位员工", avatar: first.avatar };
+    const rejected = createEmployee([occupied], human, secondInput, p);
+    rejects(rejected);
+    expect(rejected).toMatchObject({
+      error: { message: expect.stringContaining(first.id) },
+    });
+    expect(p.ids.nextEmployeeId).toHaveBeenCalledTimes(1);
+    expect(p.ids.nextEventSequence).toHaveBeenCalledTimes(1);
+    const second = value(
+      createEmployee([occupied], human, { ...secondInput, avatar: null }, p),
+    ).data;
+    rejects(
+      updateEmployee(
+        [occupied, second],
+        human,
+        second.id,
+        { avatar: first.avatar },
+        p,
+      ),
+    );
+    expect(
+      value(updateEmployee([occupied], human, first.id, { title: "新职位" }, p))
+        .data.avatar,
+    ).toBe(first.avatar);
+    expect(JSON.stringify(occupied)).toBe(before);
+  },
+);
+
+test("uploaded avatars can be shared without reserving a library character", () => {
+  const p = ports();
+  const avatar = `upload:${"a".repeat(64)}`;
+  const first = value(createEmployee([], human, { ...input, avatar }, p)).data;
+  expect(
+    createEmployee([first], human, { ...input, name: "另一位员工", avatar }, p)
+      .ok,
+  ).toBe(true);
+});
+
 test("avatar changes retain employee identity and human-only auditing", () => {
   const p = ports();
   const first = value(
