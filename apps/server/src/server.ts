@@ -260,8 +260,49 @@ export async function startCardiganServer(
     throw error;
   }
 
-  // The control plane runs beside the endpoint; a failure here closes the
-  // endpoint again instead of leaving a half-started server.
+  // The Workbench is a second listener on its own loopback port (§3.1). It
+  // shares the store but nothing else: a failure here must not leave a
+  // half-started server behind.
+  let web: RunningWebServer | undefined;
+  const webOptions = options.web;
+  if (webOptions !== undefined) {
+    try {
+      web = await listen(webOptions.config.port, () =>
+        startWebServer({
+          store,
+          mergeGate,
+          machineDisplayName: runCapacity.displayNameForMachine,
+          runLimit: runCapacity.forMachine,
+          runLimitMaximum: runCapacity.maxForMachine,
+          dataDir: config.dataDir,
+          config: webOptions.config,
+          hcSession: session,
+          hostOpsPatrolIntervalMs:
+            options.dispatcher?.hostOpsPatrolIntervalMs ??
+            config.hostOpsPatrolIntervalMs ??
+            DEFAULT_HOST_OPS_PATROL_INTERVAL_MS,
+          ...(webOptions.log === undefined ? {} : { log: webOptions.log }),
+          ...(webOptions.stream === undefined
+            ? {}
+            : { stream: webOptions.stream }),
+          ...(config.shutdownGraceMs === undefined
+            ? {}
+            : { shutdownGraceMs: config.shutdownGraceMs }),
+          ...(webOptions.shutdownTimer === undefined
+            ? {}
+            : { shutdownTimer: webOptions.shutdownTimer }),
+        }),
+      );
+    } catch (error) {
+      await mcp.close();
+      if (ownsStore) store.close();
+      throw error;
+    }
+  }
+
+  // Start background work only after every listener is bound. A Web port
+  // timeout must not have to drain a merge, dispatch or reconciliation that
+  // started during the retry window.
   let plane: ControlPlane | undefined;
   if (options.dispatcher !== undefined) {
     try {
@@ -334,47 +375,7 @@ export async function startCardiganServer(
         dataDir: config.dataDir,
       });
     } catch (error) {
-      await mcp.close();
-      if (ownsStore) store.close();
-      throw error;
-    }
-  }
-
-  // The Workbench is a second listener on its own loopback port (§3.1). It
-  // shares the store but nothing else: a failure here must not leave a
-  // half-started server behind.
-  let web: RunningWebServer | undefined;
-  const webOptions = options.web;
-  if (webOptions !== undefined) {
-    try {
-      web = await listen(webOptions.config.port, () =>
-        startWebServer({
-          store,
-          mergeGate,
-          machineDisplayName: runCapacity.displayNameForMachine,
-          runLimit: runCapacity.forMachine,
-          runLimitMaximum: runCapacity.maxForMachine,
-          dataDir: config.dataDir,
-          config: webOptions.config,
-          hcSession: session,
-          hostOpsPatrolIntervalMs:
-            options.dispatcher?.hostOpsPatrolIntervalMs ??
-            config.hostOpsPatrolIntervalMs ??
-            DEFAULT_HOST_OPS_PATROL_INTERVAL_MS,
-          ...(webOptions.log === undefined ? {} : { log: webOptions.log }),
-          ...(webOptions.stream === undefined
-            ? {}
-            : { stream: webOptions.stream }),
-          ...(config.shutdownGraceMs === undefined
-            ? {}
-            : { shutdownGraceMs: config.shutdownGraceMs }),
-          ...(webOptions.shutdownTimer === undefined
-            ? {}
-            : { shutdownTimer: webOptions.shutdownTimer }),
-        }),
-      );
-    } catch (error) {
-      await plane?.stop();
+      await web?.close();
       await mcp.close();
       if (ownsStore) store.close();
       throw error;
