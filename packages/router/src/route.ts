@@ -237,8 +237,8 @@ function routeComment(input: RouteInput, draft: Draft): void {
   }
   if (item !== undefined) return;
 
-  // §6.4: a card-level comment without a mention never rings a bell, but the
-  // human's words are merged into the next PM Ops bell.
+  // §6.4: human card comments use the logical Ops inbox, including while Ops
+  // is unavailable. The dispatcher merges pending comments into one bell.
   if (input.event.actor.kind === "human") {
     note(
       input,

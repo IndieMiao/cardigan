@@ -8,6 +8,10 @@ import {
   createGlobalIdAllocator,
   createGlobalRepositories,
 } from "./employees.js";
+import {
+  ID_FORMAT_MIGRATION_NAME,
+  migrateReadableIdFormat,
+} from "./id-format-migration.js";
 import { persistMemberEffect } from "./members.js";
 import { migrateCardPriorities } from "./priority-migration.js";
 import { installSnapshotTriggers } from "./snapshot-migration.js";
@@ -94,7 +98,9 @@ export function migrate(
       }
       if (migration.version === 17 && migration.name === "command_snapshots")
         installSnapshotTriggers(db);
-      if (migration.version === 18 && migration.name === "card_priorities")
+      if (migration.name === ID_FORMAT_MIGRATION_NAME)
+        migrateReadableIdFormat(db);
+      if (migration.version === 19 && migration.name === "card_priorities")
         migrateCardPriorities(db);
       db.prepare(
         "INSERT INTO schema_version (version, name, applied_at) VALUES (?, ?, ?)",

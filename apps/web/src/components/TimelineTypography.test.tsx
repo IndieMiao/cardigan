@@ -31,7 +31,7 @@ function fixture() {
     ],
     decisions: [
       {
-        id: "q(8)",
+        id: "Q-8",
         question: "确认合并？",
         status: "resolved",
         blocking: true,
@@ -56,7 +56,7 @@ function fixture() {
       timelineEntry({
         id: "decision",
         type: "decision_resolved",
-        decision_id: "q(8)",
+        decision_id: "Q-8",
         decision_option: "merge",
         author: "human",
         body: "同意合并",
@@ -115,7 +115,7 @@ test("U6c each structural result is in the right header cell, appears once and c
     for (const [entry, type, id, result] of [
       ["delivery", "交付", "D-8", "已接受"],
       ["review", "审核", "V-12", "已通过"],
-      ["decision", "拍板", "q(8)", "已拍板"],
+      ["decision", "拍板", "Q-8", "已拍板"],
     ]) {
       const row = document.getElementById(`entry-${entry}`) as HTMLElement;
       const heading = within(row).getByRole("heading", {

@@ -29,6 +29,11 @@ import {
   createGlobalIdAllocator,
   createGlobalRepositories,
 } from "./employees.js";
+import {
+  backupBeforeIdFormatMigration,
+  ID_FORMAT_MIGRATION_NAME,
+  legacyRequest,
+} from "./id-format-migration.js";
 import { createIdAllocator, PROJECT_EVENT_STREAM } from "./ids.js";
 import {
   acknowledgeNotifications,
@@ -42,7 +47,12 @@ import {
   recordNotification,
   routerCursor,
 } from "./inbox.js";
-import { type AppliedMigration, migrate } from "./migrate.js";
+import {
+  type AppliedMigration,
+  defaultMigrationsDir,
+  listMigrations,
+  migrate,
+} from "./migrate.js";
 import {
   listFindings,
   type ReconcileFindingInput,
@@ -245,6 +255,13 @@ export class Store {
       options.migrationsDir,
     );
     try {
+      // C-132: the id-format migration rewrites stored values; keep a copy.
+      backupBeforeIdFormatMigration(
+        db,
+        dbPath,
+        (options.clock ?? systemClock).now(),
+        listMigrations(options.migrationsDir ?? defaultMigrationsDir),
+      );
       store.migrate();
     } catch (error) {
       db.close();
@@ -459,6 +476,27 @@ export class Store {
     );
   }
 
+  /**
+   * C-132: a record written before migration 0018 hashed the request as the
+   * old server saw it — ids in the `q(n)` / `h(n)` spelling. A retry of that
+   * same request now arrives normalized to `Q-n` / `H-n`; it still replays.
+   * Only pre-migration records qualify, and only the exact legacy spelling of
+   * this request matches, so a different request still conflicts.
+   */
+  #legacyReplay(
+    existing: { readonly request_hash: string; readonly created_at: string },
+    request: unknown,
+  ): boolean {
+    const migrated = this.#db
+      .prepare("SELECT applied_at FROM schema_version WHERE name = ?")
+      .get(ID_FORMAT_MIGRATION_NAME) as { applied_at: string } | undefined;
+    return (
+      migrated !== undefined &&
+      existing.created_at < migrated.applied_at &&
+      existing.request_hash === hashRequest(legacyRequest(request))
+    );
+  }
+
   #runIdempotent<T>(
     params: Omit<IdempotentParams<unknown>, "assignment_id"> & {
       readonly assignment_id: string;
@@ -483,15 +521,18 @@ export class Store {
       }
       const existing = this.#db
         .prepare(
-          "SELECT request_hash, response FROM idempotency " +
+          "SELECT request_hash, response, created_at FROM idempotency " +
             "WHERE project_id = ? AND assignment_id = ? AND key = ?",
         )
         .get(params.project_id, params.assignment_id, params.key) as
-        | { request_hash: string; response: string }
+        | { request_hash: string; response: string; created_at: string }
         | undefined;
 
       if (existing !== undefined) {
-        if (existing.request_hash !== request_hash) {
+        if (
+          existing.request_hash !== request_hash &&
+          !this.#legacyReplay(existing, params.request)
+        ) {
           return {
             ok: false,
             error: {

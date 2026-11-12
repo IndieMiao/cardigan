@@ -403,7 +403,7 @@ test("Needs You decisions, human actions and incidents display their employee", 
     decisions: [
       {
         ...identity,
-        id: "q(1)",
+        id: "Q-1",
         question: "继续？",
         context: "背景",
         status: "open",
@@ -425,7 +425,7 @@ test("Needs You decisions, human actions and incidents display their employee", 
     human_actions: [
       {
         ...identity,
-        id: "h(1)",
+        id: "H-1",
         card_id: "C-1",
         why: "连接设备",
         instructions: "连接",

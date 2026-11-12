@@ -355,3 +355,48 @@ test("invariant 11: number references resolve current project state; unknown num
   );
   expect(resolveReferences(f.state, q.key)[0]?.status).toBe("resolved");
 });
+
+test("C-132: Q-n / H-n and legacy q(n) / h(n) body references resolve to the same records", async () => {
+  const f = mergeFixture();
+  const q = f.commit(
+    requestDecision(f.state, human, { ...question, card_id: f.card.id }, f.io),
+  );
+  const h = f.commit(
+    requestHumanAction(
+      f.state,
+      human,
+      {
+        card_id: f.card.id,
+        instructions: "Connect",
+        why_human: "Device",
+        expected_return: "Ready",
+        blocked_work_items: [],
+      },
+      f.io,
+    ),
+  );
+  expect(q.key).toMatch(/^Q-[1-9][0-9]*$/u);
+  expect(h.key).toMatch(/^H-[1-9][0-9]*$/u);
+  const qn = q.key.slice(2),
+    hn = h.key.slice(2);
+  for (const text of [`${q.key} ${h.key}`, `旧写法 q(${qn})，h(${hn})。`]) {
+    const refs = resolveReferences(f.state, text);
+    expect(refs).toEqual([
+      expect.objectContaining({ kind: "decision", id: q.key, exists: true }),
+      expect.objectContaining({
+        kind: "human_action",
+        id: h.key,
+        exists: true,
+      }),
+    ]);
+  }
+  // Both spellings in one body collapse to one reference each.
+  expect(resolveReferences(f.state, `${q.key} q(${qn})`)).toHaveLength(1);
+  // Malformed or embedded spellings are not references.
+  expect(
+    resolveReferences(
+      f.state,
+      `Q-0 Q-01 q(0) Q(1) XQ-${qn} H-${hn}_x q-1 Q-${qn}#2`,
+    ),
+  ).toEqual([]);
+});

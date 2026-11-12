@@ -4,6 +4,7 @@ import {
   type FormattedIdKind,
   formatId,
   formatTimelineEntryId,
+  normalizeLegacyId,
   parseEventId,
   parseId,
   parseTimelineEntryId,
@@ -28,8 +29,8 @@ const examples = [
   ["run", "R-1"],
   ["delivery", "D-1"],
   ["review", "V-1"],
-  ["decision", "q(1)"],
-  ["human_action", "h(1)"],
+  ["decision", "Q-1"],
+  ["human_action", "H-1"],
 ] as const satisfies readonly (readonly [FormattedIdKind, string])[];
 
 test("unknown and inherited ID kinds return validation errors", () => {
@@ -80,6 +81,53 @@ describe.each(examples)("%s IDs", (kind, example) => {
       kind === "card" ? "W-1" : "C-1",
     ])
       invalid(parseId(kind, input));
+  });
+});
+
+describe("C-132 legacy decision and human action spellings", () => {
+  test("new IDs use Q-n / H-n and continue the same counter", () => {
+    expect(value(formatId("decision", 96))).toBe("Q-96");
+    expect(value(formatId("human_action", 17))).toBe("H-17");
+  });
+  test.each([
+    ["decision", "q(95)", "Q-95", 95],
+    ["human_action", "h(16)", "H-16", 16],
+    [
+      "decision",
+      `q(${Number.MAX_SAFE_INTEGER})`,
+      `Q-${Number.MAX_SAFE_INTEGER}`,
+      Number.MAX_SAFE_INTEGER,
+    ],
+  ] as const)(
+    "%s %s parses to the same record as %s",
+    (kind, legacy, id, sequence) => {
+      expect(value(parseId(kind, legacy))).toEqual({ id, sequence });
+      expect(value(parseId(kind, id))).toEqual({ id, sequence });
+      expect(normalizeLegacyId(legacy)).toBe(id);
+    },
+  );
+  test("legacy spelling is rejected when malformed or for other kinds", () => {
+    for (const input of [
+      "q()",
+      "q(0)",
+      "q(01)",
+      "q(1",
+      "q1)",
+      "Q(1)",
+      "q-1",
+      "h(1)",
+      " q(1)",
+      "q(1) ",
+      "q(1.5)",
+      `q(${Number.MAX_SAFE_INTEGER + 1})`,
+    ])
+      invalid(parseId("decision", input));
+    for (const input of ["q(1)", "h-1", "H(1)", "Q-1"])
+      invalid(parseId("human_action", input));
+    invalid(parseId("card", "q(1)"));
+    invalid(parseId("delivery", "h(1)"));
+    for (const input of ["Q-1", "q(0)", "q(1) ", "x(1)", "q(01)"])
+      expect(normalizeLegacyId(input)).toBeUndefined();
   });
 });
 

@@ -80,7 +80,7 @@ test.each(["writable", "symlink", "directory", "parent"])(
   },
 );
 
-test("q(88) loads a configurable cancellation grace once, defaulting to 60 minutes", async () => {
+test("Q-88 loads a configurable cancellation grace once, defaulting to 60 minutes", async () => {
   expect(
     (await loadRunCapacityConfig({ configDir })).inactiveCancelAfterMs,
   ).toBe(60 * 60_000);

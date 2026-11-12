@@ -37,6 +37,18 @@ import {
 } from "./index.js";
 import { registerTemplateRoles } from "./template-fixtures.js";
 
+// This file loads the compiled workspace packages through the imports above;
+// vi.hoisted runs first, so an unbuilt checkout gets the missing files and the
+// build command instead of a module-resolution error at collection time.
+const { requireBuildOutput } = await vi.hoisted(async () => {
+  const support = await import("../../../test-support/build-output.js");
+  support.requireBuildOutput(
+    support.PACKAGE_DIST_ENTRIES,
+    "pnpm exec tsc -b apps/server",
+  );
+  return support;
+});
+
 const sdk = createRequire(resolve("packages/mcp-server/package.json"));
 const sdkUrl = (name: string) => pathToFileURL(sdk.resolve(name)).href;
 const exec = promisify(execFile),
@@ -258,6 +270,9 @@ const hc = await (async () => {
 test.skipIf(!hc)(
   "S03 real CLI/server/hc advances queued → dispatched → running, rejects duplicate start and cleans up",
   async () => {
+    // The CLI runs as a real child process from its compiled entry. Without it
+    // the start command fails at once and only "undefined, not queued" remains.
+    requireBuildOutput(["apps/cli/dist/bin.js"], "pnpm exec tsc -b apps/cli");
     const { card, item } = seed("write"),
       source = join(root, "source"),
       bin = join(root, "bin"),

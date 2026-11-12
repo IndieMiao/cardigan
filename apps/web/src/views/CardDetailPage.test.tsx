@@ -16,6 +16,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, expect, test } from "vitest";
 import { ApiError } from "../api.js";
+import { CommentBox } from "../components/CommentBox.js";
 import {
   attachment,
   cardDetail,
@@ -25,6 +26,49 @@ import {
 import { CardDetailPage } from "./CardDetailPage.js";
 
 afterEach(cleanup);
+
+test.each([false, true, undefined])(
+  "C-90 comment recipient hint follows project Ops availability (%s)",
+  async (hasPmOps) => {
+    renderCard({
+      card: async () =>
+        cardDetail(hasPmOps === undefined ? {} : { has_pm_ops: hasPmOps }),
+    });
+    const input = await screen.findByRole("textbox", { name: "评论正文" });
+    const editor = screen.getByRole("region", { name: "写评论" });
+    const hint = within(editor).queryByText("这张卡目前没有人负责");
+    expect(Boolean(hint)).toBe(hasPmOps === false);
+    expect(input.getAttribute("aria-describedby")).toBe(hint?.id ?? null);
+    fireEvent.change(input, { target: { value: "仍然可以留言" } });
+    expect(
+      screen.getByRole<HTMLButtonElement>("button", { name: "发表评论" })
+        .disabled,
+    ).toBe(false);
+  },
+);
+
+test("C-90 the hint updates when Ops becomes available without losing a comment draft", async () => {
+  const client = fakeClient();
+  const view = render(
+    <CommentBox
+      client={client}
+      projectId="p-1"
+      cardId="C-1"
+      hasPmOps={false}
+    />,
+  );
+  fireEvent.change(screen.getByRole("textbox", { name: "评论正文" }), {
+    target: { value: "未发送的评论" },
+  });
+  view.rerender(
+    <CommentBox client={client} projectId="p-1" cardId="C-1" hasPmOps />,
+  );
+  expect(screen.queryByText("这张卡目前没有人负责")).toBeNull();
+  expect(
+    screen.getByRole<HTMLTextAreaElement>("textbox", { name: "评论正文" })
+      .value,
+  ).toBe("未发送的评论");
+});
 
 function renderCard(
   client: Parameters<typeof fakeClient>[0] = {},
@@ -383,15 +427,15 @@ test("delivery and human-action references have a timeline target (M5.S S23)", a
         id: "C-1#7",
         event_seq: 7,
         delivery_id: "V-7",
-        human_action_id: "h(3)",
-        body: "见 V-7 和 h(3)。",
+        human_action_id: "H-3",
+        body: "见 V-7 和 H-3。",
       }),
     ],
   });
   renderCard({ card: async () => detail });
   await screen.findByRole("article", { name: "卡片 C-1" });
   expect(document.getElementById("delivery-V-7")).toBeTruthy();
-  expect(document.getElementById("human-action-h(3)")).toBeTruthy();
+  expect(document.getElementById("human-action-H-3")).toBeTruthy();
 });
 
 test("an Agent body with HTML or javascript: links stays inert", async () => {

@@ -656,6 +656,30 @@ test("review-limit attention starts strictly after ten minutes and clears on rec
   expect(
     reviewLimitAttention({ ...state, decisions: [ordinary] }, atTime(600001)),
   ).toEqual([]);
+  // C-132: Q-95 vs Q-96 (same tens digit) and legacy q(n) order by full number.
+  for (const [older, later] of [
+    ["Q-95", "Q-96"],
+    ["Q-9", "Q-10"],
+    ["q(95)", "Q-96"],
+  ] as const) {
+    const resolvedOlder = {
+      ...resolution,
+      id: older as DecisionId,
+      key: older as DecisionId,
+    };
+    const openLater = {
+      ...decision,
+      id: later as DecisionId,
+      key: later as DecisionId,
+    };
+    for (const decisions of [
+      [resolvedOlder, openLater],
+      [openLater, resolvedOlder],
+    ])
+      expect(
+        reviewLimitAttention({ ...state, decisions }, atTime(600001)),
+      ).toEqual([]);
+  }
 });
 
 test.each(["closed", "overflow"])(

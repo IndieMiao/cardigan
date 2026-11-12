@@ -26,7 +26,7 @@ test("board, list and card routes round-trip", () => {
       kind: "card",
       projectId: "p-fictional",
       cardId: "C-1",
-      anchor: "decision-q(2)",
+      anchor: "decision-Q-2",
     },
     {
       kind: "card",
@@ -51,9 +51,24 @@ test("board, list and card routes round-trip", () => {
       kind: "card",
       projectId: "p-fictional",
       cardId: "C-1",
-      anchor: "decision-q(2)",
+      anchor: "decision-Q-2",
     }),
-  ).toBe("#/p/p-fictional/cards/C-1?at=decision-q(2)");
+  ).toBe("#/p/p-fictional/cards/C-1?at=decision-Q-2");
+});
+
+test("C-132: legacy decision and human action anchors from old links still locate", () => {
+  expect(parseRoute("#/p/p-1/cards/C-1?at=decision-q(2)")).toEqual({
+    kind: "card",
+    projectId: "p-1",
+    cardId: "C-1",
+    anchor: "decision-Q-2",
+  });
+  expect(
+    parseRoute("#/p/p-1/cards/C-1?at=human-action-h%2812%29"),
+  ).toMatchObject({ anchor: "human-action-H-12" });
+  expect(parseRoute("#/p/p-1/cards/C-1?at=decision-q(02)")).toMatchObject({
+    anchor: "decision-q(02)",
+  });
 });
 
 test("identifiers are URL-encoded", () => {

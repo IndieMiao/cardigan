@@ -37,17 +37,17 @@ test("Needs You client writes the right routes and JSON with the browser session
     (await fetcher(...args)).clone(),
   );
   await client.needsYou("p/a");
-  await client.recordDecision("p/a", "q(1)", "merge", "  好  ");
-  await client.decisionComment("p/a", "q(1)", "request_information", "说明");
-  await client.decisionComment("p/a", "q(1)", "explain", "");
-  await client.completeAction("p/a", "h(2)", "已执行");
+  await client.recordDecision("p/a", "Q-1", "merge", "  好  ");
+  await client.decisionComment("p/a", "Q-1", "request_information", "说明");
+  await client.decisionComment("p/a", "Q-1", "explain", "");
+  await client.completeAction("p/a", "H-2", "已执行");
   await client.recheckMerge("p/a", "C-1", "D-9");
   expect(fetcher.mock.calls.map(([url]) => url)).toEqual([
     "/api/projects/p%2Fa/needs-you",
-    "/api/projects/p%2Fa/decisions/q(1)/resolve",
-    "/api/projects/p%2Fa/decisions/q(1)/comments",
-    "/api/projects/p%2Fa/decisions/q(1)/comments",
-    "/api/projects/p%2Fa/human-actions/h(2)/complete",
+    "/api/projects/p%2Fa/decisions/Q-1/resolve",
+    "/api/projects/p%2Fa/decisions/Q-1/comments",
+    "/api/projects/p%2Fa/decisions/Q-1/comments",
+    "/api/projects/p%2Fa/human-actions/H-2/complete",
     "/api/projects/p%2Fa/cards/C-1/recheck-merge",
   ]);
   expect(

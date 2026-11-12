@@ -742,6 +742,13 @@ export function cardDetail(
       : undefined;
   return {
     template: template ?? null,
+    has_pm_ops: state.assignments.some(
+      (assignment) =>
+        assignment.scope === "standing" &&
+        assignment.role_id === "pm" &&
+        assignment.standing_mode === "ops" &&
+        assignment.status === "active",
+    ),
     merge_confirmations: currentMergeConfirmations(state, card_id).map((q) =>
       decisionActionWebView(
         state,

@@ -5,6 +5,18 @@ export {
 } from "./agent-git.js";
 export { readAttention } from "./attention.js";
 export {
+  AFFECTED_PACKAGE_DIR,
+  type ChangeScope,
+  type ChangeScopeInput,
+  computeChangeScope,
+  type FullScopeReason,
+  loadWorkspace,
+  parseWorkspacePackage,
+  parseWorkspacePatterns,
+  type WorkspacePackage,
+  type WorkspaceTree,
+} from "./change-scope.js";
+export {
   applyCommand,
   issueAssignmentToken,
   issueTokenInTransaction,

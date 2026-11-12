@@ -111,15 +111,15 @@ test.each(
   [false, true].flatMap((inDrawer) => [
     {
       inDrawer,
-      anchor: "decision-q(1)",
-      request: { type: "decision_request", decision_id: "q(1)" },
-      result: { type: "decision_resolved", decision_id: "q(1)" },
+      anchor: "decision-Q-1",
+      request: { type: "decision_request", decision_id: "Q-1" },
+      result: { type: "decision_resolved", decision_id: "Q-1" },
     },
     {
       inDrawer,
-      anchor: "human-action-h(1)",
-      request: { type: "human_action", human_action_id: "h(1)" },
-      result: { type: "human_action", human_action_id: "h(1)" },
+      anchor: "human-action-H-1",
+      request: { type: "human_action", human_action_id: "H-1" },
+      result: { type: "human_action", human_action_id: "H-1" },
     },
   ]),
 )(
@@ -329,7 +329,7 @@ test("U3 merge confirmation uses Chinese question and option labels and work-ite
           ...base,
           decisions: [
             {
-              id: "q(1)",
+              id: "Q-1",
               trigger: "merge_confirmation",
               question: "Merge C-1 into main?",
               status: "resolved",
@@ -344,7 +344,7 @@ test("U3 merge confirmation uses Chinese question and option labels and work-ite
           timeline: [
             timelineEntry({
               type: "decision_resolved",
-              decision_id: "q(1)",
+              decision_id: "Q-1",
               decision_option: "merge",
               body: "User quote",
             }),
@@ -355,7 +355,7 @@ test("U3 merge confirmation uses Chinese question and option labels and work-ite
   );
   await screen.findByText("确认把 C-1 合并到 main？");
   expect(
-    screen.getByRole("heading", { name: "拍板 q(1) 确认合并" }),
+    screen.getByRole("heading", { name: "拍板 Q-1 确认合并" }),
   ).toBeTruthy();
   const item = within(screen.getByRole("region", { name: "工作项" }))
     .getByText("写迁移脚本")

@@ -1124,7 +1124,7 @@ const slots = () =>
     runCapacitySnapshot(f.store, tx).occupied.get("local"),
   );
 
-test("q(86) stops and confirms exit before cancelling/revoking, then automatically dispatches the next Run", async () => {
+test("Q-86 stops and confirms exit before cancelling/revoking, then automatically dispatches the next Run", async () => {
   const t = inactiveTarget();
   let stopped = false;
   const order: string[] = [];
@@ -1181,7 +1181,7 @@ test("q(86) stops and confirms exit before cancelling/revoking, then automatical
   expect(slots()).toBe(1); // Only the newly dispatched work occupies the slot.
 });
 
-test("q(86) MCP activity arriving during the preflight read withdraws cancellation", async () => {
+test("Q-86 MCP activity arriving during the preflight read withdraws cancellation", async () => {
   const t = inactiveTarget();
   vi.mocked(runtime.status).mockImplementation(async (ref) => {
     if (ref.terminal_ref === f.refFor(t.busy.assignment).terminal_ref) {
@@ -1266,7 +1266,7 @@ test("inactivity settlement rolls back cancellation and slot release when shared
 });
 
 test.each(["alive", "unknown", "unavailable"] as const)(
-  "q(86) unconfirmed %s exit retains the slot and token until a later confirmed retry",
+  "Q-86 unconfirmed %s exit retains the slot and token until a later confirmed retry",
   async (observed) => {
     const t = inactiveTarget();
     let confirmed = false;
@@ -1331,7 +1331,7 @@ test.each(["alive", "unknown", "unavailable"] as const)(
   },
 );
 
-test("q(86) an in-flight stop fences concurrent dispatchers and preserves a Run that finishes meanwhile", async () => {
+test("Q-86 an in-flight stop fences concurrent dispatchers and preserves a Run that finishes meanwhile", async () => {
   const t = inactiveTarget();
   let release = () => {},
     stopped = false;
@@ -1378,7 +1378,7 @@ test("q(86) an in-flight stop fences concurrent dispatchers and preserves a Run 
   }
 });
 
-test("q(88) the 60-minute default tolerates 48-minute silence and restarts on fresh MCP activity", async () => {
+test("Q-88 the 60-minute default tolerates 48-minute silence and restarts on fresh MCP activity", async () => {
   const t = inactiveTarget();
   runtime.release = vi.fn(async () => ({ ok: true, value: undefined }));
   f.advance(48 * 60_000);
@@ -1401,7 +1401,7 @@ test("q(88) the 60-minute default tolerates 48-minute silence and restarts on fr
   expect(slots()).toBe(1);
 });
 
-test("q(88) a full machine permits human CLI start, reports excess, and still queues concurrent automatic work", async () => {
+test("Q-88 a full machine permits human CLI start, reports excess, and still queues concurrent automatic work", async () => {
   const busy = f.create();
   f.session(busy.assignment, false);
   const automatic = f.create();

@@ -35,8 +35,10 @@ import {
 } from "@cardigan/git-transport";
 import {
   hostRepositoryLock,
+  loadWorkspace,
   type MergePushConfig,
   validateMergePushConfig,
+  type WorkspacePackage,
 } from "@cardigan/host";
 import type { DeliveryVerifierFor } from "@cardigan/mcp-server";
 import {
@@ -381,6 +383,36 @@ export class ServerGit implements GitBinding {
       candidate.previous_sha,
     );
     return result.status === "merged" ? { ...result, tree_sha: tree } : result;
+  }
+  /**
+   * P2a-13 A1: paths changed from `base` to `commit`, read in the center only.
+   * Both must be full commit SHAs; refs are refused (the transport checks).
+   */
+  async changedPaths(
+    project: CentralProject,
+    base: string,
+    commit: string,
+  ): Promise<readonly string[]> {
+    const repository = await this.central.ensureCentral(project);
+    return this.transport.changedPaths(repository, base, commit);
+  }
+  /**
+   * P2a-13 A1: the workspace packages of one candidate commit, read from that
+   * commit's tree in the center (`pnpm-workspace.yaml` and each member's
+   * `package.json`). Nothing outside the commit's tree is read.
+   */
+  async readWorkspace(
+    project: CentralProject,
+    commit: string,
+  ): Promise<readonly WorkspacePackage[]> {
+    const repository = await this.central.ensureCentral(project);
+    return loadWorkspace({
+      listDirectories: async (directory) =>
+        (await this.transport.listTree(repository, commit, directory))
+          .filter((entry) => entry.type === "tree")
+          .map((entry) => entry.path),
+      readFile: (path) => this.transport.readTreeFile(repository, commit, path),
+    });
   }
   /**
    * Push candidates to an execution target's base clone. Without `override`

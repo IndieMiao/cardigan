@@ -41,6 +41,29 @@ const within = (root: string, path: string) =>
   path === root || path.startsWith(root + sep);
 const fullSha = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u;
 const conflictRecord = /^[0-7]{6} [a-f0-9]+ [1-3]\t/u;
+const treeRecord =
+  /^([0-7]{6}) (blob|tree|commit) ([a-f0-9]{40}(?:[a-f0-9]{24})?)\t(.+)$/su;
+/** Pathspecs are literal: no glob or magic in tree reads. */
+const literalPathspecs = { GIT_LITERAL_PATHSPECS: "1" } as const;
+/** A normalized path inside a tree: relative, no `.`/`..` or empty segments. */
+const treePath = (path: string) => {
+  const segments = path.split("/");
+  if (
+    path.length === 0 ||
+    path.length > 4096 ||
+    [...path].some((c) => c.charCodeAt(0) < 0x20 || c === "\x7f") ||
+    segments.some((s) => s === "" || s === "." || s === "..")
+  )
+    throw new Error("Invalid tree path");
+  return path;
+};
+export interface TreeEntry {
+  readonly mode: string;
+  readonly type: string;
+  readonly oid: string;
+  /** Full path from the tree root. */
+  readonly path: string;
+}
 export interface FirstParentCommit {
   readonly sha: string;
   readonly parent?: string;
@@ -459,6 +482,99 @@ export class CentralGitTransport implements GitCentralPort {
     if (!fullSha.test(tree) || tree.length !== sha.length)
       throw new Error("Invalid commit tree id");
     return tree;
+  }
+  private async requireCommit(repository: string, sha: string) {
+    if (
+      !fullSha.test(sha) ||
+      (await this.objectType(repository, sha)) !== "commit"
+    )
+      throw new Error("Tree reads require a full commit SHA");
+  }
+  /**
+   * P2a-13 A1: paths changed between two commits of the center. Both ends are
+   * full commit SHAs (never refs); renames are reported as delete + add.
+   */
+  async changedPaths(
+    repository: string,
+    base: string,
+    commit: string,
+  ): Promise<readonly string[]> {
+    await this.requireCommit(repository, base);
+    await this.requireCommit(repository, commit);
+    const out = await this.checked(repository, [
+      "diff-tree",
+      "-r",
+      "-z",
+      "--name-only",
+      "--no-renames",
+      "--no-commit-id",
+      base,
+      commit,
+    ]);
+    return out.split("\0").filter(Boolean);
+  }
+  /**
+   * P2a-13 A1: entries directly under `directory` ("" for the root) in a
+   * commit's tree. Reads only that tree, never a working copy.
+   */
+  async listTree(
+    repository: string,
+    commit: string,
+    directory: string,
+  ): Promise<readonly TreeEntry[]> {
+    await this.requireCommit(repository, commit);
+    if (directory !== "") treePath(directory);
+    const out = await this.checked(
+      repository,
+      [
+        "ls-tree",
+        "-z",
+        "--end-of-options",
+        commit,
+        "--",
+        ...(directory === "" ? [] : [`${directory}/`]),
+      ],
+      literalPathspecs,
+    );
+    return out
+      .split("\0")
+      .filter(Boolean)
+      .map((record) => {
+        const match = treeRecord.exec(record);
+        if (!match?.[1] || !match[2] || !match[3] || !match[4])
+          throw new Error("Unsupported ls-tree record");
+        return {
+          mode: match[1],
+          type: match[2],
+          oid: match[3],
+          path: match[4],
+        };
+      });
+  }
+  /**
+   * P2a-13 A1: a regular file of a commit's tree, or undefined when absent.
+   * Symlinks, submodules and directories are refused: their content would not
+   * be the file the workspace sees, or could point outside the tree.
+   */
+  async readTreeFile(
+    repository: string,
+    commit: string,
+    path: string,
+  ): Promise<string | undefined> {
+    await this.requireCommit(repository, commit);
+    treePath(path);
+    const out = await this.checked(
+      repository,
+      ["ls-tree", "-z", "--end-of-options", commit, "--", path],
+      literalPathspecs,
+    );
+    const record = out.split("\0").find(Boolean);
+    if (record === undefined) return undefined;
+    const match = treeRecord.exec(record);
+    if (match?.[4] !== path) throw new Error("Unexpected ls-tree record");
+    if (match[2] !== "blob" || !["100644", "100755"].includes(match[1] ?? ""))
+      throw new Error(`Tree path is not a regular file: ${path}`);
+    return this.checked(repository, ["cat-file", "blob", match[3] ?? ""]);
   }
   async compareAndSwapRef(
     repository: string,

@@ -16,7 +16,7 @@ afterEach(() => {
   window.location.hash = "";
 });
 const record: DecisionHistoryRecord = {
-  id: "q(1)",
+  id: "Q-1",
   question: "是否继续",
   status: "resolved",
   blocking: false,

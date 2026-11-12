@@ -279,7 +279,15 @@ test("artifact requires an existing decision and rolls back the generated anchor
         p,
       ),
   });
-  expect(await run([...args, "--basis", decision.key])).toBe(0);
+  // C-132: the legacy q(n) spelling resolves to the stored Q-n decision.
+  expect(decision.key).toMatch(/^Q-[1-9][0-9]*$/u);
+  expect(
+    await run([
+      ...args,
+      "--basis",
+      decision.key.replace(/^Q-(\d+)$/u, "q($1)"),
+    ]),
+  ).toBe(0);
   expect(snapshot().attachments[0]).toMatchObject({
     kind: "artifact",
     basis: decision.key,

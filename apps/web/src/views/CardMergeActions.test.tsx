@@ -17,7 +17,7 @@ afterEach(cleanup);
 function fixture(confirmed = false): CardDetail {
   const detail = cardDetail();
   const q: NeedsDecision = {
-    id: "q(115)",
+    id: "Q-115",
     question: "确认合并",
     context: "",
     why: "合并检查失败或超时，可退回修改或重新检查",
@@ -103,7 +103,7 @@ test.each(["merge", "hold", "request_changes", "recheck"] as const)(
           .getByRole("button", { name: "确认退回修改" })
           .hasAttribute("disabled"),
       ).toBe(true);
-      fireEvent.change(controls.getByLabelText("q(115) 退回原因"), {
+      fireEvent.change(controls.getByLabelText("Q-115 退回原因"), {
         target: { value: "请修复断言失败" },
       });
       fireEvent.click(controls.getByRole("button", { name: "确认退回修改" }));
@@ -118,7 +118,7 @@ test.each(["merge", "hold", "request_changes", "recheck"] as const)(
     else
       expect(recordDecision).toHaveBeenCalledWith(
         "p-1",
-        "q(115)",
+        "Q-115",
         option,
         option === "request_changes" ? "请修复断言失败" : "",
         expect.any(String),

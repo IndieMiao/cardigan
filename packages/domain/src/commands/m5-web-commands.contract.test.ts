@@ -108,7 +108,7 @@ test("§3.5: a human instruction is one typed event and timeline entry, and chan
     expect.arrayContaining([
       { kind: "card", id: f.card.id },
       { kind: "work_item", id: ownedItem(f.coder) },
-      { kind: "decision", id: "q(9)" },
+      { kind: "decision", id: "Q-9" },
     ]),
   );
   // Invariant 10: an instruction is not a Run, and the command only appends.
@@ -137,7 +137,7 @@ test("§3.5: a human instruction is one typed event and timeline entry, and chan
         status: itemStatus,
         card_id: f.card.id,
       },
-      { kind: "decision", id: "q(9)", exists: false, status: null },
+      { kind: "decision", id: "Q-9", exists: false, status: null },
     ]),
   );
   // A second instruction is a second entry: the dispatcher, not the command,

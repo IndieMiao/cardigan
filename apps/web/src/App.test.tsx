@@ -104,7 +104,7 @@ const decisionCard = () =>
     relations: {
       decisions: [
         {
-          id: "q(2)",
+          id: "Q-2",
           question: "发布前要不要再跑一次冒烟？",
           status: "open",
           blocking: true,
@@ -281,17 +281,17 @@ test("M5.S S23: a related decision keeps the card route and scrolls to its row",
     navigate("#/p/p-1/cards/C-1");
     await screen.findByRole("article", { name: "卡片 C-1" });
 
-    fireEvent.click(screen.getByRole("link", { name: "q(2) 拍板" }));
+    fireEvent.click(screen.getByRole("link", { name: "Q-2 拍板" }));
 
     await waitFor(() =>
-      expect(window.location.hash).toBe("#/p/p-1/cards/C-1?at=decision-q(2)"),
+      expect(window.location.hash).toBe("#/p/p-1/cards/C-1?at=decision-Q-2"),
     );
     expect(screen.getByRole("article", { name: "卡片 C-1" })).toBeTruthy();
     await waitFor(() =>
       expect(scroll).toHaveBeenCalledWith({ block: "nearest" }),
     );
     expect(scroll.mock.contexts.at(-1)).toBe(
-      document.getElementById("decision-q(2)"),
+      document.getElementById("decision-Q-2"),
     );
   } finally {
     Element.prototype.scrollIntoView = original;
@@ -303,7 +303,7 @@ test("M5.S S23: a copied anchored card URL locates the same row after reload", a
   const original = Element.prototype.scrollIntoView;
   Element.prototype.scrollIntoView =
     scroll as unknown as typeof Element.prototype.scrollIntoView;
-  window.location.hash = "#/p/p-1/cards/C-1?at=decision-q(2)";
+  window.location.hash = "#/p/p-1/cards/C-1?at=decision-Q-2";
   try {
     render(<App client={fakeClient({ card: async () => decisionCard() })} />);
     await screen.findByRole("article", { name: "卡片 C-1" });
@@ -311,9 +311,9 @@ test("M5.S S23: a copied anchored card URL locates the same row after reload", a
       expect(scroll).toHaveBeenCalledWith({ block: "nearest" }),
     );
     expect(scroll.mock.contexts.at(-1)).toBe(
-      document.getElementById("decision-q(2)"),
+      document.getElementById("decision-Q-2"),
     );
-    expect(window.location.hash).toBe("#/p/p-1/cards/C-1?at=decision-q(2)");
+    expect(window.location.hash).toBe("#/p/p-1/cards/C-1?at=decision-Q-2");
   } finally {
     Element.prototype.scrollIntoView = original;
   }
@@ -325,9 +325,9 @@ test("M5.S S23: an unparseable hash keeps the current card instead of switching 
   navigate("#/p/p-1/cards/C-1");
   await screen.findByRole("article", { name: "卡片 C-1" });
 
-  navigate("#decision-q(2)");
+  navigate("#decision-Q-2");
 
-  await waitFor(() => expect(window.location.hash).toBe("#decision-q(2)"));
+  await waitFor(() => expect(window.location.hash).toBe("#decision-Q-2"));
   expect(screen.getByRole("article", { name: "卡片 C-1" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: /等我处理/u })).toBeNull();
 });

@@ -68,11 +68,11 @@ test("U1 ID tags include explanations, safe targets and S23 route anchors", () =
     kind: "card",
     projectId: "p/a",
     cardId: "C-1",
-    anchor: "decision-q(4)",
+    anchor: "decision-Q-4",
   });
   render(
     <>
-      <IdTag id="q(4)" label="拍板" detail="选择发布方式" href={href} />
+      <IdTag id="Q-4" label="拍板" detail="选择发布方式" href={href} />
       <IdTag id="W-12" label="代码审核" />
       <IdTag
         id="D-3"
@@ -81,15 +81,13 @@ test("U1 ID tags include explanations, safe targets and S23 route anchors", () =
       />
     </>,
   );
-  const link = screen.getByRole("link", { name: "q(4) 拍板" });
+  const link = screen.getByRole("link", { name: "Q-4 拍板" });
   expect(link.title).toBe("选择发布方式");
-  expect(link.getAttribute("href")).toBe(
-    "#/p/p%2Fa/cards/C-1?at=decision-q(4)",
-  );
+  expect(link.getAttribute("href")).toBe("#/p/p%2Fa/cards/C-1?at=decision-Q-4");
   expect(parseRoute(href)).toMatchObject({
     projectId: "p/a",
     cardId: "C-1",
-    anchor: "decision-q(4)",
+    anchor: "decision-Q-4",
   });
   expect(screen.getByText("代码审核")).toBeTruthy();
   expect(screen.queryByRole("link", { name: "D-3 交付" })).toBeNull();

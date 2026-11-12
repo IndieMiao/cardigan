@@ -832,7 +832,7 @@ test("a project executor receives the candidates and runs the checks; logs stay 
   ).resolves.toBeTypeOf("string");
 });
 
-test("q(208): an executor shared by two projects blocks the check entirely: no remote run, no local fallback", async () => {
+test("Q-208: an executor shared by two projects blocks the check entirely: no remote run, no local fallback", async () => {
   const { f, check } = await fixture("auto");
   const c = controller(f);
   const root = await mkdtemp(join(tmpdir(), "cg-shared-executor-"));

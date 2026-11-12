@@ -432,7 +432,7 @@ test("patrol uses persistent timing and one inbox notification; host handoff add
   const { card } = f.create();
   f.store.uow.run((tx) => {
     const action = {
-      id: "h(1)" as never,
+      id: "H-1" as never,
       card_id: card.id,
       instructions: "Restart session",
       why_human: "Needs host",

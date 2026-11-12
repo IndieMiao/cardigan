@@ -15,7 +15,7 @@ function legacy() {
   const migrationsDir = mkdtempSync(join(tmpdir(), "priority-schema-"));
   dirs.push(dataDir, migrationsDir);
   for (const migration of listMigrations(defaultMigrationsDir).filter(
-    (m) => m.version < 18,
+    (m) => m.version < 19,
   )) {
     const name = `${String(migration.version).padStart(4, "0")}_${migration.name}.sql`;
     copyFileSync(join(defaultMigrationsDir, name), join(migrationsDir, name));
@@ -34,7 +34,7 @@ function legacy() {
   store.close();
   return dataDir;
 }
-test("v18 maps existing numbers once, preserving the other card fields", () => {
+test("v19 maps existing numbers once, preserving the other card fields", () => {
   const dataDir = legacy();
   const store = Store.open({ dataDir });
   try {

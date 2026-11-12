@@ -411,3 +411,70 @@ test.runIf(process.platform === "linux")(
   },
   60_000,
 );
+
+test("P2a-13 A1: change scope inputs come from the candidate tree in the center only", async () => {
+  const write = (path: string, text: string) => {
+    mkdirSync(join(source, path, ".."), { recursive: true });
+    writeFileSync(join(source, path), text);
+  };
+  write("pnpm-workspace.yaml", "packages:\n  - packages/*\n  - apps/*\n");
+  write("packages/store/package.json", '{"name":"@cardigan/store"}');
+  write(
+    "apps/server/package.json",
+    '{"name":"@cardigan/server","devDependencies":{"@cardigan/store":"workspace:*"}}',
+  );
+  write("packages/notes/README.md", "not a package\n");
+  git(source, "add", "-A");
+  git(source, "commit", "-qm", "workspace");
+  const base = git(source, "rev-parse", "HEAD");
+  write("packages/store/src/store.ts", "export {};\n");
+  write("docs/plan.md", "plan\n");
+  git(source, "add", "-A");
+  git(source, "commit", "-qm", "change");
+  const candidate = git(source, "rev-parse", "HEAD");
+  // Uncommitted files in the source checkout are never part of the tree.
+  write("packages/ghost/package.json", '{"name":"@cardigan/ghost"}');
+  write(
+    "packages/store/package.json",
+    '{"name":"@cardigan/store","dependencies":{"@cardigan/ghost":"*"}}',
+  );
+
+  const gitService = new ServerGit({
+    store: f.store,
+    dataDir,
+    execution: { mode: "local", dataDir },
+  });
+  const project = gitService.projectOf(f.project_id);
+  if (project === undefined) throw new Error("project missing");
+
+  expect(await gitService.changedPaths(project, base, candidate)).toEqual([
+    "docs/plan.md",
+    "packages/store/src/store.ts",
+  ]);
+  expect(await gitService.readWorkspace(project, candidate)).toEqual([
+    {
+      dir: "apps/server",
+      name: "@cardigan/server",
+      dependencies: ["@cardigan/store"],
+    },
+    { dir: "packages/store", name: "@cardigan/store", dependencies: [] },
+  ]);
+  // Only full commit SHAs: refs, abbreviations and tree ids are refused.
+  const tree = git(source, "rev-parse", `${candidate}^{tree}`);
+  for (const ref of ["main", "HEAD", candidate.slice(0, 10), tree]) {
+    await expect(gitService.readWorkspace(project, ref)).rejects.toThrow(
+      /full commit SHA/,
+    );
+    await expect(gitService.changedPaths(project, base, ref)).rejects.toThrow(
+      /full commit SHA/,
+    );
+    await expect(
+      gitService.changedPaths(project, ref, candidate),
+    ).rejects.toThrow(/full commit SHA/);
+  }
+  // A commit without a workspace manifest is refused, not guessed.
+  const initial = git(source, "rev-list", "--max-parents=0", "HEAD");
+  await expect(gitService.readWorkspace(project, initial)).rejects.toThrow(
+    /pnpm-workspace/,
+  );
+});

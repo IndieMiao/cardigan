@@ -117,8 +117,8 @@ beforeEach(async () => {
     }
     tx.decisions.put(project_id, {
       ...decision,
-      id: "q(2)" as DecisionId,
-      key: "q(2)",
+      id: "Q-2" as DecisionId,
+      key: "Q-2",
       card_id: "C-2" as CardId,
       kind: "approve",
       target: { delivery_id: "D-2" as DeliveryId },
@@ -171,7 +171,7 @@ test("C-115: queued and running confirmations become human tasks only after pass
     const visible = status === "passed";
     expect(
       (needs.json as { decisions: { id: string }[] }).decisions.some(
-        (q) => q.id === "q(2)",
+        (q) => q.id === "Q-2",
       ),
     ).toBe(visible);
     expect(needs.json).toMatchObject({
@@ -179,7 +179,7 @@ test("C-115: queued and running confirmations become human tasks only after pass
     });
     expect((await read("/cards/C-2")).json).toMatchObject({
       decisions: expect.arrayContaining([
-        expect.objectContaining({ id: "q(2)" }),
+        expect.objectContaining({ id: "Q-2" }),
       ]),
     });
   }
@@ -194,7 +194,7 @@ test.each(
   async ({ status, source }) => {
     if (source !== "open") {
       h.store.uow.run((tx) => {
-        const q = tx.decisions.get(project_id, "q(2)");
+        const q = tx.decisions.get(project_id, "Q-2");
         if (!q) throw new Error("Missing confirmation");
         tx.decisions.put(project_id, {
           ...q,
@@ -233,14 +233,14 @@ test.each(
     expect(needs.json).toMatchObject({ waiting_merge_checks_count: 1 });
     expect(
       (needs.json as { decisions: { id: string }[] }).decisions.some(
-        (q) => q.id === "q(2)",
+        (q) => q.id === "Q-2",
       ),
     ).toBe(false);
     const detail = await read("/cards/C-2");
     expect(detail.json).toMatchObject({
       merge_confirmations: [
         expect.objectContaining({
-          id: "q(2)",
+          id: "Q-2",
           status: source === "open" ? "open" : "resolved",
           merge_confirmation: expect.objectContaining({
             completion: expect.objectContaining({ id: "D-2" }),
@@ -253,7 +253,7 @@ test.each(
         }),
       ],
       decisions: expect.arrayContaining([
-        expect.objectContaining({ id: "q(2)" }),
+        expect.objectContaining({ id: "Q-2" }),
       ]),
       timeline: expect.arrayContaining([
         expect.objectContaining({
@@ -295,7 +295,7 @@ test("only the current completion is shown and a stale request is rejected", asy
   const pending = (await read("/needs-you")).json as {
     decisions: { id: string }[];
   };
-  expect(pending.decisions.some((q) => q.id === "q(2)")).toBe(false);
+  expect(pending.decisions.some((q) => q.id === "Q-2")).toBe(false);
   expect((await read("/cards/C-2")).json).toMatchObject({
     merge_confirmations: [],
   });
@@ -329,7 +329,7 @@ test("disabled gates stay unchanged; invalid gates expose only a safe flag", asy
       expect(needs.json).toMatchObject({ waiting_merge_checks_count: 1 });
       expect(
         (needs.json as { decisions: { id: string }[] }).decisions.some(
-          (q) => q.id === "q(2)",
+          (q) => q.id === "Q-2",
         ),
       ).toBe(false);
       expect((await read("/cards/C-2")).body).not.toContain(
@@ -339,7 +339,7 @@ test("disabled gates stay unchanged; invalid gates expose only a safe flag", asy
       expect(needs.body).not.toContain('"merge_gate_invalid"');
       expect(
         (needs.json as { decisions: { id: string }[] }).decisions.some(
-          (q) => q.id === "q(2)",
+          (q) => q.id === "Q-2",
         ),
       ).toBe(true);
     }

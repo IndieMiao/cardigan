@@ -63,7 +63,7 @@ test("§6.4 work-item comment by its own Assignment notifies nobody", () => {
   expect(result.notifications).toEqual([]);
 });
 
-test("§6.4 card comment without a mention rings no bell, but a human's is merged for PM Ops", () => {
+test("§6.4 human card comments without mentions notify Ops; Agent comments stay quiet", () => {
   const fromHuman = routeEvent({
     event: event("comment_posted", { body: "note" }, { seq: 5 }),
     snapshot: snapshot({ timeline: [entry(5)] }),
@@ -80,6 +80,36 @@ test("§6.4 card comment without a mention rings no bell, but a human's is merge
     snapshot: snapshot({ timeline: [entry(5)] }),
   });
   expect(fromAgent.notifications).toEqual([]);
+});
+
+test.each(["@A-1", "@W-1", "@coder"])(
+  "C-90 human comments mentioning %s do not add a default Ops recipient",
+  (mention) => {
+    const result = routeEvent({
+      event: event(
+        "comment_posted",
+        { body: `${mention} please check` },
+        { seq: 5 },
+      ),
+      snapshot: snapshot({ timeline: [entry(5, { mentions: [mention] })] }),
+    });
+    expect(recipients(result)).toEqual(["assignment:A-1"]);
+  },
+);
+
+test("C-90 system comments do not default to Ops", () => {
+  const result = routeEvent({
+    event: event(
+      "comment_posted",
+      {},
+      {
+        seq: 5,
+        actor: { kind: "system", project_id: snapshot().project_id },
+      },
+    ),
+    snapshot: snapshot({ timeline: [entry(5)] }),
+  });
+  expect(result.notifications).toEqual([]);
 });
 
 test("§6.4 an event for a released Assignment goes to PM Ops instead", () => {
@@ -297,7 +327,7 @@ test("§6.4 review rejected produces a rework notification for the delivery's As
 
 test("§6.4 decision requested for the human becomes Needs You plus a PM Office brief", () => {
   const result = routeEvent({
-    event: event("decision_requested", { decision_id: "q(1)" }),
+    event: event("decision_requested", { decision_id: "Q-1" }),
     snapshot: snapshot({ decisions: [decision({ decider: "human" })] }),
   });
   expect(recipients(result)).toEqual(["needs_you", "pm_office"]);
@@ -309,7 +339,7 @@ test("§6.4 decision requested for the human becomes Needs You plus a PM Office 
 
 test("§6.4 decision requested from PM goes only to PM Ops", () => {
   const result = routeEvent({
-    event: event("decision_requested", { decision_id: "q(1)" }),
+    event: event("decision_requested", { decision_id: "Q-1" }),
     snapshot: snapshot({ decisions: [decision({ decider: "role:pm" })] }),
   });
   expect(recipients(result)).toEqual(["pm_ops"]);
@@ -318,7 +348,7 @@ test("§6.4 decision requested from PM goes only to PM Ops", () => {
 test("§6.4 decision resolved wakes every Assignment it had blocked, not PM Ops", () => {
   const result = routeEvent({
     event: event("decision_resolved", {
-      decision_id: "q(1)",
+      decision_id: "Q-1",
       resume_work_items: ["W-2"],
     }),
     snapshot: snapshot(),
@@ -330,7 +360,7 @@ test("§6.4 decision resolved wakes every Assignment it had blocked, not PM Ops"
 test("§6.4 decision resolved with an unowned blocked item asks PM Ops", () => {
   const result = routeEvent({
     event: event("decision_resolved", {
-      decision_id: "q(1)",
+      decision_id: "Q-1",
       resume_work_items: ["W-3"],
     }),
     snapshot: snapshot({
@@ -474,9 +504,9 @@ test("§6.4 completion request notifies the card template's reviewer", () => {
 
 test("§6.4 human action requested becomes Needs You plus a PM Office brief", () => {
   const result = routeEvent({
-    event: event("human_action_requested", { human_action_id: "h(1)" }),
+    event: event("human_action_requested", { human_action_id: "H-1" }),
     snapshot: snapshot({
-      human_actions: [humanAction("h(1)")],
+      human_actions: [humanAction("H-1")],
       work_items: [workItem("W-1", { status: "waiting_human" })],
     }),
   });
