@@ -12,9 +12,12 @@ import {
   startMcpServer,
 } from "@cardigan/mcp-server";
 import {
+  describeRuntime,
   LOCAL_RUNTIME_WARNING,
   resolveExecutionConfig,
+  runtimeOwnsRef,
   secureDataDirectory,
+  writeRegisteredRuntime,
 } from "@cardigan/runtime-herdr";
 import { getRoleVersion, Store, tokensForAssignment } from "@cardigan/store";
 import {
@@ -113,6 +116,8 @@ export async function startCardiganServer(
       LOCAL_RUNTIME_WARNING,
     );
   await secureDataDirectory({ ...execution, dataDir: config.dataDir });
+  // C-152: the CLI checks its own environment against this registration.
+  await writeRegisteredRuntime(config.dataDir, execution);
   const store = options.store ?? Store.open({ dataDir: config.dataDir });
   const ownsStore = options.store === undefined;
   // M4.5: stamp `standing_mode` on rows written before the field existed, so
@@ -164,8 +169,23 @@ export async function startCardiganServer(
         runtime: options.dispatcher.runtime,
         snapshot: options.dispatcher.snapshot,
         contextThresholdPct: config.hostOpsContextThresholdPct ?? 80,
-        scrubCredentials: (project, assignment) =>
-          scrubRunCredentials(execution, project, assignment),
+        scrubCredentials: async (project, assignment, ref) => {
+          await scrubRunCredentials(execution, project, assignment);
+          // C-152: a terminal started in local mode left its credentials
+          // under the private data directory, not the Agent root.
+          if (
+            ref &&
+            execution.mode !== "local" &&
+            ref.runtime_machine === "local"
+          )
+            await scrubRunCredentials(
+              { mode: "local", dataDir: config.dataDir },
+              project,
+              assignment,
+            );
+        },
+        ownsRuntimeRef: (ref) => runtimeOwnsRef(execution, ref),
+        runtimeLabel: describeRuntime(execution),
         settings: (project) => ({
           merge_gate_enabled:
             mergeGate.forProject(project).status === "enabled",

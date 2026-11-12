@@ -77,6 +77,18 @@ export {
   resolveExecutionConfig,
 } from "./execution.js";
 
+export {
+  describeRuntime,
+  REGISTERED_RUNTIME_FILE,
+  type RegisteredRuntime,
+  readRegisteredRuntime,
+  registeredRuntimeOf,
+  runtimeDifferences,
+  runtimeMachineOf,
+  runtimeOwnsRef,
+  writeRegisteredRuntime,
+} from "./registered.js";
+
 export interface HerdrOptions {
   readonly execution?: ExecutionConfig;
   readonly binary?: string;

@@ -6,7 +6,7 @@ import {
   hostOpsPending,
   pendingHostOpsActions,
 } from "../host-ops.js";
-import type { AssignmentId, RunId } from "../ids.js";
+import type { AssignmentId, HumanActionId, RunId } from "../ids.js";
 import { hasRunTarget } from "../run-target.js";
 import { transition } from "../transitions.js";
 import {
@@ -199,6 +199,12 @@ export function finishHostOpsAction(
     const previous = action.run_id ? d.get("runs", action.run_id) : undefined;
     if (previous && unfinished(previous))
       cancelRunDispatch(d, previous, action.reason);
+    const confirmation = hostOpsExitConfirmation(state, action_id);
+    if (confirmation.status === "open")
+      d.put("human_actions", {
+        ...d.get("human_actions", confirmation.human_action_id),
+        status: unwrap(transition("human_action", "open", "cancel")),
+      });
     a = d.get("assignments", a.id);
     const { session_ref: _session, ...rest } = a;
     const runtime_state = ["unknown", "lost"].includes(a.runtime_state)
@@ -321,5 +327,99 @@ export function claimHostOpsAction(
       action_id,
       lease_until: new Date(Date.parse(d.now) + 60_000).toISOString(),
     }).id;
+  });
+}
+
+/**
+ * C-152: state of the human confirmation that a host operation's recorded
+ * terminal has exited. Only a human completion counts; a PM triage or a
+ * cancellation leaves the terminal unconfirmed.
+ */
+export type HostOpsExitConfirmation =
+  | { readonly status: "none" }
+  | {
+      readonly status: "open" | "confirmed" | "rejected";
+      readonly human_action_id: HumanActionId;
+    };
+export function hostOpsExitConfirmation(
+  state: Pick<CommandState, "events" | "human_actions">,
+  action_id: HostOpsExecution["action_id"],
+): HostOpsExitConfirmation {
+  const requested = state.events.findLast(
+    (e) =>
+      e.type === "human_action_requested" &&
+      (e.payload as { host_ops_action_id?: string }).host_ops_action_id ===
+        action_id,
+  );
+  if (!requested) return { status: "none" };
+  const id = (requested.payload as { human_action_id: HumanActionId })
+    .human_action_id;
+  const action = state.human_actions.find((h) => h.id === id);
+  if (action?.status === "open") return { status: "open", human_action_id: id };
+  const completed = state.events.findLast(
+    (e) =>
+      e.type === "human_action_completed" &&
+      (e.payload as { human_action_id?: string }).human_action_id === id,
+  );
+  return action?.status === "done" && completed?.actor.kind === "human"
+    ? { status: "confirmed", human_action_id: id }
+    : { status: "rejected", human_action_id: id };
+}
+
+/**
+ * C-152: the recorded terminal lives on a runtime this host cannot observe
+ * (for example a local terminal while the server runs agent-ssh). Ask the
+ * human to confirm it exited instead of deferring forever. Idempotent while a
+ * request is open or already confirmed.
+ */
+export function requestHostOpsExitConfirmation(
+  state: CommandState,
+  actor: Actor,
+  p: {
+    readonly action_id: HostOpsExecution["action_id"];
+    readonly instructions: string;
+    readonly why_human: string;
+  },
+  ports: CommandPorts,
+) {
+  return command(state, actor, "manage_host_ops_action", ports, (d) => {
+    const action = pendingHostOpsActions(state.events).find(
+      (a) => a.action_id === p.action_id,
+    );
+    ensure(action, "stale_target", "Host operation is no longer pending");
+    text(p.instructions, "instructions");
+    text(p.why_human, "why_human");
+    const current = hostOpsExitConfirmation(state, p.action_id);
+    if (current.status === "open" || current.status === "confirmed")
+      return { human_action_id: current.human_action_id, created: false };
+    const a = d.get("assignments", action.assignment_id);
+    const card =
+      a.scope === "work_item"
+        ? d.get("work_items", a.work_item_id).card_id
+        : undefined;
+    const id = d.ids.next(state.project_id, "human_action") as HumanActionId;
+    d.put("human_actions", {
+      id,
+      key: id,
+      requested_by: "system",
+      status: "open",
+      ...(card ? { card_id: card } : {}),
+      blocked_work_items: [],
+      instructions: p.instructions,
+      why_human: p.why_human,
+      expected_return: "确认旧终端已退出后标记完成，并回传终端状态",
+    });
+    d.emit(
+      "human_action_requested",
+      card,
+      {
+        human_action_id: id,
+        blocked_work_items: [],
+        host_ops_action_id: p.action_id,
+        assignment_id: a.id,
+      },
+      { type: "human_action", body: p.instructions, human_action_id: id },
+    );
+    return { human_action_id: id, created: true };
   });
 }

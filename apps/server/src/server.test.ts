@@ -38,6 +38,9 @@ test("local server startup visibly warns that the Agent account is not isolated"
   expect(warnings).toHaveLength(1);
   expect(warnings[0]).toContain("没有 Agent 账号隔离");
   expect(warnings[0]).toContain("agent-ssh");
+  expect(
+    JSON.parse(readFileSync(join(dataDir, "runtime.json"), "utf8")),
+  ).toEqual({ mode: "local" });
 });
 
 test("server startup reports invalid merge gate settings in Chinese without exposing YAML values", async () => {
@@ -91,6 +94,20 @@ test.skipIf(process.platform !== "linux")(
       expect(statSync(privateDir).mode & 0o777).toBe(0o700);
       expect(isolatedWarnings).toEqual([]);
       expect(isolated.store.listProjects()).toEqual([]);
+      // C-152: the CLI compares its shell against this registration.
+      expect(
+        JSON.parse(readFileSync(join(privateDir, "runtime.json"), "utf8")),
+      ).toEqual({
+        mode: "agent-ssh",
+        machine: "cardigan-agent",
+        agentRoot: join(dataDir, "agent"),
+        gid: process.getgid?.() ?? 0,
+        identityFile: join(dataDir, "key"),
+        knownHostsFile: join(dataDir, "known"),
+      });
+      expect(statSync(join(privateDir, "runtime.json")).mode & 0o777).toBe(
+        0o600,
+      );
     } finally {
       await isolated.close();
     }

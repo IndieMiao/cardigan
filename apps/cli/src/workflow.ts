@@ -30,10 +30,7 @@ import {
 } from "@cardigan/domain";
 import { loadMergeGateConfig } from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
-import {
-  resolveExecutionConfig,
-  secureDataDirectory,
-} from "@cardigan/runtime-herdr";
+import { secureDataDirectory } from "@cardigan/runtime-herdr";
 import {
   backfillStandingModesInTransaction,
   openStore as openCardiganStore,
@@ -57,6 +54,7 @@ import {
 } from "./host.js";
 import type { CliIo } from "./io.js";
 import { printRotation, rotateStandingPmInStore } from "./pm-rotate.js";
+import { launchExecution } from "./runtime-check.js";
 
 const USAGE = [
   "用法：",
@@ -518,13 +516,10 @@ async function assignWorkItem(
 
   if (start)
     await secureDataDirectory(
-      resolveExecutionConfig({
-        ...io.env,
-        CARDIGAN_DATA_DIR: resolveDataDir(
-          io,
-          optional(parsed.flags, "data-dir"),
-        ),
-      }),
+      await launchExecution(
+        io,
+        resolveDataDir(io, optional(parsed.flags, "data-dir")),
+      ),
     );
 
   const store = openStoreFrom(io, parsed.flags);
@@ -802,16 +797,23 @@ async function pmCommand(
 ): Promise<number> {
   const [sub] = args;
   if (sub === "start") return await pmStart(args.slice(1), io, hooks);
-  if (sub === "rotate") return pmRotate(args.slice(1), io);
+  if (sub === "rotate") return await pmRotate(args.slice(1), io);
   return pmCreate(args, io);
 }
 
 /** `cardigan pm rotate --office|--ops`: human-only, one write transaction. */
-function pmRotate(args: readonly string[], io: CliIo): number {
+async function pmRotate(args: readonly string[], io: CliIo): Promise<number> {
   const parsed = parseArgs(args, ["office", "ops", "external"]);
   const office = parsed.flags.office === true;
   if (office === (parsed.flags.ops === true) || parsed.positionals.length > 0)
     throw new CliError("必须二选一：--office 或 --ops", EXIT.usage, [USAGE]);
+  // The replacement is started from this shell next; refuse before rotating
+  // when it does not match the server's runtime (C-152).
+  if (parsed.flags.external !== true)
+    await launchExecution(
+      io,
+      resolveDataDir(io, optional(parsed.flags, "data-dir")),
+    );
   const mode = office ? ("office" as const) : ("ops" as const);
   const store = openStoreFrom(io, parsed.flags);
   try {

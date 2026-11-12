@@ -14,7 +14,7 @@ import {
   LocalGitTransport,
   type WorkspaceGit,
 } from "@cardigan/git-transport";
-import { HerdrRuntime, resolveExecutionConfig } from "@cardigan/runtime-herdr";
+import { type ExecutionConfig, HerdrRuntime } from "@cardigan/runtime-herdr";
 import { openStore as openCardiganStore, type Store } from "@cardigan/store";
 import { CliError, EXIT, formatCommandError } from "./errors.js";
 import {
@@ -26,6 +26,7 @@ import {
   systemClock,
 } from "./host.js";
 import type { CliIo } from "./io.js";
+import { launchExecution } from "./runtime-check.js";
 
 /**
  * M4.4 worktree commands (plan §3.6, development plan §12.6).
@@ -150,7 +151,7 @@ function worktrees(
   store: Store,
   project_id: ProjectId,
   dataDir: string,
-  execution: ReturnType<typeof resolveExecutionConfig>,
+  execution: ExecutionConfig,
   workspace?: WorkspaceGit,
 ) {
   const central = new CentralRepositoryService(
@@ -210,10 +211,8 @@ async function diffCommand(
       optional(parsed.flags, "project"),
     );
     const dataDir = resolveDataDir(io, optional(parsed.flags, "data-dir"));
-    const execution = resolveExecutionConfig({
-      ...io.env,
-      CARDIGAN_DATA_DIR: dataDir,
-    });
+    // Workspace Git must use the server's runtime (C-152).
+    const execution = await launchExecution(io, dataDir);
     // Workspace Git in agent-ssh mode must run as the agent (§12.6).
     const runtime =
       execution.mode === "agent-ssh"
