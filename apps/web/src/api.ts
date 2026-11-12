@@ -478,7 +478,17 @@ export interface MergeCheckView {
   readonly log_ref?: string;
   readonly updated_at: string;
 }
+export interface PreMergeCheckView {
+  readonly label: string;
+  readonly status: "pending" | "passed" | "failed";
+  /** The recorded conclusion was for an older version; shown as pending. */
+  readonly stale?: boolean;
+  readonly note: string | null;
+  readonly updated_at: string;
+}
 export interface MergeConfirmationView {
+  /** C-160: checks to finish before the human confirms; empty when none. */
+  readonly pre_merge_checks?: readonly PreMergeCheckView[];
   readonly merge_noop?: boolean;
   readonly merge_gate_enabled?: boolean;
   readonly merge_gate_invalid?: boolean;
