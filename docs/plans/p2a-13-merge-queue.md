@@ -333,7 +333,7 @@ B1a 只加实体和事件，不改变任何现有合并行为，可以在 A+C �
 
 ## 8. 上线与回退（Claude 负责）
 
-1. A+C 合并后，`cardigan` 的 `merge-gate.yaml` 给 test 加 `scope: affected`、`skip_docs_only: true`，e2e 加 `skip_docs_only: true` 和 `tiers: [batch]`（打开队列前不生效）；观察一周，对比检查时长。
+1. 正式启用 `skip_docs_only` 之前，“被测试读取的文档”显式清单必须已合入 main：`docs/research/pm-practice-distillation.md` 被 `pm-lessons.test.ts` 读取以核对规则一致性，单独改它也必须判为 `full`（张良 C-148#8 选 a）。A+C 合并后，`cardigan` 的 `merge-gate.yaml` 给 test 加 `scope: affected`、`skip_docs_only: true`，e2e 加 `skip_docs_only: true` 和 `tiers: [batch]`（打开队列前不生效）；观察一周，对比检查时长。
 2. B1–B4 合并、敏感卡是否默认单独跑拍板后：打开 `queue.enabled`，`max_batch_size: 4`；先让一张卡单独走一次批次，结果与卡级相同再放开。
 3. e2e 的 `tiers: [batch]` 随队列打开生效，落实拍板第 3 条。
 4. 回退：关闭 `queue.enabled`，`tiers` 随即不生效，下一轮回到单卡全量检查路径（不变量 21 的 (a) 分支）；进行中的批次中止，成员回到待合并，需要按单卡路径重新检查。

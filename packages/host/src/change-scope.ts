@@ -20,6 +20,7 @@ export interface WorkspacePackage {
 
 export type FullScopeReason =
   | "empty"
+  | "test_document"
   | "domain"
   | "global_file"
   | "outside_workspace"
@@ -59,6 +60,10 @@ const GLOBAL_FILES = new Set([
 ]);
 const GLOBAL_DIRS = ["test-support/", "e2e/"];
 const DOMAIN_DIR = "packages/domain";
+/** Documents read by tests: pm-lessons.test.ts checks these rules against role-pack.ts. */
+const TEST_INPUT_DOCUMENTS = new Set([
+  "docs/research/pm-practice-distillation.md",
+]);
 
 const isRootFile = (path: string) => !path.includes("/");
 const isDocs = (path: string) =>
@@ -73,7 +78,7 @@ const packageDirOf = (path: string) =>
 
 /**
  * §2.1 table: `docs_only` when every path is under `docs/` or a root `*.md`;
- * `full` for domain, global files and anything outside docs/packages/apps;
+ * `full` for test input documents, domain, global files and anything outside docs/packages/apps;
  * otherwise `affected` = changed packages plus their transitive dependents.
  *
  * Conservative where the plan is silent: an empty change list, or a changed
@@ -83,6 +88,8 @@ const packageDirOf = (path: string) =>
 export function computeChangeScope(input: ChangeScopeInput): ChangeScope {
   const { paths, workspace } = input;
   if (paths.length === 0) return { kind: "full", reason: "empty" };
+  if (paths.some((path) => TEST_INPUT_DOCUMENTS.has(path)))
+    return { kind: "full", reason: "test_document" };
   if (paths.every(isDocs)) return { kind: "docs_only" };
   const changed = new Set<string>();
   for (const path of paths) {

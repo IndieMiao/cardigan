@@ -213,7 +213,7 @@ export async function createMergeCheckLog(input: {
         ...(result.reason ? { reason: filter.redact(result.reason) } : {}),
       };
       const failed = result.checks.find(
-        (c) => !["passed", "not_run"].includes(c.status),
+        (c) => !["passed", "not_run", "skipped"].includes(c.status),
       );
       const failures = failed
         ? (output.get(failed.name)?.text() ?? "")
@@ -225,7 +225,9 @@ export async function createMergeCheckLog(input: {
         : [];
       const summary =
         result.status === "passed"
-          ? "检查全部通过"
+          ? result.checks.some((c) => c.status === "skipped")
+            ? "本次范围内的检查已通过"
+            : "检查全部通过"
           : clip(
               filter.redact(
                 [

@@ -75,6 +75,7 @@ export const STATUS_LABELS = {
   timed_out: "超时",
   interrupted: "已中断",
   not_run: "未运行",
+  skipped: "已跳过",
 } as const;
 export function statusLabel(status: string): string {
   return Object.hasOwn(STATUS_LABELS, status)

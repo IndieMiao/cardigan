@@ -456,6 +456,10 @@ export interface MergeCheckView {
     | "failed"
     | "timed_out"
     | "interrupted";
+  readonly scope?: {
+    readonly kind: "docs_only" | "affected" | "full";
+    readonly packages?: readonly string[];
+  };
   readonly checks: readonly {
     readonly name: string;
     readonly status:
@@ -463,7 +467,9 @@ export interface MergeCheckView {
       | "failed"
       | "timed_out"
       | "interrupted"
-      | "not_run";
+      | "not_run"
+      | "skipped";
+    readonly reason?: "docs_only";
     readonly duration_ms?: number;
   }[];
   readonly summary?: string;

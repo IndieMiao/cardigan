@@ -56,6 +56,7 @@ const groups = {
     "released",
     "inactive",
     "not_run",
+    "skipped",
   ],
   idle: ["idle"],
   paused: ["suspended", "draining", "interrupted"],

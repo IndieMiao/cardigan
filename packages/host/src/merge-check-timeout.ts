@@ -116,6 +116,7 @@ export function checkTimedOutOnly(
       (c) =>
         c.status === "passed" ||
         c.status === "not_run" ||
+        c.status === "skipped" ||
         (c.status === "timed_out" && stepTimeoutOnly(output(c.name))) ||
         (c.status === "failed" && vitestTimeoutsOnly(output(c.name))),
     )

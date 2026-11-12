@@ -161,6 +161,10 @@ export interface MergeCheckView {
   readonly completion_id: DeliveryId;
   readonly candidate_sha: string;
   readonly tree_sha: string;
+  readonly scope?: {
+    readonly kind: "docs_only" | "affected" | "full";
+    readonly packages?: readonly string[];
+  };
   readonly status:
     | "queued"
     | "running"
@@ -176,7 +180,9 @@ export interface MergeCheckView {
       | "failed"
       | "timed_out"
       | "interrupted"
+      | "skipped"
       | "not_run";
+    readonly reason?: "docs_only";
     readonly exit_code?: number | null;
     readonly duration_ms?: number;
   }[];

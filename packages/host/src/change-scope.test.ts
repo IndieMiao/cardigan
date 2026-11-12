@@ -102,6 +102,18 @@ describe("§2.1 docs_only", () => {
 });
 
 describe("§2.1 full", () => {
+  test("test input documents run full checks while neighboring docs remain docs-only", () => {
+    const document = "docs/research/pm-practice-distillation.md";
+    expect(scope([document])).toEqual({
+      kind: "full",
+      reason: "test_document",
+    });
+    expect(scope(["apps/web/src/App.tsx", document])).toEqual({
+      kind: "full",
+      reason: "test_document",
+    });
+    expect(scope(["docs/research/other.md"])).toEqual({ kind: "docs_only" });
+  });
   test("changing packages/domain is full", () => {
     expect(
       scope(["packages/domain/src/card.ts", "packages/store/src/x.ts"]),
