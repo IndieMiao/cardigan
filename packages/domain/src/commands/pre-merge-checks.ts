@@ -103,7 +103,8 @@ export function openPreMergeChecks(
  * C-160: add or update one pre-merge check on a card.
  *
  * Only standing PMs and the human may touch the list. PM Ops (and any other
- * non-Office PM) may only add or reset a check to `pending`; marking a check
+ * non-Office PM) may only add a check or reset a `passed` one to `pending`; it
+ * cannot withdraw a `failed` one; marking a check
  * `passed` or `failed` records a conclusion relayed from the human's review
  * channel, which is PM Office's job (§7.1), so it needs PM Office or the human.
  * The checks are advisory: they never change who may confirm the merge or the
@@ -161,6 +162,16 @@ export function applyPreMergeCheck(
   );
   const checks = card.pre_merge_checks ?? [];
   const previous = checks.find((c) => c.label === label);
+  // C-160#25: a "failed" conclusion records a problem the human was told
+  // about; only PM Office or the human may withdraw it.
+  ensure(
+    previous?.status !== "failed" ||
+      input.status === "failed" ||
+      actor.kind === "human" ||
+      office,
+    "forbidden_tool",
+    "只有 PM Office 或人可以撤销“有问题”的合并前核对项",
+  );
   ensure(
     previous !== undefined || checks.length < MAX_PRE_MERGE_CHECKS,
     "validation_failed",

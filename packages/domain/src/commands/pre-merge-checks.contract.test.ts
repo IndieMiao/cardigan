@@ -159,6 +159,41 @@ describe("C-160 pre-merge checks via update_card", () => {
     expect(open(state)).toHaveLength(1);
   });
 
+  it("C-160#25: PM Ops cannot withdraw a failed check; PM Office and the human can", () => {
+    let { state, io, ops, office } = setup();
+    const set = (
+      who: Actor,
+      label: string,
+      status: "pending" | "passed" | "failed",
+    ) =>
+      updateCard(
+        state,
+        who,
+        { card_id, pre_merge_check: { label, status } },
+        io,
+      );
+    state = apply(state, value(set(office, "截图核对", "failed")));
+    state = apply(state, value(set(office, "独立安全审核", "passed")));
+    // Ops may not turn "failed" back into "pending".
+    const withdraw = set(ops, "截图核对", "pending");
+    expect(withdraw.ok).toBe(false);
+    if (!withdraw.ok) expect(withdraw.error.code).toBe("forbidden_tool");
+    expect(
+      cardOf(state).pre_merge_checks?.find((c) => c.label === "截图核对")
+        ?.status,
+    ).toBe("failed");
+    // Ops may still add a pending check and demote a passed one.
+    state = apply(state, value(set(ops, "新增项", "pending")));
+    state = apply(state, value(set(ops, "独立安全审核", "pending")));
+    expect(
+      cardOf(state).pre_merge_checks?.find((c) => c.label === "独立安全审核")
+        ?.status,
+    ).toBe("pending");
+    // PM Office and the human may withdraw "failed".
+    expect(value(set(office, "截图核对", "pending")).events).toHaveLength(1);
+    expect(value(set(human, "截图核对", "passed")).events).toHaveLength(1);
+  });
+
   it("the human may update checks too; unchanged updates write nothing", () => {
     let { state, io, office } = setup();
     const first = updateCard(

@@ -651,12 +651,14 @@ export function MergeConfirmation({
             <p className="hint">{PRE_MERGE_COPY.confirmHint}</p>
             <div className="action-row">
               <Dialog.Close asChild>
-                <button ref={cancelButton} type="button" className="quiet">
+                {/* Q-275: holding off is the primary choice here. */}
+                <button ref={cancelButton} type="button">
                   {PRE_MERGE_COPY.confirmCancel}
                 </button>
               </Dialog.Close>
               <button
                 type="button"
+                className="quiet"
                 disabled={action.busy}
                 onClick={() => {
                   setConfirming(false);

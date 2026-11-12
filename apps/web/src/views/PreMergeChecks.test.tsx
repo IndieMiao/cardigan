@@ -104,6 +104,17 @@ test("C-160: Needs You warns while checks are open and asks again before confirm
     name: COPY.confirmTitle(2),
   });
   expect(dialog.getAttribute("aria-modal")).toBe("true");
+  // Q-275: "hold off" is the primary button, "merge anyway" the secondary one.
+  expect(
+    within(dialog)
+      .getByRole("button", { name: COPY.confirmCancel })
+      .classList.contains("quiet"),
+  ).toBe(false);
+  expect(
+    within(dialog)
+      .getByRole("button", { name: COPY.confirmAnyway })
+      .classList.contains("quiet"),
+  ).toBe(true);
   expect(recordDecision).not.toHaveBeenCalled();
   fireEvent.click(
     within(dialog).getByRole("button", { name: COPY.confirmCancel }),

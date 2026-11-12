@@ -7,6 +7,9 @@ import type {
 } from "@cardigan/domain";
 import {
   acceptMergePushHold,
+  type CommandState,
+  type EffectivePreMergeCheck,
+  effectivePreMergeChecks,
   latestMergeCheck,
   mergePlan,
   parseId,
@@ -28,6 +31,7 @@ import {
   systemClock,
 } from "./host.js";
 import type { CliIo } from "./io.js";
+import { CLI_PRE_MERGE_COPY as COPY } from "./pre-merge-copy.js";
 
 /**
  * M4.4 merge commands (plan §4 M4.4, development plan §12.5).
@@ -39,7 +43,7 @@ import type { CliIo } from "./io.js";
 const USAGE = [
   "用法：",
   "  cardigan merge status [C-n] [--project <p>]       看待合并的卡片、确认和合并计划",
-  "  cardigan merge confirm <C-n> [--quote <原话>]     以人的身份确认合并",
+  "  cardigan merge confirm <C-n> [--quote <原话>] [--yes]  以人的身份确认合并；合并前核对未完成时须加 --yes",
   "  cardigan merge hold <C-n> [--quote <原话>]        以人的身份暂不合并",
   "  cardigan merge request <C-n>                      hold 之后重新发起合并确认",
   "  cardigan merge recheck <C-n> [--project <p>]       重查失败或超时的合并候选",
@@ -55,6 +59,7 @@ interface Args {
   readonly positionals: readonly string[];
   readonly flags: Readonly<Record<string, string | true>>;
 }
+const BOOLEAN_FLAGS = new Set(["yes"]);
 function parseArgs(args: readonly string[]): Args {
   const positionals: string[] = [];
   const flags: Record<string, string | true> = {};
@@ -65,6 +70,10 @@ function parseArgs(args: readonly string[]): Args {
       continue;
     }
     const [name, inline] = token.slice(2).split("=", 2) as [string, string?];
+    if (BOOLEAN_FLAGS.has(name) && inline === undefined) {
+      flags[name] = true;
+      continue;
+    }
     if (inline !== undefined) {
       flags[name] = inline;
       continue;
@@ -292,12 +301,42 @@ function describe(
     lines.push(
       `  delivery: ${delivery.id} ${delivery.work_item_id} ${delivery.subject.kind}=${delivery.subject.value}`,
     );
+  lines.push(...preMergeLines(preMergeChecksOf(state, card)));
   lines.push(
     plan.ok
       ? `  plan: ready (completion ${plan.value.completion_id}, ${plan.value.deliveries.length} deliveries)`
       : `  plan: not ready — ${formatCommandError("生成合并计划", card.id, plan.error)}`,
   );
   return lines;
+}
+
+/** C-160: the card's pre-merge checks, read as the Workbench reads them. */
+function preMergeChecksOf(
+  state: CommandState,
+  card: Card,
+): readonly EffectivePreMergeCheck[] {
+  return effectivePreMergeChecks(card, state.work_items, state.deliveries);
+}
+const openChecks = (checks: readonly EffectivePreMergeCheck[]) =>
+  checks.filter((c) => c.status !== "passed");
+function checkLine(c: EffectivePreMergeCheck): string {
+  return `    - ${c.label}：${COPY.status[c.status]}${
+    c.stale ? `（${COPY.staleNote}）` : ""
+  }${c.note ? `（${c.note}）` : ""}`;
+}
+function preMergeLines(
+  checks: readonly EffectivePreMergeCheck[],
+): readonly string[] {
+  if (checks.length === 0) return [];
+  const open = openChecks(checks);
+  return [
+    `  ${COPY.statusHeading}${
+      open.length > 0
+        ? `!! ${COPY.waitingTitle(open.map((c) => c.label))}`
+        : COPY.readyTitle
+    }`,
+    ...(open.length > 0 ? open : checks).map(checkLine),
+  ];
 }
 
 function mergeConfirm(
@@ -329,6 +368,23 @@ function mergeConfirm(
       );
       return EXIT.ok;
     }
+    // C-160: advisory only — never changes who may confirm, but the human
+    // must acknowledge unfinished pre-merge checks with --yes.
+    const open =
+      option === "merge"
+        ? openChecks(
+            preMergeChecksOf(
+              store.uow.read((tx) => loadCommandState(tx, project_id)),
+              card,
+            ),
+          )
+        : [];
+    if (open.length > 0 && parsed.flags.yes !== true)
+      throw new CliError(`!! ${COPY.confirmTitle(open.length)}`, EXIT.usage, [
+        ...open.map(checkLine),
+        COPY.confirmHint,
+        COPY.confirmNeedsYes(`cardigan merge confirm ${id}`),
+      ]);
     const held = confirmation.decider === "role:pm";
     const decision = runCommand(store, {
       operation: option === "merge" ? "确认合并" : "暂不合并",
@@ -354,6 +410,7 @@ function mergeConfirm(
         ),
       clock: systemClock,
     });
+    if (open.length > 0) io.stdout(`!! ${COPY.confirmedAnyway(open.length)}`);
     const takeover = held ? "（PM 代确认中，已按你的拍板记录）" : "";
     io.stdout(
       option === "merge"
