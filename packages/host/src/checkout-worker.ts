@@ -129,8 +129,9 @@ async function main(p) {
     try {
       const observed = await observeStat(pid);
       const identity = await procIdentity(pid, observed);
-      // The dedicated attempt cwd identifies the runtime without address-space reads.
-      if (!identity || identity.state === 'D' || identity.comm !== 'herdr-core') return;
+      if (!identity || identity.state === 'D') return;
+      // Verify the executable, not the mutable comm, without reading process memory.
+      if (basename(await boundedRead(procFiles.readlink('/proc/' + pid + '/exe'))) !== 'herdr-core') return;
       const path = await procCwd(pid);
       if (path !== p.container && !path.startsWith(p.container + '/')) return;
       associated.set(Number(pid), identity);
@@ -176,7 +177,12 @@ async function main(p) {
           // Missing status/cwd is not proof that the process itself has gone.
           if (inspection === 'stat') { associated.delete(Number(pid)); return; }
           try {
-            record = await observeStat(pid);
+            const confirmed = await observeStat(pid);
+            // A replacement process cannot confirm that the original occupant survived.
+            if (record && confirmed.start !== record.start) {
+              associated.delete(Number(pid)); unconfirmed.delete(Number(pid)); return;
+            }
+            record = confirmed;
             if (['Z', 'X'].includes(record.state)) { associated.delete(Number(pid)); return; }
           } catch (confirmation) {
             if (['ENOENT', 'ESRCH'].includes(confirmation.code)) { associated.delete(Number(pid)); return; }
@@ -244,7 +250,7 @@ async function main(p) {
       }
       for (const signal of ['SIGTERM', 'SIGKILL']) {
         for (const record of recorded) {
-          // Revalidate UID, comm, attempt cwd and Linux start time before each PID signal.
+          // Revalidate UID, executable, attempt cwd and Linux start time before each PID signal.
           if ((await coreRecord(record.pid))?.start === record.start) {
             try { process.kill(record.pid, signal); } catch {}
             emit({ type: 'output', name: 'cleanup', text: 'Stopped check runtime PID ' + record.pid + ' (' + signal + ')\n' });

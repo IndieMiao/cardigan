@@ -13,14 +13,18 @@ type Fault =
   | "stat-unlisted"
   | "cwd"
   | "cwd-timeout"
+  | "cwd-reused"
+  | "status-reused"
+  | "cwd-gone"
   | "older-cwd"
   | "gone"
   | "gone-after-status"
   | "status-gone";
 /** Executes the shipped worker with fake processes and IO; no real signals or blocked kernel tasks. */
 async function simulate(options: {
-  stuck: "remove" | "list" | "descendant";
+  stuck: "remove" | "list" | "descendant" | "none";
   fault?: Fault;
+  core?: { comm: string; executable: string };
 }) {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   const container = "/agent/checks/p/attempt";
@@ -34,11 +38,15 @@ async function simulate(options: {
   const markers: { path: string; data: string; mode: number; flag: string }[] =
     [];
   const reads: string[] = [];
+  const starts: string[] = [];
+  const signals: { pid: number; signal: string }[] = [];
   let nextPid = 100,
     group = 0,
     statReads = 0,
-    live = false,
-    disappeared = false;
+    live = options.stuck === "none",
+    disappeared = false,
+    confirming = false,
+    reused = false;
   const missing = () => Object.assign(new Error("gone"), { code: "ENOENT" });
   const failure = () => Object.assign(new Error("unreadable"), { code: "EIO" });
   const stream = () =>
@@ -99,6 +107,13 @@ async function simulate(options: {
         : [],
     readlink: async (value: string) => {
       reads.push(value);
+      if (value.endsWith("/exe")) return options.core?.executable ?? "/bin/sh";
+      if (options.fault === "cwd-reused" && !reused) {
+        reused = true;
+        throw missing();
+      }
+      if (options.fault === "cwd-gone") throw missing();
+      if (reused) return "/agent/unrelated";
       if (options.fault === "cwd" || options.fault === "older-cwd")
         throw failure();
       if (options.fault === "cwd-timeout") return new Promise<string>(() => {});
@@ -107,6 +122,7 @@ async function simulate(options: {
     readFile: async (value: string) => {
       reads.push(value);
       if (value === "/proc/50/stat") {
+        confirming = true;
         const fields = Array(20).fill("0");
         fields[0] = "S";
         fields[19] = "100";
@@ -122,13 +138,24 @@ async function simulate(options: {
         )
           throw failure();
         const fields = Array(20).fill("0");
-        fields[0] = "D";
+        fields[0] = options.core ? "S" : "D";
         fields[1] = "1";
-        fields[2] = String(options.fault?.includes("cwd") ? 0 : group);
-        fields[19] = options.fault === "older-cwd" ? "50" : "12345";
-        return `${survivor} (worker child) ${fields.join(" ")}`;
+        fields[2] = String(
+          reused || options.fault?.includes("cwd") ? 0 : group,
+        );
+        fields[19] = reused
+          ? "12346"
+          : options.fault === "older-cwd"
+            ? "50"
+            : "12345";
+        starts.push(fields[19]);
+        return `${survivor} (${options.core?.comm ?? "worker child"}) ${fields.join(" ")}`;
       }
       if (value.endsWith("/status")) {
+        if (options.fault === "status-reused" && confirming && !reused) {
+          reused = true;
+          throw missing();
+        }
         if (options.fault === "status") throw failure();
         if (options.fault === "status-gone") throw missing();
         if (options.fault === "gone-after-status") {
@@ -172,7 +199,13 @@ async function simulate(options: {
       env: {},
       getuid: () => 1234,
       chdir() {},
-      kill: vi.fn(),
+      kill: (pid: number, signal: string) => {
+        signals.push({ pid, signal });
+        if (options.core && pid === survivor) {
+          live = false;
+          disappeared = true;
+        }
+      },
       stdin: { destroy() {} },
       stdout: Object.assign(new EventEmitter(), {
         write: (line: string) => events.push(JSON.parse(line)),
@@ -204,7 +237,16 @@ async function simulate(options: {
   await vi.runAllTimersAsync();
   const result = events.find((event) => event.type === "result");
   expect(result, "worker must return a bounded result").toBeDefined();
-  return { result, events, removals, markers, reads, survivor };
+  return {
+    result,
+    events,
+    removals,
+    markers,
+    reads,
+    survivor,
+    starts,
+    signals,
+  };
 }
 
 test.each(["remove", "list"] as const)(
@@ -241,6 +283,7 @@ test.each([
   "stat-unlisted",
   "cwd",
   "cwd-timeout",
+  "cwd-gone",
   "status-gone",
 ] as const)(
   "an exited shell with a descendant's %s unavailable preserves the directory",
@@ -282,4 +325,51 @@ test("an unrelated older process with unreadable cwd does not block cleanup", as
   expect(f.result).not.toHaveProperty("manual_attention");
   expect(f.markers).toEqual([]);
   expect(f.removals).toContain("/agent/checks/p/attempt/worktree");
+});
+
+test.each(["cwd-reused", "status-reused"] as const)(
+  "a newer unrelated PID reused during %s inspection does not fail a passed check",
+  async (fault) => {
+    const f = await simulate({ stuck: "none", fault });
+    expect(f.starts).toContain("12345");
+    expect(f.starts).toContain("12346");
+    expect(f.result).toMatchObject({ status: "passed", cleanup_errors: [] });
+    expect(f.result).not.toHaveProperty("manual_attention");
+    expect(f.markers).toEqual([]);
+    expect(f.removals).toContain("/agent/checks/p/attempt/worktree");
+  },
+);
+
+test("a reused descendant PID loses its old process-group association", async () => {
+  const f = await simulate({ stuck: "descendant", fault: "status-reused" });
+  expect(f.starts).toContain("12345");
+  expect(f.starts).toContain("12346");
+  expect(f.result?.cleanup_errors).toEqual([]);
+  expect(f.result).not.toHaveProperty("manual_attention");
+  expect(f.markers).toEqual([]);
+  expect(f.removals).toContain("/agent/checks/p/attempt/worktree");
+});
+
+test("a detached core with a changed comm is reaped using its executable", async () => {
+  const f = await simulate({
+    stuck: "none",
+    core: { comm: "renamed", executable: "/agent/bin/herdr-core" },
+  });
+  expect(f.signals).toContainEqual({ pid: f.survivor, signal: "SIGTERM" });
+  expect(
+    f.reads.filter((read) => read === `/proc/${f.survivor}/exe`).length,
+  ).toBeGreaterThanOrEqual(2);
+  expect(f.result).toMatchObject({ status: "passed", cleanup_errors: [] });
+  expect(f.markers).toEqual([]);
+  expect(f.removals).toContain("/agent/checks/p/attempt/worktree");
+});
+
+test("a process named herdr-core with a different executable is not signalled", async () => {
+  const f = await simulate({
+    stuck: "none",
+    core: { comm: "herdr-core", executable: "/bin/other" },
+  });
+  expect(f.signals.filter(({ pid }) => pid === f.survivor)).toEqual([]);
+  expect(f.result).toMatchObject({ manual_attention: true });
+  expect(f.removals).toEqual([]);
 });
