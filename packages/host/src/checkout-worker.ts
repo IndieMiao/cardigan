@@ -152,7 +152,7 @@ async function main(p) {
     registered = !(cancelled || totalExpired);
     const added = await git(p.repository, ['worktree', 'add', '--detach', '--', p.directory, p.sha]);
     if (added.status === 'interrupted') {
-      addInterrupted = true; status = 'interrupted'; reason = 'Cancelled before temporary checkout completed';
+      addInterrupted = true; status = 'interrupted'; reason = '临时工作区建好之前已取消';
     }
     else if (added.status !== 'passed') { status = added.status; reason = 'Temporary checkout failed'; }
     else if (!await verify()) { status = 'failed'; reason = 'Checkout HEAD or tree does not match'; }

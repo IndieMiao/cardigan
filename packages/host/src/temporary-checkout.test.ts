@@ -585,7 +585,7 @@ test("cancelling after readiness but before checkout reports cancellation withou
     status: "interrupted",
     checks: [{ name: "must-not-run", status: "not_run" }],
     cleanup_errors: [],
-    reason: "Cancelled before temporary checkout completed",
+    reason: "临时工作区建好之前已取消",
   });
   await f.clean();
 });
@@ -632,7 +632,7 @@ test("cancelling after Git starts but before it registers the worktree reports n
     status: "interrupted",
     checks: [{ name: "must-not-run", status: "not_run" }],
     cleanup_errors: [],
-    reason: "Cancelled before temporary checkout completed",
+    reason: "临时工作区建好之前已取消",
   });
   await f.clean();
 });
@@ -647,7 +647,7 @@ test("a cancelled checkout still reports a registration that could not be remove
   );
   expect(result).toMatchObject({
     status: "interrupted",
-    reason: "Cancelled before temporary checkout completed",
+    reason: "临时工作区建好之前已取消",
     cleanup_errors: ["Could not remove temporary worktree registration"],
   });
   expect(await f.git("worktree", "list", "--porcelain")).toContain("locked");
