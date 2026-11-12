@@ -866,6 +866,7 @@ test("V12b list_templates and list_roles only show this project's catalog", asyn
   expect(listed.project_id).toBe(project_id);
   expect(listed.templates.map((t) => t.id)).toEqual([
     "artifact",
+    "design",
     "dev",
     "general",
     "ours",

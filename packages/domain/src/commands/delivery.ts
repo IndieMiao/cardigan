@@ -340,7 +340,24 @@ export function submitDelivery(
           )
           .map((q) => ({ key: `decision:${q.id}`, passed: false })),
       );
+      // A human-reviewed template has no completion verifier in between, so
+      // its required verifications (e.g. design_review) cannot be waived as
+      // known gaps: the human must only see work that passed them.
+      const { completion: rule } = resolveCardTemplate(d, card);
+      const humanReviewed = rule.mode === "review" && rule.reviewer === "human";
       for (const check of checks.filter((c) => !c.passed)) {
+        const waivable =
+          !humanReviewed ||
+          !d
+            .list("work_items")
+            .some(
+              (w) => `work_item:${w.id}` === check.key && w.kind === "verify",
+            );
+        ensure(
+          waivable,
+          "invariant_violation",
+          `人验收的完成申请须等必需验证项通过后再提交：${check.key.slice("work_item:".length)}`,
+        );
         const gap = p.known_gaps?.find((g) => g.precondition === check.key);
         ensure(
           gap?.description.trim() &&

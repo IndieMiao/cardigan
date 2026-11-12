@@ -1,5 +1,10 @@
 import { describe, expect, test } from "vitest";
-import type { RoleReference, WorkItem } from "../entities.js";
+import type {
+  Actor,
+  Assignment,
+  RoleReference,
+  WorkItem,
+} from "../entities.js";
 import { ROLE_TOOL_ALLOWLISTS, type RoleKind } from "../role.js";
 import {
   artifactCardTemplate,
@@ -7,15 +12,18 @@ import {
   type CardTemplate,
   designCardTemplate,
 } from "../templates.js";
-import { recordDecision } from "./coordination.js";
+import { autoMergeSchedule } from "./auto-merge.js";
+import { recordDecision, resolveDelegatedDecision } from "./coordination.js";
 import type { CommandState } from "./core.js";
 import { prepareDelivery, submitDelivery, submitReview } from "./delivery.js";
+import { HUMAN_COMPLETION_REASON } from "./human-completion.js";
 import { createCard } from "./pm.js";
 import { manageCardTemplate } from "./templates.js";
 import {
   actor,
   apply,
   assignment,
+  card,
   fixture,
   human,
   ports,
@@ -39,16 +47,23 @@ const designRoles = [
   packRole("design_director", "verify"),
   packRole("pm", "verify"),
 ];
+// A standing PM Ops whose role may resolve delegated decisions.
+const pmOps: Assignment = {
+  ...(({ work_item_id: _w, ...rest }) => rest)(assignment(9, "pm")),
+  scope: "standing",
+  standing_mode: "ops",
+};
 const state = (
   roles: readonly RoleReference[] = designRoles,
   card_templates: readonly CardTemplate[] = [],
+  withOps = false,
 ): CommandState => ({
   ...fixture(),
   roles,
   card_templates,
-  cards: [],
+  cards: [card(2)],
   work_items: [],
-  assignments: [],
+  assignments: withOps ? [pmOps] : [],
   runs: [],
 });
 const params = {
@@ -184,9 +199,9 @@ describe("design template (p2v-12 §2.4)", () => {
 describe("design template flow (p2v-12 §2.4)", () => {
   // The real builtin template, default-pack-shaped roles and independent
   // designer/director Assignments: no stub items, no follow-up cards.
-  const start = () => {
+  const start = (withOps = false) => {
     const p = ports();
-    const base = state();
+    const base = state(designRoles, [], withOps);
     const created = value(
       createCard(base, human, { ...params, template_id: "design" }, p),
     );
@@ -208,6 +223,7 @@ describe("design template flow (p2v-12 §2.4)", () => {
             : w,
       ) as WorkItem[],
       assignments: [
+        ...s.assignments,
         bind(production, 1, "ui_ux_designer"),
         bind(review, 2, "design_director"),
       ],
@@ -311,6 +327,133 @@ describe("design template flow (p2v-12 §2.4)", () => {
       status: "done",
       resolution: "done",
     });
+  });
+
+  const flow = (withOps = false) => {
+    const started = start(withOps);
+    let s = started.state;
+    const subject = { kind: "doc_version" as const, value: "design-v1" };
+    const deliver = async (params: Parameters<typeof prepareDelivery>[2]) => {
+      const verified = value(
+        await prepareDelivery(s, designer, params, {
+          verify: async () => ({ ok: true, value: [] }),
+        }),
+      );
+      return submitDelivery(s, designer, params, verified, started.p);
+    };
+    const commit = <T>(r: ReturnType<typeof submitDelivery> | T) => r;
+    return {
+      ...started,
+      subject,
+      get state() {
+        return s;
+      },
+      set state(next: CommandState) {
+        s = next;
+      },
+      deliver,
+      commit,
+      completion: (extra: object = {}) => ({
+        work_item_id: started.production.id,
+        kind: "card_completion" as const,
+        summary: "Ready for approval",
+        subject,
+        requested_verifiers: [],
+        ...extra,
+      }),
+      design: {
+        work_item_id: started.production.id,
+        kind: "design" as const,
+        summary: "Settings page draft",
+        subject,
+        requested_verifiers: [started.review.id],
+      },
+    };
+  };
+
+  test("the completion request is refused until the director passes, even with a known gap", async () => {
+    const f = flow();
+    f.state = apply(f.state, value(await f.deliver(f.design)));
+    for (const extra of [
+      {},
+      {
+        known_gaps: [
+          {
+            description: "Director review later",
+            precondition: `work_item:${f.review.id}`,
+            followup_card_id: card(2).id,
+          },
+        ],
+      },
+    ])
+      expect(await f.deliver(f.completion(extra))).toMatchObject({
+        ok: false,
+        error: {
+          code: "invariant_violation",
+          message: expect.stringContaining("必需验证项"),
+        },
+      });
+    expect(f.state.decisions).toEqual([]);
+  });
+
+  test("the human completion review stays with the human when PM Ops may take feature details", async () => {
+    const f = flow(true);
+    f.state = apply(f.state, value(await f.deliver(f.design)));
+    f.state = apply(
+      f.state,
+      value(
+        submitReview(
+          f.state,
+          director,
+          {
+            delivery_id: f.state.deliveries[0]?.id as never,
+            target_sha: f.subject.value,
+            kind: "design",
+            issues: [],
+          },
+          f.p,
+        ),
+      ),
+    );
+    f.state = apply(f.state, value(await f.deliver(f.completion())));
+    const decision = f.state.decisions.find(
+      (q) => q.trigger === "completion_review",
+    );
+    if (!decision) throw new Error("Missing human completion review");
+    // feature_detail is delegable by default and PM Ops is active, yet the
+    // template's human reviewer is kept.
+    expect(decision).toMatchObject({
+      category: "feature_detail",
+      decider: "human",
+      human_required_reason: HUMAN_COMPLETION_REASON,
+    });
+    expect(decision.delegation_authority).toBeUndefined();
+    const ops: Actor = {
+      kind: "assignment",
+      project_id: human.project_id,
+      assignment_id: pmOps.id,
+      ...packRole("pm", "verify"),
+    };
+    expect(
+      resolveDelegatedDecision(
+        f.state,
+        ops,
+        { decision_id: decision.id, option: "approve", rationale: "Fine" },
+        f.p,
+      ).ok,
+    ).toBe(false);
+    // Never eligible for timeout approval either.
+    expect(
+      autoMergeSchedule(
+        {
+          ...f.state,
+          project_preferences: [
+            { id: human.project_id, auto_merge_after_minutes: 1 } as never,
+          ],
+        },
+        decision.id,
+      ).ok,
+    ).toBe(false);
   });
 });
 

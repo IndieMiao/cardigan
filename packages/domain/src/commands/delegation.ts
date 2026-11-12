@@ -98,6 +98,9 @@ export function delegationAllowed(d: CommandDraft, q: DelegationSubject) {
       !mergeNeedsHuman(d.list("decisions"), d.list("cards"), q.card_id)
     );
   return (
+    // A human-required decision (e.g. a template's human completion review)
+    // ignores the delegation preference (p2v-12 §2.4, C-104 security review).
+    !q.human_required_reason &&
     !!q.category &&
     !highRiskCategories.includes(q.category) &&
     decisionDelegation(projectPreference(d))[q.category]

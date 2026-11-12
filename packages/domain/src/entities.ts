@@ -473,7 +473,11 @@ interface DecisionFields {
   readonly category?: DecisionCategory;
   /** Persisted policy evidence for decisions assigned to PM Ops. */
   readonly delegation_authority?: string;
-  /** Set when PM Ops hands a merge confirmation to the human; disables auto-merge. */
+  /**
+   * Human-only decision: set when PM Ops hands a merge confirmation to the
+   * human (disables auto-merge), or by the system on a template's human
+   * completion review. Such decisions are never delegated to PM Ops.
+   */
   readonly human_required_reason?: string;
   readonly question: string;
   readonly context: string;
