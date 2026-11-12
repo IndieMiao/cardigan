@@ -80,8 +80,10 @@ export {
   repositoryLockPath,
 } from "./repository-lock.js";
 export {
+  effectiveRunLimit,
   MERGE_CHECK_RUN_SLOTS,
   readRunQueue,
+  runCapacityMachines,
   runCapacitySnapshot,
 } from "./run-capacity.js";
 export {

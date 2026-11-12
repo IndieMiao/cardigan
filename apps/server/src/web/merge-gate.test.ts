@@ -11,7 +11,11 @@ import {
   recordMergeCheck,
   type WorkItemId,
 } from "@cardigan/domain";
-import type { ProjectMergeGate } from "@cardigan/host";
+import {
+  acquireMergeCheckCapacity,
+  executionOwner,
+  type ProjectMergeGate,
+} from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import { routeEvent } from "@cardigan/router";
 import { afterEach, beforeEach, expect, test } from "vitest";
@@ -552,4 +556,73 @@ test("logs reject traversal, non-UUID names, symlinks and directories", async ()
   await rename(dir, `${dir}-moved`);
   await symlink(`${dir}-moved`, dir);
   expect((await read(`/merge-checks/${attempt}`)).status).toBe(404);
+});
+
+test("C-145 merge capacity is separate from a same-named Agent and survives card cancellation until process exit", async () => {
+  if (gate.status !== "enabled") throw new Error("fixture gate missing");
+  gate = {
+    ...gate,
+    executor: {
+      name: "test-ci",
+      host: "private-host",
+      user: "agent",
+      port: 22,
+      hostKeyAlias: "fixture",
+      identityFile: "/private/identity",
+      knownHostsFile: "/private/hosts",
+      agentRoot: "/private/agent",
+      maxConcurrent: 3,
+    },
+  };
+  h.store.uow.run((tx) => {
+    const assignment = tx.assignments.get(project_id, "A-1");
+    if (!assignment) throw new Error("missing assignment");
+    tx.assignments.put(project_id, { ...assignment, machine_id: "test-ci" });
+  });
+  record("queued");
+  expect((await read("/execution/capacity")).json).toMatchObject({
+    agents: [
+      {
+        machine_id: "test-ci",
+        running: 1,
+        limit: 4,
+        queued: 0,
+        merge_check_slots: 0,
+      },
+    ],
+    merge_checks: [{ machine_id: "test-ci", running: 0, limit: 3, queued: 1 }],
+  });
+  record("running");
+  const owner = executionOwner(process.pid);
+  if (!owner) throw new Error("missing process identity");
+  const release = acquireMergeCheckCapacity(
+    h.store,
+    project_id,
+    attempt,
+    owner,
+    "test-ci",
+  );
+  try {
+    const running = await read("/execution/capacity");
+    expect(running.json).toMatchObject({
+      agents: [{ running: 1, limit: 4 }],
+      merge_checks: [{ running: 1, limit: 3, queued: 0 }],
+    });
+    expect(JSON.stringify(running.json)).not.toMatch(
+      /private|identityFile|knownHosts|agentRoot/,
+    );
+    h.store.uow.run((tx) => {
+      const card = tx.cards.get(project_id, "C-2");
+      if (!card) throw new Error("missing card");
+      tx.cards.put(project_id, { ...card, status: "cancelled" });
+    });
+    expect((await read("/execution/capacity")).json).toMatchObject({
+      merge_checks: [{ running: 1, queued: 0 }],
+    });
+  } finally {
+    release();
+  }
+  expect((await read("/execution/capacity")).json).toMatchObject({
+    merge_checks: [{ running: 0, queued: 0 }],
+  });
 });
