@@ -253,7 +253,8 @@ export class Store {
     try {
       // Opening/configuring the database can contend with another process too.
       db.exec("PRAGMA busy_timeout = 5000");
-      enableWal(db);
+      // SQLite's explicit in-memory and temporary databases do not support WAL.
+      if (dbPath !== ":memory:" && dbPath !== "") enableWal(db);
       db.exec("PRAGMA foreign_keys = ON");
       // C-132: the id-format migration rewrites stored values; keep a copy.
       backupBeforeIdFormatMigration(
@@ -948,6 +949,13 @@ function enableWal(db: DatabaseSync): void {
     for (;;) {
       try {
         db.exec("PRAGMA journal_mode = WAL");
+        const journalMode = db
+          .prepare("PRAGMA journal_mode")
+          .get()?.journal_mode;
+        if (journalMode !== "wal")
+          throw new Error(
+            `SQLite WAL mode required: expected journal_mode=wal, got ${journalMode}`,
+          );
         return;
       } catch (error) {
         const remaining = Math.floor(deadline - performance.now());
