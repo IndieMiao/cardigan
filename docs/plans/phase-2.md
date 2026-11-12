@@ -47,6 +47,7 @@
 | P2a-10 主机运维角色（试行发现 35/40/41，细化计划：[p2a-10-host-ops-role.md](p2a-10-host-ops-role.md)） | 先补确定性自动化（部署后刷新常驻会话工具清单）；再引入运维角色 `host_ops`（员工"大乔"，职位"主机运维"），处理 Run 卡在 dispatched、失控进程、偶发合并检查失败、attention 积压；不派活、不审核合并、不建卡、不定口径，高风险报人 | Cardigan（分三张卡） | 契约测试覆盖 host_ops 角色权限边界的六条不变量；`cardigan` 项目开出 host_ops Assignment 并观察一周，发现 35/40/41 不再需要 Claude 手动处理 |
 | P2a-11 验证方撤回已通过的审核（细化计划：[p2a-11-verify-withdraw-pass.md](p2a-11-verify-withdraw-pass.md)） | 验证方在合并开始前撤回本人已通过的审核，恢复可处理状态；按依赖作废完成申请和合并确认，保留审计并在 Needs You 提示 | Cardigan（分四张卡） | 契约测试覆盖本人权限、合并开始闸门、完成申请级联和审核轮次上限；撤回不触发代码返工 |
 | P2a-12 合并检查派到远程 CI 机器（细化计划：[p2a-12-remote-merge-check-host.md](p2a-12-remote-merge-check-host.md)） | 合并检查不再和开发 Agent 的 Run 抢主机 CPU：`merge-gate.yaml` 新增 `executors`/`executor`，项目可把合并检查经主机发起的 SSH 派到远程 CI 虚拟机 `cardigan-ci`；agent-ssh 去掉 localhost 硬编码；对账按执行目标列目录；并发名额按机器分桶；远程不可达时排队退避，不回退本机，超过 30 分钟进 Needs You | Cardigan（分五张卡） | 不配置 `executor` 时行为和现在完全一致；远程机器不持有 Git 凭据；对账不把远程正在跑的检查误报成孤儿；主机 Run 并发名额不被远程检查占用 |
+| P2a-13 分层合并检查与 MB-n 批次合并队列（细化计划：[p2a-13-merge-queue.md](p2a-13-merge-queue.md)，ADR 0004） | 降低合并检查成为开发瓶颈的程度：A+C 卡级检查按改动范围只跑受影响包的测试、只改文档跳过 test 和 e2e；B 已确认的卡按顺序叠加成批次 MB-n 跑一次全量检查，通过后 main 一次快进，失败自动二分定位，卡片状态机不变；D 检查缓存与分片、识别不稳定测试 | Cardigan（A+C 三张、B 六张、D 三张） | 不配置新字段时行为不变；不变量 21 按 ADR 0004 改写并有契约测试；一次批次检查为多张卡作证，main 前进不再让排队卡全部重跑 |
 
 ### 2.1 全机同时运行的 Run 上限（P2a-9 细化）
 
