@@ -244,11 +244,13 @@ export async function createMergeCheckLog(input: {
               12000,
             );
       // C-116: classified from the full retained output, before it is cleared.
-      const timeout_only = checkTimedOutOnly(
-        result.status,
-        result.checks,
-        (name) => output.get(name)?.text() ?? "",
-      );
+      const timeout_only =
+        !result.manual_attention &&
+        checkTimedOutOnly(
+          result.status,
+          result.checks,
+          (name) => output.get(name)?.text() ?? "",
+        );
       const names = [
         ...new Set([...result.checks.map((c) => c.name), ...output.keys()]),
       ];

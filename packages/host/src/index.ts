@@ -16,6 +16,9 @@ export {
   type WorkspacePackage,
   type WorkspaceTree,
 } from "./change-scope.js";
+export { withCheckoutDeadline } from "./checkout-deadline.js";
+export { CHECKOUT_LIMITS } from "./checkout-limits.js";
+export { sweepCheckoutOrphans } from "./checkout-orphans.js";
 export {
   applyCommand,
   issueAssignmentToken,
