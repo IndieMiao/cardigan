@@ -253,6 +253,14 @@ test("invalid files, spoofed references, metadata and oversized bodies never cre
     (await post({ ...custom, avatar_file: "a".repeat(3 * 1024 * 1024) }))
       .status,
   ).toBe(413);
+  const invalidKey = await post(input, { headers: { "idempotency-key": "" } });
+  expect(invalidKey.status).toBe(400);
+  expect(invalidKey.json).toEqual({
+    error: {
+      code: "validation_failed",
+      message: "提交的内容不完整，请刷新页面后重试",
+    },
+  });
   expect(employees()).toEqual([]);
   expect(createdEvents()).toEqual([]);
   expect(existsSync(join(h.dataDir, "avatars"))).toBe(false);
@@ -315,7 +323,14 @@ test("HTTP text limits match domain Unicode boundaries without stripping control
     { title: "😀".repeat(41) },
     { bio: "𠮷".repeat(201) },
   ]) {
-    expect((await post({ ...body, ...patch })).status).toBe(400);
+    const response = await post({ ...body, ...patch });
+    expect(response.status).toBe(400);
+    expect(response.json).toEqual({
+      error: {
+        code: "validation_failed",
+        message: "提交的内容不完整，请刷新页面后重试",
+      },
+    });
     expect(existsSync(join(h.dataDir, "avatars"))).toBe(false);
   }
   const control = await post({ ...body, name: "\t合法长度" });

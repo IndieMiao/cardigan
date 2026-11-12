@@ -146,7 +146,7 @@ export async function serveEmployees(
     throw new HttpRejection(
       400,
       "validation_failed",
-      "创建员工需要有效的表单内容和 Idempotency-Key",
+      "提交的内容不完整，请刷新页面后重试",
     );
   const { avatar_file, avatar: requestedAvatar, ...fields } = parsed.data;
   if (
