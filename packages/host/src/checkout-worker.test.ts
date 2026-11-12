@@ -25,6 +25,7 @@ async function simulate(options: {
   stuck: "remove" | "list" | "descendant" | "none";
   fault?: Fault;
   core?: { comm: string; executable: string };
+  permission?: { field: "stat" | "status" | "cwd"; code: "EACCES" | "EPERM" };
 }) {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   const container = "/agent/checks/p/attempt";
@@ -49,6 +50,12 @@ async function simulate(options: {
     reused = false;
   const missing = () => Object.assign(new Error("gone"), { code: "ENOENT" });
   const failure = () => Object.assign(new Error("unreadable"), { code: "EIO" });
+  const checkPermission = (field: "stat" | "status" | "cwd") => {
+    if (options.permission?.field === field && (field !== "stat" || confirming))
+      throw Object.assign(new Error("permission denied"), {
+        code: options.permission.code,
+      });
+  };
   const stream = () =>
     Object.assign(new EventEmitter(), {
       setEncoding() {
@@ -108,6 +115,7 @@ async function simulate(options: {
     readlink: async (value: string) => {
       reads.push(value);
       if (value.endsWith("/exe")) return options.core?.executable ?? "/bin/sh";
+      checkPermission("cwd");
       if (options.fault === "cwd-reused" && !reused) {
         reused = true;
         throw missing();
@@ -137,6 +145,7 @@ async function simulate(options: {
           statReads > 1
         )
           throw failure();
+        checkPermission("stat");
         const fields = Array(20).fill("0");
         fields[0] = options.core ? "S" : "D";
         fields[1] = "1";
@@ -152,6 +161,7 @@ async function simulate(options: {
         return `${survivor} (${options.core?.comm ?? "worker child"}) ${fields.join(" ")}`;
       }
       if (value.endsWith("/status")) {
+        checkPermission("status");
         if (options.fault === "status-reused" && confirming && !reused) {
           reused = true;
           throw missing();
@@ -373,3 +383,55 @@ test("a process named herdr-core with a different executable is not signalled", 
   expect(f.result).toMatchObject({ manual_attention: true });
   expect(f.removals).toEqual([]);
 });
+
+const permissionErrors = ["EACCES", "EPERM"] as const;
+test.each(
+  permissionErrors.flatMap((code) =>
+    (["stat", "status", "cwd"] as const).map((field) => ({ code, field })),
+  ),
+)(
+  "an unrelated newer process denied $field with $code does not block cleanup",
+  async (permission) => {
+    const f = await simulate({ stuck: "none", permission });
+    expect(f.starts).toContain("12345"); // Later than the supervisor's start=100.
+    expect(f.result).toMatchObject({ status: "passed", cleanup_errors: [] });
+    expect(f.result).not.toHaveProperty("manual_attention");
+    expect(f.markers).toEqual([]);
+    expect(f.removals).toContain("/agent/checks/p/attempt/worktree");
+  },
+);
+
+test.each(
+  permissionErrors.flatMap((code) =>
+    (["stat", "status"] as const).map((field) => ({ code, field })),
+  ),
+)(
+  "a known descendant denied $field with $code still preserves its directory",
+  async (permission) => {
+    const f = await simulate({ stuck: "descendant", permission });
+    expect(f.result).toMatchObject({ manual_attention: true });
+    expect(f.removals).toEqual([]);
+    expect(JSON.parse(f.markers[0]?.data ?? "{}").processes).toContainEqual(
+      expect.objectContaining({
+        pid: f.survivor,
+        start: "12345",
+        state: "unknown",
+      }),
+    );
+  },
+);
+
+test.each(permissionErrors)(
+  "an unconfirmed direct child denied stat with %s is not treated as unrelated",
+  async (code) => {
+    const f = await simulate({
+      stuck: "remove",
+      permission: { field: "stat", code },
+    });
+    expect(f.result).toMatchObject({ manual_attention: true });
+    expect(f.removals).toEqual([]);
+    expect(JSON.parse(f.markers[0]?.data ?? "{}").processes).toContainEqual(
+      expect.objectContaining({ pid: f.survivor, state: "unknown" }),
+    );
+  },
+);

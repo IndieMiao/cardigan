@@ -69,6 +69,7 @@ async function main(p) {
       return Promise.resolve({ code: null, status: cancelled ? 'interrupted' : 'timed_out', output: '' });
     return new Promise(resolve => {
       const started = Date.now();
+      // Only these stdio descriptors are inherited; Node does not forward the supervisor's flock FD.
       const child = spawn(file, args, { cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
       if (child.pid) groups.add(child.pid);
       let result = 'passed', output = '', hardStop, exitDeadline, finished = false;
@@ -173,6 +174,10 @@ async function main(p) {
         }
         return { ...record, wchan: await procWait(pid) };
       } catch (error) {
+        // Same-UID processes can deny procfs reads without belonging to this attempt.
+        // Permission denial alone is not evidence of a descendant; retain known children.
+        if (['EACCES', 'EPERM'].includes(error.code) &&
+            !associated.has(Number(pid)) && !unconfirmed.has(Number(pid))) return;
         if (['ENOENT', 'ESRCH'].includes(error.code)) {
           // Missing status/cwd is not proof that the process itself has gone.
           if (inspection === 'stat') { associated.delete(Number(pid)); return; }
