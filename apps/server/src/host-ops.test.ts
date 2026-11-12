@@ -441,6 +441,7 @@ test("C-152: a terminal on another runtime is settled only after a human confirm
     scrubCredentials: scrub,
     ownsRuntimeRef: (ref) => ref.runtime_machine === "cardigan-agent",
     runtimeLabel: "agent-ssh（机器 cardigan-agent）",
+    hcSession: "prod-hc",
   });
   await call("host_ops_restart_standing_pm", {
     assignment_id: pm.id,
@@ -470,6 +471,12 @@ test("C-152: a terminal on another runtime is settled only after a human confirm
   if (!first) throw new Error("Missing human action");
   expect(first.instructions).toContain(localRef.terminal_ref);
   expect(first.instructions).toMatch(/1\. [\s\S]*2\. [\s\S]*3\. [\s\S]*4\. /u);
+  // C-153#3: the hc commands use the session registered in runtime.json.
+  expect(first.instructions).toContain(
+    `HC_SESSION=prod-hc HC_SOCKET="$XDG_RUNTIME_DIR/cardigan/prod-hc.sock" hc get ${localRef.terminal_ref} --json`,
+  );
+  expect(first.instructions).not.toContain("HC_SESSION=cardigan");
+  expect(first.instructions).not.toContain("请替换会话名");
   expect(hostOpsExitConfirmation(state, action.id)).toEqual({
     status: "open",
     human_action_id: first.id,

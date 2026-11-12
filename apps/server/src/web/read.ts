@@ -1012,6 +1012,7 @@ export function needsYou(
   now: string,
   mergeGateStatus: ProjectMergeGate["status"] = "disabled",
   hostOpsPatrolIntervalMs = DEFAULT_HOST_OPS_PATROL_INTERVAL_MS,
+  hcSession?: string,
 ) {
   const result = unwrap(
     listNeedsYou(
@@ -1088,7 +1089,12 @@ export function needsYou(
   };
   return {
     attention: data.attention,
-    incident_handling: incidentHandling(state, hostOpsPatrolIntervalMs),
+    incident_handling: {
+      ...incidentHandling(state, hostOpsPatrolIntervalMs),
+      // C-153: the session the server registered in runtime.json; null when
+      // this read model was built without a running server (tests, previews).
+      hc_session: hcSession ?? null,
+    },
     incidents: data.incidents.map((incident) => ({
       ...incident,
       ...webAuthorView(state, `assignment:${incident.id}`),

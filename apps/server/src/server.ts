@@ -210,6 +210,7 @@ export async function startCardiganServer(
         },
         ownsRuntimeRef: (ref) => runtimeOwnsRef(execution, ref),
         runtimeLabel: describeRuntime(execution),
+        hcSession: session,
         settings: (project) => ({
           merge_gate_enabled:
             mergeGate.forProject(project).status === "enabled",
@@ -336,6 +337,7 @@ export async function startCardiganServer(
         mergeGate,
         dataDir: config.dataDir,
         config: options.web.config,
+        hcSession: session,
         hostOpsPatrolIntervalMs:
           options.dispatcher?.hostOpsPatrolIntervalMs ??
           config.hostOpsPatrolIntervalMs ??

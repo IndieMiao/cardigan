@@ -55,7 +55,7 @@ export function Feedback({
     />
   );
 }
-const quote = (s: string) => `'${s.replaceAll("'", "'\\''")}'`;
+export const quote = (s: string) => `'${s.replaceAll("'", "'\\''")}'`;
 export const cliCommand = (project: string, action: string, id?: string) =>
   `cardigan ${action}${id ? ` ${quote(id)}` : ""} --project ${quote(project)}`;
 export function CopyCommand({

@@ -571,6 +571,8 @@ export interface IncidentHandling {
     | (IncidentContact & { readonly patrol_interval_ms: number })
     | null;
   readonly pm_office: IncidentContact | null;
+  /** hc session the server registered in runtime.json; null when unknown. */
+  readonly hc_session?: string | null;
 }
 
 export interface NoticeView extends AuthorView {

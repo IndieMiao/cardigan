@@ -648,7 +648,7 @@ test("project decisions explain unavailable comments; cleanup and lost runtimes 
     .closest("details") as HTMLDetailsElement;
   expect(operator.open).toBe(false);
   expect(
-    within(operator).getByText(/需要在加载了 Cardigan 运行环境的 shell/),
+    within(operator).getByText(/需要在主机上、加载了运行环境的 shell 里执行/),
   ).toBeTruthy();
   for (const name of ["复制查看终端（只看不动）", "复制检查异常"])
     expect(incident.getByRole("button", { name }).closest("details")).toBe(
@@ -701,6 +701,7 @@ const handling = {
     patrol_interval_ms: 30 * 60000,
   },
   pm_office: { assignment_id: "A-91", name: "王熙凤", mention: "王熙凤" },
+  hc_session: "prod-hc",
 };
 
 test("C-153: with host_ops patrolling, a fresh incident tells the human to wait", async () => {
@@ -735,6 +736,20 @@ test("C-153: with host_ops patrolling, a fresh incident tells the human to wait"
     "点“发表评论”。",
     "等 PM Office（王熙凤）回复。只有 PM Office 或主机运维明确请你接管时，才展开下面的“需要接管输入？”。",
   ]);
+  // C-153#3: commands carry the session registered in runtime.json.
+  expect(
+    within(article).getByText(
+      "cardigan assignment attach 'A-3' --project 'p-1' --hc-session 'prod-hc'",
+    ),
+  ).toBeTruthy();
+  expect(
+    within(article).getByText(
+      "cardigan assignment attach 'A-3' --project 'p-1' --hc-session 'prod-hc' --interactive",
+    ),
+  ).toBeTruthy();
+  expect(text).toContain(
+    "hc 会话 prod-hc 取自 server 登记的运行时（runtime.json）。",
+  );
 });
 
 test("C-153: past the patrol interval the incident asks the human to act", async () => {
@@ -768,7 +783,11 @@ test("C-153: without host_ops the incident points straight to PM Office", async 
       client={fakeClient({
         needsYou: async () => ({
           ...page([]),
-          incident_handling: { host_ops: null, pm_office: handling.pm_office },
+          incident_handling: {
+            host_ops: null,
+            pm_office: handling.pm_office,
+            hc_session: null,
+          },
           incidents: [lostIncident(60000)],
         }),
       })}

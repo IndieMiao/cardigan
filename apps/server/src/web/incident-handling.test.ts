@@ -22,7 +22,7 @@ test("C-153 Needs You says who looks after lost runtimes and how often host_ops 
 
     expect(
       needsYou({ ...state, assignments: [] }, now).incident_handling,
-    ).toEqual({ host_ops: null, pm_office: null });
+    ).toEqual({ host_ops: null, pm_office: null, hc_session: null });
 
     // Without an employee the Assignment id is what a comment mentions.
     expect(
@@ -31,6 +31,7 @@ test("C-153 Needs You says who looks after lost runtimes and how often host_ops 
         now,
         "disabled",
         10 * 60_000,
+        "prod-hc",
       ).incident_handling,
     ).toEqual({
       host_ops: {
@@ -40,6 +41,7 @@ test("C-153 Needs You says who looks after lost runtimes and how often host_ops 
         patrol_interval_ms: 10 * 60_000,
       },
       pm_office: { assignment_id: "A-91", name: null, mention: "A-91" },
+      hc_session: "prod-hc",
     });
 
     // Default cadence is the 30-minute patrol; inactive standings do not count.

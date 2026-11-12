@@ -71,6 +71,7 @@ const client = fakeClient({
         patrol_interval_ms: 30 * 60_000,
       },
       pm_office: { assignment_id: "A-91", name: null, mention: "A-91" },
+      hc_session: "cardigan",
     },
     incidents: [
       {

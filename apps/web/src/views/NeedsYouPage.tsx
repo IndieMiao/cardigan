@@ -26,6 +26,7 @@ import {
   cliCommand,
   Feedback,
   Markdown,
+  quote,
   TakeoverWarning,
 } from "../components/Operations.js";
 import { PriorityBadge } from "../components/Priority.js";
@@ -732,7 +733,11 @@ function Incident({
   const message = `${viaCard ? `@${office.mention} ` : ""}${incident.id} 运行异常${
     minutes === null ? "" : `超过 ${minutes} 分钟`
   }仍未恢复，请处理。`;
-  const attach = cliCommand(projectId, "assignment attach", incident.id);
+  // C-153: name the hc session the server registered, never a guessed default.
+  const session = handling?.hc_session;
+  const attach = `${cliCommand(projectId, "assignment attach", incident.id)}${
+    session ? ` --hc-session ${quote(session)}` : ""
+  }`;
   return (
     <article
       className="needs-item urgent"
@@ -824,8 +829,10 @@ function Incident({
       <details>
         <summary>主机操作员用</summary>
         <p className="hint">
-          以下命令需要在加载了 Cardigan 运行环境的 shell
-          里执行，普通终端里会报错。
+          以下命令需要在主机上、加载了运行环境的 shell 里执行；用
+          deploy/install-cli.sh 安装的 cardigan 命令会自动加载。
+          {session &&
+            `hc 会话 ${session} 取自 server 登记的运行时（runtime.json）。`}
         </p>
         <CopyCommand label="查看终端（只看不动）" command={attach} />
         <CopyCommand

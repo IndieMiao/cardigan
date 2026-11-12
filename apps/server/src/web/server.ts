@@ -94,6 +94,8 @@ export interface WebServerOptions {
   readonly mergeGate?: MergeGateConfiguration;
   /** C-153: the host_ops patrol cadence Needs You quotes to the human. */
   readonly hostOpsPatrolIntervalMs?: number;
+  /** C-153: the hc session registered in runtime.json, for operator commands. */
+  readonly hcSession?: string;
   /** SSE cadence; tests shorten it, production uses the plan's 500 ms / 15 s. */
   readonly stream?: {
     readonly pollMs?: number;
@@ -130,6 +132,7 @@ interface RequestContext {
   readonly dataDir: string;
   readonly mergeGate: MergeGateConfiguration | undefined;
   readonly hostOpsPatrolIntervalMs: number | undefined;
+  readonly hcSession: string | undefined;
   readonly stream: WebServerOptions["stream"];
   readonly shutdown: AbortSignal;
   /** Only the validated Host and explicit configuration decide cookie flags. */
@@ -251,6 +254,7 @@ export async function startWebServer(
         dataDir,
         mergeGate: options.mergeGate,
         hostOpsPatrolIntervalMs: options.hostOpsPatrolIntervalMs,
+        hcSession: options.hcSession,
         stream: options.stream,
         queueWarningMinutes,
         shutdown: shutdown.signal,
@@ -618,6 +622,7 @@ async function serveProjectRoute(
         now,
         context.mergeGate?.forProject(project_id).status,
         context.hostOpsPatrolIntervalMs,
+        context.hcSession,
       ),
     });
     return;
