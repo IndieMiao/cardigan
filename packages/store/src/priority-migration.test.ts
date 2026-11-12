@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, test, vi } from "vitest";
 import { defaultMigrationsDir, listMigrations, Store } from "./index.js";
 import { priorityMigrationThresholds } from "./priority-migration.js";
+import { latestSchemaVersion } from "./test-support.js";
 
 const dirs: string[] = [];
 const oldValues = [-3, 0, 0.5, 1, 2, 2.5, 3, 4, 5, 99, Number.MAX_VALUE];
@@ -65,11 +66,11 @@ test.each([17, 18])(
           (card) => card.title === "kept" && card.source.decision_id === "Q-7",
         ),
       ).toBe(true);
-      expect(store.schemaVersion()).toBe(19);
+      expect(store.schemaVersion()).toBe(latestSchemaVersion());
       expect(
         store.database
           .prepare(
-            "SELECT version, name FROM schema_version WHERE version >= 18 ORDER BY version",
+            "SELECT version, name FROM schema_version WHERE version BETWEEN 18 AND 19 ORDER BY version",
           )
           .all(),
       ).toEqual([
