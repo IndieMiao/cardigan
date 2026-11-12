@@ -1327,6 +1327,13 @@ export function routeEvent(input: RouteInput): RouteResult {
       // §7.4: the PM-held merge confirmation can be answered once the check is
       // known; a failed or timed-out check on a confirmed merge is PM's to
       // return or recheck unless the card is human-only (P2a-1 §2.6).
+      // C-116: a timeout-only failure was already queued again once; only a
+      // later failure reaches PM.
+      if (
+        (input.event.payload as { auto_rerun?: unknown } | null)?.auto_rerun ===
+        true
+      )
+        break;
       const status = payloadString(input.event.payload, "status");
       const completion = payloadString(input.event.payload, "completion_id");
       const q = input.snapshot.decisions.find((q) => {

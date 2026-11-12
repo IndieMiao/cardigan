@@ -9,6 +9,7 @@ import {
   failedConfirmedMergeCheck,
   failedCurrentMergeCheck,
   latestMergeCheck,
+  timeoutOnly,
 } from "./merge-check.js";
 import { hasVerifiedMergeNoop } from "./merge-preparation.js";
 
@@ -111,19 +112,6 @@ export function pmFailedMergeCheck(state: CommandState, q: Decision) {
     ? check
     : undefined;
 }
-/** C-115 / Q-158: trust structured supervisor results, never log prose. */
-function timeoutOnly(check: MergeCheckView | undefined): boolean {
-  return (
-    !!check &&
-    (check.status === "timed_out" ||
-      (check.status === "failed" &&
-        check.checks.some((c) => c.status === "timed_out"))) &&
-    check.checks.every((c) =>
-      ["passed", "timed_out", "not_run"].includes(c.status),
-    )
-  );
-}
-
 /** Presentation only: human commands and the card detail retain their authority. */
 export function mergeConfirmationWaitingForCheck(
   state: CommandState,

@@ -282,3 +282,80 @@ test.each(
     );
   },
 );
+
+test("C-116: the automatically rerun timeout does not wake PM; the second failure does", async () => {
+  const f = mergeFixture("confirm");
+  const human = { kind: "human", project_id: f.state.project_id } as const;
+  const system = { kind: "system", project_id: f.state.project_id } as const;
+  f.commit(
+    setProjectPreferences(
+      f.state,
+      human,
+      { auto_merge_after_minutes: 1, pm_merge_confirmation: true },
+      f.io,
+    ),
+  );
+  const { completion } = await f.accept();
+  const q = f.state.decisions.findLast(
+    (d) => d.trigger === "merge_confirmation",
+  );
+  if (!q) throw new Error("Missing confirmation");
+  f.commit(
+    recordDecision(
+      f.state,
+      human,
+      {
+        decision_id: q.id,
+        option: "merge",
+        rationale: "合并",
+        raw_quote: "合并",
+      },
+      f.io,
+    ),
+  );
+  const gated = () => ({
+    ...f.state,
+    project_settings: { merge_gate_enabled: true },
+  });
+  const attempt = (attempt_id: string) => {
+    const identity = {
+      card_id: f.card.id,
+      completion_id: completion.id,
+      attempt_id,
+      candidate_sha: "b".repeat(40),
+      tree_sha: "c".repeat(40),
+    };
+    for (const status of ["queued", "running"] as const)
+      f.commit(
+        recordMergeCheck(gated(), system, { ...identity, status }, f.io),
+      );
+    const effect = value(
+      recordMergeCheck(
+        gated(),
+        system,
+        {
+          ...identity,
+          status: "failed",
+          summary: "Test timed out",
+          log_ref: `${attempt_id}.log`,
+          checks: [{ name: "test", status: "failed", exit_code: 1 }],
+          timeout_only: true,
+        },
+        f.io,
+      ),
+    );
+    f.commit({ ok: true, value: effect });
+    const finished = effect.events.find(
+      (e) => e.type === "merge_check_finished",
+    );
+    if (!finished) throw new Error("Missing finished event");
+    return routeEvent({ event: finished, snapshot: f.state }).notifications;
+  };
+  expect(attempt("attempt-1")).toEqual([]);
+  expect(attempt("attempt-2")).toEqual([
+    expect.objectContaining({
+      recipient: { kind: "pm_ops" },
+      summary: expect.stringContaining("退回修改或重新检查"),
+    }),
+  ]);
+});
