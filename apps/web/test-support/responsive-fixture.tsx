@@ -104,6 +104,34 @@ const client = fakeClient({
         last_mcp_activity_at: null,
         cursors: [],
       },
+      // C-159: every other runtime / Assignment status in the same column.
+      ...(
+        [
+          ["not_provisioned", "active"],
+          ["provisioning", "active"],
+          ["idle", "suspended"],
+          ["unknown", "active"],
+          ["lost", "active"],
+          ["released", "released"],
+        ] as const
+      ).map(([runtime_state, status], i) => ({
+        id: `A-${i + 2}`,
+        role_id: "coder",
+        role_version: 1,
+        status,
+        runtime_state,
+        machine_id: "test",
+        standing_mode: null,
+        card_id: card.id,
+        card_status: card.status,
+        work_item_id: `W-${i + 2}`,
+        worktree_path: null,
+        branch: null,
+        session_ref: null,
+        runtime_ref: null,
+        last_mcp_activity_at: null,
+        cursors: [],
+      })),
     ],
     runs: [
       {

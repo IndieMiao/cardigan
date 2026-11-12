@@ -20,6 +20,9 @@ const baseline = execFileSync(
   ],
   { cwd: root, encoding: "utf8" },
 );
+const navAllowance = ".nav a { gap: 8px; }";
+const executionAllowance = `.execution-table th { white-space: nowrap; }
+.execution-status :is(dt, .status) { white-space: nowrap; }`;
 const screenshots = process.env.LAYOUT_SCREENSHOTS;
 if (screenshots) await mkdir(screenshots, { recursive: true });
 const server = await createServer({
@@ -48,7 +51,7 @@ const server = await createServer({
 const routes = [
   ["card", "cards/C-1", ".timeline-load"],
   ["needs-you", "needs-you", ".needs-item"],
-  ["execution", "execution", ".execution-row"],
+  ["execution", "execution?view=all", ".execution-row"],
   ["decision-history", "decision-history", ".needs-item"],
   ["snapshot", "snapshot", ".delivery-table"],
   ["settings", "settings", "#preferences form"],
@@ -235,7 +238,50 @@ try {
             );
             assert(header.fits, `${label}: overflowing header ${header.text}`);
           }
+          // C-159: status labels in the run status column stay on one line.
+          const statuses = await run(() =>
+            Array.from(
+              document.querySelectorAll(
+                ".execution-status dt, .execution-status .status",
+              ),
+              (el) => {
+                const range = document.createRange();
+                range.selectNodeContents(el);
+                const tops = Array.from(range.getClientRects(), (r) => r.top);
+                return {
+                  text: el.textContent,
+                  lines: Math.max(...tops) - Math.min(...tops),
+                };
+              },
+            ),
+          );
+          assert.equal(statuses.length, 28, `${label}: missing status labels`);
+          for (const status of statuses)
+            assert(
+              status.lines <= 1,
+              `${label}: wrapped status ${status.text}`,
+            );
         }
+        // C-159: nav counts keep a gap from their label at every width.
+        const counts = await run(() =>
+          Array.from(document.querySelectorAll(".nav a"), (link) => {
+            const count = link.querySelector(".nav-count");
+            if (!count) return null;
+            const range = document.createRange();
+            range.selectNodeContents(link.firstChild);
+            const text = Array.from(range.getClientRects()).filter(
+              (r) => r.width,
+            );
+            const box = count.getBoundingClientRect();
+            return {
+              text: link.textContent,
+              gap: box.left - Math.max(...text.map((r) => r.right)),
+            };
+          }).filter(Boolean),
+        );
+        assert(counts.length > 0, `${label}: missing nav count`);
+        for (const count of counts)
+          assert(count.gap >= 8, `${label}: nav count too close ${count.text}`);
         await capture(name, width, theme);
         if (width <= 760) {
           assert.equal(
@@ -341,7 +387,8 @@ try {
           }
           if (name === "board") {
             const current = await geometry();
-            await setCss(baseline);
+            // C-159 intentionally separates nav counts from their label.
+            await setCss(`${baseline}\n${navAllowance}`);
             assert.deepEqual(
               await geometry(),
               current,
@@ -352,12 +399,13 @@ try {
           assert(layout.fixed, label);
           assert.equal(layout.main.x, 220, label);
           const current = await geometry();
-          // C-122 intentionally changes header wrapping and column widths.
-          // Keep comparing the full desktop geometry with only that allowance.
+          // C-122 and C-159 intentionally change header and status wrapping
+          // and column widths. Keep comparing the full desktop geometry with
+          // only those allowances.
           await setCss(
             name === "execution"
-              ? `${baseline}\n.execution-table th { white-space: nowrap; }`
-              : baseline,
+              ? `${baseline}\n${navAllowance}\n${executionAllowance}`
+              : `${baseline}\n${navAllowance}`,
           );
           assert.deepEqual(
             await geometry(),
