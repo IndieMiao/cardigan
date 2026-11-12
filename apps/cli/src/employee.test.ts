@@ -145,6 +145,27 @@ test("avatar list exposes all bundled names and employee add/update persist libr
   }
 });
 
+test("CLI cannot reuse a library character reserved by an inactive employee", async () => {
+  expect(await run([...add, "--avatar", "library:guan-yu"])).toBe(0);
+  expect(await run(["deactivate", "E-1"])).toBe(0);
+  const before = snapshot();
+  expect(
+    await run([
+      "add",
+      "--name",
+      "另一位",
+      "--title",
+      "开发",
+      "--role",
+      "coder",
+      "--avatar",
+      "library:guan-yu",
+    ]),
+  ).toBe(2);
+  expect(errors.join("\n")).toContain("人物已被员工");
+  expect(snapshot()).toEqual(before);
+});
+
 test("avatar-file uses content and caller cwd on add/update, deduplicates, and may be cleared", async () => {
   const png = Buffer.from(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",

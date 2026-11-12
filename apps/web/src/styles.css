@@ -3196,6 +3196,86 @@ body[data-lightbox="open"] .drawer-overlay {
 .role-history button {
   margin-left: var(--gap);
 }
+.employee-settings {
+  min-width: 0;
+}
+.employee-form fieldset {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1rem;
+}
+.employee-mode {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  margin-bottom: 0.75rem;
+}
+.employee-fields,
+.employee-search {
+  display: grid;
+  gap: 0.75rem;
+}
+.employee-search {
+  margin-block: 1rem;
+}
+.employee-form label > input:not([type="radio"]),
+.employee-settings .employee-form select,
+.employee-form textarea {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  margin-top: 0.25rem;
+}
+.employee-library {
+  max-height: 25rem;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  padding: 3px;
+}
+.employee-library h3 {
+  margin: 0.75rem 0 0.5rem;
+}
+.employee-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(6rem, 1fr));
+  gap: 0.5rem;
+}
+.employee-person {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 0.25rem;
+  min-width: 0;
+  padding: 0.5rem;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+}
+.employee-person[aria-pressed="true"] {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  background: var(--surface-muted);
+}
+.employee-person:disabled {
+  opacity: 1;
+  color: var(--text-muted);
+  background: var(--surface-muted);
+}
+.employee-person img,
+.employee-preview {
+  border-radius: 50%;
+  object-fit: cover;
+}
+.employee-person:disabled img {
+  filter: grayscale(1);
+}
+.employee-person small {
+  font-size: var(--text-xs);
+}
 @media (max-width: 640px) {
   .settings-layout {
     grid-template-columns: 1fr;

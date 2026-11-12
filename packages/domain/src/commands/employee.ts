@@ -55,6 +55,16 @@ function validate(
   );
   if (employee.avatar !== null)
     field(employee.avatar, "头像引用", undefined, true);
+  if (employee.avatar?.startsWith("library:")) {
+    const occupant = others.find(
+      (other) => other.id !== employee.id && other.avatar === employee.avatar,
+    );
+    ensure(
+      !occupant,
+      "validation_failed",
+      `人物已被员工 ${occupant?.name}（${occupant?.id}）使用，在职和离职员工均占用人物`,
+    );
+  }
   if (employee.launch_profile_ref !== null) {
     field(employee.launch_profile_ref, "启动配置", undefined, true);
     ensure(

@@ -18,3 +18,5 @@
 - 768px 及以上的导航和所有元素几何、关键样式与基线一致；执行视图仅允许 C-122 的列头不换行调整，比较时给基线列头同样加不换行约束。
 
 失败退出码非零。`responsive-fixture.tsx` 只由该测试入口加载，不进入产品构建。
+
+C-161 新建员工单独截图：`pnpm --filter @cardigan/web exec node test-support/employee-screenshots.mjs <输出目录>`。同样通过 `CHROMIUM_PATH` 指定浏览器；`EMPLOYEE_BASELINE_REF` 默认 `origin/main`，应指定实现起点提交以复现改前截图。仅加载设置页夹具与实际人物库，在 1440px、390px 及亮暗主题下输出改前新建角色、改后人物选择、自定义头像表单共 12 张图，并检查页面无水平溢出。不启动业务服务、不写正式员工。
