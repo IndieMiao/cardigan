@@ -553,10 +553,10 @@ function CardTable({
               {display.number && (
                 <td>
                   <IdTag id={card.id} label="卡片" detail={card.title} />
-                  <PriorityBadge value={card.priority} />
                 </td>
               )}
               <td>
+                <PriorityBadge value={card.priority} />{" "}
                 <a
                   className="card-table-title"
                   href={cardHref(projectId, card)}
