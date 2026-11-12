@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import { once } from "node:events";
 import {
   chmod,
   mkdir,
@@ -19,6 +20,9 @@ import {
   type ExecutionConfig,
 } from "@cardigan/runtime-herdr";
 import { afterEach, expect, test, vi } from "vitest";
+import { CHECKOUT_LIMITS } from "./checkout-limits.js";
+import { sweepCheckoutOrphans } from "./checkout-orphans.js";
+import { CHECKOUT_WORKER } from "./checkout-worker.js";
 import {
   type CheckoutInput,
   runInTemporaryCheckout,
@@ -781,6 +785,37 @@ async function remoteFixture() {
   };
 }
 
+test.each([true, false])(
+  "orphan sweep audits only fixed records and requires the completion trailer (complete=%s)",
+  async (complete) => {
+    const f = await remoteFixture();
+    const audit = vi.fn();
+    const output =
+      "untrusted raw diagnostic\norphan 10 100 SIGTERM sent\n" +
+      (complete ? "sweep-complete\n" : "");
+    const sweep = sweepCheckoutOrphans(
+      f.execution,
+      audit,
+      (file, args, env) => {
+        expect(file).toBe("ssh");
+        expect(args).toContain("agent@cardigan-ci");
+        expect(env).toEqual({ PATH: AGENT_PATH });
+        return spawn(
+          process.execPath,
+          [
+            "-e",
+            `process.stdout.write(${JSON.stringify(output)}); process.stderr.write('private SSH diagnostic');`,
+          ],
+          { env, stdio: ["pipe", "pipe", "pipe"] },
+        );
+      },
+    );
+    if (complete) await expect(sweep).resolves.toBeUndefined();
+    else await expect(sweep).rejects.toThrow("远程检查孤儿巡检失败");
+    expect(audit.mock.calls).toEqual([["orphan 10 100 SIGTERM sent"]]);
+  },
+);
+
 test.skipIf(process.platform !== "linux")(
   "a remote executor prepares, runs and cleans up the checkout entirely over its SSH entry",
   async () => {
@@ -810,6 +845,106 @@ test.skipIf(process.platform !== "linux")(
     const lock = await stat(join(f.execution.agentRoot, "merge-check-1.lock"));
     expect([lock.mode & 0o777, lock.size]).toEqual([0o444, 0]);
     await f.clean();
+  },
+);
+
+test.skipIf(process.platform !== "linux")(
+  "a worker with no handshake exits and releases its flock",
+  async () => {
+    const f = await fixture();
+    const lock = join(f.root, "handshake.lock");
+    const script = `const schedule = setTimeout; global.setTimeout = (fn, ms) => schedule(fn, ms === ${CHECKOUT_LIMITS.handshakeMs} ? 50 : ms);\n${CHECKOUT_WORKER}`;
+    const child = spawn(
+      "flock",
+      ["--exclusive", "--no-fork", lock, process.execPath, "-e", script],
+      { stdio: ["pipe", "pipe", "pipe"] },
+    );
+    try {
+      // Keep stdin open without a line, reproducing the orphaned SSH pipe.
+      expect((await once(child, "close"))[0]).toBe(124);
+      await expect(
+        exec("flock", ["--nonblock", lock, "true"]),
+      ).resolves.toMatchObject({ stderr: "" });
+    } finally {
+      child.kill("SIGKILL");
+    }
+  },
+);
+
+test.skipIf(process.platform !== "linux")(
+  "a remote total timeout removes the checkout and Git registration",
+  async () => {
+    const f = await remoteFixture();
+    await f.provision("merge-check.lock");
+    const result = await runInTemporaryCheckout(
+      {
+        ...f.input,
+        serialize: true,
+        totalTimeoutMs: 500,
+        checks: [{ name: "wait", run: node("setInterval(() => {}, 1000)") }],
+      },
+      f.ssh(),
+    );
+    expect(result).toMatchObject({ status: "timed_out", cleanup_errors: [] });
+    await f.clean();
+  },
+);
+
+test.skipIf(process.platform !== "linux")(
+  "an occupied remote slot times out without starting checks or falling back",
+  async () => {
+    const f = await remoteFixture();
+    await f.provision("merge-check.lock");
+    const holder = spawn(
+      "flock",
+      [
+        "--exclusive",
+        "--no-fork",
+        join(f.execution.agentRoot, "merge-check.lock"),
+        process.execPath,
+        "-e",
+        "console.log('locked'); process.stdin.resume()",
+      ],
+      { stdio: ["pipe", "pipe", "pipe"] },
+    );
+    const closed = once(holder, "close");
+    try {
+      await once(holder.stdout, "data");
+      const onReady = vi.fn();
+      const ssh = f.ssh();
+      const result = await runInTemporaryCheckout(
+        { ...f.input, serialize: true, onReady },
+        (file, args, env) => {
+          const command = args.at(-1) ?? "";
+          if (command.includes("'flock'"))
+            expect(command).toContain(
+              `'--wait' '${CHECKOUT_LIMITS.lockWaitMs / 1000}'`,
+            );
+          return ssh(
+            file,
+            [
+              ...args.slice(0, -1),
+              command.replace(
+                `'--wait' '${CHECKOUT_LIMITS.lockWaitMs / 1000}'`,
+                "'--wait' '0.05'",
+              ),
+            ],
+            env,
+          );
+        },
+      );
+      expect(result).toMatchObject({
+        status: "executor_unreachable",
+        checks: [],
+        cleanup_errors: [],
+      });
+      expect(onReady).not.toHaveBeenCalled();
+      expect(f.calls).toHaveLength(3);
+      await f.clean();
+    } finally {
+      holder.kill("SIGKILL");
+      await closed;
+    }
   },
 );
 

@@ -11,11 +11,13 @@ import {
 import type { CentralProject, PreparedMerge } from "@cardigan/git-service";
 import {
   acquireMergeCheckCapacity,
+  CHECKOUT_LIMITS,
   type CheckoutInput,
   type CheckoutResult,
   loadMergeGateConfig,
   type ProjectMergeGate,
   runCapacitySnapshot,
+  type sweepCheckoutOrphans,
 } from "@cardigan/host";
 import { afterEach, expect, test, vi } from "vitest";
 import {
@@ -128,6 +130,7 @@ function controller(f: M4Fixture) {
   };
   const errors = vi.fn();
   const options = {
+    sweep: vi.fn<typeof sweepCheckoutOrphans>(async () => {}),
     store: f.store,
     execution: { mode: "local" as const, dataDir: f.dataDir },
     git,
@@ -1196,6 +1199,135 @@ const remoteSettings = (): ProjectMergeGate => ({
   env: {},
   totalTimeoutMs: 1000,
   executor: ciExecutor(1),
+});
+
+test("C-164: a stuck running check times out, frees the project lane and rejects late callbacks", async () => {
+  const { f, check } = await fixture("auto");
+  const later = m4Scenario(f, "auto");
+  const { completion } = await acceptThroughMergeGate(f, later, "a".repeat(40));
+  const c = controller(f);
+  const started = Promise.withResolvers<CheckoutInput>();
+  const stuck = Promise.withResolvers<CheckoutResult>();
+  c.run.mockImplementationOnce((input) => {
+    input.onReady?.();
+    started.resolve(input);
+    return stuck.promise;
+  });
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    const round = c.gate.tick([f.project_id]);
+    const input = await started.promise;
+    expect(check()?.status).toBe("running");
+    await vi.advanceTimersByTimeAsync(1000 + CHECKOUT_LIMITS.graceMs - 1);
+    expect(check()?.status).toBe("running");
+    expect(c.run).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(input.signal?.aborted).toBe(true);
+    // An executor that ignores abort cannot reclaim the released slot or write to the closed log.
+    input.onReady?.();
+    input.onOutput?.("test", "late output");
+    stuck.resolve(passed);
+    await round;
+    await c.gate.idle();
+    expect(check()?.status).toBe("timed_out");
+    expect(
+      latestMergeCheck(f.state().events, later.card.id, completion.id)?.status,
+    ).toBe("passed");
+    expect(capacity(f).checks).toEqual({});
+    expect(c.run).toHaveBeenCalledTimes(2);
+    expect(c.git.publish).toHaveBeenCalledOnce();
+    expect(c.errors).not.toHaveBeenCalled();
+  } finally {
+    stuck.resolve(passed);
+    c.gate.stop();
+    vi.useRealTimers();
+  }
+});
+
+test("C-164: shutdown finishes within the grace period even if the executor ignores cancellation", async () => {
+  const { f, check } = await fixture("auto");
+  const c = controller(f);
+  const started = Promise.withResolvers<void>();
+  c.run.mockImplementationOnce((input) => {
+    input.onReady?.();
+    started.resolve();
+    return new Promise(() => {});
+  });
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    const round = c.gate.tick([f.project_id]);
+    await started.promise;
+    c.gate.stop();
+    await vi.advanceTimersByTimeAsync(CHECKOUT_LIMITS.graceMs);
+    await round;
+    await c.gate.idle();
+    expect(check()?.status).toBe("interrupted");
+    expect(capacity(f).checks).toEqual({});
+    expect(c.git.publish).not.toHaveBeenCalled();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("C-164: an executor stuck before ready is requeued as unreachable without acquiring capacity", async () => {
+  const { f, check } = await fixture("auto");
+  const c = controller(f);
+  c.setConfig(remoteSettings());
+  const started = Promise.withResolvers<CheckoutInput>();
+  c.run.mockImplementationOnce((input) => {
+    started.resolve(input);
+    return new Promise(() => {});
+  });
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    const round = c.gate.tick([f.project_id]);
+    const input = await started.promise;
+    await vi.advanceTimersByTimeAsync(1000 + CHECKOUT_LIMITS.graceMs);
+    await round;
+    input.onReady?.();
+    expect(input.signal?.aborted).toBe(true);
+    expect(check()?.status).toBe("queued");
+    expect(
+      f
+        .state()
+        .events.filter((e) => e.type === "merge_check_finished")
+        .at(-1)?.payload,
+    ).toMatchObject({ status: "executor_unreachable" });
+    expect(capacity(f).checks).toEqual({});
+    expect(c.errors).not.toHaveBeenCalled();
+  } finally {
+    c.gate.stop();
+    vi.useRealTimers();
+  }
+});
+
+test("C-164: remote orphan sweeps run at startup and periodically even with no waiting cards", async () => {
+  let now = Date.parse("2030-01-01T00:00:00.000Z");
+  const { f } = await fixture("auto", {
+    clock: { now: () => new Date(now).toISOString() },
+  });
+  const c = controller(f);
+  c.setConfig(remoteSettings());
+  c.options.sweep.mockImplementationOnce(async (_execution, audit) => {
+    audit("orphan 10 100 SIGTERM sent");
+  });
+  await c.gate.tick([f.project_id]);
+  await c.gate.idle();
+  expect(c.options.sweep).toHaveBeenCalledOnce();
+  expect(c.errors).toHaveBeenCalledWith(
+    new Error("远程检查孤儿清理 cardigan-ci: orphan 10 100 SIGTERM sent"),
+  );
+  await c.gate.tick([f.project_id]);
+  expect(c.options.sweep).toHaveBeenCalledOnce();
+  now += CHECKOUT_LIMITS.sweepIntervalMs;
+  await c.gate.tick([f.project_id]);
+  await c.gate.idle();
+  expect(c.options.sweep).toHaveBeenCalledTimes(2);
+  expect(c.options.sweep.mock.calls[0]?.[0]).toMatchObject({
+    mode: "agent-ssh",
+    host: "cardigan-ci",
+  });
+  expect(c.run).toHaveBeenCalledOnce();
 });
 
 test("remote outage survives restart, retains FIFO, escalates after 30 minutes and resumes automatically", async () => {

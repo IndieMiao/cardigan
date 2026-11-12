@@ -29,6 +29,7 @@ import type {
 } from "@cardigan/git-service";
 import {
   acquireMergeCheckCapacity,
+  CHECKOUT_LIMITS,
   classifyExecutorFailure,
   computeChangeScope,
   createMergeCheckLog,
@@ -38,7 +39,9 @@ import {
   mergeCheckCapacityAvailable,
   type ProjectMergeGate,
   runInTemporaryCheckout,
+  sweepCheckoutOrphans,
   type WorkspacePackage,
+  withCheckoutDeadline,
 } from "@cardigan/host";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
@@ -84,6 +87,7 @@ export interface MergeCheckOptions {
   /** Default target; a project's `executor` overrides it (P2a-12 C). */
   readonly execution: ExecutionConfig;
   readonly run?: typeof runInTemporaryCheckout;
+  readonly sweep?: typeof sweepCheckoutOrphans;
 }
 interface Task {
   project: CentralProject;
@@ -104,6 +108,10 @@ export class MergeChecks {
   private readonly lanes = new Map<string, Promise<void>>();
   /** Cards whose check is executing outside the mutex. */
   private readonly active = new Set<string>();
+  private readonly sweeps = new Map<
+    string,
+    { at: number; work: Promise<void> }
+  >();
   /** P2a-12 D: per execution target, which `max_concurrent` slots are held, and priority-ordered waiters. */
   private readonly slots = new Map<
     string,
@@ -138,6 +146,7 @@ export class MergeChecks {
   /** Resolves when no check lane is in flight. */
   async idle(): Promise<void> {
     while (this.lanes.size) await Promise.all(this.lanes.values());
+    await Promise.all([...this.sweeps.values()].map((sweep) => sweep.work));
   }
   private serial<T>(work: () => Promise<T>): Promise<T> {
     const next = this.exclusive.then(work);
@@ -517,49 +526,52 @@ export class MergeChecks {
         connected = true;
         if (!this.valid(task)) throw new Error("Merge target changed");
       });
-      result = await (this.options.run ?? runInTemporaryCheckout)({
-        execution,
-        project: task.project.project_id,
-        attempt: check.attempt_id,
-        sha: check.candidate_sha,
-        tree: check.tree_sha,
-        checks: task.settings.checks.map((step) => ({
-          name: step.name,
-          run: step.run,
-          ...(step.timeoutMs !== undefined
-            ? { timeoutMs: step.timeoutMs }
-            : {}),
-          ...(check.scope?.kind === "docs_only" && step.skipDocsOnly
-            ? { skipReason: "docs_only" as const }
-            : {}),
-          ...(step.scope === "affected"
-            ? {
-                affectedPaths:
-                  check.scope?.kind === "affected"
-                    ? (check.scope.packages ?? [])
-                    : [],
-              }
-            : {}),
-        })),
-        env: task.settings.env,
-        totalTimeoutMs: task.settings.totalTimeoutMs,
-        serialize: true,
-        lockSlot: slot,
-        signal: this.abort.signal,
-        onReady: (owner) => {
-          this.executor(task, "reachable");
-          releaseCapacity = acquireMergeCheckCapacity(
-            this.options.store,
-            task.project.project_id as ProjectId,
-            check.attempt_id,
-            owner,
-            // P2a-12 D: charge the target that actually runs the check.
-            task.settings.executor?.name ?? LOCAL_EXECUTOR,
-          );
-          this.check(task, { ...check, status: "running" });
+      result = await withCheckoutDeadline(
+        {
+          execution,
+          project: task.project.project_id,
+          attempt: check.attempt_id,
+          sha: check.candidate_sha,
+          tree: check.tree_sha,
+          checks: task.settings.checks.map((step) => ({
+            name: step.name,
+            run: step.run,
+            ...(step.timeoutMs !== undefined
+              ? { timeoutMs: step.timeoutMs }
+              : {}),
+            ...(check.scope?.kind === "docs_only" && step.skipDocsOnly
+              ? { skipReason: "docs_only" as const }
+              : {}),
+            ...(step.scope === "affected"
+              ? {
+                  affectedPaths:
+                    check.scope?.kind === "affected"
+                      ? (check.scope.packages ?? [])
+                      : [],
+                }
+              : {}),
+          })),
+          env: task.settings.env,
+          totalTimeoutMs: task.settings.totalTimeoutMs,
+          serialize: true,
+          lockSlot: slot,
+          signal: this.abort.signal,
+          onReady: (owner) => {
+            this.executor(task, "reachable");
+            releaseCapacity = acquireMergeCheckCapacity(
+              this.options.store,
+              task.project.project_id as ProjectId,
+              check.attempt_id,
+              owner,
+              // P2a-12 D: charge the target that actually runs the check.
+              task.settings.executor?.name ?? LOCAL_EXECUTOR,
+            );
+            this.check(task, { ...check, status: "running" });
+          },
+          onOutput: (name, text) => log?.append(name, text),
         },
-        onOutput: (name, text) => log?.append(name, text),
-      });
+        this.options.run ?? runInTemporaryCheckout,
+      );
     } catch (error) {
       const failure = task.settings.executor
         ? classifyExecutorFailure(error)
@@ -717,6 +729,7 @@ export class MergeChecks {
     if (this.abort.signal.aborted) return { done: Promise.resolve() };
     let tasks: Task[];
     try {
+      this.sweep(projects);
       tasks = this.tasks(projects);
     } catch (error) {
       this.report(error);
@@ -769,6 +782,35 @@ export class MergeChecks {
       this.options.onError(error);
     } catch {
       // The reporter failed too; there is nobody left to tell.
+    }
+  }
+  /** Runs at startup and periodically, including when no card can acquire a lane. */
+  private sweep(projects: readonly ProjectId[]): void {
+    for (const project of projects) {
+      const settings = this.options.configuration.forProject(project);
+      if (settings.status !== "enabled" || !settings.executor) continue;
+      const name = settings.executor.name;
+      const at = Date.parse(this.options.clock.now());
+      const previous = this.sweeps.get(name);
+      if (previous && at - previous.at < CHECKOUT_LIMITS.sweepIntervalMs)
+        continue;
+      const execution = executorExecution(
+        settings.executor,
+        this.options.execution,
+      );
+      const entry = { at: Number.POSITIVE_INFINITY, work: Promise.resolve() };
+      this.sweeps.set(name, entry);
+      entry.work = (this.options.sweep ?? sweepCheckoutOrphans)(
+        execution,
+        (record) =>
+          this.report(new Error(`远程检查孤儿清理 ${name}: ${record}`)),
+      )
+        .catch(() =>
+          this.report(new Error(`远程检查孤儿巡检失败（${name}），下轮重试`)),
+        )
+        .finally(() => {
+          entry.at = Date.parse(this.options.clock.now());
+        });
     }
   }
   private key(task: Task): string {

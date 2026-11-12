@@ -1,5 +1,12 @@
+import {
+  CHECKOUT_HANDSHAKE_TITLE,
+  CHECKOUT_LIMITS,
+} from "./checkout-limits.js";
+
 /** Trusted supervisor executed as the checkout owner, never from the checked-out tree. */
 export const CHECKOUT_WORKER = String.raw`
+process.title = '${CHECKOUT_HANDSHAKE_TITLE}';
+const handshakeDeadline = setTimeout(() => process.exit(124), ${CHECKOUT_LIMITS.handshakeMs});
 const { spawn } = require('node:child_process');
 const { createHmac } = require('node:crypto');
 const { chmod, lstat, mkdir, readFile, readdir, readlink, realpath, rm, symlink } = require('node:fs/promises');
@@ -12,13 +19,18 @@ let cancelled = false, current, deadline, totalExpired = false, nonce, authKey;
 // including in the final result: learning the returned nonce must not permit re-signing it.
 const emit = value => process.stdout.write(JSON.stringify({ ...value,
   auth: createHmac('sha256', authKey).update(JSON.stringify(value)).digest('hex') }) + '\n');
-const cancel = () => { cancelled = true; current?.('interrupted'); };
+const cancel = () => {
+  if (authKey === undefined) process.exit(124);
+  cancelled = true; current?.('interrupted');
+};
 input.on('close', cancel);
 process.on('SIGTERM', cancel);
 process.on('SIGINT', cancel);
 process.on('SIGHUP', cancel);
 process.stdout.on('error', cancel);
 input.once('line', line => {
+  clearTimeout(handshakeDeadline);
+  process.title = 'cardigan-check-running-v1';
   input.on('line', cancel);
   const payload = JSON.parse(line);
   nonce = payload.nonce;
