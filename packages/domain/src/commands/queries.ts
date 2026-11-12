@@ -29,6 +29,7 @@ import { hasActivePmOps, isPmOps } from "./delegation.js";
 import { availableWorkItemEmployees } from "./employee-assignment.js";
 import { failedConfirmedMergeCheck, latestMergeCheck } from "./merge-check.js";
 import {
+  mergeCheckEndedWithoutPass,
   mergeConfirmationWaitingForCheck,
   pmFailedMergeCheck,
   pmFailedMergeCheckOptions,
@@ -444,6 +445,11 @@ export function needsYouView(d: CommandDraft, now?: string) {
           !!failedConfirmedMergeCheck(state, q)) &&
         mergeConfirmationWaitingForCheck(state, q),
     );
+  // C-171: an ended, unpassed check will not pass by itself, so the human
+  // sees that confirmation in the list; only queued/running ones stay summarized.
+  const humanWaiting = waiting.filter(
+    (q) => !mergeCheckEndedWithoutPass(state, q),
+  );
   const why = (text: string) => [...text].slice(0, 40).join("");
   const view = (q: Decision) => decisionActionView(state, q, now);
   return {
@@ -542,9 +548,23 @@ export function needsYouView(d: CommandDraft, now?: string) {
             )) ||
           decisionFollowupNeedsHuman(state, q),
       )
-      .filter((q) => !mergeConfirmationWaitingForCheck(state, q))
+      .filter(
+        (q) =>
+          !mergeConfirmationWaitingForCheck(state, q) ||
+          !!mergeCheckEndedWithoutPass(state, q),
+      )
       .map(view),
-    waiting_merge_checks_count: waiting.length,
+    waiting_merge_checks_count: humanWaiting.length,
+    // C-171: which confirmations the summary counts, so the human can open them.
+    waiting_merge_check_items: humanWaiting.map((q) => ({
+      decision_id: q.id,
+      card_id: q.card_id ?? null,
+      check_status:
+        q.card_id && q.kind === "approve" && "delivery_id" in q.target
+          ? (latestMergeCheck(state.events, q.card_id, q.target.delivery_id)
+              ?.status ?? null)
+          : null,
+    })),
     // §7.4 (C-65): merge confirmations PM Ops still holds. Not counted as
     // waiting on the human, but the human may answer them directly.
     pm_held_merges:

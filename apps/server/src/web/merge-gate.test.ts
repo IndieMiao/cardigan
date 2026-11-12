@@ -180,6 +180,16 @@ test("C-115: queued and running confirmations become human tasks only after pass
     ).toBe(visible);
     expect(needs.json).toMatchObject({
       waiting_merge_checks_count: visible ? 0 : 1,
+      // C-171: the summary names the card and confirmation it counts.
+      waiting_merge_check_items: visible
+        ? []
+        : [
+            {
+              decision_id: "Q-2",
+              card_id: "C-2",
+              check_status: status ?? null,
+            },
+          ],
     });
     expect((await read("/cards/C-2")).json).toMatchObject({
       decisions: expect.arrayContaining([
@@ -194,7 +204,7 @@ test.each(
     (["open", "human", "pm"] as const).map((source) => ({ status, source })),
   ),
 )(
-  "$status ($source confirmation) waits outside Needs You and is rechecked once from its card",
+  "$status ($source confirmation) is listed in Needs You and is rechecked once from its card",
   async ({ status, source }) => {
     if (source !== "open") {
       h.store.uow.run((tx) => {
@@ -233,13 +243,21 @@ test.each(
     record("queued");
     record("running");
     record(status);
+    // C-171: the check will not pass by itself, so the human sees it listed.
     const needs = await read("/needs-you");
-    expect(needs.json).toMatchObject({ waiting_merge_checks_count: 1 });
-    expect(
-      (needs.json as { decisions: { id: string }[] }).decisions.some(
-        (q) => q.id === "Q-2",
-      ),
-    ).toBe(false);
+    expect(needs.json).toMatchObject({
+      waiting_merge_checks_count: 0,
+      waiting_merge_check_items: [],
+      decisions: expect.arrayContaining([
+        expect.objectContaining({
+          id: "Q-2",
+          merge_confirmation: expect.objectContaining({
+            merge_gate_enabled: true,
+            merge_check: expect.objectContaining({ status }),
+          }),
+        }),
+      ]),
+    });
     const detail = await read("/cards/C-2");
     expect(detail.json).toMatchObject({
       merge_confirmations: [
@@ -330,12 +348,18 @@ test("disabled gates stay unchanged; invalid gates expose only a safe flag", asy
     expect(needs.body).not.toContain('"merge_gate_enabled"');
     expect(needs.body).not.toContain("private-config-fixture");
     if (setting.status === "invalid") {
-      expect(needs.json).toMatchObject({ waiting_merge_checks_count: 1 });
-      expect(
-        (needs.json as { decisions: { id: string }[] }).decisions.some(
-          (q) => q.id === "Q-2",
-        ),
-      ).toBe(false);
+      // C-171: a failed check is listed (with the invalid-gate flag), not summarized.
+      expect(needs.json).toMatchObject({
+        waiting_merge_checks_count: 0,
+        decisions: expect.arrayContaining([
+          expect.objectContaining({
+            id: "Q-2",
+            merge_confirmation: expect.objectContaining({
+              merge_gate_invalid: true,
+            }),
+          }),
+        ]),
+      });
       expect((await read("/cards/C-2")).body).not.toContain(
         "private-config-fixture",
       );

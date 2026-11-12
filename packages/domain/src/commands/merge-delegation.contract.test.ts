@@ -1504,16 +1504,30 @@ test.each([
       project_settings: { merge_gate_enabled: true },
     };
     const needs = value(listNeedsYou(state, human)).data;
-    const visible = status === "passed";
+    // C-171: ended checks (failed, timed out, interrupted) never pass by
+    // themselves, so the human sees them listed; queued/running are summarized.
+    const visible = !!status && !["queued", "running"].includes(status);
     expect(needs.decisions.some((q) => q.id === confirmation().id)).toBe(
       visible,
     );
     expect(needs.waiting_merge_checks_count).toBe(visible ? 0 : 1);
+    expect(needs.waiting_merge_check_items).toEqual(
+      visible
+        ? []
+        : [
+            {
+              decision_id: confirmation().id,
+              card_id: f.card.id,
+              check_status: status ?? null,
+            },
+          ],
+    );
+    // PM Ops' queue keeps every human confirmation whose check has not passed.
     expect(
       value(
         listNeedsYou(state, opsActor),
       ).data.pm_queue?.waiting_merge_checks.map((q) => q.id),
-    ).toEqual(visible ? [] : [confirmation().id]);
+    ).toEqual(status === "passed" ? [] : [confirmation().id]);
     // Disabled projects and direct human commands retain their behavior.
     expect(humanPending(f.state)).toContain(confirmation().id);
     expect(
@@ -1790,6 +1804,15 @@ test("PM Ops rechecks a timed-out confirmed merge once, then returns it after an
     }),
   ]);
   expect(humanPending(f.state)).not.toContain(q.id);
+  // C-171: with the gate on, PM Ops' failure is neither listed nor summarized.
+  const gated = value(
+    listNeedsYou(
+      { ...f.state, project_settings: { merge_gate_enabled: true } },
+      human,
+    ),
+  ).data;
+  expect(gated.decisions.map((d) => d.id)).not.toContain(q.id);
+  expect(gated.waiting_merge_checks_count).toBe(0);
   // A confirmed merge cannot be merged or held again by PM.
   expect(pmResolve("hold", { notice: "n" }).ok).toBe(false);
   expect(pmResolve("recheck").ok).toBe(false);

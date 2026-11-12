@@ -135,6 +135,36 @@ export function mergeConfirmationWaitingForCheck(
   );
 }
 
+/**
+ * C-171: the current completion's latest check ended without passing (failed,
+ * timed out, interrupted or executor unreachable). It will not pass on its
+ * own, so Needs You lists the confirmation instead of the waiting summary.
+ * Presentation only; authority stays with the decision and recheck commands.
+ */
+export function mergeCheckEndedWithoutPass(
+  state: CommandState,
+  q: Decision,
+): MergeCheckView | undefined {
+  if (
+    !mergeConfirmationWaitingForCheck(state, q) ||
+    !q.card_id ||
+    q.kind !== "approve" ||
+    !("delivery_id" in q.target)
+  )
+    return undefined;
+  const cardId = q.card_id;
+  const context = attempt(() => mergeContext(state, cardId));
+  if (!context.ok || context.value.target.id !== q.target.delivery_id)
+    return undefined;
+  const check = latestMergeCheck(state.events, cardId, q.target.delivery_id);
+  return check &&
+    ["failed", "timed_out", "interrupted", "executor_unreachable"].includes(
+      check.status,
+    )
+    ? check
+    : undefined;
+}
+
 export function pmFailedMergeCheckOptions(state: CommandState, q: Decision) {
   return mergeRequiresHuman(state, q)
     ? ["recheck"]

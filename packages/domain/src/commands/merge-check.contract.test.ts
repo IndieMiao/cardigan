@@ -944,9 +944,11 @@ for (const approval of ["open", "human", "delegated"] as const) {
       record("queued");
       record("running");
       record(status);
+      // C-171: an ended, unpassed check is listed for the human, not summarized.
       const needs = value(listNeedsYou(state(), human)).data;
-      expect(needs.decisions.map((q) => q.id)).not.toContain(decision.id);
-      expect(needs.waiting_merge_checks_count).toBe(1);
+      expect(needs.decisions.map((q) => q.id)).toContain(decision.id);
+      expect(needs.waiting_merge_checks_count).toBe(0);
+      expect(needs.waiting_merge_check_items).toEqual([]);
       // C-115 only changes presentation; the human return below is still authorized.
       const params = {
         decision_id: decision.id,

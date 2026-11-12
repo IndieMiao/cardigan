@@ -541,7 +541,7 @@ C-46：已确认合并（人工确认或超时代批）的当前完成申请，�
 
 C-66（试行发现 43）：当前完成申请的最新检查为 `failed` 或 `timed_out` 时，PM Ops 也可经 `resolve_delegated_decision` 处理，范围为交给 PM 的 open 确认和任何已确认为 `merge` 的确认（人确认、PM 代确认或超时代批，不论 `decider`）。选 `request_changes` 时与人走同一迁移：open 确认按普通退回修改解决，已确认的确认调用与人相同的退回函数（`merge_changes_requested`、旧完成申请 supersede、确认标记为 `superseded` 并保留原授权）；选 `recheck` 时调用与人相同的重新排队逻辑写 `merge_check_requeued`。两者 `rationale`（失败用例、真实问题或偶发的判断）和 `notice` 均必填，事件带 `via=delegated`、`notice` 和 `proxy_authority=project:<id>/pm-ops-merge-check-failure`。C-115 / Q-158 选项 A：卡片涉及 D12 四类或需求范围变化、被人标为敏感（C-65），或确认已交人（`human_required_reason`，含安全相关、对外发布的升级）时，PM 不能退回或代确认合并；只允许对明确的超时失败 `recheck`，判断复用 `mergeRequiresHuman`，适用于 open/provisional 和已确认合并。超时规则只认系统检查的结构化结果：总状态为 `timed_out`，或总状态为 `failed` 且至少一步为 `timed_out`；所有步骤必须为 `passed/timed_out/not_run`，混有 `failed/interrupted` 一律拒绝。总超时允许无步骤结果；摘要或日志中的 timeout 文本不构成授权（包括测试框架内部的 5 秒超时，若步骤仅记录 failed，仍不授权）。不新增自动重试或改变调度。已确认项检查失败时 PM 只能 `request_changes`、`recheck` 或 `escalate`；检查通过、排队、运行、缺失或中断时同样拒绝。
 
-C-79：上述失败检查的 PM 处理也受当前 `pm_merge_confirmation` 偏好约束。关闭时，已确认合并不进入 `pm_queue.failed_merge_checks`，不因检查失败或随后确认而通知 PM 接手，PM 的退回和重查命令同样拒绝；人可在卡片详情处理该确认，保留“退回修改”和“重新检查”；启用闸门时，Needs You 按 C-115 等检查通过才展示。覆盖人确认、PM 代确认和超时代批，不以历史 `decider` 排除记录；切换偏好不改写原合并授权。开启时沿用 C-66，既有敏感／高风险／需求范围变化及主动交人规则、超时自动合并授权不变。
+C-79：上述失败检查的 PM 处理也受当前 `pm_merge_confirmation` 偏好约束。关闭时，已确认合并不进入 `pm_queue.failed_merge_checks`，不因检查失败或随后确认而通知 PM 接手，PM 的退回和重查命令同样拒绝；人可在卡片详情处理该确认，保留“退回修改”和“重新检查”；启用闸门时，Needs You 按 C-171 列出检查已结束未通过的确认。覆盖人确认、PM 代确认和超时代批，不以历史 `decider` 排除记录；切换偏好不改写原合并授权。开启时沿用 C-66，既有敏感／高风险／需求范围变化及主动交人规则、超时自动合并授权不变。
 
 C-47：完成申请经冲突、退回修改、新完成申请或新产出交付取代而作废时，在同一事务内将所有绑定该申请且仍为 `open` 的 `merge_confirmation` 标记为 `superseded`；不代填 merge、hold 或 request_changes，也不改写已经 resolved 的历史决定。人主动选择退回所记录的决定及 C-46 的显式撤回规则仍按原流程处理。每个自动关闭的确认写入 `decision_superseded` 事件（关联确认及完成申请）和系统时间线说明，Needs You 随状态更新移除。新版完成申请在旧版本及其未决确认作废后校验前置条件；校验失败时全部回滚，其他阻塞照常生效。新申请验收通过后生成自己的新确认，旧确认不再阻塞它。
 
@@ -1121,6 +1121,8 @@ P2-V V5 在 Workbench 统一使用员工身份组件：圆形头像、名字和�
 ### 8.2 Needs You（常驻）
 
 C-115：启用闸门时，交人的合并确认在当前完成申请最新检查为 `passed`，或主机已验证当前申请为 noop（交付均已在基线中、无需检查）后进入待拍板；无结果、排队、运行、失败、超时、中断及配置无效时均隐藏，并返回 `waiting_merge_checks_count`，界面显示“还有 N 条合并确认在等检查”，不计入待办数量。已确认但检查失败的记录同样不进入待办。新申请或新候选排队不能复用旧通过结果。Web、MCP 和 CLI 从可信主机配置传入项目设置，使用相同领域查询；检查通过后随原有刷新自动出现。未启用闸门行为不变。卡片详情通过 `merge_confirmations` 提供当前有效完成申请的可操作确认（open/provisional，或已确认 merge 且最新检查失败/超时）；历史、被取代的申请不提供控件。页面“合并处理”复用 Needs You 的确认、暂缓、退回和重新检查表单：退回理由必填，重查携带 completion_id，成功刷新，过期请求展示服务端错误。人的提前确认、退回、重新检查权限不变。PM Ops 的 `pm_queue.waiting_merge_checks` 保留等待中的人工确认；`failed_merge_checks.options` 仅列实际授权的操作，敏感或已交人的超时仅列 `recheck`；此队列不改变确认的 decider 和已有授权。
+
+C-171：上文“失败、超时、中断时隐藏”改为列出。当前完成申请的最新检查已结束但没有通过（`failed`、`timed_out`、`interrupted`、`executor_unreachable`）时，检查不会自己变成通过，交人的合并确认和已确认但检查失败、且不由 PM Ops 接手的记录直接进入 Needs You 的待拍板，并显示检查结果；按钮不变（“确认合并”照常显示，检查通过后才会合并；“退回修改”“暂不合并”照常，失败或超时另有“重新检查”），失败或超时时提示“合并检查：未通过……”，中断时提示主机恢复后会自动重新排队。只有无结果、排队、运行中（含重查后重新排队）的确认仍只计入汇总：`waiting_merge_checks_count` 只计这些，另返回 `waiting_merge_check_items`（`decision_id`、`card_id`、`check_status`），Web 汇总提示逐条列出“卡号 · Q 编号”并链接到卡片详情的拍板位置（`?at=decision-<Q-n>`），CLI `needs-you` 汇总行（同样写“检查结束后会出现在这里”）列出卡号、Q 编号和检查状态，列出的失败或超时确认附 `merge request-changes`／`merge recheck` 命令提示。PM Ops 的 `pm_queue.waiting_merge_checks` 不变，仍包含所有检查未通过的人工确认。只改展示，不改合并确认由谁来点和检查失败后的状态机。
 
 P2a-13 B 组合入后，启用合并队列的项目：交人的合并确认在当前完成申请的**卡级**快速检查通过（或主机已验证 noop）后进入待拍板，附卡级检查结果（检查范围、逐项结果，并说明卡级检查不跑 e2e）；按钮文字为“确认合并（批次检查通过后生效）”。确认后从待拍板移出；批次失败定位到本卡时，按已确认失败的规则作为新事项重新出现，提供退回修改和重新检查。
 

@@ -457,7 +457,8 @@ export interface MergeCheckView {
     | "passed"
     | "failed"
     | "timed_out"
-    | "interrupted";
+    | "interrupted"
+    | "executor_unreachable";
   readonly scope?: {
     readonly kind: "docs_only" | "affected" | "full";
     readonly packages?: readonly string[];
@@ -546,6 +547,12 @@ export interface NeedsAction
 }
 export interface NeedsPage {
   readonly waiting_merge_checks_count?: number;
+  /** C-171: the confirmations the waiting summary counts (queued or running). */
+  readonly waiting_merge_check_items?: readonly {
+    readonly decision_id: string;
+    readonly card_id: string | null;
+    readonly check_status: MergeCheckView["status"] | null;
+  }[];
   readonly attention?: readonly {
     readonly kind: "review_limit_not_resumed";
     readonly card_id: string;

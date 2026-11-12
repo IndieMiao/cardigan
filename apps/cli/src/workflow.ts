@@ -1109,7 +1109,7 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
         const needs = unwrap(listNeedsYou(state, actor)).data;
         return {
           held: needs.pm_held_merges,
-          waiting: needs.waiting_merge_checks_count,
+          waiting: needs.waiting_merge_check_items,
           decisions: needs.decisions.map((q) => ({
             ...q,
             merge_noop:
@@ -1139,9 +1139,15 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
       gate.status === "invalid"
         ? ["合并闸门配置无效，请查看 server 启动日志"]
         : [];
-    const waitingLines = waiting
+    // C-171: name what the summary counts so the human can find it.
+    const waitingLines = waiting.length
       ? [
-          `还有 ${waiting} 条合并确认在等检查；检查通过后会出现，可到卡片详情处理。`,
+          `还有 ${waiting.length} 条合并确认的检查在排队或运行中，检查结束后会出现在这里：${waiting
+            .map(
+              (w) =>
+                `${w.card_id ? `${w.card_id} ` : ""}${w.decision_id}${w.check_status ? `（${checkLabels[w.check_status]}）` : ""}`,
+            )
+            .join("、")}`,
         ]
       : [];
     // §7.4 (C-65): not waiting on the human, but answerable directly.
@@ -1203,6 +1209,14 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
                   decision.merge_noop
                     ? "    交付已在基线中，无需合并检查"
                     : `    合并检查：${check ? checkLabels[check.status] : "排队"}`,
+                  ...(!decision.merge_noop &&
+                  decision.card_id &&
+                  check &&
+                  ["failed", "timed_out"].includes(check.status)
+                    ? [
+                        `    检查未通过，不会自己变成通过：cardigan merge request-changes ${decision.card_id} --reason <原因>，偶发失败可 cardigan merge recheck ${decision.card_id}`,
+                      ]
+                    : []),
                 ]
               : []),
             ...(decision.trigger === "merge_confirmation" &&

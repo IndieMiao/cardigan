@@ -36,6 +36,7 @@ import { RequestFeedback } from "../components/RequestFeedback.js";
 import { decisionTitle, delegableCategories } from "../decision-labels.js";
 import { PRE_MERGE_COPY } from "../pre-merge-copy.js";
 import { routeHash } from "../route.js";
+import { statusLabel } from "../status.js";
 import { useResource } from "../useResource.js";
 
 const waitLabel = (ms: number | null, elapsed = 0) => {
@@ -467,6 +468,22 @@ export function MergeConfirmation({
       {merge?.merge_gate_enabled && !merge.merge_noop && (
         <MergeCheck check={check ?? null} projectId={projectId} live />
       )}
+      {merge?.merge_gate_enabled &&
+        !merge.merge_noop &&
+        check &&
+        ["failed", "timed_out"].includes(check.status) && (
+          <p className="hint" role="note">
+            合并检查：未通过。检查不会自己变成通过，请退回修改；确认是偶发失败的，可以重新检查。
+          </p>
+        )}
+      {merge?.merge_gate_enabled &&
+        !merge.merge_noop &&
+        check &&
+        ["interrupted", "executor_unreachable"].includes(check.status) && (
+          <p className="hint" role="note">
+            合并检查：已中断。主机恢复后会自动重新排队；也可以先退回修改或暂不合并。
+          </p>
+        )}
       <section className="needs-merge-section" aria-label="要合并的交付">
         <h4>要合并的交付</h4>
         {!merge || merge.deliveries.length === 0 ? (
@@ -1045,10 +1062,37 @@ function NeedsContent({
       {data && (
         <>
           {!!data.waiting_merge_checks_count && (
-            <p className="hint" role="status">
-              还有 {data.waiting_merge_checks_count}{" "}
-              条合并确认在等检查。检查通过后会出现在这里，也可以到卡片详情查看和处理。
-            </p>
+            <div className="hint" role="status">
+              <p>
+                还有 {data.waiting_merge_checks_count}{" "}
+                条合并确认的检查在排队或运行中，检查结束后会出现在这里；也可以先到卡片详情处理：
+              </p>
+              {!!data.waiting_merge_check_items?.length && (
+                <ul aria-label="等检查的合并确认">
+                  {data.waiting_merge_check_items.map((item) => (
+                    <li key={item.decision_id}>
+                      {item.card_id ? (
+                        <a
+                          href={routeHash({
+                            kind: "card",
+                            projectId,
+                            cardId: item.card_id,
+                            anchor: `decision-${item.decision_id}`,
+                          })}
+                        >
+                          {item.card_id} · {item.decision_id}
+                        </a>
+                      ) : (
+                        <span>{item.decision_id}</span>
+                      )}
+                      {item.check_status && (
+                        <span>（{statusLabel(item.check_status)}）</span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
           )}
           {total === 0 && (
             <EmptyState>
