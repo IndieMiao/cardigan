@@ -174,6 +174,12 @@ export function fakeClient(
       waiting: { human: [], agent: [] },
       recent_deliveries: [],
     }),
+    executionCapacity: async () => ({
+      agents: [],
+      merge_checks: [],
+      merge_config_invalid: false,
+    }),
+    setRunLimit: async () => {},
     execution: async () => ({ assignments: [], runs: [], machines: [] }),
     // Pages the overridden execution view's Runs like the server does, so a
     // test that only fakes `execution` still sees the drawer's Run history.

@@ -628,7 +628,7 @@ test("history distinguishes system auto-approval from PM and keeps a resolved de
 });
 
 test.each([true, false])(
-  "delegated completion preserves employee separation (same employee=%s)",
+  "a template's human completion review is never delegated to PM Ops (same employee=%s)",
   async (sameEmployee) => {
     const f = setup();
     const template = {
@@ -680,20 +680,22 @@ test.each([true, false])(
     }
     const q = state.decisions.at(-1);
     if (!q) throw new Error("Missing completion decision");
+    // C-104 security review: feature_detail is delegable by default, but the
+    // template names the human as reviewer, so PM Ops never takes it over.
     expect(q).toMatchObject({
       trigger: "completion_review",
       category: "feature_detail",
-      decider: "role:pm",
+      decider: "human",
+      human_required_reason: expect.any(String),
     });
-    const result = resolveDelegatedDecision(
-      state,
-      f.pm,
-      { decision_id: q.id, option: "approve", rationale: "已核对完成申请" },
-      f.io,
-    );
-    expect(result.ok).toBe(!sameEmployee);
-    if (sameEmployee)
-      expect(result).toMatchObject({ error: { code: "unauthorized" } });
+    expect(
+      resolveDelegatedDecision(
+        state,
+        f.pm,
+        { decision_id: q.id, option: "approve", rationale: "已核对完成申请" },
+        f.io,
+      ),
+    ).toMatchObject({ ok: false, error: { code: "unauthorized" } });
   },
 );
 

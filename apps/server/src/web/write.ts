@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import {
   type Actor,
   activateRole,
+  activeOwner,
   autoMergeSchedule,
   type Clock,
   type CommandEffect,
@@ -31,13 +32,18 @@ import {
   rollbackRole,
   setCardSensitive,
   setProjectPreferences,
+  setRunLimit,
   supersedeCard,
   type TemplateChange,
   updateCard,
   updateRole,
   uploadAttachment,
 } from "@cardigan/domain";
-import type { ProjectMergeGate } from "@cardigan/host";
+import {
+  effectiveRunLimit,
+  type ProjectMergeGate,
+  runCapacityMachines,
+} from "@cardigan/host";
 import {
   loadCommandState,
   MAX_ATTACHMENT_BASE64,
@@ -55,6 +61,7 @@ import {
   getRoleVersion,
   listRoleVersions,
   persistRoleEffect,
+  persistRunLimitEffect,
   type Store,
   type StoreTransactionContext,
 } from "@cardigan/store";
@@ -227,6 +234,7 @@ function must<T>(result: Result<T>): T {
   return result.value;
 }
 export interface WriteContext {
+  readonly runLimit?: ((machine: string) => number) | undefined;
   readonly req: IncomingMessage;
   readonly res: ServerResponse;
   readonly store: Store;
@@ -576,6 +584,54 @@ export async function serveWrite(
   }
   if (rest === "/roles" || rest.startsWith("/roles/"))
     return serveRoleWrite(c, rest);
+  if (rest === "/execution/capacity") {
+    if (c.req.method === "GET") return false;
+    if (c.req.method !== "POST") methodNotAllowed(["GET", "POST"]);
+    c.authorize();
+    const body = await readJsonBody(c.req);
+    const key = parsed(
+      requiredKey,
+      c.req.headers["idempotency-key"],
+      "并发上限写入需要 Idempotency-Key",
+    );
+    const input = parsed(
+      z
+        .object({
+          machine_id: text,
+          limit: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+        })
+        .strict(),
+      body,
+    );
+    const output = execute(
+      { ...c, idempotency: { key, request: { method: "POST", rest, body } } },
+      (tx) => {
+        const session = c.authorize();
+        const member = activeOwner(tx.members.list());
+        if (
+          !member ||
+          !session ||
+          typeof session !== "object" ||
+          !("member_id" in session) ||
+          session.member_id !== member.id
+        )
+          throw new HttpRejection(403, "unauthorized", "没有有效的人成员身份");
+        const effect = must(
+          setRunLimit({ kind: "human", project_id: c.project_id }, input, {
+            machines: runCapacityMachines(c.store, tx),
+            previous: effectiveRunLimit(c.store, input.machine_id, c.runLimit),
+            member_id: member.id,
+            clock: c.clock,
+            ids: tx.global_ids,
+          }),
+        );
+        persistRunLimitEffect(c.store.database, tx, effect);
+        return effect.setting;
+      },
+    );
+    sendJson(c.res, 200, output);
+    return true;
+  }
   if (rest === "/preferences") {
     if (c.req.method === "GET") return false;
     if (c.req.method !== "POST") methodNotAllowed(["GET", "POST"]);

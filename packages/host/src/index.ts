@@ -32,6 +32,7 @@ export {
 } from "./errors.js";
 export { classifyExecutorFailure } from "./executor-failure.js";
 export { HostOpsService } from "./host-ops.js";
+export { tryHostOpsLock } from "./host-ops-lock.js";
 export {
   type LaunchedRun,
   type LaunchHost,
@@ -79,8 +80,10 @@ export {
   repositoryLockPath,
 } from "./repository-lock.js";
 export {
+  effectiveRunLimit,
   MERGE_CHECK_RUN_SLOTS,
   readRunQueue,
+  runCapacityMachines,
   runCapacitySnapshot,
 } from "./run-capacity.js";
 export {

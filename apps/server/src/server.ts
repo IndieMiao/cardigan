@@ -117,6 +117,9 @@ export async function startCardiganServer(
     });
   const runtimeEnv = options.env ?? process.env;
   const session = runtimeEnv.CARDIGAN_HC_SESSION ?? DEFAULT_HC_SESSION;
+  // C-155: confirm the data directory is private and host-owned before
+  // trusting anything inside it, including the runtime registration.
+  await secureDataDirectory({ ...execution, dataDir: config.dataDir });
   // C-152: an existing agent-ssh registration is never downgraded by a shell
   // that merely forgot runtime.env; switching to local must be explicit.
   // Only a missing file means "not registered"; an unreadable or corrupt one
@@ -141,7 +144,6 @@ export async function startCardiganServer(
     (options.warn ?? ((message) => process.stderr.write(`${message}\n`)))(
       LOCAL_RUNTIME_WARNING,
     );
-  await secureDataDirectory({ ...execution, dataDir: config.dataDir });
   const store = options.store ?? Store.open({ dataDir: config.dataDir });
   const ownsStore = options.store === undefined;
   // M4.5: stamp `standing_mode` on rows written before the field existed, so
@@ -335,6 +337,7 @@ export async function startCardiganServer(
       web = await startWebServer({
         store,
         mergeGate,
+        runLimit: runCapacity.forMachine,
         dataDir: config.dataDir,
         config: options.web.config,
         hcSession: session,

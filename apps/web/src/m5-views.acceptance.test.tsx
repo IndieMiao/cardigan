@@ -437,7 +437,7 @@ test("§8.6: 项目动态 filters, paginates before the cursor, and shows payloa
   await screen.findByText("没有符合条件的事件。调整筛选，或等待新的项目动态。");
 });
 
-test("§8.5: the execution view offers copyable commands only and hides start when a Run is unfinished", async () => {
+test("§8.5: execution environment actions use copyable commands and hide start when a Run is unfinished", async () => {
   const base = {
     id: "A-1",
     role_id: "coder",
@@ -466,11 +466,11 @@ test("§8.5: the execution view offers copyable commands only and hides start wh
     agent_cli_version: "1",
     summary: "等待恢复",
   };
-  const server = http(() => ({
-    assignments: [base],
-    runs: [run],
-    machines: [],
-  }));
+  const server = http((path) =>
+    path.endsWith("/execution/capacity")
+      ? { agents: [], merge_checks: [], merge_config_invalid: false }
+      : { assignments: [base], runs: [run], machines: [] },
+  );
   render(<ExecutionPage client={server.client} projectId="p-1" />);
   fireEvent.change(screen.getByLabelText("筛选"), {
     target: { value: "all" },

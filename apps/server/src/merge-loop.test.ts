@@ -364,6 +364,7 @@ test("timeout preference delegates once then merges through the existing Git exe
   expect(needsYou(f.state(), f.clock.now()).decisions[0]?.auto_merge).toEqual({
     minutes: 10,
     due_at: new Date(start + 10 * 60_000).toISOString(),
+    remaining_ms: 10 * 60_000,
   });
   expect(
     cardDetail(f.state(), scenario.card.id)?.decisions[0]?.auto_merge?.minutes,
@@ -455,6 +456,8 @@ test("C-69: unmarking restarts the timeout from the unmark, and a restarted serv
   expect(needsYou(f.state(), at(30)).decisions[0]?.auto_merge).toEqual({
     minutes: 10,
     due_at: at(40),
+    // C-154: the page counts down from the restarted due time.
+    remaining_ms: 10 * 60_000,
   });
   // A fresh Store over the same data directory computes the same due time.
   const restarted = Store.open({ dataDir: f.dataDir, clock: f.clock });

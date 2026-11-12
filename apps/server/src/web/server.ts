@@ -27,6 +27,7 @@ import {
   requireLoopbackHost,
   type WebConfig,
 } from "./config.js";
+import { executionCapacity } from "./execution-capacity.js";
 import {
   applySecurityHeaders,
   clearedSessionCookie,
@@ -81,6 +82,7 @@ import { serveWrite } from "./write.js";
  */
 
 export interface WebServerOptions {
+  readonly runLimit?: (machine: string) => number;
   /** 按 q(228) 定为 30 分钟；修改配置后重启 Web 服务生效。 */
   readonly queueWarningMinutes?: number;
   readonly store: Store;
@@ -121,6 +123,7 @@ const systemClock: Clock = { now: () => new Date().toISOString() };
 const API_PREFIX = "/api/";
 
 interface RequestContext {
+  readonly runLimit: WebServerOptions["runLimit"];
   readonly queueWarningMinutes: number;
   readonly req: IncomingMessage;
   readonly res: ServerResponse;
@@ -255,6 +258,7 @@ export async function startWebServer(
         mergeGate: options.mergeGate,
         hostOpsPatrolIntervalMs: options.hostOpsPatrolIntervalMs,
         hcSession: options.hcSession,
+        runLimit: options.runLimit,
         stream: options.stream,
         queueWarningMinutes,
         shutdown: shutdown.signal,
@@ -449,6 +453,7 @@ async function serveProjectRoute(
         clock,
         dataDir: context.dataDir,
         mergeGate: context.mergeGate?.forProject(project_id),
+        runLimit: context.runLimit,
         authorize: () => requireSession(context),
       },
       rest,
@@ -457,6 +462,15 @@ async function serveProjectRoute(
     return;
 
   if (req.method !== "GET") methodNotAllowed(["GET"]);
+
+  if (rest === "/execution/capacity") {
+    sendJson(
+      res,
+      200,
+      executionCapacity(store, context.runLimit, context.mergeGate),
+    );
+    return;
+  }
 
   if (rest.startsWith("/merge-checks/")) {
     return serveMergeCheckLog({

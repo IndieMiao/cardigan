@@ -465,6 +465,13 @@ export function recordDecision(
       "forbidden_tool",
       "此合并确认须由人在 Workbench 或本机 CLI 确认，PM 不能代记",
     );
+    // C-104: a human-required decision (e.g. a template's human completion
+    // review) also needs a human Actor; PM Office may not transcribe it.
+    ensure(
+      actor.kind === "human" || !decision.human_required_reason,
+      "forbidden_tool",
+      "此决定须由人在 Workbench 或本机 CLI 亲自确认，PM 不能代记",
+    );
     if (decision.card_id) d.card(decision.card_id);
     else d.projectAccess();
     text(p.raw_quote, "raw_quote");

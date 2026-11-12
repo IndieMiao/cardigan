@@ -407,9 +407,17 @@ test("standing restart replaces the PM session; other Assignment targets are rej
   expect(f.state().runs.find((r) => r.assignment_id === pm.id)?.status).toBe(
     "queued",
   );
-  expect(f.state().events.some((e) => e.type === "assignment_resumed")).toBe(
-    true,
-  );
+  // C-154: an active PM is not paused and resumed, so nothing is handed over.
+  expect(
+    f
+      .state()
+      .events.some((e) =>
+        ["assignment_paused", "assignment_resumed"].includes(e.type),
+      ),
+  ).toBe(false);
+  expect(
+    f.state().events.some((e) => e.type === "standing_session_restarted"),
+  ).toBe(true);
 });
 
 test("C-152: a terminal on another runtime is settled only after a human confirms it exited", async () => {

@@ -11,11 +11,19 @@ import { homedir, tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { loadMergeGateConfig } from "@cardigan/host";
 import { resolveDataDirectory } from "@cardigan/runtime-herdr";
-import { afterEach, expect, test, vi } from "vitest";
+import { afterEach, beforeAll, expect, test, vi } from "vitest";
 import { resolveLaunchPaths } from "../../cli/src/paths.js";
 import { configDir, loadLaunchFiles } from "./host.js";
 
 const roots: string[] = [];
+// C-155: these cases check the isolation installed by test-support/setup.ts.
+// Without it they would read the caller's real config paths; say so clearly.
+beforeAll(() => {
+  expect(
+    process.env.CARDIGAN_CONFIG_DIR,
+    "test-support/setup.ts was not loaded; run vitest with the repository or apps/server vitest.config.ts",
+  ).toBeDefined();
+});
 afterEach(() => {
   vi.unstubAllEnvs();
   for (const root of roots.splice(0))

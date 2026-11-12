@@ -17,6 +17,7 @@ import {
   queueRun,
   type Result,
   type Role,
+  recordDecision,
   toolNames,
 } from "@cardigan/domain";
 import { prepareRoleWorktree } from "@cardigan/host";
@@ -177,7 +178,7 @@ test.each([
         allowed_tools: [...toolNames],
       });
       store.uow.run((tx) => {
-        writeRole(tx, project, role("designer", "none"), { mode: "add" });
+        writeRole(tx, project, role("ui_ux_designer", "none"), { mode: "add" });
         writeRole(tx, project, role("pm", "readonly"), { mode: "add" });
       });
       const office = store.uow.run((tx) => {
@@ -377,12 +378,29 @@ test.each([
             tx.decisions.list(project).find((d) => d.status === "open"),
           );
           if (!decision) throw new Error("Missing human review decision");
-          await call(planner, "record_decision", {
-            decision_id: decision.id,
-            option,
-            raw_quote: option,
-            rationale: "Checked document",
-          });
+          // C-104: PM Office may not transcribe a template's human
+          // completion review; only the human records it.
+          await expect(
+            call(planner, "record_decision", {
+              decision_id: decision.id,
+              option,
+              raw_quote: option,
+              rationale: "Checked document",
+            }),
+          ).rejects.toThrow();
+          apply((s, a, p) =>
+            recordDecision(
+              s,
+              a,
+              {
+                decision_id: decision.id,
+                option,
+                raw_quote: option,
+                rationale: "Checked document",
+              },
+              p,
+            ),
+          );
         };
         await resolveReview("reject");
         const rejected = store.uow.read((tx) => loadCommandState(tx, project));

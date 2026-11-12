@@ -5,6 +5,8 @@ import { assignDecision } from "./delegation.js";
 import { completionPassed } from "./merge.js";
 import { resolveCardTemplate } from "./templates.js";
 
+export const HUMAN_COMPLETION_REASON =
+  "卡片模板规定完成申请由人验收，不能交给 PM 代为决定。";
 /** A human Decider reviews a version-bound approval in the existing decision flow. */
 export function requestHumanCompletionReview(
   d: CommandDraft,
@@ -50,6 +52,9 @@ export function requestHumanCompletionReview(
     affected_work_items: [delivery.work_item_id],
     blocking: false,
     decider: "human",
+    // The template names the human as the completion reviewer: PM Ops never
+    // takes it over, whatever the delegation preference says.
+    human_required_reason: HUMAN_COMPLETION_REASON,
     doc_refs: [],
     status: "open",
   });

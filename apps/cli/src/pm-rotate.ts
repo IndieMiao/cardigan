@@ -132,7 +132,7 @@ export function printRotation(
   const label = LABEL[mode];
   if (result.unchanged) {
     io.stdout(
-      `${label}（${result.assignment.id}）已是最新版本 pm v${result.to_version}，没有改动`,
+      `${label}（${result.assignment.id}）已是最新版本 pm v${result.to_version}，没有改动。只想换个新会话请用 cardigan pm restart --${mode}（不暂停、不转交事项）`,
     );
     return;
   }

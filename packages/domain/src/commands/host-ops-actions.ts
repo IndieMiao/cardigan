@@ -20,7 +20,6 @@ import {
 } from "./core.js";
 import { cancelRunDispatch, queueRunInDraft, settingsValid } from "./launch.js";
 import { needsYouView } from "./queries.js";
-import { pauseStandingInDraft } from "./standing.js";
 
 const unfinished = (r: Run) =>
   !["completed", "failed", "cancelled"].includes(r.status);
@@ -230,15 +229,17 @@ export function finishHostOpsAction(
       (!card || !["done", "cancelled"].includes(card.status)) &&
       (a.status === "active" || action.tool === "host_ops_restart_standing_pm")
     ) {
-      if (action.tool === "host_ops_restart_standing_pm")
-        pauseStandingInDraft(d, a.id);
       ensure(action.snapshot, "invariant_violation", "Missing launch snapshot");
+      // C-154: an active standing PM keeps its Assignment and everything it
+      // owns; only a PM the human already paused is resumed (no new handoff).
       run = queueRunInDraft(d, {
         ...action.snapshot,
         assignment_id: a.id,
         reuse_queued: true,
         ...(action.tool === "host_ops_restart_standing_pm"
-          ? { resume: true }
+          ? a.status === "suspended"
+            ? { resume: true }
+            : { restart_session: true }
           : {}),
         kind: previous?.kind ?? "followup",
       });
