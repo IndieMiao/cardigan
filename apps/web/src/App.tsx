@@ -8,6 +8,7 @@ import {
 } from "./api.js";
 import { EmptyState } from "./components/Foundation.js";
 import { RequestFeedback } from "./components/RequestFeedback.js";
+import { Tooltip } from "./components/Tooltip.js";
 import { routeHash, useRoute } from "./route.js";
 import { useProjectStream } from "./useProjectStream.js";
 import { useResource } from "./useResource.js";
@@ -210,17 +211,19 @@ function Workbench({
         )}
         {selected !== undefined && (
           <nav className="nav" aria-label="视图">
-            <a
-              href={routeHash({ kind: "needs-you", projectId: selected.id })}
-              aria-current={activeView === "needs-you" ? "page" : undefined}
+            <Tooltip
+              content={needsCount > 0 ? `${needsCount} 件待处理` : undefined}
             >
-              Needs You{" "}
-              {needsCount > 0 && (
-                <span className="nav-count" title={`${needsCount} 件待处理`}>
-                  {needsCount}
-                </span>
-              )}
-            </a>
+              <a
+                href={routeHash({ kind: "needs-you", projectId: selected.id })}
+                aria-current={activeView === "needs-you" ? "page" : undefined}
+              >
+                Needs You{" "}
+                {needsCount > 0 && (
+                  <span className="nav-count">{needsCount}</span>
+                )}
+              </a>
+            </Tooltip>
             {(
               [
                 ["工作", [["cards", "卡片"]]],
