@@ -63,7 +63,7 @@ test("§6.4 work-item comment by its own Assignment notifies nobody", () => {
   expect(result.notifications).toEqual([]);
 });
 
-test("§6.4 card comment without a mention rings no bell, but a human's is merged for PM Ops", () => {
+test("§6.4 human card comments without mentions notify Ops; Agent comments stay quiet", () => {
   const fromHuman = routeEvent({
     event: event("comment_posted", { body: "note" }, { seq: 5 }),
     snapshot: snapshot({ timeline: [entry(5)] }),
@@ -80,6 +80,36 @@ test("§6.4 card comment without a mention rings no bell, but a human's is merge
     snapshot: snapshot({ timeline: [entry(5)] }),
   });
   expect(fromAgent.notifications).toEqual([]);
+});
+
+test.each(["@A-1", "@W-1", "@coder"])(
+  "C-90 human comments mentioning %s do not add a default Ops recipient",
+  (mention) => {
+    const result = routeEvent({
+      event: event(
+        "comment_posted",
+        { body: `${mention} please check` },
+        { seq: 5 },
+      ),
+      snapshot: snapshot({ timeline: [entry(5, { mentions: [mention] })] }),
+    });
+    expect(recipients(result)).toEqual(["assignment:A-1"]);
+  },
+);
+
+test("C-90 system comments do not default to Ops", () => {
+  const result = routeEvent({
+    event: event(
+      "comment_posted",
+      {},
+      {
+        seq: 5,
+        actor: { kind: "system", project_id: snapshot().project_id },
+      },
+    ),
+    snapshot: snapshot({ timeline: [entry(5)] }),
+  });
+  expect(result.notifications).toEqual([]);
 });
 
 test("§6.4 an event for a released Assignment goes to PM Ops instead", () => {
