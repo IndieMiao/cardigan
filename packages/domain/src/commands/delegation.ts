@@ -41,6 +41,18 @@ export const SENSITIVE_CARD_REASON = "卡片已被人标为敏感，合并须由
  * work derived from a project-level sensitive decision is not "ordinary".
  * Withdrawn questions on the card no longer count.
  */
+/**
+ * C-167: only the human can declare a D12 question unrelated to its cards'
+ * merge content (`merge_related=false`, raised by human). requestDecision
+ * rejects the label from anyone else; this check repeats the rule so a label
+ * without a human raiser never lifts the human-merge requirement. Answering
+ * a question is not an authorization to skip the human merge (review V-543).
+ */
+export function mergeUnrelatedConfirmed(
+  q: Pick<Decision, "merge_related" | "raised_by">,
+): boolean {
+  return q.merge_related === false && q.raised_by === "human";
+}
 export function mergeNeedsHuman(
   decisions: readonly Decision[],
   cards: readonly Pick<Card, "id" | "source" | "sensitive">[],
@@ -57,7 +69,8 @@ export function mergeNeedsHuman(
       q.trigger !== "merge_confirmation" &&
       q.trigger !== "worktree_cleanup" &&
       (q.id === sourceId ||
-        (q.status !== "withdrawn" &&
+        (!mergeUnrelatedConfirmed(q) &&
+          q.status !== "withdrawn" &&
           (q.card_id === card_id || q.affected_cards.includes(card_id)))) &&
       (q.category === "scope_change" ||
         (!!q.category && highRiskCategories.includes(q.category))),

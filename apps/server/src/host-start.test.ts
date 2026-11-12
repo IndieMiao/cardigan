@@ -112,6 +112,10 @@ test("the host starts a terminal for the given Run and never queues a second one
   expect(readFileSync(join(runDir, "first.md"), "utf8")).toContain(bell);
   expect(existsSync(join(runDir, "start"))).toBe(true);
   expect(existsSync(join(runDir, "token"))).toBe(true);
+  expect(existsSync(join(runDir, "test-workers.cjs"))).toBe(true);
+  expect(readFileSync(join(runDir, "launch.sh"), "utf8")).toContain(
+    "export NODE_OPTIONS=",
+  );
   // The launch describes the Run, not a new one.
   expect(provisioned[0]?.labels).toMatchObject({
     cardigan: "1",
@@ -120,6 +124,33 @@ test("the host starts a terminal for the given Run and never queues a second one
     run: run.id,
   });
   expect(provisioned[0]?.cwd).toBe(runDir);
+});
+
+test("dispatcher forwards the host test policy directory and rejects invalid policy before provisioning", async () => {
+  const { assignment, run } = queuedRun();
+  const configDir = join(f.dataDir, "policy");
+  mkdirSync(configDir, { mode: 0o700 });
+  writeFileSync(join(configDir, "agent-tests.yaml"), "max_workers: 0\n", {
+    mode: 0o600,
+  });
+  await expect(
+    startQueuedRun(
+      { ...host(f.dataDir), configDir },
+      {
+        project: f.project,
+        assignment,
+        run,
+        bell: "[bell] fixture",
+      },
+    ),
+  ).rejects.toThrow("agent-tests.yaml");
+  expect(runtime.provision).not.toHaveBeenCalled();
+  expect(f.state().runs[0]?.status).toBe("cancelled");
+  expect(
+    f.store.uow
+      .run((tx) => tx.tokensForAssignment(f.project, assignment.id))
+      .every((token) => token.revoked_at !== null),
+  ).toBe(true);
 });
 
 test("a previous token is revoked when the host issues the new one", async () => {
