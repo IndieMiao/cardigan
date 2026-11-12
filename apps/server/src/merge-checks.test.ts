@@ -7,6 +7,7 @@ import {
   prepareMergePlan,
   recheckMerge,
   recordMergeCheck,
+  requestHumanAction,
 } from "@cardigan/domain";
 import type { CentralProject, PreparedMerge } from "@cardigan/git-service";
 import {
@@ -127,6 +128,7 @@ function controller(f: M4Fixture) {
     ]),
   };
   const errors = vi.fn();
+  const notices = vi.fn();
   const options = {
     store: f.store,
     execution: { mode: "local" as const, dataDir: f.dataDir },
@@ -134,6 +136,7 @@ function controller(f: M4Fixture) {
     run,
     clock: f.clock,
     onError: errors,
+    report: notices,
     configuration: { errors: [], forProject: () => settings },
   };
   const gate = new MergeChecks(options);
@@ -142,6 +145,7 @@ function controller(f: M4Fixture) {
     git,
     run,
     errors,
+    notices,
     options,
     setConfig: (value: ProjectMergeGate) => {
       settings = value;
@@ -171,6 +175,57 @@ test("checks precede confirmation; a passed tree publishes only after human appr
   expect(f.card().status).toBe("done");
   expect(c.git.publish).toHaveBeenCalledTimes(1);
   expect(c.errors).not.toHaveBeenCalled();
+});
+
+test("C-112: a read-only human action leaves the check running; a merge-blocking one is logged once with its id", async () => {
+  const { f, check, scenario } = await fixture();
+  const ask = (blocks_merge: boolean) =>
+    f.apply((s, a, p) =>
+      requestHumanAction(
+        s,
+        a,
+        {
+          card_id: scenario.card.id,
+          instructions: "请查看主机日志",
+          why_human: "只有主机能看",
+          expected_return: "日志摘要",
+          blocked_work_items: [],
+          ...(blocks_merge ? { blocks_merge } : {}),
+        },
+        p,
+      ),
+    );
+  ask(false);
+  const c = controller(f);
+  await c.gate.tick([f.project_id]);
+  expect(check()?.status).toBe("passed");
+  expect(c.errors).not.toHaveBeenCalled();
+  const blocking = ask(true);
+  await c.gate.tick([f.project_id]);
+  await c.gate.tick([f.project_id]);
+  const messages = c.notices.mock.calls
+    .map((call) => String(call[0]))
+    .filter((m) => m.startsWith("merge checks skipped"));
+  expect(messages).toHaveLength(1);
+  expect(messages[0]).toContain(
+    `merge checks skipped ${f.project_id}/${scenario.card.id}`,
+  );
+  expect(messages[0]).toContain(blocking.id);
+});
+
+test("C-112: a passed check whose publication is held logs the confirmed plan's reason once", async () => {
+  const { f, check, scenario } = await fixture();
+  const c = controller(f);
+  f.decide(required(mergeConfirmation(f, scenario.card.id)), "hold");
+  await c.gate.tick([f.project_id]);
+  expect(check()?.status).toBe("passed");
+  await c.gate.tick([f.project_id]);
+  await c.gate.tick([f.project_id]);
+  expect(c.git.publish).not.toHaveBeenCalled();
+  const messages = c.notices.mock.calls.map((call) => String(call[0]));
+  expect(messages).toEqual([
+    `merge checks publish skipped ${f.project_id}/${scenario.card.id}: illegal_transition: Merge confirmation has not been granted for this completion`,
+  ]);
 });
 
 test("failure holds the baseline, redacts output and waits for explicit recheck", async () => {
