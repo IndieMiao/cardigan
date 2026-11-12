@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 import type { CardDetail, TimelineEntryView } from "../api.js";
 import { decisionOption, decisionTitle } from "../decision-labels.js";
 import { routeHash } from "../route.js";
+import { DecisionAffectedCards } from "./DecisionAffectedCards.js";
 import { DecisionAttachments } from "./DecisionAttachments.js";
 import { EmployeeIdentity } from "./EmployeeIdentity.js";
 import { IdTag, LongContent, StatusTag } from "./Foundation.js";
@@ -215,6 +216,7 @@ export function TimelineContent({
           ),
         )}
         <p className="entry-summary">{decisionTitle(decision)}</p>
+        <DecisionAffectedCards decision={decision} projectId={projectId} />
         {!resolved && (
           <DecisionAttachments attachments={decision.attachments} />
         )}

@@ -143,6 +143,35 @@ const show = (data = detail(), revision = 0) =>
     />,
   );
 
+test.each([[], ["C-1"], ["C-1", "C-2"]].map((ids) => ({ ids })))(
+  "C-133: sidebar and requested/resolved timeline decisions show impact for $ids",
+  async ({ ids }) => {
+    const data = detail();
+    const decisions = data.decisions.map((decision) => ({
+      ...decision,
+      card_id: "C-1",
+      affected_cards: ids,
+      affected_card_views: ids.map((id) => ({
+        id,
+        title: `标题 ${id}`,
+        status: "review",
+      })),
+    }));
+    show({ ...data, decisions, relations: { ...data.relations, decisions } });
+    await screen.findByRole("article", { name: "卡片 C-1" });
+    const rows = screen.queryAllByRole("list", { name: "影响的卡片" });
+    expect(rows).toHaveLength(ids.includes("C-2") ? 3 : 0);
+    for (const row of rows) {
+      const links = within(row).getAllByRole("link");
+      expect(links).toHaveLength(1);
+      expect(links[0]?.getAttribute("href")).toBe("#/p/p-1/cards/C-2");
+      expect(within(row).getByText("标题 C-2")).toBeTruthy();
+      expect(within(row).getByText("审核中")).toBeTruthy();
+      expect(row.textContent).not.toContain("C-1");
+    }
+  },
+);
+
 test("U3 separates goal/checklist and sticky summary, with only identity/status/update in the header", async () => {
   show();
   const page = await screen.findByRole("article", { name: "卡片 C-1" });

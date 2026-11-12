@@ -241,6 +241,10 @@ export interface SensitiveResult {
 }
 
 export interface DecisionView {
+  readonly card_id?: string | null;
+  readonly affected_cards?: readonly string[];
+  /** Current summaries of the existing cards explicitly affected by this decision. */
+  readonly affected_card_views?: CardRelations["cards"];
   readonly auto_merge?: {
     readonly minutes: number;
     readonly due_at: string;
