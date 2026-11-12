@@ -362,6 +362,40 @@ test("collaboration tools use domain commands and preserve reviewable identities
   expect(JSON.stringify(conflict.structuredContent)).toContain(
     "idempotency_conflict",
   );
+  // Free text is never respelled: a pre-upgrade request whose raw_quote reads
+  // like a new number replays unchanged, and changing only that text conflicts.
+  store.database
+    .prepare(
+      "INSERT INTO idempotency (project_id, assignment_id, key, request_hash, response, created_at) " +
+        "SELECT project_id, assignment_id, 'retry-text', ?, response, created_at FROM idempotency WHERE key = 'retry-same'",
+    )
+    .run(
+      hashRequest({
+        tool: "record_decision",
+        params: {
+          ...legacyParams,
+          decision_id: recordArgs.decision_id,
+          raw_quote: decision.id,
+        },
+      }),
+    );
+  expect(
+    await ok<Decision>(
+      office,
+      "record_decision",
+      { ...recordArgs, raw_quote: decision.id },
+      "retry-text",
+    ),
+  ).toEqual(resolved);
+  const textChanged = await raw(
+    office,
+    "record_decision",
+    { ...recordArgs, raw_quote: recordArgs.decision_id },
+    "retry-text",
+  );
+  expect(JSON.stringify(textChanged.structuredContent)).toContain(
+    "idempotency_conflict",
+  );
   expect(resolved.resolution).toMatchObject({
     raw_quote: "  go  ",
     via_chain: ["human", "assignment:A-1"],

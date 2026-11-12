@@ -101,7 +101,13 @@ function legacyDatabase() {
     }),
   );
   // Idempotency keys are arbitrary client strings: q(12) and Q-12 are distinct.
-  for (const key of ["q(12)", "Q-12"])
+  for (const key of [
+    "q(12)",
+    "Q-12",
+    '{"id":"q(12)"}',
+    '{"id":"Q-12"}',
+    '["h(3)"]',
+  ])
     expect(
       old.runIdempotent(
         {
@@ -113,6 +119,21 @@ function legacyDatabase() {
         () => ({ key }),
       ).ok,
     ).toBe(true);
+  // Same, where the human's own words happen to read like a new number.
+  expect(
+    old.runIdempotent(
+      {
+        project_id: "p",
+        assignment_id: "A-1",
+        key: "retry-text",
+        request: {
+          ...legacyDecisionRequest,
+          params: { ...legacyDecisionRequest.params, raw_quote: "Q-95" },
+        },
+      } as never,
+      () => ({ id: "q(95)" }),
+    ).ok,
+  ).toBe(true);
   // A request the old server stored with the legacy id, response not yet seen.
   expect(
     old.runIdempotent(
@@ -192,7 +213,15 @@ test("C-132: stored q(n) / h(n) become Q-n / H-n after a backup, and numbering c
         .prepare("SELECT key FROM idempotency ORDER BY key")
         .all()
         .map((r) => r.key),
-    ).toEqual(["Q-12", "q(12)", "retry-same"]);
+    ).toEqual([
+      "Q-12",
+      '["h(3)"]',
+      "q(12)",
+      "retry-same",
+      "retry-text",
+      '{"id":"Q-12"}',
+      '{"id":"q(12)"}',
+    ]);
     // The pre-upgrade request, retried after upgrade (now normalized), replays.
     let ran = 0;
     const retry = (key: string, request: unknown) =>
@@ -226,6 +255,31 @@ test("C-132: stored q(n) / h(n) become Q-n / H-n after a backup, and numbering c
     ).toMatchObject({
       ok: true,
       value: { replayed: true, value: { key: "q(12)" } },
+    });
+    // Opaque keys that look like JSON are kept and still replay.
+    expect(
+      retry('{"id":"q(12)"}', {
+        tool: "post_comment",
+        params: { body: '{"id":"q(12)"}' },
+      }),
+    ).toMatchObject({ ok: true, value: { replayed: true } });
+    // Free text is not respelled: the identical request replays …
+    const withText = (raw_quote: string) => ({
+      ...currentDecisionRequest,
+      params: { ...currentDecisionRequest.params, raw_quote },
+    });
+    expect(retry("retry-text", withText("Q-95"))).toMatchObject({
+      ok: true,
+      value: { replayed: true },
+    });
+    // … and a request that differs only in free text still conflicts.
+    expect(retry("retry-text", withText("q(95)"))).toMatchObject({
+      ok: false,
+      error: { code: "idempotency_conflict" },
+    });
+    expect(retry("retry-same", withText("Q-95"))).toMatchObject({
+      ok: false,
+      error: { code: "idempotency_conflict" },
     });
     expect(ran).toBe(0);
     expect(
@@ -278,6 +332,10 @@ test("only reference columns and reference fields are rewritten", () => {
   expect(rewriteLegacyIds("h(3)", "human_action_id")).toBe("H-3");
   // Whole-value text in any other column is not a reference.
   expect(rewriteLegacyIds("q(3)", "key")).toBeUndefined();
+  // Only Cardigan's JSON document columns are parsed; other text is opaque.
+  expect(rewriteLegacyIds('{"id":"q(3)"}', "key")).toBeUndefined();
+  expect(rewriteLegacyIds('["q(3)"]', "notification_ids")).toBeUndefined();
+  expect(rewriteLegacyIds('{"id":"q(3)"}', "response")).toBe('{"id":"Q-3"}');
   expect(rewriteLegacyIds("q(3)", "doc")).toBeUndefined();
   expect(rewriteLegacyIds("q(03)", "id")).toBeUndefined();
   expect(rewriteLegacyIds("Q-3", "id")).toBeUndefined();
@@ -320,8 +378,42 @@ test("only reference columns and reference fields are rewritten", () => {
   expect(rewriteLegacyIds('{"a":"Q-1","b":[1,null,true]}')).toBeUndefined();
 });
 
-test("legacyRequest spells ids the way a pre-C-132 server stored them", () => {
+test("legacyRequest respells only the id parameters the schemas normalized", () => {
   expect(
-    legacyRequest({ a: "Q-95", b: ["H-1", "Q-01", "C-1"], c: { d: 1 } }),
-  ).toEqual({ a: "q(95)", b: ["h(1)", "Q-01", "C-1"], c: { d: 1 } });
+    legacyRequest({
+      tool: "post_comment",
+      params: {
+        decision_id: "Q-95",
+        human_action_id: "H-3",
+        basis: "Q-7",
+        refs: [
+          { kind: "decision", id: "Q-1" },
+          { kind: "human_action", id: "H-2" },
+          { kind: "card", id: "C-1" },
+        ],
+        body: "Q-95",
+        raw_quote: "H-3",
+        rationale: "Q-1",
+        other_id: "Q-9",
+        wrong_kind: { decision_id: "H-1", human_action_id: "Q-1" },
+      },
+    }),
+  ).toEqual({
+    tool: "post_comment",
+    params: {
+      decision_id: "q(95)",
+      human_action_id: "h(3)",
+      basis: "q(7)",
+      refs: [
+        { kind: "decision", id: "q(1)" },
+        { kind: "human_action", id: "h(2)" },
+        { kind: "card", id: "C-1" },
+      ],
+      body: "Q-95",
+      raw_quote: "H-3",
+      rationale: "Q-1",
+      other_id: "Q-9",
+      wrong_kind: { decision_id: "H-1", human_action_id: "Q-1" },
+    },
+  });
 });

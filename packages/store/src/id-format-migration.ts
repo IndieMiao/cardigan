@@ -32,6 +32,12 @@ const REFERENCE_FIELD =
   /^(?:id|[a-z_]+_ids?|amends|superseded_by|superseded|basis|ref|decisions|open_decisions|human_actions)$/u;
 /** Columns that hold a reference as their whole value. */
 const REFERENCE_COLUMN = /^(?:id|[a-z_]+_id)$/u;
+/**
+ * Columns that store JSON documents written by Cardigan. Every other column
+ * (idempotency keys, hashes, names, …) is opaque text and never parsed, even
+ * when its value happens to be valid JSON.
+ */
+const JSON_COLUMN = new Set(["doc", "response"]);
 
 const rewriteId = (value: unknown): unknown =>
   typeof value === "string" ? (normalizeLegacyId(value) ?? value) : value;
@@ -86,6 +92,7 @@ export function rewriteLegacyIds(
   column = "doc",
 ): string | undefined {
   if (REFERENCE_COLUMN.test(column)) return normalizeLegacyId(text);
+  if (!JSON_COLUMN.has(column)) return undefined;
   const first = text.trimStart()[0];
   if (first !== "{" && first !== "[") return undefined;
   let parsed: unknown;
@@ -98,23 +105,42 @@ export function rewriteLegacyIds(
   return result.changed ? JSON.stringify(result.value) : undefined;
 }
 
-/** `Q-n` / `H-n` → `q(n)` / `h(n)`: how a pre-C-132 client spelled the id. */
-const legacySpelling = (value: string): string | undefined => {
-  const match = /^([QH])-([1-9][0-9]*)$/u.exec(value);
-  return match ? `${match[1] === "Q" ? "q" : "h"}(${match[2]})` : undefined;
+const legacyOf = (
+  kind: "decision" | "human_action",
+  value: unknown,
+): unknown => {
+  if (typeof value !== "string") return value;
+  const match = (
+    kind === "decision" ? /^Q-([1-9][0-9]*)$/u : /^H-([1-9][0-9]*)$/u
+  ).exec(value);
+  return match ? `${kind === "decision" ? "q" : "h"}(${match[1]})` : value;
 };
 
 /**
- * The request as a pre-C-132 server stored it: parseId returned `q(n)` /
- * `h(n)` unchanged, so every id the client sent was in the legacy spelling.
- * Used only to match idempotency records written before migration 0018.
+ * The request as a pre-C-132 server stored it. Only the parameters the MCP
+ * and Workbench schemas parse as decision / human action ids were normalized
+ * (`decision_id`, `human_action_id`, `basis`, and `{ kind, id }` references);
+ * those go back to `q(n)` / `h(n)`. Free text such as `raw_quote` or `body`
+ * stays exactly as sent, so a request that differs only there still differs.
+ * Used only to match idempotency records written before the migration.
  */
 export function legacyRequest(value: unknown): unknown {
-  if (typeof value === "string") return legacySpelling(value) ?? value;
   if (Array.isArray(value)) return value.map(legacyRequest);
   if (value === null || typeof value !== "object") return value;
+  const record = value as Record<string, unknown>;
+  const refKind =
+    record.kind === "decision" || record.kind === "human_action"
+      ? record.kind
+      : undefined;
   return Object.fromEntries(
-    Object.entries(value).map(([k, v]) => [k, legacyRequest(v)]),
+    Object.entries(record).map(([field, item]) => {
+      if (field === "decision_id" || field === "basis")
+        return [field, legacyOf("decision", item)];
+      if (field === "human_action_id")
+        return [field, legacyOf("human_action", item)];
+      if (field === "id" && refKind) return [field, legacyOf(refKind, item)];
+      return [field, legacyRequest(item)];
+    }),
   );
 }
 
