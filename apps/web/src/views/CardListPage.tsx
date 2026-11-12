@@ -25,6 +25,7 @@ import {
 } from "../components/Foundation.js";
 import { Menu, type MenuItem } from "../components/Menu.js";
 import { MultiSelect } from "../components/MultiSelect.js";
+import { PageSizeMenu } from "../components/PageSizeMenu.js";
 import { PriorityBadge } from "../components/Priority.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
 import { Tooltip } from "../components/Tooltip.js";
@@ -230,12 +231,23 @@ export function CardListPage({
       ? { kind: "error", message: error }
       : { kind: "loading" };
   const cards = data ? filteredCards(data.cards, filters) : [];
+  const pageSize = ["10", "20", "50"].includes(filters.count ?? "")
+    ? Number(filters.count)
+    : 10;
+  const requestedPage = Number(filters.page ?? 1);
+  const totalPages = Math.max(1, Math.ceil(cards.length / pageSize));
+  const page =
+    Number.isSafeInteger(requestedPage) && requestedPage > 0
+      ? Math.min(requestedPage, totalPages)
+      : 1;
+  const pageCards = cards.slice((page - 1) * pageSize, page * pageSize);
   const roles = [
     ...new Set((data?.cards ?? []).flatMap((card) => card.roles)),
   ].sort();
   const activeFilters = Object.entries(filters).some(
     ([key, value]) =>
-      !["expanded", "view", "card"].includes(key) && Boolean(value),
+      !["expanded", "view", "card", "page", "count"].includes(key) &&
+      Boolean(value),
   );
   const statusOptions = BOARD_STATUSES.map((status) => ({
     value: status,
@@ -271,7 +283,8 @@ export function CardListPage({
           <span className="cards-title">
             卡片
             <small className="cards-count">
-              {data?.cards.length ?? 0} 张卡片
+              {view === "list" ? cards.length : (data?.cards.length ?? 0)}{" "}
+              张卡片
             </small>
           </span>
         }
@@ -433,7 +446,14 @@ export function CardListPage({
           },
         ]}
         values={filters}
-        onChange={setFilters}
+        onChange={(next) =>
+          setFilters({
+            ...next,
+            ...(view === "list" || filters.page
+              ? { page: "1", count: String(pageSize) }
+              : {}),
+          })
+        }
       />
 
       {state.kind === "ready" && cards.length === 0 && (
@@ -463,12 +483,60 @@ export function CardListPage({
           )
         ) : cards.length > 0 ? (
           <CardTable
-            cards={cards}
+            cards={pageCards}
             projectId={projectId}
             display={display}
             onOpenCard={openCard}
           />
         ) : null)}
+      {state.kind === "ready" && view === "list" && (
+        <nav
+          className="timeline-controls card-list-pagination"
+          aria-label="卡片分页"
+        >
+          <span className="timeline-count">共 {cards.length} 张卡片</span>
+          <PageSizeMenu
+            label="每页"
+            pageSize={pageSize}
+            sizes={[10, 20, 50]}
+            unit="张"
+            onChange={(size) =>
+              setFilters({ ...filters, page: "1", count: String(size) })
+            }
+          />
+          <button
+            type="button"
+            className="quiet"
+            disabled={page === 1}
+            onClick={() =>
+              setFilters({
+                ...filters,
+                page: String(page - 1),
+                count: String(pageSize),
+              })
+            }
+          >
+            上一页
+          </button>
+          <span aria-live="polite">
+            第 {page} / {totalPages} 页
+          </span>
+          <button
+            type="button"
+            className="quiet"
+            disabled={page === totalPages}
+            onClick={() =>
+              setFilters({
+                ...filters,
+                page: String(page + 1),
+                count: String(pageSize),
+              })
+            }
+          >
+            下一页
+          </button>
+        </nav>
+      )}
       <Drawer
         open={openCardId !== undefined}
         onOpenChange={(open) => {
@@ -528,87 +596,84 @@ function CardTable({
   readonly onOpenCard: (cardId: string, trigger: HTMLElement) => void;
 }) {
   return (
-    <>
-      <table className="card-table">
-        <thead>
-          <tr>
-            {display.number && <th scope="col">编号</th>}
-            <th scope="col">标题</th>
-            <th scope="col">状态</th>
-            {display.roles && <th scope="col">负责角色</th>}
-            {display.progress && <th scope="col">进度</th>}
-            {display.updated && <th scope="col">更新时间</th>}
-            {display.next && <th scope="col">下一步</th>}
-            <th scope="col" aria-label="打开" />
+    <table className="card-table">
+      <thead>
+        <tr>
+          {display.number && <th scope="col">编号</th>}
+          <th scope="col">标题</th>
+          <th scope="col">状态</th>
+          {display.roles && <th scope="col">负责角色</th>}
+          {display.progress && <th scope="col">进度</th>}
+          {display.updated && <th scope="col">更新时间</th>}
+          {display.next && <th scope="col">下一步</th>}
+          <th scope="col" aria-label="打开" />
+        </tr>
+      </thead>
+      <tbody>
+        {cards.map((card) => (
+          <tr
+            key={card.id}
+            className={
+              card.resolution === "superseded" ? "card-superseded" : undefined
+            }
+          >
+            {display.number && (
+              <td>
+                <IdTag id={card.id} label="卡片" detail={card.title} />
+              </td>
+            )}
+            <td>
+              <PriorityBadge value={card.priority} />{" "}
+              <Tooltip content={display.reason ? card.why : undefined}>
+                <a
+                  className="card-table-title"
+                  href={cardHref(projectId, card)}
+                  onClick={(event) => {
+                    if (
+                      event.metaKey ||
+                      event.ctrlKey ||
+                      event.shiftKey ||
+                      event.altKey
+                    )
+                      return;
+                    event.preventDefault();
+                    onOpenCard(card.id, event.currentTarget);
+                  }}
+                >
+                  {card.title}
+                </a>
+              </Tooltip>
+              <CardSuperseded card={card} />
+            </td>
+            <td>
+              <StatusTag status={card.status} />
+            </td>
+            {display.roles && (
+              <td className="card-table-roles">
+                {card.roles.join("、") || "—"}
+              </td>
+            )}
+            {display.progress && (
+              <td>
+                {card.progress.completed}/{card.progress.total}
+              </td>
+            )}
+            {display.updated && (
+              <td>
+                <Time value={card.updated_at} />
+              </td>
+            )}
+            {display.next && (
+              <td>
+                <NextOwners owners={card.next_owners} />
+              </td>
+            )}
+            <td className="card-table-arrow" aria-hidden="true">
+              →
+            </td>
           </tr>
-        </thead>
-        <tbody>
-          {cards.map((card) => (
-            <tr
-              key={card.id}
-              className={
-                card.resolution === "superseded" ? "card-superseded" : undefined
-              }
-            >
-              {display.number && (
-                <td>
-                  <IdTag id={card.id} label="卡片" detail={card.title} />
-                </td>
-              )}
-              <td>
-                <PriorityBadge value={card.priority} />{" "}
-                <Tooltip content={display.reason ? card.why : undefined}>
-                  <a
-                    className="card-table-title"
-                    href={cardHref(projectId, card)}
-                    onClick={(event) => {
-                      if (
-                        event.metaKey ||
-                        event.ctrlKey ||
-                        event.shiftKey ||
-                        event.altKey
-                      )
-                        return;
-                      event.preventDefault();
-                      onOpenCard(card.id, event.currentTarget);
-                    }}
-                  >
-                    {card.title}
-                  </a>
-                </Tooltip>
-                <CardSuperseded card={card} />
-              </td>
-              <td>
-                <StatusTag status={card.status} />
-              </td>
-              {display.roles && (
-                <td className="card-table-roles">
-                  {card.roles.join("、") || "—"}
-                </td>
-              )}
-              {display.progress && (
-                <td>
-                  {card.progress.completed}/{card.progress.total}
-                </td>
-              )}
-              {display.updated && (
-                <td>
-                  <Time value={card.updated_at} />
-                </td>
-              )}
-              {display.next && (
-                <td>
-                  <NextOwners owners={card.next_owners} />
-                </td>
-              )}
-              <td className="card-table-arrow" aria-hidden="true">
-                →
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      <p className="card-table-footer">共 {cards.length} 张卡片</p>
-    </>
+        ))}
+      </tbody>
+    </table>
   );
 }

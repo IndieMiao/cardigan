@@ -883,12 +883,6 @@ fieldset.filters {
   color: var(--accent);
   text-align: right;
 }
-.card-table-footer {
-  margin: 8px 0 0;
-  color: var(--text-muted);
-  font-size: var(--text-sm);
-  text-align: right;
-}
 .card-page {
   display: grid;
   grid-template-columns: minmax(0, 760px) minmax(280px, 360px);
@@ -2352,6 +2346,15 @@ body[data-lightbox="open"] .drawer-overlay {
   padding: 4px 2px;
   color: var(--accent);
   background: transparent;
+}
+.card-list-pagination {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+.card-list-pagination .timeline-count {
+  margin-left: 0;
+  margin-right: auto;
 }
 .timeline-records {
   margin-bottom: 20px;
