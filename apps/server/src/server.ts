@@ -29,6 +29,8 @@ import {
   startControlPlane,
 } from "./assembly.js";
 import {
+  DEFAULT_LISTEN_RETRY_INTERVAL_MS,
+  DEFAULT_LISTEN_RETRY_TIMEOUT_MS,
   resolveServerConfig,
   type ServerConfig,
   type ServerEnv,
@@ -36,6 +38,7 @@ import {
 import { type GitBinding, ServerGit } from "./git.js";
 import { DEFAULT_HOST_OPS_PATROL_INTERVAL_MS } from "./host-ops-patrol.js";
 import type { ShutdownTimer } from "./lifecycle.js";
+import { createListenRetry } from "./listen-retry.js";
 import type { WebConfig } from "./web/config.js";
 import { type RunningWebServer, startWebServer } from "./web/server.js";
 
@@ -222,26 +225,34 @@ export async function startCardiganServer(
           : {}),
       })
     : undefined;
+  const listen = createListenRetry({
+    intervalMs:
+      config.listenRetryIntervalMs ?? DEFAULT_LISTEN_RETRY_INTERVAL_MS,
+    timeoutMs: config.listenRetryTimeoutMs ?? DEFAULT_LISTEN_RETRY_TIMEOUT_MS,
+    warn: options.warn ?? ((line) => process.stderr.write(`${line}\n`)),
+  });
   let mcp: RunningServer;
   try {
-    mcp = await startMcpServer({
-      // The store satisfies McpBackend structurally; this keeps mcp-server
-      // depending on domain only (§20.2).
-      store: store as McpBackend,
-      dataDir: config.dataDir,
-      host: config.host,
-      port: config.port,
-      projectSettings: (projectId) => ({
-        merge_gate_enabled:
-          mergeGate.forProject(projectId).status !== "disabled",
+    mcp = await listen(config.port, () =>
+      startMcpServer({
+        // The store satisfies McpBackend structurally; this keeps mcp-server
+        // depending on domain only (§20.2).
+        store: store as McpBackend,
+        dataDir: config.dataDir,
+        host: config.host,
+        port: config.port,
+        projectSettings: (projectId) => ({
+          merge_gate_enabled:
+            mergeGate.forProject(projectId).status !== "disabled",
+        }),
+        // §3.3: production always verifies against the real Git service, and the
+        // verifier follows the project the request belongs to.
+        deliveryVerifier: git.verifierFor,
+        ...(hostOps ? { hostOps: hostOps.tools } : {}),
+        pinDelivery: (request) => git.pinDelivery(request),
+        ...(options.log === undefined ? {} : { log: options.log }),
       }),
-      // §3.3: production always verifies against the real Git service, and the
-      // verifier follows the project the request belongs to.
-      deliveryVerifier: git.verifierFor,
-      ...(hostOps ? { hostOps: hostOps.tools } : {}),
-      pinDelivery: (request) => git.pinDelivery(request),
-      ...(options.log === undefined ? {} : { log: options.log }),
-    });
+    );
   } catch (error) {
     if (ownsStore) {
       store.close();
@@ -333,32 +344,35 @@ export async function startCardiganServer(
   // shares the store but nothing else: a failure here must not leave a
   // half-started server behind.
   let web: RunningWebServer | undefined;
-  if (options.web !== undefined) {
+  const webOptions = options.web;
+  if (webOptions !== undefined) {
     try {
-      web = await startWebServer({
-        store,
-        mergeGate,
-        machineDisplayName: runCapacity.displayNameForMachine,
-        runLimit: runCapacity.forMachine,
-        runLimitMaximum: runCapacity.maxForMachine,
-        dataDir: config.dataDir,
-        config: options.web.config,
-        hcSession: session,
-        hostOpsPatrolIntervalMs:
-          options.dispatcher?.hostOpsPatrolIntervalMs ??
-          config.hostOpsPatrolIntervalMs ??
-          DEFAULT_HOST_OPS_PATROL_INTERVAL_MS,
-        ...(options.web.log === undefined ? {} : { log: options.web.log }),
-        ...(options.web.stream === undefined
-          ? {}
-          : { stream: options.web.stream }),
-        ...(config.shutdownGraceMs === undefined
-          ? {}
-          : { shutdownGraceMs: config.shutdownGraceMs }),
-        ...(options.web.shutdownTimer === undefined
-          ? {}
-          : { shutdownTimer: options.web.shutdownTimer }),
-      });
+      web = await listen(webOptions.config.port, () =>
+        startWebServer({
+          store,
+          mergeGate,
+          machineDisplayName: runCapacity.displayNameForMachine,
+          runLimit: runCapacity.forMachine,
+          runLimitMaximum: runCapacity.maxForMachine,
+          dataDir: config.dataDir,
+          config: webOptions.config,
+          hcSession: session,
+          hostOpsPatrolIntervalMs:
+            options.dispatcher?.hostOpsPatrolIntervalMs ??
+            config.hostOpsPatrolIntervalMs ??
+            DEFAULT_HOST_OPS_PATROL_INTERVAL_MS,
+          ...(webOptions.log === undefined ? {} : { log: webOptions.log }),
+          ...(webOptions.stream === undefined
+            ? {}
+            : { stream: webOptions.stream }),
+          ...(config.shutdownGraceMs === undefined
+            ? {}
+            : { shutdownGraceMs: config.shutdownGraceMs }),
+          ...(webOptions.shutdownTimer === undefined
+            ? {}
+            : { shutdownTimer: webOptions.shutdownTimer }),
+        }),
+      );
     } catch (error) {
       await plane?.stop();
       await mcp.close();
