@@ -130,11 +130,13 @@ test.each([
     // Root ignores file modes; the unreadable case needs a regular user.
     if (kind === "unreadable" && process.getuid?.() === 0) return;
     prepare();
+    // Create each promise only when it is awaited: building both up front
+    // leaves the second rejection unhandled while the first one is awaited.
     for (const attempt of [
-      launchExecution(io({ CARDIGAN_RUNTIME_MODE: "local" }), dataDir),
-      terminalExecution(io({}), dataDir, null, "A-1"),
+      () => launchExecution(io({ CARDIGAN_RUNTIME_MODE: "local" }), dataDir),
+      () => terminalExecution(io({}), dataDir, null, "A-1"),
     ]) {
-      const error = await rejection(attempt);
+      const error = await rejection(attempt());
       expect(error.exitCode).toBe(EXIT.failure);
       expect(error.message).toContain("无法读取 server 登记的运行时配置");
     }
