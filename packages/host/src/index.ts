@@ -32,6 +32,7 @@ export {
 } from "./errors.js";
 export { classifyExecutorFailure } from "./executor-failure.js";
 export { HostOpsService } from "./host-ops.js";
+export { tryHostOpsLock } from "./host-ops-lock.js";
 export {
   type LaunchedRun,
   type LaunchHost,

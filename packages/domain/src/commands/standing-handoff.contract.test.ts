@@ -13,9 +13,12 @@ import {
   listNeedsYou,
   pauseStandingAssignment,
   queueRun,
+  releaseAssignment,
   requestDecision,
+  resolveDelegatedDecision,
   setCardSensitive,
   setProjectPreferences,
+  standingTools,
 } from "../index.js";
 import { beginHostOpsAction, finishHostOpsAction } from "./host-ops-actions.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
@@ -59,7 +62,7 @@ const at = (f: { io: ReturnType<typeof ports> }, minutes: number) => ({
   },
 });
 
-async function setup(pm: Partial<Assignment> = {}) {
+async function setup(pm: Partial<Assignment> = {}, withOps = true) {
   const empty: CommandState = {
     project_id: human.project_id,
     roles: [
@@ -70,7 +73,9 @@ async function setup(pm: Partial<Assignment> = {}) {
     ],
     cards: [],
     work_items: [],
-    assignments: [{ ...ops, ...pm } as Assignment, hostOps],
+    assignments: withOps
+      ? [{ ...ops, ...pm } as Assignment, hostOps]
+      : [hostOps],
     runs: [],
     deliveries: [],
     reviews: [],
@@ -98,7 +103,7 @@ async function setup(pm: Partial<Assignment> = {}) {
     if (!q) throw new Error("Missing merge confirmation");
     return q;
   };
-  expect(confirmation().decider).toBe("role:pm");
+  expect(confirmation().decider).toBe(withOps ? "role:pm" : "human");
   return { f, confirmation };
 }
 
@@ -191,6 +196,7 @@ const RISKS = [
 const PATHS = [
   "pause",
   "pause_twice",
+  "release",
   "host_restart",
   "delegation_off",
 ] as const;
@@ -232,6 +238,15 @@ function takePath(f: Fixture, path: (typeof PATHS)[number], minutes: number) {
     pause(f, minutes);
     pause(f, minutes + 1);
   } else if (path === "host_restart") hostRestart(f, minutes);
+  else if (path === "release")
+    f.commit(
+      releaseAssignment(
+        f.state,
+        human,
+        { assignment_id: ops.id },
+        at(f, minutes),
+      ),
+    );
   else
     f.commit(
       setProjectPreferences(
@@ -275,6 +290,91 @@ test.each(
     expect(confirmation().status).toBe("open");
   },
 );
+
+test.each(RISKS)(
+  "C-154: a %s card asked of the human directly (no PM Ops) is never auto-merged",
+  async (risk) => {
+    const { f, confirmation } = await setup({}, false);
+    markRisk(f, risk, 1);
+    expect(autoMergeSchedule(f.state, confirmation().id).ok).toBe(false);
+    expect(
+      autoConfirmMerge(
+        f.state,
+        system,
+        { decision_id: confirmation().id },
+        at(f, 24 * 60),
+      ).ok,
+    ).toBe(false);
+  },
+);
+
+test.each([...PATHS, "none"] as const)(
+  "C-154: a confirmation the PM escalated to the human stays human-only via %s",
+  async (path) => {
+    const { f, confirmation } = await setup();
+    const pmOps = {
+      kind: "assignment" as const,
+      project_id: human.project_id,
+      assignment_id: ops.id,
+      ...role("pm"),
+      allowed_tools: standingTools(role("pm").allowed_tools, "ops"),
+    };
+    f.commit(
+      resolveDelegatedDecision(
+        f.state,
+        pmOps,
+        {
+          decision_id: confirmation().id,
+          option: "merge",
+          rationale: "需要人亲自确认",
+          notice: "已交给你",
+          escalate: true,
+        },
+        at(f, 1),
+      ),
+    );
+    const reason = confirmation().human_required_reason;
+    expect(reason).toBeTruthy();
+    if (path !== "none") takePath(f, path, 20);
+    expect(confirmation()).toMatchObject({
+      decider: "human",
+      status: "open",
+      human_required_reason: reason,
+    });
+    expect(autoMergeSchedule(f.state, confirmation().id).ok).toBe(false);
+    expect(
+      autoConfirmMerge(
+        f.state,
+        system,
+        { decision_id: confirmation().id },
+        at(f, 24 * 60),
+      ).ok,
+    ).toBe(false);
+  },
+);
+
+test("C-154: a restart is refused when the session it stopped is no longer current", async () => {
+  const { f, confirmation } = await setup();
+  const before = JSON.stringify(f.state);
+  const restart = (expected_runtime_ref: Assignment["runtime_ref"]) =>
+    queueRun(
+      f.state,
+      human,
+      {
+        ...snapshot,
+        assignment_id: ops.id,
+        restart_session: true,
+        expected_runtime_ref,
+      },
+      at(f, 5),
+    );
+  const stale = restart({ ...ops.runtime_ref, terminal_ref: "other" } as never);
+  expect(stale.ok ? undefined : stale.error.code).toBe("stale_target");
+  expect(restart(null).ok).toBe(false);
+  expect(JSON.stringify(f.state)).toBe(before);
+  f.commit(restart(ops.runtime_ref));
+  expect(confirmation().decider).toBe("role:pm");
+});
 
 test.each(["idle", "lost", "unknown"] as const)(
   "C-154: host_ops restart of an active PM (%s) keeps every item with the same Assignment",

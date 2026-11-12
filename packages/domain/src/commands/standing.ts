@@ -1,4 +1,4 @@
-import type { Actor, Assignment } from "../entities.js";
+import type { Actor, Assignment, RuntimeRef } from "../entities.js";
 import type { Result } from "../errors.js";
 import { hostOpsPending } from "../host-ops.js";
 import type { AssignmentId } from "../ids.js";
@@ -95,12 +95,24 @@ export function pauseStandingInDraft(
  * the PM: the Assignment that owns them stays on duty throughout. Called
  * inside queueRun so the restart and the new Run are one transaction.
  */
-export function restartStandingSession(d: CommandDraft, id: AssignmentId) {
+export function restartStandingSession(
+  d: CommandDraft,
+  id: AssignmentId,
+  expected_runtime_ref?: RuntimeRef | null,
+) {
   const a = standing(d, id);
   ensure(
     a.status === "active",
     "illegal_transition",
     "只有在岗的常驻 PM 能重开会话；已暂停的请用 cardigan pm start 恢复",
+  );
+  // The caller proved this exact session exited; any other session (started
+  // by a concurrent restart or the Dispatcher) must not be dropped unseen.
+  ensure(
+    expected_runtime_ref === undefined ||
+      JSON.stringify(a.runtime_ref) === JSON.stringify(expected_runtime_ref),
+    "stale_target",
+    "常驻 PM 的会话已变化，没有替换；请重新运行",
   );
   const runs = d
     .list("runs")

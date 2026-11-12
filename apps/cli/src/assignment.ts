@@ -26,6 +26,8 @@ import {
   type PreparedWorktree,
   reviewTargetSha,
   scrubRunCredentials,
+  stopRunRuntime,
+  tryHostOpsLock,
   type WorktreeProvider,
   worktreeProvider,
 } from "@cardigan/host";
@@ -200,6 +202,35 @@ async function prepareWorktree(
 export async function startAssignment(
   options: StartOptions,
 ): Promise<StartedAssignment> {
+  if (options.restart_session !== true) return await startUnlocked(options);
+  // C-154: one restart at a time per Assignment, from reading the current
+  // session to launching the new one. The host_ops service takes the same
+  // lock, so a pending host restart and a human restart never interleave.
+  if (!/^A-[1-9][0-9]*$/u.test(options.assignment_id))
+    throw new CliError(
+      `不认识的 Assignment：${options.assignment_id}`,
+      EXIT.usage,
+    );
+  const unlock = await tryHostOpsLock(
+    options.store,
+    options.project_id,
+    options.assignment_id,
+  );
+  if (unlock === undefined)
+    throw new CliError(
+      `${options.assignment_id} 正在被另一个重开会话或主机运维操作处理，没有改动；稍后再试`,
+      EXIT.failure,
+    );
+  try {
+    return await startUnlocked(options);
+  } finally {
+    await unlock();
+  }
+}
+
+async function startUnlocked(
+  options: StartOptions,
+): Promise<StartedAssignment> {
   const { store, io, project_id } = options;
   const actor = resolveActor(io, project_id, store);
   rejectExternalTerminalAction(store, project_id, options.assignment_id);
@@ -259,8 +290,30 @@ export async function startAssignment(
     if (message) throw new CliError(message, EXIT.failure);
     throw error;
   });
-  if ((resuming || restarting) && assignment.runtime_ref)
+  if (resuming && assignment.runtime_ref)
     await closeStandingTerminal(options.runtime, assignment.runtime_ref);
+  // C-154: replace the session only after independently proving the old
+  // terminal exited (same primitive as the host_ops restart); otherwise keep
+  // the Assignment, its RuntimeRef and its tokens so the stop can be retried.
+  const stoppedRef = assignment.runtime_ref;
+  if (restarting) {
+    const stopped = await stopRunRuntime(
+      options.runtime,
+      stoppedRef,
+      () =>
+        JSON.stringify(
+          requireAssignment(store, project_id, assignment.id).assignment
+            .runtime_ref,
+        ) === JSON.stringify(stoppedRef),
+    );
+    if (stopped !== "exited")
+      throw new CliError(
+        stopped === "withdrawn"
+          ? `${assignment.id} 的会话已变化，没有替换；请重新运行 cardigan pm restart`
+          : `${assignment.id} 的旧终端没有确认退出，没有替换会话；Assignment、事项和 Token 都没动，稍后重试 cardigan pm restart`,
+        EXIT.failure,
+      );
+  }
   const run = runCommand(store, {
     operation: "启动 Assignment",
     target: assignment.id,
@@ -277,7 +330,9 @@ export async function startAssignment(
           agent_cli_version: version,
           launch_profile_ref: profileRef,
           ...(resuming ? { resume: true } : {}),
-          ...(restarting ? { restart_session: true } : {}),
+          ...(restarting
+            ? { restart_session: true, expected_runtime_ref: stoppedRef }
+            : {}),
         },
         ports,
       ),

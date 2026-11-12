@@ -819,6 +819,17 @@ describe("C-154 standing PM session restart", () => {
     store.uow.run((tx) => tx.assignments.put(project_id, ops));
     return ops;
   }
+  /** A terminal is alive until released; then it is gone. */
+  function liveUntilReleased(runtime: FakeRuntime) {
+    runtime.status = async (ref: RuntimeRef) =>
+      runtime.released.some((r) => r.terminal_ref === ref.terminal_ref)
+        ? { ok: false, error: { code: "runtime_not_found", message: "gone" } }
+        : ({
+            ok: true,
+            value: { process: "alive", agent: "working", observed_seq: 1 },
+          } as never);
+    return runtime;
+  }
   const options = (runtime: FakeRuntime, restart_session?: boolean) => ({
     store,
     io,
@@ -836,7 +847,7 @@ describe("C-154 standing PM session restart", () => {
 
   test("restart closes the old terminal, retires its token and keeps the PM on duty", async () => {
     standingOps();
-    const runtime = new FakeRuntime();
+    const runtime = liveUntilReleased(new FakeRuntime());
     const first = await startAssignment(options(runtime));
     const oldToken = readFileSync(
       join(dataDir, "runs", "p-one", "A-1", "token"),
@@ -864,6 +875,93 @@ describe("C-154 standing PM session restart", () => {
     expect(
       readFileSync(join(dataDir, "runs", "p-one", "A-1", "first.md"), "utf8"),
     ).toContain("常驻 PM 会话已由人重开");
+  });
+
+  test("restart keeps everything when the old terminal is not proven to have exited", async () => {
+    standingOps();
+    const runtime = new FakeRuntime();
+    const first = await startAssignment(options(runtime));
+    const token = readFileSync(
+      join(dataDir, "runs", "p-one", "A-1", "token"),
+      "utf8",
+    ).trim();
+    // The stop request "succeeds" but the terminal is still alive.
+    runtime.statusResult = {
+      ok: true,
+      value: { process: "alive", agent: "working", observed_seq: 1 },
+    } as never;
+    await expect(startAssignment(options(runtime, true))).rejects.toThrow(
+      /旧终端没有确认退出/,
+    );
+    expect(runtime.provisions).toHaveLength(1);
+    const after = store.uow.read((tx) => ({
+      assignment: tx.assignments.get(project_id, "A-1" as never),
+      run: tx.runs.get(project_id, first.run_id as never),
+      events: tx.events.listAfter(project_id, undefined, 0).map((e) => e.type),
+    }));
+    // The RuntimeRef stays, so the stop can be retried; nothing was replaced.
+    expect(after.assignment?.runtime_ref?.terminal_ref).toBe(
+      first.runtime_ref.terminal_ref,
+    );
+    expect(after.run?.status).toBe("dispatched");
+    expect(after.events).not.toContain("standing_session_restarted");
+    expect(store.verifyToken(token)?.assignment_id).toBe("A-1");
+    // Once the exit is confirmed, the same command goes through.
+    runtime.statusResult = {
+      ok: false,
+      error: { code: "runtime_not_found", message: "gone" },
+    };
+    await startAssignment(options(runtime, true));
+    expect(runtime.provisions).toHaveLength(2);
+  });
+
+  test("concurrent restarts are serialized and never orphan a replacement terminal", async () => {
+    standingOps();
+    const runtime = liveUntilReleased(new FakeRuntime());
+    const provision = runtime.provision.bind(runtime);
+    runtime.provision = async (...args) => {
+      const result = await provision(...args);
+      return result.ok
+        ? ({
+            ok: true,
+            value: {
+              ...result.value,
+              terminal_ref: `terminal-${runtime.provisions.length}`,
+            },
+          } as never)
+        : result;
+    };
+    const first = await startAssignment(options(runtime));
+    const release = runtime.release.bind(runtime);
+    let inner: unknown;
+    runtime.release = async (ref) => {
+      const result = await release(ref);
+      if (inner === undefined)
+        inner = await startAssignment(options(runtime, true)).catch(
+          (error: unknown) => error,
+        );
+      return result;
+    };
+    const outer = await startAssignment(options(runtime, true));
+    // The interleaved restart is refused before touching anything.
+    expect(String(inner)).toContain("正在被另一个重开会话或主机运维操作处理");
+    expect(runtime.provisions).toHaveLength(2);
+    expect(runtime.released.map((r) => r.terminal_ref)).toEqual([
+      first.runtime_ref.terminal_ref,
+    ]);
+    // Every provisioned terminal is either released or the current session.
+    const current = store.uow.read((tx) =>
+      tx.assignments.get(project_id, "A-1" as never),
+    )?.runtime_ref?.terminal_ref;
+    expect(current).toBe(outer.runtime_ref.terminal_ref);
+    expect(current).toBe("terminal-2");
+    // The lock is released afterwards: a later restart proceeds.
+    runtime.release = release;
+    await startAssignment(options(runtime, true));
+    expect(runtime.released.map((r) => r.terminal_ref)).toEqual([
+      "terminal-1",
+      "terminal-2",
+    ]);
   });
 
   test("restart refuses a work-item Assignment without touching it", async () => {

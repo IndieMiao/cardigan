@@ -160,6 +160,11 @@ export interface QueueRunParams {
   readonly resume?: boolean;
   /** C-154: fresh session for an active standing PM; never pauses or hands over. */
   readonly restart_session?: boolean;
+  /**
+   * With restart_session: the session the host proved exited. The restart is
+   * refused as stale_target when the Assignment now points at another one.
+   */
+  readonly expected_runtime_ref?: RuntimeRef | null;
   readonly assignment_id: AssignmentId;
   readonly model: string;
   readonly agent_cli_version: string;
@@ -196,7 +201,8 @@ export function queueRunInDraft(d: CommandDraft, p: QueueRunParams) {
     "resume and restart_session are exclusive",
   );
   if (p.resume) resumeStanding(d, p.assignment_id);
-  if (p.restart_session) restartStandingSession(d, p.assignment_id);
+  if (p.restart_session)
+    restartStandingSession(d, p.assignment_id, p.expected_runtime_ref);
   const assignment = target(d, p.assignment_id);
   ensure(
     hasRunTarget(assignment, d.state),
