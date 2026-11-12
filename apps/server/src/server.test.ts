@@ -6,6 +6,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { createServer } from "node:net";
@@ -136,6 +137,30 @@ test.each([
     }
   },
 );
+
+test("C-155: an unsafe data directory is rejected before its runtime registration is read", async () => {
+  // A symlinked data directory is refused by the permission check. Its corrupt
+  // runtime.json must not be read first, so the error names the directory.
+  const target = mkdtempSync(join(tmpdir(), "cardigan-target-"));
+  const link = `${target}-link`;
+  try {
+    writeFileSync(join(target, "runtime.json"), "{not json");
+    symlinkSync(target, link);
+    await expect(
+      startCardiganServer({
+        config: { dataDir: link, host: "127.0.0.1", port: 0 },
+        store,
+        env: { CARDIGAN_RUNTIME_MODE: "local" },
+        warn: () => {},
+      }),
+    ).rejects.toThrow(
+      "Data directory must be host-owned and must not be a symlink",
+    );
+  } finally {
+    rmSync(link, { force: true });
+    rmSync(target, { recursive: true, force: true });
+  }
+});
 
 test("server startup reports invalid merge gate settings in Chinese without exposing YAML values", async () => {
   await server.close();
