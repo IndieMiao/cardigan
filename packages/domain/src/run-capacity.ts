@@ -1,6 +1,10 @@
 import type { Assignment, Run } from "./entities.js";
 
 export const DEFAULT_RUN_LIMIT = 4;
+export const DEFAULT_MAX_RUN_LIMIT = 16;
+
+export const runLimitMaximumMessage = (maximum: number): string =>
+  `并发上限不能超过 ${maximum}。`;
 
 /** P2a-9: standing PMs may dispatch even when they fill the last slot. */
 export function canDispatchRun(

@@ -1,5 +1,6 @@
 import {
   type Assignment,
+  DEFAULT_MAX_RUN_LIMIT,
   DEFAULT_RUN_LIMIT,
   type Event,
   isStandingPm,
@@ -23,15 +24,23 @@ import { LOCAL_EXECUTOR } from "./merge-gate-executors.js";
 // Reserve the suggested two slots while actually running; tune after measurement.
 export const MERGE_CHECK_RUN_SLOTS = 2;
 
+// C-158: 待定，由人确认；统一修改未登记机器的默认显示文字。
+export const UNREGISTERED_MACHINE_LABEL = "本机";
+
 /** Legacy/default local assignments can exist before a Machine row is registered. */
-export function runCapacityMachines(store: Store, tx: ReadRepositories) {
+export function runCapacityMachines(
+  store: Store,
+  tx: ReadRepositories,
+  displayName?: (machine: string) => string | undefined,
+) {
   const machines = new Map<string, { id: string; label: string }>();
   for (const project of store.listProjects()) {
     for (const assignment of tx.assignments.list(project.id))
       if (!machines.has(assignment.machine_id))
         machines.set(assignment.machine_id, {
           id: assignment.machine_id,
-          label: assignment.machine_id,
+          label:
+            displayName?.(assignment.machine_id) ?? UNREGISTERED_MACHINE_LABEL,
         });
   }
   for (const project of store.listProjects())
@@ -142,9 +151,14 @@ export function effectiveRunLimit(
   store: Store,
   machine: string,
   defaults: (machine: string) => number = () => DEFAULT_RUN_LIMIT,
+  maximums: (machine: string) => number = () => DEFAULT_MAX_RUN_LIMIT,
 ): number {
   const fallback = defaults(machine);
-  return fallback > 0
-    ? (readRunLimit(store.database, machine)?.limit ?? fallback)
+  const maximum = maximums(machine);
+  return fallback > 0 && Number.isSafeInteger(maximum) && maximum > 0
+    ? Math.min(
+        readRunLimit(store.database, machine)?.limit ?? fallback,
+        maximum,
+      )
     : 0;
 }

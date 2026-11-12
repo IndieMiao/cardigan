@@ -18,3 +18,5 @@
 - 768px 及以上的导航和所有元素几何、关键样式与基线一致；执行视图仅允许 C-122 的列头不换行调整，比较时给基线列头同样加不换行约束。
 
 失败退出码非零。`responsive-fixture.tsx` 只由该测试入口加载，不进入产品构建。
+
+C-158 并发面板单独核对：`CAPACITY_SCREENSHOTS=/tmp/cardigan-capacity CAPACITY_BASELINE_REF=<修改前提交> node apps/web/test-support/execution-capacity-screenshots.mjs`（从仓库根目录运行，可设 `CHROMIUM_PATH`）。使用本地夹具的同一执行视图，修改前加载指定提交的面板组件并展示 `local · Agent`，修改后展示“本机 · Agent”和超限提示；输出 1440px、390px 亮暗截图，并检查封顶、保存按钮禁用和页面不溢出。截图是测试数据，显示名回退的真实读取另由 HTTP 测试覆盖。

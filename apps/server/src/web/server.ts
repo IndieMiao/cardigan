@@ -83,6 +83,8 @@ import { serveWrite } from "./write.js";
 
 export interface WebServerOptions {
   readonly runLimit?: (machine: string) => number;
+  readonly runLimitMaximum?: (machine: string) => number;
+  readonly machineDisplayName?: (machine: string) => string | undefined;
   /** 按 q(228) 定为 30 分钟；修改配置后重启 Web 服务生效。 */
   readonly queueWarningMinutes?: number;
   readonly store: Store;
@@ -120,6 +122,8 @@ const API_PREFIX = "/api/";
 
 interface RequestContext {
   readonly runLimit: WebServerOptions["runLimit"];
+  readonly runLimitMaximum: WebServerOptions["runLimitMaximum"];
+  readonly machineDisplayName: WebServerOptions["machineDisplayName"];
   readonly queueWarningMinutes: number;
   readonly req: IncomingMessage;
   readonly res: ServerResponse;
@@ -251,6 +255,8 @@ export async function startWebServer(
         dataDir,
         mergeGate: options.mergeGate,
         runLimit: options.runLimit,
+        runLimitMaximum: options.runLimitMaximum,
+        machineDisplayName: options.machineDisplayName,
         stream: options.stream,
         queueWarningMinutes,
         shutdown: shutdown.signal,
@@ -446,6 +452,7 @@ async function serveProjectRoute(
         dataDir: context.dataDir,
         mergeGate: context.mergeGate?.forProject(project_id),
         runLimit: context.runLimit,
+        runLimitMaximum: context.runLimitMaximum,
         authorize: () => requireSession(context),
       },
       rest,
@@ -459,7 +466,13 @@ async function serveProjectRoute(
     sendJson(
       res,
       200,
-      executionCapacity(store, context.runLimit, context.mergeGate),
+      executionCapacity(
+        store,
+        context.runLimit,
+        context.mergeGate,
+        context.runLimitMaximum,
+        context.machineDisplayName,
+      ),
     );
     return;
   }

@@ -40,6 +40,31 @@ const decision: NeedsDecision = {
   merge_confirmation: null,
 };
 const client = fakeClient({
+  ...(new URLSearchParams(location.search).has("capacity")
+    ? {
+        executionCapacity: async () => ({
+          agents: [
+            {
+              machine_id: "local",
+              label:
+                new URLSearchParams(location.search).get("capacity") ===
+                "before"
+                  ? "local"
+                  : "本机",
+              running: 5,
+              limit: 6,
+              max_limit: 16,
+              queued: 2,
+              merge_check_slots: 0,
+            },
+          ],
+          merge_checks: [
+            { machine_id: "test-ci", running: 1, limit: 3, queued: 4 },
+          ],
+          merge_config_invalid: false,
+        }),
+      }
+    : {}),
   subscribe: (_project, callbacks) => {
     callbacks.status("live");
     return () => {};
