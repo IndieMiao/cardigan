@@ -388,6 +388,128 @@ test("a permission decision marked unrelated to the merge leaves the PM confirma
   expect(confirmation().status).toBe("resolved");
 });
 
+// Review V-540: an Agent's own merge_related=false is only a claim. It keeps
+// the confirmation where it is, but neither PM Ops nor the timeout may merge
+// until the human has answered the labeled question.
+const agentRaise = (
+  f: ReturnType<typeof setup>["f"],
+  extra: Partial<RequestDecisionParams> = {},
+) => {
+  const result = requestDecision(
+    f.state,
+    f.actor(f.coder),
+    {
+      card_id: f.card.id,
+      category: "permission",
+      kind: "choose",
+      question: "允许本卡实现取消管理员写接口的鉴权吗？",
+      context: "本卡交付直接修改管理员接口的访问控制，需要人确认权限取舍。",
+      options: [{ key: "allow", description: "允许", impact: "影响" }],
+      recommended: "allow",
+      affected_cards: [],
+      affected_work_items: [],
+      blocking: false,
+      decider: "human",
+      merge_related: false,
+      ...extra,
+    },
+    f.io,
+  );
+  return f.commit(result) as Decision;
+};
+const humanAnswers = (f: ReturnType<typeof setup>["f"], q: Decision) =>
+  f.commit(
+    recordDecision(
+      f.state,
+      human,
+      {
+        decision_id: q.id,
+        option: "allow",
+        rationale: "与合并无关",
+        raw_quote: "允许",
+      },
+      f.io,
+    ),
+  );
+
+test("an Agent's merge_related=false does not let PM Ops confirm before the human answers", async () => {
+  const { f, confirmation, check, pmResolve } = setup();
+  await f.accept();
+  const held = confirmation();
+  expect(held.decider).toBe("role:pm");
+  const q = agentRaise(f);
+  expect(q).toMatchObject({
+    raised_by: `assignment:${f.coder.id}`,
+    merge_related: false,
+  });
+  expect(q.context).toContain("此标注由 Agent 填写");
+  // No handoff, no timer reset ...
+  expect(confirmation()).toEqual(held);
+  // ... but the question still makes the merge human-only while pending.
+  expect(mergeRequiresHuman(f.state, confirmation())).toBe(true);
+  check("passed");
+  const pm = pmResolve("merge", { notice: "n" });
+  expect(pm.ok).toBe(false);
+  if (!pm.ok) expect(pm.error.code).toBe("unauthorized");
+  expect(mergePlan(f.state, f.card.id).ok).toBe(false);
+  // Once the human answered the labeled question, the label stands.
+  humanAnswers(f, q);
+  expect(mergeRequiresHuman(f.state, confirmation())).toBe(false);
+  f.commit(pmResolve("merge", { notice: "权限拍板已由人回答，与合并无关。" }));
+  expect(confirmation().resolution).toMatchObject({
+    resolved_by: `assignment:${ops.id}`,
+  });
+  expect(mergePlan(f.state, f.card.id).ok).toBe(true);
+});
+
+test("an Agent's merge_related=false does not let the timeout auto-merge before the human answers", async () => {
+  const { f, confirmation } = setup(false);
+  f.commit(
+    setProjectPreferences(
+      f.state,
+      human,
+      { auto_merge_after_minutes: 1 },
+      f.io,
+    ),
+  );
+  await f.accept();
+  const held = confirmation();
+  expect(held.decider).toBe("human");
+  const q = agentRaise(f);
+  expect(confirmation()).toEqual(held);
+  expect(confirmation().human_required_reason).toBeUndefined();
+  const later = {
+    ...f.io,
+    clock: { now: () => new Date(Date.parse(now) + 2 * 60_000).toISOString() },
+  };
+  const auto = autoConfirmMerge(
+    f.state,
+    system,
+    { decision_id: confirmation().id },
+    later,
+  );
+  expect(auto.ok).toBe(false);
+  expect(confirmation().status).toBe("open");
+  // A provisional answer is not the human's answer either.
+  expect(
+    mergeRequiresHuman(
+      {
+        ...f.state,
+        decisions: f.state.decisions.map((d) =>
+          d.id === q.id ? { ...d, status: "provisional" } : d,
+        ),
+      },
+      confirmation(),
+    ),
+  ).toBe(true);
+  humanAnswers(f, q);
+  expect(mergeRequiresHuman(f.state, confirmation())).toBe(false);
+  expect(
+    autoConfirmMerge(f.state, system, { decision_id: confirmation().id }, later)
+      .ok,
+  ).toBe(true);
+});
+
 test("a merge-related permission decision hands the confirmation over as human-required, never auto-merged", async () => {
   const { f, confirmation, raise } = setup();
   await f.accept();

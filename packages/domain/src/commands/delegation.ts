@@ -41,6 +41,22 @@ export const SENSITIVE_CARD_REASON = "卡片已被人标为敏感，合并须由
  * work derived from a project-level sensitive decision is not "ordinary".
  * Withdrawn questions on the card no longer count.
  */
+/**
+ * C-167: a D12 question marked `merge_related=false` stops counting for its
+ * cards' merge only once a human stands behind the label: the human raised
+ * it, or the human answered it (seeing the label in its context). An agent's
+ * own label never lifts the human-merge requirement while the question is
+ * still pending, so PM Ops cannot confirm and the timeout cannot auto-merge.
+ */
+export function mergeUnrelatedConfirmed(
+  q: Pick<Decision, "merge_related" | "raised_by" | "status" | "resolution">,
+): boolean {
+  return (
+    q.merge_related === false &&
+    (q.raised_by === "human" ||
+      (q.status === "resolved" && q.resolution?.resolved_by === "human"))
+  );
+}
 export function mergeNeedsHuman(
   decisions: readonly Decision[],
   cards: readonly Pick<Card, "id" | "source" | "sensitive">[],
@@ -57,8 +73,7 @@ export function mergeNeedsHuman(
       q.trigger !== "merge_confirmation" &&
       q.trigger !== "worktree_cleanup" &&
       (q.id === sourceId ||
-        // C-167: the raiser marked it as unrelated to this card's merge content.
-        (q.merge_related !== false &&
+        (!mergeUnrelatedConfirmed(q) &&
           q.status !== "withdrawn" &&
           (q.card_id === card_id || q.affected_cards.includes(card_id)))) &&
       (q.category === "scope_change" ||

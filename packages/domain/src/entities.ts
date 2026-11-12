@@ -507,8 +507,9 @@ interface DecisionFields {
   /**
    * C-167: `false` only when the raiser marked a D12 decision as unrelated to
    * the merge content of its cards (no produce work item, no approval
-   * target). Such a decision does not make those cards' merge confirmations
-   * human-only. Absent means "related" (the conservative default).
+   * target). Such a decision does not hand those cards' merge confirmations
+   * to the human; it stops counting for `mergeNeedsHuman` only once a human
+   * raised or answered it. Absent means "related" (the conservative default).
    */
   readonly merge_related?: false;
   readonly question: string;
