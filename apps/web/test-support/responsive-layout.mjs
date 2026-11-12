@@ -22,6 +22,7 @@ const baseline = execFileSync(
 );
 const navAllowance = ".nav a { gap: 8px; }";
 const executionAllowance = `.execution-table th { white-space: nowrap; }
+.execution-status { grid-template-columns: auto minmax(min-content, 1fr); }
 .execution-status :is(dt, .status) { white-space: nowrap; }`;
 const screenshots = process.env.LAYOUT_SCREENSHOTS;
 if (screenshots) await mkdir(screenshots, { recursive: true });
@@ -247,10 +248,23 @@ try {
               (el) => {
                 const range = document.createRange();
                 range.selectNodeContents(el);
-                const tops = Array.from(range.getClientRects(), (r) => r.top);
+                const rects = Array.from(range.getClientRects()).filter(
+                  (r) => r.width,
+                );
+                const tops = rects.map((r) => r.top);
+                // The text must stay inside its own cell's content box, not
+                // spill into the neighbouring column.
+                const cell = el.closest("td");
+                const box = cell.getBoundingClientRect();
+                const style = getComputedStyle(cell);
+                const left = box.left + Number.parseFloat(style.paddingLeft);
+                const right = box.right - Number.parseFloat(style.paddingRight);
                 return {
                   text: el.textContent,
                   lines: Math.max(...tops) - Math.min(...tops),
+                  fits: rects.every(
+                    (r) => r.left >= left - 0.5 && r.right <= right + 0.5,
+                  ),
                 };
               },
             ),
@@ -260,6 +274,11 @@ try {
             assert(
               status.lines <= 1,
               `${label}: wrapped status ${status.text}`,
+            );
+          for (const status of statuses)
+            assert(
+              status.fits,
+              `${label}: status ${status.text} overflows its cell`,
             );
         }
         // C-159: nav counts keep a gap from their label at every width.

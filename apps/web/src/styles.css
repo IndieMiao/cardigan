@@ -1889,7 +1889,10 @@ fieldset.filters {
 }
 .execution-status {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  /* C-159: the value track is at least as wide as its unwrapped status, so
+     the column grows and the table scrolls instead of the text spilling
+     into the next column. */
+  grid-template-columns: auto minmax(min-content, 1fr);
   gap: 2px 6px;
   margin: 0;
 }
