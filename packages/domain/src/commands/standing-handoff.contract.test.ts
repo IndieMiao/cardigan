@@ -20,6 +20,7 @@ import {
   setProjectPreferences,
   standingTools,
 } from "../index.js";
+import { CommandDraft } from "./core.js";
 import {
   beginHostOpsAction,
   finishHostOpsAction,
@@ -27,6 +28,7 @@ import {
   requestHostOpsExitConfirmation,
 } from "./host-ops-actions.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
+import { restartStandingSession } from "./standing.js";
 import {
   assignment,
   human,
@@ -477,6 +479,50 @@ test("C-154 × C-152: settling a restart that closes its exit confirmation still
     false,
   );
 });
+
+test.each(["decisions", "human_actions"] as const)(
+  "C-154: a restart whose own effect rewrites %s is still refused",
+  async (collection) => {
+    const { f, confirmation } = await setup();
+    const draft = new CommandDraft(f.state, human, "queue_run", at(f, 5));
+    // Earlier writes in the same draft (like C-152's settlement) are allowed…
+    const put = draft.put.bind(draft) as (c: string, e: unknown) => void;
+    // …but if the restart itself touched PM-owned items, it must fail closed.
+    (draft as { put: unknown }).put = (c: string, e: unknown) => {
+      put(c, e);
+      if (c === "assignments")
+        put(
+          collection,
+          collection === "decisions"
+            ? { ...confirmation(), decider: "human" }
+            : {
+                id: "H-77",
+                card_id: f.card.id,
+                instructions: "x",
+                why_human: "x",
+                expected_return: "x",
+                blocked_work_items: [],
+                status: "open",
+                triage: "human",
+                requested_by: "system",
+                created_at: now,
+              },
+        );
+    };
+    let thrown: unknown;
+    try {
+      restartStandingSession(draft, ops.id);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toMatchObject({
+      error: {
+        code: "invariant_violation",
+        message: "重开常驻 PM 会话不能转交拍板或待你执行",
+      },
+    });
+  },
+);
 
 test("C-154: host_ops restart of a PM the human paused resumes it without a second handoff", async () => {
   const { f, confirmation } = await setup();
