@@ -93,7 +93,7 @@ function setup(withOps = true, policy: "confirm" | "auto" = "confirm") {
     return q;
   };
   const check = (
-    status: MergeCheckView["status"],
+    status: Exclude<MergeCheckView["status"], "executor_unreachable">,
     attempt: string = status,
     checks?: MergeCheckView["checks"],
   ) => {

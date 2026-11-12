@@ -102,7 +102,12 @@ type CheckUpdate = Pick<
 } & (
     | { readonly status: "queued" | "running" }
     | {
-        readonly status: "passed" | "failed" | "timed_out" | "interrupted";
+        readonly status:
+          | "passed"
+          | "failed"
+          | "timed_out"
+          | "interrupted"
+          | "executor_unreachable";
         readonly checks: MergeCheckView["checks"];
         readonly summary: string;
         readonly log_ref: string;
@@ -124,6 +129,7 @@ export function recordMergeCheck(
         "failed",
         "timed_out",
         "interrupted",
+        "executor_unreachable",
       ].includes(p.status),
       "validation_failed",
       "Invalid check status",
@@ -183,6 +189,7 @@ export function recordMergeCheck(
       ensure(
         !previous ||
           previous.status === "interrupted" ||
+          previous.status === "executor_unreachable" ||
           previous.recheck_requested,
         "illegal_transition",
         "This tree already has a result; a failed check requires an explicit recheck",
@@ -209,7 +216,9 @@ export function recordMergeCheck(
           : latest.status === "running" ||
               (latest.status === "queued" &&
                 (p.status === "interrupted" ||
-                  (p.status === "failed" && p.checks.length === 0))),
+                  ((p.status === "failed" ||
+                    p.status === "executor_unreachable") &&
+                    p.checks.length === 0))),
         "illegal_transition",
         "Invalid merge check transition",
       );

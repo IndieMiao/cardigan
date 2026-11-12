@@ -166,7 +166,8 @@ export interface MergeCheckView {
     | "passed"
     | "failed"
     | "timed_out"
-    | "interrupted";
+    | "interrupted"
+    | "executor_unreachable";
   readonly checks: readonly {
     readonly name: string;
     readonly status:

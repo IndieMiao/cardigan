@@ -18,6 +18,7 @@ export {
   type LaunchStep,
   messageOf,
 } from "./errors.js";
+export { classifyExecutorFailure } from "./executor-failure.js";
 export { HostOpsService } from "./host-ops.js";
 export {
   type LaunchedRun,

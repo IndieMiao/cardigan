@@ -18,6 +18,7 @@ import {
   mergePlan,
   prepareMergePlan,
   recordMergeCheck,
+  recordMergeExecutor,
   recordMergePreparation,
   recordMergeResult,
 } from "@cardigan/domain";
@@ -28,6 +29,7 @@ import type {
 } from "@cardigan/git-service";
 import {
   acquireMergeCheckCapacity,
+  classifyExecutorFailure,
   createMergeCheckLog,
   executorExecution,
   LOCAL_EXECUTOR,
@@ -275,7 +277,7 @@ export class MergeChecks {
   }
   private async queue(
     task: Task,
-    candidate: Candidate,
+    candidate: Pick<Candidate, "candidate_sha" | "tree_sha">,
   ): Promise<MergeCheckView | undefined> {
     const { plan } = task;
     const events = this.state(task.project.project_id).events;
@@ -304,6 +306,7 @@ export class MergeChecks {
     if (
       previous &&
       previous.status !== "interrupted" &&
+      previous.status !== "executor_unreachable" &&
       !previous.recheck_requested
     )
       return undefined;
@@ -400,6 +403,24 @@ export class MergeChecks {
       )
     );
   }
+  private executor(
+    task: Task,
+    status: "reachable" | "poll" | "unreachable",
+    attempt?: string,
+  ) {
+    const executor = task.settings.executor;
+    if (!executor) return undefined;
+    return this.command(task.project.project_id, (s, a, p) =>
+      recordMergeExecutor(
+        s,
+        a,
+        status === "unreachable"
+          ? { executor: executor.name, status, attempt_id: attempt ?? "" }
+          : { executor: executor.name, status },
+        p,
+      ),
+    );
+  }
   private async execute(
     task: Task,
     check: MergeCheckView,
@@ -408,6 +429,7 @@ export class MergeChecks {
     let log: Awaited<ReturnType<typeof createMergeCheckLog>> | undefined;
     let result: Awaited<ReturnType<typeof runInTemporaryCheckout>>;
     let releaseCapacity = () => {};
+    let connected = false;
     try {
       log = await createMergeCheckLog({
         dataDir: this.options.execution.dataDir,
@@ -419,6 +441,7 @@ export class MergeChecks {
       const execution = this.target(task);
       await this.serial(async () => {
         await this.git().distribute(task.project, execution);
+        connected = true;
         if (!this.valid(task)) throw new Error("Merge target changed");
       });
       result = await (this.options.run ?? runInTemporaryCheckout)({
@@ -434,6 +457,7 @@ export class MergeChecks {
         lockSlot: slot,
         signal: this.abort.signal,
         onReady: (owner) => {
+          this.executor(task, "reachable");
           releaseCapacity = acquireMergeCheckCapacity(
             this.options.store,
             task.project.project_id as ProjectId,
@@ -446,19 +470,43 @@ export class MergeChecks {
         },
         onOutput: (name, text) => log?.append(name, text),
       });
-    } catch {
+    } catch (error) {
+      const failure = task.settings.executor
+        ? classifyExecutorFailure(error)
+        : undefined;
+      if (failure === "repository_missing") connected = true;
       // Never expose raw Git/SSH diagnostics or configured environment values.
       result = {
-        status: this.abort.signal.aborted ? "interrupted" : "failed",
+        status: this.abort.signal.aborted
+          ? "interrupted"
+          : failure === "executor_unreachable"
+            ? "executor_unreachable"
+            : "failed",
         checks: [],
         cleanup_errors: [],
-        reason: "候选同步或检查执行入口失败，请检查执行环境",
+        reason:
+          failure === "executor_unreachable"
+            ? "远程检查机 SSH 连接失败，合并检查排队等待重试"
+            : failure === "repository_missing"
+              ? "远程检查机的基础仓库缺失或无效，请先初始化基础 clone，再重新检查"
+              : "候选同步或检查执行入口失败，请检查执行环境",
       };
     } finally {
       // Always release runtime occupancy, even if a returned/cancelled target
       // makes the subsequent business result command reject.
       releaseCapacity();
     }
+    // Unconfigured projects keep their previous entry-failure behavior.
+    if (!task.settings.executor && result.status === "executor_unreachable")
+      result = {
+        ...result,
+        status: "failed",
+        reason: "检查执行入口 SSH 连接失败，请修复执行环境后重新检查",
+      };
+    if (result.status === "executor_unreachable")
+      this.executor(task, "unreachable", check.attempt_id);
+    else if (connected && !this.abort.signal.aborted)
+      this.executor(task, "reachable");
     let finished: {
       status: Exclude<MergeCheckView["status"], "running" | "queued">;
       checks: MergeCheckView["checks"];
@@ -475,7 +523,10 @@ export class MergeChecks {
           };
     } catch {
       finished = {
-        status: "failed" as const,
+        status:
+          result.status === "executor_unreachable"
+            ? "executor_unreachable"
+            : "failed",
         checks: [],
         summary: "检查日志写入失败，拒绝发布",
         log_ref: `${check.attempt_id}.log`,
@@ -489,6 +540,8 @@ export class MergeChecks {
       log_ref: finished.log_ref,
     });
     this.seen.delete(check.attempt_id);
+    if (finished.status === "executor_unreachable" && this.valid(task))
+      await this.queue(task, check);
   }
   private async publish(task: Task) {
     if (this.abort.signal.aborted || !this.valid(task, true)) return;
@@ -560,10 +613,10 @@ export class MergeChecks {
     await (await this.schedule(projects)).done;
   }
   /**
-   * One scheduling pass. For a project whose lane is running, only publish
-   * confirmed candidates whose tree already passed; never wait for the lane
-   * (C-113). Other projects start a new lane in the background, so checks on
-   * different execution targets (or free slots of one target) overlap.
+   * Each pass independently publishes confirmed candidates whose tree passed,
+   * including projects waiting in executor backoff or running another check
+   * (C-113). Idle projects then start check lanes in the background; unchecked
+   * candidates retain their FIFO order and the executor's retry deadline.
    */
   async schedule(
     projects: readonly ProjectId[],
@@ -576,10 +629,9 @@ export class MergeChecks {
       this.report(error);
       return { done: Promise.resolve() };
     }
-    const busy = tasks.filter((t) => this.lanes.has(t.project.project_id));
-    if (busy.length)
+    if (tasks.length)
       await this.serial(async () => {
-        for (const task of busy) {
+        for (const task of tasks) {
           if (this.abort.signal.aborted) return;
           if (this.active.has(this.key(task))) continue;
           try {
@@ -592,7 +644,7 @@ export class MergeChecks {
     const fresh = new Map<string, Task[]>();
     for (const task of tasks) {
       const id = task.project.project_id;
-      if (this.lanes.has(id)) continue;
+      if (this.lanes.has(id) || !this.valid(task)) continue;
       fresh.set(id, [...(fresh.get(id) ?? []), task]);
     }
     const live = new Set(tasks.map((t) => this.key(t)));
@@ -693,6 +745,13 @@ export class MergeChecks {
         });
         if (!check) continue;
         if (check.check) {
+          const outage = this.executor(task, "poll");
+          if (
+            outage &&
+            Date.parse(outage.next_retry_at) >
+              Date.parse(this.options.clock.now())
+          )
+            return;
           const slot = await this.slot(task);
           if (!slot) return;
           try {
@@ -707,6 +766,8 @@ export class MergeChecks {
           } finally {
             slot.release();
           }
+          // An outage keeps this and all later unchecked cards queued.
+          if (this.executor(task, "poll")) return;
         }
         await this.serial(() => this.publish(task));
       } catch (error) {

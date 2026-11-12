@@ -786,6 +786,18 @@ test("C-130: an executor whose SSH preparation fails records a start failure and
   );
   await c.gate.tick([f.project_id]);
   expect(check()?.status).toBe("failed");
+  expect(check()?.checks).toEqual([]);
+  expect(
+    f
+      .state()
+      .events.some(
+        (e) =>
+          e.type === "merge_check_started" ||
+          e.type === "merge_executor_unreachable",
+      ),
+  ).toBe(false);
+  expect(f.state().human_actions).toEqual([]);
+  await c.gate.tick([f.project_id]);
   expect(check()?.summary).not.toContain("preparation");
   expect(c.run).toHaveBeenCalledTimes(1);
   expect(c.run.mock.calls[0]?.[0].execution).toMatchObject({
@@ -1041,3 +1053,278 @@ test("P2a-12 D: shutdown releases a check waiting for a slot without running it"
   expect(o.c.run).toHaveBeenCalledOnce();
   expect(o.checkB()?.status).toBe("queued");
 });
+
+const remoteSettings = (): ProjectMergeGate => ({
+  status: "enabled",
+  checks: [{ name: "test", run: "true" }],
+  env: {},
+  totalTimeoutMs: 1000,
+  executor: ciExecutor(1),
+});
+
+test("remote outage survives restart, retains FIFO, escalates after 30 minutes and resumes automatically", async () => {
+  const epoch = Date.parse("2030-01-01T00:00:00.000Z");
+  let time = epoch;
+  const { f, check, scenario } = await fixture("auto", {
+    clock: { now: () => new Date(time).toISOString() },
+  });
+  const later = m4Scenario(f, "auto");
+  await acceptThroughMergeGate(f, later, "a".repeat(40));
+  const c = controller(f);
+  c.setConfig(remoteSettings());
+  c.git.distribute.mockRejectedValue(
+    new Error("ssh: connect to host private-host port 22: Connection refused"),
+  );
+  const originalItems = f.state().work_items;
+  for (const minute of [0, 1, 3, 7, 15]) {
+    time = epoch + minute * 60_000;
+    await c.gate.tick([f.project_id]);
+    expect(check()?.status).toBe("queued");
+    expect(capacity(f).checks).toEqual({});
+  }
+  expect(c.git.distribute).toHaveBeenCalledTimes(5);
+  expect(c.run).not.toHaveBeenCalled();
+  expect(c.git.publish).not.toHaveBeenCalled();
+  expect(
+    f.state().events.filter((e) => e.type === "merge_check_finished"),
+  ).toHaveLength(5);
+  expect(
+    f
+      .state()
+      .events.filter((e) => e.type === "merge_check_finished")
+      .every(
+        (e) =>
+          (e.payload as { status: string }).status === "executor_unreachable",
+      ),
+  ).toBe(true);
+  expect(f.state().human_actions).toEqual([]);
+  const restarted = new MergeChecks(c.options);
+  time = epoch + 30 * 60_000;
+  await restarted.tick([f.project_id]);
+  expect(f.state().human_actions).toEqual([]);
+  time++;
+  await restarted.tick([f.project_id]);
+  await restarted.tick([f.project_id]);
+  expect(c.git.distribute).toHaveBeenCalledTimes(5);
+  expect(f.state().human_actions).toHaveLength(1);
+  expect(f.state().human_actions[0]).toMatchObject({
+    status: "open",
+    blocked_work_items: [],
+  });
+  expect(f.state().work_items).toEqual(originalItems);
+  const needs = listNeedsYou(f.state(), f.human);
+  expect(needs.ok && needs.value.data.human_actions).toHaveLength(1);
+  expect(JSON.stringify(f.state().events)).not.toContain("private-host");
+  c.git.distribute.mockResolvedValue();
+  // Same tree, new candidate SHA after baseline movement must still run.
+  c.advance();
+  time = epoch + 31 * 60_000;
+  await restarted.tick([f.project_id]);
+  expect(check()?.status).toBe("passed");
+  expect(c.run).toHaveBeenCalledTimes(2);
+  expect(
+    c.run.mock.calls.every(([input]) => input.execution.mode === "agent-ssh"),
+  ).toBe(true);
+  expect(
+    f
+      .state()
+      .cards.filter((card) =>
+        [scenario.card.id, later.card.id].includes(card.id),
+      )
+      .every((card) => card.status === "done"),
+  ).toBe(true);
+  expect(f.state().human_actions[0]?.status).toBe("cancelled");
+  expect(
+    f.state().events.filter((e) => e.type === "merge_executor_recovered"),
+  ).toHaveLength(1);
+  expect(c.errors).not.toHaveBeenCalled();
+});
+
+test.each([
+  "ssh: Could not resolve hostname private-host: Name or service not known",
+  "Host key verification failed.",
+  "kex_exchange_identification: Connection closed by remote host",
+  "agent@private-host: Permission denied (publickey).",
+])("SSH failure queues a retry without fallback (%s)", async (diagnostic) => {
+  const { f, check } = await fixture("auto");
+  const c = controller(f);
+  c.setConfig(remoteSettings());
+  c.git.distribute.mockRejectedValue(
+    Object.assign(new Error("Git failed"), { stderr: diagnostic }),
+  );
+  await c.gate.tick([f.project_id]);
+  await c.gate.tick([f.project_id]);
+  expect(check()?.status).toBe("queued");
+  expect(c.git.distribute).toHaveBeenCalledTimes(1);
+  expect(c.run).not.toHaveBeenCalled();
+  expect(c.git.publish).not.toHaveBeenCalled();
+});
+
+test("missing remote base clone is an environment failure, not a retryable network outage", async () => {
+  const { f, check } = await fixture("auto");
+  const c = controller(f);
+  c.setConfig(remoteSettings());
+  c.git.distribute.mockRejectedValue(
+    new Error("fatal: '/private/repo' does not appear to be a git repository"),
+  );
+  await c.gate.tick([f.project_id]);
+  await c.gate.tick([f.project_id]);
+  expect(check()?.status).toBe("failed");
+  expect(check()?.summary).toContain("基础仓库缺失或无效");
+  expect(check()?.summary).not.toContain("/private/repo");
+  expect(
+    f.state().events.some((e) => e.type === "merge_executor_unreachable"),
+  ).toBe(false);
+  expect(c.git.distribute).toHaveBeenCalledTimes(1);
+  expect(c.run).not.toHaveBeenCalled();
+});
+
+test.each([false, true])(
+  "SSH checkout entry failure retries only configured remote executors (remote=%s)",
+  async (remote) => {
+    let time = Date.parse("2030-01-01T00:00:00.000Z");
+    const { f, check } = await fixture("auto", {
+      clock: { now: () => new Date(time).toISOString() },
+    });
+    const c = controller(f);
+    if (remote) c.setConfig(remoteSettings());
+    c.run.mockImplementationOnce(async () => ({
+      status: "executor_unreachable",
+      checks: [],
+      cleanup_errors: [],
+      reason: "远程检查机 SSH 连接失败，合并检查排队等待重试",
+    }));
+    await c.gate.tick([f.project_id]);
+    expect(check()?.status).toBe(remote ? "queued" : "failed");
+    time += 60_000;
+    await c.gate.tick([f.project_id]);
+    expect(c.run).toHaveBeenCalledTimes(remote ? 2 : 1);
+    expect(check()?.status).toBe(remote ? "passed" : "failed");
+    if (!remote) {
+      expect(check()?.summary).toContain("修复执行环境后重新检查");
+      expect(check()?.summary).not.toContain("排队等待重试");
+    }
+    expect(c.errors).not.toHaveBeenCalled();
+  },
+);
+
+test("a previously passed card awaiting confirmation does not block a later outage retry", async () => {
+  let time = Date.parse("2030-01-01T00:00:00.000Z");
+  const { f, check } = await fixture("confirm", {
+    clock: { now: () => new Date(time).toISOString() },
+  });
+  const c = controller(f);
+  c.setConfig(remoteSettings());
+  await c.gate.tick([f.project_id]);
+  expect(check()?.status).toBe("passed");
+  const later = m4Scenario(f, "auto");
+  await acceptThroughMergeGate(f, later, "a".repeat(40));
+  c.git.distribute.mockRejectedValueOnce(
+    new Error("ssh: connect to host: Connection refused"),
+  );
+  await c.gate.tick([f.project_id]);
+  expect(c.git.distribute).toHaveBeenCalledTimes(2);
+  time += 60_000;
+  await c.gate.tick([f.project_id]);
+  expect(c.git.distribute).toHaveBeenCalledTimes(3);
+  expect(
+    f.state().cards.find((card) => card.id === later.card.id)?.status,
+  ).toBe("done");
+  expect(c.errors).not.toHaveBeenCalled();
+});
+
+test.each([false, true])(
+  "an earlier outage does not block confirmed passed candidates; changed trees still wait (changed=%s)",
+  async (changed) => {
+    let time = Date.parse("2030-01-01T00:00:00.000Z");
+    const {
+      f,
+      scenario: first,
+      check,
+    } = await fixture("confirm", {
+      clock: { now: () => new Date(time).toISOString() },
+    });
+    const second = m4Scenario(f, "confirm");
+    const { completion: secondCompletion } = await acceptThroughMergeGate(
+      f,
+      second,
+      "a".repeat(40),
+    );
+    const secondCheck = () =>
+      latestMergeCheck(f.state().events, second.card.id, secondCompletion.id);
+    const c = controller(f);
+    c.setConfig(remoteSettings());
+    c.run.mockImplementationOnce(async (input) => {
+      input.onReady?.();
+      return {
+        status: "failed",
+        checks: [{ name: "test", status: "failed", exit_code: 1 }],
+        cleanup_errors: [],
+      };
+    });
+    await c.gate.tick([f.project_id]);
+    expect(check()?.status).toBe("failed");
+    expect(secondCheck()?.status).toBe("passed");
+    f.apply((s, a, p) =>
+      recheckMerge(
+        { ...s, project_settings: { merge_gate_enabled: true } },
+        a,
+        { card_id: first.card.id },
+        p,
+      ),
+    );
+    c.git.distribute.mockRejectedValue(
+      new Error("ssh: connect to host: Connection refused"),
+    );
+    await c.gate.tick([f.project_id]);
+    expect(check()?.status).toBe("queued");
+    expect(c.git.publish).not.toHaveBeenCalled();
+    const third = m4Scenario(f, "auto");
+    const { completion: thirdCompletion } = await acceptThroughMergeGate(
+      f,
+      third,
+      "a".repeat(40),
+    );
+    f.decide(required(mergeConfirmation(f, second.card.id)), "merge");
+    if (changed) c.advance(true);
+    await c.gate.tick([f.project_id]);
+    await c.gate.tick([f.project_id]);
+    expect(
+      f.state().cards.find((card) => card.id === second.card.id)?.status,
+    ).toBe(changed ? "awaiting_merge" : "done");
+    expect(secondCheck()?.status).toBe(changed ? "queued" : "passed");
+    expect(c.git.publish).toHaveBeenCalledTimes(changed ? 0 : 1);
+    expect(c.git.distribute).toHaveBeenCalledTimes(3);
+    expect(c.run).toHaveBeenCalledTimes(2);
+    expect(check()?.status).toBe("queued");
+    expect(
+      latestMergeCheck(f.state().events, third.card.id, thirdCompletion.id)
+        ?.status,
+    ).toBe("queued");
+    // Publication can pass the waiting queue, but remote checks retain FIFO.
+    const order: (string | undefined)[] = [];
+    c.run.mockImplementation(async (input) => {
+      order.push(
+        f
+          .state()
+          .events.find(
+            (e) =>
+              e.type === "merge_check_queued" &&
+              (e.payload as { attempt_id?: string }).attempt_id ===
+                input.attempt,
+          )?.card_id,
+      );
+      input.onReady?.();
+      return passed;
+    });
+    c.git.distribute.mockResolvedValue();
+    time += 60_000;
+    await c.gate.tick([f.project_id]);
+    expect(order).toEqual(
+      changed
+        ? [first.card.id, second.card.id, third.card.id]
+        : [first.card.id, third.card.id],
+    );
+    expect(c.errors).not.toHaveBeenCalled();
+  },
+);
