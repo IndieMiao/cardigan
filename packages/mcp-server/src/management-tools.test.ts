@@ -2,6 +2,7 @@ import type {
   Assignment,
   Card,
   Decision,
+  Delivery,
   HumanAction,
   TimelineEntry,
   WorkItem,
@@ -1213,6 +1214,75 @@ test.each([0, 5, "3", "rush"])(
     expect(rows()).toEqual(before);
   },
 );
+
+test("C-160 update_card.pre_merge_check: Ops adds pending, only Office passes", async () => {
+  const [officeA, opsA] = store.uow.run((tx) =>
+    (["office", "ops"] as const).map((standing_mode): Assignment => {
+      const a: Assignment = {
+        id: tx.ids.next(project, "assignment"),
+        scope: "standing",
+        standing_mode,
+        role_id: "pm",
+        role_version: 1,
+        status: "active",
+        runtime_state: "idle",
+        runtime_ref: null,
+        machine_id: "local",
+        mcp_token_id: `fixture-${standing_mode}-160`,
+        created_at: "2026-01-01T00:00:00Z",
+      };
+      tx.assignments.put(project, a);
+      return a;
+    }),
+  );
+  const officeClient = await connect(officeA as Assignment);
+  const opsClient = await connect(opsA as Assignment, true);
+  const added = await ok<Card>(opsClient, "update_card", {
+    card_id: card.id,
+    pre_merge_check: { label: "独立安全审核", status: "pending" },
+  });
+  expect(added.pre_merge_checks?.[0]?.status).toBe("pending");
+  const before = rows();
+  expect(
+    (
+      await raw(opsClient, "update_card", {
+        card_id: card.id,
+        pre_merge_check: { label: "独立安全审核", status: "passed" },
+      })
+    ).isError,
+  ).toBe(true);
+  expect(rows()).toEqual(before);
+  // A conclusion binds to the current producing delivery, so one must exist.
+  store.uow.run((tx) => {
+    const item = tx.work_items
+      .list(project)
+      .find((w) => w.card_id === card.id && w.kind === "produce");
+    if (!item) throw new Error("Missing producing work item");
+    tx.deliveries.put(project, {
+      id: "D-1",
+      work_item_id: item.id,
+      run_id: "R-1",
+      kind: "code",
+      summary: "Ready",
+      subject: { kind: "git_head", value: "a".repeat(40) },
+      status: "submitted",
+      evidence: [],
+      attachments: [],
+      known_gaps: [],
+      requested_verifiers: [],
+    } as Delivery);
+  });
+  const passed = await ok<Card>(officeClient, "update_card", {
+    card_id: card.id,
+    pre_merge_check: { label: "独立安全审核", status: "passed", note: "通过" },
+  });
+  expect(passed.pre_merge_checks?.[0]).toMatchObject({
+    status: "passed",
+    note: "通过",
+    updated_by: `assignment:${officeA?.id}`,
+    checked_versions: [{ delivery_id: "D-1", subject: "a".repeat(40) }],
+  });
+});
 
 /** Drive the fixture card to awaiting_merge through the real MCP tools. */
 async function awaitingMerge() {

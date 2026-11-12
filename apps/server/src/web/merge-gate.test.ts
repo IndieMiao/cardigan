@@ -626,3 +626,70 @@ test("C-145 merge capacity is separate from a same-named Agent and survives card
     merge_checks: [{ running: 0, queued: 0 }],
   });
 });
+
+test("C-160: Needs You and card detail carry the card's pre-merge checks", async () => {
+  h.store.uow.run((tx) => {
+    const card = tx.cards.get(project_id, "C-2");
+    if (!card) throw new Error("Missing card");
+    tx.cards.put(project_id, {
+      ...card,
+      pre_merge_checks: [
+        {
+          label: "独立安全审核",
+          status: "pending",
+          updated_by: "human",
+          updated_at: NOW,
+        },
+        {
+          label: "截图核对",
+          status: "failed",
+          note: "颜色不对",
+          updated_by: "human",
+          updated_at: NOW,
+        },
+        ...(["a", "b"] as const).map((sha) => ({
+          label: `版本 ${sha}`,
+          status: "passed" as const,
+          checked_versions: [
+            {
+              work_item_id: "W-2" as WorkItemId,
+              delivery_id: "D-1" as DeliveryId,
+              subject: sha.repeat(40),
+            },
+          ],
+          updated_by: "human" as const,
+          updated_at: NOW,
+        })),
+      ],
+    });
+  });
+  record("queued");
+  record("running");
+  record("passed");
+  const expected = [
+    { label: "独立安全审核", status: "pending", stale: false, note: null },
+    // Recorded without a checked version, so it reads as pending (stale).
+    { label: "截图核对", status: "pending", stale: true, note: "颜色不对" },
+    // Passed on the current delivery (a×40) holds; passed on b×40 is stale.
+    { label: "版本 a", status: "passed", stale: false },
+    { label: "版本 b", status: "pending", stale: true },
+  ];
+  const needs = (await read("/needs-you")).json as {
+    decisions: {
+      id: string;
+      merge_confirmation: { pre_merge_checks: unknown[] } | null;
+    }[];
+  };
+  expect(
+    needs.decisions.find((q) => q.id === "Q-2")?.merge_confirmation
+      ?.pre_merge_checks,
+  ).toMatchObject(expected);
+  const detail = (await read("/cards/C-2")).json as {
+    merge_confirmations: {
+      merge_confirmation: { pre_merge_checks: unknown[] };
+    }[];
+  };
+  expect(
+    detail.merge_confirmations[0]?.merge_confirmation.pre_merge_checks,
+  ).toMatchObject(expected);
+});

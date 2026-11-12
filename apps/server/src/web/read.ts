@@ -25,6 +25,7 @@ import {
   decisionActionView,
   deriveCardStatus,
   deriveReviewMatrix,
+  effectivePreMergeChecks,
   extractReferences,
   formatTimelineEntryId,
   hasVerifiedMergeNoop,
@@ -872,6 +873,20 @@ export function noticePage(state: CommandState, before?: string) {
   };
 }
 
+function preMergeChecksView(state: CommandState, cardId: string | undefined) {
+  const card = state.cards.find((c) => c.id === cardId);
+  if (!card) return [];
+  return effectivePreMergeChecks(card, state.work_items, state.deliveries).map(
+    (check) => ({
+      label: check.label,
+      status: check.status,
+      stale: check.stale,
+      note: check.note ?? null,
+      updated_at: check.updated_at,
+    }),
+  );
+}
+
 function decisionActionWebView(
   state: CommandState,
   decision: ReturnType<typeof decisionActionView>,
@@ -949,6 +964,9 @@ function decisionActionWebView(
     merge_confirmation: decision.merge_confirmation
       ? {
           ...decision.merge_confirmation,
+          // C-160: advisory checks; a conclusion on an older version reads
+          // as pending (`stale`) until PM Office records one for this version.
+          pre_merge_checks: preMergeChecksView(state, decision.card_id),
           ...(mergeGateStatus === "enabled"
             ? {
                 merge_gate_enabled: true,

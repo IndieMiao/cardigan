@@ -213,6 +213,17 @@ const schemas = {
       ])
       .optional(),
     status: z.enum(states.card).optional(),
+    pre_merge_check: z
+      .object({
+        label: text.describe("核对项名称，例如“独立安全审核”“截图核对”"),
+        status: z.enum(["pending", "passed", "failed"]),
+        note: z.string().optional(),
+      })
+      .strict()
+      .optional()
+      .describe(
+        "C-160 合并前核对项：新增或更新一项，不能与其他字段混用。PM Ops 只能设为 pending；passed/failed 只有 PM Office 能设，且只对当前交付版本有效，新版本交付后需重新核对",
+      ),
   },
   create_work_item: {
     card_id: id("card"),
@@ -425,7 +436,7 @@ export function managementTools(clock?: Clock) {
     }),
     wire(
       "update_card",
-      "Update card metadata or planning state.",
+      "Update card metadata or planning state, or one pre-merge check (pre_merge_check).",
       (...args: Parameters<typeof updateCard>) =>
         cardReply(updateCard(...args)),
     ),
