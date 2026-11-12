@@ -1,6 +1,7 @@
 # P2a-11：验证方在合并前撤回自己已通过的审核
 
-- 状态：**草案，未排入 `docs/plans/phase-2.md`**。本文件放在 `cardigan-research`，不改 `cardigan` 仓库；正式排期时把本文件搬进 `docs/plans/`，由 Claude 在 `phase-2.md` 的 P2a 表补一行 P2a-11，并按惯例在文件顶部写"开发方案要改的章节"。
+- 状态：已排入 `docs/plans/phase-2.md` P2a 任务表（P2a-11），待拆卡实现。
+- 开发方案要改的章节（本计划只做拆分，不改正文；实现 PR 合并后由 Claude 按各 PR 描述统一回填）：§4.4（verify WorkItem 新增 passed → ready 的 withdraw_pass 迁移，以及撤回对 Card、完成申请、合并确认的级联）、§4.5（不变量 14、15、16、21、23 补撤回情形的说明）、§6.4（撤回后的路由和 Needs You 提示）、§9.2（新增 `withdraw_review` 工具）、§9.3（服务端校验：只能撤回自己的审核、状态窗口、合并检查进行中拒绝）、§10.1（角色工具清单：验证方可用，PM Office、产出角色、host_ops 不可用）。
 - 对应：试行发现 21（提炼稿 `dogfood/distill-trial-1.md` F2）；用户 2026-11-11 拍板：**允许**验证方在合并前撤回自己已通过的审核，撤回后该验证项回到可处理状态，并在 Needs You 提示。
 - 必读：`docs/development-plan.md` §4.4（状态机，尤其 verify WorkItem、Card、Decision 三段）、§4.5 不变量 14、15、16、21、23；§6.4 路由规则；§9.2/§9.3 工具清单与服务端校验。代码调查依据：`packages/domain/src/transitions.ts`、`derived.ts`、`commands/delivery.ts`、`commands/delivery-invalidation.ts`、`commands/merge-rework.ts`、`commands/merge-delegation.ts`、`commands/delegation.ts`、`commands/auto-merge.ts`。
 
