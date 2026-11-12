@@ -632,7 +632,7 @@ test.each([
     if (status === "queued" || status === "running") {
       // C-171: the summary names the card and the confirmation.
       expect(result.out).toContain(
-        `还有 1 条合并确认的检查在排队或运行中，检查结束后会列在这里：${card_id} Q-1（${label}）`,
+        `还有 1 条合并确认的检查在排队或运行中，检查结束后会出现在这里：${card_id} Q-1（${label}）`,
       );
       expect(result.out).not.toContain("待你拍板（");
     } else {
@@ -682,7 +682,7 @@ test("needs-you leaves projects without a gate unchanged and counts pending chec
   expect((await cardigan("needs-you")).out).not.toContain("合并检查");
   enableMergeGate();
   expect((await cardigan("needs-you")).out).toContain(
-    `还有 1 条合并确认的检查在排队或运行中，检查结束后会列在这里：${card_id} Q-1`,
+    `还有 1 条合并确认的检查在排队或运行中，检查结束后会出现在这里：${card_id} Q-1`,
   );
 });
 
@@ -702,7 +702,7 @@ test.each([
     const result = await cardigan("needs-you");
     expect(result.code).toBe(0);
     expect(result.out).toContain(
-      `还有 1 条合并确认的检查在排队或运行中，检查结束后会列在这里：${card_id} Q-1`,
+      `还有 1 条合并确认的检查在排队或运行中，检查结束后会出现在这里：${card_id} Q-1`,
     );
     expect(result.out).toContain("合并闸门配置无效，请查看 server 启动日志");
     expect(result.out).not.toContain("合并检查：排队");

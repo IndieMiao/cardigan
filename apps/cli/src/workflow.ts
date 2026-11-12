@@ -1142,7 +1142,7 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
     // C-171: name what the summary counts so the human can find it.
     const waitingLines = waiting.length
       ? [
-          `还有 ${waiting.length} 条合并确认的检查在排队或运行中，检查结束后会列在这里：${waiting
+          `还有 ${waiting.length} 条合并确认的检查在排队或运行中，检查结束后会出现在这里：${waiting
             .map(
               (w) =>
                 `${w.card_id ? `${w.card_id} ` : ""}${w.decision_id}${w.check_status ? `（${checkLabels[w.check_status]}）` : ""}`,
