@@ -15,11 +15,9 @@ const SIGNAL =
   /error|fail|panic|exception|assert|abort|fatal|denied|cannot|unable|[×✗✖]/iu;
 /** Failure-looking lines that vitest prints around timeouts. */
 const ALLOWED = [
-  // Test names in FAIL headers and × list items are arbitrary text; the
-  // matching FAIL block below still has to prove a timeout.
+  // Test names in FAIL headers are arbitrary text; the FAIL block itself
+  // still has to prove a timeout. × items and → reasons are handled in scan.
   FAIL,
-  /^\s*[×✗✖]\s/u,
-  /^\s*→\s+(?:Test|Hook) timed out in \d+ms\b/u,
   /^\s*⎯+\s*Failed (?:Tests|Suites) \d+\s*⎯+\s*$/u,
   /^\s*[❯✓↓]\s+\S+\s+\(\d+ tests?(?:\s*\|\s*\d+ (?:failed|passed|skipped|todo))*\)/u,
   /^\s*Test Files\s+\d+ failed\b/u,
@@ -39,29 +37,55 @@ interface Scan {
   /** Number of FAIL blocks, all of them timeouts when `clean`. */
   readonly timeouts: number;
 }
+const FAILED_ITEM = /^\s*[×✗✖]\s/u;
+const REASON = /^\s*→\s/u;
+const TIMEOUT_REASON = /^\s*→\s+(?:Test|Hook) timed out in \d+ms\b/u;
+const SUMMARY = /^\s*⎯+\s*Failed (?:Tests|Suites) \d+\s*⎯+\s*$/u;
 function scan(output: string): Scan {
-  if (output.includes(TRUNCATED_OUTPUT)) return { clean: false, timeouts: 0 };
+  const unclean = { clean: false, timeouts: 0 };
+  if (output.includes(TRUNCATED_OUTPUT)) return unclean;
   const lines = output.split(/\r?\n/u);
   let timeouts = 0;
+  /** FAIL headers in the final report, each proven to be a timeout. */
+  let reported = 0;
+  /** × items whose own reason line does not show a timeout. */
+  let unexplained = 0;
+  let summary = false;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] ?? "";
     if (FAIL.test(line)) {
       // Identical errors are grouped under consecutive FAIL headers.
       let next = i + 1;
+      reported++;
       while (
         next < lines.length &&
         (FAIL.test(lines[next] ?? "") || !lines[next]?.trim())
-      )
+      ) {
+        if (FAIL.test(lines[next] ?? "")) reported++;
         next++;
-      if (!TIMEOUT.test(lines[next]?.trim() ?? ""))
-        return { clean: false, timeouts };
+      }
+      if (!TIMEOUT.test(lines[next]?.trim() ?? "")) return unclean;
       timeouts++;
       i = next;
       continue;
     }
+    // V-436: a failed test seen in the progress output is only explained by
+    // its own timeout reason, or later by a timeout block in the report.
+    if (FAILED_ITEM.test(line)) {
+      let next = i + 1;
+      while (next < lines.length && !lines[next]?.trim()) next++;
+      if (TIMEOUT_REASON.test(lines[next] ?? "")) i = next;
+      else unexplained++;
+      continue;
+    }
+    // Any other stated reason (for example "→ expected 1 to be 2") is a failure.
+    if (REASON.test(line)) return unclean;
+    if (SUMMARY.test(line)) summary = true;
     if (SIGNAL.test(line) && !ALLOWED.some((pattern) => pattern.test(line)))
-      return { clean: false, timeouts };
+      return unclean;
   }
+  // A run cut off before its report leaves failures nobody explained.
+  if (unexplained > 0 && (!summary || unexplained > reported)) return unclean;
   return { clean: true, timeouts };
 }
 

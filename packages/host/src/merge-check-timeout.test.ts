@@ -171,6 +171,47 @@ test("C-116: a step timeout is clean only without other failure signals", () => 
   expect(stepTimeoutOnly(`partial\n${TRUNCATED_OUTPUT}\nmore`)).toBe(false);
 });
 
+// V-436: real vitest 5.1 verbose output cut off by the step timeout while
+// another test hung, before the final report was printed.
+const cutOffAfterAssertion = ` RUN  v5.1.0 /repo
+
+ × a.test.ts > value 6ms
+   → expected 1 to be 2 // Object.is equality
+`;
+const cutOffAfterTimeout = ` RUN  v5.1.0 /repo
+
+ × c.test.ts > slow 34ms
+   → Test timed out in 30ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+`;
+
+test("V-436: failed progress items need timeout evidence before the step timeout counts", () => {
+  expect(stepTimeoutOnly(cutOffAfterAssertion)).toBe(false);
+  expect(
+    stepTimeoutOnly(
+      " RUN  v5.1.0 /repo\n × a.test.mjs > value 4ms\n   → expected 1 to be 2 // Object.is equality\n",
+    ),
+  ).toBe(false);
+  // Default reporter: no reason line under ×, and no report yet.
+  expect(
+    stepTimeoutOnly(" ❯ a.test.ts (2 tests | 1 failed)\n   × value 6ms\n"),
+  ).toBe(false);
+  // A report that explains fewer failures than the progress showed.
+  expect(
+    stepTimeoutOnly(
+      `   × value 6ms\n   × other 3ms\n${run(timeoutBlock("value"), 1)}`,
+    ),
+  ).toBe(false);
+  // A timed-out test cut off before the report is still only a timeout.
+  expect(stepTimeoutOnly(cutOffAfterTimeout)).toBe(true);
+  // The default reporter's × items are explained by the full timeout report.
+  expect(
+    vitestTimeoutsOnly(
+      run(timeoutBlock("slow one") + timeoutBlock("slow two")),
+    ),
+  ).toBe(true);
+});
+
 test("C-116: step timeouts and vitest timeouts combine; anything else does not", () => {
   const outputs: Record<string, string> = {
     lint: "",
