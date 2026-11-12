@@ -20,17 +20,30 @@ import {
 } from "./merge-push-config.js";
 import type { CheckoutCheck } from "./temporary-checkout.js";
 
+export interface MergeGateCheck extends CheckoutCheck {
+  /** Only used when the merge queue is enabled; absent means both tiers. */
+  readonly tiers?: readonly ("card" | "batch")[];
+  readonly scope?: "affected";
+  readonly skipDocsOnly?: boolean;
+}
+
+export interface MergeGateAffected {
+  /** Package directory -> directories of additional dependent packages. */
+  readonly extraDependents?: Readonly<Record<string, readonly string[]>>;
+}
+
 export type ProjectMergeGate =
   | { readonly status: "disabled" }
   | { readonly status: "invalid"; readonly reason: string }
   | {
       readonly status: "enabled";
-      readonly checks: readonly CheckoutCheck[];
+      readonly checks: readonly MergeGateCheck[];
       readonly env: Readonly<Record<string, string>>;
       readonly totalTimeoutMs: number;
       readonly push?: MergePushConfig;
       /** Absent for `executor: local` or no executor: exactly today's behavior. */
       readonly executor?: MergeGateExecutor;
+      readonly affected?: MergeGateAffected;
     };
 export interface MergeGateConfiguration {
   readonly errors: readonly string[];
@@ -58,6 +71,43 @@ const only = (value: Record<string, unknown>, keys: readonly string[]) => {
   if (Object.keys(value).some((key) => !keys.includes(key)))
     invalid("含有不支持的配置字段");
 };
+function parseTiers(value: unknown): readonly ("card" | "batch")[] {
+  if (
+    !Array.isArray(value) ||
+    value.length < 1 ||
+    value.length > 2 ||
+    new Set(value).size !== value.length
+  )
+    invalid("tiers 必须是由 card、batch 组成的非空且不重复的列表");
+  return value.map((tier: unknown) => {
+    if (tier !== "card" && tier !== "batch")
+      invalid("tiers 只允许 card 和 batch");
+    return tier;
+  });
+}
+const packageDirectory = (value: unknown): value is string =>
+  typeof value === "string" && /^(packages|apps)\/[a-z0-9-]+$/u.test(value);
+function parseAffected(value: unknown): MergeGateAffected {
+  if (!object(value)) invalid("affected 必须是对象");
+  only(value, ["extra_dependents"]);
+  if (value.extra_dependents === undefined) return {};
+  if (!object(value.extra_dependents))
+    invalid("affected.extra_dependents 必须是包目录到包目录列表的映射");
+  const entries = Object.entries(value.extra_dependents).map(
+    ([directory, dependents]): [string, string[]] => {
+      if (
+        !packageDirectory(directory) ||
+        !Array.isArray(dependents) ||
+        !dependents.every(packageDirectory)
+      )
+        invalid(
+          "affected.extra_dependents 的键和列表元素必须是 packages/ 或 apps/ 下仅含小写字母、数字、短横线的包目录",
+        );
+      return [directory, [...dependents]];
+    },
+  );
+  return { extraDependents: Object.fromEntries(entries) };
+}
 async function projectConfig(
   raw: unknown,
   dataDir: string,
@@ -65,14 +115,28 @@ async function projectConfig(
   executors: ReadonlyMap<string, ExecutorEntry>,
 ): Promise<ProjectMergeGate> {
   if (!object(raw)) invalid("项目配置必须是对象");
-  only(raw, ["checks", "env", "total_timeout_minutes", "push", "executor"]);
+  only(raw, [
+    "checks",
+    "env",
+    "total_timeout_minutes",
+    "push",
+    "executor",
+    "affected",
+  ]);
   const executor = resolveProjectExecutor(raw.executor, executors);
   if (!Array.isArray(raw.checks) || !raw.checks.length)
     invalid("checks 必须是非空列表");
   const names = new Set<string>();
-  const checks = raw.checks.map((value: unknown) => {
+  const checks = raw.checks.map((value: unknown): MergeGateCheck => {
     if (!object(value)) invalid("每条检查必须是对象");
-    only(value, ["name", "run", "timeout_minutes"]);
+    only(value, [
+      "name",
+      "run",
+      "timeout_minutes",
+      "tiers",
+      "scope",
+      "skip_docs_only",
+    ]);
     if (
       typeof value.name !== "string" ||
       !value.name.trim() ||
@@ -83,10 +147,22 @@ async function projectConfig(
     )
       invalid("检查名称须非空且唯一，run 须为非空字符串");
     names.add(value.name);
+    if (value.scope !== undefined && value.scope !== "affected")
+      invalid("scope 只允许 affected");
+    if (
+      value.skip_docs_only !== undefined &&
+      typeof value.skip_docs_only !== "boolean"
+    )
+      invalid("skip_docs_only 必须是布尔值");
     return {
       name: value.name,
       run: value.run,
       timeoutMs: minutes(value.timeout_minutes, 30),
+      ...(value.tiers === undefined ? {} : { tiers: parseTiers(value.tiers) }),
+      ...(value.scope === undefined ? {} : { scope: value.scope }),
+      ...(value.skip_docs_only === undefined
+        ? {}
+        : { skipDocsOnly: value.skip_docs_only }),
     };
   });
   if (raw.env !== undefined && !object(raw.env))
@@ -116,6 +192,9 @@ async function projectConfig(
       ? {}
       : { push: await parseMergePushConfig(raw.push, dataDir, baseBranch) }),
     ...(executor === undefined ? {} : { executor }),
+    ...(raw.affected === undefined
+      ? {}
+      : { affected: parseAffected(raw.affected) }),
   };
 }
 

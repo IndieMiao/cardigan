@@ -490,6 +490,7 @@ test("invalid input and reserved runtime variables fail before creating a checko
       "HC_SESSION",
       "HC_SOCKET",
       "CARDIGAN_DATA_DIR",
+      "CARDIGAN_AFFECTED_PATHS",
       "XDG_RUNTIME_DIR",
     ].map((key) => ({ env: { [key]: "bad" } })),
   ])
