@@ -81,7 +81,7 @@ import { serveWrite } from "./write.js";
  */
 
 export interface WebServerOptions {
-  /** 待定：低优先级排队提示阈值，默认 30 分钟。 */
+  /** 按 q(228) 定为 30 分钟；修改配置后重启 Web 服务生效。 */
   readonly queueWarningMinutes?: number;
   readonly store: Store;
   readonly config: WebConfig;
@@ -149,7 +149,7 @@ export async function startWebServer(
     Number(process.env.CARDIGAN_QUEUE_WARNING_MINUTES ?? 30);
   if (!Number.isSafeInteger(queueWarningMinutes) || queueWarningMinutes < 1)
     throw new Error(
-      "CARDIGAN_QUEUE_WARNING_MINUTES 必须是正整数（默认 30，待定）",
+      "CARDIGAN_QUEUE_WARNING_MINUTES 必须是正整数（按 q(228) 定为 30 分钟）",
     );
   const clock = options.clock ?? systemClock;
   const limiter = options.loginLimiter ?? new LoginLimiter();
