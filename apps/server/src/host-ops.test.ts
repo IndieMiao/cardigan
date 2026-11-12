@@ -4,10 +4,12 @@ import {
   type Assignment,
   acknowledgeRun,
   assign,
+  completeHumanAction,
   createHostOpsAssignment,
   dispatchRun,
   HOST_OPS_ROLE_TOOLS,
   type HOST_OPS_TOOLS,
+  hostOpsExitConfirmation,
   hostOpsPending,
   queueRun,
   type Runtime,
@@ -303,6 +305,7 @@ test("target withdrawal while stopping a reviewer settles credentials without qu
   expect(scrubCredentials).toHaveBeenCalledExactlyOnceWith(
     f.project,
     reviewer.id,
+    f.refFor(reviewer),
   );
   expect(state.runs.filter((r) => r.assignment_id === reviewer.id)).toEqual([
     expect.objectContaining({ id: oldRun.id, status: "cancelled" }),
@@ -407,6 +410,107 @@ test("standing restart replaces the PM session; other Assignment targets are rej
   expect(f.state().events.some((e) => e.type === "assignment_resumed")).toBe(
     true,
   );
+});
+
+test("C-152: a terminal on another runtime is settled only after a human confirms it exited", async () => {
+  f.create(); // Registers the PM role used by this project.
+  const pm: Assignment = {
+    ...ops,
+    id: "A-91" as never,
+    role_id: "pm",
+    standing_mode: "ops",
+  };
+  f.store.uow.run((tx) => tx.assignments.put(f.project, pm));
+  const oldRun = f.session(pm, false);
+  // The terminal was started in local mode; the server runs agent-ssh.
+  const localRef = f.refFor(pm);
+  f.store.uow.run((tx) =>
+    tx.assignments.put(f.project, {
+      ...(tx.assignments.get(f.project, pm.id) as Assignment),
+      runtime_state: "lost",
+      runtime_ref: localRef,
+    }),
+  );
+  const oldToken = connect(pm, ["finish_run"]);
+  const scrub = vi.fn(async () => {});
+  service = new HostOpsService({
+    store: f.store,
+    runtime,
+    snapshot,
+    clock: f.clock,
+    scrubCredentials: scrub,
+    ownsRuntimeRef: (ref) => ref.runtime_machine === "cardigan-agent",
+    runtimeLabel: "agent-ssh（机器 cardigan-agent）",
+  });
+  await call("host_ops_restart_standing_pm", {
+    assignment_id: pm.id,
+    reason: "Recover lost PM",
+    idempotency_key: "foreign",
+  });
+  const action = f
+    .state()
+    .events.find((e) => e.type === "host_ops_action_taken");
+  if (!action) throw new Error("Missing action");
+
+  await service.tick();
+  f.advance(60_000); // The previous claim's lease expires.
+  await service.tick();
+  const state = f.state();
+  // The server never touches a terminal it cannot observe.
+  expect(runtime.status).not.toHaveBeenCalled();
+  expect(runtime.release).not.toHaveBeenCalled();
+  expect(scrub).not.toHaveBeenCalled();
+  expect(state.runs.find((r) => r.id === oldRun.id)?.status).not.toBe(
+    "cancelled",
+  );
+  expect(() => oldToken.revalidateToken?.()).not.toThrow();
+  const requested = state.human_actions.filter((h) => h.status === "open");
+  expect(requested).toHaveLength(1);
+  const first = requested[0];
+  if (!first) throw new Error("Missing human action");
+  expect(first.instructions).toContain(localRef.terminal_ref);
+  expect(first.instructions).toMatch(/1\. [\s\S]*2\. [\s\S]*3\. [\s\S]*4\. /u);
+  expect(hostOpsExitConfirmation(state, action.id)).toEqual({
+    status: "open",
+    human_action_id: first.id,
+  });
+  expect(
+    (await call("host_ops_read_diagnostics", {})) as { actions: unknown[] },
+  ).toMatchObject({
+    actions: [
+      expect.objectContaining({
+        status_reason: "terminal_exit_confirmation_requested",
+      }),
+    ],
+  });
+
+  f.apply((s, a, p) =>
+    completeHumanAction(
+      s,
+      a,
+      { human_action_id: first.id, text: "hc get t91: finished" },
+      p,
+    ),
+  );
+  f.advance(60_000);
+  await service.tick();
+  const settled = f.state();
+  expect(runtime.release).not.toHaveBeenCalled();
+  expect(settled.runs.find((r) => r.id === oldRun.id)?.status).toBe(
+    "cancelled",
+  );
+  expect(() => oldToken.revalidateToken?.()).toThrow();
+  expect(scrub).toHaveBeenCalledExactlyOnceWith(f.project, pm.id, localRef);
+  expect(hostOpsPending(settled.events, pm.id)).toBe(false);
+  expect(settled.assignments.find((a) => a.id === pm.id)).toMatchObject({
+    status: "active",
+    runtime_ref: null,
+  });
+  expect(
+    settled.runs.filter(
+      (r) => r.assignment_id === pm.id && r.status === "queued",
+    ),
+  ).toHaveLength(1);
 });
 
 test("patrol uses persistent timing and one inbox notification; host handoff additionally notifies host_ops", () => {
@@ -542,7 +646,11 @@ test("credential cleanup failures remain recoverable without exposing host error
     idempotency_key: "scrub",
   });
   await service.tick();
-  expect(scrub).toHaveBeenCalledWith(f.project, assignment.id);
+  expect(scrub).toHaveBeenCalledWith(
+    f.project,
+    assignment.id,
+    f.refFor(assignment),
+  );
   expect(f.state().runs.find((r) => r.id === run.id)?.status).toBe(
     "dispatched",
   );

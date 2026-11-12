@@ -31,9 +31,9 @@ import {
 } from "@cardigan/host";
 import { type LaunchConfig, resolveProfile } from "@cardigan/roles";
 import {
+  DEFAULT_HC_SESSION,
   type ExecutionConfig,
   HerdrRuntime,
-  resolveExecutionConfig,
   secureDataDirectory,
 } from "@cardigan/runtime-herdr";
 import {
@@ -60,6 +60,7 @@ import {
 } from "./host.js";
 import type { CliIo, SpawnedChild } from "./io.js";
 import { resolveLaunchPaths } from "./paths.js";
+import { launchExecution, terminalExecution } from "./runtime-check.js";
 import { forwardSignals } from "./signals.js";
 
 /**
@@ -100,6 +101,8 @@ export interface StartOptions {
   readonly runtime: LaunchRuntime;
   readonly dataDir: string;
   readonly worktree?: WorktreeProvider;
+  /** Already checked against the server registration by the caller. */
+  readonly execution?: ExecutionConfig;
 }
 
 export interface StartedAssignment {
@@ -144,11 +147,12 @@ async function cliVersion(io: CliIo, binary: string): Promise<string> {
   return text;
 }
 
-const executionFor = (io: CliIo, dataDir: string): ExecutionConfig =>
-  resolveExecutionConfig({
-    ...io.env,
-    CARDIGAN_DATA_DIR: resolveDataDir(io, dataDir),
-  });
+const executionFor = (
+  io: CliIo,
+  dataDir: string,
+  session?: string,
+): Promise<ExecutionConfig> =>
+  launchExecution(io, resolveDataDir(io, dataDir), session);
 
 /** §4 step 3: place the worktree the Role needs (roles with `none` skip it). */
 async function prepareWorktree(
@@ -202,7 +206,8 @@ export async function startAssignment(
   rejectExternalTerminalAction(store, project_id, options.assignment_id);
   const capacity = await loadRunCapacityConfig({ env: io.env });
   for (const error of capacity.errors) io.stderr(error);
-  const execution = executionFor(io, options.dataDir);
+  const execution =
+    options.execution ?? (await executionFor(io, options.dataDir));
   await secureDataDirectory(execution);
 
   const entities = requireAssignment(store, project_id, options.assignment_id);
@@ -528,10 +533,15 @@ function attachRef(
   return assignment.runtime_ref;
 }
 
-function attachFailure(id: Assignment["id"], reason: string): CliError {
+function attachFailure(
+  id: Assignment["id"],
+  reason: string,
+  details: readonly string[] = [],
+): CliError {
   return new CliError(
     `无法接入 ${id}：${reason}；请检查运行服务，终端已结束时用 cardigan assignment start ${id} 重新启动。`,
     EXIT.failure,
+    details,
   );
 }
 
@@ -712,14 +722,45 @@ export async function runAssignmentCommand(
       store.close();
     }
   }
-  const execution = executionFor(io, dataDir);
-  await secureDataDirectory(execution);
+  const launchSession =
+    flags["hc-session"] ?? io.env.CARDIGAN_HC_SESSION ?? DEFAULT_HC_SESSION;
+  // Refuse a mismatched shell before touching the store (C-152).
+  const launching =
+    sub === "start"
+      ? await executionFor(io, dataDir, launchSession)
+      : undefined;
+  // attach/stop pick their runtime from the terminal; the private data
+  // directory is secured the same way before the store is opened.
+  await secureDataDirectory(launching ?? { mode: "local", dataDir });
   const store = Store.open({ dataDir });
   try {
     const project_id = resolveProject(store, io, flags.project);
     const actor = resolveActor(io, project_id, store);
     // Report invalid Assignments even when hc itself is unavailable.
-    if (sub === "attach") attachRef(store, project_id, assignmentId);
+    const ref =
+      sub === "attach"
+        ? attachRef(store, project_id, assignmentId)
+        : sub === "stop"
+          ? (store.uow.read((tx) =>
+              tx.assignments.get(project_id, assignmentId),
+            )?.runtime_ref ?? null)
+          : null;
+    // attach/stop follow the runtime recorded on the terminal itself and
+    // the server's hc session.
+    const { execution, session } = launching
+      ? { execution: launching, session: launchSession }
+      : await terminalExecution(
+          io,
+          dataDir,
+          ref,
+          assignmentId,
+          flags["hc-session"],
+        ).catch((error: unknown) => {
+          if (sub === "attach" && error instanceof CliError)
+            throw attachFailure(assignmentId, error.message, error.details);
+          throw error;
+        });
+    if (!launching) await secureDataDirectory(execution);
     if (sub === "start")
       rejectExternalTerminalAction(store, project_id, assignmentId);
     if (sub === "stop") {
@@ -729,8 +770,6 @@ export async function runAssignmentCommand(
         await scrubRunCredentials(execution, project_id, assignment.id);
       }
     }
-    const session =
-      flags["hc-session"] ?? io.env.CARDIGAN_HC_SESSION ?? "cardigan";
     const created = await HerdrRuntime.create({
       session,
       execution,
@@ -793,6 +832,7 @@ export async function runAssignmentCommand(
       assignment_id: assignmentId,
       runtime,
       dataDir,
+      execution,
       ...(flags["mcp-url"] === undefined ? {} : { mcpUrl: flags["mcp-url"] }),
     });
   } finally {
@@ -808,6 +848,7 @@ export interface StartCommandOptions {
   readonly runtime: LaunchRuntime;
   readonly dataDir: string;
   readonly mcpUrl?: string;
+  readonly execution?: ExecutionConfig;
 }
 
 /** Load the host config, wire the Git service and start one Assignment. */
@@ -818,8 +859,9 @@ export async function startAssignmentCommand(
   rejectExternalTerminalAction(store, project_id, assignment_id);
   const paths = resolveLaunchPaths(io.env);
   const dataDir = resolveDataDir(io, options.dataDir);
-  const execution = executionFor(io, dataDir);
+  const execution = options.execution ?? (await executionFor(io, dataDir));
   const started = await startAssignment({
+    execution,
     store,
     io,
     project_id,
@@ -869,13 +911,11 @@ export async function startAssignmentById(
     options.assignment_id,
   );
   const dataDir = resolveDataDir(options.io, options.dataDir);
-  const execution = executionFor(options.io, dataDir);
+  const session =
+    options.session ?? options.io.env.CARDIGAN_HC_SESSION ?? DEFAULT_HC_SESSION;
+  const execution = await executionFor(options.io, dataDir, session);
   await secureDataDirectory(execution);
-  const created = await HerdrRuntime.create({
-    execution,
-    session:
-      options.session ?? options.io.env.CARDIGAN_HC_SESSION ?? "cardigan",
-  });
+  const created = await HerdrRuntime.create({ execution, session });
   if (!created.ok) {
     throw new CliError(
       formatCommandError("连接运行时", "Herdr", created.error),
@@ -886,6 +926,7 @@ export async function startAssignmentById(
     ...options,
     runtime: created.value,
     dataDir,
+    execution,
   });
 }
 

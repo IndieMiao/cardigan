@@ -25,7 +25,7 @@ beforeEach(() => {
   output = [];
   errors = [];
   io = {
-    env: { CARDIGAN_DATA_DIR: dataDir },
+    env: { CARDIGAN_RUNTIME_MODE: "local", CARDIGAN_DATA_DIR: dataDir },
     cwd: dataDir,
     platform: "linux",
     stdout: (line) => output.push(line),

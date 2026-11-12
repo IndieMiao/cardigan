@@ -1,4 +1,5 @@
 import { Menu } from "./Menu.js";
+import { PageSizeMenu } from "./PageSizeMenu.js";
 
 const fields = [
   {
@@ -82,22 +83,12 @@ export function TimelineControls({
           加载更早的记录
         </button>
       )}
-      <Menu
+      <PageSizeMenu
         label="每次加载"
-        trigger={
-          <button
-            type="button"
-            className="quiet timeline-load"
-            aria-label={`每次加载：${pageSize} 条`}
-          >
-            <span aria-hidden="true">▾</span>
-          </button>
-        }
-        items={[20, 50, 100].map((size) => ({
-          id: String(size),
-          label: `${size} 条${pageSize === size ? "（当前）" : ""}`,
-          onSelect: () => onChange({ ...filters, count: String(size) }),
-        }))}
+        pageSize={pageSize}
+        sizes={[20, 50, 100]}
+        compact
+        onChange={(size) => onChange({ ...filters, count: String(size) })}
       />
     </fieldset>
   );

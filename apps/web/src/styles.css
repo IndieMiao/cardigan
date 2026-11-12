@@ -935,12 +935,6 @@ fieldset.filters {
   color: var(--accent);
   text-align: right;
 }
-.card-table-footer {
-  margin: 8px 0 0;
-  color: var(--text-muted);
-  font-size: var(--text-sm);
-  text-align: right;
-}
 .card-page {
   display: grid;
   grid-template-columns: minmax(0, 760px) minmax(280px, 360px);
@@ -2405,6 +2399,15 @@ body[data-lightbox="open"] .drawer-overlay {
   color: var(--accent);
   background: transparent;
 }
+.card-list-pagination {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+.card-list-pagination .timeline-count {
+  margin-left: 0;
+  margin-right: auto;
+}
 .timeline-records {
   margin-bottom: 20px;
 }
@@ -2564,26 +2567,26 @@ body[data-lightbox="open"] .drawer-overlay {
   min-height: 34px;
 }
 
-/* Board and execution views keep usable width when navigation moves above them. */
+/* All views share the board's compact navigation on narrow screens. */
 @media (max-width: 760px) {
-  .app:has(:is(.cards-page-board, .execution-page)) {
+  .app {
     grid-template-columns: minmax(0, 1fr);
   }
-  .app:has(:is(.cards-page-board, .execution-page)) .sidebar {
+  .app .sidebar {
     position: static;
     width: auto;
     min-width: 0;
     padding: var(--gap);
     gap: var(--gap);
   }
-  .app:has(:is(.cards-page-board, .execution-page))
-    :is(.nav, .nav-group, .sidebar-footer) {
+  .app :is(.nav, .nav-group, .sidebar-footer) {
     display: flex;
     flex-direction: row;
     flex-wrap: wrap;
     align-items: center;
     gap: var(--gap);
   }
+  .content,
   .content:has(:is(.cards-page-board, .execution-page)) {
     grid-column: 1;
     padding: var(--gap);
@@ -2591,9 +2594,45 @@ body[data-lightbox="open"] .drawer-overlay {
   .cards-page-board {
     height: calc(100dvh - var(--gap) * 2);
   }
-  .cards-page-board .page-title {
+  .page-title {
     flex-wrap: wrap;
     gap: var(--gap);
+  }
+  .filter-bar > label {
+    display: inline-flex;
+    flex-direction: column;
+    max-width: 100%;
+    gap: 4px;
+    margin: 0 var(--gap) var(--gap) 0;
+  }
+  .timeline-controls {
+    flex-wrap: wrap;
+    white-space: normal;
+  }
+  .delivery-table {
+    display: block;
+    overflow-x: auto;
+  }
+  .delivery-table :is(th, td) {
+    min-width: 7rem;
+  }
+  .delivery-table :is(th, td):last-child {
+    min-width: 16rem;
+  }
+  .timeline-head {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: 8px;
+  }
+  .timeline-head .timeline-when {
+    grid-row: auto;
+    margin-left: 0;
+  }
+  .timeline-conclusion {
+    grid-column: 1;
+    grid-row: auto;
+    justify-self: start;
+    flex-wrap: wrap;
+    white-space: normal;
   }
 }
 .card-tile-head .status {
@@ -2802,6 +2841,18 @@ body[data-lightbox="open"] .drawer-overlay {
 @media (max-width: 1360px) {
   .card-page:not(.card-page-drawer) {
     grid-template-columns: minmax(0, 1fr) 240px;
+  }
+}
+@media (max-width: 760px) {
+  .card-page:not(.card-page-drawer) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .card-page:not(.card-page-drawer) .card-sidebar {
+    position: static;
+    max-height: none;
+    overflow: visible;
+    padding-left: 0;
+    border-left: 0;
   }
 }
 .drawer-content:has(.card-page-drawer) {
