@@ -17,6 +17,7 @@ import { categoryLabels } from "../decision-labels.js";
 import { useRouteFilters } from "../route.js";
 import { useResource } from "../useResource.js";
 
+const PAGE_SIZE = 10;
 const makerLabels = { human: "所有者", pm: "PM 代拍", system: "系统代批" };
 
 /** First page wins on refresh; later pages only add rows it does not have. */
@@ -26,6 +27,13 @@ function mergeRecords(
 ) {
   const seen = new Set(first.map((q) => q.id));
   return [...first, ...later.filter((q) => !seen.has(q.id))];
+}
+
+/** Same order as the server: newest resolution first, then higher id. */
+function isNewer(a: DecisionHistoryRecord, b: DecisionHistoryRecord) {
+  return a.resolution.at !== b.resolution.at
+    ? a.resolution.at > b.resolution.at
+    : a.id > b.id;
 }
 
 function oneLine(text: string) {
@@ -125,7 +133,7 @@ export function DecisionHistoryPage({
     kind: "decision-history",
     projectId,
   });
-  const load = useCallback(
+  const fetchPage = useCallback(
     (cursor?: string) =>
       client.decisionHistory(
         projectId,
@@ -142,31 +150,59 @@ export function DecisionHistoryPage({
       ),
     [client, projectId, filters],
   );
+  // The oldest record shown once "加载更多" was used, for this filter set.
+  const boundary = useRef<{
+    source: typeof fetchPage;
+    record: DecisionHistoryRecord;
+  }>(undefined);
+  // A refresh re-reads the whole loaded range, from the newest record down to
+  // that boundary, so records pushed off the first page by new decisions are
+  // not skipped. Changing any filter starts over at the newest 10.
+  const load = useCallback(async () => {
+    const until =
+      boundary.current?.source === fetchPage
+        ? boundary.current.record
+        : undefined;
+    let page = await fetchPage();
+    const decisions = [...page.decisions];
+    while (until && page.next_cursor) {
+      const last = decisions.at(-1);
+      if (!last || !isNewer(last, until)) break;
+      page = await fetchPage(page.next_cursor);
+      decisions.push(...page.decisions);
+    }
+    return { decisions, next_cursor: page.next_cursor };
+  }, [fetchPage]);
   const resource = useResource(load, revision);
-  // Pages loaded with "加载更多" belong to one filter set (`load`). A refresh
-  // of the first page keeps them; changing any filter starts over at 10.
+  // Pages appended by "加载更多" extend the range of one load result; the
+  // next refresh result already covers them.
+  const first = resource.data;
   const [extra, setExtra] = useState<{
-    source: typeof load;
+    base: typeof first;
     items: readonly DecisionHistoryRecord[];
     cursor: string | null;
   }>();
-  const pages = extra?.source === load ? extra : undefined;
-  const first = resource.data;
+  const pages = first && extra?.base === first ? extra : undefined;
   const visible = mergeRecords(first?.decisions ?? [], pages?.items ?? []);
   const cursor = pages ? pages.cursor : (first?.next_cursor ?? null);
+  const oldest = visible.at(-1);
+  boundary.current =
+    visible.length > PAGE_SIZE && oldest
+      ? { source: fetchPage, record: oldest }
+      : undefined;
   const loading = useRef(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [moreError, setMoreError] = useState("");
   const more = async () => {
-    if (loading.current || !cursor) return;
+    if (loading.current || !cursor || !first) return;
     loading.current = true;
     setLoadingMore(true);
     setMoreError("");
     try {
-      const page = await load(cursor);
+      const page = await fetchPage(cursor);
       setExtra((old) => ({
-        source: load,
-        items: [...(old?.source === load ? old.items : []), ...page.decisions],
+        base: first,
+        items: [...(old?.base === first ? old.items : []), ...page.decisions],
         cursor: page.next_cursor,
       }));
     } catch (cause) {

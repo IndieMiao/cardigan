@@ -3649,14 +3649,20 @@ body[data-lightbox="open"] .drawer-overlay {
 /* C-134 decision history: compact records. */
 .decision-records {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 6px;
   margin: var(--gap) 0;
   padding: 0;
   list-style: none;
 }
+.decision-records > li {
+  min-width: 0;
+}
 .decision-record {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 2px;
+  min-width: 0;
   padding: 6px 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -3706,6 +3712,9 @@ body[data-lightbox="open"] .drawer-overlay {
   width: 20px;
   height: 20px;
   font-size: var(--text-xs);
+}
+.decision-record-more {
+  min-width: 0;
 }
 .decision-record-summary {
   overflow: hidden;

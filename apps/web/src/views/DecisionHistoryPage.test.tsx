@@ -141,6 +141,11 @@ const many = (n: number, from = 0): DecisionHistoryRecord[] =>
     ...record,
     id: `Q-${from + i + 1}`,
     question: `问题 ${from + i + 1}`,
+    // Newest first, as the server returns them.
+    resolution: {
+      ...record.resolution,
+      at: new Date(Date.UTC(2026, 10, 10) - (from + i) * 60_000).toISOString(),
+    },
   }));
 
 test("each record is compact, and expanding it shows impact, rationale and authority in full", async () => {
@@ -291,4 +296,80 @@ test("a refresh keeps loaded pages and a failed load-more can be retried", async
   await waitFor(() => expect(decisionHistory).toHaveBeenCalledTimes(4));
   expect(screen.getAllByRole("article")).toHaveLength(15);
   expect(screen.queryByRole("button", { name: "加载更多" })).toBeNull();
+});
+
+test("a refresh after new decisions keeps the whole loaded range without gaps", async () => {
+  // Server double: newest first, 10 per page, cursor = last id on the page.
+  let total = 30;
+  const decisionHistory = vi.fn(
+    async (
+      _p: string,
+      _f: Readonly<Record<string, string>>,
+      cursor?: string,
+    ) => {
+      // Distinct times, so the order is by time as on the real server.
+      const all = many(total)
+        .map((q, i) => ({
+          ...q,
+          resolution: {
+            ...q.resolution,
+            at: new Date(Date.UTC(2026, 10, 1, 0, i)).toISOString(),
+          },
+        }))
+        .reverse();
+      const start = cursor ? all.findIndex((q) => q.id === cursor) + 1 : 0;
+      const decisions = all.slice(start, start + 10);
+      return {
+        decisions,
+        next_cursor:
+          start + 10 < all.length ? (decisions.at(-1)?.id ?? null) : null,
+      };
+    },
+  );
+  const client = fakeClient({ decisionHistory });
+  const ids = () =>
+    screen
+      .getAllByRole("article")
+      .map((a) => a.getAttribute("aria-label")?.replace("拍板记录 ", ""));
+  const { rerender } = render(
+    <DecisionHistoryPage projectId="p-1" client={client} />,
+  );
+  await screen.findByRole("article", { name: "拍板记录 Q-21" });
+  fireEvent.click(screen.getByRole("button", { name: "加载更多" }));
+  await screen.findByRole("article", { name: "拍板记录 Q-11" });
+  total = 31;
+  rerender(
+    <DecisionHistoryPage projectId="p-1" client={client} revision={1} />,
+  );
+  await screen.findByRole("article", { name: "拍板记录 Q-31" });
+  // Contiguous from the newest record down past the old last one (Q-11).
+  const after = ids();
+  expect(after).toEqual(
+    Array.from({ length: after.length }, (_, i) => `Q-${31 - i}`),
+  );
+  expect(after.length).toBeGreaterThanOrEqual(21);
+  fireEvent.click(screen.getByRole("button", { name: "加载更多" }));
+  await screen.findByRole("article", { name: "拍板记录 Q-1" });
+  expect(ids()).toEqual(Array.from({ length: 31 }, (_, i) => `Q-${31 - i}`));
+  expect(screen.queryByRole("button", { name: "加载更多" })).toBeNull();
+});
+
+test("a refresh with only the first page loaded stays at the newest 10", async () => {
+  let total = 15;
+  const decisionHistory = vi.fn(async () => ({
+    decisions: many(total).reverse().slice(0, 10),
+    next_cursor: "more",
+  }));
+  const client = fakeClient({ decisionHistory });
+  const { rerender } = render(
+    <DecisionHistoryPage projectId="p-1" client={client} />,
+  );
+  await screen.findByRole("article", { name: "拍板记录 Q-6" });
+  total = 16;
+  rerender(
+    <DecisionHistoryPage projectId="p-1" client={client} revision={1} />,
+  );
+  await screen.findByRole("article", { name: "拍板记录 Q-16" });
+  expect(screen.getAllByRole("article")).toHaveLength(10);
+  expect(decisionHistory).toHaveBeenCalledTimes(2);
 });
