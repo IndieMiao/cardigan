@@ -53,6 +53,7 @@ export function requestRoute(path: string): string {
   const rest = project?.[1];
   if (rest) {
     const prefix = "/api/projects/:project_id";
+    if (/^\/employees(?:\/options)?$/.test(rest)) return prefix + rest;
     if (
       /^\/(cards|needs-you|notices|snapshot|execution|activity|stream|preferences)$/.test(
         rest,

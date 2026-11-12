@@ -21,4 +21,6 @@
 
 失败退出码非零。`responsive-fixture.tsx` 只由该测试入口加载，不进入产品构建。
 
+C-161 新建员工单独截图：`pnpm --filter @cardigan/web exec node test-support/employee-screenshots.mjs <输出目录>`。同样通过 `CHROMIUM_PATH` 指定浏览器；`EMPLOYEE_BASELINE_REF` 默认 `origin/main`，应指定实现起点提交以复现改前截图。仅加载设置页夹具与实际人物库，在 1440px、390px 及亮暗主题下输出改前新建角色、改后人物选择、自定义头像表单共 12 张图，并检查页面无水平溢出。不启动业务服务、不写正式员工。
+
 C-158 并发面板单独核对：`CAPACITY_SCREENSHOTS=/tmp/cardigan-capacity CAPACITY_BASELINE_REF=<修改前提交> node apps/web/test-support/execution-capacity-screenshots.mjs`（从仓库根目录运行，可设 `CHROMIUM_PATH`）。使用本地夹具的同一执行视图，修改前加载指定提交的面板组件并展示 `local · Agent`，修改后按 Q-266 同样展示 `local · Agent`，并展示超限提示；输出 1440px、390px 亮暗截图，并检查封顶、保存按钮禁用和页面不溢出。截图是测试数据，显示名回退的真实读取另由 HTTP 测试覆盖。

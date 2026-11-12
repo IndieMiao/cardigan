@@ -62,6 +62,16 @@ export function migrate(
     }
     db.exec("BEGIN IMMEDIATE");
     try {
+      // Another opener may have applied this version while we waited for the
+      // write lock. The initial snapshot is only a fast path for old versions.
+      if (
+        db
+          .prepare("SELECT 1 FROM schema_version WHERE version = ?")
+          .get(migration.version)
+      ) {
+        db.exec("COMMIT");
+        continue;
+      }
       db.exec(migration.sql);
       if (migration.version === 10 && migration.name === "employee_assignment")
         migrateEmployeeNames(db, now());

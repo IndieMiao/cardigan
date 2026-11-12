@@ -328,3 +328,14 @@ test("C-110: PM instructions use the replacement command for verifier handoffs",
   ])
     expect(prompt).toContain(rule);
 });
+
+test("C-169 PM rules keep security decisions with the human", () => {
+  const humanList = PM_DECISION_RULES.find((rule) =>
+    rule.includes("仍由人来定"),
+  );
+  expect(humanList).toContain("删除数据、安全、对外发布");
+  const prompt = corePromptFor("pm");
+  expect(prompt).toContain(
+    "涉及安全的事项（例如凭据、鉴权、安全取舍）一律不代拍，同样传 escalate=true 交人",
+  );
+});
