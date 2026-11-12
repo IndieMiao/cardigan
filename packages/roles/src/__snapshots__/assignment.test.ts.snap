@@ -449,6 +449,7 @@ exports[`snapshot: pi > command, arguments and files 1`] = `
   "mcpServers": {
     "card": {
       "url": "http://127.0.0.1:3004/mcp",
+      "exposure": "direct",
       "headers": {
         "Authorization": "Bearer \${MCP_TOKEN}"
       }

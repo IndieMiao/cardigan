@@ -12,7 +12,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import {
   AGENT_PROTOCOL,
   type AssignmentRoleInput,
@@ -295,13 +295,29 @@ describe("snapshot: pi", () => {
     expect(compiled.args).toContain("--append-system-prompt");
     expect(compiled.args).toContain(`${RUN_DIR}/core.md`);
     expect(compiled.args).not.toContain("--no-extensions");
-    const mcp = compiled.files.find(
-      (file) => file.path === `${RUN_DIR}/pi/mcp.json`,
-    );
-    expect(JSON.parse(mcp?.content ?? "{}")).toMatchObject({
-      mcpServers: { card: { url: MCP_URL } },
-    });
-    expect(mcp?.content).toMatch(/Authorization\W+Bearer \$\{MCP_TOKEN\}/);
+  });
+
+  test("exposes Card tools directly and keeps the token as an environment reference", () => {
+    vi.stubEnv("MCP_TOKEN", TOKEN);
+    try {
+      const withToken = compile("pi", "pi-agent", first);
+      const mcp = withToken.files.find(
+        (file) => file.path === `${withToken.env.PI_CODING_AGENT_DIR}/mcp.json`,
+      );
+      expect(mcp?.mode).toBe(0o600);
+      expect(JSON.parse(mcp?.content ?? "{}")).toEqual({
+        mcpServers: {
+          card: {
+            url: MCP_URL,
+            exposure: "direct",
+            headers: { Authorization: `Bearer \${MCP_TOKEN}` },
+          },
+        },
+      });
+      expect(surface(withToken)).not.toContain(TOKEN);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
 

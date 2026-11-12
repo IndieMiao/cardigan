@@ -1488,7 +1488,9 @@ P2-V V3：共用 `host.launchRun` 从 Assignment 的 `employee_id` 读取全局�
 |---|---|---|
 | Claude Code | `--mcp-config <仓库外的文件>`，Token 用 `${MCP_TOKEN}` 引用；`CLAUDE_CONFIG_DIR=<run_dir>/claude` 隔离配置与会话 | 首次预置引导完成、仅当前 cwd 的信任、主题和 bypass 确认（2.1.318 实测）；关闭自动更新；按 session_id 恢复 |
 | Codex | 独立的配置目录（`CODEX_HOME`），`bearer_token_env_var`；`projects.<path>.trust_level="trusted"` 只登记本 Assignment 的 worktree 和其基础仓库根 | worktree 的项目根由 Git common dir 决定（0.161.0 实测）；显式放行 MCP 工具；按 thread_id 恢复 |
-| Pi | `PI_CODING_AGENT_DIR` 指向独立目录，Header 引用环境变量 | 不能用 `--no-extensions`（会关掉内置 MCP）；原生上报状态（OSC 7501） |
+| Pi | `PI_CODING_AGENT_DIR` 指向独立目录，`mcp.json` 中 Card MCP server 设置 `exposure: "direct"`，Header 引用环境变量 | 不能用 `--no-extensions`（会关掉内置 MCP）；原生上报状态（OSC 7501） |
+
+Pi 的 `mcp.json` 固定写在仓库外的 `<run_dir>/pi`，由 `PI_CODING_AGENT_DIR` 指向该目录；写到 worktree 的 `.pi/` 会触发 project trust 交互提示，阻塞无人值守终端。Card MCP server 显式使用 `exposure: "direct"`，让工具声明直接提供给模型，避免默认 codemode 模式要求先 `searchTools` 才能调用；Core Prompt 中直接调用 `get_updates`、`finish_run` 等工具的协议保持不变。URL 沿用主机传入值，Authorization 头保持字面引用 `Bearer ${MCP_TOKEN}`，不把 Token 明文写入 MCP 配置。
 
 Claude 的配置与会话目录固定在 Assignment 的 `runs/<project>/<assignment>/claude`，跨 Run、`resume_or_replace` 保留；`launch.sh` 在启动 CLI 前由实际运行账号创建并设为 0700（local 为主机用户，agent-ssh 为 agent），拒绝软链接、非目录和其他用户持有的目录，不清空已有会话。主机只写外层启动文件，不预建或写入这个 Agent 私有目录，避免主机持有的 0700 目录阻止 Agent 保存 `.claude.json`、projects 和 sessions。
 

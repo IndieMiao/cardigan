@@ -261,8 +261,9 @@ export function compileAssignmentLaunch(
       break;
 
     case "pi":
-      // Pi reads mcp.json from its agent directory and takes the prompt as a
-      // path (verified in 0.4 §3).
+      // Keep mcp.json in the isolated PI_CODING_AGENT_DIR: putting it under
+      // the worktree's .pi/ triggers project trust prompts that block unattended
+      // terminals. Pi takes the prompt as a path (verified in 0.4 §3).
       harnessFiles.push({
         path: join(input.run_dir, "pi", "mcp.json"),
         content: `${JSON.stringify(
@@ -270,6 +271,8 @@ export function compileAssignmentLaunch(
             mcpServers: {
               [serverName]: {
                 url: input.mcp.url,
+                // Declare Card tools to the model without a codemode search.
+                exposure: "direct",
                 headers: { Authorization: `Bearer \${${TOKEN_ENV_VAR}}` },
               },
             },
