@@ -504,6 +504,14 @@ interface DecisionFields {
    * completion review. Such decisions are never delegated to PM Ops.
    */
   readonly human_required_reason?: string;
+  /**
+   * C-167: `false` only when the raiser marked a D12 decision as unrelated to
+   * the merge content of its cards (no produce work item, no approval
+   * target). Only a human raiser may set it; such a decision does not make
+   * those cards' merge confirmations human-only. Absent means "related" (the
+   * conservative default).
+   */
+  readonly merge_related?: false;
   readonly question: string;
   readonly context: string;
   readonly options: readonly {

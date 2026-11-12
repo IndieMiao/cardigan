@@ -84,7 +84,11 @@ const schemas = {
     needs: z.enum(["role", "human"]),
   },
   request_decision: {
-    card_id: id("card").optional(),
+    card_id: id("card")
+      .optional()
+      .describe(
+        "Omit (and leave affected_cards empty) for a project-wide question. A spending/account/permission/data_deletion or scope_change question on a card hands that card's merge confirmation to the human, who must then confirm it personally (no auto-merge)",
+      ),
     kind: z.enum(["choose", "approve"]),
     category: z.enum(decisionCategories),
     question: text,
