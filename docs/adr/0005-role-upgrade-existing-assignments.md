@@ -23,7 +23,7 @@ MCP 认证（`packages/mcp-server/src/auth.ts`）只信 Token 记录的 `allowed
 
 §10.1 和 P2a-10 A 里写的“需要重新指派”，对已有工作项走不通：只能取消原工作项、另建工作项再指派。
 
-P2a-10 A／C-83 的会话替换（`tool_catalog_changed`）和 C-154 的 `pm restart` 都沿用原 Assignment 和原角色版本，所以新会话拿到的工具和旧会话相同（实测见下文“核实记录”）。
+P2a-10 A／C-83 的会话替换（`tool_catalog_changed`）和 C-154 的 `pm restart` 都沿用原 Assignment 和原角色版本，所以新会话的角色版本和工具都与旧会话相同（线上记录和签发实测见下文“核实记录”）。
 
 ### 复现
 
@@ -42,7 +42,11 @@ P2a-10 A／C-83 的会话替换（`tool_catalog_changed`）和 C-154 的 `pm res
   - 假设把 Assignment 的 `role_version` 改成 2 再重签：`role_version=2`，工具仍为 `[whoami, submit_delivery]`，被“与上一张 Token 取交集”挡住。
 
   两层固定都得到了验证：只改版本号不够，备选 B／C 必须同时改重签规则。
-- **线上会话替换记录（C-171#43、C-164#147）。** coder 的 Token 读不到这两张卡，Agent 账号也碰不到主机库和 CLI（ADR 0002 的隔离）。已请 PM 提供替换前后两条 `run_started` 事件里 actor 的 `role_version` 和 `allowed_tools`，以及当时该角色的最新版本（只要清单和版本号，不涉及 Token），结果待补。
+- **线上会话替换记录（2026-11-12 部署后，数据由 PM 王熙凤从事件 actor 字段原样抄录，见 C-96#12，不涉及 Token）。**
+  - C-171#43（15:46:41，`tool_catalog_changed`）：被替换的是 coder A-467。替换前 R-2535 的 `role_version=4`，替换后 R-2537 的 `run_started` 的 `role_version=4`。`allowed_tools` 前后相同，共 13 个，就是 coder 的标准清单，以 `submit_delivery` 结尾。
+  - C-164#147（15:54:01，`tool_catalog_changed`）：被替换的是 reviewer A-452。替换前 R-2517、替换后 R-2548 的 `role_version` 都是 3。`allowed_tools` 前后相同，共 14 个，含 `submit_review`、`withdraw_review`。
+  - 16:4x 查到的最新版本：coder=5、reviewer=5、pm=13。替换发生那一刻的最新版本号查不到，未核。旁证：16:08 新建的 coder A-474 和 16:14 新建的 reviewer A-480 都是 v5，它们的 `allowed_tools` 与上面 v4 coder、v3 reviewer 的清单逐项相同。
+  - 结论：线上替换证实了“替换会话后 `role_version` 不变”（v4、v3 都没有升到 v5）。但这几个版本之间的工具清单本来就相同，所以线上记录**证明不了**“新增工具拿不到”。这一点以上面的签发实测为准。同批被替换的 A-446（coder）、A-459（pm）没有逐个核对。
 
 ## 备选做法
 
