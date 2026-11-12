@@ -542,6 +542,11 @@ export interface HumanAction {
   readonly handoff?: HumanActionHandoff;
   readonly due?: Timestamp;
   readonly blocked_work_items: readonly WorkItemId[];
+  /**
+   * C-112: holds the card's merge even without blocked work items. Absent or
+   * false means a read-only escalation that leaves the merge alone.
+   */
+  readonly blocks_merge?: boolean;
   readonly status: HumanActionStatus;
   readonly result?: {
     readonly text: string;

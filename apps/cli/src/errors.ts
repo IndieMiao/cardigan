@@ -39,7 +39,6 @@ const SPECIFIC_REASONS: Partial<Record<ErrorCode, Record<string, string>>> = {
     "Card is not awaiting merge": "卡片尚未进入待合并状态",
     "Merge confirmation has not been granted for this completion":
       "本次完成申请尚未获得合并确认",
-    "Card has an unresolved blocking decision": "卡片还有未解决的阻塞拍板",
   },
   validation_failed: {
     "title is required": "标题不能为空",

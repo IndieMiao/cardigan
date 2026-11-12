@@ -37,6 +37,7 @@ import {
   queueRun,
   recordMergeCheck,
   recordMergePreparation,
+  requestHumanAction,
   submitDelivery,
   submitReview,
 } from "@cardigan/domain";
@@ -326,6 +327,36 @@ test("merge status lists the card, the confirmation and the plan", async () => {
   expect(result.out).toContain("plan: not ready");
   expect(result.out).toContain(
     `无法生成合并计划 ${card_id}：本次完成申请尚未获得合并确认（illegal_transition）`,
+  );
+});
+
+test("C-112: merge status names the human action that holds the merge", async () => {
+  await seatAwaitingMerge();
+  expect((await cardigan("merge", "confirm", card_id)).code).toBe(0);
+  const ask = (blocks_merge: boolean) =>
+    apply((s, a, p) =>
+      requestHumanAction(
+        s,
+        a,
+        {
+          card_id,
+          instructions: "请查看主机日志",
+          why_human: "只有主机能看",
+          expected_return: "日志摘要",
+          blocked_work_items: [],
+          ...(blocks_merge ? { blocks_merge } : {}),
+        },
+        p,
+      ),
+    );
+  ask(false);
+  expect((await cardigan("merge", "status", card_id)).out).toContain(
+    "plan: ready",
+  );
+  const blocking = ask(true);
+  const result = await cardigan("merge", "status", card_id);
+  expect(result.out).toContain(
+    `无法生成合并计划 ${card_id}：合并被待执行的人工事项 ${blocking.id} 挡住（illegal_transition）`,
   );
 });
 
