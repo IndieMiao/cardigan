@@ -299,17 +299,18 @@ test.each(harnesses)(
       );
       expect(output.args).not.toContain("--no-extensions");
       expect(JSON.parse(file("pi/mcp.json"))).toMatchInlineSnapshot(`
-      {
-        "mcpServers": {
-          "card": {
-            "headers": {
-              "Authorization": "Bearer \${MCP_TOKEN}",
+        {
+          "mcpServers": {
+            "card": {
+              "exposure": "direct",
+              "headers": {
+                "Authorization": "Bearer \${MCP_TOKEN}",
+              },
+              "url": "http://127.0.0.1:3004/mcp",
             },
-            "url": "http://127.0.0.1:3004/mcp",
           },
-        },
-      }
-    `);
+        }
+      `);
     }
   },
 );
