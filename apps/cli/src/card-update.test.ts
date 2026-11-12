@@ -108,10 +108,10 @@ test("updates text and acceptance criteria as human, preserving other fields", a
   expect(output.join("\n")).toBe("已更新卡片 C-1：title、goal、acceptance");
 });
 
-test("updates finite priority and planning states including priority zero", async () => {
-  for (const [status, priority] of [
-    ["backlog", "-2.5"],
-    ["todo", "0"],
+test("updates named priority and planning states including none", async () => {
+  for (const [status, priority, rank] of [
+    ["backlog", "urgent", 4],
+    ["todo", "无", 0],
   ] as const) {
     expect(
       await run([
@@ -126,7 +126,7 @@ test("updates finite priority and planning states including priority zero", asyn
     ).toBe(0);
     expect(snapshot().cards[0]).toMatchObject({
       status,
-      priority: Number(priority),
+      priority: rank,
     });
     expect(output.join("\n")).toBe("已更新卡片 C-1：priority、status");
   }
@@ -242,7 +242,7 @@ test.each([
   { args: ["--title", ""], message: "缺少 --title" },
   { args: ["--goal", " "], message: "缺少 --goal" },
   { args: ["--acceptance", " ; ; "], message: "至少写一条标准" },
-  ...["NaN", "Infinity", "abc", ""].map((priority) => ({
+  ...["NaN", "Infinity", "abc", "", "0", "5", "1.5"].map((priority) => ({
     args: ["--priority", priority],
     message: "--priority",
   })),

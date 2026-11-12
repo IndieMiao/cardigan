@@ -25,6 +25,7 @@ import {
 } from "../components/Foundation.js";
 import { Menu, type MenuItem } from "../components/Menu.js";
 import { MultiSelect } from "../components/MultiSelect.js";
+import { PriorityBadge } from "../components/Priority.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
 import { ViewSwitch } from "../components/ViewSwitch.js";
 import { routeHash, useRouteFilters } from "../route.js";
@@ -555,6 +556,7 @@ function CardTable({
                 </td>
               )}
               <td>
+                <PriorityBadge value={card.priority} />{" "}
                 <a
                   className="card-table-title"
                   href={cardHref(projectId, card)}

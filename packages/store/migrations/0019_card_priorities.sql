@@ -1,0 +1,1 @@
+-- Card priority conversion is configurable and runs in migrate.ts in this transaction.

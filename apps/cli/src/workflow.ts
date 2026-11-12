@@ -19,6 +19,7 @@ import {
   listNeedsYou,
   markNoticesRead,
   notices,
+  parseCardPriority,
   parseId,
   projectPreferences,
   projectSnapshot,
@@ -60,7 +61,7 @@ import { printRotation, rotateStandingPmInStore } from "./pm-rotate.js";
 const USAGE = [
   "用法：",
   "  cardigan card create [--template <id>] --title <标题> --goal <目标> [--acceptance <标准1;标准2>] [--repo <仓库>] [--base-branch main] [--project <p>]",
-  "  cardigan card update <C-n> [--title <标题>] [--goal <目标>] [--acceptance <标准1;标准2>] [--priority <n>] [--status backlog|todo|cancelled] [--superseded-by <C-m>] [--project <p>]",
+  "  cardigan card update <C-n> [--title <标题>] [--goal <目标>] [--acceptance <标准1;标准2>] [--priority none|low|medium|high|urgent] [--status backlog|todo|cancelled] [--superseded-by <C-m>] [--project <p>]",
   "    update 至少提供一个修改字段；含分号的验收标准请加引号。",
   "    已完成卡片不能取消；请建新卡，再用 --superseded-by 标记已完成或已取消的旧卡。",
   "  cardigan card sensitive <C-n> on|off [--project <p>]   标记或取消敏感：被标记卡片的合并确认一律由你亲自处理",
@@ -374,9 +375,13 @@ function cardUpdate(args: readonly string[], io: CliIo): number {
   const priority =
     flags.priority === undefined
       ? undefined
-      : Number(required(flags, "priority"));
-  if (priority !== undefined && !Number.isFinite(priority)) {
-    throw new CliError("--priority 必须是有限数值", EXIT.usage, [USAGE]);
+      : parseCardPriority(required(flags, "priority"));
+  if (flags.priority !== undefined && priority === undefined) {
+    throw new CliError(
+      "--priority 必须是 none/low/medium/high/urgent 或 无/低/中/高/紧急",
+      EXIT.usage,
+      [USAGE],
+    );
   }
   const acceptance =
     flags.acceptance === undefined

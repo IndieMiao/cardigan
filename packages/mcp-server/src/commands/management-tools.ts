@@ -169,7 +169,20 @@ const schemas = {
       .optional(),
     out_of_scope: z.array(text).optional(),
     related_cards: z.array(id("card")).optional(),
-    priority: z.number().optional(),
+    priority: z
+      .enum([
+        "none",
+        "low",
+        "medium",
+        "high",
+        "urgent",
+        "无",
+        "低",
+        "中",
+        "高",
+        "紧急",
+      ])
+      .optional(),
     deadline: text.optional(),
     template: text.optional(),
     template_id: text.optional(),
@@ -179,7 +192,20 @@ const schemas = {
     title: text.optional(),
     goal: text.optional(),
     acceptance_criteria: z.array(text).min(1).optional(),
-    priority: z.number().optional(),
+    priority: z
+      .enum([
+        "none",
+        "low",
+        "medium",
+        "high",
+        "urgent",
+        "无",
+        "低",
+        "中",
+        "高",
+        "紧急",
+      ])
+      .optional(),
     status: z.enum(states.card).optional(),
   },
   create_work_item: {

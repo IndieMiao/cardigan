@@ -490,6 +490,7 @@ export interface MergeConfirmationView {
   }[];
 }
 export interface NeedsDecision extends DecisionView, AuthorView {
+  readonly card_priority?: number;
   readonly followup_notice?: string;
   readonly card_id: string | null;
   readonly affected_cards: readonly string[];
@@ -591,6 +592,10 @@ export interface SnapshotData {
   }[];
 }
 export interface RunView {
+  readonly queue_warning?: {
+    readonly after_minutes: number;
+    readonly waited_ms: number;
+  };
   readonly queue_reason?: "concurrency_limit" | "runtime_unavailable";
   readonly queue_ahead?: number;
   readonly employee_id?: string;
@@ -627,6 +632,7 @@ export interface ContextUsage {
   readonly window_tokens: number;
 }
 export interface ExecutionAssignment extends AuthorView {
+  readonly card_priority?: number;
   readonly queue_ahead?: number;
   readonly id: string;
   readonly role_id: string;

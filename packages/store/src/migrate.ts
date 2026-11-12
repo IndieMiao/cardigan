@@ -13,6 +13,7 @@ import {
   migrateReadableIdFormat,
 } from "./id-format-migration.js";
 import { persistMemberEffect } from "./members.js";
+import { migrateCardPriorities } from "./priority-migration.js";
 import { installSnapshotTriggers } from "./snapshot-migration.js";
 import { seedCardTemplates } from "./templates.js";
 
@@ -99,6 +100,8 @@ export function migrate(
         installSnapshotTriggers(db);
       if (migration.name === ID_FORMAT_MIGRATION_NAME)
         migrateReadableIdFormat(db);
+      if (migration.version === 19 && migration.name === "card_priorities")
+        migrateCardPriorities(db);
       db.prepare(
         "INSERT INTO schema_version (version, name, applied_at) VALUES (?, ?, ?)",
       ).run(migration.version, migration.name, now());
