@@ -7,10 +7,11 @@ import type {
   WorkItem,
 } from "@cardigan/domain";
 import { toolNames } from "@cardigan/domain";
-import { Store } from "@cardigan/store";
+import { hashRequest, Store } from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { managementTools } from "./commands/management-tools.js";
 import { memoryLogger } from "./log.js";
 import { type RunningServer, startMcpServer } from "./server.js";
 import { acceptingVerifierFor } from "./test-support.js";
@@ -312,15 +313,55 @@ test("collaboration tools use domain commands and preserve reviewable identities
   });
   // C-132: new decisions are Q-n; the legacy q(n) spelling resolves the same one.
   expect(decision.id).toMatch(/^Q-[1-9][0-9]*$/u);
-  const resolved = await ok<Decision>(office, "record_decision", {
+  const recordArgs = {
     decision_id: decision.id.replace(/^Q-(\d+)$/u, "q($1)"),
     option: "go",
     rationale: "Confirmed",
     raw_quote: "  go  ",
     via_chain: ["human"],
     batch: "fixture-batch",
-  });
+  };
+  const resolved = await ok<Decision>(
+    office,
+    "record_decision",
+    recordArgs,
+    "retry-same",
+  );
   expect(resolved.id).toBe(decision.id);
+  // C-132: pretend this record was written before migration 0018, when the
+  // server hashed the request with the id exactly as sent (`q(n)`). The same
+  // retry through the real MCP entry still replays instead of conflicting.
+  const parsed = managementTools()
+    .find((t) => t.name === "record_decision")
+    ?.input.parse({ ...recordArgs, idempotency_key: "retry-same" }) as Record<
+    string,
+    unknown
+  >;
+  const { idempotency_key: _key, ...legacyParams } = parsed;
+  expect(legacyParams.decision_id).toBe(decision.id);
+  store.database
+    .prepare(
+      "UPDATE idempotency SET request_hash = ?, created_at = '2000-01-01T00:00:00.000Z' WHERE key = 'retry-same'",
+    )
+    .run(
+      hashRequest({
+        tool: "record_decision",
+        params: { ...legacyParams, decision_id: recordArgs.decision_id },
+      }),
+    );
+  expect(
+    await ok<Decision>(office, "record_decision", recordArgs, "retry-same"),
+  ).toEqual(resolved);
+  const conflict = await raw(
+    office,
+    "record_decision",
+    { ...recordArgs, rationale: "Different" },
+    "retry-same",
+  );
+  expect(conflict.isError).toBe(true);
+  expect(JSON.stringify(conflict.structuredContent)).toContain(
+    "idempotency_conflict",
+  );
   expect(resolved.resolution).toMatchObject({
     raw_quote: "  go  ",
     via_chain: ["human", "assignment:A-1"],

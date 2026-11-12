@@ -9,7 +9,7 @@ import {
   createGlobalRepositories,
 } from "./employees.js";
 import {
-  ID_FORMAT_MIGRATION_VERSION,
+  ID_FORMAT_MIGRATION_NAME,
   migrateReadableIdFormat,
 } from "./id-format-migration.js";
 import { persistMemberEffect } from "./members.js";
@@ -97,10 +97,7 @@ export function migrate(
       }
       if (migration.version === 17 && migration.name === "command_snapshots")
         installSnapshotTriggers(db);
-      if (
-        migration.version === ID_FORMAT_MIGRATION_VERSION &&
-        migration.name === "readable_id_format"
-      )
+      if (migration.name === ID_FORMAT_MIGRATION_NAME)
         migrateReadableIdFormat(db);
       db.prepare(
         "INSERT INTO schema_version (version, name, applied_at) VALUES (?, ?, ?)",

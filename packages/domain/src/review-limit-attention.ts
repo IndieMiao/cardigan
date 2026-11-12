@@ -1,4 +1,11 @@
 import type { CommandState } from "./commands/core.js";
+import { parseId } from "./ids.js";
+
+/** Full decision number (`Q-95` → 95; legacy `q(95)` too); unparseable sorts first. */
+const sequence = (id: string): number => {
+  const parsed = parseId("decision", id);
+  return parsed.ok ? parsed.value.sequence : 0;
+};
 
 /** Read-only consistency check, including decisions resolved by older servers. */
 export function reviewLimitAttention(state: CommandState, now: string) {
@@ -19,7 +26,7 @@ export function reviewLimitAttention(state: CommandState, now: string) {
           q.trigger === "review_limit" &&
           q.affected_work_items.includes(item.id),
       )
-      .sort((a, b) => Number(b.id.slice(2, -1)) - Number(a.id.slice(2, -1)))[0];
+      .sort((a, b) => sequence(b.id) - sequence(a.id))[0];
     if (
       decision?.status !== "resolved" ||
       decision.resolution?.option !== "raise_limit"
