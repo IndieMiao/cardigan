@@ -1137,3 +1137,162 @@ test("unreachable attempts never authorize a merge or require manual same-tree r
   record("passed", "attempt-2");
   expect(recordMergeResult(state(), system, merged, f.io).ok).toBe(true);
 });
+
+test("A3: skipped docs checks pass only for the same completion and tree", async () => {
+  const { f, state, identity, merged } = await fixture();
+  const scope = { kind: "docs_only" as const };
+  for (const status of ["queued", "running"] as const)
+    f.commit(
+      recordMergeCheck(
+        state(),
+        system,
+        { ...identity, ...(scope ? { scope } : {}), status },
+        f.io,
+      ),
+    );
+  const result = {
+    ...identity,
+    scope,
+    status: "passed" as const,
+    checks: [
+      { name: "build", status: "passed" as const, exit_code: 0 },
+      {
+        name: "test",
+        status: "skipped" as const,
+        reason: "docs_only" as const,
+      },
+      { name: "e2e", status: "skipped" as const, reason: "docs_only" as const },
+    ],
+    summary: "Scoped checks passed",
+    log_ref: "attempt-1.log",
+  };
+  f.commit(recordMergeCheck(state(), system, result, f.io));
+  for (const event of state().events.slice(-3))
+    expect(event.payload).toMatchObject({ scope });
+  expect(
+    value(projectSnapshot(state(), human)).data.cards[0]?.merge_check,
+  ).toMatchObject({ scope, checks: result.checks, status: "passed" });
+  expect(
+    recordMergeResult(
+      state(),
+      system,
+      { ...merged, result: { ...merged.result, tree_sha: "d".repeat(40) } },
+      f.io,
+    ).ok,
+  ).toBe(false);
+  expect(
+    hasPassedMergeCheck(state().events, f.card.id, "D-999" as never, tree),
+  ).toBe(false);
+  expect(
+    recordMergeCheck(
+      state(),
+      system,
+      { ...result, scope: { kind: "full" } },
+      f.io,
+    ).ok,
+  ).toBe(false);
+  f.commit(recordMergeResult(state(), system, merged, f.io));
+  expect(f.state.cards[0]?.status).toBe("done");
+});
+
+test.each([
+  null,
+  { kind: "unknown" },
+  { kind: "full", packages: ["apps/web"] },
+  { kind: "affected", packages: "apps/web" },
+  { kind: "affected", packages: ["apps/web;exit"] },
+])("A3: rejects malformed scope %j", async (scope) => {
+  const { f, state, identity } = await fixture();
+  expect(
+    recordMergeCheck(
+      state(),
+      system,
+      { ...identity, status: "queued", scope: scope as never },
+      f.io,
+    ),
+  ).toMatchObject({ ok: false, error: { code: "validation_failed" } });
+});
+
+test.each([
+  undefined,
+  { kind: "full" },
+  { kind: "affected", packages: ["apps/web"] },
+  { kind: "docs_only" },
+] as const)("A3: validates skipped evidence for scope %j", async (scope) => {
+  const { f, state, identity } = await fixture();
+  for (const status of ["queued", "running"] as const)
+    f.commit(
+      recordMergeCheck(
+        state(),
+        system,
+        { ...identity, ...(scope ? { scope } : {}), status },
+        f.io,
+      ),
+    );
+  const finish = {
+    ...identity,
+    ...(scope ? { scope } : {}),
+    status: "passed" as const,
+    summary: "ok",
+    log_ref: "attempt-1.log",
+  };
+  for (const item of [
+    { name: "test", status: "skipped" as const },
+    {
+      name: "test",
+      status: "skipped" as const,
+      reason: "docs_only" as const,
+      exit_code: 1,
+    },
+    { name: "test", status: "not_run" as const },
+  ])
+    expect(
+      recordMergeCheck(state(), system, { ...finish, checks: [item] }, f.io).ok,
+    ).toBe(false);
+  const result = recordMergeCheck(
+    state(),
+    system,
+    {
+      ...finish,
+      checks: [{ name: "test", status: "skipped", reason: "docs_only" }],
+    },
+    f.io,
+  );
+  expect(result.ok).toBe(scope?.kind === "docs_only");
+});
+
+test("A3: a timeout alongside skipped checks retains the single rerun and its scope", async () => {
+  const { f, state, identity } = await fixture();
+  const scope = { kind: "docs_only" as const };
+  for (const status of ["queued", "running"] as const)
+    f.commit(
+      recordMergeCheck(
+        state(),
+        system,
+        { ...identity, ...(scope ? { scope } : {}), status },
+        f.io,
+      ),
+    );
+  f.commit(
+    recordMergeCheck(
+      state(),
+      system,
+      {
+        ...identity,
+        scope,
+        status: "timed_out",
+        timeout_only: true,
+        checks: [
+          { name: "build", status: "timed_out" },
+          { name: "test", status: "skipped", reason: "docs_only" },
+        ],
+        summary: "timeout",
+        log_ref: "attempt-1.log",
+      },
+      f.io,
+    ),
+  );
+  expect(
+    latestMergeCheck(state().events, f.card.id, identity.completion_id),
+  ).toMatchObject({ status: "queued", scope, recheck_requested: true });
+});

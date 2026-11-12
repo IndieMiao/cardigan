@@ -17,6 +17,7 @@ import {
   prepareCheckoutAlias,
   secureDataDirectory,
 } from "@cardigan/runtime-herdr";
+import { AFFECTED_PACKAGE_DIR } from "./change-scope.js";
 import { checkEnvironment } from "./check-environment.js";
 import { CHECKOUT_WORKER } from "./checkout-worker.js";
 import { type ExecutionOwner, executionOwner } from "./merge-check-capacity.js";
@@ -25,13 +26,17 @@ export interface CheckoutCheck {
   readonly name: string;
   readonly run: string;
   readonly timeoutMs?: number;
+  /** Host-selected execution metadata, never read from the checkout. */
+  readonly skipReason?: "docs_only";
+  readonly affectedPaths?: readonly string[];
 }
 export type CheckoutStatus = "passed" | "failed" | "timed_out" | "interrupted";
 export interface CheckoutResult {
   readonly status: CheckoutStatus | "executor_unreachable";
   readonly checks: readonly {
     readonly name: string;
-    readonly status: CheckoutStatus | "not_run";
+    readonly status: CheckoutStatus | "not_run" | "skipped";
+    readonly reason?: "docs_only";
     readonly exit_code?: number | null;
     readonly duration_ms?: number;
   }[];
@@ -158,6 +163,16 @@ export async function runInTemporaryCheckout(
   const checks = input.checks.map((check) => {
     if (!check.name.trim() || !check.run.trim() || check.run.includes("\0"))
       throw new Error("Check name and command must be nonempty");
+    if (
+      (check.skipReason !== undefined && check.skipReason !== "docs_only") ||
+      (check.affectedPaths !== undefined &&
+        (!Array.isArray(check.affectedPaths) ||
+          !check.affectedPaths.every(
+            (path) =>
+              typeof path === "string" && AFFECTED_PACKAGE_DIR.test(path),
+          )))
+    )
+      throw new Error("Invalid checkout scope metadata");
     return { ...check, timeoutMs: duration(check.timeoutMs ?? 30 * 60_000) };
   });
   const totalTimeoutMs = duration(input.totalTimeoutMs ?? 60 * 60_000);

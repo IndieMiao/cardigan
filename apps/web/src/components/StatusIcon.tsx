@@ -114,6 +114,7 @@ const statusShapes = {
   needs_attention: "unknown",
   timed_out: "error",
   interrupted: "paused",
+  skipped: "cancelled",
   not_run: "cancelled",
 } satisfies Record<keyof typeof STATUS_LABELS, StatusShape>;
 

@@ -157,8 +157,13 @@ async function main(p) {
     else if (added.status !== 'passed') { status = added.status; reason = 'Temporary checkout failed'; }
     else if (!await verify()) { status = 'failed'; reason = 'Checkout HEAD or tree does not match'; }
     for (const check of p.checks) {
+      if (check.skipReason === 'docs_only') {
+        checks.push({ name: check.name, status: 'skipped', reason: 'docs_only' }); continue;
+      }
       if (status !== 'passed') { checks.push({ name: check.name, status: 'not_run' }); continue; }
-      const r = await run('/bin/sh', ['-c', check.run], environment, p.directory, check.timeoutMs, check.name);
+      const checkEnv = check.affectedPaths === undefined ? environment :
+        { ...environment, CARDIGAN_AFFECTED_PATHS: check.affectedPaths.join(' ') };
+      const r = await run('/bin/sh', ['-c', check.run], checkEnv, p.directory, check.timeoutMs, check.name);
       checks.push({ name: check.name, status: r.status, exit_code: r.code, duration_ms: r.duration_ms });
       status = r.status;
       if (status !== 'passed') reason = 'Check did not pass: ' + check.name;

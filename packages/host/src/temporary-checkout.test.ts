@@ -967,3 +967,64 @@ test.skipIf(process.platform !== "linux").each([false, true])(
     if (!cleanupFails) await f.clean();
   },
 );
+
+test("A3: docs skips do not execute; affected paths are isolated to the selected step", async () => {
+  const f = await fixture();
+  const result = await runInTemporaryCheckout({
+    ...f.input,
+    checks: [
+      { name: "test", run: "exit 1", skipReason: "docs_only" },
+      {
+        name: "affected",
+        affectedPaths: ["packages/store", "apps/server"],
+        run: 'test "$CARDIGAN_AFFECTED_PATHS" = "packages/store apps/server"',
+      },
+      {
+        name: "full",
+        affectedPaths: [],
+        // biome-ignore lint/suspicious/noTemplateCurlyInString: Shell parameter expansion.
+        run: 'test "${CARDIGAN_AFFECTED_PATHS+set}" = set && test -z "$CARDIGAN_AFFECTED_PATHS"',
+      },
+      {
+        name: "unscoped",
+        // biome-ignore lint/suspicious/noTemplateCurlyInString: Shell parameter expansion.
+        run: 'test "${CARDIGAN_AFFECTED_PATHS+set}" != set',
+      },
+      { name: "e2e", run: "exit 1", skipReason: "docs_only" },
+    ],
+  });
+  expect(result.status).toBe("passed");
+  expect(result.checks.map((c) => [c.name, c.status])).toEqual([
+    ["test", "skipped"],
+    ["affected", "passed"],
+    ["full", "passed"],
+    ["unscoped", "passed"],
+    ["e2e", "skipped"],
+  ]);
+  expect(result.checks[0]).toEqual({
+    name: "test",
+    status: "skipped",
+    reason: "docs_only",
+  });
+  await f.clean();
+});
+
+test.each([
+  "../apps/web",
+  "apps/web;false",
+  "apps/web\npackages/store",
+  "apps/web file",
+])("A3: rejects unsafe affected path %j before starting", async (path) => {
+  const f = await fixture(),
+    start = vi.fn();
+  await expect(
+    runInTemporaryCheckout(
+      {
+        ...f.input,
+        checks: [{ name: "test", run: "true", affectedPaths: [path] }],
+      },
+      start,
+    ),
+  ).rejects.toThrow("Invalid checkout scope metadata");
+  expect(start).not.toHaveBeenCalled();
+});

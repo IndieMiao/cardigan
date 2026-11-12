@@ -195,3 +195,37 @@ test.each([
     screen.getByRole("link", { name: "查看日志" }).getAttribute("href"),
   ).toBe(`/api/projects/p-1/merge-checks/${check.attempt_id}`);
 });
+
+test.each([
+  [{ kind: "docs_only" }, "检查范围：仅文档"],
+  [{ kind: "full" }, "检查范围：全量"],
+  [
+    { kind: "affected", packages: ["packages/store", "apps/server"] },
+    "检查范围：受影响包（packages/store、apps/server）",
+  ],
+] as const)("shows recorded scope %j", (scope, label) => {
+  render(<MergeCheck projectId="p-1" check={{ ...check, scope }} />);
+  expect(screen.getByText(label)).toBeTruthy();
+});
+
+test("docs-only results distinguish skipped steps and explain why; legacy scope stays absent", () => {
+  const { rerender } = render(
+    <MergeCheck
+      projectId="p-1"
+      check={{
+        ...check,
+        status: "passed",
+        scope: { kind: "docs_only" },
+        checks: [
+          { name: "test", status: "skipped", reason: "docs_only" },
+          { name: "e2e", status: "skipped", reason: "docs_only" },
+        ],
+      }}
+    />,
+  );
+  for (const badge of screen.getAllByText("已跳过"))
+    expectBadge(badge, "已跳过", "cancelled");
+  expect(screen.getAllByText("仅文档变更")).toHaveLength(2);
+  rerender(<MergeCheck projectId="p-1" check={check} />);
+  expect(screen.queryByText(/检查范围/)).toBeNull();
+});
