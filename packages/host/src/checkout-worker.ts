@@ -4,7 +4,7 @@ const { spawn } = require('node:child_process');
 const { createHmac } = require('node:crypto');
 const { chmod, lstat, mkdir, readFile, readdir, readlink, realpath, rm, symlink } = require('node:fs/promises');
 const { userInfo } = require('node:os');
-const { basename, join, resolve } = require('node:path');
+const { basename, dirname, join, resolve } = require('node:path');
 const { createInterface } = require('node:readline');
 const input = createInterface({ input: process.stdin });
 let cancelled = false, current, deadline, totalExpired = false, nonce, authKey;
@@ -34,7 +34,7 @@ async function main(p) {
   const checks = [], cleanup_errors = [];
   const runtime = join(p.container, 'runtime'), temporary = join(p.container, 'tmp');
   const aliases = join(p.alias_container, 'u'), aliasRuntime = join(aliases, 'r'), aliasTmp = join(aliases, 't');
-  let ownsAliases = false, registered = false;
+  let ownsAliases = false, registered = false, addInterrupted = false;
   const baseEnv = { PATH: p.path, HOME: userInfo().homedir, XDG_RUNTIME_DIR: aliasRuntime, TMPDIR: aliasTmp };
   Object.assign(process.env, baseEnv);
   const environment = { ...baseEnv, ...p.env };
@@ -79,6 +79,13 @@ async function main(p) {
   }
   const git = (cwd, args, cleanup = false) =>
     run('git', [...safety, '-C', cwd, ...args], gitEnv, '/', 30000, undefined, cleanup);
+  async function stillRegistered() {
+    const list = await git(p.repository, ['worktree', 'list', '--porcelain'], true);
+    if (list.status !== 'passed') return true;
+    const paths = [p.directory];
+    try { paths.push(join(await realpath(dirname(p.directory)), basename(p.directory))); } catch {}
+    return list.output.split('\n').some(line => paths.some(path => line === 'worktree ' + path));
+  }
   async function verify() {
     const head = await git(p.directory, ['rev-parse', '--verify', 'HEAD']);
     const tree = await git(p.directory, ['rev-parse', '--verify', 'HEAD^{tree}']);
@@ -144,7 +151,9 @@ async function main(p) {
     // run() skips without spawning once cancelled or expired, so no registration can exist then.
     registered = !(cancelled || totalExpired);
     const added = await git(p.repository, ['worktree', 'add', '--detach', '--', p.directory, p.sha]);
-    if (added.status === 'interrupted') { status = 'interrupted'; reason = 'Cancelled before temporary checkout completed'; }
+    if (added.status === 'interrupted') {
+      addInterrupted = true; status = 'interrupted'; reason = 'Cancelled before temporary checkout completed';
+    }
     else if (added.status !== 'passed') { status = added.status; reason = 'Temporary checkout failed'; }
     else if (!await verify()) { status = 'failed'; reason = 'Checkout HEAD or tree does not match'; }
     for (const check of p.checks) {
@@ -163,7 +172,9 @@ async function main(p) {
     try { await stopCores(); } catch { cleanup_errors.push('Could not inspect check runtime processes'); }
     // Cleanup does not inherit cancellation. Git and recursive deletion run as the owner.
     const removed = await git(p.repository, ['worktree', 'remove', '--force', '--', p.directory], true);
-    if (registered && removed.status !== 'passed') cleanup_errors.push('Could not remove temporary worktree registration');
+    // A cancelled add may have stopped before Git registered anything; only report a registration that remains.
+    if (registered && removed.status !== 'passed' && (!addInterrupted || await stillRegistered()))
+      cleanup_errors.push('Could not remove temporary worktree registration');
     try { await rm(p.directory, { recursive: true, force: true }); }
     catch { cleanup_errors.push('Could not remove temporary checkout files'); }
     for (const path of [runtime, temporary]) {

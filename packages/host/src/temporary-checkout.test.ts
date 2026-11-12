@@ -589,6 +589,72 @@ test("cancelling after readiness but before checkout reports cancellation withou
   await f.clean();
 });
 
+// The supervisor's PATH is fixed by the host; rewrite only the payload so a fake `git`
+// can deliver SIGTERM (a supervisor cancellation signal) at a chosen point of `worktree add`.
+async function cancelDuringAdd(
+  f: Awaited<ReturnType<typeof fixture>>,
+  beforeCancel: string,
+) {
+  const bin = join(f.root, "bin");
+  await mkdir(bin);
+  const real = (await exec("/bin/sh", ["-c", "command -v git"])).stdout.trim();
+  await writeFile(
+    join(bin, "git"),
+    `#!/bin/sh\nREAL=${quote(real)}\ncase " $* " in *" worktree add "*) ${beforeCancel}\n  kill -TERM $PPID; sleep 10; exit 1;; esac\nexec "$REAL" "$@"\n`,
+    { mode: 0o755 },
+  );
+  return runInTemporaryCheckout(
+    { ...f.input, checks: [{ name: "must-not-run", run: "exit 99" }] },
+    (file, args, env) => {
+      const child = spawn(file, args, { env, stdio: ["pipe", "pipe", "pipe"] });
+      const write = child.stdin.write.bind(child.stdin) as (
+        chunk: string,
+      ) => boolean;
+      let first = true;
+      child.stdin.write = ((chunk: string) => {
+        if (!first) return write(chunk);
+        first = false;
+        const payload = JSON.parse(chunk);
+        return write(
+          `${JSON.stringify({ ...payload, path: `${bin}:${payload.path}` })}\n`,
+        );
+      }) as typeof child.stdin.write;
+      return child;
+    },
+  );
+}
+
+test("cancelling after Git starts but before it registers the worktree reports no cleanup error", async () => {
+  const f = await fixture();
+  const result = await cancelDuringAdd(f, ":");
+  expect(result).toEqual({
+    status: "interrupted",
+    checks: [{ name: "must-not-run", status: "not_run" }],
+    cleanup_errors: [],
+    reason: "Cancelled before temporary checkout completed",
+  });
+  await f.clean();
+});
+
+test("a cancelled checkout still reports a registration that could not be removed", async () => {
+  const f = await fixture();
+  // Register and lock the worktree before cancelling, so `worktree remove --force` fails.
+  const result = await cancelDuringAdd(
+    f,
+    // The worktree directory is the second-to-last argument of `worktree add`.
+    `"$REAL" "$@" >/dev/null 2>&1; for a; do dir=$last; last=$a; done; "$REAL" -C "$dir" worktree lock "$dir";`,
+  );
+  expect(result).toMatchObject({
+    status: "interrupted",
+    reason: "Cancelled before temporary checkout completed",
+    cleanup_errors: ["Could not remove temporary worktree registration"],
+  });
+  expect(await f.git("worktree", "list", "--porcelain")).toContain("locked");
+  await f.git("worktree", "unlock", join(f.container, "worktree"));
+  await f.git("worktree", "prune");
+  await f.clean();
+});
+
 test("a real checkout failure keeps its reason and registration cleanup error", async () => {
   const f = await fixture();
   const result = await runInTemporaryCheckout({
