@@ -269,6 +269,7 @@ test("C-111: abort_dispatch and pause_standing_assignment reject every assignmen
     { ...caller, allowed_tools: [...HOST_OPS_ROLE_TOOLS] },
     actor(4, "pm"),
     actor(1),
+    actor(2, "reviewer"),
     { ...caller, project_id: "other" },
   ]) {
     expect(
