@@ -16,6 +16,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, expect, test } from "vitest";
 import { ApiError } from "../api.js";
+import { CommentBox } from "../components/CommentBox.js";
 import {
   attachment,
   cardDetail,
@@ -25,6 +26,49 @@ import {
 import { CardDetailPage } from "./CardDetailPage.js";
 
 afterEach(cleanup);
+
+test.each([false, true, undefined])(
+  "C-90 comment recipient hint follows project Ops availability (%s)",
+  async (hasPmOps) => {
+    renderCard({
+      card: async () =>
+        cardDetail(hasPmOps === undefined ? {} : { has_pm_ops: hasPmOps }),
+    });
+    const input = await screen.findByRole("textbox", { name: "评论正文" });
+    const editor = screen.getByRole("region", { name: "写评论" });
+    const hint = within(editor).queryByText("这张卡目前没有人负责");
+    expect(Boolean(hint)).toBe(hasPmOps === false);
+    expect(input.getAttribute("aria-describedby")).toBe(hint?.id ?? null);
+    fireEvent.change(input, { target: { value: "仍然可以留言" } });
+    expect(
+      screen.getByRole<HTMLButtonElement>("button", { name: "发表评论" })
+        .disabled,
+    ).toBe(false);
+  },
+);
+
+test("C-90 the hint updates when Ops becomes available without losing a comment draft", async () => {
+  const client = fakeClient();
+  const view = render(
+    <CommentBox
+      client={client}
+      projectId="p-1"
+      cardId="C-1"
+      hasPmOps={false}
+    />,
+  );
+  fireEvent.change(screen.getByRole("textbox", { name: "评论正文" }), {
+    target: { value: "未发送的评论" },
+  });
+  view.rerender(
+    <CommentBox client={client} projectId="p-1" cardId="C-1" hasPmOps />,
+  );
+  expect(screen.queryByText("这张卡目前没有人负责")).toBeNull();
+  expect(
+    screen.getByRole<HTMLTextAreaElement>("textbox", { name: "评论正文" })
+      .value,
+  ).toBe("未发送的评论");
+});
 
 function renderCard(
   client: Parameters<typeof fakeClient>[0] = {},

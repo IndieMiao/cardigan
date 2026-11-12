@@ -2,6 +2,7 @@
 // `renderMarkdown` output (html off, filtered links), not raw user HTML.
 import {
   type Ref,
+  useId,
   useImperativeHandle,
   useLayoutEffect,
   useMemo,
@@ -39,6 +40,7 @@ export interface CommentBoxProps {
   readonly projectId: string;
   readonly cardId: string;
   readonly mentions?: readonly MentionOption[];
+  readonly hasPmOps?: boolean | undefined;
   /** Called after the comment and its images were accepted. */
   readonly onPosted?: (comment: PostedComment) => void | Promise<void>;
   /** Refresh the timeline when a previous comment was accepted with different text. */
@@ -64,9 +66,11 @@ export function CommentBox({
   projectId,
   cardId,
   mentions = [],
+  hasPmOps,
   onPosted,
   onConflict,
 }: CommentBoxProps) {
+  const routingHintId = useId();
   const [body, setBody] = useState("");
   const [tab, setTab] = useState<"write" | "preview">("write");
   const [images, setImages] = useState<readonly PastedImage[]>([]);
@@ -230,6 +234,11 @@ export function CommentBox({
         }
       }}
     >
+      {hasPmOps === false && (
+        <p id={routingHintId} className="hint" role="status">
+          这张卡目前没有人负责
+        </p>
+      )}
       {expanded && (
         <div className="comment-tabs" role="tablist" aria-label="评论编辑方式">
           <button
@@ -257,6 +266,7 @@ export function CommentBox({
             ref={textarea}
             className="comment-input"
             aria-label="评论正文"
+            aria-describedby={hasPmOps === false ? routingHintId : undefined}
             placeholder="支持 Markdown；@ 提及角色或 Assignment；可以直接粘贴图片"
             rows={expanded ? 6 : 2}
             value={body}

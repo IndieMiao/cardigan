@@ -7,6 +7,7 @@ import {
   createCard,
   dispatchRun,
   finishRun,
+  postComment,
   projectSnapshot,
   type Runtime,
   updateCard,
@@ -120,6 +121,75 @@ const rotate = () => {
   f.store.uow.run((tx) => writeRole(tx, f.project, role, { mode: "update" }));
   return rotateStandingPmInStore(f.store, f.project, "ops").assignment;
 };
+
+test("C-90 consecutive human comments merge into one Ops bell and busy Ops reads later comments from its inbox", async () => {
+  const card = create(f.actorFor(ops));
+  f.session(ops);
+  const comment = (body: string, actor?: Actor) =>
+    f.apply(
+      (s, a, p) => postComment(s, a, { card_id: card.id, body }, p),
+      actor,
+    );
+  comment("First human comment");
+  comment("Second human comment");
+  comment("Agent comment without mention", f.actorFor(office));
+  const dispatcher = new Dispatcher(options);
+  await dispatcher.tick();
+  await new Dispatcher(options).tick();
+  expect(options.runtime.wake).toHaveBeenCalledOnce();
+  expect(vi.mocked(options.runtime.wake).mock.calls[0]?.[1]).toContain(
+    'summary="2 comments"',
+  );
+  const comments = () =>
+    f.store
+      .listNotifications({ project_id: f.project })
+      .filter((n) => n.kind === "comment");
+  expect(comments()).toHaveLength(2);
+  expect(
+    comments().every(
+      (n) => n.recipient.kind === "pm_ops" && n.status === "belled",
+    ),
+  ).toBe(true);
+  expect(f.state().runs).toHaveLength(2);
+  const run = f.state().runs.at(-1);
+  if (!run) throw new Error("Missing Ops run");
+  expect(run.assignment_id).toBe(ops.id);
+  f.apply(
+    (s, a, p) => acknowledgeRun(s, a, { run_id: run.id }, p),
+    f.actorFor(ops),
+  );
+
+  const latest = comment("Another comment while Ops is running");
+  await dispatcher.tick();
+  expect(comments().at(-1)?.status).toBe("pending");
+  expect(options.runtime.wake).toHaveBeenCalledOnce();
+  expect(f.state().runs).toHaveLength(2);
+  f.store.ackEvents({
+    project_id: f.project,
+    assignment_id: ops.id,
+    card_id: card.id,
+    up_to_seq: latest.event_seq,
+  });
+  acknowledgeInbox(f.store, f.project, options.standing, f.clock);
+  f.apply(
+    (s, a, p) =>
+      finishRun(
+        s,
+        a,
+        {
+          run_id: run.id,
+          outcome: "completed",
+          summary: "Read all comments",
+        },
+        p,
+      ),
+    f.actorFor(ops),
+  );
+  await dispatcher.tick();
+  expect(comments().every((n) => n.status === "acked")).toBe(true);
+  expect(options.runtime.wake).toHaveBeenCalledOnce();
+  expect(f.state().runs).toHaveLength(2);
+});
 
 test.each(["human", "office"] as const)(
   "%s cards reach the current Ops across every rotation window",

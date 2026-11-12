@@ -482,6 +482,7 @@ function CardContent({
             projectId={projectId}
             cardId={cardId}
             mentions={mentionOptions(detail)}
+            hasPmOps={detail.has_pm_ops}
             onPosted={onPosted}
             onConflict={onCommentConflict}
           />

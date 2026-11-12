@@ -334,6 +334,8 @@ export interface CardRelations {
 }
 
 export interface CardDetail {
+  /** Whether the project has an active default recipient for human comments. */
+  readonly has_pm_ops?: boolean;
   readonly merge_confirmations?: readonly NeedsDecision[];
   readonly template?: TemplateView | null;
   readonly mark_done?: { allowed: boolean; reason: string | null } | null;
