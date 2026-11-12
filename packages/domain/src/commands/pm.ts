@@ -18,6 +18,10 @@ import {
   resolveEmployee,
   selectEmployee,
 } from "./employee-assignment.js";
+import {
+  applyPreMergeCheck,
+  type PreMergeCheckInput,
+} from "./pre-merge-checks.js";
 import { canResume, queueResumedRun, resumeWork } from "./resumption.js";
 import {
   type ReviewLimitResolution,
@@ -183,12 +187,26 @@ export function updateCard(
     acceptance_criteria?: readonly string[];
     priority?: number | string;
     status?: Card["status"];
+    /** C-160: add or update one pre-merge check; not mixed with other edits. */
+    pre_merge_check?: PreMergeCheckInput;
   },
   ports: CommandPorts,
 ) {
   return command(state, actor, "update_card", ports, (d) => {
     d.pm();
     const card = d.card(p.card_id);
+    if (p.pre_merge_check !== undefined) {
+      ensure(
+        p.title === undefined &&
+          p.goal === undefined &&
+          p.acceptance_criteria === undefined &&
+          p.priority === undefined &&
+          p.status === undefined,
+        "validation_failed",
+        "pre_merge_check 不能与其他卡片修改混用",
+      );
+      return applyPreMergeCheck(d, card, p.pre_merge_check);
+    }
     if (p.title !== undefined) text(p.title, "title");
     if (p.goal !== undefined) text(p.goal, "goal");
     if (p.acceptance_criteria !== undefined)

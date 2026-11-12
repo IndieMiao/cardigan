@@ -1,3 +1,4 @@
+import * as Dialog from "@radix-ui/react-dialog";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type CardiganClient,
@@ -9,6 +10,7 @@ import {
   type NeedsDecision,
   type NeedsPage,
   type NoticeView,
+  type PreMergeCheckView,
 } from "../api.js";
 import { DecisionAttachments } from "../components/DecisionAttachments.js";
 import { EmployeeIdentity } from "../components/EmployeeIdentity.js";
@@ -32,6 +34,7 @@ import {
 import { PriorityBadge } from "../components/Priority.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
 import { decisionTitle, delegableCategories } from "../decision-labels.js";
+import { PRE_MERGE_COPY } from "../pre-merge-copy.js";
 import { routeHash } from "../route.js";
 import { useResource } from "../useResource.js";
 
@@ -344,6 +347,69 @@ function ReviewLine({ review }: { readonly review: MergeConfirmationReview }) {
     </li>
   );
 }
+function PreMergeCheckList({
+  checks,
+}: {
+  checks: readonly PreMergeCheckView[];
+}) {
+  return (
+    <ul className="pre-merge-check-list">
+      {checks.map((c) => (
+        <li key={c.label}>
+          <strong>{c.label}</strong>：{PRE_MERGE_COPY.status[c.status]}
+          {c.stale && (
+            <span className="hint">（{PRE_MERGE_COPY.staleNote}）</span>
+          )}
+          {c.note && <span className="hint">（{c.note}）</span>}
+        </li>
+      ))}
+    </ul>
+  );
+}
+/**
+ * C-160: checks the human wants done before confirming (e.g. an independent
+ * security review). Advisory: the confirm button stays available.
+ */
+function PreMergeChecks({
+  checks,
+  gate,
+}: {
+  checks: readonly PreMergeCheckView[];
+  gate: boolean;
+}) {
+  if (checks.length === 0) return null;
+  const open = checks.filter((c) => c.status !== "passed");
+  if (open.length > 0)
+    return (
+      <section
+        className="pre-merge-checks pre-merge-waiting"
+        role="status"
+        aria-label={PRE_MERGE_COPY.region}
+      >
+        <p className="pre-merge-title">
+          {PRE_MERGE_COPY.waitingTitle(open.map((c) => c.label))}
+        </p>
+        <p>{PRE_MERGE_COPY.missingHeading}</p>
+        <PreMergeCheckList checks={open} />
+        <p className="hint">{PRE_MERGE_COPY.waitingHint}</p>
+      </section>
+    );
+  return (
+    <section
+      className="pre-merge-checks pre-merge-ready"
+      role="status"
+      aria-label={PRE_MERGE_COPY.region}
+    >
+      <p className="pre-merge-title">{PRE_MERGE_COPY.readyTitle}</p>
+      <PreMergeCheckList checks={checks} />
+      <ol className="pre-merge-steps">
+        {PRE_MERGE_COPY.readySteps(gate).map((step) => (
+          <li key={step}>{step}</li>
+        ))}
+      </ol>
+    </section>
+  );
+}
 /** Shared by Needs You and card details so human writes use the same controls. */
 export function MergeConfirmation({
   q,
@@ -355,10 +421,15 @@ export function MergeConfirmation({
   const [quote, setQuote] = useState("");
   const [returning, setReturning] = useState(false);
   const [reason, setReason] = useState("");
+  const [confirming, setConfirming] = useState(false);
+  const confirmButton = useRef<HTMLButtonElement>(null);
+  const cancelButton = useRef<HTMLButtonElement>(null);
   const action = useAction(done);
   const merge = q.merge_confirmation;
   const check = merge?.merge_check;
   const confirmed = q.status === "resolved";
+  const preChecks = merge?.pre_merge_checks ?? [];
+  const openPreChecks = preChecks.filter((c) => c.status !== "passed");
   const cardId = q.card_id ?? q.related_cards[0]?.id ?? null;
   const decide = (option: "merge" | "hold") =>
     action.run([projectId, q.id, "resolve", option, quote], (key) =>
@@ -377,6 +448,12 @@ export function MergeConfirmation({
           正在代确认。你可以直接选择合并、暂不合并或退回修改，按你的拍板记录，PM
           之后不能再处理这一条；选择合并仍要通过合并闸门检查。
         </p>
+      )}
+      {!confirmed && (
+        <PreMergeChecks
+          checks={preChecks}
+          gate={!!merge?.merge_gate_enabled && !merge.merge_noop}
+        />
       )}
       <DecisionAttachments attachments={q.attachments} />
       {merge?.merge_gate_invalid && (
@@ -467,7 +544,9 @@ export function MergeConfirmation({
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          if (!confirmed) void decide("merge");
+          if (confirmed) return;
+          if (openPreChecks.length > 0) setConfirming(true);
+          else void decide("merge");
         }}
       >
         {confirmed ? (
@@ -484,7 +563,7 @@ export function MergeConfirmation({
         )}
         <div className="action-row">
           {!confirmed && (
-            <button type="submit" disabled={action.busy}>
+            <button ref={confirmButton} type="submit" disabled={action.busy}>
               确认合并
             </button>
           )}
@@ -544,6 +623,54 @@ export function MergeConfirmation({
           </button>
         </div>
       </form>
+      <Dialog.Root
+        open={confirming && !confirmed && openPreChecks.length > 0}
+        onOpenChange={setConfirming}
+      >
+        <Dialog.Portal>
+          <Dialog.Overlay className="pre-merge-overlay" />
+          <Dialog.Content
+            role="alertdialog"
+            aria-modal="true"
+            className="pre-merge-dialog pre-merge-checks pre-merge-waiting"
+            aria-describedby={undefined}
+            onOpenAutoFocus={(event) => {
+              // The safe choice gets focus; Enter must not merge by accident.
+              event.preventDefault();
+              cancelButton.current?.focus();
+            }}
+            onCloseAutoFocus={(event) => {
+              event.preventDefault();
+              confirmButton.current?.focus();
+            }}
+          >
+            <Dialog.Title className="pre-merge-title">
+              {PRE_MERGE_COPY.confirmTitle(openPreChecks.length)}
+            </Dialog.Title>
+            <PreMergeCheckList checks={openPreChecks} />
+            <p className="hint">{PRE_MERGE_COPY.confirmHint}</p>
+            <div className="action-row">
+              <Dialog.Close asChild>
+                {/* Q-275: holding off is the primary choice here. */}
+                <button ref={cancelButton} type="button">
+                  {PRE_MERGE_COPY.confirmCancel}
+                </button>
+              </Dialog.Close>
+              <button
+                type="button"
+                className="quiet"
+                disabled={action.busy}
+                onClick={() => {
+                  setConfirming(false);
+                  void decide("merge");
+                }}
+              >
+                {PRE_MERGE_COPY.confirmAnyway}
+              </button>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
       {returning && (
         <form
           onSubmit={(e) => {

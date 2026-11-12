@@ -40,6 +40,7 @@ import {
   requestHumanAction,
   submitDelivery,
   submitReview,
+  updateCard,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import { routeEvent } from "@cardigan/router";
@@ -871,4 +872,71 @@ test("merge push-accept validates its arguments and refuses an action without a 
   expect(missing.code).not.toBe(0);
   expect(missing.out).toBe("");
   expect(JSON.stringify(state())).toBe(before);
+});
+
+const setCheck = (
+  label: string,
+  status: "pending" | "passed" | "failed",
+  note?: string,
+) =>
+  apply((s, a, p) =>
+    updateCard(
+      s,
+      a,
+      {
+        card_id: card_id as never,
+        pre_merge_check: { label, status, ...(note ? { note } : {}) },
+      },
+      p,
+    ),
+  );
+
+test("C-160: status lists unfinished pre-merge checks; confirm needs --yes", async () => {
+  await seatAwaitingMerge();
+  setCheck("独立安全审核", "pending");
+  setCheck("截图核对", "failed", "按钮颜色不对");
+  const status = await cardigan("merge", "status", card_id);
+  expect(status.out).toContain(
+    "合并前核对：!! 等待独立安全审核、截图核对，请先不要确认合并",
+  );
+  expect(status.out).toContain("    - 独立安全审核：待完成");
+  expect(status.out).toContain("    - 截图核对：有问题（按钮颜色不对）");
+
+  const refused = await cardigan("merge", "confirm", card_id);
+  expect(refused.code).toBe(2);
+  expect(refused.err).toContain(
+    "还有 2 项合并前核对没有完成，确定现在确认合并吗？",
+  );
+  expect(refused.err).toContain(
+    `仍要确认合并，请加 --yes 重新运行：cardigan merge confirm ${card_id} --yes`,
+  );
+  expect(state().decisions.find((d) => d.id === "Q-1")?.status).toBe("open");
+
+  const anyway = await cardigan("merge", "confirm", card_id, "--yes");
+  expect(anyway.code).toBe(0);
+  expect(anyway.out).toContain(
+    "!! 注意：还有 2 项合并前核对没有完成，已按你的 --yes 确认合并。",
+  );
+  expect(state().decisions.find((d) => d.id === "Q-1")).toMatchObject({
+    status: "resolved",
+    resolution: { option: "merge" },
+  });
+});
+
+test("C-160: once every check passes, status says so and confirm needs no --yes", async () => {
+  await seatAwaitingMerge();
+  setCheck("独立安全审核", "passed");
+  const status = await cardigan("merge", "status", card_id);
+  expect(status.out).toContain("合并前核对：核对已完成，可以确认合并");
+  expect(status.out).toContain("    - 独立安全审核：已通过");
+  const result = await cardigan("merge", "confirm", card_id);
+  expect(result.code).toBe(0);
+  expect(result.out).not.toContain("!!");
+});
+
+test("C-160: hold is not gated by unfinished pre-merge checks", async () => {
+  await seatAwaitingMerge();
+  setCheck("独立安全审核", "pending");
+  const result = await cardigan("merge", "hold", card_id);
+  expect(result.code).toBe(0);
 });
