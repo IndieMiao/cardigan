@@ -11,11 +11,12 @@ import {
 import { dirname, join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { MIN_REDACTED_ENV_BYTES } from "./check-environment.js";
+import { checkTimedOutOnly, TRUNCATED_OUTPUT } from "./merge-check-timeout.js";
 import type { CheckoutResult } from "./temporary-checkout.js";
 
 export const CHECK_OUTPUT_LIMIT = 2 * 1024 * 1024;
 const MASK = "[REDACTED]",
-  OMITTED = "\n[中间输出已截断]\n";
+  OMITTED = `\n${TRUNCATED_OUTPUT}\n`;
 const escapeRegex = (value: string) =>
   value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 function redactor(env: Readonly<Record<string, string>>) {
@@ -240,6 +241,12 @@ export async function createMergeCheckLog(input: {
               ),
               12000,
             );
+      // C-116: classified from the full retained output, before it is cleared.
+      const timeout_only = checkTimedOutOnly(
+        result.status,
+        result.checks,
+        (name) => output.get(name)?.text() ?? "",
+      );
       const names = [
         ...new Set([...result.checks.map((c) => c.name), ...output.keys()]),
       ];
@@ -284,7 +291,7 @@ export async function createMergeCheckLog(input: {
       }
       logs.sort((a, b) => b.time - a.time || b.name.localeCompare(a.name));
       for (const old of logs.slice(50)) await unlink(join(directory, old.name));
-      return { ...safe, summary, log_ref };
+      return { ...safe, summary, log_ref, timeout_only };
     },
   };
 }
