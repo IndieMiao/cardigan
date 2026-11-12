@@ -1,4 +1,8 @@
-import { latestMergeCheck, prepareMergePlan } from "@cardigan/domain";
+import {
+  DEFAULT_MAX_RUN_LIMIT,
+  latestMergeCheck,
+  prepareMergePlan,
+} from "@cardigan/domain";
 import {
   effectiveRunLimit,
   MERGE_CHECK_RUN_SLOTS,
@@ -14,11 +18,13 @@ export function executionCapacity(
   store: Store,
   defaults?: (machine: string) => number,
   mergeGate?: MergeGateConfiguration,
+  maximums: (machine: string) => number = () => DEFAULT_MAX_RUN_LIMIT,
+  displayName?: (machine: string) => string | undefined,
 ) {
   return store.uow.read((tx) => {
     const projects = store.listProjects();
     const snapshot = runCapacitySnapshot(store, tx);
-    const machines = runCapacityMachines(store, tx);
+    const machines = runCapacityMachines(store, tx, displayName);
     const checks = new Map<
       string,
       { machine_id: string; running: number; limit: number; queued: number }
@@ -55,7 +61,8 @@ export function executionCapacity(
         machine_id: machine.id,
         label: machine.label,
         running: snapshot.agentOccupied.get(machine.id) ?? 0,
-        limit: effectiveRunLimit(store, machine.id, defaults),
+        limit: effectiveRunLimit(store, machine.id, defaults, maximums),
+        max_limit: maximums(machine.id),
         queued: snapshot.queue.filter((run) => run.machine_id === machine.id)
           .length,
         merge_check_slots:

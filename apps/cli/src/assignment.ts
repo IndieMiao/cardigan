@@ -368,6 +368,7 @@ async function startUnlocked(
         store,
         runtime: options.runtime,
         runLimit: capacity.forMachine,
+        runLimitMaximum: capacity.maxForMachine,
         launch: options.launch,
         mcpUrl: options.mcpUrl,
         dataDir: options.dataDir,

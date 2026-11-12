@@ -96,6 +96,7 @@ export class RunCapacityDeferred extends Error {
 
 export interface LaunchHost {
   readonly runLimit?: (machine: string) => number;
+  readonly runLimitMaximum?: (machine: string) => number;
   readonly store: Store;
   readonly runtime: Runtime & Partial<Pick<HerdrRuntime, "captureAgent">>;
   readonly launch: {
@@ -258,6 +259,7 @@ export async function launchRun(
       host.store,
       assignment.machine_id,
       host.runLimit,
+      host.runLimitMaximum,
     );
     const occupied = capacity.occupied.get(assignment.machine_id) ?? 0;
     // Q-88: only the explicit human host entry may bypass machine capacity.

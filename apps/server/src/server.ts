@@ -309,6 +309,7 @@ export async function startCardiganServer(
         git,
         mergeGate: { configuration: mergeGate, execution },
         runLimit: runCapacity.forMachine,
+        runLimitMaximum: runCapacity.maxForMachine,
         inactiveCancelAfterMs: runCapacity.inactiveCancelAfterMs,
         // Test overrides win; otherwise the server configuration decides.
         ...(mergeIntervalMs === undefined ? {} : { mergeIntervalMs }),
@@ -335,7 +336,9 @@ export async function startCardiganServer(
       web = await startWebServer({
         store,
         mergeGate,
+        machineDisplayName: runCapacity.displayNameForMachine,
         runLimit: runCapacity.forMachine,
+        runLimitMaximum: runCapacity.maxForMachine,
         dataDir: config.dataDir,
         config: options.web.config,
         ...(options.web.log === undefined ? {} : { log: options.web.log }),

@@ -3,6 +3,10 @@ import type { Machine } from "../entities.js";
 import type { Result } from "../errors.js";
 import type { GlobalActor, GlobalEvent, GlobalIdAllocator } from "../global.js";
 import type { MemberId } from "../ids.js";
+import {
+  DEFAULT_MAX_RUN_LIMIT,
+  runLimitMaximumMessage,
+} from "../run-capacity.js";
 import { attempt, ensure } from "./core.js";
 
 export interface RunLimitSetting {
@@ -23,6 +27,7 @@ export function setRunLimit(
   context: {
     readonly machines: readonly Pick<Machine, "id">[];
     readonly previous: number;
+    readonly maximum?: number;
     readonly member_id: MemberId;
     readonly clock: Clock;
     readonly ids: Pick<GlobalIdAllocator, "nextEventId" | "nextEventSequence">;
@@ -48,6 +53,17 @@ export function setRunLimit(
       context.previous > 0,
       "validation_failed",
       "主机并发配置无效，请联系主机管理员",
+    );
+    const maximum = context.maximum ?? DEFAULT_MAX_RUN_LIMIT;
+    ensure(
+      Number.isSafeInteger(maximum) && maximum > 0,
+      "validation_failed",
+      "主机并发配置无效，请联系主机管理员",
+    );
+    ensure(
+      input.limit <= maximum,
+      "validation_failed",
+      runLimitMaximumMessage(maximum),
     );
     const now = context.clock.now();
     return {

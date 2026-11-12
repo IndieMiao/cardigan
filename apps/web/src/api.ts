@@ -674,6 +674,7 @@ export interface ExecutionCapacity {
     label: string;
     running: number;
     limit: number;
+    max_limit: number;
     queued: number;
     merge_check_slots: number;
   }[];
