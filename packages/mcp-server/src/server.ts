@@ -13,6 +13,10 @@ import {
   type DeliveryToolOptions,
   deliveryTools,
 } from "./commands/delivery-tools.js";
+import {
+  type HostOpsToolOptions,
+  hostOpsTools,
+} from "./commands/host-ops-tools.js";
 import { managementTools } from "./commands/management-tools.js";
 import {
   type SupportToolOptions,
@@ -26,7 +30,8 @@ import type { ToolDefinition } from "./tools/types.js";
 
 export interface McpServerOptions
   extends DeliveryToolOptions,
-    SupportToolOptions {
+    SupportToolOptions,
+    HostOpsToolOptions {
   readonly store: McpBackend;
   /** Loopback only; M1 never binds a public interface (§9.1, §14). */
   readonly host?: string;
@@ -59,13 +64,14 @@ function bracket(host: string): string {
 
 /** The tool set the endpoint serves when the caller does not inject one. */
 export function serverTools(
-  options: DeliveryToolOptions & SupportToolOptions,
+  options: DeliveryToolOptions & SupportToolOptions & HostOpsToolOptions,
 ): readonly ToolDefinition[] {
   return [
     ...readOnlyTools,
     ...deliveryTools(options),
     ...managementTools(options.clock),
     ...supportTools(options),
+    ...hostOpsTools(options),
   ];
 }
 

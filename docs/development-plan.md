@@ -534,7 +534,7 @@ C-79：上述失败检查的 PM 处理也受当前 `pm_merge_confirmation` 偏�
 
 C-47：完成申请经冲突、退回修改、新完成申请或新产出交付取代而作废时，在同一事务内将所有绑定该申请且仍为 `open` 的 `merge_confirmation` 标记为 `superseded`；不代填 merge、hold 或 request_changes，也不改写已经 resolved 的历史决定。人主动选择退回所记录的决定及 C-46 的显式撤回规则仍按原流程处理。每个自动关闭的确认写入 `decision_superseded` 事件（关联确认及完成申请）和系统时间线说明，Needs You 随状态更新移除。新版完成申请在旧版本及其未决确认作废后校验前置条件；校验失败时全部回滚，其他阻塞照常生效。新申请验收通过后生成自己的新确认，旧确认不再阻塞它。
 
-P2a-1 的检查排队、运行、失败、超时及中断均不改变 Card 状态。新增 `merge_check_queued`、`merge_check_started`、`merge_check_finished`、`merge_check_requeued` 事件与系统时间线；卡片视图的可选 `merge_check` 从当前未被取代的完成申请最新检查事件派生，包含 attempt、候选／tree SHA、状态、逐项结果、摘要与安全日志引用。人可对 awaiting_merge 且当前完成申请已有失败／超时结果的卡片请求重新检查（`recheck_merge` 仅 human；PM Ops 按 C-66 经 `resolve_delegated_decision(option=recheck)` 发起同一重新排队）；返回执行阶段或形成新完成申请后，旧检查不得授权新合并。
+P2a-1 的检查排队、运行、失败、超时及中断均不改变 Card 状态。新增 `merge_check_queued`、`merge_check_started`、`merge_check_finished`、`merge_check_requeued` 事件与系统时间线；卡片视图的可选 `merge_check` 从当前未被取代的完成申请最新检查事件派生，包含 attempt、候选／tree SHA、状态、逐项结果、摘要与安全日志引用。人可对 awaiting_merge 且当前完成申请已有失败／超时结果的卡片请求重新检查（`recheck_merge` 接受 human 或持有 `host_ops_recheck_merge` 许可的本项目 active 常驻 host_ops；PM Ops 按 C-66 经 `resolve_delegated_decision(option=recheck)` 发起同一重新排队）；返回执行阶段或形成新完成申请后，旧检查不得授权新合并。
 
 P2a-12 E：远程执行目标在候选分发或检查监督进程通道中 SSH 不可达时，检查 attempt 进入终止状态 `executor_unreachable`，随后用新 attempt 保持候选 `queued`。此状态不代表代码失败，不授权合并，也不要求人手动重查；同完成申请／同树可自动重新检查。退避与项目级人工事项见 §12.5。
 
@@ -651,7 +651,11 @@ M2.1 的 queueRun / dispatchRun 是主机内部命令，只接受同项目 human
 
 acknowledgeRun 只接受 Run 所属 Assignment 的 Actor，由 MCP 认证后在内部调用，不增加工具许可名称。它经 acknowledge/start 将 dispatched（也兼容已 acked）推进到 running，写 started_at 和 run_started 事件，再复用 activeWork：todo 产出先检查依赖，ready 或返工项开始执行；ready 验证项检查剩余审核预算。等待目标、已交付、终态和暂停项保持原工作状态，不把启动当作解除阻塞；失败返回无部分效果。已 running 的同一 Run 在身份/快照校验后无操作，即使卡片后来已取消也不重新激活工作项。
 
-abortDispatch 只允许同项目 human/system，须带非空 reason，将未结束 Run 经 cancel 标为 cancelled、outcome=failed，保存 summary/finished_at 并发 run_dispatch_aborted；已 cancelled 重复调用无操作，正常结束的 Run 不可再取消。运行状态为 running 时经 run_finished 到 idle 并清空 runtime_ref，保留 worktree/branch/base_sha/Session 元数据，不倒退已确认的工作项。真实终端 release、撤销 Token 和失败补偿顺序由 M2.6 负责；命令不执行或证明外部清理成功。
+abortDispatch 允许同项目 human/system，或持有 `host_ops_cancel_run` 许可的本项目 active 常驻 host_ops，须带非空 reason，将未结束 Run 经 cancel 标为 cancelled、outcome=failed，保存 summary/finished_at 并发 run_dispatch_aborted；已 cancelled 重复调用无操作，正常结束的 Run 不可再取消。运行状态为 running 时经 run_finished 到 idle 并清空 runtime_ref，保留 worktree/branch/base_sha/Session 元数据，不倒退已确认的工作项。真实终端 release、撤销 Token 和失败补偿顺序由 M2.6 负责；命令不执行或证明外部清理成功。
+
+P2a-10 B2（C-85）：运维重启／取消先在同一事务按 Assignment／Run 编号核对目标、项目、状态、角色版本和执行快照，拒绝外接身份、其他自动停止意图、在途投递及工作目录冲突。成功受理写 `host_ops_action_taken`（tool、target_id、reason、actor），保存所要停止的准确 RuntimeRef 和必要的启动快照（包含 C-106 的 harness／effort，未知时保持缺省，写意图前校验，重排时完整保留）；MCP 返回 pending。Dispatcher 在既有循环消费这些持久意图，以 60 秒租约安排失败重试，服务重启可接续。主机在领取租约前另取得按数据库、项目及 Assignment 定位的执行互斥（进程内共享，Linux 追加主机 locks 目录的 flock），一直持有到终端停止、凭据清理和事务收尾全部结束；租约过期不能抢走仍在执行外部清理的互斥，竞争者跳过本轮，避免迟到清理删除替代 Run 的文件。意图期间禁止该目标启动、ACK／结束 Run、另行停止／释放，也阻止同目录启动；原 Run 因其他业务动作结束时仍保留实际终端的容量占用。
+
+主机只关闭记录的终端，并独立查询确认 exited／runtime_not_found；无法证明退出时保留意图、原 Run 与凭据，租约到期后重试。确认退出后清理该 Assignment 运行目录中的凭据，再同事务撤销目标 Token、复用取消及排队迁移并写 `host_ops_action_finished`；重启产生 queued Run 和定向通知，继续经过普通 Dispatcher 的容量限制和启动流程。普通 Assignment 保留原 worktree、分支及会话恢复信息；常驻 PM 重启只接受 `role_id=pm` 的 standing 目标，复用暂停／恢复迁移并清掉旧 Session 引用，以加载最新工具。已关闭卡片或已释放目标不重新启动。C-88 的当前审核目标检查同样用于运维重启：验证工作项无当前目标时，在写意图前拒绝重启，显式取消仍允许；意图受理后若目标被撤回，确认退出、凭据清理、旧 Run 取消及审计照常收尾，不创建替代 Run，待新交付到来后由普通派发恢复。合并重查只重排当前失败／超时检查，并记录同一审计事件，不改变合并授权。重启产生的新 Run 绑定 `host_ops_action_finished`，该系统事件记录原 Run 及原触发事件；审核逻辑验证每一段 Run／Assignment 绑定并追溯混合的运维重启与自动恢复链，保留 C-36 的冲突修复免费复核。同一冲突仍只豁免一次，不因反复重启而重置审核额度。
 
 **Delivery**：`submitted → accepted | rejected | superseded`。
 
@@ -761,7 +765,7 @@ abortDispatch 只允许同项目 human/system，须带非空 reason，将未结�
 
 M3.4 的持久化边界见 [ADR 0003](adr/0003-dispatch-delivery-boundary.md)：复用 M3.3 的 `(project_id, stream)` 游标，卡片流以卡片 ID 标识，项目级流用 PROJECT_EVENT_STREAM；每条流只消费自身游标之后的事件并按流内 seq 串行处理，不要求跨卡片的全局顺序。通知、门铃和 ACK 继续使用流内 seq。每次外部投递前先把 Assignment、Run、通知集合及租期写成持久意图，同一 Assignment 最多一个未结束意图。重启后不抢占未过租期的意图；过期且结果不确定时结算为 delivery_failed，进入下述 C-56 退避恢复流程。迟到 ACK 仍可确认失败通知，已结算意图不被迟到调用结果覆盖。
 
-C-126 / C-131：调度器、RuntimeMonitor、merge、merge-checks、merge-push、cleanup 以及 MCP 共用 Store 的按项目命令状态缓存，跨轮保留。迁移 0017 为命令状态涉及的表安装事务内修订触发器，按项目／表记录版本、按实体主键保留最后一次变更；本项目相关表或全局员工、成员、员工活动变化才失效，通知、Token、幂等记录和其他项目的普通写入不触发重载。timeline、runs 等实体集合只解码发生变化的行，删除保留主键墓碑；员工活动按 Assignment 增量维护贡献，Run 变化只刷新所属 Assignment，汇总仍覆盖所有项目。每次消费都在原事务里核对版本，领取 Run、停止与收尾的重查规则不变；写后读取可见，跨连接提交在下一事务可见，事务内固定的 WAL 快照保持一致。缓存仅在 COMMIT 后发布，回滚丢弃待发布快照，重启从数据库重建；旧 schema 或不支持缓存的后端沿用原读取路径。Store 的事件历史继续按 rowid 高水位增量解码，事件按项目流、卡片列表顺序及流内 seq 组装，持久 ACK／Router 游标保持独立。所有主机周期循环使用默认 1000ms 的慢轮阈值，日志包含循环名称和耗时；调度轮统计包含前后两次 RuntimeMonitor reconcile。
+C-126 / C-131：调度器（含运维巡检）、RuntimeMonitor、merge、merge-checks、merge-push、cleanup 以及 MCP 共用 Store 的按项目命令状态缓存，跨轮保留。迁移 0017 为命令状态涉及的表安装事务内修订触发器，按项目／表记录版本、按实体主键保留最后一次变更；本项目相关表或全局员工、成员、员工活动变化才失效，通知、Token、幂等记录和其他项目的普通写入不触发重载。timeline、runs 等实体集合只解码发生变化的行，删除保留主键墓碑；员工活动按 Assignment 增量维护贡献，Run 变化只刷新所属 Assignment，汇总仍覆盖所有项目。每次消费都在原事务里核对版本，领取 Run、停止与收尾的重查规则不变；写后读取可见，跨连接提交在下一事务可见，事务内固定的 WAL 快照保持一致。缓存仅在 COMMIT 后发布，回滚丢弃待发布快照，重启从数据库重建；旧 schema 或不支持缓存的后端沿用原读取路径。Store 的事件历史继续按 rowid 高水位增量解码，事件按项目流、卡片列表顺序及流内 seq 组装，持久 ACK／Router 游标保持独立。所有主机周期循环使用默认 1000ms 的慢轮阈值，日志包含循环名称和耗时；调度轮统计包含前后两次 RuntimeMonitor reconcile。
 
 M3.4 重发策略：首次成功投递之外最多再重发 4 次，等待间隔默认 1、2、4、8 分钟（retryBaseMs / maxRetries 可配置）；最后一次重发再等待最后一档间隔仍无 ACK 才标记 needs_attention。到期时存在任何未结束 Run 或投递意图则等待，ACK 优先；重发沿用原 Run，不重开已结束 Run、不创建第二个 Run。项目级通知仍只首次投递；项目级 ACK 使用独立的空流键，与卡片流同样结算 pending / belled / delivery_failed。逻辑 PM 收件人已投递的通知以实际 Run 或在途投递的 Assignment 为准，不能由新 PM 的游标代确认。
 
@@ -826,7 +830,8 @@ M3.4 主机循环通过 startDispatchLoop 启动：默认每轮结束后等待 1
 | 依赖完成 | 下游工作项的 Assignment；没有 Assignment 时交给 PM Ops |
 | 所有必需工作项都已通过 | 提醒主产出工作项的负责人提交完成申请（不自动关卡） |
 | 完成申请 | 卡片模板指定的审核者（默认 PM） |
-| 请求你执行操作 | 先交 PM Ops 分拣；交人或标为主机操作后才进 Needs You 并提示 Office |
+| 请求你执行操作 | 先交 PM Ops 分拣；交人或标为主机操作后才进 Needs You 并提示 Office；分拣为 host 时另通知本项目 active 常驻 host_ops |
+| 主机运维巡检到期 | 每 30 分钟通过既有 Dispatcher 通知 host_ops；有未结束 Run 或待处理通知时合并等待，不因自己的 Run 结束而自我唤醒 |
 | 拍板解决 30 分钟仍无落实变化 | PM Ops，无活跃后台时进入 Needs You；按每次 resolution 去重提醒一次 |
 | HumanAction 已完成 | 发起它的 active Assignment、实际恢复的工作项负责人，以及同卡仍在等待的其他 active Assignment；验证项须有当前有效的目标交付；发起方不可用时交项目 PM Ops，无活跃 PM Ops 时进入 Needs You |
 | 门铃发送失败 | 标记 `delivery_failed`，按 §6.1 退避重试和一次恢复；仍失败交 PM Ops，无后台则进 Needs You |
@@ -952,7 +957,7 @@ C-89：PM Ops 每轮开始和结束用 `project_snapshot` 检查 backlog、todo 
 
 审核轮数上限由 PM Ops 作流程判断，使用 `update_work_item.review_limit_decision` 的限定入口（§4.4），不借用前台代记人的权限。后台在流程类别授权开启时可以附理由增加一轮或暂停；仅涉及功能、结果或需求疑问时，才将原拍板升级给人。没有活跃后台时由系统直接交人。
 
-P2a-10 B1（C-84，q(139)）：主机运维是独立的常驻角色 `host_ops`，员工“大乔”的身份由 Employee 提供；它没有 PM 的 `standing_mode`，不参与 Office/Ops 的模式回填。只负责本项目、本机的会话健康，向 PM Ops 汇报；不派活、不建卡、不交付或审核、不确认合并、不代拍。口径和权限内处理不了的事项沿用评论与人工操作请求交给 PM Ops，高风险继续交人。五个专用 MCP 工具、主机执行、定时巡检及 host 分拣通知的接线由 C-85 承接，B1 不改变现有路由与 human-only 执行权限。
+P2a-10 B1（C-84，q(139)）：主机运维是独立的常驻角色 `host_ops`，员工“大乔”的身份由 Employee 提供；它没有 PM 的 `standing_mode`，不参与 Office/Ops 的模式回填。只负责本项目、本机的会话健康，向 PM Ops 汇报；不派活、不建卡、不交付或审核、不确认合并、不代拍。口径和权限内处理不了的事项沿用评论与人工操作请求交给 PM Ops，高风险继续交人。C-85 接入五个专用 MCP 工具、主机执行、定时巡检及 host 分拣通知。诊断可读取项目 attention、Needs You、Run 状态和估算会话用量；投递失败的自动恢复仍由 C-56 负责，这些 Run 不进入巡检待处理列表。
 
 ### 7.2 Event Router：先规则，后 PM
 
@@ -1305,7 +1310,17 @@ CLI 接受 `CARDIGAN_TOKEN` 或全局 `--token-file <path>`，同时提供时拒
 
 C-108：`release_assignment({assignment_id, idempotency_key})` 接入既有领域释放命令，只对常驻 PM Ops 开放。角色与 Token 都须包含该工具；PM Office 和工作项角色调用被拒。存在未结束 Run（含停止收尾标记）时拒绝并提示先由主机执行 `cardigan assignment stop <A-n>`；释放产生既有审计事件，终端、Token 和工作区沿用主机清理流程，不在 MCP 内执行运行时或 Git 操作。释放不改变工作项归属，不允许在原工作项上换人，遵守 §4.5 第 15 条。
 
-P2a-10 B1 在 domain 的 `toolNames` 中预留 `host_ops_read_diagnostics`、`host_ops_restart_assignment`、`host_ops_cancel_run`、`host_ops_recheck_merge`、`host_ops_restart_standing_pm` 五个名称，只允许 `host_ops` 角色配置。它们目前没有 CLI 映射或 MCP handler，不出现在服务的可调用工具清单中；实际调用入口由 C-85 接线。`host_ops_action_taken` 领域事件类型预定义 `tool`、`target_id`、`reason`，操作者和时间沿用 Event 的 `actor/created_at`；B1 没有执行路径写入该事件。
+P2a-10 B2：五个 `host_ops_*` 工具只对 Token 具备对应许可的本项目 active 常驻 host_ops 开放；MCP 身份和 domain 新鲜事务均检查。主机执行通过注入的端口接线，MCP 不直接使用 CLI 的终端清理。执行工具均要求 `idempotency_key`；重启／取消还要求非空 reason，重复请求不重复停止或排 Run。
+
+| 工具 | 参数与行为 |
+|---|---|
+| `host_ops_read_diagnostics` | 可选 project_id 只能等于 Token 项目；复用 CLI attention 聚合、domain Needs You 与 Store 查询。返回全部 Run 只读状态和排除自动恢复的巡检列表；会话用量暂按本 Session 已启动 Run 数估算（每次计 1%，上限 100%），标注 estimated，不代表真实模型上下文用量 |
+| `host_ops_restart_assignment` | assignment_id、reason；停止准确终端，确认退出后取消旧 Run、重排新 Run |
+| `host_ops_cancel_run` | run_id、reason；停止并取消该 Run，不重启 |
+| `host_ops_recheck_merge` | card_id；复用 `recheckMerge`，仅当前完成申请最新检查 failed／timed_out 可重排 |
+| `host_ops_restart_standing_pm` | assignment_id、reason；只接受 standing PM，支持暂停中的 PM，重建会话刷新工具 |
+
+`host_ops_action_taken` 保存工具、目标、理由及 Event 的操作者／时间；重查在命令成功事务写入，终端动作在外部执行前写入持久意图，完成后另写 `host_ops_action_finished`。诊断中的 pending actions 及事件用于确认异步操作结果；无法确认终端退出或清理凭据失败时只记录固定原因，不透出原始主机错误，保留意图等待重试。没有新增 CLI 执行入口；结束任意 PID、脱敏导出仍留 PR C。
 
 | 工具 | 可用角色 | 作用 |
 |---|---|---|
@@ -1739,6 +1754,8 @@ CLI 与 server 的 `bin.ts` 先安装警告过滤，再动态导入业务模块�
 
 CLI、server 与运行时配置默认共用主机用户的 `~/.local/share/cardigan`，不随启动 cwd 改变。CLI 优先使用 `--data-dir`，其次 `CARDIGAN_DATA_DIR`；server 使用 `CARDIGAN_DATA_DIR`。显式相对路径按启动 cwd 解析为绝对路径。读取或写入数据的 CLI 命令在打开数据库前向 stderr 显示 `数据目录：<绝对路径>`；设置密码时在询问密码前显示，stdout 的 JSON 输出保持原格式。已有 `.data` 数据不自动搬迁；继续使用它时需显式指定目录，安装器若使用其他路径也应保持相同配置。
 
+C-85：`CARDIGAN_HOST_OPS_PATROL_INTERVAL_MS` 配置巡检间隔，默认 1800000 毫秒；计时依据持久化的巡检事件，重启不重置。有待处理通知或未结束 Run 时不堆积巡检。`CARDIGAN_HOST_OPS_CONTEXT_THRESHOLD_PCT` 配置诊断的估算上下文阈值（1–100，默认 80），仅供运维判断，不自动替换会话；真实水位上报仍由 D-C2 负责。
+
 CLI 的 domain、MCP 和运行时错误统一由 `apps/cli/src/errors.ts` 说明，格式为“无法<操作> <对象>：<中文原因>（<错误码>）”。覆盖 `not_found`、`illegal_transition`、`invariant_violation`、`validation_failed`、`unauthorized`、`forbidden_tool`、`idempotency_conflict`、`stale_target` 及运行时错误码；可识别的重复指派、卡片状态转换、附件校验等给出具体中文原因；卡片不存在时指出实际缺失的卡片编号，校验失败时说明可识别的具体字段，已有中文提示保留原意。未知错误码显示“操作被拒绝”并附原始信息，始终保留错误码便于排查。命令原有退出码、事务和状态迁移不变；`merge status` 中的计划拒绝也使用同一说明函数。角色命令沿用 domain 的错误码：重复角色为 `validation_failed`，角色或历史版本缺失为 `not_found`；CLI 的 `--version` 必须为下一个版本，参数拒绝使用 `validation_failed`。统一说明保留下一步操作或缺失版本的中文原因，退出码仍为 2；不再保留旧的 `RoleVersionError` 转换。员工、模板及 `card done` 命令同样使用共用格式并保留已有中文原因。
 
 人可用 `cardigan preference get auto-merge-after [--project <p>]` 查看、`cardigan preference set auto-merge-after <分钟|off> [--project <p>]` 修改项目偏好；沿用 `--data-dir` 和项目选择规则，只有 human 修改，非法值拒绝。偏好持久化到 SQLite，重启继续生效。合并循环每轮先尝试到期确认，再按现有计划执行合并，默认间隔仍为 5 秒，不增加独立调度器；关闭开关不撤销已经作出的确认。
@@ -1954,7 +1971,7 @@ C-110：常驻工具上限另含 `replace_verification_work_item`，只能配置
 
 所有类型均额外要求：record_decision、resolve_delegated_decision、triage_human_action 只能配置在编号为 pm 的角色上；后两者的命令只允许 active、standing_mode=ops 的常驻 PM，Office Token 不签发。`release_assignment` 只对 active、standing_mode=ops 的常驻 PM 开放，Office 的工具范围排除它；命令只释放工作项 Assignment，常驻 Assignment 仍仅允许 human 释放。主机只对 standing_mode=office 的常驻 PM 签发 record_decision。Ops、工作项 PM 和其他角色不能取得它。现有命令对工作项类型、项目作用域及作者／审核者隔离的校验继续生效，角色白名单不会绕过这些约束。角色 CRUD 权限独立于工具清单，当前只接受同项目 human，Agent 和 system 均拒绝。
 
-P2a-10 B1：produce/verify 上限另排除所有 `host_ops_*` 工具；standing 类型上限增加五个预留运维工具，现有 PM 默认工具清单不变。所有角色写入均强制 `host_ops_*` 只能属于 `role_id=host_ops`，且该角色必须为 standing；它禁止配置 `record_decision`、`resolve_delegated_decision`、`triage_human_action`、`submit_delivery`、`submit_review`、`withdraw_review`、`create_card`、`update_card`、`create_work_item`、`update_work_item`、`assign`、`issue_instruction`。命令层再次核对运维角色边界和常驻作用域，`assign` 即使由人调用也不能把它指派到工作项。它可在项目内读取、评论和请求协作，但发起拍板的 `decider` 只能是 human 或 role:pm；任何请求都不能把 host_ops 设为决策人。请求仍记录 assignment 作者，D12 四类高风险继续只认 human。`recheck_merge`、常驻 PM 暂停与恢复的原有 human-only 校验在 B1 保持不变。
+P2a-10 B1：produce/verify 上限另排除所有 `host_ops_*` 工具；standing 类型上限增加五个预留运维工具，现有 PM 默认工具清单不变。所有角色写入均强制 `host_ops_*` 只能属于 `role_id=host_ops`，且该角色必须为 standing；它禁止配置 `record_decision`、`resolve_delegated_decision`、`triage_human_action`、`submit_delivery`、`submit_review`、`withdraw_review`、`create_card`、`update_card`、`create_work_item`、`update_work_item`、`assign`、`issue_instruction`。命令层再次核对运维角色边界和常驻作用域，`assign` 即使由人调用也不能把它指派到工作项。它可在项目内读取、评论和请求协作，但发起拍板的 `decider` 只能是 human 或 role:pm；任何请求都不能把 host_ops 设为决策人。请求仍记录 assignment 作者，D12 四类高风险继续只认 human。C-85 将 `recheck_merge`、`abort_dispatch`、`pause_standing_assignment` 分别映射至 `host_ops_recheck_merge`、`host_ops_cancel_run`、`host_ops_restart_standing_pm` 的 Token 与角色双白名单；其他 Agent 仍被拒绝。通用 queue/dispatch 仍只接受主机，host_ops 通过专用事务和主机消费意图触发恢复，不能取得任意启动权限。原有 human 操作与 system 自动恢复继续按各自入口执行。
 
 ## 15. 决策（Phase 0 已全部敲定）
 
@@ -2132,6 +2149,7 @@ cardigan/
 - `domain` 不依赖任何其他包；运行时和 Git 传输通过 `domain` 中定义的端口接口接入。
 - `host` 是包和 apps 之间的一层：`cardigan assignment start` 与 Dispatcher 在终端已退出时新开会话走**同一份**启动流程（`launchRun`），Token 轮换、启动编译、运行目录写入、provision、dispatch、start 哨兵和失败补偿只实现一次；apps 之间不互相依赖，只依赖 `host`。CLI 保留参数校验、启动配置和模型选择、`queueRun` 与 worktree 准备，server 只把门铃文本和系统 Actor 交给这份实现。
 - apps 只能依赖本层以下（`host` 及其下的包），`host` 只能依赖 `packages` 中它下面的层，`.dependency-cruiser.cjs` 的分层表与本节一致。
+- `host.readAttention` 为 CLI attention 与运维诊断提供共享聚合；`host.HostOpsService` 负责经 domain 校验后持久化操作意图、关闭记录的终端及确认退出，server 把它注入 MCP 并接入既有 Dispatcher 循环。domain 只返回效果，不执行 IO。
 - CLI 和 server 的启动警告过滤共用 `@cardigan/host/warnings` 独立子路径；该模块无业务依赖，不经 `host` 主入口导入，避免在安装过滤前间接加载 SQLite。
 - `host.runInTemporaryCheckout` 封装临时检出、检查进程生命周期、完整性核对和清理，合并闸门及验证方构建复用。它不读取闸门配置、不作领域状态迁移、不推送外部远程；调用方负责候选分发、日志脱敏与领域结果记录。
 - 用 lint 规则强制依赖方向（dependency-cruiser 或 TypeScript project references）。以后要拆包或换实现（例如直连 SDK 的运行时）时几乎不用改代码。

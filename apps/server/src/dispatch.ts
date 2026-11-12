@@ -20,6 +20,7 @@ import {
   dispatchRecoveryFailed,
   dispatchRun,
   hasRunTarget,
+  hostOpsPending,
   isStandingPm,
   lastRunActivity,
   launchSettings,
@@ -78,6 +79,7 @@ import {
 } from "./dispatch-inbox.js";
 import { retryDispatchedRuns } from "./dispatch-retry.js";
 import { dispatchStateLoader, type StateLoader } from "./dispatch-state.js";
+import { patrolHostOps } from "./host-ops-patrol.js";
 import { escalateReviewLimitWaits } from "./review-limit-attention.js";
 
 /** The model/CLI snapshot a queued Run records; C-106 adds harness and effort. */
@@ -87,6 +89,8 @@ export type LaunchSnapshot = Pick<
 >;
 
 export interface DispatcherOptions {
+  readonly hostOpsTick?: () => Promise<void>;
+  readonly hostOpsPatrolIntervalMs?: number;
   readonly store: Store;
   readonly runtime: Runtime;
   readonly clock?: Clock;
@@ -245,6 +249,7 @@ export class Dispatcher {
     const next = this.serial.then(async () => {
       this.loadState = dispatchStateLoader(this.options.store);
       try {
+        await this.options.hostOpsTick?.();
         // Route every project before choosing any winner. Project enumeration is
         // not a scheduling priority, even when a caller requests a project tick.
         const candidates: Candidate[] = [];
@@ -275,6 +280,13 @@ export class Dispatcher {
   }
   private async project(project: ProjectId): Promise<Candidate[]> {
     const { store, standing } = this.options;
+    patrolHostOps(
+      store,
+      project,
+      this.clock,
+      this.options.hostOpsPatrolIntervalMs,
+      this.loadState,
+    );
     store.uow.run((tx) => {
       const effect = unwrap(
         remindDecisionFollowups(
@@ -393,6 +405,7 @@ export class Dispatcher {
     );
   }
   private busy(state: CommandState, a: Assignment) {
+    if (hostOpsPending(state.events, a.id)) return true;
     const queued = this.queued(state, a);
     return state.runs.some(
       (r) =>

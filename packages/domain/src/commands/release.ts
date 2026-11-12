@@ -1,5 +1,6 @@
 import type { Actor, Decision } from "../entities.js";
 import type { Result } from "../errors.js";
+import { hostOpsPending } from "../host-ops.js";
 import type { AssignmentId } from "../ids.js";
 import { transition } from "../transitions.js";
 import {
@@ -30,6 +31,11 @@ export function releaseAssignment(
       "Only the human, system or PM Ops can release assignments",
     );
     const a = d.get("assignments", p.assignment_id);
+    ensure(
+      !hostOpsPending(state.events, a.id),
+      "illegal_transition",
+      "A host operation is pending",
+    );
     ensure(
       a.scope === "work_item" || actor.kind === "human",
       "unauthorized",

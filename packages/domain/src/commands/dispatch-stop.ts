@@ -1,4 +1,5 @@
 import type { Actor, Run } from "../entities.js";
+import { hostOpsPending } from "../host-ops.js";
 import type { RunId } from "../ids.js";
 import { hasRunTarget } from "../run-target.js";
 import {
@@ -44,6 +45,7 @@ export function claimDispatchStop(
     const run = d.get("runs", p.run_id),
       a = d.get("assignments", run.assignment_id),
       old = run.dispatch_stop;
+    if (hostOpsPending(state.events, a.id)) return;
     if (run.inactivity_stop) return;
     const card = cardOf(d, run);
     const closed =

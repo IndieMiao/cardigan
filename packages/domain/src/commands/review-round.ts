@@ -25,27 +25,51 @@ export function conflictRepairEvent(
       ? eventId
       : undefined;
   }
-  let trigger = d.state.events.find((e) => e.id === run.trigger_event_id);
-  // A dispatch recovery is the same unstarted fix, with a new queue identity.
-  const recovery = trigger?.payload as
-    | {
-        assignment_id?: string;
-        replacement_run_id?: string;
-        original_trigger_event_id?: string;
-      }
-    | undefined;
-  if (
-    trigger?.type === "run_dispatch_recovered" &&
-    trigger.actor.kind === "system" &&
-    recovery?.assignment_id === run.assignment_id &&
-    recovery.replacement_run_id === run.id
-  )
-    trigger = d.state.events.find(
-      (e) => e.id === recovery.original_trigger_event_id,
-    );
+  let sourceRun = run;
+  let trigger = d.state.events.find((e) => e.id === sourceRun.trigger_event_id);
+  const visited = new Set<EventId>();
+  // Both host restarts and automatic recovery retain the same logical fix.
+  // Follow mixed/repeated recovery chains, validating every Run/event binding.
+  while (
+    trigger &&
+    ["run_dispatch_recovered", "host_ops_action_finished"].includes(
+      trigger.type,
+    )
+  ) {
+    if (visited.has(trigger.id)) return undefined;
+    visited.add(trigger.id);
+    const recovery = trigger.payload as {
+      assignment_id?: string;
+      run_id?: string;
+      previous_run_id?: string;
+      replacement_run_id?: string;
+      original_trigger_event_id?: string;
+    };
+    const hostRestart = trigger.type === "host_ops_action_finished";
+    const previous = d
+      .list("runs")
+      .find(
+        (r) =>
+          r.id === (hostRestart ? recovery.previous_run_id : recovery.run_id),
+      );
+    if (
+      trigger.actor.kind !== "system" ||
+      recovery.assignment_id !== sourceRun.assignment_id ||
+      (hostRestart ? recovery.run_id : recovery.replacement_run_id) !==
+        sourceRun.id ||
+      !previous ||
+      previous.assignment_id !== sourceRun.assignment_id ||
+      previous.kind !== sourceRun.kind ||
+      previous.trigger_event_id !== recovery.original_trigger_event_id
+    )
+      return undefined;
+    sourceRun = previous;
+    trigger = d.state.events.find((e) => e.id === sourceRun.trigger_event_id);
+  }
   const payload = trigger?.payload as { work_item_id?: string } | undefined;
   return run.kind === "fix" &&
     trigger?.type === "merge_conflicted" &&
+    trigger.actor.kind === "system" &&
     trigger.card_id === item.card_id &&
     payload?.work_item_id === item.id &&
     !deliveries.some((v) => v.merge_conflict_event_id === trigger.id)

@@ -3,6 +3,7 @@ export {
   type AgentGitRunner,
   AgentGitTransport,
 } from "./agent-git.js";
+export { readAttention } from "./attention.js";
 export {
   applyCommand,
   issueAssignmentToken,
@@ -18,6 +19,7 @@ export {
   messageOf,
 } from "./errors.js";
 export { classifyExecutorFailure } from "./executor-failure.js";
+export { HostOpsService } from "./host-ops.js";
 export {
   type LaunchedRun,
   type LaunchHost,
