@@ -1,4 +1,5 @@
-import { readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   latestMergeCheck,
@@ -12,6 +13,7 @@ import {
   acquireMergeCheckCapacity,
   type CheckoutInput,
   type CheckoutResult,
+  loadMergeGateConfig,
   type ProjectMergeGate,
   runCapacitySnapshot,
 } from "@cardigan/host";
@@ -645,6 +647,61 @@ test("a project executor receives the candidates and runs the checks; logs stay 
       "utf8",
     ),
   ).resolves.toBeTypeOf("string");
+});
+
+test("q(208): an executor shared by two projects blocks the check entirely: no remote run, no local fallback", async () => {
+  const { f, check } = await fixture("auto");
+  const c = controller(f);
+  const root = await mkdtemp(join(tmpdir(), "cg-shared-executor-"));
+  try {
+    const dataDir = join(root, "data"),
+      configDir = join(root, "config");
+    for (const path of [dataDir, join(dataDir, "ssh"), configDir])
+      await mkdir(path, { mode: 0o700 });
+    for (const name of ["ci.key", "ci.known_hosts"])
+      await writeFile(join(dataDir, "ssh", name), "fictional-not-a-key", {
+        mode: 0o600,
+      });
+    const gate = { checks: [{ name: "test", run: "true" }], executor: "ci" };
+    await writeFile(
+      join(configDir, "merge-gate.yaml"),
+      JSON.stringify({
+        executors: {
+          ci: {
+            host: "cardigan-ci",
+            identity_file: "ssh/ci.key",
+            known_hosts_file: "ssh/ci.known_hosts",
+            agent_root: "/srv/cardigan-agent",
+          },
+        },
+        projects: { [f.project_id]: gate, "p-other": gate },
+      }),
+      { mode: 0o600 },
+    );
+    const configuration = await loadMergeGateConfig({
+      configDir,
+      dataDir,
+      projectIds: [f.project_id, "p-other"],
+    });
+    expect(configuration.forProject(f.project_id)).toMatchObject({
+      status: "invalid",
+      reason: expect.stringContaining("执行目标 ci 被 2 个项目引用"),
+    });
+    c.options.configuration.forProject = configuration.forProject;
+    expect(c.gate.configured(f.project_id)).toBe(true);
+    await c.gate.tick([f.project_id]);
+    expect(c.git.prepare).not.toHaveBeenCalled();
+    expect(c.git.distribute).not.toHaveBeenCalled();
+    expect(c.run).not.toHaveBeenCalled();
+    expect(c.git.publish).not.toHaveBeenCalled();
+    expect(check()?.status).not.toBe("passed");
+    expect(f.state().events.some((e) => e.type === "merge_check_started")).toBe(
+      false,
+    );
+    expect(f.card().status).toBe("awaiting_merge");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 const ciExecutor = (maxConcurrent: number) => ({
