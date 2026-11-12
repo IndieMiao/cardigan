@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   type HumanAction,
+  pauseStandingAssignment,
   queueRun,
   recordDecision,
   requestDecision,
@@ -632,6 +633,58 @@ test("pm start can start one mode and refuses when no PM exists", async () => {
   expect(await run(["project", "create", "p-other"])).toBe(0);
   expect(await run(["pm", "start", "--project", "p-other"])).toBe(2);
   expect(errors.join("\n")).toContain("pm create");
+});
+
+test("C-154: pm restart reopens one standing PM session without pausing it", async () => {
+  await createPmPair();
+  const calls: { id: string; restart?: boolean }[] = [];
+  const start = async (options: {
+    assignment_id: string;
+    restart_session?: boolean;
+  }) => {
+    calls.push({
+      id: options.assignment_id,
+      ...(options.restart_session ? { restart: true } : {}),
+    });
+    return 0;
+  };
+  expect(
+    await main(["pm", "restart", "--ops", "--project", "p-work"], io, {
+      start,
+    }),
+  ).toBe(0);
+  expect(calls).toEqual([{ id: "A-2", restart: true }]);
+  expect(printed()).toContain("已重开 PM Ops（A-2）的会话");
+  expect(printed()).toContain("待处理事项没有转交");
+  // Exactly one mode, as for pm rotate.
+  expect(
+    await main(["pm", "restart", "--project", "p-work"], io, { start }),
+  ).toBe(2);
+  expect(calls).toHaveLength(1);
+  // A paused PM is resumed with pm start, never restarted.
+  const store = Store.open({ dataDir });
+  try {
+    runCommand(store, {
+      project_id: "p-work" as never,
+      actor: { kind: "human", project_id: "p-work" as never },
+      reduce: (state, actor, ports) =>
+        pauseStandingAssignment(
+          state,
+          actor,
+          { assignment_id: "A-1" as never },
+          ports,
+        ),
+    });
+  } finally {
+    store.close();
+  }
+  expect(
+    await main(["pm", "restart", "--office", "--project", "p-work"], io, {
+      start,
+    }),
+  ).toBe(2);
+  expect(errors.join("\n")).toContain("cardigan pm start --office");
+  expect(calls).toHaveLength(1);
 });
 
 test("needs-you lists open human decisions and pending human actions", async () => {

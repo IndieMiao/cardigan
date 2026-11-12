@@ -11,6 +11,7 @@ export const EVENT_LABELS: Readonly<Record<string, string>> = {
   assignment_released: "释放了 Assignment",
   assignment_paused: "暂停了 Assignment",
   assignment_resumed: "恢复了 Assignment",
+  standing_session_restarted: "重开了常驻 PM 会话",
   comment_posted: "发表了评论",
   instruction_issued: "下达了指令",
   delivery_submitted: "提交了交付",

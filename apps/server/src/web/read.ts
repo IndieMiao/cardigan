@@ -886,8 +886,24 @@ function decisionActionWebView(
       : undefined;
   return {
     auto_merge: schedule.ok
-      ? { minutes: schedule.value.minutes, due_at: schedule.value.due_at }
+      ? {
+          minutes: schedule.value.minutes,
+          due_at: schedule.value.due_at,
+          // C-154: the countdown may restart at a handoff or unmark, so the
+          // page counts down from the due time, not from opened_at.
+          ...(decision.opened_at !== null && decision.waited_ms !== null
+            ? {
+                remaining_ms: Math.max(
+                  0,
+                  Date.parse(schedule.value.due_at) -
+                    Date.parse(decision.opened_at) -
+                    decision.waited_ms,
+                ),
+              }
+            : {}),
+        }
       : null,
+    handed_over_from_pm: decision.handed_over_from_pm,
     ...webAuthorView(
       state,
       state.decisions.find((d) => d.id === decision.id)?.raised_by ?? "system",
@@ -1398,6 +1414,7 @@ const EVENT_CATEGORIES: Readonly<Record<string, readonly string[]>> = {
     "inactive_stop_unconfirmed",
     "inactive_stop_confirmed",
     "session_replaced",
+    "standing_session_restarted",
     "runtime_unknown",
     "runtime_lost",
     "runtime_reconnected",

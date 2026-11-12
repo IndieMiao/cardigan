@@ -105,6 +105,11 @@ function DecisionMeta({
       {isPausedReview(q) && (
         <StatusTag status="suspended" label="已暂停（临时决定）" />
       )}
+      {q.handed_over_from_pm && (
+        <span className="hint" title={q.handed_over_from_pm.reason}>
+          由 PM 转交
+        </span>
+      )}
       <span className="hint">{waitLabel(q.waited_ms, elapsed)}</span>
       {q.auto_merge && (
         <span className="hint">
@@ -115,8 +120,10 @@ function DecisionMeta({
             hour12: false,
           })}{" "}
           自动合并（偏好设置：{q.auto_merge.minutes} 分钟）
-          {q.waited_ms !== null &&
-            ` · 剩余 ${Math.max(0, Math.ceil((q.auto_merge.minutes * 60_000 - q.waited_ms - elapsed) / 60_000))} 分钟`}
+          {q.auto_merge.remaining_ms !== undefined
+            ? ` · 剩余 ${Math.max(0, Math.ceil((q.auto_merge.remaining_ms - elapsed) / 60_000))} 分钟`
+            : q.waited_ms !== null &&
+              ` · 剩余 ${Math.max(0, Math.ceil((q.auto_merge.minutes * 60_000 - q.waited_ms - elapsed) / 60_000))} 分钟`}
         </span>
       )}
       <span className="needs-cards">

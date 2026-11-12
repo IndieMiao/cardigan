@@ -345,8 +345,13 @@ test.each(["host_ops_cancel_run", "host_ops_restart_standing_pm"] as const)(
       expect(
         result.assignments.find((a) => a.id === id("assignment", 4))?.status,
       ).toBe("active");
+      // C-154: the same Assignment gets a fresh session; it is never paused,
+      // so nothing it owns is handed to the human.
+      expect(result.events.some((e) => e.type === "assignment_paused")).toBe(
+        false,
+      );
       expect(
-        result.events.filter((e) => e.type === "assignment_paused"),
+        result.events.filter((e) => e.type === "standing_session_restarted"),
       ).toEqual([
         expect.objectContaining({
           payload: expect.objectContaining({

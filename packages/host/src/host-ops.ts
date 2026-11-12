@@ -135,9 +135,11 @@ export class HostOpsService {
                   r.started_at >=
                     (state.events.findLast(
                       (e) =>
-                        ["session_replaced", "assignment_resumed"].includes(
-                          e.type,
-                        ) &&
+                        [
+                          "session_replaced",
+                          "assignment_resumed",
+                          "standing_session_restarted",
+                        ].includes(e.type) &&
                         (e.payload as { assignment_id?: string })
                           .assignment_id === a.id,
                     )?.created_at ?? a.created_at),

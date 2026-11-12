@@ -785,3 +785,96 @@ test.each([
     ).toBe("employee-codex");
   },
 );
+
+describe("C-154 standing PM session restart", () => {
+  function standingOps(): Assignment {
+    store.createProject({ id: project_id, name: "One" });
+    store.uow.run((tx) =>
+      writeRole(
+        tx,
+        project_id,
+        {
+          ...roleFor("none"),
+          role_id: "pm",
+          display_name: "PM",
+          core_prompt: corePromptFor("pm"),
+          kind: "pm",
+        } as Role,
+        { mode: "add" },
+      ),
+    );
+    const ops = {
+      id: "A-1",
+      scope: "standing",
+      standing_mode: "ops",
+      role_id: "pm",
+      role_version: 1,
+      status: "active",
+      runtime_state: "not_provisioned",
+      machine_id: "local",
+      runtime_ref: null,
+      mcp_token_id: "pm-ops",
+      created_at: "2026-01-01T00:00:00.000Z",
+    } as unknown as Assignment;
+    store.uow.run((tx) => tx.assignments.put(project_id, ops));
+    return ops;
+  }
+  const options = (runtime: FakeRuntime, restart_session?: boolean) => ({
+    store,
+    io,
+    project_id,
+    assignment_id: "A-1" as never,
+    launch: {
+      config: launchConfig,
+      secrets: { provider: "sk-fictional-secret" },
+    },
+    mcpUrl: "http://127.0.0.1:3004/mcp",
+    runtime,
+    dataDir,
+    ...(restart_session ? { restart_session } : {}),
+  });
+
+  test("restart closes the old terminal, retires its token and keeps the PM on duty", async () => {
+    standingOps();
+    const runtime = new FakeRuntime();
+    const first = await startAssignment(options(runtime));
+    const oldToken = readFileSync(
+      join(dataDir, "runs", "p-one", "A-1", "token"),
+      "utf8",
+    ).trim();
+    expect(store.verifyToken(oldToken)?.assignment_id).toBe("A-1");
+
+    const second = await startAssignment(options(runtime, true));
+    expect(second.run_id).not.toBe(first.run_id);
+    expect(runtime.released.map((r) => r.terminal_ref)).toEqual([
+      first.runtime_ref.terminal_ref,
+    ]);
+    expect(store.verifyToken(oldToken)).toBeUndefined();
+    const state = store.uow.read((tx) => ({
+      assignment: tx.assignments.get(project_id, "A-1" as never),
+      old: tx.runs.get(project_id, first.run_id as never),
+      next: tx.runs.get(project_id, second.run_id as never),
+      events: tx.events.listAfter(project_id, undefined, 0).map((e) => e.type),
+    }));
+    expect(state.assignment?.status).toBe("active");
+    expect(state.old?.status).toBe("cancelled");
+    expect(state.next?.status).toBe("dispatched");
+    expect(state.events).toContain("standing_session_restarted");
+    expect(state.events).not.toContain("assignment_paused");
+    expect(
+      readFileSync(join(dataDir, "runs", "p-one", "A-1", "first.md"), "utf8"),
+    ).toContain("常驻 PM 会话已由人重开");
+  });
+
+  test("restart refuses a work-item Assignment without touching it", async () => {
+    const assignment = assignWorkItem("none");
+    const runtime = new FakeRuntime();
+    await expect(
+      startAssignment({
+        ...options(runtime, true),
+        assignment_id: assignment.id,
+      }),
+    ).rejects.toThrow(/不是在岗的常驻 PM/);
+    expect(runtime.provisions).toHaveLength(0);
+  });
+});

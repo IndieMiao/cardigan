@@ -368,8 +368,31 @@ export function decisionActionView(
       .sort((a, b) => a.event_seq - b.event_seq)[0]?.created_at;
   const elapsed =
     opened && now ? Date.parse(now) - Date.parse(opened) : Number.NaN;
+  // C-154: still with the human after the PM handed it over (pause, release
+  // or withdrawn delegation); Needs You labels it "由 PM 转交".
+  const handoff =
+    q.decider === "human"
+      ? state.events.findLast(
+          (e) =>
+            e.type === "decision_requested" &&
+            typeof e.payload === "object" &&
+            e.payload !== null &&
+            "decision_id" in e.payload &&
+            e.payload.decision_id === q.id &&
+            "previous_decider" in e.payload &&
+            e.payload.previous_decider === "role:pm",
+        )
+      : undefined;
   return {
     ...q,
+    handed_over_from_pm: handoff
+      ? {
+          at: handoff.created_at,
+          reason: String(
+            (handoff.payload as { reason?: unknown }).reason ?? "",
+          ),
+        }
+      : null,
     ...(failedConfirmation
       ? {
           options: q.options.filter((o) => o.key === "request_changes"),
