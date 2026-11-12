@@ -14,6 +14,7 @@ import type {
   NeedsPage,
   PreMergeCheckView,
 } from "../api.js";
+import { PRE_MERGE_COPY as COPY } from "../pre-merge-copy.js";
 import { cardDetail, fakeClient } from "../testing/fixtures.js";
 import { CardDetailPage } from "./CardDetailPage.js";
 import { NeedsYouPage } from "./NeedsYouPage.js";
@@ -85,22 +86,26 @@ test("C-160: Needs You warns while checks are open and asks again before confirm
       projectId="p-1"
     />,
   );
-  const status = await screen.findByRole("status", { name: "合并前核对" });
+  const status = await screen.findByRole("status", { name: COPY.region });
   expect(
-    within(status).getByText("等待独立安全审核、截图核对，请先不要确认合并"),
+    within(status).getByText(COPY.waitingTitle(["独立安全审核", "截图核对"])),
   ).toBeTruthy();
-  expect(within(status).getByText(/待完成/)).toBeTruthy();
-  expect(within(status).getByText(/有问题/)).toBeTruthy();
+  expect(
+    within(status).getByText(new RegExp(COPY.status.pending)),
+  ).toBeTruthy();
+  expect(within(status).getByText(new RegExp(COPY.status.failed))).toBeTruthy();
   expect(within(status).getByText(/按钮颜色不对/)).toBeTruthy();
-  expect(screen.queryByText("核对已完成，可以确认合并")).toBeNull();
+  expect(screen.queryByText(COPY.readyTitle)).toBeNull();
 
   const confirm = screen.getByRole("button", { name: "确认合并", exact: true });
   expect(confirm.hasAttribute("disabled")).toBe(false);
   fireEvent.click(confirm);
-  const dialog = screen.getByRole("alertdialog", { name: "合并前核对未完成" });
-  expect(within(dialog).getByText(/还有 2 项合并前核对没有完成/)).toBeTruthy();
+  const dialog = screen.getByRole("alertdialog", { name: COPY.confirmRegion });
+  expect(within(dialog).getByText(COPY.confirmTitle(2))).toBeTruthy();
   expect(recordDecision).not.toHaveBeenCalled();
-  fireEvent.click(within(dialog).getByRole("button", { name: "先不确认" }));
+  fireEvent.click(
+    within(dialog).getByRole("button", { name: COPY.confirmCancel }),
+  );
   expect(screen.queryByRole("alertdialog")).toBeNull();
   expect(recordDecision).not.toHaveBeenCalled();
 
@@ -109,8 +114,8 @@ test("C-160: Needs You warns while checks are open and asks again before confirm
   );
   fireEvent.click(
     within(
-      screen.getByRole("alertdialog", { name: "合并前核对未完成" }),
-    ).getByRole("button", { name: "仍然确认合并" }),
+      screen.getByRole("alertdialog", { name: COPY.confirmRegion }),
+    ).getByRole("button", { name: COPY.confirmAnyway }),
   );
   await waitFor(() =>
     expect(recordDecision).toHaveBeenCalledWith(
@@ -134,11 +139,13 @@ test("C-160: once every check passes the warning is gone and numbered steps appe
       projectId="p-1"
     />,
   );
-  const status = await screen.findByRole("status", { name: "合并前核对" });
-  expect(within(status).getByText("核对已完成，可以确认合并")).toBeTruthy();
+  const status = await screen.findByRole("status", { name: COPY.region });
+  expect(within(status).getByText(COPY.readyTitle)).toBeTruthy();
   expect(within(status).getAllByRole("listitem").length).toBeGreaterThan(2);
-  expect(within(status).getByText("点“确认合并”。")).toBeTruthy();
-  expect(screen.queryByText(/请先不要确认合并/)).toBeNull();
+  expect(
+    within(status).getByText(COPY.readySteps(false)[2] as string),
+  ).toBeTruthy();
+  expect(screen.queryByText(/请先不要确认/)).toBeNull();
   fireEvent.click(
     screen.getByRole("button", { name: "确认合并", exact: true }),
   );
@@ -154,7 +161,7 @@ test("C-160: no checks means no extra prompt", async () => {
     />,
   );
   await screen.findByRole("button", { name: "确认合并", exact: true });
-  expect(screen.queryByRole("status", { name: "合并前核对" })).toBeNull();
+  expect(screen.queryByRole("status", { name: COPY.region })).toBeNull();
 });
 
 test("C-160: card detail shows the same waiting prompt and second confirmation", async () => {
@@ -178,7 +185,7 @@ test("C-160: card detail shows the same waiting prompt and second confirmation",
     await screen.findByRole("region", { name: "合并处理" }),
   );
   expect(
-    region.getByText("等待独立安全审核、截图核对，请先不要确认合并"),
+    region.getByText(COPY.waitingTitle(["独立安全审核", "截图核对"])),
   ).toBeTruthy();
   fireEvent.click(
     region.getByRole("button", { name: "确认合并", exact: true }),

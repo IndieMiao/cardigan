@@ -31,6 +31,7 @@ import {
 import { PriorityBadge } from "../components/Priority.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
 import { decisionTitle, delegableCategories } from "../decision-labels.js";
+import { PRE_MERGE_COPY } from "../pre-merge-copy.js";
 import { routeHash } from "../route.js";
 import { useResource } from "../useResource.js";
 
@@ -343,11 +344,6 @@ function ReviewLine({ review }: { readonly review: MergeConfirmationReview }) {
     </li>
   );
 }
-const preMergeStatus: Record<PreMergeCheckView["status"], string> = {
-  pending: "待完成",
-  passed: "已通过",
-  failed: "有问题",
-};
 function PreMergeCheckList({
   checks,
 }: {
@@ -357,7 +353,7 @@ function PreMergeCheckList({
     <ul className="pre-merge-check-list">
       {checks.map((c) => (
         <li key={c.label}>
-          <strong>{c.label}</strong>：{preMergeStatus[c.status]}
+          <strong>{c.label}</strong>：{PRE_MERGE_COPY.status[c.status]}
           {c.note && <span className="hint">（{c.note}）</span>}
         </li>
       ))}
@@ -382,35 +378,28 @@ function PreMergeChecks({
       <section
         className="pre-merge-checks pre-merge-waiting"
         role="status"
-        aria-label="合并前核对"
+        aria-label={PRE_MERGE_COPY.region}
       >
         <p className="pre-merge-title">
-          等待{open.map((c) => c.label).join("、")}，请先不要确认合并
+          {PRE_MERGE_COPY.waitingTitle(open.map((c) => c.label))}
         </p>
-        <p>还差这些核对：</p>
+        <p>{PRE_MERGE_COPY.missingHeading}</p>
         <PreMergeCheckList checks={open} />
-        <p className="hint">
-          核对全部通过后，这里会提示可以确认。你仍然可以直接确认合并，但会先请你再确认一次。
-        </p>
+        <p className="hint">{PRE_MERGE_COPY.waitingHint}</p>
       </section>
     );
   return (
     <section
       className="pre-merge-checks pre-merge-ready"
       role="status"
-      aria-label="合并前核对"
+      aria-label={PRE_MERGE_COPY.region}
     >
-      <p className="pre-merge-title">核对已完成，可以确认合并</p>
+      <p className="pre-merge-title">{PRE_MERGE_COPY.readyTitle}</p>
       <PreMergeCheckList checks={checks} />
       <ol className="pre-merge-steps">
-        <li>看一遍下面的“要合并的交付”和“审核与验收”。</li>
-        <li>需要的话，在“补充说明”里写下你的原话。</li>
-        <li>点“确认合并”。</li>
-        <li>
-          {gate
-            ? "等待合并检查通过并完成合并，结果会出现在卡片时间线上。"
-            : "合并结果会出现在卡片时间线上。"}
-        </li>
+        {PRE_MERGE_COPY.readySteps(gate).map((step) => (
+          <li key={step}>{step}</li>
+        ))}
       </ol>
     </section>
   );
@@ -630,14 +619,13 @@ export function MergeConfirmation({
         <section
           className="pre-merge-checks pre-merge-waiting"
           role="alertdialog"
-          aria-label="合并前核对未完成"
+          aria-label={PRE_MERGE_COPY.confirmRegion}
         >
           <p className="pre-merge-title">
-            还有 {openPreChecks.length}{" "}
-            项合并前核对没有完成，确定现在确认合并吗？
+            {PRE_MERGE_COPY.confirmTitle(openPreChecks.length)}
           </p>
           <PreMergeCheckList checks={openPreChecks} />
-          <p className="hint">确认后会按你的拍板合并，不再等待这些核对。</p>
+          <p className="hint">{PRE_MERGE_COPY.confirmHint}</p>
           <div className="action-row">
             <button
               type="button"
@@ -647,7 +635,7 @@ export function MergeConfirmation({
                 void decide("merge");
               }}
             >
-              仍然确认合并
+              {PRE_MERGE_COPY.confirmAnyway}
             </button>
             <button
               type="button"
@@ -655,7 +643,7 @@ export function MergeConfirmation({
               disabled={action.busy}
               onClick={() => setConfirming(false)}
             >
-              先不确认
+              {PRE_MERGE_COPY.confirmCancel}
             </button>
           </div>
         </section>
