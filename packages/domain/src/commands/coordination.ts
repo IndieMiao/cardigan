@@ -722,7 +722,7 @@ export function requestHumanAction(
   p: Pick<
     HumanAction,
     "instructions" | "why_human" | "expected_return" | "blocked_work_items"
-  > & { card_id: CardId; due?: string },
+  > & { card_id: CardId; due?: string; blocks_merge?: boolean },
   ports: CommandPorts,
 ) {
   return command(state, actor, "request_human_action", ports, (d) => {
@@ -750,12 +750,17 @@ export function requestHumanAction(
       status: "open",
       triage: hasActivePmOps(d, "triage_human_action") ? "pm_ops" : "human",
       ...(p.due ? { due: p.due } : {}),
+      ...(p.blocks_merge ? { blocks_merge: true } : {}),
     };
     d.put("human_actions", action);
     d.emit(
       "human_action_requested",
       p.card_id,
-      { human_action_id: id, blocked_work_items: action.blocked_work_items },
+      {
+        human_action_id: id,
+        blocked_work_items: action.blocked_work_items,
+        ...(action.blocks_merge ? { blocks_merge: true } : {}),
+      },
       { type: "human_action", body: p.instructions, human_action_id: id },
     );
     return action;

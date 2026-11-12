@@ -225,6 +225,7 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
             ? {}
             : { intervalMs: options.mergeIntervalMs }),
           onError: report,
+          report: (message) => options.onError?.(new Error(message)),
         });
   const push =
     options.git && options.mergeGate

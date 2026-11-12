@@ -1,4 +1,10 @@
-import type { Actor, Card, Decision, Delivery } from "../entities.js";
+import type {
+  Actor,
+  Card,
+  Decision,
+  Delivery,
+  HumanAction,
+} from "../entities.js";
 import type { Result } from "../errors.js";
 import type { CardId } from "../ids.js";
 import { transition } from "../transitions.js";
@@ -108,6 +114,25 @@ function confirmation(
     ),
   );
 }
+/**
+ * C-112: open human actions that hold this card's merge. Only actions that
+ * block one of the card's work items, or were explicitly raised with
+ * `blocks_merge`, count; read-only escalations (logs, diagnostics) that merely
+ * name the card do not.
+ */
+export function mergeBlockingHumanActions(
+  state: Pick<CommandState, "human_actions" | "work_items">,
+  card_id: CardId,
+): HumanAction[] {
+  return state.human_actions.filter(
+    (action) =>
+      action.status === "open" &&
+      ((action.blocks_merge === true && action.card_id === card_id) ||
+        action.blocked_work_items.some((id) =>
+          state.work_items.some((w) => w.id === id && w.card_id === card_id),
+        )),
+  );
+}
 /** No Git IO: the caller checks these SHAs against the pinned delivery refs. */
 export function mergePlan(state: CommandState, card_id: CardId) {
   return planFor(state, card_id, true);
@@ -158,42 +183,35 @@ function planFor(state: CommandState, card_id: CardId, confirmed: boolean) {
         "敏感卡片的合并须由人亲自确认",
       );
     }
-    ensure(
-      !state.decisions.some(
-        (q) =>
-          !(
-            !confirmed &&
-            q.trigger === "merge_confirmation" &&
-            q.kind === "approve" &&
-            "delivery_id" in q.target &&
-            q.target.delivery_id === target.id
-          ) &&
-          q.blocking &&
-          ["open", "provisional"].includes(q.status) &&
-          (q.card_id === card.id ||
-            q.affected_cards.includes(card.id) ||
-            q.affected_work_items.some((id) =>
-              state.work_items.some(
-                (w) => w.id === id && w.card_id === card.id,
-              ),
-            )),
-      ),
-      "illegal_transition",
-      "Card has an unresolved blocking decision",
+    const decision = state.decisions.find(
+      (q) =>
+        !(
+          !confirmed &&
+          q.trigger === "merge_confirmation" &&
+          q.kind === "approve" &&
+          "delivery_id" in q.target &&
+          q.target.delivery_id === target.id
+        ) &&
+        q.blocking &&
+        ["open", "provisional"].includes(q.status) &&
+        (q.card_id === card.id ||
+          q.affected_cards.includes(card.id) ||
+          q.affected_work_items.some((id) =>
+            state.work_items.some((w) => w.id === id && w.card_id === card.id),
+          )),
     );
+    // C-112: the message names the blocker so `merge status` and the loops'
+    // skip logs can say which item holds the merge.
     ensure(
-      !state.human_actions.some(
-        (action) =>
-          action.status === "open" &&
-          (action.card_id === card.id ||
-            action.blocked_work_items.some((id) =>
-              state.work_items.some(
-                (w) => w.id === id && w.card_id === card.id,
-              ),
-            )),
-      ),
+      !decision,
       "illegal_transition",
-      "Card has an open human action",
+      `合并被未解决的阻塞拍板 ${decision?.id} 挡住`,
+    );
+    const action = mergeBlockingHumanActions(state, card.id)[0];
+    ensure(
+      !action,
+      "illegal_transition",
+      `合并被待执行的人工事项 ${action?.id} 挡住`,
     );
     return {
       card_id,
