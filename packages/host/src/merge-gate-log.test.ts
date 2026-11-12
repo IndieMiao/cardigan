@@ -193,9 +193,9 @@ test("short env values do not corrupt output; the eight-byte boundary and multib
 test.each([
   [
     "interrupted",
-    "Cancelled before temporary checkout completed",
+    "临时工作区建好之前已取消",
     [],
-    "合并检查已取消：Cancelled before temporary checkout completed",
+    "合并检查已取消：临时工作区建好之前已取消",
   ],
   [
     "failed",

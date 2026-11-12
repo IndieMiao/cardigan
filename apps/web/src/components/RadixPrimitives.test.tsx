@@ -338,7 +338,7 @@ test("radix primitive styles use shared tokens, focus styles and the dark theme"
     css.indexOf("}", css.indexOf(".menu-content")),
   );
   expect(menu).toContain("background: var(--surface);");
-  expect(css).toContain('.view-switch-item[data-state="on"]');
+  expect(css).toContain('.view-switch-item[aria-pressed="true"]');
   expect(css).toContain(".drawer-divider");
   expect(css).toContain("@keyframes drawer-slide-in");
   // §9 U6a: layers are ordered and a preview mask replaces the drawer mask.

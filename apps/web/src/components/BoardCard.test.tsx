@@ -16,7 +16,10 @@ import { DEFAULT_CARD_DISPLAY } from "../card-display.js";
 import { card } from "../testing/fixtures.js";
 import { BoardCard } from "./BoardCard.js";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 if (!globalThis.ResizeObserver)
   Object.defineProperty(globalThis, "ResizeObserver", {
     configurable: true,
@@ -65,12 +68,17 @@ test.each(["hover", "focus"])(
     const { container } = renderCard();
     const link = screen.getByRole("link", { name: new RegExp(example.title) });
     const heading = container.querySelector(".card-title");
-    expect(heading?.getAttribute("title")).toBe(example.title);
+    expect(heading?.getAttribute("title")).toBeNull();
     expect(container.querySelector(".card-tile-head")?.textContent).toBe(
       "C-1进行中",
     );
     if (mode === "focus") act(() => link.focus());
-    else fireEvent.pointerMove(link, { pointerType: "mouse" });
+    else {
+      vi.useFakeTimers();
+      fireEvent.pointerMove(link, { pointerType: "mouse" });
+      act(() => vi.advanceTimersByTime(1000));
+      vi.useRealTimers();
+    }
     const tooltip = await screen.findByRole("tooltip");
     expect(tooltip.textContent).toBe(example.title);
     expect(link.getAttribute("aria-describedby")).toBe(tooltip.id);
@@ -135,7 +143,7 @@ test("every icon label has an accessible name and its own keyboard tooltip; wait
   for (const badge of badges) {
     const label = badge.getAttribute("aria-label");
     expect(label).toBeTruthy();
-    expect(badge.getAttribute("title")).toBe(label);
+    expect(badge.getAttribute("title")).toBeNull();
     expect(badge.querySelector("svg")?.getAttribute("aria-hidden")).toBe(
       "true",
     );
@@ -234,13 +242,17 @@ test("display preferences hide tags while keyboard tooltip retains the full titl
   expect(screen.queryByRole("link", { name: /^附件：/ })).toBeNull();
 });
 
-test("anonymous participants retain a named role placeholder and hover hint", () => {
+test("anonymous participants retain a named role placeholder and hover hint", async () => {
   renderCard({
     ...example,
     participants: [{ employee: null, author_role: "reviewer" }],
   });
   const placeholder = screen.getByRole("img", { name: "未命名的 reviewer" });
-  expect(placeholder.getAttribute("title")).toBe("未命名的 reviewer");
+  expect(placeholder.getAttribute("title")).toBeNull();
+  fireEvent.focus(placeholder);
+  expect((await screen.findByRole("tooltip")).textContent).toBe(
+    "未命名的 reviewer",
+  );
   expect(placeholder.querySelector(".employee-avatar")?.textContent).toBe("R");
 });
 
@@ -298,7 +310,7 @@ test.each([
     expect(badge.closest(".board-card-meta")).toBeTruthy();
     expect(badge.textContent).toBe(String(ahead));
     expect(badge.getAttribute("aria-label")).toBe(label);
-    expect(badge.getAttribute("title")).toBe(label);
+    expect(badge.getAttribute("title")).toBeNull();
     const icon = badge.querySelector("svg.status-shape-pending");
     expect(icon?.getAttribute("aria-hidden")).toBe("true");
     expect(icon?.querySelector("circle")).toBeTruthy();
@@ -306,7 +318,12 @@ test.each([
     expect(screen.queryByText(label)).toBeNull();
 
     if (mode === "focus") act(() => badge.focus());
-    else fireEvent.pointerMove(badge, { pointerType: "mouse" });
+    else {
+      vi.useFakeTimers();
+      fireEvent.pointerMove(badge, { pointerType: "mouse" });
+      act(() => vi.advanceTimersByTime(1000));
+      vi.useRealTimers();
+    }
     const tooltip = await screen.findByRole("tooltip");
     expect(tooltip.textContent).toBe(label);
     expect(tooltip.closest(".tooltip-content")).toBeTruthy();
