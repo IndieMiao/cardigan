@@ -249,7 +249,7 @@ export function fakeClient(
     setPmMergeConfirmation: async () => {},
     setBoardLane: async () => {},
     markNoticesRead: async () => {},
-    decisionHistory: async () => ({ decisions: [] }),
+    decisionHistory: async () => ({ decisions: [], next_cursor: null }),
     needsYou: async () => ({ decisions: [], human_actions: [], incidents: [] }),
     notices: async () => ({ notices: [], next_cursor: null, unread_count: 0 }),
     recordDecision: async () => undefined,

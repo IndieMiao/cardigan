@@ -112,24 +112,37 @@ const client = fakeClient({
       },
     ],
   }),
+  // C-134: a full first page of ten, with more behind "加载更多".
   decisionHistory: async () => ({
-    decisions: [
-      {
-        ...decision,
-        card_id: card.id,
-        status: "resolved",
-        decision_maker: "pm",
-        resolution: {
-          option: "go",
-          rationale: "符合当前安排，继续核对交付证据。",
-          raw_quote: "继续检查",
-          at: NOW,
-          resolved_by: "assignment:A-2",
-          via: "delegated",
-          proxy_authority: "project:p-1/default-decision-delegation/general",
-        },
+    decisions: Array.from({ length: 10 }, (_, i) => ({
+      ...decision,
+      id: `Q-${20 - i}`,
+      question:
+        i % 3 === 0
+          ? "是否继续安排发布前的检查，并在合并前由负责人核对亮色、暗色和窄屏三种截图？"
+          : decision.question,
+      card_id: card.id,
+      status: "resolved" as const,
+      decision_maker: i % 2 ? ("human" as const) : ("pm" as const),
+      resolution: {
+        option: "go",
+        rationale:
+          i % 2
+            ? "符合当前安排，继续核对交付证据。"
+            : "依据项目的默认代拍授权：本类别的拍板交给 PM 处理。审核意见已全部处理，截图和测试结果都附在交付里，没有新增风险。",
+        raw_quote: "继续检查",
+        at: NOW,
+        resolved_by: i % 2 ? "human" : "assignment:A-2",
+        via: i % 2 ? "needs_you" : "delegated",
+        ...(i % 2
+          ? {}
+          : {
+              proxy_authority:
+                "project:p-1/default-decision-delegation/general",
+            }),
       },
-    ],
+    })),
+    next_cursor: "next",
   }),
   execution: async () => ({
     assignments: [

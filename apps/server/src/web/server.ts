@@ -27,6 +27,12 @@ import {
   requireLoopbackHost,
   type WebConfig,
 } from "./config.js";
+import {
+  DECISION_HISTORY_DEFAULT_LIMIT,
+  DECISION_HISTORY_MAX_LIMIT,
+  decodeDecisionHistoryCursor,
+  pageDecisionHistory,
+} from "./decision-history.js";
 import { executionCapacity } from "./execution-capacity.js";
 import {
   applySecurityHeaders,
@@ -621,23 +627,40 @@ async function serveProjectRoute(
     const card_id = url.searchParams.get("card_id") || undefined;
     const from = url.searchParams.get("from") || undefined;
     const to = url.searchParams.get("to") || undefined;
+    const rawLimit = url.searchParams.get("limit");
+    const limit =
+      rawLimit === null || rawLimit === ""
+        ? DECISION_HISTORY_DEFAULT_LIMIT
+        : numberParam(rawLimit);
+    const rawCursor = url.searchParams.get("cursor") || undefined;
+    const after = rawCursor
+      ? decodeDecisionHistoryCursor(rawCursor)
+      : undefined;
     if (
       (decider && !["human", "pm", "system"].includes(decider)) ||
       (category && !decisionCategories.includes(category as never)) ||
-      [from, to].some((v) => v && !Number.isFinite(Date.parse(v)))
+      [from, to].some((v) => v && !Number.isFinite(Date.parse(v))) ||
+      limit === undefined ||
+      limit > DECISION_HISTORY_MAX_LIMIT ||
+      (rawCursor !== undefined && after === undefined)
     )
       throw new HttpRejection(400, "validation_failed", "拍板记录筛选条件无效");
-    sendJson(res, 200, {
-      decisions: decisionHistory(state, {
+    const page = pageDecisionHistory(
+      decisionHistory(state, {
         ...(decider ? { decider: decider as "human" | "pm" | "system" } : {}),
         ...(category ? { category } : {}),
         ...(card_id ? { card_id } : {}),
         ...(from ? { from: new Date(from).toISOString() } : {}),
         ...(to ? { to: new Date(to).toISOString() } : {}),
-      }).map((decision) => ({
+      }),
+      { limit, after },
+    );
+    sendJson(res, 200, {
+      decisions: page.decisions.map((decision) => ({
         ...decision,
         ...webDecisionView(state, decision),
       })),
+      next_cursor: page.next_cursor,
     });
     return;
   }
