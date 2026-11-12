@@ -47,6 +47,7 @@ export {
   defaultRoleDefinition,
   defaultRoles,
   firstPrompt,
+  HUMAN_ACTION_MERGE_RULE,
   instructionsFor,
   isDefaultRoleId,
   P2A_PM_DECISION_RULES,
