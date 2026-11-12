@@ -9,6 +9,7 @@ import {
   Time,
 } from "../components/Foundation.js";
 import { CardLink, Feedback } from "../components/Operations.js";
+import { Tooltip } from "../components/Tooltip.js";
 import { routeHash } from "../route.js";
 import { SNAPSHOT_GROUPS } from "../snapshot-groups.js";
 import { useResource } from "../useResource.js";
@@ -242,21 +243,24 @@ function Overview({
   return (
     <nav className="snapshot-overview" aria-label="项目概览">
       {SNAPSHOT_GROUPS.map((group) => (
-        <a
+        <Tooltip
           key={group.value}
-          href={routeHash({
-            kind: "cards",
-            projectId,
-            filters: { view: "list", overview: group.value },
-          })}
-          title={
+          content={
             group.value === "blocked"
               ? "有等待审核或阻塞的工作项，按卡片计数"
               : "按卡片计数，各分组可能重叠"
           }
         >
-          <span>{group.label}</span> <strong>{counts[group.value]}</strong>
-        </a>
+          <a
+            href={routeHash({
+              kind: "cards",
+              projectId,
+              filters: { view: "list", overview: group.value },
+            })}
+          >
+            <span>{group.label}</span> <strong>{counts[group.value]}</strong>
+          </a>
+        </Tooltip>
       ))}
     </nav>
   );

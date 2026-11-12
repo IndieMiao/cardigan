@@ -100,7 +100,6 @@ export function BoardCard({
           href={href}
           onClick={openCard}
           aria-label={label}
-          title={label}
         >
           {icon}
           {text}
@@ -115,16 +114,10 @@ export function BoardCard({
       <Tooltip content={card.title}>
         <a className="card-tile-link" href={href} onClick={openCard}>
           <span className="card-tile-head">
-            {display.number && (
-              <span className="card-id" title={`卡片 ${card.id}`}>
-                {card.id}
-              </span>
-            )}
+            {display.number && <span className="card-id">{card.id}</span>}
             <StatusTag status={card.status} />
           </span>
-          <span className="card-title" title={card.title}>
-            {card.title}
-          </span>
+          <span className="card-title">{card.title}</span>
         </a>
       </Tooltip>
       <div className="board-card-meta">

@@ -2224,7 +2224,7 @@ body[data-lightbox="open"] .drawer-overlay {
 .view-switch-item + .view-switch-item {
   border-left: 1px solid var(--border);
 }
-.view-switch-item[data-state="on"] {
+.view-switch-item[aria-pressed="true"] {
   background: var(--accent);
   color: var(--accent-contrast);
 }

@@ -7,6 +7,7 @@ import {
   describeWriteError,
 } from "../api.js";
 import { RequestFeedback } from "./RequestFeedback.js";
+import { Tooltip } from "./Tooltip.js";
 
 type Mode = "edit" | "cancel" | "supersede";
 type Operation =
@@ -149,16 +150,17 @@ export function CardActions({
               取消卡片
             </button>
           )}
-          <button
-            type="button"
-            className="quiet"
-            aria-pressed={!!card.sensitive}
-            disabled={flagging}
-            title="被标为敏感的卡，合并确认一律由你亲自处理，PM 不能代确认，也不会超时自动合并"
-            onClick={() => void toggleSensitive()}
-          >
-            {card.sensitive ? "取消敏感标记" : "标为敏感"}
-          </button>
+          <Tooltip content="被标为敏感的卡，合并确认一律由你亲自处理，PM 不能代确认，也不会超时自动合并">
+            <button
+              type="button"
+              className="quiet"
+              aria-pressed={!!card.sensitive}
+              disabled={flagging}
+              onClick={() => void toggleSensitive()}
+            >
+              {card.sensitive ? "取消敏感标记" : "标为敏感"}
+            </button>
+          </Tooltip>
         </div>
       )}
       {card.sensitive && (

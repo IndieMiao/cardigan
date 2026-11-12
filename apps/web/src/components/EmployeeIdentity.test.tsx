@@ -2,6 +2,7 @@
 import { readFileSync } from "node:fs";
 import { URL as NodeURL } from "node:url";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -44,6 +45,7 @@ const identity: AuthorView = {
 };
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   window.location.hash = "";
 });
 
@@ -99,9 +101,7 @@ test("library avatars select 64/128 sources with 2x images, including the 64px p
   expect(container.querySelector("img")?.getAttribute("srcset")).toBe(
     `${base}128.webp 1x, ${base}256.webp 2x`,
   );
-  fireEvent.pointerEnter(
-    screen.getByRole("button", { name: "林舟的员工卡片" }),
-  );
+  fireEvent.click(screen.getByRole("button", { name: "林舟的员工卡片" }));
   const profile = screen.getByRole("dialog");
   const image = profile.querySelector("img");
   expect(image?.getAttribute("src")).toBe(`${base}64.webp`);
@@ -174,7 +174,10 @@ test("hover and click reveal a profile, Escape/outside dismiss it, and keyboard 
   );
   screen.getByRole("button", { name: "其他" }).focus();
   const trigger = screen.getByRole("button", { name: "林舟的员工卡片" });
+  vi.useFakeTimers();
   fireEvent.pointerEnter(trigger);
+  act(() => vi.advanceTimersByTime(1000));
+  vi.useRealTimers();
   const profile = await screen.findByRole("dialog", { name: "林舟的员工卡片" });
   expect(profile.textContent).toContain("负责实现与维护");
   expect(profile.textContent).toContain("角色：coder");
@@ -205,6 +208,97 @@ test("hover and click reveal a profile, Escape/outside dismiss it, and keyboard 
   });
   fireEvent.click(screen.getByRole("button", { name: "其他" }));
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+});
+
+test("hover waits a full second, leaving cancels it, and returning starts a fresh delay", () => {
+  vi.useFakeTimers();
+  render(<EmployeeIdentity {...identity} />);
+  const trigger = screen.getByRole("button", { name: "林舟的员工卡片" });
+  fireEvent.pointerEnter(trigger);
+  act(() => vi.advanceTimersByTime(999));
+  expect(screen.queryByRole("dialog")).toBeNull();
+  fireEvent.pointerLeave(trigger);
+  act(() => vi.advanceTimersByTime(1000));
+  expect(screen.queryByRole("dialog")).toBeNull();
+  fireEvent.pointerEnter(trigger);
+  act(() => vi.advanceTimersByTime(999));
+  expect(screen.queryByRole("dialog")).toBeNull();
+  act(() => vi.advanceTimersByTime(1));
+  expect(screen.getByRole("dialog", { name: "林舟的员工卡片" })).toBeTruthy();
+});
+
+test("opening a second hover profile immediately dismisses the first", () => {
+  vi.useFakeTimers();
+  render(
+    <>
+      <EmployeeIdentity {...identity} />
+      <EmployeeIdentity employee={{ ...employee, id: "E-18", name: "李青" }} />
+    </>,
+  );
+  fireEvent.pointerEnter(
+    screen.getByRole("button", { name: "林舟的员工卡片" }),
+  );
+  act(() => vi.advanceTimersByTime(1000));
+  expect(screen.getByRole("dialog", { name: "林舟的员工卡片" })).toBeTruthy();
+  // Keep the first hovered: the second must dismiss it independently of leave timers.
+  fireEvent.pointerEnter(
+    screen.getByRole("button", { name: "李青的员工卡片" }),
+  );
+  act(() => vi.advanceTimersByTime(999));
+  expect(screen.getAllByRole("dialog")).toHaveLength(1);
+  expect(screen.queryByRole("dialog", { name: "李青的员工卡片" })).toBeNull();
+  act(() => vi.advanceTimersByTime(1));
+  expect(screen.queryByRole("dialog", { name: "林舟的员工卡片" })).toBeNull();
+  expect(screen.getByRole("dialog", { name: "李青的员工卡片" })).toBeTruthy();
+});
+
+test("click opens immediately, cancels pending hover and keeps the profile pinned", () => {
+  vi.useFakeTimers();
+  render(
+    <>
+      <EmployeeIdentity {...identity} />
+      <EmployeeIdentity employee={{ ...employee, id: "E-18", name: "李青" }} />
+    </>,
+  );
+  const trigger = screen.getByRole("button", { name: "林舟的员工卡片" });
+  fireEvent.pointerEnter(trigger);
+  act(() => vi.advanceTimersByTime(500));
+  fireEvent.click(trigger);
+  expect(screen.getByRole("dialog", { name: "林舟的员工卡片" })).toBeTruthy();
+  fireEvent.pointerLeave(trigger);
+  fireEvent.pointerEnter(
+    screen.getByRole("button", { name: "李青的员工卡片" }),
+  );
+  act(() => vi.advanceTimersByTime(1000));
+  expect(screen.getAllByRole("dialog")).toHaveLength(2);
+  fireEvent.click(trigger);
+  expect(screen.queryByRole("dialog", { name: "林舟的员工卡片" })).toBeNull();
+  act(() => vi.advanceTimersByTime(1000));
+  expect(screen.queryByRole("dialog", { name: "林舟的员工卡片" })).toBeNull();
+});
+
+test("unmount cancels pending hover and releases the active profile", () => {
+  vi.useFakeTimers();
+  const first = render(<EmployeeIdentity {...identity} />);
+  fireEvent.pointerEnter(
+    screen.getByRole("button", { name: "林舟的员工卡片" }),
+  );
+  first.unmount();
+  act(() => vi.advanceTimersByTime(1000));
+  expect(screen.queryByRole("dialog")).toBeNull();
+  const second = render(<EmployeeIdentity {...identity} />);
+  fireEvent.pointerEnter(
+    screen.getByRole("button", { name: "林舟的员工卡片" }),
+  );
+  act(() => vi.advanceTimersByTime(1000));
+  expect(screen.getByRole("dialog")).toBeTruthy();
+  second.unmount();
+  render(<EmployeeIdentity {...identity} />);
+  fireEvent.pointerEnter(
+    screen.getByRole("button", { name: "林舟的员工卡片" }),
+  );
+  act(() => vi.advanceTimersByTime(1000));
+  expect(screen.getAllByRole("dialog")).toHaveLength(1);
 });
 
 test("outside clicks close the click-opened profile and return focus to the avatar unless another control takes it", async () => {

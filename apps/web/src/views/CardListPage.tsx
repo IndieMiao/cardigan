@@ -26,6 +26,7 @@ import {
 import { Menu, type MenuItem } from "../components/Menu.js";
 import { MultiSelect } from "../components/MultiSelect.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
+import { Tooltip } from "../components/Tooltip.js";
 import { ViewSwitch } from "../components/ViewSwitch.js";
 import { routeHash, useRouteFilters } from "../route.js";
 import { inSnapshotGroup, SNAPSHOT_GROUPS } from "../snapshot-groups.js";
@@ -544,7 +545,6 @@ function CardTable({
           {cards.map((card) => (
             <tr
               key={card.id}
-              title={display.reason ? card.why : undefined}
               className={
                 card.resolution === "superseded" ? "card-superseded" : undefined
               }
@@ -555,24 +555,25 @@ function CardTable({
                 </td>
               )}
               <td>
-                <a
-                  className="card-table-title"
-                  href={cardHref(projectId, card)}
-                  title={display.reason ? card.why : undefined}
-                  onClick={(event) => {
-                    if (
-                      event.metaKey ||
-                      event.ctrlKey ||
-                      event.shiftKey ||
-                      event.altKey
-                    )
-                      return;
-                    event.preventDefault();
-                    onOpenCard(card.id, event.currentTarget);
-                  }}
-                >
-                  {card.title}
-                </a>
+                <Tooltip content={display.reason ? card.why : undefined}>
+                  <a
+                    className="card-table-title"
+                    href={cardHref(projectId, card)}
+                    onClick={(event) => {
+                      if (
+                        event.metaKey ||
+                        event.ctrlKey ||
+                        event.shiftKey ||
+                        event.altKey
+                      )
+                        return;
+                      event.preventDefault();
+                      onOpenCard(card.id, event.currentTarget);
+                    }}
+                  >
+                    {card.title}
+                  </a>
+                </Tooltip>
                 <CardSuperseded card={card} />
               </td>
               <td>
