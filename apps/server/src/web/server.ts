@@ -96,6 +96,10 @@ export interface WebServerOptions {
   /** Attachment blobs live beside the database (§9.3). */
   readonly dataDir?: string;
   readonly mergeGate?: MergeGateConfiguration;
+  /** C-153: the host_ops patrol cadence Needs You quotes to the human. */
+  readonly hostOpsPatrolIntervalMs?: number;
+  /** C-153: the hc session registered in runtime.json, for operator commands. */
+  readonly hcSession?: string;
   /** SSE cadence; tests shorten it, production uses the plan's 500 ms / 15 s. */
   readonly stream?: {
     readonly pollMs?: number;
@@ -134,6 +138,8 @@ interface RequestContext {
   readonly limiter: LoginLimiter;
   readonly dataDir: string;
   readonly mergeGate: MergeGateConfiguration | undefined;
+  readonly hostOpsPatrolIntervalMs: number | undefined;
+  readonly hcSession: string | undefined;
   readonly stream: WebServerOptions["stream"];
   readonly shutdown: AbortSignal;
   /** Only the validated Host and explicit configuration decide cookie flags. */
@@ -254,6 +260,8 @@ export async function startWebServer(
         limiter,
         dataDir,
         mergeGate: options.mergeGate,
+        hostOpsPatrolIntervalMs: options.hostOpsPatrolIntervalMs,
+        hcSession: options.hcSession,
         runLimit: options.runLimit,
         runLimitMaximum: options.runLimitMaximum,
         machineDisplayName: options.machineDisplayName,
@@ -636,7 +644,13 @@ async function serveProjectRoute(
   if (rest === "/needs-you") {
     sendJson(res, 200, {
       project_id,
-      ...needsYou(state, now, context.mergeGate?.forProject(project_id).status),
+      ...needsYou(
+        state,
+        now,
+        context.mergeGate?.forProject(project_id).status,
+        context.hostOpsPatrolIntervalMs,
+        context.hcSession,
+      ),
     });
     return;
   }
