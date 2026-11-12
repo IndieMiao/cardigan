@@ -9,6 +9,7 @@ import {
   dispatchRecoveryQueuedAt,
   dispatchTargetWaitMs,
   hasRunTarget,
+  hostOpsPending,
   type ProjectId,
   type RunId,
   type Runtime,
@@ -178,6 +179,7 @@ export async function retryDispatchedRuns(
   };
   const candidates = read();
   for (const candidate of candidates.runs) {
+    if (hostOpsPending(read().events, candidate.assignment_id)) continue;
     const owner = candidates.assignments.find(
       (a) => a.id === candidate.assignment_id,
     );

@@ -30,6 +30,10 @@ export {
   type PinDeliveryRequest,
 } from "./commands/delivery-tools.js";
 export { loadCommandState, persistEffect, unwrap } from "./commands/execute.js";
+export {
+  type HostOpsToolOptions,
+  hostOpsTools,
+} from "./commands/host-ops-tools.js";
 export { managementTools } from "./commands/management-tools.js";
 export {
   ERROR_CODES,

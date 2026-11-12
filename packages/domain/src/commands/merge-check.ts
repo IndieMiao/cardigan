@@ -294,7 +294,15 @@ export function recheckMerge(
       "illegal_transition",
       "Merge gate is not enabled",
     );
-    return requeueMergeCheck(d, p.card_id);
+    d.card(p.card_id);
+    const result = requeueMergeCheck(d, p.card_id);
+    if (actor.kind === "assignment")
+      d.emit("host_ops_action_taken", p.card_id, {
+        tool: "host_ops_recheck_merge",
+        target_id: p.card_id,
+        reason: "Retry failed or timed-out merge check",
+      });
+    return result;
   });
 }
 /**
