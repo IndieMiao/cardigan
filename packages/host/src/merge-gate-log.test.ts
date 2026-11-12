@@ -31,6 +31,26 @@ const passed = {
   ],
   cleanup_errors: [],
 };
+test("a timeout with surviving processes is recorded for manual attention, not automatic retry", async () => {
+  const dataDir = await fixture();
+  const log = await createMergeCheckLog({
+    dataDir,
+    project: "p",
+    attempt: "attempt-manual",
+  });
+  const result = await log.finish({
+    status: "timed_out",
+    checks: [{ name: "test", status: "timed_out", exit_code: null }],
+    cleanup_errors: [
+      "Manual attention required: PID 123 state=D wchan=exit_mm",
+    ],
+    manual_attention: true,
+  });
+  expect(result.timeout_only).toBe(false);
+  expect(
+    await readFile(join(dataDir, "merge-gate/logs/p", log.log_ref), "utf8"),
+  ).toContain("PID 123 state=D wchan=exit_mm");
+});
 test("logs redact configured values across chunks and retained edges before writing private files", async () => {
   const dataDir = await fixture(),
     secret = "private-env-value:abc/xyz";
