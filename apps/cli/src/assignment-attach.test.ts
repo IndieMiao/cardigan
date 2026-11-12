@@ -494,31 +494,34 @@ describe("C-152: server-registered runtime", () => {
     }
   });
 
-  test("a shell whose runtime differs from the registration is refused with the differing fields", () => {
-    registerAgentSsh();
-    Object.assign(env, {
-      CARDIGAN_RUNTIME_MODE: "agent-ssh",
-      CARDIGAN_AGENT_MACHINE: "elsewhere",
-      CARDIGAN_AGENT_ROOT: join(root, "agent"),
-      CARDIGAN_AGENT_GID: "4242",
-      CARDIGAN_AGENT_IDENTITY: join(root, "ssh", "id"),
-      CARDIGAN_AGENT_KNOWN_HOSTS: join(root, "ssh", "known_hosts"),
-    });
-    updateAssignment({ standing_mode: "ops" });
-    for (const args of [
-      ["assignment", "start", "A-1", "--project", "fixture"],
-      ["pm", "start", "--project", "fixture"],
-      ["pm", "rotate", "--ops", "--project", "fixture"],
-    ]) {
+  // One CLI process per case: each spawn costs a Node startup, and three in a
+  // row exceeded the 5s budget under a fully parallel run (C-152#35).
+  test.each([
+    [["assignment", "start", "A-1", "--project", "fixture"]],
+    [["pm", "start", "--project", "fixture"]],
+    [["pm", "rotate", "--ops", "--project", "fixture"]],
+  ])(
+    "a shell whose runtime differs from the registration is refused with the differing fields: %j",
+    (args) => {
+      registerAgentSsh();
+      Object.assign(env, {
+        CARDIGAN_RUNTIME_MODE: "agent-ssh",
+        CARDIGAN_AGENT_MACHINE: "elsewhere",
+        CARDIGAN_AGENT_ROOT: join(root, "agent"),
+        CARDIGAN_AGENT_GID: "4242",
+        CARDIGAN_AGENT_IDENTITY: join(root, "ssh", "id"),
+        CARDIGAN_AGENT_KNOWN_HOSTS: join(root, "ssh", "known_hosts"),
+      });
+      updateAssignment({ standing_mode: "ops" });
       const result = cli(args);
-      expect(result.code, args.join(" ")).toBe(2);
+      expect(result.code).toBe(2);
       expect(result.output).toContain("和 server 登记的不一致");
       expect(result.output).toContain(
         "CARDIGAN_AGENT_MACHINE：server 登记为 cardigan-agent，当前 shell 为 elsewhere",
       );
-    }
-    expect(calls()).toEqual([]);
-  });
+      expect(calls()).toEqual([]);
+    },
+  );
 
   test("without any registration an empty shell is refused instead of defaulting to local", () => {
     delete env.CARDIGAN_RUNTIME_MODE;
