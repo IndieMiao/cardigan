@@ -484,7 +484,7 @@ C-144：迁移 0019 在 C-132 的编号格式迁移 0018 之后，将旧数字�
 - `id`、`key`、`card_id?`、`requested_by`
 - 内容：`instructions`（要执行的命令或操作，写完整）、`why_human`（为什么只能你做：权限、账号、实体设备等）、`expected_return`（做完回传什么）、`due?`
 - 影响：`blocked_work_items[]`、`blocks_merge?`
-- 是否挡合并（C-112）：只有 open 且满足下面任一条件的事项才挡卡片合并——`blocked_work_items` 含该卡的工作项，或 `card_id` 是该卡且请求时显式传了 `blocks_merge=true`。只挂在卡片上、不阻塞工作项也没标 `blocks_merge` 的事项（查日志、排查诊断等只读升级，以及系统建的派发卡住、主机退出确认等事项）只进 Needs You 和 `waiting_on`，不挡 `prepareMergePlan`/`mergePlan`。旧记录没有该字段时按 false 处理，所以存量里只挂卡片的 open 事项升级后不再挡合并。
+- 是否挡合并（C-112）：只有 open 且满足下面任一条件的事项才挡卡片合并——`blocked_work_items` 含该卡的工作项，或 `card_id` 是该卡且请求时显式传了 `blocks_merge=true`。只挂在卡片上、不阻塞工作项也没标 `blocks_merge` 的事项（查日志、排查诊断等只读升级，以及系统建的派发卡住、主机退出确认等事项）只进 Needs You 和 `waiting_on`，不挡 `prepareMergePlan`/`mergePlan`。旧记录没有该字段时按 false 处理，所以存量里只挂卡片的 open 事项升级后不再挡合并。默认角色包的各角色提示词用同一句话写明何时必须传 `blocks_merge=true`（事项不完成就不应该合并，例如凭据、安全或权限取舍、仓库外前置操作），只请人看看、知会或可事后补做的不设（C-162）。
 - `triage?`：`pm_ops | host | human`。新请求先交有分拣工具的活跃 PM Ops，否则直接交人；旧记录缺失视为 human。`triage_rationale?` 保存分拣依据。`handoff?` 保存 PM 的白话交接内容：`title`（单行、最多 80 字）、`summary`（这是什么）、`why_human`（为什么必须由人做）、`instructions`（点哪里或执行什么命令）、`expected_outcome`（做完会怎样）、`expected_return`（回传什么），以及服务端生成的 `rewritten_by/rewritten_at`。原始请求的 instructions/why_human/expected_return 不覆盖；旧记录缺少 handoff 时仍可读。
 - `status`：`open` | `done` | `cancelled`；`result?`：`{text, attachments[], at}`
 - 来源：0.2 回溯中，需要你介入的门铃有一半是只有你能做的操作，而不是拍板
