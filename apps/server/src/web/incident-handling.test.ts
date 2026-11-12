@@ -90,49 +90,50 @@ test("C-153 / V-504 the PM Office mention in the steps reaches the Office, not P
       employee_id: employee.id,
     };
     const ops: Assignment = { ...office, id: "A-92", standing_mode: "ops" };
-    const s = {
-      ...state,
-      employees: [...(state.employees ?? []), employee],
-      assignments: [...state.assignments, office, ops],
-    };
-    const contact = needsYou(s, "2026-01-01T00:00:00.000Z").incident_handling
-      .pm_office;
-    // The name is for display; the mention must route.
-    expect(contact).toEqual({
-      assignment_id: "A-91",
-      name: "示例前台",
-      mention: "A-91",
-    });
-    // Same text NeedsYouPage asks the human to post on the card.
-    const body = `@${contact?.mention} ${target.assignment.id} 运行异常超过 30 分钟仍未恢复，请处理。`;
-    // Not persisted: only the reducer output is routed.
-    const result = f.store.uow.run((tx) =>
-      postComment(
-        s,
-        { kind: "human", project_id: f.project },
-        { card_id: target.card.id, body },
-        { clock: f.clock, ids: tx.ids },
-      ),
-    );
-    if (!result.ok) throw new Error(result.error.message);
-    const effect = result.value;
-    const event = effect.events.find((e) => e.type === "comment_posted");
-    if (!event) throw new Error("Missing comment event");
-    const routed = routeEvent({
-      event,
-      snapshot: {
-        ...s,
-        events: [...s.events, ...effect.events],
-        timeline: [...s.timeline, ...effect.timeline],
-      },
-    });
-    expect(routed.notifications.map((n) => n.recipient)).toContainEqual({
-      kind: "assignment",
-      assignment_id: "A-91",
-    });
-    expect(routed.notifications.map((n) => n.recipient)).not.toContainEqual({
-      kind: "pm_ops",
-    });
+    // With PM Ops present, and in an Office-only project.
+    for (const extra of [[office, ops], [office]]) {
+      const s = {
+        ...state,
+        employees: [...(state.employees ?? []), employee],
+        assignments: [...state.assignments, ...extra],
+      };
+      const contact = needsYou(s, "2026-01-01T00:00:00.000Z").incident_handling
+        .pm_office;
+      // The name is for display; the mention must route.
+      expect(contact).toEqual({
+        assignment_id: "A-91",
+        name: "示例前台",
+        mention: "A-91",
+      });
+      // Same text NeedsYouPage asks the human to post on the card.
+      const body = `@${contact?.mention} ${target.assignment.id} 运行异常超过 30 分钟仍未恢复，请处理。`;
+      // Not persisted: only the reducer output is routed.
+      const result = f.store.uow.run((tx) =>
+        postComment(
+          s,
+          { kind: "human", project_id: f.project },
+          { card_id: target.card.id, body },
+          { clock: f.clock, ids: tx.ids },
+        ),
+      );
+      if (!result.ok) throw new Error(result.error.message);
+      const effect = result.value;
+      const event = effect.events.find((e) => e.type === "comment_posted");
+      if (!event) throw new Error("Missing comment event");
+      const recipients = routeEvent({
+        event,
+        snapshot: {
+          ...s,
+          events: [...s.events, ...effect.events],
+          timeline: [...s.timeline, ...effect.timeline],
+        },
+      }).notifications.map((n) => n.recipient);
+      expect(recipients).toContainEqual({
+        kind: "assignment",
+        assignment_id: "A-91",
+      });
+      expect(recipients).not.toContainEqual({ kind: "pm_ops" });
+    }
   } finally {
     f.close();
   }
