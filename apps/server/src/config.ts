@@ -18,6 +18,9 @@ export interface ServerConfig {
   readonly host: string;
   /** `0` asks the OS for a free port (tests). */
   readonly port: number;
+  /** EADDRINUSE retry cadence and shared startup wait budget, in milliseconds. */
+  readonly listenRetryIntervalMs?: number;
+  readonly listenRetryTimeoutMs?: number;
   /** M4.4 phase loops; every value has a default and is overridable. */
   readonly mergeIntervalMs?: number;
   readonly cleanupIntervalMs?: number;
@@ -44,6 +47,8 @@ export interface ServerEnv extends ExecutionEnv {
   readonly CARDIGAN_DATA_DIR?: string | undefined;
   readonly CARDIGAN_MCP_HOST?: string | undefined;
   readonly CARDIGAN_MCP_PORT?: string | undefined;
+  readonly CARDIGAN_LISTEN_RETRY_INTERVAL_MS?: string | undefined;
+  readonly CARDIGAN_LISTEN_RETRY_TIMEOUT_MS?: string | undefined;
   /**
    * Workbench settings. The listen address is never configurable
    * (`resolveWebConfig` refuses anything but loopback), so listing it here
@@ -65,6 +70,8 @@ export interface ServerEnv extends ExecutionEnv {
 }
 
 export const DEFAULT_SHUTDOWN_GRACE_MS = 10_000;
+export const DEFAULT_LISTEN_RETRY_INTERVAL_MS = 1_000;
+export const DEFAULT_LISTEN_RETRY_TIMEOUT_MS = 30_000;
 
 /** Default cadence of the M4.4 phase loops (plan §3.6, §3.7). */
 export const DEFAULT_INTERVALS = {
@@ -93,6 +100,16 @@ export function resolveServerConfig(env: ServerEnv): ServerConfig {
     execution: resolveExecutionConfig({ ...env, CARDIGAN_DATA_DIR: dataDir }),
     host: resolveHost(env.CARDIGAN_MCP_HOST),
     port,
+    listenRetryIntervalMs: interval(
+      env.CARDIGAN_LISTEN_RETRY_INTERVAL_MS,
+      "CARDIGAN_LISTEN_RETRY_INTERVAL_MS",
+      DEFAULT_LISTEN_RETRY_INTERVAL_MS,
+    ),
+    listenRetryTimeoutMs: interval(
+      env.CARDIGAN_LISTEN_RETRY_TIMEOUT_MS,
+      "CARDIGAN_LISTEN_RETRY_TIMEOUT_MS",
+      DEFAULT_LISTEN_RETRY_TIMEOUT_MS,
+    ),
     hostOpsContextThresholdPct: percentage(
       env.CARDIGAN_HOST_OPS_CONTEXT_THRESHOLD_PCT,
     ),

@@ -1,4 +1,8 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { createServer } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, expect, test } from "vitest";
 
@@ -63,6 +67,73 @@ test.each([false, true])(
       expect(result.stderr).not.toContain("SQLite is an experimental feature");
     } else {
       expect(result.stderr).toBe(error);
+    }
+  },
+);
+
+test.each(["MCP", "Web"])(
+  "built server exits with a Chinese port error when the %s wait expires",
+  async (listener) => {
+    const dataDir = mkdtempSync(join(tmpdir(), "cardigan-bind-"));
+    const occupied = createServer();
+    await new Promise<void>((resolve) =>
+      occupied.listen(0, "127.0.0.1", resolve),
+    );
+    const port = (occupied.address() as { port: number }).port;
+    // This failure precedes control-plane startup. Stub only the external
+    // runtime wiring; config parsing, SQLite, sockets and bin exit are real.
+    const preload = `
+    import { registerHooks } from 'node:module';
+    registerHooks({ load(url, context, nextLoad) {
+      if (url.endsWith('/server/dist/host.js')) return {
+        format: 'module', shortCircuit: true,
+        source: 'export const createHostWiring = async () => ({runtime: {}}); export const configDir = () => ""; export const loadLaunchFiles = async () => ({});',
+      };
+      return nextLoad(url, context);
+    } });
+  `;
+    const child = spawn(
+      process.execPath,
+      ["--import", `data:text/javascript,${encodeURIComponent(preload)}`, bin],
+      {
+        cwd: serverRoot,
+        env: {
+          ...env,
+          CARDIGAN_RUNTIME_MODE: "local",
+          CARDIGAN_DATA_DIR: dataDir,
+          CARDIGAN_MCP_HOST: "127.0.0.1",
+          CARDIGAN_MCP_PORT: listener === "MCP" ? String(port) : "0",
+          CARDIGAN_WEB_PORT: listener === "Web" ? String(port) : "0",
+          CARDIGAN_LISTEN_RETRY_INTERVAL_MS: "10",
+          CARDIGAN_LISTEN_RETRY_TIMEOUT_MS: "30",
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 5_000,
+      },
+    );
+    let stdout = "",
+      stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    try {
+      const result = await new Promise((resolve, reject) => {
+        child.once("error", reject);
+        child.once("close", (code, signal) => resolve({ code, signal }));
+      });
+      expect(result).toEqual({ code: 1, signal: null });
+      expect(stdout).not.toContain('"ready":true');
+      expect(stderr).toContain(`端口 ${port} 被占用（EADDRINUSE）`);
+      expect(stderr).toContain(
+        `启动失败：等待 30 毫秒后，端口 ${port} 仍被占用（EADDRINUSE）。`,
+      );
+    } finally {
+      child.kill();
+      await new Promise<void>((resolve) => occupied.close(() => resolve()));
+      rmSync(dataDir, { recursive: true, force: true });
     }
   },
 );

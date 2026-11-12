@@ -32,6 +32,8 @@ test("S10 defaults to loopback, port 3004 and the same user data directory as th
     },
     host: DEFAULT_MCP_HOST,
     port: DEFAULT_MCP_PORT,
+    listenRetryIntervalMs: 1_000,
+    listenRetryTimeoutMs: 30_000,
     mergeIntervalMs: DEFAULT_INTERVALS.merge,
     cleanupIntervalMs: DEFAULT_INTERVALS.cleanup,
     reconcileIntervalMs: DEFAULT_INTERVALS.reconcile,
@@ -103,6 +105,8 @@ test("reads data dir and port from the environment", () => {
     execution: { mode: "local", dataDir: "/srv/cardigan/data" },
     host: DEFAULT_MCP_HOST,
     port: 0,
+    listenRetryIntervalMs: 1_000,
+    listenRetryTimeoutMs: 30_000,
     mergeIntervalMs: DEFAULT_INTERVALS.merge,
     cleanupIntervalMs: DEFAULT_INTERVALS.cleanup,
     reconcileIntervalMs: DEFAULT_INTERVALS.reconcile,
@@ -180,4 +184,24 @@ test("the shutdown grace period defaults to 10 seconds and is configurable", () 
     expect(() =>
       resolveServerConfig({ CARDIGAN_SHUTDOWN_GRACE_MS: value }),
     ).toThrow(/CARDIGAN_SHUTDOWN_GRACE_MS/);
+});
+
+test("listen retries accept configurable positive millisecond values", () => {
+  expect(
+    resolveServerConfig({
+      CARDIGAN_LISTEN_RETRY_INTERVAL_MS: "25",
+      CARDIGAN_LISTEN_RETRY_TIMEOUT_MS: "120",
+    }),
+  ).toMatchObject({ listenRetryIntervalMs: 25, listenRetryTimeoutMs: 120 });
+  for (const name of [
+    "CARDIGAN_LISTEN_RETRY_INTERVAL_MS",
+    "CARDIGAN_LISTEN_RETRY_TIMEOUT_MS",
+  ]) {
+    expect(resolveServerConfig({ [name]: " " })).toMatchObject({
+      listenRetryIntervalMs: 1_000,
+      listenRetryTimeoutMs: 30_000,
+    });
+    for (const value of ["0", "-1", "1.5", "NaN", "Infinity", "2147483648"])
+      expect(() => resolveServerConfig({ [name]: value })).toThrow(name);
+  }
 });

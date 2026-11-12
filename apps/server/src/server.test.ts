@@ -18,6 +18,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { installShutdownHandlers } from "./lifecycle.js";
 import { type CardiganServer, startCardiganServer } from "./server.js";
+import { resolveWebConfig } from "./web/config.js";
 
 let dataDir: string;
 let store: Store;
@@ -50,7 +51,13 @@ test("C-152: a failed or competing start never replaces the live server's regist
   expect(registration()).toEqual({ mode: "local", session: "cardigan" });
   await expect(
     startCardiganServer({
-      config: { dataDir, host: "127.0.0.1", port: server.port },
+      config: {
+        dataDir,
+        host: "127.0.0.1",
+        port: server.port,
+        listenRetryIntervalMs: 5,
+        listenRetryTimeoutMs: 10,
+      },
       store,
       env: { CARDIGAN_RUNTIME_MODE: "local", CARDIGAN_HC_SESSION: "other" },
       warn: () => {},
@@ -410,12 +417,97 @@ test("a failing port bind closes the store it opened", async () => {
   try {
     await expect(
       startCardiganServer({
-        config: { dataDir, host: "127.0.0.1", port: first.port },
+        config: {
+          dataDir,
+          host: "127.0.0.1",
+          port: first.port,
+          listenRetryIntervalMs: 5,
+          listenRetryTimeoutMs: 10,
+        },
       }),
     ).rejects.toThrow();
   } finally {
     await first.close();
   }
+});
+
+test.each(["MCP", "Web"])(
+  "%s starts on the same port after its previous owner releases it",
+  async (listener) => {
+    const occupied = createServer();
+    await new Promise<void>((resolve) =>
+      occupied.listen(0, "127.0.0.1", resolve),
+    );
+    const port = (occupied.address() as { port: number }).port;
+    const messages: string[] = [];
+    let release: Promise<void> | undefined;
+    let started: CardiganServer | undefined;
+    try {
+      started = await startCardiganServer({
+        config: {
+          dataDir,
+          host: "127.0.0.1",
+          port: listener === "MCP" ? port : 0,
+          listenRetryIntervalMs: 10,
+          listenRetryTimeoutMs: 1_000,
+        },
+        store,
+        warn: (message) => {
+          messages.push(message);
+          // Release only after a genuine bind conflict, with no timing guess.
+          if (message.includes("EADDRINUSE") && !release)
+            release = new Promise<void>((resolve, reject) =>
+              occupied.close((error) => (error ? reject(error) : resolve())),
+            );
+        },
+        ...(listener === "Web"
+          ? { web: { config: resolveWebConfig({}, { port }) } }
+          : {}),
+      });
+      await release;
+      expect(listener === "MCP" ? started.port : started.web?.port).toBe(port);
+      expect(
+        messages.some((message) =>
+          message.includes(`端口 ${port} 被占用（EADDRINUSE）`),
+        ),
+      ).toBe(true);
+      const response = await fetch(
+        listener === "MCP" ? started.url : `${started.web?.url}/api/session`,
+      );
+      expect(response.status).toBe(listener === "MCP" ? 401 : 200);
+    } finally {
+      await started?.close();
+      if (occupied.listening)
+        await new Promise<void>((resolve) => occupied.close(() => resolve()));
+    }
+  },
+);
+
+test("a Web bind timeout closes the already bound MCP listener and preserves the injected store", async () => {
+  const probe = createServer();
+  await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
+  const port = (probe.address() as { port: number }).port;
+  await new Promise<void>((resolve) => probe.close(() => resolve()));
+  await expect(
+    startCardiganServer({
+      config: {
+        dataDir,
+        host: "127.0.0.1",
+        port,
+        listenRetryIntervalMs: 5,
+        listenRetryTimeoutMs: 10,
+      },
+      store,
+      warn: () => {},
+      web: { config: resolveWebConfig({}, { port: server.port }) },
+    }),
+  ).rejects.toMatchObject({ code: "EADDRINUSE", port: server.port });
+  await new Promise<void>((resolve, reject) => {
+    probe.once("error", reject);
+    probe.listen(port, "127.0.0.1", resolve);
+  });
+  await new Promise<void>((resolve) => probe.close(() => resolve()));
+  expect(() => store.listProjects()).not.toThrow();
 });
 
 test("SIGTERM triggers shutdown through the installed handler", () => {
