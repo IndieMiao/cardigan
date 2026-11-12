@@ -30,7 +30,7 @@ import {
   CentralRepositoryService,
 } from "@cardigan/git-service";
 import { CentralGitTransport } from "@cardigan/git-transport";
-import { loadMergeGateConfig } from "@cardigan/host";
+import { loadMergeGateConfig, runInTemporaryCheckout } from "@cardigan/host";
 import {
   authenticate,
   getCardTool,
@@ -39,7 +39,7 @@ import {
   unwrap,
 } from "@cardigan/mcp-server";
 import { Store } from "@cardigan/store";
-import { afterEach, beforeEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { createProcessIo, main } from "../../cli/src/index.js";
 import { ServerGit } from "./git.js";
 import {
@@ -687,25 +687,47 @@ test("stopping the long-lived loop cancels a real check and records interruption
     sha,
   );
   await pin(product.id, sha);
-  const c = await gated("node -e 'setInterval(()=>{},1000)'");
-  const loop = startMergeLoop({ ...c.options, intervalMs: 60_000 });
+  // The check's fixed PATH need not contain the Node running this test.
+  const node = `'${process.execPath.replaceAll("'", "'\\''")}'`;
+  const c = await gated(
+    `exec ${node} -e 'console.log("check-ready"); setInterval(()=>{},1000)'`,
+  );
+  let output = "";
+  const loop = startMergeLoop({
+    ...c.options,
+    intervalMs: 60_000,
+    gate: {
+      ...c.options.gate,
+      run: (input) =>
+        runInTemporaryCheckout({
+          ...input,
+          onOutput: (name, text) => {
+            input.onOutput?.(name, text);
+            if (name === "test") output += text;
+          },
+        }),
+    },
+  });
   try {
-    const deadline = Date.now() + 5000;
-    while (
+    // `running` means the supervisor is ready, before checkout or command startup.
+    // Wait for the real check's output so shutdown must cancel a live command.
+    await vi.waitFor(() => expect(output).toBe("check-ready\n"), {
+      timeout: 5000,
+    });
+    expect(
       latestMergeCheck(f.state().events, scenario.card.id, completion.id)
-        ?.status !== "running"
-    ) {
-      if (Date.now() > deadline)
-        throw new Error(`Check did not start: ${c.errors}`);
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
+        ?.status,
+    ).toBe("running");
   } finally {
     await loop.loop.stop();
   }
   await loop.loop.done;
   expect(
-    latestMergeCheck(f.state().events, scenario.card.id, completion.id)?.status,
-  ).toBe("interrupted");
+    latestMergeCheck(f.state().events, scenario.card.id, completion.id),
+  ).toMatchObject({
+    status: "interrupted",
+    checks: [{ name: "test", status: "interrupted", exit_code: null }],
+  });
   expect(await baseline()).toBe(repos.base);
   expect(readdirSync(join(f.dataDir, "agent", "checks", f.project_id))).toEqual(
     [],
