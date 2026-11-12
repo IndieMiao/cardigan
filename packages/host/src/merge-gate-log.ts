@@ -231,7 +231,7 @@ export async function createMergeCheckLog(input: {
                 [
                   failed
                     ? `检查 ${failed.name} 未通过（${failed.status}，退出码 ${failed.exit_code ?? "无"}）`
-                    : `合并检查未通过：${result.reason ?? result.status}`,
+                    : `${result.status === "interrupted" ? "合并检查已取消" : "合并检查未通过"}：${result.reason ?? result.status}`,
                   ...failures,
                 ]
                   .join("\n")
