@@ -34,7 +34,7 @@ async function main(p) {
   const checks = [], cleanup_errors = [];
   const runtime = join(p.container, 'runtime'), temporary = join(p.container, 'tmp');
   const aliases = join(p.alias_container, 'u'), aliasRuntime = join(aliases, 'r'), aliasTmp = join(aliases, 't');
-  let ownsAliases = false;
+  let ownsAliases = false, registered = false;
   const baseEnv = { PATH: p.path, HOME: userInfo().homedir, XDG_RUNTIME_DIR: aliasRuntime, TMPDIR: aliasTmp };
   Object.assign(process.env, baseEnv);
   const environment = { ...baseEnv, ...p.env };
@@ -141,8 +141,11 @@ async function main(p) {
     await mkdir(aliases, { mode: 0o700 }); ownsAliases = true;
     await chmod(aliases, 0o700);
     await symlink(runtime, aliasRuntime); await symlink(temporary, aliasTmp);
+    // run() skips without spawning once cancelled or expired, so no registration can exist then.
+    registered = !(cancelled || totalExpired);
     const added = await git(p.repository, ['worktree', 'add', '--detach', '--', p.directory, p.sha]);
-    if (added.status !== 'passed') { status = added.status; reason = 'Temporary checkout failed'; }
+    if (added.status === 'interrupted') { status = 'interrupted'; reason = 'Cancelled before temporary checkout completed'; }
+    else if (added.status !== 'passed') { status = added.status; reason = 'Temporary checkout failed'; }
     else if (!await verify()) { status = 'failed'; reason = 'Checkout HEAD or tree does not match'; }
     for (const check of p.checks) {
       if (status !== 'passed') { checks.push({ name: check.name, status: 'not_run' }); continue; }
@@ -160,7 +163,7 @@ async function main(p) {
     try { await stopCores(); } catch { cleanup_errors.push('Could not inspect check runtime processes'); }
     // Cleanup does not inherit cancellation. Git and recursive deletion run as the owner.
     const removed = await git(p.repository, ['worktree', 'remove', '--force', '--', p.directory], true);
-    if (removed.status !== 'passed') cleanup_errors.push('Could not remove temporary worktree registration');
+    if (registered && removed.status !== 'passed') cleanup_errors.push('Could not remove temporary worktree registration');
     try { await rm(p.directory, { recursive: true, force: true }); }
     catch { cleanup_errors.push('Could not remove temporary checkout files'); }
     for (const path of [runtime, temporary]) {

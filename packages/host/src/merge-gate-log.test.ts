@@ -190,3 +190,44 @@ test("short env values do not corrupt output; the eight-byte boundary and multib
   expect(text).not.toContain("abcdefgh");
   expect(text).not.toContain("中文值");
 });
+test.each([
+  [
+    "interrupted",
+    "Cancelled before temporary checkout completed",
+    [],
+    "合并检查已取消：Cancelled before temporary checkout completed",
+  ],
+  [
+    "failed",
+    "Temporary checkout failed",
+    ["Could not remove temporary worktree registration"],
+    "合并检查未通过：Temporary checkout failed",
+  ],
+] as const)(
+  "%s results before any check summarise as cancellation or failure",
+  async (status, reason, cleanup_errors, summary) => {
+    const dataDir = await fixture();
+    const log = await createMergeCheckLog({
+      dataDir,
+      project: "p",
+      attempt: status,
+    });
+    const result = await log.finish({
+      status,
+      checks: [{ name: "test", status: "not_run" }],
+      cleanup_errors: [...cleanup_errors],
+      reason,
+    });
+    expect(result.summary).toBe(summary);
+    const text = await readFile(
+      join(dataDir, "merge-gate/logs/p", result.log_ref),
+      "utf8",
+    );
+    expect(text).toContain(`\n${summary}\n`);
+    if (cleanup_errors.length)
+      expect(text).toContain(
+        "\n清理提示：\nCould not remove temporary worktree registration\n",
+      );
+    else expect(text).not.toContain("清理提示");
+  },
+);

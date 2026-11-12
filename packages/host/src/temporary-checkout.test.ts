@@ -559,6 +559,53 @@ test.skipIf(process.platform !== "linux")(
   },
 );
 
+test("cancelling after readiness but before checkout reports cancellation without a cleanup error", async () => {
+  const f = await fixture();
+  const ready = vi.fn();
+  // Deterministic: the supervisor receives "cancel" right after its payload, before `worktree add`.
+  const result = await runInTemporaryCheckout(
+    {
+      ...f.input,
+      onReady: ready,
+      checks: [{ name: "must-not-run", run: "exit 99" }],
+    },
+    (file, args, env) =>
+      spawn(
+        "/bin/sh",
+        [
+          "-c",
+          `(IFS= read -r line; printf '%s\\ncancel\\n' "$line") | ${[file, ...args].map(quote).join(" ")}`,
+        ],
+        { env, stdio: ["pipe", "pipe", "pipe"] },
+      ),
+  );
+  expect(ready).toHaveBeenCalledOnce();
+  expect(result).toEqual({
+    status: "interrupted",
+    checks: [{ name: "must-not-run", status: "not_run" }],
+    cleanup_errors: [],
+    reason: "Cancelled before temporary checkout completed",
+  });
+  await f.clean();
+});
+
+test("a real checkout failure keeps its reason and registration cleanup error", async () => {
+  const f = await fixture();
+  const result = await runInTemporaryCheckout({
+    ...f.input,
+    sha: "b".repeat(40),
+  });
+  expect(result).toMatchObject({
+    status: "failed",
+    checks: [{ name: "check", status: "not_run" }],
+    reason: "Temporary checkout failed",
+  });
+  expect(result.cleanup_errors).toContain(
+    "Could not remove temporary worktree registration",
+  );
+  await f.clean();
+});
+
 test("cleanup failure is reported without changing a passed conclusion", async () => {
   const f = await fixture();
   const result = await runInTemporaryCheckout({
