@@ -27,14 +27,15 @@ let gate: ProjectMergeGate;
 const attempt = "e42de008-2c67-49e2-a59d-077a0f7936de";
 const path = (suffix: string) => `/api/projects/${project_id}${suffix}`;
 const logPath = path(`/merge-checks/${attempt}`);
-const identity = {
+const checkIdentity = {
   card_id: "C-2" as CardId,
   completion_id: "D-2" as DeliveryId,
   attempt_id: attempt,
   candidate_sha: "a".repeat(40),
   tree_sha: "b".repeat(40),
 };
-function record(status: MergeCheckView["status"]) {
+function record(status: MergeCheckView["status"], attempt_id = attempt) {
+  const identity = { ...checkIdentity, attempt_id };
   h.store.uow.run((tx) => {
     const effect = unwrap(
       recordMergeCheck(
@@ -57,13 +58,18 @@ function record(status: MergeCheckView["status"]) {
                 },
               ],
               summary: "Error: fixture failed",
-              log_ref: `${attempt}.log`,
+              log_ref: `${attempt_id}.log`,
             },
         { ids: tx.ids, clock: { now: () => NOW } },
       ),
     );
     persistEffect(tx, project_id, effect);
   });
+}
+/** C-116: spend the completion's single automatic timeout rerun first. */
+function useTimeoutRerun() {
+  for (const status of ["queued", "running", "timed_out"] as const)
+    record(status, "timeout-rerun");
 }
 const read = (suffix: string) => call(h.port, path(suffix), { cookie });
 const recheck = (completion_id = "D-2", key = "retry") =>
@@ -138,6 +144,7 @@ test.each(["failed", "timed_out"] as const)(
       if (!card) throw new Error("Missing card");
       tx.cards.put(project_id, { ...card, sensitive: true });
     });
+    if (status === "timed_out") useTimeoutRerun();
     record("queued");
     record("running");
     record(status);
@@ -226,6 +233,7 @@ test.each(
         ).status,
       ).toBe(200);
     }
+    if (status === "timed_out") useTimeoutRerun();
     record("queued");
     record("running");
     record(status);
@@ -273,7 +281,9 @@ test.each(
     expect(again.body).toContain("没有失败或超时");
     const events = h.store.uow.read((tx) =>
       loadCommandState(tx, project_id).events.filter(
-        (e) => e.type === "merge_check_requeued",
+        (e) =>
+          e.type === "merge_check_requeued" &&
+          (e.payload as { via?: string }).via !== "timeout_auto_rerun",
       ),
     );
     expect(events).toHaveLength(1);
@@ -480,16 +490,16 @@ test("logs require a session, are plain text, read only and isolated to the proj
   const otherPath = `/api/projects/${otherProject}/merge-checks/${attempt}`;
   expect((await call(h.port, otherPath, { cookie })).status).toBe(404);
   h.store.uow.run((tx) => {
-    const source = tx.cards.get(project_id, identity.card_id);
+    const source = tx.cards.get(project_id, checkIdentity.card_id);
     if (!source) throw new Error("Missing fixture card");
     tx.cards.put(otherProject, { ...source, project_id: otherProject });
     tx.events.append(otherProject, {
       id: tx.ids.nextEventId(),
-      seq: tx.ids.nextEventSequence(otherProject, identity.card_id),
-      card_id: identity.card_id,
+      seq: tx.ids.nextEventSequence(otherProject, checkIdentity.card_id),
+      card_id: checkIdentity.card_id,
       type: "merge_check_queued",
       actor: { kind: "system", project_id: otherProject },
-      payload: { ...identity, status: "queued" },
+      payload: { ...checkIdentity, status: "queued" },
       created_at: NOW,
     });
   });

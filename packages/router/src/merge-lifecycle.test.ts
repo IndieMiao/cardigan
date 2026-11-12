@@ -170,6 +170,42 @@ test.each(
       ...f.state,
       project_settings: { merge_gate_enabled: true },
     });
+    const result = (attempt_id: string) => ({
+      ...identity,
+      attempt_id,
+      status,
+      // Log text must never authorize timeout handling on its own.
+      summary: "test failed: timeout",
+      log_ref: `${attempt_id}.log`,
+      checks: steps.map((status, index) => ({
+        name: `check-${index}`,
+        status,
+        exit_code: status === "passed" ? 0 : null,
+        duration_ms: 1,
+      })),
+    });
+    if (timeoutOnly) {
+      // C-116: the first timeout-only failure is rerun automatically and
+      // nobody is woken; the second one below follows the existing flow.
+      const first = { ...identity, attempt_id: "attempt-0" };
+      for (const step of ["queued", "running"] as const)
+        f.commit(
+          recordMergeCheck(gated(), system, { ...first, status: step }, f.io),
+        );
+      const rerun = value(
+        recordMergeCheck(gated(), system, result("attempt-0"), f.io),
+      );
+      f.commit({ ok: true, value: rerun });
+      const auto = rerun.events.find((e) => e.type === "merge_check_finished");
+      if (!auto) throw new Error("Missing finished event");
+      expect(auto.payload).toMatchObject({ auto_rerun: true });
+      expect(rerun.events.some((e) => e.type === "merge_check_requeued")).toBe(
+        true,
+      );
+      expect(
+        routeEvent({ event: auto, snapshot: f.state }).notifications,
+      ).toEqual([]);
+    }
     f.commit(
       recordMergeCheck(
         gated(),
@@ -187,25 +223,9 @@ test.each(
       ),
     );
     const failed = value(
-      recordMergeCheck(
-        gated(),
-        system,
-        {
-          ...identity,
-          status,
-          // Log text must never authorize timeout handling on its own.
-          summary: "test failed: timeout",
-          log_ref: "attempt-1.log",
-          checks: steps.map((status, index) => ({
-            name: `check-${index}`,
-            status,
-            exit_code: status === "passed" ? 0 : null,
-            duration_ms: 1,
-          })),
-        },
-        f.io,
-      ),
+      recordMergeCheck(gated(), system, result("attempt-1"), f.io),
     );
+    expect(failed.events.map((e) => e.type)).toEqual(["merge_check_finished"]);
     f.commit({ ok: true, value: failed });
     const finished = failed.events.find(
       (e) => e.type === "merge_check_finished",

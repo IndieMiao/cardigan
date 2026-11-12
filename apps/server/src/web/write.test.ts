@@ -296,6 +296,26 @@ test.each(
       tree_sha: "b".repeat(40),
     };
     const returning = { option: "request_changes", raw_quote: "修复检查失败" };
+    // C-116: the first timeout is rerun automatically; the second reaches PM.
+    if (status === "timed_out")
+      for (const checkStatus of ["queued", "running", status] as const)
+        s.command((state, _actor, ports) =>
+          recordMergeCheck(
+            { ...state, project_settings: { merge_gate_enabled: true } },
+            { kind: "system", project_id: state.project_id },
+            checkStatus === status
+              ? {
+                  ...identity,
+                  attempt_id: "web-timeout",
+                  status: checkStatus,
+                  checks: [],
+                  summary: "检查超时",
+                  log_ref: "web-timeout.log",
+                }
+              : { ...identity, attempt_id: "web-timeout", status: checkStatus },
+            ports,
+          ),
+        );
     for (const checkStatus of ["queued", "running", status] as const) {
       s.command((state, _actor, ports) =>
         recordMergeCheck(

@@ -421,7 +421,7 @@ test.each(["failed", "timed_out"] as const)(
     const c = controller(f);
     const decision = required(mergeConfirmation(f, scenario.card.id));
     f.decide(decision, "merge");
-    c.run.mockImplementationOnce(async (input) => {
+    c.run.mockImplementation(async (input) => {
       input.onReady?.();
       return {
         status,
@@ -430,11 +430,15 @@ test.each(["failed", "timed_out"] as const)(
       };
     });
     await c.gate.tick([f.project_id]);
+    // C-116: a step timeout is rerun automatically once before PM sees it.
+    const runs = status === "timed_out" ? 2 : 1;
+    if (status === "timed_out") await c.gate.tick([f.project_id]);
     expect(check()?.status).toBe(status);
+    expect(c.run).toHaveBeenCalledTimes(runs);
     expect(c.git.publish).not.toHaveBeenCalled();
     f.decide(decision, "request_changes");
     await c.gate.tick([f.project_id]);
-    expect(c.run).toHaveBeenCalledTimes(1);
+    expect(c.run).toHaveBeenCalledTimes(runs);
     expect(c.git.publish).not.toHaveBeenCalled();
     expect(c.errors).not.toHaveBeenCalled();
     expect(f.card().status).toBe("in_progress");
@@ -446,6 +450,88 @@ test.each(["failed", "timed_out"] as const)(
     );
   },
 );
+
+const vitestTimeout = ` RUN  v5.1.0 /repo
+
+ ❯ src/a.test.ts (2 tests | 1 failed) 5012ms
+   × slow 5004ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/a.test.ts > slow
+Error: Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+
+ Test Files  1 failed (1)
+`;
+const vitestAssertion = vitestTimeout.replace(
+  "Error: Test timed out in 5000ms.",
+  "AssertionError: expected 1 to be 2",
+);
+const vitestFailure =
+  (output: string) =>
+  async (input: CheckoutInput): Promise<CheckoutResult> => {
+    input.onReady?.();
+    input.onOutput?.("test", output);
+    return {
+      status: "failed",
+      checks: [{ name: "test", status: "failed", exit_code: 1 }],
+      cleanup_errors: [],
+    };
+  };
+const autoReruns = (f: M4Fixture) =>
+  f
+    .state()
+    .events.filter(
+      (e) =>
+        e.type === "merge_check_requeued" &&
+        (e.payload as { via?: string }).via === "timeout_auto_rerun",
+    );
+
+test("C-116: a vitest timeout failure is requeued automatically once and then passes", async () => {
+  const { f, check } = await fixture("auto");
+  const c = controller(f);
+  c.run.mockImplementationOnce(vitestFailure(vitestTimeout));
+  await c.gate.tick([f.project_id]);
+  // The rerun is already queued as a fresh attempt for the same tree.
+  expect(check()?.status).toBe("queued");
+  expect(autoReruns(f)).toHaveLength(1);
+  expect(f.state().timeline.map((t) => t.body)).toContain("因超时自动重跑");
+  expect(
+    f.state().events.find((e) => e.type === "merge_check_finished")?.payload,
+  ).toMatchObject({ status: "failed", timeout_only: true, auto_rerun: true });
+  await c.gate.tick([f.project_id]);
+  expect(c.run).toHaveBeenCalledTimes(2);
+  expect(check()?.status).toBe("passed");
+  expect(f.card().status).toBe("done");
+  expect(c.errors).not.toHaveBeenCalled();
+});
+
+test("C-116: a second timeout failure for the same completion waits for PM", async () => {
+  const { f, check } = await fixture("auto");
+  const c = controller(f);
+  c.run.mockImplementation(vitestFailure(vitestTimeout));
+  await c.gate.tick([f.project_id]);
+  await c.gate.tick([f.project_id]);
+  expect(check()).toMatchObject({ status: "failed", timeout_only: true });
+  await c.gate.tick([f.project_id]);
+  expect(c.run).toHaveBeenCalledTimes(2);
+  expect(autoReruns(f)).toHaveLength(1);
+  expect(c.git.publish).not.toHaveBeenCalled();
+  expect(f.card().status).toBe("awaiting_merge");
+});
+
+test("C-116: an assertion failure is not requeued automatically", async () => {
+  const { f, check } = await fixture("auto");
+  const c = controller(f);
+  c.run.mockImplementationOnce(vitestFailure(vitestAssertion));
+  await c.gate.tick([f.project_id]);
+  await c.gate.tick([f.project_id]);
+  expect(check()?.status).toBe("failed");
+  expect(check()?.timeout_only).toBeUndefined();
+  expect(c.run).toHaveBeenCalledTimes(1);
+  expect(autoReruns(f)).toHaveLength(0);
+});
 
 test("fake host_ops MCP recheck retries a failed check and the existing merge gate passes it", async () => {
   const { f, scenario, check } = await fixture();

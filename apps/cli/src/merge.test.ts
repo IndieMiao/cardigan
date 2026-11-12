@@ -366,6 +366,7 @@ test.each(["open", "failed", "timed_out"] as const)(
     const { development, confirmation } = await seatAwaitingMerge();
     if (status !== "open") {
       await cardigan("merge", "confirm", card_id);
+      if (status === "timed_out") useTimeoutRerun();
       recordCheck("queued");
       recordCheck("running");
       recordCheck(status);
@@ -473,12 +474,13 @@ function recordCheck(
     | "failed"
     | "timed_out"
     | "interrupted",
+  attempt_id = "cli-check",
 ) {
   const plan = unwrap(prepareMergePlan(state(), card_id as never));
   const identity = {
     card_id: plan.card_id,
     completion_id: plan.completion_id,
-    attempt_id: "cli-check",
+    attempt_id,
     candidate_sha: SHA,
     tree_sha: "b".repeat(40),
   };
@@ -500,12 +502,17 @@ function recordCheck(
                 },
               ],
               summary: "fixture result",
-              log_ref: "cli-check.log",
+              log_ref: `${attempt_id}.log`,
             },
         p,
       ),
     { kind: "system", project_id: project },
   );
+}
+/** C-116: spend the completion's single automatic timeout rerun first. */
+function useTimeoutRerun() {
+  for (const status of ["queued", "running", "timed_out"] as const)
+    recordCheck(status, "cli-timeout");
 }
 
 test("merge recheck explains a missing card in Chinese without writing state", async () => {
@@ -566,6 +573,7 @@ test.each(["failed", "timed_out"] as const)(
   async (status) => {
     enableMergeGate();
     await seatAwaitingMerge();
+    if (status === "timed_out") useTimeoutRerun();
     recordCheck("queued");
     recordCheck("running");
     recordCheck(status);
