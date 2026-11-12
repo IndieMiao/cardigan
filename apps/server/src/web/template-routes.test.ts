@@ -100,6 +100,11 @@ test("list, details and version history preserve project boundaries and do not m
   expect((await read("/card-templates")).json).toMatchObject({
     templates: [
       { id: "artifact", builtin: true, version: 1, status: "active" },
+      {
+        id: "design",
+        builtin: true,
+        completion: { mode: "review", reviewer: "human" },
+      },
       { id: "dev", requires_repo: true, merge: "confirm" },
       { id: "general", completion: { mode: "human_mark_done" } },
     ],

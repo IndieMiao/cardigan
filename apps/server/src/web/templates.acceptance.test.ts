@@ -177,7 +177,7 @@ test.each([
         allowed_tools: [...toolNames],
       });
       store.uow.run((tx) => {
-        writeRole(tx, project, role("designer", "none"), { mode: "add" });
+        writeRole(tx, project, role("ui_ux_designer", "none"), { mode: "add" });
         writeRole(tx, project, role("pm", "readonly"), { mode: "add" });
       });
       const office = store.uow.run((tx) => {
