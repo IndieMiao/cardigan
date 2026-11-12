@@ -260,46 +260,102 @@ test("an accepted stop fences ACK, launch and competing human stop until host se
   ).toBeUndefined();
 });
 
-test("standing pause and abort map only their own operational permissions; human behavior remains available", () => {
+test("C-111: abort_dispatch and pause_standing_assignment reject every assignment actor, including fully permitted host_ops", () => {
   const s = base(),
     io = ports();
-  for (const a of [human, caller]) {
+  const before = JSON.stringify(s);
+  for (const a of [
+    caller,
+    { ...caller, allowed_tools: [...HOST_OPS_ROLE_TOOLS] },
+    actor(4, "pm"),
+    actor(1),
+    { ...caller, project_id: "other" },
+  ]) {
     expect(
-      pauseStandingAssignment(s, a, { assignment_id: id("assignment", 4) }, io)
-        .ok,
-    ).toBe(true);
+      pauseStandingAssignment(s, a, { assignment_id: id("assignment", 4) }, io),
+    ).toMatchObject({ ok: false, error: { code: "unauthorized" } });
     expect(
-      abortDispatch(s, a, { run_id: id("run", 1), reason: "stop" }, io).ok,
-    ).toBe(true);
+      abortDispatch(s, a, { run_id: id("run", 1), reason: "stop" }, io),
+    ).toMatchObject({ ok: false, error: { code: "unauthorized" } });
   }
-  expect(
+  expect(JSON.stringify(s)).toBe(before);
+  // Human keeps both commands; the system host keeps abort_dispatch.
+  const system = { kind: "system", project_id: s.project_id } as const;
+  for (const a of [human, system]) {
+    const aborted = value(
+      abortDispatch(s, a, { run_id: id("run", 1), reason: "stop" }, io),
+    );
+    expect(aborted.data.status).toBe("cancelled");
+    expect(aborted.events.some((e) => e.type === "host_ops_action_taken")).toBe(
+      false,
+    );
+  }
+  const paused = value(
     pauseStandingAssignment(
       s,
-      { ...caller, allowed_tools: ["host_ops_cancel_run"] },
+      human,
       { assignment_id: id("assignment", 4) },
       io,
-    ).ok,
-  ).toBe(false);
-  expect(
-    abortDispatch(
-      s,
-      { ...caller, allowed_tools: ["host_ops_restart_standing_pm"] },
-      { run_id: id("run", 1), reason: "stop" },
-      io,
-    ).ok,
-  ).toBe(false);
-  for (const a of [actor(4, "pm"), { ...caller, project_id: "other" }]) {
-    expect(
-      pauseStandingAssignment(s, a, { assignment_id: id("assignment", 4) }, io)
-        .ok,
-    ).toBe(false);
-    expect(
-      abortDispatch(s, a, { run_id: id("run", 1), reason: "stop" }, io).ok,
-    ).toBe(false);
-  }
+    ),
+  );
+  expect(paused.data.assignment.status).toBe("suspended");
+  expect(paused.events.some((e) => e.type === "host_ops_action_taken")).toBe(
+    false,
+  );
   expect(hostOpsReadDiagnostics(s, caller, now).ok).toBe(true);
   expect(hostOpsReadDiagnostics(s, actor(4, "pm"), now).ok).toBe(false);
 });
+
+test.each(["host_ops_cancel_run", "host_ops_restart_standing_pm"] as const)(
+  "C-111 regression: %s still settles through the vetted host_ops action flow",
+  (tool) => {
+    const s = base(),
+      io = ports();
+    const begun = value(beginHostOpsAction(s, caller, params(tool), io));
+    expect(begun.events).toEqual([
+      expect.objectContaining({
+        type: "host_ops_action_taken",
+        actor: caller,
+        payload: expect.objectContaining({ tool }),
+      }),
+    ]);
+    const pending = apply(s, begun);
+    const finished = value(
+      finishHostOpsAction(
+        pending,
+        { kind: "system", project_id: s.project_id },
+        begun.data.action_id,
+        io,
+      ),
+    );
+    const result = apply(pending, finished);
+    expect(hostOpsPending(result.events, begun.data.assignment_id)).toBe(false);
+    if (tool === "host_ops_cancel_run") {
+      expect(finished.data.run).toBeUndefined();
+      expect(result.runs.find((r) => r.id === id("run", 1))).toMatchObject({
+        status: "cancelled",
+        summary: params(tool).reason,
+      });
+    } else {
+      expect(finished.data.run).toMatchObject({
+        status: "queued",
+        assignment_id: id("assignment", 4),
+      });
+      expect(
+        result.assignments.find((a) => a.id === id("assignment", 4))?.status,
+      ).toBe("active");
+      expect(
+        result.events.filter((e) => e.type === "assignment_paused"),
+      ).toEqual([
+        expect.objectContaining({
+          payload: expect.objectContaining({
+            assignment_id: id("assignment", 4),
+          }),
+        }),
+      ]);
+    }
+  },
+);
 
 test("preflight refuses a conflicting pending worktree stop and an invalid launch profile before effects", () => {
   const original = base(),
