@@ -34,6 +34,7 @@ import {
   type ServerEnv,
 } from "./config.js";
 import { type GitBinding, ServerGit } from "./git.js";
+import { DEFAULT_HOST_OPS_PATROL_INTERVAL_MS } from "./host-ops-patrol.js";
 import type { ShutdownTimer } from "./lifecycle.js";
 import type { WebConfig } from "./web/config.js";
 import { type RunningWebServer, startWebServer } from "./web/server.js";
@@ -287,7 +288,7 @@ export async function startCardiganServer(
         hostOpsPatrolIntervalMs:
           options.dispatcher.hostOpsPatrolIntervalMs ??
           config.hostOpsPatrolIntervalMs ??
-          1_800_000,
+          DEFAULT_HOST_OPS_PATROL_INTERVAL_MS,
         ...((options.dispatcher.intervalMs ?? config.dispatchIntervalMs) ===
         undefined
           ? {}
@@ -335,6 +336,10 @@ export async function startCardiganServer(
         mergeGate,
         dataDir: config.dataDir,
         config: options.web.config,
+        hostOpsPatrolIntervalMs:
+          options.dispatcher?.hostOpsPatrolIntervalMs ??
+          config.hostOpsPatrolIntervalMs ??
+          DEFAULT_HOST_OPS_PATROL_INTERVAL_MS,
         ...(options.web.log === undefined ? {} : { log: options.web.log }),
         ...(options.web.stream === undefined
           ? {}

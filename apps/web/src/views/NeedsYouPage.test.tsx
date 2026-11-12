@@ -629,14 +629,31 @@ test("project decisions explain unavailable comments; cleanup and lost runtimes 
   expect(
     screen.getByText("cardigan assignment attach 'A-3' --project 'p-1'"),
   ).toBeTruthy();
-  const incident = within(
-    screen.getByRole("article", { name: "运行异常 A-3" }),
+  const article = screen.getByRole("article", { name: "运行异常 A-3" });
+  const incident = within(article);
+  // No host_ops and no PM Office: the human must contact the platform owner.
+  expect(article.textContent).toContain(
+    "这个项目没有配置主机运维，不会自动恢复。",
   );
+  expect(
+    incident.getByText("需要你操作：请按下面的步骤联系平台负责人。"),
+  ).toBeTruthy();
   const writeText = vi.fn(async () => {});
   Object.defineProperty(navigator, "clipboard", {
     configurable: true,
     value: { writeText },
   });
+  const operator = incident
+    .getByText("主机操作员用")
+    .closest("details") as HTMLDetailsElement;
+  expect(operator.open).toBe(false);
+  expect(
+    within(operator).getByText(/需要在加载了 Cardigan 运行环境的 shell/),
+  ).toBeTruthy();
+  for (const name of ["复制查看终端（只看不动）", "复制检查异常"])
+    expect(incident.getByRole("button", { name }).closest("details")).toBe(
+      operator,
+    );
   fireEvent.click(
     incident.getByRole("button", { name: "复制查看终端（只看不动）" }),
   );
@@ -648,19 +665,129 @@ test("project decisions explain unavailable comments; cleanup and lost runtimes 
   const summary = incident.getByText("需要接管输入？");
   const details = summary.closest("details") as HTMLDetailsElement;
   expect(details.open).toBe(false);
+  expect(details).not.toBe(operator);
   expect(
     incident.getByRole("button", { name: "复制接管输入" }).closest("details"),
   ).toBe(details);
   fireEvent.click(summary);
   expect(details.open).toBe(true);
-  expect(
-    within(details).getByText("你的输入会直接发给正在工作的 Agent，可能打断它"),
-  ).toBeTruthy();
+  // The warning comes before the command.
+  expect(details.querySelector("summary + p")?.textContent).toBe(
+    "接管会直接向 Agent 终端输入，可能打断它。只在 PM Office 或主机运维请你接管时使用。",
+  );
   fireEvent.click(incident.getByRole("button", { name: "复制接管输入" }));
   await waitFor(() =>
     expect(writeText).toHaveBeenLastCalledWith(
       "cardigan assignment attach 'A-3' --project 'p-1' --interactive",
     ),
+  );
+});
+
+const lostIncident = (waited_ms: number) => ({
+  id: "A-3",
+  role_id: "coder",
+  runtime_state: "lost",
+  waited_ms,
+  card_id: "C-1",
+  disconnected_at: "2026-01-01T00:00:00.000Z",
+  lost_at: null,
+  last_run: null,
+});
+const handling = {
+  host_ops: {
+    assignment_id: "A-90",
+    name: "张良",
+    mention: "张良",
+    patrol_interval_ms: 30 * 60000,
+  },
+  pm_office: { assignment_id: "A-91", name: "王熙凤", mention: "王熙凤" },
+};
+
+test("C-153: with host_ops patrolling, a fresh incident tells the human to wait", async () => {
+  render(
+    <NeedsYouPage
+      client={fakeClient({
+        needsYou: async () => ({
+          ...page([]),
+          incident_handling: handling,
+          incidents: [lostIncident(12 * 60000)],
+        }),
+      })}
+      projectId="p-1"
+    />,
+  );
+  const article = await screen.findByRole("article", {
+    name: "运行异常 A-3",
+  });
+  const text = article.textContent ?? "";
+  expect(text).toContain("这个 Agent 的运行环境失联了");
+  expect(text).toContain(
+    "主机运维 张良 每 30 分钟巡检一次，会自动取消、重排或重启卡住、失联的 Run。",
+  );
+  expect(within(article).getByText("你现在不需要操作。")).toBeTruthy();
+  expect(text).toContain("已等待 12 分钟。超过 30 分钟仍未恢复时，请这样做：");
+  const steps = [...article.querySelectorAll("ol.incident-steps > li")].map(
+    (li) => li.textContent,
+  );
+  expect(steps).toEqual([
+    "打开卡片 C-1。",
+    "在卡片页底部的“评论正文”框里填写：@王熙凤 A-3 运行异常超过 30 分钟仍未恢复，请处理。",
+    "点“发表评论”。",
+    "等 PM Office（王熙凤）回复。只有 PM Office 或主机运维明确请你接管时，才展开下面的“需要接管输入？”。",
+  ]);
+});
+
+test("C-153: past the patrol interval the incident asks the human to act", async () => {
+  render(
+    <NeedsYouPage
+      client={fakeClient({
+        needsYou: async () => ({
+          ...page([]),
+          incident_handling: handling,
+          incidents: [lostIncident(31 * 60000)],
+        }),
+      })}
+      projectId="p-1"
+    />,
+  );
+  const article = await screen.findByRole("article", {
+    name: "运行异常 A-3",
+  });
+  expect(
+    within(article).getByText(
+      "需要你操作：请按下面的步骤联系 PM Office（王熙凤）。",
+    ),
+  ).toBeTruthy();
+  expect(within(article).queryByText("你现在不需要操作。")).toBeNull();
+  expect(article.textContent).toContain("已超过 30 分钟仍未恢复：");
+});
+
+test("C-153: without host_ops the incident points straight to PM Office", async () => {
+  render(
+    <NeedsYouPage
+      client={fakeClient({
+        needsYou: async () => ({
+          ...page([]),
+          incident_handling: { host_ops: null, pm_office: handling.pm_office },
+          incidents: [lostIncident(60000)],
+        }),
+      })}
+      projectId="p-1"
+    />,
+  );
+  const article = await screen.findByRole("article", {
+    name: "运行异常 A-3",
+  });
+  expect(article.textContent).toContain(
+    "这个项目没有配置主机运维，不会自动恢复。",
+  );
+  expect(
+    within(article).getByText(
+      "需要你操作：请按下面的步骤联系 PM Office（王熙凤）。",
+    ),
+  ).toBeTruthy();
+  expect(article.textContent).toContain(
+    "@王熙凤 A-3 运行异常仍未恢复，请处理。",
   );
 });
 

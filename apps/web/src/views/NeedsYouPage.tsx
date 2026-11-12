@@ -3,6 +3,7 @@ import {
   type CardiganClient,
   describeError,
   describeWriteError,
+  type IncidentHandling,
   type MergeConfirmationReview,
   type NeedsAction,
   type NeedsDecision,
@@ -20,12 +21,12 @@ import {
 } from "../components/Foundation.js";
 import { MergeCheck } from "../components/MergeCheck.js";
 import {
-  AttachCommands,
   CardLink,
   CopyCommand,
   cliCommand,
   Feedback,
   Markdown,
+  TakeoverWarning,
 } from "../components/Operations.js";
 import { PriorityBadge } from "../components/Priority.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
@@ -698,15 +699,40 @@ function HumanAction({
     </article>
   );
 }
+const incidentSituation: Record<string, string> = {
+  lost: "这个 Agent 的运行环境失联了，它手上的工作暂停了。",
+  unknown: "主机暂时确认不了这个 Agent 是否还在运行。",
+};
+/** C-153: plain-language guidance first; commands are for host operators. */
 function Incident({
   incident,
+  handling,
   projectId,
   elapsed,
 }: {
   readonly incident: NeedsPage["incidents"][number];
+  readonly handling: IncidentHandling | undefined;
   readonly projectId: string;
   readonly elapsed: number;
 }) {
+  const hostOps = handling?.host_ops ?? null;
+  const office = handling?.pm_office ?? null;
+  const minutes = hostOps
+    ? Math.max(1, Math.round(hostOps.patrol_interval_ms / 60000))
+    : null;
+  const overdue =
+    hostOps === null ||
+    (incident.waited_ms !== null &&
+      incident.waited_ms + elapsed >= hostOps.patrol_interval_ms);
+  // Without a PM Office or a card to comment on, the platform owner is next.
+  const viaCard = office !== null && incident.card_id !== null;
+  const contact = viaCard
+    ? ` PM Office${office.name ? `（${office.name}）` : " "}`
+    : "平台负责人";
+  const message = `${viaCard ? `@${office.mention} ` : ""}${incident.id} 运行异常${
+    minutes === null ? "" : `超过 ${minutes} 分钟`
+  }仍未恢复，请处理。`;
+  const attach = cliCommand(projectId, "assignment attach", incident.id);
   return (
     <article
       className="needs-item urgent"
@@ -725,6 +751,58 @@ function Incident({
           <CardLink projectId={projectId} id={incident.card_id} />
         </span>
       </header>
+      <div>
+        <p>
+          {incidentSituation[incident.runtime_state] ??
+            "这个 Agent 的运行状态异常。"}
+          {hostOps
+            ? `主机运维 ${hostOps.name ?? hostOps.assignment_id} 每 ${minutes} 分钟巡检一次，会自动取消、重排或重启卡住、失联的 Run。`
+            : "这个项目没有配置主机运维，不会自动恢复。"}{" "}
+          {overdue ? (
+            <strong>需要你操作：请按下面的步骤联系{contact}。</strong>
+          ) : (
+            <strong>你现在不需要操作。</strong>
+          )}
+        </p>
+        <p>
+          {waitLabel(incident.waited_ms, elapsed)}。
+          {hostOps &&
+            (overdue
+              ? `已超过 ${minutes} 分钟仍未恢复：`
+              : `超过 ${minutes} 分钟仍未恢复时，请这样做：`)}
+        </p>
+        <ol className="incident-steps">
+          {viaCard ? (
+            <>
+              <li>
+                打开卡片{" "}
+                <a
+                  href={routeHash({
+                    kind: "card",
+                    projectId,
+                    cardId: incident.card_id ?? "",
+                  })}
+                >
+                  {incident.card_id}
+                </a>
+                。
+              </li>
+              <li>
+                在卡片页底部的“评论正文”框里填写：<code>{message}</code>
+              </li>
+              <li>点“发表评论”。</li>
+            </>
+          ) : (
+            <li>
+              直接联系{contact}，告诉对方：<code>{message}</code>
+            </li>
+          )}
+          <li>
+            等{contact}回复。只有 PM Office
+            或主机运维明确请你接管时，才展开下面的“需要接管输入？”。
+          </li>
+        </ol>
+      </div>
       {incident.disconnected_at && (
         <p>
           失联时间：
@@ -738,15 +816,23 @@ function Incident({
           {incident.last_run.summary}
         </p>
       )}
-      <AttachCommands
-        label="查看终端"
-        projectId={projectId}
-        assignmentId={incident.id}
-      />
-      <CopyCommand
-        label="检查异常"
-        command={cliCommand(projectId, "attention")}
-      />
+      <details>
+        <summary>需要接管输入？</summary>
+        <TakeoverWarning />
+        <CopyCommand label="接管输入" command={`${attach} --interactive`} />
+      </details>
+      <details>
+        <summary>主机操作员用</summary>
+        <p className="hint">
+          以下命令需要在加载了 Cardigan 运行环境的 shell
+          里执行，普通终端里会报错。
+        </p>
+        <CopyCommand label="查看终端（只看不动）" command={attach} />
+        <CopyCommand
+          label="检查异常"
+          command={cliCommand(projectId, "attention")}
+        />
+      </details>
     </article>
   );
 }
@@ -835,6 +921,7 @@ function NeedsContent({
                 <Incident
                   key={incident.id}
                   incident={incident}
+                  handling={data.incident_handling}
                   projectId={projectId}
                   elapsed={elapsed}
                 />

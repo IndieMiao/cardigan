@@ -255,7 +255,7 @@ test("execution copies observe by default and reveals warned interactive access 
   fireEvent.click(summary);
   expect(details.open).toBe(true);
   const warning = within(details).getByText(
-    "你的输入会直接发给正在工作的 Agent，可能打断它",
+    "接管会直接向 Agent 终端输入，可能打断它。",
   );
   const interactiveCommand = within(details).getByText(
     `${command} --interactive`,
