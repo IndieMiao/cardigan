@@ -23,7 +23,6 @@ import {
   delegationAuthority,
   grantDecisionCategory,
   handoffDecision,
-  handoffUnauthorizedDecisions,
   hasActivePmOps,
   isPmOps,
   mergeDelegationAuthority,
@@ -265,6 +264,8 @@ export type RequestDecisionParams = Pick<
   readonly category: NonNullable<Decision["category"]>;
   readonly target?: Extract<Decision, { kind: "approve" }>["target"];
   readonly attachment_ids?: readonly AttachmentId[];
+  /** C-167: `false` marks a D12 decision as unrelated to its cards' merge content. */
+  readonly merge_related?: boolean;
 };
 export function requestDecision(
   state: CommandState,
@@ -360,6 +361,18 @@ export function requestDecision(
     ];
     for (const id of cards) d.card(id);
     const attachment_ids = decisionAttachments(d, p.attachment_ids, cards);
+    // C-167: only the raiser can say a D12 question is not about what the card
+    // merges, and only when it touches no produce work item and binds no
+    // approval target; anything else stays merge-related (human merge).
+    const mergeUnrelated = p.merge_related === false;
+    if (mergeUnrelated)
+      ensure(
+        highRiskCategories.includes(p.category) &&
+          !p.target &&
+          items.every((w) => w.kind !== "produce"),
+        "validation_failed",
+        "只有不涉及产出工作项、也不绑定审批对象的高风险拍板（花钱、账号、权限、删除数据）才能标为与合并无关",
+      );
     if (p.blocking) {
       for (const item of items) paused(d, item, "waiting_decision");
       endForDecision(d, p.question, items);
@@ -372,7 +385,10 @@ export function requestDecision(
       raised_by: d.author,
       category: p.category,
       question: p.question,
-      context: p.context,
+      context: mergeUnrelated
+        ? `${p.context}\n\n发起人标注：此拍板与 ${cards.join("、") || "任何卡片"} 的合并内容无关，不改变合并确认由谁处理。`
+        : p.context,
+      ...(mergeUnrelated ? { merge_related: false as const } : {}),
       options: p.options,
       recommended: p.recommended,
       affected_cards: cards,
@@ -401,15 +417,25 @@ export function requestDecision(
         { decision_id: id, affected_work_items: decision.affected_work_items },
         { type: "decision_request", body: p.question, decision_id: id },
       );
-    // §7.4: a D12 or scope question makes the card's merge confirmation human-only.
+    // §7.4 (C-167): a merge-related D12 or scope question makes the merge
+    // confirmations of its own cards human-only, and that sticks: the handoff
+    // writes human_required_reason, so no timeout auto-merge. Other cards'
+    // confirmations and merge-unrelated questions leave them untouched.
     if (
-      p.category === "scope_change" ||
-      highRiskCategories.includes(p.category)
-    )
-      handoffUnauthorizedDecisions(
-        d,
-        `${id} 涉及${p.category === "scope_change" ? "需求范围变化" : "高风险事项"}，此卡片的合并确认转交给你。`,
-      );
+      !mergeUnrelated &&
+      (p.category === "scope_change" || highRiskCategories.includes(p.category))
+    ) {
+      const reason = `${id} 涉及${p.category === "scope_change" ? "需求范围变化" : "高风险事项（花钱、账号、权限或删除数据）"}，此卡片的合并确认须由人亲自确认，不适用超时自动合并。`;
+      for (const q of d.list("decisions"))
+        if (
+          q.trigger === "merge_confirmation" &&
+          q.card_id &&
+          cards.includes(q.card_id) &&
+          ["open", "provisional"].includes(q.status) &&
+          !q.human_required_reason
+        )
+          handoffDecision(d, q, reason, undefined, true);
+    }
     return decision;
   });
 }

@@ -107,6 +107,12 @@ const schemas = {
       .describe(
         "Existing attachments on this card or affected_cards to show with the question, in display order",
       ),
+    merge_related: z
+      .boolean()
+      .optional()
+      .describe(
+        "Only for spending/account/permission/data_deletion: false marks a question that is not about what its cards will merge (e.g. a project-wide policy question), so their merge confirmations stay where they are. Rejected when it lists a produce work item or binds a target. Omit when unsure: the default treats it as merge-related and the merge must be confirmed by the human",
+      ),
   },
   resolve_delegated_decision: {
     decision_id: id("decision"),

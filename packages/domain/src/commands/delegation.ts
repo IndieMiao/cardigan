@@ -57,7 +57,9 @@ export function mergeNeedsHuman(
       q.trigger !== "merge_confirmation" &&
       q.trigger !== "worktree_cleanup" &&
       (q.id === sourceId ||
-        (q.status !== "withdrawn" &&
+        // C-167: the raiser marked it as unrelated to this card's merge content.
+        (q.merge_related !== false &&
+          q.status !== "withdrawn" &&
           (q.card_id === card_id || q.affected_cards.includes(card_id)))) &&
       (q.category === "scope_change" ||
         (!!q.category && highRiskCategories.includes(q.category))),
