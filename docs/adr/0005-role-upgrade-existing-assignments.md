@@ -23,7 +23,7 @@ MCP 认证（`packages/mcp-server/src/auth.ts`）只信 Token 记录的 `allowed
 
 §10.1 和 P2a-10 A 里写的“需要重新指派”，对已有工作项走不通：只能取消原工作项、另建工作项再指派。
 
-P2a-10 A／C-83 的会话替换（`tool_catalog_changed`）和 C-154 的 `pm restart` 都沿用原 Assignment 和原角色版本，所以新会话拿到的工具和旧会话相同。
+P2a-10 A／C-83 的会话替换（`tool_catalog_changed`）和 C-154 的 `pm restart` 都沿用原 Assignment 和原角色版本，所以新会话拿到的工具和旧会话相同（实测见下文“核实记录”）。
 
 ### 复现
 
@@ -34,6 +34,15 @@ P2a-10 A／C-83 的会话替换（`tool_catalog_changed`）和 C-154 的 `pm res
 5. 再执行一次 `cardigan assign` 同一个工作项：返回原 A-x，版本不变。
 
 常驻 PM 同理：第 3、4 步不变，只有 `pm rotate` 后的新 Assignment 拿到 T。
+
+### 核实记录
+
+- **代码层实测（2026-11-13，孙悟空）。** 在临时库里调用主机签发 Token 的真实函数 `launchEntities` + `issueAssignmentToken`（Dispatcher 替换会话、`token issue`、`assignment start` 都走它）。用的是临时测试文件，跑完已删除，没有提交。场景：coder v1 的工具为 `[whoami, submit_delivery]`，工作项 Assignment 固定 v1，先签发一次；再追加 v2，工具多一个 `post_comment`。结果：
+  - 不改 Assignment 直接重签：`role_version=1`，工具 `[whoami, submit_delivery]`；
+  - 假设把 Assignment 的 `role_version` 改成 2 再重签：`role_version=2`，工具仍为 `[whoami, submit_delivery]`，被“与上一张 Token 取交集”挡住。
+
+  两层固定都得到了验证：只改版本号不够，备选 B／C 必须同时改重签规则。
+- **线上会话替换记录（C-171#43、C-164#147）。** coder 的 Token 读不到这两张卡，Agent 账号也碰不到主机库和 CLI（ADR 0002 的隔离）。已请 PM 提供替换前后两条 `run_started` 事件里 actor 的 `role_version` 和 `allowed_tools`，以及当时该角色的最新版本（只要清单和版本号，不涉及 Token），结果待补。
 
 ## 备选做法
 
