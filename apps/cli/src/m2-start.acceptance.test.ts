@@ -26,6 +26,7 @@ import {
 import { HerdrRuntime } from "@cardigan/runtime-herdr";
 import { Store, writeRole } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { requireBuildOutput } from "../../../test-support/build-output.js";
 import { createTestRuntime } from "../../../test-support/paths.js";
 import { startCardiganServer } from "../../server/src/index.js";
 import { HcCore, runCleanupSteps } from "../../server/test-support/hc.js";
@@ -258,6 +259,12 @@ const hc = await (async () => {
 test.skipIf(!hc)(
   "S03 real CLI/server/hc advances queued → dispatched → running, rejects duplicate start and cleans up",
   async () => {
+    // The CLI runs as a real child process from its compiled entry. Without it
+    // the start command fails at once and only "undefined, not queued" remains.
+    requireBuildOutput(
+      [resolve("apps/cli/dist/bin.js")],
+      "pnpm exec tsc -b apps/cli",
+    );
     const { card, item } = seed("write"),
       source = join(root, "source"),
       bin = join(root, "bin"),
