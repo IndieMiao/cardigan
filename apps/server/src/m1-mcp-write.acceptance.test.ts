@@ -700,7 +700,7 @@ describe("§16: forged identity and illegal transitions", () => {
       name: "record_decision",
       arguments: {
         idempotency_key: "w-coder-record",
-        decision_id: "q(1)",
+        decision_id: "Q-1",
         option: "a",
         rationale: "fictional",
         raw_quote: "fictional",

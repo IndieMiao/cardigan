@@ -25,7 +25,7 @@ export type Route = (
       readonly kind: "card";
       readonly projectId: string;
       readonly cardId: string;
-      /** Element to scroll to after the card page renders (e.g. `decision-q(2)`). */
+      /** Element to scroll to after the card page renders (e.g. `decision-Q-2`). */
       readonly anchor?: string;
     }
 ) & { readonly filters?: Readonly<Record<string, string>> };
@@ -45,9 +45,19 @@ function decode(segment: string): string | undefined {
  * `board` and `list` are legacy routes the shell redirects to `cards`.
  *
  * The location anchor is a query parameter of the card route, not a second
- * `#fragment`: the hash is the route itself, so `#decision-q(2)` would replace
+ * `#fragment`: the hash is the route itself, so `#decision-Q-2` would replace
  * the route and send the Workbench to its fallback project (M5.S S23).
  */
+/** C-132: `decision-q(2)` / `human-action-h(3)` from old links → `decision-Q-2` / `human-action-H-3`. */
+function legacyAnchor(anchor: string | null): string | null {
+  return (
+    anchor
+      ?.replace(/^decision-q\(([1-9][0-9]*)\)$/u, "decision-Q-$1")
+      .replace(/^human-action-h\(([1-9][0-9]*)\)$/u, "human-action-H-$1") ??
+    null
+  );
+}
+
 export function parseRoute(hash: string): Route | undefined {
   const [path = "", query = ""] = hash
     .replace(/^#/, "")
@@ -84,7 +94,7 @@ export function parseRoute(hash: string): Route | undefined {
     const cardSegment = segments[3] ?? "";
     const cardId = decode(cardSegment);
     if (cardId === undefined) return undefined;
-    const anchor = params.get("at");
+    const anchor = legacyAnchor(params.get("at"));
     return {
       kind: "card",
       projectId,

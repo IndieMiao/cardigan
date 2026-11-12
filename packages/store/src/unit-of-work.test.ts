@@ -114,7 +114,7 @@ test("ids are project-local and separate per kind", () => {
       expect(tx.ids.next(project_id, "card")).toBe("C-2");
       expect(tx.ids.next(project_id, "work_item")).toBe("W-1");
       expect(tx.ids.next("p-other", "card")).toBe("C-1");
-      expect(tx.ids.next(project_id, "decision")).toBe("q(1)");
+      expect(tx.ids.next(project_id, "decision")).toBe("Q-1");
     });
   });
 });

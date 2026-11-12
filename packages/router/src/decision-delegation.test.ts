@@ -13,7 +13,7 @@ test.each(["general", "feature_detail", "scope_change"])(
   "authorized %s goes only to PM Ops",
   (category) => {
     const routed = routeEvent({
-      event: event("decision_requested", { decision_id: "q(1)" }),
+      event: event("decision_requested", { decision_id: "Q-1" }),
       snapshot: snapshot({
         decisions: [decision({ decider: "role:pm", category })],
       }),
@@ -197,7 +197,7 @@ test("a failed check on a confirmed merge wakes PM Ops unless the card is human-
     [],
   );
   const sensitive = decision({
-    id: "q(2)",
+    id: "Q-2",
     category: "spending",
     status: "resolved",
   });
@@ -208,7 +208,7 @@ test.each(["permission", "scope_change"])(
   "a card sourced from a %s decision keeps real merge failures with the human",
   (category) => {
     const source = decision({
-      id: "q(2)",
+      id: "Q-2",
       card_id: undefined,
       affected_cards: [],
       category,

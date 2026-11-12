@@ -8,6 +8,10 @@ import {
   createGlobalIdAllocator,
   createGlobalRepositories,
 } from "./employees.js";
+import {
+  ID_FORMAT_MIGRATION_NAME,
+  migrateReadableIdFormat,
+} from "./id-format-migration.js";
 import { persistMemberEffect } from "./members.js";
 import { installSnapshotTriggers } from "./snapshot-migration.js";
 import { seedCardTemplates } from "./templates.js";
@@ -93,6 +97,8 @@ export function migrate(
       }
       if (migration.version === 17 && migration.name === "command_snapshots")
         installSnapshotTriggers(db);
+      if (migration.name === ID_FORMAT_MIGRATION_NAME)
+        migrateReadableIdFormat(db);
       db.prepare(
         "INSERT INTO schema_version (version, name, applied_at) VALUES (?, ?, ?)",
       ).run(migration.version, migration.name, now());

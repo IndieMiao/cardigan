@@ -92,7 +92,7 @@ export const review = (
 
 export const decision = (overrides: Overrides<Decision> = {}): Decision =>
   ({
-    id: "q(1)",
+    id: "Q-1",
     card_id: CARD_ID,
     decider: "human",
     question: "Which shape?",
@@ -100,7 +100,7 @@ export const decision = (overrides: Overrides<Decision> = {}): Decision =>
     ...overrides,
   }) as unknown as Decision;
 
-export const humanAction = (id = "h(1)"): HumanAction =>
+export const humanAction = (id = "H-1"): HumanAction =>
   ({
     id,
     card_id: CARD_ID,

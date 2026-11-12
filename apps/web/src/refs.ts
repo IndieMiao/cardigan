@@ -79,6 +79,15 @@ export function referenceHref(
   }
 }
 
+/** The pre-C-132 `q(n)` / `h(n)` spelling of a `Q-n` / `H-n` id. */
+function legacySpelling(kind: string, id: string): string | undefined {
+  const match = /^([QH])-([1-9][0-9]*)$/u.exec(id);
+  if (!match) return undefined;
+  if (kind === "decision" && match[1] === "Q") return `q(${match[2]})`;
+  if (kind === "human_action" && match[1] === "H") return `h(${match[2]})`;
+  return undefined;
+}
+
 function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
@@ -109,7 +118,12 @@ export function linkifyReferences(
       delivery: "交付",
       timeline_entry: "时间线条目",
     }[reference.kind];
-    return [[reference.id, `[${reference.id} ${label}](${href})`] as const];
+    // C-132: old comments say `q(95)` / `h(16)`; the server resolves them to
+    // `Q-95` / `H-16`, so the legacy spelling in the body links there too.
+    const legacy = legacySpelling(reference.kind, reference.id);
+    return [reference.id, ...(legacy === undefined ? [] : [legacy])].map(
+      (text) => [text, `[${text} ${label}](${href})`] as const,
+    );
   });
   if (replacements.length === 0) return body;
 

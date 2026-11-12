@@ -374,9 +374,9 @@ test("executorExecution targets the executor over agent-ssh and keeps host-side 
 });
 
 const shared = (projects: string) =>
-  `项目 %s 的合并闸门无效：执行目标 cardigan-ci 被 2 个项目引用（${projects}），一个执行账号只能服务一个项目（q(208)），不会回退到本机；请给每个项目配置独立的执行账号或执行目标`;
+  `项目 %s 的合并闸门无效：执行目标 cardigan-ci 被 2 个项目引用（${projects}），一个执行账号只能服务一个项目（Q-208），不会回退到本机；请给每个项目配置独立的执行账号或执行目标`;
 
-test("q(208): an executor referenced by two projects invalidates both with a Chinese reason, never falling back to local", async () => {
+test("Q-208: an executor referenced by two projects invalidates both with a Chinese reason, never falling back to local", async () => {
   const f = await fixture();
   await f.save({
     executors: { "cardigan-ci": ci },
@@ -393,7 +393,7 @@ test("q(208): an executor referenced by two projects invalidates both with a Chi
   }
 });
 
-test("q(208): an unregistered project sharing the executor still blocks the registered one; local and other executors are unaffected", async () => {
+test("Q-208: an unregistered project sharing the executor still blocks the registered one; local and other executors are unaffected", async () => {
   const f = await fixture();
   await f.save({
     executors: { "cardigan-ci": ci, other: ci },
@@ -414,7 +414,7 @@ test("q(208): an unregistered project sharing the executor still blocks the regi
   });
 });
 
-test("q(208) regression: one project per executor, local and no executor keep loading", async () => {
+test("Q-208 regression: one project per executor, local and no executor keep loading", async () => {
   const f = await fixture();
   await f.save({
     executors: { "cardigan-ci": ci },

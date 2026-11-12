@@ -257,7 +257,7 @@ export async function launchRun(
       input.actor.kind === "human" && input.actor.project_id === input.project;
     const limit = host.runLimit?.(assignment.machine_id) ?? DEFAULT_RUN_LIMIT;
     const occupied = capacity.occupied.get(assignment.machine_id) ?? 0;
-    // q(88): only the explicit human host entry may bypass machine capacity.
+    // Q-88: only the explicit human host entry may bypass machine capacity.
     // PM tools, Dispatcher and recovery callers retain system/assignment actors.
     if (
       !manual &&

@@ -42,7 +42,7 @@ const needs: NeedsPage = {
   incidents: [],
   human_actions: [
     {
-      id: "h(1)",
+      id: "H-1",
       card_id: "C-1",
       why: "检查发布结果",
       instructions: "查看发布结果后回报。",

@@ -427,15 +427,15 @@ test("delivery and human-action references have a timeline target (M5.S S23)", a
         id: "C-1#7",
         event_seq: 7,
         delivery_id: "V-7",
-        human_action_id: "h(3)",
-        body: "见 V-7 和 h(3)。",
+        human_action_id: "H-3",
+        body: "见 V-7 和 H-3。",
       }),
     ],
   });
   renderCard({ card: async () => detail });
   await screen.findByRole("article", { name: "卡片 C-1" });
   expect(document.getElementById("delivery-V-7")).toBeTruthy();
-  expect(document.getElementById("human-action-h(3)")).toBeTruthy();
+  expect(document.getElementById("human-action-H-3")).toBeTruthy();
 });
 
 test("an Agent body with HTML or javascript: links stays inert", async () => {

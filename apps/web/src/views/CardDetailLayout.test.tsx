@@ -68,7 +68,7 @@ function detail(): CardDetail {
     ],
     decisions: [
       {
-        id: "q(1)",
+        id: "Q-1",
         question: "Choose a strategy",
         status: "resolved",
         blocking: true,
@@ -89,7 +89,7 @@ function detail(): CardDetail {
         id: "C-1#6",
         event_seq: 6,
         type: "decision_resolved",
-        decision_id: "q(1)",
+        decision_id: "Q-1",
         decision_option: "A",
         author: "human",
         body: "Original quote",
@@ -98,7 +98,7 @@ function detail(): CardDetail {
         id: "C-1#5",
         event_seq: 5,
         type: "decision_request",
-        decision_id: "q(1)",
+        decision_id: "Q-1",
         author_role: "pm",
       }),
       timelineEntry({
@@ -397,7 +397,7 @@ test("U3 a numbered alias scrolls its containing row, not an empty inline anchor
 });
 
 test("U3 the same anchor is repositioned when a route change restores filtered-out rows", async () => {
-  window.location.hash = "#/p/p-1/cards/C-1?type=review&at=decision-q(1)";
+  window.location.hash = "#/p/p-1/cards/C-1?type=review&at=decision-Q-1";
   const scroll = vi.fn(),
     original = Element.prototype.scrollIntoView;
   Element.prototype.scrollIntoView = scroll;
@@ -406,7 +406,7 @@ test("U3 the same anchor is repositioned when a route change restores filtered-o
     await waitFor(() => expect(scroll).toHaveBeenCalled());
     const before = scroll.mock.calls.length;
     act(() => {
-      window.location.hash = "#/p/p-1/cards/C-1?at=decision-q(1)";
+      window.location.hash = "#/p/p-1/cards/C-1?at=decision-Q-1";
       window.dispatchEvent(new HashChangeEvent("hashchange"));
     });
     await screen.findByText("Human comment");

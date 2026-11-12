@@ -216,7 +216,7 @@ export async function loadMergeGateConfig(input: {
     errors.push(globalError);
     return result();
   }
-  // q(208) one_project_per_account: an executor (one execution account) serves exactly one project.
+  // Q-208 one_project_per_account: an executor (one execution account) serves exactly one project.
   // Counted over every project in the file, registered or not, so the shared account is never used.
   const referencedBy = new Map<string, string[]>();
   for (const [project, value] of Object.entries(raw.projects)) {
@@ -233,7 +233,7 @@ export async function loadMergeGateConfig(input: {
         : [];
       if (sharing.length > 1)
         invalid(
-          `执行目标 ${name as string} 被 ${sharing.length} 个项目引用（${sharing.join("、")}），一个执行账号只能服务一个项目（q(208)），不会回退到本机；请给每个项目配置独立的执行账号或执行目标`,
+          `执行目标 ${name as string} 被 ${sharing.length} 个项目引用（${sharing.join("、")}），一个执行账号只能服务一个项目（Q-208），不会回退到本机；请给每个项目配置独立的执行账号或执行目标`,
         );
       projects.set(
         project,

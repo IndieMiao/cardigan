@@ -61,7 +61,7 @@ test("Needs You returns all unread first and pages read history by stable cursor
       {
         ...inserted,
         id: "99999999999999999999999999" as Event["id"],
-        payload: { ...(inserted.payload as object), decision_id: "q(999)" },
+        payload: { ...(inserted.payload as object), decision_id: "Q-999" },
       },
       {
         ...inserted,

@@ -32,11 +32,11 @@ const USAGE = [
   "用法：",
   "  cardigan card done <C-n> --result <文字> [--file <证据>]...",
   "  cardigan comment add <C-n> (--text <内容> | --text-file <路径>) [--file <路径>]... [--note <说明>]",
-  "  cardigan attachment add <C-n> --file <路径> [--note <说明>] [--kind evidence|artifact] [--basis <q(n)>] [--entry <C-n#k>]",
+  "  cardigan attachment add <C-n> --file <路径> [--note <说明>] [--kind evidence|artifact] [--basis <Q-n>] [--entry <C-n#k>]",
   "",
   "评论正文二选一，支持 Markdown；--file 可重复，附件均为 evidence。",
   "--note 为本次所有附件的一句话说明，最多 200 字符；文件名自动取本地文件名。",
-  "单独上传默认 evidence；artifact 必须带 --basis（拍板编号请加引号）。",
+  "单独上传默认 evidence；artifact 必须带 --basis（拍板编号形如 Q-3；旧写法 q(3) 需加引号）。",
   "省略 --entry 时创建一条“上传附件”评论；指定时挂到当前卡片的已有条目。",
   "附件每个不超过 10 MiB，按扩展名识别：png、jpg/jpeg、gif、webp、avif、svg、html/htm、md/markdown、txt/log、json、pdf。",
   "通用：--project <p> 省略时取 CARDIGAN_PROJECT，再取数据库里唯一的项目；",
@@ -103,7 +103,7 @@ function parseArgs(command: string, args: readonly string[]) {
     usage("artifact 附件必须提供 --basis 拍板编号");
   const basis =
     flags.basis === undefined ? undefined : parseId("decision", flags.basis);
-  if (basis && !basis.ok) usage("--basis 需要合法的拍板编号（形如 q(3)）");
+  if (basis && !basis.ok) usage("--basis 需要合法的拍板编号（形如 Q-3）");
   const entry =
     flags.entry === undefined ? undefined : parseTimelineEntryId(flags.entry);
   if (entry && !entry.ok) usage("--entry 需要合法的条目编号（形如 C-3#2）");

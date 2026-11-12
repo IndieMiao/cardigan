@@ -29,7 +29,7 @@ const post = (suffix: string, body: unknown, key: string, auth = true) =>
 const ids = (list: unknown) =>
   (list as { id: string }[] | undefined)?.map((q) => q.id) ?? [];
 const confirmation = () =>
-  h.store.uow.read((tx) => tx.decisions.get(project_id, "q(2)"));
+  h.store.uow.read((tx) => tx.decisions.get(project_id, "Q-2"));
 
 beforeEach(async () => {
   h = await webHarness({ password: "sensitive-test-password" });
@@ -63,8 +63,8 @@ beforeEach(async () => {
     const { resolution: _resolution, ...open } = decision;
     tx.decisions.put(project_id, {
       ...open,
-      id: "q(2)" as DecisionId,
-      key: "q(2)",
+      id: "Q-2" as DecisionId,
+      key: "Q-2",
       card_id: "C-2" as CardId,
       kind: "approve",
       target: { delivery_id: "D-2" as DeliveryId },
@@ -90,10 +90,10 @@ afterEach(async () => h?.close());
 
 test("a PM-held merge is listed separately and the human can answer it directly", async () => {
   const needs = (await read("/needs-you")).json as Record<string, unknown>;
-  expect(ids(needs.pm_held_merges)).toEqual(["q(2)"]);
-  expect(ids(needs.decisions)).not.toContain("q(2)");
+  expect(ids(needs.pm_held_merges)).toEqual(["Q-2"]);
+  expect(ids(needs.decisions)).not.toContain("Q-2");
   const answer = await post(
-    "/decisions/q(2)/resolve",
+    "/decisions/Q-2/resolve",
     { option: "hold" },
     "take-over",
   );
@@ -133,7 +133,7 @@ test("the human marks and unmarks a card sensitive; a PM-held merge moves to the
   });
   expect(confirmation()).toMatchObject({ decider: "human", status: "open" });
   const needs = (await read("/needs-you")).json as Record<string, unknown>;
-  expect(ids(needs.decisions)).toContain("q(2)");
+  expect(ids(needs.decisions)).toContain("Q-2");
   expect(ids(needs.pm_held_merges)).toEqual([]);
   expect(
     (await post("/cards/C-2/sensitive", { sensitive: false }, "off")).status,

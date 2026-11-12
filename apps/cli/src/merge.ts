@@ -44,7 +44,7 @@ const USAGE = [
   "  cardigan merge request <C-n>                      hold 之后重新发起合并确认",
   "  cardigan merge recheck <C-n> [--project <p>]       重查失败或超时的合并候选",
   "  cardigan merge request-changes <C-n> --reason <原因> [--project <p>]  退回修改（原因必填）",
-  "  cardigan merge push-accept <h(n)> --text <说明> [--project <p>]  确认接受暂停推送里列出的外来提交并恢复自动推送",
+  "  cardigan merge push-accept <H-n> --text <说明> [--project <p>]  确认接受暂停推送里列出的外来提交并恢复自动推送",
   "",
   "PM 代确认中的合并也可以直接 confirm、hold 或 request-changes，按你的拍板记录。",
   "通用：--project 省略时取 CARDIGAN_PROJECT，再取数据库里唯一的项目；",
@@ -373,7 +373,7 @@ function mergePushAccept(args: readonly string[], io: CliIo): number {
   const id = parseId("human_action", raw);
   if (!id.ok)
     throw new CliError(
-      `HumanAction 编号不合法：${JSON.stringify(raw)}（形如 h(3)）`,
+      `HumanAction 编号不合法：${JSON.stringify(raw)}（形如 H-3）`,
       EXIT.usage,
       [USAGE],
     );

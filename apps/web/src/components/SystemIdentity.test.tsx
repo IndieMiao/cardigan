@@ -103,7 +103,7 @@ test("Needs You notices resolved by the system show the gear", async () => {
     id: "N-1",
     kind: "merge",
     card_id: "C-1",
-    decision_id: "q(7)",
+    decision_id: "Q-7",
     question: "",
     option: "merge",
     resolved_by: "system",
@@ -126,7 +126,7 @@ test("Needs You notices resolved by the system show the gear", async () => {
       projectId="p-1"
     />,
   );
-  const article = await screen.findByRole("article", { name: "知会 q(7)" });
+  const article = await screen.findByRole("article", { name: "知会 Q-7" });
   const identity = within(article)
     .getByText("系统")
     .closest(".employee-identity");
@@ -185,7 +185,7 @@ test("system icon is a token-coloured rounded square, not a person circle", () =
 
 test("card detail recent conclusions show the gear for a system decision only", () => {
   const decision = {
-    id: "q(7)",
+    id: "Q-7",
     question: "合并？",
     status: "resolved",
     blocking: false,
@@ -194,7 +194,7 @@ test("card detail recent conclusions show the gear for a system decision only", 
     recommended: "merge",
     trigger: "merge_confirmation",
   };
-  const byPm = { ...decision, id: "q(8)" };
+  const byPm = { ...decision, id: "Q-8" };
   const detail = cardDetail({
     decisions: [decision, byPm],
     recent_conclusions: [
@@ -204,7 +204,7 @@ test("card detail recent conclusions show the gear for a system decision only", 
         type: "decision_resolved",
         author: "system",
         author_display: "系统",
-        decision_id: "q(7)",
+        decision_id: "Q-7",
         decision_option: "merge",
       }),
       timelineEntry({
@@ -214,7 +214,7 @@ test("card detail recent conclusions show the gear for a system decision only", 
         author: "assignment:A-9",
         author_role: "pm",
         author_display: "王熙凤",
-        decision_id: "q(8)",
+        decision_id: "Q-8",
         decision_option: "merge",
       }),
     ],
@@ -229,8 +229,8 @@ test("card detail recent conclusions show the gear for a system decision only", 
   ).toBe("true");
   expect(system?.querySelector(".status-icon")).toBeTruthy();
   const link = within(system as HTMLElement).getByRole("link");
-  expect(link.textContent).toBe("q(7) 系统 确认合并");
+  expect(link.textContent).toBe("Q-7 系统 确认合并");
   expect(link.getAttribute("href")).toBe("#/p/p-1/cards/C-1?at=entry-C-1%239");
   expect(pm?.querySelector(".employee-system")).toBeNull();
-  expect(pm?.textContent).toBe("q(8) 王熙凤 确认合并");
+  expect(pm?.textContent).toBe("Q-8 王熙凤 确认合并");
 });

@@ -40,7 +40,7 @@ afterEach(() => {
 
 const NOW = "2026-01-01T00:00:00.000Z";
 const decision = (overrides: Partial<NeedsDecision> = {}): NeedsDecision => ({
-  id: "q(1)",
+  id: "Q-1",
   card_id: "C-1",
   affected_cards: ["C-1"],
   question: "要发布吗？",
@@ -63,7 +63,7 @@ const decision = (overrides: Partial<NeedsDecision> = {}): NeedsDecision => ({
   ...overrides,
 });
 const action = {
-  id: "h(1)",
+  id: "H-1",
   card_id: "C-1",
   why: "需要连接设备",
   instructions: "连接后运行 **检查**。",
@@ -110,15 +110,15 @@ function http(answer: (path: string, init?: RequestInit) => unknown) {
 test("§3.6: 选方案 posts the human's option and exact words to the decision endpoint", async () => {
   const server = http((path) => (path.endsWith("/needs-you") ? page() : {}));
   render(<NeedsYouPage client={server.client} projectId="p-1" />);
-  await screen.findByLabelText("q(1) 原话或补充说明");
+  await screen.findByLabelText("Q-1 原话或补充说明");
   fireEvent.click(screen.getAllByRole("radio")[1] as HTMLInputElement);
-  fireEvent.change(screen.getByLabelText("q(1) 原话或补充说明"), {
+  fireEvent.change(screen.getByLabelText("Q-1 原话或补充说明"), {
     target: { value: "先别发，等我确认" },
   });
   fireEvent.click(screen.getByRole("button", { name: "按所选拍板" }));
   await waitFor(() => expect(server.posts()).toHaveLength(1));
   expect(server.posts()[0]).toEqual({
-    path: "/api/projects/p-1/decisions/q(1)/resolve",
+    path: "/api/projects/p-1/decisions/Q-1/resolve",
     body: { option: "hold", raw_quote: "先别发，等我确认" },
     headers: {
       accept: "application/json",
@@ -138,20 +138,20 @@ test("§3.6: 选方案 posts the human's option and exact words to the decision 
 test("§3.6: 要求补充信息 / 解释后果 post to the decision comment endpoint; empty input sends just the action", async () => {
   const server = http((path) => (path.endsWith("/needs-you") ? page() : {}));
   render(<NeedsYouPage client={server.client} projectId="p-1" />);
-  await screen.findByLabelText("q(1) 原话或补充说明");
+  await screen.findByLabelText("Q-1 原话或补充说明");
   fireEvent.click(screen.getByRole("button", { name: "要求补充信息" }));
   await waitFor(() => expect(server.posts()).toHaveLength(1));
   expect(server.posts()[0]).toMatchObject({
-    path: "/api/projects/p-1/decisions/q(1)/comments",
+    path: "/api/projects/p-1/decisions/Q-1/comments",
     body: { action: "request_information" },
   });
-  fireEvent.change(screen.getByLabelText("q(1) 原话或补充说明"), {
+  fireEvent.change(screen.getByLabelText("Q-1 原话或补充说明"), {
     target: { value: "请解释影响" },
   });
   fireEvent.click(screen.getByRole("button", { name: "请 PM 解释" }));
   await waitFor(() => expect(server.posts()).toHaveLength(2));
   expect(server.posts()[1]).toMatchObject({
-    path: "/api/projects/p-1/decisions/q(1)/comments",
+    path: "/api/projects/p-1/decisions/Q-1/comments",
     body: { action: "explain", body: "请解释影响" },
   });
 });
@@ -161,13 +161,13 @@ test("§3.6: 完成待你执行的操作 posts the result through the human acti
   render(<NeedsYouPage client={server.client} projectId="p-1" />);
   const submit = await screen.findByRole("button", { name: "确认已完成" });
   expect((submit as HTMLButtonElement).disabled).toBe(true);
-  fireEvent.change(screen.getByLabelText("h(1) 执行结果"), {
+  fireEvent.change(screen.getByLabelText("H-1 执行结果"), {
     target: { value: "设备已连接" },
   });
   fireEvent.click(submit);
   await waitFor(() => expect(server.posts()).toHaveLength(1));
   expect(server.posts()[0]).toMatchObject({
-    path: "/api/projects/p-1/human-actions/h(1)/complete",
+    path: "/api/projects/p-1/human-actions/H-1/complete",
     body: { text: "设备已连接" },
   });
 });
@@ -196,16 +196,16 @@ test("U4a: incidents, blocking decisions, merge confirmations, other decisions a
       },
     ],
     decisions: [
-      decision({ id: "q(2)", blocking: false, why: "普通拍板" }),
+      decision({ id: "Q-2", blocking: false, why: "普通拍板" }),
       decision({
-        id: "q(3)",
+        id: "Q-3",
         blocking: false,
         category: "permission",
         why: "权限确认",
       }),
-      decision({ id: "q(1)", blocking: true, why: "阻塞拍板" }),
+      decision({ id: "Q-1", blocking: true, why: "阻塞拍板" }),
       decision({
-        id: "q(4)",
+        id: "Q-4",
         blocking: true,
         why: "确认合并",
         trigger: "merge_confirmation",
@@ -254,13 +254,13 @@ test("U4a: incidents, blocking decisions, merge confirmations, other decisions a
       true,
     );
   const blocking = within(screen.getByRole("region", { name: "阻塞拍板" }));
-  expect(blocking.getByRole("article", { name: "拍板 q(1)" })).toBeTruthy();
-  expect(blocking.queryByRole("article", { name: "拍板 q(3)" })).toBeNull();
+  expect(blocking.getByRole("article", { name: "拍板 Q-1" })).toBeTruthy();
+  expect(blocking.queryByRole("article", { name: "拍板 Q-3" })).toBeNull();
   const merges = within(screen.getByRole("region", { name: "合并确认" }));
-  expect(merges.getByRole("article", { name: "合并确认 q(4)" })).toBeTruthy();
+  expect(merges.getByRole("article", { name: "合并确认 Q-4" })).toBeTruthy();
   const other = within(screen.getByRole("region", { name: "其他拍板" }));
-  expect(other.getByRole("article", { name: "拍板 q(2)" })).toBeTruthy();
-  expect(other.getByRole("article", { name: "拍板 q(3)" })).toBeTruthy();
+  expect(other.getByRole("article", { name: "拍板 Q-2" })).toBeTruthy();
+  expect(other.getByRole("article", { name: "拍板 Q-3" })).toBeTruthy();
   expect(
     screen.getByRole("region", { name: "待你执行" }).textContent,
   ).toContain("连接结果");
@@ -270,8 +270,8 @@ test("§8.2/M5.4: a stream-triggered refresh keeps the human's draft and shows t
   const first = page({ incidents: [] });
   const second = page({
     decisions: [
-      decision({ id: "q(1)" }),
-      decision({ id: "q(4)", question: "新出现的拍板？" }),
+      decision({ id: "Q-1" }),
+      decision({ id: "Q-4", question: "新出现的拍板？" }),
     ],
   });
   const needsYou = vi
@@ -283,14 +283,14 @@ test("§8.2/M5.4: a stream-triggered refresh keeps the human's draft and shows t
   const view = render(
     <NeedsYouPage client={client} projectId="p-1" revision={0} />,
   );
-  await screen.findByLabelText("q(1) 原话或补充说明");
-  fireEvent.change(screen.getByLabelText("q(1) 原话或补充说明"), {
+  await screen.findByLabelText("Q-1 原话或补充说明");
+  fireEvent.change(screen.getByLabelText("Q-1 原话或补充说明"), {
     target: { value: "还没提交的原话" },
   });
-  const field = screen.getByLabelText("q(1) 原话或补充说明");
+  const field = screen.getByLabelText("Q-1 原话或补充说明");
   view.rerender(<NeedsYouPage client={client} projectId="p-1" revision={1} />);
   await screen.findByText(/新出现的拍板/);
-  expect(screen.getByLabelText("q(1) 原话或补充说明")).toBe(field);
+  expect(screen.getByLabelText("Q-1 原话或补充说明")).toBe(field);
   expect((field as HTMLTextAreaElement).value).toBe("还没提交的原话");
   expect(needsYou).toHaveBeenCalledTimes(2);
 });
@@ -329,8 +329,8 @@ test("§8.6/M5.4: after a reconnect the Needs You view refetches and catches up 
     subscribe: (id, callbacks) => subscribeProject(id, callbacks, create, 10),
   });
   render(<App client={client} />);
-  await screen.findByLabelText("q(1) 原话或补充说明");
-  const field = screen.getByLabelText("q(1) 原话或补充说明");
+  await screen.findByLabelText("Q-1 原话或补充说明");
+  const field = screen.getByLabelText("Q-1 原话或补充说明");
   fireEvent.change(field, { target: { value: "断线前的草稿" } });
   act(() => connections.at(-1)?.emit("open"));
   await waitFor(() =>
@@ -341,7 +341,7 @@ test("§8.6/M5.4: after a reconnect the Needs You view refetches and catches up 
     incidents: [],
     decisions: [
       decision(),
-      decision({ id: "q(7)", question: "断线期间出现的拍板？" }),
+      decision({ id: "Q-7", question: "断线期间出现的拍板？" }),
     ],
   });
   const previous = connections.at(-1);
@@ -355,7 +355,7 @@ test("§8.6/M5.4: after a reconnect the Needs You view refetches and catches up 
   ).toBe("project:0");
   act(() => connections.at(-1)?.emit("open"));
   await screen.findByText(/断线期间出现的拍板/);
-  expect(screen.getByLabelText("q(1) 原话或补充说明")).toBe(field);
+  expect(screen.getByLabelText("Q-1 原话或补充说明")).toBe(field);
   expect((field as HTMLTextAreaElement).value).toBe("断线前的草稿");
   expect(previous?.closed).toBe(true);
 });
@@ -378,7 +378,7 @@ test("§3.2/§14: Agent-written decision text stays text and unsafe links never 
       projectId="p-1"
     />,
   );
-  await screen.findByLabelText("q(1) 原话或补充说明");
+  await screen.findByLabelText("Q-1 原话或补充说明");
   expect(document.querySelector("img")).toBeNull();
   expect(document.querySelector("script")).toBeNull();
   expect(document.querySelector('a[href^="javascript:"]')).toBeNull();
@@ -545,7 +545,7 @@ test("§8.2: a comment with a pasted image posts the entry first and attaches th
 
 test("§3.6: the cleanup decision offers the copyable worktree diff command", async () => {
   const cleanup = decision({
-    id: "q(5)",
+    id: "Q-5",
     trigger: "worktree_cleanup",
     category: "data_deletion",
     assignment_id: "A-2",
@@ -563,11 +563,11 @@ test("§3.6: the cleanup decision offers the copyable worktree diff command", as
     incidents: [],
   }));
   render(<NeedsYouPage client={server.client} projectId="p-1" />);
-  await screen.findByLabelText("q(5) 原话或补充说明");
+  await screen.findByLabelText("Q-5 原话或补充说明");
   const command = "cardigan worktree diff 'A-2' --project 'p-1'";
   expect(screen.getByText(command)).toBeTruthy();
   // The merge confirmation is not a cleanup item and gets no diff command.
-  const merge = screen.getByRole("article", { name: "拍板 q(1)" });
+  const merge = screen.getByRole("article", { name: "拍板 Q-1" });
   expect(within(merge).queryByText(/worktree diff/u)).toBeNull();
   const clipboard = vi.fn(async () => {});
   Object.defineProperty(navigator, "clipboard", {

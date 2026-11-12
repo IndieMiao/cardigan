@@ -75,7 +75,7 @@ const USAGE = [
   "    已是最新版本时不做改动。先用 cardigan role upgrade pm --from-default 追加新版本。",
   "  cardigan needs-you [--project <p>]                   看待你拍板、待你执行的事项和知会",
   "  cardigan needs-you read <知会编号...>|--all [--project <p>]  把知会标为已读",
-  "  cardigan human-action done <h(n)> --text <结果> [--project <p>]",
+  "  cardigan human-action done <H-n> --text <结果> [--project <p>]",
   "",
   "通用：--project 省略时取 CARDIGAN_PROJECT，再取数据库里唯一的项目；",
   "      --data-dir 省略时取 CARDIGAN_DATA_DIR，再取 ~/.local/share/cardigan。",
@@ -166,7 +166,7 @@ function parseHumanAction(raw: string | undefined): HumanActionId {
   const parsed = parseId("human_action", raw);
   if (!parsed.ok) {
     throw new CliError(
-      `HumanAction 编号不合法：${JSON.stringify(raw)}（形如 h(3)）`,
+      `HumanAction 编号不合法：${JSON.stringify(raw)}（形如 H-3）`,
       EXIT.usage,
       [USAGE],
     );
@@ -1404,7 +1404,7 @@ function humanActionDone(args: readonly string[], io: CliIo): number {
   const [sub, ...rest] = args;
   if (sub !== "done") {
     throw new CliError(
-      "用法：cardigan human-action done <h(n)> --text <结果>",
+      "用法：cardigan human-action done <H-n> --text <结果>",
       EXIT.usage,
       [USAGE],
     );

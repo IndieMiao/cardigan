@@ -543,7 +543,7 @@ test("pm create --ops issues a token without record_decision", async () => {
     name: "record_decision",
     arguments: {
       idempotency_key: "e2e-ops-record",
-      decision_id: "q(1)",
+      decision_id: "Q-1",
       option: "a",
       rationale: "fictional",
       raw_quote: "fictional",

@@ -47,7 +47,7 @@ export function failedConfirmedMergeCheck(
     : undefined;
 }
 
-/** C-115 / q(158): trust structured supervisor results, never log prose. */
+/** C-115 / Q-158: trust structured supervisor results, never log prose. */
 export function timeoutOnly(check: MergeCheckView | undefined): boolean {
   return (
     !!check &&

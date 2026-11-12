@@ -171,7 +171,7 @@ test("U6b structural conclusions retain their result and share the comment heade
     ],
     decisions: [
       {
-        id: "q(1)",
+        id: "Q-1",
         question: "选择方案",
         status: "open",
         blocking: true,
@@ -197,7 +197,7 @@ test("U6b structural conclusions retain their result and share the comment heade
     timelineEntry({
       id: "e3",
       type: "decision_request",
-      decision_id: "q(1)",
+      decision_id: "Q-1",
       author_role: "pm",
     }),
   ];
@@ -348,7 +348,7 @@ test("U6b system rows show the authenticated actor and exact upload thumbnail; p
 
 test("merge timeline shows the deadline and distinguishes delegated from human confirmation", () => {
   const decision = {
-    id: "q(1)",
+    id: "Q-1",
     trigger: "merge_confirmation",
     question: "Merge C-1 into main?",
     status: "open",
@@ -400,7 +400,7 @@ test("merge timeline shows the deadline and distinguishes delegated from human c
 
 test("C-95: an open decision shows referenced attachments in the card timeline; plain ones stay unchanged", () => {
   const decision = {
-    id: "q(3)",
+    id: "Q-3",
     question: "选哪张稿子？",
     status: "open",
     decider: "human",
@@ -418,7 +418,7 @@ test("C-95: an open decision shows referenced attachments in the card timeline; 
       }),
     ],
   };
-  const plain = { ...decision, id: "q(4)", attachments: [] };
+  const plain = { ...decision, id: "Q-4", attachments: [] };
   const content = (id: string) => (
     <TimelineContent
       entry={timelineEntry({ type: "decision_request", decision_id: id })}
@@ -441,7 +441,7 @@ test("C-95: an open decision shows referenced attachments in the card timeline; 
 
 test("a PM delegated decision uses a shared status icon and remains distinct from automatic merge approval", () => {
   const decision = {
-    id: "q(2)",
+    id: "Q-2",
     question: "选用哪个展示方式？",
     status: "resolved",
     decider: "pm",
