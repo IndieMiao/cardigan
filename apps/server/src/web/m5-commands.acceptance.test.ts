@@ -363,7 +363,7 @@ test("§14: write routes refuse other credentials, foreign origins and non-JSON,
   ).toMatchObject({ status: 404 });
   // A syntactically valid body for an unknown decision reaches the domain lookup.
   expect(
-    await s.call(s.projectPath("/decisions/q(999)/resolve"), {
+    await s.call(s.projectPath("/decisions/Q-999/resolve"), {
       method: "POST",
       body: { option: "go" },
     }),

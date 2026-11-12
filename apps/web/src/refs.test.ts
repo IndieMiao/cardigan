@@ -11,26 +11,26 @@ test("each reference kind has a destination", () => {
   expect(referenceHref({ kind: "card", id: "C-2" }, "p-1", "C-1")).toBe(
     "#/p/p-1/cards/C-2",
   );
-  expect(referenceHref({ kind: "decision", id: "q(2)" }, "p-1", "C-1")).toBe(
-    "#/p/p-1/cards/C-1?at=decision-q(2)",
+  expect(referenceHref({ kind: "decision", id: "Q-2" }, "p-1", "C-1")).toBe(
+    "#/p/p-1/cards/C-1?at=decision-Q-2",
   );
   expect(referenceHref({ kind: "delivery", id: "V-4" }, "p-1", "C-1")).toBe(
     "#/p/p-1/cards/C-1?at=delivery-V-4",
   );
-  expect(
-    referenceHref({ kind: "human_action", id: "h(3)" }, "p-1", "C-1"),
-  ).toBe("#/p/p-1/cards/C-1?at=human-action-h(3)");
+  expect(referenceHref({ kind: "human_action", id: "H-3" }, "p-1", "C-1")).toBe(
+    "#/p/p-1/cards/C-1?at=human-action-H-3",
+  );
   expect(
     referenceHref({ kind: "timeline_entry", id: "C-1#7" }, "p-1", "C-1"),
   ).toBe("#/p/p-1/cards/C-1?at=entry-C-1%237");
   // A server-resolved card target wins over the currently open card.
   expect(
     referenceHref(
-      { kind: "decision", id: "q(2)", card_id: "C-9" },
+      { kind: "decision", id: "Q-2", card_id: "C-9" },
       "p-1",
       "C-1",
     ),
-  ).toBe("#/p/p-1/cards/C-9?at=decision-q(2)");
+  ).toBe("#/p/p-1/cards/C-9?at=decision-Q-2");
   expect(
     referenceHref(
       { kind: "pr", url: "https://example.com/pr/1" },
@@ -42,8 +42,23 @@ test("each reference kind has a destination", () => {
     referenceHref({ kind: "pr", url: "javascript:alert(1)" }, "p-1", "C-1"),
   ).toBe(undefined);
   // Without a card target, a non-card reference must not invent a fragment.
-  expect(referenceHref({ kind: "decision", id: "q(2)" }, "p-1")).toBe(
-    undefined,
+  expect(referenceHref({ kind: "decision", id: "Q-2" }, "p-1")).toBe(undefined);
+});
+
+test("C-132: legacy q(n) / h(n) text in old comments links to the Q-n / H-n record", () => {
+  const body = "旧评论见 q(95)、h(16) 和 Q-95；q(9) 不在列表里。";
+  expect(
+    linkifyReferences(
+      body,
+      [
+        { kind: "decision", id: "Q-95" },
+        { kind: "human_action", id: "H-16" },
+      ],
+      "p-1",
+      "C-1",
+    ),
+  ).toBe(
+    "旧评论见 [q(95) 拍板](#/p/p-1/cards/C-1?at=decision-Q-95)、[h(16) 待你执行](#/p/p-1/cards/C-1?at=human-action-H-16) 和 [Q-95 拍板](#/p/p-1/cards/C-1?at=decision-Q-95)；q(9) 不在列表里。",
   );
 });
 

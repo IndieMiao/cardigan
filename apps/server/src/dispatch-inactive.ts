@@ -32,7 +32,7 @@ interface ReaperOptions {
   ): void;
 }
 
-/** q(86): supply inactivity eligibility and settlement to the shared stop workflow. */
+/** Q-86: supply inactivity eligibility and settlement to the shared stop workflow. */
 export class InactiveRunReaper {
   constructor(private readonly options: ReaperOptions) {}
   async tick(projects: readonly ProjectId[]) {

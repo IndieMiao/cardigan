@@ -12,7 +12,7 @@ import {
 } from "./core.js";
 import { cancelRunDispatch } from "./launch.js";
 
-// q(88) explicitly selects 60 minutes despite observed legitimate silence of
+// Q-88 explicitly selects 60 minutes despite observed legitimate silence of
 // 48 minutes. The 15-minute alert remains separate from this configurable deadline.
 export const DEFAULT_INACTIVE_CANCEL_AFTER_MS = 60 * 60_000;
 export const INACTIVE_STOP_LEASE_MS = 60_000;

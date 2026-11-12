@@ -11,9 +11,9 @@
 
 export interface WaitingOnItem {
   readonly kind: "decision" | "human_action" | "review" | "blocked";
-  /** The referenced entity: `q(1)`, `h(2)`, `W-3`, `C-4#5`. */
+  /** The referenced entity: `Q-1`, `H-2`, `W-3`, `C-4#5`. */
   readonly ref: string;
-  /** Short human label, e.g. `等你拍板 q(1)`. */
+  /** Short human label, e.g. `等你拍板 Q-1`. */
   readonly label: string;
 }
 

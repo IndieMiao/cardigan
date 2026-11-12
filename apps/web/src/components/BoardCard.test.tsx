@@ -44,9 +44,9 @@ const example: CardListItem = {
   attachment_count: 4,
   waiting_on: [
     { kind: "blocked", ref: "W-3", label: "需要访问权限" },
-    { kind: "decision", ref: "q(1)", label: "选择发布窗口" },
-    { kind: "human_action", ref: "h(1)", label: "连接设备" },
-    { kind: "decision", ref: "q(2)", label: "确定版本" },
+    { kind: "decision", ref: "Q-1", label: "选择发布窗口" },
+    { kind: "human_action", ref: "H-1", label: "连接设备" },
+    { kind: "decision", ref: "Q-2", label: "确定版本" },
   ],
 };
 const renderCard = (item = example, onOpenCard = vi.fn()) =>

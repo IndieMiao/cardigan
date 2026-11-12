@@ -579,9 +579,9 @@ test("every write route enforces cookie authentication, Origin and JSON before a
       cardPath("update"),
       cardPath("cancel"),
       cardPath("supersede"),
-      "/decisions/q(1)/resolve",
-      "/decisions/q(1)/comments",
-      "/human-actions/h(1)/complete",
+      "/decisions/Q-1/resolve",
+      "/decisions/Q-1/comments",
+      "/human-actions/H-1/complete",
     ],
     before = snapshot();
   for (const url of routes) {

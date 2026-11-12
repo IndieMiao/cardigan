@@ -29,6 +29,7 @@ import {
   createGlobalIdAllocator,
   createGlobalRepositories,
 } from "./employees.js";
+import { backupBeforeIdFormatMigration } from "./id-format-migration.js";
 import { createIdAllocator, PROJECT_EVENT_STREAM } from "./ids.js";
 import {
   acknowledgeNotifications,
@@ -42,7 +43,12 @@ import {
   recordNotification,
   routerCursor,
 } from "./inbox.js";
-import { type AppliedMigration, migrate } from "./migrate.js";
+import {
+  type AppliedMigration,
+  defaultMigrationsDir,
+  listMigrations,
+  migrate,
+} from "./migrate.js";
 import {
   listFindings,
   type ReconcileFindingInput,
@@ -245,6 +251,13 @@ export class Store {
       options.migrationsDir,
     );
     try {
+      // C-132: the id-format migration rewrites stored values; keep a copy.
+      backupBeforeIdFormatMigration(
+        db,
+        dbPath,
+        (options.clock ?? systemClock).now(),
+        listMigrations(options.migrationsDir ?? defaultMigrationsDir),
+      );
       store.migrate();
     } catch (error) {
       db.close();

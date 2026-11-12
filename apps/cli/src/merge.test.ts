@@ -321,7 +321,7 @@ test("merge status lists the card, the confirmation and the plan", async () => {
   expect(result.out).toContain(
     `${card_id} awaiting_merge merge_policy=confirm`,
   );
-  expect(result.out).toContain("confirmation: q(1) open");
+  expect(result.out).toContain("confirmation: Q-1 open");
   expect(result.out).toContain("delivery: D-1 W-1 git_head=");
   expect(result.out).toContain("plan: not ready");
   expect(result.out).toContain(
@@ -334,7 +334,7 @@ test("merge confirm records the merge decision with the command as the quote", a
   const result = await cardigan("merge", "confirm", card_id);
   expect(result.code).toBe(0);
   expect(result.out).toContain(`已确认合并 ${card_id}`);
-  expect(state().decisions.find((d) => d.id === "q(1)")).toMatchObject({
+  expect(state().decisions.find((d) => d.id === "Q-1")).toMatchObject({
     status: "resolved",
     resolution: {
       option: "merge",
@@ -350,7 +350,7 @@ test("merge confirm keeps an explicit --quote", async () => {
   await seatAwaitingMerge();
   await cardigan("merge", "confirm", card_id, "--quote", "merge it");
   expect(
-    state().decisions.find((d) => d.id === "q(1)")?.resolution?.raw_quote,
+    state().decisions.find((d) => d.id === "Q-1")?.resolution?.raw_quote,
   ).toBe("merge it");
 });
 
@@ -688,7 +688,7 @@ test.each(["queued", "running", "passed"] as const)(
 // C-65: the human answers PM-held merges directly and flags sensitive cards.
 const holdWithPm = () =>
   store.uow.run((tx) => {
-    const q = tx.decisions.get(project, "q(1)");
+    const q = tx.decisions.get(project, "Q-1");
     if (!q) throw new Error("Missing confirmation");
     tx.decisions.put(project, { ...q, decider: "role:pm" });
   });
@@ -702,7 +702,7 @@ test.each([
     await seatAwaitingMerge();
     holdWithPm();
     expect((await cardigan("merge", "status", card_id)).out).toContain(
-      "confirmation: q(1) open decider=PM（可直接处理）",
+      "confirmation: Q-1 open decider=PM（可直接处理）",
     );
     const needs = await cardigan("needs-you");
     expect(needs.out).toContain("PM 代确认中的合并（1");
@@ -710,7 +710,7 @@ test.each([
     const result = await cardigan("merge", sub, card_id);
     expect(result.code).toBe(0);
     expect(result.out).toContain("PM 代确认中，已按你的拍板记录");
-    expect(state().decisions.find((d) => d.id === "q(1)")).toMatchObject({
+    expect(state().decisions.find((d) => d.id === "Q-1")).toMatchObject({
       decider: "human",
       status: "resolved",
       resolution: {
@@ -737,7 +737,7 @@ test("merge request-changes answers a PM-held confirmation as the human", async 
     "我来退回",
   );
   expect(result.code).toBe(0);
-  expect(state().decisions.find((d) => d.id === "q(1)")).toMatchObject({
+  expect(state().decisions.find((d) => d.id === "Q-1")).toMatchObject({
     decider: "human",
     resolution: { option: "request_changes", taken_over_from: "role:pm" },
   });
@@ -750,7 +750,7 @@ test("card sensitive on|off is recorded and hands a PM-held merge to the human",
   expect(on.code).toBe(0);
   expect(on.out).toContain(`已将 ${card_id} 标为敏感`);
   expect(state().cards.find((c) => c.id === card_id)?.sensitive).toBe(true);
-  expect(state().decisions.find((d) => d.id === "q(1)")).toMatchObject({
+  expect(state().decisions.find((d) => d.id === "Q-1")).toMatchObject({
     decider: "human",
     status: "open",
   });
@@ -809,7 +809,7 @@ test("C-72: a repeated unmark does not promise a restarted timeout", async () =>
     `${card_id} 本来就没有敏感标记，这次没有改动，合并确认的超时计时也没有重新开始。`,
   );
   // The actual due time is unchanged by the no-op and shown as is.
-  const due = unwrap(autoMergeSchedule(state(), "q(1)" as DecisionId)).due_at;
+  const due = unwrap(autoMergeSchedule(state(), "Q-1" as DecisionId)).due_at;
   expect(again.out).toContain(`当前合并确认将于 ${due} 按项目设置自动合并。`);
 });
 
@@ -827,13 +827,13 @@ test("merge push-accept validates its arguments and refuses an action without a 
   const bad = await cardigan("merge", "push-accept", "x1", "--text", "接受");
   expect(bad.code).toBe(2);
   expect(bad.err).toContain("HumanAction 编号不合法");
-  const empty = await cardigan("merge", "push-accept", "h(1)");
+  const empty = await cardigan("merge", "push-accept", "H-1");
   expect(empty.code).toBe(2);
   expect(empty.err).toContain("--text");
   const missing = await cardigan(
     "merge",
     "push-accept",
-    "h(1)",
+    "H-1",
     "--text",
     "接受",
   );

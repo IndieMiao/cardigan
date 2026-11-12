@@ -67,7 +67,7 @@ const ACTIVE_WORK_ITEM: ReadonlySet<string> = new Set([
   "changes_requested",
 ]);
 
-/** Numeric tail of a readable id (`D-12` → 12, `q(3)` → 3). */
+/** Numeric tail of a readable id (`D-12` → 12, `Q-3` → 3). */
 function idNumber(id: string): number {
   const digits = /(\d+)\)?$/.exec(id)?.[1];
   return digits === undefined ? 0 : Number(digits);

@@ -297,7 +297,7 @@ test("§6.4 review rejected produces a rework notification for the delivery's As
 
 test("§6.4 decision requested for the human becomes Needs You plus a PM Office brief", () => {
   const result = routeEvent({
-    event: event("decision_requested", { decision_id: "q(1)" }),
+    event: event("decision_requested", { decision_id: "Q-1" }),
     snapshot: snapshot({ decisions: [decision({ decider: "human" })] }),
   });
   expect(recipients(result)).toEqual(["needs_you", "pm_office"]);
@@ -309,7 +309,7 @@ test("§6.4 decision requested for the human becomes Needs You plus a PM Office 
 
 test("§6.4 decision requested from PM goes only to PM Ops", () => {
   const result = routeEvent({
-    event: event("decision_requested", { decision_id: "q(1)" }),
+    event: event("decision_requested", { decision_id: "Q-1" }),
     snapshot: snapshot({ decisions: [decision({ decider: "role:pm" })] }),
   });
   expect(recipients(result)).toEqual(["pm_ops"]);
@@ -318,7 +318,7 @@ test("§6.4 decision requested from PM goes only to PM Ops", () => {
 test("§6.4 decision resolved wakes every Assignment it had blocked, not PM Ops", () => {
   const result = routeEvent({
     event: event("decision_resolved", {
-      decision_id: "q(1)",
+      decision_id: "Q-1",
       resume_work_items: ["W-2"],
     }),
     snapshot: snapshot(),
@@ -330,7 +330,7 @@ test("§6.4 decision resolved wakes every Assignment it had blocked, not PM Ops"
 test("§6.4 decision resolved with an unowned blocked item asks PM Ops", () => {
   const result = routeEvent({
     event: event("decision_resolved", {
-      decision_id: "q(1)",
+      decision_id: "Q-1",
       resume_work_items: ["W-3"],
     }),
     snapshot: snapshot({
@@ -474,9 +474,9 @@ test("§6.4 completion request notifies the card template's reviewer", () => {
 
 test("§6.4 human action requested becomes Needs You plus a PM Office brief", () => {
   const result = routeEvent({
-    event: event("human_action_requested", { human_action_id: "h(1)" }),
+    event: event("human_action_requested", { human_action_id: "H-1" }),
     snapshot: snapshot({
-      human_actions: [humanAction("h(1)")],
+      human_actions: [humanAction("H-1")],
       work_items: [workItem("W-1", { status: "waiting_human" })],
     }),
   });

@@ -11,9 +11,19 @@ const formats = {
   run: ["R-", ""],
   delivery: ["D-", ""],
   review: ["V-", ""],
+  decision: ["Q-", ""],
+  human_action: ["H-", ""],
+} as const;
+/**
+ * C-132: decisions and human actions were `q(n)` / `h(n)` before. The legacy
+ * spelling still parses, and always normalizes to the current `Q-n` / `H-n`.
+ */
+const legacyFormats: Partial<
+  Record<FormattedIdKind, readonly [string, string]>
+> = {
   decision: ["q(", ")"],
   human_action: ["h(", ")"],
-} as const;
+};
 export type FormattedIdKind = keyof typeof formats;
 // Project-local allocation deliberately excludes global identity IDs.
 export type ReadableIdKind = Exclude<FormattedIdKind, "employee" | "member">;
@@ -59,19 +69,37 @@ export function parseId<K extends FormattedIdKind>(
 ): Result<{ id: Id<K>; sequence: number }> {
   if (!Object.hasOwn(formats, kind)) return validationFailed("Unknown ID kind");
   if (typeof input !== "string") return validationFailed("ID must be a string");
-  const [prefix, suffix] = formats[kind];
-  const digits = input.slice(
-    prefix.length,
-    suffix ? -suffix.length : undefined,
-  );
-  if (
-    !input.startsWith(prefix) ||
-    !input.endsWith(suffix) ||
-    !decimal(digits)
-  ) {
-    return validationFailed(`Invalid ${kind} ID`);
+  const legacy = legacyFormats[kind];
+  for (const [prefix, suffix] of legacy
+    ? [formats[kind], legacy]
+    : [formats[kind]]) {
+    const digits = input.slice(
+      prefix.length,
+      suffix ? -suffix.length : undefined,
+    );
+    if (
+      input.startsWith(prefix) &&
+      input.endsWith(suffix) &&
+      input.length > prefix.length + suffix.length &&
+      decimal(digits)
+    ) {
+      const sequence = Number(digits);
+      const [current, tail] = formats[kind];
+      return {
+        ok: true,
+        value: { id: `${current}${sequence}${tail}` as Id<K>, sequence },
+      };
+    }
   }
-  return { ok: true, value: { id: input as Id<K>, sequence: Number(digits) } };
+  return validationFailed(`Invalid ${kind} ID`);
+}
+
+/** C-132: the current spelling of a legacy `q(n)` / `h(n)` string, else `undefined`. */
+export function normalizeLegacyId(input: string): string | undefined {
+  const match = /^([qh])\(([1-9][0-9]*)\)$/u.exec(input);
+  if (!match) return undefined;
+  const parsed = parseId(match[1] === "q" ? "decision" : "human_action", input);
+  return parsed.ok ? parsed.value.id : undefined;
 }
 
 export function formatTimelineEntryId(

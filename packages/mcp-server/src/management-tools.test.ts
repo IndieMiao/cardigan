@@ -310,14 +310,17 @@ test("collaboration tools use domain commands and preserve reviewable identities
     blocking: true,
     decider: "human",
   });
+  // C-132: new decisions are Q-n; the legacy q(n) spelling resolves the same one.
+  expect(decision.id).toMatch(/^Q-[1-9][0-9]*$/u);
   const resolved = await ok<Decision>(office, "record_decision", {
-    decision_id: decision.id,
+    decision_id: decision.id.replace(/^Q-(\d+)$/u, "q($1)"),
     option: "go",
     rationale: "Confirmed",
     raw_quote: "  go  ",
     via_chain: ["human"],
     batch: "fixture-batch",
   });
+  expect(resolved.id).toBe(decision.id);
   expect(resolved.resolution).toMatchObject({
     raw_quote: "  go  ",
     via_chain: ["human", "assignment:A-1"],

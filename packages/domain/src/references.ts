@@ -10,13 +10,19 @@ const kinds = {
   A: "assignment",
   R: "run",
   V: "review",
+  Q: "decision",
+  H: "human_action",
   q: "decision",
   h: "human_action",
 } as const;
+/**
+ * Identifiers mentioned in a body. Legacy `q(n)` / `h(n)` (C-132) are still
+ * recognized and normalize to `Q-n` / `H-n`, so old comments keep linking.
+ */
 export function extractReferences(body: string): readonly Reference[] {
   const refs: Reference[] = [];
   for (const [token] of body.matchAll(
-    /(?<![A-Za-z0-9_-])(?:C-[1-9][0-9]*(?:#[1-9][0-9]*)?|[WDARV]-[1-9][0-9]*|[qh]\([1-9][0-9]*\))(?![A-Za-z0-9_#])/gu,
+    /(?<![A-Za-z0-9_-])(?:C-[1-9][0-9]*(?:#[1-9][0-9]*)?|[WDARVQH]-[1-9][0-9]*|[qh]\([1-9][0-9]*\))(?![A-Za-z0-9_#])/gu,
   )) {
     if (token.includes("#")) {
       const parsed = parseTimelineEntryId(token);

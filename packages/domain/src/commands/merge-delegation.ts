@@ -111,7 +111,7 @@ export function pmFailedMergeCheck(state: CommandState, q: Decision) {
     ? check
     : undefined;
 }
-/** C-115 / q(158): trust structured supervisor results, never log prose. */
+/** C-115 / Q-158: trust structured supervisor results, never log prose. */
 function timeoutOnly(check: MergeCheckView | undefined): boolean {
   return (
     !!check &&

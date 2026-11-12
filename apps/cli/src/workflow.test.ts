@@ -234,11 +234,9 @@ test("token issue validates the assignment and its state", async () => {
 
 test("human-action reports domain rejection in Chinese with the same exit code", async () => {
   await bootstrap();
-  expect(await run(["human-action", "done", "h(99)", "--text", "done"])).toBe(
-    2,
-  );
+  expect(await run(["human-action", "done", "H-99", "--text", "done"])).toBe(2);
   expect(errors.join("\n")).toContain(
-    "无法完成待办操作 h(99)：对象在当前项目中不存在（not_found）",
+    "无法完成待办操作 H-99：对象在当前项目中不存在（not_found）",
   );
   expect(printed()).toBe("");
 });
@@ -447,11 +445,13 @@ test("human-action done completes the action and requires --text", async () => {
   expect(await run(["human-action", "done", action.id])).toBe(2);
   expect(errors.join("\n")).toContain("--text");
 
+  // C-132: new actions are H-n; the legacy h(n) spelling still finds them.
+  expect(action.id).toMatch(/^H-[1-9][0-9]*$/u);
   expect(
     await run([
       "human-action",
       "done",
-      action.id,
+      action.id.replace(/^H-(\d+)$/u, "h($1)"),
       "--text",
       "fictional result",
     ]),

@@ -455,7 +455,7 @@ test("artifacts require an existing basis and support both attachment target typ
       await call(coder, "upload_attachment", {
         ...upload,
         kind: "artifact",
-        basis: "q(999)",
+        basis: "Q-999",
       }),
     ),
   ).toBe("not_found");
@@ -772,7 +772,7 @@ test("PM queries derive current project views without writes or idempotency keys
         why: `等你拍板 ${q.key}`,
         waiting_on: [
           { kind: "decision", ref: q.key },
-          { kind: "human_action", ref: "h(1)" },
+          { kind: "human_action", ref: "H-1" },
         ],
       },
     ],
@@ -797,7 +797,7 @@ test("PM queries derive current project views without writes or idempotency keys
         merge_confirmation: null,
       },
     ],
-    human_actions: [{ key: "h(1)", why: "Device" }],
+    human_actions: [{ key: "H-1", why: "Device" }],
   });
   for (const name of ["project_snapshot", "list_needs_you"])
     expect(code(await call(coder, name))).toBe("forbidden_tool");

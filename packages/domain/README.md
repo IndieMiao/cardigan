@@ -6,7 +6,7 @@ M1.3 的纯函数命令、事务和预检边界见 [命令契约](COMMANDS.md)�
 
 ## 编号
 
-- `formatId(kind, sequence)` / `parseId(kind, input)` 覆盖 `C-`、`W-`、`A-`、`R-`、`D-`、`V-`、`q(n)`、`h(n)`。
+- `formatId(kind, sequence)` / `parseId(kind, input)` 覆盖 `C-`、`W-`、`A-`、`R-`、`D-`、`V-`、`Q-n`、`H-n`（旧写法 `q(n)`、`h(n)` 仍可解析，并规范成新格式）。
 - 从 1 开始，仅接受无前导零的安全整数；拒绝空白、指数/小数形式和溢出。返回 `Result<T>`，失败为 `validation_failed`，不依赖异常表达非法输入。
 - `formatTimelineEntryId` / `parseTimelineEntryId` 使用 `C-n#m`。条目计数独立于 Event.seq，同一事件可以对应多个条目。
 - `parseEventId` 校验规范的大写 ULID，包括 128 位上限；ULID 的生成通过 `IdAllocator.nextEventId` 注入。

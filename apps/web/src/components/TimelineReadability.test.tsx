@@ -61,7 +61,7 @@ function records() {
     ],
     decisions: [
       {
-        id: "q(8)",
+        id: "Q-8",
         question: "Merge C-1 into main?",
         trigger: "merge_confirmation",
         status: "resolved",
@@ -96,7 +96,7 @@ function records() {
         id: "C-1#3",
         event_seq: 3,
         type: "decision_resolved",
-        decision_id: "q(8)",
+        decision_id: "Q-8",
         decision_option: "merge",
         author: "human",
         body: "在 Needs You 选择了 merge",
@@ -213,7 +213,7 @@ test("U5c delivery, review and decision lead with unique IDs and coloured result
     for (const [n, id, label, result] of [
       [1, "D-9", "交付", "已接受"],
       [2, "V-13", "审核", "已通过"],
-      [3, "q(8)", "拍板", "确认合并"],
+      [3, "Q-8", "拍板", "确认合并"],
     ] as const) {
       const row = document.getElementById(`entry-C-1#${n}`) as HTMLElement;
       const heading = within(row).getByRole("heading", {

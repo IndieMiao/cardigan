@@ -21,7 +21,7 @@ import { writeFailures } from "../testing/write-errors.js";
 import { NeedsYouPage } from "./NeedsYouPage.js";
 
 const q = (overrides: Partial<NeedsDecision> = {}): NeedsDecision => ({
-  id: "q(1)",
+  id: "Q-1",
   question: "要发布吗？",
   context: "发布前的背景",
   why: "等待合并确认",
@@ -45,7 +45,7 @@ const q = (overrides: Partial<NeedsDecision> = {}): NeedsDecision => ({
 });
 const merge = (overrides: Partial<NeedsDecision> = {}): NeedsDecision =>
   q({
-    id: "q(3)",
+    id: "Q-3",
     question: "Merge C-2 into main?",
     trigger: "merge_confirmation",
     why: "确认合并",
@@ -86,7 +86,7 @@ const page = (decisions = [q()]): NeedsPage => ({
   decisions,
   human_actions: [
     {
-      id: "h(1)",
+      id: "H-1",
       card_id: "C-1",
       why: "需要连接设备",
       instructions: "连接后运行 **检查**。",
@@ -147,9 +147,9 @@ test.each(
         projectId="p-1"
       />,
     );
-    await screen.findByRole("article", { name: "执行 h(1)" });
+    await screen.findByRole("article", { name: "执行 H-1" });
     if (operation === "action") {
-      fireEvent.change(screen.getByLabelText("h(1) 执行结果"), {
+      fireEvent.change(screen.getByLabelText("H-1 执行结果"), {
         target: { value: "已完成" },
       });
       fireEvent.click(screen.getByRole("button", { name: "确认已完成" }));
@@ -167,11 +167,11 @@ test.each(
 
 test("groups runtime incidents, blocking decisions, merge confirmations, other decisions and actions in order", async () => {
   const data = page([
-    q({ id: "q(4)", trigger: null, blocking: false, why: "普通拍板" }),
-    merge({ id: "q(3)", blocking: true }),
-    q({ id: "q(1)", trigger: null, blocking: true, why: "阻塞拍板" }),
+    q({ id: "Q-4", trigger: null, blocking: false, why: "普通拍板" }),
+    merge({ id: "Q-3", blocking: true }),
+    q({ id: "Q-1", trigger: null, blocking: true, why: "阻塞拍板" }),
     q({
-      id: "q(2)",
+      id: "Q-2",
       trigger: null,
       blocking: false,
       category: "permission",
@@ -196,7 +196,7 @@ test("groups runtime incidents, blocking decisions, merge confirmations, other d
       projectId="p-1"
     />,
   );
-  await screen.findByRole("article", { name: "拍板 q(1)" });
+  await screen.findByRole("article", { name: "拍板 Q-1" });
   const regions = [
     "运行异常",
     "阻塞拍板",
@@ -214,13 +214,13 @@ test("groups runtime incidents, blocking decisions, merge confirmations, other d
     );
 
   const blocking = within(screen.getByRole("region", { name: "阻塞拍板" }));
-  expect(blocking.getByRole("article", { name: "拍板 q(1)" })).toBeTruthy();
-  expect(blocking.queryByRole("article", { name: "拍板 q(2)" })).toBeNull();
+  expect(blocking.getByRole("article", { name: "拍板 Q-1" })).toBeTruthy();
+  expect(blocking.queryByRole("article", { name: "拍板 Q-2" })).toBeNull();
   const merges = within(screen.getByRole("region", { name: "合并确认" }));
-  expect(merges.getByRole("article", { name: "合并确认 q(3)" })).toBeTruthy();
+  expect(merges.getByRole("article", { name: "合并确认 Q-3" })).toBeTruthy();
   const other = within(screen.getByRole("region", { name: "其他拍板" }));
-  expect(other.getByRole("article", { name: "拍板 q(2)" })).toBeTruthy();
-  expect(other.getByRole("article", { name: "拍板 q(4)" })).toBeTruthy();
+  expect(other.getByRole("article", { name: "拍板 Q-2" })).toBeTruthy();
+  expect(other.getByRole("article", { name: "拍板 Q-4" })).toBeTruthy();
   expect(
     screen.getByRole("region", { name: "待你执行" }).textContent,
   ).toContain("连接结果");
@@ -229,7 +229,7 @@ test("groups runtime incidents, blocking decisions, merge confirmations, other d
 test("decision cards collapse the background, do not preselect an option and expose the impact", async () => {
   const data = page([
     q({
-      id: "q(1)",
+      id: "Q-1",
       trigger: null,
       context: "这是需要折叠的完整背景。",
       options: [
@@ -245,7 +245,7 @@ test("decision cards collapse the background, do not preselect an option and exp
       projectId="p-1"
     />,
   );
-  const card = await screen.findByRole("article", { name: "拍板 q(1)" });
+  const card = await screen.findByRole("article", { name: "拍板 Q-1" });
   expect(within(card).getAllByText("要发布吗？")).toHaveLength(1);
   expect(within(card).queryByText("待拍板")).toBeNull();
   expect(within(card).queryByText("等待合并确认")).toBeNull();
@@ -275,14 +275,14 @@ test("C-95: referenced images show as thumbnails that open the lightbox; other f
     });
   const data = page([
     q({
-      id: "q(1)",
+      id: "Q-1",
       trigger: null,
       attachments: [
         file("F-2", "application/pdf", "spec.pdf"),
         file("F-1", "image/png", "before.png"),
       ],
     }),
-    q({ id: "q(2)", trigger: null, question: "不带附件" }),
+    q({ id: "Q-2", trigger: null, question: "不带附件" }),
   ]);
   render(
     <NeedsYouPage
@@ -290,7 +290,7 @@ test("C-95: referenced images show as thumbnails that open the lightbox; other f
       projectId="p-1"
     />,
   );
-  const card = await screen.findByRole("article", { name: "拍板 q(1)" });
+  const card = await screen.findByRole("article", { name: "拍板 Q-1" });
   const list = within(card).getByRole("list", { name: "拍板附件" });
   const items = within(list).getAllByRole("listitem");
   expect(items.map((li) => li.textContent)).toEqual(["▤ spec.pdf", ""]);
@@ -301,7 +301,7 @@ test("C-95: referenced images show as thumbnails that open the lightbox; other f
   expect(within(thumb).getByRole("img").getAttribute("src")).toBe(
     "/api/projects/p-1/attachments/F-1",
   );
-  const plain = screen.getByRole("article", { name: "拍板 q(2)" });
+  const plain = screen.getByRole("article", { name: "拍板 Q-2" });
   expect(within(plain).queryByRole("list", { name: "拍板附件" })).toBeNull();
   fireEvent.click(thumb);
   const dialog = await screen.findByRole("dialog");
@@ -322,7 +322,7 @@ test("C-95: merge confirmations show the completion request's attachments", asyn
       projectId="p-1"
     />,
   );
-  const card = await screen.findByRole("article", { name: "合并确认 q(3)" });
+  const card = await screen.findByRole("article", { name: "合并确认 Q-3" });
   expect(
     within(within(card).getByRole("list", { name: "拍板附件" })).getByRole(
       "button",
@@ -356,9 +356,9 @@ test.each(["approve", "reject", "merge", "keep", "force_clean"])(
         projectId="p-1"
       />,
     );
-    await screen.findByRole("article", { name: "拍板 q(1)" });
+    await screen.findByRole("article", { name: "拍板 Q-1" });
     fireEvent.click(screen.getByRole("radio"));
-    fireEvent.change(screen.getByLabelText("q(1) 原话或补充说明"), {
+    fireEvent.change(screen.getByLabelText("Q-1 原话或补充说明"), {
       target: { value: "  我选这个  " },
     });
     fireEvent.click(screen.getByRole("button", { name: "按所选拍板" }));
@@ -367,7 +367,7 @@ test.each(["approve", "reject", "merge", "keep", "force_clean"])(
     );
     expect(recordDecision).toHaveBeenCalledWith(
       "p-1",
-      "q(1)",
+      "Q-1",
       option,
       "  我选这个  ",
       expect.any(String),
@@ -381,13 +381,13 @@ test("merge confirmation lists the deliveries, reviews and known gaps and record
   render(
     <NeedsYouPage
       client={fakeClient({
-        needsYou: async () => page([merge({ id: "q(3)" })]),
+        needsYou: async () => page([merge({ id: "Q-3" })]),
         recordDecision,
       })}
       projectId="p-1"
     />,
   );
-  const card = await screen.findByRole("article", { name: "合并确认 q(3)" });
+  const card = await screen.findByRole("article", { name: "合并确认 Q-3" });
   expect(within(card).getByRole("heading", { level: 3 }).textContent).toBe(
     "确认把 C-2 合并到 main？",
   );
@@ -406,14 +406,14 @@ test("merge confirmation lists the deliveries, reviews and known gaps and record
   expect(
     within(card).getByRole("region", { name: "已知遗留" }).textContent,
   ).toContain("Windows 未覆盖");
-  fireEvent.change(within(card).getByLabelText("q(3) 原话或补充说明"), {
+  fireEvent.change(within(card).getByLabelText("Q-3 原话或补充说明"), {
     target: { value: " 可以合并 " },
   });
   fireEvent.click(within(card).getByRole("button", { name: "确认合并" }));
   await waitFor(() =>
     expect(recordDecision).toHaveBeenCalledWith(
       "p-1",
-      "q(3)",
+      "Q-3",
       "merge",
       " 可以合并 ",
       expect.any(String),
@@ -435,15 +435,15 @@ test.each([
       projectId="p-1"
     />,
   );
-  await screen.findByLabelText("q(1) 原话或补充说明");
-  fireEvent.change(screen.getByLabelText("q(1) 原话或补充说明"), {
+  await screen.findByLabelText("Q-1 原话或补充说明");
+  fireEvent.change(screen.getByLabelText("Q-1 原话或补充说明"), {
     target: { value: "请说明影响" },
   });
   fireEvent.click(screen.getByRole("button", { name: label }));
   await waitFor(() =>
     expect(decisionComment).toHaveBeenCalledWith(
       "p-1",
-      "q(1)",
+      "Q-1",
       action,
       "请说明影响",
       expect.any(String),
@@ -471,7 +471,7 @@ test.each(["open", "resolved"])(
       expect(screen.queryByRole("button", { name: "暂不合并" })).toBeNull();
       expect(screen.getByText("合并检查失败或超时，可以退回修改")).toBeTruthy();
     }
-    const reason = screen.getByLabelText("q(3) 退回原因");
+    const reason = screen.getByLabelText("Q-3 退回原因");
     const submit = screen.getByRole("button", {
       name: "确认退回修改",
     }) as HTMLButtonElement;
@@ -486,7 +486,7 @@ test.each(["open", "resolved"])(
     await waitFor(() =>
       expect(recordDecision).toHaveBeenCalledWith(
         "p-1",
-        "q(3)",
+        "Q-3",
         "request_changes",
         " 请补齐空输入校验 ",
         expect.any(String),
@@ -508,13 +508,13 @@ test("hold still submits without a reason after cancelling the return form", asy
   );
   fireEvent.click(await screen.findByRole("button", { name: "退回修改" }));
   fireEvent.click(screen.getByRole("button", { name: "取消" }));
-  expect(screen.queryByLabelText("q(3) 退回原因")).toBeNull();
+  expect(screen.queryByLabelText("Q-3 退回原因")).toBeNull();
   expect(recordDecision).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button", { name: "暂不合并" }));
   await waitFor(() =>
     expect(recordDecision).toHaveBeenCalledWith(
       "p-1",
-      "q(3)",
+      "Q-3",
       "hold",
       "",
       expect.any(String),
@@ -535,19 +535,19 @@ test("execution results require text; errors preserve the draft for retry", asyn
   );
   const submit = await screen.findByRole("button", { name: "确认已完成" });
   expect((submit as HTMLButtonElement).disabled).toBe(true);
-  fireEvent.change(screen.getByLabelText("h(1) 执行结果"), {
+  fireEvent.change(screen.getByLabelText("H-1 执行结果"), {
     target: { value: "设备已连接" },
   });
   fireEvent.click(submit);
   await screen.findByText("暂时失败");
   expect(
-    (screen.getByLabelText("h(1) 执行结果") as HTMLTextAreaElement).value,
+    (screen.getByLabelText("H-1 执行结果") as HTMLTextAreaElement).value,
   ).toBe("设备已连接");
   fireEvent.click(submit);
   await waitFor(() => expect(completeAction).toHaveBeenCalledTimes(2));
   expect(completeAction).toHaveBeenLastCalledWith(
     "p-1",
-    "h(1)",
+    "H-1",
     "设备已连接",
     expect.any(String),
   );
@@ -671,7 +671,7 @@ test("empty groups are not rendered", async () => {
       projectId="p-1"
     />,
   );
-  await screen.findByRole("article", { name: "执行 h(1)" });
+  await screen.findByRole("article", { name: "执行 H-1" });
   for (const name of ["运行异常", "阻塞拍板", "合并确认", "其他拍板"])
     expect(screen.queryByRole("region", { name })).toBeNull();
   expect(screen.getByRole("region", { name: "待你执行" })).toBeTruthy();
@@ -716,16 +716,16 @@ test("waiting durations advance without changing the decision draft", async () =
       projectId="p-1"
     />,
   );
-  await screen.findByLabelText("q(1) 原话或补充说明");
-  fireEvent.change(screen.getByLabelText("q(1) 原话或补充说明"), {
+  await screen.findByLabelText("Q-1 原话或补充说明");
+  fireEvent.change(screen.getByLabelText("Q-1 原话或补充说明"), {
     target: { value: "未提交" },
   });
   act(() => vi.advanceTimersByTime(60000));
   expect(
-    screen.getByRole("article", { name: "拍板 q(1)" }).textContent,
+    screen.getByRole("article", { name: "拍板 Q-1" }).textContent,
   ).toContain("已等待 3 分钟");
   expect(
-    (screen.getByLabelText("q(1) 原话或补充说明") as HTMLTextAreaElement).value,
+    (screen.getByLabelText("Q-1 原话或补充说明") as HTMLTextAreaElement).value,
   ).toBe("未提交");
 });
 
@@ -750,8 +750,7 @@ test.each(["decision", "clarification", "completion"] as const)(
     await screen.findByText("需要连接设备");
     if (kind === "decision")
       fireEvent.click(screen.getByRole("radio", { name: /merge/u }));
-    const input =
-      kind === "completion" ? "h(1) 执行结果" : "q(1) 原话或补充说明";
+    const input = kind === "completion" ? "H-1 执行结果" : "Q-1 原话或补充说明";
     const button =
       kind === "completion"
         ? "确认已完成"
@@ -799,7 +798,7 @@ test.each(["pause", "raise_limit"])(
       />,
     );
     const article = within(
-      await screen.findByRole("article", { name: "拍板 q(1)" }),
+      await screen.findByRole("article", { name: "拍板 Q-1" }),
     );
     const pause = article.getByRole("radio", { name: /暂停：保持停止/u });
     const raise = article.getByRole("radio", { name: /增加一轮审核额度/u });
@@ -834,7 +833,7 @@ test("a paused review-limit decision keeps only raise_limit and explains its aut
     />,
   );
   const article = within(
-    await screen.findByRole("article", { name: "拍板 q(1)" }),
+    await screen.findByRole("article", { name: "拍板 Q-1" }),
   );
   expect(article.getByText("已暂停（临时决定）")).toBeTruthy();
   expect(article.getAllByRole("radio")).toHaveLength(1);
@@ -845,7 +844,7 @@ test("a paused review-limit decision keeps only raise_limit and explains its aut
   await waitFor(() =>
     expect(recordDecision).toHaveBeenCalledWith(
       "p-1",
-      "q(1)",
+      "Q-1",
       "raise_limit",
       "",
       expect.any(String),
@@ -899,7 +898,7 @@ test("answering a human scope decision can grant future PM authority in the same
   await waitFor(() =>
     expect(recordDecision).toHaveBeenCalledWith(
       "p-1",
-      "q(1)",
+      "Q-1",
       "merge",
       "",
       expect.any(String),
@@ -922,7 +921,7 @@ test.each(["spending", "account", "permission", "data_deletion"])(
         })}
       />,
     );
-    await screen.findByRole("article", { name: "拍板 q(1)" });
+    await screen.findByRole("article", { name: "拍板 Q-1" });
     expect(
       screen.queryByRole("checkbox", { name: "此类问题以后由 PM 代拍" }),
     ).toBeNull();
@@ -956,7 +955,7 @@ test("unclaimed decision follow-up displays its outcome without offering a secon
       })}
     />,
   );
-  const notice = await screen.findByRole("article", { name: "拍板落实 q(1)" });
+  const notice = await screen.findByRole("article", { name: "拍板落实 Q-1" });
   expect(within(notice).getByText("已选方案：合并")).toBeTruthy();
   expect(within(notice).getByText("影响：更新基线")).toBeTruthy();
   expect(within(notice).queryByRole("radio")).toBeNull();
@@ -994,17 +993,17 @@ test("failed confirmed merges remain returnable beside read-only decision follow
       })}
     />,
   );
-  const notice = await screen.findByRole("article", { name: "拍板落实 q(1)" });
+  const notice = await screen.findByRole("article", { name: "拍板落实 Q-1" });
   expect(within(notice).queryByRole("radio")).toBeNull();
   expect(within(notice).queryByRole("button", { name: "退回修改" })).toBeNull();
-  const confirmation = screen.getByRole("article", { name: "合并确认 q(3)" });
+  const confirmation = screen.getByRole("article", { name: "合并确认 Q-3" });
   expect(
     within(confirmation).queryByRole("button", { name: "确认合并" }),
   ).toBeNull();
   fireEvent.click(
     within(confirmation).getByRole("button", { name: "退回修改" }),
   );
-  fireEvent.change(within(confirmation).getByLabelText("q(3) 退回原因"), {
+  fireEvent.change(within(confirmation).getByLabelText("Q-3 退回原因"), {
     target: { value: "修复检查失败" },
   });
   fireEvent.click(
@@ -1013,7 +1012,7 @@ test("failed confirmed merges remain returnable beside read-only decision follow
   await waitFor(() =>
     expect(recordDecision).toHaveBeenCalledWith(
       "p-1",
-      "q(3)",
+      "Q-3",
       "request_changes",
       "修复检查失败",
       expect.any(String),
@@ -1026,7 +1025,7 @@ test.each(["host", "human"] as const)(
   "a PM %s handoff shows a readable title, explanations and shared status icons, with the earlier request available separately",
   async (triage) => {
     const item = {
-      id: "h(3)",
+      id: "H-3",
       card_id: "C-1",
       instructions: "在主机终端执行 git fetch，然后回传最新版本号。",
       expected_return: "最新版本号",
@@ -1063,7 +1062,7 @@ test.each(["host", "human"] as const)(
         })}
       />,
     );
-    const article = await screen.findByRole("article", { name: "执行 h(3)" });
+    const article = await screen.findByRole("article", { name: "执行 H-3" });
     expect(
       within(article).getByRole("heading", {
         name: `${triage === "host" ? "主机操作：" : ""}请同步主机上的最新项目代码`,
@@ -1144,7 +1143,7 @@ test.each(checkStates)(
       />,
     );
     const article = await screen.findByRole("article", {
-      name: "合并确认 q(3)",
+      name: "合并确认 Q-3",
     });
     const content = within(article);
     const checkGroup = content.getByRole("region", { name: "合并检查" });
@@ -1181,7 +1180,7 @@ test.each(checkStates)(
     await waitFor(() =>
       expect(recordDecision).toHaveBeenCalledWith(
         "p/a",
-        "q(3)",
+        "Q-3",
         "merge",
         "",
         expect.any(String),
@@ -1238,7 +1237,7 @@ test.each(["failed", "timed_out"] as const)(
       />,
     );
     const article = within(
-      await screen.findByRole("article", { name: "合并确认 q(3)" }),
+      await screen.findByRole("article", { name: "合并确认 Q-3" }),
     );
     expect(
       article.getByText(status === "failed" ? "失败" : "超时"),
@@ -1311,7 +1310,7 @@ test("an invalid merge gate shows a fixed warning without a queued badge or rech
     />,
   );
   const article = within(
-    await screen.findByRole("article", { name: "合并确认 q(3)" }),
+    await screen.findByRole("article", { name: "合并确认 Q-3" }),
   );
   expect(
     article.getByText("合并闸门配置无效，请查看 server 启动日志"),
@@ -1327,7 +1326,7 @@ test("notices list delegated merges and decisions without blocking, and can be m
     id,
     kind,
     card_id: "C-1",
-    decision_id: kind === "merge" ? "q(7)" : "q(8)",
+    decision_id: kind === "merge" ? "Q-7" : "Q-8",
     question: "",
     option: "merge",
     resolved_by: "pm",
@@ -1355,7 +1354,7 @@ test("notices list delegated merges and decisions without blocking, and can be m
   expect(within(group).getByText("改了登录页；无风险。")).toBeTruthy();
   // Notices do not count as things waiting on the human.
   expect(screen.queryByText(/件事等你处理/)).toBeNull();
-  const merge = within(group).getByRole("article", { name: "知会 q(7)" });
+  const merge = within(group).getByRole("article", { name: "知会 Q-7" });
   expect(
     within(merge)
       .getByRole("link", { name: "查看拍板记录" })
@@ -1365,7 +1364,7 @@ test("notices list delegated merges and decisions without blocking, and can be m
   await waitFor(() =>
     expect(markNoticesRead).toHaveBeenCalledWith("p-1", ["E-2"]),
   );
-  const read = within(group).getByRole("article", { name: "知会 q(8)" });
+  const read = within(group).getByRole("article", { name: "知会 Q-8" });
   expect(within(read).queryByRole("button", { name: "标为已读" })).toBeNull();
 });
 
@@ -1373,7 +1372,7 @@ const pagedNotice = (n: number, read = true): NoticeView => ({
   id: `notice-${n}`,
   kind: "decision",
   card_id: "C-1",
-  decision_id: `q(${n})`,
+  decision_id: `Q-${n}`,
   question: "",
   option: "go",
   resolved_by: "pm",
@@ -1599,11 +1598,11 @@ test("a late notice page from a previous project cannot appear in the next proje
   const view = render(<NeedsYouPage client={client} projectId="p-1" />);
   fireEvent.click(await screen.findByRole("button", { name: "显示更多" }));
   view.rerender(<NeedsYouPage client={client} projectId="p-2" />);
-  await screen.findByRole("article", { name: "知会 q(99)" });
+  await screen.findByRole("article", { name: "知会 Q-99" });
   await act(async () =>
     finish({ notices: [pagedNotice(19)], next_cursor: null, unread_count: 0 }),
   );
-  expect(screen.queryByRole("article", { name: "知会 q(19)" })).toBeNull();
+  expect(screen.queryByRole("article", { name: "知会 Q-19" })).toBeNull();
 });
 
 test("PM-held merges are listed without counting as waiting, and the human can answer them directly", async () => {
@@ -1615,7 +1614,7 @@ test("PM-held merges are listed without counting as waiting, and the human can a
           ...page([]),
           human_actions: [],
           pm_held_merges: [
-            q({ id: "q(9)", decider: "role:pm", blocking: false }),
+            q({ id: "Q-9", decider: "role:pm", blocking: false }),
           ],
         }),
         recordDecision,
@@ -1627,13 +1626,13 @@ test("PM-held merges are listed without counting as waiting, and the human can a
     name: "PM 代确认中的合并",
   });
   expect(screen.queryByText(/件事等你处理/)).toBeNull();
-  const item = within(group).getByRole("article", { name: "合并确认 q(9)" });
+  const item = within(group).getByRole("article", { name: "合并确认 Q-9" });
   expect(within(item).getByText(/PM 正在代确认/)).toBeTruthy();
   fireEvent.click(within(item).getByRole("button", { name: "暂不合并" }));
   await waitFor(() =>
     expect(recordDecision).toHaveBeenCalledWith(
       "p-1",
-      "q(9)",
+      "Q-9",
       "hold",
       "",
       expect.any(String),
@@ -1643,7 +1642,7 @@ test("PM-held merges are listed without counting as waiting, and the human can a
   await waitFor(() =>
     expect(recordDecision).toHaveBeenCalledWith(
       "p-1",
-      "q(9)",
+      "Q-9",
       "merge",
       "",
       expect.any(String),

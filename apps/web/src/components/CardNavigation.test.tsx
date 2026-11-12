@@ -70,11 +70,11 @@ test("U5b decision source links to its actual card and excess related cards coll
         ...base,
         card: {
           ...base.card,
-          source: { kind: "decision", decision_id: "q(8)" },
+          source: { kind: "decision", decision_id: "Q-8" },
         },
         relations: {
           ...base.relations,
-          source_card: { id: "C-2", title: "方案来源", decision_id: "q(8)" },
+          source_card: { id: "C-2", title: "方案来源", decision_id: "Q-8" },
           cards: [2, 3, 4, 5].map((n) => ({
             id: `C-${n}`,
             title: `相关卡 ${n}`,
@@ -89,8 +89,8 @@ test("U5b decision source links to its actual card and excess related cards coll
     screen.getByRole("link", { name: "C-2 方案来源" }).getAttribute("href"),
   ).toBe("#/p/p-1/cards/C-2");
   expect(
-    screen.getByRole("link", { name: "q(8)" }).getAttribute("href"),
-  ).toContain("at=decision-q(8)");
+    screen.getByRole("link", { name: "Q-8" }).getAttribute("href"),
+  ).toContain("at=decision-Q-8");
   const more = screen.getByText("另外 1 张").closest("details");
   expect(more?.open).toBe(false);
   fireEvent.click(screen.getByText("另外 1 张"));
