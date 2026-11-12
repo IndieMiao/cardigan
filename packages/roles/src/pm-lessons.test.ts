@@ -206,11 +206,23 @@ test("C-115 PM instructions limit human-only merge handling to structured timeou
     "整体或步骤 timed_out，且不能混有 failed/interrupted",
     "日志里出现 timeout 不够",
     "重查仍须 rationale 和 notice",
-    "检查通过后自动出现在人的 Needs You",
+    "检查结束后自动重新出现在人的 Needs You 待拍板",
     "waiting_merge_checks 是等检查的人工确认，decider 不变",
   ])
     expect(prompt).toContain(rule);
   expect(prompt).not.toContain("你不能退回或重新检查");
+});
+
+test("C-171 PM instructions describe how failed human merge checks show in Needs You", () => {
+  const prompt = corePromptFor("pm");
+  for (const rule of [
+    "检查还没出结果（无结果、排队、运行中）时不进入人的 Needs You 待拍板，只计入等待汇总",
+    "检查已结束未通过（失败、超时、中断）时，交人的确认会列进人的 Needs You 待拍板并标出检查结果",
+    "交给人之前先等当前完成申请的闸门检查通过",
+  ])
+    expect(prompt).toContain(rule);
+  expect(prompt).not.toContain("检查未通过时不进入人的 Needs You");
+  expect(prompt).not.toContain("只显示等待数量");
 });
 
 test("C-65 PM instructions hand sensitive cards' merges to the human", () => {
