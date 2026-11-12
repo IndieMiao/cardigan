@@ -44,14 +44,20 @@ function guardVitest(maxWorkers: number, lockFile: string): void {
   }
   const args = process.argv.slice(2);
   const kept: string[] = [];
+  const positional: string[] = [];
   let limit = maxWorkers;
+  // Vitest resolves this environment variable after CLI/project options.
+  // Preserve a lower budget, but never let inherited or script-local values
+  // raise the host limit (or leave invalid/percentage values for Vitest).
+  const inherited = Number(process.env.VITEST_MAX_WORKERS);
+  if (Number.isSafeInteger(inherited) && inherited > 0)
+    limit = Math.min(limit, inherited);
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === undefined) continue;
     if (arg === "--") {
-      kept.push(`--maxWorkers=${limit}`, ...args.slice(i));
-      process.argv.splice(2, Infinity, ...kept);
-      return;
+      positional.push(...args.slice(i));
+      break;
     }
     const match = /^--max(?:Workers|-workers)(?:=(.*))?$/.exec(arg);
     if (match) {
@@ -60,7 +66,14 @@ function guardVitest(maxWorkers: number, lockFile: string): void {
         limit = Math.min(limit, value);
     } else kept.push(arg);
   }
-  process.argv.splice(2, Infinity, ...kept, `--maxWorkers=${limit}`);
+  process.env.VITEST_MAX_WORKERS = String(limit);
+  process.argv.splice(
+    2,
+    Infinity,
+    ...kept,
+    `--maxWorkers=${limit}`,
+    ...positional,
+  );
 }
 
 export function testWorkerLimit(

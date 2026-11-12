@@ -3,6 +3,7 @@ import { once } from "node:events";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { instructionsFor } from "./role-pack.js";
@@ -72,6 +73,115 @@ test("root scripts, filtered scripts and direct bin invocation inherit the guard
       })
     ).stdout,
   ).toContain('["run","--maxWorkers=2"]');
+});
+
+// Probe the installed Vitest parser, not an argv echo. onInit runs before test
+// workers are started, so even a broken guard cannot create an oversized pool.
+async function realVitestProbe() {
+  const vitestCli = fileURLToPath(
+    new URL("./vitest.mjs", import.meta.resolve("vitest/package.json")),
+  );
+  await mkdir(join(dir, "bin"));
+  await symlink(vitestCli, join(dir, "bin", "vitest"));
+  const config = join(dir, "vitest.config.mjs");
+  await writeFile(
+    config,
+    `export default { test: {
+      maxWorkers: 12,
+      projects: [{ test: { name: 'probe', maxWorkers: 16 } }],
+      reporters: [{ onInit(ctx) {
+        process.stdout.write('WORKER_LIMIT=' + JSON.stringify({
+          root: ctx.config.maxWorkers,
+          projects: ctx.projects.map(project => project.config.maxWorkers),
+          env: process.env.VITEST_MAX_WORKERS,
+        }) + '\\n', () => process.exit(0));
+      } }],
+    } };`,
+  );
+  return {
+    args: ["run", "--config", config],
+    env: { ...env, PATH: `${join(dir, "bin")}:${env.PATH}` },
+  };
+}
+
+function parsedWorkers(stdout: string) {
+  const line = stdout
+    .split("\n")
+    .find((line) => line.startsWith("WORKER_LIMIT="));
+  expect(line, stdout).toBeDefined();
+  return JSON.parse(line?.slice("WORKER_LIMIT=".length) ?? "null");
+}
+
+test.each(["root", "filtered", "direct"])(
+  "real Vitest clamps inherited/script environment in %s invocation",
+  async (invocation) => {
+    const probe = await realVitestProbe();
+    await mkdir(join(dir, "child"));
+    await writeFile(join(dir, "pnpm-workspace.yaml"), "packages: ['child']\n");
+    for (const folder of [dir, join(dir, "child")]) {
+      await writeFile(
+        join(folder, "package.json"),
+        JSON.stringify({
+          name: folder === dir ? "fixture-root" : "fixture-child",
+          scripts: {
+            test: `VITEST_MAX_WORKERS=8 vitest run --config ${folder === dir ? "vitest.config.mjs" : "../vitest.config.mjs"} --maxWorkers=8`,
+          },
+        }),
+      );
+    }
+    const command = invocation === "direct" ? "vitest" : "pnpm";
+    const args =
+      invocation === "direct"
+        ? [...probe.args, "--maxWorkers=8"]
+        : invocation === "root"
+          ? ["test"]
+          : ["--filter", "fixture-child", "test"];
+    const result = await exec(command, args, {
+      cwd: dir,
+      env: { ...probe.env, VITEST_MAX_WORKERS: "8" },
+      timeout: 5000,
+    });
+    expect(parsedWorkers(result.stdout)).toEqual({
+      root: 2,
+      projects: [2],
+      env: "2",
+    });
+  },
+);
+
+test.each([
+  { inherited: "1", cliLimit: "8", expected: 1 },
+  { inherited: "8", cliLimit: "1", expected: 1 },
+  { inherited: "100%", cliLimit: "8", expected: 2 },
+  { inherited: "invalid", cliLimit: "8", expected: 2 },
+  { inherited: "0", cliLimit: "8", expected: 2 },
+])(
+  "real Vitest normalizes env=$inherited and CLI=$cliLimit to $expected",
+  async ({ inherited, cliLimit, expected }) => {
+    const probe = await realVitestProbe();
+    const result = await exec(
+      "vitest",
+      [...probe.args, `--maxWorkers=${cliLimit}`, "--", "some.test.ts"],
+      { env: { ...probe.env, VITEST_MAX_WORKERS: inherited }, timeout: 5000 },
+    );
+    expect(parsedWorkers(result.stdout)).toEqual({
+      root: expected,
+      projects: [expected],
+      env: String(expected),
+    });
+  },
+);
+
+test("real Vitest outside employee injection keeps maxWorkers=4", async () => {
+  const probe = await realVitestProbe();
+  const manualEnv: NodeJS.ProcessEnv = { ...probe.env };
+  delete manualEnv.NODE_OPTIONS;
+  delete manualEnv.VITEST_MAX_WORKERS;
+  const result = await exec("vitest", [...probe.args, "--maxWorkers=4"], {
+    env: manualEnv,
+    timeout: 5000,
+  });
+  expect(parsedWorkers(result.stdout)).toEqual({ root: 4, projects: [4] });
 });
 
 test("competing and nested invocations fail promptly; process death releases the lock", async () => {
