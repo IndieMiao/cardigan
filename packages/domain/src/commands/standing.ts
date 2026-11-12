@@ -17,11 +17,9 @@ import { handoffWithoutOps } from "./delegation.js";
 function standing(d: CommandDraft, id: AssignmentId) {
   ensure(
     d.actor.kind === "human" ||
-      (d.assignment?.role_id === "host_ops" &&
-        d.assignment.status === "active") ||
       (d.actor.kind === "system" && d.tool === "manage_host_ops_action"),
     "unauthorized",
-    "Only the human or authorized host_ops can pause or resume a standing PM",
+    "Only the human or the host_ops action flow can pause or resume a standing PM",
   );
   const a = d.get("assignments", id);
   ensure(
@@ -44,14 +42,7 @@ export function pauseStandingAssignment(
   ports: CommandPorts,
 ): Result<CommandEffect<{ assignment: Assignment; aborted: boolean }>> {
   return command(state, actor, "pause_standing_assignment", ports, (d) => {
-    const result = pauseStandingInDraft(d, p.assignment_id);
-    if (actor.kind === "assignment")
-      d.emit("host_ops_action_taken", undefined, {
-        tool: "host_ops_restart_standing_pm",
-        target_id: p.assignment_id,
-        reason: "Pause standing PM for restart",
-      });
-    return result;
+    return pauseStandingInDraft(d, p.assignment_id);
   });
 }
 export function pauseStandingInDraft(

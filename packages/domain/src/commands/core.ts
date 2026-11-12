@@ -207,13 +207,13 @@ export class CommandDraft {
       "check_merge_push_range",
       "request_worktree_cleanup",
     ].includes(tool);
-    const hostTool = (
-      {
-        recheck_merge: "host_ops_recheck_merge",
-        abort_dispatch: "host_ops_cancel_run",
-        pause_standing_assignment: "host_ops_restart_standing_pm",
-      } as const
-    )[tool as "recheck_merge" | "abort_dispatch" | "pause_standing_assignment"];
+    // Only recheck_merge maps onto a host_ops tool. abort_dispatch and
+    // pause_standing_assignment are host/human-only: host_ops reaches them
+    // solely through the vetted host_ops action flow (actor=system).
+    const hostTool =
+      tool === "recheck_merge"
+        ? ("host_ops_recheck_merge" as const)
+        : undefined;
     ensure(
       tool !== "accept_merge_push_hold" || actor.kind === "human",
       "unauthorized",
@@ -246,9 +246,7 @@ export class CommandDraft {
       "Actor cannot access this project",
     );
     ensure(
-      !hostOnly ||
-        actor.kind !== "assignment" ||
-        (hostTool !== undefined && actor.role_id === "host_ops"),
+      !hostOnly || actor.kind !== "assignment",
       "unauthorized",
       "Only the host can manage launch runs",
     );

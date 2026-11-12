@@ -516,21 +516,6 @@ export function abortDispatch(
       "illegal_transition",
       "A host operation is pending",
     );
-    if (actor.kind === "assignment") {
-      const a = target(d, run.assignment_id);
-      ensure(
-        !run.dispatch_stop && !run.inactivity_stop,
-        "illegal_transition",
-        "An automatic stop is in progress",
-      );
-      const result = cancelRunDispatch(d, run, p.reason);
-      d.emit("host_ops_action_taken", cardId(d, a), {
-        tool: "host_ops_cancel_run",
-        target_id: run.id,
-        reason: p.reason,
-      });
-      return result;
-    }
     return cancelRunDispatch(d, run, p.reason);
   });
 }

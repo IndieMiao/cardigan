@@ -133,14 +133,15 @@ test("S24 invariants 5, 11, 12: pause cancels the Run; only human resume can ato
       ),
     ).toMatchObject({ ok: false, error: { code: "unauthorized" } });
   }
+  // C-111: host_ops must go through host_ops_restart_standing_pm, never the raw command.
   expect(
     pauseStandingAssignment(
       x.state,
       x.hostOps,
       { assignment_id: x.pm.id },
       x.f.io,
-    ).ok,
-  ).toBe(true);
+    ),
+  ).toMatchObject({ ok: false, error: { code: "unauthorized" } });
   expect(
     queueRun(state, x.hostOps, { ...x.params, resume: true }, x.f.io).ok,
   ).toBe(false);
