@@ -14,6 +14,7 @@ export {
   type CentralGitOptions,
   CentralGitTransport,
   type FirstParentCommit,
+  type TreeEntry,
 } from "./central.js";
 export { gitEnvironment, gitSafetyArguments } from "./hardening.js";
 export { type GitTimeoutOptions, withGitTimeout } from "./timeouts.js";
