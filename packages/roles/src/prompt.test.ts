@@ -14,7 +14,7 @@ import {
 } from "./role-pack.js";
 import { parseLaunchConfig } from "./schema.js";
 
-test.each(["coder", "reviewer", "pm"] as const)(
+test.each(["coder", "reviewer", "pm", "design_director"] as const)(
   "%s defaults grant valid attachment read permission",
   (id) => {
     const role = defaultRoleDefinition(id, {
@@ -33,6 +33,8 @@ test.each([
   "pm",
   "coder",
   "host_ops",
+  "ui_ux_designer",
+  "design_director",
 ] as const)(
   "%s default tools include withdrawal exactly when they include review submission",
   (id) => {
@@ -54,6 +56,8 @@ test.each([
   "designer",
   "tester",
   "host_ops",
+  "ui_ux_designer",
+  "design_director",
 ] as const)(
   "converts the default %s format without carrying system sections",
   (id) => {

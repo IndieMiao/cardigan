@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { generalCardTemplate } from "@cardigan/domain";
+import { builtinCardTemplates, generalCardTemplate } from "@cardigan/domain";
 import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { stringify } from "yaml";
@@ -191,7 +191,7 @@ test("invalid YAML and missing completion results leave no writes", async () => 
   expect(await run(["template", "add", "--file", "bad.yaml"])).toBe(2);
   expect(
     store.uow.read((tx) => tx.card_templates.list("templates")),
-  ).toHaveLength(3);
+  ).toHaveLength(builtinCardTemplates.length);
   expect(await run(card("general"))).toBe(0);
   const created = store.uow.read((tx) => tx.cards.list("templates"))[0];
   if (!created) throw new Error("Missing card");

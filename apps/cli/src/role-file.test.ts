@@ -285,6 +285,25 @@ test("a run pinned to an old version still resolves that version", async () => {
   }
 });
 
+test("design roles copy from the default pack with their recommended launch settings", async () => {
+  for (const [id, harness, launch_profile_ref, kind] of [
+    ["ui_ux_designer", "codex", "codex-astra", "produce"],
+    ["design_director", "claude-code", "claude-opus", "verify"],
+  ] as const) {
+    expect(await run(["role", "copy", id, id, "--from-default"])).toBe(0);
+    expect(await run(["role", "show", id])).toBe(0);
+    expect(JSON.parse(printed())).toMatchObject({
+      kind,
+      harness,
+      launch_profile_ref,
+    });
+  }
+  // Roles without a recommendation still need explicit launch settings.
+  expect(await run(["role", "copy", "coder", "maker", "--from-default"])).toBe(
+    2,
+  );
+});
+
 test("role CLI copies defaults and project versions, filters inactive roles and rolls back content", async () => {
   expect(
     await run([

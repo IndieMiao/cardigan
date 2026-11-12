@@ -18,6 +18,7 @@ import {
 } from "@cardigan/domain";
 import {
   convertLegacyRole,
+  DEFAULT_ROLE_LAUNCH,
   defaultRoleDefinition,
   type Harness,
   isDefaultRoleId,
@@ -44,9 +45,10 @@ const USAGE = [
   "  show <角色> [--version <n>] [--history]",
   "  add|update --file <role.yaml>",
   "  copy <源角色> <新角色> [--from-project <项目> | --from-default --harness <CLI> --launch-profile <配置>] [--version <n>] [--name <显示名>]",
+  "    ui_ux_designer、design_director 从默认角色包复制时可省略 --harness 和 --launch-profile，分别默认 codex/codex-astra、claude-code/claude-opus。",
   "  update <角色> --convert-legacy",
   "  upgrade <角色> --from-default [--dry-run]",
-  "    为已有默认角色（pm、coder、reviewer、designer、tester、host_ops）追加新版本：instructions、allowed_tools、",
+  "    为已有默认角色（pm、coder、reviewer、designer、ui_ux_designer、design_director、tester、host_ops）追加新版本：instructions、allowed_tools、",
   "    capabilities、kind、worktree 取当前默认角色包；harness、launch_profile_ref、display_name、abilities、",
   "    required_machine_tags 保留项目自己的。先打印变化和放宽项；内容相同时不追加。--dry-run 只打印不写入。",
   "  deactivate|activate <角色>",
@@ -246,10 +248,13 @@ export async function runRoleCommand(
             const tools = toolList(flags["allowed-tools"]);
             definition = isDefaultRoleId(id)
               ? {
-                  ...defaultRoleDefinition(id, {
-                    harness: "codex",
-                    launch_profile_ref: "codex-agent",
-                  }),
+                  ...defaultRoleDefinition(
+                    id,
+                    DEFAULT_ROLE_LAUNCH[id] ?? {
+                      harness: "codex",
+                      launch_profile_ref: "codex-agent",
+                    },
+                  ),
                   allowed_tools: tools,
                   capabilities: commaList(flags.capabilities),
                 }
@@ -309,15 +314,24 @@ export async function runRoleCommand(
           if (flags["from-default"]) {
             if (!isDefaultRoleId(id)) fail(`默认角色包没有 ${id}`);
             if (version !== undefined) fail("默认角色包不接受 --version");
+            const recommended = DEFAULT_ROLE_LAUNCH[id];
             if (
-              !["claude-code", "codex", "pi"].includes(flags.harness ?? "") ||
-              !flags["launch-profile"]
+              recommended &&
+              flags.harness === undefined &&
+              flags["launch-profile"] === undefined
             )
-              fail("从默认角色包复制需要 --harness 和 --launch-profile");
-            source = defaultRoleDefinition(id, {
-              harness: flags.harness as Harness,
-              launch_profile_ref: flags["launch-profile"] as string,
-            });
+              source = defaultRoleDefinition(id, recommended);
+            else {
+              if (
+                !["claude-code", "codex", "pi"].includes(flags.harness ?? "") ||
+                !flags["launch-profile"]
+              )
+                fail("从默认角色包复制需要 --harness 和 --launch-profile");
+              source = defaultRoleDefinition(id, {
+                harness: flags.harness as Harness,
+                launch_profile_ref: flags["launch-profile"] as string,
+              });
+            }
           } else {
             const sourceProject = flags["from-project"] ?? project;
             if (!store.getProject(sourceProject))
@@ -402,6 +416,8 @@ const DEFAULT_ROLE_IDS = [
   "coder",
   "reviewer",
   "designer",
+  "ui_ux_designer",
+  "design_director",
   "tester",
   "host_ops",
 ];

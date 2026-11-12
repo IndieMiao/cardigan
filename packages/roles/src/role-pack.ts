@@ -89,7 +89,14 @@ export const P2A_PM_OPS_RULES = [
 ] as const;
 
 const ROLE_BODIES: Record<
-  "pm" | "coder" | "reviewer" | "designer" | "tester" | "host_ops",
+  | "pm"
+  | "coder"
+  | "reviewer"
+  | "designer"
+  | "tester"
+  | "host_ops"
+  | "ui_ux_designer"
+  | "design_director",
   string
 > = {
   pm: [
@@ -225,6 +232,37 @@ const ROLE_BODIES: Record<
     "- 第二轮起只复查上一轮的问题是否修好；要新开问题必须是 critical 并带 proof。",
     "- 不改代码，不 push；设计建议写进审核问题，不直接改交付。",
   ].join("\n"),
+  ui_ux_designer: [
+    "# 角色：UI/UX 设计师",
+    "",
+    "你是产出型角色，负责界面设计和交互设计，产出设计稿、交互原型和设计说明。",
+    "",
+    "## 你的职责",
+    "",
+    "- 用 `get_card` 看清目标、验收标准和上轮审核问题；可以写 HTML/React 原型代码，或用当前可用的工具产出设计稿。",
+    "- 用 `submit_delivery` 提交交付，`kind=design`；`subject` 用设计稿的 `artifact_sha256` 或 `doc_version`，原型代码在仓库里时用 commit SHA。截图和设计说明放进 `attachments[]`，也可以用 `upload_attachment` 补充到交付上。",
+    "- 产出交付的 `requested_verifiers` 只填以本工作项为目标的验证项（`get_card` 里 `target_work_item_id` 等于本工作项），并包含其中所有必需项。",
+    "- `summary` 不超过 160 字：只写结论和影响；长内容放进附件或 `known_gaps`。",
+    "- 收到驳回后先用 `get_card` / `get_updates` 看清问题，再提交新版本；新版本会让旧版本的审核失效，设计总监要对新版本重新验证。",
+    "- 主产出工作项的负责人在设计总监通过后提交 `kind=card_completion` 的完成申请，逐条对照验收标准，并把设计稿截图和设计说明放进这次交付的 `attachments[]`，供人拍板时查看。",
+    "- 在仓库里改动时只在当前 worktree 与分支上本地 commit，不 push。",
+    "- 被阻塞时用 `report_blocker`，需要人操作时用 `request_human_action`。",
+  ].join("\n"),
+  design_director: [
+    "# 角色：设计总监",
+    "",
+    "你是验证型角色，审核设计师提交的设计稿本身是否达标、够不够格交给人拍板；你审的是设计稿，不是代码实现。",
+    "",
+    "## 你的职责",
+    "",
+    "- 用 `get_card` 看清交付的 `subject`、验收标准、工作项和上轮问题，只审当前版本。",
+    "- 先用 `read_attachment` 实际查看交付里的截图、原型和设计说明，再写审核结论；没看到附件内容就不下结论，如实写未核。",
+    "- 对照验收标准检查信息层级、交互流程、状态完整性、一致性和文案。",
+    "- 用 `submit_review` 提交结论：`target_sha` 必须等于交付的 `subject`；`issues[]` 每项写清 severity、must_fix、pre_existing，必要时用附件附上标注截图作为证据。",
+    "- 有 `must_fix` 的问题就是驳回；`verdict` 与 `blocking` 由服务端计算，不要自己声明通过。",
+    "- 第二轮起只复查上一轮的问题是否修好；要新开问题必须是 critical 并带 proof。",
+    "- 不改设计稿，不改代码，不 push；修改建议写进审核问题。",
+  ].join("\n"),
   tester: [
     "# 角色：tester",
     "",
@@ -259,6 +297,52 @@ const ROLE_BODIES: Record<
 
 export type DefaultRoleId = keyof typeof ROLE_BODIES;
 
+/**
+ * Explicit kind per default role (p2v-12 §2.3). New roles must be listed here;
+ * there is no "anything else is verify" fallback.
+ */
+export const DEFAULT_ROLE_KINDS: Readonly<Record<DefaultRoleId, RoleKind>> = {
+  pm: "standing",
+  host_ops: "standing",
+  coder: "produce",
+  ui_ux_designer: "produce",
+  reviewer: "verify",
+  designer: "verify",
+  tester: "verify",
+  design_director: "verify",
+};
+
+/** Roles whose defaults include `read_attachment` besides the standing PM. */
+const ATTACHMENT_READERS: ReadonlySet<DefaultRoleId> = new Set([
+  "coder",
+  "reviewer",
+  "design_director",
+]);
+
+const DEFAULT_DISPLAY_NAMES: Partial<Record<DefaultRoleId, string>> = {
+  host_ops: "主机运维",
+  ui_ux_designer: "UI/UX 设计师",
+  design_director: "设计总监",
+};
+
+/**
+ * Recommended launch settings for default roles that have one (user decision
+ * 2026-11-11, p2v-12 §6 item 5): producer and reviewer use different models.
+ * Used when copying from the default pack without an explicit launch profile.
+ */
+export const DEFAULT_ROLE_LAUNCH: Partial<
+  Record<
+    DefaultRoleId,
+    { readonly harness: Harness; readonly launch_profile_ref: string }
+  >
+> = {
+  ui_ux_designer: { harness: "codex", launch_profile_ref: "codex-astra" },
+  design_director: {
+    harness: "claude-code",
+    launch_profile_ref: "claude-opus",
+  },
+};
+
 export interface DefaultRoleOptions {
   readonly harness: Harness;
   readonly launch_profile: string;
@@ -289,12 +373,7 @@ export function defaultRoleDefinition(
   role: DefaultRoleId,
   launch: { readonly harness: Harness; readonly launch_profile_ref: string },
 ): RoleDefinition {
-  const kind: RoleKind =
-    role === "pm" || role === "host_ops"
-      ? "standing"
-      : role === "coder"
-        ? "produce"
-        : "verify";
+  const kind = DEFAULT_ROLE_KINDS[role];
   const common: readonly ToolName[] = [
     "whoami",
     "get_card",
@@ -307,20 +386,18 @@ export function defaultRoleDefinition(
     "request_human_action",
     "request_decision",
     "upload_attachment",
-    ...(role === "coder" || role === "reviewer"
-      ? (["read_attachment"] as const)
-      : []),
+    ...(ATTACHMENT_READERS.has(role) ? (["read_attachment"] as const) : []),
   ];
   return {
     role_id: role,
-    display_name: role === "host_ops" ? "主机运维" : role,
+    display_name: DEFAULT_DISPLAY_NAMES[role] ?? role,
     kind,
     instructions: instructionsFor(role),
     ...launch,
     abilities: [],
     required_machine_tags: [],
     worktree:
-      role === "host_ops" ? "none" : role === "coder" ? "write" : "readonly",
+      role === "host_ops" ? "none" : kind === "produce" ? "write" : "readonly",
     capabilities:
       role === "host_ops" ? [] : [kind === "standing" ? "verify" : kind],
     allowed_tools:

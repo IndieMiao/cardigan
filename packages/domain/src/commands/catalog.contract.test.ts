@@ -65,6 +65,7 @@ test("list_templates returns the latest active version of every template", () =>
   expect(templates.map((t) => [t.id, t.version, t.builtin])).toEqual([
     ["artifact", 1, true],
     ["custom", 2, false],
+    ["design", 1, true],
     ["dev", 1, true],
     ["general", 1, true],
   ]);
