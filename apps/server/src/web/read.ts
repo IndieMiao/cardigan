@@ -948,6 +948,16 @@ function decisionActionWebView(
     merge_confirmation: decision.merge_confirmation
       ? {
           ...decision.merge_confirmation,
+          // C-160: advisory checks the human wants done before confirming.
+          pre_merge_checks: (
+            state.cards.find((card) => card.id === decision.card_id)
+              ?.pre_merge_checks ?? []
+          ).map((check) => ({
+            label: check.label,
+            status: check.status,
+            note: check.note ?? null,
+            updated_at: check.updated_at,
+          })),
           ...(mergeGateStatus === "enabled"
             ? {
                 merge_gate_enabled: true,

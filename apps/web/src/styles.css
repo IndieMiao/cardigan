@@ -1752,6 +1752,32 @@ fieldset.filters {
 .needs-merge-section {
   margin-top: 16px;
 }
+.pre-merge-checks {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--status-wait);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.pre-merge-ready {
+  border-left-color: var(--status-done);
+}
+.pre-merge-checks p {
+  margin: 0 0 6px;
+}
+.pre-merge-title {
+  font-weight: 600;
+  color: var(--status-wait);
+}
+.pre-merge-ready .pre-merge-title {
+  color: var(--status-done);
+}
+.pre-merge-check-list,
+.pre-merge-steps {
+  margin: 0 0 6px;
+  padding-left: 20px;
+}
 .needs-merge-section h4 {
   margin: 0 0 6px;
   color: var(--text-muted);

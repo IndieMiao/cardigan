@@ -137,8 +137,22 @@ export interface Card {
    * always goes to the human, never to PM Ops or the auto-merge timeout.
    */
   readonly sensitive?: boolean;
+  /**
+   * C-160: checks a human wants done before confirming the merge (e.g. an
+   * independent security review). Advisory only: they never change who may
+   * confirm the merge or the auto-merge timeout rules.
+   */
+  readonly pre_merge_checks?: readonly PreMergeCheck[];
   readonly created_by: Author;
   readonly created_at: Timestamp;
+}
+export type PreMergeCheckStatus = "pending" | "passed" | "failed";
+export interface PreMergeCheck {
+  readonly label: string;
+  readonly status: PreMergeCheckStatus;
+  readonly note?: string;
+  readonly updated_by: Author;
+  readonly updated_at: Timestamp;
 }
 export interface CardView extends Card {
   readonly merge_check?: MergeCheckView;

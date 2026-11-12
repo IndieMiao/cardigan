@@ -8,6 +8,7 @@ import {
   type NeedsDecision,
   type NeedsPage,
   type NoticeView,
+  type PreMergeCheckView,
 } from "../api.js";
 import { DecisionAttachments } from "../components/DecisionAttachments.js";
 import { EmployeeIdentity } from "../components/EmployeeIdentity.js";
@@ -342,6 +343,78 @@ function ReviewLine({ review }: { readonly review: MergeConfirmationReview }) {
     </li>
   );
 }
+const preMergeStatus: Record<PreMergeCheckView["status"], string> = {
+  pending: "待完成",
+  passed: "已通过",
+  failed: "有问题",
+};
+function PreMergeCheckList({
+  checks,
+}: {
+  checks: readonly PreMergeCheckView[];
+}) {
+  return (
+    <ul className="pre-merge-check-list">
+      {checks.map((c) => (
+        <li key={c.label}>
+          <strong>{c.label}</strong>：{preMergeStatus[c.status]}
+          {c.note && <span className="hint">（{c.note}）</span>}
+        </li>
+      ))}
+    </ul>
+  );
+}
+/**
+ * C-160: checks the human wants done before confirming (e.g. an independent
+ * security review). Advisory: the confirm button stays available.
+ */
+function PreMergeChecks({
+  checks,
+  gate,
+}: {
+  checks: readonly PreMergeCheckView[];
+  gate: boolean;
+}) {
+  if (checks.length === 0) return null;
+  const open = checks.filter((c) => c.status !== "passed");
+  if (open.length > 0)
+    return (
+      <section
+        className="pre-merge-checks pre-merge-waiting"
+        role="status"
+        aria-label="合并前核对"
+      >
+        <p className="pre-merge-title">
+          等待{open.map((c) => c.label).join("、")}，请先不要确认合并
+        </p>
+        <p>还差这些核对：</p>
+        <PreMergeCheckList checks={open} />
+        <p className="hint">
+          核对全部通过后，这里会提示可以确认。你仍然可以直接确认合并，但会先请你再确认一次。
+        </p>
+      </section>
+    );
+  return (
+    <section
+      className="pre-merge-checks pre-merge-ready"
+      role="status"
+      aria-label="合并前核对"
+    >
+      <p className="pre-merge-title">核对已完成，可以确认合并</p>
+      <PreMergeCheckList checks={checks} />
+      <ol className="pre-merge-steps">
+        <li>看一遍下面的“要合并的交付”和“审核与验收”。</li>
+        <li>需要的话，在“补充说明”里写下你的原话。</li>
+        <li>点“确认合并”。</li>
+        <li>
+          {gate
+            ? "等待合并检查通过并完成合并，结果会出现在卡片时间线上。"
+            : "合并结果会出现在卡片时间线上。"}
+        </li>
+      </ol>
+    </section>
+  );
+}
 /** Shared by Needs You and card details so human writes use the same controls. */
 export function MergeConfirmation({
   q,
@@ -353,10 +426,13 @@ export function MergeConfirmation({
   const [quote, setQuote] = useState("");
   const [returning, setReturning] = useState(false);
   const [reason, setReason] = useState("");
+  const [confirming, setConfirming] = useState(false);
   const action = useAction(done);
   const merge = q.merge_confirmation;
   const check = merge?.merge_check;
   const confirmed = q.status === "resolved";
+  const preChecks = merge?.pre_merge_checks ?? [];
+  const openPreChecks = preChecks.filter((c) => c.status !== "passed");
   const cardId = q.card_id ?? q.related_cards[0]?.id ?? null;
   const decide = (option: "merge" | "hold") =>
     action.run([projectId, q.id, "resolve", option, quote], (key) =>
@@ -375,6 +451,12 @@ export function MergeConfirmation({
           正在代确认。你可以直接选择合并、暂不合并或退回修改，按你的拍板记录，PM
           之后不能再处理这一条；选择合并仍要通过合并闸门检查。
         </p>
+      )}
+      {!confirmed && (
+        <PreMergeChecks
+          checks={preChecks}
+          gate={!!merge?.merge_gate_enabled && !merge.merge_noop}
+        />
       )}
       <DecisionAttachments attachments={q.attachments} />
       {merge?.merge_gate_invalid && (
@@ -465,7 +547,9 @@ export function MergeConfirmation({
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          if (!confirmed) void decide("merge");
+          if (confirmed) return;
+          if (openPreChecks.length > 0) setConfirming(true);
+          else void decide("merge");
         }}
       >
         {confirmed ? (
@@ -542,6 +626,40 @@ export function MergeConfirmation({
           </button>
         </div>
       </form>
+      {confirming && !confirmed && openPreChecks.length > 0 && (
+        <section
+          className="pre-merge-checks pre-merge-waiting"
+          role="alertdialog"
+          aria-label="合并前核对未完成"
+        >
+          <p className="pre-merge-title">
+            还有 {openPreChecks.length}{" "}
+            项合并前核对没有完成，确定现在确认合并吗？
+          </p>
+          <PreMergeCheckList checks={openPreChecks} />
+          <p className="hint">确认后会按你的拍板合并，不再等待这些核对。</p>
+          <div className="action-row">
+            <button
+              type="button"
+              disabled={action.busy}
+              onClick={() => {
+                setConfirming(false);
+                void decide("merge");
+              }}
+            >
+              仍然确认合并
+            </button>
+            <button
+              type="button"
+              className="quiet"
+              disabled={action.busy}
+              onClick={() => setConfirming(false)}
+            >
+              先不确认
+            </button>
+          </div>
+        </section>
+      )}
       {returning && (
         <form
           onSubmit={(e) => {

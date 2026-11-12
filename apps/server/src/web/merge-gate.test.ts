@@ -626,3 +626,53 @@ test("C-145 merge capacity is separate from a same-named Agent and survives card
     merge_checks: [{ running: 0, queued: 0 }],
   });
 });
+
+test("C-160: Needs You and card detail carry the card's pre-merge checks", async () => {
+  h.store.uow.run((tx) => {
+    const card = tx.cards.get(project_id, "C-2");
+    if (!card) throw new Error("Missing card");
+    tx.cards.put(project_id, {
+      ...card,
+      pre_merge_checks: [
+        {
+          label: "独立安全审核",
+          status: "pending",
+          updated_by: "human",
+          updated_at: NOW,
+        },
+        {
+          label: "截图核对",
+          status: "failed",
+          note: "颜色不对",
+          updated_by: "human",
+          updated_at: NOW,
+        },
+      ],
+    });
+  });
+  record("queued");
+  record("running");
+  record("passed");
+  const expected = [
+    { label: "独立安全审核", status: "pending", note: null },
+    { label: "截图核对", status: "failed", note: "颜色不对" },
+  ];
+  const needs = (await read("/needs-you")).json as {
+    decisions: {
+      id: string;
+      merge_confirmation: { pre_merge_checks: unknown[] } | null;
+    }[];
+  };
+  expect(
+    needs.decisions.find((q) => q.id === "Q-2")?.merge_confirmation
+      ?.pre_merge_checks,
+  ).toMatchObject(expected);
+  const detail = (await read("/cards/C-2")).json as {
+    merge_confirmations: {
+      merge_confirmation: { pre_merge_checks: unknown[] };
+    }[];
+  };
+  expect(
+    detail.merge_confirmations[0]?.merge_confirmation.pre_merge_checks,
+  ).toMatchObject(expected);
+});
