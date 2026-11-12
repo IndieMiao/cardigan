@@ -119,7 +119,6 @@ test("S24 invariants 5, 11, 12: pause cancels the Run; only human resume can ato
   });
   for (const actor of [
     x.actor,
-    x.hostOps,
     { kind: "system", project_id: state.project_id } as const,
   ]) {
     expect(
@@ -134,6 +133,17 @@ test("S24 invariants 5, 11, 12: pause cancels the Run; only human resume can ato
       ),
     ).toMatchObject({ ok: false, error: { code: "unauthorized" } });
   }
+  expect(
+    pauseStandingAssignment(
+      x.state,
+      x.hostOps,
+      { assignment_id: x.pm.id },
+      x.f.io,
+    ).ok,
+  ).toBe(true);
+  expect(
+    queueRun(state, x.hostOps, { ...x.params, resume: true }, x.f.io).ok,
+  ).toBe(false);
   expect(
     queueRun(state, human, { ...x.params, resume: true, model: "" }, x.f.io),
   ).toMatchObject({ ok: false, error: { code: "validation_failed" } });

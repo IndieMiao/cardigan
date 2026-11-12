@@ -1,4 +1,5 @@
 import type { Actor, Assignment, Run, RuntimeRef } from "../entities.js";
+import { hostOpsPending } from "../host-ops.js";
 import type { RunId } from "../ids.js";
 import { transition } from "../transitions.js";
 import {
@@ -79,6 +80,7 @@ export function claimInactiveRunStop(
     );
     const run = d.get("runs", p.run_id),
       a = d.get("assignments", run.assignment_id);
+    if (hostOpsPending(state.events, a.id)) return;
     if (run.dispatch_stop) return undefined;
     const old = run.inactivity_stop;
     if (old && old.lease_until > d.now) return undefined;

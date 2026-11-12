@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { lstat } from "node:fs/promises";
 import { isIP } from "node:net";
 import { dirname, isAbsolute, join, posix, resolve } from "node:path";
+import { checkLockName } from "./agent-files.js";
 import { fail, type HcClient } from "./client.js";
 import { type ExecutionConfig, shellQuote } from "./execution.js";
 
@@ -307,4 +308,192 @@ export async function agentListChecks(
       .filter(below)
       .sort(),
   };
+}
+
+/** C-130: paths an executor prepared for one merge-check attempt. */
+export interface AgentCheckPaths {
+  /** `<agentRoot>/checks/<project>/<attempt>` */
+  readonly container: string;
+  /** `<agentRoot>/s/<alias>` */
+  readonly alias: string;
+  /** `<agentRoot>/<checkLockName(slot)>` when the check is serialized. */
+  readonly lock?: string;
+}
+const CHECK_PROJECT = /^[a-zA-Z0-9_][a-zA-Z0-9._-]*$/u;
+const CHECK_ATTEMPT = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/u;
+const CHECK_ALIAS = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}$/u;
+/**
+ * Runs as the executor account. There is no host account on a remote
+ * executor: the account owns its check namespace (`checks`, `s`), where
+ * parents must be real directories (never symlinks) and leaves are created
+ * exclusively as 0700. Every path is a positional argument; the script
+ * itself is constant.
+ *
+ * The slot lock is different: mutual exclusion needs one persistent inode
+ * that candidate code (running as this account) can never unlink, rename or
+ * replace. So the lock is never created here. The operator provisions it,
+ * and the lock and every ancestor up to `/` must be neither owned nor
+ * writable by the account (a sticky ancestor is fine when the next component
+ * is not the account's) — the remote counterpart of the host-owned 2750
+ * agent root that protects the local lock (§12.2).
+ */
+const PREPARE_SCRIPT = [
+  "set -u",
+  "umask 077",
+  "root=$1 project=$2 attempt=$3 alias=$4 lock=$5",
+  'foreign() { [ ! -O "$1" ]; }',
+  // anchored DIR CHILD: DIR cannot be used by this account to replace CHILD.
+  "anchored() {",
+  '  [ ! -L "$1" ] && foreign "$1" || return 1',
+  '  [ ! -w "$1" ] || { [ -k "$1" ] && [ -n "$2" ] && foreign "$2"; }',
+  "}",
+  '[ ! -L "$root" ] && [ -d "$root" ] || exit 3',
+  'if [ -n "$lock" ]; then',
+  '  d=$root c="$root/$lock"',
+  "  while :; do",
+  '    anchored "$d" "$c" || exit 4',
+  '    [ "$d" = / ] && break',
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: POSIX sh parameter expansion.
+  '    c=$d d=${d%/*}; [ -n "$d" ] || d=/',
+  "  done",
+  // Never created or repaired here: a missing or replaced lock is a start failure.
+  '  l="$root/$lock"',
+  '  [ -f "$l" ] && [ ! -L "$l" ] && foreign "$l" && [ -r "$l" ] && [ ! -w "$l" ] && [ ! -s "$l" ] || exit 7',
+  "fi",
+  // The openat equivalent: the working directory pins each validated level,
+  // so a concurrent same-account check swapping a level for a symlink cannot
+  // redirect what is created below it (C-130#15).
+  'cd -P -- "$root" || exit 3',
+  "R=$(pwd -P)",
+  // enter NAME: step into an account-owned real child, creating it if missing.
+  "enter() {",
+  '  [ -L "$1" ] && exit 3',
+  '  [ -e "$1" ] || mkdir -m 0700 -- "$1" 2>/dev/null || :',
+  "  h=$(pwd -P)",
+  '  cd -P -- "$1" 2>/dev/null || exit 3',
+  '  [ "$(pwd -P)" = "$h/$1" ] && [ -O . ] || exit 3',
+  "}",
+  // A check never reuses a previous attempt (same rule as prepareAgentCheckout).
+  'enter checks; enter "$project"',
+  'mkdir -m 0700 -- "$attempt" || exit 5',
+  'cd -P -- "$R" && [ "$(pwd -P)" = "$R" ] || exit 3',
+  "enter s",
+  'if ! mkdir -m 0700 -- "$alias"; then',
+  '  cd -P -- "$R/checks/$project" && [ "$(pwd -P)" = "$R/checks/$project" ] && rmdir -- "$attempt"',
+  "  exit 5",
+  "fi",
+  // The returned paths must still resolve to the leaves created above.
+  'real() { [ "$(cd -P -- "$1" 2>/dev/null && pwd -P)" = "$2" ]; }',
+  'real "$root/checks/$project/$attempt" "$R/checks/$project/$attempt" && real "$root/s/$alias" "$R/s/$alias" || exit 8',
+  "printf 'prepared\\n'",
+].join("\n");
+const CLEANUP_SCRIPT = [
+  "set -u",
+  "root=$1; shift",
+  'R=$(cd -P -- "$root" 2>/dev/null && pwd -P) || exit 6',
+  "failed=0",
+  // Only empty leaves are removed (the worker removed their contents), and
+  // only from the validated parent, never through a swapped intermediate level.
+  "for p; do",
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: POSIX sh parameter expansion.
+  "  parent=${p%/*} name=${p##*/}",
+  '  [ -e "$parent" ] || [ -L "$parent" ] || continue',
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: POSIX sh parameter expansion.
+  '  ( cd -P -- "$parent" 2>/dev/null && [ "$(pwd -P)" = "$R${parent#"$root"}" ] && [ -O . ] || exit 1',
+  '    rmdir -- "$name" 2>/dev/null || { [ ! -e "$name" ] && [ ! -L "$name" ]; } ) || failed=1',
+  "done",
+  '[ "$failed" = 0 ] || exit 6',
+  "printf 'cleaned\\n'",
+].join("\n");
+function checkPaths(
+  config: AgentConfig,
+  input: {
+    readonly project: string;
+    readonly attempt: string;
+    readonly alias: string;
+    readonly lock?: string;
+  },
+): AgentCheckPaths {
+  // Same rules as prepareAgentCheckout / prepareCheckoutAlias and
+  // agentListChecks (C-127); agentRoot is checked by validateSshConfig.
+  validateSshConfig(config);
+  if (
+    !CHECK_PROJECT.test(input.project) ||
+    !CHECK_ATTEMPT.test(input.attempt) ||
+    !CHECK_ALIAS.test(input.alias)
+  )
+    fail("invalid_launch", "Invalid executor check path component");
+  return {
+    container: posix.join(
+      config.agentRoot,
+      "checks",
+      input.project,
+      input.attempt,
+    ),
+    alias: posix.join(config.agentRoot, "s", input.alias),
+    ...(input.lock === undefined
+      ? {}
+      : { lock: posix.join(config.agentRoot, input.lock) }),
+  };
+}
+/**
+ * C-130: the SSH command that prepares a merge check's lock, container and
+ * alias on the executor itself. The caller must treat any non-zero exit or
+ * missing `prepared` trailer as a start failure and never fall back to the host.
+ */
+export async function agentPrepareCheckCommand(
+  config: AgentConfig,
+  input: {
+    readonly project: string;
+    readonly attempt: string;
+    readonly alias: string;
+    /** Merge-check slot lock to prepare; omitted when not serialized. */
+    readonly slot?: number;
+  },
+) {
+  const lock = input.slot === undefined ? undefined : checkLockName(input.slot);
+  const paths = checkPaths(config, {
+    ...input,
+    ...(lock === undefined ? {} : { lock }),
+  });
+  const command = await agentProcessCommand(config, [
+    "sh",
+    "-c",
+    PREPARE_SCRIPT,
+    "sh",
+    config.agentRoot,
+    input.project,
+    input.attempt,
+    input.alias,
+    lock ?? "",
+  ]);
+  return { ...command, paths, expect: "prepared\n" };
+}
+/** C-130: remove the empty container and alias leaves on the executor. */
+export async function agentCleanupCheckCommand(
+  config: AgentConfig,
+  paths: AgentCheckPaths,
+) {
+  const below = (path: string, area: string, depth: number) => {
+    const part = path.slice(config.agentRoot.length + 1).split("/");
+    return (
+      path.startsWith(`${config.agentRoot}/${area}/`) &&
+      posix.normalize(path) === path &&
+      part.length === depth &&
+      part.every((name) => CHECK_PROJECT.test(name))
+    );
+  };
+  validateSshConfig(config);
+  if (!below(paths.container, "checks", 3) || !below(paths.alias, "s", 2))
+    fail("invalid_launch", "Invalid executor check path component");
+  const command = await agentProcessCommand(config, [
+    "sh",
+    "-c",
+    CLEANUP_SCRIPT,
+    "sh",
+    config.agentRoot,
+    paths.container,
+    paths.alias,
+  ]);
+  return { ...command, expect: "cleaned\n" };
 }

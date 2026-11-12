@@ -1,4 +1,5 @@
 import type { Actor, Assignment, Run, RuntimeRef } from "../entities.js";
+import { hostOpsPending, pendingHostOpsActions } from "../host-ops.js";
 import type { AssignmentId, EventId, RunId } from "../ids.js";
 import { hasRunTarget } from "../run-target.js";
 import { EXTERNAL_ASSIGNMENT_START_ERROR } from "../standing.js";
@@ -19,6 +20,11 @@ const unfinished = (run: Run) =>
   !["completed", "failed", "cancelled"].includes(run.status);
 function target(d: CommandDraft, id: AssignmentId) {
   const assignment = d.get("assignments", id);
+  ensure(
+    d.tool === "manage_host_ops_action" || !hostOpsPending(d.state.events, id),
+    "illegal_transition",
+    "A host operation is pending",
+  );
   ensure(
     !assignment.external,
     "validation_failed",
@@ -71,6 +77,24 @@ function exclusive(
   path = assignment.worktree_path,
 ) {
   ensure(
+    !pendingHostOpsActions(d.state.events).some((action) => {
+      if (
+        action.assignment_id === assignment.id &&
+        d.tool === "manage_host_ops_action"
+      )
+        return false;
+      const owner = d.get("assignments", action.assignment_id);
+      return (
+        owner.id === assignment.id ||
+        (path &&
+          owner.machine_id === assignment.machine_id &&
+          owner.worktree_path === path)
+      );
+    }),
+    "illegal_transition",
+    "Assignment or worktree has a pending host operation",
+  );
+  ensure(
     !d.list("runs").some((r) => {
       if (
         r.id === run_id ||
@@ -107,7 +131,7 @@ export function launchSettings(
   };
 }
 const HARNESS_VALUES: readonly string[] = ["claude-code", "codex", "pi"];
-function settingsValid(source: LaunchSettingsSource) {
+export function settingsValid(source: LaunchSettingsSource) {
   if (source.harness !== undefined)
     ensure(
       HARNESS_VALUES.includes(source.harness),
@@ -132,7 +156,7 @@ export type RunKind = Run["kind"];
 export interface QueueRunParams {
   /** Explicit host start may consume the Assignment's already queued work. */
   readonly reuse_queued?: boolean;
-  /** Explicit human start after a standing PM pause; never set by Dispatcher. */
+  /** Explicit host start after a standing PM pause; never set by Dispatcher. */
   readonly resume?: boolean;
   readonly assignment_id: AssignmentId;
   readonly model: string;
@@ -158,75 +182,76 @@ export function queueRun(
   ports: CommandPorts,
 ) {
   return command(state, actor, "queue_run", ports, (d) => {
-    if (p.resume) resumeStanding(d, p.assignment_id);
-    const assignment = target(d, p.assignment_id);
-    ensure(
-      hasRunTarget(assignment, d.state),
-      "illegal_transition",
-      "验证工作项尚无当前可审交付，请等待交付后再启动",
-    );
-    if (p.reuse_queued) {
-      const queued = d
-        .list("runs")
-        .find(
-          (r) => r.assignment_id === assignment.id && r.status === "queued",
-        );
-      if (queued) {
-        exclusive(d, assignment, queued.id);
-        snapshot(queued, assignment);
-        return queued;
-      }
-    }
-    text(p.model, "model");
-    text(p.agent_cli_version, "agent_cli_version");
-    if (p.launch_profile_ref !== undefined)
-      text(p.launch_profile_ref, "launch_profile_ref");
-    settingsValid(p);
-    if (p.trigger_event_id !== undefined) {
-      ensure(
-        !d
-          .list("runs")
-          .some(
-            (run) =>
-              run.assignment_id === assignment.id &&
-              run.trigger_event_id === p.trigger_event_id,
-          ),
-        "idempotency_conflict",
-        "A Run already exists for this trigger event",
-      );
-    }
-    exclusive(d, assignment);
-    const id = d.ids.next(state.project_id, "run");
-    const event = d.emit("run_queued", cardId(d, assignment), {
-      run_id: id,
-      assignment_id: assignment.id,
-      kind: p.kind ?? "initial",
-      ...(p.trigger_event_id === undefined
-        ? {}
-        : { trigger_event_id: p.trigger_event_id }),
-    });
-    const run: Run = {
-      id,
-      assignment_id: assignment.id,
-      ...(assignment.employee_id
-        ? { employee_id: assignment.employee_id }
-        : {}),
-      ...(p.launch_profile_ref
-        ? { launch_profile_ref: p.launch_profile_ref }
-        : {}),
-      ...launchSettings(p),
-      trigger_event_id: p.trigger_event_id ?? event.id,
-      kind: p.kind ?? "initial",
-      status: "queued",
-      role_version: assignment.role_version,
-      model: p.model,
-      agent_cli_version: p.agent_cli_version,
-      outcome: null,
-      summary: "",
-    };
-    d.put("runs", run);
-    return run;
+    return queueRunInDraft(d, p);
   });
+}
+/** Shared queue transition, including ownership, snapshots and exclusivity checks. */
+export function queueRunInDraft(d: CommandDraft, p: QueueRunParams) {
+  const state = d.state;
+  if (p.resume) resumeStanding(d, p.assignment_id);
+  const assignment = target(d, p.assignment_id);
+  ensure(
+    hasRunTarget(assignment, d.state),
+    "illegal_transition",
+    "验证工作项尚无当前可审交付，请等待交付后再启动",
+  );
+  if (p.reuse_queued) {
+    const queued = d
+      .list("runs")
+      .find((r) => r.assignment_id === assignment.id && r.status === "queued");
+    if (queued) {
+      exclusive(d, assignment, queued.id);
+      snapshot(queued, assignment);
+      return queued;
+    }
+  }
+  text(p.model, "model");
+  text(p.agent_cli_version, "agent_cli_version");
+  if (p.launch_profile_ref !== undefined)
+    text(p.launch_profile_ref, "launch_profile_ref");
+  settingsValid(p);
+  if (p.trigger_event_id !== undefined) {
+    ensure(
+      !d
+        .list("runs")
+        .some(
+          (run) =>
+            run.assignment_id === assignment.id &&
+            run.trigger_event_id === p.trigger_event_id,
+        ),
+      "idempotency_conflict",
+      "A Run already exists for this trigger event",
+    );
+  }
+  exclusive(d, assignment);
+  const id = d.ids.next(state.project_id, "run");
+  const event = d.emit("run_queued", cardId(d, assignment), {
+    run_id: id,
+    assignment_id: assignment.id,
+    kind: p.kind ?? "initial",
+    ...(p.trigger_event_id === undefined
+      ? {}
+      : { trigger_event_id: p.trigger_event_id }),
+  });
+  const run: Run = {
+    id,
+    assignment_id: assignment.id,
+    ...(assignment.employee_id ? { employee_id: assignment.employee_id } : {}),
+    ...(p.launch_profile_ref
+      ? { launch_profile_ref: p.launch_profile_ref }
+      : {}),
+    ...launchSettings(p),
+    trigger_event_id: p.trigger_event_id ?? event.id,
+    kind: p.kind ?? "initial",
+    status: "queued",
+    role_version: assignment.role_version,
+    model: p.model,
+    agent_cli_version: p.agent_cli_version,
+    outcome: null,
+    summary: "",
+  };
+  d.put("runs", run);
+  return run;
 }
 
 export interface DispatchRunParams {
@@ -486,6 +511,26 @@ export function abortDispatch(
   return command(state, actor, "abort_dispatch", ports, (d) => {
     text(p.reason, "reason");
     const run = d.get("runs", p.run_id);
+    ensure(
+      !hostOpsPending(state.events, run.assignment_id),
+      "illegal_transition",
+      "A host operation is pending",
+    );
+    if (actor.kind === "assignment") {
+      const a = target(d, run.assignment_id);
+      ensure(
+        !run.dispatch_stop && !run.inactivity_stop,
+        "illegal_transition",
+        "An automatic stop is in progress",
+      );
+      const result = cancelRunDispatch(d, run, p.reason);
+      d.emit("host_ops_action_taken", cardId(d, a), {
+        tool: "host_ops_cancel_run",
+        target_id: run.id,
+        reason: p.reason,
+      });
+      return result;
+    }
     return cancelRunDispatch(d, run, p.reason);
   });
 }

@@ -1,15 +1,31 @@
 import { expect, test } from "vitest";
 import {
+  beginHostOpsAction,
+  claimDispatchStop,
+  createHostOpsAssignment,
   type Delivery,
+  dispatchRun,
+  finishHostOpsAction,
+  finishRun,
+  HOST_OPS_ROLE_TOOLS,
   prepareDelivery,
+  queueRun,
   type ReviewIssue,
   recordDecision,
   recordMergeResult,
+  recoverDispatch,
+  startDispatchStop,
   submitDelivery,
   submitReview,
 } from "../index.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
-import { human, value } from "./test-fixtures.js";
+import {
+  fixture as commandFixture,
+  human,
+  ports,
+  role,
+  value,
+} from "./test-fixtures.js";
 
 const system = { kind: "system" as const, project_id: human.project_id };
 const bug: ReviewIssue = {
@@ -262,3 +278,156 @@ test("a generic merge return does not grant an exemption based on its prose or f
   expect(next.merge_conflict_event_id).toBeUndefined();
   expect(f.state.decisions.at(-1)).toMatchObject({ trigger: "review_limit" });
 });
+
+test.each([false, true])(
+  "host restarts retain a conflict's single free review through repeated recovery (automatic first=%s)",
+  async (automatic) => {
+    const seed = commandFixture();
+    const f = mergeFixture("auto", 1, {
+      state: {
+        ...seed,
+        cards: [],
+        work_items: [],
+        assignments: [],
+        runs: [],
+        roles: [
+          ...seed.roles,
+          { ...role("host_ops"), allowed_tools: HOST_OPS_ROLE_TOOLS },
+        ],
+      },
+      ports: ports(),
+    });
+    const ops = f.commit(
+      createHostOpsAssignment(f.state, human, {}, f.io),
+    ).assignment;
+    const { product, completion } = await f.accept();
+    f.commit(
+      recordMergeResult(
+        f.state,
+        system,
+        {
+          card_id: f.card.id,
+          completion_id: completion.id,
+          result: {
+            kind: "conflicted",
+            delivery_id: product.id,
+            files: ["fixture.ts"],
+          },
+        },
+        f.io,
+      ),
+    );
+    const conflict = f.state.events.find((e) => e.type === "merge_conflicted");
+    if (!conflict) throw new Error("Missing conflict");
+    const active = f.state.runs.find(
+      (r) => r.assignment_id === f.coder.id && r.status === "running",
+    );
+    if (active)
+      f.commit(
+        finishRun(
+          f.state,
+          f.actor(f.coder),
+          {
+            run_id: active.id,
+            outcome: "completed",
+            summary: "Awaiting repair",
+          },
+          f.io,
+        ),
+      );
+    const queued = f.commit(
+      queueRun(
+        f.state,
+        human,
+        {
+          assignment_id: f.coder.id,
+          model: "fixture",
+          agent_cli_version: "1",
+          kind: "fix",
+          trigger_event_id: conflict.id,
+        },
+        f.io,
+      ),
+    );
+    f.commit(dispatchRun(f.state, system, { run_id: queued.id }, f.io));
+    if (automatic) {
+      const claim = f.commit(
+        claimDispatchStop(
+          f.state,
+          system,
+          {
+            run_id: queued.id,
+            lease_ms: 60_000,
+            reason: "delivery_retry_exhausted",
+          },
+          f.io,
+        ),
+      );
+      if (!claim?.dispatch_stop) throw new Error("Missing automatic stop");
+      const stop_id = claim.dispatch_stop.attempt_id;
+      f.commit(
+        startDispatchStop(
+          f.state,
+          system,
+          { run_id: queued.id, attempt_id: stop_id },
+          f.io,
+        ),
+      );
+      const ref = f.state.assignments.find(
+        (a) => a.id === f.coder.id,
+      )?.runtime_ref;
+      if (!ref) throw new Error("Missing terminal");
+      f.commit(
+        recoverDispatch(
+          f.state,
+          system,
+          {
+            run_id: queued.id,
+            timeout_ms: 1,
+            failed_attempts: 5,
+            max_failures: 5,
+            stopped_runtime: ref,
+            stop_id,
+          },
+          f.io,
+        ),
+      );
+    }
+    const restart = () => {
+      const intent = f.commit(
+        beginHostOpsAction(
+          f.state,
+          f.actor(ops),
+          {
+            tool: "host_ops_restart_assignment",
+            target_id: f.coder.id,
+            reason: "Recover fix",
+            snapshot: { model: "fixture", agent_cli_version: "1" },
+          },
+          f.io,
+        ),
+      );
+      return f.commit(
+        finishHostOpsAction(f.state, system, intent.action_id, f.io),
+      ).run;
+    };
+    restart();
+    expect(restart()?.kind).toBe("fix");
+    const repair = await f.deliver("code", "b".repeat(40));
+    expect(repair.merge_conflict_event_id).toBe(conflict.id);
+    expect(
+      f.state.work_items.find((w) => w.id === f.reviewer.work_item_id),
+    ).toMatchObject({ status: "ready", max_review_rounds: 1 });
+    f.review(repair);
+    expect(
+      f.state.work_items.find((w) => w.id === f.reviewer.work_item_id)?.status,
+    ).toBe("passed");
+    restart();
+    const next = await f.deliver("code", "c".repeat(40));
+    expect(next.merge_conflict_event_id).toBeUndefined();
+    expect(
+      f.state.work_items.find((w) => w.id === f.reviewer.work_item_id)?.status,
+    ).toBe("waiting_decision");
+    expect(f.state.decisions.at(-1)?.trigger).toBe("review_limit");
+  },
+);
