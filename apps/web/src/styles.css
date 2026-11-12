@@ -1836,6 +1836,7 @@ fieldset.filters {
 .execution-table th {
   color: var(--text-muted);
   font-weight: 600;
+  white-space: nowrap;
 }
 .execution-status {
   display: grid;
