@@ -46,6 +46,7 @@ import type { Store } from "@cardigan/store";
 import type { MergeGit } from "./git.js";
 
 import { mergeProjectSettings } from "./merge-push-loop.js";
+import { MergeSkipLog } from "./merge-skip-log.js";
 import { withPublication } from "./publication-lock.js";
 
 type Candidate = Extract<PreparedMerge, { status: "candidate" }>;
@@ -97,6 +98,9 @@ interface Task {
 export class MergeChecks {
   private readonly abort = new AbortController();
   private readonly seen = new Set<string>();
+  private readonly skips = new MergeSkipLog("merge checks", (error) =>
+    this.options.onError(error),
+  );
   /**
    * P2a-12 D: one in-flight lane per project (a project never checks or
    * merges two cards in parallel); publication must never wait for it (C-113).
@@ -781,10 +785,22 @@ export class MergeChecks {
         project = this.options.git.projectOf(id);
       if (settings.status !== "enabled" || !project) continue;
       const state = this.state(id);
+      this.skips.retain(
+        id,
+        new Set(
+          state.cards
+            .filter((c) => c.status === "awaiting_merge")
+            .map((c) => c.id),
+        ),
+      );
       for (const card of state.cards) {
         if (card.status !== "awaiting_merge") continue;
         const plan = prepareMergePlan(state, card.id);
-        if (!plan.ok) continue;
+        if (!plan.ok) {
+          this.skips.skipped(id, card.id, plan.error);
+          continue;
+        }
+        this.skips.ready(id, card.id);
         const entered = state.events
           .filter(
             (e) =>

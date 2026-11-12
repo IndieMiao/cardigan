@@ -22,6 +22,7 @@ import type { Store } from "@cardigan/store";
 import type { MergeGit } from "./git.js";
 import { startTimerLoop, type TimerLoop } from "./loop.js";
 import { type MergeCheckOptions, MergeChecks } from "./merge-checks.js";
+import { MergeSkipLog } from "./merge-skip-log.js";
 import { withPublication } from "./publication-lock.js";
 
 /** Default cadence: one pass is cheap when no card is ready. */
@@ -75,7 +76,11 @@ export interface MergeLoopOptions {
 export class MergeExecutor {
   private serial: Promise<void> = Promise.resolve();
   private readonly checks: MergeChecks | undefined;
+  private readonly skips: MergeSkipLog;
   constructor(private readonly options: MergeLoopOptions) {
+    this.skips = new MergeSkipLog("merge loop", (error) =>
+      this.options.onError?.(error),
+    );
     this.checks = options.gate
       ? new MergeChecks({
           ...options.gate,
@@ -258,6 +263,14 @@ export class MergeExecutor {
     // Cards whose plan does not validate stay put (not confirmed, blocked or
     // nothing to merge); remember them so one pass cannot spin forever.
     const attempted = new Set<CardId>();
+    this.skips.retain(
+      project_id,
+      new Set(
+        this.state(project_id)
+          .cards.filter((c) => c.status === "awaiting_merge")
+          .map((c) => c.id),
+      ),
+    );
     for (;;) {
       const state = this.state(project_id),
         card = state.cards
@@ -270,7 +283,11 @@ export class MergeExecutor {
       if (card === undefined) return;
       attempted.add(card.id);
       const plan = mergePlan(this.state(project_id), card.id);
-      if (!plan.ok) continue;
+      if (!plan.ok) {
+        this.skips.skipped(project_id, card.id, plan.error);
+        continue;
+      }
+      this.skips.ready(project_id, card.id);
       if (!(await this.merge(project, plan.value))) return;
     }
   }

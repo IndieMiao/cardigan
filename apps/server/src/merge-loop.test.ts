@@ -201,6 +201,69 @@ test("an unconfirmed card stays put and is never asked twice", async () => {
   expect(f.card().status).toBe("awaiting_merge");
 }, 30_000);
 
+test("C-112: skips are logged once per reason, read-only human actions do not hold the merge, merge-blocking ones are named", async () => {
+  const scenario = m4Scenario(f, "confirm");
+  const sha = agentCommit("agent/C-1/W-1", "feature.txt", "feature\n");
+  const { product } = await acceptThroughMergeGate(f, scenario, sha);
+  await pin(product.id, sha);
+  const errors: unknown[] = [];
+  const loop = new MergeExecutor({
+    store: f.store,
+    git: new ServerGit({ store: f.store, dataDir: f.dataDir }),
+    onError: (error) => errors.push(error),
+  });
+  const skips = () =>
+    errors
+      .map((e) => (e instanceof Error ? e.message : String(e)))
+      .filter((m) => m.startsWith("merge loop skipped"));
+  await loop.tick(f.project_id);
+  await loop.tick(f.project_id);
+  expect(skips()).toHaveLength(1);
+  expect(skips()[0]).toContain(scenario.card.id);
+  expect(skips()[0]).toContain("Merge confirmation has not been granted");
+
+  const ask = (blocks_merge: boolean) =>
+    f.apply((s, a, p) =>
+      requestHumanAction(
+        s,
+        a,
+        {
+          card_id: scenario.card.id,
+          instructions: "请查看主机日志",
+          why_human: "只有主机能看",
+          expected_return: "日志摘要",
+          blocked_work_items: [],
+          ...(blocks_merge ? { blocks_merge } : {}),
+        },
+        p,
+      ),
+    );
+  ask(false);
+  const blocking = ask(true);
+  f.decide(mergeConfirmation(f, scenario.card.id) as never, "merge");
+  await loop.tick(f.project_id);
+  await loop.tick(f.project_id);
+  expect(skips()).toHaveLength(2);
+  expect(skips()[1]).toContain(blocking.id);
+  expect(f.card().status).toBe("awaiting_merge");
+
+  // Only the read-only action remains open: the card merges.
+  f.apply((s, a, p) =>
+    completeHumanAction(
+      s,
+      a,
+      { human_action_id: blocking.id, text: "Done" },
+      p,
+    ),
+  );
+  await loop.tick(f.project_id);
+  expect(f.card().status).toBe("done");
+  expect(
+    f.state().human_actions.filter((h) => h.status === "open"),
+  ).toHaveLength(1);
+  expect(skips()).toHaveLength(2);
+}, 30_000);
+
 test("a conflicting delivery returns the card to in_progress with a fix event", async () => {
   // Two cards whose agent branches both start at the original baseline and
   // both rewrite the same file: the second merge must conflict.
@@ -381,6 +444,7 @@ test("timeout preference delegates once then merges through the existing Git exe
         why_human: "Manual",
         expected_return: "Done",
         blocked_work_items: [],
+        blocks_merge: true,
       },
       p,
     ),
