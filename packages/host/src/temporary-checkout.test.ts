@@ -1,4 +1,9 @@
-import { execFile, spawn } from "node:child_process";
+import {
+  type ChildProcessWithoutNullStreams,
+  execFile,
+  spawn,
+} from "node:child_process";
+import { once } from "node:events";
 import {
   chmod,
   mkdir,
@@ -19,6 +24,9 @@ import {
   type ExecutionConfig,
 } from "@cardigan/runtime-herdr";
 import { afterEach, expect, test, vi } from "vitest";
+import { CHECKOUT_LIMITS } from "./checkout-limits.js";
+import { sweepCheckoutOrphans } from "./checkout-orphans.js";
+import { CHECKOUT_WORKER } from "./checkout-worker.js";
 import {
   type CheckoutInput,
   runInTemporaryCheckout,
@@ -165,7 +173,7 @@ test
       const outside=${JSON.stringify(outside)}; fs.mkdirSync(outside);
       const own=path.join(process.env.TMPDIR,'herdr-core'), other=path.join(outside,'herdr-core');
       for(const binary of [own,other]){fs.copyFileSync('/usr/bin/python3',binary);fs.chmodSync(binary,0o700);}
-      const launch=(binary,runtime)=>{const c=spawn(binary,['-c','import time; time.sleep(60)'],{detached:true,stdio:'ignore',env:{PATH:process.env.PATH,XDG_RUNTIME_DIR:runtime}});c.unref();return c.pid;};
+      const launch=(binary,runtime)=>{const c=spawn(binary,['-c','import time; time.sleep(60)'],{cwd:binary===other?outside:process.cwd(),detached:true,stdio:'ignore',env:{PATH:process.env.PATH,XDG_RUNTIME_DIR:runtime}});c.unref();return c.pid;};
       console.log(JSON.stringify([launch(own,process.env.XDG_RUNTIME_DIR),launch(own,fs.realpathSync(process.env.TMPDIR)+'/holder'),launch(other,outside)]));
       ${expected === "timed_out" ? "setInterval(()=>{},1000);" : "setTimeout(()=>{},50);"}
     `),
@@ -472,6 +480,110 @@ test.each(["wrong-tree", "dirty", "staged"] as const)(
     expect(result.reason).toContain("HEAD or tree");
     await f.clean();
   },
+);
+
+test.skipIf(process.platform !== "linux").each(["group", "cwd"] as const)(
+  "an unkillable child identified by %s exits its supervisor, releases flock and preserves its directory",
+  async (identity) => {
+    const f = await fixture();
+    const output: string[] = [];
+    const lock = join(f.input.execution.dataDir, "merge-check.lock");
+    let worker: ChildProcessWithoutNullStreams | undefined;
+    let lockedWhileRunning: Promise<number | string> | undefined;
+    // Model D state and a child that never emits close; never create actual kernel stalls.
+    const inject = String.raw`
+    const fakePid = 900000001;
+    const cp = require('node:child_process'), fs = require('node:fs/promises');
+    const originalSpawn = cp.spawn, originalRead = fs.readFile, originalLink = fs.readlink, originalList = fs.readdir, originalKill = process.kill;
+    let fakeCwd;
+    cp.spawn = (file, args, options) => {
+      if (file !== '/bin/sh' || args[1] !== 'simulated-d-child') return originalSpawn(file, args, options);
+      fakeCwd = options.cwd;
+      const child = new (require('node:events').EventEmitter)();
+      child.pid = fakePid;
+      child.stdout = new (require('node:stream').PassThrough)();
+      child.stderr = new (require('node:stream').PassThrough)();
+      child.unref = () => {};
+      return child;
+    };
+    process.kill = (pid, signal) => Math.abs(pid) === fakePid ? true : originalKill(pid, signal);
+    fs.readdir = async (path, ...args) => {
+      const entries = await originalList(path, ...args);
+      return path === '/proc' && fakeCwd ? [...entries, String(fakePid)] : entries;
+    };
+    fs.readlink = async (path, ...args) => path === '/proc/' + fakePid + '/cwd' ? fakeCwd : originalLink(path, ...args);
+    fs.readFile = async (path, ...args) => {
+      if (!String(path).startsWith('/proc/' + fakePid + '/')) return originalRead(path, ...args);
+      if (path.endsWith('/status')) return 'Uid:\t' + Array(4).fill(process.getuid()).join('\t');
+      if (path.endsWith('/wchan')) return 'exit_mm';
+      if (!path.endsWith('/stat')) throw new Error('Forbidden simulated D-state read');
+      const fields = Array(20).fill('0');
+      fields[0] = 'D'; fields[1] = String(process.pid); fields[2] = ${identity === "group" ? "String(fakePid)" : "'0'"}; fields[19] = '100';
+      return fakePid + ' (biome) ' + fields.join(' ');
+    };
+  `;
+    // Fail if the supervisor needs the host's 120-second hard-stop fallback.
+    // The watchdog also prevents a regressed worker from leaking its real lock.
+    const watchdog = setTimeout(() => worker?.kill("SIGKILL"), 8_000);
+    let result: Awaited<ReturnType<typeof runInTemporaryCheckout>>;
+    try {
+      result = await runInTemporaryCheckout(
+        {
+          ...f.input,
+          serialize: true,
+          checks: [{ name: "wait", run: "simulated-d-child", timeoutMs: 50 }],
+          onReady: () => {
+            lockedWhileRunning = exec(
+              "flock",
+              ["--nonblock", "--conflict-exit-code", "75", lock, "true"],
+              { timeout: 1_000 },
+            ).then(
+              () => 0,
+              (error: { code: number | string }) => error.code,
+            );
+          },
+          onOutput: (_name, text) => output.push(text),
+        },
+        (file, args, env) => {
+          worker = spawn(
+            file,
+            args.map((arg) => (arg === CHECKOUT_WORKER ? inject + arg : arg)),
+            { env, stdio: ["pipe", "pipe", "pipe"] },
+          );
+          return worker;
+        },
+      );
+    } finally {
+      clearTimeout(watchdog);
+      if (worker?.exitCode === null) worker.kill("SIGKILL");
+    }
+    expect(await lockedWhileRunning).toBe(75);
+    expect(worker?.exitCode).toBe(0);
+    expect(worker?.signalCode).toBeNull();
+    await expect(
+      exec("flock", ["--nonblock", lock, "true"], { timeout: 1_000 }),
+    ).resolves.toMatchObject({ stderr: "" });
+    expect(result).toMatchObject({
+      status: "timed_out",
+      manual_attention: true,
+    });
+    expect(output.join("")).toContain("PID 900000001 state=D wchan=exit_mm");
+    const marker = join(f.container, "manual-attention.json");
+    expect(JSON.parse(await readFile(marker, "utf8"))).toMatchObject({
+      kind: "merge_check_manual_attention",
+      processes: [
+        { pid: 900000001, start: "100", state: "D", wchan: "exit_mm" },
+      ],
+    });
+    expect((await stat(marker)).mode & 0o777).toBe(0o600);
+    expect(await f.git("worktree", "list", "--porcelain")).toContain(
+      join(f.container, "worktree"),
+    );
+    expect(await readFile(join(f.container, "worktree/file"), "utf8")).toBe(
+      "original\n",
+    );
+  },
+  10_000,
 );
 
 test("merge checks discard employee test injection and preserve maxWorkers=4", async () => {
@@ -809,6 +921,37 @@ async function remoteFixture() {
   };
 }
 
+test.each([true, false])(
+  "orphan sweep audits only fixed records and requires the completion trailer (complete=%s)",
+  async (complete) => {
+    const f = await remoteFixture();
+    const audit = vi.fn();
+    const output =
+      "untrusted raw diagnostic\norphan 10 100 SIGTERM sent\n" +
+      (complete ? "sweep-complete\n" : "");
+    const sweep = sweepCheckoutOrphans(
+      f.execution,
+      audit,
+      (file, args, env) => {
+        expect(file).toBe("ssh");
+        expect(args).toContain("agent@cardigan-ci");
+        expect(env).toEqual({ PATH: AGENT_PATH });
+        return spawn(
+          process.execPath,
+          [
+            "-e",
+            `process.stdout.write(${JSON.stringify(output)}); process.stderr.write('private SSH diagnostic');`,
+          ],
+          { env, stdio: ["pipe", "pipe", "pipe"] },
+        );
+      },
+    );
+    if (complete) await expect(sweep).resolves.toBeUndefined();
+    else await expect(sweep).rejects.toThrow("远程检查孤儿巡检失败");
+    expect(audit.mock.calls).toEqual([["orphan 10 100 SIGTERM sent"]]);
+  },
+);
+
 test.skipIf(process.platform !== "linux")(
   "a remote executor prepares, runs and cleans up the checkout entirely over its SSH entry",
   async () => {
@@ -838,6 +981,115 @@ test.skipIf(process.platform !== "linux")(
     const lock = await stat(join(f.execution.agentRoot, "merge-check-1.lock"));
     expect([lock.mode & 0o777, lock.size]).toEqual([0o444, 0]);
     await f.clean();
+  },
+);
+
+test.skipIf(process.platform !== "linux")(
+  "a worker with no handshake exits and releases its flock",
+  async () => {
+    const f = await fixture();
+    const lock = join(f.root, "handshake.lock");
+    const script = `const schedule = setTimeout; global.setTimeout = (fn, ms) => schedule(fn, ms === ${CHECKOUT_LIMITS.handshakeMs} ? 50 : ms);\n${CHECKOUT_WORKER}`;
+    const child = spawn(
+      "flock",
+      [
+        "--exclusive",
+        "--no-fork",
+        lock,
+        process.execPath,
+        "-e",
+        script,
+        "--",
+        f.root,
+      ],
+      { stdio: ["pipe", "pipe", "pipe"] },
+    );
+    try {
+      // Keep stdin open without a line, reproducing the orphaned SSH pipe.
+      expect((await once(child, "close"))[0]).toBe(124);
+      await expect(
+        exec("flock", ["--nonblock", lock, "true"]),
+      ).resolves.toMatchObject({ stderr: "" });
+    } finally {
+      child.kill("SIGKILL");
+    }
+  },
+);
+
+test.skipIf(process.platform !== "linux")(
+  "a remote total timeout removes the checkout and Git registration",
+  async () => {
+    const f = await remoteFixture();
+    await f.provision("merge-check.lock");
+    const result = await runInTemporaryCheckout(
+      {
+        ...f.input,
+        serialize: true,
+        totalTimeoutMs: 500,
+        checks: [{ name: "wait", run: node("setInterval(() => {}, 1000)") }],
+      },
+      f.ssh(),
+    );
+    expect(result).toMatchObject({ status: "timed_out", cleanup_errors: [] });
+    await f.clean();
+  },
+);
+
+test.skipIf(process.platform !== "linux")(
+  "an occupied remote slot times out without starting checks or falling back",
+  async () => {
+    const f = await remoteFixture();
+    await f.provision("merge-check.lock");
+    const holder = spawn(
+      "flock",
+      [
+        "--exclusive",
+        "--no-fork",
+        join(f.execution.agentRoot, "merge-check.lock"),
+        process.execPath,
+        "-e",
+        "console.log('locked'); process.stdin.resume()",
+      ],
+      { stdio: ["pipe", "pipe", "pipe"] },
+    );
+    const closed = once(holder, "close");
+    try {
+      await once(holder.stdout, "data");
+      const onReady = vi.fn();
+      const ssh = f.ssh();
+      const result = await runInTemporaryCheckout(
+        { ...f.input, serialize: true, onReady },
+        (file, args, env) => {
+          const command = args.at(-1) ?? "";
+          if (command.includes("'flock'"))
+            expect(command).toContain(
+              `'--wait' '${CHECKOUT_LIMITS.lockWaitMs / 1000}'`,
+            );
+          return ssh(
+            file,
+            [
+              ...args.slice(0, -1),
+              command.replace(
+                `'--wait' '${CHECKOUT_LIMITS.lockWaitMs / 1000}'`,
+                "'--wait' '0.05'",
+              ),
+            ],
+            env,
+          );
+        },
+      );
+      expect(result).toMatchObject({
+        status: "executor_unreachable",
+        checks: [],
+        cleanup_errors: [],
+      });
+      expect(onReady).not.toHaveBeenCalled();
+      expect(f.calls).toHaveLength(3);
+      await f.clean();
+    } finally {
+      holder.kill("SIGKILL");
+      await closed;
+    }
   },
 );
 
