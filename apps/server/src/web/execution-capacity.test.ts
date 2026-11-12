@@ -37,7 +37,7 @@ test.each([undefined, 8, 24])(
         agents: [
           {
             machine_id: "local",
-            label: maximum === undefined ? "本机" : "Workstation",
+            label: maximum === undefined ? "local" : "Workstation",
             limit: 4,
             max_limit: cap,
           },

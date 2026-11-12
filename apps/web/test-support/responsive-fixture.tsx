@@ -46,11 +46,7 @@ const client = fakeClient({
           agents: [
             {
               machine_id: "local",
-              label:
-                new URLSearchParams(location.search).get("capacity") ===
-                "before"
-                  ? "local"
-                  : "本机",
+              label: "local",
               running: 5,
               limit: 6,
               max_limit: 16,

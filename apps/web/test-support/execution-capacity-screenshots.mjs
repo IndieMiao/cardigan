@@ -92,7 +92,7 @@ for (const stage of ["before", "after"]) {
           await evaluate(
             'document.querySelector(".execution-capacity-count strong").textContent',
           ),
-          `${stage === "before" ? "local" : "本机"} · Agent`,
+          "local · Agent",
         );
         const capture = async (suffix = "") => {
           assert(

@@ -1946,7 +1946,7 @@ P2a-9 全机并发配置为主机 `CARDIGAN_CONFIG_DIR/run-capacity.yaml`，配�
 
 C-158（Q-252）：每台机器的 Agent 并发可设置值默认封顶 16，实际默认并发仍为 4。`machines` 保留数字简写，也接受对象 `{ limit?: number, max_limit?: number, display_name?: string }`；例如 `machines: { local: { limit: 4, max_limit: 16, display_name: "工作站" } }`。`limit` 缺省 4、`max_limit` 缺省 16，均为正安全整数，且 `limit <= max_limit`；需要更低的封顶时也须把默认值配到范围内。`display_name` 可省略，配置时须为去除首尾空白后非空、不超过 200 字符且不含控制／格式字符的文字。未知字段、非法数值或显示名使整份配置无效，沿用暂停普通自动派发的处理。封顶和显示名与 YAML 默认值一起在 server 启动时加载，CLI 每次调用加载；只有主机可信配置能改封顶，HTTP 不接受调用者传入封顶字段。
 
-HTTP 的 zod 校验和 domain 的 `setRunLimit` 分别按目标机器封顶检查，超出时统一报“并发上限不能超过 {上限}。”；domain 仅接受主机显式传入的封顶，缺省 16。执行视图接口返回 `max_limit`，输入框按该值限制并提示同一句文字。旧数据库覆盖或重启后调低封顶导致已存值超出时，Dispatcher、共享启动路径、CLI 和执行视图读取 `min(数据库覆盖或 YAML 默认值, 封顶)`，不重写历史设置和审计，也不停止已运行任务。机器显示名优先用登记表的 `label`，未登记时用 YAML 的 `display_name`，再回退到集中常量 `UNREGISTERED_MACHINE_LABEL` 的“本机”（待定，由人确认；合并前附亮暗截图确认）。配置名称仅用于显示，不登记机器、不改变机器编号或可修改范围。
+HTTP 的 zod 校验和 domain 的 `setRunLimit` 分别按目标机器封顶检查，超出时统一报“并发上限不能超过 {上限}。”；domain 仅接受主机显式传入的封顶，缺省 16。执行视图接口返回 `max_limit`，输入框按该值限制并提示同一句文字。旧数据库覆盖或重启后调低封顶导致已存值超出时，Dispatcher、共享启动路径、CLI 和执行视图读取 `min(数据库覆盖或 YAML 默认值, 封顶)`，不重写历史设置和审计，也不停止已运行任务。机器显示名优先用登记表的 `label`，未登记时用 YAML 的 `display_name`，再回退到机器内部编号 `machine_id`（Q-266 已选 `machine_id`，例如“local · Agent”）。配置名称仅用于显示，不登记机器、不改变机器编号或可修改范围。
 
 `POST /api/projects/:id/execution/capacity` 只接受已认证人的 Workbench 会话和幂等键，严格拒绝身份、执行器并发等额外字段；MCP 不暴露此命令。domain 的 `setRunLimit` 独立拒绝所有 assignment（包括 PM Office、PM Ops、host_ops）和 system，只允许 human 修改已登记或已有 Assignment 使用的 Agent 机器的正安全整数上限（兼容未登记机器行的旧 local Assignment）。设置与全局 `run_capacity_updated` 事件同事务保存，事件含 Machine、唯一 owner 成员编号、时间和前后有效值，作为不可覆盖的审计记录；请求重试不重复审计。domain 不读配置或存储，也不改变任何 Run 状态；调低上限只限制下一次普通派发，不停止已有任务。
 

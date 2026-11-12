@@ -40,7 +40,7 @@ test.each([16, 8, 24])(
         client={fakeClient({
           executionCapacity: async () => ({
             ...capacity,
-            agents: [{ ...agent, label: "本机", max_limit: maximum }],
+            agents: [{ ...agent, label: "local", max_limit: maximum }],
           }),
           setRunLimit,
         })}
@@ -49,7 +49,7 @@ test.each([16, 8, 24])(
       />,
     );
     const input = await screen.findByRole<HTMLInputElement>("spinbutton", {
-      name: "本机 Agent 并发上限",
+      name: "local Agent 并发上限",
     });
     expect(input.max).toBe(String(maximum));
     fireEvent.change(input, { target: { value: String(maximum + 1) } });
@@ -57,7 +57,7 @@ test.each([16, 8, 24])(
     expect(
       screen.getByRole<HTMLButtonElement>("button", { name: "保存" }).disabled,
     ).toBe(true);
-    fireEvent.submit(screen.getByRole("form", { name: "本机 Agent 并发" }));
+    fireEvent.submit(screen.getByRole("form", { name: "local Agent 并发" }));
     expect(setRunLimit).not.toHaveBeenCalled();
     fireEvent.change(input, { target: { value: String(maximum) } });
     expect(screen.queryByText(`并发上限不能超过 ${maximum}。`)).toBeNull();

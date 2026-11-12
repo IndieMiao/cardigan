@@ -24,9 +24,6 @@ import { LOCAL_EXECUTOR } from "./merge-gate-executors.js";
 // Reserve the suggested two slots while actually running; tune after measurement.
 export const MERGE_CHECK_RUN_SLOTS = 2;
 
-// C-158: 待定，由人确认；统一修改未登记机器的默认显示文字。
-export const UNREGISTERED_MACHINE_LABEL = "本机";
-
 /** Legacy/default local assignments can exist before a Machine row is registered. */
 export function runCapacityMachines(
   store: Store,
@@ -39,8 +36,7 @@ export function runCapacityMachines(
       if (!machines.has(assignment.machine_id))
         machines.set(assignment.machine_id, {
           id: assignment.machine_id,
-          label:
-            displayName?.(assignment.machine_id) ?? UNREGISTERED_MACHINE_LABEL,
+          label: displayName?.(assignment.machine_id) ?? assignment.machine_id,
         });
   }
   for (const project of store.listProjects())

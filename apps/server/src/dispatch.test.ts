@@ -569,7 +569,7 @@ test("cross-project event FIFO survives full ticks, changed limits, restart, and
   expect(executionCapacity(f.store, () => limit).agents).toEqual([
     {
       machine_id: "local",
-      label: "本机",
+      label: "local",
       max_limit: 16,
       running: 1,
       limit: 1,
