@@ -817,7 +817,7 @@ M3.4 主机循环通过 startDispatchLoop 启动：默认每轮结束后等待 1
 |---|---|
 | 新建卡片（人或 Agent）、卡片转入 todo | 当前 PM Ops 安排工作；通过逻辑 pm_ops 收件人投递，轮换时沿用未确认通知的交接；在岗 Ops 自己建卡或改为 todo 不通知自己，已关闭卡片不再提醒 |
 | 工作项下的新评论 | 该工作项的 Assignment（作者是它自己时不通知） |
-| 卡片级普通评论，没有 @ | 不按门铃；随下一次 `get_updates` 一并读到。作者是人时，合并通知 PM Ops |
+| 卡片级普通评论，没有 @ | 作者是人时默认通知 PM Ops，按同一 Assignment 的待投递通知合并门铃；Agent 评论不通知，随下一次 `get_updates` 读取 |
 | 指令（`instruction_issued`） | 人或常驻 PM Ops 下达；对应未结束工作项的 Assignment，未指派时交给 PM Ops 分配 |
 | 工作项被指派（Agent 或 PM 经 MCP `assign`） | 该工作项的 Assignment，**前提是现在就能开工**（产出型无未完成依赖，或验证型的交付已到）；还不能开工的等依赖完成或交付门铃，人从 CLI `assign` 仍由自己显式启动 |
 | Delivery 提交 | 验证这个工作项的各个验证型 Assignment；验证项没有负责人、需要指派时给 PM Ops 定向通知 |
@@ -841,6 +841,8 @@ M3.4 主机循环通过 startDispatchLoop 启动：默认每轮结束后等待 1
 | merge_conflicted / merge_changes_requested | 冲突产出或被退回的主产出工作项的 Assignment，run_kind=fix；退回原因随触发事件保留，无 active 负责人时交 PM Ops |
 | card_merged | PM Ops 摘要 |
 | merge_failed / reconcile_finding | PM Ops 升级 |
+
+C-90：无提及的人类卡片评论沿用逻辑 `pm_ops` 收件箱。项目没有 active、standing、ops 模式的 PM（包括仅有前台，或后台已暂停／释放）时，Workbench 评论框旁显示“这张卡目前没有人负责”，不阻止发表评论；通知保留待接手，后台恢复后按现有规则投递。短时间连续评论合并投递，后台正在执行时留在收件箱供本轮读取和 ACK，不逐条新建 Run。工作项定向评论和已有 @ 路由保持不变。
 
 C-37：拍板解决后，即使没有阻塞工作项，也通知 `raised_by` 的 Assignment 落实所选方案。投递给发起人的首条主机提示在 ID 门铃之后附上所选选项、说明、影响和“引用 q(n) 记录执行结果”的要求；相同接收者的恢复通知与落实通知去重，工作项仍有其他阻塞时通知留在收件箱，不提前排恢复 Run；更新事件也保存选项、影响与理由。当前执行者自己作出的决定沿用不自我按铃规则。Office 和 Ops 都必须执行所选方案，并在卡片时间线写一句执行结果。
 
