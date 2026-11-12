@@ -17,6 +17,7 @@ import type {
   WorkItemId,
 } from "./ids.js";
 import type { DecisionCategory } from "./preferences.js";
+import type { CardPriority } from "./priority.js";
 import type {
   ApprovalStatus,
   AssignmentStatus,
@@ -122,7 +123,7 @@ export interface Card {
   readonly related_cards: readonly CardId[];
   readonly repo?: string;
   readonly base_branch?: string;
-  readonly priority: number;
+  readonly priority: CardPriority;
   readonly status: CardStatus;
   readonly resolution?: "done" | "superseded" | "duplicate" | "wontdo";
   /** The replacement card, distinct from other related cards. */
@@ -160,6 +161,10 @@ export interface MergeCheckView {
   readonly completion_id: DeliveryId;
   readonly candidate_sha: string;
   readonly tree_sha: string;
+  readonly scope?: {
+    readonly kind: "docs_only" | "affected" | "full";
+    readonly packages?: readonly string[];
+  };
   readonly status:
     | "queued"
     | "running"
@@ -175,7 +180,9 @@ export interface MergeCheckView {
       | "failed"
       | "timed_out"
       | "interrupted"
+      | "skipped"
       | "not_run";
+    readonly reason?: "docs_only";
     readonly exit_code?: number | null;
     readonly duration_ms?: number;
   }[];

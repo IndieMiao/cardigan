@@ -153,7 +153,7 @@ const cardUpdate = z
     title: text.optional(),
     goal: text.optional(),
     acceptance_criteria: z.array(text).min(1).optional(),
-    priority: z.number().finite().optional(),
+    priority: z.number().int().min(0).max(4).optional(),
   })
   .strict()
   .refine((p) => Object.keys(p).length > 0);

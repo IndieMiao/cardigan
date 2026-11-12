@@ -8,6 +8,10 @@
 
 :root {
   color-scheme: light;
+  --priority-low: #236bb5;
+  --priority-medium: #9a7600;
+  --priority-high: #bf560c;
+  --priority-urgent: #c93135;
   --bg: #f2f4f3;
   --surface: #ffffff;
   --surface-muted: #eef2ef;
@@ -60,6 +64,10 @@
 @media (prefers-color-scheme: dark) {
   :root {
     color-scheme: dark;
+    --priority-low: #6daef5;
+    --priority-medium: #eac74a;
+    --priority-high: #f9a15d;
+    --priority-urgent: #ff7b80;
     --bg: #171e1b;
     --surface: #202a25;
     --surface-muted: #29352e;
@@ -3322,4 +3330,71 @@ body[data-lightbox="open"] .drawer-overlay {
   background: var(--surface-muted);
   font-size: var(--text-sm);
   overflow-wrap: anywhere;
+}
+
+/* Fixed priority symbols share one palette across every card surface. */
+.priority-glyph {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+}
+.priority-none {
+  color: var(--text-muted);
+}
+.priority-low {
+  color: var(--priority-low);
+}
+.priority-medium {
+  color: var(--priority-medium);
+}
+.priority-high {
+  color: var(--priority-high);
+}
+.priority-urgent {
+  color: var(--priority-urgent);
+}
+.priority-badge {
+  position: relative;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  min-height: 0;
+  display: inline-flex;
+  vertical-align: middle;
+  border-radius: 3px;
+}
+.priority-select,
+.priority-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.priority-select {
+  width: 180px;
+}
+.priority-field {
+  display: grid;
+  gap: 6px;
+}
+.priority-menu {
+  min-width: 220px;
+  z-index: 90;
+}
+.priority-search {
+  width: 100%;
+  margin-bottom: 6px;
+}
+.priority-option {
+  padding: 7px 9px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.priority-option.active {
+  background: var(--surface-muted);
+}
+.priority-check {
+  margin-left: auto;
+}
+.queue-warning {
+  color: var(--status-wait);
 }

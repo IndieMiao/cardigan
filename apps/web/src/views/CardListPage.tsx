@@ -25,6 +25,7 @@ import {
 } from "../components/Foundation.js";
 import { Menu, type MenuItem } from "../components/Menu.js";
 import { MultiSelect } from "../components/MultiSelect.js";
+import { PriorityBadge } from "../components/Priority.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
 import { Tooltip } from "../components/Tooltip.js";
 import { ViewSwitch } from "../components/ViewSwitch.js";
@@ -555,6 +556,7 @@ function CardTable({
                 </td>
               )}
               <td>
+                <PriorityBadge value={card.priority} />{" "}
                 <Tooltip content={display.reason ? card.why : undefined}>
                   <a
                     className="card-table-title"

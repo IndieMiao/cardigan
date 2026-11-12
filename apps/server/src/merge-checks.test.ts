@@ -108,6 +108,23 @@ function controller(f: M4Fixture) {
       },
     ),
     distribute: vi.fn(async () => {}),
+    changedPaths: vi.fn(
+      async (): Promise<readonly string[]> => ["docs/guide.md"],
+    ),
+    readWorkspace: vi.fn(async () => [
+      { dir: "packages/store", name: "@cardigan/store", dependencies: [] },
+      {
+        dir: "apps/server",
+        name: "@cardigan/server",
+        dependencies: ["@cardigan/store"],
+      },
+      { dir: "apps/web", name: "@cardigan/web", dependencies: [] },
+      {
+        dir: "apps/bad;exit",
+        name: "@cardigan/bad",
+        dependencies: ["@cardigan/store"],
+      },
+    ]),
   };
   const errors = vi.fn();
   const options = {
@@ -142,6 +159,9 @@ test("checks precede confirmation; a passed tree publishes only after human appr
   const c = controller(f);
   await c.gate.tick([f.project_id]);
   expect(check()?.status).toBe("passed");
+  expect(check()).not.toHaveProperty("scope");
+  expect(c.git.changedPaths).not.toHaveBeenCalled();
+  expect(c.git.readWorkspace).not.toHaveBeenCalled();
   expect(c.git.publish).not.toHaveBeenCalled();
   await c.gate.tick([f.project_id]);
   expect(c.run).toHaveBeenCalledTimes(1);
@@ -1444,3 +1464,262 @@ test.each([false, true])(
     expect(c.errors).not.toHaveBeenCalled();
   },
 );
+
+const scopedSettings: ProjectMergeGate = {
+  status: "enabled",
+  env: {},
+  totalTimeoutMs: 1000,
+  checks: [
+    { name: "build", run: "true" },
+    { name: "test", run: "true", scope: "affected", skipDocsOnly: true },
+    { name: "e2e", run: "true", tiers: ["batch"], skipDocsOnly: true },
+  ],
+  affected: { extraDependents: { "packages/store": ["apps/web"] } },
+};
+function scopedRunner(input: CheckoutInput): Promise<CheckoutResult> {
+  input.onReady?.();
+  return Promise.resolve({
+    status: "passed",
+    cleanup_errors: [],
+    checks: input.checks.map((step) =>
+      step.skipReason
+        ? { name: step.name, status: "skipped", reason: step.skipReason }
+        : { name: step.name, status: "passed", exit_code: 0 },
+    ),
+  });
+}
+
+test.each([
+  { paths: ["docs/guide.md"], kind: "docs_only", packages: undefined },
+  {
+    paths: ["packages/store/src/index.ts"],
+    kind: "affected",
+    packages: ["apps/server", "apps/web", "packages/store"],
+  },
+  {
+    paths: ["packages/domain/src/index.ts"],
+    kind: "full",
+    packages: undefined,
+  },
+  { paths: ["apps/unknown/file.ts"], kind: "full", packages: undefined },
+] as const)(
+  "A3: $kind scopes the candidate and records executed or skipped steps",
+  async ({ paths, kind, packages }) => {
+    const { f, check, completion } = await fixture("auto");
+    const c = controller(f);
+    c.setConfig(scopedSettings);
+    c.git.changedPaths.mockResolvedValue(paths);
+    c.run.mockImplementation(scopedRunner);
+    await c.gate.tick([f.project_id]);
+    expect(c.errors).not.toHaveBeenCalled();
+    expect(check()).toMatchObject({
+      status: "passed",
+      scope: { kind, ...(packages ? { packages } : {}) },
+    });
+    expect(c.git.changedPaths).toHaveBeenCalledWith(
+      expect.anything(),
+      "a".repeat(40),
+      "b".repeat(40),
+    );
+    const input = required(c.run.mock.calls[0]?.[0]);
+    expect(input.checks[0]).not.toHaveProperty("affectedPaths");
+    expect(input.checks[1]?.affectedPaths).toEqual(packages ?? []);
+    expect(input.env).not.toHaveProperty("CARDIGAN_AFFECTED_PATHS");
+    expect(check()?.checks.map((s) => s.status)).toEqual(
+      kind === "docs_only"
+        ? ["passed", "skipped", "skipped"]
+        : ["passed", "passed", "passed"],
+    );
+    for (const e of f
+      .state()
+      .events.filter((e) =>
+        [
+          "merge_check_queued",
+          "merge_check_started",
+          "merge_check_finished",
+        ].includes(e.type),
+      ))
+      expect(e.payload).toMatchObject({
+        completion_id: completion.id,
+        tree_sha: "c".repeat(40),
+        scope: { kind },
+      });
+    expect(f.card().status).toBe("done");
+  },
+);
+
+test("A3: legacy and tiers-only checks retain their events and execute every step", async () => {
+  const { f } = await fixture();
+  const c = controller(f);
+  c.setConfig({
+    status: "enabled",
+    env: {},
+    totalTimeoutMs: 1000,
+    checks: [{ name: "e2e", run: "true", tiers: ["batch"] }],
+  });
+  c.run.mockImplementation(scopedRunner);
+  await c.gate.tick([f.project_id]);
+  expect(c.git.changedPaths).not.toHaveBeenCalled();
+  expect(c.git.readWorkspace).not.toHaveBeenCalled();
+  expect(c.run.mock.calls[0]?.[0].checks).toEqual([
+    { name: "e2e", run: "true" },
+  ]);
+  for (const e of f
+    .state()
+    .events.filter((e) => e.type.startsWith("merge_check_"))) {
+    expect(e.payload).not.toHaveProperty("scope");
+    expect(e.payload).not.toHaveProperty("level");
+  }
+});
+
+test("A3: a new candidate recomputes scope; workspace read failures cannot authorize merging", async () => {
+  const { f, check } = await fixture();
+  const c = controller(f);
+  c.setConfig(scopedSettings);
+  c.run.mockImplementation(scopedRunner);
+  await c.gate.tick([f.project_id]);
+  expect(check()?.scope?.kind).toBe("docs_only");
+  c.advance(true);
+  c.git.changedPaths.mockResolvedValue(["apps/web/src/index.ts"]);
+  c.git.readWorkspace.mockRejectedValue(
+    new Error("unreadable candidate workspace"),
+  );
+  await c.gate.tick([f.project_id]);
+  expect(c.git.publish).not.toHaveBeenCalled();
+  expect(c.errors).toHaveBeenCalled();
+  expect(c.run).toHaveBeenCalledTimes(1);
+  c.git.readWorkspace.mockResolvedValue([
+    { dir: "apps/web", name: "@cardigan/web", dependencies: [] },
+  ]);
+  await c.gate.tick([f.project_id]);
+  expect(check()).toMatchObject({
+    status: "passed",
+    scope: { kind: "affected", packages: ["apps/web"] },
+  });
+  expect(c.git.readWorkspace).toHaveBeenCalledWith(
+    expect.anything(),
+    "e".repeat(40),
+  );
+});
+
+function setPriority(
+  f: M4Fixture,
+  priority: 0 | 1 | 2 | 3 | 4,
+  cardId = f.card().id,
+) {
+  f.store.uow.run((tx) => {
+    const card = tx.cards.get(f.project_id, cardId);
+    if (!card) throw new Error("Missing card");
+    tx.cards.put(f.project_id, { ...card, priority });
+  });
+}
+
+test("higher card priority wins cross-project merge checks, then equal tiers keep completion FIFO", async () => {
+  const { f: older } = await fixture("auto", { project_id: "older" });
+  const { f: newer } = await fixture("auto", {
+    project_id: "newer",
+    dataDir: older.dataDir,
+    clock: { now: () => "2030-01-02T00:00:00.000Z" },
+  });
+  setPriority(older, 1);
+  setPriority(newer, 4);
+  const c = controller(older);
+  await c.gate.tick([older.project_id, newer.project_id]);
+  expect(c.run.mock.calls.map(([input]) => input.project)).toEqual([
+    newer.project_id,
+    older.project_id,
+  ]);
+  expect(c.errors).not.toHaveBeenCalled();
+});
+
+test("queued merge priorities refresh while a check runs, including another card in the same project", async () => {
+  const o = await overlapping(() => gateWith(ciExecutor(1)));
+  const third = await fixture("auto", {
+    project_id: "c-third",
+    dataDir: o.a.dataDir,
+  });
+  setPriority(o.a, 4);
+  setPriority(o.b, 2);
+  setPriority(third.f, 1);
+  const second = m4Scenario(o.b, "auto");
+  await acceptThroughMergeGate(o.b, second, "a".repeat(40));
+  setPriority(o.b, 0, second.card.id);
+  const round = o.c.gate.tick([
+    o.a.project_id,
+    o.b.project_id,
+    third.f.project_id,
+  ]);
+  await o.startedOne;
+  await o.settle();
+  setPriority(third.f, 4);
+  setPriority(o.b, 3, second.card.id);
+  await o.c.gate.schedule([o.a.project_id, o.b.project_id, third.f.project_id]);
+  expect(o.running.map((r) => r.project)).toEqual([o.a.project_id]);
+  await o.finish(o.a.project_id);
+  await vi.waitFor(() =>
+    expect(o.running.map((r) => r.project)).toEqual([third.f.project_id]),
+  );
+  await o.finish(third.f.project_id);
+  await vi.waitFor(() =>
+    expect(o.running.map((r) => r.project)).toEqual([o.b.project_id]),
+  );
+  const call = o.c.run.mock.calls.at(-1)?.[0];
+  expect(
+    o.b
+      .state()
+      .events.find(
+        (e) =>
+          (e.payload as { attempt_id?: string }).attempt_id === call?.attempt,
+      )?.card_id,
+  ).toBe(second.card.id);
+  await o.finish(o.b.project_id);
+  await vi.waitFor(() => expect(o.c.run).toHaveBeenCalledTimes(4));
+  await o.finish(o.b.project_id);
+  await round;
+  expect(o.c.errors).not.toHaveBeenCalled();
+});
+
+test("a high-priority executor backoff never blocks a healthy lower-priority project", async () => {
+  const { f: high, check } = await fixture("auto", { project_id: "high" });
+  const { f: low } = await fixture("auto", {
+    project_id: "low",
+    dataDir: high.dataDir,
+  });
+  setPriority(high, 4);
+  setPriority(low, 1);
+  const c = controller(high);
+  c.options.configuration.forProject = () => gateWith(ciExecutor(1));
+  c.git.distribute.mockImplementation(async (project) => {
+    if (project.project_id === high.project_id)
+      throw new Error("ssh: connect to host: Connection refused");
+  });
+  await c.gate.tick([high.project_id]);
+  expect(check()?.status).toBe("queued");
+  await c.gate.tick([high.project_id, low.project_id]);
+  expect(c.run.mock.calls.map(([input]) => input.project)).toEqual([
+    low.project_id,
+  ]);
+  expect(check()?.status).toBe("queued");
+});
+
+test("the next high-priority card in a running project's lane competes before a waiting lower tier", async () => {
+  const o = await overlapping(() => gateWith(ciExecutor(1)));
+  setPriority(o.a, 4);
+  setPriority(o.b, 1);
+  const next = m4Scenario(o.a, "auto");
+  await acceptThroughMergeGate(o.a, next, "a".repeat(40));
+  setPriority(o.a, 3, next.card.id);
+  const round = o.c.gate.tick([o.a.project_id, o.b.project_id]);
+  await o.startedOne;
+  await o.settle();
+  await o.finish(o.a.project_id);
+  await vi.waitFor(() => expect(o.c.run).toHaveBeenCalledTimes(2));
+  expect(o.running.map((r) => r.project)).toEqual([o.a.project_id]);
+  await o.finish(o.a.project_id);
+  await vi.waitFor(() =>
+    expect(o.running.map((r) => r.project)).toEqual([o.b.project_id]),
+  );
+  await o.finish(o.b.project_id);
+  await round;
+  expect(o.c.errors).not.toHaveBeenCalled();
+});

@@ -151,6 +151,7 @@ interface Candidate {
   notes: Notification[];
   assignment: Assignment;
   order: {
+    priority: number;
     project_id: string;
     assignment_id: string;
     created_at: string;
@@ -363,6 +364,13 @@ export class Dispatcher {
         notes,
         assignment,
         order: {
+          priority:
+            state.cards.find(
+              (c) =>
+                c.id ===
+                state.work_items.find((w) => w.id === assignment.work_item_id)
+                  ?.card_id,
+            )?.priority ?? 0,
           project_id: project,
           assignment_id: assignment.id,
           created_at: event.created_at,
@@ -799,6 +807,12 @@ export class Dispatcher {
           (e) => e.id === run?.trigger_event_id,
         );
         const order = {
+          priority:
+            state.cards.find(
+              (c) =>
+                c.id ===
+                state.work_items.find((w) => w.id === a.work_item_id)?.card_id,
+            )?.priority ?? 0,
           project_id: project,
           assignment_id: a.id,
           created_at: trigger?.created_at ?? a.created_at,

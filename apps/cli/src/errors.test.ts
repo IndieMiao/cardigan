@@ -108,7 +108,11 @@ describe("Chinese CLI errors", () => {
       "Acceptance criteria are required",
       "至少需要一条非空的验收标准",
     ],
-    ["validation_failed", "Invalid priority", "优先级必须是有限数值"],
+    [
+      "validation_failed",
+      "Invalid priority",
+      "优先级必须是无、低、中、高或紧急",
+    ],
     ["not_found", "cards:C-99 was not found", "卡片 C-99 在当前项目中不存在"],
     [
       "invariant_violation",

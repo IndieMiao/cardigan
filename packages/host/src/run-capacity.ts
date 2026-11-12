@@ -26,10 +26,11 @@ function queueSnapshot(store: Store) {
   // polls this projection, so do not load historical Runs/events on every poll.
   const rows = store.database
     .prepare(`SELECT r.project_id, r.doc AS run, a.doc AS owner,
-      e.doc AS cause, w.card_id FROM runs r
+      e.doc AS cause, w.card_id, json_extract(c.doc, '$.priority') AS priority FROM runs r
     JOIN assignments a ON a.project_id = r.project_id AND a.id = r.assignment_id
     JOIN events e ON e.project_id = r.project_id AND e.id = r.trigger_event_id
     LEFT JOIN work_items w ON w.project_id = a.project_id AND w.id = json_extract(a.doc, '$.work_item_id')
+    LEFT JOIN cards c ON c.project_id = w.project_id AND c.id = w.card_id
     WHERE json_extract(r.doc, '$.status') = 'queued' AND json_extract(r.doc, '$.queue_reason') = 'concurrency_limit'
       AND json_extract(a.doc, '$.status') = 'active' AND NOT EXISTS (
         SELECT 1 FROM bell_attempts b WHERE b.project_id = r.project_id AND b.run_id = r.id AND b.finished_at IS NULL
@@ -43,6 +44,7 @@ function queueSnapshot(store: Store) {
     const cause = JSON.parse(String(row.cause)) as Event;
     const card = row.card_id ?? cause.card_id;
     queue.push({
+      priority: Number(row.priority ?? 0),
       project_id: String(row.project_id),
       assignment_id: owner.id,
       machine_id: owner.machine_id,

@@ -49,12 +49,28 @@ export function MergeCheck({
           </a>
         )}
       </div>
+      {check?.scope && (
+        <p className="hint">
+          检查范围：
+          {check.scope.kind === "docs_only"
+            ? "仅文档"
+            : check.scope.kind === "full"
+              ? "全量"
+              : "受影响包"}
+          {check.scope.kind === "affected" && check.scope.packages?.length
+            ? `（${check.scope.packages.join("、")}）`
+            : ""}
+        </p>
+      )}
       {!!check?.checks.length && (
         <ul className="merge-check-items" aria-label="单项检查">
           {check.checks.map((item) => (
             <li key={item.name}>
               <span>{item.name}</span>
               <StatusTag status={item.status} />
+              {item.status === "skipped" && item.reason === "docs_only" && (
+                <span className="hint">仅文档变更</span>
+              )}
             </li>
           ))}
         </ul>

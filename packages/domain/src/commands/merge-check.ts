@@ -55,7 +55,7 @@ export function timeoutOnly(check: MergeCheckView | undefined): boolean {
       (check.status === "failed" &&
         check.checks.some((c) => c.status === "timed_out"))) &&
     check.checks.every((c) =>
-      ["passed", "timed_out", "not_run"].includes(c.status),
+      ["passed", "timed_out", "not_run", "skipped"].includes(c.status),
     )
   );
 }
@@ -130,7 +130,7 @@ export function hasPassedMergeCheck(
 }
 type CheckUpdate = Pick<
   MergeCheckView,
-  "attempt_id" | "completion_id" | "candidate_sha" | "tree_sha"
+  "attempt_id" | "completion_id" | "candidate_sha" | "tree_sha" | "scope"
 > & {
   readonly card_id: CardId;
 } & (
@@ -192,11 +192,33 @@ export function recordMergeCheck(
       "validation_failed",
       "Invalid merge check identity",
     );
+    if (p.scope !== undefined)
+      ensure(
+        p.scope !== null &&
+          typeof p.scope === "object" &&
+          ["docs_only", "affected", "full"].includes(p.scope.kind) &&
+          (p.scope.packages === undefined ||
+            (p.scope.kind === "affected" &&
+              Array.isArray(p.scope.packages) &&
+              p.scope.packages.every(
+                (path) =>
+                  typeof path === "string" &&
+                  /^(packages|apps)\/[a-z0-9-]+$/u.test(path),
+              ))),
+        "validation_failed",
+        "Invalid merge check scope",
+      );
     const latest = latestMergeCheck(state.events, p.card_id, p.completion_id);
     const same =
       latest?.attempt_id === p.attempt_id &&
       latest.candidate_sha === p.candidate_sha &&
       latest.tree_sha === p.tree_sha;
+    if (same)
+      ensure(
+        JSON.stringify(latest.scope) === JSON.stringify(p.scope),
+        "stale_target",
+        "Check scope cannot change within an attempt",
+      );
     if (same && latest.status === p.status && !latest.recheck_requested) {
       if ("checks" in p)
         ensure(
@@ -277,7 +299,14 @@ export function recordMergeCheck(
               "timed_out",
               "interrupted",
               "not_run",
+              "skipped",
             ].includes(c.status) &&
+            (c.status === "skipped"
+              ? c.reason === "docs_only" &&
+                p.scope?.kind === "docs_only" &&
+                c.exit_code == null &&
+                (c.duration_ms === undefined || c.duration_ms === 0)
+              : c.reason === undefined) &&
             (c.exit_code === undefined ||
               c.exit_code === null ||
               Number.isSafeInteger(c.exit_code)) &&
@@ -296,9 +325,13 @@ export function recordMergeCheck(
                   ["failed", "timed_out"].includes(c.status),
                 ) &&
                 p.checks.every((c) =>
-                  ["passed", "failed", "timed_out", "not_run"].includes(
-                    c.status,
-                  ),
+                  [
+                    "passed",
+                    "failed",
+                    "timed_out",
+                    "not_run",
+                    "skipped",
+                  ].includes(c.status),
                 )))),
         "validation_failed",
         "Only a failed or timed-out check can be classified as timeout-only",
@@ -306,7 +339,11 @@ export function recordMergeCheck(
       ensure(
         p.status !== "passed" ||
           (p.checks.length > 0 &&
-            p.checks.every((c) => c.status === "passed" && c.exit_code === 0)),
+            p.checks.every(
+              (c) =>
+                c.status === "skipped" ||
+                (c.status === "passed" && c.exit_code === 0),
+            )),
         "invariant_violation",
         "A passed check must have only successful commands",
       );
@@ -316,6 +353,7 @@ export function recordMergeCheck(
       completion_id: p.completion_id,
       candidate_sha: p.candidate_sha,
       tree_sha: p.tree_sha,
+      ...(p.scope ? { scope: p.scope } : {}),
       status: p.status,
       checks: "checks" in p ? p.checks : [],
       updated_at: d.now,
@@ -361,6 +399,7 @@ export function recordMergeCheck(
       completion_id: value.completion_id,
       candidate_sha: value.candidate_sha,
       tree_sha: value.tree_sha,
+      ...(value.scope ? { scope: value.scope } : {}),
       status: "queued",
       checks: [],
       recheck_requested: true,

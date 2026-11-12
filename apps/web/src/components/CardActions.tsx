@@ -6,6 +6,7 @@ import {
   type CardView,
   describeWriteError,
 } from "../api.js";
+import { PrioritySelect } from "./Priority.js";
 import { RequestFeedback } from "./RequestFeedback.js";
 import { Tooltip } from "./Tooltip.js";
 
@@ -205,7 +206,7 @@ function CardActionForm({
       value,
     })),
   );
-  const [priority, setPriority] = useState(String(card.priority));
+  const [priority, setPriority] = useState(card.priority);
   const [reason, setReason] = useState("");
   const [target, setTarget] = useState(card.superseded_by ?? "");
   const [error, setError] = useState("");
@@ -222,9 +223,7 @@ function CardActionForm({
       ? title.trim() &&
         goal.trim() &&
         criteria.length > 0 &&
-        criteria.every((row) => row.value.trim()) &&
-        priority.trim() &&
-        Number.isFinite(Number(priority))
+        criteria.every((row) => row.value.trim())
       : mode === "supersede"
         ? /^C-[1-9]\d*$/u.test(target.trim()) && target.trim() !== card.id
         : true;
@@ -248,7 +247,7 @@ function CardActionForm({
                     title,
                     goal,
                     acceptance_criteria: criteria.map((row) => row.value),
-                    priority: Number(priority),
+                    priority,
                   },
                 }
               : mode === "cancel"
@@ -339,16 +338,10 @@ function CardActionForm({
                 添加验收标准
               </button>
             </fieldset>
-            <label>
-              优先级
-              <input
-                required
-                type="number"
-                step="any"
-                value={priority}
-                onChange={(e) => setPriority(e.target.value)}
-              />
-            </label>
+            <div className="priority-field">
+              <span>优先级</span>
+              <PrioritySelect value={priority} onChange={setPriority} />
+            </div>
           </>
         )}
         {mode === "cancel" && (

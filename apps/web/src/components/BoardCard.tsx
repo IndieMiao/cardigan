@@ -5,6 +5,7 @@ import { routeHash } from "../route.js";
 import { nextOwnersLabel } from "../status.js";
 import { ProduceOwners } from "./EmployeeIdentity.js";
 import { fullTime, StatusTag, Time } from "./Foundation.js";
+import { PriorityBadge } from "./Priority.js";
 import { StatusIcon } from "./StatusIcon.js";
 import { Tooltip } from "./Tooltip.js";
 
@@ -121,6 +122,7 @@ export function BoardCard({
         </a>
       </Tooltip>
       <div className="board-card-meta">
+        <PriorityBadge value={card.priority} />
         {display.progress &&
           badge(
             `进度：${card.progress.completed}/${card.progress.total}${complete ? "，全部完成" : ""}`,

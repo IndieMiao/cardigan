@@ -341,11 +341,13 @@ Standing Assignment (scope=project): PM Office, PM Ops — not tied to a WorkIte
 - 基本信息：`id`、`project_id`、`title`、`goal`、`acceptance_criteria`（由卡片模板强制）
 - 来龙去脉：`source`（起因：用户原话，或指向某个 Decision）、`out_of_scope`、`deadline?`、`related_cards[]`
 - 代码基线：`repo?`、`base_branch?`；模板要求仓库时两者必填，无仓库卡片省略两者。
-- 管理字段：`priority`、`status`（见 §4.4：中间状态由工作项推导，`done` 按模板规定的完成方式产生）、`resolution?`（`done | superseded | duplicate | wontdo`）、`superseded_by?`（取代本卡的同项目卡片编号，同时保存在 `related_cards[]` 中）、`template`、`template_version`（固定建卡时的模板版本，决定默认工作项、必需项与完成方式；老卡按 v1 读取）、`merge_policy`（从模板的 `merge` 固定，`none | confirm | auto`）、`sensitive?`（人标记的敏感卡片，只有人能设置或取消；合并确认一律由人亲自处理，见 §4.4 C-65）
+- 管理字段：`priority`（C-144：固定五档 `0=None/无`、`1=Low/低`、`2=Medium/中`、`3=High/高`、`4=Urgent/紧急`，默认无，越大越先执行）、`status`（见 §4.4：中间状态由工作项推导，`done` 按模板规定的完成方式产生）、`resolution?`（`done | superseded | duplicate | wontdo`）、`superseded_by?`（取代本卡的同项目卡片编号，同时保存在 `related_cards[]` 中）、`template`、`template_version`（固定建卡时的模板版本，决定默认工作项、必需项与完成方式；老卡按 v1 读取）、`merge_policy`（从模板的 `merge` 固定，`none | confirm | auto`）、`sensitive?`（人标记的敏感卡片，只有人能设置或取消；合并确认一律由人亲自处理，见 §4.4 C-65）
 - 审计：`created_by`、`created_at`
 - 派生字段（不存储，实时计算）：`waiting_on[]`、`next_owners[]`、`open_decisions[]`、`review_matrix`（每个交付 × 审核它的验证方 → 对当前 SHA 的结论；产出交付只列以该工作项为目标的验证项，完成申请只列它请求的 PM 验收项）、`why`（一句话原因，≤40 字，见 §8.2）
 - `next_owners[]` 中，处于 `ready`、`in_progress`、`changes_requested` 的工作项若关联的 Assignment 已 `released`，退回 `{kind: "role", ref: 工作项的 role_id}`，表示需要重新指派；`active` 和 `suspended` 仍指向该 Assignment。同一角色去重，其他派生字段规则不变。
 - 负责人和审核人不写进描述正文；改派作为事件进时间线。
+
+C-144：迁移 0019 在 C-132 的编号格式迁移 0018 之后，将旧数字一次性映射为五档，只改卡片当前字段，不改历史事件。**按 q(227) 选 b**：旧值 0→None、1→Low、2→Medium、3 及以上→High，不自动产生 Urgent；原先默认的 3～4→High、5 及以上→Urgent 已撤换。原有负数仍归 None，小数沿上界规则分档（≤0→无、(0,1]→低、(1,2]→中、>2→高）。首次升级前可用主机环境变量 `CARDIGAN_PRIORITY_MIGRATION_THRESHOLDS` 配置低／中／高的上界，默认 **`1,2,unbounded`**；前两项必须是递增的有限正数，第三项可为更大的有限正数，或关键字 `unbounded`，表示 High 无上界、准确禁止自动产生 Urgent，不使用极大阈值近似。显式的三个有限阈值配置仍兼容（如 `1,2,4`），超过第三个上界时映射为 Urgent；非法配置回滚本次迁移，升级完成后改配置不再重映射。CLI `card update --priority` 与 MCP `create_card/update_card` 接受英文档名或中文档名，不接受任意数字；领域命令和 Workbench 的固定数值编码只允许 0–4 整数。优先级修改沿用卡片更新权限与审计。
 
 **CardTemplate（P2-V V10a）**
 
@@ -540,6 +542,8 @@ C-79：上述失败检查的 PM 处理也受当前 `pm_merge_confirmation` 偏�
 C-47：完成申请经冲突、退回修改、新完成申请或新产出交付取代而作废时，在同一事务内将所有绑定该申请且仍为 `open` 的 `merge_confirmation` 标记为 `superseded`；不代填 merge、hold 或 request_changes，也不改写已经 resolved 的历史决定。人主动选择退回所记录的决定及 C-46 的显式撤回规则仍按原流程处理。每个自动关闭的确认写入 `decision_superseded` 事件（关联确认及完成申请）和系统时间线说明，Needs You 随状态更新移除。新版完成申请在旧版本及其未决确认作废后校验前置条件；校验失败时全部回滚，其他阻塞照常生效。新申请验收通过后生成自己的新确认，旧确认不再阻塞它。
 
 P2a-1 的检查排队、运行、失败、超时及中断均不改变 Card 状态。新增 `merge_check_queued`、`merge_check_started`、`merge_check_finished`、`merge_check_requeued` 事件与系统时间线；卡片视图的可选 `merge_check` 从当前未被取代的完成申请最新检查事件派生，包含 attempt、候选／tree SHA、状态、逐项结果、摘要与安全日志引用。人可对 awaiting_merge 且当前完成申请已有失败／超时结果的卡片请求重新检查（`recheck_merge` 接受 human 或持有 `host_ops_recheck_merge` 许可的本项目 active 常驻 host_ops；PM Ops 按 C-66 经 `resolve_delegated_decision(option=recheck)` 发起同一重新排队）；返回执行阶段或形成新完成申请后，旧检查不得授权新合并。
+
+P2a-13 A3：配置启用范围裁剪时，单卡检查事件增加可选 `scope: {kind: docs_only | affected | full, packages?: string[]}`；同一 attempt 的范围保持不变。主机依据候选相对基线的变更和候选 workspace 计算范围，domain 只校验格式。“被测试读取的文档”显式清单中的 `docs/research/pm-practice-distillation.md` 是 full 例外，以确保 `pm-lessons.test.ts` 继续核对文档与角色规则一致；相邻普通文档仍按 docs_only 处理。`docs_only` 时标记 `skip_docs_only` 的步骤记为 `skipped`（`reason=docs_only`），不执行；`scope: affected` 步骤通过独立受控字段注入 `CARDIGAN_AFFECTED_PATHS`，只含合法包目录，full 时为空字符串。跳过项可以与成功项共同形成 passed，不改变完成申请和 tree 的绑定。旧配置不增加 scope，所有步骤照旧执行；tiers 仍待 B 组生效。Workbench 显示范围和跳过原因。
 
 P2a-12 E：远程执行目标在候选分发或检查监督进程通道中 SSH 不可达时，检查 attempt 进入终止状态 `executor_unreachable`，随后用新 attempt 保持候选 `queued`。此状态不代表代码失败，不授权合并，也不要求人手动重查；同完成申请／同树可自动重新检查。退避与项目级人工事项见 §12.5。
 
@@ -1245,6 +1249,7 @@ Agent 只通过 Card MCP 读写，看板界面只服务你一个人，所以第�
   - P2a-13 B4（启用合并队列的项目）：卡片状态不新增，“待合并”列里的卡显示从批次数据派生的合并阶段子标签：待确认（附快速检查结果）→ 排队中（第 n 位）→ 批次检查中（MB-n 徽章，同批同色）→ 二分定位中 → 定位为失败原因（红色，退出队列）→ 已随批次合并（转为 done）。同批卡相邻排列，用同色竖条串起，组顶部显示“MB-12 检查中 · 4 张 · 3/6 步”，悬停其中一张时同批卡一起高亮；“单独跑”的卡显示“单独批次”。这是用户已认可的合并流程展示，不扩大看板的其他范围。
   - 列表只读响应补充 `participants`（上述未释放参与者）、`work_items`（仅编号／标题／状态）和 `attachment_count`。附件数量沿用详情的归属规则，包含卡片附件及历史时间线附件；沿用同一快照，不逐卡请求详情，不暴露员工启动配置，也不改变领域状态或 Agent 游标。
 - 卡片详情：
+  - C-144：看板、列表、执行视图和 Needs You 合并确认共用五档图标：无为灰色圆圈斜线，低为蓝色一格信号条，中为黄色两格信号条，高为橙色三格信号条，紧急为红色方框感叹号；亮暗主题使用独立配色，悬停和键盘聚焦显示中文档名。详情编辑的优先级菜单顶部可搜索，每档显示图标与名称、当前档打勾；方向键选择、Enter 确认、Escape 关闭。
   - 目标、验收标准、工作项清单；可编辑标题、目标、验收标准和优先级，确认后取消未结束卡片，或标记终态卡片被取代（§8.4）；
   - 时间线，评论、指令、交付、审核、决策用不同样式显示；
   - 评论输入框，支持 @提及、Markdown、粘贴图片和附件。
@@ -1643,7 +1648,7 @@ Git 超时分为两档：查询默认 30 秒（`CARDIGAN_GIT_QUERY_TIMEOUT_MS` /
 
 监督进程在删除运行目录前补查脱离检查进程组的 hc core／holder：仅 Linux 下 exe 为 herdr-core、UID 属于执行账号且 XDG_RUNTIME_DIR（包括已知短别名映射）落在本 attempt 的进程。先记录 PID 和 Linux 启动时间，每次发送 SIGTERM／SIGKILL 前重新核对身份；重复检查用于捕获 holder 退出时新出现的 core，未能结束的进程记为清理失败。不调用会自动启动 core 的 hc 读命令，不按进程名称批量结束其他会话。
 
-合并检查调用临时执行器时启用 `serialize`：配置的本机执行根使用固定 `merge-check.lock`（P2a-12 D：执行目标 `max_concurrent` > 1 时，第 i 个槽位用 `merge-check-<i>.lock`，槽位 0 仍是 `merge-check.lock`），Agent 模式位于 agentRoot（主机拥有、共享组 0660），local 位于 dataDir（0600），所有项目共用该 inode。只接受可信属主、空内容、无链接的锁文件，不在收尾时 unlink 或重建。执行账号通过 `flock --exclusive --no-fork` 获得锁后才启动监督进程；锁保持到监督进程退出，检查子进程不继承锁 FD。取得锁后发出认证的 ready 消息，主机才通知调用方开始检查；排队等待不计入检查总超时，可单独取消。SSH 挂断也走监督进程的取消收尾。卡片的 FIFO 排序和持久化状态仍由 MergeExecutor 管理，这个文件锁提供跨项目／控制进程的执行互斥。
+合并检查调用临时执行器时启用 `serialize`：配置的本机执行根使用固定 `merge-check.lock`（P2a-12 D：执行目标 `max_concurrent` > 1 时，第 i 个槽位用 `merge-check-<i>.lock`，槽位 0 仍是 `merge-check.lock`），Agent 模式位于 agentRoot（主机拥有、共享组 0660），local 位于 dataDir（0600），所有项目共用该 inode。只接受可信属主、空内容、无链接的锁文件，不在收尾时 unlink 或重建。执行账号通过 `flock --exclusive --no-fork` 获得锁后才启动监督进程；锁保持到监督进程退出，检查子进程不继承锁 FD。取得锁后发出认证的 ready 消息，主机才通知调用方开始检查；排队等待不计入检查总超时，可单独取消。SSH 挂断也走监督进程的取消收尾。卡片的优先级与同档 FIFO 排序和持久化状态仍由 MergeExecutor 管理，这个文件锁提供跨项目／控制进程的执行互斥。
 
 短别名不放宽中心仓库的私有路径校验。Cardigan 自身测试把 TMPDIR 当作数据根时仍会碰到链接／共享祖先限制；测试夹具另行适配为执行账号独占的真实私有数据根，hc 运行目录仍留在受控 attempt 下。根目录本身过长的配置仍需避免超过平台 Unix socket 长度上限。
 
@@ -1687,7 +1692,7 @@ P2a-1 的领域层通过 `prepareMergePlan` 在人确认前取得候选集合，
 
 C-29 的超时代批在两条合并路径共用的入口执行：每轮以新鲜事务快照重查偏好、到期时间、完成申请和阻塞条件。代批只解决确认 Decision；启用闸门时，queued／running／failed／timed_out 均不能发布，失败仍需人显式重查，通过后才发布，不重复请求确认。模板、员工、项目偏好与可信闸门设置同时载入命令快照，互不覆盖。
 
-P2a-1a 的检查队列按当前完成申请最后一条审核事件的时间跨项目排序，先持久化整批 queued，再依次获取执行账号的 OS 检查锁；持锁监督进程确认 ready 后才记录 started。进程重启看到遗留 queued/running 时先记 interrupted，再用新 attempt 重排；候选同步或日志创建在启动前失败可直接由 queued 记 failed（逐项结果必须为空），不伪造执行记录。失败／超时的同树不自动重试（C-116 的超时自动重跑一次除外），人通过 recheck 排新 attempt。候选缓存只在项目描述、计划和中心基线都不变时复用；发布前重新读取计划与确认，基线变化重算候选，同完成申请同树复用 passed，不同树重新排队。停止时取消检查并等结果持久化与清理；noop 仍要求满足原确认策略，包含 C-29 已授权的超时代批。准备阶段的 noop 事实以 `merge_preparation_recorded` 持久化，重启后查询仍能展示人工确认；重复准备同一事实不重复发事件，重新准备为非 noop 或出现后续检查事件即撤销展示例外。记录时验证当前完成申请和计划；不新增检查调度或自动重试，不把此事实用作 passed 证据。
+P2a-1a 的检查队列先按卡片当前优先级从高到低，再按当前完成申请最后一条审核事件的时间跨项目排序，先持久化整批 queued，再依次获取执行账号的 OS 检查锁；持锁监督进程确认 ready 后才记录 started。进程重启看到遗留 queued/running 时先记 interrupted，再用新 attempt 重排；候选同步或日志创建在启动前失败可直接由 queued 记 failed（逐项结果必须为空），不伪造执行记录。失败／超时的同树不自动重试（C-116 的超时自动重跑一次除外），人通过 recheck 排新 attempt。候选缓存只在项目描述、计划和中心基线都不变时复用；发布前重新读取计划与确认，基线变化重算候选，同完成申请同树复用 passed，不同树重新排队。停止时取消检查并等结果持久化与清理；noop 仍要求满足原确认策略，包含 C-29 已授权的超时代批。准备阶段的 noop 事实以 `merge_preparation_recorded` 持久化，重启后查询仍能展示人工确认；重复准备同一事实不重复发事件，重新准备为非 noop 或出现后续检查事件即撤销展示例外。记录时验证当前完成申请和计划；不新增检查调度或自动重试，不把此事实用作 passed 证据。
 
 主机分发检查候选时，local 同步中心到基础 clone；agent-ssh 从中心发起增量 push，经绑定基础 clone 路径的 Agent receive-pack 入口更新候选 ref，不在 Agent 仓库执行主机 Git。基础 clone 已在交付阶段创建；若此时消失，检查以启动前失败记录，等待显式重查。CLI `cardigan merge recheck <C-n> [--project <p>]` 每次读取同一主机配置，仅允许人对当前失败／超时完成申请重查，不提供跳过检查的入口。
 
@@ -1695,7 +1700,7 @@ P2a-12 C（检查执行目标）：`distribute(project, execution?)` 可由调�
 
 一执行账号一项目（Q-208 `one_project_per_account`，C-139）：一个执行目标（`executors.<name>`，即一个执行账号）只服务一个项目。加载 `merge-gate.yaml` 时统计各项目的 `executor` 引用（文件中列出的项目都计入，含未登记项目；`local` 和未配置不计），同一执行目标被两个及以上项目引用时，所有引用它的项目闸门都为 invalid，中文原因写明执行目标名、引用它的项目和改法（给每个项目配独立的执行账号或执行目标）；这些项目不分发候选、不启动远程检查，也不回退本机执行。只有一个项目引用或未配置 executor 的项目行为不变。这条只是配置校验，不做账号或沙箱级隔离；两个不同名字的执行目标指向同一 host／user 时不在校验范围内，由操作员保证。
 
-P2a-12 E：显式配置远程 executor 的项目在候选分发或检查监督进程通道的 SSH 连接失败（含主机密钥校验、认证失败）时，不回退本机，也不提供临时回退开关。每次失败结束当前 attempt 为 `executor_unreachable`，新 attempt 留在 `queued`，保持原审核时间的排队顺序并释放执行容量。项目按 executor 的事件记录累计不可达起点、失败次数和下次重试时间，依次等待 1、2、4、8、16、30 分钟，之后上限 30 分钟；重启后沿用这些记录，不重置预算。候选／tree 改变也不跳过执行目标的退避。`executor_unreachable` 不参与同树通过或失败结果的复用，连接恢复后自动执行，不需要人工重排。每轮调度独立尝试发布已获确认且当前候选 tree 已通过检查的卡片，因此队首退避不阻塞后续无需再跑检查的发布；发布前仍重读基线并校验当前 tree，有变化的候选继续按 FIFO 与原退避等待检查。未配置 executor 的项目沿用原有失败处理，SSH 入口失败提示修复执行环境后重新检查，不承诺自动重试。
+P2a-12 E：显式配置远程 executor 的项目在候选分发或检查监督进程通道的 SSH 连接失败（含主机密钥校验、认证失败）时，不回退本机，也不提供临时回退开关。每次失败结束当前 attempt 为 `executor_unreachable`，新 attempt 留在 `queued`，保持原审核时间的排队顺序并释放执行容量。项目按 executor 的事件记录累计不可达起点、失败次数和下次重试时间，依次等待 1、2、4、8、16、30 分钟，之后上限 30 分钟；重启后沿用这些记录，不重置预算。候选／tree 改变也不跳过执行目标的退避。`executor_unreachable` 不参与同树通过或失败结果的复用，连接恢复后自动执行，不需要人工重排。每轮调度独立尝试发布已获确认且当前候选 tree 已通过检查的卡片，因此队首退避不阻塞后续无需再跑检查的发布；发布前仍重读基线并校验当前 tree，有变化的候选继续按优先级、同档 FIFO 与原退避等待检查。未配置 executor 的项目沿用原有失败处理，SSH 入口失败提示修复执行环境后重新检查，不承诺自动重试。
 
 连续不可达超过 30 分钟时，调度轮在重试间隔内也检查阈值，按 §12.7 模式创建一条项目级、`blocked_work_items=[]` 的系统 HumanAction，提示远程检查机不可达、合并检查正在排队以及恢复后会自动继续。一次连续故障最多创建一条；人工关闭不重置重试计时。项目事件 `merge_executor_unreachable` 记录开始与各次失败的退避，`merge_executor_attention_required` 记录定时升级；已确认连通后写 `merge_executor_recovered`，同事务取消仍 open 的事项并写 `human_action_cancelled`。基础 clone 缺失或无效是独立环境错误：检查为 `failed`，提示初始化基础仓库后重新检查，不误记不可达或自动循环重试。原始 SSH／Git 诊断只在内存分类，事件、日志和 Needs You 仅保留固定说明与执行目标名称。
 
@@ -1926,11 +1931,13 @@ P2a-9 全机并发配置为主机 `CARDIGAN_CONFIG_DIR/run-capacity.yaml`，配�
 
 计数跨项目汇总同一 Machine 上 Assignment 的 `dispatched`／`acked`／`running` Run；一般不计 queued、unknown 或已结束 Run。Q-86 的停止意图在确认退出前继续预留一个名额，即使期间 Run 变为 unknown 或已经结束，也不能提前释放；同一 Run 不重复计数。常驻 PM（`scope=standing` 且 `role_id=pm`，含 Office／Ops）不受这条上限限制，但其在途 Run 仍占名额；工作项级 PM 不豁免。外部新会话启动期间，尚未派发的 Run 由已有持久 BellAttempt 临时预留一个名额，与事务内计数和领取一起提交；正式派发后只按 Run 计一次，避免自动派发并发误用同一空位，并将人手启动计入后续判断。未派发启动的意图回收必须在同一写事务内取消该 queued Run，再释放预留；迟到启动因 Run 已取消而被状态机拒绝，不能抢用已经分配给其他工作的名额。已派发／已确认／运行中或状态未知的 Run 不因投递意图过期而自动取消。
 
-Dispatcher 每轮先汇集所有项目待投递候选，再按 Run 原触发事件的 `created_at` 排序；尚未创建 Run 的候选采用将要绑定的触发事件时间。同时间依次以事件编号、项目编号、Assignment 编号稳定排序，不比较跨卡片 seq。名额不足时保持原 queued Run 的身份和相对顺序，空位释放后下轮继续；降低上限不会停止已派发 Run。常驻 PM 跳过并发排队判断。Q-88 授权人通过 `cardigan assignment start` 显式启动时绕过全机上限和容量队列次序，立即派发；Workbench 复制的同一命令行为相同。仅主机传入的 human Actor 享有此例外，没有可由 Agent／MCP 参数开启的 bypass 标志；自动派发、PM Ops 指派触发的工作项 Run、C-56 超时重排仍通过 Dispatcher 的容量判断。手动 Run 从领取启动意图起计入占用，启动占用快照超过上限时，CLI 输出“已超过全机上限（当前 X/上限 Y）”。手动启动仍须满足 Assignment／worktree 互斥、停止意图和运行环境检查，不绕过安全状态机；不再因容量满额返回排队提示。读取和 ACK 通知不会取消已排队的工作。queued 候选的运行环境返回 unknown 或查询失败时，保留 Run 与原触发事件，改记 runtime_unavailable、一次性告警，不再阻塞后续可派发候选；后续 tick 继续探测，恢复后按原时间重新入队。执行视图将其显示为“等待运行环境恢复”，不误标为并发排队。
+Dispatcher 每轮先汇集所有项目待投递候选，先按所属卡片当前优先级从高到低，再按 Run 原触发事件的 `created_at` 排序；尚未创建 Run 的候选采用将要绑定的触发事件时间。同时间依次以事件编号、项目编号、Assignment 编号稳定排序，不比较跨卡片 seq。名额不足时保持原 queued Run 的身份；卡片改档后下一轮按新档位重排，同档保持原先后顺序，空位释放后下轮继续；降低上限不会停止已派发 Run。常驻 PM 跳过并发排队判断。Q-88 授权人通过 `cardigan assignment start` 显式启动时绕过全机上限和容量队列次序，立即派发；Workbench 复制的同一命令行为相同。仅主机传入的 human Actor 享有此例外，没有可由 Agent／MCP 参数开启的 bypass 标志；自动派发、PM Ops 指派触发的工作项 Run、C-56 超时重排仍通过 Dispatcher 的容量判断。手动 Run 从领取启动意图起计入占用，启动占用快照超过上限时，CLI 输出“已超过全机上限（当前 X/上限 Y）”。手动启动仍须满足 Assignment／worktree 互斥、停止意图和运行环境检查，不绕过安全状态机；不再因容量满额返回排队提示。读取和 ACK 通知不会取消已排队的工作。queued 候选的运行环境返回 unknown 或查询失败时，保留 Run 与原触发事件，改记 runtime_unavailable、一次性告警，不再阻塞后续可派发候选；后续 tick 继续探测，恢复后按当前优先级与原时间重新入队。执行视图将其显示为“等待运行环境恢复”，不误标为并发排队。
 
-P2a-1 合并检查实际执行期间计为 **2 个名额**，依据 Phase 2 §2.1 对全仓构建／测试 CPU 消耗的建议值，后续可按实测调整。迁移 0014 的 merge_check_capacity 保存独立运行占用：取得执行锁且收到认证 ready 后登记，执行器结束后的 finally 释放，不依赖卡片是否仍允许记录合并结果。卡片退回／取消时仍在执行的检查继续计数，执行结束后即释放；不改变合并闸门的排队、失败处理或状态机。占用绑定主机侧监督进程／SSH 客户端的 PID、Linux boot ID 与进程启动时刻，查询时排除已退出进程及 PID 重用，主机重启不会因缺少业务 finished 事件永久泄漏名额。主机退出导致管道关闭时，既有检查监督进程按取消路径收尾；只要原执行进程仍存活，占用仍保留。P2a-12 D：占用按实际执行目标记账，`machine_id` 为 `local`（未配置 `executor` 或 `executor: local`）或 `merge-gate.yaml` 的执行目标名；PID／启动时刻核对不变（远程目标下是主机侧 SSH 客户端进程）。只有 `local` 的检查按每次 2 个名额计入主机 `local` 的 Run 占用；远程执行目标的检查跨项目计入该目标自己的桶，不进入 `run-capacity.yaml` `machines` 的任何配额，即使有 Agent 机器与执行目标同名也互不影响。远程执行目标同时运行的检查数上限为 `executors.<name>.max_concurrent`（默认 1，1–16），本机固定为 1（与此前一致）。合并检查按项目分道：同一项目的卡片仍按顺序逐张检查和合并，不同项目各自一条后台道，执行前在进程内取得所属执行目标的一个槽位（先到先得，满了排队，检查保持 queued），因此不同执行目标互不等待，同一目标在上限内可以并行。取得槽位后若存活占用（含其他控制进程登记的）已达上限，该项目本次停止、剩余卡片保持 queued，下一轮再试。某项目的道正在运行时，新一轮对该项目只发布已通过的检查（C-113 不变）。不做多台执行目标之间的调度、负载均衡或抢占。合并检查、常驻 PM 或人显式启动可能让占用超过配置值，本规则限制新普通 Run 的自动派发，不抢占正在执行的工作。
+P2a-1 合并检查实际执行期间计为 **2 个名额**，依据 Phase 2 §2.1 对全仓构建／测试 CPU 消耗的建议值，后续可按实测调整。迁移 0014 的 merge_check_capacity 保存独立运行占用：取得执行锁且收到认证 ready 后登记，执行器结束后的 finally 释放，不依赖卡片是否仍允许记录合并结果。卡片退回／取消时仍在执行的检查继续计数，执行结束后即释放；不改变合并闸门的排队、失败处理或状态机。占用绑定主机侧监督进程／SSH 客户端的 PID、Linux boot ID 与进程启动时刻，查询时排除已退出进程及 PID 重用，主机重启不会因缺少业务 finished 事件永久泄漏名额。主机退出导致管道关闭时，既有检查监督进程按取消路径收尾；只要原执行进程仍存活，占用仍保留。P2a-12 D：占用按实际执行目标记账，`machine_id` 为 `local`（未配置 `executor` 或 `executor: local`）或 `merge-gate.yaml` 的执行目标名；PID／启动时刻核对不变（远程目标下是主机侧 SSH 客户端进程）。只有 `local` 的检查按每次 2 个名额计入主机 `local` 的 Run 占用；远程执行目标的检查跨项目计入该目标自己的桶，不进入 `run-capacity.yaml` `machines` 的任何配额，即使有 Agent 机器与执行目标同名也互不影响。远程执行目标同时运行的检查数上限为 `executors.<name>.max_concurrent`（默认 1，1–16），本机固定为 1（与此前一致）。合并检查按项目分道：同一项目的卡片仍按顺序逐张检查和合并，不同项目各自一条后台道，执行前在进程内取得所属执行目标的一个槽位（按卡片优先级与同档审核时间排队，满了保持 queued；领取空位时重新读取档位，正在运行的检查不被抢占），因此不同执行目标互不等待，同一目标在上限内可以并行。取得槽位后若存活占用（含其他控制进程登记的）已达上限，该项目本次停止、剩余卡片保持 queued，下一轮再试。某项目的道正在运行时，新一轮对该项目只发布已通过的检查（C-113 不变）。不做多台执行目标之间的调度、负载均衡或抢占。合并检查、常驻 PM 或人显式启动可能让占用超过配置值，本规则限制新普通 Run 的自动派发，不抢占正在执行的工作。
 
-Workbench 执行视图、看板卡片和 `cardigan attention` 共用跨项目的等待队列投影。执行视图和 CLI 显示“排队中（前面还有 N 个）”，同卡多个排队 Run 分别展示；看板按 §8.7 C-74 只用图标徽标展示最靠前的 Run。N 只数同机等待的普通 Run，不含已运行工作或常驻 PM；队首为 0。暂停／释放 Assignment 与启动中的 Run 不列入。队列变化通过独立只读 SSE 刷新信号同步到项目视图，不伪造项目／卡片事件 seq，不写时间线巡检消息。
+C-144：检查队列的内存等待者也按最新档位领取空位，同项目下一张卡在领取时重选；远程退避未到期的项目跳过，不占槽位、不阻塞其它可执行项目。未启用闸门的合并路径不变，不实现批次合并。
+
+Workbench 执行视图、看板卡片和 `cardigan attention` 共用跨项目的等待队列投影。执行视图和 CLI 显示“排队中（前面还有 N 个）”，同卡多个排队 Run 分别展示；看板按 §8.7 C-74 只用图标徽标展示最靠前的 Run。N 只数同机等待的普通 Run，不含已运行工作或常驻 PM；队首为 0。暂停／释放 Assignment 与启动中的 Run 不列入。队列变化通过独立只读 SSE 刷新信号同步到项目视图，不伪造项目／卡片事件 seq，不写时间线巡检消息。C-144：无／低档的容量等待超过阈值时，在执行视图显示“已长时间排队”；主机环境变量 `CARDIGAN_QUEUE_WARNING_MINUTES` 为正整数分钟，默认 **按 q(228) 定为 30 分钟**，重启 Web 服务生效。等待从原触发事件时间计算，界面按分钟更新时间，即使没有新事件也会出现提示；提示不提档、不改变排队顺序，不将运行环境故障等待误报为容量饥饿。
 
 
 ### 13.9 故障处理

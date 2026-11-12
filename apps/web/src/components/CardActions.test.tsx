@@ -135,9 +135,8 @@ test.each([false, true])(
     fireEvent.change(screen.getByLabelText("验收标准 2"), {
       target: { value: "新增标准" },
     });
-    fireEvent.change(screen.getByLabelText("优先级"), {
-      target: { value: "5" },
-    });
+    fireEvent.click(screen.getByRole("button", { name: "优先级：低" }));
+    fireEvent.click(screen.getByRole("option", { name: "紧急" }));
     view.rerender(display(1));
     await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
     expect((screen.getByLabelText("标题") as HTMLInputElement).value).toBe(
@@ -152,7 +151,7 @@ test.each([false, true])(
         title: "修改后的标题",
         goal: "新的目标",
         acceptance_criteria: ["修改标准", "新增标准"],
-        priority: 5,
+        priority: 4,
       },
       expect.any(String),
     );

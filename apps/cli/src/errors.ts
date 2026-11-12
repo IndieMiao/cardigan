@@ -45,7 +45,7 @@ const SPECIFIC_REASONS: Partial<Record<ErrorCode, Record<string, string>>> = {
     "title is required": "标题不能为空",
     "goal is required": "目标不能为空",
     "Acceptance criteria are required": "至少需要一条非空的验收标准",
-    "Invalid priority": "优先级必须是有限数值",
+    "Invalid priority": "优先级必须是无、低、中、高或紧急",
     "A card cannot supersede itself": "卡片不能被自身取代",
     "Assignment role must match the work item":
       "指派的角色必须与工作项要求一致",

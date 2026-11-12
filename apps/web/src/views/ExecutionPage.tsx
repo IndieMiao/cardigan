@@ -22,6 +22,7 @@ import {
   cliCommand,
   Feedback,
 } from "../components/Operations.js";
+import { PriorityBadge } from "../components/Priority.js";
 import { Tooltip } from "../components/Tooltip.js";
 import {
   assignmentActivity,
@@ -86,7 +87,16 @@ function RunSummary({ text }: { readonly text: string }) {
     </div>
   );
 }
-function RunLine({ run }: { readonly run: RunView }) {
+export function RunLine({ run }: { readonly run: RunView }) {
+  const [elapsed, setElapsed] = useState(0);
+  const waited = run.queue_warning?.waited_ms;
+  useEffect(() => {
+    setElapsed(0);
+    if (waited === undefined) return;
+    const sampled = Date.now();
+    const timer = setInterval(() => setElapsed(Date.now() - sampled), 60_000);
+    return () => clearInterval(timer);
+  }, [waited]);
   return (
     <>
       <IdTag id={run.id} label={runKind(run)} />
@@ -97,6 +107,14 @@ function RunLine({ run }: { readonly run: RunView }) {
       ) : (
         <StatusTag status={run.outcome ?? run.status} />
       )}
+      {run.status === "queued" &&
+        run.queue_warning &&
+        run.queue_warning.waited_ms + elapsed >=
+          run.queue_warning.after_minutes * 60_000 && (
+          <span className="queue-warning" role="note">
+            已长时间排队（超过 {run.queue_warning.after_minutes} 分钟）
+          </span>
+        )}
       {runTime(run) && <Time value={runTime(run)} />}
     </>
   );
@@ -200,6 +218,7 @@ function AssignmentRow({
         {a.work_item_id ? (
           <>
             <CardLink projectId={projectId} id={a.card_id} />
+            <PriorityBadge value={a.card_priority ?? 0} />
             <IdTag id={a.work_item_id} label="工作项" />
           </>
         ) : (
