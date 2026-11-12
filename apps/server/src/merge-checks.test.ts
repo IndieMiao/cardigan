@@ -533,6 +533,26 @@ test("C-116: an assertion failure is not requeued automatically", async () => {
   expect(autoReruns(f)).toHaveLength(0);
 });
 
+test("C-116: a step timeout after an assertion failure is not requeued automatically", async () => {
+  const { f, check } = await fixture("auto");
+  const c = controller(f);
+  c.run.mockImplementationOnce(async (input) => {
+    input.onReady?.();
+    input.onOutput?.("test", vitestAssertion);
+    return {
+      status: "timed_out",
+      checks: [{ name: "test", status: "timed_out", exit_code: null }],
+      cleanup_errors: [],
+    };
+  });
+  await c.gate.tick([f.project_id]);
+  await c.gate.tick([f.project_id]);
+  expect(check()).toMatchObject({ status: "timed_out" });
+  expect(check()?.timeout_only).toBeUndefined();
+  expect(c.run).toHaveBeenCalledTimes(1);
+  expect(autoReruns(f)).toHaveLength(0);
+});
+
 test("fake host_ops MCP recheck retries a failed check and the existing merge gate passes it", async () => {
   const { f, scenario, check } = await fixture();
   const c = controller(f);

@@ -170,42 +170,6 @@ test.each(
       ...f.state,
       project_settings: { merge_gate_enabled: true },
     });
-    const result = (attempt_id: string) => ({
-      ...identity,
-      attempt_id,
-      status,
-      // Log text must never authorize timeout handling on its own.
-      summary: "test failed: timeout",
-      log_ref: `${attempt_id}.log`,
-      checks: steps.map((status, index) => ({
-        name: `check-${index}`,
-        status,
-        exit_code: status === "passed" ? 0 : null,
-        duration_ms: 1,
-      })),
-    });
-    if (timeoutOnly) {
-      // C-116: the first timeout-only failure is rerun automatically and
-      // nobody is woken; the second one below follows the existing flow.
-      const first = { ...identity, attempt_id: "attempt-0" };
-      for (const step of ["queued", "running"] as const)
-        f.commit(
-          recordMergeCheck(gated(), system, { ...first, status: step }, f.io),
-        );
-      const rerun = value(
-        recordMergeCheck(gated(), system, result("attempt-0"), f.io),
-      );
-      f.commit({ ok: true, value: rerun });
-      const auto = rerun.events.find((e) => e.type === "merge_check_finished");
-      if (!auto) throw new Error("Missing finished event");
-      expect(auto.payload).toMatchObject({ auto_rerun: true });
-      expect(rerun.events.some((e) => e.type === "merge_check_requeued")).toBe(
-        true,
-      );
-      expect(
-        routeEvent({ event: auto, snapshot: f.state }).notifications,
-      ).toEqual([]);
-    }
     f.commit(
       recordMergeCheck(
         gated(),
@@ -223,9 +187,25 @@ test.each(
       ),
     );
     const failed = value(
-      recordMergeCheck(gated(), system, result("attempt-1"), f.io),
+      recordMergeCheck(
+        gated(),
+        system,
+        {
+          ...identity,
+          status,
+          // Log text must never authorize timeout handling on its own.
+          summary: "test failed: timeout",
+          log_ref: "attempt-1.log",
+          checks: steps.map((status, index) => ({
+            name: `check-${index}`,
+            status,
+            exit_code: status === "passed" ? 0 : null,
+            duration_ms: 1,
+          })),
+        },
+        f.io,
+      ),
     );
-    expect(failed.events.map((e) => e.type)).toEqual(["merge_check_finished"]);
     f.commit({ ok: true, value: failed });
     const finished = failed.events.find(
       (e) => e.type === "merge_check_finished",
@@ -302,3 +282,80 @@ test.each(
     );
   },
 );
+
+test("C-116: the automatically rerun timeout does not wake PM; the second failure does", async () => {
+  const f = mergeFixture("confirm");
+  const human = { kind: "human", project_id: f.state.project_id } as const;
+  const system = { kind: "system", project_id: f.state.project_id } as const;
+  f.commit(
+    setProjectPreferences(
+      f.state,
+      human,
+      { auto_merge_after_minutes: 1, pm_merge_confirmation: true },
+      f.io,
+    ),
+  );
+  const { completion } = await f.accept();
+  const q = f.state.decisions.findLast(
+    (d) => d.trigger === "merge_confirmation",
+  );
+  if (!q) throw new Error("Missing confirmation");
+  f.commit(
+    recordDecision(
+      f.state,
+      human,
+      {
+        decision_id: q.id,
+        option: "merge",
+        rationale: "合并",
+        raw_quote: "合并",
+      },
+      f.io,
+    ),
+  );
+  const gated = () => ({
+    ...f.state,
+    project_settings: { merge_gate_enabled: true },
+  });
+  const attempt = (attempt_id: string) => {
+    const identity = {
+      card_id: f.card.id,
+      completion_id: completion.id,
+      attempt_id,
+      candidate_sha: "b".repeat(40),
+      tree_sha: "c".repeat(40),
+    };
+    for (const status of ["queued", "running"] as const)
+      f.commit(
+        recordMergeCheck(gated(), system, { ...identity, status }, f.io),
+      );
+    const effect = value(
+      recordMergeCheck(
+        gated(),
+        system,
+        {
+          ...identity,
+          status: "failed",
+          summary: "Test timed out",
+          log_ref: `${attempt_id}.log`,
+          checks: [{ name: "test", status: "failed", exit_code: 1 }],
+          timeout_only: true,
+        },
+        f.io,
+      ),
+    );
+    f.commit({ ok: true, value: effect });
+    const finished = effect.events.find(
+      (e) => e.type === "merge_check_finished",
+    );
+    if (!finished) throw new Error("Missing finished event");
+    return routeEvent({ event: finished, snapshot: f.state }).notifications;
+  };
+  expect(attempt("attempt-1")).toEqual([]);
+  expect(attempt("attempt-2")).toEqual([
+    expect.objectContaining({
+      recipient: { kind: "pm_ops" },
+      summary: expect.stringContaining("退回修改或重新检查"),
+    }),
+  ]);
+});

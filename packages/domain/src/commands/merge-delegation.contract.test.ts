@@ -25,7 +25,6 @@ import {
   setCardSensitive,
   setProjectPreferences,
   standingTools,
-  TIMEOUT_AUTO_RERUN,
   type WorkItem,
 } from "../index.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
@@ -101,64 +100,51 @@ function setup(withOps = true, policy: "confirm" | "auto" = "confirm") {
     const q = confirmation();
     if (!("target" in q) || !("delivery_id" in q.target))
       throw new Error("Missing completion");
-    const completion_id = q.target.delivery_id;
-    const cycle = (attempt_id: string) => {
-      const identity = {
-        card_id: f.card.id,
-        completion_id,
-        attempt_id,
-        candidate_sha: "b".repeat(40),
-        tree_sha: (status === "passed" ? "c" : "d").repeat(40),
-      };
-      f.commit(
-        recordMergeCheck(
-          { ...f.state, project_settings: { merge_gate_enabled: true } },
-          system,
-          { ...identity, status: "queued" },
-          f.io,
-        ),
-      );
-      if (status === "queued") return;
-      f.commit(
-        recordMergeCheck(
-          { ...f.state, project_settings: { merge_gate_enabled: true } },
-          system,
-          { ...identity, status: "running" },
-          f.io,
-        ),
-      );
-      if (status === "running") return;
-      f.commit(
-        recordMergeCheck(
-          { ...f.state, project_settings: { merge_gate_enabled: true } },
-          system,
-          {
-            ...identity,
-            status,
-            summary: status,
-            log_ref: `${identity.attempt_id}.log`,
-            checks: checks ?? [
-              {
-                name: "test",
-                status,
-                exit_code: status === "passed" ? 0 : 1,
-                duration_ms: 1,
-              },
-            ],
-          },
-          f.io,
-        ),
-      );
+    const gated = {
+      ...f.state,
+      project_settings: { merge_gate_enabled: true },
     };
-    cycle(`attempt-${attempt}`);
-    // C-116: a timeout-only failure is rerun automatically once; the rerun
-    // fails the same way, so the result reaches PM as before.
-    const last = f.state.events.at(-1);
-    if (
-      last?.type === "merge_check_requeued" &&
-      (last.payload as { via?: string }).via === TIMEOUT_AUTO_RERUN
-    )
-      cycle(`attempt-${attempt}-rerun`);
+    const identity = {
+      card_id: f.card.id,
+      completion_id: q.target.delivery_id,
+      attempt_id: `attempt-${attempt}`,
+      candidate_sha: "b".repeat(40),
+      tree_sha: (status === "passed" ? "c" : "d").repeat(40),
+    };
+    f.commit(
+      recordMergeCheck(gated, system, { ...identity, status: "queued" }, f.io),
+    );
+    if (status === "queued") return;
+    f.commit(
+      recordMergeCheck(
+        { ...f.state, project_settings: { merge_gate_enabled: true } },
+        system,
+        { ...identity, status: "running" },
+        f.io,
+      ),
+    );
+    if (status === "running") return;
+    f.commit(
+      recordMergeCheck(
+        { ...f.state, project_settings: { merge_gate_enabled: true } },
+        system,
+        {
+          ...identity,
+          status,
+          summary: status,
+          log_ref: `${identity.attempt_id}.log`,
+          checks: checks ?? [
+            {
+              name: "test",
+              status,
+              exit_code: status === "passed" ? 0 : 1,
+              duration_ms: 1,
+            },
+          ],
+        },
+        f.io,
+      ),
+    );
   };
   const pmResolve = (
     option: string,

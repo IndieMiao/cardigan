@@ -322,12 +322,15 @@ export function recordMergeCheck(
       ...("checks" in p ? { summary: p.summary, log_ref: p.log_ref } : {}),
       ...("checks" in p && p.timeout_only ? { timeout_only: true } : {}),
     };
-    // C-116: a failure made only of timeouts is queued again automatically,
-    // once per completion; any later failure goes to PM as before.
+    // C-116: a failure the check supervisor classified as timeout-only is
+    // queued again automatically, once per completion; any other or later
+    // failure goes to PM as before. Only the supervisor, which sees the full
+    // output, can tell a clean timeout from a step that failed and then hung,
+    // so structured statuses alone never trigger the rerun.
     const plan =
       "checks" in p &&
       (p.status === "failed" || p.status === "timed_out") &&
-      (value.timeout_only || timeoutOnly(value)) &&
+      p.timeout_only === true &&
       !hasTimeoutAutoRerun(state.events, p.card_id, p.completion_id)
         ? attempt(() => unwrap(prepareMergePlan(state, p.card_id)))
         : undefined;

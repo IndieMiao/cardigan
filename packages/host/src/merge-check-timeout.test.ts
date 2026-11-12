@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
 import {
   checkTimedOutOnly,
+  stepTimeoutOnly,
   TRUNCATED_OUTPUT,
   vitestTimeoutsOnly,
 } from "./merge-check-timeout.js";
@@ -47,7 +48,50 @@ ${blocks}
  ELIFECYCLE  Test failed. See above for more details.
 `;
 
+// V-431: real vitest 5.1 output for a suite-level beforeAll timeout.
+const suiteHookTimeout = ` RUN  v5.1.0 /repo
+
+ ❯ hook.test.ts (1 test | 1 skipped) 45ms
+
+⎯⎯⎯⎯⎯⎯ Failed Suites 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  hook.test.ts [ hook.test.ts ]
+Error: Hook timed out in 30ms.
+If this is a long-running hook, pass a timeout value as the last argument or configure it globally with "hookTimeout".
+ ❯ hook.test.ts:2:1
+      1| import { beforeAll, test } from "vitest";
+      2| beforeAll(() => new Promise(() => {}), 30);
+       | ^
+      3| test("would pass", () => {});
+      4|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 skipped (1)
+   Start at  12:27:18
+   Duration  198ms (tests 62%, transform 22%, import 12%, worker 5%)
+`;
+// V-431: an assertion failure, after which the command hung until its step timeout.
+const assertionThenHang = ` RUN  v5.1.0 /repo
+
+ ❯ assert.test.mjs (1 test | 1 failed) 4ms
+   × assertion 3ms
+     → expected 1 to be 2 // Object.is equality
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  assert.test.mjs > assertion
+AssertionError: expected 1 to be 2 // Object.is equality
+ ❯ assert.test.mjs:1:59
+
+ Test Files  1 failed (1)
+      Tests  1 failed (1)
+`;
+
 test("C-116: vitest output with only test or hook timeouts is timeout-only", () => {
+  expect(vitestTimeoutsOnly(suiteHookTimeout)).toBe(true);
   expect(
     vitestTimeoutsOnly(
       run(timeoutBlock("slow one") + timeoutBlock("slow two")),
@@ -75,7 +119,7 @@ test.each([
   ],
   ["only an assertion failure", run(assertionBlock, 1)],
   [
-    "a failed suite",
+    "a failed suite with an import error",
     `${run(timeoutBlock("slow"))}\n⎯⎯⎯⎯ Failed Suites 1 ⎯⎯⎯⎯\n\n FAIL  src/c.test.ts [ src/c.test.ts ]\nError: Cannot find module\n`,
   ],
   [
@@ -87,6 +131,23 @@ test.each([
     `${run(timeoutBlock("slow"))}\n     Errors  1 error\n`,
   ],
   ["a type check or lint failure", "src/a.ts(1,1): error TS2322: nope\n"],
+  // V-431: one command reporting a timeout and a TypeScript error.
+  [
+    "a timeout next to a TypeScript error",
+    "\n FAIL  a.test.ts > slow\nError: Test timed out in 5000ms.\nsrc/a.ts(1,1): error TS2322: Type string is not assignable to type number.\n",
+  ],
+  [
+    "a timeout next to an error the tests logged",
+    `stderr | src/a.test.ts > slow\nError: something logged\n${run(timeoutBlock("slow"))}`,
+  ],
+  [
+    "a timeout next to a lint diagnostic",
+    `${run(timeoutBlock("slow"))}\nsrc/a.ts:1:1 lint/suspicious/noExplicitAny ━━━━\nFound 1 error.\n`,
+  ],
+  [
+    "a suite hook timeout followed by another error",
+    `\n⎯⎯⎯⎯ Failed Suites 1 ⎯⎯⎯⎯\n\n FAIL  src/c.test.ts [ src/c.test.ts ]\nError: Hook timed out in 30ms.\nSyntaxError: Unexpected token\n`,
+  ],
   ["no output", ""],
   [
     "truncated output",
@@ -102,11 +163,24 @@ test.each([
   expect(vitestTimeoutsOnly(output)).toBe(false);
 });
 
+test("C-116: a step timeout is clean only without other failure signals", () => {
+  expect(stepTimeoutOnly("")).toBe(true);
+  expect(stepTimeoutOnly("building...\nwaiting for server\n")).toBe(true);
+  expect(stepTimeoutOnly(assertionThenHang)).toBe(false);
+  expect(stepTimeoutOnly("Error: connect ECONNREFUSED\n")).toBe(false);
+  expect(stepTimeoutOnly(`partial\n${TRUNCATED_OUTPUT}\nmore`)).toBe(false);
+});
+
 test("C-116: step timeouts and vitest timeouts combine; anything else does not", () => {
   const outputs: Record<string, string> = {
     lint: "",
     unit: run(timeoutBlock("slow")),
     broken: run(assertionBlock, 1),
+    // A step that printed a vitest timeout and then hung is still clean.
+    slow: run(timeoutBlock("slow")),
+    hung: assertionThenHang,
+    typed:
+      "src/a.ts(1,1): error TS2322: Type string is not assignable to type number.\n",
   };
   const read = (name: string) => outputs[name] ?? "";
   expect(
@@ -115,6 +189,7 @@ test("C-116: step timeouts and vitest timeouts combine; anything else does not",
       [
         { name: "lint", status: "passed" },
         { name: "e2e", status: "timed_out" },
+        { name: "slow", status: "timed_out" },
         { name: "later", status: "not_run" },
       ],
       read,
@@ -141,6 +216,16 @@ test("C-116: step timeouts and vitest timeouts combine; anything else does not",
     ],
     ["failed", [{ name: "lint", status: "failed" }]],
     ["timed_out", [{ name: "e2e", status: "interrupted" }]],
+    // V-431: an assertion or type error before the step timeout is not a timeout.
+    ["timed_out", [{ name: "hung", status: "timed_out" }]],
+    ["timed_out", [{ name: "typed", status: "timed_out" }]],
+    [
+      "timed_out",
+      [
+        { name: "unit", status: "failed" },
+        { name: "hung", status: "timed_out" },
+      ],
+    ],
     ["failed", []],
     ["passed", [{ name: "unit", status: "passed" }]],
     ["interrupted", [{ name: "e2e", status: "timed_out" }]],
@@ -174,4 +259,31 @@ test("C-116: the merge check log classifies the retained command output", async 
   expect(
     await finish("attempt-2", run(timeoutBlock("a") + assertionBlock)),
   ).toMatchObject({ status: "failed", timeout_only: false });
+  // V-431: the step timed out after an assertion failure.
+  const hung = await createMergeCheckLog({
+    dataDir,
+    project: "p",
+    attempt: "attempt-3",
+  });
+  hung.append("test", assertionThenHang);
+  expect(
+    await hung.finish({
+      status: "timed_out",
+      checks: [{ name: "test", status: "timed_out", exit_code: null }],
+      cleanup_errors: [],
+    }),
+  ).toMatchObject({ status: "timed_out", timeout_only: false });
+  const clean = await createMergeCheckLog({
+    dataDir,
+    project: "p",
+    attempt: "attempt-4",
+  });
+  clean.append("test", "waiting for server\n");
+  expect(
+    await clean.finish({
+      status: "timed_out",
+      checks: [{ name: "test", status: "timed_out", exit_code: null }],
+      cleanup_errors: [],
+    }),
+  ).toMatchObject({ status: "timed_out", timeout_only: true });
 });

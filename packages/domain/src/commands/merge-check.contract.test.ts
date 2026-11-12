@@ -271,25 +271,30 @@ const finish = (
 });
 
 test.each([
-  { name: "a step timeout", status: "timed_out", steps: ["timed_out"] },
+  {
+    name: "a step timeout",
+    status: "timed_out",
+    steps: ["timed_out"],
+    timeout_only: true,
+  },
   {
     name: "a timed-out step after passed ones",
     status: "failed",
     steps: ["passed", "timed_out", "not_run"],
+    timeout_only: true,
   },
   {
-    name: "vitest test timeouts classified by the supervisor",
+    name: "vitest test timeouts",
     status: "failed",
     steps: ["passed", "failed"],
     timeout_only: true,
   },
 ] as const)(
-  "C-116: $name is requeued automatically once and recorded",
-  async ({ status, steps, ...rest }) => {
+  "C-116: $name classified by the supervisor is requeued automatically once and recorded",
+  async ({ status, steps, timeout_only }) => {
     const { f, state, record, identity } = await fixture();
     record("queued");
     record("running");
-    const timeout_only = "timeout_only" in rest ? rest.timeout_only : undefined;
     const effect = value(
       recordMergeCheck(
         state(),
@@ -354,6 +359,25 @@ test.each([
     status: "failed",
     steps: ["failed"],
     timeout_only: false,
+  },
+  // V-431: a step that failed an assertion and then hung until its step
+  // timeout looks structurally like a clean timeout; only the supervisor's
+  // classification may authorize the rerun.
+  {
+    name: "a step timeout the supervisor saw other failures in",
+    status: "timed_out",
+    steps: ["timed_out"],
+    timeout_only: false,
+  },
+  {
+    name: "an unclassified step timeout",
+    status: "timed_out",
+    steps: ["timed_out"],
+  },
+  {
+    name: "an unclassified timed-out step after passed ones",
+    status: "failed",
+    steps: ["passed", "timed_out", "not_run"],
   },
 ] as const)(
   "C-116: $name is not requeued automatically",
@@ -420,7 +444,14 @@ test("C-116: each completion is rerun automatically at most once; later timeouts
   const { f, state, record, identity } = await fixture();
   record("queued");
   record("running");
-  record("timed_out");
+  f.commit(
+    recordMergeCheck(
+      state(),
+      system,
+      finish(identity as never, "timed_out", ["timed_out"], true),
+      f.io,
+    ),
+  );
   expect(
     latestMergeCheck(state().events, f.card.id, identity.completion_id)?.status,
   ).toBe("queued");
@@ -453,7 +484,19 @@ test("C-116: each completion is rerun automatically at most once; later timeouts
   expect(requeued?.payload).not.toHaveProperty("timeout_only");
   record("queued", "attempt-3");
   record("running", "attempt-3");
-  record("timed_out", "attempt-3");
+  f.commit(
+    recordMergeCheck(
+      state(),
+      system,
+      finish(
+        { ...identity, attempt_id: "attempt-3" } as never,
+        "timed_out",
+        ["timed_out"],
+        true,
+      ),
+      f.io,
+    ),
+  );
   expect(
     latestMergeCheck(state().events, f.card.id, identity.completion_id)?.status,
   ).toBe("timed_out");
@@ -510,12 +553,6 @@ async function fixture(policy: "auto" | "confirm" = "auto") {
         f.io,
       ),
     );
-  /** C-116: spend the completion's single automatic timeout rerun first. */
-  const useTimeoutRerun = () => {
-    record("queued", "timeout-rerun");
-    record("running", "timeout-rerun");
-    record("timed_out", "timeout-rerun");
-  };
   const merged = {
     card_id: f.card.id,
     completion_id: completion.id,
@@ -526,16 +563,7 @@ async function fixture(policy: "auto" | "confirm" = "auto") {
       tree_sha: tree,
     },
   };
-  return {
-    f,
-    state,
-    identity,
-    record,
-    useTimeoutRerun,
-    merged,
-    completion,
-    product,
-  };
+  return { f, state, identity, record, merged, completion, product };
 }
 
 test("a decision opened during checking blocks publication but does not lose the failure result", async () => {
@@ -701,9 +729,7 @@ test("invariant 21: no gate preserves legacy merges; a verified noop is explicit
 test.each(["failed", "timed_out"] as const)(
   "invariant 21: %s needs a human recheck; no automatic retry or result rewrite",
   async (status) => {
-    const { f, state, record, identity, useTimeoutRerun } = await fixture();
-    // The automatic timeout rerun is used once; the next timeout stays put.
-    if (status === "timed_out") useTimeoutRerun();
+    const { f, state, record, identity } = await fixture();
     record("queued");
     record("running");
     record(status);
@@ -883,8 +909,7 @@ for (const approval of ["open", "human", "delegated"] as const) {
   test.each(["failed", "timed_out"] as const)(
     `a ${approval} confirmation can return a %s check through the existing rework lifecycle`,
     async (status) => {
-      const { f, state, record, completion, useTimeoutRerun } =
-        await fixture("confirm");
+      const { f, state, record, completion } = await fixture("confirm");
       const decision = f.state.decisions[0];
       if (!decision) throw new Error("Missing confirmation");
       if (approval === "human")
@@ -916,7 +941,6 @@ for (const approval of ["open", "human", "delegated"] as const) {
         );
       }
       const authorization = f.state.decisions[0]?.resolution;
-      if (status === "timed_out") useTimeoutRerun();
       record("queued");
       record("running");
       record(status);
