@@ -107,6 +107,57 @@ test("failed writes roll back employees, events and global counters together", (
   });
 });
 
+test("library occupancy is global across connections and enforced for repository writes including inactive employees", () => {
+  withTempStore((store, dataDir) => {
+    const first = add(store);
+    store.uow.run((tx) =>
+      tx.employees.put({
+        ...first,
+        avatar: "library:guan-yu",
+        status: "inactive",
+      }),
+    );
+    const other = Store.open({ dataDir });
+    try {
+      expect(() =>
+        other.uow.run((tx) => {
+          const effect = value(
+            createEmployee(
+              tx.employees.list(),
+              { kind: "human" },
+              {
+                name: "另一个名字",
+                title: "开发",
+                role_id: "coder",
+                avatar: "library:guan-yu",
+              },
+              { clock, ids: tx.global_ids },
+            ),
+          );
+          persistEmployeeEffect(tx, effect);
+        }),
+      ).toThrow("人物已被员工");
+      expect(() =>
+        other.uow.run((tx) =>
+          tx.employees.put({
+            ...first,
+            id: tx.global_ids.nextEmployeeId(),
+            name: "直接存储",
+            avatar: "library:guan-yu",
+          }),
+        ),
+      ).toThrow("人物已被其他员工");
+      expect(other.uow.read((tx) => tx.employees.list())).toHaveLength(1);
+      expect(
+        other.uow.read((tx) => tx.global_events.listAfter(1)),
+      ).toHaveLength(1);
+      expect(add(other, "未占用").id).toBe("E-2");
+    } finally {
+      other.close();
+    }
+  });
+});
+
 test("SQLite enforces active name uniqueness and read transactions cannot mutate globals", () => {
   withTempStore((store) => {
     const first = add(store, "诸葛 亮");

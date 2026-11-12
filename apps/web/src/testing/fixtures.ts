@@ -159,6 +159,12 @@ export function fakeClient(
   overrides: Partial<CardiganClient> = {},
 ): CardiganClient {
   return {
+    employeeOptions: async () => ({ library: [], roles: [] }),
+    createEmployee: async (_projectId, input) => ({
+      id: "E-1",
+      name: input.name,
+      role_id: input.role_id,
+    }),
     subscribe: () => () => {},
     activity: async () => ({
       cards: [{ id: card.id, title: card.title }],

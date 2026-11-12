@@ -245,16 +245,16 @@ export class Store {
     });
 
     const db = new DatabaseSync(dbPath);
-    db.exec("PRAGMA journal_mode = WAL");
-    db.exec("PRAGMA foreign_keys = ON");
-    db.exec("PRAGMA busy_timeout = 5000");
-
     const store = new Store(
       db,
       options.clock ?? systemClock,
       options.migrationsDir,
     );
     try {
+      // Opening/configuring the database can contend with another process too.
+      db.exec("PRAGMA busy_timeout = 5000");
+      enableWal(db);
+      db.exec("PRAGMA foreign_keys = ON");
       // C-132: the id-format migration rewrites stored values; keep a copy.
       backupBeforeIdFormatMigration(
         db,
@@ -937,6 +937,38 @@ export class Store {
     return row === undefined
       ? undefined
       : (JSON.parse((row as { doc: string }).doc) as Cursor);
+  }
+}
+
+/** WAL lock upgrades may return SQLITE_BUSY without invoking SQLite's busy handler. */
+function enableWal(db: DatabaseSync): void {
+  const deadline = performance.now() + 5000;
+  const pause = new Int32Array(new SharedArrayBuffer(4));
+  try {
+    for (;;) {
+      try {
+        db.exec("PRAGMA journal_mode = WAL");
+        return;
+      } catch (error) {
+        const remaining = Math.floor(deadline - performance.now());
+        if (
+          !error ||
+          typeof error !== "object" ||
+          !("errcode" in error) ||
+          typeof error.errcode !== "number" ||
+          (error.errcode & 0xff) !== 5 ||
+          remaining <= 0
+        )
+          throw error;
+        // Sleep rather than spin, and keep all retries inside the original wait budget.
+        Atomics.wait(pause, 0, 0, Math.min(20, remaining));
+        const nextWait = Math.floor(deadline - performance.now());
+        if (nextWait <= 0) throw error;
+        db.exec(`PRAGMA busy_timeout = ${nextWait}`);
+      }
+    }
+  } finally {
+    db.exec("PRAGMA busy_timeout = 5000");
   }
 }
 

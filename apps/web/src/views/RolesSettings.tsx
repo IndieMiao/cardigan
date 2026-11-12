@@ -12,6 +12,7 @@ import {
 import { EmployeeIdentity } from "../components/EmployeeIdentity.js";
 import { StatusTag, Time } from "../components/Foundation.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
+import { employeeCopy } from "../employee-copy.js";
 import {
   parseList,
   ROLE_FIELD_LABELS,
@@ -69,12 +70,15 @@ export function RolesSettings({
   client,
   projectId,
   revision = 0,
+  onNewEmployee,
 }: {
   client: CardiganClient;
   projectId: string;
   revision?: number;
+  onNewEmployee?: (roleId: string) => void;
 }) {
   const [view, setView] = useState<View>({ kind: "list" });
+  const [createdRole, setCreatedRole] = useState<string>();
   const [message, setMessage] = useState("");
   const load = useCallback(() => client.roles(projectId), [client, projectId]);
   const list = useResource(load, revision);
@@ -86,6 +90,16 @@ export function RolesSettings({
   return (
     <div className="role-settings">
       <RequestFeedback message={message} />
+      {createdRole &&
+        onNewEmployee &&
+        view.kind === "detail" &&
+        view.roleId === createdRole && (
+          <p>
+            <button type="button" onClick={() => onNewEmployee(createdRole)}>
+              {employeeCopy.afterRole}
+            </button>
+          </p>
+        )}
       {view.kind === "list" && (
         <RequestFeedback
           {...list}
@@ -106,12 +120,13 @@ export function RolesSettings({
           projectId={projectId}
           list={list.data}
           onCancel={() => open({ kind: "list" })}
-          onCreated={(role) =>
+          onCreated={(role) => {
+            setCreatedRole(role.role_id);
             open(
               { kind: "detail", roleId: role.role_id },
               `已创建角色 ${role.role_id} v${role.version}`,
-            )
-          }
+            );
+          }}
         />
       )}
       {(view.kind === "detail" || view.kind === "edit") && (

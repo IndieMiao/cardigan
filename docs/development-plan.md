@@ -394,7 +394,8 @@ C-144：迁移 0019 在 C-132 的编号格式迁移 0018 之后，将旧数字�
 - `name`、`title`、`bio`：名字、职位、简介，分别最多 40 / 40 / 200 个 Unicode 字符；去掉首尾空白，名字和职位必填，简介默认空字符串。拒绝控制字符、格式控制字符及 Unicode 行／段分隔符。在职员工名字全局唯一，比较时全角空格转半角空格、去掉首尾空白，再用 Unicode `toLowerCase()` 转为小写（与 locale 无关）；显示名保留大小写。创建、改名和恢复在职均使用这一规则。
 - `avatar`：可空的头像引用字符串，不存图片。V4a 约定 `library:<人物 id>` 和 `upload:<sha256>`；内置素材清单含 60 位人物（第一期 59 位加 2026-11-10 增补张良），原始 WebP 和 manifest 随 Workbench 放在 `apps/web/public/avatars/v1/`，NOTICE 标明“AI 生成、Cardigan 自有”，测试核对文件 SHA-256。CLI 选择内置头像时校验人物编号；未知或旧引用保留在存储中，Workbench 读取时按无头像处理。
 - 上传头像是全局资源：CLI 的 `--avatar-file` 只接受按内容识别的 PNG、WebP、JPEG，最大 2 MiB；不重新编码，按摘要存到数据目录 `avatars/<sha256>.<png|webp|jpg>`，员工仅存引用。读取接口把内置引用解析为 `/avatars/v1/<id>/head-64.webp`，上传引用解析为 `/api/avatars/<sha256>`；前端仍仅接受同源根相对路径。上传路由要求有效登录会话，严格按 64 位小写摘要及固定扩展名查找、拒绝符号链接、核对内容摘要，返回正确 MIME、nosniff、私有缓存与 ETag，每次重验证均先检查登录。
-- `EmployeeIdentity` 按显示大小使用 64 或 128 素材，并以 `srcset` 提供 2 倍图；员工悬停卡片使用 256 素材，缺失或加载失败回退名字首字色块。CLI 选头像和全站显示属于 V4a，招聘和员工管理界面仍留到 V6。
+- C-161：内置人物引用在全局员工之间互斥，在职和离职员工都占用；创建和修改共用 domain 校验，存储 `employees.put` 同样拒绝另一员工已有的 `library:` 引用。读取全部员工、校验、写员工及全局审计在既有 `BEGIN IMMEDIATE` 事务中执行，跨连接串行写入；无需新增字段、索引或迁移。上传头像不受人物库互斥约束，成员头像不占用员工人物库。
+- `EmployeeIdentity` 按显示大小使用 64 或 128 素材，并以 `srcset` 提供 2 倍图；员工悬停卡片使用 256 素材，缺失或加载失败回退名字首字色块。CLI 选头像和全站显示属于 V4a；C-161 将新建员工接入设置页，完整员工管理仍留到 V6。
 - `role_id`：角色编号，创建后不可通过员工修改命令改变；`launch_profile_ref`：可空，设置时必须是主机 `launch.yaml` 中存在的配置名，不因选配置而改角色。指派时检查该角色已在目标项目登记，且与工作项要求一致。
 - `status`：`active | inactive`；`created_at`、`updated_at` 记录审计时间。只有人可创建、修改、停用和恢复，不提供删除。
 - 存储新增无项目键的 `employees`、`global_counters`、`global_events`。员工命令使用独立全局事件流，事件类型为 `employee_created / employee_updated / employee_deactivated / employee_activated`，保存 human 操作者和变更后的员工快照。选择全局流是为了让团队管理不依赖项目选择，避免把全局审计绑定某个项目；全局序号与原有项目／卡片流分别递增。员工、编号及事件在同一事务中提交或回滚；SQLite 部分唯一索引约束在职姓名。
@@ -709,6 +710,7 @@ C-152：意图记录的 RuntimeRef 不属于 server 当前运行时（`machine_i
 
 16. 员工级审核隔离：验证工作项的员工不得出现在目标产出项任何当前或曾经（包括已释放）的 Assignment 上；完成申请验收项与模板主产出项同样隔离。反向先指派验证方、再指派产出方也检查；提交交付／审核时重查。不带员工的一方不凭角色推断身份，双方均无员工继续沿用第 15 条。
 17. 新指派的员工必须在职，员工角色、工作项角色和目标项目登记的角色一致；绑定尚未 released 的外接常驻 Assignment 的员工不能被指派到工作项（包括跨项目和重复指派）。员工编号在 Assignment 创建后不可修改。停用只阻止新指派，不取消既有责任和 Run。
+    C-161：同一个内置人物不能同时属于两个员工，离职员工也保留占用；Web 与 CLI 的创建、修改均在全局写事务中校验，不仅由界面禁选。
 18. 模板按项目、编号和版本隔离；已有卡片固定模板版本，修改／停用不改旧卡。内置模板只能复制；所有模板写操作和人标记完成都由 domain 校验 human 身份。需要 Git 合并的卡片必须有仓库和基线，非 Git 模板不能用 Git 交付绕过完成方式。
 19. 模板引用的角色（含完成审核者）必须在目标项目登记，且最新版本未停用；没有 `status` 的老角色按启用处理，未登记仍拒绝，与 V1b 指派的项目角色登记要求一致。`capabilities=[]` 表示老角色未声明工作项能力，兼容其承担模板指定的产出／验证，不以工具列表阻止模板创建、启用或建卡；非空时仍严格要求产出允许 `submit_delivery`、验证及完成审核允许 `submit_review`。这只是模板适配规则，不扩充角色、Assignment 或 Token 的 `allowed_tools`，实际交付／审核仍须通过原有工具权限校验。
 
@@ -1063,6 +1065,8 @@ M5.1 实现的骨架（实现细节见 `docs/plans/phase-1-m5.md` §3.1–§3.3�
 - **重试交互**：评论草稿开始编辑时用 `crypto.randomUUID()` 生成键，失败保留正文和键。评论、附件、卡片编辑／取消／取代、Needs You 拍板／补充信息／人工事项完成共用写请求错误说明：仅网络错误、超时或 5xx 提示“可能已经成功，重试不会重复提交”，400、409 和领域拒绝只显示中文原因。修改已提交草稿仍先沿用原键；收到评论的 `idempotency_conflict` 后明确提示“上一次的评论已经发表”，刷新最新时间线，保留编辑后的正文并释放原键，等待用户再次点击发表作为新评论，不自动补发。成功清空或用户清空正文后，下一条草稿使用新键。每张粘贴图片各有一个键，附件部分上传失败后重试沿用评论及附件的原键；开始新评论时保留的图片也换新键，避免关联到不同评论时冲突。附件冲突不按评论冲突处理。Needs You 的拍板、补充信息和人工事项完成按操作内容保留失败请求的键，成功后释放。重试保障限于当前页面保留的操作和服务端 24 小时保留期。
 - **只读接口**：`GET /api/projects`；`GET /api/projects/:id/cards`（`filter=needs_me|agent`，每张卡带 domain 派生的 `status`、`waiting_on`、`next_owners`、`why`）；`GET /api/projects/:id/cards/:card`（工作项、时间线、交付、审核、决策、附件和 §8.4 的关联区）；`GET /api/projects/:id/needs-you`（含一句话原因和已等待时长）；`GET /api/projects/:id/snapshot`（§8.3）；`GET /api/projects/:id/execution`（§8.5 的 Assignment、Run、runtime、worktree、游标）；`GET /api/projects/:id/activity`（§8.6，按卡片、角色、类型过滤并分页）；`GET /api/projects/:id/preferences` 及 V9b 的 `roles` 读接口见 §8.8。全部以 `{ kind: "human" }` 身份复用 domain 已有的查询（`projectSnapshot`、`listNeedsYou`），只读事务，不推进任何 Agent 游标。
 - **卡片模板设置（V10b）**：设置页提供“偏好”、“授权”、“角色”和“卡片模板”分栏；模板列表与详情展示版本、状态和流程定义，内置模板只读并提供复制入口，项目模板支持新建、编辑、停用／启用和回退（见 §8.8）。
+- **新建员工（C-161）**：设置页增加“员工”分栏，新建角色成功后可继续为该角色新建员工。人物库复用 `cardigan avatar list` 数据，按出处分组，可搜索；在职和离职员工已占用的人物置灰并显示占用者。选中人物带出可编辑名字及头像；职位必填、简介可选，角色仅列本项目最新启用版本。自定义模式允许自行填名字、上传 PNG/JPEG/WebP（可选，最大 2 MiB）。`GET /api/projects/:id/employees/options` 返回人物、占用者公开资料及角色选项；`POST /api/projects/:id/employees` 接受名字、职位、角色、简介及内置头像引用或规范 base64 文件，要求 `Idempotency-Key`，复用 24 小时人类写入重试机制。员工仍为全局实体，创建和 `employee_created` 审计同事务；不暴露启动配置、不创建 Assignment。新增界面文字集中在 `apps/web/src/employee-copy.ts`，待定，由人确认。
+  安全复核补充：HTTP 层同时限制名字、职位、简介为 40／40／200 个去首尾空白后的 Unicode 字符，原文本仍交 domain 检查控制字符。写头像前在只读事务中调用相同的员工领域命令预校验角色、重名、人物占用和文本，不消耗真实编号、不保存预览效果；无效表单在文件 IO 前被拒绝。异步文件 IO 后仍在 `BEGIN IMMEDIATE` 写事务重新检查当前状态，预校验不代替并发校验。
 - **实时刷新**：`GET /api/projects/:id/stream?after=<流:seq,...>`（SSE，`project` 代表项目级流），心跳 15 秒，断线重连按流补发缺失的 seq；不带 `after` 时从当前最新事件开始，不重放历史。
 - **关闭（C-117）**：server 收到 SIGTERM／SIGINT 后，Workbench 监听器先停止接受新连接，并立即给每条 SSE 连接发送 `event: shutdown` 后结束，不等浏览器断开；这一步和控制面停止同时开始，控制面仍按既有顺序等各循环当前一轮结束。进行中的普通请求有宽限期 `CARDIGAN_SHUTDOWN_GRACE_MS`（正整数毫秒，默认 10000），宽限期内正常完成，超时则断开连接。从收到信号起，进程最晚在宽限期再加 2 秒时退出：仍未关闭完（例如某个循环卡在当前一轮里）时记 `shutdown_forced` 并以退出码 1 退出，不关闭仍可能被使用的 Store；已经关闭完但仍有残留句柄（例如被截断的请求留下的定时器）时记 `shutdown_forced`、`after_close: true`，按已确定的退出码退出。这个计时器不阻止进程自然退出；被截断的合并检查由现有的启动规则记 interrupted 并重新排队。
 - **请求状态提示（C-57）**：Workbench 的读取、同步、保存、提交结果及错误共用 `RequestFeedback`，在右上角脱离文档流的提示区排列；抽屉内的提示留在对话框内部，保持读屏及重试按钮可访问。后台刷新和 SSE 引发的读取默认静默，连续等待 1 秒才显示进度；用户提交、保存和手动重试立即反馈。刷新及失败保留已有内容，错误醒目且不挤动页面。提示使用 `aria-live="polite"`，空闲时保留空的播报节点。用 `hidden` 保留表单的设置分栏同时通过 `RequestFeedbackScope` 控制其 Portal 提示：隐藏时不渲染提示或播报节点，迟到的操作结果也不串到当前分栏；表单及请求继续保留，切回后恢复对应反馈和草稿。组件测试用受控 Promise 和计时器，比较刷新前、等待中、完成或失败后的文档流布局结构，避免把 jsdom 恒为零的 `offsetTop` 当作浏览器布局证据。
@@ -1993,6 +1997,7 @@ resume_or_replace 在旧终端不存在时可重开；release 返回 runtime_una
 | 机器间已有的互相授权 | Agent 运行在没有密钥的 `agent` 用户下 |
 | Herdr Socket（无 ACL） | 接受同机 Agent 可互相操作；影响范围限于单台机器 |
 | 成员身份（V11a） | 成员管理只接受 human；展示姓名和头像不能伪造 Actor。单密码会话对应唯一 owner，旧会话校验后回填成员编号；多人登录和权限矩阵留后续 |
+| Workbench 创建员工（C-161） | 仅有效 owner 会话可访问，Bearer Token 一律拒绝；沿用 Host/Origin 检查，在请求体、头像 IO 后及写事务内重查身份。JSON 请求有总量上限，文件解码后最大 2 MiB；复用 CLI 的 `fileAvatarStore` 按内容识别 PNG/JPEG/WebP，客户端不能指定文件名、路径、MIME 或 `upload:` 引用。服务器以 SHA-256 生成文件名，既有头像读取路由以固定位图 MIME、nosniff、隔离 CSP 返回，拒绝 SVG/HTML；创建写入全局 human 审计。 |
 | 高风险合并检查的重查（C-115） | PM Ops 在当前偏好允许时只能重查结构化超时失败；不得退回或代确认合并，日志文本不能放宽权限，见 §4.4 |
 | 高风险业务拍板（D12） | 只允许 human Actor 通过 Workbench 或本机 CLI 确认；不接受 PM Office、PM Ops 或其他 Agent 的转录与代拍，不因接口参数或 CLI 命令文字自称 human 而改变身份 |
 | 外接 Assignment | external 仅是调度属性，不授予 human 身份或主机权限；同配置 Office 的 Token 工具范围一致，四类高风险仍只允许 human 确认 |
@@ -2214,6 +2219,7 @@ cardigan/
 - CLI 和 server 的启动警告过滤共用 `@cardigan/host/warnings` 独立子路径；该模块无业务依赖，不经 `host` 主入口导入，避免在安装过滤前间接加载 SQLite。
 - `host.runInTemporaryCheckout` 封装临时检出、检查进程生命周期、完整性核对和清理，合并闸门及验证方构建复用。它不读取闸门配置、不作领域状态迁移、不推送外部远程；调用方负责候选分发、日志脱敏与领域结果记录。
 - 用 lint 规则强制依赖方向（dependency-cruiser 或 TypeScript project references）。以后要拆包或换实现（例如直连 SDK 的运行时）时几乎不用改代码。
+- C-161 启动并发修复：`store` 打开 SQLite 后先设置 5000ms 的 `busy_timeout`，再配置 WAL。WAL 锁升级可能跳过 SQLite 的 busy handler，因此仅对该步骤的 `SQLITE_BUSY` 在同一 5 秒预算内休眠重试；其他错误和到期错误继续抛出，初始化失败关闭连接。每个迁移取得 `BEGIN IMMEDIATE` 写锁后重新查已应用版本，避免两个进程同时首次打开新库时重复执行迁移及初始化审计；不新增迁移文件或改变 schema 版本。
 
 ### 20.3 被开发项目怎么接入
 
