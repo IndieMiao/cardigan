@@ -562,7 +562,7 @@ export interface NeedsPage {
 export interface IncidentContact {
   readonly assignment_id: string;
   readonly name: string | null;
-  /** What to type after `@` so the comment reaches this Assignment. */
+  /** What to type after `@` so the comment reaches this Assignment (its id). */
   readonly mention: string;
 }
 

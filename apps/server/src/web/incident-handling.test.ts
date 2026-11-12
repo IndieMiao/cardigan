@@ -1,4 +1,5 @@
-import type { Assignment } from "@cardigan/domain";
+import { type Assignment, type Employee, postComment } from "@cardigan/domain";
+import { routeEvent } from "@cardigan/router";
 import { expect, test } from "vitest";
 import { dispatchFixture } from "../../test-support/dispatch.js";
 import { needsYou } from "./read.js";
@@ -56,6 +57,81 @@ test("C-153 Needs You says who looks after lost runtimes and how often host_ops 
     ).toMatchObject({
       host_ops: { patrol_interval_ms: 30 * 60_000 },
       pm_office: null,
+    });
+  } finally {
+    f.close();
+  }
+});
+
+test("C-153 / V-504 the PM Office mention in the steps reaches the Office, not PM Ops", () => {
+  const f = dispatchFixture();
+  try {
+    const target = f.create();
+    const state = f.state();
+    const { work_item_id: _workItem, ...base } = target.assignment;
+    const employee: Employee = {
+      id: "E-91",
+      name: "示例前台",
+      title: "前台",
+      bio: "",
+      avatar: null,
+      role_id: "pm",
+      launch_profile_ref: null,
+      status: "active",
+      created_at: state.events[0]?.created_at ?? "2026-01-01T00:00:00.000Z",
+      updated_at: state.events[0]?.created_at ?? "2026-01-01T00:00:00.000Z",
+    };
+    const office: Assignment = {
+      ...base,
+      id: "A-91",
+      scope: "standing",
+      role_id: "pm",
+      standing_mode: "office",
+      employee_id: employee.id,
+    };
+    const ops: Assignment = { ...office, id: "A-92", standing_mode: "ops" };
+    const s = {
+      ...state,
+      employees: [...(state.employees ?? []), employee],
+      assignments: [...state.assignments, office, ops],
+    };
+    const contact = needsYou(s, "2026-01-01T00:00:00.000Z").incident_handling
+      .pm_office;
+    // The name is for display; the mention must route.
+    expect(contact).toEqual({
+      assignment_id: "A-91",
+      name: "示例前台",
+      mention: "A-91",
+    });
+    // Same text NeedsYouPage asks the human to post on the card.
+    const body = `@${contact?.mention} ${target.assignment.id} 运行异常超过 30 分钟仍未恢复，请处理。`;
+    // Not persisted: only the reducer output is routed.
+    const result = f.store.uow.run((tx) =>
+      postComment(
+        s,
+        { kind: "human", project_id: f.project },
+        { card_id: target.card.id, body },
+        { clock: f.clock, ids: tx.ids },
+      ),
+    );
+    if (!result.ok) throw new Error(result.error.message);
+    const effect = result.value;
+    const event = effect.events.find((e) => e.type === "comment_posted");
+    if (!event) throw new Error("Missing comment event");
+    const routed = routeEvent({
+      event,
+      snapshot: {
+        ...s,
+        events: [...s.events, ...effect.events],
+        timeline: [...s.timeline, ...effect.timeline],
+      },
+    });
+    expect(routed.notifications.map((n) => n.recipient)).toContainEqual({
+      kind: "assignment",
+      assignment_id: "A-91",
+    });
+    expect(routed.notifications.map((n) => n.recipient)).not.toContainEqual({
+      kind: "pm_ops",
     });
   } finally {
     f.close();

@@ -700,7 +700,7 @@ const handling = {
     mention: "张良",
     patrol_interval_ms: 30 * 60000,
   },
-  pm_office: { assignment_id: "A-91", name: "王熙凤", mention: "王熙凤" },
+  pm_office: { assignment_id: "A-91", name: "王熙凤", mention: "A-91" },
   hc_session: "prod-hc",
 };
 
@@ -732,7 +732,7 @@ test("C-153: with host_ops patrolling, a fresh incident tells the human to wait"
   );
   expect(steps).toEqual([
     "打开卡片 C-1。",
-    "在卡片页底部的“评论正文”框里填写：@王熙凤 A-3 运行异常超过 30 分钟仍未恢复，请处理。",
+    "在卡片页底部的“评论正文”框里填写：@A-91 A-3 运行异常超过 30 分钟仍未恢复，请处理。",
     "点“发表评论”。",
     "等 PM Office（王熙凤）回复。只有 PM Office 或主机运维明确请你接管时，才展开下面的“需要接管输入？”。",
   ]);
@@ -805,9 +805,7 @@ test("C-153: without host_ops the incident points straight to PM Office", async 
       "需要你操作：请按下面的步骤联系 PM Office（王熙凤）。",
     ),
   ).toBeTruthy();
-  expect(article.textContent).toContain(
-    "@王熙凤 A-3 运行异常仍未恢复，请处理。",
-  );
+  expect(article.textContent).toContain("@A-91 A-3 运行异常仍未恢复，请处理。");
 });
 
 test("empty groups are not rendered", async () => {

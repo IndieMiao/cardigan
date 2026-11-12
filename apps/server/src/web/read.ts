@@ -985,14 +985,15 @@ function incidentHandling(state: CommandState, patrolIntervalMs: number) {
   const standing = state.assignments.filter(
     (a) => a.scope === "standing" && a.status === "active",
   );
-  // Mentions route by employee name or Assignment id (`commentMentions`).
+  // The router resolves @employee only to work-item Assignments on the card,
+  // so a standing PM Office is reachable by its Assignment id alone (V-504).
   const contact = (assignment: (typeof standing)[number] | undefined) => {
     if (!assignment) return null;
     const view = webAuthorView(state, `assignment:${assignment.id}`);
     return {
       assignment_id: assignment.id,
       name: view.employee?.name ?? null,
-      mention: view.employee?.name ?? assignment.id,
+      mention: assignment.id,
     };
   };
   const hostOps = contact(standing.find((a) => a.role_id === "host_ops"));
