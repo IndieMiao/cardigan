@@ -28,6 +28,7 @@ export function standingTools(
           "release_assignment",
           "resolve_delegated_decision",
           "triage_human_action",
+          "replace_verification_work_item",
         ].includes(tool)
       : tool !== OFFICE_ONLY_TOOL,
   );

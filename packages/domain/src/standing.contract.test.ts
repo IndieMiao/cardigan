@@ -112,3 +112,9 @@ test("the field is written once: re-reading it never re-infers", () => {
     "office" | "ops" | undefined
   >();
 });
+
+test("C-110: verifier replacement is issued only to standing PM Ops", () => {
+  const tools = ["whoami", "replace_verification_work_item"] as const;
+  expect(standingTools(tools, "office")).toEqual(["whoami"]);
+  expect(standingTools(tools, "ops")).toEqual(tools);
+});

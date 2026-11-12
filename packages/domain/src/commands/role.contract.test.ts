@@ -249,13 +249,15 @@ describe("tool and worktree boundaries", () => {
         const standingOnly = ["list_templates", "list_roles"].includes(tool);
         const expected = tool.startsWith("host_ops_")
           ? false
-          : standingOnly && kind !== "standing"
-            ? false
-            : kind === "produce"
-              ? !["submit_review", "withdraw_review"].includes(tool)
-              : kind === "verify"
-                ? tool !== "submit_delivery"
-                : (STANDING_ROLE_TOOLS as readonly string[]).includes(tool);
+          : tool === "replace_verification_work_item"
+            ? kind === "standing"
+            : standingOnly && kind !== "standing"
+              ? false
+              : kind === "produce"
+                ? !["submit_review", "withdraw_review"].includes(tool)
+                : kind === "verify"
+                  ? tool !== "submit_delivery"
+                  : (STANDING_ROLE_TOOLS as readonly string[]).includes(tool);
         expect(
           validateRole(
             definition({
@@ -278,6 +280,7 @@ describe("tool and worktree boundaries", () => {
         "git_credentials",
         "launch_rocket",
         "record_decision",
+        "replace_verification_work_item",
       ]) {
         expect(
           validateRole(

@@ -410,6 +410,11 @@ export function updateWorkItem(
   return command(state, actor, "update_work_item", ports, (d) => {
     d.pm();
     const item = d.work(p.work_item_id);
+    ensure(
+      !item.replaced_by_work_item_id,
+      "illegal_transition",
+      "已被替换的验证项不能再修改",
+    );
     const resume = item.status === "blocked" && p.status === "in_progress";
     const confirmReported =
       p.status === "in_progress" &&
@@ -579,6 +584,11 @@ export function assign(
     const existing = d
       .list("assignments")
       .filter((a) => a.scope === "work_item" && a.work_item_id === item.id);
+    ensure(
+      !item.replaced_by_work_item_id,
+      "illegal_transition",
+      "已被替换的验证项不能再指派",
+    );
     if (existing.length || item.assignment_id) {
       const current = existing[0];
       ensure(
