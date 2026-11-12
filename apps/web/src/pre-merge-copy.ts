@@ -9,6 +9,7 @@ export const PRE_MERGE_COPY = {
   status: { pending: "待完成", passed: "已通过", failed: "有问题" },
   waitingTitle: (labels: readonly string[]) =>
     `等待${labels.join("、")}，请先不要确认合并`,
+  staleNote: "上次的结论针对旧版本，需要重新核对",
   missingHeading: "还差这些核对：",
   waitingHint:
     "核对全部通过后，这里会提示可以确认。你仍然可以直接确认合并，但会先请你再确认一次。",
@@ -21,7 +22,6 @@ export const PRE_MERGE_COPY = {
       ? "等待合并检查通过并完成合并，结果会出现在卡片时间线上。"
       : "合并结果会出现在卡片时间线上。",
   ],
-  confirmRegion: "合并前核对未完成",
   confirmTitle: (count: number) =>
     `还有 ${count} 项合并前核对没有完成，确定现在确认合并吗？`,
   confirmHint: "确认后会按你的拍板合并，不再等待这些核对。",

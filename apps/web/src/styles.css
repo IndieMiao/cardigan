@@ -1776,6 +1776,28 @@ fieldset.filters {
 .pre-merge-ready .pre-merge-title {
   color: var(--status-done);
 }
+.pre-merge-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: var(--overlay);
+}
+.pre-merge-dialog {
+  position: fixed;
+  z-index: 101;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(480px, calc(100vw - var(--gap) * 2));
+  max-height: calc(100vh - var(--gap) * 2);
+  overflow: auto;
+  margin: 0;
+  box-shadow: 0 8px 24px var(--overlay);
+}
+.pre-merge-dialog h2.pre-merge-title {
+  margin: 0 0 8px;
+  font-size: var(--text-section);
+}
 .pre-merge-check-list,
 .pre-merge-steps {
   margin: 0 0 6px;

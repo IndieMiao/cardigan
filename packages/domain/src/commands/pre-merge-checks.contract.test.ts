@@ -1,8 +1,13 @@
 import { describe, expect, it } from "vitest";
-import type { Actor, Assignment, Card } from "../entities.js";
+import type { Actor, Assignment, Card, Delivery } from "../entities.js";
 import type { CardId } from "../ids.js";
+import { recordDecision } from "./coordination.js";
+import { mergeFixture } from "./merge/test-fixtures.js";
 import { updateCard } from "./pm.js";
-import { openPreMergeChecks } from "./pre-merge-checks.js";
+import {
+  effectivePreMergeChecks,
+  openPreMergeChecks,
+} from "./pre-merge-checks.js";
 import {
   actor,
   apply,
@@ -15,6 +20,21 @@ import {
   value,
 } from "./test-fixtures.js";
 
+function delivery(n: number, sha: string): Delivery {
+  return {
+    id: id("delivery", n),
+    work_item_id: id("work_item", 1),
+    run_id: id("run", 1),
+    kind: "code",
+    summary: "Ready",
+    subject: { kind: "git_head", value: sha.repeat(40) },
+    status: "submitted",
+    evidence: [],
+    attachments: [],
+    known_gaps: [],
+    requested_verifiers: [],
+  };
+}
 function setup() {
   let state = fixture();
   const { work_item_id: _work, ...base } = assignment(4, "pm");
@@ -32,6 +52,7 @@ function setup() {
       ops,
       office,
     ],
+    deliveries: [delivery(1, "a")],
   };
   const as = (a: Assignment): Actor => ({
     kind: "assignment",
@@ -44,6 +65,8 @@ function setup() {
 const card_id = id("card", 1) as CardId;
 const cardOf = (state: ReturnType<typeof fixture>): Card =>
   state.cards.find((c) => c.id === card_id) as Card;
+const open = (state: ReturnType<typeof fixture>) =>
+  openPreMergeChecks(cardOf(state), state.work_items, state.deliveries);
 
 describe("C-160 pre-merge checks via update_card", () => {
   it("PM Ops adds a pending check; PM Office passes it; each change is on the timeline", () => {
@@ -58,9 +81,7 @@ describe("C-160 pre-merge checks via update_card", () => {
       io,
     );
     state = apply(state, value(added));
-    expect(openPreMergeChecks(cardOf(state)).map((c) => c.label)).toEqual([
-      "独立安全审核",
-    ]);
+    expect(open(state).map((c) => c.label)).toEqual(["独立安全审核"]);
     expect(value(added).timeline[0]?.body).toBe(
       "合并前核对「独立安全审核」：新增，待完成",
     );
@@ -83,14 +104,14 @@ describe("C-160 pre-merge checks via update_card", () => {
       io,
     );
     state = apply(state, value(passed));
-    expect(openPreMergeChecks(cardOf(state))).toEqual([]);
+    expect(open(state)).toEqual([]);
     expect(cardOf(state).pre_merge_checks?.[0]).toMatchObject({
       status: "passed",
       note: "R-1 结论通过",
       updated_by: `assignment:${id("assignment", 5)}`,
     });
     expect(value(passed).timeline[0]?.body).toBe(
-      "合并前核对「独立安全审核」：待完成 → 已通过。备注：R-1 结论通过",
+      `合并前核对「独立安全审核」：待完成 → 已通过（核对版本 ${id("delivery", 1)}@aaaaaaaaaaaa）。备注：R-1 结论通过`,
     );
     expect(value(passed).events[0]?.payload).toMatchObject({
       label: "独立安全审核",
@@ -135,7 +156,7 @@ describe("C-160 pre-merge checks via update_card", () => {
       io,
     );
     expect(r.ok).toBe(false);
-    expect(openPreMergeChecks(cardOf(state))).toHaveLength(1);
+    expect(open(state)).toHaveLength(1);
   });
 
   it("the human may update checks too; unchanged updates write nothing", () => {
@@ -233,5 +254,114 @@ describe("C-160 pre-merge checks via update_card", () => {
         io,
       ).ok,
     ).toBe(false);
+  });
+  it("a conclusion only holds for the version it was reached on", () => {
+    let { state, io, office } = setup();
+    state = apply(
+      state,
+      value(
+        updateCard(
+          state,
+          office,
+          {
+            card_id,
+            pre_merge_check: { label: "独立安全审核", status: "passed" },
+          },
+          io,
+        ),
+      ),
+    );
+    expect(open(state)).toEqual([]);
+    expect(cardOf(state).pre_merge_checks?.[0]?.checked_versions).toEqual([
+      {
+        work_item_id: id("work_item", 1),
+        delivery_id: id("delivery", 1),
+        subject: "a".repeat(40),
+      },
+    ]);
+    // A new producing delivery (rework) makes the old conclusion stale.
+    state = { ...state, deliveries: [...state.deliveries, delivery(2, "b")] };
+    expect(open(state)).toMatchObject([
+      { label: "独立安全审核", status: "pending", stale: true },
+    ]);
+    // Re-passing the same status for the new version is a real change.
+    const again = value(
+      updateCard(
+        state,
+        office,
+        {
+          card_id,
+          pre_merge_check: { label: "独立安全审核", status: "passed" },
+        },
+        io,
+      ),
+    );
+    expect(again.events).toHaveLength(1);
+    state = apply(state, again);
+    expect(open(state)).toEqual([]);
+  });
+
+  it("refuses passed/failed before any delivery exists", () => {
+    const { state, io, office } = setup();
+    const empty = { ...state, deliveries: [] };
+    for (const status of ["passed", "failed"] as const)
+      expect(
+        updateCard(
+          empty,
+          office,
+          { card_id, pre_merge_check: { label: "截图核对", status } },
+          io,
+        ).ok,
+      ).toBe(false);
+  });
+});
+
+describe("C-160 pre-merge checks across a returned merge", () => {
+  it("rework and redelivery reset a passed check to pending", async () => {
+    const f = mergeFixture();
+    await f.accept();
+    f.commit(
+      updateCard(
+        f.state,
+        human,
+        {
+          card_id: f.card.id,
+          pre_merge_check: {
+            label: "独立安全审核",
+            status: "passed",
+            note: "已审核 a 版本",
+          },
+        },
+        f.io,
+      ),
+    );
+    const card = () => f.state.cards.find((c) => c.id === f.card.id) as Card;
+    const checks = () =>
+      effectivePreMergeChecks(card(), f.state.work_items, f.state.deliveries);
+    expect(checks()[0]).toMatchObject({ status: "passed", stale: false });
+    const decision = f.state.decisions.at(-1);
+    if (!decision) throw new Error("Missing confirmation");
+    f.commit(
+      recordDecision(
+        f.state,
+        human,
+        {
+          decision_id: decision.id,
+          option: "request_changes",
+          rationale: "Fix it",
+          raw_quote: "Fix it",
+        },
+        f.io,
+      ),
+    );
+    const next = await f.deliver("code", "b".repeat(40));
+    f.review(next);
+    f.review(await f.deliver("card_completion", next.subject.value));
+    expect(card().status).toBe("awaiting_merge");
+    expect(checks()[0]).toMatchObject({
+      status: "pending",
+      stale: true,
+      note: "已审核 a 版本",
+    });
   });
 });

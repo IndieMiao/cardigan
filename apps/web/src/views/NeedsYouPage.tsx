@@ -1,3 +1,4 @@
+import * as Dialog from "@radix-ui/react-dialog";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type CardiganClient,
@@ -354,6 +355,9 @@ function PreMergeCheckList({
       {checks.map((c) => (
         <li key={c.label}>
           <strong>{c.label}</strong>：{PRE_MERGE_COPY.status[c.status]}
+          {c.stale && (
+            <span className="hint">（{PRE_MERGE_COPY.staleNote}）</span>
+          )}
           {c.note && <span className="hint">（{c.note}）</span>}
         </li>
       ))}
@@ -416,6 +420,8 @@ export function MergeConfirmation({
   const [returning, setReturning] = useState(false);
   const [reason, setReason] = useState("");
   const [confirming, setConfirming] = useState(false);
+  const confirmButton = useRef<HTMLButtonElement>(null);
+  const cancelButton = useRef<HTMLButtonElement>(null);
   const action = useAction(done);
   const merge = q.merge_confirmation;
   const check = merge?.merge_check;
@@ -555,7 +561,7 @@ export function MergeConfirmation({
         )}
         <div className="action-row">
           {!confirmed && (
-            <button type="submit" disabled={action.busy}>
+            <button ref={confirmButton} type="submit" disabled={action.busy}>
               确认合并
             </button>
           )}
@@ -615,39 +621,52 @@ export function MergeConfirmation({
           </button>
         </div>
       </form>
-      {confirming && !confirmed && openPreChecks.length > 0 && (
-        <section
-          className="pre-merge-checks pre-merge-waiting"
-          role="alertdialog"
-          aria-label={PRE_MERGE_COPY.confirmRegion}
-        >
-          <p className="pre-merge-title">
-            {PRE_MERGE_COPY.confirmTitle(openPreChecks.length)}
-          </p>
-          <PreMergeCheckList checks={openPreChecks} />
-          <p className="hint">{PRE_MERGE_COPY.confirmHint}</p>
-          <div className="action-row">
-            <button
-              type="button"
-              disabled={action.busy}
-              onClick={() => {
-                setConfirming(false);
-                void decide("merge");
-              }}
-            >
-              {PRE_MERGE_COPY.confirmAnyway}
-            </button>
-            <button
-              type="button"
-              className="quiet"
-              disabled={action.busy}
-              onClick={() => setConfirming(false)}
-            >
-              {PRE_MERGE_COPY.confirmCancel}
-            </button>
-          </div>
-        </section>
-      )}
+      <Dialog.Root
+        open={confirming && !confirmed && openPreChecks.length > 0}
+        onOpenChange={setConfirming}
+      >
+        <Dialog.Portal>
+          <Dialog.Overlay className="pre-merge-overlay" />
+          <Dialog.Content
+            role="alertdialog"
+            aria-modal="true"
+            className="pre-merge-dialog pre-merge-checks pre-merge-waiting"
+            aria-describedby={undefined}
+            onOpenAutoFocus={(event) => {
+              // The safe choice gets focus; Enter must not merge by accident.
+              event.preventDefault();
+              cancelButton.current?.focus();
+            }}
+            onCloseAutoFocus={(event) => {
+              event.preventDefault();
+              confirmButton.current?.focus();
+            }}
+          >
+            <Dialog.Title className="pre-merge-title">
+              {PRE_MERGE_COPY.confirmTitle(openPreChecks.length)}
+            </Dialog.Title>
+            <PreMergeCheckList checks={openPreChecks} />
+            <p className="hint">{PRE_MERGE_COPY.confirmHint}</p>
+            <div className="action-row">
+              <Dialog.Close asChild>
+                <button ref={cancelButton} type="button" className="quiet">
+                  {PRE_MERGE_COPY.confirmCancel}
+                </button>
+              </Dialog.Close>
+              <button
+                type="button"
+                disabled={action.busy}
+                onClick={() => {
+                  setConfirming(false);
+                  void decide("merge");
+                }}
+              >
+                {PRE_MERGE_COPY.confirmAnyway}
+              </button>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
       {returning && (
         <form
           onSubmit={(e) => {

@@ -1,4 +1,11 @@
-import type { Card, PreMergeCheck, PreMergeCheckStatus } from "../entities.js";
+import type {
+  Card,
+  Delivery,
+  PreMergeCheck,
+  PreMergeCheckedVersion,
+  PreMergeCheckStatus,
+  WorkItem,
+} from "../entities.js";
 import { type CommandDraft, ensure, text } from "./core.js";
 
 /** C-160: what a pre-merge check update carries through `update_card`. */
@@ -15,11 +22,81 @@ export const MAX_PRE_MERGE_CHECKS = 8;
 const MAX_LABEL = 40;
 const MAX_NOTE = 500;
 
+const numericId = (id: string): number => Number(/(\d+)$/u.exec(id)?.[1] ?? 0);
+
+/**
+ * The version a pre-merge conclusion applies to: each producing work item's
+ * newest non-superseded delivery (the same candidates the merge will take).
+ */
+export function currentPreMergeVersions(
+  card: Pick<Card, "id">,
+  workItems: readonly WorkItem[],
+  deliveries: readonly Delivery[],
+): readonly PreMergeCheckedVersion[] {
+  return workItems
+    .filter((w) => w.card_id === card.id && w.kind === "produce")
+    .sort((a, b) => numericId(a.id) - numericId(b.id))
+    .flatMap((w) => {
+      const latest = deliveries
+        .filter(
+          (d) =>
+            d.work_item_id === w.id &&
+            d.kind !== "card_completion" &&
+            d.status !== "superseded",
+        )
+        .sort((a, b) => numericId(b.id) - numericId(a.id))[0];
+      return latest
+        ? [
+            {
+              work_item_id: w.id,
+              delivery_id: latest.id,
+              subject: latest.subject.value,
+            },
+          ]
+        : [];
+    });
+}
+const sameVersions = (
+  a: readonly PreMergeCheckedVersion[] | undefined,
+  b: readonly PreMergeCheckedVersion[],
+) =>
+  a !== undefined &&
+  a.length === b.length &&
+  a.every(
+    (v, i) =>
+      v.work_item_id === b[i]?.work_item_id && v.subject === b[i]?.subject,
+  );
+
+export interface EffectivePreMergeCheck extends PreMergeCheck {
+  /** A passed/failed conclusion reached on an older version; reads as pending. */
+  readonly stale: boolean;
+}
+/**
+ * C-160: a passed/failed conclusion only holds for the version it was reached
+ * on. After rework the check reads as pending again until PM Office records a
+ * conclusion for the new version.
+ */
+export function effectivePreMergeChecks(
+  card: Pick<Card, "id" | "pre_merge_checks">,
+  workItems: readonly WorkItem[],
+  deliveries: readonly Delivery[],
+): readonly EffectivePreMergeCheck[] {
+  const current = currentPreMergeVersions(card, workItems, deliveries);
+  return (card.pre_merge_checks ?? []).map((c) =>
+    c.status !== "pending" && !sameVersions(c.checked_versions, current)
+      ? { ...c, status: "pending", stale: true }
+      : { ...c, stale: false },
+  );
+}
 /** The checks still standing between the human and a clean merge. */
 export function openPreMergeChecks(
-  card: Pick<Card, "pre_merge_checks">,
-): readonly PreMergeCheck[] {
-  return (card.pre_merge_checks ?? []).filter((c) => c.status !== "passed");
+  card: Pick<Card, "id" | "pre_merge_checks">,
+  workItems: readonly WorkItem[],
+  deliveries: readonly Delivery[],
+): readonly EffectivePreMergeCheck[] {
+  return effectivePreMergeChecks(card, workItems, deliveries).filter(
+    (c) => c.status !== "passed",
+  );
 }
 
 /**
@@ -89,11 +166,31 @@ export function applyPreMergeCheck(
     "validation_failed",
     `一张卡最多 ${MAX_PRE_MERGE_CHECKS} 个合并前核对项`,
   );
-  if (previous?.status === input.status && previous.note === note) return card;
+  const versions =
+    input.status === "pending"
+      ? undefined
+      : currentPreMergeVersions(
+          card,
+          d.list("work_items"),
+          d.list("deliveries"),
+        );
+  ensure(
+    versions === undefined || versions.length > 0,
+    "illegal_transition",
+    "还没有可核对的交付版本，不能标为已通过或有问题",
+  );
+  if (
+    previous?.status === input.status &&
+    previous.note === note &&
+    (versions === undefined ||
+      sameVersions(previous.checked_versions, versions))
+  )
+    return card;
   const next: PreMergeCheck = {
     label,
     status: input.status,
     ...(note === undefined ? {} : { note }),
+    ...(versions === undefined ? {} : { checked_versions: versions }),
     updated_by: d.author,
     updated_at: d.now,
   };
@@ -117,10 +214,25 @@ export function applyPreMergeCheck(
       status: input.status,
       previous_status: previous?.status ?? null,
       ...(note === undefined ? {} : { note }),
+      ...(versions === undefined
+        ? {}
+        : {
+            checked_versions: versions.map((v) => ({
+              work_item_id: v.work_item_id,
+              delivery_id: v.delivery_id,
+              subject: v.subject,
+            })),
+          }),
     },
     {
       type: "status_change",
-      body: `合并前核对「${label}」：${change}${note ? `。备注：${note}` : ""}`,
+      body: `合并前核对「${label}」：${change}${
+        versions === undefined
+          ? ""
+          : `（核对版本 ${versions
+              .map((v) => `${v.delivery_id}@${v.subject.slice(0, 12)}`)
+              .join("、")}）`
+      }${note ? `。备注：${note}` : ""}`,
     },
   );
   return result;

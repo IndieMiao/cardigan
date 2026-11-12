@@ -100,13 +100,15 @@ test("C-160: Needs You warns while checks are open and asks again before confirm
   const confirm = screen.getByRole("button", { name: "确认合并", exact: true });
   expect(confirm.hasAttribute("disabled")).toBe(false);
   fireEvent.click(confirm);
-  const dialog = screen.getByRole("alertdialog", { name: COPY.confirmRegion });
-  expect(within(dialog).getByText(COPY.confirmTitle(2))).toBeTruthy();
+  const dialog = await screen.findByRole("alertdialog", {
+    name: COPY.confirmTitle(2),
+  });
+  expect(dialog.getAttribute("aria-modal")).toBe("true");
   expect(recordDecision).not.toHaveBeenCalled();
   fireEvent.click(
     within(dialog).getByRole("button", { name: COPY.confirmCancel }),
   );
-  expect(screen.queryByRole("alertdialog")).toBeNull();
+  await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
   expect(recordDecision).not.toHaveBeenCalled();
 
   fireEvent.click(
@@ -114,7 +116,7 @@ test("C-160: Needs You warns while checks are open and asks again before confirm
   );
   fireEvent.click(
     within(
-      screen.getByRole("alertdialog", { name: COPY.confirmRegion }),
+      await screen.findByRole("alertdialog", { name: COPY.confirmTitle(2) }),
     ).getByRole("button", { name: COPY.confirmAnyway }),
   );
   await waitFor(() =>
@@ -190,6 +192,72 @@ test("C-160: card detail shows the same waiting prompt and second confirmation",
   fireEvent.click(
     region.getByRole("button", { name: "确认合并", exact: true }),
   );
-  expect(region.getByRole("alertdialog")).toBeTruthy();
+  expect(await screen.findByRole("alertdialog")).toBeTruthy();
   expect(recordDecision).not.toHaveBeenCalled();
+});
+
+test("C-160: the confirmation dialog takes focus, closes on Escape and returns focus", async () => {
+  const recordDecision = vi.fn(async () => undefined);
+  render(
+    <NeedsYouPage
+      client={fakeClient({
+        needsYou: async () => needs(merge(pending)),
+        recordDecision,
+      })}
+      projectId="p-1"
+    />,
+  );
+  const confirm = await screen.findByRole("button", {
+    name: "确认合并",
+    exact: true,
+  });
+  confirm.focus();
+  fireEvent.click(confirm);
+  const dialog = await screen.findByRole("alertdialog", {
+    name: COPY.confirmTitle(2),
+  });
+  // Focus moves into the dialog, onto the safe choice.
+  await waitFor(() =>
+    expect(document.activeElement).toBe(
+      within(dialog).getByRole("button", { name: COPY.confirmCancel }),
+    ),
+  );
+  fireEvent.keyDown(document.activeElement as Element, {
+    key: "Escape",
+    code: "Escape",
+  });
+  await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+  await waitFor(() => expect(document.activeElement).toBe(confirm));
+  expect(recordDecision).not.toHaveBeenCalled();
+});
+
+test("C-160: a conclusion for an older version shows as pending and still asks again", async () => {
+  render(
+    <NeedsYouPage
+      client={fakeClient({
+        needsYou: async () =>
+          needs(
+            merge([
+              {
+                ...check("独立安全审核", "pending", "已审核 a 版本"),
+                stale: true,
+              },
+            ]),
+          ),
+      })}
+      projectId="p-1"
+    />,
+  );
+  const status = await screen.findByRole("status", { name: COPY.region });
+  expect(
+    within(status).getByText(COPY.waitingTitle(["独立安全审核"])),
+  ).toBeTruthy();
+  expect(within(status).getByText(new RegExp(COPY.staleNote))).toBeTruthy();
+  expect(screen.queryByText(COPY.readyTitle)).toBeNull();
+  fireEvent.click(
+    screen.getByRole("button", { name: "确认合并", exact: true }),
+  );
+  expect(
+    await screen.findByRole("alertdialog", { name: COPY.confirmTitle(1) }),
+  ).toBeTruthy();
 });

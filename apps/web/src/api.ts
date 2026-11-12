@@ -481,6 +481,8 @@ export interface MergeCheckView {
 export interface PreMergeCheckView {
   readonly label: string;
   readonly status: "pending" | "passed" | "failed";
+  /** The recorded conclusion was for an older version; shown as pending. */
+  readonly stale?: boolean;
   readonly note: string | null;
   readonly updated_at: string;
 }

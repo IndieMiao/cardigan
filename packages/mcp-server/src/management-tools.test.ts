@@ -2,6 +2,7 @@ import type {
   Assignment,
   Card,
   Decision,
+  Delivery,
   HumanAction,
   TimelineEntry,
   WorkItem,
@@ -1247,6 +1248,26 @@ test("C-160 update_card.pre_merge_check: Ops adds pending, only Office passes", 
     ).isError,
   ).toBe(true);
   expect(rows()).toEqual(before);
+  // A conclusion binds to the current producing delivery, so one must exist.
+  store.uow.run((tx) => {
+    const item = tx.work_items
+      .list(project)
+      .find((w) => w.card_id === card.id && w.kind === "produce");
+    if (!item) throw new Error("Missing producing work item");
+    tx.deliveries.put(project, {
+      id: "D-1",
+      work_item_id: item.id,
+      run_id: "R-1",
+      kind: "code",
+      summary: "Ready",
+      subject: { kind: "git_head", value: "a".repeat(40) },
+      status: "submitted",
+      evidence: [],
+      attachments: [],
+      known_gaps: [],
+      requested_verifiers: [],
+    } as Delivery);
+  });
   const passed = await ok<Card>(officeClient, "update_card", {
     card_id: card.id,
     pre_merge_check: { label: "独立安全审核", status: "passed", note: "通过" },
@@ -1255,5 +1276,6 @@ test("C-160 update_card.pre_merge_check: Ops adds pending, only Office passes", 
     status: "passed",
     note: "通过",
     updated_by: `assignment:${officeA?.id}`,
+    checked_versions: [{ delivery_id: "D-1", subject: "a".repeat(40) }],
   });
 });

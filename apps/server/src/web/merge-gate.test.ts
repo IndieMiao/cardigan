@@ -647,6 +647,19 @@ test("C-160: Needs You and card detail carry the card's pre-merge checks", async
           updated_by: "human",
           updated_at: NOW,
         },
+        ...(["a", "b"] as const).map((sha) => ({
+          label: `版本 ${sha}`,
+          status: "passed" as const,
+          checked_versions: [
+            {
+              work_item_id: "W-2" as WorkItemId,
+              delivery_id: "D-1" as DeliveryId,
+              subject: sha.repeat(40),
+            },
+          ],
+          updated_by: "human" as const,
+          updated_at: NOW,
+        })),
       ],
     });
   });
@@ -654,8 +667,12 @@ test("C-160: Needs You and card detail carry the card's pre-merge checks", async
   record("running");
   record("passed");
   const expected = [
-    { label: "独立安全审核", status: "pending", note: null },
-    { label: "截图核对", status: "failed", note: "颜色不对" },
+    { label: "独立安全审核", status: "pending", stale: false, note: null },
+    // Recorded without a checked version, so it reads as pending (stale).
+    { label: "截图核对", status: "pending", stale: true, note: "颜色不对" },
+    // Passed on the current delivery (a×40) holds; passed on b×40 is stale.
+    { label: "版本 a", status: "passed", stale: false },
+    { label: "版本 b", status: "pending", stale: true },
   ];
   const needs = (await read("/needs-you")).json as {
     decisions: {

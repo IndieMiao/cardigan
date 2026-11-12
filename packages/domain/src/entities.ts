@@ -147,10 +147,21 @@ export interface Card {
   readonly created_at: Timestamp;
 }
 export type PreMergeCheckStatus = "pending" | "passed" | "failed";
+/** The producing deliveries a pre-merge conclusion was reached on. */
+export interface PreMergeCheckedVersion {
+  readonly work_item_id: WorkItemId;
+  readonly delivery_id: DeliveryId;
+  readonly subject: string;
+}
 export interface PreMergeCheck {
   readonly label: string;
   readonly status: PreMergeCheckStatus;
   readonly note?: string;
+  /**
+   * C-160: `passed`/`failed` only hold for these versions; once any producing
+   * work item has a newer delivery the check reads as pending again.
+   */
+  readonly checked_versions?: readonly PreMergeCheckedVersion[];
   readonly updated_by: Author;
   readonly updated_at: Timestamp;
 }
