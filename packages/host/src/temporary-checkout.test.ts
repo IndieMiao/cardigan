@@ -605,3 +605,251 @@ test.skipIf(process.platform !== "linux")(
     await f.clean();
   },
 );
+
+/** C-130: an executor with a host shares no disk with the host. */
+async function remoteFixture() {
+  const f = await fixture(true);
+  const execution: AgentExecution = {
+    ...(f.input.execution as AgentExecution),
+    // Not the host's group: host-side Agent root checks must not run.
+    gid: 2_000_001,
+    machine: "cardigan-ci",
+    host: "cardigan-ci",
+    port: 22,
+    user: "agent",
+    hostKeyAlias: "cardigan-ci",
+  };
+  const calls: string[][] = [];
+  /**
+   * Operator provisioning (§12.5 C-130): empty read-only slot locks. The test
+   * account owns its temporary agent root, so the fake SSH stubs exactly the
+   * "lock and ancestors are not the account's" rule; runtime-herdr tests run
+   * that rule unmodified.
+   */
+  const provision = async (...names: string[]) => {
+    for (const name of names) {
+      const path = join(execution.agentRoot, name);
+      await writeFile(path, "", { mode: 0o444 });
+      await chmod(path, 0o444);
+    }
+  };
+  /** Fake SSH: runs the remote half locally, standing in for the executor's disk. */
+  const ssh =
+    (fail: (index: number) => boolean = () => false) =>
+    (file: string, args: readonly string[], env: NodeJS.ProcessEnv) => {
+      calls.push([file, ...args]);
+      expect(file).toBe("ssh");
+      expect(env).toEqual({ PATH: AGENT_PATH });
+      expect(args).toEqual(
+        expect.arrayContaining([
+          "HostKeyAlias=cardigan-ci",
+          "agent@cardigan-ci",
+        ]),
+      );
+      const remote = fail(calls.length - 1)
+        ? "exit 255"
+        : (args.at(-1) ?? "")
+            .replace("'node' '-e'", `${quote(process.execPath)} '-e'`)
+            .replace("anchored() {", "anchored() { return 0;")
+            .replace('foreign() { [ ! -O "$1" ]; }', "foreign() { :; }");
+      return spawn("/bin/sh", ["-c", remote], {
+        env,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    };
+  return {
+    ...f,
+    input: { ...f.input, execution },
+    execution,
+    calls,
+    ssh,
+    provision,
+  };
+}
+
+test.skipIf(process.platform !== "linux")(
+  "a remote executor prepares, runs and cleans up the checkout entirely over its SSH entry",
+  async () => {
+    const f = await remoteFixture();
+    await f.provision("merge-check-1.lock");
+    let ready = false;
+    const result = await runInTemporaryCheckout(
+      {
+        ...f.input,
+        serialize: true,
+        lockSlot: 1,
+        onReady: () => {
+          ready = true;
+        },
+      },
+      f.ssh(),
+    );
+    expect(result).toMatchObject({ status: "passed", cleanup_errors: [] });
+    expect(ready).toBe(true);
+    // prepare, worker, cleanup — every step on the executor.
+    expect(f.calls).toHaveLength(3);
+    expect(f.calls[0]?.at(-1)).toContain(quote(f.execution.agentRoot));
+    expect(f.calls[1]?.at(-1)).toContain(
+      quote(join(f.execution.agentRoot, "merge-check-1.lock")),
+    );
+    expect(f.calls[2]?.at(-1)).toContain(quote(f.container));
+    const lock = await stat(join(f.execution.agentRoot, "merge-check-1.lock"));
+    expect([lock.mode & 0o777, lock.size]).toEqual([0o444, 0]);
+    await f.clean();
+  },
+);
+
+test.skipIf(process.platform !== "linux")(
+  "a failed SSH preparation is a start failure: no worker, no host-side checkout, no local fallback",
+  async () => {
+    const f = await remoteFixture();
+    let ready = false;
+    await expect(
+      runInTemporaryCheckout(
+        {
+          ...f.input,
+          serialize: true,
+          onReady: () => {
+            ready = true;
+          },
+        },
+        f.ssh(() => true),
+      ),
+    ).rejects.toThrow("Executor checkout preparation failed");
+    expect(ready).toBe(false);
+    expect(f.calls).toHaveLength(1);
+    expect(f.calls[0]?.[0]).toBe("ssh");
+    expect((await readdir(f.execution.agentRoot)).sort()).toEqual(["repos"]);
+    await expect(
+      stat(join(f.execution.dataDir, "agent")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readdir(f.execution.dataDir)).toEqual([]);
+  },
+);
+
+test.skipIf(process.platform !== "linux")(
+  "a failed SSH cleanup is reported without changing a passed conclusion",
+  async () => {
+    const f = await remoteFixture();
+    const result = await runInTemporaryCheckout(
+      f.input,
+      f.ssh((index) => index === 2),
+    );
+    expect(result.status).toBe("passed");
+    expect(result.cleanup_errors).toEqual([
+      "Could not remove temporary checkout container",
+    ]);
+    expect(f.calls).toHaveLength(3);
+  },
+);
+
+test("remote executor path injection is rejected before any SSH command", async () => {
+  const f = await remoteFixture();
+  for (const agentRoot of [
+    "/srv/agent;touch /tmp/pwn",
+    "/srv/agent$(id)",
+    "/srv/a'b",
+    "/srv/agent/../etc",
+  ])
+    await expect(
+      runInTemporaryCheckout(
+        { ...f.input, execution: { ...f.execution, agentRoot } },
+        f.ssh(),
+      ),
+    ).rejects.toThrow();
+  for (const patch of [
+    { project: "p;id" },
+    { project: "../escape" },
+    { attempt: "a$(id)" },
+    { attempt: "../escape" },
+    { lockSlot: 64, serialize: true },
+  ])
+    await expect(
+      runInTemporaryCheckout({ ...f.input, ...patch }, f.ssh()),
+    ).rejects.toThrow();
+  expect(f.calls).toEqual([]);
+});
+
+test.skipIf(process.platform !== "linux")(
+  "V-405: a check that unlinks the slot lock cannot let a second same-slot check run alongside it",
+  async () => {
+    const f = await remoteFixture();
+    await f.provision("merge-check.lock");
+    const lock = join(f.execution.agentRoot, "merge-check.lock"),
+      unlinked = join(f.root, "unlinked"),
+      release = join(f.root, "release");
+    let secondReady = false;
+    const first = runInTemporaryCheckout(
+      {
+        ...f.input,
+        serialize: true,
+        checks: [
+          {
+            name: "unlink",
+            // On a correctly provisioned executor this unlink is refused;
+            // here it succeeds, so the next preparation must still fail.
+            run: node(
+              `const fs=require('node:fs');fs.rmSync(${JSON.stringify(lock)});fs.writeFileSync(${JSON.stringify(unlinked)},'');const t=setInterval(()=>{if(fs.existsSync(${JSON.stringify(release)}))clearInterval(t)},20)`,
+            ),
+          },
+        ],
+      },
+      f.ssh(),
+    );
+    while (
+      !(await stat(unlinked).then(
+        () => true,
+        () => false,
+      ))
+    )
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    try {
+      await expect(
+        runInTemporaryCheckout(
+          {
+            ...f.input,
+            attempt: "attempt-2",
+            serialize: true,
+            onReady: () => {
+              secondReady = true;
+            },
+            checks: [{ name: "must-not-run", run: "exit 99" }],
+          },
+          f.ssh(),
+        ),
+      ).rejects.toThrow("Executor checkout preparation failed");
+      expect(secondReady).toBe(false);
+      await expect(stat(lock)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await writeFile(release, "");
+    }
+    expect((await first).status).toBe("passed");
+  },
+);
+
+test.skipIf(process.platform !== "linux").each([false, true])(
+  "SSH worker failure after remote preparation stays unreachable even when cleanup fails (%s)",
+  async (cleanupFails) => {
+    const f = await remoteFixture();
+    await f.provision("merge-check.lock");
+    const ready = vi.fn();
+    const result = await runInTemporaryCheckout(
+      { ...f.input, serialize: true, onReady: ready },
+      f.ssh((index) => index === 1 || (cleanupFails && index === 2)),
+    );
+    expect(result).toMatchObject({
+      status: "executor_unreachable",
+      checks: [],
+    });
+    expect(result.cleanup_errors).toEqual(
+      cleanupFails ? ["Could not remove temporary checkout container"] : [],
+    );
+    expect(ready).not.toHaveBeenCalled();
+    // Preparation, worker, and cleanup all use the selected remote SSH entry.
+    expect(f.calls).toHaveLength(3);
+    await expect(
+      stat(join(f.execution.dataDir, "agent")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    if (!cleanupFails) await f.clean();
+  },
+);

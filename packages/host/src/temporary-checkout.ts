@@ -5,6 +5,10 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import {
   AGENT_PATH,
+  type AgentCheckPaths,
+  type AgentExecution,
+  agentCleanupCheckCommand,
+  agentPrepareCheckCommand,
   agentProcessCommand,
   type ExecutionConfig,
   LOCAL_RUNTIME_WARNING,
@@ -60,14 +64,86 @@ const duration = (value: number) => {
   return value;
 };
 
+type Start = (
+  file: string,
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+) => ChildProcessWithoutNullStreams;
+/**
+ * C-130: an agent-ssh execution with an explicit host is a merge-gate
+ * executor (`executorExecution`), which shares no disk with the host. The
+ * server's default agent-ssh account (no host) keeps the host-side path.
+ */
+export function remoteExecution(
+  execution: ExecutionConfig,
+): AgentExecution | undefined {
+  return execution.mode === "agent-ssh" && execution.host !== undefined
+    ? execution
+    : undefined;
+}
+/** Run one short executor command; true only for exit 0 and the exact trailer. */
+function runOnExecutor(
+  start: Start,
+  command: { file: string; args: readonly string[]; expect: string },
+  path: string,
+  timeoutMs = 60_000,
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    let child: ChildProcessWithoutNullStreams;
+    try {
+      child = start(command.file, command.args, { PATH: path });
+    } catch {
+      resolve(false);
+      return;
+    }
+    let stdout = "";
+    const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
+    child.stdin.on("error", () => {});
+    child.stdin.end();
+    child.stdout.setEncoding("utf8").on("data", (data: string) => {
+      stdout = (stdout + data).slice(-4096);
+    });
+    child.stderr.on("data", () => {}); // Never expose SSH diagnostics.
+    child.once("error", () => {
+      clearTimeout(timer);
+      resolve(false);
+    });
+    child.once("close", (code) => {
+      clearTimeout(timer);
+      resolve(code === 0 && stdout === command.expect);
+    });
+  });
+}
+async function prepareOnExecutor(
+  execution: AgentExecution,
+  start: Start,
+  path: string,
+  input: Parameters<typeof agentPrepareCheckCommand>[1],
+): Promise<AgentCheckPaths> {
+  // Host-side state stays on the host: the private data directory.
+  await secureDataDirectory(execution);
+  const command = await agentPrepareCheckCommand(execution, input);
+  if (!(await runOnExecutor(start, command, path)))
+    throw new Error("Executor checkout preparation failed");
+  return command.paths;
+}
+async function cleanupOnExecutor(
+  execution: AgentExecution,
+  start: Start,
+  path: string,
+  paths: AgentCheckPaths,
+): Promise<boolean> {
+  return runOnExecutor(
+    start,
+    await agentCleanupCheckCommand(execution, paths),
+    path,
+  );
+}
+
 /** P2a-1/P2a-3: detached checkout, sequential commands, integrity check and unconditional cleanup. */
 export async function runInTemporaryCheckout(
   input: CheckoutInput,
-  start: (
-    file: string,
-    args: readonly string[],
-    env: NodeJS.ProcessEnv,
-  ) => ChildProcessWithoutNullStreams = (file, args, env) =>
+  start: Start = (file, args, env) =>
     spawn(file, args, { env, stdio: ["pipe", "pipe", "pipe"] }),
 ): Promise<CheckoutResult> {
   const { execution, project, sha, tree, signal } = input;
@@ -92,9 +168,24 @@ export async function runInTemporaryCheckout(
     execution.mode === "agent-ssh"
       ? AGENT_PATH
       : "/usr/local/bin:/usr/bin:/bin";
-  const lock = input.serialize
-    ? await prepareCheckLock(execution, input.lockSlot ?? 0)
+  const alias = `a${randomBytes(7).toString("base64url")}`;
+  // C-130: a remote executor shares no disk with the host. Its lock, container
+  // and alias are prepared (and later removed) over the executor's own SSH
+  // entry; a failure is a start failure, never a fallback to the host.
+  const remote = remoteExecution(execution);
+  const prepared = remote
+    ? await prepareOnExecutor(remote, start, path, {
+        project,
+        attempt,
+        alias,
+        ...(input.serialize ? { slot: input.lockSlot ?? 0 } : {}),
+      })
     : undefined;
+  const lock = prepared
+    ? prepared.lock
+    : input.serialize
+      ? await prepareCheckLock(execution, input.lockSlot ?? 0)
+      : undefined;
   const worker = [
     execution.mode === "agent-ssh" ? "node" : process.execPath,
     "-e",
@@ -103,24 +194,32 @@ export async function runInTemporaryCheckout(
   const argv = lock
     ? ["flock", "--exclusive", "--no-fork", "--", lock, ...worker]
     : worker;
-  const command =
-    execution.mode === "agent-ssh"
-      ? await agentProcessCommand(execution, argv)
-      : { file: argv[0] as string, args: argv.slice(1) };
   const root =
     execution.mode === "agent-ssh"
       ? execution.agentRoot
       : join(execution.dataDir, "agent");
   const repository = join(root, "repos", project);
+  let command: { file: string; args: string[] };
   let container: string;
-  if (execution.mode === "agent-ssh") {
-    container = await prepareAgentCheckout(execution, project, attempt);
-  } else {
-    await secureDataDirectory(execution);
-    const parent = join(root, "checks", project);
-    await mkdir(parent, { recursive: true, mode: 0o700 });
-    container = join(parent, attempt);
-    await mkdir(container, { mode: 0o700 });
+  try {
+    command =
+      execution.mode === "agent-ssh"
+        ? await agentProcessCommand(execution, argv)
+        : { file: argv[0] as string, args: argv.slice(1) };
+    if (prepared) container = prepared.container;
+    else if (execution.mode === "agent-ssh") {
+      container = await prepareAgentCheckout(execution, project, attempt);
+    } else {
+      await secureDataDirectory(execution);
+      const parent = join(root, "checks", project);
+      await mkdir(parent, { recursive: true, mode: 0o700 });
+      container = join(parent, attempt);
+      await mkdir(container, { mode: 0o700 });
+    }
+  } catch (error) {
+    if (remote && prepared)
+      await cleanupOnExecutor(remote, start, path, prepared).catch(() => {});
+    throw error;
   }
   // Agent can remove this child, but cannot rename/replace the host-owned attempt namespace.
   const directory = join(container, "worktree");
@@ -130,10 +229,9 @@ export async function runInTemporaryCheckout(
   const authKey = randomBytes(32).toString("hex");
   let aliasContainer: string | undefined;
   try {
-    aliasContainer = await prepareCheckoutAlias(
-      execution,
-      `a${randomBytes(7).toString("base64url")}`,
-    );
+    aliasContainer = prepared
+      ? prepared.alias
+      : await prepareCheckoutAlias(execution, alias);
     if (execution.mode === "local")
       input.onOutput?.("system", `${LOCAL_RUNTIME_WARNING}\n`);
     completed = await new Promise<CheckoutResult>((resolve, reject) => {
@@ -247,15 +345,25 @@ export async function runInTemporaryCheckout(
       if (signal?.aborted) cancel();
     });
   } finally {
+    const failed = () => {
+      cleanupErrors.push("Could not remove temporary checkout container");
+      input.onOutput?.("cleanup", `${cleanupErrors[0]}\n`);
+    };
+    if (remote && prepared) {
+      if (
+        !(await cleanupOnExecutor(remote, start, path, prepared).catch(
+          () => false,
+        ))
+      )
+        failed();
+    }
     // Host removes only an empty protected leaf, never Agent-controlled contents.
-    for (const path of [aliasContainer, container])
-      if (path)
-        await rmdir(path).catch((error: NodeJS.ErrnoException) => {
-          if (error.code !== "ENOENT") {
-            cleanupErrors.push("Could not remove temporary checkout container");
-            input.onOutput?.("cleanup", `${cleanupErrors[0]}\n`);
-          }
-        });
+    else
+      for (const path of [aliasContainer, container])
+        if (path)
+          await rmdir(path).catch((error: NodeJS.ErrnoException) => {
+            if (error.code !== "ENOENT") failed();
+          });
   }
   return {
     ...completed,

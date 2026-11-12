@@ -131,6 +131,7 @@ export function validateRole(role: RoleDefinition): Result<RoleDefinition> {
           "record_decision",
           "resolve_delegated_decision",
           "triage_human_action",
+          "replace_verification_work_item",
         ].includes(t),
       ) || role.role_id === "pm",
       "validation_failed",

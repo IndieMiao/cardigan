@@ -46,6 +46,7 @@ export const STANDING_ROLE_TOOLS = [
   "request_human_action",
   "request_decision",
   "upload_attachment",
+  "read_attachment",
   "heartbeat",
   "finish_run",
   "submit_delivery",
@@ -55,6 +56,7 @@ export const STANDING_ROLE_TOOLS = [
   "update_card",
   "create_work_item",
   "update_work_item",
+  "replace_verification_work_item",
   "assign",
   "release_assignment",
   "project_snapshot",
@@ -95,11 +97,15 @@ export const ROLE_TOOL_ALLOWLISTS: Readonly<
   produce: toolNames.filter(
     (tool) =>
       tool !== "submit_review" &&
+      tool !== "replace_verification_work_item" &&
       tool !== "withdraw_review" &&
       workItemTool(tool),
   ),
   verify: toolNames.filter(
-    (tool) => tool !== "submit_delivery" && workItemTool(tool),
+    (tool) =>
+      tool !== "submit_delivery" &&
+      tool !== "replace_verification_work_item" &&
+      workItemTool(tool),
   ),
   standing: [...STANDING_ROLE_TOOLS, ...HOST_OPS_TOOLS],
 };

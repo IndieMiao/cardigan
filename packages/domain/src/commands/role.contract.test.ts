@@ -45,6 +45,25 @@ const empty: RoleCommandState = { project_id: human.project_id, roles: [] };
 const first = (): Role =>
   value(createRole(empty, human, definition(), ports())).data;
 
+test.each<RoleKind>(["produce", "verify", "standing"])(
+  "attachment read permission preserves human-only role management for %s",
+  (kind) => {
+    const role = definition({
+      kind,
+      worktree: "none",
+      allowed_tools: ["read_attachment"],
+    });
+    expect(
+      value(createRole(empty, human, role, ports())).data.allowed_tools,
+    ).toEqual(["read_attachment"]);
+    expect(createRole(empty, actor(), role, ports())).toMatchObject({
+      ok: false,
+      error: { code: "forbidden_tool" },
+    });
+    expect(empty.roles).toEqual([]);
+  },
+);
+
 test.each([
   "## 协作规则",
   "## 协议（每个 Run 都要遵守）",
@@ -230,13 +249,15 @@ describe("tool and worktree boundaries", () => {
         const standingOnly = ["list_templates", "list_roles"].includes(tool);
         const expected = tool.startsWith("host_ops_")
           ? false
-          : standingOnly && kind !== "standing"
-            ? false
-            : kind === "produce"
-              ? !["submit_review", "withdraw_review"].includes(tool)
-              : kind === "verify"
-                ? tool !== "submit_delivery"
-                : (STANDING_ROLE_TOOLS as readonly string[]).includes(tool);
+          : tool === "replace_verification_work_item"
+            ? kind === "standing"
+            : standingOnly && kind !== "standing"
+              ? false
+              : kind === "produce"
+                ? !["submit_review", "withdraw_review"].includes(tool)
+                : kind === "verify"
+                  ? tool !== "submit_delivery"
+                  : (STANDING_ROLE_TOOLS as readonly string[]).includes(tool);
         expect(
           validateRole(
             definition({
@@ -259,6 +280,7 @@ describe("tool and worktree boundaries", () => {
         "git_credentials",
         "launch_rocket",
         "record_decision",
+        "replace_verification_work_item",
       ]) {
         expect(
           validateRole(

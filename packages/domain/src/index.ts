@@ -65,6 +65,7 @@ export * from "./commands/pm-rotate.js";
 export * from "./commands/preferences.js";
 export * from "./commands/queries.js";
 export * from "./commands/release.js";
+export * from "./commands/replace-verifier.js";
 export * from "./commands/review-withdrawal.js";
 export * from "./commands/role.js";
 export * from "./commands/run-target-wait.js";
