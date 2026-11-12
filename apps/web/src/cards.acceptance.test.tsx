@@ -34,6 +34,19 @@ import { CardDetailPage } from "./views/CardDetailPage.js";
 import { CardListPage } from "./views/CardListPage.js";
 import { LoginPage } from "./views/LoginPage.js";
 
+// The real CLI/Store/domain run from their compiled output. vi.hoisted runs
+// before the imports above, so an unbuilt checkout reports the missing files and
+// the build command instead of a module-resolution error.
+await vi.hoisted(async () => {
+  const { PACKAGE_DIST_ENTRIES, requireBuildOutput } = await import(
+    "../../../test-support/build-output.js"
+  );
+  requireBuildOutput(
+    [...PACKAGE_DIST_ENTRIES, "apps/cli/dist/index.js"],
+    "pnpm exec tsc -b apps/server apps/cli",
+  );
+});
+
 // Keep native Node module URLs for the real CLI/Store while providing a DOM to React.
 const browser = await vi.hoisted(async () => {
   // @ts-expect-error jsdom is an existing test-only dependency without bundled declarations.
