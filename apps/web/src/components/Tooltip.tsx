@@ -5,7 +5,6 @@ export interface TooltipProps {
   readonly content: ReactNode;
   readonly children: ReactElement;
   readonly side?: "top" | "right" | "bottom" | "left";
-  readonly delayDuration?: number;
   readonly className?: string;
 }
 
@@ -14,11 +13,12 @@ export function Tooltip({
   content,
   children,
   side = "top",
-  delayDuration = 200,
   className = "",
 }: TooltipProps) {
+  if (content === undefined || content === null || content === "")
+    return children;
   return (
-    <TooltipPrimitive.Provider delayDuration={delayDuration}>
+    <TooltipPrimitive.Provider delayDuration={1000} skipDelayDuration={0}>
       <TooltipPrimitive.Root>
         <TooltipPrimitive.Trigger asChild>{children}</TooltipPrimitive.Trigger>
         <TooltipPrimitive.Portal>

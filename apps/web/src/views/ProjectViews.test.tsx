@@ -19,6 +19,13 @@ import { card, fakeClient } from "../testing/fixtures.js";
 import { ExecutionPage } from "./ExecutionPage.js";
 import { SnapshotPage } from "./SnapshotPage.js";
 
+class ResizeObserverMock {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+vi.stubGlobal("ResizeObserver", ResizeObserverMock);
+
 afterEach(() => {
   cleanup();
   window.history.replaceState(null, "", "/");

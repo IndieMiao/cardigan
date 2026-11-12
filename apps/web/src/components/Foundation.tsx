@@ -2,6 +2,7 @@ import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { isHttpLink } from "../markdown.js";
 import { statusLabel } from "../status.js";
 import { StatusIcon, statusShape } from "./StatusIcon.js";
+import { Tooltip } from "./Tooltip.js";
 
 export function PageTitle({
   title,
@@ -116,14 +117,19 @@ export function IdTag({
     </>
   );
   const title = detail ?? `${id} ${label}`;
-  return href && (href.startsWith("#/p/") || isHttpLink(href)) ? (
-    <a className="id-tag" href={href} title={title}>
-      {text}
-    </a>
-  ) : (
-    <span className="id-tag" title={title}>
-      {text}
-    </span>
+  return (
+    <Tooltip content={title}>
+      {href && (href.startsWith("#/p/") || isHttpLink(href)) ? (
+        <a className="id-tag" href={href}>
+          {text}
+        </a>
+      ) : (
+        // biome-ignore lint/a11y/noNoninteractiveTabindex: Tooltip details must be reachable by keyboard.
+        <span className="id-tag" tabIndex={0}>
+          {text}
+        </span>
+      )}
+    </Tooltip>
   );
 }
 

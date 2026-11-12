@@ -1,7 +1,10 @@
 import * as Popover from "@radix-ui/react-popover";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { AuthorView, NextOwnerItem } from "../api.js";
 import { Tooltip } from "./Tooltip.js";
+
+// Only hover-opened profiles participate; clicked profiles remain pinned.
+let dismissHoveredProfile: (() => void) | undefined;
 
 /** Only root-relative, same-origin image paths supplied by the read API. */
 function avatarPath(value: string | null | undefined) {
@@ -102,6 +105,9 @@ export function EmployeeIdentity({
   metadata?: string;
 }) {
   const [open, setOpen] = useState<"hover" | "click" | null>(null);
+  const openTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
   const closeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
     undefined,
   );
@@ -110,12 +116,20 @@ export function EmployeeIdentity({
   const focusTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
     undefined,
   );
+  const closeHover = useCallback(() => {
+    clearTimeout(closeTimer.current);
+    setOpen((mode) => (mode === "hover" ? null : mode));
+    if (dismissHoveredProfile === closeHover) dismissHoveredProfile = undefined;
+  }, []);
   useEffect(
     () => () => {
+      clearTimeout(openTimer.current);
       clearTimeout(closeTimer.current);
       clearTimeout(focusTimer.current);
+      if (dismissHoveredProfile === closeHover)
+        dismissHoveredProfile = undefined;
     },
-    [],
+    [closeHover],
   );
   const profile = member ?? employee;
   const role = member
@@ -137,11 +151,9 @@ export function EmployeeIdentity({
   const color = profile ? colorIndex(profile.id) : "role";
   const keepOpen = () => clearTimeout(closeTimer.current);
   const leave = () => {
+    clearTimeout(openTimer.current);
     keepOpen();
-    closeTimer.current = setTimeout(
-      () => setOpen((mode) => (mode === "hover" ? null : mode)),
-      180,
-    );
+    closeTimer.current = setTimeout(closeHover, 180);
   };
   const identity = (
     <>
@@ -179,14 +191,17 @@ export function EmployeeIdentity({
         </Tooltip>
       );
     return avatarOnly ? (
-      <span
-        className="employee-identity"
-        role="img"
-        aria-label={name}
-        title={name}
-      >
-        {identity}
-      </span>
+      <Tooltip content={name}>
+        <span
+          className="employee-identity"
+          role="img"
+          aria-label={name}
+          // biome-ignore lint/a11y/noNoninteractiveTabindex: Tooltip content must be reachable by keyboard.
+          tabIndex={0}
+        >
+          {identity}
+        </span>
+      </Tooltip>
     ) : (
       <span className="employee-identity">{identity}</span>
     );
@@ -194,7 +209,11 @@ export function EmployeeIdentity({
   return (
     <Popover.Root
       open={open !== null}
-      onOpenChange={(value) => setOpen(value ? "click" : null)}
+      onOpenChange={(value) => {
+        clearTimeout(openTimer.current);
+        closeHover();
+        setOpen(value ? "click" : null);
+      }}
     >
       <Popover.Trigger asChild>
         <button
@@ -205,14 +224,24 @@ export function EmployeeIdentity({
           onPointerEnter={(event) => {
             if (event.pointerType === "touch") return;
             keepOpen();
-            if (!open) returnFocus.current = false;
-            setOpen((mode) => mode ?? "hover");
+            clearTimeout(openTimer.current);
+            if (open) return;
+            openTimer.current = setTimeout(() => {
+              dismissHoveredProfile?.();
+              dismissHoveredProfile = closeHover;
+              returnFocus.current = false;
+              setOpen("hover");
+            }, 1000);
           }}
           onPointerLeave={leave}
+          onPointerCancel={leave}
           onClick={(event) => {
             event.preventDefault();
             event.stopPropagation();
+            clearTimeout(openTimer.current);
             keepOpen();
+            if (dismissHoveredProfile === closeHover)
+              dismissHoveredProfile = undefined;
             returnFocus.current = true;
             setOpen((mode) => (mode === "click" ? null : "click"));
           }}
