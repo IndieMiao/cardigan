@@ -12,9 +12,15 @@ import {
   startMcpServer,
 } from "@cardigan/mcp-server";
 import {
+  DEFAULT_HC_SESSION,
+  describeRuntime,
   LOCAL_RUNTIME_WARNING,
+  REGISTERED_RUNTIME_FILE,
+  readRegisteredRuntime,
   resolveExecutionConfig,
+  runtimeOwnsRef,
   secureDataDirectory,
+  writeRegisteredRuntime,
 } from "@cardigan/runtime-herdr";
 import { getRoleVersion, Store, tokensForAssignment } from "@cardigan/store";
 import {
@@ -108,6 +114,28 @@ export async function startCardiganServer(
       ...(options.env ?? process.env),
       CARDIGAN_DATA_DIR: config.dataDir,
     });
+  const runtimeEnv = options.env ?? process.env;
+  const session = runtimeEnv.CARDIGAN_HC_SESSION ?? DEFAULT_HC_SESSION;
+  // C-152: an existing agent-ssh registration is never downgraded by a shell
+  // that merely forgot runtime.env; switching to local must be explicit.
+  // Only a missing file means "not registered"; an unreadable or corrupt one
+  // might hide an agent-ssh registration, so it stops the start (V-489).
+  const previous = await readRegisteredRuntime(config.dataDir).catch(
+    (error: unknown) => {
+      throw new Error(
+        `拒绝启动：无法读取数据目录中已有的运行时登记 ${REGISTERED_RUNTIME_FILE}（${error instanceof Error ? error.message : String(error)}）；它可能记录着 agent-ssh，不能当作未登记。请修复该文件的权限或内容；确认要重新登记时，先把它移走，再用正确的运行环境启动 server。`,
+        { cause: error },
+      );
+    },
+  );
+  if (
+    previous?.mode === "agent-ssh" &&
+    execution.mode === "local" &&
+    (runtimeEnv.CARDIGAN_RUNTIME_MODE ?? "") === ""
+  )
+    throw new Error(
+      `拒绝启动：数据目录已登记 ${describeRuntime(previous)}，当前环境没有设置 CARDIGAN_RUNTIME_MODE（没有加载 runtime.env）。请加载 runtime.env 后再启动；确实要改为本机模式时显式设置 CARDIGAN_RUNTIME_MODE=local。`,
+    );
   if (execution.mode === "local")
     (options.warn ?? ((message) => process.stderr.write(`${message}\n`)))(
       LOCAL_RUNTIME_WARNING,
@@ -164,8 +192,23 @@ export async function startCardiganServer(
         runtime: options.dispatcher.runtime,
         snapshot: options.dispatcher.snapshot,
         contextThresholdPct: config.hostOpsContextThresholdPct ?? 80,
-        scrubCredentials: (project, assignment) =>
-          scrubRunCredentials(execution, project, assignment),
+        scrubCredentials: async (project, assignment, ref) => {
+          await scrubRunCredentials(execution, project, assignment);
+          // C-152: a terminal started in local mode left its credentials
+          // under the private data directory, not the Agent root.
+          if (
+            ref &&
+            execution.mode !== "local" &&
+            ref.runtime_machine === "local"
+          )
+            await scrubRunCredentials(
+              { mode: "local", dataDir: config.dataDir },
+              project,
+              assignment,
+            );
+        },
+        ownsRuntimeRef: (ref) => runtimeOwnsRef(execution, ref),
+        runtimeLabel: describeRuntime(execution),
         settings: (project) => ({
           merge_gate_enabled:
             mergeGate.forProject(project).status === "enabled",
@@ -309,6 +352,18 @@ export async function startCardiganServer(
       if (ownsStore) store.close();
       throw error;
     }
+  }
+
+  // C-152: register only once every listener is up, so a failed or
+  // competing start (e.g. EADDRINUSE) cannot replace the live server's entry.
+  try {
+    await writeRegisteredRuntime(config.dataDir, execution, session);
+  } catch (error) {
+    await web?.close();
+    await plane?.stop();
+    await mcp.close();
+    if (ownsStore) store.close();
+    throw error;
   }
 
   return {

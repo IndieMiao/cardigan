@@ -5,12 +5,15 @@ import {
   type HostOpsExecutionTool,
   hostOpsPending,
 } from "../host-ops.js";
+import { completeHumanAction } from "./coordination.js";
 import { CommandDraft, type CommandState } from "./core.js";
 import {
   beginHostOpsAction,
   finishHostOpsAction,
+  hostOpsExitConfirmation,
   hostOpsReadDiagnostics,
   prepareHostOpsAction,
+  requestHostOpsExitConfirmation,
 } from "./host-ops-actions.js";
 import { abortDispatch, acknowledgeRun, queueRun } from "./launch.js";
 import { conflictRepairEvent } from "./review-round.js";
@@ -602,3 +605,122 @@ test.each([2, 3])(
     ).toBe("queued");
   },
 );
+
+test("C-152: exit confirmation for a foreign terminal is system-requested, human-confirmed and closed on settlement", () => {
+  const s = base(),
+    io = ports(),
+    system = { kind: "system" as const, project_id: s.project_id };
+  const begun = value(
+    beginHostOpsAction(s, caller, params("host_ops_restart_assignment"), io),
+  );
+  let state = apply(s, begun);
+  const action = begun.data.action_id;
+  const request = {
+    action_id: action,
+    instructions: "1. check\n2. kill\n3. recheck\n4. confirm",
+    why_human: "foreign runtime",
+  };
+  expect(hostOpsExitConfirmation(state, action)).toEqual({ status: "none" });
+  // Only the host's system flow may ask; agents and humans cannot.
+  for (const a of [human, caller])
+    expect(requestHostOpsExitConfirmation(state, a, request, io).ok).toBe(
+      false,
+    );
+  expect(
+    requestHostOpsExitConfirmation(
+      state,
+      system,
+      { ...request, instructions: " " },
+      io,
+    ).ok,
+  ).toBe(false);
+  const asked = value(
+    requestHostOpsExitConfirmation(state, system, request, io),
+  );
+  expect(asked.data.created).toBe(true);
+  expect(asked.events).toEqual([
+    expect.objectContaining({
+      type: "human_action_requested",
+      payload: expect.objectContaining({
+        host_ops_action_id: action,
+        human_action_id: asked.data.human_action_id,
+      }),
+    }),
+  ]);
+  state = apply(state, asked);
+  const open = {
+    status: "open",
+    human_action_id: asked.data.human_action_id,
+  };
+  expect(hostOpsExitConfirmation(state, action)).toEqual(open);
+  // Idempotent while open: no second Needs You item.
+  const again = value(
+    requestHostOpsExitConfirmation(state, system, request, io),
+  );
+  expect(again.data).toEqual({
+    human_action_id: asked.data.human_action_id,
+    created: false,
+  });
+  expect(again.events).toEqual([]);
+
+  // A non-human completion (e.g. PM triage) is not a confirmation.
+  const byAgent = {
+    ...state,
+    human_actions: state.human_actions.map((h) =>
+      h.id === asked.data.human_action_id
+        ? { ...h, status: "done" as const }
+        : h,
+    ),
+    events: [
+      ...state.events,
+      {
+        id: "E-pm" as never,
+        seq: 999,
+        type: "human_action_completed",
+        actor: actor(4, "pm"),
+        payload: { human_action_id: asked.data.human_action_id },
+        created_at: now,
+      },
+    ],
+  };
+  expect(hostOpsExitConfirmation(byAgent, action).status).toBe("rejected");
+  expect(
+    value(requestHostOpsExitConfirmation(byAgent, system, request, io)).data
+      .created,
+  ).toBe(true);
+
+  // Settling the action another way cancels the stale open request.
+  const settled = value(finishHostOpsAction(state, system, action, io));
+  expect(
+    apply(state, settled).human_actions.find(
+      (h) => h.id === asked.data.human_action_id,
+    )?.status,
+  ).toBe("cancelled");
+
+  const confirmed = apply(
+    state,
+    value(
+      completeHumanAction(
+        state,
+        human,
+        { human_action_id: asked.data.human_action_id, text: "exited" },
+        io,
+      ),
+    ),
+  );
+  expect(hostOpsExitConfirmation(confirmed, action)).toEqual({
+    ...open,
+    status: "confirmed",
+  });
+  expect(
+    requestHostOpsExitConfirmation(
+      apply(
+        confirmed,
+        value(finishHostOpsAction(confirmed, system, action, io)),
+      ),
+      system,
+      request,
+      io,
+    ).ok,
+  ).toBe(false);
+});
