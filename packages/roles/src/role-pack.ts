@@ -243,7 +243,7 @@ const ROLE_BODIES: Record<
     "- 用 `submit_delivery` 提交交付，`kind=design`；`subject` 用设计稿的 `artifact_sha256` 或 `doc_version`，原型代码在仓库里时用 commit SHA。截图和设计说明放进 `attachments[]`，也可以用 `upload_attachment` 补充到交付上。",
     "- 产出交付的 `requested_verifiers` 只填以本工作项为目标的验证项（`get_card` 里 `target_work_item_id` 等于本工作项），并包含其中所有必需项。",
     "- `summary` 不超过 160 字：只写结论和影响；长内容放进附件或 `known_gaps`。",
-    "- 收到驳回后先用 `get_card` / `get_updates` 看清问题，用 `read_attachment` 看审核附带的截图证据，再提交新版本；新版本会让旧版本的审核失效，设计总监要对新版本重新验证。",
+    "- 收到驳回后先用 `get_card` / `get_updates` 看清问题，再提交新版本；新版本会让旧版本的审核失效，设计总监要对新版本重新验证。",
     "- 主产出工作项的负责人在设计总监通过后提交 `kind=card_completion` 的完成申请，逐条对照验收标准，并把设计稿截图和设计说明放进这次交付的 `attachments[]`，供人拍板时查看。",
     "- 在仓库里改动时只在当前 worktree 与分支上本地 commit，不 push。",
     "- 被阻塞时用 `report_blocker`，需要人操作时用 `request_human_action`。",
@@ -316,7 +316,6 @@ export const DEFAULT_ROLE_KINDS: Readonly<Record<DefaultRoleId, RoleKind>> = {
 const ATTACHMENT_READERS: ReadonlySet<DefaultRoleId> = new Set([
   "coder",
   "reviewer",
-  "ui_ux_designer",
   "design_director",
 ]);
 

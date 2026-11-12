@@ -15,7 +15,7 @@ import {
 import { persistMemberEffect } from "./members.js";
 import { migrateCardPriorities } from "./priority-migration.js";
 import { installSnapshotTriggers } from "./snapshot-migration.js";
-import { seedCardTemplates } from "./templates.js";
+import { seedCardTemplates, seedDesignTemplate } from "./templates.js";
 
 /** Directory shipped next to the compiled package: `packages/store/migrations`. */
 export const defaultMigrationsDir = fileURLToPath(
@@ -102,6 +102,8 @@ export function migrate(
         migrateReadableIdFormat(db);
       if (migration.version === 19 && migration.name === "card_priorities")
         migrateCardPriorities(db);
+      if (migration.version === 20 && migration.name === "design_template")
+        seedDesignTemplate(db);
       db.prepare(
         "INSERT INTO schema_version (version, name, applied_at) VALUES (?, ?, ?)",
       ).run(migration.version, migration.name, now());

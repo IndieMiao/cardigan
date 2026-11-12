@@ -65,11 +65,11 @@ test.each([17, 18])(
           (card) => card.title === "kept" && card.source.decision_id === "Q-7",
         ),
       ).toBe(true);
-      expect(store.schemaVersion()).toBe(19);
+      expect(store.schemaVersion()).toBeGreaterThanOrEqual(19);
       expect(
         store.database
           .prepare(
-            "SELECT version, name FROM schema_version WHERE version >= 18 ORDER BY version",
+            "SELECT version, name FROM schema_version WHERE version BETWEEN 18 AND 19 ORDER BY version",
           )
           .all(),
       ).toEqual([

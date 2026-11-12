@@ -21,7 +21,6 @@ const BASE_TOOLS = [
   "request_human_action",
   "request_decision",
   "upload_attachment",
-  "read_attachment",
 ];
 
 describe("default role kinds (p2v-12 §2.3)", () => {
@@ -56,6 +55,8 @@ describe("default role kinds (p2v-12 §2.3)", () => {
     expect([...role.allowed_tools].sort()).toEqual(
       [...BASE_TOOLS, "submit_delivery"].sort(),
     );
+    // Plan §2.3 grants no attachment reading to the designer (C-104 V-476).
+    expect(role.allowed_tools).not.toContain("read_attachment");
     expect(role.allowed_tools).not.toContain("submit_review");
     expect(role.allowed_tools).not.toContain("withdraw_review");
     for (const tool of role.allowed_tools)
@@ -73,7 +74,12 @@ describe("default role kinds (p2v-12 §2.3)", () => {
       worktree: "readonly",
     });
     expect([...role.allowed_tools].sort()).toEqual(
-      [...BASE_TOOLS, "submit_review", "withdraw_review"].sort(),
+      [
+        ...BASE_TOOLS,
+        "read_attachment",
+        "submit_review",
+        "withdraw_review",
+      ].sort(),
     );
     expect(role.allowed_tools).not.toContain("submit_delivery");
     for (const tool of role.allowed_tools)
@@ -111,6 +117,7 @@ describe("default role kinds (p2v-12 §2.3)", () => {
     expect(designer.instructions).toContain("`kind=design`");
     expect(designer.instructions).toContain("`kind=card_completion`");
     expect(designer.instructions).not.toContain("`submit_review`");
+    expect(designer.instructions).not.toContain("`read_attachment`");
     const director = defaultRoleDefinition("design_director", launch);
     expect(director.instructions).toContain("`read_attachment`");
     expect(director.instructions).toContain("不是代码实现");

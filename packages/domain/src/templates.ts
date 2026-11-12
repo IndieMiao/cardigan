@@ -136,7 +136,9 @@ export const designCardTemplate = {
       required: true,
       target_work_item_key: "design_production",
     },
-    acceptance,
+    // No pm_acceptance: the human completion review below is the acceptance
+    // (plan §2.4 "人拍板，不是 PM"). A required verify item without a target
+    // can review neither the design nor a human-reviewed completion request.
   ],
 } as const satisfies CardTemplate;
 export const builtinCardTemplates: readonly CardTemplate[] = [

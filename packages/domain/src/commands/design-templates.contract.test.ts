@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import type { RoleReference } from "../entities.js";
+import type { RoleReference, WorkItem } from "../entities.js";
 import { ROLE_TOOL_ALLOWLISTS, type RoleKind } from "../role.js";
 import {
   artifactCardTemplate,
@@ -7,10 +7,21 @@ import {
   type CardTemplate,
   designCardTemplate,
 } from "../templates.js";
+import { recordDecision } from "./coordination.js";
 import type { CommandState } from "./core.js";
+import { prepareDelivery, submitDelivery, submitReview } from "./delivery.js";
 import { createCard } from "./pm.js";
 import { manageCardTemplate } from "./templates.js";
-import { fixture, human, ports, value } from "./test-fixtures.js";
+import {
+  actor,
+  apply,
+  assignment,
+  fixture,
+  human,
+  ports,
+  run,
+  value,
+} from "./test-fixtures.js";
 
 // Mirrors the default pack (packages/roles): produce roles hold
 // submit_delivery, verify roles hold submit_review, never both.
@@ -88,13 +99,6 @@ describe("design template (p2v-12 §2.4)", () => {
         required: true,
         target: "design_production",
       },
-      {
-        key: "pm_acceptance",
-        kind: "verify",
-        role_id: "pm",
-        required: true,
-        target: null,
-      },
     ]);
   });
 
@@ -120,7 +124,6 @@ describe("design template (p2v-12 §2.4)", () => {
         role_id: "design_director",
         template_key: "design_review",
       },
-      { kind: "verify", role_id: "pm", template_key: "pm_acceptance" },
     ]);
     const [production, review] = items as { id: string }[];
     expect(review).toMatchObject({ target_work_item_id: production?.id });
@@ -175,6 +178,139 @@ describe("design template (p2v-12 §2.4)", () => {
         ports(),
       ),
     ).toMatchObject({ ok: false, error: { code: "validation_failed" } });
+  });
+});
+
+describe("design template flow (p2v-12 §2.4)", () => {
+  // The real builtin template, default-pack-shaped roles and independent
+  // designer/director Assignments: no stub items, no follow-up cards.
+  const start = () => {
+    const p = ports();
+    const base = state();
+    const created = value(
+      createCard(base, human, { ...params, template_id: "design" }, p),
+    );
+    let s = apply(base, created);
+    const items = s.work_items.filter((w) => w.card_id === created.data.id);
+    const production = items.find((w) => w.kind === "produce") as WorkItem;
+    const review = items.find((w) => w.kind === "verify") as WorkItem;
+    const bind = (item: WorkItem, n: number, role_id: string) => ({
+      ...assignment(n, role_id),
+      work_item_id: item.id,
+    });
+    s = {
+      ...s,
+      work_items: s.work_items.map((w) =>
+        w.id === production.id
+          ? { ...w, status: "in_progress", assignment_id: bind(w, 1, "").id }
+          : w.id === review.id
+            ? { ...w, status: "ready", assignment_id: bind(w, 2, "").id }
+            : w,
+      ) as WorkItem[],
+      assignments: [
+        bind(production, 1, "ui_ux_designer"),
+        bind(review, 2, "design_director"),
+      ],
+      runs: [run(1), run(2)],
+    };
+    return { p, card_id: created.data.id, production, review, state: s };
+  };
+  const designer = actor(1, "ui_ux_designer");
+  const director = actor(2, "design_director");
+
+  test("director pass, completion request and human approval finish the card", async () => {
+    let { p, card_id, production, review, state: s } = start();
+    const deliver = async (params: Parameters<typeof prepareDelivery>[2]) => {
+      const verified = value(
+        await prepareDelivery(s, designer, params, {
+          verify: async () => ({ ok: true, value: [] }),
+        }),
+      );
+      const effect = value(submitDelivery(s, designer, params, verified, p));
+      s = apply(s, effect);
+      return effect.data;
+    };
+    const subject = { kind: "doc_version" as const, value: "design-v1" };
+    const draft = await deliver({
+      work_item_id: production.id,
+      kind: "design",
+      summary: "Settings page draft",
+      subject,
+      requested_verifiers: [review.id],
+    });
+    s = apply(
+      s,
+      value(
+        submitReview(
+          s,
+          director,
+          {
+            delivery_id: draft.id,
+            target_sha: subject.value,
+            kind: "design",
+            issues: [],
+          },
+          p,
+        ),
+      ),
+    );
+    expect(s.work_items.find((w) => w.id === review.id)?.status).toBe("passed");
+    // No verifier is requested: the human completion review is the acceptance.
+    await deliver({
+      work_item_id: production.id,
+      kind: "card_completion",
+      summary: "Ready for approval",
+      subject,
+      requested_verifiers: [],
+    });
+    const decision = s.decisions.find(
+      (d) => d.status === "open" && d.decider === "human",
+    );
+    if (!decision) throw new Error("Missing human completion review");
+    expect(decision).toMatchObject({ trigger: "completion_review" });
+    const decisionParams = {
+      decision_id: decision.id,
+      rationale: "Looks right",
+      raw_quote: "通过",
+    };
+    // Human rejection sends the card back for rework.
+    s = apply(
+      s,
+      value(
+        recordDecision(s, human, { ...decisionParams, option: "reject" }, p),
+      ),
+    );
+    expect(s.cards.find((c) => c.id === card_id)?.status).toBe("in_progress");
+    await deliver({
+      work_item_id: production.id,
+      kind: "card_completion",
+      summary: "Ready for approval again",
+      subject,
+      requested_verifiers: [],
+    });
+    const retry = s.decisions.find(
+      (d) => d.status === "open" && d.trigger === "completion_review",
+    );
+    if (!retry) throw new Error("Missing retry completion review");
+    s = apply(
+      s,
+      value(
+        recordDecision(
+          s,
+          human,
+          {
+            ...decisionParams,
+            decision_id: retry.id,
+            option: "approve",
+          },
+          p,
+        ),
+      ),
+    );
+    expect(s.cards.find((c) => c.id === card_id)).toMatchObject({
+      status: "done",
+      resolution: "done",
+    });
   });
 });
 
