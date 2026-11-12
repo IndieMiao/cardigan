@@ -1511,6 +1511,8 @@ M5.S S9：三种 Harness 的 Assignment 启动环境统一通过 `GIT_CONFIG_COU
 
 注入的提示词、MCP 配置和 Token 一律写在 worktree 之外的 Assignment 运行目录，或者已被 git 忽略的路径，**绝不提交进仓库**。
 
+C-168：本机员工启动编译还接收主机读取的测试 worker 上限，在同一运行目录生成 Node 预加载文件并向员工环境注入；不从角色、项目配置或命令行取得上限。该环境随会话复用，旧会话须重开才生效；配置、强制方式及测试调用边界见 §13.4、§13.8。
+
 Assignment 的 `launch.sh` 用 `exec nice -n <值> <Agent CLI> ...` 启动 Claude Code、Codex 或 Pi，默认值为 10；由主机执行配置 `agentNice` 传给编译器，必须为 0–19 的整数。local 与 agent-ssh 共用这条路径，替换 Session 时也应用，CLI 的工具及其子进程继承优先级。只降低 Agent CLI 进程树的 CPU 调度优先级，不改变 server、Workbench、Dispatcher 或 hc 控制服务的优先级，不要求 root。`nice -n` 是相对继承值的增量（通常父进程为 0，最高封顶 19）；不是 CPU 配额，不能消除磁盘等待或其他普通优先级程序造成的争用。
 
 ### 10.3 Core Memory
@@ -1900,6 +1902,12 @@ MCP `create_card` 增加 `template_id`；需要仓库的模板仍从项目登记
 
 ### 13.4 Agent 运行环境
 
+C-168：本机员工会话由共用 `host.launchRun` 读取主机 `agent-tests.yaml`，将测试限流器编译到 worktree 外的运行目录，并只在员工启动脚本导出 `NODE_OPTIONS=--require=.../test-workers.cjs`。CLI 显式启动与 Dispatcher 新建／替换会话走同一流程，覆盖 Claude Code、Codex、Pi 及 `local`、本机 `agent-ssh`。根目录 `pnpm test`、按包过滤的脚本／exec、直接 `vitest run` 和 `node .../vitest.mjs` 都经过 Vitest CLI 的预加载层；在解析选项前移除重复、百分比或更大的 `--maxWorkers`／`--max-workers`，注入不超过主机上限的数值，显式较小值保留。已验证项目锁定的 Vitest 5；其 CLI 上限同时覆盖项目配置。独立启动器经 API 调用 Vitest、其他测试框架不在本层支持范围。
+
+同一 Assignment 会话中的测试共用一个内核 `flock`：第二个或嵌套 Vitest 命令立即以 75 退出并提示等已有测试结束，避免多个命令叠加超过每 Run 的预算，也避免嵌套等待死锁；进程退出（含崩溃）释放锁。上限和锁路径固化在生成脚本里，改 `--maxWorkers` 不能放宽。此层防止正常测试调用过量，不是防恶意代码的 OS 沙箱；员工不得删除预加载环境或改写限流脚本绕过。合并检查沿用独立的白名单环境，不继承这份预加载配置，原 `--maxWorkers=4` 不变；人在员工会话之外运行测试不受影响。不调整 nice、Run 并发或合并检查配置。
+
+部署后须重开旧员工会话以加载限流；已有活会话的自然唤醒仍沿用原环境，不能靠重启 server 或 `role upgrade` 改写它。默认包的 coder、reviewer、tester 增加自测最多 2 worker、不得绕过、全量检查交合并检查的规则；需分别执行 `role upgrade`，已有 Assignment 仍按固定角色版本处理。强制限流不依赖角色是否升级。
+
 执行配置接受 `CARDIGAN_AGENT_NICE`（0–19，默认 10），对应程序化配置 `ExecutionConfig.agentNice`；非法值拒绝启动。两种运行模式均在下一次启动 Agent CLI 时应用（§10.2），不会追改已经运行的 Agent。控制面本身继续按原优先级运行。主机繁忙时，降低 Agent 的 CPU 优先级可让 Workbench 更及时获得 CPU，但仍须结合请求耗时日志判断瓶颈；本项不改变并发数量或主机侧合并检查的执行策略。
 
 | 阶段 | 方式 |
@@ -1940,6 +1948,8 @@ M2.7 采用 [ADR 0002](adr/0002-agent-account-isolation.md)：Linux 安装器由
 - 方案 B（Phase 3）：主机运行模型网关，工作机只拿网关 Token。好处是密钥不落在工作机上，能按 Assignment 统计成本，也能按角色统一选模型。
 
 ### 13.8 机器登记与调度
+
+C-168：员工自测预算独立于全机 Run 容量。主机配置目录（`CARDIGAN_CONFIG_DIR`，默认 `~/.config/cardigan`）的 `agent-tests.yaml` 仅接受 `max_workers: <正整数>`，文件或字段缺失默认 **2**；不在被开发项目／worktree 写配置，不改 `run-capacity.yaml`。沿用可信配置的属主、普通文件、无符号链接及不可由组／其他用户写入的边界；未知字段、重复键、非法数值或不安全文件均拒绝新会话启动，错误不回显 YAML。每次创建会话读取，配置变化须重开已有会话；仅应用于 `machine_id=local` 的员工，不流入合并检查执行器。执行方式和会话升级边界见 §13.4。
 
 - Machine 登记表：见 §4.3。健康状态来自 `status server` 和心跳。
 - 第一版由 PM 在 `assign` 时**手动指定机器**。
