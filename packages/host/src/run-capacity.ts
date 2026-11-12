@@ -15,6 +15,7 @@ import {
 } from "@cardigan/store";
 
 import { runningMergeChecks } from "./merge-check-capacity.js";
+import { LOCAL_EXECUTOR } from "./merge-gate-executors.js";
 
 // P2a-9 / phase-2 §2.1: merge checks build and test the entire repository.
 // Reserve the suggested two slots while actually running; tune after measurement.
@@ -98,12 +99,16 @@ export function runCapacitySnapshot(store: Store, tx: ReadRepositories) {
   }
   // Runtime occupancy is independent of whether a card still accepts a merge
   // result. Dead process incarnations (including PID reuse) release on restart.
+  // P2a-12 D: only checks executed locally consume the host's `local` Run
+  // slots; a remote executor's checks are counted in its own bucket and never
+  // in `occupied`, even if an agent machine happens to share its name.
+  const mergeChecks = runningMergeChecks(store);
   occupied.set(
-    "local",
-    (occupied.get("local") ?? 0) +
-      runningMergeChecks(store) * MERGE_CHECK_RUN_SLOTS,
+    LOCAL_EXECUTOR,
+    (occupied.get(LOCAL_EXECUTOR) ?? 0) +
+      (mergeChecks.get(LOCAL_EXECUTOR) ?? 0) * MERGE_CHECK_RUN_SLOTS,
   );
-  return { occupied, queue: queueSnapshot(store) };
+  return { occupied, mergeChecks, queue: queueSnapshot(store) };
 }
 
 export function readRunQueue(store: Store, tx?: ReadRepositories) {

@@ -1,4 +1,13 @@
-import { mkdtemp, rm, stat, utimes, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  open,
+  rm,
+  stat,
+  symlink,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, test } from "vitest";
@@ -88,4 +97,24 @@ test("reusing an existing blob refreshes its mtime so the sweep keeps it", async
   const touched = (await stat(path)).mtimeMs;
   expect(touched).toBeGreaterThan(stale.getTime() + 60 * 60 * 1000);
   expect(await blobs.get(digest)).toEqual(content);
+});
+
+test("blob reads reject oversized sparse files, symlinks and directories", async () => {
+  const content = Buffer.from("private bytes");
+  const digest = sha256(content),
+    blobs = fileAttachmentStore(dataDir);
+  const target = join(dataDir, "attachments", digest);
+  await blobs.put(digest, content);
+  const sparse = await open(target, "w");
+  await sparse.truncate(1024 * 1024 * 1024);
+  await sparse.close();
+  await expect(blobs.get(digest)).rejects.toThrow("10 MiB");
+  await rm(target);
+  const outside = join(dataDir, "outside");
+  await writeFile(outside, content);
+  await symlink(outside, target);
+  await expect(blobs.get(digest)).rejects.toThrow("could not be read");
+  await rm(target);
+  await mkdir(target);
+  await expect(blobs.get(digest)).rejects.toThrow("must be a file");
 });

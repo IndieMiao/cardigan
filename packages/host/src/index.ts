@@ -33,6 +33,7 @@ export {
   acquireMergeCheckCapacity,
   type ExecutionOwner,
   executionOwner,
+  mergeCheckCapacityAvailable,
 } from "./merge-check-capacity.js";
 export {
   loadMergeGateConfig,

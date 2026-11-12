@@ -210,6 +210,7 @@ async function pmFixture() {
               "record_decision",
               "resolve_delegated_decision",
               "triage_human_action",
+              "replace_verification_work_item",
             ].includes(tool) &&
               !(STANDING_ONLY_TOOLS as readonly string[]).includes(tool) &&
               !(

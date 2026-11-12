@@ -23,6 +23,7 @@ import {
   acquireMergeCheckCapacity,
   executionOwner,
   launchRun,
+  mergeCheckCapacityAvailable,
   RunCapacityDeferred,
   readRunQueue,
   runCapacitySnapshot,
@@ -648,6 +649,96 @@ test("running merge checks occupy two slots across projects until their attempt 
   release();
   await dispatcher.tick();
   expect(runtime.wake).toHaveBeenCalledOnce();
+});
+
+test("P2a-12 D: remote executor checks do not consume the host's Run slots, even with a same-named agent machine", async () => {
+  const other = secondProject();
+  const owner = executionOwner(process.pid);
+  if (!owner) throw new Error("Missing process identity");
+  const releases = [
+    acquireMergeCheckCapacity(f.store, f.project, "ci-a", owner, "cardigan-ci"),
+    acquireMergeCheckCapacity(
+      f.store,
+      other.project,
+      "ci-b",
+      owner,
+      "cardigan-ci",
+    ),
+  ];
+  try {
+    comment();
+    // A machines quota of 1 still admits the Run: no check runs locally.
+    await new Dispatcher({ ...options, runLimit: () => 1 }).tick();
+    expect(runtime.wake).toHaveBeenCalledOnce();
+    const snapshot = f.store.uow.read((tx) => runCapacitySnapshot(f.store, tx));
+    expect(snapshot.occupied.get("cardigan-ci")).toBeUndefined();
+    expect(snapshot.occupied.get("local")).toBe(1);
+    expect(snapshot.mergeChecks.get("cardigan-ci")).toBe(2);
+    expect(snapshot.mergeChecks.get("local")).toBeUndefined();
+  } finally {
+    for (const release of releases) release();
+  }
+});
+
+test("P2a-12 D: merge checks are counted per execution target across projects and release independently", () => {
+  const other = secondProject();
+  const owner = executionOwner(process.pid);
+  if (!owner) throw new Error("Missing process identity");
+  const local = acquireMergeCheckCapacity(f.store, f.project, "l", owner);
+  const ciA = acquireMergeCheckCapacity(
+    f.store,
+    f.project,
+    "a",
+    owner,
+    "cardigan-ci",
+  );
+  const ciB = acquireMergeCheckCapacity(
+    f.store,
+    other.project,
+    "b",
+    owner,
+    "cardigan-ci",
+  );
+  const gpu = acquireMergeCheckCapacity(
+    f.store,
+    other.project,
+    "g",
+    owner,
+    "build-2",
+  );
+  const view = () =>
+    f.store.uow.read((tx) => {
+      const s = runCapacitySnapshot(f.store, tx);
+      return {
+        local: s.occupied.get("local"),
+        checks: Object.fromEntries(s.mergeChecks),
+      };
+    });
+  try {
+    expect(view()).toEqual({
+      local: 2,
+      checks: { local: 1, "cardigan-ci": 2, "build-2": 1 },
+    });
+    expect(mergeCheckCapacityAvailable(f.store, "cardigan-ci", 2)).toBe(false);
+    expect(mergeCheckCapacityAvailable(f.store, "build-2", 2)).toBe(true);
+    ciA();
+    expect(view()).toEqual({
+      local: 2,
+      checks: { local: 1, "cardigan-ci": 1, "build-2": 1 },
+    });
+    expect(mergeCheckCapacityAvailable(f.store, "cardigan-ci", 1)).toBe(false);
+    expect(mergeCheckCapacityAvailable(f.store, "cardigan-ci", 2)).toBe(true);
+    local();
+    expect(view()).toEqual({
+      local: 0,
+      checks: { "cardigan-ci": 1, "build-2": 1 },
+    });
+  } finally {
+    local();
+    ciA();
+    ciB();
+    gpu();
+  }
 });
 
 test("startup reservations prevent concurrent dispatcher instances from claiming the same last slot", async () => {

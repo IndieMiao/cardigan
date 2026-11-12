@@ -8,10 +8,12 @@ import {
   recordMergeCheck,
 } from "@cardigan/domain";
 import type { CentralProject, PreparedMerge } from "@cardigan/git-service";
-import type {
-  CheckoutInput,
-  CheckoutResult,
-  ProjectMergeGate,
+import {
+  acquireMergeCheckCapacity,
+  type CheckoutInput,
+  type CheckoutResult,
+  type ProjectMergeGate,
+  runCapacitySnapshot,
 } from "@cardigan/host";
 import { afterEach, expect, test, vi } from "vitest";
 import {
@@ -558,7 +560,8 @@ test.each(["checks", "executor"] as const)(
     try {
       await started.promise;
       expect(blockedCheck()?.status).toBe("running");
-      expect(ready.card().status).toBe("awaiting_merge");
+      // P2a-12 D: the other project's lane no longer waits behind this check,
+      // so the ready card may already be published here.
       // Two overlapping passes while the other card's check is running.
       await Promise.all([tick(), tick()]);
       expect(ready.card().status).toBe("done");
@@ -709,4 +712,275 @@ test("a project executor receives the candidates and runs the checks; logs stay 
       "utf8",
     ),
   ).resolves.toBeTypeOf("string");
+});
+
+test("C-130: an executor whose SSH preparation fails records a start failure and never falls back to the host", async () => {
+  const { f, check } = await fixture("auto");
+  const c = controller(f);
+  c.setConfig({
+    status: "enabled",
+    checks: [{ name: "test", run: "true" }],
+    env: {},
+    totalTimeoutMs: 1000,
+    executor: ciExecutor(1),
+  });
+  c.run.mockRejectedValueOnce(
+    new Error("Executor checkout preparation failed"),
+  );
+  await c.gate.tick([f.project_id]);
+  expect(check()?.status).toBe("failed");
+  expect(check()?.summary).not.toContain("preparation");
+  expect(c.run).toHaveBeenCalledTimes(1);
+  expect(c.run.mock.calls[0]?.[0].execution).toMatchObject({
+    mode: "agent-ssh",
+    host: "cardigan-ci",
+  });
+  expect(c.git.publish).not.toHaveBeenCalled();
+});
+
+const ciExecutor = (maxConcurrent: number) => ({
+  name: "cardigan-ci",
+  host: "cardigan-ci",
+  port: 22,
+  user: "agent",
+  hostKeyAlias: "cardigan-ci",
+  identityFile: "/data/ssh/ci.key",
+  knownHostsFile: "/data/ssh/ci.known_hosts",
+  agentRoot: "/srv/cardigan-agent",
+  maxConcurrent,
+});
+const otherProject = (f: M4Fixture) => {
+  const id = "p-other" as typeof f.project_id;
+  if (!f.store.listProjects().some((p) => p.id === id))
+    f.store.createProject({ id, name: "Other project" });
+  return id;
+};
+const capacity = (f: M4Fixture) =>
+  f.store.uow.read((tx) => {
+    const s = runCapacitySnapshot(f.store, tx);
+    return {
+      local: s.occupied.get("local"),
+      checks: Object.fromEntries(s.mergeChecks),
+    };
+  });
+
+test("P2a-12 D: a full executor (max_concurrent) leaves the check queued; it runs once a slot frees", async () => {
+  const { f, check } = await fixture("auto");
+  const c = controller(f);
+  c.setConfig({
+    status: "enabled",
+    checks: [{ name: "test", run: "true" }],
+    env: {},
+    totalTimeoutMs: 1000,
+    executor: ciExecutor(1),
+  });
+  // Another project's check already holds the executor's only slot.
+  const busy = acquireMergeCheckCapacity(
+    f.store,
+    otherProject(f),
+    "busy",
+    undefined,
+    "cardigan-ci",
+  );
+  try {
+    await c.gate.tick([f.project_id]);
+    expect(c.run).not.toHaveBeenCalled();
+    expect(c.git.distribute).not.toHaveBeenCalled();
+    expect(check()?.status).toBe("queued");
+  } finally {
+    busy();
+  }
+  const seen: ReturnType<typeof capacity>[] = [];
+  c.run.mockImplementation(async (input: CheckoutInput) => {
+    input.onReady?.();
+    seen.push(capacity(f));
+    return passed;
+  });
+  await c.gate.tick([f.project_id]);
+  expect(c.run).toHaveBeenCalledOnce();
+  expect(check()?.status).toBe("passed");
+  // Charged to the executor's bucket, not the host's local Run slots.
+  expect(seen).toEqual([{ local: 0, checks: { "cardigan-ci": 1 } }]);
+  expect(capacity(f)).toEqual({ local: 0, checks: {} });
+});
+
+test("P2a-12 D: max_concurrent above the running count admits the check", async () => {
+  const { f, check } = await fixture("auto");
+  const c = controller(f);
+  c.setConfig({
+    status: "enabled",
+    checks: [{ name: "test", run: "true" }],
+    env: {},
+    totalTimeoutMs: 1000,
+    executor: ciExecutor(2),
+  });
+  const busy = acquireMergeCheckCapacity(
+    f.store,
+    otherProject(f),
+    "busy",
+    undefined,
+    "cardigan-ci",
+  );
+  try {
+    await c.gate.tick([f.project_id]);
+    expect(c.run).toHaveBeenCalledOnce();
+    expect(check()?.status).toBe("passed");
+  } finally {
+    busy();
+  }
+});
+
+test("P2a-12 D: without an executor, checks are charged to local and never gated (regression)", async () => {
+  const { f, check } = await fixture("auto");
+  const c = controller(f);
+  const busy = acquireMergeCheckCapacity(f.store, otherProject(f), "busy");
+  const seen: ReturnType<typeof capacity>[] = [];
+  c.run.mockImplementation(async (input: CheckoutInput) => {
+    input.onReady?.();
+    seen.push(capacity(f));
+    return passed;
+  });
+  try {
+    await c.gate.tick([f.project_id]);
+  } finally {
+    busy();
+  }
+  expect(check()?.status).toBe("passed");
+  expect(seen).toEqual([{ local: 4, checks: { local: 2 } }]);
+});
+
+/** Two projects in one Store; each check blocks until released. */
+async function overlapping(
+  executorOf: (project: string) => ProjectMergeGate & { status: "enabled" },
+) {
+  const { f: a, check: checkA } = await fixture("auto", {
+    project_id: "a-first",
+  });
+  const { f: b, check: checkB } = await fixture("auto", {
+    project_id: "b-second",
+    dataDir: a.dataDir,
+  });
+  const c = controller(a);
+  c.options.configuration.forProject = (id: string) => executorOf(id);
+  const running: { project: string; slot: number | undefined }[] = [];
+  const gates = new Map<string, PromiseWithResolvers<void>>();
+  const startedOne = Promise.withResolvers<void>();
+  c.run.mockImplementation(async (input: CheckoutInput) => {
+    input.onReady?.();
+    running.push({ project: input.project, slot: input.lockSlot });
+    startedOne.resolve();
+    const gate = Promise.withResolvers<void>();
+    gates.set(input.project, gate);
+    await gate.promise;
+    running.splice(
+      running.findIndex((r) => r.project === input.project),
+      1,
+    );
+    return passed;
+  });
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+  return {
+    a,
+    b,
+    c,
+    checkA,
+    checkB,
+    running,
+    startedOne: startedOne.promise,
+    settle,
+    finish: async (project: string) => {
+      for (let i = 0; i < 50 && !gates.has(project); i++) await settle();
+      required(gates.get(project)).resolve();
+    },
+  };
+}
+const gateWith = (executor?: ReturnType<typeof ciExecutor>) =>
+  ({
+    status: "enabled",
+    checks: [{ name: "test", run: "true" }],
+    env: {},
+    totalTimeoutMs: 1000,
+    ...(executor ? { executor } : {}),
+  }) as ProjectMergeGate & { status: "enabled" };
+
+test("P2a-12 D: max_concurrent 2 lets two projects' checks overlap on one executor, on separate lock slots", async () => {
+  const o = await overlapping(() => gateWith(ciExecutor(2)));
+  const round = o.c.gate.tick([o.a.project_id, o.b.project_id]);
+  await o.startedOne;
+  await o.settle();
+  expect(o.running.map((r) => r.project).sort()).toEqual([
+    "a-first",
+    "b-second",
+  ]);
+  expect(o.running.map((r) => r.slot).sort()).toEqual([0, 1]);
+  expect(capacity(o.a)).toEqual({ local: 0, checks: { "cardigan-ci": 2 } });
+  await o.finish("a-first");
+  await o.finish("b-second");
+  await round;
+  expect(o.checkA()?.status).toBe("passed");
+  expect(o.checkB()?.status).toBe("passed");
+  expect(o.c.errors).not.toHaveBeenCalled();
+});
+
+test("P2a-12 D: different executors do not wait for each other", async () => {
+  const o = await overlapping((id) =>
+    gateWith(
+      id === "a-first"
+        ? ciExecutor(1)
+        : { ...ciExecutor(1), name: "build-2", host: "build-2" },
+    ),
+  );
+  const round = o.c.gate.tick([o.a.project_id, o.b.project_id]);
+  await o.startedOne;
+  await o.settle();
+  expect(o.running).toEqual(
+    expect.arrayContaining([
+      { project: "a-first", slot: 0 },
+      { project: "b-second", slot: 0 },
+    ]),
+  );
+  expect(capacity(o.a).checks).toEqual({ "cardigan-ci": 1, "build-2": 1 });
+  await o.finish("a-first");
+  await o.finish("b-second");
+  await round;
+  expect(o.checkB()?.status).toBe("passed");
+});
+
+test.each([
+  ["a full executor (max_concurrent 1)", ciExecutor(1)],
+  ["local without an executor (regression)", undefined],
+] as const)(
+  "P2a-12 D: %s runs one check at a time; the other stays queued until the slot frees",
+  async (_name, executor) => {
+    const o = await overlapping(() => gateWith(executor));
+    const round = o.c.gate.tick([o.a.project_id, o.b.project_id]);
+    await o.startedOne;
+    await o.settle();
+    expect(o.running).toEqual([{ project: "a-first", slot: 0 }]);
+    expect(o.checkB()?.status).toBe("queued");
+    // A further pass while the slot is held neither starts nor fails it.
+    await o.c.gate.schedule([o.a.project_id, o.b.project_id]);
+    await o.settle();
+    expect(o.running).toEqual([{ project: "a-first", slot: 0 }]);
+    await o.finish("a-first");
+    await o.finish("b-second");
+    await round;
+    expect(o.checkA()?.status).toBe("passed");
+    expect(o.checkB()?.status).toBe("passed");
+    expect(o.c.run).toHaveBeenCalledTimes(2);
+    expect(o.c.errors).not.toHaveBeenCalled();
+  },
+);
+
+test("P2a-12 D: shutdown releases a check waiting for a slot without running it", async () => {
+  const o = await overlapping(() => gateWith(ciExecutor(1)));
+  const round = o.c.gate.tick([o.a.project_id, o.b.project_id]);
+  await o.startedOne;
+  await o.settle();
+  o.c.gate.stop();
+  await o.finish("a-first");
+  await round;
+  await o.c.gate.idle();
+  expect(o.c.run).toHaveBeenCalledOnce();
+  expect(o.checkB()?.status).toBe("queued");
 });

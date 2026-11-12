@@ -51,6 +51,7 @@ export const toolNames = [
   "request_human_action",
   "request_decision",
   "upload_attachment",
+  "read_attachment",
   "heartbeat",
   "finish_run",
   "submit_delivery",
@@ -60,6 +61,7 @@ export const toolNames = [
   "update_card",
   "create_work_item",
   "update_work_item",
+  "replace_verification_work_item",
   "assign",
   "release_assignment",
   "project_snapshot",
@@ -191,6 +193,8 @@ interface WorkItemFields {
   readonly completion_criteria: readonly string[];
   readonly assignment_id?: AssignmentId;
   readonly template_key?: string;
+  /** Historical verifier retained after an atomic replacement. */
+  readonly replaced_by_work_item_id?: WorkItemId;
   readonly reported_blocker?: {
     readonly reason: string;
     readonly needs: "role" | "human";

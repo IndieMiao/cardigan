@@ -124,6 +124,7 @@ function inspect(d: CommandDraft, p: SubmitDeliveryParams) {
       (w) =>
         w.card_id === card.id &&
         w.kind === "verify" &&
+        !w.replaced_by_work_item_id &&
         (completion
           ? isCompletionVerifier(template, w)
           : w.target_work_item_id === item.id),
@@ -145,6 +146,7 @@ function inspect(d: CommandDraft, p: SubmitDeliveryParams) {
       !(
         w.card_id === card.id &&
         w.kind === "verify" &&
+        !w.replaced_by_work_item_id &&
         (completion
           ? isCompletionVerifier(template, w)
           : w.target_work_item_id === item.id)
@@ -486,6 +488,7 @@ export function submitReview(
     checkEmployeeSeparation(d, item, d.assignment.employee_id);
     ensure(
       item.kind === "verify" &&
+        !item.replaced_by_work_item_id &&
         target.requested_verifiers.includes(item.id) &&
         (target.kind === "card_completion"
           ? isCompletionVerifier(resolveCardTemplate(d, card), item)

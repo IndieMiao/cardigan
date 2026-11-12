@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { link, mkdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { link, mkdir, open, rm, utimes, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { type AttachmentStore, prepareAttachment } from "@cardigan/domain";
 import { ToolError } from "./errors.js";
@@ -76,19 +77,54 @@ export function fileAttachmentStore(
 ): AttachmentStore {
   const directory = resolve(dataDir, "attachments");
   const path = (digest: string) => {
-    if (!/^[a-f0-9]{64}$/u.test(digest))
+    if (digest.length !== 64 || !/^[a-f0-9]{64}$/u.test(digest))
       throw ToolError.validation("Invalid attachment sha256");
     return join(directory, digest);
   };
   const get = async (digest: string) => {
+    const target = path(digest);
     try {
-      const content = await readFile(path(digest));
-      if (sha256(content) !== digest)
-        throw ToolError.validation("Stored attachment checksum mismatch");
-      return content;
+      // Never follow a blob symlink or block while opening a special file.
+      const file = await open(
+        target,
+        constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+      );
+      try {
+        const info = await file.stat();
+        if (!info.isFile() || info.size > MAX_ATTACHMENT_BYTES)
+          throw ToolError.validation(
+            "Stored attachment must be a file up to 10 MiB",
+          );
+        // Bound the read even if another process grows the file after stat.
+        // One extra byte detects growth without ever using an unbounded readFile.
+        const buffer = Buffer.alloc(info.size + 1);
+        let size = 0;
+        while (size < buffer.length) {
+          const { bytesRead } = await file.read(
+            buffer,
+            size,
+            buffer.length - size,
+            size,
+          );
+          if (bytesRead === 0) break;
+          size += bytesRead;
+        }
+        if (size !== info.size)
+          throw ToolError.validation(
+            "Stored attachment size changed during read",
+          );
+        const content = buffer.subarray(0, size);
+        if (sha256(content) !== digest)
+          throw ToolError.validation("Stored attachment checksum mismatch");
+        return content;
+      } finally {
+        await file.close();
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-      throw error;
+      if (error instanceof ToolError) throw error;
+      // Filesystem errors may contain host paths; keep them off the wire.
+      throw ToolError.validation("Stored attachment could not be read");
     }
   };
   return {

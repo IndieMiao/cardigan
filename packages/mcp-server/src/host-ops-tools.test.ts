@@ -149,21 +149,35 @@ test("released host_ops credentials are rejected before invoking the host", asyn
   expect(read).not.toHaveBeenCalled();
 });
 
-test("host_ops cannot discover or invoke the PM Ops release tool with a broad legacy token", async () => {
-  const { c } = await client("host_ops", [
-    ...HOST_OPS_TOOLS,
-    "release_assignment",
-  ]);
-  expect(
-    (await c.listTools()).tools.some((t) => t.name === "release_assignment"),
-  ).toBe(false);
-  expect(
-    (
-      await c.callTool({
-        name: "release_assignment",
-        arguments: { assignment_id: "A-2", idempotency_key: "release-denied" },
-      })
-    ).isError,
-  ).toBe(true);
-  expect(execute).not.toHaveBeenCalled();
-});
+test.each([
+  {
+    name: "release_assignment" as const,
+    arguments: { assignment_id: "A-2" },
+  },
+  {
+    name: "replace_verification_work_item" as const,
+    arguments: {
+      work_item_id: "W-2",
+      card_id: "C-1",
+      template_key: "code_review",
+      reason: "Replace released reviewer",
+    },
+  },
+])(
+  "host_ops cannot discover or invoke the PM Ops $name tool with a broad legacy token",
+  async (tool) => {
+    const { c } = await client("host_ops", [...HOST_OPS_TOOLS, tool.name]);
+    expect((await c.listTools()).tools.some((t) => t.name === tool.name)).toBe(
+      false,
+    );
+    expect(
+      (
+        await c.callTool({
+          name: tool.name,
+          arguments: { ...tool.arguments, idempotency_key: "pm-ops-denied" },
+        })
+      ).isError,
+    ).toBe(true);
+    expect(execute).not.toHaveBeenCalled();
+  },
+);

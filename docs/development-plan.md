@@ -361,6 +361,7 @@ Standing Assignment (scope=project): PM Office, PM Ops — not tied to a WorkIte
 - `target_work_item_id?`：仅 verify 类型，表示验证哪个产出型工作项
 - `completion_criteria`、`status`、`assignment_id?`
 - `template_key?`：模板生成工作项的稳定键，用来识别主产出和本次完成申请的审核项。
+- `replaced_by_work_item_id?`（C-110）：已被替换的验证项指向新项；旧项保留模板 key、目标和 Assignment 归属，置为 cancelled、required=false，仅用于历史追溯。
 - `reported_blocker?`：`{reason, needs: role | human, reported_by, reported_at}`。报告者来自 Actor，时间来自 Clock；它是独立阻塞原因，其他阻塞解除不能清除它。重复上报更新当前报告，历史保留在时间线。
 
 **Role（P2-V V9a）**
@@ -685,6 +686,8 @@ P2a-10 B2（C-85）：运维重启／取消先在同一事务按 Assignment／Ru
 13. review 模板的 `done` 必须经过完成申请和审核；human_mark_done 模板只接受人显式记录结果且必需项全部成功的完成命令。规则不能自动把卡片置为 `done`。
 14. 交付和审核绑定到版本（SHA）：交付有新版本后，针对旧版本的审核结论自动失效。产物类附件必须带 `basis`（对应的拍板编号）。
 15. 审核者不能是作者：验证工作项不能使用其目标产出项当前或曾经的 Assignment；产出项也不能使用已经验证过它的 Assignment。完成申请的 PM 验收项与模板指定的主产出项同样必须使用不同 Assignment。当前 `assign` 不接受既有 `assignment_id`，只为新工作项分配新身份，或复用该工作项唯一且仍 active 的原身份；Assignment 的 `work_item_id` 不可改派，释放后也保留归属，因此现有规则已阻止上述身份复用。归属不一致或试图复用已释放身份时返回 `invariant_violation`，产出方调用 `submitReview` 自审返回 `unauthorized`。CLI `cardigan assign` 与 MCP `assign` 共用这条 domain 路径；即使两个工作项使用同一 Role，也必须分配不同身份。本条的员工级补充见第 16 条。
+   C-110 的换人路径不改变第 15 条：`replace_verification_work_item({work_item_id, card_id, template_key, reason})` 只向常驻 PM Ops 开放 MCP 工具（domain 同时允许 human），在同一事务内核对原项属于指定卡片和固定模板验证 key，且原项已取消或其 Assignment 已释放；不能替换产出项、跨卡或跨 key。服务端生成新编号，继承角色、template_key、target_work_item_id、required、依赖、验收标准和审核上限，不继承 Assignment、审核或阻塞报告；新项从 todo 开始，仍须经 assign 和正常交付／审核。旧项保留绑定及历史，撤回旧目标后经 cancel 取消，写入替代编号并置 required=false，从必需验证人和完成前置条件中移除；已替换项不能再次修改、指派或审核。仅取消、未替换的必需项仍然阻塞完成。依赖旧项的同卡工作项转为依赖新项。替换作废同卡当前完成申请，以及请求旧项审核的当前产出交付；旧审核失效，未决确认按原规则关闭，必须重提受影响交付和完成申请，不修改旧交付的 requested_verifiers。待合并卡须先走既有退回修改流程，已结束卡拒绝替换。替换关系、原因、作废交付及操作者写入审计事件和时间线；任何校验或持久化失败全部回滚。
+
 16. 员工级审核隔离：验证工作项的员工不得出现在目标产出项任何当前或曾经（包括已释放）的 Assignment 上；完成申请验收项与模板主产出项同样隔离。反向先指派验证方、再指派产出方也检查；提交交付／审核时重查。不带员工的一方不凭角色推断身份，双方均无员工继续沿用第 15 条。
 17. 新指派的员工必须在职，员工角色、工作项角色和目标项目登记的角色一致；绑定尚未 released 的外接常驻 Assignment 的员工不能被指派到工作项（包括跨项目和重复指派）。员工编号在 Assignment 创建后不可修改。停用只阻止新指派，不取消既有责任和 Run。
 18. 模板按项目、编号和版本隔离；已有卡片固定模板版本，修改／停用不改旧卡。内置模板只能复制；所有模板写操作和人标记完成都由 domain 校验 human 身份。需要 Git 合并的卡片必须有仓库和基线，非 Git 模板不能用 Git 交付绕过完成方式。
@@ -1329,6 +1332,7 @@ P2a-10 B2：五个 `host_ops_*` 工具只对 Token 具备对应许可的本项�
 | `request_human_action(card_id, instructions, why_human, expected_return, blocked_work_items[], due?) → key` | 全部 | 先交 PM Ops 分拣，转交人或主机操作后进入 Needs You |
 | `request_decision(card_id?, kind, category, question, context, options[], recommended, affected_cards[], affected_work_items[], blocking, decider, attachment_ids?) → key` | 全部 | 发起拍板，返回编号；`attachment_ids` 引用已有卡片附件，顺序即展示顺序 |
 | `upload_attachment(card_id, file, mime, kind, attach_to, basis?, sha256?, supersedes?)` | 全部 | 返回附件元数据；file 为标准带填充 base64，解码后 ≤10MiB（10×1024×1024 字节）；artifact 必须有 basis |
+| `read_attachment(attachment_id)` | 工具白名单允许的 Assignment（默认 coder、reviewer、pm） | 只读本项目且有权访问卡片的附件；返回原始字节的 base64、SHA-256、字节数和 MIME，校验摘要及大小，最大 10 MiB |
 | `heartbeat(run_id, note?)` | 全部 | 心跳 |
 | `finish_run(run_id, outcome: completed\|blocked\|failed, summary)` | 全部 | 结束本次 Run |
 | `submit_delivery(work_item_id, kind, summary, subject, requested_verifiers[], branch?, pr_url?, test_results?, attachments[], known_gaps[], supersedes?)` | 产出型角色 | 提交交付。`kind=card_completion` 即卡片的完成申请，只有主产出工作项的负责人可以提交。`summary` 面向人且不超过 160 字；长内容放 `test_results`、`known_gaps` 或附件 |
@@ -1349,6 +1353,10 @@ S21：MCP `create_card` 的 `repo`、`base_branch` 都可省略，分别使用 T
 M1.5 已负责 `whoami`、`get_card`、`get_updates`、`ack_events` 的实现与测试；domain 不再提供第二套同名命令。M1.3 的项目查询仅保留 `project_snapshot`、`list_needs_you`。
 
 M1.6c 的 `heartbeat`、`finish_run` 与附件上传复用写命令的幂等事务；心跳不生成事件或时间线，结束 Run 不代表业务完成。`project_snapshot`、`list_needs_you` 不要求幂等键，在同一个只读事务中加载完整项目 CommandState 并执行 domain 查询，具有下述完整快照的规模成本。
+
+C-87：只读工具 `read_attachment(attachment_id)` 返回 `{attachment_id, card_id, encoding:"base64", file, sha256, size, mime}`，`file` 解码后即上传时的原始字节，不要求幂等键。默认角色包的 coder、reviewer、pm 增加该工具；已有角色版本和 Token 不自动升级，沿用人工角色升级和会话换版流程。工具不接受服务端文件路径，不提供公开下载地址；Agent 需要落盘时自行将返回的 base64 解码到自己的工作区。
+
+读取先按 Token 所属项目查附件，并复用 `get_card` 的卡片可见性：工作项 Assignment 仅本卡，常驻 Assignment 为本项目。不存在、跨项目和无权卡片统一返回不含所属卡号的 `not_found`，鉴权通过前不读文件。随后校验元数据（SHA-256 格式、0–10 MiB 整数字节数、MIME 类型语法），按摘要读取内容，重算 SHA-256 并核对上传记录的字节数。MIME 保留上传时声明的类型和参数，不作内容嗅探或格式转换。文件读取在数据库事务外进行，只接受普通文件，拒绝文件符号链接；同一文件描述符先检查大小、再有界读取，读取期间文件增长也不能突破上限。读取后重查 Token 和 Assignment 状态及卡片可见性。响应不包含存储路径，日志不记录字节内容；不写附件记录、业务事件或幂等缓存。
 
 C-107：`project_snapshot.available_employees` 为 PM 提供可指派工作项的在职员工，排除外接员工、项目未登记／停用的角色和仅常驻的 host_ops；只返回编号、名字、职位和角色，不带启动配置或简介。该列表不针对特定工作项，具体指派仍由 `assign` 检查角色及作者／审核者隔离；员工管理列表和历史作者展示保持完整。
 
@@ -1615,7 +1623,7 @@ Git 超时分为两档：查询默认 30 秒（`CARDIGAN_GIT_QUERY_TIMEOUT_MS` /
 
 监督进程在删除运行目录前补查脱离检查进程组的 hc core／holder：仅 Linux 下 exe 为 herdr-core、UID 属于执行账号且 XDG_RUNTIME_DIR（包括已知短别名映射）落在本 attempt 的进程。先记录 PID 和 Linux 启动时间，每次发送 SIGTERM／SIGKILL 前重新核对身份；重复检查用于捕获 holder 退出时新出现的 core，未能结束的进程记为清理失败。不调用会自动启动 core 的 hc 读命令，不按进程名称批量结束其他会话。
 
-合并检查调用临时执行器时启用 `serialize`：配置的本机执行根使用固定 `merge-check.lock`，Agent 模式位于 agentRoot（主机拥有、共享组 0660），local 位于 dataDir（0600），所有项目共用该 inode。只接受可信属主、空内容、无链接的锁文件，不在收尾时 unlink 或重建。执行账号通过 `flock --exclusive --no-fork` 获得锁后才启动监督进程；锁保持到监督进程退出，检查子进程不继承锁 FD。取得锁后发出认证的 ready 消息，主机才通知调用方开始检查；排队等待不计入检查总超时，可单独取消。SSH 挂断也走监督进程的取消收尾。卡片的 FIFO 排序和持久化状态仍由 MergeExecutor 管理，这个文件锁提供跨项目／控制进程的执行互斥。
+合并检查调用临时执行器时启用 `serialize`：配置的本机执行根使用固定 `merge-check.lock`（P2a-12 D：执行目标 `max_concurrent` > 1 时，第 i 个槽位用 `merge-check-<i>.lock`，槽位 0 仍是 `merge-check.lock`），Agent 模式位于 agentRoot（主机拥有、共享组 0660），local 位于 dataDir（0600），所有项目共用该 inode。只接受可信属主、空内容、无链接的锁文件，不在收尾时 unlink 或重建。执行账号通过 `flock --exclusive --no-fork` 获得锁后才启动监督进程；锁保持到监督进程退出，检查子进程不继承锁 FD。取得锁后发出认证的 ready 消息，主机才通知调用方开始检查；排队等待不计入检查总超时，可单独取消。SSH 挂断也走监督进程的取消收尾。卡片的 FIFO 排序和持久化状态仍由 MergeExecutor 管理，这个文件锁提供跨项目／控制进程的执行互斥。
 
 短别名不放宽中心仓库的私有路径校验。Cardigan 自身测试把 TMPDIR 当作数据根时仍会碰到链接／共享祖先限制；测试夹具另行适配为执行账号独占的真实私有数据根，hc 运行目录仍留在受控 attempt 下。根目录本身过长的配置仍需避免超过平台 Unix socket 长度上限。
 
@@ -1665,6 +1673,8 @@ P2a-1a 的检查队列按当前完成申请最后一条审核事件的时间跨�
 
 P2a-12 C（检查执行目标）：`distribute(project, execution?)` 可由调用方传入执行目标覆盖，不传时仍用 ServerGit 构造时的默认 execution，开发 Agent 的分发、交付验证和唤醒路径不变。合并检查按项目选目标：`merge-gate.yaml` 中项目配置了 `executor`（已解析为 `ProjectMergeGate.executor`）时，用它生成一份 agent-ssh 执行配置（SSH 目标、凭据、`agent_root` 来自执行目标，数据目录、共享组和 niceness 沿用默认 execution，机器名为执行目标名），候选分发和检查执行使用同一份；未配置或 `executor: local` 时仍用默认 execution，绝不在两者之间回退。覆盖目标的基础 clone 可能在另一台机器上，主机不在本机磁盘解析该路径，只按 `<agent_root>/repos/<project>` 做字面校验，经绑定该路径的 receive-pack 入口推送；该基础 clone 须由操作员预先建好，缺失时本次检查以启动前失败记录。检查日志仍写主机数据目录。
 
+C-130（远程执行目标的检查目录准备）：执行配置为 agent-ssh 且带 `host`（即由 `merge-gate.yaml` 执行目标生成的配置）时视为远程执行目标，主机与它不共用磁盘。检查前的三步准备——槽位锁 `<agent_root>/merge-check[-<i>].lock`、attempt 容器 `<agent_root>/checks/<project>/<attempt>`、短别名容器 `<agent_root>/s/<随机名>`——以及检查后删除这两个空容器，都经该目标同一个固定 SSH 入口（`agentProcessCommand`）在执行目标上完成；不调用主机侧的 `prepareCheckLock`／`prepareAgentCheckout`／`prepareCheckoutAlias`／`rmdir`，也不检查主机是否属于共享组。主机侧只保留数据目录校验、参数校验、SSH 凭据文件校验和检查日志。远程机器上没有主机账号，无法复现“父层归主机所有”的保护，因此改由执行账号自己建立命名空间：agent 根目录必须已存在、不是链接，不会重建；`checks`、`checks/<project>`、`s` 缺失时以 0700 新建，已存在时必须是真实目录而不是链接；容器和别名以 0700 独占新建，已存在即失败、不复用，别名失败时回滚刚建的容器。槽位锁不同：互斥依赖一个持久、不可替换的 inode，而候选代码也以执行账号运行，所以远程准备**从不创建或修复锁**（V-405）。锁由操作员预先建好（`merge-check.lock`，`max_concurrent` > 1 时再加 `merge-check-<i>.lock`），必须是空的普通文件，不是链接，执行账号可读、不可写、不是属主。锁本身和它到 `/` 的每一级父目录，都不能归执行账号所有，也不能被执行账号写入（带粘滞位、且下一级不归执行账号的目录除外），这样执行账号无法 unlink、改名或替换锁。这相当于本机由主机拥有的 2750 agent 根目录。任何一项不满足，或锁不存在，都按准备失败处理。因此远程 agent 根目录也由操作员建立且不归执行账号所有；其中的 `checks`、`s`、`repos/<project>` 预先建好并归执行账号所有。同一执行账号的并发检查可能把中间目录换成符号链接（C-130#15），因此准备脚本用与 openat 等价的方式逐级进入：先 `cd -P` 进入每一级，核对 `pwd -P` 等于预期的真实路径，并核对该目录归执行账号所有，再在当前目录下相对创建下一级。容器和别名都在这样锁定的目录里新建，最后再确认返回给主机的路径仍解析到刚建的叶子，否则准备失败。清理时同样先进入父目录并核对其真实路径和属主，再 rmdir 叶子，不会穿过被替换的中间目录删除别处的目录。远程脚本固定不变，project、attempt、别名、锁名和 agent 根目录只作为位置参数传入，参数逐个按 shell 规则引用；在生成 SSH 命令之前，按 C-127 的同一套规则校验 project、attempt、别名和槽位，`agent_root` 走字面路径规则。准备命令须以 0 退出并输出约定的结束标记，否则抛出“准备失败”，合并检查按启动前失败记录（结果中逐项为空），不启动监督进程，也不回退本机；清理失败只记清理错误，不改检查结论。local 模式和不带 `host` 的本机隔离账号 agent-ssh，路径不变。
+
 ### 12.6 清理与对账
 
 - releaseAssignment 允许人、常驻 PM Ops 或 system；必须没有任何未结束 Run（含 queued/unknown）。system 只自动释放 done/cancelled 卡片的工作项 Assignment，不释放常驻 PM；PM Ops 只能手动释放 scope=work_item 的 Assignment；常驻 Assignment（包括 PM Office）仅允许 human 释放。Assignment 与 runtime 都经 release 迁移，保留工作目录、分支和运行时引用供清理；assignment_released 带 worktree_path/branch/token_id/runtime_ref。M4.4 在同一轮清理中作废该 Assignment 的所有 Token、释放终端。终端回收不依赖项目是否登记仓库或 Assignment 是否有 worktree；每轮也补查所有已释放 Assignment（包括由人释放的常驻项）。运行时仍存活时执行 force release，业务无未结束 Run 的前置条件仍由 domain 保证，不受 Harness 的 working 标签阻挡。terminal 不存在视为完成；失败逐项报告并在下一轮重试，不缓存失败或仅凭上次成功跳过补查，关闭未确认前不删除其 worktree。
@@ -1673,6 +1683,7 @@ P2a-12 C（检查执行目标）：`distribute(project, execution?)` 可由调�
 - 定期对账（M4.3 `listWorktreeState` + 纯函数 `reconcile`）：比对基础 clone 的 `git worktree list`、Assignment 与 checks 根目录下的实际 worktree、数据库里的 Assignment／检查记录和中心仓库的固定交付 ref；Git 登记路径逐一核实目录是否存在，不能把“不在 Assignment 根目录下”当成目录缺失。报告六类发现——孤儿 worktree（存在但无 Assignment 拥有）、缺失（active Assignment 记录的 worktree 不存在）、失效登记（Git 登记了但目录已不在）、有 `git_head` 交付但没有固定 ref、M2.7 留下的失败临时 clone（`<clone 根>/.clone-*`）、登记源与中心基线分叉。**只报告，从不删除**，是否处理由组装层（M4.4）发起清理决策或放进 attention。
 - C-67：按项目和 attempt 的精确路径识别合并检查 worktree，由持有完整 Store 的 ReconcileExecutor 提供检查状态读取回调，ServerGit 在目录扫描结束后调用它，取得各 attempt 的最新 queued / started / finished 事件，包含旧完成申请和已关闭卡片的记录；Git 接线的 Store 仍只需 getProject/listProjects，不要求事务接口，扫描期间新排队的检查同样受保护；重新检查请求不改旧 attempt 的实际结束时间。queued / running 不报孤儿或失效登记；结束后从 finished 事件时间起等待 `CARDIGAN_CHECK_CLEANUP_GRACE_MS`（默认 600000 毫秒，正整数，启动时读取），超过才报告残留。默认 10 分钟与对账周期一致，给检查自己的收尾留出时间，也避免长期掩盖清理失败。目录存在且无人认领时只报 orphan，只有登记而目录缺失时只报 stale；二者互斥，诊断说明目录和登记的实际情况。不改变检查执行、状态机或清理责任，不自动删除。
 - P2a-12 C：配置了非本机合并检查执行目标的项目，对账在本机扫描（默认 execution 的 checks 根目录，仍用 `readdir`）之外，再经该执行目标的固定 SSH 入口跑一次只读列目录命令：列出 `<agent_root>/checks/<project>/*/worktree` 目录，以及该机基础 clone 中登记在 checks 根目录下的 worktree（`git worktree list --porcelain -z`，禁用系统／全局配置和 hook）。结果按上一条同样的 Store 事件和宽限期判定孤儿和失效登记，诊断路径写成 `<执行目标>:<路径>`，不与主机路径混淆。远程脚本只有在可搜索的父目录（或 agent 根目录）里确认名字不存在时，才把 checks 目录或基础 clone 视为不存在；权限不足、符号链接、类型不对或 agent 根目录缺失都使列目录失败。SSH 连接失败、命令非零退出、超时或输出不完整（缺少结束标记）时报告独立的第三种诊断 `executor_unreachable`，本轮不对该目标报告任何孤儿或失效登记；连不上永远不被当成“目录不存在”。对账台账把这一轮视为该目标未扫描：路径在 `<执行目标>:<checks 根目录>/` 下的未解决发现保持未解决，首次发现时间不变，恢复后只有成功列目录确认消失才解决。本机或 local 执行目标不走 SSH。
+- C-130：远程执行目标的 attempt 容器和别名容器，在检查结束后由执行账号经 SSH 删除（只 rmdir 空的叶子目录，不递归删除）。删除失败只记一条清理错误。如果准备脚本执行到一半 SSH 断开，可能留下空容器；上一条的列目录只看 `*/worktree`，看不到这种空容器，目前靠远程机器初始化清单里的定时清理兜底。
 - 未提交、尚未被主机拉取的修改，以及 ahead / behind 数据，由 Dispatcher 通过 SSH 在对应机器上执行 git 命令获取（Herdr 没有这个 API）。agent-ssh 下这些仓库操作（`status`、`worktree list`、`diff`、`worktree remove`、`branch -D`）一律经 Agent 执行入口，主机身份的 git 只在中心仓库里运行。
 - M4.4 的清理循环与合并循环并列：每轮先对 done/cancelled 卡片的工作项 Assignment 走 releaseAssignment（system），作废其所有 Token、`runtime.release` 释放终端，然后对 released 且有 worktree 的 Assignment 执行 `removeWorktree`。干净的直接删除；有未提交改动或分支未备份的发起一次 worktree_cleanup 决策；决策为 `force_clean` 时由循环执行强制删除（补丁先落盘），`keep` 则永久保留、不再询问。worktree 目录已经不存在的 Assignment 直接跳过，由对账负责报告。
 - 对账循环把每轮发现写进 `reconcile_findings` 表：主键是「种类 + 主体（路径／交付／Assignment）」，记录首次发现、最近看到和已解决时间；重新出现算新发现。只有新发现（含解决后重现）写一条项目级 `reconcile_finding` 事件，由 Router 交给 PM Ops，同一发现不会每轮刷新事件。发现「有 git_head 交付但没有固定 ref」时，先尝试用 `refs/cardigan/candidates/<assignment>/<sha>` 重建固定 ref，成功就不算发现。`cardigan attention` 展示未解决的对账发现（含登记源分叉），运行中及宽限期内的检查不进入诊断。发现已解决或 first_seen_at 已变为新一轮时，旧的未终结通知沿现有 ack 迁移退役，保留原事件和台账，不推进 Agent 阅读游标；新一轮仍正常通知。Dispatcher、PM 轮换交接及暂停恢复均清理这些过期通知，并先按原接收者真实 ACK 结算已读通知，再保留／转交未读项，避免重放旧 reconcile 升级。
@@ -1720,7 +1731,7 @@ P2a-10 B1 新增仅人类 CLI：先用 `cardigan role copy host_ops host_ops --f
 
 V11b：主机用 `cardigan pm rotate --office --external --employee <E-n 或名字> [--project <p>]` 接入外接 Office；Token 只显示一次，保存到仓库外的安全位置并用于 MCP，通知用现有收件箱协议读取。CLI Token 身份模式由 V11c 另行实现。
 
-P2a-1 的主机配置读取层从 `CARDIGAN_CONFIG_DIR/merge-gate.yaml`（默认 `~/.config/cardigan/merge-gate.yaml`）按项目加载检查；server 在启动时读取，CLI 每次调用读取，修复配置后需重启 server。未找到文件或项目未配置时为 disabled；已配置但项目不存在、检查为空／名称重复／命令为空、超时不是正整数、env 非字符串或含受控运行变量时为 invalid，组装层必须停止该项目的合并，不能当作 disabled。整份 YAML 无法读取／解析或顶层格式无效时，对所有项目返回 invalid。只输出固定中文错误，不回显配置正文、命令或 env 值。配置文件须为可信属主的普通文件，不可由组／其他用户写，路径祖先不可被不可信用户替换；拒绝链接、YAML 重复键／别名／警告及超大文件。P2a-1b 增加可选 push，非法推送配置同样使项目闸门 invalid；单条默认 30 分钟、总计默认 60 分钟。
+P2a-1 的主机配置读取层从 `CARDIGAN_CONFIG_DIR/merge-gate.yaml`（默认 `~/.config/cardigan/merge-gate.yaml`）按项目加载检查；server 在启动时读取，CLI 每次调用读取，修复配置后需重启 server。未找到文件或项目未配置时为 disabled；已配置但项目不存在、检查为空／名称重复／命令为空、超时不是正整数、env 非字符串或含受控运行变量时为 invalid，组装层必须停止该项目的合并，不能当作 disabled。整份 YAML 无法读取／解析或顶层格式无效时，对所有项目返回 invalid。只输出固定中文错误，不回显配置正文、命令或 env 值。配置文件须为可信属主的普通文件，不可由组／其他用户写，路径祖先不可被不可信用户替换；拒绝链接、YAML 重复键／别名／警告及超大文件。P2a-1b 增加可选 push，非法推送配置同样使项目闸门 invalid；P2a-12 的 `executors.<name>.max_concurrent` 为该执行目标跨项目同时运行的合并检查上限，可选，默认 1（§13.8）；单条默认 30 分钟、总计默认 60 分钟。
 
 合并检查日志保存在 `<dataDir>/merge-gate/logs/<project>/<attempt>.log`，目录 0700、文件 0600，独占创建、不覆盖已有 attempt。写入前过滤配置 env 的原值及 URI／JSON／Base64 表达，并屏蔽常见认证字段和私钥块；每条输出按 UTF-8 字节限制为 2 MiB，保留首尾，边缘留重叠以先脱敏后截断。失败摘要包含检查名、退出码及末尾 40 行中的 FAIL／Error／× 错误行，总计最多 20 行。清理警告写入日志但不改检查结论。每项目仅保留最近 50 个日志；日志路径不得包含链接，日志引用只返回文件名。原始输出不写临时文件或错误信息，检查中断时至少保留已创建的日志头，完成时写入脱敏的有界输出。
 
@@ -1884,7 +1895,7 @@ P2a-9 全机并发配置为主机 `CARDIGAN_CONFIG_DIR/run-capacity.yaml`，配�
 
 Dispatcher 每轮先汇集所有项目待投递候选，再按 Run 原触发事件的 `created_at` 排序；尚未创建 Run 的候选采用将要绑定的触发事件时间。同时间依次以事件编号、项目编号、Assignment 编号稳定排序，不比较跨卡片 seq。名额不足时保持原 queued Run 的身份和相对顺序，空位释放后下轮继续；降低上限不会停止已派发 Run。常驻 PM 跳过并发排队判断。q(88) 授权人通过 `cardigan assignment start` 显式启动时绕过全机上限和容量队列次序，立即派发；Workbench 复制的同一命令行为相同。仅主机传入的 human Actor 享有此例外，没有可由 Agent／MCP 参数开启的 bypass 标志；自动派发、PM Ops 指派触发的工作项 Run、C-56 超时重排仍通过 Dispatcher 的容量判断。手动 Run 从领取启动意图起计入占用，启动占用快照超过上限时，CLI 输出“已超过全机上限（当前 X/上限 Y）”。手动启动仍须满足 Assignment／worktree 互斥、停止意图和运行环境检查，不绕过安全状态机；不再因容量满额返回排队提示。读取和 ACK 通知不会取消已排队的工作。queued 候选的运行环境返回 unknown 或查询失败时，保留 Run 与原触发事件，改记 runtime_unavailable、一次性告警，不再阻塞后续可派发候选；后续 tick 继续探测，恢复后按原时间重新入队。执行视图将其显示为“等待运行环境恢复”，不误标为并发排队。
 
-P2a-1 合并检查实际执行期间计为 **2 个名额**，依据 Phase 2 §2.1 对全仓构建／测试 CPU 消耗的建议值，后续可按实测调整。迁移 0014 的 merge_check_capacity 保存独立运行占用：取得执行锁且收到认证 ready 后登记，执行器结束后的 finally 释放，不依赖卡片是否仍允许记录合并结果。卡片退回／取消时仍在执行的检查继续计数，执行结束后即释放；不改变合并闸门的排队、失败处理或状态机。占用绑定主机侧监督进程／SSH 客户端的 PID、Linux boot ID 与进程启动时刻，查询时排除已退出进程及 PID 重用，主机重启不会因缺少业务 finished 事件永久泄漏名额。主机退出导致管道关闭时，既有检查监督进程按取消路径收尾；只要原执行进程仍存活，占用仍保留。P2a 仅有 `local` 执行机器，后续多机再扩展检查的机器归属。合并检查、常驻 PM 或人显式启动可能让占用超过配置值，本规则限制新普通 Run 的自动派发，不抢占正在执行的工作。
+P2a-1 合并检查实际执行期间计为 **2 个名额**，依据 Phase 2 §2.1 对全仓构建／测试 CPU 消耗的建议值，后续可按实测调整。迁移 0014 的 merge_check_capacity 保存独立运行占用：取得执行锁且收到认证 ready 后登记，执行器结束后的 finally 释放，不依赖卡片是否仍允许记录合并结果。卡片退回／取消时仍在执行的检查继续计数，执行结束后即释放；不改变合并闸门的排队、失败处理或状态机。占用绑定主机侧监督进程／SSH 客户端的 PID、Linux boot ID 与进程启动时刻，查询时排除已退出进程及 PID 重用，主机重启不会因缺少业务 finished 事件永久泄漏名额。主机退出导致管道关闭时，既有检查监督进程按取消路径收尾；只要原执行进程仍存活，占用仍保留。P2a-12 D：占用按实际执行目标记账，`machine_id` 为 `local`（未配置 `executor` 或 `executor: local`）或 `merge-gate.yaml` 的执行目标名；PID／启动时刻核对不变（远程目标下是主机侧 SSH 客户端进程）。只有 `local` 的检查按每次 2 个名额计入主机 `local` 的 Run 占用；远程执行目标的检查跨项目计入该目标自己的桶，不进入 `run-capacity.yaml` `machines` 的任何配额，即使有 Agent 机器与执行目标同名也互不影响。远程执行目标同时运行的检查数上限为 `executors.<name>.max_concurrent`（默认 1，1–16），本机固定为 1（与此前一致）。合并检查按项目分道：同一项目的卡片仍按顺序逐张检查和合并，不同项目各自一条后台道，执行前在进程内取得所属执行目标的一个槽位（先到先得，满了排队，检查保持 queued），因此不同执行目标互不等待，同一目标在上限内可以并行。取得槽位后若存活占用（含其他控制进程登记的）已达上限，该项目本次停止、剩余卡片保持 queued，下一轮再试。某项目的道正在运行时，新一轮对该项目只发布已通过的检查（C-113 不变）。不做多台执行目标之间的调度、负载均衡或抢占。合并检查、常驻 PM 或人显式启动可能让占用超过配置值，本规则限制新普通 Run 的自动派发，不抢占正在执行的工作。
 
 Workbench 执行视图、看板卡片和 `cardigan attention` 共用跨项目的等待队列投影。执行视图和 CLI 显示“排队中（前面还有 N 个）”，同卡多个排队 Run 分别展示；看板按 §8.7 C-74 只用图标徽标展示最靠前的 Run。N 只数同机等待的普通 Run，不含已运行工作或常驻 PM；队首为 0。暂停／释放 Assignment 与启动中的 Run 不列入。队列变化通过独立只读 SSE 刷新信号同步到项目视图，不伪造项目／卡片事件 seq，不写时间线巡检消息。
 
@@ -1944,7 +1955,9 @@ P2a-12 C：`identityFile` 与 `knownHostsFile` 用同一条字面路径规则：
 |---|---|
 | produce 产出 | 系统白名单去掉 submit_review、withdraw_review |
 | verify 验证 | 系统白名单去掉 submit_delivery；worktree 只能为 readonly 或 none |
-| standing 常驻 | 固定的 STANDING_ROLE_TOOLS（现有 PM 上限）：whoami、get_card、get_updates、ack_events、post_comment、issue_instruction、report_blocker、request_human_action、request_decision、upload_attachment、heartbeat、finish_run、submit_delivery、submit_review、withdraw_review、create_card、update_card、create_work_item、update_work_item、assign、release_assignment、project_snapshot、list_needs_you、record_decision、resolve_delegated_decision、triage_human_action |
+| standing 常驻 | 固定的 STANDING_ROLE_TOOLS（现有 PM 上限）：whoami、get_card、get_updates、ack_events、post_comment、issue_instruction、report_blocker、request_human_action、request_decision、upload_attachment、read_attachment、heartbeat、finish_run、submit_delivery、submit_review、withdraw_review、create_card、update_card、create_work_item、update_work_item、assign、release_assignment、project_snapshot、list_needs_you、record_decision、resolve_delegated_decision、triage_human_action |
+
+C-110：常驻工具上限另含 `replace_verification_work_item`，只能配置给 standing 类型的 pm，Office Token 不签发；命令重查 active、standing_mode=ops 的 PM 身份，工作项 PM 和其他角色均拒绝。
 
 所有类型均额外要求：record_decision、resolve_delegated_decision、triage_human_action 只能配置在编号为 pm 的角色上；后两者的命令只允许 active、standing_mode=ops 的常驻 PM，Office Token 不签发。`release_assignment` 只对 active、standing_mode=ops 的常驻 PM 开放，Office 的工具范围排除它；命令只释放工作项 Assignment，常驻 Assignment 仍仅允许 human 释放。主机只对 standing_mode=office 的常驻 PM 签发 record_decision。Ops、工作项 PM 和其他角色不能取得它。现有命令对工作项类型、项目作用域及作者／审核者隔离的校验继续生效，角色白名单不会绕过这些约束。角色 CRUD 权限独立于工具清单，当前只接受同项目 human，Agent 和 system 均拒绝。
 
