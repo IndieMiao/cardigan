@@ -104,6 +104,34 @@ const client = fakeClient({
         last_mcp_activity_at: null,
         cursors: [],
       },
+      // C-159: every other runtime / Assignment status in the same column.
+      ...(
+        [
+          ["not_provisioned", "active"],
+          ["provisioning", "active"],
+          ["idle", "suspended"],
+          ["unknown", "active"],
+          ["lost", "active"],
+          ["released", "released"],
+        ] as const
+      ).map(([runtime_state, status], i) => ({
+        id: `A-${i + 430}`,
+        role_id: "coder",
+        role_version: 1,
+        status,
+        runtime_state,
+        machine_id: "test",
+        standing_mode: null,
+        card_id: card.id,
+        card_status: card.status,
+        work_item_id: `W-${i + 472}`,
+        worktree_path: null,
+        branch: null,
+        session_ref: null,
+        runtime_ref: null,
+        last_mcp_activity_at: null,
+        cursors: [],
+      })),
     ],
     runs: [
       {
@@ -111,7 +139,10 @@ const client = fakeClient({
         assignment_id: "A-1",
         status: "running",
         kind: "initial",
-        model: "test-model",
+        model: "gpt-6.1-sol",
+        harness: "codex",
+        effort: "xhigh",
+        context_usage: { used_ratio: 0.9, window_tokens: 1000000 },
         role_version: 1,
         agent_cli_version: "1.0",
         summary: "正在核对工作台各页窄屏布局",
