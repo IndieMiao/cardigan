@@ -1,0 +1,19 @@
+# Workbench 布局回归
+
+`pnpm --filter @cardigan/web test:layout` 在真实 Chromium 中加载 App、字体和 CSS，使用非空测试夹具；不启动业务服务、Dispatcher，也不连接正式数据库。它与 jsdom 组件测试互补，不加入默认的无浏览器测试流程。
+
+前置条件：已有 Node 24、workspace 依赖和本地 Chromium。默认执行 PATH 中的 `chromium`；使用其他安装位置时设置 `CHROMIUM_PATH` 为浏览器可执行文件路径。测试通过 Chromium 自带的 DevTools pipe 控制浏览器，不需要 Playwright 或新增 npm 依赖。浏览器使用临时 profile，以无沙箱模式运行本地测试代码，结束后关闭浏览器并删除 profile。
+
+可选参数：
+
+- `LAYOUT_BASELINE_REF`：桌面布局比较所用 Git ref，默认 `origin/main`；两套 CSS 作用于同一份 DOM，逐元素比较位置、尺寸和关键样式。验证指定交付时设为其对应的基线提交。
+- `LAYOUT_SCREENSHOTS`：截图输出目录。设置后输出七页在 390px 下的亮、暗完整截图；未设置时只运行断言。
+
+覆盖 390、760、768、1280、1440px 与亮暗主题的 70 个场景：
+
+- 六个非看板页的公共导航及主内容宽度，另核对看板已有布局不变。
+- 详情共 25 条时间线、初始加载 20 条：控制栏不越界、不重叠；真实点击分页按钮后显示 25 条，页面仍不溢出。
+- 执行表格、快照最近交付表格可在自身区域横向滚动到末尾，不撑宽页面。
+- 768px 及以上的导航和所有元素几何、关键样式与基线一致。
+
+失败退出码非零。`responsive-fixture.tsx` 只由该测试入口加载，不进入产品构建。
