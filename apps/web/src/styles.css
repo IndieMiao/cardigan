@@ -350,6 +350,9 @@ button.quiet,
   display: flex;
   justify-content: space-between;
   align-items: center;
+  /* C-159: keeps counts apart from their label when the link shrinks
+     to its content on narrow screens. */
+  gap: 8px;
 }
 .nav a[aria-current="page"] {
   color: var(--accent);
@@ -1912,12 +1915,20 @@ fieldset.filters {
 }
 .execution-status {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  /* C-159: the value track is at least as wide as its unwrapped status, so
+     the column grows and the table scrolls instead of the text spilling
+     into the next column. */
+  grid-template-columns: auto minmax(min-content, 1fr);
   gap: 2px 6px;
   margin: 0;
 }
 .execution-status dt {
   color: var(--text-muted);
+}
+/* C-159: status labels keep their icon and words on one line; the table
+   scrolls sideways instead. */
+.execution-status :is(dt, .status) {
+  white-space: nowrap;
 }
 .execution-status dd {
   margin: 0;
