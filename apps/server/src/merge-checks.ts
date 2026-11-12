@@ -539,6 +539,8 @@ export class MergeChecks {
       checks: MergeCheckView["checks"];
       summary: string;
       log_ref: string;
+      /** C-116: the supervisor saw only timeouts; drives one automatic rerun. */
+      timeout_only?: boolean;
     };
     try {
       finished = log
@@ -565,6 +567,7 @@ export class MergeChecks {
       checks: finished.checks,
       summary: finished.summary,
       log_ref: finished.log_ref,
+      timeout_only: finished.timeout_only === true,
     });
     this.seen.delete(check.attempt_id);
     if (finished.status === "executor_unreachable" && this.valid(task))

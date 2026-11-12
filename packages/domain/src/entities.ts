@@ -184,6 +184,12 @@ export interface MergeCheckView {
   readonly log_ref?: string;
   readonly updated_at: Timestamp;
   readonly recheck_requested?: boolean;
+  /**
+   * C-116: the check supervisor classified every failure as a timeout (for
+   * example vitest "Test timed out"). Only drives the one automatic rerun; it
+   * never widens PM authority over human-only merges.
+   */
+  readonly timeout_only?: boolean;
 }
 interface WorkItemFields {
   readonly id: WorkItemId;

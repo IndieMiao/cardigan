@@ -6,6 +6,7 @@ import {
   currentMergeConfirmations,
   HOST_OPS_ROLE_TOOLS,
   hasPassedMergeCheck,
+  hasTimeoutAutoRerun,
   hasVerifiedMergeNoop,
   latestMergeCheck,
   listNeedsYou,
@@ -20,6 +21,7 @@ import {
   recordMergeResult,
   requestDecision,
   setProjectPreferences,
+  TIMEOUT_AUTO_RERUN,
 } from "../index.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
 import { apply, human, value } from "./test-fixtures.js";
@@ -242,6 +244,271 @@ test("a queued attempt can fail before any command starts, but cannot claim exec
     ),
   );
 });
+// C-116: a failure made only of timeouts is requeued automatically, once per
+// completion; anything else, or the second failure, follows the PM flow.
+const finish = (
+  identity: {
+    card_id: never;
+    completion_id: never;
+    attempt_id: string;
+    candidate_sha: string;
+    tree_sha: string;
+  },
+  status: "failed" | "timed_out",
+  steps: readonly ("passed" | "failed" | "timed_out" | "not_run")[],
+  timeout_only?: boolean,
+) => ({
+  ...identity,
+  status,
+  summary: status,
+  log_ref: `${identity.attempt_id}.log`,
+  checks: steps.map((s, i) => ({
+    name: `check-${i}`,
+    status: s,
+    exit_code: s === "passed" ? 0 : 1,
+  })),
+  ...(timeout_only === undefined ? {} : { timeout_only }),
+});
+
+test.each([
+  {
+    name: "a step timeout",
+    status: "timed_out",
+    steps: ["timed_out"],
+    timeout_only: true,
+  },
+  {
+    name: "a timed-out step after passed ones",
+    status: "failed",
+    steps: ["passed", "timed_out", "not_run"],
+    timeout_only: true,
+  },
+  {
+    name: "vitest test timeouts",
+    status: "failed",
+    steps: ["passed", "failed"],
+    timeout_only: true,
+  },
+] as const)(
+  "C-116: $name classified by the supervisor is requeued automatically once and recorded",
+  async ({ status, steps, timeout_only }) => {
+    const { f, state, record, identity } = await fixture();
+    record("queued");
+    record("running");
+    const effect = value(
+      recordMergeCheck(
+        state(),
+        system,
+        finish(identity as never, status, steps, timeout_only),
+        f.io,
+      ),
+    );
+    expect(effect.events.map((e) => e.type)).toEqual([
+      "merge_check_finished",
+      "merge_check_requeued",
+    ]);
+    expect(effect.events[0]?.payload).toMatchObject({
+      status,
+      auto_rerun: true,
+    });
+    expect(effect.events[1]?.payload).toMatchObject({
+      status: "queued",
+      recheck_requested: true,
+      via: TIMEOUT_AUTO_RERUN,
+      failed_status: status,
+      completion_id: identity.completion_id,
+    });
+    expect(effect.events[1]?.payload).not.toHaveProperty("timeout_only");
+    expect(effect.timeline.map((t) => t.body)).toContain("因超时自动重跑");
+    // The finished result itself is returned, unchanged.
+    expect(effect.data).toMatchObject({ status, attempt_id: "attempt-1" });
+    f.commit({ ok: true, value: effect });
+    expect(
+      hasTimeoutAutoRerun(state().events, f.card.id, identity.completion_id),
+    ).toBe(true);
+    expect(
+      latestMergeCheck(state().events, f.card.id, identity.completion_id),
+    ).toMatchObject({ status: "queued", recheck_requested: true });
+    // Nobody needs to recheck; the host queues a fresh attempt for the tree.
+    expect(recheckMerge(state(), human, { card_id: f.card.id }, f.io).ok).toBe(
+      false,
+    );
+    record("queued", "attempt-2");
+    record("running", "attempt-2");
+    record("passed", "attempt-2");
+    expect(
+      hasPassedMergeCheck(
+        state().events,
+        f.card.id,
+        identity.completion_id,
+        tree,
+      ),
+    ).toBe(true);
+  },
+);
+
+test.each([
+  { name: "an assertion failure", status: "failed", steps: ["failed"] },
+  {
+    name: "a timeout mixed with an assertion failure",
+    status: "timed_out",
+    steps: ["failed", "timed_out"],
+  },
+  {
+    name: "a failure the supervisor did not classify as timeout",
+    status: "failed",
+    steps: ["failed"],
+    timeout_only: false,
+  },
+  // V-431: a step that failed an assertion and then hung until its step
+  // timeout looks structurally like a clean timeout; only the supervisor's
+  // classification may authorize the rerun.
+  {
+    name: "a step timeout the supervisor saw other failures in",
+    status: "timed_out",
+    steps: ["timed_out"],
+    timeout_only: false,
+  },
+  {
+    name: "an unclassified step timeout",
+    status: "timed_out",
+    steps: ["timed_out"],
+  },
+  {
+    name: "an unclassified timed-out step after passed ones",
+    status: "failed",
+    steps: ["passed", "timed_out", "not_run"],
+  },
+] as const)(
+  "C-116: $name is not requeued automatically",
+  async ({ status, steps, ...rest }) => {
+    const { f, state, record, identity } = await fixture();
+    record("queued");
+    record("running");
+    const timeout_only = "timeout_only" in rest ? rest.timeout_only : undefined;
+    const effect = value(
+      recordMergeCheck(
+        state(),
+        system,
+        finish(identity as never, status, steps, timeout_only),
+        f.io,
+      ),
+    );
+    expect(effect.events.map((e) => e.type)).toEqual(["merge_check_finished"]);
+    expect(effect.events[0]?.payload).not.toHaveProperty("auto_rerun");
+    f.commit({ ok: true, value: effect });
+    expect(
+      latestMergeCheck(state().events, f.card.id, identity.completion_id)
+        ?.status,
+    ).toBe(status);
+    expect(
+      hasTimeoutAutoRerun(state().events, f.card.id, identity.completion_id),
+    ).toBe(false);
+  },
+);
+
+test("C-116: timeout_only is only accepted on failed or timed-out results", async () => {
+  const { f, state, record, identity } = await fixture();
+  record("queued");
+  record("running");
+  for (const bad of [
+    {
+      ...identity,
+      status: "passed" as const,
+      summary: "ok",
+      log_ref: "attempt-1.log",
+      checks: [{ name: "test", status: "passed" as const, exit_code: 0 }],
+      timeout_only: true,
+    },
+    {
+      ...identity,
+      status: "interrupted" as const,
+      summary: "stop",
+      log_ref: "attempt-1.log",
+      checks: [],
+      timeout_only: true,
+    },
+    finish(identity as never, "failed", ["passed"], true),
+    {
+      ...finish(identity as never, "failed", ["failed"]),
+      timeout_only: "yes" as never,
+    },
+  ])
+    expect(recordMergeCheck(state(), system, bad, f.io)).toMatchObject({
+      ok: false,
+      error: { code: "validation_failed" },
+    });
+});
+
+test("C-116: each completion is rerun automatically at most once; later timeouts stay failed", async () => {
+  const { f, state, record, identity } = await fixture();
+  record("queued");
+  record("running");
+  f.commit(
+    recordMergeCheck(
+      state(),
+      system,
+      finish(identity as never, "timed_out", ["timed_out"], true),
+      f.io,
+    ),
+  );
+  expect(
+    latestMergeCheck(state().events, f.card.id, identity.completion_id)?.status,
+  ).toBe("queued");
+  record("queued", "attempt-2");
+  record("running", "attempt-2");
+  const second = value(
+    recordMergeCheck(
+      state(),
+      system,
+      finish(
+        { ...identity, attempt_id: "attempt-2" } as never,
+        "failed",
+        ["failed"],
+        true,
+      ),
+      f.io,
+    ),
+  );
+  expect(second.events.map((e) => e.type)).toEqual(["merge_check_finished"]);
+  expect(second.events[0]?.payload).not.toHaveProperty("auto_rerun");
+  f.commit({ ok: true, value: second });
+  expect(
+    latestMergeCheck(state().events, f.card.id, identity.completion_id),
+  ).toMatchObject({ status: "failed", timeout_only: true });
+  // A human recheck is not the automatic rerun and does not carry the
+  // previous classification; its timeout still is not retried again.
+  f.commit(recheckMerge(state(), human, { card_id: f.card.id }, f.io));
+  const requeued = state().events.at(-1);
+  expect(requeued?.payload).not.toHaveProperty("via");
+  expect(requeued?.payload).not.toHaveProperty("timeout_only");
+  record("queued", "attempt-3");
+  record("running", "attempt-3");
+  f.commit(
+    recordMergeCheck(
+      state(),
+      system,
+      finish(
+        { ...identity, attempt_id: "attempt-3" } as never,
+        "timed_out",
+        ["timed_out"],
+        true,
+      ),
+      f.io,
+    ),
+  );
+  expect(
+    latestMergeCheck(state().events, f.card.id, identity.completion_id)?.status,
+  ).toBe("timed_out");
+  expect(
+    state().events.filter(
+      (e) =>
+        e.type === "merge_check_requeued" &&
+        (e.payload as { via?: string }).via === TIMEOUT_AUTO_RERUN,
+    ),
+  ).toHaveLength(1);
+});
+
 async function fixture(policy: "auto" | "confirm" = "auto") {
   const f = mergeFixture(policy),
     { completion, product } = await f.accept();

@@ -30,9 +30,11 @@ export {
 } from "./commands/merge.js";
 export {
   hasPassedMergeCheck,
+  hasTimeoutAutoRerun,
   latestMergeCheck,
   recheckMerge,
   recordMergeCheck,
+  TIMEOUT_AUTO_RERUN,
 } from "./commands/merge-check.js";
 export {
   currentMergeConfirmations,
