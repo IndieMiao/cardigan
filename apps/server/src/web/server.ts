@@ -83,6 +83,8 @@ import { serveWrite } from "./write.js";
 
 export interface WebServerOptions {
   readonly runLimit?: (machine: string) => number;
+  readonly runLimitMaximum?: (machine: string) => number;
+  readonly machineDisplayName?: (machine: string) => string | undefined;
   /** 按 q(228) 定为 30 分钟；修改配置后重启 Web 服务生效。 */
   readonly queueWarningMinutes?: number;
   readonly store: Store;
@@ -94,6 +96,10 @@ export interface WebServerOptions {
   /** Attachment blobs live beside the database (§9.3). */
   readonly dataDir?: string;
   readonly mergeGate?: MergeGateConfiguration;
+  /** C-153: the host_ops patrol cadence Needs You quotes to the human. */
+  readonly hostOpsPatrolIntervalMs?: number;
+  /** C-153: the hc session registered in runtime.json, for operator commands. */
+  readonly hcSession?: string;
   /** SSE cadence; tests shorten it, production uses the plan's 500 ms / 15 s. */
   readonly stream?: {
     readonly pollMs?: number;
@@ -120,6 +126,8 @@ const API_PREFIX = "/api/";
 
 interface RequestContext {
   readonly runLimit: WebServerOptions["runLimit"];
+  readonly runLimitMaximum: WebServerOptions["runLimitMaximum"];
+  readonly machineDisplayName: WebServerOptions["machineDisplayName"];
   readonly queueWarningMinutes: number;
   readonly req: IncomingMessage;
   readonly res: ServerResponse;
@@ -130,6 +138,8 @@ interface RequestContext {
   readonly limiter: LoginLimiter;
   readonly dataDir: string;
   readonly mergeGate: MergeGateConfiguration | undefined;
+  readonly hostOpsPatrolIntervalMs: number | undefined;
+  readonly hcSession: string | undefined;
   readonly stream: WebServerOptions["stream"];
   readonly shutdown: AbortSignal;
   /** Only the validated Host and explicit configuration decide cookie flags. */
@@ -250,7 +260,11 @@ export async function startWebServer(
         limiter,
         dataDir,
         mergeGate: options.mergeGate,
+        hostOpsPatrolIntervalMs: options.hostOpsPatrolIntervalMs,
+        hcSession: options.hcSession,
         runLimit: options.runLimit,
+        runLimitMaximum: options.runLimitMaximum,
+        machineDisplayName: options.machineDisplayName,
         stream: options.stream,
         queueWarningMinutes,
         shutdown: shutdown.signal,
@@ -446,6 +460,7 @@ async function serveProjectRoute(
         dataDir: context.dataDir,
         mergeGate: context.mergeGate?.forProject(project_id),
         runLimit: context.runLimit,
+        runLimitMaximum: context.runLimitMaximum,
         authorize: () => requireSession(context),
       },
       rest,
@@ -459,7 +474,13 @@ async function serveProjectRoute(
     sendJson(
       res,
       200,
-      executionCapacity(store, context.runLimit, context.mergeGate),
+      executionCapacity(
+        store,
+        context.runLimit,
+        context.mergeGate,
+        context.runLimitMaximum,
+        context.machineDisplayName,
+      ),
     );
     return;
   }
@@ -623,7 +644,13 @@ async function serveProjectRoute(
   if (rest === "/needs-you") {
     sendJson(res, 200, {
       project_id,
-      ...needsYou(state, now, context.mergeGate?.forProject(project_id).status),
+      ...needsYou(
+        state,
+        now,
+        context.mergeGate?.forProject(project_id).status,
+        context.hostOpsPatrolIntervalMs,
+        context.hcSession,
+      ),
     });
     return;
   }

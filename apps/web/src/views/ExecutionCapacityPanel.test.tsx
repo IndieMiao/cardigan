@@ -21,6 +21,7 @@ const agent: ExecutionCapacity["agents"][number] = {
   label: "Workstation",
   running: 5,
   limit: 6,
+  max_limit: 16,
   queued: 2,
   merge_check_slots: 0,
 };
@@ -29,6 +30,47 @@ const capacity: ExecutionCapacity = {
   merge_checks: [{ machine_id: "test-ci", running: 1, limit: 3, queued: 4 }],
   merge_config_invalid: false,
 };
+
+test.each([16, 8, 24])(
+  "the input enforces the server ceiling %s and permits its boundary",
+  async (maximum) => {
+    const setRunLimit = vi.fn(async () => {});
+    render(
+      <ExecutionCapacityPanel
+        client={fakeClient({
+          executionCapacity: async () => ({
+            ...capacity,
+            agents: [{ ...agent, label: "local", max_limit: maximum }],
+          }),
+          setRunLimit,
+        })}
+        projectId="p"
+        revision={0}
+      />,
+    );
+    const input = await screen.findByRole<HTMLInputElement>("spinbutton", {
+      name: "local Agent 并发上限",
+    });
+    expect(input.max).toBe(String(maximum));
+    fireEvent.change(input, { target: { value: String(maximum + 1) } });
+    expect(screen.getByText(`并发上限不能超过 ${maximum}。`)).toBeTruthy();
+    expect(
+      screen.getByRole<HTMLButtonElement>("button", { name: "保存" }).disabled,
+    ).toBe(true);
+    fireEvent.submit(screen.getByRole("form", { name: "local Agent 并发" }));
+    expect(setRunLimit).not.toHaveBeenCalled();
+    fireEvent.change(input, { target: { value: String(maximum) } });
+    expect(screen.queryByText(`并发上限不能超过 ${maximum}。`)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await screen.findByText("已保存，下一轮调度生效。");
+    expect(setRunLimit).toHaveBeenCalledWith(
+      "p",
+      "local",
+      maximum,
+      expect.any(String),
+    );
+  },
+);
 
 test("distinct machine counts, human save, validation and a stable key after uncertain failure", async () => {
   let current = structuredClone(capacity);

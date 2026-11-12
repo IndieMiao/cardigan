@@ -25,6 +25,51 @@ const context = () => ({
   },
 });
 
+test.each([undefined, 8, 32])(
+  "capacity cannot exceed the trusted ceiling %s, with no audit on rejection",
+  (maximum) => {
+    const cap = maximum ?? 16;
+    const ports = {
+      ...context(),
+      ...(maximum === undefined ? {} : { maximum }),
+    };
+    expect(
+      setRunLimit(
+        { kind: "human" },
+        { machine_id: "local", limit: cap + 1 },
+        ports,
+      ),
+    ).toMatchObject({
+      ok: false,
+      error: {
+        code: "validation_failed",
+        message: `并发上限不能超过 ${cap}。`,
+      },
+    });
+    expect(ports.ids.nextEventId).not.toHaveBeenCalled();
+    expect(ports.ids.nextEventSequence).not.toHaveBeenCalled();
+    expect(
+      setRunLimit(
+        { kind: "human" },
+        { machine_id: "local", limit: cap },
+        ports,
+      ),
+    ).toMatchObject({ ok: true, value: { setting: { limit: cap } } });
+  },
+);
+
+test.each([0, -1, 1.5, NaN, Infinity])(
+  "invalid trusted ceiling %s cannot authorize a write",
+  (maximum) => {
+    const ports = { ...context(), maximum };
+    expect(
+      setRunLimit({ kind: "human" }, { machine_id: "local", limit: 1 }, ports)
+        .ok,
+    ).toBe(false);
+    expect(ports.ids.nextEventId).not.toHaveBeenCalled();
+  },
+);
+
 test.each(["coder", "pm", "host_ops"])(
   "%s cannot change global capacity even with tool grants",
   (role_id) => {

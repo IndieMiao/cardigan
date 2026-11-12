@@ -24,10 +24,12 @@ function AgentLimit({
   const [error, setError] = useState("");
   const request = useRef<{ limit: number; key: string } | undefined>(undefined);
   const value = draft ?? String(machine.limit);
-  const valid =
+  const positiveInteger =
     /^\d+$/.test(value) &&
     Number.isSafeInteger(Number(value)) &&
     Number(value) > 0;
+  const exceedsMaximum = positiveInteger && Number(value) > machine.max_limit;
+  const valid = positiveInteger && !exceedsMaximum;
   const save = async () => {
     if (pending || !valid) return;
     const limit = Number(value);
@@ -77,7 +79,9 @@ function AgentLimit({
           type="number"
           min="1"
           step="1"
-          max={Number.MAX_SAFE_INTEGER}
+          max={machine.max_limit}
+          aria-describedby={`${inputId}-validation`}
+          aria-invalid={!valid}
           value={value}
           disabled={pending || machine.limit === 0}
           onChange={(event) => {
@@ -93,7 +97,13 @@ function AgentLimit({
           {pending ? "保存中…" : "保存"}
         </button>
       </div>
-      {!valid && <span className="hint">并发上限必须为正整数。</span>}
+      {!valid && (
+        <span id={`${inputId}-validation`} className="hint">
+          {exceedsMaximum
+            ? `并发上限不能超过 ${machine.max_limit}。`
+            : "并发上限必须为正整数。"}
+        </span>
+      )}
       {machine.limit === 0 && (
         <span role="alert">主机并发配置无效，请联系主机管理员。</span>
       )}

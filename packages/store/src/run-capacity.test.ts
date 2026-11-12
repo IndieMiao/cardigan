@@ -28,6 +28,7 @@ test("capacity and audit commit atomically, survive reopen, and are visible acro
     });
   try {
     save(6);
+    expect(() => save(17)).toThrow("并发上限不能超过 16。");
     expect(() => save(2, true)).toThrow("rollback");
     expect(readRunLimit(other.database, "local")?.limit).toBe(6);
     expect(

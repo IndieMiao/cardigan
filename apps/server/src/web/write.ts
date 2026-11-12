@@ -11,6 +11,7 @@ import {
   completeHumanAction,
   copyRole,
   createRole,
+  DEFAULT_MAX_RUN_LIMIT,
   type DomainError,
   deactivateRole,
   issueInstruction,
@@ -30,6 +31,7 @@ import {
   recheckMerge,
   recordDecision,
   rollbackRole,
+  runLimitMaximumMessage,
   setCardSensitive,
   setProjectPreferences,
   setRunLimit,
@@ -236,6 +238,7 @@ function must<T>(result: Result<T>): T {
 }
 export interface WriteContext {
   readonly runLimit?: ((machine: string) => number) | undefined;
+  readonly runLimitMaximum?: ((machine: string) => number) | undefined;
   readonly req: IncomingMessage;
   readonly res: ServerResponse;
   readonly store: Store;
@@ -605,6 +608,13 @@ export async function serveWrite(
         .strict(),
       body,
     );
+    const maximum =
+      c.runLimitMaximum?.(input.machine_id) ?? DEFAULT_MAX_RUN_LIMIT;
+    parsed(
+      z.number().max(maximum),
+      input.limit,
+      runLimitMaximumMessage(maximum),
+    );
     const output = execute(
       { ...c, idempotency: { key, request: { method: "POST", rest, body } } },
       (tx) => {
@@ -621,7 +631,13 @@ export async function serveWrite(
         const effect = must(
           setRunLimit({ kind: "human", project_id: c.project_id }, input, {
             machines: runCapacityMachines(c.store, tx),
-            previous: effectiveRunLimit(c.store, input.machine_id, c.runLimit),
+            previous: effectiveRunLimit(
+              c.store,
+              input.machine_id,
+              c.runLimit,
+              c.runLimitMaximum,
+            ),
+            maximum,
             member_id: member.id,
             clock: c.clock,
             ids: tx.global_ids,

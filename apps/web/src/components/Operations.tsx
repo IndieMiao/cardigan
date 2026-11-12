@@ -55,7 +55,7 @@ export function Feedback({
     />
   );
 }
-const quote = (s: string) => `'${s.replaceAll("'", "'\\''")}'`;
+export const quote = (s: string) => `'${s.replaceAll("'", "'\\''")}'`;
 export const cliCommand = (project: string, action: string, id?: string) =>
   `cardigan ${action}${id ? ` ${quote(id)}` : ""} --project ${quote(project)}`;
 export function CopyCommand({
@@ -97,6 +97,15 @@ export function CopyCommand({
     </div>
   );
 }
+/** C-153: shown first whenever the interactive attach command is revealed. */
+export function TakeoverWarning() {
+  return (
+    <p className="attach-command-warning">
+      <strong>接管会直接向 Agent 终端输入，可能打断它。</strong>
+      只在 PM Office 或主机运维请你接管时使用。
+    </p>
+  );
+}
 export function AttachCommands({
   projectId,
   assignmentId,
@@ -113,9 +122,7 @@ export function AttachCommands({
       <CopyCommand label={`${label}（只看不动）`} command={command} />
       <details>
         <summary>需要接管输入？</summary>
-        <p className="attach-command-warning">
-          <strong>你的输入会直接发给正在工作的 Agent，可能打断它</strong>
-        </p>
+        <TakeoverWarning />
         <CopyCommand label="接管输入" command={`${command} --interactive`} />
       </details>
     </div>
