@@ -20,7 +20,12 @@ import {
   setProjectPreferences,
   standingTools,
 } from "../index.js";
-import { beginHostOpsAction, finishHostOpsAction } from "./host-ops-actions.js";
+import {
+  beginHostOpsAction,
+  finishHostOpsAction,
+  hostOpsExitConfirmation,
+  requestHostOpsExitConfirmation,
+} from "./host-ops-actions.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
 import {
   assignment,
@@ -419,6 +424,59 @@ test.each(["idle", "lost", "unknown"] as const)(
     ).not.toContain(confirmation().id);
   },
 );
+
+test("C-154 × C-152: settling a restart that closes its exit confirmation still keeps PM items in place", async () => {
+  const { f, confirmation } = await setup();
+  const before = confirmation();
+  const begun = value(
+    beginHostOpsAction(
+      f.state,
+      hostOpsActor,
+      {
+        tool: "host_ops_restart_standing_pm",
+        target_id: ops.id,
+        reason: "跨运行时终端，人确认退出后重启",
+        snapshot,
+      },
+      at(f, 10),
+    ),
+  );
+  f.commit({ ok: true, value: begun });
+  const asked = f.commit(
+    requestHostOpsExitConfirmation(
+      f.state,
+      system,
+      {
+        action_id: begun.data.action_id,
+        instructions: "1. 查看终端\n2. 结束进程\n3. 确认已退出",
+        why_human: "终端属于另一个运行时",
+      },
+      at(f, 11),
+    ),
+  );
+  expect(hostOpsExitConfirmation(f.state, begun.data.action_id).status).toBe(
+    "open",
+  );
+  // The settlement closes the exit confirmation (a human_actions write) and
+  // restarts the PM in the same draft; only the restart's own effect counts.
+  const settled = f.commit(
+    finishHostOpsAction(f.state, system, begun.data.action_id, at(f, 12)),
+  );
+  expect(settled.run).toMatchObject({
+    status: "queued",
+    assignment_id: ops.id,
+  });
+  expect(
+    f.state.human_actions.find((h) => h.id === asked.human_action_id)?.status,
+  ).toBe("cancelled");
+  expect(confirmation()).toEqual(before);
+  expect(
+    f.state.events.filter((e) => e.type === "standing_session_restarted"),
+  ).toHaveLength(1);
+  expect(f.state.events.some((e) => e.type === "assignment_paused")).toBe(
+    false,
+  );
+});
 
 test("C-154: host_ops restart of a PM the human paused resumes it without a second handoff", async () => {
   const { f, confirmation } = await setup();

@@ -441,3 +441,166 @@ describe("assignment attach", () => {
     expect(existsSync(join(root, "calls"))).toBe(false);
   });
 });
+
+describe("C-152: server-registered runtime", () => {
+  // The fixture hc listens only in the `attach-fixture` session: the server's.
+  const registerAgentSsh = (machine = "cardigan-agent") =>
+    writeFileSync(
+      join(root, "data", "runtime.json"),
+      JSON.stringify({
+        mode: "agent-ssh",
+        session: "attach-fixture",
+        machine,
+        agentRoot: join(root, "agent"),
+        gid: 4242,
+        identityFile: join(root, "ssh", "id"),
+        knownHostsFile: join(root, "ssh", "known_hosts"),
+      }),
+      { mode: 0o600 },
+    );
+  const calls = () =>
+    existsSync(join(root, "calls"))
+      ? readFileSync(join(root, "calls"), "utf8").trim().split("\n")
+      : [];
+  function cli(args: string[]) {
+    const result = spawnSync(process.execPath, [bin, ...args], {
+      env,
+      encoding: "utf8",
+      timeout: 10_000,
+    });
+    return {
+      code: result.status,
+      output: `${result.stdout}${result.stderr}`,
+    };
+  }
+
+  test("agent-ssh project + shell without runtime env: start is refused before any terminal or Run", () => {
+    registerAgentSsh();
+    delete env.CARDIGAN_RUNTIME_MODE;
+    updateAssignment({ runtime_ref: null, runtime_state: "idle" });
+    const result = cli(["assignment", "start", "A-1", "--project", "fixture"]);
+    expect(result.code).toBe(2);
+    expect(result.output).toContain("拒绝启动：当前 shell 没有加载运行环境");
+    expect(result.output).toContain("agent-ssh（机器 cardigan-agent）");
+    expect(result.output).toContain("runtime.env");
+    expect(calls()).toEqual([]);
+    const store = Store.open({ dataDir: join(root, "data") });
+    try {
+      expect(store.uow.read((tx) => tx.runs.list("fixture" as never))).toEqual(
+        [],
+      );
+    } finally {
+      store.close();
+    }
+  });
+
+  // One CLI process per case: each spawn costs a Node startup, and three in a
+  // row exceeded the 5s budget under a fully parallel run (C-152#35).
+  test.each([
+    [["assignment", "start", "A-1", "--project", "fixture"]],
+    [["pm", "start", "--project", "fixture"]],
+    [["pm", "rotate", "--ops", "--project", "fixture"]],
+  ])(
+    "a shell whose runtime differs from the registration is refused with the differing fields: %j",
+    (args) => {
+      registerAgentSsh();
+      Object.assign(env, {
+        CARDIGAN_RUNTIME_MODE: "agent-ssh",
+        CARDIGAN_AGENT_MACHINE: "elsewhere",
+        CARDIGAN_AGENT_ROOT: join(root, "agent"),
+        CARDIGAN_AGENT_GID: "4242",
+        CARDIGAN_AGENT_IDENTITY: join(root, "ssh", "id"),
+        CARDIGAN_AGENT_KNOWN_HOSTS: join(root, "ssh", "known_hosts"),
+      });
+      updateAssignment({ standing_mode: "ops" });
+      const result = cli(args);
+      expect(result.code).toBe(2);
+      expect(result.output).toContain("和 server 登记的不一致");
+      expect(result.output).toContain(
+        "CARDIGAN_AGENT_MACHINE：server 登记为 cardigan-agent，当前 shell 为 elsewhere",
+      );
+      expect(calls()).toEqual([]);
+    },
+  );
+
+  test("without any registration an empty shell is refused instead of defaulting to local", () => {
+    delete env.CARDIGAN_RUNTIME_MODE;
+    updateAssignment({ runtime_ref: null, runtime_state: "idle" });
+    const result = cli(["assignment", "start", "A-1", "--project", "fixture"]);
+    expect(result.code).toBe(2);
+    expect(result.output).toContain("server 还没有在这个数据目录登记运行时");
+    expect(result.output).toContain("CARDIGAN_RUNTIME_MODE=local");
+    expect(calls()).toEqual([]);
+  });
+
+  test("a start whose hc session differs from the server's is refused", () => {
+    writeFileSync(
+      join(root, "data", "runtime.json"),
+      JSON.stringify({ mode: "local", session: "server-session" }),
+    );
+    updateAssignment({ runtime_ref: null, runtime_state: "idle" });
+    const result = cli(["assignment", "start", "A-1", "--project", "fixture"]);
+    expect(result.code).toBe(2);
+    expect(result.output).toContain(
+      "CARDIGAN_HC_SESSION（或 --hc-session）：server 登记为 server-session，当前 shell 为 attach-fixture",
+    );
+    expect(calls()).toEqual([]);
+  });
+
+  test.skipIf(process.platform !== "linux")(
+    "attach to an agent-ssh terminal from a plain shell uses the server's registered hc session",
+    () => {
+      mkdirSync(join(root, "ssh"));
+      for (const name of ["id", "known_hosts"])
+        writeFileSync(join(root, "ssh", name), "fixture", { mode: 0o600 });
+      registerAgentSsh();
+      delete env.CARDIGAN_RUNTIME_MODE;
+      delete env.CARDIGAN_HC_SESSION;
+      updateAssignment({
+        runtime_ref: {
+          machine_id: "local",
+          runtime_machine: "cardigan-agent",
+          terminal_ref: "cardigan-agent/t7",
+          agent_name: "fixture",
+        },
+      });
+      const result = run(["--print"]);
+      expect(result.output).toContain("HC_SESSION='attach-fixture'");
+      expect(result.output).toContain("attach 'cardigan-agent/t7' --observe");
+      expect(result.code).toBe(0);
+    },
+  );
+
+  test("attach from a plain shell follows the terminal's recorded local runtime", () => {
+    registerAgentSsh();
+    delete env.CARDIGAN_RUNTIME_MODE;
+    delete env.CARDIGAN_HC_SESSION;
+    const result = run(["--print"]);
+    expect(result.code).toBe(0);
+    expect(result.output).toContain("attach 't7' --observe");
+    // The local terminal is reached without registering the Agent machine.
+    expect(calls().map((line) => JSON.parse(line)[0])).toEqual([
+      "--version",
+      "get",
+    ]);
+  });
+
+  test("attach to a terminal outside the registered runtime names the real cause", () => {
+    registerAgentSsh();
+    updateAssignment({
+      runtime_ref: {
+        machine_id: "local",
+        runtime_machine: "other-box",
+        terminal_ref: "other-box/t9",
+        agent_name: "fixture",
+      },
+    });
+    const result = run(["--print"]);
+    expect(result.code).toBe(1);
+    expect(result.output).toContain(
+      "终端 other-box/t9 记录在运行时机器 other-box，不属于 server 登记的运行时 agent-ssh（机器 cardigan-agent）",
+    );
+    expect(result.output).not.toContain("启动配置不合法");
+    expect(calls()).toEqual([]);
+  });
+});

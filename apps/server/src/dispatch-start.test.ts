@@ -43,7 +43,7 @@ const start = () =>
   startAssignment({
     store: f.store,
     io: {
-      env: { CARDIGAN_DATA_DIR: f.dataDir },
+      env: { CARDIGAN_RUNTIME_MODE: "local", CARDIGAN_DATA_DIR: f.dataDir },
       cwd: f.dataDir,
       captureCommand: async () => ({
         code: 0,

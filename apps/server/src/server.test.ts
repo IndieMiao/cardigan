@@ -38,7 +38,104 @@ test("local server startup visibly warns that the Agent account is not isolated"
   expect(warnings).toHaveLength(1);
   expect(warnings[0]).toContain("没有 Agent 账号隔离");
   expect(warnings[0]).toContain("agent-ssh");
+  expect(
+    JSON.parse(readFileSync(join(dataDir, "runtime.json"), "utf8")),
+  ).toEqual({ mode: "local", session: "cardigan" });
 });
+
+test("C-152: a failed or competing start never replaces the live server's registration", async () => {
+  const registration = () =>
+    JSON.parse(readFileSync(join(dataDir, "runtime.json"), "utf8"));
+  expect(registration()).toEqual({ mode: "local", session: "cardigan" });
+  await expect(
+    startCardiganServer({
+      config: { dataDir, host: "127.0.0.1", port: server.port },
+      store,
+      env: { CARDIGAN_RUNTIME_MODE: "local", CARDIGAN_HC_SESSION: "other" },
+      warn: () => {},
+    }),
+  ).rejects.toMatchObject({ code: "EADDRINUSE" });
+  expect(registration()).toEqual({ mode: "local", session: "cardigan" });
+});
+
+test("C-152: a shell without runtime.env cannot downgrade an agent-ssh registration", async () => {
+  await server.close();
+  const agent = {
+    mode: "agent-ssh",
+    session: "cardigan",
+    machine: "cardigan-agent",
+    agentRoot: "/srv/agent",
+    gid: 900,
+    identityFile: "/keys/id",
+    knownHostsFile: "/keys/known_hosts",
+  };
+  writeFileSync(join(dataDir, "runtime.json"), JSON.stringify(agent));
+  const start = (env: Record<string, string>) =>
+    startCardiganServer({
+      config: { dataDir, host: "127.0.0.1", port: 0 },
+      store,
+      env,
+      warn: () => {},
+    });
+  await expect(start({})).rejects.toThrow(/CARDIGAN_RUNTIME_MODE=local/);
+  expect(
+    JSON.parse(readFileSync(join(dataDir, "runtime.json"), "utf8")),
+  ).toEqual(agent);
+  // An explicit switch to local is the operator's decision and is registered.
+  server = await start({ CARDIGAN_RUNTIME_MODE: "local" });
+  expect(
+    JSON.parse(readFileSync(join(dataDir, "runtime.json"), "utf8")),
+  ).toEqual({ mode: "local", session: "cardigan" });
+});
+
+test.each([
+  ["unreadable", "EACCES"],
+  ["invalid JSON", "SyntaxError"],
+])(
+  "C-152: an %s registration stops the start instead of being treated as missing",
+  async (kind) => {
+    await server.close();
+    const path = join(dataDir, "runtime.json");
+    const agent = JSON.stringify({
+      mode: "agent-ssh",
+      session: "cardigan",
+      machine: "cardigan-agent",
+      agentRoot: "/srv/agent",
+      gid: 900,
+      identityFile: "/keys/id",
+      knownHostsFile: "/keys/known_hosts",
+    });
+    writeFileSync(path, kind === "unreadable" ? agent : agent.slice(0, 20));
+    if (kind === "unreadable") chmodSync(path, 0o000);
+    const start = () =>
+      startCardiganServer({
+        config: { dataDir, host: "127.0.0.1", port: 0 },
+        store,
+        env: {},
+        warn: () => {},
+      });
+    try {
+      // Root ignores file modes; the unreadable case needs a regular user.
+      if (kind === "unreadable" && process.getuid?.() === 0) return;
+      await expect(start()).rejects.toThrow(
+        /无法读取数据目录中已有的运行时登记/,
+      );
+      chmodSync(path, 0o600);
+      expect(readFileSync(path, "utf8")).toBe(
+        kind === "unreadable" ? agent : agent.slice(0, 20),
+      );
+    } finally {
+      // Restore a running server for afterEach.
+      chmodSync(path, 0o600);
+      rmSync(path);
+      server = await startCardiganServer({
+        config: { dataDir, host: "127.0.0.1", port: 0 },
+        store,
+        warn: () => {},
+      });
+    }
+  },
+);
 
 test("server startup reports invalid merge gate settings in Chinese without exposing YAML values", async () => {
   await server.close();
@@ -91,6 +188,21 @@ test.skipIf(process.platform !== "linux")(
       expect(statSync(privateDir).mode & 0o777).toBe(0o700);
       expect(isolatedWarnings).toEqual([]);
       expect(isolated.store.listProjects()).toEqual([]);
+      // C-152: the CLI compares its shell against this registration.
+      expect(
+        JSON.parse(readFileSync(join(privateDir, "runtime.json"), "utf8")),
+      ).toEqual({
+        mode: "agent-ssh",
+        session: "cardigan",
+        machine: "cardigan-agent",
+        agentRoot: join(dataDir, "agent"),
+        gid: process.getgid?.() ?? 0,
+        identityFile: join(dataDir, "key"),
+        knownHostsFile: join(dataDir, "known"),
+      });
+      expect(statSync(join(privateDir, "runtime.json")).mode & 0o777).toBe(
+        0o600,
+      );
     } finally {
       await isolated.close();
     }

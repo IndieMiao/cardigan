@@ -77,6 +77,19 @@ export {
   resolveExecutionConfig,
 } from "./execution.js";
 
+export {
+  DEFAULT_HC_SESSION,
+  describeRuntime,
+  REGISTERED_RUNTIME_FILE,
+  type RegisteredRuntime,
+  readRegisteredRuntime,
+  registeredRuntimeOf,
+  runtimeDifferences,
+  runtimeMachineOf,
+  runtimeOwnsRef,
+  writeRegisteredRuntime,
+} from "./registered.js";
+
 export interface HerdrOptions {
   readonly execution?: ExecutionConfig;
   readonly binary?: string;

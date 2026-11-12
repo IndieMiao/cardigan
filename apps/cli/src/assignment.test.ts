@@ -126,7 +126,7 @@ beforeEach(() => {
   dataDir = mkdtempSync(join(tmpdir(), "cardigan-assignment-"));
   store = Store.open({ dataDir });
   io = {
-    env: { CARDIGAN_DATA_DIR: dataDir },
+    env: { CARDIGAN_RUNTIME_MODE: "local", CARDIGAN_DATA_DIR: dataDir },
     cwd: dataDir,
     platform: "linux",
     stdout: () => undefined,
@@ -962,6 +962,37 @@ describe("C-154 standing PM session restart", () => {
       "terminal-1",
       "terminal-2",
     ]);
+  });
+
+  test("restart refuses a terminal recorded on another runtime without touching it", async () => {
+    standingOps();
+    const runtime = liveUntilReleased(new FakeRuntime());
+    const first = await startAssignment(options(runtime));
+    // The session now lives on a runtime machine this host cannot reach.
+    store.uow.run((tx) => {
+      const current = tx.assignments.get(project_id, "A-1" as never);
+      if (!current?.runtime_ref) throw new Error("missing runtime_ref");
+      tx.assignments.put(project_id, {
+        ...current,
+        runtime_ref: { ...current.runtime_ref, runtime_machine: "elsewhere" },
+      });
+    });
+    // Seen from here, that terminal is "not found" — which is no exit proof.
+    runtime.status = async () => ({
+      ok: false,
+      error: { code: "runtime_not_found", message: "not here" },
+    });
+    await expect(startAssignment(options(runtime, true))).rejects.toThrow(
+      /host_ops_restart_standing_pm/,
+    );
+    expect(runtime.provisions).toHaveLength(1);
+    expect(runtime.released).toHaveLength(0);
+    const after = store.uow.read((tx) => ({
+      assignment: tx.assignments.get(project_id, "A-1" as never),
+      run: tx.runs.get(project_id, first.run_id as never),
+    }));
+    expect(after.assignment?.runtime_ref?.runtime_machine).toBe("elsewhere");
+    expect(after.run?.status).toBe("dispatched");
   });
 
   test("restart refuses a work-item Assignment without touching it", async () => {

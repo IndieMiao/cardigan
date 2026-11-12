@@ -114,6 +114,11 @@ export function restartStandingSession(
     "stale_target",
     "常驻 PM 的会话已变化，没有替换；请重新运行",
   );
+  // Only this restart's own effect is checked below: the host_ops settlement
+  // may already have closed its exit confirmation (C-152) in the same draft.
+  const owned = () =>
+    JSON.stringify([d.list("decisions"), d.list("human_actions")]);
+  const before = owned();
   const runs = d
     .list("runs")
     .filter(
@@ -146,9 +151,7 @@ export function restartStandingSession(
     handoff: `常驻 PM 会话由${d.actor.kind === "human" ? "人" : "主机运维"}重开，Assignment 不变，待处理事项仍归你。读取排队门铃对应的 get_updates，再 ack_events。`,
   });
   ensure(
-    !d.changes.some(
-      (c) => c.collection === "decisions" || c.collection === "human_actions",
-    ),
+    owned() === before,
     "invariant_violation",
     "重开常驻 PM 会话不能转交拍板或待你执行",
   );
