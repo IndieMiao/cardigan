@@ -13,7 +13,7 @@ import {
   text,
   unwrap,
 } from "./core.js";
-import { resumeStanding } from "./standing.js";
+import { restartStandingSession, resumeStanding } from "./standing.js";
 import { activeWork } from "./workflow.js";
 
 const unfinished = (run: Run) =>
@@ -158,6 +158,13 @@ export interface QueueRunParams {
   readonly reuse_queued?: boolean;
   /** Explicit host start after a standing PM pause; never set by Dispatcher. */
   readonly resume?: boolean;
+  /** C-154: fresh session for an active standing PM; never pauses or hands over. */
+  readonly restart_session?: boolean;
+  /**
+   * With restart_session: the session the host proved exited. The restart is
+   * refused as stale_target when the Assignment now points at another one.
+   */
+  readonly expected_runtime_ref?: RuntimeRef | null;
   readonly assignment_id: AssignmentId;
   readonly model: string;
   readonly agent_cli_version: string;
@@ -188,7 +195,14 @@ export function queueRun(
 /** Shared queue transition, including ownership, snapshots and exclusivity checks. */
 export function queueRunInDraft(d: CommandDraft, p: QueueRunParams) {
   const state = d.state;
+  ensure(
+    !(p.resume && p.restart_session),
+    "validation_failed",
+    "resume and restart_session are exclusive",
+  );
   if (p.resume) resumeStanding(d, p.assignment_id);
+  if (p.restart_session)
+    restartStandingSession(d, p.assignment_id, p.expected_runtime_ref);
   const assignment = target(d, p.assignment_id);
   ensure(
     hasRunTarget(assignment, d.state),

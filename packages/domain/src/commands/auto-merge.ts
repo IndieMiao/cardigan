@@ -107,11 +107,24 @@ export function autoMergeSchedule(
         e.payload.sensitive === false &&
         Number.isFinite(Date.parse(e.created_at)),
     );
-    const waiting_since =
-      unmarked &&
-      Date.parse(unmarked.created_at) > Date.parse(opened.created_at)
-        ? unmarked.created_at
-        : opened.created_at;
+    // C-154: a confirmation handed to the human later (PM paused or released,
+    // delegation withdrawn...) is re-requested with a new decision_requested
+    // event; the human gets a full window from that handoff, not from creation.
+    const handedOver = state.events.findLast(
+      (e) =>
+        e.type === "decision_requested" &&
+        e.seq > opened.seq &&
+        e.payload !== null &&
+        typeof e.payload === "object" &&
+        "decision_id" in e.payload &&
+        e.payload.decision_id === decision.id &&
+        Number.isFinite(Date.parse(e.created_at)),
+    );
+    const waiting_since = [opened, handedOver, unmarked]
+      .flatMap((e) => (e ? [e.created_at] : []))
+      .reduce((latest, at) =>
+        Date.parse(at) > Date.parse(latest) ? at : latest,
+      );
     // Reuse the actual merge planner for accepted completion, latest confirmation,
     // project/card state and every remaining blocker; only simulate this answer.
     const resolved: Decision = {

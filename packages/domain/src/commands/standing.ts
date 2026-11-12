@@ -1,4 +1,4 @@
-import type { Actor, Assignment } from "../entities.js";
+import type { Actor, Assignment, RuntimeRef } from "../entities.js";
 import type { Result } from "../errors.js";
 import { hostOpsPending } from "../host-ops.js";
 import type { AssignmentId } from "../ids.js";
@@ -88,6 +88,73 @@ export function pauseStandingInDraft(
   });
   handoffWithoutOps(d, next);
   return { assignment: next, aborted: runs.length > 0 };
+}
+/**
+ * C-154: give an active standing PM a fresh session on the same Assignment.
+ * Unlike a pause, nothing is suspended and no decision or human action leaves
+ * the PM: the Assignment that owns them stays on duty throughout. Called
+ * inside queueRun so the restart and the new Run are one transaction.
+ */
+export function restartStandingSession(
+  d: CommandDraft,
+  id: AssignmentId,
+  expected_runtime_ref?: RuntimeRef | null,
+) {
+  const a = standing(d, id);
+  ensure(
+    a.status === "active",
+    "illegal_transition",
+    "只有在岗的常驻 PM 能重开会话；已暂停的请用 cardigan pm start 恢复",
+  );
+  // The caller proved this exact session exited; any other session (started
+  // by a concurrent restart or the Dispatcher) must not be dropped unseen.
+  ensure(
+    expected_runtime_ref === undefined ||
+      JSON.stringify(a.runtime_ref) === JSON.stringify(expected_runtime_ref),
+    "stale_target",
+    "常驻 PM 的会话已变化，没有替换；请重新运行",
+  );
+  // Only this restart's own effect is checked below: the host_ops settlement
+  // may already have closed its exit confirmation (C-152) in the same draft.
+  const owned = () =>
+    JSON.stringify([d.list("decisions"), d.list("human_actions")]);
+  const before = owned();
+  const runs = d
+    .list("runs")
+    .filter(
+      (r) =>
+        r.assignment_id === a.id &&
+        !["completed", "failed", "cancelled"].includes(r.status),
+    );
+  for (const r of runs)
+    d.put("runs", {
+      ...r,
+      status: unwrap(transition("run", r.status, "cancel")),
+      outcome: "failed",
+      summary:
+        d.actor.kind === "human"
+          ? "Standing PM session restarted by human"
+          : "Standing PM session restarted by host_ops",
+      finished_at: d.now,
+    });
+  const { session_ref: _oldSession, ...rest } = a;
+  const runtime_state = ["unknown", "lost"].includes(a.runtime_state)
+    ? unwrap(transition("runtime", a.runtime_state, "session_replaced"))
+    : a.runtime_state === "running"
+      ? unwrap(transition("runtime", a.runtime_state, "run_finished"))
+      : a.runtime_state;
+  d.put("assignments", { ...rest, runtime_state, runtime_ref: null });
+  d.emit("standing_session_restarted", undefined, {
+    assignment_id: a.id,
+    old_runtime_ref: a.runtime_ref ? { ...a.runtime_ref } : null,
+    cancelled_run_ids: runs.map((r) => r.id),
+    handoff: `常驻 PM 会话由${d.actor.kind === "human" ? "人" : "主机运维"}重开，Assignment 不变，待处理事项仍归你。读取排队门铃对应的 get_updates，再 ack_events。`,
+  });
+  ensure(
+    owned() === before,
+    "invariant_violation",
+    "重开常驻 PM 会话不能转交拍板或待你执行",
+  );
 }
 /** Called inside queueRun so resuming and reserving the new Run are atomic. */
 export function resumeStanding(d: CommandDraft, id: AssignmentId): void {

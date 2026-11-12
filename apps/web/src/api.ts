@@ -244,6 +244,8 @@ export interface DecisionView {
   readonly auto_merge?: {
     readonly minutes: number;
     readonly due_at: string;
+    /** C-154: time left when the view was read (countdown may restart). */
+    readonly remaining_ms?: number;
   } | null;
   readonly trigger?: string | null;
   readonly id: string;
@@ -497,6 +499,11 @@ export interface MergeConfirmationView {
 }
 export interface NeedsDecision extends DecisionView, AuthorView {
   readonly card_priority?: number;
+  /** C-154: the PM handed this over (paused, released or delegation off). */
+  readonly handed_over_from_pm?: {
+    readonly at: string;
+    readonly reason: string;
+  } | null;
   readonly followup_notice?: string;
   readonly card_id: string | null;
   readonly affected_cards: readonly string[];
