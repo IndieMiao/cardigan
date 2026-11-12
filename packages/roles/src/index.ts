@@ -40,6 +40,8 @@ export {
   composeRolePrompt,
   convertLegacyRole,
   corePromptFor,
+  DEFAULT_ROLE_KINDS,
+  DEFAULT_ROLE_LAUNCH,
   type DefaultRoleId,
   type DefaultRoleOptions,
   defaultRoleDefinition,

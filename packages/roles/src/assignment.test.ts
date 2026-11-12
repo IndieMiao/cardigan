@@ -591,14 +591,28 @@ describe("default role pack", () => {
       "指派",
     ])
       expect(prompt, `pm is missing: ${phrase}`).toContain(phrase);
-    for (const role of ["coder", "reviewer", "designer", "tester"] as const) {
+    for (const role of [
+      "coder",
+      "reviewer",
+      "designer",
+      "ui_ux_designer",
+      "design_director",
+      "tester",
+    ] as const) {
       expect(corePromptFor(role), role).not.toContain("不审产出交付");
       expect(corePromptFor(role), role).not.toContain("常驻 PM 不直接提交审核");
     }
   });
 
   test("non-PM prompts stay free of PM instructions", () => {
-    for (const role of ["coder", "reviewer", "designer", "tester"] as const) {
+    for (const role of [
+      "coder",
+      "reviewer",
+      "designer",
+      "ui_ux_designer",
+      "design_director",
+      "tester",
+    ] as const) {
       const prompt = corePromptFor(role);
       expect(prompt).not.toContain("PM Office");
       expect(prompt).not.toContain("`record_decision`");
@@ -637,6 +651,18 @@ describe("default role pack", () => {
         worktree: "readonly",
         allowed_tools: ["submit_review"],
       },
+      ui_ux_designer: {
+        harness: "codex",
+        launch_profile: "codex-astra",
+        worktree: "write",
+        allowed_tools: ["submit_delivery"],
+      },
+      design_director: {
+        harness: "claude-code",
+        launch_profile: "claude-opus",
+        worktree: "readonly",
+        allowed_tools: ["submit_review"],
+      },
       tester: {
         harness: "claude-code",
         launch_profile: "claude-agent",
@@ -650,6 +676,8 @@ describe("default role pack", () => {
       "coder",
       "reviewer",
       "designer",
+      "ui_ux_designer",
+      "design_director",
       "tester",
       "host_ops",
     ]);
@@ -657,6 +685,8 @@ describe("default role pack", () => {
       "none",
       "write",
       "readonly",
+      "readonly",
+      "write",
       "readonly",
       "readonly",
       "none",

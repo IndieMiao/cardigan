@@ -9,7 +9,7 @@ import { expect, test } from "vitest";
 import { defaultMigrationsDir, listMigrations } from "./migrate.js";
 import { Store } from "./store.js";
 
-test("v10 upgrade seeds each project's three templates and fixes legacy cards at dev v1", () => {
+test("v10 upgrade seeds each project's builtin templates and fixes legacy cards at dev v1", () => {
   const root = mkdtempSync(join(tmpdir(), "cardigan-templates-"));
   let store: Store | undefined;
   try {
@@ -50,7 +50,7 @@ test("v10 upgrade seeds each project's three templates and fixes legacy cards at
     expect(store.migrate()).toEqual([]);
     expect(store.createProject({ id: "new" }).ok).toBe(true);
     expect(store.uow.read((tx) => tx.card_templates.list("new"))).toHaveLength(
-      3,
+      builtinCardTemplates.length,
     );
     const upgraded = store;
     expect(() =>

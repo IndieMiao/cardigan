@@ -28,7 +28,7 @@ const definition: CardTemplateDefinition = {
 };
 const initial = (): CommandState => ({
   ...fixture(),
-  roles: [...fixture().roles, role("designer")],
+  roles: [...fixture().roles, role("ui_ux_designer")],
   cards: [],
   work_items: [],
   assignments: [],
@@ -225,7 +225,7 @@ describe("template validation contracts", () => {
   test.each(["produce", "verify"] as const)(
     "rejects a role that cannot %s and rejects its inactive latest version",
     (kind) => {
-      const roleId = kind === "produce" ? "designer" : "pm";
+      const roleId = kind === "produce" ? "ui_ux_designer" : "pm";
       for (const patch of [
         { allowed_tools: [] },
         { status: "inactive" as const },
@@ -398,12 +398,15 @@ test("create uses the selected version, validates roles, repo and acceptance, an
       .filter((c) => c.collection === "work_items")
       .map((c) => c.entity),
   ).toMatchObject([
-    { kind: "produce", role_id: "designer", template_key: "production" },
+    { kind: "produce", role_id: "ui_ux_designer", template_key: "production" },
     { kind: "verify", role_id: "pm", template_key: "pm_acceptance" },
   ]);
   expect(
     create(
-      { ...state, roles: state.roles.filter((r) => r.role_id !== "designer") },
+      {
+        ...state,
+        roles: state.roles.filter((r) => r.role_id !== "ui_ux_designer"),
+      },
       "artifact",
     ).ok,
   ).toBe(false);

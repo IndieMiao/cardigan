@@ -1498,6 +1498,8 @@ const DEFAULT_ROLE_CANDIDATES = [
   "coder",
   "reviewer",
   "designer",
+  "ui_ux_designer",
+  "design_director",
   "tester",
   "host_ops",
 ];
