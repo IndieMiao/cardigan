@@ -74,6 +74,7 @@ export const STATUS_LABELS = {
   needs_attention: "需要关注",
   timed_out: "超时",
   interrupted: "已中断",
+  executor_unreachable: "检查机不可达",
   not_run: "未运行",
   skipped: "已跳过",
 } as const;

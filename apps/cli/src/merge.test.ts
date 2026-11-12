@@ -629,10 +629,23 @@ test.each([
     if (status !== "queued" && status !== "running") recordCheck(status);
     const result = await cardigan("needs-you");
     expect(result.code).toBe(0);
-    if (status === "passed") expect(result.out).toContain(`合并检查：${label}`);
-    else {
-      expect(result.out).toContain("还有 1 条合并确认在等检查");
+    if (status === "queued" || status === "running") {
+      // C-171: the summary names the card and the confirmation.
+      expect(result.out).toContain(
+        `还有 1 条合并确认的检查在排队或运行中，检查结束后会列在这里：${card_id} Q-1（${label}）`,
+      );
       expect(result.out).not.toContain("待你拍板（");
+    } else {
+      // C-171: ended checks never pass by themselves; list them for the human.
+      expect(result.out).toContain("待你拍板（1）");
+      expect(result.out).toContain(`合并检查：${label}`);
+      expect(result.out).not.toContain("排队或运行中");
+      const hint = `cardigan merge recheck ${card_id}`;
+      if (status === "failed" || status === "timed_out")
+        expect(result.out).toContain(
+          `检查未通过，不会自己变成通过：cardigan merge request-changes ${card_id} --reason <原因>，偶发失败可 ${hint}`,
+        );
+      else expect(result.out).not.toContain(hint);
     }
   },
 );
@@ -660,7 +673,7 @@ test("C-115: a host-verified noop is actionable in needs-you without a fabricate
   expect(result.code).toBe(0);
   expect(result.out).toContain("待你拍板");
   expect(result.out).toContain("交付已在基线中，无需合并检查");
-  expect(result.out).not.toContain("在等检查");
+  expect(result.out).not.toContain("排队或运行中");
   expect(result.out).not.toContain("合并检查：通过");
 });
 
@@ -669,7 +682,7 @@ test("needs-you leaves projects without a gate unchanged and counts pending chec
   expect((await cardigan("needs-you")).out).not.toContain("合并检查");
   enableMergeGate();
   expect((await cardigan("needs-you")).out).toContain(
-    "还有 1 条合并确认在等检查",
+    `还有 1 条合并确认的检查在排队或运行中，检查结束后会列在这里：${card_id} Q-1`,
   );
 });
 
@@ -688,7 +701,9 @@ test.each([
     const before = JSON.stringify(state());
     const result = await cardigan("needs-you");
     expect(result.code).toBe(0);
-    expect(result.out).toContain("还有 1 条合并确认在等检查");
+    expect(result.out).toContain(
+      `还有 1 条合并确认的检查在排队或运行中，检查结束后会列在这里：${card_id} Q-1`,
+    );
     expect(result.out).toContain("合并闸门配置无效，请查看 server 启动日志");
     expect(result.out).not.toContain("合并检查：排队");
     expect(result.out + result.err).not.toContain("private-config-fixture");

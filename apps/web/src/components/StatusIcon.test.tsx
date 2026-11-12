@@ -47,6 +47,7 @@ const groups = {
     "offline",
     "degraded",
     "delivery_failed",
+    "executor_unreachable",
   ],
   cancelled: [
     "cancelled",

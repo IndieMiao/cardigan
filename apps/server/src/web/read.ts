@@ -1148,6 +1148,7 @@ export function needsYou(
       (left, right) => (right.waited_ms ?? 0) - (left.waited_ms ?? 0),
     ),
     waiting_merge_checks_count: data.waiting_merge_checks_count,
+    waiting_merge_check_items: data.waiting_merge_check_items,
     // §7.4 知会: delegated resolutions, newest first; never blocking.
     notices: noticeList.notices,
     notices_next_cursor: noticeList.next_cursor,

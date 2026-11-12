@@ -104,18 +104,81 @@ test("pending merge checks show a count without adding a human task, then refres
     ...page([]),
     human_actions: [],
     waiting_merge_checks_count: 2,
+    waiting_merge_check_items: [
+      { decision_id: "Q-5", card_id: "C-4", check_status: "running" },
+      { decision_id: "Q-6", card_id: null, check_status: null },
+    ],
   };
   const client = fakeClient({ needsYou: async () => data });
   const view = render(
     <NeedsYouPage client={client} projectId="p-1" revision={0} />,
   );
-  expect(await screen.findByText(/还有 2 条合并确认在等检查/)).toBeTruthy();
+  expect(
+    await screen.findByText(
+      "还有 2 条合并确认的检查在排队或运行中，检查结束后会出现在这里；也可以先到卡片详情处理：",
+    ),
+  ).toBeTruthy();
+  // C-171: each counted confirmation links to its decision on the card.
+  const list = within(screen.getByRole("list", { name: "等检查的合并确认" }));
+  expect(
+    list.getByRole("link", { name: "C-4 · Q-5" }).getAttribute("href"),
+  ).toBe("#/p/p-1/cards/C-4?at=decision-Q-5");
+  expect(list.getByText("（运行中）")).toBeTruthy();
+  expect(list.getByText("Q-6")).toBeTruthy();
+  expect(list.getAllByRole("link")).toHaveLength(1);
   expect(screen.queryByRole("region", { name: "合并确认" })).toBeNull();
   expect(screen.getByText(/没有需要你处理的事/)).toBeTruthy();
-  data = { ...page([merge()]), waiting_merge_checks_count: 0 };
+  data = {
+    ...page([merge()]),
+    waiting_merge_checks_count: 0,
+    waiting_merge_check_items: [],
+  };
   view.rerender(<NeedsYouPage client={client} projectId="p-1" revision={1} />);
   expect(await screen.findByRole("region", { name: "合并确认" })).toBeTruthy();
-  expect(screen.queryByText(/还有 2 条合并确认在等检查/)).toBeNull();
+  expect(screen.queryByText(/排队或运行中/)).toBeNull();
+});
+
+test("C-171: a failed human merge check is listed with return, hold and recheck", async () => {
+  const failed = merge();
+  if (!failed.merge_confirmation) throw new Error("Missing fixture");
+  render(
+    <NeedsYouPage
+      projectId="p-1"
+      client={fakeClient({
+        needsYou: async () => ({
+          ...page([
+            {
+              ...failed,
+              merge_confirmation: {
+                ...failed.merge_confirmation,
+                merge_gate_enabled: true,
+                merge_check: {
+                  status: "failed",
+                  attempt_id: "a-1",
+                  completion_id: "D-9",
+                  checks: [],
+                  updated_at: new Date().toISOString(),
+                },
+              },
+            },
+          ]),
+          human_actions: [],
+          waiting_merge_checks_count: 0,
+          waiting_merge_check_items: [],
+        }),
+      })}
+    />,
+  );
+  const group = within(await screen.findByRole("region", { name: "合并确认" }));
+  const article = within(group.getByRole("article", { name: "合并确认 Q-3" }));
+  expect(
+    within(article.getByRole("region", { name: "合并检查" })).getByText("失败"),
+  ).toBeTruthy();
+  expect(article.getByText(/合并检查：未通过/)).toBeTruthy();
+  for (const name of ["确认合并", "退回修改", "暂不合并", "重新检查"])
+    expect(article.getByRole("button", { name })).toBeTruthy();
+  expect(article.getByText("检查通过后才会合并")).toBeTruthy();
+  expect(screen.queryByText(/排队或运行中/)).toBeNull();
 });
 afterEach(() => {
   cleanup();
@@ -1248,6 +1311,7 @@ const checkStates = [
   ["failed", "失败", "error"],
   ["timed_out", "超时", "error"],
   ["interrupted", "已中断", "paused"],
+  ["executor_unreachable", "检查机不可达", "error"],
 ] as const;
 const attempt = "e42de008-2c67-49e2-a59d-077a0f7936de";
 function checkedMerge(status: (typeof checkStates)[number][0]) {
@@ -1312,6 +1376,19 @@ test.each(checkStates)(
     expect(content.queryByText("检查通过后才会合并") !== null).toBe(
       status !== "passed",
     );
+    // C-171: an ended, unpassed check says it will not pass by itself.
+    expect(
+      content.queryByText(
+        "合并检查：未通过。检查不会自己变成通过，请退回修改；确认是偶发失败的，可以重新检查。",
+      ) !== null,
+    ).toBe(["failed", "timed_out"].includes(status));
+    expect(
+      content.queryByText(
+        "合并检查：已中断。主机恢复后会自动重新排队；也可以先退回修改或暂不合并。",
+      ) !== null,
+    ).toBe(["interrupted", "executor_unreachable"].includes(status));
+    expect(content.getByRole("button", { name: "退回修改" })).toBeTruthy();
+    expect(content.getByRole("button", { name: "暂不合并" })).toBeTruthy();
     expect(
       content.getByRole("link", { name: "查看日志" }).getAttribute("href"),
     ).toBe(`/api/projects/p%2Fa/merge-checks/${attempt}`);
