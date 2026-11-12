@@ -30,6 +30,7 @@ import type {
 import {
   acquireMergeCheckCapacity,
   classifyExecutorFailure,
+  computeChangeScope,
   createMergeCheckLog,
   executorExecution,
   LOCAL_EXECUTOR,
@@ -37,6 +38,7 @@ import {
   mergeCheckCapacityAvailable,
   type ProjectMergeGate,
   runInTemporaryCheckout,
+  type WorkspacePackage,
 } from "@cardigan/host";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
@@ -51,6 +53,15 @@ type Settings = Extract<ProjectMergeGate, { status: "enabled" }>;
 type WithoutCard<T> = T extends unknown ? Omit<T, "card_id"> : never;
 type CheckChange = WithoutCard<Parameters<typeof recordMergeCheck>[2]>;
 export interface MergeCheckGit {
+  changedPaths(
+    project: CentralProject,
+    base: string,
+    commit: string,
+  ): Promise<readonly string[]>;
+  readWorkspace(
+    project: CentralProject,
+    commit: string,
+  ): Promise<readonly WorkspacePackage[]>;
   baseline(project: CentralProject): Promise<string>;
   prepare(project: CentralProject, plan: MergePlan): Promise<PreparedMerge>;
   publish(
@@ -172,6 +183,7 @@ export class MergeChecks {
       completion_id: update.completion_id,
       candidate_sha: update.candidate_sha,
       tree_sha: update.tree_sha,
+      ...(update.scope ? { scope: update.scope } : {}),
     };
     return this.command(task.project.project_id, (s, a, p) =>
       recordMergeCheck(
@@ -277,7 +289,10 @@ export class MergeChecks {
   }
   private async queue(
     task: Task,
-    candidate: Pick<Candidate, "candidate_sha" | "tree_sha">,
+    candidate: Pick<Candidate, "candidate_sha" | "tree_sha"> & {
+      previous_sha?: string;
+      scope?: MergeCheckView["scope"];
+    },
   ): Promise<MergeCheckView | undefined> {
     const { plan } = task;
     const events = this.state(task.project.project_id).events;
@@ -310,15 +325,46 @@ export class MergeChecks {
       !previous.recheck_requested
     )
       return undefined;
+    const scope = candidate.previous_sha
+      ? await this.scope(task, candidate.previous_sha, candidate.candidate_sha)
+      : candidate.scope;
     const queued = this.check(task, {
       completion_id: plan.completion_id,
       attempt_id: randomUUID(),
       candidate_sha: candidate.candidate_sha,
       tree_sha: candidate.tree_sha,
+      ...(scope ? { scope } : {}),
       status: "queued",
     });
     this.seen.add(queued.attempt_id);
     return queued;
+  }
+  private async scope(
+    task: Task,
+    base: string,
+    commit: string,
+  ): Promise<MergeCheckView["scope"]> {
+    if (
+      !task.settings.checks.some(
+        (check) => check.scope === "affected" || check.skipDocsOnly,
+      )
+    )
+      return undefined;
+    const git = this.git();
+    if (!git.changedPaths || !git.readWorkspace)
+      throw new Error("分层检查缺少变更范围读取入口，拒绝合并");
+    const paths = await git.changedPaths(task.project, base, commit);
+    // Docs/global changes need no workspace; affected checks read the candidate, never HEAD.
+    let scope = computeChangeScope({ paths, workspace: [] });
+    if (scope.kind === "full" && scope.reason === "unknown_package")
+      scope = computeChangeScope({
+        paths,
+        workspace: await git.readWorkspace(task.project, commit),
+        ...(task.settings.affected?.extraDependents
+          ? { extraDependents: task.settings.affected.extraDependents }
+          : {}),
+      });
+    return scope.kind === "affected" ? scope : { kind: scope.kind };
   }
   private terminal(task: Task, prepared: Exclude<PreparedMerge, Candidate>) {
     if (prepared.status === "conflicted")
@@ -450,7 +496,24 @@ export class MergeChecks {
         attempt: check.attempt_id,
         sha: check.candidate_sha,
         tree: check.tree_sha,
-        checks: task.settings.checks,
+        checks: task.settings.checks.map((step) => ({
+          name: step.name,
+          run: step.run,
+          ...(step.timeoutMs !== undefined
+            ? { timeoutMs: step.timeoutMs }
+            : {}),
+          ...(check.scope?.kind === "docs_only" && step.skipDocsOnly
+            ? { skipReason: "docs_only" as const }
+            : {}),
+          ...(step.scope === "affected"
+            ? {
+                affectedPaths:
+                  check.scope?.kind === "affected"
+                    ? (check.scope.packages ?? [])
+                    : [],
+              }
+            : {}),
+        })),
         env: task.settings.env,
         totalTimeoutMs: task.settings.totalTimeoutMs,
         serialize: true,

@@ -108,6 +108,23 @@ function controller(f: M4Fixture) {
       },
     ),
     distribute: vi.fn(async () => {}),
+    changedPaths: vi.fn(
+      async (): Promise<readonly string[]> => ["docs/guide.md"],
+    ),
+    readWorkspace: vi.fn(async () => [
+      { dir: "packages/store", name: "@cardigan/store", dependencies: [] },
+      {
+        dir: "apps/server",
+        name: "@cardigan/server",
+        dependencies: ["@cardigan/store"],
+      },
+      { dir: "apps/web", name: "@cardigan/web", dependencies: [] },
+      {
+        dir: "apps/bad;exit",
+        name: "@cardigan/bad",
+        dependencies: ["@cardigan/store"],
+      },
+    ]),
   };
   const errors = vi.fn();
   const options = {
@@ -142,6 +159,9 @@ test("checks precede confirmation; a passed tree publishes only after human appr
   const c = controller(f);
   await c.gate.tick([f.project_id]);
   expect(check()?.status).toBe("passed");
+  expect(check()).not.toHaveProperty("scope");
+  expect(c.git.changedPaths).not.toHaveBeenCalled();
+  expect(c.git.readWorkspace).not.toHaveBeenCalled();
   expect(c.git.publish).not.toHaveBeenCalled();
   await c.gate.tick([f.project_id]);
   expect(c.run).toHaveBeenCalledTimes(1);
@@ -1444,3 +1464,140 @@ test.each([false, true])(
     expect(c.errors).not.toHaveBeenCalled();
   },
 );
+
+const scopedSettings: ProjectMergeGate = {
+  status: "enabled",
+  env: {},
+  totalTimeoutMs: 1000,
+  checks: [
+    { name: "build", run: "true" },
+    { name: "test", run: "true", scope: "affected", skipDocsOnly: true },
+    { name: "e2e", run: "true", tiers: ["batch"], skipDocsOnly: true },
+  ],
+  affected: { extraDependents: { "packages/store": ["apps/web"] } },
+};
+function scopedRunner(input: CheckoutInput): Promise<CheckoutResult> {
+  input.onReady?.();
+  return Promise.resolve({
+    status: "passed",
+    cleanup_errors: [],
+    checks: input.checks.map((step) =>
+      step.skipReason
+        ? { name: step.name, status: "skipped", reason: step.skipReason }
+        : { name: step.name, status: "passed", exit_code: 0 },
+    ),
+  });
+}
+
+test.each([
+  { paths: ["docs/guide.md"], kind: "docs_only", packages: undefined },
+  {
+    paths: ["packages/store/src/index.ts"],
+    kind: "affected",
+    packages: ["apps/server", "apps/web", "packages/store"],
+  },
+  {
+    paths: ["packages/domain/src/index.ts"],
+    kind: "full",
+    packages: undefined,
+  },
+  { paths: ["apps/unknown/file.ts"], kind: "full", packages: undefined },
+] as const)(
+  "A3: $kind scopes the candidate and records executed or skipped steps",
+  async ({ paths, kind, packages }) => {
+    const { f, check, completion } = await fixture("auto");
+    const c = controller(f);
+    c.setConfig(scopedSettings);
+    c.git.changedPaths.mockResolvedValue(paths);
+    c.run.mockImplementation(scopedRunner);
+    await c.gate.tick([f.project_id]);
+    expect(c.errors).not.toHaveBeenCalled();
+    expect(check()).toMatchObject({
+      status: "passed",
+      scope: { kind, ...(packages ? { packages } : {}) },
+    });
+    expect(c.git.changedPaths).toHaveBeenCalledWith(
+      expect.anything(),
+      "a".repeat(40),
+      "b".repeat(40),
+    );
+    const input = required(c.run.mock.calls[0]?.[0]);
+    expect(input.checks[0]).not.toHaveProperty("affectedPaths");
+    expect(input.checks[1]?.affectedPaths).toEqual(packages ?? []);
+    expect(input.env).not.toHaveProperty("CARDIGAN_AFFECTED_PATHS");
+    expect(check()?.checks.map((s) => s.status)).toEqual(
+      kind === "docs_only"
+        ? ["passed", "skipped", "skipped"]
+        : ["passed", "passed", "passed"],
+    );
+    for (const e of f
+      .state()
+      .events.filter((e) =>
+        [
+          "merge_check_queued",
+          "merge_check_started",
+          "merge_check_finished",
+        ].includes(e.type),
+      ))
+      expect(e.payload).toMatchObject({
+        completion_id: completion.id,
+        tree_sha: "c".repeat(40),
+        scope: { kind },
+      });
+    expect(f.card().status).toBe("done");
+  },
+);
+
+test("A3: legacy and tiers-only checks retain their events and execute every step", async () => {
+  const { f } = await fixture();
+  const c = controller(f);
+  c.setConfig({
+    status: "enabled",
+    env: {},
+    totalTimeoutMs: 1000,
+    checks: [{ name: "e2e", run: "true", tiers: ["batch"] }],
+  });
+  c.run.mockImplementation(scopedRunner);
+  await c.gate.tick([f.project_id]);
+  expect(c.git.changedPaths).not.toHaveBeenCalled();
+  expect(c.git.readWorkspace).not.toHaveBeenCalled();
+  expect(c.run.mock.calls[0]?.[0].checks).toEqual([
+    { name: "e2e", run: "true" },
+  ]);
+  for (const e of f
+    .state()
+    .events.filter((e) => e.type.startsWith("merge_check_"))) {
+    expect(e.payload).not.toHaveProperty("scope");
+    expect(e.payload).not.toHaveProperty("level");
+  }
+});
+
+test("A3: a new candidate recomputes scope; workspace read failures cannot authorize merging", async () => {
+  const { f, check } = await fixture();
+  const c = controller(f);
+  c.setConfig(scopedSettings);
+  c.run.mockImplementation(scopedRunner);
+  await c.gate.tick([f.project_id]);
+  expect(check()?.scope?.kind).toBe("docs_only");
+  c.advance(true);
+  c.git.changedPaths.mockResolvedValue(["apps/web/src/index.ts"]);
+  c.git.readWorkspace.mockRejectedValue(
+    new Error("unreadable candidate workspace"),
+  );
+  await c.gate.tick([f.project_id]);
+  expect(c.git.publish).not.toHaveBeenCalled();
+  expect(c.errors).toHaveBeenCalled();
+  expect(c.run).toHaveBeenCalledTimes(1);
+  c.git.readWorkspace.mockResolvedValue([
+    { dir: "apps/web", name: "@cardigan/web", dependencies: [] },
+  ]);
+  await c.gate.tick([f.project_id]);
+  expect(check()).toMatchObject({
+    status: "passed",
+    scope: { kind: "affected", packages: ["apps/web"] },
+  });
+  expect(c.git.readWorkspace).toHaveBeenCalledWith(
+    expect.anything(),
+    "e".repeat(40),
+  );
+});

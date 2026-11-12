@@ -328,3 +328,23 @@ test("C-116: the merge check log classifies the retained command output", async 
     }),
   ).toMatchObject({ status: "timed_out", timeout_only: true });
 });
+
+test("A3: skipped commands neither hide failure summaries nor disable timeout classification", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "cg-scope-log-"));
+  roots.push(dataDir);
+  const log = await createMergeCheckLog({
+    dataDir,
+    project: "p",
+    attempt: "docs-timeout",
+  });
+  const result = await log.finish({
+    status: "timed_out",
+    checks: [
+      { name: "test", status: "skipped", reason: "docs_only" },
+      { name: "build", status: "timed_out" },
+    ],
+    cleanup_errors: [],
+  });
+  expect(result.timeout_only).toBe(true);
+  expect(result.summary).toContain("检查 build 未通过");
+});

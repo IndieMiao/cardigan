@@ -541,6 +541,8 @@ C-47：完成申请经冲突、退回修改、新完成申请或新产出交付�
 
 P2a-1 的检查排队、运行、失败、超时及中断均不改变 Card 状态。新增 `merge_check_queued`、`merge_check_started`、`merge_check_finished`、`merge_check_requeued` 事件与系统时间线；卡片视图的可选 `merge_check` 从当前未被取代的完成申请最新检查事件派生，包含 attempt、候选／tree SHA、状态、逐项结果、摘要与安全日志引用。人可对 awaiting_merge 且当前完成申请已有失败／超时结果的卡片请求重新检查（`recheck_merge` 接受 human 或持有 `host_ops_recheck_merge` 许可的本项目 active 常驻 host_ops；PM Ops 按 C-66 经 `resolve_delegated_decision(option=recheck)` 发起同一重新排队）；返回执行阶段或形成新完成申请后，旧检查不得授权新合并。
 
+P2a-13 A3：配置启用范围裁剪时，单卡检查事件增加可选 `scope: {kind: docs_only | affected | full, packages?: string[]}`；同一 attempt 的范围保持不变。主机依据候选相对基线的变更和候选 workspace 计算范围，domain 只校验格式。“被测试读取的文档”显式清单中的 `docs/research/pm-practice-distillation.md` 是 full 例外，以确保 `pm-lessons.test.ts` 继续核对文档与角色规则一致；相邻普通文档仍按 docs_only 处理。`docs_only` 时标记 `skip_docs_only` 的步骤记为 `skipped`（`reason=docs_only`），不执行；`scope: affected` 步骤通过独立受控字段注入 `CARDIGAN_AFFECTED_PATHS`，只含合法包目录，full 时为空字符串。跳过项可以与成功项共同形成 passed，不改变完成申请和 tree 的绑定。旧配置不增加 scope，所有步骤照旧执行；tiers 仍待 B 组生效。Workbench 显示范围和跳过原因。
+
 P2a-12 E：远程执行目标在候选分发或检查监督进程通道中 SSH 不可达时，检查 attempt 进入终止状态 `executor_unreachable`，随后用新 attempt 保持候选 `queued`。此状态不代表代码失败，不授权合并，也不要求人手动重查；同完成申请／同树可自动重新检查。退避与项目级人工事项见 §12.5。
 
 P2a-13 B 组（计划 §3.8）：批次 MB-n、合并队列、二分和失败定位都不改变 Card 状态，卡片仍为 `awaiting_merge → done`。卡片视图增加从批次事件派生的 `merge_stage`：`awaiting_confirmation`（附卡级检查结果）、`queued`（第 n 位）、`batch_checking`（MB-n）、`bisecting`、`culprit`（定位为失败原因，退出队列）、`merged_in_batch`（随批次合并，卡片已 done）。只有整批发布时为每个成员写的 `card_merged` 让卡片进入 `done`；失败原因卡写一条 `level=batch` 的 `merge_check_finished`，所以 C-66／C-79 的退回修改和重新检查规则原样适用。
