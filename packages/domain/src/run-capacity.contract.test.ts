@@ -346,3 +346,22 @@ test("q(86) a replaced runtime is never cancelled by an old stop result", () => 
     f.state.assignments.find((a) => a.id === t.run.assignment_id)?.runtime_ref,
   ).toEqual(replacement);
 });
+
+test("priority wins across projects and machines; equal tiers retain FIFO and edits reorder only queued runs", () => {
+  const low = { ...entry("a", 1), priority: 1 };
+  const high = { ...entry("b", 3), priority: 3 };
+  const peer = { ...entry("c", 2), priority: 3 };
+  expect(
+    runQueuePositions([low, high, peer]).map((r) => [r.project_id, r.ahead]),
+  ).toEqual([
+    ["c", 0],
+    ["b", 1],
+    ["a", 2],
+  ]);
+  expect(
+    runQueuePositions([{ ...low, priority: 4 }, high, peer]).map(
+      (r) => r.project_id,
+    ),
+  ).toEqual(["a", "c", "b"]);
+  expect(low.priority).toBe(1);
+});

@@ -17,6 +17,7 @@ import type {
   WorkItemId,
 } from "./ids.js";
 import type { DecisionCategory } from "./preferences.js";
+import type { CardPriority } from "./priority.js";
 import type {
   ApprovalStatus,
   AssignmentStatus,
@@ -122,7 +123,7 @@ export interface Card {
   readonly related_cards: readonly CardId[];
   readonly repo?: string;
   readonly base_branch?: string;
-  readonly priority: number;
+  readonly priority: CardPriority;
   readonly status: CardStatus;
   readonly resolution?: "done" | "superseded" | "duplicate" | "wontdo";
   /** The replacement card, distinct from other related cards. */

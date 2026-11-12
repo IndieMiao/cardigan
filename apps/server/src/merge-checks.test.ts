@@ -1601,3 +1601,125 @@ test("A3: a new candidate recomputes scope; workspace read failures cannot autho
     "e".repeat(40),
   );
 });
+
+function setPriority(
+  f: M4Fixture,
+  priority: 0 | 1 | 2 | 3 | 4,
+  cardId = f.card().id,
+) {
+  f.store.uow.run((tx) => {
+    const card = tx.cards.get(f.project_id, cardId);
+    if (!card) throw new Error("Missing card");
+    tx.cards.put(f.project_id, { ...card, priority });
+  });
+}
+
+test("higher card priority wins cross-project merge checks, then equal tiers keep completion FIFO", async () => {
+  const { f: older } = await fixture("auto", { project_id: "older" });
+  const { f: newer } = await fixture("auto", {
+    project_id: "newer",
+    dataDir: older.dataDir,
+    clock: { now: () => "2030-01-02T00:00:00.000Z" },
+  });
+  setPriority(older, 1);
+  setPriority(newer, 4);
+  const c = controller(older);
+  await c.gate.tick([older.project_id, newer.project_id]);
+  expect(c.run.mock.calls.map(([input]) => input.project)).toEqual([
+    newer.project_id,
+    older.project_id,
+  ]);
+  expect(c.errors).not.toHaveBeenCalled();
+});
+
+test("queued merge priorities refresh while a check runs, including another card in the same project", async () => {
+  const o = await overlapping(() => gateWith(ciExecutor(1)));
+  const third = await fixture("auto", {
+    project_id: "c-third",
+    dataDir: o.a.dataDir,
+  });
+  setPriority(o.a, 4);
+  setPriority(o.b, 2);
+  setPriority(third.f, 1);
+  const second = m4Scenario(o.b, "auto");
+  await acceptThroughMergeGate(o.b, second, "a".repeat(40));
+  setPriority(o.b, 0, second.card.id);
+  const round = o.c.gate.tick([
+    o.a.project_id,
+    o.b.project_id,
+    third.f.project_id,
+  ]);
+  await o.startedOne;
+  await o.settle();
+  setPriority(third.f, 4);
+  setPriority(o.b, 3, second.card.id);
+  await o.c.gate.schedule([o.a.project_id, o.b.project_id, third.f.project_id]);
+  expect(o.running.map((r) => r.project)).toEqual([o.a.project_id]);
+  await o.finish(o.a.project_id);
+  await vi.waitFor(() =>
+    expect(o.running.map((r) => r.project)).toEqual([third.f.project_id]),
+  );
+  await o.finish(third.f.project_id);
+  await vi.waitFor(() =>
+    expect(o.running.map((r) => r.project)).toEqual([o.b.project_id]),
+  );
+  const call = o.c.run.mock.calls.at(-1)?.[0];
+  expect(
+    o.b
+      .state()
+      .events.find(
+        (e) =>
+          (e.payload as { attempt_id?: string }).attempt_id === call?.attempt,
+      )?.card_id,
+  ).toBe(second.card.id);
+  await o.finish(o.b.project_id);
+  await vi.waitFor(() => expect(o.c.run).toHaveBeenCalledTimes(4));
+  await o.finish(o.b.project_id);
+  await round;
+  expect(o.c.errors).not.toHaveBeenCalled();
+});
+
+test("a high-priority executor backoff never blocks a healthy lower-priority project", async () => {
+  const { f: high, check } = await fixture("auto", { project_id: "high" });
+  const { f: low } = await fixture("auto", {
+    project_id: "low",
+    dataDir: high.dataDir,
+  });
+  setPriority(high, 4);
+  setPriority(low, 1);
+  const c = controller(high);
+  c.options.configuration.forProject = () => gateWith(ciExecutor(1));
+  c.git.distribute.mockImplementation(async (project) => {
+    if (project.project_id === high.project_id)
+      throw new Error("ssh: connect to host: Connection refused");
+  });
+  await c.gate.tick([high.project_id]);
+  expect(check()?.status).toBe("queued");
+  await c.gate.tick([high.project_id, low.project_id]);
+  expect(c.run.mock.calls.map(([input]) => input.project)).toEqual([
+    low.project_id,
+  ]);
+  expect(check()?.status).toBe("queued");
+});
+
+test("the next high-priority card in a running project's lane competes before a waiting lower tier", async () => {
+  const o = await overlapping(() => gateWith(ciExecutor(1)));
+  setPriority(o.a, 4);
+  setPriority(o.b, 1);
+  const next = m4Scenario(o.a, "auto");
+  await acceptThroughMergeGate(o.a, next, "a".repeat(40));
+  setPriority(o.a, 3, next.card.id);
+  const round = o.c.gate.tick([o.a.project_id, o.b.project_id]);
+  await o.startedOne;
+  await o.settle();
+  await o.finish(o.a.project_id);
+  await vi.waitFor(() => expect(o.c.run).toHaveBeenCalledTimes(2));
+  expect(o.running.map((r) => r.project)).toEqual([o.a.project_id]);
+  await o.finish(o.a.project_id);
+  await vi.waitFor(() =>
+    expect(o.running.map((r) => r.project)).toEqual([o.b.project_id]),
+  );
+  await o.finish(o.b.project_id);
+  await round;
+  expect(o.c.errors).not.toHaveBeenCalled();
+});

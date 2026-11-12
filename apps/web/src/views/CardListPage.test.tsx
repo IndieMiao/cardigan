@@ -383,12 +383,20 @@ test("filters from a copied URL are restored", async () => {
   ).toBe(true);
 });
 
-test("the display menu hides fields and persists the choice in localStorage", async () => {
-  const api = client(async () => page());
+test("hiding numbers preserves every priority badge, including after restoring saved preferences", async () => {
+  const cards = [...CARDS, card({ id: "C-4", title: "紧急修复", priority: 4 })];
+  const api = client(async () => ({ ...page(), cards }));
+  const expectPriorities = () => {
+    for (const label of ["低", "中", "高", "紧急"])
+      expect(
+        screen.getByRole("button", { name: `优先级：${label}` }).tabIndex,
+      ).toBe(0);
+  };
   const first = render(
     <CardListPage client={api} projectId="p-1" view="list" />,
   );
   await screen.findByText("准备发布");
+  expectPriorities();
   expect(screen.getByRole("columnheader", { name: "编号" })).toBeTruthy();
   fireEvent.pointerDown(screen.getByRole("button", { name: "显示" }), {
     button: 0,
@@ -408,6 +416,7 @@ test("the display menu hides fields and persists the choice in localStorage", as
     expect(screen.queryByRole("columnheader", { name: "编号" })).toBeNull(),
   );
   fireEvent.keyDown(document, { key: "Escape" });
+  await waitFor(expectPriorities);
   expect(
     JSON.parse(window.localStorage.getItem("cardigan.cards.display") ?? "{}"),
   ).toMatchObject({
@@ -416,6 +425,7 @@ test("the display menu hides fields and persists the choice in localStorage", as
   first.unmount();
   render(<CardListPage client={api} projectId="p-1" view="list" />);
   await screen.findByText("准备发布");
+  expectPriorities();
   expect(screen.queryByRole("columnheader", { name: "编号" })).toBeNull();
 });
 

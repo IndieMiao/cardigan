@@ -39,18 +39,20 @@ export function occupiedRunSlots(
 }
 
 export interface DispatchOrder {
+  readonly priority?: number;
   readonly project_id: string;
   readonly assignment_id: string;
   readonly created_at: string;
   readonly trigger_event_id: string;
 }
 
-/** Event time, never per-card seq or project enumeration order. Ties are stable. */
+/** Live card rank first, then the original event FIFO and stable ties. */
 export function compareDispatchOrder(
   a: DispatchOrder,
   b: DispatchOrder,
 ): number {
   return (
+    (b.priority ?? 0) - (a.priority ?? 0) ||
     a.created_at.localeCompare(b.created_at) ||
     a.trigger_event_id.localeCompare(b.trigger_event_id) ||
     a.project_id.localeCompare(b.project_id) ||

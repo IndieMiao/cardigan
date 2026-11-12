@@ -906,6 +906,8 @@ function decisionActionWebView(
     kind: "decision" as const,
     id: decision.id,
     card_id: decision.card_id ?? null,
+    card_priority:
+      state.cards.find((card) => card.id === decision.card_id)?.priority ?? 0,
     attachments: decisionAttachmentViews(
       state,
       state.decisions.find((d) => d.id === decision.id),
@@ -1179,6 +1181,7 @@ export function executionView(
   now: string,
   machines: readonly Machine[] = [],
   queue: readonly RunQueuePosition[] = [],
+  queueWarningMinutes = 30,
 ) {
   // §8.5: the newest Run is the one created last, not the one that started
   // last. A Run that is still queued has no `started_at`, and ordering by it
@@ -1194,6 +1197,23 @@ export function executionView(
   // emits its trigger event, without a run_queued event, so that trigger's
   // time is when the Run was queued.
   const withQueuedAt = runQueuedAt(state);
+  const warning = (run: Run) => {
+    const waiting = queue.find(
+      (entry) =>
+        entry.project_id === state.project_id && entry.run_id === run.id,
+    );
+    return waiting && run.status === "queued" && (waiting.priority ?? 0) <= 1
+      ? {
+          queue_warning: {
+            after_minutes: queueWarningMinutes,
+            waited_ms: Math.max(
+              0,
+              Date.parse(now) - Date.parse(waiting.created_at),
+            ),
+          },
+        }
+      : {};
+  };
   return {
     project_id: state.project_id,
     generated_at: now,
@@ -1208,6 +1228,7 @@ export function executionView(
           ?.card_id ?? null;
       return {
         card_id,
+        card_priority: state.cards.find((c) => c.id === card_id)?.priority ?? 0,
         card_status: state.cards.find((c) => c.id === card_id)?.status ?? null,
         ...(waiting ? { queue_ahead: waiting.ahead } : {}),
         standing_mode:
@@ -1241,6 +1262,7 @@ export function executionView(
                 started_at: run.started_at ?? null,
                 finished_at: run.finished_at ?? null,
                 ...withQueuedAt(run),
+                ...warning(run),
                 heartbeat_at: run.heartbeat_at ?? null,
                 heartbeat_note: run.heartbeat_note ?? null,
                 outcome: run.outcome,
@@ -1263,6 +1285,7 @@ export function executionView(
         return {
           ...run,
           ...withQueuedAt(run),
+          ...warning(run),
           ...(waiting ? { queue_ahead: waiting.ahead } : {}),
         };
       }),

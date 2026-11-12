@@ -1,5 +1,6 @@
 import type { Actor, Assignment, Card, WorkItem } from "../entities.js";
 import type { WorkItemId } from "../ids.js";
+import { parseCardPriority } from "../priority.js";
 import { isRoleActive } from "../role.js";
 import { builtinCardTemplates, latestCardTemplate } from "../templates.js";
 import { DEFAULT_MAX_REVIEW_ROUNDS, transition } from "../transitions.js";
@@ -33,12 +34,11 @@ export type CreateCardParams = Pick<
       Card,
       | "out_of_scope"
       | "related_cards"
-      | "priority"
       | "deadline"
       | "template"
       | "acceptance_criteria"
     >
-  > & { readonly template_id?: string };
+  > & { readonly template_id?: string; readonly priority?: number | string };
 export function createCard(
   state: CommandState,
   actor: Actor,
@@ -97,11 +97,10 @@ export function createCard(
       "validation_failed",
       "Card source is required",
     );
-    ensure(
-      p.priority === undefined || Number.isFinite(p.priority),
-      "validation_failed",
-      "Invalid priority",
+    const priority = parseCardPriority(
+      p.priority === undefined ? 0 : p.priority,
     );
+    ensure(priority !== undefined, "validation_failed", "Invalid priority");
     for (const id of p.related_cards ?? []) d.card(id);
     const id = d.ids.next(state.project_id, "card");
     const card: Card = {
@@ -113,7 +112,7 @@ export function createCard(
       source: p.source,
       ...(p.repo === undefined ? {} : { repo: p.repo }),
       ...(p.base_branch === undefined ? {} : { base_branch: p.base_branch }),
-      priority: p.priority ?? 0,
+      priority,
       status: "todo",
       template: template.id,
       template_version: template.version,
@@ -182,7 +181,7 @@ export function updateCard(
     title?: string;
     goal?: string;
     acceptance_criteria?: readonly string[];
-    priority?: number;
+    priority?: number | string;
     status?: Card["status"];
   },
   ports: CommandPorts,
@@ -200,12 +199,9 @@ export function updateCard(
         "validation_failed",
         "Acceptance criteria are required",
       );
+    const priority = parseCardPriority(p.priority);
     if (p.priority !== undefined)
-      ensure(
-        Number.isFinite(p.priority),
-        "validation_failed",
-        "Invalid priority",
-      );
+      ensure(priority !== undefined, "validation_failed", "Invalid priority");
     let status = card.status;
     if (p.status !== undefined) {
       ensure(
@@ -237,7 +233,7 @@ export function updateCard(
       status,
       ...(p.title !== undefined ? { title: p.title } : {}),
       ...(p.goal !== undefined ? { goal: p.goal } : {}),
-      ...(p.priority !== undefined ? { priority: p.priority } : {}),
+      ...(priority !== undefined ? { priority } : {}),
       ...(p.acceptance_criteria !== undefined
         ? { acceptance_criteria: p.acceptance_criteria }
         : {}),

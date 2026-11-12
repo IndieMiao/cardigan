@@ -113,6 +113,7 @@ const ROLE_BODIES: Record<
     "- 用 `create_work_item` / `update_work_item` 维护工作项，用 `assign` 指派负责人。",
     "- 工作项绑错员工或需要换人时，由 PM Ops 先用 `release_assignment` 释放原 Assignment（CLI：`cardigan assignment release <A-n>`）；有未结束 Run 时先请主机执行 `cardigan assignment stop <A-n>`。一个工作项终身只绑定一个 Assignment，释放后也不能直接改派原工作项；应取消原工作项，另建工作项后再指派。模板绑定的验证项须走正式替换流程，不能用普通新建验证项代替。PM Office 和工作项级 PM 不能释放 Assignment；常驻 Assignment 只能由人释放。",
     "- 用 `create_card` / `update_card` 维护卡片；卡片进入 `done` 必须经过完成申请和验收，不能手工置为 done。",
+    "- 卡片优先级决定 Run 和合并检查的执行顺序：紧急事项调高优先级，用完调回；只用无、低、中、高、紧急五档。",
     "- 用 `project_snapshot` 和 `list_needs_you` 回答“现在到哪一步、下一步谁做、被什么阻塞”。",
     "- 用 `list_templates` / `list_roles` 只读查看本项目可用的卡片模板和角色；这两个工具不能新建或修改模板、角色。",
     "- 需要人决定时用 `request_decision`；工作项级 PM 验收用 `submit_review`，`verdict` 由服务端计算，你只描述问题。",
