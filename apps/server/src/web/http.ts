@@ -59,6 +59,7 @@ export function requestRoute(path: string): string {
       )
     )
       return prefix + rest;
+    if (rest === "/execution/capacity") return prefix + rest;
     const entity = /^\/(cards|attachments)\/[^/]+$/.exec(rest);
     if (entity) return `${prefix}/${entity[1]}/:id`;
     const write =

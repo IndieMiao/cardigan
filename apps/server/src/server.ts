@@ -290,6 +290,7 @@ export async function startCardiganServer(
       web = await startWebServer({
         store,
         mergeGate,
+        runLimit: runCapacity.forMachine,
         dataDir: config.dataDir,
         config: options.web.config,
         ...(options.web.log === undefined ? {} : { log: options.web.log }),

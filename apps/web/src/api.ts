@@ -655,6 +655,24 @@ export interface ExecutionAssignment extends AuthorView {
   readonly last_mcp_activity_at: string | null;
   readonly cursors: readonly { card_id: string; acked_seq: number }[];
 }
+export interface ExecutionCapacity {
+  readonly agents: readonly {
+    machine_id: string;
+    label: string;
+    running: number;
+    limit: number;
+    queued: number;
+    merge_check_slots: number;
+  }[];
+  readonly merge_checks: readonly {
+    machine_id: string;
+    running: number;
+    limit: number;
+    queued: number;
+  }[];
+  readonly merge_config_invalid: boolean;
+}
+
 export interface ExecutionData {
   readonly assignments: readonly ExecutionAssignment[];
   readonly runs: readonly RunView[];
@@ -986,6 +1004,13 @@ export interface CardiganClient {
   subscribe(projectId: string, callbacks: StreamCallbacks): () => void;
   activity(projectId: string, filters: ActivityFilter): Promise<ActivityData>;
   snapshot(projectId: string): Promise<SnapshotData>;
+  executionCapacity(projectId: string): Promise<ExecutionCapacity>;
+  setRunLimit(
+    projectId: string,
+    machineId: string,
+    limit: number,
+    idempotencyKey: string,
+  ): Promise<void>;
   execution(projectId: string): Promise<ExecutionData>;
   executionRuns(
     projectId: string,
@@ -1139,6 +1164,24 @@ export class HttpCardiganClient implements CardiganClient {
   snapshot(projectId: string): Promise<SnapshotData> {
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/snapshot`,
+    );
+  }
+  executionCapacity(projectId: string): Promise<ExecutionCapacity> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/execution/capacity`,
+    );
+  }
+  async setRunLimit(
+    projectId: string,
+    machineId: string,
+    limit: number,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      "execution/capacity",
+      { machine_id: machineId, limit },
+      idempotencyKey,
     );
   }
   execution(projectId: string): Promise<ExecutionData> {

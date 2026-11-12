@@ -32,6 +32,7 @@ import {
 } from "../execution-sort.js";
 import { routeHash, useRouteFilters } from "../route.js";
 import { useResource } from "../useResource.js";
+import { ExecutionCapacityPanel } from "./ExecutionCapacityPanel.js";
 
 const kinds: Readonly<Record<string, string>> = {
   initial: "首次执行",
@@ -622,6 +623,14 @@ export function ExecutionPage({
       <PageTitle
         title="执行视图"
         description="查看 Agent 的运行环境、最近执行和可用命令。"
+        actions={
+          <ExecutionCapacityPanel
+            key={projectId}
+            client={client}
+            projectId={projectId}
+            revision={revision}
+          />
+        }
       />
       <FilterBar
         fields={[

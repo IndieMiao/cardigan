@@ -71,6 +71,7 @@ export * from "./commands/release.js";
 export * from "./commands/replace-verifier.js";
 export * from "./commands/review-withdrawal.js";
 export * from "./commands/role.js";
+export * from "./commands/run-limit.js";
 export * from "./commands/run-target-wait.js";
 export * from "./commands/runtime.js";
 export * from "./commands/sensitive.js";

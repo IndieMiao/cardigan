@@ -14,7 +14,6 @@ import {
   canDispatchRun,
   compareDispatchOrder,
   DEFAULT_INACTIVE_CANCEL_AFTER_MS,
-  DEFAULT_RUN_LIMIT,
   decisionFollowupBlocked,
   decisionFollowupPrompt,
   dispatchRecoveryFailed,
@@ -33,6 +32,7 @@ import {
 } from "@cardigan/domain";
 import {
   deferTargetAttempt,
+  effectiveRunLimit,
   HostLaunchError,
   RunTargetDeferred,
   redactFailureLine,
@@ -834,7 +834,7 @@ export class Dispatcher {
         if (
           (!isStandingPm(a) && earlier) ||
           !canDispatchRun(
-            this.options.runLimit?.(a.machine_id) ?? DEFAULT_RUN_LIMIT,
+            effectiveRunLimit(store, a.machine_id, this.options.runLimit),
             capacity.occupied.get(a.machine_id) ?? 0,
             isStandingPm(a),
           )

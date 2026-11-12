@@ -17,7 +17,6 @@ import type {
 import {
   abortDispatch,
   canDispatchRun,
-  DEFAULT_RUN_LIMIT,
   dispatchRun,
   EXTERNAL_ASSIGNMENT_START_ERROR,
   isStandingPm,
@@ -60,7 +59,7 @@ import {
 } from "./commands.js";
 import { HostLaunchError, type LaunchStep, messageOf } from "./errors.js";
 import { agentNameFor } from "./naming.js";
-import { runCapacitySnapshot } from "./run-capacity.js";
+import { effectiveRunLimit, runCapacitySnapshot } from "./run-capacity.js";
 import {
   deferTargetAttempt,
   RunTargetDeferred,
@@ -255,7 +254,11 @@ export async function launchRun(
     const capacity = runCapacitySnapshot(host.store, tx);
     const manual =
       input.actor.kind === "human" && input.actor.project_id === input.project;
-    const limit = host.runLimit?.(assignment.machine_id) ?? DEFAULT_RUN_LIMIT;
+    const limit = effectiveRunLimit(
+      host.store,
+      assignment.machine_id,
+      host.runLimit,
+    );
     const occupied = capacity.occupied.get(assignment.machine_id) ?? 0;
     // Q-88: only the explicit human host entry may bypass machine capacity.
     // PM tools, Dispatcher and recovery callers retain system/assignment actors.

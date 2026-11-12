@@ -403,6 +403,58 @@ button.quiet,
   display: flex;
   gap: 8px;
 }
+.execution-page .page-actions {
+  min-width: 0;
+  width: min(100%, 520px);
+}
+.execution-capacity {
+  width: 100%;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+.execution-capacity-heading,
+.execution-capacity-edit {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.execution-capacity-heading {
+  justify-content: space-between;
+}
+.execution-capacity-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.execution-capacity-count {
+  display: grid;
+  gap: 4px;
+}
+.execution-capacity-edit input {
+  width: 5rem;
+  min-width: 0;
+}
+.execution-capacity-row > .hint,
+.execution-capacity-row > [role] {
+  flex-basis: 100%;
+}
+@media (max-width: 1000px) {
+  .execution-page .page-title {
+    flex-direction: column;
+  }
+  .execution-page .page-actions {
+    width: 100%;
+  }
+}
 .empty {
   padding: 24px 0;
   max-width: 680px;
@@ -548,7 +600,7 @@ button.quiet,
   gap: 6px;
 }
 
-.content:has(.cards-page-board) {
+.content:has(:is(.cards-page-board, .execution-page)) {
   padding: calc(var(--gap) * 2);
 }
 .cards-page-board {
@@ -2512,26 +2564,27 @@ body[data-lightbox="open"] .drawer-overlay {
   min-height: 34px;
 }
 
-/* The board keeps its own width and scrolling when the sidebar moves above it. */
+/* Board and execution views keep usable width when navigation moves above them. */
 @media (max-width: 760px) {
-  .app:has(.cards-page-board) {
+  .app:has(:is(.cards-page-board, .execution-page)) {
     grid-template-columns: minmax(0, 1fr);
   }
-  .app:has(.cards-page-board) .sidebar {
+  .app:has(:is(.cards-page-board, .execution-page)) .sidebar {
     position: static;
     width: auto;
     min-width: 0;
     padding: var(--gap);
     gap: var(--gap);
   }
-  .app:has(.cards-page-board) :is(.nav, .nav-group, .sidebar-footer) {
+  .app:has(:is(.cards-page-board, .execution-page))
+    :is(.nav, .nav-group, .sidebar-footer) {
     display: flex;
     flex-direction: row;
     flex-wrap: wrap;
     align-items: center;
     gap: var(--gap);
   }
-  .content:has(.cards-page-board) {
+  .content:has(:is(.cards-page-board, .execution-page)) {
     grid-column: 1;
     padding: var(--gap);
   }
