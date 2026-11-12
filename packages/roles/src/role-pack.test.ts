@@ -5,6 +5,8 @@ import {
   DEFAULT_ROLE_LAUNCH,
   type DefaultRoleId,
   defaultRoleDefinition,
+  HUMAN_ACTION_MERGE_RULE,
+  instructionsFor,
   isDefaultRoleId,
 } from "./role-pack.js";
 
@@ -123,4 +125,27 @@ describe("default role kinds (p2v-12 §2.3)", () => {
     expect(director.instructions).toContain("不是代码实现");
     expect(director.instructions).not.toContain("`submit_delivery`");
   });
+});
+
+// C-162: wording copied independently of role-pack.ts.
+const MERGE_RULE =
+  "事项不完成就不应该合并时（例如需要人提供或轮换凭据、人确认安全或权限取舍、人在仓库外完成某个前置操作），`request_human_action` 必须传 `blocks_merge=true`；只是请人看看、知会或可以事后补做的，不设。";
+
+test("C-162: every default role says when request_human_action must hold the merge, in one wording", () => {
+  expect(HUMAN_ACTION_MERGE_RULE).toBe(MERGE_RULE);
+  for (const role of Object.keys(DEFAULT_ROLE_KINDS) as DefaultRoleId[]) {
+    const body = instructionsFor(role);
+    expect(body, role).toContain("`request_human_action`");
+    // Each prompt states the rule exactly once, right where the tool is named.
+    expect(body.split(MERGE_RULE).length - 1, role).toBe(1);
+    for (const line of body
+      .split("\n")
+      .filter((l) => l.includes("request_human_action")))
+      expect(
+        line.includes(MERGE_RULE) ||
+          body.split("\n")[body.split("\n").indexOf(line) + 1] ===
+            `- ${MERGE_RULE}`,
+        `${role}: ${line}`,
+      ).toBe(true);
+  }
 });

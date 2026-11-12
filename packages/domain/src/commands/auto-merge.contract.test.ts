@@ -221,8 +221,9 @@ test("invariants 11, 13, 14: every failed precondition rejects without partial e
       ).toBe(false);
     }
   }
+  // C-112: only merge-blocking human actions stop automation.
   for (const relation of [
-    { card_id: f.card.id, blocked_work_items: [] },
+    { card_id: f.card.id, blocked_work_items: [], blocks_merge: true },
     { blocked_work_items: [work.id] },
   ]) {
     const action = {

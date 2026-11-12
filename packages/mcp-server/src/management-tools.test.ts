@@ -7,11 +7,12 @@ import type {
   TimelineEntry,
   WorkItem,
 } from "@cardigan/domain";
-import { toolNames } from "@cardigan/domain";
+import { prepareMergePlan, toolNames } from "@cardigan/domain";
 import { hashRequest, Store } from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { loadCommandState } from "./commands/execute.js";
 import { managementTools } from "./commands/management-tools.js";
 import { memoryLogger } from "./log.js";
 import { type RunningServer, startMcpServer } from "./server.js";
@@ -162,9 +163,12 @@ const work = (role: string) => {
   return found;
 };
 async function coder(reused = false) {
+  return assignee("coder", reused);
+}
+async function assignee(role: string, reused = false) {
   const assignment = await ok<AssignmentReply>(office, "assign", {
-    work_item_id: work("coder").id,
-    role_id: "coder",
+    work_item_id: work(role).id,
+    role_id: role,
   });
   expect(assignment.token_status).toBe(
     reused ? "host_managed" : "pending_host_issuance",
@@ -1279,3 +1283,86 @@ test("C-160 update_card.pre_merge_check: Ops adds pending, only Office passes", 
     checked_versions: [{ delivery_id: "D-1", subject: "a".repeat(40) }],
   });
 });
+
+/** Drive the fixture card to awaiting_merge through the real MCP tools. */
+async function awaitingMerge() {
+  const producer = await coder();
+  const reviewer = await assignee("reviewer");
+  const pm = await assignee("pm");
+  const subject = { kind: "git_head", value: "a".repeat(40) };
+  const delivery = await ok<{ id: string }>(producer, "submit_delivery", {
+    work_item_id: work("coder").id,
+    kind: "code",
+    summary: "Ready to merge",
+    subject,
+    requested_verifiers: [work("reviewer").id],
+  });
+  await ok(reviewer, "submit_review", {
+    delivery_id: delivery.id,
+    target_sha: subject.value,
+    kind: "code",
+    issues: [],
+  });
+  const completion = await ok<{ id: string }>(producer, "submit_delivery", {
+    work_item_id: work("coder").id,
+    kind: "card_completion",
+    summary: "Done",
+    subject,
+    requested_verifiers: [work("pm").id],
+  });
+  await ok(pm, "submit_review", {
+    delivery_id: completion.id,
+    target_sha: subject.value,
+    kind: "product",
+    issues: [],
+  });
+  expect(store.uow.read((tx) => tx.cards.get(project, card.id)?.status)).toBe(
+    "awaiting_merge",
+  );
+  return producer;
+}
+const mergeCheck = () =>
+  store.uow.read((tx) =>
+    prepareMergePlan(loadCommandState(tx, project), card.id),
+  );
+
+test.each([true, undefined])(
+  "C-162: request_human_action over MCP with blocks_merge=%s records the flag and holds the merge only when set",
+  async (blocks_merge) => {
+    const caller = await awaitingMerge();
+    expect(mergeCheck().ok).toBe(true);
+    const action = await ok<HumanAction>(caller, "request_human_action", {
+      card_id: card.id,
+      instructions: "Rotate the deploy credential",
+      why_human: "Only a person holds the credential",
+      expected_return: "Rotated",
+      blocked_work_items: [],
+      ...(blocks_merge === undefined ? {} : { blocks_merge }),
+    });
+    const stored = store.uow.read((tx) =>
+      tx.human_actions.get(project, action.id),
+    );
+    const requested = store.uow.read((tx) =>
+      tx.events
+        .listAfter(project, card.id, 0)
+        .find((e) => e.type === "human_action_requested"),
+    );
+    if (blocks_merge) {
+      expect(action.blocks_merge).toBe(true);
+      expect(stored?.blocks_merge).toBe(true);
+      expect(requested?.payload).toMatchObject({
+        human_action_id: action.id,
+        blocks_merge: true,
+      });
+      expect(mergeCheck()).toMatchObject({
+        ok: false,
+        error: { message: expect.stringContaining(action.id) },
+      });
+    } else {
+      expect(action).not.toHaveProperty("blocks_merge");
+      expect(stored).not.toHaveProperty("blocks_merge");
+      expect(requested?.payload).not.toHaveProperty("blocks_merge");
+      expect(mergeCheck().ok).toBe(true);
+    }
+  },
+);

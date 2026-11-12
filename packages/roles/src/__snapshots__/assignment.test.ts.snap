@@ -43,6 +43,7 @@ exports[`snapshot: claude-code > command, arguments and files 1`] = `
 - 收到修复或退回修改（包括 \`fix\` Run、\`merge_changes_requested\`、合并冲突）时，先把最新的基线分支合入当前工作分支并解决冲突，再跑测试并交付；交付摘要里写明合入的基线提交 SHA。
 - 主产出工作项的负责人可以提交 \`kind=card_completion\` 的完成申请，逐条对照验收标准。
 - 被阻塞时用 \`report_blocker\`，需要人操作时用 \`request_human_action\`。
+- 事项不完成就不应该合并时（例如需要人提供或轮换凭据、人确认安全或权限取舍、人在仓库外完成某个前置操作），\`request_human_action\` 必须传 \`blocks_merge=true\`；只是请人看看、知会或可以事后补做的，不设。
 
 ## 协作规则
 
@@ -232,6 +233,7 @@ exports[`snapshot: codex > command, arguments and files 1`] = `
 - 收到修复或退回修改（包括 \`fix\` Run、\`merge_changes_requested\`、合并冲突）时，先把最新的基线分支合入当前工作分支并解决冲突，再跑测试并交付；交付摘要里写明合入的基线提交 SHA。
 - 主产出工作项的负责人可以提交 \`kind=card_completion\` 的完成申请，逐条对照验收标准。
 - 被阻塞时用 \`report_blocker\`，需要人操作时用 \`request_human_action\`。
+- 事项不完成就不应该合并时（例如需要人提供或轮换凭据、人确认安全或权限取舍、人在仓库外完成某个前置操作），\`request_human_action\` 必须传 \`blocks_merge=true\`；只是请人看看、知会或可以事后补做的，不设。
 
 ## 协作规则
 
@@ -409,6 +411,7 @@ exports[`snapshot: pi > command, arguments and files 1`] = `
 - 收到修复或退回修改（包括 \`fix\` Run、\`merge_changes_requested\`、合并冲突）时，先把最新的基线分支合入当前工作分支并解决冲突，再跑测试并交付；交付摘要里写明合入的基线提交 SHA。
 - 主产出工作项的负责人可以提交 \`kind=card_completion\` 的完成申请，逐条对照验收标准。
 - 被阻塞时用 \`report_blocker\`，需要人操作时用 \`request_human_action\`。
+- 事项不完成就不应该合并时（例如需要人提供或轮换凭据、人确认安全或权限取舍、人在仓库外完成某个前置操作），\`request_human_action\` 必须传 \`blocks_merge=true\`；只是请人看看、知会或可以事后补做的，不设。
 
 ## 协作规则
 

@@ -147,6 +147,12 @@ const schemas = {
     why_human: text,
     expected_return: text,
     blocked_work_items: z.array(id("work_item")),
+    blocks_merge: z
+      .boolean()
+      .optional()
+      .describe(
+        "Hold this card's merge until the action is done. Omit for read-only requests (logs, diagnostics); listing blocked_work_items already holds the merge.",
+      ),
     due: text.optional(),
   },
   create_card: {
