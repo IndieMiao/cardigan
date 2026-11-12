@@ -666,6 +666,27 @@ export function cardDetail(
     });
   const events = state.events.filter((event) => event.card_id === card_id);
   const eventBySeq = new Map(events.map((event) => [event.seq, event]));
+  // C-136: deliveries and reviews carry no timestamp; read it off the event
+  // that created them so the records tab can show when each was submitted.
+  const submittedTimes = new Map<string, string>();
+  for (const event of events) {
+    const payload = event.payload as {
+      delivery_id?: unknown;
+      review_id?: unknown;
+    } | null;
+    const key =
+      event.type === "delivery_submitted"
+        ? `delivery:${String(payload?.delivery_id)}`
+        : event.type === "review_submitted"
+          ? `review:${String(payload?.review_id)}`
+          : undefined;
+    if (key && !submittedTimes.has(key))
+      submittedTimes.set(key, event.created_at);
+  }
+  const submittedAt = (key: string) => {
+    const at = submittedTimes.get(key);
+    return at ? { submitted_at: at } : {};
+  };
   const roles = new Map<string, string>(
     state.assignments.map((a) => [a.id, a.role_id]),
   );
@@ -796,10 +817,12 @@ export function cardDetail(
     deliveries: deliveries.map((d) => ({
       ...d,
       ...webRunAuthorView(state, d.run_id),
+      ...submittedAt(`delivery:${d.id}`),
     })),
     reviews: reviews.map((r) => ({
       ...r,
       ...webRunAuthorView(state, r.run_id),
+      ...submittedAt(`review:${r.id}`),
     })),
     review_matrix,
     decisions: decisions.map((decision) => {

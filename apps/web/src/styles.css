@@ -2919,25 +2919,142 @@ body[data-lightbox="open"] .drawer-overlay {
 .recent-conclusions a:hover {
   text-decoration: underline;
 }
-.card-main .card-record-list p {
-  display: block;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+/* C-136: records tab. Current deliveries first, superseded ones folded; every
+   delivery/review row shares one column grid so avatars, ids, statuses,
+   commits and times line up, and nothing scrolls sideways. */
+.card-records {
+  --record-who: 8.5em;
+  --record-indent: 24px;
+  container-type: inline-size;
 }
 .card-record-list > li {
   border-bottom: 1px solid var(--border);
   padding: 10px 0;
+  min-width: 0;
 }
-.card-record-list > li > div,
+.card-record-list > li.record-delivery-current {
+  border-left: 3px solid var(--accent);
+  padding-left: 10px;
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  border-radius: 0 calc(var(--radius) / 2) calc(var(--radius) / 2) 0;
+  margin-bottom: 6px;
+}
+.record-row {
+  display: grid;
+  grid-template-columns:
+    minmax(0, var(--record-who)) 4.5em 7em minmax(0, 1fr)
+    auto;
+  grid-template-areas: "who id status commit time";
+  align-items: center;
+  column-gap: 12px;
+  row-gap: 2px;
+  min-width: 0;
+}
+.record-who {
+  grid-area: who;
+  min-width: 0;
+}
+.record-who > :where(.employee-identity) {
+  min-width: 0;
+}
+.record-who :where(.employee-label strong) {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.record-id {
+  grid-area: id;
+  white-space: nowrap;
+}
+.record-status {
+  grid-area: status;
+  white-space: nowrap;
+}
+.record-commit {
+  grid-area: commit;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.record-kind-label {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+.record-time {
+  grid-area: time;
+  justify-self: end;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+.record-summary {
+  margin: 4px 0 0;
+  min-width: 0;
+}
+.card-main .record-summary p {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.card-main .record-summary p.record-summary-clamped {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
+.record-kind {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) / 2);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+.record-sha {
+  font-family: var(--font-code);
+  font-size: var(--text-code-inline);
+  text-decoration: underline dotted;
+  cursor: help;
+}
+.record-more {
+  padding: 0;
+  border: 0;
+  color: var(--accent);
+  font-size: var(--text-sm);
+}
 .record-reviews {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 8px 16px;
+  list-style: none;
+  margin: 6px 0 0 12px;
+  padding: 0 0 0 calc(var(--record-indent) - 13px);
+  border-left: 1px solid var(--border);
 }
-.card-main .card-record-list p {
-  margin: 4px 0;
+.record-reviews > .record-row {
+  grid-template-columns:
+    minmax(0, calc(var(--record-who) - var(--record-indent))) 4.5em 7em
+    minmax(0, 1fr) auto;
+  padding: 2px 0;
+}
+.record-superseded {
+  margin-top: 8px;
+}
+.card-records .record-superseded > summary {
+  cursor: pointer;
+  padding: 6px 0;
+  color: var(--text-muted);
+}
+@container (max-width: 520px) {
+  .record-row,
+  .record-reviews > .record-row {
+    grid-template-columns: minmax(0, 1fr) 4.5em 7em;
+    grid-template-areas:
+      "who id status"
+      "commit time time";
+  }
 }
 .attachment-grid {
   display: grid;

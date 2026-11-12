@@ -201,6 +201,8 @@ export interface DeliveryView extends AuthorView {
   readonly pr_url?: string;
   readonly status: string;
   readonly supersedes?: string;
+  /** When the delivery was submitted (from its event); absent on old servers. */
+  readonly submitted_at?: string;
   readonly test_results?: readonly { command: string; result: string }[];
   readonly evidence?: readonly { kind: string; details: unknown }[];
   readonly known_gaps?: readonly {
@@ -224,6 +226,8 @@ export interface ReviewView extends AuthorView {
     proof?: string;
   }[];
   readonly recheck_required?: boolean;
+  /** When the review was submitted (from its event); absent on old servers. */
+  readonly submitted_at?: string;
 }
 
 export interface ReviewMatrixRow {
