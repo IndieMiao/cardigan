@@ -53,6 +53,12 @@ const pmOps: Assignment = {
   scope: "standing",
   standing_mode: "ops",
 };
+// A standing PM Office that may transcribe ordinary human decisions.
+const pmOffice: Assignment = {
+  ...pmOps,
+  id: assignment(8, "pm").id,
+  standing_mode: "office",
+};
 const state = (
   roles: readonly RoleReference[] = designRoles,
   card_templates: readonly CardTemplate[] = [],
@@ -63,7 +69,7 @@ const state = (
   card_templates,
   cards: [card(2)],
   work_items: [],
-  assignments: withOps ? [pmOps] : [],
+  assignments: withOps ? [pmOps, pmOffice] : [],
   runs: [],
 });
 const params = {
@@ -442,6 +448,43 @@ describe("design template flow (p2v-12 §2.4)", () => {
         f.p,
       ).ok,
     ).toBe(false);
+    // PM Office (record_decision) and PM Ops cannot record it either, and a
+    // refusal leaves no partial effect.
+    const recordAs = (assignment_id: Assignment["id"]): Actor => ({
+      kind: "assignment",
+      project_id: human.project_id,
+      assignment_id,
+      ...packRole("pm", "verify"),
+      allowed_tools: [
+        ...packRole("pm", "verify").allowed_tools,
+        "record_decision",
+      ],
+    });
+    const answer = {
+      decision_id: decision.id,
+      option: "approve",
+      rationale: "Fine",
+      raw_quote: "通过",
+    };
+    const before = JSON.stringify(f.state);
+    for (const who of [pmOffice.id, pmOps.id])
+      expect(recordDecision(f.state, recordAs(who), answer, f.p)).toMatchObject(
+        {
+          ok: false,
+          error: { code: "forbidden_tool" },
+        },
+      );
+    expect(JSON.stringify(f.state)).toBe(before);
+    const approved = apply(
+      f.state,
+      value(recordDecision(f.state, human, answer, f.p)),
+    );
+    expect(approved.cards.find((c) => c.id === f.card_id)).toMatchObject({
+      status: "done",
+    });
+    expect(
+      approved.decisions.find((q) => q.id === decision.id)?.resolution,
+    ).toMatchObject({ resolved_by: "human" });
     // Never eligible for timeout approval either.
     expect(
       autoMergeSchedule(
