@@ -3645,3 +3645,97 @@ body[data-lightbox="open"] .drawer-overlay {
 .queue-warning {
   color: var(--status-wait);
 }
+
+/* C-134 decision history: compact records. */
+.decision-records {
+  display: grid;
+  gap: 6px;
+  margin: var(--gap) 0;
+  padding: 0;
+  list-style: none;
+}
+.decision-record {
+  display: grid;
+  gap: 2px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+.decision-record-head,
+.decision-record-choice {
+  display: flex;
+  align-items: center;
+  gap: 4px 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.decision-record-id,
+.decision-record-meta {
+  flex: none;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+.decision-record-question {
+  flex: 1 1 12em;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  font-size: var(--text-body);
+  font-weight: 600;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.decision-record-cards {
+  display: inline-flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.decision-record-option {
+  flex: 1 1 12em;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.decision-record-by .employee-identity {
+  gap: 6px;
+  font-size: var(--text-sm);
+}
+.decision-record-by .employee-avatar {
+  width: 20px;
+  height: 20px;
+  font-size: var(--text-xs);
+}
+.decision-record-summary {
+  overflow: hidden;
+  color: var(--text-muted);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.decision-record-more[open] .decision-record-preview,
+.decision-record-collapse {
+  display: none;
+}
+.decision-record-more[open] .decision-record-collapse {
+  display: inline;
+}
+.decision-record-detail {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 12px;
+  margin: 6px 0 2px;
+}
+.decision-record-detail dt {
+  color: var(--text-muted);
+}
+.decision-record-detail dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.decision-records-more {
+  display: block;
+  margin: 0 auto var(--gap);
+}
+/* End C-134 decision history. */

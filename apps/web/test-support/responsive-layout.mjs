@@ -24,6 +24,11 @@ const navAllowance = ".nav a { gap: 8px; }";
 const executionAllowance = `.execution-table th { white-space: nowrap; }
 .execution-status { grid-template-columns: auto minmax(min-content, 1fr); }
 .execution-status :is(dt, .status) { white-space: nowrap; }`;
+// C-134 replaces the decision history cards with compact records.
+const decisionHistoryAllowance = css.slice(
+  css.indexOf("/* C-134 decision history: compact records. */"),
+  css.indexOf("/* End C-134 decision history. */"),
+);
 const screenshots = process.env.LAYOUT_SCREENSHOTS;
 if (screenshots) await mkdir(screenshots, { recursive: true });
 const server = await createServer({
@@ -53,7 +58,7 @@ const routes = [
   ["card", "cards/C-1", ".timeline-load"],
   ["needs-you", "needs-you", ".needs-item"],
   ["execution", "execution?view=all", ".execution-row"],
-  ["decision-history", "decision-history", ".needs-item"],
+  ["decision-history", "decision-history", ".decision-record"],
   ["snapshot", "snapshot", ".delivery-table"],
   ["settings", "settings", "#preferences form"],
   ["board", "cards?view=board", ".cards-page-board"],
@@ -111,7 +116,11 @@ try {
   async function capture(name, width, theme) {
     if (
       !screenshots ||
-      (width !== 390 && !(name === "execution" && width === 1440))
+      (width !== 390 &&
+        !(
+          (name === "execution" || name === "decision-history") &&
+          width === 1440
+        ))
     )
       return;
     const { cssContentSize } = await send("Page.getLayoutMetrics");
@@ -281,6 +290,37 @@ try {
               `${label}: status ${status.text} overflows its cell`,
             );
         }
+        if (name === "decision-history") {
+          // C-134: compact records; a 1080px-high desktop screen shows at
+          // least six from the top of the page, each in at most three lines.
+          const records = await run(() =>
+            Array.from(document.querySelectorAll(".decision-record"), (el) => {
+              const r = el.getBoundingClientRect();
+              const lines = Array.from(
+                el.querySelectorAll(
+                  ".decision-record-head, .decision-record-choice, .decision-record-summary",
+                ),
+                (line) => line.getBoundingClientRect().height,
+              );
+              return { bottom: r.bottom, lines };
+            }),
+          );
+          assert.equal(records.length, 10, `${label}: first page is not 10`);
+          if (width >= 1280) {
+            assert(
+              records.filter((r) => r.bottom <= 1080).length >= 6,
+              `${label}: fewer than 6 records fit in 1080px`,
+            );
+            for (const record of records)
+              assert(
+                record.lines.length === 3 && record.lines.every((h) => h <= 32),
+                `${label}: record wraps beyond three lines`,
+              );
+          }
+          await until(
+            "Array.from(document.querySelectorAll('button')).some((b) => b.textContent === '加载更多')",
+          );
+        }
         // C-159: nav counts keep a gap from their label at every width.
         const counts = await run(() =>
           Array.from(document.querySelectorAll(".nav a"), (link) => {
@@ -424,7 +464,9 @@ try {
           await setCss(
             name === "execution"
               ? `${baseline}\n${navAllowance}\n${executionAllowance}`
-              : `${baseline}\n${navAllowance}`,
+              : name === "decision-history"
+                ? `${baseline}\n${navAllowance}\n${decisionHistoryAllowance}`
+                : `${baseline}\n${navAllowance}`,
           );
           assert.deepEqual(
             await geometry(),

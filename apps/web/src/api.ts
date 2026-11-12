@@ -788,6 +788,11 @@ export interface DecisionHistoryRecord extends DecisionView {
     proxy_authority?: string;
   };
 }
+/** C-134: newest 10 first; pass `next_cursor` back to read the next 10. */
+export interface DecisionHistoryPage {
+  readonly decisions: readonly DecisionHistoryRecord[];
+  readonly next_cursor: string | null;
+}
 export interface TemplateDefinition {
   id: string;
   title: string;
@@ -1036,7 +1041,8 @@ export interface CardiganClient {
   decisionHistory(
     projectId: string,
     filters: Readonly<Record<string, string>>,
-  ): Promise<{ decisions: readonly DecisionHistoryRecord[] }>;
+    cursor?: string,
+  ): Promise<DecisionHistoryPage>;
   setDelegation(
     projectId: string,
     category: string,
@@ -1289,10 +1295,12 @@ export class HttpCardiganClient implements CardiganClient {
   decisionHistory(
     projectId: string,
     filters: Readonly<Record<string, string>>,
-  ): Promise<{ decisions: readonly DecisionHistoryRecord[] }> {
+    cursor?: string,
+  ): Promise<DecisionHistoryPage> {
     const query = new URLSearchParams(
       Object.entries(filters).filter(([, v]) => v),
     );
+    if (cursor) query.set("cursor", cursor);
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/decision-history?${query}`,
     );
