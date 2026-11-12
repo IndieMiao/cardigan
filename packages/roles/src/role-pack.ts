@@ -383,7 +383,13 @@ export function instructionsFor(
 ): string {
   const header =
     display_name === undefined ? "" : `\n（显示名：${display_name}）`;
-  return [ROLE_BODIES[role], header].join("\n").trimEnd();
+  const testRule = ["coder", "reviewer", "tester"].includes(role)
+    ? "- 在本机员工 Run 中自测最多使用 2 个 worker，不要设法绕过主机限流；全量检查交给合并检查。"
+    : "";
+  return [ROLE_BODIES[role], testRule, header]
+    .filter(Boolean)
+    .join("\n")
+    .trimEnd();
 }
 
 /** Default pack definition for initial registration and one-time copies. */

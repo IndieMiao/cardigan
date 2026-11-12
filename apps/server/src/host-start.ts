@@ -22,6 +22,7 @@ import type { Store } from "@cardigan/store";
  * It never queues a Run.
  */
 export interface StartRunHost {
+  readonly configDir?: string;
   readonly store: Store;
   readonly runtime: Runtime;
   readonly launch: {
@@ -54,6 +55,7 @@ export async function startQueuedRun(
   input: StartRunInput,
 ): Promise<void> {
   const launchHost: LaunchHost = {
+    ...(host.configDir === undefined ? {} : { configDir: host.configDir }),
     store: host.store,
     runtime: host.runtime,
     launch: host.launch,
