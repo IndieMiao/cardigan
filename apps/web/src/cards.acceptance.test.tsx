@@ -1,7 +1,6 @@
 // @vitest-environment node
 /** M5.T1: M5.3 public components against real CLI/domain/MCP/HTTP state, per plan §3.2/§3.4/§3.7. */
 
-import { fileURLToPath } from "node:url";
 import {
   act,
   cleanup,
@@ -11,11 +10,12 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterAll, afterEach, beforeEach, expect, test, vi } from "vitest";
-import type {
-  Attachment,
-  Delivery,
+import {
+  type Attachment,
+  type Delivery,
+  recordDecision,
+  requestDecision,
 } from "../../../packages/domain/dist/index.js";
-import { requireBuildOutput } from "../../../test-support/build-output.js";
 import {
   type BrowserFixture,
   browserFixture,
@@ -34,19 +34,18 @@ import { CardDetailPage } from "./views/CardDetailPage.js";
 import { CardListPage } from "./views/CardListPage.js";
 import { LoginPage } from "./views/LoginPage.js";
 
-// The real CLI/Store/domain run from their compiled output. Check it before
-// loading so an unbuilt checkout reports the cause instead of a resolve error.
-requireBuildOutput(
-  [
-    "../../../packages/domain/dist/index.js",
-    "../../../packages/store/dist/index.js",
-    "../../cli/dist/index.js",
-  ].map((path) => fileURLToPath(new URL(path, import.meta.url))),
-  "pnpm exec tsc -b apps/server apps/cli",
-);
-const { recordDecision, requestDecision } = await import(
-  "../../../packages/domain/dist/index.js"
-);
+// The real CLI/Store/domain run from their compiled output. vi.hoisted runs
+// before the imports above, so an unbuilt checkout reports the missing files and
+// the build command instead of a module-resolution error.
+await vi.hoisted(async () => {
+  const { PACKAGE_DIST_ENTRIES, requireBuildOutput } = await import(
+    "../../../test-support/build-output.js"
+  );
+  requireBuildOutput(
+    [...PACKAGE_DIST_ENTRIES, "apps/cli/dist/index.js"],
+    "pnpm exec tsc -b apps/server apps/cli",
+  );
+});
 
 // Keep native Node module URLs for the real CLI/Store while providing a DOM to React.
 const browser = await vi.hoisted(async () => {

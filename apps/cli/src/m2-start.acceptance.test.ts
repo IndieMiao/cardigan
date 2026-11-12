@@ -26,7 +26,6 @@ import {
 import { HerdrRuntime } from "@cardigan/runtime-herdr";
 import { Store, writeRole } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { requireBuildOutput } from "../../../test-support/build-output.js";
 import { createTestRuntime } from "../../../test-support/paths.js";
 import { startCardiganServer } from "../../server/src/index.js";
 import { HcCore, runCleanupSteps } from "../../server/test-support/hc.js";
@@ -37,6 +36,18 @@ import {
   startAssignment,
 } from "./index.js";
 import { registerTemplateRoles } from "./template-fixtures.js";
+
+// This file loads the compiled workspace packages through the imports above;
+// vi.hoisted runs first, so an unbuilt checkout gets the missing files and the
+// build command instead of a module-resolution error at collection time.
+const { requireBuildOutput } = await vi.hoisted(async () => {
+  const support = await import("../../../test-support/build-output.js");
+  support.requireBuildOutput(
+    support.PACKAGE_DIST_ENTRIES,
+    "pnpm exec tsc -b apps/server",
+  );
+  return support;
+});
 
 const sdk = createRequire(resolve("packages/mcp-server/package.json"));
 const sdkUrl = (name: string) => pathToFileURL(sdk.resolve(name)).href;
@@ -261,10 +272,7 @@ test.skipIf(!hc)(
   async () => {
     // The CLI runs as a real child process from its compiled entry. Without it
     // the start command fails at once and only "undefined, not queued" remains.
-    requireBuildOutput(
-      [resolve("apps/cli/dist/bin.js")],
-      "pnpm exec tsc -b apps/cli",
-    );
+    requireBuildOutput(["apps/cli/dist/bin.js"], "pnpm exec tsc -b apps/cli");
     const { card, item } = seed("write"),
       source = join(root, "source"),
       bin = join(root, "bin"),
