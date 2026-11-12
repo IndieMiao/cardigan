@@ -1895,6 +1895,23 @@ fieldset.filters {
   overflow-wrap: anywhere;
 }
 
+.activity-page {
+  container-type: inline-size;
+}
+.activity-page .filter-controls {
+  display: grid;
+  grid-template-columns: minmax(10rem, 2fr) repeat(3, minmax(7rem, 1fr)) max-content;
+}
+.activity-page :where(.filter-controls) > label {
+  min-width: 0;
+}
+.activity-page .filter-controls :is(select, button) {
+  width: 100%;
+  max-width: none;
+  height: 36px;
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
 .activity-day {
   margin: 24px 0;
 }
@@ -1910,11 +1927,54 @@ fieldset.filters {
   list-style: none;
 }
 .activity-summary {
-  display: flex;
-  align-items: baseline;
+  display: grid;
+  /* Reserve room for older timestamps as well as relative times. */
+  grid-template-columns: 9.5em 10em 16em minmax(0, 1fr);
+  align-items: center;
   gap: 8px;
-  flex-wrap: wrap;
+  line-height: 24px;
   cursor: pointer;
+}
+.activity-summary > * {
+  min-width: 0;
+}
+.activity-time {
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.activity-summary :where(.employee-label) strong,
+.activity-card .id-description {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.activity-card {
+  display: flex;
+  align-items: center;
+}
+.activity-card .id-tag {
+  min-width: 0;
+  font-size: inherit;
+}
+@container (max-width: 760px) {
+  .activity-page .filter-controls {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .activity-summary {
+    grid-template-columns: 9.5em 10em minmax(0, 1fr);
+  }
+  .activity-card {
+    grid-column: 2 / -1;
+  }
+}
+@container (max-width: 540px) {
+  .activity-summary {
+    grid-template-columns: 9.5em minmax(0, 1fr);
+  }
+  .activity-action {
+    grid-column: 2;
+  }
 }
 .execution-page {
   max-width: 1600px;

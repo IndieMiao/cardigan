@@ -120,19 +120,25 @@ function DayGroup({
               <li key={event.id}>
                 <details className="event-details">
                   <summary className="activity-summary">
-                    <Time value={event.created_at} />
+                    <span className="activity-time">
+                      <Time value={event.created_at} />
+                    </span>
                     <EmployeeIdentity
                       {...event}
                       author={event.actor.kind}
                       author_role={event.role}
                       showTitle={false}
                     />
-                    <span>{eventLabel(event.type)}</span>
-                    <CardLink
-                      projectId={projectId}
-                      id={event.card_id}
-                      label={event.card_title ?? "卡片"}
-                    />
+                    <span className="activity-action">
+                      {eventLabel(event.type)}
+                    </span>
+                    <span className="activity-card">
+                      <CardLink
+                        projectId={projectId}
+                        id={event.card_id}
+                        label={event.card_title ?? "卡片"}
+                      />
+                    </span>
                   </summary>
                   <pre>{JSON.stringify(event.payload, null, 2)}</pre>
                 </details>
@@ -144,14 +150,20 @@ function DayGroup({
             <li key={first?.id}>
               <details className="event-details">
                 <summary className="activity-summary">
-                  <Time value={first?.created_at} />
+                  <span className="activity-time">
+                    <Time value={first?.created_at} />
+                  </span>
                   <EmployeeIdentity author="system" showTitle={false} />
-                  <span>{groupedLabel(row.type, row.events.length)}</span>
-                  <CardLink
-                    projectId={projectId}
-                    id={row.card_id}
-                    label={row.card_title ?? "卡片"}
-                  />
+                  <span className="activity-action">
+                    {groupedLabel(row.type, row.events.length)}
+                  </span>
+                  <span className="activity-card">
+                    <CardLink
+                      projectId={projectId}
+                      id={row.card_id}
+                      label={row.card_title ?? "卡片"}
+                    />
+                  </span>
                 </summary>
                 <pre>
                   {JSON.stringify(
@@ -195,7 +207,7 @@ export function ActivityPage({
     days.set(key, [...(days.get(key) ?? []), event]);
   }
   return (
-    <section aria-label="项目动态">
+    <section className="activity-page" aria-label="项目动态">
       <PageTitle
         title="项目动态"
         description="查看发生了什么，展开事件可核对原始记录。"
