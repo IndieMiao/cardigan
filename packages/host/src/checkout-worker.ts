@@ -2,17 +2,20 @@ import {
   CHECKOUT_HANDSHAKE_TITLE,
   CHECKOUT_LIMITS,
 } from "./checkout-limits.js";
+import { CHECKOUT_PROCESSES } from "./checkout-processes.js";
 
 /** Trusted supervisor executed as the checkout owner, never from the checked-out tree. */
 export const CHECKOUT_WORKER = String.raw`
 process.title = '${CHECKOUT_HANDSHAKE_TITLE}';
 const handshakeDeadline = setTimeout(() => process.exit(124), ${CHECKOUT_LIMITS.handshakeMs});
+process.chdir(process.argv[1]);
 const { spawn } = require('node:child_process');
 const { createHmac } = require('node:crypto');
-const { chmod, lstat, mkdir, readFile, readdir, readlink, realpath, rm, symlink } = require('node:fs/promises');
+const { chmod, lstat, mkdir, realpath, rm, symlink } = require('node:fs/promises');
 const { userInfo } = require('node:os');
-const { basename, dirname, join, resolve } = require('node:path');
+const { basename, dirname, join } = require('node:path');
 const { createInterface } = require('node:readline');
+${CHECKOUT_PROCESSES}
 const input = createInterface({ input: process.stdin });
 let cancelled = false, current, deadline, totalExpired = false, nonce, authKey;
 // A same-uid check can read the pipe too. Never expose the independent authentication key,
@@ -30,7 +33,7 @@ process.on('SIGHUP', cancel);
 process.stdout.on('error', cancel);
 input.once('line', line => {
   clearTimeout(handshakeDeadline);
-  process.title = 'cardigan-check-running-v1';
+  process.title = 'cg-check-run';
   input.on('line', cancel);
   const payload = JSON.parse(line);
   nonce = payload.nonce;
@@ -43,7 +46,8 @@ input.once('line', line => {
   });
 });
 async function main(p) {
-  const checks = [], cleanup_errors = [];
+  const checks = [], cleanup_errors = [], groups = new Set(), unconfirmed = new Set();
+  let manual_attention = false;
   const runtime = join(p.container, 'runtime'), temporary = join(p.container, 'tmp');
   const aliases = join(p.alias_container, 'u'), aliasRuntime = join(aliases, 'r'), aliasTmp = join(aliases, 't');
   let ownsAliases = false, registered = false, addInterrupted = false;
@@ -63,30 +67,43 @@ async function main(p) {
     return new Promise(resolve => {
       const started = Date.now();
       const child = spawn(file, args, { cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
-      let result = 'passed', output = '', hardStop;
+      if (child.pid) groups.add(child.pid);
+      let result = 'passed', output = '', hardStop, exitDeadline, finished = false;
       const kill = signal => { if (child.pid) try { process.kill(-child.pid, signal); } catch {} };
+      const finish = (code, forced = false) => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer); clearTimeout(hardStop); clearTimeout(exitDeadline);
+        if (!cleanup) current = undefined;
+        if (forced) {
+          if (child.pid) unconfirmed.add(child.pid);
+          child.stdout.destroy(); child.stderr.destroy(); child.unref();
+          if (result === 'passed') result = 'failed';
+        }
+        resolve({ code, status: result === 'passed' && code !== 0 ? 'failed' : result,
+          duration_ms: Date.now() - started, output });
+      };
+      const boundExit = () => {
+        if (!exitDeadline) exitDeadline = setTimeout(() => finish(null, true), ${CHECKOUT_LIMITS.childExitMs});
+      };
       const stop = value => {
-        if (result !== 'passed') return;
+        if (finished || result !== 'passed') return;
         result = value;
         kill('SIGTERM');
-        hardStop = setTimeout(() => kill('SIGKILL'), 500);
+        hardStop = setTimeout(() => { kill('SIGKILL'); boundExit(); }, ${CHECKOUT_LIMITS.killGraceMs});
       };
       if (!cleanup) current = stop;
       const timer = setTimeout(() => stop('timed_out'), timeout);
       if (name) emit({ type: 'started', name, pid: child.pid });
       for (const stream of [child.stdout, child.stderr]) stream.setEncoding('utf8').on('data', data => {
+        if (finished) return;
         if (name) emit({ type: 'output', name, text: data });
         else output = (output + data.toString()).slice(-65536);
       });
-      child.once('error', () => { result = 'failed'; });
+      child.once('error', () => { result = 'failed'; finish(null); });
       // A completed shell must not leave background children in its process group.
-      child.once('exit', () => kill('SIGKILL'));
-      child.once('close', code => {
-        clearTimeout(timer); clearTimeout(hardStop);
-        if (!cleanup) current = undefined;
-        resolve({ code, status: result === 'passed' && code !== 0 ? 'failed' : result,
-          duration_ms: Date.now() - started, output });
-      });
+      child.once('exit', () => { if (!finished) { kill('SIGKILL'); boundExit(); } });
+      child.once('close', code => finish(code));
     });
   }
   const git = (cwd, args, cleanup = false) =>
@@ -107,24 +124,36 @@ async function main(p) {
   }
   async function coreRecord(pid) {
     try {
-      const proc = '/proc/' + pid;
-      if (basename(await readlink(proc + '/exe')) !== 'herdr-core') return;
-      if ((await lstat(proc)).uid !== process.getuid()) return;
-      const value = (await readFile(proc + '/environ', 'utf8')).split('\0').find(v => v.startsWith('XDG_RUNTIME_DIR='))?.slice(16);
-      if (!value?.startsWith('/')) return;
-      let path = resolve(value);
-      for (const [alias, target] of [[aliasRuntime, runtime], [aliasTmp, temporary]])
-        if (path === alias || path.startsWith(alias + '/')) path = target + path.slice(alias.length);
+      const identity = await procIdentity(pid);
+      // The dedicated attempt cwd identifies the runtime without address-space reads.
+      if (!identity || identity.state === 'D' || identity.comm !== 'herdr-core') return;
+      const path = await procCwd(pid);
       if (path !== p.container && !path.startsWith(p.container + '/')) return;
-      const stat = await readFile(proc + '/stat', 'utf8');
-      const fields = stat.slice(stat.lastIndexOf(') ') + 2).split(' ');
-      if (fields[0] === 'Z') return;
-      return { pid, start: fields[19] };
+      return { pid, start: identity.start };
     } catch { return; }
   }
   async function cores() {
-    const entries = await readdir('/proc');
+    const entries = await procPids();
     return (await Promise.all(entries.filter(v => /^[1-9][0-9]*$/.test(v)).map(v => coreRecord(Number(v))))).filter(Boolean);
+  }
+  async function remainingProcesses() {
+    if (process.platform !== 'linux') return [];
+    const remaining = await Promise.all((await procPids()).map(async pid => {
+      if (Number(pid) === process.pid) return;
+      try {
+        const record = await procIdentity(pid);
+        if (!record) return;
+        if (!groups.has(record.group)) {
+          const cwd = await procCwd(pid);
+          if (cwd !== p.container && !cwd.startsWith(p.container + '/')) return;
+        }
+        return { ...record, wchan: await procWait(pid) };
+      } catch (error) {
+        if (unconfirmed.has(Number(pid)) && !['ENOENT', 'ESRCH'].includes(error.code))
+          return { pid: Number(pid), state: 'unknown', wchan: 'unknown' };
+      }
+    }));
+    return remaining.filter(Boolean);
   }
   async function stopCores() {
     if (process.platform !== 'linux') return;
@@ -137,7 +166,7 @@ async function main(p) {
       }
       for (const signal of ['SIGTERM', 'SIGKILL']) {
         for (const record of recorded) {
-          // Revalidate executable, runtime directory and Linux start time before each PID signal.
+          // Revalidate UID, comm, attempt cwd and Linux start time before each PID signal.
           if ((await coreRecord(record.pid))?.start === record.start) {
             try { process.kill(record.pid, signal); } catch {}
             emit({ type: 'output', name: 'cleanup', text: 'Stopped check runtime PID ' + record.pid + ' (' + signal + ')\n' });
@@ -187,6 +216,22 @@ async function main(p) {
   finally {
     clearTimeout(deadline);
     try { await stopCores(); } catch { cleanup_errors.push('Could not inspect check runtime processes'); }
+    let remaining;
+    try { remaining = await remainingProcesses(); }
+    catch { remaining = [...unconfirmed].map(pid => ({ pid, state: 'unknown', wchan: 'unknown' }));
+      if (!remaining.length) remaining = [{ pid: process.pid, state: 'unknown', wchan: 'inspection_failed' }]; }
+    if (remaining.length) {
+      manual_attention = true;
+      for (const record of remaining) {
+        const message = 'Manual attention required for attempt ' + basename(p.container) + ': PID ' + record.pid +
+          ' state=' + record.state + ' wchan=' + record.wchan;
+        cleanup_errors.push(message);
+        emit({ type: 'output', name: 'cleanup', text: message + '\n' });
+      }
+      try { await markManualAttention(p.container, remaining); }
+      catch { cleanup_errors.push('Could not persist manual-attention.json; preserve the check directory'); }
+      if (status === 'passed') { status = 'failed'; reason = 'Check child processes did not stop'; }
+    } else {
     // Cleanup does not inherit cancellation. Git and recursive deletion run as the owner.
     const removed = await git(p.repository, ['worktree', 'remove', '--force', '--', p.directory], true);
     // A cancelled add may have stopped before Git registered anything; only report a registration that remains.
@@ -200,7 +245,8 @@ async function main(p) {
     }
     if (ownsAliases) try { await rm(aliases, { recursive: true, force: true }); }
     catch { cleanup_errors.push('Could not remove private runtime aliases'); }
+    }
   }
-  emit({ type: 'result', nonce, status, checks, cleanup_errors, ...(reason ? { reason } : {}) });
+  emit({ type: 'result', nonce, status, checks, cleanup_errors, ...(manual_attention ? { manual_attention } : {}), ...(reason ? { reason } : {}) });
 }
 `;

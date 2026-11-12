@@ -1729,7 +1729,8 @@ P2a-13 B（合并队列，ADR 0004）：`merge-gate.yaml` 的 `queue.enabled` �
 
 ### 12.6 清理与对账
 
-- C-164（P2a-12 握手孤儿）：选择主机自动巡检，以便项目通道已被占住或没有待检查卡片时仍能恢复。服务首次调度及之后每 60 秒，对显式远程 executor 经既有固定 SSH 入口执行固定的 Linux 进程扫描；每目标最多一条巡检在途，命令最多 60 秒，不占检查槽位。仅在实际账号为非 root 的 `agent` 时启用：进程的属主和 real/effective/saved/fs UID 都须等于该账号、可执行文件为 Node、命令行必须精确等于 `cardigan-check-handshake-v1`、启动年龄至少 60 秒。新 worker 启动时设置该阶段标记，收到首行后在开始工作前同步改为 running 标记。巡检先记录 `/proc/<pid>/stat` 的 starttime，再于 TERM 和 500 毫秒后的 KILL 前分别重查上述身份及同一 starttime；每次信号的 PID、starttime、信号及结果流式写入主机日志，失败不输出原始 SSH 诊断。无阶段标记的旧 worker、正常 running worker、其他账号或身份变化的 PID 均不自动处理；升级前遗留的无标记进程仍需运维核实，不能仅因进程很老或命令中含 flock 就结束它。本巡检不新增通用远端命令入口，也不删除工作区。
+- C-164（P2a-12 握手孤儿）：选择主机自动巡检，以便项目通道已被占住或没有待检查卡片时仍能恢复。服务首次调度及之后每 60 秒，对显式远程 executor 经既有固定 SSH 入口执行固定的 Linux 进程扫描；每目标最多一条巡检在途，命令最多 60 秒，不占检查槽位。仅在实际账号为非 root 的 `agent` 时启用：`status` 的 real/effective/saved/fs UID 都须等于该账号，`stat` 的 comm 精确为 `cg-check-wait`，cwd 必须是该执行目标 `checks/<project>/<attempt>` 容器，启动年龄至少 60 秒。新 worker 从启动参数进入自己的容器，在握手前设置这个短 comm 标记，收到首行后同步改为 `cg-check-run`（均不超过 Linux comm 的 15 字节限制）。巡检先记录 starttime，再于 TERM 和 500 毫秒后的 KILL 前分别重查 UID、comm、同一 cwd 与 starttime；KILL 后再等 1 秒，仍匹配的进程记录 PID/state/wchan 并在容器留下 `manual-attention.json`。每次信号和人工处理标记流式写入主机日志；不输出原始 SSH 诊断。进程识别只读 stat、status、wchan 和 cwd，不读 cmdline、environ 或 ps args；每次进程读取限时 1 秒，超时身份不用于发信号。无阶段标记的旧 worker、正常 running worker、其他账号或身份变化的 PID 均不自动结束；升级前遗留的无标记进程仍需运维核实。本巡检不新增通用远端命令入口，也不删除工作区。
+- C-164 第 7 条（无法结束的子进程）：检查命令超时或取消时先 TERM，500 毫秒后 KILL，KILL 后仍未收到 close 最多再等 1 秒；正常 shell 已退出、后代仍占着输出管道时同样最多再等 1 秒，不能拖住整个检查收尾。收尾扫描本次启动的进程组和 cwd 在当前容器内的同账号进程，忽略僵尸／已退出进程；仍存活的进程（包括 D 状态）将 PID、starttime、state、wchan 记入检查日志，并以 0600、独占创建 `manual-attention.json` 标记该目录待人工处理。无法读取已知未退出 PID 时明确记 unknown；标记写入失败也留日志。此时保留 worktree、Git 登记和运行目录，不继续递归清理，也不把含此类遗留的超时视为可自动重跑的纯超时。没有存活占用者时仍走原有正常清理；历史残留的事后受控清理由 C-165 单独实现，不在本卡自动删除。
 
 - releaseAssignment 允许人、常驻 PM Ops 或 system；必须没有任何未结束 Run（含 queued/unknown）。system 只自动释放 done/cancelled 卡片的工作项 Assignment，不释放常驻 PM；PM Ops 只能手动释放 scope=work_item 的 Assignment；常驻 Assignment（包括 PM Office）仅允许 human 释放。Assignment 与 runtime 都经 release 迁移，保留工作目录、分支和运行时引用供清理；assignment_released 带 worktree_path/branch/token_id/runtime_ref。M4.4 在同一轮清理中作废该 Assignment 的所有 Token、释放终端。终端回收不依赖项目是否登记仓库或 Assignment 是否有 worktree；每轮也补查所有已释放 Assignment（包括由人释放的常驻项）。运行时仍存活时执行 force release，业务无未结束 Run 的前置条件仍由 domain 保证，不受 Harness 的 working 标签阻挡。terminal 不存在视为完成；失败逐项报告并在下一轮重试，不缓存失败或仅凭上次成功跳过补查，关闭未确认前不删除其 worktree。
 - requestWorktreeCleanup 只允许 system 对已 released 且有 worktree 的 Assignment 发起决策，附未提交／未备份原因；trigger=worktree_cleanup、category=data_deletion、decider=human、keep/force_clean，不阻塞已释放的工作项。同 Assignment 只保留一份未决申请；已解决决定也复用，尤其 keep 后不再因对账重复询问。按 D12 更新，只能由人通过 Workbench 或本机 CLI 确认，Office、Ops 和其他 Agent 不能代结；既有 decision_requested 路由进入 Needs You 并提示 PM Office。补丁备份、文件删除和强制清理均由 M4.3/M4.4 执行，domain 不做 IO。
@@ -2018,7 +2019,7 @@ P2a-12 C：`identityFile` 与 `knownHostsFile` 用同一条字面路径规则：
 
 P2a-12 E：远程检查连接失败始终保持原 executor，不允许自动或临时回退本机。SSH 退出码与 Git 传输诊断在主机侧分类，不把原始诊断、凭据路径或配置环境写入事件与 Needs You。不可达、恢复和定时升级的领域命令只接受同项目 system，不作为 MCP 工具暴露。
 
-C-164：握手孤儿清理是 §12.6 限定的主机固定操作，仅对 agent 账号、精确握手阶段命令特征及 starttime 均核验通过的超龄 Node 进程发信号；每次信号留日志。Agent 不获得 PID、信号或远端脚本参数入口。正常检查与无可靠阶段证据的旧进程不自动清理。
+C-164：握手孤儿清理是 §12.6 限定的主机固定操作，仅对 agent 账号、精确握手 comm、checks 容器 cwd 及 starttime 均核验通过的超龄进程发信号；每次信号留日志。进程诊断不读取 cmdline/environ 或 ps args，读取均有限时。Agent 不获得 PID、信号或远端脚本参数入口。正常检查与无可靠阶段证据的旧进程不自动结束；发现无法结束的检查子进程时保留目录并记录人工处理标记，后续清理归 C-165。
 
 ### 14.1 角色权限边界（V9a）
 

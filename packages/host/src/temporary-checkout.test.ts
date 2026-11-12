@@ -169,7 +169,7 @@ test
       const outside=${JSON.stringify(outside)}; fs.mkdirSync(outside);
       const own=path.join(process.env.TMPDIR,'herdr-core'), other=path.join(outside,'herdr-core');
       for(const binary of [own,other]){fs.copyFileSync('/usr/bin/python3',binary);fs.chmodSync(binary,0o700);}
-      const launch=(binary,runtime)=>{const c=spawn(binary,['-c','import time; time.sleep(60)'],{detached:true,stdio:'ignore',env:{PATH:process.env.PATH,XDG_RUNTIME_DIR:runtime}});c.unref();return c.pid;};
+      const launch=(binary,runtime)=>{const c=spawn(binary,['-c','import time; time.sleep(60)'],{cwd:binary===other?outside:process.cwd(),detached:true,stdio:'ignore',env:{PATH:process.env.PATH,XDG_RUNTIME_DIR:runtime}});c.unref();return c.pid;};
       console.log(JSON.stringify([launch(own,process.env.XDG_RUNTIME_DIR),launch(own,fs.realpathSync(process.env.TMPDIR)+'/holder'),launch(other,outside)]));
       ${expected === "timed_out" ? "setInterval(()=>{},1000);" : "setTimeout(()=>{},50);"}
     `),
@@ -474,6 +474,76 @@ test.each(["wrong-tree", "dirty", "staged"] as const)(
     expect(result.status).toBe("failed");
     expect(result.reason).toContain("HEAD or tree");
     await f.clean();
+  },
+);
+
+test.skipIf(process.platform !== "linux").each(["group", "cwd"] as const)(
+  "an unkillable child identified by %s is bounded, audited and leaves its directory for manual attention",
+  async (identity) => {
+    const f = await fixture();
+    const output: string[] = [];
+    // Model D state and a child that never emits close; never create actual kernel stalls.
+    const inject = String.raw`
+    const fakePid = 900000001;
+    const cp = require('node:child_process'), fs = require('node:fs/promises');
+    const originalSpawn = cp.spawn, originalRead = fs.readFile, originalLink = fs.readlink, originalList = fs.readdir, originalKill = process.kill;
+    let fakeCwd;
+    cp.spawn = (file, args, options) => {
+      if (file !== '/bin/sh' || args[1] !== 'simulated-d-child') return originalSpawn(file, args, options);
+      fakeCwd = options.cwd;
+      const child = new (require('node:events').EventEmitter)();
+      child.pid = fakePid;
+      child.stdout = new (require('node:stream').PassThrough)();
+      child.stderr = new (require('node:stream').PassThrough)();
+      child.unref = () => {};
+      return child;
+    };
+    process.kill = (pid, signal) => Math.abs(pid) === fakePid ? true : originalKill(pid, signal);
+    fs.readdir = async (path, ...args) => {
+      const entries = await originalList(path, ...args);
+      return path === '/proc' && fakeCwd ? [...entries, String(fakePid)] : entries;
+    };
+    fs.readlink = async (path, ...args) => path === '/proc/' + fakePid + '/cwd' ? fakeCwd : originalLink(path, ...args);
+    fs.readFile = async (path, ...args) => {
+      if (!String(path).startsWith('/proc/' + fakePid + '/')) return originalRead(path, ...args);
+      if (path.endsWith('/status')) return 'Uid:\t' + Array(4).fill(process.getuid()).join('\t');
+      if (path.endsWith('/wchan')) return 'exit_mm';
+      if (!path.endsWith('/stat')) throw new Error('Forbidden simulated D-state read');
+      const fields = Array(20).fill('0');
+      fields[0] = 'D'; fields[1] = String(process.pid); fields[2] = ${identity === "group" ? "String(fakePid)" : "'0'"}; fields[19] = '100';
+      return fakePid + ' (biome) ' + fields.join(' ');
+    };
+  `;
+    const result = await runInTemporaryCheckout(
+      {
+        ...f.input,
+        checks: [{ name: "wait", run: "simulated-d-child", timeoutMs: 50 }],
+        onOutput: (_name, text) => output.push(text),
+      },
+      (file, args, env) =>
+        spawn(
+          file,
+          args.map((arg) => (arg === CHECKOUT_WORKER ? inject + arg : arg)),
+          { env, stdio: ["pipe", "pipe", "pipe"] },
+        ),
+    );
+    expect(result).toMatchObject({
+      status: "timed_out",
+      manual_attention: true,
+    });
+    expect(output.join("")).toContain("PID 900000001 state=D wchan=exit_mm");
+    const marker = join(f.container, "manual-attention.json");
+    expect(JSON.parse(await readFile(marker, "utf8"))).toMatchObject({
+      kind: "merge_check_manual_attention",
+      processes: [{ pid: 900000001, state: "D", wchan: "exit_mm" }],
+    });
+    expect((await stat(marker)).mode & 0o777).toBe(0o600);
+    expect(await f.git("worktree", "list", "--porcelain")).toContain(
+      join(f.container, "worktree"),
+    );
+    expect(await readFile(join(f.container, "worktree/file"), "utf8")).toBe(
+      "original\n",
+    );
   },
 );
 
@@ -856,7 +926,16 @@ test.skipIf(process.platform !== "linux")(
     const script = `const schedule = setTimeout; global.setTimeout = (fn, ms) => schedule(fn, ms === ${CHECKOUT_LIMITS.handshakeMs} ? 50 : ms);\n${CHECKOUT_WORKER}`;
     const child = spawn(
       "flock",
-      ["--exclusive", "--no-fork", lock, process.execPath, "-e", script],
+      [
+        "--exclusive",
+        "--no-fork",
+        lock,
+        process.execPath,
+        "-e",
+        script,
+        "--",
+        f.root,
+      ],
       { stdio: ["pipe", "pipe", "pipe"] },
     );
     try {

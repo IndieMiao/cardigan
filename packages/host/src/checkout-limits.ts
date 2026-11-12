@@ -8,7 +8,10 @@ export const CHECKOUT_LIMITS = {
   orphanAgeMs: 60_000,
   sweepIntervalMs: 60_000,
   killGraceMs: 500,
+  procReadMs: 1_000,
+  childExitMs: 1_000,
 } as const;
 
 /** A phase marker, removed synchronously before any checkout work starts. */
-export const CHECKOUT_HANDSHAKE_TITLE = "cardigan-check-handshake-v1";
+// Linux comm is limited to 15 bytes; waiting and running must remain distinct.
+export const CHECKOUT_HANDSHAKE_TITLE = "cg-check-wait";

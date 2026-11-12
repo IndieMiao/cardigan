@@ -43,6 +43,7 @@ export interface CheckoutResult {
   }[];
   readonly cleanup_errors: readonly string[];
   readonly reason?: string;
+  readonly manual_attention?: boolean;
 }
 export interface CheckoutInput {
   readonly execution: ExecutionConfig;
@@ -208,10 +209,16 @@ export async function runInTemporaryCheckout(
     : input.serialize
       ? await prepareCheckLock(execution, input.lockSlot ?? 0)
       : undefined;
+  const root =
+    execution.mode === "agent-ssh"
+      ? execution.agentRoot
+      : join(execution.dataDir, "agent");
   const worker = [
     execution.mode === "agent-ssh" ? "node" : process.execPath,
     "-e",
     CHECKOUT_WORKER,
+    "--",
+    join(root, "checks", project, attempt),
   ];
   const argv = lock
     ? [
@@ -227,10 +234,6 @@ export async function runInTemporaryCheckout(
         ...worker,
       ]
     : worker;
-  const root =
-    execution.mode === "agent-ssh"
-      ? execution.agentRoot
-      : join(execution.dataDir, "agent");
   const repository = join(root, "repos", project);
   let command: { file: string; args: string[] };
   let container: string;
