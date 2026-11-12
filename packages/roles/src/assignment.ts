@@ -12,6 +12,7 @@ import {
 import type { Harness } from "./harness.js";
 import { composeRolePrompt } from "./prompt.js";
 import type { LaunchConfig, LaunchProfileDefinition } from "./schema.js";
+import { testWorkerLimit } from "./test-worker-limit.js";
 
 /**
  * Compile "start this Assignment" on top of the M1.8 launch compiler.
@@ -92,6 +93,8 @@ export interface CompileAssignmentInput {
   readonly secrets: Readonly<Record<string, string>>;
   /** CPU niceness increment for the Agent and its children; defaults to 10. */
   readonly agent_nice?: number;
+  /** Host policy for local employee sessions, never a project setting. */
+  readonly test_max_workers?: number;
 }
 
 export interface CompiledAssignmentLaunch {
@@ -335,6 +338,14 @@ export function compileAssignmentLaunch(
     }
   });
   const startFile = join(input.run_dir, START_FILE_NAME);
+  const testLimit =
+    input.test_max_workers === undefined
+      ? undefined
+      : testWorkerLimit(input.run_dir, input.test_max_workers);
+  if (testLimit)
+    env.NODE_OPTIONS = [env.NODE_OPTIONS, testLimit.nodeOptions]
+      .filter(Boolean)
+      .join(" ");
   const secretsFile = join(input.run_dir, SECRETS_FILE_NAME);
   const secretsFiles: CompiledFile[] =
     Object.keys(secretEnv).length === 0
@@ -368,6 +379,7 @@ export function compileAssignmentLaunch(
       },
       ...strippedBaseFiles,
       ...harnessFiles,
+      ...(testLimit ? [testLimit.file] : []),
       ...secretsFiles,
       {
         path: launchScript,

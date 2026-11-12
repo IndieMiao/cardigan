@@ -51,6 +51,7 @@ import {
   type Store,
   unfinishedBellAttempts,
 } from "@cardigan/store";
+import { loadAgentTestWorkers } from "./agent-test-config.js";
 import {
   applyCommand,
   issueAssignmentToken,
@@ -95,6 +96,7 @@ export class RunCapacityDeferred extends Error {
 }
 
 export interface LaunchHost {
+  readonly configDir?: string;
   readonly runLimit?: (machine: string) => number;
   readonly runLimitMaximum?: (machine: string) => number;
   readonly store: Store;
@@ -569,6 +571,9 @@ async function launch(
       },
       launch: host.launch.config,
       agent_nice: execution.agentNice ?? 10,
+      ...(assignment.machine_id === "local"
+        ? { test_max_workers: await loadAgentTestWorkers(host.configDir) }
+        : {}),
       mcp: { url: host.mcpUrl },
       run_dir: runDir,
       work_dir: workDir,

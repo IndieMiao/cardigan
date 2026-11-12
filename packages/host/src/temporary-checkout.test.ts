@@ -210,6 +210,7 @@ test("local checkout uses an explicit environment, runs in order, warns, and rem
   vi.stubEnv("CARDIGAN_TOKEN", "host-secret");
   vi.stubEnv("XDG_RUNTIME_DIR", "/production/socket");
   vi.stubEnv("SSH_AUTH_SOCK", "/production/agent");
+  vi.stubEnv("NODE_OPTIONS", "--require=/employee/test-workers.cjs");
   vi.stubEnv("HOME", "/host-only-home");
   const result = await runInTemporaryCheckout({
     ...f.input,
@@ -584,6 +585,33 @@ test.skipIf(process.platform !== "linux").each(["group", "cwd"] as const)(
   },
   10_000,
 );
+
+test("merge checks discard employee test injection and preserve maxWorkers=4", async () => {
+  const f = await fixture();
+  vi.stubEnv("NODE_OPTIONS", "--require=/employee/test-workers.cjs");
+  let output = "";
+  const result = await runInTemporaryCheckout({
+    ...f.input,
+    checks: [
+      {
+        name: "worker-policy",
+        run: node(`
+      const fs=require('node:fs'), cp=require('node:child_process'), assert=require('node:assert/strict');
+      assert.equal(process.env.NODE_OPTIONS, undefined);
+      fs.writeFileSync('vitest.mjs', 'console.log(JSON.stringify(process.argv.slice(2)))');
+      const result=cp.spawnSync(process.execPath,['vitest.mjs','run','--maxWorkers=4'],{encoding:'utf8'});
+      assert.equal(result.status,0); process.stdout.write(result.stdout);
+    `),
+      },
+    ],
+    onOutput: (_name, text) => {
+      output += text;
+    },
+  });
+  expect(result.status).toBe("passed");
+  expect(output).toContain('["run","--maxWorkers=4"]');
+  await f.clean();
+});
 
 test("invalid input and reserved runtime variables fail before creating a checkout", async () => {
   const f = await fixture();
