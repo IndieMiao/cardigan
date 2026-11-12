@@ -97,8 +97,9 @@ A1 和 A2 互不依赖，可以并行开卡。
 ### 3.1 概念
 
 - **卡级快速检查**（`level=card`）：启用队列后，跑 `tiers` 含 `card` 的步骤（按 B5 的配置不含 e2e），test 按 A+C 的范围裁剪。卡片进入 `awaiting_merge` 就跑，绑定 `(completion_id, tree_sha)`。它是确认前给人看的信息，也是 PM 代确认和 C-115 展示的前置条件。**基线前进后不重跑**：只要当前完成申请有一条 `level=card` 的 passed 记录（任意 tree），就算卡级通过。这一条消除了“main 前进一次，排队卡全部重跑”的放大。
-- **合并队列**：每个项目一条。卡片在下列条件同时满足时在队列中（由事件派生，不另存队列表）：卡片 `awaiting_merge`；当前完成申请的合并确认已解决为 `merge`（人确认、PM 代确认、C-29 代批，或 `merge_policy=auto` 且卡级通过）；卡级检查已通过；不是 noop；当前完成申请没有未处理的批次失败定位；不在一个进行中的批次里。
-- **批次 MB-n**：项目内编号，格式 `MB-<n>`，与其他项目内编号一样递增、不复用。字段：`id`、`project_id`、`purpose`（`main`：正常组批；`bisect`：二分探测）、`parent_batch_id?`、`base_sha`、`members[]`（按叠加顺序：`card_id`、`completion_id`、`merge_sha`，即本卡在叠加链上的合并提交）、`final_sha`、`final_tree_sha`、`solo`、`priority`（成员中最高档，见 3.6）、`status`（`checking → passed → published`；`checking → failed → bisecting → resolved`；任何未发布状态 → `aborted`）。
+- **合并队列**：每个项目一条。卡片在下列条件同时满足时在队列中（由事件派生，不另存队列表）：卡片 `awaiting_merge`；当前完成申请的合并确认已解决为 `merge`（人确认、PM 代确认、C-29 代批，或 `merge_policy=auto` 且卡级通过）；卡级检查已通过；不是 noop；当前完成申请没有未处理的批次失败定位；不属于任何进行中的批次族（见下文“归属”）。
+- **批次 MB-n**：项目内编号，格式 `MB-<n>`，与其他项目内编号一样递增、不复用。字段：`id`、`project_id`、`purpose`（`main`：正常组批；`bisect`：二分探测）、`parent_batch_id?`、`base_sha`、`members[]`（按叠加顺序：`card_id`、`completion_id`、`merge_sha`，即本卡在叠加链上的合并提交）、`final_sha`、`final_tree_sha`、`solo`、`priority`（成员中最高档，见 3.6）、`status`（主批次：`checking → passed → publishing → published`；`checking → failed → bisecting → resolved`，或确认重跑通过后 `bisecting → passed → publishing → published`；探测子批次：`checking → passed／failed`，被选为发布的通过前缀再经 `publishing → published`；任何尚未进入 `publishing` 的状态 → `aborted`）。
+- **批次族与归属**：主批次（`purpose=main`）和它的全部探测子批次组成一个批次族。卡片的**归属**只由主批次决定：组批时卡片必须在队列中，组批后它从队列移出，归属这个族，直到族收尾（发布、定位后回队或中止）。探测子批次不取得归属，它的成员是父批次成员的**快照**：必须是父批次叠加链的前缀（同一 `base_sha`、同样的 `card_id`／`completion_id`／`merge_sha` 和顺序），只能在父批次为 `bisecting` 时创建，校验的是“成员属于父批次”，不是“成员在队列中”。所以同一张卡可以同时出现在父批次和多个探测里（同族内的合法重叠），但不能同时出现在两个不同的批次族里。
 - **叠加**：第 1 张卡在 `base_sha` 上做合并提交，第 i 张卡在第 i−1 张卡的合并提交上做合并提交。每张卡一个合并提交，main 发布时一次快进到 `final_sha`，所以 main 上每张卡的提交都在，但 main 的分支指针只停在批次最终提交。
 
 ### 3.2 流程
@@ -107,33 +108,38 @@ A1 和 A2 互不依赖，可以并行开卡。
 2. **叠加与冲突**：主机在中心仓库依次 `merge-tree --write-tree` + `commit-tree`。某张卡和 `base_sha` 本身冲突，按现有 `merge_conflicted` 流程处理（卡回 `in_progress`，给原实现方排修复 Run），并从本批去掉；只和本批前面的卡冲突、和 `base_sha` 不冲突时，从本批去掉但保留队列位置，等前面的卡合入后在下一批里自然暴露冲突。至少剩一张卡才组批。
 3. **候选分发**：批次最终提交固定到 `refs/cardigan/candidates/MB-<n>`。这个前缀已经由 C-127 的候选分发同步到执行目标的基础 clone，所以批次可以直接作为 C-127 的候选分发（一个候选对应一棵 tree），不需要新的分发通道（C-124#8）。
 4. **全量检查**：在 `final_tree_sha` 上跑 `batch` 层全部检查（含 e2e），范围固定为 `full`。执行目标、槽位锁、远程目录准备沿用项目 `executor` 配置（C-127、C-130）；占用的名额与卡级检查在同一执行目标的分桶里共同计数（C-128，C-124#8）。
-5. **发布**：通过后，主机重新校验每个成员仍在队列中、成员的 `merge_sha` 在叠加链上，再用 `update-ref <base> <base_sha> → <final_sha>` 比较更新。成功后 domain 在**一个事务**里写 `merge_batch_published`，并为每个成员按叠加顺序写 `card_merged`（`merge_sha` 为本卡合并提交，附 `batch_id` 和同批卡片编号），卡片转 `done`；启用推送的项目照常每卡追加 `merge_push_queued`（§12.7）。
+5. **发布**：通过后，主机校验每个成员仍归属本族、完成申请仍是当前申请、成员的 `merge_sha` 在叠加链上，然后分三步：
+   1. 先持久化 `merge_batch_publishing`（`batch_id`、`base_sha`、`final_sha`，system 命令 `beginMergeBatchPublish`），批次进入 `publishing`。从这一步起批次不能再中止，成员也不能被退回或取消（这些命令在事务里看到 `publishing` 即拒绝，提示“正在合并”）；
+   2. 再用 `update-ref <base> <final_sha> <base_sha>` 比较更新；
+   3. 成功后 domain 在**一个事务**里写 `merge_batch_published`，并为每个成员按叠加顺序写 `card_merged`（`merge_sha` 为本卡合并提交，附 `batch_id` 和同批卡片编号），卡片转 `done`；启用推送的项目照常每卡追加 `merge_push_queued`（§12.7）。
+   - **崩溃恢复**：重启或下一轮看到 `publishing` 但没有 `merge_batch_published` 的批次时，先做发布恢复，再做任何 stale 判断和 noop 判断：基线等于 `final_sha`，或 `final_sha` 是基线的祖先（只有本批比较更新成功后才可能出现，`final_sha` 是主机生成、只在中心仓库的提交），说明 Git 已发布，直接补写第 3 步的事务，各卡 `merge_sha` 仍取叠加链上的本卡提交；基线仍等于 `base_sha`，说明比较更新没发生，重做第 2 步；其他情况（基线既不是 `base_sha` 也不包含 `final_sha`）才是外部前进，批次记 `merge_batch_aborted`（原因 `stale`），成员回队。处于 `publishing` 的批次成员不进入现有 noop 收尾路径，避免把本批的发布误记为 noop。
 6. **失败**：见 3.3。
 
 ### 3.3 失败、二分和定位
 
 - 批次检查 `failed` 或 `timed_out`：
   1. 先套用 C-116 的规则：失败原因全部是测试超时时，同一批次自动重跑一次（每个批次只一次），记“因超时自动重跑”。C-116 合并前 B 组不做这一步。
-  2. 批次只有 1 张卡：直接定位到它。
+  2. 批次只有 1 张卡（队列里只有它，或它是“单独跑”）：不探测，直接走第 5 步的确认重跑。
   3. 否则进入 `bisecting`，按前缀探测：第 i 个前缀是叠加链上前 i 张卡，它的 tree 就是第 i 张卡合并提交的 tree，所以探测不需要新合并提交。每个探测是一个子批次（`purpose=bisect`，`parent_batch_id` 指向原批次，成员是前 i 张卡），跑 `batch` 层全量检查。
   4. 探测策略：空闲槽位够时，一次并行探测全部前缀 1…k−1（批次上限 4 时最多 3 个探测，正好用满 `cardigan-ci` 的 3 个槽位）；槽位不够时按二分逐轮探测。
-  5. 定位规则：最短的失败前缀为 i，且前缀 i−1 通过（i=1 时前缀 0 就是 `base_sha`，视为通过），则第 i 张卡是失败原因。如果失败前缀就是整批（即 i=k，证据只有原批次那一次失败），再单独把整批重跑一次确认；重跑通过则视为偶发失败，本批按通过发布。每个定位结论至少有两次失败证据（原批次 + 一次探测或确认重跑）。
-  6. 通过的最长前缀（1…i−1）本身就是一个检查通过的子批次，直接发布，不重新检查。
+  5. 定位规则：最短的失败前缀为 i，且前缀 i−1 通过（i=1 时前缀 0 就是 `base_sha`，视为通过），则第 i 张卡是失败原因。**单卡和多卡用同一条证据要求：每个定位结论至少有两次失败证据**（原批次那一次，加一次探测失败或确认重跑失败）。失败前缀就是整批时（i=k，包括 k=1），证据只有原批次那一次，必须把整批原样重跑一次确认：重跑失败则定位第 k 张卡；重跑通过则视为偶发失败，本批按通过发布（k>1 时探测已证明前缀 1…k−1 通过）。第 1 步的 C-116 超时自动重跑本身就算这次确认重跑，不再另跑一次。
+  6. 通过的最长前缀（1…i−1）本身就是一个检查通过的子批次，直接发布，不重新检查；发布同样走 3.2 第 5 步的三步和崩溃恢复，`publishing` 记在该子批次上。
+  7. 父批次收尾：定位结论写入（`merge_batch_culprit_identified`）后，父批次转 `resolved`；通过前缀发布完成（或 i=1 没有可发布前缀）时，第 i+1…k 张卡回到队列。确认重跑通过时，父批次自己经 `publishing` 发布。父批次收尾后，族内仍在跑的探测一律中止（记 `interrupted`），结果不再采用。
 - **定位结果**：失败原因卡写一条卡片流的 `merge_check_finished`（`level=batch`，`batch_id`，结果为探测中的 `failed`／`timed_out`，绑定本卡完成申请和失败前缀的 tree），退出队列。卡片仍是 `awaiting_merge`，状态机不动；现有失败处理（C-66、C-79）因此直接生效：PM 可退回修改或重新检查，敏感卡和已交人的确认只交人。“重新检查”让卡回到队列原位置，不需要重新确认，也不需要重跑卡级检查。
-- 同批其余未发布的卡自动回到队列，保留原排队位置，不需要重新确认。
+- 同批其余未发布的卡（失败原因卡之后的卡）自动回到队列，保留原排队位置，不需要重新确认。
 - `interrupted`（server 重启、候选改变）和 `executor_unreachable` 不算失败，不进入二分：前者以新 attempt 重跑同一批次；后者按 C-129 留在排队状态退避重试，不回退本机（C-124#8）。
 - 二分期间也只有这一个批次族在跑，项目队列等它结束。
 
 ### 3.4 队列和 main 的外部前进
 
 - main 在启用队列的项目里仍可能被别的路径推进：登记源的快进同步（§12.1）、队列关闭期间的旧单卡路径。批次和二分探测都绑定 `base_sha`。
-- 合并循环每轮读基线；发现基线已不是 `base_sha` 时，中止进行中的批次检查（记 `interrupted`，`merge_batch_aborted` 原因 `stale`），成员按原位置回到队列，在新基线上重新组批。发布时的比较更新失败同样按 `stale` 处理，不强写。
+- 合并循环每轮读基线；先按 3.2 第 5 步做发布恢复，再判断：未进入 `publishing` 的批次族发现基线已不是 `base_sha` 时，中止进行中的批次检查（记 `interrupted`，`merge_batch_aborted` 原因 `stale`），成员按原位置回到队列，在新基线上重新组批。发布时的比较更新失败同样按 `stale` 处理，不强写。
 - 同一项目同时只有一个进行中的批次族；下一批不在本批上投机叠加（不做投机执行，见第 6 节“不做”）。
 - 队列开启时，单卡旧路径对该项目关闭：已确认的卡只能经批次合并。noop 卡不进队列，仍按现有 noop 路径收尾（无需检查）。
 
 ### 3.5 成员退出与中止
 
-- 成员卡在批次进行中被退回修改、取消、标为敏感导致 PM 的确认作废、完成申请被取代或撤回审核（不变量 27 已禁止批次检查运行中撤回，见 3.8）时，该卡退出队列，所在批次中止（`merge_batch_aborted` 原因 `member_left`，检查进程按现有取消路径结束），其余成员按原位置回到队列。
+- 成员卡在批次进行中被退回修改、取消、标为敏感导致 PM 的确认作废、完成申请被取代或撤回审核（不变量 27 已禁止批次检查运行中撤回，见 3.8）时，该卡退出队列，所在批次中止（`merge_batch_aborted` 原因 `member_left`，检查进程按现有取消路径结束），其余成员按原位置回到队列。这只适用于尚未进入 `publishing` 的批次族；进入 `publishing` 后这些命令被拒绝，提示“正在合并”，等发布完成（或恢复判定为 stale 中止）后再处理。
 - server 停止：沿用现有顺序，取消检查、等中断结果持久化后再关闭 Store。
 
 ### 3.6 优先级、插队和“单独跑”（与 C-144 的配合，由 q(222) 决定）
@@ -168,6 +174,7 @@ C-144（接替 C-121，在途）把优先级改为固定五档 None／Low／Medi
 | `merge_batch_check_queued／started／finished` | 项目 | 与 `merge_check_*` 同形，`level=batch`、`batch_id`、`completion_ids[]`；`finished` 结果为 passed／failed／timed_out／interrupted／executor_unreachable |
 | `merge_batch_bisect_started` | 项目 | 原批次、探测子批次编号 |
 | `merge_batch_culprit_identified` | 项目 | 原批次、失败原因卡及完成申请、证据（子批次编号与结果） |
+| `merge_batch_publishing` | 项目 | `base_sha`、`final_sha`；比较更新之前持久化，作为崩溃恢复的边界 |
 | `merge_batch_published` | 项目 | `previous_sha`、`final_sha`、成员 |
 | `merge_batch_aborted` | 项目 | 原因 `stale／member_left／interrupted` |
 | `merge_batch_stage_changed` | 每个成员卡 | 阶段 `batch_checking／bisecting／requeued`，附批次编号；只在阶段变化时写 |
@@ -175,16 +182,18 @@ C-144（接替 C-121，在途）把优先级改为固定五档 None／Low／Medi
 | `card_merged`（增加 `batch_id?`、`batch_peers?`） | 成员卡 | 见 3.2 第 5 步 |
 | `merge_solo_set` | 卡片 | `solo`、操作者、理由 |
 
-- 命令：`formMergeBatch`、`recordMergeBatchCheck`、`identifyMergeBatchCulprit`、`recordMergeBatchResult`（整批原子）、`abortMergeBatch` 只允许 system；`setMergeSolo` 允许 human 和常驻 PM Ops。全部在同一新鲜事务快照里校验。
+- 命令：`formMergeBatch`、`formBisectProbe`、`recordMergeBatchCheck`、`identifyMergeBatchCulprit`、`beginMergeBatchPublish`、`recordMergeBatchResult`（整批原子）、`abortMergeBatch` 只允许 system；`setMergeSolo` 允许 human 和常驻 PM Ops。全部在同一新鲜事务快照里校验。
 - 不变量（契约测试必须覆盖）：
   1. 不变量 21 新表述（ADR 0004）：单卡合并只认 `level=single` 的 passed 记录；批次合并的 passed 记录绑定的完成申请集合与成员集合完全相等，且每个成员是本卡当前完成申请；`level=card` 的记录永远不能授权 merged；不同批次、不同 tree 不复用。
   2. `recordMergeBatchResult` 要么为全部成员写 `card_merged`，要么全部不写。
   3. 一个项目同时最多一个进行中的批次族（主批次及其二分子批次）。
-  4. 卡片同时最多属于一个进行中的批次；`done`／`cancelled` 卡不能入批。
-  5. 组批只收在队列中的卡（3.1 的条件），未确认、卡级未通过、敏感卡未获 human 确认的卡入批被拒。
+  4. 卡片同时最多归属一个进行中的批次族；`done`／`cancelled` 卡不能入批。同族内父批次和探测子批次的成员重叠是合法的；探测子批次只能在父批次 `bisecting` 时创建，成员必须是父批次叠加链的前缀（同 `base_sha`、同成员和 `merge_sha`、同顺序），否则拒绝。
+  5. 主批次组批只收在队列中的卡（3.1 的条件），未确认、卡级未通过、敏感卡未获 human 确认、已归属另一个进行中批次族的卡入批被拒。
+  5a. 发布边界：`recordMergeBatchResult` 要求批次已有 `merge_batch_publishing`；`publishing` 之后 `abortMergeBatch`、成员的退回修改、取消和撤回审核都被拒绝；同一批次重放 `recordMergeBatchResult` 无新事件。
+  5b. 定位证据：`identifyMergeBatchCulprit` 要求至少两条失败证据（原批次结果加一次探测失败或确认重跑失败），单卡批次同样适用。
   6. 失败原因卡退出队列，其余成员回到队列且确认不失效。
   7. 卡片状态只经已有迁移：批次相关命令不新增 Card 状态，只有 `card_merged` 让卡片 `done`。
-  8. 不变量 23 新前置条件：PM 代确认选 merge 时要求卡级通过；不变量 27 扩展：本卡所在批次检查为 running 时禁止撤回审核。
+  8. 不变量 23 新前置条件：PM 代确认选 merge 时要求卡级通过；不变量 27 扩展：本卡所在批次族的检查为 running，或批次处于 `publishing` 时，禁止撤回审核。
   9. `setMergeSolo` 拒绝 Agent（除常驻 PM Ops）、拒绝空理由（PM Ops）、拒绝终态卡。
 - 读模型：卡片视图增加派生字段 `merge_stage`：
 
@@ -212,10 +221,10 @@ C-144（接替 C-121，在途）把优先级改为固定五档 None／Low／Medi
 
 | 任务 | 分支 | 内容 | 范围（包和文件） | 验收标准 | 依赖 |
 |---|---|---|---|---|---|
-| B1a 批次实体与事件 | `feat/p2a-13b1a-merge-batch-domain` | MB-n 编号、批次实体、3.8 的事件与 system 命令、队列和 `merge_stage` 派生 | `packages/domain/src/ids.ts`、`entities.ts`、`commands/merge-batch.ts`（新）、`card-derived.ts`、`index.ts`；`packages/store` 的事件持久化和读取 | 3.8 不变量 2–7 的契约测试；`MB-` 编号递增不复用且与 `M-` 解析不混；`merge_stage` 每个值有派生用例；`pnpm --filter @cardigan/domain test:types` 通过 | ADR 0004 已合并（本卡） |
+| B1a 批次实体与事件 | `feat/p2a-13b1a-merge-batch-domain` | MB-n 编号、批次实体、3.8 的事件与 system 命令、队列和 `merge_stage` 派生 | `packages/domain/src/ids.ts`、`entities.ts`、`commands/merge-batch.ts`（新）、`card-derived.ts`、`index.ts`；`packages/store` 的事件持久化和读取 | 3.8 不变量 2–7（含 4 的同族合法重叠、跨族重复归属被拒、非前缀或父批次不在 `bisecting` 时探测被拒）的契约测试；`MB-` 编号递增不复用且与 `M-` 解析不混；`merge_stage` 每个值有派生用例；`pnpm --filter @cardigan/domain test:types` 通过 | ADR 0004 已合并（本卡） |
 | B1b 不变量 21／23／27 改写 | `feat/p2a-13b1b-batch-merge-invariants` | `recordMergeResult` 支持批次依据；卡级记录不能授权 merged；PM 代确认、C-115 展示、C-29 代批改看卡级通过；撤回审核扩展到批次运行中；`setMergeSolo` | `packages/domain/src/commands/merge-result.ts`、`merge-check.ts`、`merge-delegation.ts`、`auto-merge.ts`、`merge-preparation.ts` 相关判断、撤回审核命令；对应契约测试 | 3.8 不变量 1、8、9 的契约测试；未启用队列的项目所有现有合并契约测试不改断言即通过（回归） | B1a |
-| B2a 队列循环：组批、检查、发布 | `feat/p2a-13b2a-merge-queue-loop` | 组批与叠加、冲突处理、`MB-<n>` 候选分发、批次全量检查、整批发布、`stale` 与成员退出中止；`merge-gate.yaml` 增加 `queue: {enabled, max_batch_size}`；C-144 排序键（或同档） | `apps/server/src/merge-loop.ts`、`merge-checks.ts`（新增批次任务类型）、`apps/server/src/git.ts`（`prepareBatch`、`publishBatch`）；`packages/git-transport` 中心仓库叠加与比较更新；`packages/host/src/merge-gate-config.ts` | 不配置 `queue` 时行为与现在相同（回归）；3 张卡一批：一次检查、一次比较更新、3 个 `card_merged`；基线外部前进时中止并重组；成员被退回时中止且其余回原位；批次检查与卡级检查共用执行目标分桶名额；远程不可达时排队退避不回退本机 | B1b、A3 |
-| B2b 二分与定位 | `feat/p2a-13b2b-merge-batch-bisect` | 3.3 的探测、并行／二分策略、定位规则、整批确认重跑、通过前缀发布、失败原因卡记录；C-116 超时重跑扩展到批次 | `apps/server/src/merge-loop.ts`、`merge-checks.ts`；`packages/domain/src/commands/merge-batch.ts` 的定位校验 | k=4 时第 1／2／3／4 张为坏卡各一个用例；偶发失败（确认重跑通过）发布整批；探测 `interrupted`／`executor_unreachable` 不产生定位结论；定位后 C-66 退回和重查路径可用，敏感卡只交人 | B2a；C-116 合并后补超时重跑用例 |
+| B2a 队列循环：组批、检查、发布 | `feat/p2a-13b2a-merge-queue-loop` | 组批与叠加、冲突处理、`MB-<n>` 候选分发、批次全量检查、整批发布、`stale` 与成员退出中止；`merge-gate.yaml` 增加 `queue: {enabled, max_batch_size}`；C-144 排序键（或同档） | `apps/server/src/merge-loop.ts`、`merge-checks.ts`（新增批次任务类型）、`apps/server/src/git.ts`（`prepareBatch`、`publishBatch`）；`packages/git-transport` 中心仓库叠加与比较更新；`packages/host/src/merge-gate-config.ts` | 不配置 `queue` 时行为与现在相同（回归）；3 张卡一批：一次检查、一次比较更新、3 个 `card_merged`；基线外部前进时中止并重组；成员被退回时中止且其余回原位；故障恢复：比较更新成功、事务提交前进程退出，重启后补写 `merge_batch_published` 和全部 `card_merged`，各卡 `merge_sha` 是叠加链上的本卡提交，不走 noop、不判 stale；`publishing` 已记录但比较更新未发生时重做发布；`publishing` 后基线被外部推进到不含 `final_sha` 时才按 stale 中止；批次检查与卡级检查共用执行目标分桶名额；远程不可达时排队退避不回退本机 | B1b、A3 |
+| B2b 二分与定位 | `feat/p2a-13b2b-merge-batch-bisect` | 3.3 的探测、并行／二分策略、定位规则、整批确认重跑、通过前缀发布、失败原因卡记录；C-116 超时重跑扩展到批次 | `apps/server/src/merge-loop.ts`、`merge-checks.ts`；`packages/domain/src/commands/merge-batch.ts` 的定位校验 | k=4 时第 1／2／3／4 张为坏卡各一个用例；探测并行时同一张卡同时在父批次和多个探测里不被拒；单卡批次（队列只有一张卡、“单独跑”的卡）各两个用例：确认重跑失败才定位、确认重跑通过则发布；偶发失败（确认重跑通过）发布整批；定位后父批次收尾、仍在跑的探测中止；探测 `interrupted`／`executor_unreachable` 不产生定位结论；定位后 C-66 退回和重查路径可用，敏感卡只交人 | B2a；C-116 合并后补超时重跑用例 |
 | B3 接口与工具 | `feat/p2a-13b3-merge-queue-api` | 读接口：卡片 `merge_stage`、项目 `merge_batches`、批次详情 `GET /api/projects/:project/merge-batches/:batch`；MCP `set_merge_solo`（仅常驻 PM Ops）；CLI `cardigan merge solo`；`list_needs_you` 增加批次失败定位的条目 | `apps/server/src/web/read.ts`、`card-state.ts`、`server.ts`；`packages/mcp-server`；`apps/cli`；`packages/roles`（PM Ops 工具清单） | 批次详情要求登录且批次属于本项目；MCP 工具对其他角色 `unauthorized`；CLI 只接受人 | B1b |
 | B4 Workbench 界面 | `feat/p2a-13b4-merge-queue-ui` | 3.9 全部界面 | `apps/web/src/components/BoardCard.tsx`、`Board.tsx`、`MergeCheck.tsx`、`CardSidebar.tsx`，新增批次详情抽屉；Needs You 合并确认文案 | 组件测试覆盖六个子标签、同批相邻与同色、悬停高亮、单独批次、批次详情的二分展示、两块检查分开显示和“未单独检查”说明；亮暗主题对比度测试通过 | B3 |
 | B5 上线切换（Claude 负责，不开实现卡） | — | `cardigan` 的 `merge-gate.yaml` 打开 `queue`，把 e2e 改成 `tiers: [batch]`（落实拍板第 3 条）；先一张卡试跑 | 私有部署仓库的配置 | 见第 8 节 | B1–B4；敏感卡默认单独跑的拍板 |
