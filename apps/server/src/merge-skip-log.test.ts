@@ -8,9 +8,7 @@ const error = (message: string) =>
 
 test("C-112: one log per card and reason, again after the reason changes or the card was ready", () => {
   const logged: string[] = [];
-  const log = new MergeSkipLog("merge loop", (e) =>
-    logged.push((e as Error).message),
-  );
+  const log = new MergeSkipLog("merge loop", (m) => logged.push(m));
   log.skipped("p", card(1), error("合并被待执行的人工事项 H-12 挡住"));
   log.skipped("p", card(1), error("合并被待执行的人工事项 H-12 挡住"));
   log.skipped("q", card(1), error("合并被待执行的人工事项 H-12 挡住"));
@@ -30,9 +28,20 @@ test("C-112: one log per card and reason, again after the reason changes or the 
   expect(logged).toHaveLength(5);
 });
 
-test("a throwing reporter never escapes", () => {
-  const log = new MergeSkipLog("merge checks", () => {
-    throw new Error("boom");
+test("a throwing reporter never escapes, and the undelivered reason is retried", () => {
+  const delivered: string[] = [];
+  let fail = true;
+  const log = new MergeSkipLog("merge checks", (e) => {
+    if (fail) throw new Error("temporary reporter failure");
+    delivered.push(e);
   });
-  expect(() => log.skipped("p", card(2), error("x"))).not.toThrow();
+  const reason = error("合并被待执行的人工事项 H-12 挡住");
+  expect(() => log.skipped("p", card(2), reason)).not.toThrow();
+  expect(delivered).toEqual([]);
+  fail = false;
+  log.skipped("p", card(2), reason);
+  log.skipped("p", card(2), reason);
+  expect(delivered).toEqual([
+    "merge checks skipped p/C-2: illegal_transition: 合并被待执行的人工事项 H-12 挡住",
+  ]);
 });

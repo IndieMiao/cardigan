@@ -98,8 +98,17 @@ interface Task {
 export class MergeChecks {
   private readonly abort = new AbortController();
   private readonly seen = new Set<string>();
-  private readonly skips = new MergeSkipLog("merge checks", (error) =>
-    this.options.onError(error),
+  private readonly skips = new MergeSkipLog("merge checks", (message) =>
+    this.options.report?.(message),
+  );
+  /**
+   * C-112: publication re-validates with the confirmed `mergePlan`; its
+   * refusals (no confirmation, hold, a merge-blocking action) are logged on
+   * their own so a valid preparation plan never clears them.
+   */
+  private readonly publishSkips = new MergeSkipLog(
+    "merge checks publish",
+    (message) => this.options.report?.(message),
   );
   /**
    * P2a-12 D: one in-flight lane per project (a project never checks or
@@ -131,6 +140,8 @@ export class MergeChecks {
       git: MergeGit & Partial<MergeCheckGit>;
       clock: Clock;
       onError: (error: unknown) => void;
+      /** C-112: informational skip notices (not errors); default discards. */
+      report?: (message: string) => void;
     },
   ) {}
 
@@ -228,10 +239,15 @@ export class MergeChecks {
     return git as MergeGit & MergeCheckGit;
   }
   private valid(task: Task, confirmed = false): boolean {
+    const { project_id } = task.project,
+      { card_id } = task.plan;
     const plan = (confirmed ? mergePlan : prepareMergePlan)(
-      this.state(task.project.project_id),
-      task.plan.card_id,
+      this.state(project_id),
+      card_id,
     );
+    if (confirmed)
+      if (plan.ok) this.publishSkips.ready(project_id, card_id);
+      else this.publishSkips.skipped(project_id, card_id, plan.error);
     return plan.ok && JSON.stringify(plan.value) === JSON.stringify(task.plan);
   }
   private passed(task: Task, tree: string): boolean {
@@ -785,14 +801,13 @@ export class MergeChecks {
         project = this.options.git.projectOf(id);
       if (settings.status !== "enabled" || !project) continue;
       const state = this.state(id);
-      this.skips.retain(
-        id,
-        new Set(
-          state.cards
-            .filter((c) => c.status === "awaiting_merge")
-            .map((c) => c.id),
-        ),
+      const awaiting = new Set(
+        state.cards
+          .filter((c) => c.status === "awaiting_merge")
+          .map((c) => c.id),
       );
+      this.skips.retain(id, awaiting);
+      this.publishSkips.retain(id, awaiting);
       for (const card of state.cards) {
         if (card.status !== "awaiting_merge") continue;
         const plan = prepareMergePlan(state, card.id);

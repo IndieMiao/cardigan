@@ -61,6 +61,8 @@ export interface MergeLoopOptions {
   readonly git: MergeGit;
   readonly clock?: Clock;
   readonly onError?: (error: unknown) => void;
+  /** C-112: informational notices such as skipped merge candidates. */
+  readonly report?: (message: string) => void;
   readonly gate?: MergeCheckOptions;
 }
 
@@ -78,8 +80,8 @@ export class MergeExecutor {
   private readonly checks: MergeChecks | undefined;
   private readonly skips: MergeSkipLog;
   constructor(private readonly options: MergeLoopOptions) {
-    this.skips = new MergeSkipLog("merge loop", (error) =>
-      this.options.onError?.(error),
+    this.skips = new MergeSkipLog("merge loop", (message) =>
+      this.options.report?.(message),
     );
     this.checks = options.gate
       ? new MergeChecks({
@@ -88,6 +90,7 @@ export class MergeExecutor {
           git: options.git,
           clock: this.clock,
           onError: options.onError ?? (() => {}),
+          ...(options.report ? { report: options.report } : {}),
         })
       : undefined;
   }

@@ -206,16 +206,13 @@ test("C-112: skips are logged once per reason, read-only human actions do not ho
   const sha = agentCommit("agent/C-1/W-1", "feature.txt", "feature\n");
   const { product } = await acceptThroughMergeGate(f, scenario, sha);
   await pin(product.id, sha);
-  const errors: unknown[] = [];
+  const notices: string[] = [];
   const loop = new MergeExecutor({
     store: f.store,
     git: new ServerGit({ store: f.store, dataDir: f.dataDir }),
-    onError: (error) => errors.push(error),
+    report: (message) => notices.push(message),
   });
-  const skips = () =>
-    errors
-      .map((e) => (e instanceof Error ? e.message : String(e)))
-      .filter((m) => m.startsWith("merge loop skipped"));
+  const skips = () => notices.filter((m) => m.startsWith("merge loop skipped"));
   await loop.tick(f.project_id);
   await loop.tick(f.project_id);
   expect(skips()).toHaveLength(1);

@@ -9,21 +9,20 @@ export class MergeSkipLog {
   private readonly last = new Map<string, string>();
   constructor(
     private readonly loop: string,
-    private readonly report: (error: unknown) => void,
+    private readonly report: (message: string) => void,
   ) {}
   /** A card whose plan did not validate this pass. */
   skipped(project_id: ProjectId, card_id: CardId, error: DomainError): void {
     const key = `${project_id}/${card_id}`;
     const reason = `${error.code}: ${error.message}`;
     if (this.last.get(key) === reason) return;
-    this.last.set(key, reason);
     try {
-      this.report(
-        new Error(`${this.loop} skipped ${project_id}/${card_id}: ${reason}`),
-      );
+      this.report(`${this.loop} skipped ${project_id}/${card_id}: ${reason}`);
     } catch {
-      // Logging must never stop the loop.
+      // Logging must never stop the loop; an undelivered reason is retried.
+      return;
     }
+    this.last.set(key, reason);
   }
   /** The card's plan validated, so a later skip is news again. */
   ready(project_id: ProjectId, card_id: CardId): void {
