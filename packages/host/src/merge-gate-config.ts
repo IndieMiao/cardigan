@@ -12,6 +12,7 @@ import {
   type MergeGateExecutor,
   parseMergeGateExecutors,
   resolveProjectExecutor,
+  validExecutorName,
 } from "./merge-gate-executors.js";
 import {
   type MergePushConfig,
@@ -215,9 +216,25 @@ export async function loadMergeGateConfig(input: {
     errors.push(globalError);
     return result();
   }
+  // q(208) one_project_per_account: an executor (one execution account) serves exactly one project.
+  // Counted over every project in the file, registered or not, so the shared account is never used.
+  const referencedBy = new Map<string, string[]>();
+  for (const [project, value] of Object.entries(raw.projects)) {
+    const name = object(value) ? value.executor : undefined;
+    if (validExecutorName(name))
+      referencedBy.set(name, [...(referencedBy.get(name) ?? []), project]);
+  }
   for (const [project, value] of Object.entries(raw.projects)) {
     try {
       if (!input.projectIds.includes(project)) invalid("项目未登记");
+      const name = object(value) ? value.executor : undefined;
+      const sharing = validExecutorName(name)
+        ? (referencedBy.get(name) ?? [])
+        : [];
+      if (sharing.length > 1)
+        invalid(
+          `执行目标 ${name as string} 被 ${sharing.length} 个项目引用（${sharing.join("、")}），一个执行账号只能服务一个项目（q(208)），不会回退到本机；请给每个项目配置独立的执行账号或执行目标`,
+        );
       projects.set(
         project,
         await projectConfig(
