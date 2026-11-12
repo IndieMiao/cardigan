@@ -18,6 +18,7 @@
 - `cardigan` 项目的合并检查在 `cardigan-ci` 执行目标上跑，并发 3（C-128 分桶，`executors.cardigan-ci.max_concurrent: 3`），test 用 `--maxWorkers=4`，3 × 4 正好占满 12 vCPU。
 - 主机 GS66 的 Agent 并发为 6：干活的 Run 按 4 个排，另外 2 个留给常驻 PM 和主机运维（P2a-9 `run-capacity.yaml`）。合并检查不占这些名额（C-128）。
 - 一执行目标只服务一个项目（C-139），所以 `cardigan-ci` 的 3 个槽位全部属于 `cardigan` 项目。
+- 本计划的卡级快速检查、批次全量检查和二分探测都跑在项目配置的执行目标上，对 `cardigan` 就是 `cardigan-ci`，不跑在 GS66。这对应用户 2026-11-12 定的分工：GS66 只做 Agent 宿主，CI 尽量都放到 `cardigan-ci`。
 
 ## 1. 目标
 
@@ -106,8 +107,8 @@ A1 和 A2 互不依赖，可以并行开卡。
 
 1. **组批**：项目没有进行中的批次（`checking`、`bisecting`）且队列非空时立即组批，不设攒批等待时间。从队首按顺序取卡，直到批次上限（`queue.max_batch_size`，默认 4，范围 1–8）；遇到 `solo` 卡时：如果它在队首，组一个只有它的批次；否则批次在它之前截止。
 2. **叠加与冲突**：主机在中心仓库依次 `merge-tree --write-tree` + `commit-tree`。某张卡和 `base_sha` 本身冲突，按现有 `merge_conflicted` 流程处理（卡回 `in_progress`，给原实现方排修复 Run），并从本批去掉；只和本批前面的卡冲突、和 `base_sha` 不冲突时，从本批去掉但保留队列位置，等前面的卡合入后在下一批里自然暴露冲突。至少剩一张卡才组批。
-3. **候选分发**：批次最终提交固定到 `refs/cardigan/candidates/MB-<n>`。这个前缀已经由 C-127 的候选分发同步到执行目标的基础 clone，所以批次可以直接作为 C-127 的候选分发（一个候选对应一棵 tree），不需要新的分发通道（C-124#8）。
-4. **全量检查**：在 `final_tree_sha` 上跑 `batch` 层全部检查（含 e2e），范围固定为 `full`。执行目标、槽位锁、远程目录准备沿用项目 `executor` 配置（C-127、C-130）；占用的名额与卡级检查在同一执行目标的分桶里共同计数（C-128，C-124#8）。
+3. **候选分发**：批次最终提交固定到 `refs/cardigan/candidates/MB-<n>`。这个前缀已经由 C-127 的候选分发同步到执行目标的基础 clone，所以批次可以直接作为 C-127 的候选分发（一个候选对应一棵 tree），不需要新的分发通道（C-124#8，源自 C-127#3）。
+4. **全量检查**：在 `final_tree_sha` 上跑 `batch` 层全部检查（含 e2e），范围固定为 `full`。执行目标、槽位锁、远程目录准备沿用项目 `executor` 配置（C-127、C-130）；占用的名额与卡级检查在同一执行目标的分桶里共同计数（C-128，C-124#8，源自 C-127#3）。
 5. **发布**：通过后，主机校验每个成员仍归属本族、完成申请仍是当前申请、成员的 `merge_sha` 在叠加链上，然后分三步：
    1. 先持久化 `merge_batch_publishing`（`batch_id`、`base_sha`、`final_sha`，system 命令 `beginMergeBatchPublish`），批次进入 `publishing`。从这一步起批次不能再中止，成员也不能被退回或取消（这些命令在事务里看到 `publishing` 即拒绝，提示“正在合并”）；
    2. 再用 `update-ref <base> <final_sha> <base_sha>` 比较更新；
@@ -127,7 +128,7 @@ A1 和 A2 互不依赖，可以并行开卡。
   7. 父批次收尾：定位结论写入（`merge_batch_culprit_identified`）后，父批次转 `resolved`；通过前缀发布完成（或 i=1 没有可发布前缀）时，第 i+1…k 张卡回到队列。确认重跑通过时，父批次自己经 `publishing` 发布。父批次收尾后，族内仍在跑的探测一律中止（记 `interrupted`），结果不再采用。
 - **定位结果**：失败原因卡写一条卡片流的 `merge_check_finished`（`level=batch`，`batch_id`，结果为探测中的 `failed`／`timed_out`，绑定本卡完成申请和失败前缀的 tree），退出队列。卡片仍是 `awaiting_merge`，状态机不动；现有失败处理（C-66、C-79）因此直接生效：PM 可退回修改或重新检查，敏感卡和已交人的确认只交人。“重新检查”让卡回到队列原位置，不需要重新确认，也不需要重跑卡级检查。
 - 同批其余未发布的卡（失败原因卡之后的卡）自动回到队列，保留原排队位置，不需要重新确认。
-- `interrupted`（server 重启、候选改变）和 `executor_unreachable` 不算失败，不进入二分：前者以新 attempt 重跑同一批次；后者按 C-129 留在排队状态退避重试，不回退本机（C-124#8）。
+- `interrupted`（server 重启、候选改变）和 `executor_unreachable` 不算失败，不进入二分：前者以新 attempt 重跑同一批次；后者按 C-129 留在排队状态退避重试，不回退本机（C-124#8，源自 C-127#3）。
 - 二分期间也只有这一个批次族在跑，项目队列等它结束。
 
 ### 3.4 队列和 main 的外部前进
@@ -201,6 +202,7 @@ C-144（接替 C-121，在途）把优先级改为固定五档 None／Low／Medi
 |---|---|---|
 | `awaiting_confirmation` | 待合并、未确认 | 卡级检查结果 |
 | `queued` | 在队列中 | 队列位置（第 n 位） |
+| `held_by_window` | 在队列中，但被合并窗口挡住（B6，见 3.11） | 保护卡编号 |
 | `batch_checking` | 在进行中的主批次里 | `MB-n`、颜色序号、已完成步数／总步数 |
 | `bisecting` | 所在批次在二分 | `MB-n` |
 | `culprit` | 定位为失败原因，等处理 | `MB-n`、失败摘要 |
@@ -221,15 +223,49 @@ C-144（接替 C-121，在途）把优先级改为固定五档 None／Low／Medi
 
 | 任务 | 分支 | 内容 | 范围（包和文件） | 验收标准 | 依赖 |
 |---|---|---|---|---|---|
-| B1a 批次实体与事件 | `feat/p2a-13b1a-merge-batch-domain` | MB-n 编号、批次实体、3.8 的事件与 system 命令、队列和 `merge_stage` 派生 | `packages/domain/src/ids.ts`、`entities.ts`、`commands/merge-batch.ts`（新）、`card-derived.ts`、`index.ts`；`packages/store` 的事件持久化和读取 | 3.8 不变量 2–7（含 4 的同族合法重叠、跨族重复归属被拒、非前缀或父批次不在 `bisecting` 时探测被拒）的契约测试；`MB-` 编号递增不复用且与 `M-` 解析不混；`merge_stage` 每个值有派生用例；`pnpm --filter @cardigan/domain test:types` 通过 | ADR 0004 已合并（本卡） |
+| B1a 批次实体与事件 | `feat/p2a-13b1a-merge-batch-domain` | MB-n 编号、批次实体、3.8 的事件与 system 命令、队列和 `merge_stage` 派生 | `packages/domain/src/ids.ts`、`entities.ts`、`commands/merge-batch.ts`（新）、`card-derived.ts`、`index.ts`；`packages/store` 的事件持久化和读取 | 3.8 不变量 2–7（含 4 的同族合法重叠、跨族重复归属被拒、非前缀或父批次不在 `bisecting` 时探测被拒）的契约测试；`MB-` 编号递增不复用且与 `M-` 解析不混；`merge_stage` 每个值有派生用例；`pnpm --filter @cardigan/domain test:types` 通过；实现时注意 PR 行数：新实体、十余类事件和对应契约测试超出几百行时拆开，例如 B1a-1（编号、实体、组批与归属相关事件和命令）、B1a-2（检查、定位、发布事件和 `merge_stage` 派生） | ADR 0004 已合并（本卡） |
 | B1b 不变量 21／23／27 改写 | `feat/p2a-13b1b-batch-merge-invariants` | `recordMergeResult` 支持批次依据；卡级记录不能授权 merged；PM 代确认、C-115 展示、C-29 代批改看卡级通过；撤回审核扩展到批次运行中；`setMergeSolo` | `packages/domain/src/commands/merge-result.ts`、`merge-check.ts`、`merge-delegation.ts`、`auto-merge.ts`、`merge-preparation.ts` 相关判断、撤回审核命令；对应契约测试 | 3.8 不变量 1、8、9 的契约测试；未启用队列的项目所有现有合并契约测试不改断言即通过（回归） | B1a |
 | B2a 队列循环：组批、检查、发布 | `feat/p2a-13b2a-merge-queue-loop` | 组批与叠加、冲突处理、`MB-<n>` 候选分发、批次全量检查、整批发布、`stale` 与成员退出中止；`merge-gate.yaml` 增加 `queue: {enabled, max_batch_size}`；C-144 排序键（或同档） | `apps/server/src/merge-loop.ts`、`merge-checks.ts`（新增批次任务类型）、`apps/server/src/git.ts`（`prepareBatch`、`publishBatch`）；`packages/git-transport` 中心仓库叠加与比较更新；`packages/host/src/merge-gate-config.ts` | 不配置 `queue` 时行为与现在相同（回归）；3 张卡一批：一次检查、一次比较更新、3 个 `card_merged`；基线外部前进时中止并重组；成员被退回时中止且其余回原位；故障恢复：比较更新成功、事务提交前进程退出，重启后补写 `merge_batch_published` 和全部 `card_merged`，各卡 `merge_sha` 是叠加链上的本卡提交，不走 noop、不判 stale；`publishing` 已记录但比较更新未发生时重做发布；`publishing` 后基线被外部推进到不含 `final_sha` 时才按 stale 中止；批次检查与卡级检查共用执行目标分桶名额；远程不可达时排队退避不回退本机 | B1b、A3 |
-| B2b 二分与定位 | `feat/p2a-13b2b-merge-batch-bisect` | 3.3 的探测、并行／二分策略、定位规则、整批确认重跑、通过前缀发布、失败原因卡记录；C-116 超时重跑扩展到批次 | `apps/server/src/merge-loop.ts`、`merge-checks.ts`；`packages/domain/src/commands/merge-batch.ts` 的定位校验 | k=4 时第 1／2／3／4 张为坏卡各一个用例；探测并行时同一张卡同时在父批次和多个探测里不被拒；单卡批次（队列只有一张卡、“单独跑”的卡）各两个用例：确认重跑失败才定位、确认重跑通过则发布；偶发失败（确认重跑通过）发布整批；定位后父批次收尾、仍在跑的探测中止；探测 `interrupted`／`executor_unreachable` 不产生定位结论；定位后 C-66 退回和重查路径可用，敏感卡只交人 | B2a；C-116 合并后补超时重跑用例 |
+| B2b 二分与定位 | `feat/p2a-13b2b-merge-batch-bisect` | 3.3 的探测、并行／二分策略、定位规则、整批确认重跑、通过前缀发布、失败原因卡记录；C-116 超时重跑扩展到批次 | `apps/server/src/merge-loop.ts`、`merge-checks.ts`；`packages/domain/src/commands/merge-batch.ts` 的定位校验 | k=4 时第 1／2／3／4 张为坏卡各一个用例；探测并行时同一张卡同时在父批次和多个探测里不被拒；单卡批次（队列只有一张卡、“单独跑”的卡）各两个用例：确认重跑失败才定位、确认重跑通过则发布；偶发失败（确认重跑通过）发布整批；定位后父批次收尾、仍在跑的探测中止；探测 `interrupted`／`executor_unreachable` 不产生定位结论；定位后 C-66 退回和重查路径可用，敏感卡只交人；`merge-batch.ts` 的定位校验（两次失败证据、探测前缀、父批次收尾）附契约测试，运行 `pnpm exec vitest run packages/domain` 和 `pnpm --filter @cardigan/domain test:types` | B2a；C-116 合并后补超时重跑用例 |
 | B3 接口与工具 | `feat/p2a-13b3-merge-queue-api` | 读接口：卡片 `merge_stage`、项目 `merge_batches`、批次详情 `GET /api/projects/:project/merge-batches/:batch`；MCP `set_merge_solo`（仅常驻 PM Ops）；CLI `cardigan merge solo`；`list_needs_you` 增加批次失败定位的条目 | `apps/server/src/web/read.ts`、`card-state.ts`、`server.ts`；`packages/mcp-server`；`apps/cli`；`packages/roles`（PM Ops 工具清单） | 批次详情要求登录且批次属于本项目；MCP 工具对其他角色 `unauthorized`；CLI 只接受人 | B1b |
 | B4 Workbench 界面 | `feat/p2a-13b4-merge-queue-ui` | 3.9 全部界面 | `apps/web/src/components/BoardCard.tsx`、`Board.tsx`、`MergeCheck.tsx`、`CardSidebar.tsx`，新增批次详情抽屉；Needs You 合并确认文案 | 组件测试覆盖六个子标签、同批相邻与同色、悬停高亮、单独批次、批次详情的二分展示、两块检查分开显示和“未单独检查”说明；亮暗主题对比度测试通过 | B3 |
+| B6 合并窗口 | `feat/p2a-13b6-merge-window` | 3.11 的窗口实体、开关命令、组批时跳过冲突范围内的卡、`merge_stage` 增加 `held_by_window`、界面提示 | `packages/domain/src/commands/merge-window.ts`（新）及契约测试；`apps/server/src/merge-loop.ts`（组批过滤）；`packages/mcp-server`（PM Ops 工具）、`apps/cli`；`apps/web` 卡片子标签和看板提示 | 3.11 的四条不变量有契约测试并运行 `pnpm exec vitest run packages/domain`、`pnpm --filter @cardigan/domain test:types`；第 N 次冲突自动开窗口；窗口内与保护范围相交的卡留在队列原位、不相交的卡照常组批；保护卡合并、取消、超时或被关闭后窗口关闭，被挡的卡按原位置组批；未开窗口时组批结果与 B2a 相同（回归） | B2a；3.11 待定项拍板 |
 | B5 上线切换（Claude 负责，不开实现卡） | — | `cardigan` 的 `merge-gate.yaml` 打开 `queue`，把 e2e 改成 `tiers: [batch]`（落实拍板第 3 条）；先一张卡试跑 | 私有部署仓库的配置 | 见第 8 节 | B1–B4；敏感卡默认单独跑的拍板 |
 
-B1a 只加实体和事件，不改变任何现有合并行为，可以在 A+C 进行中并行开卡；B2a 依赖 A3（检查要能按层跑）。
+B1a 只加实体和事件，不改变任何现有合并行为，可以在 A+C 进行中并行开卡；B2a 依赖 A3（检查要能按层跑）。B6 依赖 B2a 的组批，和 B2b、B3、B4 互不依赖。
+
+### 3.11 合并窗口（试行发现 57，B6）
+
+试行发现 57：C-85 前后冲突了八次。原因是它改的共享文件范围大，修冲突、重新审核、等确认的这段时间里，别的卡不断先合进 main，它每次回来都又冲突。合并队列和减少重跑只能缩短检查时间，挡不住这种“被反复插队”。合并窗口的做法是：给这张卡（保护卡）开一个窗口，窗口期内，和它改动范围相交的其他卡先在队列里等，让保护卡先合进去。
+
+**哪些卡需要窗口**
+- 自动：同一张卡累计 `merge_conflicted` 达到 N 次时，系统在第 N 次冲突的同一事务里为它开窗口。N 待定，建议 2。
+- 手动：PM Ops 或人可以给任意未结束的卡开窗口，例如等人确认、改动面大的卡，理由必填。
+
+**保护范围**
+- 取保护卡最新一版产出交付相对基线的改动文件（A1 的改动文件入口，按文件比较，不按包）。窗口开着时，保护卡每次重新交付都重算范围。
+- 其他卡的范围按同样方法计算。两者有交集，就算“在冲突范围内”。
+
+**窗口期间队列怎么做**
+- 组批时跳过冲突范围内的其他卡：它们留在队列原位，`merge_stage` 显示 `held_by_window`（“等待合并窗口：保护 C-x”），确认不失效，也不用重跑卡级检查；不相交的卡照常组批。
+- 保护卡自己进入队列后照常组批；批次失败定位到保护卡时，窗口不关，按现有失败处理。
+- 窗口只影响合并顺序，不阻止开发、审核和确认，也不改变 Card 状态。
+- 同一项目可以同时开多个窗口；两个窗口的保护范围相交时，后开的窗口等先开的关了再生效。这一条待定。
+
+**谁开、谁关**
+- 开：系统（第 N 次冲突），或 PM Ops、人手动开。
+- 关：保护卡合并或取消时，系统自动关闭；超过时限自动关闭，避免一张卡长期挡住别人（时限待定，建议 24 小时，从开窗口或保护卡最近一次交付起算）；PM Ops 或人也可以手动关，理由必填。敏感卡的窗口只能由人手动关。
+- 开关都写时间线和知会，被挡的卡的时间线写“因 C-x 的合并窗口暂缓合并”。
+
+**领域约束（B6 契约测试）**
+1. 窗口只由 system、常驻 PM Ops、human 开关，其他 Agent 被拒；手动开关理由必填。
+2. 组批不收任何生效窗口冲突范围内的非保护卡；未开窗口时组批结果与 B2a 相同。
+3. 保护卡合并、取消或时限到期时，窗口在同一事务或下一轮关闭，不留生效窗口。
+4. 被挡的卡保留原排队位置和确认，窗口关闭后按原位置组批。
+
+**待定项**（B6 开卡前由 PM 在卡上提问拍板，本计划不定死）：自动开窗口的 N；窗口时限；两个窗口范围相交时怎么处理；范围按文件还是按包算。
+
+共享文件冲突的另一半，是让开发方在开工时就知道某些文件正被保护卡改（提前协调）。这一部分不放进 P2a-13：它属于派发和提示，不属于合并队列。B6 合并后，如果冲突次数仍然高，由 PM 另开卡处理。
 
 ## 4. D 组：缓存、分片和不稳定测试
 
@@ -275,8 +311,9 @@ B1a 只加实体和事件，不改变任何现有合并行为，可以在 A+C �
 | C-116 | 在途（孙悟空，A-356） | 只处理超时、只重跑一次。B2b 合并在 C-116 之后，再把规则扩展到批次；D3 依赖 C-116 合并，计数时区分超时重跑 |
 | C-144（接替已取消的 C-121） | 在途（赵云，A-359） | 五档优先级决定排队。批次选卡、插队、单独跑与档位的关系见 3.6（由 q(222) 决定）；B2a 复用 C-144 的排序键，二者谁先合并都可以 |
 | C-141 | 已合并 | 修好的不稳定用例，作为 D3 的例子 |
+| C-85／试行发现 57 | C-85 已合并 | 反复冲突由 B6 合并窗口承接（3.11）；开工前的共享文件提前协调不在本计划内 |
 
-先后顺序：A1 ∥ A2 → A3 → （B1a 可提前）B1b → B2a → B2b；B1b → B3 → B4；B1–B4 → B5。D 组在 P2a-12 切换完成后开始，D1 → D2，D3 在 C-116 和 B2b 之后。所有卡都不修改在途卡 C-116、C-144 正在改的判断逻辑本身，只复用它们的结果；B2a／B2b 若和它们同时改 `merge-checks.ts`，后合并的一方按 AGENTS.md 合入基线后解决冲突。
+先后顺序：A1 ∥ A2 → A3 → （B1a 可提前）B1b → B2a → B2b；B1b → B3 → B4；B2a → B6；B1–B4 → B5（B6 不阻塞 B5，可以在队列上线后再开）。D 组在 P2a-12 切换完成后开始，D1 → D2，D3 在 C-116 和 B2b 之后。所有卡都不修改在途卡 C-116、C-144 正在改的判断逻辑本身，只复用它们的结果；B2a／B2b 若和它们同时改 `merge-checks.ts`，后合并的一方按 AGENTS.md 合入基线后解决冲突。
 
 ## 6. 不做
 
