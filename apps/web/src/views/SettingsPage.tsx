@@ -14,7 +14,9 @@ import {
   defaultDelegation,
   delegableCategories,
 } from "../decision-labels.js";
+import { employeeCopy } from "../employee-copy.js";
 import { useResource } from "../useResource.js";
+import { EmployeesSettings } from "./EmployeesSettings.js";
 import { RolesSettings } from "./RolesSettings.js";
 import { TemplateSettings } from "./TemplateSettings.js";
 
@@ -28,8 +30,9 @@ export function SettingsPage({
   revision?: number;
 }) {
   const [tab, setTab] = useState<
-    "preferences" | "authorization" | "roles" | "templates"
+    "preferences" | "authorization" | "roles" | "templates" | "employees"
   >("preferences");
+  const [employeeRole, setEmployeeRole] = useState("");
   const load = useCallback(
     () => client.preferences(projectId),
     [client, projectId],
@@ -37,10 +40,7 @@ export function SettingsPage({
   const resource = useResource(load, revision);
   return (
     <>
-      <PageTitle
-        title="设置"
-        description="管理当前项目的偏好、授权、角色和卡片模板。"
-      />
+      <PageTitle title="设置" description={employeeCopy.settingsDescription} />
       <div className="settings-layout">
         <nav aria-label="设置分栏">
           <button
@@ -78,6 +78,16 @@ export function SettingsPage({
           >
             卡片模板
           </button>
+          <button
+            type="button"
+            aria-current={tab === "employees" ? "page" : undefined}
+            onClick={() => {
+              setEmployeeRole("");
+              setTab("employees");
+            }}
+          >
+            {employeeCopy.tab}
+          </button>
         </nav>
         {tab === "roles" && (
           <section id="roles" tabIndex={-1} aria-labelledby="roles-title">
@@ -87,8 +97,21 @@ export function SettingsPage({
               client={client}
               projectId={projectId}
               revision={revision}
+              onNewEmployee={(roleId) => {
+                setEmployeeRole(roleId);
+                setTab("employees");
+              }}
             />
           </section>
+        )}
+        {tab === "employees" && (
+          <EmployeesSettings
+            key={projectId}
+            client={client}
+            projectId={projectId}
+            initialRole={employeeRole}
+            revision={revision}
+          />
         )}
         {tab === "templates" && (
           <TemplateSettings
@@ -105,7 +128,9 @@ export function SettingsPage({
             pendingMessage="正在加载偏好…"
           />
         )}
-        <div hidden={tab === "templates" || tab === "roles"}>
+        <div
+          hidden={tab === "templates" || tab === "roles" || tab === "employees"}
+        >
           <RequestFeedbackScope hidden={tab !== "preferences"}>
             <section
               hidden={tab !== "preferences"}

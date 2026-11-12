@@ -856,6 +856,38 @@ export interface RoleListView {
   readonly allowlists: RoleAllowlists;
 }
 
+export interface EmployeeOptions {
+  readonly library: readonly {
+    readonly id: string;
+    readonly name: string;
+    readonly source: string;
+    readonly avatar: string;
+    readonly occupied_by: {
+      readonly id: string;
+      readonly name: string;
+      readonly status: "active" | "inactive";
+    } | null;
+  }[];
+  readonly roles: readonly {
+    readonly role_id: string;
+    readonly display_name: string;
+  }[];
+}
+export interface CreateEmployeeInput {
+  readonly name: string;
+  readonly title: string;
+  readonly role_id: string;
+  readonly bio?: string;
+  readonly avatar?: string;
+  /** Canonical base64; the server identifies and stores the bitmap. */
+  readonly avatar_file?: string;
+}
+export interface CreatedEmployee {
+  readonly id: string;
+  readonly name: string;
+  readonly role_id: string;
+}
+
 /** One saved role version (V9a `Role`). */
 export interface RoleDefinitionView {
   readonly role_id: string;
@@ -940,6 +972,12 @@ export interface RoleCopyInput {
 }
 
 export interface CardiganClient {
+  employeeOptions(projectId: string): Promise<EmployeeOptions>;
+  createEmployee(
+    projectId: string,
+    input: CreateEmployeeInput,
+    idempotencyKey: string,
+  ): Promise<CreatedEmployee>;
   templates(projectId: string): Promise<{ templates: TemplateView[] }>;
   template(projectId: string, id: string): Promise<TemplateDetail>;
   templateHistory(
@@ -1374,6 +1412,23 @@ export class HttpCardiganClient implements CardiganClient {
   }
   roles(projectId: string): Promise<RoleListView> {
     return this.request(`/api/projects/${encodeURIComponent(projectId)}/roles`);
+  }
+  employeeOptions(projectId: string): Promise<EmployeeOptions> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/employees/options`,
+    );
+  }
+  createEmployee(
+    projectId: string,
+    input: CreateEmployeeInput,
+    idempotencyKey: string,
+  ): Promise<CreatedEmployee> {
+    return this.write(
+      projectId,
+      "employees",
+      input,
+      idempotencyKey,
+    ) as Promise<CreatedEmployee>;
   }
   role(projectId: string, roleId: string): Promise<RoleDetailView> {
     return this.request(

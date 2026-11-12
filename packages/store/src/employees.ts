@@ -99,6 +99,16 @@ export function createGlobalRepositories(
           .map((row) => employee(row as { doc: string })),
       put: (value) => {
         writable("employees.put");
+        // All repository writes hold BEGIN IMMEDIATE: check and write cannot
+        // race another connection. Keep inactive employees in the reservation.
+        if (
+          value.avatar?.startsWith("library:") &&
+          prepare(
+            db,
+            "SELECT id FROM employees WHERE id != ? AND json_extract(doc, '$.avatar') = ? LIMIT 1",
+          ).get(value.id, value.avatar)
+        )
+          throw new Error("人物已被其他员工使用，在职和离职员工均占用人物");
         prepare(
           db,
           "INSERT INTO employees (id, name_key, status, doc) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name_key = excluded.name_key, status = excluded.status, doc = excluded.doc",

@@ -330,6 +330,30 @@ test("legacy roles prefill converted instructions and warn about the new format"
   ).toBe(false);
 });
 
+test("a newly created role leads directly to employee creation with that role selected", async () => {
+  await openRoles(
+    client({
+      copyRole: async () => ({ ...v1, role_id: "designer-x" }),
+      employeeOptions: async () => ({
+        library: [],
+        roles: [{ role_id: "designer-x", display_name: "设计" }],
+      }),
+    }),
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "新建角色" }));
+  const form = screen.getByRole("form", { name: "新建角色" });
+  fireEvent.change(within(form).getByLabelText("新角色编号"), {
+    target: { value: "designer-x" },
+  });
+  fireEvent.click(within(form).getByRole("button", { name: "创建角色" }));
+  fireEvent.click(
+    await screen.findByRole("button", { name: "为这个角色新建员工" }),
+  );
+  expect(
+    ((await screen.findByLabelText("角色")) as HTMLSelectElement).value,
+  ).toBe("designer-x");
+});
+
 test("new role copies from the default pack or from an existing role in another project", async () => {
   const copyRole = vi.fn().mockResolvedValue({ ...v1, role_id: "designer-x" });
   await openRoles(
