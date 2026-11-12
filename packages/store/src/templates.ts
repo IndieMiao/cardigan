@@ -19,7 +19,7 @@ export function seedCardTemplates(db: DatabaseSync, project: string): void {
 }
 
 /**
- * Migration 0020 (p2v-12 V12a): add design v1 to projects seeded before it
+ * Migration 0021 (p2v-12 V12a): add design v1 to projects seeded before it
  * existed. Existing versions (including the old artifact v1) are untouched.
  */
 export function seedDesignTemplate(db: DatabaseSync): void {

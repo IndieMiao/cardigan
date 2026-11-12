@@ -102,7 +102,7 @@ export function migrate(
         migrateReadableIdFormat(db);
       if (migration.version === 19 && migration.name === "card_priorities")
         migrateCardPriorities(db);
-      if (migration.version === 20 && migration.name === "design_template")
+      if (migration.version === 21 && migration.name === "design_template")
         seedDesignTemplate(db);
       db.prepare(
         "INSERT INTO schema_version (version, name, applied_at) VALUES (?, ?, ?)",

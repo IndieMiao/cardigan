@@ -10,6 +10,7 @@ import {
 import { expect, test } from "vitest";
 import { defaultMigrationsDir, listMigrations } from "./migrate.js";
 import { Store } from "./store.js";
+import { latestSchemaVersion } from "./test-support.js";
 
 test("v10 upgrade seeds each project's builtin templates and fixes legacy cards at dev v1", () => {
   const root = mkdtempSync(join(tmpdir(), "cardigan-templates-"));
@@ -74,7 +75,7 @@ test("v10 upgrade seeds each project's builtin templates and fixes legacy cards 
   }
 });
 
-test("v20 adds design v1 to projects migrated before it and keeps their stored artifact v1", () => {
+test("v21 adds design v1 to projects migrated before it and keeps their stored artifact v1", () => {
   const root = mkdtempSync(join(tmpdir(), "cardigan-design-template-"));
   let store: Store | undefined;
   try {
@@ -116,7 +117,12 @@ test("v20 adds design v1 to projects migrated before it and keeps their stored a
     store.close();
 
     store = Store.open({ dbPath });
-    expect(store.schemaVersion()).toBe(20);
+    expect(store.schemaVersion()).toBe(latestSchemaVersion());
+    expect(
+      store.database
+        .prepare("SELECT name FROM schema_version WHERE version = 21")
+        .get(),
+    ).toEqual({ name: "design_template" });
     for (const id of ["one", "two"]) {
       const opened = store;
       expect(
