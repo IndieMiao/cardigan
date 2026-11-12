@@ -9,6 +9,7 @@ import {
   createGlobalRepositories,
 } from "./employees.js";
 import { persistMemberEffect } from "./members.js";
+import { migrateCardPriorities } from "./priority-migration.js";
 import { installSnapshotTriggers } from "./snapshot-migration.js";
 import { seedCardTemplates } from "./templates.js";
 
@@ -93,6 +94,8 @@ export function migrate(
       }
       if (migration.version === 17 && migration.name === "command_snapshots")
         installSnapshotTriggers(db);
+      if (migration.version === 18 && migration.name === "card_priorities")
+        migrateCardPriorities(db);
       db.prepare(
         "INSERT INTO schema_version (version, name, applied_at) VALUES (?, ?, ?)",
       ).run(migration.version, migration.name, now());

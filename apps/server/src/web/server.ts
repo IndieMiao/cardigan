@@ -81,6 +81,8 @@ import { serveWrite } from "./write.js";
  */
 
 export interface WebServerOptions {
+  /** 待定：低优先级排队提示阈值，默认 30 分钟。 */
+  readonly queueWarningMinutes?: number;
   readonly store: Store;
   readonly config: WebConfig;
   /** Structured log line per request, like the MCP endpoint's log. */
@@ -115,6 +117,7 @@ const systemClock: Clock = { now: () => new Date().toISOString() };
 const API_PREFIX = "/api/";
 
 interface RequestContext {
+  readonly queueWarningMinutes: number;
   readonly req: IncomingMessage;
   readonly res: ServerResponse;
   readonly url: URL;
@@ -141,6 +144,13 @@ export async function startWebServer(
     host: requireLoopbackHost(options.config.host),
   };
   const { store } = options;
+  const queueWarningMinutes =
+    options.queueWarningMinutes ??
+    Number(process.env.CARDIGAN_QUEUE_WARNING_MINUTES ?? 30);
+  if (!Number.isSafeInteger(queueWarningMinutes) || queueWarningMinutes < 1)
+    throw new Error(
+      "CARDIGAN_QUEUE_WARNING_MINUTES 必须是正整数（默认 30，待定）",
+    );
   const clock = options.clock ?? systemClock;
   const limiter = options.loginLimiter ?? new LoginLimiter();
   const log =
@@ -238,6 +248,7 @@ export async function startWebServer(
         dataDir,
         mergeGate: options.mergeGate,
         stream: options.stream,
+        queueWarningMinutes,
         shutdown: shutdown.signal,
         secureCookie: config.publicOrigins.includes(`https://${hostHeader}`),
         log,
@@ -628,7 +639,13 @@ async function serveProjectRoute(
     sendJson(
       res,
       200,
-      executionView(state, now, machines, readRunQueue(store)),
+      executionView(
+        state,
+        now,
+        machines,
+        readRunQueue(store),
+        context.queueWarningMinutes,
+      ),
     );
     return;
   }

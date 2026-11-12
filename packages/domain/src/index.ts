@@ -86,6 +86,7 @@ export * from "./member.js";
 export * from "./notification.js";
 export * from "./ports.js";
 export * from "./preferences.js";
+export * from "./priority.js";
 export { type ResolvedReference, resolveReferences } from "./references.js";
 export { reviewLimitAttention } from "./review-limit-attention.js";
 export * from "./role.js";

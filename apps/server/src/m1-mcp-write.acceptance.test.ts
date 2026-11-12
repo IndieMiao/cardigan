@@ -283,9 +283,9 @@ describe("every write tool has one normal call", () => {
     const updated = await call(w.office, "update_card", {
       idempotency_key: "w-update-card",
       card_id: w.cardId,
-      priority: 7,
+      priority: "urgent",
     });
-    expect(updated.priority).toBe(7);
+    expect(updated.priority).toBe(4);
 
     // create_work_item
     const created = await call(w.office, "create_work_item", {

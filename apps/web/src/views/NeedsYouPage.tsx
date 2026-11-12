@@ -27,6 +27,7 @@ import {
   Feedback,
   Markdown,
 } from "../components/Operations.js";
+import { PriorityBadge } from "../components/Priority.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
 import { decisionTitle, delegableCategories } from "../decision-labels.js";
 import { routeHash } from "../route.js";
@@ -357,7 +358,10 @@ export function MergeConfirmation({
   return (
     <article className="needs-item needs-merge" aria-label={`合并确认 ${q.id}`}>
       <DecisionMeta q={q} projectId={projectId} elapsed={elapsed} />
-      <h3 className="needs-question">{decisionTitle(q)}</h3>
+      <h3 className="needs-question">
+        <PriorityBadge value={q.card_priority ?? 0} />
+        {decisionTitle(q)}
+      </h3>
       {q.decider === "role:pm" && !confirmed && (
         <p className="hint">
           PM

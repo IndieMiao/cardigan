@@ -480,7 +480,7 @@ test("capacity preserves queued Run identity and notifications, then dispatches 
 
 test("cross-project event FIFO survives full ticks, changed limits, restart, and projects with identical IDs", async () => {
   const other = secondProject();
-  // IDs are project-scoped; event creation time is the only scheduling priority.
+  // IDs are project-scoped; equal card tiers keep event creation order.
   expect(other.owner.id).toBe(target.assignment.id);
   other.comment();
   f.advance(1000);
@@ -1508,4 +1508,58 @@ test("q(88) a full machine permits human CLI start, reports excess, and still qu
     release();
     await manual;
   }
+});
+
+test("live card priority reorders the saturated cross-project queue without replacing Runs", async () => {
+  const other = secondProject();
+  other.comment();
+  f.advance(1000);
+  comment();
+  const busy = f.create();
+  f.session(busy.assignment, false);
+  const dispatcher = new Dispatcher({ ...options, runLimit: () => 1 });
+  await dispatcher.tick();
+  const before = readRunQueue(f.store);
+  expect(before.map((r) => r.project_id)).toEqual([other.project, f.project]);
+  f.apply((s, a, p) =>
+    updateCard(s, a, { card_id: target.card.id, priority: "urgent" }, p),
+  );
+  expect(readRunQueue(f.store).map((r) => r.project_id)).toEqual([
+    f.project,
+    other.project,
+  ]);
+  finish(busy.assignment);
+  await dispatcher.tick();
+  expect(runtime.wake).toHaveBeenCalledOnce();
+  expect(options.startRun).not.toHaveBeenCalled();
+  const queued = before.find((r) => r.project_id === f.project);
+  expect(f.state().runs.find((r) => r.id === queued?.run_id)?.status).toBe(
+    "dispatched",
+  );
+  expect(readRunQueue(f.store).map((r) => [r.project_id, r.ahead])).toEqual([
+    [other.project, 0],
+  ]);
+});
+
+test("execution warns only for old low-priority capacity waits, using the configured threshold", async () => {
+  const busy = f.create();
+  f.session(busy.assignment, false);
+  comment();
+  await new Dispatcher({ ...options, runLimit: () => 1 }).tick();
+  const queue = readRunQueue(f.store);
+  f.advance(10 * 60_000);
+  const view = (minutes: number) =>
+    executionView(f.state(), f.clock.now(), [], readRunQueue(f.store), minutes);
+  expect(view(9).runs.find((r) => r.id === queue[0]?.run_id)).toMatchObject({
+    queue_warning: { after_minutes: 9 },
+  });
+  expect(view(11).runs.find((r) => r.id === queue[0]?.run_id)).toMatchObject({
+    queue_warning: { after_minutes: 11, waited_ms: 600000 },
+  });
+  f.apply((s, a, p) =>
+    updateCard(s, a, { card_id: target.card.id, priority: "urgent" }, p),
+  );
+  expect(
+    view(9).runs.find((r) => r.id === queue[0]?.run_id),
+  ).not.toHaveProperty("queue_warning");
 });

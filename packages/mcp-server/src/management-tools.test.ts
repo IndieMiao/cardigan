@@ -1078,3 +1078,56 @@ test("C-110: only standing PM Ops can replace a template verifier; invalid attem
   });
   expect(assigned.id).not.toBe(acceptance.id);
 });
+
+test.each([
+  "none",
+  "low",
+  "medium",
+  "high",
+  "urgent",
+  "无",
+  "低",
+  "中",
+  "高",
+  "紧急",
+])("MCP card commands accept priority tier %s", async (priority) => {
+  const rank =
+    [
+      "none",
+      "low",
+      "medium",
+      "high",
+      "urgent",
+      "无",
+      "低",
+      "中",
+      "高",
+      "紧急",
+    ].indexOf(priority) % 5;
+  const created = await ok<Card>(office, "create_card", {
+    title: "Priority",
+    goal: "Queue order",
+    acceptance_criteria: ["Fixed tier"],
+    source: { kind: "quote", text: "Priority" },
+    repo: "fixture",
+    base_branch: "main",
+    priority,
+  });
+  expect(created.priority).toBe(rank);
+  expect(
+    (await ok<Card>(office, "update_card", { card_id: card.id, priority }))
+      .priority,
+  ).toBe(rank);
+});
+
+test.each([0, 5, "3", "rush"])(
+  "MCP rejects non-name priority %s without writes",
+  async (priority) => {
+    const before = rows();
+    expect(
+      (await raw(office, "update_card", { card_id: card.id, priority }))
+        .isError,
+    ).toBe(true);
+    expect(rows()).toEqual(before);
+  },
+);
