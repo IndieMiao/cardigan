@@ -69,7 +69,7 @@ function fixture() {
     human_entry: async () => ({ ok: true as const, value: "attach" }),
   };
   const io: CliIo = {
-    env: { CARDIGAN_DATA_DIR: f.dataDir },
+    env: { CARDIGAN_RUNTIME_MODE: "local", CARDIGAN_DATA_DIR: f.dataDir },
     cwd: f.dataDir,
     platform: "linux",
     stdout: () => undefined,

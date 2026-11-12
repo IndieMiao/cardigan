@@ -297,6 +297,7 @@ describe.skipIf(!available)("M3.5 router and dispatcher end to end", () => {
     runtimeDir = createTestRuntime(join(root, "run"));
     socketPath = join(runtimeDir, "cardigan", `${SESSION}.sock`);
     hostEnv = {
+      CARDIGAN_RUNTIME_MODE: "local",
       CARDIGAN_DATA_DIR: dataDir,
       CARDIGAN_CONFIG_DIR: join(root, "config"),
       XDG_RUNTIME_DIR: runtimeDir,
@@ -441,6 +442,9 @@ describe.skipIf(!available)("M3.5 router and dispatcher end to end", () => {
           agent_cli_version: "pi 1.5.0-fake",
         }),
         startRun: async ({ project, assignment, run, bell }) => {
+          // The control plane may tick before startCardiganServer returns
+          // (it registers the runtime after every listener is up).
+          while (!server) await sleep(10);
           await startQueuedRun(
             {
               store,

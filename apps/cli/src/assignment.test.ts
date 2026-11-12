@@ -126,7 +126,7 @@ beforeEach(() => {
   dataDir = mkdtempSync(join(tmpdir(), "cardigan-assignment-"));
   store = Store.open({ dataDir });
   io = {
-    env: { CARDIGAN_DATA_DIR: dataDir },
+    env: { CARDIGAN_RUNTIME_MODE: "local", CARDIGAN_DATA_DIR: dataDir },
     cwd: dataDir,
     platform: "linux",
     stdout: () => undefined,

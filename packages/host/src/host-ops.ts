@@ -11,13 +11,16 @@ import {
   finishHostOpsAction,
   type HostOpsExecution,
   type HostOpsExecutionTool,
+  hostOpsExitConfirmation,
   hostOpsReadDiagnostics,
   type ProjectId,
   pendingHostOpsActions,
   prepareHostOpsAction,
   type RunId,
   type Runtime,
+  type RuntimeRef,
   recheckMerge,
+  requestHostOpsExitConfirmation,
 } from "@cardigan/domain";
 import {
   type HostOpsToolOptions,
@@ -49,7 +52,17 @@ interface Options {
   scrubCredentials?: (
     project: ProjectId,
     assignment: AssignmentId,
+    ref: RuntimeRef | null,
   ) => Promise<void>;
+  /**
+   * C-152: whether `runtime` can observe this terminal. A terminal recorded on
+   * another runtime (e.g. a local terminal while the server runs agent-ssh)
+   * can never be proven exited here, so the human confirms it instead.
+   * Defaults to "every reference belongs to `runtime`".
+   */
+  ownsRuntimeRef?: (ref: RuntimeRef) => boolean;
+  /** Label of the server runtime for the human instructions. */
+  runtimeLabel?: string;
 }
 /** Requests commit first. The dispatch loop drains intents; a restart resumes unfinished work. */
 export class HostOpsService {
@@ -282,6 +295,40 @@ export class HostOpsService {
       });
     });
   }
+  /**
+   * C-152: a terminal on another runtime is settled only after a human
+   * confirms it exited; until then a single Needs You item stays open.
+   */
+  private confirmedByHuman(project: ProjectId, action: HostOpsExecution) {
+    const { store } = this.options;
+    const state = store.uow.read((tx) => loadCommandState(tx, project));
+    const confirmation = hostOpsExitConfirmation(state, action.action_id);
+    if (confirmation.status === "confirmed") return true;
+    if (confirmation.status !== "open")
+      store.uow.run((tx) => {
+        const effect = unwrap(
+          requestHostOpsExitConfirmation(
+            loadCommandState(tx, project),
+            { kind: "system", project_id: project },
+            {
+              action_id: action.action_id,
+              ...exitConfirmationText(
+                action,
+                this.options.runtimeLabel ?? "server 当前运行时",
+              ),
+            },
+            { clock: this.clock, ids: tx.ids },
+          ),
+        );
+        persistEffect(tx, project, effect);
+      });
+    this.defer(
+      project,
+      action.action_id,
+      "terminal_exit_confirmation_requested",
+    );
+    return false;
+  }
   private async drain() {
     const { store, runtime } = this.options;
     for (const project of store.listProjects()) {
@@ -328,7 +375,12 @@ export class HostOpsService {
           };
           // Do not revoke credentials or release the Run slot until exit is proven.
           if (!current()) continue;
-          if (
+          const foreign =
+            action.runtime_ref !== null &&
+            this.options.ownsRuntimeRef?.(action.runtime_ref) === false;
+          if (foreign) {
+            if (!this.confirmedByHuman(project.id, action)) continue;
+          } else if (
             (await stopRunRuntime(runtime, action.runtime_ref, current)) !==
             "exited"
           ) {
@@ -344,6 +396,7 @@ export class HostOpsService {
             await this.options.scrubCredentials?.(
               project.id,
               action.assignment_id,
+              action.runtime_ref,
             );
           } catch {
             this.defer(
@@ -395,4 +448,39 @@ export class HostOpsService {
       }
     }
   }
+}
+
+const OPERATION: Record<HostOpsExecution["tool"], string> = {
+  host_ops_restart_assignment: "重启",
+  host_ops_restart_standing_pm: "重启常驻 PM",
+  host_ops_cancel_run: "取消 Run",
+};
+
+/** Numbered steps for the human; the terminal is never touched by the server. */
+export function exitConfirmationText(
+  action: Pick<
+    HostOpsExecution,
+    "tool" | "assignment_id" | "run_id" | "runtime_ref"
+  >,
+  runtimeLabel: string,
+) {
+  const ref = action.runtime_ref;
+  const terminal = ref?.terminal_ref ?? "（未记录）";
+  const where =
+    ref?.runtime_machine === "local"
+      ? "本机（local 模式，以当时运行 cardigan 的主机账号启动）"
+      : `机器 ${ref?.runtime_machine ?? "（未记录）"}`;
+  const run = action.run_id ?? "（无）";
+  const hc =
+    'HC_SESSION=cardigan HC_SOCKET="$XDG_RUNTIME_DIR/cardigan/cardigan.sock" hc';
+  return {
+    instructions: [
+      `主机运维要${OPERATION[action.tool] ?? "处理"} ${action.assignment_id}，但它记录的终端 ${terminal} 在${where}，不属于 server 当前运行时 ${runtimeLabel}，server 无法确认它已退出。请按以下步骤处理：`,
+      `1. 在启动该终端的主机账号下打开一个没有加载 runtime.env 的 shell（${ref?.runtime_machine === "local" ? "即当时启动它的那类普通 shell" : "能访问该机器的 shell"}），运行 \`${hc} get ${terminal} --json\`，查看终端状态（state 为 live 表示仍在运行；启动时指定过 --hc-session 的请替换会话名）。`,
+      `2. 如果仍在运行：先运行 \`${hc} kill ${terminal}\` 结束它；hc 不可用时，结束对应的 Agent 进程（如 claude）和终端占位进程。`,
+      `3. 再次运行 \`${hc} get ${terminal} --json\`，确认 state 为 finished 或终端不存在，并确认该 Assignment 的 Agent 进程已不在运行。`,
+      `4. 确认后把本事项标记为完成：server 会结束旧 Run ${run}、作废它的 Token、清理运行目录凭据，再按原动作重建。无法确认已退出时不要标记完成，在时间线说明情况；动作会继续等待，不会重建。`,
+    ].join("\n"),
+    why_human: `终端记录在 server 当前没有接入的运行时上，server 不能查询或结束它；在人确认之前，旧 Run 不会结束、Token 不会作废。`,
+  };
 }

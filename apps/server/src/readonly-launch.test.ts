@@ -113,7 +113,7 @@ test.each(["cli", "server"])(
   async (entry) => {
     if (entry === "cli") {
       const io: CliIo = {
-        env: {},
+        env: { CARDIGAN_RUNTIME_MODE: "local" },
         cwd: f.dataDir,
         platform: "linux",
         stdout: () => {},
