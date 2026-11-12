@@ -570,6 +570,7 @@ test("cross-project event FIFO survives full ticks, changed limits, restart, and
     {
       machine_id: "local",
       label: "local",
+      max_limit: 16,
       running: 1,
       limit: 1,
       queued: 2,
@@ -1460,9 +1461,33 @@ test("Q-88 the 60-minute default tolerates 48-minute silence and restarts on fre
   expect(slots()).toBe(1);
 });
 
-test.each([false, true])(
-  "Q-88/C-145 human CLI start shares the effective cap (database override: %s)",
-  async (override) => {
+test("a lowered host ceiling constrains an existing database override on dispatch", async () => {
+  const busy = f.create();
+  f.session(busy.assignment, false);
+  saveLimit(16);
+  comment();
+  await new Dispatcher({
+    ...options,
+    runLimit: () => 1,
+    runLimitMaximum: () => 1,
+  }).tick();
+  expect(runtime.wake).not.toHaveBeenCalled();
+  expect(readRunQueue(f.store).map((r) => r.assignment_id)).toContain(
+    target.assignment.id,
+  );
+  expect(
+    executionCapacity(
+      f.store,
+      () => 1,
+      undefined,
+      () => 1,
+    ).agents[0],
+  ).toMatchObject({ limit: 1, max_limit: 1 });
+});
+
+test.each(["yaml", "override", "ceiling"])(
+  "Q-88/C-158 human CLI start shares the effective cap (%s)",
+  async (mode) => {
     const busy = f.create();
     f.session(busy.assignment, false);
     const automatic = f.create();
@@ -1491,7 +1516,9 @@ test.each([false, true])(
     await mkdir(configDir, { mode: 0o700 });
     await writeFile(
       join(configDir, "run-capacity.yaml"),
-      `machines: { local: ${override ? 4 : 1} }\n`,
+      mode === "ceiling"
+        ? "machines: { local: { limit: 1, max_limit: 1 } }\n"
+        : `machines: { local: ${mode === "override" ? 4 : 1} }\n`,
       { mode: 0o600 },
     );
     await writeFile(
@@ -1499,7 +1526,7 @@ test.each([false, true])(
       "profiles:\n  fixture:\n    harness: pi\n    model: fixture-model\n",
       { mode: 0o600 },
     );
-    if (override) saveLimit(1);
+    if (mode !== "yaml") saveLimit(mode === "ceiling" ? 4 : 1);
     const output: string[] = [];
     let release = () => {};
     const hold = new Promise<void>((resolve) => {
@@ -1557,6 +1584,7 @@ test.each([false, true])(
         ...options,
         clock: { now: () => new Date().toISOString() },
         runLimit: () => 1,
+        ...(mode === "ceiling" ? { runLimitMaximum: () => 1 } : {}),
       }).tick();
       expect(readRunQueue(f.store).map((r) => r.assignment_id)).toEqual([
         automatic.assignment.id,

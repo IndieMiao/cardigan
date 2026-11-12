@@ -1,6 +1,101 @@
-import { effectiveRunLimit } from "@cardigan/host";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { effectiveRunLimit, loadRunCapacityConfig } from "@cardigan/host";
 import { expect, test } from "vitest";
 import { m5Cross, TEST_PASSWORD } from "../../test-support/m5-cross.js";
+
+test.each([undefined, 8, 24])(
+  "HTTP enforces the host ceiling %s and exposes it to the input",
+  async (maximum) => {
+    const configDir = await mkdtemp(join(tmpdir(), "execution-capacity-"));
+    await writeFile(
+      join(configDir, "run-capacity.yaml"),
+      maximum === undefined
+        ? "machines: {}\n"
+        : `machines: { local: { limit: 4, max_limit: ${maximum}, display_name: Workstation } }\n`,
+      { mode: 0o600 },
+    );
+    const config = await loadRunCapacityConfig({ configDir });
+    const f = await m5Cross({
+      runLimit: config.forMachine,
+      runLimitMaximum: config.maxForMachine,
+      machineDisplayName: config.displayNameForMachine,
+    });
+    try {
+      await f.password(TEST_PASSWORD);
+      await f.login();
+      const cap = maximum ?? 16;
+      const path = f.projectPath("/execution/capacity");
+      const save = (limit: number, extra = {}) =>
+        f.call(path, {
+          method: "POST",
+          body: { machine_id: "local", limit, ...extra },
+          headers: { "idempotency-key": `cap-${limit}` },
+        });
+      expect((await f.call(path)).json).toMatchObject({
+        agents: [
+          {
+            machine_id: "local",
+            label: maximum === undefined ? "local" : "Workstation",
+            limit: 4,
+            max_limit: cap,
+          },
+        ],
+      });
+      const rejected = await save(cap + 1);
+      expect(rejected.status).toBe(400);
+      expect(rejected.json).toMatchObject({
+        error: { message: `并发上限不能超过 ${cap}。` },
+      });
+      expect((await save(cap + 1, { max_limit: cap + 1 })).status).toBe(400);
+      expect(
+        f
+          .store()
+          .uow.read((tx) =>
+            tx.global_events
+              .listAfter(0)
+              .filter((e) => e.type === "run_capacity_updated"),
+          ),
+      ).toHaveLength(0);
+      expect((await save(cap)).status).toBe(200);
+      expect((await f.call(path)).json).toMatchObject({
+        agents: [{ limit: cap }],
+      });
+      expect(
+        effectiveRunLimit(f.store(), "local", config.forMachine, () => 2),
+      ).toBe(2);
+      expect(
+        effectiveRunLimit(
+          f.store(),
+          "local",
+          config.forMachine,
+          config.maxForMachine,
+        ),
+      ).toBe(cap);
+
+      f.store().uow.run((tx) =>
+        tx.machines.put(f.project.project_id, {
+          id: "local",
+          label: "Registered workstation",
+          status: "online",
+          herdr_machine: "local",
+          os: "linux",
+          arch: "x64",
+          tags: [],
+          max_assignments: 4,
+          last_seen: "2026-11-12T00:00:00.000Z",
+        }),
+      );
+      expect((await f.call(path)).json).toMatchObject({
+        agents: [{ label: "Registered workstation" }],
+      });
+    } finally {
+      await f.close();
+      await rm(configDir, { recursive: true, force: true });
+    }
+  },
+);
 
 test("C-145 human session alone edits capacity, with validation, idempotency and global audit", async () => {
   const f = await m5Cross();

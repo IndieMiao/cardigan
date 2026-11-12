@@ -41,6 +41,17 @@ test("missing file/machine defaults to four; CARDIGAN_CONFIG_DIR is read once pe
 });
 
 test.each([
+  "machines: { local: 17 }",
+  "machines: { local: { limit: 5, max_limit: 4 } }",
+  "machines: { local: { max_limit: 0 } }",
+  "machines: { local: { max_limit: 1.5 } }",
+  "machines: { local: { max_limit: '32' } }",
+  "machines: { local: { limit: null } }",
+  "machines: { local: { max_limit: null } }",
+  "machines: { local: { display_name: '' } }",
+  "machines: { local: { display_name: 123 } }",
+  'machines: { local: { display_name: "private-value\\nlabel" } }',
+  "machines: { local: { extra: private-value } }",
   "machines: { local: 0 }",
   "machines: { local: -1 }",
   "machines: { local: 1.5 }",
@@ -56,10 +67,38 @@ test.each([
     const config = await loadRunCapacityConfig({ configDir });
     expect(config.forMachine("local")).toBe(0);
     expect(config.forMachine("omitted")).toBe(0);
+    expect(config.maxForMachine("local")).toBe(0);
+    expect(config.displayNameForMachine("local")).toBeUndefined();
     expect(config.errors).toHaveLength(1);
     expect(config.errors.join()).not.toContain("private-value");
   },
 );
+
+test("per-machine ceilings and names coexist with legacy defaults and load once", async () => {
+  const absent = await loadRunCapacityConfig({ configDir });
+  expect(absent.maxForMachine("local")).toBe(16);
+  expect(absent.displayNameForMachine("local")).toBeUndefined();
+  await write(`machines:
+  local: { limit: 24, max_limit: 24, display_name: " Workstation " }
+  worker: { limit: 2, max_limit: 8 }
+  named: { display_name: "Worker" }
+  legacy: 16
+`);
+  const config = await loadRunCapacityConfig({ configDir });
+  expect(config.errors).toEqual([]);
+  expect(config.forMachine("local")).toBe(24);
+  expect(config.maxForMachine("local")).toBe(24);
+  expect(config.displayNameForMachine("local")).toBe("Workstation");
+  expect(config.maxForMachine("worker")).toBe(8);
+  expect(config.forMachine("named")).toBe(4);
+  expect(config.maxForMachine("legacy")).toBe(16);
+  expect(config.maxForMachine("omitted")).toBe(16);
+  await write("machines: {}\n");
+  expect(config.maxForMachine("local")).toBe(24);
+  expect(
+    (await loadRunCapacityConfig({ configDir })).maxForMachine("local"),
+  ).toBe(16);
+});
 
 test.each(["writable", "symlink", "directory", "parent"])(
   "refuses unsafe %s configuration",

@@ -40,6 +40,27 @@ const decision: NeedsDecision = {
   merge_confirmation: null,
 };
 const client = fakeClient({
+  ...(new URLSearchParams(location.search).has("capacity")
+    ? {
+        executionCapacity: async () => ({
+          agents: [
+            {
+              machine_id: "local",
+              label: "local",
+              running: 5,
+              limit: 6,
+              max_limit: 16,
+              queued: 2,
+              merge_check_slots: 0,
+            },
+          ],
+          merge_checks: [
+            { machine_id: "test-ci", running: 1, limit: 3, queued: 4 },
+          ],
+          merge_config_invalid: false,
+        }),
+      }
+    : {}),
   subscribe: (_project, callbacks) => {
     callbacks.status("live");
     return () => {};
@@ -63,7 +84,33 @@ const client = fakeClient({
   needsYou: async () => ({
     decisions: [decision],
     human_actions: [],
-    incidents: [],
+    incident_handling: {
+      host_ops: {
+        assignment_id: "A-90",
+        name: "张良",
+        mention: "张良",
+        patrol_interval_ms: 30 * 60_000,
+      },
+      pm_office: { assignment_id: "A-91", name: null, mention: "A-91" },
+      hc_session: "cardigan",
+    },
+    incidents: [
+      {
+        id: "A-3",
+        role_id: "coder",
+        runtime_state: "lost",
+        waited_ms: 12 * 60_000,
+        card_id: card.id,
+        disconnected_at: "2026-01-01T00:00:00.000Z",
+        lost_at: null,
+        last_run: null,
+        author: "assignment:A-3",
+        author_role: "coder",
+        author_display: "未命名的 coder",
+        employee: null,
+        member: null,
+      },
+    ],
   }),
   decisionHistory: async () => ({
     decisions: [

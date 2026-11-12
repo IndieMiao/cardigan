@@ -7,7 +7,7 @@ import type { Attachment, TimelineEntry } from "@cardigan/domain";
 import { Store } from "@cardigan/store";
 import { resolveWebConfig } from "../src/web/config.js";
 import { LoginLimiter } from "../src/web/login-limiter.js";
-import { startWebServer } from "../src/web/server.js";
+import { startWebServer, type WebServerOptions } from "../src/web/server.js";
 import { m4Cross } from "./m4-cross.js";
 export const TEST_PASSWORD = "acceptance password phrase";
 export interface ResponseBody {
@@ -16,7 +16,12 @@ export interface ResponseBody {
   readonly text: string;
   readonly json: unknown;
 }
-export async function m5Cross() {
+export async function m5Cross(
+  options: Pick<
+    WebServerOptions,
+    "runLimit" | "runLimitMaximum" | "machineDisplayName"
+  > = {},
+) {
   const f = await m4Cross();
   let now = Date.now(),
     cookie = "";
@@ -38,6 +43,7 @@ export async function m5Cross() {
     }
   })();
   const web = await startWebServer({
+    ...options,
     store,
     dataDir: f.dataDir,
     clock,

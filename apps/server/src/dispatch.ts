@@ -101,6 +101,7 @@ export interface DispatcherOptions {
   readonly maxRetries?: number;
   /** Loaded once by the host; the decision reads the supplied limit on every claim. */
   readonly runLimit?: (machine: string) => number;
+  readonly runLimitMaximum?: (machine: string) => number;
   readonly inactivityGraceMs?: number;
   readonly dispatchTimeoutMs?: number;
   readonly deliveryRetryBaseMs?: number;
@@ -834,7 +835,12 @@ export class Dispatcher {
         if (
           (!isStandingPm(a) && earlier) ||
           !canDispatchRun(
-            effectiveRunLimit(store, a.machine_id, this.options.runLimit),
+            effectiveRunLimit(
+              store,
+              a.machine_id,
+              this.options.runLimit,
+              this.options.runLimitMaximum,
+            ),
             capacity.occupied.get(a.machine_id) ?? 0,
             isStandingPm(a),
           )

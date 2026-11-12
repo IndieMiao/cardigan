@@ -34,6 +34,7 @@ import {
   type ServerEnv,
 } from "./config.js";
 import { type GitBinding, ServerGit } from "./git.js";
+import { DEFAULT_HOST_OPS_PATROL_INTERVAL_MS } from "./host-ops-patrol.js";
 import type { ShutdownTimer } from "./lifecycle.js";
 import type { WebConfig } from "./web/config.js";
 import { type RunningWebServer, startWebServer } from "./web/server.js";
@@ -211,6 +212,7 @@ export async function startCardiganServer(
         },
         ownsRuntimeRef: (ref) => runtimeOwnsRef(execution, ref),
         runtimeLabel: describeRuntime(execution),
+        hcSession: session,
         settings: (project) => ({
           merge_gate_enabled:
             mergeGate.forProject(project).status === "enabled",
@@ -289,7 +291,7 @@ export async function startCardiganServer(
         hostOpsPatrolIntervalMs:
           options.dispatcher.hostOpsPatrolIntervalMs ??
           config.hostOpsPatrolIntervalMs ??
-          1_800_000,
+          DEFAULT_HOST_OPS_PATROL_INTERVAL_MS,
         ...((options.dispatcher.intervalMs ?? config.dispatchIntervalMs) ===
         undefined
           ? {}
@@ -309,6 +311,7 @@ export async function startCardiganServer(
         git,
         mergeGate: { configuration: mergeGate, execution },
         runLimit: runCapacity.forMachine,
+        runLimitMaximum: runCapacity.maxForMachine,
         inactiveCancelAfterMs: runCapacity.inactiveCancelAfterMs,
         // Test overrides win; otherwise the server configuration decides.
         ...(mergeIntervalMs === undefined ? {} : { mergeIntervalMs }),
@@ -335,9 +338,16 @@ export async function startCardiganServer(
       web = await startWebServer({
         store,
         mergeGate,
+        machineDisplayName: runCapacity.displayNameForMachine,
         runLimit: runCapacity.forMachine,
+        runLimitMaximum: runCapacity.maxForMachine,
         dataDir: config.dataDir,
         config: options.web.config,
+        hcSession: session,
+        hostOpsPatrolIntervalMs:
+          options.dispatcher?.hostOpsPatrolIntervalMs ??
+          config.hostOpsPatrolIntervalMs ??
+          DEFAULT_HOST_OPS_PATROL_INTERVAL_MS,
         ...(options.web.log === undefined ? {} : { log: options.web.log }),
         ...(options.web.stream === undefined
           ? {}

@@ -46,6 +46,7 @@ import type { ProjectMergeGate } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
 import { convertLegacyRole, HARNESSES, isDefaultRoleId } from "@cardigan/roles";
 import type { Store } from "@cardigan/store";
+import { DEFAULT_HOST_OPS_PATROL_INTERVAL_MS } from "../host-ops-patrol.js";
 
 /**
  * The Workbench read model (M5 plan §4 M5.1: 只读接口).
@@ -1009,11 +1010,44 @@ function decisionActionWebView(
   };
 }
 
+/**
+ * C-153: who looks after a lost or unknown runtime, so Needs You can tell the
+ * human whether to wait and when to ask for help instead of only listing
+ * operator commands.
+ */
+function incidentHandling(state: CommandState, patrolIntervalMs: number) {
+  const standing = state.assignments.filter(
+    (a) => a.scope === "standing" && a.status === "active",
+  );
+  // The router resolves @employee only to work-item Assignments on the card,
+  // so a standing PM Office is reachable by its Assignment id alone (V-504).
+  const contact = (assignment: (typeof standing)[number] | undefined) => {
+    if (!assignment) return null;
+    const view = webAuthorView(state, `assignment:${assignment.id}`);
+    return {
+      assignment_id: assignment.id,
+      name: view.employee?.name ?? null,
+      mention: assignment.id,
+    };
+  };
+  const hostOps = contact(standing.find((a) => a.role_id === "host_ops"));
+  return {
+    host_ops: hostOps
+      ? { ...hostOps, patrol_interval_ms: patrolIntervalMs }
+      : null,
+    pm_office: contact(
+      standing.find((a) => a.role_id === "pm" && a.standing_mode === "office"),
+    ),
+  };
+}
+
 /** `listNeedsYou` plus the one-line reason and how long each item has waited. */
 export function needsYou(
   state: CommandState,
   now: string,
   mergeGateStatus: ProjectMergeGate["status"] = "disabled",
+  hostOpsPatrolIntervalMs = DEFAULT_HOST_OPS_PATROL_INTERVAL_MS,
+  hcSession?: string,
 ) {
   const result = unwrap(
     listNeedsYou(
@@ -1090,6 +1124,12 @@ export function needsYou(
   };
   return {
     attention: data.attention,
+    incident_handling: {
+      ...incidentHandling(state, hostOpsPatrolIntervalMs),
+      // C-153: the session the server registered in runtime.json; null when
+      // this read model was built without a running server (tests, previews).
+      hc_session: hcSession ?? null,
+    },
     incidents: data.incidents.map((incident) => ({
       ...incident,
       ...webAuthorView(state, `assignment:${incident.id}`),

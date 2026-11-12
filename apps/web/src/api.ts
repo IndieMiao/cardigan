@@ -562,6 +562,8 @@ export interface NeedsPage {
   /** §7.4 知会: delegated resolutions; never blocking. */
   readonly notices?: readonly NoticeView[];
   readonly notices_next_cursor?: string | null;
+  /** C-153: who looks after lost runtimes; older servers omit it. */
+  readonly incident_handling?: IncidentHandling;
   readonly incidents: readonly (AuthorView & {
     readonly id: string;
     readonly role_id: string;
@@ -572,6 +574,22 @@ export interface NeedsPage {
     readonly card_id: string | null;
     readonly waited_ms: number | null;
   })[];
+}
+
+export interface IncidentContact {
+  readonly assignment_id: string;
+  readonly name: string | null;
+  /** What to type after `@` so the comment reaches this Assignment (its id). */
+  readonly mention: string;
+}
+
+export interface IncidentHandling {
+  readonly host_ops:
+    | (IncidentContact & { readonly patrol_interval_ms: number })
+    | null;
+  readonly pm_office: IncidentContact | null;
+  /** hc session the server registered in runtime.json; null when unknown. */
+  readonly hc_session?: string | null;
 }
 
 export interface NoticeView extends AuthorView {
@@ -684,6 +702,7 @@ export interface ExecutionCapacity {
     label: string;
     running: number;
     limit: number;
+    max_limit: number;
     queued: number;
     merge_check_slots: number;
   }[];

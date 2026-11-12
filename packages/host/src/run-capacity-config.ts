@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
   DEFAULT_INACTIVE_CANCEL_AFTER_MS,
+  DEFAULT_MAX_RUN_LIMIT,
   DEFAULT_RUN_LIMIT,
 } from "@cardigan/domain";
 import { parseDocument } from "yaml";
@@ -11,6 +12,8 @@ import { parseDocument } from "yaml";
 export interface RunCapacityConfiguration {
   readonly errors: readonly string[];
   forMachine(machine: string): number;
+  maxForMachine(machine: string): number;
+  displayNameForMachine(machine: string): string | undefined;
   readonly inactiveCancelAfterMs: number | null;
 }
 
@@ -31,6 +34,8 @@ export async function loadRunCapacityConfig(
     "run-capacity.yaml",
   );
   const limits = new Map<string, number>();
+  const maximums = new Map<string, number>();
+  const names = new Map<string, string>();
   const errors: string[] = [];
   let inactiveCancelAfterMs = DEFAULT_INACTIVE_CANCEL_AFTER_MS;
   const result = (): RunCapacityConfiguration => ({
@@ -39,6 +44,10 @@ export async function loadRunCapacityConfig(
     // Invalid configuration stops automatic work items; standing PMs remain exempt.
     forMachine: (machine) =>
       errors.length ? 0 : (limits.get(machine) ?? DEFAULT_RUN_LIMIT),
+    maxForMachine: (machine) =>
+      errors.length ? 0 : (maximums.get(machine) ?? DEFAULT_MAX_RUN_LIMIT),
+    displayNameForMachine: (machine) =>
+      errors.length ? undefined : names.get(machine),
   });
   let source: string;
   try {
@@ -102,20 +111,47 @@ export async function loadRunCapacityConfig(
         throw new Error("Invalid inactivity grace");
       inactiveCancelAfterMs = minutes * 60_000;
     }
-    for (const [machine, limit] of Object.entries(raw.machines)) {
+    for (const [machine, entry] of Object.entries(raw.machines)) {
+      const settings = object(entry) ? entry : { limit: entry };
+      if (
+        Object.keys(settings).some(
+          (key) => !["limit", "max_limit", "display_name"].includes(key),
+        )
+      )
+        throw new Error("Invalid machine fields");
+      const limit = settings.limit ?? DEFAULT_RUN_LIMIT;
+      const maximum = settings.max_limit ?? DEFAULT_MAX_RUN_LIMIT;
       if (
         !machine.trim() ||
+        settings.limit === null ||
+        settings.max_limit === null ||
         typeof limit !== "number" ||
         !Number.isSafeInteger(limit) ||
-        limit < 1
+        limit < 1 ||
+        typeof maximum !== "number" ||
+        !Number.isSafeInteger(maximum) ||
+        maximum < 1 ||
+        limit > maximum
       )
         throw new Error("Invalid limit");
+      if (settings.display_name !== undefined) {
+        const name = settings.display_name;
+        if (
+          typeof name !== "string" ||
+          !name.trim() ||
+          name.length > 200 ||
+          /[\p{Cc}\p{Cf}]/u.test(name)
+        )
+          throw new Error("Invalid display name");
+        names.set(machine, name.trim());
+      }
       limits.set(machine, limit);
+      maximums.set(machine, maximum);
     }
   } catch {
     // Never include YAML contents (which could contain credentials) in diagnostics.
     errors.push(
-      "run-capacity.yaml 必须包含 machines 映射；机器上限及可选 inactive_cancel_after_minutes 须为允许范围的正整数。配置无效，暂停普通 Run 自动派发及失活回收",
+      "run-capacity.yaml 必须包含 machines 映射；limit 不得超过 max_limit（默认 16），两者及可选 inactive_cancel_after_minutes 须为允许范围的正整数，display_name 须为有效文字。配置无效，暂停普通 Run 自动派发及失活回收",
     );
   }
   return result();
