@@ -23,6 +23,7 @@ import {
   Feedback,
 } from "../components/Operations.js";
 import { PriorityBadge } from "../components/Priority.js";
+import { Tooltip } from "../components/Tooltip.js";
 import {
   assignmentActivity,
   type ExecutionSort,
@@ -190,21 +191,22 @@ function AssignmentRow({
       <td>
         <div className="execution-assignment">
           {/* C-106: the Assignment id opens the drawer; no separate 详情 button. */}
-          <button
-            ref={button}
-            type="button"
-            className="quiet execution-open"
-            aria-haspopup="dialog"
-            aria-expanded={open}
-            aria-label={`查看 ${a.id} 详情`}
-            title={`${a.role_id} v${a.role_version}`}
-            onClick={(event) => {
-              event.stopPropagation();
-              onOpen(event.currentTarget);
-            }}
-          >
-            {a.id}
-          </button>
+          <Tooltip content={`${a.role_id} v${a.role_version}`}>
+            <button
+              ref={button}
+              type="button"
+              className="quiet execution-open"
+              aria-haspopup="dialog"
+              aria-expanded={open}
+              aria-label={`查看 ${a.id} 详情`}
+              onClick={(event) => {
+                event.stopPropagation();
+                onOpen(event.currentTarget);
+              }}
+            >
+              {a.id}
+            </button>
+          </Tooltip>
           <span className="id-description">{a.role_id}</span>
           {a.standing_mode && (
             <span className="hint">
@@ -697,21 +699,24 @@ export function ExecutionPage({
                       scope="col"
                       aria-sort={sort === "desc" ? "descending" : "ascending"}
                     >
-                      <button
-                        type="button"
-                        className="quiet execution-sort"
-                        title={
+                      <Tooltip
+                        content={
                           sort === "desc"
                             ? "当前从新到旧，点击改为从旧到新"
                             : "当前从旧到新，点击改为从新到旧"
                         }
-                        onClick={toggleSort}
                       >
-                        最近活动
-                        <span aria-hidden="true">
-                          {sort === "desc" ? " ↓" : " ↑"}
-                        </span>
-                      </button>
+                        <button
+                          type="button"
+                          className="quiet execution-sort"
+                          onClick={toggleSort}
+                        >
+                          最近活动
+                          <span aria-hidden="true">
+                            {sort === "desc" ? " ↓" : " ↑"}
+                          </span>
+                        </button>
+                      </Tooltip>
                     </th>
                   </tr>
                 </thead>

@@ -1,5 +1,6 @@
 import * as ToggleGroup from "@radix-ui/react-toggle-group";
 import type { ReactNode } from "react";
+import { Tooltip } from "./Tooltip.js";
 
 export interface ViewSwitchOption {
   readonly value: string;
@@ -36,16 +37,16 @@ export function ViewSwitch({
       aria-label={label}
     >
       {options.map((option) => (
-        <ToggleGroup.Item
-          key={option.value}
-          value={option.value}
-          className="view-switch-item"
-          aria-label={option.label}
-          title={option.label}
-        >
-          {option.icon}
-          {showLabel && <span>{option.label}</span>}
-        </ToggleGroup.Item>
+        <Tooltip key={option.value} content={option.label}>
+          <ToggleGroup.Item
+            value={option.value}
+            className="view-switch-item"
+            aria-label={option.label}
+          >
+            {option.icon}
+            {showLabel && <span>{option.label}</span>}
+          </ToggleGroup.Item>
+        </Tooltip>
       ))}
     </ToggleGroup.Root>
   );
