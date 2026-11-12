@@ -84,7 +84,11 @@ const schemas = {
     needs: z.enum(["role", "human"]),
   },
   request_decision: {
-    card_id: id("card").optional(),
+    card_id: id("card")
+      .optional()
+      .describe(
+        "Omit (and leave affected_cards empty) for a project-wide question. A spending/account/permission/data_deletion or scope_change question on a card hands that card's merge confirmation to the human, who must then confirm it personally (no auto-merge)",
+      ),
     kind: z.enum(["choose", "approve"]),
     category: z.enum(decisionCategories),
     question: text,
@@ -106,12 +110,6 @@ const schemas = {
       .optional()
       .describe(
         "Existing attachments on this card or affected_cards to show with the question, in display order",
-      ),
-    merge_related: z
-      .boolean()
-      .optional()
-      .describe(
-        "Only for spending/account/permission/data_deletion: false marks a question that is not about what its cards will merge (e.g. a project-wide policy question), so their merge confirmations stay where they are. Rejected when it lists a produce work item or binds a target. Until the human answers the question, those merges still cannot be confirmed by PM or auto-merged. Omit when unsure: the default treats it as merge-related and the merge must be confirmed by the human",
       ),
   },
   resolve_delegated_decision: {

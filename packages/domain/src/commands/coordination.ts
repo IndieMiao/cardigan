@@ -361,13 +361,18 @@ export function requestDecision(
     ];
     for (const id of cards) d.card(id);
     const attachment_ids = decisionAttachments(d, p.attachment_ids, cards);
-    // C-167: only the raiser can say a D12 question is not about what the card
-    // merges, and only when it touches no produce work item and binds no
-    // approval target; anything else stays merge-related (human merge). The
-    // label is a claim: it skips the handoff below, but mergeNeedsHuman keeps
-    // counting the question until a human raised or answered it.
+    // C-167: only a human raiser can say a D12 question is not about what the
+    // card merges (an Agent's own label is no authorization, review V-540 and
+    // V-543), and only when it touches no produce work item and binds no
+    // approval target; anything else stays merge-related (human merge).
+    // Agents raise project-wide questions without card_id/affected_cards.
     const mergeUnrelated = p.merge_related === false;
-    if (mergeUnrelated)
+    if (mergeUnrelated) {
+      ensure(
+        d.author === "human",
+        "unauthorized",
+        "只有人能把拍板标为与合并无关；与卡片无关的全局问题请不填 card_id 和 affected_cards 发起",
+      );
       ensure(
         highRiskCategories.includes(p.category) &&
           !p.target &&
@@ -375,6 +380,7 @@ export function requestDecision(
         "validation_failed",
         "只有不涉及产出工作项、也不绑定审批对象的高风险拍板（花钱、账号、权限、删除数据）才能标为与合并无关",
       );
+    }
     if (p.blocking) {
       for (const item of items) paused(d, item, "waiting_decision");
       endForDecision(d, p.question, items);
@@ -388,7 +394,7 @@ export function requestDecision(
       category: p.category,
       question: p.question,
       context: mergeUnrelated
-        ? `${p.context}\n\n发起人标注：此拍板与 ${cards.join("、") || "任何卡片"} 的合并内容无关，不改变合并确认由谁处理。${d.author === "human" ? "" : "此标注由 Agent 填写：你回答此拍板之前，这些卡片的合并不能由 PM 代确认或超时自动合并；如认为与合并有关，请直接处理该卡的合并确认。"}`
+        ? `${p.context}\n\n发起人标注：此拍板与 ${cards.join("、") || "任何卡片"} 的合并内容无关，不改变合并确认由谁处理。`
         : p.context,
       ...(mergeUnrelated ? { merge_related: false as const } : {}),
       options: p.options,

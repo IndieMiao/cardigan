@@ -388,14 +388,14 @@ test("a permission decision marked unrelated to the merge leaves the PM confirma
   expect(confirmation().status).toBe("resolved");
 });
 
-// Review V-540: an Agent's own merge_related=false is only a claim. It keeps
-// the confirmation where it is, but neither PM Ops nor the timeout may merge
-// until the human has answered the labeled question.
+// Reviews V-540 / V-543: an Agent cannot exempt a card from the human merge.
+// It cannot set merge_related=false, and answering its question (even with a
+// refusal) is not an authorization to skip the human merge confirmation.
 const agentRaise = (
   f: ReturnType<typeof setup>["f"],
   extra: Partial<RequestDecisionParams> = {},
-) => {
-  const result = requestDecision(
+) =>
+  requestDecision(
     f.state,
     f.actor(f.coder),
     {
@@ -404,110 +404,120 @@ const agentRaise = (
       kind: "choose",
       question: "允许本卡实现取消管理员写接口的鉴权吗？",
       context: "本卡交付直接修改管理员接口的访问控制，需要人确认权限取舍。",
-      options: [{ key: "allow", description: "允许", impact: "影响" }],
-      recommended: "allow",
+      options: [
+        { key: "allow", description: "允许", impact: "取消鉴权" },
+        { key: "deny", description: "拒绝取消鉴权", impact: "保留鉴权" },
+      ],
+      recommended: "deny",
       affected_cards: [],
       affected_work_items: [],
       blocking: false,
       decider: "human",
-      merge_related: false,
       ...extra,
     },
     f.io,
   );
-  return f.commit(result) as Decision;
-};
-const humanAnswers = (f: ReturnType<typeof setup>["f"], q: Decision) =>
+const humanAnswers = (
+  f: ReturnType<typeof setup>["f"],
+  q: Decision,
+  option: string,
+) =>
   f.commit(
     recordDecision(
       f.state,
       human,
       {
         decision_id: q.id,
-        option: "allow",
-        rationale: "与合并无关",
-        raw_quote: "允许",
+        option,
+        rationale: "人的业务回答",
+        raw_quote: option,
       },
       f.io,
     ),
   );
 
-test("an Agent's merge_related=false does not let PM Ops confirm before the human answers", async () => {
-  const { f, confirmation, check, pmResolve } = setup();
-  await f.accept();
-  const held = confirmation();
-  expect(held.decider).toBe("role:pm");
-  const q = agentRaise(f);
-  expect(q).toMatchObject({
-    raised_by: `assignment:${f.coder.id}`,
-    merge_related: false,
-  });
-  expect(q.context).toContain("此标注由 Agent 填写");
-  // No handoff, no timer reset ...
-  expect(confirmation()).toEqual(held);
-  // ... but the question still makes the merge human-only while pending.
-  expect(mergeRequiresHuman(f.state, confirmation())).toBe(true);
-  check("passed");
-  const pm = pmResolve("merge", { notice: "n" });
-  expect(pm.ok).toBe(false);
-  if (!pm.ok) expect(pm.error.code).toBe("unauthorized");
-  expect(mergePlan(f.state, f.card.id).ok).toBe(false);
-  // Once the human answered the labeled question, the label stands.
-  humanAnswers(f, q);
-  expect(mergeRequiresHuman(f.state, confirmation())).toBe(false);
-  f.commit(pmResolve("merge", { notice: "权限拍板已由人回答，与合并无关。" }));
-  expect(confirmation().resolution).toMatchObject({
-    resolved_by: `assignment:${ops.id}`,
-  });
-  expect(mergePlan(f.state, f.card.id).ok).toBe(true);
-});
+test.each(["allow", "deny"])(
+  "an Agent cannot mark a D12 question merge-unrelated; after the human answers %s, PM still cannot confirm",
+  async (option) => {
+    const { f, confirmation, check, pmResolve } = setup();
+    await f.accept();
+    const held = confirmation();
+    expect(held.decider).toBe("role:pm");
+    const before = f.state;
+    const labeled = agentRaise(f, { merge_related: false });
+    expect(labeled.ok).toBe(false);
+    if (!labeled.ok) expect(labeled.error.code).toBe("unauthorized");
+    expect(f.state).toBe(before);
+    // Without the label the question is merge-related: handed over, pinned.
+    const q = f.commit(agentRaise(f)) as Decision;
+    expect(q.merge_related).toBeUndefined();
+    expect(confirmation()).toMatchObject({
+      decider: "human",
+      human_required_reason: expect.stringContaining(q.id),
+    });
+    check("passed");
+    humanAnswers(f, q, option);
+    expect(mergeRequiresHuman(f.state, confirmation())).toBe(true);
+    const pm = pmResolve("merge", { notice: "n" });
+    expect(pm.ok).toBe(false);
+    expect(mergePlan(f.state, f.card.id).ok).toBe(false);
+  },
+);
 
-test("an Agent's merge_related=false does not let the timeout auto-merge before the human answers", async () => {
-  const { f, confirmation } = setup(false);
-  f.commit(
-    setProjectPreferences(
-      f.state,
-      human,
-      { auto_merge_after_minutes: 1 },
-      f.io,
-    ),
-  );
+test.each(["allow", "deny"])(
+  "an Agent's D12 question is never auto-merged, even after the human answers %s",
+  async (option) => {
+    const { f, confirmation } = setup(false);
+    f.commit(
+      setProjectPreferences(
+        f.state,
+        human,
+        { auto_merge_after_minutes: 1 },
+        f.io,
+      ),
+    );
+    await f.accept();
+    expect(confirmation().decider).toBe("human");
+    expect(agentRaise(f, { merge_related: false }).ok).toBe(false);
+    const q = f.commit(agentRaise(f)) as Decision;
+    expect(confirmation().human_required_reason).toContain(q.id);
+    humanAnswers(f, q, option);
+    const later = {
+      ...f.io,
+      clock: {
+        now: () => new Date(Date.parse(now) + 2 * 60_000).toISOString(),
+      },
+    };
+    expect(
+      autoConfirmMerge(
+        f.state,
+        system,
+        { decision_id: confirmation().id },
+        later,
+      ).ok,
+    ).toBe(false);
+    expect(confirmation().status).toBe("open");
+  },
+);
+
+test("a stored merge_related=false label without a human raiser does not lift the human merge", async () => {
+  const { f, confirmation } = setup();
   await f.accept();
-  const held = confirmation();
-  expect(held.decider).toBe("human");
-  const q = agentRaise(f);
-  expect(confirmation()).toEqual(held);
-  expect(confirmation().human_required_reason).toBeUndefined();
-  const later = {
-    ...f.io,
-    clock: { now: () => new Date(Date.parse(now) + 2 * 60_000).toISOString() },
+  const q = f.commit(agentRaise(f)) as Decision;
+  // Even if such a record existed (e.g. written before this rule), only a
+  // human raiser makes the label count.
+  const forged: CommandState = {
+    ...f.state,
+    decisions: f.state.decisions.map((d): Decision => {
+      if (d.id === q.id) return { ...d, merge_related: false };
+      if (d.id !== confirmation().id) return d;
+      const { human_required_reason: _pinned, ...rest } = d;
+      return rest;
+    }),
   };
-  const auto = autoConfirmMerge(
-    f.state,
-    system,
-    { decision_id: confirmation().id },
-    later,
-  );
-  expect(auto.ok).toBe(false);
-  expect(confirmation().status).toBe("open");
-  // A provisional answer is not the human's answer either.
-  expect(
-    mergeRequiresHuman(
-      {
-        ...f.state,
-        decisions: f.state.decisions.map((d) =>
-          d.id === q.id ? { ...d, status: "provisional" } : d,
-        ),
-      },
-      confirmation(),
-    ),
-  ).toBe(true);
-  humanAnswers(f, q);
-  expect(mergeRequiresHuman(f.state, confirmation())).toBe(false);
-  expect(
-    autoConfirmMerge(f.state, system, { decision_id: confirmation().id }, later)
-      .ok,
-  ).toBe(true);
+  const pinned = forged.decisions.find((d) => d.id === confirmation().id);
+  if (!pinned) throw new Error("Missing confirmation");
+  expect(mergeRequiresHuman(forged, pinned)).toBe(true);
 });
 
 test("a merge-related permission decision hands the confirmation over as human-required, never auto-merged", async () => {

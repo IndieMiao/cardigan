@@ -42,20 +42,16 @@ export const SENSITIVE_CARD_REASON = "卡片已被人标为敏感，合并须由
  * Withdrawn questions on the card no longer count.
  */
 /**
- * C-167: a D12 question marked `merge_related=false` stops counting for its
- * cards' merge only once a human stands behind the label: the human raised
- * it, or the human answered it (seeing the label in its context). An agent's
- * own label never lifts the human-merge requirement while the question is
- * still pending, so PM Ops cannot confirm and the timeout cannot auto-merge.
+ * C-167: only the human can declare a D12 question unrelated to its cards'
+ * merge content (`merge_related=false`, raised by human). requestDecision
+ * rejects the label from anyone else; this check repeats the rule so a label
+ * without a human raiser never lifts the human-merge requirement. Answering
+ * a question is not an authorization to skip the human merge (review V-543).
  */
 export function mergeUnrelatedConfirmed(
-  q: Pick<Decision, "merge_related" | "raised_by" | "status" | "resolution">,
+  q: Pick<Decision, "merge_related" | "raised_by">,
 ): boolean {
-  return (
-    q.merge_related === false &&
-    (q.raised_by === "human" ||
-      (q.status === "resolved" && q.resolution?.resolved_by === "human"))
-  );
+  return q.merge_related === false && q.raised_by === "human";
 }
 export function mergeNeedsHuman(
   decisions: readonly Decision[],
