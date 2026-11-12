@@ -47,6 +47,9 @@ input.once('line', line => {
 });
 async function main(p) {
   const checks = [], cleanup_errors = [], groups = new Set(), unconfirmed = new Set();
+  // Retain partial, incarnation-specific evidence even if a later status/cwd read fails.
+  const associated = new Map();
+  let supervisorStart;
   let manual_attention = false;
   const runtime = join(p.container, 'runtime'), temporary = join(p.container, 'tmp');
   const aliases = join(p.alias_container, 'u'), aliasRuntime = join(aliases, 'r'), aliasTmp = join(aliases, 't');
@@ -124,11 +127,13 @@ async function main(p) {
   }
   async function coreRecord(pid) {
     try {
-      const identity = await procIdentity(pid);
+      const observed = await observeStat(pid);
+      const identity = await procIdentity(pid, observed);
       // The dedicated attempt cwd identifies the runtime without address-space reads.
       if (!identity || identity.state === 'D' || identity.comm !== 'herdr-core') return;
       const path = await procCwd(pid);
       if (path !== p.container && !path.startsWith(p.container + '/')) return;
+      associated.set(Number(pid), identity);
       return { pid, start: identity.start };
     } catch { return; }
   }
@@ -136,24 +141,97 @@ async function main(p) {
     const entries = await procPids();
     return (await Promise.all(entries.filter(v => /^[1-9][0-9]*$/.test(v)).map(v => coreRecord(Number(v))))).filter(Boolean);
   }
+  async function observeStat(pid) {
+    const record = await procStat(pid), previous = associated.get(Number(pid));
+    if (previous && previous.start !== record.start) associated.delete(Number(pid));
+    if (groups.has(record.group)) associated.set(Number(pid), record);
+    return record;
+  }
+  function unknownProcess(pid, record, inspection) {
+    return { ...record, pid: Number(pid), state: 'unknown',
+      ...(record ? { last_state: record.state } : {}), wchan: 'unknown', inspection };
+  }
   async function remainingProcesses() {
     if (process.platform !== 'linux') return [];
-    const remaining = await Promise.all((await procPids()).map(async pid => {
+    supervisorStart ??= (await procStat(process.pid)).start;
+    const pids = new Set([...(await procPids()).map(Number), ...associated.keys(), ...unconfirmed]);
+    const remaining = await Promise.all([...pids].map(async pid => {
       if (Number(pid) === process.pid) return;
+      let record = associated.get(Number(pid)), inspection = 'stat';
       try {
-        const record = await procIdentity(pid);
-        if (!record) return;
-        if (!groups.has(record.group)) {
+        record = await observeStat(pid);
+        if (['Z', 'X'].includes(record.state)) { associated.delete(Number(pid)); return; }
+        inspection = 'status';
+        const identity = await procIdentity(pid, record);
+        if (!identity) return associated.has(Number(pid)) ? unknownProcess(pid, record, 'owner_changed') : undefined;
+        if (!associated.has(Number(pid))) {
+          inspection = 'cwd';
           const cwd = await procCwd(pid);
           if (cwd !== p.container && !cwd.startsWith(p.container + '/')) return;
+          associated.set(Number(pid), record);
         }
         return { ...record, wchan: await procWait(pid) };
       } catch (error) {
-        if (unconfirmed.has(Number(pid)) && !['ENOENT', 'ESRCH'].includes(error.code))
-          return { pid: Number(pid), state: 'unknown', wchan: 'unknown' };
+        if (['ENOENT', 'ESRCH'].includes(error.code)) {
+          // Missing status/cwd is not proof that the process itself has gone.
+          if (inspection === 'stat') { associated.delete(Number(pid)); return; }
+          try {
+            record = await observeStat(pid);
+            if (['Z', 'X'].includes(record.state)) { associated.delete(Number(pid)); return; }
+          } catch (confirmation) {
+            if (['ENOENT', 'ESRCH'].includes(confirmation.code)) { associated.delete(Number(pid)); return; }
+          }
+        }
+        // An unrelated process older than this supervisor cannot be its descendant.
+        // Never discard a recorded association just because a later read failed.
+        if (record && !associated.has(Number(pid)) && !unconfirmed.has(Number(pid)) &&
+            BigInt(record.start) < BigInt(supervisorStart)) return;
+        // A potentially related, unreadable descendant does not authorize deletion.
+        return unknownProcess(pid, record, inspection);
       }
     }));
     return remaining.filter(Boolean);
+  }
+  async function preserveIfUncertain() {
+    let remaining;
+    try { remaining = await remainingProcesses(); }
+    catch {
+      remaining = [...new Set([...associated.keys(), ...unconfirmed])]
+        .map(pid => unknownProcess(pid, associated.get(pid), 'listing'));
+      if (!remaining.length) remaining = [unknownProcess(process.pid, undefined, 'listing')];
+    }
+    if (!remaining.length) return false;
+    manual_attention = true;
+    for (const record of remaining) {
+      const message = 'Manual attention required for attempt ' + basename(p.container) + ': PID ' + record.pid +
+        ' state=' + record.state + ' wchan=' + record.wchan +
+        (record.inspection ? ' inspection=' + record.inspection : '');
+      cleanup_errors.push(message);
+      emit({ type: 'output', name: 'cleanup', text: message + '\n' });
+    }
+    try { await markManualAttention(p.container, remaining); }
+    catch { cleanup_errors.push('Could not persist manual-attention.json; preserve the check directory'); }
+    if (status === 'passed') { status = 'failed'; reason = 'Check child processes did not stop'; }
+    return true;
+  }
+  async function cleanup() {
+    if (await preserveIfUncertain()) return;
+    // Every cleanup subprocess can itself get stuck. Recheck before any further deletion.
+    const removed = await git(p.repository, ['worktree', 'remove', '--force', '--', p.directory], true);
+    if (await preserveIfUncertain()) return;
+    if (registered && removed.status !== 'passed') {
+      const remains = !addInterrupted || await stillRegistered();
+      if (await preserveIfUncertain()) return;
+      if (remains) cleanup_errors.push('Could not remove temporary worktree registration');
+    }
+    try { await rm(p.directory, { recursive: true, force: true }); }
+    catch { cleanup_errors.push('Could not remove temporary checkout files'); }
+    for (const path of [runtime, temporary]) {
+      try { await rm(path, { recursive: true, force: true }); }
+      catch { cleanup_errors.push('Could not remove private check runtime files'); }
+    }
+    if (ownsAliases) try { await rm(aliases, { recursive: true, force: true }); }
+    catch { cleanup_errors.push('Could not remove private runtime aliases'); }
   }
   async function stopCores() {
     if (process.platform !== 'linux') return;
@@ -216,36 +294,7 @@ async function main(p) {
   finally {
     clearTimeout(deadline);
     try { await stopCores(); } catch { cleanup_errors.push('Could not inspect check runtime processes'); }
-    let remaining;
-    try { remaining = await remainingProcesses(); }
-    catch { remaining = [...unconfirmed].map(pid => ({ pid, state: 'unknown', wchan: 'unknown' }));
-      if (!remaining.length) remaining = [{ pid: process.pid, state: 'unknown', wchan: 'inspection_failed' }]; }
-    if (remaining.length) {
-      manual_attention = true;
-      for (const record of remaining) {
-        const message = 'Manual attention required for attempt ' + basename(p.container) + ': PID ' + record.pid +
-          ' state=' + record.state + ' wchan=' + record.wchan;
-        cleanup_errors.push(message);
-        emit({ type: 'output', name: 'cleanup', text: message + '\n' });
-      }
-      try { await markManualAttention(p.container, remaining); }
-      catch { cleanup_errors.push('Could not persist manual-attention.json; preserve the check directory'); }
-      if (status === 'passed') { status = 'failed'; reason = 'Check child processes did not stop'; }
-    } else {
-    // Cleanup does not inherit cancellation. Git and recursive deletion run as the owner.
-    const removed = await git(p.repository, ['worktree', 'remove', '--force', '--', p.directory], true);
-    // A cancelled add may have stopped before Git registered anything; only report a registration that remains.
-    if (registered && removed.status !== 'passed' && (!addInterrupted || await stillRegistered()))
-      cleanup_errors.push('Could not remove temporary worktree registration');
-    try { await rm(p.directory, { recursive: true, force: true }); }
-    catch { cleanup_errors.push('Could not remove temporary checkout files'); }
-    for (const path of [runtime, temporary]) {
-      try { await rm(path, { recursive: true, force: true }); }
-      catch { cleanup_errors.push('Could not remove private check runtime files'); }
-    }
-    if (ownsAliases) try { await rm(aliases, { recursive: true, force: true }); }
-    catch { cleanup_errors.push('Could not remove private runtime aliases'); }
-    }
+    await cleanup();
   }
   emit({ type: 'result', nonce, status, checks, cleanup_errors, ...(manual_attention ? { manual_attention } : {}), ...(reason ? { reason } : {}) });
 }

@@ -18,12 +18,13 @@ async function procStat(pid) {
   return { pid: Number(pid), comm: stat.slice(stat.indexOf('(') + 1, end),
     state: fields[0], ppid: Number(fields[1]), group: Number(fields[2]), start: fields[19] };
 }
-async function procIdentity(pid) {
-  const record = await procStat(pid);
+async function procIdentity(pid, observed) {
+  const record = observed ?? await procStat(pid);
+  if (['Z', 'X'].includes(record.state)) return;
   const status = await boundedRead(procFiles.readFile('/proc/' + pid + '/status', 'utf8'));
   const uids = status.match(/^Uid:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)$/m);
-  if (!uids || uids.slice(1).some(uid => Number(uid) !== process.getuid())) return;
-  if (['Z', 'X'].includes(record.state)) return;
+  if (!uids) throw new Error('Invalid process owner');
+  if (uids.slice(1).some(uid => Number(uid) !== process.getuid())) return;
   return record;
 }
 async function procCwd(pid) {
