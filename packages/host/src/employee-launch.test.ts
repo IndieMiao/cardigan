@@ -1,6 +1,8 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import {
   type Assignment,
   type Employee,
@@ -26,6 +28,13 @@ test.each(
   "host launch injects the stored employee through $harness (instructions=$modern), including dispatcher first prompts",
   async ({ harness, modern }) => {
     const dataDir = await mkdtemp(join(tmpdir(), "cg-employee-launch-"));
+    const configDir = join(dataDir, "config");
+    await mkdir(configDir, { mode: 0o700 });
+    const probe = join(dataDir, "vitest.mjs");
+    await writeFile(
+      probe,
+      "console.log(JSON.stringify(process.argv.slice(2)))\n",
+    );
     const store = Store.open({ dataDir });
     const project = "employee-launch";
     const clock = { now: () => "2026-01-01T00:00:00.000Z" };
@@ -78,6 +87,12 @@ test.each(
         tx.employees.put(employee);
       });
       for (const named of [false, true]) {
+        if (named)
+          await writeFile(
+            join(configDir, "agent-tests.yaml"),
+            "max_workers: 1\n",
+            { mode: 0o600 },
+          );
         const assignment: Assignment = {
           id: named ? "A-2" : "A-1",
           scope: "standing",
@@ -116,6 +131,7 @@ test.each(
             store,
             runtime,
             dataDir,
+            configDir,
             execution: {
               mode: "local",
               dataDir,
@@ -144,6 +160,22 @@ test.each(
           "utf8",
         );
         expect(script).toContain(`exec nice -n ${named ? 17 : 10} `);
+        expect(script).toContain("export NODE_OPTIONS=");
+        const guarded = await promisify(execFile)(
+          process.execPath,
+          [
+            "--require",
+            join(launched.run_dir, "test-workers.cjs"),
+            probe,
+            "run",
+            "--maxWorkers=9",
+          ],
+          { env: { ...process.env, NODE_OPTIONS: "" } },
+        );
+        expect(JSON.parse(guarded.stdout)).toEqual([
+          "run",
+          `--maxWorkers=${named ? 1 : 2}`,
+        ]);
         const first = await readFile(
           join(launched.run_dir, "first.md"),
           "utf8",

@@ -372,6 +372,7 @@ async function startUnlocked(
         launch: options.launch,
         mcpUrl: options.mcpUrl,
         dataDir: options.dataDir,
+        configDir: resolveLaunchPaths(io.env).configDir,
         execution,
         report: (message) => io.stderr(message),
       },

@@ -213,6 +213,7 @@ export async function createHostWiring(options: {
           launch,
           mcpUrl: url,
           dataDir: options.dataDir,
+          configDir: configDir(env),
           execution,
           ...(options.clock === undefined ? {} : { clock: options.clock }),
         },
