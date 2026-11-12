@@ -19,6 +19,7 @@ import {
 } from "@cardigan/runtime-herdr";
 import { AFFECTED_PACKAGE_DIR } from "./change-scope.js";
 import { checkEnvironment } from "./check-environment.js";
+import { CHECKOUT_LIMITS } from "./checkout-limits.js";
 import { CHECKOUT_WORKER } from "./checkout-worker.js";
 import { type ExecutionOwner, executionOwner } from "./merge-check-capacity.js";
 
@@ -42,6 +43,7 @@ export interface CheckoutResult {
   }[];
   readonly cleanup_errors: readonly string[];
   readonly reason?: string;
+  readonly manual_attention?: boolean;
 }
 export interface CheckoutInput {
   readonly execution: ExecutionConfig;
@@ -91,7 +93,7 @@ function runOnExecutor(
   start: Start,
   command: { file: string; args: readonly string[]; expect: string },
   path: string,
-  timeoutMs = 60_000,
+  timeoutMs = CHECKOUT_LIMITS.remoteCommandMs,
 ): Promise<boolean> {
   return new Promise((resolve) => {
     let child: ChildProcessWithoutNullStreams;
@@ -102,7 +104,13 @@ function runOnExecutor(
       return;
     }
     let stdout = "";
-    const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      child.stdin.destroy();
+      child.stdout.destroy();
+      child.stderr.destroy();
+      resolve(false);
+    }, timeoutMs);
     child.stdin.on("error", () => {});
     child.stdin.end();
     child.stdout.setEncoding("utf8").on("data", (data: string) => {
@@ -201,18 +209,31 @@ export async function runInTemporaryCheckout(
     : input.serialize
       ? await prepareCheckLock(execution, input.lockSlot ?? 0)
       : undefined;
-  const worker = [
-    execution.mode === "agent-ssh" ? "node" : process.execPath,
-    "-e",
-    CHECKOUT_WORKER,
-  ];
-  const argv = lock
-    ? ["flock", "--exclusive", "--no-fork", "--", lock, ...worker]
-    : worker;
   const root =
     execution.mode === "agent-ssh"
       ? execution.agentRoot
       : join(execution.dataDir, "agent");
+  const worker = [
+    execution.mode === "agent-ssh" ? "node" : process.execPath,
+    "-e",
+    CHECKOUT_WORKER,
+    "--",
+    join(root, "checks", project, attempt),
+  ];
+  const argv = lock
+    ? [
+        "flock",
+        "--exclusive",
+        "--no-fork",
+        "--wait",
+        String(CHECKOUT_LIMITS.lockWaitMs / 1000),
+        "--conflict-exit-code",
+        "75",
+        "--",
+        lock,
+        ...worker,
+      ]
+    : worker;
   const repository = join(root, "repos", project);
   let command: { file: string; args: string[] };
   let container: string;
@@ -265,17 +286,58 @@ export async function runInTemporaryCheckout(
       let resultCount = 0,
         protocolFailed = false;
       let ready = false;
+      let closed = false;
+      let timer: ReturnType<typeof setTimeout>;
+      const dispose = () => {
+        closed = true;
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", cancel);
+        lines.close();
+      };
+      const expire = () => {
+        dispose();
+        child.kill("SIGKILL");
+        child.stdin.destroy();
+        child.stdout.destroy();
+        child.stderr.destroy();
+        if (protocolFailed) reject(new Error("Invalid checkout protocol"));
+        else
+          resolve({
+            status: signal?.aborted
+              ? "interrupted"
+              : ready
+                ? "timed_out"
+                : "executor_unreachable",
+            checks: [],
+            cleanup_errors: ready
+              ? ["检查执行器未按时结束，远端清理未确认"]
+              : [],
+            reason: ready
+              ? "检查超过总时限及宽限时间"
+              : "检查槽位或握手等待超时，等待重试",
+          });
+      };
       const cancel = () => {
+        if (closed) return;
+        // Repeated invalid messages must not extend the hard deadline.
+        if (!cancelling) {
+          cancelling = true;
+          clearTimeout(timer);
+          timer = setTimeout(expire, CHECKOUT_LIMITS.graceMs);
+        }
         if (input.serialize && !ready) {
           child.kill("SIGTERM");
           return;
         }
         if (!child.stdin.destroyed) child.stdin.write("cancel\n");
       };
+      let cancelling = false;
       signal?.addEventListener("abort", cancel, { once: true });
       child.stdin.on("error", () => {});
       const lines = createInterface({ input: child.stdout });
+      timer = setTimeout(expire, CHECKOUT_LIMITS.entryMs);
       lines.on("line", (line) => {
+        if (closed) return;
         try {
           const { auth, ...event } = JSON.parse(line);
           if (event.type === "result") resultCount++;
@@ -292,6 +354,11 @@ export async function runInTemporaryCheckout(
             if (ready) throw new Error("Duplicate checkout readiness");
             if (ownerError) throw ownerError;
             ready = true;
+            clearTimeout(timer);
+            timer = setTimeout(
+              expire,
+              Math.min(2147483647, totalTimeoutMs + CHECKOUT_LIMITS.graceMs),
+            );
             input.onReady?.(owner);
           }
           if (event.type === "output") input.onOutput?.(event.name, event.text);
@@ -307,12 +374,14 @@ export async function runInTemporaryCheckout(
         }
       });
       child.stderr.on("data", () => {}); // Never expose arbitrary SSH diagnostics or credential paths.
-      child.once("error", () =>
-        reject(new Error("Checkout execution entry failed")),
-      );
+      child.once("error", () => {
+        if (closed) return;
+        dispose();
+        reject(new Error("Checkout execution entry failed"));
+      });
       child.once("close", (code) => {
-        signal?.removeEventListener("abort", cancel);
-        lines.close();
+        if (closed) return;
+        dispose();
         if (
           code === 0 &&
           ready &&
@@ -324,15 +393,19 @@ export async function runInTemporaryCheckout(
         else if (signal?.aborted && !protocolFailed)
           resolve({ status: "interrupted", checks: [], cleanup_errors: [] });
         else if (
-          execution.mode === "agent-ssh" &&
-          code === 255 &&
+          ((execution.mode === "agent-ssh" && code === 255) ||
+            (!ready && input.serialize && code === 75) ||
+            (!ready && code === 124)) &&
           !protocolFailed
         )
           resolve({
             status: "executor_unreachable",
             checks: [],
             cleanup_errors: [],
-            reason: "远程检查机 SSH 连接失败，合并检查排队等待重试",
+            reason:
+              code === 255
+                ? "远程检查机 SSH 连接失败，合并检查排队等待重试"
+                : "检查槽位或握手等待超时，合并检查排队等待重试",
           });
         else
           reject(
