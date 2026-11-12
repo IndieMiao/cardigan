@@ -1,4 +1,8 @@
-import { execFile, spawn } from "node:child_process";
+import {
+  type ChildProcessWithoutNullStreams,
+  execFile,
+  spawn,
+} from "node:child_process";
 import { once } from "node:events";
 import {
   chmod,
@@ -478,10 +482,13 @@ test.each(["wrong-tree", "dirty", "staged"] as const)(
 );
 
 test.skipIf(process.platform !== "linux").each(["group", "cwd"] as const)(
-  "an unkillable child identified by %s is bounded, audited and leaves its directory for manual attention",
+  "an unkillable child identified by %s exits its supervisor, releases flock and preserves its directory",
   async (identity) => {
     const f = await fixture();
     const output: string[] = [];
+    const lock = join(f.input.execution.dataDir, "merge-check.lock");
+    let worker: ChildProcessWithoutNullStreams | undefined;
+    let lockedWhileRunning: Promise<number | string> | undefined;
     // Model D state and a child that never emits close; never create actual kernel stalls.
     const inject = String.raw`
     const fakePid = 900000001;
@@ -514,19 +521,47 @@ test.skipIf(process.platform !== "linux").each(["group", "cwd"] as const)(
       return fakePid + ' (biome) ' + fields.join(' ');
     };
   `;
-    const result = await runInTemporaryCheckout(
-      {
-        ...f.input,
-        checks: [{ name: "wait", run: "simulated-d-child", timeoutMs: 50 }],
-        onOutput: (_name, text) => output.push(text),
-      },
-      (file, args, env) =>
-        spawn(
-          file,
-          args.map((arg) => (arg === CHECKOUT_WORKER ? inject + arg : arg)),
-          { env, stdio: ["pipe", "pipe", "pipe"] },
-        ),
-    );
+    // Fail if the supervisor needs the host's 120-second hard-stop fallback.
+    // The watchdog also prevents a regressed worker from leaking its real lock.
+    const watchdog = setTimeout(() => worker?.kill("SIGKILL"), 8_000);
+    let result: Awaited<ReturnType<typeof runInTemporaryCheckout>>;
+    try {
+      result = await runInTemporaryCheckout(
+        {
+          ...f.input,
+          serialize: true,
+          checks: [{ name: "wait", run: "simulated-d-child", timeoutMs: 50 }],
+          onReady: () => {
+            lockedWhileRunning = exec(
+              "flock",
+              ["--nonblock", "--conflict-exit-code", "75", lock, "true"],
+              { timeout: 1_000 },
+            ).then(
+              () => 0,
+              (error: { code: number | string }) => error.code,
+            );
+          },
+          onOutput: (_name, text) => output.push(text),
+        },
+        (file, args, env) => {
+          worker = spawn(
+            file,
+            args.map((arg) => (arg === CHECKOUT_WORKER ? inject + arg : arg)),
+            { env, stdio: ["pipe", "pipe", "pipe"] },
+          );
+          return worker;
+        },
+      );
+    } finally {
+      clearTimeout(watchdog);
+      if (worker?.exitCode === null) worker.kill("SIGKILL");
+    }
+    expect(await lockedWhileRunning).toBe(75);
+    expect(worker?.exitCode).toBe(0);
+    expect(worker?.signalCode).toBeNull();
+    await expect(
+      exec("flock", ["--nonblock", lock, "true"], { timeout: 1_000 }),
+    ).resolves.toMatchObject({ stderr: "" });
     expect(result).toMatchObject({
       status: "timed_out",
       manual_attention: true,
@@ -535,7 +570,9 @@ test.skipIf(process.platform !== "linux").each(["group", "cwd"] as const)(
     const marker = join(f.container, "manual-attention.json");
     expect(JSON.parse(await readFile(marker, "utf8"))).toMatchObject({
       kind: "merge_check_manual_attention",
-      processes: [{ pid: 900000001, state: "D", wchan: "exit_mm" }],
+      processes: [
+        { pid: 900000001, start: "100", state: "D", wchan: "exit_mm" },
+      ],
     });
     expect((await stat(marker)).mode & 0o777).toBe(0o600);
     expect(await f.git("worktree", "list", "--porcelain")).toContain(
@@ -545,6 +582,7 @@ test.skipIf(process.platform !== "linux").each(["group", "cwd"] as const)(
       "original\n",
     );
   },
+  10_000,
 );
 
 test("invalid input and reserved runtime variables fail before creating a checkout", async () => {
