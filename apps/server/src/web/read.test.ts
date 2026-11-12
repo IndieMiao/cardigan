@@ -524,6 +524,45 @@ test("attachments download, and only bitmaps may render inline", async () => {
   }
 });
 
+test("C-125: a signed-in cross-project attachment download returns 404 without content or metadata", async () => {
+  const { harness, cookie, seeded: data } = await seeded();
+  try {
+    const otherProject = "attachment-other";
+    expect(
+      harness.store.createProject({
+        id: otherProject,
+        name: "Other project",
+      }).ok,
+    ).toBe(true);
+    const source = await call(
+      harness.port,
+      `/api/projects/${project_id}/attachments/${data.attachment.id}`,
+      { cookie },
+    );
+    expect(source.status).toBe(200);
+    expect(source.body).toBe(data.attachment_content);
+
+    const crossProject = await call(
+      harness.port,
+      `/api/projects/${otherProject}/attachments/${data.attachment.id}`,
+      { cookie },
+    );
+    expect(crossProject.status).toBe(404);
+    expect(crossProject.json).toEqual({
+      error: { code: "not_found", message: "attachment not found" },
+    });
+    expect(crossProject.body).not.toContain(data.attachment_content);
+    expect(crossProject.body).not.toContain(data.attachment.sha256);
+    expect(crossProject.headers["content-type"]).toBe(
+      "application/json; charset=utf-8",
+    );
+    expect(crossProject.headers["content-disposition"]).toBeUndefined();
+    expect(crossProject.headers.etag).toBeUndefined();
+  } finally {
+    await harness.close();
+  }
+});
+
 test("reading the board does not move any Agent cursor", async () => {
   const { harness, cookie } = await seeded();
   try {

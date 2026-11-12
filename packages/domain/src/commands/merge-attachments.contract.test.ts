@@ -3,10 +3,12 @@ import {
   type Actor,
   type Assignment,
   type CommandState,
+  createCard,
   MAX_DECISION_ATTACHMENTS,
   prepareAttachment,
   resolveDelegatedDecision,
   standingTools,
+  submitReview,
   uploadAttachment,
 } from "../index.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
@@ -46,15 +48,15 @@ async function setup() {
       get: async () => undefined,
     }),
   );
-  const upload = (mime = "image/png") => {
-    const entry = f.state.timeline.find((e) => e.card_id === f.card.id);
+  const upload = (mime = "image/png", card_id = f.card.id) => {
+    const entry = f.state.timeline.find((e) => e.card_id === card_id);
     if (!entry) throw new Error("Missing card entry");
     return f.commit(
       uploadAttachment(
         f.state,
         human,
         {
-          card_id: f.card.id,
+          card_id,
           kind: "evidence",
           mime,
           attach_to: { kind: "timeline_entry", id: entry.id },
@@ -94,6 +96,67 @@ test("§6 C-95: a merge confirmation shows the completion request's card attachm
   expect(confirmation()).toMatchObject({
     trigger: "merge_confirmation",
     attachment_ids: ids.slice(0, MAX_DECISION_ATTACHMENTS),
+  });
+});
+
+test("§6 C-125: a merge confirmation only includes the intersection of completion and own-card attachments", async () => {
+  const { f, upload, confirmation } = await setup();
+  const product = await f.deliver();
+  f.review(product);
+  const first = upload();
+  const second = upload();
+  upload(); // An own-card attachment not referenced by the completion.
+  const other = f.commit(
+    createCard(
+      f.state,
+      human,
+      {
+        title: "Other card",
+        goal: "Keep attachments isolated",
+        acceptance_criteria: ["Attachments stay on their card"],
+        source: { kind: "quote", text: "Attachment isolation" },
+        repo: "fixture",
+        base_branch: "main",
+      },
+      f.io,
+    ),
+  );
+  const foreign = upload("image/png", other.id);
+  const completion = await f.deliver(
+    "card_completion",
+    product.subject.value,
+    true,
+    [],
+    undefined,
+    [second.id, first.id],
+  );
+  f.start(f.pm);
+  // Submission rejects foreign attachments; seed a malformed stored request
+  // to exercise the merge confirmation's independent isolation boundary.
+  f.commit(
+    submitReview(
+      {
+        ...f.state,
+        deliveries: f.state.deliveries.map((d) =>
+          d.id === completion.id
+            ? { ...d, attachments: [foreign.id, ...d.attachments] }
+            : d,
+        ),
+      },
+      f.actor(f.pm),
+      {
+        delivery_id: completion.id,
+        target_sha: completion.subject.value,
+        kind: "product",
+        issues: [],
+      },
+      f.io,
+    ),
+  );
+  expect(confirmation()).toMatchObject({
+    trigger: "merge_confirmation",
+    target: { delivery_id: completion.id },
+    attachment_ids: [second.id, first.id],
   });
 });
 
