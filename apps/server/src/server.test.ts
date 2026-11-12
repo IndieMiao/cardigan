@@ -88,6 +88,55 @@ test("C-152: a shell without runtime.env cannot downgrade an agent-ssh registrat
   ).toEqual({ mode: "local", session: "cardigan" });
 });
 
+test.each([
+  ["unreadable", "EACCES"],
+  ["invalid JSON", "SyntaxError"],
+])(
+  "C-152: an %s registration stops the start instead of being treated as missing",
+  async (kind) => {
+    await server.close();
+    const path = join(dataDir, "runtime.json");
+    const agent = JSON.stringify({
+      mode: "agent-ssh",
+      session: "cardigan",
+      machine: "cardigan-agent",
+      agentRoot: "/srv/agent",
+      gid: 900,
+      identityFile: "/keys/id",
+      knownHostsFile: "/keys/known_hosts",
+    });
+    writeFileSync(path, kind === "unreadable" ? agent : agent.slice(0, 20));
+    if (kind === "unreadable") chmodSync(path, 0o000);
+    const start = () =>
+      startCardiganServer({
+        config: { dataDir, host: "127.0.0.1", port: 0 },
+        store,
+        env: {},
+        warn: () => {},
+      });
+    try {
+      // Root ignores file modes; the unreadable case needs a regular user.
+      if (kind === "unreadable" && process.getuid?.() === 0) return;
+      await expect(start()).rejects.toThrow(
+        /无法读取数据目录中已有的运行时登记/,
+      );
+      chmodSync(path, 0o600);
+      expect(readFileSync(path, "utf8")).toBe(
+        kind === "unreadable" ? agent : agent.slice(0, 20),
+      );
+    } finally {
+      // Restore a running server for afterEach.
+      chmodSync(path, 0o600);
+      rmSync(path);
+      server = await startCardiganServer({
+        config: { dataDir, host: "127.0.0.1", port: 0 },
+        store,
+        warn: () => {},
+      });
+    }
+  },
+);
+
 test("server startup reports invalid merge gate settings in Chinese without exposing YAML values", async () => {
   await server.close();
   writeFileSync(

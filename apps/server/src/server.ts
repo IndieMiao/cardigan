@@ -15,6 +15,7 @@ import {
   DEFAULT_HC_SESSION,
   describeRuntime,
   LOCAL_RUNTIME_WARNING,
+  REGISTERED_RUNTIME_FILE,
   readRegisteredRuntime,
   resolveExecutionConfig,
   runtimeOwnsRef,
@@ -117,8 +118,15 @@ export async function startCardiganServer(
   const session = runtimeEnv.CARDIGAN_HC_SESSION ?? DEFAULT_HC_SESSION;
   // C-152: an existing agent-ssh registration is never downgraded by a shell
   // that merely forgot runtime.env; switching to local must be explicit.
+  // Only a missing file means "not registered"; an unreadable or corrupt one
+  // might hide an agent-ssh registration, so it stops the start (V-489).
   const previous = await readRegisteredRuntime(config.dataDir).catch(
-    () => undefined,
+    (error: unknown) => {
+      throw new Error(
+        `拒绝启动：无法读取数据目录中已有的运行时登记 ${REGISTERED_RUNTIME_FILE}（${error instanceof Error ? error.message : String(error)}）；它可能记录着 agent-ssh，不能当作未登记。请修复该文件的权限或内容；确认要重新登记时，先把它移走，再用正确的运行环境启动 server。`,
+        { cause: error },
+      );
+    },
   );
   if (
     previous?.mode === "agent-ssh" &&

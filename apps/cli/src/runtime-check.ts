@@ -28,7 +28,7 @@ async function registered(
     return await readRegisteredRuntime(dataDir);
   } catch (error) {
     throw new CliError(
-      `无法读取 server 登记的运行时配置：${error instanceof Error ? error.message : String(error)}；请重启 cardigan-server 重新登记`,
+      `无法读取 server 登记的运行时配置：${error instanceof Error ? error.message : String(error)}；它可能记录着 agent-ssh，不能当作未登记。请修复该文件的权限或内容；确认要重新登记时先把它移走，再用正确的运行环境启动 cardigan-server`,
       EXIT.failure,
     );
   }
