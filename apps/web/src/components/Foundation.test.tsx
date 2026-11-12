@@ -30,6 +30,13 @@ import {
   Time,
 } from "./Foundation.js";
 
+class ResizeObserverMock {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+vi.stubGlobal("ResizeObserver", ResizeObserverMock);
+
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
@@ -63,7 +70,7 @@ test("U1 time uses relative minutes/hours, local dates and years, with a full ti
   expect(screen.getByText("4 分钟前")).toBeTruthy();
 });
 
-test("U1 ID tags include explanations, safe targets and S23 route anchors", () => {
+test("U1 ID tags include explanations, safe targets and S23 route anchors", async () => {
   const href = routeHash({
     kind: "card",
     projectId: "p/a",
@@ -82,7 +89,9 @@ test("U1 ID tags include explanations, safe targets and S23 route anchors", () =
     </>,
   );
   const link = screen.getByRole("link", { name: "Q-4 拍板" });
-  expect(link.title).toBe("选择发布方式");
+  expect(link.title).toBe("");
+  fireEvent.focus(link);
+  expect((await screen.findByRole("tooltip")).textContent).toBe("选择发布方式");
   expect(link.getAttribute("href")).toBe("#/p/p%2Fa/cards/C-1?at=decision-Q-4");
   expect(parseRoute(href)).toMatchObject({
     projectId: "p/a",
@@ -179,7 +188,10 @@ test("U1 shell orders Needs You first with its count, then work and runtime grou
   const sidebar = await screen.findByRole("complementary", {
     name: "Workbench 导航",
   });
-  await screen.findByTitle("1 件待处理");
+  const needsLink = await screen.findByRole("link", { name: "Needs You 1" });
+  fireEvent.focus(needsLink);
+  expect((await screen.findByRole("tooltip")).textContent).toBe("1 件待处理");
+  fireEvent.blur(needsLink);
   expect(
     within(sidebar)
       .getAllByRole("link")
