@@ -34,6 +34,7 @@ test("the registration round-trips without the data directory or priority, priva
   const read = await readRegisteredRuntime(dir);
   expect(read).toEqual({
     mode: "agent-ssh",
+    session: "cardigan",
     agentRoot: "/srv/agent",
     gid: 900,
     machine: "cardigan-agent",
@@ -43,7 +44,12 @@ test("the registration round-trips without the data directory or priority, priva
   if (!read) throw new Error("missing");
   expect(runtimeDifferences(read, { ...agent, dataDir: "/other" })).toEqual([]);
   await writeRegisteredRuntime(dir, { mode: "local", dataDir: dir });
-  expect(await readRegisteredRuntime(dir)).toEqual({ mode: "local" });
+  expect(await readRegisteredRuntime(dir)).toEqual({
+    mode: "local",
+    session: "cardigan",
+  });
+  await writeRegisteredRuntime(dir, { mode: "local", dataDir: dir }, "other");
+  expect((await readRegisteredRuntime(dir))?.session).toBe("other");
 });
 
 test("differences name the environment variable and both values", () => {
@@ -51,6 +57,7 @@ test("differences name the environment variable and both values", () => {
     runtimeDifferences(
       {
         mode: "agent-ssh",
+        session: "server-session",
         machine: "cardigan-agent",
         agentRoot: "/srv/agent",
         gid: 900,
@@ -58,9 +65,11 @@ test("differences name the environment variable and both values", () => {
         knownHostsFile: "/keys/known_hosts",
       },
       { mode: "local", dataDir: "/data" },
+      "shell-session",
     ),
   ).toEqual(
     expect.arrayContaining([
+      "CARDIGAN_HC_SESSION（或 --hc-session）：server 登记为 server-session，当前 shell 为 shell-session",
       "CARDIGAN_RUNTIME_MODE：server 登记为 agent-ssh，当前 shell 为 local",
       "CARDIGAN_AGENT_MACHINE：server 登记为 cardigan-agent，当前 shell 为 （未设置）",
     ]),

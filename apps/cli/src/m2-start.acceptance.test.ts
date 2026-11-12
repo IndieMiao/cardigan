@@ -365,6 +365,8 @@ if(process.argv.includes('--version')) { console.log('pi acceptance-1'); process
         port: 0,
         execution: { mode: "local", dataDir },
       },
+      // The CLI must use the session the server registered (C-152).
+      env: { CARDIGAN_HC_SESSION: session },
       store,
       warn() {},
       log() {},

@@ -443,11 +443,13 @@ describe("assignment attach", () => {
 });
 
 describe("C-152: server-registered runtime", () => {
+  // The fixture hc listens only in the `attach-fixture` session: the server's.
   const registerAgentSsh = (machine = "cardigan-agent") =>
     writeFileSync(
       join(root, "data", "runtime.json"),
       JSON.stringify({
         mode: "agent-ssh",
+        session: "attach-fixture",
         machine,
         agentRoot: join(root, "agent"),
         gid: 4242,
@@ -518,9 +520,58 @@ describe("C-152: server-registered runtime", () => {
     expect(calls()).toEqual([]);
   });
 
+  test("without any registration an empty shell is refused instead of defaulting to local", () => {
+    delete env.CARDIGAN_RUNTIME_MODE;
+    updateAssignment({ runtime_ref: null, runtime_state: "idle" });
+    const result = cli(["assignment", "start", "A-1", "--project", "fixture"]);
+    expect(result.code).toBe(2);
+    expect(result.output).toContain("server 还没有在这个数据目录登记运行时");
+    expect(result.output).toContain("CARDIGAN_RUNTIME_MODE=local");
+    expect(calls()).toEqual([]);
+  });
+
+  test("a start whose hc session differs from the server's is refused", () => {
+    writeFileSync(
+      join(root, "data", "runtime.json"),
+      JSON.stringify({ mode: "local", session: "server-session" }),
+    );
+    updateAssignment({ runtime_ref: null, runtime_state: "idle" });
+    const result = cli(["assignment", "start", "A-1", "--project", "fixture"]);
+    expect(result.code).toBe(2);
+    expect(result.output).toContain(
+      "CARDIGAN_HC_SESSION（或 --hc-session）：server 登记为 server-session，当前 shell 为 attach-fixture",
+    );
+    expect(calls()).toEqual([]);
+  });
+
+  test.skipIf(process.platform !== "linux")(
+    "attach to an agent-ssh terminal from a plain shell uses the server's registered hc session",
+    () => {
+      mkdirSync(join(root, "ssh"));
+      for (const name of ["id", "known_hosts"])
+        writeFileSync(join(root, "ssh", name), "fixture", { mode: 0o600 });
+      registerAgentSsh();
+      delete env.CARDIGAN_RUNTIME_MODE;
+      delete env.CARDIGAN_HC_SESSION;
+      updateAssignment({
+        runtime_ref: {
+          machine_id: "local",
+          runtime_machine: "cardigan-agent",
+          terminal_ref: "cardigan-agent/t7",
+          agent_name: "fixture",
+        },
+      });
+      const result = run(["--print"]);
+      expect(result.output).toContain("HC_SESSION='attach-fixture'");
+      expect(result.output).toContain("attach 'cardigan-agent/t7' --observe");
+      expect(result.code).toBe(0);
+    },
+  );
+
   test("attach from a plain shell follows the terminal's recorded local runtime", () => {
     registerAgentSsh();
     delete env.CARDIGAN_RUNTIME_MODE;
+    delete env.CARDIGAN_HC_SESSION;
     const result = run(["--print"]);
     expect(result.code).toBe(0);
     expect(result.output).toContain("attach 't7' --observe");

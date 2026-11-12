@@ -11,7 +11,13 @@ import type { ExecutionConfig } from "./execution.js";
  */
 export const REGISTERED_RUNTIME_FILE = "runtime.json";
 
-export type RegisteredRuntime =
+/** hc session used when neither the server nor the shell names one. */
+export const DEFAULT_HC_SESSION = "cardigan";
+
+export type RegisteredRuntime = {
+  /** The server's hc session: existing terminals are found only inside it. */
+  readonly session: string;
+} & (
   | { readonly mode: "local" }
   | {
       readonly mode: "agent-ssh";
@@ -24,15 +30,18 @@ export type RegisteredRuntime =
       readonly port?: number;
       readonly user?: string;
       readonly hostKeyAlias?: string;
-    };
+    }
+);
 
 /** The non-secret fields that decide where and as whom terminals run. */
 export function registeredRuntimeOf(
   config: ExecutionConfig,
+  session: string = DEFAULT_HC_SESSION,
 ): RegisteredRuntime {
-  if (config.mode === "local") return { mode: "local" };
+  if (config.mode === "local") return { mode: "local", session };
   return {
     mode: "agent-ssh",
+    session,
     machine: config.machine,
     agentRoot: config.agentRoot,
     gid: config.gid,
@@ -73,13 +82,14 @@ export const describeRuntime = (
 export async function writeRegisteredRuntime(
   dataDir: string,
   config: ExecutionConfig,
+  session: string = DEFAULT_HC_SESSION,
 ): Promise<void> {
   const target = join(dataDir, REGISTERED_RUNTIME_FILE);
   const temp = join(dataDir, `.${REGISTERED_RUNTIME_FILE}.${randomUUID()}`);
   try {
     await writeFile(
       temp,
-      `${JSON.stringify(registeredRuntimeOf(config), null, 2)}\n`,
+      `${JSON.stringify(registeredRuntimeOf(config, session), null, 2)}\n`,
       { mode: 0o600, flag: "wx" },
     );
     await rename(temp, target);
@@ -103,7 +113,12 @@ export async function readRegisteredRuntime(
     throw error;
   }
   const parsed = JSON.parse(text) as Partial<Record<string, unknown>>;
-  if (parsed.mode === "local") return { mode: "local" };
+  // Registrations written before C-152 rework had no session: the default.
+  const session =
+    typeof parsed.session === "string" && parsed.session.length > 0
+      ? parsed.session
+      : DEFAULT_HC_SESSION;
+  if (parsed.mode === "local") return { mode: "local", session };
   const str = (key: string) => {
     const value = parsed[key];
     if (typeof value !== "string" || value.length === 0)
@@ -119,6 +134,7 @@ export async function readRegisteredRuntime(
     typeof parsed[key] === "string" ? { [key]: parsed[key] as string } : {};
   return {
     mode: "agent-ssh",
+    session,
     machine: str("machine"),
     agentRoot: str("agentRoot"),
     gid,
@@ -132,6 +148,7 @@ export async function readRegisteredRuntime(
 }
 
 const FIELD_ENV: Record<string, string> = {
+  session: "CARDIGAN_HC_SESSION（或 --hc-session）",
   mode: "CARDIGAN_RUNTIME_MODE",
   machine: "CARDIGAN_AGENT_MACHINE",
   agentRoot: "CARDIGAN_AGENT_ROOT",
@@ -148,8 +165,9 @@ const FIELD_ENV: Record<string, string> = {
 export function runtimeDifferences(
   registered: RegisteredRuntime,
   current: ExecutionConfig,
+  session: string = DEFAULT_HC_SESSION,
 ): string[] {
-  const mine = registeredRuntimeOf(current) as Record<string, unknown>;
+  const mine = registeredRuntimeOf(current, session) as Record<string, unknown>;
   const theirs = registered as Record<string, unknown>;
   const keys = new Set([...Object.keys(mine), ...Object.keys(theirs)]);
   const show = (value: unknown) =>

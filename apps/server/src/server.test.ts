@@ -40,7 +40,52 @@ test("local server startup visibly warns that the Agent account is not isolated"
   expect(warnings[0]).toContain("agent-ssh");
   expect(
     JSON.parse(readFileSync(join(dataDir, "runtime.json"), "utf8")),
-  ).toEqual({ mode: "local" });
+  ).toEqual({ mode: "local", session: "cardigan" });
+});
+
+test("C-152: a failed or competing start never replaces the live server's registration", async () => {
+  const registration = () =>
+    JSON.parse(readFileSync(join(dataDir, "runtime.json"), "utf8"));
+  expect(registration()).toEqual({ mode: "local", session: "cardigan" });
+  await expect(
+    startCardiganServer({
+      config: { dataDir, host: "127.0.0.1", port: server.port },
+      store,
+      env: { CARDIGAN_RUNTIME_MODE: "local", CARDIGAN_HC_SESSION: "other" },
+      warn: () => {},
+    }),
+  ).rejects.toMatchObject({ code: "EADDRINUSE" });
+  expect(registration()).toEqual({ mode: "local", session: "cardigan" });
+});
+
+test("C-152: a shell without runtime.env cannot downgrade an agent-ssh registration", async () => {
+  await server.close();
+  const agent = {
+    mode: "agent-ssh",
+    session: "cardigan",
+    machine: "cardigan-agent",
+    agentRoot: "/srv/agent",
+    gid: 900,
+    identityFile: "/keys/id",
+    knownHostsFile: "/keys/known_hosts",
+  };
+  writeFileSync(join(dataDir, "runtime.json"), JSON.stringify(agent));
+  const start = (env: Record<string, string>) =>
+    startCardiganServer({
+      config: { dataDir, host: "127.0.0.1", port: 0 },
+      store,
+      env,
+      warn: () => {},
+    });
+  await expect(start({})).rejects.toThrow(/CARDIGAN_RUNTIME_MODE=local/);
+  expect(
+    JSON.parse(readFileSync(join(dataDir, "runtime.json"), "utf8")),
+  ).toEqual(agent);
+  // An explicit switch to local is the operator's decision and is registered.
+  server = await start({ CARDIGAN_RUNTIME_MODE: "local" });
+  expect(
+    JSON.parse(readFileSync(join(dataDir, "runtime.json"), "utf8")),
+  ).toEqual({ mode: "local", session: "cardigan" });
 });
 
 test("server startup reports invalid merge gate settings in Chinese without exposing YAML values", async () => {
@@ -99,6 +144,7 @@ test.skipIf(process.platform !== "linux")(
         JSON.parse(readFileSync(join(privateDir, "runtime.json"), "utf8")),
       ).toEqual({
         mode: "agent-ssh",
+        session: "cardigan",
         machine: "cardigan-agent",
         agentRoot: join(dataDir, "agent"),
         gid: process.getgid?.() ?? 0,

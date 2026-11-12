@@ -38,6 +38,8 @@ export interface ServerConfig {
 }
 
 export interface ServerEnv extends ExecutionEnv {
+  /** hc session the runtime uses; registered for the CLI (C-152). */
+  readonly CARDIGAN_HC_SESSION?: string | undefined;
   readonly CARDIGAN_CONFIG_DIR?: string | undefined;
   readonly CARDIGAN_DATA_DIR?: string | undefined;
   readonly CARDIGAN_MCP_HOST?: string | undefined;

@@ -78,6 +78,7 @@ export {
 } from "./execution.js";
 
 export {
+  DEFAULT_HC_SESSION,
   describeRuntime,
   REGISTERED_RUNTIME_FILE,
   type RegisteredRuntime,

@@ -12,8 +12,10 @@ import {
   startMcpServer,
 } from "@cardigan/mcp-server";
 import {
+  DEFAULT_HC_SESSION,
   describeRuntime,
   LOCAL_RUNTIME_WARNING,
+  readRegisteredRuntime,
   resolveExecutionConfig,
   runtimeOwnsRef,
   secureDataDirectory,
@@ -111,13 +113,26 @@ export async function startCardiganServer(
       ...(options.env ?? process.env),
       CARDIGAN_DATA_DIR: config.dataDir,
     });
+  const runtimeEnv = options.env ?? process.env;
+  const session = runtimeEnv.CARDIGAN_HC_SESSION ?? DEFAULT_HC_SESSION;
+  // C-152: an existing agent-ssh registration is never downgraded by a shell
+  // that merely forgot runtime.env; switching to local must be explicit.
+  const previous = await readRegisteredRuntime(config.dataDir).catch(
+    () => undefined,
+  );
+  if (
+    previous?.mode === "agent-ssh" &&
+    execution.mode === "local" &&
+    (runtimeEnv.CARDIGAN_RUNTIME_MODE ?? "") === ""
+  )
+    throw new Error(
+      `拒绝启动：数据目录已登记 ${describeRuntime(previous)}，当前环境没有设置 CARDIGAN_RUNTIME_MODE（没有加载 runtime.env）。请加载 runtime.env 后再启动；确实要改为本机模式时显式设置 CARDIGAN_RUNTIME_MODE=local。`,
+    );
   if (execution.mode === "local")
     (options.warn ?? ((message) => process.stderr.write(`${message}\n`)))(
       LOCAL_RUNTIME_WARNING,
     );
   await secureDataDirectory({ ...execution, dataDir: config.dataDir });
-  // C-152: the CLI checks its own environment against this registration.
-  await writeRegisteredRuntime(config.dataDir, execution);
   const store = options.store ?? Store.open({ dataDir: config.dataDir });
   const ownsStore = options.store === undefined;
   // M4.5: stamp `standing_mode` on rows written before the field existed, so
@@ -329,6 +344,18 @@ export async function startCardiganServer(
       if (ownsStore) store.close();
       throw error;
     }
+  }
+
+  // C-152: register only once every listener is up, so a failed or
+  // competing start (e.g. EADDRINUSE) cannot replace the live server's entry.
+  try {
+    await writeRegisteredRuntime(config.dataDir, execution, session);
+  } catch (error) {
+    await web?.close();
+    await plane?.stop();
+    await mcp.close();
+    if (ownsStore) store.close();
+    throw error;
   }
 
   return {
