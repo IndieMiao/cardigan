@@ -258,6 +258,80 @@ test("invalid files, spoofed references, metadata and oversized bodies never cre
   expect(existsSync(join(h.dataDir, "avatars"))).toBe(false);
 });
 
+test("valid images with invalid business fields are rejected before blob IO without allocating IDs or audit events", async () => {
+  expect((await post(input)).status).toBe(200);
+  h.store.uow.run((tx) =>
+    tx.roles.put(
+      "p-test",
+      roleDocument({
+        ...defaultRoleDefinition("reviewer", {
+          harness: "codex",
+          launch_profile_ref: "fixture",
+        }),
+        version: 1,
+        status: "inactive",
+      }),
+    ),
+  );
+  const before = { employees: employees(), events: createdEvents() };
+  const body = {
+    name: "自定义",
+    title: "开发",
+    role_id: "coder",
+    avatar_file: png.toString("base64"),
+  };
+  for (const patch of [
+    { role_id: "unknown" },
+    { role_id: "reviewer" },
+    { name: input.name },
+    { name: "　关羽　" },
+    { name: " " },
+    { title: " " },
+    { name: "\t名字" },
+    { bio: "一行\n两行" },
+    { name: "名".repeat(41) },
+    { title: "职".repeat(41) },
+    { bio: "介".repeat(201) },
+  ]) {
+    expect((await post({ ...body, ...patch })).status).toBe(400);
+    expect(existsSync(join(h.dataDir, "avatars"))).toBe(false);
+    expect({ employees: employees(), events: createdEvents() }).toEqual(before);
+  }
+  expect((await post(body)).json).toMatchObject({ id: "E-2" });
+  expect(await readdir(join(h.dataDir, "avatars"))).toHaveLength(1);
+  expect(createdEvents()).toHaveLength(2);
+});
+
+test("HTTP text limits match domain Unicode boundaries without stripping control characters", async () => {
+  const body = {
+    name: `　${"𠮷".repeat(40)}　`,
+    title: ` ${"😀".repeat(40)} `,
+    bio: ` ${"𠮷".repeat(200)} `,
+    role_id: "coder",
+    avatar_file: png.toString("base64"),
+  };
+  for (const patch of [
+    { name: "𠮷".repeat(41) },
+    { title: "😀".repeat(41) },
+    { bio: "𠮷".repeat(201) },
+  ]) {
+    expect((await post({ ...body, ...patch })).status).toBe(400);
+    expect(existsSync(join(h.dataDir, "avatars"))).toBe(false);
+  }
+  const control = await post({ ...body, name: "\t合法长度" });
+  expect(control.status).toBe(400);
+  expect(control.json).toMatchObject({
+    error: { message: expect.stringContaining("控制字符") },
+  });
+  expect((await post(body)).status).toBe(200);
+  expect(employees()[0]).toMatchObject({
+    id: "E-1",
+    name: "𠮷".repeat(40),
+    title: "😀".repeat(40),
+    bio: "𠮷".repeat(200),
+  });
+});
+
 test("Agent tokens, invalid owner membership, foreign origins and revoked sessions cannot create or replay", async () => {
   const token = h.store.issueToken({
     project_id: "p-test",

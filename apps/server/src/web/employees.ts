@@ -4,6 +4,9 @@ import {
   activeOwner,
   type Clock,
   createEmployee,
+  type EmployeeCommandPorts,
+  type EmployeeId,
+  type EventId,
   MAX_AVATAR_BYTES,
   parseAvatarReference,
   type Result,
@@ -37,12 +40,22 @@ interface EmployeeContext {
 }
 
 const maxBase64 = Math.ceil(MAX_AVATAR_BYTES / 3) * 4;
+function boundedEmployeeText(max: number) {
+  // Domain limits count trimmed Unicode code points, not UTF-16 code units.
+  // Preserve the original string so domain still rejects surrounding controls.
+  const length = z.number().max(max);
+  return z
+    .string()
+    .refine(
+      (value) => length.safeParse(Array.from(value.trim()).length).success,
+    );
+}
 const employeeInput = z
   .object({
-    name: z.string(),
-    title: z.string(),
+    name: boundedEmployeeText(40),
+    title: boundedEmployeeText(40),
     role_id: z.string(),
-    bio: z.string().optional(),
+    bio: boundedEmployeeText(200).optional(),
     avatar: z.string().optional(),
     avatar_file: z.string().min(1).max(maxBase64).optional(),
   })
@@ -175,6 +188,48 @@ export async function serveEmployees(
     if (error !== missing) throw error;
   }
 
+  const prepare = (
+    tx: Pick<ReadRepositories, "roles" | "employees">,
+    ids: EmployeeCommandPorts["ids"],
+    avatar: string | undefined,
+  ) => {
+    const role = getRoleVersion(tx, c.project_id, fields.role_id);
+    if (!role || role.status === "inactive")
+      throw new HttpRejection(
+        400,
+        "validation_failed",
+        "请选择本项目已启用的角色",
+      );
+    return must(
+      createEmployee(
+        tx.employees.list(),
+        { kind: "human" },
+        {
+          name: fields.name,
+          title: fields.title,
+          role_id: fields.role_id,
+          ...(fields.bio === undefined ? {} : { bio: fields.bio }),
+          ...(avatar === undefined ? {} : { avatar }),
+        },
+        { clock: c.clock, ids },
+      ),
+    );
+  };
+  c.store.uow.read((tx) => {
+    owner(c, tx);
+    // Preview the same domain command before blob IO. Discard its effect and
+    // use synthetic IDs: failed forms must not allocate IDs or write events.
+    prepare(
+      tx,
+      {
+        nextEmployeeId: () => "E-1" as EmployeeId,
+        nextEventId: () => "preview" as EventId,
+        nextEventSequence: () => 1,
+      },
+      requestedAvatar,
+    );
+  });
+
   let avatar = requestedAvatar;
   if (avatar_file !== undefined) {
     const bytes = Buffer.from(avatar_file, "base64");
@@ -199,28 +254,9 @@ export async function serveEmployees(
     }
   }
   const created = execute((tx) => {
-    const role = getRoleVersion(tx, c.project_id, fields.role_id);
-    if (!role || role.status === "inactive")
-      throw new HttpRejection(
-        400,
-        "validation_failed",
-        "请选择本项目已启用的角色",
-      );
-    // BEGIN IMMEDIATE serializes this fresh global check with CLI and other requests.
-    const effect = must(
-      createEmployee(
-        tx.employees.list(),
-        { kind: "human" },
-        {
-          name: fields.name,
-          title: fields.title,
-          role_id: fields.role_id,
-          ...(fields.bio === undefined ? {} : { bio: fields.bio }),
-          ...(avatar === undefined ? {} : { avatar }),
-        },
-        { clock: c.clock, ids: tx.global_ids },
-      ),
-    );
+    // Recheck after asynchronous IO: BEGIN IMMEDIATE serializes the fresh
+    // snapshot with CLI and other requests; the preview cannot authorize writes.
+    const effect = prepare(tx, tx.global_ids, avatar);
     persistEmployeeEffect(tx, effect);
     const { id, name, role_id } = effect.data;
     return { id, name, role_id };
