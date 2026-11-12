@@ -105,7 +105,11 @@ try {
       });
     });
   async function capture(name, width, theme) {
-    if (!screenshots || width !== 390) return;
+    if (
+      !screenshots ||
+      (width !== 390 && !(name === "execution" && width === 1440))
+    )
+      return;
     const { cssContentSize } = await send("Page.getLayoutMetrics");
     const { data } = await send("Page.captureScreenshot", {
       format: "png",
@@ -192,6 +196,46 @@ try {
               "fixed",
           };
         });
+        if (name === "execution") {
+          const headers = await run(() =>
+            Array.from(
+              document.querySelectorAll(".execution-table th"),
+              (th) => {
+                const walker = document.createTreeWalker(
+                  th,
+                  NodeFilter.SHOW_TEXT,
+                );
+                const rects = [];
+                while (walker.nextNode()) {
+                  if (!walker.currentNode.textContent.trim()) continue;
+                  const range = document.createRange();
+                  range.selectNodeContents(walker.currentNode);
+                  rects.push(...range.getClientRects());
+                }
+                const box = th.getBoundingClientRect();
+                return {
+                  text: th.textContent,
+                  tops: rects.map((rect) => rect.top),
+                  fits: rects.every(
+                    (rect) => rect.left >= box.left && rect.right <= box.right,
+                  ),
+                };
+              },
+            ),
+          );
+          assert.equal(headers.length, 9, `${label}: missing column headers`);
+          for (const header of headers) {
+            assert(
+              header.tops.length > 0,
+              `${label}: empty header ${header.text}`,
+            );
+            assert(
+              Math.max(...header.tops) - Math.min(...header.tops) <= 1,
+              `${label}: wrapped header ${header.text}`,
+            );
+            assert(header.fits, `${label}: overflowing header ${header.text}`);
+          }
+        }
         await capture(name, width, theme);
         if (width <= 760) {
           assert.equal(
@@ -308,7 +352,13 @@ try {
           assert(layout.fixed, label);
           assert.equal(layout.main.x, 220, label);
           const current = await geometry();
-          await setCss(baseline);
+          // C-122 intentionally changes header wrapping and column widths.
+          // Keep comparing the full desktop geometry with only that allowance.
+          await setCss(
+            name === "execution"
+              ? `${baseline}\n.execution-table th { white-space: nowrap; }`
+              : baseline,
+          );
           assert.deepEqual(
             await geometry(),
             current,
@@ -322,7 +372,7 @@ try {
   }
   assert.deepEqual(browser.errors, [], "Browser runtime errors");
   console.log(
-    "PASS 70 layout cases, including timeline pagination and internal table scrolling",
+    "PASS 70 layout cases, including single-line execution headers, timeline pagination and internal table scrolling",
   );
 } finally {
   await browser?.close();
