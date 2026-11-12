@@ -1,0 +1,330 @@
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
+import { createServer } from "vite";
+import { chromium } from "./chromium.mjs";
+
+const root = fileURLToPath(new URL("../", import.meta.url));
+const css = await readFile(
+  new URL("../src/styles.css", import.meta.url),
+  "utf8",
+);
+const baseline = execFileSync(
+  "git",
+  [
+    "show",
+    `${process.env.LAYOUT_BASELINE_REF ?? "origin/main"}:apps/web/src/styles.css`,
+  ],
+  { cwd: root, encoding: "utf8" },
+);
+const screenshots = process.env.LAYOUT_SCREENSHOTS;
+if (screenshots) await mkdir(screenshots, { recursive: true });
+const server = await createServer({
+  root,
+  server: { host: "localhost", port: 0 },
+  plugins: [
+    {
+      name: "responsive-test-entry",
+      configureServer(server) {
+        server.middlewares.use(async (request, response, next) => {
+          if (!request.url?.startsWith("/__layout")) return next();
+          response.setHeader("Content-Type", "text/html");
+          response.end(
+            await server.transformIndexHtml(
+              "/__layout",
+              `<!doctype html>
+          <html lang="zh-CN"><head><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+          <body><div id="root"></div><script type="module" src="/test-support/responsive-fixture.tsx"></script></body></html>`,
+            ),
+          );
+        });
+      },
+    },
+  ],
+});
+const routes = [
+  ["card", "cards/C-1", ".timeline-load"],
+  ["needs-you", "needs-you", ".needs-item"],
+  ["execution", "execution", ".execution-row"],
+  ["decision-history", "decision-history", ".needs-item"],
+  ["snapshot", "snapshot", ".delivery-table"],
+  ["settings", "settings", "#preferences form"],
+  ["board", "cards?view=board", ".cards-page-board"],
+];
+let browser;
+try {
+  await server.listen();
+  browser = await chromium();
+  const { send, evaluate } = browser;
+  const run = (fn, ...args) =>
+    evaluate(`(${fn.toString()})(...${JSON.stringify(args)})`);
+  async function until(expression) {
+    const deadline = Date.now() + 15000;
+    while (!(await evaluate(expression))) {
+      assert(Date.now() < deadline, `Timed out: ${expression}`);
+      await delay(40);
+    }
+  }
+  async function setCss(value) {
+    await run((value) => {
+      document.querySelector(
+        'style[data-vite-dev-id$="/src/styles.css"]',
+      ).textContent = value;
+      window.scrollTo(0, 0);
+    }, value);
+  }
+  const geometry = () =>
+    run(async () => {
+      window.scrollTo({ top: 0, left: 0, behavior: "instant" });
+      await new Promise((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(resolve)),
+      );
+      return Array.from(document.querySelectorAll(".app, .app *"), (el) => {
+        const rect = el.getBoundingClientRect(),
+          style = getComputedStyle(el);
+        return [
+          el.tagName,
+          el.className,
+          rect.x,
+          rect.y,
+          rect.width,
+          rect.height,
+          style.display,
+          style.position,
+          style.gridTemplateColumns,
+          style.fontSize,
+          style.lineHeight,
+          style.padding,
+          style.margin,
+          style.color,
+          style.backgroundColor,
+        ];
+      });
+    });
+  async function capture(name, width, theme) {
+    if (!screenshots || width !== 390) return;
+    const { cssContentSize } = await send("Page.getLayoutMetrics");
+    const { data } = await send("Page.captureScreenshot", {
+      format: "png",
+      captureBeyondViewport: true,
+      clip: {
+        x: 0,
+        y: 0,
+        width,
+        height: Math.ceil(cssContentSize.height),
+        scale: 1,
+      },
+    });
+    await writeFile(
+      resolve(screenshots, `${name}-${width}-${theme}.png`),
+      Buffer.from(data, "base64"),
+    );
+    if (name === "card") {
+      await run(async () => {
+        const controls = document.querySelector(".timeline-controls");
+        const nav = document.querySelector(".card-section-nav");
+        window.scrollTo({
+          top:
+            controls.getBoundingClientRect().y +
+            window.scrollY -
+            nav.clientHeight -
+            80,
+          behavior: "instant",
+        });
+        await new Promise((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(resolve)),
+        );
+      });
+      const { data } = await send("Page.captureScreenshot", {
+        format: "png",
+        captureBeyondViewport: false,
+      });
+      await writeFile(
+        resolve(screenshots, `card-pagination-${width}-${theme}.png`),
+        Buffer.from(data, "base64"),
+      );
+      await run(() =>
+        window.scrollTo({ top: 0, left: 0, behavior: "instant" }),
+      );
+    }
+  }
+  for (const width of [390, 760, 768, 1280, 1440]) {
+    await send("Emulation.setDeviceMetricsOverride", {
+      width,
+      height: 844,
+      deviceScaleFactor: 1,
+      mobile: false,
+    });
+    for (const theme of ["light", "dark"]) {
+      await send("Emulation.setEmulatedMedia", {
+        features: [
+          { name: "prefers-color-scheme", value: theme },
+          { name: "prefers-reduced-motion", value: "reduce" },
+        ],
+      });
+      for (const [name, route, ready] of routes) {
+        const label = `${name} ${width}px ${theme}`;
+        await send("Page.navigate", {
+          url: `${server.resolvedUrls.local[0]}__layout?case=${name}#/p/p-1/${route}`,
+        });
+        await until(
+          `Boolean(document.querySelector(${JSON.stringify(ready)}))`,
+        );
+        await evaluate("document.fonts.ready.then(() => true)");
+        await run(() =>
+          window.scrollTo({ top: 0, left: 0, behavior: "instant" }),
+        );
+        const layout = await run(() => {
+          const rect = (selector) => {
+            const r = document.querySelector(selector).getBoundingClientRect();
+            return { x: r.x, y: r.y, width: r.width, bottom: r.bottom };
+          };
+          return {
+            width: innerWidth,
+            scrollWidth: document.documentElement.scrollWidth,
+            main: rect(".content"),
+            sidebar: rect(".sidebar"),
+            fixed:
+              getComputedStyle(document.querySelector(".sidebar")).position ===
+              "fixed",
+          };
+        });
+        await capture(name, width, theme);
+        if (width <= 760) {
+          assert.equal(
+            layout.scrollWidth,
+            width,
+            `${label}: horizontal page overflow`,
+          );
+          assert.equal(layout.main.x, 0, label);
+          assert.equal(layout.main.width, width, label);
+          assert.equal(layout.fixed, false, label);
+          assert(layout.main.y >= layout.sidebar.bottom, label);
+          if (name === "card") {
+            const controls = await run(() => {
+              const main = document
+                .querySelector(".card-main")
+                .getBoundingClientRect();
+              const side = document
+                .querySelector(".card-sidebar")
+                .getBoundingClientRect();
+              const controls = document.querySelector(".timeline-controls");
+              return {
+                stacked: side.y >= main.bottom,
+                text: controls.textContent,
+                boxes: Array.from(controls.children, (el) => {
+                  const r = el.getBoundingClientRect();
+                  return {
+                    x: r.x,
+                    y: r.y,
+                    right: r.right,
+                    bottom: r.bottom,
+                    width: r.width,
+                    height: r.height,
+                  };
+                }).filter((r) => r.width && r.height),
+              };
+            });
+            assert(controls.stacked, label);
+            assert.match(controls.text, /已加载 20 \/ 25 条/, label);
+            for (const box of controls.boxes)
+              assert(
+                box.x >= 0 && box.right <= width,
+                `${label}: clipped control`,
+              );
+            for (let i = 0; i < controls.boxes.length; i++)
+              for (const other of controls.boxes.slice(i + 1)) {
+                const a = controls.boxes[i];
+                assert(
+                  a.right <= other.x ||
+                    other.right <= a.x ||
+                    a.bottom <= other.y ||
+                    other.bottom <= a.y,
+                  `${label}: overlapping controls`,
+                );
+              }
+            const point = await run(() => {
+              const button = document.querySelector(".timeline-load");
+              button.scrollIntoView({ block: "center", behavior: "instant" });
+              const r = button.getBoundingClientRect();
+              return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+            });
+            await send("Input.dispatchMouseEvent", {
+              type: "mousePressed",
+              button: "left",
+              clickCount: 1,
+              ...point,
+            });
+            await send("Input.dispatchMouseEvent", {
+              type: "mouseReleased",
+              button: "left",
+              clickCount: 1,
+              ...point,
+            });
+            await until(
+              "document.querySelector('.timeline-controls').textContent.includes('已加载 25 / 25 条')",
+            );
+            assert.equal(
+              await evaluate("document.documentElement.scrollWidth"),
+              width,
+              label,
+            );
+          }
+          if (name === "execution" || name === "snapshot") {
+            const scroll = await run(
+              (selector) => {
+                const el = document.querySelector(selector);
+                el.scrollLeft = el.scrollWidth;
+                return {
+                  left: el.scrollLeft,
+                  max: el.scrollWidth - el.clientWidth,
+                  page: document.documentElement.scrollWidth,
+                };
+              },
+              name === "execution"
+                ? ".execution-table-scroll"
+                : ".delivery-table",
+            );
+            assert(
+              (width !== 390 || scroll.left > 0) &&
+                Math.abs(scroll.left - scroll.max) <= 1,
+              `${label}: table cannot scroll to the end`,
+            );
+            assert.equal(scroll.page, width, label);
+          }
+          if (name === "board") {
+            const current = await geometry();
+            await setCss(baseline);
+            assert.deepEqual(
+              await geometry(),
+              current,
+              `${label}: existing board layout changed`,
+            );
+          }
+        } else {
+          assert(layout.fixed, label);
+          assert.equal(layout.main.x, 220, label);
+          const current = await geometry();
+          await setCss(baseline);
+          assert.deepEqual(
+            await geometry(),
+            current,
+            `${label}: desktop layout changed`,
+          );
+          await setCss(css);
+        }
+        console.log(`PASS ${label}`);
+      }
+    }
+  }
+  assert.deepEqual(browser.errors, [], "Browser runtime errors");
+  console.log(
+    "PASS 70 layout cases, including timeline pagination and internal table scrolling",
+  );
+} finally {
+  await browser?.close();
+  await server.close();
+}

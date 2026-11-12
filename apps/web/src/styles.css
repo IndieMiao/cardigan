@@ -2550,6 +2550,10 @@ body[data-lightbox="open"] .drawer-overlay {
     gap: 4px;
     margin: 0 var(--gap) var(--gap) 0;
   }
+  .timeline-controls {
+    flex-wrap: wrap;
+    white-space: normal;
+  }
   .delivery-table {
     display: block;
     overflow-x: auto;
