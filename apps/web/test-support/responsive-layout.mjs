@@ -12,13 +12,32 @@ const css = await readFile(
   new URL("../src/styles.css", import.meta.url),
   "utf8",
 );
-const baseline = execFileSync(
-  "git",
-  [
-    "show",
-    `${process.env.LAYOUT_BASELINE_REF ?? "origin/main"}:apps/web/src/styles.css`,
-  ],
-  { cwd: root, encoding: "utf8" },
+// C-136 intentionally redesigns the card records tab. Swap that one region of
+// the baseline stylesheet for the current one in place (keeping cascade
+// order), so every other desktop geometry is still compared unchanged. Once
+// the baseline carries the redesign this is a no-op.
+function recordsRegion(value) {
+  const start = value.search(
+    /\/\* C-136: records tab\.|\.card-main \.card-record-list p \{/,
+  );
+  const end = value.indexOf(".attachment-grid {", start);
+  assert(start >= 0 && end > start, "records CSS region not found");
+  return [start, end];
+}
+function withCurrentRecords(value) {
+  const [start, end] = recordsRegion(value);
+  const [from, to] = recordsRegion(css);
+  return `${value.slice(0, start)}${css.slice(from, to)}${value.slice(end)}`;
+}
+const baseline = withCurrentRecords(
+  execFileSync(
+    "git",
+    [
+      "show",
+      `${process.env.LAYOUT_BASELINE_REF ?? "origin/main"}:apps/web/src/styles.css`,
+    ],
+    { cwd: root, encoding: "utf8" },
+  ),
 );
 const navAllowance = ".nav a { gap: 8px; }";
 const executionAllowance = `.execution-table th { white-space: nowrap; }

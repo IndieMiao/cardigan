@@ -252,6 +252,10 @@ export function EmployeeIdentity({
       <Popover.Portal>
         <Popover.Content
           className="popover-content employee-card"
+          // C-136: open upward so the profile never covers the row it was
+          // opened from (Radix flips it below when there is no room above).
+          side="top"
+          collisionPadding={8}
           sideOffset={6}
           align="start"
           aria-label={`${name}的${member ? "成员" : "员工"}卡片`}
