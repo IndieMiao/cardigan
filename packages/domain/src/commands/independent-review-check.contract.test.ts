@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 import { isReviewStale } from "../derived.js";
-import type { Delivery } from "../entities.js";
+import type { Delivery, PreMergeCheckStatus } from "../entities.js";
 import type { CommandEffect, CommandState } from "./core.js";
 import { prepareDelivery, submitDelivery, submitReview } from "./delivery.js";
 import { updateCard } from "./pm.js";
@@ -9,30 +9,56 @@ import {
   effectivePreMergeChecks,
   INDEPENDENT_REVIEW_CHECK_LABEL as label,
   MAX_PRE_MERGE_CHECKS,
+  openPreMergeChecks,
 } from "./pre-merge-checks.js";
+import { withdrawReview } from "./review-withdrawal.js";
 import {
   actor,
   apply,
+  assignment,
   fixture,
   human,
   id,
   now,
   ports,
   role,
+  run,
   value,
 } from "./test-fixtures.js";
 
-function setup(reviewRole = "independent_reviewer") {
+function setup(
+  reviewRole = "independent_reviewer",
+  secondReviewerRole?: string,
+) {
   const seed = fixture();
+  const verifier = seed.work_items.find((w) => w.id === id("work_item", 2));
+  if (verifier?.kind !== "verify") throw new Error("Missing verifier");
   let state: CommandState = {
     ...seed,
     roles: [...seed.roles, role("independent_reviewer")],
-    assignments: seed.assignments.map((a) =>
-      a.id === id("assignment", 2) ? { ...a, role_id: reviewRole } : a,
-    ),
-    work_items: seed.work_items.map((w) =>
-      w.id === id("work_item", 2) ? { ...w, role_id: reviewRole } : w,
-    ),
+    assignments: [
+      ...seed.assignments.map((a) =>
+        a.id === id("assignment", 2) ? { ...a, role_id: reviewRole } : a,
+      ),
+      ...(secondReviewerRole ? [assignment(5, secondReviewerRole)] : []),
+    ],
+    work_items: [
+      ...seed.work_items.map((w) =>
+        w.id === id("work_item", 2) ? { ...w, role_id: reviewRole } : w,
+      ),
+      ...(secondReviewerRole
+        ? [
+            {
+              ...verifier,
+              id: id("work_item", 5),
+              assignment_id: id("assignment", 5),
+              role_id: secondReviewerRole,
+              template_key: "parallel_review",
+            },
+          ]
+        : []),
+    ],
+    runs: [...seed.runs, ...(secondReviewerRole ? [run(5)] : [])],
   };
   const io = ports();
   const card = () => {
@@ -54,7 +80,13 @@ function setup(reviewRole = "independent_reviewer") {
         kind: "code" as const,
         summary: "Ready for review",
         subject: { kind: "git_head" as const, value: sha },
-        requested_verifiers: [id("work_item", 2)],
+        requested_verifiers: state.work_items
+          .filter(
+            (w) =>
+              w.kind === "verify" &&
+              w.target_work_item_id === id("work_item", 1),
+          )
+          .map((w) => w.id),
       };
       const proof = value(
         await prepareDelivery(state, actor(), p, {
@@ -69,10 +101,11 @@ function setup(reviewRole = "independent_reviewer") {
       target: Delivery,
       issues: Parameters<typeof submitReview>[2]["issues"] = [],
       recheck_required = false,
+      caller = actor(2, reviewRole),
     ) {
       return submitReview(
         state,
-        actor(2, reviewRole),
+        caller,
         {
           delivery_id: target.id,
           target_sha: target.subject.value,
@@ -86,7 +119,15 @@ function setup(reviewRole = "independent_reviewer") {
     apply(effect: CommandEffect<unknown>) {
       state = apply(state, effect);
     },
-    pending(checkLabel = label) {
+    withdraw(work_item_id = id("work_item", 2), caller = actor(2, reviewRole)) {
+      return withdrawReview(
+        state,
+        caller,
+        { work_item_id, rationale: "重新核查遗漏" },
+        io,
+      );
+    },
+    setCheck(checkLabel = label, status: PreMergeCheckStatus = "pending") {
       state = apply(
         state,
         value(
@@ -95,7 +136,7 @@ function setup(reviewRole = "independent_reviewer") {
             human,
             {
               card_id: card().id,
-              pre_merge_check: { label: checkLabel, status: "pending" },
+              pre_merge_check: { label: checkLabel, status },
             },
             io,
           ),
@@ -109,8 +150,8 @@ test.each([false, true])(
   "independent pass atomically upserts its reserved check (pending=%s)",
   async (pending) => {
     const f = setup();
-    if (pending) f.pending();
-    f.pending("截图核对");
+    if (pending) f.setCheck();
+    f.setCheck("截图核对");
     const other = f
       .card()
       .pre_merge_checks?.find((c) => c.label === "截图核对");
@@ -188,7 +229,7 @@ test.each([
     expect(f.checks()).toMatchObject([
       { label, status: "failed", stale: false },
     ]);
-    f.pending();
+    f.setCheck();
     expect(f.checks()).toMatchObject([
       { label, status: "pending", stale: false },
     ]);
@@ -220,7 +261,7 @@ test.each(["a", "b"])(
 
 test("ordinary reviewers cannot create or overwrite the independent projection", async () => {
   const f = setup("reviewer");
-  f.pending();
+  f.setCheck();
   const target = await f.deliver();
   const effect = value(f.review(target));
   expect(effect.events.map((e) => e.type)).toEqual(["review_submitted"]);
@@ -230,15 +271,140 @@ test("ordinary reviewers cannot create or overwrite the independent projection",
   ]);
 });
 
-test("projection failure does not expose a partial Review or workflow transition", async () => {
+test.each(["pass", "reject"] as const)(
+  "eight ordinary checks still allow an independent %s with or without a placeholder",
+  async (verdict) => {
+    for (const placeholder of ["absent", "before", "after"]) {
+      const f = setup();
+      const target = await f.deliver();
+      if (placeholder === "before") f.setCheck();
+      for (let n = 0; n < MAX_PRE_MERGE_CHECKS; n++)
+        f.setCheck(`Check ${n}`, "passed");
+      const ordinary = f
+        .card()
+        .pre_merge_checks?.filter((c) => c.label !== label);
+      if (placeholder === "after") f.setCheck();
+      const effect = value(
+        f.review(
+          target,
+          verdict === "pass"
+            ? []
+            : [
+                {
+                  severity: "major",
+                  must_fix: true,
+                  pre_existing: false,
+                  description: "Fix permission boundary",
+                },
+              ],
+        ),
+      );
+      expect(effect.data.verdict).toBe(verdict);
+      f.apply(effect);
+      expect(f.card().pre_merge_checks).toHaveLength(MAX_PRE_MERGE_CHECKS + 1);
+      expect(
+        f.card().pre_merge_checks?.filter((c) => c.label !== label),
+      ).toEqual(ordinary);
+      expect(f.checks().find((c) => c.label === label)).toMatchObject({
+        status: verdict === "pass" ? "passed" : "failed",
+        stale: false,
+      });
+      expect(f.state.reviews).toEqual([effect.data]);
+      expect(
+        updateCard(
+          f.state,
+          human,
+          {
+            card_id: f.card().id,
+            pre_merge_check: {
+              label: "Ninth ordinary check",
+              status: "pending",
+            },
+          },
+          f.io,
+        ),
+      ).toMatchObject({ ok: false, error: { code: "validation_failed" } });
+    }
+  },
+);
+
+test("withdrawing the independent pass atomically resets its check and preserves other state", async () => {
   const f = setup();
-  for (let n = 0; n < MAX_PRE_MERGE_CHECKS; n++) f.pending(`Check ${n}`);
   const target = await f.deliver();
-  const before = JSON.stringify(f.state);
-  expect(f.review(target)).toMatchObject({
+  f.setCheck("截图核对", "passed");
+  f.apply(value(f.review(target)));
+  const before = f.state;
+  expect(f.withdraw(id("work_item", 2), human)).toMatchObject({
     ok: false,
-    error: { code: "validation_failed" },
+    error: { code: "unauthorized" },
   });
-  expect(JSON.stringify(f.state)).toBe(before);
-  expect(f.state.reviews).toEqual([]);
+  expect(f.checks().find((c) => c.label === label)?.status).toBe("passed");
+  const effect = value(f.withdraw());
+  expect(effect.events.map((e) => e.type)).toEqual([
+    "review_withdrawn",
+    "pre_merge_check_updated",
+  ]);
+  f.apply(effect);
+  expect(isReviewStale(effect.data, target)).toBe(true);
+  expect(
+    f.state.work_items.find((w) => w.id === effect.data.work_item_id)?.status,
+  ).toBe("ready");
+  expect(
+    openPreMergeChecks(f.card(), f.state.work_items, f.state.deliveries),
+  ).toMatchObject([
+    {
+      label,
+      status: "pending",
+      updated_by: `assignment:${id("assignment", 2)}`,
+    },
+  ]);
+  expect(
+    f.checks().find((c) => c.label === label)?.checked_versions,
+  ).toBeUndefined();
+  expect(
+    f.card().pre_merge_checks?.find((c) => c.label === "截图核对"),
+  ).toEqual(
+    before.cards
+      .find((c) => c.id === f.card().id)
+      ?.pre_merge_checks?.find((c) => c.label === "截图核对"),
+  );
+  expect(f.state.deliveries).toEqual(before.deliveries);
+  expect(f.state.decisions).toEqual(before.decisions);
+  expect(f.state.runs).toEqual(before.runs);
+  expect(f.withdraw()).toMatchObject({
+    ok: false,
+    error: { code: "illegal_transition" },
+  });
+});
+
+test.each(["reviewer", "independent_reviewer"])(
+  "withdrawing a different %s does not overwrite the current projection",
+  async (reviewRole) => {
+    const f = setup(reviewRole, "independent_reviewer");
+    const target = await f.deliver();
+    f.apply(value(f.review(target)));
+    f.apply(
+      value(f.review(target, [], false, actor(5, "independent_reviewer"))),
+    );
+    const before = f.card().pre_merge_checks;
+    const withdrawn = value(f.withdraw());
+    expect(withdrawn.events.map((e) => e.type)).toEqual(["review_withdrawn"]);
+    f.apply(withdrawn);
+    expect(f.card().pre_merge_checks).toEqual(before);
+    expect(f.checks()).toMatchObject([{ label, status: "passed" }]);
+    f.apply(
+      value(f.withdraw(id("work_item", 5), actor(5, "independent_reviewer"))),
+    );
+    expect(f.checks()).toMatchObject([{ label, status: "pending" }]);
+  },
+);
+
+test("a manual pending reset retains its attribution when the review is withdrawn", async () => {
+  const f = setup();
+  const target = await f.deliver();
+  f.apply(value(f.review(target)));
+  f.setCheck();
+  const before = f.card().pre_merge_checks;
+  f.apply(value(f.withdraw()));
+  expect(f.card().pre_merge_checks).toEqual(before);
 });

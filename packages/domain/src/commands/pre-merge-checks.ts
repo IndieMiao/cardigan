@@ -22,6 +22,7 @@ export interface PreMergeCheckInput {
 export const PRE_MERGE_CHECK_STATUS_LABELS: Readonly<
   Record<PreMergeCheckStatus, string>
 > = { pending: "待完成", passed: "已通过", failed: "有问题" };
+/** Ordinary checks; the reserved independent review has its own slot. */
 export const MAX_PRE_MERGE_CHECKS = 8;
 export const INDEPENDENT_REVIEW_CHECK_LABEL = "独立复核";
 const MAX_LABEL = 40;
@@ -241,6 +242,33 @@ export function projectIndependentReviewCheck(d: CommandDraft, review: Review) {
   });
 }
 
+/** Withdrawal invalidates only the projection written by this review owner. */
+export function withdrawIndependentReviewCheck(
+  d: CommandDraft,
+  review: Review,
+) {
+  ensure(
+    d.tool === "withdraw_review" &&
+      d.assignment?.role_id === "independent_reviewer",
+    "forbidden_tool",
+    "独立复核结论只能随独立复核员本人撤回审核失效",
+  );
+  const item = d.ownWork(review.work_item_id);
+  const card = d.card(item.card_id);
+  const check = card.pre_merge_checks?.find(
+    (c) => c.label === INDEPENDENT_REVIEW_CHECK_LABEL,
+  );
+  // Another reviewer may have since replaced the single fixed projection;
+  // a manual pending reset likewise must retain its author and explanation.
+  if (!check || check.updated_by !== d.author || check.status === "pending")
+    return;
+  writePreMergeCheck(d, card, {
+    label: INDEPENDENT_REVIEW_CHECK_LABEL,
+    status: "pending",
+    note: `审核 ${review.id} 已撤回`,
+  });
+}
+
 /** Shared persistence keeps the Review projection and its audit in one draft. */
 function writePreMergeCheck(
   d: CommandDraft,
@@ -256,9 +284,12 @@ function writePreMergeCheck(
   const checks = card.pre_merge_checks ?? [];
   const previous = checks.find((c) => c.label === label);
   ensure(
-    previous !== undefined || checks.length < MAX_PRE_MERGE_CHECKS,
+    previous !== undefined ||
+      label === INDEPENDENT_REVIEW_CHECK_LABEL ||
+      checks.filter((c) => c.label !== INDEPENDENT_REVIEW_CHECK_LABEL).length <
+        MAX_PRE_MERGE_CHECKS,
     "validation_failed",
-    `一张卡最多 ${MAX_PRE_MERGE_CHECKS} 个合并前核对项`,
+    `一张卡最多 ${MAX_PRE_MERGE_CHECKS} 个普通合并前核对项，独立复核另计`,
   );
   const versions =
     input.status === "pending"

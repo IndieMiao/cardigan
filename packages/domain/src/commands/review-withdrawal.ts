@@ -8,6 +8,7 @@ import {
   ensure,
 } from "./core.js";
 import { latestMergeCheck } from "./merge-check.js";
+import { withdrawIndependentReviewCheck } from "./pre-merge-checks.js";
 
 export interface WithdrawReviewParams {
   readonly work_item_id: WorkItemId;
@@ -105,6 +106,8 @@ export function withdrawReview(
         refs: [{ kind: "review", id: review.id }],
       },
     );
+    if (d.assignment?.role_id === "independent_reviewer")
+      withdrawIndependentReviewCheck(d, review);
     return withdrawn;
   });
 }
