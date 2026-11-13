@@ -1,6 +1,7 @@
 import type { Actor, Assignment, StandingMode, ToolName } from "../entities.js";
 import type { Result } from "../errors.js";
 import type { DecisionId, HumanActionId, RunId } from "../ids.js";
+import type { Role } from "../role.js";
 import { isRoleActive } from "../role.js";
 import { transition } from "../transitions.js";
 import {
@@ -12,6 +13,7 @@ import {
   unwrap,
 } from "./core.js";
 import { resolveEmployee } from "./employee-assignment.js";
+import { roleUpgradeDiff } from "./role.js";
 
 export interface RotateStandingPmResult {
   /** True when the role version and explicitly requested identity already match. */
@@ -49,11 +51,36 @@ export function rotateStandingPm(
   },
   ports: CommandPorts,
 ): Result<CommandEffect<RotateStandingPmResult>> {
-  return command(state, actor, "rotate_standing_pm", ports, (d) => {
+  return rotate(state, actor, p, ports);
+}
+
+/** Only the host may rotate Ops after a non-widening deployment upgrade. */
+export function rotatePmAfterDeployment(
+  state: CommandState,
+  actor: Actor,
+  roles: readonly Role[],
+  ports: CommandPorts,
+): Result<CommandEffect<RotateStandingPmResult>> {
+  return rotate(state, actor, { standing_mode: "ops" }, ports, roles);
+}
+
+function rotate(
+  state: CommandState,
+  actor: Actor,
+  p: {
+    readonly standing_mode: StandingMode;
+    readonly external?: boolean;
+    readonly employee_id?: string;
+  },
+  ports: CommandPorts,
+  deploymentRoles?: readonly Role[],
+): Result<CommandEffect<RotateStandingPmResult>> {
+  const tool = deploymentRoles ? "rotate_deployed_pm" : "rotate_standing_pm";
+  return command(state, actor, tool, ports, (d) => {
     ensure(
-      d.actor.kind === "human",
+      d.actor.kind === (deploymentRoles ? "system" : "human"),
       "unauthorized",
-      "只有人可以给常驻 PM 换版本",
+      "只有人或受限部署流程可以给常驻 PM 换版本",
     );
     ensure(
       p.standing_mode === "ops" || p.standing_mode === "office",
@@ -97,10 +124,57 @@ export function rotateStandingPm(
       .filter((r) => r.role_id === "pm")
       .sort((a, b) => b.role_version - a.role_version)[0];
     ensure(latest, "not_found", "项目里没有 pm 角色");
+    if (deploymentRoles) {
+      const before = deploymentRoles.find(
+        (r) => r.role_id === "pm" && r.version === previous.role_version,
+      );
+      const after = deploymentRoles.find(
+        (r) => r.role_id === "pm" && r.version === latest.role_version,
+      );
+      ensure(
+        before && after && after.instructions !== undefined,
+        "validation_failed",
+        "自动轮换必须核对完整角色版本",
+      );
+      // Full definitions are host-resolved in the same transaction as CommandState.
+      ensure(
+        JSON.stringify(before.allowed_tools) ===
+          JSON.stringify(
+            d.state.roles.find(
+              (r) =>
+                r.role_id === "pm" && r.role_version === previous.role_version,
+            )?.allowed_tools,
+          ) &&
+          JSON.stringify(before.capabilities) ===
+            JSON.stringify(
+              d.state.roles.find(
+                (r) =>
+                  r.role_id === "pm" &&
+                  r.role_version === previous.role_version,
+              )?.capabilities,
+            ) &&
+          JSON.stringify(after.allowed_tools) ===
+            JSON.stringify(latest.allowed_tools) &&
+          JSON.stringify(after.capabilities) ===
+            JSON.stringify(latest.capabilities),
+        "validation_failed",
+        "角色版本快照不一致",
+      );
+      ensure(
+        roleUpgradeDiff(before, {
+          ...after,
+          instructions: after.instructions,
+        }).relaxations.length === 0,
+        "forbidden_tool",
+        "自动轮换不得放宽当前 PM Ops 的权限",
+      );
+    }
+    const requestedEmployee =
+      p.employee_id ?? (deploymentRoles ? previous.employee_id : undefined);
     const employee =
-      p.employee_id === undefined
+      requestedEmployee === undefined
         ? undefined
-        : resolveEmployee(d, p.employee_id);
+        : resolveEmployee(d, requestedEmployee);
     if (employee) {
       ensure(
         employee.status === "active",

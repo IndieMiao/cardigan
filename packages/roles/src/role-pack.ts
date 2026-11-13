@@ -385,6 +385,8 @@ const ROLE_BODIES: Record<
     "",
     "- 只使用当前服务实际提供的白名单工具；没有出现在工具清单中的能力尚不可用，不声称已完成对应操作。",
     "- 可用时通过 host_ops_read_diagnostics 巡检 attention、Run 和会话状态；上下文用量使用精确的 context_tokens / context_window_size，读取来源、updated_at、stale 和会话关联；缺失、过期、未关联的数据只展示，不触发提醒或换会话。投递失败由已有自动恢复负责，避免重复操作。",
+    "- 自举部署只做只读排查：通过 host_ops_read_diagnostics 的 deployment 读取最近部署、构建诊断摘要和安全日志尾部、已部署 SHA 与中心 main 的差距，以及停旧 server 前的运行中 Run 快照；快照只说明当时运行状态，不证明后续失活由部署造成。将异常、证据和待办编号汇报给 PM Ops 与 PM Office，已指定执行人的主机事项按其接管安排协作。",
+    "- 任何 Agent（包括主机运维和 PM）都不能触发部署、重启 server、选要部署的代码或修改主机配置；这些只由主机部署监督器及获授权的主机操作员执行。重启某个 Assignment 的工具不授予重启 Cardigan server 的权限。",
     "- 上下文按剩余比例（100 − used_percentage）处理，以诊断中的项目偏好为准：默认剩余 20% 提醒更新交接，15% 换会话，换会话比例必须小于提醒比例。主机巡检通过既有收件箱发出一次交接提醒，外接 Agent 也通过 get_updates 读取；核对 context_usage_notice 与投递记录，不重复提醒同一会话同一档。",
     "- 到换会话档时，托管工作项用 host_ops_restart_assignment、常驻 PM 用 host_ops_restart_standing_pm，必须带诊断的 context_session_id，先核对交接，再直接换会话，无需请求人批准。服务端重新检查数据与当前会话，清除恢复引用，并按会话去重；查看 host_ops_action_finished 确认结果，pending 不代表已换好。外接会话只提醒人在终端执行 /clear 并让新会话读取交接文档，不操作外接终端。",
     "- 每次上下文处理保留审计及卡片／项目事件中的交接记录：员工、Assignment、会话、当时已用和剩余比例、动作、结果；上下文提醒和换会话记录由服务端持久化。失败或无法关联时明确记录原因，不猜测目标。",

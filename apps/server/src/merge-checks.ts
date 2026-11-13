@@ -34,6 +34,8 @@ import {
   classifyExecutorFailure,
   computeChangeScope,
   createMergeCheckLog,
+  DeploymentInProgress,
+  deploymentInProgress,
   executorExecution,
   LOCAL_EXECUTOR,
   type MergeGateConfiguration,
@@ -500,6 +502,12 @@ export class MergeChecks {
    */
   private capacity(task: Task): boolean {
     const executor = task.settings.executor;
+    if (
+      this.options.store.uow.read(() =>
+        deploymentInProgress(this.options.store),
+      )
+    )
+      return false;
     return (
       !executor ||
       mergeCheckCapacityAvailable(
@@ -534,8 +542,22 @@ export class MergeChecks {
   ): Promise<void> {
     let log: Awaited<ReturnType<typeof createMergeCheckLog>> | undefined;
     let result: Awaited<ReturnType<typeof runInTemporaryCheckout>>;
-    let releaseCapacity = () => {};
+    let releaseCapacity: ReturnType<typeof acquireMergeCheckCapacity>;
     let connected = false;
+    // Reserve before any worker can execute, including the ready handshake window.
+    try {
+      releaseCapacity = acquireMergeCheckCapacity(
+        this.options.store,
+        task.project.project_id as ProjectId,
+        check.attempt_id,
+        undefined,
+        task.settings.executor?.name ?? LOCAL_EXECUTOR,
+      );
+    } catch (error) {
+      if (!(error instanceof DeploymentInProgress)) throw error;
+      this.seen.delete(check.attempt_id);
+      return; // Keep the check queued; deployment does not change its result.
+    }
     try {
       log = await createMergeCheckLog({
         dataDir: this.options.execution.dataDir,
@@ -581,15 +603,8 @@ export class MergeChecks {
           lockSlot: slot,
           signal: this.abort.signal,
           onReady: (owner) => {
+            releaseCapacity.transfer(owner);
             this.executor(task, "reachable");
-            releaseCapacity = acquireMergeCheckCapacity(
-              this.options.store,
-              task.project.project_id as ProjectId,
-              check.attempt_id,
-              owner,
-              // P2a-12 D: charge the target that actually runs the check.
-              task.settings.executor?.name ?? LOCAL_EXECUTOR,
-            );
             this.check(task, { ...check, status: "running" });
           },
           onOutput: (name, text) => log?.append(name, text),

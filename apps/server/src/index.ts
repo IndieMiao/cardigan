@@ -157,6 +157,7 @@ export async function runServer(
   write(
     JSON.stringify({
       ready: true,
+      deployment_fence: 1,
       url: server.url,
       ...(server.web === undefined ? {} : { web_url: server.web.url }),
     }),
