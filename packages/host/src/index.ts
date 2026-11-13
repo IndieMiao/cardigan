@@ -27,6 +27,7 @@ export {
   launchEntities,
   wallClock,
 } from "./commands.js";
+export * from "./context-usage.js";
 export {
   HostLaunchError,
   LAUNCH_STEPS,
@@ -108,6 +109,7 @@ export {
   type CheckoutStatus,
   runInTemporaryCheckout,
 } from "./temporary-checkout.js";
+export * from "./upstream-health.js";
 export {
   type AgentBinary,
   type AgentCliVersionSource,

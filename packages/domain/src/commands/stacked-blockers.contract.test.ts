@@ -20,6 +20,12 @@ import {
   value,
 } from "./test-fixtures.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 const cases = ["produce", "verify"].flatMap((kind) =>
   ["human", "decision"].flatMap((first) =>
     ["human", "decision"].map((clearFirst) => ({ kind, first, clearFirst })),
@@ -99,6 +105,7 @@ test.each(cases)(
                 affected_work_items: [work_item_id],
                 blocking: true,
                 decider: "human",
+                plain_summary: TEST_PLAIN_SUMMARY,
               },
               io,
             ),
@@ -200,6 +207,7 @@ test("invariant 11: recording a nonblocking decision does not clear a role block
         affected_work_items: [id("work_item", 1)],
         blocking: false,
         decider: "human",
+        plain_summary: TEST_PLAIN_SUMMARY,
       },
       io,
     ),

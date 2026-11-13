@@ -155,7 +155,11 @@ export function supportTools(options: SupportToolOptions = {}) {
           "finish_run",
           idempotency_key,
           params,
-          finishRun,
+          (state, actor, p, ports) =>
+            finishRun(state, actor, p, {
+              ...ports,
+              run_token: context.identity.token,
+            }),
           options.clock,
         ),
     }),

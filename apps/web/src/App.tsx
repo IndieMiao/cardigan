@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
+import * as Dialog from "@radix-ui/react-dialog";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type CardiganClient,
   describeError,
@@ -7,20 +8,23 @@ import {
   type SessionInfo,
 } from "./api.js";
 import { EmptyState } from "./components/Foundation.js";
+import { PageLoader } from "./components/PageLoader.js";
 import { RequestFeedback } from "./components/RequestFeedback.js";
-import { Tooltip } from "./components/Tooltip.js";
+import { NavIcon, SidebarNav } from "./components/SidebarNav.js";
+import {
+  ActivityPage,
+  CardDetailPage,
+  DecisionHistoryPage,
+  ExecutionPage,
+  NeedsYouPage,
+  SettingsPage,
+  SnapshotPage,
+} from "./lazy-pages.js";
 import { routeHash, useRoute } from "./route.js";
 import { useProjectStream } from "./useProjectStream.js";
 import { useResource } from "./useResource.js";
-import { ActivityPage } from "./views/ActivityPage.js";
-import { CardDetailPage } from "./views/CardDetailPage.js";
 import { CardListPage } from "./views/CardListPage.js";
-import { DecisionHistoryPage } from "./views/DecisionHistoryPage.js";
-import { ExecutionPage } from "./views/ExecutionPage.js";
 import { LoginPage } from "./views/LoginPage.js";
-import { NeedsYouPage } from "./views/NeedsYouPage.js";
-import { SettingsPage } from "./views/SettingsPage.js";
-import { SnapshotPage } from "./views/SnapshotPage.js";
 
 /**
  * Application shell (M5 plan §4 M5.3).
@@ -100,6 +104,8 @@ type ProjectsState =
   | { readonly kind: "error"; readonly message: string }
   | { readonly kind: "ready"; readonly projects: readonly ProjectSummary[] };
 
+const NARROW_QUERY = "(max-width: 760px)";
+
 function Workbench({
   client,
   onLoggedOut,
@@ -109,6 +115,28 @@ function Workbench({
 }) {
   const [route, navigate, invalidHash] = useRoute();
   const [loggingOut, setLoggingOut] = useState(false);
+  // C-209: below the 760px breakpoint the sidebar becomes a modal drawer.
+  // The top bar only exists on narrow screens, so wide screens (and screen
+  // readers there) see a single Needs You link.
+  const [narrow, setNarrow] = useState(
+    () =>
+      typeof window.matchMedia === "function" &&
+      window.matchMedia(NARROW_QUERY).matches,
+  );
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const closeRef = useRef<HTMLButtonElement>(null);
+  const mainRef = useRef<HTMLElement>(null);
+  const focusMainOnClose = useRef(false);
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const query = window.matchMedia(NARROW_QUERY);
+    const sync = (event: MediaQueryListEvent) => {
+      setNarrow(event.matches);
+      if (!event.matches) setDrawerOpen(false);
+    };
+    query.addEventListener("change", sync);
+    return () => query.removeEventListener("change", sync);
+  }, []);
   const loadProjects = useCallback(() => client.projects(), [client]);
   const projectResource = useResource(loadProjects);
   const projects: ProjectsState = projectResource.data
@@ -188,99 +216,136 @@ function Workbench({
       ? "cards"
       : (route?.kind ?? "cards");
 
+  const projectSwitcher = projects.kind === "ready" &&
+    projects.projects.length > 0 && (
+      <label className="project-switcher">
+        <span>项目</span>
+        <select
+          value={selected?.id ?? ""}
+          onChange={(event) => {
+            navigate({ kind: activeView, projectId: event.target.value });
+          }}
+        >
+          {projects.projects.map((project) => (
+            <option key={project.id} value={project.id}>
+              {project.name}
+            </option>
+          ))}
+        </select>
+      </label>
+    );
+  const feedback = (
+    <>
+      {selected && (
+        <RequestFeedback
+          pending={live.status !== "live"}
+          pendingMessage="正在连接实时更新…"
+          error={live.status === "retrying" ? "连接中断，正在重连" : undefined}
+        />
+      )}
+      <RequestFeedback
+        interactive
+        pending={loggingOut}
+        pendingMessage="登出中…"
+      />
+    </>
+  );
+  const navProps = {
+    projectId: selected?.id,
+    activeView,
+    needsCount,
+    loggingOut,
+    onLogout: () => void logout(),
+  };
+
   return (
     <div className="app">
-      <aside className="sidebar" aria-label="Workbench 导航">
-        <span className="brand">Cardigan</span>
-        {projects.kind === "ready" && projects.projects.length > 0 && (
-          <label className="project-switcher">
-            <span>项目</span>
-            <select
-              value={selected?.id ?? ""}
-              onChange={(event) => {
-                navigate({ kind: activeView, projectId: event.target.value });
-              }}
-            >
-              {projects.projects.map((project) => (
-                <option key={project.id} value={project.id}>
-                  {project.name}
-                </option>
-              ))}
-            </select>
-          </label>
-        )}
-        {selected !== undefined && (
-          <nav className="nav" aria-label="视图">
-            <Tooltip
-              content={needsCount > 0 ? `${needsCount} 件待处理` : undefined}
-            >
-              <a
-                href={routeHash({ kind: "needs-you", projectId: selected.id })}
-                aria-current={activeView === "needs-you" ? "page" : undefined}
+      {narrow && (
+        <header className="mobile-header">
+          <Dialog.Root open={drawerOpen} onOpenChange={setDrawerOpen}>
+            <Dialog.Trigger asChild>
+              <button
+                type="button"
+                className="icon-button"
+                aria-label="打开导航"
               >
-                Needs You{" "}
-                {needsCount > 0 && (
-                  <span className="nav-count">{needsCount}</span>
-                )}
-              </a>
-            </Tooltip>
-            {(
-              [
-                ["工作", [["cards", "卡片"]]],
-                [
-                  "运行",
-                  [
-                    ["execution", "执行视图"],
-                    ["activity", "项目动态"],
-                    ["decision-history", "拍板记录"],
-                    ["snapshot", "项目快照"],
-                  ],
-                ],
-                ["项目", [["settings", "设置"]]],
-              ] as const
-            ).map(([group, links]) => (
-              <div className="nav-group" key={group}>
-                <h2>{group}</h2>
-                {links.map(([kind, label]) => (
-                  <a
-                    key={kind}
-                    href={routeHash({ kind, projectId: selected.id })}
-                    aria-current={activeView === kind ? "page" : undefined}
-                  >
-                    {label}
-                  </a>
-                ))}
-              </div>
-            ))}
-          </nav>
-        )}
-        <div className="sidebar-footer">
-          {selected && (
-            <RequestFeedback
-              pending={live.status !== "live"}
-              pendingMessage="正在连接实时更新…"
-              error={
-                live.status === "retrying" ? "连接中断，正在重连" : undefined
+                <NavIcon name="menu" />
+              </button>
+            </Dialog.Trigger>
+            <Dialog.Portal>
+              <Dialog.Overlay className="nav-drawer-overlay" />
+              <Dialog.Content
+                className="nav-drawer sidebar-panel"
+                aria-describedby={undefined}
+                onOpenAutoFocus={(event) => {
+                  event.preventDefault();
+                  closeRef.current?.focus();
+                }}
+                onCloseAutoFocus={(event) => {
+                  // Choosing an entry moves on to the page; Escape, the overlay
+                  // and the close button return to the menu button (default).
+                  if (!focusMainOnClose.current) return;
+                  focusMainOnClose.current = false;
+                  event.preventDefault();
+                  mainRef.current?.focus();
+                }}
+              >
+                <Dialog.Title className="visually-hidden">
+                  项目导航
+                </Dialog.Title>
+                <SidebarNav
+                  {...navProps}
+                  projectSwitcher={projectSwitcher}
+                  feedback={feedback}
+                  onNavigate={() => {
+                    focusMainOnClose.current = true;
+                    setDrawerOpen(false);
+                  }}
+                  brandAction={
+                    <Dialog.Close asChild>
+                      <button
+                        ref={closeRef}
+                        type="button"
+                        className="icon-button"
+                        aria-label="关闭导航"
+                      >
+                        <NavIcon name="close" />
+                      </button>
+                    </Dialog.Close>
+                  }
+                />
+              </Dialog.Content>
+            </Dialog.Portal>
+          </Dialog.Root>
+          <span className="brand">Cardigan</span>
+          {selected !== undefined && (
+            <a
+              className="mobile-needs"
+              href={routeHash({ kind: "needs-you", projectId: selected.id })}
+              aria-label={
+                needsCount > 0
+                  ? `Needs You，${needsCount} 件待处理`
+                  : "Needs You"
               }
-            />
+              aria-current={activeView === "needs-you" ? "page" : undefined}
+            >
+              <NavIcon name="inbox" />
+              {needsCount > 0 && (
+                <span className="nav-count">{needsCount}</span>
+              )}
+            </a>
           )}
-          <RequestFeedback
-            interactive
-            pending={loggingOut}
-            pendingMessage="登出中…"
-          />
-          <button
-            type="button"
-            className="logout"
-            onClick={() => void logout()}
-            disabled={loggingOut}
-          >
-            登出
-          </button>
-        </div>
+        </header>
+      )}
+      <aside className="sidebar sidebar-panel" aria-label="Workbench 导航">
+        <SidebarNav
+          {...navProps}
+          projectSwitcher={projectSwitcher}
+          feedback={feedback}
+        />
       </aside>
 
-      <main className="content">
+      <main className="content" id="main-content" ref={mainRef} tabIndex={-1}>
         <RequestFeedback
           {...projectResource}
           retry={projectResource.reload}
@@ -297,72 +362,74 @@ function Workbench({
             error={`无法识别链接 ${invalidHash}；请从项目导航重新进入。`}
           />
         )}
-        {selected && route?.kind === "decision-history" && (
-          <DecisionHistoryPage
-            client={client}
-            projectId={selected.id}
-            revision={live.revision}
-          />
-        )}
-        {selected && route?.kind === "settings" && (
-          <SettingsPage
-            key={selected.id}
-            client={client}
-            projectId={selected.id}
-            revision={live.revision}
-          />
-        )}
-        {selected && route?.kind === "activity" && (
-          <ActivityPage
-            key={selected.id}
-            client={client}
-            projectId={selected.id}
-            revision={live.revision}
-          />
-        )}
-        {selected && route?.kind === "snapshot" && (
-          <SnapshotPage
-            key={selected.id}
-            client={client}
-            projectId={selected.id}
-            revision={live.revision}
-          />
-        )}
-        {selected && route?.kind === "execution" && (
-          <ExecutionPage
-            key={selected.id}
-            client={client}
-            projectId={selected.id}
-            revision={live.revision}
-          />
-        )}
-        {selected !== undefined && route?.kind === "needs-you" && (
-          <NeedsYouPage
-            resource={needs}
-            key={selected.id}
-            client={client}
-            projectId={selected.id}
-            revision={live.revision}
-          />
-        )}
-        {selected !== undefined && route?.kind === "card" && (
-          <CardDetailPage
-            key={`${selected.id}/${route.cardId}`}
-            client={client}
-            projectId={selected.id}
-            cardRevision={live.cardRevision}
-            cardId={route.cardId}
-            {...(route.anchor === undefined ? {} : { anchor: route.anchor })}
-          />
-        )}
-        {selected !== undefined && route?.kind === "cards" && (
-          <CardListPage
-            client={client}
-            key={selected.id}
-            projectId={selected.id}
-            revision={live.revision}
-          />
-        )}
+        <PageLoader key={`${selected?.id}/${route?.kind}`}>
+          {selected && route?.kind === "decision-history" && (
+            <DecisionHistoryPage
+              client={client}
+              projectId={selected.id}
+              revision={live.revision}
+            />
+          )}
+          {selected && route?.kind === "settings" && (
+            <SettingsPage
+              key={selected.id}
+              client={client}
+              projectId={selected.id}
+              revision={live.revision}
+            />
+          )}
+          {selected && route?.kind === "activity" && (
+            <ActivityPage
+              key={selected.id}
+              client={client}
+              projectId={selected.id}
+              revision={live.revision}
+            />
+          )}
+          {selected && route?.kind === "snapshot" && (
+            <SnapshotPage
+              key={selected.id}
+              client={client}
+              projectId={selected.id}
+              revision={live.revision}
+            />
+          )}
+          {selected && route?.kind === "execution" && (
+            <ExecutionPage
+              key={selected.id}
+              client={client}
+              projectId={selected.id}
+              revision={live.revision}
+            />
+          )}
+          {selected !== undefined && route?.kind === "needs-you" && (
+            <NeedsYouPage
+              resource={needs}
+              key={selected.id}
+              client={client}
+              projectId={selected.id}
+              revision={live.revision}
+            />
+          )}
+          {selected !== undefined && route?.kind === "card" && (
+            <CardDetailPage
+              key={`${selected.id}/${route.cardId}`}
+              client={client}
+              projectId={selected.id}
+              cardRevision={live.cardRevision}
+              cardId={route.cardId}
+              {...(route.anchor === undefined ? {} : { anchor: route.anchor })}
+            />
+          )}
+          {selected !== undefined && route?.kind === "cards" && (
+            <CardListPage
+              client={client}
+              key={selected.id}
+              projectId={selected.id}
+              revision={live.revision}
+            />
+          )}
+        </PageLoader>
       </main>
     </div>
   );

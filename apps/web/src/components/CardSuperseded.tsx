@@ -5,7 +5,7 @@ export function CardSuperseded({
   card,
   projectId,
 }: {
-  card: CardView;
+  card: Pick<CardView, "resolution" | "superseded_by">;
   projectId?: string;
 }) {
   if (card.resolution !== "superseded") return null;

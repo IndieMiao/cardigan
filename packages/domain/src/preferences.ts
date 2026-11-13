@@ -31,6 +31,9 @@ export const defaultDecisionDelegation: Readonly<
 export interface ProjectPreferences {
   readonly id: ProjectId;
   readonly auto_merge_after_minutes: number | null;
+  /** C-200: remaining context percentages, never cumulative token usage. */
+  readonly context_handoff_remaining_pct?: number;
+  readonly context_restart_remaining_pct?: number;
   /**
    * C-177: minutes a PM-held merge confirmation may stay open after its check
    * concluded before PM Ops and the human are alerted. Absent means the default.
@@ -134,5 +137,20 @@ export function validMergeConfirmSnoozeMaxMinutes(
     Number.isInteger(value) &&
     value >= 60 &&
     value <= 10080
+  );
+}
+
+export function contextUsageThresholds(preferences?: ProjectPreferences) {
+  return {
+    handoff: preferences?.context_handoff_remaining_pct ?? 20,
+    restart: preferences?.context_restart_remaining_pct ?? 15,
+  };
+}
+export function validContextPercentage(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isFinite(value) &&
+    value > 0 &&
+    value < 100
   );
 }

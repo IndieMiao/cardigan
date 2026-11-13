@@ -5,6 +5,7 @@ import { buildCheckoutFacts } from "./build-checkouts.js";
 import type { ReconcileGit } from "./git.js";
 import { startTimerLoop, type TimerLoop } from "./loop.js";
 import { systemClock } from "./merge-loop.js";
+import { profileSpan, profileSpanSync } from "./tick-profile.js";
 
 /**
  * M4.4 reconciliation and backup loops (plan §3.6, §3.7; development plan §12.6).
@@ -47,6 +48,11 @@ export class ReconcileExecutor {
 
   /** The loop owns database access; ServerGit only needs project lookup. */
   private checks(project_id: ProjectId): ReconcileChecks {
+    return profileSpanSync("reconcile.checks", () =>
+      this.readChecks(project_id),
+    );
+  }
+  private readChecks(project_id: ProjectId): ReconcileChecks {
     return this.options.store.uow.read((tx) => {
       // Keep old attempts too, including superseded completions/closed cards.
       const latest = new Map<string, ReconcileChecks["attempts"][number]>();
@@ -168,23 +174,33 @@ export class ReconcileExecutor {
   private async project(project_id: ProjectId) {
     const project = this.options.git.projectOf(project_id);
     if (project === undefined) return;
-    const state = this.state(project_id);
-    let findings = await this.options.git.reconcile(
-      project,
-      state.assignments,
-      state.deliveries,
-      () => this.checks(project_id),
-    );
-    if (await this.repair(project_id, findings)) {
-      const current = this.state(project_id);
-      findings = await this.options.git.reconcile(
-        project,
-        current.assignments,
-        current.deliveries,
-        () => this.checks(project_id),
+    // C-221: `reconcile.*` spans are timing only. `git` includes the
+    // filesystem/Git scan and the nested `reconcile.checks` database replay.
+    // C-231: after a repair the state re-read and the second scan add to the
+    // same `state` and `git` spans, so `git` still contains every `checks`.
+    const scan = async () => {
+      const state = profileSpanSync("reconcile.state", () =>
+        this.state(project_id),
       );
-    }
-    this.record(project_id, findings);
+      return profileSpan("reconcile.git", () =>
+        this.options.git.reconcile(
+          project,
+          state.assignments,
+          state.deliveries,
+          () => this.checks(project_id),
+        ),
+      );
+    };
+    let findings = await scan();
+    if (
+      await profileSpan("reconcile.repair", () =>
+        this.repair(project_id, findings),
+      )
+    )
+      findings = await scan();
+    profileSpanSync("reconcile.record", () =>
+      this.record(project_id, findings),
+    );
   }
 
   private report(message: string) {
@@ -212,7 +228,9 @@ export class BackupExecutor {
         const central = this.options.git.projectOf(project as ProjectId);
         if (central === undefined) continue;
         try {
-          await this.options.git.backup(central);
+          await profileSpan("backup.fetch", () =>
+            this.options.git.backup(central),
+          );
         } catch (error) {
           // §3.7: a failed backup keeps the previous one and changes no result.
           (this.options.report ?? this.options.onError ?? (() => undefined))(

@@ -7,7 +7,6 @@ import {
   fireEvent,
   render,
   screen,
-  waitFor,
   within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
@@ -217,7 +216,7 @@ test("U5c delivery, review and decision lead with unique IDs and coloured result
     ] as const) {
       const row = document.getElementById(`entry-C-1#${n}`) as HTMLElement;
       const heading = within(row).getByRole("heading", {
-        name: `${label} ${id} ${result}`,
+        name: `${id} ${label} ${result}`,
       });
       expect(heading.querySelector(".status")?.textContent).toBe(result);
       expect(
@@ -306,7 +305,7 @@ test("U6b long comments fold after fifteen rendered lines and expand safely; seq
   expect(tooltip.textContent).toContain("A-1");
 });
 
-test("U5c full page follows the latest day while the drawer keeps its top position", async () => {
+test("C-205 full page and drawer keep the header visible above the dated timeline", async () => {
   const data = records();
   data.timeline = data.timeline.map((entry, index) => ({
     ...entry,
@@ -320,11 +319,8 @@ test("U5c full page follows the latest day while the drawer keeps its top positi
     const full = render(
       <CardDetailPage client={client} projectId="p-1" cardId="C-1" />,
     );
-    await waitFor(() =>
-      expect(scroll.mock.contexts.at(-1)).toBe(
-        document.getElementById("entry-C-1#3"),
-      ),
-    );
+    await screen.findByRole("region", { name: "时间线记录" });
+    expect(scroll).not.toHaveBeenCalled();
     expect(document.querySelectorAll(".timeline-day")).toHaveLength(3);
     full.unmount();
     scroll.mockClear();

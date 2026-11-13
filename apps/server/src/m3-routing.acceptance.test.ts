@@ -19,6 +19,12 @@ import {
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { m3Fixture } from "../test-support/m3-acceptance.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 let f: ReturnType<typeof m3Fixture>;
 beforeEach(() => {
   f = m3Fixture();
@@ -59,6 +65,7 @@ const decision = () => {
           affected_work_items: [f.produce.id],
           blocking: true,
           decider: "human",
+          plain_summary: TEST_PLAIN_SUMMARY,
         },
         p,
       ),

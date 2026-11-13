@@ -1,5 +1,7 @@
 # Workbench 布局回归
 
+C-203 加载测量：`node apps/web/test-support/load-performance.mjs --local --json /tmp/load.json`（从仓库根目录运行，先 `pnpm exec tsc -b apps/server`、`pnpm --filter @cardigan/web build`）。独立临时 SQLite、210 张卡、577 个 Assignment、4200 条事件/时间线；不启动 Dispatcher，不读取正式数据库。复用本地 Chromium，无新增依赖。详细口径、远程一条命令、冷暖缓存和修前修后数据见 [加载测量记录](../../../docs/research/workbench-load-c203.md)。
+
 C-133 拍板影响范围人工截图：运行 `pnpm --filter @cardigan/web dev --host localhost`，打开 Vite 地址下的 `/test-support/decision-impact.html`。这是本地夹具，不连接业务服务或正式数据库，也不进入产品构建。分别在 1440px、390px 下模拟 `prefers-color-scheme: light/dark`，截取 Needs You 和点击 C-1 后的卡片详情（含合并处理、侧栏拍板和请求／解决时间线）。Q-1 和失败合并确认 Q-2 显示 C-2、C-3、C-4 的链接、缩略标题与状态；Q-3 为空列表、Q-4 仅含所属卡片，均不显示影响行。检查无水平溢出、状态文字不截断、长标题悬停可读，点击 C-2 可打开详情，影响行仍只排除拍板所属的 C-1。
 
 `pnpm --filter @cardigan/web test:layout` 在真实 Chromium 中加载 App、字体和 CSS，使用非空测试夹具；不启动业务服务、Dispatcher，也不连接正式数据库。它与 jsdom 组件测试互补，不加入默认的无浏览器测试流程。
@@ -26,3 +28,5 @@ C-133 拍板影响范围人工截图：运行 `pnpm --filter @cardigan/web dev -
 C-161 新建员工单独截图：`pnpm --filter @cardigan/web exec node test-support/employee-screenshots.mjs <输出目录>`。同样通过 `CHROMIUM_PATH` 指定浏览器；`EMPLOYEE_BASELINE_REF` 默认 `origin/main`，应指定实现起点提交以复现改前截图。仅加载设置页夹具与实际人物库，在 1440px、390px 及亮暗主题下输出改前新建角色、改后人物选择、自定义头像表单共 12 张图，并检查页面无水平溢出。不启动业务服务、不写正式员工。
 
 C-158 并发面板单独核对：`CAPACITY_SCREENSHOTS=/tmp/cardigan-capacity CAPACITY_BASELINE_REF=<修改前提交> node apps/web/test-support/execution-capacity-screenshots.mjs`（从仓库根目录运行，可设 `CHROMIUM_PATH`）。使用本地夹具的同一执行视图，修改前加载指定提交的面板组件并展示 `local · Agent`，修改后按 Q-266 同样展示 `local · Agent`，并展示超限提示；输出 1440px、390px 亮暗截图，并检查封顶、保存按钮禁用和页面不溢出。截图是测试数据，显示名回退的真实读取另由 HTTP 测试覆盖。
+
+C-205 拍板区块与卡片详情：`node apps/web/test-support/compact-merge-screenshots.mjs /tmp/cardigan-compact`（仓库根目录运行，可设 `CHROMIUM_PATH`）。`COMPACT_BASELINE_REF` 默认本卡起点 `69f4e14b20f453ff4ccea5d2dfe7a322154bdb8d`；改前加载该提交的 React 组件和 CSS，改后加载当前源码，两者使用同一份本地数据与产品字体，不连接业务服务。Q-337 文案来自 C-205 的历史摘录，检查名称、耗时及其他状态使用示意数据。覆盖 1440 亮／暗、390 亮，共 48 个页面组合，检查无横向溢出及单一状态条；另验证键盘展开／收起、导航自动展开，以及从已滚动页面进入详情和显式锚点定位。输出 29 张截图（含 4 张窄屏首屏对比图和 2 张定位图）与 `measurements.json`，记录区块高度、主操作相对视口位置及 3 组实际路由定位结果。完整截图超过一屏不表示按钮不可见，测量也不代表所有真实记录的固定节省幅度。

@@ -39,6 +39,12 @@ import {
   value,
 } from "./test-fixtures.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 const system: Actor = { kind: "system", project_id: human.project_id };
 const { work_item_id: _w, ...pmBase } = assignment(900, "pm");
 const ops: Assignment = {
@@ -234,6 +240,7 @@ function markRisk(f: Fixture, risk: (typeof RISKS)[number], minutes: number) {
           affected_work_items: [],
           blocking: false,
           decider: "human",
+          plain_summary: TEST_PLAIN_SUMMARY,
         },
         at(f, minutes),
       ),
@@ -345,6 +352,7 @@ test.each([...PATHS, "none"] as const)(
     if (path !== "none") takePath(f, path, 20);
     expect(confirmation()).toMatchObject({
       decider: "human",
+      plain_summary: TEST_PLAIN_SUMMARY,
       status: "open",
       human_required_reason: reason,
     });

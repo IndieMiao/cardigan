@@ -1,6 +1,7 @@
 import type { DecisionView } from "../api.js";
 import { routeHash } from "../route.js";
 import { StatusTag } from "./Foundation.js";
+import { IdBadge } from "./IdTag.js";
 
 export function DecisionAffectedCards({
   decision,
@@ -24,7 +25,7 @@ export function DecisionAffectedCards({
               href={routeHash({ kind: "card", projectId, cardId: card.id })}
               title={`${card.id} ${card.title}`}
             >
-              <span className="mono">{card.id}</span>{" "}
+              <IdBadge id={card.id} />{" "}
               <span className="decision-affected-title">{card.title}</span>{" "}
               <StatusTag status={card.status} />
             </a>

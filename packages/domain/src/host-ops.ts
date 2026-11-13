@@ -1,3 +1,4 @@
+import type { ContextObservation } from "./context-usage.js";
 import type { Event, Run, RuntimeRef, ToolName } from "./entities.js";
 import type { AssignmentId, CardId, RunId } from "./ids.js";
 
@@ -61,6 +62,8 @@ export type HostOpsExecutionTool =
 /** Persisted intent. Only the host consumes runtime references and launch snapshots. */
 export interface HostOpsExecution {
   readonly action_id: Event["id"];
+  readonly upstream_incident_id?: Event["id"];
+  readonly context_usage?: ContextObservation;
   readonly tool: HostOpsExecutionTool;
   readonly target_id: AssignmentId | RunId;
   readonly assignment_id: AssignmentId;
@@ -92,11 +95,21 @@ export function pendingHostOpsActions(
       action_id: e.id,
     }));
 }
+/** C-221: per-snapshot memo; event arrays are immutable (see event-index.ts). */
+const pendingAssignments = new WeakMap<
+  readonly Event[],
+  ReadonlySet<unknown>
+>();
 export function hostOpsPending(
   events: readonly Event[],
   assignment_id: AssignmentId,
 ): boolean {
-  return pendingHostOpsActions(events).some(
-    (a) => a.assignment_id === assignment_id,
-  );
+  let pending = pendingAssignments.get(events);
+  if (!pending) {
+    pending = new Set(
+      pendingHostOpsActions(events).map((a) => a.assignment_id),
+    );
+    pendingAssignments.set(events, pending);
+  }
+  return pending.has(assignment_id);
 }

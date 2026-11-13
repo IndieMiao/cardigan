@@ -36,6 +36,12 @@ import {
   m4Scenario,
 } from "./m4-fixtures.js";
 import { BackupExecutor, ReconcileExecutor } from "./reconcile-loop.js";
+import {
+  type ProfileLine,
+  profileTick,
+  setTickProfiler,
+  TickProfiler,
+} from "./tick-profile.js";
 
 const git = (cwd: string, ...args: string[]) =>
   execFileSync(
@@ -305,6 +311,89 @@ test("a Git delivery without a fixed ref is repaired from its candidate", async 
       .listReconcileFindings(f.project_id, { openOnly: true })
       .some((finding) => finding.kind === "missing_delivery_ref"),
   ).toBe(false);
+});
+
+test("C-231: a repair's state re-read and second scan are timed in reconcile.state and reconcile.git", async () => {
+  const repository = await centralWithBaseClone();
+  const agent = join(root, "agent-clone");
+  git(root, "clone", "-q", source, agent);
+  git(agent, "checkout", "-q", "-b", "agent/C-1/W-1");
+  const sha = commitOn(agent, "feature.txt", "feature\n");
+  const { product } = await acceptThroughMergeGate(f, scenario, sha);
+  await central.git.fetchRefs(repository, agent, [`+${sha}:${sha}`]);
+  await central.createRef(
+    repository,
+    `refs/cardigan/candidates/${scenario.coder.id}/${sha}`,
+    sha,
+  );
+
+  // A virtual timer: only the stubs below move it, so every span is exact.
+  let t = 0;
+  vi.spyOn(performance, "now").mockImplementation(() => t);
+  const binding = new ServerGit({ store: f.store, dataDir: f.dataDir });
+  const scan = binding.reconcile.bind(binding);
+  const scanned: number[] = [];
+  vi.spyOn(binding, "reconcile").mockImplementation(async (...args) => {
+    t += 100; // the filesystem/Git scan
+    const findings = await scan(...args);
+    scanned.push(findings.length);
+    return findings;
+  });
+  const pin = binding.repairPin.bind(binding);
+  vi.spyOn(binding, "repairPin").mockImplementation(async (...args) => {
+    t += 1_000;
+    return pin(...args);
+  });
+  const store = f.store;
+  const executor = new ReconcileExecutor({
+    store,
+    git: binding,
+    // `readChecks` asks the clock once per scan: 10 inside reconcile.checks.
+    clock: {
+      now: () => {
+        t += 10;
+        return f.clock.now();
+      },
+    },
+    report: (message) => errors.push(message),
+  });
+  // Each database state read costs 1: two land in reconcile.state, the
+  // repair's own read lands in reconcile.repair.
+  const internals = executor as unknown as {
+    state: (project_id: typeof f.project_id) => unknown;
+  };
+  const state = internals.state.bind(executor);
+  vi.spyOn(internals, "state").mockImplementation((project_id) => {
+    t += 1;
+    return state(project_id);
+  });
+
+  const lines: ProfileLine[] = [];
+  const profiler = new TickProfiler({
+    log: (line) => lines.push(line),
+    reportIntervalMs: 0,
+  });
+  setTickProfiler(profiler);
+  try {
+    await profileTick("reconcile", () => executor.tick(f.project_id));
+  } finally {
+    setTickProfiler(undefined);
+    profiler.stop();
+  }
+
+  expect(errors).toEqual([]);
+  expect(scanned).toHaveLength(2); // the repair path scanned twice
+  expect((await central.pinnedDeliveries(project)).get(product.id)).toBe(sha);
+  const spans = lines.find((line) => line.event === "tick_profile")
+    ?.spans as Record<string, number>;
+  // Before C-231 the second pass was untimed: git 110, state 1, checks 20.
+  expect(spans["reconcile.checks"]).toBe(20);
+  expect(spans["reconcile.git"]).toBe(220);
+  expect(spans["reconcile.git"]).toBeGreaterThanOrEqual(
+    spans["reconcile.checks"] ?? Number.POSITIVE_INFINITY,
+  );
+  expect(spans["reconcile.state"]).toBe(2);
+  expect(spans["reconcile.repair"]).toBeGreaterThanOrEqual(1_000);
 });
 
 test("a diverged registered source is reported and moves no ref", async () => {

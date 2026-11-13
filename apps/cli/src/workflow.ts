@@ -4,6 +4,7 @@ import type {
   CommandState,
   HumanActionId,
   ProjectId,
+  RiskTag,
   WorkItemId,
 } from "@cardigan/domain";
 import {
@@ -52,6 +53,7 @@ import {
   runCommand,
   systemClock,
 } from "./host.js";
+import { rotateHostOps } from "./host-ops-rotate.js";
 import type { CliIo } from "./io.js";
 import { printRotation, rotateStandingPmInStore } from "./pm-rotate.js";
 import { launchExecution } from "./runtime-check.js";
@@ -59,15 +61,17 @@ import { launchExecution } from "./runtime-check.js";
 const USAGE = [
   "用法：",
   "  cardigan card create [--template <id>] --title <标题> --goal <目标> [--acceptance <标准1;标准2>] [--repo <仓库>] [--base-branch main] [--project <p>]",
-  "  cardigan card update <C-n> [--title <标题>] [--goal <目标>] [--acceptance <标准1;标准2>] [--priority none|low|medium|high|urgent] [--status backlog|todo|cancelled] [--superseded-by <C-m>] [--project <p>]",
+  "  cardigan card update <C-n> [--title <标题>] [--goal <目标>] [--acceptance <标准1;标准2>] [--priority none|low|medium|high|urgent] [--status backlog|todo|cancelled] [--risk-tags security,permission,numeric_rule|none] [--superseded-by <C-m>] [--project <p>]",
   "    update 至少提供一个修改字段；含分号的验收标准请加引号。",
+  "    --risk-tags 用逗号分隔 security、permission、numeric_rule；传 none 清空。",
   "    已完成卡片不能取消；请建新卡，再用 --superseded-by 标记已完成或已取消的旧卡。",
   "  cardigan card sensitive <C-n> on|off [--project <p>]   标记或取消敏感：被标记卡片的合并确认一律由你亲自处理",
   "  cardigan assign <W-n> --role <角色> [--employee <E-n 或名字>] [--machine local] [--start] [--project <p>]",
   "  cardigan token issue <A-n> [--project <p>]",
   "  cardigan pm create --office|--ops [--project <p>]",
-  "  cardigan host-ops create [--employee <E-n>] [--project <p>]  创建常驻主机运维并签发 Token",
+  "  cardigan host-ops create [--employee <E-n>] [--project <p>]  创建常驻主机运维，启动时自动签发凭据",
   "  cardigan host-ops start [--project <p>]  启动常驻主机运维（已在运行就跳过）",
+  "  cardigan host-ops rotate [--project <p>]  保留员工和待处理事项，切换到最新角色版本并启动",
   "  cardigan pm start [--office] [--ops] [--project <p>]  一键启动常驻 PM（已在运行就跳过）",
   "  cardigan pm rotate --office|--ops [--external] [--employee <E-n 或名字>] [--project <p>]     把常驻 PM 换到 pm 角色的最新版本",
   "  cardigan pm restart --office|--ops [--project <p>]     重开常驻 PM 会话（不暂停、不转交事项、不换版本）",
@@ -324,6 +328,25 @@ function cardSensitive(args: readonly string[], io: CliIo): number {
   }
 }
 
+const RISK_TAGS: readonly RiskTag[] = [
+  "security",
+  "permission",
+  "numeric_rule",
+];
+
+/** `none` clears; otherwise a comma-separated list of the three risk tags. */
+function parseRiskTags(raw: string): RiskTag[] {
+  if (raw === "none") return [];
+  const tags = raw.split(",").map((tag) => tag.trim());
+  if (!tags.every((tag): tag is RiskTag => RISK_TAGS.includes(tag as RiskTag)))
+    throw new CliError(
+      "--risk-tags 只接受 security、permission、numeric_rule（逗号分隔），清空请传 none",
+      EXIT.usage,
+      [USAGE],
+    );
+  return [...new Set(tags)];
+}
+
 function cardUpdate(args: readonly string[], io: CliIo): number {
   const { flags, positionals } = parseArgs(args, []);
   const parsedId = parseId("card", positionals[0]);
@@ -338,6 +361,7 @@ function cardUpdate(args: readonly string[], io: CliIo): number {
     "acceptance",
     "priority",
     "status",
+    "risk-tags",
     "superseded-by",
   ];
   for (const name of Object.keys(flags)) {
@@ -389,12 +413,17 @@ function cardUpdate(args: readonly string[], io: CliIo): number {
   if (acceptance?.length === 0) {
     throw new CliError("--acceptance 至少写一条标准", EXIT.usage, [USAGE]);
   }
+  const riskTags =
+    flags["risk-tags"] === undefined
+      ? undefined
+      : parseRiskTags(required(flags, "risk-tags"));
   const patch: Omit<Parameters<typeof updateCard>[2], "card_id"> = {
     ...(flags.title === undefined ? {} : { title: required(flags, "title") }),
     ...(flags.goal === undefined ? {} : { goal: required(flags, "goal") }),
     ...(acceptance === undefined ? {} : { acceptance_criteria: acceptance }),
     ...(priority === undefined ? {} : { priority }),
     ...(status === undefined ? {} : { status }),
+    ...(riskTags === undefined ? {} : { risk_tags: riskTags }),
   };
   const cardId = parsedId.value.id;
   const store = openStoreFrom(io, flags);
@@ -698,12 +727,12 @@ async function hostOpsCommand(
       ? ["project", "data-dir", "employee"]
       : ["project", "data-dir", "mcp-url", "hc-session"];
   if (
-    !["create", "start"].includes(sub ?? "") ||
+    !["create", "start", "rotate"].includes(sub ?? "") ||
     parsed.positionals.length ||
     Object.keys(parsed.flags).some((key) => !allowed.includes(key))
   )
     throw new CliError(
-      "请使用 host-ops create 或 start 及其支持的选项",
+      "请使用 host-ops create、start 或 rotate 及其支持的选项",
       EXIT.usage,
       [USAGE],
     );
@@ -715,7 +744,7 @@ async function hostOpsCommand(
       optional(parsed.flags, "project"),
     );
     if (sub === "create") {
-      const issued = store.uow.run((tx) => {
+      const created = store.uow.run((tx) => {
         const employee_id = optional(parsed.flags, "employee");
         const result = createHostOpsAssignment(
           loadCommandState(tx, project_id),
@@ -730,24 +759,26 @@ async function hostOpsCommand(
           );
         const effect = result.value;
         persistEffect(tx, project_id, effect);
-        const { assignment } = effect.data;
-        const role = roleInTransaction(
-          tx,
-          project_id,
-          "host_ops",
-          assignment.role_version,
-        );
-        return {
-          ...effect.data,
-          token: issueTokenForAssignment(tx, project_id, assignment.id, role),
-        };
+        return effect.data;
       });
       io.stdout(
-        `${issued.reused ? "复用" : "已创建"}常驻主机运维：${issued.assignment.id}（host_ops v${issued.assignment.role_version}）`,
+        `${created.reused ? "复用" : "已创建"}常驻主机运维：${created.assignment.id}（host_ops v${created.assignment.role_version}）`,
       );
-      printToken(io, issued.token);
+      io.stdout(
+        "运行 cardigan host-ops start 启动；凭据由启动流程自动签发，不在终端显示。",
+      );
       return EXIT.ok;
     }
+    if (sub === "rotate")
+      await rotateHostOps({
+        store,
+        io,
+        project_id,
+        dataDir: resolveDataDir(io, optional(parsed.flags, "data-dir")),
+        ...(optional(parsed.flags, "hc-session")
+          ? { session: optional(parsed.flags, "hc-session") as string }
+          : {}),
+      });
     const candidates = store.uow.read((tx) =>
       tx.assignments
         .list(project_id)
@@ -770,21 +801,35 @@ async function hostOpsCommand(
       io.stdout(`主机运维（${assignment.id}）已在运行，跳过`);
       return EXIT.ok;
     }
-    return await (hooks.start ?? startAssignmentById)({
-      store,
-      io,
-      project_id,
-      assignment_id: assignment.id,
-      ...(optional(parsed.flags, "data-dir")
-        ? { dataDir: optional(parsed.flags, "data-dir") as string }
-        : {}),
-      ...(optional(parsed.flags, "mcp-url")
-        ? { mcpUrl: optional(parsed.flags, "mcp-url") as string }
-        : {}),
-      ...(optional(parsed.flags, "hc-session")
-        ? { session: optional(parsed.flags, "hc-session") as string }
-        : {}),
-    });
+    try {
+      const result = await (hooks.start ?? startAssignmentById)({
+        store,
+        io,
+        project_id,
+        assignment_id: assignment.id,
+        ...(optional(parsed.flags, "data-dir")
+          ? { dataDir: optional(parsed.flags, "data-dir") as string }
+          : {}),
+        ...(optional(parsed.flags, "mcp-url")
+          ? { mcpUrl: optional(parsed.flags, "mcp-url") as string }
+          : {}),
+        ...(optional(parsed.flags, "hc-session")
+          ? { session: optional(parsed.flags, "hc-session") as string }
+          : {}),
+      });
+      if (sub === "rotate" && result !== EXIT.ok)
+        io.stderr(
+          `新主机运维 ${assignment.id} 已保留；请运行 cardigan host-ops start --project ${project_id} 重试启动。`,
+        );
+      return result;
+    } catch (error) {
+      if (sub === "rotate")
+        throw new CliError(
+          `新主机运维 ${assignment.id} 已保留；请运行 cardigan host-ops start --project ${project_id} 重试启动。`,
+          EXIT.failure,
+        );
+      throw error;
+    }
   } finally {
     store.close();
   }

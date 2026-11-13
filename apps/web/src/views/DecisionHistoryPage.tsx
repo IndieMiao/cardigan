@@ -11,6 +11,8 @@ import {
   StatusTag,
   Time,
 } from "../components/Foundation.js";
+import { IdentityRow } from "../components/IdentityRow.js";
+import { IdTag } from "../components/IdTag.js";
 import { CardLink, Markdown } from "../components/Operations.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
 import { categoryLabels } from "../decision-labels.js";
@@ -61,7 +63,7 @@ function DecisionRecord({
   return (
     <article className="decision-record" aria-label={`拍板记录 ${q.id}`}>
       <header className="decision-record-head">
-        <span className="decision-record-id">{q.id}</span>
+        <IdTag id={q.id} />
         <h2 className="decision-record-question" title={q.question}>
           {q.question}
         </h2>
@@ -78,19 +80,19 @@ function DecisionRecord({
           <Time value={q.resolution.at} />
         </span>
       </header>
-      <div className="decision-record-choice">
+      <IdentityRow className="decision-record-choice">
         <span className="decision-record-option">
           所选方案：{option?.description ?? q.resolution.option}
         </span>
-        <span className="decision-record-by">
+        <IdentityRow as="span" className="decision-record-by">
           <span className="visually-hidden">记录人：</span>
           <EmployeeIdentity
             {...q.resolution}
             author={q.resolution.resolved_by}
             showTitle={false}
           />
-        </span>
-      </div>
+        </IdentityRow>
+      </IdentityRow>
       <details className="decision-record-more">
         <summary className="decision-record-summary">
           <span className="decision-record-preview">

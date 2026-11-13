@@ -1,6 +1,7 @@
 import * as Popover from "@radix-ui/react-popover";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AuthorView, NextOwnerItem } from "../api.js";
+import { useInlineIdentity } from "./IdentityRow.js";
 import { Tooltip } from "./Tooltip.js";
 
 // Only hover-opened profiles participate; clicked profiles remain pinned.
@@ -29,7 +30,11 @@ function avatarVariant(src: string | undefined, size: 64 | 128 | 256) {
  * Cardigan's own rule logic (scheduler, merge gate, reconciliation, timers)
  * is not a person: it gets one fixed gear icon instead of a lettered avatar.
  */
-export function SystemAvatar({ size }: { size?: 32 | 64 | 128 | undefined }) {
+export function SystemAvatar({
+  size,
+}: {
+  size?: 24 | 32 | 64 | 128 | undefined;
+}) {
   return (
     <span
       className="employee-avatar employee-system"
@@ -62,7 +67,7 @@ function EmployeeAvatar({
   src: string | undefined;
   initial: string | undefined;
   color: number | "role";
-  size?: 32 | 64 | 128 | undefined;
+  size?: 24 | 32 | 64 | 128 | undefined;
 }) {
   const [failedImage, setFailedImage] = useState<string>();
   const pixels = (size ?? 32) > 64 ? 128 : 64;
@@ -101,9 +106,12 @@ export function EmployeeIdentity({
 }: { [K in keyof AuthorView]?: AuthorView[K] | undefined } & {
   showTitle?: boolean;
   avatarOnly?: boolean;
-  avatarSize?: 32 | 64 | 128;
+  avatarSize?: 24 | 32 | 64 | 128;
   metadata?: string;
 }) {
+  const inline = useInlineIdentity();
+  const inlineSize = inline ? 24 : avatarSize;
+  const identityClass = `employee-identity${inline ? " employee-inline" : ""}`;
   const [open, setOpen] = useState<"hover" | "click" | null>(null);
   const openTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
     undefined,
@@ -158,19 +166,19 @@ export function EmployeeIdentity({
   const identity = (
     <>
       {system ? (
-        <SystemAvatar size={avatarSize} />
+        <SystemAvatar size={inlineSize} />
       ) : (
         <EmployeeAvatar
           src={src}
           initial={initial}
           color={color}
-          size={avatarSize}
+          size={inlineSize}
         />
       )}
       {!avatarOnly && (
         <span className="employee-label">
           <strong>{name}</strong>
-          {showTitle && profile?.title && (
+          {showTitle && !inline && profile?.title && (
             <span className="employee-title">{profile.title}</span>
           )}
         </span>
@@ -183,7 +191,7 @@ export function EmployeeIdentity({
         <Tooltip content={metadata}>
           <button
             type="button"
-            className="employee-identity employee-trigger"
+            className={`${identityClass} employee-trigger`}
             aria-label={name}
           >
             {identity}
@@ -193,7 +201,7 @@ export function EmployeeIdentity({
     return avatarOnly ? (
       <Tooltip content={name}>
         <span
-          className="employee-identity"
+          className={identityClass}
           role="img"
           aria-label={name}
           // biome-ignore lint/a11y/noNoninteractiveTabindex: Tooltip content must be reachable by keyboard.
@@ -203,7 +211,7 @@ export function EmployeeIdentity({
         </span>
       </Tooltip>
     ) : (
-      <span className="employee-identity">{identity}</span>
+      <span className={identityClass}>{identity}</span>
     );
   }
   return (
@@ -219,7 +227,7 @@ export function EmployeeIdentity({
         <button
           ref={trigger}
           type="button"
-          className="employee-identity employee-trigger"
+          className={`${identityClass} employee-trigger`}
           aria-label={`${name}的${member ? "成员" : "员工"}卡片`}
           onPointerEnter={(event) => {
             if (event.pointerType === "touch") return;

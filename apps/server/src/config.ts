@@ -31,8 +31,10 @@ export interface ServerConfig {
   readonly attachmentIntervalMs?: number;
   readonly dispatchTimeoutMs?: number;
   readonly hostOpsPatrolIntervalMs?: number;
-  readonly hostOpsContextThresholdPct?: number;
+  readonly contextUsageCacheDir?: string;
+  readonly contextUsageStaleAfterMs?: number;
   readonly dispatchIntervalMs?: number;
+  readonly runtimeFailureLimit?: number;
   /**
    * After SIGTERM, how long in-flight Workbench requests may run before their
    * connections are cut; SSE streams end at once. 10 seconds by default.
@@ -45,6 +47,8 @@ export interface ServerEnv extends ExecutionEnv {
   readonly CARDIGAN_HC_SESSION?: string | undefined;
   readonly CARDIGAN_CONFIG_DIR?: string | undefined;
   readonly CARDIGAN_DATA_DIR?: string | undefined;
+  /** C-216: `1` turns on the periodic-loop profiler; default off. */
+  readonly CARDIGAN_TICK_PROFILE?: string | undefined;
   readonly CARDIGAN_MCP_HOST?: string | undefined;
   readonly CARDIGAN_MCP_PORT?: string | undefined;
   readonly CARDIGAN_LISTEN_RETRY_INTERVAL_MS?: string | undefined;
@@ -64,8 +68,10 @@ export interface ServerEnv extends ExecutionEnv {
   readonly CARDIGAN_ATTACHMENT_GC_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_DISPATCH_TIMEOUT_MS?: string | undefined;
   readonly CARDIGAN_HOST_OPS_PATROL_INTERVAL_MS?: string | undefined;
-  readonly CARDIGAN_HOST_OPS_CONTEXT_THRESHOLD_PCT?: string | undefined;
+  readonly CARDIGAN_CONTEXT_USAGE_CACHE_DIR?: string | undefined;
+  readonly CARDIGAN_CONTEXT_USAGE_STALE_AFTER_MS?: string | undefined;
   readonly CARDIGAN_DISPATCH_INTERVAL_MS?: string | undefined;
+  readonly CARDIGAN_RUNTIME_FAILURE_LIMIT?: string | undefined;
   readonly CARDIGAN_SHUTDOWN_GRACE_MS?: string | undefined;
 }
 
@@ -87,6 +93,16 @@ const nonEmpty = (value: string | undefined): string | undefined =>
 
 /** Read the server configuration from the environment (§3, §13.1). */
 export function resolveServerConfig(env: ServerEnv): ServerConfig {
+  const failureLimitText = nonEmpty(env.CARDIGAN_RUNTIME_FAILURE_LIMIT);
+  const runtimeFailureLimit =
+    failureLimitText === undefined ? undefined : Number(failureLimitText);
+  if (
+    runtimeFailureLimit !== undefined &&
+    (!Number.isSafeInteger(runtimeFailureLimit) || runtimeFailureLimit < 2)
+  )
+    throw new Error(
+      "CARDIGAN_RUNTIME_FAILURE_LIMIT must be an integer of at least 2",
+    );
   const portText = nonEmpty(env.CARDIGAN_MCP_PORT);
   const port = portText === undefined ? DEFAULT_MCP_PORT : Number(portText);
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
@@ -110,8 +126,17 @@ export function resolveServerConfig(env: ServerEnv): ServerConfig {
       "CARDIGAN_LISTEN_RETRY_TIMEOUT_MS",
       DEFAULT_LISTEN_RETRY_TIMEOUT_MS,
     ),
-    hostOpsContextThresholdPct: percentage(
-      env.CARDIGAN_HOST_OPS_CONTEXT_THRESHOLD_PCT,
+    ...(nonEmpty(env.CARDIGAN_CONTEXT_USAGE_CACHE_DIR)
+      ? {
+          contextUsageCacheDir: nonEmpty(
+            env.CARDIGAN_CONTEXT_USAGE_CACHE_DIR,
+          ) as string,
+        }
+      : {}),
+    contextUsageStaleAfterMs: interval(
+      env.CARDIGAN_CONTEXT_USAGE_STALE_AFTER_MS,
+      "CARDIGAN_CONTEXT_USAGE_STALE_AFTER_MS",
+      600_000,
     ),
     hostOpsPatrolIntervalMs: interval(
       env.CARDIGAN_HOST_OPS_PATROL_INTERVAL_MS,
@@ -132,6 +157,7 @@ export function resolveServerConfig(env: ServerEnv): ServerConfig {
       "CARDIGAN_DISPATCH_TIMEOUT_MS",
       600_000,
     ),
+    ...(runtimeFailureLimit === undefined ? {} : { runtimeFailureLimit }),
     mergeIntervalMs: interval(
       env.CARDIGAN_MERGE_INTERVAL_MS,
       "CARDIGAN_MERGE_INTERVAL_MS",
@@ -208,12 +234,3 @@ import {
   resolveDataDirectory,
   resolveExecutionConfig,
 } from "@cardigan/runtime-herdr";
-
-function percentage(value?: string): number {
-  const result = Number(nonEmpty(value) ?? "80");
-  if (!Number.isFinite(result) || result < 1 || result > 100)
-    throw new Error(
-      "CARDIGAN_HOST_OPS_CONTEXT_THRESHOLD_PCT must be between 1 and 100",
-    );
-  return result;
-}

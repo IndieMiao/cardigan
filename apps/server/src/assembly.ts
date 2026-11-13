@@ -5,6 +5,7 @@ import type {
   ProjectId,
 } from "@cardigan/domain";
 import { standingModeFromTools } from "@cardigan/domain";
+import type { LaunchConfig } from "@cardigan/roles";
 import { type Store, tokensForAssignment } from "@cardigan/store";
 import { type AttachmentGc, startAttachmentLoop } from "./attachment-loop.js";
 import { type CleanupExecutor, startCleanupLoop } from "./cleanup-loop.js";
@@ -41,6 +42,7 @@ import {
  * `stop()` (loop + monitor drain) → close the MCP endpoint → close the Store.
  */
 export interface ControlPlaneOptions {
+  readonly upstream?: LaunchConfig;
   readonly hostOpsTick?: () => Promise<void>;
   readonly hostOpsPatrolIntervalMs?: number;
   readonly store: Store;
@@ -64,6 +66,7 @@ export interface ControlPlaneOptions {
   readonly inactiveCancelAfterMs?: number | null;
   readonly lossGraceMs?: number;
   readonly eventSilenceMs?: number;
+  readonly runtimeFailureLimit?: number;
   /**
    * M4.4: present when the host wired Git. Without it no merge can run, which
    * is what tests of the pure dispatcher want.
@@ -194,6 +197,12 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
     runtime: options.runtime,
     clock,
     standing,
+    ...(options.intervalMs === undefined
+      ? {}
+      : { reconcileIntervalMs: options.intervalMs }),
+    ...(options.runtimeFailureLimit === undefined
+      ? {}
+      : { maxConsecutiveFailures: options.runtimeFailureLimit }),
     ...(options.lossGraceMs === undefined
       ? {}
       : { lossGraceMs: options.lossGraceMs }),

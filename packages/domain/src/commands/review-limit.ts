@@ -2,6 +2,7 @@ import type { Decision, WorkItem } from "../entities.js";
 import type { CommandDraft } from "./core.js";
 import { assignDecision } from "./delegation.js";
 import { endRun } from "./end-run.js";
+import { REVIEW_LIMIT_PLAIN_SUMMARY } from "./plain-summary.js";
 import { currentReviewTarget } from "./review-round.js";
 
 export function pendingReviewLimit(d: CommandDraft, item: WorkItem) {
@@ -63,6 +64,7 @@ export function requestReviewLimit(d: CommandDraft, item: WorkItem) {
         },
       ],
       recommended,
+      plain_summary: { ...REVIEW_LIMIT_PLAIN_SUMMARY },
       affected_cards: [item.card_id],
       affected_work_items: [item.id],
       blocking: true,

@@ -66,6 +66,8 @@ export type CardStatus =
   | "done"
   | "cancelled";
 
+export type RiskTag = "security" | "permission" | "numeric_rule";
+
 /** The card view the API returns; `status`, `why` and `next_owners` are derived. */
 export interface CardView {
   readonly merge_check_blockers?: readonly MergeCheckBlocker[];
@@ -78,6 +80,8 @@ export interface CardView {
   readonly superseded_by?: string;
   /** C-65: human-only flag; its merge confirmation always goes to the human. */
   readonly sensitive?: boolean;
+  /** C-188: PM-set risk tags; the Web only displays them (C-197). */
+  readonly risk_tags?: readonly RiskTag[];
   readonly priority: number;
   readonly repo: string;
   readonly base_branch: string;
@@ -93,7 +97,12 @@ export interface CardView {
 }
 
 /** A list row: the card plus the fields the list filters and columns need. */
-export interface CardListItem extends CardView {
+export interface CardListItem
+  extends Omit<CardView, "goal" | "acceptance_criteria" | "source"> {
+  /** Legacy full-list responses may include prose; the board requests summaries. */
+  readonly goal?: string;
+  readonly acceptance_criteria?: readonly string[];
+  readonly source?: CardView["source"];
   readonly queued_runs?: readonly {
     readonly run_id: string;
     readonly assignment_id: string;
@@ -261,6 +270,12 @@ export interface DecisionSuggestionView {
   readonly at: string;
   readonly stale: boolean;
 }
+/** C-202: plain-language summary shown first on a decision. */
+export interface PlainSummaryView {
+  readonly changed: string;
+  readonly impact: string;
+  readonly risk: string;
+}
 export interface DecisionView {
   readonly card_id?: string | null;
   readonly affected_cards?: readonly string[];
@@ -293,6 +308,8 @@ export interface DecisionView {
   readonly recommended: string;
   /** C-192: the raiser's suggestion; `stale` disables one-click handling. */
   readonly suggestion?: DecisionSuggestionView;
+  /** C-202: absent on older decisions, which show `context` as before. */
+  readonly plain_summary?: PlainSummaryView;
   readonly context?: string;
   /** Card attachments the requester referenced, in display order (§6). */
   readonly attachments?: readonly AttachmentView[];
@@ -1271,7 +1288,7 @@ export class HttpCardiganClient implements CardiganClient {
 
   async cards(projectId: string, filter: CardFilter): Promise<CardPage> {
     return this.request<CardPage>(
-      `/api/projects/${encodeURIComponent(projectId)}/cards?filter=${filter}`,
+      `/api/projects/${encodeURIComponent(projectId)}/cards?filter=${filter}&view=summary`,
     );
   }
 

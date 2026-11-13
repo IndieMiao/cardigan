@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>C-205 · 拍板区块紧凑布局原型</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="prototype.css">
+  <script src="prototype.js" defer></script>
+</head>
+<body>
+  <div class="prototype-tools" aria-label="设计原型控件">
+    <strong>C-205 设计原型</strong>
+    <label>页面 <select id="view"><option value="after">改后 · Needs You</option><option value="before">改前 · 布局复刻</option><option value="card">改后 · 卡片详情</option></select></label>
+    <label>情境 <select id="scenario"></select></label>
+    <label>主题 <select id="theme"><option value="light">亮色</option><option value="dark">暗色</option></select></label>
+    <span>本地演示，操作不写入真实记录</span>
+  </div>
+  <div class="workspace">
+    <aside class="navigation" aria-label="项目导航示意">
+      <div class="wordmark">Cardigan</div>
+      <div class="project">Cardigan <span>⌄</span></div>
+      <div class="nav-item active">需要我 <span>1</span></div>
+      <div class="nav-item">卡片</div><div class="nav-item">项目动态</div><div class="nav-item">拍板记录</div>
+      <div class="nav-footer">一个人的监工桌</div>
+    </aside>
+    <main id="main"></main>
+  </div>
+  <dialog id="action-dialog" aria-labelledby="dialog-title">
+    <form id="action-form">
+      <h2 id="dialog-title"></h2><p id="dialog-copy"></p>
+      <div id="dialog-fields"></div>
+      <div class="actions"><button type="submit" id="dialog-submit">确认</button><button type="button" class="quiet" id="dialog-cancel">取消</button></div>
+    </form>
+  </dialog>
+  <p id="feedback" role="status" aria-live="polite" hidden></p>
+</body>
+</html>

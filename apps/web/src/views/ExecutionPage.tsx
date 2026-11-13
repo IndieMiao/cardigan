@@ -15,6 +15,8 @@ import {
   StatusTag,
   Time,
 } from "../components/Foundation.js";
+import { IdentityRow } from "../components/IdentityRow.js";
+import { IdBadge } from "../components/IdTag.js";
 import {
   AttachCommands,
   CardLink,
@@ -186,10 +188,12 @@ function AssignmentRow({
       }}
     >
       <td>
-        <EmployeeIdentity {...a} author_role={a.role_id} />
+        <IdentityRow>
+          <EmployeeIdentity {...a} author_role={a.role_id} />
+        </IdentityRow>
       </td>
       <td>
-        <div className="execution-assignment">
+        <IdentityRow className="execution-assignment">
           {/* C-106: the Assignment id opens the drawer; no separate 详情 button. */}
           <Tooltip content={`${a.role_id} v${a.role_version}`}>
             <button
@@ -204,7 +208,7 @@ function AssignmentRow({
                 onOpen(event.currentTarget);
               }}
             >
-              {a.id}
+              <IdBadge id={a.id} />
             </button>
           </Tooltip>
           <span className="id-description">{a.role_id}</span>
@@ -213,7 +217,7 @@ function AssignmentRow({
               {a.standing_mode === "office" ? "PM 前台" : "PM 后台"}
             </span>
           )}
-        </div>
+        </IdentityRow>
       </td>
       <td>
         {a.work_item_id ? (

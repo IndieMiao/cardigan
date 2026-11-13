@@ -66,6 +66,12 @@ import { afterEach, beforeEach, expect, test } from "vitest";
 import { main } from "./index.js";
 import type { CliIo } from "./io.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 const project = "p-m4t1";
 const human: Actor = { kind: "human", project_id: project };
 const system: Actor = { kind: "system", project_id: project };
@@ -462,6 +468,9 @@ async function deliver(
         value: input.subject,
       },
       requested_verifiers: [...input.verifiers],
+      ...(input.kind === "card_completion"
+        ? { plain_summary: TEST_PLAIN_SUMMARY }
+        : {}),
       ...(input.known_gaps === undefined
         ? {}
         : { known_gaps: [...input.known_gaps] }),
@@ -624,6 +633,7 @@ test("§12.5 confirm: an unconfirmed merge is impossible until the human merges,
     trigger: "merge_confirmation",
     status: "open",
     decider: "human",
+    plain_summary: TEST_PLAIN_SUMMARY,
     blocking: true,
   });
   expect(first?.options.map((o) => o.key).sort()).toEqual([

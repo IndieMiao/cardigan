@@ -46,6 +46,7 @@ const exec = promisify(execFile);
  * model/CLI snapshot for a fresh terminal, and the M2.6 start adapter.
  */
 export interface HostWiring {
+  readonly upstream: LaunchConfig;
   readonly runtime: HerdrRuntime;
   readonly beforeWake: NonNullable<DispatcherOptions["beforeWake"]>;
   readonly snapshot: (
@@ -145,6 +146,7 @@ export async function createHostWiring(options: {
 
   return {
     runtime,
+    upstream: launch.config,
     // Lock contention and transient network errors retry briefly inside this
     // delivery; the final error carries a sanitized category (§6.5, §12.4).
     beforeWake: async ({ project, assignment }) => {

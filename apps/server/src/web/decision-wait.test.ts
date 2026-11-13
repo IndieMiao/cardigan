@@ -5,6 +5,12 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { expect, test } from "vitest";
 import { m5Cross, TEST_PASSWORD } from "../../test-support/m5-cross.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 test("Web and MCP report the same project Decision request time and elapsed wait", async () => {
   const f = await m5Cross();
   const mcp = await startMcpServer({
@@ -37,6 +43,7 @@ test("Web and MCP report the same project Decision request time and elapsed wait
           options: [{ key: "go", description: "Go", impact: "Proceed" }],
           recommended: "go",
           decider: "human",
+          plain_summary: TEST_PLAIN_SUMMARY,
           blocking: false,
           affected_cards: [],
           affected_work_items: [],

@@ -7,6 +7,12 @@ import {
 } from "../index.js";
 import { actor, apply, fixture, id, ports, value } from "./test-fixtures.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 const attachment = (n: number, card: number, mime = "image/png") =>
   ({
     id: `attachment-${n}`,
@@ -47,6 +53,7 @@ const params: RequestDecisionParams = {
   affected_work_items: [],
   blocking: false,
   decider: "human",
+  plain_summary: TEST_PLAIN_SUMMARY,
 };
 
 test("§6 C-95: a decision records referenced card attachments in display order", () => {

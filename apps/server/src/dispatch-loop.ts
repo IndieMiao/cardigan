@@ -1,5 +1,6 @@
 import type { Dispatcher } from "./dispatch.js";
 import { DEFAULT_SLOW_TICK_MS } from "./loop.js";
+import { profileSpan, profileTick } from "./tick-profile.js";
 
 export interface DispatchLoopOptions {
   dispatcher: Pick<Dispatcher, "tick">;
@@ -19,11 +20,16 @@ export interface DispatchLoop {
   stop(): Promise<void>;
 }
 
-/** No global signal handlers or Store ownership. Await stop() before closing host resources. */
-export function startDispatchLoop(options: DispatchLoopOptions): DispatchLoop {
-  const interval = options.intervalMs ?? 1000;
+/** Shared by the loop and monitor so startup keeps one interval validation contract. */
+export function dispatcherInterval(interval = 1000): number {
   if (!Number.isSafeInteger(interval) || interval < 1 || interval > 2147483647)
     throw new Error("Invalid dispatcher interval");
+  return interval;
+}
+
+/** No global signal handlers or Store ownership. Await stop() before closing host resources. */
+export function startDispatchLoop(options: DispatchLoopOptions): DispatchLoop {
+  const interval = dispatcherInterval(options.intervalMs);
   const slowTickMs = options.slowTickMs ?? DEFAULT_SLOW_TICK_MS;
   if (!Number.isFinite(slowTickMs) || slowTickMs <= 0)
     throw new Error("Invalid dispatcher slow tick threshold");
@@ -39,10 +45,17 @@ export function startDispatchLoop(options: DispatchLoopOptions): DispatchLoop {
       while (!stopping) {
         const started = performance.now();
         try {
-          options.monitor?.reconcile();
-          // One global tick preserves FIFO across projects and rechecks freed slots.
-          await options.dispatcher.tick();
-          if (!stopping) options.monitor?.reconcile();
+          await profileTick("dispatcher", async () => {
+            await profileSpan("monitor", async () =>
+              options.monitor?.reconcile(),
+            );
+            // One global tick preserves FIFO across projects and rechecks freed slots.
+            await options.dispatcher.tick();
+            if (!stopping)
+              await profileSpan("monitor", async () =>
+                options.monitor?.reconcile(),
+              );
+          });
         } catch (error) {
           options.onError(error);
         } finally {

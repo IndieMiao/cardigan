@@ -17,6 +17,24 @@ const envVarSchema = z
   .regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "not a valid environment variable name");
 
 const harnessSchema = z.enum(HARNESSES);
+const positiveMillis = z.number().int().positive().max(2_147_483_647);
+// Only a credential-free origin is accepted. Probes never send an HTTP request.
+const probeOrigin = z.string().refine((value) => {
+  try {
+    const url = new URL(value);
+    return (
+      ["http:", "https:"].includes(url.protocol) &&
+      !url.username &&
+      !url.password &&
+      !url.search &&
+      !url.hash &&
+      url.pathname === "/" &&
+      value === url.origin
+    );
+  } catch {
+    return false;
+  }
+}, "probe_url must be an http(s) origin without credentials, path, query or fragment");
 
 /**
  * Provider = "接入点": which harness it belongs to, the endpoint it talks to,
@@ -27,6 +45,9 @@ const providerSchema = z.strictObject({
   harness: harnessSchema,
   env: z.record(envVarSchema, z.string()).default({}),
   secret_env: z.record(envVarSchema, z.string().min(1)).default({}),
+  upstream: z
+    .strictObject({ group: nameSchema, probe_url: probeOrigin.optional() })
+    .optional(),
 });
 
 /**
@@ -77,6 +98,26 @@ const launchConfigSchema = z.strictObject({
   providers: z.record(nameSchema, providerSchema).default({}),
   profiles: z.record(nameSchema, profileSchema).default({}),
   browser: browserSchema.optional(),
+  upstream_health: z
+    .strictObject({
+      // No unapproved defaults: the host must explicitly set all probe timings.
+      probe: z
+        .strictObject({
+          interval_ms: positiveMillis,
+          timeout_ms: positiveMillis,
+          stale_after_ms: positiveMillis,
+        })
+        .optional(),
+      inactive_session_count: z
+        .number()
+        .int()
+        .positive()
+        .max(Number.MAX_SAFE_INTEGER)
+        .default(3),
+      inactivity_window_ms: positiveMillis.default(600_000),
+      recurrence_window_ms: positiveMillis.default(900_000),
+    })
+    .optional(),
 });
 
 export type ProviderDefinition = z.infer<typeof providerSchema>;

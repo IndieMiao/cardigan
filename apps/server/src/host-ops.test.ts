@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   type Assignment,
   acknowledgeRun,
@@ -14,11 +15,13 @@ import {
   queueRun,
   type Runtime,
   type ToolName,
+  upstreamIncident,
 } from "@cardigan/domain";
 import {
   HostOpsService,
   runCapacitySnapshot,
   scrubRunCredentials,
+  UpstreamHealthMonitor,
 } from "@cardigan/host";
 import {
   authenticate,
@@ -27,6 +30,8 @@ import {
   unwrap,
 } from "@cardigan/mcp-server";
 import {
+  compileAssignmentLaunch,
+  parseLaunchConfig,
   SECRETS_FILE_NAME,
   START_FILE_NAME,
   TOKEN_FILE_NAME,
@@ -106,7 +111,10 @@ beforeEach(() => {
     clock: f.clock,
   });
 });
-afterEach(() => f.close());
+afterEach(async () => {
+  await service.close();
+  f.close();
+});
 async function call(
   name: (typeof HOST_OPS_TOOLS)[number],
   input: object,
@@ -630,17 +638,22 @@ test("pending terminal stop retains capacity if business cancellation finishes t
   f.store.uow.run((tx) =>
     tx.runs.put(f.project, { ...run, status: "cancelled" }),
   );
-  expect(
-    f.store.uow.read((tx) =>
-      runCapacitySnapshot(f.store, tx).occupied.get("local"),
-    ),
-  ).toBe(1);
+  // C-216: host-ops actions come from the Store's cached event streams; a
+  // backend without that port re-reads each stream. Both must agree.
+  const occupied = () =>
+    f.store.uow.read((tx) => {
+      expect(tx.events.listStreams).toBeTypeOf("function");
+      const cached = runCapacitySnapshot(f.store, tx).occupied.get("local");
+      const fallback = runCapacitySnapshot(f.store, {
+        ...tx,
+        events: { listAfter: tx.events.listAfter },
+      }).occupied.get("local");
+      expect(cached).toBe(fallback);
+      return cached;
+    });
+  expect(occupied()).toBe(1);
   await service.tick();
-  expect(
-    f.store.uow.read((tx) =>
-      runCapacitySnapshot(f.store, tx).occupied.get("local"),
-    ),
-  ).toBe(0);
+  expect(occupied()).toBe(0);
 });
 
 test("credential cleanup failures remain recoverable without exposing host errors or launching a new Run", async () => {
@@ -688,7 +701,7 @@ test("credential cleanup failures remain recoverable without exposing host error
   ).toHaveLength(1);
 });
 
-test("delivery failures stay read-only and outside patrol work; context estimates are labelled", async () => {
+test("delivery failures stay read-only and outside patrol work; missing context is stale", async () => {
   const { run } = dispatched();
   f.store.uow.run((tx) =>
     tx.events.append(f.project, {
@@ -708,8 +721,10 @@ test("delivery failures stay read-only and outside patrol work; context estimate
   expect(diagnostics).toMatchObject({
     sessions: expect.arrayContaining([
       expect.objectContaining({
-        context_usage_estimated: true,
-        context_usage_threshold_pct: 80,
+        context_usage_estimated: false,
+        context_tokens: null,
+        stale: true,
+        status: "missing",
       }),
     ]),
   });
@@ -717,11 +732,11 @@ test("delivery failures stay read-only and outside patrol work; context estimate
     false,
   );
   expect(
-    resolveServerConfig({ CARDIGAN_HOST_OPS_CONTEXT_THRESHOLD_PCT: "65" })
-      .hostOpsContextThresholdPct,
-  ).toBe(65);
+    resolveServerConfig({ CARDIGAN_CONTEXT_USAGE_STALE_AFTER_MS: "65000" })
+      .contextUsageStaleAfterMs,
+  ).toBe(65000);
   expect(() =>
-    resolveServerConfig({ CARDIGAN_HOST_OPS_CONTEXT_THRESHOLD_PCT: "101" }),
+    resolveServerConfig({ CARDIGAN_CONTEXT_USAGE_STALE_AFTER_MS: "-1" }),
   ).toThrow();
 });
 
@@ -819,4 +834,787 @@ test("a delayed credential scrub cannot outlive takeover and delete the replacem
     await first;
     reopened.close();
   }
+});
+
+test.each(["codex", "pi"] as const)(
+  "%s context patrol delivers handoff once, guards restart and observes fresh replacement usage (simulated)",
+  async (harness) => {
+    const { assignment, run, card } = dispatched();
+    const execution = { mode: "local" as const, dataDir: f.dataDir };
+    const { runDir } = executionPaths(execution, f.project, assignment.id);
+    f.store.uow.run((tx) => {
+      const stored = tx.runs.get(f.project, run.id);
+      if (!stored) throw new Error("Missing fixture Run");
+      tx.runs.put(f.project, { ...stored, harness });
+    });
+    service = new HostOpsService({
+      store: f.store,
+      runtime,
+      snapshot: async () => ({ ...(await snapshot()), harness }),
+      clock: f.clock,
+      contextUsage: { execution, staleAfterMs: 60000 },
+    });
+    const sample = async (id: string, tokens: number) => {
+      const dir =
+        harness === "codex"
+          ? join(runDir, "codex", "sessions")
+          : join(runDir, "pi", "context-usage");
+      await mkdir(dir, { recursive: true });
+      const text =
+        harness === "codex"
+          ? [
+              { type: "session_meta", payload: { id, cwd: runDir } },
+              {
+                type: "event_msg",
+                timestamp: f.clock.now(),
+                payload: {
+                  type: "token_count",
+                  info: {
+                    last_token_usage: { total_tokens: tokens },
+                    total_token_usage: { total_tokens: 1000000 },
+                    model_context_window: 1000,
+                  },
+                },
+              },
+            ]
+              .map((v) => JSON.stringify(v))
+              .join("\n")
+          : JSON.stringify({
+              agent: "pi",
+              session_id: id,
+              cwd: runDir,
+              model: "fixture",
+              context_tokens: tokens,
+              context_window_size: 1000,
+              used_percentage: tokens / 10,
+              updated_at: f.clock.now(),
+            });
+      await writeFile(
+        join(
+          dir,
+          harness === "codex" ? `rollout-${id}.jsonl` : `pi-${id}.json`,
+        ),
+        text,
+      );
+    };
+    await sample("session-1", 800);
+    // Reading diagnostics remains read-only.
+    expect(await call("host_ops_read_diagnostics", {})).toMatchObject({
+      context_thresholds: {
+        handoff_remaining_pct: 20,
+        restart_remaining_pct: 15,
+      },
+      sessions: expect.arrayContaining([
+        expect.objectContaining({
+          assignment_id: assignment.id,
+          context_tokens: 800,
+          level: "handoff",
+        }),
+      ]),
+    });
+    expect(
+      f.state().events.filter((e) => e.type === "context_usage_notice"),
+    ).toHaveLength(0);
+    await service.tick();
+    const notices = () =>
+      f.state().events.filter((e) => e.type === "context_usage_notice");
+    expect(notices()).toHaveLength(1);
+    expect(
+      f.store
+        .listNotifications({ project_id: f.project })
+        .some(
+          (n) =>
+            n.event_id === notices()[0]?.id &&
+            n.recipient.kind === "assignment" &&
+            n.recipient.assignment_id === assignment.id &&
+            n.card_id === card.id,
+        ),
+    ).toBe(true);
+    const request = {
+      assignment_id: assignment.id,
+      context_session_id: "session-1",
+      reason: "Context low; handoff recorded",
+      idempotency_key: "context-restart",
+    };
+    await expect(
+      call("host_ops_restart_assignment", request),
+    ).rejects.toMatchObject({ code: "stale_target" });
+    f.advance(30000);
+    await sample("session-1", 850);
+    await service.tick();
+    expect(notices()).toHaveLength(2);
+    await call("host_ops_restart_assignment", request);
+    await service.tick();
+    expect(runtime.release).toHaveBeenCalledTimes(1);
+    const replacement = f
+      .state()
+      .runs.find(
+        (r) => r.assignment_id === assignment.id && r.status === "queued",
+      );
+    expect(replacement).toBeDefined();
+    expect(
+      f.state().assignments.find((a) => a.id === assignment.id)?.session_ref,
+    ).toBeUndefined();
+    await expect(
+      call("host_ops_restart_assignment", {
+        ...request,
+        idempotency_key: "different-key",
+      }),
+    ).rejects.toBeDefined();
+    f.advance(1000);
+    await sample("session-2", 0);
+    expect(await call("host_ops_read_diagnostics", {})).toMatchObject({
+      sessions: expect.arrayContaining([
+        expect.objectContaining({
+          assignment_id: assignment.id,
+          session_id: "session-2",
+          context_tokens: 0,
+          used_percentage: 0,
+          level: null,
+        }),
+      ]),
+    });
+    const finished = f
+      .state()
+      .events.find((e) => e.type === "host_ops_action_finished");
+    expect(finished?.payload).toMatchObject({
+      context_usage: { session_id: "session-1", used_percentage: 85 },
+      result: "new_session_queued",
+    });
+  },
+);
+
+test("pi high watermark becomes non-actionable immediately when the installed extension reports unknown usage", async () => {
+  const { assignment, run } = dispatched();
+  const execution = { mode: "local" as const, dataDir: f.dataDir };
+  const { runDir } = executionPaths(execution, f.project, assignment.id);
+  f.store.uow.run((tx) => {
+    const stored = tx.runs.get(f.project, run.id);
+    if (!stored) throw new Error("Missing fixture Run");
+    tx.runs.put(f.project, { ...stored, harness: "pi" });
+  });
+  const compiled = compileAssignmentLaunch({
+    assignment: { assignment_id: assignment.id, run_id: run.id },
+    role: {
+      role_id: "coder",
+      harness: "pi",
+      launch_profile: "fixture",
+      worktree: "none",
+      allowed_tools: [],
+      core_prompt: "fixture",
+    },
+    launch: parseLaunchConfig({
+      profiles: { fixture: { harness: "pi", model: "fixture" } },
+    }),
+    mcp: { url: "http://localhost/mcp" },
+    run_dir: runDir,
+    work_dir: runDir,
+    first_prompt: "fixture",
+    secrets: {},
+  });
+  const extension = compiled.files.find((file) =>
+    file.path.endsWith("cardigan-context-usage.js"),
+  );
+  if (!extension) throw new Error("Missing generated pi extension");
+  await mkdir(join(runDir, "pi"), { recursive: true });
+  const script = join(runDir, "pi", "context-fixture.mjs");
+  await writeFile(script, extension.content);
+  let onTurnEnd: (event: unknown, ctx: unknown) => Promise<void> =
+    async () => {};
+  (await import(pathToFileURL(script).href)).default({
+    on: (event: string, callback: typeof onTurnEnd) => {
+      expect(event).toBe("turn_end");
+      onTurnEnd = callback;
+    },
+  });
+  service = new HostOpsService({
+    store: f.store,
+    runtime,
+    snapshot,
+    clock: f.clock,
+    contextUsage: { execution },
+  });
+  vi.stubEnv("PI_CODING_AGENT_DIR", join(runDir, "pi"));
+  vi.useFakeTimers({ toFake: ["Date"] });
+  try {
+    vi.setSystemTime(new Date(f.clock.now()));
+    const ctx = {
+      cwd: runDir,
+      model: { id: "fixture" },
+      sessionManager: {
+        getSessionId: () => "same-session",
+        getSessionFile: () => undefined,
+      },
+    };
+    await onTurnEnd(
+      {},
+      {
+        ...ctx,
+        getContextUsage: () => ({
+          tokens: 850,
+          contextWindow: 1000,
+          percent: 85,
+        }),
+      },
+    );
+    expect(await call("host_ops_read_diagnostics", {})).toMatchObject({
+      sessions: expect.arrayContaining([
+        expect.objectContaining({
+          assignment_id: assignment.id,
+          status: "fresh",
+          used_percentage: 85,
+          level: "restart",
+        }),
+      ]),
+    });
+    f.advance(1000);
+    vi.setSystemTime(new Date(f.clock.now()));
+    await onTurnEnd(
+      {},
+      {
+        ...ctx,
+        getContextUsage: () => ({
+          tokens: null,
+          contextWindow: 1000,
+          percent: null,
+        }),
+      },
+    );
+    expect(await call("host_ops_read_diagnostics", {})).toMatchObject({
+      sessions: expect.arrayContaining([
+        expect.objectContaining({
+          assignment_id: assignment.id,
+          session_id: "same-session",
+          updated_at: f.clock.now(),
+          status: "missing",
+          stale: true,
+          used_percentage: null,
+          level: null,
+        }),
+      ]),
+    });
+    await service.tick();
+    expect(
+      f.state().events.some((e) => e.type === "context_usage_notice"),
+    ).toBe(false);
+    await expect(
+      call("host_ops_restart_assignment", {
+        assignment_id: assignment.id,
+        context_session_id: "same-session",
+        reason: "Previous sample was high",
+        idempotency_key: "unknown-pi-context",
+      }),
+    ).rejects.toMatchObject({ code: "stale_target" });
+    expect(runtime.release).not.toHaveBeenCalled();
+    expect(
+      f.state().events.some((e) => e.type === "host_ops_action_taken"),
+    ).toBe(false);
+  } finally {
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
+  }
+});
+
+function upstreamService(probeConfigured = true) {
+  let reachable = true;
+  const config = parseLaunchConfig({
+    providers: {
+      relay: {
+        harness: "pi",
+        upstream: {
+          group: "relay",
+          probe_url: "https://gateway.example.invalid",
+        },
+      },
+    },
+    profiles: { fixture: { harness: "pi", provider: "relay" } },
+    ...(probeConfigured
+      ? {
+          upstream_health: {
+            probe: { interval_ms: 100, timeout_ms: 20, stale_after_ms: 200 },
+          },
+        }
+      : {}),
+  });
+  const monitor = new UpstreamHealthMonitor(
+    config,
+    runtime,
+    f.clock,
+    async () =>
+      reachable
+        ? { status: "reachable" }
+        : { status: "unreachable", failure: "connection_error" },
+  );
+  f.store.uow.run((tx) => {
+    for (const run of tx.runs.list(f.project))
+      tx.runs.put(f.project, { ...run, launch_profile_ref: "fixture" });
+  });
+  service = new HostOpsService({
+    store: f.store,
+    runtime,
+    snapshot,
+    clock: f.clock,
+    upstreamMonitor: monitor,
+  });
+  return {
+    monitor,
+    sample: async (healthy: boolean) => {
+      reachable = healthy;
+      f.advance(100);
+      monitor.schedule();
+      await vi.waitFor(() =>
+        expect(monitor.diagnostics(f.state()).providers[0]?.status).toBe(
+          healthy ? "reachable" : "unreachable",
+        ),
+      );
+    },
+  };
+}
+function markInactive(assignment: Assignment, runId: string) {
+  f.store.uow.run((tx) =>
+    tx.events.append(f.project, {
+      id: tx.ids.nextEventId(),
+      seq: tx.ids.nextEventSequence(f.project),
+      type: "run_inactive",
+      actor: { kind: "system", project_id: f.project },
+      created_at: f.clock.now(),
+      payload: {
+        assignment_id: assignment.id,
+        run_id: runId,
+        reason: "mcp_inactivity",
+      },
+    }),
+  );
+}
+
+test("C-213: a failed probe blocks a restart without stopping a terminal", async () => {
+  const target = dispatched();
+  const { sample } = upstreamService();
+  await sample(false);
+  const view = (await call("host_ops_read_diagnostics", {})) as {
+    upstream_health: { sessions: unknown[] };
+  };
+  expect(view.upstream_health.sessions).toContainEqual(
+    expect.objectContaining({
+      assignment_id: target.assignment.id,
+      cause: "upstream_unreachable",
+      action: "wait",
+    }),
+  );
+  await expect(
+    call("host_ops_restart_assignment", {
+      assignment_id: target.assignment.id,
+      reason: "recover",
+      idempotency_key: "outage",
+    }),
+  ).rejects.toThrow("upstream_unreachable");
+  expect(runtime.release).not.toHaveBeenCalled();
+  expect(f.state().human_actions).toHaveLength(1);
+  await service.close();
+});
+
+test("C-213: an upstream incident never withdraws an explicit Run cancellation", async () => {
+  const target = dispatched();
+  const { sample } = upstreamService();
+  await sample(false);
+  await call("host_ops_read_diagnostics", {});
+  expect(upstreamIncident(f.state(), "relay")).toBeDefined();
+  await call("host_ops_cancel_run", {
+    run_id: target.run.id,
+    reason: "stop this Run explicitly",
+    idempotency_key: "cancel-during-outage",
+  });
+  expect(hostOpsPending(f.state().events, target.assignment.id)).toBe(true);
+  await service.tick();
+  expect(runtime.release).toHaveBeenCalledTimes(1);
+  expect(f.state().runs.find((r) => r.id === target.run.id)?.status).toBe(
+    "cancelled",
+  );
+  expect(
+    f.state().runs.filter((r) => r.assignment_id === target.assignment.id),
+  ).toHaveLength(1);
+  expect(hostOpsPending(f.state().events, target.assignment.id)).toBe(false);
+  expect(
+    f.state().events.filter((e) => e.type === "host_ops_action_finished"),
+  ).not.toContainEqual(
+    expect.objectContaining({
+      payload: expect.objectContaining({
+        result: "withdrawn_upstream_changed",
+      }),
+    }),
+  );
+  await service.close();
+});
+
+test("C-213: patrol observes working sessions before clustering, without waiting in the global tick", async () => {
+  for (let n = 0; n < 3; n++) f.session(f.create().assignment, false);
+  const { monitor } = upstreamService(false);
+  f.advance(15 * 60_000);
+  await new Dispatcher({
+    store: f.store,
+    runtime,
+    snapshot,
+    clock: f.clock,
+  }).tick();
+  expect(
+    f.state().events.filter((e) => e.type === "run_inactive"),
+  ).toHaveLength(3);
+  let finish!: (value: Awaited<ReturnType<Runtime["status"]>>) => void;
+  const observation = new Promise<Awaited<ReturnType<Runtime["status"]>>>(
+    (resolve) => {
+      finish = resolve;
+    },
+  );
+  vi.mocked(runtime.status).mockClear().mockReturnValue(observation);
+  const reconcile = vi.spyOn(monitor, "reconcile");
+  try {
+    await service.tick();
+    expect(runtime.status).toHaveBeenCalledTimes(3);
+    expect(reconcile).not.toHaveBeenCalled();
+    expect(upstreamIncident(f.state(), "relay")).toBeUndefined();
+    await service.tick();
+    expect(runtime.status).toHaveBeenCalledTimes(3);
+    f.advance(1);
+  } finally {
+    finish({
+      ok: true,
+      value: { process: "alive", agent: "working", observed_seq: 1 },
+    });
+  }
+  await vi.waitFor(() => expect(reconcile).toHaveBeenCalledTimes(1));
+  expect(upstreamIncident(f.state(), "relay")).toBeUndefined();
+  expect(f.state().human_actions).toEqual([]);
+  expect(
+    monitor
+      .diagnostics(f.state())
+      .sessions.filter((s) => s.cause === "agent_busy"),
+  ).toHaveLength(3);
+  // No read-diagnostics request was needed to protect a later patrol either.
+  f.advance(1_000);
+  await service.tick();
+  await vi.waitFor(() => expect(reconcile).toHaveBeenCalledTimes(2));
+  expect(f.state().human_actions).toEqual([]);
+  await service.close();
+});
+
+test("C-213: a failed stop-time observation defers recovery and continues other operations", async () => {
+  const target = dispatched();
+  const other = dispatched();
+  const { monitor, sample } = upstreamService();
+  markInactive(target.assignment, target.run.id);
+  await sample(true);
+  await call("host_ops_restart_assignment", {
+    assignment_id: target.assignment.id,
+    reason: "recover",
+    idempotency_key: "observation-race",
+  });
+  await call("host_ops_cancel_run", {
+    run_id: other.run.id,
+    reason: "cancel another Run",
+    idempotency_key: "independent-cancel",
+  });
+  const observe = monitor.observe.bind(monitor);
+  vi.spyOn(monitor, "observe").mockImplementation((state, only) => {
+    if (only === target.assignment.id)
+      return Promise.reject(new Error("private observation failure"));
+    return observe(state, only);
+  });
+  await expect(service.tick()).resolves.toBeUndefined();
+  expect(f.state().runs.find((r) => r.id === target.run.id)?.status).toBe(
+    "dispatched",
+  );
+  expect(f.state().runs.find((r) => r.id === other.run.id)?.status).toBe(
+    "cancelled",
+  );
+  expect(runtime.release).toHaveBeenCalledTimes(1);
+  expect(f.state().events).toContainEqual(
+    expect.objectContaining({
+      type: "host_ops_action_deferred",
+      payload: expect.objectContaining({
+        reason: "upstream_observation_failed",
+      }),
+    }),
+  );
+  expect(JSON.stringify(f.state().events)).not.toContain(
+    "private observation failure",
+  );
+});
+
+test("C-213: dormant sessions do not keep recovered outages or their human notices open", async () => {
+  const active = f.create().assignment;
+  const dormant = f.create().assignment;
+  f.session(active, false);
+  f.session(dormant, true);
+  const { sample } = upstreamService();
+  await sample(false);
+  await call("host_ops_read_diagnostics", {});
+  const first = upstreamIncident(f.state(), "relay");
+  expect(first?.assignment_ids).toEqual([active.id]);
+  f.advance(600_000);
+  await sample(true);
+  expect(f.store.touchAssignmentActivity(f.project, active.id)).toBe(true);
+  await call("host_ops_read_diagnostics", {});
+  expect(upstreamIncident(f.state(), "relay")).toBeUndefined();
+  expect(f.state().human_actions.filter((h) => h.status === "open")).toEqual(
+    [],
+  );
+  expect(runtime.release).not.toHaveBeenCalled();
+  await sample(false);
+  await call("host_ops_read_diagnostics", {});
+  expect(upstreamIncident(f.state(), "relay")?.id).not.toBe(first?.id);
+  expect(upstreamIncident(f.state(), "relay")?.assignment_ids).toEqual([
+    active.id,
+  ]);
+  await service.close();
+});
+
+test("C-213: line failure after accepting a restart is rechecked before stopping; the old request is withdrawn", async () => {
+  const target = dispatched();
+  const { sample } = upstreamService();
+  markInactive(target.assignment, target.run.id);
+  await sample(true);
+  await call("host_ops_restart_assignment", {
+    assignment_id: target.assignment.id,
+    reason: "single idle session",
+    idempotency_key: "before-outage",
+  });
+  expect(hostOpsPending(f.state().events, target.assignment.id)).toBe(true);
+  await sample(false);
+  await service.tick();
+  expect(runtime.release).not.toHaveBeenCalled();
+  expect(hostOpsPending(f.state().events, target.assignment.id)).toBe(false);
+  expect(f.state().events).toContainEqual(
+    expect.objectContaining({
+      type: "host_ops_action_finished",
+      payload: expect.objectContaining({
+        result: "withdrawn_upstream_changed",
+      }),
+    }),
+  );
+  await service.close();
+});
+
+test("C-213: runtime work is not classified as a stuck Agent merely because MCP has been quiet", async () => {
+  const target = dispatched();
+  const { sample } = upstreamService();
+  markInactive(target.assignment, target.run.id);
+  vi.mocked(runtime.status).mockResolvedValue({
+    ok: true,
+    value: { process: "alive", agent: "working", observed_seq: 2 },
+  });
+  await sample(true);
+  const view = (await call("host_ops_read_diagnostics", {})) as {
+    upstream_health: { sessions: unknown[] };
+  };
+  expect(view.upstream_health.sessions).toContainEqual(
+    expect.objectContaining({
+      assignment_id: target.assignment.id,
+      cause: "agent_busy",
+      action: "none",
+    }),
+  );
+  await expect(
+    call("host_ops_restart_assignment", {
+      assignment_id: target.assignment.id,
+      reason: "MCP quiet",
+      idempotency_key: "busy",
+    }),
+  ).rejects.toThrow("agent_busy");
+  expect(runtime.release).not.toHaveBeenCalled();
+  await service.close();
+});
+
+test("C-213: recovered lines permit one restart per session", async () => {
+  const targets = [dispatched(), dispatched(), dispatched()];
+  const first = targets[0];
+  const witness = targets[2];
+  if (!first || !witness) throw new Error("Missing fixture targets");
+  const { sample } = upstreamService();
+  for (const target of targets) markInactive(target.assignment, target.run.id);
+  await sample(true);
+  await call("host_ops_read_diagnostics", {});
+  expect(
+    f.state().events.filter((e) => e.type === "upstream_incident_started"),
+  ).toHaveLength(1);
+  const restart = (key: string) =>
+    call("host_ops_restart_assignment", {
+      assignment_id: first.assignment.id,
+      reason: "recover the affected session",
+      idempotency_key: key,
+    });
+  await expect(restart("too-soon")).rejects.toThrow("upstream_suspected");
+  f.advance(600_000);
+  await expect(restart("no-witness")).rejects.toThrow("upstream_suspected");
+  f.store.uow.run((tx) => {
+    const current = tx.assignments.get(f.project, witness.assignment.id);
+    if (!current) throw new Error("Missing witness");
+    tx.assignments.put(f.project, {
+      ...current,
+      last_mcp_activity_at: f.clock.now(),
+    });
+  });
+  await restart("recover-once");
+  await service.tick();
+  expect(runtime.release).toHaveBeenCalledTimes(1);
+  await expect(restart("duplicate")).rejects.toThrow(
+    "recovery_already_requested",
+  );
+  await service.close();
+});
+
+test.each([
+  [5 * 60_000, "human"],
+  [15 * 60_000, "human"],
+  [15 * 60_000 + 1, "restart_once"],
+] as const)(
+  "C-213: real watchdog reports silence beginning %i ms after recovery as %s across service recreation",
+  async (lastActivityAfterMs, action) => {
+    const { assignment } = f.create();
+    const original = f.session(assignment, false);
+    const { sample } = upstreamService();
+    await sample(true);
+    const dispatcher = new Dispatcher({
+      store: f.store,
+      runtime,
+      snapshot,
+      clock: f.clock,
+    });
+    f.advance(15 * 60_000);
+    await dispatcher.tick();
+    expect(f.state().events).toContainEqual(
+      expect.objectContaining({
+        type: "run_inactive",
+        payload: expect.objectContaining({ run_id: original.id }),
+      }),
+    );
+    const restart = (key: string) =>
+      call("host_ops_restart_assignment", {
+        assignment_id: assignment.id,
+        reason: "recover the inactive session",
+        idempotency_key: key,
+      });
+    await restart("initial-recovery");
+    await service.tick();
+    const recoveredAt = f.clock.now();
+    expect(runtime.release).toHaveBeenCalledTimes(1);
+    const nextRun = f
+      .state()
+      .runs.find(
+        (r) => r.assignment_id === assignment.id && r.id !== original.id,
+      );
+    if (!nextRun) throw new Error("Recovery did not queue a replacement");
+    // Include a real dispatch delay and start the replacement via domain commands.
+    alive = true;
+    f.advance(1_000);
+    f.apply((s, a, p) =>
+      dispatchRun(
+        s,
+        a,
+        { run_id: nextRun.id, runtime_ref: f.refFor(assignment) },
+        p,
+      ),
+    );
+    f.apply(
+      (s, a, p) => acknowledgeRun(s, a, { run_id: nextRun.id }, p),
+      f.actorFor(assignment),
+    );
+    f.advance(lastActivityAfterMs - 1_000);
+    expect(f.store.touchAssignmentActivity(f.project, assignment.id)).toBe(
+      true,
+    );
+    f.advance(15 * 60_000 - 1);
+    await dispatcher.tick();
+    const alert = () =>
+      f
+        .state()
+        .events.find(
+          (e) =>
+            e.type === "run_inactive" &&
+            (e.payload as { run_id?: string }).run_id === nextRun.id,
+        );
+    expect(alert()).toBeUndefined();
+    f.advance(1);
+    await dispatcher.tick();
+    expect(alert()?.created_at).toBe(f.clock.now());
+    expect(Date.parse(f.clock.now()) - Date.parse(recoveredAt)).toBe(
+      lastActivityAfterMs + 15 * 60_000,
+    );
+    await service.close();
+    upstreamService();
+    const view = (await call("host_ops_read_diagnostics", {})) as {
+      upstream_health: { sessions: unknown[] };
+    };
+    expect(view.upstream_health.sessions).toContainEqual(
+      expect.objectContaining({
+        assignment_id: assignment.id,
+        action,
+      }),
+    );
+    if (action === "human") {
+      await expect(restart("recurred")).rejects.toThrow("复发须交人");
+      expect(
+        f.state().events.filter((e) => e.type === "upstream_recovery_recurred"),
+      ).toHaveLength(1);
+      expect(
+        f
+          .state()
+          .human_actions.some((h) =>
+            h.instructions.includes(`${assignment.id} 在恢复后`),
+          ),
+      ).toBe(true);
+    } else {
+      expect(
+        f.state().events.some((e) => e.type === "upstream_recovery_recurred"),
+      ).toBe(false);
+      await restart("later-stall");
+    }
+    const notices = f.state().human_actions.length;
+    await call("host_ops_read_diagnostics", {});
+    expect(f.state().human_actions).toHaveLength(notices);
+    expect(runtime.release).toHaveBeenCalledTimes(1);
+    await service.close();
+  },
+);
+
+test("C-213: an outage recovery is withdrawn when the target resumes before execution", async () => {
+  const target = dispatched();
+  const witness = dispatched();
+  const { sample } = upstreamService();
+  markInactive(target.assignment, target.run.id);
+  await sample(false);
+  await call("host_ops_read_diagnostics", {});
+  f.advance(600_000);
+  f.store.uow.run((tx) => {
+    const current = tx.assignments.get(f.project, witness.assignment.id);
+    if (!current) throw new Error("Missing witness");
+    tx.assignments.put(f.project, {
+      ...current,
+      last_mcp_activity_at: f.clock.now(),
+    });
+  });
+  await sample(true);
+  await call("host_ops_restart_assignment", {
+    assignment_id: target.assignment.id,
+    reason: "recover",
+    idempotency_key: "recover-before-resume",
+  });
+  f.advance(1);
+  f.store.uow.run((tx) => {
+    const current = tx.assignments.get(f.project, target.assignment.id);
+    if (!current) throw new Error("Missing target");
+    tx.assignments.put(f.project, {
+      ...current,
+      last_mcp_activity_at: f.clock.now(),
+    });
+  });
+  await service.tick();
+  expect(runtime.release).not.toHaveBeenCalled();
+  expect(hostOpsPending(f.state().events, target.assignment.id)).toBe(false);
+  expect(f.state().events).toContainEqual(
+    expect.objectContaining({
+      type: "host_ops_action_finished",
+      payload: expect.objectContaining({ result: "withdrawn_recovered" }),
+    }),
+  );
+  await service.close();
 });

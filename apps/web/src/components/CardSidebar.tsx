@@ -6,6 +6,7 @@ import { SUGGESTION_COPY } from "../suggestion-copy.js";
 import { DecisionAffectedCards } from "./DecisionAffectedCards.js";
 import { NextOwners } from "./EmployeeIdentity.js";
 import { EmptyState, IdTag, StatusTag } from "./Foundation.js";
+import { PlainSummary } from "./PlainSummary.js";
 
 export function CardSidebar({
   detail,
@@ -24,134 +25,143 @@ export function CardSidebar({
     routeHash({ kind: "card", projectId, cardId, anchor });
   return (
     <aside className="card-sidebar" aria-label="卡片概况">
-      <section aria-label="当前进度">
-        <dl className="questions">
-          <div>
-            <dt>进行到哪一步</dt>
-            <dd>
-              <StatusTag status={card.status} />
-              <span>
-                工作项 {completed}/{work_items.length} 完成
-              </span>
-            </dd>
-          </div>
-          <div>
-            <dt>下一步该谁做</dt>
-            <dd>
-              <NextOwners owners={card.next_owners} />
-            </dd>
-          </div>
-          <div>
-            <dt>被什么阻塞</dt>
-            <dd>
-              {card.waiting_on.length
-                ? card.waiting_on.map((w) => w.label).join("；")
-                : "没有被阻塞"}
-            </dd>
-          </div>
-        </dl>
-      </section>
-      <section aria-label="验收责任">
-        <details>
-          <summary>谁验收、依据是什么</summary>
-          <ul className="plain-list">
-            {work_items
-              .filter((w) => w.kind === "verify")
-              .map((w) => {
-                const latest = [...detail.review_matrix]
-                  .reverse()
-                  .find((r) => r.work_item_id === w.id);
-                return (
-                  <li key={w.id}>
-                    {w.role_id}：
-                    {latest?.verdict ? (
-                      <StatusTag status={latest.verdict} />
-                    ) : (
-                      "还没有结论"
+      <details>
+        <summary>卡片索引与关联</summary>
+        <section aria-label="当前进度">
+          <dl className="questions">
+            <div>
+              <dt>进行到哪一步</dt>
+              <dd>
+                <StatusTag status={card.status} />
+                <span>
+                  工作项 {completed}/{work_items.length} 完成
+                </span>
+              </dd>
+            </div>
+            <div>
+              <dt>下一步该谁做</dt>
+              <dd>
+                <NextOwners owners={card.next_owners} />
+              </dd>
+            </div>
+            <div>
+              <dt>被什么阻塞</dt>
+              <dd>
+                {card.waiting_on.length
+                  ? card.waiting_on.map((w) => w.label).join("；")
+                  : "没有被阻塞"}
+              </dd>
+            </div>
+          </dl>
+        </section>
+        <section aria-label="验收责任">
+          <details>
+            <summary>谁验收、依据是什么</summary>
+            <ul className="plain-list">
+              {work_items
+                .filter((w) => w.kind === "verify")
+                .map((w) => {
+                  const latest = [...detail.review_matrix]
+                    .reverse()
+                    .find((r) => r.work_item_id === w.id);
+                  return (
+                    <li key={w.id}>
+                      {w.role_id}：
+                      {latest?.verdict ? (
+                        <StatusTag status={latest.verdict} />
+                      ) : (
+                        "还没有结论"
+                      )}
+                      {w.completion_criteria.length > 0 &&
+                        `，依据 ${w.completion_criteria.join("；")}`}
+                    </li>
+                  );
+                })}
+            </ul>
+          </details>
+        </section>
+        {!!relations.decisions.length && (
+          <section aria-label="拍板">
+            <h2>拍板（{relations.decisions.length}）</h2>
+            <ul className="plain-list">
+              {relations.decisions.map((d) => (
+                <li
+                  key={d.id}
+                  id={
+                    detail.timeline.some((e) => e.decision_id === d.id)
+                      ? `decision-summary-${d.id}`
+                      : `decision-${d.id}`
+                  }
+                >
+                  <IdTag
+                    id={d.id}
+                    label="拍板"
+                    detail={d.question}
+                    href={link(`decision-${d.id}`)}
+                  />{" "}
+                  <StatusTag status={d.status} />
+                  {d.blocking &&
+                    ![
+                      "resolved",
+                      "withdrawn",
+                      "superseded",
+                      "revoked",
+                    ].includes(d.status) && <span>阻塞中</span>}
+                  <p>
+                    {decisionTitle(
+                      detail.decisions.find((q) => q.id === d.id) ?? d,
                     )}
-                    {w.completion_criteria.length > 0 &&
-                      `，依据 ${w.completion_criteria.join("；")}`}
-                  </li>
-                );
-              })}
-          </ul>
-        </details>
-      </section>
-      {!!relations.decisions.length && (
-        <section aria-label="拍板">
-          <h2>拍板（{relations.decisions.length}）</h2>
+                  </p>
+                  <OpenPlainSummary
+                    decision={detail.decisions.find((q) => q.id === d.id)}
+                  />
+                  <SuggestionLine
+                    decision={detail.decisions.find((q) => q.id === d.id)}
+                  />
+                  <DecisionAffectedCards
+                    decision={detail.decisions.find((q) => q.id === d.id)}
+                    projectId={projectId}
+                  />
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+        <section aria-label="关联">
+          <h2>关联</h2>
+          {!relations.cards.length && !relations.pull_requests.length && (
+            <EmptyState>没有关联卡片或 PR。</EmptyState>
+          )}
           <ul className="plain-list">
-            {relations.decisions.map((d) => (
-              <li
-                key={d.id}
-                id={
-                  detail.timeline.some((e) => e.decision_id === d.id)
-                    ? `decision-summary-${d.id}`
-                    : `decision-${d.id}`
-                }
-              >
+            {relations.cards.map((c) => (
+              <li key={c.id}>
                 <IdTag
-                  id={d.id}
-                  label="拍板"
-                  detail={d.question}
-                  href={link(`decision-${d.id}`)}
+                  id={c.id}
+                  label={c.title}
+                  href={routeHash({ kind: "card", projectId, cardId: c.id })}
                 />{" "}
-                <StatusTag status={d.status} />
-                {d.blocking &&
-                  !["resolved", "withdrawn", "superseded", "revoked"].includes(
-                    d.status,
-                  ) && <span>阻塞中</span>}
+                <StatusTag status={c.status} />
+              </li>
+            ))}
+          </ul>
+          <ul className="plain-list">
+            {relations.pull_requests.map((p) => (
+              <li key={p.delivery_id}>
+                {isHttpLink(p.pr_url) ? (
+                  <a href={p.pr_url} target="_blank" rel="noopener noreferrer">
+                    {p.pr_url}
+                  </a>
+                ) : (
+                  <span className="plain-url">{p.pr_url}</span>
+                )}
                 <p>
-                  {decisionTitle(
-                    detail.decisions.find((q) => q.id === d.id) ?? d,
-                  )}
+                  {p.work_item_id}（<StatusTag status={p.status} />）
                 </p>
-                <SuggestionLine
-                  decision={detail.decisions.find((q) => q.id === d.id)}
-                />
-                <DecisionAffectedCards
-                  decision={detail.decisions.find((q) => q.id === d.id)}
-                  projectId={projectId}
-                />
               </li>
             ))}
           </ul>
         </section>
-      )}
-      <section aria-label="关联">
-        <h2>关联</h2>
-        {!relations.cards.length && !relations.pull_requests.length && (
-          <EmptyState>没有关联卡片或 PR。</EmptyState>
-        )}
-        <ul className="plain-list">
-          {relations.cards.map((c) => (
-            <li key={c.id}>
-              <IdTag
-                id={c.id}
-                label={c.title}
-                href={routeHash({ kind: "card", projectId, cardId: c.id })}
-              />{" "}
-              <StatusTag status={c.status} />
-            </li>
-          ))}
-        </ul>
-        <ul className="plain-list">
-          {relations.pull_requests.map((p) => (
-            <li key={p.delivery_id}>
-              {isHttpLink(p.pr_url) ? (
-                <a href={p.pr_url} target="_blank" rel="noopener noreferrer">
-                  {p.pr_url}
-                </a>
-              ) : (
-                <span className="plain-url">{p.pr_url}</span>
-              )}
-              <p>
-                {p.work_item_id}（<StatusTag status={p.status} />）
-              </p>
-            </li>
-          ))}
-        </ul>
-      </section>
+      </details>
     </aside>
   );
 }
@@ -173,7 +183,7 @@ export function CardWorkItems({
     routeHash({ kind: "card", projectId, cardId, anchor });
   return (
     <section className="card-section" aria-label="工作项">
-      <details className="work-items" open>
+      <details className="work-items">
         <summary>
           工作项（{completed}/{work_items.length} 完成）
         </summary>
@@ -257,5 +267,21 @@ function SuggestionLine({
         </>
       )}
     </p>
+  );
+}
+
+/** C-202: the plain summary of an open decision, first thing under its title. */
+function OpenPlainSummary({
+  decision,
+}: {
+  readonly decision: DecisionView | undefined;
+}) {
+  if (
+    !decision?.plain_summary ||
+    !["open", "provisional", "snoozed"].includes(decision.status)
+  )
+    return null;
+  return (
+    <PlainSummary id={decision.id} summary={decision.plain_summary} compact />
   );
 }

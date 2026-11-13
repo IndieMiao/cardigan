@@ -13,6 +13,12 @@ import {
 import { mergeFixture } from "./merge/test-fixtures.js";
 import { apply, human, value } from "./test-fixtures.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 /**
  * M5.T2 cross-acceptance for the human write path (plan phase-1-m5 §3.4, §3.5,
  * §3.6, M5.2). Oracles: the M5 plan and development plan §4.4, §4.5, §6.4, §8.2.
@@ -37,6 +43,7 @@ const question: Omit<RequestDecisionParams, "card_id"> = {
   affected_work_items: [],
   blocking: false,
   decider: "human",
+  plain_summary: TEST_PLAIN_SUMMARY,
 };
 
 /** A second card with its own work items, created and assigned through the domain. */
@@ -285,6 +292,7 @@ test("§3.6: the merge confirmation a human resolves is the decision `cardigan m
   expect(confirmation).toMatchObject({
     status: "open",
     decider: "human",
+    plain_summary: TEST_PLAIN_SUMMARY,
     card_id: f.card.id,
   });
   // The merge stays blocked until the human confirms, whichever surface they use.

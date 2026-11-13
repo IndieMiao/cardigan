@@ -59,6 +59,15 @@ export interface CommandPorts {
   readonly ids: IdAllocator;
   /** Host-provided template configuration, never MCP parameters. */
   readonly templates?: readonly CardTemplate[];
+  /** Host-only token row: authenticated request token, or its current row at settlement. Never MCP parameters. */
+  readonly run_token?: {
+    readonly id: string;
+    readonly project_id: I.ProjectId;
+    readonly assignment_id: I.AssignmentId;
+    readonly role_version: number;
+    readonly allowed_tools: readonly E.ToolName[];
+    readonly revoked_at: string | null;
+  };
 }
 export interface TokenRequest {
   readonly token_id: string;
@@ -82,6 +91,7 @@ type CommandName =
   | "pause_standing_assignment"
   | "rotate_standing_pm"
   | "create_host_ops_assignment"
+  | "rotate_host_ops_assignment"
   | "manage_host_ops_action"
   | "queue_run"
   | "dispatch_run"
@@ -92,6 +102,7 @@ type CommandName =
   | "manage_dispatch_stop"
   | "resolve_dispatch_attention"
   | "manage_inactive_run_stop"
+  | "settle_pending_run_finish"
   | "set_project_preferences"
   | "mark_notices_read"
   | "set_card_sensitive"
@@ -165,6 +176,33 @@ const keyOf = (entity: CommandEntities[keyof CommandEntities]) =>
       ? entity.id
       : `${entity.assignment_id}/${entity.card_id}`;
 
+/**
+ * C-230: per-snapshot key index for `CommandDraft.get`. Like C-221's
+ * `eventById`/`hasRunTarget`, it relies on command state collections being
+ * immutable snapshots: the Store's snapshot cache and every fixture build a new
+ * array on change and nothing mutates one in place, so an index keyed by array
+ * identity cannot go stale. Draft writes live in `changes` and are consulted
+ * first; a rolled-back transaction keeps reading its old array and old index.
+ */
+const NONE: readonly never[] = [];
+const stateIndexes = new WeakMap<
+  readonly object[],
+  ReadonlyMap<string, object>
+>();
+function stateIndex<T extends CommandEntities[keyof CommandEntities]>(
+  entities: readonly T[],
+): ReadonlyMap<string, T> {
+  let index = stateIndexes.get(entities);
+  if (!index) {
+    // Same as `new Map(entities.map((e) => [keyOf(e), e]))`: the last entry wins.
+    const map = new Map<string, T>();
+    for (const entity of entities) map.set(keyOf(entity), entity);
+    index = map;
+    stateIndexes.set(entities, index);
+  }
+  return index as ReadonlyMap<string, T>;
+}
+
 // A private draft: rejection never exposes a partially applied entity/event batch.
 export class CommandDraft {
   readonly changes: EntityChange[] = [];
@@ -199,6 +237,7 @@ export class CommandDraft {
     const systemOnly = [
       "manage_host_ops_action",
       "manage_inactive_run_stop",
+      "settle_pending_run_finish",
       "auto_confirm_merge",
       "expire_merge_snoozes",
       "recover_dispatch",
@@ -330,7 +369,18 @@ export class CommandDraft {
     collection: K,
     id: string,
   ): CommandEntities[K] {
-    const entity = this.list(collection).find((value) => keyOf(value) === id);
+    // C-230: same answer as `this.list(collection).find((v) => keyOf(v) === id)`
+    // without rebuilding the whole collection on every lookup. `list` keeps the
+    // last state entry per key, then the last change per key overrides it.
+    let entity: CommandEntities[K] | undefined;
+    for (let i = this.changes.length - 1; i >= 0 && !entity; i--) {
+      const change = this.changes[i] as EntityChange;
+      if (change.collection === collection && keyOf(change.entity) === id)
+        entity = change.entity as CommandEntities[K];
+    }
+    entity ??= stateIndex(
+      (this.state[collection] ?? NONE) as readonly CommandEntities[K][],
+    ).get(id);
     ensure(entity, "not_found", `${collection}:${id} was not found`);
     return entity;
   }

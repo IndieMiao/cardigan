@@ -17,6 +17,12 @@ import { afterEach, beforeEach, expect, test } from "vitest";
 import { stubGit } from "./git-test-support.js";
 import { type CardiganServer, startCardiganServer } from "./server.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 const PM_TOOLS = [
   "create_card",
   "update_card",
@@ -451,6 +457,7 @@ test("pm, coder and reviewer walk a dev card from creation to merge readiness", 
     idempotency_key: "e2e-completion",
     work_item_id: development.id,
     kind: "card_completion",
+    plain_summary: TEST_PLAIN_SUMMARY,
     summary: "fictional completion request",
     subject: { kind: "git_head", value: sha("b") },
     requested_verifiers: [acceptance.id],

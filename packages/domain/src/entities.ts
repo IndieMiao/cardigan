@@ -322,6 +322,14 @@ export type Assignment = AssignmentFields &
   );
 export type RunOutcome = "completed" | "blocked" | "failed";
 export interface Run {
+  /** Accepted while disconnected; only the host can settle it after confirming this session alive. */
+  readonly pending_finish?: {
+    readonly outcome: RunOutcome;
+    readonly summary: string;
+    readonly runtime_ref: RuntimeRef;
+    /** Actual authenticated token row ID, not Assignment.mcp_token_id's provisioning placeholder. */
+    readonly token_id: string;
+  };
   /** Durable automatic-stop fence; independent of bell delivery leases. */
   readonly dispatch_stop?: {
     readonly attempt_id: EventId;
@@ -450,6 +458,8 @@ export interface Delivery {
     readonly precondition?: string;
   }[];
   readonly requested_verifiers: readonly WorkItemId[];
+  /** C-202: required on card completions; carried into the merge confirmation. */
+  readonly plain_summary?: PlainSummary;
   /** Control-plane provenance; never accepted from submit_delivery parameters. */
   readonly merge_conflict_event_id?: EventId;
   readonly supersedes?: DeliveryId;
@@ -518,6 +528,16 @@ export interface DecisionSuggestion {
   readonly at: Timestamp;
   readonly basis: string;
 }
+/**
+ * C-202: plain-language summary shown above everything else on a decision
+ * handed to the human (and written by producers on completion requests).
+ * No internal IDs, commit hashes or interface names; `risk` is "无" when none.
+ */
+export interface PlainSummary {
+  readonly changed: string;
+  readonly impact: string;
+  readonly risk: string;
+}
 interface DecisionFields {
   readonly id: DecisionId;
   readonly key: DecisionId;
@@ -558,6 +578,11 @@ interface DecisionFields {
   readonly recommended: string;
   /** C-192: optional suggestion; absent keeps the decision UI unchanged. */
   readonly suggestion?: DecisionSuggestion;
+  /**
+   * C-202: required on every decision handed to the human from now on;
+   * absent on older decisions, which keep showing `context` as before.
+   */
+  readonly plain_summary?: PlainSummary;
   readonly latest_by?: Timestamp;
   readonly preconditions?: readonly string[];
   readonly affected_cards: readonly CardId[];

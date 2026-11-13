@@ -3,6 +3,7 @@ export * from "./avatar.js";
 export * from "./card-derived.js";
 export * from "./commands/attachments.js";
 export * from "./commands/auto-merge.js";
+export * from "./commands/context-usage.js";
 export * from "./commands/coordination.js";
 export type {
   CommandEffect,
@@ -27,6 +28,7 @@ export * from "./commands/dispatch-stop.js";
 export * from "./commands/employee.js";
 export * from "./commands/host-ops.js";
 export * from "./commands/host-ops-actions.js";
+export * from "./commands/host-ops-rotate.js";
 export * from "./commands/inactive-run.js";
 export * from "./commands/launch.js";
 export * from "./commands/member.js";
@@ -73,6 +75,15 @@ export {
 export * from "./commands/merge-result.js";
 export * from "./commands/merge-snooze.js";
 export * from "./commands/notices.js";
+export {
+  buildPlainSummary,
+  PLAIN_SUMMARY_LIMITS,
+  plainSummaryJargon,
+  plainSummaryNoRisk,
+  REVIEW_LIMIT_PLAIN_SUMMARY,
+  systemHandoffPlainSummary,
+  WORKTREE_CLEANUP_PLAIN_SUMMARY,
+} from "./commands/plain-summary.js";
 export * from "./commands/pm.js";
 export * from "./commands/pm-rotate.js";
 export * from "./commands/pre-merge-checks.js";
@@ -89,11 +100,14 @@ export * from "./commands/screenshot-check.js";
 export * from "./commands/sensitive.js";
 export { pauseStandingAssignment } from "./commands/standing.js";
 export * from "./commands/templates.js";
+export * from "./commands/upstream-health.js";
 export { canStartWork, workCompleted } from "./commands/workflow.js";
+export * from "./context-usage.js";
 export * from "./derived.js";
 export * from "./employee.js";
 export * from "./entities.js";
 export * from "./errors.js";
+export { eventById } from "./event-index.js";
 export * from "./git-port.js";
 export * from "./host-ops.js";
 export * from "./ids.js";
@@ -114,3 +128,4 @@ export * from "./standing.js";
 export * from "./states.js";
 export * from "./templates.js";
 export * from "./transitions.js";
+export * from "./upstream-health.js";

@@ -24,6 +24,7 @@ afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
   window.history.replaceState(null, "", "/");
+  document.documentElement.scrollTop = 0;
 });
 function detail(): CardDetail {
   const base = cardDetail();
@@ -183,7 +184,7 @@ test("U3 separates goal/checklist and sticky summary, with only identity/status/
   const sidebar = screen.getByRole("complementary", { name: "卡片概况" });
   for (const text of ["进行到哪一步", "下一步该谁做", "被什么阻塞"])
     expect(within(sidebar).getByText(text)).toBeTruthy();
-  const purpose = screen.getByRole("region", { name: "目标和验收标准" });
+  const purpose = screen.getByRole("group", { name: "目标和验收标准" });
   expect(purpose.textContent).toContain("测试通过");
   expect(purpose.querySelectorAll("li")).toHaveLength(2);
   // A globally accepted completion has no per-criterion mapping: no inferred ticks.
@@ -294,26 +295,24 @@ test("U3 combines only consecutive system records and explicit locations reveal 
   }
 });
 
-test("U3 opening scrolls the page to the latest entry; refresh keeps the reader's position and draft", async () => {
+test("C-205 opening keeps the decision header visible; refresh keeps position and draft", async () => {
   const scroll = vi.fn(),
     original = Element.prototype.scrollIntoView;
   Element.prototype.scrollIntoView = scroll;
   try {
+    document.documentElement.scrollTop = 640;
     const data = detail(),
       client = fakeClient({ card: async () => data });
     const view = render(
       <CardDetailPage client={client} projectId="p-1" cardId="C-1" />,
     );
     await screen.findByRole("region", { name: "时间线记录" });
-    await waitFor(() =>
-      expect(scroll).toHaveBeenCalledWith({ block: "start" }),
-    );
-    expect(scroll.mock.contexts.at(-1)).toBe(
-      document.getElementById("entry-C-1#6"),
-    );
+    expect(document.documentElement.scrollTop).toBe(0);
+    expect(scroll).not.toHaveBeenCalled();
     const before = scroll.mock.calls.length;
     const input = screen.getByRole("textbox", { name: /评论|内容/ });
     fireEvent.change(input, { target: { value: "Draft survives" } });
+    document.documentElement.scrollTop = 420;
     view.rerender(
       <CardDetailPage
         client={client}
@@ -324,9 +323,36 @@ test("U3 opening scrolls the page to the latest entry; refresh keeps the reader'
     );
     await act(async () => {});
     expect(scroll.mock.calls.length).toBe(before);
+    expect(document.documentElement.scrollTop).toBe(420);
     expect((input as HTMLTextAreaElement).value).toBe("Draft survives");
   } finally {
     Element.prototype.scrollIntoView = original;
+  }
+});
+
+test("C-205 opening a drawer resets only its own scroll container", async () => {
+  const root = document.createElement("div");
+  root.className = "drawer-body";
+  document.body.append(root);
+  root.scrollTop = 540;
+  document.documentElement.scrollTop = 240;
+  try {
+    render(
+      <StrictMode>
+        <CardDetailPage
+          client={fakeClient({ card: async () => detail() })}
+          projectId="p-1"
+          cardId="C-1"
+          inDrawer
+        />
+      </StrictMode>,
+      { container: root },
+    );
+    await screen.findByRole("region", { name: "时间线记录" });
+    expect(root.scrollTop).toBe(0);
+    expect(document.documentElement.scrollTop).toBe(240);
+  } finally {
+    root.remove();
   }
 });
 
@@ -364,7 +390,7 @@ test("U5a embedded detail starts at the top but still follows an explicit anchor
   }
 });
 
-test("U3 initial page scrolling survives StrictMode and stops after interaction", async () => {
+test("C-205 explicit anchor scrolling survives StrictMode and stops after interaction", async () => {
   const callbacks: (() => void)[] = [],
     disconnects: ReturnType<typeof vi.fn>[] = [];
   const scroll = vi.fn(),
@@ -383,25 +409,32 @@ test("U3 initial page scrolling survives StrictMode and stops after interaction"
     },
   );
   try {
+    document.documentElement.scrollTop = 480;
     render(
       <StrictMode>
         <CardDetailPage
           client={fakeClient({ card: async () => detail() })}
           projectId="p-1"
           cardId="C-1"
+          anchor="entry-C-1#6"
         />
       </StrictMode>,
     );
     await screen.findByRole("region", { name: "时间线记录" });
     await waitFor(() => expect(scroll).toHaveBeenCalled());
-    const pending = callbacks.at(-1),
-      disconnect = disconnects.at(-1),
-      initial = scroll.mock.calls.length;
-    act(() => pending?.());
+    expect(document.documentElement.scrollTop).toBe(480);
+    const initial = scroll.mock.calls.length;
+    act(() => {
+      for (const callback of callbacks) callback();
+    });
     expect(scroll.mock.calls.length).toBe(initial + 1);
     fireEvent.wheel(window);
-    expect(disconnect).toHaveBeenCalled();
-    act(() => pending?.());
+    expect(
+      disconnects.some((disconnect) => disconnect.mock.calls.length > 0),
+    ).toBe(true);
+    act(() => {
+      for (const callback of callbacks) callback();
+    });
     expect(scroll.mock.calls.length).toBe(initial + 1);
   } finally {
     Element.prototype.scrollIntoView = original;

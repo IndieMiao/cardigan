@@ -17,6 +17,7 @@ import { buildCheckoutIdle } from "./build-checkouts.js";
 import type { ReconcileGit } from "./git.js";
 import { startTimerLoop, type TimerLoop } from "./loop.js";
 import { runSystemCommand, systemClock } from "./merge-loop.js";
+import { profileSpan, profileSpanSync } from "./tick-profile.js";
 
 /**
  * M4.4 release and worktree cleanup (plan §3.6, development plan §12.6).
@@ -75,9 +76,15 @@ export class CleanupExecutor {
   }
 
   private async project(project_id: ProjectId) {
-    this.releaseClosed(project_id);
+    // C-221: `cleanup.*` spans are timing only (no added await when off; the
+    // async ones wrap calls that were already awaited).
+    profileSpanSync("cleanup.release_closed", () =>
+      this.releaseClosed(project_id),
+    );
     // Re-read after releasing: released Assignments are what cleanup looks at.
-    const state = this.state(project_id);
+    const state = profileSpanSync("cleanup.state", () =>
+      this.state(project_id),
+    );
     // §12.6: a terminal whose exit is unconfirmed may still use its directories.
     const unconfirmed = new Set<string>();
     for (const assignment of state.assignments.filter(
@@ -89,7 +96,11 @@ export class CleanupExecutor {
     )) {
       // Terminal/token cleanup is independent of Git and runs on every sweep:
       // previous failures or incomplete external releases must be repaired.
-      if (!(await this.revokeAndReleaseTerminal(project_id, assignment))) {
+      if (
+        !(await profileSpan("cleanup.revoke_and_release", () =>
+          this.revokeAndReleaseTerminal(project_id, assignment),
+        ))
+      ) {
         unconfirmed.add(assignment.id);
         continue;
       }
@@ -97,9 +108,13 @@ export class CleanupExecutor {
         assignment.scope === "work_item" &&
         assignment.worktree_path !== undefined
       )
-        await this.settle(project_id, assignment);
+        await profileSpan("cleanup.settle", () =>
+          this.settle(project_id, assignment),
+        );
     }
-    await this.removeIdleBuilds(project_id, unconfirmed);
+    await profileSpan("cleanup.idle_builds", () =>
+      this.removeIdleBuilds(project_id, unconfirmed),
+    );
   }
 
   /**
@@ -188,12 +203,14 @@ export class CleanupExecutor {
     project_id: ProjectId,
     assignment: Assignment,
   ): Promise<boolean> {
-    for (const token of tokensForAssignment(
-      this.options.store.database,
-      project_id,
-      assignment.id,
-    ))
-      if (token.revoked_at === null) this.options.store.revokeToken(token.id);
+    profileSpanSync("cleanup.revoke_tokens", () => {
+      for (const token of tokensForAssignment(
+        this.options.store.database,
+        project_id,
+        assignment.id,
+      ))
+        if (token.revoked_at === null) this.options.store.revokeToken(token.id);
+    });
     const ref: RuntimeRef | undefined = assignment.runtime_ref ?? undefined;
     if (ref === undefined) return true;
     try {

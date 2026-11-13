@@ -3,6 +3,12 @@ import { expect, test } from "vitest";
 import type { CardDetail } from "../../../web/src/api.js";
 import { m5Cross, TEST_PASSWORD } from "../../test-support/m5-cross.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 test("U5b source cards and related titles resolve inside the project snapshot", async () => {
   const f = await m5Cross();
   try {
@@ -24,6 +30,7 @@ test("U5b source cards and related titles resolve inside the project snapshot", 
           affected_work_items: [],
           blocking: false,
           decider: "human",
+          plain_summary: TEST_PLAIN_SUMMARY,
         },
         p,
       ),

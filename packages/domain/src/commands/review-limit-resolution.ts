@@ -3,6 +3,7 @@ import type { DecisionId } from "../ids.js";
 import { transition } from "../transitions.js";
 import { type CommandDraft, ensure, text, unwrap } from "./core.js";
 import { delegationAllowed, delegationAuthority } from "./delegation.js";
+import { REVIEW_LIMIT_PLAIN_SUMMARY } from "./plain-summary.js";
 import { queueResumedRun, resumeWork } from "./resumption.js";
 
 export interface ReviewLimitResolution {
@@ -47,6 +48,8 @@ export function resolveReviewLimit(
       ...q,
       decider: "human",
       context: `${q.context}\n\n项目经理升级给你：${p.rationale}`,
+      // C-202: review-limit decisions raised before plain summaries get one.
+      plain_summary: q.plain_summary ?? { ...REVIEW_LIMIT_PLAIN_SUMMARY },
     });
     d.emit(
       "decision_requested",

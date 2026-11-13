@@ -7,6 +7,12 @@ import {
   pageDecisionHistory,
 } from "./decision-history.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 const rows = (n: number) =>
   Array.from({ length: n }, (_, i) => ({
     id: `Q-${String(i + 1).padStart(3, "0")}`,
@@ -110,6 +116,7 @@ test("GET /decision-history pages with limit and cursor and filters the whole hi
             options: [{ key: "go", description: "继续", impact: "推进当前卡" }],
             recommended: "go",
             decider: "human",
+            plain_summary: TEST_PLAIN_SUMMARY,
             affected_cards: [f.card.id],
             affected_work_items: [],
             blocking: false,

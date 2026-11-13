@@ -8,10 +8,15 @@ import {
 } from "../api.js";
 import { AttachmentGrid } from "../components/AttachmentGrid.js";
 import { CardActions } from "../components/CardActions.js";
-import { CardSource, RecentConclusions } from "../components/CardIntro.js";
+import {
+  CardRiskTags,
+  CardSource,
+  RecentConclusions,
+} from "../components/CardIntro.js";
 import { CardRecords } from "../components/CardRecords.js";
 import { CardSectionNav } from "../components/CardSectionNav.js";
 import { CardSidebar, CardWorkItems } from "../components/CardSidebar.js";
+import { CardStatusLine } from "../components/CardStatusLine.js";
 import { CardSuperseded } from "../components/CardSuperseded.js";
 import { CardTemplate } from "../components/CardTemplate.js";
 import {
@@ -24,10 +29,10 @@ import {
   IdTag,
   LongContent,
   PageTitle,
-  StatusTag,
   Time,
 } from "../components/Foundation.js";
 import { MergeBlockers } from "../components/MergeBlockers.js";
+import { DecisionContext, PlainSummary } from "../components/PlainSummary.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
 import { Timeline } from "../components/Timeline.js";
 import { TimelineControls } from "../components/TimelineControls.js";
@@ -241,9 +246,17 @@ function CardContent({
   const article = useRef<HTMLElement>(null);
   const commentBox = useRef<CommentBoxHandle>(null);
   const scroll = useRef<HTMLElement>(null),
-    initialTimeline = useRef(detail.timeline),
-    interacted = useRef(false),
     lastAnchor = useRef<string | undefined>(undefined);
+  const opened = useRef(false);
+  useEffect(() => {
+    if (opened.current) return;
+    opened.current = true;
+    if (anchor) return;
+    const root = inDrawer
+      ? article.current?.closest<HTMLElement>(".drawer-body")
+      : (document.scrollingElement ?? document.documentElement);
+    if (root) root.scrollTop = 0;
+  }, [anchor, inDrawer]);
   // Anchors may render before route filters settle. Follow their row while this
   // snapshot lays out, then stop on interaction or refresh; never move a reader
   // back to the latest entry on an unrelated SSE update.
@@ -251,11 +264,11 @@ function CardContent({
     const region = scroll.current;
     if (!region) return;
     let position: () => void;
+    let initial = true;
     if (anchor) {
       if (!anchorReady) return;
       const location = `${anchor}/${filters.type ?? ""}/${filters.author ?? ""}`;
-      if (lastAnchor.current === location) return;
-      interacted.current = true;
+      initial = lastAnchor.current !== location;
       position = () => {
         const target = document.getElementById(anchor);
         if (!target) return;
@@ -272,21 +285,15 @@ function CardContent({
         });
       };
     } else {
-      if (inDrawer) return;
+      // C-205: start at the decision summary; explicit timeline anchors still win.
       lastAnchor.current = undefined;
-      if (interacted.current || initialTimeline.current !== detail.timeline)
-        return;
-      position = () => {
-        region
-          .querySelector(".timeline > li")
-          ?.scrollIntoView?.({ block: "start" });
-      };
+      return;
     }
     let following = true;
     const settle = () => {
       if (following) position();
     };
-    settle();
+    if (initial) settle();
     const observer =
       typeof ResizeObserver === "undefined"
         ? undefined
@@ -294,7 +301,6 @@ function CardContent({
     observer?.observe(article.current ?? region);
     const stop = () => {
       following = false;
-      interacted.current = true;
       observer?.disconnect();
     };
     for (const event of ["wheel", "pointerdown", "keydown"])
@@ -305,14 +311,7 @@ function CardContent({
       for (const event of ["wheel", "pointerdown", "keydown"])
         window.removeEventListener(event, stop);
     };
-  }, [
-    anchor,
-    anchorReady,
-    detail.timeline,
-    filters.type,
-    filters.author,
-    inDrawer,
-  ]);
+  }, [anchor, anchorReady, filters.type, filters.author]);
   const card = detail.card;
   const cardPageClass = inDrawer ? "card-page card-page-drawer" : "card-page";
   const completion = [...detail.deliveries]
@@ -329,13 +328,13 @@ function CardContent({
       ["open", "provisional", "snoozed"].includes(q.status),
   );
   const sections = [
-    { id: sectionId("overview"), label: "概览" },
     ...(detail.merge_confirmations?.length || card.merge_check_blockers?.length
       ? [{ id: sectionId("merge"), label: "合并处理" }]
       : []),
     ...(suggested.length
       ? [{ id: sectionId("suggested"), label: SUGGESTION_COPY.cardSection }]
       : []),
+    { id: sectionId("overview"), label: "概览" },
     ...(detail.work_items.length
       ? [
           {
@@ -390,7 +389,6 @@ function CardContent({
             }
             description={
               <>
-                <StatusTag status={card.status} />
                 <CardSuperseded card={card} projectId={projectId} />
                 <span>
                   更新于 <Time value={detail.updated_at ?? card.created_at} />
@@ -398,6 +396,8 @@ function CardContent({
               </>
             }
           />
+          <CardStatusLine detail={detail} />
+          <CardRiskTags tags={card.risk_tags} />
           <CardTemplate
             key={card.id}
             detail={detail}
@@ -420,16 +420,76 @@ function CardContent({
           commentBox={commentBox}
           inDrawer={inDrawer}
         />
-        <section
+        {!!(
+          detail.merge_confirmations?.length ||
+          card.merge_check_blockers?.length
+        ) && (
+          <section
+            id={sectionId("merge")}
+            className="card-section card-merge"
+            aria-label="合并处理"
+          >
+            <h2 className="visually-hidden">合并处理</h2>
+            <MergeBlockers blockers={card.merge_check_blockers ?? []} />
+            {detail.merge_confirmations?.map((q) => (
+              <MergeConfirmation
+                key={q.id}
+                q={q}
+                client={client}
+                projectId={projectId}
+                done={reload}
+                elapsed={0}
+                inCardHeader
+              />
+            ))}
+          </section>
+        )}
+        {suggested.length > 0 && (
+          <section
+            id={sectionId("suggested")}
+            className="card-section"
+            aria-label={SUGGESTION_COPY.cardSection}
+          >
+            <h2>{SUGGESTION_COPY.cardSection}</h2>
+            {suggested.map((q) => (
+              <article
+                key={q.id}
+                className="needs-item"
+                aria-label={`拍板 ${q.id}`}
+              >
+                <h3 className="needs-question">{q.question}</h3>
+                <PlainSummary id={q.id} summary={q.plain_summary} />
+                <DecisionContext
+                  context={q.context}
+                  summary={q.plain_summary}
+                  legacy={null}
+                />
+                <SuggestedDecision
+                  q={q}
+                  client={client}
+                  projectId={projectId}
+                  done={reload}
+                />
+                <p className="hint">
+                  {SUGGESTION_COPY.otherOptions}
+                  <a href={routeHash({ kind: "needs-you", projectId })}>
+                    Needs You
+                  </a>
+                </p>
+              </article>
+            ))}
+          </section>
+        )}
+        <details
           id={sectionId("overview")}
           className="card-purpose"
           aria-label="目标和验收标准"
         >
-          <h2>目标</h2>
+          <summary>目标和验收标准</summary>
           <LongContent>
             <p>{card.goal}</p>
           </LongContent>
-          <details className="acceptance-criteria" open>
+          <details className="acceptance-criteria">
             <summary>验收标准（{card.acceptance_criteria.length} 项）</summary>
             <LongContent>
               <ul>
@@ -462,60 +522,7 @@ function CardContent({
             projectId={projectId}
             onLocate={onLocate}
           />
-        </section>
-        {!!(
-          detail.merge_confirmations?.length ||
-          card.merge_check_blockers?.length
-        ) && (
-          <section
-            id={sectionId("merge")}
-            className="card-section"
-            aria-label="合并处理"
-          >
-            <h2>合并处理</h2>
-            <MergeBlockers blockers={card.merge_check_blockers ?? []} />
-            {detail.merge_confirmations?.map((q) => (
-              <MergeConfirmation
-                key={`${q.id}/${q.status}/${q.merge_confirmation?.merge_check?.attempt_id ?? ""}`}
-                q={q}
-                client={client}
-                projectId={projectId}
-                done={reload}
-                elapsed={0}
-              />
-            ))}
-          </section>
-        )}
-        {suggested.length > 0 && (
-          <section
-            id={sectionId("suggested")}
-            className="card-section"
-            aria-label={SUGGESTION_COPY.cardSection}
-          >
-            <h2>{SUGGESTION_COPY.cardSection}</h2>
-            {suggested.map((q) => (
-              <article
-                key={q.id}
-                className="needs-item"
-                aria-label={`拍板 ${q.id}`}
-              >
-                <h3 className="needs-question">{q.question}</h3>
-                <SuggestedDecision
-                  q={q}
-                  client={client}
-                  projectId={projectId}
-                  done={reload}
-                />
-                <p className="hint">
-                  {SUGGESTION_COPY.otherOptions}
-                  <a href={routeHash({ kind: "needs-you", projectId })}>
-                    Needs You
-                  </a>
-                </p>
-              </article>
-            ))}
-          </section>
-        )}
+        </details>
         {!!detail.work_items.length && (
           <div id={sectionId("work")}>
             <CardWorkItems
@@ -526,13 +533,20 @@ function CardContent({
           </div>
         )}
         {!!(detail.deliveries.length || detail.reviews.length) && (
-          <div id={sectionId("records")}>
+          <details
+            id={sectionId("records")}
+            className="card-records-disclosure"
+          >
+            <summary>
+              交付与审核（{detail.deliveries.length + detail.reviews.length}{" "}
+              条）
+            </summary>
             <CardRecords
               detail={detail}
               projectId={projectId}
               onLocate={onLocate}
             />
-          </div>
+          </details>
         )}
         <section
           id={sectionId("timeline")}
@@ -582,14 +596,14 @@ function CardContent({
           </section>
         </section>
         {!!detail.attachments.length && (
-          <section
+          <details
             id={sectionId("attachments")}
             className="card-section"
             aria-label="附件"
           >
-            <h2>附件（{detail.attachments.length}）</h2>
+            <summary>附件（{detail.attachments.length}）</summary>
             <AttachmentGrid attachments={detail.attachments} />
-          </section>
+          </details>
         )}
       </div>
       <CardSidebar detail={detail} projectId={projectId} cardId={cardId} />

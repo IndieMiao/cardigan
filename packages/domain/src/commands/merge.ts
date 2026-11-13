@@ -301,6 +301,10 @@ function requestConfirmation(d: CommandDraft, card: Card, target: Delivery) {
     category: "general",
     question: `将 ${card.id} 合并到 ${card.base_branch}？`,
     context: sensitive ? `${target.summary}\n\n${sensitive}` : target.summary,
+    // C-202: the producer's plain change note; absent on older completions.
+    ...(target.plain_summary
+      ? { plain_summary: { ...target.plain_summary } }
+      : {}),
     options: [
       {
         key: "merge",
