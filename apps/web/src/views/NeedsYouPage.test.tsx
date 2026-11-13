@@ -10,11 +10,12 @@ import {
 } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { App } from "../App.js";
-import type {
-  NeedsDecision,
-  NeedsPage,
-  NoticesPage,
-  NoticeView,
+import {
+  ApiError,
+  type NeedsDecision,
+  type NeedsPage,
+  type NoticesPage,
+  type NoticeView,
 } from "../api.js";
 import { attachment, fakeClient } from "../testing/fixtures.js";
 import { writeFailures } from "../testing/write-errors.js";
@@ -676,6 +677,40 @@ test("hold requires a separate reason after cancelling the return form", async (
       undefined,
     ),
   );
+});
+
+test("C-196: a hold over the cap names the settings label, not the preference key", async () => {
+  const recordDecision = vi
+    .fn()
+    .mockRejectedValue(
+      new ApiError(
+        400,
+        "validation_failed",
+        "暂缓到期时间距现在不能超过 4320 分钟（merge-confirm-snooze-max）",
+      ),
+    );
+  render(
+    <NeedsYouPage
+      client={fakeClient({
+        needsYou: async () => page([merge()]),
+        recordDecision,
+      })}
+      projectId="p-1"
+    />,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "暂不合并" }));
+  fireEvent.change(screen.getByLabelText("暂缓原因（必填）"), {
+    target: { value: "等待核对" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "登记暂缓" }));
+  const alert = (await screen.findByRole("alert")).textContent ?? "";
+  expect(alert).toContain(
+    "暂缓到期时间距现在不能超过 4320 分钟（可在项目设置的“合并确认最长暂缓时长”中调整）",
+  );
+  expect(alert).not.toContain("merge-confirm-snooze-max");
+  expect(
+    (screen.getByLabelText("暂缓原因（必填）") as HTMLTextAreaElement).value,
+  ).toBe("等待核对");
 });
 
 test("execution results require text; errors preserve the draft for retry", async () => {
