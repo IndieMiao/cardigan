@@ -1,4 +1,8 @@
-import { ROLE_TOOL_ALLOWLISTS, validateRole } from "@cardigan/domain";
+import {
+  HOST_OPS_ROLE_TOOLS,
+  ROLE_TOOL_ALLOWLISTS,
+  validateRole,
+} from "@cardigan/domain";
 import { describe, expect, test } from "vitest";
 import {
   DEFAULT_ROLE_KINDS,
@@ -27,6 +31,27 @@ const BASE_TOOLS = [
   "request_decision",
   "upload_attachment",
 ];
+
+test("host operations keeps v3 outage safeguards and C-200 context guidance without new tools", () => {
+  const role = defaultRoleDefinition("host_ops", launch);
+  expect([...role.allowed_tools].sort()).toEqual(
+    [...HOST_OPS_ROLE_TOOLS].sort(),
+  );
+  const body = instructionsFor("host_ops");
+  for (const rule of [
+    "10 分钟内有 3 个及以上",
+    "先不重启",
+    "有会话恢复活动或新 Run 正常开始工作",
+    "每个会话只恢复一次",
+    "恢复后 15 分钟内再次失活",
+    "Agent 仍在改代码或跑测试时不能重启",
+    "context_session_id",
+    "20%",
+    "15%",
+    "审计",
+  ])
+    expect(body).toContain(rule);
+});
 
 describe("default role kinds (p2v-12 §2.3)", () => {
   test("every default role has an explicit kind", () => {

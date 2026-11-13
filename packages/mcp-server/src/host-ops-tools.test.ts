@@ -181,3 +181,27 @@ test.each([
     expect(execute).not.toHaveBeenCalled();
   },
 );
+
+test("callers cannot supply upstream probe evidence or a recovery incident", async () => {
+  const { c } = await client();
+  const result = await c.callTool({
+    name: "host_ops_restart_assignment",
+    arguments: {
+      assignment_id: "A-2",
+      reason: "Recover",
+      idempotency_key: "untrusted-evidence",
+      upstream_incident_id: "client-chosen",
+      probe_status: "reachable",
+    },
+  });
+  expect(result.isError).not.toBe(true);
+  expect(execute).toHaveBeenCalledWith(
+    expect.anything(),
+    "host_ops_restart_assignment",
+    {
+      target_id: "A-2",
+      reason: "Recover",
+      idempotency_key: "untrusted-evidence",
+    },
+  );
+});

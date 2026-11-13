@@ -70,7 +70,7 @@ const TOP_LEVEL_USAGE = [
   "  pm start         一键启动 PM Office 与 PM Ops（已在运行就跳过）",
   "  pm rotate        把常驻 PM 换到 pm 最新版本（--office / --ops），事项转给新 Assignment",
   "  pm restart       重开常驻 PM 会话（--office / --ops），不暂停、不转交事项",
-  "  host-ops create|start  创建或启动常驻主机运维 Assignment（仅人类）",
+  "  host-ops create|start|rotate  创建、启动或轮换常驻主机运维（仅人类，不显示凭据）",
   "  preference get|set auto-merge-after  查看或修改超时自动合并偏好",
   "  preference get|set merge-confirm-snooze-default  查看或修改合并确认默认暂缓分钟数（默认 240）",
   "  preference get|set merge-confirm-stall-after  查看或修改 PM 合并确认停留告警分钟数（默认 60）",
