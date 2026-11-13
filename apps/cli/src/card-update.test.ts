@@ -108,6 +108,27 @@ test("updates text and acceptance criteria as human, preserving other fields", a
   expect(output.join("\n")).toBe("已更新卡片 C-1：title、goal、acceptance");
 });
 
+test("independent review conclusions cannot be injected through CLI card updates", async () => {
+  const before = snapshot();
+  for (const status of ["passed", "failed"])
+    for (const flag of ["--pre-merge-check", "--pre-merge-checks"]) {
+      const check = { label: "独立复核", status };
+      expect(
+        await run([
+          "card",
+          "update",
+          "C-1",
+          "--title",
+          "valid",
+          flag,
+          JSON.stringify(flag === "--pre-merge-check" ? check : [check]),
+        ]),
+      ).toBe(2);
+      expect(errors.join("\n")).toContain("不认识的选项");
+      expect(snapshot()).toEqual(before);
+    }
+});
+
 test("updates named priority and planning states including none", async () => {
   for (const [status, priority, rank] of [
     ["backlog", "urgent", 4],

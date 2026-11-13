@@ -968,6 +968,20 @@ test("K2 rejects empty fields and manual progress without partial changes", asyn
   }
 });
 
+test("independent review conclusions cannot be injected through HTTP card updates", async () => {
+  const before = snapshot();
+  for (const status of ["passed", "failed"])
+    for (const payload of [
+      { pre_merge_check: { label: "独立复核", status } },
+      { pre_merge_checks: [{ label: "独立复核", status }] },
+    ]) {
+      expect(
+        await request(cardPath("update"), { title: "valid", ...payload }),
+      ).toMatchObject({ status: 400 });
+      expect(snapshot()).toBe(before);
+    }
+});
+
 test.each([undefined, "", "不再需要这个目标"])(
   "K2 cancellation records its optional reason once (%s)",
   async (reason) => {

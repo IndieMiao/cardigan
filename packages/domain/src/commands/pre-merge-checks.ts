@@ -5,6 +5,7 @@ import type {
   PreMergeCheck,
   PreMergeCheckedVersion,
   PreMergeCheckStatus,
+  Review,
   WorkItem,
 } from "../entities.js";
 import type { CardId, HumanActionId, ProjectId } from "../ids.js";
@@ -21,7 +22,9 @@ export interface PreMergeCheckInput {
 export const PRE_MERGE_CHECK_STATUS_LABELS: Readonly<
   Record<PreMergeCheckStatus, string>
 > = { pending: "待完成", passed: "已通过", failed: "有问题" };
+/** Ordinary checks; the reserved independent review has its own slot. */
 export const MAX_PRE_MERGE_CHECKS = 8;
+export const INDEPENDENT_REVIEW_CHECK_LABEL = "独立复核";
 const MAX_LABEL = 40;
 const MAX_NOTE = 500;
 
@@ -62,12 +65,16 @@ export function currentPreMergeVersions(
 const sameVersions = (
   a: readonly PreMergeCheckedVersion[] | undefined,
   b: readonly PreMergeCheckedVersion[],
+  label?: string,
 ) =>
   a !== undefined &&
   a.length === b.length &&
   a.every(
     (v, i) =>
-      v.work_item_id === b[i]?.work_item_id && v.subject === b[i]?.subject,
+      v.work_item_id === b[i]?.work_item_id &&
+      v.subject === b[i]?.subject &&
+      (label !== INDEPENDENT_REVIEW_CHECK_LABEL ||
+        v.delivery_id === b[i]?.delivery_id),
   );
 
 /**
@@ -110,8 +117,8 @@ export interface EffectivePreMergeCheck extends PreMergeCheck {
 }
 /**
  * C-160: a passed/failed conclusion only holds for the version it was reached
- * on. After rework the check reads as pending again until PM Office records a
- * conclusion for the new version.
+ * on. Independent reviews also bind to the delivery ID, like isReviewStale;
+ * redelivering the same SHA still requires another independent review.
  */
 export function effectivePreMergeChecks(
   card: Pick<Card, "id" | "pre_merge_checks">,
@@ -120,7 +127,8 @@ export function effectivePreMergeChecks(
 ): readonly EffectivePreMergeCheck[] {
   const current = currentPreMergeVersions(card, workItems, deliveries);
   return (card.pre_merge_checks ?? []).map((c) =>
-    c.status !== "pending" && !sameVersions(c.checked_versions, current)
+    c.status !== "pending" &&
+    !sameVersions(c.checked_versions, current, c.label)
       ? { ...c, status: "pending", stale: true }
       : { ...c, stale: false },
   );
@@ -144,8 +152,8 @@ export function openPreMergeChecks(
  * cannot withdraw a `failed` one; marking a check
  * `passed` or `failed` records a conclusion relayed from the human's review
  * channel, which is PM Office's job (§7.1), so it needs PM Office or the human.
- * The checks are advisory: they never change who may confirm the merge or the
- * auto-merge timeout.
+ * The independent review label is reserved for submit_review projections;
+ * direct updates may only reset it to pending. Other labels stay advisory.
  */
 export function applyPreMergeCheck(
   d: CommandDraft,
@@ -188,17 +196,16 @@ export function applyPreMergeCheck(
   );
   const note = input.note?.trim() || undefined;
   ensure(
+    label !== INDEPENDENT_REVIEW_CHECK_LABEL || input.status === "pending",
+    "forbidden_tool",
+    "独立复核的已通过或有问题结论只能由独立复核员提交审核生成",
+  );
+  ensure(
     input.status === "pending" || actor.kind === "human" || office,
     "forbidden_tool",
     "只有 PM Office 或人可以把合并前核对项标为已通过或有问题",
   );
-  ensure(
-    card.status !== "done" && card.status !== "cancelled",
-    "illegal_transition",
-    "Card is closed",
-  );
-  const checks = card.pre_merge_checks ?? [];
-  const previous = checks.find((c) => c.label === label);
+  const previous = card.pre_merge_checks?.find((c) => c.label === label);
   // C-160#25: a "failed" conclusion records a problem the human was told
   // about; only PM Office or the human may withdraw it.
   ensure(
@@ -209,10 +216,80 @@ export function applyPreMergeCheck(
     "forbidden_tool",
     "只有 PM Office 或人可以撤销“有问题”的合并前核对项",
   );
+  return writePreMergeCheck(d, card, {
+    label,
+    status: input.status,
+    ...(note === undefined ? {} : { note }),
+  });
+}
+
+/** Only submitReview calls this, after validating and recording the Review. */
+export function projectIndependentReviewCheck(d: CommandDraft, review: Review) {
   ensure(
-    previous !== undefined || checks.length < MAX_PRE_MERGE_CHECKS,
+    d.tool === "submit_review" &&
+      d.assignment?.role_id === "independent_reviewer",
+    "forbidden_tool",
+    "独立复核结论只能由独立复核员提交审核生成",
+  );
+  const item = d.ownWork(review.work_item_id);
+  return writePreMergeCheck(d, d.card(item.card_id), {
+    label: INDEPENDENT_REVIEW_CHECK_LABEL,
+    status:
+      review.verdict === "pass" && !review.issues.some((i) => i.must_fix)
+        ? "passed"
+        : "failed",
+    note: `审核 ${review.id}`,
+  });
+}
+
+/** Withdrawal invalidates only the projection written by this review owner. */
+export function withdrawIndependentReviewCheck(
+  d: CommandDraft,
+  review: Review,
+) {
+  ensure(
+    d.tool === "withdraw_review" &&
+      d.assignment?.role_id === "independent_reviewer",
+    "forbidden_tool",
+    "独立复核结论只能随独立复核员本人撤回审核失效",
+  );
+  const item = d.ownWork(review.work_item_id);
+  const card = d.card(item.card_id);
+  const check = card.pre_merge_checks?.find(
+    (c) => c.label === INDEPENDENT_REVIEW_CHECK_LABEL,
+  );
+  // Another reviewer may have since replaced the single fixed projection;
+  // a manual pending reset likewise must retain its author and explanation.
+  if (!check || check.updated_by !== d.author || check.status === "pending")
+    return;
+  writePreMergeCheck(d, card, {
+    label: INDEPENDENT_REVIEW_CHECK_LABEL,
+    status: "pending",
+    note: `审核 ${review.id} 已撤回`,
+  });
+}
+
+/** Shared persistence keeps the Review projection and its audit in one draft. */
+function writePreMergeCheck(
+  d: CommandDraft,
+  card: Card,
+  input: PreMergeCheckInput,
+): Card {
+  const { label, note } = input;
+  ensure(
+    card.status !== "done" && card.status !== "cancelled",
+    "illegal_transition",
+    "Card is closed",
+  );
+  const checks = card.pre_merge_checks ?? [];
+  const previous = checks.find((c) => c.label === label);
+  ensure(
+    previous !== undefined ||
+      label === INDEPENDENT_REVIEW_CHECK_LABEL ||
+      checks.filter((c) => c.label !== INDEPENDENT_REVIEW_CHECK_LABEL).length <
+        MAX_PRE_MERGE_CHECKS,
     "validation_failed",
-    `一张卡最多 ${MAX_PRE_MERGE_CHECKS} 个合并前核对项`,
+    `一张卡最多 ${MAX_PRE_MERGE_CHECKS} 个普通合并前核对项，独立复核另计`,
   );
   const versions =
     input.status === "pending"
@@ -231,7 +308,7 @@ export function applyPreMergeCheck(
     previous?.status === input.status &&
     previous.note === note &&
     (versions === undefined ||
-      sameVersions(previous.checked_versions, versions))
+      sameVersions(previous.checked_versions, versions, label))
   )
     return card;
   const next: PreMergeCheck = {
@@ -291,7 +368,7 @@ export function applyPreMergeCheck(
     !(
       previous?.status === "passed" &&
       versions !== undefined &&
-      sameVersions(previous.checked_versions, versions)
+      sameVersions(previous.checked_versions, versions, label)
     )
   )
     remindMergeBlockingActions(d, card.id, label);

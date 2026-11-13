@@ -236,7 +236,7 @@ const schemas = {
       .strict()
       .optional()
       .describe(
-        "C-160 合并前核对项：新增或更新一项，不能与其他字段混用。PM Ops 只能设为 pending；passed/failed 只有 PM Office 能设，且只对当前交付版本有效，新版本交付后需重新核对",
+        "C-160 合并前核对项：新增或更新一项，不能与其他字段混用。PM Ops 只能设为 pending；passed/failed 只有 PM Office 能设。固定名称“独立复核”只允许手工设为 pending，其结论由独立复核员提交审核生成。结论只对当前交付版本有效，新版本交付后需重新核对",
       ),
   },
   create_work_item: {
