@@ -9,6 +9,15 @@
   <style>
     /* Design specimen only; the linked baseline stylesheet is never modified. */
     :root { --font: "Inter Variable", "Noto Sans SC Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; }
+    :root { --control-border: var(--border); }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #181818; --surface: #222222; --surface-muted: #2c2c2c; --timeline-card: #2c2c2c;
+        --border: #484848; --control-border: #777777; --text: #cccccc; --text-muted: #a4a4a4;
+        --accent: #8dcac3; --status-muted: #a4a4a4; --status-backlog: #a4a4a4; --status-idle: #a4a4a4;
+      }
+    }
+    .design-toolbar button { border-color: var(--control-border); }
     .design-page { max-width: 1248px; margin: auto; padding: 40px 24px 48px; }
     .design-page h1 { font-size: 28px; line-height: 1.35; margin: 8px 0 12px; }
     .design-page h2 { font-size: 18px; margin: 0 0 8px; }
@@ -42,7 +51,7 @@
     a.ref-group { min-height: 32px; text-decoration: none; }
     a.ref-group .ref-badge { text-decoration: underline; text-underline-offset: 3px; }
     a.ref-group:hover .ref-badge { outline: 1px solid currentColor; outline-offset: -1px; }
-    .design-page :is(a, button, summary):focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    .design-page :is(a, button, summary):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     .design-state { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; font-size: 13px; line-height: 20px; color: var(--text); }
     .design-state svg { width: 16px; height: 16px; flex: none; color: var(--status-done); }
     .design-state.wait svg { color: var(--status-wait); }
@@ -74,7 +83,7 @@
 <body>
 <main class="design-page">
   <header>
-    <p class="design-eyebrow">CARDIGAN / C-204 / 设计提案 v2（暗色待同步）</p>
+    <p class="design-eyebrow">CARDIGAN / C-204 / 设计提案 v2</p>
     <h1>编号有类别，同行有秩序</h1>
     <p class="design-subtitle">编号保留前缀；头像、姓名、工作项与状态共享一条中心线。类型颜色与状态颜色独立定义。</p>
     <div class="design-toolbar">
@@ -85,7 +94,7 @@
   </header>
   <section id="comparison" aria-labelledby="compare-title">
     <h2 id="compare-title">01 / 拍板区块：改前与改后</h2>
-    <p class="design-note">改前按基线源码复现，非生产截图；两侧均使用同一姓名、工作项和头像素材。</p>
+    <p class="design-note">改前布局按基线源码复现，非生产截图；两侧使用同一主题与示例内容。暗色采用 C-208 定稿。</p>
     <div class="design-compare" style="margin-top:16px">
       <article class="design-panel">
         <span class="design-kicker">改前 / 基线 60d617a</span>
@@ -166,20 +175,20 @@
 <script>
   // Design registry: prefix, token, meaning, light foreground/background, dark foreground/background.
   const palette = [
-    ['C', 'card', '卡片', '#123a8e', '#e3edff', '#adc9ff', '#21334e'],
-    ['W', 'work-item', '工作项', '#6b2896', '#f0e3fa', '#d4b8ff', '#362b49'],
-    ['Q', 'decision', '拍板', '#9c1a67', '#fce0ef', '#eab8da', '#412d3b'],
-    ['A', 'assignment', '责任上下文', '#343a40', '#e3e4e6', '#b7ccdd', '#2b3742'],
-    ['R', 'run', '执行', '#005968', '#d6f3f7', '#96d4e6', '#203c45'],
-    ['D', 'delivery', '交付', '#535e18', '#e9efce', '#b0d3f2', '#29394a'],
-    ['V', 'review', '审核', '#765017', '#f7e9ca', '#c5bffc', '#302e4b'],
-    ['H', 'human-action', '人工待办', '#804e4c', '#f7e1df', '#dbc6ba', '#3c332e'],
-    ['E', 'employee', '员工', '#645b70', '#ece8f3', '#c4c8ed', '#31354b'],
-    ['M', 'member', '成员', '#645b70', '#ece8f3', '#d5c2e1', '#3a3042'],
-    ['MB', 'merge-batch', '合并批次', '#645b70', '#ece8f3', '#bbcde3', '#2d3847'],
-    ['?', 'unknown', '未知类型', '#645b70', '#ece8f3', '#b0beb5', '#29352e'],
+    ['C', 'card', '卡片', '#123a8e', '#e3edff', '#7997d2', '#202c43'],
+    ['W', 'work-item', '工作项', '#6b2896', '#f0e3fa', '#b982df', '#3c224c'],
+    ['Q', 'decision', '拍板', '#9c1a67', '#fce0ef', '#db70bd', '#43233a'],
+    ['A', 'assignment', '责任上下文', '#343a40', '#e3e4e6', '#cccccc', '#303030'],
+    ['R', 'run', '执行', '#005968', '#d6f3f7', '#63ada8', '#203c3c'],
+    ['D', 'delivery', '交付', '#535e18', '#e9efce', '#cece54', '#3d3d20'],
+    ['V', 'review', '审核', '#765017', '#f7e9ca', '#d6c59f', '#413824'],
+    ['H', 'human-action', '人工待办', '#804e4c', '#f7e1df', '#aa8f8f', '#302525'],
+    ['E', 'employee', '员工', '#645b70', '#ece8f3', '#a69bb0', '#34303f'],
+    ['M', 'member', '成员', '#645b70', '#ece8f3', '#a69bb0', '#34303f'],
+    ['MB', 'merge-batch', '合并批次', '#645b70', '#ece8f3', '#a69bb0', '#34303f'],
+    ['?', 'unknown', '未知类型', '#645b70', '#ece8f3', '#a69bb0', '#34303f'],
   ];
-  const separation = {"light": {"C": {"fg": 16.3, "fgNeighbor": "W", "bg": 6.38, "bgNeighbor": "E", "status": 10.57, "statusNeighbor": "dispatched", "contrast": 8.82}, "W": {"fg": 16.3, "fgNeighbor": "C", "bg": 5.68, "bgNeighbor": "Q", "status": 10.51, "statusNeighbor": "review", "contrast": 7.21}, "Q": {"fg": 16.61, "fgNeighbor": "W", "bg": 5.68, "bgNeighbor": "W", "status": 21.71, "statusNeighbor": "review", "contrast": 6.18}, "A": {"fg": 16.34, "fgNeighbor": "C", "bg": 5.49, "bgNeighbor": "E", "status": 19.8, "statusNeighbor": "dispatched", "contrast": 9.04}, "R": {"fg": 16.8, "fgNeighbor": "A", "bg": 10.5, "bgNeighbor": "A", "status": 12.95, "statusNeighbor": "progress", "contrast": 6.86}, "D": {"fg": 18.48, "fgNeighbor": "V", "bg": 8.36, "bgNeighbor": "V", "status": 17.7, "statusNeighbor": "done", "contrast": 5.94}, "V": {"fg": 18.48, "fgNeighbor": "D", "bg": 8.36, "bgNeighbor": "D", "status": 10.61, "statusNeighbor": "unknown", "contrast": 5.96}, "H": {"fg": 16.85, "fgNeighbor": "E", "bg": 7.36, "bgNeighbor": "Q", "status": 11.46, "statusNeighbor": "cancelled", "contrast": 5.4}, "E": {"fg": 16.85, "fgNeighbor": "H", "bg": 5.49, "bgNeighbor": "A", "status": 11.71, "statusNeighbor": "muted", "contrast": 5.32}}};
+  const separation = {"light": {"C": {"fg": 16.3, "fgNeighbor": "W", "bg": 6.38, "bgNeighbor": "E", "status": 10.57, "statusNeighbor": "dispatched", "contrast": 8.82, "surfaceContrast": 9.19, "focusOnTag": 6.36, "Lstar": 27.04}, "W": {"fg": 16.3, "fgNeighbor": "C", "bg": 5.68, "bgNeighbor": "Q", "status": 10.51, "statusNeighbor": "review", "contrast": 7.21, "surfaceContrast": 7.84, "focusOnTag": 6.09, "Lstar": 31.45}, "Q": {"fg": 16.61, "fgNeighbor": "W", "bg": 5.68, "bgNeighbor": "W", "status": 21.71, "statusNeighbor": "review", "contrast": 6.18, "surfaceContrast": 6.74, "focusOnTag": 6.08, "Lstar": 35.57}, "A": {"fg": 16.34, "fgNeighbor": "C", "bg": 5.49, "bgNeighbor": "E", "status": 19.8, "statusNeighbor": "dispatched", "contrast": 9.04, "surfaceContrast": 10.18, "focusOnTag": 5.89, "Lstar": 24.08}, "R": {"fg": 16.8, "fgNeighbor": "A", "bg": 10.5, "bgNeighbor": "A", "status": 12.95, "statusNeighbor": "progress", "contrast": 6.86, "surfaceContrast": 7.07, "focusOnTag": 6.43, "Lstar": 34.28}, "D": {"fg": 18.48, "fgNeighbor": "V", "bg": 8.36, "bgNeighbor": "V", "status": 17.7, "statusNeighbor": "done", "contrast": 5.94, "surfaceContrast": 6.23, "focusOnTag": 6.31, "Lstar": 37.68}, "V": {"fg": 18.48, "fgNeighbor": "D", "bg": 8.36, "bgNeighbor": "D", "status": 10.61, "statusNeighbor": "unknown", "contrast": 5.96, "surfaceContrast": 6.34, "focusOnTag": 6.23, "Lstar": 37.21}, "H": {"fg": 16.85, "fgNeighbor": "E", "bg": 7.36, "bgNeighbor": "Q", "status": 11.46, "statusNeighbor": "cancelled", "contrast": 5.4, "surfaceContrast": 5.97, "focusOnTag": 5.99, "Lstar": 38.83}, "E": {"fg": 16.85, "fgNeighbor": "H", "bg": 5.49, "bgNeighbor": "A", "status": 11.71, "statusNeighbor": "muted", "contrast": 5.32, "surfaceContrast": 5.68, "focusOnTag": 6.21, "Lstar": 40.18}}, "dark": {"C": {"fg": 17.39, "fgNeighbor": "E", "bg": 7.59, "bgNeighbor": "E", "status": 10.92, "statusNeighbor": "pending", "contrast": 4.77, "surfaceContrast": 4.77, "focusOnTag": 7.57, "Lstar": 62.38}, "W": {"fg": 11.32, "fgNeighbor": "Q", "bg": 7.55, "bgNeighbor": "Q", "status": 12.32, "statusNeighbor": "review", "contrast": 4.8, "surfaceContrast": 4.87, "focusOnTag": 7.45, "Lstar": 63.02}, "Q": {"fg": 11.32, "fgNeighbor": "W", "bg": 7.55, "bgNeighbor": "W", "status": 19.25, "statusNeighbor": "review", "contrast": 4.59, "surfaceContrast": 4.7, "focusOnTag": 7.38, "Lstar": 61.93}, "A": {"fg": 14.45, "fgNeighbor": "V", "bg": 7.3, "bgNeighbor": "H", "status": 10.75, "statusNeighbor": "backlog", "contrast": 8.22, "surfaceContrast": 8.7, "focusOnTag": 7.15, "Lstar": 82.05}, "R": {"fg": 23.06, "fgNeighbor": "A", "bg": 12.09, "bgNeighbor": "A", "status": 12.02, "statusNeighbor": "progress", "contrast": 4.55, "surfaceContrast": 5.37, "focusOnTag": 6.41, "Lstar": 66.03}, "D": {"fg": 15.46, "fgNeighbor": "V", "bg": 6.79, "bgNeighbor": "V", "status": 17.28, "statusNeighbor": "wait", "contrast": 6.67, "surfaceContrast": 8.37, "focusOnTag": 6.03, "Lstar": 80.69}, "V": {"fg": 14.45, "fgNeighbor": "A", "bg": 6.79, "bgNeighbor": "D", "status": 11.4, "statusNeighbor": "wait", "contrast": 6.8, "surfaceContrast": 8.21, "focusOnTag": 6.26, "Lstar": 80.03}, "H": {"fg": 10.67, "fgNeighbor": "E", "bg": 7.3, "bgNeighbor": "A", "status": 12.45, "statusNeighbor": "backlog", "contrast": 4.96, "surfaceContrast": 4.68, "focusOnTag": 8.02, "Lstar": 61.8}, "E": {"fg": 10.67, "fgNeighbor": "H", "bg": 7.59, "bgNeighbor": "C", "status": 11.48, "statusNeighbor": "backlog", "contrast": 4.84, "surfaceContrast": 5.28, "focusOnTag": 6.93, "Lstar": 65.5}}};
   const variables = (dark) => palette.map(p => `--id-${p[1]}-fg:${p[dark ? 5 : 3]};--id-${p[1]}-bg:${p[dark ? 6 : 4]};`).join('');
   const sheet = document.createElement('style');
   sheet.textContent = `:root{${variables(false)}}@media(prefers-color-scheme:dark){:root{${variables(true)}}}` + palette.map(p => `[data-id-type="${p[1]}"]{--id-fg:var(--id-${p[1]}-fg);--id-bg:var(--id-${p[1]}-bg);}`).join('');
@@ -190,9 +199,15 @@
     const tile = document.createElement('div'); tile.className = 'design-swatch';
     tile.innerHTML = `<span class="ref-group" data-id="${p[0] === '?' ? 'XYZ' : p[0]}-12" data-label="${p[2]}"></span><small>亮色 ${contrast(p[3],p[4])}:1 / 暗色 ${contrast(p[5],p[6])}:1</small><small>--id-${p[1]}-{fg,bg}</small>`;
     const near = separation.light[p[0]];
+    const darkNear = separation.dark[p[0]];
     const metric = document.createElement('small');
     metric.textContent = near ? `亮色最近邻 ΔE：字 ${near.fg} / 底 ${near.bg}` : '辅助类型：与 E 共用灰紫族';
     tile.append(metric);
+    if (darkNear) {
+      const darkMetric = document.createElement('small');
+      darkMetric.textContent = `暗色最近邻 ΔE：字 ${darkNear.fg} / 底 ${darkNear.bg}`;
+      tile.append(darkMetric);
+    }
     document.querySelector('#palette').append(tile);
   }
   for (const el of document.querySelectorAll('[data-id]')) {
