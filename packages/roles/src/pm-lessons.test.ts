@@ -183,6 +183,36 @@ test("C-49 PM instructions cover merge confirmation preconditions and notices", 
     expect(prompt).toContain(rule);
 });
 
+test("C-194 PM Ops limits numeric-rule merge confirmation to evidenced human decisions until P2a-14", () => {
+  for (const prompt of [
+    corePromptFor("pm"),
+    ...modePrompts.map((p) => p.prompt),
+  ]) {
+    const ops = prompt?.split("## PM Ops（后台）")[1]?.split("## 协作规则")[0];
+    const rule = ops
+      ?.split("\n")
+      .find((line) => line.startsWith("- 数值和行为规则卡的合并确认"));
+    for (const condition of [
+      "P2a-14 上线前的过渡规则",
+      "在满足上一条合并条件且不属于必须交人的卡片时",
+      "只有同时满足以下三条",
+      "全部来自人的明确拍板（卡片来源、Decision 或人的原话）",
+      "实现的值和规则与人拍板的逐一一致",
+      "没有引入人没拍板过的其它数值或行为改动",
+      "在确认理由 rationale 里逐条写明依据",
+      "每个数值或行为规则对应人的哪句话或哪个 Q 编号",
+      "不满足其中任何一条，都传 escalate=true 交人",
+      "不授权 PM 决定新的数值或行为规则",
+      "角色规则改动仍按 Q-279 交人确认合并",
+      "P2a-14 上线后，带 risk_tags=numeric_rule 的卡以独立复核通过后自动合并为准，这条过渡规则不再适用",
+    ])
+      expect(rule).toContain(condition);
+    expect(ops).toContain(
+      "会改变系统行为的数值和规则（例如上限、超时、自动合并分钟数）即使归在 feature_detail，也传 escalate=true 交人",
+    );
+  }
+});
+
 test("C-66 PM instructions cover returning or rechecking failed merge checks", () => {
   const prompt = corePromptFor("pm");
   for (const rule of [
@@ -313,7 +343,7 @@ test("C-86 PM Ops gives final merge confirmation, including UI cards after a PM 
     "先核实当前项目在职 PM Office 的 Assignment 编号，在卡上用 @A-n 提及它请其做截图核对",
     "等 PM Office 把核对结论写进卡片后，你据此确认或退回",
     "被人标为敏感的卡、涉及 D12 四类高风险（花钱、账号、权限、删除数据）的卡、安全相关改动、对外发布和需求范围变化的卡，以及已交人的确认，只能重新检查明确的超时失败，不能退回修改，也不能代确认合并",
-    "仍交给人的只有被人标为敏感的卡、D12 四类高风险（花钱、账号、权限、删除数据）、安全相关改动、对外发布和需求范围变化",
+    "仍交给人的包括被人标为敏感的卡、D12 四类高风险（花钱、账号、权限、删除数据）、安全相关改动、对外发布、需求范围变化、角色规则改动，以及不满足下一条过渡条件的数值和行为规则卡",
   ])
     expect(prompt).toContain(phrase);
   expect(prompt).not.toContain("用户可见的大改动");
