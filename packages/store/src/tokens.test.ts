@@ -1,9 +1,48 @@
 import { randomBytes } from "node:crypto";
 import { expect, test } from "vitest";
-import { hashToken, tokenMatchesHash } from "./index.js";
+import {
+  hashToken,
+  Store,
+  tokenMatchesHash,
+  unrevokedTokensForProject,
+} from "./index.js";
 import { assignment, project_id, withTempStore } from "./test-support.js";
 
 const fictionalToken = "fictional-token-not-a-real-credential";
+
+test("cleanup token candidates see committed late issuance and exclude revoked/other-project rows", () => {
+  withTempStore((store, dataDir) => {
+    const input = {
+      project_id,
+      assignment_id: assignment().id,
+      role: { role_version: 1, allowed_tools: [] },
+    };
+    const revoked = store.issueToken(input);
+    store.revokeToken(revoked.record.id);
+    store.issueToken({ ...input, project_id: "other" });
+    const list = () => unrevokedTokensForProject(store.database, project_id);
+    expect(list()).toEqual([]);
+    const other = Store.open({ dataDir });
+    try {
+      const late = other.issueToken(input);
+      expect(list()).toEqual([
+        { id: late.record.id, assignment_id: input.assignment_id },
+      ]);
+      expect(() =>
+        store.uow.run((tx) => {
+          tx.revokeToken(late.record.id);
+          expect(list()).toEqual([]);
+          throw new Error("rollback");
+        }),
+      ).toThrow("rollback");
+      expect(list()).toHaveLength(1);
+      other.revokeToken(late.record.id);
+      expect(list()).toEqual([]);
+    } finally {
+      other.close();
+    }
+  });
+});
 
 test("issueToken stores only the sha256 hash", () => {
   withTempStore((store) => {

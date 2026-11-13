@@ -1,4 +1,4 @@
-import type { Actor, Decision } from "../entities.js";
+import type { Actor, Decision, RuntimeRef } from "../entities.js";
 import type { Result } from "../errors.js";
 import { hostOpsPending } from "../host-ops.js";
 import type { AssignmentId } from "../ids.js";
@@ -92,6 +92,37 @@ export function releaseAssignment(
     return next;
   });
 }
+/** Host-confirmed missing terminals; never a caller-supplied cleanup flag. */
+export function clearReleasedRuntimeRefs(
+  state: CommandState,
+  actor: Actor,
+  p: {
+    readonly missing: readonly {
+      readonly assignment_id: AssignmentId;
+      readonly runtime_ref: RuntimeRef;
+    }[];
+  },
+  ports: CommandPorts,
+) {
+  return command(state, actor, "clear_released_runtime_refs", ports, (d) => {
+    for (const missing of p.missing) {
+      const a = d.get("assignments", missing.assignment_id);
+      // The observation predates this transaction. A changed owner/ref wins;
+      // repeated observations and retries after a commit are harmless.
+      if (
+        a.status !== "released" ||
+        JSON.stringify(a.runtime_ref) !== JSON.stringify(missing.runtime_ref)
+      )
+        continue;
+      d.put("assignments", { ...a, runtime_ref: null });
+      d.emit("assignment_terminal_cleaned", undefined, {
+        assignment_id: a.id,
+        runtime_ref: { ...missing.runtime_ref },
+      });
+    }
+  });
+}
+
 export function requestWorktreeCleanup(
   state: CommandState,
   actor: Actor,

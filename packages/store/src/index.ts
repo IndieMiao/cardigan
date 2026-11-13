@@ -95,6 +95,7 @@ export {
   revokeToken,
   tokenMatchesHash,
   tokensForAssignment,
+  unrevokedTokensForProject,
   verifyToken,
 } from "./tokens.js";
 export { newUlid } from "./ulid.js";
