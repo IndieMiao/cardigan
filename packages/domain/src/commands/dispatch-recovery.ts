@@ -418,7 +418,10 @@ export function obsoleteDispatchAttention(
   if (
     run &&
     field(event?.payload, "reason") === "recovery_startup_failed" &&
-    note.recipient.kind !== "assignment"
+    // Only the failed Assignment's own diagnostic marker retires with its Run.
+    // Other recipients still need to handle the unresolved startup failure.
+    (note.recipient.kind !== "assignment" ||
+      note.recipient.assignment_id !== run.assignment_id)
   )
     return startupFailureResolved(state, run);
   return (

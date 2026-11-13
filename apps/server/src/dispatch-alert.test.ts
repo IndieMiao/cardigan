@@ -1,5 +1,6 @@
 import {
   type Assignment,
+  abortDispatch,
   type CardId,
   createHostOpsAssignment,
   dispatchRun,
@@ -60,9 +61,18 @@ const hostBells = () =>
 
 async function trigger(
   owner: Assignment,
-  cause: "inactive" | "lost" | "timeout" | "stop_unconfirmed",
+  cause:
+    | "inactive"
+    | "lost"
+    | "timeout"
+    | "stop_unconfirmed"
+    | "startup_failed",
 ) {
-  if (cause === "timeout" || cause === "stop_unconfirmed") {
+  if (
+    cause === "timeout" ||
+    cause === "stop_unconfirmed" ||
+    cause === "startup_failed"
+  ) {
     const run = f.apply((s, a, p) =>
       queueRun(
         s,
@@ -83,6 +93,13 @@ async function trigger(
       vi.mocked(f.runtime.release).mockResolvedValue({
         ok: true,
         value: undefined,
+      });
+    if (cause === "startup_failed")
+      vi.mocked(f.options.startRun).mockImplementationOnce(async ({ run }) => {
+        f.apply((s, a, p) =>
+          abortDispatch(s, a, { run_id: run.id, reason: "startup_failed" }, p),
+        );
+        throw new Error("host startup compensation");
       });
     f.advance(100);
     await new Dispatcher(options()).tick();
@@ -140,9 +157,15 @@ async function trigger(
 
 test.each(
   (["ops", "office"] as const).flatMap((mode) =>
-    (["inactive", "lost", "timeout", "stop_unconfirmed"] as const).map(
-      (cause) => ({ mode, cause }),
-    ),
+    (
+      [
+        "inactive",
+        "lost",
+        "timeout",
+        "stop_unconfirmed",
+        "startup_failed",
+      ] as const
+    ).map((cause) => ({ mode, cause })),
   ),
 )(
   "C-220 standing PM $mode $cause alerts and bells host_ops once, then ACK closes its notice",
@@ -155,6 +178,19 @@ test.each(
     expect(hostBells()).toHaveLength(1);
     expect(hostBells()[0]?.[1]).toContain("[bell]");
     expect(hostBells()[0]?.[1]).toContain(`seq=${event.seq}..${event.seq}`);
+    if (cause === "startup_failed") {
+      expect(event.payload).toMatchObject({
+        reason: "recovery_startup_failed",
+      });
+      expect(
+        f.store
+          .listNotifications({
+            project_id: f.project,
+            assignment_id: owner.id,
+          })
+          .find((n) => n.event_id === event.id)?.status,
+      ).toBe("resolved");
+    }
     if (cause === "inactive" || cause === "lost")
       expect(
         f.store

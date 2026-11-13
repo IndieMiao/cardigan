@@ -302,6 +302,78 @@ test.each([false, true])(
   },
 );
 
+test.each(["cancelled", "failed"] as const)(
+  "C-220 a %s recovery Run retires only its own diagnostic, retaining escalation until recovery",
+  (status) => {
+    const replacement = commit(recover(run, 5));
+    if (!replacement) throw new Error("Missing recovery");
+    commit(
+      abortDispatch(
+        f.state,
+        system,
+        { run_id: replacement.id, reason: "startup_failed" },
+        f.io,
+      ),
+    );
+    f.state = {
+      ...f.state,
+      runs: f.state.runs.map((r) =>
+        r.id === replacement.id ? { ...r, status } : r,
+      ),
+    };
+    commit(recover(replacement));
+    const event = f.state.events.find((e) => e.type === "run_dispatch_stalled");
+    if (!event) throw new Error("Missing startup failure alert");
+    const own: Notification = {
+      id: "diagnostic",
+      project_id: f.state.project_id,
+      event_id: event.id,
+      recipient: { kind: "assignment", assignment_id: f.coder.id },
+      seq: event.seq,
+      kind: "run_attention",
+      status: "needs_attention",
+      attempts: 0,
+      created_at: f.io.clock.now(),
+      updated_at: f.io.clock.now(),
+    };
+    const recipients: Notification["recipient"][] = [
+      { kind: "assignment", assignment_id: f.reviewer.id },
+      { kind: "pm_ops" },
+      { kind: "pm_office" },
+      { kind: "needs_you" },
+    ];
+    const notices = recipients.map(
+      (recipient): Notification => ({
+        ...own,
+        recipient,
+        status: "pending",
+      }),
+    );
+    const stale = () =>
+      notices.map((n) => obsoleteDispatchAttention(f.state, n));
+    expect(obsoleteDispatchAttention(f.state, own)).toBe(true);
+    expect(stale()).toEqual([false, false, false, false]);
+
+    const unresolved = f.state;
+    const next = commit(queue());
+    expect(stale()).toEqual([false, false, false, false]);
+    commit(dispatch(next));
+    expect(stale()).toEqual([false, false, false, false]);
+    commit(acknowledgeRun(f.state, actor(), { run_id: next.id }, f.io));
+    expect(stale()).toEqual([true, true, true, true]);
+    expect(f.state.cursors).toEqual([]);
+
+    f.state = {
+      ...unresolved,
+      assignments: unresolved.assignments.map((a) =>
+        a.id === f.coder.id ? { ...a, status: "released" } : a,
+      ),
+    };
+    expect(stale()).toEqual([true, true, true, true]);
+    expect(f.state.cursors).toEqual([]);
+  },
+);
+
 test("a later independent Run does not inherit a previous recovery's waiting time", () => {
   now += 600000;
   const replacement = commit(recover());

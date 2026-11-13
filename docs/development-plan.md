@@ -823,6 +823,8 @@ MCP 看门狗观察 running Run，按本次 started_at、heartbeat_at 与 Assign
 
 C-220：上述常驻 PM 自身的告警另通知本项目当前 active 常驻 `host_ops`，包括托管 PM Office／PM Ops 的 `run_inactive`、运行时丢失以及派发超时在既有恢复流程中产生的 `run_dispatch_stalled`；不提前升级单次重试失败、不改变失活阈值和恢复预算。收件人使用具体 Assignment 编号，事件与通知同事务提交，同一事件同一收件人只保存一条；由既有 Dispatcher 按铃，忙碌时留在 Inbox，处理后按该流的 `ack_events` 关闭，主机运维按现有 `host_ops_restart_standing_pm` 流程核实和恢复。未配置、暂停或释放的主机运维不接收补发；外接 PM 不纳入托管失活监控。`host_ops` 自身的失活和运行时丢失告警交 Needs You 与 PM Office，不向自己派发恢复门铃；自身 `needs_attention` 诊断标记仍保留。普通工作项的告警收件人不变，不增加角色工具或读取权限。
 
+恢复启动失败（`recovery_startup_failed`）时，已结束的源 Run 只使源 Assignment 自己的诊断标记过期；发给主机运维等其他收件人的恢复通知仍须投递并等待 ACK。未 ACK 的通知沿用既有升级收尾条件：源 Assignment 的后续 Run 真正开始执行，或源 Assignment 已释放，才自动关闭，不能仅因启动补偿取消了源 Run 就提前清理。
+
 自动回收先持久化绑定 Run 与 RuntimeRef 的停止意图，取得 60 秒处理租约，再停止该终端并独立查询确认 exited 或 runtime_not_found。release 返回成功本身不构成退出证明；unknown、runtime_unavailable、超时和调用失败均保留名额与凭据，一次告警后等待后续 tick 重试。租约到期仅允许下一处理者接续同一终端，不能直接释放名额；迟到结果须匹配当前意图编号，重启后同样先确认退出。停止意图存在时，即使监控把 Run 改为 unknown、或 Agent 在停止调用期间提交了结束，也继续预留一个名额并阻止该 Assignment／worktree 再次启动，直到停止收尾完成。
 
 确认退出后，在同一事务中将仍未结束的 Run 经 cancel 标为 cancelled、outcome=failed，撤销该 Assignment 的有效 Token，写明系统取消原因并释放停止意图。不接受 Agent 自报的退出证明，不伪造业务成功，不改工作项结果、不删除 worktree／分支／基线。停止调用期间已完成的 Run 保留原业务结果；已经发出的外部停止无法撤回，后续只收尾原 Run 和原 RuntimeRef，不触碰替换后的会话。取消及收尾写审计事件和系统时间线，并通知 PM／人。用户已接受无 MCP 心跳的合法长任务可能被打断的取舍。
