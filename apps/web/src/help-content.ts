@@ -1,5 +1,3 @@
-/// <reference types="vite/client" />
-
 export interface HelpDocument {
   readonly slug: string;
   readonly title: string;
