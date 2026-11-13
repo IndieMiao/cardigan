@@ -27,6 +27,7 @@ export {
   launchEntities,
   wallClock,
 } from "./commands.js";
+export * from "./context-usage.js";
 export {
   HostLaunchError,
   LAUNCH_STEPS,

@@ -10,6 +10,7 @@ import {
   compileLaunch,
 } from "./compile.js";
 import type { Harness } from "./harness.js";
+import { piContextUsageExtension } from "./pi-context-usage.js";
 import { composeRolePrompt } from "./prompt.js";
 import type {
   BrowserLaunchDefinition,
@@ -373,6 +374,16 @@ export function compileAssignmentLaunch(
           null,
           2,
         )}\n`,
+        mode: 0o600,
+      });
+      harnessFiles.push({
+        path: join(
+          input.run_dir,
+          "pi",
+          "extensions",
+          "cardigan-context-usage.js",
+        ),
+        content: piContextUsageExtension,
         mode: 0o600,
       });
       harnessEnv.PI_CODING_AGENT_DIR = join(input.run_dir, "pi");

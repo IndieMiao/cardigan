@@ -1,3 +1,4 @@
+import type { ContextObservation } from "./context-usage.js";
 import type { Event, Run, RuntimeRef, ToolName } from "./entities.js";
 import type { AssignmentId, CardId, RunId } from "./ids.js";
 
@@ -61,6 +62,7 @@ export type HostOpsExecutionTool =
 /** Persisted intent. Only the host consumes runtime references and launch snapshots. */
 export interface HostOpsExecution {
   readonly action_id: Event["id"];
+  readonly context_usage?: ContextObservation;
   readonly tool: HostOpsExecutionTool;
   readonly target_id: AssignmentId | RunId;
   readonly assignment_id: AssignmentId;
