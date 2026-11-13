@@ -308,6 +308,33 @@ test("valid token writes assignment authors; no token keeps human authors", asyn
   ).toBe("human");
 });
 
+test("risk tags reuse the update_card PM gate for tokens", async () => {
+  const coder = store.uow.run((tx) => {
+    const row: Assignment = {
+      ...assignment,
+      id: tx.ids.next(project, "assignment"),
+      role_id: "coder",
+    };
+    tx.assignments.put(project, row);
+    return row;
+  });
+  const coderToken = store.issueToken({
+    project_id: project,
+    assignment_id: coder.id,
+    role: { role_version: 1, allowed_tools: ["update_card"] },
+  }).token;
+  const tags = ["card", "update", "C-1", "--risk-tags", "security"];
+  expect(await run(tags, tokenIo(coderToken))).toBe(2);
+  expect(
+    store.uow.read((tx) => tx.cards.get(project, "C-1" as never)?.risk_tags),
+  ).toBeUndefined();
+  const pmToken = issue(["update_card"]).token;
+  expect(await run(tags, tokenIo(pmToken)), errors.join("\n")).toBe(0);
+  expect(
+    store.uow.read((tx) => tx.cards.get(project, "C-1" as never)?.risk_tags),
+  ).toEqual(["security"]);
+});
+
 test("project selectors cannot escape the token project", async () => {
   store.createProject({ id: "another", name: "Other project" });
   const token = issue().token;

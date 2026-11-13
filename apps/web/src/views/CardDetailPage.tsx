@@ -8,7 +8,11 @@ import {
 } from "../api.js";
 import { AttachmentGrid } from "../components/AttachmentGrid.js";
 import { CardActions } from "../components/CardActions.js";
-import { CardSource, RecentConclusions } from "../components/CardIntro.js";
+import {
+  CardRiskTags,
+  CardSource,
+  RecentConclusions,
+} from "../components/CardIntro.js";
 import { CardRecords } from "../components/CardRecords.js";
 import { CardSectionNav } from "../components/CardSectionNav.js";
 import { CardSidebar, CardWorkItems } from "../components/CardSidebar.js";
@@ -429,6 +433,7 @@ function CardContent({
           <LongContent>
             <p>{card.goal}</p>
           </LongContent>
+          <CardRiskTags tags={card.risk_tags} />
           <details className="acceptance-criteria" open>
             <summary>验收标准（{card.acceptance_criteria.length} 项）</summary>
             <LongContent>

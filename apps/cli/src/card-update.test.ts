@@ -153,6 +153,43 @@ test("updates named priority and planning states including none", async () => {
   }
 });
 
+test("sets, deduplicates and clears risk tags through the update_card gate", async () => {
+  const before = snapshot();
+  expect(
+    await run([
+      "card",
+      "update",
+      "C-1",
+      "--risk-tags",
+      " security, numeric_rule ,security",
+    ]),
+  ).toBe(0);
+  let after = snapshot();
+  expect(after.cards[0]).toEqual({
+    ...before.cards[0],
+    risk_tags: ["security", "numeric_rule"],
+  });
+  expect(after.events.at(-1)).toMatchObject({
+    type: "card_updated",
+    actor: { kind: "human", project_id: project },
+    payload: {
+      previous_risk_tags: [],
+      risk_tags: ["security", "numeric_rule"],
+    },
+  });
+  expect(output.join("\n")).toBe("已更新卡片 C-1：risk-tags");
+  expect(await run(["card", "update", "C-1", "--risk-tags=none"])).toBe(0);
+  after = snapshot();
+  expect(after.cards[0]?.risk_tags).toEqual([]);
+  expect(after.events.at(-1)).toMatchObject({
+    type: "card_updated",
+    payload: {
+      previous_risk_tags: ["security", "numeric_rule"],
+      risk_tags: [],
+    },
+  });
+});
+
 test("cancels unfinished work, preserves passed verification and other cards", async () => {
   await createCard();
   store.uow.run((tx) => {
@@ -268,6 +305,18 @@ test.each([
     message: "--priority",
   })),
   { args: ["--status", ""], message: "缺少 --status" },
+  ...[
+    "secret",
+    "Security",
+    "安全",
+    "security,",
+    "security,none",
+    "security;permission",
+  ].map((tags) => ({
+    args: ["--title", "Must not persist", "--risk-tags", tags],
+    message: "--risk-tags 只接受",
+  })),
+  { args: ["--risk-tags=", "--title", "x"], message: "缺少 --risk-tags" },
   { args: ["--superseded-by"], message: "--superseded-by 需要一个值" },
   { args: ["--superseded-by", ""], message: "缺少 --superseded-by" },
   { args: ["--superseded-by", "W-2"], message: "合法的卡片编号" },
@@ -337,6 +386,7 @@ test.each([["--help"], ["card", "--help"], ["card", "update", "--help"]])(
     expect(output.join("\n")).toContain("card update");
     expect(output.join("\n")).toContain("--superseded-by <C-m>");
     expect(output.join("\n")).toContain("已完成卡片不能取消");
+    expect(output.join("\n")).toContain("--risk-tags");
   },
 );
 
