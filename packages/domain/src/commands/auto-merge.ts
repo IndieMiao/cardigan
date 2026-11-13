@@ -15,6 +15,7 @@ import {
 import { mergeRequiresHuman, riskTagAutoMergeAllowed } from "./delegation.js";
 import { mergePlan } from "./merge.js";
 import { projectPreferences } from "./preferences.js";
+import { screenshotCheckBlocker } from "./screenshot-check.js";
 
 /** Also used by Needs You: no countdown is promised for an ineligible decision. */
 export function autoMergeSchedule(
@@ -58,6 +59,12 @@ export function autoMergeSchedule(
         (!card.risk_tags?.length || riskTagAutoMergeAllowed(state, decision)),
       "illegal_transition",
       "此合并须由人明确确认，不适用超时自动合并",
+    );
+    const screenshot = screenshotCheckBlocker(state, card);
+    ensure(
+      !screenshot,
+      "illegal_transition",
+      `${screenshot}，不适用超时自动合并`,
     );
     const opened = state.events.find(
       (e) =>

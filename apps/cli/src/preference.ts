@@ -153,7 +153,7 @@ export function runPreferenceCommand(
         : pmMerge
           ? `pm-merge-confirmation: ${pmMergeConfirmation(preferences) ? "on (PM 代确认合并)" : "off (由人确认)"}`
           : browser
-            ? `reviewer-browser: ${reviewerBrowserEnabled(preferences) ? "on (截图核对计入代确认)" : "off (灰度中，截图仍由人核实)"}`
+            ? `reviewer-browser: ${reviewerBrowserEnabled(preferences) ? "on (界面卡的截图核对须由独立复核员审核通过，PM 才能代确认)" : "off (灰度中，截图核对由 PM Office 或人核实)"}`
             : stall
               ? `merge-confirm-stall-after: ${mergeConfirmStallAfterMinutes(preferences)}`
               : snooze
