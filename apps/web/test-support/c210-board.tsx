@@ -6,7 +6,10 @@ import "@fontsource-variable/inter";
 import "@fontsource-variable/noto-sans-sc";
 import "@fontsource-variable/jetbrains-mono";
 import "../src/styles.css";
-import "./c210-board.css";
+
+// Product captures use the current stylesheet without prototype overrides.
+if (!new URLSearchParams(location.search).has("product"))
+  void import("./c210-board.css");
 
 // Design fixture only. All data stays local; the production App is unchanged.
 const before = new URLSearchParams(location.search).get("version") === "before";
