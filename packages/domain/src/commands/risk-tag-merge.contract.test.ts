@@ -3,6 +3,7 @@ import {
   type Actor,
   type Assignment,
   assign,
+  autoConfirmMerge,
   autoMergeSchedule,
   type CommandState,
   createWorkItem,
@@ -10,6 +11,7 @@ import {
   mergePlan,
   pmMergeBlockers,
   type RiskTag,
+  recordDecision,
   recordMergeCheck,
   requestDecision,
   resolveDelegatedDecision,
@@ -18,7 +20,9 @@ import {
   standingTools,
   submitReview,
   updateCard,
+  updateWorkItem,
   type WorkItem,
+  withdrawReview,
 } from "../index.js";
 import { CommandDraft } from "./core.js";
 import { assignDecision, riskTagAutoMergeAllowed } from "./delegation.js";
@@ -28,6 +32,7 @@ import {
   fixture,
   human,
   id,
+  now,
   ports,
   role,
 } from "./test-fixtures.js";
@@ -179,7 +184,17 @@ async function setup(
       },
       f.io,
     );
-  return { f, item, product, completion, tag, confirmation, check, resolve };
+  return {
+    f,
+    item,
+    owner,
+    product,
+    completion,
+    tag,
+    confirmation,
+    check,
+    resolve,
+  };
 }
 
 test.each(
@@ -553,4 +568,303 @@ test("source and affected-card business permissions still require the human", as
     expect(riskTagAutoMergeAllowed(state, confirmation())).toBe(false);
     expect(resolve(state).ok).toBe(false);
   }
+});
+
+async function authorize(
+  fixture: Awaited<ReturnType<typeof setup>>,
+  mode: "pm" | "timeout" | "human",
+) {
+  const { f, confirmation, resolve } = fixture;
+  if (mode === "pm") f.commit(resolve());
+  else if (mode === "human")
+    f.commit(
+      recordDecision(
+        f.state,
+        human,
+        {
+          decision_id: confirmation().id,
+          option: "merge",
+          rationale: "人工确认",
+          raw_quote: "合并",
+        },
+        f.io,
+      ),
+    );
+  else {
+    f.commit(
+      setProjectPreferences(
+        f.state,
+        human,
+        {
+          pm_merge_confirmation: false,
+          auto_merge_after_minutes: 1,
+        },
+        f.io,
+      ),
+    );
+    f.commit(
+      autoConfirmMerge(
+        f.state,
+        system,
+        { decision_id: confirmation().id },
+        {
+          ...f.io,
+          clock: {
+            now: () => new Date(Date.parse(now) + 120_000).toISOString(),
+          },
+        },
+      ),
+    );
+  }
+}
+
+test.each(["pm", "timeout"] as const)(
+  "adding a risk tag supersedes an unpublished %s authorization without independent review",
+  async (mode) => {
+    const fixture = await setup([], false);
+    const { f, confirmation, check } = fixture;
+    check("passed");
+    await authorize(fixture, mode);
+    const old = confirmation();
+    expect(mergePlan(f.state, f.card.id).ok).toBe(true);
+    f.commit(
+      updateCard(
+        f.state,
+        opsActor,
+        { card_id: f.card.id, risk_tags: ["security"] },
+        f.io,
+      ),
+    );
+    const next = confirmation();
+    expect(next).toMatchObject({
+      status: "open",
+      decider: "human",
+      amends: old.id,
+    });
+    expect(f.state.decisions.find((q) => q.id === old.id)).toMatchObject({
+      status: "superseded",
+      resolution: old.resolution,
+    });
+    expect(mergePlan(f.state, f.card.id).ok).toBe(false);
+    expect(autoMergeSchedule(f.state, next.id).ok).toBe(false);
+    expect(f.state.events).toContainEqual(
+      expect.objectContaining({
+        type: "decision_requested",
+        payload: expect.objectContaining({ decision_id: next.id }),
+      }),
+    );
+    expect(f.state.events).toContainEqual(
+      expect.objectContaining({
+        type: "decision_superseded",
+        payload: expect.objectContaining({
+          decision_id: old.id,
+          replacement_decision_id: next.id,
+        }),
+      }),
+    );
+    // Restoring ordinary status must not resurrect the superseded authority.
+    f.commit(
+      updateCard(
+        f.state,
+        opsActor,
+        { card_id: f.card.id, risk_tags: [] },
+        f.io,
+      ),
+    );
+    expect(confirmation().id).toBe(next.id);
+    expect(mergePlan(f.state, f.card.id).ok).toBe(false);
+  },
+);
+
+test.each(["open", "snoozed", "pm", "timeout"] as const)(
+  "removing required review hands the %s confirmation to the human atomically",
+  async (phase) => {
+    const fixture = await setup();
+    const { f, item, confirmation, check } = fixture;
+    if (!item) throw new Error("Missing independent review");
+    check("passed");
+    if (phase === "pm" || phase === "timeout") await authorize(fixture, phase);
+    if (phase === "snoozed")
+      f.commit(
+        resolveDelegatedDecision(
+          f.state,
+          opsActor,
+          {
+            decision_id: confirmation().id,
+            option: "hold",
+            rationale: "Later",
+          },
+          f.io,
+        ),
+      );
+    const old = confirmation();
+    f.commit(
+      updateWorkItem(
+        f.state,
+        opsActor,
+        { work_item_id: item.id, required: false },
+        f.io,
+      ),
+    );
+    expect(riskTagAutoMergeAllowed(f.state, confirmation())).toBe(false);
+    expect(confirmation().decider).toBe("human");
+    expect(mergePlan(f.state, f.card.id).ok).toBe(false);
+    const newRequest = f.state.events
+      .filter((e) => e.type === "decision_requested")
+      .at(-1);
+    expect(newRequest?.payload).toMatchObject({
+      decision_id: confirmation().id,
+    });
+    if (phase === "pm" || phase === "timeout") {
+      expect(confirmation()).toMatchObject({ status: "open", amends: old.id });
+      expect(f.state.decisions.find((q) => q.id === old.id)).toMatchObject({
+        status: "superseded",
+        resolution: old.resolution,
+      });
+    } else {
+      expect(confirmation()).toMatchObject({ id: old.id, status: old.status });
+      expect(newRequest?.payload).toMatchObject({
+        previous_decider: "role:pm",
+      });
+    }
+    // The new owner can actually finish the flow despite missing mandatory review.
+    await authorize(fixture, "human");
+    expect(mergePlan(f.state, f.card.id).ok).toBe(true);
+  },
+);
+
+test.each([false, true])(
+  "withdrawing review also hands over an unpublished merge (confirmed=%s)",
+  async (confirmed) => {
+    const fixture = await setup();
+    const { f, item, owner, confirmation, check } = fixture;
+    if (!item || !owner) throw new Error("Missing independent review");
+    check("passed");
+    if (confirmed) await authorize(fixture, "pm");
+    const old = confirmation();
+    f.commit(
+      withdrawReview(
+        f.state,
+        f.actor(owner),
+        { work_item_id: item.id, rationale: "发现遗漏" },
+        f.io,
+      ),
+    );
+    expect(confirmation().decider).toBe("human");
+    expect(confirmation().id === old.id).toBe(!confirmed);
+    expect(riskTagAutoMergeAllowed(f.state, confirmation())).toBe(false);
+    expect(mergePlan(f.state, f.card.id).ok).toBe(false);
+  },
+);
+
+test("publication rechecks risk eligibility even when a stored authorization was not synchronized", async () => {
+  const fixture = await setup();
+  const { f, item, confirmation, check } = fixture;
+  if (!item) throw new Error("Missing independent review");
+  check("passed");
+  await authorize(fixture, "pm");
+  const stale: CommandState = {
+    ...f.state,
+    work_items: f.state.work_items.map((w) =>
+      w.id === item.id ? { ...w, required: false } : w,
+    ),
+  };
+  expect(confirmation().status).toBe("resolved");
+  expect(mergePlan(stale, f.card.id)).toMatchObject({
+    ok: false,
+    error: {
+      code: "illegal_transition",
+      message: expect.stringContaining("旧代理确认不能用于合并"),
+    },
+  });
+});
+
+test("a legacy PM-held ineligible confirmation can still be escalated safely", async () => {
+  const { f, item, confirmation, check } = await setup();
+  if (!item) throw new Error("Missing independent review");
+  check("passed");
+  const stale: CommandState = {
+    ...f.state,
+    work_items: f.state.work_items.map((w) =>
+      w.id === item.id ? { ...w, required: false } : w,
+    ),
+  };
+  f.commit(
+    resolveDelegatedDecision(
+      stale,
+      opsActor,
+      {
+        decision_id: confirmation().id,
+        option: "merge",
+        rationale: "复核资格已变化",
+        escalate: true,
+      },
+      f.io,
+    ),
+  );
+  expect(confirmation()).toMatchObject({
+    status: "open",
+    decider: "human",
+    human_required_reason: expect.stringContaining("复核资格已变化"),
+  });
+  expect(mergePlan(f.state, f.card.id).ok).toBe(false);
+});
+
+test("eligibility updates retain a human's personal confirmation and a still-eligible PM authorization", async () => {
+  for (const mode of ["pm", "human"] as const) {
+    const fixture = await setup([], mode === "pm");
+    const { f, confirmation, check } = fixture;
+    check("passed");
+    await authorize(fixture, mode);
+    const old = confirmation();
+    f.commit(
+      updateCard(
+        f.state,
+        opsActor,
+        { card_id: f.card.id, risk_tags: ["security"] },
+        f.io,
+      ),
+    );
+    expect(confirmation()).toEqual(old);
+    expect(mergePlan(f.state, f.card.id).ok).toBe(true);
+  }
+});
+
+test("an ineligible handoff requires a personal human answer, not Office transcription", async () => {
+  const fixture = await setup([], false);
+  const { f, confirmation, check } = fixture;
+  check("passed");
+  f.commit(
+    updateCard(
+      f.state,
+      opsActor,
+      { card_id: f.card.id, risk_tags: ["security"] },
+      f.io,
+    ),
+  );
+  const office: Assignment = {
+    ...ops,
+    id: id("assignment", 901),
+    standing_mode: "office",
+  };
+  const officeActor: Actor = {
+    ...opsActor,
+    assignment_id: office.id,
+    allowed_tools: standingTools(role("pm").allowed_tools, "office"),
+  };
+  expect(
+    recordDecision(
+      { ...f.state, assignments: [...f.state.assignments, office] },
+      officeActor,
+      {
+        decision_id: confirmation().id,
+        option: "merge",
+        rationale: "转录",
+        raw_quote: "合并",
+      },
+      f.io,
+    ),
+  ).toMatchObject({ ok: false, error: { code: "forbidden_tool" } });
+  await authorize(fixture, "human");
+  expect(mergePlan(f.state, f.card.id).ok).toBe(true);
 });

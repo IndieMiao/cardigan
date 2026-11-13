@@ -19,7 +19,12 @@ import {
   unwrap,
 } from "./core.js";
 import { MAX_DECISION_ATTACHMENTS } from "./decision-attachments.js";
-import { assignDecision, mergeNeedsHuman } from "./delegation.js";
+import {
+  assignDecision,
+  handoffDecision,
+  mergeNeedsHuman,
+  riskTagAutoMergeAllowed,
+} from "./delegation.js";
 import { reopenMerge } from "./merge-rework.js";
 
 const newest = <T extends { readonly id: string }>(values: readonly T[]) =>
@@ -206,6 +211,13 @@ function planFor(state: CommandState, card_id: CardId, confirmed: boolean) {
         !card.sensitive || answeredByHuman(q),
         "illegal_transition",
         "敏感卡片的合并须由人亲自确认",
+      );
+      ensure(
+        !card.risk_tags?.length ||
+          answeredByHuman(q) ||
+          riskTagAutoMergeAllowed(state, q),
+        "illegal_transition",
+        "风险标签卡已不满足独立复核条件，旧代理确认不能用于合并，须由人重新确认",
       );
     }
     const decision = mergeBlockingDecisions(
@@ -438,6 +450,53 @@ export function syncSensitiveMerge(d: CommandDraft, card: Card) {
         type: "status_change",
         decision_id: q.id,
         body: `${q.id} 已作废：卡片不再敏感，按模板自动合并。`,
+      },
+    );
+  }
+}
+
+/** Recheck pending/unpublished delegated confirmations after eligibility changes. */
+export function syncRiskTagMerge(d: CommandDraft, card: Card) {
+  if (card.status !== "awaiting_merge" || !card.risk_tags?.length) return;
+  const state = {
+    cards: d.list("cards"),
+    decisions: d.list("decisions"),
+    work_items: d.list("work_items"),
+    deliveries: d.list("deliveries"),
+    reviews: d.list("reviews"),
+  };
+  const target = attempt(() => completion(state, card));
+  if (!target.ok) return;
+  const q = confirmation(state.decisions, card, target.value);
+  if (!q || riskTagAutoMergeAllowed(state, q)) return;
+  const reason =
+    "风险标签或独立复核资格已变化，当前不满足代确认条件，合并转交给人确认。";
+  if (
+    q.decider === "role:pm" &&
+    ["open", "provisional", "snoozed"].includes(q.status)
+  ) {
+    handoffDecision(d, q, reason);
+  } else if (
+    q.status === "resolved" &&
+    q.resolution?.option === "merge" &&
+    !answeredByHuman(q)
+  ) {
+    // Keep the old resolution/authority as history; never resurrect it when
+    // eligibility returns. The new confirmation has its own decision ID.
+    const next = requestConfirmation(d, card, target.value);
+    d.put("decisions", { ...next, context: `${next.context}\n\n${reason}` });
+    d.emit(
+      "decision_superseded",
+      card.id,
+      {
+        decision_id: q.id,
+        reason: "risk_tag_merge_ineligible",
+        replacement_decision_id: next.id,
+      },
+      {
+        type: "status_change",
+        decision_id: q.id,
+        body: `${q.id} 的旧代理合并确认已作废：${reason}`,
       },
     );
   }

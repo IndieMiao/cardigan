@@ -12,13 +12,13 @@ import {
   text,
   unwrap,
 } from "./core.js";
-import { handoffUnauthorizedDecisions } from "./delegation.js";
 import {
   checkEmployeeNotExternal,
   checkEmployeeSeparation,
   resolveEmployee,
   selectEmployee,
 } from "./employee-assignment.js";
+import { syncRiskTagMerge } from "./merge.js";
 import {
   applyPreMergeCheck,
   type PreMergeCheckInput,
@@ -295,13 +295,7 @@ export function updateCard(
       },
       { type: "status_change", body: result.title },
     );
-    if (p.risk_tags !== undefined)
-      handoffUnauthorizedDecisions(
-        d,
-        "风险标签已更新，未满足代确认条件的合并须交人确认。",
-        undefined,
-        card.id,
-      );
+    if (p.risk_tags !== undefined) syncRiskTagMerge(d, result);
     return result;
   });
 }
@@ -606,6 +600,8 @@ export function updateWorkItem(
         });
     }
     if (resumed) queueResumedRun(d, item, event);
+    if (p.required !== undefined && item.role_id === "independent_reviewer")
+      syncRiskTagMerge(d, card);
     return result;
   });
 }

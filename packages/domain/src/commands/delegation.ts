@@ -259,12 +259,10 @@ export function handoffUnauthorizedDecisions(
   d: CommandDraft,
   reason: string,
   assignmentId?: string,
-  cardId?: CardId,
 ) {
   for (const q of d.list("decisions")) {
     if (
       q.decider === "role:pm" &&
-      (!cardId || q.card_id === cardId) &&
       ["open", "provisional", "snoozed"].includes(q.status) &&
       (!hasActivePmOps(
         d,
