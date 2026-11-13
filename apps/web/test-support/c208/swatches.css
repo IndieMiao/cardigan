@@ -1,0 +1,45 @@
+.swatch-sheet {
+  max-width: 1400px;
+  margin: auto;
+  padding: 32px;
+}
+.swatch-levels {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 20px;
+}
+.swatch-level {
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.level-0 {
+  background: var(--bg);
+}
+.level-1 {
+  background: var(--surface);
+}
+.level-2 {
+  background: var(--surface-muted);
+}
+.swatch-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 20px 0;
+}
+.swatch-controls {
+  margin-top: 24px;
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+@media (max-width: 700px) {
+  .swatch-sheet {
+    padding: 20px;
+  }
+  .swatch-levels {
+    grid-template-columns: 1fr;
+  }
+}
