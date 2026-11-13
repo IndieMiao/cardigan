@@ -94,8 +94,10 @@ JSON 文档加字段兼容，不需要新表（`decisions` 本身已是按项目
 | `merge` | `none` |
 | `require_acceptance_criteria` | `true` |
 | `primary_work_item_key` | `design_production` |
-| `work_items` | `design_production`（produce，`ui_ux_designer`，必需）→ `design_review`（verify，`design_director`，`target_work_item_key=design_production`，必需）→ `pm_acceptance`（verify，`pm`，复用 `PM_ACCEPTANCE_WORK_ITEM_KEY` 常量，`packages/domain/src/templates.ts:25-30`，必需） |
+| `work_items` | `design_production`（produce，`ui_ux_designer`，必需）→ `design_review`（verify，`design_director`，`target_work_item_key=design_production`，必需） |
 | `completion` | `{mode:"review", reviewer:"human"}` |
+
+设计卡由人审批完成（`completion.reviewer=human`），不设 PM 验收。
 
 **流程**：设计师产出（`submit_delivery(kind=design, subject=artifact_sha256|doc_version, attachments=[截图...])`）→ 设计总监验证（`submit_review`，有 `must_fix` 即驳回，回到设计师，走现有 §4.4 返工机制，不新增状态）→ 主产出负责人（`ui_ux_designer`）提交 `kind=card_completion` 的完成申请 → **人拍板**（不是 PM）：通过即卡片完成，退回即回到设计师重做、设计总监重新验证。
 
