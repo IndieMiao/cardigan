@@ -112,9 +112,6 @@ const baseline = withCurrentBoard(
     ),
   ),
 );
-const executionAllowance = `.execution-table th { white-space: nowrap; }
-.execution-status { grid-template-columns: auto minmax(min-content, 1fr); }
-.execution-status :is(dt, .status) { white-space: nowrap; }`;
 // C-134 replaces the decision history cards with compact records.
 const decisionHistoryAllowance = css.slice(
   css.indexOf("/* C-134 decision history: compact records. */"),
@@ -148,7 +145,7 @@ const server = await createServer({
 const routes = [
   ["card", "cards/C-1", ".timeline-load"],
   ["needs-you", "needs-you", ".needs-item"],
-  ["execution", "execution?view=all", ".execution-row"],
+  ["execution", "execution?view=all", ".execution-row, .execution-card"],
   ["decision-history", "decision-history", ".decision-record"],
   ["snapshot", "snapshot", ".delivery-table"],
   ["settings", "settings", "#preferences form"],
@@ -328,7 +325,8 @@ try {
               "fixed",
           };
         });
-        if (name === "execution") {
+        // C-207: below 760px the execution view renders cards, not a table.
+        if (name === "execution" && width > 760) {
           const headers = await run(() =>
             Array.from(
               document.querySelectorAll(".execution-table th"),
@@ -355,7 +353,7 @@ try {
               },
             ),
           );
-          assert.equal(headers.length, 9, `${label}: missing column headers`);
+          assert.equal(headers.length, 6, `${label}: missing column headers`);
           for (const header of headers) {
             assert(
               header.tops.length > 0,
@@ -370,9 +368,7 @@ try {
           // C-159: status labels in the run status column stay on one line.
           const statuses = await run(() =>
             Array.from(
-              document.querySelectorAll(
-                ".execution-status dt, .execution-status .status",
-              ),
+              document.querySelectorAll(".execution-state .status"),
               (el) => {
                 const range = document.createRange();
                 range.selectNodeContents(el);
@@ -397,7 +393,7 @@ try {
               },
             ),
           );
-          assert.equal(statuses.length, 28, `${label}: missing status labels`);
+          assert.equal(statuses.length, 8, `${label}: missing status labels`);
           for (const status of statuses)
             assert(
               status.lines <= 1,
@@ -602,7 +598,7 @@ try {
               label,
             );
           }
-          if (name === "execution" || name === "snapshot") {
+          if ((name === "execution" && width > 760) || name === "snapshot") {
             const scroll = await run(
               (selector) => {
                 const el = document.querySelector(selector);
@@ -638,22 +634,23 @@ try {
           assert(layout.fixed, label);
           assert.equal(layout.main.x, 220, label);
           const current = await geometry();
-          // C-122 and C-159 intentionally change header and status wrapping
-          // and column widths. Keep comparing the full desktop geometry with
-          // only those allowances.
-          await setCss(
-            name === "execution"
-              ? `${baseline}\n${executionAllowance}`
-              : name === "decision-history"
+          // C-207 redesigns the execution view (new DOM and stylesheet), so
+          // it is not compared with the baseline; execution-layout-screenshots
+          // checks its row heights and first screen instead. C-134 changes
+          // the decision history records with its own allowance.
+          if (name !== "execution") {
+            await setCss(
+              name === "decision-history"
                 ? `${baseline}\n${decisionHistoryAllowance}`
                 : baseline,
-          );
-          assert.deepEqual(
-            await geometry(),
-            current,
-            `${label}: desktop layout changed`,
-          );
-          await setCss(css);
+            );
+            assert.deepEqual(
+              await geometry(),
+              current,
+              `${label}: desktop layout changed`,
+            );
+            await setCss(css);
+          }
         }
         console.log(`PASS ${label}`);
       }

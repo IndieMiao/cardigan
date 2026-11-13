@@ -8,14 +8,14 @@ export function PageTitle({
   actions,
 }: {
   title: ReactNode;
-  description: ReactNode;
+  description?: ReactNode;
   actions?: ReactNode;
 }) {
   return (
     <header className="page-title">
       <div>
         <h1>{title}</h1>
-        <p>{description}</p>
+        {description && <p>{description}</p>}
       </div>
       {actions && <div className="page-actions">{actions}</div>}
     </header>

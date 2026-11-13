@@ -74,7 +74,7 @@ export async function chromium() {
       await exited;
       clearTimeout(timer);
     }
-    await rm(profile, { recursive: true, force: true });
+    await rm(profile, { recursive: true, force: true, maxRetries: 10 });
   }
   try {
     const { targetId } = await send("Target.createTarget", {
