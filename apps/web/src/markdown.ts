@@ -1,4 +1,5 @@
 import MarkdownIt from "markdown-it";
+import { idBadgeClass, idType } from "./id-types.js";
 
 /**
  * Markdown rendering for Agent-written bodies (M5 plan §3.2, §3.7).
@@ -63,12 +64,48 @@ markdown.renderer.rules.link_open = (
 ) => {
   const token = tokens[index];
   const href = String(token?.attrGet("href") ?? "");
+  // Decorate an existing internal number link; never create or resolve one.
+  // Only a single text label is eligible, so code/formatting stays untouched.
+  const label = tokens[index + 1];
+  if (
+    href.startsWith("#/p/") &&
+    label?.type === "text" &&
+    tokens[index + 2]?.type === "link_close"
+  ) {
+    const match = /^(\S+)(?: (.+))?$/u.exec(label.content);
+    const id = match?.[1] ?? "";
+    // Keep the historical spelling visible, as linkifyReferences does.
+    const canonical = id.replace(
+      /^([qh])\(([1-9][0-9]*)\)$/u,
+      (_, prefix, n) => `${prefix.toUpperCase()}-${n}`,
+    );
+    const type = idType(canonical);
+    if (type) {
+      token?.attrJoin("class", "id-tag");
+      label.type = "id_reference";
+      label.meta = { id, canonical, description: match?.[2] ?? type.label };
+    }
+  }
   if (/^https?:\/\//i.test(href)) {
     // An external page must not get a handle on this window.
     token?.attrSet("target", "_blank");
     token?.attrSet("rel", "noopener noreferrer");
   }
   return defaultLinkOpen(tokens, index, options, environment, self);
+};
+
+markdown.renderer.rules.id_reference = (tokens, index) => {
+  const meta = tokens[index]?.meta;
+  if (!meta) return "";
+  const { id, canonical, description } = meta;
+  if (
+    typeof id !== "string" ||
+    typeof canonical !== "string" ||
+    typeof description !== "string"
+  )
+    return "";
+  const escapeHtml = markdown.utils.escapeHtml;
+  return `<span class="${idBadgeClass(canonical)}">${escapeHtml(id)}</span> <span class="id-description">${escapeHtml(description)}</span>`;
 };
 
 /** Render one body to HTML; the caller owns the container element. */

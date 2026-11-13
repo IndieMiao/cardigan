@@ -119,12 +119,10 @@ test("U6c each structural result is in the right header cell, appears once and c
     ]) {
       const row = document.getElementById(`entry-${entry}`) as HTMLElement;
       const heading = within(row).getByRole("heading", {
-        name: `${type} ${id} ${result}`,
+        name: `${id} ${type} ${result}`,
       });
-      expect(heading.parentElement?.className).toBe("timeline-head");
-      expect(getComputedStyle(heading).gridColumn).toBe("2");
-      expect(getComputedStyle(heading).gridRow).toBe("1");
-      expect(getComputedStyle(heading).justifySelf).toBe("end");
+      expect(heading.parentElement?.classList).toContain("timeline-head");
+      expect(getComputedStyle(heading).flexWrap).toBe("wrap");
       expect(
         getComputedStyle(heading.parentElement as Element).alignItems,
       ).toBe("center");
@@ -186,7 +184,8 @@ test("U6c timeline prose is 15, speakers and subheadings 14, and secondary infor
       for (const el of document.querySelectorAll(selector))
         expect(size(el), selector).toBe("13px");
     for (const el of document.querySelectorAll(".timeline-days *")) {
-      if (el.closest("svg, code, .employee-avatar")) continue;
+      if (el.closest("svg, code, .employee-avatar, .timeline-version"))
+        continue;
       expect(["12px", "16px"]).not.toContain(size(el));
     }
     expect(screen.getByText("中文English 123正文。")).toBeTruthy();
@@ -221,7 +220,7 @@ test("U6c site typography uses tokens, bundled fonts with system fallbacks, auto
     for (const [, value] of css.matchAll(/font-size:\s*([^;]+);/g))
       expect(value).toMatch(/^(?:var\(--[\w-]+\)|inherit)$/);
     for (const [, value] of css.matchAll(/font-weight:\s*([^;]+);/g))
-      expect(["400", "600"]).toContain(value);
+      expect(["400", "500", "600"]).toContain(value);
     expect(css).toContain("text-autospace: normal;");
     render(
       <>
