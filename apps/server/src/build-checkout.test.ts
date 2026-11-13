@@ -1,11 +1,21 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import {
   acknowledgeRun,
   queueRun,
   type Run,
   type Runtime,
+  releaseAssignment,
 } from "@cardigan/domain";
 import {
   CentralRepositoryService,
@@ -15,7 +25,12 @@ import {
   CentralGitTransport,
   LocalGitTransport,
 } from "@cardigan/git-transport";
-import { launchEntities, worktreeBaselinePrompt } from "@cardigan/host";
+import {
+  launchEntities,
+  prepareRoleWorktree,
+  worktreeBaselinePrompt,
+  worktreeProvider,
+} from "@cardigan/host";
 import { parseLaunchConfig } from "@cardigan/roles";
 import { executionPaths } from "@cardigan/runtime-herdr";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
@@ -244,14 +259,23 @@ test("removal re-checks idleness under the repository lock", async () => {
   expect(await git.listBuildCheckouts(project)).toEqual([s.reviewer.id]);
 });
 
-test("a later Run at a new delivery replaces the checkout; the same SHA keeps it", async () => {
+test("every Run starts from a fresh checkout, even at the same SHA", async () => {
   await startReviewer();
   const build = buildPath();
+  // The previous Run edited, staged and added sources and installed deps.
+  writeFileSync(join(build, "version"), "patched-by-prior-run");
+  writeFileSync(join(build, "staged"), "staged source");
+  git(build, "add", "staged");
+  writeFileSync(join(build, "extra.ts"), "untracked source");
   mkdirSync(join(build, "node_modules"));
   f.endRun(s.reviewer);
-  // Same SHA, cleanup not yet run: the next Run keeps the installed deps.
+  // Same SHA and the cleanup loop has not run yet.
   await startReviewer();
-  expect(existsSync(join(build, "node_modules"))).toBe(true);
+  expect(git(build, "rev-parse", "HEAD")).toBe(sha);
+  expect(readFileSync(join(build, "version"), "utf8")).toBe("one");
+  expect(git(build, "status", "--porcelain", "--ignored")).toBe("");
+  for (const name of ["staged", "extra.ts", "node_modules"])
+    expect(existsSync(join(build, name))).toBe(false);
   f.endRun(s.reviewer);
   writeFileSync(join(source, "version"), "two");
   git(source, "add", ".");
@@ -273,7 +297,156 @@ test("a later Run at a new delivery replaces the checkout; the same SHA keeps it
   f.endRun(s.coder);
   await startReviewer();
   expect(git(build, "rev-parse", "HEAD")).toBe(next);
-  expect(existsSync(join(build, "node_modules"))).toBe(false);
+  expect(readFileSync(join(build, "version"), "utf8")).toBe("two");
+});
+
+test("a registration whose directory vanished is rebuilt and also cleaned up", async () => {
+  await startReviewer();
+  const build = buildPath();
+  rmSync(build, { recursive: true, force: true });
+  f.endRun(s.reviewer);
+  // The next Run recovers instead of returning a directory that is not there.
+  await startReviewer();
+  expect(git(build, "rev-parse", "HEAD")).toBe(sha);
+  expect(readFileSync(join(build, "version"), "utf8")).toBe("one");
+  // Without a next Run, cleanup still finds and removes the stale entry.
+  rmSync(build, { recursive: true, force: true });
+  const project = serverGit().projectOf(f.project_id);
+  if (!project) throw new Error("missing project");
+  expect(await serverGit().listBuildCheckouts(project)).toEqual([
+    s.reviewer.id,
+  ]);
+  f.endRun(s.reviewer);
+  await cleanup().tick(f.project_id);
+  expect(git(clone(), "worktree", "list", "--porcelain")).not.toContain(build);
+  expect(await serverGit().listBuildCheckouts(project)).toEqual([]);
+});
+
+test("a failed preparation is a diagnosable start failure, on the server and the CLI path", async () => {
+  // Unregistered leftovers the host must not recurse into block a fresh build.
+  mkdirSync(join(buildPath(), "leftover"), { recursive: true });
+  await expect(
+    prepareRoleWorktree(
+      {
+        store: f.store,
+        execution: { mode: "local", dataDir: f.dataDir },
+        runtime,
+      },
+      f.project_id,
+      s.reviewer.id,
+    ),
+  ).rejects.toThrow(/unregistered leftover contents/);
+  const entities = launchEntities(f.store, f.project_id, s.reviewer.id);
+  // `cardigan assignment start` uses this provider directly.
+  await expect(
+    worktreeProvider(
+      { mode: "local", dataDir: f.dataDir },
+      runtime,
+    )({
+      project_id: f.project_id,
+      source_repo: source,
+      assignment: entities.assignment,
+      role: entities.role,
+      card: entities.card,
+      work_item: entities.workItem,
+      target_sha: sha,
+    }),
+  ).rejects.toThrow(/unregistered leftover contents/);
+  // The Dispatcher's start path reports it as a launch failure; no Agent starts.
+  await expect(startReviewer()).rejects.toThrow();
+  expect(runtime.provision).not.toHaveBeenCalled();
+  expect(existsSync(join(buildPath(), "leftover"))).toBe(true);
+});
+
+test("a released Assignment keeps its build until its terminal exit is confirmed", async () => {
+  await startReviewer();
+  f.endRun(s.reviewer);
+  f.apply((state, actor, ports) =>
+    releaseAssignment(state, actor, { assignment_id: s.reviewer.id }, ports),
+  );
+  const reports: string[] = [];
+  let release = false;
+  runtime.release = async () =>
+    release
+      ? ok(undefined)
+      : {
+          ok: false as const,
+          error: { code: "runtime_unavailable", message: "still alive" },
+        };
+  runtime.status = async () =>
+    ok({ process: "alive", agent: "working", observed_seq: 1 });
+  const executor = new CleanupExecutor({
+    store: f.store,
+    git: serverGit(),
+    runtime,
+    clock: f.clock,
+    report: (message) => reports.push(message),
+  });
+  await executor.tick(f.project_id);
+  expect(existsSync(buildPath())).toBe(true);
+  expect(reports.some((r) => r.includes("terminal release"))).toBe(true);
+  release = true;
+  await executor.tick(f.project_id);
+  expect(existsSync(buildPath())).toBe(false);
+});
+
+test("a push from the build checkout stops at a central repository the Agent account cannot access", async () => {
+  await startReviewer();
+  const build = buildPath();
+  const before = refs(central());
+  writeFileSync(join(build, "version"), "pushed by verifier");
+  git(build, "commit", "-qam", "attempted push");
+  // agent-ssh layout: the center sits in the host's private 0700 data
+  // directory, which the agent account cannot enter. Emulate that here.
+  const parent = join(f.dataDir, "central");
+  chmodSync(parent, 0o000);
+  try {
+    for (const target of [
+      "HEAD:refs/heads/main",
+      "HEAD:refs/cardigan/deliveries/D-999",
+    ])
+      expect(() => git(build, "push", "origin", target)).toThrow(
+        /Permission denied|does not appear to be a git repository/,
+      );
+  } finally {
+    chmodSync(parent, 0o700);
+  }
+  expect(refs(central())).toBe(before);
+  // The build's origin is that host-private center, never another Agent path.
+  expect(git(build, "config", "--get", "remote.origin.url")).toBe(central());
+});
+
+test("preparing and removing a build touches no other Assignment directory or shared cache", async () => {
+  // A shared dependency cache and another Assignment's worktree beside it.
+  const cache = join(root(), "cache", "pnpm-store");
+  mkdirSync(cache, { recursive: true });
+  writeFileSync(join(cache, "index"), "content-addressed");
+  f.startRun(s.coder);
+  const coderTree = join(root(), "worktrees", f.project_id, s.coder.id);
+  mkdirSync(coderTree, { recursive: true });
+  writeFileSync(join(coderTree, "work"), "coder work");
+  f.endRun(s.coder);
+  const snapshot = () =>
+    JSON.stringify(
+      [cache, coderTree].map((dir) =>
+        readdirSync(dir, { recursive: true, withFileTypes: true })
+          .filter((entry) => entry.isFile())
+          .map((entry) => {
+            const path = join(entry.parentPath, entry.name);
+            const info = statSync(path);
+            return [path, info.mtimeMs, readFileSync(path, "utf8")];
+          }),
+      ),
+    );
+  const before = snapshot();
+  await startReviewer();
+  // The verifier builds: outputs stay inside its own leaf.
+  mkdirSync(join(buildPath(), "node_modules", ".pnpm"), { recursive: true });
+  writeFileSync(join(buildPath(), "node_modules", ".pnpm", "lock"), "x");
+  f.endRun(s.reviewer);
+  await cleanup().tick(f.project_id);
+  expect(existsSync(buildPath())).toBe(false);
+  expect(snapshot()).toBe(before);
 });
 
 test("reconcile does not report a build checkout in use or within the cleanup grace", async () => {
@@ -376,7 +549,7 @@ test("only a readonly verifier at a delivery SHA gets a build checkout", async (
   expect(existsSync(join(root(), "builds"))).toBe(false);
 });
 
-test("the prompt names the build checkout, or says it is unavailable", () => {
+test("the prompt names the fresh build checkout", () => {
   expect(
     worktreeBaselinePrompt({
       path: "/w",
@@ -384,14 +557,7 @@ test("the prompt names the build checkout, or says it is unavailable", () => {
       build: { path: "/b", sha },
     }),
   ).toBe(
-    `可写构建目录：/b（交付 ${sha} 的独立检出，可安装依赖、构建和跑测试；只读 worktree 保持不动。本次 Run 结束后主机会删除它，里面的改动不会保留，也不会被拉取、交付或合并）。`,
+    `可写构建目录：/b（交付 ${sha} 的全新独立检出，可安装依赖、构建和跑测试；只读 worktree 保持不动。本次 Run 结束后主机会删除它，里面的改动不会保留，也不会被拉取、交付或合并）。`,
   );
-  expect(
-    worktreeBaselinePrompt({
-      path: "/w",
-      base_sha: sha,
-      build: { unavailable: true },
-    }),
-  ).toContain("本次没有可写构建目录");
   expect(worktreeBaselinePrompt({ path: "/w", base_sha: sha })).toBeUndefined();
 });

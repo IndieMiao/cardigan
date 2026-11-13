@@ -344,10 +344,13 @@ export class GitWorktreeService {
 
   /**
    * P2a-3: give a readonly verifier a writable, detached checkout of the
-   * delivery it verifies. An existing checkout at the same commit is kept (the
-   * verifier may be mid-build); one at another commit is disposable and is
-   * replaced. Only `git worktree add --detach` is used: no branch is created,
-   * and the central repository is only read.
+   * delivery it verifies. Every preparation starts from a fresh checkout: a
+   * previous Run's checkout (even at the same commit) may hold edited,
+   * staged or untracked sources and stale build outputs, so it is force
+   * removed first — including a registration whose directory vanished. The
+   * Dispatcher prepares once per Run, before the bell, so this never pulls a
+   * directory from under a running verifier. Only `git worktree add
+   * --detach` is used: no branch is created; the central repository is read.
    */
   async ensureBuildCheckout(
     input: EnsureWorktreeInput,
@@ -387,19 +390,22 @@ export class GitWorktreeService {
         repository,
         input.target_sha as string,
       );
-      const existing = (await this.git.listWorktrees(repository)).find(
+      const registered = (await this.git.listWorktrees(repository)).some(
         (w) => resolve(w.path) === path,
       );
-      if (existing && !existing.branch && existing.head === sha)
-        return { path, sha };
-      if (existing) await this.dropBuild(repository, path);
-      else await this.pruneBuild(path);
+      if (registered) await this.dropBuild(repository, path);
+      else
+        await this.pruneBuild(path).catch((error) => {
+          throw new Error(
+            `Build checkout ${path} has unregistered leftover contents (${code(error) ?? "unknown"}); remove it before the next Run`,
+          );
+        });
       await this.git.addWorktree(repository, path, sha);
       return { path, sha };
     });
   }
 
-  /** Assignments with a build checkout directory (plus its registrations). */
+  /** Assignments with a build checkout directory or a Git registration. */
   async listBuildCheckouts(project_id: string): Promise<readonly string[]> {
     if (!/^[a-zA-Z0-9_][a-zA-Z0-9._-]*$/u.test(project_id))
       throw new Error("Invalid project path component");
@@ -408,9 +414,7 @@ export class GitWorktreeService {
     const found = new Set(
       (await subdirectories(root)).map((path) => basename(path)),
     );
-    // Every cleanup round calls this: skip Agent Git when nothing is on disk.
-    // A registration without its directory is left to reconcile to report.
-    if (found.size === 0) return [];
+    // A registration whose directory vanished is a cleanup candidate as well.
     const hasClone = await access(repository).then(
       () => true,
       () => false,
