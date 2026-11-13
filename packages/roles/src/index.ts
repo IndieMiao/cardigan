@@ -2,6 +2,10 @@ export {
   type AssignmentIdentity,
   type AssignmentMcpEndpoint,
   type AssignmentRoleInput,
+  BROWSER_CAPABILITY,
+  BROWSER_MCP_ARGS,
+  BROWSER_MCP_SERVER_NAME,
+  BROWSER_TOOL_PATTERN,
   type CompileAssignmentInput,
   type CompiledAssignmentLaunch,
   compileAssignmentLaunch,
@@ -36,6 +40,9 @@ export {
 export { REDACTED, redactLaunch } from "./redact.js";
 export {
   AGENT_PROTOCOL,
+  BROWSER_BOUNDARY_RULE,
+  BROWSER_ROLES,
+  BROWSER_SCREENSHOT_RULE,
   type ConvertedRoleInstructions,
   composeRolePrompt,
   convertLegacyRole,
@@ -63,6 +70,7 @@ export {
   SHARED_BOUNDARIES,
 } from "./role-pack.js";
 export {
+  type BrowserLaunchDefinition,
   type LaunchConfig,
   type LaunchProfileDefinition,
   type ProviderDefinition,

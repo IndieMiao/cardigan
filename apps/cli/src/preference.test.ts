@@ -161,6 +161,27 @@ test("PM merge confirmation defaults on and the human can switch it from the CLI
   ).not.toBe(0);
 });
 
+test("P2a-14 ⑧: reviewer-browser is off by default and the human can switch it", async () => {
+  expect(await run(["preference", "get", "reviewer-browser"])).toBe(0);
+  expect(output).toEqual(["reviewer-browser: off (灰度中，截图仍由人核实)"]);
+  expect(await run(["preference", "set", "reviewer-browser", "on"])).toBe(0);
+  expect(output).toContain("reviewer-browser: on (截图核对计入代确认)");
+  expect(
+    store.uow.read((tx) =>
+      tx.project_preferences.get("preferences", "preferences"),
+    )?.enable_reviewer_browser,
+  ).toBe(true);
+  expect(await run(["preference", "set", "reviewer-browser", "off"])).toBe(0);
+  expect(await run(["preference", "get", "reviewer-browser"])).toBe(0);
+  expect(output).toEqual(["reviewer-browser: off (灰度中，截图仍由人核实)"]);
+  for (const bad of [
+    ["set", "reviewer-browser", "maybe"],
+    ["set", "reviewer-browser", "10"],
+    ["set", "reviewer-browser"],
+  ])
+    expect(await run(["preference", ...bad])).not.toBe(0);
+});
+
 test("merge-confirm-snooze-default defaults to 240, persists minutes with an audit event and rejects off", async () => {
   expect(await run(["preference", "get", "merge-confirm-snooze-default"])).toBe(
     0,

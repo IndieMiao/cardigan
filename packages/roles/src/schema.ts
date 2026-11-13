@@ -53,14 +53,35 @@ const profileSchema = z.strictObject({
   args: z.array(z.string()).optional(),
 });
 
+const absolutePathSchema = z
+  .string()
+  .min(1)
+  .regex(/^\/[^\0\n]*$/u, "must be an absolute path");
+
+/**
+ * P2a-14 ⑧: the host's local headless browser for roles with the `browser`
+ * capability. Host policy only (launch.yaml lives outside every project
+ * repository); without this section no Assignment gets a browser.
+ */
+const browserSchema = z.strictObject({
+  /** Installed `@playwright/mcp` CLI, e.g. `/opt/playwright-mcp-<v>/bin/mcp-server-playwright`. */
+  command: absolutePathSchema,
+  /** Read-only shared Chromium, exported as `PLAYWRIGHT_BROWSERS_PATH`. */
+  browsers_path: absolutePathSchema,
+  /** Extra arguments appended after Cardigan's own. */
+  args: z.array(z.string()).optional(),
+});
+
 const launchConfigSchema = z.strictObject({
   providers: z.record(nameSchema, providerSchema).default({}),
   profiles: z.record(nameSchema, profileSchema).default({}),
+  browser: browserSchema.optional(),
 });
 
 export type ProviderDefinition = z.infer<typeof providerSchema>;
 export type LaunchProfileDefinition = z.infer<typeof profileSchema>;
 export type LaunchConfig = z.infer<typeof launchConfigSchema>;
+export type BrowserLaunchDefinition = z.infer<typeof browserSchema>;
 
 export interface ResolvedProfile {
   readonly name: string;

@@ -5,7 +5,11 @@ import {
   STANDING_ROLE_TOOLS,
   type ToolName,
 } from "@cardigan/domain";
-import type { AssignmentRoleInput } from "./assignment.js";
+import {
+  type AssignmentRoleInput,
+  BROWSER_CAPABILITY,
+  BROWSER_TOOL_PATTERN,
+} from "./assignment.js";
 import type { Harness } from "./harness.js";
 import { composeRolePrompt } from "./prompt.js";
 
@@ -55,6 +59,24 @@ export const PM_TEMPLATE_RULES = [
  * C-162: when a human action must hold the card's merge (C-112 `blocks_merge`).
  * Shared verbatim by every default role so the wording cannot drift.
  */
+/**
+ * P2a-14 ⑧: the local browser's boundary. A role rule, not a network
+ * restriction (ADR 0006 decision 6): the Agent already has a shell, and the
+ * real boundaries are the Workbench password and the Card MCP token.
+ */
+export const BROWSER_BOUNDARY_RULE = `有浏览器工具（\`${BROWSER_TOOL_PATTERN}\`）时，被测页面只能是你自己起的本地 dev server（验证方在主机准备的可写构建目录，产出方在当前 worktree）；不得打开生产 Workbench，不得导航到 127.0.0.1:7781 或其它已知 Workbench 端口，也不在浏览器里登录任何账号。没有浏览器工具时如实写未核，不声称看过页面。`;
+
+/** P2a-14 ⑧: what the independent reviewer does with the browser on UI cards. */
+export const BROWSER_SCREENSHOT_RULE =
+  "界面卡用浏览器工具截图核对亮色、暗色两套主题和 390px 窄屏，视口与主题切换沿用项目已有的截图约定；截图用 `upload_attachment(kind=evidence)` 附到卡片留痕，核对结论写进 `submit_review`。";
+
+/** Default roles that carry the `browser` capability (ADR 0006 decision 6). */
+export const BROWSER_ROLES = [
+  "ui_ux_designer",
+  "design_director",
+  "independent_reviewer",
+] as const;
+
 export const HUMAN_ACTION_MERGE_RULE =
   "事项不完成就不应该合并时（例如需要人提供或轮换凭据、人确认安全或权限取舍、人在仓库外完成某个前置操作），`request_human_action` 必须传 `blocks_merge=true`；只是请人看看、知会或可以事后补做的，不设。";
 
@@ -265,6 +287,8 @@ const ROLE_BODIES: Record<
     "- 有阻塞问题必须标为 must_fix 并退回，不能只提建议却通过；`verdict` 和 `blocking` 由服务端计算。第二轮起只复查上轮问题，新问题必须是 critical 并带 proof。",
     "- 审核上限为 2 轮；两轮未通过即进入 waiting_decision 交人处理，不自行安排第三轮或反复退回。",
     "- 不改交付代码、不 commit、不 push；需要跑测试时使用主机准备的可写构建目录，遵守卡片测试范围。",
+    `- ${BROWSER_SCREENSHOT_RULE}`,
+    `- ${BROWSER_BOUNDARY_RULE}`,
     "- 需要人操作时用 `request_human_action`。",
     `- ${HUMAN_ACTION_MERGE_RULE}`,
   ].join("\n"),
@@ -298,6 +322,7 @@ const ROLE_BODIES: Record<
     "- 收到驳回后先用 `get_card` / `get_updates` 看清问题，再提交新版本；新版本会让旧版本的审核失效，设计总监要对新版本重新验证。",
     "- 主产出工作项的负责人在设计总监通过后提交 `kind=card_completion` 的完成申请，逐条对照验收标准，并把设计稿截图和设计说明放进这次交付的 `attachments[]`，供人拍板时查看。",
     "- 在仓库里改动时只在当前 worktree 与分支上本地 commit，不 push。",
+    `- ${BROWSER_BOUNDARY_RULE}`,
     "- 被阻塞时用 `report_blocker`，需要人操作时用 `request_human_action`。",
     `- ${HUMAN_ACTION_MERGE_RULE}`,
   ].join("\n"),
@@ -315,6 +340,7 @@ const ROLE_BODIES: Record<
     "- 有 `must_fix` 的问题就是驳回；`verdict` 与 `blocking` 由服务端计算，不要自己声明通过。",
     "- 第二轮起只复查上一轮的问题是否修好；要新开问题必须是 critical 并带 proof。",
     "- 不改设计稿，不改代码，不 push；修改建议写进审核问题。",
+    `- ${BROWSER_BOUNDARY_RULE}`,
     "- 需要人操作时用 `request_human_action`。",
     `- ${HUMAN_ACTION_MERGE_RULE}`,
   ].join("\n"),
@@ -475,7 +501,14 @@ export function defaultRoleDefinition(
     worktree:
       role === "host_ops" ? "none" : kind === "produce" ? "write" : "readonly",
     capabilities:
-      role === "host_ops" ? [] : [kind === "standing" ? "verify" : kind],
+      role === "host_ops"
+        ? []
+        : [
+            kind === "standing" ? "verify" : kind,
+            ...((BROWSER_ROLES as readonly string[]).includes(role)
+              ? [BROWSER_CAPABILITY]
+              : []),
+          ],
     allowed_tools:
       role === "host_ops"
         ? HOST_OPS_ROLE_TOOLS
@@ -504,6 +537,9 @@ export function defaultRoles(
     launch_profile: options[role].launch_profile,
     worktree: options[role].worktree,
     allowed_tools: options[role].allowed_tools,
+    ...((BROWSER_ROLES as readonly string[]).includes(role)
+      ? { capabilities: [BROWSER_CAPABILITY] }
+      : {}),
     core_prompt: corePromptFor(role, options[role].display_name),
     instructions: instructionsFor(role, options[role].display_name),
   }));
