@@ -1,0 +1,116 @@
+/* C-208 design-only override; never imported by the product entry. */
+@media (prefers-color-scheme: dark) {
+  :root[data-c208="after"] .card-record-list > li.record-delivery-current {
+    background: var(--surface-muted);
+  }
+  :root[data-c208="after"] {
+    --priority-low: #6daef5;
+    --priority-medium: #eac74a;
+    --priority-high: #f9a15d;
+    --priority-urgent: #ff7b80;
+    --bg: #181818;
+    --surface: #222222;
+    --surface-muted: #2c2c2c;
+    --timeline-card: #2c2c2c;
+    --border: #484848;
+    --text: #cccccc;
+    --text-muted: #a4a4a4;
+    --accent: #8dcac3;
+    --accent-contrast: #181818;
+    --danger: #ff9c91;
+    --overlay: rgba(0, 0, 0, 0.75);
+    --overlay-text: #f5f5f5;
+    --tooltip-bg: #222222;
+    --tooltip-text: #f5f5f5;
+    --tooltip-border: #777777;
+    --status-wait: #edb96d;
+    --status-progress: #65d3e0;
+    --status-review: #c5b0f1;
+    --status-done: #91cda5;
+    --status-muted: #a4a4a4;
+    --status-backlog: #a4a4a4;
+    --status-pending: #94bde9;
+    --status-dispatched: #b6b0ff;
+    --status-merge: #6dd9b7;
+    --status-cancelled: #d1b4a6;
+    --status-idle: #a4a4a4;
+    --status-unknown: #f6b486;
+    --status-cutout: #181818;
+    --control-border: #777777;
+    --id-card-fg: #7997d2;
+    --id-card-bg: #202c43;
+    --id-work-item-fg: #b982df;
+    --id-work-item-bg: #3c224c;
+    --id-decision-fg: #db70bd;
+    --id-decision-bg: #43233a;
+    --id-assignment-fg: #cccccc;
+    --id-assignment-bg: #303030;
+    --id-run-fg: #63ada8;
+    --id-run-bg: #203c3c;
+    --id-delivery-fg: #cece54;
+    --id-delivery-bg: #3d3d20;
+    --id-review-fg: #d6c59f;
+    --id-review-bg: #413824;
+    --id-human-action-fg: #aa8f8f;
+    --id-human-action-bg: #302525;
+    --id-employee-fg: #a69bb0;
+    --id-employee-bg: #34303f;
+    --id-member-fg: #a69bb0;
+    --id-member-bg: #34303f;
+    --id-merge-batch-fg: #a69bb0;
+    --id-merge-batch-bg: #34303f;
+    --id-unknown-fg: #a69bb0;
+    --id-unknown-bg: #34303f;
+  }
+  :root[data-c208="after"] :is(input, select, textarea, button, .filter) {
+    border-color: var(--control-border);
+  }
+  :root[data-c208="after"] .id-tag[data-id-kind="card"] {
+    color: var(--id-card-fg);
+    background: var(--id-card-bg);
+  }
+  :root[data-c208="after"] .id-tag[data-id-kind="work-item"] {
+    color: var(--id-work-item-fg);
+    background: var(--id-work-item-bg);
+  }
+  :root[data-c208="after"] .id-tag[data-id-kind="decision"] {
+    color: var(--id-decision-fg);
+    background: var(--id-decision-bg);
+  }
+  :root[data-c208="after"] .id-tag[data-id-kind="assignment"] {
+    color: var(--id-assignment-fg);
+    background: var(--id-assignment-bg);
+  }
+  :root[data-c208="after"] .id-tag[data-id-kind="run"] {
+    color: var(--id-run-fg);
+    background: var(--id-run-bg);
+  }
+  :root[data-c208="after"] .id-tag[data-id-kind="delivery"] {
+    color: var(--id-delivery-fg);
+    background: var(--id-delivery-bg);
+  }
+  :root[data-c208="after"] .id-tag[data-id-kind="review"] {
+    color: var(--id-review-fg);
+    background: var(--id-review-bg);
+  }
+  :root[data-c208="after"] .id-tag[data-id-kind="human-action"] {
+    color: var(--id-human-action-fg);
+    background: var(--id-human-action-bg);
+  }
+  :root[data-c208="after"] .id-tag[data-id-kind="employee"] {
+    color: var(--id-employee-fg);
+    background: var(--id-employee-bg);
+  }
+  :root[data-c208="after"] .id-tag[data-id-kind="member"] {
+    color: var(--id-member-fg);
+    background: var(--id-member-bg);
+  }
+  :root[data-c208="after"] .id-tag[data-id-kind="merge-batch"] {
+    color: var(--id-merge-batch-fg);
+    background: var(--id-merge-batch-bg);
+  }
+  :root[data-c208="after"] .id-tag[data-id-kind="unknown"] {
+    color: var(--id-unknown-fg);
+    background: var(--id-unknown-bg);
+  }
+}
