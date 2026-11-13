@@ -6,6 +6,7 @@
 import { expect, test } from "vitest";
 import type { Assignment, Event, Run, RuntimeRef } from "../entities.js";
 import { HOST_OPS_ROLE_TOOLS } from "../host-ops.js";
+import { occupiedRunSlots } from "../run-capacity.js";
 import type { CommandState } from "./core.js";
 import { beginHostOpsAction } from "./host-ops-actions.js";
 import { stoppedByHuman, stopWorkItemAssignment } from "./stop.js";
@@ -55,21 +56,25 @@ const stop = (
     ports(),
   );
 
-test("stop cancels the running and the queued Runs of that Assignment only", () => {
+test("stop first cancels only queued Runs; the running one keeps its slot until the release", () => {
   const s = base();
   const result = stop(s);
   expect(result.ok).toBe(true);
   if (!result.ok) return;
-  expect(result.value.data.cancelled).toBe(2);
+  expect(result.value.data.cancelled).toBe(1);
   const next = apply(s, result.value);
-  const runs = next.runs.filter((r) => r.assignment_id === id("assignment", 1));
-  expect(runs.map((r) => r.status)).toEqual(["cancelled", "cancelled"]);
-  expect(runs.every((r) => r.summary === "stopped by host")).toBe(true);
+  const status = (n: number) =>
+    next.runs.find((r) => r.id === id("run", n))?.status;
+  expect(status(9)).toBe("cancelled");
+  // Still counted as a busy run slot: the terminal is not released yet.
+  expect(status(1)).toBe("running");
+  expect(occupiedRunSlots(next.assignments, next.runs, "local")).toBe(
+    occupiedRunSlots(s.assignments, s.runs, "local"),
+  );
   // Other Assignments' Runs are untouched.
-  expect(next.runs.find((r) => r.id === id("run", 2))?.status).toBe("running");
+  expect(status(2)).toBe("running");
   const a = next.assignments.find((x) => x.id === id("assignment", 1));
-  // The ref stays until the host has released that terminal.
-  expect(a).toMatchObject({ runtime_state: "idle", runtime_ref: ref });
+  expect(a).toMatchObject({ runtime_state: "running", runtime_ref: ref });
   expect(stoppedByHuman(next.events, id("assignment", 1))).toBe(true);
   expect(stoppedByHuman(next.events, id("assignment", 2))).toBe(false);
   expect(next.events.at(-1)).toMatchObject({
@@ -77,23 +82,74 @@ test("stop cancels the running and the queued Runs of that Assignment only", () 
     card_id: id("card", 1),
     payload: {
       assignment_id: id("assignment", 1),
-      cancelled_run_ids: [id("run", 1), id("run", 9)],
+      cancelled_run_ids: [id("run", 9)],
     },
   });
 });
 
-test("the released terminal's ref is cleared, a newer session's ref is not", () => {
+test("after the release the remaining Runs end and only that terminal's ref is cleared", () => {
   const stopped = apply(
     base(),
     (stop(base()) as { ok: true; value: never }).value,
   );
-  const cleared = stop(stopped, { released_runtime_ref: ref });
-  expect(cleared.ok && cleared.value.data.assignment.runtime_ref).toBeNull();
-  expect(cleared.ok && cleared.value.events).toEqual([]);
   const other = { ...ref, terminal_ref: "t2" };
   const kept = stop(stopped, { released_runtime_ref: other });
   expect(kept.ok && kept.value.data.assignment.runtime_ref).toEqual(ref);
   expect(kept.ok && kept.value.changes).toEqual([]);
+  const settled = stop(stopped, { released_runtime_ref: ref });
+  expect(settled.ok).toBe(true);
+  if (!settled.ok) return;
+  expect(settled.value.data.cancelled).toBe(1);
+  const next = apply(stopped, settled.value);
+  expect(next.runs.find((r) => r.id === id("run", 1))).toMatchObject({
+    status: "cancelled",
+    summary: "stopped by host",
+  });
+  expect(
+    next.assignments.find((x) => x.id === id("assignment", 1)),
+  ).toMatchObject({ runtime_state: "idle", runtime_ref: null });
+  expect(stoppedByHuman(next.events, id("assignment", 1))).toBe(true);
+  // Without a holding stop the release step changes nothing.
+  const unstopped = stop(base(), { released_runtime_ref: ref });
+  expect(unstopped.ok && unstopped.value.changes).toEqual([]);
+});
+
+test("stop is refused while a host operation is pending, so neither is left unfinishable", () => {
+  const { work_item_id: _w, ...opsFields } = assignment(10, "host_ops");
+  const s0 = { ...base(), runs: fixture().runs };
+  const s = {
+    ...s0,
+    roles: [
+      ...s0.roles,
+      { ...role("host_ops"), allowed_tools: HOST_OPS_ROLE_TOOLS },
+    ],
+    assignments: [
+      ...s0.assignments,
+      { ...opsFields, scope: "standing" } as Assignment,
+    ],
+  };
+  const caller = {
+    ...actor(10, "host_ops"),
+    allowed_tools: HOST_OPS_ROLE_TOOLS,
+  } as never;
+  const begun = beginHostOpsAction(
+    s,
+    caller,
+    {
+      tool: "host_ops_restart_assignment",
+      target_id: id("assignment", 1),
+      reason: "Recover",
+      snapshot: { model: "test", agent_cli_version: "test" },
+    },
+    ports(),
+  );
+  if (!begun.ok) throw new Error(begun.error.message);
+  const pending = apply(s, begun.value);
+  for (const extra of [{}, { released_runtime_ref: ref }]) {
+    const refused = stop(pending, extra);
+    expect(refused.ok).toBe(false);
+    expect(!refused.ok && refused.error.message).toMatch(/host operation/);
+  }
 });
 
 test("only the human stops, and only active work-item Assignments", () => {

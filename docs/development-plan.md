@@ -651,7 +651,7 @@ P2a-14 ①：`createWorkItem` 和 `createCard` 从模板生成验证项共用按
 
 常驻 PM 的 stop 先持久化暂停、经 cancel 结束未完成 Run 并作废 Token，再关闭终端；运行时不可用也不撤回暂停。原 RuntimeRef 保留供关闭重试，清理循环也补查已暂停的常驻 PM。恢复前确认旧终端关闭，再清除旧引用并排新 Run；未知／失联运行状态按 session_replaced 迁移恢复，新启动失败则保持暂停。项目事件保存暂停／恢复及交接信息，attention 显示暂停状态与恢复命令。
 
-C-211：工作项 Assignment 的 `assignment stop` 不改业务状态（仍为 active），只接受 human。先经 domain `stopWorkItemAssignment` 在一个事务里取消它所有未结束的 Run（包括已排队的后续 Run），运行状态 running 迁到 idle、unknown／lost 按 session_replaced 迁到 idle，并写卡片事件 `assignment_stopped`；然后才释放终端，释放成功后再以同一命令（带 `released_runtime_ref`）清除这条 RuntimeRef，会话已经换过的不清。释放失败时 RuntimeRef 保留，可以直接重试。之后到下一次该 Assignment 的 `run_dispatched` 为止（`stoppedByHuman`），Dispatcher 把它当作忙碌：不唤醒、不替换、不新起会话，门铃留在 Inbox；主机运维的重启也拒绝（取消 Run 不受影响）。只有人显式 `assignment start` 才恢复。
+C-211：工作项 Assignment 的 `assignment stop` 不改业务状态（仍为 active），只接受 human，有待处理的主机运维操作时拒绝（与主机运维互不卡死）。domain `stopWorkItemAssignment` 分两步：释放终端前先写卡片事件 `assignment_stopped` 并取消已排队的 Run（它们不占终端和名额）；主机释放终端成功后，再带 `released_runtime_ref` 调用一次，取消其余未结束的 Run，运行状态 running 迁到 idle、unknown／lost 按 session_replaced 迁到 idle，并清除这条 RuntimeRef（停止已不成立或会话已换过时不做任何改动）。释放失败时正在运行的 Run 继续占用并发名额，RuntimeRef 保留，可以直接重试。从 `assignment_stopped` 起到下一次该 Assignment 的 `run_dispatched` 为止（`stoppedByHuman`），Dispatcher 把它当作忙碌：不唤醒、不替换、不新起会话，门铃留在 Inbox；主机运维的重启也拒绝（取消 Run 不受影响）。只有人显式 `assignment start` 才恢复。
 
 **Run**：`queued → dispatched → acked → running → completed | failed | cancelled`；运行环境失联时进入 `unknown`；确认重新连通时 `unknown --reconnected--> running`。重连不表示业务完成，已结束的 Run 不通过 reconnected 恢复。
 
@@ -937,7 +937,7 @@ C-120 的显式 `@A-n` 校验与 Card MCP 读取范围一致：工作项 Assignm
 | Session 空闲 | 优先派发该 Assignment 已有的 queued Run 并唤醒 Session；没有 queued Run 才创建新 Run |
 | 外接 Assignment（external=true） | 通知留在 Inbox 的 pending 状态，由对接 Agent 拉取并 ACK；不排启动 Run、不按铃、不新建或替换 Session，也不纳入运行时失联监控。展示“外接身份，由对接的 Agent 自行拉取”，不记为暂停 |
 | 常驻 PM 已暂停 | 门铃留在 Inbox，不自动启动或替换 Session；显式 start 的首条消息携带待处理卡片／项目和 seq，由 Agent 读取 get_updates 并 ack_events，不伪造 ACK |
-| 工作项 Assignment 已被人 stop（C-211） | 排队的 Run 在 stop 时一并取消；门铃留在 Inbox，不自动唤醒、替换或新建 Session，主机运维也不能重启；人执行 `assignment start` 后恢复（见 §4.4） |
+| 工作项 Assignment 已被人 stop（C-211） | 排队的 Run 在 stop 时一并取消，运行中的 Run 在终端释放后取消；门铃留在 Inbox，不自动唤醒、替换或新建 Session，主机运维也不能重启；人执行 `assignment start` 后恢复（见 §4.4） |
 | 进程已退出 | 按 `session_ref` 恢复；无法恢复则新建 Session，用卡片时间线生成交接摘要 |
 | 已交付、尚未清理 | 复用原 Session 和 worktree，创建返工 Run |
 | 卡片已关闭、worktree 已清理 | 创建后续工作项和新 Assignment，并引用历史 |

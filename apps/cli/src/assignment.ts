@@ -572,10 +572,11 @@ export async function stopAssignment(input: {
       EXIT.usage,
     );
   }
-  // C-211: persist the stop before touching the terminal. Every unfinished
-  // Run, queued ones included, is cancelled in the same transaction, and the
+  // C-211: persist the stop before touching the terminal: from here on the
   // Dispatcher starts no session for this Assignment until the human runs
-  // `cardigan assignment start` again.
+  // `cardigan assignment start` again, and its queued Runs are cancelled.
+  // The running Run keeps its run slot until the terminal is released, so a
+  // failed release can be retried and never under-counts capacity.
   const stopped = runCommand(input.store, {
     operation: "停止 Assignment",
     target: assignment.id,
@@ -596,7 +597,7 @@ export async function stopAssignment(input: {
       EXIT.failure,
     );
   }
-  runCommand(input.store, {
+  const settled = runCommand(input.store, {
     operation: "停止 Assignment",
     target: assignment.id,
     project_id: input.project_id,
@@ -630,7 +631,10 @@ export async function stopAssignment(input: {
       input.project_id,
       input.assignment_id,
     );
-  return { released: true, aborted: stopped.cancelled > 0 };
+  return {
+    released: true,
+    aborted: stopped.cancelled + settled.cancelled > 0,
+  };
 }
 
 function attachRef(

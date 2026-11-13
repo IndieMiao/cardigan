@@ -1,5 +1,6 @@
-import type { Actor, Assignment, Event, RuntimeRef } from "../entities.js";
+import type { Actor, Assignment, Event, Run, RuntimeRef } from "../entities.js";
 import type { Result } from "../errors.js";
+import { hostOpsPending } from "../host-ops.js";
 import type { AssignmentId } from "../ids.js";
 import { transition } from "../transitions.js";
 import {
@@ -12,6 +13,7 @@ import {
 } from "./core.js";
 
 const ASSIGNMENT_STOPPED = "assignment_stopped";
+const ASSIGNMENT_STOP_RELEASED = "assignment_stop_released";
 
 const field = (payload: unknown, key: string): unknown =>
   payload !== null && typeof payload === "object"
@@ -40,12 +42,22 @@ export function stoppedByHuman(
   return false;
 }
 
+const unfinished = (status: string) =>
+  !["completed", "failed", "cancelled"].includes(status);
+
 /**
- * `cardigan assignment stop` for a work-item Assignment, persisted before the
- * terminal is touched: cancel every unfinished Run of it (queued ones too, so
- * none is dispatched later) and record the stop. The RuntimeRef is kept so a
- * failed terminal release can be retried; once the host has released that
- * terminal it calls again with `released_runtime_ref` to clear it.
+ * `cardigan assignment stop` for a work-item Assignment, in two steps around
+ * the terminal release.
+ *
+ * 1. Before the terminal is touched: record `assignment_stopped`, so the
+ *    Dispatcher starts nothing for it from now on, and cancel its queued Runs
+ *    (they hold no terminal and no run slot). Refused while a host operation
+ *    is pending, so the two never leave each other unfinishable.
+ * 2. With `released_runtime_ref`, once the host has released that terminal:
+ *    cancel the remaining unfinished Runs, settle the runtime state and clear
+ *    the ref. Until then the running Run keeps its run slot, so a failed
+ *    release neither under-counts capacity nor loses the ref to retry with.
+ *    A no-op when the stop no longer holds or the session changed.
  */
 export function stopWorkItemAssignment(
   state: CommandState,
@@ -74,49 +86,59 @@ export function stopWorkItemAssignment(
       "illegal_transition",
       `Assignment ${a.id} is ${a.status}`,
     );
+    ensure(
+      !hostOpsPending(state.events, a.id),
+      "illegal_transition",
+      "A host operation is pending; let it finish before stopping",
+    );
+    const card = d.work(a.work_item_id).card_id;
+    const cancel = (runs: readonly Run[]) => {
+      for (const r of runs)
+        d.put("runs", {
+          ...r,
+          status: unwrap(transition("run", r.status, "cancel")),
+          outcome: "failed",
+          summary: p.reason,
+          finished_at: d.now,
+        });
+    };
     if (p.released_runtime_ref !== undefined) {
-      // Only the terminal this stop released; a session started since wins.
       if (
+        !stoppedByHuman(state.events, a.id) ||
         JSON.stringify(a.runtime_ref) !== JSON.stringify(p.released_runtime_ref)
       )
         return { assignment: a, cancelled: 0 };
-      const next = { ...a, runtime_ref: null };
+      const runs = d
+        .list("runs")
+        .filter((r) => r.assignment_id === a.id && unfinished(r.status));
+      cancel(runs);
+      // A later start launches from a clean runtime state, as after a restart.
+      const runtime_state = ["unknown", "lost"].includes(a.runtime_state)
+        ? unwrap(transition("runtime", a.runtime_state, "session_replaced"))
+        : a.runtime_state === "running"
+          ? unwrap(transition("runtime", a.runtime_state, "run_finished"))
+          : a.runtime_state;
+      const next = { ...a, runtime_state, runtime_ref: null };
       d.put("assignments", next);
-      return { assignment: next, cancelled: 0 };
-    }
-    const runs = d
-      .list("runs")
-      .filter(
-        (r) =>
-          r.assignment_id === a.id &&
-          !["completed", "failed", "cancelled"].includes(r.status),
-      );
-    for (const r of runs) {
-      d.put("runs", {
-        ...r,
-        status: unwrap(transition("run", r.status, "cancel")),
-        outcome: "failed",
-        summary: p.reason,
-        finished_at: d.now,
-      });
-    }
-    // A later start launches from a clean runtime state, as after a restart.
-    const runtime_state = ["unknown", "lost"].includes(a.runtime_state)
-      ? unwrap(transition("runtime", a.runtime_state, "session_replaced"))
-      : a.runtime_state === "running"
-        ? unwrap(transition("runtime", a.runtime_state, "run_finished"))
-        : a.runtime_state;
-    const next = { ...a, runtime_state };
-    d.put("assignments", next);
-    d.emit(
-      ASSIGNMENT_STOPPED,
-      d.work(a.work_item_id).card_id,
-      {
+      d.emit(ASSIGNMENT_STOP_RELEASED, card, {
         assignment_id: a.id,
         cancelled_run_ids: runs.map((r) => r.id),
+      });
+      return { assignment: next, cancelled: runs.length };
+    }
+    const queued = d
+      .list("runs")
+      .filter((r) => r.assignment_id === a.id && r.status === "queued");
+    cancel(queued);
+    d.emit(
+      ASSIGNMENT_STOPPED,
+      card,
+      {
+        assignment_id: a.id,
+        cancelled_run_ids: queued.map((r) => r.id),
       },
       { type: "status_change", body: `Stopped ${a.id}` },
     );
-    return { assignment: next, cancelled: runs.length };
+    return { assignment: a, cancelled: queued.length };
   });
 }
