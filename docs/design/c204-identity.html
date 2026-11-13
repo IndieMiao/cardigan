@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>C-204｜编号与同行身份设计</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="../../apps/web/src/styles.css">
+  <style>
+    /* Design specimen only; the linked baseline stylesheet is never modified. */
+    :root { --font: "Inter Variable", "Noto Sans SC Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; }
+    :root { --control-border: var(--border); }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #181818; --surface: #222222; --surface-muted: #2c2c2c; --timeline-card: #2c2c2c;
+        --border: #484848; --control-border: #777777; --text: #cccccc; --text-muted: #a4a4a4;
+        --accent: #8dcac3; --status-muted: #a4a4a4; --status-backlog: #a4a4a4; --status-idle: #a4a4a4;
+      }
+    }
+    .design-toolbar button { border-color: var(--control-border); }
+    .design-page { max-width: 1248px; margin: auto; padding: 40px 24px 48px; }
+    .design-page h1 { font-size: 28px; line-height: 1.35; margin: 8px 0 12px; }
+    .design-page h2 { font-size: 18px; margin: 0 0 8px; }
+    .design-page h3 { font-size: 14px; margin: 0 0 16px; }
+    .design-page p { margin: 0; }
+    .design-eyebrow { font-size: 12px; letter-spacing: .08em; color: var(--text-muted); }
+    .design-subtitle, .design-note { color: var(--text-muted); font-size: 13px; }
+    .design-toolbar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 20px 0 28px; }
+    .design-toolbar button { min-height: 36px; }
+    .design-section { margin-top: 28px; }
+    .design-section > .design-note { margin-bottom: 16px; }
+    .design-compare, .design-contexts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+    .design-panel { min-width: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 20px; }
+    .design-panel > .design-note { margin-top: 16px; }
+    .design-kicker { display: block; color: var(--text-muted); font-size: 12px; margin-bottom: 12px; }
+    .design-specimen { padding: 16px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+    .design-specimen .design-note { margin-top: 12px; }
+    .design-baseline { min-height: 36px; }
+    .design-baseline code { font-size: 12px; }
+    .identity-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; min-width: 0; min-height: 32px; }
+    .identity-person { display: inline-flex; align-items: center; gap: 8px; flex: 0 1 auto; min-width: 0; max-width: 100%; min-height: 32px; }
+    .identity-person .employee-avatar { width: 24px; height: 24px; font-size: 12px; }
+    .identity-name { min-width: 0; font-size: 14px; font-weight: 500; line-height: 20px; overflow-wrap: anywhere; }
+    .identity-detail { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; min-width: 0; max-width: 100%; }
+    .identity-row code { display: inline-flex; align-items: center; min-height: 24px; font-size: 12px; line-height: 20px; }
+    .identity-action { display: inline-flex; align-items: center; min-height: 32px; font-size: 13px; line-height: 20px; white-space: nowrap; }
+    .identity-subline { margin: 8px 0 0 32px !important; color: var(--text-muted); font-size: 13px; }
+    .ref-group { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; line-height: 20px; font-size: 13px; color: var(--text); }
+    .ref-badge { display: inline-flex; align-items: center; flex: none; min-height: 24px; padding: 2px 6px; border-radius: 4px; white-space: nowrap; font-size: 13px; line-height: 20px; font-weight: 500; font-variant-numeric: tabular-nums; color: var(--id-fg); background: var(--id-bg); }
+    .ref-label { min-width: 0; overflow-wrap: anywhere; }
+    a.ref-group { min-height: 32px; text-decoration: none; }
+    a.ref-group .ref-badge { text-decoration: underline; text-underline-offset: 3px; }
+    a.ref-group:hover .ref-badge { outline: 1px solid currentColor; outline-offset: -1px; }
+    .design-page :is(a, button, summary):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .design-state { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; font-size: 13px; line-height: 20px; color: var(--text); }
+    .design-state svg { width: 16px; height: 16px; flex: none; color: var(--status-done); }
+    .design-state.wait svg { color: var(--status-wait); }
+    .design-state.fail svg { color: var(--danger); }
+    .design-statuses { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; margin-top: 16px; }
+    .design-contexts .design-panel { padding: 16px 20px; }
+    .design-contexts .identity-row + .identity-row { margin-top: 16px; }
+    .design-palette { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+    .design-swatch { background: var(--surface); border: 1px solid var(--border); padding: 14px; border-radius: 8px; min-width: 0; }
+    .design-swatch .ref-group { margin-bottom: 8px; }
+    .design-swatch small { display: block; color: var(--text-muted); font-size: 12px; line-height: 20px; }
+    .design-footer { margin-top: 28px; padding-top: 16px; border-top: 1px solid var(--border); color: var(--text-muted); font-size: 12px; }
+    .design-page.guides .identity-row { background-image: linear-gradient(transparent calc(50% - .5px), var(--border) calc(50% - .5px), var(--border) calc(50% + .5px), transparent calc(50% + .5px)); }
+    .design-page.guides .identity-row > * { outline: 1px dashed var(--border); }
+    @media (max-width: 600px) {
+      .design-page { padding: 24px 16px 32px; }
+      .design-page h1 { font-size: 24px; }
+      .design-compare, .design-contexts { grid-template-columns: minmax(0, 1fr); }
+      .design-panel, .design-contexts .design-panel { padding: 16px; }
+      .design-palette { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+      .design-swatch { padding: 12px; }
+    }
+    @media (forced-colors: active) {
+      .ref-badge { border: 1px solid CanvasText; }
+      a.ref-group .ref-badge { color: LinkText; }
+    }
+  </style>
+</head>
+<body>
+<main class="design-page">
+  <header>
+    <p class="design-eyebrow">CARDIGAN / C-204 / 设计提案 v2</p>
+    <h1>编号有类别，同行有秩序</h1>
+    <p class="design-subtitle">编号保留前缀；头像、姓名、工作项与状态共享一条中心线。类型颜色与状态颜色独立定义。</p>
+    <div class="design-toolbar">
+      <button type="button" id="guides" class="quiet" aria-pressed="false">显示对齐辅助线</button>
+      <a href="c204-identity.md">设计说明与完整配色表</a>
+      <span class="design-note">晴雯 / 静态演示数据 / 主题跟随系统</span>
+    </div>
+  </header>
+  <section id="comparison" aria-labelledby="compare-title">
+    <h2 id="compare-title">01 / 拍板区块：改前与改后</h2>
+    <p class="design-note">改前布局按基线源码复现，非生产截图；两侧使用同一主题与示例内容。暗色采用 C-208 定稿。</p>
+    <div class="design-compare" style="margin-top:16px">
+      <article class="design-panel">
+        <span class="design-kicker">改前 / 基线 60d617a</span>
+        <h3>要合并的交付</h3>
+        <div class="design-specimen">
+          <div class="needs-delivery-head design-baseline">
+            <span class="employee-identity"><span class="employee-avatar"><img src="../../apps/web/public/avatars/v1/sun-wukong/head-64.webp" alt=""></span><span class="employee-label"><strong>孙悟空</strong></span></span>
+            <span class="id-tag"><span>W-586</span><span class="id-description">开发</span></span>
+            <code>d9cf21d630b1</code>
+            <a href="#context-title">查看改动</a>
+          </div>
+          <p class="design-note">统一拍板区块的交付信息。</p>
+        </div>
+        <p class="design-note">父行 baseline，姓名组件 middle；标签只有灰色边框。</p>
+      </article>
+      <article class="design-panel">
+        <span class="design-kicker">改后 / 统一同行组件</span>
+        <h3>要合并的交付</h3>
+        <div class="design-specimen">
+          <div class="identity-row" id="aligned-row">
+            <span class="identity-person"><span class="employee-avatar"><img src="../../apps/web/public/avatars/v1/sun-wukong/head-64.webp" alt=""></span><strong class="identity-name">孙悟空</strong></span>
+            <span class="ref-group" data-id="W-586" data-label="开发"></span>
+            <code>d9cf21d630b1</code>
+            <a class="identity-action" href="#context-title">查看改动</a>
+          </div>
+          <p class="design-note">统一拍板区块的交付信息。</p>
+        </div>
+        <p class="design-note">头像 24px，行高至少 32px；文字行高 20px，统一垂直居中。</p>
+      </article>
+    </div>
+    <p class="design-note" style="margin-top:12px">两侧均为完整交付行，演示链接跳到本页场景说明。状态同排见下方场景。本提案不决定 C-202 的信息折叠或删减。</p>
+  </section>
+  <section class="design-section" aria-labelledby="context-title">
+    <h2 id="context-title">02 / 四个场景，一套排列规则</h2>
+    <p class="design-note">空间不足时按“人员 / 工作项 / 状态”完整组换行，续行从容器左边开始；描述单独一行，与姓名左边对齐。</p>
+    <div class="design-contexts">
+      <article class="design-panel">
+        <h3>拍板 / 需要你确认</h3>
+        <div class="identity-row"><span class="ref-group" data-id="Q-279" data-label="拍板"></span><span class="design-state wait" data-state="wait">待确认</span></div>
+        <div class="identity-row"><span class="identity-person"><span class="employee-avatar" aria-hidden="true">王</span><strong class="identity-name">王熙凤</strong></span><span class="ref-group" data-id="W-623" data-label="设计"></span></div>
+      </article>
+      <article class="design-panel">
+        <h3>执行视图 / 人员优先</h3>
+        <div class="identity-row"><span class="identity-person"><span class="employee-avatar" aria-hidden="true">孙</span><strong class="identity-name">孙悟空</strong></span><span class="ref-group" data-id="A-579" data-label="责任上下文"></span></div>
+        <div class="identity-row"><span class="ref-group" data-id="R-3090" data-label="执行"></span><span class="ref-group" data-id="W-586" data-label="开发"></span></div>
+      </article>
+      <article class="design-panel">
+        <h3>卡片详情 / 长姓名与长工作项</h3>
+        <div class="identity-row"><span class="identity-person"><span class="employee-avatar" aria-hidden="true">陈</span><strong class="identity-name">陈长安（界面与交互设计）</strong></span><span class="ref-group" data-id="W-623" data-label="编号标签与头像姓名同行对齐规范"></span><span class="design-state" data-state="done">已交付</span></div>
+        <p class="identity-subline">姓名与标题完整显示。只在词组内部按需换行，编号不拆开。</p>
+      </article>
+      <article class="design-panel">
+        <h3>时间线 / 人员、交付与审核分开表达</h3>
+        <div class="identity-row"><span class="identity-person"><span class="employee-avatar" aria-hidden="true">妙</span><strong class="identity-name">妙玉</strong></span><span class="ref-group" data-id="V-104" data-label="审核"></span><span class="design-state" data-state="done">通过</span></div>
+        <p class="identity-subline"><span class="ref-group" data-id="D-120" data-label="交付"></span> 的设计符合规范。</p>
+      </article>
+    </div>
+  </section>
+  <section class="design-section" aria-labelledby="palette-title">
+    <h2 id="palette-title">03 / 编号类型色</h2>
+    <p class="design-note">九类主要编号拉开色差；E / M / MB / 未知共用低饱和灰紫族。前缀与中文含义保留。</p>
+    <div class="design-palette" id="palette"></div>
+    <div class="design-statuses"><strong>状态仍独立显示</strong><span class="design-state" data-state="done">通过</span><span class="design-state wait" data-state="wait">等待</span><span class="design-state fail" data-state="fail">失败</span></div>
+    <p class="design-note" style="margin-top:12px">D 用橄榄、V 用棕金、H 用灰玫瑰，与成功绿、警告橙和错误红保持色差；编号不随状态变色。</p>
+  </section>
+  <section class="design-section" aria-labelledby="edge-title">
+    <h2 id="edge-title">04 / 链接、长编号与未知类型</h2>
+    <div class="identity-row">
+      <a class="ref-group" href="#palette-title" data-id="C-204" data-label="卡片（演示链接）"></a>
+      <span class="ref-group" data-id="C-204#12" data-label="时间线条目"></span>
+      <span class="ref-group" data-id="W-9007199254740991" data-label="长编号"></span>
+      <span class="ref-group" data-id="XYZ-12" data-label="未知类型"></span>
+    </div>
+    <p class="design-note" style="margin-top:12px">链接常态带下划线，Tab 聚焦有清晰外框；没有有效目标时保留静态文本。示例链接仅跳到本页色表。</p>
+  </section>
+  <footer class="design-footer">W-623 设计交付原型。配色表列出两种主题的 AA 对比度；本页展示系统当前主题。产品全站替换与 C-202 整合由开发项完成。</footer>
+</main>
+<script>
+  // Design registry: prefix, token, meaning, light foreground/background, dark foreground/background.
+  const palette = [
+    ['C', 'card', '卡片', '#123a8e', '#e3edff', '#7997d2', '#202c43'],
+    ['W', 'work-item', '工作项', '#6b2896', '#f0e3fa', '#b982df', '#3c224c'],
+    ['Q', 'decision', '拍板', '#9c1a67', '#fce0ef', '#db70bd', '#43233a'],
+    ['A', 'assignment', '责任上下文', '#343a40', '#e3e4e6', '#cccccc', '#303030'],
+    ['R', 'run', '执行', '#005968', '#d6f3f7', '#63ada8', '#203c3c'],
+    ['D', 'delivery', '交付', '#535e18', '#e9efce', '#cece54', '#3d3d20'],
+    ['V', 'review', '审核', '#765017', '#f7e9ca', '#d6c59f', '#413824'],
+    ['H', 'human-action', '人工待办', '#804e4c', '#f7e1df', '#aa8f8f', '#302525'],
+    ['E', 'employee', '员工', '#645b70', '#ece8f3', '#a69bb0', '#34303f'],
+    ['M', 'member', '成员', '#645b70', '#ece8f3', '#a69bb0', '#34303f'],
+    ['MB', 'merge-batch', '合并批次', '#645b70', '#ece8f3', '#a69bb0', '#34303f'],
+    ['?', 'unknown', '未知类型', '#645b70', '#ece8f3', '#a69bb0', '#34303f'],
+  ];
+  const separation = {"light": {"C": {"fg": 16.3, "fgNeighbor": "W", "bg": 6.38, "bgNeighbor": "E", "status": 10.57, "statusNeighbor": "dispatched", "contrast": 8.82, "surfaceContrast": 9.19, "focusOnTag": 6.36, "Lstar": 27.04}, "W": {"fg": 16.3, "fgNeighbor": "C", "bg": 5.68, "bgNeighbor": "Q", "status": 10.51, "statusNeighbor": "review", "contrast": 7.21, "surfaceContrast": 7.84, "focusOnTag": 6.09, "Lstar": 31.45}, "Q": {"fg": 16.61, "fgNeighbor": "W", "bg": 5.68, "bgNeighbor": "W", "status": 21.71, "statusNeighbor": "review", "contrast": 6.18, "surfaceContrast": 6.74, "focusOnTag": 6.08, "Lstar": 35.57}, "A": {"fg": 16.34, "fgNeighbor": "C", "bg": 5.49, "bgNeighbor": "E", "status": 19.8, "statusNeighbor": "dispatched", "contrast": 9.04, "surfaceContrast": 10.18, "focusOnTag": 5.89, "Lstar": 24.08}, "R": {"fg": 16.8, "fgNeighbor": "A", "bg": 10.5, "bgNeighbor": "A", "status": 12.95, "statusNeighbor": "progress", "contrast": 6.86, "surfaceContrast": 7.07, "focusOnTag": 6.43, "Lstar": 34.28}, "D": {"fg": 18.48, "fgNeighbor": "V", "bg": 8.36, "bgNeighbor": "V", "status": 17.7, "statusNeighbor": "done", "contrast": 5.94, "surfaceContrast": 6.23, "focusOnTag": 6.31, "Lstar": 37.68}, "V": {"fg": 18.48, "fgNeighbor": "D", "bg": 8.36, "bgNeighbor": "D", "status": 10.61, "statusNeighbor": "unknown", "contrast": 5.96, "surfaceContrast": 6.34, "focusOnTag": 6.23, "Lstar": 37.21}, "H": {"fg": 16.85, "fgNeighbor": "E", "bg": 7.36, "bgNeighbor": "Q", "status": 11.46, "statusNeighbor": "cancelled", "contrast": 5.4, "surfaceContrast": 5.97, "focusOnTag": 5.99, "Lstar": 38.83}, "E": {"fg": 16.85, "fgNeighbor": "H", "bg": 5.49, "bgNeighbor": "A", "status": 11.71, "statusNeighbor": "muted", "contrast": 5.32, "surfaceContrast": 5.68, "focusOnTag": 6.21, "Lstar": 40.18}}, "dark": {"C": {"fg": 17.39, "fgNeighbor": "E", "bg": 7.59, "bgNeighbor": "E", "status": 10.92, "statusNeighbor": "pending", "contrast": 4.77, "surfaceContrast": 4.77, "focusOnTag": 7.57, "Lstar": 62.38}, "W": {"fg": 11.32, "fgNeighbor": "Q", "bg": 7.55, "bgNeighbor": "Q", "status": 12.32, "statusNeighbor": "review", "contrast": 4.8, "surfaceContrast": 4.87, "focusOnTag": 7.45, "Lstar": 63.02}, "Q": {"fg": 11.32, "fgNeighbor": "W", "bg": 7.55, "bgNeighbor": "W", "status": 19.25, "statusNeighbor": "review", "contrast": 4.59, "surfaceContrast": 4.7, "focusOnTag": 7.38, "Lstar": 61.93}, "A": {"fg": 14.45, "fgNeighbor": "V", "bg": 7.3, "bgNeighbor": "H", "status": 10.75, "statusNeighbor": "backlog", "contrast": 8.22, "surfaceContrast": 8.7, "focusOnTag": 7.15, "Lstar": 82.05}, "R": {"fg": 23.06, "fgNeighbor": "A", "bg": 12.09, "bgNeighbor": "A", "status": 12.02, "statusNeighbor": "progress", "contrast": 4.55, "surfaceContrast": 5.37, "focusOnTag": 6.41, "Lstar": 66.03}, "D": {"fg": 15.46, "fgNeighbor": "V", "bg": 6.79, "bgNeighbor": "V", "status": 17.28, "statusNeighbor": "wait", "contrast": 6.67, "surfaceContrast": 8.37, "focusOnTag": 6.03, "Lstar": 80.69}, "V": {"fg": 14.45, "fgNeighbor": "A", "bg": 6.79, "bgNeighbor": "D", "status": 11.4, "statusNeighbor": "wait", "contrast": 6.8, "surfaceContrast": 8.21, "focusOnTag": 6.26, "Lstar": 80.03}, "H": {"fg": 10.67, "fgNeighbor": "E", "bg": 7.3, "bgNeighbor": "A", "status": 12.45, "statusNeighbor": "backlog", "contrast": 4.96, "surfaceContrast": 4.68, "focusOnTag": 8.02, "Lstar": 61.8}, "E": {"fg": 10.67, "fgNeighbor": "H", "bg": 7.59, "bgNeighbor": "C", "status": 11.48, "statusNeighbor": "backlog", "contrast": 4.84, "surfaceContrast": 5.28, "focusOnTag": 6.93, "Lstar": 65.5}}};
+  const variables = (dark) => palette.map(p => `--id-${p[1]}-fg:${p[dark ? 5 : 3]};--id-${p[1]}-bg:${p[dark ? 6 : 4]};`).join('');
+  const sheet = document.createElement('style');
+  sheet.textContent = `:root{${variables(false)}}@media(prefers-color-scheme:dark){:root{${variables(true)}}}` + palette.map(p => `[data-id-type="${p[1]}"]{--id-fg:var(--id-${p[1]}-fg);--id-bg:var(--id-${p[1]}-bg);}`).join('');
+  document.head.append(sheet);
+  const luminance = hex => [1,3,5].map(i => parseInt(hex.slice(i,i+2),16)/255).map(v => v <= .04045 ? v/12.92 : ((v+.055)/1.055)**2.4).reduce((sum,v,i) => sum + v*[.2126,.7152,.0722][i],0);
+  const contrast = (fg,bg) => { const [a,b] = [luminance(fg),luminance(bg)].sort((a,b)=>b-a); return ((a+.05)/(b+.05)).toFixed(2); };
+  for (const p of palette) {
+    const tile = document.createElement('div'); tile.className = 'design-swatch';
+    tile.innerHTML = `<span class="ref-group" data-id="${p[0] === '?' ? 'XYZ' : p[0]}-12" data-label="${p[2]}"></span><small>亮色 ${contrast(p[3],p[4])}:1 / 暗色 ${contrast(p[5],p[6])}:1</small><small>--id-${p[1]}-{fg,bg}</small>`;
+    const near = separation.light[p[0]];
+    const darkNear = separation.dark[p[0]];
+    const metric = document.createElement('small');
+    metric.textContent = near ? `亮色最近邻 ΔE：字 ${near.fg} / 底 ${near.bg}` : '辅助类型：与 E 共用灰紫族';
+    tile.append(metric);
+    if (darkNear) {
+      const darkMetric = document.createElement('small');
+      darkMetric.textContent = `暗色最近邻 ΔE：字 ${darkNear.fg} / 底 ${darkNear.bg}`;
+      tile.append(darkMetric);
+    }
+    document.querySelector('#palette').append(tile);
+  }
+  for (const el of document.querySelectorAll('[data-id]')) {
+    const id = el.dataset.id;
+    const prefix = /^(MB|[CWQARDVHEM])-[1-9][0-9]*(?:#[1-9][0-9]*)?$/.exec(id)?.[1];
+    const p = palette.find(p=>p[0]===prefix) ?? palette.at(-1);
+    el.dataset.idType = p[1];
+    const badge = document.createElement('span'); badge.className = 'ref-badge'; badge.textContent = id;
+    const label = document.createElement('span'); label.className = 'ref-label'; label.textContent = el.dataset.label;
+    el.replaceChildren(badge, document.createTextNode(' '), label);
+  }
+  for (const el of document.querySelectorAll('[data-state]')) {
+    const shapes = { done: '<circle cx="8" cy="8" r="6"/><path d="m5 8 2 2 4-4"/>', wait: '<circle cx="8" cy="8" r="6"/><path d="M8 4v4l2 2"/>', fail: '<circle cx="8" cy="8" r="6"/><path d="m6 6 4 4m0-4-4 4"/>' };
+    el.insertAdjacentHTML('afterbegin', `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">${shapes[el.dataset.state]}</svg>`);
+  }
+  document.querySelector('#guides').addEventListener('click', e => {
+    const visible = document.querySelector('main').classList.toggle('guides');
+    e.currentTarget.setAttribute('aria-pressed', String(visible));
+    e.currentTarget.textContent = visible ? '隐藏对齐辅助线' : '显示对齐辅助线';
+  });
+</script>
+</body>
+</html>
