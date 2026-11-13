@@ -12,7 +12,11 @@ import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import { payloadString } from "@cardigan/router";
 import type { RuntimeEvent } from "@cardigan/runtime-herdr";
 import type { Store, StoreTransactionContext } from "@cardigan/store";
-import { dispatchAlert, unfinishedRun } from "./dispatch-alert.js";
+import {
+  alertAudience,
+  dispatchAlert,
+  unfinishedRun,
+} from "./dispatch-alert.js";
 import { dispatcherClock, type StandingResolver } from "./dispatch-inbox.js";
 import { dispatcherInterval } from "./dispatch-loop.js";
 
@@ -361,7 +365,7 @@ export class RuntimeMonitor {
           type: "runtime_lost",
           reason: "runtime_loss_grace_exceeded",
           audience:
-            standing?.(project, "pm_office", state) === a.id
+            alertAudience(a, state, standing) === "human_only"
               ? "human_only"
               : "human",
           card_id: since.card_id,
