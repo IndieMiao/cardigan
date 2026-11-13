@@ -93,6 +93,7 @@ type CommandName =
   | "manage_dispatch_stop"
   | "resolve_dispatch_attention"
   | "manage_inactive_run_stop"
+  | "settle_pending_run_finish"
   | "set_project_preferences"
   | "mark_notices_read"
   | "set_card_sensitive"
@@ -200,6 +201,7 @@ export class CommandDraft {
     const systemOnly = [
       "manage_host_ops_action",
       "manage_inactive_run_stop",
+      "settle_pending_run_finish",
       "auto_confirm_merge",
       "expire_merge_snoozes",
       "recover_dispatch",

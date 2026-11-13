@@ -18,6 +18,7 @@ export function endRun(
     summary,
     finished_at: d.now,
   };
+  delete next.pending_finish;
   d.put("runs", next);
   const assignment = d.get("assignments", run.assignment_id);
   if (assignment.runtime_state === "running")

@@ -7,8 +7,8 @@ import type {
   RuntimeRef,
   RuntimeResult,
 } from "@cardigan/domain";
-import { transition } from "@cardigan/domain";
-import { loadCommandState, unwrap } from "@cardigan/mcp-server";
+import { settlePendingRunFinish, transition } from "@cardigan/domain";
+import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import { payloadString } from "@cardigan/router";
 import type { RuntimeEvent } from "@cardigan/runtime-herdr";
 import type { Store, StoreTransactionContext } from "@cardigan/store";
@@ -29,11 +29,18 @@ export interface RuntimeMonitorOptions {
   standing?: StandingResolver;
   lossGraceMs?: number;
   eventSilenceMs?: number;
+  /** The existing dispatcher interval; time beyond one scheduled interval is excluded. */
+  reconcileIntervalMs?: number;
+  maxConsecutiveFailures?: number;
 }
+/** C-219: conservative candidate, pending human confirmation (§13.9). */
+export const DEFAULT_RUNTIME_FAILURE_LIMIT = 3;
 interface Subscription {
   controller: AbortController;
   ref: RuntimeRef;
   lastReceived: number;
+  silentFor: number;
+  failures: { count: number };
   seq: number;
   done: boolean;
 }
@@ -55,6 +62,9 @@ export class RuntimeMonitor {
   private readonly clock: Clock;
   private readonly grace: number;
   private readonly silence: number;
+  private readonly interval: number;
+  private readonly failureLimit: number;
+  private lastReconciledAt: number;
   private readonly subscriptions = new Map<string, Subscription>();
   private readonly tasks = new Set<Promise<void>>();
   private stopped = false;
@@ -63,8 +73,16 @@ export class RuntimeMonitor {
     this.clock = options.clock ?? dispatcherClock;
     this.grace = options.lossGraceMs ?? 5 * 60000;
     this.silence = options.eventSilenceMs ?? 45000;
+    this.interval = options.reconcileIntervalMs ?? 1000;
+    this.failureLimit =
+      options.maxConsecutiveFailures ?? DEFAULT_RUNTIME_FAILURE_LIMIT;
+    this.lastReconciledAt = Date.parse(this.clock.now());
     if (
-      ![this.grace, this.silence].every((n) => Number.isSafeInteger(n) && n > 0)
+      ![this.grace, this.silence, this.interval].every(
+        (n) => Number.isSafeInteger(n) && n > 0,
+      ) ||
+      !Number.isSafeInteger(this.failureLimit) ||
+      this.failureLimit < 2
     )
       throw new Error("Invalid runtime monitor grace period");
   }
@@ -77,6 +95,7 @@ export class RuntimeMonitor {
       throw error;
     }
     const wanted = new Set<string>();
+    const started = Date.parse(this.clock.now());
     for (const { id: project } of this.options.store.listProjects()) {
       const state = this.options.store.uow.read((tx) =>
         loadCommandState(tx, project),
@@ -93,19 +112,33 @@ export class RuntimeMonitor {
         const key = `${project}/${a.id}`;
         wanted.add(key);
         const old = this.subscriptions.get(key);
+        const sameSession = old && keyOf(old.ref) === keyOf(a.runtime_ref);
+        if (old && sameSession && !old.done)
+          old.silentFor += Math.min(
+            this.interval,
+            Math.max(
+              0,
+              started - Math.max(this.lastReconciledAt, old.lastReceived),
+            ),
+          );
         if (
           old &&
           (old.done ||
             keyOf(old.ref) !== keyOf(a.runtime_ref) ||
-            Date.parse(this.clock.now()) - old.lastReceived >= this.silence)
+            old.silentFor >= this.silence)
         ) {
-          if (!old.done && keyOf(old.ref) === keyOf(a.runtime_ref))
-            this.observe(project, a.id, old.ref, false);
+          if (!old.done && sameSession) this.failed(project, a.id, old);
           old.controller.abort();
           this.subscriptions.delete(key);
         }
         if (!this.subscriptions.has(key))
-          this.subscribe(key, project, a, a.runtime_ref);
+          this.subscribe(
+            key,
+            project,
+            a,
+            a.runtime_ref,
+            sameSession ? old.failures : { count: 0 },
+          );
       }
       this.expire(project);
     }
@@ -114,6 +147,8 @@ export class RuntimeMonitor {
         sub.controller.abort();
         this.subscriptions.delete(key);
       }
+    // Store reads and synchronous work in this pass are not terminal silence.
+    this.lastReconciledAt = Date.parse(this.clock.now());
   }
   async stop(): Promise<void> {
     this.stopped = true;
@@ -127,11 +162,14 @@ export class RuntimeMonitor {
     project: ProjectId,
     a: Assignment,
     ref: RuntimeRef,
+    failures: Subscription["failures"],
   ) {
     const sub: Subscription = {
       controller: new AbortController(),
       ref,
       lastReceived: Date.parse(this.clock.now()),
+      silentFor: 0,
+      failures,
       seq: -1,
       done: false,
     };
@@ -155,11 +193,16 @@ export class RuntimeMonitor {
     try {
       for await (const result of this.options.runtime.events(sub.ref, signal)) {
         if (signal.aborted) return;
-        if (!result.ok) break;
+        if (!result.ok) {
+          if (result.error.code === "runtime_not_found")
+            this.observe(project, id, sub.ref, false);
+          break;
+        }
         const e = result.value;
         if (!Number.isSafeInteger(e.seq) || e.seq < 0 || e.seq < sub.seq)
           continue;
         sub.lastReceived = Date.parse(this.clock.now());
+        sub.silentFor = 0;
         // Equal-seq heartbeats prove the connection is alive, but cannot replay state changes.
         if (e.seq === sub.seq) continue;
         sub.seq = e.seq;
@@ -172,20 +215,26 @@ export class RuntimeMonitor {
           ["lost", "finished", "removed"].includes(type ?? "")
         )
           this.observe(project, id, sub.ref, false);
-        else if (terminal)
+        else if (terminal) {
+          if (terminal.status.process === "alive") sub.failures.count = 0;
           this.observe(
             project,
             id,
             sub.ref,
             terminal.status.process === "alive",
           );
-        else if (["snapshot", "missed"].includes(type ?? ""))
+        } else if (["snapshot", "missed"].includes(type ?? ""))
           this.observe(project, id, sub.ref, false);
       }
     } catch (error) {
       if (!signal.aborted) this.failure = error;
     }
-    if (!signal.aborted) this.observe(project, id, sub.ref, false);
+    if (!signal.aborted) this.failed(project, id, sub);
+  }
+  private failed(project: ProjectId, id: Assignment["id"], sub: Subscription) {
+    sub.failures.count++;
+    if (sub.failures.count >= this.failureLimit)
+      this.observe(project, id, sub.ref, false);
   }
   private observe(
     project: ProjectId,
@@ -204,30 +253,56 @@ export class RuntimeMonitor {
       )
         return;
       const runs = activeRuns(state, a);
-      if (!runs.length || (alive && a.runtime_state !== "unknown")) return;
+      if (
+        !runs.length ||
+        (alive &&
+          a.runtime_state !== "unknown" &&
+          !runs.some((r) => r.pending_finish))
+      )
+        return;
       if (!alive && a.runtime_state === "unknown") {
         if (!lostFact(state, a))
           this.fact(tx, state, a, "runtime_disconnected");
         return;
       }
-      const event = alive ? "reconnected" : "connection_lost";
-      tx.assignments.put(project, {
-        ...a,
-        runtime_state: unwrap(transition("runtime", a.runtime_state, event)),
-      });
-      for (const r of runs) {
-        if (alive && r.status !== "unknown") continue;
-        tx.runs.put(project, {
-          ...r,
-          status: unwrap(transition("run", r.status, event)),
+      if (!alive || a.runtime_state === "unknown") {
+        const event = alive ? "reconnected" : "connection_lost";
+        tx.assignments.put(project, {
+          ...a,
+          runtime_state: unwrap(transition("runtime", a.runtime_state, event)),
         });
+        this.fact(
+          tx,
+          state,
+          a,
+          alive ? "runtime_reconnected" : "runtime_disconnected",
+        );
+        for (const r of runs) {
+          if (alive && r.status !== "unknown") continue;
+          tx.runs.put(project, {
+            ...r,
+            status: unwrap(transition("run", r.status, event)),
+          });
+        }
       }
-      this.fact(
-        tx,
-        state,
-        a,
-        alive ? "runtime_reconnected" : "runtime_disconnected",
-      );
+      // A stop fence may have postponed settlement at reconnection. A later
+      // fresh alive observation can settle it once that fence is withdrawn.
+      if (alive)
+        for (const r of runs) {
+          if (!r.pending_finish) continue;
+          persistEffect(
+            tx,
+            project,
+            unwrap(
+              settlePendingRunFinish(
+                loadCommandState(tx, project),
+                { kind: "system", project_id: project },
+                { run_id: r.id, runtime_ref: ref },
+                { clock: this.clock, ids: tx.ids },
+              ),
+            ),
+          );
+        }
     });
   }
   private fact(

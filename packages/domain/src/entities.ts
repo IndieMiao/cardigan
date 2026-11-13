@@ -322,6 +322,13 @@ export type Assignment = AssignmentFields &
   );
 export type RunOutcome = "completed" | "blocked" | "failed";
 export interface Run {
+  /** Accepted while disconnected; only the host can settle it after confirming this session alive. */
+  readonly pending_finish?: {
+    readonly outcome: RunOutcome;
+    readonly summary: string;
+    readonly runtime_ref: RuntimeRef;
+    readonly token_id: string;
+  };
   /** Durable automatic-stop fence; independent of bell delivery leases. */
   readonly dispatch_stop?: {
     readonly attempt_id: EventId;

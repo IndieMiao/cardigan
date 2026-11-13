@@ -362,6 +362,14 @@ export async function startCardiganServer(
               );
         },
         ...options.dispatcher,
+        ...((options.dispatcher.runtimeFailureLimit ??
+          config.runtimeFailureLimit) === undefined
+          ? {}
+          : {
+              runtimeFailureLimit:
+                options.dispatcher.runtimeFailureLimit ??
+                config.runtimeFailureLimit,
+            }),
         ...(hostOps ? { hostOpsTick: () => hostOps.tick() } : {}),
         hostOpsPatrolIntervalMs:
           options.dispatcher.hostOpsPatrolIntervalMs ??
