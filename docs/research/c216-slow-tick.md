@@ -192,6 +192,7 @@ route 子分段稳态（修前 → 修后）：
 
 - cleanup：`cleanup.release_closed`（同步，释放已结束卡的 Assignment）、`cleanup.state`、`cleanup.revoke_and_release`（每个已释放 Assignment：撤 Token 加终端 `status`/`release`，内含 `cleanup.revoke_tokens`）、`cleanup.settle`（读状态、`exists`、Git `removeWorktree`、必要时发清理决策）、`cleanup.idle_builds`（构建检出列举和删除）。
 - reconcile：`reconcile.state`、`reconcile.git`（文件系统和 Git 扫描，**包含**嵌套的 `reconcile.checks`）、`reconcile.checks`（对每张卡从 seq 0 读全部事件找合并检查记录）、`reconcile.repair`、`reconcile.record`（写发现和事件）。
+  - C-231 补齐：`reconcile.repair` 修好固定引用后会重读状态、再扫一遍；这次重读计入 `reconcile.state`，第二次扫描（连同其中的 `reconcile.checks`）计入 `reconcile.git`，两段都是多次累加。因此走修复路径时 `reconcile.git` 仍然包含全部 `reconcile.checks`，Git 扫描时间不再低报。`apps/server/src/reconcile-loop.test.ts` 用虚拟计时复现了修复路径：修前 `git` 只计第一遍（110），修后为两遍之和（220），`checks` 两遍共 20、都在 `git` 之内。
 - backup：`backup.fetch`（即整个 tick）。
 
 replay 新增 `REPLAY_LOOPS=1`（配 `REPLAY_LOOP_TICKS`，默认 2）：dispatcher tick 之后用同一个库、桩 Git 和桩终端各跑几次三个执行器。结果（稳态第 2 次）：
@@ -237,7 +238,9 @@ replay 新增 `REPLAY_LOOPS=1`（配 `REPLAY_LOOP_TICKS`，默认 2）：dispatc
 2. **容量队列跨认领复用**（`packages/host/src/run-capacity.ts` 的 `queueSnapshot`）：不再对 runs 表做 SQL 扫描，改为用事务里已缓存的 Run、Assignment、WorkItem、Card 列表在内存里筛选，条件与原 JOIN 一致（`queued` 且 `queue_reason=concurrency_limit`、Owner `active` 且不是 standing PM、触发事件存在；卡片取 Owner 工作项的卡，没有则取触发事件的卡，优先级取该卡）。排好序的候选按“所有项目的这四个列表是否仍是同一批数组”复用，每个 Store 只留一份。未结束的 BellAttempt 不在快照里，**每次调用都重新读并过滤**；对稳定排序的结果做过滤，顺序与对过滤后的行重新排序相同，最后仍交给 `runQueuePositions` 算 `ahead`。触发事件按 Run 对象缓存（事件只追加，只缓存查到的）。
 3. **待执行主机操作按快照复用**（同文件 `runCapacitySnapshot`）：有按流事件缓存时，按“事件流 Map + 卡片列表”两者的身份复用 `pendingHostOpsActions` 的结果；没有该端口的后端走原路径。
 
-**为什么不会读到旧值**（与 §6.3 同一约定，本卡新增的三处缓存都依赖它）：命令状态和 Store 快照里的数组都不原地修改。Store 的快照缓存（`command-snapshots.ts`）按 `command_versions` 版本号复用，写入（包括同一事务里更早的写入，触发器会更新版本号）会生成新数组；事务回滚丢弃事务内的新数组，之后读到的又是已提交的旧数组，而缓存键里存的是事务内的数组，对不上就重建。事件流缓存（`command-events.ts`）在有新事件时生成新的 Map 和新数组。`CommandDraft` 的写入只记在 `changes`，查找时先查 `changes`，所以命令内先写后读拿到的是新值；另一个草稿或回滚后的新草稿看不到这些写入。返回新数组的后端（没有快照缓存，或测试桩）只是缓存不命中，结果仍正确。非测试代码里没有对这些数组原地 `push`/`splice` 的地方（已检索），类型上的收紧由 C-231 做。
+**为什么不会读到旧值**（与 §6.3 同一约定，本卡新增的三处缓存都依赖它）：命令状态和 Store 快照里的数组都不原地修改。Store 的快照缓存（`command-snapshots.ts`）按 `command_versions` 版本号复用，写入（包括同一事务里更早的写入，触发器会更新版本号）会生成新数组；事务回滚丢弃事务内的新数组，之后读到的又是已提交的旧数组，而缓存键里存的是事务内的数组，对不上就重建。事件流缓存（`command-events.ts`）在有新事件时生成新的 Map 和新数组。`CommandDraft` 的写入只记在 `changes`，查找时先查 `changes`，所以命令内先写后读拿到的是新值；另一个草稿或回滚后的新草稿看不到这些写入。返回新数组的后端（没有快照缓存，或测试桩）只是缓存不命中，结果仍正确。非测试代码里没有对这些数组原地 `push`/`splice` 的地方（已检索）。
+
+**C-231 的编译期约束**：`CommandState` 的各集合、仓储的 `list`/`listAfter`、员工和成员列表、Store 快照和事件流缓存在类型上本来就是 `readonly` 数组，实体字段也都是 `readonly`，所以经这些类型拿到的数组和实体，原地修改编译不过。C-231 加了 `packages/domain/src/commands/command-state-readonly.contract.test.ts`（由 `pnpm --filter @cardigan/domain test:types` 检查），断言 `CommandState` 没有可变数组字段、`CommandDraft` 索引的每个集合都是只读数组、仓储读接口返回只读数组，并用 `@ts-expect-error` 列出 `push`/`splice`/`sort`/下标赋值/改实体字段等写法；以后谁把类型放宽，这个文件就编译不过。另外收紧了两处：`queueSnapshot` 首次构建时把缓存的排序结果以可变数组返回，现在返回类型改为只读；`role.contract.test.ts` 里对 `state.roles` 原地 `push` 改为每步生成新状态。仍未覆盖的是别名：调用方自己用可变类型持有同一个数组再改（TypeScript 结构类型挡不住），目前生产代码里没有这种写法。
 
 **测试**：`packages/domain/src/commands/command-draft-get.contract.test.ts` 用 300 组随机状态（重复键、复合键、带版本键、缺省集合）把新 `get` 与原 `list().find` 逐键对照，覆盖草稿内写后读、同键再次写入、事件追加、提交后换新快照、回滚后在旧快照上新建草稿；`apps/server/src/run-queue-cache.test.ts` 把原 SQL 原样留作对照，覆盖优先级变化、BellAttempt 占用与释放、Owner 释放、清除 `queue_reason`、standing PM、多项目排序，以及写事务内写后读（新 Run 带新追加的触发事件、改优先级）和回滚后恢复。去掉缓存键里的卡片列表时该测试会失败（已验证）。
 

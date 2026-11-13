@@ -69,7 +69,7 @@ const queueCache = new WeakMap<
 // Only hits are cached; a rolled-back Run object is never listed again.
 const triggerEvents = new WeakMap<object, Event>();
 
-function waitingRuns(store: Store, tx: ReadRepositories) {
+function waitingRuns(store: Store, tx: ReadRepositories): readonly QueuedRun[] {
   const key: unknown[] = [];
   const projects = store.listProjects().map((project) => {
     const lists = {

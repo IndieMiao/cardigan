@@ -176,30 +176,28 @@ export class ReconcileExecutor {
     if (project === undefined) return;
     // C-221: `reconcile.*` spans are timing only. `git` includes the
     // filesystem/Git scan and the nested `reconcile.checks` database replay.
-    const state = profileSpanSync("reconcile.state", () =>
-      this.state(project_id),
-    );
-    let findings = await profileSpan("reconcile.git", () =>
-      this.options.git.reconcile(
-        project,
-        state.assignments,
-        state.deliveries,
-        () => this.checks(project_id),
-      ),
-    );
+    // C-231: after a repair the state re-read and the second scan add to the
+    // same `state` and `git` spans, so `git` still contains every `checks`.
+    const scan = async () => {
+      const state = profileSpanSync("reconcile.state", () =>
+        this.state(project_id),
+      );
+      return profileSpan("reconcile.git", () =>
+        this.options.git.reconcile(
+          project,
+          state.assignments,
+          state.deliveries,
+          () => this.checks(project_id),
+        ),
+      );
+    };
+    let findings = await scan();
     if (
       await profileSpan("reconcile.repair", () =>
         this.repair(project_id, findings),
       )
-    ) {
-      const current = this.state(project_id);
-      findings = await this.options.git.reconcile(
-        project,
-        current.assignments,
-        current.deliveries,
-        () => this.checks(project_id),
-      );
-    }
+    )
+      findings = await scan();
     profileSpanSync("reconcile.record", () =>
       this.record(project_id, findings),
     );
