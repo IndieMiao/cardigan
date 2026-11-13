@@ -1,4 +1,4 @@
-import type { Actor, RunOutcome, RuntimeRef } from "../entities.js";
+import type { Actor, Run, RunOutcome, RuntimeRef } from "../entities.js";
 import { hostOpsPending } from "../host-ops.js";
 import type { RunId } from "../ids.js";
 import {
@@ -10,6 +10,18 @@ import {
 } from "./core.js";
 
 import { endRun } from "./end-run.js";
+
+function validRunToken(state: CommandState, run: Run, ports: CommandPorts) {
+  const token = ports.run_token;
+  return token?.id.trim() &&
+    token.project_id === state.project_id &&
+    token.assignment_id === run.assignment_id &&
+    token.role_version === run.role_version &&
+    token.revoked_at === null &&
+    token.allowed_tools.includes("finish_run")
+    ? token
+    : undefined;
+}
 
 export function heartbeat(
   state: CommandState,
@@ -54,17 +66,24 @@ export function finishRun(
       p.outcome === "blocked"
     )
       return run;
+    const token = validRunToken(state, run, ports);
     if (run.pending_finish)
       ensure(
-        run.pending_finish.outcome === p.outcome &&
+        token &&
+          run.pending_finish.outcome === p.outcome &&
           run.pending_finish.summary === p.summary &&
-          run.pending_finish.token_id === d.assignment?.mcp_token_id &&
+          run.pending_finish.token_id === token.id &&
           JSON.stringify(run.pending_finish.runtime_ref) ===
             JSON.stringify(d.assignment?.runtime_ref),
         "illegal_transition",
         "Run already has a pending finish request",
       );
     if (run.status === "unknown") {
+      ensure(
+        token,
+        "unauthorized",
+        "Deferred finish requires the authenticated, active Token record",
+      );
       const assignment = d.assignment;
       ensure(
         assignment?.runtime_state === "unknown" &&
@@ -81,7 +100,7 @@ export function finishRun(
           outcome: p.outcome,
           summary: p.summary,
           runtime_ref: assignment.runtime_ref,
-          token_id: assignment.mcp_token_id,
+          token_id: token.id,
         },
       };
       d.put("runs", next);
@@ -120,13 +139,15 @@ export function settlePendingRunFinish(
     const run = d.get("runs", p.run_id);
     const a = d.get("assignments", run.assignment_id);
     const pending = run.pending_finish;
+    const token = validRunToken(state, run, ports);
     if (
       !pending ||
+      !token ||
       run.status !== "running" ||
       a.status !== "active" ||
       !["idle", "running"].includes(a.runtime_state) ||
       run.role_version !== a.role_version ||
-      pending.token_id !== a.mcp_token_id ||
+      pending.token_id !== token.id ||
       JSON.stringify(pending.runtime_ref) !== JSON.stringify(p.runtime_ref) ||
       JSON.stringify(a.runtime_ref) !== JSON.stringify(p.runtime_ref) ||
       run.dispatch_stop ||

@@ -59,6 +59,15 @@ export interface CommandPorts {
   readonly ids: IdAllocator;
   /** Host-provided template configuration, never MCP parameters. */
   readonly templates?: readonly CardTemplate[];
+  /** Host-only token row: authenticated request token, or its current row at settlement. Never MCP parameters. */
+  readonly run_token?: {
+    readonly id: string;
+    readonly project_id: I.ProjectId;
+    readonly assignment_id: I.AssignmentId;
+    readonly role_version: number;
+    readonly allowed_tools: readonly E.ToolName[];
+    readonly revoked_at: string | null;
+  };
 }
 export interface TokenRequest {
   readonly token_id: string;

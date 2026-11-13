@@ -1,6 +1,7 @@
 import { beforeEach, expect, test } from "vitest";
 import {
   acknowledgeRun,
+  type CommandPorts,
   finishRun,
   type Run,
   settlePendingRunFinish,
@@ -23,6 +24,17 @@ beforeEach(() => {
   setup();
   run = commit(dispatch(commit(queue())));
   run = commit(acknowledgeRun(f.state, actor(), { run_id: run.id }, f.io));
+  f.io = {
+    ...f.io,
+    run_token: {
+      id: "authenticated-token-id",
+      project_id: f.state.project_id,
+      assignment_id: run.assignment_id,
+      role_version: run.role_version,
+      allowed_tools: ["finish_run"],
+      revoked_at: null,
+    },
+  };
   f.state = {
     ...f.state,
     runs: f.state.runs.map((r) =>
@@ -157,9 +169,6 @@ test.each([
             ...(change === "replaced"
               ? { runtime_ref: { ...ref, terminal_ref: "replacement" } }
               : {}),
-            ...(change === "token"
-              ? { mcp_token_id: "replacement-token-id" }
-              : {}),
             ...(change === "role" ? { role_version: a.role_version + 1 } : {}),
           },
     ),
@@ -213,6 +222,11 @@ test.each([
           ]
         : f.state.events,
   };
+  if (change === "token")
+    f.io = {
+      ...f.io,
+      run_token: { ...tokenEvidence(), id: "replacement-token-id" },
+    };
   expect(value(settle())).toMatchObject({ changes: [], events: [] });
 });
 
@@ -223,3 +237,37 @@ test("C-219 a stale observation cannot confirm a different RuntimeRef", () => {
     value(settle(system, { ...ref, terminal_ref: "other" })),
   ).toMatchObject({ changes: [], events: [] });
 });
+
+const tokenEvidence = (): NonNullable<CommandPorts["run_token"]> => {
+  if (!f.io.run_token) throw new Error("Missing token evidence");
+  return f.io.run_token;
+};
+
+test.each(["missing", "revoked", "assignment", "project", "version", "scope"])(
+  "C-219 invalid Token evidence (%s) cannot accept or settle a deferred finish",
+  (mode) => {
+    const validPorts = f.io;
+    const invalidPorts = {
+      ...f.io,
+      run_token: {
+        ...tokenEvidence(),
+        ...(mode === "revoked" ? { revoked_at: f.io.clock.now() } : {}),
+        ...(mode === "assignment" ? { assignment_id: f.reviewer.id } : {}),
+        ...(mode === "project" ? { project_id: "another-project" } : {}),
+        ...(mode === "version" ? { role_version: run.role_version + 1 } : {}),
+        ...(mode === "scope" ? { allowed_tools: [] } : {}),
+      },
+    } as CommandPorts;
+    const missingPorts: CommandPorts = { clock: f.io.clock, ids: f.io.ids };
+    f.io = mode === "missing" ? missingPorts : invalidPorts;
+    expect(request()).toMatchObject({
+      ok: false,
+      error: { code: "unauthorized" },
+    });
+    f.io = validPorts;
+    commit(request());
+    reconnect();
+    f.io = mode === "missing" ? missingPorts : invalidPorts;
+    expect(value(settle())).toMatchObject({ changes: [], events: [] });
+  },
+);

@@ -14,6 +14,7 @@ import type { RuntimeEvent } from "@cardigan/runtime-herdr";
 import type { Store, StoreTransactionContext } from "@cardigan/store";
 import { dispatchAlert, unfinishedRun } from "./dispatch-alert.js";
 import { dispatcherClock, type StandingResolver } from "./dispatch-inbox.js";
+import { dispatcherInterval } from "./dispatch-loop.js";
 
 /** HerdrRuntime implements this host-side subscription interface. */
 export interface RuntimeEventSource {
@@ -73,12 +74,12 @@ export class RuntimeMonitor {
     this.clock = options.clock ?? dispatcherClock;
     this.grace = options.lossGraceMs ?? 5 * 60000;
     this.silence = options.eventSilenceMs ?? 45000;
-    this.interval = options.reconcileIntervalMs ?? 1000;
+    this.interval = dispatcherInterval(options.reconcileIntervalMs);
     this.failureLimit =
       options.maxConsecutiveFailures ?? DEFAULT_RUNTIME_FAILURE_LIMIT;
     this.lastReconciledAt = Date.parse(this.clock.now());
     if (
-      ![this.grace, this.silence, this.interval].every(
+      ![this.grace, this.silence].every(
         (n) => Number.isSafeInteger(n) && n > 0,
       ) ||
       !Number.isSafeInteger(this.failureLimit) ||
@@ -290,6 +291,9 @@ export class RuntimeMonitor {
       if (alive)
         for (const r of runs) {
           if (!r.pending_finish) continue;
+          const token = tx
+            .tokensForAssignment(project, r.assignment_id)
+            .find((t) => t.id === r.pending_finish?.token_id);
           persistEffect(
             tx,
             project,
@@ -298,7 +302,11 @@ export class RuntimeMonitor {
                 loadCommandState(tx, project),
                 { kind: "system", project_id: project },
                 { run_id: r.id, runtime_ref: ref },
-                { clock: this.clock, ids: tx.ids },
+                {
+                  clock: this.clock,
+                  ids: tx.ids,
+                  ...(token ? { run_token: token } : {}),
+                },
               ),
             ),
           );

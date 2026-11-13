@@ -1,4 +1,6 @@
-import { finishRun } from "@cardigan/domain";
+import type { RunOutcome } from "@cardigan/domain";
+import { issueTokenInTransaction } from "@cardigan/host";
+import { authenticate, serverTools, unwrap } from "@cardigan/mcp-server";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { recoveryFixture } from "../test-support/recovery.js";
 import { runtimeEvents } from "../test-support/runtime-events.js";
@@ -6,11 +8,13 @@ import { RuntimeMonitor } from "./dispatch-monitor.js";
 
 let f: ReturnType<typeof recoveryFixture>,
   events: ReturnType<typeof runtimeEvents>,
-  monitor: RuntimeMonitor;
+  monitor: RuntimeMonitor,
+  token: ReturnType<typeof issueTokenInTransaction>;
 beforeEach(() => {
   f = recoveryFixture();
   f.session(f.target.assignment, false);
   f.skipEvents();
+  token = issue();
   events = runtimeEvents();
   monitor = new RuntimeMonitor({
     store: f.store,
@@ -23,6 +27,36 @@ afterEach(async () => {
   await monitor.stop();
   f.close();
 });
+const issue = () =>
+  f.store.uow.run((tx) =>
+    issueTokenInTransaction(tx, f.project, f.target.assignment.id, {
+      role_version: f.target.assignment.role_version,
+      allowed_tools: ["finish_run"],
+    }),
+  );
+const finish = async (outcome: RunOutcome = "completed", summary = "Done") => {
+  const tool = serverTools({ clock: f.clock }).find(
+    (t) => t.name === "finish_run",
+  );
+  if (!tool) throw new Error("Missing finish_run tool");
+  return tool.handler(
+    tool.input.parse({
+      idempotency_key: "deferred-finish",
+      run_id: f.latest().id,
+      outcome,
+      summary,
+      // Caller-supplied evidence is not part of the tool schema.
+      run_token: { id: "caller-injected" },
+    }),
+    {
+      store: f.store,
+      identity: unwrap(authenticate(f.store, token.token)),
+      revalidateToken: () => {
+        if (!f.store.verifyToken(token.token)) throw new Error("Revoked Token");
+      },
+    },
+  );
+};
 const state = () =>
   f.state().assignments.find((a) => a.id === f.target.assignment.id)
     ?.runtime_state;
@@ -283,16 +317,8 @@ test.each(["completed", "blocked", "failed"] as const)(
     await expectState("unknown");
     const run = f.latest();
     const work = f.state().work_items;
-    f.apply(
-      (s, a, p) =>
-        finishRun(
-          s,
-          a,
-          { run_id: run.id, outcome, summary: "Done while disconnected" },
-          p,
-        ),
-      f.actorFor(f.target.assignment),
-    );
+    await finish(outcome, "Done while disconnected");
+    expect(f.latest().pending_finish?.token_id).toBe(token.record.id);
     expect(f.latest()).toMatchObject({
       status: "unknown",
       pending_finish: { outcome },
@@ -332,16 +358,7 @@ test("C-219 a pending finish waits for a withdrawn stop fence and a fresh alive 
   lost();
   await expectState("unknown");
   const run = f.latest();
-  f.apply(
-    (s, a, p) =>
-      finishRun(
-        s,
-        a,
-        { run_id: run.id, outcome: "completed", summary: "Done" },
-        p,
-      ),
-    f.actorFor(f.target.assignment),
-  );
+  await finish();
   f.store.uow.run((tx) => {
     const current = tx.runs.get(f.project, run.id);
     if (!current) throw new Error("Missing Run");
@@ -376,17 +393,7 @@ test("C-219 a pending finish waits for a withdrawn stop fence and a fresh alive 
 test("C-219 an unrecovered terminal with a pending finish still expires through the existing lost flow", async () => {
   lost();
   await expectState("unknown");
-  const run = f.latest();
-  f.apply(
-    (s, a, p) =>
-      finishRun(
-        s,
-        a,
-        { run_id: run.id, outcome: "completed", summary: "Done" },
-        p,
-      ),
-    f.actorFor(f.target.assignment),
-  );
+  await finish();
   f.advance(300_000);
   monitor.reconcile();
   expect(state()).toBe("lost");
@@ -431,7 +438,6 @@ test("completed Runs do not become unknown when the terminal exits", async () =>
 test.each([
   { lossGraceMs: 0 },
   { eventSilenceMs: Number.NaN },
-  { reconcileIntervalMs: 0 },
   ...[0, 1, -1, 1.5, Number.NaN, Infinity].map((maxConsecutiveFailures) => ({
     maxConsecutiveFailures,
   })),
@@ -445,3 +451,56 @@ test.each([
       }),
   ).toThrow("Invalid runtime monitor");
 });
+
+test.each(["rotate", "revoke"])(
+  "C-219 real Token %s cannot settle an old deferred finish on the same RuntimeRef",
+  async (mode) => {
+    const reference = f
+      .state()
+      .assignments.find((a) => a.id === f.target.assignment.id)?.mcp_token_id;
+    lost();
+    await expectState("unknown");
+    const run = f.latest();
+    await finish();
+    expect(f.latest().pending_finish?.token_id).toBe(token.record.id);
+    expect(f.latest().pending_finish?.token_id).not.toBe(reference);
+    if (mode === "rotate") {
+      const replacement = issue();
+      expect(token.record.id).not.toBe(replacement.record.id);
+    } else f.store.uow.run((tx) => tx.revokeToken(token.record.id));
+    expect(f.store.verifyToken(token.token)).toBeUndefined();
+    expect(
+      f.state().assignments.find((a) => a.id === f.target.assignment.id)
+        ?.mcp_token_id,
+    ).toBe(reference);
+    await expect(finish()).rejects.toMatchObject({ code: "unauthorized" });
+    alive(2);
+    await flush();
+    expect(f.latest().status).toBe("running");
+    expect(f.latest().pending_finish?.token_id).toBe(token.record.id);
+    expect(f.latest().finished_at).toBeUndefined();
+    expect(
+      f
+        .state()
+        .events.filter(
+          (e) =>
+            e.type === "run_finished" &&
+            (e.payload as { run_id?: string }).run_id === run.id,
+        ),
+    ).toHaveLength(0);
+  },
+);
+
+test.each([0, -1, 1.5, Number.NaN, Infinity, 2147483648])(
+  "C-219 monitor shares the dispatcher interval error contract for %s",
+  (reconcileIntervalMs) => {
+    expect(
+      () =>
+        new RuntimeMonitor({
+          store: f.store,
+          runtime: events.source,
+          reconcileIntervalMs,
+        }),
+    ).toThrow("Invalid dispatcher interval");
+  },
+);

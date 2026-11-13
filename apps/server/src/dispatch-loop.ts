@@ -19,11 +19,16 @@ export interface DispatchLoop {
   stop(): Promise<void>;
 }
 
-/** No global signal handlers or Store ownership. Await stop() before closing host resources. */
-export function startDispatchLoop(options: DispatchLoopOptions): DispatchLoop {
-  const interval = options.intervalMs ?? 1000;
+/** Shared by the loop and monitor so startup keeps one interval validation contract. */
+export function dispatcherInterval(interval = 1000): number {
   if (!Number.isSafeInteger(interval) || interval < 1 || interval > 2147483647)
     throw new Error("Invalid dispatcher interval");
+  return interval;
+}
+
+/** No global signal handlers or Store ownership. Await stop() before closing host resources. */
+export function startDispatchLoop(options: DispatchLoopOptions): DispatchLoop {
+  const interval = dispatcherInterval(options.intervalMs);
   const slowTickMs = options.slowTickMs ?? DEFAULT_SLOW_TICK_MS;
   if (!Number.isFinite(slowTickMs) || slowTickMs <= 0)
     throw new Error("Invalid dispatcher slow tick threshold");
