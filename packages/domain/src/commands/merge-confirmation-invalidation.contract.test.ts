@@ -15,6 +15,12 @@ import {
 import { mergeFixture } from "./merge/test-fixtures.js";
 import { apply, human, value } from "./test-fixtures.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 const system: Actor = { kind: "system", project_id: human.project_id };
 const conflict = (
   f: ReturnType<typeof mergeFixture>,
@@ -168,6 +174,9 @@ test.each(["card_completion", "code"] as const)(
     const params = {
       work_item_id: product.work_item_id,
       kind,
+      ...(kind === "card_completion"
+        ? { plain_summary: TEST_PLAIN_SUMMARY }
+        : {}),
       summary: "Replacement",
       subject: product.subject,
       requested_verifiers:
@@ -216,6 +225,7 @@ test("invariants 11, 14: unrelated blockers still reject a replacement without p
   const params = {
     work_item_id: product.work_item_id,
     kind: "card_completion" as const,
+    plain_summary: TEST_PLAIN_SUMMARY,
     summary: "Replacement",
     subject: product.subject,
     requested_verifiers: completion.requested_verifiers,

@@ -14,6 +14,12 @@ import {
 import { mergeFixture } from "./merge/test-fixtures.js";
 import { assignment, human, ports, role, value } from "./test-fixtures.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 const { work_item_id: _work, ...base } = assignment(900, "pm");
 const ops: Assignment = { ...base, scope: "standing", standing_mode: "ops" };
 const opsActor: Actor = {
@@ -193,6 +199,7 @@ test("§6 C-95: PM Ops can attach card images when handing a decision to the hum
   expect(confirmation()).toMatchObject({
     id: q.id,
     decider: "human",
+    plain_summary: TEST_PLAIN_SUMMARY,
     attachment_ids: [shot.id],
   });
 });

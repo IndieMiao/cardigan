@@ -307,31 +307,53 @@ button.quiet,
   display: grid;
   grid-template-columns: 220px minmax(0, 1fr);
 }
+/* C-209 sidebar (design D-700 / D-709): one quiet heading level, 14px entries
+   with shared icon and text indents, and only Needs You in bold. The same
+   panel styles serve the wide sidebar and the narrow-screen drawer. */
 .sidebar {
   position: fixed;
   inset: 0 auto 0 0;
   width: 220px;
   height: auto;
   overflow-y: auto;
+  border-right: 1px solid var(--border);
+}
+.sidebar-panel {
   display: flex;
   flex-direction: column;
   gap: 24px;
-  padding: 24px 16px;
+  padding: 20px 12px 12px;
   background: var(--surface);
-  border-right: 1px solid var(--border);
+  color: var(--text);
+}
+.brand-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 28px;
+  padding: 0 8px;
+}
+.brand-row .brand,
+.mobile-header .brand {
+  line-height: 28px;
 }
 .project-switcher {
   display: grid;
   gap: 6px;
+  margin: 0 8px;
   color: var(--text-muted);
-  font-size: var(--text-sm);
+  font-size: var(--text-xs);
+  line-height: 18px;
 }
 .project-switcher select {
   width: 100%;
+  /* The drawer raises this to a 44px touch target. */
+  height: var(--switcher-height, 36px);
+  font-size: var(--text-body);
 }
-
 .nav,
-.nav-group {
+.nav-group,
+.nav-links {
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -341,29 +363,80 @@ button.quiet,
 }
 .nav-group h2 {
   margin: 0 12px 4px;
-  font-size: var(--text-sm);
+  font-size: var(--text-xs);
+  line-height: 18px;
+  font-weight: 400;
   color: var(--text-muted);
 }
-.nav a {
-  padding: 8px 12px;
-  border-radius: 4px;
-  text-decoration: none;
-  color: var(--text);
+.nav-item {
+  position: relative;
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  /* C-159: keeps counts apart from their label when the link shrinks
-     to its content on narrow screens. */
-  gap: 8px;
+  gap: 10px;
+  width: 100%;
+  min-height: 40px;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-body);
+  line-height: 20px;
+  font-weight: 400;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
 }
-.nav a[aria-current="page"] {
+.nav-item:hover {
+  background: var(--surface-muted);
+}
+.nav-item[aria-current="page"] {
   color: var(--accent);
   background: var(--surface-muted);
+}
+/* Colour is not the only cue: the current entry also gets a left marker. */
+.nav-item[aria-current="page"]::before {
+  content: "";
+  position: absolute;
+  top: calc(50% - 10px);
+  left: 0;
+  width: 3px;
+  height: 20px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+.nav-item.needs-link {
   font-weight: 600;
 }
-.nav-count {
-  font-weight: 600;
+.nav-icon {
+  display: block;
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.needs-link .nav-icon,
+.mobile-needs {
   color: var(--status-wait);
+}
+.nav-count {
+  min-width: 24px;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--status-wait);
+  font-size: var(--text-xs);
+  line-height: 22px;
+  text-align: center;
+}
+.needs-link .nav-count {
+  margin-left: auto;
 }
 .sidebar-footer {
   margin-top: auto;
@@ -371,10 +444,51 @@ button.quiet,
   gap: 12px;
   font-size: var(--text-xs);
 }
-.logout {
-  background: var(--surface);
+.nav-tools {
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.icon-button {
+  display: grid;
+  place-items: center;
+  min-width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
   color: var(--text);
-  text-align: left;
+}
+.icon-button:hover {
+  background: var(--surface-muted);
+}
+.mobile-header {
+  display: none;
+}
+.nav-drawer-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: var(--overlay);
+}
+.nav-drawer {
+  position: fixed;
+  inset: 0 auto 0 0;
+  z-index: 101;
+  width: min(280px, calc(100vw - 56px));
+  height: 100dvh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 12px 12px max(12px, env(safe-area-inset-bottom));
+  border-right: 1px solid var(--border);
+  --switcher-height: 44px;
+}
+.nav-drawer .brand-row {
+  min-height: 44px;
+}
+.nav-drawer .nav-item {
+  min-height: 44px;
+  padding-block: 12px;
 }
 .content {
   grid-column: 2;
@@ -2734,22 +2848,40 @@ body[data-lightbox="open"] .drawer-overlay {
 
 /* All views share the board's compact navigation on narrow screens. */
 @media (max-width: 760px) {
+  /* C-209: the sidebar leaves the flow; a 56px top bar opens it as a drawer
+     and keeps a Needs You shortcut, so the page gets the full width. */
   .app {
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto 1fr;
   }
-  .app .sidebar {
-    position: static;
-    width: auto;
-    min-width: 0;
-    padding: var(--gap);
-    gap: var(--gap);
+  .app > .sidebar {
+    display: none;
   }
-  .app :is(.nav, .nav-group, .sidebar-footer) {
+  .mobile-header {
     display: flex;
-    flex-direction: row;
-    flex-wrap: wrap;
     align-items: center;
-    gap: var(--gap);
+    gap: 8px;
+    height: 56px;
+    padding: 6px 12px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+  }
+  .mobile-needs {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-width: 44px;
+    min-height: 44px;
+    margin-left: auto;
+    padding: 0 8px;
+    border-radius: 4px;
+    text-decoration: none;
+  }
+  .mobile-header .nav-icon {
+    flex-basis: 20px;
+    width: 20px;
+    height: 20px;
   }
   .content,
   .content:has(:is(.cards-page-board, .execution-page)) {
@@ -3994,6 +4126,67 @@ body[data-lightbox="open"] .drawer-overlay {
 .decision-suggestion textarea {
   width: 100%;
 }
+/* C-202: plain-language summary shown first on a decision. */
+.plain-summary {
+  margin: 8px 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.plain-summary dl {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+.plain-summary dl > div {
+  display: grid;
+  grid-template-columns: 6em minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+}
+.plain-summary dt {
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.plain-summary dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.plain-summary-risk.risky {
+  margin: 2px -8px 0;
+  padding: 6px 8px;
+  border-left: 4px solid var(--danger);
+  border-radius: var(--radius);
+  background: var(--danger-surface);
+}
+.plain-summary-risk.risky dt,
+.plain-summary-risk.risky dd {
+  color: var(--danger);
+}
+.plain-summary-flag {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 6px;
+  border: 1px solid var(--danger);
+  border-radius: 999px;
+  font-size: var(--text-sm);
+}
+.plain-summary.compact {
+  margin: 4px 0 6px;
+  padding: 6px 8px;
+  font-size: var(--text-sm);
+}
+.plain-summary.compact dl > div {
+  grid-template-columns: 5em minmax(0, 1fr);
+}
+@media (max-width: 480px) {
+  .plain-summary dl > div {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+}
+/* End C-202 plain summary. */
 
 /* C-208: distinguish controls from decorative dividers in the dark palette.
  * Override component border colours without adding borders to borderless actions.

@@ -8,6 +8,12 @@ import {
 import { expect, test } from "vitest";
 import { m5Cross, TEST_PASSWORD } from "../../test-support/m5-cross.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 test("Workbench answers and grants atomically, enforces fixed risks and filters human/PM history", async () => {
   const f = await m5Cross();
   try {
@@ -27,6 +33,7 @@ test("Workbench answers and grants atomically, enforces fixed risks and filters 
             options: [{ key: "go", description: "继续", impact: "推进当前卡" }],
             recommended: "go",
             decider: "human",
+            plain_summary: TEST_PLAIN_SUMMARY,
             affected_cards: [f.card.id],
             affected_work_items: [],
             blocking: false,
@@ -170,6 +177,7 @@ test("unclaimed completed decisions stay visible in Workbench and CLI without al
       ],
       recommended: "go",
       decider: "human",
+      plain_summary: TEST_PLAIN_SUMMARY,
       blocking: false,
       affected_cards: [f.card.id],
       affected_work_items: [],
@@ -362,6 +370,7 @@ test("PM merge confirmation setting round-trips and delegated answers become rea
           options: [{ key: "go", description: "继续", impact: "推进当前卡" }],
           recommended: "go",
           decider: "human",
+          plain_summary: TEST_PLAIN_SUMMARY,
           affected_cards: [f.card.id],
           affected_work_items: [],
           blocking: false,

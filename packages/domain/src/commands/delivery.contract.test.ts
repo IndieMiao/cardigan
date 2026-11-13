@@ -25,6 +25,12 @@ import {
   value,
 } from "./test-fixtures.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 function present<T>(entity: T | undefined): T {
   if (entity === undefined) throw new Error("Missing delivery fixture entity");
   return entity;
@@ -312,6 +318,7 @@ test("invariant 13: code review enables completion; the PM completion review ope
     await deliver(state, {
       ...p,
       kind: "card_completion",
+      plain_summary: TEST_PLAIN_SUMMARY,
       requested_verifiers: [id("work_item", 3)],
     }),
   );
@@ -371,6 +378,7 @@ test("invariants 11, 13: summary length counts code points and completion requir
     await deliver(secondary, {
       ...p,
       kind: "card_completion",
+      plain_summary: TEST_PLAIN_SUMMARY,
       requested_verifiers: [id("work_item", 3)],
     }),
   ).toMatchObject({ ok: false, error: { code: "unauthorized" } });
@@ -382,6 +390,7 @@ test("invariant 13: incomplete conditions need explicit known gaps and follow-up
   const params = {
     ...p,
     kind: "card_completion" as const,
+    plain_summary: TEST_PLAIN_SUMMARY,
     requested_verifiers: [id("work_item", 3)],
   };
   expect(await deliver(state, params)).toMatchObject({
@@ -608,6 +617,7 @@ test.each(["pending", "conditional", "rejected"] as const)(
       await deliver(state, {
         ...p,
         kind: "card_completion",
+        plain_summary: TEST_PLAIN_SUMMARY,
         requested_verifiers: [id("work_item", 3)],
       }),
     );
@@ -1056,6 +1066,7 @@ test("M5.S S16: a completion request only waits on the PM acceptance item", asyn
       {
         work_item_id: setup.produce.id,
         kind: "card_completion",
+        plain_summary: TEST_PLAIN_SUMMARY,
         summary: "Complete",
         subject,
         requested_verifiers: [setup.acceptance.id],

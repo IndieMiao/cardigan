@@ -23,6 +23,12 @@ import {
 } from "./launch/test-fixtures.js";
 import { human, subject, value } from "./test-fixtures.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 beforeEach(setup);
 const start = (a = f.coder) => {
   const sent = commit(dispatch(commit(queue(a))));
@@ -66,6 +72,7 @@ test("M5.6 invariants 5, 10: a blocking Decision ends the Run and returns the As
         options: [{ key: "go", description: "Continue", impact: "Resume" }],
         recommended: "go",
         decider: "human",
+        plain_summary: TEST_PLAIN_SUMMARY,
         affected_cards: [],
         affected_work_items: [item().id],
         blocking: true,

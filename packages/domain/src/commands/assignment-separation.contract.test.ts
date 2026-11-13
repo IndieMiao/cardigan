@@ -18,6 +18,12 @@ import {
   value,
 } from "./test-fixtures.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 function assignItem(state: CommandState, n: number, io = ports()) {
   const item = state.work_items.find((w) => w.id === id("work_item", n));
   if (!item) throw new Error("Missing work item");
@@ -165,6 +171,9 @@ test.each(["code", "card_completion"] as const)(
       const params = {
         work_item_id: id("work_item", 1),
         kind: deliveryKind,
+        ...(deliveryKind === "card_completion"
+          ? { plain_summary: TEST_PLAIN_SUMMARY }
+          : {}),
         summary: "Ready",
         subject,
         requested_verifiers: [id("work_item", deliveryKind === "code" ? 2 : 3)],

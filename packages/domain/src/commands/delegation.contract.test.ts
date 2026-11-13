@@ -43,6 +43,12 @@ import {
   value,
 } from "./test-fixtures.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 function setup(active = true) {
   let state = fixture();
   const io = ports();
@@ -105,6 +111,7 @@ function setup(active = true) {
           affected_work_items: [],
           blocking: false,
           decider: "human",
+          plain_summary: TEST_PLAIN_SUMMARY,
         },
         io,
       ),
@@ -554,6 +561,7 @@ test("implementation notifications do not start a work-item Run until its final 
         ...seed,
         category: "permission",
         decider: "human",
+        plain_summary: TEST_PLAIN_SUMMARY,
         blocking: true,
         affected_work_items: [id("work_item", 1)],
       },
@@ -667,7 +675,13 @@ test.each([true, false])(
       requested_verifiers: [],
     };
     for (const kind of ["doc", "card_completion"] as const) {
-      const params = { ...product, kind };
+      const params = {
+        ...product,
+        kind,
+        ...(kind === "card_completion"
+          ? { plain_summary: TEST_PLAIN_SUMMARY }
+          : {}),
+      };
       const verified = value(
         await prepareDelivery(state, actor(1, "pm"), params, {
           verify: async () => ({ ok: true, value: [] }),
@@ -686,6 +700,7 @@ test.each([true, false])(
       trigger: "completion_review",
       category: "feature_detail",
       decider: "human",
+      plain_summary: TEST_PLAIN_SUMMARY,
       human_required_reason: expect.any(String),
     });
     expect(

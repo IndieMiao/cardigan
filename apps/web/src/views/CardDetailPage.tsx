@@ -32,6 +32,7 @@ import {
   Time,
 } from "../components/Foundation.js";
 import { MergeBlockers } from "../components/MergeBlockers.js";
+import { DecisionContext, PlainSummary } from "../components/PlainSummary.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
 import { Timeline } from "../components/Timeline.js";
 import { TimelineControls } from "../components/TimelineControls.js";
@@ -505,6 +506,12 @@ function CardContent({
                 aria-label={`拍板 ${q.id}`}
               >
                 <h3 className="needs-question">{q.question}</h3>
+                <PlainSummary id={q.id} summary={q.plain_summary} />
+                <DecisionContext
+                  context={q.context}
+                  summary={q.plain_summary}
+                  legacy={null}
+                />
                 <SuggestedDecision
                   q={q}
                   client={client}

@@ -1152,6 +1152,68 @@ C-208 暗色配色候选见 [设计说明](design/c208/design.md)：页面、面
 
 C-151：沿用看板现有的 760px 窄屏断点，将导航移到页面上方并允许入口换行，主内容占满宽度，覆盖卡片详情、Needs You、执行视图、拍板记录、项目快照和设置。卡片详情在窄屏改为单栏，概况接在正文之后；时间线身份与结论分行，筛选标签和控件一起换行；时间线筛选、计数和分页按钮也允许换行，超过默认 20 条记录时仍可完整操作。快照最近交付表格在自身区域内横向滚动，执行表格沿用现有内部滚动；不让表格撑宽页面。768px 及以上保留原布局，不改变页面内容、组件或导航交互。
 
+**C-209 侧栏导航设计（W-638，晴雯；W-635 已实现）**
+
+依据 C-209 验收标准、C-209#9 的“增加可读性、弱化样式装饰”方向及 C-209#10 的跨卡约定。独立原型为 [c209-sidebar.html](design/c209-sidebar.html)，只演示布局、入口状态与导航抽屉，不接 API。W-635 已按本方案实现：`apps/web/src/components/SidebarNav.tsx` 同时用于宽屏侧栏和 760px 以下的 Radix Dialog 抽屉，顶栏只在窄屏渲染；抽屉替代 C-151 的顶部入口换行展示，其余页面响应式规则保持原样。暗色沿用同名主题变量，C-208 合并后自动换成定稿值；项目选择器边框暂用 `--border`，`--control-border` 随 C-208 落地后对齐。帮助入口仅预留图标与位置，由 C-206 加路由。
+
+| 区域 | 顺序 / 图标 | 理由 |
+|---|---|---|
+| 顶部，无标题 | Needs You / 收件托盘；卡片 / 三列面板 | 人先处理待办，再查看工作；取消仅含“卡片”的“工作”标题 |
+| 观察 | 执行视图 / 趋势折线；项目动态 / 脉冲线；拍板记录 / 勾选清单；项目快照 / 四格概览 | 按查看执行、动态与历史记录的用途归组；顶部保留高频待办和卡片操作，不以项目归属划分层级 |
+| 底部工具区，无标题 | 设置 / 调节滑杆；帮助 / 问号圆；登出 / 退出箭头 | 低频工具下沉，取消仅含“设置”的标题；帮助紧挨登出上方，符合 C-206 |
+
+入口及既有路由保留。“项目”仅作为选择器标签保留；中部用用途名称“观察”区分，是不可点击的分组标题，无折叠箭头。底部使用一个轻分隔线。原有连接、重连、登出反馈在工具区前按现有条件显示，不变成导航项；登出仍为按钮，保留进行中禁用状态。
+
+| 尺寸 / 状态 | 设计值 |
+|---|---|
+| 侧栏 | 宽 220px；左右内边距 12px、上 20px、下 12px；品牌和项目选择器另缩进 8px |
+| 分组标题 | 12px / 18px，400，`--text-muted`；左缩进 12px，下方 8px（含行间 gap） |
+| 普通入口 | 14px / 20px，400；行高 40px，左右内边距 12px；图标与文字相隔 10px，行间 4px |
+| 对齐 | 图标距侧栏左边 24px，文字 52px；分组标题与图标起点对齐，全部入口共享缩进 |
+| 分组间距 | 顶部入口组与观察组间隔 24px；工具区 `margin-top:auto`，分隔线下留 12px |
+| 普通 / 悬停 | 普通透明底、`--text`；悬停 `--surface-muted`，无阴影 |
+| 当前项 | `--surface-muted` 底、`--accent` 文字与图标，400（Needs You 保持 600）；左侧 3×20px 标记；4px 圆角；`aria-current=page`，不用颜色作为唯一线索 |
+| 键盘焦点 | 2px `--accent` 轮廓、偏移 2px，与选中/悬停同时存在 |
+| Needs You | 始终第一项，600；图标、计数用 `--status-wait`。计数 12px / 22px、最小宽 24px、左右各 6px、`--surface` 底、无描边（亮色计数对比度 5.02:1）。0 隐藏数量，大数完整显示，不改计数口径 |
+| 图标 | 自绘内联 SVG，24×24 viewBox，显示 18×18px，线宽 1.75、圆端点/转角，`currentColor`，无大型图标库 |
+
+仅品牌与 Needs You 加粗；普通当前项保持 400，通过底色、左侧标记和强调色辨认。Needs You 成为当前项时仍保持 600。带文字的图标 `aria-hidden=true`；纯图标按钮有可访问名称。页面入口保持链接和修饰键打开行为，登出保持按钮语义。帮助沿用同样的当前态，C-206 提供路由和 Markdown 页面，本卡不实现帮助内容。
+
+**390px 抽屉**
+
+- 保持现有 `max-width:760px` 断点。收起时只有 56px 顶栏：左侧 44×44px 菜单按钮和品牌；右侧为 Needs You 图标与数量快捷入口，最小触控区 44px。正文占满宽度，不引入新功能入口。
+- 左侧覆盖抽屉宽 `min(280px, 100vw - 56px)`、高 `100dvh`；390px 时留 110px 遮罩。使用 `--surface`、`--border`、`--overlay`，不推挤正文，无进入动画。
+- 入口与项目选择器高 44px（入口上下各 12px），其余缩进、图标、分组间距同宽屏。抽屉自身可纵向滚动，低矮视口仍可到达帮助和登出，底部兼顾 safe area。
+- 打开后锁背景滚动、背景不可交互，焦点移到“关闭导航”，Tab / Shift+Tab 限制在模态内。Escape、遮罩和关闭按钮关闭，焦点返回菜单按钮；同步 `aria-expanded`。
+- 激活入口后关闭抽屉、更新当前项，焦点移到主内容；视口变宽时关闭抽屉、解锁背景、恢复侧栏。开发可复用已有 Radix Dialog；原型用原生 dialog 演示。
+- 宽屏图标窄栏为可选项，本版暂不做：额外涉及项目切换、图标提示和折叠持久化，先保持 220px。没有无效的折叠按钮。
+
+**主题与跨卡约定**
+
+组件消费语义主题变量，暗色使用 C-208 的定稿表：交付 D-704（`9c5fcc19ebe00e04dbcc618694ee95681297ae3e`）、审核 V-679；由 PM 在 C-209#40 原样转贴。第三版替换 D-700 的临时灰阶，结构仍沿用 V-674 已通过的“观察”分组及字重规则。以下值集中定义在原型暗色主题块，组件内不写死颜色；浅色沿用现有值。
+
+| 暗色变量 | C-208 定稿值 / 使用 |
+|---|---|
+| `--bg` | `#181818`，页面底色 |
+| `--surface` | `#222222`，侧栏、抽屉、选择器、计数底色 |
+| `--surface-muted` / `--timeline-card` | `#2c2c2c`，当前项与悬停底色 |
+| `--border` | `#484848`，只作侧栏边界、工具区分隔和示意列表分隔 |
+| `--control-border` | `#777777`，项目选择器与示意筛选控件边框；不用于装饰分隔 |
+| `--text` / `--text-muted` | `#cccccc` / `#a4a4a4`，普通入口 / 分组标题及选择器标签 |
+| `--accent` / `--accent-contrast` | `#8dcac3` / `#181818`，当前文字、左标记和焦点；焦点轮廓 2px、偏移 2px |
+| `--tooltip-bg` / `--tooltip-text` / `--tooltip-border` | `#222222` / `#f5f5f5` / `#777777` |
+| `--status-muted` / `--status-backlog` / `--status-idle` | `#a4a4a4` |
+
+选中项只有中性次级灰底加品牌色文字和左标记，悬停用同一灰底；没有绿色背景。Needs You 的等待色 `--status-wait` 为 `#edb96d`，继承原型引用的 `apps/web/src/styles.css` 暗色主题（基线 `80dbfa11c0807864a3c9f06fdf69a302fb53c2c1`），不属于 C-209#40 转贴的灰阶覆盖项；在 `--surface:#222222` 上对比度为 **8.91:1**，满足计数文字 AA 4.5:1，也满足图标 3:1。图标、计数都使用这个变量，沿用现有状态语义；抽屉遮罩 `--overlay` 也沿用现有主题值。彩色限于当前项、焦点与待处理提示，正文不用纯白。正式实现沿用随包字体；无依赖原型使用本机 Noto Sans CJK SC / sans-serif，字体像素差异不构成产品字体改动。
+
+本轮针对 V-674 遗留核对 1440×900、390×844 的暗色正常态、悬停/焦点及抽屉，检查实际计算变量与 C-209#40 一致。文字按 AA 4.5:1、控件边框与焦点按 3:1 检查；`--border` 只作装饰，不将它当作控件边界。暗色复审通过后由 PM 安排 W-635，本设计交付不代替产品实现验收。
+
+**证据口径**
+
+用当前工作树自建静态服务器预览。`?mode=before` 按基线 `80dbfa11c0807864a3c9f06fdf69a302fb53c2c1` 的 `App.tsx` 导航顺序与 `styles.css` 重建旧侧栏，`?mode=after` 为提案；正文均为同一份静态示意数据。“改前”不是生产截图，也不包含尚未开发的 C-206 帮助入口。`?count=0` / `?count=128` 为数量样例。
+
+比较截图覆盖 1440×900、390×844、亮/暗主题；另核对悬停、键盘焦点、390×568 抽屉滚动、Escape/遮罩/选项关闭及焦点返回。证据随本卡设计交付上传，不代表产品实现或真实路由已经验收。浏览器 MCP 因 crashpad 启动失败，使用本机已安装 Playwright/Chromium 及独立临时浏览器目录，仅访问自己的静态服务完成检查。
+
 U6c 随 Workbench 打包 Inter Variable（英文和数字）、Noto Sans SC Variable（中文）和 JetBrains Mono Variable（代码），采用固定版本的 Fontsource 包，均为 SIL OFL 1.1 授权。入口引入本地 CSS，由 Vite 输出同源 WOFF2 资产，中文保留 `unicode-range` 切片按需加载；不走外部 CDN、不将字体内联为 data URL，继续使用既有 `font-src 'self'` 和 `font/woff2` 响应。三份 OFL 原文保存在 `apps/web/public/licenses/` 并随 dist 发布。字体栈先用上述字体，再回退系统字体；正文 `text-autospace: normal` 自动处理中文与西文／数字间距，不支持的浏览器忽略；`tabular-nums` 仅用于表格、时间和计数。行内代码按所在文字的 0.92 倍，代码块 13px；字号统一取 CSS 变量，字重只用 400 与 600。
 
 P2-V V5 在 Workbench 统一使用员工身份组件：圆形头像、名字和可按场景隐藏的职位。时间线（含评论、交付、审核）、交付审核记录、附件上传者、项目动态、Needs You 发起人／异常 Assignment、执行视图及下一步负责人均复用它；人和系统保留原身份。看板的参与员工展示所有工作项（含验证项）当前未释放 Assignment 的负责人，按员工去重，最多三个头像叠放，超出显示 `+n` 并提示其余名字；匿名 Assignment 保留角色占位。原有产出负责人字段仍保留其产出项语义。头像用 `<img>` 加载 Web 读取层给出的站内根相对路径，外部 URL、不透明素材引用、缺省或加载失败均显示名字首字占位，颜色由员工编号稳定映射到现有主题变量；没有员工显示“未命名的 <角色>”和角色占位标。悬停或点击头像展示名字、职位、简介及担任角色，支持键盘、Esc 和点外部关闭；本期不链接团队页。Web 读取层仅补公开简介、角色及负责人／发起人身份，不暴露启动配置，不写入数据或改变领域规则；历史作者仍从原始 Assignment／Run 解析，不从当前负责人推测。
@@ -1177,6 +1239,7 @@ C-71：Workbench 作者展示优先使用绑定的员工名；没有员工的常
 - 在 Needs You 里作答时，系统自动记录你的原话。
 - C-95：拍板引用了卡片附件时，Needs You 和卡片时间线里的拍板卡在背景下方按引用顺序展示：白名单位图显示缩略图，点击用公共 Lightbox 看大图；其他类型显示文件名和下载链接。全部走现有附件下载接口和登录鉴权，不新开公开链接；颜色用主题变量，亮暗两套主题一致。合并确认（含 PM 转交给人的合并确认）的卡片同样展示，显示条件不变。不引用附件的拍板显示不变。读取接口在拍板视图上补 `attachments`（与卡片附件同结构，未引用时为空数组）。
 - C-192：拍板可以带发起方的建议（`suggestion`：建议选项、一句理由；建议退回修改时附预填的退回原因）。Needs You 的拍板卡和合并确认、卡片详情的合并处理区，以及卡片详情新增的“待你拍板”区（交给人、未解决、带建议的其他拍板）显示“建议：<选项>（理由）”和“按建议处理”按钮；建议退回时退回原因输入框预先填好、可以修改，页面不刷新时新到的建议也会填入，但不覆盖人已经改过的内容。已确认合并、之后检查失败的确认，PM 交人时可以建议退回，人可一键退回（保留原合并记录，`merge_changes_requested` 事件带 `via_suggestion`，时间线写“按建议处理，退回修改：<原因>”）。建议写下之后，相关卡片（拍板的卡片、受影响工作项的卡片、批准目标交付所在的卡片）的交付（新增任何版本）、批准目标交付的状态（例如被取代）、当前完成申请的合并检查（尝试或结果）或合并前核对（任一项的状态或更新时间）有变化，建议标为“已过期”，不显示按钮；没有建议时界面不变。按钮只提交建议的选项，服务端校验调用方是人（Agent、PM Office 和 MCP 都会被拒绝，`forbidden_tool`）、建议存在且未过期（过期返回 `stale_target`）；记录仍是人的拍板，`resolution.via_suggestion=true`，原话记为“按建议处理：<选项>”加补充说明，`decision_resolved` 事件同时带 `via_suggestion`。还有未完成的合并前核对时，一键合并同样先弹出二次确认。界面文字集中在 `apps/web/src/suggestion-copy.ts`，待 PM 按 Q-279 定稿。
+- C-202：交给人的拍板带结构化的人话概述 `plain_summary = {changed, impact, risk}`（改了什么 / 对你的影响 / 风险，没有风险写“无”），三项必填、去掉首尾空白后按字数计长度上限（`PLAIN_SUMMARY_LIMITS`：changed 150、impact 150、risk 100，数值待人定），不能含看不见的控制字符或格式字符（零宽字符、文字方向覆盖符等，换行和制表符除外），不能出现内部编号（W/A/R/D/V/Q/H-n 与 q(n)、h(n)，卡片号 C-n 允许）、提交号、反引号、下划线或驼峰接口名、`key=` 参数写法，不合格返回白话的 validation_failed 且不写入。服务端强制的路径：`request_decision` 的 `decider=human`；`resolve_delegated_decision` 的 `escalate`（拍板已有概述时可不传，传入即改写，`decision_handed_off` 事件记 `plain_summary_rewrite{previous, next, by}`，`by` 取自 Token）；完成申请（`card_completion`）必须带人话改动说明，系统生成的合并确认和人工验收拍板原样带入。给角色的拍板可以带，带了同样校验；但按最终决策人判断：给 `role:pm` 的拍板因没有活跃 PM Ops 直接回退给人时，同样必须带。系统自己生成并交给人的拍板写好固定的白话概述：审核轮数用完的拍板、工作区清理拍板（风险写明会删除本地文件）；PM 拍板因 PM Ops 暂停、释放或撤销授权等被系统转交给人而没有概述时，系统按阻塞与否和类别补一段（花钱、账号、权限、删除数据、范围变化标在风险里），事件记 `plain_summary_source=system`。MCP 层只声明概述的结构，缺字段、类型不对、多余字段都交给领域层返回同样的白话错误。已开着的旧拍板不回填，系统照常把旧完成申请的合并确认交给人；Workbench 的 Needs You 拍板卡、合并确认和卡片详情的拍板区把人话概述放在最上面，原 `context` 折叠为“详细信息”，风险不是“无”时标“请留意”；没有人话概述的旧拍板照原样显示。界面文字集中在 `apps/web/src/plain-summary-copy.ts`。
 - 当前完成申请的合并确认已解决为 `merge`，但最新检查失败／超时时，当前未由 PM 接手时，Needs You 重新展示该确认并说明可退回修改或重新检查；退回入口先填写原因，重查沿用合并检查入口，不重复提供确认合并。沿用已有 `/decisions/:decision/resolve` 与领域校验；退回后从列表消失，原授权保留为被取代的决定，退回原因与原话写入事件。
 - `review_limit` 选择 `pause` 后保留在此处，明确显示“已暂停（临时决定）”，只保留 `raise_limit` 操作；按钮旁说明上限加 1、额度可用且无其他阻塞时自动恢复审核。直接选择或暂停后再选择 `raise_limit` 都按 §4.4 在同一事务中更新额度和记录决定，重试不会重复加额度。已确认增加轮数但超过 10 分钟仍未恢复的项显示在“审核恢复异常”中，供核查额度与其他阻塞。
 - 显示已等待多久。
@@ -1428,19 +1491,19 @@ P2a-10 B2：五个 `host_ops_*` 工具只对 Token 具备对应许可的本项�
 | `issue_instruction(card_id, work_item_id, body)` | 仅常驻 PM Ops | 下达指令，生成 instruction 时间线和 instruction_issued 事件；人走 Workbench API |
 | `report_blocker(work_item_id, reason, needs: role\|human)` | 全部 | 报告阻塞 |
 | `request_human_action(card_id, instructions, why_human, expected_return, blocked_work_items[], blocks_merge?, due?) → key` | 全部 | 先交 PM Ops 分拣，转交人或主机操作后进入 Needs You；`blocks_merge=true` 时在完成前挡该卡合并（C-112），只读排查不传 |
-| `request_decision(card_id?, kind, category, question, context, options[], recommended, affected_cards[], affected_work_items[], blocking, decider, attachment_ids?, suggestion?) → key` | 全部 | 发起拍板，返回编号；`attachment_ids` 引用已有卡片附件，顺序即展示顺序；`suggestion`（C-192）是给人的建议，`option` 须等于 `recommended` |
+| `request_decision(card_id?, kind, category, question, context, options[], recommended, affected_cards[], affected_work_items[], blocking, decider, attachment_ids?, suggestion?, plain_summary?) → key` | 全部 | 发起拍板，返回编号；`attachment_ids` 引用已有卡片附件，顺序即展示顺序；`suggestion`（C-192）是给人的建议，`option` 须等于 `recommended`；`decider=human`（或给 `role:pm` 但会回退给人）时 `plain_summary`（C-202 人话概述）必填 |
 | `upload_attachment(card_id, file, mime, kind, attach_to, basis?, sha256?, supersedes?)` | 全部 | 返回附件元数据；file 为标准带填充 base64，解码后 ≤10MiB（10×1024×1024 字节）；artifact 必须有 basis |
 | `read_attachment(attachment_id)` | 工具白名单允许的 Assignment（默认 coder、reviewer、design_director、independent_reviewer、pm） | 只读本项目且有权访问卡片的附件；返回原始字节的 base64、SHA-256、字节数和 MIME，校验摘要及大小，最大 10 MiB |
 | `heartbeat(run_id, note?)` | 全部 | 心跳 |
 | `finish_run(run_id, outcome: completed\|blocked\|failed, summary)` | 全部 | 结束本次 Run |
-| `submit_delivery(work_item_id, kind, summary, subject, requested_verifiers[], branch?, pr_url?, test_results?, attachments[], known_gaps[], supersedes?)` | 产出型角色 | 提交交付。`kind=card_completion` 即卡片的完成申请，只有主产出工作项的负责人可以提交。`summary` 面向人且不超过 160 字；长内容放 `test_results`、`known_gaps` 或附件 |
+| `submit_delivery(work_item_id, kind, summary, subject, requested_verifiers[], branch?, pr_url?, test_results?, attachments[], known_gaps[], supersedes?, plain_summary?)` | 产出型角色 | 提交交付。`kind=card_completion` 即卡片的完成申请，只有主产出工作项的负责人可以提交，必须带人话改动说明 `plain_summary`（C-202），其他交付不能带。`summary` 面向人且不超过 160 字；长内容放 `test_results`、`known_gaps` 或附件 |
 | `submit_review(delivery_id, target_sha, kind, issues[], attachments[], recheck_required?)` | 验证型角色 | 提交审核结论；`verdict` 和 `blocking` 由服务端计算 |
 | `withdraw_review(work_item_id, rationale)` | 持有该验证项的 Assignment | 撤回本人当前有效的 pass，保留 Review 审计并回到 ready；P2a-11 卡 1 只支持普通验证项，完成验收等待级联支持 |
 | `create_card` / `update_card` / `create_work_item` / `update_work_item` | PM | 管理卡片与工作项 |
 | `assign(work_item_id, role_id, machine_id?, employee_id?)` | PM | 登记指派（employee_id 可填 E-n 或在职名字，省略按 §4.3 挑选），Token 待主机侧签发；Agent/PM 经 MCP 指派后系统为该 Assignment 排 `initial` Run |
 | `project_snapshot()` / `list_needs_you()` | PM | 项目快照和待你处理的事项；PM Ops 响应另含 pm_queue，列出待代拍与待分拣详情 |
 | `list_templates()` / `list_roles()` | 仅常驻 PM（Office、Ops） | 只读（V12b）：本项目每个模板、角色 id 的最新且 active 版本。模板含 `id/version/title/description/builtin/requires_repo/merge/primary_work_item_key/work_items[]`（每项 `key/title/role_id/kind/required`）；角色含 `role_id/version/display_name/kind/capabilities/worktree/abilities`，不返回 `core_prompt`、`instructions`、工具白名单和启动配置。不要求幂等键，不产生事件；只有 pm 角色可以配置，Token 签发、认证和 tools/list 只交给常驻 pm Assignment（工作项 PM、host_ops 拿不到）；不提供新建或修改模板、角色的能力 |
-| `resolve_delegated_decision(decision_id, option, rationale, escalate?, notice?, attachment_ids?, suggestion?)` | 仅 PM Ops | 重查类别授权后代拍，或附理由升级给人（升级时可用 `attachment_ids` 引用该拍板卡片上的附件，C-95；可带 `suggestion` 给人一键处理，C-192）；系统生成授权依据。合并确认选 merge 时校验 C-49 前置条件并要求 notice（知会）；当前检查失败或超时时可选 request_changes 或 recheck（含已确认合并，C-66），rationale 与 notice 必填 |
+| `resolve_delegated_decision(decision_id, option, rationale, escalate?, notice?, attachment_ids?, suggestion?, plain_summary?)` | 仅 PM Ops | 重查类别授权后代拍，或附理由升级给人（升级时可用 `attachment_ids` 引用该拍板卡片上的附件，C-95；可带 `suggestion` 给人一键处理，C-192；拍板还没有人话概述时必须带 `plain_summary`，已有时传入即改写并留审计，C-202）；系统生成授权依据。合并确认选 merge 时校验 C-49 前置条件并要求 notice（知会）；当前检查失败或超时时可选 request_changes 或 recheck（含已确认合并，C-66），rationale 与 notice 必填 |
 | `triage_human_action(human_action_id, disposition, rationale, title?, summary?, why_human?, instructions?, expected_outcome?, expected_return?)` | 仅 PM Ops | 记录权限内已完成的操作，或提交完整白话交接并转为 host/human（后两种 disposition 的六个文案字段都必填） |
 | `record_decision(decision_id, option, rationale, raw_quote, via_chain[]?, batch?)` | 仅 PM Office | 记录你在对话中做出的决定，`raw_quote` 为你的原话 |
 

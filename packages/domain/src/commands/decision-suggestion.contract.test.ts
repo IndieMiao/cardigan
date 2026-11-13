@@ -17,6 +17,12 @@ import {
 import { mergeFixture } from "./merge/test-fixtures.js";
 import { assignment, human, ports, role } from "./test-fixtures.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 const { work_item_id: _work, ...base } = assignment(900, "pm");
 const ops: Assignment = { ...base, scope: "standing", standing_mode: "ops" };
 const office: Assignment = {
@@ -157,6 +163,7 @@ test("C-192: escalating with a suggestion records option, reason and author; the
   const q = confirmation();
   expect(q).toMatchObject({
     decider: "human",
+    plain_summary: TEST_PLAIN_SUMMARY,
     recommended: "merge",
     suggestion: {
       option: "merge",
@@ -400,6 +407,7 @@ test("C-192: request_decision accepts a suggestion matching the recommendation, 
     affected_work_items: [],
     blocking: false,
     decider: "human",
+    plain_summary: TEST_PLAIN_SUMMARY,
   };
   expect(
     requestDecision(
@@ -463,6 +471,7 @@ test("C-192: an approval bound to a delivery goes stale once that delivery is su
         affected_work_items: [],
         blocking: false,
         decider: "human",
+        plain_summary: TEST_PLAIN_SUMMARY,
       },
       f.io,
     ),

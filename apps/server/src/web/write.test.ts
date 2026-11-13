@@ -30,6 +30,12 @@ import { HttpRejection } from "./http.js";
 import { type RunningWebServer, startWebServer } from "./server.js";
 import { serveWrite } from "./write.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 let s: M4Cross, web: RunningWebServer, cookie: string;
 const password = "workbench test password";
 const question = {
@@ -43,6 +49,7 @@ const question = {
   affected_work_items: [],
   blocking: false,
   decider: "human" as const,
+  plain_summary: TEST_PLAIN_SUMMARY,
 };
 const path = (rest: string) => `/api/projects/${s.project.project_id}${rest}`;
 async function request(

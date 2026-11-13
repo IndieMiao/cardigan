@@ -82,6 +82,7 @@ export {
   type ProjectCreateInput,
   type ProjectRecord,
   Store,
+  type StoreObserver,
   type StoreOptions,
   type StoreTransactionContext,
   type StoreUnitOfWork,
