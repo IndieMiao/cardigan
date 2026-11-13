@@ -39,6 +39,10 @@ import {
   pmMergeBlockers,
 } from "./merge-delegation.js";
 import { latestPreMergeCheckReminder } from "./pre-merge-checks.js";
+import {
+  DEFAULT_RUNTIME_UNKNOWN_GRACE_MS,
+  runtimeUnknownDeferred,
+} from "./runtime-incident.js";
 import { resolveCardTemplate } from "./templates.js";
 
 function affects(d: CommandDraft, q: Decision, id: CardId) {
@@ -433,16 +437,33 @@ export function decisionActionView(
   };
 }
 
-export function listNeedsYou(state: CommandState, actor: Actor, clock?: Clock) {
+export function listNeedsYou(
+  state: CommandState,
+  actor: Actor,
+  clock?: Clock,
+  options: NeedsYouOptions = {},
+) {
   return command(state, actor, "list_needs_you", undefined, (d) => {
     d.pm();
     d.projectAccess();
-    return needsYouView(d, clock?.now());
+    return needsYouView(d, clock?.now(), options);
   });
 }
 
+export interface NeedsYouOptions {
+  /**
+   * C-228: grace period before a failures-only `unknown` runtime reaches the
+   * human. Applies to human readers only; PM and host_ops see every incident.
+   */
+  readonly runtimeUnknownGraceMs?: number;
+}
+
 /** Shared read model; callers enforce their own entry-point authorization. */
-export function needsYouView(d: CommandDraft, now?: string) {
+export function needsYouView(
+  d: CommandDraft,
+  now?: string,
+  options: NeedsYouOptions = {},
+) {
   const state = d.state,
     actor = d.actor;
   const waiting = d
@@ -561,7 +582,18 @@ export function needsYouView(d: CommandDraft, now?: string) {
       .filter(
         (a) =>
           a.status === "active" &&
-          ["unknown", "lost"].includes(a.runtime_state),
+          ["unknown", "lost"].includes(a.runtime_state) &&
+          // C-228: the human's queue waits out a short failures-only unknown.
+          !(
+            actor.kind === "human" &&
+            now !== undefined &&
+            runtimeUnknownDeferred(
+              state.events,
+              a,
+              now,
+              options.runtimeUnknownGraceMs ?? DEFAULT_RUNTIME_UNKNOWN_GRACE_MS,
+            )
+          ),
       )
       .map((a) => {
         const fact = (type: string) =>

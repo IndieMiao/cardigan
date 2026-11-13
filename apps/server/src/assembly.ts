@@ -67,6 +67,8 @@ export interface ControlPlaneOptions {
   readonly lossGraceMs?: number;
   readonly eventSilenceMs?: number;
   readonly runtimeFailureLimit?: number;
+  /** C-228 / Q-387: failures-only unknown grace before Needs You. */
+  readonly runtimeUnknownGraceMs?: number;
   /**
    * M4.4: present when the host wired Git. Without it no merge can run, which
    * is what tests of the pure dispatcher want.
@@ -203,6 +205,9 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
     ...(options.runtimeFailureLimit === undefined
       ? {}
       : { maxConsecutiveFailures: options.runtimeFailureLimit }),
+    ...(options.runtimeUnknownGraceMs === undefined
+      ? {}
+      : { runtimeUnknownGraceMs: options.runtimeUnknownGraceMs }),
     ...(options.lossGraceMs === undefined
       ? {}
       : { lossGraceMs: options.lossGraceMs }),

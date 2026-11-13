@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { recoveryFixture } from "../test-support/recovery.js";
 import { runtimeEvents } from "../test-support/runtime-events.js";
 import { RuntimeMonitor } from "./dispatch-monitor.js";
+import { needsYou } from "./web/read.js";
 
 let f: ReturnType<typeof recoveryFixture>,
   events: ReturnType<typeof runtimeEvents>,
@@ -438,8 +439,11 @@ test("completed Runs do not become unknown when the terminal exits", async () =>
 test.each([
   { lossGraceMs: 0 },
   { eventSilenceMs: Number.NaN },
-  ...[0, 1, -1, 1.5, Number.NaN, Infinity].map((maxConsecutiveFailures) => ({
-    maxConsecutiveFailures,
+  ...[0, 1, -1, 1.5, Number.NaN, Infinity, 11, 1000].map(
+    (maxConsecutiveFailures) => ({ maxConsecutiveFailures }),
+  ),
+  ...[0, -1, 1.5, Number.NaN].map((runtimeUnknownGraceMs) => ({
+    runtimeUnknownGraceMs,
   })),
 ])("rejects invalid monitor configuration %j", (config) => {
   expect(
@@ -504,3 +508,91 @@ test.each([0, -1, 1.5, Number.NaN, Infinity, 2147483648])(
     ).toThrow("Invalid dispatcher interval");
   },
 );
+
+// C-228 / Q-387: a failures-only unknown waits 60 s before the human sees it.
+const failThrice = async () => {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    events.sessions.at(-1)?.end();
+    await flush();
+    monitor.reconcile();
+  }
+  await expectState("unknown");
+};
+const humanIncidents = () =>
+  needsYou(f.state(), f.clock.now()).incidents.map((i) => i.id);
+const facts = (type: string) => f.state().events.filter((e) => e.type === type);
+
+test("C-228 failures-only unknown enters Needs You only after the 60 s grace", async () => {
+  await failThrice();
+  expect(facts("runtime_disconnected").map((e) => e.payload)).toMatchObject([
+    { assignment_id: f.target.assignment.id, cause: "failures" },
+  ]);
+  expect(humanIncidents()).toEqual([]);
+  f.advance(59_999);
+  monitor.reconcile();
+  expect(humanIncidents()).toEqual([]);
+  expect(facts("runtime_unknown_surfaced")).toHaveLength(0);
+  f.advance(1);
+  monitor.reconcile();
+  monitor.reconcile();
+  // One audit fact also refreshes the Workbench through the event stream.
+  expect(facts("runtime_unknown_surfaced")).toHaveLength(1);
+  expect(humanIncidents()).toEqual([f.target.assignment.id]);
+  expect(state()).toBe("unknown");
+  // The existing five-minute loss grace period is unchanged.
+  f.advance(240_000);
+  monitor.reconcile();
+  expect(state()).toBe("lost");
+});
+
+test("C-228 reconnecting within the grace period is audited but never shown", async () => {
+  await failThrice();
+  f.advance(20_000);
+  alive(1);
+  await expectState("idle");
+  expect(facts("runtime_disconnected")).toHaveLength(1);
+  expect(facts("runtime_reconnected")).toHaveLength(1);
+  f.advance(600_000);
+  monitor.reconcile();
+  expect(humanIncidents()).toEqual([]);
+  expect(facts("runtime_unknown_surfaced")).toHaveLength(0);
+});
+
+test.each(["lost", "finished", "removed"])(
+  "C-228 explicit %s still enters Needs You immediately",
+  async (type) => {
+    lost(1, type);
+    await expectState("unknown");
+    expect(facts("runtime_disconnected").map((e) => e.payload)).toMatchObject([
+      { cause: "exit" },
+    ]);
+    expect(humanIncidents()).toEqual([f.target.assignment.id]);
+  },
+);
+
+test("C-228 an explicit exit during a failures-only grace is shown at once", async () => {
+  await failThrice();
+  expect(humanIncidents()).toEqual([]);
+  lost(5);
+  await expect.poll(() => facts("runtime_exit_observed").length).toBe(1);
+  expect(humanIncidents()).toEqual([f.target.assignment.id]);
+  // The loss grace period still counts from the first disconnect.
+  expect(facts("runtime_disconnected")).toHaveLength(1);
+});
+
+test("C-228 repeated short reconnects cannot postpone the incident forever", async () => {
+  await failThrice();
+  f.advance(20_000);
+  alive(1);
+  await expectState("idle");
+  f.advance(10_000);
+  monitor.reconcile();
+  await failThrice();
+  f.advance(29_999);
+  monitor.reconcile();
+  expect(humanIncidents()).toEqual([]);
+  f.advance(1);
+  monitor.reconcile();
+  expect(humanIncidents()).toEqual([f.target.assignment.id]);
+  expect(facts("runtime_unknown_surfaced")).toHaveLength(1);
+});

@@ -22,8 +22,10 @@ import {
   notices,
   parseCardPriority,
   parseId,
+  parseRuntimeUnknownGraceMs,
   projectPreferences,
   projectSnapshot,
+  runtimeUnknownDeferred,
   setCardSensitive,
   standingTools,
   supersedeCard,
@@ -1146,6 +1148,15 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
       interrupted: "中断",
       executor_unreachable: "远程检查机不可达",
     };
+    let unknownGraceMs: number;
+    try {
+      unknownGraceMs = parseRuntimeUnknownGraceMs(
+        io.env.CARDIGAN_RUNTIME_UNKNOWN_GRACE_SECONDS,
+      );
+    } catch (error) {
+      throw new CliError((error as Error).message, EXIT.usage);
+    }
+    const now = systemClock.now();
     const { decisions, actions, incidents, noticeList, held, waiting } =
       store.uow.read((tx) => {
         const state = loadCommandState(tx, project_id, {
@@ -1170,13 +1181,13 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
           actions: needs.human_actions,
           // Same source as the Workbench 知会 section (§7.4): newest first.
           noticeList: notices(state),
-          incidents: tx.assignments
-            .list(project_id)
-            .filter(
-              (a) =>
-                a.status === "active" &&
-                ["lost", "unknown"].includes(a.runtime_state),
-            ),
+          incidents: tx.assignments.list(project_id).filter(
+            (a) =>
+              a.status === "active" &&
+              ["lost", "unknown"].includes(a.runtime_state) &&
+              // C-228: same grace period as the Workbench Needs You.
+              !runtimeUnknownDeferred(state.events, a, now, unknownGraceMs),
+          ),
         };
       });
 

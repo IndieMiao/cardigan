@@ -335,6 +335,9 @@ export async function startCardiganServer(
           dataDir: config.dataDir,
           config: webOptions.config,
           hcSession: session,
+          ...(config.runtimeUnknownGraceMs === undefined
+            ? {}
+            : { runtimeUnknownGraceMs: config.runtimeUnknownGraceMs }),
           hostOpsPatrolIntervalMs:
             options.dispatcher?.hostOpsPatrolIntervalMs ??
             config.hostOpsPatrolIntervalMs ??
@@ -428,6 +431,14 @@ export async function startCardiganServer(
               runtimeFailureLimit:
                 options.dispatcher.runtimeFailureLimit ??
                 config.runtimeFailureLimit,
+            }),
+        ...((options.dispatcher.runtimeUnknownGraceMs ??
+          config.runtimeUnknownGraceMs) === undefined
+          ? {}
+          : {
+              runtimeUnknownGraceMs:
+                options.dispatcher.runtimeUnknownGraceMs ??
+                config.runtimeUnknownGraceMs,
             }),
         ...(hostOps ? { hostOpsTick: () => hostOps.tick() } : {}),
         hostOpsPatrolIntervalMs:
