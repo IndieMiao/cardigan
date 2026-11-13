@@ -489,7 +489,7 @@ test("clicking a card opens the detail drawer on the route and returns focus on 
   const dialog = await screen.findByRole("dialog", {
     name: "C-1 准备发布",
   });
-  expect(dialog.textContent).toContain("把 0.1 发出去");
+  expect(await within(dialog).findByText("把 0.1 发出去")).toBeTruthy();
   await waitFor(() =>
     expect(window.location.hash).toBe(
       "#/p/p-1/cards?view=list&status=in_progress&card=C-1",
@@ -525,7 +525,7 @@ test("a drawer card in the URL survives refresh and the back link opens the full
   const dialog = await screen.findByRole("dialog", {
     name: "C-1 准备发布",
   });
-  expect(dialog.textContent).toContain("把 0.1 发出去");
+  expect(await within(dialog).findByText("把 0.1 发出去")).toBeTruthy();
   expect(
     screen.getByRole("link", { name: "在完整页面打开" }).getAttribute("href"),
   ).toBe("#/p/p-1/cards/C-1");
