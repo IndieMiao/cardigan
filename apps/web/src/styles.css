@@ -333,7 +333,6 @@ button.quiet,
 }
 .brand-row .brand,
 .mobile-header .brand {
-  font-size: 18px;
   line-height: 28px;
 }
 .project-switcher {
@@ -346,7 +345,8 @@ button.quiet,
 }
 .project-switcher select {
   width: 100%;
-  height: 36px;
+  /* The drawer raises this to a 44px touch target. */
+  height: var(--switcher-height, 36px);
   font-size: var(--text-body);
 }
 .nav,
@@ -479,6 +479,7 @@ button.quiet,
   overscroll-behavior: contain;
   padding: 12px 12px max(12px, env(safe-area-inset-bottom));
   border-right: 1px solid var(--border);
+  --switcher-height: 44px;
 }
 .nav-drawer .brand-row {
   min-height: 44px;
@@ -486,9 +487,6 @@ button.quiet,
 .nav-drawer .nav-item {
   min-height: 44px;
   padding-block: 12px;
-}
-.nav-drawer .project-switcher select {
-  height: 44px;
 }
 .content {
   grid-column: 2;

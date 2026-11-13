@@ -104,6 +104,8 @@ type ProjectsState =
   | { readonly kind: "error"; readonly message: string }
   | { readonly kind: "ready"; readonly projects: readonly ProjectSummary[] };
 
+const NARROW_QUERY = "(max-width: 760px)";
+
 function Workbench({
   client,
   onLoggedOut,
@@ -114,18 +116,26 @@ function Workbench({
   const [route, navigate, invalidHash] = useRoute();
   const [loggingOut, setLoggingOut] = useState(false);
   // C-209: below the 760px breakpoint the sidebar becomes a modal drawer.
+  // The top bar only exists on narrow screens, so wide screens (and screen
+  // readers there) see a single Needs You link.
+  const [narrow, setNarrow] = useState(
+    () =>
+      typeof window.matchMedia === "function" &&
+      window.matchMedia(NARROW_QUERY).matches,
+  );
   const [drawerOpen, setDrawerOpen] = useState(false);
   const closeRef = useRef<HTMLButtonElement>(null);
   const mainRef = useRef<HTMLElement>(null);
   const focusMainOnClose = useRef(false);
   useEffect(() => {
     if (typeof window.matchMedia !== "function") return;
-    const narrow = window.matchMedia("(max-width: 760px)");
-    const close = (event: MediaQueryListEvent) => {
+    const query = window.matchMedia(NARROW_QUERY);
+    const sync = (event: MediaQueryListEvent) => {
+      setNarrow(event.matches);
       if (!event.matches) setDrawerOpen(false);
     };
-    narrow.addEventListener("change", close);
-    return () => narrow.removeEventListener("change", close);
+    query.addEventListener("change", sync);
+    return () => query.removeEventListener("change", sync);
   }, []);
   const loadProjects = useCallback(() => client.projects(), [client]);
   const projectResource = useResource(loadProjects);
@@ -250,71 +260,83 @@ function Workbench({
 
   return (
     <div className="app">
-      <header className="mobile-header">
-        <Dialog.Root open={drawerOpen} onOpenChange={setDrawerOpen}>
-          <Dialog.Trigger asChild>
-            <button type="button" className="icon-button" aria-label="打开导航">
-              <NavIcon name="menu" />
-            </button>
-          </Dialog.Trigger>
-          <Dialog.Portal>
-            <Dialog.Overlay className="nav-drawer-overlay" />
-            <Dialog.Content
-              className="nav-drawer sidebar-panel"
-              aria-describedby={undefined}
-              onOpenAutoFocus={(event) => {
-                event.preventDefault();
-                closeRef.current?.focus();
-              }}
-              onCloseAutoFocus={(event) => {
-                // Choosing an entry moves on to the page; Escape, the overlay
-                // and the close button return to the menu button (default).
-                if (!focusMainOnClose.current) return;
-                focusMainOnClose.current = false;
-                event.preventDefault();
-                mainRef.current?.focus();
-              }}
-            >
-              <Dialog.Title className="visually-hidden">项目导航</Dialog.Title>
-              <SidebarNav
-                {...navProps}
-                projectSwitcher={projectSwitcher}
-                feedback={feedback}
-                onNavigate={() => {
-                  focusMainOnClose.current = true;
-                  setDrawerOpen(false);
+      {narrow && (
+        <header className="mobile-header">
+          <Dialog.Root open={drawerOpen} onOpenChange={setDrawerOpen}>
+            <Dialog.Trigger asChild>
+              <button
+                type="button"
+                className="icon-button"
+                aria-label="打开导航"
+              >
+                <NavIcon name="menu" />
+              </button>
+            </Dialog.Trigger>
+            <Dialog.Portal>
+              <Dialog.Overlay className="nav-drawer-overlay" />
+              <Dialog.Content
+                className="nav-drawer sidebar-panel"
+                aria-describedby={undefined}
+                onOpenAutoFocus={(event) => {
+                  event.preventDefault();
+                  closeRef.current?.focus();
                 }}
-                brandAction={
-                  <Dialog.Close asChild>
-                    <button
-                      ref={closeRef}
-                      type="button"
-                      className="icon-button"
-                      aria-label="关闭导航"
-                    >
-                      <NavIcon name="close" />
-                    </button>
-                  </Dialog.Close>
-                }
-              />
-            </Dialog.Content>
-          </Dialog.Portal>
-        </Dialog.Root>
-        <span className="brand">Cardigan</span>
-        {selected !== undefined && (
-          <a
-            className="mobile-needs"
-            href={routeHash({ kind: "needs-you", projectId: selected.id })}
-            aria-label={
-              needsCount > 0 ? `Needs You，${needsCount} 件待处理` : "Needs You"
-            }
-            aria-current={activeView === "needs-you" ? "page" : undefined}
-          >
-            <NavIcon name="inbox" />
-            {needsCount > 0 && <span className="nav-count">{needsCount}</span>}
-          </a>
-        )}
-      </header>
+                onCloseAutoFocus={(event) => {
+                  // Choosing an entry moves on to the page; Escape, the overlay
+                  // and the close button return to the menu button (default).
+                  if (!focusMainOnClose.current) return;
+                  focusMainOnClose.current = false;
+                  event.preventDefault();
+                  mainRef.current?.focus();
+                }}
+              >
+                <Dialog.Title className="visually-hidden">
+                  项目导航
+                </Dialog.Title>
+                <SidebarNav
+                  {...navProps}
+                  projectSwitcher={projectSwitcher}
+                  feedback={feedback}
+                  onNavigate={() => {
+                    focusMainOnClose.current = true;
+                    setDrawerOpen(false);
+                  }}
+                  brandAction={
+                    <Dialog.Close asChild>
+                      <button
+                        ref={closeRef}
+                        type="button"
+                        className="icon-button"
+                        aria-label="关闭导航"
+                      >
+                        <NavIcon name="close" />
+                      </button>
+                    </Dialog.Close>
+                  }
+                />
+              </Dialog.Content>
+            </Dialog.Portal>
+          </Dialog.Root>
+          <span className="brand">Cardigan</span>
+          {selected !== undefined && (
+            <a
+              className="mobile-needs"
+              href={routeHash({ kind: "needs-you", projectId: selected.id })}
+              aria-label={
+                needsCount > 0
+                  ? `Needs You，${needsCount} 件待处理`
+                  : "Needs You"
+              }
+              aria-current={activeView === "needs-you" ? "page" : undefined}
+            >
+              <NavIcon name="inbox" />
+              {needsCount > 0 && (
+                <span className="nav-count">{needsCount}</span>
+              )}
+            </a>
+          )}
+        </header>
+      )}
       <aside className="sidebar sidebar-panel" aria-label="Workbench 导航">
         <SidebarNav
           {...navProps}

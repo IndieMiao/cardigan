@@ -39,7 +39,6 @@ const baseline = withCurrentRecords(
     { cwd: root, encoding: "utf8" },
   ),
 );
-const navAllowance = ".nav a { gap: 8px; }";
 const executionAllowance = `.execution-table th { white-space: nowrap; }
 .execution-status { grid-template-columns: auto minmax(min-content, 1fr); }
 .execution-status :is(dt, .status) { white-space: nowrap; }`;
@@ -110,27 +109,39 @@ try {
       await new Promise((resolve) =>
         requestAnimationFrame(() => requestAnimationFrame(resolve)),
       );
-      return Array.from(document.querySelectorAll(".app, .app *"), (el) => {
-        const rect = el.getBoundingClientRect(),
-          style = getComputedStyle(el);
-        return [
-          el.tagName,
-          el.className,
-          rect.x,
-          rect.y,
-          rect.width,
-          rect.height,
-          style.display,
-          style.position,
-          style.gridTemplateColumns,
-          style.fontSize,
-          style.lineHeight,
-          style.padding,
-          style.margin,
-          style.color,
-          style.backgroundColor,
-        ];
-      });
+      // C-209 redesigns the navigation itself, so only the page content is
+      // compared, relative to its own box (the narrow top bar replaces the
+      // stacked sidebar and shifts the content down).
+      // A different page offset shifts sub-pixel snapping; ignore that noise.
+      const round = (value) => Math.round(value * 100) / 100;
+      const content = document
+        .querySelector(".content")
+        .getBoundingClientRect();
+      return Array.from(
+        document.querySelectorAll(".content, .content *"),
+        (el) => {
+          const rect = el.getBoundingClientRect(),
+            style = getComputedStyle(el);
+          return [
+            el.tagName,
+            el.className,
+            // Hidden boxes report 0,0 regardless of the content offset.
+            style.display === "none" ? 0 : round(rect.x - content.x),
+            style.display === "none" ? 0 : round(rect.y - content.y),
+            round(rect.width),
+            round(rect.height),
+            style.display,
+            style.position,
+            style.gridTemplateColumns,
+            style.fontSize,
+            style.lineHeight,
+            style.padding,
+            style.margin,
+            style.color,
+            style.backgroundColor,
+          ];
+        },
+      );
     });
   async function capture(name, width, theme) {
     if (
@@ -216,13 +227,25 @@ try {
         const layout = await run(() => {
           const rect = (selector) => {
             const r = document.querySelector(selector).getBoundingClientRect();
-            return { x: r.x, y: r.y, width: r.width, bottom: r.bottom };
+            return {
+              x: r.x,
+              y: r.y,
+              width: r.width,
+              height: r.height,
+              bottom: r.bottom,
+            };
           };
           return {
             width: innerWidth,
             scrollWidth: document.documentElement.scrollWidth,
             main: rect(".content"),
             sidebar: rect(".sidebar"),
+            sidebarShown:
+              getComputedStyle(document.querySelector(".sidebar")).display !==
+              "none",
+            header: document.querySelector(".mobile-header")
+              ? rect(".mobile-header")
+              : null,
             fixed:
               getComputedStyle(document.querySelector(".sidebar")).position ===
               "fixed",
@@ -340,13 +363,15 @@ try {
             "Array.from(document.querySelectorAll('button')).some((b) => b.textContent === '加载更多')",
           );
         }
-        // C-159: nav counts keep a gap from their label at every width.
+        // C-159: nav counts keep a gap from their label at every width; on
+        // narrow screens the count sits in the top bar shortcut (C-209).
         const counts = await run(() =>
           Array.from(document.querySelectorAll(".nav a"), (link) => {
             const count = link.querySelector(".nav-count");
-            if (!count) return null;
+            const label = link.querySelector(".nav-icon + span");
+            if (!count || !label || !link.getClientRects().length) return null;
             const range = document.createRange();
-            range.selectNodeContents(link.firstChild);
+            range.selectNodeContents(label);
             const text = Array.from(range.getClientRects()).filter(
               (r) => r.width,
             );
@@ -357,7 +382,16 @@ try {
             };
           }).filter(Boolean),
         );
-        assert(counts.length > 0, `${label}: missing nav count`);
+        if (width > 760)
+          assert(counts.length > 0, `${label}: missing nav count`);
+        else
+          assert(
+            await run(
+              () =>
+                document.querySelector(".mobile-needs .nav-count")?.textContent,
+            ),
+            `${label}: missing top bar count`,
+          );
         for (const count of counts)
           assert(count.gap >= 8, `${label}: nav count too close ${count.text}`);
         await capture(name, width, theme);
@@ -369,8 +403,58 @@ try {
           );
           assert.equal(layout.main.x, 0, label);
           assert.equal(layout.main.width, width, label);
-          assert.equal(layout.fixed, false, label);
-          assert(layout.main.y >= layout.sidebar.bottom, label);
+          // C-209: the sidebar leaves the flow for a 56px top bar.
+          assert.equal(layout.sidebarShown, false, label);
+          assert.equal(layout.header?.height, 56, label);
+          assert(layout.main.y >= layout.header.bottom, label);
+          if (name === "needs-you") {
+            await run(() =>
+              document.querySelector('[aria-label="打开导航"]').click(),
+            );
+            await until("Boolean(document.querySelector('.nav-drawer'))");
+            const drawer = await run(() => {
+              const r = document
+                .querySelector(".nav-drawer")
+                .getBoundingClientRect();
+              return {
+                x: r.x,
+                width: r.width,
+                height: r.height,
+                focused: document.activeElement?.getAttribute("aria-label"),
+                links: document.querySelectorAll(".nav-drawer .nav-item")
+                  .length,
+                main: document.querySelector(".content").getBoundingClientRect()
+                  .x,
+              };
+            });
+            assert.equal(drawer.x, 0, `${label}: drawer`);
+            assert.equal(drawer.width, Math.min(280, width - 56), label);
+            assert.equal(drawer.height, 844, label);
+            assert.equal(drawer.focused, "关闭导航", label);
+            assert.equal(drawer.links, 8, `${label}: drawer entries`);
+            assert.equal(drawer.main, 0, `${label}: drawer pushes content`);
+            await capture("nav-drawer", width, theme);
+            await send("Input.dispatchKeyEvent", {
+              type: "keyDown",
+              key: "Escape",
+              code: "Escape",
+              windowsVirtualKeyCode: 27,
+            });
+            await send("Input.dispatchKeyEvent", {
+              type: "keyUp",
+              key: "Escape",
+              code: "Escape",
+              windowsVirtualKeyCode: 27,
+            });
+            await until("!document.querySelector('.nav-drawer')");
+            assert.equal(
+              await run(() =>
+                document.activeElement?.getAttribute("aria-label"),
+              ),
+              "打开导航",
+              `${label}: focus returns to the menu button`,
+            );
+          }
           if (name === "card") {
             const controls = await run(() => {
               const main = document
@@ -465,8 +549,8 @@ try {
           }
           if (name === "board") {
             const current = await geometry();
-            // C-159 intentionally separates nav counts from their label.
-            await setCss(`${baseline}\n${navAllowance}`);
+            // Compare page content against the baseline stylesheet.
+            await setCss(baseline);
             assert.deepEqual(
               await geometry(),
               current,
@@ -482,10 +566,10 @@ try {
           // only those allowances.
           await setCss(
             name === "execution"
-              ? `${baseline}\n${navAllowance}\n${executionAllowance}`
+              ? `${baseline}\n${executionAllowance}`
               : name === "decision-history"
-                ? `${baseline}\n${navAllowance}\n${decisionHistoryAllowance}`
-                : `${baseline}\n${navAllowance}`,
+                ? `${baseline}\n${decisionHistoryAllowance}`
+                : baseline,
           );
           assert.deepEqual(
             await geometry(),
