@@ -18,6 +18,7 @@ import {
   mergePlan,
   prepareMergePlan,
   recordMergeCheck,
+  recordMergeCheckBlockers,
   recordMergeExecutor,
   recordMergePreparation,
   recordMergeResult,
@@ -102,8 +103,10 @@ interface Task {
 export class MergeChecks {
   private readonly abort = new AbortController();
   private readonly seen = new Set<string>();
-  private readonly skips = new MergeSkipLog("merge checks", (message) =>
-    this.options.report?.(message),
+  private readonly skips = new MergeSkipLog(
+    "merge checks",
+    (message) => this.options.report?.(message),
+    { now: () => this.options.clock.now() },
   );
   /**
    * C-112: publication re-validates with the confirmed `mergePlan`; its
@@ -113,6 +116,7 @@ export class MergeChecks {
   private readonly publishSkips = new MergeSkipLog(
     "merge checks publish",
     (message) => this.options.report?.(message),
+    { now: () => this.options.clock.now() },
   );
   /**
    * P2a-12 D: one in-flight lane per project (a project never checks or
@@ -841,6 +845,19 @@ export class MergeChecks {
     for (const id of projects) {
       const settings = this.options.configuration.forProject(id),
         project = this.options.git.projectOf(id);
+      if (settings.status !== "disabled")
+        this.command(id, (s, a, p) =>
+          recordMergeCheckBlockers(
+            s,
+            a,
+            settings.status === "invalid"
+              ? { unavailable: "configuration" }
+              : !project
+                ? { unavailable: "repository" }
+                : {},
+            p,
+          ),
+        );
       if (settings.status !== "enabled" || !project) continue;
       const state = this.state(id);
       const awaiting = new Set(

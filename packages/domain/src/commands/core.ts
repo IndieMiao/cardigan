@@ -106,6 +106,7 @@ type CommandName =
   | "record_merge_executor"
   | "record_merge_check"
   | "record_merge_preparation"
+  | "record_merge_check_blockers"
   | "recheck_merge"
   | "supersede_card"
   | "manage_templates"
@@ -115,8 +116,10 @@ export function ensure(
   condition: unknown,
   code: ErrorCode,
   message: string,
+  details?: DomainError["details"],
 ): asserts condition {
-  if (!condition) throw new Rejection({ code, message });
+  if (!condition)
+    throw new Rejection({ code, message, ...(details ? { details } : {}) });
 }
 export function unwrap<T>(result: Result<T>): T {
   if (!result.ok) throw new Rejection(result.error);
@@ -204,6 +207,7 @@ export class CommandDraft {
       "record_merge_executor",
       "record_merge_check",
       "record_merge_preparation",
+      "record_merge_check_blockers",
       "begin_merge_push",
       "record_merge_push_result",
       "check_merge_push_range",

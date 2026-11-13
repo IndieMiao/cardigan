@@ -36,6 +36,7 @@ import {
   prepareMergePlan,
   queueRun,
   recordMergeCheck,
+  recordMergeCheckBlockers,
   recordMergePreparation,
   requestHumanAction,
   submitDelivery,
@@ -355,7 +356,19 @@ test("C-112: merge status names the human action that holds the merge", async ()
     "plan: ready",
   );
   const blocking = ask(true);
+  apply((s, a, p) => recordMergeCheckBlockers(s, a, {}, p), {
+    kind: "system",
+    project_id: project,
+  });
   const result = await cardigan("merge", "status", card_id);
+  const since = new Date(NOW).toLocaleTimeString("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  });
+  expect(result.out).toContain(
+    `合并检查未开始：被 ${blocking.id} 挡住（自 ${since} 起）：请查看主机日志`,
+  );
   expect(result.out).toContain(
     `无法生成合并计划 ${card_id}：合并被待执行的人工事项 ${blocking.id} 挡住（illegal_transition）`,
   );

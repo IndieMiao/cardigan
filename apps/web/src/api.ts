@@ -68,6 +68,7 @@ export type CardStatus =
 
 /** The card view the API returns; `status`, `why` and `next_owners` are derived. */
 export interface CardView {
+  readonly merge_check_blockers?: readonly MergeCheckBlocker[];
   readonly id: string;
   readonly title: string;
   readonly goal: string;
@@ -152,6 +153,7 @@ export interface WorkItemView {
 }
 
 export interface TimelineEntryView extends AuthorView {
+  readonly merge_check_blocker?: MergeCheckBlocker;
   readonly merge_check?: MergeCheckView;
   readonly id: string;
   readonly card_id: string;
@@ -189,6 +191,13 @@ export interface TimelineEntryView extends AuthorView {
   readonly body: string;
   readonly mentions: readonly string[];
   readonly created_at: string;
+}
+
+export interface MergeCheckBlocker {
+  readonly key: string;
+  readonly label: string;
+  readonly detail: string;
+  readonly started_at: string;
 }
 
 export interface DeliveryView extends AuthorView {
