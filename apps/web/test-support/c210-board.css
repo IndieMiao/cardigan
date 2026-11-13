@@ -1,0 +1,176 @@
+/* C-210 design study. These scoped rules are not imported by the product. */
+:root[data-c210="after"] {
+  --board-title: #3d4541;
+  --board-meta: #626c66;
+  --board-scroll-rest: #9aa39e;
+  --board-scroll-active: #6b7770;
+  /* C-204 v2 candidate colours; structure relayed in C-210#10. */
+  --board-id-text: #123a8e;
+  --board-id-bg: #e3edff;
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-c210="after"] {
+    /* Provisional neutral palette; replace with the confirmed C-208 values. */
+    --bg: #181818;
+    --surface: #222222;
+    --surface-muted: #2a2a2a;
+    --border: #3d3d3d;
+    --text: #d4d4d4;
+    --text-muted: #a3a3a3;
+    --board-title: var(--text);
+    --board-meta: var(--text-muted);
+    --board-scroll-rest: #515151;
+    --board-scroll-active: #777777;
+    --board-id-text: var(--text-muted);
+    --board-id-bg: var(--surface-muted);
+  }
+}
+[data-c210="after"] .board {
+  gap: 16px;
+}
+[data-c210="after"] .board-column:not(.board-column-collapsed) {
+  flex: 0 0 420px;
+  width: 420px;
+  min-width: 0;
+  padding: 10px 4px;
+}
+[data-c210="after"] .board-column-title {
+  padding-inline: 8px;
+}
+[data-c210="after"] .board-lane-cards {
+  scrollbar-gutter: stable;
+}
+[data-c210="after"] :is(.board, .board-lane-cards) {
+  scrollbar-width: thin;
+  scrollbar-color: var(--board-scroll-rest) transparent;
+}
+[data-c210="after"]
+  :is(.board, .board-lane-cards):is(:hover, :focus-within, :focus-visible) {
+  scrollbar-color: var(--board-scroll-active) transparent;
+}
+/* Chromium needs pseudo-elements to remove its native end buttons. Firefox
+   uses the standards-based thin scrollbar, which has no CSS button API. */
+@supports selector(::-webkit-scrollbar) {
+  [data-c210="after"] :is(.board, .board-lane-cards),
+  [data-c210="after"]
+    :is(.board, .board-lane-cards):is(:hover, :focus-within, :focus-visible) {
+    scrollbar-width: auto;
+    scrollbar-color: auto;
+  }
+  [data-c210="after"] :is(.board, .board-lane-cards)::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  [data-c210="after"] :is(.board, .board-lane-cards)::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  [data-c210="after"] :is(.board, .board-lane-cards)::-webkit-scrollbar-thumb {
+    background: var(--board-scroll-rest);
+    border-radius: 999px;
+  }
+  [data-c210="after"]
+    :is(.board, .board-lane-cards):is(
+      :hover,
+      :focus-within
+    )::-webkit-scrollbar-thumb {
+    background: var(--board-scroll-active);
+  }
+}
+[data-c210="after"] :is(.board, .board-lane-cards)::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+[data-c210="after"] :is(.board, .board-lane-cards)::-webkit-scrollbar-corner {
+  background: transparent;
+}
+[data-c210="after"] .board-card {
+  padding: 12px;
+  gap: 8px;
+}
+[data-c210="after"] .board-card .card-title {
+  display: block;
+  -webkit-line-clamp: unset;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 14px;
+  line-height: 22px;
+  font-weight: 400;
+  color: var(--board-title);
+}
+[data-c210="after"] .board-card-meta {
+  gap: 4px 8px;
+  color: var(--board-meta);
+}
+[data-c210="after"] .board-card-badge {
+  background: transparent;
+  border: 0;
+  padding: 0 2px;
+  color: var(--board-meta);
+  min-height: 24px;
+}
+[data-c210="after"] .board-card-badge:hover {
+  color: var(--text);
+  text-decoration: underline;
+}
+[data-c210="after"] .board-card-complete {
+  color: var(--status-done);
+}
+[data-c210="after"] .board-card-waiting {
+  color: var(--status-wait);
+}
+[data-c210="after"] .board-card-blocked {
+  color: var(--danger);
+}
+[data-c210="after"] .board-card .employee-owners {
+  gap: 4px;
+}
+[data-c210="after"] .board-card .employee-owners > * + * {
+  margin-inline-start: 0;
+}
+[data-c210="after"] .board-card .employee-avatar {
+  border: 0;
+  width: 24px;
+  height: 24px;
+}
+[data-c210="after"] .board-card .priority-badge {
+  min-width: 24px;
+  min-height: 24px;
+  justify-content: center;
+  align-items: center;
+}
+[data-c210="after"] .board-card .card-id {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: 4px;
+  font-size: 13px;
+  line-height: 20px;
+  font-weight: 500;
+  color: var(--board-id-text);
+  background: var(--board-id-bg);
+  text-decoration: underline;
+}
+[data-c210="after"] .board-card .card-tile-head {
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+[data-c210="after"] .board-card .card-tile-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+@media (max-width: 640px) {
+  [data-c210="after"] .board-column:not(.board-column-collapsed) {
+    flex-basis: calc(100% - 24px);
+    width: calc(100% - 24px);
+  }
+}
+@media (forced-colors: active) {
+  [data-c210="after"] :is(.board, .board-lane-cards) {
+    scrollbar-color: auto;
+    scrollbar-width: auto;
+  }
+}
