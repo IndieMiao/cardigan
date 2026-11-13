@@ -176,6 +176,8 @@ const decision = z.object({
   snooze_until: z.string().optional(),
   raw_quote: z.string().optional(),
   delegate_future: z.boolean().optional(),
+  /** C-192: "按建议处理"; the domain accepts it only from a human Actor. */
+  via_suggestion: z.boolean().optional(),
 });
 const clarification = z.object({
   action: z.enum(["request_information", "explain"]),
@@ -1018,6 +1020,22 @@ export async function serveWrite(
             : p.raw_quote?.trim() || returning
               ? (p.raw_quote ?? "")
               : `在 Needs You 选择了 ${p.option}`;
+        if (p.via_suggestion)
+          // The domain writes "按建议处理" into the record and falls back to
+          // the suggestion's reason; a return keeps the (edited) reason.
+          return recordDecision(
+            s,
+            a,
+            {
+              decision_id,
+              option: p.option,
+              via_suggestion: true,
+              raw_quote: p.raw_quote ?? "",
+              rationale:
+                p.rationale?.trim() || (returning ? (p.raw_quote ?? "") : ""),
+            },
+            { ...ports, human_confirmation: "workbench" },
+          );
         return recordDecision(
           s,
           a,

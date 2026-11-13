@@ -489,7 +489,24 @@ export interface DecisionResolution {
   readonly notice?: string;
   /** The human answered a confirmation PM Ops still held (§7.4). */
   readonly taken_over_from?: "role:pm";
+  /** C-192: the human submitted the raiser's suggestion with one click. */
+  readonly via_suggestion?: true;
   readonly at: Timestamp;
+}
+/**
+ * C-192: the raiser's (or escalating PM's) suggested answer, shown to the
+ * human with a one-click "按建议处理". `basis` fingerprints the card state it
+ * was written against (deliveries, merge check, pre-merge checks); once that
+ * changes the suggestion reads as stale and cannot be applied in one click.
+ */
+export interface DecisionSuggestion {
+  readonly option: string;
+  readonly rationale: string;
+  /** Prefilled return reason; only when `option` is `request_changes`. */
+  readonly return_reason?: string;
+  readonly by: Author;
+  readonly at: Timestamp;
+  readonly basis: string;
 }
 interface DecisionFields {
   readonly id: DecisionId;
@@ -529,6 +546,8 @@ interface DecisionFields {
     readonly impact: string;
   }[];
   readonly recommended: string;
+  /** C-192: optional suggestion; absent keeps the decision UI unchanged. */
+  readonly suggestion?: DecisionSuggestion;
   readonly latest_by?: Timestamp;
   readonly preconditions?: readonly string[];
   readonly affected_cards: readonly CardId[];

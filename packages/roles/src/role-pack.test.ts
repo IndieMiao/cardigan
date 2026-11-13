@@ -8,6 +8,7 @@ import {
   HUMAN_ACTION_MERGE_RULE,
   instructionsFor,
   isDefaultRoleId,
+  PM_DECISION_SUGGESTION_RULE,
   PM_PRE_MERGE_CHECK_RULE,
   REVIEWER_PRE_MERGE_CHECK_RULE,
 } from "./role-pack.js";
@@ -203,4 +204,21 @@ test("C-179: pm and reviewer route pre-merge reviews through pre-merge checks, n
     "PM Ops 设 pending，PM Office 设 passed 或 failed",
   );
   expect(PM_PRE_MERGE_CHECK_RULE).toContain("系统不会自动完成");
+});
+
+test("C-192: pm hands matters to the human with a suggestion, reason and prefilled return reason", () => {
+  const body = instructionsFor("pm");
+  expect(body.split(PM_DECISION_SUGGESTION_RULE).length - 1).toBe(1);
+  for (const phrase of [
+    "`decider=human`",
+    "`escalate`",
+    "必须带 `suggestion`",
+    "`rationale`",
+    "`return_reason`",
+    "按建议处理",
+    "已过期",
+  ])
+    expect(PM_DECISION_SUGGESTION_RULE).toContain(phrase);
+  for (const role of ["coder", "reviewer"] as const)
+    expect(instructionsFor(role)).not.toContain(PM_DECISION_SUGGESTION_RULE);
 });

@@ -26,6 +26,7 @@ import {
 } from "../templates.js";
 import { type CommandDraft, type CommandState, command } from "./core.js";
 import { decisionFollowupNeedsHuman } from "./decision-followup.js";
+import { suggestionView } from "./decision-suggestion.js";
 import { hasActivePmOps, isPmOps } from "./delegation.js";
 import { availableWorkItemEmployees } from "./employee-assignment.js";
 import { failedConfirmedMergeCheck, latestMergeCheck } from "./merge-check.js";
@@ -389,8 +390,12 @@ export function decisionActionView(
             e.payload.previous_decider === "role:pm",
         )
       : undefined;
+  // C-192: expose the suggestion with `stale`, never its stored fingerprint.
+  const suggestion = suggestionView(state, q);
+  const { suggestion: _stored, ...decision } = q;
   return {
-    ...q,
+    ...decision,
+    ...(suggestion ? { suggestion } : {}),
     handed_over_from_pm: handoff
       ? {
           at: handoff.created_at,

@@ -1,7 +1,8 @@
-import type { CardDetail } from "../api.js";
+import type { CardDetail, DecisionView } from "../api.js";
 import { decisionTitle } from "../decision-labels.js";
 import { isHttpLink } from "../markdown.js";
 import { routeHash } from "../route.js";
+import { SUGGESTION_COPY } from "../suggestion-copy.js";
 import { DecisionAffectedCards } from "./DecisionAffectedCards.js";
 import { NextOwners } from "./EmployeeIdentity.js";
 import { EmptyState, IdTag, StatusTag } from "./Foundation.js";
@@ -105,6 +106,9 @@ export function CardSidebar({
                     detail.decisions.find((q) => q.id === d.id) ?? d,
                   )}
                 </p>
+                <SuggestionLine
+                  decision={detail.decisions.find((q) => q.id === d.id)}
+                />
                 <DecisionAffectedCards
                   decision={detail.decisions.find((q) => q.id === d.id)}
                   projectId={projectId}
@@ -222,5 +226,36 @@ export function CardWorkItems({
         </ul>
       </details>
     </section>
+  );
+}
+
+/** C-192: read-only suggestion; one-click handling lives in Needs You. */
+function SuggestionLine({
+  decision,
+}: {
+  readonly decision: DecisionView | undefined;
+}) {
+  const s = decision?.suggestion;
+  if (
+    !decision ||
+    !s ||
+    !["open", "provisional", "snoozed"].includes(decision.status)
+  )
+    return null;
+  const label =
+    decision.trigger === "merge_confirmation"
+      ? (SUGGESTION_COPY.mergeOptions[s.option] ?? s.option)
+      : (decision.options.find((o) => o.key === s.option)?.description ??
+        s.option);
+  return (
+    <p className="hint">
+      {SUGGESTION_COPY.line(label, s.rationale)}
+      {s.stale && (
+        <>
+          {" "}
+          <StatusTag status="superseded" label={SUGGESTION_COPY.stale} />
+        </>
+      )}
+    </p>
   );
 }

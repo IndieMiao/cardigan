@@ -12,6 +12,11 @@ export type {
   TokenRequest,
 } from "./commands/core.js";
 export * from "./commands/decision-followup.js";
+export {
+  type DecisionSuggestionInput,
+  suggestionStale,
+  suggestionView,
+} from "./commands/decision-suggestion.js";
 export { mergeRequiresHuman } from "./commands/delegation.js";
 export * from "./commands/delivery.js";
 export * from "./commands/dispatch-recovery.js";
