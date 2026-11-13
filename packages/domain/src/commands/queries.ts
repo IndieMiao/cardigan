@@ -10,6 +10,7 @@ import type {
   CardView,
   Decision,
   Delivery,
+  HumanAction,
   Review,
   WorkItem,
 } from "../entities.js";
@@ -36,6 +37,7 @@ import {
   pmFailedMergeCheckOptions,
   pmMergeBlockers,
 } from "./merge-delegation.js";
+import { latestPreMergeCheckReminder } from "./pre-merge-checks.js";
 import { resolveCardTemplate } from "./templates.js";
 
 function affects(d: CommandDraft, q: Decision, id: CardId) {
@@ -454,6 +456,15 @@ export function needsYouView(d: CommandDraft, now?: string) {
     (q) => q.status !== "snoozed" && !mergeCheckEndedWithoutPass(state, q),
   );
   const why = (text: string) => [...text].slice(0, 40).join("");
+  // C-179: a passed pre-merge check may be what an open action waited for.
+  const withReminder = <H extends HumanAction>(
+    h: H,
+  ): H & {
+    pre_merge_check_reminder?: ReturnType<typeof latestPreMergeCheckReminder>;
+  } => {
+    const reminder = latestPreMergeCheckReminder(state.events, h);
+    return reminder ? { ...h, pre_merge_check_reminder: reminder } : h;
+  };
   const view = (q: Decision) => decisionActionView(state, q, now);
   return {
     attention: now ? reviewLimitAttention(state, now) : [],
@@ -535,7 +546,8 @@ export function needsYouView(d: CommandDraft, now?: string) {
             }),
             human_actions: d
               .list("human_actions")
-              .filter((h) => h.status === "open" && h.triage === "pm_ops"),
+              .filter((h) => h.status === "open" && h.triage === "pm_ops")
+              .map(withReminder),
           },
         }
       : {}),
@@ -645,6 +657,7 @@ export function needsYouView(d: CommandDraft, now?: string) {
         ...(h.status === "done"
           ? { completion_notice: h.result?.text ?? "" }
           : {}),
+        ...withReminder(h),
       })),
   };
 }

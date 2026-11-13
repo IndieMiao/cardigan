@@ -128,6 +128,10 @@ describe.skipIf(process.platform !== "linux")("shared launch files", () => {
     expect(await mode(join(config.agentRoot, "worktrees", "project"))).toBe(
       0o2750,
     );
+    // P2a-3: build checkouts get the same host-protected namespace parent.
+    expect(await mode(join(config.agentRoot, "builds", "project"))).toBe(
+      0o2750,
+    );
     expect(await mode(runDir)).toBe(0o2770);
     expect((await stat(runDir)).gid).toBe(config.gid);
     expect(await prepareAgentProject(config, "project", "A-1")).toEqual(paths);

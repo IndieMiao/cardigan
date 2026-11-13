@@ -664,6 +664,40 @@ process.exit(child.status ?? 98);
     );
     await expect(lstat(repository)).rejects.toMatchObject({ code: "ENOENT" });
   });
+  test("P2a-3 places a detached build checkout in its protected leaf, never with a branch", async () => {
+    const sha = await initialize();
+    const build = join(config.agentRoot, "builds", "project", "A-1");
+    await expect(
+      transport.addWorktree(repository, build, sha, "agent/C-1/W-2"),
+    ).rejects.toThrow(/must be detached/);
+    await expect(
+      transport.addWorktree(
+        repository,
+        join(config.agentRoot, "builds", "project", "A-2"),
+        sha,
+      ),
+    ).rejects.toThrow(/Unexpected/);
+    await transport.addWorktree(repository, build, sha);
+    // Host-protected parent and shared leaf, like the Assignment worktree.
+    expect(await mode(join(config.agentRoot, "builds", "project"))).toBe(
+      0o2750,
+    );
+    expect(await mode(build)).toBe(0o2770);
+    const listed = (await transport.listWorktrees(repository)).find(
+      (entry) => entry.path === build,
+    );
+    expect(listed).toEqual({ path: build, head: sha });
+    // Only the Agent identity ran Git in the build leaf.
+    expect(
+      hostCalls.some((call) => call.cwd.startsWith(config.agentRoot)),
+    ).toBe(false);
+    await transport.removeWorktree(repository, build, { force: true });
+    expect(
+      (await transport.listWorktrees(repository)).some(
+        (entry) => entry.path === build,
+      ),
+    ).toBe(false);
+  });
   test("rejects changed sources, escaped paths and shared source repositories", async () => {
     await initialize();
     await expect(transport.ensureClone(repository, repository)).rejects.toThrow(

@@ -13,6 +13,7 @@ import { releaseAssignment, requestWorktreeCleanup } from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
 import { tokensForAssignment } from "@cardigan/store";
+import { buildCheckoutIdle } from "./build-checkouts.js";
 import type { ReconcileGit } from "./git.js";
 import { startTimerLoop, type TimerLoop } from "./loop.js";
 import { runSystemCommand, systemClock } from "./merge-loop.js";
@@ -77,6 +78,8 @@ export class CleanupExecutor {
     this.releaseClosed(project_id);
     // Re-read after releasing: released Assignments are what cleanup looks at.
     const state = this.state(project_id);
+    // §12.6: a terminal whose exit is unconfirmed may still use its directories.
+    const unconfirmed = new Set<string>();
     for (const assignment of state.assignments.filter(
       (candidate) =>
         candidate.status === "released" ||
@@ -86,13 +89,62 @@ export class CleanupExecutor {
     )) {
       // Terminal/token cleanup is independent of Git and runs on every sweep:
       // previous failures or incomplete external releases must be repaired.
-      if (!(await this.revokeAndReleaseTerminal(project_id, assignment)))
+      if (!(await this.revokeAndReleaseTerminal(project_id, assignment))) {
+        unconfirmed.add(assignment.id);
         continue;
+      }
       if (
         assignment.scope === "work_item" &&
         assignment.worktree_path !== undefined
       )
         await this.settle(project_id, assignment);
+    }
+    await this.removeIdleBuilds(project_id, unconfirmed);
+  }
+
+  /**
+   * P2a-3: a verifier's build checkout is disposable and lives only as long as
+   * its Run; remove it in the first round after the Assignment (released or
+   * not) has no unfinished Run and, if released, its terminal exit is
+   * confirmed. Nothing is backed up and no decision is asked.
+   */
+  private async removeIdleBuilds(
+    project_id: ProjectId,
+    unconfirmed: ReadonlySet<string>,
+  ) {
+    const git = this.options.git;
+    if (!git.listBuildCheckouts || !git.removeBuildCheckout) return;
+    const project = git.projectOf(project_id);
+    if (project === undefined) return;
+    const runs = () =>
+      this.options.store.uow.read((tx) => tx.runs.list(project_id));
+    let owners: readonly string[];
+    try {
+      owners = await git.listBuildCheckouts(project);
+    } catch (error) {
+      this.report(
+        `build checkout listing for ${project_id} failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return;
+    }
+    for (const assignment_id of owners) {
+      // A released Assignment whose terminal release failed this round keeps
+      // its build until the next round confirms the exit (§12.6).
+      if (unconfirmed.has(assignment_id)) continue;
+      if (!buildCheckoutIdle(runs(), assignment_id)) continue;
+      try {
+        await git.removeBuildCheckout({
+          project,
+          assignment_id,
+          // Re-read under the repository lock: a Run queued meanwhile wins.
+          idle: () => buildCheckoutIdle(runs(), assignment_id),
+        });
+      } catch (error) {
+        // Reconcile reports the leftover after the cleanup grace.
+        this.report(
+          `build checkout cleanup for ${assignment_id} failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
   }
 

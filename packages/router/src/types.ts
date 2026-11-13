@@ -103,6 +103,8 @@ export type RuleId =
   | "7.2/delivery does not match the requirement"
   | "7.2/decide whether to pause"
   | "7.2/unhandled exception"
+  // §7.4 merge confirmation
+  | "7.4/pre-merge check passed"
   // §7.3 information levels
   | "7.3/agent execution failed";
 

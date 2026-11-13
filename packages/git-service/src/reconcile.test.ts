@@ -261,3 +261,91 @@ test("a check owns only its exact project/attempt path", () => {
       .sort(),
   ).toEqual([other, worktree].sort());
 });
+
+// ------------------------------------------------ P2a-3: verifier builds
+const builds = "/srv/agent/builds/p-fictional";
+const build = `${builds}/A-7`;
+const buildChecks = (
+  facts: NonNullable<ReconcileChecks["builds"]>,
+  now = "2030-01-01T01:00:00.000Z",
+): ReconcileChecks => ({ attempts: [], now, builds: facts });
+
+test("P2a-3 a build checkout of an unfinished Run is neither orphan nor stale", () => {
+  for (const present of [true, false])
+    expect(
+      reconcile(
+        state({
+          builds_root: builds,
+          registered: [{ path: build, head: "a".repeat(40) } as GitWorktree],
+          directories: present ? [build] : [],
+        }),
+        [],
+        [],
+        buildChecks([{ assignment_id: "A-7", unfinished: true }]),
+      ),
+    ).toEqual([]);
+});
+
+test("P2a-3 a finished Run's build is protected for the cleanup grace, then reported", () => {
+  const finished_at = "2030-01-01T00:55:00.000Z";
+  const scan = state({ builds_root: builds, directories: [build] });
+  expect(
+    reconcile(
+      scan,
+      [],
+      [],
+      buildChecks([{ assignment_id: "A-7", unfinished: false, finished_at }]),
+    ),
+  ).toEqual([]);
+  const late = new Date(
+    Date.parse(finished_at) + DEFAULT_CHECK_CLEANUP_GRACE_MS + 1,
+  ).toISOString();
+  expect(
+    reconcile(
+      scan,
+      [],
+      [],
+      buildChecks(
+        [{ assignment_id: "A-7", unfinished: false, finished_at }],
+        late,
+      ),
+    ),
+  ).toEqual([
+    {
+      kind: "orphan_worktree",
+      detail:
+        "Build checkout of A-7 remains after its Run ended and the cleanup grace",
+      path: build,
+    },
+  ]);
+  // A leftover registration without its directory is a stale build entry.
+  expect(
+    reconcile(
+      state({
+        builds_root: builds,
+        registered: [{ path: build, head: "a".repeat(40) } as GitWorktree],
+      }),
+      [],
+      [],
+      buildChecks([], late),
+    ),
+  ).toEqual([
+    {
+      kind: "stale_registration",
+      detail:
+        "Build checkout of A-7 remains after its Run ended and the cleanup grace; directory missing",
+      path: build,
+    },
+  ]);
+});
+
+test("P2a-3 another Assignment's activity never protects a build", () => {
+  expect(
+    reconcile(
+      state({ builds_root: builds, directories: [build] }),
+      [],
+      [],
+      buildChecks([{ assignment_id: "A-8", unfinished: true }]),
+    ).map((finding) => finding.kind),
+  ).toEqual(["orphan_worktree"]);
+});

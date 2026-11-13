@@ -128,6 +128,8 @@ export function executionPaths(
     runDir: join(root, "runs", project, assignment),
     repositoriesRoot: join(gitRoot, "repos"),
     worktreesRoot: join(gitRoot, "worktrees"),
+    /** P2a-3: writable build checkouts of verifier Runs (`<root>/<project>/<A-n>`). */
+    buildsRoot: join(gitRoot, "builds"),
   };
 }
 export function executionPermissions(config: ExecutionConfig) {

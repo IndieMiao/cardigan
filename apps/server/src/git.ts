@@ -19,6 +19,7 @@ import {
   type PreparedMerge,
   type ReconcileChecks,
   type ReconcileFinding,
+  type RemoveBuildOutcome,
   type RemoveWorktreeInput,
   type RemoveWorktreeOutcome,
   type RepositoryLock,
@@ -159,6 +160,14 @@ export interface ReconcileGit {
     readChecks?: () => ReconcileChecks,
   ): Promise<readonly ReconcileFinding[]>;
   removeWorktree(input: RemoveWorktreeInput): Promise<RemoveWorktreeOutcome>;
+  /** P2a-3: Assignment ids that have a verifier build checkout on disk or in Git. */
+  listBuildCheckouts?(project: CentralProject): Promise<readonly string[]>;
+  /** P2a-3: `idle` is re-checked under the project's repository lock. */
+  removeBuildCheckout?(input: {
+    readonly project: CentralProject;
+    readonly assignment_id: string;
+    readonly idle: () => boolean;
+  }): Promise<RemoveBuildOutcome>;
   diffWorktree(input: {
     readonly project: CentralProject;
     readonly assignment: Assignment;
@@ -176,13 +185,19 @@ export interface ReconcileGit {
 export function gitRoots(
   execution: ExecutionConfig,
   dataDir: string,
-): { repositoriesRoot: string; worktreesRoot: string; checksRoot: string } {
+): {
+  repositoriesRoot: string;
+  worktreesRoot: string;
+  checksRoot: string;
+  buildsRoot: string;
+} {
   const root =
     execution.mode === "local" ? join(dataDir, "agent") : execution.agentRoot;
   return {
     repositoriesRoot: join(root, "repos"),
     worktreesRoot: join(root, "worktrees"),
     checksRoot: join(root, "checks"),
+    buildsRoot: join(root, "builds"),
   };
 }
 
@@ -592,5 +607,15 @@ export class ServerGit implements GitBinding {
     readonly assignment: Assignment;
   }): Promise<WorktreeDiff> {
     return this.worktrees.diffWorktree(input);
+  }
+  listBuildCheckouts(project: CentralProject): Promise<readonly string[]> {
+    return this.worktrees.listBuildCheckouts(project.project_id);
+  }
+  removeBuildCheckout(input: {
+    readonly project: CentralProject;
+    readonly assignment_id: string;
+    readonly idle: () => boolean;
+  }): Promise<RemoveBuildOutcome> {
+    return this.worktrees.removeBuildCheckout(input);
   }
 }

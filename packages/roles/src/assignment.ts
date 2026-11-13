@@ -87,6 +87,8 @@ export interface CompileAssignmentInput {
   readonly work_dir: string;
   /** Host-selected base clone containing the worktree's common .git directory. */
   readonly repository_root?: string;
+  /** P2a-3: a readonly verifier's writable build checkout (outside the worktree). */
+  readonly build_dir?: string;
   /** First message the agent receives (a bell-shaped prompt, M2 §4 step 7). */
   readonly first_prompt: string;
   /** Values from `secrets.env`, keyed by secret name. */
@@ -197,12 +199,21 @@ export function compileAssignmentLaunch(
           ...new Set([
             input.work_dir,
             ...(input.repository_root ? [input.repository_root] : []),
+            ...(input.build_dir ? [input.build_dir] : []),
           ]),
         ];
   harnessEnv.GIT_CONFIG_COUNT = String(gitPaths.length + 1);
   for (const [index, path] of ["", ...gitPaths].entries()) {
     harnessEnv[`GIT_CONFIG_KEY_${index}`] = "safe.directory";
     harnessEnv[`GIT_CONFIG_VALUE_${index}`] = path;
+  }
+  // P2a-3: pnpm hardlinks installed files to the shared store by default, so
+  // a verifier editing node_modules in its build checkout would edit the
+  // store every other Agent and merge check installs from. Copy instead
+  // (pnpm 11 reads pnpm_config_*, older versions npm_config_*).
+  if (input.build_dir) {
+    harnessEnv.pnpm_config_package_import_method = "copy";
+    harnessEnv.npm_config_package_import_method = "copy";
   }
 
   switch (harness) {
@@ -253,6 +264,7 @@ export function compileAssignmentLaunch(
           [
             input.work_dir,
             ...(input.repository_root ? [input.repository_root] : []),
+            ...(input.build_dir ? [input.build_dir] : []),
           ],
         ),
         mode: 0o600,
