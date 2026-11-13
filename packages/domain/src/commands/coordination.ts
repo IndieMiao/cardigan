@@ -32,6 +32,7 @@ import {
   isPmOps,
   mergeDelegationAuthority,
   mergeRequiresHuman,
+  riskTagAutoMergeAllowed,
 } from "./delegation.js";
 import {
   pmFailedMergeCheck,
@@ -564,7 +565,14 @@ export function recordDecision(
     // §7.4: a sensitive or PM-escalated merge needs a human Actor; PM Office
     // transcription would record resolved_by=human without one.
     ensure(
-      actor.kind === "human" || !mergeRequiresHuman(state, decision),
+      actor.kind === "human" ||
+        (!mergeRequiresHuman(state, decision) &&
+          !(
+            decision.trigger === "merge_confirmation" &&
+            state.cards.find((c) => c.id === decision.card_id)?.risk_tags
+              ?.length &&
+            !riskTagAutoMergeAllowed(state, decision)
+          )),
       "forbidden_tool",
       "此合并确认须由人在 Workbench 或本机 CLI 确认，PM 不能代记",
     );
@@ -750,7 +758,10 @@ export function resolveDelegatedDecision(
         (confirmedFailed && !mergeRequiresHuman(state, q)) ||
         (q.decider === "role:pm" &&
           ["open", "provisional", "snoozed"].includes(q.status) &&
-          delegationAllowed(d, q)),
+          (delegationAllowed(d, q) ||
+            // A legacy/stale PM-held confirmation must still have a safe
+            // escape to the human after its merge eligibility is lost.
+            (q.trigger === "merge_confirmation" && p.escalate === true))),
       "unauthorized",
       q.trigger === "merge_confirmation" && mergeRequiresHuman(state, q)
         ? "此合并确认须由人处理，PM 只能重新检查明确的超时失败，不能退回或代确认合并"

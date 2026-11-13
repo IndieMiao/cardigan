@@ -18,6 +18,7 @@ import {
   resolveEmployee,
   selectEmployee,
 } from "./employee-assignment.js";
+import { syncRiskTagMerge } from "./merge.js";
 import {
   applyPreMergeCheck,
   type PreMergeCheckInput,
@@ -294,6 +295,7 @@ export function updateCard(
       },
       { type: "status_change", body: result.title },
     );
+    if (p.risk_tags !== undefined) syncRiskTagMerge(d, result);
     return result;
   });
 }
@@ -598,6 +600,8 @@ export function updateWorkItem(
         });
     }
     if (resumed) queueResumedRun(d, item, event);
+    if (p.required !== undefined && item.role_id === "independent_reviewer")
+      syncRiskTagMerge(d, card);
     return result;
   });
 }

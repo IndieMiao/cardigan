@@ -1,3 +1,4 @@
+import { deriveReviewMatrix } from "../derived.js";
 import type { Assignment, Card, Decision, ToolName } from "../entities.js";
 import type { CardId } from "../ids.js";
 import {
@@ -6,7 +7,7 @@ import {
   highRiskCategories,
   pmMergeConfirmation,
 } from "../preferences.js";
-import { type CommandDraft, ensure } from "./core.js";
+import { type CommandDraft, type CommandState, ensure } from "./core.js";
 
 export function hasActivePmOps(d: CommandDraft, tool?: ToolName) {
   return d
@@ -98,6 +99,53 @@ type DelegationSubject = Pick<
   Decision,
   "category" | "trigger" | "card_id" | "human_required_reason"
 >;
+/** P2a-14: risk tags never override the existing human-only rules. */
+export function riskTagAutoMergeAllowed(
+  state: Pick<
+    CommandState,
+    "cards" | "decisions" | "work_items" | "deliveries" | "reviews"
+  >,
+  q: DelegationSubject,
+): boolean {
+  const card = state.cards.find((c) => c.id === q.card_id);
+  if (
+    q.trigger !== "merge_confirmation" ||
+    !card?.risk_tags?.length ||
+    !card.risk_tags.every((tag) =>
+      ["security", "permission", "numeric_rule"].includes(tag),
+    ) ||
+    q.human_required_reason ||
+    mergeNeedsHuman(state.decisions, state.cards, card.id)
+  )
+    return false;
+  const items = state.work_items.filter((w) => w.card_id === card.id);
+  const current = items
+    .filter((w) => w.kind === "produce" && w.status !== "cancelled")
+    .flatMap((w) => {
+      const latest = state.deliveries
+        .filter(
+          (v) =>
+            v.work_item_id === w.id &&
+            v.kind !== "card_completion" &&
+            v.status !== "superseded",
+        )
+        .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
+      return latest ? [latest] : [];
+    });
+  const verifiers = items.filter(
+    (w) =>
+      w.kind === "verify" &&
+      w.role_id === "independent_reviewer" &&
+      w.required &&
+      w.status === "passed" &&
+      !w.replaced_by_work_item_id,
+  );
+  // Review identity/version is authoritative; similarly named advisory checks
+  // and a passed work item alone cannot grant merge authority.
+  return deriveReviewMatrix(current, verifiers, state.reviews).some(
+    (r) => r.verdict === "pass",
+  );
+}
 function projectPreference(d: CommandDraft) {
   return d.list("project_preferences").find((p) => p.id === d.state.project_id);
 }
@@ -108,7 +156,18 @@ export function delegationAllowed(d: CommandDraft, q: DelegationSubject) {
       pmMergeConfirmation(projectPreference(d)) &&
       !q.human_required_reason &&
       !!q.card_id &&
-      !mergeNeedsHuman(d.list("decisions"), d.list("cards"), q.card_id)
+      !mergeNeedsHuman(d.list("decisions"), d.list("cards"), q.card_id) &&
+      (!d.list("cards").find((c) => c.id === q.card_id)?.risk_tags?.length ||
+        riskTagAutoMergeAllowed(
+          {
+            cards: d.list("cards"),
+            decisions: d.list("decisions"),
+            work_items: d.list("work_items"),
+            deliveries: d.list("deliveries"),
+            reviews: d.list("reviews"),
+          },
+          q,
+        ))
     );
   return (
     // A human-required decision (e.g. a template's human completion review)
