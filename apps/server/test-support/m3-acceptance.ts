@@ -265,7 +265,7 @@ export function m3Fixture(
     const params = {
       work_item_id: produce.id,
       kind,
-      ...((kind) === "card_completion"
+      ...(kind === "card_completion"
         ? { plain_summary: TEST_PLAIN_SUMMARY }
         : {}),
       summary: "Ready for review",
