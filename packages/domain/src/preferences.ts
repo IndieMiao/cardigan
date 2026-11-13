@@ -38,6 +38,8 @@ export interface ProjectPreferences {
   readonly merge_confirm_stall_after_minutes?: number;
   /** C-180: default duration of an explicit merge hold, in minutes. */
   readonly merge_confirm_snooze_default_minutes?: number;
+  /** C-193: maximum duration from the first hold of a merge confirmation. */
+  readonly merge_confirm_snooze_max_minutes?: number;
   /** Missing entries use the documented defaults, including on existing projects. */
   readonly decision_delegation?: Readonly<
     Partial<Record<DecisionCategory, boolean>>
@@ -103,4 +105,21 @@ export function mergeConfirmSnoozeDefaultMinutes(
   preferences?: ProjectPreferences,
 ): number {
   return preferences?.merge_confirm_snooze_default_minutes ?? 240;
+}
+
+export function mergeConfirmSnoozeMaxMinutes(
+  preferences?: ProjectPreferences,
+): number {
+  return preferences?.merge_confirm_snooze_max_minutes ?? 4320;
+}
+
+export function validMergeConfirmSnoozeMaxMinutes(
+  value: unknown,
+): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= 60 &&
+    value <= 10080
+  );
 }

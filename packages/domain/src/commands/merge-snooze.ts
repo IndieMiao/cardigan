@@ -1,5 +1,8 @@
 import type { Actor, Decision } from "../entities.js";
-import { mergeConfirmSnoozeDefaultMinutes } from "../preferences.js";
+import {
+  mergeConfirmSnoozeDefaultMinutes,
+  mergeConfirmSnoozeMaxMinutes,
+} from "../preferences.js";
 import { transition } from "../transitions.js";
 import {
   attempt,
@@ -52,10 +55,10 @@ export function snoozeMergeConfirmation(
   );
   const at = d.now;
   const now = Date.parse(at);
+  const preferences = projectPreferences(d.state);
   const due =
     p.snooze_until === undefined
-      ? now +
-        mergeConfirmSnoozeDefaultMinutes(projectPreferences(d.state)) * 60_000
+      ? now + mergeConfirmSnoozeDefaultMinutes(preferences) * 60_000
       : Date.parse(p.snooze_until);
   ensure(
     Number.isFinite(now) &&
@@ -65,6 +68,33 @@ export function snoozeMergeConfirmation(
         /^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:\d{2})$/u.test(p.snooze_until)),
     "validation_failed",
     "暂缓到期时间须为带时区的未来时间",
+  );
+  const maxMinutes = mergeConfirmSnoozeMaxMinutes(preferences);
+  ensure(
+    due - now <= maxMinutes * 60_000,
+    "validation_failed",
+    `暂缓到期时间距现在不能超过 ${maxMinutes} 分钟（merge-confirm-snooze-max）`,
+  );
+  // Expiry removes q.snooze. Persisted events keep the first hold across
+  // renewals, expiry/reopening and restarts, including holds predating C-193.
+  const first = d.state.events
+    .filter(
+      (e) =>
+        e.card_id === q.card_id &&
+        e.type === "merge_confirmation_snoozed" &&
+        typeof e.payload === "object" &&
+        e.payload !== null &&
+        "decision_id" in e.payload &&
+        e.payload.decision_id === q.id,
+    )
+    .reduce(
+      (start, e) => Math.min(start, Date.parse(e.created_at)),
+      q.snooze ? Date.parse(q.snooze.at) : now,
+    );
+  ensure(
+    due - first <= maxMinutes * 60_000,
+    "validation_failed",
+    `暂缓累计时长不能超过 ${maxMinutes} 分钟（从首次暂缓开始计算）；请选择更早的到期时间，已达上限请交人或处理合并确认`,
   );
   const until = new Date(due).toISOString();
   const result: Decision = {

@@ -195,3 +195,46 @@ test("merge-confirm-snooze-default defaults to 240, persists minutes with an aud
       await run(["preference", "set", "merge-confirm-snooze-default", bad]),
     ).not.toBe(0);
 });
+
+test("C-193: snooze cap get/set validates both bounds, persists and audits once", async () => {
+  expect(await run(["preference", "get", "merge-confirm-snooze-max"])).toBe(0);
+  expect(output).toContain("merge-confirm-snooze-max: 4320");
+  for (const minutes of ["60", "60", "10080"])
+    expect(
+      await run(["preference", "set", "merge-confirm-snooze-max", minutes]),
+    ).toBe(0);
+  expect(await run(["preference", "get", "merge-confirm-snooze-max"])).toBe(0);
+  expect(output).toContain("merge-confirm-snooze-max: 10080");
+  for (const bad of ["off", "59", "10081", "60.5", "NaN", "1e2"])
+    expect(
+      await run(["preference", "set", "merge-confirm-snooze-max", bad]),
+    ).not.toBe(0);
+  expect(errors.join(" ")).toContain("60 到 10080");
+  expect(
+    store.uow.read((tx) =>
+      tx.project_preferences.get("preferences", "preferences"),
+    ),
+  ).toMatchObject({ merge_confirm_snooze_max_minutes: 10080 });
+  expect(
+    store.uow
+      .read((tx) => tx.events.listAfter("preferences", undefined, 0))
+      .filter((e) => e.type === "project_preferences_updated"),
+  ).toMatchObject([
+    {
+      actor: { kind: "human" },
+      payload: {
+        preference: "merge_confirm_snooze_max_minutes",
+        old_value: 4320,
+        new_value: 60,
+      },
+    },
+    {
+      actor: { kind: "human" },
+      payload: {
+        preference: "merge_confirm_snooze_max_minutes",
+        old_value: 60,
+        new_value: 10080,
+      },
+    },
+  ]);
+});

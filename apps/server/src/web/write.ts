@@ -685,6 +685,12 @@ export async function serveWrite(
             .min(1)
             .max(1440)
             .optional(),
+          merge_confirm_snooze_max_minutes: z
+            .number()
+            .int()
+            .min(60)
+            .max(10080)
+            .optional(),
           merge_confirm_stall_after_minutes: z
             .number()
             .int()
@@ -718,6 +724,12 @@ export async function serveWrite(
             ? {
                 merge_confirm_snooze_default_minutes:
                   input.merge_confirm_snooze_default_minutes,
+              }
+            : {}),
+          ...(input.merge_confirm_snooze_max_minutes !== undefined
+            ? {
+                merge_confirm_snooze_max_minutes:
+                  input.merge_confirm_snooze_max_minutes,
               }
             : {}),
           ...(input.decision_delegation !== undefined

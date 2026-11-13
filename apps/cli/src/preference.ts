@@ -3,6 +3,7 @@ import {
   decisionCategories,
   decisionDelegation,
   mergeConfirmSnoozeDefaultMinutes,
+  mergeConfirmSnoozeMaxMinutes,
   mergeConfirmStallAfterMinutes,
   pmMergeConfirmation,
   projectPreferences,
@@ -20,7 +21,7 @@ import {
 import type { CliIo } from "./io.js";
 
 const USAGE =
-  "cardigan preference get auto-merge-after | set auto-merge-after <分钟|off> | get merge-confirm-stall-after | set merge-confirm-stall-after <分钟> | get merge-confirm-snooze-default | set merge-confirm-snooze-default <分钟> | get decision-delegation | set decision-delegation <类别> <on|off> | get pm-merge-confirmation | set pm-merge-confirmation <on|off> [--project <p>] [--data-dir <目录>]";
+  "cardigan preference get auto-merge-after | set auto-merge-after <分钟|off> | get merge-confirm-stall-after | set merge-confirm-stall-after <分钟> | get merge-confirm-snooze-default | set merge-confirm-snooze-default <分钟> | get merge-confirm-snooze-max | set merge-confirm-snooze-max <分钟> | get decision-delegation | set decision-delegation <类别> <on|off> | get pm-merge-confirmation | set pm-merge-confirmation <on|off> [--project <p>] [--data-dir <目录>]";
 export function runPreferenceCommand(
   args: readonly string[],
   io: CliIo,
@@ -33,7 +34,7 @@ export function runPreferenceCommand(
     flags: Record<string, string> = {};
   const fail = (): never => {
     throw new CliError(
-      "偏好参数无效；分钟须为 1 到 1440 的整数，off 表示关闭。",
+      "偏好参数无效；暂缓上限须为 60 到 10080 的整数分钟，其他时长须为 1 到 1440 的整数分钟；仅自动合并支持 off 关闭。",
       EXIT.usage,
       [USAGE],
     );
@@ -60,18 +61,21 @@ export function runPreferenceCommand(
   const pmMerge = preference === "pm-merge-confirmation";
   const stall = preference === "merge-confirm-stall-after";
   const snooze = preference === "merge-confirm-snooze-default";
+  const snoozeMax = preference === "merge-confirm-snooze-max";
   if (
     (!delegation &&
       !pmMerge &&
       !stall &&
       !snooze &&
+      !snoozeMax &&
       preference !== "auto-merge-after") ||
     !["get", "set"].includes(action ?? "") ||
     positions.length !== (action === "get" ? 2 : delegation ? 4 : 3)
   )
     fail();
   const minutes = raw === "off" ? null : Number(raw);
-  if ((stall || snooze) && action === "set" && raw === "off") fail();
+  if ((stall || snooze || snoozeMax) && action === "set" && raw === "off")
+    fail();
   if (
     action === "set" &&
     !delegation &&
@@ -79,8 +83,8 @@ export function runPreferenceCommand(
     raw !== "off" &&
     (!/^\d+$/.test(raw ?? "") ||
       !Number.isInteger(minutes) ||
-      Number(minutes) < 1 ||
-      Number(minutes) > 1440)
+      Number(minutes) < (snoozeMax ? 60 : 1) ||
+      Number(minutes) > (snoozeMax ? 10080 : 1440))
   )
     fail();
   if (
@@ -120,7 +124,11 @@ export function runPreferenceCommand(
                             merge_confirm_snooze_default_minutes:
                               Number(minutes),
                           }
-                        : { auto_merge_after_minutes: minutes },
+                        : snoozeMax
+                          ? {
+                              merge_confirm_snooze_max_minutes: Number(minutes),
+                            }
+                          : { auto_merge_after_minutes: minutes },
                 ports,
               ),
           })
@@ -141,7 +149,9 @@ export function runPreferenceCommand(
             ? `merge-confirm-stall-after: ${mergeConfirmStallAfterMinutes(preferences)}`
             : snooze
               ? `merge-confirm-snooze-default: ${mergeConfirmSnoozeDefaultMinutes(preferences)}`
-              : `auto-merge-after: ${preferences.auto_merge_after_minutes ?? "off"}`,
+              : snoozeMax
+                ? `merge-confirm-snooze-max: ${mergeConfirmSnoozeMaxMinutes(preferences)}`
+                : `auto-merge-after: ${preferences.auto_merge_after_minutes ?? "off"}`,
     );
     return EXIT.ok;
   } finally {

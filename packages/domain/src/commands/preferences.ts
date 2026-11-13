@@ -6,9 +6,11 @@ import {
   highRiskCategories,
   isBoardLane,
   mergeConfirmSnoozeDefaultMinutes,
+  mergeConfirmSnoozeMaxMinutes,
   mergeConfirmStallAfterMinutes,
   pmMergeConfirmation,
   validAutoMergeMinutes,
+  validMergeConfirmSnoozeMaxMinutes,
   validMergeConfirmStallMinutes,
 } from "../preferences.js";
 import { states } from "../states.js";
@@ -36,6 +38,7 @@ export function setProjectPreferences(
     auto_merge_after_minutes?: number | null;
     merge_confirm_stall_after_minutes?: number;
     merge_confirm_snooze_default_minutes?: number;
+    merge_confirm_snooze_max_minutes?: number;
     decision_delegation?: Partial<Record<DecisionCategory, boolean>>;
     pm_merge_confirmation?: boolean;
     /** A patch: only the listed lanes change; null forgets the human setting. */
@@ -69,11 +72,20 @@ export function setProjectPreferences(
       "validation_failed",
       "合并确认默认暂缓时长须为 1 到 1440 的整数分钟",
     );
+    ensure(
+      input.merge_confirm_snooze_max_minutes === undefined ||
+        validMergeConfirmSnoozeMaxMinutes(
+          input.merge_confirm_snooze_max_minutes,
+        ),
+      "validation_failed",
+      "合并确认最长暂缓时长须为 60 到 10080 的整数分钟",
+    );
     const old = projectPreferences(state);
     ensure(
       input.auto_merge_after_minutes !== undefined ||
         input.merge_confirm_stall_after_minutes !== undefined ||
         input.merge_confirm_snooze_default_minutes !== undefined ||
+        input.merge_confirm_snooze_max_minutes !== undefined ||
         input.decision_delegation !== undefined ||
         input.pm_merge_confirmation !== undefined ||
         input.board_collapsed_lanes !== undefined,
@@ -137,6 +149,12 @@ export function setProjectPreferences(
           }
         : {}),
       ...(input.decision_delegation ? { decision_delegation: delegation } : {}),
+      ...(input.merge_confirm_snooze_max_minutes !== undefined
+        ? {
+            merge_confirm_snooze_max_minutes:
+              input.merge_confirm_snooze_max_minutes,
+          }
+        : {}),
       ...(input.pm_merge_confirmation !== undefined
         ? { pm_merge_confirmation: input.pm_merge_confirmation }
         : {}),
@@ -153,6 +171,8 @@ export function setProjectPreferences(
     const delegationChanged = decisionCategories.some(
       (c) => decisionDelegation(old)[c] !== delegation[c],
     );
+    const snoozeMaxChanged =
+      mergeConfirmSnoozeMaxMinutes(old) !== mergeConfirmSnoozeMaxMinutes(next);
     const pmMergeChanged =
       pmMergeConfirmation(old) !== pmMergeConfirmation(next);
     const oldLanes: Partial<Record<string, boolean>> =
@@ -164,6 +184,7 @@ export function setProjectPreferences(
       !mergeChanged &&
       !stallChanged &&
       !snoozeChanged &&
+      !snoozeMaxChanged &&
       !delegationChanged &&
       !pmMergeChanged &&
       !lanesChanged
@@ -189,6 +210,12 @@ export function setProjectPreferences(
         old_value: mergeConfirmSnoozeDefaultMinutes(old),
         new_value: mergeConfirmSnoozeDefaultMinutes(next),
         preference: "merge_confirm_snooze_default_minutes",
+      });
+    if (snoozeMaxChanged)
+      d.emit("project_preferences_updated", undefined, {
+        old_value: mergeConfirmSnoozeMaxMinutes(old),
+        new_value: mergeConfirmSnoozeMaxMinutes(next),
+        preference: "merge_confirm_snooze_max_minutes",
       });
     if (delegationChanged) {
       d.emit("project_preferences_updated", undefined, {

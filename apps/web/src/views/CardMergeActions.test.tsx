@@ -304,3 +304,30 @@ test("C-182: the card merge block shows an accessible snoozed tag, reason and lo
   expect(tag.classList.contains("status-shape-paused")).toBe(true);
   expect(tag.querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
 });
+
+test("C-193: a rejected hold shows the server's cap error and preserves the reason", async () => {
+  const message =
+    "暂缓到期时间距现在不能超过 4320 分钟（merge-confirm-snooze-max）";
+  const recordDecision = vi
+    .fn()
+    .mockRejectedValue(new ApiError(400, "validation_failed", message));
+  render(
+    <CardDetailPage
+      client={fakeClient({ card: async () => fixture(), recordDecision })}
+      projectId="p-1"
+      cardId="C-1"
+    />,
+  );
+  const controls = within(
+    await screen.findByRole("region", { name: "合并处理" }),
+  );
+  fireEvent.click(controls.getByRole("button", { name: "暂不合并" }));
+  fireEvent.change(controls.getByLabelText("暂缓原因（必填）"), {
+    target: { value: "等待核对" },
+  });
+  fireEvent.click(controls.getByRole("button", { name: "登记暂缓" }));
+  expect((await screen.findByRole("alert")).textContent).toContain(message);
+  expect(
+    (controls.getByLabelText("暂缓原因（必填）") as HTMLInputElement).value,
+  ).toBe("等待核对");
+});
