@@ -34,6 +34,7 @@
     .identity-name { min-width: 0; font-size: 14px; font-weight: 600; line-height: 20px; overflow-wrap: anywhere; }
     .identity-detail { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; min-width: 0; max-width: 100%; }
     .identity-row code { display: inline-flex; align-items: center; min-height: 24px; font-size: 12px; line-height: 20px; }
+    .identity-action { display: inline-flex; align-items: center; min-height: 32px; font-size: 13px; line-height: 20px; white-space: nowrap; }
     .identity-subline { margin: 8px 0 0 32px !important; color: var(--text-muted); font-size: 13px; }
     .ref-group { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; line-height: 20px; font-size: 13px; color: var(--text); }
     .ref-badge { display: inline-flex; align-items: center; flex: none; min-height: 24px; padding: 2px 6px; border-radius: 4px; white-space: nowrap; font-size: 13px; line-height: 20px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--id-fg); background: var(--id-bg); }
@@ -93,7 +94,8 @@
           <div class="needs-delivery-head design-baseline">
             <span class="employee-identity"><span class="employee-avatar"><img src="../../apps/web/public/avatars/v1/sun-wukong/head-64.webp" alt=""></span><span class="employee-label"><strong>孙悟空</strong></span></span>
             <span class="id-tag"><span>W-586</span><span class="id-description">开发</span></span>
-            <code>7a84bd90ef12</code>
+            <code>d9cf21d630b1</code>
+            <a href="#context-title">查看改动</a>
           </div>
           <p class="design-note">统一拍板区块的交付信息。</p>
         </div>
@@ -106,15 +108,15 @@
           <div class="identity-row" id="aligned-row">
             <span class="identity-person"><span class="employee-avatar"><img src="../../apps/web/public/avatars/v1/sun-wukong/head-64.webp" alt=""></span><strong class="identity-name">孙悟空</strong></span>
             <span class="ref-group" data-id="W-586" data-label="开发"></span>
-            <code>7a84bd90ef12</code>
-            <span class="design-state" data-state="done">已交付</span>
+            <code>d9cf21d630b1</code>
+            <a class="identity-action" href="#context-title">查看改动</a>
           </div>
           <p class="design-note">统一拍板区块的交付信息。</p>
         </div>
         <p class="design-note">头像 24px，行高至少 32px；文字行高 20px，统一垂直居中。</p>
       </article>
     </div>
-    <p class="design-note" style="margin-top:12px">改后保留相同提交号，并额外演示状态同排。本提案不决定 C-202 的信息折叠或删减。</p>
+    <p class="design-note" style="margin-top:12px">两侧均为完整交付行，演示链接跳到本页场景说明。状态同排见下方场景。本提案不决定 C-202 的信息折叠或删减。</p>
   </section>
   <section class="design-section" aria-labelledby="context-title">
     <h2 id="context-title">02 / 四个场景，一套排列规则</h2>
