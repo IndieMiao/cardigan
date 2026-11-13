@@ -76,8 +76,45 @@ function target(d: CommandDraft, item: WorkItem): string | undefined {
     )?.id;
 }
 
+const INDEPENDENT_REVIEWER = "independent_reviewer";
+
+/**
+ * Invariant 15/16 extension (P2a-14 ②): an independent_reviewer verify item is
+ * isolated from every other verify item on the same card, in both directions.
+ * Other verify roles stay unseparated from each other.
+ */
+function verifierCounterparts(d: CommandDraft, item: WorkItem): string[] {
+  if (item.kind !== "verify") return [];
+  return d
+    .list("work_items")
+    .filter(
+      (w) =>
+        w.id !== item.id &&
+        w.card_id === item.card_id &&
+        w.kind === "verify" &&
+        (item.role_id === INDEPENDENT_REVIEWER ||
+          w.role_id === INDEPENDENT_REVIEWER),
+    )
+    .map((w) => w.id);
+}
+
+function hasEmployeeOn(
+  d: CommandDraft,
+  work_item_ids: readonly (string | undefined)[],
+  employee_id: EmployeeId,
+): boolean {
+  return d
+    .list("assignments")
+    .some(
+      (a) =>
+        a.scope === "work_item" &&
+        work_item_ids.includes(a.work_item_id) &&
+        a.employee_id === employee_id,
+    );
+}
+
 /** Symmetric: assigning a producer after its reviewer must not bypass separation. */
-export function employeeConflicts(
+function authorConflict(
   d: CommandDraft,
   item: WorkItem,
   employee_id: EmployeeId,
@@ -89,14 +126,18 @@ export function employeeConflicts(
           .list("work_items")
           .filter((w) => target(d, w) === item.id)
           .map((w) => w.id);
-  return d
-    .list("assignments")
-    .some(
-      (a) =>
-        a.scope === "work_item" &&
-        counterparts.includes(a.work_item_id) &&
-        a.employee_id === employee_id,
-    );
+  return hasEmployeeOn(d, counterparts, employee_id);
+}
+
+export function employeeConflicts(
+  d: CommandDraft,
+  item: WorkItem,
+  employee_id: EmployeeId,
+): boolean {
+  return (
+    authorConflict(d, item, employee_id) ||
+    hasEmployeeOn(d, verifierCounterparts(d, item), employee_id)
+  );
 }
 
 export function checkEmployeeSeparation(
@@ -104,10 +145,16 @@ export function checkEmployeeSeparation(
   item: WorkItem,
   employee_id?: EmployeeId,
 ): void {
+  if (!employee_id) return;
   ensure(
-    !employee_id || !employeeConflicts(d, item, employee_id),
+    !authorConflict(d, item, employee_id),
     "invariant_violation",
     "审核员工不能是目标产出项当前或曾经的作者（完成申请同理）",
+  );
+  ensure(
+    !hasEmployeeOn(d, verifierCounterparts(d, item), employee_id),
+    "invariant_violation",
+    "独立复核员工不能同时是同一张卡上其它验证项当前或曾经的负责人",
   );
 }
 
