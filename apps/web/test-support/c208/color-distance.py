@@ -38,6 +38,8 @@ if __name__=='__main__':
         assert abs(delta(a,b)-expected)<.0001
     p=json.loads(Path(__file__).with_name('palette.json').read_text())
     labels=p['labels'][:9]
+    body_lightness=lab(p['after']['--text'])[0]
+    assert all(lab(row[2])[0] <= body_lightness + .00001 for row in p['labels'])
     rows=[]
     for kind,_,fg,bg in p['labels']:
         peers=[r for r in labels if r[0]!=kind]
@@ -46,10 +48,10 @@ if __name__=='__main__':
         statuses=[(k,v) for k,v in p['after'].items() if k.startswith('--status-') and k!='--status-cutout' or k=='--danger']
         status=min(statuses,key=lambda r:delta(lab(fg),lab(r[1])))
         assert delta(lab(fg),lab(status[1])) >= 10
-        rows.append(f'| {kind} | {nearest[0]} / {delta(lab(fg),lab(nearest[2])):.2f} | {bgnear[0]} / {delta(lab(bg),lab(bgnear[3])):.2f} | {status[0]} / {delta(lab(fg),lab(status[1])):.2f} |')
+        rows.append(f'| {kind} | {nearest[0]} / {delta(lab(fg),lab(nearest[2])):.2f} | {bgnear[0]} / {delta(lab(bg),lab(bgnear[3])):.2f} | {status[0]} / {delta(lab(fg),lab(status[1])):.2f} | {lab(fg)[0]:.2f} |')
     pairs=[(a[0],b[0],delta(lab(a[2]),lab(b[2])),delta(lab(a[3]),lab(b[3]))) for a,b in itertools.combinations(labels,2)]
     assert min(r[2] for r in pairs)>=10
     assert min(r[3] for r in pairs)>=5
     output=Path(__file__).resolve().parents[4]/'docs/design/c208/distance.md'
-    output.write_text('# C-204 暗色色差\n\nsRGB、D65、CIEDE2000，kL=kC=kH=1。以 C/W/Q/A/R/D/V/H/E 九类为最近邻集合；M/MB/unknown 允许共用 E 的中性族。三组 Sharma 标准参考对误差小于 0.0001。\n\n| 类型 | 最近文字邻色 / ΔE00 | 最近底色邻色 / ΔE00 | 最近状态色 / ΔE00 |\n|---|---|---|---|\n'+'\n'.join(rows)+'\n\n九类全部 36 对：\n\n| 类型对 | 文字 ΔE00 | 底色 ΔE00 |\n|---|---|---|\n'+'\n'.join(f'| {a} / {b} | {fg:.2f} | {bg:.2f} |' for a,b,fg,bg in pairs)+'\n')
+    output.write_text('# C-204 暗色色差\n\nsRGB、D65、CIEDE2000，kL=kC=kH=1。以 C/W/Q/A/R/D/V/H/E 九类为最近邻集合；M/MB/unknown 允许共用 E 的中性族。三组 Sharma 标准参考对误差小于 0.0001。\n\n| 类型 | 最近文字邻色 / ΔE00 | 最近底色邻色 / ΔE00 | 最近状态色 / ΔE00 | 文字 L* |\n|---|---|---|---|---|\n'+'\n'.join(rows)+'\n\n九类全部 36 对：\n\n| 类型对 | 文字 ΔE00 | 底色 ΔE00 |\n|---|---|---|\n'+'\n'.join(f'| {a} / {b} | {fg:.2f} | {bg:.2f} |' for a,b,fg,bg in pairs)+'\n')
     print('36 pairs passed: text >= 10, background >= 5')

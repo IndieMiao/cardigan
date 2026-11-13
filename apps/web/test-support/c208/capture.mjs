@@ -1,5 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+
 // Use an already installed local Playwright; this prototype adds no dependency.
 const { chromium } = await import(
   process.env.PLAYWRIGHT_MODULE ?? "playwright"
@@ -21,6 +22,7 @@ const page = await browser.newPage({
 const errors = [];
 page.on("pageerror", (error) => errors.push(error.message));
 const results = [];
+const readingSamples = [];
 const routes = [
   ["needs-you", "needs-you", ".needs-item"],
   ["card", "cards/C-1", ".timeline"],
@@ -56,6 +58,19 @@ try {
         `${base}/test-support/c208/index.html?palette=before#/p/p-1/${route}`,
       );
       await page.locator(selector).first().waitFor();
+      if (name === "card") {
+        await settle();
+        await geometry();
+        await page
+          .locator(".timeline-review summary")
+          .filter({ hasText: "问题列表" })
+          .click();
+        const expand = page
+          .locator(".timeline-comment")
+          .first()
+          .getByRole("button", { name: "展开全文", exact: true });
+        if (await expand.count()) await expand.click();
+      }
       await page.evaluate(() => {
         document.documentElement.dataset.c208 = "before";
       });
@@ -112,6 +127,65 @@ try {
           }),
         );
       results.push({ name, width, beforeBg, ...metrics, geometrySame: true });
+      if (name === "card") {
+        const comment = page.locator(".timeline-comment").first();
+        const review = page.locator(".timeline-review").first();
+        for (const mode of ["before", "after"]) {
+          await page.evaluate((mode) => {
+            document.documentElement.dataset.c208 = mode;
+          }, mode);
+          // Capture document coordinates from the top: locator screenshots scroll
+          // the target under the sticky card navigation on narrow viewports.
+          await settle();
+          await page.screenshot({
+            path: resolve(output, `review-issues-${width}-${mode}.png`),
+            fullPage: true,
+            clip: await review.boundingBox(),
+          });
+          await page.screenshot({
+            path: resolve(output, `long-comment-${width}-${mode}.png`),
+            fullPage: true,
+            clip: await comment.boundingBox(),
+          });
+        }
+        const details = await comment.evaluate((el) => {
+          const body = el.querySelector(".timeline-body");
+          const container = el.querySelector(".long-body");
+          return {
+            text: body.textContent,
+            color: getComputedStyle(body).color,
+            metadata: getComputedStyle(el.querySelector("time")).color,
+            fullyVisible: container.clientHeight >= container.scrollHeight - 1,
+          };
+        });
+        const issues = await review.evaluate((el) => ({
+          color: getComputedStyle(el.querySelector(".markdown p")).color,
+          open: !!el.querySelector("details[open]"),
+          mustFix: el.textContent.includes("必须修复"),
+          suggestion: el.textContent.includes("建议"),
+        }));
+        if (
+          !details.text.includes("本轮核对覆盖页面背景") ||
+          details.color !== "rgb(204, 204, 204)" ||
+          details.metadata !== "rgb(164, 164, 164)" ||
+          !details.fullyVisible ||
+          issues.color !== details.color ||
+          !issues.open ||
+          !issues.mustFix ||
+          !issues.suggestion
+        )
+          throw Error(JSON.stringify({ details, issues }));
+        readingSamples.push({
+          width,
+          comment: {
+            color: details.color,
+            metadata: details.metadata,
+            characters: details.text.length,
+            fullyVisible: details.fullyVisible,
+          },
+          issues,
+        });
+      }
     }
     await page.goto(`${base}/test-support/c208/palette.html`);
     await page.waitForFunction(
@@ -139,6 +213,7 @@ try {
     JSON.stringify(
       {
         scenarios: results,
+        readingSamples,
         lightBackground: lightAfter,
         runtimeErrors: errors,
       },
@@ -147,7 +222,7 @@ try {
     ),
   );
   console.log(
-    "20 page screenshots + 2 palette screenshots; 10 geometry/overflow/local-data checks passed.",
+    "20 page screenshots + 2 palette screenshots + 8 reading screenshots; 10 geometry/overflow/local-data checks passed.",
   );
 } finally {
   await browser.close();

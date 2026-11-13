@@ -1,75 +1,160 @@
 {
   "card": "C-208",
   "work_item": "W-633",
+  "version": "v2",
   "baseline": "80dbfa11c0807864a3c9f06fdf69a302fb53c2c1",
   "design": {
-    "id": "attachment-359",
-    "sha256": "58143ee00f6fac0fdc890bc18d0d9fd782ac154e34c1c9747199412e8457bbd1"
+    "id": "attachment-392",
+    "sha256": "325f952d77217c2c05917b151e8c2ebf4fefef64b9828620352c27f7b942a31b"
+  },
+  "browser_checks": {
+    "id": "attachment-393",
+    "sha256": "2d5d882982a6410e70e9c55f07d4926395d06c5124b6a3487cc08751d0c7e223"
   },
   "screenshots": [
     {
-      "name": "needs-you-1440-comparison.png",
-      "id": "attachment-360",
-      "sha256": "2df8efbba031d79c4c45392670101f54b3fed3665a8501a24d8afd1d6532c43b"
-    },
-    {
-      "name": "needs-you-390-comparison.png",
-      "id": "attachment-361",
-      "sha256": "18c6c3d59ef63c0d7f65b7cfc9d9b61af78b6a618fb63195ebd2dcb51aaa7504"
-    },
-    {
-      "name": "card-1440-comparison.png",
-      "id": "attachment-362",
-      "sha256": "aebab08363676dbaa432e99bb366b841e253581f7201121e3973d504e75db44c"
-    },
-    {
-      "name": "card-390-comparison.png",
-      "id": "attachment-363",
-      "sha256": "4fa0787b194f09dcd9049b1302a2860644d533c51e7923d7c25aa94ef36384a0"
-    },
-    {
-      "name": "board-1440-comparison.png",
-      "id": "attachment-364",
-      "sha256": "06029dcbc066324b39756e9fdfd60fef2ad7992be59f4e691a863d40c6f56a72"
-    },
-    {
-      "name": "board-390-comparison.png",
-      "id": "attachment-365",
-      "sha256": "7d7ed18ea2572df1a7438b84a436744b0e6056bad1b3575d157001e98cb13166"
-    },
-    {
-      "name": "execution-1440-comparison.png",
-      "id": "attachment-366",
-      "sha256": "41091aae90f4929ccb5e37b8719ff1caf5323d4320a394920dcf8a5c53a7eb28"
-    },
-    {
-      "name": "execution-390-comparison.png",
-      "id": "attachment-367",
-      "sha256": "6d0baaac006cbb0946e1b44b0eaa42face5c6d42fd63e227230aab78d74b0829"
-    },
-    {
       "name": "activity-1440-comparison.png",
-      "id": "attachment-368",
-      "sha256": "db5ac55d9f51818a5a7ddc6adb52194f72a40818b1e44cd01787554367354b4f"
+      "id": "attachment-394",
+      "sha256": "8fcd38dfd5256d4606dc149455f1462d4237d444909d351e833dd14f9ca2f5df",
+      "dimensions": [
+        2904,
+        1044
+      ]
     },
     {
       "name": "activity-390-comparison.png",
-      "id": "attachment-369",
-      "sha256": "0e0e8c076d5c9f68aba21cad4a418491419819e75a635b4ada09681c66952ed9"
+      "id": "attachment-395",
+      "sha256": "28f4dee2e3ff83616ae883a9665375f41732c4b475c62d4c78ad9e94c914bfb1",
+      "dimensions": [
+        804,
+        1560
+      ]
+    },
+    {
+      "name": "board-1440-comparison.png",
+      "id": "attachment-396",
+      "sha256": "7a6fc463aa85a43800feb538e69a2d1d4c66414d9248bb959af8b06a5e384280",
+      "dimensions": [
+        2904,
+        1044
+      ]
+    },
+    {
+      "name": "board-390-comparison.png",
+      "id": "attachment-397",
+      "sha256": "7ffc52515b985d30e9fe783a8e4d026af8389d5343c0c58ac970dffa2f464033",
+      "dimensions": [
+        804,
+        1423
+      ]
+    },
+    {
+      "name": "card-1440-comparison.png",
+      "id": "attachment-398",
+      "sha256": "f9d9bec9336a86161a06c3932ba4ac7ea1502ee7a58665f2852e45c947ac50e3",
+      "dimensions": [
+        2904,
+        2517
+      ]
+    },
+    {
+      "name": "card-390-comparison.png",
+      "id": "attachment-400",
+      "sha256": "652e717b8b23b71f1916ca8305e60676ca15297a92f84d96502c0c0bde87930b",
+      "dimensions": [
+        804,
+        4354
+      ]
+    },
+    {
+      "name": "execution-1440-comparison.png",
+      "id": "attachment-411",
+      "sha256": "a867b98ef7987e208810a9a2d2f470e0406a40a475481e577415571cb405be08",
+      "dimensions": [
+        2904,
+        1044
+      ]
+    },
+    {
+      "name": "execution-390-comparison.png",
+      "id": "attachment-412",
+      "sha256": "0674151674ce5c1123c857f7fb9bc31a02ae5b9332cf60cf036fa5f2e399dd33",
+      "dimensions": [
+        804,
+        1290
+      ]
+    },
+    {
+      "name": "long-comment-1440-comparison.png",
+      "id": "attachment-413",
+      "sha256": "636e15b364bd16a111b7147732578d19dec700c9b8d833dcdf98b69a6c18969e",
+      "dimensions": [
+        1388,
+        476
+      ]
+    },
+    {
+      "name": "long-comment-390-comparison.png",
+      "id": "attachment-414",
+      "sha256": "886e2a45d4099b61594f02a39ac13f252649165ea1e1963dd093fd22eea92097",
+      "dimensions": [
+        600,
+        903
+      ]
+    },
+    {
+      "name": "needs-you-1440-comparison.png",
+      "id": "attachment-415",
+      "sha256": "51c6a235ed183a3c0f40da8e367106ec74501601c2c95e54d58e2cbd206c2ad4",
+      "dimensions": [
+        2904,
+        1255
+      ]
+    },
+    {
+      "name": "needs-you-390-comparison.png",
+      "id": "attachment-416",
+      "sha256": "a0cddeb07f2e41f127ba5b016d53396878a443ec658d070ae42ed1172739bb64",
+      "dimensions": [
+        804,
+        1805
+      ]
+    },
+    {
+      "name": "review-issues-1440-comparison.png",
+      "id": "attachment-417",
+      "sha256": "d65a5ab8f820712ac48447576cc32a0f23857d375ad48a1514547735786ac159",
+      "dimensions": [
+        1388,
+        784
+      ]
+    },
+    {
+      "name": "review-issues-390-comparison.png",
+      "id": "attachment-418",
+      "sha256": "122febb852dc304c07a902637e80c96be16ff50ed1ad624729f97c2484e4626e",
+      "dimensions": [
+        600,
+        1298
+      ]
     },
     {
       "name": "palette-1440.png",
-      "id": "attachment-370",
-      "sha256": "4c326ba6350a1764082c218edb8b9e06bf945c4e0f0162c0875c2e972be294ef"
+      "id": "attachment-419",
+      "sha256": "74c9da3b9a86133712bfdf08b4c65a0444261f1759149aba31869ebfc0bc7405",
+      "dimensions": [
+        1440,
+        1000
+      ]
     },
     {
       "name": "palette-390.png",
-      "id": "attachment-371",
-      "sha256": "fac1d6acbe72dec0f08a9805d8b6acdfbe9d6639ecca2a3cf3954b53315d503f"
+      "id": "attachment-420",
+      "sha256": "18d1afa314a79bc2f629498c0aac3f3e126ec338b6263077d26d231912a36185",
+      "dimensions": [
+        390,
+        2047
+      ]
     }
-  ],
-  "browser_checks": {
-    "id": "attachment-372",
-    "sha256": "9bdd22d81e6993103840f30ef35227836c5d502f15eacc14e89bc059bab545fb"
-  }
+  ]
 }

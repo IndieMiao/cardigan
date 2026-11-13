@@ -101,6 +101,38 @@
       "geometrySame": true
     }
   ],
+  "readingSamples": [
+    {
+      "width": 1440,
+      "comment": {
+        "color": "rgb(204, 204, 204)",
+        "metadata": "rgb(164, 164, 164)",
+        "characters": 407,
+        "fullyVisible": true
+      },
+      "issues": {
+        "color": "rgb(204, 204, 204)",
+        "open": true,
+        "mustFix": true,
+        "suggestion": true
+      }
+    },
+    {
+      "width": 390,
+      "comment": {
+        "color": "rgb(204, 204, 204)",
+        "metadata": "rgb(164, 164, 164)",
+        "characters": 407,
+        "fullyVisible": true
+      },
+      "issues": {
+        "color": "rgb(204, 204, 204)",
+        "open": true,
+        "mustFix": true,
+        "suggestion": true
+      }
+    }
+  ],
   "lightBackground": "rgb(242, 244, 243)",
   "runtimeErrors": []
 }

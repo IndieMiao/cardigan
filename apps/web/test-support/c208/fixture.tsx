@@ -67,6 +67,13 @@ const decision: NeedsDecision = {
   related_cards: [{ id: sample.id, title: sample.title }],
   merge_confirmation: null,
 };
+const longComment = `本轮核对覆盖页面背景、侧栏、内容卡片和长段文字。正文使用柔和的浅灰，次要信息再低一级；阅读时先看到问题本身，再根据需要查看编号、时间和负责人。标题沿用原有字号和字重，不另外提高文字亮度。
+
+第一项需要确认的是信息层次。审核问题、评论和交付说明常常需要连续阅读，正文不能像白色警告一样抢眼。几段说明放在同一张内容卡里，段落之间保留原有间距；即使文字较长，也不增加装饰框或大面积强调底色。
+
+第二项需要确认的是状态辨识。通过、失败、运行中、阻塞和暂缓仍显示专用图标与中文名称。编号标签的色彩只提示对象类型，不能替代状态，也不能让读者误以为某个对象已经审核通过。长评论里的普通文字保持同一灰度，真正需要注意的结果由旁边的状态信息表达。
+
+最后请结合窄屏核对。正文应自然换行，时间和编号不会挤占阅读区域；需要继续处理时，可以使用已有的评论入口。这里是一段本地示例内容，用来检查连续阅读的亮度和对比度，不代表真实项目的审核结论。`;
 const client = fakeClient({
   ...(new URLSearchParams(location.search).has("capacity")
     ? {
@@ -93,19 +100,89 @@ const client = fakeClient({
     callbacks.status("live");
     return () => {};
   },
-  card: async (_project, _card, query) =>
+  card: async () =>
     cardDetail({
       card: sample,
       attachments: [],
-      counts: { timeline: 25, deliveries: 1, reviews: 0, open_decisions: 0 },
-      timeline: Array.from({ length: 3 }, (_, i) =>
+      counts: { timeline: 25, deliveries: 1, reviews: 1, open_decisions: 0 },
+      deliveries: [
+        {
+          id: "D-1",
+          work_item_id: "W-1",
+          kind: "design",
+          summary: "本地示例：界面配色与连续阅读",
+          subject: { kind: "doc_version", value: "example-v1" },
+          status: "submitted",
+        },
+      ],
+      reviews: [
+        {
+          id: "V-1",
+          delivery_id: "D-1",
+          work_item_id: "W-2",
+          verdict: "reject",
+          blocking: true,
+          issues: [
+            {
+              severity: "major",
+              must_fix: true,
+              pre_existing: false,
+              description:
+                "第一项：检查正文的连续阅读感受。审核问题、评论和交付说明需要使用同一档柔和浅灰，避免长段文字与状态提示争夺注意力。标题继续使用原有字号和字重，不能靠提高正文亮度来制造层级。",
+              proof:
+                "将同一段示例文字放在页面、卡片和时间线三档背景上，核对正文与次要信息。",
+            },
+            {
+              severity: "major",
+              must_fix: true,
+              pre_existing: false,
+              description:
+                "第二项：核对标签与状态之间的关系。编号颜色只表示对象类型，状态仍需要专用图标和中文名称。短编号不应比旁边的正文更亮，不能因为浅色标签形成一串视觉亮点，打断审核问题的阅读顺序。",
+              proof:
+                "同时查看任务、运行、审核和交付编号；色差与对比度需要分别计算。",
+            },
+            {
+              severity: "minor",
+              must_fix: true,
+              pre_existing: false,
+              description:
+                "第三项：检查窄屏换行。问题说明应跟随内容宽度自然换行，严重程度和必须修复标记保持可读。较长的依据可以使用已有的内容展开入口，展开以后也不能遮住后续段落或把页面撑出横向滚动。",
+              proof:
+                "分别在宽屏和窄屏打开同一份问题列表，使用相同的示例内容对照。",
+            },
+            {
+              severity: "minor",
+              must_fix: false,
+              pre_existing: true,
+              description:
+                "第四项：保留必要的次要信息。发言时间和编号可降低一级亮度，但仍应方便核对；不要为了突出正文而删除阅读所需的背景。建议在长评论下方继续使用原有回复入口，让处理动作紧跟内容。",
+              proof: "本条是展示建议标记的示例，不代表产品存在真实缺陷。",
+            },
+          ],
+        },
+      ],
+      timeline: [
         timelineEntry({
-          id: `C-1#${25 - i}`,
-          event_seq: 25 - i,
-          author_role: "coder",
-          body: `第 ${25 - i} 条：已完成页面布局核对，请检查亮暗主题下的长标题和交付信息。`,
+          id: "C-1#25",
+          event_seq: 25,
+          type: "review",
+          review_id: "V-1",
+          author_role: "reviewer",
+          body: "本地示例：连续阅读问题列表",
         }),
-      ),
+        timelineEntry({
+          id: "C-1#24",
+          event_seq: 24,
+          author_role: "coder",
+          body: longComment,
+        }),
+        timelineEntry({
+          id: "C-1#23",
+          event_seq: 23,
+          author_role: "coder",
+          body: "本地示例：请结合审核问题列表核对正文与次要信息的亮度。",
+        }),
+      ],
     }),
   needsYou: async () => ({
     decisions: [decision],
@@ -263,7 +340,7 @@ const decorate = () =>
     const prefix = el.textContent?.trim().match(/^([A-Z]+)-/)?.[1] ?? "";
     el.dataset.idKind = kinds[prefix] ?? "unknown";
   });
-new MutationObserver(decorate).observe(document.getElementById("root")!, {
+new MutationObserver(decorate).observe(root, {
   childList: true,
   subtree: true,
 });

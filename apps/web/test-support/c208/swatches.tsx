@@ -1,5 +1,5 @@
 import { createRoot } from "react-dom/client";
-import { StatusTag, IdTag } from "../../src/components/Foundation.js";
+import { IdTag, StatusTag } from "../../src/components/Foundation.js";
 import "@fontsource-variable/inter";
 import "@fontsource-variable/noto-sans-sc";
 import "@fontsource-variable/jetbrains-mono";
@@ -7,6 +7,7 @@ import "../../src/styles.css";
 import "./palette.css";
 import "./swatches.css";
 import palette from "./palette.json";
+
 document.documentElement.dataset.c208 = "after";
 const statuses = [
   "passed",
@@ -22,7 +23,7 @@ function Sheet() {
   return (
     <main className="swatch-sheet">
       <h1>C-208 中性深灰 × C-204 编号标签</h1>
-      <p className="hint">晴雯 · 设计候选 v1 · 示例数据</p>
+      <p className="hint">晴雯 · 设计候选 v2 · 示例数据</p>
       <div className="swatch-levels">
         {["--bg", "--surface", "--surface-muted"].map((key, i) => (
           <section className={`swatch-level level-${i}`} key={key}>
@@ -33,7 +34,7 @@ function Sheet() {
               {key} {palette.after[key]}
             </code>
             <p>正文清晰，次要文字保持足够对比。</p>
-            <p className="hint">次要文字 #b8b8b8</p>
+            <p className="hint">次要文字 #a4a4a4</p>
             <div className="swatch-items">
               {statuses.map((status) => (
                 <StatusTag key={status} status={status} />
@@ -69,9 +70,13 @@ function Sheet() {
     </main>
   );
 }
-createRoot(document.getElementById("root")!).render(<Sheet />);
+const root = document.getElementById("root");
+if (!root) throw new Error("Missing palette root");
+createRoot(root).render(<Sheet />);
 new MutationObserver(() =>
   document
     .querySelectorAll<HTMLElement>("[data-demo-kind] .id-tag")
-    .forEach((el) => (el.dataset.idKind = el.parentElement!.dataset.demoKind)),
-).observe(document.getElementById("root")!, { childList: true, subtree: true });
+    .forEach((el) => {
+      el.dataset.idKind = el.parentElement?.dataset.demoKind ?? "unknown";
+    }),
+).observe(root, { childList: true, subtree: true });
