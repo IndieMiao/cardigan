@@ -10,7 +10,7 @@ import type {
 } from "../entities.js";
 import type { CardId, HumanActionId, ProjectId } from "../ids.js";
 import { type CommandDraft, ensure, text } from "./core.js";
-import { mergeBlockingHumanActions } from "./merge.js";
+import { mergeBlockingHumanActions, syncScreenshotMerge } from "./merge.js";
 import {
   SCREENSHOT_CHECK_LABEL,
   screenshotCheckEnforced,
@@ -66,10 +66,20 @@ export function currentPreMergeVersions(
         : [];
     });
 }
+/**
+ * Labels whose conclusions come only from Review projections: they bind to the
+ * delivery ID (like isReviewStale) and do not use an ordinary-check slot. The
+ * screenshot check joins them only while the reviewer-browser switch is on.
+ */
+const reservedLabels = (screenshotEnforced: boolean): readonly string[] =>
+  screenshotEnforced
+    ? [INDEPENDENT_REVIEW_CHECK_LABEL, SCREENSHOT_CHECK_LABEL]
+    : [INDEPENDENT_REVIEW_CHECK_LABEL];
 const sameVersions = (
   a: readonly PreMergeCheckedVersion[] | undefined,
   b: readonly PreMergeCheckedVersion[],
   label?: string,
+  screenshotEnforced = false,
 ) =>
   a !== undefined &&
   a.length === b.length &&
@@ -77,7 +87,8 @@ const sameVersions = (
     (v, i) =>
       v.work_item_id === b[i]?.work_item_id &&
       v.subject === b[i]?.subject &&
-      (label !== INDEPENDENT_REVIEW_CHECK_LABEL ||
+      (label === undefined ||
+        !reservedLabels(screenshotEnforced).includes(label) ||
         v.delivery_id === b[i]?.delivery_id),
   );
 
@@ -128,11 +139,13 @@ export function effectivePreMergeChecks(
   card: Pick<Card, "id" | "pre_merge_checks">,
   workItems: readonly WorkItem[],
   deliveries: readonly Delivery[],
+  /** Q-336 (a): pass `screenshotCheckEnforced(state)` from the caller. */
+  screenshotEnforced = false,
 ): readonly EffectivePreMergeCheck[] {
   const current = currentPreMergeVersions(card, workItems, deliveries);
   return (card.pre_merge_checks ?? []).map((c) =>
     c.status !== "pending" &&
-    !sameVersions(c.checked_versions, current, c.label)
+    !sameVersions(c.checked_versions, current, c.label, screenshotEnforced)
       ? { ...c, status: "pending", stale: true }
       : { ...c, stale: false },
   );
@@ -142,10 +155,14 @@ export function openPreMergeChecks(
   card: Pick<Card, "id" | "pre_merge_checks">,
   workItems: readonly WorkItem[],
   deliveries: readonly Delivery[],
+  screenshotEnforced = false,
 ): readonly EffectivePreMergeCheck[] {
-  return effectivePreMergeChecks(card, workItems, deliveries).filter(
-    (c) => c.status !== "passed",
-  );
+  return effectivePreMergeChecks(
+    card,
+    workItems,
+    deliveries,
+    screenshotEnforced,
+  ).filter((c) => c.status !== "passed");
 }
 
 /**
@@ -279,16 +296,11 @@ export function projectScreenshotCheck(d: CommandDraft, review: Review) {
   )
     return;
   const item = d.ownWork(review.work_item_id);
-  writePreMergeCheck(
-    d,
-    d.card(item.card_id),
-    {
-      label: SCREENSHOT_CHECK_LABEL,
-      status: review.screenshot_check,
-      note: `审核 ${review.id}`,
-    },
-    true,
-  );
+  writePreMergeCheck(d, d.card(item.card_id), {
+    label: SCREENSHOT_CHECK_LABEL,
+    status: review.screenshot_check,
+    note: `审核 ${review.id}`,
+  });
 }
 
 /** Withdrawal invalidates only the projections written by this review owner. */
@@ -332,10 +344,13 @@ function writePreMergeCheck(
   d: CommandDraft,
   card: Card,
   input: PreMergeCheckInput,
-  /** A Review projection must not fail on the ordinary-check limit. */
-  projection = false,
 ): Card {
   const { label, note } = input;
+  const enforced = screenshotCheckEnforced({
+    project_id: d.state.project_id,
+    project_preferences: d.list("project_preferences"),
+  });
+  const reserved = reservedLabels(enforced);
   ensure(
     card.status !== "done" && card.status !== "cancelled",
     "illegal_transition",
@@ -345,12 +360,11 @@ function writePreMergeCheck(
   const previous = checks.find((c) => c.label === label);
   ensure(
     previous !== undefined ||
-      label === INDEPENDENT_REVIEW_CHECK_LABEL ||
-      projection ||
-      checks.filter((c) => c.label !== INDEPENDENT_REVIEW_CHECK_LABEL).length <
+      reserved.includes(label) ||
+      checks.filter((c) => !reserved.includes(c.label)).length <
         MAX_PRE_MERGE_CHECKS,
     "validation_failed",
-    `一张卡最多 ${MAX_PRE_MERGE_CHECKS} 个普通合并前核对项，独立复核另计`,
+    `一张卡最多 ${MAX_PRE_MERGE_CHECKS} 个普通合并前核对项，${reserved.join("、")}另计`,
   );
   const versions =
     input.status === "pending"
@@ -369,7 +383,7 @@ function writePreMergeCheck(
     previous?.status === input.status &&
     previous.note === note &&
     (versions === undefined ||
-      sameVersions(previous.checked_versions, versions, label))
+      sameVersions(previous.checked_versions, versions, label, enforced))
   )
     return card;
   const next: PreMergeCheck = {
@@ -429,10 +443,11 @@ function writePreMergeCheck(
     !(
       previous?.status === "passed" &&
       versions !== undefined &&
-      sameVersions(previous.checked_versions, versions, label)
+      sameVersions(previous.checked_versions, versions, label, enforced)
     )
   )
     remindMergeBlockingActions(d, card.id, label);
+  if (label === SCREENSHOT_CHECK_LABEL) syncScreenshotMerge(d, result);
   return result;
 }
 function remindMergeBlockingActions(

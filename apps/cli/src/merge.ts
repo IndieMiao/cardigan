@@ -18,6 +18,7 @@ import {
   recheckMerge,
   recordDecision,
   requestMerge,
+  screenshotCheckEnforced,
 } from "@cardigan/domain";
 import { loadMergeGateConfig } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
@@ -333,7 +334,12 @@ function preMergeChecksOf(
   state: CommandState,
   card: Card,
 ): readonly EffectivePreMergeCheck[] {
-  return effectivePreMergeChecks(card, state.work_items, state.deliveries);
+  return effectivePreMergeChecks(
+    card,
+    state.work_items,
+    state.deliveries,
+    screenshotCheckEnforced(state),
+  );
 }
 const openChecks = (checks: readonly EffectivePreMergeCheck[]) =>
   checks.filter((c) => c.status !== "passed");

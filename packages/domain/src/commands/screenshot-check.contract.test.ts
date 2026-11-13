@@ -5,13 +5,14 @@ import {
   assign,
   autoConfirmMerge,
   autoMergeSchedule,
-  type CommandState,
   createWorkItem,
+  type Decision,
   type DecisionCategory,
   effectivePreMergeChecks,
   mergePlan,
   mergeRequiresHuman,
   pmMergeBlockers,
+  recordDecision,
   recordMergeCheck,
   requestDecision,
   resolveDelegatedDecision,
@@ -382,37 +383,128 @@ test.each(["passed", "failed"] as const)(
   },
 );
 
-test("switch on: a redelivery with the same SHA makes the pass stale", async () => {
-  const { f, confirmation, product, card } = await setup({
+test.each([true, false])(
+  "same-SHA redelivery: screenshot view follows merge authority when on, C-160 when off (on=%s)",
+  async (on) => {
+    const { f, product, card } = await prepare({
+      on: true,
+      shot: "passed",
+    });
+    const again = await f.deliver();
+    expect(again.subject.value).toBe(product.subject.value);
+    expect(again.id).not.toBe(product.id);
+    const view = effectivePreMergeChecks(
+      card(),
+      f.state.work_items,
+      f.state.deliveries,
+      on,
+    ).find((c) => c.label === SCREENSHOT_CHECK_LABEL);
+    // On: bound to the delivery like 独立复核, so the old pass reads stale,
+    // matching screenshotCheckBlocker. Off: ordinary C-160 SHA comparison.
+    expect(view).toMatchObject(
+      on
+        ? { status: "pending", stale: true }
+        : { status: "passed", stale: false },
+    );
+    expect(screenshotCheckBlocker(f.state, card())).toContain("须由独立复核员");
+  },
+);
+
+const humanAnswer = (
+  f: Awaited<ReturnType<typeof setup>>["f"],
+  decision_id: Decision["id"],
+  option: "merge" | "request_changes",
+) =>
+  recordDecision(
+    f.state,
+    human,
+    {
+      decision_id,
+      option,
+      rationale: "人亲自处理",
+      raw_quote: option === "merge" ? "合并" : "退回",
+    },
+    f.io,
+  );
+
+test.each(["merge", "request_changes"] as const)(
+  "a reset pass voids the unpublished PM confirmation and hands a new one to the human (%s)",
+  async (option) => {
+    const { f, resolve, write, confirmation } = await setup({
+      on: true,
+      shot: "passed",
+    });
+    f.commit(resolve());
+    const old = confirmation();
+    expect(mergePlan(f.state, f.card.id).ok).toBe(true);
+    f.commit(write("pending"));
+    const next = confirmation();
+    expect(next.id).not.toBe(old.id);
+    expect(next).toMatchObject({ status: "open", decider: "human" });
+    expect(next.human_required_reason).toContain(SCREENSHOT_CHECK_LABEL);
+    // The old authorization stays as history and is not resurrected.
+    const history = f.state.decisions.find((q) => q.id === old.id);
+    expect(history?.resolution?.option).toBe("merge");
+    expect(history?.status).toBe("superseded");
+    expect(
+      f.state.events.some(
+        (e) =>
+          e.type === "decision_superseded" &&
+          (e.payload as { decision_id?: string }).decision_id === old.id,
+      ),
+    ).toBe(true);
+    expect(mergePlan(f.state, f.card.id).ok).toBe(false);
+    // PM cannot answer it; the human can merge or return it.
+    expect(resolve().ok).toBe(false);
+    f.commit(humanAnswer(f, next.id, option));
+    if (option === "merge") expect(mergePlan(f.state, f.card.id).ok).toBe(true);
+    else
+      expect(f.state.cards.find((c) => c.id === f.card.id)?.status).not.toBe(
+        "awaiting_merge",
+      );
+  },
+);
+
+test("turning the switch on voids a delegated merge made on a manual pass", async () => {
+  const { f, resolve, confirmation, setSwitch } = await setup({
+    on: false,
+    manual: "passed",
+  });
+  f.commit(resolve());
+  const old = confirmation();
+  expect(mergePlan(f.state, f.card.id).ok).toBe(true);
+  setSwitch(true);
+  const next = confirmation();
+  expect(next.id).not.toBe(old.id);
+  expect(next).toMatchObject({ status: "open", decider: "human" });
+  expect(mergePlan(f.state, f.card.id).ok).toBe(false);
+  f.commit(humanAnswer(f, next.id, "merge"));
+  expect(mergePlan(f.state, f.card.id).ok).toBe(true);
+});
+
+test("a human's own merge confirmation survives a later reset", async () => {
+  const { f, write, confirmation } = await setup({
     on: true,
     shot: "passed",
   });
-  const state: CommandState = {
-    ...f.state,
-    deliveries: [
-      ...f.state.deliveries,
-      { ...product, id: "D-999" as typeof product.id, supersedes: product.id },
-    ],
-  };
-  // The ordinary check view keeps C-160 semantics (same SHA)…
-  expect(
-    effectivePreMergeChecks(card(), state.work_items, state.deliveries).find(
-      (c) => c.label === SCREENSHOT_CHECK_LABEL,
-    )?.stale,
-  ).toBe(false);
-  // …but merge authority binds to the delivery, like 独立复核.
-  expect(screenshotCheckBlocker(state, card())).toContain("须由独立复核员");
-  expect(pmMergeBlockers(state, confirmation()).length).toBeGreaterThan(0);
-});
-
-test("switch on: a PM confirmation cannot be published after the pass is reset", async () => {
-  const { f, resolve, write } = await setup({ on: true, shot: "passed" });
-  f.commit(resolve());
-  expect(mergePlan(f.state, f.card.id).ok).toBe(true);
+  f.commit(
+    resolveDelegatedDecision(
+      f.state,
+      opsActor,
+      {
+        decision_id: confirmation().id,
+        option: "merge",
+        rationale: "交人",
+        escalate: true,
+      },
+      f.io,
+    ),
+  );
+  f.commit(humanAnswer(f, confirmation().id, "merge"));
+  const confirmed = confirmation();
   f.commit(write("pending"));
-  const plan = mergePlan(f.state, f.card.id);
-  expect(plan.ok).toBe(false);
-  if (!plan.ok) expect(plan.error.message).toContain(SCREENSHOT_CHECK_LABEL);
+  expect(confirmation().id).toBe(confirmed.id);
+  expect(mergePlan(f.state, f.card.id).ok).toBe(true);
 });
 
 test.each([true, false])(
@@ -540,7 +632,7 @@ test("switch on + screenshot passed never lifts a human_required_reason handoff"
   expect(resolve().ok).toBe(false);
 });
 
-test("projection does not fail on the ordinary-check limit", async () => {
+test("switch on: projection does not fail on the ordinary-check limit", async () => {
   const { shotCheck, card } = await prepare({
     on: true,
     shot: "passed",
@@ -551,4 +643,35 @@ test("projection does not fail on the ordinary-check limit", async () => {
     card().pre_merge_checks?.filter((c) => c.label.startsWith("核对 ")),
   ).toHaveLength(8);
   expect(shotCheck()?.status).toBe("passed");
+});
+
+const addOrdinary = (
+  f: Awaited<ReturnType<typeof prepare>>["f"],
+  label: string,
+) =>
+  updateCard(
+    f.state,
+    human,
+    { card_id: f.card.id, pre_merge_check: { label, status: "pending" } },
+    f.io,
+  );
+
+test("switch on: the screenshot check takes no ordinary slot in either order", async () => {
+  // Projection first, then 8 ordinary checks.
+  const first = await prepare({ on: true, shot: "passed" });
+  for (let i = 0; i < 8; i++) first.f.commit(addOrdinary(first.f, `核对 ${i}`));
+  expect(addOrdinary(first.f, "核对 8").ok).toBe(false);
+  // 8 ordinary checks first, then the PM's pending marker.
+  const second = await prepare({ on: true, ui: false, ordinary: 8 });
+  second.f.commit(second.write("pending"));
+  expect(second.shotCheck()?.status).toBe("pending");
+});
+
+test("switch off: the screenshot check keeps using an ordinary slot (C-160)", async () => {
+  const { write } = await prepare({ on: false, ui: false, ordinary: 8 });
+  const r = write("pending");
+  expect(r.ok).toBe(false);
+  if (!r.ok) expect(r.error.code).toBe("validation_failed");
+  const marked = await prepare({ on: false, ordinary: 7 });
+  expect(addOrdinary(marked.f, "核对 7").ok).toBe(false);
 });

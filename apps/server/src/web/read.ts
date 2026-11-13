@@ -42,6 +42,7 @@ import {
   resolveReferences,
   roleKind,
   runAuthorView,
+  screenshotCheckEnforced,
   suggestionView,
 } from "@cardigan/domain";
 import type { ProjectMergeGate } from "@cardigan/host";
@@ -921,15 +922,18 @@ export function noticePage(state: CommandState, before?: string) {
 function preMergeChecksView(state: CommandState, cardId: string | undefined) {
   const card = state.cards.find((c) => c.id === cardId);
   if (!card) return [];
-  return effectivePreMergeChecks(card, state.work_items, state.deliveries).map(
-    (check) => ({
-      label: check.label,
-      status: check.status,
-      stale: check.stale,
-      note: check.note ?? null,
-      updated_at: check.updated_at,
-    }),
-  );
+  return effectivePreMergeChecks(
+    card,
+    state.work_items,
+    state.deliveries,
+    screenshotCheckEnforced(state),
+  ).map((check) => ({
+    label: check.label,
+    status: check.status,
+    stale: check.stale,
+    note: check.note ?? null,
+    updated_at: check.updated_at,
+  }));
 }
 
 function decisionActionWebView(
