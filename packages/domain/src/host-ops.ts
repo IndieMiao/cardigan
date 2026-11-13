@@ -62,6 +62,7 @@ export type HostOpsExecutionTool =
 /** Persisted intent. Only the host consumes runtime references and launch snapshots. */
 export interface HostOpsExecution {
   readonly action_id: Event["id"];
+  readonly upstream_incident_id?: Event["id"];
   readonly context_usage?: ContextObservation;
   readonly tool: HostOpsExecutionTool;
   readonly target_id: AssignmentId | RunId;

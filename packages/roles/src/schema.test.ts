@@ -222,3 +222,78 @@ describe("parseSecretsText", () => {
     );
   });
 });
+
+describe("C-213 explicit upstream configuration", () => {
+  test("defaults only the approved v3 rules and never infers endpoints from credential environments", () => {
+    const config = parseLaunchConfig({
+      ...fictionalConfig,
+      upstream_health: {},
+    });
+    expect(config.upstream_health).toEqual({
+      inactive_session_count: 3,
+      inactivity_window_ms: 600_000,
+      recurrence_window_ms: 900_000,
+    });
+    expect(config.providers.of?.upstream).toBeUndefined();
+  });
+  test.each([
+    "https://user:secret@example.invalid",
+    "https://example.invalid/token",
+    "https://example.invalid?token=secret",
+    "https://example.invalid#secret",
+    "ftp://example.invalid",
+  ])("rejects a credential-bearing or unsupported probe origin: %s", (url) => {
+    const error = errorText(() =>
+      parseLaunchConfig({
+        providers: {
+          relay: {
+            harness: "codex",
+            upstream: { group: "relay", probe_url: url },
+          },
+        },
+      }),
+    );
+    expect(error).toContain("probe_url");
+    expect(error).not.toContain("secret");
+  });
+  test.each([0, -1, 0.5, NaN, Infinity, 2_147_483_648])(
+    "rejects unsupported timing %s without a fallback",
+    (n) => {
+      expect(() =>
+        parseLaunchConfig({
+          upstream_health: {
+            probe: { interval_ms: n, timeout_ms: 100, stale_after_ms: 200 },
+          },
+        }),
+      ).toThrow();
+    },
+  );
+  test("requires all explicit probe timings and validates v3 thresholds", () => {
+    expect(() =>
+      parseLaunchConfig({ upstream_health: { probe: { interval_ms: 1000 } } }),
+    ).toThrow();
+    for (const key of [
+      "inactive_session_count",
+      "inactivity_window_ms",
+      "recurrence_window_ms",
+    ])
+      expect(() =>
+        parseLaunchConfig({ upstream_health: { [key]: 0 } }),
+      ).toThrow();
+    const config = parseLaunchConfig({
+      providers: {
+        a: {
+          harness: "codex",
+          upstream: {
+            group: "relay",
+            probe_url: "https://gateway.example.invalid",
+          },
+        },
+      },
+      upstream_health: {
+        probe: { interval_ms: 1000, timeout_ms: 100, stale_after_ms: 2000 },
+      },
+    });
+    expect(config.providers.a?.upstream?.group).toBe("relay");
+  });
+});

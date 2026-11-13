@@ -9,6 +9,10 @@ import {
 } from "./coordination.js";
 import { attempt, CommandDraft, type CommandState } from "./core.js";
 import { createHostOpsAssignment } from "./host-ops.js";
+import {
+  finishHostOpsRotation,
+  prepareHostOpsRotation,
+} from "./host-ops-rotate.js";
 import { assign } from "./pm.js";
 import {
   copyRole,
@@ -366,4 +370,49 @@ test("bootstrap pins the role and employee; disabled or ambiguous new identities
     expect(
       createHostOpsAssignment({ ...base, roles }, human, {}, ports()).ok,
     ).toBe(false);
+});
+
+test("rotation changes identity and cursors atomically after a read-only human preflight", () => {
+  const s = standing();
+  const allocator = ports();
+  allocator.ids.next(s.state.project_id, "assignment");
+  const role = s.state.roles.find((r) => r.role_id === "host_ops");
+  if (!role) throw new Error("Missing host_ops role");
+  let state: CommandState = {
+    ...s.state,
+    roles: [...s.state.roles, { ...role, role_version: 2 }],
+    cursors: [
+      { assignment_id: s.assignment.id, card_id: id("card", 1), acked_seq: 7 },
+    ],
+  };
+  for (const caller of [
+    s.actor,
+    { kind: "system", project_id: state.project_id },
+  ] as const)
+    expect(prepareHostOpsRotation(state, caller).ok).toBe(false);
+  const ready = value(prepareHostOpsRotation(state, human));
+  expect(ready.changes).toEqual([]);
+  expect(ready.events).toEqual([]);
+  expect(ready.data.unchanged).toBe(false);
+  const params = { previous_assignment_id: s.assignment.id, to_version: 2 };
+  expect(finishHostOpsRotation(state, s.actor, params, allocator).ok).toBe(
+    false,
+  );
+  const finished = value(
+    finishHostOpsRotation(state, human, params, allocator),
+  );
+  state = apply(state, finished);
+  expect(
+    state.assignments.filter(
+      (a) => a.role_id === "host_ops" && a.status === "active",
+    ),
+  ).toEqual([finished.data.assignment]);
+  expect(finished.data.assignment.role_version).toBe(2);
+  expect(state.cursors).toContainEqual({
+    assignment_id: finished.data.assignment.id,
+    card_id: id("card", 1),
+    acked_seq: 7,
+  });
+  expect(finishHostOpsRotation(state, human, params, allocator).ok).toBe(false);
+  expect(value(prepareHostOpsRotation(state, human)).data.unchanged).toBe(true);
 });

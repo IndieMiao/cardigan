@@ -5,6 +5,7 @@ import type {
   ProjectId,
 } from "@cardigan/domain";
 import { standingModeFromTools } from "@cardigan/domain";
+import type { LaunchConfig } from "@cardigan/roles";
 import { type Store, tokensForAssignment } from "@cardigan/store";
 import { type AttachmentGc, startAttachmentLoop } from "./attachment-loop.js";
 import { type CleanupExecutor, startCleanupLoop } from "./cleanup-loop.js";
@@ -41,6 +42,7 @@ import {
  * `stop()` (loop + monitor drain) → close the MCP endpoint → close the Store.
  */
 export interface ControlPlaneOptions {
+  readonly upstream?: LaunchConfig;
   readonly hostOpsTick?: () => Promise<void>;
   readonly hostOpsPatrolIntervalMs?: number;
   readonly store: Store;
