@@ -218,3 +218,43 @@ replay 新增 `REPLAY_LOOPS=1`（配 `REPLAY_LOOP_TICKS`，默认 2）：dispatc
   - cleanup 的串行 await 本身已经会让出事件循环（外部 IO），它慢主要是串行 IO，不是阻塞；分片对它帮助不大，并行化反而要处理同一仓库的 Git 锁。
 - **要改的边界**：`Dispatcher.tick` 的 route/deliver 循环（让出点、让出后候选列表是否重算）、`retryDispatchedRuns` 的候选循环、`maintenance` 内单个大事务（要先拆成多个事务才能让出，涉及“同一事务内看到一致状态”的假设）；派发顺序和合并检查互斥的契约测试要补“让出期间有并发写”的用例。
 - 建议：先做 §6.5 的两项，把稳态 tick 再降一截，再按数字决定要不要分片；要做的话属于并发行为变化，交人另行决定。
+
+## 7. C-230：deliver 段的容量队列与 CommandDraft 查找（第四轮修复与测量）
+
+> 卡片 C-230 / 工作项 W-708。只改查找和复用方式，不改调度语义，不改表结构，也没有新增数值或行为规则。测量方法同 §6.1（不设 `CARDIGAN_TICK_PROFILE`，`REPLAY_TICKS=4`），修前是本卡起点 main（74cba167）构建后测的，修后是同一台机器、同一份合成数据 `tsc -b` 之后测的。
+
+### 7.1 修前热点（240 卡 CPU profile，4 次 tick 共 41.7 s 采样，包含关系）
+
+| 位置 | 包含耗时 | 说明 |
+|---|---:|---|
+| `claim` | 29.5 s | deliver 段的逐候选认领 |
+| ├ `runCapacitySnapshot` | 14.4 s | 其中 `queueSnapshot` 11.9 s：每次认领都对全部 Run 行做 `json_extract` 扫描、关联 Assignment/事件/工作项/卡片、逐行 JSON 解码后排序；`pendingHostOpsActions` 每次把全部事件拼起来重算 |
+| └ `queueRun` → `exclusive` | 9.9 s | 对每个未结束 Run 调 `d.get("assignments", …)`，而 `CommandDraft.get` 每次都 `list()` 重建整张 Map（`get` 8.8 s，`keyOf` 2.5 s） |
+
+### 7.2 改了什么
+
+1. **`CommandDraft.get` 按键查找**（`packages/domain/src/commands/core.ts`）：先倒序查本草稿的 `changes`（`put` 保证同键只有一条，倒序等价于“后写覆盖”），没有再查按状态数组身份缓存的索引（`WeakMap`，同键取最后一条，与 `list()` 里 `new Map` 的覆盖规则一致）。找不到时报同样的 `not_found` 错误。`list()`、`put()` 不变。
+2. **容量队列跨认领复用**（`packages/host/src/run-capacity.ts` 的 `queueSnapshot`）：不再对 runs 表做 SQL 扫描，改为用事务里已缓存的 Run、Assignment、WorkItem、Card 列表在内存里筛选，条件与原 JOIN 一致（`queued` 且 `queue_reason=concurrency_limit`、Owner `active` 且不是 standing PM、触发事件存在；卡片取 Owner 工作项的卡，没有则取触发事件的卡，优先级取该卡）。排好序的候选按“所有项目的这四个列表是否仍是同一批数组”复用，每个 Store 只留一份。未结束的 BellAttempt 不在快照里，**每次调用都重新读并过滤**；对稳定排序的结果做过滤，顺序与对过滤后的行重新排序相同，最后仍交给 `runQueuePositions` 算 `ahead`。触发事件按 Run 对象缓存（事件只追加，只缓存查到的）。
+3. **待执行主机操作按快照复用**（同文件 `runCapacitySnapshot`）：有按流事件缓存时，按“事件流 Map + 卡片列表”两者的身份复用 `pendingHostOpsActions` 的结果；没有该端口的后端走原路径。
+
+**为什么不会读到旧值**（与 §6.3 同一约定，本卡新增的三处缓存都依赖它）：命令状态和 Store 快照里的数组都不原地修改。Store 的快照缓存（`command-snapshots.ts`）按 `command_versions` 版本号复用，写入（包括同一事务里更早的写入，触发器会更新版本号）会生成新数组；事务回滚丢弃事务内的新数组，之后读到的又是已提交的旧数组，而缓存键里存的是事务内的数组，对不上就重建。事件流缓存（`command-events.ts`）在有新事件时生成新的 Map 和新数组。`CommandDraft` 的写入只记在 `changes`，查找时先查 `changes`，所以命令内先写后读拿到的是新值；另一个草稿或回滚后的新草稿看不到这些写入。返回新数组的后端（没有快照缓存，或测试桩）只是缓存不命中，结果仍正确。非测试代码里没有对这些数组原地 `push`/`splice` 的地方（已检索），类型上的收紧由 C-231 做。
+
+**测试**：`packages/domain/src/commands/command-draft-get.contract.test.ts` 用 300 组随机状态（重复键、复合键、带版本键、缺省集合）把新 `get` 与原 `list().find` 逐键对照，覆盖草稿内写后读、同键再次写入、事件追加、提交后换新快照、回滚后在旧快照上新建草稿；`apps/server/src/run-queue-cache.test.ts` 把原 SQL 原样留作对照，覆盖优先级变化、BellAttempt 占用与释放、Owner 释放、清除 `queue_reason`、standing PM、多项目排序，以及写事务内写后读（新 Run 带新追加的触发事件、改优先级）和回滚后恢复。去掉缓存键里的卡片列表时该测试会失败（已验证）。
+
+### 7.3 修前修后（本机合成数据，`REPLAY_TICKS=4`）
+
+| 卡数 | 稳态 tick 修前 → 修后 | 首次 tick 修前 → 修后 | `deliver` 稳态 修前 → 修后 | `route` 稳态 修前 → 修后 | 事件循环延迟 max 修前 → 修后 |
+|---:|---:|---:|---:|---:|---:|
+| 40 | 0.11～0.15 → 0.07 s | 0.39 → 0.32 s | 0.07～0.08 → 0.02～0.03 s | 0.04～0.07 → 0.04～0.05 s | 0.40 → 0.34 s |
+| 120 | 1.16～1.48 → 0.33～0.38 s | 3.80 → 1.83 s | 0.97～1.21 → 0.16 s | 0.19～0.26 → 0.17～0.22 s | 3.85 → 1.87 s |
+| 240 | 5.54～5.83 → 1.49～1.62 s | 20.1 → 7.2 s | 4.58～4.83 → 0.68～0.76 s | 0.93～1.11 → 0.81～0.93 s | 20.3 → 7.3 s |
+
+| 卡数 | Web tick 期间 p50 / max 修前 → 修后 | MCP tick 期间 p50 / max 修前 → 修后 | Web / MCP 空闲 p50 修后 |
+|---:|---:|---:|---:|
+| 40 | 0.15 / 0.40 → 0.06 / 0.34 s | 0.15 / 0.40 → 0.07 / 0.35 s | 6 / 8 ms |
+| 120 | 1.5 / 3.8 → 0.42 / 1.9 s | 1.5 / 3.9 → 0.42 / 1.9 s | 38 / 41 ms |
+| 240 | 6.0 / 20.4 → 1.8 / 7.5 s | 6.0 / 20.4 → 1.8 / 7.5 s | 164 / 168 ms |
+
+修后 240 卡 profile（4 次 tick 共 16.1 s 采样）：`claim` 29.5 → 5.4 s，`queueSnapshot` 11.9 → 0.7 s，`exclusive` 9.9 → 0.3 s，`CommandDraft.get` 8.8 → 0.2 s 以下。
+
+结论：240 卡稳态 tick 再降约 72%，`deliver` 段降约 85%，两处热点已不在 profile 前列。tick 仍整段阻塞事件循环（ELU 1.0）。剩下的大头是首次 tick（对全部积压候选的认领和首次路由，约 7 s）和 `route` 段（稳态约 0.9 s，其中 `cardView` 里的 `list()` 重建较多）；分片或让出事件循环仍按 §6.7 交人另行决定，本卡不做。

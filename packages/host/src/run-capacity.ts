@@ -1,13 +1,13 @@
 import {
-  type Assignment,
+  compareDispatchOrder,
   DEFAULT_MAX_RUN_LIMIT,
   DEFAULT_RUN_LIMIT,
   type Event,
+  type HostOpsExecution,
   isStandingPm,
   occupiedRunSlots,
   pendingHostOpsActions,
   type QueuedRun,
-  type Run,
   runQueuePositions,
 } from "@cardigan/domain";
 import {
@@ -45,62 +45,170 @@ export function runCapacityMachines(
   return [...machines.values()].sort((a, b) => a.id.localeCompare(b.id));
 }
 
-function queueSnapshot(store: Store) {
-  // Read only waiting rows, including their original trigger time. The stream
-  // polls this projection, so do not load historical Runs/events on every poll.
-  const rows = store.database
-    .prepare(`SELECT r.project_id, r.doc AS run, a.doc AS owner,
-      e.doc AS cause, w.card_id, json_extract(c.doc, '$.priority') AS priority FROM runs r
-    JOIN assignments a ON a.project_id = r.project_id AND a.id = r.assignment_id
-    JOIN events e ON e.project_id = r.project_id AND e.id = r.trigger_event_id
-    LEFT JOIN work_items w ON w.project_id = a.project_id AND w.id = json_extract(a.doc, '$.work_item_id')
-    LEFT JOIN cards c ON c.project_id = w.project_id AND c.id = w.card_id
-    WHERE json_extract(r.doc, '$.status') = 'queued' AND json_extract(r.doc, '$.queue_reason') = 'concurrency_limit'
-      AND json_extract(a.doc, '$.status') = 'active' AND NOT EXISTS (
-        SELECT 1 FROM bell_attempts b WHERE b.project_id = r.project_id AND b.run_id = r.id AND b.finished_at IS NULL
-      )`)
-    .all();
+/**
+ * C-230: the capacity queue used to be a json_extract scan over every Run row,
+ * re-run on every claim. It is now built from the transaction's Run,
+ * Assignment, WorkItem and Card lists and reused while those lists are the very
+ * same arrays. Store snapshot lists are immutable: a write (including one made
+ * earlier in the same transaction) yields a new array, a rollback returns the
+ * committed array again, and nothing mutates one in place (the same convention
+ * C-221's `eventById`/`hasRunTarget` indexes rely on). A backend that returns a
+ * fresh array per call only misses the cache. Unfinished BellAttempts are not
+ * snapshotted, so they are re-read and filtered on every call.
+ *
+ * Rows match the former JOIN: queued for `concurrency_limit`, owner active and
+ * not a standing PM, trigger event present; the card is the owner's work item
+ * card, else the trigger event's card, and priority comes from that card.
+ */
+type QueueKey = readonly unknown[];
+const queueCache = new WeakMap<
+  Store,
+  { key: QueueKey; sorted: readonly QueuedRun[] }
+>();
+// Event rows are append-only, so a Run object's trigger event never changes.
+// Only hits are cached; a rolled-back Run object is never listed again.
+const triggerEvents = new WeakMap<object, Event>();
+
+function waitingRuns(store: Store, tx: ReadRepositories) {
+  const key: unknown[] = [];
+  const projects = store.listProjects().map((project) => {
+    const lists = {
+      id: project.id,
+      runs: tx.runs.list(project.id),
+      assignments: tx.assignments.list(project.id),
+      work_items: tx.work_items.list(project.id),
+      cards: tx.cards.list(project.id),
+    };
+    key.push(
+      lists.id,
+      lists.runs,
+      lists.assignments,
+      lists.work_items,
+      lists.cards,
+    );
+    return lists;
+  });
+  const cached = queueCache.get(store);
+  if (
+    cached?.key.length === key.length &&
+    cached.key.every((value, i) => value === key[i])
+  )
+    return cached.sorted;
   const queue: QueuedRun[] = [];
-  for (const row of rows) {
-    const owner = JSON.parse(String(row.owner)) as Assignment;
-    if (isStandingPm(owner)) continue;
-    const run = JSON.parse(String(row.run)) as Run;
-    const cause = JSON.parse(String(row.cause)) as Event;
-    const card = row.card_id ?? cause.card_id;
-    queue.push({
-      priority: Number(row.priority ?? 0),
-      project_id: String(row.project_id),
-      assignment_id: owner.id,
-      machine_id: owner.machine_id,
-      run_id: run.id,
-      trigger_event_id: cause.id,
-      created_at: cause.created_at,
-      ...(card ? { card_id: String(card) } : {}),
-    });
+  let triggerEvent: ReturnType<Store["database"]["prepare"]> | undefined;
+  for (const project of projects) {
+    const waiting = project.runs.filter(
+      (r) => r.status === "queued" && r.queue_reason === "concurrency_limit",
+    );
+    if (waiting.length === 0) continue;
+    const assignments = new Map(
+      project.assignments.map((a) => [a.id, a] as const),
+    );
+    const items = new Map(project.work_items.map((w) => [w.id, w] as const));
+    const cards = new Map(project.cards.map((c) => [c.id, c] as const));
+    for (const run of waiting) {
+      const owner = assignments.get(run.assignment_id);
+      if (owner?.status !== "active" || isStandingPm(owner)) continue;
+      let cause = triggerEvents.get(run);
+      if (!cause) {
+        triggerEvent ??= store.database.prepare(
+          "SELECT doc FROM events WHERE project_id = ? AND id = ?",
+        );
+        const row = triggerEvent.get(project.id, run.trigger_event_id);
+        if (!row) continue;
+        cause = JSON.parse(String(row.doc)) as Event;
+        triggerEvents.set(run, cause);
+      }
+      const workItem =
+        "work_item_id" in owner && owner.work_item_id !== undefined
+          ? items.get(owner.work_item_id)
+          : undefined;
+      const priority = workItem
+        ? cards.get(workItem.card_id)?.priority
+        : undefined;
+      const card = workItem?.card_id ?? cause.card_id;
+      queue.push({
+        priority: Number(priority ?? 0),
+        project_id: project.id,
+        assignment_id: owner.id,
+        machine_id: owner.machine_id,
+        run_id: run.id,
+        trigger_event_id: cause.id,
+        created_at: cause.created_at,
+        ...(card ? { card_id: String(card) } : {}),
+      });
+    }
   }
-  return runQueuePositions(queue);
+  const sorted = [...queue].sort(compareDispatchOrder);
+  queueCache.set(store, { key, sorted });
+  return sorted;
 }
+
+function queueSnapshot(
+  store: Store,
+  tx: ReadRepositories,
+  reservedRuns?: ReadonlyMap<string, ReadonlySet<string>>,
+) {
+  const sorted = waitingRuns(store, tx);
+  const reserved = new Map(reservedRuns);
+  // Filtering a stably sorted list keeps the order `runQueuePositions` would
+  // give the filtered rows, so its re-sort only confirms the order.
+  return runQueuePositions(
+    sorted.filter((entry) => {
+      let runs = reserved.get(entry.project_id);
+      if (!runs) {
+        runs = new Set(
+          unfinishedBellAttempts(store.database, entry.project_id).map(
+            (a) => a.run_id,
+          ),
+        );
+        reserved.set(entry.project_id, runs);
+      }
+      return !runs.has(entry.run_id);
+    }),
+  );
+}
+
+const pendingActions = new WeakMap<
+  ReadonlyMap<string, readonly Event[]>,
+  WeakMap<readonly object[], readonly HostOpsExecution[]>
+>();
 
 /** Read under the caller's transaction so counting and claiming share a snapshot. */
 export function runCapacitySnapshot(store: Store, tx: ReadRepositories) {
   const occupied = new Map<string, number>();
+  const reservedRuns = new Map<string, ReadonlySet<string>>();
   for (const project of store.listProjects()) {
     const assignments = tx.assignments.list(project.id);
     const runs = tx.runs.list(project.id);
     // C-216: reuse the Store's cached per-stream history when the transaction
     // offers it; otherwise re-read each stream. Same streams, same order.
+    // C-230: with the cache, also reuse the result while the stream map and
+    // card list are the same immutable snapshots (see `queueCache`).
     const streams = tx.events.listStreams?.(project.id);
-    const actions = pendingHostOpsActions(
-      [undefined, ...tx.cards.list(project.id).map((card) => card.id)].flatMap(
-        (card) =>
+    const cards = tx.cards.list(project.id);
+    const collect = () =>
+      pendingHostOpsActions(
+        [undefined, ...cards.map((card) => card.id)].flatMap((card) =>
           streams
             ? (streams.get(card ?? "") ?? [])
             : tx.events.listAfter(project.id, card, 0),
-      ),
-    );
+        ),
+      );
+    let actions: readonly HostOpsExecution[];
+    if (streams) {
+      let byCards = pendingActions.get(streams);
+      if (!byCards) {
+        byCards = new WeakMap();
+        pendingActions.set(streams, byCards);
+      }
+      actions = byCards.get(cards) ?? collect();
+      byCards.set(cards, actions);
+    } else actions = collect();
     const reserved = new Set(
       unfinishedBellAttempts(store.database, project.id).map((a) => a.run_id),
     );
+    reservedRuns.set(project.id, reserved);
     for (const machine of new Set(assignments.map((a) => a.machine_id))) {
       const owners = new Set(
         assignments.filter((a) => a.machine_id === machine).map((a) => a.id),
@@ -141,11 +249,18 @@ export function runCapacitySnapshot(store: Store, tx: ReadRepositories) {
     (occupied.get(LOCAL_EXECUTOR) ?? 0) +
       (mergeChecks.get(LOCAL_EXECUTOR) ?? 0) * MERGE_CHECK_RUN_SLOTS,
   );
-  return { occupied, agentOccupied, mergeChecks, queue: queueSnapshot(store) };
+  return {
+    occupied,
+    agentOccupied,
+    mergeChecks,
+    queue: queueSnapshot(store, tx, reservedRuns),
+  };
 }
 
 export function readRunQueue(store: Store, tx?: ReadRepositories) {
-  return tx ? queueSnapshot(store) : store.uow.read(() => queueSnapshot(store));
+  return tx
+    ? queueSnapshot(store, tx)
+    : store.uow.read((read) => queueSnapshot(store, read));
 }
 
 /** YAML is the default; invalid trusted config still fails closed, even with an override. */
