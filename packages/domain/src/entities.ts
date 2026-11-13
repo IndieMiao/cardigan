@@ -139,8 +139,9 @@ export interface Card {
   readonly sensitive?: boolean;
   /**
    * C-160: checks a human wants done before confirming the merge (e.g. an
-   * independent security review). Advisory only: they never change who may
-   * confirm the merge or the auto-merge timeout rules.
+   * independent security review). Labels other than the reserved independent
+   * review are advisory and do not affect merge authority. The independent
+   * review is a submit_review projection used by ADR 0006's delegation rules.
    */
   readonly pre_merge_checks?: readonly PreMergeCheck[];
   readonly created_by: Author;

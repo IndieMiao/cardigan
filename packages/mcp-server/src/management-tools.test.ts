@@ -1282,6 +1282,25 @@ test("C-160 update_card.pre_merge_check: Ops adds pending, only Office passes", 
     updated_by: `assignment:${officeA?.id}`,
     checked_versions: [{ delivery_id: "D-1", subject: "a".repeat(40) }],
   });
+  const reservedBefore = rows();
+  for (const client of [officeClient, opsClient])
+    for (const status of ["passed", "failed"])
+      expect(
+        (
+          await raw(client, "update_card", {
+            card_id: card.id,
+            pre_merge_check: { label: " 独立复核 ", status },
+          })
+        ).isError,
+      ).toBe(true);
+  expect(rows()).toEqual(reservedBefore);
+  const reserved = await ok<Card>(officeClient, "update_card", {
+    card_id: card.id,
+    pre_merge_check: { label: "独立复核", status: "pending" },
+  });
+  expect(reserved.pre_merge_checks).toContainEqual(
+    expect.objectContaining({ label: "独立复核", status: "pending" }),
+  );
 });
 
 /** Drive the fixture card to awaiting_merge through the real MCP tools. */

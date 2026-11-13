@@ -2,10 +2,13 @@ import { describe, expect, it } from "vitest";
 import type { Actor, Assignment, Card, Delivery } from "../entities.js";
 import type { CardId } from "../ids.js";
 import { recordDecision } from "./coordination.js";
+import { attempt, CommandDraft } from "./core.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
 import { updateCard } from "./pm.js";
 import {
+  applyPreMergeCheck,
   effectivePreMergeChecks,
+  INDEPENDENT_REVIEW_CHECK_LABEL,
   openPreMergeChecks,
 } from "./pre-merge-checks.js";
 import {
@@ -69,6 +72,49 @@ const open = (state: ReturnType<typeof fixture>) =>
   openPreMergeChecks(cardOf(state), state.work_items, state.deliveries);
 
 describe("C-160 pre-merge checks via update_card", () => {
+  it("reserved independent conclusions reject all manual writers, including direct domain calls", () => {
+    const { state, io, ops, office } = setup();
+    for (const who of [human, office, ops, actor(3, "pm"), actor(1, "coder")])
+      for (const status of ["passed", "failed"] as const) {
+        const input = { label: ` ${INDEPENDENT_REVIEW_CHECK_LABEL} `, status };
+        expect(
+          updateCard(state, who, { card_id, pre_merge_check: input }, io),
+        ).toMatchObject({
+          ok: false,
+          error: { code: "forbidden_tool" },
+        });
+        expect(
+          attempt(() =>
+            applyPreMergeCheck(
+              new CommandDraft(state, who, "update_card", io),
+              cardOf(state),
+              input,
+            ),
+          ),
+        ).toMatchObject({
+          ok: false,
+          error: { code: "forbidden_tool" },
+        });
+      }
+    for (const who of [human, office, ops])
+      expect(
+        updateCard(
+          state,
+          who,
+          {
+            card_id,
+            pre_merge_check: {
+              label: INDEPENDENT_REVIEW_CHECK_LABEL,
+              status: "pending",
+            },
+          },
+          io,
+        ).ok,
+      ).toBe(true);
+    expect(state.events).toEqual([]);
+    expect(cardOf(state).pre_merge_checks).toBeUndefined();
+  });
+
   it("PM Ops adds a pending check; PM Office passes it; each change is on the timeline", () => {
     let { state, io, ops, office } = setup();
     const added = updateCard(

@@ -27,6 +27,7 @@ import { supersedeDelivery } from "./delivery-invalidation.js";
 import { checkEmployeeSeparation } from "./employee-assignment.js";
 import { requestHumanCompletionReview } from "./human-completion.js";
 import { completionPassed } from "./merge.js";
+import { projectIndependentReviewCheck } from "./pre-merge-checks.js";
 import { pendingReviewLimit, requestReviewLimit } from "./review-limit.js";
 import { conflictRepairEvent } from "./review-round.js";
 import { resolveCardTemplate } from "./templates.js";
@@ -676,8 +677,10 @@ export function submitReview(
         run_id: run.id,
       },
     );
+    if (d.assignment.role_id === "independent_reviewer")
+      projectIndependentReviewCheck(d, value);
     if (target.kind === "card_completion" && allPassed && !value.blocking)
-      completionPassed(d, card, target);
+      completionPassed(d, d.card(card.id), target);
     if (limitReached) requestReviewLimit(d, item);
     return value;
   });
