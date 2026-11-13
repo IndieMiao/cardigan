@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import {
   executorExecution,
   HostOpsService,
@@ -198,7 +199,19 @@ export async function startCardiganServer(
         store,
         runtime: options.dispatcher.runtime,
         snapshot: options.dispatcher.snapshot,
-        contextThresholdPct: config.hostOpsContextThresholdPct ?? 80,
+        contextUsage: {
+          execution,
+          cacheDir:
+            config.contextUsageCacheDir ??
+            join(
+              execution.mode === "local"
+                ? execution.dataDir
+                : execution.agentRoot,
+              "shared",
+              "context-usage",
+            ),
+          staleAfterMs: config.contextUsageStaleAfterMs ?? 600_000,
+        },
         scrubCredentials: async (project, assignment, ref) => {
           await scrubRunCredentials(execution, project, assignment);
           // C-152: a terminal started in local mode left its credentials

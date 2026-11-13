@@ -161,6 +161,19 @@ test.each(
         );
         expect(script).toContain(`exec nice -n ${named ? 17 : 10} `);
         expect(script).toContain("export NODE_OPTIONS=");
+        if (harness === "pi") {
+          expect(
+            await readFile(
+              join(
+                launched.run_dir,
+                "pi",
+                "extensions",
+                "cardigan-context-usage.js",
+              ),
+              "utf8",
+            ),
+          ).toContain('pi.on("turn_end"');
+        }
         const guarded = await promisify(execFile)(
           process.execPath,
           [
@@ -172,9 +185,18 @@ test.each(
           ],
           { env: { ...process.env, NODE_OPTIONS: "" } },
         );
+        // The enclosing employee Run may impose a lower limit than this
+        // fixture's launch policy; the child must preserve that lower limit.
+        const inheritedWorkers = Number(process.env.VITEST_MAX_WORKERS);
+        const expectedWorkers =
+          Number.isSafeInteger(inheritedWorkers) && inheritedWorkers > 0
+            ? Math.min(named ? 1 : 2, inheritedWorkers)
+            : named
+              ? 1
+              : 2;
         expect(JSON.parse(guarded.stdout)).toEqual([
           "run",
-          `--maxWorkers=${named ? 1 : 2}`,
+          `--maxWorkers=${expectedWorkers}`,
         ]);
         const first = await readFile(
           join(launched.run_dir, "first.md"),

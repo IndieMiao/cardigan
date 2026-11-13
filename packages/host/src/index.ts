@@ -27,6 +27,7 @@ export {
   launchEntities,
   wallClock,
 } from "./commands.js";
+export * from "./context-usage.js";
 export { DeploymentController } from "./deployment.js";
 export {
   acquireDeploymentCapacity,
