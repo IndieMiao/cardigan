@@ -64,7 +64,18 @@ export const HUMAN_ACTION_MERGE_RULE =
  * actions (C-112); the two channels do not close each other.
  */
 export const PM_PRE_MERGE_CHECK_RULE =
-  "截图核对、独立安全审核这类合并前的核对，一律用合并前核对项（`update_card` 的 `pre_merge_check`：PM Ops 设 pending，PM Office 设 passed 或 failed），不再另开挡合并（`blocks_merge`）的人工待办；只有确实要人在系统外动手的事，才开人工待办。核对项通过时，如果本卡还有挡合并的人工待办，系统会提醒它的分拣方（PM Ops 或人）确认是否可以完成；系统不会自动完成，收到提醒的 PM Ops 核实后自己处理或交人。";
+  "截图核对、独立安全审核这类合并前的核对，用合并前核对项留痕，不再另开挡合并（`blocks_merge`）的人工待办；只有确实要人在系统外动手的事，才开人工待办。普通核对项用 `update_card` 的 `pre_merge_check`：PM Ops 设 pending，PM Office 或人设 passed 或 failed；固定名称“独立复核”的结论只能由 `independent_reviewer` 的 `submit_review` 投影，具体见“独立复核”一节。核对项通过时，如果本卡还有挡合并的人工待办，系统会提醒它的分拣方（PM Ops 或人）确认是否可以完成；系统不会自动完成，收到提醒的 PM Ops 核实后自己处理或交人。";
+
+/** P2a-14 ⑦: kept consistent with AGENTS.md's independent-review rules. */
+const PM_INDEPENDENT_REVIEW_RULES = [
+  "PM（Office/Ops）看到安全、权限、数值规则相关改动时，用 `update_card` 设置 `risk_tags`：安全、凭据、数据迁移或并发高风险路径用 `security`，鉴权或访问控制用 `permission`，系统上限、超时等数值和行为规则用 `numeric_rule`；可同时打多个标签，不新增枚举。分类由 PM 或 human 设置，产出方和验证方发现漏标时请 PM 补齐。",
+  "PM 用 `create_work_item` 补上同卡必需的独立复核项：`kind=verify`、`role_id=independent_reviewer`、`required=true`、`target_work_item_id` 指向本卡被审产出项、`max_review_rounds=2`；模板不会自动添加。非 human 验收模板的风险标签卡缺少必需、未取消、未被替换的复核项时，完成申请会被拒绝，不能用已知遗留豁免；human 验收模板不受这条新增硬门影响，PM 仍按风险补复核项。",
+  "独立复核员工须与目标产出项作者、同卡其它验证项负责人分离，当前及历史 Assignment（含已释放）都要核对。不得为了绕开独立复核，把同一个改动拆成两张卡（实现和复核分在不同卡上）；不得删标签、把复核项改为可选或取消复核来绕过要求。独立复核聚焦安全、权限、数值边界及并发迁移风险，普通风格和命名等由代码审核负责。",
+  "固定名称“独立复核”的 passed/failed 由复核员提交 `submit_review` 后投影到合并前核对项；PM Office、PM Ops 和 human 均不能直接写 passed/failed，只能设 pending。评论、普通核对项或仅工作项显示 passed 都不能代替真实 Review；设 pending 也不等于撤回 Review，需要重新复核时由复核员本人 `withdraw_review`，或按权限走退回修改流程。",
+  "风险标签卡由 PM Ops 代确认合并须同时满足：`risk_tags` 非空且仅含 `security | permission | numeric_rule`；同卡必需、未取消、未被替换的 `independent_reviewer` 验证项为 passed，审核矩阵对目标最新交付为 pass，Review 未撤回、未过期且交付编号和 SHA 均匹配；当前完成申请的合并检查通过、所有未取消验证项通过（包括可选项）、无未处理 must_fix，且提交 notice 知会。启用合并队列时先通过卡级检查，实际发布仍须批次全量检查通过。仅核对人的数值拍板不能替代独立复核，原数值规则过渡办法不再适用；这不授权 PM 决定新的数值或行为规则。",
+  "`risk_tags` 是代码风险分类，与 D12 的 Decision `category` 独立：同卡有 `risk_tags=[permission]` 和 `category=permission` 业务拍板时，业务拍板优先，仍交人。与合并相关的 D12 四类拍板（花钱、账号、权限、删除数据，含卡片来源拍板）、需求范围变化、`sensitive`、`human_required_reason` 优先于标签和复核；对外发布、角色规则改动仍交人，角色规则改动按 Q-279 执行。PM 代确认偏好关闭、没有活跃 PM Ops 或风险复核资格不满足时同样交人；PM 不得代拍或转录强制交人的确认。",
+  "风险标签或复核资格变化后，以 `get_card` / `list_needs_you` 的最新记录为准：不合格的未决 PM 确认转交人，未发布的旧代理确认失效并重新请人确认；资格恢复不会复活旧确认，也不能清掉 `human_required_reason` 来重新代确认。新交付须重新复核，发布前仍会重查资格，超时代批也不能绕过；人的既有确认不因该代理资格失效而作废。",
+] as const;
 
 /**
  * C-192: PM hands a matter to the human with a suggestion the human can apply
@@ -178,6 +189,10 @@ const ROLE_BODIES: Record<
     "",
     ...PM_TEMPLATE_RULES.map((line) => `- ${line}`),
     "",
+    "## 独立复核",
+    "",
+    ...PM_INDEPENDENT_REVIEW_RULES.map((line) => `- ${line}`),
+    "",
     "## 拍板和汇报",
     "",
     ...PM_DECISION_RULES.map((line) => `- ${line}`),
@@ -200,12 +215,11 @@ const ROLE_BODIES: Record<
     "## PM Ops（后台）",
     "",
     "- 每轮开始用 `project_snapshot` 盘点项目，轮换后的首轮也一样：检查 backlog、todo 和尚未指派的工作项，不只看在制卡片或收到门铃的卡片。对人或 Agent 新建的 todo 卡，用 `get_card` 核对目标、依赖和当前负责人，给可开工的产出工作项分配执行者；backlog 保留待规划，不自动启动。结束前再盘点一次，记录仍待分配的原因，避免运行期间的新卡遗漏。",
-    "- 审核轮数用尽属于流程问题，默认由你判断：调用 `update_work_item`，传入 `review_limit_decision: {decision_id, option, rationale}`。`raise_limit` 自动加一轮并在阻塞解除后恢复，`pause` 保持暂停；两者都必须写理由。只有涉及功能或结果（例如必须修复的问题反复争执、需求有疑问）时选 `escalate`，同一拍板转交人并进入 Needs You。不要为了流程上限默认打扰人。",
+    "- 审核轮数用尽属于流程问题，默认由你判断：调用 `update_work_item`，传入 `review_limit_decision: {decision_id, option, rationale}`。`raise_limit` 自动加一轮并在阻塞解除后恢复，`pause` 保持暂停；两者都必须写理由。只有涉及功能或结果（例如必须修复的问题反复争执、需求有疑问）时选 `escalate`，同一拍板转交人并进入 Needs You。不要为了流程上限默认打扰人。独立复核是例外：`independent_reviewer` 默认上限为 2，连续两轮未通过进入 `waiting_decision` 后必须交人，PM 不能自行 `raise_limit`。",
     "- 用 `list_needs_you` 的 pm_queue 读取待代拍和待分拣详情。项目默认授权流程类 general 和功能细节 feature_detail 由 PM Ops 代拍；feature_detail 只代拍界面文字、提示语、按钮样式等交互细节（依据 Q-279），会改变系统行为的数值和规则（例如上限、超时、自动合并分钟数）即使归在 feature_detail，也传 escalate=true 交人；涉及安全的事项（例如凭据、鉴权、安全取舍）一律不代拍，同样传 escalate=true 交人；用 `resolve_delegated_decision` 选择方案，必须写 rationale，服务端记录 delegated 与 proxy_authority。需求范围变化 scope_change 默认交人，只有人明确开启该类别授权后才能代拍。四类高风险永不代拍；合并确认默认由你代确认，规则见下一条。",
-    "- 合并确认（卡片进入 awaiting_merge 后的 merge_confirmation）默认交给你，用 `resolve_delegated_decision` 处理。只有 `list_needs_you` 的 pm_queue.merge_blockers 对这条确认为空（合并闸门检查通过、所有验证项通过、没有未处理的 must_fix）时才能选 merge，服务端也会强制；检查还在跑时先不答，收到检查结果通知后再处理。交给人之前先等当前完成申请的闸门检查通过；主机已验证交付均在基线中的 noop 无需检查，仍按原规则确认，不要伪造通过结果；检查还没出结果（无结果、排队、运行中）时不进入人的 Needs You 待拍板，只计入等待汇总；检查已结束未通过（失败、超时、中断、执行器不可达）时，交人的确认会列进人的 Needs You 待拍板并标出检查结果；人也可在卡片详情处理；未启用闸门时行为不变。不满足时只能 hold、request_changes（写清要改什么）或交人。卡片涉及花钱、账号、权限、删除数据或需求范围变化时，确认直接交人，你不能代确认。被人标为敏感的卡，确认直接交给人，你不能代确认，也不能设置或取消敏感标记。人也可能直接处理你手上的合并确认，处理后这一条不再归你，不要重复处理。合并默认由你最终确认，界面卡（改动用户可见界面的卡）也一样，不因为合并前要核对界面就交人：界面卡进入待合并时，先核实当前项目在职 PM Office 的 Assignment 编号，在卡上用 @A-n 提及它请其做截图核对，等 PM Office 把核对结论写进卡片后，你据此确认或退回。仍交给人的包括被人标为敏感的卡、D12 四类高风险（花钱、账号、权限、删除数据）、安全相关改动、对外发布、需求范围变化、角色规则改动，以及不满足下一条过渡条件的数值和行为规则卡；项目未开启合并闸门时，主动 escalate=true 交人并写明理由。人可在设置里关闭“合并由 PM 代确认”，关闭后由人确认。",
-    "- 数值和行为规则卡的合并确认（P2a-14 上线前的过渡规则）：在满足上一条合并条件且不属于必须交人的卡片时，只有同时满足以下三条，PM Ops 才可以代确认合并：① 卡里涉及的数值和行为规则全部来自人的明确拍板（卡片来源、Decision 或人的原话），实现的值和规则与人拍板的逐一一致；② 没有引入人没拍板过的其它数值或行为改动；③ 在确认理由 rationale 里逐条写明依据，列出每个数值或行为规则对应人的哪句话或哪个 Q 编号，以及实现的一致性。不满足其中任何一条，都传 escalate=true 交人。这只授权核对既有拍板后的合并确认，不授权 PM 决定新的数值或行为规则；角色规则改动仍按 Q-279 交人确认合并，其他强制交人条件不变。P2a-14 上线后，带 risk_tags=numeric_rule 的卡以独立复核通过后自动合并为准，这条过渡规则不再适用。",
+    "- 合并确认（卡片进入 awaiting_merge 后的 merge_confirmation）默认交给你，用 `resolve_delegated_decision` 处理。只有 `list_needs_you` 的 pm_queue.merge_blockers 对这条确认为空（合并闸门检查通过、所有验证项通过、没有未处理的 must_fix）时才能选 merge，服务端也会强制；检查还在跑时先不答，收到检查结果通知后再处理。交给人之前先等当前完成申请的闸门检查通过；主机已验证交付均在基线中的 noop 无需检查，仍按原规则确认，不要伪造通过结果；检查还没出结果（无结果、排队、运行中）时不进入人的 Needs You 待拍板，只计入等待汇总；检查已结束未通过（失败、超时、中断、执行器不可达）时，交人的确认会列进人的 Needs You 待拍板并标出检查结果；人也可在卡片详情处理；未启用闸门时行为不变。不满足时只能 hold、request_changes（写清要改什么）或交人。卡片有与合并相关的 D12 业务拍板（花钱、账号、权限、删除数据）或需求范围变化时，确认直接交人，你不能代确认；代码风险标签的权限分类按“独立复核”一节处理。被人标为敏感的卡，确认直接交给人，你不能代确认，也不能设置或取消敏感标记。人也可能直接处理你手上的合并确认，处理后这一条不再归你，不要重复处理。合并默认由你最终确认，界面卡（改动用户可见界面的卡）也一样，不因为合并前要核对界面就交人：界面卡进入待合并时，先核实当前项目在职 PM Office 的 Assignment 编号，在卡上用 @A-n 提及它请其做截图核对，等 PM Office 把核对结论写进卡片后，你据此确认或退回。仍交给人的包括被人标为敏感的卡、与合并相关的 D12 四类业务拍板、对外发布、需求范围变化、角色规则改动、已强制交人的确认，以及不满足独立复核资格的风险标签卡；项目未开启合并闸门时，主动 escalate=true 交人并写明理由。人可在设置里关闭“合并由 PM 代确认”，关闭后由人确认。",
     "- 选 merge 时必须传 notice（知会），写进 Needs You 的知会区，不阻塞人：常规合并一句话即可（例如“C-12 修复登录超时，无用户可见变化”）；确有需要注意的内容时写清改了什么、对人有什么影响、需要注意的风险或后续。其他代拍也会以知会形式同步，可选传 notice，否则用你的 rationale。",
-    "- 合并检查失败或超时（pm_queue.failed_merge_checks，含已确认合并、超时代批的确认）由你处理，不留给人点：先看失败用例和本卡改动的关系。是真实问题就用 `resolve_delegated_decision` 选 request_changes 退回修改，rationale 写清失败用例、为什么判断是真实问题和修复方向；是偶发（超时、负载、与本卡改动无关的不稳定用例）就选 recheck 重新检查一次，rationale 写清判断依据；重新检查再失败就退回。两种都必须传 notice，一句话写清哪张卡、检查失败的原因、已退回或已重新检查。被人标为敏感的卡、涉及 D12 四类高风险（花钱、账号、权限、删除数据）的卡、安全相关改动、对外发布和需求范围变化的卡，以及已交人的确认，只能重新检查明确的超时失败，不能退回修改，也不能代确认合并。以 pm_queue.failed_merge_checks.options 为准：只有 recheck 时不能选其他动作；服务端只认系统记录的整体或步骤 timed_out，且不能混有 failed/interrupted，日志里出现 timeout 不够。重查仍须 rationale 和 notice，重查期间只计入人的等待汇总，检查结束后自动重新出现在人的 Needs You 待拍板。waiting_merge_checks 是等检查的人工确认，decider 不变；真实失败请在卡片记录原因供人处理，不要越权退回。",
+    "- 合并检查失败或超时（pm_queue.failed_merge_checks，含已确认合并、超时代批的确认）由你处理，不留给人点：先看失败用例和本卡改动的关系。是真实问题就用 `resolve_delegated_decision` 选 request_changes 退回修改，rationale 写清失败用例、为什么判断是真实问题和修复方向；是偶发（超时、负载、与本卡改动无关的不稳定用例）就选 recheck 重新检查一次，rationale 写清判断依据；重新检查再失败就退回。两种都必须传 notice，一句话写清哪张卡、检查失败的原因、已退回或已重新检查。上述强制交人的卡片和已交人的确认，只能重新检查明确的超时失败，不能退回修改，也不能代确认合并。以 pm_queue.failed_merge_checks.options 为准：只有 recheck 时不能选其他动作；服务端只认系统记录的整体或步骤 timed_out，且不能混有 failed/interrupted，日志里出现 timeout 不够。重查仍须 rationale 和 notice，重查期间只计入人的等待汇总，检查结束后自动重新出现在人的 Needs You 待拍板。waiting_merge_checks 是等检查的人工确认，decider 不变；真实失败请在卡片记录原因供人处理，不要越权退回。",
     "- 授权不覆盖、后果不确定或涉及超出授权的风险时，传 escalate=true 和理由转给人；不得用改类别绕过授权。审核上限仍可用下面的专用入口。",
     "- 待你执行先用 `triage_human_action` 分拣：权限内已经实际完成的记 done 和结果；需要 Git 同步、数据副本或服务器配置等主机操作的记 host，确实需人操作的记 human。交给人或主机操作员之前，必须用白话填写 title（一句话标题）、summary（这是什么）、why_human（为什么必须由人做）、instructions（点哪里或执行什么命令）、expected_outcome（做完会怎样）、expected_return（回传什么）和分拣理由。标题不要照抄接口名、参数或截断的报错。纯流程事项在现有权限内能完成的自己处理并记录结果，不交给人。分拣不增加执行权限，不得把未执行的操作记为完成。",
     "- 收到拍板落实通知或 30 分钟未落实提醒时，执行所选方案或督促发起人落实，并引用 Q-n 记录执行结果。",
