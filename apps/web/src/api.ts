@@ -1778,6 +1778,17 @@ async function toApiError(
   return new ApiError(response.status, code, message);
 }
 
+/**
+ * Server messages written for CLI users may name preference keys
+ * (`cardigan preference set ...`); the Web points at the settings label instead.
+ */
+function webErrorMessage(message: string): string {
+  return message.replace(
+    /^(暂缓到期时间距现在不能超过 \d+ 分钟)（merge-confirm-snooze-max）/u,
+    "$1（可在项目设置的“合并确认最长暂缓时长”中调整）",
+  );
+}
+
 /** Human-readable Chinese explanation of a failed request. */
 export function describeError(error: unknown): string {
   if (error instanceof ApiError) {
@@ -1787,7 +1798,7 @@ export function describeError(error: unknown): string {
     if (error.status === 401) return "会话已失效，请重新登录。";
     if (error.status === 429) return "尝试次数太多，请稍后再试。";
     if (error.status === 403) return "请求被拒绝（来源校验未通过）。";
-    return `请求失败：${error.message}`;
+    return `请求失败：${webErrorMessage(error.message)}`;
   }
   if (error instanceof TypeError) {
     return "连不上 Workbench 服务，确认 cardigan server 还在运行。";
