@@ -1,5 +1,6 @@
 import { attempt, type CommandState } from "./commands/core.js";
 import { mergeContext } from "./commands/merge.js";
+import { mergeConfirmationSnoozed } from "./commands/merge-snooze.js";
 import { projectPreferences } from "./commands/preferences.js";
 import type { Decision, Event } from "./entities.js";
 import type { CardId, DecisionId, DeliveryId } from "./ids.js";
@@ -75,7 +76,7 @@ function decisionChangedAt(state: CommandState, q: Decision) {
 export interface PmMergeStallOptions {
   /**
    * Extension point for explicit holds (C-180): return true to suppress the
-   * alert for this confirmation at `now`. Defaults to never suppressing.
+   * alert for this confirmation at `now`. Explicit snoozes always suppress.
    */
   readonly suppressed?: (q: Decision, now: string) => boolean;
 }
@@ -111,12 +112,16 @@ export function pmMergeStallAttention(
     if (
       q.trigger !== "merge_confirmation" ||
       q.decider !== "role:pm" ||
-      q.status !== "open" ||
+      !["open", "snoozed"].includes(q.status) ||
       q.kind !== "approve" ||
       !("delivery_id" in q.target) ||
       !q.card_id
     )
       return [];
+    if (mergeConfirmationSnoozed(q, now) || options.suppressed?.(q, now))
+      return [];
+    // Expired snoozes wait for maintenance to persist their new clock first.
+    if (q.status !== "open") return [];
     const card_id = q.card_id;
     const completion_id = q.target.delivery_id;
     // Only cards still awaiting merge, and only the current completion.
@@ -129,7 +134,6 @@ export function pmMergeStallAttention(
       changed && Date.parse(changed) > Date.parse(ready) ? changed : ready;
     const waited = Date.parse(now) - Date.parse(since);
     if (!Number.isFinite(waited) || waited <= threshold * 60_000) return [];
-    if (options.suppressed?.(q, now)) return [];
     return [
       {
         kind: PM_MERGE_STALL_KIND,

@@ -33,6 +33,7 @@ import {
   pmMergeBlockers,
   pmMergeCheckFailureAuthority,
 } from "./merge-delegation.js";
+import { snoozeMergeConfirmation } from "./merge-snooze.js";
 import { resolveReviewLimit } from "./review-limit-resolution.js";
 
 export { extractReferences } from "../references.js";
@@ -439,7 +440,7 @@ export function requestDecision(
           q.trigger === "merge_confirmation" &&
           q.card_id &&
           cards.includes(q.card_id) &&
-          ["open", "provisional"].includes(q.status) &&
+          ["open", "provisional", "snoozed"].includes(q.status) &&
           !q.human_required_reason
         )
           handoffDecision(d, q, reason, undefined, true);
@@ -454,6 +455,7 @@ export function recordDecision(
     decision_id: DecisionId;
     option: string;
     rationale: string;
+    snooze_until?: string;
     raw_quote: string;
     via_chain?: readonly Author[];
     batch?: string;
@@ -469,7 +471,7 @@ export function recordDecision(
       actor.kind === "human" &&
       held.decider === "role:pm" &&
       held.trigger === "merge_confirmation" &&
-      ["open", "provisional"].includes(held.status);
+      ["open", "provisional", "snoozed"].includes(held.status);
     const decision: Decision = takenOver ? { ...held, decider: "human" } : held;
     // C-79: a confirmed merge handed back after failure may still retain
     // role:pm as its historical decider. Preserve that authorization record.
@@ -571,6 +573,7 @@ function resolveDecisionDraft(
   p: {
     option: string;
     rationale: string;
+    snooze_until?: string;
     raw_quote: string;
     via_chain?: readonly Author[];
     batch?: string;
@@ -579,6 +582,14 @@ function resolveDecisionDraft(
   },
   delegated: boolean,
 ) {
+  ensure(
+    p.snooze_until === undefined ||
+      (decision.trigger === "merge_confirmation" && p.option === "hold"),
+    "validation_failed",
+    "snooze_until 只能用于暂缓合并确认",
+  );
+  if (decision.trigger === "merge_confirmation" && p.option === "hold")
+    return snoozeMergeConfirmation(d, decision, p);
   const actor = d.actor;
   const result = recordDecisionResolution(d, decision, {
     option: p.option,
@@ -621,6 +632,7 @@ export function resolveDelegatedDecision(
     decision_id: DecisionId;
     option: string;
     rationale: string;
+    snooze_until?: string;
     escalate?: boolean;
     /** Needs You notice; required when PM Ops confirms a merge (§7.4). */
     notice?: string;
@@ -649,7 +661,7 @@ export function resolveDelegatedDecision(
       timeoutRecheck ||
         (confirmedFailed && !mergeRequiresHuman(state, q)) ||
         (q.decider === "role:pm" &&
-          ["open", "provisional"].includes(q.status) &&
+          ["open", "provisional", "snoozed"].includes(q.status) &&
           delegationAllowed(d, q)),
       "unauthorized",
       q.trigger === "merge_confirmation" && mergeRequiresHuman(state, q)

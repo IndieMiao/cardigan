@@ -57,7 +57,7 @@ function cardView(d: CommandDraft, id: CardId): CommandCardView {
     .list("decisions")
     .filter(
       (q) =>
-        (q.status === "open" || q.status === "provisional") &&
+        ["open", "provisional", "snoozed"].includes(q.status) &&
         affects(d, q, id),
     );
   const actions = d
@@ -444,14 +444,14 @@ export function needsYouView(d: CommandDraft, now?: string) {
       (q) =>
         q.trigger === "merge_confirmation" &&
         ((q.decider === "human" &&
-          ["open", "provisional"].includes(q.status)) ||
+          ["open", "provisional", "snoozed"].includes(q.status)) ||
           !!failedConfirmedMergeCheck(state, q)) &&
         mergeConfirmationWaitingForCheck(state, q),
     );
   // C-171: an ended, unpassed check will not pass by itself, so the human
   // sees that confirmation in the list; only queued/running ones stay summarized.
   const humanWaiting = waiting.filter(
-    (q) => !mergeCheckEndedWithoutPass(state, q),
+    (q) => q.status !== "snoozed" && !mergeCheckEndedWithoutPass(state, q),
   );
   const why = (text: string) => [...text].slice(0, 40).join("");
   const view = (q: Decision) => decisionActionView(state, q, now);
@@ -461,6 +461,40 @@ export function needsYouView(d: CommandDraft, now?: string) {
       ? {
           pm_queue: {
             waiting_merge_checks: waiting,
+            snoozed_merges: d
+              .list("decisions")
+              .filter((q) => q.decider === "role:pm" && q.status === "snoozed"),
+            expired_snoozes: d
+              .list("decisions")
+              .filter(
+                (q) =>
+                  q.trigger === "merge_confirmation" && q.status === "open",
+              )
+              .flatMap((q) => {
+                const event = state.events.findLast(
+                  (e) =>
+                    e.type === "decision_requested" &&
+                    e.payload !== null &&
+                    typeof e.payload === "object" &&
+                    "decision_id" in e.payload &&
+                    e.payload.decision_id === q.id,
+                );
+                const p = event?.payload;
+                return p &&
+                  typeof p === "object" &&
+                  "snooze_expired" in p &&
+                  p.snooze_expired === true
+                  ? [
+                      {
+                        decision_id: q.id,
+                        card_id: q.card_id,
+                        decider: q.decider,
+                        at: event.created_at,
+                        body: "reason" in p ? p.reason : "暂缓已到期",
+                      },
+                    ]
+                  : [];
+              }),
             decisions: d
               .list("decisions")
               .filter(
@@ -483,7 +517,10 @@ export function needsYouView(d: CommandDraft, now?: string) {
             // P2a-1 §2.6: failed or timed-out checks PM Ops may return
             // (request_changes) or recheck, including confirmed merges.
             failed_merge_checks: d.list("decisions").flatMap((q) => {
-              const check = pmFailedMergeCheck(state, q);
+              const check =
+                q.status === "snoozed"
+                  ? undefined
+                  : pmFailedMergeCheck(state, q);
               return check
                 ? [
                     {
@@ -542,7 +579,7 @@ export function needsYouView(d: CommandDraft, now?: string) {
       .filter(
         (q) =>
           (q.decider === "human" &&
-            ["open", "provisional"].includes(q.status)) ||
+            ["open", "provisional", "snoozed"].includes(q.status)) ||
           (failedConfirmedMergeCheck(state, q) &&
             // PM Ops handles it and syncs a notice (P2a-1 §2.6).
             !(
@@ -553,6 +590,7 @@ export function needsYouView(d: CommandDraft, now?: string) {
       )
       .filter(
         (q) =>
+          q.status === "snoozed" ||
           !mergeConfirmationWaitingForCheck(state, q) ||
           !!mergeCheckEndedWithoutPass(state, q),
       )
@@ -578,7 +616,7 @@ export function needsYouView(d: CommandDraft, now?: string) {
               (q) =>
                 q.decider === "role:pm" &&
                 q.trigger === "merge_confirmation" &&
-                ["open", "provisional"].includes(q.status),
+                ["open", "provisional", "snoozed"].includes(q.status),
             )
             .map(view)
         : [],

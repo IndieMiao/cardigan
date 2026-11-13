@@ -1150,6 +1150,15 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
             .join("、")}`,
         ]
       : [];
+    const snoozeLines = (q: {
+      status: string;
+      snooze?: { reason: string; until: string };
+    }) =>
+      q.status === "snoozed" && q.snooze
+        ? [
+            `    已暂缓：${q.snooze.reason}（到 ${new Date(q.snooze.until).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hourCycle: "h23" })}）`,
+          ]
+        : [];
     // §7.4 (C-65): not waiting on the human, but answerable directly.
     const heldLines = held.length
       ? [
@@ -1158,9 +1167,10 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
             [
               `  ${q.id}  ${q.card_id ?? "项目"}`,
               `    ${q.question}`,
+              ...snoozeLines(q),
               ...(q.card_id
                 ? [
-                    `    直接处理：cardigan merge confirm|hold ${q.card_id}，或 cardigan merge request-changes ${q.card_id} --reason <原因>`,
+                    `    直接处理：cardigan merge confirm|hold ${q.card_id}（hold 须加 --reason <原因>），或 cardigan merge request-changes ${q.card_id} --reason <原因>`,
                   ]
                 : []),
             ].join("\n"),
@@ -1203,6 +1213,7 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
           [
             `  ${decision.id}${decision.card_id === undefined ? "" : `  ${decision.card_id}`}`,
             `    ${decision.question}`,
+            ...snoozeLines(decision),
             ...(decision.trigger === "merge_confirmation" &&
             gate.status === "enabled"
               ? [

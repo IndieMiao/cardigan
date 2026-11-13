@@ -8,6 +8,7 @@ import {
   type CommandState,
   type Decision,
   type DecisionCategory,
+  expireMergeSnoozes,
   listNeedsYou,
   type MergeCheckView,
   markNoticesRead,
@@ -300,15 +301,18 @@ test("without merge preconditions PM Ops can still hold or request changes", asy
   const hold = setup();
   await hold.f.accept();
   hold.f.commit(hold.pmResolve("hold"));
-  expect(hold.confirmation().resolution?.option).toBe("hold");
-  expect(notices(hold.f.state)[0]).toMatchObject({
-    kind: "merge",
-    option: "hold",
-    resolved_by: "pm",
+  expect(hold.confirmation()).toMatchObject({
+    status: "snoozed",
+    decider: "role:pm",
   });
-  // Re-requesting after a hold goes back to PM Ops.
+  expect(notices(hold.f.state)).toEqual([]);
+  const until = hold.confirmation().snooze?.until;
+  if (!until) throw new Error("Missing expiry");
   hold.f.commit(
-    requestMerge(hold.f.state, human, { card_id: hold.f.card.id }, hold.f.io),
+    expireMergeSnoozes(hold.f.state, system, {
+      ...hold.f.io,
+      clock: { now: () => until },
+    }),
   );
   expect(hold.confirmation()).toMatchObject({
     decider: "role:pm",
@@ -946,7 +950,7 @@ test("a card created from a sensitive decision keeps its merge with the human", 
     events: [...derived.events, ...held.events],
   };
   const again = value(
-    requestMerge(afterHold, human, { card_id: f.card.id }, f.io),
+    requestMerge(legacyHolds(afterHold), human, { card_id: f.card.id }, f.io),
   ).data;
   expect(again.decider).toBe("human");
   expect(again.context).toContain("来源拍板");
@@ -1171,7 +1175,7 @@ test("marking a card sensitive hands its PM-held confirmation to the human at on
   ).toEqual([]);
 });
 
-test("after the flag is removed, a new confirmation goes back to PM Ops", async () => {
+test("after the flag is removed, a new confirmation after a legacy hold goes back to PM Ops", async () => {
   const { f, confirmation, pmResolve } = setup();
   f.commit(
     setCardSensitive(
@@ -1204,7 +1208,9 @@ test("after the flag is removed, a new confirmation goes back to PM Ops", async 
       f.io,
     ),
   );
-  f.commit(requestMerge(f.state, human, { card_id: f.card.id }, f.io));
+  f.commit(
+    requestMerge(legacyHolds(f.state), human, { card_id: f.card.id }, f.io),
+  );
   expect(confirmation()).toMatchObject({ decider: "role:pm", status: "open" });
   expect(pmResolve("hold").ok).toBe(true);
 });
@@ -1245,18 +1251,28 @@ test.each(["merge", "hold", "request_changes"] as const)(
     expect(confirmation()).toMatchObject({
       id: held.id,
       decider: "human",
-      status: "resolved",
-      resolution: {
-        option,
-        resolved_by: "human",
-        via: "needs_you",
-        taken_over_from: "role:pm",
-      },
+      ...(option === "hold"
+        ? { status: "snoozed", snooze: { reason: "我直接处理", by: "human" } }
+        : {
+            status: "resolved",
+            resolution: {
+              option,
+              resolved_by: "human",
+              via: "needs_you",
+              taken_over_from: "role:pm",
+            },
+          }),
     });
     expect(confirmation().resolution?.proxy_authority).toBeUndefined();
     expect(
-      effect.events.find((e) => e.type === "decision_resolved")?.payload,
-    ).toMatchObject({ via: "needs_you", taken_over_from: "role:pm" });
+      effect.events.find(
+        (e) =>
+          e.type ===
+          (option === "hold"
+            ? "merge_confirmation_snoozed"
+            : "decision_resolved"),
+      )?.payload,
+    ).toMatchObject({ taken_over_from: "role:pm" });
     const again = pmResolve(option === "merge" ? "hold" : "merge", {
       notice: "n",
     });
@@ -2154,3 +2170,28 @@ test("a failed check on a card the human flagged sensitive stays with the human 
   }
   expect(humanPending(f.state)).toContain(q.id);
 });
+
+/** Old databases retain resolved holds; requestMerge must still support them. */
+function legacyHolds(state: CommandState): CommandState {
+  return {
+    ...state,
+    decisions: state.decisions.map(
+      (q): Decision =>
+        q.status === "snoozed"
+          ? {
+              ...q,
+              status: "resolved",
+              resolution: {
+                option: "hold",
+                rationale: "Legacy hold",
+                raw_quote: "Legacy hold",
+                resolved_by: "human",
+                via: "needs_you",
+                via_chain: ["human"],
+                at: now,
+              },
+            }
+          : q,
+    ),
+  };
+}

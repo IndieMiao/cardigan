@@ -19,7 +19,7 @@ export function supersedeDelivery(
       decision.kind !== "approve" ||
       !("delivery_id" in decision.target) ||
       decision.target.delivery_id !== delivery.id ||
-      decision.status !== "open"
+      !["open", "snoozed"].includes(decision.status)
     )
       continue;
     d.put("decisions", {

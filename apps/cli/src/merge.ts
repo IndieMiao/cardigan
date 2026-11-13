@@ -45,8 +45,8 @@ const USAGE = [
   "用法：",
   "  cardigan merge status [C-n] [--project <p>]       看待合并的卡片、确认和合并计划",
   "  cardigan merge confirm <C-n> [--quote <原话>] [--yes]  以人的身份确认合并；合并前核对未完成时须加 --yes",
-  "  cardigan merge hold <C-n> [--quote <原话>]        以人的身份暂不合并",
-  "  cardigan merge request <C-n>                      hold 之后重新发起合并确认",
+  "  cardigan merge hold <C-n> --reason <原因> [--until <带时区时间>] [--quote <原话>]  暂缓合并（到期自动恢复）",
+  "  cardigan merge request <C-n>                      旧 hold 之后重新发起合并确认",
   "  cardigan merge recheck <C-n> [--project <p>]       重查失败或超时的合并候选",
   "  cardigan merge request-changes <C-n> --reason <原因> [--project <p>]  退回修改（原因必填）",
   "  cardigan merge push-accept <H-n> --text <说明> [--project <p>]  确认接受暂停推送里列出的外来提交并恢复自动推送",
@@ -282,7 +282,7 @@ function describe(
               ? ""
               : ` (${confirmation.resolution.option})`
           }${
-            confirmation.status === "open"
+            ["open", "snoozed"].includes(confirmation.status)
               ? confirmation.decider === "role:pm"
                 ? " decider=PM（可直接处理）"
                 : " decider=human"
@@ -290,6 +290,13 @@ function describe(
           }`
     }`,
   ];
+  if (confirmation?.status === "snoozed" && confirmation.snooze) {
+    const until = new Date(confirmation.snooze.until).toLocaleTimeString(
+      "zh-CN",
+      { hour: "2-digit", minute: "2-digit", hourCycle: "h23" },
+    );
+    lines.push(`  已暂缓：${confirmation.snooze.reason}（到 ${until}）`);
+  }
   const accepted = state.deliveries.filter(
     (delivery) =>
       delivery.kind !== "card_completion" &&
@@ -396,6 +403,13 @@ function mergeConfirm(
         COPY.confirmHint,
         COPY.confirmNeedsYes(`cardigan merge confirm ${id}`),
       ]);
+    const holdReason = optional(parsed.flags, "reason");
+    const holdUntil = optional(parsed.flags, "until");
+    if (option === "hold" && !holdReason?.trim())
+      throw new CliError(
+        "暂缓合并必须填写原因：--reason <原因>；可用 --until <带时区时间> 指定到期时间。",
+        EXIT.usage,
+      );
     const held = confirmation.decider === "role:pm";
     const decision = runCommand(store, {
       operation: option === "merge" ? "确认合并" : "暂不合并",
@@ -410,9 +424,8 @@ function mergeConfirm(
             decision_id: confirmation.id,
             option,
             rationale:
-              option === "merge"
-                ? `命令行确认合并 ${id}`
-                : `命令行暂不合并 ${id}`,
+              option === "merge" ? `命令行确认合并 ${id}` : (holdReason ?? ""),
+            ...(holdUntil !== undefined ? { snooze_until: holdUntil } : {}),
             raw_quote:
               optional(parsed.flags, "quote") ??
               `cardigan merge ${option === "merge" ? "confirm" : "hold"} ${id}`,
@@ -426,7 +439,7 @@ function mergeConfirm(
     io.stdout(
       option === "merge"
         ? `已确认合并 ${id}（${decision.id} ${decision.status}）${takeover}；合并循环会把交付合进 ${card.base_branch ?? "无"}。`
-        : `已暂不合并 ${id}（${decision.id}）${takeover}；需要时运行 cardigan merge request ${id}`,
+        : `已暂缓合并 ${id}（${decision.id}）${takeover}；原因：${decision.snooze?.reason}，到期时间：${decision.snooze?.until}；到期自动放回待处理。`,
     );
     return EXIT.ok;
   } finally {
@@ -518,7 +531,7 @@ function mergeRequestChanges(args: readonly string[], io: CliIo): number {
     const confirmation = confirmationOf(store, project_id, id);
     if (
       !confirmation ||
-      (confirmation.status !== "open" &&
+      (!["open", "snoozed"].includes(confirmation.status) &&
         !(
           confirmation.status === "resolved" &&
           confirmation.resolution?.option === "merge"

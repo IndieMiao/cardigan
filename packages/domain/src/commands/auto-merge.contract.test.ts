@@ -4,10 +4,10 @@ import {
   autoMergeSchedule,
   type CommandState,
   type Decision,
+  expireMergeSnoozes,
   mergePlan,
   projectPreferences,
   recordDecision,
-  requestMerge,
   setCardSensitive,
   setProjectPreferences,
 } from "../index.js";
@@ -256,7 +256,7 @@ test("invariants 11, 13, 14: every failed precondition rejects without partial e
 });
 
 test.each(["hold", "request_changes"])(
-  "human %s stops automation until a fresh confirmation",
+  "human %s stops automation until the confirmation is requested again",
   async (option) => {
     const { f, q } = await setup();
     f.commit(
@@ -287,13 +287,17 @@ test.each(["hold", "request_changes"])(
     if (option === "request_changes") await f.accept();
     const next =
       option === "hold"
-        ? f.commit(
-            requestMerge(f.state, human, { card_id: f.card.id }, later(f)),
-          )
+        ? (f.commit(
+            expireMergeSnoozes(f.state, system, later(f, 240)),
+          )[0] as Decision)
         : (f.state.decisions.at(-1) as Decision);
     expect(
-      autoConfirmMerge(f.state, system, { decision_id: next.id }, later(f, 20))
-        .ok,
+      autoConfirmMerge(
+        f.state,
+        system,
+        { decision_id: next.id },
+        later(f, option === "hold" ? 250 : 20),
+      ).ok,
     ).toBe(true);
   },
 );

@@ -41,6 +41,7 @@ import {
   createWorkItem,
   developmentCardTemplate,
   dispatchRun,
+  expireMergeSnoozes,
   finishRun,
   mergePlan,
   prepareDelivery,
@@ -612,7 +613,7 @@ test("§3.8 every new card, produce and verify migration is allowed exactly wher
     ).toBe(false);
 });
 
-test("§12.5 confirm: an unconfirmed merge is impossible until the human merges, and hold can be re-requested", async () => {
+test("§12.5 confirm: an unconfirmed merge is impossible until the human merges, and hold reopens at expiry", async () => {
   const s = await scenario("confirm");
   const { completion } = await acceptThroughMergeGate(s);
 
@@ -660,13 +661,17 @@ test("§12.5 confirm: an unconfirmed merge is impossible until the human merges,
       actorFor(s.coder),
     ).code,
   ).toBe("unauthorized");
-  const requested = apply(
-    (st, a, p) => requestMerge(st, a, { card_id: s.card.id }, p),
-    actorFor(s.ops, opsTools),
+  const held = confirmations(s.card.id).find((q) => q.id === first.id);
+  if (!held?.snooze) throw new Error("Missing snooze");
+  const until = held.snooze.until;
+  const [requested] = apply(
+    (st, a, p) =>
+      expireMergeSnoozes(st, a, { ...p, clock: { now: () => until } }),
+    system,
   );
-  const all = confirmations(s.card.id);
-  expect(all).toHaveLength(2);
-  expect(all.find((q) => q.id === first.id)?.status).toBe("superseded");
+  if (!requested) throw new Error("Missing reopened confirmation");
+  expect(confirmations(s.card.id)).toHaveLength(1);
+  expect(requested.id).toBe(first.id);
   expect(requested.status).toBe("open");
   decide(requested, "merge");
   const plan = mergePlan(state(), s.card.id);

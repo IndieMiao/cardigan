@@ -425,6 +425,9 @@ export function MergeConfirmation({
 }: Props & { q: NeedsDecision; done: () => void; elapsed: number }) {
   const [quote, setQuote] = useState("");
   const [returning, setReturning] = useState(false);
+  const [holding, setHolding] = useState(false);
+  const [holdReason, setHoldReason] = useState("");
+  const [holdUntil, setHoldUntil] = useState("");
   const [reason, setReason] = useState("");
   const [confirming, setConfirming] = useState(false);
   const confirmButton = useRef<HTMLButtonElement>(null);
@@ -436,7 +439,7 @@ export function MergeConfirmation({
   const preChecks = merge?.pre_merge_checks ?? [];
   const openPreChecks = preChecks.filter((c) => c.status !== "passed");
   const cardId = q.card_id ?? q.related_cards[0]?.id ?? null;
-  const decide = (option: "merge" | "hold") =>
+  const decide = (option: "merge") =>
     action.run([projectId, q.id, "resolve", option, quote], (key) =>
       client.recordDecision(projectId, q.id, option, quote, key),
     );
@@ -447,6 +450,17 @@ export function MergeConfirmation({
         <PriorityBadge value={q.card_priority ?? 0} />
         {decisionTitle(q)}
       </h3>
+      {q.status === "snoozed" && q.snooze && (
+        <p role="status" title={new Date(q.snooze.until).toLocaleString()}>
+          已暂缓：{q.snooze.reason}（到{" "}
+          {new Date(q.snooze.until).toLocaleTimeString("zh-CN", {
+            hour: "2-digit",
+            minute: "2-digit",
+            hourCycle: "h23",
+          })}
+          ）
+        </p>
+      )}
       {q.decider === "role:pm" && !confirmed && (
         <p className="hint">
           PM
@@ -629,7 +643,7 @@ export function MergeConfirmation({
               type="button"
               className="quiet"
               disabled={action.busy}
-              onClick={() => void decide("hold")}
+              onClick={() => setHolding(true)}
             >
               暂不合并
             </button>
@@ -644,6 +658,70 @@ export function MergeConfirmation({
           </button>
         </div>
       </form>
+      {holding && !confirmed && (
+        <form
+          aria-label="暂缓合并"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (
+              !holdReason.trim() ||
+              (holdUntil && !Number.isFinite(Date.parse(holdUntil)))
+            )
+              return;
+            const until = holdUntil
+              ? new Date(holdUntil).toISOString()
+              : undefined;
+            void action.run(
+              [projectId, q.id, "hold", holdReason, until],
+              async (key) => {
+                await client.recordDecision(
+                  projectId,
+                  q.id,
+                  "hold",
+                  holdReason,
+                  key,
+                  false,
+                  until,
+                );
+                setHolding(false);
+                setHoldReason("");
+                setHoldUntil("");
+              },
+            );
+          }}
+        >
+          <label>
+            暂缓原因（必填）
+            <textarea
+              required
+              value={holdReason}
+              onChange={(e) => setHoldReason(e.target.value)}
+            />
+          </label>
+          <label>
+            暂缓到期时间（可选）
+            <input
+              type="datetime-local"
+              value={holdUntil}
+              onChange={(e) => setHoldUntil(e.target.value)}
+            />
+          </label>
+          <p className="hint">
+            不填到期时间时使用项目默认暂缓时长，到期后自动放回待处理。
+          </p>
+          <button type="submit" disabled={action.busy || !holdReason.trim()}>
+            登记暂缓
+          </button>
+          <button
+            type="button"
+            className="quiet"
+            disabled={action.busy}
+            onClick={() => setHolding(false)}
+          >
+            取消暂缓
+          </button>
+        </form>
+      )}
       <Dialog.Root
         open={confirming && !confirmed && openPreChecks.length > 0}
         onOpenChange={setConfirming}

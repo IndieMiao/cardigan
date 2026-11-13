@@ -5,6 +5,7 @@ import {
   decisionDelegation,
   highRiskCategories,
   isBoardLane,
+  mergeConfirmSnoozeDefaultMinutes,
   mergeConfirmStallAfterMinutes,
   pmMergeConfirmation,
   validAutoMergeMinutes,
@@ -34,6 +35,7 @@ export function setProjectPreferences(
   input: {
     auto_merge_after_minutes?: number | null;
     merge_confirm_stall_after_minutes?: number;
+    merge_confirm_snooze_default_minutes?: number;
     decision_delegation?: Partial<Record<DecisionCategory, boolean>>;
     pm_merge_confirmation?: boolean;
     /** A patch: only the listed lanes change; null forgets the human setting. */
@@ -59,10 +61,19 @@ export function setProjectPreferences(
       "validation_failed",
       "合并确认停留告警时间须为 1 到 1440 的整数分钟",
     );
+    ensure(
+      input.merge_confirm_snooze_default_minutes === undefined ||
+        validMergeConfirmStallMinutes(
+          input.merge_confirm_snooze_default_minutes,
+        ),
+      "validation_failed",
+      "合并确认默认暂缓时长须为 1 到 1440 的整数分钟",
+    );
     const old = projectPreferences(state);
     ensure(
       input.auto_merge_after_minutes !== undefined ||
         input.merge_confirm_stall_after_minutes !== undefined ||
+        input.merge_confirm_snooze_default_minutes !== undefined ||
         input.decision_delegation !== undefined ||
         input.pm_merge_confirmation !== undefined ||
         input.board_collapsed_lanes !== undefined,
@@ -119,6 +130,12 @@ export function setProjectPreferences(
               input.merge_confirm_stall_after_minutes,
           }
         : {}),
+      ...(input.merge_confirm_snooze_default_minutes !== undefined
+        ? {
+            merge_confirm_snooze_default_minutes:
+              input.merge_confirm_snooze_default_minutes,
+          }
+        : {}),
       ...(input.decision_delegation ? { decision_delegation: delegation } : {}),
       ...(input.pm_merge_confirmation !== undefined
         ? { pm_merge_confirmation: input.pm_merge_confirmation }
@@ -130,6 +147,9 @@ export function setProjectPreferences(
     const stallChanged =
       mergeConfirmStallAfterMinutes(old) !==
       mergeConfirmStallAfterMinutes(next);
+    const snoozeChanged =
+      mergeConfirmSnoozeDefaultMinutes(old) !==
+      mergeConfirmSnoozeDefaultMinutes(next);
     const delegationChanged = decisionCategories.some(
       (c) => decisionDelegation(old)[c] !== delegation[c],
     );
@@ -143,6 +163,7 @@ export function setProjectPreferences(
     if (
       !mergeChanged &&
       !stallChanged &&
+      !snoozeChanged &&
       !delegationChanged &&
       !pmMergeChanged &&
       !lanesChanged
@@ -162,6 +183,12 @@ export function setProjectPreferences(
         old_value: mergeConfirmStallAfterMinutes(old),
         new_value: mergeConfirmStallAfterMinutes(next),
         preference: "merge_confirm_stall_after_minutes",
+      });
+    if (snoozeChanged)
+      d.emit("project_preferences_updated", undefined, {
+        old_value: mergeConfirmSnoozeDefaultMinutes(old),
+        new_value: mergeConfirmSnoozeDefaultMinutes(next),
+        preference: "merge_confirm_snooze_default_minutes",
       });
     if (delegationChanged) {
       d.emit("project_preferences_updated", undefined, {

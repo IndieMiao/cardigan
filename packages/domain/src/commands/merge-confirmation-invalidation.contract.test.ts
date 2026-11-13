@@ -5,6 +5,7 @@ import {
   type CommandState,
   type Decision,
   type Delivery,
+  expireMergeSnoozes,
   listNeedsYou,
   prepareDelivery,
   recordDecision,
@@ -285,3 +286,45 @@ test.each(["merge", "hold", "request_changes"])(
       expect(next.decisions.find((entry) => entry.id === q.id)).toEqual(q);
   },
 );
+
+test("C-180: a merge conflict invalidates a snoozed confirmation atomically and expiry cannot revive it", async () => {
+  const f = mergeFixture();
+  const { product, completion } = await f.accept();
+  const q = f.state.decisions[0];
+  if (!q) throw new Error("Missing confirmation");
+  const held = f.commit(
+    recordDecision(
+      f.state,
+      human,
+      {
+        decision_id: q.id,
+        option: "hold",
+        rationale: "等待",
+        raw_quote: "等待",
+      },
+      f.io,
+    ),
+  );
+  f.commit(
+    recordMergeResult(
+      { ...f.state, project_settings: { merge_gate_enabled: true } },
+      system,
+      conflict(f, product, completion),
+      f.io,
+    ),
+  );
+  expectClosed(f.state, held, completion);
+  if (!held.snooze) throw new Error("Missing snooze");
+  const until = held.snooze.until;
+  expect(
+    f.commit(
+      expireMergeSnoozes(f.state, system, {
+        ...f.io,
+        clock: { now: () => until },
+      }),
+    ),
+  ).toEqual([]);
+  expect(f.state.decisions.find((v) => v.id === q.id)?.status).toBe(
+    "superseded",
+  );
+});

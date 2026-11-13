@@ -64,7 +64,10 @@ test("U3 detail identifies PM and decision event choices without advancing Agent
     if (!decision) throw new Error("Expected merge confirmation");
     const resolved = await f.call(
       f.projectPath(`/decisions/${encodeURIComponent(decision.id)}/resolve`),
-      { method: "POST", body: { option: "hold", raw_quote: "先保留这个版本" } },
+      {
+        method: "POST",
+        body: { option: "merge", raw_quote: "确认合并此版本" },
+      },
     );
     expect(resolved.status).toBe(200);
     const before = f.state().cursors;
@@ -84,7 +87,7 @@ test("U3 detail identifies PM and decision event choices without advancing Agent
       detail.timeline.find(
         (e) => e.type === "decision_resolved" && e.decision_id === decision.id,
       ),
-    ).toMatchObject({ decision_option: "hold", body: "先保留这个版本" });
+    ).toMatchObject({ decision_option: "merge", body: "确认合并此版本" });
     expect(f.state().cursors).toEqual(before);
   } finally {
     await f.close();

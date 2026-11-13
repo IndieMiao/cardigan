@@ -1,8 +1,12 @@
 import {
+  type Actor,
+  type Assignment,
   type Decision,
   type Delivery,
+  listNeedsYou,
   PM_MERGE_STALL_KIND,
   type Runtime,
+  resolveDelegatedDecision,
 } from "@cardigan/domain";
 import { readAttention } from "@cardigan/host";
 import { afterEach, expect, test, vi } from "vitest";
@@ -189,6 +193,97 @@ test("the escalation honours the suppression extension point", () => {
     expect(
       f.state().events.filter((e) => e.type === PM_MERGE_STALL_KIND),
     ).toEqual([]);
+  } finally {
+    f.close();
+  }
+});
+
+test("C-180: a real PM hold suppresses an existing alert, survives dispatcher restart and re-alerts only after expiry plus the threshold", async () => {
+  const { f, card, decision, options } = pmHeldMerge();
+  try {
+    const base = f.state().assignments[0];
+    if (!base) throw new Error("Missing assignment");
+    const { work_item_id: _work, ...standing } = base;
+    const ops: Assignment = {
+      ...standing,
+      id: "A-900" as Assignment["id"],
+      scope: "standing",
+      standing_mode: "ops",
+      role_id: "pm",
+    };
+    f.store.uow.run((tx) => {
+      tx.assignments.put(f.project, ops);
+      const role = tx.roles.get(f.project, {
+        role_id: "pm",
+        role_version: ops.role_version,
+      });
+      if (!role) throw new Error("Missing PM role");
+      tx.roles.put(f.project, {
+        ...role,
+        allowed_tools: ["resolve_delegated_decision", "list_needs_you"],
+      });
+    });
+    const actor: Actor = {
+      ...f.actorFor(ops),
+      allowed_tools: ["resolve_delegated_decision", "list_needs_you"],
+    } as Actor;
+    f.advance(61 * minute);
+    await new Dispatcher(options).tick();
+    expect(
+      f.state().events.filter((e) => e.type === PM_MERGE_STALL_KIND),
+    ).toHaveLength(1);
+    f.apply(
+      (s, a, p) =>
+        resolveDelegatedDecision(
+          s,
+          a,
+          {
+            decision_id: decision.id,
+            option: "hold",
+            rationale: "等待核对",
+          },
+          p,
+        ),
+      actor,
+    );
+    f.advance(239 * minute);
+    await new Dispatcher(options).tick();
+    expect(f.state().decisions.find((q) => q.id === decision.id)?.status).toBe(
+      "snoozed",
+    );
+    expect(
+      readAttention(f.store, f.project, f.clock.now()).merge_stalls,
+    ).toEqual([]);
+    expect(
+      f.state().events.filter((e) => e.type === PM_MERGE_STALL_KIND),
+    ).toHaveLength(1);
+    f.advance(minute);
+    await new Dispatcher(options).tick();
+    await new Dispatcher(options).tick();
+    expect(f.state().decisions.find((q) => q.id === decision.id)).toMatchObject(
+      { status: "open", decider: "role:pm" },
+    );
+    const entries = f
+      .state()
+      .timeline.filter((t) => t.body.includes("暂缓已到期"));
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.body).toBe(`暂缓已到期：等待核对（${card.id}）`);
+    const needs = listNeedsYou(f.state(), actor, f.clock);
+    if (!needs.ok) throw new Error(needs.error.message);
+    expect(needs.value.data.pm_queue?.expired_snoozes).toEqual([
+      expect.objectContaining({ body: entries[0]?.body }),
+    ]);
+    f.advance(60 * minute);
+    await new Dispatcher(options).tick();
+    expect(
+      f.state().events.filter((e) => e.type === PM_MERGE_STALL_KIND),
+    ).toHaveLength(1);
+    f.advance(1);
+    await new Dispatcher(options).tick();
+    await new Dispatcher(options).tick();
+    expect(
+      f.state().events.filter((e) => e.type === PM_MERGE_STALL_KIND),
+    ).toHaveLength(2);
   } finally {
     f.close();
   }

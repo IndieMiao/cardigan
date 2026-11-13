@@ -149,10 +149,23 @@ export function SettingsPage({
                 />
               )}
               {resource.data && (
-                <MergeStallSetting
+                <MergeMinutesSetting
+                  kind="stall"
                   key={`stall:${resource.data.merge_confirm_stall_after_minutes}`}
                   initial={
                     resource.data.merge_confirm_stall_after_minutes ?? 60
+                  }
+                  client={client}
+                  projectId={projectId}
+                  saved={resource.reload}
+                />
+              )}
+              {resource.data && (
+                <MergeMinutesSetting
+                  kind="snooze"
+                  key={`snooze:${resource.data.merge_confirm_snooze_default_minutes}`}
+                  initial={
+                    resource.data.merge_confirm_snooze_default_minutes ?? 240
                   }
                   client={client}
                   projectId={projectId}
@@ -304,17 +317,21 @@ function PreferenceForm({
 }
 
 /** C-177: wording set by PM Ops per Q-279 (C-177#7). */
-function MergeStallSetting({
+function MergeMinutesSetting({
+  kind,
   initial,
   client,
   projectId,
   saved,
 }: {
+  kind: "stall" | "snooze";
   initial: number;
   client: CardiganClient;
   projectId: string;
   saved: () => void;
 }) {
+  const snooze = kind === "snooze";
+  const label = snooze ? "合并确认默认暂缓时长" : "PM 合并确认停留告警";
   const [minutes, setMinutes] = useState(String(initial));
   const [busy, setBusy] = useState(false),
     [error, setError] = useState(""),
@@ -325,7 +342,7 @@ function MergeStallSetting({
     /^\d+$/.test(minutes) && Number(minutes) >= 1 && Number(minutes) <= 1440;
   return (
     <form
-      aria-label="PM 合并确认停留告警"
+      aria-label={label}
       onSubmit={async (event) => {
         event.preventDefault();
         if (sending.current || !valid) return;
@@ -336,11 +353,18 @@ function MergeStallSetting({
         const key = keys.current.get(minutes) ?? crypto.randomUUID();
         keys.current.set(minutes, key);
         try {
-          await client.setMergeConfirmStallAfter(
-            projectId,
-            Number(minutes),
-            key,
-          );
+          if (snooze)
+            await client.setMergeConfirmSnoozeDefault(
+              projectId,
+              Number(minutes),
+              key,
+            );
+          else
+            await client.setMergeConfirmStallAfter(
+              projectId,
+              Number(minutes),
+              key,
+            );
           keys.current.delete(minutes);
           setMessage("偏好已保存");
           saved();
@@ -353,7 +377,7 @@ function MergeStallSetting({
       }}
     >
       <label>
-        PM 合并确认停留告警（分钟）
+        {label}（分钟）
         <input
           type="number"
           min="1"
@@ -365,14 +389,15 @@ function MergeStallSetting({
         />
       </label>
       <p className="hint">
-        PM 持有的合并确认在检查通过后超过这么久还没处理，就提醒 PM Ops，并在
-        Needs You 知会人
+        {snooze
+          ? "PM 或人暂缓一条合并确认时，没有填到期时间就用这个时长，到期后自动放回待处理"
+          : "PM 持有的合并确认在合并检查出结论后，超过这么久还没处理，就提醒 PM Ops，并在 Needs You 知会人"}
       </p>
       <RequestFeedback
         error={!valid ? "请输入 1 到 1440 的整数分钟。" : undefined}
       />
       <button type="submit" disabled={busy || !valid}>
-        保存停留告警
+        {snooze ? "保存暂缓时长" : "保存停留告警"}
       </button>
       <RequestFeedback
         interactive

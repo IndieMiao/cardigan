@@ -43,6 +43,7 @@ export const STATUS_LABELS = {
   superseded: "已取代",
   open: "待拍板",
   provisional: "暂定",
+  snoozed: "已暂缓",
   resolved: "已拍板",
   withdrawn: "已撤回",
   revoked: "已撤销",

@@ -109,7 +109,15 @@ export const transitionTables: {
     rejected: { supersede: "superseded" },
   },
   decision: {
+    snoozed: {
+      resume: "open",
+      snooze: "snoozed",
+      resolve: "resolved",
+      withdraw: "withdrawn",
+      supersede: "superseded",
+    },
     open: {
+      snooze: "snoozed",
       resolve: "resolved",
       provisionally_resolve: "provisional",
       withdraw: "withdrawn",

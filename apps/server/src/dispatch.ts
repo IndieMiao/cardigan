@@ -18,6 +18,7 @@ import {
   decisionFollowupPrompt,
   dispatchRecoveryFailed,
   dispatchRun,
+  expireMergeSnoozes,
   hasRunTarget,
   hostOpsPending,
   isStandingPm,
@@ -1160,8 +1161,19 @@ export class Dispatcher {
   private maintenance(project: ProjectId) {
     const { store, standing } = this.options;
     store.uow.run((tx) => {
-      const state = this.loadState(tx, project),
-        at = this.clock.now();
+      const at = this.clock.now();
+      const prior = this.loadState(tx, project);
+      const expired = unwrap(
+        expireMergeSnoozes(
+          prior,
+          { kind: "system", project_id: project },
+          { clock: { now: () => at }, ids: tx.ids },
+        ),
+      );
+      persistEffect(tx, project, expired);
+      const state = expired.changes.length
+        ? this.loadState(tx, project)
+        : prior;
       persistEffect(
         tx,
         project,

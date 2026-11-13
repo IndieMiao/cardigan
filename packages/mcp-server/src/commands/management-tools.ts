@@ -113,6 +113,11 @@ const schemas = {
       ),
   },
   resolve_delegated_decision: {
+    snooze_until: text
+      .optional()
+      .describe(
+        "With merge hold only: future ISO timestamp with timezone. Omit to use the project default; rationale is the required hold reason.",
+      ),
     decision_id: id("decision"),
     option: text,
     rationale: text,
@@ -138,6 +143,11 @@ const schemas = {
     expected_return: text.optional(),
   },
   record_decision: {
+    snooze_until: text
+      .optional()
+      .describe(
+        "With merge hold only: future ISO timestamp with timezone. Omit to use the project default; rationale is the required hold reason.",
+      ),
     decision_id: id("decision"),
     option: text,
     rationale: text,
@@ -344,7 +354,7 @@ export function managementTools(clock?: Clock) {
     wire("report_blocker", "Report a work item blocker.", reportBlocker),
     wire(
       "resolve_delegated_decision",
-      "Resolve an authorized decision as PM Ops, with a rationale, or escalate it to the human. Merge confirmations: choose merge only when list_needs_you shows no merge_blockers, and pass a notice (what changed, impact on the human, risks or follow-ups) for the Needs You notices. When the current merge check failed or timed out (list_needs_you pm_queue.failed_merge_checks, including confirmed merges), choose request_changes (real failure; rationale names the failing case and fix direction) or recheck (flaky: timeout or load), always with a notice; cards with high-risk or scope-change decisions stay with the human.",
+      "Resolve an authorized decision as PM Ops, with a rationale, or escalate it to the human. Merge confirmations: hold records a required rationale and optional snooze_until (default 240 minutes, configurable); it reopens automatically at expiry. Choose merge only when list_needs_you shows no merge_blockers, and pass a notice (what changed, impact on the human, risks or follow-ups) for the Needs You notices. When the current merge check failed or timed out (list_needs_you pm_queue.failed_merge_checks, including confirmed merges), choose request_changes (real failure; rationale names the failing case and fix direction) or recheck (flaky: timeout or load), always with a notice; cards with high-risk or scope-change decisions stay with the human.",
       resolveDelegatedDecision,
     ),
     wire(

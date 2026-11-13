@@ -163,6 +163,20 @@ test.each(["merge", "hold", "request_changes", "recheck"] as const)(
       });
       fireEvent.click(controls.getByRole("button", { name: "确认退回修改" }));
     }
+    if (option === "hold") {
+      expect(
+        controls
+          .getByRole("button", { name: "登记暂缓" })
+          .hasAttribute("disabled"),
+      ).toBe(true);
+      fireEvent.change(controls.getByLabelText("暂缓原因（必填）"), {
+        target: { value: "等待核对" },
+      });
+      fireEvent.change(controls.getByLabelText("暂缓到期时间（可选）"), {
+        target: { value: "2035-01-01T12:30" },
+      });
+      fireEvent.click(controls.getByRole("button", { name: "登记暂缓" }));
+    }
     if (option === "recheck")
       expect(recheckMerge).toHaveBeenCalledWith(
         "p-1",
@@ -175,8 +189,15 @@ test.each(["merge", "hold", "request_changes", "recheck"] as const)(
         "p-1",
         "Q-115",
         option,
-        option === "request_changes" ? "请修复断言失败" : "",
+        option === "request_changes"
+          ? "请修复断言失败"
+          : option === "hold"
+            ? "等待核对"
+            : "",
         expect.any(String),
+        ...(option === "hold"
+          ? [false, new Date("2035-01-01T12:30").toISOString()]
+          : []),
       );
     await waitFor(() =>
       expect(screen.queryByRole("region", { name: "合并处理" })).toBeNull(),
@@ -243,4 +264,38 @@ test("C-115: a verified noop keeps human confirmation without claiming a passed 
   expect(controls.getByRole("button", { name: "确认合并" })).toBeTruthy();
   expect(controls.queryByRole("region", { name: "合并检查" })).toBeNull();
   expect(controls.queryByRole("button", { name: "重新检查" })).toBeNull();
+});
+
+test("C-180: the card merge block shows a snoozed reason and local expiry", async () => {
+  const detail = fixture();
+  const until = "2035-01-01T04:30:00.000Z";
+  const snoozed = {
+    ...detail,
+    merge_confirmations: detail.merge_confirmations?.map((q) => ({
+      ...q,
+      status: "snoozed",
+      snooze: {
+        reason: "等待核对",
+        until,
+        at: "2035-01-01T00:30:00.000Z",
+        by: "human",
+      },
+    })),
+  };
+  render(
+    <CardDetailPage
+      client={fakeClient({ card: async () => snoozed })}
+      projectId="p-1"
+      cardId="C-1"
+    />,
+  );
+  const controls = within(
+    await screen.findByRole("region", { name: "合并处理" }),
+  );
+  const time = new Date(until).toLocaleTimeString("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  });
+  expect(controls.getByText(`已暂缓：等待核对（到 ${time}）`)).toBeTruthy();
 });

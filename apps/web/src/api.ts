@@ -268,6 +268,12 @@ export interface DecisionView {
   readonly id: string;
   readonly question: string;
   readonly status: string;
+  readonly snooze?: {
+    readonly reason: string;
+    readonly until: string;
+    readonly at: string;
+    readonly by: string;
+  };
   readonly blocking: boolean;
   readonly decider: string;
   readonly decider_view?: AuthorView | null;
@@ -860,6 +866,7 @@ export interface PreferencesView {
   readonly auto_merge_after_minutes: number | null;
   /** C-177: PM-held merge confirmation stall alert; older servers omit it. */
   readonly merge_confirm_stall_after_minutes?: number;
+  readonly merge_confirm_snooze_default_minutes?: number;
   readonly merge_gate_enabled: boolean;
   /** Lanes the human folded (true) or unfolded (false); missing = default. */
   readonly board_collapsed_lanes?: Readonly<Record<string, boolean>>;
@@ -1073,6 +1080,11 @@ export interface CardiganClient {
     enabled: boolean,
     idempotencyKey: string,
   ): Promise<void>;
+  setMergeConfirmSnoozeDefault(
+    projectId: string,
+    minutes: number,
+    idempotencyKey: string,
+  ): Promise<void>;
   setMergeConfirmStallAfter(
     projectId: string,
     minutes: number,
@@ -1149,6 +1161,7 @@ export interface CardiganClient {
     quote: string,
     idempotencyKey?: string,
     delegateFuture?: boolean,
+    snoozeUntil?: string,
   ): Promise<void>;
   decisionComment(
     projectId: string,
@@ -1395,6 +1408,18 @@ export class HttpCardiganClient implements CardiganClient {
       idempotencyKey,
     );
   }
+  async setMergeConfirmSnoozeDefault(
+    projectId: string,
+    minutes: number,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      "preferences",
+      { merge_confirm_snooze_default_minutes: minutes },
+      idempotencyKey,
+    );
+  }
   async setMergeConfirmStallAfter(
     projectId: string,
     minutes: number,
@@ -1572,6 +1597,7 @@ export class HttpCardiganClient implements CardiganClient {
     quote: string,
     idempotencyKey: string = crypto.randomUUID(),
     delegateFuture = false,
+    snoozeUntil?: string,
   ): Promise<void> {
     await this.write(
       projectId,
@@ -1580,6 +1606,7 @@ export class HttpCardiganClient implements CardiganClient {
         option,
         raw_quote: quote,
         ...(delegateFuture ? { delegate_future: true } : {}),
+        ...(snoozeUntil !== undefined ? { snooze_until: snoozeUntil } : {}),
       },
       idempotencyKey,
     );

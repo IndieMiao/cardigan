@@ -57,7 +57,7 @@ export function setCardSensitive(
           q.trigger === "merge_confirmation" &&
           q.card_id === card.id &&
           q.decider === "role:pm" &&
-          ["open", "provisional"].includes(q.status)
+          ["open", "provisional", "snoozed"].includes(q.status)
         )
           handoffDecision(
             d,

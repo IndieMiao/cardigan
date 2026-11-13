@@ -254,7 +254,7 @@ test("PM merge confirmation stall alert shows the default 60 minutes and saves a
   expect(input.value).toBe("60");
   expect(
     screen.getByText(
-      /PM 持有的合并确认在检查通过后超过这么久还没处理，就提醒 PM Ops/,
+      /PM 持有的合并确认在合并检查出结论后，超过这么久还没处理，就提醒 PM Ops/,
     ),
   ).toBeTruthy();
   fireEvent.change(input, { target: { value: "0" } });
@@ -343,3 +343,34 @@ test.each([
     expect(minutes.value).toBe("23");
   },
 );
+
+test("PM merge confirmation snooze duration shows the default 240 minutes and saves a new value", async () => {
+  const setMergeConfirmSnoozeDefault = vi.fn().mockResolvedValue(undefined);
+  render(
+    <SettingsPage
+      projectId="p-1"
+      client={fakeClient({ setMergeConfirmSnoozeDefault })}
+    />,
+  );
+  const input = (await screen.findByLabelText(
+    "合并确认默认暂缓时长（分钟）",
+  )) as HTMLInputElement;
+  expect(input.value).toBe("240");
+  expect(
+    screen.getByText(/PM 或人暂缓一条合并确认时，没有填到期时间就用这个时长/),
+  ).toBeTruthy();
+  fireEvent.change(input, { target: { value: "0" } });
+  expect(
+    (screen.getByRole("button", { name: "保存暂缓时长" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+  fireEvent.change(input, { target: { value: "90" } });
+  fireEvent.click(screen.getByRole("button", { name: "保存暂缓时长" }));
+  await waitFor(() =>
+    expect(setMergeConfirmSnoozeDefault).toHaveBeenCalledTimes(1),
+  );
+  expect(setMergeConfirmSnoozeDefault.mock.calls[0]?.slice(0, 2)).toEqual([
+    "p-1",
+    90,
+  ]);
+});

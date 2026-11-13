@@ -150,7 +150,7 @@ test("U5b latest conclusions use full history even when outside the loaded timel
           f.projectPath(
             `/decisions/${encodeURIComponent(decision.id)}/resolve`,
           ),
-          { method: "POST", body: { option: "hold", raw_quote: "先不合并" } },
+          { method: "POST", body: { option: "merge", raw_quote: "确认合并" } },
         )
       ).status,
     ).toBe(200);
@@ -174,8 +174,8 @@ test("U5b latest conclusions use full history even when outside the loaded timel
     ]);
     expect(detail.recent_conclusions?.[0]).toMatchObject({
       decision_id: decision.id,
-      decision_option: "hold",
-      body: "先不合并",
+      decision_option: "merge",
+      body: "确认合并",
     });
     const first = detail.recent_conclusions?.[0];
     const linked = (

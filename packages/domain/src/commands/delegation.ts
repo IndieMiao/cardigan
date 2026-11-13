@@ -204,7 +204,7 @@ export function handoffUnauthorizedDecisions(
   for (const q of d.list("decisions")) {
     if (
       q.decider === "role:pm" &&
-      ["open", "provisional"].includes(q.status) &&
+      ["open", "provisional", "snoozed"].includes(q.status) &&
       (!hasActivePmOps(
         d,
         q.trigger === "review_limit"

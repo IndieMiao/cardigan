@@ -641,7 +641,7 @@ test.each(["open", "resolved"])(
   },
 );
 
-test("hold still submits without a reason after cancelling the return form", async () => {
+test("hold requires a separate reason after cancelling the return form", async () => {
   const recordDecision = vi.fn().mockResolvedValue(undefined);
   render(
     <NeedsYouPage
@@ -657,13 +657,23 @@ test("hold still submits without a reason after cancelling the return form", asy
   expect(screen.queryByLabelText("Q-3 退回原因")).toBeNull();
   expect(recordDecision).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button", { name: "暂不合并" }));
+  expect(
+    (screen.getByRole("button", { name: "登记暂缓" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+  fireEvent.change(screen.getByLabelText("暂缓原因（必填）"), {
+    target: { value: "等待核对" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "登记暂缓" }));
   await waitFor(() =>
     expect(recordDecision).toHaveBeenCalledWith(
       "p-1",
       "Q-3",
       "hold",
-      "",
+      "等待核对",
       expect.any(String),
+      false,
+      undefined,
     ),
   );
 });
@@ -1933,13 +1943,19 @@ test("PM-held merges are listed without counting as waiting, and the human can a
   const item = within(group).getByRole("article", { name: "合并确认 Q-9" });
   expect(within(item).getByText(/PM 正在代确认/)).toBeTruthy();
   fireEvent.click(within(item).getByRole("button", { name: "暂不合并" }));
+  fireEvent.change(within(item).getByLabelText("暂缓原因（必填）"), {
+    target: { value: "等待核对" },
+  });
+  fireEvent.click(within(item).getByRole("button", { name: "登记暂缓" }));
   await waitFor(() =>
     expect(recordDecision).toHaveBeenCalledWith(
       "p-1",
       "Q-9",
       "hold",
-      "",
+      "等待核对",
       expect.any(String),
+      false,
+      undefined,
     ),
   );
   fireEvent.click(within(item).getByRole("button", { name: "确认合并" }));
@@ -1988,4 +2004,36 @@ test("C-154: a confirmation handed over by the PM is labelled and counts down fr
   expect(handed.textContent).toContain("剩余 5 分钟");
   const direct = screen.getByRole("article", { name: "合并确认 Q-4" });
   expect(within(direct).queryByText("由 PM 转交")).toBeNull();
+});
+
+test("C-180: human snoozed confirmations remain visible with reason and expiry", async () => {
+  const until = "2035-01-01T04:30:00.000Z";
+  render(
+    <NeedsYouPage
+      client={fakeClient({
+        needsYou: async () =>
+          page([
+            {
+              ...merge(),
+              status: "snoozed",
+              snooze: {
+                reason: "等待核对",
+                until,
+                at: "2035-01-01T00:30:00.000Z",
+                by: "human",
+              },
+            },
+          ]),
+      })}
+      projectId="p-1"
+    />,
+  );
+  const time = new Date(until).toLocaleTimeString("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  });
+  expect(
+    await screen.findByText(`已暂缓：等待核对（到 ${time}）`),
+  ).toBeTruthy();
 });
