@@ -168,10 +168,18 @@ export function mergeFixture(
         kind: git ? ("git_head" as const) : ("doc_version" as const),
         value: sha,
       },
-      requested_verifiers: [
-        (kind === "card_completion" ? pm : reviewer)
-          .work_item_id as Delivery["work_item_id"],
-      ],
+      requested_verifiers:
+        kind === "card_completion"
+          ? [pm.work_item_id as Delivery["work_item_id"]]
+          : state.work_items
+              .filter(
+                (w) =>
+                  w.kind === "verify" &&
+                  w.target_work_item_id === coder.work_item_id &&
+                  w.status !== "cancelled" &&
+                  !w.replaced_by_work_item_id,
+              )
+              .map((w) => w.id),
     };
     const proof = value(
       await prepareDelivery(state, actor(coder), p, {

@@ -3,7 +3,7 @@ import type { Decision, Delivery, MergeCheckView } from "../entities.js";
 import type { CardId } from "../ids.js";
 import { pmMergeConfirmation } from "../preferences.js";
 import { attempt, type CommandState } from "./core.js";
-import { mergeRequiresHuman } from "./delegation.js";
+import { mergeRequiresHuman, riskTagAutoMergeAllowed } from "./delegation.js";
 import { mergeContext } from "./merge.js";
 import {
   failedConfirmedMergeCheck,
@@ -43,6 +43,11 @@ export function pmMergeBlockers(
   if (completion.id !== q.target.delivery_id)
     return ["合并确认属于旧的完成申请"];
   const blockers: string[] = [];
+  if (
+    context.value.card.risk_tags?.length &&
+    !riskTagAutoMergeAllowed(state, q)
+  )
+    blockers.push("风险标签卡须有必需且有效的独立复核通过，否则须交人确认");
   const check = latestMergeCheck(state.events, card_id, completion.id);
   if (check?.status !== "passed")
     blockers.push(

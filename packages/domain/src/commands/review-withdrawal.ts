@@ -7,6 +7,7 @@ import {
   command,
   ensure,
 } from "./core.js";
+import { syncRiskTagMerge } from "./merge.js";
 import { latestMergeCheck } from "./merge-check.js";
 import { withdrawIndependentReviewCheck } from "./pre-merge-checks.js";
 
@@ -106,8 +107,10 @@ export function withdrawReview(
         refs: [{ kind: "review", id: review.id }],
       },
     );
-    if (d.assignment?.role_id === "independent_reviewer")
+    if (d.assignment?.role_id === "independent_reviewer") {
       withdrawIndependentReviewCheck(d, review);
+      syncRiskTagMerge(d, card);
+    }
     return withdrawn;
   });
 }
