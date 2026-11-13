@@ -238,3 +238,24 @@ test("C-193: snooze cap get/set validates both bounds, persists and audits once"
     },
   ]);
 });
+
+test("context preferences use remaining percentages, persist and reject reversed thresholds", async () => {
+  expect(await run(["preference", "get", "context-handoff-remaining"])).toBe(0);
+  expect(output).toContain("context-handoff-remaining: 20");
+  expect(await run(["preference", "get", "context-restart-remaining"])).toBe(0);
+  expect(output).toContain("context-restart-remaining: 15");
+  expect(
+    await run(["preference", "set", "context-handoff-remaining", "30.5"]),
+  ).toBe(0);
+  expect(
+    await run(["preference", "set", "context-restart-remaining", "25"]),
+  ).toBe(0);
+  expect(output).toContain("context-restart-remaining: 25");
+  for (const bad of ["off", "-1", "0", "100", "NaN", "30.5", "90"]) {
+    expect(
+      await run(["preference", "set", "context-restart-remaining", bad]),
+    ).not.toBe(0);
+  }
+  expect(await run(["preference", "get", "context-restart-remaining"])).toBe(0);
+  expect(output).toContain("context-restart-remaining: 25");
+});

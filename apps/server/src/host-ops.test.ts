@@ -688,7 +688,7 @@ test("credential cleanup failures remain recoverable without exposing host error
   ).toHaveLength(1);
 });
 
-test("delivery failures stay read-only and outside patrol work; context estimates are labelled", async () => {
+test("delivery failures stay read-only and outside patrol work; missing context is stale", async () => {
   const { run } = dispatched();
   f.store.uow.run((tx) =>
     tx.events.append(f.project, {
@@ -708,8 +708,10 @@ test("delivery failures stay read-only and outside patrol work; context estimate
   expect(diagnostics).toMatchObject({
     sessions: expect.arrayContaining([
       expect.objectContaining({
-        context_usage_estimated: true,
-        context_usage_threshold_pct: 80,
+        context_usage_estimated: false,
+        context_tokens: null,
+        stale: true,
+        status: "missing",
       }),
     ]),
   });
@@ -717,11 +719,11 @@ test("delivery failures stay read-only and outside patrol work; context estimate
     false,
   );
   expect(
-    resolveServerConfig({ CARDIGAN_HOST_OPS_CONTEXT_THRESHOLD_PCT: "65" })
-      .hostOpsContextThresholdPct,
-  ).toBe(65);
+    resolveServerConfig({ CARDIGAN_CONTEXT_USAGE_STALE_AFTER_MS: "65000" })
+      .contextUsageStaleAfterMs,
+  ).toBe(65000);
   expect(() =>
-    resolveServerConfig({ CARDIGAN_HOST_OPS_CONTEXT_THRESHOLD_PCT: "101" }),
+    resolveServerConfig({ CARDIGAN_CONTEXT_USAGE_STALE_AFTER_MS: "-1" }),
   ).toThrow();
 });
 
@@ -820,3 +822,151 @@ test("a delayed credential scrub cannot outlive takeover and delete the replacem
     reopened.close();
   }
 });
+
+test.each(["codex", "pi"] as const)(
+  "%s context patrol delivers handoff once, guards restart and observes fresh replacement usage (simulated)",
+  async (harness) => {
+    const { assignment, run, card } = dispatched();
+    const execution = { mode: "local" as const, dataDir: f.dataDir };
+    const { runDir } = executionPaths(execution, f.project, assignment.id);
+    f.store.uow.run((tx) => {
+      const stored = tx.runs.get(f.project, run.id);
+      if (!stored) throw new Error("Missing fixture Run");
+      tx.runs.put(f.project, { ...stored, harness });
+    });
+    service = new HostOpsService({
+      store: f.store,
+      runtime,
+      snapshot: async () => ({ ...(await snapshot()), harness }),
+      clock: f.clock,
+      contextUsage: { execution, staleAfterMs: 60000 },
+    });
+    const sample = async (id: string, tokens: number) => {
+      const dir =
+        harness === "codex"
+          ? join(runDir, "codex", "sessions")
+          : join(runDir, "pi", "context-usage");
+      await mkdir(dir, { recursive: true });
+      const text =
+        harness === "codex"
+          ? [
+              { type: "session_meta", payload: { id, cwd: runDir } },
+              {
+                type: "event_msg",
+                timestamp: f.clock.now(),
+                payload: {
+                  type: "token_count",
+                  info: {
+                    last_token_usage: { total_tokens: tokens },
+                    total_token_usage: { total_tokens: 1000000 },
+                    model_context_window: 1000,
+                  },
+                },
+              },
+            ]
+              .map((v) => JSON.stringify(v))
+              .join("\n")
+          : JSON.stringify({
+              agent: "pi",
+              session_id: id,
+              cwd: runDir,
+              model: "fixture",
+              context_tokens: tokens,
+              context_window_size: 1000,
+              used_percentage: tokens / 10,
+              updated_at: f.clock.now(),
+            });
+      await writeFile(
+        join(
+          dir,
+          harness === "codex" ? `rollout-${id}.jsonl` : `pi-${id}.json`,
+        ),
+        text,
+      );
+    };
+    await sample("session-1", 800);
+    // Reading diagnostics remains read-only.
+    expect(await call("host_ops_read_diagnostics", {})).toMatchObject({
+      context_thresholds: {
+        handoff_remaining_pct: 20,
+        restart_remaining_pct: 15,
+      },
+      sessions: expect.arrayContaining([
+        expect.objectContaining({
+          assignment_id: assignment.id,
+          context_tokens: 800,
+          level: "handoff",
+        }),
+      ]),
+    });
+    expect(
+      f.state().events.filter((e) => e.type === "context_usage_notice"),
+    ).toHaveLength(0);
+    await service.tick();
+    const notices = () =>
+      f.state().events.filter((e) => e.type === "context_usage_notice");
+    expect(notices()).toHaveLength(1);
+    expect(
+      f.store
+        .listNotifications({ project_id: f.project })
+        .some(
+          (n) =>
+            n.event_id === notices()[0]?.id &&
+            n.recipient.kind === "assignment" &&
+            n.recipient.assignment_id === assignment.id &&
+            n.card_id === card.id,
+        ),
+    ).toBe(true);
+    const request = {
+      assignment_id: assignment.id,
+      context_session_id: "session-1",
+      reason: "Context low; handoff recorded",
+      idempotency_key: "context-restart",
+    };
+    await expect(
+      call("host_ops_restart_assignment", request),
+    ).rejects.toMatchObject({ code: "stale_target" });
+    f.advance(30000);
+    await sample("session-1", 850);
+    await service.tick();
+    expect(notices()).toHaveLength(2);
+    await call("host_ops_restart_assignment", request);
+    await service.tick();
+    expect(runtime.release).toHaveBeenCalledTimes(1);
+    const replacement = f
+      .state()
+      .runs.find(
+        (r) => r.assignment_id === assignment.id && r.status === "queued",
+      );
+    expect(replacement).toBeDefined();
+    expect(
+      f.state().assignments.find((a) => a.id === assignment.id)?.session_ref,
+    ).toBeUndefined();
+    await expect(
+      call("host_ops_restart_assignment", {
+        ...request,
+        idempotency_key: "different-key",
+      }),
+    ).rejects.toBeDefined();
+    f.advance(1000);
+    await sample("session-2", 0);
+    expect(await call("host_ops_read_diagnostics", {})).toMatchObject({
+      sessions: expect.arrayContaining([
+        expect.objectContaining({
+          assignment_id: assignment.id,
+          session_id: "session-2",
+          context_tokens: 0,
+          used_percentage: 0,
+          level: null,
+        }),
+      ]),
+    });
+    const finished = f
+      .state()
+      .events.find((e) => e.type === "host_ops_action_finished");
+    expect(finished?.payload).toMatchObject({
+      context_usage: { session_id: "session-1", used_percentage: 85 },
+      result: "new_session_queued",
+    });
+  },
+);

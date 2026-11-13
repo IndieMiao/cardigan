@@ -1,5 +1,6 @@
 import type { Actor } from "../entities.js";
 import {
+  contextUsageThresholds,
   type DecisionCategory,
   decisionCategories,
   decisionDelegation,
@@ -10,6 +11,7 @@ import {
   mergeConfirmStallAfterMinutes,
   pmMergeConfirmation,
   validAutoMergeMinutes,
+  validContextPercentage,
   validMergeConfirmSnoozeMaxMinutes,
   validMergeConfirmStallMinutes,
 } from "../preferences.js";
@@ -36,6 +38,8 @@ export function setProjectPreferences(
   actor: Actor,
   input: {
     auto_merge_after_minutes?: number | null;
+    context_handoff_remaining_pct?: number;
+    context_restart_remaining_pct?: number;
     merge_confirm_stall_after_minutes?: number;
     merge_confirm_snooze_default_minutes?: number;
     merge_confirm_snooze_max_minutes?: number;
@@ -80,9 +84,35 @@ export function setProjectPreferences(
       "validation_failed",
       "合并确认最长暂缓时长须为 60 到 10080 的整数分钟",
     );
-    const old = projectPreferences(state);
     ensure(
-      input.auto_merge_after_minutes !== undefined ||
+      (input.context_handoff_remaining_pct === undefined ||
+        validContextPercentage(input.context_handoff_remaining_pct)) &&
+        (input.context_restart_remaining_pct === undefined ||
+          validContextPercentage(input.context_restart_remaining_pct)),
+      "validation_failed",
+      "上下文剩余比例须为大于 0 且小于 100 的有限数值",
+    );
+    const old = projectPreferences(state);
+    const contextNext = contextUsageThresholds({
+      ...old,
+      ...(input.context_handoff_remaining_pct !== undefined
+        ? { context_handoff_remaining_pct: input.context_handoff_remaining_pct }
+        : {}),
+      ...(input.context_restart_remaining_pct !== undefined
+        ? { context_restart_remaining_pct: input.context_restart_remaining_pct }
+        : {}),
+    });
+    ensure(
+      validContextPercentage(contextNext.handoff) &&
+        validContextPercentage(contextNext.restart) &&
+        contextNext.restart < contextNext.handoff,
+      "validation_failed",
+      "上下文剩余比例须大于 0 且小于 100，换会话比例必须小于交接提醒比例",
+    );
+    ensure(
+      input.context_handoff_remaining_pct !== undefined ||
+        input.context_restart_remaining_pct !== undefined ||
+        input.auto_merge_after_minutes !== undefined ||
         input.merge_confirm_stall_after_minutes !== undefined ||
         input.merge_confirm_snooze_default_minutes !== undefined ||
         input.merge_confirm_snooze_max_minutes !== undefined ||
@@ -132,6 +162,12 @@ export function setProjectPreferences(
     }
     const next = {
       ...old,
+      ...(input.context_handoff_remaining_pct !== undefined
+        ? { context_handoff_remaining_pct: input.context_handoff_remaining_pct }
+        : {}),
+      ...(input.context_restart_remaining_pct !== undefined
+        ? { context_restart_remaining_pct: input.context_restart_remaining_pct }
+        : {}),
       auto_merge_after_minutes:
         input.auto_merge_after_minutes === undefined
           ? old.auto_merge_after_minutes
@@ -160,6 +196,10 @@ export function setProjectPreferences(
         : {}),
       ...(input.board_collapsed_lanes ? { board_collapsed_lanes: lanes } : {}),
     };
+    const contextOld = contextUsageThresholds(old);
+    const contextChanged =
+      contextOld.handoff !== contextNext.handoff ||
+      contextOld.restart !== contextNext.restart;
     const mergeChanged =
       old.auto_merge_after_minutes !== next.auto_merge_after_minutes;
     const stallChanged =
@@ -181,6 +221,7 @@ export function setProjectPreferences(
       input.board_collapsed_lanes !== undefined &&
       states.card.some((lane) => oldLanes[lane] !== lanes[lane]);
     if (
+      !contextChanged &&
       !mergeChanged &&
       !stallChanged &&
       !snoozeChanged &&
@@ -193,6 +234,17 @@ export function setProjectPreferences(
     // Lane folding is a view setting: it is stored for every device but emits
     // no audit event, so toggling a lane never feeds the activity stream.
     d.put("project_preferences", next);
+    for (const [key, preference] of [
+      ["handoff", "context_handoff_remaining_pct"],
+      ["restart", "context_restart_remaining_pct"],
+    ] as const) {
+      if (contextOld[key] !== contextNext[key])
+        d.emit("project_preferences_updated", undefined, {
+          old_value: contextOld[key],
+          new_value: contextNext[key],
+          preference,
+        });
+    }
     if (mergeChanged)
       d.emit("project_preferences_updated", undefined, {
         old_value: old.auto_merge_after_minutes,

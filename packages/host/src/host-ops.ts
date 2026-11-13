@@ -20,6 +20,7 @@ import {
   type Runtime,
   type RuntimeRef,
   recheckMerge,
+  recordContextUsageNotices,
   requestHostOpsExitConfirmation,
 } from "@cardigan/domain";
 import {
@@ -37,6 +38,12 @@ import {
   unfinishedBellAttempts,
 } from "@cardigan/store";
 import { readAttention } from "./attention.js";
+import {
+  type ContextUsageOptions,
+  contextThresholdView,
+  DEFAULT_CONTEXT_STALE_AFTER_MS,
+  readSessionContexts,
+} from "./context-usage.js";
 import { tryHostOpsLock } from "./host-ops-lock.js";
 import { revokeStoppedRunTokens, stopRunRuntime } from "./stop-run.js";
 
@@ -49,7 +56,7 @@ interface Options {
   ) => Promise<NonNullable<HostOpsExecution["snapshot"]>>;
   settings?: (project: ProjectId) => CommandState["project_settings"];
   clock?: Clock;
-  contextThresholdPct?: number;
+  contextUsage?: ContextUsageOptions;
   scrubCredentials?: (
     project: ProjectId,
     assignment: AssignmentId,
@@ -73,6 +80,7 @@ interface Options {
 /** Requests commit first. The dispatch loop drains intents; a restart resumes unfinished work. */
 export class HostOpsService {
   private readonly clock: Clock;
+  private lastContextPoll = Number.NEGATIVE_INFINITY;
   private serial: Promise<void> = Promise.resolve();
   constructor(private readonly options: Options) {
     this.clock = options.clock ?? { now: () => new Date().toISOString() };
@@ -81,7 +89,7 @@ export class HostOpsService {
     read: (context, project) => this.read(context, project),
     execute: (context, tool, params) => this.execute(context, tool, params),
   };
-  private read(context: ToolContext, project?: string) {
+  private async read(context: ToolContext, project?: string) {
     context.revalidateToken?.();
     const actor = context.identity.actor;
     if (project !== undefined && project !== actor.project_id)
@@ -89,6 +97,17 @@ export class HostOpsService {
         "unauthorized",
         "Diagnostics are limited to the authenticated project",
       );
+    this.options.store.uow.read((tx) =>
+      unwrap(
+        checkHostOpsAccess(
+          loadCommandState(tx, actor.project_id),
+          actor,
+          "host_ops_read_diagnostics",
+        ),
+      ),
+    );
+    const sessions = await this.sessions(actor.project_id);
+    context.revalidateToken?.();
     return this.options.store.uow.read((tx) => {
       const state = loadCommandState(tx, actor.project_id);
       const view = unwrap(
@@ -141,40 +160,22 @@ export class HostOpsService {
             r.recovery_owner === "host_ops" &&
             ["dispatched", "acked", "unknown"].includes(r.status),
         ),
-        sessions: state.assignments
-          .filter((a) => a.status === "active")
-          .map((a) => ({
-            assignment_id: a.id,
-            context_usage_pct: Math.min(
-              100,
-              state.runs.filter(
-                (r) =>
-                  r.assignment_id === a.id &&
-                  r.started_at &&
-                  r.started_at >=
-                    (state.events.findLast(
-                      (e) =>
-                        [
-                          "session_replaced",
-                          "assignment_resumed",
-                          "standing_session_restarted",
-                        ].includes(e.type) &&
-                        (e.payload as { assignment_id?: string })
-                          .assignment_id === a.id,
-                    )?.created_at ?? a.created_at),
-              ).length,
-            ),
-            context_usage_estimated: true,
-            context_usage_basis: "one_percent_per_started_run",
-            context_usage_threshold_pct: this.options.contextThresholdPct ?? 80,
-          })),
+        context_thresholds: contextThresholdView(state),
+        sessions: sessions.map(
+          ({ observation: _observation, ...view }) => view,
+        ),
       };
     });
   }
   private async execute(
     context: ToolContext,
     tool: HostOpsExecutionTool | "host_ops_recheck_merge",
-    p: { target_id: string; reason?: string; idempotency_key: string },
+    p: {
+      target_id: string;
+      reason?: string;
+      idempotency_key: string;
+      context_session_id?: string;
+    },
   ) {
     const { store } = this.options,
       actor = context.identity.actor,
@@ -215,7 +216,32 @@ export class HostOpsService {
           return effect.data;
         }),
       ).value;
+    const contextUsage =
+      p.context_session_id === undefined
+        ? undefined
+        : (await this.sessions(project)).find(
+            (v) =>
+              v.assignment_id === p.target_id &&
+              v.session_id === p.context_session_id &&
+              !v.stale,
+          )?.observation;
+    if (
+      p.context_session_id !== undefined &&
+      (!contextUsage || tool === "host_ops_cancel_run")
+    )
+      throw new ToolError(
+        "stale_target",
+        "精确上下文数据缺失、过期或会话已更换，请重新读取诊断",
+      );
     const params = {
+      ...(contextUsage
+        ? {
+            context_usage: contextUsage,
+            context_stale_after_ms:
+              this.options.contextUsage?.staleAfterMs ??
+              DEFAULT_CONTEXT_STALE_AFTER_MS,
+          }
+        : {}),
       tool,
       target_id: p.target_id as AssignmentId | RunId,
       reason: p.reason ?? "",
@@ -274,8 +300,61 @@ export class HostOpsService {
       }),
     ).value;
   }
+  private sessions(project: ProjectId) {
+    const state = this.options.store.uow.read((tx) =>
+      loadCommandState(tx, project),
+    );
+    return readSessionContexts(
+      state,
+      this.options.contextUsage,
+      this.clock.now(),
+      this.options.store.getProject(project)?.repo_path,
+    );
+  }
+  private async pollContexts() {
+    if (
+      !this.options.contextUsage ||
+      Date.parse(this.clock.now()) - this.lastContextPoll < 30_000
+    )
+      return;
+    this.lastContextPoll = Date.parse(this.clock.now());
+    for (const project of this.options.store.listProjects()) {
+      const sessions = await this.sessions(project.id);
+      for (const session of sessions) {
+        const usage = session.observation;
+        if (!usage || session.stale) continue;
+        this.options.store.uow.run((tx) => {
+          const state = loadCommandState(tx, project.id);
+          const effect = unwrap(
+            recordContextUsageNotices(
+              state,
+              { kind: "system", project_id: project.id },
+              usage,
+              this.options.contextUsage?.staleAfterMs ??
+                DEFAULT_CONTEXT_STALE_AFTER_MS,
+              { clock: this.clock, ids: tx.ids },
+            ),
+          );
+          persistEffect(tx, project.id, effect);
+          for (const { event, recipient } of effect.data)
+            recordNotification(this.options.store.database, {
+              project_id: project.id,
+              event_id: event.id,
+              seq: event.seq,
+              kind: "context_usage",
+              at: event.created_at,
+              recipient: { kind: "assignment", assignment_id: recipient },
+              ...(event.card_id ? { card_id: event.card_id } : {}),
+            });
+        });
+      }
+    }
+  }
   tick(): Promise<void> {
-    const next = this.serial.then(() => this.drain());
+    const next = this.serial.then(async () => {
+      await this.pollContexts();
+      await this.drain();
+    });
     this.serial = next.catch(() => {});
     return next;
   }
