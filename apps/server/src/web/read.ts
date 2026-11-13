@@ -6,6 +6,7 @@ import type {
   CardView,
   CommandPorts,
   CommandState,
+  ContextObservation,
   Decision,
   EventId,
   Machine,
@@ -22,6 +23,8 @@ import {
   autoMergeSchedule,
   builtinCardTemplates,
   cardTemplate,
+  contextObservationCurrent,
+  contextUsageLevel,
   currentMergeConfirmations,
   decisionActionView,
   deriveCardStatus,
@@ -35,6 +38,7 @@ import {
   markCardDone,
   notices,
   parseAvatarReference,
+  projectPreferences,
   projectSnapshot,
   type Result,
   ROLE_TOOL_ALLOWLISTS,
@@ -1315,6 +1319,32 @@ function runQueuedAt(state: CommandState) {
   };
 }
 
+/** C-232: the host patrol's latest fresh context sample per Assignment. */
+export type ExecutionContexts = ReadonlyMap<string, ContextObservation>;
+
+/**
+ * C-232: the Workbench shape of a context sample. Only the numbers leave the
+ * server; session id, cwd and transcript path stay in host diagnostics. The
+ * level is the host's own rule with this project's thresholds, so the page
+ * and the patrol agree at the rounding edges.
+ */
+function contextUsageView(
+  state: CommandState,
+  assignment: CommandState["assignments"][number],
+  contexts: ExecutionContexts | undefined,
+) {
+  const usage = contexts?.get(assignment.id);
+  if (!usage || !contextObservationCurrent(assignment, usage, state.events))
+    return undefined;
+  return {
+    used_ratio: usage.context_tokens / usage.context_window_size,
+    window_tokens: usage.context_window_size,
+    used_tokens: usage.context_tokens,
+    level: contextUsageLevel(usage, projectPreferences(state)) ?? null,
+    updated_at: usage.updated_at,
+  };
+}
+
 /** §8.5 执行视图: assignments with their newest Run, worktree, machine, cursor. */
 export function executionView(
   state: CommandState,
@@ -1322,6 +1352,7 @@ export function executionView(
   machines: readonly Machine[] = [],
   queue: readonly RunQueuePosition[] = [],
   queueWarningMinutes = 30,
+  contexts?: ExecutionContexts,
 ) {
   // §8.5: the newest Run is the one created last, not the one that started
   // last. A Run that is still queued has no `started_at`, and ordering by it
@@ -1354,6 +1385,21 @@ export function executionView(
         }
       : {};
   };
+  // C-232: the sample belongs to the Assignment's session, so only its newest
+  // Run carries it; older Runs of the same Assignment never do.
+  const contextByRun = new Map<
+    string,
+    NonNullable<ReturnType<typeof contextUsageView>>
+  >();
+  for (const assignment of state.assignments) {
+    const run = latestRun(assignment.id);
+    const usage = run && contextUsageView(state, assignment, contexts);
+    if (run && usage) contextByRun.set(run.id, usage);
+  }
+  const withContext = (run: Run) => {
+    const usage = contextByRun.get(run.id);
+    return usage ? { context_usage: usage } : {};
+  };
   return {
     project_id: state.project_id,
     generated_at: now,
@@ -1370,6 +1416,7 @@ export function executionView(
         card_id,
         card_priority: state.cards.find((c) => c.id === card_id)?.priority ?? 0,
         card_status: state.cards.find((c) => c.id === card_id)?.status ?? null,
+        card_title: state.cards.find((c) => c.id === card_id)?.title ?? null,
         ...(waiting ? { queue_ahead: waiting.ahead } : {}),
         standing_mode:
           assignment.scope === "standing"
@@ -1406,6 +1453,7 @@ export function executionView(
                 heartbeat_at: run.heartbeat_at ?? null,
                 heartbeat_note: run.heartbeat_note ?? null,
                 outcome: run.outcome,
+                ...withContext(run),
               },
         cursors: state.cursors
           .filter((cursor) => cursor.assignment_id === assignment.id)
@@ -1427,6 +1475,7 @@ export function executionView(
           ...withQueuedAt(run),
           ...warning(run),
           ...(waiting ? { queue_ahead: waiting.ahead } : {}),
+          ...withContext(run),
         };
       }),
   };

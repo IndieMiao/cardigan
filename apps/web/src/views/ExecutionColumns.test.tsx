@@ -193,6 +193,75 @@ test("C-207: context levels follow the host's 20% remind and 15% change-session 
   expect(contextReading(withUsage(1.2))?.remaining).toBe("0.00");
 });
 
+test("C-232: the server's level (project thresholds) wins over the local defaults", () => {
+  // 25% left is normal under the 20%/15% defaults, a reminder at 30%.
+  expect(
+    contextReading({
+      ...run,
+      context_usage: {
+        used_ratio: 0.75,
+        window_tokens: 200_000,
+        level: "handoff",
+      },
+    })?.level,
+  ).toBe("handoff");
+  // The server says no level: stay normal even past the local 15% default.
+  expect(
+    contextReading({
+      ...run,
+      context_usage: { used_ratio: 0.9, window_tokens: 200_000, level: null },
+    })?.level,
+  ).toBe("normal");
+  // Exact token count from the server is shown as is.
+  expect(
+    contextReading({
+      ...run,
+      context_usage: {
+        used_ratio: 0.6234,
+        window_tokens: 200_000,
+        used_tokens: 124_681,
+      },
+    })?.usedTokens,
+  ).toBe(124_681);
+});
+
+test("C-232: the task cell shows the Card title after its id, cut to one line", async () => {
+  const title = "执行视图读取接口补上卡片标题和上下文用量（C-207 遗留）".repeat(
+    3,
+  );
+  render(
+    <ExecutionPage
+      client={fakeClient({
+        execution: async () => ({
+          assignments: [{ ...base, card_title: title }, pm],
+          runs: [run, legacyRun],
+          machines: [],
+        }),
+        executionRuns: async () => ({ runs: [], total: 0, next_cursor: null }),
+      })}
+      projectId="p-1"
+    />,
+  );
+  await screen.findByRole("button", { name: "查看 A-1 详情" });
+  const coder = cells("A-1");
+  expect(coder.task).toContain("C-1");
+  expect(coder.task).toContain(title);
+  expect(coder.task?.indexOf("C-1")).toBeLessThan(
+    coder.task?.indexOf(title) ?? -1,
+  );
+  const titleNode = coder.row.querySelector(".execution-task-title");
+  expect(titleNode?.getAttribute("title")).toBe(title);
+  // A standing PM has no Card and so no title line.
+  expect(cells("A-7").row.querySelector(".execution-task-title")).toBeNull();
+  const css = readFileSync(
+    new NodeURL("../styles.css", import.meta.url),
+    "utf8",
+  );
+  const rule = /\.execution-task-title \{([^}]*)\}/u.exec(css)?.[1] ?? "";
+  expect(rule).toContain("text-overflow: ellipsis");
+  expect(rule).toContain("white-space: nowrap");
+});
+
 test("C-207: six columns put employee, task, state and context first and fold Harness/model/effort into one line", async () => {
   renderPage();
   await screen.findByRole("button", { name: "查看 A-1 详情" });

@@ -319,6 +319,9 @@ export async function startCardiganServer(
         startWebServer({
           store,
           mergeGate,
+          ...(hostOps
+            ? { contextUsage: (project) => hostOps.contextUsage(project) }
+            : {}),
           machineDisplayName: runCapacity.displayNameForMachine,
           runLimit: runCapacity.forMachine,
           runLimitMaximum: runCapacity.maxForMachine,

@@ -984,6 +984,62 @@ test.each(["codex", "pi"] as const)(
   },
 );
 
+test("C-232: the Workbench reads the last poll's fresh samples from memory, dropping stale or unknown ones", async () => {
+  const { assignment, run } = dispatched();
+  const execution = { mode: "local" as const, dataDir: f.dataDir };
+  const { runDir } = executionPaths(execution, f.project, assignment.id);
+  f.store.uow.run((tx) => {
+    const stored = tx.runs.get(f.project, run.id);
+    if (!stored) throw new Error("Missing fixture Run");
+    tx.runs.put(f.project, { ...stored, harness: "pi" });
+  });
+  service = new HostOpsService({
+    store: f.store,
+    runtime,
+    snapshot,
+    clock: f.clock,
+    contextUsage: { execution, staleAfterMs: 60000 },
+  });
+  const dir = join(runDir, "pi", "context-usage");
+  await mkdir(dir, { recursive: true });
+  const sample = (tokens: number | null) =>
+    writeFile(
+      join(dir, "pi-session-1.json"),
+      JSON.stringify({
+        agent: "pi",
+        session_id: "session-1",
+        cwd: runDir,
+        model: "fixture",
+        context_tokens: tokens,
+        context_window_size: tokens === null ? null : 1000,
+        used_percentage: tokens === null ? null : tokens / 10,
+        updated_at: f.clock.now(),
+      }),
+    );
+  await sample(420);
+  // Nothing is read on demand: before the first poll there is no sample.
+  expect(service.contextUsage(f.project).size).toBe(0);
+  await service.tick();
+  expect(service.contextUsage(f.project).get(assignment.id)).toMatchObject({
+    assignment_id: assignment.id,
+    session_id: "session-1",
+    context_tokens: 420,
+    context_window_size: 1000,
+    source: "pi_turn_end:getContextUsage",
+  });
+  // Past the stale limit the cached reading disappears even without a poll.
+  f.advance(61000);
+  expect(service.contextUsage(f.project).size).toBe(0);
+  // A newer unknown sample replaces the old one on the next poll.
+  await sample(420);
+  await service.tick();
+  expect(service.contextUsage(f.project).size).toBe(1);
+  f.advance(31000);
+  await sample(null);
+  await service.tick();
+  expect(service.contextUsage(f.project).size).toBe(0);
+});
+
 test("pi high watermark becomes non-actionable immediately when the installed extension reports unknown usage", async () => {
   const { assignment, run } = dispatched();
   const execution = { mode: "local" as const, dataDir: f.dataDir };
