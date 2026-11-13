@@ -103,6 +103,37 @@ test("pending notifications are grouped by recipient", () => {
   });
 });
 
+test("listNotifications narrows to the given ids and keeps seq order (C-216)", () => {
+  withTempStore((store) => {
+    seed(store);
+    const a = store.recordNotification(note(store, 5)).notification;
+    const b = store.recordNotification(
+      note(store, 1, { kind: "pm_ops" } as never),
+    ).notification;
+    const c = store.recordNotification(note(store, 1)).notification;
+    store.moveNotification({ project_id, id: c.id, event: "bell" });
+    const all = store.listNotifications({ project_id });
+    // The ids filter returns the same rows, in the same order, as filtering
+    // the full list in memory — including duplicates and unknown ids.
+    const ids = [a.id, c.id, b.id, a.id, "N-missing"];
+    expect(store.listNotifications({ project_id, ids })).toEqual(
+      all.filter((n) => ids.includes(n.id)),
+    );
+    expect(
+      store.listNotifications({ project_id, status: "pending", ids }),
+    ).toEqual(all.filter((n) => ids.includes(n.id) && n.status === "pending"));
+    expect(
+      store
+        .listNotifications({ project_id, status: "pending", ids })
+        .map((n) => n.seq),
+    ).toEqual([1, 5]);
+    expect(store.listNotifications({ project_id, ids: [] })).toEqual([]);
+    expect(
+      store.listNotifications({ project_id: "P-other" as never, ids }),
+    ).toEqual([]);
+  });
+});
+
 test("the notification state machine is enforced by the store", () => {
   withTempStore((store) => {
     seed(store);
