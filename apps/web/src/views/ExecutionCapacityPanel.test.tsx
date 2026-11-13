@@ -162,3 +162,46 @@ test("loading failures can retry and invalid host configuration cannot be saved"
   );
   expect(screen.getByText("合并检查配置无效，请联系主机管理员。")).toBeTruthy();
 });
+
+test("C-207: the panel folds to a one-line summary and cancel restores the saved limit", async () => {
+  render(
+    <ExecutionCapacityPanel
+      client={fakeClient({ executionCapacity: async () => capacity })}
+      projectId="p"
+      revision={0}
+    />,
+  );
+  const summary = await screen.findByText("Agent 运行中 5 / 上限 6 / 排队 2");
+  const details = summary.closest("details") as HTMLDetailsElement;
+  expect(details.open).toBe(false);
+  expect(details.querySelector("summary")?.textContent).toContain(
+    "查看与调整上限",
+  );
+  expect(details.querySelector("summary")?.textContent).toContain("全项目共用");
+  // The edit form stays inside the folded body.
+  const input = screen.getByRole<HTMLInputElement>("spinbutton");
+  expect(details.contains(input)).toBe(true);
+  expect(screen.queryByRole("button", { name: "取消" })).toBeNull();
+  fireEvent.change(input, { target: { value: "9" } });
+  fireEvent.click(screen.getByRole("button", { name: "取消" }));
+  expect(input.value).toBe("6");
+  expect(screen.queryByRole("button", { name: "取消" })).toBeNull();
+});
+
+test("C-207: an invalid host limit shows as unavailable in the summary", async () => {
+  render(
+    <ExecutionCapacityPanel
+      client={fakeClient({
+        executionCapacity: async () => ({
+          ...capacity,
+          agents: [{ ...agent, limit: 0 }],
+        }),
+      })}
+      projectId="p"
+      revision={0}
+    />,
+  );
+  expect(
+    await screen.findByText("Agent 运行中 5 / 上限 不可用 / 排队 2"),
+  ).toBeTruthy();
+});

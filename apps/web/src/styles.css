@@ -566,27 +566,55 @@ button.quiet,
   display: flex;
   gap: 8px;
 }
-.execution-page .page-actions {
-  min-width: 0;
-  width: min(100%, 520px);
-}
+/* C-207: machine capacity folds to one line below the execution list. */
 .execution-capacity {
-  width: 100%;
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
+  margin-top: 16px;
+  border-top: 1px solid var(--border);
   font-size: var(--text-sm);
   overflow-wrap: anywhere;
 }
-.execution-capacity-heading,
+.execution-capacity > details > summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  min-height: 40px;
+  padding: 8px 0;
+  cursor: pointer;
+  list-style: none;
+}
+.execution-capacity > details > summary::-webkit-details-marker {
+  display: none;
+}
+.execution-capacity > details > summary::before {
+  content: "▸";
+  color: var(--text-muted);
+}
+.execution-capacity > details[open] > summary::before {
+  content: "▾";
+}
+.execution-capacity-title {
+  color: var(--text);
+}
+.execution-capacity-summary {
+  font-variant-numeric: tabular-nums;
+}
+.execution-capacity-more {
+  margin-left: auto;
+  color: var(--accent);
+  text-decoration: underline;
+}
+.execution-capacity-body {
+  max-width: 720px;
+  padding: 0 0 12px 20px;
+}
+.execution-capacity-body > .hint {
+  margin: 8px 0 0;
+}
 .execution-capacity-edit {
   display: flex;
   align-items: center;
   gap: 8px;
-}
-.execution-capacity-heading {
-  justify-content: space-between;
 }
 .execution-capacity-row {
   display: flex;
@@ -594,13 +622,15 @@ button.quiet,
   align-items: center;
   justify-content: space-between;
   gap: 8px 12px;
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px solid var(--border);
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
 }
 .execution-capacity-count {
   display: grid;
   gap: 4px;
+}
+.execution-capacity-count strong {
+  font-weight: 400;
 }
 .execution-capacity-edit input {
   width: 5rem;
@@ -610,13 +640,15 @@ button.quiet,
 .execution-capacity-row > [role] {
   flex-basis: 100%;
 }
-@media (max-width: 1000px) {
-  .execution-page .page-title {
-    flex-direction: column;
-  }
-  .execution-page .page-actions {
-    width: 100%;
-  }
+.execution-capacity > [role="alert"] {
+  margin: 4px 0 0;
+}
+.execution-capacity-jump {
+  white-space: nowrap;
+}
+.execution-machines {
+  margin-top: 8px;
+  font-size: var(--text-sm);
 }
 .empty {
   padding: 24px 0;
@@ -2244,44 +2276,144 @@ fieldset.filters {
 .execution-page {
   max-width: 1600px;
 }
+/* C-207: six columns; only the employee name carries weight, the rest is
+   regular text. Rows stay within 72px so 1440x900 shows seven at once. */
 .execution-table {
   width: 100%;
   min-width: 1080px;
+  table-layout: fixed;
   border-collapse: collapse;
   font-size: var(--text-sm);
-  line-height: 1.45;
+  line-height: 20px;
+}
+.execution-col-employee {
+  width: 232px;
+}
+.execution-col-state {
+  width: 176px;
+}
+.execution-col-context {
+  width: 196px;
+}
+.execution-col-config {
+  width: 184px;
+}
+.execution-col-activity {
+  width: 104px;
 }
 .execution-table th,
 .execution-table td {
-  padding: 10px 8px;
+  padding: 8px;
   border-bottom: 1px solid var(--border);
   text-align: left;
   vertical-align: top;
 }
 .execution-table th {
   color: var(--text-muted);
-  font-weight: 600;
+  font-weight: 400;
   white-space: nowrap;
 }
-.execution-status {
-  display: grid;
-  /* C-159: the value track is at least as wide as its unwrapped status, so
-     the column grows and the table scrolls instead of the text spilling
-     into the next column. */
-  grid-template-columns: auto minmax(min-content, 1fr);
-  gap: 2px 6px;
-  margin: 0;
+.execution-employee {
+  flex-wrap: nowrap;
 }
-.execution-status dt {
+.execution-state {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 8px;
+  min-height: 20px;
+}
+.execution-state .status {
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+.execution-state-note {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  font-size: var(--text-xs);
   color: var(--text-muted);
 }
-/* C-159: status labels keep their icon and words on one line; the table
-   scrolls sideways instead. */
-.execution-status :is(dt, .status) {
+.execution-state-note:empty {
+  display: none;
+}
+.execution-state-note .status {
+  color: var(--text-muted);
+}
+.execution-task {
+  min-height: 24px;
+}
+.execution-config {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+.execution-config-text {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
-.execution-status dd {
-  margin: 0;
+.execution-table td[data-column="activity"] {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+.execution-context {
+  display: grid;
+  gap: 2px;
+  font-size: var(--text-xs);
+  line-height: 16px;
+}
+.execution-context-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.execution-context-value {
+  font-size: var(--text-reading);
+  line-height: 20px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+.execution-context-meter {
+  position: relative;
+  display: block;
+  height: 4px;
+  max-width: 160px;
+  border-radius: 2px;
+  background: var(--surface-muted);
+  /* Ticks at 80% and 85% used: the remind and change-session lines. */
+  background-image:
+    linear-gradient(var(--text-muted), var(--text-muted)),
+    linear-gradient(var(--text-muted), var(--text-muted));
+  background-size: 1px 100%;
+  background-position:
+    80% 0,
+    85% 0;
+  background-repeat: no-repeat;
+}
+.execution-context-fill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--text-muted);
+}
+.execution-context-label {
+  color: var(--text-muted);
+}
+.execution-context-handoff .execution-context-label,
+.execution-context-handoff .execution-context-value {
+  color: var(--status-wait);
+}
+.execution-context-handoff .execution-context-fill {
+  background: var(--status-wait);
+}
+.execution-context-restart .execution-context-label,
+.execution-context-restart .execution-context-value {
+  color: var(--danger);
+}
+.execution-context-restart .execution-context-fill {
+  background: var(--danger);
 }
 .execution-row {
   cursor: pointer;
@@ -2290,33 +2422,91 @@ fieldset.filters {
   background: var(--surface-muted);
 }
 /* C-106: the Assignment id is the row's drawer trigger. */
-.execution-assignment {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  flex-wrap: wrap;
+/* C-207: in the execution list the employee name is the only weighted
+   text; shared id badges (500 elsewhere) drop to regular here. */
+.execution-page :is(.execution-table, .execution-cards) .id-badge {
+  font-weight: 400;
 }
-.execution-open {
-  padding: 0 4px;
-  font-family: var(--font-code);
-  font-size: var(--text-sm);
-  font-weight: 600;
+button.execution-open {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 0 2px;
+  border-color: transparent;
+  background: transparent;
+  font-weight: 400;
   white-space: nowrap;
 }
-/* C-106: nine columns scroll sideways on narrow screens instead of
-   stretching the page. */
+/* C-106: the table scrolls sideways inside its own box when the content
+   area is narrower than the six columns. */
 .execution-table-scroll {
   max-width: 100%;
   overflow-x: auto;
-}
-.execution-table td[data-column] {
-  white-space: nowrap;
 }
 .execution-run {
   display: inline-flex;
   align-items: baseline;
   gap: 6px;
   flex-wrap: wrap;
+}
+/* C-207: below 760px each Assignment is a card in reading order. */
+.execution-cards {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.execution-card {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.execution-card.selected {
+  background: var(--surface-muted);
+}
+.execution-card-head {
+  justify-content: space-between;
+}
+.execution-card-context {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: start;
+  gap: 12px;
+}
+.execution-card-foot {
+  justify-content: space-between;
+}
+.execution-card-config-summary {
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  cursor: pointer;
+  list-style: none;
+}
+.execution-card-config-summary::-webkit-details-marker {
+  display: none;
+}
+.execution-card-config-summary::before {
+  content: "▸";
+}
+.execution-card-config[open] > .execution-card-config-summary::before {
+  content: "▾";
+}
+.execution-card-config-line {
+  margin: 4px 0;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+.execution-sort {
+  white-space: nowrap;
 }
 .execution-row.selected {
   background: var(--surface-muted);
@@ -4443,4 +4633,7 @@ body[data-lightbox="open"] .drawer-overlay {
 
 .decision-status-line > :is(.status-open, .status-snoozed) .status-icon {
   color: var(--status-wait);
+}
+.metadata .execution-sort {
+  margin-left: auto;
 }
