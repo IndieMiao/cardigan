@@ -148,7 +148,7 @@ test("stop is refused while a host operation is pending, so neither is left unfi
   for (const extra of [{}, { released_runtime_ref: ref }]) {
     const refused = stop(pending, extra);
     expect(refused.ok).toBe(false);
-    expect(!refused.ok && refused.error.message).toMatch(/host operation/);
+    expect(!refused.ok && refused.error.message).toMatch(/待处理的主机运维操作/);
   }
 });
 

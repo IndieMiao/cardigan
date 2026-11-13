@@ -89,7 +89,7 @@ export function stopWorkItemAssignment(
     ensure(
       !hostOpsPending(state.events, a.id),
       "illegal_transition",
-      "A host operation is pending; let it finish before stopping",
+      `${a.id} 还有待处理的主机运维操作，等它处理完再停止；之后可以重新执行 cardigan assignment stop ${a.id}`,
     );
     const card = d.work(a.work_item_id).card_id;
     const cancel = (runs: readonly Run[]) => {
