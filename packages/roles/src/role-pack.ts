@@ -58,6 +58,17 @@ export const PM_TEMPLATE_RULES = [
 export const HUMAN_ACTION_MERGE_RULE =
   "事项不完成就不应该合并时（例如需要人提供或轮换凭据、人确认安全或权限取舍、人在仓库外完成某个前置操作），`request_human_action` 必须传 `blocks_merge=true`；只是请人看看、知会或可以事后补做的，不设。";
 
+/**
+ * C-179: reviews done before merge (screenshot checks, independent security
+ * reviews) go through pre-merge checks (C-160), not merge-blocking human
+ * actions (C-112); the two channels do not close each other.
+ */
+export const PM_PRE_MERGE_CHECK_RULE =
+  "截图核对、独立安全审核这类合并前的核对，一律用合并前核对项（`update_card` 的 `pre_merge_check`：PM Ops 设 pending，PM Office 设 passed 或 failed），不再另开挡合并（`blocks_merge`）的人工待办；只有确实要人在系统外动手的事，才开人工待办。核对项通过时，如果本卡还有挡合并的人工待办，系统会提醒它的分拣方（PM Ops 或人）确认是否可以完成；系统不会自动完成，收到提醒的 PM Ops 核实后自己处理或交人。";
+
+export const REVIEWER_PRE_MERGE_CHECK_RULE =
+  "认为合并前还需要截图核对、独立安全审核这类核对时，不另开挡合并（`blocks_merge`）的人工待办，在审核结论里写明要核对什么，由 PM 设合并前核对项；只有确实要人在系统外动手的事，才开人工待办。";
+
 export const PM_DECISION_RULES = [
   "`request_decision` 要自包含：`context` 写清背景和为什么要人来定，不用没解释过的内部代号；每个选项的 `impact` 写清代价；`recommended` 写推荐和理由；在 `context` 里说明不回复会卡住什么，以及回复之前哪些工作照常推进。",
   '发起之前先查已有的 Decision，人已经回答过的不再问。要推翻人以前亲自选过的选项，就单独发起一条，写明"推翻"，不要在下游顺手改掉。',
@@ -127,6 +138,7 @@ const ROLE_BODIES: Record<
     "- 用 `create_work_item` / `update_work_item` 维护工作项，用 `assign` 指派负责人。",
     "- 工作项绑错员工或需要换人时，由 PM Ops 先用 `release_assignment` 释放原 Assignment（CLI：`cardigan assignment release <A-n>`）；有未结束 Run 时先请主机执行 `cardigan assignment stop <A-n>`。一个工作项终身只绑定一个 Assignment，释放后也不能直接改派原工作项；应取消原工作项，另建工作项后再指派。模板绑定的验证项须走正式替换流程，不能用普通新建验证项代替。PM Office 和工作项级 PM 不能释放 Assignment；常驻 Assignment 只能由人释放。",
     "- 用 `create_card` / `update_card` 维护卡片；卡片进入 `done` 必须经过完成申请和验收，不能手工置为 done。",
+    `- ${PM_PRE_MERGE_CHECK_RULE}`,
     "- 卡片优先级决定 Run 和合并检查的执行顺序：紧急事项调高优先级，用完调回；只用无、低、中、高、紧急五档。",
     "- 用 `project_snapshot` 和 `list_needs_you` 回答“现在到哪一步、下一步谁做、被什么阻塞”。",
     "- 用 `list_templates` / `list_roles` 只读查看本项目可用的卡片模板和角色；这两个工具不能新建或修改模板、角色。",
@@ -227,6 +239,7 @@ const ROLE_BODIES: Record<
     "- 不改代码，不 push，不在审核结论里夹带实施建议以外的改动。",
     "- 需要人操作时用 `request_human_action`。",
     `- ${HUMAN_ACTION_MERGE_RULE}`,
+    `- ${REVIEWER_PRE_MERGE_CHECK_RULE}`,
   ].join("\n"),
   designer: [
     "# 角色：designer",
