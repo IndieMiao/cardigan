@@ -204,9 +204,10 @@ test("U1/C-209 shell orders Needs You first with its count, then 卡片, 观察 
     "拍板记录",
     "项目快照",
     "设置",
+    "帮助",
   ]);
   // C-209: Needs You and 卡片 sit above the only heading, 观察; the tools
-  // (设置, 登出) form their own unlabelled group at the bottom.
+  // (设置, 帮助, 登出) form their own unlabelled group at the bottom.
   expect(
     within(sidebar)
       .getAllByRole("heading")
@@ -217,10 +218,10 @@ test("U1/C-209 shell orders Needs You first with its count, then 卡片, 观察 
     within(tools)
       .getAllByRole("link")
       .map((a) => a.textContent),
-  ).toEqual(["设置"]);
+  ).toEqual(["设置", "帮助"]);
   expect(within(tools).getByRole("button", { name: "登出" })).toBeTruthy();
   expect(needsLink.className).toContain("needs-link");
-  expect(sidebar.querySelectorAll("a svg.nav-icon")).toHaveLength(7);
+  expect(sidebar.querySelectorAll("a svg.nav-icon")).toHaveLength(8);
   expect(await screen.findByRole("heading", { name: /卡片/u })).toBeTruthy();
 });
 

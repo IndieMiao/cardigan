@@ -5,6 +5,7 @@
     "outDir": "dist",
     "tsBuildInfoFile": "./node_modules/.cache/tsconfig.tsbuildinfo",
     "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "types": ["vite/client"],
     "jsx": "react-jsx",
     "noEmit": true
   },
