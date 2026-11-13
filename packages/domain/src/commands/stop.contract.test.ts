@@ -9,6 +9,7 @@ import { HOST_OPS_ROLE_TOOLS } from "../host-ops.js";
 import { occupiedRunSlots } from "../run-capacity.js";
 import type { CommandState } from "./core.js";
 import { beginHostOpsAction } from "./host-ops-actions.js";
+import { dispatchRun } from "./launch.js";
 import { stoppedByHuman, stopWorkItemAssignment } from "./stop.js";
 import {
   actor,
@@ -240,4 +241,105 @@ test("host_ops cannot restart a stopped Assignment", () => {
   const refused = beginHostOpsAction(stopped, caller, restart, ports());
   expect(refused.ok).toBe(false);
   expect(!refused.ok && refused.error.message).toMatch(/stopped by the human/);
+});
+
+/**
+ * C-235: fix the guarantees between a stop and a start already in flight.
+ * The host launch flow only lets an Agent start after `dispatchRun` commits;
+ * these cases pin that the domain refuses that commit once the stop won.
+ */
+const freshRef: RuntimeRef = {
+  ...ref,
+  terminal_ref: "t-new",
+  agent_name: "a-new",
+};
+const dispatch = (s: CommandState, runtime_ref?: RuntimeRef) =>
+  dispatchRun(
+    s,
+    human,
+    {
+      run_id: id("run", 9),
+      launch_snapshot: { model: "test", agent_cli_version: "test" },
+      ...(runtime_ref === undefined ? {} : { runtime_ref }),
+    },
+    ports(),
+  );
+/** Assignment 1 between Runs: the previous Run finished, its terminal idles. */
+function idle(): CommandState {
+  const s = base();
+  return {
+    ...s,
+    assignments: s.assignments.map((a) =>
+      a.id === id("assignment", 1)
+        ? ({ ...a, runtime_state: "idle" } as Assignment)
+        : a,
+    ),
+    runs: s.runs.map((r) =>
+      r.id === id("run", 1)
+        ? { ...r, status: "completed", outcome: "completed" as never }
+        : r,
+    ),
+  };
+}
+
+test("C-235 a Run the stop already cancelled is never dispatched, on a fresh or the existing terminal", () => {
+  const s = idle();
+  // Control: before the stop the same queued Run can be dispatched both ways.
+  expect(dispatch(s, freshRef).ok).toBe(true);
+  expect(dispatch(s).ok).toBe(true);
+
+  const stopped = apply(s, (stop(s) as { ok: true; value: never }).value);
+  expect(stopped.runs.find((r) => r.id === id("run", 9))?.status).toBe(
+    "cancelled",
+  );
+  for (const attempt of [dispatch(stopped, freshRef), dispatch(stopped)]) {
+    expect(attempt.ok).toBe(false);
+    if (!attempt.ok) expect(attempt.error.code).toBe("illegal_transition");
+  }
+  // Nothing about the refused dispatch lifts the stop or records a terminal.
+  expect(stoppedByHuman(stopped.events, id("assignment", 1))).toBe(true);
+  expect(
+    stopped.events.some(
+      (e) =>
+        e.type === "run_dispatched" &&
+        (e.payload as { run_id?: string }).run_id === id("run", 9),
+    ),
+  ).toBe(false);
+});
+
+test("C-235 a wake dispatched before the stop is cancelled and its terminal released", () => {
+  const s = idle();
+  // The bell path dispatches the queued Run onto the existing terminal...
+  const woken = apply(s, (dispatch(s) as { ok: true; value: never }).value);
+  expect(woken.runs.find((r) => r.id === id("run", 9))?.status).toBe(
+    "dispatched",
+  );
+  expect(stoppedByHuman(woken.events, id("assignment", 1))).toBe(false);
+
+  // ...then the human stops. Step 1 records the stop; the dispatched Run
+  // keeps its slot because its terminal has not been released yet.
+  const first = stop(woken);
+  expect(first.ok && first.value.data.cancelled).toBe(0);
+  const stopped = apply(woken, (first as { ok: true; value: never }).value);
+  expect(stoppedByHuman(stopped.events, id("assignment", 1))).toBe(true);
+  expect(stopped.runs.find((r) => r.id === id("run", 9))?.status).toBe(
+    "dispatched",
+  );
+
+  // Step 2, after the host released that terminal: the Run is cancelled and
+  // the Assignment no longer points at any terminal.
+  const settled = stop(stopped, { released_runtime_ref: ref });
+  expect(settled.ok && settled.value.data.cancelled).toBe(1);
+  const next = apply(stopped, (settled as { ok: true; value: never }).value);
+  expect(next.runs.find((r) => r.id === id("run", 9))).toMatchObject({
+    status: "cancelled",
+    summary: "stopped by host",
+  });
+  expect(
+    next.assignments.find((x) => x.id === id("assignment", 1)),
+  ).toMatchObject({ runtime_ref: null });
+  expect(stoppedByHuman(next.events, id("assignment", 1))).toBe(true);
+  // The cancelled Run cannot be dispatched again by a late wake either.
+  expect(dispatch(next).ok).toBe(false);
+  expect(dispatch(next, freshRef).ok).toBe(false);
 });
