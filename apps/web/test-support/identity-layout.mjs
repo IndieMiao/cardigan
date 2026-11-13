@@ -52,7 +52,7 @@ try {
       const deadline = Date.now() + 15000;
       while (
         !(await browser.evaluate(
-          "Boolean(document.querySelector('.needs-delivery-head') && document.querySelector('.execution-row'))",
+          "Boolean(document.querySelector('.needs-delivery-head') && document.querySelector('.execution-row, .execution-card'))",
         ))
       ) {
         assert(Date.now() < deadline, "fixture did not load");

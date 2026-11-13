@@ -96,6 +96,19 @@ function AgentLimit({
         >
           {pending ? "保存中…" : "保存"}
         </button>
+        {draft !== undefined && !pending && (
+          <button
+            type="button"
+            className="quiet"
+            onClick={() => {
+              setDraft(undefined);
+              setError("");
+              setMessage("");
+            }}
+          >
+            取消
+          </button>
+        )}
       </div>
       {!valid && (
         <span id={`${inputId}-validation`} className="hint">
@@ -118,11 +131,28 @@ function AgentLimit({
   );
 }
 
+/** C-207: one folded line, e.g. "Agent 运行中 4 / 上限 6 / 排队 2". */
+function summary(
+  data: ExecutionCapacity | undefined,
+  error: string | undefined,
+) {
+  if (!data) return error ? "读取失败" : "正在读取…";
+  if (!data.agents.length) return "暂无 Agent 机器";
+  const sum = (pick: (m: ExecutionCapacity["agents"][number]) => number) =>
+    data.agents.reduce((total, machine) => total + pick(machine), 0);
+  const limit = data.agents.some((machine) => machine.limit === 0)
+    ? "不可用"
+    : sum((machine) => machine.limit);
+  return `Agent 运行中 ${sum((m) => m.running)} / 上限 ${limit} / 排队 ${sum((m) => m.queued)}`;
+}
+
 export function ExecutionCapacityPanel({
+  id,
   client,
   projectId,
   revision,
 }: {
+  id?: string;
   client: CardiganClient;
   projectId: string;
   revision: number;
@@ -139,10 +169,44 @@ export function ExecutionCapacityPanel({
   }, [reload]);
   return (
     <section className="execution-capacity" aria-label="机器并发">
-      <div className="execution-capacity-heading">
-        <strong>机器并发</strong>
-        <span className="hint">全项目共用</span>
-      </div>
+      {/* C-207: folded below the list; the body stays mounted so drafts survive. */}
+      <details id={id}>
+        <summary>
+          <span className="execution-capacity-title">机器并发</span>
+          <span className="execution-capacity-summary">
+            {summary(data, error)}
+          </span>
+          <span className="hint">全项目共用</span>
+          <span className="execution-capacity-more">查看与调整上限</span>
+        </summary>
+        <div className="execution-capacity-body">
+          {!data && !error && <p className="hint">正在读取并发信息…</p>}
+          {data?.agents.map((machine) => (
+            <AgentLimit
+              key={machine.machine_id}
+              machine={machine}
+              client={client}
+              projectId={projectId}
+              saved={reload}
+            />
+          ))}
+          {!!data?.agents.length && (
+            <p className="hint">调低上限不会停止已运行的任务。</p>
+          )}
+          {data?.merge_checks.map((machine) => (
+            <div key={machine.machine_id} className="execution-capacity-row">
+              <div className="execution-capacity-count">
+                <strong>{machine.machine_id} · 合并检查</strong>
+                <span>
+                  运行中 {machine.running} / 上限 {machine.limit} / 排队{" "}
+                  {machine.queued}
+                </span>
+              </div>
+              <span className="hint">需要主机预置，找张良</span>
+            </div>
+          ))}
+        </div>
+      </details>
       {error && (
         <p role="alert">
           读取并发信息失败：{error}{" "}
@@ -151,31 +215,6 @@ export function ExecutionCapacityPanel({
           </button>
         </p>
       )}
-      {!data && !error && <p className="hint">正在读取并发信息…</p>}
-      {data?.agents.map((machine) => (
-        <AgentLimit
-          key={machine.machine_id}
-          machine={machine}
-          client={client}
-          projectId={projectId}
-          saved={reload}
-        />
-      ))}
-      {!!data?.agents.length && (
-        <p className="hint">调低上限不会停止已运行的任务。</p>
-      )}
-      {data?.merge_checks.map((machine) => (
-        <div key={machine.machine_id} className="execution-capacity-row">
-          <div className="execution-capacity-count">
-            <strong>{machine.machine_id} · 合并检查</strong>
-            <span>
-              运行中 {machine.running} / 上限 {machine.limit} / 排队{" "}
-              {machine.queued}
-            </span>
-          </div>
-          <span className="hint">需要主机预置，找张良</span>
-        </div>
-      ))}
       {data?.merge_config_invalid && (
         <p role="alert">合并检查配置无效，请联系主机管理员。</p>
       )}

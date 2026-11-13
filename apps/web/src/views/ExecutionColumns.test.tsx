@@ -2,13 +2,21 @@
 
 import { readFileSync } from "node:fs";
 import { URL as NodeURL } from "node:url";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, expect, test } from "vitest";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from "@testing-library/react";
+import { afterEach, expect, test, vi } from "vitest";
 import type { ExecutionAssignment, RunView } from "../api.js";
 import { fakeClient } from "../testing/fixtures.js";
 import {
+  contextReading,
   contextUsage,
   ExecutionPage,
+  runConfig,
   runHarness,
   runModelEffort,
 } from "./ExecutionPage.js";
@@ -114,13 +122,19 @@ const cells = (assignmentId: string) => {
     row.querySelector(`td[data-column="${column}"]`)?.textContent;
   return {
     row,
-    harness: at("harness"),
-    model: at("model"),
+    employee: at("employee"),
+    task: at("task"),
+    state: at("state"),
+    config: at("config"),
     context: at("context"),
   };
 };
+const withUsage = (used_ratio: number, window_tokens = 200_000): RunView => ({
+  ...run,
+  context_usage: { used_ratio, window_tokens },
+});
 
-test("C-106: formatting shows recorded values and '—' for anything unknown", () => {
+test("C-106/C-207: formatting shows recorded values and '—' for anything unknown", () => {
   expect(runHarness(run)).toBe("claude");
   expect(runHarness({ ...run, harness: "codex" })).toBe("codex");
   expect(runHarness({ ...run, harness: "pi" })).toBe("pi");
@@ -129,13 +143,13 @@ test("C-106: formatting shows recorded values and '—' for anything unknown", (
   expect(runModelEffort(run)).toBe("opus-5.5 / xhigh");
   expect(runModelEffort(legacyRun)).toBe("fixture-model / —");
   expect(runModelEffort(undefined)).toBe("—");
-  expect(contextUsage(run)).toBe("90%（1M）");
-  expect(
-    contextUsage({
-      ...run,
-      context_usage: { used_ratio: 0.423, window_tokens: 200_000 },
-    }),
-  ).toBe("42%（200K）");
+  expect(runConfig(run)).toBe("claude / opus-5.5 / xhigh");
+  expect(runConfig(legacyRun)).toBe("— / fixture-model / —");
+  expect(runConfig(undefined)).toBe("—");
+  expect(contextUsage(run)).toBe("已用 90.00%，剩余 10.00%（1M）");
+  expect(contextUsage(withUsage(0.6234))).toBe(
+    "已用 62.34%，剩余 37.66%（200K）",
+  );
   expect(contextUsage(legacyRun)).toBe("—");
   expect(contextUsage({ ...run, context_usage: undefined })).toBe("—");
   expect(
@@ -153,7 +167,33 @@ test("C-106: formatting shows recorded values and '—' for anything unknown", (
   expect(contextUsage(undefined)).toBe("—");
 });
 
-test("C-106: employee and Assignment are separate columns, with the new Harness, model/effort and context columns", async () => {
+test("C-207: context levels follow the host's 20% remind and 15% change-session thresholds", () => {
+  expect(contextReading(withUsage(0.6234))?.level).toBe("normal");
+  expect(contextReading(withUsage(0.79))?.level).toBe("normal");
+  // Both boundaries belong to the stricter level, as on the host.
+  expect(contextReading(withUsage(0.8))?.level).toBe("handoff");
+  expect(contextReading(withUsage(0.849))?.level).toBe("handoff");
+  expect(contextReading(withUsage(0.85))?.level).toBe("restart");
+  expect(contextReading(withUsage(0.97))?.level).toBe("restart");
+  // Shown with two decimals; the level follows the host's 0.1 rounding of
+  // what is left, never the displayed value.
+  expect(contextReading(withUsage(0.79949))).toMatchObject({
+    used: "79.95",
+    remaining: "20.05",
+    level: "normal",
+  });
+  expect(contextReading(withUsage(0.79951))?.level).toBe("handoff");
+  expect(contextReading(withUsage(0.5))).toMatchObject({
+    window: "200K",
+    usedTokens: 100_000,
+    windowTokens: 200_000,
+    meter: 50,
+  });
+  expect(contextReading(withUsage(1.2))?.meter).toBe(100);
+  expect(contextReading(withUsage(1.2))?.remaining).toBe("0.00");
+});
+
+test("C-207: six columns put employee, task, state and context first and fold Harness/model/effort into one line", async () => {
   renderPage();
   await screen.findByRole("button", { name: "查看 A-1 详情" });
   const headers = screen
@@ -161,44 +201,44 @@ test("C-106: employee and Assignment are separate columns, with the new Harness,
     .map((header) => header.textContent?.replace(/[↑↓]/gu, "").trim());
   expect(headers).toEqual([
     "员工",
-    "Assignment",
-    "卡片和工作项",
+    "正在做什么",
     "运行状态",
-    "Harness",
-    "模型和 effort",
     "上下文用量",
-    "最近 Run",
+    "运行配置",
     "最近活动",
   ]);
 
   const coder = cells("A-1");
-  const [employeeCell, assignmentCell] = [...coder.row.cells];
-  expect(employeeCell?.textContent).toContain("孙悟空");
-  expect(employeeCell?.textContent).not.toContain("A-1");
-  expect(assignmentCell?.textContent).toContain("A-1");
-  expect(assignmentCell?.textContent).toContain("coder");
-  expect(assignmentCell?.textContent).not.toContain("孙悟空");
-  // With recorded values.
-  expect(coder).toMatchObject({
-    harness: "claude",
-    model: "opus-5.5 / xhigh",
-    context: "90%（1M）",
-  });
+  // The Assignment id shares the employee's line.
+  expect(coder.employee).toContain("孙悟空");
+  expect(coder.employee).toContain("A-1");
+  expect(coder.task).toContain("C-1");
+  expect(coder.task).toContain("W-1");
+  expect(coder.state).toContain("空闲");
+  expect(coder.state).not.toContain("有效");
+  expect(coder.config).toBe("claude / opus-5.5 / xhigh");
+  expect(coder.context).toContain("90.00%");
+  expect(coder.context).toContain("剩余 10.00%");
+  expect(coder.context).toContain("换会话");
+  expect(coder.context).toContain("1M");
+  expect(
+    coder.row.querySelector(".execution-context")?.getAttribute("data-level"),
+  ).toBe("restart");
 
   // Recorded Run without launch profile data or context usage.
   const backstage = cells("A-7");
-  expect(backstage.row.cells[1]?.textContent).toContain("PM 后台");
-  expect(backstage).toMatchObject({
-    harness: "—",
-    model: "fixture-model / —",
-    context: "—",
-  });
+  expect(backstage.task).toContain("常驻 PM（项目级）");
+  expect(backstage.task).toContain("PM 后台");
+  expect(backstage.config).toBe("— / fixture-model / —");
+  expect(backstage.context).toBe("—尚未上报");
 
-  // The external Assignment has no Run: every new column is "—".
+  // The external Assignment has no Run.
   const outside = cells("A-9");
-  expect(outside.row.cells[0]?.textContent).toContain("张良");
-  expect(outside.row.cells[1]?.textContent).toContain("PM 前台");
-  expect(outside).toMatchObject({ harness: "—", model: "—", context: "—" });
+  expect(outside.employee).toContain("张良");
+  expect(outside.task).toContain("PM 前台");
+  expect(outside.state).toContain("外接身份");
+  expect(outside.config).toBe("—");
+  expect(outside.context).toBe("—外接身份，暂无数据");
 
   // C-73: newest activity first is unchanged.
   expect(
@@ -206,6 +246,26 @@ test("C-106: employee and Assignment are separate columns, with the new Harness,
       (row) => row.querySelector(".execution-open")?.textContent,
     ),
   ).toEqual(["A-1", "A-7", "A-9"]);
+});
+
+test("C-207: abnormal Assignment status and a bad Run outcome stay in the row", async () => {
+  window.location.hash = "#/p/p-1/execution?view=all";
+  render(
+    <ExecutionPage
+      client={fakeClient({
+        execution: async () => ({
+          assignments: [{ ...base, status: "suspended" }],
+          runs: [{ ...run, status: "completed", outcome: "failed" }],
+          machines: [],
+        }),
+      })}
+      projectId="p-1"
+    />,
+  );
+  await screen.findByRole("button", { name: "查看 A-1 详情" });
+  const state = cells("A-1").state;
+  expect(state).toContain("已暂停");
+  expect(state).toContain("最近执行失败");
 });
 
 test("C-106: clicking the row or the Assignment id opens the drawer; the id is a keyboard-focusable button", async () => {
@@ -223,10 +283,13 @@ test("C-106: clicking the row or the Assignment id opens the drawer; the id is a
   // A plain cell of another row opens that row's drawer instead.
   const coder = cells("A-1");
   fireEvent.click(
-    coder.row.querySelector('td[data-column="model"]') as Element,
+    coder.row.querySelector('td[data-column="config"]') as Element,
   );
-  expect(await screen.findByRole("dialog", { name: "A-1 详情" })).toBeTruthy();
+  const drawer = await screen.findByRole("dialog", { name: "A-1 详情" });
   expect(screen.getAllByRole("dialog")).toHaveLength(1);
+  // C-207: the folded details live in the drawer.
+  expect(drawer.textContent).toContain("opus-5.5 / xhigh");
+  expect(drawer.textContent).toContain("900,000 / 1,000,000 tokens");
 });
 
 test("C-106: a link inside the row keeps its own behaviour and does not open the drawer", async () => {
@@ -238,7 +301,7 @@ test("C-106: a link inside the row keeps its own behaviour and does not open the
   expect(screen.queryByRole("dialog", { name: /详情$/ })).toBeNull();
 });
 
-test("C-106: the wide table scrolls sideways inside its own container on narrow screens", async () => {
+test("C-106: the wide table scrolls sideways inside its own container", async () => {
   renderPage();
   await screen.findByRole("button", { name: "查看 A-1 详情" });
   const table = document.querySelector(".execution-table");
@@ -250,4 +313,76 @@ test("C-106: the wide table scrolls sideways inside its own container on narrow 
     "utf8",
   );
   expect(css).toMatch(/\.execution-table-scroll\s*\{[^}]*overflow-x:\s*auto/u);
+  // C-207: one strong text per row; headers and Assignment ids are regular.
+  expect(css).toMatch(/\.execution-table th\s*\{[^}]*font-weight:\s*400/u);
+  expect(css).toMatch(/\.execution-open\s*\{[^}]*font-weight:\s*400/u);
+});
+
+test("C-207: below 760px the same Assignments render as cards only, in reading order", async () => {
+  const listeners: ((event: MediaQueryListEvent) => void)[] = [];
+  const matchMedia = vi.fn((query: string) => ({
+    matches: query === "(max-width: 760px)",
+    media: query,
+    addEventListener: (_: string, fn: (event: MediaQueryListEvent) => void) =>
+      listeners.push(fn),
+    removeEventListener: () => {},
+  }));
+  vi.stubGlobal("matchMedia", matchMedia);
+  try {
+    renderPage();
+    const trigger = await screen.findByRole("button", {
+      name: "查看 A-1 详情",
+    });
+    expect(document.querySelector(".execution-table")).toBeNull();
+    const list = screen.getByRole("list", { name: "Assignment 列表" });
+    const cards = [...list.querySelectorAll(":scope > li")];
+    expect(cards).toHaveLength(3);
+    const card = trigger.closest("li") as HTMLElement;
+    const text = card.textContent ?? "";
+    // Person and state, then task, then context, then id and activity.
+    const order = [
+      "孙悟空",
+      "空闲",
+      "C-1",
+      "90.00%",
+      "A-1",
+      "运行配置与最近执行",
+    ];
+    const positions = order.map((part) => text.indexOf(part));
+    expect(positions.every((position) => position >= 0)).toBe(true);
+    expect([...positions].sort((x, y) => x - y)).toEqual(positions);
+    // The configuration is folded.
+    const details = within(card)
+      .getByText("运行配置与最近执行")
+      .closest("details") as HTMLDetailsElement;
+    expect(details.open).toBe(false);
+    expect(details.textContent).toContain("claude / opus-5.5 / xhigh");
+    // The mobile sort control replaces the table header.
+    expect(
+      screen.getByRole("button", { name: /最近活动从新到旧/u }),
+    ).toBeTruthy();
+    // A plain card area opens the drawer.
+    fireEvent.click(card.querySelector(".execution-card-context") as Element);
+    expect(
+      await screen.findByRole("dialog", { name: "A-1 详情" }),
+    ).toBeTruthy();
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+test("C-207: the table comes first; capacity sits below it and the title jump opens it", async () => {
+  renderPage();
+  await screen.findByRole("button", { name: "查看 A-1 详情" });
+  const table = document.querySelector(".execution-table") as Element;
+  const panel = screen.getByRole("region", { name: "机器并发" });
+  expect(
+    table.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+  expect(document.querySelector(".page-title")?.contains(panel)).toBe(false);
+  const details = panel.querySelector("details") as HTMLDetailsElement;
+  expect(details.open).toBe(false);
+  fireEvent.click(screen.getByRole("button", { name: /机器并发/u }));
+  expect(details.open).toBe(true);
+  expect(document.activeElement).toBe(details.querySelector("summary"));
 });
