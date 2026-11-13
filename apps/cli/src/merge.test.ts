@@ -988,7 +988,7 @@ test("C-180: hold requires a reason, accepts an explicit expiry, and merge statu
   await seatAwaitingMerge();
   expect((await cardigan("merge", "hold", card_id)).code).toBe(2);
   expect(state().decisions.find((q) => q.id === "Q-1")?.status).toBe("open");
-  const until = "2035-01-01T04:30:00.000Z";
+  const until = new Date(Date.now() + 90 * 60_000).toISOString();
   expect(
     (
       await cardigan(
@@ -1017,4 +1017,21 @@ test("C-180: hold requires a reason, accepts an explicit expiry, and merge statu
   expect((await cardigan("needs-you")).out).toContain(
     `已暂缓：等待核对（到 ${time}）`,
   );
+});
+
+test("C-193: CLI surfaces snooze cap failures without changing the confirmation", async () => {
+  await seatAwaitingMerge();
+  const before = state().decisions;
+  const result = await cardigan(
+    "merge",
+    "hold",
+    card_id,
+    "--reason",
+    "等待",
+    "--until",
+    new Date(Date.now() + 4321 * 60_000).toISOString(),
+  );
+  expect(result.code).not.toBe(0);
+  expect(result.err).toContain("暂缓到期时间距现在不能超过 4320 分钟");
+  expect(state().decisions).toEqual(before);
 });

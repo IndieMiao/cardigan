@@ -172,6 +172,18 @@ export function SettingsPage({
                   saved={resource.reload}
                 />
               )}
+              {resource.data && (
+                <MergeMinutesSetting
+                  kind="snooze-max"
+                  key={`snooze-max:${resource.data.merge_confirm_snooze_max_minutes}`}
+                  initial={
+                    resource.data.merge_confirm_snooze_max_minutes ?? 4320
+                  }
+                  client={client}
+                  projectId={projectId}
+                  saved={resource.reload}
+                />
+              )}
             </section>
           </RequestFeedbackScope>
           <RequestFeedbackScope hidden={tab !== "authorization"}>
@@ -324,14 +336,21 @@ function MergeMinutesSetting({
   projectId,
   saved,
 }: {
-  kind: "stall" | "snooze";
+  kind: "stall" | "snooze" | "snooze-max";
   initial: number;
   client: CardiganClient;
   projectId: string;
   saved: () => void;
 }) {
   const snooze = kind === "snooze";
-  const label = snooze ? "合并确认默认暂缓时长" : "PM 合并确认停留告警";
+  const snoozeMax = kind === "snooze-max";
+  const label = snoozeMax
+    ? "合并确认最长暂缓时长"
+    : snooze
+      ? "合并确认默认暂缓时长"
+      : "PM 合并确认停留告警";
+  const min = snoozeMax ? 60 : 1;
+  const max = snoozeMax ? 10080 : 1440;
   const [minutes, setMinutes] = useState(String(initial));
   const [busy, setBusy] = useState(false),
     [error, setError] = useState(""),
@@ -339,7 +358,7 @@ function MergeMinutesSetting({
   const sending = useRef(false),
     keys = useRef(new Map<string, string>());
   const valid =
-    /^\d+$/.test(minutes) && Number(minutes) >= 1 && Number(minutes) <= 1440;
+    /^\d+$/.test(minutes) && Number(minutes) >= min && Number(minutes) <= max;
   return (
     <form
       aria-label={label}
@@ -353,7 +372,13 @@ function MergeMinutesSetting({
         const key = keys.current.get(minutes) ?? crypto.randomUUID();
         keys.current.set(minutes, key);
         try {
-          if (snooze)
+          if (snoozeMax)
+            await client.setMergeConfirmSnoozeMax(
+              projectId,
+              Number(minutes),
+              key,
+            );
+          else if (snooze)
             await client.setMergeConfirmSnoozeDefault(
               projectId,
               Number(minutes),
@@ -380,8 +405,8 @@ function MergeMinutesSetting({
         {label}（分钟）
         <input
           type="number"
-          min="1"
-          max="1440"
+          min={min}
+          max={max}
           step="1"
           value={minutes}
           disabled={busy}
@@ -389,15 +414,17 @@ function MergeMinutesSetting({
         />
       </label>
       <p className="hint">
-        {snooze
-          ? "PM 或人暂缓一条合并确认时，没有填到期时间就用这个时长，到期后自动放回待处理"
-          : "PM 持有的合并确认在合并检查出结论后，超过这么久还没处理，就提醒 PM Ops，并在 Needs You 知会人"}
+        {snoozeMax
+          ? "默认 4320 分钟（72 小时），可设为 60 到 10080 分钟。同一合并确认从首次暂缓开始累计计时，续期或到期后再次暂缓不能超过上限；达到上限后请交人或处理确认。"
+          : snooze
+            ? "PM 或人暂缓一条合并确认时，没有填到期时间就用这个时长，到期后自动放回待处理"
+            : "PM 持有的合并确认在合并检查出结论后，超过这么久还没处理，就提醒 PM Ops，并在 Needs You 知会人"}
       </p>
       <RequestFeedback
-        error={!valid ? "请输入 1 到 1440 的整数分钟。" : undefined}
+        error={!valid ? `请输入 ${min} 到 ${max} 的整数分钟。` : undefined}
       />
       <button type="submit" disabled={busy || !valid}>
-        {snooze ? "保存暂缓时长" : "保存停留告警"}
+        {snoozeMax ? "保存暂缓上限" : snooze ? "保存暂缓时长" : "保存停留告警"}
       </button>
       <RequestFeedback
         interactive

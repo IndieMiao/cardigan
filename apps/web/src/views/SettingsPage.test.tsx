@@ -103,7 +103,7 @@ test("existing setting loads and a configured gate hides the warning", async () 
 test("HTTP preferences carry the required key and encoded project", async () => {
   const fetcher = vi
     .fn<typeof fetch>()
-    .mockResolvedValue(new Response("{}", { status: 200 }));
+    .mockImplementation(async () => new Response("{}", { status: 200 }));
   const client = new HttpCardiganClient(fetcher);
   await client.setPreferences("a/b", 10, "preference-key");
   const [url, init] = fetcher.mock.calls[0] ?? [];
@@ -112,6 +112,13 @@ test("HTTP preferences carry the required key and encoded project", async () => 
     "preference-key",
   );
   expect(init?.body).toBe('{"auto_merge_after_minutes":10}');
+  await client.setMergeConfirmSnoozeMax("a/b", 60, "snooze-max-key");
+  const [maxUrl, maxInit] = fetcher.mock.calls[1] ?? [];
+  expect(maxUrl).toBe("/api/projects/a%2Fb/preferences");
+  expect(new Headers(maxInit?.headers).get("Idempotency-Key")).toBe(
+    "snooze-max-key",
+  );
+  expect(maxInit?.body).toBe('{"merge_confirm_snooze_max_minutes":60}');
 });
 
 test("authorization exposes defaults, retries safely, and fixes high-risk categories to human confirmation", async () => {
@@ -373,4 +380,32 @@ test("PM merge confirmation snooze duration shows the default 240 minutes and sa
     "p-1",
     90,
   ]);
+});
+
+test("C-193: snooze cap shows 72 hours, validates bounds and saves the setting", async () => {
+  const save = vi.fn().mockResolvedValue(undefined);
+  render(
+    <SettingsPage
+      projectId="p-1"
+      client={fakeClient({ setMergeConfirmSnoozeMax: save })}
+    />,
+  );
+  const input = (await screen.findByLabelText(
+    "合并确认最长暂缓时长（分钟）",
+  )) as HTMLInputElement;
+  expect(input.value).toBe("4320");
+  const button = screen.getByRole("button", {
+    name: "保存暂缓上限",
+  }) as HTMLButtonElement;
+  for (const value of ["59", "10081", "60.5"]) {
+    fireEvent.change(input, { target: { value } });
+    expect(button.disabled).toBe(true);
+  }
+  fireEvent.change(input, { target: { value: "60" } });
+  expect(button.disabled).toBe(false);
+  fireEvent.change(input, { target: { value: "10080" } });
+  fireEvent.click(button);
+  await waitFor(() =>
+    expect(save).toHaveBeenCalledWith("p-1", 10080, expect.any(String)),
+  );
 });

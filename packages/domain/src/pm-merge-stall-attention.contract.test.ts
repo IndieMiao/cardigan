@@ -19,6 +19,7 @@ import {
   listNeedsYou,
   type MergeCheckView,
   mergeConfirmationSnoozed,
+  mergeConfirmSnoozeMaxMinutes,
   mergePlan,
   notices,
   PM_MERGE_STALL_KIND,
@@ -479,6 +480,191 @@ test("C-180: human-only audited preference changes the next hold; an explicit ex
     ),
   );
   expect(confirmation().snooze?.until).toBe(at(50 * minute));
+});
+
+test("C-193: the snooze cap defaults to 72 hours and only humans may change it with audit", async () => {
+  const { f, io } = setup();
+  await f.accept();
+  expect(mergeConfirmSnoozeMaxMinutes(projectPreferences(f.state))).toBe(4320);
+  for (const actor of [opsActor, system])
+    expect(
+      setProjectPreferences(
+        f.state,
+        actor,
+        { merge_confirm_snooze_max_minutes: 60 },
+        io,
+      ),
+    ).toMatchObject({
+      ok: false,
+      error: { code: expect.stringMatching(/^(unauthorized|forbidden_tool)$/) },
+    });
+  for (const bad of [59, 10081, 60.5, NaN, Infinity])
+    expect(
+      setProjectPreferences(
+        f.state,
+        human,
+        { merge_confirm_snooze_max_minutes: bad },
+        io,
+      ),
+    ).toMatchObject({ ok: false, error: { code: "validation_failed" } });
+  for (const minutes of [60, 60, 10080])
+    f.commit(
+      setProjectPreferences(
+        f.state,
+        human,
+        { merge_confirm_snooze_max_minutes: minutes },
+        io,
+      ),
+    );
+  expect(
+    f.state.events.filter((e) => e.type === "project_preferences_updated"),
+  ).toMatchObject([
+    {
+      actor: human,
+      payload: {
+        preference: "merge_confirm_snooze_max_minutes",
+        old_value: 4320,
+        new_value: 60,
+      },
+    },
+    {
+      actor: human,
+      payload: {
+        preference: "merge_confirm_snooze_max_minutes",
+        old_value: 60,
+        new_value: 10080,
+      },
+    },
+  ]);
+  expect(mergeConfirmSnoozeMaxMinutes(projectPreferences(f.state))).toBe(10080);
+});
+
+test.each(["human", "pm"] as const)(
+  "C-193: %s holds accept the exact cap and reject a millisecond beyond it",
+  async (caller) => {
+    const { f, io, confirmation, setClock } = setup();
+    await f.accept();
+    setClock(10 * minute);
+    const hold = (until: string) => {
+      const params = {
+        decision_id: confirmation().id,
+        option: "hold",
+        rationale: "等待",
+        raw_quote: "等待",
+        snooze_until: until,
+      };
+      return caller === "human"
+        ? recordDecision(f.state, human, params, io)
+        : resolveDelegatedDecision(f.state, opsActor, params, io);
+    };
+    const before = JSON.stringify(f.state);
+    expect(hold(at(4330 * minute + 1))).toMatchObject({
+      ok: false,
+      error: {
+        code: "validation_failed",
+        message: expect.stringContaining("4320 分钟"),
+      },
+    });
+    expect(JSON.stringify(f.state)).toBe(before);
+    f.commit(hold(at(4330 * minute)));
+    expect(confirmation().snooze?.until).toBe(at(4330 * minute));
+  },
+);
+
+test.each(["human", "pm"] as const)(
+  "C-193: %s renewal keeps the first hold's cap across expiry and snapshot reload",
+  async (caller) => {
+    const { f, io, confirmation, setClock } = setup();
+    await f.accept();
+    f.commit(
+      setProjectPreferences(
+        f.state,
+        human,
+        {
+          merge_confirm_snooze_max_minutes: 60,
+          merge_confirm_snooze_default_minutes: 30,
+        },
+        io,
+      ),
+    );
+    const hold = (until?: string) => {
+      const params = {
+        decision_id: confirmation().id,
+        option: "hold",
+        rationale: "等待",
+        raw_quote: "等待",
+        ...(until ? { snooze_until: until } : {}),
+      };
+      // A freshly loaded snapshot carries persisted events, not in-memory timers.
+      const state = JSON.parse(JSON.stringify(f.state)) as CommandState;
+      return caller === "human"
+        ? recordDecision(state, human, params, io)
+        : resolveDelegatedDecision(state, opsActor, params, io);
+    };
+    setClock(10 * minute);
+    f.commit(hold());
+    expect(confirmation().snooze?.until).toBe(at(40 * minute));
+    setClock(20 * minute);
+    f.commit(hold());
+    expect(confirmation().snooze?.until).toBe(at(50 * minute));
+    setClock(50 * minute);
+    f.commit(expireMergeSnoozes(f.state, system, io));
+    expect(confirmation().snooze).toBeUndefined();
+    const before = JSON.stringify(f.state);
+    for (const until of [undefined, at(70 * minute + 1)])
+      expect(hold(until)).toMatchObject({
+        ok: false,
+        error: {
+          code: "validation_failed",
+          message: expect.stringContaining("暂缓累计时长不能超过 60 分钟"),
+        },
+      });
+    expect(JSON.stringify(f.state)).toBe(before);
+    f.commit(hold(at(70 * minute)));
+    setClock(70 * minute);
+    f.commit(expireMergeSnoozes(f.state, system, io));
+    expect(hold(at(70 * minute + 1))).toMatchObject({
+      ok: false,
+      error: {
+        message: expect.stringContaining("已达上限请交人或处理合并确认"),
+      },
+    });
+  },
+);
+
+test("C-193: a new cap applies to the next hold without clamping the configured default or rewriting an existing hold", async () => {
+  const { f, io, confirmation } = setup();
+  await f.accept();
+  const params = {
+    decision_id: confirmation().id,
+    option: "hold",
+    rationale: "等待",
+    raw_quote: "等待",
+  };
+  f.commit(recordDecision(f.state, human, params, io));
+  const held = confirmation();
+  f.commit(
+    setProjectPreferences(
+      f.state,
+      human,
+      { merge_confirm_snooze_max_minutes: 60 },
+      io,
+    ),
+  );
+  expect(confirmation()).toEqual(held);
+  expect(recordDecision(f.state, human, params, io)).toMatchObject({
+    ok: false,
+    error: { message: expect.stringContaining("距现在不能超过 60 分钟") },
+  });
+  f.commit(
+    recordDecision(
+      f.state,
+      human,
+      { ...params, snooze_until: at(60 * minute) },
+      io,
+    ),
+  );
+  expect(confirmation().snooze?.until).toBe(at(60 * minute));
 });
 
 test("C-180: sensitivity and delegation handoffs retain the hold and human authority at expiry", async () => {

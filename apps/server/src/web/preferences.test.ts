@@ -56,19 +56,23 @@ test("human preferences require session and idempotency, persist audit, and isol
       404,
     );
     const token = f.token(f.primary.owner);
-    expect(
-      (
-        await f.call(path, {
-          method: "POST",
-          body: { auto_merge_after_minutes: 1 },
-          anonymous: true,
-          headers: {
-            authorization: `Bearer ${token}`,
-            "idempotency-key": "agent",
-          },
-        })
-      ).status,
-    ).toBe(401);
+    for (const body of [
+      { auto_merge_after_minutes: 1 },
+      { merge_confirm_snooze_max_minutes: 60 },
+    ])
+      expect(
+        (
+          await f.call(path, {
+            method: "POST",
+            body,
+            anonymous: true,
+            headers: {
+              authorization: `Bearer ${token}`,
+              "idempotency-key": "agent",
+            },
+          })
+        ).status,
+      ).toBe(401);
   } finally {
     await f.close();
   }

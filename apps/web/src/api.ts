@@ -873,6 +873,7 @@ export interface PreferencesView {
   /** C-177: PM-held merge confirmation stall alert; older servers omit it. */
   readonly merge_confirm_stall_after_minutes?: number;
   readonly merge_confirm_snooze_default_minutes?: number;
+  readonly merge_confirm_snooze_max_minutes?: number;
   readonly merge_gate_enabled: boolean;
   /** Lanes the human folded (true) or unfolded (false); missing = default. */
   readonly board_collapsed_lanes?: Readonly<Record<string, boolean>>;
@@ -1087,6 +1088,11 @@ export interface CardiganClient {
     idempotencyKey: string,
   ): Promise<void>;
   setMergeConfirmSnoozeDefault(
+    projectId: string,
+    minutes: number,
+    idempotencyKey: string,
+  ): Promise<void>;
+  setMergeConfirmSnoozeMax(
     projectId: string,
     minutes: number,
     idempotencyKey: string,
@@ -1435,6 +1441,18 @@ export class HttpCardiganClient implements CardiganClient {
       projectId,
       "preferences",
       { merge_confirm_stall_after_minutes: minutes },
+      idempotencyKey,
+    );
+  }
+  async setMergeConfirmSnoozeMax(
+    projectId: string,
+    minutes: number,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      "preferences",
+      { merge_confirm_snooze_max_minutes: minutes },
       idempotencyKey,
     );
   }

@@ -218,7 +218,7 @@ test("C-180: HTTP hold rejects missing reasons, reads the audited default and ex
       },
     }),
   );
-  const until = "2035-01-01T04:30:00.000Z";
+  const until = new Date(Date.parse(q.snooze.at) + 90 * 60_000).toISOString();
   expect(
     (
       await post(
@@ -229,4 +229,107 @@ test("C-180: HTTP hold rejects missing reasons, reads the audited default and ex
     ).status,
   ).toBe(200);
   expect(confirmation()?.snooze?.until).toBe(until);
+});
+
+test("C-193: HTTP exposes the audited snooze cap and clear duration/renewal errors", async () => {
+  expect((await read("/preferences")).json).toMatchObject({
+    merge_confirm_snooze_max_minutes: 4320,
+  });
+  expect(
+    (
+      await post(
+        "/preferences",
+        { merge_confirm_snooze_max_minutes: 60 },
+        "anonymous-cap",
+        false,
+      )
+    ).status,
+  ).toBe(401);
+  for (const bad of [59, 10081, 60.5, "60", null])
+    expect(
+      (
+        await post(
+          "/preferences",
+          { merge_confirm_snooze_max_minutes: bad },
+          `cap-bad-${bad}`,
+        )
+      ).status,
+    ).toBe(400);
+  const tooLong = await post(
+    "/decisions/Q-2/resolve",
+    {
+      option: "hold",
+      rationale: "等待",
+      snooze_until: new Date(Date.now() + 4321 * 60_000).toISOString(),
+    },
+    "too-long",
+  );
+  expect(tooLong.status).toBe(400);
+  expect(tooLong.body).toContain("暂缓到期时间距现在不能超过 4320 分钟");
+  expect(confirmation()?.status).toBe("open");
+  expect(
+    (
+      await post(
+        "/decisions/Q-2/resolve",
+        { option: "hold", rationale: "等待" },
+        "first-hold",
+      )
+    ).status,
+  ).toBe(200);
+  const first = confirmation();
+  if (!first?.snooze) throw new Error("Missing snooze");
+  for (const key of ["cap", "same-cap"])
+    expect(
+      (
+        await post(
+          "/preferences",
+          { merge_confirm_snooze_max_minutes: 60 },
+          key,
+        )
+      ).status,
+    ).toBe(200);
+  expect((await read("/preferences")).json).toMatchObject({
+    merge_confirm_snooze_max_minutes: 60,
+  });
+  expect(confirmation()).toEqual(first);
+  const deadline = Date.parse(first.snooze.at) + 60 * 60_000;
+  const renewed = await post(
+    "/decisions/Q-2/resolve",
+    {
+      option: "hold",
+      rationale: "等待",
+      snooze_until: new Date(deadline + 1).toISOString(),
+    },
+    "beyond-first-hold",
+  );
+  expect(renewed.status).toBe(400);
+  expect(renewed.body).toContain("暂缓累计时长不能超过 60 分钟");
+  expect(confirmation()).toEqual(first);
+  expect(
+    (
+      await post(
+        "/decisions/Q-2/resolve",
+        {
+          option: "hold",
+          rationale: "等待",
+          snooze_until: new Date(deadline).toISOString(),
+        },
+        "exact-cap",
+      )
+    ).status,
+  ).toBe(200);
+  expect(
+    h.store.uow
+      .read((tx) => tx.events.listAfter(project_id, undefined, 0))
+      .filter((e) => e.type === "project_preferences_updated"),
+  ).toMatchObject([
+    {
+      actor: { kind: "human" },
+      payload: {
+        preference: "merge_confirm_snooze_max_minutes",
+        old_value: 4320,
+        new_value: 60,
+      },
+    },
+  ]);
 });
