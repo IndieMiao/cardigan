@@ -29,14 +29,59 @@ function withCurrentRecords(value) {
   const [from, to] = recordsRegion(css);
   return `${value.slice(0, start)}${css.slice(from, to)}${value.slice(end)}`;
 }
-const baseline = withCurrentRecords(
-  execFileSync(
-    "git",
-    [
-      "show",
-      `${process.env.LAYOUT_BASELINE_REF ?? "origin/main"}:apps/web/src/styles.css`,
-    ],
-    { cwd: root, encoding: "utf8" },
+// C-204 intentionally changes number tags and person rows. Compare unrelated
+// desktop geometry against the baseline with only these shared rules updated.
+function withCurrentIdentity(value) {
+  // Keep each theme's unrelated variables from the baseline. Only the ID
+  // palette is an intentional colour change in this comparison.
+  for (const theme of [
+    /^:root \{[^}]*\}/m,
+    /@media \(prefers-color-scheme: dark\) \{\s*:root \{[^}]*\}/,
+  ]) {
+    const variables = /--id-[\w-]+-(?:fg|bg):[^;]+;/g;
+    const declarations = css.match(theme)?.[0].match(variables);
+    assert(declarations?.length && theme.test(value), "ID theme CSS not found");
+    value = value.replace(
+      theme,
+      (block) =>
+        `${block.slice(0, -1).replace(variables, "")}\n${declarations.join("\n")}\n}`,
+    );
+  }
+  for (const [startPattern, end] of [
+    [/\.id-tag(?:,| \{)/, ".filter-bar {"],
+    [/\.entry-meta \{/, ".timeline-version {"],
+  ]) {
+    const start = value.search(startPattern),
+      from = css.search(startPattern);
+    value =
+      value.slice(0, start) +
+      css.slice(from, css.indexOf(end, from)) +
+      value.slice(value.indexOf(end, start));
+  }
+  for (const selector of [
+    ".identity-row > *",
+    ".employee-inline .employee-label strong",
+    ".needs-delivery-list p",
+    ".needs-review-issues",
+    ".decision-record-by .employee-identity",
+  ]) {
+    const start = css.indexOf(`${selector} {`);
+    value += `\n${css.slice(start, css.indexOf("}", start) + 1)}`;
+  }
+  return (
+    value + css.slice(css.indexOf("/* C-204: shared person/number/status rows"))
+  );
+}
+const baseline = withCurrentIdentity(
+  withCurrentRecords(
+    execFileSync(
+      "git",
+      [
+        "show",
+        `${process.env.LAYOUT_BASELINE_REF ?? "origin/main"}:apps/web/src/styles.css`,
+      ],
+      { cwd: root, encoding: "utf8" },
+    ),
   ),
 );
 const executionAllowance = `.execution-table th { white-space: nowrap; }

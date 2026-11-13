@@ -355,7 +355,7 @@ test("U3 merge confirmation uses Chinese question and option labels and work-ite
   );
   await screen.findByText("确认把 C-1 合并到 main？");
   expect(
-    screen.getByRole("heading", { name: "拍板 Q-1 确认合并" }),
+    screen.getByRole("heading", { name: "Q-1 拍板 确认合并" }),
   ).toBeTruthy();
   const item = within(screen.getByRole("region", { name: "工作项" }))
     .getByText("写迁移脚本")

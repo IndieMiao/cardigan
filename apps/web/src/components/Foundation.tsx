@@ -1,8 +1,6 @@
 import { type ReactNode, useEffect, useId, useRef, useState } from "react";
-import { isHttpLink } from "../markdown.js";
 import { statusLabel } from "../status.js";
 import { StatusIcon, statusShape } from "./StatusIcon.js";
-import { Tooltip } from "./Tooltip.js";
 
 export function PageTitle({
   title,
@@ -99,39 +97,7 @@ export function Time({
   );
 }
 
-/** The caller supplies a known target via routeHash/referenceHref (S23). */
-export function IdTag({
-  id,
-  label,
-  detail,
-  href,
-}: {
-  id: string;
-  label: string;
-  detail?: string;
-  href?: string | undefined;
-}) {
-  const text = (
-    <>
-      <span>{id}</span> <span className="id-description">{label}</span>
-    </>
-  );
-  const title = detail ?? `${id} ${label}`;
-  return (
-    <Tooltip content={title}>
-      {href && (href.startsWith("#/p/") || isHttpLink(href)) ? (
-        <a className="id-tag" href={href}>
-          {text}
-        </a>
-      ) : (
-        // biome-ignore lint/a11y/noNoninteractiveTabindex: Tooltip details must be reachable by keyboard.
-        <span className="id-tag" tabIndex={0}>
-          {text}
-        </span>
-      )}
-    </Tooltip>
-  );
-}
+export { IdTag } from "./IdTag.js";
 
 /** Measure rendered lines, including wrapping and Markdown, rather than source newlines. */
 export function LongContent({

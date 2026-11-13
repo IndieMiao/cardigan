@@ -216,7 +216,7 @@ test("U5c delivery, review and decision lead with unique IDs and coloured result
     ] as const) {
       const row = document.getElementById(`entry-C-1#${n}`) as HTMLElement;
       const heading = within(row).getByRole("heading", {
-        name: `${label} ${id} ${result}`,
+        name: `${id} ${label} ${result}`,
       });
       expect(heading.querySelector(".status")?.textContent).toBe(result);
       expect(

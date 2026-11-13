@@ -653,6 +653,8 @@ P2a-14 ①：`createWorkItem` 和 `createCard` 从模板生成验证项共用按
 
 **Run**：`queued → dispatched → acked → running → completed | failed | cancelled`；运行环境失联时进入 `unknown`；确认重新连通时 `unknown --reconnected--> running`。重连不表示业务完成，已结束的 Run 不通过 reconnected 恢复。
 
+C-219：`finish_run` 在 `unknown` 窗口校验所属 Assignment、角色快照、结果和摘要后，接受并持久化 `Run.pending_finish`（结果、摘要、原 RuntimeRef、实际认证的 Token 记录编号），返回仍为 unknown 的 Run；不提前写 finished_at 或业务完成事件。相同请求幂等，不同结果／摘要不能覆盖。主机收到原终端明确 alive 的新观察后，先经 reconnected 恢复，再由仅 system 可调用的内部结算命令复用 complete／fail 和 run_finished；核对当前 Run、active Assignment、角色版本、实际 Token 记录、完整 RuntimeRef，并检查派发、失活回收和 host_ops 停止栅栏。Token 证据只能由服务端认证上下文通过命令端口传入，不接受工具参数自报，也不使用不会随真实签发更新的 Assignment.mcp_token_id 占位字段。MCP 写事务内重查认证有效性；重连结算在同一事务按保存的 Token 编号读取当前记录，要求记录存在、未撤销，且项目、Assignment、角色版本和 finish_run 权限均匹配，缺失证据时不结算。只保存记录编号，不保存 Token 明文。已取消／结束、已释放、换会话或换 Token 的旧请求不结算；停止栅栏暂时阻止结算时，撤回后须有新的 alive 观察才能重试。请求随 Run JSON 持久化，server 重启可接续，不新增状态或数据库迁移。选择保存请求而非重连提醒，是因为 Agent 已表达结束意图，自动结算不依赖对活跃 Run 再按门铃，也不依赖 15 分钟失活兜底。终端确实失联则仍按 unknown → lost 交原运维流程，不能凭请求证明存活。
+
 P2a-9：`queued` 也表示等待全机并发名额，不新增状态。Dispatcher 为达到上限的候选保留原 Run、kind、触发事件和待投递通知，不调用 `dispatchRun`、不按铃。可选调度元数据 `queue_reason=concurrency_limit` 标识这一等待原因，派发时清除；只在 queued 时参与位次计算。运行环境暂不可确认的候选改记 `queue_reason=runtime_unavailable`，仍是 queued，但不占容量队列的位次；定期探测恢复后再按原触发事件时间参与派发。上限、计数和排队顺序见 §13.8。Q-86 的失活回收复用 cancel 迁移；可选 inactivity_stop 只保存主机停止意图，不增加 Run 状态。只有确认原运行环境退出后才自动取消，业务成功仍由交付／审核决定。
 
 M5.6：显式 finish_run（completed / blocked / failed）、阻塞 Decision 和审核轮次上限结束 Run 时，Assignment 的 running 经 run_finished 回到 idle，保留 RuntimeRef；这只表示没有在途业务 Run，不代表终端在线。系统在两个 Run 之间替换 Session 后，dispatchRun 校验旧 RuntimeRef 未变化、没有其他未结束 Run，若旧环境为 unknown/lost，只在原在途 Run 已明确结束后才允许经 session_replaced 回 idle，再将原 queued Run 派发与交接事件原子提交；卡片流记录系统 handoff（原因、旧 RuntimeRef、最近 Run/outcome、新 Session 先读卡片和 get_updates），常驻 PM 无卡片时间线时把同一交接正文保存在项目事件中。
@@ -1148,7 +1150,9 @@ C-156：卡片列表在浏览器中先对全部卡片做状态、概览、下一
 
 Phase 1.5 U1 的展示规范见 `docs/plans/phase-1.5-ui.md` §3：220px 左侧导航将 Needs You（带待处理数量）置顶，再按工作／运行分组；浅深主题使用同一套语义颜色和字号变量。页面共用标题、带说明的编号标签、中文状态词、相对／本地时间（悬停显示完整时间和时区）、空状态、筛选栏和超过六行的长内容折叠。筛选与翻页放进当前视图的哈希路由参数，复制链接、刷新和前进后退可恢复；卡片页内定位仍用 S23 的 `?at=`。项目动态使用统一中文事件名，原始类型与负载仅在展开详情中显示。Needs You 左栏数量与页面共用读结果，随现有 SSE 刷新，写操作后同时更新；各页面内部区块和交互的重新布局留给 U2–U4b，不改变 API 或安全边界。
 
-C-208 暗色配色候选见 [设计说明](design/c208/design.md)：页面、面板、次级区块采用三档纯灰，长段正文采用 #cccccc、次要文字采用 #a4a4a4，标题和正文用字号与字重区分；装饰分隔线与控件边界分别使用主题变量；状态保留原有形状、文字及语义色。C-204 编号标签的暗色在同一背景上联合校验正文对比度和类型色差。当前交付仅为设计说明及本地示例原型，待设计审核后由开发落实，不改变亮色、布局或业务规则。
+C-204（设计定稿 D-708 / V-686，卡片 #49 §1–3）：编号前缀、中文含义及颜色 token 集中在 Web 的 `id-types.ts`，供 `IdTag`、正文中已有的编号链接和帮助页复用；亮暗颜色只定义于 `styles.css` 的 `--id-<token>-fg/-bg`，编号本体按类型着色，说明保持正文色。C/W/Q/A/R/D/V/H/E/M/MB、时间线 C-n#n 和未知前缀保留完整文字，UUID、SHA、项目名不按编号着色；不新增链接目标或改变历史编号解析。`IdentityRow` 统一头像、姓名、编号、状态、提交号与链接的居中和整组换行，行内头像 24px，姓名 14px/20px、500 字重，标签 13px/20px、500 字重，提交号 12px/20px；大头像资料卡与人物交互沿用原实现。拍板、执行视图、卡片记录、时间线与项目动态复用这套组件。暗色配色对应 C-208 中性主题，发布顺序为 C-208 先行或同批合入。
+
+C-208 暗色配色按 [设计说明](design/c208/design.md) 落实：页面、面板、次级区块采用三档纯灰，长段正文采用 #cccccc、次要文字采用 #a4a4a4，标题和正文用字号与字重区分；装饰分隔线与控件边界分别使用主题变量；状态保留原有形状、文字及语义色。C-204 编号标签的暗色在同一背景上联合校验正文对比度和类型色差。实现保持亮色、布局和业务规则不变。
 
 C-151：沿用看板现有的 760px 窄屏断点，将导航移到页面上方并允许入口换行，主内容占满宽度，覆盖卡片详情、Needs You、执行视图、拍板记录、项目快照和设置。卡片详情在窄屏改为单栏，概况接在正文之后；时间线身份与结论分行，筛选标签和控件一起换行；时间线筛选、计数和分页按钮也允许换行，超过默认 20 条记录时仍可完整操作。快照最近交付表格在自身区域内横向滚动，执行表格沿用现有内部滚动；不让表格撑宽页面。768px 及以上保留原布局，不改变页面内容、组件或导航交互。
 
@@ -1373,6 +1377,8 @@ M5.4 的实时刷新由当前项目共用一个 SSE 订阅：按 stream 保存�
 ### 8.7 看板第一版范围（自研）
 
 Agent 只通过 Card MCP 读写，看板界面只服务你一个人，所以第一版可以做得很窄。
+
+C-204 编号标签与同行身份的设计依据见 [配色及对齐规范](design/c204-identity.md) 与 [HTML 原型](design/c204-identity.html)（W-623 v2 设计提案，暗色已同步 C-208 定稿，待本卡复审与 PM 定稿）。编号类型使用独立的亮暗主题变量，保留前缀及中文含义；人物、编号、状态统一垂直居中并按组换行。规范覆盖现有编号，不改变编号格式、状态语义或后端数据；全站组件替换由 W-611 在设计通过且有开发人员空出后完成，不等待 C-202 合并；两卡后合并者负责整合最新基线。
 
 **做：**
 
@@ -2180,7 +2186,7 @@ Workbench 执行视图、看板卡片和 `cardigan attention` 共用跨项目的
 
 ### 13.9 故障处理
 
-1. 心跳超时：Assignment 运行状态变为 `unknown`，**不立即换机器重跑**，因为旧机器可能只是暂时断网，仍在改代码。失联判断不依据 CLI 的退出码，而看运行时的事件序号是否还在推进；SSH 设置连接超时（0.5b 用 3 秒验证），外层命令另设截止时间。
+1. 确认运行时失联（依据见本节下文）：Assignment 运行状态变为 `unknown`，**不立即换机器重跑**，因为旧机器可能只是暂时断网，仍在改代码。失联判断不依据 CLI 的退出码，而看运行时的事件序号是否还在推进；SSH 设置连接超时（0.5b 用 3 秒验证），外层命令另设截止时间。
    - 在仍为 `unknown` 时确认重连，显式发出 `reconnected`：Assignment 运行状态回 `idle`，未结束的 Run 回 `running`；不据此判定任务成功或失败。
 2. 宽限期（建议 5–10 分钟，可配置）后仍失联：变为 `lost`，进入 Needs You，由你选择等待或接管。
 3. 接管：从主机最后一次拉取到的 SHA 在另一台机器新建 worktree 和 Session，用时间线生成交接摘要。原机器恢复后，它的 worktree 进入清理流程。
@@ -2188,7 +2194,11 @@ Workbench 执行视图、看板卡片和 `cardigan attention` 共用跨项目的
 
 ---
 
-M3.4 通过主机 RuntimeMonitor 订阅每个未结束 Run 所在终端的 hc events。lost / finished / removed、快照缺少终端、订阅失败或结束先经 connection_lost 把 Assignment 和在途 Run 标为 unknown；不把终端状态当业务完成。默认 45 秒没有订阅消息也按失联处理，可用 eventSilenceMs 配置；相同 seq 的心跳刷新连接活跃度，但不重放状态变化。新订阅的完整快照可以确认重连，同一订阅丢弃重复和倒退的状态事件，旧 RuntimeRef 的迟到消息不能影响替换后的 Session。
+M3.4 / C-219：主机 RuntimeMonitor 订阅每个未结束 Run 所在终端的 hc events。明确 lost / finished / removed、观察到进程非 alive、完整 snapshot / missed 缺少目标终端，或 runtime_not_found，立即经 connection_lost 把 Assignment 和在途 Run 标为 unknown；不把终端状态当业务完成。订阅静默、普通传输错误或 EOF 则先静默重订阅，不立即写 runtime_disconnected。只有同一 RuntimeRef 的连续失败订阅尝试达到配置次数才确认失联；包含首次失败，重订阅收到目标终端的新 alive 观察即清零，换 RuntimeRef 不继承旧次数。计数为监控进程内状态，重启重新核实；已确认失联的持久宽限期不受它影响。
+
+45 秒无消息的静默窗口（eventSilenceMs）仍保留；相同 seq 的心跳刷新连接活跃度，不重放状态变化。每次 reconcile 只累计上次结束／最后消息之后、至本次开始之间的静默，并最多累计一个既有 dispatcher interval（缺省 1 秒；程序化 reconcileIntervalMs 由组装层传入实际 intervalMs）。超过正常间隔的调度延迟和本次 reconcile 的同步耗时不算终端静默，不另加“阻塞门限”。时间回退按零处理；真实退出、EOF 和错误计数不依赖此时间扣除，确认失联后的 5 分钟宽限期仍使用实际时间。持续 slow tick 会拉长半开连接的实际确认时间：例如每轮约 100 秒且只累计 1 秒时，默认 135 秒有效静默需约 135 轮、3.75 小时；这是扣除主机延迟的代价，明确退出信号仍立即处理。新订阅快照确认重连，同一订阅丢弃重复和倒退的状态事件，旧 RuntimeRef 的迟到消息不能影响替换后的 Session。
+
+C-219 / Q-357（2026-11-14 人确认 three）：连续失败次数默认值为 **3 次（包含首次，即两次重连仍失败）**。首次失败后允许两次重连；三次均无存活确认才记 unknown。若每次都静默，正常调度下约 135 秒有效静默后确认失联；明确退出仍立即处理。主机可通过 CARDIGAN_RUNTIME_FAILURE_LIMIT 配置，程序化入口为 runtimeFailureLimit（RuntimeMonitor.maxConsecutiveFailures）。必须为不小于 2 的安全整数；非法值拒绝启动，不隐式回退。既有 45 秒静默窗口、5 分钟失联宽限期和 15 分钟 run_inactive 告警不变，不引入新的静默时间或阻塞判定默认值。
 
 首次失联写入持久事件作为宽限期起点（lossGraceMs 默认 5 分钟）；重复失联消息和 server 重启不重置计时。宽限期内确认 alive 时经 reconnected 恢复 Assignment=idle、Run=running；超时则只将 Assignment 标为 lost，原 Run 保持 unknown，进入 Needs You 并给 PM Office 简短提示。lost 不自动重连、不接管、不建第二个 Run。状态变更、事件与升级通知在同一事务提交，不新增迁移。RuntimeMonitor 提供 reconcile / stop 接口，订阅 abort 后等待清理；M3.5 负责实际组装。
 

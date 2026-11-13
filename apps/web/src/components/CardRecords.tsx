@@ -3,6 +3,8 @@ import type { CardDetail, DeliveryView, ReviewView } from "../api.js";
 import { routeHash } from "../route.js";
 import { EmployeeIdentity } from "./EmployeeIdentity.js";
 import { StatusTag, Time } from "./Foundation.js";
+import { IdentityRow } from "./IdentityRow.js";
+import { IdBadge } from "./IdTag.js";
 import { TimelineVersion } from "./TimelineVersion.js";
 
 /** Full git SHA-1 or SHA-256 written out in a summary. */
@@ -114,7 +116,7 @@ export function CardRecords({
           : undefined
       }
     >
-      {id}
+      <IdBadge id={id} />
     </a>
   );
   const reviewsOf = (delivery: DeliveryView) =>
@@ -122,7 +124,7 @@ export function CardRecords({
       .filter((r) => r.delivery_id === delivery.id)
       .sort((a, b) => newestFirst(b, a));
   const review = (r: ReviewView, delivery: DeliveryView) => (
-    <li key={r.id} className="record-row record-review">
+    <IdentityRow as="li" key={r.id} className="record-row record-review">
       <span className="record-who">
         <EmployeeIdentity {...r} showTitle={false} />
       </span>
@@ -136,7 +138,7 @@ export function CardRecords({
       <span className="record-time">
         {r.submitted_at && <Time value={r.submitted_at} />}
       </span>
-    </li>
+    </IdentityRow>
   );
   const delivery = (d: DeliveryView, current: boolean) => {
     const reviews = reviewsOf(d);
@@ -146,7 +148,7 @@ export function CardRecords({
         className={`record-delivery${current ? " record-delivery-current" : ""}`}
         data-delivery-id={d.id}
       >
-        <div className="record-row">
+        <IdentityRow className="record-row">
           <span className="record-who">
             <EmployeeIdentity {...d} showTitle={false} />
           </span>
@@ -163,7 +165,7 @@ export function CardRecords({
           <span className="record-time">
             {d.submitted_at && <Time value={d.submitted_at} />}
           </span>
-        </div>
+        </IdentityRow>
         <RecordSummary
           text={d.summary}
           kind={d.kind === "card_completion" ? "完成申请" : undefined}

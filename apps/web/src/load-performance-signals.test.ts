@@ -108,12 +108,19 @@ test.each([
         });
       }
       child.kill(signal);
-      if (phase === "login") {
-        await vi.waitFor(() =>
-          expect(output).toContain("Collection interrupted"),
-        );
-        releaseLogin?.();
-      }
+      // Signal delivery and the held HTTP responses reach the child on
+      // different fds, so their handling order is not guaranteed. Wait until
+      // the child has acknowledged the signal before releasing anything;
+      // otherwise a released logout can finish a normal cleanup first and
+      // the child exits 0/1 instead of with the signal's exit code.
+      await vi.waitFor(
+        () =>
+          expect(output).toContain(
+            `Collection interrupted (${signal}); cleaning up.`,
+          ),
+        { timeout: 5000 },
+      );
+      if (phase === "login") releaseLogin?.();
       await vi.waitFor(() => expect(logouts).toBe(1), { timeout: 5000 });
       child.kill(signal === "SIGINT" ? "SIGTERM" : "SIGINT");
       releaseLogout?.();
@@ -129,9 +136,8 @@ test.each([
           name.startsWith("cardigan-layout-"),
         ),
       ).toBe(false);
-      expect(output).toContain(
-        `Collection interrupted (${signal}); cleaning up.`,
-      );
+      // The second signal must not start another cleanup.
+      expect(output.split("Collection interrupted").length - 1).toBe(1);
       if (status === 503)
         expect(output).toContain("session cleanup failed (HTTP 503)");
       else if (status === "pending")

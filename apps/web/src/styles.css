@@ -8,6 +8,31 @@
 
 :root {
   color-scheme: light;
+  --id-card-fg: #123a8e;
+  --id-card-bg: #e3edff;
+  --id-work-item-fg: #6b2896;
+  --id-work-item-bg: #f0e3fa;
+  --id-decision-fg: #9c1a67;
+  --id-decision-bg: #fce0ef;
+  --id-assignment-fg: #343a40;
+  --id-assignment-bg: #e3e4e6;
+  --id-run-fg: #005968;
+  --id-run-bg: #d6f3f7;
+  --id-delivery-fg: #535e18;
+  --id-delivery-bg: #e9efce;
+  --id-review-fg: #765017;
+  --id-review-bg: #f7e9ca;
+  --id-human-action-fg: #804e4c;
+  --id-human-action-bg: #f7e1df;
+  --id-employee-fg: #645b70;
+  --id-employee-bg: #ece8f3;
+  --id-member-fg: var(--id-employee-fg);
+  --id-member-bg: var(--id-employee-bg);
+  --id-merge-batch-fg: var(--id-employee-fg);
+  --id-merge-batch-bg: var(--id-employee-bg);
+  --id-unknown-fg: var(--id-employee-fg);
+  --id-unknown-bg: var(--id-employee-bg);
+
   --priority-low: #236bb5;
   --priority-medium: #9a7600;
   --priority-high: #bf560c;
@@ -65,6 +90,25 @@
 @media (prefers-color-scheme: dark) {
   :root {
     color-scheme: dark;
+    --id-card-fg: #7997d2;
+    --id-card-bg: #202c43;
+    --id-work-item-fg: #b982df;
+    --id-work-item-bg: #3c224c;
+    --id-decision-fg: #db70bd;
+    --id-decision-bg: #43233a;
+    --id-assignment-fg: #cccccc;
+    --id-assignment-bg: #303030;
+    --id-run-fg: #63ada8;
+    --id-run-bg: #203c3c;
+    --id-delivery-fg: #cece54;
+    --id-delivery-bg: #3d3d20;
+    --id-review-fg: #d6c59f;
+    --id-review-bg: #413824;
+    --id-human-action-fg: #aa8f8f;
+    --id-human-action-bg: #302525;
+    --id-employee-fg: #a69bb0;
+    --id-employee-bg: #34303f;
+
     --priority-low: #6daef5;
     --priority-medium: #eac74a;
     --priority-high: #f9a15d;
@@ -578,33 +622,121 @@ button.quiet,
   padding: 24px 0;
   max-width: 680px;
 }
+.identity-row > * {
+  min-width: 0;
+  max-width: 100%;
+}
 .metadata {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
   gap: 6px 16px;
 }
-.id-tag,
-.markdown a[href^="#/p/"] {
+.id-tag {
   display: inline-flex;
-  align-items: baseline;
-  gap: 5px;
-  border: 1px solid var(--border);
-  padding: 0 5px;
-  border-radius: 4px;
-  font-size: var(--text-sm);
-  font-family: var(--font);
-  text-decoration: none;
+  align-items: center;
+  vertical-align: middle;
+  gap: 6px;
+  min-width: 0;
   max-width: 100%;
+  font: 400 var(--text-sm) / 20px var(--font);
+  text-decoration: none;
   overflow-wrap: anywhere;
 }
-.id-tag > span:first-child {
-  white-space: nowrap;
+.id-badge {
+  display: inline-block;
   flex: none;
+  white-space: nowrap;
+  padding: 2px 6px;
+  border-radius: 4px;
+  color: var(--id-fg);
+  background: var(--id-bg);
+  font: 500 var(--text-sm) / 20px var(--font);
+  font-variant-numeric: tabular-nums;
+}
+.id-type-card {
+  --id-fg: var(--id-card-fg);
+  --id-bg: var(--id-card-bg);
+}
+.id-type-work-item {
+  --id-fg: var(--id-work-item-fg);
+  --id-bg: var(--id-work-item-bg);
+}
+.id-type-decision {
+  --id-fg: var(--id-decision-fg);
+  --id-bg: var(--id-decision-bg);
+}
+.id-type-assignment {
+  --id-fg: var(--id-assignment-fg);
+  --id-bg: var(--id-assignment-bg);
+}
+.id-type-run {
+  --id-fg: var(--id-run-fg);
+  --id-bg: var(--id-run-bg);
+}
+.id-type-delivery {
+  --id-fg: var(--id-delivery-fg);
+  --id-bg: var(--id-delivery-bg);
+}
+.id-type-review {
+  --id-fg: var(--id-review-fg);
+  --id-bg: var(--id-review-bg);
+}
+.id-type-human-action {
+  --id-fg: var(--id-human-action-fg);
+  --id-bg: var(--id-human-action-bg);
+}
+.id-type-employee {
+  --id-fg: var(--id-employee-fg);
+  --id-bg: var(--id-employee-bg);
+}
+.id-type-member {
+  --id-fg: var(--id-member-fg);
+  --id-bg: var(--id-member-bg);
+}
+.id-type-merge-batch {
+  --id-fg: var(--id-merge-batch-fg);
+  --id-bg: var(--id-merge-batch-bg);
+}
+.id-type-unknown {
+  --id-fg: var(--id-unknown-fg);
+  --id-bg: var(--id-unknown-bg);
 }
 .id-description {
   min-width: 0;
-  color: var(--text-muted);
+  color: var(--text);
+  font-weight: 400;
+  white-space: normal;
+}
+a.id-tag,
+a:has(> .id-badge),
+button:has(> .id-badge) {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  gap: 6px;
+}
+a .id-badge,
+button .id-badge {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+:is(a, button):hover .id-badge {
+  box-shadow: inset 0 0 0 1px currentColor;
+}
+.id-tag:focus-visible,
+:is(a, button):has(> .id-badge):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+@media (forced-colors: active) {
+  .id-badge {
+    border: 1px solid CanvasText;
+  }
+  a .id-badge {
+    color: LinkText;
+  }
 }
 .filter-bar {
   margin: 0 0 20px;
@@ -1178,25 +1310,9 @@ fieldset.filters {
   font-size: var(--text-reading);
 }
 .entry-meta {
-  display: flex;
-  align-items: baseline;
-  gap: 12px;
   color: var(--text-muted);
   font-size: var(--text-sm);
-  white-space: nowrap;
   margin: 8px 0;
-}
-.entry-meta .id-tag {
-  border: 0;
-  padding: 0;
-  min-width: 0;
-  max-width: 50%;
-  color: inherit;
-  font-size: inherit;
-}
-.entry-meta .id-description {
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 .timeline-version {
   flex: none;
@@ -1983,19 +2099,12 @@ fieldset.filters {
   padding: 8px 0;
   border-top: 1px solid var(--border);
 }
-.needs-delivery-head,
-.needs-review-head {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  flex-wrap: wrap;
-}
 .needs-delivery-list p {
-  margin: 4px 0 0;
+  margin: 8px 0 0 32px;
   color: var(--text-muted);
 }
 .needs-review-issues {
-  margin-top: 4px;
+  margin: 8px 0 0 32px;
 }
 .needs-batch {
   margin: 16px 0;
@@ -3053,13 +3162,10 @@ body[data-lightbox="open"] .drawer-overlay {
 .recent-conclusions a:hover {
   text-decoration: underline;
 }
-/* C-136: records tab. Current deliveries first, superseded ones folded; every
-   delivery/review row shares one column grid so avatars, ids, statuses,
-   commits and times line up, and nothing scrolls sideways. */
+/* C-136: records tab. Current deliveries first, superseded ones folded. C-204 rows
+   share the same center alignment and wrap whole groups without clipping. */
 .card-records {
-  --record-who: 8.5em;
   --record-indent: 24px;
-  container-type: inline-size;
 }
 .card-record-list > li {
   border-bottom: 1px solid var(--border);
@@ -3073,44 +3179,14 @@ body[data-lightbox="open"] .drawer-overlay {
   border-radius: 0 calc(var(--radius) / 2) calc(var(--radius) / 2) 0;
   margin-bottom: 6px;
 }
-.record-row {
-  display: grid;
-  grid-template-columns:
-    minmax(0, var(--record-who)) 4.5em 7em minmax(0, 1fr)
-    auto;
-  grid-template-areas: "who id status commit time";
-  align-items: center;
-  column-gap: 12px;
-  row-gap: 2px;
-  min-width: 0;
-}
 .record-who {
-  grid-area: who;
   min-width: 0;
+  max-width: 100%;
 }
-.record-who > :where(.employee-identity) {
-  min-width: 0;
-}
-.record-who :where(.employee-label strong) {
-  display: block;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-.record-id {
-  grid-area: id;
-  white-space: nowrap;
-}
-.record-status {
-  grid-area: status;
-  white-space: nowrap;
-}
+.record-id,
+.record-status,
 .record-commit {
-  grid-area: commit;
   min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
 }
 .record-kind-label {
   color: var(--text-muted);
@@ -3168,9 +3244,6 @@ body[data-lightbox="open"] .drawer-overlay {
   border-left: 1px solid var(--border);
 }
 .record-reviews > .record-row {
-  grid-template-columns:
-    minmax(0, calc(var(--record-who) - var(--record-indent))) 4.5em 7em
-    minmax(0, 1fr) auto;
   padding: 2px 0;
 }
 .record-superseded {
@@ -3180,15 +3253,6 @@ body[data-lightbox="open"] .drawer-overlay {
   cursor: pointer;
   padding: 6px 0;
   color: var(--text-muted);
-}
-@container (max-width: 520px) {
-  .record-row,
-  .record-reviews > .record-row {
-    grid-template-columns: minmax(0, 1fr) 4.5em 7em;
-    grid-template-areas:
-      "who id status"
-      "commit time time";
-  }
 }
 .attachment-grid {
   display: grid;
@@ -3442,6 +3506,13 @@ body[data-lightbox="open"] .drawer-overlay {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  overflow-wrap: anywhere;
+}
+.employee-inline .employee-label strong {
+  font-size: var(--text-body);
+  line-height: 20px;
+  font-weight: 500;
+  white-space: normal;
   overflow-wrap: anywhere;
 }
 .employee-title {
@@ -4056,8 +4127,8 @@ body[data-lightbox="open"] .drawer-overlay {
   overflow-wrap: anywhere;
 }
 .decision-record-by .employee-identity {
-  gap: 6px;
-  font-size: var(--text-sm);
+  gap: 8px;
+  font-size: var(--text-body);
 }
 .decision-record-by .employee-avatar {
   width: 20px;
@@ -4199,6 +4270,54 @@ body[data-lightbox="open"] .drawer-overlay {
   .card-record-list > li.record-delivery-current {
     background: var(--surface-muted);
   }
+}
+
+/* C-204: shared person/number/status rows, in document reading order. */
+.identity-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  min-height: 32px;
+  min-width: 0;
+  gap: 8px 12px;
+}
+.identity-row > a:not(.id-tag) {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  font-size: var(--text-sm);
+  line-height: 20px;
+}
+.identity-row > code,
+.identity-row .timeline-version {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  font-size: var(--text-xs);
+  font-family: var(--font-code);
+  line-height: 20px;
+}
+.identity-row .status {
+  gap: 6px;
+  font-size: var(--text-sm);
+  line-height: 20px;
+}
+.employee-inline {
+  min-width: 0;
+  min-height: 32px;
+  gap: 8px;
+}
+.identity-row.timeline-head .timeline-when {
+  flex-basis: 100%;
+  margin: 0 0 0 32px;
+}
+.identity-row.timeline-head .timeline-conclusion {
+  margin: 0 0 0 auto;
+}
+
+.identity-row .status-icon {
+  width: 16px;
+  height: 16px;
 }
 
 /* C-205: one status row, actionable facts first, supporting evidence folded. */

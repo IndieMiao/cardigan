@@ -34,6 +34,7 @@ export interface ServerConfig {
   readonly contextUsageCacheDir?: string;
   readonly contextUsageStaleAfterMs?: number;
   readonly dispatchIntervalMs?: number;
+  readonly runtimeFailureLimit?: number;
   /**
    * After SIGTERM, how long in-flight Workbench requests may run before their
    * connections are cut; SSE streams end at once. 10 seconds by default.
@@ -70,6 +71,7 @@ export interface ServerEnv extends ExecutionEnv {
   readonly CARDIGAN_CONTEXT_USAGE_CACHE_DIR?: string | undefined;
   readonly CARDIGAN_CONTEXT_USAGE_STALE_AFTER_MS?: string | undefined;
   readonly CARDIGAN_DISPATCH_INTERVAL_MS?: string | undefined;
+  readonly CARDIGAN_RUNTIME_FAILURE_LIMIT?: string | undefined;
   readonly CARDIGAN_SHUTDOWN_GRACE_MS?: string | undefined;
 }
 
@@ -91,6 +93,16 @@ const nonEmpty = (value: string | undefined): string | undefined =>
 
 /** Read the server configuration from the environment (§3, §13.1). */
 export function resolveServerConfig(env: ServerEnv): ServerConfig {
+  const failureLimitText = nonEmpty(env.CARDIGAN_RUNTIME_FAILURE_LIMIT);
+  const runtimeFailureLimit =
+    failureLimitText === undefined ? undefined : Number(failureLimitText);
+  if (
+    runtimeFailureLimit !== undefined &&
+    (!Number.isSafeInteger(runtimeFailureLimit) || runtimeFailureLimit < 2)
+  )
+    throw new Error(
+      "CARDIGAN_RUNTIME_FAILURE_LIMIT must be an integer of at least 2",
+    );
   const portText = nonEmpty(env.CARDIGAN_MCP_PORT);
   const port = portText === undefined ? DEFAULT_MCP_PORT : Number(portText);
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
@@ -145,6 +157,7 @@ export function resolveServerConfig(env: ServerEnv): ServerConfig {
       "CARDIGAN_DISPATCH_TIMEOUT_MS",
       600_000,
     ),
+    ...(runtimeFailureLimit === undefined ? {} : { runtimeFailureLimit }),
     mergeIntervalMs: interval(
       env.CARDIGAN_MERGE_INTERVAL_MS,
       "CARDIGAN_MERGE_INTERVAL_MS",
