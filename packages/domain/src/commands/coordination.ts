@@ -340,6 +340,8 @@ export function requestDecision(
       "suggestion.option 必须与 recommended 一致",
     );
     // C-202: every decision raised for the human carries a plain summary.
+    // A decision for PM that falls back to the human (no PM Ops able to take
+    // it) is checked after routing below.
     const plainSummary =
       p.decider === "human" || p.plain_summary !== undefined
         ? buildPlainSummary(p.plain_summary)
@@ -457,6 +459,11 @@ export function requestDecision(
             target: p.target as NonNullable<typeof p.target>,
           }
         : { ...base, kind: "choose" },
+    );
+    ensure(
+      decision.decider !== "human" || !!plainSummary,
+      "validation_failed",
+      "现在没有能代为处理的后台项目经理，这条拍板会直接交给人，所以必须带人话概述（plain_summary）：请用白话写清“改了什么”“对你的影响”“风险”三项（没有风险就写“无”）",
     );
     d.put("decisions", decision);
     for (const card of cards.length ? cards : [undefined])

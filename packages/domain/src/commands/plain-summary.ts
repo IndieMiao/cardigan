@@ -1,4 +1,4 @@
-import type { PlainSummary } from "../entities.js";
+import type { Decision, PlainSummary } from "../entities.js";
 import { ensure } from "./core.js";
 
 /**
@@ -108,3 +108,44 @@ export function plainSummaryNoRisk(summary: PlainSummary): boolean {
 
 export const samePlainSummary = (a?: PlainSummary, b?: PlainSummary) =>
   a?.changed === b?.changed && a?.impact === b?.impact && a?.risk === b?.risk;
+
+const CATEGORY_RISK: Readonly<Record<string, string>> = {
+  spending: "涉及花钱，请看详细信息",
+  account: "涉及账号，请看详细信息",
+  permission: "涉及权限，请看详细信息",
+  data_deletion: "涉及删除数据，请看详细信息",
+  scope_change: "涉及需求范围变化，请看详细信息",
+};
+
+/**
+ * C-202: written by the system when it hands a decision without a plain
+ * summary to the human by itself (PM Ops paused or released, delegation
+ * revoked, card marked sensitive). Merge confirmations are left alone: theirs
+ * comes from the completion request, and older ones show `context` as before.
+ */
+export function systemHandoffPlainSummary(q: Decision): PlainSummary {
+  return {
+    changed:
+      "这条拍板原本由项目经理处理，现在项目经理处理不了，系统把它转交给你；具体问题见标题和详细信息",
+    impact: q.blocking
+      ? "你拍板之前，相关工作会一直等着"
+      : "这条拍板不挡工作，可以稍后处理",
+    risk:
+      CATEGORY_RISK[q.category ?? "general"] ??
+      "系统没有评估风险，请看详细信息",
+  };
+}
+
+/** C-202: the plain summary of the system's review-limit decision. */
+export const REVIEW_LIMIT_PLAIN_SUMMARY: PlainSummary = {
+  changed: "审核员的审核轮数用完了，需要决定是再给一轮审核，还是先暂停",
+  impact: "拍板之前，这项审核会一直停着",
+  risk: "无",
+};
+
+/** C-202: the plain summary of the system's worktree cleanup decision. */
+export const WORKTREE_CLEANUP_PLAIN_SUMMARY: PlainSummary = {
+  changed: "一名员工的工作已经结束，问你是保留还是清理留下的本地工作区",
+  impact: "保留就什么都不变；清理会先把改动存成补丁，再删掉工作区文件",
+  risk: "选清理会删除本地文件（会先存补丁备份）",
+};

@@ -790,6 +790,8 @@ test("needs-you lists open human decisions and pending human actions", async () 
             affected_work_items: [],
             blocking: false,
             decider: "role:pm",
+            // No active PM Ops: it falls back to the human, so it needs one.
+            plain_summary: TEST_PLAIN_SUMMARY,
           },
           ports,
         ),

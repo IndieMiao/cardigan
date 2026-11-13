@@ -1428,3 +1428,38 @@ test.each([true, undefined])(
     }
   },
 );
+
+test("C-202: MCP leaves plain_summary checks to the domain, so a missing or non-text field gets the plain error", async () => {
+  const request = (plain_summary: unknown) =>
+    raw(office, "request_decision", {
+      card_id: card.id,
+      kind: "choose",
+      category: "general",
+      question: "Continue?",
+      context: "Choice",
+      options: [{ key: "go", description: "Continue", impact: "Unblocks" }],
+      recommended: "go",
+      affected_cards: [],
+      affected_work_items: [],
+      blocking: true,
+      decider: "human",
+      plain_summary,
+    });
+  const before = rows().events;
+  const cases: [unknown, string][] = [
+    [{ changed: "调整显示", impact: "更容易阅读" }, "缺少“风险”"],
+    [{ changed: "调整显示", impact: 3, risk: "无" }, "缺少“对你的影响”"],
+    [{ ...TEST_PLAIN_SUMMARY, extra: "多余" }, "不认识：extra"],
+    [undefined, "缺少人话概述"],
+    ["一句话", "要写成一个对象"],
+  ];
+  for (const [input, message] of cases) {
+    const result = await request(input);
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: "validation_failed" },
+    });
+    expect(JSON.stringify(result.structuredContent)).toContain(message);
+  }
+  expect(rows().events).toBe(before);
+});

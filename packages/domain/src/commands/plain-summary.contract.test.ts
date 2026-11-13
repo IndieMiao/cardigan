@@ -10,11 +10,18 @@ import {
   plainSummaryJargon,
   plainSummaryNoRisk,
   prepareDelivery,
+  REVIEW_LIMIT_PLAIN_SUMMARY,
   type RequestDecisionParams,
+  releaseAssignment,
   requestDecision,
+  requestWorktreeCleanup,
   resolveDelegatedDecision,
   standingTools,
   submitDelivery,
+  submitReview,
+  systemHandoffPlainSummary,
+  updateWorkItem,
+  WORKTREE_CLEANUP_PLAIN_SUMMARY,
 } from "../index.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
 import {
@@ -483,4 +490,211 @@ test("C-202: the system still hands an older confirmation without a summary to t
   const q = paused.decisions.find((x) => x.id === legacy.id);
   expect(q).toMatchObject({ decider: "human", status: "open" });
   expect(q).not.toHaveProperty("plain_summary");
+});
+
+// ---- final decider and automatic handoffs (review V-671) -------------------
+
+test("C-202: a decision for PM that falls back to the human without PM Ops needs a summary", async () => {
+  const { f } = await setup();
+  const noOps: CommandState = {
+    ...f.state,
+    assignments: f.state.assignments.filter((a) => a.id !== ops.id),
+  };
+  const before = JSON.stringify(noOps);
+  const r = requestDecision(
+    noOps,
+    officeActor,
+    ask(f.card.id, { decider: "role:pm" }),
+    f.io,
+  );
+  expect(r).toMatchObject({ ok: false, error: { code: "validation_failed" } });
+  expect(JSON.stringify(r)).toContain("直接交给人");
+  expect(JSON.stringify(noOps)).toBe(before);
+  const q = value(
+    requestDecision(
+      noOps,
+      officeActor,
+      ask(f.card.id, { decider: "role:pm", plain_summary: PLAIN }),
+      f.io,
+    ),
+  ).data;
+  expect(q).toMatchObject({ decider: "human", plain_summary: PLAIN });
+});
+
+test("C-202: a PM decision handed to the human by the system gets a system-written summary", async () => {
+  const { f } = await setup();
+  const q = f.commit(
+    requestDecision(
+      f.state,
+      officeActor,
+      ask(f.card.id, { decider: "role:pm", blocking: true }),
+      f.io,
+    ),
+  );
+  expect(q).toMatchObject({ decider: "role:pm" });
+  expect(q).not.toHaveProperty("plain_summary");
+  const paused = apply(
+    f.state,
+    value(
+      pauseStandingAssignment(f.state, human, { assignment_id: ops.id }, f.io),
+    ),
+  );
+  const handed = paused.decisions.find((x) => x.id === q.id);
+  expect(handed).toMatchObject({
+    decider: "human",
+    plain_summary: systemHandoffPlainSummary(q),
+  });
+  expect(handed?.plain_summary?.impact).toContain("一直等着");
+  const event = paused.events.find(
+    (e) =>
+      e.type === "decision_requested" &&
+      (e.payload as { decision_id?: string }).decision_id === q.id &&
+      (e.payload as { previous_decider?: string }).previous_decider ===
+        "role:pm",
+  );
+  expect(event?.payload).toMatchObject({ plain_summary_source: "system" });
+  // A summary the decision already has is kept as it is.
+  const { f: g } = await setup();
+  const own = g.commit(
+    requestDecision(
+      g.state,
+      officeActor,
+      ask(g.card.id, { decider: "role:pm", plain_summary: PLAIN }),
+      g.io,
+    ),
+  );
+  const kept = apply(
+    g.state,
+    value(
+      pauseStandingAssignment(g.state, human, { assignment_id: ops.id }, g.io),
+    ),
+  ).decisions.find((x) => x.id === own.id);
+  expect(kept).toMatchObject({ decider: "human", plain_summary: PLAIN });
+});
+
+test("C-202: system-written summaries are themselves plain and flag risky categories", () => {
+  const q = (category: Decision["category"], blocking = false) =>
+    ({ category, blocking }) as Decision;
+  for (const category of [
+    "general",
+    "feature_detail",
+    "scope_change",
+    "spending",
+    "account",
+    "permission",
+    "data_deletion",
+  ] as const)
+    for (const blocking of [true, false]) {
+      const summary = systemHandoffPlainSummary(q(category, blocking));
+      expect(buildPlainSummary(summary)).toEqual(summary);
+      expect(plainSummaryNoRisk(summary)).toBe(false);
+    }
+  expect(systemHandoffPlainSummary(q("spending")).risk).toContain("花钱");
+  expect(systemHandoffPlainSummary(q("data_deletion")).risk).toContain(
+    "删除数据",
+  );
+  for (const summary of [
+    REVIEW_LIMIT_PLAIN_SUMMARY,
+    WORKTREE_CLEANUP_PLAIN_SUMMARY,
+  ])
+    expect(buildPlainSummary(summary)).toEqual(summary);
+  expect(plainSummaryNoRisk(REVIEW_LIMIT_PLAIN_SUMMARY)).toBe(true);
+  expect(plainSummaryNoRisk(WORKTREE_CLEANUP_PLAIN_SUMMARY)).toBe(false);
+});
+
+async function reviewLimit() {
+  const f = mergeFixture("auto", 1);
+  const target = await f.deliver();
+  f.start(f.reviewer);
+  f.commit(
+    submitReview(
+      f.state,
+      f.actor(f.reviewer),
+      {
+        delivery_id: target.id,
+        target_sha: target.subject.value,
+        kind: "code",
+        issues: [
+          {
+            severity: "major",
+            description: "必须修复",
+            must_fix: true,
+            pre_existing: false,
+          },
+        ],
+      },
+      f.io,
+    ),
+  );
+  const q = f.state.decisions.find((x) => x.trigger === "review_limit");
+  if (!q) throw new Error("Missing review limit");
+  return { f, q };
+}
+
+test("C-202: the system's review-limit decision carries its own plain summary", async () => {
+  const { q } = await reviewLimit();
+  expect(q).toMatchObject({
+    decider: "human",
+    plain_summary: REVIEW_LIMIT_PLAIN_SUMMARY,
+  });
+});
+
+test("C-202: an older review-limit decision escalated by PM Ops gets the plain summary", async () => {
+  const { f, q } = await reviewLimit();
+  const { plain_summary: _gone, ...legacy } = q;
+  const pmOps: Assignment = { ...ops, id: "A-950" as Assignment["id"] };
+  const state: CommandState = {
+    ...f.state,
+    assignments: [...f.state.assignments, pmOps],
+    decisions: f.state.decisions.map((x) =>
+      x.id === q.id ? { ...legacy, decider: "role:pm" as const } : x,
+    ),
+  };
+  const actor = { ...opsActor, assignment_id: pmOps.id };
+  const r = updateWorkItem(
+    state,
+    actor,
+    {
+      work_item_id: q
+        .affected_work_items[0] as (typeof q.affected_work_items)[0],
+      review_limit_decision: {
+        decision_id: q.id,
+        option: "escalate",
+        rationale: "人来定",
+      },
+    },
+    f.io,
+  );
+  const next = apply(state, value(r)).decisions.find((x) => x.id === q.id);
+  expect(next).toMatchObject({
+    decider: "human",
+    plain_summary: REVIEW_LIMIT_PLAIN_SUMMARY,
+  });
+});
+
+test("C-202: the system's worktree cleanup decision carries its own plain summary", () => {
+  const f = mergeFixture();
+  const state = {
+    ...f.state,
+    assignments: f.state.assignments.map((a) =>
+      a.id === f.coder.id
+        ? { ...a, worktree_path: "/fixture/worktree", branch: "agent/fixture" }
+        : a,
+    ),
+  };
+  const p = { assignment_id: f.coder.id, reason: "Uncommitted changes" };
+  f.commit(releaseAssignment(state, human, p, f.io));
+  const q = f.commit(
+    requestWorktreeCleanup(
+      f.state,
+      { kind: "system", project_id: human.project_id } as Actor,
+      p,
+      f.io,
+    ),
+  );
+  expect(q).toMatchObject({
+    trigger: "worktree_cleanup",
+    decider: "human",
+    plain_summary: WORKTREE_CLEANUP_PLAIN_SUMMARY,
+  });
 });
