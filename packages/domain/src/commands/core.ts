@@ -84,6 +84,7 @@ type CommandName =
   | "rotate_deployed_pm"
   | "record_deployment"
   | "create_host_ops_assignment"
+  | "rotate_host_ops_assignment"
   | "manage_host_ops_action"
   | "queue_run"
   | "dispatch_run"

@@ -1,0 +1,138 @@
+{
+  "scenarios": [
+    {
+      "name": "needs-you",
+      "width": 1440,
+      "beforeBg": "rgb(23, 30, 27)",
+      "scroll": 1440,
+      "scrollY": 0,
+      "bg": "rgb(24, 24, 24)",
+      "apiRequests": 0,
+      "geometrySame": true
+    },
+    {
+      "name": "card",
+      "width": 1440,
+      "beforeBg": "rgb(23, 30, 27)",
+      "scroll": 1440,
+      "scrollY": 0,
+      "bg": "rgb(24, 24, 24)",
+      "apiRequests": 0,
+      "geometrySame": true
+    },
+    {
+      "name": "board",
+      "width": 1440,
+      "beforeBg": "rgb(23, 30, 27)",
+      "scroll": 1440,
+      "scrollY": 0,
+      "bg": "rgb(24, 24, 24)",
+      "apiRequests": 0,
+      "geometrySame": true
+    },
+    {
+      "name": "execution",
+      "width": 1440,
+      "beforeBg": "rgb(23, 30, 27)",
+      "scroll": 1440,
+      "scrollY": 0,
+      "bg": "rgb(24, 24, 24)",
+      "apiRequests": 0,
+      "geometrySame": true
+    },
+    {
+      "name": "activity",
+      "width": 1440,
+      "beforeBg": "rgb(23, 30, 27)",
+      "scroll": 1440,
+      "scrollY": 0,
+      "bg": "rgb(24, 24, 24)",
+      "apiRequests": 0,
+      "geometrySame": true
+    },
+    {
+      "name": "needs-you",
+      "width": 390,
+      "beforeBg": "rgb(23, 30, 27)",
+      "scroll": 390,
+      "scrollY": 0,
+      "bg": "rgb(24, 24, 24)",
+      "apiRequests": 0,
+      "geometrySame": true
+    },
+    {
+      "name": "card",
+      "width": 390,
+      "beforeBg": "rgb(23, 30, 27)",
+      "scroll": 390,
+      "scrollY": 0,
+      "bg": "rgb(24, 24, 24)",
+      "apiRequests": 0,
+      "geometrySame": true
+    },
+    {
+      "name": "board",
+      "width": 390,
+      "beforeBg": "rgb(23, 30, 27)",
+      "scroll": 390,
+      "scrollY": 0,
+      "bg": "rgb(24, 24, 24)",
+      "apiRequests": 0,
+      "geometrySame": true
+    },
+    {
+      "name": "execution",
+      "width": 390,
+      "beforeBg": "rgb(23, 30, 27)",
+      "scroll": 390,
+      "scrollY": 0,
+      "bg": "rgb(24, 24, 24)",
+      "apiRequests": 0,
+      "geometrySame": true
+    },
+    {
+      "name": "activity",
+      "width": 390,
+      "beforeBg": "rgb(23, 30, 27)",
+      "scroll": 390,
+      "scrollY": 0,
+      "bg": "rgb(24, 24, 24)",
+      "apiRequests": 0,
+      "geometrySame": true
+    }
+  ],
+  "readingSamples": [
+    {
+      "width": 1440,
+      "comment": {
+        "color": "rgb(204, 204, 204)",
+        "metadata": "rgb(164, 164, 164)",
+        "characters": 407,
+        "fullyVisible": true
+      },
+      "issues": {
+        "color": "rgb(204, 204, 204)",
+        "open": true,
+        "mustFix": true,
+        "suggestion": true
+      }
+    },
+    {
+      "width": 390,
+      "comment": {
+        "color": "rgb(204, 204, 204)",
+        "metadata": "rgb(164, 164, 164)",
+        "characters": 407,
+        "fullyVisible": true
+      },
+      "issues": {
+        "color": "rgb(204, 204, 204)",
+        "open": true,
+        "mustFix": true,
+        "suggestion": true
+      }
+    }
+  ],
+  "lightBackground": "rgb(242, 244, 243)",
+  "runtimeErrors": []
+}
