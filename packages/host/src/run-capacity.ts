@@ -87,9 +87,15 @@ export function runCapacitySnapshot(store: Store, tx: ReadRepositories) {
   for (const project of store.listProjects()) {
     const assignments = tx.assignments.list(project.id);
     const runs = tx.runs.list(project.id);
+    // C-216: reuse the Store's cached per-stream history when the transaction
+    // offers it; otherwise re-read each stream. Same streams, same order.
+    const streams = tx.events.listStreams?.(project.id);
     const actions = pendingHostOpsActions(
       [undefined, ...tx.cards.list(project.id).map((card) => card.id)].flatMap(
-        (card) => tx.events.listAfter(project.id, card, 0),
+        (card) =>
+          streams
+            ? (streams.get(card ?? "") ?? [])
+            : tx.events.listAfter(project.id, card, 0),
       ),
     );
     const reserved = new Set(

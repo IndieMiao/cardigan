@@ -109,6 +109,12 @@ export interface NotificationQuery {
   readonly recipient_kind?: Notification["recipient"]["kind"] | undefined;
   readonly assignment_id?: AssignmentId | undefined;
   readonly card_id?: CardId | undefined;
+  /**
+   * Only these notification ids (C-216). Looked up through the primary key, so
+   * a caller that already knows its ids does not decode the whole history.
+   * Duplicates and unknown ids are ignored; an empty list matches nothing.
+   */
+  readonly ids?: readonly string[] | undefined;
 }
 
 /** Notifications matching the query, oldest seq first. */
@@ -133,6 +139,11 @@ export function listNotifications(
   if (query.card_id !== undefined) {
     conditions.push("card_id = ?");
     values.push(query.card_id);
+  }
+  if (query.ids !== undefined) {
+    if (query.ids.length === 0) return [];
+    conditions.push("id IN (SELECT value FROM json_each(?))");
+    values.push(JSON.stringify(query.ids));
   }
   return db
     .prepare(

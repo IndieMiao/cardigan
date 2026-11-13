@@ -1,5 +1,6 @@
 import type { Dispatcher } from "./dispatch.js";
 import { DEFAULT_SLOW_TICK_MS } from "./loop.js";
+import { profileSpan, profileTick } from "./tick-profile.js";
 
 export interface DispatchLoopOptions {
   dispatcher: Pick<Dispatcher, "tick">;
@@ -44,10 +45,17 @@ export function startDispatchLoop(options: DispatchLoopOptions): DispatchLoop {
       while (!stopping) {
         const started = performance.now();
         try {
-          options.monitor?.reconcile();
-          // One global tick preserves FIFO across projects and rechecks freed slots.
-          await options.dispatcher.tick();
-          if (!stopping) options.monitor?.reconcile();
+          await profileTick("dispatcher", async () => {
+            await profileSpan("monitor", async () =>
+              options.monitor?.reconcile(),
+            );
+            // One global tick preserves FIFO across projects and rechecks freed slots.
+            await options.dispatcher.tick();
+            if (!stopping)
+              await profileSpan("monitor", async () =>
+                options.monitor?.reconcile(),
+              );
+          });
         } catch (error) {
           options.onError(error);
         } finally {

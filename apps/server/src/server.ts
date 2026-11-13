@@ -12,6 +12,7 @@ import {
   type Logger,
   type RunningServer,
   startMcpServer,
+  stdoutLogger,
 } from "@cardigan/mcp-server";
 import {
   DEFAULT_HC_SESSION,
@@ -41,6 +42,12 @@ import { type GitBinding, ServerGit } from "./git.js";
 import { DEFAULT_HOST_OPS_PATROL_INTERVAL_MS } from "./host-ops-patrol.js";
 import type { ShutdownTimer } from "./lifecycle.js";
 import { createListenRetry } from "./listen-retry.js";
+import {
+  setTickProfiler,
+  TickProfiler,
+  tickProfileEnabled,
+  tickProfiler,
+} from "./tick-profile.js";
 import type { WebConfig } from "./web/config.js";
 import { type RunningWebServer, startWebServer } from "./web/server.js";
 
@@ -151,6 +158,29 @@ export async function startCardiganServer(
     );
   const store = options.store ?? Store.open({ dataDir: config.dataDir });
   const ownsStore = options.store === undefined;
+  // C-216: opt-in tick measurement; off unless CARDIGAN_TICK_PROFILE=1.
+  const profiler = tickProfileEnabled(runtimeEnv)
+    ? new TickProfiler({
+        log: (line) => process.stdout.write(`${JSON.stringify(line)}\n`),
+      })
+    : undefined;
+  if (profiler) {
+    setTickProfiler(profiler);
+    store.observe(profiler.storeObserver);
+  }
+  const stopProfiler = () => {
+    if (!profiler) return;
+    profiler.stop();
+    store.observe(undefined);
+    if (tickProfiler() === profiler) setTickProfiler(undefined);
+  };
+  const mcpLog: Logger | undefined = profiler
+    ? (entry) => {
+        if (entry.event === "http" && entry.duration_ms !== undefined)
+          profiler.request("mcp", entry.duration_ms);
+        (options.log ?? stdoutLogger)(entry);
+      }
+    : options.log;
   // M4.5: stamp `standing_mode` on rows written before the field existed, so
   // routing and token issuance only ever read the field.
   store.backfillStandingModes();
@@ -267,10 +297,11 @@ export async function startCardiganServer(
         deliveryVerifier: git.verifierFor,
         ...(hostOps ? { hostOps: hostOps.tools } : {}),
         pinDelivery: (request) => git.pinDelivery(request),
-        ...(options.log === undefined ? {} : { log: options.log }),
+        ...(mcpLog === undefined ? {} : { log: mcpLog }),
       }),
     );
   } catch (error) {
+    stopProfiler();
     if (ownsStore) {
       store.close();
     }
@@ -298,7 +329,24 @@ export async function startCardiganServer(
             options.dispatcher?.hostOpsPatrolIntervalMs ??
             config.hostOpsPatrolIntervalMs ??
             DEFAULT_HOST_OPS_PATROL_INTERVAL_MS,
-          ...(webOptions.log === undefined ? {} : { log: webOptions.log }),
+          ...(profiler
+            ? {
+                log: (event) => {
+                  if (
+                    event.event === "web_http" &&
+                    typeof event.duration_ms === "number"
+                  )
+                    profiler.request("web", event.duration_ms);
+                  (
+                    webOptions.log ??
+                    ((line) =>
+                      process.stdout.write(`${JSON.stringify(line)}\n`))
+                  )(event);
+                },
+              }
+            : webOptions.log === undefined
+              ? {}
+              : { log: webOptions.log }),
           ...(webOptions.stream === undefined
             ? {}
             : { stream: webOptions.stream }),
@@ -313,6 +361,7 @@ export async function startCardiganServer(
     } catch (error) {
       await hostOps?.close();
       await mcp.close();
+      stopProfiler();
       if (ownsStore) store.close();
       throw error;
     }
@@ -409,6 +458,7 @@ export async function startCardiganServer(
       await web?.close();
       await hostOps?.close();
       await mcp.close();
+      stopProfiler();
       if (ownsStore) store.close();
       throw error;
     }
@@ -423,6 +473,7 @@ export async function startCardiganServer(
     await plane?.stop();
     await hostOps?.close();
     await mcp.close();
+    stopProfiler();
     if (ownsStore) store.close();
     throw error;
   }
@@ -442,6 +493,7 @@ export async function startCardiganServer(
       const results = await Promise.allSettled([web?.close(), plane?.stop()]);
       await hostOps?.close();
       await mcp.close();
+      stopProfiler();
       if (ownsStore) {
         store.close();
       }
