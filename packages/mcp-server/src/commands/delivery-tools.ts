@@ -15,7 +15,7 @@ import type { Logger } from "../log.js";
 import { defineTool } from "../tools/types.js";
 import { executeCommand, executePreparedCommand, unwrap } from "./execute.js";
 
-import { id, idempotency_key } from "./schemas.js";
+import { id, idempotency_key, plainSummary } from "./schemas.js";
 
 const attachments = z.array(z.string().min(1)).optional();
 const deliveryInput = z.object({
@@ -56,6 +56,11 @@ const deliveryInput = z.object({
     )
     .optional(),
   supersedes: id("delivery").optional(),
+  plain_summary: plainSummary
+    .optional()
+    .describe(
+      "Required with kind=card_completion, refused otherwise: the plain change note (人话改动说明) the human sees first on the merge confirmation.",
+    ),
 });
 const reviewInput = z.object({
   idempotency_key,

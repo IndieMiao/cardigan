@@ -25,6 +25,12 @@ import { Dispatcher } from "./dispatch.js";
 import { startQueuedRun } from "./host-start.js";
 import { m4Fixture, m4Scenario } from "./m4-fixtures.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 let f: ReturnType<typeof m4Fixture>, s: ReturnType<typeof m4Scenario>;
 let source: string, sha: string, service: GitWorktreeService, runtime: Runtime;
 const git = (path: string, ...args: string[]) =>
@@ -365,6 +371,7 @@ test("M5.S S13 a work-item PM acceptance reads the completion at its SHA", async
   f.startRun(s.coder);
   const completion = await f.deliver(s.coder, s.development.id, {
     kind: "card_completion",
+    plain_summary: TEST_PLAIN_SUMMARY,
     subject: sha,
     verifiers: [s.acceptance.id],
   });

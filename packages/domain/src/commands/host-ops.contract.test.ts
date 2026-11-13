@@ -33,6 +33,12 @@ import {
   value,
 } from "./test-fixtures.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 const definition: RoleDefinition = {
   role_id: "host_ops",
   display_name: "Host operations",
@@ -197,6 +203,7 @@ const decision: RequestDecisionParams = {
   affected_work_items: [],
   blocking: false,
   decider: "human",
+  plain_summary: TEST_PLAIN_SUMMARY,
 };
 test("invariant 6: host_ops requests retain assignment authorship and only target human or PM", () => {
   const s = standing();

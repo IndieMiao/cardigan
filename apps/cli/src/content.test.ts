@@ -18,6 +18,12 @@ import { main } from "./index.js";
 import type { CliIo } from "./io.js";
 import { registerTemplateRoles } from "./template-fixtures.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 const project = "p-content" as ProjectId;
 let dataDir: string, store: Store, io: CliIo;
 let output: string[], errors: string[];
@@ -275,6 +281,7 @@ test("artifact requires an existing decision and rolls back the generated anchor
           affected_work_items: [],
           blocking: false,
           decider: "human",
+          plain_summary: TEST_PLAIN_SUMMARY,
         },
         p,
       ),

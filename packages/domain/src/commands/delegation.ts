@@ -1,5 +1,11 @@
 import { deriveReviewMatrix } from "../derived.js";
-import type { Assignment, Card, Decision, ToolName } from "../entities.js";
+import type {
+  Assignment,
+  Card,
+  Decision,
+  PlainSummary,
+  ToolName,
+} from "../entities.js";
 import type { CardId } from "../ids.js";
 import {
   type DecisionCategory,
@@ -8,6 +14,7 @@ import {
   pmMergeConfirmation,
 } from "../preferences.js";
 import { type CommandDraft, type CommandState, ensure } from "./core.js";
+import { systemHandoffPlainSummary } from "./plain-summary.js";
 
 export function hasActivePmOps(d: CommandDraft, tool?: ToolName) {
   return d
@@ -235,12 +242,22 @@ export function handoffDecision(
   reason: string,
   assignmentId?: string,
   humanRequired = false,
+  /** C-202: audit of a PM rewrite of the plain summary on escalation. */
+  plainSummaryRewrite?: { readonly previous: PlainSummary | null },
 ) {
+  // C-202: nothing reaches the human without a plain summary. When the system
+  // hands over a decision that has none, it writes one itself; merge
+  // confirmations keep the completion's (older ones show context as before).
+  const generated =
+    !q.plain_summary && q.trigger !== "merge_confirmation"
+      ? systemHandoffPlainSummary(q)
+      : undefined;
   d.put("decisions", {
     ...q,
     decider: "human",
     context: `${q.context}\n\n${reason}`,
     ...(humanRequired ? { human_required_reason: reason } : {}),
+    ...(generated ? { plain_summary: generated } : {}),
   });
   d.emit(
     "decision_requested",
@@ -251,8 +268,26 @@ export function handoffDecision(
       previous_decider: q.decider,
       reason,
       ...(assignmentId ? { assignment_id: assignmentId } : {}),
+      ...(generated ? { plain_summary_source: "system" } : {}),
+      ...(plainSummaryRewrite && q.plain_summary
+        ? {
+            plain_summary_rewrite: {
+              previous: plainSummaryRewrite.previous
+                ? { ...plainSummaryRewrite.previous }
+                : null,
+              next: { ...q.plain_summary },
+              by: d.author,
+            },
+          }
+        : {}),
     },
-    { type: "decision_request", decision_id: q.id, body: reason },
+    {
+      type: "decision_request",
+      decision_id: q.id,
+      body: plainSummaryRewrite
+        ? `${reason}\n（${plainSummaryRewrite.previous ? "项目经理改写了人话概述" : "项目经理补写了人话概述"}）`
+        : reason,
+    },
   );
 }
 export function handoffUnauthorizedDecisions(

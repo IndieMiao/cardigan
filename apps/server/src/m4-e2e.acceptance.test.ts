@@ -50,6 +50,12 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { type CardiganServer, startCardiganServer } from "./server.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 const project = "p-m4e2e";
 const sourceBranch = "main";
 const ALL_TOOLS = [
@@ -669,6 +675,7 @@ async function deliverAndApprove(
       idempotency_key: idem(),
       work_item_id: seeded.development.id,
       kind: "card_completion",
+      plain_summary: TEST_PLAIN_SUMMARY,
       summary: "complete",
       subject: { kind: "git_head", value: sha },
       requested_verifiers: [seeded.acceptance.id],

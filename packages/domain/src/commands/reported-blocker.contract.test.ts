@@ -23,6 +23,12 @@ import {
   value,
 } from "./test-fixtures.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 const cases = ["produce", "verify"].flatMap((kind) =>
   (kind === "verify"
     ? ["missing", "current", "superseded"]
@@ -107,6 +113,7 @@ test.each(cases)(
                 affected_work_items: [work_item_id],
                 blocking: true,
                 decider: "human",
+                plain_summary: TEST_PLAIN_SUMMARY,
               },
               io,
             ),

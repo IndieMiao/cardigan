@@ -23,6 +23,12 @@ import {
 } from "./launch/test-fixtures.js";
 import { human, id, subject, value } from "./test-fixtures.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 beforeEach(setup);
 async function deliver() {
   const run = commit(dispatch(commit(queue())));
@@ -153,6 +159,7 @@ test("invariant 14: code and acceptance targets stay in their own card, work ite
   const completion: Delivery = {
     ...delivery,
     kind: "card_completion",
+    plain_summary: TEST_PLAIN_SUMMARY,
     requested_verifiers: [acceptance.id],
   };
   check(completion, false, true);

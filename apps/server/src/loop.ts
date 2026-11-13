@@ -1,3 +1,5 @@
+import { profileTick } from "./tick-profile.js";
+
 /**
  * M4.4: a bounded background loop for the merge, cleanup, reconcile and backup
  * phases. It never installs signal handlers and never owns the store: the
@@ -44,7 +46,7 @@ export function startTimerLoop(options: TimerLoopOptions): TimerLoop {
       while (!stopping) {
         const started = performance.now();
         try {
-          await options.tick();
+          await profileTick(options.name, options.tick);
         } catch (error) {
           options.onError(error);
         } finally {

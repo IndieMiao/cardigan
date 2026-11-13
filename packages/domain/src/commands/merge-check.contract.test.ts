@@ -26,6 +26,12 @@ import {
 import { mergeFixture } from "./merge/test-fixtures.js";
 import { apply, human, value } from "./test-fixtures.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 const system: Actor = { kind: "system", project_id: human.project_id };
 const tree = "c".repeat(40),
   candidate = "b".repeat(40);
@@ -586,6 +592,7 @@ test("a decision opened during checking blocks publication but does not lose the
         affected_work_items: [],
         blocking: true,
         decider: "human",
+        plain_summary: TEST_PLAIN_SUMMARY,
       },
       f.io,
     ),

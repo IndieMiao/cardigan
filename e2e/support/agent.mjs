@@ -175,6 +175,12 @@ async function produceWork(card, runId) {
         affected_work_items: [item.id],
         blocking: true,
         decider: "human",
+        // C-202: a decision for the human carries a plain summary.
+        plain_summary: {
+          changed: "返工时发现起飞画面会闪一帧空白，现有验收标准没覆盖到",
+          impact: "选补测会推迟一天发布；选照常发布，空白帧留到下个版本",
+          risk: "无",
+        },
       });
       mark("decision-asked");
       log(`coder: decision ${JSON.stringify(asked).slice(0, 160)}`);
@@ -367,6 +373,12 @@ async function completionWork(card, runId) {
     summary: "所有必需项通过，申请完成",
     subject: product.subject,
     requested_verifiers: [pmAcceptance.id],
+    // C-202: a completion request carries a plain change note.
+    plain_summary: {
+      changed: "所有必需的开发和验证都已通过，申请把这张卡合并",
+      impact: "合并后新版本带上本卡的改动",
+      risk: "无",
+    },
   });
   log(`coder: completion ${JSON.stringify(delivery).slice(0, 160)}`);
   mark("completion");

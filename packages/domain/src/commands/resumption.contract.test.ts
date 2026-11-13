@@ -27,6 +27,12 @@ import {
   value,
 } from "./test-fixtures.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 const office = actor(4, "pm");
 const ops = {
   ...office,
@@ -41,6 +47,7 @@ const choice = {
   question: "Choose",
   context: "A choice is needed",
   decider: "human" as const,
+  plain_summary: TEST_PLAIN_SUMMARY,
   options: [{ key: "go", description: "Continue", impact: "Unblocks work" }],
   recommended: "go",
   affected_cards: [],

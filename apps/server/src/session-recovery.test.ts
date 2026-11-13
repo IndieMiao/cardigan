@@ -21,6 +21,12 @@ import { Dispatcher } from "./dispatch.js";
 import { RuntimeMonitor } from "./dispatch-monitor.js";
 import { startQueuedRun } from "./host-start.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 let f: ReturnType<typeof dispatchFixture>;
 beforeEach(() => {
   f = dispatchFixture();
@@ -42,6 +48,7 @@ function scenario() {
         options: [{ key: "go", description: "Proceed", impact: "Resume" }],
         recommended: "go",
         decider: "human",
+        plain_summary: TEST_PLAIN_SUMMARY,
         blocking: true,
         affected_cards: [target.card.id],
         affected_work_items: [target.item.id],
