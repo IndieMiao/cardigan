@@ -3,6 +3,7 @@ import type {
   Author,
   Decision,
   HumanAction,
+  PlainSummary,
   TimelineEntry,
   WorkItem,
 } from "../entities.js";
@@ -40,6 +41,7 @@ import {
   pmMergeCheckFailureAuthority,
 } from "./merge-delegation.js";
 import { snoozeMergeConfirmation } from "./merge-snooze.js";
+import { buildPlainSummary, samePlainSummary } from "./plain-summary.js";
 import { resolveReviewLimit } from "./review-limit-resolution.js";
 
 export { extractReferences } from "../references.js";
@@ -275,6 +277,8 @@ export type RequestDecisionParams = Pick<
   readonly merge_related?: boolean;
   /** C-192: suggested option for the human; must match `recommended`. */
   readonly suggestion?: DecisionSuggestionInput;
+  /** C-202: plain-language summary; required when `decider` is the human. */
+  readonly plain_summary?: PlainSummary;
 };
 export function requestDecision(
   state: CommandState,
@@ -335,6 +339,11 @@ export function requestDecision(
       "validation_failed",
       "suggestion.option 必须与 recommended 一致",
     );
+    // C-202: every decision raised for the human carries a plain summary.
+    const plainSummary =
+      p.decider === "human" || p.plain_summary !== undefined
+        ? buildPlainSummary(p.plain_summary)
+        : undefined;
     if (p.kind === "approve") {
       ensure(
         p.target,
@@ -433,6 +442,7 @@ export function requestDecision(
             ),
           }
         : {}),
+      ...(plainSummary ? { plain_summary: plainSummary } : {}),
       blocking: p.blocking,
       decider: p.decider,
       doc_refs: [],
@@ -734,6 +744,11 @@ export function resolveDelegatedDecision(
     attachment_ids?: readonly AttachmentId[];
     /** C-192: suggestion shown to the human; only with `escalate`. */
     suggestion?: DecisionSuggestionInput;
+    /**
+     * C-202: plain summary for the human; only with `escalate`. Required when
+     * the decision has none yet, otherwise an audited rewrite.
+     */
+    plain_summary?: PlainSummary;
   },
   ports: CommandPorts,
 ) {
@@ -777,6 +792,11 @@ export function resolveDelegatedDecision(
       !p.suggestion || !!p.escalate,
       "validation_failed",
       "suggestion 只能在交给人（escalate）时提供",
+    );
+    ensure(
+      p.plain_summary === undefined || !!p.escalate,
+      "validation_failed",
+      "plain_summary 只能在交给人（escalate）时提供",
     );
     if (failed && !p.escalate) {
       ensure(
@@ -826,16 +846,33 @@ export function resolveDelegatedDecision(
       const suggestion = p.suggestion
         ? buildSuggestion(d, q, p.suggestion)
         : undefined;
+      // C-202: the human always gets a plain summary on escalation: the one
+      // already on the decision (e.g. from the completion request) or the
+      // PM's own; a PM rewrite is recorded in the handoff event.
+      ensure(
+        p.plain_summary !== undefined || !!q.plain_summary,
+        "validation_failed",
+        "交给人时必须带人话概述（plain_summary）：这条拍板还没有，请用白话写清“改了什么”“对你的影响”“风险”三项（没有风险就写“无”）",
+      );
+      const plainSummary =
+        p.plain_summary !== undefined
+          ? buildPlainSummary(p.plain_summary)
+          : q.plain_summary;
+      const rewritten =
+        p.plain_summary !== undefined &&
+        !samePlainSummary(plainSummary, q.plain_summary);
       handoffDecision(
         d,
         {
           ...q,
           ...(attachment_ids.length ? { attachment_ids } : {}),
           ...(suggestion ? { suggestion, recommended: suggestion.option } : {}),
+          ...(plainSummary ? { plain_summary: plainSummary } : {}),
         },
         `项目经理升级给你：${p.rationale}`,
         undefined,
         q.trigger === "merge_confirmation",
+        rewritten ? { previous: q.plain_summary ?? null } : undefined,
       );
       return d.get("decisions", q.id);
     }

@@ -1,5 +1,11 @@
 import { deriveReviewMatrix } from "../derived.js";
-import type { Assignment, Card, Decision, ToolName } from "../entities.js";
+import type {
+  Assignment,
+  Card,
+  Decision,
+  PlainSummary,
+  ToolName,
+} from "../entities.js";
 import type { CardId } from "../ids.js";
 import {
   type DecisionCategory,
@@ -235,6 +241,8 @@ export function handoffDecision(
   reason: string,
   assignmentId?: string,
   humanRequired = false,
+  /** C-202: audit of a PM rewrite of the plain summary on escalation. */
+  plainSummaryRewrite?: { readonly previous: PlainSummary | null },
 ) {
   d.put("decisions", {
     ...q,
@@ -251,8 +259,25 @@ export function handoffDecision(
       previous_decider: q.decider,
       reason,
       ...(assignmentId ? { assignment_id: assignmentId } : {}),
+      ...(plainSummaryRewrite && q.plain_summary
+        ? {
+            plain_summary_rewrite: {
+              previous: plainSummaryRewrite.previous
+                ? { ...plainSummaryRewrite.previous }
+                : null,
+              next: { ...q.plain_summary },
+              by: d.author,
+            },
+          }
+        : {}),
     },
-    { type: "decision_request", decision_id: q.id, body: reason },
+    {
+      type: "decision_request",
+      decision_id: q.id,
+      body: plainSummaryRewrite
+        ? `${reason}\n（${plainSummaryRewrite.previous ? "项目经理改写了人话概述" : "项目经理补写了人话概述"}）`
+        : reason,
+    },
   );
 }
 export function handoffUnauthorizedDecisions(

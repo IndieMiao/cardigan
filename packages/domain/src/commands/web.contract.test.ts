@@ -15,6 +15,12 @@ import {
 import { mergeFixture } from "./merge/test-fixtures.js";
 import { human, id, role, value } from "./test-fixtures.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 function instructionFixture() {
   const f = mergeFixture(),
     a: Assignment = {
@@ -162,6 +168,7 @@ const question = {
   affected_work_items: [],
   blocking: false,
   decider: "human" as const,
+  plain_summary: TEST_PLAIN_SUMMARY,
 };
 test.each([
   "general",

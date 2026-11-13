@@ -27,6 +27,12 @@ import {
   value,
 } from "./test-fixtures.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 const params = (n = 3) => ({
   work_item_id: id("work_item", n),
   card_id: id("card", 1),
@@ -232,6 +238,9 @@ async function deliver(
   const p = {
     work_item_id: f.coder.work_item_id as WorkItem["id"],
     kind,
+    ...(kind === "card_completion"
+      ? { plain_summary: TEST_PLAIN_SUMMARY }
+      : {}),
     summary: "Ready",
     subject: { kind: "git_head" as const, value: "a".repeat(40) },
     requested_verifiers: verifiers,
@@ -373,6 +382,7 @@ test("cancel alone never removes a required verifier or supplies a replacement",
   const p = {
     work_item_id: id("work_item", 1),
     kind: "card_completion" as const,
+    plain_summary: TEST_PLAIN_SUMMARY,
     summary: "Ready",
     subject: { kind: "git_head" as const, value: "a".repeat(40) },
     requested_verifiers: [],
@@ -458,6 +468,9 @@ test("invariants 13, 14: replacement withdraws a pending human completion decisi
     const p = {
       work_item_id: id("work_item", 1),
       kind,
+      ...(kind === "card_completion"
+        ? { plain_summary: TEST_PLAIN_SUMMARY }
+        : {}),
       summary: "Ready",
       subject: { kind: "git_head" as const, value: "a".repeat(40) },
       requested_verifiers: kind === "code" ? [id("work_item", 2)] : [],

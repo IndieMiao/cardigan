@@ -27,6 +27,7 @@ import { supersedeDelivery } from "./delivery-invalidation.js";
 import { checkEmployeeSeparation } from "./employee-assignment.js";
 import { requestHumanCompletionReview } from "./human-completion.js";
 import { completionPassed } from "./merge.js";
+import { buildPlainSummary } from "./plain-summary.js";
 import {
   projectIndependentReviewCheck,
   projectScreenshotCheck,
@@ -49,6 +50,7 @@ export type SubmitDeliveryParams = Pick<
       | "attachments"
       | "known_gaps"
       | "supersedes"
+      | "plain_summary"
     >
   >;
 const sameSubject = (a: DeliverySubject, b: DeliverySubject) =>
@@ -107,6 +109,18 @@ function inspect(d: CommandDraft, p: SubmitDeliveryParams) {
     "Invalid subject digest",
   );
   const completion = p.kind === "card_completion";
+  // C-202: the completion's plain change note becomes the merge
+  // confirmation's (or human completion review's) plain summary.
+  ensure(
+    completion || p.plain_summary === undefined,
+    "validation_failed",
+    "人话改动说明（plain_summary）只在完成申请（card_completion）里填写",
+  );
+  if (completion)
+    buildPlainSummary(
+      p.plain_summary,
+      "完成申请的人话改动说明（plain_summary）",
+    );
   const template = resolveCardTemplate(d, card);
   ensure(
     p.subject.kind !== "git_head" ||
@@ -449,6 +463,14 @@ export function submitDelivery(
       ...(p.branch ? { branch: p.branch } : {}),
       ...(p.pr_url ? { pr_url: p.pr_url } : {}),
       ...(p.test_results ? { test_results: p.test_results } : {}),
+      ...(completion
+        ? {
+            plain_summary: buildPlainSummary(
+              p.plain_summary,
+              "完成申请的人话改动说明（plain_summary）",
+            ),
+          }
+        : {}),
       ...(predecessor ? { supersedes: predecessor.id } : {}),
     };
     d.put("deliveries", value);

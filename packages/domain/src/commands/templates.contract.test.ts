@@ -22,6 +22,12 @@ import {
   value,
 } from "./test-fixtures.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 const definition: CardTemplateDefinition = {
   ...artifactCardTemplate,
   id: "custom",
@@ -566,6 +572,7 @@ test("completion and employee separation use the card's pinned custom primary an
   const completion = await deliver({
     ...product,
     kind: "card_completion",
+    plain_summary: TEST_PLAIN_SUMMARY,
     requested_verifiers: [id("work_item", 3)],
   });
   state = apply(
@@ -626,7 +633,11 @@ test("human completion review binds a decision to the current non-Git delivery a
     return effect.data;
   };
   await deliver(product);
-  await deliver({ ...product, kind: "card_completion" });
+  await deliver({
+    ...product,
+    kind: "card_completion",
+    plain_summary: TEST_PLAIN_SUMMARY,
+  });
   const first = state.decisions[0];
   if (!first) throw new Error("Missing human acceptance");
   await deliver({ ...product, subject: { ...product.subject, value: "v2" } });
@@ -644,6 +655,7 @@ test("human completion review binds a decision to the current non-Git delivery a
     ...product,
     subject: { ...product.subject, value: "v2" },
     kind: "card_completion",
+    plain_summary: TEST_PLAIN_SUMMARY,
   });
   const current = state.decisions.find((d) => d.status === "open");
   if (!current) throw new Error("Missing current review");
@@ -674,6 +686,7 @@ test("human completion review binds a decision to the current non-Git delivery a
     ...product,
     subject: { ...product.subject, value: "v2" },
     kind: "card_completion",
+    plain_summary: TEST_PLAIN_SUMMARY,
   });
   const retry = state.decisions.find((d) => d.status === "open");
   if (!retry) throw new Error("Missing retry review");

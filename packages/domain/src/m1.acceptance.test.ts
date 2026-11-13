@@ -51,6 +51,12 @@ import {
   type WorkItem,
 } from "./index.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 const project_id = "p-acceptance" as ProjectId;
 const NOW = "2026-01-01T00:00:00.000Z";
 
@@ -369,6 +375,9 @@ async function deliver(
     summary: input.summary ?? "fictional delivery",
     subject: { kind: "git_head" as const, value: input.subject ?? sha("a") },
     requested_verifiers: [...input.verifiers],
+    ...(input.kind === "card_completion"
+      ? { plain_summary: TEST_PLAIN_SUMMARY }
+      : {}),
   };
   const prepared = await prepareDelivery(h.state, actor, params, verifier);
   if (!prepared.ok) {
@@ -961,6 +970,7 @@ describe("inventory of §4.5 invariants", () => {
           affected_work_items: [],
           blocking: true,
           decider: "human",
+          plain_summary: TEST_PLAIN_SUMMARY,
         },
         s.h.ports,
       ),
@@ -1229,6 +1239,7 @@ describe("inventory of §4.5 invariants", () => {
           affected_work_items: [],
           blocking: false,
           decider: "human",
+          plain_summary: TEST_PLAIN_SUMMARY,
         },
         s.h.ports,
       ),
@@ -1380,6 +1391,7 @@ describe("decisions", () => {
           affected_work_items: [],
           blocking: true,
           decider: "human",
+          plain_summary: TEST_PLAIN_SUMMARY,
         },
         s.h.ports,
       ),
@@ -1964,6 +1976,7 @@ describe("PM tool boundaries and decision recording", () => {
           affected_work_items: [],
           blocking: false,
           decider: "human",
+          plain_summary: TEST_PLAIN_SUMMARY,
         },
         s.h.ports,
       ),
@@ -2138,6 +2151,7 @@ describe("PM tool boundaries and decision recording", () => {
           affected_work_items: [s.development.id],
           blocking: true,
           decider: "human",
+          plain_summary: TEST_PLAIN_SUMMARY,
         },
         s.h.ports,
       ),

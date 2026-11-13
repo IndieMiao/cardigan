@@ -43,6 +43,9 @@ export function requestHumanCompletionReview(
     target: { delivery_id: delivery.id },
     question: `验收 ${card.id} 的完成申请 ${delivery.id}`,
     context: delivery.summary,
+    ...(delivery.plain_summary
+      ? { plain_summary: { ...delivery.plain_summary } }
+      : {}),
     options: [
       { key: "approve", description: "验收通过", impact: "进入合并或完成" },
       { key: "reject", description: "退回修改", impact: "重新提交完成申请" },

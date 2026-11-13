@@ -17,6 +17,12 @@ import {
   type WorkItem,
 } from "./index.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 const card: Card = {
   id: "C-1" as never,
   project_id: "p",
@@ -123,6 +129,7 @@ function decision(overrides: Partial<Decision> = {}): Decision {
     affected_work_items: [],
     blocking: true,
     decider: "human",
+    plain_summary: TEST_PLAIN_SUMMARY,
     doc_refs: [],
     status: "open",
     ...overrides,
@@ -317,6 +324,7 @@ describe("waiting_on", () => {
   test("waits on the completion request for a verify item without a target", () => {
     const completion = delivery("D-9", {
       kind: "card_completion",
+      plain_summary: TEST_PLAIN_SUMMARY,
       summary: "completion request",
     });
     const waiting = deriveWaitingOn(

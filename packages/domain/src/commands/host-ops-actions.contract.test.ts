@@ -32,6 +32,12 @@ import {
   value,
 } from "./test-fixtures.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 const { work_item_id: _work, ...opsFields } = assignment(10, "host_ops");
 const ops: Assignment = { ...opsFields, scope: "standing" };
 const caller = {
@@ -562,6 +568,9 @@ test.each([2, 3])(
       work_item_id: id("work_item", 1),
       run_id: id("run", 1),
       kind: n === 2 ? "code" : "card_completion",
+      ...((n === 2 ? "code" : "card_completion") === "card_completion"
+        ? { plain_summary: TEST_PLAIN_SUMMARY }
+        : {}),
       summary: "Review target",
       subject,
       status: "accepted",
