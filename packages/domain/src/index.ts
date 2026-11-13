@@ -3,6 +3,7 @@ export * from "./avatar.js";
 export * from "./card-derived.js";
 export * from "./commands/attachments.js";
 export * from "./commands/auto-merge.js";
+export * from "./commands/context-usage.js";
 export * from "./commands/coordination.js";
 export type {
   CommandEffect,
@@ -90,6 +91,7 @@ export * from "./commands/sensitive.js";
 export { pauseStandingAssignment } from "./commands/standing.js";
 export * from "./commands/templates.js";
 export { canStartWork, workCompleted } from "./commands/workflow.js";
+export * from "./context-usage.js";
 export * from "./derived.js";
 export * from "./employee.js";
 export * from "./entities.js";

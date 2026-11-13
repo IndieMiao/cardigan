@@ -1,3 +1,9 @@
+import {
+  type ContextObservation,
+  contextObservationCurrent,
+  contextUsageFresh,
+  contextUsageLevel,
+} from "../context-usage.js";
 import type { Actor, Run } from "../entities.js";
 import {
   type HOST_OPS_TOOLS,
@@ -19,12 +25,15 @@ import {
   unwrap,
 } from "./core.js";
 import { cancelRunDispatch, queueRunInDraft, settingsValid } from "./launch.js";
+import { projectPreferences } from "./preferences.js";
 import { needsYouView } from "./queries.js";
 
 const unfinished = (r: Run) =>
   !["completed", "failed", "cancelled"].includes(r.status);
 export interface HostOpsActionParams {
   readonly tool: HostOpsExecutionTool;
+  readonly context_usage?: ContextObservation;
+  readonly context_stale_after_ms?: number;
   readonly target_id: AssignmentId | RunId;
   readonly reason: string;
   readonly snapshot?: HostOpsExecution["snapshot"];
@@ -150,6 +159,32 @@ export function beginHostOpsAction(
 ) {
   return command(state, actor, p.tool, ports, (d) => {
     const { assignment: a, run } = target(d, p);
+    if (p.context_usage) {
+      const usage = p.context_usage;
+      ensure(
+        p.tool !== "host_ops_cancel_run" &&
+          contextObservationCurrent(a, usage, state.events) &&
+          contextUsageFresh(
+            usage,
+            d.now,
+            p.context_stale_after_ms ?? 600_000,
+          ) &&
+          contextUsageLevel(usage, projectPreferences(state)) === "restart",
+        "stale_target",
+        "上下文未到换会话档，或用量已过期、会话已更换",
+      );
+      ensure(
+        !state.events.some(
+          (e) =>
+            e.type === "host_ops_action_taken" &&
+            (e.payload as { assignment_id?: string }).assignment_id === a.id &&
+            (e.payload as { context_usage?: ContextObservation }).context_usage
+              ?.session_id === usage.session_id,
+        ),
+        "illegal_transition",
+        "本会话已请求过上下文换会话",
+      );
+    }
     if (p.tool !== "host_ops_cancel_run") {
       ensure(p.snapshot, "validation_failed", "Launch snapshot is required");
       text(p.snapshot.model, "model");
@@ -160,6 +195,7 @@ export function beginHostOpsAction(
     }
     const payload = {
       execution: true,
+      ...(p.context_usage ? { context_usage: { ...p.context_usage } } : {}),
       tool: p.tool,
       target_id: p.target_id,
       assignment_id: a.id,
@@ -168,7 +204,25 @@ export function beginHostOpsAction(
       runtime_ref: a.runtime_ref ? { ...a.runtime_ref } : null,
       ...(p.snapshot ? { snapshot: { ...p.snapshot } } : {}),
     };
-    const event = d.emit("host_ops_action_taken", undefined, payload);
+    const card =
+      a.scope === "work_item"
+        ? d.get("work_items", a.work_item_id).card_id
+        : undefined;
+    const employee = state.employees?.find((e) => e.id === a.employee_id);
+    const body = p.context_usage
+      ? `主机运维为 ${employee?.name ?? a.id}（${a.id}）换会话 ${p.context_usage.session_id}：已用 ${p.context_usage.used_percentage}%，剩余 ${Math.round((100 - p.context_usage.used_percentage) * 10) / 10}%；已受理，等待确认退出。${p.reason}`
+      : undefined;
+    const event = d.emit("host_ops_action_taken", undefined, {
+      ...payload,
+      ...(body ? { body } : {}),
+    });
+    if (body && card)
+      d.emit(
+        "context_session_restart_requested",
+        card,
+        { action_id: event.id, assignment_id: a.id, body },
+        { type: "system", body },
+      );
     return {
       action_id: event.id,
       assignment_id: a.id,
@@ -212,7 +266,9 @@ export function finishHostOpsAction(
         ? unwrap(transition("runtime", a.runtime_state, "run_finished"))
         : a.runtime_state;
     d.put("assignments", {
-      ...(action.tool === "host_ops_restart_standing_pm" ? rest : a),
+      ...(action.tool === "host_ops_restart_standing_pm" || action.context_usage
+        ? rest
+        : a),
       runtime_ref: null,
       runtime_state,
     });
@@ -244,11 +300,23 @@ export function finishHostOpsAction(
         kind: previous?.kind ?? "followup",
       });
     }
+    const body = `主机运维已处理 ${action.target_id}：${action.reason}${action.context_usage ? `；会话 ${action.context_usage.session_id} 已用 ${action.context_usage.used_percentage}%，${run ? "旧会话已退出，已排新会话" : "已停止，目标无需重启"}` : ""}`;
     const event = d.emit(
       "host_ops_action_finished",
       card?.id,
       {
         action_id,
+        ...(action.context_usage
+          ? {
+              body,
+              employee_id: a.employee_id ?? null,
+              employee_name:
+                state.employees?.find((e) => e.id === a.employee_id)?.name ??
+                null,
+              context_usage: { ...action.context_usage },
+              result: run ? "new_session_queued" : "stopped_without_restart",
+            }
+          : {}),
         assignment_id: a.id,
         ...(run ? { run_id: run.id } : {}),
         ...(run && previous
@@ -260,7 +328,7 @@ export function finishHostOpsAction(
       },
       {
         type: "system",
-        body: `主机运维已处理 ${action.target_id}：${action.reason}`,
+        body,
       },
     );
     if (run) {

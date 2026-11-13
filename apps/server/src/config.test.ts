@@ -42,7 +42,7 @@ test("S10 defaults to loopback, port 3004 and the same user data directory as th
     attachmentIntervalMs: DEFAULT_INTERVALS.attachment,
     dispatchTimeoutMs: 600_000,
     hostOpsPatrolIntervalMs: 1_800_000,
-    hostOpsContextThresholdPct: 80,
+    contextUsageStaleAfterMs: 600_000,
     shutdownGraceMs: 10_000,
   });
 });
@@ -115,7 +115,7 @@ test("reads data dir and port from the environment", () => {
     attachmentIntervalMs: DEFAULT_INTERVALS.attachment,
     dispatchTimeoutMs: 600_000,
     hostOpsPatrolIntervalMs: 1_800_000,
-    hostOpsContextThresholdPct: 80,
+    contextUsageStaleAfterMs: 600_000,
     shutdownGraceMs: 10_000,
   });
 });
@@ -204,4 +204,34 @@ test("listen retries accept configurable positive millisecond values", () => {
     for (const value of ["0", "-1", "1.5", "NaN", "Infinity", "2147483648"])
       expect(() => resolveServerConfig({ [name]: value })).toThrow(name);
   }
+});
+
+test("context usage config defaults to ten minutes and accepts a host-selected cache directory", () => {
+  expect(resolveServerConfig({})).toMatchObject({
+    contextUsageStaleAfterMs: 600_000,
+  });
+  expect(resolveServerConfig({}).contextUsageCacheDir).toBeUndefined();
+  expect(
+    resolveServerConfig({
+      CARDIGAN_CONTEXT_USAGE_STALE_AFTER_MS: " ",
+      CARDIGAN_CONTEXT_USAGE_CACHE_DIR: " ",
+    }),
+  ).toMatchObject({ contextUsageStaleAfterMs: 600_000 });
+  expect(
+    resolveServerConfig({ CARDIGAN_CONTEXT_USAGE_CACHE_DIR: " " })
+      .contextUsageCacheDir,
+  ).toBeUndefined();
+  expect(
+    resolveServerConfig({
+      CARDIGAN_CONTEXT_USAGE_STALE_AFTER_MS: " 120000 ",
+      CARDIGAN_CONTEXT_USAGE_CACHE_DIR: " /fixture/context-cache ",
+    }),
+  ).toMatchObject({
+    contextUsageStaleAfterMs: 120_000,
+    contextUsageCacheDir: "/fixture/context-cache",
+  });
+  for (const value of ["0", "-1", "1.5", "NaN", "Infinity", "2147483648"])
+    expect(() =>
+      resolveServerConfig({ CARDIGAN_CONTEXT_USAGE_STALE_AFTER_MS: value }),
+    ).toThrow("CARDIGAN_CONTEXT_USAGE_STALE_AFTER_MS");
 });
