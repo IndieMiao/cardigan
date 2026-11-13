@@ -14,6 +14,7 @@ const baseline =
   "69f4e14b20f453ff4ccea5d2dfe7a322154bdb8d";
 await mkdir(output, { recursive: true });
 const measurements = [];
+const positionChecks = [];
 for (const before of [true, false]) {
   const server = await createServer({
     root,
@@ -185,6 +186,50 @@ for (const before of [true, false]) {
                 await evaluate("document.querySelector('.card-purpose').open"),
                 true,
               );
+              await evaluate("location.hash = '#/p/p-1/needs-you'");
+              await until(
+                "!document.querySelector('.card-header') && !!document.querySelector('.needs-merge')",
+              );
+              await evaluate(
+                "document.querySelectorAll('.needs-merge details').forEach(d => d.open = true); window.scrollTo({top: document.documentElement.scrollHeight, behavior: 'instant'})",
+              );
+              await until("window.scrollY > 100");
+              const fromScroll = await evaluate("window.scrollY");
+              await evaluate("location.hash = '#/p/p-1/cards/C-199'");
+              await until(
+                "!!document.querySelector('.card-header') && window.scrollY === 0",
+              );
+              const topScroll = await evaluate("window.scrollY");
+              for (const stage of ["top", "anchor"]) {
+                if (stage === "anchor") {
+                  await evaluate(
+                    "location.hash = '#/p/p-1/cards/C-199?at=work-item-W-1'",
+                  );
+                  // Scroll offsets are integral; rectangle edges may be fractional.
+                  await until(
+                    "(() => { const e = document.getElementById('work-item-W-1'); if (!e) return false; const r = e.getBoundingClientRect(); return e.closest('details')?.open && r.height > 0 && r.top >= -1 && r.bottom <= innerHeight + 1; })()",
+                  );
+                }
+                if (width === 390) {
+                  const shot = await send("Page.captureScreenshot", {
+                    format: "png",
+                  });
+                  await writeFile(
+                    resolve(output, `position-card-${stage}-390-light.png`),
+                    Buffer.from(shot.data, "base64"),
+                  );
+                }
+              }
+              const anchor = await evaluate(
+                "(() => { const e = document.getElementById('work-item-W-1'); const r = e.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, open: e.closest('details').open, scrollY: window.scrollY }; })()",
+              );
+              positionChecks.push({
+                width,
+                theme,
+                fromScroll,
+                topScroll,
+                anchor,
+              });
             }
           }
         }
@@ -198,6 +243,8 @@ for (const before of [true, false]) {
 }
 await writeFile(
   resolve(output, "measurements.json"),
-  JSON.stringify({ baseline, measurements }, null, 2),
+  JSON.stringify({ baseline, measurements, positionChecks }, null, 2),
 );
-console.log(`PASS ${measurements.length} layout cases; ${output}`);
+console.log(
+  `PASS ${measurements.length} layout cases, ${positionChecks.length} route/anchor cases; ${output}`,
+);

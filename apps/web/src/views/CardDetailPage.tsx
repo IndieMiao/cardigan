@@ -247,6 +247,16 @@ function CardContent({
   const commentBox = useRef<CommentBoxHandle>(null);
   const scroll = useRef<HTMLElement>(null),
     lastAnchor = useRef<string | undefined>(undefined);
+  const opened = useRef(false);
+  useEffect(() => {
+    if (opened.current) return;
+    opened.current = true;
+    if (anchor) return;
+    const root = inDrawer
+      ? article.current?.closest<HTMLElement>(".drawer-body")
+      : (document.scrollingElement ?? document.documentElement);
+    if (root) root.scrollTop = 0;
+  }, [anchor, inDrawer]);
   // Anchors may render before route filters settle. Follow their row while this
   // snapshot lays out, then stop on interaction or refresh; never move a reader
   // back to the latest entry on an unrelated SSE update.

@@ -24,6 +24,7 @@ afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
   window.history.replaceState(null, "", "/");
+  document.documentElement.scrollTop = 0;
 });
 function detail(): CardDetail {
   const base = cardDetail();
@@ -299,16 +300,19 @@ test("C-205 opening keeps the decision header visible; refresh keeps position an
     original = Element.prototype.scrollIntoView;
   Element.prototype.scrollIntoView = scroll;
   try {
+    document.documentElement.scrollTop = 640;
     const data = detail(),
       client = fakeClient({ card: async () => data });
     const view = render(
       <CardDetailPage client={client} projectId="p-1" cardId="C-1" />,
     );
     await screen.findByRole("region", { name: "时间线记录" });
+    expect(document.documentElement.scrollTop).toBe(0);
     expect(scroll).not.toHaveBeenCalled();
     const before = scroll.mock.calls.length;
     const input = screen.getByRole("textbox", { name: /评论|内容/ });
     fireEvent.change(input, { target: { value: "Draft survives" } });
+    document.documentElement.scrollTop = 420;
     view.rerender(
       <CardDetailPage
         client={client}
@@ -319,9 +323,36 @@ test("C-205 opening keeps the decision header visible; refresh keeps position an
     );
     await act(async () => {});
     expect(scroll.mock.calls.length).toBe(before);
+    expect(document.documentElement.scrollTop).toBe(420);
     expect((input as HTMLTextAreaElement).value).toBe("Draft survives");
   } finally {
     Element.prototype.scrollIntoView = original;
+  }
+});
+
+test("C-205 opening a drawer resets only its own scroll container", async () => {
+  const root = document.createElement("div");
+  root.className = "drawer-body";
+  document.body.append(root);
+  root.scrollTop = 540;
+  document.documentElement.scrollTop = 240;
+  try {
+    render(
+      <StrictMode>
+        <CardDetailPage
+          client={fakeClient({ card: async () => detail() })}
+          projectId="p-1"
+          cardId="C-1"
+          inDrawer
+        />
+      </StrictMode>,
+      { container: root },
+    );
+    await screen.findByRole("region", { name: "时间线记录" });
+    expect(root.scrollTop).toBe(0);
+    expect(document.documentElement.scrollTop).toBe(240);
+  } finally {
+    root.remove();
   }
 });
 
@@ -378,6 +409,7 @@ test("C-205 explicit anchor scrolling survives StrictMode and stops after intera
     },
   );
   try {
+    document.documentElement.scrollTop = 480;
     render(
       <StrictMode>
         <CardDetailPage
@@ -390,6 +422,7 @@ test("C-205 explicit anchor scrolling survives StrictMode and stops after intera
     );
     await screen.findByRole("region", { name: "时间线记录" });
     await waitFor(() => expect(scroll).toHaveBeenCalled());
+    expect(document.documentElement.scrollTop).toBe(480);
     const initial = scroll.mock.calls.length;
     act(() => {
       for (const callback of callbacks) callback();
