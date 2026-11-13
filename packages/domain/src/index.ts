@@ -96,6 +96,7 @@ export * from "./commands/role.js";
 export * from "./commands/run-limit.js";
 export * from "./commands/run-target-wait.js";
 export * from "./commands/runtime.js";
+export * from "./commands/runtime-incident.js";
 export * from "./commands/screenshot-check.js";
 export * from "./commands/sensitive.js";
 export { pauseStandingAssignment } from "./commands/standing.js";

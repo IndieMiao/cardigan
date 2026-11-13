@@ -1,3 +1,8 @@
+import {
+  MAX_RUNTIME_FAILURE_LIMIT,
+  MIN_RUNTIME_FAILURE_LIMIT,
+  parseRuntimeUnknownGraceMs,
+} from "@cardigan/domain";
 import { DEFAULT_CHECK_CLEANUP_GRACE_MS } from "@cardigan/git-service";
 
 export const DEFAULT_DATA_DIR = defaultDataDirectory();
@@ -35,6 +40,8 @@ export interface ServerConfig {
   readonly contextUsageStaleAfterMs?: number;
   readonly dispatchIntervalMs?: number;
   readonly runtimeFailureLimit?: number;
+  /** C-228 / Q-387: CARDIGAN_RUNTIME_UNKNOWN_GRACE_SECONDS, default 60 s. */
+  readonly runtimeUnknownGraceMs?: number;
   /**
    * After SIGTERM, how long in-flight Workbench requests may run before their
    * connections are cut; SSE streams end at once. 10 seconds by default.
@@ -72,6 +79,7 @@ export interface ServerEnv extends ExecutionEnv {
   readonly CARDIGAN_CONTEXT_USAGE_STALE_AFTER_MS?: string | undefined;
   readonly CARDIGAN_DISPATCH_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_RUNTIME_FAILURE_LIMIT?: string | undefined;
+  readonly CARDIGAN_RUNTIME_UNKNOWN_GRACE_SECONDS?: string | undefined;
   readonly CARDIGAN_SHUTDOWN_GRACE_MS?: string | undefined;
 }
 
@@ -98,11 +106,16 @@ export function resolveServerConfig(env: ServerEnv): ServerConfig {
     failureLimitText === undefined ? undefined : Number(failureLimitText);
   if (
     runtimeFailureLimit !== undefined &&
-    (!Number.isSafeInteger(runtimeFailureLimit) || runtimeFailureLimit < 2)
+    (!Number.isSafeInteger(runtimeFailureLimit) ||
+      runtimeFailureLimit < MIN_RUNTIME_FAILURE_LIMIT ||
+      runtimeFailureLimit > MAX_RUNTIME_FAILURE_LIMIT)
   )
     throw new Error(
-      "CARDIGAN_RUNTIME_FAILURE_LIMIT must be an integer of at least 2",
+      `CARDIGAN_RUNTIME_FAILURE_LIMIT must be an integer from ${MIN_RUNTIME_FAILURE_LIMIT} to ${MAX_RUNTIME_FAILURE_LIMIT} (Q-387)`,
     );
+  const runtimeUnknownGraceMs = parseRuntimeUnknownGraceMs(
+    env.CARDIGAN_RUNTIME_UNKNOWN_GRACE_SECONDS,
+  );
   const portText = nonEmpty(env.CARDIGAN_MCP_PORT);
   const port = portText === undefined ? DEFAULT_MCP_PORT : Number(portText);
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
@@ -158,6 +171,7 @@ export function resolveServerConfig(env: ServerEnv): ServerConfig {
       600_000,
     ),
     ...(runtimeFailureLimit === undefined ? {} : { runtimeFailureLimit }),
+    runtimeUnknownGraceMs,
     mergeIntervalMs: interval(
       env.CARDIGAN_MERGE_INTERVAL_MS,
       "CARDIGAN_MERGE_INTERVAL_MS",

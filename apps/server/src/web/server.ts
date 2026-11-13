@@ -116,6 +116,8 @@ export interface WebServerOptions {
   readonly hostOpsPatrolIntervalMs?: number;
   /** C-153: the hc session registered in runtime.json, for operator commands. */
   readonly hcSession?: string;
+  /** C-228 / Q-387: failures-only unknown grace before Needs You; 60 s default. */
+  readonly runtimeUnknownGraceMs?: number;
   /** SSE cadence; tests shorten it, production uses the plan's 500 ms / 15 s. */
   readonly stream?: {
     readonly pollMs?: number;
@@ -157,6 +159,7 @@ interface RequestContext {
   readonly mergeGate: MergeGateConfiguration | undefined;
   readonly hostOpsPatrolIntervalMs: number | undefined;
   readonly hcSession: string | undefined;
+  readonly runtimeUnknownGraceMs: number | undefined;
   readonly stream: WebServerOptions["stream"];
   readonly shutdown: AbortSignal;
   /** Only the validated Host and explicit configuration decide cookie flags. */
@@ -279,6 +282,7 @@ export async function startWebServer(
         mergeGate: options.mergeGate,
         hostOpsPatrolIntervalMs: options.hostOpsPatrolIntervalMs,
         hcSession: options.hcSession,
+        runtimeUnknownGraceMs: options.runtimeUnknownGraceMs,
         runLimit: options.runLimit,
         runLimitMaximum: options.runLimitMaximum,
         machineDisplayName: options.machineDisplayName,
@@ -711,6 +715,7 @@ async function serveProjectRoute(
         context.mergeGate?.forProject(project_id).status,
         context.hostOpsPatrolIntervalMs,
         context.hcSession,
+        context.runtimeUnknownGraceMs,
       ),
     });
     return;

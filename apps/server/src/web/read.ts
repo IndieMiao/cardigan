@@ -1108,6 +1108,7 @@ export function needsYou(
   mergeGateStatus: ProjectMergeGate["status"] = "disabled",
   hostOpsPatrolIntervalMs = DEFAULT_HOST_OPS_PATROL_INTERVAL_MS,
   hcSession?: string,
+  runtimeUnknownGraceMs?: number,
 ) {
   const result = unwrap(
     listNeedsYou(
@@ -1119,6 +1120,7 @@ export function needsYou(
       },
       human(state.project_id),
       { now: () => now },
+      runtimeUnknownGraceMs === undefined ? {} : { runtimeUnknownGraceMs },
     ),
   );
   const data = result.data;
@@ -1614,6 +1616,8 @@ const EVENT_CATEGORIES: Readonly<Record<string, readonly string[]>> = {
     "runtime_unknown",
     "runtime_lost",
     "runtime_reconnected",
+    "runtime_unknown_surfaced",
+    "runtime_exit_observed",
     "bell_delivery_failed",
     "bell_delivery_attempt_failed",
     "bell_retry_exhausted",
