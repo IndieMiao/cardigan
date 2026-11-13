@@ -47,9 +47,17 @@
   .demo-toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); padding: 8px 16px; border: 1px solid var(--border); background: var(--surface); border-radius: 4px; z-index: 20; }
   .demo-toast:empty { display: none; }
   @media (prefers-color-scheme: dark) {
-    /* Neutral preview only; replace this table with C-208's approved values.
-       Navigation components consume existing semantic variables exclusively. */
-    html[data-mode="after"] { --bg: #181818; --surface: #222222; --surface-muted: #2c2c2c; --border: #484848; --text: #d6d6d6; --text-muted: #a8a8a8; --timeline-card: #2c2c2c; }
+    /* C-208 D-704 / V-679 approved palette, relayed in C-209#40.
+       Control borders and decorative dividers use separate semantic tokens. */
+    html[data-mode="after"] {
+      --bg: #181818; --surface: #222222; --surface-muted: #2c2c2c;
+      --timeline-card: #2c2c2c; --border: #484848; --control-border: #777777;
+      --text: #cccccc; --text-muted: #a4a4a4;
+      --accent: #8dcac3; --accent-contrast: #181818;
+      --tooltip-bg: #222222; --tooltip-text: #f5f5f5; --tooltip-border: #777777;
+      --status-muted: #a4a4a4; --status-backlog: #a4a4a4; --status-idle: #a4a4a4;
+    }
+    .after .project-switcher select, .after .demo-toolbar span { border-color: var(--control-border); }
   }
   @media (max-width: 760px) {
     .demo-row { grid-template-columns: 52px 1fr; gap: 8px; }
