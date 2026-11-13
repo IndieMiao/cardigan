@@ -31,9 +31,9 @@
   .after .nav-group h2 { font-size: 12px; line-height: 18px; font-weight: 400; color: var(--text-muted); margin: 0 12px 4px; }
   .after .nav-item { position: relative; display: flex; align-items: center; justify-content: flex-start; gap: 10px; min-height: 40px; padding: 10px 12px; border: 0; border-radius: 4px; background: transparent; color: var(--text); text-decoration: none; font: inherit; font-size: 14px; line-height: 20px; text-align: left; width: 100%; cursor: pointer; }
   .after .nav-item:hover { background: var(--surface-muted); }
-  .after .nav-item[aria-current="page"] { color: var(--accent); background: var(--surface-muted); font-weight: 600; }
+  .after .nav-item[aria-current="page"] { color: var(--accent); background: var(--surface-muted); font-weight: 400; }
   .after .nav-item[aria-current="page"]::before { content: ""; position: absolute; width: 3px; height: 20px; left: 0; top: calc(50% - 10px); border-radius: 2px; background: var(--accent); }
-  .after .needs-link { font-weight: 600; }
+  .after .nav-item.needs-link { font-weight: 600; }
   .after .needs-link .svg-icon { color: var(--status-wait); }
   .after .nav-count { margin-left: auto; padding: 0 6px; min-width: 24px; height: 22px; line-height: 22px; background: var(--surface); border-radius: 4px; color: var(--status-wait); font-size: 12px; text-align: center; font-variant-numeric: tabular-nums; }
   .after .utility-links { margin-top: auto; padding-top: 12px; border-top: 1px solid var(--border); }
@@ -120,7 +120,7 @@
   if (mode==='before') {
     sidebar.innerHTML=`<span class="brand">Cardigan</span>${project}<nav class="nav" aria-label="视图">${link(items[0])}<div class="nav-group"><h2>工作</h2>${link(items[1])}</div><div class="nav-group"><h2>运行</h2>${items.slice(2,6).map(link).join('')}</div><div class="nav-group"><h2>项目</h2>${link(items[6])}</div></nav><div class="sidebar-footer"><button class="logout">登出</button></div>`;
   } else {
-    sidebar.innerHTML=`<div class="brand-row"><span class="brand">Cardigan</span><button class="icon-button close-nav" aria-label="关闭导航">${icon('close')}</button></div>${project}<nav class="nav" aria-label="视图"><div class="primary-links">${items.slice(0,2).map(link).join('')}</div><div class="nav-group"><h2>项目</h2>${items.slice(2,6).map(link).join('')}</div></nav><nav class="utility-links" aria-label="工具">${items.slice(6).map(link).join('')}<button class="nav-item logout">${icon('logout')}<span>登出</span></button></nav>`;
+    sidebar.innerHTML=`<div class="brand-row"><span class="brand">Cardigan</span><button class="icon-button close-nav" aria-label="关闭导航">${icon('close')}</button></div>${project}<nav class="nav" aria-label="视图"><div class="primary-links">${items.slice(0,2).map(link).join('')}</div><div class="nav-group"><h2>观察</h2>${items.slice(2,6).map(link).join('')}</div></nav><nav class="utility-links" aria-label="工具">${items.slice(6).map(link).join('')}<button class="nav-item logout">${icon('logout')}<span>登出</span></button></nav>`;
   }
   document.querySelector('#desktop-nav').append(sidebar);
   const dialog=document.querySelector('#nav-dialog'), opener=document.querySelector('#open-nav');
