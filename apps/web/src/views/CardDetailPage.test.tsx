@@ -143,6 +143,43 @@ test("P2a-5: legacy superseded cards without a replacement do not infer it from 
   expect(screen.queryByRole("link", { name: /已被.*取代/ })).toBeNull();
 });
 
+test("C-197: risk tags show read-only Chinese labels in the goal section", async () => {
+  const detail = cardDetail();
+  renderCard({
+    card: async () => ({
+      ...detail,
+      card: {
+        ...detail.card,
+        risk_tags: ["security", "permission", "numeric_rule"],
+      },
+    }),
+  });
+  const line = await screen.findByText("风险标签：安全、权限、数值规则");
+  expect(line.closest("section[aria-label='目标和验收标准']")).toBeTruthy();
+  const page = document.body.textContent ?? "";
+  for (const raw of ["security", "permission", "numeric_rule"])
+    expect(page).not.toContain(raw);
+  expect(line.querySelector("input, button, select")).toBeNull();
+});
+
+test.each([undefined, []])(
+  "C-197: no risk tags line when the card has none (%j)",
+  async (risk_tags) => {
+    const detail = cardDetail();
+    renderCard({
+      card: async () => ({
+        ...detail,
+        card: {
+          ...detail.card,
+          ...(risk_tags === undefined ? {} : { risk_tags }),
+        },
+      }),
+    });
+    await screen.findByRole("region", { name: "目标和验收标准" });
+    expect(screen.queryByText(/风险标签/)).toBeNull();
+  },
+);
+
 test("shows a loading state while the card is on its way", () => {
   renderCard({ card: () => new Promise(() => undefined) });
   expect(screen.getByRole("status").textContent).toBe("");
