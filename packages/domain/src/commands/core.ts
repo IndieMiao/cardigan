@@ -59,6 +59,15 @@ export interface CommandPorts {
   readonly ids: IdAllocator;
   /** Host-provided template configuration, never MCP parameters. */
   readonly templates?: readonly CardTemplate[];
+  /** Host-only token row: authenticated request token, or its current row at settlement. Never MCP parameters. */
+  readonly run_token?: {
+    readonly id: string;
+    readonly project_id: I.ProjectId;
+    readonly assignment_id: I.AssignmentId;
+    readonly role_version: number;
+    readonly allowed_tools: readonly E.ToolName[];
+    readonly revoked_at: string | null;
+  };
 }
 export interface TokenRequest {
   readonly token_id: string;
@@ -93,6 +102,7 @@ type CommandName =
   | "manage_dispatch_stop"
   | "resolve_dispatch_attention"
   | "manage_inactive_run_stop"
+  | "settle_pending_run_finish"
   | "set_project_preferences"
   | "mark_notices_read"
   | "set_card_sensitive"
@@ -200,6 +210,7 @@ export class CommandDraft {
     const systemOnly = [
       "manage_host_ops_action",
       "manage_inactive_run_stop",
+      "settle_pending_run_finish",
       "auto_confirm_merge",
       "expire_merge_snoozes",
       "recover_dispatch",
