@@ -28,6 +28,8 @@ import {
 import {
   launchEntities,
   prepareRoleWorktree,
+  sessionFingerprint,
+  VERIFIER_LAUNCH_REVISION,
   worktreeBaselinePrompt,
   worktreeProvider,
 } from "@cardigan/host";
@@ -562,4 +564,31 @@ test("the prompt names the fresh build checkout", () => {
     `可写构建目录：/b（交付 ${sha} 的全新独立检出，可安装依赖、构建和跑测试；只读 worktree 保持不动。本次 Run 结束后主机会删除它，里面的改动不会保留，也不会被拉取、交付或合并）。`,
   );
   expect(worktreeBaselinePrompt({ path: "/w", base_sha: sha })).toBeUndefined();
+});
+
+test("a verifier session launched without the build environment is fingerprinted for one replacement", async () => {
+  // Sessions launched by this version record the verifier revision...
+  await startReviewer();
+  const recorded = f
+    .state()
+    .runs.filter((run) => run.assignment_id === s.reviewer.id)
+    .at(-1)?.tool_catalog;
+  expect(recorded?.endsWith(`+${VERIFIER_LAUNCH_REVISION}`)).toBe(true);
+  // ...which an older session's bare catalog never equals, so the Dispatcher's
+  // existing comparison (P2a-10 A) replaces it before its next wake.
+  const bare = recorded?.slice(0, -`+${VERIFIER_LAUNCH_REVISION}`.length);
+  const reviewer = launchEntities(f.store, f.project_id, s.reviewer.id);
+  expect(sessionFingerprint(bare, reviewer.role, reviewer.assignment)).toBe(
+    recorded,
+  );
+  expect(bare).not.toBe(recorded);
+  // Writers and standing sessions keep their fingerprint: no replacement.
+  const coder = launchEntities(f.store, f.project_id, s.coder.id);
+  expect(sessionFingerprint("c", coder.role, coder.assignment)).toBe("c");
+  expect(sessionFingerprint("c", reviewer.role, { scope: "standing" })).toBe(
+    "c",
+  );
+  expect(
+    sessionFingerprint(undefined, reviewer.role, reviewer.assignment),
+  ).toBeUndefined();
 });
