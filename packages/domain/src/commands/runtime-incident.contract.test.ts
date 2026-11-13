@@ -1,5 +1,5 @@
 import { beforeEach, expect, test } from "vitest";
-import type { Actor, Assignment, Event } from "../index.js";
+import type { Actor, Assignment, Event, RuntimeRef } from "../index.js";
 import {
   acknowledgeRun,
   DEFAULT_RUNTIME_UNKNOWN_GRACE_MS,
@@ -36,11 +36,13 @@ beforeEach(() => {
 function runtime(
   state: "unknown" | "idle" | "lost",
   facts: readonly (readonly [type: string, ms: number, cause?: string])[],
+  runtime_ref = coder().runtime_ref,
 ) {
+  const runtime_key = JSON.stringify(runtime_ref);
   f.state = {
     ...f.state,
     assignments: f.state.assignments.map((a) =>
-      a.id === f.coder.id ? { ...a, runtime_state: state } : a,
+      a.id === f.coder.id ? { ...a, runtime_state: state, runtime_ref } : a,
     ),
     events: [
       ...f.state.events,
@@ -54,7 +56,7 @@ function runtime(
           created_at: at(ms),
           payload: {
             assignment_id: f.coder.id,
-            runtime_key: "k",
+            runtime_key,
             ...(cause ? { cause } : {}),
           },
         }),
@@ -71,8 +73,9 @@ const humanIncidents = (ms: number, runtimeUnknownGraceMs?: number) =>
       runtimeUnknownGraceMs === undefined ? {} : { runtimeUnknownGraceMs },
     ),
   ).data.incidents.map((i) => i.id);
-const coder = () =>
-  present(f.state.assignments.find((a) => a.id === f.coder.id));
+function coder() {
+  return present(f.state.assignments.find((a) => a.id === f.coder.id));
+}
 
 test("C-228 Q-387 fixes the defaults at 60 s grace and a 2..10 failure limit", () => {
   expect(DEFAULT_RUNTIME_UNKNOWN_GRACE_MS).toBe(60_000);
@@ -183,4 +186,46 @@ test("C-228 grace setting must be a positive integer below the loss grace period
     expect(() => parseRuntimeUnknownGraceMs(text)).toThrow(
       "CARDIGAN_RUNTIME_UNKNOWN_GRACE_SECONDS",
     );
+});
+
+test("C-228 V-804 a replacement Session does not inherit the old terminal's grace", () => {
+  const old: RuntimeRef = { ...present(coder().runtime_ref ?? undefined) };
+  // Old terminal: failures-only disconnect, recovered 55 s later.
+  runtime(
+    "idle",
+    [
+      ["runtime_disconnected", 0, "failures"],
+      ["runtime_reconnected", 55_000],
+    ],
+    old,
+  );
+  // Session replaced at 60 s; the new terminal first fails at 80 s.
+  runtime("unknown", [["runtime_disconnected", 80_000, "failures"]], {
+    ...old,
+    terminal_ref: "t2",
+    agent_session_id: "session-2",
+  });
+  expect(runtimeUnknownVisibleAt(f.state.events, coder(), 60_000)).toBe(
+    at(140_000),
+  );
+  expect(humanIncidents(80_000)).toEqual([]);
+  expect(humanIncidents(139_999)).toEqual([]);
+  expect(humanIncidents(140_000)).toEqual([f.coder.id]);
+});
+
+test("C-228 an explicit exit seen on an old Session does not surface the new one", () => {
+  const old: RuntimeRef = { ...present(coder().runtime_ref ?? undefined) };
+  runtime(
+    "idle",
+    [
+      ["runtime_disconnected", 0, "failures"],
+      ["runtime_exit_observed", 1_000],
+    ],
+    old,
+  );
+  runtime("unknown", [["runtime_disconnected", 80_000, "failures"]], {
+    ...old,
+    terminal_ref: "t2",
+  });
+  expect(humanIncidents(80_000)).toEqual([]);
 });

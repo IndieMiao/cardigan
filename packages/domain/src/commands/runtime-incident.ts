@@ -33,18 +33,23 @@ const field = (event: Event, key: string): string | undefined => {
  * The grace period starts at the first disconnect of a flapping run: a
  * disconnect that follows the previous reconnection by less than the grace
  * period continues the same run, so repeated short reconnects cannot postpone
- * the incident forever.
+ * the incident forever. Only facts of the current RuntimeRef count: an
+ * Assignment is reused across Sessions, and a replacement terminal must not
+ * inherit the old terminal's elapsed time (V-804).
  */
 export function runtimeUnknownVisibleAt(
   events: readonly Event[],
-  assignment: Pick<Assignment, "id" | "runtime_state">,
+  assignment: Pick<Assignment, "id" | "runtime_state" | "runtime_ref">,
   graceMs: number,
 ): string | null {
   if (assignment.runtime_state !== "unknown") return null;
+  // Same key the RuntimeMonitor writes into each fact's `runtime_key`.
+  const key = JSON.stringify(assignment.runtime_ref);
   const facts = events.filter(
     (e) =>
       (RUNTIME_FACTS as readonly string[]).includes(e.type) &&
-      field(e, "assignment_id") === assignment.id,
+      field(e, "assignment_id") === assignment.id &&
+      field(e, "runtime_key") === key,
   );
   let index = facts.findLastIndex((e) => e.type === "runtime_disconnected");
   const current = facts[index];
@@ -75,7 +80,7 @@ export function runtimeUnknownVisibleAt(
 /** True while a failures-only `unknown` is still inside its grace period. */
 export function runtimeUnknownDeferred(
   events: readonly Event[],
-  assignment: Pick<Assignment, "id" | "runtime_state">,
+  assignment: Pick<Assignment, "id" | "runtime_state" | "runtime_ref">,
   now: string,
   graceMs: number,
 ): boolean {
