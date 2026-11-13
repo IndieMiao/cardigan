@@ -3,14 +3,21 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HOST_OPS_ROLE_TOOLS, queueRun } from "@cardigan/domain";
+import { defaultRoleDefinition } from "@cardigan/roles";
+import { HerdrRuntime } from "@cardigan/runtime-herdr";
 import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { StartById } from "./assignment.js";
 import { CLI_TOOLS } from "./command-access.js";
-import { runCommand } from "./host.js";
+import { issueTokenForAssignment, runCommand } from "./host.js";
 import { main } from "./index.js";
 import type { CliIo } from "./io.js";
 import { runWorkflowCommand } from "./workflow.js";
+
+function required<T>(value: T | undefined): T {
+  if (value === undefined) throw new Error("Missing fixture value");
+  return value;
+}
 
 let dir: string;
 let store: Store;
@@ -26,7 +33,7 @@ beforeEach(async () => {
   errors = [];
   io = {
     cwd: dir,
-    env: { CARDIGAN_DATA_DIR: dir },
+    env: { CARDIGAN_DATA_DIR: dir, CARDIGAN_RUNTIME_MODE: "local" },
     platform: "linux",
     stdout: (line) => output.push(line),
     stderr: (line) => errors.push(line),
@@ -58,21 +65,26 @@ beforeEach(async () => {
   errors = [];
 });
 afterEach(() => {
+  vi.restoreAllMocks();
   store.close();
   rmSync(dir, { recursive: true, force: true });
 });
 function assignments() {
   return store.uow.read((tx) => tx.assignments.list(project));
 }
-function printedToken(): string {
-  const lines = output.join("\n").split("\n");
-  const at = lines.findIndex((line) => line.startsWith("Token（只显示这一次"));
-  const token = lines[at + 1];
-  if (at < 0 || !token) throw new Error("Expected one-time token output");
-  return token;
+function fixtureToken(): string {
+  const a = assignments()[0];
+  if (!a) throw new Error("Missing fixture Assignment");
+  return store.uow.run(
+    (tx) =>
+      issueTokenForAssignment(tx, project, a.id, {
+        role_version: a.role_version,
+        allowed_tools: HOST_OPS_ROLE_TOOLS,
+      }).token,
+  );
 }
 
-test("create binds the sole operations employee and prints each issued token only once", async () => {
+test("create binds the sole employee without issuing credentials or revoking a running session", async () => {
   expect(
     await main(
       [
@@ -90,8 +102,16 @@ test("create binds the sole operations employee and prints each issued token onl
   ).toBe(0);
   output = [];
   expect(await main(["host-ops", "create"], io)).toBe(0);
-  const token = printedToken();
-  expect(output.join("\n").split(token).length - 1).toBe(1);
+  expect(
+    store.uow.run((tx) =>
+      tx.tokensForAssignment(
+        project,
+        required(tx.assignments.list(project)[0]).id,
+      ),
+    ),
+  ).toEqual([]);
+  const token = fixtureToken();
+  expect(output.join("\n")).not.toContain(token);
   expect(errors.join("\n").includes(token)).toBe(false);
   const [assignment] = assignments();
   expect(assignment).toMatchObject({
@@ -110,8 +130,8 @@ test("create binds the sole operations employee and prints each issued token onl
   expect(await main(["host-ops", "create"], io)).toBe(0);
   expect(assignments()).toHaveLength(1);
   expect(assignments()[0]?.id).toBe(assignment?.id);
-  expect(store.verifyToken(token)).toBeUndefined();
-  expect(store.verifyToken(printedToken())?.role_version).toBe(1);
+  expect(store.verifyToken(token)?.role_version).toBe(1);
+  expect(output.join("\n")).not.toContain(token);
 });
 
 test("start uses the existing launch entry and skips an unfinished Run", async () => {
@@ -164,14 +184,19 @@ test("start uses the existing launch entry and skips an unfinished Run", async (
   expect(output.join("\n")).toContain("已在运行，跳过");
 });
 
-test.each(["create", "start"])(
+test.each(["create", "start", "rotate"])(
   "%s rejects both token inputs before effects or launch",
   async (sub) => {
     expect(
-      CLI_TOOLS[`host-ops ${sub}` as "host-ops create" | "host-ops start"],
+      CLI_TOOLS[
+        `host-ops ${sub}` as
+          | "host-ops create"
+          | "host-ops start"
+          | "host-ops rotate"
+      ],
     ).toBeNull();
     expect(await main(["host-ops", "create"], io)).toBe(0);
-    const token = printedToken();
+    const token = fixtureToken();
     const path = join(dir, "credential");
     writeFileSync(path, token, { mode: 0o600 });
     const before = assignments();
@@ -215,3 +240,165 @@ test("invalid flags and unavailable roles fail without creating assignments or p
   expect(assignments()).toEqual([]);
   expect(output.join("\n")).not.toContain("Token（");
 });
+
+test("rotate retains the employee, transfers pending work and starts without exposing credentials", async () => {
+  expect(
+    await main(
+      [
+        "employee",
+        "add",
+        "--name",
+        "Operator",
+        "--title",
+        "Operations",
+        "--role",
+        "host_ops",
+      ],
+      io,
+    ),
+  ).toBe(0);
+  expect(await main(["host-ops", "create"], io)).toBe(0);
+  const previous = required(assignments()[0]);
+  const token = fixtureToken();
+  const event = required(
+    store.getUpdates({ project_id: project, since_seq: 0 }).events.at(-1),
+  );
+  store.recordNotification({
+    project_id: project,
+    event_id: event.id,
+    seq: event.seq,
+    recipient: { kind: "assignment", assignment_id: previous.id },
+    kind: "comment",
+  });
+  const roleFile = join(dir, "role.yaml");
+  writeFileSync(
+    roleFile,
+    JSON.stringify({
+      ...defaultRoleDefinition("host_ops", {
+        harness: "codex",
+        launch_profile_ref: "fixture",
+      }),
+      instructions: "Updated operations rules",
+    }),
+  );
+  expect(await main(["role", "update", "--file", roleFile], io)).toBe(0);
+  output = [];
+  const start = vi.fn(async () => 0);
+  expect(await main(["host-ops", "rotate"], io, { start })).toBe(0);
+  const next = required(assignments().find((a) => a.status === "active"));
+  expect(next.id).not.toBe(previous.id);
+  expect(next.employee_id).toBe(previous.employee_id);
+  expect(next.role_version).toBe(2);
+  expect(assignments().find((a) => a.id === previous.id)?.status).toBe(
+    "released",
+  );
+  expect(store.verifyToken(token)).toBeUndefined();
+  expect(store.listNotifications({ project_id: project })).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        status: "pending",
+        recipient: { kind: "assignment", assignment_id: next.id },
+      }),
+    ]),
+  );
+  expect(start).toHaveBeenCalledWith(
+    expect.objectContaining({ assignment_id: next.id }),
+  );
+  expect([...output, ...errors].join("\n")).not.toContain(token);
+  expect(output.join("\n")).not.toContain("Token（");
+  // Retrying after an unsuccessful start reuses the same replacement.
+  expect(await main(["host-ops", "rotate"], io, { start })).toBe(0);
+  expect(assignments()).toHaveLength(2);
+});
+
+async function prepareRotation() {
+  expect(await main(["host-ops", "create"], io)).toBe(0);
+  const roleFile = join(dir, "role.yaml");
+  writeFileSync(
+    roleFile,
+    JSON.stringify({
+      ...defaultRoleDefinition("host_ops", {
+        harness: "codex",
+        launch_profile_ref: "fixture",
+      }),
+      instructions: "New version",
+    }),
+  );
+  expect(await main(["role", "update", "--file", roleFile], io)).toBe(0);
+  return required(assignments()[0]);
+}
+
+test("unconfirmed terminal exit leaves the old Assignment, token and inbox untouched", async () => {
+  const previous = await prepareRotation();
+  const token = fixtureToken();
+  store.uow.run((tx) =>
+    tx.assignments.put(project, {
+      ...previous,
+      runtime_ref: {
+        machine_id: "local",
+        runtime_machine: "local",
+        terminal_ref: "fixture",
+        agent_name: "fixture",
+      },
+    }),
+  );
+  const runtime = {
+    status: vi.fn(async () => ({
+      ok: true,
+      value: { process: "alive", agent: "idle", observed_seq: 1 },
+    })),
+    release: vi.fn(async () => ({
+      ok: false,
+      error: {
+        code: "runtime_unavailable",
+        message: "sensitive runtime output",
+      },
+    })),
+  } as unknown as HerdrRuntime;
+  vi.spyOn(HerdrRuntime, "create").mockResolvedValue({
+    ok: true,
+    value: runtime,
+  });
+  const before = assignments();
+  const beforeEvents = store.getUpdates({
+    project_id: project,
+    since_seq: 0,
+  }).events;
+  const start = vi.fn(async () => 0);
+  expect(await main(["host-ops", "rotate"], io, { start })).not.toBe(0);
+  expect(assignments()).toEqual(before);
+  expect(
+    store.getUpdates({ project_id: project, since_seq: 0 }).events,
+  ).toEqual(beforeEvents);
+  expect(store.verifyToken(token)).toBeDefined();
+  expect(start).not.toHaveBeenCalled();
+  expect(errors.join("\n")).toContain("旧终端尚未确认退出");
+  expect([...output, ...errors].join("\n")).not.toContain(
+    "sensitive runtime output",
+  );
+});
+
+test.each(["exit-code", "exception"])(
+  "failed replacement start (%s) preserves the new identity and prints a retry command",
+  async (failure) => {
+    const previous = await prepareRotation();
+    const token = fixtureToken();
+    const start = vi.fn(async () => {
+      if (failure === "exception")
+        throw new Error(`fixture start failure ${token}`);
+      return 1;
+    });
+    expect(await main(["host-ops", "rotate"], io, { start })).not.toBe(0);
+    const next = required(assignments().find((a) => a.status === "active"));
+    expect(next.id).not.toBe(previous.id);
+    expect(store.verifyToken(token)).toBeUndefined();
+    expect(errors.join("\n")).toContain("cardigan host-ops start --project");
+    expect([...output, ...errors].join("\n")).not.toContain(token);
+    const retry = vi.fn(async () => 0);
+    expect(await main(["host-ops", "start"], io, { start: retry })).toBe(0);
+    expect(retry).toHaveBeenCalledWith(
+      expect.objectContaining({ assignment_id: next.id }),
+    );
+    expect(assignments()).toHaveLength(2);
+  },
+);
