@@ -7,6 +7,7 @@ import type {
   Run,
   RunId,
 } from "@cardigan/domain";
+import { isStandingPm } from "@cardigan/domain";
 import { describePreparationFailure, redactFailureLine } from "@cardigan/host";
 import {
   moveNotification,
@@ -99,17 +100,52 @@ export function alertAudience(
   standing?: StandingResolver,
   notes: readonly Notification[] = [],
 ): AlertAudience {
+  if (a.scope === "standing" && a.role_id === "host_ops") return "human";
   if (
     notes.some((n) => n.recipient.kind === "pm_office") ||
+    (isStandingPm(a) && a.standing_mode === "office") ||
     standing?.(state.project_id, "pm_office", state) === a.id
   )
     return "human_only";
   if (
     notes.some((n) => n.recipient.kind === "pm_ops") ||
+    isStandingPm(a) ||
     standing?.(state.project_id, "pm_ops", state) === a.id
   )
     return "human";
   return "ops";
+}
+/** Reuse the normal inbox/bell/ACK path; never send recovery work to its subject. */
+export function recordHostOpsAlert(
+  store: Store,
+  state: CommandState,
+  at: string,
+  assignment: Assignment,
+  event: Event,
+) {
+  if (
+    !isStandingPm(assignment) ||
+    assignment.status !== "active" ||
+    assignment.external
+  )
+    return;
+  const hostOps = state.assignments.find(
+    (a) =>
+      a.scope === "standing" &&
+      a.role_id === "host_ops" &&
+      a.status === "active" &&
+      a.id !== assignment.id,
+  );
+  if (!hostOps) return;
+  recordNotification(store.database, {
+    project_id: state.project_id,
+    event_id: event.id,
+    card_id: event.card_id,
+    seq: event.seq,
+    recipient: { kind: "assignment", assignment_id: hostOps.id },
+    kind: "run_attention",
+    at,
+  });
 }
 /** Caller owns the transaction: the fact and all escalation recipients commit together. */
 export function dispatchAlert(
@@ -177,4 +213,5 @@ export function dispatchAlert(
     record({ kind: "needs_you" });
     if (input.audience === "human") record({ kind: "pm_office" });
   }
+  recordHostOpsAlert(store, state, at, input.assignment, event);
 }

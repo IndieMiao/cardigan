@@ -819,7 +819,9 @@ C-56 失败恢复：外接 Assignment 跳过失败重试、派发超时恢复及
 
 C-63 的等待时长口径：`run_dispatch_stalled.waited_ms` 与升级通知的“派发后已等待 N 分钟”均从本轮原 Run 首次派发计时，包含原 Run、自动恢复后的排队与启动等待；通过 `run_dispatch_recovered` 的旧新 Run 关联和持久化 `run_dispatched` 时间计算，重启后口径一致。只关联当前替换 Run，不把同一 Assignment 后续独立 Run 算入旧一轮；没有关联时沿用当前 Run 的派发／恢复排队时间。超时判定仍按当前 Run 原有起点与阈值执行，重试、恢复预算和升级接收方不变。
 
-MCP 看门狗观察 running Run，按本次 started_at、heartbeat_at 与 Assignment 最近任意 MCP 调用时间的较晚者计算，默认 15 分钟（inactivityGraceMs 可配置）；先产生 needs_attention 通知并交 PM Ops，每个 Run 用持久事件去重。C-54 Q-86 授权在更长的可配置宽限期后自动终止失活执行：默认距最近活动 60 分钟（Q-88 按人的补充原话调整），沿用 §13.8 的主机配置且不热加载。领取停止意图和发出 Runtime.release 前各重新读取 MCP 活动；期间恢复活动则撤回尚未发出的停止，不用 Harness idle/done 推断业务完成。PM Ops 自身的投递失败、重发用尽、活跃度或回收告警转交 Needs You，并给 PM Office 一条简短提示；PM Office 自身只进入 Needs You，避免自我唤醒循环。
+MCP 看门狗观察 running Run，按本次 started_at、heartbeat_at 与 Assignment 最近任意 MCP 调用时间的较晚者计算，默认 15 分钟（inactivityGraceMs 可配置）；先产生 needs_attention 通知并交 PM Ops，每个 Run 用持久事件去重。C-54 Q-86 授权在更长的可配置宽限期后自动终止失活执行：默认距最近活动 60 分钟（Q-88 按人的补充原话调整），沿用 §13.8 的主机配置且不热加载。领取停止意图和发出 Runtime.release 前各重新读取 MCP 活动；期间恢复活动则撤回尚未发出的停止，不用 Harness idle/done 推断业务完成。PM Ops 自身的投递失败、重发用尽、活跃度或回收告警转交 Needs You，并给 PM Office 一条简短提示；PM Office 自身的人工升级只进入 Needs You，避免自我唤醒循环。两者另按下述 C-220 通知主机运维。
+
+C-220：上述常驻 PM 自身的告警另通知本项目当前 active 常驻 `host_ops`，包括托管 PM Office／PM Ops 的 `run_inactive`、运行时丢失以及派发超时在既有恢复流程中产生的 `run_dispatch_stalled`；不提前升级单次重试失败、不改变失活阈值和恢复预算。收件人使用具体 Assignment 编号，事件与通知同事务提交，同一事件同一收件人只保存一条；由既有 Dispatcher 按铃，忙碌时留在 Inbox，处理后按该流的 `ack_events` 关闭，主机运维按现有 `host_ops_restart_standing_pm` 流程核实和恢复。未配置、暂停或释放的主机运维不接收补发；外接 PM 不纳入托管失活监控。`host_ops` 自身的失活和运行时丢失告警交 Needs You 与 PM Office，不向自己派发恢复门铃；自身 `needs_attention` 诊断标记仍保留。普通工作项的告警收件人不变，不增加角色工具或读取权限。
 
 自动回收先持久化绑定 Run 与 RuntimeRef 的停止意图，取得 60 秒处理租约，再停止该终端并独立查询确认 exited 或 runtime_not_found。release 返回成功本身不构成退出证明；unknown、runtime_unavailable、超时和调用失败均保留名额与凭据，一次告警后等待后续 tick 重试。租约到期仅允许下一处理者接续同一终端，不能直接释放名额；迟到结果须匹配当前意图编号，重启后同样先确认退出。停止意图存在时，即使监控把 Run 改为 unknown、或 Agent 在停止调用期间提交了结束，也继续预留一个名额并阻止该 Assignment／worktree 再次启动，直到停止收尾完成。
 
@@ -872,6 +874,7 @@ M3.4 主机循环通过 startDispatchLoop 启动：默认每轮结束后等待 1
 | 完成申请 | 卡片模板指定的审核者（默认 PM） |
 | 请求你执行操作 | 先交 PM Ops 分拣；交人或标为主机操作后才进 Needs You 并提示 Office；分拣为 host 时另通知本项目 active 常驻 host_ops |
 | 主机运维巡检到期 | 每 30 分钟通过既有 Dispatcher 通知 host_ops；有未结束 Run 或待处理通知时合并等待，不因自己的 Run 结束而自我唤醒 |
+| 托管常驻 PM 自身失活、运行时丢失或派发恢复失败 | 保留既有收件人，另通知本项目 active 常驻 host_ops 并按铃；host_ops 自身失活不向自己按铃，详见 §6.1 |
 | 拍板解决 30 分钟仍无落实变化 | PM Ops，无活跃后台时进入 Needs You；按每次 resolution 去重提醒一次 |
 | HumanAction 已完成 | 发起它的 active Assignment、实际恢复的工作项负责人，以及同卡仍在等待的其他 active Assignment；验证项须有当前有效的目标交付；发起方不可用时交项目 PM Ops，无活跃 PM Ops 时进入 Needs You |
 | 门铃发送失败 | 标记 `delivery_failed`，按 §6.1 退避重试和一次恢复；仍失败交 PM Ops，无后台则进 Needs You |
