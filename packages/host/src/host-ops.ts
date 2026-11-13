@@ -5,8 +5,10 @@ import {
   type CardId,
   type Clock,
   type CommandState,
+  type ContextObservation,
   checkHostOpsAccess,
   claimHostOpsAction,
+  contextUsageFresh,
   dispatchRecoveryQueuedAt,
   finishHostOpsAction,
   type HostOpsExecution,
@@ -91,6 +93,11 @@ export class HostOpsService {
   private readonly upstreamPolls = new Map<ProjectId, Promise<void>>();
   private closing = false;
   private lastContextPoll = Number.NEGATIVE_INFINITY;
+  /** C-232: the last poll's fresh observations, in memory only (not persisted). */
+  private readonly contexts = new Map<
+    ProjectId,
+    ReadonlyMap<AssignmentId, ContextObservation>
+  >();
   private serial: Promise<void> = Promise.resolve();
   constructor(private readonly options: Options) {
     this.clock = options.clock ?? { now: () => new Date().toISOString() };
@@ -454,6 +461,16 @@ export class HostOpsService {
     this.lastContextPoll = Date.parse(this.clock.now());
     for (const project of this.options.store.listProjects()) {
       const sessions = await this.sessions(project.id);
+      this.contexts.set(
+        project.id,
+        new Map(
+          sessions.flatMap((session) =>
+            session.observation && !session.stale
+              ? [[session.observation.assignment_id, session.observation]]
+              : [],
+          ),
+        ),
+      );
       for (const session of sessions) {
         const usage = session.observation;
         if (!usage || session.stale) continue;
@@ -483,6 +500,23 @@ export class HostOpsService {
         });
       }
     }
+  }
+  /**
+   * C-232: read-only view of the latest context poll for the Workbench. A
+   * sample older than the stale limit is dropped at read time, so a stopped
+   * patrol never leaves an old reading on screen.
+   */
+  contextUsage(
+    project: ProjectId,
+  ): ReadonlyMap<AssignmentId, ContextObservation> {
+    const now = this.clock.now();
+    const staleMs =
+      this.options.contextUsage?.staleAfterMs ?? DEFAULT_CONTEXT_STALE_AFTER_MS;
+    return new Map(
+      [...(this.contexts.get(project) ?? [])].filter(([, usage]) =>
+        contextUsageFresh(usage, now, staleMs),
+      ),
+    );
   }
   tick(): Promise<void> {
     const next = this.serial.then(async () => {

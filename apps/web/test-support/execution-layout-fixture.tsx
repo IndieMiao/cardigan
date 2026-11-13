@@ -7,7 +7,7 @@ import "@fontsource-variable/noto-sans-sc";
 import "@fontsource-variable/jetbrains-mono";
 import "../src/styles.css";
 
-// C-207 screenshots only: deterministic demo data, no business service.
+// C-207/C-232 screenshots only: deterministic demo data, no business service.
 Date.now = () => new Date(NOW).getTime();
 history.scrollRestoration = "manual";
 const minutesAgo = (minutes: number) =>
@@ -130,6 +130,17 @@ const rows: readonly Row[] = [
     { status: "released" },
   ],
 ];
+// C-232: Card titles as the server returns them; one is long enough to cut.
+const titles: Readonly<Record<string, string>> = {
+  "C-207":
+    "执行视图首屏让给列表，表格改为六列并补上上下文用量的精确比例和两档提醒",
+  "C-205": "合并队列批次检查失败时退回到卡级检查",
+  "C-204": "需要你页面的拍板卡片显示建议答案",
+  "C-208": "员工页显示最近交付",
+  "C-209": "主机巡检识别失联终端",
+  "C-210": "附件预览支持暗色",
+  "C-211": "验收测试补齐契约用例",
+};
 const assignments: ExecutionAssignment[] = rows.map(
   ([id, name, title, avatar, role, card, work, runtime, minutes, extra]) => ({
     id,
@@ -141,6 +152,7 @@ const assignments: ExecutionAssignment[] = rows.map(
     standing_mode: null,
     card_id: card,
     card_status: card ? "in_progress" : null,
+    card_title: card ? (titles[card] ?? `示例卡片 ${card}`) : null,
     card_priority: card ? 2 : undefined,
     work_item_id: work,
     worktree_path: work ? `/worktrees/${id}` : null,
@@ -162,8 +174,23 @@ const assignments: ExecutionAssignment[] = rows.map(
     ...extra,
   }),
 );
-const usage = (used_ratio: number | null) =>
-  used_ratio === null ? null : { used_ratio, window_tokens: 200_000 };
+// C-232: the server's shape, with the host's level under default thresholds.
+const usage = (used_ratio: number | null) => {
+  if (used_ratio === null) return null;
+  const remaining = Math.round((100 - used_ratio * 100) * 10) / 10;
+  return {
+    used_ratio,
+    window_tokens: 200_000,
+    used_tokens: Math.round(used_ratio * 200_000),
+    level:
+      remaining <= 15
+        ? ("restart" as const)
+        : remaining <= 20
+          ? ("handoff" as const)
+          : null,
+    updated_at: minutesAgo(1),
+  };
+};
 const run = (
   n: number,
   assignment_id: string,

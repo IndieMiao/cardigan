@@ -1,5 +1,6 @@
 import {
   type CommandState,
+  type ContextObservation,
   type Event,
   parseEventId,
   type Run,
@@ -13,6 +14,7 @@ import {
   human,
   id,
   ports,
+  run,
   value,
 } from "../../../../packages/domain/src/commands/test-fixtures.js";
 import {
@@ -212,4 +214,117 @@ test("C-106: the execution view passes the Run's launch settings snapshot throug
   const legacy = view.runs.find((run) => run.id === id("run", 2));
   expect(legacy).not.toHaveProperty("harness");
   expect(legacy).not.toHaveProperty("effort");
+});
+
+test("C-232: each Assignment carries its Card title; standing ones carry null", () => {
+  const base = fixture();
+  const state: CommandState = {
+    ...base,
+    cards: base.cards.map((card) =>
+      card.id === id("card", 1) ? { ...card, title: "补上卡片标题" } : card,
+    ),
+  };
+  const view = executionView(state, at(30));
+  const first = view.assignments.find((a) => a.id === id("assignment", 1));
+  expect(first).toMatchObject({
+    card_id: id("card", 1),
+    card_title: "补上卡片标题",
+  });
+  const standing = view.assignments.find((a) => a.scope === "standing");
+  expect(standing?.card_title).toBeNull();
+});
+
+const observation = (
+  assignment: number,
+  overrides: Partial<ContextObservation> = {},
+): ContextObservation => ({
+  agent: "claude",
+  session_id: "fixture-session",
+  transcript_path: "/tmp/transcript.jsonl",
+  cwd: "/work/tree",
+  model: "opus",
+  context_tokens: 162_000,
+  context_window_size: 200_000,
+  used_percentage: 81,
+  updated_at: "2026-01-01T00:05:00.000Z",
+  assignment_id: id("assignment", assignment),
+  runtime_key: "null",
+  source: "claude_statusline_cache",
+  ...overrides,
+});
+
+test("C-232: only the Assignment's newest Run carries the host's context sample", () => {
+  const base = fixture();
+  const state: CommandState = {
+    ...base,
+    runs: [...base.runs, { ...run(1), id: id("run", 4) }],
+  };
+  const contexts = new Map([[id("assignment", 1), observation(1)]]);
+  const view = executionView(state, at(30), [], [], 30, contexts);
+  const usage = {
+    used_ratio: 0.81,
+    window_tokens: 200_000,
+    used_tokens: 162_000,
+    // 19% left: at or below the default 20% reminder, above 15%.
+    level: "handoff",
+    updated_at: "2026-01-01T00:05:00.000Z",
+  };
+  expect(
+    view.runs.find((run) => run.id === id("run", 4))?.context_usage,
+  ).toEqual(usage);
+  expect(
+    view.assignments.find((a) => a.id === id("assignment", 1))?.run,
+  ).toMatchObject({ id: id("run", 4), context_usage: usage });
+  // The older Run of the same Assignment and other Assignments carry nothing.
+  expect(view.runs.find((run) => run.id === id("run", 1))).not.toHaveProperty(
+    "context_usage",
+  );
+  expect(view.runs.find((run) => run.id === id("run", 2))).not.toHaveProperty(
+    "context_usage",
+  );
+  // Session id, cwd and transcript path never leave the host diagnostics.
+  expect(JSON.stringify(view)).not.toContain("/tmp/transcript.jsonl");
+  expect(JSON.stringify(view)).not.toContain("/work/tree");
+});
+
+test("C-232: the context level follows the project's thresholds", () => {
+  const base = fixture();
+  const state: CommandState = {
+    ...base,
+    project_preferences: [
+      {
+        id: base.project_id,
+        auto_merge_after_minutes: null,
+        context_handoff_remaining_pct: 30,
+        context_restart_remaining_pct: 25,
+      },
+    ],
+  };
+  const contexts = new Map([
+    [
+      id("assignment", 1),
+      observation(1, { context_tokens: 150_000, used_percentage: 75 }),
+    ],
+  ]);
+  const view = executionView(state, at(30), [], [], 30, contexts);
+  expect(
+    view.runs.find((run) => run.id === id("run", 1))?.context_usage?.level,
+  ).toBe("restart");
+});
+
+test("C-232: a sample from another session or a replaced runtime is not shown", () => {
+  const base = fixture();
+  const contexts = new Map([
+    [id("assignment", 1), observation(1, { session_id: "old-session" })],
+    [
+      id("assignment", 2),
+      observation(2, { runtime_key: '{"terminal_ref":"x"}' }),
+    ],
+  ]);
+  const view = executionView(base, at(30), [], [], 30, contexts);
+  expect(view.runs.some((run) => "context_usage" in run)).toBe(false);
+  // Without host samples (no dispatcher) the field is simply absent.
+  expect(
+    executionView(base, at(30)).runs.some((run) => "context_usage" in run),
+  ).toBe(false);
 });

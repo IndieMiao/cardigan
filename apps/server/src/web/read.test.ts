@@ -431,6 +431,60 @@ test("the execution view lists assignments, their run, worktree and cursor", asy
   }
 });
 
+test("C-232: the execution route returns Card titles and the host's context sample", async () => {
+  const sample = {
+    agent: "codex" as const,
+    session_id: "s-1",
+    transcript_path: "/srv/agent/run/A-1/codex/rollout.jsonl",
+    cwd: "/srv/agent/worktrees/A-1",
+    model: "fixture-model",
+    context_tokens: 128_000,
+    context_window_size: 400_000,
+    used_percentage: 32,
+    updated_at: NOW,
+    assignment_id: "A-1" as never,
+    runtime_key: "null",
+    source: "codex_rollout:last_token_usage",
+  };
+  const asked: string[] = [];
+  const harness = await webHarness({
+    password: PASSWORD,
+    contextUsage: (project) => {
+      asked.push(project);
+      return new Map([["A-1", sample]]);
+    },
+  });
+  seedWebProject(harness.store, harness.dataDir);
+  const cookie = await harness.login(PASSWORD);
+  try {
+    const res = await call(
+      harness.port,
+      `/api/projects/${project_id}/execution`,
+      { cookie },
+    );
+    expect(res.status).toBe(200);
+    const body = res.json as ReadBody;
+    expect(asked).toEqual([project_id]);
+    const usage = {
+      used_ratio: 0.32,
+      window_tokens: 400_000,
+      used_tokens: 128_000,
+      level: null,
+      updated_at: NOW,
+    };
+    expect(body.assignments[0]).toMatchObject({
+      id: "A-1",
+      card_id: "C-2",
+      card_title: expect.any(String),
+      run: { id: "R-1", context_usage: usage },
+    });
+    expect(body.runs[0]).toMatchObject({ id: "R-1", context_usage: usage });
+    expect(JSON.stringify(body)).not.toContain("rollout.jsonl");
+  } finally {
+    await harness.close();
+  }
+});
+
 test("the execution view shows a queued Run over the older finished one", async () => {
   const { harness, cookie } = await seeded();
   try {

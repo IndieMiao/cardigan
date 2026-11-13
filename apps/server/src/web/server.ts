@@ -59,6 +59,8 @@ import {
   type ActivityQuery,
   activity,
   type CardFilter,
+  contextUsageRevision,
+  type ExecutionContexts,
   executionRunPage,
   executionView,
   InvalidQuery,
@@ -96,6 +98,11 @@ export interface WebServerOptions {
   readonly machineDisplayName?: (machine: string) => string | undefined;
   /** 按 q(228) 定为 30 分钟；修改配置后重启 Web 服务生效。 */
   readonly queueWarningMinutes?: number;
+  /**
+   * C-232: the host patrol's latest fresh context samples per Assignment
+   * (memory only). Absent without a dispatcher; the column then shows "—".
+   */
+  readonly contextUsage?: (project: ProjectId) => ExecutionContexts;
   readonly store: Store;
   readonly config: WebConfig;
   /** Structured log line per request, like the MCP endpoint's log. */
@@ -138,6 +145,7 @@ interface RequestContext {
   readonly runLimitMaximum: WebServerOptions["runLimitMaximum"];
   readonly machineDisplayName: WebServerOptions["machineDisplayName"];
   readonly queueWarningMinutes: number;
+  readonly contextUsage: WebServerOptions["contextUsage"];
   readonly req: IncomingMessage;
   readonly res: ServerResponse;
   readonly url: URL;
@@ -276,6 +284,7 @@ export async function startWebServer(
         machineDisplayName: options.machineDisplayName,
         stream: options.stream,
         queueWarningMinutes,
+        contextUsage: options.contextUsage,
         shutdown: shutdown.signal,
         secureCookie: config.publicOrigins.includes(`https://${hostHeader}`),
         log,
@@ -454,6 +463,12 @@ async function serveProjectRoute(
         : { heartbeatMs: context.stream.heartbeatMs }),
       log: context.log,
       signal: context.shutdown,
+      ...(context.contextUsage
+        ? {
+            contextRevision: () =>
+              contextUsageRevision(context.contextUsage?.(project_id)),
+          }
+        : {}),
     });
     return;
   }
@@ -732,6 +747,7 @@ async function serveProjectRoute(
         machines,
         readRunQueue(store),
         context.queueWarningMinutes,
+        context.contextUsage?.(project_id),
       ),
     );
     return;

@@ -724,8 +724,9 @@ export interface RunView {
   readonly harness?: string | null;
   readonly effort?: string | null;
   /**
-   * C-106: the session's context use when the Run was last observed. No
-   * server collects it yet, so the column shows "—" until one does.
+   * C-232: the session's context use from the host patrol's latest fresh
+   * sample; only the Assignment's newest Run carries it. Absent when there is
+   * no fresh sample, and the column shows "—".
    */
   readonly context_usage?: ContextUsage | null;
 }
@@ -734,6 +735,12 @@ export interface ContextUsage {
   readonly used_ratio: number;
   /** Context window size in tokens. */
   readonly window_tokens: number;
+  /** C-232: exact tokens in use; older servers omit it. */
+  readonly used_tokens?: number;
+  /** C-232: the host's level under this project's thresholds. */
+  readonly level?: "handoff" | "restart" | null;
+  /** C-232: when the agent sampled it (not when the host polled). */
+  readonly updated_at?: string;
 }
 export interface ExecutionAssignment extends AuthorView {
   readonly card_priority?: number;
@@ -748,6 +755,8 @@ export interface ExecutionAssignment extends AuthorView {
   readonly external?: boolean;
   readonly card_id: string | null;
   readonly card_status: string | null;
+  /** C-232: the Card's title; older servers omit it. */
+  readonly card_title?: string | null;
   readonly work_item_id: string | null;
   readonly worktree_path: string | null;
   readonly branch: string | null;

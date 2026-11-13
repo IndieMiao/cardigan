@@ -68,6 +68,12 @@ export interface StreamOptions {
    * open; the client reconnects to the next server with its cursors.
    */
   readonly signal?: AbortSignal;
+  /**
+   * C-232: revision of the host patrol's in-memory context samples, which have
+   * no seq either. Checked on the same poll as the queue; absent without a
+   * dispatcher, and then no `context` frame is sent.
+   */
+  readonly contextRevision?: () => string;
 }
 
 export const SSE_SHUTDOWN_FRAME = "event: shutdown\ndata: {}\n\n";
@@ -134,6 +140,13 @@ export async function serveStream(options: StreamOptions): Promise<void> {
     `event: queue\ndata: ${JSON.stringify({ revision })}\n\n`;
   let queueRevision = queueRevisionOf();
   res.write(queueFrame(queueRevision));
+  // C-232: same contract for context samples: a first sample, a new reading,
+  // an unknown sample or expiry changes the revision; only the execution view
+  // re-reads on it.
+  const contextFrame = (revision: string): string =>
+    `event: context\ndata: ${JSON.stringify({ revision })}\n\n`;
+  let contextRevision = options.contextRevision?.();
+  if (contextRevision !== undefined) res.write(contextFrame(contextRevision));
   let closed = false;
   let poll: NodeJS.Timeout | undefined;
   let heartbeat: NodeJS.Timeout | undefined;
@@ -158,6 +171,11 @@ export async function serveStream(options: StreamOptions): Promise<void> {
         queueRevision = nextQueue;
         // Cross-project capacity changes have no seq in this project's streams.
         res.write(queueFrame(queueRevision));
+      }
+      const nextContext = options.contextRevision?.();
+      if (nextContext !== undefined && nextContext !== contextRevision) {
+        contextRevision = nextContext;
+        res.write(contextFrame(contextRevision));
       }
       batch = store.uow.read((tx) => {
         const streams = [
