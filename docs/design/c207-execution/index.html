@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>C-207 · 执行视图设计原型</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="prototype.css">
+  <script src="prototype.js" defer></script>
+</head>
+<body>
+  <div class="prototype-bar"><span>C-207 · 设计原型 · 示例数据</span><div><a href="?view=before" id="before-link">改前复刻</a><a href="?view=after" id="after-link">改后方案</a><button id="theme" aria-label="切换明暗主题">◐</button></div></div>
+  <header class="app-header"><strong class="brand"><span aria-hidden="true">C</span> Cardigan</strong><span class="project">示例项目 <span aria-hidden="true">⌄</span></span><span class="connection">● 已连接</span></header>
+  <div class="app-layout">
+    <aside class="sidebar" aria-label="项目导航示意"><span class="nav-label">工作空间</span><span>▦　卡片</span><span>◇　Needs You</span><span>▤　项目快照</span><strong aria-current="page">▸　执行视图</strong><span>◷　项目动态</span><span class="nav-bottom">⚙　设置</span></aside>
+    <main id="main">
+      <div class="page-heading"><div><h1>执行视图</h1><p id="description">谁在工作、正在做什么，以及会话还剩多少空间。</p></div><button id="capacity-jump" class="quiet">机器并发 ↓</button><div id="old-capacity"></div></div>
+      <div class="filterbar"><div role="group" aria-label="筛选 Assignment" id="filters"><button data-filter="working" aria-pressed="true">工作中</button><button data-filter="all" aria-pressed="false">全部</button><button data-filter="released" aria-pressed="false">已释放</button><button data-filter="lost" aria-pressed="false">失联</button></div><span class="muted" id="count" aria-live="polite"></span><button id="mobile-sort" class="quiet">最近活动 ↓</button></div>
+      <section id="assignments" aria-label="Assignment 列表"></section>
+      <section id="capacity" class="capacity" aria-label="机器并发"></section>
+      <p class="page-note" id="page-note">点击 Assignment 编号查看运行详情。上下文仅显示已上报的数据。</p>
+    </main>
+  </div>
+  <aside id="drawer" class="drawer" role="dialog" aria-modal="false" aria-labelledby="drawer-title" hidden><header><h2 id="drawer-title">运行详情</h2><button id="close-drawer" aria-label="关闭详情">×</button></header><div id="drawer-body"></div></aside>
+  <div id="toast" role="status" hidden></div>
+</body>
+</html>
