@@ -15,11 +15,11 @@ const rows = [
 ];
 let filter = 'working', descending = true, trigger, selected, limit = 6;
 const percent = n => (n * 100).toFixed(2);
-const idTag = (id, clickable=false) => id ? `<${clickable ? 'button' : 'span'} class="id id-${id[0].toLowerCase()}" ${clickable ? `data-open="${id}" aria-label="查看 ${id} 详情" aria-haspopup="dialog" aria-expanded="false"` : ''}>${id}</${clickable ? 'button' : 'span'}>` : '';
+const idTag = (id, clickable=false) => id ? (clickable ? `<button class="id-link" data-open="${id}" aria-label="查看 ${id} 详情" aria-haspopup="dialog" aria-expanded="false"><span class="id id-${id[0].toLowerCase()}">${id}</span></button>` : `<span class="id id-${id[0].toLowerCase()}">${id}</span>`) : '';
 const person = r => `<button class="person" data-person="${r.id}" aria-label="查看 ${r.name} 员工信息"><img src="../../../apps/web/public/avatars/v1/${r.avatar}/head-64.webp" alt=""><span class="person-copy"><strong>${r.name}</strong><small>${r.role}</small></span></button>`;
 const stateIcon = r => ({running:'●',waiting:'◷',lost:'!',released:'○',external:'↗',idle:'○'})[r.state];
 const state = r => `<span class="state state-${r.state}"><span aria-hidden="true">${stateIcon(r)}</span>${r.status}</span>`;
-const task = r => `<div class="task"><div class="task-main">${r.card ? `<button class="id id-c" data-card="${r.id}" aria-label="查看卡片 ${r.card}">${r.card}</button>` : '<span class="muted">项目级</span>'}<span class="task-title">${r.title}</span></div><div class="task-meta">${idTag(r.work)}<span>${r.task}</span></div></div>`;
+const task = r => `<div class="task"><div class="task-main">${r.card ? `<button class="id-link" data-card="${r.id}" aria-label="查看卡片 ${r.card}"><span class="id id-c">${r.card}</span></button>` : '<span class="muted">项目级</span>'}<span class="task-title">${r.title}</span></div><div class="task-meta">${idTag(r.work)}<span>${r.task}</span></div></div>`;
 function context(r, interactive=true) {
   const tag = interactive ? 'button' : 'div';
   if (r.ratio === null) return `<${tag} class="context" ${interactive ? `data-context="${r.id}" aria-label="${r.name} 上下文未上报，查看说明"` : ''}><span class="context-head"><strong>—</strong><span>上下文</span></span><span class="sub">${r.state === 'external' ? '外接身份，暂无数据' : '尚未上报'}</span></${tag}>`;
