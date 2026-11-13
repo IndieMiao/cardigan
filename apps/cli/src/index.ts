@@ -72,6 +72,7 @@ const TOP_LEVEL_USAGE = [
   "  pm restart       重开常驻 PM 会话（--office / --ops），不暂停、不转交事项",
   "  host-ops create|start  创建或启动常驻主机运维 Assignment（仅人类）",
   "  preference get|set auto-merge-after  查看或修改超时自动合并偏好",
+  "  preference get|set merge-confirm-stall-after  查看或修改 PM 合并确认停留告警分钟数（默认 60）",
   "  template list|show|add|copy|update|deactivate|activate|rollback  管理项目模板",
   "  card create      按模板建卡（默认 dev）",
   "  card done        用 --result 记录结果并完成人工完成的卡片，可重复 --file 附证据",

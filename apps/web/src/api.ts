@@ -849,6 +849,8 @@ export interface PreferencesView {
   /** Merge confirmations go to PM Ops; missing means the default (on). */
   readonly pm_merge_confirmation?: boolean;
   readonly auto_merge_after_minutes: number | null;
+  /** C-177: PM-held merge confirmation stall alert; older servers omit it. */
+  readonly merge_confirm_stall_after_minutes?: number;
   readonly merge_gate_enabled: boolean;
   /** Lanes the human folded (true) or unfolded (false); missing = default. */
   readonly board_collapsed_lanes?: Readonly<Record<string, boolean>>;
@@ -1060,6 +1062,11 @@ export interface CardiganClient {
   setPmMergeConfirmation(
     projectId: string,
     enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void>;
+  setMergeConfirmStallAfter(
+    projectId: string,
+    minutes: number,
     idempotencyKey: string,
   ): Promise<void>;
   setBoardLane(
@@ -1376,6 +1383,18 @@ export class HttpCardiganClient implements CardiganClient {
       projectId,
       `cards/${encodeURIComponent(cardId)}/mark-done`,
       { result, attachments },
+      idempotencyKey,
+    );
+  }
+  async setMergeConfirmStallAfter(
+    projectId: string,
+    minutes: number,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      "preferences",
+      { merge_confirm_stall_after_minutes: minutes },
       idempotencyKey,
     );
   }

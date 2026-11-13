@@ -240,6 +240,39 @@ test("PM merge confirmation defaults on and can be turned off", async () => {
   ]);
 });
 
+test("PM merge confirmation stall alert shows the default 60 minutes and saves a new value", async () => {
+  const setMergeConfirmStallAfter = vi.fn().mockResolvedValue(undefined);
+  render(
+    <SettingsPage
+      projectId="p-1"
+      client={fakeClient({ setMergeConfirmStallAfter })}
+    />,
+  );
+  const input = (await screen.findByLabelText(
+    "PM 合并确认停留告警（分钟）",
+  )) as HTMLInputElement;
+  expect(input.value).toBe("60");
+  expect(
+    screen.getByText(
+      /PM 持有的合并确认在检查通过后超过这么久还没处理，就提醒 PM Ops/,
+    ),
+  ).toBeTruthy();
+  fireEvent.change(input, { target: { value: "0" } });
+  expect(
+    (screen.getByRole("button", { name: "保存停留告警" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+  fireEvent.change(input, { target: { value: "90" } });
+  fireEvent.click(screen.getByRole("button", { name: "保存停留告警" }));
+  await waitFor(() =>
+    expect(setMergeConfirmStallAfter).toHaveBeenCalledTimes(1),
+  );
+  expect(setMergeConfirmStallAfter.mock.calls[0]?.slice(0, 2)).toEqual([
+    "p-1",
+    90,
+  ]);
+});
+
 test("hidden preferences suppress validation feedback and retain the draft when returning", async () => {
   render(<SettingsPage client={fakeClient()} projectId="p-1" />);
   const enabled = await screen.findByRole("checkbox", { name: "超时自动合并" });

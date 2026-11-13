@@ -162,10 +162,18 @@ export function attentionCommand(args: readonly string[], io: CliIo): number {
   try {
     const project_id = resolveProject(store, io, flags.project);
     const now = new Date().toISOString();
-    const { attention, escalated, lost, paused, queued, findings } =
-      readAttention(store, project_id, now);
+    const {
+      attention,
+      merge_stalls,
+      escalated,
+      lost,
+      paused,
+      queued,
+      findings,
+    } = readAttention(store, project_id, now);
     if (
       attention.length === 0 &&
+      merge_stalls.length === 0 &&
       escalated.length === 0 &&
       lost.length === 0 &&
       findings.length === 0 &&
@@ -183,6 +191,13 @@ export function attentionCommand(args: readonly string[], io: CliIo): number {
       for (const finding of attention)
         lines.push(
           `  ${finding.kind} ${finding.card_id} age=${ageMinutes(finding.resolved_at, now)}m ${finding.detail}`,
+        );
+    }
+    if (merge_stalls.length) {
+      lines.push(`PM 合并确认停留（${merge_stalls.length}）`);
+      for (const stall of merge_stalls)
+        lines.push(
+          `  ${stall.kind} ${stall.card_id} ${stall.decision_id} age=${Math.floor(stall.waited_ms / 60_000)}m threshold=${stall.threshold_minutes}m`,
         );
     }
     if (queued.length) {

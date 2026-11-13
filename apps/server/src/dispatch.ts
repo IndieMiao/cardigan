@@ -80,6 +80,7 @@ import {
 import { retryDispatchedRuns } from "./dispatch-retry.js";
 import { dispatchStateLoader, type StateLoader } from "./dispatch-state.js";
 import { patrolHostOps } from "./host-ops-patrol.js";
+import { escalatePmMergeStalls } from "./pm-merge-stall-attention.js";
 import { escalateReviewLimitWaits } from "./review-limit-attention.js";
 
 /** The model/CLI snapshot a queued Run records; C-106 adds harness and effort. */
@@ -1182,6 +1183,7 @@ export class Dispatcher {
           });
       }
       escalateReviewLimitWaits(tx, store, state, at);
+      escalatePmMergeStalls(tx, store, state, at);
       const attempts = unfinishedBellAttempts(store.database, project);
       for (const n of store.listNotifications({
         project_id: project,
