@@ -4034,6 +4034,9 @@ body[data-lightbox="open"] .drawer-overlay {
   font-weight: 400;
   color: color-mix(in srgb, var(--text) 70%, var(--text-muted));
 }
+.board-card.card-superseded .card-title {
+  color: var(--text-muted);
+}
 .board-card .card-tile-head {
   flex-wrap: wrap;
   gap: 8px 12px;
