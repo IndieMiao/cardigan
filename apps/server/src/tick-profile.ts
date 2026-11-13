@@ -156,6 +156,21 @@ export class TickProfiler {
     }
   }
 
+  /** Synchronous `span`: adds no await, so callers keep their interleaving. */
+  spanSync<T>(name: string, run: () => T): T {
+    const sample = this.#als.getStore();
+    const started = performance.now();
+    try {
+      return run();
+    } finally {
+      if (sample)
+        sample.spans.set(
+          name,
+          (sample.spans.get(name) ?? 0) + performance.now() - started,
+        );
+    }
+  }
+
   /** A finished HTTP request; `busy` when its lifetime overlapped any tick. */
   request(channel: string, durationMs: number): void {
     if (!Number.isFinite(durationMs)) return;
@@ -217,6 +232,11 @@ export function profileSpan<T>(
   run: () => Promise<T>,
 ): Promise<T> {
   return current ? current.span(name, run) : run();
+}
+
+/** Pass-through unless profiling is on; never yields to the event loop. */
+export function profileSpanSync<T>(name: string, run: () => T): T {
+  return current ? current.spanSync(name, run) : run();
 }
 
 /** `CARDIGAN_TICK_PROFILE=1` turns measurement on; anything else keeps it off. */

@@ -107,6 +107,7 @@ export * from "./derived.js";
 export * from "./employee.js";
 export * from "./entities.js";
 export * from "./errors.js";
+export { eventById } from "./event-index.js";
 export * from "./git-port.js";
 export * from "./host-ops.js";
 export * from "./ids.js";

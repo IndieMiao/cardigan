@@ -119,3 +119,102 @@ CPU profile 里 SQLite 执行本身（`all`/`prepare`）只占约 19%，主要�
 | 240 | 36.1 / 58.0 → 18.4 / 37.5 s | 36.1 / 58.0 → 18.4 / 37.5 s | 217 / 217 ms |
 
 结论：稳态 tick 在 120 卡降约 72%，240 卡降约 50%；`deliver` 段降 60%～80%。tick 仍整段阻塞事件循环（ELU 仍为 1.0），240 卡时剩余耗时以 `route`（6～8 s）和认领里的 `hasRunTarget` 线性扫描为主，增长仍是超线性。是否继续做 C（`hasRunTarget` 建索引，改 domain）或分片让出事件循环，由 PM 按这组数字决定本卡追加还是另开卡。
+
+## 6. C-221：route 段与 hasRunTarget（第三轮修复与测量）
+
+> 卡片 C-221 / 工作项 W-680。只改查找方式，不改调度语义和表结构，也不新增数值或行为规则；分片只评估、不实现。
+
+### 6.1 测量方法更正与新增分段
+
+- **不要在 replay 时设 `CARDIGAN_TICK_PROFILE=1`**：replay 自己装了一个 profiler，而 server 看到这个变量会再装一个，把前者顶掉，于是所有 `spans`、`uow_ms` 都是 0，只剩 `wall_ms`。本节数字都是不设该变量、用 §2.2 的命令测的（`REPLAY_TICKS=4`）。replay 文件头已写明这一点。
+- `route` 拆成子分段（`apps/server/src/dispatch.ts`）：`route.patrol_host_ops`、`route.decision_followups`、`route.route_events`（两次路由合计）、`route.unreadable`、`route.ack_inbox`、`route.bell_attempts`、`route.retry_dispatched`、`route.maintenance`、`route.candidates`。同步步骤用新增的 `profileSpanSync`，不增加 `await`，步骤顺序和交错与原来一致；`retry_dispatched` 原本就是 await 的，沿用 `profileSpan`。
+- cleanup、reconcile、backup 也加了分段（见 §6.5）。
+- 修前基线是在本分支上只加分段、`packages/domain` 的 `dist` 仍是 main 构建时测的；修后是 `tsc -b` 之后测的。同一台机器、同一份合成数据。240 卡基线比 §5.2 的“修后”略快（14.7～17.3 s 对 17.0～18.2 s），是机器负载波动，比较以本节同批数字为准。
+
+### 6.2 修前 route 段里最慢的是什么（240 卡 CPU profile，4 次 tick 合计，包含关系）
+
+| 位置 | 包含耗时 | 说明 |
+|---|---:|---|
+| `Dispatcher.project`（route 合计） | 27.6 s | 每 tick 约 6.9 s |
+| ├ `hasRunTarget`（domain） | 8.9 s | 候选、重派检查里每个 Assignment 都对 deliveries × work_items 线性扫描 |
+| ├ `retryDispatchedRuns` | 10.6 s | 其中 `hasRunTarget` 5.1 s、`hostOpsPending` 2.8 s（每个候选 Run 都重扫全部事件求待执行的主机操作） |
+| ├ `maintenance` | 7.0 s | `obsoleteDispatchAttention` 4.2 s、`escalatePmMergeStalls` 2.4 s：每条通知都 `state.events.find` 按 id 找事件，是“通知数 × 事件数” |
+| ├ `candidates`（`add` 与排序） | 5.7 s | `hasRunTarget`，以及排序比较函数里每次比较都两次按 id 线性找事件 |
+| └ `routeProjectEvents` | 2.9 s | 路由新事件；只在有新事件时重，稳态很小 |
+
+deliver 段（认领）里 `hasRunTarget` 另占 13.7 s。
+
+### 6.3 改了什么
+
+1. **`hasRunTarget` 按键查找**（`packages/domain/src/run-target.ts`）：按 `(deliveries 数组, work_items 数组)` 的对象身份缓存一个索引（`WeakMap`）：工作项按 id（取第一个，与 `find` 一致）、有效非完成交付按目标工作项 id 记它所在的卡、有效完成申请按被请求的验证项 id 记卡。查一次是 O(1)，索引每个状态快照只建一次。判定规则逐条与原实现相同（未替代、同卡、目标交付不是完成申请、完成申请必须点名本验证项）。
+2. **事件按 id 查找**（新增 `packages/domain/src/event-index.ts` 的 `eventById`，同样按事件数组身份缓存，取第一个匹配）：用在 `obsoleteDispatchAttention`、`unreadableCommentTrigger`（domain）、`escalatePmMergeStalls` 和 dispatcher 候选的触发事件与排序比较（server）。
+3. **`hostOpsPending` 按快照记忆**（`packages/domain/src/host-ops.ts`）：每个事件数组只算一次“有待执行主机操作的 Assignment 集合”，之后按 id 查。
+
+**为什么缓存不会读到旧值**：命令状态的各集合都是不可变快照。Store 的快照缓存在有改动时生成新数组（`command-snapshots.ts` 的 `[...entities.values()]`，事件流合并后新建排序数组）；命令草稿 `CommandDraft` 只把改动记在 `changes`，`d.state` 本身不变，`d.list()` 每次返回新数组；测试夹具的 `apply` 也是复制。写事务内追加事件或改交付后，下一次 `loadState` 拿到的是新数组，索引随之重建；事务回滚后读到的是旧数组，对应的也是旧数组自己的索引，二者一致。非测试代码里没有对这些数组原地 `push`/`splice` 的地方（已检索）。`WeakMap` 不阻止旧快照被回收。
+
+契约测试：`run-target-index.contract.test.ts` 用 600 组随机状态（含重复 id、跨卡、各种交付状态和种类、目标缺失）逐个 Assignment 对比新旧实现，并覆盖新快照重建、回滚后旧快照答案不变；`event-index.contract.test.ts` 对 `eventById`、`hostOpsPending` 做同样的随机对比和快照测试。原有 `run-target.contract.test.ts`（不变量 11、14）不改、仍通过。
+
+### 6.4 修前修后（本机合成数据，`REPLAY_TICKS=4`）
+
+| 卡数 | 稳态 tick 修前 → 修后 | 首次 tick 修前 → 修后 | `route` 稳态 修前 → 修后 | `deliver` 稳态 修前 → 修后 | 事件循环延迟 max 修前 → 修后 |
+|---:|---:|---:|---:|---:|---:|
+| 40 | 0.17～0.24 → 0.12～0.14 s | 0.43 → 0.44 s | 0.08～0.11 → 0.04～0.05 s | 0.09～0.12 → 0.08～0.09 s | 0.55 → 0.57 s |
+| 120 | 2.50～4.15 → 1.14～1.47 s | 5.35 → 3.31 s | 0.88～2.03 → 0.23～0.27 s | 1.54～2.12 → 0.91～1.21 s | 5.5 → 3.5 s |
+| 240 | 14.7～17.3 → 5.7～6.4 s | 28.0 → 21.4 s | 5.3～7.9 → 0.75～0.95 s | 8.6～11.1 → 5.0～5.4 s | 28.1 → 21.5 s |
+
+route 子分段稳态（修前 → 修后）：
+
+| 卡数 | `retry_dispatched` | `maintenance` | `candidates` | `ack_inbox` | `route_events` | `unreadable` |
+|---:|---:|---:|---:|---:|---:|---:|
+| 40 | 20～40 → 10 ms | 30～40 → 10 ms | 10 → 10 ms | 10～20 → 10 ms | 0～10 → 0～10 ms | <5 ms |
+| 120 | 0.38～0.84 → 0.07～0.08 s | 0.29～0.65 → 0.05～0.06 s | 0.14～0.34 → 0.04～0.07 s | 0.04～0.13 → 0.04～0.05 s | 0.01～0.05 → 0.01～0.02 s | 10～20 → 10 ms |
+| 240 | 2.78～3.94 → 0.18～0.24 s | 1.37～2.16 → 0.18～0.29 s | 1.06～1.60 → 0.25～0.27 s | 0.09～0.12 → 0.10～0.11 s | 0.02～0.05 → 0.02～0.04 s | 20～30 ms |
+
+| 卡数 | Web tick 期间 p50 / max 修前 → 修后 | MCP tick 期间 p50 / max 修前 → 修后 | Web / MCP 空闲 p50 修后 |
+|---:|---:|---:|---:|
+| 40 | 0.24 / 0.55 → 0.14 / 0.56 s | 0.24 / 0.55 → 0.15 / 0.57 s | 7 / 10 ms |
+| 120 | 4.3 / 5.5 → 1.5 / 3.5 s | 4.3 / 5.5 → 1.5 / 3.5 s | 46 / 50 ms |
+| 240 | 17.5 / 28.3 → 6.5 / 6.6 s | 17.5 / 28.3 → 6.6 / 21.7 s | 198 / 202 ms |
+
+结论：240 卡稳态 tick 降约 62%，`route` 段降约 85%（6～8 s → 不到 1 s），`hasRunTarget` 已从 profile 热点里消失。tick 仍整段阻塞事件循环（ELU 1.0）。首次 tick 仍有 21 s：它包含首次路由（`route_events` 2.4 s）和对全部积压候选的认领，属于 deliver。
+
+### 6.5 剩下的大头（修复面大，建议另开卡）
+
+修后 240 卡 CPU profile（4 次 tick 共 44 s 采样）里，`deliver` → `claim` 占 31.6 s：
+
+- `runCapacitySnapshot` → `queueSnapshot`（host/domain）12.8 s：每次认领都对全部 Run 重算容量队列。要改成跨认领复用，需要处理认领之间的写入，面较大。
+- `queueRun` 的互斥检查 `exclusive`（`packages/domain/src/commands/launch.ts`）10.0 s：对每个未结束 Run 调 `d.get("assignments", …)`，而 `CommandDraft.get` 每次都 `list()` 重建整张 Map，是“未结束 Run 数 × Assignment 数”。改 `CommandDraft` 的查找会影响所有命令，应单独开卡并补契约测试。
+- 这两项都在 deliver 段，不在本卡的 route 范围内，本卡不修。
+
+### 6.6 cleanup、backup、reconcile 分段测量
+
+新增分段（都只计时，不改行为；关闭测量时与原来完全相同）：
+
+- cleanup：`cleanup.release_closed`（同步，释放已结束卡的 Assignment）、`cleanup.state`、`cleanup.revoke_and_release`（每个已释放 Assignment：撤 Token 加终端 `status`/`release`，内含 `cleanup.revoke_tokens`）、`cleanup.settle`（读状态、`exists`、Git `removeWorktree`、必要时发清理决策）、`cleanup.idle_builds`（构建检出列举和删除）。
+- reconcile：`reconcile.state`、`reconcile.git`（文件系统和 Git 扫描，**包含**嵌套的 `reconcile.checks`）、`reconcile.checks`（对每张卡从 seq 0 读全部事件找合并检查记录）、`reconcile.repair`、`reconcile.record`（写发现和事件）。
+- backup：`backup.fetch`（即整个 tick）。
+
+replay 新增 `REPLAY_LOOPS=1`（配 `REPLAY_LOOP_TICKS`，默认 2）：dispatcher tick 之后用同一个库、桩 Git 和桩终端各跑几次三个执行器。结果（稳态第 2 次）：
+
+| 卡数 | cleanup | reconcile（checks / record） | backup |
+|---:|---:|---:|---:|
+| 120 | 0.9 ms | 49 ms（15 / 34 ms） | 0.1 ms |
+| 240 | 1.1 ms | 90 ms（28 / 62 ms） | 0.1 ms |
+
+**合成重放测不出这三个任务的真实耗时**，原因：
+
+- 合成夹具里没有“已释放、带终端和 worktree”的 Assignment，`cleanup.revoke_and_release` 和 `cleanup.settle` 根本没跑到；生产 cleanup 平均 25 秒、最长 208 秒（C-221#5），按代码看来自对每个已释放 Assignment 串行 await 的终端 `status`/`release`、`access`、`git worktree remove`，这些是外部 IO，合成数据无法模拟其耗时。已释放 Assignment 只增不减，每轮都会重走一遍（进程内 `cleaned` 集合只记录已删掉或已不存在的 worktree，重启即清空）。
+- reconcile 的数据库部分（含从 seq 0 重放事件）在 240 卡只有约 0.1 s，与生产平均 9 秒、最长 65 秒差两个数量级，生产耗时应主要在 `reconcile.git` 的文件系统和 Git 扫描；但这只有生产数据才能确认。
+- backup 是一次 `git fetch`，合成数据无意义。
+
+**缺的数据**：生产上打开 `CARDIGAN_TICK_PROFILE=1` 一段时间（本卡部署后，至少覆盖几轮 cleanup 和 1～2 轮 reconcile、backup）得到的 `tick_profile` 行（只含循环名、分段名和数字），再加每轮 cleanup 时已释放 Assignment 的个数（可从库里数）。这比提供脱敏库副本更直接，也不涉及数据外传；已开人工待办（不阻塞合并）。
+
+### 6.7 分片或让出事件循环：只评估、不实现
+
+- **收益**：修后 240 卡稳态 tick 仍约 6 s、ELU 1.0，期间 HTTP、SSE、MCP 全部排队。如果每处理完一个项目、一个候选认领或一批通知就 `await setImmediate()` 让出一次，单次阻塞上限会从“整个 tick”降到“一次认领”（240 卡约几十到 200 ms），Workbench 和 MCP 的 tick 期间延迟会接近空闲水平。总耗时不变，甚至略增。
+- **并发风险**：
+  - 让出后其它请求（MCP 写命令、Web 操作、其它周期任务）会插到 tick 中间写库。现在每次认领、ACK、停止都在独立事务里重新 `loadState` 并复查（`dispatchStateLoader` 每次按版本号重查），这一层仍然成立；但 `project()` 里跨步骤复用的局部值（`candidates` 里的 `state`、排好序的 `candidates` 列表、`claimed` 集合）会过期：可能按旧优先级顺序派发，或者对刚被别处处理掉的通知再走一遍（事务内复查会挡住重复派发，但顺序语义会变）。
+  - `Dispatcher.serial`、各执行器的 `serial` 只保证同一实例内串行，不防止让出期间 MCP 命令改写同一 Assignment；需要逐个确认“读快照 → await → 写”的路径都在写事务里复查。
+  - cleanup 的串行 await 本身已经会让出事件循环（外部 IO），它慢主要是串行 IO，不是阻塞；分片对它帮助不大，并行化反而要处理同一仓库的 Git 锁。
+- **要改的边界**：`Dispatcher.tick` 的 route/deliver 循环（让出点、让出后候选列表是否重算）、`retryDispatchedRuns` 的候选循环、`maintenance` 内单个大事务（要先拆成多个事务才能让出，涉及“同一事务内看到一致状态”的假设）；派发顺序和合并检查互斥的契约测试要补“让出期间有并发写”的用例。
+- 建议：先做 §6.5 的两项，把稳态 tick 再降一截，再按数字决定要不要分片；要做的话属于并发行为变化，交人另行决定。
