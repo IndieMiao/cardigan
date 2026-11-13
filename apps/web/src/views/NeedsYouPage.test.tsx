@@ -2006,7 +2006,7 @@ test("C-154: a confirmation handed over by the PM is labelled and counts down fr
   expect(within(direct).queryByText("由 PM 转交")).toBeNull();
 });
 
-test("C-180: human snoozed confirmations remain visible with reason and expiry", async () => {
+test("C-182: human snoozed confirmations show an accessible tag, reason and expiry", async () => {
   const until = "2035-01-01T04:30:00.000Z";
   render(
     <NeedsYouPage
@@ -2036,6 +2036,11 @@ test("C-180: human snoozed confirmations remain visible with reason and expiry",
   expect(
     await screen.findByText(`已暂缓：等待核对（到 ${time}）`),
   ).toBeTruthy();
+  const status = screen.getByRole("status", { name: "已暂缓" });
+  const tag = within(status).getByText("已暂缓");
+  expect(tag.classList.contains("status-snoozed")).toBe(true);
+  expect(tag.classList.contains("status-shape-paused")).toBe(true);
+  expect(tag.querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
 });
 
 test("C-179: an open action shows the pre-merge check reminder with a direct link", async () => {

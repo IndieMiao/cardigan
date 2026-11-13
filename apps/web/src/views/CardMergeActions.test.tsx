@@ -266,7 +266,7 @@ test("C-115: a verified noop keeps human confirmation without claiming a passed 
   expect(controls.queryByRole("button", { name: "重新检查" })).toBeNull();
 });
 
-test("C-180: the card merge block shows a snoozed reason and local expiry", async () => {
+test("C-182: the card merge block shows an accessible snoozed tag, reason and local expiry", async () => {
   const detail = fixture();
   const until = "2035-01-01T04:30:00.000Z";
   const snoozed = {
@@ -298,4 +298,9 @@ test("C-180: the card merge block shows a snoozed reason and local expiry", asyn
     hourCycle: "h23",
   });
   expect(controls.getByText(`已暂缓：等待核对（到 ${time}）`)).toBeTruthy();
+  const status = controls.getByRole("status", { name: "已暂缓" });
+  const tag = within(status).getByText("已暂缓");
+  expect(tag.classList.contains("status-snoozed")).toBe(true);
+  expect(tag.classList.contains("status-shape-paused")).toBe(true);
+  expect(tag.querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
 });
