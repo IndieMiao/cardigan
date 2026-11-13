@@ -256,25 +256,25 @@ test("anonymous participants retain a named role placeholder and hover hint", as
   expect(placeholder.querySelector(".employee-avatar")?.textContent).toBe("R");
 });
 
-test("compact styles clamp two readable lines, wrap metadata and use existing theme tokens", () => {
+test("readable cards truncate one regular-weight line and use existing theme tokens", () => {
   const css = readFileSync(
     new NodeURL("../styles.css", import.meta.url),
     "utf8",
   );
-  const compact = css.slice(css.indexOf("/* C-31:"));
+  const compact = css.slice(css.indexOf("/* C-210: readable"));
   const title = /\.board-card \.card-title \{([^}]+)\}/.exec(compact)?.[1];
   for (const rule of [
-    "display: -webkit-box",
-    "-webkit-box-orient: vertical",
-    "-webkit-line-clamp: 2",
+    "display: block",
+    "white-space: nowrap",
+    "text-overflow: ellipsis",
+    "font-weight: 400",
     "overflow: hidden",
-    "overflow-wrap: anywhere",
-    "line-height: 1.65",
+    "line-height: 22px",
   ])
     expect(title).toContain(rule);
   expect(compact).toContain("flex-wrap: wrap");
   expect(compact).toContain("min-width: 0");
-  expect(compact).toContain("margin-inline-start: calc(var(--gap) / -2)");
+  expect(compact).toContain("margin-inline-start: 0");
   expect(compact).not.toMatch(/#[0-9a-f]{3,8}\b|rgba?\(/i);
   for (const token of [
     "status-done",

@@ -72,15 +72,43 @@ function withCurrentIdentity(value) {
     value + css.slice(css.indexOf("/* C-204: shared person/number/status rows"))
   );
 }
-const baseline = withCurrentIdentity(
-  withCurrentRecords(
-    execFileSync(
-      "git",
-      [
-        "show",
-        `${process.env.LAYOUT_BASELINE_REF ?? "origin/main"}:apps/web/src/styles.css`,
-      ],
-      { cwd: root, encoding: "utf8" },
+// C-210 intentionally widens board lanes and changes card typography. Keep
+// baseline comparisons for the rest of the page, replacing only board rules.
+function withCurrentBoard(value) {
+  for (const [pattern, end] of [
+    [/\.board-scroll \{/, ".card-tile {"],
+    [
+      /\/\* C-(?:31: compact|210: readable) cards/,
+      "/* V10b: template management",
+    ],
+  ]) {
+    const start = value.search(pattern),
+      from = css.search(pattern);
+    assert(start >= 0 && from >= 0, "Board CSS region not found");
+    value =
+      value.slice(0, start) +
+      css.slice(from, css.indexOf(end, from)) +
+      value.slice(value.indexOf(end, start));
+  }
+  const priority = /\.board-card \.priority-badge \{[^}]+\}/;
+  const currentPriority = css.match(priority)?.[0];
+  assert(currentPriority, "Board priority target rule not found");
+  value = priority.test(value)
+    ? value.replace(priority, currentPriority)
+    : `${value}\n${currentPriority}`;
+  return value;
+}
+const baseline = withCurrentBoard(
+  withCurrentIdentity(
+    withCurrentRecords(
+      execFileSync(
+        "git",
+        [
+          "show",
+          `${process.env.LAYOUT_BASELINE_REF ?? "origin/main"}:apps/web/src/styles.css`,
+        ],
+        { cwd: root, encoding: "utf8" },
+      ),
     ),
   ),
 );
@@ -254,7 +282,11 @@ try {
           { name: "prefers-reduced-motion", value: "reduce" },
         ],
       });
-      for (const [name, route, ready] of routes) {
+      for (const [name, route, ready] of routes.filter(
+        ([name]) =>
+          !process.env.LAYOUT_CASES ||
+          process.env.LAYOUT_CASES.split(",").includes(name),
+      )) {
         const label = `${name} ${width}px ${theme}`;
         await send("Page.navigate", {
           url: `${server.resolvedUrls.local[0]}__layout?case=${name}#/p/p-1/${route}`,
@@ -626,7 +658,9 @@ try {
   }
   assert.deepEqual(browser.errors, [], "Browser runtime errors");
   console.log(
-    "PASS 70 layout cases, including single-line execution headers, timeline pagination and internal table scrolling",
+    process.env.LAYOUT_CASES
+      ? `PASS selected layout cases: ${process.env.LAYOUT_CASES} (5 widths, 2 themes)`
+      : "PASS 70 layout cases, including single-line execution headers, timeline pagination and internal table scrolling",
   );
 } finally {
   await browser?.close();

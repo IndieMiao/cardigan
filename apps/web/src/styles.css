@@ -895,36 +895,73 @@ button .id-badge {
 .cards-page-board > :not(.board-scroll) {
   flex-shrink: 0;
 }
+/* C-210: wider lanes; scrolling stays inside the board. */
 .board-scroll {
+  --board-scroll-rest: color-mix(in srgb, var(--text-muted) 45%, var(--bg));
+  --board-scroll-active: color-mix(in srgb, var(--text-muted) 80%, var(--bg));
   position: relative;
   min-width: 0;
   width: 100%;
   flex: 1;
   min-height: calc(var(--gap) * 12);
 }
-/* U6a: one row of fixed-width columns; only the board scrolls sideways. */
 .board {
   display: flex;
   flex-wrap: nowrap;
-  gap: var(--gap);
+  gap: 16px;
   align-items: stretch;
   height: 100%;
   max-width: 100%;
   overflow-x: auto;
   overflow-y: hidden;
   padding-bottom: 10px;
+}
+:is(.board, .board-lane-cards) {
   scrollbar-width: thin;
-  scrollbar-color: var(--text-muted) transparent;
+  scrollbar-color: var(--board-scroll-rest) transparent;
 }
-.board::-webkit-scrollbar {
-  height: 10px;
+:is(.board, .board-lane-cards):is(:hover, :focus-within, :focus-visible) {
+  scrollbar-color: var(--board-scroll-active) transparent;
 }
-.board::-webkit-scrollbar-thumb {
-  background: var(--text-muted);
-  border-radius: 999px;
+/* Chromium's standard thin mode can retain arrow buttons. Use its pseudo
+   elements instead; Firefox keeps the standard rules above. */
+@supports selector(::-webkit-scrollbar) {
+  :is(.board, .board-lane-cards),
+  :is(.board, .board-lane-cards):is(:hover, :focus-within, :focus-visible) {
+    scrollbar-width: auto;
+    scrollbar-color: auto;
+  }
+  :is(.board, .board-lane-cards)::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  :is(.board, .board-lane-cards)::-webkit-scrollbar-thumb {
+    background: var(--board-scroll-rest);
+    border-radius: 999px;
+  }
+  :is(.board, .board-lane-cards):is(
+    :hover,
+    :focus-within,
+    :focus-visible
+  )::-webkit-scrollbar-thumb {
+    background: var(--board-scroll-active);
+  }
+  :is(.board, .board-lane-cards)::-webkit-scrollbar-track,
+  :is(.board, .board-lane-cards)::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+  :is(.board, .board-lane-cards)::-webkit-scrollbar-button {
+    display: none;
+    width: 0;
+    height: 0;
+  }
 }
-.board::-webkit-scrollbar-track {
-  background: transparent;
+@media (forced-colors: active) {
+  :is(.board, .board-lane-cards),
+  :is(.board, .board-lane-cards):is(:hover, :focus-within, :focus-visible) {
+    scrollbar-width: auto;
+    scrollbar-color: auto;
+  }
 }
 /* Fades the last visible column while the board still has columns to the right. */
 .board-fade {
@@ -940,16 +977,26 @@ button .id-badge {
   margin-bottom: 12px;
 }
 .board-column {
-  flex: 0 0 280px;
-  width: 280px;
-  min-width: 280px;
+  flex: 0 0 420px;
+  width: 420px;
+  min-width: 0;
   height: 100%;
   min-height: 0;
   display: flex;
   flex-direction: column;
   background: transparent;
   border: 0;
-  padding: 10px;
+  padding: 10px 4px;
+}
+@media (max-width: 640px) {
+  .board-column:not(.board-column-collapsed) {
+    /* 16px gap and 48px of the next lane remain visible. */
+    flex-basis: calc(100% - 64px);
+    width: calc(100% - 64px);
+  }
+  .board-fade {
+    display: none;
+  }
 }
 .board-column-collapsed {
   flex: 0 0 48px;
@@ -981,6 +1028,10 @@ button .id-badge {
   font-size: var(--text-sm);
 }
 
+.board-column:where(:not(.board-column-collapsed)) .board-column-title {
+  padding-inline: 8px;
+}
+
 .board-column-count {
   color: var(--text-muted);
 }
@@ -996,8 +1047,7 @@ button .id-badge {
   overflow-y: auto;
   overflow-x: hidden;
   overscroll-behavior-y: contain;
-  scrollbar-width: thin;
-  scrollbar-color: var(--text-muted) transparent;
+  scrollbar-gutter: stable;
 }
 .board-load-more {
   width: 100%;
@@ -3970,12 +4020,12 @@ body[data-lightbox="open"] .drawer-overlay {
   }
 }
 
-/* C-31: compact cards share the existing palette in both themes. */
+/* C-210: readable cards share the existing palette in both themes. */
 .board-card {
   position: relative;
   min-width: 0;
-  gap: calc(var(--gap) / 2);
-  padding: calc(var(--gap) * 2 / 3);
+  gap: 8px;
+  padding: 12px;
 }
 .board-card .card-tile-link {
   gap: calc(var(--gap) / 2);
@@ -3988,20 +4038,39 @@ body[data-lightbox="open"] .drawer-overlay {
   border-radius: var(--radius);
 }
 .board-card .card-title {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  display: block;
+  white-space: nowrap;
   overflow: hidden;
-  overflow-wrap: anywhere;
-  line-height: 1.65;
+  text-overflow: ellipsis;
+  line-height: 22px;
   font-size: var(--text-body);
+  font-weight: 400;
+  color: color-mix(in srgb, var(--text) 70%, var(--text-muted));
+}
+.board-card.card-superseded .card-title {
+  color: var(--text-muted);
+}
+.board-card .card-tile-head {
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+.board-card .card-tile-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
 }
 .board-card-meta {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: calc(var(--gap) / 3);
+  gap: 4px 8px;
   min-width: 0;
+  color: var(--text-muted);
+}
+.board-card-time-attachments {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
 }
 .board-card-badge {
   position: relative;
@@ -4010,10 +4079,10 @@ body[data-lightbox="open"] .drawer-overlay {
   gap: calc(var(--gap) / 3);
   min-width: 0;
   max-width: 100%;
-  padding: 0 calc(var(--gap) / 3);
-  min-height: calc(var(--gap) * 2);
-  border-radius: calc(var(--radius) / 2);
-  background: var(--surface-muted);
+  padding: 0 2px;
+  min-height: 24px;
+  border: 0;
+  background: transparent;
   color: var(--text-muted);
   font-size: var(--text-xs);
   text-decoration: none;
@@ -4025,7 +4094,8 @@ body[data-lightbox="open"] .drawer-overlay {
   height: var(--text-section);
 }
 .board-card-badge:hover {
-  color: var(--accent);
+  color: var(--text);
+  text-decoration: underline;
 }
 .board-card-complete {
   color: var(--status-done);
@@ -4038,16 +4108,16 @@ body[data-lightbox="open"] .drawer-overlay {
 }
 .board-card .employee-owners {
   position: relative;
-  gap: 0;
+  gap: 4px;
   flex-wrap: nowrap;
 }
 .board-card .employee-owners > * + * {
-  margin-inline-start: calc(var(--gap) / -2);
+  margin-inline-start: 0;
 }
 .board-card .employee-avatar {
   width: calc(var(--gap) * 2);
   height: calc(var(--gap) * 2);
-  border: 2px solid var(--surface);
+  border: 0;
   font-size: var(--text-xs);
 }
 .board-card .employee-trigger {
@@ -4234,6 +4304,12 @@ body[data-lightbox="open"] .drawer-overlay {
   display: inline-flex;
   vertical-align: middle;
   border-radius: 3px;
+}
+.board-card .priority-badge {
+  min-width: 24px;
+  min-height: 24px;
+  align-items: center;
+  justify-content: center;
 }
 .priority-select,
 .priority-option {
