@@ -42,6 +42,7 @@ import {
   resolveReferences,
   roleKind,
   runAuthorView,
+  suggestionView,
 } from "@cardigan/domain";
 import type { ProjectMergeGate } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
@@ -174,8 +175,10 @@ export function webDecisionView(
   state: CommandState,
   decision: import("@cardigan/domain").Decision,
 ) {
+  const suggestion = suggestionView(state, decision);
   return {
     ...decision,
+    ...(suggestion ? { suggestion } : {}),
     affected_card_views: affectedCardViews(state, decision.affected_cards),
     ...webAuthorView(state, decision.raised_by ?? "system"),
     attachments: decisionAttachmentViews(state, decision),
@@ -999,6 +1002,7 @@ function decisionActionWebView(
       decision.decider === "human" ? webAuthorView(state, "human") : null,
     options: decision.options,
     recommended: decision.recommended,
+    ...(decision.suggestion ? { suggestion: decision.suggestion } : {}),
     trigger: decision.trigger ?? null,
     category: decision.category ?? "general",
     assignment_id: decision.assignment_id ?? null,

@@ -63,6 +63,10 @@ const viaAuthor = z
       (s.startsWith("assignment:") && parseId("assignment", s.slice(11)).ok),
     "Invalid author",
   );
+/** C-192: optional suggestion on a decision handed to the human. */
+const suggestion = z
+  .object({ option: text, rationale: text, return_reason: text.optional() })
+  .optional();
 const schemas = {
   issue_instruction: {
     card_id: id("card"),
@@ -97,6 +101,9 @@ const schemas = {
       .array(z.object({ key: text, description: text, impact: text }))
       .min(1),
     recommended: text,
+    suggestion: suggestion.describe(
+      "Suggested answer shown to the human with a one-click button; option must equal recommended. Required by PM rules when handing a matter to the human.",
+    ),
     affected_cards: z.array(id("card")),
     affected_work_items: z.array(id("work_item")),
     blocking: z.boolean(),
@@ -122,6 +129,9 @@ const schemas = {
     option: text,
     rationale: text,
     escalate: z.boolean().optional(),
+    suggestion: suggestion.describe(
+      "With escalate only: your suggested option (merge or request_changes for merge confirmations) and a one-line reason, shown to the human with a one-click button; with request_changes also return_reason, prefilled for the human. Required by PM rules when escalating.",
+    ),
     notice: text.optional(),
     attachment_ids: z
       .array(text)

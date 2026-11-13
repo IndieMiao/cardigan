@@ -253,6 +253,14 @@ export interface SensitiveResult {
   readonly auto_merge_due_at: string | null;
 }
 
+export interface DecisionSuggestionView {
+  readonly option: string;
+  readonly rationale: string;
+  readonly return_reason?: string;
+  readonly by: string;
+  readonly at: string;
+  readonly stale: boolean;
+}
 export interface DecisionView {
   readonly card_id?: string | null;
   readonly affected_cards?: readonly string[];
@@ -283,6 +291,8 @@ export interface DecisionView {
     readonly impact: string;
   }[];
   readonly recommended: string;
+  /** C-192: the raiser's suggestion; `stale` disables one-click handling. */
+  readonly suggestion?: DecisionSuggestionView;
   readonly context?: string;
   /** Card attachments the requester referenced, in display order (§6). */
   readonly attachments?: readonly AttachmentView[];
@@ -1169,6 +1179,14 @@ export interface CardiganClient {
     delegateFuture?: boolean,
     snoozeUntil?: string,
   ): Promise<void>;
+  /** C-192: submit the decision's fresh suggestion ("按建议处理"). */
+  applySuggestion(
+    projectId: string,
+    id: string,
+    option: string,
+    quote: string,
+    idempotencyKey?: string,
+  ): Promise<void>;
   decisionComment(
     projectId: string,
     id: string,
@@ -1614,6 +1632,20 @@ export class HttpCardiganClient implements CardiganClient {
         ...(delegateFuture ? { delegate_future: true } : {}),
         ...(snoozeUntil !== undefined ? { snooze_until: snoozeUntil } : {}),
       },
+      idempotencyKey,
+    );
+  }
+  async applySuggestion(
+    projectId: string,
+    id: string,
+    option: string,
+    quote: string,
+    idempotencyKey: string = crypto.randomUUID(),
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      `decisions/${encodeURIComponent(id)}/resolve`,
+      { option, raw_quote: quote, via_suggestion: true },
       idempotencyKey,
     );
   }

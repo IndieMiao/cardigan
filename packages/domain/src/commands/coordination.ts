@@ -18,6 +18,11 @@ import { decisionCategories, highRiskCategories } from "../preferences.js";
 import { extractReferences } from "../references.js";
 import { decisionAttachments } from "./decision-attachments.js";
 import {
+  buildSuggestion,
+  type DecisionSuggestionInput,
+  suggestionStale,
+} from "./decision-suggestion.js";
+import {
   assignDecision,
   delegationAllowed,
   delegationAuthority,
@@ -267,6 +272,8 @@ export type RequestDecisionParams = Pick<
   readonly attachment_ids?: readonly AttachmentId[];
   /** C-167: `false` marks a D12 decision as unrelated to its cards' merge content. */
   readonly merge_related?: boolean;
+  /** C-192: suggested option for the human; must match `recommended`. */
+  readonly suggestion?: DecisionSuggestionInput;
 };
 export function requestDecision(
   state: CommandState,
@@ -321,6 +328,11 @@ export function requestDecision(
         p.options.some((o) => o.key === p.recommended),
       "validation_failed",
       "Options and recommendation must be explicit",
+    );
+    ensure(
+      !p.suggestion || p.suggestion.option === p.recommended,
+      "validation_failed",
+      "suggestion.option 必须与 recommended 一致",
     );
     if (p.kind === "approve") {
       ensure(
@@ -403,6 +415,19 @@ export function requestDecision(
       affected_cards: cards,
       affected_work_items: items.map((w) => w.id),
       ...(attachment_ids.length ? { attachment_ids } : {}),
+      ...(p.suggestion
+        ? {
+            suggestion: buildSuggestion(
+              d,
+              {
+                options: p.options,
+                ...(p.card_id ? { card_id: p.card_id } : {}),
+                affected_cards: cards,
+              },
+              p.suggestion,
+            ),
+          }
+        : {}),
       blocking: p.blocking,
       decider: p.decider,
       doc_refs: [],
@@ -451,7 +476,7 @@ export function requestDecision(
 export function recordDecision(
   state: CommandState,
   actor: Actor,
-  p: {
+  input: {
     decision_id: DecisionId;
     option: string;
     rationale: string;
@@ -460,11 +485,43 @@ export function recordDecision(
     via_chain?: readonly Author[];
     batch?: string;
     delegate_future?: boolean;
+    /** C-192: the human clicked "按建议处理"; never accepted from Agents. */
+    via_suggestion?: boolean;
   },
   ports: CommandPorts,
 ) {
   return command(state, actor, "record_decision", ports, (d) => {
-    const held = d.get("decisions", p.decision_id);
+    const held = d.get("decisions", input.decision_id);
+    let p = input;
+    if (p.via_suggestion) {
+      ensure(
+        actor.kind === "human",
+        "forbidden_tool",
+        "按建议处理只能由人亲自操作，Agent 不能代人提交",
+      );
+      ensure(
+        held.suggestion &&
+          ["open", "provisional", "snoozed"].includes(held.status),
+        "validation_failed",
+        "这条拍板没有可用的建议",
+      );
+      ensure(
+        !suggestionStale(state, held),
+        "stale_target",
+        "建议已过期：交付、合并检查或合并前核对在建议之后有变化，请按当前情况选择",
+      );
+      ensure(
+        p.option === held.suggestion.option,
+        "validation_failed",
+        "按建议处理只能提交建议的选项",
+      );
+      const extra = p.raw_quote.trim();
+      p = {
+        ...p,
+        raw_quote: `按建议处理：${p.option}${extra ? `。${extra}` : ""}`,
+        rationale: p.rationale.trim() || held.suggestion.rationale,
+      };
+    }
     // §7.4 (C-65): the human may answer a merge confirmation PM Ops still
     // holds without turning delegation off; it becomes the human's answer.
     const takenOver =
@@ -579,6 +636,7 @@ function resolveDecisionDraft(
     batch?: string;
     notice?: string;
     taken_over_from?: "role:pm";
+    via_suggestion?: boolean;
   },
   delegated: boolean,
 ) {
@@ -610,6 +668,9 @@ function resolveDecisionDraft(
       : {}),
     ...(delegated && p.notice?.trim() ? { notice: p.notice.trim() } : {}),
     ...(p.taken_over_from ? { taken_over_from: p.taken_over_from } : {}),
+    ...(p.via_suggestion && !delegated
+      ? { via_suggestion: true as const }
+      : {}),
     raw_quote: p.raw_quote,
     via_chain: [...(p.via_chain ?? []), d.author],
     ...(p.batch ? { batch: p.batch } : {}),
@@ -638,6 +699,8 @@ export function resolveDelegatedDecision(
     notice?: string;
     /** C-95: card attachments to show the human; only with `escalate`. */
     attachment_ids?: readonly AttachmentId[];
+    /** C-192: suggestion shown to the human; only with `escalate`. */
+    suggestion?: DecisionSuggestionInput;
   },
   ports: CommandPorts,
 ) {
@@ -673,6 +736,11 @@ export function resolveDelegatedDecision(
       !p.attachment_ids?.length || !!p.escalate,
       "validation_failed",
       "attachment_ids 只能在交给人（escalate）时提供",
+    );
+    ensure(
+      !p.suggestion || !!p.escalate,
+      "validation_failed",
+      "suggestion 只能在交给人（escalate）时提供",
     );
     if (failed && !p.escalate) {
       ensure(
@@ -719,9 +787,16 @@ export function resolveDelegatedDecision(
         ...(q.card_id ? [q.card_id] : []),
         ...q.affected_cards,
       ]);
+      const suggestion = p.suggestion
+        ? buildSuggestion(d, q, p.suggestion)
+        : undefined;
       handoffDecision(
         d,
-        attachment_ids.length ? { ...q, attachment_ids } : q,
+        {
+          ...q,
+          ...(attachment_ids.length ? { attachment_ids } : {}),
+          ...(suggestion ? { suggestion, recommended: suggestion.option } : {}),
+        },
         `项目经理升级给你：${p.rationale}`,
         undefined,
         q.trigger === "merge_confirmation",

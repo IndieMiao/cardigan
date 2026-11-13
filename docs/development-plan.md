@@ -1153,6 +1153,7 @@ C-71：Workbench 作者展示优先使用绑定的员工名；没有员工的常
 - 不紧急的拍板合并成批次呈现；阻塞性的拍板和风险立即提醒（0.2 回溯：需要你介入的事项中，72% 可以合并或延后）。
 - 在 Needs You 里作答时，系统自动记录你的原话。
 - C-95：拍板引用了卡片附件时，Needs You 和卡片时间线里的拍板卡在背景下方按引用顺序展示：白名单位图显示缩略图，点击用公共 Lightbox 看大图；其他类型显示文件名和下载链接。全部走现有附件下载接口和登录鉴权，不新开公开链接；颜色用主题变量，亮暗两套主题一致。合并确认（含 PM 转交给人的合并确认）的卡片同样展示，显示条件不变。不引用附件的拍板显示不变。读取接口在拍板视图上补 `attachments`（与卡片附件同结构，未引用时为空数组）。
+- C-192：拍板可以带发起方的建议（`suggestion`：建议选项、一句理由；建议退回修改时附预填的退回原因）。Needs You 和卡片详情的合并确认在拍板卡上显示“建议：<选项>（理由）”和“按建议处理”按钮，建议退回时退回原因输入框预先填好、可以修改；卡片详情侧栏的其他拍板只显示建议文字，一键处理在 Needs You。建议写下之后，卡片的交付（新增任何版本）、当前完成申请的合并检查（尝试或结果）或合并前核对（任一项的状态或更新时间）有变化，建议标为“已过期”，不显示按钮；没有建议时界面不变。按钮只提交建议的选项，服务端校验调用方是人（Agent、PM Office 和 MCP 都会被拒绝，`forbidden_tool`）、建议存在且未过期（过期返回 `stale_target`）；记录仍是人的拍板，`resolution.via_suggestion=true`，原话记为“按建议处理：<选项>”加补充说明，`decision_resolved` 事件同时带 `via_suggestion`。还有未完成的合并前核对时，一键合并同样先弹出二次确认。界面文字集中在 `apps/web/src/suggestion-copy.ts`，待 PM 按 Q-279 定稿。
 - 当前完成申请的合并确认已解决为 `merge`，但最新检查失败／超时时，当前未由 PM 接手时，Needs You 重新展示该确认并说明可退回修改或重新检查；退回入口先填写原因，重查沿用合并检查入口，不重复提供确认合并。沿用已有 `/decisions/:decision/resolve` 与领域校验；退回后从列表消失，原授权保留为被取代的决定，退回原因与原话写入事件。
 - `review_limit` 选择 `pause` 后保留在此处，明确显示“已暂停（临时决定）”，只保留 `raise_limit` 操作；按钮旁说明上限加 1、额度可用且无其他阻塞时自动恢复审核。直接选择或暂停后再选择 `raise_limit` 都按 §4.4 在同一事务中更新额度和记录决定，重试不会重复加额度。已确认增加轮数但超过 10 分钟仍未恢复的项显示在“审核恢复异常”中，供核查额度与其他阻塞。
 - 显示已等待多久。
@@ -1400,7 +1401,7 @@ P2a-10 B2：五个 `host_ops_*` 工具只对 Token 具备对应许可的本项�
 | `issue_instruction(card_id, work_item_id, body)` | 仅常驻 PM Ops | 下达指令，生成 instruction 时间线和 instruction_issued 事件；人走 Workbench API |
 | `report_blocker(work_item_id, reason, needs: role\|human)` | 全部 | 报告阻塞 |
 | `request_human_action(card_id, instructions, why_human, expected_return, blocked_work_items[], blocks_merge?, due?) → key` | 全部 | 先交 PM Ops 分拣，转交人或主机操作后进入 Needs You；`blocks_merge=true` 时在完成前挡该卡合并（C-112），只读排查不传 |
-| `request_decision(card_id?, kind, category, question, context, options[], recommended, affected_cards[], affected_work_items[], blocking, decider, attachment_ids?) → key` | 全部 | 发起拍板，返回编号；`attachment_ids` 引用已有卡片附件，顺序即展示顺序 |
+| `request_decision(card_id?, kind, category, question, context, options[], recommended, affected_cards[], affected_work_items[], blocking, decider, attachment_ids?, suggestion?) → key` | 全部 | 发起拍板，返回编号；`attachment_ids` 引用已有卡片附件，顺序即展示顺序；`suggestion`（C-192）是给人的建议，`option` 须等于 `recommended` |
 | `upload_attachment(card_id, file, mime, kind, attach_to, basis?, sha256?, supersedes?)` | 全部 | 返回附件元数据；file 为标准带填充 base64，解码后 ≤10MiB（10×1024×1024 字节）；artifact 必须有 basis |
 | `read_attachment(attachment_id)` | 工具白名单允许的 Assignment（默认 coder、reviewer、pm） | 只读本项目且有权访问卡片的附件；返回原始字节的 base64、SHA-256、字节数和 MIME，校验摘要及大小，最大 10 MiB |
 | `heartbeat(run_id, note?)` | 全部 | 心跳 |
@@ -1412,7 +1413,7 @@ P2a-10 B2：五个 `host_ops_*` 工具只对 Token 具备对应许可的本项�
 | `assign(work_item_id, role_id, machine_id?, employee_id?)` | PM | 登记指派（employee_id 可填 E-n 或在职名字，省略按 §4.3 挑选），Token 待主机侧签发；Agent/PM 经 MCP 指派后系统为该 Assignment 排 `initial` Run |
 | `project_snapshot()` / `list_needs_you()` | PM | 项目快照和待你处理的事项；PM Ops 响应另含 pm_queue，列出待代拍与待分拣详情 |
 | `list_templates()` / `list_roles()` | 仅常驻 PM（Office、Ops） | 只读（V12b）：本项目每个模板、角色 id 的最新且 active 版本。模板含 `id/version/title/description/builtin/requires_repo/merge/primary_work_item_key/work_items[]`（每项 `key/title/role_id/kind/required`）；角色含 `role_id/version/display_name/kind/capabilities/worktree/abilities`，不返回 `core_prompt`、`instructions`、工具白名单和启动配置。不要求幂等键，不产生事件；只有 pm 角色可以配置，Token 签发、认证和 tools/list 只交给常驻 pm Assignment（工作项 PM、host_ops 拿不到）；不提供新建或修改模板、角色的能力 |
-| `resolve_delegated_decision(decision_id, option, rationale, escalate?, notice?, attachment_ids?)` | 仅 PM Ops | 重查类别授权后代拍，或附理由升级给人（升级时可用 `attachment_ids` 引用该拍板卡片上的附件，C-95）；系统生成授权依据。合并确认选 merge 时校验 C-49 前置条件并要求 notice（知会）；当前检查失败或超时时可选 request_changes 或 recheck（含已确认合并，C-66），rationale 与 notice 必填 |
+| `resolve_delegated_decision(decision_id, option, rationale, escalate?, notice?, attachment_ids?, suggestion?)` | 仅 PM Ops | 重查类别授权后代拍，或附理由升级给人（升级时可用 `attachment_ids` 引用该拍板卡片上的附件，C-95；可带 `suggestion` 给人一键处理，C-192）；系统生成授权依据。合并确认选 merge 时校验 C-49 前置条件并要求 notice（知会）；当前检查失败或超时时可选 request_changes 或 recheck（含已确认合并，C-66），rationale 与 notice 必填 |
 | `triage_human_action(human_action_id, disposition, rationale, title?, summary?, why_human?, instructions?, expected_outcome?, expected_return?)` | 仅 PM Ops | 记录权限内已完成的操作，或提交完整白话交接并转为 host/human（后两种 disposition 的六个文案字段都必填） |
 | `record_decision(decision_id, option, rationale, raw_quote, via_chain[]?, batch?)` | 仅 PM Office | 记录你在对话中做出的决定，`raw_quote` 为你的原话 |
 
@@ -1443,6 +1444,7 @@ C-107：`project_snapshot.available_employees` 为 PM 提供可指派工作项�
 - 产物类附件缺少 `basis` 时拒绝上传。
 - `request_decision` 的 `attachment_ids`（C-95）只能引用本项目内、属于该拍板 `card_id`、`affected_cards` 或受影响工作项所在卡片的附件；不存在或其他项目的附件返回 not_found，无关卡片、重复引用或超过上限（`MAX_DECISION_ATTACHMENTS`，暂定 6，集中定义在 domain，可调）返回 validation_failed。拒绝时不产生拍板、事件、暂停或 Run 结束等任何写入。Decision 只在有引用时记录 `attachment_ids`。
   - 合并确认由控制面生成时，继承完成申请上属于本卡片的附件（按完成申请的顺序，最多取上限张）；完成申请没有附件时不记录。PM Ops 用 `resolve_delegated_decision` 交给人（`escalate=true`）时可带 `attachment_ids`，按同一规则对该拍板的 `card_id` 与 `affected_cards` 校验，替换原有引用；不升级时带该参数返回 validation_failed。
+- 拍板的 `suggestion`（C-192）为 `{option, rationale, return_reason?}`：`option` 必须是该拍板的选项，`rationale` 必填；`option=request_changes` 时 `return_reason` 必填，其他选项不能带。`request_decision` 里 `option` 须等于 `recommended`；`resolve_delegated_decision` 只在 `escalate=true` 时接受，写入后把 `recommended` 改为建议的选项。合并确认只能建议 `merge` 或 `request_changes`（暂缓要人填原因和时间，不支持一键）。不合规返回 validation_failed，不产生任何写入。Decision 记录建议的作者、时间和写入时的卡片状态指纹，读取接口只返回建议内容和 `stale`，不返回指纹。`record_decision` 的 `via_suggestion` 只在 Workbench（Web）入口开放，MCP 工具不提供该参数。
   - M1 的 `file` 只接受规范 base64；适配层解码、计算 sha256，若请求带 sha256 则核对；不接受客户端文件路径或存储凭据。HTTP 请求体有界（最大 base64 长度加 1MiB JSON 元数据余量），超限返回 413；附件本身超限返回 validation_failed。
   - 缓存未命中后，在数据库事务外经 prepareAttachment 调用 AttachmentStore：新建目录权限 700、文件 600，临时文件完整写入后原子发布至 CARDIGAN_DATA_DIR/attachments/<sha256>；已有同摘要文件校验内容后复用。元数据只返回相对 storage_path，不暴露主机绝对路径。apps/server 的显式 dataDir 同时用于数据库与附件。
   - 落盘后，在新的幂等事务内重查 Token、读取项目快照并执行 uploadAttachment；拒绝或持久化失败回滚所有数据库变更、编号、事件和幂等记录。已发布文件保留，可能成为未引用文件；不在失败请求中删除，以免破坏其他附件或并发上传的共享内容。重试可复用。**孤立文件由 server 的附件清理循环回收**（Phase 2 §7 遗留小项）：每轮只删 `<dataDir>/attachments` 下没有任何项目附件记录引用、且修改时间早于 24 小时的普通文件，文件名必须是合法 sha256；链接、目录、临时文件和其他名字一律跳过。24 小时宽限期保护“已落盘但记录还没写入”的上传，删除前再在同一事务里确认一次没有引用；每轮最多删 200 个，日志只记数量和摘要前缀。默认每 6 小时一轮，用 `CARDIGAN_ATTACHMENT_GC_INTERVAL_MS` 调整。崩溃残留的临时文件和磁盘配额仍留待后续。

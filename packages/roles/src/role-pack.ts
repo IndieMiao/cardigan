@@ -66,6 +66,13 @@ export const HUMAN_ACTION_MERGE_RULE =
 export const PM_PRE_MERGE_CHECK_RULE =
   "截图核对、独立安全审核这类合并前的核对，一律用合并前核对项（`update_card` 的 `pre_merge_check`：PM Ops 设 pending，PM Office 设 passed 或 failed），不再另开挡合并（`blocks_merge`）的人工待办；只有确实要人在系统外动手的事，才开人工待办。核对项通过时，如果本卡还有挡合并的人工待办，系统会提醒它的分拣方（PM Ops 或人）确认是否可以完成；系统不会自动完成，收到提醒的 PM Ops 核实后自己处理或交人。";
 
+/**
+ * C-192: PM hands a matter to the human with a suggestion the human can apply
+ * in one click ("按建议处理"); a suggested return carries its reason.
+ */
+export const PM_DECISION_SUGGESTION_RULE =
+  "把事项交给人时（`request_decision` 的 `decider=human`，或 `resolve_delegated_decision` 的 `escalate`），必须带 `suggestion`：`option` 写你建议的选项（`request_decision` 里与 `recommended` 一致；合并确认只能建议 merge 或 request_changes），`rationale` 用一句话写理由；建议退回修改（`request_changes`）时，必须同时写 `return_reason`，写清要改什么，人会直接用它退回。人在 Needs You 和卡片详情看到“建议：<选项>（理由）”，可以一键“按建议处理”；交付、合并检查或合并前核对在建议之后有变化时，建议标为已过期，不能一键处理。";
+
 export const REVIEWER_PRE_MERGE_CHECK_RULE =
   "认为合并前还需要截图核对、独立安全审核这类核对时，不另开挡合并（`blocks_merge`）的人工待办，在审核结论里写明要核对什么，由 PM 设合并前核对项；只有确实要人在系统外动手的事，才开人工待办。";
 
@@ -144,6 +151,7 @@ const ROLE_BODIES: Record<
     "- 用 `list_templates` / `list_roles` 只读查看本项目可用的卡片模板和角色；这两个工具不能新建或修改模板、角色。",
     "- 需要人决定时用 `request_decision`；工作项级 PM 验收用 `submit_review`，`verdict` 由服务端计算，你只描述问题。",
     "- 需要人看图拍板时引用卡片附件：`request_decision` 的 `attachment_ids` 填本卡片或 `affected_cards` 上已有附件的 ID（顺序即展示顺序），不另外上传；把合并确认等拍板交给人（`resolve_delegated_decision` 的 `escalate`）时也可以带 `attachment_ids`。",
+    `- ${PM_DECISION_SUGGESTION_RULE}`,
     "- 工作项上的 PM 验收审的是完成申请（`kind=card_completion`），不审产出交付；需要核对代码时用 `whoami` 的 `worktree_path`，卡片里没有主机路径。常驻 PM 不直接提交审核：由 PM Ops 用 `assign` 把 PM 验收工作项指派成独立的 `pm` Assignment，验收在独立会话里完成。",
     "",
     "## 打断规则（§7.3，两个上下文都要遵守）",

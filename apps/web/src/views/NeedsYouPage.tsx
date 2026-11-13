@@ -14,6 +14,7 @@ import {
 } from "../api.js";
 import { DecisionAffectedCards } from "../components/DecisionAffectedCards.js";
 import { DecisionAttachments } from "../components/DecisionAttachments.js";
+import { DecisionSuggestion } from "../components/DecisionSuggestion.js";
 import { EmployeeIdentity } from "../components/EmployeeIdentity.js";
 import {
   EmptyState,
@@ -38,6 +39,7 @@ import { decisionTitle, delegableCategories } from "../decision-labels.js";
 import { PRE_MERGE_COPY } from "../pre-merge-copy.js";
 import { routeHash } from "../route.js";
 import { statusLabel } from "../status.js";
+import { SUGGESTION_COPY } from "../suggestion-copy.js";
 import { useResource } from "../useResource.js";
 
 const waitLabel = (ms: number | null, elapsed = 0) => {
@@ -161,7 +163,10 @@ function Decision({
   elapsed,
 }: Props & { q: NeedsDecision; done: () => void; elapsed: number }) {
   const [option, setOption] = useState(""),
-    [quote, setQuote] = useState("");
+    [quote, setQuote] = useState(""),
+    [suggestedReason, setSuggestedReason] = useState(
+      q.suggestion?.return_reason ?? "",
+    );
   const action = useAction(done);
   const [delegateFuture, setDelegateFuture] = useState(false);
   const canDelegate =
@@ -203,6 +208,29 @@ function Decision({
         </details>
       )}
       <DecisionAttachments attachments={q.attachments} />
+      {q.suggestion && !paused && (
+        <DecisionSuggestion
+          id={q.id}
+          suggestion={q.suggestion}
+          label={
+            q.options.find((o) => o.key === q.suggestion?.option)
+              ?.description ?? q.suggestion.option
+          }
+          busy={action.busy}
+          reason={suggestedReason}
+          onReason={setSuggestedReason}
+          onApply={() => {
+            const suggested = q.suggestion?.option ?? "";
+            const said =
+              suggested === "request_changes" ? suggestedReason : quote;
+            void action.run(
+              [projectId, q.id, "suggestion", suggested, said],
+              (key) =>
+                client.applySuggestion(projectId, q.id, suggested, said, key),
+            );
+          }}
+        />
+      )}
       <form
         onSubmit={(e) => {
           e.preventDefault();
@@ -428,8 +456,13 @@ export function MergeConfirmation({
   const [holding, setHolding] = useState(false);
   const [holdReason, setHoldReason] = useState("");
   const [holdUntil, setHoldUntil] = useState("");
-  const [reason, setReason] = useState("");
+  const suggestion = q.status === "resolved" ? undefined : q.suggestion;
+  const [reason, setReason] = useState(
+    suggestion && !suggestion.stale ? (suggestion.return_reason ?? "") : "",
+  );
   const [confirming, setConfirming] = useState(false);
+  // C-192: the pre-merge dialog may be confirming the suggestion.
+  const [confirmingSuggestion, setConfirmingSuggestion] = useState(false);
   const confirmButton = useRef<HTMLButtonElement>(null);
   const cancelButton = useRef<HTMLButtonElement>(null);
   const action = useAction(done);
@@ -439,9 +472,13 @@ export function MergeConfirmation({
   const preChecks = merge?.pre_merge_checks ?? [];
   const openPreChecks = preChecks.filter((c) => c.status !== "passed");
   const cardId = q.card_id ?? q.related_cards[0]?.id ?? null;
-  const decide = (option: "merge") =>
-    action.run([projectId, q.id, "resolve", option, quote], (key) =>
-      client.recordDecision(projectId, q.id, option, quote, key),
+  const decide = (option: "merge", viaSuggestion = false) =>
+    action.run(
+      [projectId, q.id, "resolve", option, quote, viaSuggestion],
+      (key) =>
+        viaSuggestion
+          ? client.applySuggestion(projectId, q.id, option, quote, key)
+          : client.recordDecision(projectId, q.id, option, quote, key),
     );
   return (
     <article className="needs-item needs-merge" aria-label={`合并确认 ${q.id}`}>
@@ -479,6 +516,36 @@ export function MergeConfirmation({
         />
       )}
       <DecisionAttachments attachments={q.attachments} />
+      {suggestion && (
+        <DecisionSuggestion
+          id={q.id}
+          suggestion={suggestion}
+          label={
+            SUGGESTION_COPY.mergeOptions[suggestion.option] ?? suggestion.option
+          }
+          busy={action.busy}
+          reason={reason}
+          onReason={setReason}
+          onApply={() => {
+            if (suggestion.option === "request_changes")
+              void action.run(
+                [projectId, q.id, "suggestion", "request_changes", reason],
+                (key) =>
+                  client.applySuggestion(
+                    projectId,
+                    q.id,
+                    "request_changes",
+                    reason,
+                    key,
+                  ),
+              );
+            else if (openPreChecks.length > 0) {
+              setConfirmingSuggestion(true);
+              setConfirming(true);
+            } else void decide("merge", true);
+          }}
+        />
+      )}
       {merge?.merge_gate_invalid && (
         <p className="error">合并闸门配置无效，请查看 server 启动日志</p>
       )}
@@ -584,6 +651,7 @@ export function MergeConfirmation({
         onSubmit={(e) => {
           e.preventDefault();
           if (confirmed) return;
+          setConfirmingSuggestion(false);
           if (openPreChecks.length > 0) setConfirming(true);
           else void decide("merge");
         }}
@@ -765,7 +833,7 @@ export function MergeConfirmation({
                 disabled={action.busy}
                 onClick={() => {
                   setConfirming(false);
-                  void decide("merge");
+                  void decide("merge", confirmingSuggestion);
                 }}
               >
                 {PRE_MERGE_COPY.confirmAnyway}

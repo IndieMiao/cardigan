@@ -3965,3 +3965,30 @@ body[data-lightbox="open"] .drawer-overlay {
   margin: 0 auto var(--gap);
 }
 /* End C-134 decision history. */
+/* C-192: suggested answer with one-click handling. */
+.decision-suggestion {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.decision-suggestion.stale {
+  border-left-color: var(--border);
+}
+.decision-suggestion-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 6px;
+  overflow-wrap: anywhere;
+}
+.decision-suggestion.stale .decision-suggestion-line strong {
+  color: var(--text-muted);
+  text-decoration: line-through;
+}
+.decision-suggestion textarea {
+  width: 100%;
+}

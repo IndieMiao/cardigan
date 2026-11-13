@@ -194,6 +194,7 @@ export function recordDecisionResolution(
         ...(resolution.taken_over_from
           ? { taken_over_from: resolution.taken_over_from }
           : {}),
+        ...(resolution.via_suggestion ? { via_suggestion: true } : {}),
         status: result.status,
         resume_work_items: unblocked.map((w) => w.id),
       },
