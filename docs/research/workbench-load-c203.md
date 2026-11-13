@@ -4,7 +4,7 @@
 
 ## 方法与边界
 
-- 修前基线：`60d617acb725342a7a851b5dd51cae9ad65de552`。修后在合入主机随后同步的 `80dbfa11c0807864a3c9f06fdf69a302fb53c2c1` 后重新构建、采集（实现提交为 `d387963444ec0f3ee74cae409be3a0b1e119efeb`，后续仅补测量文档）。基线新增的风险标签详情也已保留。
+- 修前基线：`60d617acb725342a7a851b5dd51cae9ad65de552`。修后在合入主机随后同步的 `80dbfa11c0807864a3c9f06fdf69a302fb53c2c1` 后重新构建、采集（业务实现提交为 `d387963444ec0f3ee74cae409be3a0b1e119efeb`）。后续补充测量文档及修复采集脚本注销失败处理，业务构建与采集指标不变。基线新增的风险标签详情也已保留。
 - Node 24.22.1、Chromium headless shell 157.0.8103.15，1440×900；Vite 正式构建、真实 Workbench HTTP 服务、独立临时 SQLite。210 张卡、577 个 Assignment/工作项/已结束 Run、4200 条事件及时间线，中文正文由固定夹具生成。未访问生产 Workbench 或生产数据库，不启动 Dispatcher。
 - 三个独立冷缓存导航，每个紧接一次暖缓存导航；同一轮服务端进程不重启，因此冷缓存指浏览器 HTTP 缓存。字体和静态文件允许缓存，API 照常请求。表中时间为三次中位数。登录在计时前完成。
 - “首屏可交互”口径：从导航开始到含卡片数据的看板、搜索输入框出现，等待两个动画帧并成功聚焦搜索框。它是本卡可复现的页面就绪指标，不等同于 Lighthouse TTI。采集持续到该指标、字体加载和 SSE open 均完成；逐项记录 Performance Resource Timing 的开始/耗时、编码体积、解码体积、transferSize，以及原生 EventSource 构造至 open 时间。SSE 为长连接，不计算无限响应体大小。
@@ -76,7 +76,7 @@ node /tmp/c203/load-performance.mjs --url "$WORKBENCH_ORIGIN" --project cardigan
 unset WORKBENCH_PASSWORD
 ```
 
-修后重复上述步骤，将输出路径换为 `/tmp/load-after.json`。可设 `CHROMIUM_PATH`；默认执行 PATH 内的 `chromium`。报告为一张冷/暖汇总表，含每项资源体积/耗时、每次导航请求数、总传输量；JSON 保存逐次原始值，不保存响应正文、密码、Cookie 或主机名。结束后注销采集会话并删除临时浏览器 profile。`--samples` 默认 3，支持 1–10；远程不要传模拟限速参数。第一次使用新浏览器无法连接服务时，先确认远程设备的 Tailscale 访问和证书环境。
+修后重复上述步骤，将输出路径换为 `/tmp/load-after.json`。可设 `CHROMIUM_PATH`；默认执行 PATH 内的 `chromium`。报告为一张冷/暖汇总表，含每项资源体积/耗时、每次导航请求数、总传输量；JSON 保存逐次原始值，不保存响应正文、密码、Cookie 或主机名。结束时尝试注销采集会话并删除临时浏览器 profile；只有收尾成功才正常退出。注销返回非 2xx 或网络失败时，脚本以非零退出码明确报告 `session cleanup failed`，不输出响应正文、密码、Cookie 或原始网络异常。此时会话可能仍有效，即使已生成报告也不表示收尾成功，请把该错误一并回贴。浏览器关闭失败也会继续尝试注销。`--samples` 默认 3，支持 1–10；远程不要传模拟限速参数。第一次使用新浏览器无法连接服务时，先确认远程设备的 Tailscale 访问和证书环境。
 
 **待人确认的目标**：固定 150 ms / 1600 kbps 模拟下冷加载 ≤11 秒、暖加载 ≤5 秒，当前分别 10.54 秒/4.53 秒；真实远程同设备同网络的冷/暖中位数均较修前改善至少 30%，真实远程实测值待补。依 C-203#3，远程补采为不阻塞合并的人工待办，不能用本机模拟充当远程验收结果。
 
@@ -84,9 +84,10 @@ unset WORKBENCH_PASSWORD
 
 - `pnpm exec tsc -b apps/server apps/web apps/cli`：通过；CLI 仅为现有交叉验收夹具的构建前置。
 - `pnpm --filter @cardigan/web build`：通过，无超过 500 KB 分块警告。
-- `pnpm exec vitest run apps/web/src apps/server/src/web --maxWorkers=2`：合入最新基线后 90 文件通过，1037 项通过、1 项原有 todo。含完整 Web 单元/组件集、服务端 Web 读写/鉴权/缓存回归；未跑全仓或主机端到端检查。
+- `pnpm exec vitest run apps/web/src apps/server/src/web apps/server/src/m5-web-api.acceptance.test.ts --maxWorkers=2`：R-3140 修复后 92 文件通过，1049 项通过、1 项原有 todo。含完整 Web 单元/组件集、服务端 Web 读写/鉴权/缓存回归与现有读接口验收；未跑全仓或主机端到端检查。
 - `pnpm --filter @cardigan/web test:layout`：70 个真实浏览器布局场景通过，包括宽窄屏、亮暗主题、分页与内部滚动。
 - 初次测试因缺少 CLI 构建产物及抽屉测试假设同步加载而失败；补齐构建并让断言等待真实内容后，上述整组通过。未改断言覆盖的用户行为。
 - 采集脚本的 `--url` 远程参数路径另在自己的独立夹具验证，成功登录、生成冷暖表格/JSON、注销；不作为真实远程测量证据。
+- V-664 修复：新增六项脚本回归，覆盖注销 204 成功、401/500/503 失败、网络异常不泄露凭据、浏览器关闭失败仍尝试注销。真实 Chromium + 独立夹具注入注销 503 时，脚本以退出码 1 报 `session cleanup failed (HTTP 503)`；会话仍有效的事实被明确报告，探针最后经真实注销接口撤销了夹具会话。正常 HTTP 路径也实测退出码 0，事后 `/api/session` 为 `authenticated=false`。未访问生产 Workbench；沿用 H-35 供人补采。
 
 剩余限制：真实远程补采尚未完成；字体仍是较大的冷加载资源；列表仍返回所有摘要，正文较少的真实项目收益可能低于此夹具。暂不扩大到字体策略、分页、压缩、网络配置或 SSE 刷新规则。

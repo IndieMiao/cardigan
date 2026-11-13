@@ -2,6 +2,26 @@ import { writeFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import { chromium } from "./chromium.mjs";
 
+async function logoutSession(origin, cookie) {
+  let response;
+  try {
+    response = await fetch(`${origin}/api/logout`, {
+      method: "POST",
+      headers: { origin, cookie, "content-type": "application/json" },
+      body: "{}",
+    });
+  } catch {
+    // Do not print transport errors: they may contain request credentials.
+    throw new Error(
+      "Workbench session cleanup failed (network error); the session may still be active.",
+    );
+  }
+  if (!response.ok)
+    throw new Error(
+      `Workbench session cleanup failed (HTTP ${response.status}); the session may still be active.`,
+    );
+}
+
 const { values } = parseArgs({
   options: {
     local: { type: "boolean" },
@@ -187,16 +207,13 @@ try {
   if (values.json)
     await writeFile(values.json, `${JSON.stringify(result, null, 2)}\n`);
 } finally {
-  await browser?.close();
-  if (remoteCookie)
-    await fetch(`${origin}/api/logout`, {
-      method: "POST",
-      headers: {
-        origin,
-        cookie: remoteCookie,
-        "content-type": "application/json",
-      },
-      body: "{}",
-    });
-  await fixture?.close();
+  try {
+    await browser?.close();
+  } finally {
+    try {
+      if (remoteCookie) await logoutSession(origin, remoteCookie);
+    } finally {
+      await fixture?.close();
+    }
+  }
 }
