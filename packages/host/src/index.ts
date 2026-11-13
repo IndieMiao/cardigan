@@ -41,7 +41,10 @@ export {
 } from "./deployment-config.js";
 export { readDeploymentDiagnostics } from "./deployment-diagnostics.js";
 export { NodeDeploymentDriver } from "./deployment-node.js";
-export { upgradeDeployedRoles } from "./deployment-roles.js";
+export {
+  deploymentRolePolicyHash,
+  upgradeDeployedRoles,
+} from "./deployment-roles.js";
 export {
   HostLaunchError,
   LAUNCH_STEPS,

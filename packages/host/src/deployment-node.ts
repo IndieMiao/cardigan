@@ -551,6 +551,7 @@ export class NodeDeploymentDriver implements DeploymentDriver {
         ...this.options.env,
         CARDIGAN_DATA_DIR: this.options.dataDir,
         CARDIGAN_DEPLOYMENT_CHANGED_ROLES: JSON.stringify(changed),
+        CARDIGAN_DEPLOYMENT_PREVIOUS_ROLES: JSON.stringify(before),
       },
     );
     if (result.code !== 0) throw new Error("部署后角色同步未完成，请主机检查");

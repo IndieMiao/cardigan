@@ -14,10 +14,12 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
 import { gitSafetyArguments } from "@cardigan/git-transport";
+import { defaultRoleDefinition } from "@cardigan/roles";
 import { Store } from "@cardigan/store";
 import { expect, test } from "vitest";
 import { readDeploymentDiagnostics } from "./deployment-diagnostics.js";
 import { NodeDeploymentDriver } from "./deployment-node.js";
+import { deploymentRolePolicyHash } from "./deployment-roles.js";
 import { acquireMergeCheckCapacity } from "./merge-check-capacity.js";
 import { executionOwner } from "./process-identity.js";
 
@@ -158,6 +160,45 @@ test.runIf(process.platform === "linux")(
         await readFile(join(dataDir, "self-deploy/state.json"), "utf8"),
       );
       expect(adopted.process).toEqual(state.process);
+      // The real post-deployment subprocess must receive the old default's hash,
+      // never a hash calculated from the project's hand-edited role.
+      const nextRelease = join(root, "next-release");
+      const oldPolicy = {
+        ...defaultRoleDefinition("host_ops", {
+          harness: "codex",
+          launch_profile_ref: "fixture",
+        }),
+        instructions: "Previous default policy",
+      };
+      const newPolicy = { ...oldPolicy, instructions: "New default policy" };
+      for (const [folder, policy] of [
+        [release, oldPolicy],
+        [nextRelease, newPolicy],
+      ] as const) {
+        await mkdir(join(folder, "packages/roles/dist"), { recursive: true });
+        await writeFile(
+          join(folder, "packages/roles/dist/index.js"),
+          `exports.DEFAULT_ROLE_KINDS = { host_ops: 'standing' };
+           exports.defaultRoleDefinition = () => (${JSON.stringify(policy)});`,
+        );
+      }
+      await mkdir(join(nextRelease, "apps/cli/dist"), { recursive: true });
+      await writeFile(
+        join(nextRelease, "apps/cli/dist/bin.js"),
+        `
+        require('node:fs').writeFileSync(require('node:path').join(process.env.CARDIGAN_DATA_DIR, 'role-sync.json'),
+          JSON.stringify({ changed: JSON.parse(process.env.CARDIGAN_DEPLOYMENT_CHANGED_ROLES),
+            previous: JSON.parse(process.env.CARDIGAN_DEPLOYMENT_PREVIOUS_ROLES) }));`,
+      );
+      await driver.promote({ sha: "b".repeat(40), release: nextRelease });
+      await driver.refreshRoles();
+      expect(
+        JSON.parse(await readFile(join(dataDir, "role-sync.json"), "utf8")),
+      ).toEqual({
+        changed: ["host_ops"],
+        previous: { host_ops: deploymentRolePolicyHash(oldPolicy) },
+      });
+      await driver.promote({ sha, release });
       const failedBuild = await driver.build(sha);
       expect(failedBuild).toEqual({
         log_tail: "TypeScript TS6305\nbuild: exit 1",

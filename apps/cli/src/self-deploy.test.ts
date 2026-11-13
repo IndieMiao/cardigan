@@ -2,9 +2,9 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Assignment } from "@cardigan/domain";
-import { RunCapacityDeferred } from "@cardigan/host";
+import { deploymentRolePolicyHash, RunCapacityDeferred } from "@cardigan/host";
 import { defaultRoleDefinition } from "@cardigan/roles";
-import { Store, writeRole } from "@cardigan/store";
+import { getRoleVersion, Store, writeRole } from "@cardigan/store";
 import { expect, test, vi } from "vitest";
 import { startAssignmentById } from "./assignment.js";
 import type { CliIo } from "./io.js";
@@ -24,6 +24,15 @@ test("post-deploy starts the replacement Ops as host automation only when it has
       CARDIGAN_DATA_DIR: dataDir,
       CARDIGAN_CONFIG_DIR: root,
       CARDIGAN_DEPLOYMENT_CHANGED_ROLES: '["pm"]',
+      CARDIGAN_DEPLOYMENT_PREVIOUS_ROLES: JSON.stringify({
+        pm: deploymentRolePolicyHash({
+          ...defaultRoleDefinition("pm", {
+            harness: "codex",
+            launch_profile_ref: "fixture",
+          }),
+          instructions: "Previous instructions",
+        }),
+      }),
     },
     cwd: root,
     platform: "linux",
@@ -80,6 +89,23 @@ test("post-deploy starts the replacement Ops as host automation only when it has
         created_at: "2026-01-01T00:00:00.000Z",
       } as Assignment);
     });
+    for (const previous of [
+      undefined,
+      "not-json-private-value",
+      "[]",
+      JSON.stringify({ pm: "short-hash" }),
+    ]) {
+      await expect(
+        runSelfDeployCommand(["roles"], {
+          ...io,
+          env: { ...io.env, CARDIGAN_DEPLOYMENT_PREVIOUS_ROLES: previous },
+        }),
+      ).rejects.toThrow("上一默认版本指纹");
+      expect(
+        store.uow.read((tx) => getRoleVersion(tx, "cardigan", "pm")?.version),
+      ).toBe(1);
+      expect(start).not.toHaveBeenCalled();
+    }
     expect(await runSelfDeployCommand(["roles"], io)).toBe(0);
     expect(start).toHaveBeenCalledOnce();
     expect(start.mock.calls[0]?.[0]).toMatchObject({

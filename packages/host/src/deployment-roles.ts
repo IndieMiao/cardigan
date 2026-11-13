@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
 import {
   type ProjectId,
+  type RoleDefinition,
   requestDeploymentAction,
+  roleUpgradeDiff,
   rotatePmAfterDeployment,
   upgradeRoleAfterDeployment,
 } from "@cardigan/domain";
@@ -14,11 +16,24 @@ import {
 } from "@cardigan/store";
 import { persistPmRotation } from "./pm-rotation.js";
 
+/** Only fields replaced by --from-default participate; project launch settings stay local. */
+export function deploymentRolePolicyHash(role: RoleDefinition): string {
+  const policy = {
+    instructions: role.instructions ?? role.core_prompt ?? "",
+    allowed_tools: [...role.allowed_tools].sort(),
+    capabilities: [...role.capabilities].sort(),
+    kind: role.kind,
+    worktree: role.worktree,
+  };
+  return createHash("sha256").update(JSON.stringify(policy)).digest("hex");
+}
+
 /** Run from the deployed build, so defaults come from that exact release. */
 export function upgradeDeployedRoles(
   store: Store,
   project: ProjectId,
-  changedRoles?: readonly string[],
+  changedRoles: readonly string[],
+  previousDefaults: Readonly<Record<string, string>>,
 ) {
   return store.uow.run((tx) => {
     const actor = { kind: "system" as const, project_id: project };
@@ -42,15 +57,33 @@ export function upgradeDeployedRoles(
     ];
     let pmChanged = false;
     for (const id of ids) {
-      if (!isDefaultRoleId(id) || (changedRoles && !changedRoles.includes(id)))
-        continue;
+      if (!isDefaultRoleId(id) || !changedRoles.includes(id)) continue;
       const roles = listRoleVersions(tx, project);
       const latest = roles.filter((r) => r.role_id === id).at(-1);
-      if (!latest) continue;
+      if (!latest || latest.status === "inactive") continue;
       const source = defaultRoleDefinition(id, {
         harness: latest.harness,
         launch_profile_ref: latest.launch_profile_ref,
       });
+      const currentHash = deploymentRolePolicyHash(latest);
+      // No write is necessary when a formerly manual rule has reached the default pack.
+      if (currentHash === deploymentRolePolicyHash(source)) continue;
+      const baseline = Object.hasOwn(previousDefaults, id)
+        ? previousDefaults[id]
+        : undefined;
+      if (!baseline || currentHash !== baseline) {
+        if (source.instructions === undefined)
+          throw new Error("Default role instructions missing");
+        const diff = roleUpgradeDiff(latest, {
+          ...source,
+          instructions: source.instructions,
+        });
+        pending(
+          `deployment-role-manual:${id}:${latest.version}:${deploymentRolePolicyHash(source)}`,
+          `角色 ${id} 未自动升级：${baseline ? "当前版本有手工改动，与上一次已部署默认版本不一致" : "缺少上一次已部署默认版本，无法确认当前版本是否有手工改动"}。已保留当前版本 v${latest.version}；请人核对 role upgrade ${id} --from-default --dry-run 的差异，确认如何保留项目规则。\n${JSON.stringify(diff)}`,
+        );
+        continue;
+      }
       const result = unwrap(
         upgradeRoleAfterDeployment(
           { project_id: project, roles },

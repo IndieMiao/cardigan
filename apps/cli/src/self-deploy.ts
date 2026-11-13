@@ -36,18 +36,39 @@ export async function runSelfDeployCommand(
     if (!store.getProject("cardigan"))
       throw new CliError("自动部署只服务自举项目 cardigan", EXIT.usage);
     if (args[0] === "roles") {
-      const changed: unknown = JSON.parse(
-        io.env.CARDIGAN_DEPLOYMENT_CHANGED_ROLES ?? "null",
-      );
-      if (
-        !Array.isArray(changed) ||
-        !changed.every((id) => typeof id === "string")
-      )
-        throw new CliError(
-          "角色同步必须由部署监督器提供已核对的角色包差异",
+      const invalid = () =>
+        new CliError(
+          "角色同步必须由部署监督器提供已核对的角色包差异及上一默认版本指纹",
           EXIT.usage,
         );
-      const assignment = upgradeDeployedRoles(store, "cardigan", changed);
+      let changed: unknown, previous: unknown;
+      try {
+        changed = JSON.parse(
+          io.env.CARDIGAN_DEPLOYMENT_CHANGED_ROLES ?? "null",
+        );
+        previous = JSON.parse(
+          io.env.CARDIGAN_DEPLOYMENT_PREVIOUS_ROLES ?? "null",
+        );
+      } catch {
+        throw invalid();
+      }
+      if (
+        !Array.isArray(changed) ||
+        !changed.every((id) => typeof id === "string") ||
+        !previous ||
+        typeof previous !== "object" ||
+        Array.isArray(previous) ||
+        !Object.values(previous).every(
+          (hash) => typeof hash === "string" && /^[a-f0-9]{64}$/u.test(hash),
+        )
+      )
+        throw invalid();
+      const assignment = upgradeDeployedRoles(
+        store,
+        "cardigan",
+        changed,
+        previous as Record<string, string>,
+      );
       if (
         assignment &&
         store.uow.read(
