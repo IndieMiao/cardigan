@@ -451,8 +451,12 @@ export function MergeConfirmation({
         {decisionTitle(q)}
       </h3>
       {q.status === "snoozed" && q.snooze && (
-        <p role="status" title={new Date(q.snooze.until).toLocaleString()}>
-          已暂缓：{q.snooze.reason}（到{" "}
+        <p
+          role="status"
+          aria-label="已暂缓"
+          title={new Date(q.snooze.until).toLocaleString()}
+        >
+          <StatusTag status="snoozed" /> 已暂缓：{q.snooze.reason}（到{" "}
           {new Date(q.snooze.until).toLocaleTimeString("zh-CN", {
             hour: "2-digit",
             minute: "2-digit",
