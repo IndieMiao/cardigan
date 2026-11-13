@@ -24,6 +24,7 @@ import {
   loadRunCapacityConfig,
   messageOf,
   type PreparedWorktree,
+  resolveMcpUrl,
   reviewTargetSha,
   scrubRunCredentials,
   stopRunRuntime,
@@ -752,8 +753,6 @@ const USAGE = [
   "  按 Ctrl+\\ 分离退出；--interactive 下你的输入会直接发给正在工作的 Agent。",
 ].join("\n");
 
-const DEFAULT_MCP_URL = "http://127.0.0.1:3004/mcp";
-
 function parseArgs(args: readonly string[]) {
   const [sub, ...rest] = args;
   if (
@@ -961,6 +960,15 @@ export interface StartCommandOptions {
   readonly execution?: ExecutionConfig;
 }
 
+/** Follows the server's CARDIGAN_MCP_PORT unless CARDIGAN_MCP_URL is set (C-211). */
+function cliMcpUrl(env: CliIo["env"]): string {
+  try {
+    return resolveMcpUrl(env);
+  } catch (error) {
+    throw new CliError(messageOf(error), EXIT.usage);
+  }
+}
+
 /** Load the host config, wire the Git service and start one Assignment. */
 export async function startAssignmentCommand(
   options: StartCommandOptions,
@@ -980,7 +988,7 @@ export async function startAssignmentCommand(
       config: await loadConfig(paths),
       secrets: await loadSecrets(paths, io),
     },
-    mcpUrl: options.mcpUrl ?? io.env.CARDIGAN_MCP_URL ?? DEFAULT_MCP_URL,
+    mcpUrl: options.mcpUrl ?? cliMcpUrl(io.env),
     runtime,
     dataDir,
     worktree: worktreeProvider(execution, runtime),

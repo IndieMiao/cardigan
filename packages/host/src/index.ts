@@ -50,6 +50,14 @@ export {
   VERIFIER_LAUNCH_REVISION,
 } from "./launch.js";
 export {
+  DEFAULT_MCP_HOST,
+  DEFAULT_MCP_PORT,
+  explicitMcpUrl,
+  type McpUrlEnv,
+  mcpUrlFor,
+  resolveMcpUrl,
+} from "./mcp-url.js";
+export {
   acquireMergeCheckCapacity,
   type ExecutionOwner,
   executionOwner,

@@ -13,6 +13,7 @@ import {
   type SignalHost,
   systemShutdownTimer,
 } from "./lifecycle.js";
+import { listenerMcpUrl } from "./mcp-url.js";
 import { type CardiganServer, startCardiganServer } from "./server.js";
 import { resolveWebConfig } from "./web/config.js";
 
@@ -112,10 +113,13 @@ export async function runServer(
   // One Store for the endpoint, the router and the dispatcher: they share the
   // same write lock and see each other's commits immediately.
   const store = Store.open({ dataDir: config.dataDir });
-  let server: CardiganServer;
+  let server: CardiganServer | undefined;
   try {
     const host = await createHostWiring({
       env,
+      // Agents reach the MCP endpoint this server actually listens on, unless
+      // the operator set CARDIGAN_MCP_URL explicitly (C-211).
+      url: listenerMcpUrl(env, config, () => server?.url),
       store,
       dataDir: config.dataDir,
       ...(config.execution === undefined
