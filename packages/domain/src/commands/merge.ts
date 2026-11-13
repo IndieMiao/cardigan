@@ -26,6 +26,7 @@ import {
   riskTagAutoMergeAllowed,
 } from "./delegation.js";
 import { reopenMerge } from "./merge-rework.js";
+import { screenshotCheckBlocker } from "./screenshot-check.js";
 
 const newest = <T extends { readonly id: string }>(values: readonly T[]) =>
   [...values].sort(
@@ -218,6 +219,16 @@ function planFor(state: CommandState, card_id: CardId, confirmed: boolean) {
           riskTagAutoMergeAllowed(state, q),
         "illegal_transition",
         "风险标签卡已不满足独立复核条件，旧代理确认不能用于合并，须由人重新确认",
+      );
+      // Q-336 (a): re-checked at publication, so a PM or timeout answer
+      // cannot outlive a screenshot projection reset or redelivery.
+      const screenshot = answeredByHuman(q)
+        ? undefined
+        : screenshotCheckBlocker(state, card);
+      ensure(
+        !screenshot,
+        "illegal_transition",
+        `${screenshot}，旧代理确认不能用于合并`,
       );
     }
     const decision = mergeBlockingDecisions(

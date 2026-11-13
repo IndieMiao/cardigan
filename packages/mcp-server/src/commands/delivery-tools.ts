@@ -73,6 +73,12 @@ const reviewInput = z.object({
   ),
   recheck_required: z.boolean().optional(),
   attachments,
+  screenshot_check: z
+    .enum(["passed", "failed"])
+    .optional()
+    .describe(
+      "仅独立复核员：界面卡截图核对（亮色、暗色、390px）的结论；项目开启截图核对计入代确认时投影为合并前核对项“截图核对”",
+    ),
 });
 
 /**
