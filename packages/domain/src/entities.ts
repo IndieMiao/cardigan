@@ -167,6 +167,7 @@ export interface PreMergeCheck {
 }
 export interface CardView extends Card {
   readonly merge_check?: MergeCheckView;
+  readonly merge_check_blockers?: readonly MergeCheckBlocker[];
   /** Derived by `deriveWaitingOn` in `card-derived.ts`. */
   readonly waiting_on: readonly WaitingOnItem[];
   /** Derived by `deriveNextOwners` in `card-derived.ts`. */
@@ -180,6 +181,13 @@ export interface CardView extends Card {
     readonly verdict: ReviewVerdict | null;
   }[];
   readonly why: string;
+}
+/** One continuous, host-observed prerequisite that prevents preparation. */
+export interface MergeCheckBlocker {
+  readonly key: string;
+  readonly label: string;
+  readonly detail: string;
+  readonly started_at: string;
 }
 export interface MergeCheckView {
   readonly attempt_id: string;

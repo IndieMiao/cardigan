@@ -14,6 +14,61 @@ import { CardDetailPage } from "./CardDetailPage.js";
 
 afterEach(cleanup);
 
+test("C-178: merge blockers show the reason and local start time even without a confirmation", async () => {
+  const base = cardDetail();
+  const started_at = "2026-01-01T08:25:00.000Z";
+  const blocker = {
+    key: "H-25",
+    label: "H-25",
+    detail: "轮换合并凭据",
+    started_at,
+  };
+  const detail = {
+    ...base,
+    card: {
+      ...base.card,
+      status: "awaiting_merge",
+      merge_check_blockers: [blocker],
+    },
+    merge_confirmations: [],
+    timeline: [
+      {
+        id: "C-1#100",
+        card_id: "C-1",
+        event_seq: 100,
+        type: "system" as const,
+        author: "system",
+        body: "UTC fallback",
+        refs: [],
+        mentions: [],
+        retracted: false,
+        created_at: started_at,
+        event_type: "merge_check_blocked",
+        merge_check_blocker: blocker,
+      },
+    ],
+  };
+  render(
+    <CardDetailPage
+      client={fakeClient({ card: async () => detail })}
+      projectId="p-1"
+      cardId="C-1"
+    />,
+  );
+  const region = within(
+    await screen.findByRole("region", { name: "合并处理" }),
+  );
+  const since = new Date(started_at).toLocaleTimeString("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  });
+  const message = `合并检查未开始：被 H-25 挡住（自 ${since} 起）：轮换合并凭据`;
+  expect(region.getByText(message)).toBeTruthy();
+  expect(screen.getAllByText(message)).toHaveLength(2);
+  expect(screen.queryByText("UTC fallback")).toBeNull();
+});
+
 function fixture(confirmed = false): CardDetail {
   const detail = cardDetail();
   const q: NeedsDecision = {

@@ -11,6 +11,7 @@ import {
   type EffectivePreMergeCheck,
   effectivePreMergeChecks,
   latestMergeCheck,
+  mergeCheckBlockers,
   mergePlan,
   parseId,
   prepareMergePlan,
@@ -302,6 +303,16 @@ function describe(
       `  delivery: ${delivery.id} ${delivery.work_item_id} ${delivery.subject.kind}=${delivery.subject.value}`,
     );
   lines.push(...preMergeLines(preMergeChecksOf(state, card)));
+  for (const blocker of mergeCheckBlockers(state, card.id)) {
+    const since = new Date(blocker.started_at).toLocaleTimeString("zh-CN", {
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    });
+    lines.push(
+      `  合并检查未开始：被 ${blocker.label} 挡住（自 ${since} 起）：${blocker.detail}`,
+    );
+  }
   lines.push(
     plan.ok
       ? `  plan: ready (completion ${plan.value.completion_id}, ${plan.value.deliveries.length} deliveries)`
