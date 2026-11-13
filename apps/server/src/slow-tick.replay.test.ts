@@ -121,6 +121,7 @@ test.skipIf(process.env.CARDIGAN_TICK_REPLAY !== "1")(
     // its callback runs, so it cannot see time queued behind a blocked loop.
     const ticks: Array<[number, number]> = [];
     const probe: Record<string, Array<[number, number]>> = { web: [], mcp: [] };
+    const errors: Record<string, number> = {};
     // An open-loop client: each probe is due on a fixed cadence and its
     // latency counts from the due time, so time spent queued behind a
     // blocked event loop is included (an outside browser or Agent would wait
@@ -130,8 +131,13 @@ test.skipIf(process.env.CARDIGAN_TICK_REPLAY !== "1")(
       due: number,
       request: () => Promise<unknown>,
     ) => {
-      await request();
-      probe[channel]?.push([due, performance.now()]);
+      try {
+        await request();
+        probe[channel]?.push([due, performance.now()]);
+      } catch {
+        // A keep-alive socket can be reset while the loop is blocked.
+        errors[channel] = (errors[channel] ?? 0) + 1;
+      }
     };
     let probing = true;
     const probes = (async () => {
@@ -182,12 +188,28 @@ test.skipIf(process.env.CARDIGAN_TICK_REPLAY !== "1")(
       startRun: async () => {},
     });
     await idle();
+    // Optional CPU profile of the ticks (REPLAY_PROFILE=<file.cpuprofile>).
+    const { Session } = await import("node:inspector/promises");
+    const inspector = process.env.REPLAY_PROFILE ? new Session() : undefined;
+    if (inspector) {
+      inspector.connect();
+      await inspector.post("Profiler.enable");
+      await inspector.post("Profiler.start");
+    }
     for (let i = 0; i < TICKS; i++) {
       const started = performance.now();
       await profiler.tick("dispatcher", () => dispatcher.tick());
       ticks.push([started, performance.now()]);
       // The production dispatcher loop sleeps its interval between ticks.
       await new Promise((r) => setTimeout(r, 1_000));
+    }
+    if (inspector) {
+      const { profile } = await inspector.post("Profiler.stop");
+      writeFileSync(
+        String(process.env.REPLAY_PROFILE),
+        JSON.stringify(profile),
+      );
+      inspector.disconnect();
     }
     await idle();
     probing = false;
@@ -224,7 +246,7 @@ test.skipIf(process.env.CARDIGAN_TICK_REPLAY !== "1")(
         ];
       }),
     );
-    const report = { shape, latency, lines };
+    const report = { shape, latency, errors, lines };
     console.log(JSON.stringify(report, null, 1));
     if (process.env.REPLAY_OUT)
       writeFileSync(process.env.REPLAY_OUT, JSON.stringify(report, null, 1));
