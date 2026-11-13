@@ -29,6 +29,14 @@ import {
 } from "./review-limit-resolution.js";
 import { resolveCardTemplate, validateCardTemplate } from "./templates.js";
 
+const INDEPENDENT_REVIEW_MAX_ROUNDS = 2;
+
+function initialReviewLimit(roleId: string): number {
+  return roleId === "independent_reviewer"
+    ? INDEPENDENT_REVIEW_MAX_ROUNDS
+    : DEFAULT_MAX_REVIEW_ROUNDS;
+}
+
 export type CreateCardParams = Pick<
   Card,
   "title" | "goal" | "source" | "repo" | "base_branch"
@@ -154,7 +162,7 @@ export function createCard(
         d.put("work_items", {
           ...common,
           kind: "verify",
-          max_review_rounds: DEFAULT_MAX_REVIEW_ROUNDS,
+          max_review_rounds: initialReviewLimit(w.role_id),
           ...(w.target_work_item_key !== undefined
             ? {
                 target_work_item_id: ids.get(
@@ -361,11 +369,17 @@ export function createWorkItem(
         "Verification target must be a producing work item on this card",
       );
     }
-    const max = p.max_review_rounds ?? DEFAULT_MAX_REVIEW_ROUNDS;
+    const independentReview = p.role_id === "independent_reviewer";
+    const max = p.max_review_rounds ?? initialReviewLimit(p.role_id);
     ensure(
       Number.isSafeInteger(max) && max > 0,
       "validation_failed",
       "Invalid review limit",
+    );
+    ensure(
+      !independentReview || max <= INDEPENDENT_REVIEW_MAX_ROUNDS,
+      "validation_failed",
+      "独立复核的初始审核上限不能超过 2 轮",
     );
     if (max > DEFAULT_MAX_REVIEW_ROUNDS)
       ensure(
@@ -487,6 +501,13 @@ export function updateWorkItem(
         p.max_review_rounds >= item.max_review_rounds,
         "validation_failed",
         "Review limits may only be relaxed",
+      );
+      ensure(
+        item.role_id !== "independent_reviewer" ||
+          p.max_review_rounds <= INDEPENDENT_REVIEW_MAX_ROUNDS ||
+          actor.kind === "human",
+        "forbidden_tool",
+        "独立复核超过 2 轮只能由人确认放宽",
       );
     }
     let result: WorkItem = {

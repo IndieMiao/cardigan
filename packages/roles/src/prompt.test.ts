@@ -14,17 +14,20 @@ import {
 } from "./role-pack.js";
 import { parseLaunchConfig } from "./schema.js";
 
-test.each(["coder", "reviewer", "pm", "design_director"] as const)(
-  "%s defaults grant valid attachment read permission",
-  (id) => {
-    const role = defaultRoleDefinition(id, {
-      harness: "codex",
-      launch_profile_ref: "fixture",
-    });
-    expect(role.allowed_tools).toContain("read_attachment");
-    expect(validateRole(role).ok).toBe(true);
-  },
-);
+test.each([
+  "coder",
+  "reviewer",
+  "pm",
+  "design_director",
+  "independent_reviewer",
+] as const)("%s defaults grant valid attachment read permission", (id) => {
+  const role = defaultRoleDefinition(id, {
+    harness: "codex",
+    launch_profile_ref: "fixture",
+  });
+  expect(role.allowed_tools).toContain("read_attachment");
+  expect(validateRole(role).ok).toBe(true);
+});
 
 test.each([
   "reviewer",
@@ -35,6 +38,7 @@ test.each([
   "host_ops",
   "ui_ux_designer",
   "design_director",
+  "independent_reviewer",
 ] as const)(
   "%s default tools include withdrawal exactly when they include review submission",
   (id) => {
@@ -58,6 +62,7 @@ test.each([
   "host_ops",
   "ui_ux_designer",
   "design_director",
+  "independent_reviewer",
 ] as const)(
   "converts the default %s format without carrying system sections",
   (id) => {
