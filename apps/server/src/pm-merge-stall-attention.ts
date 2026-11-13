@@ -1,5 +1,6 @@
 import {
   type CommandState,
+  eventById,
   type JsonValue,
   PM_MERGE_STALL_KIND,
   type PmMergeStallOptions,
@@ -32,7 +33,7 @@ export function escalatePmMergeStalls(
     `${payloadString(payload, "decision_id")}@${payloadString(payload, "since")}`;
   for (const n of store.listNotifications({ project_id: state.project_id })) {
     if (["acked", "resolved"].includes(n.status)) continue;
-    const event = state.events.find((e) => e.id === n.event_id);
+    const event = eventById(state.events, n.event_id);
     if (
       event?.type !== PM_MERGE_STALL_KIND ||
       current.has(keyOf(event.payload))

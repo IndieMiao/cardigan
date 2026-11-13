@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "vitest";
 import {
   type ProfileLine,
   profileSpan,
+  profileSpanSync,
   profileTick,
   setTickProfiler,
   TickProfiler,
@@ -137,4 +138,37 @@ test("requests are bucketed by overlap with a tick, and report resets the window
   lines.length = 0;
   profiler.report();
   expect(lines.filter((l) => l.event === "request_latency")).toEqual([]);
+});
+
+test("C-221: synchronous spans return inline (off and on), accumulate by name and survive throws", async () => {
+  // Off: a plain call, no promise involved.
+  expect(profileSpanSync("route.step", () => 3)).toBe(3);
+  const { lines } = install();
+  const order: string[] = [];
+  await profileTick("dispatcher", async () => {
+    const value = profileSpanSync("route.step", () => {
+      order.push("first");
+      return 1;
+    });
+    // Returned synchronously: no microtask ran between the step and here.
+    queueMicrotask(() => order.push("microtask"));
+    order.push(`value ${value}`);
+    profileSpanSync("route.step", () => order.push("second"));
+    expect(() =>
+      profileSpanSync("route.fail", () => {
+        throw new Error("boom");
+      }),
+    ).toThrow("boom");
+    order.push("sync end");
+  });
+  expect(order).toEqual([
+    "first",
+    "value 1",
+    "second",
+    "sync end",
+    "microtask",
+  ]);
+  const spans = lines[0]?.spans as Record<string, number>;
+  expect(Object.keys(spans).sort()).toEqual(["route.fail", "route.step"]);
+  for (const v of Object.values(spans)) expect(typeof v).toBe("number");
 });
