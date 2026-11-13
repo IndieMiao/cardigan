@@ -729,12 +729,17 @@ export class Dispatcher {
           );
         return;
       }
-      const all = store.listNotifications({ project_id: project }),
-        requested = new Set(notes.map((n) => n.id));
-      const ready = all.filter(
+      const requested = new Set(notes.map((n) => n.id));
+      // C-216: fetch only the requested pending rows instead of decoding the
+      // project's whole notification history on every claim.
+      const ready = store
+        .listNotifications({
+          project_id: project,
+          status: "pending",
+          ids: [...requested],
+        })
+        .filter(
         (n) =>
-          requested.has(n.id) &&
-          n.status === "pending" &&
           this.owner(n, state) === a.id &&
           !covered(n, state, a.id) &&
           !decisionFollowupBlocked(state, n.event_id, a.id),
