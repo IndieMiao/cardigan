@@ -86,6 +86,7 @@ test("local defaults and agent paths/permission policy keep private data separat
     runDir: join(root, "agent", "runs", "project", "A-1"),
     repositoriesRoot: join(root, "agent", "repos"),
     worktreesRoot: join(root, "agent", "worktrees"),
+    buildsRoot: join(root, "agent", "builds"),
   });
   expect(executionPaths(execution, "other", "A-1").runDir).not.toBe(
     executionPaths(execution, "project", "A-1").runDir,

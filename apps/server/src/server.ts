@@ -4,6 +4,7 @@ import {
   loadMergeGateConfig,
   loadRunCapacityConfig,
   scrubRunCredentials,
+  sessionFingerprint,
 } from "@cardigan/host";
 import type { McpBackend } from "@cardigan/mcp-server";
 import {
@@ -322,21 +323,26 @@ export async function startCardiganServer(
         // P2a-10 A: the fingerprint comes from the endpoint's own tool set, so
         // it always matches what a new session would list.
         toolCatalog: (assignment, project) => {
+          const role = store.uow.read((tx) =>
+            getRoleVersion(
+              tx,
+              project,
+              assignment.role_id,
+              assignment.role_version,
+            ),
+          );
           const allowed =
             tokensForAssignment(store.database, project, assignment.id).at(-1)
-              ?.allowed_tools ??
-            store.uow.read(
-              (tx) =>
-                getRoleVersion(
-                  tx,
-                  project,
-                  assignment.role_id,
-                  assignment.role_version,
-                )?.allowed_tools,
-            );
-          return allowed === undefined
+              ?.allowed_tools ?? role?.allowed_tools;
+          // P2a-3: plus the verifier launch-environment revision, so a session
+          // launched without the build checkout environment is replaced once.
+          return allowed === undefined || role === undefined
             ? undefined
-            : served.toolCatalog(allowed, assignment);
+            : sessionFingerprint(
+                served.toolCatalog(allowed, assignment),
+                role,
+                assignment,
+              );
         },
         ...options.dispatcher,
         ...(hostOps ? { hostOpsTick: () => hostOps.tick() } : {}),

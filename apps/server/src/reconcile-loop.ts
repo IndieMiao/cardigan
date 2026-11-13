@@ -1,6 +1,7 @@
 import type { Clock, ProjectId } from "@cardigan/domain";
 import type { ReconcileChecks, ReconcileFinding } from "@cardigan/git-service";
 import { retireReconcileNotifications, type Store } from "@cardigan/store";
+import { buildCheckoutFacts } from "./build-checkouts.js";
 import type { ReconcileGit } from "./git.js";
 import { startTimerLoop, type TimerLoop } from "./loop.js";
 import { systemClock } from "./merge-loop.js";
@@ -66,7 +67,12 @@ export class ReconcileExecutor {
             updated_at: event.created_at,
           });
         }
-      return { attempts: [...latest.values()], now: this.clock.now() };
+      return {
+        attempts: [...latest.values()],
+        now: this.clock.now(),
+        // P2a-3: verifier build checkouts live as long as their Runs.
+        builds: buildCheckoutFacts(tx.runs.list(project_id)),
+      };
     });
   }
 

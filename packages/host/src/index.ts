@@ -45,6 +45,8 @@ export {
   projectActor,
   RunCapacityDeferred,
   scrubRunCredentials,
+  sessionFingerprint,
+  VERIFIER_LAUNCH_REVISION,
 } from "./launch.js";
 export {
   acquireMergeCheckCapacity,

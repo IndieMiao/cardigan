@@ -8,6 +8,7 @@ import type {
   DispatchRunParams,
   Machine,
   ProjectId,
+  Role,
   Run,
   Runtime,
   RuntimeLaunch,
@@ -405,7 +406,7 @@ async function launch(
       "Session replacement requires the same idle Assignment and queued Run",
     );
 
-  const { runDir, repositoriesRoot } = executionPaths(
+  const { runDir, repositoriesRoot, buildsRoot } = executionPaths(
     execution,
     project,
     assignment.id,
@@ -532,8 +533,9 @@ async function launch(
     const currentAssignment =
       host.store.uow.read((tx) => tx.assignments.get(project, assignment.id)) ??
       assignment;
-    const toolCatalog = sessionToolCatalog(
-      issued.record.allowed_tools,
+    const toolCatalog = sessionFingerprint(
+      sessionToolCatalog(issued.record.allowed_tools, currentAssignment),
+      role,
       currentAssignment,
     );
 
@@ -583,6 +585,11 @@ async function launch(
       ...(worktree === undefined
         ? {}
         : { repository_root: join(repositoriesRoot, project) }),
+      // P2a-3: a reused session keeps working across wakes; the build path is
+      // fixed per Assignment, so every readonly verifier trusts it up front.
+      ...(worktree === undefined || role.worktree !== "readonly"
+        ? {}
+        : { build_dir: join(buildsRoot, project, assignment.id) }),
       // The merged bell is the first prompt when the caller has one (M3 §3.2).
       first_prompt: [
         prompt,
@@ -809,6 +816,26 @@ async function compensate(input: Compensation): Promise<void> {
       input.step,
       "Deferred launch credential cleanup failed",
     );
+}
+
+/**
+ * P2a-3: launch-environment revision of verifier sessions. A readonly
+ * work-item session launched before the build checkout existed lacks its
+ * environment (`pnpm_config_package_import_method=copy`, safe.directory) and a
+ * reused session cannot gain it, so it is folded into the session fingerprint
+ * the Dispatcher already compares (P2a-10 A): such a session is replaced once
+ * before its next wake, like a changed tool catalog.
+ */
+export const VERIFIER_LAUNCH_REVISION = "build-env-1";
+export function sessionFingerprint(
+  catalog: string | undefined,
+  role: Pick<Role, "worktree">,
+  assignment: Pick<Assignment, "scope">,
+): string | undefined {
+  if (catalog === undefined) return undefined;
+  return role.worktree === "readonly" && assignment.scope === "work_item"
+    ? `${catalog}+${VERIFIER_LAUNCH_REVISION}`
+    : catalog;
 }
 
 /**

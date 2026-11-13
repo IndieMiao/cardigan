@@ -171,4 +171,42 @@ test("S9 a role without a worktree grants no Git ownership exceptions", () => {
   expect(compiled.env.GIT_CONFIG_KEY_0).toBe("safe.directory");
   expect(compiled.env.GIT_CONFIG_VALUE_0).toBe("");
   expect(compiled.env.GIT_CONFIG_VALUE_1).toBeUndefined();
+  // Only a verifier with a build checkout changes how pnpm imports packages.
+  expect(compiled.env.pnpm_config_package_import_method).toBeUndefined();
+});
+
+test("P2a-3 a readonly verifier's build checkout is trusted next to its worktree", () => {
+  for (const harness of ["claude-code", "codex"] as const) {
+    const compiled = compileAssignmentLaunch({
+      assignment: { assignment_id: "A-2", run_id: "R-2" },
+      role: {
+        role_id: "reviewer",
+        harness,
+        launch_profile: "fixture",
+        core_prompt: "Fixture",
+        allowed_tools: [],
+        worktree: "readonly",
+      },
+      launch: parseLaunchConfig({
+        profiles: { fixture: { harness } },
+      }),
+      mcp: { url: "http://localhost/mcp" },
+      run_dir: "/fixture/runs/A-2",
+      work_dir: "/fixture/worktrees/project/A-2",
+      repository_root: "/fixture/repos/project",
+      build_dir: "/fixture/builds/project/A-2",
+      first_prompt: "hello",
+      secrets: {},
+    });
+    expect(compiled.env.GIT_CONFIG_COUNT).toBe("4");
+    expect(compiled.env.GIT_CONFIG_VALUE_3).toBe("/fixture/builds/project/A-2");
+    // Installs copy from the shared pnpm store instead of hardlinking it.
+    expect(compiled.env.pnpm_config_package_import_method).toBe("copy");
+    expect(compiled.env.npm_config_package_import_method).toBe("copy");
+    if (harness === "codex")
+      expect(
+        compiled.files.find((file) => file.path.endsWith("config.toml"))
+          ?.content,
+      ).toContain('[projects."/fixture/builds/project/A-2"]');
+  }
 });

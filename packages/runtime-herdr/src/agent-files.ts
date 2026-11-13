@@ -164,7 +164,7 @@ export async function prepareAgentProject(
   await secureDataDirectory(config);
   const root = await agentRoot(config);
   try {
-    for (const area of ["runs", "worktrees", "inputs"]) {
+    for (const area of ["runs", "worktrees", "builds", "inputs"]) {
       const parent = await projectDirectory(root, area, project, config);
       try {
         if (area === "runs")

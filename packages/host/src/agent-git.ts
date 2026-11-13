@@ -40,6 +40,8 @@ export class AgentGitTransport implements GitWorktreePort {
   private readonly commands: LocalGitTransport;
   private readonly repository: string;
   private readonly worktree: string;
+  /** P2a-3: the verifier's writable build checkout of the same Assignment. */
+  private readonly build: string;
   private readonly inputs: string;
   constructor(
     private readonly config: AgentExecution,
@@ -50,6 +52,7 @@ export class AgentGitTransport implements GitWorktreePort {
   ) {
     this.repository = join(config.agentRoot, "repos", project);
     this.worktree = join(config.agentRoot, "worktrees", project, assignment);
+    this.build = join(config.agentRoot, "builds", project, assignment);
     this.inputs = join(config.agentRoot, "inputs", project);
     this.commands = new LocalGitTransport("git", options, {
       run: (args, timeout) =>
@@ -59,18 +62,25 @@ export class AgentGitTransport implements GitWorktreePort {
             `safe.directory=${this.repository}`,
             "-c",
             `safe.directory=${this.worktree}`,
+            "-c",
+            `safe.directory=${this.build}`,
             ...args,
           ],
           timeout,
         ),
       prepareWorktree: async (path) => {
-        this.exact(path, this.worktree);
+        this.placement(path);
         await this.leaf(path);
       },
     });
   }
   private exact(actual: string, expected: string) {
     if (resolve(actual) !== expected)
+      throw new Error("Unexpected Agent Git path");
+  }
+  /** Worktree placement may only target this Assignment's two leaves. */
+  private placement(actual: string) {
+    if (![this.worktree, this.build].includes(resolve(actual)))
       throw new Error("Unexpected Agent Git path");
   }
   private async prepare() {
@@ -224,7 +234,10 @@ export class AgentGitTransport implements GitWorktreePort {
   ) {
     await this.prepare();
     this.exact(repository, this.repository);
-    this.exact(path, this.worktree);
+    this.placement(path);
+    // A build checkout is always detached: it must never own a branch.
+    if (branch !== undefined && resolve(path) !== this.worktree)
+      throw new Error("Build checkout must be detached");
     return this.commands.addWorktree(repository, path, head, branch);
   }
   async isDirty(path: string) {
@@ -251,7 +264,7 @@ export class AgentGitTransport implements GitWorktreePort {
   ) {
     await this.prepare();
     this.exact(repository, this.repository);
-    this.exact(path, this.worktree);
+    this.placement(path);
     return this.commands.removeWorktree(repository, path, options);
   }
   async deleteBranch(repository: string, branch: string) {
