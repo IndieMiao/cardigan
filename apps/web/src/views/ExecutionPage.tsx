@@ -162,7 +162,8 @@ const windowSize = (tokens: number) => {
 };
 /**
  * C-200 defaults: remind at 20% left, change sessions at 15% left. They mirror
- * the domain's contextUsageThresholds defaults; the web reads no override.
+ * the domain's contextUsageThresholds defaults and only apply when the server
+ * sends no level (C-232 servers send the host's level with project overrides).
  */
 const CONTEXT_HANDOFF_REMAINING = 20;
 const CONTEXT_RESTART_REMAINING = 15;
@@ -199,17 +200,23 @@ export function contextReading(
     return undefined;
   const usedPct = usage.used_ratio * 100;
   const remaining = Math.round((100 - usedPct) * 10) / 10;
-  return {
-    used: usedPct.toFixed(2),
-    remaining: Math.max(0, 100 - usedPct).toFixed(2),
-    level:
-      remaining <= CONTEXT_RESTART_REMAINING
+  // C-232: the server sends the host's own level (project thresholds); the
+  // local default rule only covers servers that do not.
+  const level: ContextLevel =
+    usage.level !== undefined
+      ? (usage.level ?? "normal")
+      : remaining <= CONTEXT_RESTART_REMAINING
         ? "restart"
         : remaining <= CONTEXT_HANDOFF_REMAINING
           ? "handoff"
-          : "normal",
+          : "normal";
+  return {
+    used: usedPct.toFixed(2),
+    remaining: Math.max(0, 100 - usedPct).toFixed(2),
+    level,
     window: windowSize(usage.window_tokens),
-    usedTokens: Math.round(usage.used_ratio * usage.window_tokens),
+    usedTokens:
+      usage.used_tokens ?? Math.round(usage.used_ratio * usage.window_tokens),
     windowTokens: usage.window_tokens,
     meter: Math.min(100, usedPct),
   };
@@ -270,7 +277,11 @@ function ContextCell({
     </div>
   );
 }
-/** C-207: what the Assignment is working on; Card, priority and work item. */
+/**
+ * C-207: what the Assignment is working on; Card, priority and work item.
+ * C-232: the Card title follows on its own line, cut to one line with the
+ * full title in the tooltip; the Card id above always stays visible.
+ */
 function TaskCell({
   a,
   projectId,
@@ -278,7 +289,7 @@ function TaskCell({
   readonly a: ExecutionAssignment;
   readonly projectId: string;
 }) {
-  return (
+  const row = (
     <IdentityRow className="execution-task">
       {a.work_item_id ? (
         <>
@@ -295,6 +306,15 @@ function TaskCell({
         </span>
       )}
     </IdentityRow>
+  );
+  if (!a.work_item_id || !a.card_title) return row;
+  return (
+    <div className="execution-task-cell">
+      {row}
+      <span className="execution-task-title" title={a.card_title}>
+        {a.card_title}
+      </span>
+    </div>
   );
 }
 /**
@@ -849,10 +869,13 @@ export function ExecutionPage({
   client,
   projectId,
   revision = 0,
+  contextRevision = 0,
 }: {
   client: CardiganClient;
   projectId: string;
   revision?: number;
+  /** C-232: bumps when the host's context samples change (SSE `context`). */
+  contextRevision?: number;
 }) {
   const [filters, setFilters] = useRouteFilters({
     kind: "execution",
@@ -878,9 +901,10 @@ export function ExecutionPage({
     () => client.execution(projectId),
     [client, projectId],
   );
+  // Both counters only grow, so their sum changes whenever either does.
   const { data, pending, error, reload, interactive } = useResource(
     load,
-    revision,
+    revision + contextRevision,
   );
   const [sort, setSort] = useState<ExecutionSort>(() =>
     readExecutionSort(projectId),

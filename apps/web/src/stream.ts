@@ -8,6 +8,11 @@ export interface StreamCallbacks {
   readonly change: (event: ProjectChange) => void;
   readonly ready: () => void;
   readonly status: (status: StreamStatus) => void;
+  /**
+   * C-232: the host's in-memory context samples changed (first sample, new
+   * reading, unknown or expired). Only the execution view needs to re-read.
+   */
+  readonly context?: () => void;
 }
 export interface EventConnection {
   addEventListener(type: string, listener: EventListener): void;
@@ -27,6 +32,8 @@ export function subscribeProject(
   // Last run-queue revision the server announced. The queue has no seq, so a
   // resumed connection relies on this to notice changes made while away.
   let queueRevision: string | undefined;
+  // C-232: the same for the host's context samples.
+  let contextRevision: string | undefined;
   let source: EventConnection | undefined,
     timer: ReturnType<typeof setTimeout> | undefined,
     stopped = false;
@@ -90,6 +97,29 @@ export function subscribeProject(
       // re-read on open; on a resumed connection any revision we did not have
       // yet means the queue may have changed while we were away.
       if (known !== undefined || resumed) callbacks.ready();
+    });
+    connection.addEventListener("context", (event) => {
+      if (!current()) return;
+      let revision: unknown;
+      try {
+        revision = (
+          JSON.parse((event as MessageEvent<string>).data) as {
+            revision?: unknown;
+          }
+        ).revision;
+      } catch {
+        revision = undefined;
+      }
+      if (typeof revision !== "string") {
+        callbacks.context?.();
+        return;
+      }
+      const known = contextRevision;
+      contextRevision = revision;
+      if (known === revision) return;
+      // As with the queue: the first connection's first revision is covered
+      // by the re-read on open.
+      if (known !== undefined || resumed) callbacks.context?.();
     });
     connection.addEventListener("change", (event) => {
       if (!current()) return;

@@ -2343,6 +2343,19 @@ fieldset.filters {
 .execution-task {
   min-height: 24px;
 }
+.execution-task-cell {
+  display: grid;
+  min-width: 0;
+}
+.execution-task-title {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-xs);
+  line-height: 16px;
+}
 .execution-config {
   color: var(--text-muted);
   font-size: var(--text-xs);
