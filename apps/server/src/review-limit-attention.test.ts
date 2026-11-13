@@ -5,6 +5,12 @@ import { dispatchFixture } from "../test-support/dispatch.js";
 import { Dispatcher } from "./dispatch.js";
 import { needsYou } from "./web/read.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 afterEach(() => vi.useRealTimers());
 
 test("a resolved review limit stuck past ten minutes raises durable attention once, visible in CLI and Workbench", async () => {
@@ -33,6 +39,7 @@ test("a resolved review limit stuck past ten minutes raises durable attention on
           affected_work_items: [],
           blocking: true,
           decider: "human",
+          plain_summary: TEST_PLAIN_SUMMARY,
         },
         ports,
       ),

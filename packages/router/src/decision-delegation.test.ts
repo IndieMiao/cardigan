@@ -9,6 +9,12 @@ import {
 } from "./fixtures.js";
 import { routeEvent } from "./route.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 test.each(["general", "feature_detail", "scope_change"])(
   "authorized %s goes only to PM Ops",
   (category) => {
@@ -168,6 +174,7 @@ test("PM-held merge confirmations go to PM Ops and wake it when the check finish
 test("a failed check on a confirmed merge wakes PM Ops unless the card is human-only", () => {
   const q = decision({
     decider: "human",
+    plain_summary: TEST_PLAIN_SUMMARY,
     trigger: "merge_confirmation",
     kind: "approve",
     status: "resolved",
@@ -216,6 +223,7 @@ test.each(["permission", "scope_change"])(
     });
     const q = decision({
       decider: "human",
+      plain_summary: TEST_PLAIN_SUMMARY,
       trigger: "merge_confirmation",
       kind: "approve",
       status: "resolved",

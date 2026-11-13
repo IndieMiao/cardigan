@@ -11,6 +11,12 @@ import { afterEach, beforeEach, expect, test } from "vitest";
 import { call, type WebHarness, webHarness } from "../../test-support/web.js";
 import { project_id, seedWebProject } from "../../test-support/web-data.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 // C-65: the sensitive flag and the human's direct answer to a PM-held merge.
 let h: WebHarness, cookie: string;
 const path = (suffix: string) => `/api/projects/${project_id}${suffix}`;
@@ -100,6 +106,7 @@ test("a PM-held merge is listed separately and the human can answer it directly"
   expect(answer.status).toBe(200);
   expect(confirmation()).toMatchObject({
     decider: "human",
+    plain_summary: TEST_PLAIN_SUMMARY,
     status: "snoozed",
     snooze: { reason: "等待核对", by: "human" },
   });

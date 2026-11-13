@@ -3,6 +3,12 @@ import { mergePlan, recordDecision, recordMergeResult } from "../index.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
 import { human, value } from "./test-fixtures.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 test.each(["code", "doc", "design", "test_report", "other"] as const)(
   "S19 invariants 13, 14: accepted %s Git commits require human confirmation and enter the merge plan",
   async (kind) => {
@@ -23,6 +29,7 @@ test.each(["code", "doc", "design", "test_report", "other"] as const)(
     expect(q).toMatchObject({
       status: "open",
       decider: "human",
+      plain_summary: TEST_PLAIN_SUMMARY,
       blocking: true,
       target: { delivery_id: completion.id },
     });

@@ -13,6 +13,12 @@ import type {
 } from "@cardigan/domain";
 import type { Store } from "@cardigan/store";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 /**
  * Fixtures for the Workbench read API tests.
  *
@@ -80,6 +86,7 @@ const decision: Decision = {
   affected_work_items: [],
   blocking: true,
   decider: "human",
+  plain_summary: TEST_PLAIN_SUMMARY,
   doc_refs: [],
   status: "open",
   kind: "choose",

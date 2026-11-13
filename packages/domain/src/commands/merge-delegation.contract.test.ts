@@ -41,6 +41,12 @@ import {
   value,
 } from "./test-fixtures.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 const system: Actor = { kind: "system", project_id: human.project_id };
 const { work_item_id: _work, ...base } = assignment(900, "pm");
 const ops: Assignment = {
@@ -185,6 +191,7 @@ function setup(withOps = true, policy: "confirm" | "auto" = "confirm") {
           affected_work_items: [],
           blocking: false,
           decider: "human",
+          plain_summary: TEST_PLAIN_SUMMARY,
           ...extra,
         },
         f.io,
@@ -417,6 +424,7 @@ const agentRaise = (
       affected_work_items: [],
       blocking: false,
       decider: "human",
+      plain_summary: TEST_PLAIN_SUMMARY,
       ...extra,
     },
     f.io,
@@ -457,6 +465,7 @@ test.each(["allow", "deny"])(
     expect(q.merge_related).toBeUndefined();
     expect(confirmation()).toMatchObject({
       decider: "human",
+      plain_summary: TEST_PLAIN_SUMMARY,
       human_required_reason: expect.stringContaining(q.id),
     });
     check("passed");
@@ -540,6 +549,7 @@ test("a merge-related permission decision hands the confirmation over as human-r
   expect(q.merge_related).toBeUndefined();
   expect(confirmation()).toMatchObject({
     decider: "human",
+    plain_summary: TEST_PLAIN_SUMMARY,
     status: "open",
     human_required_reason: expect.stringContaining(q.id),
   });
@@ -620,6 +630,7 @@ test("a project-level permission decision does not move a card's merge confirmat
         affected_work_items: [],
         blocking: false,
         decider: "human",
+        plain_summary: TEST_PLAIN_SUMMARY,
       },
       f.io,
     ),
@@ -662,6 +673,7 @@ test("only a D12 question that touches no produce work and binds no target can b
         affected_work_items: [],
         blocking: false,
         decider: "human",
+        plain_summary: TEST_PLAIN_SUMMARY,
         merge_related: false,
         ...extra,
       },
@@ -692,6 +704,7 @@ test("PM Ops may hand a merge to the human with a reason; no auto-merge then", a
   f.commit(pmResolve("merge", { escalate: true }));
   expect(confirmation()).toMatchObject({
     decider: "human",
+    plain_summary: TEST_PLAIN_SUMMARY,
     human_required_reason: "项目经理升级给你：选择 merge",
   });
   expect(confirmation().context).toContain("项目经理升级给你");
@@ -797,6 +810,7 @@ test("delegated resolutions become non-blocking notices the human can mark read"
         affected_work_items: [],
         blocking: false,
         decider: "human",
+        plain_summary: TEST_PLAIN_SUMMARY,
       },
       f.io,
     ),
@@ -920,6 +934,7 @@ test("a card created from a sensitive decision keeps its merge with the human", 
         affected_work_items: [],
         blocking: false,
         decider: "human",
+        plain_summary: TEST_PLAIN_SUMMARY,
       },
       f.io,
     ),
@@ -1156,6 +1171,7 @@ test("marking a card sensitive hands its PM-held confirmation to the human at on
   expect(confirmation()).toMatchObject({
     id: held.id,
     decider: "human",
+    plain_summary: TEST_PLAIN_SUMMARY,
     status: "open",
   });
   expect(f.state.events.at(-1)).toMatchObject({
@@ -1251,6 +1267,7 @@ test.each(["merge", "hold", "request_changes"] as const)(
     expect(confirmation()).toMatchObject({
       id: held.id,
       decider: "human",
+      plain_summary: TEST_PLAIN_SUMMARY,
       ...(option === "hold"
         ? { status: "snoozed", snooze: { reason: "我直接处理", by: "human" } }
         : {
@@ -1427,6 +1444,7 @@ test("marking after PM Ops confirmed but before publication supersedes PM's answ
   const asked = confirmation();
   expect(asked).toMatchObject({
     decider: "human",
+    plain_summary: TEST_PLAIN_SUMMARY,
     status: "open",
     amends: delegated.id,
   });
@@ -2116,6 +2134,7 @@ test("PM Ops may hand a failed confirmed merge to the human instead", async () =
   expect(confirmation()).toMatchObject({
     status: "resolved",
     decider: "human",
+    plain_summary: TEST_PLAIN_SUMMARY,
     human_required_reason: expect.stringContaining("项目经理升级给你"),
   });
   expect(failedQueue(f.state)).toEqual([]);

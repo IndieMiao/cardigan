@@ -31,6 +31,12 @@ import {
   value,
 } from "./test-fixtures.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 function present<T>(value: T | undefined): T {
   if (value === undefined) throw new Error("Missing workflow fixture entity");
   return value;
@@ -171,6 +177,7 @@ const decisionParams = (ctx: Context) => ({
   affected_work_items: [],
   blocking: true,
   decider: "human" as const,
+  plain_summary: TEST_PLAIN_SUMMARY,
 });
 const actionParams = (ctx: Context, id: WorkItemId) => ({
   card_id: ctx.card,

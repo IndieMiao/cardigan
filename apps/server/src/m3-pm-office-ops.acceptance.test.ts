@@ -44,6 +44,12 @@ import { afterEach, expect, test } from "vitest";
 import { stubGit } from "./git-test-support.js";
 import { startCardiganServer } from "./index.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 const ok = <T>(value: T): RuntimeResult<T> => ({ ok: true, value });
 class PmRuntime implements Runtime {
   readonly bus = new EventEmitter();
@@ -501,6 +507,7 @@ test("P01 §7.1: pm start preserves Office/Ops MCP capability separation under t
     affected_work_items: [],
     blocking: false,
     decider: "human",
+    plain_summary: TEST_PLAIN_SUMMARY,
   });
   const forbidden = await f.raw(f.ops, "record_decision", {
     decision_id: decision.id,
@@ -736,6 +743,7 @@ test("P07 §6.4/§7.3: decisions and human actions appear in needs-you, Office g
     affected_work_items: [],
     blocking: false,
     decider: "human",
+    plain_summary: TEST_PLAIN_SUMMARY,
   });
   await expect
     .poll(() => s.runtime.bells.filter((b) => b.id === s.office.id).length)

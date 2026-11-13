@@ -6,6 +6,7 @@ import { SUGGESTION_COPY } from "../suggestion-copy.js";
 import { DecisionAffectedCards } from "./DecisionAffectedCards.js";
 import { NextOwners } from "./EmployeeIdentity.js";
 import { EmptyState, IdTag, StatusTag } from "./Foundation.js";
+import { PlainSummary } from "./PlainSummary.js";
 
 export function CardSidebar({
   detail,
@@ -106,6 +107,9 @@ export function CardSidebar({
                     detail.decisions.find((q) => q.id === d.id) ?? d,
                   )}
                 </p>
+                <OpenPlainSummary
+                  decision={detail.decisions.find((q) => q.id === d.id)}
+                />
                 <SuggestionLine
                   decision={detail.decisions.find((q) => q.id === d.id)}
                 />
@@ -257,5 +261,21 @@ function SuggestionLine({
         </>
       )}
     </p>
+  );
+}
+
+/** C-202: the plain summary of an open decision, first thing under its title. */
+function OpenPlainSummary({
+  decision,
+}: {
+  readonly decision: DecisionView | undefined;
+}) {
+  if (
+    !decision?.plain_summary ||
+    !["open", "provisional", "snoozed"].includes(decision.status)
+  )
+    return null;
+  return (
+    <PlainSummary id={decision.id} summary={decision.plain_summary} compact />
   );
 }

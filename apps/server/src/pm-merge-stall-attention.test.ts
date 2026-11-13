@@ -15,6 +15,12 @@ import { Dispatcher } from "./dispatch.js";
 import { escalatePmMergeStalls } from "./pm-merge-stall-attention.js";
 import { needsYou } from "./web/read.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 afterEach(() => vi.useRealTimers());
 
 const minute = 60_000;
@@ -28,6 +34,7 @@ function pmHeldMerge() {
     work_item_id: item.id,
     run_id: "R-900",
     kind: "card_completion",
+    plain_summary: TEST_PLAIN_SUMMARY,
     summary: "Done",
     subject: { kind: "git_head", value: "a".repeat(40) },
     evidence: [],

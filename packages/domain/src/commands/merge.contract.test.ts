@@ -11,6 +11,12 @@ import {
 import { mergeFixture } from "./merge/test-fixtures.js";
 import { human, value } from "./test-fixtures.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 test.each([
   ["card", "review", "completion_review_passed", "awaiting_merge", "todo"],
   ["card", "awaiting_merge", "merge_not_required", "done", "review"],
@@ -54,6 +60,7 @@ test("invariant 13: a real dev card waits for confirmation and preserves the acc
     target: { delivery_id: completion.id },
     blocking: true,
     decider: "human",
+    plain_summary: TEST_PLAIN_SUMMARY,
     affected_work_items: [],
   });
   expect(q.question).toBe(`将 ${f.card.id} 合并到 main？`);

@@ -33,6 +33,12 @@ import {
   value,
 } from "./test-fixtures.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 let io = ports();
 beforeEach(() => {
   io = ports();
@@ -50,6 +56,7 @@ const decision: RequestDecisionParams = {
   affected_work_items: [id("work_item", 1)],
   blocking: true,
   decider: "human",
+  plain_summary: TEST_PLAIN_SUMMARY,
 };
 const comment = { card_id: id("card", 1), body: "See C-2 and q(1)" };
 const humanRequest = {

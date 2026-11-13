@@ -21,6 +21,12 @@ import {
 } from "./route.js";
 import type { RouteResult } from "./types.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 const rules = (result: RouteResult) => result.notifications.map((n) => n.rule);
 const recipients = (result: RouteResult) =>
   result.notifications.map((n) =>
@@ -484,6 +490,7 @@ test("§6.4 completion request notifies the card template's reviewer", () => {
       deliveries: [
         delivery("D-1", {
           kind: "card_completion",
+          plain_summary: TEST_PLAIN_SUMMARY,
           requested_verifiers: ["W-2"],
         }),
       ],
@@ -774,6 +781,7 @@ test("M3.4 completion routing uses requested verifiers rather than the first PM 
       deliveries: [
         delivery("D-1", {
           kind: "card_completion",
+          plain_summary: TEST_PLAIN_SUMMARY,
           requested_verifiers: ["W-4"],
         }),
       ],

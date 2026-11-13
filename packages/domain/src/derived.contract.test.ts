@@ -15,6 +15,12 @@ import {
   type WorkItem,
 } from "./index.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 const id = <K extends ReadableIdKind>(kind: K, n: number) => {
   const result = formatId(kind, n);
   if (!result.ok) throw new Error(result.error.message);
@@ -196,6 +202,7 @@ test("M5.S S16: a completion request waits only on the verifiers it requested", 
   const completion = {
     ...delivery(2, "head", "submitted", 1),
     kind: "card_completion" as const,
+    plain_summary: TEST_PLAIN_SUMMARY,
     requested_verifiers: [id("work_item", 3)],
   };
   const matrix = deriveReviewMatrix([product, completion], workItems, [
