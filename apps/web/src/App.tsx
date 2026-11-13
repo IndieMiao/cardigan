@@ -7,20 +7,23 @@ import {
   type SessionInfo,
 } from "./api.js";
 import { EmptyState } from "./components/Foundation.js";
+import { PageLoader } from "./components/PageLoader.js";
 import { RequestFeedback } from "./components/RequestFeedback.js";
 import { Tooltip } from "./components/Tooltip.js";
+import {
+  ActivityPage,
+  CardDetailPage,
+  DecisionHistoryPage,
+  ExecutionPage,
+  NeedsYouPage,
+  SettingsPage,
+  SnapshotPage,
+} from "./lazy-pages.js";
 import { routeHash, useRoute } from "./route.js";
 import { useProjectStream } from "./useProjectStream.js";
 import { useResource } from "./useResource.js";
-import { ActivityPage } from "./views/ActivityPage.js";
-import { CardDetailPage } from "./views/CardDetailPage.js";
 import { CardListPage } from "./views/CardListPage.js";
-import { DecisionHistoryPage } from "./views/DecisionHistoryPage.js";
-import { ExecutionPage } from "./views/ExecutionPage.js";
 import { LoginPage } from "./views/LoginPage.js";
-import { NeedsYouPage } from "./views/NeedsYouPage.js";
-import { SettingsPage } from "./views/SettingsPage.js";
-import { SnapshotPage } from "./views/SnapshotPage.js";
 
 /**
  * Application shell (M5 plan §4 M5.3).
@@ -297,72 +300,74 @@ function Workbench({
             error={`无法识别链接 ${invalidHash}；请从项目导航重新进入。`}
           />
         )}
-        {selected && route?.kind === "decision-history" && (
-          <DecisionHistoryPage
-            client={client}
-            projectId={selected.id}
-            revision={live.revision}
-          />
-        )}
-        {selected && route?.kind === "settings" && (
-          <SettingsPage
-            key={selected.id}
-            client={client}
-            projectId={selected.id}
-            revision={live.revision}
-          />
-        )}
-        {selected && route?.kind === "activity" && (
-          <ActivityPage
-            key={selected.id}
-            client={client}
-            projectId={selected.id}
-            revision={live.revision}
-          />
-        )}
-        {selected && route?.kind === "snapshot" && (
-          <SnapshotPage
-            key={selected.id}
-            client={client}
-            projectId={selected.id}
-            revision={live.revision}
-          />
-        )}
-        {selected && route?.kind === "execution" && (
-          <ExecutionPage
-            key={selected.id}
-            client={client}
-            projectId={selected.id}
-            revision={live.revision}
-          />
-        )}
-        {selected !== undefined && route?.kind === "needs-you" && (
-          <NeedsYouPage
-            resource={needs}
-            key={selected.id}
-            client={client}
-            projectId={selected.id}
-            revision={live.revision}
-          />
-        )}
-        {selected !== undefined && route?.kind === "card" && (
-          <CardDetailPage
-            key={`${selected.id}/${route.cardId}`}
-            client={client}
-            projectId={selected.id}
-            cardRevision={live.cardRevision}
-            cardId={route.cardId}
-            {...(route.anchor === undefined ? {} : { anchor: route.anchor })}
-          />
-        )}
-        {selected !== undefined && route?.kind === "cards" && (
-          <CardListPage
-            client={client}
-            key={selected.id}
-            projectId={selected.id}
-            revision={live.revision}
-          />
-        )}
+        <PageLoader key={`${selected?.id}/${route?.kind}`}>
+          {selected && route?.kind === "decision-history" && (
+            <DecisionHistoryPage
+              client={client}
+              projectId={selected.id}
+              revision={live.revision}
+            />
+          )}
+          {selected && route?.kind === "settings" && (
+            <SettingsPage
+              key={selected.id}
+              client={client}
+              projectId={selected.id}
+              revision={live.revision}
+            />
+          )}
+          {selected && route?.kind === "activity" && (
+            <ActivityPage
+              key={selected.id}
+              client={client}
+              projectId={selected.id}
+              revision={live.revision}
+            />
+          )}
+          {selected && route?.kind === "snapshot" && (
+            <SnapshotPage
+              key={selected.id}
+              client={client}
+              projectId={selected.id}
+              revision={live.revision}
+            />
+          )}
+          {selected && route?.kind === "execution" && (
+            <ExecutionPage
+              key={selected.id}
+              client={client}
+              projectId={selected.id}
+              revision={live.revision}
+            />
+          )}
+          {selected !== undefined && route?.kind === "needs-you" && (
+            <NeedsYouPage
+              resource={needs}
+              key={selected.id}
+              client={client}
+              projectId={selected.id}
+              revision={live.revision}
+            />
+          )}
+          {selected !== undefined && route?.kind === "card" && (
+            <CardDetailPage
+              key={`${selected.id}/${route.cardId}`}
+              client={client}
+              projectId={selected.id}
+              cardRevision={live.cardRevision}
+              cardId={route.cardId}
+              {...(route.anchor === undefined ? {} : { anchor: route.anchor })}
+            />
+          )}
+          {selected !== undefined && route?.kind === "cards" && (
+            <CardListPage
+              client={client}
+              key={selected.id}
+              projectId={selected.id}
+              revision={live.revision}
+            />
+          )}
+        </PageLoader>
       </main>
     </div>
   );

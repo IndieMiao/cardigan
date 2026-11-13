@@ -25,17 +25,18 @@ import {
 } from "../components/Foundation.js";
 import { Menu, type MenuItem } from "../components/Menu.js";
 import { MultiSelect } from "../components/MultiSelect.js";
+import { PageLoader } from "../components/PageLoader.js";
 import { PageSizeMenu } from "../components/PageSizeMenu.js";
 import { PriorityBadge } from "../components/Priority.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
 import { Tooltip } from "../components/Tooltip.js";
 import { ViewSwitch } from "../components/ViewSwitch.js";
+import { CardDetailPage } from "../lazy-pages.js";
 import { routeHash, useRouteFilters } from "../route.js";
 import { inSnapshotGroup, SNAPSHOT_GROUPS } from "../snapshot-groups.js";
 import { BOARD_STATUSES, cardStatusLabel } from "../status.js";
 import { useBoardLanes } from "../useBoardLanes.js";
 import { useResource } from "../useResource.js";
-import { CardDetailPage } from "./CardDetailPage.js";
 
 /**
  * The merged cards workspace (Phase 1.5 U5a / §8.2).
@@ -567,14 +568,16 @@ export function CardListPage({
         }
       >
         {openCardId !== undefined && (
-          <CardDetailPage
-            key={openCardId}
-            client={client}
-            projectId={projectId}
-            cardId={openCardId}
-            inDrawer
-            revision={revision}
-          />
+          <PageLoader key={openCardId}>
+            <CardDetailPage
+              key={openCardId}
+              client={client}
+              projectId={projectId}
+              cardId={openCardId}
+              inDrawer
+              revision={revision}
+            />
+          </PageLoader>
         )}
       </Drawer>
     </section>
