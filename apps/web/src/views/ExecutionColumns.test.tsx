@@ -316,6 +316,10 @@ test("C-106: the wide table scrolls sideways inside its own container", async ()
   // C-207: one strong text per row; headers and Assignment ids are regular.
   expect(css).toMatch(/\.execution-table th\s*\{[^}]*font-weight:\s*400/u);
   expect(css).toMatch(/\.execution-open\s*\{[^}]*font-weight:\s*400/u);
+  // Shared id badges are 500 elsewhere; the execution list overrides them.
+  expect(css).toMatch(
+    /\.execution-page :is\(\.execution-table, \.execution-cards\) \.id-badge\s*\{[^}]*font-weight:\s*400/u,
+  );
 });
 
 test("C-207: below 760px the same Assignments render as cards only, in reading order", async () => {

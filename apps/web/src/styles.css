@@ -2422,6 +2422,11 @@ fieldset.filters {
   background: var(--surface-muted);
 }
 /* C-106: the Assignment id is the row's drawer trigger. */
+/* C-207: in the execution list the employee name is the only weighted
+   text; shared id badges (500 elsewhere) drop to regular here. */
+.execution-page :is(.execution-table, .execution-cards) .id-badge {
+  font-weight: 400;
+}
 button.execution-open {
   display: inline-flex;
   align-items: center;

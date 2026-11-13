@@ -128,6 +128,15 @@ for (const stage of ["before", "after"]) {
           fullyVisible: rows.filter((row) => row.getBoundingClientRect().bottom <= innerHeight).length,
           tableShown: Boolean(document.querySelector('.execution-table')),
           cardsShown: Boolean(document.querySelector('.execution-cards')),
+          // C-207: the employee name is the row's only weighted text.
+          weights: rows.slice(0, 1).map((row) => {
+            const weight = (el) => Number(getComputedStyle(el).fontWeight);
+            const name = row.querySelector('.employee-label strong');
+            const others = [...row.querySelectorAll('*')].filter(
+              (el) => el !== name && !name.contains(el) && el.childElementCount === 0 && el.textContent.trim(),
+            );
+            return { name: weight(name), maxOther: Math.max(...others.map(weight)) };
+          })[0],
         };
       })()`);
       measurements[label] = metrics;
@@ -147,6 +156,11 @@ for (const stage of ["before", "after"]) {
           assert(metrics.cardsShown && !metrics.tableShown, label);
         }
         assert(metrics.capacityTop > metrics.listTop, label);
+        assert(
+          metrics.weights.maxOther === 400 &&
+            metrics.weights.name > metrics.weights.maxOther,
+          `${label}: only the employee name may be weighted: ${JSON.stringify(metrics.weights)}`,
+        );
       }
       await capture(`${label}`, width, height, false);
       await capture(`${label}-full`, width, height, true);
@@ -180,9 +194,16 @@ for (const stage of ["before", "after"]) {
     }
     assert.deepEqual(browser.errors, []);
   } finally {
-    // A late profile write can make the cleanup fail; never hide the real error.
-    await browser?.close().catch(() => {});
-    await server.close();
+    // Report a failed browser cleanup and fail the run, without replacing an
+    // earlier assertion error that is already propagating.
+    try {
+      await browser?.close();
+    } catch (error) {
+      console.error("Browser cleanup failed:", error);
+      process.exitCode = 1;
+    } finally {
+      await server.close();
+    }
   }
 }
 await writeFile(
