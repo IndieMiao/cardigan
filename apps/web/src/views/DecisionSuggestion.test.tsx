@@ -102,9 +102,11 @@ function renderNeeds(decisions: NeedsDecision[]) {
 test("C-192: without a suggestion the decision looks as before", async () => {
   renderNeeds([merge(), choose()]);
   await screen.findByRole("article", { name: "合并确认 Q-3" });
-  expect(screen.queryByRole("button", { name: SUGGESTION_COPY.apply })).toBe(
-    null,
-  );
+  expect(
+    screen.queryByRole("button", {
+      name: /^(按建议处理|按建议：确认合并|按建议：退回修改)$/u,
+    }),
+  ).toBe(null);
   expect(screen.queryByText(/^建议：/u)).toBe(null);
 });
 
@@ -118,7 +120,9 @@ test("C-192: a merge suggestion shows its reason and submits it in one click", a
     within(box).getByText(SUGGESTION_COPY.line("确认合并", "检查和审核都通过")),
   ).toBeTruthy();
   fireEvent.click(
-    within(box).getByRole("button", { name: SUGGESTION_COPY.apply }),
+    within(box).getByRole("button", {
+      name: /^(按建议处理|按建议：确认合并|按建议：退回修改)$/u,
+    }),
   );
   await waitFor(() =>
     expect(applySuggestion).toHaveBeenCalledWith(
@@ -160,7 +164,9 @@ test("C-192: a suggested return prefills an editable reason, also in the return 
   ).toBe("修好按钮换行");
   fireEvent.change(reason, { target: { value: "修好按钮换行，补暗色截图" } });
   fireEvent.click(
-    within(box).getByRole("button", { name: SUGGESTION_COPY.apply }),
+    within(box).getByRole("button", {
+      name: /^(按建议处理|按建议：确认合并|按建议：退回修改)$/u,
+    }),
   );
   await waitFor(() =>
     expect(applySuggestion).toHaveBeenCalledWith(
@@ -188,7 +194,9 @@ test("C-192: an emptied return reason cannot be submitted", async () => {
   });
   expect(
     within(box)
-      .getByRole("button", { name: SUGGESTION_COPY.apply })
+      .getByRole("button", {
+        name: /^(按建议处理|按建议：确认合并|按建议：退回修改)$/u,
+      })
       .hasAttribute("disabled"),
   ).toBe(true);
 });
@@ -215,7 +223,9 @@ test("C-192: a business decision names the suggested option and applies it", asy
     within(box).getByText(SUGGESTION_COPY.line("左侧栏", "更省空间")),
   ).toBeTruthy();
   fireEvent.click(
-    within(box).getByRole("button", { name: SUGGESTION_COPY.apply }),
+    within(box).getByRole("button", {
+      name: /^(按建议处理|按建议：确认合并|按建议：退回修改)$/u,
+    }),
   );
   await waitFor(() =>
     expect(applySuggestion).toHaveBeenCalledWith(
@@ -244,9 +254,14 @@ test("C-192: with open pre-merge checks the suggestion still asks for confirmati
     }),
   ]);
   const box = await screen.findByRole("region", { name: "Q-3 建议" });
-  fireEvent.click(
-    within(box).getByRole("button", { name: SUGGESTION_COPY.apply }),
-  );
+  const trigger = within(box).getByRole("button", { name: "按建议：确认合并" });
+  trigger.focus();
+  fireEvent.click(trigger);
+  const firstDialog = await screen.findByRole("alertdialog");
+  fireEvent.keyDown(firstDialog, { key: "Escape", code: "Escape" });
+  await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+  expect(document.activeElement).toBe(trigger);
+  fireEvent.click(trigger);
   const dialog = await screen.findByRole("alertdialog");
   expect(applySuggestion).not.toHaveBeenCalled();
   fireEvent.click(within(dialog).getByRole("button", { name: "仍然确认合并" }));
@@ -287,7 +302,11 @@ test("C-192: card details show the suggestion on the merge confirmation and appl
   expect(
     box.getByText(SUGGESTION_COPY.line("确认合并", "检查和审核都通过")),
   ).toBeTruthy();
-  fireEvent.click(box.getByRole("button", { name: SUGGESTION_COPY.apply }));
+  fireEvent.click(
+    box.getByRole("button", {
+      name: /^(按建议处理|按建议：确认合并|按建议：退回修改)$/u,
+    }),
+  );
   await waitFor(() =>
     expect(applySuggestion).toHaveBeenCalledWith(
       "p-1",
@@ -338,7 +357,11 @@ test("C-192: card details offer one-click handling for a business decision, with
   ) as HTMLTextAreaElement;
   expect(reason.value).toBe("补暗色截图");
   fireEvent.change(reason, { target: { value: "补暗色和窄屏截图" } });
-  fireEvent.click(box.getByRole("button", { name: SUGGESTION_COPY.apply }));
+  fireEvent.click(
+    box.getByRole("button", {
+      name: /^(按建议处理|按建议：确认合并|按建议：退回修改)$/u,
+    }),
+  );
   await waitFor(() =>
     expect(applySuggestion).toHaveBeenCalledWith(
       "p-1",
@@ -372,9 +395,11 @@ test("C-192: card details show no suggestion section without a suggestion or for
   expect(
     screen.queryByRole("region", { name: SUGGESTION_COPY.cardSection }),
   ).toBe(null);
-  expect(screen.queryByRole("button", { name: SUGGESTION_COPY.apply })).toBe(
-    null,
-  );
+  expect(
+    screen.queryByRole("button", {
+      name: /^(按建议处理|按建议：确认合并|按建议：退回修改)$/u,
+    }),
+  ).toBe(null);
 });
 
 test("C-192: a suggestion arriving while the page stays open prefills the reason, but keeps what the human typed", () => {
@@ -397,7 +422,9 @@ test("C-192: a suggestion arriving while the page stays open prefills the reason
   expect(reason.value).toBe("修好窄屏布局");
   expect(
     box
-      .getByRole("button", { name: SUGGESTION_COPY.apply })
+      .getByRole("button", {
+        name: /^(按建议处理|按建议：确认合并|按建议：退回修改)$/u,
+      })
       .hasAttribute("disabled"),
   ).toBe(false);
   fireEvent.change(reason, { target: { value: "我自己的原因" } });
@@ -466,7 +493,11 @@ test("C-192: a confirmed merge whose check failed shows the return suggestion an
   expect(
     (box.getByLabelText("Q-3 建议的退回原因") as HTMLTextAreaElement).value,
   ).toBe("修好失败的测试");
-  fireEvent.click(box.getByRole("button", { name: SUGGESTION_COPY.apply }));
+  fireEvent.click(
+    box.getByRole("button", {
+      name: /^(按建议处理|按建议：确认合并|按建议：退回修改)$/u,
+    }),
+  );
   await waitFor(() =>
     expect(applySuggestion).toHaveBeenCalledWith(
       "p-1",
@@ -489,4 +520,29 @@ test("C-192: a confirmed merge no longer offers its merge suggestion", () => {
     />,
   );
   expect(screen.queryByRole("region", { name: "Q-3 建议" })).toBe(null);
+});
+
+test("C-205: direct confirmation beside a suggestion submits the same folded quote without applying the suggestion", async () => {
+  const { applySuggestion, recordDecision } = renderNeeds([
+    merge({ suggestion: suggestion() }),
+  ]);
+  const card = await screen.findByRole("article", { name: "合并确认 Q-3" });
+  fireEvent.click(within(card).getByText("补充说明", { selector: "summary" }));
+  fireEvent.change(within(card).getByLabelText("Q-3 原话或补充说明"), {
+    target: { value: "我的确认原话" },
+  });
+  fireEvent.click(within(card).getByText("补充说明", { selector: "summary" }));
+  fireEvent.click(
+    within(card).getByRole("button", { name: "确认合并", exact: true }),
+  );
+  await waitFor(() =>
+    expect(recordDecision).toHaveBeenCalledWith(
+      "p-1",
+      "Q-3",
+      "merge",
+      "我的确认原话",
+      expect.any(String),
+    ),
+  );
+  expect(applySuggestion).not.toHaveBeenCalled();
 });

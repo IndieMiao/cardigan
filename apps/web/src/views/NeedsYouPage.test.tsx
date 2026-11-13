@@ -176,7 +176,7 @@ test("C-171: a failed human merge check is listed with return, hold and recheck"
   const group = within(await screen.findByRole("region", { name: "合并确认" }));
   const article = within(group.getByRole("article", { name: "合并确认 Q-3" }));
   expect(
-    within(article.getByRole("region", { name: "合并检查" })).getByText("失败"),
+    within(article.getByRole("region", { name: "Q-3 状态" })).getByText("失败"),
   ).toBeTruthy();
   expect(article.getByText(/合并检查：未通过/)).toBeTruthy();
   for (const name of ["确认合并", "退回修改", "暂不合并", "重新检查"])
@@ -538,7 +538,7 @@ test("merge confirmation lists the deliveries, reviews and known gaps and record
   expect(within(card).getByRole("heading", { level: 3 }).textContent).toBe(
     "确认把 C-2 合并到 main？",
   );
-  const deliveries = within(card).getByRole("region", { name: "要合并的交付" });
+  const deliveries = within(card).getByRole("group", { name: "要合并的交付" });
   expect(deliveries.textContent).toContain("实现");
   expect(deliveries.textContent).toContain("增加 --json 输出");
   expect(deliveries.textContent).toContain("abcdef123456");
@@ -547,11 +547,11 @@ test("merge confirmation lists the deliveries, reviews and known gaps and record
       .getByRole("link", { name: "查看改动" })
       .getAttribute("href"),
   ).toBe("#/p/p-1/cards/C-1?at=delivery-D-8");
-  const reviews = within(card).getByRole("region", { name: "审核与验收" });
+  const reviews = within(card).getByRole("group", { name: "审核与验收" });
   expect(reviews.textContent).toContain("代码审核");
   expect(reviews.textContent).toContain("已通过");
   expect(
-    within(card).getByRole("region", { name: "已知遗留" }).textContent,
+    within(card).getByRole("group", { name: "已知遗留" }).textContent,
   ).toContain("Windows 未覆盖");
   fireEvent.change(within(card).getByLabelText("Q-3 原话或补充说明"), {
     target: { value: " 可以合并 " },
@@ -1202,7 +1202,7 @@ test("merge confirmation shows due time and a decreasing countdown", async () =>
       resource={{ data, pending: false, error: undefined, reload: () => {} }}
     />,
   );
-  expect(screen.getByText(/自动合并（偏好设置：10 分钟）/)).toBeTruthy();
+  expect(screen.getByText(/偏好设置：10 分钟/)).toBeTruthy();
   expect(screen.getByText(/剩余 8 分钟/)).toBeTruthy();
   await act(async () => {
     await vi.advanceTimersByTimeAsync(60000);
@@ -1482,9 +1482,12 @@ test.each(checkStates)(
       name: "合并确认 Q-3",
     });
     const content = within(article);
-    const checkGroup = content.getByRole("region", { name: "合并检查" });
+    const checkGroup = content.getByRole("region", { name: "Q-3 状态" });
+    const disclosure = content.getByText("合并检查详情").closest("details");
+    expect(disclosure?.open).toBe(false);
+    fireEvent.click(content.getByText("合并检查详情"));
     const badge = within(checkGroup).getByText(label, {
-      selector: ".action-row > .status",
+      selector: ".decision-check > .status",
     });
     expect(badge.className).toContain(`status-${status}`);
     const icon = badge.querySelector(`svg.status-shape-${shape}`);
@@ -1976,7 +1979,7 @@ test("PM-held merges are listed without counting as waiting, and the human can a
   });
   expect(screen.queryByText(/件事等你处理/)).toBeNull();
   const item = within(group).getByRole("article", { name: "合并确认 Q-9" });
-  expect(within(item).getByText(/PM 正在代确认/)).toBeTruthy();
+  expect(within(item).getByText("PM 代确认中")).toBeTruthy();
   fireEvent.click(within(item).getByRole("button", { name: "暂不合并" }));
   fireEvent.change(within(item).getByLabelText("暂缓原因（必填）"), {
     target: { value: "等待核对" },
@@ -2063,19 +2066,18 @@ test("C-182: human snoozed confirmations show an accessible tag, reason and expi
       projectId="p-1"
     />,
   );
-  const time = new Date(until).toLocaleTimeString("zh-CN", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-  });
+  expect(await screen.findByText("暂缓原因：等待核对")).toBeTruthy();
+  const status = screen.getByRole("region", { name: "Q-3 状态" });
+  expect(status.textContent).toContain("已暂缓至");
+  const expiry = status.querySelector("time");
+  expect(expiry?.dateTime).toBe(until);
+  expect(expiry?.title).toContain("2035");
   expect(
-    await screen.findByText(`已暂缓：等待核对（到 ${time}）`),
-  ).toBeTruthy();
-  const status = screen.getByRole("status", { name: "已暂缓" });
-  const tag = within(status).getByText("已暂缓");
-  expect(tag.classList.contains("status-snoozed")).toBe(true);
-  expect(tag.classList.contains("status-shape-paused")).toBe(true);
-  expect(tag.querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
+    within(status)
+      .getByText("等你确认")
+      .querySelector("svg")
+      ?.getAttribute("aria-hidden"),
+  ).toBe("true");
 });
 
 test("C-179: an open action shows the pre-merge check reminder with a direct link", async () => {

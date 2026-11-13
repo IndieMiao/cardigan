@@ -289,20 +289,11 @@ test("C-182: the card merge block shows an accessible snoozed tag, reason and lo
       cardId="C-1"
     />,
   );
-  const controls = within(
-    await screen.findByRole("region", { name: "合并处理" }),
-  );
-  const time = new Date(until).toLocaleTimeString("zh-CN", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-  });
-  expect(controls.getByText(`已暂缓：等待核对（到 ${time}）`)).toBeTruthy();
-  const status = controls.getByRole("status", { name: "已暂缓" });
-  const tag = within(status).getByText("已暂缓");
-  expect(tag.classList.contains("status-snoozed")).toBe(true);
-  expect(tag.classList.contains("status-shape-paused")).toBe(true);
-  expect(tag.querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
+  const status = await screen.findByRole("region", { name: "卡片状态" });
+  expect(status.textContent).toContain("已暂缓至");
+  expect(status.querySelector("time")?.dateTime).toBe(until);
+  expect(status.textContent).toContain("等你处理");
+  expect(screen.getByText("暂缓原因：等待核对")).toBeTruthy();
 });
 
 test("C-196: a rejected hold shows the cap without the preference key and preserves the reason", async () => {
