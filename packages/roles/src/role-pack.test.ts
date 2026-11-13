@@ -201,7 +201,10 @@ test("C-179: pm and reviewer route pre-merge reviews through pre-merge checks, n
     expect(rule).toContain("只有确实要人在系统外动手的事，才开人工待办");
   }
   expect(PM_PRE_MERGE_CHECK_RULE).toContain(
-    "PM Ops 设 pending，PM Office 设 passed 或 failed",
+    "PM Ops 设 pending，PM Office 或人设 passed 或 failed",
+  );
+  expect(PM_PRE_MERGE_CHECK_RULE).toContain(
+    "固定名称“独立复核”的结论只能由 `independent_reviewer` 的 `submit_review` 投影",
   );
   expect(PM_PRE_MERGE_CHECK_RULE).toContain("系统不会自动完成");
 });
