@@ -31,13 +31,13 @@
     .identity-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; min-width: 0; min-height: 32px; }
     .identity-person { display: inline-flex; align-items: center; gap: 8px; flex: 0 1 auto; min-width: 0; max-width: 100%; min-height: 32px; }
     .identity-person .employee-avatar { width: 24px; height: 24px; font-size: 12px; }
-    .identity-name { min-width: 0; font-size: 14px; font-weight: 600; line-height: 20px; overflow-wrap: anywhere; }
+    .identity-name { min-width: 0; font-size: 14px; font-weight: 500; line-height: 20px; overflow-wrap: anywhere; }
     .identity-detail { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; min-width: 0; max-width: 100%; }
     .identity-row code { display: inline-flex; align-items: center; min-height: 24px; font-size: 12px; line-height: 20px; }
     .identity-action { display: inline-flex; align-items: center; min-height: 32px; font-size: 13px; line-height: 20px; white-space: nowrap; }
     .identity-subline { margin: 8px 0 0 32px !important; color: var(--text-muted); font-size: 13px; }
     .ref-group { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; line-height: 20px; font-size: 13px; color: var(--text); }
-    .ref-badge { display: inline-flex; align-items: center; flex: none; min-height: 24px; padding: 2px 6px; border-radius: 4px; white-space: nowrap; font-size: 13px; line-height: 20px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--id-fg); background: var(--id-bg); }
+    .ref-badge { display: inline-flex; align-items: center; flex: none; min-height: 24px; padding: 2px 6px; border-radius: 4px; white-space: nowrap; font-size: 13px; line-height: 20px; font-weight: 500; font-variant-numeric: tabular-nums; color: var(--id-fg); background: var(--id-bg); }
     .ref-label { min-width: 0; overflow-wrap: anywhere; }
     a.ref-group { min-height: 32px; text-decoration: none; }
     a.ref-group .ref-badge { text-decoration: underline; text-underline-offset: 3px; }
@@ -74,7 +74,7 @@
 <body>
 <main class="design-page">
   <header>
-    <p class="design-eyebrow">CARDIGAN / C-204 / 设计提案 v1</p>
+    <p class="design-eyebrow">CARDIGAN / C-204 / 设计提案 v2（暗色待同步）</p>
     <h1>编号有类别，同行有秩序</h1>
     <p class="design-subtitle">编号保留前缀；头像、姓名、工作项与状态共享一条中心线。类型颜色与状态颜色独立定义。</p>
     <div class="design-toolbar">
@@ -146,10 +146,10 @@
   </section>
   <section class="design-section" aria-labelledby="palette-title">
     <h2 id="palette-title">03 / 编号类型色</h2>
-    <p class="design-note">11 类编号与中性回退。色相帮助扫读，前缀与中文含义负责辨认；不要求用户记住颜色。</p>
+    <p class="design-note">九类主要编号拉开色差；E / M / MB / 未知共用低饱和灰紫族。前缀与中文含义保留。</p>
     <div class="design-palette" id="palette"></div>
     <div class="design-statuses"><strong>状态仍独立显示</strong><span class="design-state" data-state="done">通过</span><span class="design-state wait" data-state="wait">等待</span><span class="design-state fail" data-state="fail">失败</span></div>
-    <p class="design-note" style="margin-top:12px">编号只使用冷色、灰紫与低饱和棕；不使用成功绿、警告黄橙和错误红，不随业务状态改变类型色。</p>
+    <p class="design-note" style="margin-top:12px">D 用橄榄、V 用棕金、H 用灰玫瑰，与成功绿、警告橙和错误红保持色差；编号不随状态变色。</p>
   </section>
   <section class="design-section" aria-labelledby="edge-title">
     <h2 id="edge-title">04 / 链接、长编号与未知类型</h2>
@@ -166,19 +166,20 @@
 <script>
   // Design registry: prefix, token, meaning, light foreground/background, dark foreground/background.
   const palette = [
-    ['C', 'card', '卡片', '#234f9b', '#edf3ff', '#adc9ff', '#21334e'],
-    ['W', 'work-item', '工作项', '#65439a', '#f5efff', '#d4b8ff', '#362b49'],
-    ['Q', 'decision', '拍板', '#84446e', '#f9eef6', '#eab8da', '#412d3b'],
-    ['A', 'assignment', '责任上下文', '#3f6076', '#edf3f6', '#b7ccdd', '#2b3742'],
-    ['R', 'run', '执行', '#155f73', '#e9f6fa', '#96d4e6', '#203c45'],
-    ['D', 'delivery', '交付', '#315f88', '#edf5fc', '#b0d3f2', '#29394a'],
-    ['V', 'review', '审核', '#4d4595', '#f1effb', '#c5bffc', '#302e4b'],
-    ['H', 'human-action', '人工待办', '#6b5147', '#f4efeb', '#dbc6ba', '#3c332e'],
-    ['E', 'employee', '员工', '#565b87', '#f0f1f8', '#c4c8ed', '#31354b'],
-    ['M', 'member', '成员', '#6c5679', '#f4f0f7', '#d5c2e1', '#3a3042'],
-    ['MB', 'merge-batch', '合并批次', '#455a72', '#eff3f7', '#bbcde3', '#2d3847'],
-    ['?', 'unknown', '未知类型', '#5a6661', '#eef2ef', '#b0beb5', '#29352e'],
+    ['C', 'card', '卡片', '#123a8e', '#e3edff', '#adc9ff', '#21334e'],
+    ['W', 'work-item', '工作项', '#6b2896', '#f0e3fa', '#d4b8ff', '#362b49'],
+    ['Q', 'decision', '拍板', '#9c1a67', '#fce0ef', '#eab8da', '#412d3b'],
+    ['A', 'assignment', '责任上下文', '#343a40', '#e3e4e6', '#b7ccdd', '#2b3742'],
+    ['R', 'run', '执行', '#005968', '#d6f3f7', '#96d4e6', '#203c45'],
+    ['D', 'delivery', '交付', '#535e18', '#e9efce', '#b0d3f2', '#29394a'],
+    ['V', 'review', '审核', '#765017', '#f7e9ca', '#c5bffc', '#302e4b'],
+    ['H', 'human-action', '人工待办', '#804e4c', '#f7e1df', '#dbc6ba', '#3c332e'],
+    ['E', 'employee', '员工', '#645b70', '#ece8f3', '#c4c8ed', '#31354b'],
+    ['M', 'member', '成员', '#645b70', '#ece8f3', '#d5c2e1', '#3a3042'],
+    ['MB', 'merge-batch', '合并批次', '#645b70', '#ece8f3', '#bbcde3', '#2d3847'],
+    ['?', 'unknown', '未知类型', '#645b70', '#ece8f3', '#b0beb5', '#29352e'],
   ];
+  const separation = {"light": {"C": {"fg": 16.3, "fgNeighbor": "W", "bg": 6.38, "bgNeighbor": "E", "status": 10.57, "statusNeighbor": "dispatched", "contrast": 8.82}, "W": {"fg": 16.3, "fgNeighbor": "C", "bg": 5.68, "bgNeighbor": "Q", "status": 10.51, "statusNeighbor": "review", "contrast": 7.21}, "Q": {"fg": 16.61, "fgNeighbor": "W", "bg": 5.68, "bgNeighbor": "W", "status": 21.71, "statusNeighbor": "review", "contrast": 6.18}, "A": {"fg": 16.34, "fgNeighbor": "C", "bg": 5.49, "bgNeighbor": "E", "status": 19.8, "statusNeighbor": "dispatched", "contrast": 9.04}, "R": {"fg": 16.8, "fgNeighbor": "A", "bg": 10.5, "bgNeighbor": "A", "status": 12.95, "statusNeighbor": "progress", "contrast": 6.86}, "D": {"fg": 18.48, "fgNeighbor": "V", "bg": 8.36, "bgNeighbor": "V", "status": 17.7, "statusNeighbor": "done", "contrast": 5.94}, "V": {"fg": 18.48, "fgNeighbor": "D", "bg": 8.36, "bgNeighbor": "D", "status": 10.61, "statusNeighbor": "unknown", "contrast": 5.96}, "H": {"fg": 16.85, "fgNeighbor": "E", "bg": 7.36, "bgNeighbor": "Q", "status": 11.46, "statusNeighbor": "cancelled", "contrast": 5.4}, "E": {"fg": 16.85, "fgNeighbor": "H", "bg": 5.49, "bgNeighbor": "A", "status": 11.71, "statusNeighbor": "muted", "contrast": 5.32}}};
   const variables = (dark) => palette.map(p => `--id-${p[1]}-fg:${p[dark ? 5 : 3]};--id-${p[1]}-bg:${p[dark ? 6 : 4]};`).join('');
   const sheet = document.createElement('style');
   sheet.textContent = `:root{${variables(false)}}@media(prefers-color-scheme:dark){:root{${variables(true)}}}` + palette.map(p => `[data-id-type="${p[1]}"]{--id-fg:var(--id-${p[1]}-fg);--id-bg:var(--id-${p[1]}-bg);}`).join('');
@@ -188,6 +189,10 @@
   for (const p of palette) {
     const tile = document.createElement('div'); tile.className = 'design-swatch';
     tile.innerHTML = `<span class="ref-group" data-id="${p[0] === '?' ? 'XYZ' : p[0]}-12" data-label="${p[2]}"></span><small>亮色 ${contrast(p[3],p[4])}:1 / 暗色 ${contrast(p[5],p[6])}:1</small><small>--id-${p[1]}-{fg,bg}</small>`;
+    const near = separation.light[p[0]];
+    const metric = document.createElement('small');
+    metric.textContent = near ? `亮色最近邻 ΔE：字 ${near.fg} / 底 ${near.bg}` : '辅助类型：与 E 共用灰紫族';
+    tile.append(metric);
     document.querySelector('#palette').append(tile);
   }
   for (const el of document.querySelectorAll('[data-id]')) {
