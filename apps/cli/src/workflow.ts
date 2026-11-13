@@ -4,6 +4,7 @@ import type {
   CommandState,
   HumanActionId,
   ProjectId,
+  RiskTag,
   WorkItemId,
 } from "@cardigan/domain";
 import {
@@ -59,8 +60,9 @@ import { launchExecution } from "./runtime-check.js";
 const USAGE = [
   "用法：",
   "  cardigan card create [--template <id>] --title <标题> --goal <目标> [--acceptance <标准1;标准2>] [--repo <仓库>] [--base-branch main] [--project <p>]",
-  "  cardigan card update <C-n> [--title <标题>] [--goal <目标>] [--acceptance <标准1;标准2>] [--priority none|low|medium|high|urgent] [--status backlog|todo|cancelled] [--superseded-by <C-m>] [--project <p>]",
+  "  cardigan card update <C-n> [--title <标题>] [--goal <目标>] [--acceptance <标准1;标准2>] [--priority none|low|medium|high|urgent] [--status backlog|todo|cancelled] [--risk-tags security,permission,numeric_rule|none] [--superseded-by <C-m>] [--project <p>]",
   "    update 至少提供一个修改字段；含分号的验收标准请加引号。",
+  "    --risk-tags 用逗号分隔 security、permission、numeric_rule；传 none 清空。",
   "    已完成卡片不能取消；请建新卡，再用 --superseded-by 标记已完成或已取消的旧卡。",
   "  cardigan card sensitive <C-n> on|off [--project <p>]   标记或取消敏感：被标记卡片的合并确认一律由你亲自处理",
   "  cardigan assign <W-n> --role <角色> [--employee <E-n 或名字>] [--machine local] [--start] [--project <p>]",
@@ -324,6 +326,25 @@ function cardSensitive(args: readonly string[], io: CliIo): number {
   }
 }
 
+const RISK_TAGS: readonly RiskTag[] = [
+  "security",
+  "permission",
+  "numeric_rule",
+];
+
+/** `none` clears; otherwise a comma-separated list of the three risk tags. */
+function parseRiskTags(raw: string): RiskTag[] {
+  if (raw === "none") return [];
+  const tags = raw.split(",").map((tag) => tag.trim());
+  if (!tags.every((tag): tag is RiskTag => RISK_TAGS.includes(tag as RiskTag)))
+    throw new CliError(
+      "--risk-tags 只接受 security、permission、numeric_rule（逗号分隔），清空请传 none",
+      EXIT.usage,
+      [USAGE],
+    );
+  return [...new Set(tags)];
+}
+
 function cardUpdate(args: readonly string[], io: CliIo): number {
   const { flags, positionals } = parseArgs(args, []);
   const parsedId = parseId("card", positionals[0]);
@@ -338,6 +359,7 @@ function cardUpdate(args: readonly string[], io: CliIo): number {
     "acceptance",
     "priority",
     "status",
+    "risk-tags",
     "superseded-by",
   ];
   for (const name of Object.keys(flags)) {
@@ -389,12 +411,17 @@ function cardUpdate(args: readonly string[], io: CliIo): number {
   if (acceptance?.length === 0) {
     throw new CliError("--acceptance 至少写一条标准", EXIT.usage, [USAGE]);
   }
+  const riskTags =
+    flags["risk-tags"] === undefined
+      ? undefined
+      : parseRiskTags(required(flags, "risk-tags"));
   const patch: Omit<Parameters<typeof updateCard>[2], "card_id"> = {
     ...(flags.title === undefined ? {} : { title: required(flags, "title") }),
     ...(flags.goal === undefined ? {} : { goal: required(flags, "goal") }),
     ...(acceptance === undefined ? {} : { acceptance_criteria: acceptance }),
     ...(priority === undefined ? {} : { priority }),
     ...(status === undefined ? {} : { status }),
+    ...(riskTags === undefined ? {} : { risk_tags: riskTags }),
   };
   const cardId = parsedId.value.id;
   const store = openStoreFrom(io, flags);

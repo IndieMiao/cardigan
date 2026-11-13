@@ -343,7 +343,7 @@ Standing Assignment (scope=project): PM Office, PM Ops — not tied to a WorkIte
 - 代码基线：`repo?`、`base_branch?`；模板要求仓库时两者必填，无仓库卡片省略两者。
 - 管理字段：`priority`（C-144：固定五档 `0=None/无`、`1=Low/低`、`2=Medium/中`、`3=High/高`、`4=Urgent/紧急`，默认无，越大越先执行）、`status`（见 §4.4：中间状态由工作项推导，`done` 按模板规定的完成方式产生）、`resolution?`（`done | superseded | duplicate | wontdo`）、`superseded_by?`（取代本卡的同项目卡片编号，同时保存在 `related_cards[]` 中）、`template`、`template_version`（固定建卡时的模板版本，决定默认工作项、必需项与完成方式；老卡按 v1 读取）、`merge_policy`（从模板的 `merge` 固定，`none | confirm | auto`）、`sensitive?`（人标记的敏感卡片，只有人能设置或取消；合并确认一律由人亲自处理，见 §4.4 C-65）、`pre_merge_checks?`（C-160 合并前核对项 `{label, status: pending|passed|failed, note?, updated_by, updated_at}[]`，普通项只作提示，固定名称“独立复核”为审核投影，见 §4.4 C-160、C-187）
 - 审计：`created_by`、`created_at`
-- P2a-14 ④：`risk_tags?: readonly RiskTag[]`，`RiskTag` 只含 `security | permission | numeric_rule`，用于代码风险分类，与 D12 业务拍板类别独立。PM（Office/Ops）或 human 经 `updateCard` 写入，MCP `update_card` 和 Workbench 卡片更新 API 共用领域校验；产出和复核角色不能写。数组替换旧值、重复标签去重，`[]` 清空，省略保持原值；旧卡缺少字段视同未标记，无需迁移。`card_updated` 记录修改前后标签及操作者；不与 `pre_merge_check` 混用。
+- P2a-14 ④：`risk_tags?: readonly RiskTag[]`，`RiskTag` 只含 `security | permission | numeric_rule`，用于代码风险分类，与 D12 业务拍板类别独立。PM（Office/Ops）或 human 经 `updateCard` 写入，MCP `update_card` 和 Workbench 卡片更新 API 共用领域校验；产出和复核角色不能写。数组替换旧值、重复标签去重，`[]` 清空，省略保持原值；旧卡缺少字段视同未标记，无需迁移。`card_updated` 记录修改前后标签及操作者；不与 `pre_merge_check` 混用。C-197：CLI `card update --risk-tags` 同样走 `updateCard`（逗号分隔三个枚举值，`none` 清空），Token 模式下非 PM 角色被同一领域闸门拒绝；Workbench 卡片详情只读显示，见 §8.4。
 - 派生字段（不存储，实时计算）：`waiting_on[]`、`next_owners[]`、`open_decisions[]`、`review_matrix`（每个交付 × 审核它的验证方 → 对当前 SHA 的结论；产出交付只列以该工作项为目标的验证项，完成申请只列它请求的 PM 验收项）、`why`（一句话原因，≤40 字，见 §8.2）
 - `next_owners[]` 中，处于 `ready`、`in_progress`、`changes_requested` 的工作项若关联的 Assignment 已 `released`，退回 `{kind: "role", ref: 工作项的 role_id}`，表示需要重新指派；`active` 和 `suspended` 仍指向该 Assignment。同一角色去重，其他派生字段规则不变。
 - 负责人和审核人不写进描述正文；改派作为事件进时间线。
@@ -1241,6 +1241,8 @@ C-133：侧栏拍板索引和时间线的拍板请求、已解决条目复用 §
 
 工作项清单可以折叠显示，每项包含负责人、状态和交付。
 
+C-197：卡片详情（完整页与抽屉）在目标下方只读显示风险标签，文案按 Q-279 定稿：“风险标签：安全、权限、数值规则”（security→安全、permission→权限、numeric_rule→数值规则，顿号分隔），不显示内部枚举名；没有标签时不显示该行。Web 不提供编辑入口，编辑走 MCP `update_card`、Workbench 卡片更新 API 或 CLI `card update --risk-tags`。
+
 V10b 在完整页与抽屉标题区只读显示建卡时固定的模板标题及版本，不提供建卡或更换模板入口。`human_mark_done` 模板展示“标记完成”：必填非空结果，可勾选同卡证据附件。服务端以当前 human 身份预检已有 `markCardDone` 命令，只在无必需工作项或必需项全部 accepted／passed 且状态允许时启用；拒绝时按钮禁用并显示中文原因。预检使用内存编号，不持久化效果、不分配数据库编号。提交经同一命令重新校验，结果、附件、完成状态与时间线原子保存；完成结果在时间线详情中按纯文本保留换行，不解析 Markdown、HTML 或编号链接；失败保留草稿与对应幂等键，实时刷新保留草稿并更新可用条件。
 
 Phase 1.5 U5a 起，从“卡片”页点击卡片也可以从右侧抽屉打开同一份详情组件；抽屉顶部提供关闭、在完整页面打开和复制链接，抽屉打开状态由卡片页路由的 `card=<编号>` 表示（详见 `docs/plans/phase-1.5-ui.md` §8.2）。
@@ -1898,7 +1900,7 @@ C-37：`cardigan preference get decision-delegation` 查看各类别授权，`ca
 
 C-49：`cardigan preference get pm-merge-confirmation` 查看、`cardigan preference set pm-merge-confirmation <on|off>` 修改“合并由 PM 代确认”（默认 on），与 Workbench 设置页写同一项目偏好和审计事件；关闭时仍交给 PM 的合并确认转给人。C-65：`cardigan card sensitive <C-n> on|off` 设置或取消敏感标记；`cardigan merge hold <C-n>` 以人的身份暂不合并；`merge confirm|hold|request-changes` 也可直接处理 PM 持有的确认，`merge status` 对 open 确认显示 decider，`needs-you` 末尾列出 PM 代确认中的合并和直接处理命令。PM 代确认需要 PM 角色具备 `resolve_delegated_decision`（C-37 起的默认 PM 角色已具备）。
 
-人可用 `cardigan card update <C-n> [--title <标题>] [--goal <目标>] [--acceptance <标准1;标准2>] [--priority <n>] [--status backlog|todo|cancelled] [--superseded-by <C-m>] [--project <p>]` 修改、取消或标记被取代的卡片。至少指定一个修改字段，验收标准按分号拆分（命令行中需加引号）；项目省略时取 `CARDIGAN_PROJECT`，再取数据库里唯一的项目。CLI 以 human 身份在同一事务内调用 domain `updateCard` 和（指定 `--superseded-by` 时）`supersedeCard`；组合修改任一步失败则全部回滚。取消按状态机同步取消工作项，保留已通过的验证项；不开放手动设置执行进度或完成状态。对已完成卡片使用 `--status cancelled` 返回中文错误，提示建新卡并用 `--superseded-by` 标记旧卡。取代标记只接受已完成或已取消的原卡及同项目的另一张现存卡片；Workbench 的取代标记入口见 §8.4。成功输出卡片编号及修改字段，非法参数或被领域状态机拒绝的转换返回中文错误和非零退出码，不写入部分改动。基础命令计划见 [C-3 CLI 修改卡片](plans/cli-card-update.md)，取代规则见 [Phase 2 P2a-5](plans/phase-2.md#2-p2a-自举做顺约-1-周)。
+人可用 `cardigan card update <C-n> [--title <标题>] [--goal <目标>] [--acceptance <标准1;标准2>] [--priority <n>] [--status backlog|todo|cancelled] [--risk-tags security,permission,numeric_rule|none] [--superseded-by <C-m>] [--project <p>]` 修改、取消或标记被取代的卡片。`--risk-tags` 只接受三个枚举值（逗号分隔、去重），`none` 清空，其他取值返回中文用法错误，写权限沿用 `updateCard` 的 PM／human 闸门（C-197）。至少指定一个修改字段，验收标准按分号拆分（命令行中需加引号）；项目省略时取 `CARDIGAN_PROJECT`，再取数据库里唯一的项目。CLI 以 human 身份在同一事务内调用 domain `updateCard` 和（指定 `--superseded-by` 时）`supersedeCard`；组合修改任一步失败则全部回滚。取消按状态机同步取消工作项，保留已通过的验证项；不开放手动设置执行进度或完成状态。对已完成卡片使用 `--status cancelled` 返回中文错误，提示建新卡并用 `--superseded-by` 标记旧卡。取代标记只接受已完成或已取消的原卡及同项目的另一张现存卡片；Workbench 的取代标记入口见 §8.4。成功输出卡片编号及修改字段，非法参数或被领域状态机拒绝的转换返回中文错误和非零退出码，不写入部分改动。基础命令计划见 [C-3 CLI 修改卡片](plans/cli-card-update.md)，取代规则见 [Phase 2 P2a-5](plans/phase-2.md#2-p2a-自举做顺约-1-周)。
 
 人可用全局成员命令（[P2-V V11a](plans/p2v-11-members-identity.md)），无需选择项目：`cardigan member add --name <名字> --title <职位> --role owner`、`member list [--all] [--role owner]`、`member update <M-n> [--name <名字>] [--title <职位>] [--avatar library:<人物 id> | --avatar-file <路径>]`、`member deactivate <M-n>` / `member activate <M-n>`。头像传空字符串可清空，数据目录规则与员工命令相同。初始化已有占位 owner，所以日常用 update 填写姓名和头像；add 第二个、停用最后一个均被拒绝。上线人员将占位成员改为真实姓名；成员管理不向 Agent 开放。
 
