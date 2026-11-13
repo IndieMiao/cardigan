@@ -665,17 +665,22 @@ test("pending terminal stop retains capacity if business cancellation finishes t
   f.store.uow.run((tx) =>
     tx.runs.put(f.project, { ...run, status: "cancelled" }),
   );
-  expect(
-    f.store.uow.read((tx) =>
-      runCapacitySnapshot(f.store, tx).occupied.get("local"),
-    ),
-  ).toBe(1);
+  // C-216: host-ops actions come from the Store's cached event streams; a
+  // backend without that port re-reads each stream. Both must agree.
+  const occupied = () =>
+    f.store.uow.read((tx) => {
+      expect(tx.events.listStreams).toBeTypeOf("function");
+      const cached = runCapacitySnapshot(f.store, tx).occupied.get("local");
+      const fallback = runCapacitySnapshot(f.store, {
+        ...tx,
+        events: { listAfter: tx.events.listAfter },
+      }).occupied.get("local");
+      expect(cached).toBe(fallback);
+      return cached;
+    });
+  expect(occupied()).toBe(1);
   await service.tick();
-  expect(
-    f.store.uow.read((tx) =>
-      runCapacitySnapshot(f.store, tx).occupied.get("local"),
-    ),
-  ).toBe(0);
+  expect(occupied()).toBe(0);
 });
 
 test("credential cleanup failures remain recoverable without exposing host errors or launching a new Run", async () => {

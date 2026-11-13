@@ -84,6 +84,7 @@ import { dispatchStateLoader, type StateLoader } from "./dispatch-state.js";
 import { patrolHostOps } from "./host-ops-patrol.js";
 import { escalatePmMergeStalls } from "./pm-merge-stall-attention.js";
 import { escalateReviewLimitWaits } from "./review-limit-attention.js";
+import { profileSpan } from "./tick-profile.js";
 
 /** The model/CLI snapshot a queued Run records; C-106 adds harness and effort. */
 export type LaunchSnapshot = Pick<
@@ -254,22 +255,28 @@ export class Dispatcher {
     const next = this.serial.then(async () => {
       this.loadState = dispatchStateLoader(this.options.store);
       try {
-        await this.options.hostOpsTick?.();
+        await profileSpan("host_ops", async () => this.options.hostOpsTick?.());
         // Route every project before choosing any winner. Project enumeration is
         // not a scheduling priority, even when a caller requests a project tick.
         const candidates: Candidate[] = [];
-        for (const project of this.options.store.listProjects())
-          candidates.push(...(await this.project(project.id)));
-        await this.inactive.tick(
-          this.options.store.listProjects().map((p) => p.id),
+        await profileSpan("route", async () => {
+          for (const project of this.options.store.listProjects())
+            candidates.push(...(await this.project(project.id)));
+        });
+        await profileSpan("inactive", () =>
+          this.inactive.tick(
+            this.options.store.listProjects().map((p) => p.id),
+          ),
         );
         candidates.sort((a, b) => compareDispatchOrder(a.order, b.order));
-        for (const candidate of candidates)
-          await this.deliver(
-            candidate.project,
-            candidate.notes,
-            candidate.assignment,
-          );
+        await profileSpan("deliver", async () => {
+          for (const candidate of candidates)
+            await this.deliver(
+              candidate.project,
+              candidate.notes,
+              candidate.assignment,
+            );
+        });
       } finally {
         this.loadState = loadCommandState;
       }
@@ -726,16 +733,21 @@ export class Dispatcher {
           );
         return;
       }
-      const all = store.listNotifications({ project_id: project }),
-        requested = new Set(notes.map((n) => n.id));
-      const ready = all.filter(
-        (n) =>
-          requested.has(n.id) &&
-          n.status === "pending" &&
-          this.owner(n, state) === a.id &&
-          !covered(n, state, a.id) &&
-          !decisionFollowupBlocked(state, n.event_id, a.id),
-      );
+      const requested = new Set(notes.map((n) => n.id));
+      // C-216: fetch only the requested pending rows instead of decoding the
+      // project's whole notification history on every claim.
+      const ready = store
+        .listNotifications({
+          project_id: project,
+          status: "pending",
+          ids: [...requested],
+        })
+        .filter(
+          (n) =>
+            this.owner(n, state) === a.id &&
+            !covered(n, state, a.id) &&
+            !decisionFollowupBlocked(state, n.event_id, a.id),
+        );
       const waiting = this.queued(state, a);
       if (
         (!ready.length &&
