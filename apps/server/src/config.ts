@@ -31,7 +31,8 @@ export interface ServerConfig {
   readonly attachmentIntervalMs?: number;
   readonly dispatchTimeoutMs?: number;
   readonly hostOpsPatrolIntervalMs?: number;
-  readonly hostOpsContextThresholdPct?: number;
+  readonly contextUsageCacheDir?: string;
+  readonly contextUsageStaleAfterMs?: number;
   readonly dispatchIntervalMs?: number;
   /**
    * After SIGTERM, how long in-flight Workbench requests may run before their
@@ -64,7 +65,8 @@ export interface ServerEnv extends ExecutionEnv {
   readonly CARDIGAN_ATTACHMENT_GC_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_DISPATCH_TIMEOUT_MS?: string | undefined;
   readonly CARDIGAN_HOST_OPS_PATROL_INTERVAL_MS?: string | undefined;
-  readonly CARDIGAN_HOST_OPS_CONTEXT_THRESHOLD_PCT?: string | undefined;
+  readonly CARDIGAN_CONTEXT_USAGE_CACHE_DIR?: string | undefined;
+  readonly CARDIGAN_CONTEXT_USAGE_STALE_AFTER_MS?: string | undefined;
   readonly CARDIGAN_DISPATCH_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_SHUTDOWN_GRACE_MS?: string | undefined;
 }
@@ -110,8 +112,17 @@ export function resolveServerConfig(env: ServerEnv): ServerConfig {
       "CARDIGAN_LISTEN_RETRY_TIMEOUT_MS",
       DEFAULT_LISTEN_RETRY_TIMEOUT_MS,
     ),
-    hostOpsContextThresholdPct: percentage(
-      env.CARDIGAN_HOST_OPS_CONTEXT_THRESHOLD_PCT,
+    ...(nonEmpty(env.CARDIGAN_CONTEXT_USAGE_CACHE_DIR)
+      ? {
+          contextUsageCacheDir: nonEmpty(
+            env.CARDIGAN_CONTEXT_USAGE_CACHE_DIR,
+          ) as string,
+        }
+      : {}),
+    contextUsageStaleAfterMs: interval(
+      env.CARDIGAN_CONTEXT_USAGE_STALE_AFTER_MS,
+      "CARDIGAN_CONTEXT_USAGE_STALE_AFTER_MS",
+      600_000,
     ),
     hostOpsPatrolIntervalMs: interval(
       env.CARDIGAN_HOST_OPS_PATROL_INTERVAL_MS,
@@ -208,12 +219,3 @@ import {
   resolveDataDirectory,
   resolveExecutionConfig,
 } from "@cardigan/runtime-herdr";
-
-function percentage(value?: string): number {
-  const result = Number(nonEmpty(value) ?? "80");
-  if (!Number.isFinite(result) || result < 1 || result > 100)
-    throw new Error(
-      "CARDIGAN_HOST_OPS_CONTEXT_THRESHOLD_PCT must be between 1 and 100",
-    );
-  return result;
-}
