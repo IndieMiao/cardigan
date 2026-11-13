@@ -61,6 +61,7 @@ import {
 } from "./commands.js";
 import { HostLaunchError, type LaunchStep, messageOf } from "./errors.js";
 import { agentNameFor } from "./naming.js";
+import { piTrustedWorktreePath } from "./pi-trust.js";
 import { effectiveRunLimit, runCapacitySnapshot } from "./run-capacity.js";
 import {
   deferTargetAttempt,
@@ -581,6 +582,12 @@ async function launch(
       mcp: { url: host.mcpUrl },
       run_dir: runDir,
       work_dir: workDir,
+      // C-235: pi pre-trusts only the verified real path of this worktree.
+      ...(worktree === undefined
+        ? {}
+        : await piTrustedWorktreePath(worktree.path).then((real) =>
+            real === undefined ? {} : { work_dir_real: real },
+          )),
       // GitWorktreeService owns this layout; do not run host Git in an Agent
       // repository to discover the common dir (§12.2). Only an Assignment that
       // actually got a worktree needs the repository exception (M5.S S13).
