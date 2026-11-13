@@ -16,7 +16,7 @@ import type {
 import { SUGGESTION_COPY } from "../suggestion-copy.js";
 import { cardDetail, fakeClient } from "../testing/fixtures.js";
 import { CardDetailPage } from "./CardDetailPage.js";
-import { NeedsYouPage } from "./NeedsYouPage.js";
+import { MergeConfirmation, NeedsYouPage } from "./NeedsYouPage.js";
 
 afterEach(cleanup);
 
@@ -297,4 +297,196 @@ test("C-192: card details show the suggestion on the merge confirmation and appl
       expect.any(String),
     ),
   );
+});
+
+test("C-192: card details offer one-click handling for a business decision, with an editable prefilled return", async () => {
+  const detail = cardDetail();
+  const q = choose({
+    id: "Q-5",
+    question: "这一版要退回吗？",
+    options: [
+      { key: "approve", description: "通过", impact: "继续" },
+      { key: "request_changes", description: "退回修改", impact: "返工" },
+    ],
+    recommended: "request_changes",
+    suggestion: suggestion({
+      option: "request_changes",
+      rationale: "缺暗色截图",
+      return_reason: "补暗色截图",
+    }),
+  });
+  const applySuggestion = vi.fn().mockResolvedValue(undefined);
+  render(
+    <CardDetailPage
+      client={fakeClient({
+        card: async () => ({ ...detail, decisions: [q] }),
+        applySuggestion,
+      })}
+      projectId="p-1"
+      cardId="C-1"
+    />,
+  );
+  const section = within(
+    await screen.findByRole("region", { name: SUGGESTION_COPY.cardSection }),
+  );
+  const box = within(section.getByRole("region", { name: "Q-5 建议" }));
+  expect(
+    box.getByText(SUGGESTION_COPY.line("退回修改", "缺暗色截图")),
+  ).toBeTruthy();
+  const reason = box.getByLabelText(
+    "Q-5 建议的退回原因",
+  ) as HTMLTextAreaElement;
+  expect(reason.value).toBe("补暗色截图");
+  fireEvent.change(reason, { target: { value: "补暗色和窄屏截图" } });
+  fireEvent.click(box.getByRole("button", { name: SUGGESTION_COPY.apply }));
+  await waitFor(() =>
+    expect(applySuggestion).toHaveBeenCalledWith(
+      "p-1",
+      "Q-5",
+      "request_changes",
+      "补暗色和窄屏截图",
+      expect.any(String),
+    ),
+  );
+});
+
+test("C-192: card details show no suggestion section without a suggestion or for decisions not with the human", async () => {
+  const detail = cardDetail();
+  render(
+    <CardDetailPage
+      client={fakeClient({
+        card: async () => ({
+          ...detail,
+          decisions: [
+            choose({ id: "Q-6" }),
+            choose({ id: "Q-7", decider: "role:pm", suggestion: suggestion() }),
+            choose({ id: "Q-8", status: "resolved", suggestion: suggestion() }),
+          ],
+        }),
+      })}
+      projectId="p-1"
+      cardId="C-1"
+    />,
+  );
+  await screen.findByRole("complementary", { name: "卡片概况" });
+  expect(
+    screen.queryByRole("region", { name: SUGGESTION_COPY.cardSection }),
+  ).toBe(null);
+  expect(screen.queryByRole("button", { name: SUGGESTION_COPY.apply })).toBe(
+    null,
+  );
+});
+
+test("C-192: a suggestion arriving while the page stays open prefills the reason, but keeps what the human typed", () => {
+  const client = fakeClient({});
+  const props = { client, projectId: "p-1", done: () => {}, elapsed: 0 };
+  const first = merge({ decider: "role:pm" });
+  const arrived = merge({
+    suggestion: suggestion({
+      option: "request_changes",
+      rationale: "窄屏错位",
+      return_reason: "修好窄屏布局",
+    }),
+  });
+  const { rerender } = render(<MergeConfirmation q={first} {...props} />);
+  rerender(<MergeConfirmation q={arrived} {...props} />);
+  const box = within(screen.getByRole("region", { name: "Q-3 建议" }));
+  const reason = box.getByLabelText(
+    "Q-3 建议的退回原因",
+  ) as HTMLTextAreaElement;
+  expect(reason.value).toBe("修好窄屏布局");
+  expect(
+    box
+      .getByRole("button", { name: SUGGESTION_COPY.apply })
+      .hasAttribute("disabled"),
+  ).toBe(false);
+  fireEvent.change(reason, { target: { value: "我自己的原因" } });
+  rerender(
+    <MergeConfirmation
+      q={merge({
+        suggestion: suggestion({
+          option: "request_changes",
+          rationale: "窄屏错位",
+          return_reason: "修好窄屏布局（新）",
+          at: "2026-11-13T01:00:00.000Z",
+        }),
+      })}
+      {...props}
+    />,
+  );
+  expect(
+    (
+      within(screen.getByRole("region", { name: "Q-3 建议" })).getByLabelText(
+        "Q-3 建议的退回原因",
+      ) as HTMLTextAreaElement
+    ).value,
+  ).toBe("我自己的原因");
+});
+
+test("C-192: a confirmed merge whose check failed shows the return suggestion and applies it", async () => {
+  const base = merge();
+  const applySuggestion = vi.fn().mockResolvedValue(undefined);
+  render(
+    <MergeConfirmation
+      q={merge({
+        status: "resolved",
+        options: [
+          { key: "request_changes", description: "退回修改", impact: "返工" },
+        ],
+        recommended: "request_changes",
+        suggestion: suggestion({
+          option: "request_changes",
+          rationale: "测试真实失败",
+          return_reason: "修好失败的测试",
+        }),
+        merge_confirmation: {
+          ...(base.merge_confirmation as NonNullable<
+            NeedsDecision["merge_confirmation"]
+          >),
+          merge_gate_enabled: true,
+          merge_check: {
+            completion_id: "D-9",
+            attempt_id: "attempt-1",
+            candidate_sha: "b".repeat(40),
+            tree_sha: "c".repeat(40),
+            status: "failed",
+            checks: [{ name: "test", status: "failed" }],
+            summary: "断言失败",
+            updated_at: "2026-11-13T00:00:00Z",
+          },
+        },
+      })}
+      client={fakeClient({ applySuggestion })}
+      projectId="p-1"
+      done={() => {}}
+      elapsed={0}
+    />,
+  );
+  const box = within(screen.getByRole("region", { name: "Q-3 建议" }));
+  expect(
+    (box.getByLabelText("Q-3 建议的退回原因") as HTMLTextAreaElement).value,
+  ).toBe("修好失败的测试");
+  fireEvent.click(box.getByRole("button", { name: SUGGESTION_COPY.apply }));
+  await waitFor(() =>
+    expect(applySuggestion).toHaveBeenCalledWith(
+      "p-1",
+      "Q-3",
+      "request_changes",
+      "修好失败的测试",
+      expect.any(String),
+    ),
+  );
+});
+
+test("C-192: a confirmed merge no longer offers its merge suggestion", () => {
+  render(
+    <MergeConfirmation
+      q={merge({ status: "resolved", suggestion: suggestion() })}
+      client={fakeClient({})}
+      projectId="p-1"
+      done={() => {}}
+      elapsed={0}
+    />,
+  );
+  expect(screen.queryByRole("region", { name: "Q-3 建议" })).toBe(null);
 });

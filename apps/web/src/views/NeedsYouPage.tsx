@@ -2,6 +2,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type CardiganClient,
+  type DecisionView,
   describeError,
   describeWriteError,
   type IncidentHandling,
@@ -14,7 +15,10 @@ import {
 } from "../api.js";
 import { DecisionAffectedCards } from "../components/DecisionAffectedCards.js";
 import { DecisionAttachments } from "../components/DecisionAttachments.js";
-import { DecisionSuggestion } from "../components/DecisionSuggestion.js";
+import {
+  DecisionSuggestion,
+  usePrefilledReason,
+} from "../components/DecisionSuggestion.js";
 import { EmployeeIdentity } from "../components/EmployeeIdentity.js";
 import {
   EmptyState,
@@ -163,10 +167,7 @@ function Decision({
   elapsed,
 }: Props & { q: NeedsDecision; done: () => void; elapsed: number }) {
   const [option, setOption] = useState(""),
-    [quote, setQuote] = useState(""),
-    [suggestedReason, setSuggestedReason] = useState(
-      q.suggestion?.return_reason ?? "",
-    );
+    [quote, setQuote] = useState("");
   const action = useAction(done);
   const [delegateFuture, setDelegateFuture] = useState(false);
   const canDelegate =
@@ -208,27 +209,14 @@ function Decision({
         </details>
       )}
       <DecisionAttachments attachments={q.attachments} />
-      {q.suggestion && !paused && (
-        <DecisionSuggestion
-          id={q.id}
-          suggestion={q.suggestion}
-          label={
-            q.options.find((o) => o.key === q.suggestion?.option)
-              ?.description ?? q.suggestion.option
-          }
-          busy={action.busy}
-          reason={suggestedReason}
-          onReason={setSuggestedReason}
-          onApply={() => {
-            const suggested = q.suggestion?.option ?? "";
-            const said =
-              suggested === "request_changes" ? suggestedReason : quote;
-            void action.run(
-              [projectId, q.id, "suggestion", suggested, said],
-              (key) =>
-                client.applySuggestion(projectId, q.id, suggested, said, key),
-            );
-          }}
+      {!paused && (
+        <SuggestedDecision
+          q={q}
+          client={client}
+          projectId={projectId}
+          done={done}
+          quote={quote}
+          action={action}
         />
       )}
       <form
@@ -351,6 +339,69 @@ function Decision({
     </article>
   );
 }
+/**
+ * C-192: one-click handling of a (non-merge) decision's suggestion. Needs You
+ * and card details share it; a suggested return keeps its editable reason.
+ */
+export function SuggestedDecision({
+  q,
+  client,
+  projectId,
+  done,
+  quote = "",
+  action: shared,
+}: Props & {
+  q: Pick<DecisionView, "id" | "suggestion" | "options">;
+  done: () => void;
+  /** Supplementary words the human typed elsewhere on the same card. */
+  quote?: string;
+  /** Share the surrounding form's busy and feedback state. */
+  action?: ReturnType<typeof useAction>;
+}) {
+  const own = useAction(done);
+  const action = shared ?? own;
+  const [reason, setReason] = usePrefilledReason(q.suggestion);
+  const suggestion = q.suggestion;
+  if (!suggestion) return null;
+  return (
+    <>
+      <DecisionSuggestion
+        id={q.id}
+        suggestion={suggestion}
+        label={
+          q.options.find((o) => o.key === suggestion.option)?.description ??
+          suggestion.option
+        }
+        busy={action.busy}
+        reason={reason}
+        onReason={setReason}
+        onApply={() => {
+          const said = suggestion.option === "request_changes" ? reason : quote;
+          void action.run(
+            [projectId, q.id, "suggestion", suggestion.option, said],
+            (key) =>
+              client.applySuggestion(
+                projectId,
+                q.id,
+                suggestion.option,
+                said,
+                key,
+              ),
+          );
+        }}
+      />
+      {!shared && (
+        <RequestFeedback
+          interactive
+          pending={action.busy}
+          pendingMessage="提交中…"
+          error={action.error}
+          message={action.message}
+        />
+      )}
+    </>
+  );
+}
 function ReviewLine({ review }: { readonly review: MergeConfirmationReview }) {
   const label =
     [review.work_item_title, review.role_id].filter(Boolean).join(" ") ||
@@ -456,10 +507,12 @@ export function MergeConfirmation({
   const [holding, setHolding] = useState(false);
   const [holdReason, setHoldReason] = useState("");
   const [holdUntil, setHoldUntil] = useState("");
-  const suggestion = q.status === "resolved" ? undefined : q.suggestion;
-  const [reason, setReason] = useState(
-    suggestion && !suggestion.stale ? (suggestion.return_reason ?? "") : "",
-  );
+  // C-192: once confirmed, only a return is still possible (failed check).
+  const suggestion =
+    q.status === "resolved" && q.suggestion?.option !== "request_changes"
+      ? undefined
+      : q.suggestion;
+  const [reason, setReason] = usePrefilledReason(suggestion);
   const [confirming, setConfirming] = useState(false);
   // C-192: the pre-merge dialog may be confirming the suggestion.
   const [confirmingSuggestion, setConfirmingSuggestion] = useState(false);

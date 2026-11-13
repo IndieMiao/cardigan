@@ -323,6 +323,8 @@ export function requestMergeChanges(
   raw_quote: string,
   /** PM Ops returning after a failed check (§7.4): notice for Needs You. */
   delegated?: { readonly notice: string; readonly proxy_authority: string },
+  /** C-192: the human returned with one click on the suggestion. */
+  viaSuggestion = false,
 ) {
   ensure(
     decision.card_id &&
@@ -360,10 +362,11 @@ export function requestMergeChanges(
             proxy_authority: delegated.proxy_authority,
           }
         : {}),
+      ...(viaSuggestion ? { via_suggestion: true } : {}),
     },
     {
       type: "status_change",
-      body: `退回修改：${reason}`,
+      body: `${viaSuggestion ? "按建议处理，退回修改" : "退回修改"}：${reason}`,
       decision_id: decision.id,
       work_item_id: target.work_item_id,
     },

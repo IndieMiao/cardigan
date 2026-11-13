@@ -5,8 +5,10 @@ import {
   type Assignment,
   type CommandState,
   decisionActionView,
+  type MergeCheckView,
   type RequestDecisionParams,
   recordDecision,
+  recordMergeCheck,
   requestDecision,
   resolveDelegatedDecision,
   standingTools,
@@ -31,9 +33,10 @@ const standing = (a: Assignment, mode: "ops" | "office"): Actor => ({
   allowed_tools: standingTools(role("pm").allowed_tools, mode),
 });
 const opsActor = standing(ops, "ops");
+const system: Actor = { kind: "system", project_id: human.project_id };
 const officeActor = standing(office, "office");
 
-async function setup() {
+async function setup(accepted = true) {
   const empty: CommandState = {
     project_id: human.project_id,
     roles: [role("coder"), role("reviewer"), role("pm")],
@@ -51,7 +54,7 @@ async function setup() {
     events: [],
   };
   const f = mergeFixture("confirm", 3, { state: empty, ports: ports() });
-  await f.accept();
+  if (accepted) await f.accept();
   const confirmation = () => {
     const q = f.state.decisions
       .filter((q) => q.trigger === "merge_confirmation")
@@ -87,7 +90,56 @@ async function setup() {
       },
       f.io,
     );
-  return { f, confirmation, escalate, apply };
+  /** Record a finished merge check on the current completion. */
+  const check = (status: MergeCheckView["status"], attempt: string) => {
+    const q = confirmation();
+    if (!("target" in q) || !("delivery_id" in q.target))
+      throw new Error("Missing completion");
+    const identity = {
+      card_id: f.card.id,
+      completion_id: q.target.delivery_id,
+      attempt_id: `attempt-${attempt}`,
+      candidate_sha: "b".repeat(40),
+      tree_sha: (attempt === "1" ? "d" : "e").repeat(40),
+    };
+    const gated = () => ({
+      ...f.state,
+      project_settings: { merge_gate_enabled: true },
+    });
+    f.commit(
+      recordMergeCheck(
+        gated(),
+        system,
+        { ...identity, status: "queued" },
+        f.io,
+      ),
+    );
+    f.commit(
+      recordMergeCheck(
+        gated(),
+        system,
+        { ...identity, status: "running" },
+        f.io,
+      ),
+    );
+    f.commit(
+      recordMergeCheck(
+        gated(),
+        system,
+        {
+          ...identity,
+          status,
+          summary: status,
+          log_ref: `${identity.attempt_id}.log`,
+          checks: [
+            { name: "test", status: "failed", exit_code: 1, duration_ms: 1 },
+          ],
+        } as Parameters<typeof recordMergeCheck>[2],
+        f.io,
+      ),
+    );
+  };
+  return { f, confirmation, escalate, apply, check };
 }
 
 test("C-192: without a suggestion the decision and its view keep their previous shape", async () => {
@@ -386,4 +438,156 @@ test("C-192: request_decision accepts a suggestion matching the recommendation, 
     raw_quote: "按建议处理：a",
     rationale: "更省空间",
   });
+});
+
+test("C-192: an approval bound to a delivery goes stale once that delivery is superseded, even without card_id", async () => {
+  const { f } = await setup(false);
+  const first = await f.deliver();
+  const q = f.commit(
+    requestDecision(
+      f.state,
+      officeActor,
+      {
+        category: "permission",
+        kind: "approve",
+        target: { delivery_id: first.id },
+        question: "Approve this version?",
+        context: "Bound to the delivery only",
+        options: [
+          { key: "yes", description: "批准", impact: "继续" },
+          { key: "no", description: "不批准", impact: "返工" },
+        ],
+        recommended: "yes",
+        suggestion: { option: "yes", rationale: "审过了" },
+        affected_cards: [],
+        affected_work_items: [],
+        blocking: false,
+        decider: "human",
+      },
+      f.io,
+    ),
+  );
+  expect(q.card_id).toBeUndefined();
+  expect(suggestionStale(f.state, q)).toBe(false);
+  await f.deliver("code", "b".repeat(40));
+  expect(f.state.deliveries.find((x) => x.id === first.id)?.status).toBe(
+    "superseded",
+  );
+  expect(suggestionStale(f.state, q)).toBe(true);
+  expect(
+    recordDecision(
+      f.state,
+      human,
+      {
+        decision_id: q.id,
+        option: "yes",
+        rationale: "",
+        raw_quote: "",
+        via_suggestion: true,
+      },
+      f.io,
+    ),
+  ).toMatchObject({ ok: false, error: { code: "stale_target" } });
+});
+
+test("C-192: a confirmed merge whose check failed is returned on PM's suggestion; the merge record is kept and the return is audited", async () => {
+  const { f, confirmation, escalate, apply, check } = await setup();
+  f.commit(
+    recordDecision(
+      f.state,
+      human,
+      {
+        decision_id: confirmation().id,
+        option: "merge",
+        rationale: "ok",
+        raw_quote: "ok",
+      },
+      f.io,
+    ),
+  );
+  check("failed", "1");
+  const confirmed = confirmation();
+  expect(confirmed).toMatchObject({
+    status: "resolved",
+    resolution: { option: "merge" },
+  });
+  f.commit(
+    escalate(
+      {
+        option: "request_changes",
+        rationale: "测试真实失败",
+        return_reason: "修好失败的测试",
+      },
+      { option: "request_changes" },
+    ),
+  );
+  const handed = f.state.decisions.find((q) => q.id === confirmed.id);
+  expect(handed?.suggestion).toMatchObject({ option: "request_changes" });
+  if (!handed) throw new Error("Missing decision");
+  const view = decisionActionView(f.state, handed);
+  expect(view.suggestion).toMatchObject({ stale: false });
+  expect(view.options.map((o) => o.key)).toEqual(["request_changes"]);
+  // Only the suggested option, and only by the human.
+  expect(apply(opsActor, { option: "request_changes" })).toMatchObject({
+    ok: false,
+    error: { code: "forbidden_tool" },
+  });
+  f.commit(
+    apply(human, {
+      decision_id: confirmed.id,
+      option: "request_changes",
+      rationale: "修好失败的测试，并补用例",
+      raw_quote: "修好失败的测试，并补用例",
+    }),
+  );
+  const after = f.state.decisions.find((q) => q.id === confirmed.id);
+  expect(after).toMatchObject({
+    status: "superseded",
+    resolution: { option: "merge" },
+  });
+  const changes = f.state.events.findLast(
+    (e) => e.type === "merge_changes_requested",
+  );
+  expect(changes?.actor.kind).toBe("human");
+  expect(changes?.payload).toMatchObject({
+    reason: "修好失败的测试，并补用例",
+    via_suggestion: true,
+  });
+  expect(
+    f.state.timeline.findLast((e) => e.decision_id === confirmed.id)?.body,
+  ).toBe("按建议处理，退回修改：修好失败的测试，并补用例");
+});
+
+test("C-192: a recheck after the suggestion makes the confirmed-failed return suggestion stale", async () => {
+  const { f, confirmation, escalate, apply, check } = await setup();
+  f.commit(
+    recordDecision(
+      f.state,
+      human,
+      {
+        decision_id: confirmation().id,
+        option: "merge",
+        rationale: "ok",
+        raw_quote: "ok",
+      },
+      f.io,
+    ),
+  );
+  check("failed", "1");
+  const id = confirmation().id;
+  f.commit(
+    escalate(
+      { option: "request_changes", rationale: "r", return_reason: "fix" },
+      { option: "request_changes" },
+    ),
+  );
+  check("failed", "2");
+  expect(
+    apply(human, {
+      decision_id: id,
+      option: "request_changes",
+      rationale: "fix",
+      raw_quote: "fix",
+    }),
+  ).toMatchObject({ ok: false, error: { code: "stale_target" } });
 });

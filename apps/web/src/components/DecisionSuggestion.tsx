@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from "react";
 import type { DecisionSuggestionView } from "../api.js";
 import { SUGGESTION_COPY } from "../suggestion-copy.js";
 import { StatusTag } from "./Foundation.js";
@@ -64,4 +65,27 @@ export function DecisionSuggestion({
       )}
     </section>
   );
+}
+
+/**
+ * The return reason box, prefilled from a fresh `request_changes` suggestion.
+ * A suggestion arriving (or changing) while the page stays mounted refills
+ * the box unless the human already typed their own text.
+ */
+export function usePrefilledReason(
+  suggestion: DecisionSuggestionView | undefined,
+) {
+  const prefill =
+    suggestion && !suggestion.stale ? (suggestion.return_reason ?? "") : "";
+  const [reason, setReason] = useState(prefill);
+  const last = useRef(prefill);
+  useEffect(() => {
+    if (prefill === last.current) return;
+    const previous = last.current;
+    last.current = prefill;
+    setReason((current) =>
+      current === previous || !current.trim() ? prefill : current,
+    );
+  }, [prefill]);
+  return [reason, setReason] as const;
 }

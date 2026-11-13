@@ -423,6 +423,10 @@ export function requestDecision(
                 options: p.options,
                 ...(p.card_id ? { card_id: p.card_id } : {}),
                 affected_cards: cards,
+                affected_work_items: items.map((w) => w.id),
+                ...(p.kind === "approve" && p.target
+                  ? { target: p.target }
+                  : {}),
               },
               p.suggestion,
             ),
@@ -499,9 +503,15 @@ export function recordDecision(
         "forbidden_tool",
         "按建议处理只能由人亲自操作，Agent 不能代人提交",
       );
+      // A confirmed merge whose check then failed can still be returned on
+      // a suggestion (P2a-1 §2.6); returnConfirmedMerge checks the failure.
       ensure(
         held.suggestion &&
-          ["open", "provisional", "snoozed"].includes(held.status),
+          (["open", "provisional", "snoozed"].includes(held.status) ||
+            (held.status === "resolved" &&
+              held.trigger === "merge_confirmation" &&
+              held.resolution?.option === "merge" &&
+              p.option === "request_changes")),
         "validation_failed",
         "这条拍板没有可用的建议",
       );
@@ -588,7 +598,14 @@ export function recordDecision(
         "forbidden_tool",
         "只有人可以退回已确认的合并",
       );
-      return returnConfirmedMerge(d, decision, p.rationale, p.raw_quote);
+      return returnConfirmedMerge(
+        d,
+        decision,
+        p.rationale,
+        p.raw_quote,
+        undefined,
+        !!p.via_suggestion,
+      );
     }
     return resolveDecisionDraft(
       d,
@@ -610,13 +627,14 @@ function returnConfirmedMerge(
   reason: string,
   raw_quote: string,
   delegated?: { readonly notice: string; readonly proxy_authority: string },
+  viaSuggestion = false,
 ) {
   ensure(
     failedConfirmedMergeCheck(d.state, decision),
     "illegal_transition",
     "已确认的合并只有在当前完成申请的最新检查失败或超时时才能退回修改；检查通过、排队或运行中均不能退回。",
   );
-  requestMergeChanges(d, decision, reason, raw_quote, delegated);
+  requestMergeChanges(d, decision, reason, raw_quote, delegated, viaSuggestion);
   const superseded: Decision = {
     ...decision,
     status: unwrap(transition("decision", decision.status, "supersede")),
@@ -680,7 +698,14 @@ function resolveDecisionDraft(
     decision.trigger === "merge_confirmation" &&
     p.option === "request_changes"
   )
-    requestMergeChanges(d, decision, p.rationale, p.raw_quote);
+    requestMergeChanges(
+      d,
+      decision,
+      p.rationale,
+      p.raw_quote,
+      undefined,
+      !!p.via_suggestion && !delegated,
+    );
   if (decision.trigger === "completion_review")
     resolveHumanCompletionReview(d, decision, p.option);
   return result;

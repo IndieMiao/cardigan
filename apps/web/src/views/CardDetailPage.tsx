@@ -32,8 +32,9 @@ import { RequestFeedback } from "../components/RequestFeedback.js";
 import { Timeline } from "../components/Timeline.js";
 import { TimelineControls } from "../components/TimelineControls.js";
 import { routeHash, useRouteFilters } from "../route.js";
+import { SUGGESTION_COPY } from "../suggestion-copy.js";
 import { useResource } from "../useResource.js";
-import { MergeConfirmation } from "./NeedsYouPage.js";
+import { MergeConfirmation, SuggestedDecision } from "./NeedsYouPage.js";
 
 export interface CardDetailPageProps {
   readonly client: CardiganClient;
@@ -318,10 +319,22 @@ function CardContent({
     .reverse()
     .find((d) => d.kind === "card_completion" && d.status === "accepted");
   const sectionId = (name: string) => `card-${cardId}-${name}`;
+  // C-192: open human decisions (other than merge confirmations) carrying a
+  // suggestion can be handled here in one click, like in Needs You.
+  const suggested = detail.decisions.filter(
+    (q) =>
+      q.suggestion &&
+      q.decider === "human" &&
+      q.trigger !== "merge_confirmation" &&
+      ["open", "provisional", "snoozed"].includes(q.status),
+  );
   const sections = [
     { id: sectionId("overview"), label: "概览" },
     ...(detail.merge_confirmations?.length || card.merge_check_blockers?.length
       ? [{ id: sectionId("merge"), label: "合并处理" }]
+      : []),
+    ...(suggested.length
+      ? [{ id: sectionId("suggested"), label: SUGGESTION_COPY.cardSection }]
       : []),
     ...(detail.work_items.length
       ? [
@@ -470,6 +483,36 @@ function CardContent({
                 done={reload}
                 elapsed={0}
               />
+            ))}
+          </section>
+        )}
+        {suggested.length > 0 && (
+          <section
+            id={sectionId("suggested")}
+            className="card-section"
+            aria-label={SUGGESTION_COPY.cardSection}
+          >
+            <h2>{SUGGESTION_COPY.cardSection}</h2>
+            {suggested.map((q) => (
+              <article
+                key={q.id}
+                className="needs-item"
+                aria-label={`拍板 ${q.id}`}
+              >
+                <h3 className="needs-question">{q.question}</h3>
+                <SuggestedDecision
+                  q={q}
+                  client={client}
+                  projectId={projectId}
+                  done={reload}
+                />
+                <p className="hint">
+                  {SUGGESTION_COPY.otherOptions}
+                  <a href={routeHash({ kind: "needs-you", projectId })}>
+                    Needs You
+                  </a>
+                </p>
+              </article>
             ))}
           </section>
         )}

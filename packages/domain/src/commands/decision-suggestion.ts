@@ -16,38 +16,63 @@ export interface DecisionSuggestionInput {
   readonly return_reason?: string;
 }
 
-type Scope = Pick<Decision, "card_id" | "affected_cards">;
+type Scope = Pick<Decision, "card_id" | "affected_cards"> & {
+  readonly affected_work_items?: Decision["affected_work_items"];
+  readonly target?: Extract<Decision, { kind: "approve" }>["target"];
+};
+
+const targetDelivery = (q: Scope) =>
+  q.target && "delivery_id" in q.target ? q.target.delivery_id : undefined;
 
 /**
- * Fingerprint of what a suggestion was written against, per card: every
- * delivery (a newer version adds one), the current completion's latest merge
- * check attempt and status, and the pre-merge checks.
+ * Fingerprint of what a suggestion was written against. Per card (the
+ * decision's cards, its work items' cards and an approval target's card):
+ * every delivery (a newer version adds one), the current completion's latest
+ * merge check attempt and status, and the pre-merge checks. An approval bound
+ * to a delivery also records that delivery's status (e.g. superseded).
  */
 export function suggestionBasis(state: CommandState, q: Scope): string {
-  const cards = [
-    ...new Set([...(q.card_id ? [q.card_id] : []), ...q.affected_cards]),
-  ].sort();
   const cardOf = new Map(state.work_items.map((w) => [w.id, w.card_id]));
+  const target = targetDelivery(q);
+  const targetRow = target
+    ? state.deliveries.find((x) => x.id === target)
+    : undefined;
+  const cards = [
+    ...new Set([
+      ...(q.card_id ? [q.card_id] : []),
+      ...q.affected_cards,
+      ...[
+        ...(q.affected_work_items ?? []),
+        ...(targetRow ? [targetRow.work_item_id] : []),
+      ].flatMap((id) => {
+        const card = cardOf.get(id);
+        return card ? [card] : [];
+      }),
+    ]),
+  ].sort();
+  const perCard = cards.map((card_id) => {
+    const card = state.cards.find((c) => c.id === card_id);
+    const deliveries = state.deliveries
+      .filter((x) => cardOf.get(x.work_item_id) === card_id)
+      .map((x) => x.id)
+      .sort();
+    const context = attempt(() => mergeContext(state, card_id));
+    const check = context.ok
+      ? latestMergeCheck(state.events, card_id, context.value.target.id)
+      : undefined;
+    return [
+      card_id,
+      deliveries,
+      check ? `${check.attempt_id}:${check.status}` : null,
+      (card?.pre_merge_checks ?? []).map(
+        (c) => `${c.label}:${c.status}:${c.updated_at}`,
+      ),
+    ];
+  });
   return JSON.stringify(
-    cards.map((card_id) => {
-      const card = state.cards.find((c) => c.id === card_id);
-      const deliveries = state.deliveries
-        .filter((x) => cardOf.get(x.work_item_id) === card_id)
-        .map((x) => x.id)
-        .sort();
-      const context = attempt(() => mergeContext(state, card_id));
-      const check = context.ok
-        ? latestMergeCheck(state.events, card_id, context.value.target.id)
-        : undefined;
-      return [
-        card_id,
-        deliveries,
-        check ? `${check.attempt_id}:${check.status}` : null,
-        (card?.pre_merge_checks ?? []).map(
-          (c) => `${c.label}:${c.status}:${c.updated_at}`,
-        ),
-      ];
-    }),
+    target
+      ? { target: [target, targetRow?.status ?? null], cards: perCard }
+      : perCard,
   );
 }
 
