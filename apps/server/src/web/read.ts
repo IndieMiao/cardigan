@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type {
   Actor,
   Attachment,
@@ -1321,6 +1322,28 @@ function runQueuedAt(state: CommandState) {
 
 /** C-232: the host patrol's latest fresh context sample per Assignment. */
 export type ExecutionContexts = ReadonlyMap<string, ContextObservation>;
+
+/**
+ * C-232: a short hash of what the execution view would show from the samples,
+ * for the SSE `context` frame. Only fields the view uses take part, so a
+ * re-poll of an unchanged sample does not refresh the page.
+ */
+export function contextUsageRevision(contexts: ExecutionContexts | undefined) {
+  const entries = [...(contexts ?? [])]
+    .map(([assignment, usage]) => [
+      assignment,
+      usage.session_id,
+      usage.runtime_key,
+      usage.context_tokens,
+      usage.context_window_size,
+      usage.updated_at,
+    ])
+    .sort((left, right) => String(left[0]).localeCompare(String(right[0])));
+  return createHash("sha256")
+    .update(JSON.stringify(entries))
+    .digest("hex")
+    .slice(0, 16);
+}
 
 /**
  * C-232: the Workbench shape of a context sample. Only the numbers leave the

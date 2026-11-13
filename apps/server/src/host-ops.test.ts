@@ -44,6 +44,7 @@ import { resolveServerConfig } from "./config.js";
 import { Dispatcher } from "./dispatch.js";
 import { routeProjectEvents } from "./dispatch-inbox.js";
 import { patrolHostOps } from "./host-ops-patrol.js";
+import { contextUsageRevision } from "./web/read.js";
 
 let f: ReturnType<typeof dispatchFixture>,
   ops: Assignment,
@@ -1016,6 +1017,12 @@ test("C-232: the Workbench reads the last poll's fresh samples from memory, drop
         updated_at: f.clock.now(),
       }),
     );
+  // C-232 rework: the SSE `context` revision is derived from this view, so
+  // each change below must move it while no event is written.
+  const revision = () => contextUsageRevision(service.contextUsage(f.project));
+  const events = () => f.state().events.length;
+  const eventCount = events();
+  const empty = revision();
   await sample(420);
   // Nothing is read on demand: before the first poll there is no sample.
   expect(service.contextUsage(f.project).size).toBe(0);
@@ -1027,17 +1034,30 @@ test("C-232: the Workbench reads the last poll's fresh samples from memory, drop
     context_window_size: 1000,
     source: "pi_turn_end:getContextUsage",
   });
+  const first = revision();
+  expect(first).not.toBe(empty);
+  // A new normal reading (no threshold, so no notice event).
+  f.advance(31000);
+  await sample(650);
+  await service.tick();
+  const changed = revision();
+  expect(changed).not.toBe(first);
   // Past the stale limit the cached reading disappears even without a poll.
   f.advance(61000);
   expect(service.contextUsage(f.project).size).toBe(0);
+  expect(revision()).toBe(empty);
   // A newer unknown sample replaces the old one on the next poll.
   await sample(420);
   await service.tick();
   expect(service.contextUsage(f.project).size).toBe(1);
+  expect(revision()).not.toBe(empty);
   f.advance(31000);
   await sample(null);
   await service.tick();
   expect(service.contextUsage(f.project).size).toBe(0);
+  expect(revision()).toBe(empty);
+  // None of these changes was a business event the stream could carry.
+  expect(events()).toBe(eventCount);
 });
 
 test("pi high watermark becomes non-actionable immediately when the installed extension reports unknown usage", async () => {

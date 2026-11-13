@@ -37,7 +37,8 @@ class Connection extends EventTarget {
   }
   emit(type: string, data?: unknown) {
     this.dispatchEvent(
-      type === "change" || (type === "queue" && data !== undefined)
+      type === "change" ||
+        ((type === "queue" || type === "context") && data !== undefined)
         ? new MessageEvent(type, { data: JSON.stringify(data) })
         : new Event(type),
     );
@@ -585,4 +586,62 @@ test("cross-project queue changes refresh views without fabricating a project ev
   stop();
   p.last.emit("queue");
   expect(c.ready).toHaveBeenCalledOnce();
+});
+
+test("C-232: context revisions call only the context callback, and only when they change", () => {
+  vi.useFakeTimers();
+  const p = pool(),
+    c = { ...callbacks(), context: vi.fn() },
+    stop = subscribeProject("p-1", c, p.create);
+  const first = p.last;
+  first.emit("open");
+  first.emit("context", { revision: "x1" });
+  // The opening revision is covered by the re-read on open.
+  expect(c.context).not.toHaveBeenCalled();
+  first.emit("context", { revision: "x1" });
+  expect(c.context).not.toHaveBeenCalled();
+  first.emit("context", { revision: "x2" });
+  expect(c.context).toHaveBeenCalledTimes(1);
+  // Context never re-reads the other views.
+  expect(c.ready).toHaveBeenCalledTimes(1);
+  first.emit("change", change("C-1", 3));
+
+  // Resumed with the same samples: nothing to read.
+  first.emit("shutdown");
+  vi.advanceTimersByTime(3000);
+  p.last.emit("open");
+  p.last.emit("context", { revision: "x2" });
+  expect(c.context).toHaveBeenCalledTimes(1);
+  // Samples changed (or expired) while away.
+  p.last.emit("shutdown");
+  vi.advanceTimersByTime(3000);
+  p.last.emit("open");
+  p.last.emit("context", { revision: "x3" });
+  expect(c.context).toHaveBeenCalledTimes(2);
+  // No revision (malformed): refresh to be safe.
+  p.last.emit("context");
+  expect(c.context).toHaveBeenCalledTimes(3);
+  expect(c.ready).toHaveBeenCalledTimes(1);
+  stop();
+});
+
+test("C-232: a context change re-reads the open execution view and nothing else", async () => {
+  window.location.hash = "#/p/p-1/execution";
+  const defaults = fakeClient();
+  const execution = vi.spyOn(defaults, "execution");
+  const needsYou = vi.spyOn(defaults, "needsYou");
+  const { client, connections } = live({ execution, needsYou });
+  render(<App client={client} />);
+  await waitFor(() => expect(execution).toHaveBeenCalled());
+  act(() => {
+    connections.last.emit("open");
+    connections.last.emit("context", { revision: "x1" });
+  });
+  await settle();
+  const reads = execution.mock.calls.length,
+    needs = needsYou.mock.calls.length;
+  act(() => connections.last.emit("context", { revision: "x2" }));
+  await waitFor(() => expect(execution).toHaveBeenCalledTimes(reads + 1));
+  await settle();
+  expect(needsYou).toHaveBeenCalledTimes(needs);
 });

@@ -59,6 +59,7 @@ import {
   type ActivityQuery,
   activity,
   type CardFilter,
+  contextUsageRevision,
   type ExecutionContexts,
   executionRunPage,
   executionView,
@@ -462,6 +463,12 @@ async function serveProjectRoute(
         : { heartbeatMs: context.stream.heartbeatMs }),
       log: context.log,
       signal: context.shutdown,
+      ...(context.contextUsage
+        ? {
+            contextRevision: () =>
+              contextUsageRevision(context.contextUsage?.(project_id)),
+          }
+        : {}),
     });
     return;
   }

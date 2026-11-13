@@ -400,6 +400,7 @@ function Workbench({
               client={client}
               projectId={selected.id}
               revision={live.revision}
+              contextRevision={live.contextRevision}
             />
           )}
           {selected !== undefined && route?.kind === "needs-you" && (

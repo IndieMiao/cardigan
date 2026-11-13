@@ -869,10 +869,13 @@ export function ExecutionPage({
   client,
   projectId,
   revision = 0,
+  contextRevision = 0,
 }: {
   client: CardiganClient;
   projectId: string;
   revision?: number;
+  /** C-232: bumps when the host's context samples change (SSE `context`). */
+  contextRevision?: number;
 }) {
   const [filters, setFilters] = useRouteFilters({
     kind: "execution",
@@ -898,9 +901,10 @@ export function ExecutionPage({
     () => client.execution(projectId),
     [client, projectId],
   );
+  // Both counters only grow, so their sum changes whenever either does.
   const { data, pending, error, reload, interactive } = useResource(
     load,
-    revision,
+    revision + contextRevision,
   );
   const [sort, setSort] = useState<ExecutionSort>(() =>
     readExecutionSort(projectId),
