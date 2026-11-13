@@ -68,8 +68,9 @@ const browserSchema = z.strictObject({
   command: absolutePathSchema,
   /** Read-only shared Chromium, exported as `PLAYWRIGHT_BROWSERS_PATH`. */
   browsers_path: absolutePathSchema,
-  /** Extra arguments appended after Cardigan's own. */
-  args: z.array(z.string()).optional(),
+  // No free-form `args`: extra flags could switch the server to HTTP
+  // (`--port`), attach an existing browser (`--extension`) or move the
+  // browser and output directory, undoing the fixed stdio/isolated launch.
 });
 
 const launchConfigSchema = z.strictObject({

@@ -7,6 +7,7 @@ import {
   BROWSER_TOOL_PATTERN,
   type CompiledAssignmentLaunch,
   compileAssignmentLaunch,
+  corePromptFor,
   DEFAULT_ROLE_KINDS,
   type DefaultRoleId,
   defaultRoleDefinition,
@@ -35,6 +36,9 @@ const withBrowser = parseLaunchConfig({
 });
 const withoutBrowser = parseLaunchConfig(base);
 
+/** A Core Prompt that carries the browser boundary, as an upgraded role does. */
+const CORE = `core\n- ${BROWSER_BOUNDARY_RULE}`;
+
 const PROFILE: Record<Harness, string> = {
   "claude-code": "claude",
   codex: "codex",
@@ -47,6 +51,7 @@ function compile(
     readonly capabilities?: readonly string[];
     readonly launch?: typeof withBrowser;
     readonly role_id?: string;
+    readonly core_prompt?: string;
   } = {},
 ): CompiledAssignmentLaunch {
   return compileAssignmentLaunch({
@@ -57,7 +62,7 @@ function compile(
       launch_profile: PROFILE[harness],
       worktree: "readonly",
       allowed_tools: ["whoami", "submit_review"],
-      core_prompt: "core",
+      core_prompt: options.core_prompt ?? CORE,
       ...(options.capabilities === undefined
         ? { capabilities: ["verify", BROWSER_CAPABILITY] }
         : { capabilities: options.capabilities }),
@@ -77,12 +82,15 @@ function file(compiled: CompiledAssignmentLaunch, suffix: string): string {
   return found.content;
 }
 
-/** Everything the host writes or passes to the CLI. */
+/** Every launch setting the host writes or passes to the CLI. */
 function surface(compiled: CompiledAssignmentLaunch): string {
   return [
     ...compiled.args,
     ...Object.entries(compiled.env).map(([k, v]) => `${k}=${v}`),
-    ...compiled.files.map((f) => `${f.path}\n${f.content}`),
+    // The Core Prompt may name the browser in its rules; the launch must not.
+    ...compiled.files
+      .filter((f) => !f.path.endsWith("/core.md"))
+      .map((f) => `${f.path}\n${f.content}`),
   ].join("\n");
 }
 
@@ -179,25 +187,6 @@ describe("roles with the browser capability get a local stdio server", () => {
       expect(browserPart).toContain("PLAYWRIGHT_BROWSERS_PATH");
     },
   );
-
-  test("launch.yaml extra args come after Cardigan's own", () => {
-    const launch = parseLaunchConfig({
-      ...base,
-      browser: {
-        command: MCP_BIN,
-        browsers_path: BROWSERS,
-        args: ["--viewport-size", "390,844"],
-      },
-    });
-    const config = JSON.parse(
-      file(compile("claude-code", { launch }), "mcp.json"),
-    ) as { mcpServers: { playwright: { args: string[] } } };
-    expect(config.mcpServers.playwright.args).toEqual([
-      ...EXPECTED_ARGS,
-      "--viewport-size",
-      "390,844",
-    ]);
-  });
 });
 
 describe("no browser leaks to other roles or hosts", () => {
@@ -222,6 +211,85 @@ describe("no browser leaks to other roles or hosts", () => {
     },
   );
 
+  const harnesses = ["claude-code", "codex", "pi"] as const;
+  test.each(
+    harnesses.flatMap((harness) =>
+      [
+        "coder",
+        "reviewer",
+        "pm",
+        "tester",
+        "designer",
+        "host_ops",
+        "custom",
+      ].map((role_id) => [harness, role_id] as const),
+    ),
+  )(
+    "%s: %s declaring browser (even with the rule) still gets nothing",
+    (harness, role_id) => {
+      const compiled = compile(harness, {
+        role_id,
+        capabilities: [BROWSER_CAPABILITY],
+      });
+      expect(surface(compiled)).not.toMatch(/playwright|PLAYWRIGHT|chromium/u);
+      expect(compiled.browser).toBe(false);
+    },
+  );
+
+  test.each(
+    harnesses.flatMap((harness) =>
+      BROWSER_ROLES.map((role_id) => [harness, role_id] as const),
+    ),
+  )(
+    "%s: %s on a role version without the Workbench rule gets nothing",
+    (harness, role_id) => {
+      const compiled = compile(harness, {
+        role_id,
+        core_prompt: "Existing role without browser boundary",
+      });
+      expect(surface(compiled)).not.toMatch(/playwright|PLAYWRIGHT|chromium/u);
+      expect(compiled.browser).toBe(false);
+    },
+  );
+
+  test.each(
+    harnesses.flatMap((harness) =>
+      BROWSER_ROLES.map((role_id) => [harness, role_id] as const),
+    ),
+  )(
+    "%s: %s with capability, rule and host install gets the browser",
+    (harness, role_id) => {
+      expect(compile(harness, { role_id }).browser).toBe(true);
+    },
+  );
+
+  test("the default pack's Core Prompts pass the boundary gate", () => {
+    for (const role_id of BROWSER_ROLES) {
+      const compiled = compileAssignmentLaunch({
+        assignment: { assignment_id: "A-40", run_id: "R-9" },
+        role: {
+          role_id,
+          harness: "claude-code",
+          launch_profile: "claude",
+          worktree: "readonly",
+          allowed_tools: ["whoami"],
+          core_prompt: corePromptFor(role_id),
+          capabilities: defaultRoleDefinition(role_id, {
+            harness: "claude-code",
+            launch_profile_ref: "claude",
+          }).capabilities,
+        },
+        launch: withBrowser,
+        mcp: { url: "http://127.0.0.1:3004/mcp" },
+        run_dir: RUN_DIR,
+        work_dir: "/srv/agent/worktrees/A-40",
+        first_prompt: "bell",
+        secrets: {},
+      });
+      expect(compiled.browser, role_id).toBe(true);
+    }
+  });
+
   test("roles without capabilities (legacy callers) get nothing", () => {
     const compiled = compileAssignmentLaunch({
       assignment: { assignment_id: "A-40", run_id: "R-9" },
@@ -231,7 +299,7 @@ describe("no browser leaks to other roles or hosts", () => {
         launch_profile: "claude",
         worktree: "readonly",
         allowed_tools: ["whoami"],
-        core_prompt: "core",
+        core_prompt: CORE,
       },
       launch: withBrowser,
       mcp: { url: "http://127.0.0.1:3004/mcp" },
@@ -253,7 +321,7 @@ describe("no browser leaks to other roles or hosts", () => {
           launch_profile: "claude",
           worktree: "readonly",
           allowed_tools: ["whoami"],
-          core_prompt: "core",
+          core_prompt: CORE,
           capabilities: [BROWSER_CAPABILITY],
         },
         launch: withBrowser,
@@ -273,6 +341,16 @@ describe("launch.yaml browser section", () => {
     [{ command: MCP_BIN, browsers_path: "playwright-chromium" }],
     [{ command: MCP_BIN }],
     [{ command: MCP_BIN, browsers_path: BROWSERS, port: 8931 }],
+    // No free-form args: they could switch transport, attach an existing
+    // browser, or move the browser and output directory (review V-646).
+    ...[
+      ["--port", "8931"],
+      ["--extension"],
+      ["--browser", "webkit"],
+      ["--output-dir", "/tmp/elsewhere"],
+      ["--viewport-size", "390,844"],
+      [],
+    ].map((args) => [{ command: MCP_BIN, browsers_path: BROWSERS, args }]),
   ])("rejects %j", (browser) => {
     expect(() => parseLaunchConfig({ ...base, browser })).toThrow(
       LaunchConfigError,

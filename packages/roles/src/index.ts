@@ -2,9 +2,11 @@ export {
   type AssignmentIdentity,
   type AssignmentMcpEndpoint,
   type AssignmentRoleInput,
+  BROWSER_BOUNDARY_RULE,
   BROWSER_CAPABILITY,
   BROWSER_MCP_ARGS,
   BROWSER_MCP_SERVER_NAME,
+  BROWSER_ROLES,
   BROWSER_TOOL_PATTERN,
   type CompileAssignmentInput,
   type CompiledAssignmentLaunch,
@@ -40,8 +42,6 @@ export {
 export { REDACTED, redactLaunch } from "./redact.js";
 export {
   AGENT_PROTOCOL,
-  BROWSER_BOUNDARY_RULE,
-  BROWSER_ROLES,
   BROWSER_SCREENSHOT_RULE,
   type ConvertedRoleInstructions,
   composeRolePrompt,

@@ -56,7 +56,21 @@ export const BROWSER_CAPABILITY = "browser";
 export const BROWSER_MCP_SERVER_NAME = "playwright";
 /** Harness allow-list entry for every tool of the browser server. */
 export const BROWSER_TOOL_PATTERN = `mcp__${BROWSER_MCP_SERVER_NAME}__*`;
-/** Arguments Cardigan always passes; `launch.yaml` can only append. */
+/** Default roles that carry the `browser` capability (ADR 0006 decision 6). */
+export const BROWSER_ROLES = [
+  "ui_ux_designer",
+  "design_director",
+  "independent_reviewer",
+] as const;
+
+/**
+ * P2a-14 ⑧: the local browser's boundary. A role rule, not a network
+ * restriction (ADR 0006 decision 6): the Agent already has a shell, and the
+ * real boundaries are the Workbench password and the Card MCP token.
+ */
+export const BROWSER_BOUNDARY_RULE = `有浏览器工具（\`${BROWSER_TOOL_PATTERN}\`）时，被测页面只能是你自己起的本地 dev server（验证方在主机准备的可写构建目录，产出方在当前 worktree）；不得打开生产 Workbench，不得导航到 127.0.0.1:7781 或其它已知 Workbench 端口，也不在浏览器里登录任何账号。没有浏览器工具时如实写未核，不声称看过页面。`;
+
+/** Fixed arguments; the host config cannot add to or override them. */
 export const BROWSER_MCP_ARGS = [
   "--headless",
   "--isolated",
@@ -210,9 +224,13 @@ export function compileAssignmentLaunch(
   const toolNames = input.role.allowed_tools.map(
     (tool) => `mcp__${serverName}__${tool}`,
   );
-  // Both the role capability and the host's browser install are required.
+  // Every gate must hold: one of the approved roles, a role version that
+  // took the `browser` capability, its Core Prompt carrying the Workbench
+  // boundary, and the host's browser install. Anything else gets no browser.
   const browser =
+    (BROWSER_ROLES as readonly string[]).includes(input.role.role_id) &&
     input.role.capabilities?.includes(BROWSER_CAPABILITY) &&
+    corePrompt.includes(BROWSER_BOUNDARY_RULE) &&
     input.launch.browser !== undefined
       ? browserServer(input.launch.browser, input.run_dir)
       : undefined;
@@ -506,12 +524,7 @@ function browserServer(
 ): BrowserServer {
   return {
     command: config.command,
-    args: [
-      ...BROWSER_MCP_ARGS,
-      "--output-dir",
-      join(runDir, "playwright"),
-      ...(config.args ?? []),
-    ],
+    args: [...BROWSER_MCP_ARGS, "--output-dir", join(runDir, "playwright")],
     env: { PLAYWRIGHT_BROWSERS_PATH: config.browsers_path },
   };
 }

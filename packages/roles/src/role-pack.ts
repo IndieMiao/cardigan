@@ -7,8 +7,9 @@ import {
 } from "@cardigan/domain";
 import {
   type AssignmentRoleInput,
+  BROWSER_BOUNDARY_RULE,
   BROWSER_CAPABILITY,
-  BROWSER_TOOL_PATTERN,
+  BROWSER_ROLES,
 } from "./assignment.js";
 import type { Harness } from "./harness.js";
 import { composeRolePrompt } from "./prompt.js";
@@ -55,28 +56,14 @@ export const PM_TEMPLATE_RULES = [
   "确实需要新角色或新模板时，只能起草，通过 `request_decision`（`category=permission`、`decider=human`）交人批准，不能自己创建或修改模板和角色；起草前先用 `list_roles` 确认没有能力相近、可以直接复用的角色。",
 ] as const;
 
-/**
- * C-162: when a human action must hold the card's merge (C-112 `blocks_merge`).
- * Shared verbatim by every default role so the wording cannot drift.
- */
-/**
- * P2a-14 ⑧: the local browser's boundary. A role rule, not a network
- * restriction (ADR 0006 decision 6): the Agent already has a shell, and the
- * real boundaries are the Workbench password and the Card MCP token.
- */
-export const BROWSER_BOUNDARY_RULE = `有浏览器工具（\`${BROWSER_TOOL_PATTERN}\`）时，被测页面只能是你自己起的本地 dev server（验证方在主机准备的可写构建目录，产出方在当前 worktree）；不得打开生产 Workbench，不得导航到 127.0.0.1:7781 或其它已知 Workbench 端口，也不在浏览器里登录任何账号。没有浏览器工具时如实写未核，不声称看过页面。`;
-
 /** P2a-14 ⑧: what the independent reviewer does with the browser on UI cards. */
 export const BROWSER_SCREENSHOT_RULE =
   "界面卡用浏览器工具截图核对亮色、暗色两套主题和 390px 窄屏，视口与主题切换沿用项目已有的截图约定；截图用 `upload_attachment(kind=evidence)` 附到卡片留痕，核对结论写进 `submit_review`。";
 
-/** Default roles that carry the `browser` capability (ADR 0006 decision 6). */
-export const BROWSER_ROLES = [
-  "ui_ux_designer",
-  "design_director",
-  "independent_reviewer",
-] as const;
-
+/**
+ * C-162: when a human action must hold the card's merge (C-112 `blocks_merge`).
+ * Shared verbatim by every default role so the wording cannot drift.
+ */
 export const HUMAN_ACTION_MERGE_RULE =
   "事项不完成就不应该合并时（例如需要人提供或轮换凭据、人确认安全或权限取舍、人在仓库外完成某个前置操作），`request_human_action` 必须传 `blocks_merge=true`；只是请人看看、知会或可以事后补做的，不设。";
 
