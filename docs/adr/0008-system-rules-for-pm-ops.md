@@ -95,7 +95,7 @@ GROUP BY type ORDER BY n DESC;
 | 代拍 general / feature_detail | **仍由 PM Ops** | 需要判断（Q-279） |
 | 分拣人工操作（`triage_human_action`） | **仍由 PM Ops** | 需要判断 |
 | 回应无人认领的人类评论、处理 Router 升级事件 | **仍由 PM Ops** | 需要判断 |
-| 等待过久的提醒（就绪项无人指派、Run 失活、核对项长时间 pending） | **交给系统定时器**（决定 3） | 提醒本身是确定性的；收到提醒后怎么处理仍是 PM Ops 或人的判断 |
+| 等待过久的提醒（就绪项无人指派、核对项长时间 pending；Run 失活沿用现有看门狗） | **交给系统定时器**（决定 3） | 提醒本身是确定性的；收到提醒后怎么处理仍是 PM Ops 或人的判断 |
 | 新建卡、拆卡、写评论说明进展 | **仍由 PM Ops / PM Office** | 需要判断 |
 
 ## 3. 决定
@@ -183,10 +183,14 @@ GROUP BY type ORDER BY n DESC;
 | 提醒 | 触发条件 | 判定依据 | 例外 | 收件人与回退 |
 |---|---|---|---|---|
 | ① 就绪项超时未指派 | 工作项可以开工（产出项：卡片 `todo`/`in_progress`、依赖都已成功；验证项：已有可审交付）且没有 Assignment，持续超过 `unassigned_ready_after_minutes`（**待定**） | 工作项状态、依赖、交付事件的时间 | 卡片 backlog / 暂停；工作项标了 `manual_assign`（若采纳）；自动指派刚失败且已通知 PM Ops 的同一周期不重复 | PM Ops；没有活跃 PM Ops 时进 Needs You |
-| ② Run 失活 | Run 处于 running，最后一次活动（`lastRunActivity`：Run 开始、心跳、Assignment 最近一次 MCP 调用）距今超过 `run_inactive_warn_after_minutes`（**待定**，须小于现有失活自动取消阈值 `DEFAULT_INACTIVE_CANCEL_AFTER_MS`，目前 60 分钟） | `inactive-run.ts` 的同一活动口径 | 已进入取消流程的 Run | 普通 Run → PM Ops 和常驻 host_ops；**常驻 PM Ops 自己的 Run → 常驻 host_ops，没有 host_ops 时进 Needs You**（不提醒卡住的 PM Ops 本人）。本提醒只通知，不自动取消、不自动换会话（现有自动取消规则不变） |
+| ② Run 失活 | **不新增计时器，复用现有看门狗**（见表下说明） | `apps/server/src/dispatch.ts` 维护循环：`lastRunActivity`（Run 开始、心跳、Assignment 最近一次 MCP 调用）超过 `inactivityGraceMs`（默认 15 分钟）时发 `run_inactive` 告警，按 Run 持久去重 | 外接 Assignment、非 running 的 Run（与现状一致） | 与现状一致：常驻 PM Ops 自己的 Run 告警给人（`alertAudience` 返回 `human`），不发给卡住的 PM Ops 本人；PM Office 的发给人；其它发给 PM Ops |
 | ③ 核对项长时间 pending | 合并前核对项对当前交付为 pending（含过期变回 pending），且卡片已在 `awaiting_merge`，持续超过 `pre_merge_check_pending_after_minutes`（**待定**） | `effectivePreMergeChecks` | “独立复核”“截图核对”两条由验证项本身驱动，提醒发给该验证项的 Assignment（没有则按 ① 处理） | 其它核对项 → PM Ops；PM Ops 不在时进 Needs You |
 
 是否重复提醒、重复间隔和最多次数同样**待定、交人**；在拍板前只提醒一次。
+
+**② 为什么不新增计时器（代码审核 C-225#21 第 3 条）**：现有看门狗已经覆盖“Run 失活提醒”：`dispatch.ts` 的 `inactivityGraceMs`（默认 15 分钟）到期后发一次 `run_inactive` 告警，按 Run 去重；之后失活回收由 `InactiveRunReaper` 按主机实际生效的回收阈值执行（`packages/host/src/run-capacity-config.ts` 的 `inactive_cancel_after_minutes`，未配置时取 `max(DEFAULT_INACTIVE_CANCEL_AFTER_MS, inactivityGraceMs)`）。再加一个计时器只会重复通知，还可能出现“先回收、后提醒”的顺序错误。所以本 ADR **不新增失活提醒开关和阈值**，提醒时机、去重、收件人都以现有看门狗为准，本 ADR 不改它们。
+- R-3328 空挂 30 分钟这件事，按现有逻辑 15 分钟时应该已经告警给人。问题出在告警之后没人处理，而不是没有提醒。是否要在 PM Ops 自己的 Run 失活时，把常驻 host_ops 也加入收件人（host_ops 可以用 `host_ops_restart_standing_pm` 换会话），列为第 7 节问题 9。这一项只改收件人，不新增数值。
+- 如果将来要调整提醒时机，只改现有的 `inactivityGraceMs` 配置，并且必须小于主机实际生效的回收阈值（以 `run-capacity-config` 读到的值为准，不以默认 60 分钟为准）。没有配置回收阈值时取上面的默认值；配置不合法时沿用现有校验（`run-capacity-config` 直接报错），不另设回退。具体数值仍交人。
 
 ### 决定 4（候选，张良 C-225#2 提出，王熙凤 C-225#7 转达）：审核轮数用满后由系统自动加一轮
 
@@ -198,10 +202,10 @@ GROUP BY type ORDER BY n DESC;
 
 **4a 普通验证项（代码审核、测试等）**：把 PM Ops 已有的 `raise_limit` 权限机械化，不改变人确认边界。
 
-- 触发：生成 `review_limit` 拍板，且该拍板 `decider=role:pm`（已委托给 PM Ops），开关 `system_review_limit_raise`（默认关闭，human 设置）开启。
+- 触发：生成 `review_limit` 拍板，且该拍板 `decider=role:pm`（已委托给 PM Ops）、`status=open`、没有 `resolution`，开关 `system_review_limit_raise`（默认关闭，human 设置）开启。**只处理还没人动过的拍板**：PM Ops 已选 `pause`（拍板变为 `provisional`）、已 `escalate`（decider 变为 human）、人已处理，或拍板已解决时，系统一律不碰。注意 `review-limit-resolution.ts` 允许 PM Ops 在 `provisional` 后再选 `raise_limit`，但系统不走这条路，不能覆盖 PM Ops 的暂停（代码审核 C-225#21 第 2 条）。
 - 判定依据（全部满足，在解决事务内重查）：① 工作项 `role_id` 不是 `independent_reviewer`，拍板没有 `human_required_reason`；② 该验证项上一轮 Review 是 `pass` 且未被撤回，没有未处理的 must_fix；③ 新交付相对上一轮已审 SHA 的差异属于“只来自合入基线”（判定见下）；④ 卡片未被标敏感，没有 D12 四类和需求范围变化拍板（`mergeNeedsHuman` 不命中），改动不命中角色规则路径（**清单未设置、为空或格式非法时视为不确定，不加轮**；读不到改动文件列表同样不加轮）；⑤ 同一验证项由系统自动加轮的累计次数不超过上限 N（**N 待定、交人**）。
-- 执行：系统以 `system` 身份解决该拍板为 `raise_limit`，rationale 写命中的条件，审计事件带两次 SHA 和差异判定结果；之后按现有逻辑恢复审核。
-- 回退：任一条件不满足 → 不动，拍板照旧留给 PM Ops。
+- 执行：系统在解决事务内**重查**拍板仍是 `status=open`、`decider=role:pm`、无 `resolution`，以及 ①–⑤ 全部条件，任一项变了就放弃；然后以 `system` 身份解决该拍板为 `raise_limit`，rationale 写命中的条件，审计事件带两次 SHA 和差异判定结果；之后按现有逻辑恢复审核。
+- 回退：任一条件不满足，或拍板已被 PM Ops/人接手（pause、escalate、resolve）→ 不动，拍板照旧留给 PM Ops 或人；系统不重试，也不会在 PM Ops 暂停之后再加轮。
 
 **4b 独立复核（`independent_reviewer`）**：**改变人确认边界，需要邵杰单独明确拍板**（本卡 out_of_scope 写的是“不改人确认的边界”，所以默认不做）。
 
@@ -233,8 +237,8 @@ GROUP BY type ORDER BY n DESC;
 1. 自动指派：目标产出项当前作者、曾经（已释放）作者、同卡其它验证项负责人（对 `independent_reviewer`）都不会被选中；先指派复核员再指派审核者等三种顺序都被拒；没有合格员工时不指派、给 PM Ops 定向通知；外接员工、停用员工不被选中；产出项不被自动指派；已替换、已取消的验证项不被指派；与 PM `assign` 并发时只有一个生效。
 2. 系统代确认：表中 16 条**逐条单独置为不满足**，系统都不触发；没有分类确认、分类确认绑定的是旧交付、分类确认任一项为“否”、分类确认之后出现 human 或 Agent 评论、早于确认之前没有确认覆盖的 human 评论、`numeric_rule` 卡、截图核对未计入代确认的界面卡、路径清单为空或非法时都不触发；`decider=human` 的确认、敏感卡、D12 四类、需求范围变化、`human_required_reason`、偏好关闭、没有活跃 PM Ops 时都不触发；撤回窗口内 PM Ops hold 后到期不再代确认；到期时条件变化（例如新交付、新人类评论）不代确认。
 3. 人确认边界：`mergeNeedsHuman`/`mergeRequiresHuman` 的现有契约测试保持不变并全部通过。
-4. 定时器：阈值未设置时不提醒；非法值（0、负数、小数、超范围、非数字）被拒；同一等待周期只提醒一次；PM Ops 自己的 Run 失活时提醒不发给 PM Ops。
-5. 自动加轮（4a）：独立复核项、带 `human_required_reason` 的拍板、上一轮非 pass、有 must_fix、差异判定不满足、超过次数上限、敏感/D12/范围变化、角色规则清单为空或非法时都不触发。
+4. 定时器（①、③）：阈值未设置时不提醒；非法值（0、负数、小数、超范围、非数字）被拒；同一等待周期只提醒一次。② 不新增代码，只保留现有 `run_inactive` 看门狗的测试；若采纳问题 9，补“PM Ops 自己的 Run 失活时，告警发给人和常驻 host_ops，不发给 PM Ops 本人”的测试。
+5. 自动加轮（4a）：拍板已被 PM Ops `pause`（provisional）、已 `escalate`、已解决，或候选选出后、写入前 PM Ops 先 pause 时都不触发；独立复核项、带 `human_required_reason` 的拍板、上一轮非 pass、有 must_fix、差异判定不满足、超过次数上限、敏感/D12/范围变化、角色规则清单为空或非法时都不触发。
 6. Actor：通过 MCP 或 Web API 都无法以 `system` 身份调用这些命令。
 7. 改了 `packages/domain` 时运行 `pnpm --filter @cardigan/domain test:types`。
 
@@ -243,6 +247,7 @@ GROUP BY type ORDER BY n DESC;
 - “指派验证型工作项前，先确认产出项已交付”（`P2A_PM_OPS_RULES` 第 1 条）改写为：“验证项由系统在交付后自动指派；系统通知你‘没有合格员工’时，再判断换人、新建员工或交人。不要主动给已有交付的验证项抢先指派。”
 - 合并确认一条：补“项目开启系统代确认时，你在交付后对当前交付做一次合并前分类确认（风险标签、界面卡、数值是否已由人拍板、对外发布、角色规则、已读全部时间线），写明每一项；之后满足全部条件的确认由系统处理。你只处理没有分类确认的确认、系统列出未满足条件的确认、合并检查失败和需要交人的确认。分类确认不能在没读完时间线时做”。
 - 盘点一条：保留“盘点未指派的产出项”；验证项改为“查看系统未能指派的项”。
+- 审核轮数一条：补“项目开启 `system_review_limit_raise` 时，普通验证项上一轮通过、新交付只合入基线的上限拍板由系统加一轮；你仍处理其余上限拍板。你选了 pause 或 escalate 的，系统不会再加轮；想让它继续审核就自己选 raise_limit。独立复核的上限仍交人”。
 - 新增：“收到系统的超时提醒时，处理事项本身，并在时间线写处理结果；不要只确认收到。”
 - 以上改动在开关开启前不生效的部分，角色正文按“开启后”的口径写，并注明开关名；开关关闭时 PM Ops 仍按原规则执行。角色规则改动按 Q-279 交人确认。
 
@@ -256,8 +261,9 @@ GROUP BY type ORDER BY n DESC;
 | 4 | 是否新增工作项字段 `manual_assign` | A 新增（PM/human 可设，系统跳过）；B 不新增，PM 想等就先不建验证项或取消后重建 | A：成本小，避免 PM Ops 为了“暂缓”去取消工作项 |
 | 5 | 普通验证项自动加一轮（决定 4a） | A 采纳，差异判定只用第 1 档；B 采纳，并开放第 2/3 档；C 不采纳 | A |
 | 6 | **独立复核自动加一轮（决定 4b，改变人确认边界）** | A 不采纳，仍交人；B 采纳，仅限第 1 档 | A：风险见决定 4b |
-| 7 | 新数值和清单 | 撤回窗口分钟数；①②③ 三个阈值；阈值允许范围；是否重复提醒、间隔和次数；角色规则路径清单、发布路径清单的初值（提示：角色规则清单至少应覆盖 `packages/roles/**`、`AGENTS.md`、`CLAUDE.md`，具体路径仍由人定；清单为空时系统一律不代确认、不加轮）；自动加轮次数上限 N；差异判定第 2/3 档的界定和阈值 | 不推荐具体数值（按规则交人）；建议都做成项目偏好，未设置即关闭 |
+| 7 | 新数值和清单 | 撤回窗口分钟数；①、③ 两个阈值（② 复用现有看门狗，不新增）；阈值允许范围；是否重复提醒、间隔和次数；角色规则路径清单、发布路径清单的初值（提示：角色规则清单至少应覆盖 `packages/roles/**`、`AGENTS.md`、`CLAUDE.md`，具体路径仍由人定；清单为空时系统一律不代确认、不加轮）；自动加轮次数上限 N；差异判定第 2/3 档的界定和阈值 | 不推荐具体数值（按规则交人）；建议都做成项目偏好，未设置即关闭 |
 | 8 | `numeric_rule` 卡是否允许系统代确认 | A 第一版一律排除，留给 PM Ops；B 条件 16 列出人拍板的 Q-n 后允许 | A：数值是否已由人拍板、拍板内容与实现是否一致，系统无法判断 |
+| 9 | PM Ops 自己的 Run 失活时，现有 `run_inactive` 告警是否加发给常驻 host_ops | A 加发（host_ops 可直接换 PM Ops 会话）；B 维持现状，只告警给人 | A：只改收件人，不新增数值 |
 
 ## 8. 备选方案及未采用原因
 
