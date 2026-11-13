@@ -145,7 +145,7 @@ export interface Card {
    * C-160: checks a human wants done before confirming the merge (e.g. an
    * independent security review). Labels other than the reserved independent
    * review are advisory and do not affect merge authority. The independent
-   * review is a submit_review projection used by ADR 0006's delegation rules.
+   * review is a display projection; ADR 0006 checks the actual Review and work item.
    */
   readonly pre_merge_checks?: readonly PreMergeCheck[];
   readonly created_by: Author;

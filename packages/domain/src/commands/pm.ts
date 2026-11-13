@@ -12,6 +12,7 @@ import {
   text,
   unwrap,
 } from "./core.js";
+import { handoffUnauthorizedDecisions } from "./delegation.js";
 import {
   checkEmployeeNotExternal,
   checkEmployeeSeparation,
@@ -294,6 +295,13 @@ export function updateCard(
       },
       { type: "status_change", body: result.title },
     );
+    if (p.risk_tags !== undefined)
+      handoffUnauthorizedDecisions(
+        d,
+        "风险标签已更新，未满足代确认条件的合并须交人确认。",
+        undefined,
+        card.id,
+      );
     return result;
   });
 }
