@@ -975,6 +975,8 @@ M3.4 的 Runtime 接线根据已派发的业务 Run（dispatched / acked / runni
 
 C-89：PM Ops 每轮开始和结束用 `project_snapshot` 检查 backlog、todo 与尚未指派的工作项，轮换后的首轮同样执行；收到新卡通知后先用 `get_card` 查当前状态，再为可开工的产出项指派执行者。backlog 保留待规划，不自动启动；未能派发的 todo 记录原因。这样此前未生成通知的旧卡也能由快照盘点发现，不把“在制卡片为空”当作“没有待安排工作”。
 
+C-226：PM Ops 在 Claude Code（`claude-code`）下，一轮涉及 2 张及以上卡片，或单卡需核对多份交付／审核、员工隔离历史、附件时，优先按卡片或独立核对项委派只读子 Agent，并遵守主机并发上限。非 Claude Code harness 由本人核对；此规则不扩展到 Office 或工作项级 PM。每次委派明确只读工具白名单：`get_card`、`get_updates`、`read_attachment`、`project_snapshot`、`list_needs_you`，仅限当前身份已有工具；禁止白名单外工具以及借 CLI、HTTP、文件写入或再委派绕过，不得读取或打印凭据、环境变量值。子 Agent 只返回结论、可核对的证据和未核事项（交付编号与完整 SHA、审核绑定、时间线／seq、当前及历史 Assignment、附件原文等）；本人核对证据原文，写操作前重读当前卡片和更新。所有写操作，包括 ACK、心跳和结束 Run，仍由本人执行。子 Agent 超时、失败或工具不可用时本人接手，证据缺失不能跳过核对。只读约束的技术限制与人工确认要求见 §14 的 C-226 评估说明。
+
 > 它们共享"项目事实"，不共享"对话噪声"。
 
 两个 Assignment 靠 `standing_mode`（`office` | `ops`）区分，这是由 `cardigan pm create --office|--ops` 写入一次、之后不能修改的字段。Token 的工具范围由模式决定：office 去掉后台专用的 `issue_instruction`、`resolve_delegated_decision`、`triage_human_action`，ops 去掉 `record_decision`；`cardigan pm start`、Dispatcher 重开终端、`token issue` 都按模式签发，所以 Ops 无论换多少次 Token 都拿不到 `record_decision`。首条提示同时写明当前是前台还是后台。旧数据没有这个字段时，按最新一张 Token 推断一次并写回，之后只看字段。
@@ -2231,6 +2233,13 @@ C-200：精确上下文读取仅针对主机确定的运行目录和缓存目录
 C-213：上游探测只使用主机显式登记的无凭据 origin，不读取 secret_env、外部 profile 或凭据文件，不允许认证信息、URL 路径／查询／片段，不发送 HTTP 请求、自动重定向或模型调用。诊断和审计只保存 provider／线路名称及固定失败类别。主机运维工具白名单保持不变，恢复依据由主机采样和持久事件产生，MCP 调用者不能自报探测结果或上游事件编号。`host-ops rotate` 仅人类入口；新身份生效与旧 Token 撤销同事务，旧终端未确认退出不提交替换。
 
 ### 14.1 角色权限边界（V9a）
+
+**C-226：PM Ops 子 Agent 只读边界评估说明（需人确认）。** 当前子 Agent 复用父会话的 MCP 配置、Token 和 Assignment 身份；角色正文里的白名单只靠规则约束，不是服务端权限隔离。误写会被当作 PM Ops 本人的调用；Cardigan 审计不能可靠区分父子 Agent，子 Agent 自报身份也不能作为可信归因。
+
+- 启动层：`packages/roles/src/assignment.ts` 为整个 Assignment 生成同一份 MCP 配置和 `--allowedTools`；`schema.ts` / `compile.ts` 的启动配置没有子 Agent 专属的受控权限或独立凭据。把整个会话限制为只读会同时阻止 PM Ops 的正常写操作；给子 Agent 提示或由父 Agent 自行选工具不能证明它无法使用父 Token。当前没有实现并验证对子 Agent 的强制只读边界。
+- MCP 层：`packages/mcp-server/src/auth.ts` 只按 Bearer Token 解析 Assignment、角色和工具权限，`server.ts` 没有可信的父子调用来源。要技术强制，需由主机签发独立、收窄的凭据，并隔离父凭据与其他写入通道，配套可信审计；这超出本卡只改角色正文的范围，不在本卡引入新工具或放宽权限。
+- 本卡的缓解措施是明确只读白名单、禁止凭据和环境变量值读取、逐项附证据、本人重读原文与当前状态后才写入，以及异常接手；不能保证子 Agent 不误写。是否接受这一残余风险必须由人确认，确认前不得合并；本卡的角色规则改动仍按 Q-279 由人亲自确认合并。独立复核通过或角色升级提示“没有放宽权限的变化”均不能替代这一安全取舍。
+- 合并后由主机操作员执行 `cardigan role upgrade pm --from-default`，再执行 `cardigan pm rotate --ops --employee E-6` 并按返回提示启动新 Assignment；升级前先核对 `role upgrade pm --from-default --dry-run`，本卡相对当前基线只改变正文。项目已有角色若与基线不同，应以实际差异为准，出现额外扩权须另行交人确认。
 
 工具名称以 domain 的 `toolNames` 为系统白名单。`ROLE_TOOL_ALLOWLISTS` 按类型收窄；任何不在白名单内的名字（包括推送、Git 凭据等伪造能力）都拒绝。capabilities、abilities 和机器标签只是描述与调度条件，不授予系统工具。
 

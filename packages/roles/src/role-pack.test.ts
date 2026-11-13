@@ -34,6 +34,96 @@ const BASE_TOOLS = [
   "upload_attachment",
 ];
 
+describe("C-226 PM Ops read-only subagent checks", () => {
+  const body = instructionsFor("pm");
+  const ops = body.split("## PM Ops（后台）")[1] ?? "";
+
+  test("delegation is scoped to Claude Code Ops and falls back to the parent", () => {
+    for (const rule of [
+      "只适用于 PM Ops 且当前 harness 为 Claude Code（claude-code）",
+      "一轮涉及 2 张及以上卡片，或单卡核对量大",
+      "每张卡或每项独立核对开一个只读子 Agent",
+      "遵守主机并发上限",
+      "非 Claude Code harness 不适用，由本人核对",
+      "不适用于 PM Office 或工作项级 PM",
+      "超时、失败或工具不可用时，由本人接手",
+    ])
+      expect(ops).toContain(rule);
+    expect(body.split("## PM Ops（后台）")[0]).not.toContain(
+      "只读子 Agent 并行核对",
+    );
+    for (const role of Object.keys(DEFAULT_ROLE_KINDS) as DefaultRoleId[])
+      if (role !== "pm")
+        expect(instructionsFor(role)).not.toContain("只读子 Agent 并行核对");
+  });
+
+  test("the child allowlist contains only the five existing read tools", () => {
+    const allowlist = ops.split("工具白名单仅为 ")[1]?.split("，且")[0] ?? "";
+    const tools = [...allowlist.matchAll(/`([^`]+)`/g)].map((m) => m[1]);
+    expect(tools).toEqual([
+      "get_card",
+      "get_updates",
+      "read_attachment",
+      "project_snapshot",
+      "list_needs_you",
+    ]);
+    const role = defaultRoleDefinition("pm", launch);
+    expect(role.allowed_tools).toEqual(expect.arrayContaining(tools));
+    for (const rule of [
+      "只能使用当前身份已有的工具",
+      "禁止调用白名单外的工具",
+      "不得通过 CLI、HTTP、文件写入或再委派绕过限制",
+      "不得读取或打印凭据、环境变量值",
+    ])
+      expect(ops).toContain(rule);
+  });
+
+  test("writes and Run protocol stay with the parent despite the shared identity", () => {
+    const writes =
+      ops
+        .split("子 Agent 只返回结论和证据，不执行任何写操作：")[1]
+        ?.split("\n")[0] ?? "";
+    for (const tool of [
+      "assign",
+      "resolve_delegated_decision",
+      "request_decision",
+      "post_comment",
+      "update_card",
+      "ack_events",
+      "finish_run",
+    ])
+      expect(writes).toContain(`\`${tool}\``);
+    expect(writes).toContain("确认或退回");
+    expect(writes).toContain("全部由 PM Ops 本人看过结论后执行");
+    expect(writes).toContain("ACK、心跳和结束操作也只由本人负责");
+    for (const rule of [
+      "共用 Token 和 Assignment 身份",
+      "只靠规则约束只读",
+      "误写会记在本人名下",
+      "不能声称已有技术隔离",
+      "发现越界立即停止该子 Agent",
+    ])
+      expect(ops).toContain(rule);
+  });
+
+  test("reports require versioned evidence and a fresh parent check before writes", () => {
+    for (const rule of [
+      "结论、证据和未核事项",
+      "交付编号和完整 SHA",
+      "审核编号及其绑定的交付",
+      "时间线条目或事件 seq",
+      "员工当前及历史 Assignment（含已释放）",
+      "附件编号与相关原文",
+      "没读到的标为“未核”",
+      "本人须核对返回的证据原文",
+      "写操作前重新读取 `get_card` / `get_updates` 的当前记录",
+      "不能直接当作已核实事实写入时间线",
+      "过期或不一致的结论要重新核对",
+    ])
+      expect(ops).toContain(rule);
+  });
+});
+
 test("host operations keeps v3 outage safeguards and C-200 context guidance without new tools", () => {
   const role = defaultRoleDefinition("host_ops", launch);
   expect([...role.allowed_tools].sort()).toEqual(
