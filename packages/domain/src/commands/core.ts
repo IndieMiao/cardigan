@@ -81,6 +81,8 @@ type CommandName =
   | E.ToolName
   | "pause_standing_assignment"
   | "rotate_standing_pm"
+  | "rotate_deployed_pm"
+  | "record_deployment"
   | "create_host_ops_assignment"
   | "manage_host_ops_action"
   | "queue_run"
@@ -197,6 +199,8 @@ export class CommandDraft {
       "pause_standing_assignment",
     ].includes(tool);
     const systemOnly = [
+      "rotate_deployed_pm",
+      "record_deployment",
       "manage_host_ops_action",
       "manage_inactive_run_stop",
       "auto_confirm_merge",

@@ -27,6 +27,20 @@ export {
   launchEntities,
   wallClock,
 } from "./commands.js";
+export { DeploymentController } from "./deployment.js";
+export {
+  acquireDeploymentCapacity,
+  DeploymentInProgress,
+  deploymentInProgress,
+} from "./deployment-capacity.js";
+export {
+  type DeploymentConfig,
+  loadDeploymentConfig,
+  parseDeploymentConfig,
+} from "./deployment-config.js";
+export { readDeploymentDiagnostics } from "./deployment-diagnostics.js";
+export { NodeDeploymentDriver } from "./deployment-node.js";
+export { upgradeDeployedRoles } from "./deployment-roles.js";
 export {
   HostLaunchError,
   LAUNCH_STEPS,
@@ -78,6 +92,7 @@ export {
   type RunDirectory,
   runDirectory,
 } from "./naming.js";
+export { persistPmRotation } from "./pm-rotation.js";
 export {
   acquireRepositoryFlock,
   type FlockRunner,

@@ -94,6 +94,8 @@ export type LaunchRuntime = Runtime &
   Partial<Pick<HerdrRuntime, "captureAgent">>;
 
 export interface StartOptions {
+  /** Trusted host automation; no CLI flag, Token callers remain rejected. */
+  readonly automatic?: true;
   readonly store: Store;
   readonly io: CliIo;
   readonly project_id: ProjectId;
@@ -238,7 +240,12 @@ async function startUnlocked(
   options: StartOptions,
 ): Promise<StartedAssignment> {
   const { store, io, project_id } = options;
-  const actor = resolveActor(io, project_id, store);
+  const caller = resolveActor(io, project_id, store);
+  if (options.automatic && caller.kind !== "human")
+    throw new CliError("自动启动仅限主机", EXIT.usage);
+  const actor: Actor = options.automatic
+    ? { kind: "system", project_id }
+    : caller;
   rejectExternalTerminalAction(store, project_id, options.assignment_id);
   const capacity = await loadRunCapacityConfig({ env: io.env });
   for (const error of capacity.errors) io.stderr(error);
@@ -950,6 +957,8 @@ export async function runAssignmentCommand(
 }
 
 export interface StartCommandOptions {
+  /** Trusted host automation; no CLI flag, Token callers remain rejected. */
+  readonly automatic?: true;
   readonly store: Store;
   readonly io: CliIo;
   readonly project_id: ProjectId;
@@ -984,6 +993,7 @@ export async function startAssignmentCommand(
     runtime,
     dataDir,
     worktree: worktreeProvider(execution, runtime),
+    ...(options.automatic ? { automatic: true } : {}),
     ...(options.restart_session ? { restart_session: true } : {}),
   });
 
@@ -1002,6 +1012,8 @@ export async function startAssignmentCommand(
 }
 
 export interface StartByIdOptions {
+  /** Trusted host automation; no CLI flag, Token callers remain rejected. */
+  readonly automatic?: true;
   readonly store: Store;
   readonly io: CliIo;
   readonly project_id: ProjectId;

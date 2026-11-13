@@ -4,11 +4,13 @@ import type {
   Assignment,
   CommandState,
   Decision,
+  EmployeeId,
   HumanAction,
   RoleReference,
 } from "../index.js";
 import {
   postComment,
+  rotatePmAfterDeployment,
   rotateStandingPm,
   STANDING_ROLE_TOOLS,
   standingTools,
@@ -458,4 +460,100 @@ test("external Office rotates at the same version, validates employee, and prese
     ok: false,
     error: { message: expect.stringContaining("未结束的 Run") },
   });
+});
+
+test("deployment rotation retains the Ops employee and cannot widen pinned permissions", () => {
+  const x = setup();
+  const roles = x.state.roles
+    .filter((r) => r.role_id === "pm")
+    .map((r) => ({
+      ...r,
+      version: r.role_version,
+      display_name: "PM",
+      kind: "standing" as const,
+      core_prompt: "",
+      instructions: `Rules v${r.role_version}`,
+      harness: "codex" as const,
+      launch_profile_ref: "fixture",
+      worktree: "readonly" as const,
+      abilities: [],
+      required_machine_tags: [],
+    }));
+  const system = { kind: "system" as const, project_id: x.state.project_id };
+  expect(rotatePmAfterDeployment(x.state, system, roles, ports()).ok).toBe(
+    false,
+  );
+  const safeRoles = roles.map((r) => ({
+    ...r,
+    allowed_tools: [...STANDING_ROLE_TOOLS],
+  }));
+  const state = {
+    ...x.state,
+    roles: safeRoles,
+    employees: [
+      {
+        id: "E-1" as EmployeeId,
+        name: "PM employee",
+        title: "PM",
+        bio: "",
+        avatar: null,
+        role_id: "pm",
+        launch_profile_ref: null,
+        status: "active" as const,
+        created_at: now,
+        updated_at: now,
+      },
+    ],
+    assignments: x.state.assignments.map((a) =>
+      a.id === x.ops.id ? { ...a, employee_id: "E-1" as EmployeeId } : a,
+    ),
+  };
+  expect(
+    rotatePmAfterDeployment(
+      {
+        ...state,
+        employees: state.employees.map((e) => ({
+          ...e,
+          status: "inactive" as const,
+        })),
+      },
+      system,
+      safeRoles,
+      ports(),
+    ).ok,
+  ).toBe(false);
+  const effect = value(
+    rotatePmAfterDeployment(state, system, safeRoles, ports()),
+  );
+  expect(effect.data.assignment).toMatchObject({
+    standing_mode: "ops",
+    employee_id: "E-1",
+    role_version: 3,
+  });
+  expect(
+    effect.events.find((e) => e.type === "standing_pm_rotated")?.actor,
+  ).toEqual(system);
+  expect(rotatePmAfterDeployment(state, human, safeRoles, ports()).ok).toBe(
+    false,
+  );
+  expect(
+    rotatePmAfterDeployment(
+      state,
+      { ...system, project_id: "other" },
+      safeRoles,
+      ports(),
+    ).ok,
+  ).toBe(false);
+  const asg = {
+    ...human,
+    kind: "assignment" as const,
+    assignment_id: x.ops.id,
+    role_id: "pm",
+    role_version: 2,
+    allowed_tools: [...STANDING_ROLE_TOOLS],
+    capabilities: ["verify"],
+  };
+  expect(rotatePmAfterDeployment(state, asg, safeRoles, ports()).ok).toBe(
+    false,
+  );
 });

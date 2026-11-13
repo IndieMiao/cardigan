@@ -5,14 +5,12 @@ import type {
   StandingMode,
 } from "@cardigan/domain";
 import { rotateStandingPm, standingTools } from "@cardigan/domain";
-import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
+import { persistPmRotation } from "@cardigan/host";
+import { loadCommandState } from "@cardigan/mcp-server";
 import {
   backfillStandingModesInTransaction,
-  finishBellAttempt,
-  reassignNotifications,
   type Store,
   type StoreTransactionContext,
-  unfinishedBellAttempts,
 } from "@cardigan/store";
 import { CliError, EXIT, formatCommandError } from "./errors.js";
 import {
@@ -74,37 +72,13 @@ export function rotateStandingPmInStore(
       );
     const data = result.value.data;
     if (data.unchanged) return { ...data, revoked_tokens: 0 };
-    persistEffect(tx, project_id, result.value);
-    let revoked_tokens = 0;
-    for (const token of tx.tokensForAssignment(project_id, data.previous.id))
-      if (token.revoked_at === null) {
-        if (!tx.revokeToken(token.id))
-          throw new CliError("作废旧 Token 失败", EXIT.failure);
-        revoked_tokens += 1;
-      }
-    const run_ids = tx.runs
-      .list(project_id)
-      .filter((r) => r.assignment_id === data.previous.id)
-      .map((r) => r.id);
-    reassignNotifications(store.database, {
+    const revoked_tokens = persistPmRotation(
+      store,
+      tx,
       project_id,
-      from: data.previous.id,
-      to: data.assignment.id,
-      run_ids,
+      result.value,
       at,
-    });
-    // A late result from the old session's bell must not escalate anything.
-    for (const attempt of unfinishedBellAttempts(store.database, project_id))
-      if (attempt.assignment_id === data.previous.id)
-        finishBellAttempt(
-          store.database,
-          project_id,
-          attempt.id,
-          "failed",
-          new Date(
-            Math.max(Date.parse(at), Date.parse(attempt.started_at)),
-          ).toISOString(),
-        );
+    );
     const token = data.assignment.external
       ? issueTokenForAssignment(tx, project_id, data.assignment.id, {
           role_version: data.assignment.role_version,

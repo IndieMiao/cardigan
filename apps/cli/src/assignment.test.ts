@@ -20,6 +20,7 @@ import type {
   RuntimeResult,
 } from "@cardigan/domain";
 import { assign, createCard, type Role } from "@cardigan/domain";
+import { loadCommandState } from "@cardigan/mcp-server";
 import { corePromptFor, parseLaunchConfig } from "@cardigan/roles";
 import { Store, writeRole } from "@cardigan/store";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
@@ -264,49 +265,61 @@ describe("names and paths (M2 plan §3)", () => {
 });
 
 describe("startAssignment", () => {
-  test("queues, provisions and dispatches a role without a worktree", async () => {
-    const assignment = assignWorkItem("none");
-    const runtime = new FakeRuntime();
+  test.each([false, true])(
+    "queues, provisions and dispatches a role without a worktree (automatic=%s)",
+    async (automatic) => {
+      const assignment = assignWorkItem("none");
+      const runtime = new FakeRuntime();
 
-    const started = await startAssignment({
-      store,
-      io,
-      project_id,
-      assignment_id: assignment.id,
-      launch: {
-        config: launchConfig,
-        secrets: { provider: "sk-fictional-secret" },
-      },
-      mcpUrl: "http://127.0.0.1:3004/mcp",
-      runtime,
-      dataDir,
-    });
+      const started = await startAssignment({
+        ...(automatic ? { automatic: true } : {}),
+        store,
+        io,
+        project_id,
+        assignment_id: assignment.id,
+        launch: {
+          config: launchConfig,
+          secrets: { provider: "sk-fictional-secret" },
+        },
+        mcpUrl: "http://127.0.0.1:3004/mcp",
+        runtime,
+        dataDir,
+      });
 
-    expect(started.runtime_ref.terminal_ref).toBe("t1");
-    expect(started.worktree_path).toBeUndefined();
-    expect(runtime.provisions).toHaveLength(1);
-    const launch = runtime.provisions[0];
-    expect(launch?.labels).toMatchObject({
-      cardigan: "1",
-      project: project_id,
-      assignment: assignment.id,
-      run: started.run_id,
-    });
-    expect(launch?.cwd).toBe(join(dataDir, "runs", "p-one", assignment.id));
+      expect(started.runtime_ref.terminal_ref).toBe("t1");
+      expect(started.worktree_path).toBeUndefined();
+      expect(runtime.provisions).toHaveLength(1);
+      const launch = runtime.provisions[0];
+      expect(launch?.labels).toMatchObject({
+        cardigan: "1",
+        project: project_id,
+        assignment: assignment.id,
+        run: started.run_id,
+      });
+      expect(launch?.cwd).toBe(join(dataDir, "runs", "p-one", assignment.id));
 
-    // The Run is dispatched and the assignment records the runtime.
-    const run = store.uow.read((tx) =>
-      tx.runs.get(project_id, started.run_id as never),
-    );
-    expect(run?.status).toBe("dispatched");
-    expect(run?.model).toBe("fictional-model");
-    expect(run?.agent_cli_version).toBe("pi 1.5.0-fictional");
-    const updated = store.uow.read((tx) =>
-      tx.assignments.get(project_id, assignment.id),
-    );
-    expect(updated?.runtime_state).toBe("running");
-    expect(updated?.runtime_ref?.terminal_ref).toBe("t1");
-  });
+      // The Run is dispatched and the assignment records the runtime.
+      const run = store.uow.read((tx) =>
+        tx.runs.get(project_id, started.run_id as never),
+      );
+      expect(run?.status).toBe("dispatched");
+      expect(run?.model).toBe("fictional-model");
+      expect(run?.agent_cli_version).toBe("pi 1.5.0-fictional");
+      const queued = store.uow.read((tx) =>
+        loadCommandState(tx, project_id).events.find(
+          (e) =>
+            e.type === "run_queued" &&
+            (e.payload as { run_id?: string }).run_id === started.run_id,
+        ),
+      );
+      expect(queued?.actor.kind).toBe(automatic ? "system" : "human");
+      const updated = store.uow.read((tx) =>
+        tx.assignments.get(project_id, assignment.id),
+      );
+      expect(updated?.runtime_state).toBe("running");
+      expect(updated?.runtime_ref?.terminal_ref).toBe("t1");
+    },
+  );
 
   test("the run directory holds the compiled files and the token", async () => {
     const assignment = assignWorkItem("none");
