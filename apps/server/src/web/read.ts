@@ -9,6 +9,7 @@ import type {
   Decision,
   EventId,
   Machine,
+  MergeCheckBlocker,
   MergeCheckView,
   ProjectId,
   Run,
@@ -720,6 +721,9 @@ export function cardDetail(
       ...entry,
       ...webAuthorView(state, entry.author),
       event_type: event?.type ?? null,
+      ...(event?.type === "merge_check_blocked"
+        ? { merge_check_blocker: event.payload as unknown as MergeCheckBlocker }
+        : {}),
       ...([
         "merge_check_queued",
         "merge_check_started",

@@ -36,6 +36,7 @@ export {
   recordMergeCheck,
   TIMEOUT_AUTO_RERUN,
 } from "./commands/merge-check.js";
+export * from "./commands/merge-check-blockers.js";
 export {
   currentMergeConfirmations,
   pmFailedMergeCheck,

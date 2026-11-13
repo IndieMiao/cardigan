@@ -28,6 +28,7 @@ import { decisionFollowupNeedsHuman } from "./decision-followup.js";
 import { hasActivePmOps, isPmOps } from "./delegation.js";
 import { availableWorkItemEmployees } from "./employee-assignment.js";
 import { failedConfirmedMergeCheck, latestMergeCheck } from "./merge-check.js";
+import { mergeCheckBlockers } from "./merge-check-blockers.js";
 import {
   mergeCheckEndedWithoutPass,
   mergeConfirmationWaitingForCheck,
@@ -74,6 +75,7 @@ function cardView(d: CommandDraft, id: CardId): CommandCardView {
   const merge_check = completion
     ? latestMergeCheck(d.state.events, id, completion.id)
     : undefined;
+  const blockers = mergeCheckBlockers(d.state, id);
   const fields = deriveCardFields({
     card,
     template: resolveCardTemplate(d, card),
@@ -91,6 +93,7 @@ function cardView(d: CommandDraft, id: CardId): CommandCardView {
     open_decisions: open.map((q) => q.id),
     review_matrix: deriveReviewMatrix(deliveries, items, d.list("reviews")),
     ...(merge_check ? { merge_check } : {}),
+    ...(blockers.length ? { merge_check_blockers: blockers } : {}),
     ...fields,
   };
 }

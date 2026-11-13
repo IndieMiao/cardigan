@@ -14,6 +14,7 @@ import type {
 import {
   autoConfirmMerge,
   mergePlan,
+  recordMergeCheckBlockers,
   recordMergeResult,
 } from "@cardigan/domain";
 import type { CentralProject, MergeOutcome } from "@cardigan/git-service";
@@ -80,8 +81,10 @@ export class MergeExecutor {
   private readonly checks: MergeChecks | undefined;
   private readonly skips: MergeSkipLog;
   constructor(private readonly options: MergeLoopOptions) {
-    this.skips = new MergeSkipLog("merge loop", (message) =>
-      this.options.report?.(message),
+    this.skips = new MergeSkipLog(
+      "merge loop",
+      (message) => this.options.report?.(message),
+      this.clock,
     );
     this.checks = options.gate
       ? new MergeChecks({
@@ -262,6 +265,19 @@ export class MergeExecutor {
 
   private async project(project_id: ProjectId) {
     const project = this.options.git.projectOf(project_id);
+    const observed = runSystemCommand(
+      this.options.store,
+      project_id,
+      (s, a, p) =>
+        recordMergeCheckBlockers(
+          s,
+          a,
+          project ? {} : { unavailable: "repository" },
+          p,
+        ),
+      this.clock,
+    );
+    if (!observed.ok) this.options.onError?.(new Error(observed.error.message));
     if (project === undefined) return;
     // Cards whose plan does not validate stay put (not confirmed, blocked or
     // nothing to merge); remember them so one pass cannot spin forever.

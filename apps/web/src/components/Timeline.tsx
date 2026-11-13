@@ -9,6 +9,7 @@ import { statusLabel } from "../status.js";
 import { AttachmentCaption, attachmentName } from "./AttachmentCaption.js";
 import { AttachmentPreview, isBitmap } from "./AttachmentPreview.js";
 import { EmptyState, LongContent, StatusTag, Time } from "./Foundation.js";
+import { mergeBlockerMessage } from "./MergeBlockers.js";
 import { MergeCheck } from "./MergeCheck.js";
 import { TimelineContent } from "./TimelineContent.js";
 import {
@@ -243,7 +244,9 @@ export function Timeline({
                   dangerouslySetInnerHTML={{
                     __html: renderMarkdown(
                       linkifyReferences(
-                        entry.body,
+                        entry.merge_check_blocker
+                          ? mergeBlockerMessage(entry.merge_check_blocker)
+                          : entry.body,
                         linkableReferences(entry.references ?? []),
                         projectId,
                         cardId,

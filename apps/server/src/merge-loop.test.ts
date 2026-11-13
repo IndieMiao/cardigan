@@ -212,7 +212,7 @@ test("C-112: skips are logged once per reason, read-only human actions do not ho
     git: new ServerGit({ store: f.store, dataDir: f.dataDir }),
     report: (message) => notices.push(message),
   });
-  const skips = () => notices.filter((m) => m.startsWith("merge loop skipped"));
+  const skips = () => notices.filter((m) => m.includes("merge loop skipped"));
   await loop.tick(f.project_id);
   await loop.tick(f.project_id);
   expect(skips()).toHaveLength(1);
@@ -242,6 +242,9 @@ test("C-112: skips are logged once per reason, read-only human actions do not ho
   await loop.tick(f.project_id);
   expect(skips()).toHaveLength(2);
   expect(skips()[1]).toContain(blocking.id);
+  expect(
+    f.state().events.filter((e) => e.type === "merge_check_blocked"),
+  ).toHaveLength(1);
   expect(f.card().status).toBe("awaiting_merge");
 
   // Only the read-only action remains open: the card merges.
@@ -259,6 +262,9 @@ test("C-112: skips are logged once per reason, read-only human actions do not ho
     f.state().human_actions.filter((h) => h.status === "open"),
   ).toHaveLength(1);
   expect(skips()).toHaveLength(2);
+  expect(
+    f.state().events.filter((e) => e.type === "merge_check_unblocked"),
+  ).toHaveLength(1);
 }, 30_000);
 
 test("a conflicting delivery returns the card to in_progress with a fix event", async () => {

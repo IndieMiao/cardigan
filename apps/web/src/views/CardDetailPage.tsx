@@ -27,6 +27,7 @@ import {
   StatusTag,
   Time,
 } from "../components/Foundation.js";
+import { MergeBlockers } from "../components/MergeBlockers.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
 import { Timeline } from "../components/Timeline.js";
 import { TimelineControls } from "../components/TimelineControls.js";
@@ -319,7 +320,7 @@ function CardContent({
   const sectionId = (name: string) => `card-${cardId}-${name}`;
   const sections = [
     { id: sectionId("overview"), label: "概览" },
-    ...(detail.merge_confirmations?.length
+    ...(detail.merge_confirmations?.length || card.merge_check_blockers?.length
       ? [{ id: sectionId("merge"), label: "合并处理" }]
       : []),
     ...(detail.work_items.length
@@ -449,14 +450,18 @@ function CardContent({
             onLocate={onLocate}
           />
         </section>
-        {!!detail.merge_confirmations?.length && (
+        {!!(
+          detail.merge_confirmations?.length ||
+          card.merge_check_blockers?.length
+        ) && (
           <section
             id={sectionId("merge")}
             className="card-section"
             aria-label="合并处理"
           >
             <h2>合并处理</h2>
-            {detail.merge_confirmations.map((q) => (
+            <MergeBlockers blockers={card.merge_check_blockers ?? []} />
+            {detail.merge_confirmations?.map((q) => (
               <MergeConfirmation
                 key={`${q.id}/${q.status}/${q.merge_confirmation?.merge_check?.attempt_id ?? ""}`}
                 q={q}

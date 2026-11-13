@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  completeHumanAction,
   latestMergeCheck,
   listNeedsYou,
   prepareMergePlan,
@@ -30,7 +31,7 @@ import {
 } from "./m4-fixtures.js";
 import { MergeChecks } from "./merge-checks.js";
 import { MergeExecutor, startMergeLoop } from "./merge-loop.js";
-import { needsYou } from "./web/read.js";
+import { cardDetail, needsYou } from "./web/read.js";
 
 const required = <T>(value: T | undefined): T => {
   if (value === undefined) throw new Error("Missing fixture value");
@@ -208,7 +209,7 @@ test("C-112: a read-only human action leaves the check running; a merge-blocking
   await c.gate.tick([f.project_id]);
   const messages = c.notices.mock.calls
     .map((call) => String(call[0]))
-    .filter((m) => m.startsWith("merge checks skipped"));
+    .filter((m) => m.includes("merge checks skipped"));
   expect(messages).toHaveLength(1);
   expect(messages[0]).toContain(
     `merge checks skipped ${f.project_id}/${scenario.card.id}`,
@@ -225,10 +226,98 @@ test("C-112: a passed check whose publication is held logs the confirmed plan's 
   await c.gate.tick([f.project_id]);
   await c.gate.tick([f.project_id]);
   expect(c.git.publish).not.toHaveBeenCalled();
+  expect(
+    f.state().events.filter((e) => e.type === "merge_check_blocked"),
+  ).toEqual([]);
   const messages = c.notices.mock.calls.map((call) => String(call[0]));
   expect(messages).toEqual([
-    `merge checks publish skipped ${f.project_id}/${scenario.card.id}: illegal_transition: Merge confirmation has not been granted for this completion`,
+    `[${f.clock.now()}] merge checks publish skipped ${f.project_id}/${scenario.card.id}: illegal_transition: Merge confirmation has not been granted for this completion`,
   ]);
+});
+
+test("C-178: blocked checks persist one timeline entry across executor restart, then one release", async () => {
+  const { f, scenario, check } = await fixture();
+  const h = f.apply((s, a, p) =>
+    requestHumanAction(
+      s,
+      a,
+      {
+        card_id: scenario.card.id,
+        instructions: "轮换合并凭据",
+        why_human: "需人执行",
+        expected_return: "完成",
+        blocked_work_items: [],
+        blocks_merge: true,
+      },
+      p,
+    ),
+  );
+  const c = controller(f);
+  await c.gate.tick([f.project_id]);
+  await c.gate.tick([f.project_id]);
+  const restarted = new MergeChecks(c.options);
+  await restarted.tick([f.project_id]);
+  expect(check()).toBeUndefined();
+  expect(c.run).not.toHaveBeenCalled();
+  const blocked = f
+    .state()
+    .events.filter((e) => e.type === "merge_check_blocked");
+  expect(blocked).toHaveLength(1);
+  const detail = cardDetail(f.state(), scenario.card.id);
+  expect(detail?.card.merge_check_blockers).toMatchObject([
+    { label: h.id, detail: "轮换合并凭据", started_at: f.clock.now() },
+  ]);
+  expect(
+    detail?.timeline.find((t) => t.event_type === "merge_check_blocked"),
+  ).toMatchObject({
+    type: "system",
+    merge_check_blocker: { label: h.id },
+  });
+  f.apply((s, a, p) =>
+    completeHumanAction(s, a, { human_action_id: h.id, text: "完成" }, p),
+  );
+  await restarted.tick([f.project_id]);
+  await restarted.tick([f.project_id]);
+  expect(check()?.status).toBe("passed");
+  expect(
+    f.state().events.filter((e) => e.type === "merge_check_unblocked"),
+  ).toHaveLength(1);
+  expect(
+    cardDetail(f.state(), scenario.card.id)?.card.merge_check_blockers,
+  ).toBeUndefined();
+});
+
+test("C-178: invalid configuration has a safe persistent reason until repaired", async () => {
+  const { f, scenario } = await fixture();
+  const c = controller(f);
+  c.setConfig({
+    status: "invalid",
+    reason: "private configuration diagnostic",
+  });
+  await c.gate.tick([f.project_id]);
+  await c.gate.tick([f.project_id]);
+  const detail = cardDetail(f.state(), scenario.card.id);
+  expect(detail?.card.merge_check_blockers).toMatchObject([
+    { label: "合并闸门配置" },
+  ]);
+  expect(JSON.stringify(detail)).not.toContain(
+    "private configuration diagnostic",
+  );
+  expect(
+    f.state().events.filter((e) => e.type === "merge_check_blocked"),
+  ).toHaveLength(1);
+  expect(c.run).not.toHaveBeenCalled();
+  c.setConfig({
+    status: "enabled",
+    checks: [{ name: "test", run: "true" }],
+    env: {},
+    totalTimeoutMs: 1000,
+  });
+  await c.gate.tick([f.project_id]);
+  expect(
+    f.state().events.filter((e) => e.type === "merge_check_unblocked"),
+  ).toHaveLength(1);
+  expect(c.run).toHaveBeenCalledTimes(1);
 });
 
 test("failure holds the baseline, redacts output and waits for explicit recheck", async () => {

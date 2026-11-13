@@ -1,4 +1,4 @@
-import type { CardId, DomainError, ProjectId } from "@cardigan/domain";
+import type { CardId, Clock, DomainError, ProjectId } from "@cardigan/domain";
 
 /**
  * C-112: the merge and merge-check loops skip cards whose plan does not
@@ -10,6 +10,7 @@ export class MergeSkipLog {
   constructor(
     private readonly loop: string,
     private readonly report: (message: string) => void,
+    private readonly clock: Clock = { now: () => new Date().toISOString() },
   ) {}
   /** A card whose plan did not validate this pass. */
   skipped(project_id: ProjectId, card_id: CardId, error: DomainError): void {
@@ -17,7 +18,9 @@ export class MergeSkipLog {
     const reason = `${error.code}: ${error.message}`;
     if (this.last.get(key) === reason) return;
     try {
-      this.report(`${this.loop} skipped ${project_id}/${card_id}: ${reason}`);
+      this.report(
+        `[${this.clock.now()}] ${this.loop} skipped ${project_id}/${card_id}: ${reason}`,
+      );
     } catch {
       // Logging must never stop the loop; an undelivered reason is retried.
       return;

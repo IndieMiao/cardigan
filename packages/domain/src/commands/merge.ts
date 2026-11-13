@@ -141,6 +141,31 @@ export function mergePlan(state: CommandState, card_id: CardId) {
 export function prepareMergePlan(state: CommandState, card_id: CardId) {
   return planFor(state, card_id, false);
 }
+/** Shared with the observation path; confirmation only gates publication. */
+export function mergeBlockingDecisions(
+  state: CommandState,
+  card_id: CardId,
+  completion_id: Delivery["id"],
+  confirmed: boolean,
+) {
+  return state.decisions.filter(
+    (q) =>
+      !(
+        !confirmed &&
+        q.trigger === "merge_confirmation" &&
+        q.kind === "approve" &&
+        "delivery_id" in q.target &&
+        q.target.delivery_id === completion_id
+      ) &&
+      q.blocking &&
+      ["open", "provisional"].includes(q.status) &&
+      (q.card_id === card_id ||
+        q.affected_cards.includes(card_id) ||
+        q.affected_work_items.some((id) =>
+          state.work_items.some((w) => w.id === id && w.card_id === card_id),
+        )),
+  );
+}
 /** Recording a running check must survive unrelated decisions opened after it started. */
 export function mergeContext(state: CommandState, card_id: CardId) {
   const card = state.cards.find(
@@ -183,35 +208,26 @@ function planFor(state: CommandState, card_id: CardId, confirmed: boolean) {
         "敏感卡片的合并须由人亲自确认",
       );
     }
-    const decision = state.decisions.find(
-      (q) =>
-        !(
-          !confirmed &&
-          q.trigger === "merge_confirmation" &&
-          q.kind === "approve" &&
-          "delivery_id" in q.target &&
-          q.target.delivery_id === target.id
-        ) &&
-        q.blocking &&
-        ["open", "provisional"].includes(q.status) &&
-        (q.card_id === card.id ||
-          q.affected_cards.includes(card.id) ||
-          q.affected_work_items.some((id) =>
-            state.work_items.some((w) => w.id === id && w.card_id === card.id),
-          )),
-    );
+    const decision = mergeBlockingDecisions(
+      state,
+      card.id,
+      target.id,
+      confirmed,
+    )[0];
     // C-112: the message names the blocker so `merge status` and the loops'
     // skip logs can say which item holds the merge.
     ensure(
       !decision,
       "illegal_transition",
       `合并被未解决的阻塞拍板 ${decision?.id} 挡住`,
+      { merge_blocker: true, completion_id: target.id },
     );
     const action = mergeBlockingHumanActions(state, card.id)[0];
     ensure(
       !action,
       "illegal_transition",
       `合并被待执行的人工事项 ${action?.id} 挡住`,
+      { merge_blocker: true, completion_id: target.id },
     );
     return {
       card_id,
