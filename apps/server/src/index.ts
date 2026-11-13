@@ -139,6 +139,7 @@ export async function runServer(
       web: { config: webConfig },
       dispatcher: {
         runtime: host.runtime,
+        upstream: host.upstream,
         snapshot: host.snapshot,
         startRun: host.startRun,
         beforeWake: host.beforeWake,

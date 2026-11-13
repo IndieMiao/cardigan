@@ -28,6 +28,7 @@ export * from "./commands/dispatch-stop.js";
 export * from "./commands/employee.js";
 export * from "./commands/host-ops.js";
 export * from "./commands/host-ops-actions.js";
+export * from "./commands/host-ops-rotate.js";
 export * from "./commands/inactive-run.js";
 export * from "./commands/launch.js";
 export * from "./commands/member.js";
@@ -94,6 +95,7 @@ export {
   stopWorkItemAssignment,
 } from "./commands/stop.js";
 export * from "./commands/templates.js";
+export * from "./commands/upstream-health.js";
 export { canStartWork, workCompleted } from "./commands/workflow.js";
 export * from "./context-usage.js";
 export * from "./derived.js";
@@ -120,3 +122,4 @@ export * from "./standing.js";
 export * from "./states.js";
 export * from "./templates.js";
 export * from "./transitions.js";
+export * from "./upstream-health.js";

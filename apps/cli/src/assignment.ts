@@ -770,7 +770,7 @@ const USAGE = [
   "  cardigan assignment stop <A-n> [--project <p>] [--hc-session <s>] [--data-dir <目录>]",
   "  cardigan assignment release <A-n> [--project <p>] [--data-dir <目录>]",
   "  cardigan assignment attach <A-n> [--print] [--interactive] [--project <p>] [--hc-session <s>] [--data-dir <目录>]",
-  "  stop：释放终端并取消未结束和排队的 Run；之后不会自动起新会话，门铃排队，用 assignment start 恢复。",
+  "  stop：释放终端并取消未结束和排队的 Run；之后不会自动起新会话，门铃排队，用 assignment start 恢复。主机运维操作待处理时拒绝 stop；终端释放失败可直接重试。",
   "  attach：输入和输出均为终端（TTY）时直接只读观察；--interactive 允许输入，--print 或非 TTY 只打印命令（默认带 --observe）。",
   "  按 Ctrl+\\ 分离退出；--interactive 下你的输入会直接发给正在工作的 Agent。",
 ].join("\n");

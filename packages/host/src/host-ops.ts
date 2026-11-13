@@ -13,6 +13,7 @@ import {
   type HostOpsExecutionTool,
   hostOpsExitConfirmation,
   hostOpsReadDiagnostics,
+  lastUpstreamInactivity,
   type ProjectId,
   pendingHostOpsActions,
   prepareHostOpsAction,
@@ -22,6 +23,8 @@ import {
   recheckMerge,
   recordContextUsageNotices,
   requestHostOpsExitConfirmation,
+  type SessionActivity,
+  withdrawRecoveredHostOpsAction,
 } from "@cardigan/domain";
 import {
   type HostOpsToolOptions,
@@ -31,6 +34,7 @@ import {
   ToolError,
   unwrap,
 } from "@cardigan/mcp-server";
+import type { LaunchConfig } from "@cardigan/roles";
 import { DEFAULT_HC_SESSION } from "@cardigan/runtime-herdr";
 import {
   recordNotification,
@@ -46,8 +50,11 @@ import {
 } from "./context-usage.js";
 import { tryHostOpsLock } from "./host-ops-lock.js";
 import { revokeStoppedRunTokens, stopRunRuntime } from "./stop-run.js";
+import { UpstreamHealthMonitor } from "./upstream-health.js";
 
 interface Options {
+  upstream?: LaunchConfig;
+  upstreamMonitor?: UpstreamHealthMonitor;
   store: Store;
   runtime: Runtime;
   snapshot: (
@@ -82,10 +89,22 @@ interface Options {
 /** Requests commit first. The dispatch loop drains intents; a restart resumes unfinished work. */
 export class HostOpsService {
   private readonly clock: Clock;
+  private readonly upstream: UpstreamHealthMonitor | undefined;
+  private readonly upstreamPolls = new Map<ProjectId, Promise<void>>();
+  private closing = false;
   private lastContextPoll = Number.NEGATIVE_INFINITY;
   private serial: Promise<void> = Promise.resolve();
   constructor(private readonly options: Options) {
     this.clock = options.clock ?? { now: () => new Date().toISOString() };
+    this.upstream =
+      options.upstreamMonitor ??
+      (options.upstream
+        ? new UpstreamHealthMonitor(
+            options.upstream,
+            options.runtime,
+            this.clock,
+          )
+        : undefined);
   }
   readonly tools: NonNullable<HostOpsToolOptions["hostOps"]> = {
     read: (context, project) => this.read(context, project),
@@ -109,6 +128,8 @@ export class HostOpsService {
       ),
     );
     const sessions = await this.sessions(actor.project_id);
+    const activity = await this.observeUpstream(actor.project_id);
+    this.upstream?.reconcile(this.options.store, actor.project_id, activity);
     context.revalidateToken?.();
     return this.options.store.uow.read((tx) => {
       const state = loadCommandState(tx, actor.project_id);
@@ -146,6 +167,9 @@ export class HostOpsService {
       }));
       return {
         ...attention,
+        ...(this.upstream
+          ? { upstream_health: this.upstream.diagnostics(state, activity) }
+          : {}),
         lost: attention.lost.map(summary),
         paused: attention.paused.map(summary),
         findings: attention.findings.map((f) => ({
@@ -248,12 +272,22 @@ export class HostOpsService {
       target_id: p.target_id as AssignmentId | RunId,
       reason: p.reason ?? "",
     };
-    const preflight = store.uow.read(
-      (tx) =>
-        unwrap(
-          prepareHostOpsAction(loadCommandState(tx, project), actor, params),
-        ).data,
-    );
+    const activity =
+      tool === "host_ops_cancel_run"
+        ? undefined
+        : await this.observeUpstream(project, p.target_id as AssignmentId);
+    const preflight = store.uow.read((tx) => {
+      const state = loadCommandState(tx, project);
+      if (tool !== "host_ops_cancel_run")
+        this.checkUpstream(
+          state,
+          p.target_id as AssignmentId,
+          Boolean(contextUsage),
+          undefined,
+          activity,
+        );
+      return unwrap(prepareHostOpsAction(state, actor, params)).data;
+    });
     const snapshot =
       tool === "host_ops_cancel_run"
         ? undefined
@@ -265,11 +299,25 @@ export class HostOpsService {
                 "Target launch configuration could not be prepared",
               );
             });
+    const freshActivity =
+      tool === "host_ops_cancel_run"
+        ? undefined
+        : await this.observeUpstream(project, preflight.assignment.id);
     return unwrap(
       store.runIdempotent(invocation, (tx) => {
         context.revalidateToken?.();
         const state = loadCommandState(tx, project);
         const fresh = unwrap(prepareHostOpsAction(state, actor, params)).data;
+        const diagnosis =
+          tool === "host_ops_cancel_run"
+            ? undefined
+            : this.checkUpstream(
+                state,
+                preflight.assignment.id,
+                Boolean(contextUsage),
+                undefined,
+                freshActivity,
+              );
         if (
           JSON.stringify(fresh.assignment) !==
             JSON.stringify(preflight.assignment) ||
@@ -293,7 +341,13 @@ export class HostOpsService {
           beginHostOpsAction(
             state,
             actor,
-            { ...params, ...(snapshot ? { snapshot } : {}) },
+            {
+              ...params,
+              ...(snapshot ? { snapshot } : {}),
+              ...(diagnosis?.incident_id
+                ? { upstream_incident_id: diagnosis.incident_id }
+                : {}),
+            },
             { clock: this.clock, ids: tx.ids },
           ),
         );
@@ -301,6 +355,86 @@ export class HostOpsService {
         return effect.data;
       }),
     ).value;
+  }
+  private async observeUpstream(project: ProjectId, only?: AssignmentId) {
+    if (!this.upstream) return {};
+    const state = this.options.store.uow.read((tx) =>
+      loadCommandState(tx, project),
+    );
+    const activity = await this.upstream.observe(state, only);
+    const sessions = await this.sessions(project);
+    for (const session of sessions) {
+      if (!session.assignment_id) continue;
+      const inactive = lastUpstreamInactivity(state, session.assignment_id);
+      if (
+        (!only || session.assignment_id === only) &&
+        inactive &&
+        !session.stale &&
+        session.observation &&
+        session.observation.updated_at > inactive.created_at
+      )
+        activity[session.assignment_id] = "working";
+    }
+    const current = this.options.store.uow.read((tx) =>
+      loadCommandState(tx, project),
+    );
+    for (const id of Object.keys(activity)) {
+      const before = state.assignments.find((a) => a.id === id);
+      const after = current.assignments.find((a) => a.id === id);
+      if (
+        !after ||
+        JSON.stringify(before?.runtime_ref) !==
+          JSON.stringify(after.runtime_ref)
+      )
+        throw new ToolError(
+          "stale_target",
+          "活动采样期间会话已更换，请重新读取诊断",
+        );
+    }
+    return activity;
+  }
+  private checkUpstream(
+    state: CommandState,
+    id: AssignmentId,
+    contextRestart: boolean,
+    ignoreAction?: HostOpsExecution["action_id"],
+    activity?: SessionActivity,
+  ) {
+    const diagnosis = this.upstream?.diagnosis(
+      state,
+      id,
+      ignoreAction,
+      activity,
+    );
+    if (
+      diagnosis &&
+      (diagnosis.action === "wait" ||
+        diagnosis.action === "human" ||
+        (diagnosis.cause === "agent_busy" && !contextRestart))
+    )
+      throw new ToolError(
+        "illegal_transition",
+        `当前不能重启 ${id}：${diagnosis.cause}（${diagnosis.evidence.join(", ")}）；${diagnosis.action === "human" ? "复发须交人" : "请等待并核实诊断"}`,
+      );
+    return diagnosis;
+  }
+  async close() {
+    this.closing = true;
+    await this.upstream?.close();
+    await Promise.allSettled(this.upstreamPolls.values());
+  }
+  /** Runtime/context observations must precede clustering, without holding the dispatcher. */
+  private pollUpstream(project: ProjectId) {
+    const upstream = this.upstream;
+    if (!upstream || this.closing || this.upstreamPolls.has(project)) return;
+    const poll = this.observeUpstream(project)
+      .then((activity) => {
+        if (!this.closing)
+          upstream.reconcile(this.options.store, project, activity);
+      })
+      .catch(() => upstream.observationFailed(project))
+      .finally(() => this.upstreamPolls.delete(project));
+    this.upstreamPolls.set(project, poll);
   }
   private sessions(project: ProjectId) {
     const state = this.options.store.uow.read((tx) =>
@@ -354,6 +488,10 @@ export class HostOpsService {
   }
   tick(): Promise<void> {
     const next = this.serial.then(async () => {
+      this.upstream?.schedule();
+      if (this.upstream)
+        for (const project of this.options.store.listProjects())
+          this.pollUpstream(project.id);
       // C-211: a context patrol failure must not skip this round's drain.
       try {
         await this.pollContexts();
@@ -470,13 +608,74 @@ export class HostOpsService {
           };
           // Do not revoke credentials or release the Run slot until exit is proven.
           if (!current()) continue;
+          let activity: SessionActivity | undefined;
+          if (action.tool !== "host_ops_cancel_run") {
+            try {
+              activity = await this.observeUpstream(
+                project.id,
+                action.assignment_id,
+              );
+            } catch {
+              this.upstream?.observationFailed(project.id);
+              this.defer(
+                project.id,
+                action.action_id,
+                "upstream_observation_failed",
+              );
+              continue;
+            }
+          }
+          const mayStop = () => {
+            if (!current()) return false;
+            if (action.tool === "host_ops_cancel_run") return true;
+            const diagnosis = this.upstream?.diagnosis(
+              read(),
+              action.assignment_id,
+              action.action_id,
+              activity,
+            );
+            if (action.upstream_incident_id || diagnosis?.incident_id) {
+              const withdrawn = store.uow.run((tx) => {
+                const effect = unwrap(
+                  withdrawRecoveredHostOpsAction(
+                    loadCommandState(tx, project.id),
+                    { kind: "system", project_id: project.id },
+                    action.action_id,
+                    { clock: this.clock, ids: tx.ids },
+                    diagnosis?.incident_id,
+                  ),
+                );
+                persistEffect(tx, project.id, effect);
+                return effect.data;
+              });
+              if (withdrawn) return false;
+            }
+            try {
+              this.checkUpstream(
+                read(),
+                action.assignment_id,
+                Boolean(action.context_usage),
+                action.action_id,
+                activity,
+              );
+              return true;
+            } catch {
+              this.defer(
+                project.id,
+                action.action_id,
+                "upstream_recovery_not_ready",
+              );
+              return false;
+            }
+          };
+          if (!mayStop()) continue;
           const foreign =
             action.runtime_ref !== null &&
             this.options.ownsRuntimeRef?.(action.runtime_ref) === false;
           if (foreign) {
             if (!this.confirmedByHuman(project.id, action)) continue;
           } else if (
-            (await stopRunRuntime(runtime, action.runtime_ref, current)) !==
+            (await stopRunRuntime(runtime, action.runtime_ref, mayStop)) !==
             "exited"
           ) {
             this.defer(

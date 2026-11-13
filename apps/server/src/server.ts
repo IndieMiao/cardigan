@@ -200,6 +200,9 @@ export async function startCardiganServer(
         store,
         runtime: options.dispatcher.runtime,
         snapshot: options.dispatcher.snapshot,
+        ...(options.dispatcher.upstream
+          ? { upstream: options.dispatcher.upstream }
+          : {}),
         contextUsage: {
           execution,
           cacheDir:
@@ -315,6 +318,7 @@ export async function startCardiganServer(
         }),
       );
     } catch (error) {
+      await hostOps?.close();
       await mcp.close();
       if (ownsStore) store.close();
       throw error;
@@ -402,6 +406,7 @@ export async function startCardiganServer(
       });
     } catch (error) {
       await web?.close();
+      await hostOps?.close();
       await mcp.close();
       if (ownsStore) store.close();
       throw error;
@@ -415,6 +420,7 @@ export async function startCardiganServer(
   } catch (error) {
     await web?.close();
     await plane?.stop();
+    await hostOps?.close();
     await mcp.close();
     if (ownsStore) store.close();
     throw error;
@@ -433,6 +439,7 @@ export async function startCardiganServer(
       // current tick (a merge is never cut in half). In-flight requests get
       // the grace period. The MCP endpoint and the store close after both.
       const results = await Promise.allSettled([web?.close(), plane?.stop()]);
+      await hostOps?.close();
       await mcp.close();
       if (ownsStore) {
         store.close();
