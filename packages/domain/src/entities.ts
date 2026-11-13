@@ -109,6 +109,8 @@ export type Reference =
   | { readonly kind: "delivery"; readonly id: DeliveryId }
   | { readonly kind: "pr"; readonly url: string };
 
+export type RiskTag = "security" | "permission" | "numeric_rule";
+
 export interface Card {
   readonly id: CardId;
   readonly project_id: ProjectId;
@@ -137,6 +139,8 @@ export interface Card {
    * always goes to the human, never to PM Ops or the auto-merge timeout.
    */
   readonly sensitive?: boolean;
+  /** PM/human-maintained code risk classification, independent of D12 decisions. */
+  readonly risk_tags?: readonly RiskTag[];
   /**
    * C-160: checks a human wants done before confirming the merge (e.g. an
    * independent security review). Labels other than the reserved independent

@@ -195,6 +195,7 @@ export function updateCard(
     acceptance_criteria?: readonly string[];
     priority?: number | string;
     status?: Card["status"];
+    risk_tags?: Card["risk_tags"];
     /** C-160: add or update one pre-merge check; not mixed with other edits. */
     pre_merge_check?: PreMergeCheckInput;
   },
@@ -209,7 +210,8 @@ export function updateCard(
           p.goal === undefined &&
           p.acceptance_criteria === undefined &&
           p.priority === undefined &&
-          p.status === undefined,
+          p.status === undefined &&
+          p.risk_tags === undefined,
         "validation_failed",
         "pre_merge_check 不能与其他卡片修改混用",
       );
@@ -217,6 +219,15 @@ export function updateCard(
     }
     if (p.title !== undefined) text(p.title, "title");
     if (p.goal !== undefined) text(p.goal, "goal");
+    if (p.risk_tags !== undefined)
+      ensure(
+        Array.isArray(p.risk_tags) &&
+          p.risk_tags.every((tag) =>
+            ["security", "permission", "numeric_rule"].includes(tag),
+          ),
+        "validation_failed",
+        "risk_tags 只接受 security、permission、numeric_rule 组成的数组；清空请传 []",
+      );
     if (p.acceptance_criteria !== undefined)
       ensure(
         (!resolveCardTemplate(d, card).require_acceptance_criteria ||
@@ -259,6 +270,9 @@ export function updateCard(
       status,
       ...(p.title !== undefined ? { title: p.title } : {}),
       ...(p.goal !== undefined ? { goal: p.goal } : {}),
+      ...(p.risk_tags !== undefined
+        ? { risk_tags: [...new Set(p.risk_tags)] }
+        : {}),
       ...(priority !== undefined ? { priority } : {}),
       ...(p.acceptance_criteria !== undefined
         ? { acceptance_criteria: p.acceptance_criteria }
@@ -268,7 +282,16 @@ export function updateCard(
     d.emit(
       "card_updated",
       card.id,
-      { card_id: card.id, status },
+      {
+        card_id: card.id,
+        status,
+        ...(p.risk_tags !== undefined
+          ? {
+              previous_risk_tags: card.risk_tags ?? [],
+              risk_tags: result.risk_tags,
+            }
+          : {}),
+      },
       { type: "status_change", body: result.title },
     );
     return result;

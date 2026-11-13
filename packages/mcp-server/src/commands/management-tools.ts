@@ -237,6 +237,12 @@ const schemas = {
       ])
       .optional(),
     status: z.enum(states.card).optional(),
+    risk_tags: z
+      .array(z.enum(["security", "permission", "numeric_rule"]))
+      .optional()
+      .describe(
+        "代码风险标签，仅 PM 或人可写；传 [] 清空。非人验收卡须配套必需的独立复核验证项",
+      ),
     pre_merge_check: z
       .object({
         label: text.describe("核对项名称，例如“独立安全审核”“截图核对”"),

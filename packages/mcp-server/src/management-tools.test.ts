@@ -1215,6 +1215,39 @@ test.each([0, 5, "3", "rush"])(
   },
 );
 
+test("risk tags survive MCP update, storage and get_card; invalid values have no effects", async () => {
+  expect(card.risk_tags).toBeUndefined();
+  const risk_tags = ["security", "permission", "numeric_rule"];
+  expect(
+    await ok<Card>(office, "update_card", { card_id: card.id, risk_tags }),
+  ).toMatchObject({ risk_tags });
+  expect(
+    store.uow.read((tx) => tx.cards.get(project, card.id))?.risk_tags,
+  ).toEqual(risk_tags);
+  expect(await ok(office, "get_card", { card_id: card.id })).toMatchObject({
+    card: { risk_tags },
+  });
+  const before = rows();
+  for (const invalid of [
+    ["spending"],
+    ["security", "concurrency"],
+    "security",
+    null,
+  ])
+    expect(
+      (
+        await raw(office, "update_card", {
+          card_id: card.id,
+          risk_tags: invalid,
+        })
+      ).isError,
+    ).toBe(true);
+  expect(rows()).toEqual(before);
+  expect(
+    await ok<Card>(office, "update_card", { card_id: card.id, risk_tags: [] }),
+  ).toMatchObject({ risk_tags: [] });
+});
+
 test("C-160 update_card.pre_merge_check: Ops adds pending, only Office passes", async () => {
   const [officeA, opsA] = store.uow.run((tx) =>
     (["office", "ops"] as const).map((standing_mode): Assignment => {
