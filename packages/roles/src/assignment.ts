@@ -129,6 +129,8 @@ export interface CompileAssignmentInput {
    * `work_dir`, i.e. the exact key pi 1.4 looks up in `trust.json`
    * (`canonicalizePath(resolvePath(cwd))`). Set only when the worktree leaf
    * itself is not a symlink; without it pi gets no pre-trust (fail closed).
+   * The compiler cannot check the filesystem, so only the host may set it,
+   * and only from `piTrustedWorktreePath(work_dir)` in `@cardigan/host`.
    */
   readonly work_dir_real?: string;
   /** Host-selected base clone containing the worktree's common .git directory. */

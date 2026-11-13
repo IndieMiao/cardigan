@@ -1,6 +1,13 @@
 import { spawnSync } from "node:child_process";
 import { realpathSync } from "node:fs";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, expect, test } from "vitest";
@@ -78,4 +85,25 @@ test("C-235 unusable worktree paths get no pre-trust (fail closed)", async () =>
     "/",
   ])
     expect(await piTrustedWorktreePath(path)).toBeUndefined();
+});
+
+test("C-235 an unexpected filesystem error is surfaced with its path, never swallowed", async () => {
+  // A worktree under a directory the host cannot search: lstat fails EACCES.
+  const locked = join(root, "locked");
+  const worktree = join(locked, "A-1");
+  await mkdir(worktree, { recursive: true });
+  await chmod(locked, 0o600);
+  try {
+    const failure = await piTrustedWorktreePath(worktree).then(
+      () => undefined,
+      (error: unknown) => error as Error,
+    );
+    expect(failure?.message).toContain("EACCES");
+    expect(failure?.message).toContain(worktree);
+    expect((failure?.cause as NodeJS.ErrnoException | undefined)?.code).toBe(
+      "EACCES",
+    );
+  } finally {
+    await chmod(locked, 0o700);
+  }
 });
