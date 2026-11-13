@@ -1,5 +1,5 @@
 import type { ProjectId } from "@cardigan/domain";
-import { reviewLimitAttention } from "@cardigan/domain";
+import { pmMergeStallAttention, reviewLimitAttention } from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
 import type { ReadRepositories, Store } from "@cardigan/store";
 import { readRunQueue } from "./run-capacity.js";
@@ -15,6 +15,8 @@ export function readAttention(
     const state = loadCommandState(tx, project);
     return {
       attention: reviewLimitAttention(state, now),
+      /** C-177: PM-held merge confirmations open past the stall threshold. */
+      merge_stalls: pmMergeStallAttention(state, now),
       escalated: store
         .listNotifications({ project_id: project })
         .filter((n) =>

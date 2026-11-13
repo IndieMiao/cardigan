@@ -31,6 +31,11 @@ export const defaultDecisionDelegation: Readonly<
 export interface ProjectPreferences {
   readonly id: ProjectId;
   readonly auto_merge_after_minutes: number | null;
+  /**
+   * C-177: minutes a PM-held merge confirmation may stay open after its check
+   * concluded before PM Ops and the human are alerted. Absent means the default.
+   */
+  readonly merge_confirm_stall_after_minutes?: number;
   /** Missing entries use the documented defaults, including on existing projects. */
   readonly decision_delegation?: Readonly<
     Partial<Record<DecisionCategory, boolean>>
@@ -63,6 +68,24 @@ export function decisionDelegation(
     permission: false,
     data_deletion: false,
   };
+}
+/** C-177 default for `merge_confirm_stall_after_minutes`. */
+export const DEFAULT_MERGE_CONFIRM_STALL_MINUTES = 60;
+export function mergeConfirmStallAfterMinutes(
+  preferences?: ProjectPreferences,
+): number {
+  return (
+    preferences?.merge_confirm_stall_after_minutes ??
+    DEFAULT_MERGE_CONFIRM_STALL_MINUTES
+  );
+}
+export function validMergeConfirmStallMinutes(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= 1 &&
+    value <= 1440
+  );
 }
 export function validAutoMergeMinutes(value: unknown): value is number | null {
   return (

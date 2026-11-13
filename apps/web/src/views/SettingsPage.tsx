@@ -148,6 +148,17 @@ export function SettingsPage({
                   saved={resource.reload}
                 />
               )}
+              {resource.data && (
+                <MergeStallSetting
+                  key={`stall:${resource.data.merge_confirm_stall_after_minutes}`}
+                  initial={
+                    resource.data.merge_confirm_stall_after_minutes ?? 60
+                  }
+                  client={client}
+                  projectId={projectId}
+                  saved={resource.reload}
+                />
+              )}
             </section>
           </RequestFeedbackScope>
           <RequestFeedbackScope hidden={tab !== "authorization"}>
@@ -280,6 +291,88 @@ function PreferenceForm({
       />
       <button type="submit" disabled={busy || !valid}>
         保存偏好
+      </button>
+      <RequestFeedback
+        interactive
+        pending={busy}
+        pendingMessage="保存中…"
+        error={error}
+        message={message}
+      />
+    </form>
+  );
+}
+
+/** C-177: wording set by PM Ops per Q-279 (C-177#7). */
+function MergeStallSetting({
+  initial,
+  client,
+  projectId,
+  saved,
+}: {
+  initial: number;
+  client: CardiganClient;
+  projectId: string;
+  saved: () => void;
+}) {
+  const [minutes, setMinutes] = useState(String(initial));
+  const [busy, setBusy] = useState(false),
+    [error, setError] = useState(""),
+    [message, setMessage] = useState("");
+  const sending = useRef(false),
+    keys = useRef(new Map<string, string>());
+  const valid =
+    /^\d+$/.test(minutes) && Number(minutes) >= 1 && Number(minutes) <= 1440;
+  return (
+    <form
+      aria-label="PM 合并确认停留告警"
+      onSubmit={async (event) => {
+        event.preventDefault();
+        if (sending.current || !valid) return;
+        sending.current = true;
+        setBusy(true);
+        setError("");
+        setMessage("");
+        const key = keys.current.get(minutes) ?? crypto.randomUUID();
+        keys.current.set(minutes, key);
+        try {
+          await client.setMergeConfirmStallAfter(
+            projectId,
+            Number(minutes),
+            key,
+          );
+          keys.current.delete(minutes);
+          setMessage("偏好已保存");
+          saved();
+        } catch (cause) {
+          setError(describeWriteError(cause));
+        } finally {
+          sending.current = false;
+          setBusy(false);
+        }
+      }}
+    >
+      <label>
+        PM 合并确认停留告警（分钟）
+        <input
+          type="number"
+          min="1"
+          max="1440"
+          step="1"
+          value={minutes}
+          disabled={busy}
+          onChange={(e) => setMinutes(e.target.value)}
+        />
+      </label>
+      <p className="hint">
+        PM 持有的合并确认在检查通过后超过这么久还没处理，就提醒 PM Ops，并在
+        Needs You 知会人
+      </p>
+      <RequestFeedback
+        error={!valid ? "请输入 1 到 1440 的整数分钟。" : undefined}
+      />
+      <button type="submit" disabled={busy || !valid}>
+        保存停留告警
       </button>
       <RequestFeedback
         interactive

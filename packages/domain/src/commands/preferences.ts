@@ -5,8 +5,10 @@ import {
   decisionDelegation,
   highRiskCategories,
   isBoardLane,
+  mergeConfirmStallAfterMinutes,
   pmMergeConfirmation,
   validAutoMergeMinutes,
+  validMergeConfirmStallMinutes,
 } from "../preferences.js";
 import { states } from "../states.js";
 import {
@@ -31,6 +33,7 @@ export function setProjectPreferences(
   actor: Actor,
   input: {
     auto_merge_after_minutes?: number | null;
+    merge_confirm_stall_after_minutes?: number;
     decision_delegation?: Partial<Record<DecisionCategory, boolean>>;
     pm_merge_confirmation?: boolean;
     /** A patch: only the listed lanes change; null forgets the human setting. */
@@ -50,9 +53,16 @@ export function setProjectPreferences(
       "validation_failed",
       "自动合并等待时间须为 1 到 1440 的整数分钟，或 null（关闭）",
     );
+    ensure(
+      input.merge_confirm_stall_after_minutes === undefined ||
+        validMergeConfirmStallMinutes(input.merge_confirm_stall_after_minutes),
+      "validation_failed",
+      "合并确认停留告警时间须为 1 到 1440 的整数分钟",
+    );
     const old = projectPreferences(state);
     ensure(
       input.auto_merge_after_minutes !== undefined ||
+        input.merge_confirm_stall_after_minutes !== undefined ||
         input.decision_delegation !== undefined ||
         input.pm_merge_confirmation !== undefined ||
         input.board_collapsed_lanes !== undefined,
@@ -103,6 +113,12 @@ export function setProjectPreferences(
         input.auto_merge_after_minutes === undefined
           ? old.auto_merge_after_minutes
           : input.auto_merge_after_minutes,
+      ...(input.merge_confirm_stall_after_minutes !== undefined
+        ? {
+            merge_confirm_stall_after_minutes:
+              input.merge_confirm_stall_after_minutes,
+          }
+        : {}),
       ...(input.decision_delegation ? { decision_delegation: delegation } : {}),
       ...(input.pm_merge_confirmation !== undefined
         ? { pm_merge_confirmation: input.pm_merge_confirmation }
@@ -111,6 +127,9 @@ export function setProjectPreferences(
     };
     const mergeChanged =
       old.auto_merge_after_minutes !== next.auto_merge_after_minutes;
+    const stallChanged =
+      mergeConfirmStallAfterMinutes(old) !==
+      mergeConfirmStallAfterMinutes(next);
     const delegationChanged = decisionCategories.some(
       (c) => decisionDelegation(old)[c] !== delegation[c],
     );
@@ -121,7 +140,13 @@ export function setProjectPreferences(
     const lanesChanged =
       input.board_collapsed_lanes !== undefined &&
       states.card.some((lane) => oldLanes[lane] !== lanes[lane]);
-    if (!mergeChanged && !delegationChanged && !pmMergeChanged && !lanesChanged)
+    if (
+      !mergeChanged &&
+      !stallChanged &&
+      !delegationChanged &&
+      !pmMergeChanged &&
+      !lanesChanged
+    )
       return old;
     // Lane folding is a view setting: it is stored for every device but emits
     // no audit event, so toggling a lane never feeds the activity stream.
@@ -131,6 +156,12 @@ export function setProjectPreferences(
         old_value: old.auto_merge_after_minutes,
         new_value: next.auto_merge_after_minutes,
         preference: "auto_merge_after_minutes",
+      });
+    if (stallChanged)
+      d.emit("project_preferences_updated", undefined, {
+        old_value: mergeConfirmStallAfterMinutes(old),
+        new_value: mergeConfirmStallAfterMinutes(next),
+        preference: "merge_confirm_stall_after_minutes",
       });
     if (delegationChanged) {
       d.emit("project_preferences_updated", undefined, {

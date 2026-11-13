@@ -1044,6 +1044,8 @@ P2a-10 B1（C-84，Q-139）：主机运维是独立的常驻角色 `host_ops`，
 
 C-178：阻止合并候选准备的人工待办（`blocks_merge` 或阻塞本卡工作项）、阻塞拍板及其他前置条件，由主机扫描写入卡片系统时间线；首次记录编号、标题／说明和发现时间，同一持续原因不重复写，解除后再写“合并检查已解除阻挡：H-n”。只读查询类人工待办不写此类时间线。卡片合并区块和 `cardigan merge status` 显示“合并检查未开始：被 H-n 挡住（自 hh:mm 起）”及说明，时间沿用展示端本地时区；原始事件保留完整时间戳。等待当前完成申请的合并确认、暂缓合并只限制发布，不误标为检查启动阻挡；不改变任何合并判定或授权。
 
+**PM 持有的合并确认停留告警**（C-177，2026-11-13 用户拍板“60 分钟做成能够 preference 配置”）：项目偏好 `merge_confirm_stall_after_minutes`（1–1440 的整数分钟，未设置时默认 60）。`decider=role:pm` 的合并确认处于 open、属于当前完成申请，且当前完成申请的最新检查已有结论（通过、失败、超时、中断、执行器不可达），或主机已验证为 noop，从这个时刻起超过阈值仍未处理，就算停留。没有检查结果、检查排队或运行中时不算 PM 停留。计时起点取检查出结论的时间和该确认最近一次状态事件（发起、转交等带 `decision_id` 的事件，不含告警自身）中较晚的一个，所以状态变化后重新计时。检查是 domain 纯函数 `pmMergeStallAttention`，写法同审核恢复检查（C-45），由 Dispatcher 每轮维护时执行，不启动 Run，不花 token；同一确认、同一计时起点只持久化一次 `pm_merge_confirmation_stalled` 事件，并写一条发给 PM Ops 的升级通知和一条人的 `needs_attention` 通知，重启后不重复。确认处理掉或重新计时后，旧通知自动标为 resolved。函数留有“是否抑制”扩展点（`suppressed`，默认不抑制），显式暂缓（C-180）接入后，暂缓期内的确认不告警。PM 收到告警后怎么处理写在 pm 规则里，不在代码中硬编码；本条不改变 `decider=human` 的超时代批规则。
+
 P2a-13 B 组合入后（ADR 0004，用户 2026-11-11 拍板第 2 条），启用合并队列的项目里，合并确认的含义改为“同意合并，以批次全量检查通过为准”：第 1、2 条中的“闸门检查通过”指卡级快速检查通过（不跑 e2e，基线前进不重跑）；确认后卡片进入合并队列，与其他已确认的卡组成批次 MB-n 跑全量检查，通过才合并。批次失败定位到本卡时按第 7 条处理，确认不撤销，同批其他卡不需要重新确认。人和 PM Ops 可以给卡打“单独跑”标记，让它单独成批。敏感卡（第 5 条）仍只由人确认，人确认的含义同样变为以批次检查为准。
 
 ---
@@ -1174,6 +1176,8 @@ C-37：交给人的普通拍板增加“此类问题以后由 PM 代拍”勾选
 
 C-49：Needs You 末尾新增“知会”区，列出 PM 代确认的合并、C-37 代拍、审核上限代判和超时自动合并。C-71 将 Workbench 的固定 50 条改为服务端分页：未读始终全部置顶，已读默认最近 10 条，两组各按时间倒序、同一时间按事件编号倒序；首屏 `/needs-you` 返回 `notices` 和 `notices_next_cursor`，“显示更多”经 `GET /api/projects/:id/notices?before=<游标>` 每次追加 10 条已读，游标为上一页末条的事件编号，响应 `next_cursor=null` 时隐藏按钮。新增记录不改变游标边界；非法或不属于本项目的游标拒绝。刷新保留已展开历史，加载及失败沿用 `RequestFeedback`，不占据内容布局。标题显示“知会（未读 N）”，每条显示类型（PM 代确认合并／PM 退回修改／PM 重新检查／超时自动合并／PM 代拍；C-79 按实际操作区分）、拍板编号、卡片、时间和知会正文，链接到按卡片筛选的拍板记录页。知会不计入待处理总数，不阻塞；可逐条或全部经 `POST /api/projects/:id/notices/read`（`notice_ids`）标为已读，已读条目保留并去掉按钮。交给 PM 的合并确认不进待处理列表，PM 交人或偏好关闭后按原合并确认展示。本机 `cardigan needs-you` 用同一份 domain `notices()` 数据在末尾列出知会（倒序，最多 50 条，标出已读／未读、知会编号、类型、拍板编号、卡片、时间和正文）；`cardigan needs-you read <知会编号...>` 或 `--all` 以 human 身份调用与 Workbench 相同的 `markNoticesRead`。C-65：Needs You 在“合并确认”后显示“PM 代确认中的合并（N）”分组（数据来自 `pm_held_merges`，不计入待处理总数），每条与合并确认相同的展示和按钮，并提示“PM 正在代确认，你可以直接处理”；卡片详情的操作区提供“标为敏感／取消敏感标记”按钮，被标记时显示“敏感卡片：合并确认由你亲自处理”。
 
+C-177：PM 持有的合并确认停留超过 `merge_confirm_stall_after_minutes`（见 §7.4）时，“知会”区出现一条系统知会“PM 持有的合并确认已停留 N 分钟（C-n）”，标签为“PM 合并确认停留”，链接到卡片和拍板记录。知会只提醒，不阻塞，也不提供操作；同一确认、同一计时起点只出现一次。`cardigan attention` 和主机运维的 `host_ops_read_diagnostics` 在 `merge_stalls` 中列出当前停留项，包括卡号、拍板编号、停留时长和阈值。
+
 侧栏增加 `#/p/<项目>/decision-history` 拍板记录页，查询已解决的拍板，包含后来被取代或撤回但有已解决事件的历史决定，不提供撤销。`GET /api/projects/:id/decision-history` 支持决策人 `human | pm | system`、类别、卡片及起止时间筛选，按解决时间倒序显示选项、影响、理由、记录人和授权依据；Office 转录计为人，`resolved_by=system` 的超时自动合并计为系统代批。筛选同步到 URL，沿用 Workbench 登录与项目隔离。C-134：接口改为分页，`limit` 默认 10、最大 100，`cursor` 为上一页末条的（解决时间，拍板编号）编码，响应附 `next_cursor`，末页为 null；筛选先作用于全部记录再分页，新解决的拍板不改变游标边界，非法 `limit` 或游标返回 400。页面默认显示最近 10 条，底部“加载更多”每次追加 10 条，改筛选后从最近 10 条重新开始，刷新保留已加载的页。每条记录压缩为三行：编号、问题（单行截断）、卡片、决策人、类别和时间；所选方案和记录人（小头像加姓名，不显示职位）；影响和理由的一行摘要，展开后显示完整问题、影响、理由和授权依据。
 
 P2a-1c（C-115 调整展示时机）：启用合并闸门的项目，卡片详情中的合并确认显示当前完成申请的 `merge_check` 徽标（排队中、运行中、已通过、失败、超时、已中断）、检查用时、失败摘要及日志链接。首个检查事件尚未写入时显示排队；运行用时从开始事件计算，结束后汇总逐项用时。Needs You 待拍板在检查通过或主机已验证 noop 后显示该确认；noop 显示“交付均在基线中，无需合并检查”，不伪装为排队或通过；卡片详情的确认按钮仍可用，检查未通过时旁注“检查通过后才会合并”。仅失败或超时提供“重新检查”，以 human 身份经 `POST /cards/:card/recheck-merge` 调用与 CLI 相同的 `recheckMerge`；请求携带 completion_id 和幂等键，事务内核对当前完成申请，过期或不满足重试条件时用中文说明。未配置闸门时保持原界面。配置无效时，人工确认留在等待计数中，卡片详情和 `cardigan needs-you` 显示固定提示“合并闸门配置无效，请查看 server 启动日志”；只读接口只传递无效状态，不回显配置内容或具体解析错误，也不显示排队或提供重新检查。时间线从对应 `merge_check_*` 事件展示当次检查徽标，不解析正文或另存状态；`cardigan needs-you` 的合并项同步显示检查状态。
@@ -1292,7 +1296,7 @@ Agent 只通过 Card MCP 读写，看板界面只服务你一个人，所以第�
 
 侧栏“设置”进入 `#/p/<项目>/settings`，页面使用独立分栏导航，实现“偏好”（默认）、“授权”、“角色”（P2-V V9b）和“卡片模板”（P2-V V10b）四栏。偏好栏提供超时自动合并开关、1–1440 分钟输入与保存，默认关闭。授权栏顶部提供“合并由 PM 代确认”开关（`pm_merge_confirmation`，默认开），说明 PM 代确认的前置条件和敏感卡片仍由人确认；关闭后合并确认由人处理，超时自动合并作为兜底。项目未启用合并闸门时显示：“没有合并闸门时，自动合并会合并未经全量测试和 e2e 的代码”。是否启用以主机当前项目的合并闸门配置为准。
 
-`GET /api/projects/:id/preferences` 返回当前偏好与 `merge_gate_enabled`；同路径 POST 接受 `auto_merge_after_minutes` 和 `decision_delegation` 的部分修改，沿用人类会话与 Origin 校验，强制 `Idempotency-Key`，同键重试与偏好及审计同事务处理。前端按操作内容保留失败请求的键，成功后释放，切换项目重建页面状态。授权栏列出每个类别当前由 PM 还是人处理，可开关三个非高风险类别，四类高风险固定由人确认（Workbench 或本机 CLI）。
+`GET /api/projects/:id/preferences` 返回当前偏好（含按默认值补全的 `merge_confirm_stall_after_minutes`）与 `merge_gate_enabled`；同路径 POST 接受 `auto_merge_after_minutes`、`merge_confirm_stall_after_minutes`（C-177，1–1440 整数分钟）和 `decision_delegation` 的部分修改，沿用人类会话与 Origin 校验，强制 `Idempotency-Key`，同键重试与偏好及审计同事务处理。前端按操作内容保留失败请求的键，成功后释放，切换项目重建页面状态。授权栏列出每个类别当前由 PM 还是人处理，可开关三个非高风险类别，四类高风险固定由人确认（Workbench 或本机 CLI）。
 
 **角色栏（P2-V V9b）**：把 V9a 的角色命令和权限边界搬到界面上，不另做校验或存储。
 
@@ -1832,6 +1836,8 @@ CLI、server 与运行时配置默认共用主机用户的 `~/.local/share/cardi
 C-85：`CARDIGAN_HOST_OPS_PATROL_INTERVAL_MS` 配置巡检间隔，默认 1800000 毫秒；计时依据持久化的巡检事件，重启不重置。有待处理通知或未结束 Run 时不堆积巡检。`CARDIGAN_HOST_OPS_CONTEXT_THRESHOLD_PCT` 配置诊断的估算上下文阈值（1–100，默认 80），仅供运维判断，不自动替换会话；真实水位上报仍由 D-C2 负责。
 
 CLI 的 domain、MCP 和运行时错误统一由 `apps/cli/src/errors.ts` 说明，格式为“无法<操作> <对象>：<中文原因>（<错误码>）”。覆盖 `not_found`、`illegal_transition`、`invariant_violation`、`validation_failed`、`unauthorized`、`forbidden_tool`、`idempotency_conflict`、`stale_target` 及运行时错误码；可识别的重复指派、卡片状态转换、附件校验等给出具体中文原因；卡片不存在时指出实际缺失的卡片编号，校验失败时说明可识别的具体字段，已有中文提示保留原意。未知错误码显示“操作被拒绝”并附原始信息，始终保留错误码便于排查。命令原有退出码、事务和状态迁移不变；`merge status` 中的计划拒绝也使用同一说明函数。角色命令沿用 domain 的错误码：重复角色为 `validation_failed`，角色或历史版本缺失为 `not_found`；CLI 的 `--version` 必须为下一个版本，参数拒绝使用 `validation_failed`。统一说明保留下一步操作或缺失版本的中文原因，退出码仍为 2；不再保留旧的 `RoleVersionError` 转换。员工、模板及 `card done` 命令同样使用共用格式并保留已有中文原因。
+
+C-177：`cardigan preference get|set merge-confirm-stall-after [<分钟>]` 查看或修改 PM 合并确认停留告警阈值（默认 60，1–1440，不接受 off），改动写 `project_preferences_updated` 审计事件；Workbench 设置页“偏好”栏可修改“PM 合并确认停留告警（分钟）”。
 
 人可用 `cardigan preference get auto-merge-after [--project <p>]` 查看、`cardigan preference set auto-merge-after <分钟|off> [--project <p>]` 修改项目偏好；沿用 `--data-dir` 和项目选择规则，只有 human 修改，非法值拒绝。偏好持久化到 SQLite，重启继续生效。合并循环每轮先尝试到期确认，再按现有计划执行合并，默认间隔仍为 5 秒，不增加独立调度器；关闭开关不撤销已经作出的确认。
 

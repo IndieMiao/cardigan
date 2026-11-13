@@ -94,6 +94,39 @@ test.each(["0", "1441", "1.5", "-10", "NaN", "1e2", "on"])(
   },
 );
 
+test("merge-confirm-stall-after defaults to 60, persists minutes with an audit event and rejects off", async () => {
+  expect(await run(["preference", "get", "merge-confirm-stall-after"])).toBe(0);
+  expect(output).toContain("merge-confirm-stall-after: 60");
+  expect(
+    await run(["preference", "set", "merge-confirm-stall-after", "90"]),
+  ).toBe(0);
+  expect(output).toContain("merge-confirm-stall-after: 90");
+  expect(
+    store.uow.read((tx) =>
+      tx.project_preferences.get("preferences", "preferences"),
+    ),
+  ).toMatchObject({
+    merge_confirm_stall_after_minutes: 90,
+    auto_merge_after_minutes: null,
+  });
+  expect(
+    store.uow
+      .read((tx) => tx.events.listAfter("preferences", undefined, 0))
+      .filter((e) => e.type === "project_preferences_updated")
+      .map((e) => e.payload),
+  ).toEqual([
+    {
+      old_value: 60,
+      new_value: 90,
+      preference: "merge_confirm_stall_after_minutes",
+    },
+  ]);
+  for (const bad of ["off", "0", "1441", "1.5"])
+    expect(
+      await run(["preference", "set", "merge-confirm-stall-after", bad]),
+    ).not.toBe(0);
+});
+
 test("delegation preferences persist separately from merge settings and reject fixed-risk categories", async () => {
   expect(await run(["preference", "get", "decision-delegation"])).toBe(0);
   expect(output.join("\n")).toContain("general: on (PM 代拍)");

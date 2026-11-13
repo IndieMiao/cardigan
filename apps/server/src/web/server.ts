@@ -9,6 +9,7 @@ import {
   decisionCategories,
   decisionDelegation,
   decisionHistory,
+  mergeConfirmStallAfterMinutes,
   pmMergeConfirmation,
   projectPreferences,
 } from "@cardigan/domain";
@@ -617,6 +618,9 @@ async function serveProjectRoute(
       ...projectPreferences(state),
       decision_delegation: decisionDelegation(projectPreferences(state)),
       pm_merge_confirmation: pmMergeConfirmation(projectPreferences(state)),
+      merge_confirm_stall_after_minutes: mergeConfirmStallAfterMinutes(
+        projectPreferences(state),
+      ),
       merge_gate_enabled: false,
     });
     return;

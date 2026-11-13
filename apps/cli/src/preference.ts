@@ -2,6 +2,7 @@ import {
   type DecisionCategory,
   decisionCategories,
   decisionDelegation,
+  mergeConfirmStallAfterMinutes,
   pmMergeConfirmation,
   projectPreferences,
   setProjectPreferences,
@@ -18,7 +19,7 @@ import {
 import type { CliIo } from "./io.js";
 
 const USAGE =
-  "cardigan preference get auto-merge-after | set auto-merge-after <分钟|off> | get decision-delegation | set decision-delegation <类别> <on|off> | get pm-merge-confirmation | set pm-merge-confirmation <on|off> [--project <p>] [--data-dir <目录>]";
+  "cardigan preference get auto-merge-after | set auto-merge-after <分钟|off> | get merge-confirm-stall-after | set merge-confirm-stall-after <分钟> | get decision-delegation | set decision-delegation <类别> <on|off> | get pm-merge-confirmation | set pm-merge-confirmation <on|off> [--project <p>] [--data-dir <目录>]";
 export function runPreferenceCommand(
   args: readonly string[],
   io: CliIo,
@@ -56,13 +57,15 @@ export function runPreferenceCommand(
   const [action, preference, raw, toggle] = positions;
   const delegation = preference === "decision-delegation";
   const pmMerge = preference === "pm-merge-confirmation";
+  const stall = preference === "merge-confirm-stall-after";
   if (
-    (!delegation && !pmMerge && preference !== "auto-merge-after") ||
+    (!delegation && !pmMerge && !stall && preference !== "auto-merge-after") ||
     !["get", "set"].includes(action ?? "") ||
     positions.length !== (action === "get" ? 2 : delegation ? 4 : 3)
   )
     fail();
   const minutes = raw === "off" ? null : Number(raw);
+  if (stall && action === "set" && raw === "off") fail();
   if (
     action === "set" &&
     !delegation &&
@@ -104,7 +107,9 @@ export function runPreferenceCommand(
                     }
                   : pmMerge
                     ? { pm_merge_confirmation: raw === "on" }
-                    : { auto_merge_after_minutes: minutes },
+                    : stall
+                      ? { merge_confirm_stall_after_minutes: Number(minutes) }
+                      : { auto_merge_after_minutes: minutes },
                 ports,
               ),
           })
@@ -121,7 +126,9 @@ export function runPreferenceCommand(
             .join("\n")
         : pmMerge
           ? `pm-merge-confirmation: ${pmMergeConfirmation(preferences) ? "on (PM 代确认合并)" : "off (由人确认)"}`
-          : `auto-merge-after: ${preferences.auto_merge_after_minutes ?? "off"}`,
+          : stall
+            ? `merge-confirm-stall-after: ${mergeConfirmStallAfterMinutes(preferences)}`
+            : `auto-merge-after: ${preferences.auto_merge_after_minutes ?? "off"}`,
     );
     return EXIT.ok;
   } finally {

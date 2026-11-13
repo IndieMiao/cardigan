@@ -678,6 +678,12 @@ export async function serveWrite(
             .max(1440)
             .nullable()
             .optional(),
+          merge_confirm_stall_after_minutes: z
+            .number()
+            .int()
+            .min(1)
+            .max(1440)
+            .optional(),
           decision_delegation: z.record(z.string(), z.boolean()).optional(),
           pm_merge_confirmation: z.boolean().optional(),
           board_collapsed_lanes: z
@@ -694,6 +700,12 @@ export async function serveWrite(
         {
           ...(input.auto_merge_after_minutes !== undefined
             ? { auto_merge_after_minutes: input.auto_merge_after_minutes }
+            : {}),
+          ...(input.merge_confirm_stall_after_minutes !== undefined
+            ? {
+                merge_confirm_stall_after_minutes:
+                  input.merge_confirm_stall_after_minutes,
+              }
             : {}),
           ...(input.decision_delegation !== undefined
             ? { decision_delegation: input.decision_delegation }
