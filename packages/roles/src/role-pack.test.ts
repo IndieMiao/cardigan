@@ -36,6 +36,7 @@ describe("default role kinds (p2v-12 §2.3)", () => {
       coder: "produce",
       ui_ux_designer: "produce",
       reviewer: "verify",
+      independent_reviewer: "verify",
       designer: "verify",
       tester: "verify",
       design_director: "verify",
@@ -114,6 +115,10 @@ describe("default role kinds (p2v-12 §2.3)", () => {
         harness: "claude-code",
         launch_profile_ref: "claude-opus",
       },
+      independent_reviewer: {
+        harness: "claude-code",
+        launch_profile_ref: "claude-opus",
+      },
     });
   });
 
@@ -128,6 +133,37 @@ describe("default role kinds (p2v-12 §2.3)", () => {
     expect(director.instructions).toContain("不是代码实现");
     expect(director.instructions).not.toContain("`submit_delivery`");
   });
+});
+
+test("P2a-14: independent reviewer has only the planned verify tools and boundaries", () => {
+  const role = defaultRoleDefinition("independent_reviewer", launch);
+  expect(role).toMatchObject({
+    display_name: "独立复核",
+    kind: "verify",
+    capabilities: ["verify"],
+    worktree: "readonly",
+  });
+  // An exact allowlist also excludes delivery, PM and host_ops tools.
+  expect([...role.allowed_tools].sort()).toEqual(
+    [
+      ...BASE_TOOLS,
+      "read_attachment",
+      "submit_review",
+      "withdraw_review",
+    ].sort(),
+  );
+  expect(validateRole(role).ok).toBe(true);
+  for (const phrase of [
+    "安全、权限和数值规则",
+    "不复查 `code_review` 已覆盖",
+    "`target_sha` 必须等于交付的 `subject`",
+    "有阻塞问题必须标为 must_fix 并退回",
+    "两轮未通过即进入 waiting_decision 交人处理",
+    "不能与实现者或同卡其它审核者是同一员工",
+    "可写构建目录",
+    "worker 数不超过主机限流配置的上限",
+  ])
+    expect(role.instructions).toContain(phrase);
 });
 
 // C-162: wording copied independently of role-pack.ts.

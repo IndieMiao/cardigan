@@ -16,9 +16,9 @@
 ### 0.2 当前执行容量（2026-11-12）
 
 - `cardigan` 项目的合并检查在 `cardigan-ci` 执行目标上跑，并发 3（C-128 分桶，`executors.cardigan-ci.max_concurrent: 3`），test 用 `--maxWorkers=4`，3 × 4 正好占满 12 vCPU。
-- 主机 GS66 的 Agent 并发为 6：干活的 Run 按 4 个排，另外 2 个留给常驻 PM 和主机运维（P2a-9 `run-capacity.yaml`）。合并检查不占这些名额（C-128）。
+- 目标主机的 Agent 并发为 6：干活的 Run 按 4 个排，另外 2 个留给常驻 PM 和主机运维（P2a-9 `run-capacity.yaml`）。合并检查不占这些名额（C-128）。
 - 一执行目标只服务一个项目（C-139），所以 `cardigan-ci` 的 3 个槽位全部属于 `cardigan` 项目。
-- 本计划的卡级快速检查、批次全量检查和二分探测都跑在项目配置的执行目标上，对 `cardigan` 就是 `cardigan-ci`，不跑在 GS66。这对应用户 2026-11-12 定的分工：GS66 只做 Agent 宿主，CI 尽量都放到 `cardigan-ci`。
+- 本计划的卡级快速检查、批次全量检查和二分探测都跑在项目配置的执行目标上，对 `cardigan` 就是 `cardigan-ci`，不跑在目标主机。这对应用户 2026-11-12 定的分工：目标主机只做 Agent 宿主，CI 尽量都放到 `cardigan-ci`。
 
 ## 1. 目标
 

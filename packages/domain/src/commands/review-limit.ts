@@ -67,6 +67,12 @@ export function requestReviewLimit(d: CommandDraft, item: WorkItem) {
       affected_work_items: [item.id],
       blocking: true,
       decider: "human",
+      ...(item.role_id === "independent_reviewer"
+        ? {
+            human_required_reason:
+              "独立复核审核轮数已用完，必须由人确认后续处理",
+          }
+        : {}),
       doc_refs: [],
       status: "open",
     });

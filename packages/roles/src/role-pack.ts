@@ -117,6 +117,7 @@ const ROLE_BODIES: Record<
   | "pm"
   | "coder"
   | "reviewer"
+  | "independent_reviewer"
   | "designer"
   | "tester"
   | "host_ops"
@@ -249,6 +250,23 @@ const ROLE_BODIES: Record<
     `- ${HUMAN_ACTION_MERGE_RULE}`,
     `- ${REVIEWER_PRE_MERGE_CHECK_RULE}`,
   ].join("\n"),
+  independent_reviewer: [
+    "# 角色：独立复核（independent_reviewer）",
+    "",
+    "你在只读 worktree 中独立复核当前交付，重点检查安全、权限和数值规则。",
+    "",
+    "## 你的职责",
+    "",
+    "- 用 `get_card` 确认当前交付 SHA、工作项、验收标准和上轮问题；用 `read_attachment` 读取相关证据。交付变化后必须重新复核。",
+    "- 聚焦鉴权绕过、权限提升、输入校验缺失、数值边界、并发和迁移风险；不复查 `code_review` 已覆盖的风格、命名和普通缺陷。",
+    "- 复核员不能与实现者或同卡其它审核者是同一员工；发现身份冲突先报告阻塞。",
+    "- 用 `submit_review` 提交结论，`target_sha` 必须等于交付的 `subject`；问题写清 severity、must_fix、pre_existing 和证据。",
+    "- 有阻塞问题必须标为 must_fix 并退回，不能只提建议却通过；`verdict` 和 `blocking` 由服务端计算。第二轮起只复查上轮问题，新问题必须是 critical 并带 proof。",
+    "- 审核上限为 2 轮；两轮未通过即进入 waiting_decision 交人处理，不自行安排第三轮或反复退回。",
+    "- 不改交付代码、不 commit、不 push；需要跑测试时使用主机准备的可写构建目录，遵守卡片测试范围。",
+    "- 需要人操作时用 `request_human_action`。",
+    `- ${HUMAN_ACTION_MERGE_RULE}`,
+  ].join("\n"),
   designer: [
     "# 角色：designer",
     "",
@@ -346,6 +364,7 @@ export const DEFAULT_ROLE_KINDS: Readonly<Record<DefaultRoleId, RoleKind>> = {
   coder: "produce",
   ui_ux_designer: "produce",
   reviewer: "verify",
+  independent_reviewer: "verify",
   designer: "verify",
   tester: "verify",
   design_director: "verify",
@@ -355,6 +374,7 @@ export const DEFAULT_ROLE_KINDS: Readonly<Record<DefaultRoleId, RoleKind>> = {
 const ATTACHMENT_READERS: ReadonlySet<DefaultRoleId> = new Set([
   "coder",
   "reviewer",
+  "independent_reviewer",
   "design_director",
 ]);
 
@@ -362,6 +382,7 @@ const DEFAULT_DISPLAY_NAMES: Partial<Record<DefaultRoleId, string>> = {
   host_ops: "主机运维",
   ui_ux_designer: "UI/UX 设计师",
   design_director: "设计总监",
+  independent_reviewer: "独立复核",
 };
 
 /**
@@ -377,6 +398,10 @@ export const DEFAULT_ROLE_LAUNCH: Partial<
 > = {
   ui_ux_designer: { harness: "codex", launch_profile_ref: "codex-astra" },
   design_director: {
+    harness: "claude-code",
+    launch_profile_ref: "claude-opus",
+  },
+  independent_reviewer: {
     harness: "claude-code",
     launch_profile_ref: "claude-opus",
   },
@@ -404,7 +429,12 @@ export function instructionsFor(
 ): string {
   const header =
     display_name === undefined ? "" : `\n（显示名：${display_name}）`;
-  const testRule = ["coder", "reviewer", "tester"].includes(role)
+  const testRule = [
+    "coder",
+    "reviewer",
+    "independent_reviewer",
+    "tester",
+  ].includes(role)
     ? "- 在本机员工 Run 中自测使用的 worker 数不超过主机限流配置的上限（启动时已强制），不要设法绕过主机限流；全量检查交给合并检查。"
     : "";
   return [ROLE_BODIES[role], testRule, header]
