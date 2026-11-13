@@ -739,11 +739,11 @@ export class Dispatcher {
           ids: [...requested],
         })
         .filter(
-        (n) =>
-          this.owner(n, state) === a.id &&
-          !covered(n, state, a.id) &&
-          !decisionFollowupBlocked(state, n.event_id, a.id),
-      );
+          (n) =>
+            this.owner(n, state) === a.id &&
+            !covered(n, state, a.id) &&
+            !decisionFollowupBlocked(state, n.event_id, a.id),
+        );
       const waiting = this.queued(state, a);
       if (
         (!ready.length &&
