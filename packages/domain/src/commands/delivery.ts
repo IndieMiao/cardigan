@@ -27,7 +27,10 @@ import { supersedeDelivery } from "./delivery-invalidation.js";
 import { checkEmployeeSeparation } from "./employee-assignment.js";
 import { requestHumanCompletionReview } from "./human-completion.js";
 import { completionPassed } from "./merge.js";
-import { projectIndependentReviewCheck } from "./pre-merge-checks.js";
+import {
+  projectIndependentReviewCheck,
+  projectScreenshotCheck,
+} from "./pre-merge-checks.js";
 import { pendingReviewLimit, requestReviewLimit } from "./review-limit.js";
 import { conflictRepairEvent } from "./review-round.js";
 import { resolveCardTemplate } from "./templates.js";
@@ -502,7 +505,9 @@ export type SubmitReviewParams = Pick<
   Review,
   "delivery_id" | "target_sha" | "kind" | "issues"
 > &
-  Partial<Pick<Review, "attachments" | "recheck_required">>;
+  Partial<
+    Pick<Review, "attachments" | "recheck_required" | "screenshot_check">
+  >;
 export function submitReview(
   state: CommandState,
   actor: Actor,
@@ -568,6 +573,19 @@ export function submitReview(
       "validation_failed",
       "Review issues must describe severity and must_fix",
     );
+    ensure(
+      p.screenshot_check === undefined ||
+        p.screenshot_check === "passed" ||
+        p.screenshot_check === "failed",
+      "validation_failed",
+      "screenshot_check must be passed or failed",
+    );
+    ensure(
+      p.screenshot_check === undefined ||
+        d.assignment.role_id === "independent_reviewer",
+      "forbidden_tool",
+      "只有独立复核员可以在审核里给出截图核对结论",
+    );
     for (const id of p.attachments ?? [])
       ensure(
         d.get("attachments", id).card_id === card.id,
@@ -620,6 +638,9 @@ export function submitReview(
       ...calculated,
       recheck_required: p.recheck_required ?? false,
       attachments: [...(p.attachments ?? [])],
+      ...(p.screenshot_check === undefined
+        ? {}
+        : { screenshot_check: p.screenshot_check }),
     };
     d.put("reviews", value);
     if (value.verdict !== "conditional")
@@ -698,8 +719,10 @@ export function submitReview(
         run_id: run.id,
       },
     );
-    if (d.assignment.role_id === "independent_reviewer")
+    if (d.assignment.role_id === "independent_reviewer") {
       projectIndependentReviewCheck(d, value);
+      projectScreenshotCheck(d, value);
+    }
     if (target.kind === "card_completion" && allPassed && !value.blocking)
       completionPassed(d, d.card(card.id), target);
     if (limitReached) requestReviewLimit(d, item);

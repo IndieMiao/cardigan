@@ -475,6 +475,12 @@ export interface Review {
   readonly recheck_required: boolean;
   readonly withdrawn?: { readonly at: string; readonly rationale: string };
   readonly attachments: readonly AttachmentId[];
+  /**
+   * Q-336 (a): an independent reviewer's UI screenshot conclusion (light,
+   * dark, 390px). Projected to the "截图核对" pre-merge check only while the
+   * project's `enable_reviewer_browser` switch is on.
+   */
+  readonly screenshot_check?: "passed" | "failed";
 }
 export interface ReviewView extends Review {
   readonly stale: boolean;

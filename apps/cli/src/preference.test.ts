@@ -163,9 +163,13 @@ test("PM merge confirmation defaults on and the human can switch it from the CLI
 
 test("P2a-14 ⑧: reviewer-browser is off by default and the human can switch it", async () => {
   expect(await run(["preference", "get", "reviewer-browser"])).toBe(0);
-  expect(output).toEqual(["reviewer-browser: off (灰度中，截图仍由人核实)"]);
+  expect(output).toEqual([
+    "reviewer-browser: off (灰度中，截图核对由 PM Office 或人核实)",
+  ]);
   expect(await run(["preference", "set", "reviewer-browser", "on"])).toBe(0);
-  expect(output).toContain("reviewer-browser: on (截图核对计入代确认)");
+  expect(output).toContain(
+    "reviewer-browser: on (界面卡的截图核对须由独立复核员审核通过，PM 才能代确认)",
+  );
   expect(
     store.uow.read((tx) =>
       tx.project_preferences.get("preferences", "preferences"),
@@ -173,7 +177,9 @@ test("P2a-14 ⑧: reviewer-browser is off by default and the human can switch it
   ).toBe(true);
   expect(await run(["preference", "set", "reviewer-browser", "off"])).toBe(0);
   expect(await run(["preference", "get", "reviewer-browser"])).toBe(0);
-  expect(output).toEqual(["reviewer-browser: off (灰度中，截图仍由人核实)"]);
+  expect(output).toEqual([
+    "reviewer-browser: off (灰度中，截图核对由 PM Office 或人核实)",
+  ]);
   for (const bad of [
     ["set", "reviewer-browser", "maybe"],
     ["set", "reviewer-browser", "10"],

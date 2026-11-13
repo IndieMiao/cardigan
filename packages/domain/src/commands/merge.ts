@@ -26,6 +26,7 @@ import {
   riskTagAutoMergeAllowed,
 } from "./delegation.js";
 import { reopenMerge } from "./merge-rework.js";
+import { screenshotCheckBlocker } from "./screenshot-check.js";
 
 const newest = <T extends { readonly id: string }>(values: readonly T[]) =>
   [...values].sort(
@@ -218,6 +219,16 @@ function planFor(state: CommandState, card_id: CardId, confirmed: boolean) {
           riskTagAutoMergeAllowed(state, q),
         "illegal_transition",
         "风险标签卡已不满足独立复核条件，旧代理确认不能用于合并，须由人重新确认",
+      );
+      // Q-336 (a): re-checked at publication, so a PM or timeout answer
+      // cannot outlive a screenshot projection reset or redelivery.
+      const screenshot = answeredByHuman(q)
+        ? undefined
+        : screenshotCheckBlocker(state, card);
+      ensure(
+        !screenshot,
+        "illegal_transition",
+        `${screenshot}，旧代理确认不能用于合并`,
       );
     }
     const decision = mergeBlockingDecisions(
@@ -500,6 +511,65 @@ export function syncRiskTagMerge(d: CommandDraft, card: Card) {
       },
     );
   }
+}
+/**
+ * Q-336 (a): when the screenshot check stops qualifying (reset, withdrawn,
+ * switch turned on after a delegated answer), an unpublished non-human merge
+ * authorization is superseded and a new confirmation goes to the human, who
+ * may merge or return it. The old resolution stays as history and is never
+ * resurrected; human answers and open PM-held confirmations are untouched
+ * (the latter stay blocked by pmMergeBlockers).
+ */
+export function syncScreenshotMerge(d: CommandDraft, card: Card) {
+  if (card.status !== "awaiting_merge") return;
+  const blocker = screenshotCheckBlocker(
+    {
+      project_id: d.state.project_id,
+      project_preferences: d.list("project_preferences"),
+      assignments: d.list("assignments"),
+      work_items: d.list("work_items"),
+      deliveries: d.list("deliveries"),
+    },
+    card,
+  );
+  if (!blocker) return;
+  const decisions = d.list("decisions");
+  const target = attempt(() =>
+    completion(
+      { work_items: d.list("work_items"), deliveries: d.list("deliveries") },
+      card,
+    ),
+  );
+  if (!target.ok) return;
+  const q = confirmation(decisions, card, target.value);
+  if (
+    q?.status !== "resolved" ||
+    q.resolution?.option !== "merge" ||
+    answeredByHuman(q)
+  )
+    return;
+  const reason = `截图核对资格已变化（${blocker}），旧代理合并确认作废，合并转交给人确认。`;
+  const next = requestConfirmation(d, card, target.value);
+  d.put("decisions", {
+    ...next,
+    decider: "human",
+    context: `${next.context}\n\n${reason}`,
+    human_required_reason: reason,
+  });
+  d.emit(
+    "decision_superseded",
+    card.id,
+    {
+      decision_id: q.id,
+      reason: "screenshot_check_ineligible",
+      replacement_decision_id: next.id,
+    },
+    {
+      type: "status_change",
+      decision_id: q.id,
+      body: `${q.id} 的旧代理合并确认已作废：${reason}`,
+    },
+  );
 }
 export function requestMerge(
   state: CommandState,
