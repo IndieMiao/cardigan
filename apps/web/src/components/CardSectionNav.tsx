@@ -108,6 +108,17 @@ export function CardSectionNav({
             onClick={() => {
               const target = document.getElementById(section.id);
               if (target) {
+                for (
+                  let element: HTMLElement | null = target;
+                  element;
+                  element = element.parentElement
+                )
+                  if (element instanceof HTMLDetailsElement)
+                    element.open = true;
+                const contents = target.querySelector<HTMLDetailsElement>(
+                  ":scope > section > details, :scope > details",
+                );
+                if (contents) contents.open = true;
                 setActive(section.id);
                 scrollTo(target);
               }

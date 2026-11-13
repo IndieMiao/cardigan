@@ -146,7 +146,12 @@ test("C-202: an older decision without a plain summary looks exactly as before",
   expect(within(confirmation).queryByText(PLAIN_SUMMARY_COPY.details)).toBe(
     null,
   );
-  expect(within(confirmation).queryByText(/D-684/u)).toBe(null);
+  expect(
+    within(confirmation).getByText(/D-684/u).closest("details")?.open,
+  ).toBe(false);
+  expect(
+    within(confirmation).getByText("尚未提供改动概述 / 风险尚未说明"),
+  ).toBeTruthy();
 });
 
 test("C-202: a merge confirmation shows the completion's plain summary on top, context folded", async () => {
@@ -164,7 +169,7 @@ test("C-202: a merge confirmation shows the completion's plain summary on top, c
     before(
       article,
       box,
-      within(article).getByRole("region", { name: "要合并的交付" }),
+      within(article).getByRole("group", { name: "要合并的交付" }),
     ),
   ).toBe(true);
 });

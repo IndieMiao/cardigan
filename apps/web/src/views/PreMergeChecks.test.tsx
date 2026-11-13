@@ -141,7 +141,7 @@ test("C-160: Needs You warns while checks are open and asks again before confirm
   );
 });
 
-test("C-160: once every check passes the warning is gone and numbered steps appear", async () => {
+test("C-205: passed checks and standard steps fold away without adding a confirmation", async () => {
   const recordDecision = vi.fn(async () => undefined);
   render(
     <NeedsYouPage
@@ -152,11 +152,15 @@ test("C-160: once every check passes the warning is gone and numbered steps appe
       projectId="p-1"
     />,
   );
-  const status = await screen.findByRole("status", { name: COPY.region });
-  expect(within(status).getByText(COPY.readyTitle)).toBeTruthy();
-  expect(within(status).getAllByRole("listitem").length).toBeGreaterThan(2);
+  await screen.findByRole("article", { name: "合并确认 Q-7" });
+  expect(screen.queryByRole("status", { name: COPY.region })).toBeNull();
+  const help = screen.getByText("操作说明").closest("details");
+  if (!help) throw new Error("Missing help disclosure");
+  expect(help.open).toBe(false);
+  fireEvent.click(screen.getByText("操作说明"));
+  expect(help?.open).toBe(true);
   expect(
-    within(status).getByText(COPY.readySteps(false)[2] as string),
+    within(help).getByText(COPY.readySteps(false)[2] as string),
   ).toBeTruthy();
   expect(screen.queryByText(/请先不要确认/)).toBeNull();
   fireEvent.click(

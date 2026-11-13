@@ -1120,11 +1120,11 @@ fieldset.filters {
   min-width: 0;
   font-size: var(--text-sm);
 }
-.card-sidebar > section {
+.card-sidebar > details > section {
   padding: 12px 0;
   border-bottom: 1px solid var(--border);
 }
-.card-sidebar > section:first-child {
+.card-sidebar > details > section:first-of-type {
   padding-top: 0;
 }
 .card-sidebar h2 {
@@ -4199,4 +4199,129 @@ body[data-lightbox="open"] .drawer-overlay {
   .card-record-list > li.record-delivery-current {
     background: var(--surface-muted);
   }
+}
+
+/* C-205: one status row, actionable facts first, supporting evidence folded. */
+.decision-status-line,
+.decision-status-line > :where(span),
+.card-waiting-owner,
+.needs-merge
+  :is(.needs-meta, .needs-cards, .needs-delivery-head, .needs-review-head) {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+.decision-status-line {
+  margin: 8px 0 12px;
+  font-size: var(--text-sm);
+}
+.decision-status-line > :where(span) {
+  gap: 6px;
+}
+.decision-blocking {
+  color: var(--text-muted);
+}
+.decision-wait {
+  color: var(--status-wait);
+}
+.needs-merge .plain-summary,
+.needs-merge .decision-suggestion,
+.card-key-risk.plain-summary {
+  border: 0;
+  background: none;
+  padding: 0;
+}
+.needs-merge .decision-suggestion-line :where(strong),
+.needs-merge .plain-summary :where(dt) {
+  font-weight: 400;
+}
+.needs-merge .plain-summary-risk.risky,
+.card-key-risk .plain-summary-risk.risky {
+  margin: 0;
+  padding: 6px 8px;
+  font-weight: 600;
+}
+.card-key-risk > :where(div) {
+  display: grid;
+  grid-template-columns: 6em minmax(0, 1fr);
+  gap: 8px;
+}
+.needs-merge .merge-quote {
+  margin: 8px 0;
+}
+.merge-evidence {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 16px;
+  margin-top: 16px;
+}
+.merge-evidence > details {
+  min-width: 0;
+  margin: 0;
+}
+.merge-evidence > details[open] {
+  grid-column: 1 / -1;
+}
+.card-records-disclosure > :where(summary),
+.merge-evidence :where(summary),
+.card-purpose > :where(summary),
+.card-sidebar > details > :where(summary) {
+  cursor: pointer;
+  padding: 6px 0;
+}
+.merge-exception {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.needs-merge :is(.needs-delivery-list, .needs-review-list, .needs-gap-list) {
+  margin-top: 8px;
+}
+.needs-merge .needs-gap-list {
+  white-space: pre-wrap;
+}
+.card-header .page-description {
+  margin-bottom: 0;
+}
+@media (max-width: 760px) {
+  .merge-evidence {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .needs-merge button:not(.employee-trigger) {
+    min-height: 44px;
+  }
+  .needs-merge :is(.needs-meta, .needs-cards) {
+    gap: 8px;
+  }
+  .card-key-risk > :where(div) {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+}
+.card-merge .needs-item.needs-merge {
+  border: 0;
+  padding: 0;
+  margin: 0;
+}
+
+.needs-merge .needs-question {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.card-records-disclosure {
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.card-records-disclosure .card-records {
+  border: 0;
+  padding: 12px 0 0;
+  margin: 0;
+}
+
+.decision-status-line > :is(.status-open, .status-snoozed) .status-icon {
+  color: var(--status-wait);
 }

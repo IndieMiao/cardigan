@@ -143,7 +143,7 @@ test("P2a-5: legacy superseded cards without a replacement do not infer it from 
   expect(screen.queryByRole("link", { name: /已被.*取代/ })).toBeNull();
 });
 
-test("C-197: risk tags show read-only Chinese labels in the goal section", async () => {
+test("C-197: risk tags show read-only Chinese labels in the header", async () => {
   const detail = cardDetail();
   renderCard({
     card: async () => ({
@@ -155,7 +155,7 @@ test("C-197: risk tags show read-only Chinese labels in the goal section", async
     }),
   });
   const line = await screen.findByText("风险标签：安全、权限、数值规则");
-  expect(line.closest("section[aria-label='目标和验收标准']")).toBeTruthy();
+  expect(line.closest(".card-header")).toBeTruthy();
   const page = document.body.textContent ?? "";
   for (const raw of ["security", "permission", "numeric_rule"])
     expect(page).not.toContain(raw);
@@ -175,7 +175,7 @@ test.each([undefined, []])(
         },
       }),
     });
-    await screen.findByRole("region", { name: "目标和验收标准" });
+    await screen.findByRole("group", { name: "目标和验收标准" });
     expect(screen.queryByText(/风险标签/)).toBeNull();
   },
 );
@@ -230,7 +230,7 @@ test("the main column and sidebar answer the five questions", async () => {
     expect(value?.textContent ?? "", question).toContain(answer);
   }
   expect(
-    within(page).getByRole("region", { name: "目标和验收标准" }).textContent,
+    within(page).getByRole("group", { name: "目标和验收标准" }).textContent,
   ).toContain("把 0.1 发出去");
   expect(page.textContent).toContain("测试通过");
   expect(
@@ -244,6 +244,8 @@ test("work items are collapsible and show owner, status and delivery", async () 
   await screen.findByRole("article", { name: "卡片 C-1" });
   const details = screen.getByText("工作项（0/2 完成）").closest("details");
   expect(details).not.toBeNull();
+  expect((details as HTMLDetailsElement).open).toBe(false);
+  fireEvent.click(screen.getByText("工作项（0/2 完成）"));
   expect((details as HTMLDetailsElement).open).toBe(true);
   expect(details?.textContent).toContain("写迁移脚本");
   expect(details?.textContent).toContain("已交付");

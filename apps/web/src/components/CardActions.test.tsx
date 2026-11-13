@@ -155,7 +155,7 @@ test.each([false, true])(
       },
       expect.any(String),
     );
-    const overview = screen.getByRole("region", { name: "目标和验收标准" });
+    const overview = screen.getByRole("group", { name: "目标和验收标准" });
     expect(overview.textContent).toContain("新的目标");
     expect(overview.textContent).toContain("新增标准");
     expect(overview.textContent).not.toContain("文档更新");

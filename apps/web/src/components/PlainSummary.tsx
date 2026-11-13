@@ -11,14 +11,16 @@ export function PlainSummary({
   id,
   summary,
   compact = false,
+  omitRisk = false,
 }: {
   readonly id: string;
   readonly summary: PlainSummaryView | undefined;
   /** Sidebar lists: smaller type, same three rows. */
   readonly compact?: boolean;
+  /** The card header already displays this risk. */
+  readonly omitRisk?: boolean;
 }) {
   if (!summary) return null;
-  const risky = !noRisk(summary.risk);
   return (
     <section
       className={`plain-summary${compact ? " compact" : ""}`}
@@ -33,22 +35,30 @@ export function PlainSummary({
           <dt>{PLAIN_SUMMARY_COPY.impact}</dt>
           <dd>{summary.impact}</dd>
         </div>
-        <div
-          className={risky ? "plain-summary-risk risky" : "plain-summary-risk"}
-          {...(risky ? { role: "note" } : {})}
-        >
-          <dt>{PLAIN_SUMMARY_COPY.risk}</dt>
-          <dd>
-            {risky && (
-              <strong className="plain-summary-flag">
-                {PLAIN_SUMMARY_COPY.riskFlag}
-              </strong>
-            )}
-            {summary.risk}
-          </dd>
-        </div>
+        {!omitRisk && <PlainSummaryRisk risk={summary.risk} />}
       </dl>
     </section>
+  );
+}
+
+/** Shared with the card header so the risk is visible only once. */
+export function PlainSummaryRisk({ risk }: { readonly risk: string }) {
+  const risky = !noRisk(risk);
+  return (
+    <div
+      className={risky ? "plain-summary-risk risky" : "plain-summary-risk"}
+      {...(risky ? { role: "note" } : {})}
+    >
+      <dt>{PLAIN_SUMMARY_COPY.risk}</dt>
+      <dd>
+        {risky && (
+          <strong className="plain-summary-flag">
+            {PLAIN_SUMMARY_COPY.riskFlag}
+          </strong>
+        )}
+        {risk}
+      </dd>
+    </div>
   );
 }
 

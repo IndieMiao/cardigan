@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import type { DecisionSuggestionView } from "../api.js";
 import { SUGGESTION_COPY } from "../suggestion-copy.js";
 import { StatusTag } from "./Foundation.js";
@@ -12,6 +12,8 @@ export function DecisionSuggestion({
   id,
   suggestion,
   label,
+  explicitAction = false,
+  actions,
   busy,
   reason,
   onReason,
@@ -21,10 +23,12 @@ export function DecisionSuggestion({
   readonly suggestion: DecisionSuggestionView;
   /** Human label of the suggested option. */
   readonly label: string;
+  readonly explicitAction?: boolean;
+  readonly actions?: ReactNode;
   readonly busy: boolean;
   readonly reason: string;
   readonly onReason: (value: string) => void;
-  readonly onApply: () => void;
+  readonly onApply: (button: HTMLButtonElement) => void;
 }) {
   const returning = suggestion.option === "request_changes";
   return (
@@ -56,10 +60,11 @@ export function DecisionSuggestion({
             <button
               type="button"
               disabled={busy || (returning && !reason.trim())}
-              onClick={onApply}
+              onClick={(event) => onApply(event.currentTarget)}
             >
-              {SUGGESTION_COPY.apply}
+              {explicitAction ? `按建议：${label}` : SUGGESTION_COPY.apply}
             </button>
+            {actions}
           </div>
         </>
       )}

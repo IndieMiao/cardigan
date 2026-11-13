@@ -28,3 +28,5 @@ C-133 拍板影响范围人工截图：运行 `pnpm --filter @cardigan/web dev -
 C-161 新建员工单独截图：`pnpm --filter @cardigan/web exec node test-support/employee-screenshots.mjs <输出目录>`。同样通过 `CHROMIUM_PATH` 指定浏览器；`EMPLOYEE_BASELINE_REF` 默认 `origin/main`，应指定实现起点提交以复现改前截图。仅加载设置页夹具与实际人物库，在 1440px、390px 及亮暗主题下输出改前新建角色、改后人物选择、自定义头像表单共 12 张图，并检查页面无水平溢出。不启动业务服务、不写正式员工。
 
 C-158 并发面板单独核对：`CAPACITY_SCREENSHOTS=/tmp/cardigan-capacity CAPACITY_BASELINE_REF=<修改前提交> node apps/web/test-support/execution-capacity-screenshots.mjs`（从仓库根目录运行，可设 `CHROMIUM_PATH`）。使用本地夹具的同一执行视图，修改前加载指定提交的面板组件并展示 `local · Agent`，修改后按 Q-266 同样展示 `local · Agent`，并展示超限提示；输出 1440px、390px 亮暗截图，并检查封顶、保存按钮禁用和页面不溢出。截图是测试数据，显示名回退的真实读取另由 HTTP 测试覆盖。
+
+C-205 拍板区块与卡片详情：`node apps/web/test-support/compact-merge-screenshots.mjs /tmp/cardigan-compact`（仓库根目录运行，可设 `CHROMIUM_PATH`）。`COMPACT_BASELINE_REF` 默认本卡起点 `69f4e14b20f453ff4ccea5d2dfe7a322154bdb8d`；改前加载该提交的 React 组件和 CSS，改后加载当前源码，两者使用同一份本地数据与产品字体，不连接业务服务。Q-337 文案来自 C-205 的历史摘录，检查名称、耗时及其他状态使用示意数据。覆盖 1440 亮／暗、390 亮，共 48 个页面组合，检查无横向溢出及单一状态条；另验证键盘展开／收起和导航自动展开。输出 27 张截图（含 4 张窄屏首屏图）与 `measurements.json`，记录区块高度、主操作相对视口位置。完整截图超过一屏不表示按钮不可见，测量也不代表所有真实记录的固定节省幅度。
