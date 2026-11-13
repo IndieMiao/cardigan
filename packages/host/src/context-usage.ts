@@ -59,7 +59,22 @@ function json(line: string): Record<string, unknown> | undefined {
     return undefined;
   }
 }
-export function parseContextCache(value: unknown): ContextUsage | undefined {
+type ContextSample = Omit<
+  ContextUsage,
+  "context_tokens" | "context_window_size" | "used_percentage"
+> & {
+  context_tokens: number | null;
+  context_window_size: number | null;
+  used_percentage: number | null;
+};
+function measured(sample: ContextSample): sample is ContextUsage {
+  return (
+    sample.context_tokens !== null &&
+    sample.context_window_size !== null &&
+    sample.used_percentage !== null
+  );
+}
+function parseContextSample(value: unknown): ContextSample | undefined {
   const v = object(value);
   if (
     !v ||
@@ -68,31 +83,53 @@ export function parseContextCache(value: unknown): ContextUsage | undefined {
     !/^[a-zA-Z0-9_-]+$/.test(v.session_id) ||
     typeof v.cwd !== "string" ||
     !v.cwd.startsWith("/") ||
-    typeof v.context_tokens !== "number" ||
-    !Number.isFinite(v.context_tokens) ||
-    v.context_tokens < 0 ||
-    typeof v.context_window_size !== "number" ||
-    !Number.isFinite(v.context_window_size) ||
-    v.context_window_size <= 0 ||
     typeof v.updated_at !== "string" ||
     !Number.isFinite(Date.parse(v.updated_at))
   )
     return undefined;
-  const percentage =
-    Math.round((v.context_tokens / v.context_window_size) * 1000) / 10;
-  if (!Number.isFinite(percentage)) return undefined;
-  return {
+  const metadata = {
     agent: v.agent as ContextUsage["agent"],
     session_id: v.session_id,
     cwd: v.cwd,
     transcript_path:
       typeof v.transcript_path === "string" ? v.transcript_path : null,
     model: typeof v.model === "string" ? v.model : null,
+    updated_at: v.updated_at,
+  };
+  if (
+    v.agent === "pi" &&
+    v.context_tokens === null &&
+    v.context_window_size === null &&
+    v.used_percentage === null
+  )
+    return {
+      ...metadata,
+      context_tokens: null,
+      context_window_size: null,
+      used_percentage: null,
+    };
+  if (
+    typeof v.context_tokens !== "number" ||
+    !Number.isFinite(v.context_tokens) ||
+    v.context_tokens < 0 ||
+    typeof v.context_window_size !== "number" ||
+    !Number.isFinite(v.context_window_size) ||
+    v.context_window_size <= 0
+  )
+    return undefined;
+  const percentage =
+    Math.round((v.context_tokens / v.context_window_size) * 1000) / 10;
+  if (!Number.isFinite(percentage)) return undefined;
+  return {
+    ...metadata,
     context_tokens: v.context_tokens,
     context_window_size: v.context_window_size,
     used_percentage: percentage,
-    updated_at: v.updated_at,
   };
+}
+export function parseContextCache(value: unknown): ContextUsage | undefined {
+  const sample = parseContextSample(value);
+  return sample && measured(sample) ? sample : undefined;
 }
 
 /** Never read a cache-provided transcript path or follow directory/file symlinks. */
@@ -207,13 +244,13 @@ async function codex(root: string): Promise<ContextUsage | undefined> {
     return undefined;
   }
 }
-async function caches(root: string | undefined): Promise<ContextUsage[]> {
+async function caches(root: string | undefined): Promise<ContextSample[]> {
   if (!root) return [];
-  const result: ContextUsage[] = [];
+  const result: ContextSample[] = [];
   for (const path of await files(root, ".json")) {
     try {
       const parts = await readParts(path, true);
-      const usage = parts && parseContextCache(JSON.parse(parts.head));
+      const usage = parts && parseContextSample(JSON.parse(parts.head));
       if (usage) result.push(usage);
     } catch {
       /* Missing, partial, oversized or unreadable cache: no action. */
@@ -250,7 +287,7 @@ export async function readSessionContexts(
   now: string,
   projectCwd?: string | null,
 ): Promise<SessionContextDiagnostic[]> {
-  const shared = await caches(options?.cacheDir);
+  const shared = (await caches(options?.cacheDir)).filter(measured);
   const consumed = new Set<ContextUsage>();
   const result: SessionContextDiagnostic[] = [];
   const active = state.assignments.filter((a) => a.status === "active");
@@ -277,7 +314,7 @@ export async function readSessionContexts(
         (other) =>
           other.external && (other.worktree_path ?? projectCwd) === cwd,
       ).length === 1;
-    let usage: ContextUsage | undefined;
+    let usage: ContextSample | undefined;
     let source: string | null = null;
     const harness = [...state.runs]
       .reverse()
@@ -290,7 +327,13 @@ export async function readSessionContexts(
       if (harness === "pi") {
         usage = (await caches(join(root, "pi", "context-usage")))
           .filter((v) => v.agent === "pi")
-          .sort((a, b) => b.updated_at.localeCompare(a.updated_at))[0];
+          // Select the latest sample before checking its measurements. Unknown
+          // samples must suppress older valid sessions, including timestamp ties.
+          .sort(
+            (a, b) =>
+              Date.parse(b.updated_at) - Date.parse(a.updated_at) ||
+              Number(measured(a)) - Number(measured(b)),
+          )[0];
         source = "pi_turn_end:getContextUsage";
       }
     }
@@ -307,10 +350,10 @@ export async function readSessionContexts(
         ? matches[0]
         : matches.find((v) => contextUsageFresh(v, now, staleMs));
       source = "claude_statusline_cache";
-      if (usage) consumed.add(usage);
+      if (usage && measured(usage)) consumed.add(usage);
     }
     const observation =
-      usage && source
+      usage && measured(usage) && source
         ? {
             ...usage,
             assignment_id: a.id,
@@ -340,10 +383,10 @@ export async function readSessionContexts(
       source,
       updated_at: usage?.updated_at ?? null,
       stale: !fresh,
-      status: !usage ? "missing" : fresh ? "fresh" : "stale",
+      status: !observation ? "missing" : fresh ? "fresh" : "stale",
       level:
-        fresh && usage
-          ? (contextUsageLevel(usage, projectPreferences(state)) ?? null)
+        fresh && observation
+          ? (contextUsageLevel(observation, projectPreferences(state)) ?? null)
           : null,
       ...(observation ? { observation } : {}),
     });

@@ -470,20 +470,24 @@ export default function (pi) {
   pi.on("turn_end", async (_event, ctx) => {
     let temporary;
     try {
-      const usage = ctx.getContextUsage();
       const session = ctx.sessionManager.getSessionId();
       const root = process.env.PI_CODING_AGENT_DIR;
-      if (!root || !/^[a-zA-Z0-9_-]+$/.test(session) || !usage ||
-          !Number.isFinite(usage.tokens) || usage.tokens < 0 ||
-          !Number.isFinite(usage.contextWindow) || usage.contextWindow <= 0) return;
+      if (!root || !/^[a-zA-Z0-9_-]+$/.test(session)) return;
+      let usage;
+      try { usage = ctx.getContextUsage(); } catch { /* Unknown usage. */ }
+      const known = usage && Number.isFinite(usage.tokens) && usage.tokens >= 0 &&
+        Number.isFinite(usage.contextWindow) && usage.contextWindow > 0 &&
+        Number.isFinite(usage.tokens / usage.contextWindow * 1000);
+      // Persist an unknown sample too: keeping the previous high watermark
+      // would let patrol rotate a session whose current context is unknown.
       const dir = join(root, "context-usage");
       await mkdir(dir, { recursive: true, mode: 0o750 });
       const value = {
         agent: "pi", session_id: session,
         transcript_path: ctx.sessionManager.getSessionFile() ?? null,
         cwd: ctx.cwd, model: ctx.model?.id ?? null,
-        context_tokens: usage.tokens, context_window_size: usage.contextWindow,
-        used_percentage: Math.round(usage.tokens / usage.contextWindow * 1000) / 10,
+        context_tokens: known ? usage.tokens : null, context_window_size: known ? usage.contextWindow : null,
+        used_percentage: known ? Math.round(usage.tokens / usage.contextWindow * 1000) / 10 : null,
         updated_at: new Date().toISOString(),
       };
       temporary = join(dir, "." + randomUUID() + ".tmp");

@@ -234,3 +234,42 @@ test("a missing Codex sample cannot fall back to another harness cache at the sa
     level: null,
   });
 });
+
+test.each(["2026-01-01T00:00:59.000Z", now])(
+  "latest unknown pi sample suppresses an older valid sample at %s",
+  async (olderAt) => {
+    const dir = join(runDir(), "pi", "context-usage");
+    await write(
+      join(dir, "pi-older.json"),
+      JSON.stringify(
+        cache({ agent: "pi", session_id: "older", updated_at: olderAt }),
+      ),
+    );
+    await write(
+      join(dir, "pi-session-1.json"),
+      JSON.stringify(
+        cache({
+          agent: "pi",
+          context_tokens: null,
+          context_window_size: null,
+          used_percentage: null,
+        }),
+      ),
+    );
+    const contexts = await readSessionContexts(
+      state("pi"),
+      { execution: execution() },
+      now,
+    );
+    expect(contexts[0]).toMatchObject({
+      session_id: "session-1",
+      updated_at: now,
+      status: "missing",
+      stale: true,
+      context_tokens: null,
+      used_percentage: null,
+      level: null,
+    });
+    expect(contexts[0]).not.toHaveProperty("observation");
+  },
+);

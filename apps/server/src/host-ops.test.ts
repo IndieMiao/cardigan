@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   type Assignment,
   acknowledgeRun,
@@ -27,6 +28,8 @@ import {
   unwrap,
 } from "@cardigan/mcp-server";
 import {
+  compileAssignmentLaunch,
+  parseLaunchConfig,
   SECRETS_FILE_NAME,
   START_FILE_NAME,
   TOKEN_FILE_NAME,
@@ -970,3 +973,134 @@ test.each(["codex", "pi"] as const)(
     });
   },
 );
+
+test("pi high watermark becomes non-actionable immediately when the installed extension reports unknown usage", async () => {
+  const { assignment, run } = dispatched();
+  const execution = { mode: "local" as const, dataDir: f.dataDir };
+  const { runDir } = executionPaths(execution, f.project, assignment.id);
+  f.store.uow.run((tx) => {
+    const stored = tx.runs.get(f.project, run.id);
+    if (!stored) throw new Error("Missing fixture Run");
+    tx.runs.put(f.project, { ...stored, harness: "pi" });
+  });
+  const compiled = compileAssignmentLaunch({
+    assignment: { assignment_id: assignment.id, run_id: run.id },
+    role: {
+      role_id: "coder",
+      harness: "pi",
+      launch_profile: "fixture",
+      worktree: "none",
+      allowed_tools: [],
+      core_prompt: "fixture",
+    },
+    launch: parseLaunchConfig({
+      profiles: { fixture: { harness: "pi", model: "fixture" } },
+    }),
+    mcp: { url: "http://localhost/mcp" },
+    run_dir: runDir,
+    work_dir: runDir,
+    first_prompt: "fixture",
+    secrets: {},
+  });
+  const extension = compiled.files.find((file) =>
+    file.path.endsWith("cardigan-context-usage.js"),
+  );
+  if (!extension) throw new Error("Missing generated pi extension");
+  await mkdir(join(runDir, "pi"), { recursive: true });
+  const script = join(runDir, "pi", "context-fixture.mjs");
+  await writeFile(script, extension.content);
+  let onTurnEnd: (event: unknown, ctx: unknown) => Promise<void> =
+    async () => {};
+  (await import(pathToFileURL(script).href)).default({
+    on: (event: string, callback: typeof onTurnEnd) => {
+      expect(event).toBe("turn_end");
+      onTurnEnd = callback;
+    },
+  });
+  service = new HostOpsService({
+    store: f.store,
+    runtime,
+    snapshot,
+    clock: f.clock,
+    contextUsage: { execution },
+  });
+  vi.stubEnv("PI_CODING_AGENT_DIR", join(runDir, "pi"));
+  vi.useFakeTimers({ toFake: ["Date"] });
+  try {
+    vi.setSystemTime(new Date(f.clock.now()));
+    const ctx = {
+      cwd: runDir,
+      model: { id: "fixture" },
+      sessionManager: {
+        getSessionId: () => "same-session",
+        getSessionFile: () => undefined,
+      },
+    };
+    await onTurnEnd(
+      {},
+      {
+        ...ctx,
+        getContextUsage: () => ({
+          tokens: 850,
+          contextWindow: 1000,
+          percent: 85,
+        }),
+      },
+    );
+    expect(await call("host_ops_read_diagnostics", {})).toMatchObject({
+      sessions: expect.arrayContaining([
+        expect.objectContaining({
+          assignment_id: assignment.id,
+          status: "fresh",
+          used_percentage: 85,
+          level: "restart",
+        }),
+      ]),
+    });
+    f.advance(1000);
+    vi.setSystemTime(new Date(f.clock.now()));
+    await onTurnEnd(
+      {},
+      {
+        ...ctx,
+        getContextUsage: () => ({
+          tokens: null,
+          contextWindow: 1000,
+          percent: null,
+        }),
+      },
+    );
+    expect(await call("host_ops_read_diagnostics", {})).toMatchObject({
+      sessions: expect.arrayContaining([
+        expect.objectContaining({
+          assignment_id: assignment.id,
+          session_id: "same-session",
+          updated_at: f.clock.now(),
+          status: "missing",
+          stale: true,
+          used_percentage: null,
+          level: null,
+        }),
+      ]),
+    });
+    await service.tick();
+    expect(
+      f.state().events.some((e) => e.type === "context_usage_notice"),
+    ).toBe(false);
+    await expect(
+      call("host_ops_restart_assignment", {
+        assignment_id: assignment.id,
+        context_session_id: "same-session",
+        reason: "Previous sample was high",
+        idempotency_key: "unknown-pi-context",
+      }),
+    ).rejects.toMatchObject({ code: "stale_target" });
+    expect(runtime.release).not.toHaveBeenCalled();
+    expect(
+      f.state().events.some((e) => e.type === "host_ops_action_taken"),
+    ).toBe(false);
+  } finally {
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
+  }
+});

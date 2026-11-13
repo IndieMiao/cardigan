@@ -55,6 +55,33 @@ test("installed extension atomically writes current usage at turn_end, including
     expect(JSON.parse(await readFile(file, "utf8"))).toMatchObject({
       context_tokens: 900,
     });
+    for (const getContextUsage of [
+      () => ({ tokens: null, contextWindow: 1000, percent: null }),
+      () => undefined,
+      () => ({ tokens: NaN, contextWindow: 1000 }),
+      () => ({ tokens: Infinity, contextWindow: 1000 }),
+      () => ({ tokens: -1, contextWindow: 1000 }),
+      () => ({ tokens: 850, contextWindow: 0 }),
+      () => {
+        throw new Error("Context temporarily unavailable");
+      },
+    ]) {
+      await callback({}, ctx());
+      await expect(
+        callback({}, { ...ctx(), getContextUsage }),
+      ).resolves.toBeUndefined();
+      expect(JSON.parse(await readFile(file, "utf8"))).toMatchObject({
+        session_id: "session-1",
+        context_tokens: null,
+        context_window_size: null,
+        used_percentage: null,
+      });
+    }
+    await callback({}, ctx("session-1", 10));
+    expect(JSON.parse(await readFile(file, "utf8"))).toMatchObject({
+      context_tokens: 10,
+      used_percentage: 1,
+    });
     await callback({}, ctx("session-2", 0));
     expect(
       JSON.parse(
@@ -68,6 +95,7 @@ test("installed extension atomically writes current usage at turn_end, including
     expect((await readdir(join(root, "context-usage"))).sort()).toEqual([
       "pi-session-1.json",
       "pi-session-2.json",
+      "pi-unknown.json",
     ]);
     const broken = join(root, "broken");
     await mkdir(broken);
