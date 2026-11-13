@@ -1,0 +1,209 @@
+# ADR 0008：把 PM Ops 的机械规则交给系统（自动指派验证项、系统代确认合并、定时催办）
+
+- 状态：**提议，待邵杰拍板**。本 ADR 只记录盘点和设计，不改产品代码；文中凡是新数值一律标“待定、交人”。拍板前不开发实现部分（C-225 验收标准第 1 条）。
+- 卡片：C-225（W-691 开发；W-692 代码审核；W-700 独立复核；W-693 PM 验收）。`risk_tags=[permission, numeric_rule]`。
+- 来源：邵杰 2026-11-14 对话：“王熙凤这种常驻的 pm 可以开分身审核么? 我发现部分瓶颈在这个角色”；张良给出四个方案，邵杰选“1. 机械规则交给系统”。卡片附带数据：王熙凤 11-13 共 312 轮 Run（平均 55 秒），指派 118 次、评论 251 条；W-665/W-667 就绪后等了 10 多分钟才派；R-3328 空挂 30 分钟期间全项目停摆。
+- 范围外（卡片 out_of_scope）：不开多个 PM Ops 分身，不改“每项目一个常驻 PM Ops”；不改人确认的边界（敏感、D12 四类、角色规则、需求范围、对外发布）。
+- 依据：开发方案 §4.4、§4.5（不变量 11、15、16、17、20、22、23、26、29）、§6.4、§7.1–§7.4、§14；ADR 0006（独立复核与风险标签代确认）；AGENTS.md“独立复核”一节。
+- 代码依据（main `b6693d8`）：
+  - 指派：`packages/domain/src/commands/pm.ts` `assign`（L608，`d.pm()` 只认 PM 或 human）；`packages/domain/src/commands/employee-assignment.ts` `selectEmployee`（不传员工时已按“在职、非外接、同角色、满足隔离、空闲优先、最久未指派优先、编号小优先”挑人）、`employeeConflicts`/`checkEmployeeSeparation`（员工隔离，含已释放的历史 Assignment，`independent_reviewer` 的三方隔离）。
+  - 合并：`packages/domain/src/commands/delegation.ts` `mergeNeedsHuman`、`mergeRequiresHuman`、`riskTagAutoMergeAllowed`、`delegationAllowed`；`packages/domain/src/commands/merge-delegation.ts` `pmMergeBlockers`；`packages/domain/src/commands/auto-merge.ts` `autoMergeSchedule`/`autoConfirmMerge`（已有的 system 超时代批）；`packages/domain/src/commands/screenshot-check.ts`；`packages/domain/src/commands/pre-merge-checks.ts` `effectivePreMergeChecks`/`openPreMergeChecks`。
+  - 定时：`apps/server/src/pm-merge-stall-attention.ts` 与 `packages/domain/src/pm-merge-stall-attention.ts`（C-177，`merge_confirm_stall_after_minutes`）、`apps/server/src/review-limit-attention.ts`、`packages/domain/src/commands/inactive-run.ts`（`DEFAULT_INACTIVE_CANCEL_AFTER_MS`=60 分钟）、`apps/server/src/host-ops-patrol.ts`、C-179 合并前核对提醒（`pre_merge_check_reminded`）。
+  - 路由：`packages/router/src/route.ts` `routeDelivery`/`routeCompletionRequest`/`routeCompletedItem`（验证项没有负责人时给 PM Ops 定向通知）。
+  - 展示：`apps/web/src/components/EmployeeIdentity.tsx`（`author="system"` 已显示齿轮“系统”）。
+
+## 1. 背景与目标
+
+常驻 PM Ops 每次只能跑一轮 Run。很多轮次处理的是**结果确定**的事：
+
+- 交付提交后，被请求的验证项没有负责人，Router 给 PM Ops 发定向通知（§7.2），PM Ops 起一轮 Run 调 `assign`——而 `assign` 不传员工时，挑谁本来就由 `selectEmployee` 按固定规则算出来。
+- 合并闸门通过后，PM Ops 起一轮 Run，读 `pm_queue.merge_blockers`；为空时选 `merge` 并写一句知会。阻塞条件本来就由 `pmMergeBlockers` 在服务端强制。
+- 等待过久的事项，只有在 PM Ops 下一轮盘点时才会被看到；PM Ops 自己卡住时没人发现（R-3328）。
+
+目标：把这三类确定性规则搬进 server 的调度循环和 domain 命令，actor 是 `system`；PM Ops 只处理需要判断的事项。**系统规则只能比 PM Ops 现有规则更严，不能更宽**；条件不满足或判断不确定时，事项照旧交给 PM Ops（或按原规则交人），系统不猜。
+
+## 2. 盘点：PM Ops 今天在做什么
+
+数据口径：只读，只统计事件类型和计数，不读取或输出正文、凭据。Agent 账号无权直接读数据库文件，所以没有直接查 `events` 表，而是用 Card MCP 的只读事件接口（`get_updates` 不带 card_id 的项目事件流，同一张 `events` 表的投影）统计。时间窗为项目事件 seq 6301–8121（2026-11-13T00:21Z–16:35Z，与卡片引用的“11-13 共 312 轮”口径接近但不完全相同）。PM Ops 当天轮换 6 次，先后 7 个 Assignment：A-460、A-506、A-515、A-545、A-560、A-570、A-595（来自 `standing_pm_rotated` 事件）。
+
+### 2.1 Run 概况（项目事件流，覆盖完整）
+
+| 指标 | 值 |
+|---|---|
+| PM Ops `run_started` | 320（A-460 2、A-506 30、A-515 64、A-545 36、A-560 34、A-570 71、A-595 82） |
+| 触发类型（`run_queued.kind`） | followup 291、rework 24、initial 5 |
+| 结束结果（`run_finished.outcome`） | completed 316 |
+| 单轮时长（started→finished，n=314） | 中位 26 秒、P90 93 秒、最长 795 秒、平均 56 秒 |
+| 排队到开始（queued→started，n=317） | 中位 8 秒、P90 16 秒、最长 544 秒 |
+
+### 2.2 卡片级动作（本 Run 无法直接统计，已知缺口）
+
+卡片级事件（`work_item_assigned`、`comment_posted`、`card_updated`、`decision_resolved` 等）只在各卡片的事件流里。开发者 Token 只能读本卡 C-225，读其它卡返回 not_found，所以本 ADR **没有**卡片级的分类计数。可用的数据：
+
+- 卡片来源引用的 11-13 数据：指派 118 次、评论 251 条（PM Ops 侧统计）。
+- 第 2.1 节：PM Ops 91% 的 Run 是 followup（被事件唤醒），单轮中位 26 秒——说明大部分轮次是“看一眼、做一个动作”的短轮次，符合“机械动作占比高”的判断，但**不能据此推出各类动作的精确占比**。
+
+补齐方法（交 PM 或主机操作员只读执行，只输出类型和计数）：
+
+```sql
+SELECT type, COUNT(*) AS n, COUNT(DISTINCT card_id) AS cards
+FROM events
+WHERE project_id = 'cardigan'
+  AND json_extract(doc, '$.actor.assignment_id') IN
+      ('A-460','A-506','A-515','A-545','A-560','A-570','A-595')
+  AND json_extract(doc, '$.created_at') >= '2026-11-13T00:00:00Z'
+  AND json_extract(doc, '$.created_at') <  '2026-11-14T00:00:00Z'
+GROUP BY type ORDER BY n DESC;
+```
+
+（`events` 表结构见 `packages/store/migrations/0001_initial.sql`，actor 和时间在 `doc` JSON 里；按只读方式打开数据库副本执行。）
+拍板时若需要精确占比，请先补这张表；第 2.3 节的分类不依赖精确占比。
+
+### 2.3 分类结论
+
+| PM Ops 动作 | 去向 | 理由 |
+|---|---|---|
+| 交付后给**验证项**指派员工（代码审核、测试、独立复核、设计核对等） | **交给系统**（决定 1） | 挑人规则已在 `selectEmployee`，隔离已在 domain 强制；PM Ops 只是“按下按钮” |
+| 完成申请后给 **PM 验收项**指派工作项级 `pm` Assignment | **交给系统**（决定 1） | 同上；角色固定为 `pm`，员工隔离按不变量 15/16 |
+| 给**产出项**指派开发者 | **仍由 PM Ops** | 要判断依赖、冲突文件、先后顺序（例如“等 C-202 合并后再派”），不是确定性规则 |
+| 验证项没有合格员工（都冲突、都外接、没有在职员工） | **仍由 PM Ops** | 需要判断换人、新建员工或交人 |
+| 合并确认：条件全部满足时选 `merge` 并写知会 | **交给系统**（决定 2），项目偏好开启后生效 | 条件已由 `pmMergeBlockers` 等服务端强制，再加更严的系统条件 |
+| 合并确认：条件不满足时 hold / 退回 / 交人；合并检查失败判断真实问题还是偶发 | **仍由 PM Ops** | 需要判断 |
+| 合并确认：敏感、D12 四类、需求范围变化、角色规则、对外发布、已交人的确认 | **交人**（不变） | 人确认边界不变 |
+| 打 `risk_tags`、补 `independent_reviewer` 验证项 | **仍由 PM Ops** | 风险分类是判断（ADR 0006 决定 4） |
+| 审核轮数用尽（`raise_limit`/`pause`/`escalate`） | **仍由 PM Ops**；独立复核的上限仍交人 | 需要判断 |
+| 代拍 general / feature_detail | **仍由 PM Ops** | 需要判断（Q-279） |
+| 分拣人工操作（`triage_human_action`） | **仍由 PM Ops** | 需要判断 |
+| 回应无人认领的人类评论、处理 Router 升级事件 | **仍由 PM Ops** | 需要判断 |
+| 等待过久的提醒（就绪项无人指派、Run 失活、核对项长时间 pending） | **交给系统定时器**（决定 3） | 提醒本身是确定性的；收到提醒后怎么处理仍是 PM Ops 或人的判断 |
+| 新建卡、拆卡、写评论说明进展 | **仍由 PM Ops / PM Office** | 需要判断 |
+
+## 3. 决定
+
+### 决定 0：系统动作的通用约束
+
+1. **actor 是 `system`**：系统动作只由 server 内部调用 domain 命令产生（与现有 `autoConfirmMerge`、`expireMergeSnoozes`、C-177 一样），不暴露成 MCP 工具，也不经 Workbench API；Agent Token 只能得到 `assignment` Actor，无法伪造 `system`（不变量 11）。**不给任何 Agent 新增工具或能力。**
+2. **同一新鲜事务内重查**：每个系统动作在写入事务里重新读取当前状态、重查全部条件；任一条件不满足就不写入（拒绝不留部分效果）。调度循环里的预判只用于挑候选，不作为授权依据。
+3. **留痕**：每个动作写一条事件（带 `rule` 编号和依据，例如 `rule: "C-225/auto-assign"`、命中的员工排序依据或合并条件清单），并写卡片时间线条目，`author="system"`，Workbench 显示齿轮“系统”。审计与现有事件表一致，不新开存储。
+4. **开关**：三类规则各有一个项目偏好开关，**默认关闭**，只有 human 能开关（与 `pm_merge_confirmation`、`auto_merge_after_minutes` 的写入权限一致）。关闭即回到今天的行为。
+5. **失败回退**：系统动作因条件不满足或异常没有执行时，按今天的路径通知 PM Ops（例如 Router 原有的“验证项需要指派”定向通知），并在事件里写明未执行的原因；不重试到成功为止，不降级。
+6. **与 PM Ops 并发**：系统和 PM Ops 写同一对象时由 domain 事务串行化；后到的一方按现有规则被拒（例如 `assign` 的“一个工作项一个 Assignment”、合并确认已解决），不会重复动作。PM 角色包同步删掉已交给系统的规则（见第 6 节），避免 PM Ops 主动去抢。
+
+### 决定 1：验证工作项自动指派
+
+**触发条件**（满足任一，且开关 `system_auto_assign_verifiers` 开启）：
+
+- `delivery_submitted`（产出交付）：对它 `requested_verifiers` 里每个**没有 Assignment** 的验证项；
+- `delivery_submitted`（完成申请，`kind=card_completion`）：对它请求的、没有 Assignment 的 PM 验收项（模板完成审核者是 human 时不处理，与现有路由一致）；
+- 调度循环兜底扫描：已有可审交付（目标产出项当前最新交付请求了该项，或当前完成申请请求了该项）、但仍无 Assignment 的验证项——用于开关刚打开、或 server 重启漏掉事件的情况。
+
+**判定依据**（全部满足才指派，都在指派事务内重查）：
+
+1. 工作项 `kind=verify`，状态不是 `cancelled`/`passed`，`replaced_by_work_item_id` 为空，`assignment_id` 为空，也没有指向它的 Assignment；卡片不是 `done`/`cancelled`。
+2. 目标有当前可审的交付：产出项最新、未作废的交付在 `requested_verifiers` 里请求了它（完成申请同理）。这是 P2a PM Ops 规则“交付后再指派”的机械化。
+3. 员工：复用 `selectEmployee(d, item)` 不带员工参数的分支——在职、非外接、员工角色等于工作项角色、目标项目登记了该角色且未停用；`employeeConflicts` 排除与目标产出项**当前或曾经**（含已释放）Assignment 同员工的人，`independent_reviewer` 再排除同卡其它验证项当前或曾经的负责人（三方隔离，双向）；然后按“没有未结束 Run 优先 → 最久未被指派优先 → 员工编号小优先”排序取第一个。排序结果写进事件，便于复核。
+4. 角色版本取该角色最新的启用版本，与 PM 调 `assign` 不传 `role_version` 时一致；机器取 `local`（与现有 M1 约束一致）。
+5. 指派通过与 `assign` **同一段 domain 代码**（抽出内部函数，`assign` 保留 `d.pm()` 校验，新增 system 专用入口 `autoAssignVerifier`），所以不变量 15/16/17 的校验天然生效，不另写一份。
+
+**例外（不自动指派，交 PM Ops）**：
+
+- 该角色没有在职员工、全是外接员工，或所有候选都违反隔离：**不降级为同一员工、不放宽隔离**，按今天的路由给 PM Ops 定向通知，附上“没有合格员工”的原因（来自 `selectEmployee` 的错误信息）。
+- 产出项（`kind=produce`）一律不自动指派。
+- 工作项被 PM Ops 或人显式标记“手动指派”（新增工作项字段 `manual_assign: true`，PM/human 通过 `update_work_item` 设置）——用于 PM 想先等一等的情况。**是否需要这个字段待定、交人**（见第 7 节问题 4）。
+
+**撤回与改派**：系统建的 Assignment 与 PM 建的完全相同，PM Ops 用现有手段处理：有未结束 Run 时请主机 `cardigan assignment stop`，`release_assignment` 释放，模板验证项走 `replace_verification_work_item` 后再指派新项（C-110，不变量 15 的补充）。不新增“改绑 Assignment”的入口。
+
+**Router 配合**：自动指派成功时，Router 原来给 PM Ops 的“验证项需要指派”定向通知不再发出，改为只写时间线；新 Assignment 照常收到门铃。自动指派失败时保留原通知。
+
+### 决定 2：系统代确认合并
+
+**授权来源**：系统只处理**已经委托给 PM Ops** 的合并确认（`trigger=merge_confirmation`、`decider=role:pm`、`status=open`），即今天 PM Ops 有权代确认的那一部分；系统在此基础上再加更严的条件。`decider=human` 的确认（包括已交人的、敏感卡、D12、需求范围变化、PM 偏好关闭、没有活跃 PM Ops 时转给人的）**系统一律不碰**；它们仍按现有规则由人确认或走已有的超时自动合并（不变量 20，本 ADR 不改）。开关：新项目偏好 `system_merge_confirmation`，默认关闭，只有 human 能设置；`pm_merge_confirmation` 关闭时它也不生效。
+
+**判定依据（全部满足才代确认；在解决事务内一次性重查）**：
+
+| # | 条件 | 依据 / 现有代码 |
+|---|---|---|
+| 1 | 卡片未被人标为敏感 | `mergeNeedsHuman`（C-65） |
+| 2 | 卡片及其来源拍板没有未撤回的 D12 四类（花钱、账号、权限、删除数据）拍板 | `mergeNeedsHuman` |
+| 3 | 没有需求范围变化拍板（含卡片来源拍板） | `mergeNeedsHuman` |
+| 4 | 确认没有 `human_required_reason`，`decider` 仍是 `role:pm`，项目仍有活跃 PM Ops 且 `pm_merge_confirmation` 开启 | `mergeRequiresHuman`、`delegationAllowed`、`hasActivePmOps` |
+| 5 | 未改角色规则：当前交付相对基线的改动文件不命中“角色规则路径”清单 | **新**：主机从 Git 服务读改动文件列表交给 domain（domain 不做 IO）；路径清单可配置，**初值待定、交人**；读不到文件列表视为不确定 |
+| 6 | 不是对外发布：卡片未被标为对外发布，且改动文件不命中“发布路径”清单 | **新**：判定方式**待定、交人**（第 7 节问题 2） |
+| 7 | 当前完成申请的合并检查 passed（或主机已验证 noop），确认目标就是当前完成申请 | `pmMergeBlockers` |
+| 8 | 所有未取消的验证项 passed（不论是否必需）；必需产出项的最新交付 accepted | `pmMergeBlockers` |
+| 9 | 当前交付和完成申请上没有未处理的 must_fix | `pmMergeBlockers` |
+| 10 | 合并前核对项**全部** passed 且未过期（`openPreMergeChecks` 为空），不只是独立复核和截图核对两条 | **比 PM Ops 更严**：PM Ops 今天把其它核对项当提示 |
+| 11 | 风险标签卡：`risk_tags` 非空且仅含 `security`/`permission`/`numeric_rule`；同卡必需、未取消、未被替换的 `independent_reviewer` 验证项 passed，审核矩阵对目标最新交付为 pass，Review 未撤回、未过期、交付编号和 SHA 匹配 | `riskTagAutoMergeAllowed`（AGENTS.md 独立复核全部条件；知会由系统生成，见下） |
+| 12 | 界面卡开启截图核对计入代确认时，“截图核对”对当前交付为 passed | `screenshotCheckBlocker` |
+| 13 | 卡片和工作项上没有未关闭的阻塞：未处理的 `report_blocker`、未完成且阻塞合并的人工操作（`blocks_merge` 或列了工作项）、未决的其它拍板 | **新**的聚合检查，复用现有实体状态 |
+| 14 | 时间线没有撤回或“不要合并”的意见：当前完成申请提交之后，没有任何 **human** 发的评论；也没有 Agent 评论（`comment`，不含 Delivery/Review/系统条目）。**不做关键词匹配** | **新**；“有没有未处理的意见”无法确定判断，所以出现即视为不确定（第 7 节问题 3 给出放宽选项） |
+| 15 | 卡片 `merge_policy=confirm`；这条确认当前没有被暂缓（snoozed），当前完成申请的合并确认也没有被 hold 或退回过（被 hold 过的由 PM Ops 或人重新处理） | 与 `autoMergeSchedule` 相同的 hold/退回/暂缓检查 |
+
+**执行**：条件全部满足时，系统先写 `system_merge_confirmation_scheduled` 事件，进入**撤回窗口**（时长**待定、交人**，可以是 0）；窗口内 PM Ops 或人可以用现有的 `hold`/`request_changes`/`escalate` 处理该确认，系统就放弃。窗口到期时在新事务内**重查全部条件**，仍满足才解决确认：`resolution.option=merge`、`resolved_by="system"`、`via="system_rule"`、授权依据写成 `project:<id>/system_merge_confirmation/event:<偏好审计事件>`；同时生成知会写进 Needs You 知会区，内容固定为“系统按规则代确认合并 C-n（标题），条件清单 15/15 满足，规则依据 ADR 0008”。之后走原有合并、批次检查和发布流程（不变量 20/21 不变）。合并已发布后不能撤回，只能另开回退卡。
+
+**不满足或不确定时的回退**：任一条件不满足 → 系统不动，确认留给 PM Ops，并在 PM Ops 的通知里列出未满足的条件编号（等价于今天的 `merge_blockers`，再加系统新增条件）。条件 1–6 命中（敏感、D12、范围、角色规则、发布）时系统不仅不动，还提示 PM Ops 按现有规则交人。系统**从不**选 `hold`、`request_changes` 或交人——这些仍是 PM Ops 的判断。
+
+**人确认边界不变**：本决定只收窄“谁来按下 PM Ops 本来就能按的按钮”；不改 `mergeNeedsHuman`、`mergeRequiresHuman`、不变量 20/22/23/28/29，不改 D12、Q-279 和 AGENTS.md 的强制交人条件。
+
+### 决定 3：催办改为定时器通知
+
+沿用 C-177 的做法：在 dispatcher 维护循环里运行（不起 Run、不用 Token），从事件推算等待起点，server 重启后结果一致；同一事项、同一等待周期只提醒一次，事项处理掉或等待重新开始时清除标记。所有阈值都是项目偏好，**数值待定、交人**；未设置时该提醒**关闭**（不自定默认值）；写入时校验为正整数分钟且在允许范围内（范围上下限也待定、交人），非法值拒绝。
+
+| 提醒 | 触发条件 | 判定依据 | 例外 | 收件人与回退 |
+|---|---|---|---|---|
+| ① 就绪项超时未指派 | 工作项可以开工（产出项：卡片 `todo`/`in_progress`、依赖都已成功；验证项：已有可审交付）且没有 Assignment，持续超过 `unassigned_ready_after_minutes`（**待定**） | 工作项状态、依赖、交付事件的时间 | 卡片 backlog / 暂停；工作项标了 `manual_assign`（若采纳）；自动指派刚失败且已通知 PM Ops 的同一周期不重复 | PM Ops；没有活跃 PM Ops 时进 Needs You |
+| ② Run 失活 | Run 处于 running，最后一次活动（`lastRunActivity`：Run 开始、心跳、Assignment 最近一次 MCP 调用）距今超过 `run_inactive_warn_after_minutes`（**待定**，须小于现有失活自动取消阈值 `DEFAULT_INACTIVE_CANCEL_AFTER_MS`，目前 60 分钟） | `inactive-run.ts` 的同一活动口径 | 已进入取消流程的 Run | 普通 Run → PM Ops 和常驻 host_ops；**常驻 PM Ops 自己的 Run → 常驻 host_ops，没有 host_ops 时进 Needs You**（不提醒卡住的 PM Ops 本人）。本提醒只通知，不自动取消、不自动换会话（现有自动取消规则不变） |
+| ③ 核对项长时间 pending | 合并前核对项对当前交付为 pending（含过期变回 pending），且卡片已在 `awaiting_merge`，持续超过 `pre_merge_check_pending_after_minutes`（**待定**） | `effectivePreMergeChecks` | “独立复核”“截图核对”两条由验证项本身驱动，提醒发给该验证项的 Assignment（没有则按 ① 处理） | 其它核对项 → PM Ops；PM Ops 不在时进 Needs You |
+
+是否重复提醒、重复间隔和最多次数同样**待定、交人**；在拍板前只提醒一次。
+
+## 4. 不变量与开发方案的改动（拍板后随实现提交）
+
+- §4.5 新增一条（编号实现时顺延）：“系统规则动作（自动指派验证项、系统代确认合并、定时提醒）只由 server 内部以 `system` Actor 执行，不暴露给任何 Agent 工具；每次动作在同一新鲜事务内重查全部条件，条件不满足或不确定时不写入、交 PM Ops；系统代确认合并只处理已委托给 PM Ops 的确认，条件集合是不变量 23 的超集。”
+- 不变量 15/16/17：不改文字；自动指派复用同一代码路径，契约测试覆盖。
+- 不变量 23：补一句“项目开启 `system_merge_confirmation` 时，系统可以在决定 2 的全部条件满足后代确认；系统代确认不会扩大 PM 代确认的范围”。
+- §6.4 / §7.2：验证项没有负责人时，先尝试系统自动指派，失败才给 PM Ops 定向通知。
+- §7.1 PM Ops 职责表、§7.4：注明哪些规则已由系统执行。
+- §4.3 ProjectPreferences：新增三类开关和三个阈值（全部默认关闭/未设置）。
+
+## 5. 契约测试要点（实现阶段）
+
+1. 自动指派：目标产出项当前作者、曾经（已释放）作者、同卡其它验证项负责人（对 `independent_reviewer`）都不会被选中；先指派复核员再指派审核者等三种顺序都被拒；没有合格员工时不指派、给 PM Ops 定向通知；外接员工、停用员工不被选中；产出项不被自动指派；已替换、已取消的验证项不被指派；与 PM `assign` 并发时只有一个生效。
+2. 系统代确认：表中 15 条**逐条单独置为不满足**，系统都不触发；`decider=human` 的确认、敏感卡、D12 四类、需求范围变化、`human_required_reason`、偏好关闭、没有活跃 PM Ops 时都不触发；撤回窗口内 PM Ops hold 后到期不再代确认；到期时条件变化（例如新交付、新人类评论）不代确认。
+3. 人确认边界：`mergeNeedsHuman`/`mergeRequiresHuman` 的现有契约测试保持不变并全部通过。
+4. 定时器：阈值未设置时不提醒；非法值（0、负数、小数、超范围、非数字）被拒；同一等待周期只提醒一次；PM Ops 自己的 Run 失活时提醒不发给 PM Ops。
+5. Actor：通过 MCP 或 Web API 都无法以 `system` 身份调用这三个命令。
+6. 改了 `packages/domain` 时运行 `pnpm --filter @cardigan/domain test:types`。
+
+## 6. PM 角色包的同步修改（实现阶段）
+
+- “指派验证型工作项前，先确认产出项已交付”（`P2A_PM_OPS_RULES` 第 1 条）改写为：“验证项由系统在交付后自动指派；系统通知你‘没有合格员工’时，再判断换人、新建员工或交人。不要主动给已有交付的验证项抢先指派。”
+- 合并确认一条：补“项目开启系统代确认时，满足全部条件的确认由系统处理；你只处理系统列出未满足条件的确认、合并检查失败和需要交人的确认”。
+- 盘点一条：保留“盘点未指派的产出项”；验证项改为“查看系统未能指派的项”。
+- 新增：“收到系统的超时提醒时，处理事项本身，并在时间线写处理结果；不要只确认收到。”
+- 以上改动在开关开启前不生效的部分，角色正文按“开启后”的口径写，并注明开关名；开关关闭时 PM Ops 仍按原规则执行。角色规则改动按 Q-279 交人确认。
+
+## 7. 交邵杰拍板的问题
+
+| # | 问题 | 选项 | 推荐 |
+|---|---|---|---|
+| 1 | 三个开关的上线顺序 | A 先开自动指派和提醒，系统代确认合并观察一周后再开；B 三个一起开 | A：自动指派风险最低、收益最直接（就绪等待）；代确认先只记录“若开启会代确认”的影子事件，对比 PM Ops 实际决定后再开 |
+| 2 | “对外发布”如何判定 | A 卡片新增人/PM 可设的 `external_release` 标记，加上可配置的发布路径清单；B 只靠路径清单；C 系统代确认只处理 PM Ops 在接卡时标为“可系统合并”的卡（正向白名单） | A：缺标记时还有路径兜底；C 最安全但每张卡都要 PM Ops 多一次判断 |
+| 3 | 条件 14“时间线没有意见”的严格程度 | A 完成申请后任何 human 或 Agent 评论都视为不确定；B 只看 human 评论和 @PM/@人的 Agent 评论 | A 起步，观察一周后按数据决定是否放宽到 B |
+| 4 | 是否新增工作项字段 `manual_assign` | A 新增（PM/human 可设，系统跳过）；B 不新增，PM 想等就先不建验证项或取消后重建 | A：成本小，避免 PM Ops 为了“暂缓”去取消工作项 |
+| 5 | 新数值 | 撤回窗口分钟数；①②③ 三个阈值；阈值允许范围；是否重复提醒、间隔和次数；角色规则路径清单、发布路径清单的初值 | 不推荐具体数值（按规则交人）；建议都做成项目偏好，未设置即关闭 |
+
+## 8. 备选方案及未采用原因
+
+1. **开多个 PM Ops 分身**：卡片 out_of_scope；会破坏“每项目一个常驻 PM Ops”的不变量，且并发判断难以审计。
+2. **把这些规则写进 Router（只发更精确的通知）**：仍要 PM Ops 起 Run 才能落地，解决不了排队和 PM Ops 卡住时停摆的问题。
+3. **给 PM Ops 换更便宜的模型跑机械动作**：省钱但不省排队；PM Ops 卡住时仍停摆。
+4. **系统代确认直接复用 `autoConfirmMerge`（超时代批）**：那条路径处理的是 `decider=human` 的确认，依据是人的超时偏好；本 ADR 的对象是委托给 PM Ops 的确认，授权来源不同，混用会模糊人确认边界。只复用其中的 hold/退回检查和 `mergePlan` 预演。
+
+## 9. 回滚方式
+
+三个开关任一关闭即回到今天的行为：验证项恢复由 PM Ops 指派，合并确认恢复由 PM Ops 代确认，提醒停止。系统已建的 Assignment、已解决的确认和已发出的提醒都保留为历史记录，不需要数据迁移回退。
+
+## 10. 上线后的观测（卡片验收标准第 6 条）
+
+上线一周内只记录实测值，不预估：PM Ops 每日 Run 数（按 `run_started` 统计，对照第 2.1 节 11-13 的 320 轮）、验证项“可审交付出现 → 指派”的等待时间（中位、P90、最大）、系统代确认次数与“条件不满足交回 PM Ops”的次数及条件分布、各类提醒次数、PM Ops 撤回或改派系统动作的次数。
