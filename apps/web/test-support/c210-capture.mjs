@@ -45,6 +45,16 @@ for (const engine of (process.env.C210_ENGINES ?? "chromium,firefox").split(
           await page.locator(".board-card").first().waitFor();
           await page.evaluate(() => document.fonts.ready);
           await page.mouse.move(0, 0);
+          if (width === 390)
+            await page.locator(".board").evaluate((el) => {
+              const lane = el.querySelector(
+                ".board-column:not(.board-column-collapsed)",
+              );
+              el.scrollLeft =
+                lane.getBoundingClientRect().left -
+                el.getBoundingClientRect().left;
+              window.scrollTo(0, document.documentElement.scrollHeight);
+            });
           const measures = await page.evaluate(() => {
             const title = document.querySelector(".card-title"),
               card = document.querySelector(".board-card");
@@ -53,7 +63,45 @@ for (const engine of (process.env.C210_ENGINES ?? "chromium,firefox").split(
             );
             const scroll = lane.querySelector(".board-lane-cards");
             const style = getComputedStyle(title);
+            const board = document
+              .querySelector(".board")
+              .getBoundingClientRect();
+            const nextLane = lane.nextElementSibling;
+            const nextHeading = nextLane
+              .querySelector(".board-column-heading")
+              .getBoundingClientRect();
+            const nextCard = nextLane
+              .querySelector(".board-card")
+              .getBoundingClientRect();
+            const visible = (rect) =>
+              Math.max(
+                0,
+                Math.min(rect.right, board.right) -
+                  Math.max(rect.left, board.left),
+              );
+            const pairRows = [
+              ...document.querySelectorAll(".board-card-meta"),
+            ].flatMap((meta) => {
+              const time = meta.querySelector('a[aria-label^="更新时间："]');
+              const attachment = meta.querySelector('a[aria-label^="附件："]');
+              return time && attachment
+                ? [
+                    Math.abs(
+                      time.getBoundingClientRect().top -
+                        attachment.getBoundingClientRect().top,
+                    ),
+                  ]
+                : [];
+            });
             return {
+              nextColumnVisible: visible(nextLane.getBoundingClientRect()),
+              nextHeadingVisible: visible(nextHeading),
+              nextCardVisible: visible(nextCard),
+              fadeHidden:
+                !document.querySelector(".board-fade") ||
+                getComputedStyle(document.querySelector(".board-fade"))
+                  .display === "none",
+              timeAttachmentRowOffsets: pairRows,
               pageWidth: document.documentElement.clientWidth,
               boardWidth: document.querySelector(".board").clientWidth,
               scrollWidth: document.documentElement.scrollWidth,
@@ -77,26 +125,41 @@ for (const engine of (process.env.C210_ENGINES ?? "chromium,firefox").split(
             "Page must not overflow horizontally",
           );
           if (version === "after") {
+            if (width === 390) {
+              assert(
+                measures.nextColumnVisible >= 48,
+                "Next lane must remain visibly discoverable",
+              );
+              assert(
+                measures.nextHeadingVisible >= 36,
+                "Next heading must peek into the viewport",
+              );
+              assert(
+                measures.nextCardVisible >= 44,
+                "Next card edge must peek into the viewport",
+              );
+              assert(
+                measures.fadeHidden,
+                "The next lane must not be obscured by the edge fade",
+              );
+              assert(
+                measures.timeAttachmentRowOffsets.every((delta) => delta < 1),
+                "Fixture time and attachment should share a row",
+              );
+            }
             assert.equal(measures.titleWeight, "400");
             assert.equal(measures.titleHeight, 22);
             assert.equal(
               measures.columnWidth,
-              width === 1440 ? 420 : measures.boardWidth - 24,
+              width === 1440 ? 420 : measures.boardWidth - 64,
             );
           }
-          if (width === 390)
-            await page.locator(".board").evaluate((el) => {
-              const lane = el.querySelector(
-                ".board-column:not(.board-column-collapsed)",
-              );
-              el.scrollLeft =
-                lane.getBoundingClientRect().left -
-                el.getBoundingClientRect().left;
-            });
           const stem = `${engine}-${width}-${colorScheme}-${version}`;
           await page.screenshot({
             path: join(output, `${stem}.png`),
-            fullPage: true,
+            // Full-page capture can remove the document scrollbar and reflow
+            // Chromium's narrow layout; capture the measured viewport instead.
+            fullPage: width !== 390,
           });
           if (version === "after") {
             const link = page.locator(".card-tile-link").first();

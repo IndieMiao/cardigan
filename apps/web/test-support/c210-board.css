@@ -164,8 +164,12 @@
 }
 @media (max-width: 640px) {
   [data-c210="after"] .board-column:not(.board-column-collapsed) {
-    flex-basis: calc(100% - 24px);
-    width: calc(100% - 24px);
+    /* 16px gap + 48px of the next lane, including its heading and card edge. */
+    flex-basis: calc(100% - 64px);
+    width: calc(100% - 64px);
+  }
+  [data-c210="after"] .board-fade {
+    display: none;
   }
 }
 @media (forced-colors: active) {
