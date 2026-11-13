@@ -6,6 +6,8 @@ process.on("SIGTERM", () => {
   process.exit(0);
 });
 const input = createReadStream("", { fd: 3, autoClose: false });
+// If a regression kills the owner before cleanup, do not leave the stub alive.
+input.on("end", () => process.exit(0));
 input.setEncoding("utf8");
 let buffer = "";
 input.on("data", (data) => {
