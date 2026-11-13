@@ -32,6 +32,21 @@ function withCurrentRecords(value) {
 // C-204 intentionally changes number tags and person rows. Compare unrelated
 // desktop geometry against the baseline with only these shared rules updated.
 function withCurrentIdentity(value) {
+  // Keep each theme's unrelated variables from the baseline. Only the ID
+  // palette is an intentional colour change in this comparison.
+  for (const theme of [
+    /^:root \{[^}]*\}/m,
+    /@media \(prefers-color-scheme: dark\) \{\s*:root \{[^}]*\}/,
+  ]) {
+    const variables = /--id-[\w-]+-(?:fg|bg):[^;]+;/g;
+    const declarations = css.match(theme)?.[0].match(variables);
+    assert(declarations?.length && theme.test(value), "ID theme CSS not found");
+    value = value.replace(
+      theme,
+      (block) =>
+        `${block.slice(0, -1).replace(variables, "")}\n${declarations.join("\n")}\n}`,
+    );
+  }
   for (const [startPattern, end] of [
     [/\.id-tag(?:,| \{)/, ".filter-bar {"],
     [/\.entry-meta \{/, ".timeline-version {"],
