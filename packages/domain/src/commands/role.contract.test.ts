@@ -381,7 +381,11 @@ describe("tool and worktree boundaries", () => {
 
 test("create, update, copy, deactivate, activate and rollback append immutable project versions", () => {
   const original = first();
-  const state = { ...empty, roles: [original] };
+  // C-231: state snapshots are never mutated in place; each step builds a new one.
+  let state: RoleCommandState = { ...empty, roles: [original] };
+  const add = (role: (typeof state.roles)[number]) => {
+    state = { ...state, roles: [...state.roles, role] };
+  };
   const changed = value(
     updateRole(
       state,
@@ -392,16 +396,16 @@ test("create, update, copy, deactivate, activate and rollback append immutable p
     ),
   );
   expect(changed.data).toMatchObject({ version: 2, instructions: "Second" });
-  state.roles.push(changed.data);
+  add(changed.data);
   const stopped = value(deactivateRole(state, human, "coder", ports()));
-  state.roles.push(stopped.data);
+  add(stopped.data);
   expect(stopped.data).toMatchObject({ version: 3, status: "inactive" });
   expect(value(deactivateRole(state, human, "coder", ports()))).toMatchObject({
     roles: [],
     events: [],
   });
   const reverted = value(rollbackRole(state, human, "coder", 1, ports()));
-  state.roles.push(reverted.data);
+  add(reverted.data);
   expect(reverted.data).toMatchObject({
     version: 4,
     status: "inactive",
@@ -409,7 +413,7 @@ test("create, update, copy, deactivate, activate and rollback append immutable p
     display_name: original.display_name,
   });
   const active = value(activateRole(state, human, "coder", ports()));
-  state.roles.push(active.data);
+  add(active.data);
   expect(active.data).toMatchObject({ version: 5, status: "active" });
   expect(value(activateRole(state, human, "coder", ports()))).toMatchObject({
     roles: [],
