@@ -8,6 +8,7 @@ import {
   mergeConfirmStallAfterMinutes,
   pmMergeConfirmation,
   projectPreferences,
+  reviewerBrowserEnabled,
   setProjectPreferences,
 } from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
@@ -22,7 +23,7 @@ import {
 import type { CliIo } from "./io.js";
 
 const USAGE =
-  "cardigan preference get context-handoff-remaining | set context-handoff-remaining <剩余百分比> | get context-restart-remaining | set context-restart-remaining <剩余百分比> | get auto-merge-after | set auto-merge-after <分钟|off> | get merge-confirm-stall-after | set merge-confirm-stall-after <分钟> | get merge-confirm-snooze-default | set merge-confirm-snooze-default <分钟> | get merge-confirm-snooze-max | set merge-confirm-snooze-max <分钟> | get decision-delegation | set decision-delegation <类别> <on|off> | get pm-merge-confirmation | set pm-merge-confirmation <on|off> [--project <p>] [--data-dir <目录>]";
+  "cardigan preference get context-handoff-remaining | set context-handoff-remaining <剩余百分比> | get context-restart-remaining | set context-restart-remaining <剩余百分比> | get auto-merge-after | set auto-merge-after <分钟|off> | get merge-confirm-stall-after | set merge-confirm-stall-after <分钟> | get merge-confirm-snooze-default | set merge-confirm-snooze-default <分钟> | get merge-confirm-snooze-max | set merge-confirm-snooze-max <分钟> | get decision-delegation | set decision-delegation <类别> <on|off> | get pm-merge-confirmation | set pm-merge-confirmation <on|off> | get reviewer-browser | set reviewer-browser <on|off> [--project <p>] [--data-dir <目录>]";
 export function runPreferenceCommand(
   args: readonly string[],
   io: CliIo,
@@ -66,13 +67,15 @@ export function runPreferenceCommand(
         : undefined;
   const delegation = preference === "decision-delegation";
   const pmMerge = preference === "pm-merge-confirmation";
+  const browser = preference === "reviewer-browser";
+  const toggleOnly = pmMerge || browser;
   const stall = preference === "merge-confirm-stall-after";
   const snooze = preference === "merge-confirm-snooze-default";
   const snoozeMax = preference === "merge-confirm-snooze-max";
   if (
     (!contextKey &&
       !delegation &&
-      !pmMerge &&
+      !toggleOnly &&
       !stall &&
       !snooze &&
       !snoozeMax &&
@@ -92,7 +95,7 @@ export function runPreferenceCommand(
     action === "set" &&
     !contextKey &&
     !delegation &&
-    !pmMerge &&
+    !toggleOnly &&
     raw !== "off" &&
     (!/^\d+$/.test(raw ?? "") ||
       !Number.isInteger(minutes) ||
@@ -116,7 +119,8 @@ export function runPreferenceCommand(
       !["on", "off"].includes(toggle ?? ""))
   )
     fail();
-  if (pmMerge && action === "set" && !["on", "off"].includes(raw ?? "")) fail();
+  if (toggleOnly && action === "set" && !["on", "off"].includes(raw ?? ""))
+    fail();
   const store = openStore({ dataDir: announceDataDir(io, flags["data-dir"]) });
   try {
     const project = resolveProject(store, io, flags.project);
@@ -141,19 +145,24 @@ export function runPreferenceCommand(
                       }
                     : pmMerge
                       ? { pm_merge_confirmation: raw === "on" }
-                      : stall
-                        ? { merge_confirm_stall_after_minutes: Number(minutes) }
-                        : snooze
+                      : browser
+                        ? { enable_reviewer_browser: raw === "on" }
+                        : stall
                           ? {
-                              merge_confirm_snooze_default_minutes:
+                              merge_confirm_stall_after_minutes:
                                 Number(minutes),
                             }
-                          : snoozeMax
+                          : snooze
                             ? {
-                                merge_confirm_snooze_max_minutes:
+                                merge_confirm_snooze_default_minutes:
                                   Number(minutes),
                               }
-                            : { auto_merge_after_minutes: minutes },
+                            : snoozeMax
+                              ? {
+                                  merge_confirm_snooze_max_minutes:
+                                    Number(minutes),
+                                }
+                              : { auto_merge_after_minutes: minutes },
                 ports,
               ),
           })
@@ -172,13 +181,15 @@ export function runPreferenceCommand(
               .join("\n")
           : pmMerge
             ? `pm-merge-confirmation: ${pmMergeConfirmation(preferences) ? "on (PM 代确认合并)" : "off (由人确认)"}`
-            : stall
-              ? `merge-confirm-stall-after: ${mergeConfirmStallAfterMinutes(preferences)}`
-              : snooze
-                ? `merge-confirm-snooze-default: ${mergeConfirmSnoozeDefaultMinutes(preferences)}`
-                : snoozeMax
-                  ? `merge-confirm-snooze-max: ${mergeConfirmSnoozeMaxMinutes(preferences)}`
-                  : `auto-merge-after: ${preferences.auto_merge_after_minutes ?? "off"}`,
+            : browser
+              ? `reviewer-browser: ${reviewerBrowserEnabled(preferences) ? "on (截图核对计入代确认)" : "off (灰度中，截图仍由人核实)"}`
+              : stall
+                ? `merge-confirm-stall-after: ${mergeConfirmStallAfterMinutes(preferences)}`
+                : snooze
+                  ? `merge-confirm-snooze-default: ${mergeConfirmSnoozeDefaultMinutes(preferences)}`
+                  : snoozeMax
+                    ? `merge-confirm-snooze-max: ${mergeConfirmSnoozeMaxMinutes(preferences)}`
+                    : `auto-merge-after: ${preferences.auto_merge_after_minutes ?? "off"}`,
     );
     return EXIT.ok;
   } finally {

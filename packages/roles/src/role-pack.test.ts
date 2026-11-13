@@ -55,7 +55,7 @@ describe("default role kinds (p2v-12 §2.3)", () => {
       role_id: "ui_ux_designer",
       display_name: "UI/UX 设计师",
       kind: "produce",
-      capabilities: ["produce"],
+      capabilities: ["produce", "browser"],
       worktree: "write",
     });
     expect([...role.allowed_tools].sort()).toEqual(
@@ -76,7 +76,7 @@ describe("default role kinds (p2v-12 §2.3)", () => {
       role_id: "design_director",
       display_name: "设计总监",
       kind: "verify",
-      capabilities: ["verify"],
+      capabilities: ["verify", "browser"],
       worktree: "readonly",
     });
     expect([...role.allowed_tools].sort()).toEqual(
@@ -140,7 +140,7 @@ test("P2a-14: independent reviewer has only the planned verify tools and boundar
   expect(role).toMatchObject({
     display_name: "独立复核",
     kind: "verify",
-    capabilities: ["verify"],
+    capabilities: ["verify", "browser"],
     worktree: "readonly",
   });
   // An exact allowlist also excludes delivery, PM and host_ops tools.
@@ -201,7 +201,10 @@ test("C-179: pm and reviewer route pre-merge reviews through pre-merge checks, n
     expect(rule).toContain("只有确实要人在系统外动手的事，才开人工待办");
   }
   expect(PM_PRE_MERGE_CHECK_RULE).toContain(
-    "PM Ops 设 pending，PM Office 设 passed 或 failed",
+    "PM Ops 设 pending，PM Office 或人设 passed 或 failed",
+  );
+  expect(PM_PRE_MERGE_CHECK_RULE).toContain(
+    "固定名称“独立复核”的结论只能由 `independent_reviewer` 的 `submit_review` 投影",
   );
   expect(PM_PRE_MERGE_CHECK_RULE).toContain("系统不会自动完成");
 });

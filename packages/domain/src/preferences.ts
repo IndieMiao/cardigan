@@ -50,6 +50,14 @@ export interface ProjectPreferences {
   /** Merge confirmations go to PM Ops unless this is explicitly false (§7.4). */
   readonly pm_merge_confirmation?: boolean;
   /**
+   * P2a-14 ⑧ gray switch, off unless explicitly true: whether the independent
+   * reviewer's browser screenshot check may count toward PM Ops confirming a
+   * UI card's merge. Off keeps C-86 (a human still checks the screenshots).
+   * It does not decide who gets a browser: that is the role's `browser`
+   * capability plus the host's install. Turned on only after the 5-card trial.
+   */
+  readonly enable_reviewer_browser?: boolean;
+  /**
    * Board lanes the human folded (true) or unfolded (false) by hand. A lane
    * without an entry follows the default: empty lanes start collapsed.
    */
@@ -63,6 +71,11 @@ export function isBoardLane(value: string): value is CardStatus {
 }
 export function pmMergeConfirmation(preferences?: ProjectPreferences): boolean {
   return preferences?.pm_merge_confirmation !== false;
+}
+export function reviewerBrowserEnabled(
+  preferences?: ProjectPreferences,
+): boolean {
+  return preferences?.enable_reviewer_browser === true;
 }
 export function decisionDelegation(
   preferences?: ProjectPreferences,

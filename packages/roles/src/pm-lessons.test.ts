@@ -46,6 +46,12 @@ const exportedRules = [
   ...PM_OPS_EVENT_RULES,
 ];
 
+const independentReviewSection =
+  readFileSync(new URL("../../../AGENTS.md", import.meta.url), "utf8")
+    .split("## 独立复核\n")[1]
+    ?.split("\n## 工作流程")[0]
+    ?.trim() ?? "";
+
 // Office and Ops share the role body; their launch tool scopes differ.
 const launch = parseLaunchConfig({
   providers: { local: { harness: "pi" } },
@@ -132,6 +138,7 @@ test("PL.1 places the three source blocks in their prescribed sections", () => {
   // V12b inserts its own section after planning; strip it the same way.
   const prompt = corePromptFor("pm")
     .replace(templateSection, "")
+    .replace(`## 独立复核\n\n${independentReviewSection}\n\n`, "")
     .split("\n")
     .filter((line) => !p2a.has(line))
     .join("\n");
@@ -175,7 +182,7 @@ test("C-49 PM instructions cover merge confirmation preconditions and notices", 
     "merge_blockers",
     "合并闸门检查通过、所有验证项通过、没有未处理的 must_fix",
     "只能 hold、request_changes",
-    "需求范围变化时，确认直接交人",
+    "或需求范围变化时，确认直接交人",
     "必须传 notice（知会）",
     "常规合并一句话即可",
     "改了什么、对人有什么影响、需要注意的风险或后续",
@@ -183,30 +190,70 @@ test("C-49 PM instructions cover merge confirmation preconditions and notices", 
     expect(prompt).toContain(rule);
 });
 
-test("C-194 PM Ops limits numeric-rule merge confirmation to evidenced human decisions until P2a-14", () => {
+test("C-190 independent-review rules agree with AGENTS.md in both PM modes", () => {
+  expect(independentReviewSection.split("\n- ")).toHaveLength(7);
+  for (const prompt of [
+    corePromptFor("pm"),
+    ...modePrompts.map((p) => p.prompt),
+  ]) {
+    expect(prompt?.split("## 独立复核\n")[1]?.split("\n## ")[0]?.trim()).toBe(
+      independentReviewSection,
+    );
+  }
+  for (const role of ["coder", "reviewer"] as const)
+    expect(corePromptFor(role), role).not.toContain(independentReviewSection);
+});
+
+test("C-190 PM rules require same-card risk classification, independent review and version evidence", () => {
+  for (const rule of [
+    "`update_card` 设置 `risk_tags`",
+    "数据迁移或并发高风险路径用 `security`",
+    "鉴权或访问控制用 `permission`",
+    "数值和行为规则用 `numeric_rule`",
+    "`kind=verify`、`role_id=independent_reviewer`、`required=true`",
+    "`target_work_item_id` 指向本卡被审产出项、`max_review_rounds=2`",
+    "非 human 验收模板",
+    "不能用已知遗留豁免",
+    "当前及历史 Assignment（含已释放）",
+    "不得为了绕开独立复核，把同一个改动拆成两张卡",
+    "不得删标签、把复核项改为可选或取消复核来绕过要求",
+    "PM Office、PM Ops 和 human 均不能直接写 passed/failed，只能设 pending",
+    "设 pending 也不等于撤回 Review",
+    "Review 未撤回、未过期且交付编号和 SHA 均匹配",
+    "所有未取消验证项通过（包括可选项）、无未处理 must_fix",
+    "提交 notice 知会",
+    "实际发布仍须批次全量检查通过",
+  ])
+    expect(independentReviewSection).toContain(rule);
+});
+
+test("C-190 replaces the numeric transition without expanding decision delegation or reviving invalid confirmations", () => {
   for (const prompt of [
     corePromptFor("pm"),
     ...modePrompts.map((p) => p.prompt),
   ]) {
     const ops = prompt?.split("## PM Ops（后台）")[1]?.split("## 协作规则")[0];
-    const rule = ops
-      ?.split("\n")
-      .find((line) => line.startsWith("- 数值和行为规则卡的合并确认"));
     for (const condition of [
-      "P2a-14 上线前的过渡规则",
-      "在满足上一条合并条件且不属于必须交人的卡片时",
-      "只有同时满足以下三条",
-      "全部来自人的明确拍板（卡片来源、Decision 或人的原话）",
-      "实现的值和规则与人拍板的逐一一致",
-      "没有引入人没拍板过的其它数值或行为改动",
-      "在确认理由 rationale 里逐条写明依据",
-      "每个数值或行为规则对应人的哪句话或哪个 Q 编号",
-      "不满足其中任何一条，都传 escalate=true 交人",
+      "仅核对人的数值拍板不能替代独立复核",
+      "原数值规则过渡办法不再适用",
       "不授权 PM 决定新的数值或行为规则",
-      "角色规则改动仍按 Q-279 交人确认合并",
-      "P2a-14 上线后，带 risk_tags=numeric_rule 的卡以独立复核通过后自动合并为准，这条过渡规则不再适用",
+      "业务拍板优先，仍交人",
+      "需求范围变化、`sensitive`、`human_required_reason` 优先于标签和复核",
+      "对外发布、角色规则改动仍交人，角色规则改动按 Q-279 执行",
+      "PM 代确认偏好关闭、没有活跃 PM Ops 或风险复核资格不满足时同样交人",
+      "PM 不得代拍或转录强制交人的确认",
+      "不合格的未决 PM 确认转交人",
+      "未发布的旧代理确认失效并重新请人确认",
+      "资格恢复不会复活旧确认",
+      "新交付须重新复核",
+      "超时代批也不能绕过",
     ])
-      expect(rule).toContain(condition);
+      expect(prompt).toContain(condition);
+    expect(ops).not.toContain("P2a-14 上线前的过渡规则");
+    expect(ops).not.toContain("安全相关改动、对外发布");
+    expect(ops).toContain(
+      "连续两轮未通过进入 `waiting_decision` 后必须交人，PM 不能自行 `raise_limit`",
+    );
     expect(ops).toContain(
       "会改变系统行为的数值和规则（例如上限、超时、自动合并分钟数）即使归在 feature_detail，也传 escalate=true 交人",
     );
@@ -342,8 +389,8 @@ test("C-86 PM Ops gives final merge confirmation, including UI cards after a PM 
     "合并默认由你最终确认，界面卡（改动用户可见界面的卡）也一样",
     "先核实当前项目在职 PM Office 的 Assignment 编号，在卡上用 @A-n 提及它请其做截图核对",
     "等 PM Office 把核对结论写进卡片后，你据此确认或退回",
-    "被人标为敏感的卡、涉及 D12 四类高风险（花钱、账号、权限、删除数据）的卡、安全相关改动、对外发布和需求范围变化的卡，以及已交人的确认，只能重新检查明确的超时失败，不能退回修改，也不能代确认合并",
-    "仍交给人的包括被人标为敏感的卡、D12 四类高风险（花钱、账号、权限、删除数据）、安全相关改动、对外发布、需求范围变化、角色规则改动，以及不满足下一条过渡条件的数值和行为规则卡",
+    "上述强制交人的卡片和已交人的确认，只能重新检查明确的超时失败，不能退回修改，也不能代确认合并",
+    "仍交给人的包括被人标为敏感的卡、与合并相关的 D12 四类业务拍板、对外发布、需求范围变化、角色规则改动、已强制交人的确认，以及不满足独立复核资格的风险标签卡",
   ])
     expect(prompt).toContain(phrase);
   expect(prompt).not.toContain("用户可见的大改动");

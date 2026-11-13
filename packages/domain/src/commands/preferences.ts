@@ -10,6 +10,7 @@ import {
   mergeConfirmSnoozeMaxMinutes,
   mergeConfirmStallAfterMinutes,
   pmMergeConfirmation,
+  reviewerBrowserEnabled,
   validAutoMergeMinutes,
   validContextPercentage,
   validMergeConfirmSnoozeMaxMinutes,
@@ -45,6 +46,8 @@ export function setProjectPreferences(
     merge_confirm_snooze_max_minutes?: number;
     decision_delegation?: Partial<Record<DecisionCategory, boolean>>;
     pm_merge_confirmation?: boolean;
+    /** P2a-14 ⑧ gray switch; see `ProjectPreferences.enable_reviewer_browser`. */
+    enable_reviewer_browser?: boolean;
     /** A patch: only the listed lanes change; null forgets the human setting. */
     board_collapsed_lanes?: Readonly<Record<string, boolean | null>>;
   },
@@ -118,6 +121,7 @@ export function setProjectPreferences(
         input.merge_confirm_snooze_max_minutes !== undefined ||
         input.decision_delegation !== undefined ||
         input.pm_merge_confirmation !== undefined ||
+        input.enable_reviewer_browser !== undefined ||
         input.board_collapsed_lanes !== undefined,
       "validation_failed",
       "No preference supplied",
@@ -127,6 +131,12 @@ export function setProjectPreferences(
         typeof input.pm_merge_confirmation === "boolean",
       "validation_failed",
       "pm_merge_confirmation must be a boolean",
+    );
+    ensure(
+      input.enable_reviewer_browser === undefined ||
+        typeof input.enable_reviewer_browser === "boolean",
+      "validation_failed",
+      "enable_reviewer_browser must be a boolean",
     );
     const delegation = { ...decisionDelegation(old) };
     for (const [category, enabled] of Object.entries(
@@ -194,6 +204,9 @@ export function setProjectPreferences(
       ...(input.pm_merge_confirmation !== undefined
         ? { pm_merge_confirmation: input.pm_merge_confirmation }
         : {}),
+      ...(input.enable_reviewer_browser !== undefined
+        ? { enable_reviewer_browser: input.enable_reviewer_browser }
+        : {}),
       ...(input.board_collapsed_lanes ? { board_collapsed_lanes: lanes } : {}),
     };
     const contextOld = contextUsageThresholds(old);
@@ -215,6 +228,8 @@ export function setProjectPreferences(
       mergeConfirmSnoozeMaxMinutes(old) !== mergeConfirmSnoozeMaxMinutes(next);
     const pmMergeChanged =
       pmMergeConfirmation(old) !== pmMergeConfirmation(next);
+    const reviewerBrowserChanged =
+      reviewerBrowserEnabled(old) !== reviewerBrowserEnabled(next);
     const oldLanes: Partial<Record<string, boolean>> =
       old.board_collapsed_lanes ?? {};
     const lanesChanged =
@@ -228,6 +243,7 @@ export function setProjectPreferences(
       !snoozeMaxChanged &&
       !delegationChanged &&
       !pmMergeChanged &&
+      !reviewerBrowserChanged &&
       !lanesChanged
     )
       return old;
@@ -289,6 +305,12 @@ export function setProjectPreferences(
         "合并由 PM 代确认已关闭，此合并确认转交给你。",
       );
     }
+    if (reviewerBrowserChanged)
+      d.emit("project_preferences_updated", undefined, {
+        old_value: reviewerBrowserEnabled(old),
+        new_value: reviewerBrowserEnabled(next),
+        preference: "enable_reviewer_browser",
+      });
     return next;
   });
 }

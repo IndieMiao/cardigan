@@ -570,6 +570,8 @@ async function launch(
         // a rotated Ops session never even sees record_decision (§7.1).
         allowed_tools: issued.record.allowed_tools,
         worktree: role.worktree,
+        // P2a-14 ⑧: `browser` adds the host's local browser when configured.
+        capabilities: role.capabilities,
       },
       launch: host.launch.config,
       agent_nice: execution.agentNice ?? 10,
