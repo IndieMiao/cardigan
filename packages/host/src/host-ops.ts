@@ -88,6 +88,8 @@ interface Options {
 export class HostOpsService {
   private readonly clock: Clock;
   private readonly upstream: UpstreamHealthMonitor | undefined;
+  private readonly upstreamPolls = new Map<ProjectId, Promise<void>>();
+  private closing = false;
   private lastContextPoll = Number.NEGATIVE_INFINITY;
   private serial: Promise<void> = Promise.resolve();
   constructor(private readonly options: Options) {
@@ -371,6 +373,22 @@ export class HostOpsService {
       )
         activity[session.assignment_id] = "working";
     }
+    const current = this.options.store.uow.read((tx) =>
+      loadCommandState(tx, project),
+    );
+    for (const id of Object.keys(activity)) {
+      const before = state.assignments.find((a) => a.id === id);
+      const after = current.assignments.find((a) => a.id === id);
+      if (
+        !after ||
+        JSON.stringify(before?.runtime_ref) !==
+          JSON.stringify(after.runtime_ref)
+      )
+        throw new ToolError(
+          "stale_target",
+          "活动采样期间会话已更换，请重新读取诊断",
+        );
+    }
     return activity;
   }
   private checkUpstream(
@@ -399,7 +417,22 @@ export class HostOpsService {
     return diagnosis;
   }
   async close() {
+    this.closing = true;
     await this.upstream?.close();
+    await Promise.allSettled(this.upstreamPolls.values());
+  }
+  /** Runtime/context observations must precede clustering, without holding the dispatcher. */
+  private pollUpstream(project: ProjectId) {
+    const upstream = this.upstream;
+    if (!upstream || this.closing || this.upstreamPolls.has(project)) return;
+    const poll = this.observeUpstream(project)
+      .then((activity) => {
+        if (!this.closing)
+          upstream.reconcile(this.options.store, project, activity);
+      })
+      .catch(() => upstream.observationFailed(project))
+      .finally(() => this.upstreamPolls.delete(project));
+    this.upstreamPolls.set(project, poll);
   }
   private sessions(project: ProjectId) {
     const state = this.options.store.uow.read((tx) =>
@@ -456,7 +489,7 @@ export class HostOpsService {
       this.upstream?.schedule();
       if (this.upstream)
         for (const project of this.options.store.listProjects())
-          this.upstream.reconcile(this.options.store, project.id);
+          this.pollUpstream(project.id);
       await this.pollContexts();
       await this.drain();
     });
@@ -568,12 +601,26 @@ export class HostOpsService {
           };
           // Do not revoke credentials or release the Run slot until exit is proven.
           if (!current()) continue;
-          const activity =
-            action.tool === "host_ops_cancel_run"
-              ? undefined
-              : await this.observeUpstream(project.id, action.assignment_id);
+          let activity: SessionActivity | undefined;
+          if (action.tool !== "host_ops_cancel_run") {
+            try {
+              activity = await this.observeUpstream(
+                project.id,
+                action.assignment_id,
+              );
+            } catch {
+              this.upstream?.observationFailed(project.id);
+              this.defer(
+                project.id,
+                action.action_id,
+                "upstream_observation_failed",
+              );
+              continue;
+            }
+          }
           const mayStop = () => {
             if (!current()) return false;
+            if (action.tool === "host_ops_cancel_run") return true;
             const diagnosis = this.upstream?.diagnosis(
               read(),
               action.assignment_id,
@@ -597,14 +644,13 @@ export class HostOpsService {
               if (withdrawn) return false;
             }
             try {
-              if (action.tool !== "host_ops_cancel_run")
-                this.checkUpstream(
-                  read(),
-                  action.assignment_id,
-                  Boolean(action.context_usage),
-                  action.action_id,
-                  activity,
-                );
+              this.checkUpstream(
+                read(),
+                action.assignment_id,
+                Boolean(action.context_usage),
+                action.action_id,
+                activity,
+              );
               return true;
             } catch {
               this.defer(

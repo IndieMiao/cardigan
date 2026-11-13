@@ -400,7 +400,7 @@ export function withdrawRecoveredHostOpsAction(
     const action = pendingHostOpsActions(state.events).find(
       (a) => a.action_id === action_id,
     );
-    if (!action) return false;
+    if (!action || action.tool === "host_ops_cancel_run") return false;
     const changed =
       new_incident_id &&
       new_incident_id !== action.upstream_incident_id &&

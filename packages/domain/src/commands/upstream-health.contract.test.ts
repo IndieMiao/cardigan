@@ -245,7 +245,7 @@ test("recovery requires the full window and activity evidence, then permits only
   expect(f.diagnosis().evidence).toContain("recovery_already_requested");
 });
 
-test("recurrence at fifteen minutes escalates once, and does not reopen a restart budget", () => {
+test("silence beginning at fifteen minutes escalates once despite a delayed alert", () => {
   const f = scenario();
   const taken = f.fact("host_ops_action_taken", {
     assignment_id: "A-1",
@@ -255,7 +255,15 @@ test("recurrence at fifteen minutes escalates once, and does not reopen a restar
     assignment_id: "A-1",
     action_id: taken.id,
   });
-  f.advance(15);
+  f.replace({
+    ...f.state(),
+    assignments: f
+      .state()
+      .assignments.map((a) =>
+        a.id === "A-1" ? { ...a, last_mcp_activity_at: f.at(15) } : a,
+      ),
+  });
+  f.advance(30);
   f.inactive(1);
   f.record();
   expect(f.diagnosis()).toMatchObject({
@@ -320,6 +328,65 @@ test("multiple server-side delivery failures do not become an upstream cluster",
   expect(f.state().human_actions).toEqual([]);
   expect(f.diagnosis(1, f.probe("reachable"), { "A-1": "idle" }).cause).toBe(
     "server_problem",
+  );
+});
+
+test.each(["started_at", "heartbeat_at", "last_mcp_activity_at"] as const)(
+  "recovery activity in %s makes an old delivery failure irrelevant to a later stall",
+  (field) => {
+    const f = scenario();
+    for (const n of [1, 2, 3]) {
+      f.fact("bell_delivery_attempt_failed", {
+        assignment_id: `A-${n}`,
+        run_id: `R-${n}`,
+        reason: "before_wake_failed",
+      });
+    }
+    f.replace({
+      ...f.state(),
+      runs: f
+        .state()
+        .runs.map((r) =>
+          field === "last_mcp_activity_at" ? r : { ...r, [field]: f.at(1) },
+        ),
+      assignments: f
+        .state()
+        .assignments.map((a) =>
+          field === "last_mcp_activity_at"
+            ? { ...a, last_mcp_activity_at: f.at(1) }
+            : a,
+        ),
+    });
+    f.advance(16);
+    f.inactive(1);
+    expect(
+      f.diagnosis(1, f.probe("reachable"), { "A-1": "idle" }),
+    ).toMatchObject({
+      cause: "agent_stalled",
+      action: "restart_once",
+    });
+    f.inactive(2);
+    f.inactive(3);
+    expect(
+      upstreamCluster(f.state(), f.targets, DEFAULT_UPSTREAM_POLICY, {}),
+    ).toHaveLength(3);
+    f.record();
+    expect(f.diagnosis().cause).toBe("upstream_suspected");
+  },
+);
+
+test("a completed Run cannot keep an already open outage waiting for activity", () => {
+  const f = scenario();
+  f.record(f.probe("unreachable"));
+  f.replace({
+    ...f.state(),
+    runs: f.state().runs.map((r) => ({ ...r, status: "completed" as const })),
+  });
+  f.advance(10);
+  f.record(f.probe("reachable"));
+  expect(upstreamIncident(f.state(), "relay")).toBeUndefined();
+  expect(f.state().human_actions.filter((h) => h.status === "open")).toEqual(
+    [],
   );
 });
 

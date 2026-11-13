@@ -1,6 +1,7 @@
 import type { Actor, Event } from "../entities.js";
 import type { NotificationRecipient } from "../notification.js";
 import {
+  hasUnfinishedUpstreamRun,
   lastUpstreamInactivity,
   recurrentUpstreamFailure,
   type SessionActivity,
@@ -97,7 +98,9 @@ export function recordUpstreamHealth(
       const cluster = upstreamCluster(state, targets, p.policy, p.activity);
       const incident = upstreamIncident(state, group);
       const affected = failed
-        ? targets.map((t) => t.assignment_id)
+        ? targets
+            .filter((t) => hasUnfinishedUpstreamRun(state, t.assignment_id))
+            .map((t) => t.assignment_id)
         : incident
           ? targets
               .filter(
@@ -178,6 +181,7 @@ export function recordUpstreamHealth(
           incident.assignment_ids.every(
             (id) =>
               !targets.some((t) => t.assignment_id === id) ||
+              !hasUnfinishedUpstreamRun(state, id) ||
               (!lastUpstreamInactivity(state, id) &&
                 upstreamActivityAfter(
                   state,

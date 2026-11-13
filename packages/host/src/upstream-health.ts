@@ -349,4 +349,7 @@ export class UpstreamHealthMonitor {
       this.classificationFailures.add(project);
     }
   }
+  observationFailed(project: ProjectId) {
+    this.classificationFailures.add(project);
+  }
 }

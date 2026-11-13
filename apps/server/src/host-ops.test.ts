@@ -15,6 +15,7 @@ import {
   queueRun,
   type Runtime,
   type ToolName,
+  upstreamIncident,
 } from "@cardigan/domain";
 import {
   HostOpsService,
@@ -110,7 +111,10 @@ beforeEach(() => {
     clock: f.clock,
   });
 });
-afterEach(() => f.close());
+afterEach(async () => {
+  await service.close();
+  f.close();
+});
 async function call(
   name: (typeof HOST_OPS_TOOLS)[number],
   input: object,
@@ -1106,7 +1110,7 @@ test("pi high watermark becomes non-actionable immediately when the installed ex
   }
 });
 
-function upstreamService() {
+function upstreamService(probeConfigured = true) {
   let reachable = true;
   const config = parseLaunchConfig({
     providers: {
@@ -1119,9 +1123,13 @@ function upstreamService() {
       },
     },
     profiles: { fixture: { harness: "pi", provider: "relay" } },
-    upstream_health: {
-      probe: { interval_ms: 100, timeout_ms: 20, stale_after_ms: 200 },
-    },
+    ...(probeConfigured
+      ? {
+          upstream_health: {
+            probe: { interval_ms: 100, timeout_ms: 20, stale_after_ms: 200 },
+          },
+        }
+      : {}),
   });
   const monitor = new UpstreamHealthMonitor(
     config,
@@ -1200,6 +1208,161 @@ test("C-213: a failed probe blocks a restart without stopping a terminal", async
   await service.close();
 });
 
+test("C-213: an upstream incident never withdraws an explicit Run cancellation", async () => {
+  const target = dispatched();
+  const { sample } = upstreamService();
+  await sample(false);
+  await call("host_ops_read_diagnostics", {});
+  expect(upstreamIncident(f.state(), "relay")).toBeDefined();
+  await call("host_ops_cancel_run", {
+    run_id: target.run.id,
+    reason: "stop this Run explicitly",
+    idempotency_key: "cancel-during-outage",
+  });
+  expect(hostOpsPending(f.state().events, target.assignment.id)).toBe(true);
+  await service.tick();
+  expect(runtime.release).toHaveBeenCalledTimes(1);
+  expect(f.state().runs.find((r) => r.id === target.run.id)?.status).toBe(
+    "cancelled",
+  );
+  expect(
+    f.state().runs.filter((r) => r.assignment_id === target.assignment.id),
+  ).toHaveLength(1);
+  expect(hostOpsPending(f.state().events, target.assignment.id)).toBe(false);
+  expect(
+    f.state().events.filter((e) => e.type === "host_ops_action_finished"),
+  ).not.toContainEqual(
+    expect.objectContaining({
+      payload: expect.objectContaining({
+        result: "withdrawn_upstream_changed",
+      }),
+    }),
+  );
+  await service.close();
+});
+
+test("C-213: patrol observes working sessions before clustering, without waiting in the global tick", async () => {
+  for (let n = 0; n < 3; n++) f.session(f.create().assignment, false);
+  const { monitor } = upstreamService(false);
+  f.advance(15 * 60_000);
+  await new Dispatcher({
+    store: f.store,
+    runtime,
+    snapshot,
+    clock: f.clock,
+  }).tick();
+  expect(
+    f.state().events.filter((e) => e.type === "run_inactive"),
+  ).toHaveLength(3);
+  let finish!: (value: Awaited<ReturnType<Runtime["status"]>>) => void;
+  const observation = new Promise<Awaited<ReturnType<Runtime["status"]>>>(
+    (resolve) => {
+      finish = resolve;
+    },
+  );
+  vi.mocked(runtime.status).mockClear().mockReturnValue(observation);
+  const reconcile = vi.spyOn(monitor, "reconcile");
+  try {
+    await service.tick();
+    expect(runtime.status).toHaveBeenCalledTimes(3);
+    expect(reconcile).not.toHaveBeenCalled();
+    expect(upstreamIncident(f.state(), "relay")).toBeUndefined();
+    await service.tick();
+    expect(runtime.status).toHaveBeenCalledTimes(3);
+    f.advance(1);
+  } finally {
+    finish({
+      ok: true,
+      value: { process: "alive", agent: "working", observed_seq: 1 },
+    });
+  }
+  await vi.waitFor(() => expect(reconcile).toHaveBeenCalledTimes(1));
+  expect(upstreamIncident(f.state(), "relay")).toBeUndefined();
+  expect(f.state().human_actions).toEqual([]);
+  expect(
+    monitor
+      .diagnostics(f.state())
+      .sessions.filter((s) => s.cause === "agent_busy"),
+  ).toHaveLength(3);
+  // No read-diagnostics request was needed to protect a later patrol either.
+  f.advance(1_000);
+  await service.tick();
+  await vi.waitFor(() => expect(reconcile).toHaveBeenCalledTimes(2));
+  expect(f.state().human_actions).toEqual([]);
+  await service.close();
+});
+
+test("C-213: a failed stop-time observation defers recovery and continues other operations", async () => {
+  const target = dispatched();
+  const other = dispatched();
+  const { monitor, sample } = upstreamService();
+  markInactive(target.assignment, target.run.id);
+  await sample(true);
+  await call("host_ops_restart_assignment", {
+    assignment_id: target.assignment.id,
+    reason: "recover",
+    idempotency_key: "observation-race",
+  });
+  await call("host_ops_cancel_run", {
+    run_id: other.run.id,
+    reason: "cancel another Run",
+    idempotency_key: "independent-cancel",
+  });
+  const observe = monitor.observe.bind(monitor);
+  vi.spyOn(monitor, "observe").mockImplementation((state, only) => {
+    if (only === target.assignment.id)
+      return Promise.reject(new Error("private observation failure"));
+    return observe(state, only);
+  });
+  await expect(service.tick()).resolves.toBeUndefined();
+  expect(f.state().runs.find((r) => r.id === target.run.id)?.status).toBe(
+    "dispatched",
+  );
+  expect(f.state().runs.find((r) => r.id === other.run.id)?.status).toBe(
+    "cancelled",
+  );
+  expect(runtime.release).toHaveBeenCalledTimes(1);
+  expect(f.state().events).toContainEqual(
+    expect.objectContaining({
+      type: "host_ops_action_deferred",
+      payload: expect.objectContaining({
+        reason: "upstream_observation_failed",
+      }),
+    }),
+  );
+  expect(JSON.stringify(f.state().events)).not.toContain(
+    "private observation failure",
+  );
+});
+
+test("C-213: dormant sessions do not keep recovered outages or their human notices open", async () => {
+  const active = f.create().assignment;
+  const dormant = f.create().assignment;
+  f.session(active, false);
+  f.session(dormant, true);
+  const { sample } = upstreamService();
+  await sample(false);
+  await call("host_ops_read_diagnostics", {});
+  const first = upstreamIncident(f.state(), "relay");
+  expect(first?.assignment_ids).toEqual([active.id]);
+  f.advance(600_000);
+  await sample(true);
+  expect(f.store.touchAssignmentActivity(f.project, active.id)).toBe(true);
+  await call("host_ops_read_diagnostics", {});
+  expect(upstreamIncident(f.state(), "relay")).toBeUndefined();
+  expect(f.state().human_actions.filter((h) => h.status === "open")).toEqual(
+    [],
+  );
+  expect(runtime.release).not.toHaveBeenCalled();
+  await sample(false);
+  await call("host_ops_read_diagnostics", {});
+  expect(upstreamIncident(f.state(), "relay")?.id).not.toBe(first?.id);
+  expect(upstreamIncident(f.state(), "relay")?.assignment_ids).toEqual([
+    active.id,
+  ]);
+  await service.close();
+});
+
 test("C-213: line failure after accepting a restart is rechecked before stopping; the old request is withdrawn", async () => {
   const target = dispatched();
   const { sample } = upstreamService();
@@ -1256,7 +1419,7 @@ test("C-213: runtime work is not classified as a stuck Agent merely because MCP 
   await service.close();
 });
 
-test("C-213: recovered lines permit one restart per session and recurrence survives service recreation", async () => {
+test("C-213: recovered lines permit one restart per session", async () => {
   const targets = [dispatched(), dispatched(), dispatched()];
   const first = targets[0];
   const witness = targets[2];
@@ -1291,33 +1454,122 @@ test("C-213: recovered lines permit one restart per session and recurrence survi
   await expect(restart("duplicate")).rejects.toThrow(
     "recovery_already_requested",
   );
-  const nextRun = f
-    .state()
-    .runs.find(
-      (r) => r.assignment_id === first.assignment.id && r.id !== first.run.id,
-    );
-  if (!nextRun) throw new Error("Recovery did not queue a replacement");
-  f.advance(60_000);
-  markInactive(first.assignment, nextRun.id);
-  await service.close();
-  upstreamService();
-  const view = (await call("host_ops_read_diagnostics", {})) as {
-    upstream_health: { sessions: unknown[] };
-  };
-  expect(view.upstream_health.sessions).toContainEqual(
-    expect.objectContaining({
-      assignment_id: first.assignment.id,
-      action: "human",
-      evidence: expect.arrayContaining(["recurrence_after_recovery"]),
-    }),
-  );
-  await expect(restart("recurred")).rejects.toThrow("复发须交人");
-  const notices = f.state().human_actions.length;
-  await call("host_ops_read_diagnostics", {});
-  expect(f.state().human_actions).toHaveLength(notices);
-  expect(runtime.release).toHaveBeenCalledTimes(1);
   await service.close();
 });
+
+test.each([
+  [5 * 60_000, "human"],
+  [15 * 60_000, "human"],
+  [15 * 60_000 + 1, "restart_once"],
+] as const)(
+  "C-213: real watchdog reports silence beginning %i ms after recovery as %s across service recreation",
+  async (lastActivityAfterMs, action) => {
+    const { assignment } = f.create();
+    const original = f.session(assignment, false);
+    const { sample } = upstreamService();
+    await sample(true);
+    const dispatcher = new Dispatcher({
+      store: f.store,
+      runtime,
+      snapshot,
+      clock: f.clock,
+    });
+    f.advance(15 * 60_000);
+    await dispatcher.tick();
+    expect(f.state().events).toContainEqual(
+      expect.objectContaining({
+        type: "run_inactive",
+        payload: expect.objectContaining({ run_id: original.id }),
+      }),
+    );
+    const restart = (key: string) =>
+      call("host_ops_restart_assignment", {
+        assignment_id: assignment.id,
+        reason: "recover the inactive session",
+        idempotency_key: key,
+      });
+    await restart("initial-recovery");
+    await service.tick();
+    const recoveredAt = f.clock.now();
+    expect(runtime.release).toHaveBeenCalledTimes(1);
+    const nextRun = f
+      .state()
+      .runs.find(
+        (r) => r.assignment_id === assignment.id && r.id !== original.id,
+      );
+    if (!nextRun) throw new Error("Recovery did not queue a replacement");
+    // Include a real dispatch delay and start the replacement via domain commands.
+    alive = true;
+    f.advance(1_000);
+    f.apply((s, a, p) =>
+      dispatchRun(
+        s,
+        a,
+        { run_id: nextRun.id, runtime_ref: f.refFor(assignment) },
+        p,
+      ),
+    );
+    f.apply(
+      (s, a, p) => acknowledgeRun(s, a, { run_id: nextRun.id }, p),
+      f.actorFor(assignment),
+    );
+    f.advance(lastActivityAfterMs - 1_000);
+    expect(f.store.touchAssignmentActivity(f.project, assignment.id)).toBe(
+      true,
+    );
+    f.advance(15 * 60_000 - 1);
+    await dispatcher.tick();
+    const alert = () =>
+      f
+        .state()
+        .events.find(
+          (e) =>
+            e.type === "run_inactive" &&
+            (e.payload as { run_id?: string }).run_id === nextRun.id,
+        );
+    expect(alert()).toBeUndefined();
+    f.advance(1);
+    await dispatcher.tick();
+    expect(alert()?.created_at).toBe(f.clock.now());
+    expect(Date.parse(f.clock.now()) - Date.parse(recoveredAt)).toBe(
+      lastActivityAfterMs + 15 * 60_000,
+    );
+    await service.close();
+    upstreamService();
+    const view = (await call("host_ops_read_diagnostics", {})) as {
+      upstream_health: { sessions: unknown[] };
+    };
+    expect(view.upstream_health.sessions).toContainEqual(
+      expect.objectContaining({
+        assignment_id: assignment.id,
+        action,
+      }),
+    );
+    if (action === "human") {
+      await expect(restart("recurred")).rejects.toThrow("复发须交人");
+      expect(
+        f.state().events.filter((e) => e.type === "upstream_recovery_recurred"),
+      ).toHaveLength(1);
+      expect(
+        f
+          .state()
+          .human_actions.some((h) =>
+            h.instructions.includes(`${assignment.id} 在恢复后`),
+          ),
+      ).toBe(true);
+    } else {
+      expect(
+        f.state().events.some((e) => e.type === "upstream_recovery_recurred"),
+      ).toBe(false);
+      await restart("later-stall");
+    }
+    const notices = f.state().human_actions.length;
+    await call("host_ops_read_diagnostics", {});
+    expect(f.state().human_actions).toHaveLength(notices);
+    expect(runtime.release).toHaveBeenCalledTimes(1);
+    await service.close();
+  },
+);
 
 test("C-213: an outage recovery is withdrawn when the target resumes before execution", async () => {
   const target = dispatched();

@@ -1,4 +1,5 @@
 import type { CommandState } from "./commands/core.js";
+import { lastRunActivity } from "./commands/inactive-run.js";
 import type { Event } from "./entities.js";
 import type { AssignmentId, EventId } from "./ids.js";
 
@@ -37,6 +38,12 @@ export type SessionActivity = Readonly<
 const fields = (e: Event) => e.payload as Record<string, unknown>;
 const unfinished = (status: string) =>
   !["completed", "failed", "cancelled"].includes(status);
+export function hasUnfinishedUpstreamRun(
+  state: CommandState,
+  id: AssignmentId,
+) {
+  return state.runs.some((r) => r.assignment_id === id && unfinished(r.status));
+}
 export function upstreamIncident(
   state: Pick<CommandState, "events">,
   group: string,
@@ -114,6 +121,17 @@ export function recurrentUpstreamFailure(
 ) {
   const inactive = lastUpstreamInactivity(state, id);
   if (!inactive) return;
+  const assignment = state.assignments.find((a) => a.id === id);
+  const run = state.runs.find(
+    (r) => r.id === fields(inactive).run_id && r.assignment_id === id,
+  );
+  if (!assignment || !run) return;
+  // The watchdog reports silence after its grace period. Recurrence is about
+  // when that silence began, not when the delayed alert was emitted.
+  const inactiveSince =
+    inactive.type === "run_inactive"
+      ? lastRunActivity(run, assignment)
+      : Date.parse(inactive.created_at);
   return state.events.findLast((e) => {
     if (
       e.type !== "host_ops_action_finished" ||
@@ -130,11 +148,20 @@ export function recurrentUpstreamFailure(
       fields(request).tool === "host_ops_cancel_run"
     )
       return false;
-    const elapsed = Date.parse(inactive.created_at) - Date.parse(e.created_at);
+    const elapsed = inactiveSince - Date.parse(e.created_at);
     return elapsed >= 0 && elapsed <= policy.recurrence_window_ms;
   });
 }
 function serverFailureFor(state: CommandState, inactive: Event) {
+  const assignment = state.assignments.find(
+    (a) => a.id === fields(inactive).assignment_id,
+  );
+  const run = state.runs.find(
+    (r) =>
+      r.id === fields(inactive).run_id && r.assignment_id === assignment?.id,
+  );
+  if (!assignment || !run) return;
+  const lastActivity = lastRunActivity(run, assignment);
   return state.events.findLast(
     (e) =>
       ["bell_delivery_failed", "bell_delivery_attempt_failed"].includes(
@@ -142,6 +169,8 @@ function serverFailureFor(state: CommandState, inactive: Event) {
       ) &&
       fields(e).assignment_id === fields(inactive).assignment_id &&
       fields(e).run_id === fields(inactive).run_id &&
+      Date.parse(e.created_at) >= lastActivity &&
+      Date.parse(e.created_at) <= Date.parse(inactive.created_at) &&
       ["before_wake_failed", "wake_failed", "delivery_call_failed"].includes(
         String(fields(e).reason),
       ),
