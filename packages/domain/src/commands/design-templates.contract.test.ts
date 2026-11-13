@@ -17,7 +17,7 @@ import { recordDecision, resolveDelegatedDecision } from "./coordination.js";
 import type { CommandState } from "./core.js";
 import { prepareDelivery, submitDelivery, submitReview } from "./delivery.js";
 import { HUMAN_COMPLETION_REASON } from "./human-completion.js";
-import { createCard } from "./pm.js";
+import { createCard, updateCard } from "./pm.js";
 import { manageCardTemplate } from "./templates.js";
 import {
   actor,
@@ -240,8 +240,12 @@ describe("design template flow (p2v-12 §2.4)", () => {
   const designer = actor(1, "ui_ux_designer");
   const director = actor(2, "design_director");
 
-  test("director pass, completion request and human approval finish the card", async () => {
+  test("director pass, completion request and human approval finish a risk-tagged card", async () => {
     let { p, card_id, production, review, state: s } = start();
+    s = apply(
+      s,
+      value(updateCard(s, human, { card_id, risk_tags: ["security"] }, p)),
+    );
     const deliver = async (params: Parameters<typeof prepareDelivery>[2]) => {
       const verified = value(
         await prepareDelivery(s, designer, params, {

@@ -164,6 +164,9 @@ const cardUpdate = z
     goal: text.optional(),
     acceptance_criteria: z.array(text).min(1).optional(),
     priority: z.number().int().min(0).max(4).optional(),
+    risk_tags: z
+      .array(z.enum(["security", "permission", "numeric_rule"]))
+      .optional(),
   })
   .strict()
   .refine((p) => Object.keys(p).length > 0);

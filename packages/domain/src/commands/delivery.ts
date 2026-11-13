@@ -171,6 +171,27 @@ function inspect(d: CommandDraft, p: SubmitDeliveryParams) {
       "unauthorized",
       "Only the primary producer can request completion",
     );
+  if (
+    completion &&
+    card.risk_tags?.length &&
+    template.completion.mode === "review" &&
+    template.completion.reviewer !== "human"
+  )
+    ensure(
+      d
+        .list("work_items")
+        .some(
+          (w) =>
+            w.card_id === card.id &&
+            w.kind === "verify" &&
+            w.role_id === "independent_reviewer" &&
+            w.required &&
+            w.status !== "cancelled" &&
+            !w.replaced_by_work_item_id,
+        ),
+      "invariant_violation",
+      "卡片已设置风险标签，提交完成申请前须添加必需且未取消的 independent_reviewer 独立复核验证项",
+    );
   for (const attachment of p.attachments ?? [])
     ensure(
       d.get("attachments", attachment).card_id === card.id,

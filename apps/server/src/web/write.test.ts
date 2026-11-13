@@ -91,6 +91,28 @@ afterEach(async () => {
   await s?.close();
 }, 30_000);
 
+test("human card updates set and clear risk tags and reject invalid values atomically", async () => {
+  const risk_tags = ["security", "permission", "numeric_rule"];
+  expect(await request(cardPath("update"), { risk_tags })).toMatchObject({
+    status: 200,
+  });
+  expect(s.state().cards.find((c) => c.id === s.card.id)?.risk_tags).toEqual(
+    risk_tags,
+  );
+  const before = snapshot();
+  for (const invalid of [["spending"], "security", null])
+    expect(
+      await request(cardPath("update"), { risk_tags: invalid }),
+    ).toMatchObject({ status: 400 });
+  expect(snapshot()).toBe(before);
+  expect(await request(cardPath("update"), { risk_tags: [] })).toMatchObject({
+    status: 200,
+  });
+  expect(s.state().cards.find((c) => c.id === s.card.id)?.risk_tags).toEqual(
+    [],
+  );
+});
+
 test("human comments preserve Markdown, mentions and resolved reference metadata", async () => {
   const body = `    code\n\n见 ${s.card.id} ${s.primary.owner.work_item_id} C-999`;
   const response = await request(cardPath("comments"), {

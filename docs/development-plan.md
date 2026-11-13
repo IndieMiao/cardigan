@@ -343,6 +343,7 @@ Standing Assignment (scope=project): PM Office, PM Ops — not tied to a WorkIte
 - 代码基线：`repo?`、`base_branch?`；模板要求仓库时两者必填，无仓库卡片省略两者。
 - 管理字段：`priority`（C-144：固定五档 `0=None/无`、`1=Low/低`、`2=Medium/中`、`3=High/高`、`4=Urgent/紧急`，默认无，越大越先执行）、`status`（见 §4.4：中间状态由工作项推导，`done` 按模板规定的完成方式产生）、`resolution?`（`done | superseded | duplicate | wontdo`）、`superseded_by?`（取代本卡的同项目卡片编号，同时保存在 `related_cards[]` 中）、`template`、`template_version`（固定建卡时的模板版本，决定默认工作项、必需项与完成方式；老卡按 v1 读取）、`merge_policy`（从模板的 `merge` 固定，`none | confirm | auto`）、`sensitive?`（人标记的敏感卡片，只有人能设置或取消；合并确认一律由人亲自处理，见 §4.4 C-65）、`pre_merge_checks?`（C-160 合并前核对项 `{label, status: pending|passed|failed, note?, updated_by, updated_at}[]`，只作提示，见 §4.4 C-160）
 - 审计：`created_by`、`created_at`
+- P2a-14 ④：`risk_tags?: readonly RiskTag[]`，`RiskTag` 只含 `security | permission | numeric_rule`，用于代码风险分类，与 D12 业务拍板类别独立。PM（Office/Ops）或 human 经 `updateCard` 写入，MCP `update_card` 和 Workbench 卡片更新 API 共用领域校验；产出和复核角色不能写。数组替换旧值、重复标签去重，`[]` 清空，省略保持原值；旧卡缺少字段视同未标记，无需迁移。`card_updated` 记录修改前后标签及操作者；不与 `pre_merge_check` 混用。
 - 派生字段（不存储，实时计算）：`waiting_on[]`、`next_owners[]`、`open_decisions[]`、`review_matrix`（每个交付 × 审核它的验证方 → 对当前 SHA 的结论；产出交付只列以该工作项为目标的验证项，完成申请只列它请求的 PM 验收项）、`why`（一句话原因，≤40 字，见 §8.2）
 - `next_owners[]` 中，处于 `ready`、`in_progress`、`changes_requested` 的工作项若关联的 Assignment 已 `released`，退回 `{kind: "role", ref: 工作项的 role_id}`，表示需要重新指派；`active` 和 `suspended` 仍指向该 Assignment。同一角色去重，其他派生字段规则不变。
 - 负责人和审核人不写进描述正文；改派作为事件进时间线。
@@ -534,6 +535,8 @@ C-144：迁移 0019 在 C-132 的编号格式迁移 0018 之后，将旧数字�
 - P2v-12 V12a（C-104 安全审核）：`reviewer=human` 模板的完成申请不经过任何完成验证项，因此卡上所有必需验证项（如 design 模板的 `design_review`）必须先通过，不能用“已知缺口 + 后续卡”豁免；系统生成的 `completion_review` Decision 带 `human_required_reason`，不受 `decision_delegation` 偏好影响、不改派给 PM Ops，PM Ops 也不能用 `resolve_delegated_decision` 代答，PM Office 也不能用 `record_decision` 转录（只接受 human Actor）；它不是合并确认，不适用超时自动合并。
 
 - 规则只做两件事：除本次完成审核项以外的必需工作项都通过后，提醒负责人可以申请；收到申请时校验前置条件（排除本次完成审核项，其余 `required` 工作项处于成功终态；没有 open 且 `blocking` 的 Decision），并把结果展示给审核者。未满足的条件必须列为已知遗留，并关联后续卡片。本次完成审核项（开发卡中的 PM 验收）在审核通过后才置为 passed，卡片再进入合并阶段，避免前置条件循环（2026-11-04 用户确认）。
+
+- P2a-14 ④：`risk_tags` 非空且模板完成审核者不是 human 时，完成申请的预检和事务内提交均要求同卡存在必需、未取消、未被替换的 `independent_reviewer` 验证项；缺项时以中文说明拒绝，不能用已知遗留豁免，也不自动建项。存在该项后，继续检查原有必需项完成条件。普通产出交付、未标记卡片和 human 验收模板不受此新增门槛影响。
 
 `awaiting_merge --merge_conflicted--> in_progress`，`awaiting_merge --request_changes--> in_progress`，`awaiting_merge --cancel--> cancelled`。派生计算保留待合并状态，`resolution=done` 只在真正 done 时写入。待合并期间拒绝新交付和审核；合并确认增加 `request_changes`（退回修改），必须填写非空原因。退回与冲突复用同一套迁移：相应产出 accepted → changes_requested、旧完成申请 supersede、验收项 target_withdrawn 回 todo；退回修改定位完成申请所属的主产出项。原因写入时间线与 `merge_changes_requested` 事件，Router / Dispatcher 为原产出 Assignment 排 `fix` Run，其触发事件保留原因。返回执行阶段后再按原流程交付、审核、申请完成和确认合并，避免修改已确认的合并集合。
 
@@ -727,7 +730,7 @@ C-152：意图记录的 RuntimeRef 不属于 server 当前运行时（`machine_i
 
 23. 合并确认由 PM Ops 选择 `merge` 时，domain 必须在同一事务内校验当前完成申请的合并检查已通过、所有未取消的验证项通过（不论是否必需）、无未处理的 must_fix，并要求知会正文；不满足时只能 hold、退回修改或交人。卡片涉及 D12 四类或需求范围变化（含卡片来源拍板）、偏好关闭或没有活跃 PM Ops 时，合并确认由人确认；敏感卡片（含人标记的敏感卡片）和 PM 主动交人的确认只接受 human Actor，不适用超时自动合并，也不接受 PM Office 代记。敏感标记只能由 human Actor 设置或取消。当前检查失败或超时后，`pm_merge_confirmation` 开启时 PM Ops 可退回修改或重新检查（含已确认合并），理由和知会必填，敏感卡片（含人标记的敏感卡片）和已交人的确认只允许按 §4.4 的结构化超时规则重新检查，不能退回或代确认合并；理由、知会和当前偏好仍须校验（C-115 / Q-158）。P2a-13 B 组合入后，在启用合并队列的项目里，PM Ops 选 `merge` 的检查前置条件改为“当前完成申请的卡级快速检查已通过”（基线前进后不要求重跑），合并本身仍以批次全量检查通过为准（第 21 条 (b)）；批次失败定位到本卡时，按本条的失败处理规则处理。
 
-   ADR 0006（2026-11-13 用户拍板，已决定、待实现，以 P2a-14 各卡的实现为准）：第 23 条将新增一条窄口代确认分支——卡片的 `risk_tags` 非空且 ⊆ `{security, permission, numeric_rule}`、且未命中上述人工强制条件（D12 四类、需求范围变化、敏感、`human_required_reason`）时，须额外校验卡上存在一个 `role_id=independent_reviewer` 的必需验证项，其当前 Review 非 stale 且为 passed，PM Ops 才能代确认合并；该验证项不存在或结论非 passed／已过期时仍由人确认。`risk_tags` 只能由 PM 或人设置，与 D12 的 Decision `category` 相互独立，同卡同时有 D12 `permission` 类拍板时业务拍板优先、仍交人。第 15／16 条将仅对 `independent_reviewer` 扩展为三方隔离：复核员的员工不能与目标产出项、也不能与同卡其它验证项（如 `code_review`）的员工相同，双向检查；其它角色之间的既有语义不变。另新增一条：`risk_tags` 非空且模板完成审核者不是人时，主产出项提交完成申请前必须存在必需、未取消的 `independent_reviewer` 验证项。上述规则在 P2a-14 实现合并前不生效，现行第 15／16／23 条照旧执行。
+   ADR 0006（2026-11-13 用户拍板，已决定、待实现，以 P2a-14 各卡的实现为准）：第 23 条将新增一条窄口代确认分支——卡片的 `risk_tags` 非空且 ⊆ `{security, permission, numeric_rule}`、且未命中上述人工强制条件（D12 四类、需求范围变化、敏感、`human_required_reason`）时，须额外校验卡上存在一个 `role_id=independent_reviewer` 的必需验证项，其当前 Review 非 stale 且为 passed，PM Ops 才能代确认合并；该验证项不存在或结论非 passed／已过期时仍由人确认。`risk_tags` 只能由 PM 或人设置，与 D12 的 Decision `category` 相互独立，同卡同时有 D12 `permission` 类拍板时业务拍板优先、仍交人。第 15／16 条将仅对 `independent_reviewer` 扩展为三方隔离：复核员的员工不能与目标产出项、也不能与同卡其它验证项（如 `code_review`）的员工相同，双向检查；其它角色之间的既有语义不变。字段和缺复核项的完成申请硬门已由 P2a-14 ④ 落地，见 §4.3、§4.4 和第 29 条；三方隔离和代确认分支仍按各实现卡合并进度生效，本卡不改现行第 15／16／23 条。
 
 24. 全局恰好一个 `role=owner` 且 `status=active` 的成员。迁移为新旧库初始化占位 owner；成员命令只接受 human，并与全局审计及编号同事务。成员身份只影响读取与展示，不增加任何 Agent 权限，不改变已有 Actor / Author 或 D12 的 human 检查。
 
@@ -736,6 +739,7 @@ C-152：意图记录的 RuntimeRef 不属于 server 当前运行时（`machine_i
 26. 撤回通过结论只接受持有该验证工作项的 Assignment 本人，不能由 PM、host_ops、人或 system 代撤；要求工作项为 passed 且对应的最新 Review 当前有效。理由必填，原审核仅追加 withdrawn 审计标记，不能删除原记录或改写原结论；已撤回记录不再作为有效审核参与衍生计算。
 27. done/cancelled 卡片、当前完成申请的合并检查为 running，或已经记录合并成功时禁止撤回审核。身份、目标有效性和时机必须在同一新鲜事务快照内校验，拒绝不留部分效果。P2a-13 B 组合入后，本卡所在批次（含二分探测）的检查为 running，或批次已进入 `publishing`（发布边界已持久化）时，同样禁止撤回审核。
 28. 模板规定由人验收（`completion.reviewer=human`）的完成决定只接受 human：带 `human_required_reason` 的 Decision 一律不委托给 PM Ops、不进入超时代批；其完成申请提交前，卡上所有必需验证项必须已对当前版本通过，不能以已知缺口豁免。
+29. 卡片 `risk_tags` 非空且模板完成审核者不是 human 时，提交完成申请前必须存在同卡必需、未取消、未被替换的 `role_id=independent_reviewer` 验证型工作项；可选项、产出项、其他卡片的项和已知遗留都不能替代这项检查（P2a-14 ④）。
 
 ---
 
