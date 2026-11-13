@@ -18,6 +18,8 @@ vi.mock("../test-support/chromium.mjs", () => ({
 }));
 
 const originalArgv = process.argv;
+const originalInterrupts = process.listeners("SIGINT");
+const originalTerminates = process.listeners("SIGTERM");
 const password = "fixture-password-not-for-output";
 const cookie = "cardigan_session=fixture-cookie-not-for-output";
 
@@ -43,6 +45,8 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
+  expect(process.listeners("SIGINT")).toEqual(originalInterrupts);
+  expect(process.listeners("SIGTERM")).toEqual(originalTerminates);
 });
 
 function mockRequests(logout: () => Promise<Response>) {

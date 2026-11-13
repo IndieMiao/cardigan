@@ -41,21 +41,96 @@ if (!values.local && (!values.url || !values.project))
 for (const name of ["latency", "kbps"])
   if (!Number.isFinite(Number(values[name])) || Number(values[name]) < 0)
     throw new Error(`${name} must be a nonnegative number`);
-const fixture = values.local
-  ? await (
-      await import("../../server/test-support/load-fixture.mjs")
-    ).loadFixture()
-  : undefined;
-const origin = new URL(fixture?.url ?? values.url).origin;
-const project = fixture?.project ?? values.project;
+let fixture;
+let origin;
+let project;
 let browser;
 let remoteCookie;
+let setup;
+let cleanupPromise;
+let interrupted;
+
+// One cleanup promise is shared by normal completion, errors and repeated signals.
+function cleanup() {
+  cleanupPromise ??= (async () => {
+    // A login already in flight may still return a cookie; collect it before logout.
+    await setup?.catch(() => {});
+    try {
+      await browser?.close();
+    } finally {
+      try {
+        if (remoteCookie) await logoutSession(origin, remoteCookie);
+      } finally {
+        await fixture?.close();
+      }
+    }
+  })();
+  return cleanupPromise;
+}
+function removeSignalHandlers() {
+  process.off("SIGINT", onInterrupt);
+  process.off("SIGTERM", onTerminate);
+}
+function interrupt(signal, code) {
+  if (interrupted) return;
+  interrupted = signal;
+  console.error(`Collection interrupted (${signal}); cleaning up.`);
+  // This is the diagnostic script's shutdown budget, not a server setting.
+  const deadline = setTimeout(() => {
+    console.error(
+      "Collection cleanup timed out; the session may still be active and temporary files may remain.",
+    );
+    removeSignalHandlers();
+    process.exit(code);
+  }, 10_000);
+  void cleanup()
+    .catch((error) => {
+      // Only logoutSession's fixed, credential-free messages may reach stderr.
+      const message = error instanceof Error ? error.message : "";
+      console.error(
+        /^Workbench session cleanup failed \((HTTP \d{3}|network error)\); the session may still be active\.$/.test(
+          message,
+        )
+          ? message
+          : "Collection cleanup failed; temporary files may remain.",
+      );
+    })
+    .finally(() => {
+      clearTimeout(deadline);
+      removeSignalHandlers();
+      process.exit(code);
+    });
+}
+const onInterrupt = () => interrupt("SIGINT", 130);
+const onTerminate = () => interrupt("SIGTERM", 143);
+function requireRunning() {
+  if (interrupted) throw new Error("Collection interrupted");
+}
+function send(method, params) {
+  requireRunning();
+  return browser.send(method, params);
+}
+process.on("SIGINT", onInterrupt);
+process.on("SIGTERM", onTerminate);
 const reports = [];
 try {
-  browser = await chromium();
-  await browser.send("Network.enable");
+  setup = (async () => {
+    fixture = values.local
+      ? await (
+          await import("../../server/test-support/load-fixture.mjs")
+        ).loadFixture()
+      : undefined;
+    origin = new URL(fixture?.url ?? values.url).origin;
+    project = fixture?.project ?? values.project;
+    requireRunning();
+    browser = await chromium();
+  })();
+  await setup;
+  requireRunning();
+  await send("Network.enable");
+  requireRunning();
   if (fixture) {
-    await browser.send("Network.setCookie", {
+    await send("Network.setCookie", {
       name: "cardigan_session",
       value: fixture.token,
       url: origin,
@@ -66,17 +141,21 @@ try {
     // Read credentials only from the caller's environment; never print them.
     const password = process.env.WORKBENCH_PASSWORD;
     if (!password) throw new Error("Set WORKBENCH_PASSWORD for remote login");
-    const response = await fetch(`${origin}/api/login`, {
-      method: "POST",
-      headers: { "content-type": "application/json", origin },
-      body: JSON.stringify({ password }),
-    });
-    if (!response.ok) throw new Error(`Login failed (${response.status})`);
-    const cookie = response.headers.getSetCookie()[0]?.split(";")[0];
-    if (!cookie) throw new Error("Login did not return a session");
-    remoteCookie = cookie;
+    setup = (async () => {
+      const response = await fetch(`${origin}/api/login`, {
+        method: "POST",
+        headers: { "content-type": "application/json", origin },
+        body: JSON.stringify({ password }),
+      });
+      if (!response.ok) throw new Error(`Login failed (${response.status})`);
+      remoteCookie = response.headers.getSetCookie()[0]?.split(";")[0];
+      if (!remoteCookie) throw new Error("Login did not return a session");
+    })();
+    await setup;
+    requireRunning();
+    const cookie = remoteCookie;
     const index = cookie.indexOf("=");
-    await browser.send("Network.setCookie", {
+    await send("Network.setCookie", {
       name: cookie.slice(0, index),
       value: cookie.slice(index + 1),
       url: origin,
@@ -85,7 +164,7 @@ try {
       secure: origin.startsWith("https:"),
     });
   }
-  await browser.send("Emulation.setDeviceMetricsOverride", {
+  await send("Emulation.setDeviceMetricsOverride", {
     width: 1440,
     height: 900,
     deviceScaleFactor: 1,
@@ -94,13 +173,13 @@ try {
   const latency = Number(values.latency),
     kbps = Number(values.kbps);
   if (latency || kbps)
-    await browser.send("Network.emulateNetworkConditions", {
+    await send("Network.emulateNetworkConditions", {
       offline: false,
       latency,
       downloadThroughput: kbps ? (kbps * 1000) / 8 : -1,
       uploadThroughput: kbps ? (kbps * 1000) / 8 : -1,
     });
-  await browser.send("Page.addScriptToEvaluateOnNewDocument", {
+  await send("Page.addScriptToEvaluateOnNewDocument", {
     source: `
     performance.setResourceTimingBufferSize(2000);
     window.loadMetrics = { sse: [] };
@@ -130,11 +209,13 @@ try {
   });
   for (let sample = 1; sample <= samples; sample++) {
     for (const cache of ["cold", "warm"]) {
-      await browser.send("Page.navigate", { url: "about:blank" });
-      if (cache === "cold") await browser.send("Network.clearBrowserCache");
-      await browser.send("Page.navigate", {
+      requireRunning();
+      await send("Page.navigate", { url: "about:blank" });
+      if (cache === "cold") await send("Network.clearBrowserCache");
+      await send("Page.navigate", {
         url: `${origin}/#/p/${encodeURIComponent(project)}/cards`,
       });
+      requireRunning();
       const result = await browser.evaluate(`new Promise((resolve, reject) => {
         const timeout = setTimeout(() => { clearInterval(timer); reject(new Error('Board/SSE did not become ready')); }, 25000);
         const timer = setInterval(async () => {
@@ -153,6 +234,7 @@ try {
           });
         }, 50);
       })`);
+      requireRunning();
       if (
         !result.focused ||
         browser.errors.length ||
@@ -206,14 +288,14 @@ try {
   console.table(rows);
   if (values.json)
     await writeFile(values.json, `${JSON.stringify(result, null, 2)}\n`);
+} catch (error) {
+  if (!interrupted) throw error;
 } finally {
   try {
-    await browser?.close();
+    await cleanup().catch((error) => {
+      if (!interrupted) throw error;
+    });
   } finally {
-    try {
-      if (remoteCookie) await logoutSession(origin, remoteCookie);
-    } finally {
-      await fixture?.close();
-    }
+    if (!interrupted) removeSignalHandlers();
   }
 }
