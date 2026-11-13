@@ -23,6 +23,7 @@ export {
   riskTagAutoMergeAllowed,
 } from "./commands/delegation.js";
 export * from "./commands/delivery.js";
+export * from "./commands/deployment.js";
 export * from "./commands/dispatch-recovery.js";
 export * from "./commands/dispatch-stop.js";
 export * from "./commands/employee.js";
@@ -100,10 +101,15 @@ export * from "./commands/runtime-incident.js";
 export * from "./commands/screenshot-check.js";
 export * from "./commands/sensitive.js";
 export { pauseStandingAssignment } from "./commands/standing.js";
+export {
+  stoppedByHuman,
+  stopWorkItemAssignment,
+} from "./commands/stop.js";
 export * from "./commands/templates.js";
 export * from "./commands/upstream-health.js";
 export { canStartWork, workCompleted } from "./commands/workflow.js";
 export * from "./context-usage.js";
+export * from "./deployment-port.js";
 export * from "./derived.js";
 export * from "./employee.js";
 export * from "./entities.js";

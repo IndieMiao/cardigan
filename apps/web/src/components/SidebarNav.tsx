@@ -46,7 +46,6 @@ const iconPaths = {
       <circle cx="10" cy="18" r="2" />
     </>
   ),
-  // Reserved for C-206's 帮助 entry, which sits between 设置 and 登出.
   help: (
     <>
       <circle cx="12" cy="12" r="9" />
@@ -80,7 +79,8 @@ type ViewKind =
   | "activity"
   | "decision-history"
   | "snapshot"
-  | "settings";
+  | "settings"
+  | "help";
 
 const observeLinks: readonly (readonly [ViewKind, string, NavIconName])[] = [
   ["execution", "执行视图", "execution"],
@@ -167,6 +167,7 @@ export function SidebarNav({
         {feedback}
         <nav className="nav-links nav-tools" aria-label="工具">
           {link("settings", "设置", "settings")}
+          {link("help", "帮助", "help")}
           <button
             type="button"
             className="nav-item logout"

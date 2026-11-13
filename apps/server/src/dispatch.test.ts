@@ -18,6 +18,7 @@ import {
   postComment,
   queueRun,
   setRunLimit,
+  stopWorkItemAssignment,
   updateCard,
 } from "@cardigan/domain";
 import {
@@ -308,6 +309,70 @@ test("§3.1 released Assignment is not started or woken and the failure reaches 
       recipient_kind: "pm_ops",
     }).length,
   ).toBeGreaterThan(0);
+});
+test("C-211 a stopped Assignment gets no new session from queued Runs or later bells until the human starts it", async () => {
+  // A follow-up Run was already queued when the human stopped the Assignment.
+  const trigger = f.state().events.at(-1)?.id;
+  const queued = f.apply((s, a, p) =>
+    queueRun(
+      s,
+      a,
+      {
+        assignment_id: target.assignment.id,
+        model: "m",
+        agent_cli_version: "c",
+        kind: "followup",
+        trigger_event_id: trigger as never,
+      },
+      p,
+    ),
+  );
+  const stopped = f.apply((s, a, p) =>
+    stopWorkItemAssignment(
+      s,
+      a,
+      { assignment_id: target.assignment.id, reason: "stopped by host" },
+      p,
+    ),
+  );
+  expect(stopped.cancelled).toBe(1);
+  expect(f.state().runs.find((r) => r.id === queued.id)?.status).toBe(
+    "cancelled",
+  );
+  comment();
+  for (const process of ["alive", "exited"] as const) {
+    vi.mocked(runtime.status).mockResolvedValue({
+      ok: true,
+      value: { process, agent: "unknown", observed_seq: 2 },
+    });
+    await new Dispatcher(options).tick();
+  }
+  expect(options.startRun).not.toHaveBeenCalled();
+  expect(runtime.wake).not.toHaveBeenCalled();
+  expect(
+    f
+      .state()
+      .runs.filter(
+        (r) =>
+          r.assignment_id === target.assignment.id &&
+          !["completed", "failed", "cancelled"].includes(r.status),
+      ),
+  ).toEqual([]);
+  // The bell is kept for the session the human starts later.
+  expect(ownNotes().map((n) => n.status)).toEqual(["pending"]);
+
+  // `cardigan assignment start` dispatches a Run; the stop no longer holds.
+  f.session(
+    f
+      .state()
+      .assignments.find((a) => a.id === target.assignment.id) as Assignment,
+  );
+  vi.mocked(runtime.status).mockResolvedValue({
+    ok: true,
+    value: { process: "alive", agent: "idle", observed_seq: 3 },
+  });
+  await new Dispatcher(options).tick();
+  expect(runtime.wake).toHaveBeenCalled();
 });
 test("C-56 wake failure retries the same Run after backoff without immediate escalation", async () => {
   comment();
@@ -1075,7 +1140,7 @@ test.each(["request_changes", "cancelled"] as const)(
           },
         },
         run: async (input) => {
-          expect(occupied()).toBe(0);
+          expect(occupied()).toBe(2); // Admission reserves before the ready handshake (C-201).
           input.onReady?.();
           expect(occupied()).toBe(2);
           if (action === "cancelled")

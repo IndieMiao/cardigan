@@ -380,7 +380,7 @@ C-144：迁移 0019 在 C-132 的编号格式迁移 0018 之后，将旧数字�
 - 新格式使用 `kind=produce | verify | standing`、可编辑的 `instructions`、`status=active | inactive`。旧 `kind=work` 继续可读，保存时根据 `submit_review` 或验证能力标记转成 verify，否则转成 produce；旧记录没有 status 时视为 active。字段具体约束见 §10.1、§14。
 - 新建、复制、修改、停用、恢复、回退都是仅同项目 human 可调用的 domain 命令，权限判断集中在 `canManageRoles`，Phase 3 再扩展。每次保存追加版本，回退复制指定历史版本的内容但保留当前启停状态；重复停用或恢复不写新版本。没有删除入口。
 - 角色版本与 `role_created / role_copied / role_updated / role_deactivated / role_activated / role_rolled_back` 项目级事件在同一事务内保存，事件记录操作者和角色快照。复制是一次性的，源项目后续修改不影响副本。新指派默认取最新版，停用检查始终看最新版，显式指定旧版也不能绕过停用；已有 Assignment 继续使用其固定角色版本。
-- 角色升级与常驻 PM 换版本（C-55）：`cardigan role upgrade <角色> --from-default [--dry-run]` 为项目里已有的默认角色（pm、coder、reviewer、designer、ui_ux_designer、design_director、tester）追加一个版本，`instructions`、`allowed_tools`、`capabilities`、`kind`、`worktree` 取当前默认角色包，`harness`、`launch_profile_ref`、`display_name`、`abilities`、`required_machine_tags` 保留项目自己的。写入前打印新增和移除的工具、能力及其他字段差异（`--dry-run` 只在只读事务里用 `previewRoleUpgrade` 计算，不消耗任何编号或事件序号），新增工具、新增能力、worktree 放宽和类型改变单独醒目列出；与最新版内容相同（工具和能力不计顺序）时不追加版本，提示“已是默认包内容”。domain 入口 `upgradeRole` 只计算差异，写入复用 `updateRole`（同一 `canManageRoles` 和 `validateRole`），事件仍为 `role_updated`；不是默认角色或项目里还没有该角色时用中文拒绝。升级角色不改变已有 Assignment 的固定版本；常驻 PM 换到新版本用 `cardigan pm rotate`（§7.1）。不自动升级任何角色。
+- 角色升级与常驻 PM 换版本（C-55）：`cardigan role upgrade <角色> --from-default [--dry-run]` 为项目里已有的默认角色（pm、coder、reviewer、designer、ui_ux_designer、design_director、tester）追加一个版本，`instructions`、`allowed_tools`、`capabilities`、`kind`、`worktree` 取当前默认角色包，`harness`、`launch_profile_ref`、`display_name`、`abilities`、`required_machine_tags` 保留项目自己的。写入前打印新增和移除的工具、能力及其他字段差异（`--dry-run` 只在只读事务里用 `previewRoleUpgrade` 计算，不消耗任何编号或事件序号），新增工具、新增能力、worktree 放宽和类型改变单独醒目列出；与最新版内容相同（工具和能力不计顺序）时不追加版本，提示“已是默认包内容”。domain 入口 `upgradeRole` 只计算差异，写入复用 `updateRole`（同一 `canManageRoles` 和 `validateRole`），事件仍为 `role_updated`；不是默认角色或项目里还没有该角色时用中文拒绝。升级角色不改变已有 Assignment 的固定版本；常驻 PM 换到新版本用 `cardigan pm rotate`（§7.1）。C-201 的自举部署例外见 §12.9：只有主机能自动升级角色包发生变化且不放宽权限的角色，普通管理入口仍仅人可用。
 - 存储采用加字段兼容，不改表结构，不批量改写旧 core_prompt，也不自动转换旧角色。旧库升级测试确认旧 JSON 文档逐字保留；新字段在下一次角色保存时写入。
 - 工具白名单和类型边界只约束新建、更新等保存新版本的操作，不对已有数据库文档在读取、指派或启动时补做校验。即使旧版本曾允许两类工作项动作或使用旧 kind=work，也继续按历史快照启动；Token 的既有作用域规则仍然生效。host 兼容回归从旧 schema 的 roles 行升级，覆盖 coder/reviewer/pm 经三种 Harness 的读取、指派、编译与派发，确认旧文档不变。
 
@@ -651,6 +651,8 @@ P2a-14 ①：`createWorkItem` 和 `createCard` 从模板生成验证项共用按
 
 常驻 PM 的 stop 先持久化暂停、经 cancel 结束未完成 Run 并作废 Token，再关闭终端；运行时不可用也不撤回暂停。原 RuntimeRef 保留供关闭重试，清理循环也补查已暂停的常驻 PM。恢复前确认旧终端关闭，再清除旧引用并排新 Run；未知／失联运行状态按 session_replaced 迁移恢复，新启动失败则保持暂停。项目事件保存暂停／恢复及交接信息，attention 显示暂停状态与恢复命令。
 
+C-211：工作项 Assignment 的 `assignment stop` 不改业务状态（仍为 active），只接受 human，有待处理的主机运维操作时拒绝（与主机运维互不卡死）。domain `stopWorkItemAssignment` 分两步：释放终端前先写卡片事件 `assignment_stopped` 并取消已排队的 Run（它们不占终端和名额）；主机释放终端成功后，再带 `released_runtime_ref` 调用一次，取消其余未结束的 Run，运行状态 running 迁到 idle、unknown／lost 按 session_replaced 迁到 idle，并清除这条 RuntimeRef（停止已不成立或会话已换过时不做任何改动）。释放失败时正在运行的 Run 继续占用并发名额，RuntimeRef 保留，可以直接重试。从 `assignment_stopped` 起到下一次该 Assignment 的 `run_dispatched` 为止（`stoppedByHuman`），Dispatcher 把它当作忙碌：不唤醒、不替换、不新起会话，门铃留在 Inbox；主机运维的重启也拒绝（取消 Run 不受影响）。只有人显式 `assignment start` 才恢复。
+
 **Run**：`queued → dispatched → acked → running → completed | failed | cancelled`；运行环境失联时进入 `unknown`；确认重新连通时 `unknown --reconnected--> running`。重连不表示业务完成，已结束的 Run 不通过 reconnected 恢复。
 
 C-219：`finish_run` 在 `unknown` 窗口校验所属 Assignment、角色快照、结果和摘要后，接受并持久化 `Run.pending_finish`（结果、摘要、原 RuntimeRef、实际认证的 Token 记录编号），返回仍为 unknown 的 Run；不提前写 finished_at 或业务完成事件。相同请求幂等，不同结果／摘要不能覆盖。主机收到原终端明确 alive 的新观察后，先经 reconnected 恢复，再由仅 system 可调用的内部结算命令复用 complete／fail 和 run_finished；核对当前 Run、active Assignment、角色版本、实际 Token 记录、完整 RuntimeRef，并检查派发、失活回收和 host_ops 停止栅栏。Token 证据只能由服务端认证上下文通过命令端口传入，不接受工具参数自报，也不使用不会随真实签发更新的 Assignment.mcp_token_id 占位字段。MCP 写事务内重查认证有效性；重连结算在同一事务按保存的 Token 编号读取当前记录，要求记录存在、未撤销，且项目、Assignment、角色版本和 finish_run 权限均匹配，缺失证据时不结算。只保存记录编号，不保存 Token 明文。已取消／结束、已释放、换会话或换 Token 的旧请求不结算；停止栅栏暂时阻止结算时，撤回后须有新的 alive 观察才能重试。请求随 Run JSON 持久化，server 重启可接续，不新增状态或数据库迁移。选择保存请求而非重连提醒，是因为 Agent 已表达结束意图，上述校验通过时的自动结算不依赖对活跃 Run 再按门铃，也不依赖 15 分钟失活兜底。终端确实失联则仍按 unknown → lost 交原运维流程，不能凭请求证明存活。
@@ -735,7 +737,7 @@ C-152：意图记录的 RuntimeRef 不属于 server 当前运行时（`machine_i
 21. 项目启用合并闸门时，记录 merged 必须满足下面两种之一（ADR 0004，2026-11-11 用户拍板改写）：（a）单卡合并（项目未启用合并队列）：记录 merged 的 tree 必须有同一完成申请的单卡检查（`level=single`，旧事件视同 single）passed 记录；不同候选提交可复用同树的通过记录，不同 tree／完成申请不可复用。（b）批次合并（P2a-13 B 组合入后，启用合并队列的项目）：本卡属于批次 MB-n，MB-n 的最终 tree 有一条 passed 记录，其绑定的完成申请集合与 MB-n 成员集合完全相等，且都是各卡的当前完成申请；本卡合并提交在 MB-n 的叠加链上；本批全部成员在同一事务内记录 merged，基线以一次比较更新从批次 `base_sha` 前进到 `final_sha`；批次中间的 tree 不要求单独检查记录。两种情况下，卡级快速检查（`level=card`）的通过记录都不能作为 merged 的依据。主机负责从实际候选提交读取 tree，验证其 Git 身份、叠加链和祖先关系；domain 校验记录绑定和集合相等。唯一例外是主机已证明所有计划交付均为当前基线祖先的 noop，结果必须显式标记 noop，且 merge_sha == previous_sha；不需要也不伪造检查通过。
 
 
-21. 角色只能由人管理，写入时必须满足按类型的工具白名单和验证型 worktree 边界。停用角色不能被新指派；历史版本、已有 Assignment 和 Run 不被停用操作改写。
+21. 角色的普通管理入口只能由人调用；C-201 另设同项目 system 专用的部署升级入口，只能采用当前已部署默认包且差异没有新增工具、能力、worktree 放宽或角色类型改变。发现放宽则不写新版本，生成交人的差异核对事项。写入时仍必须满足按类型的工具白名单和验证型 worktree 边界。停用角色不能被新指派；历史版本、已有 Assignment 和 Run 不被停用操作改写。
 
 22. PM 代拍必须在解决事务内重查项目类别授权、PM Ops 身份和目标状态，记录理由与授权依据；四类高风险不可纳入此授权。PM 分拣人工操作不增加执行权限。
 
@@ -944,6 +946,7 @@ C-120 的显式 `@A-n` 校验与 Card MCP 读取范围一致：工作项 Assignm
 | Session 空闲 | 优先派发该 Assignment 已有的 queued Run 并唤醒 Session；没有 queued Run 才创建新 Run |
 | 外接 Assignment（external=true） | 通知留在 Inbox 的 pending 状态，由对接 Agent 拉取并 ACK；不排启动 Run、不按铃、不新建或替换 Session，也不纳入运行时失联监控。展示“外接身份，由对接的 Agent 自行拉取”，不记为暂停 |
 | 常驻 PM 已暂停 | 门铃留在 Inbox，不自动启动或替换 Session；显式 start 的首条消息携带待处理卡片／项目和 seq，由 Agent 读取 get_updates 并 ack_events，不伪造 ACK |
+| 工作项 Assignment 已被人 stop（C-211） | 排队的 Run 在 stop 时一并取消，运行中的 Run 在终端释放后取消；门铃留在 Inbox，不自动唤醒、替换或新建 Session，主机运维也不能重启；人执行 `assignment start` 后恢复（见 §4.4） |
 | 进程已退出 | 按 `session_ref` 恢复；无法恢复则新建 Session，用卡片时间线生成交接摘要 |
 | 已交付、尚未清理 | 复用原 Session 和 worktree，创建返工 Run |
 | 卡片已关闭、worktree 已清理 | 创建后续工作项和新 Assignment，并引用历史 |
@@ -1158,6 +1161,8 @@ C-156：卡片列表在浏览器中先对全部卡片做状态、概览、下一
 Phase 1.5 U1 的展示规范见 `docs/plans/phase-1.5-ui.md` §3：220px 左侧导航将 Needs You（带待处理数量）置顶，再按工作／运行分组；浅深主题使用同一套语义颜色和字号变量。页面共用标题、带说明的编号标签、中文状态词、相对／本地时间（悬停显示完整时间和时区）、空状态、筛选栏和超过六行的长内容折叠。筛选与翻页放进当前视图的哈希路由参数，复制链接、刷新和前进后退可恢复；卡片页内定位仍用 S23 的 `?at=`。项目动态使用统一中文事件名，原始类型与负载仅在展开详情中显示。Needs You 左栏数量与页面共用读结果，随现有 SSE 刷新，写操作后同时更新；各页面内部区块和交互的重新布局留给 U2–U4b，不改变 API 或安全边界。
 
 C-204（设计定稿 D-708 / V-686，卡片 #49 §1–3）：编号前缀、中文含义及颜色 token 集中在 Web 的 `id-types.ts`，供 `IdTag`、正文中已有的编号链接和帮助页复用；亮暗颜色只定义于 `styles.css` 的 `--id-<token>-fg/-bg`，编号本体按类型着色，说明保持正文色。C/W/Q/A/R/D/V/H/E/M/MB、时间线 C-n#n 和未知前缀保留完整文字，UUID、SHA、项目名不按编号着色；不新增链接目标或改变历史编号解析。`IdentityRow` 统一头像、姓名、编号、状态、提交号与链接的居中和整组换行，行内头像 24px，姓名 14px/20px、500 字重，标签 13px/20px、500 字重，提交号 12px/20px；大头像资料卡与人物交互沿用原实现。拍板、执行视图、卡片记录、时间线与项目动态复用这套组件。暗色配色对应 C-208 中性主题，发布顺序为 C-208 先行或同批合入。
+
+C-206：侧栏底部“帮助”紧挨“登出”上方，宽屏和窄屏抽屉共用入口。`#/p/<project>/help?doc=<slug>` 展示只读 Markdown 帮助，首篇为“编号和标记”；`apps/web/src/help/` 内直接放置以小写字母、数字、连字符命名的 `.md` 文件（建议数字排序前缀），首个一级标题作为目录名。Vite 构建时自动收集并按文件名排序，新增文章只需增加文档并重新构建，不需维护代码清单。URL 只精确匹配构建期文档列表，不拼接文件路径、不新增服务端读取路由；缺失文章保留目录并提示重新选择。正文用 markdown-it 关闭原始 HTML，解析为白名单 React 元素，文本由 React 转义；链接仅允许 http、https 和站内路径，拒绝控制字符、协议相对地址及反斜杠，不加载文档中的图片。行内代码中的编号样例复用 `IdTag`（链接内部用 `IdBadge`），`status:blocked` 等已登记状态复用 `StatusTag`；其他行内代码和代码块原样展示，不自行定义标签颜色。首篇解释全部登记前缀及时间线编号的含义、创建来源、出现位置和常见状态；第二篇说明现有导航。帮助只含随代码发布的公开说明，不含业务或鉴权数据，不做搜索和在线编辑。
 
 C-208 暗色配色按 [设计说明](design/c208/design.md) 落实：页面、面板、次级区块采用三档纯灰，长段正文采用 #cccccc、次要文字采用 #a4a4a4，标题和正文用字号与字重区分；装饰分隔线与控件边界分别使用主题变量；状态保留原有形状、文字及语义色。C-204 编号标签的暗色在同一背景上联合校验正文对比度和类型色差。实现保持亮色、布局和业务规则不变。
 
@@ -1635,9 +1640,13 @@ P2-V V3：共用 `host.launchRun` 从 Assignment 的 `employee_id` 读取全局�
 |---|---|---|
 | Claude Code | `--mcp-config <仓库外的文件>`，Token 用 `${MCP_TOKEN}` 引用；`CLAUDE_CONFIG_DIR=<run_dir>/claude` 隔离配置与会话 | 首次预置引导完成、仅当前 cwd 的信任、主题和 bypass 确认（2.1.318 实测）；关闭自动更新；按 session_id 恢复 |
 | Codex | 独立的配置目录（`CODEX_HOME`），`bearer_token_env_var`；`projects.<path>.trust_level="trusted"` 只登记本 Assignment 的 worktree 和其基础仓库根 | worktree 的项目根由 Git common dir 决定（0.161.0 实测）；显式放行 MCP 工具；按 thread_id 恢复 |
-| Pi | `PI_CODING_AGENT_DIR` 指向独立目录，`mcp.json` 中 Card MCP server 设置 `exposure: "direct"`，Header 引用环境变量 | 不能用 `--no-extensions`（会关掉内置 MCP）；原生上报状态（OSC 7501） |
+| Pi | `PI_CODING_AGENT_DIR` 指向独立目录，`mcp.json` 中 Card MCP server 设置 `exposure: "direct"`，Header 引用环境变量 | 不能用 `--no-extensions`（会关掉内置 MCP）；原生上报状态（OSC 7501）；同一目录的 `trust.json` 只预先信任本 Assignment 的 worktree（C-211，1.4.0 实测） |
 
 Pi 的 `mcp.json` 固定写在仓库外的 `<run_dir>/pi`，由 `PI_CODING_AGENT_DIR` 指向该目录；写到 worktree 的 `.pi/` 会触发 project trust 交互提示，阻塞无人值守终端。Card MCP server 显式使用 `exposure: "direct"`，让工具声明直接提供给模型，避免默认 codemode 模式要求先 `searchTools` 才能调用；Core Prompt 中直接调用 `get_updates`、`finish_run` 等工具的协议保持不变。URL 沿用主机传入值，Authorization 头保持字面引用 `Bearer ${MCP_TOKEN}`，不把 Token 明文写入 MCP 配置。
+
+C-211：各 Harness 配置里的 MCP 地址只从主机自己的配置推导（`resolveMcpUrl`）。显式设置了 `CARDIGAN_MCP_URL` 就用它；否则用 `CARDIGAN_MCP_HOST`（只接受 127.0.0.1、::1、localhost）和 `CARDIGAN_MCP_PORT`（默认 3004）。server 在每次启动、唤醒、换会话或重启拉起会话时现取地址，取的是 MCP 监听器实际报告的地址，不在启动时写死；CLI `assignment start` 在没有 `--mcp-url` 时用同一套推导，端口为 0 时必须显式设置 `CARDIGAN_MCP_URL`。卡片和 Agent 写的内容都影响不到这个地址。
+
+C-211：仓库里跟踪了 `.pi/settings.json`，Pi 在新 worktree 首次启动时会弹“Trust project folder?”，挡住无人值守终端。Pi 1.4.0 的已保存信任决定放在 `<agent-dir>/trust.json`（规范路径映射到 `true`；查找时从 cwd 往上找最近的一条）。编译器在本 Run 独立的 `PI_CODING_AGENT_DIR`（`<run_dir>/pi`）里写入 `trust.json`，内容只有一条：Pi 启动所在的、由主机创建的 worktree 路径。不信任父目录，不用通配，不改全局 `defaultProjectTrust`，不传 `--approve`，也不碰用户的 `~/.pi/agent`。没有 worktree（cwd 是运行目录）时不写这个文件。同父目录下的其他 worktree 仍然会弹信任框（本机实测）。信任只决定 Pi 是否加载项目里的 `.pi` 资源，不扩大 Agent 账号原有的文件和进程权限。
 
 Claude 的配置与会话目录固定在 Assignment 的 `runs/<project>/<assignment>/claude`，跨 Run、`resume_or_replace` 保留；`launch.sh` 在启动 CLI 前由实际运行账号创建并设为 0700（local 为主机用户，agent-ssh 为 agent），拒绝软链接、非目录和其他用户持有的目录，不清空已有会话。主机只写外层启动文件，不预建或写入这个 Agent 私有目录，避免主机持有的 0700 目录阻止 Agent 保存 `.claude.json`、projects 和 sessions。
 
@@ -1812,7 +1821,7 @@ status 先 hc get，再取 hc events 的初始快照，同时使用该快照的�
 - pi 启动编译在本 Assignment 的 `PI_CODING_AGENT_DIR/extensions/cardigan-context-usage.js` 安装扩展；`turn_end` 调用 `ctx.getContextUsage()`，把本会话缓存原子写入其 `context-usage/pi-<session_id>.json`，临时文件独占创建、关闭后 rename、文件 0640；用量未知、数值无效或采样接口抛错时，同样原子写入带当前会话和采样时间的记录，三个数值字段置 null，使之前的高水位立即失效；读取方先选择最新采样，再检查数值，不能跳过未知记录回退到旧会话（时间相同时也优先拒绝未知采样）。诊断保留会话和采样时间，但标为 missing、stale=true，不提醒、不重启。采集与 IO 失败不影响 Agent。扩展和缓存均在运行目录，不写被开发项目仓库，后续启动才会安装。
 - Codex 不增加或修改配置项。服务端只读该 Assignment 的 `codex/sessions` 中按创建时间命名的最新 `rollout-*.jsonl`，取最后一条 `token_count.info.last_token_usage.total_tokens` 与该条 `model_context_window`；`total_token_usage` 是累计用量，不参与计算。首段读会话元数据、尾部最多读 4 MiB，尾部无完整有效采样时标缺失，不回退到旧会话。
 - Claude 沿用主机状态栏缓存，不修改状态栏脚本。托管会话按运行目录／工作目录和已知 Session ID 关联；外接会话要求精确 cwd（Assignment 工作目录，否则项目登记仓库路径）以及唯一候选，可用时还须匹配 `session_ref`。多个新鲜候选或多个外接身份共用 cwd 时不猜归属；同项目目录的未关联缓存只展示、不通知、不重启，其他项目路径不披露。
-- 主机每 30 秒采样一次；存在 active 主机运维时，剩余比例到提醒档，为目标生成 `context_usage_notice` 和同事务收件箱通知，要求先记录进度、未提交改动和下一步。托管 Agent 走现有 Dispatcher，外接 Agent 按原协议拉取 `get_updates` 并 ACK，不注入终端。到换会话档则通知主机运维；外接目标同时创建 `triage=human` 的项目人工事项，提示人在终端 `/clear` 并让新会话读取交接文档。
+- 主机每 30 秒采样一次；存在 active 主机运维时，剩余比例到提醒档，为目标生成 `context_usage_notice` 和同事务收件箱通知，要求先记录进度、未提交改动和下一步。托管 Agent 走现有 Dispatcher，外接 Agent 按原协议拉取 `get_updates` 并 ACK，不注入终端。到换会话档则通知主机运维；外接目标同时创建 `triage=human` 的项目人工事项，提示人在终端 `/clear` 并让新会话读取交接文档。C-211：如果一次采样同时越过两档（例如从 79% 直接到 86%），这一轮只发提醒；下一轮才发换会话通知，给 Agent 留出先更新交接的时间。采样或通知出错时单独记日志，不影响同一轮主机运维意图的处理。
 - 大乔读取诊断后直接用已有的 `host_ops_restart_assignment`／`host_ops_restart_standing_pm`，上下文换会话须携带 `context_session_id`。服务端重新采样并在事务内核对当前会话、比例、偏好、有效期和 RuntimeRef；同一 Assignment／会话同一提醒档只记一次，同一会话只受理一次上下文换会话，不依赖调用者复用幂等键。过期、缺失、未关联或已更换的会话拒绝操作。
 - 重启沿用既有停止意图、互斥锁、退出确认、Token 撤销和 queued Run 流程；上下文重启还清除普通 Assignment 的 `session_ref`，以全新会话启动，保留分支和 worktree。审计保存会话、比例、来源、采样时间、动作及结果；工作项写卡片时间线，常驻身份写项目事件，`pending`／`new_session_queued` 不冒充新会话已运行。部署前需要 Codex、pi 各一例真实换会话验证，模拟采集和假运行时测试不替代实测。
 - host_ops 默认包更新后，需由主机管理员执行 `cardigan role upgrade host_ops --from-default` 并按主机管理流程让巡检身份使用新版角色，已有固定角色版本不会自动升级；不新增工具或权限。
@@ -1898,7 +1907,7 @@ P2a-3（C-91）验证方的可写构建检出：只读 worktree 只用来审阅�
 - **谁有**：worktree 为 `readonly`、带验证工作项、卡片有仓库的 Assignment（reviewer、tester、designer、工作项 PM 验收）。常驻 PM、产出方没有。
 - **目录和内容**：`<agent 根>/builds/<project>/<assignment>`（local 模式在 `<数据目录>/agent/builds` 下），是基础 clone 的 detached worktree，检出与只读 worktree 相同的交付 SHA（完成验收项取完成申请的 SHA）。agent-ssh 下由 Agent 执行入口跑 `git worktree add --detach`，主机先建好受保护的父目录和叶子；Agent Git 传输只允许本 Assignment 的 worktree 和构建检出两个叶子，构建检出不接受分支。依赖由验证方在其中自行安装，走 Agent 账号已有的共享 pnpm 缓存（与合并检查相同，见 `docs/plans/p2a-1-merge-gate.md`），以复制而非硬链接方式导入（见下方权限边界），本卡不另建缓存。
 - **何时准备**：与只读 worktree 同一步——CLI 启动、Dispatcher 新开或复用会话按铃前（`prepareRoleWorktree`），每个 Run 只准备一次。每次都从全新检出开始：已有的构建检出（即使 SHA 相同）可能带着上一个 Run 改过、暂存或新增的源码和过期的构建产物，一律先强制移除再 `worktree add`；Git 登记还在但目录已丢失的，同样先移除登记再重建。依赖每个 Run 重新安装，走共享缓存，代价是几秒钟。准备失败与只读 worktree 准备失败同等处理：在同一次投递内短暂重试，仍失败则投递失败并升级，CLI 启动直接报错，都带具体原因，不启动或唤醒 Agent。构建路径下有未登记的非空残留时，主机不递归删除 Agent 的内容，准备以“unregistered leftover contents”失败，需人工清理。首条提示和每次唤醒都写明目录路径和 SHA；启动配置把该路径加进 Git `safe.directory` 和 Codex 信任目录。
-- **何时删除**：构建检出属于 Run，不属于 Assignment。清理循环（§12.6，默认每 60 秒）每轮列出构建根目录和基础 clone 里登记在构建根下的检出（含目录已丢失的登记），对没有未结束 Run（`queued`／`dispatched`／`acked`／`running`／`unknown` 都算未结束；`queued` 要算，因为 Dispatcher 在持久化派发前就准备目录）的 Assignment 执行 `git worktree remove --force` 并由主机 rmdir 空叶子。已释放的 Assignment 本轮终端释放未确认时（§12.6“关闭未确认前不删除”）跳过，下一轮确认后再删。删除前在项目仓库锁内重新读一次 Run 状态，准备与删除互斥，刚排队的 Run 不会被删掉目录。不备份、不发清理拍板、不写补丁：里面的东西按约定都是一次性的。删除失败只记日志，由对账在宽限期后报告。
+- **何时删除**：构建检出属于 Run，不属于 Assignment。清理循环（§12.6，默认每 60 秒）每轮列出构建根目录和基础 clone 里登记在构建根下的检出（含目录已丢失的登记），对没有未结束 Run（`queued`／`dispatched`／`acked`／`running`／`unknown` 都算未结束；`queued` 要算，因为 Dispatcher 在持久化派发前就准备目录）的 Assignment 执行 `git worktree remove --force` 并由主机 rmdir 空叶子。C-211：移除前（包括准备时的强制移除）先由 Agent Git 在这个已登记的构建检出顶层执行 `git clean -ffdxq`，删掉验证方自己生成的未跟踪和被忽略文件（依赖、Vite 缓存等）。执行前核对路径已登记、确实是检出的顶层目录；agent-ssh 下只允许本 Assignment 的构建叶子。原因是 `git worktree remove` 遇到第一个删不掉的条目就停下，但登记照样会删掉，留下主机不能递归删除的未登记残留。现在清理失败时登记还在，下一轮可以重试。已释放的 Assignment 本轮终端释放未确认时（§12.6“关闭未确认前不删除”）跳过，下一轮确认后再删。删除前在项目仓库锁内重新读一次 Run 状态，准备与删除互斥，刚排队的 Run 不会被删掉目录。不备份、不发清理拍板、不写补丁：里面的东西按约定都是一次性的。删除失败只记日志，由对账在宽限期后报告。
 - **对账**：构建根目录纳入 `listWorktreeState` 的目录扫描。对账回调在目录扫描之后读取各 Assignment 的 Run 事实：有未结束 Run，或最近一次结束不超过 `CARDIGAN_CHECK_CLEANUP_GRACE_MS`（与合并检查同一宽限，默认 10 分钟）的构建检出，不报孤儿也不报失效登记；超过宽限仍在的报 `orphan_worktree`（目录在）或 `stale_registration`（只剩登记），诊断写明“Build checkout of A-n remains after its Run ended”。只报告，不删除。
 - **并发名额**：不另占名额。构建检出只在验证方自己的 Run 里使用，该 Run 处于 `dispatched`／`acked`／`running` 时已按 P2a-9 计入全机名额（`queued` 的 Run 不会被按铃，Agent 不会在里面跑命令）；验证方的测试进程数仍受本机员工测试 worker 上限约束。合并检查那样整仓重跑、按 2 个名额计的做法不适用于这里。
 - **权限边界**：构建检出是 detached 的，准备和删除都不创建、不删除、不移动任何分支，也不 fetch／备份它的内容；中心仓库只被读取。验证方在里面做的提交只留在这个一次性目录里，随目录删除；交付仍以中心仓库的固定 ref 为准（§12.3），合并只用中心仓库里的提交（§12.5）。构建检出的 `origin` 就是主机的中心仓库路径，agent-ssh 下它在主机私有的 0700 数据目录里，Agent 账号进不去，推送在权限检查处失败；Agent 也不持有任何 Git 凭据（§12.1）。主机准备和删除构建检出只碰本 Assignment 的构建叶子，不碰其他 Assignment 的目录和共享依赖缓存。验证方的工具白名单不变，仍然不能 `submit_delivery` 到产出项。已知限制：同一 Agent 账号共享基础 clone、其他 Assignment 的目录（组可写 2770）和 pnpm 缓存，验证方进程本来就能写这些（P2a-3 之前在只读 worktree 里即如此，合并检查共用同一缓存）；pnpm 默认把已安装文件硬链接到共享缓存，验证方改构建检出里的依赖文件就会改到缓存本身；因此有构建检出的验证方，启动环境设 `pnpm_config_package_import_method=copy`（旧版 pnpm 读 `npm_config_package_import_method`，两者都设），安装改为复制，改动只落在构建检出里。这只防误改：同账号进程仍可以直接写缓存目录或覆盖这个环境变量。环境变量只在会话启动时设置，已有会话拿不到；因此这个启动环境的版本号（`build-env-1`）并进 P2a-10 A 的会话工具清单指纹（只对 work-item 范围的 readonly 角色），升级前启动的验证方会话在下次唤醒前按“tool_catalog_changed”被替换一次，换成带该环境的新会话。产出方和常驻会话的指纹不变，不会被替换。按角色拆账号不在本卡范围。local 模式下 Agent 与主机同一用户，没有账号边界（`LOCAL_RUNTIME_WARNING`）。
@@ -2000,6 +2009,22 @@ server 在合并循环旁启动独立的推送循环（默认 5 秒轮询，跟�
 基础 clone 锁（C-68）：同一项目的所有 Assignment 共享一个基础 clone，并发的 fetch、`worktree add`、移除和清理前的备份会抢 Git 的 `*.lock` 文件而失败。GitWorktreeService 的 ensureWorktree、removeWorktree、diffWorktree，以及合并检查前把候选分发到基础 clone 的 ServerGit.distribute，都在项目锁内执行（分发只在传输期间持锁，不覆盖整个检查），锁分两层：进程内按基础 clone 路径排队（所有服务实例共享，先到先得）；主机再用 `flock --exclusive --wait` 跨进程加锁，覆盖 server 各循环和 CLI。锁文件为主机拥有的 `<CARDIGAN_DATA_DIR>/locks/repo-<project_id>.lock`（0600）：这把锁只在主机进程之间协调，放在 Agent 可写的命名空间之外，agent-ssh 模式下也由主机持有。flock 通过继承的文件描述符加锁，子进程退出后锁仍由主机句柄持有，关闭句柄即释放。两层合计最多等待 30 秒，超时抛出可重试的 `repository_lock_timeout`，由 §6.1 的唤醒前短暂重试处理。flock 层仅在 Linux 启用，与合并闸门一致；其他平台只有进程内排队。合并检查的临时 checkout（§12.2 的 runInTemporaryCheckout）仍只用合并闸门锁，不持有本锁，避免长时间检查阻塞唤醒。
 
 ---
+
+### 12.9 自举主机自动部署（C-201）
+
+`cardigan self-deploy watch` 是运行在 server 进程之外的主机监督器，仅服务自举项目 `cardigan`。主机部署管理器启动该命令并配置失败退出后的恢复策略；恢复间隔与次数沿用主机配置，不在代码里增加默认值。现有 server 首次改由监督器接管，需要主机管理员先确认现有构建已支持 C-201 的部署互斥协议（ready 消息包含 `deployment_fence=1`），正常停止旧服务并配置该构建的目录与 SHA；旧版 server 不能直接由监督器接管。主机路径、服务管理脚本和实际参数放私有 `cardigan-deploy`，Agent 不安装或运行监督器。Token 模式拒绝 `self-deploy`，不新增 MCP 或 Workbench 部署入口。
+
+- 配置只从主机 `CARDIGAN_CONFIG_DIR/self-deploy.yaml` 读取（默认用户配置目录），文件为可信属主的 0600 普通文件，拒绝链接、非可信祖先、未知字段、重复键和 YAML 别名。`enabled` 缺省为 `true`，可设为 `false` 停止自动部署；`initial_release`、`initial_sha` 是首次接管的现有构建，`ready_timeout_ms`、`stop_timeout_ms`、`poll_interval_ms`、`build_timeout_ms` 均由主机显式填写正整数（待人定）。`build_timeout_ms` 是单条主机命令的上限，install/build 分别计时；`stop_timeout_ms` 是每轮退出确认的上限，TERM 与必要的 KILL 分别计时。修改配置后由主机重启监督器。两端口必须固定且互不相同。
+- 目标固定为主机中心 `central/cardigan.git` 的 `refs/heads/main`，不接受项目、分支、SHA 或命令参数选择目标。只接受从已部署 SHA 快进的区间；区间中每段均须有 system 的 `card_merged` 和绑定同一完成申请、同一 tree 的真实 passed 合并检查，主机再核对 Git tree 与祖先关系。中心 main 分叉时，保留当前服务并告警。Git 更新 main 与写入 `card_merged` 之间存在正常窗口；证据尚未完整核验时不构建、不停服，也不把 SHA 放入失败集合，而是写 `waiting_for_evidence` 记录并向 PM Office 和主机运维提示一次（每个监督器生命周期、每个目标一次，不生成需要人手工解除的待办），后续每轮重新读取并完整核验。未经门禁的提交只会持续等待，始终不能部署。
+- 迁移 0022 增加单例 `host_deployment_capacity`，与合并检查领取使用同一 SQLite 写事务。活跃合并检查存在时部署不领取；部署领取后，所有项目的检查保持排队。检查在执行器启动前预占容量，ready 后原子改为实际执行器身份，结束才释放；部署与检查均用 boot ID + PID start ticks 区分进程重用，已退出的进程不永久占位。监督器另持主机文件锁，整个生命周期不允许第二个监督器接管；重启恢复未完成切换时也先领取容量，检查仍活跃时保留现有服务。
+- 每轮部署判断前按 boot/start ticks 核对当前 server 是否存活，包括 main 未前进、自动部署已关闭和合并检查仍占用容量时；监督器重启接管的 server 同样检查。发现已退出时清除持久就绪状态和旧进程引用，写 `server_exited` 失败审计、通知 PM Office 与主机运维并生成主机待办；该错误必须穿过 watch 的普通单轮异常捕获，让监督器以非零退出交回主机服务管理器。重启沿用 `initialize` 的互斥和恢复校验，只恢复持久的已部署构建、重新核对 ready 和两端口，不改用尚未核验的 main。计划内切换和正常关闭期间不并发运行此检查，不把主动 stop 误报成崩溃；构建或切换中退出沿用原回滚及下一轮存活检查。首次主机实跑须核对监督器失败重启策略。
+- 在独立的主机私有 release 目录检出已核验 SHA，执行固定的 `pnpm install --frozen-lockfile` 和 `pnpm build`；不继承 server 的环境或凭据，仅给构建 PATH/LANG。构建非零退出时不停止 server。每次使用新目录，不复用旧 tsbuildinfo。构建输出仅投影 TypeScript 错误代码、阶段和退出码作为日志尾部，路径、自由文本、环境变量、Token、密钥均不进入事件和 Agent 诊断。
+- 构建成功后核对记录的 PID、boot/start ticks、UID、Node 可执行文件和 release cwd，再发停止信号；不搜索 cmdline、不按名字杀进程，退出未确认不启动第二个 server。`packages/store` 发生变化时，旧服务退出后、新构建启动和迁移前，用 SQLite `VACUUM INTO` 备份（包含 WAL 数据），保存为主机私有 0600 文件。新 server 的结构化 ready 消息和两个回环端口都通过才发布当前构建；失败或超时停止候选，恢复上一构建并重新核对 ready。回滚不自动覆盖数据库；若新迁移导致旧构建不能启动，记录失败并交主机管理员结合备份处理，避免丢弃已写入的数据。
+- 部署后比较新旧构建中每个默认角色的策略字段指纹，只处理角色包确实变化的已登记角色。升级前，在同一写事务将当前登记的最新角色策略指纹与上一已部署构建的默认策略指纹比较；策略只包含 `instructions`（旧版本回退 `core_prompt`）、工具、能力、kind 和 worktree，工具和能力忽略顺序但保留重复项，项目 launch/display/abilities/机器标签不参与。不同则保留当前版本，生成直接交人的人工待办，明确“当前版本有手工改动”，附当前版本到新默认包的 dry-run 差异；缺失旧指纹也停止自动升级并交人。当前内容已与新默认包相同时不写版本也不新建手改待办（例如手改规则已并入默认包）。主机仅把新旧构建计算出的摘要传给角色同步子进程，不从项目文件或 Agent 参数取基线。复用 `role upgrade --from-default` 的差异算法；工具或能力新增（按精确名称比较）、重复项造成的歧义、worktree 放宽、角色类型改变均不自动升级，产生含 dry-run 差异的人工事项（直接交人）。相同内容或停用角色不写版本。实际升级保存项目 launch 字段、追加 `role_updated` 与包含版本和差异摘要的 `host_role_upgraded`。
+- PM 升级后，以当前 Ops Assignment 固定的旧角色再核对非扩权，复用 `pm rotate --ops` 的原子迁移、Token 撤销、通知转移与审计，保留员工。若旧 Ops 权限比新版本窄或不能接住原有待办，停止自动轮换并交人。新 Assignment 没有 Run 时以 system 身份调用既有启动流程，遵守主机容量并允许留在排队态，不借用人工启动豁免、不另建派发路径；重试会识别已轮换但尚无 Run 的 Assignment。
+- 停旧 server 前，在同一写事务读取自举项目当时 `status=running` 的 Run 并写 `stopping` 部署事件，保存采集时间、Run 编号、Assignment 编号和工作项所属卡片（常驻项目级 Run 的 `card_id=null`）；审计落盘成功后才发停止信号，审计失败保持旧服务。成功、失败和回滚记录均保留这份快照。快照不更改 Run 或 Assignment 状态，也不作为部署导致后续失活的因果证据。
+- `host_ops_read_diagnostics` 增加自举项目的 `deployment` 只读投影，包含最近 20 条部署记录、构建诊断代码和安全日志尾部、已部署 SHA、中心 main SHA、快进关系和落后提交数；文件或 Git 数据缺失时返回空值，不回显内部路径、配置、环境或原始错误。沿用 C-200 的异步读取前后鉴权，不增加执行工具。运维依此向 PM Ops 和 PM Office 汇报，不能选代码、触发部署、重启 server 或改主机配置。
+- `host_deployment_recorded` 保存提交区间、构建结果、停服时长、ready、回滚状态和安全摘要；Workbench 项目动态展示这些记录以及角色升级、PM 轮换事件。失败、回滚或部署后角色同步失败时，先提交事件与人工事项，再通知当前 PM Office 和主机运维。监督器存活期间同一构建、切换或非快进失败目标不自动循环重试；发布证据未齐的等待目标持续重新核验，不受失败集合限制；主机处理后可重启监督器，后续 main 新提交可以重新尝试。普通部署不改变 Card、Delivery 或 Review 状态。
 
 ## 13. 部署
 
@@ -2247,6 +2272,7 @@ resume_or_replace 在旧终端不存在时可重开；release 返回 runtime_una
 | 注入的提示词和 Token | 主机写入目标 Assignment 自己的 MCP 配置，放在 worktree 外；不进入其他 Agent 的对话记录，Session 替换时作废旧 Token |
 | 仓库内容中的提示注入 | Agent 没有 sudo；高风险操作走工具审批；业务变更走 Decision |
 | 主机单点 | 定期备份数据库；第一版接受单点 |
+| 自举部署（C-201） | 仅独立主机监督器执行，固定中心 main、快进与门禁证据；任何 Agent 均无部署、server 重启、配置修改或代码选择能力。构建隔离、精确进程身份、备份和回滚见 §12.9 |
 | 运行时 | herdr-app 默认开启使用遥测，部署时必须关闭；herdr-core 的状态目录含终端输出和屏幕存档，按机密目录处理 |
 | 运行目录和凭据副本 | local 使用 0700 / 0600；agent-ssh 使用主机与 agent 专用组的 2770 / 0660（脚本 0770），父层 2750；写入不跟随链接，读取后删除凭据；日志脱敏；release 时清理 |
 
@@ -2278,7 +2304,7 @@ P2v-12 V12a：默认设计角色的工具清单按类型取默认包公共部分
 
 C-110：常驻工具上限另含 `replace_verification_work_item`，只能配置给 standing 类型的 pm，Office Token 不签发；命令重查 active、standing_mode=ops 的 PM 身份，工作项 PM 和其他角色均拒绝。
 
-所有类型均额外要求：record_decision、resolve_delegated_decision、triage_human_action 只能配置在编号为 pm 的角色上；后两者的命令只允许 active、standing_mode=ops 的常驻 PM，Office Token 不签发。`release_assignment` 只对 active、standing_mode=ops 的常驻 PM 开放，Office 的工具范围排除它；命令只释放工作项 Assignment，常驻 Assignment 仍仅允许 human 释放。主机只对 standing_mode=office 的常驻 PM 签发 record_decision。Ops、工作项 PM 和其他角色不能取得它。现有命令对工作项类型、项目作用域及作者／审核者隔离的校验继续生效，角色白名单不会绕过这些约束。角色 CRUD 权限独立于工具清单，当前只接受同项目 human，Agent 和 system 均拒绝。
+所有类型均额外要求：record_decision、resolve_delegated_decision、triage_human_action 只能配置在编号为 pm 的角色上；后两者的命令只允许 active、standing_mode=ops 的常驻 PM，Office Token 不签发。`release_assignment` 只对 active、standing_mode=ops 的常驻 PM 开放，Office 的工具范围排除它；命令只释放工作项 Assignment，常驻 Assignment 仍仅允许 human 释放。主机只对 standing_mode=office 的常驻 PM 签发 record_decision。Ops、工作项 PM 和其他角色不能取得它。现有命令对工作项类型、项目作用域及作者／审核者隔离的校验继续生效，角色白名单不会绕过这些约束。角色 CRUD 权限独立于工具清单，只接受同项目 human，Agent 和 system 均拒绝；C-201 的非扩权自动升级与保留员工的 PM Ops 轮换是另设的 system 专用入口，不放宽 CRUD 或任何 Agent 工具权限（§12.9）。
 
 P2a-10 B1：produce/verify 上限另排除所有 `host_ops_*` 工具；standing 类型上限增加五个预留运维工具，现有 PM 默认工具清单不变。所有角色写入均强制 `host_ops_*` 只能属于 `role_id=host_ops`，且该角色必须为 standing；它禁止配置 `record_decision`、`resolve_delegated_decision`、`triage_human_action`、`submit_delivery`、`submit_review`、`withdraw_review`、`create_card`、`update_card`、`create_work_item`、`update_work_item`、`assign`、`issue_instruction`。命令层再次核对运维角色边界和常驻作用域，`assign` 即使由人调用也不能把它指派到工作项。它可在项目内读取、评论和请求协作，但发起拍板的 `decider` 只能是 human 或 role:pm；任何请求都不能把 host_ops 设为决策人。请求仍记录 assignment 作者，D12 四类高风险继续只认 human。C-85 将 `recheck_merge` 映射至 `host_ops_recheck_merge` 的 Token 与角色双白名单；其他 Agent 仍被拒绝。C-111 起 `abort_dispatch`、`pause_standing_assignment` 不再映射任何 host_ops 工具，命令层对所有 assignment actor（含 host_ops）一律拒绝，只接受 human 和 system；host_ops 只能经 `host_ops_cancel_run`、`host_ops_restart_standing_pm` 的 `beginHostOpsAction` 前置核对与 `finishHostOpsAction`（actor=system）落地。通用 queue/dispatch 仍只接受主机，host_ops 通过专用事务和主机消费意图触发恢复，不能取得任意启动权限。原有 human 操作与 system 自动恢复继续按各自入口执行。
 
@@ -2460,6 +2486,7 @@ cardigan/
 - `host` 是包和 apps 之间的一层：`cardigan assignment start` 与 Dispatcher 在终端已退出时新开会话走**同一份**启动流程（`launchRun`），Token 轮换、启动编译、运行目录写入、provision、dispatch、start 哨兵和失败补偿只实现一次；apps 之间不互相依赖，只依赖 `host`。CLI 保留参数校验、启动配置和模型选择、`queueRun` 与 worktree 准备，server 只把门铃文本和系统 Actor 交给这份实现。
 - apps 只能依赖本层以下（`host` 及其下的包），`host` 只能依赖 `packages` 中它下面的层，`.dependency-cruiser.cjs` 的分层表与本节一致。
 - `host.readAttention` 为 CLI attention 与运维诊断提供共享聚合；`host.HostOpsService` 负责经 domain 校验后持久化操作意图、关闭记录的终端及确认退出，server 把它注入 MCP 并接入既有 Dispatcher 循环。domain 只返回效果，不执行 IO。
+- C-201：自举部署的 IO 端口定义在 domain，控制器与主机适配器在 host，CLI 只装配配置和进程生命周期；PM 轮换的存储收尾由 host 统一复用。
 - CLI 和 server 的启动警告过滤共用 `@cardigan/host/warnings` 独立子路径；该模块无业务依赖，不经 `host` 主入口导入，避免在安装过滤前间接加载 SQLite。
 - `host.runInTemporaryCheckout` 封装临时检出、检查进程生命周期、完整性核对和清理，合并闸门及验证方构建复用。它不读取闸门配置、不作领域状态迁移、不推送外部远程；调用方负责候选分发、日志脱敏与领域结果记录。
 - 用 lint 规则强制依赖方向（dependency-cruiser 或 TypeScript project references）。以后要拆包或换实现（例如直连 SDK 的运行时）时几乎不用改代码。

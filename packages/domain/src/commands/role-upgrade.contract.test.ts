@@ -6,6 +6,7 @@ import {
   type RoleCommandState,
   type RoleDefinition,
   upgradeRole,
+  upgradeRoleAfterDeployment,
 } from "./role.js";
 import { actor, human, ports, value } from "./test-fixtures.js";
 
@@ -147,4 +148,97 @@ test("upgrade is human-only and still goes through validateRole", () => {
   );
   expect(missing.ok).toBe(false);
   if (!missing.ok) expect(missing.error.code).toBe("not_found");
+});
+
+const system: Actor = { kind: "system", project_id: human.project_id };
+
+test("deployment upgrades narrow or equal permissions and preserve project settings", () => {
+  const { state, role } = projectPm();
+  const source = {
+    ...pack,
+    allowed_tools: role.allowed_tools,
+    worktree: "none" as const,
+  };
+  const result = value(
+    upgradeRoleAfterDeployment(state, system, "pm", source, ports()),
+  );
+  expect(result.effect?.data).toMatchObject({
+    version: 2,
+    instructions: pack.instructions,
+    worktree: "none",
+    harness: role.harness,
+    launch_profile_ref: role.launch_profile_ref,
+  });
+  expect(result.effect?.events[0]?.actor.kind).toBe("system");
+  expect(result.diff.relaxations).toEqual([]);
+  if (!result.effect) throw new Error("Expected upgrade");
+  const next = result.effect.data;
+  expect(
+    value(
+      upgradeRoleAfterDeployment(
+        { ...state, roles: [...state.roles, next] },
+        system,
+        "pm",
+        source,
+        ports(),
+      ),
+    ).effect,
+  ).toBeUndefined();
+});
+
+test("deployment leaves every permission widening for a human, with a dry-run diff", () => {
+  const { state, role } = projectPm();
+  for (const patch of [
+    { allowed_tools: pack.allowed_tools },
+    { capabilities: ["verify", "produce"] },
+    { capabilities: ["VERIFY"] },
+    { capabilities: ["verify", "verify"] },
+    { allowed_tools: [...role.allowed_tools, ...role.allowed_tools] },
+    { worktree: "write" as const },
+    { kind: "produce" as const, allowed_tools: ["get_card" as const] },
+  ]) {
+    const result = value(
+      upgradeRoleAfterDeployment(
+        state,
+        system,
+        "pm",
+        { ...pack, allowed_tools: role.allowed_tools, ...patch },
+        ports(),
+      ),
+    );
+    expect(result.effect).toBeUndefined();
+    expect(result.diff.relaxations.length).toBeGreaterThan(0);
+  }
+});
+
+test("no Agent or foreign project can invoke deployment role upgrades", () => {
+  const { state, role } = projectPm();
+  for (const caller of [
+    actor(1, "coder"),
+    actor(4, "pm"),
+    actor(5, "host_ops"),
+    human,
+    { kind: "system" as const, project_id: "foreign" },
+  ]) {
+    const result = upgradeRoleAfterDeployment(
+      state,
+      caller,
+      "pm",
+      { ...pack, allowed_tools: role.allowed_tools },
+      ports(),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("unauthorized");
+  }
+  expect(
+    value(
+      upgradeRoleAfterDeployment(
+        { ...state, roles: [{ ...role, status: "inactive" }] },
+        system,
+        "pm",
+        { ...pack, allowed_tools: role.allowed_tools },
+        ports(),
+      ),
+    ).effect,
+  ).toBeUndefined();
 });

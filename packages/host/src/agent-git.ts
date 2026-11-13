@@ -257,6 +257,13 @@ export class AgentGitTransport implements GitWorktreePort {
     this.exact(path, this.worktree);
     return this.commands.diffHead(path);
   }
+  /** C-211: only this Assignment's build checkout, never its write worktree. */
+  async cleanBuildCheckout(repository: string, path: string) {
+    await this.prepare();
+    this.exact(repository, this.repository);
+    this.exact(path, this.build);
+    return this.commands.cleanBuildCheckout(repository, path);
+  }
   async removeWorktree(
     repository: string,
     path: string,

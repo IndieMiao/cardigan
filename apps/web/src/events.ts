@@ -2,6 +2,10 @@ import { PRE_MERGE_COPY } from "./pre-merge-copy.js";
 
 /** Shared presentation vocabulary; raw event data remains available in details. */
 export const EVENT_LABELS: Readonly<Record<string, string>> = {
+  host_deployment_recorded: "记录了主机部署",
+  host_role_upgraded: "自动升级了角色",
+  standing_pm_rotated: "轮换了常驻 PM",
+  host_deployment_action_requested: "请求处理部署事项",
   project_preferences_updated: "更新了项目偏好",
   card_created: "创建了卡片",
   card_updated: "更新了卡片",

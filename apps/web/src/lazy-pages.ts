@@ -19,6 +19,9 @@ export const ExecutionPage = lazy(() =>
     default: m.ExecutionPage,
   })),
 );
+export const HelpPage = lazy(() =>
+  import("./views/HelpPage.js").then((m) => ({ default: m.HelpPage })),
+);
 export const NeedsYouPage = lazy(() =>
   import("./views/NeedsYouPage.js").then((m) => ({ default: m.NeedsYouPage })),
 );

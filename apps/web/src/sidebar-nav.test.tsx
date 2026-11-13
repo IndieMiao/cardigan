@@ -158,10 +158,11 @@ test("narrow screens: menu opens a modal drawer that closes on choice or Escape"
 
   fireEvent.click(menu);
   const reopened = await screen.findByRole("dialog", { name: "项目导航" });
-  fireEvent.click(within(reopened).getByRole("link", { name: "执行视图" }));
+  fireEvent.click(within(reopened).getByRole("link", { name: "帮助" }));
   await waitFor(() =>
     expect(screen.queryByRole("dialog", { name: "项目导航" })).toBeNull(),
   );
+  await screen.findByRole("article", { name: "编号和标记" });
 });
 
 test("widening the viewport closes the drawer and drops the top bar", async () => {

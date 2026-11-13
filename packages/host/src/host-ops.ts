@@ -50,6 +50,7 @@ import {
   DEFAULT_CONTEXT_STALE_AFTER_MS,
   readSessionContexts,
 } from "./context-usage.js";
+import { readDeploymentDiagnostics } from "./deployment-diagnostics.js";
 import { tryHostOpsLock } from "./host-ops-lock.js";
 import { revokeStoppedRunTokens, stopRunRuntime } from "./stop-run.js";
 import { UpstreamHealthMonitor } from "./upstream-health.js";
@@ -85,6 +86,8 @@ interface Options {
    * commands handed to the human use it instead of a hard-coded name.
    */
   hcSession?: string;
+  /** C-211: a failed context patrol is reported here; drain still runs. */
+  onError?: (error: unknown) => void;
 }
 /** Requests commit first. The dispatch loop drains intents; a restart resumes unfinished work. */
 export class HostOpsService {
@@ -132,7 +135,10 @@ export class HostOpsService {
         ),
       ),
     );
-    const sessions = await this.sessions(actor.project_id);
+    const [sessions, deployment] = await Promise.all([
+      this.sessions(actor.project_id),
+      readDeploymentDiagnostics(this.options.store, actor.project_id),
+    ]);
     const activity = await this.observeUpstream(actor.project_id);
     this.upstream?.reconcile(this.options.store, actor.project_id, activity);
     context.revalidateToken?.();
@@ -172,6 +178,7 @@ export class HostOpsService {
       }));
       return {
         ...attention,
+        ...(deployment ? { deployment } : {}),
         ...(this.upstream
           ? { upstream_health: this.upstream.diagnostics(state, activity) }
           : {}),
@@ -524,7 +531,12 @@ export class HostOpsService {
       if (this.upstream)
         for (const project of this.options.store.listProjects())
           this.pollUpstream(project.id);
-      await this.pollContexts();
+      // C-211: a context patrol failure must not skip this round's drain.
+      try {
+        await this.pollContexts();
+      } catch (error) {
+        this.options.onError?.(error);
+      }
       await this.drain();
     });
     this.serial = next.catch(() => {});

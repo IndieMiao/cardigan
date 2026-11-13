@@ -89,7 +89,10 @@ class Rejection {
 type CommandName =
   | E.ToolName
   | "pause_standing_assignment"
+  | "stop_assignment"
   | "rotate_standing_pm"
+  | "rotate_deployed_pm"
+  | "record_deployment"
   | "create_host_ops_assignment"
   | "rotate_host_ops_assignment"
   | "manage_host_ops_action"
@@ -236,6 +239,8 @@ export class CommandDraft {
       "pause_standing_assignment",
     ].includes(tool);
     const systemOnly = [
+      "rotate_deployed_pm",
+      "record_deployment",
       "manage_host_ops_action",
       "manage_inactive_run_stop",
       "settle_pending_run_finish",

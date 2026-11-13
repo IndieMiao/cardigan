@@ -871,6 +871,115 @@ button .id-badge {
   margin-top: 6px;
   padding: 2px 8px;
 }
+/* C-206: document navigation and prose share the Workbench theme. */
+.help-layout {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 900px);
+  gap: 32px;
+  align-items: start;
+}
+.help-directory {
+  display: grid;
+  gap: 4px;
+}
+.help-directory h2 {
+  margin: 0 0 8px;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  font-weight: 400;
+}
+.help-directory a {
+  padding: 8px 10px;
+  color: var(--text);
+  border-left: 2px solid transparent;
+  text-decoration: none;
+}
+.help-directory a[aria-current="page"] {
+  color: var(--accent);
+  border-left-color: var(--accent);
+  background: var(--surface-muted);
+}
+.help-article {
+  min-width: 0;
+}
+.help-markdown {
+  line-height: 1.75;
+  overflow-wrap: anywhere;
+}
+.help-markdown h2 {
+  margin-top: 0;
+  font-size: var(--text-page);
+  font-weight: 500;
+}
+.help-markdown h3 {
+  margin-top: 28px;
+  font-size: var(--text-section);
+  font-weight: 500;
+}
+.help-markdown table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+.help-markdown :is(th, td) {
+  padding: 12px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+.help-markdown th {
+  font-weight: 400;
+  color: var(--text-muted);
+}
+.help-markdown :is(th, td):first-child {
+  min-width: 160px;
+}
+.help-markdown pre {
+  overflow: auto;
+}
+@media (max-width: 1000px) {
+  .help-layout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 24px;
+  }
+  .help-directory {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .help-directory h2 {
+    margin: 0 8px 0 0;
+  }
+}
+@media (max-width: 760px) {
+  .help-markdown :is(table, tbody, tr, td) {
+    display: block;
+  }
+  .help-markdown thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+  .help-markdown tr {
+    padding: 12px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .help-markdown td {
+    padding: 3px 0;
+    border: 0;
+  }
+  .help-markdown td:not(:first-child) {
+    display: grid;
+    grid-template-columns: 5em minmax(0, 1fr);
+    gap: 8px;
+  }
+  .help-markdown td:not(:first-child)::before {
+    content: attr(data-label);
+    color: var(--text-muted);
+  }
+}
 .toolbar {
   display: flex;
   gap: var(--gap);
