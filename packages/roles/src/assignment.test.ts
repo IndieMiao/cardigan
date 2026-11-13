@@ -610,6 +610,7 @@ describe("default role pack", () => {
     for (const role of [
       "coder",
       "reviewer",
+      "independent_reviewer",
       "designer",
       "ui_ux_designer",
       "design_director",
@@ -624,6 +625,7 @@ describe("default role pack", () => {
     for (const role of [
       "coder",
       "reviewer",
+      "independent_reviewer",
       "designer",
       "ui_ux_designer",
       "design_director",
@@ -661,6 +663,12 @@ describe("default role pack", () => {
         worktree: "readonly",
         allowed_tools: ["submit_review"],
       },
+      independent_reviewer: {
+        harness: "claude-code",
+        launch_profile: "claude-opus",
+        worktree: "readonly",
+        allowed_tools: ["submit_review", "withdraw_review"],
+      },
       designer: {
         harness: "claude-code",
         launch_profile: "claude-agent",
@@ -691,6 +699,7 @@ describe("default role pack", () => {
       "pm",
       "coder",
       "reviewer",
+      "independent_reviewer",
       "designer",
       "ui_ux_designer",
       "design_director",
@@ -700,6 +709,7 @@ describe("default role pack", () => {
     expect(roles.map((role) => role.worktree)).toEqual([
       "none",
       "write",
+      "readonly",
       "readonly",
       "readonly",
       "write",
