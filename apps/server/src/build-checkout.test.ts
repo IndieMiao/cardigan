@@ -304,6 +304,61 @@ test("every Run starts from a fresh checkout, even at the same SHA", async () =>
   expect(readFileSync(join(build, "version"), "utf8")).toBe("two");
 });
 
+test("C-211 a verifier's own untracked files are cleaned through Git and a blocked removal keeps its registration", async () => {
+  await startReviewer();
+  const build = buildPath();
+  // A dev server the verifier started left caches and dependencies behind.
+  const deps = join(build, "apps", "web", ".vite", "deps");
+  mkdirSync(deps, { recursive: true });
+  writeFileSync(join(deps, "chunk.js"), "cache");
+  mkdirSync(join(build, "node_modules", "pkg"), { recursive: true });
+  writeFileSync(join(build, "node_modules", "pkg", "index.js"), "dep");
+  f.endRun(s.reviewer);
+  const server = serverGit();
+  const project = server.projectOf(f.project_id);
+  if (!project) throw new Error("missing project");
+  // An entry Git cannot delete yet (e.g. still being written).
+  chmodSync(deps, 0o555);
+  try {
+    await expect(
+      server.removeBuildCheckout({
+        project,
+        assignment_id: s.reviewer.id,
+        idle: () => true,
+      }),
+    ).rejects.toThrow();
+    // Still registered: the next round can retry instead of hitting
+    // unregistered leftovers the host must not recurse into.
+    expect(git(clone(), "worktree", "list", "--porcelain")).toContain(build);
+  } finally {
+    chmodSync(deps, 0o755);
+  }
+  expect(
+    await server.removeBuildCheckout({
+      project,
+      assignment_id: s.reviewer.id,
+      idle: () => true,
+    }),
+  ).toEqual({ status: "removed" });
+  expect(existsSync(build)).toBe(false);
+  expect(git(clone(), "worktree", "list", "--porcelain")).not.toContain(build);
+  // The next Run prepares a fresh checkout instead of failing.
+  await startReviewer();
+  expect(git(build, "rev-parse", "HEAD")).toBe(sha);
+  expect(existsSync(join(build, "apps"))).toBe(false);
+});
+
+test("C-211 cleaning refuses a directory that is not a registered checkout", async () => {
+  await startReviewer();
+  const stray = join(root(), "builds", f.project_id, "A-999");
+  mkdirSync(join(stray, "keep"), { recursive: true });
+  writeFileSync(join(stray, "keep", "file"), "not a checkout");
+  await expect(
+    new LocalGitTransport().cleanBuildCheckout(clone(), stray),
+  ).rejects.toThrow(/not registered/);
+  expect(existsSync(join(stray, "keep", "file"))).toBe(true);
+});
+
 test("a registration whose directory vanished is rebuilt and also cleaned up", async () => {
   await startReviewer();
   const build = buildPath();
