@@ -37,6 +37,7 @@ export interface WebHarness {
 
 export interface HarnessOptions {
   readonly mergeGate?: WebServerOptions["mergeGate"];
+  readonly contextUsage?: WebServerOptions["contextUsage"];
   readonly log?: (event: Readonly<Record<string, unknown>>) => void;
   readonly env?: WebEnv;
   readonly overrides?: WebConfigOverrides;
@@ -75,6 +76,7 @@ export async function webHarness(
     store,
     dataDir,
     ...(options.mergeGate ? { mergeGate: options.mergeGate } : {}),
+    ...(options.contextUsage ? { contextUsage: options.contextUsage } : {}),
     config: resolveWebConfig(options.env, {
       port: 0,
       staticDir,

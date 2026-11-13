@@ -50,10 +50,14 @@ test("U6a board columns stay in one row inside a horizontally scrollable strip",
   expect(board).toContain("flex-wrap: nowrap;");
   expect(board).toContain("overflow-x: auto;");
   // The scrollbar is styled explicitly so it does not disappear on macOS.
-  expect(board).toContain("scrollbar-width: thin;");
-  expect(styles).toContain(".board::-webkit-scrollbar {");
-  expect(rule(".board-column")).toContain("flex: 0 0 280px;");
-  expect(rule(".board-column")).toContain("min-width: 280px;");
+  expect(rule(":is(.board, .board-lane-cards)")).toContain(
+    "scrollbar-width: thin;",
+  );
+  expect(styles).toContain(
+    ":is(.board, .board-lane-cards)::-webkit-scrollbar {",
+  );
+  expect(rule(".board-column")).toContain("flex: 0 0 420px;");
+  expect(rule(".board-column")).toContain("min-width: 0;");
   const collapsed = rule(".board-column-collapsed");
   expect(collapsed).toContain("flex: 0 0 48px;");
   expect(collapsed).toContain("min-width: 48px;");

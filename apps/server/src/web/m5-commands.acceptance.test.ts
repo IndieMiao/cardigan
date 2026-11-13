@@ -17,6 +17,12 @@ import { Dispatcher } from "../dispatch.js";
 import { HttpRejection } from "./http.js";
 import { serveWrite } from "./write.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 /**
  * M5.T2 cross-acceptance for M5.2 (plan phase-1-m5 §3.4–§3.6, §8.2).
  *
@@ -57,6 +63,7 @@ const question = {
   affected_work_items: [],
   blocking: false,
   decider: "human" as const,
+  plain_summary: TEST_PLAIN_SUMMARY,
 };
 
 test("§3.5/§6.4: a human instruction rings the owning Assignment once and never duplicates its Run", async () => {

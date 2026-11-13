@@ -3,6 +3,12 @@ import { listNeedsYou, requestDecision } from "../index.js";
 import { commit, f, item, setup } from "./launch/test-fixtures.js";
 import { human, value } from "./test-fixtures.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 beforeEach(setup);
 const opened = "2026-01-01T00:00:00.000Z";
 const later = "2026-01-01T00:01:00.000Z";
@@ -14,6 +20,7 @@ const question = {
   options: [{ key: "go", description: "Continue", impact: "Proceed" }],
   recommended: "go",
   decider: "human" as const,
+  plain_summary: TEST_PLAIN_SUMMARY,
   blocking: false,
   affected_cards: [],
   affected_work_items: [],

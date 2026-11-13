@@ -1,5 +1,11 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from "@testing-library/react";
 import { afterEach, expect, test } from "vitest";
 import { timelineEntry } from "../testing/fixtures.js";
 import { TimelineActor } from "./TimelineHeader.js";
@@ -39,7 +45,7 @@ test("legacy unnamed authors show their role; human attribution falls back to ow
   expect(screen.getByText("所有者")).toBeTruthy();
 });
 
-test("human authors render member name, title and avatar with the shared identity component", () => {
+test("human authors keep name and avatar inline and show their title in the member profile", () => {
   const { container, rerender } = render(
     <TimelineActor
       entry={timelineEntry({
@@ -55,11 +61,17 @@ test("human authors render member name, title and avatar with the shared identit
     />,
   );
   expect(screen.getByText("邵杰")).toBeTruthy();
-  expect(screen.getByText("所有者")).toBeTruthy();
+  const person = screen.getByRole("button", { name: "邵杰的成员卡片" });
+  expect(within(person).queryByText("所有者")).toBeNull();
   expect(container.querySelector("img")?.getAttribute("src")).toBe(
     "/avatars/v1/liu-bei/head-64.webp",
   );
   expect(screen.queryByText(/^(你|人)$/)).toBeNull();
+  fireEvent.click(person);
+  const profile = screen.getByRole("dialog", { name: "邵杰的成员卡片" });
+  expect(within(profile).getByText("所有者")).toBeTruthy();
+  fireEvent.click(person);
+  expect(screen.queryByRole("dialog")).toBeNull();
   rerender(<TimelineActor entry={timelineEntry({ author: "human" })} />);
   expect(screen.getByText("所有者")).toBeTruthy();
 });

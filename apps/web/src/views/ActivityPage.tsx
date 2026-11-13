@@ -3,6 +3,7 @@ import type { ActivityData, CardiganClient } from "../api.js";
 import { EmployeeIdentity } from "../components/EmployeeIdentity.js";
 import { FilterBar } from "../components/FilterBar.js";
 import { EmptyState, PageTitle, Time } from "../components/Foundation.js";
+import { IdentityRow } from "../components/IdentityRow.js";
 import { CardLink, Feedback } from "../components/Operations.js";
 import { eventLabel } from "../events.js";
 import { useRouteFilters } from "../route.js";
@@ -119,7 +120,7 @@ function DayGroup({
             return (
               <li key={event.id}>
                 <details className="event-details">
-                  <summary className="activity-summary">
+                  <IdentityRow as="summary" className="activity-summary">
                     <span className="activity-time">
                       <Time value={event.created_at} />
                     </span>
@@ -139,7 +140,7 @@ function DayGroup({
                         label={event.card_title ?? "卡片"}
                       />
                     </span>
-                  </summary>
+                  </IdentityRow>
                   <pre>{JSON.stringify(event.payload, null, 2)}</pre>
                 </details>
               </li>
@@ -149,7 +150,7 @@ function DayGroup({
           return (
             <li key={first?.id}>
               <details className="event-details">
-                <summary className="activity-summary">
+                <IdentityRow as="summary" className="activity-summary">
                   <span className="activity-time">
                     <Time value={first?.created_at} />
                   </span>
@@ -164,7 +165,7 @@ function DayGroup({
                       label={row.card_title ?? "卡片"}
                     />
                   </span>
-                </summary>
+                </IdentityRow>
                 <pre>
                   {JSON.stringify(
                     row.events.map((event) => event.payload),

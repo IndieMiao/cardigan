@@ -453,7 +453,14 @@ export function roleUpgradeDiff(
           : "旧版说明",
       to: "默认包说明",
     });
+  const duplicates = [
+    previous.allowed_tools,
+    previous.capabilities,
+    patch.allowed_tools,
+    patch.capabilities,
+  ].some((values) => new Set(values).size !== values.length);
   const relaxations = [
+    ...(duplicates ? ["工具或能力存在重复项，需人工核对权限差异"] : []),
     ...added_tools.map((tool) => `新增工具 ${tool}`),
     ...added_capabilities.map((value) => `新增能力 ${value}`),
     ...(WORKTREE_RANK[patch.worktree] > WORKTREE_RANK[previous.worktree]
@@ -495,36 +502,44 @@ export function previewRoleUpgrade(
 ): Result<RoleUpgradePreview> {
   return attempt(() => {
     authorize(state, actor);
-    ensure(
-      source.role_id === id && source.instructions !== undefined,
-      "validation_failed",
-      `默认角色包里的 ${id} 不完整`,
-    );
-    const previous = find(state, id);
-    const patch: DefaultPackPatch = {
-      instructions: source.instructions,
-      allowed_tools: [...reviewTools(source.allowed_tools)],
-      capabilities: [...source.capabilities],
-      kind: source.kind,
-      worktree: source.worktree,
-    };
-    const diff = roleUpgradeDiff(previous, patch);
-    const same = (a: readonly string[], b: readonly string[]) =>
-      a.length === b.length && a.every((value) => b.includes(value));
-    const unchanged =
-      diff.fields.length === 0 &&
-      same(previous.allowed_tools, patch.allowed_tools) &&
-      same(previous.capabilities, patch.capabilities);
-    if (!unchanged) {
-      const checked = validateRole({ ...previous, ...patch });
-      ensure(
-        checked.ok,
-        "validation_failed",
-        checked.ok ? "" : checked.error.message,
-      );
-    }
-    return { unchanged, previous, diff, patch };
+    return previewDefaultUpgrade(state, id, source);
   });
+}
+
+function previewDefaultUpgrade(
+  state: RoleCommandState,
+  id: string,
+  source: RoleDefinition,
+): RoleUpgradePreview {
+  ensure(
+    source.role_id === id && source.instructions !== undefined,
+    "validation_failed",
+    `默认角色包里的 ${id} 不完整`,
+  );
+  const previous = find(state, id);
+  const patch: DefaultPackPatch = {
+    instructions: source.instructions,
+    allowed_tools: [...reviewTools(source.allowed_tools)],
+    capabilities: [...source.capabilities],
+    kind: source.kind,
+    worktree: source.worktree,
+  };
+  const diff = roleUpgradeDiff(previous, patch);
+  const same = (a: readonly string[], b: readonly string[]) =>
+    a.length === b.length && a.every((value) => b.includes(value));
+  const unchanged =
+    diff.fields.length === 0 &&
+    same(previous.allowed_tools, patch.allowed_tools) &&
+    same(previous.capabilities, patch.capabilities);
+  if (!unchanged) {
+    const checked = validateRole({ ...previous, ...patch });
+    ensure(
+      checked.ok,
+      "validation_failed",
+      checked.ok ? "" : checked.error.message,
+    );
+  }
+  return { unchanged, previous, diff, patch };
 }
 
 /**
@@ -555,5 +570,38 @@ export function upgradeRole(
       effect.ok ? "" : effect.error.message,
     );
     return { unchanged: false, previous, diff, effect: effect.value };
+  });
+}
+
+/** Host-only deployment path. No general role-management permission is granted. */
+export function upgradeRoleAfterDeployment(
+  state: RoleCommandState,
+  actor: Actor,
+  id: string,
+  source: RoleDefinition,
+  ports: CommandPorts,
+): Result<RoleUpgradePreview & { readonly effect?: RoleEffect }> {
+  return attempt(() => {
+    ensure(
+      actor.kind === "system" && actor.project_id === state.project_id,
+      "unauthorized",
+      "只有本项目主机可以自动升级角色",
+    );
+    const preview = previewDefaultUpgrade(state, id, source);
+    if (
+      preview.unchanged ||
+      preview.diff.relaxations.length > 0 ||
+      preview.previous.status === "inactive"
+    )
+      return preview;
+    const effect = save(
+      state,
+      actor,
+      { ...preview.previous, ...preview.patch },
+      "active",
+      "role_updated",
+      ports,
+    );
+    return { ...preview, effect };
   });
 }

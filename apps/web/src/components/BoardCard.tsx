@@ -5,6 +5,7 @@ import { routeHash } from "../route.js";
 import { nextOwnersLabel } from "../status.js";
 import { ProduceOwners } from "./EmployeeIdentity.js";
 import { fullTime, StatusTag, Time } from "./Foundation.js";
+import { IdBadge } from "./IdTag.js";
 import { PriorityBadge } from "./Priority.js";
 import { StatusIcon } from "./StatusIcon.js";
 import { Tooltip } from "./Tooltip.js";
@@ -115,7 +116,11 @@ export function BoardCard({
       <Tooltip content={card.title}>
         <a className="card-tile-link" href={href} onClick={openCard}>
           <span className="card-tile-head">
-            {display.number && <span className="card-id">{card.id}</span>}
+            {display.number && (
+              <span className="card-id">
+                <IdBadge id={card.id} />
+              </span>
+            )}
             <StatusTag status={card.status} />
           </span>
           <span className="card-title">{card.title}</span>
@@ -152,18 +157,22 @@ export function BoardCard({
             `下一步：${nextOwnersLabel(card.next_owners)}`,
             <Icon name="next" />,
           )}
-        {display.updated &&
-          badge(
-            `更新时间：${fullTime(card.updated_at)}`,
-            <Icon name="clock" />,
-            <Time value={card.updated_at} relative />,
-          )}
-        {!!card.attachment_count &&
-          badge(
-            `附件：${card.attachment_count} 个`,
-            <Icon name="attachment" />,
-            card.attachment_count,
-          )}
+        {(display.updated || !!card.attachment_count) && (
+          <span className="board-card-time-attachments">
+            {display.updated &&
+              badge(
+                `更新时间：${fullTime(card.updated_at)}`,
+                <Icon name="clock" />,
+                <Time value={card.updated_at} relative />,
+              )}
+            {!!card.attachment_count &&
+              badge(
+                `附件：${card.attachment_count} 个`,
+                <Icon name="attachment" />,
+                card.attachment_count,
+              )}
+          </span>
+        )}
         {display.waiting &&
           (["decision", "human_action", "blocked"] as const)
             .filter((kind) => reasons.has(kind))

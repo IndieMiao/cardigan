@@ -22,10 +22,13 @@ export function MergeCheck({
   check,
   projectId,
   live = false,
+  detailsOnly = false,
 }: {
   readonly check: MergeCheckView | null;
   readonly projectId: string;
   readonly live?: boolean;
+  /** The enclosing summary already shows status and failures. */
+  readonly detailsOnly?: boolean;
 }) {
   const status = check?.status ?? "queued";
   const hasLog =
@@ -37,7 +40,7 @@ export function MergeCheck({
     <section className="merge-check" aria-label="合并检查">
       <div className="action-row">
         <span>合并检查</span>
-        <StatusTag status={status} />
+        {!detailsOnly && <StatusTag status={status} />}
         <span className="hint">用时：{duration(check, live)}</span>
         {hasLog && check && (
           <a
@@ -75,7 +78,8 @@ export function MergeCheck({
           ))}
         </ul>
       )}
-      {["failed", "timed_out", "interrupted"].includes(status) &&
+      {!detailsOnly &&
+        ["failed", "timed_out", "interrupted"].includes(status) &&
         check?.summary && (
           <p className="merge-check-summary">{check.summary}</p>
         )}

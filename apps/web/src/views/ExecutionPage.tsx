@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import {
+  type RefObject,
+  useCallback,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+} from "react";
 import type {
   CardiganClient,
   ExecutionAssignment,
@@ -15,6 +22,8 @@ import {
   StatusTag,
   Time,
 } from "../components/Foundation.js";
+import { IdentityRow } from "../components/IdentityRow.js";
+import { IdBadge } from "../components/IdTag.js";
 import {
   AttachCommands,
   CardLink,
@@ -32,6 +41,7 @@ import {
   writeExecutionSort,
 } from "../execution-sort.js";
 import { routeHash, useRouteFilters } from "../route.js";
+import { statusLabel } from "../status.js";
 import { useResource } from "../useResource.js";
 import { ExecutionCapacityPanel } from "./ExecutionCapacityPanel.js";
 
@@ -126,7 +136,7 @@ const harnessLabel: Readonly<Record<string, string>> = {
   codex: "codex",
   pi: "pi",
 };
-/** C-106: the Harness column; unknown or missing shows "—". */
+/** C-106: the Harness; unknown or missing shows "—". */
 export function runHarness(run: RunView | undefined): string {
   if (!run?.harness) return NONE;
   return harnessLabel[run.harness] ?? run.harness;
@@ -135,6 +145,11 @@ export function runHarness(run: RunView | undefined): string {
 export function runModelEffort(run: RunView | undefined): string {
   if (!run?.model) return NONE;
   return `${run.model} / ${run.effort || NONE}`;
+}
+/** C-207: Harness, model and effort as one muted line; no Run shows "—". */
+export function runConfig(run: RunView | undefined): string {
+  if (!run) return NONE;
+  return `${runHarness(run)} / ${run.model || NONE} / ${run.effort || NONE}`;
 }
 const windowSize = (tokens: number) => {
   const [unit, size] =
@@ -145,8 +160,35 @@ const windowSize = (tokens: number) => {
         : ["", 1];
   return `${Number((tokens / size).toFixed(1))}${unit}`;
 };
-/** C-106: "90%（1M）"; no recorded or invalid value shows "—", never a guess. */
-export function contextUsage(run: RunView | undefined): string {
+/**
+ * C-200 defaults: remind at 20% left, change sessions at 15% left. They mirror
+ * the domain's contextUsageThresholds defaults and only apply when the server
+ * sends no level (C-232 servers send the host's level with project overrides).
+ */
+const CONTEXT_HANDOFF_REMAINING = 20;
+const CONTEXT_RESTART_REMAINING = 15;
+export type ContextLevel = "normal" | "handoff" | "restart";
+export interface ContextReading {
+  /** Used share, two decimals, e.g. "62.34". */
+  readonly used: string;
+  readonly remaining: string;
+  readonly level: ContextLevel;
+  /** Window size, e.g. "200K". */
+  readonly window: string;
+  readonly usedTokens: number;
+  readonly windowTokens: number;
+  /** 0..100 for the meter. */
+  readonly meter: number;
+}
+/**
+ * C-207: the exact reading of the latest Run's context use. No recorded or
+ * invalid value is undefined (shown as "—"), never a guess. The level follows
+ * the host rule: remaining percentage rounded to 0.1, compared with the two
+ * thresholds; the displayed two decimals never decide the level.
+ */
+export function contextReading(
+  run: RunView | undefined,
+): ContextReading | undefined {
   const usage = run?.context_usage;
   if (
     !usage ||
@@ -155,27 +197,244 @@ export function contextUsage(run: RunView | undefined): string {
     usage.used_ratio < 0 ||
     usage.window_tokens <= 0
   )
-    return NONE;
-  return `${Math.round(usage.used_ratio * 100)}%（${windowSize(usage.window_tokens)}）`;
+    return undefined;
+  const usedPct = usage.used_ratio * 100;
+  const remaining = Math.round((100 - usedPct) * 10) / 10;
+  // C-232: the server sends the host's own level (project thresholds); the
+  // local default rule only covers servers that do not.
+  const level: ContextLevel =
+    usage.level !== undefined
+      ? (usage.level ?? "normal")
+      : remaining <= CONTEXT_RESTART_REMAINING
+        ? "restart"
+        : remaining <= CONTEXT_HANDOFF_REMAINING
+          ? "handoff"
+          : "normal";
+  return {
+    used: usedPct.toFixed(2),
+    remaining: Math.max(0, 100 - usedPct).toFixed(2),
+    level,
+    window: windowSize(usage.window_tokens),
+    usedTokens:
+      usage.used_tokens ?? Math.round(usage.used_ratio * usage.window_tokens),
+    windowTokens: usage.window_tokens,
+    meter: Math.min(100, usedPct),
+  };
+}
+const contextLevelLabel: Readonly<Record<ContextLevel, string>> = {
+  normal: "用量正常",
+  handoff: "提醒",
+  restart: "换会话",
+};
+const contextLevelIcon: Readonly<Record<ContextLevel, string>> = {
+  normal: "",
+  handoff: "△ ",
+  restart: "↻ ",
+};
+/** C-106 compatible one-line text, used in labels and the detail drawer. */
+export function contextUsage(run: RunView | undefined): string {
+  const reading = contextReading(run);
+  if (!reading) return NONE;
+  return `已用 ${reading.used}%，剩余 ${reading.remaining}%（${reading.window}）`;
+}
+function ContextCell({
+  run,
+  external,
+}: {
+  readonly run: RunView | undefined;
+  readonly external: boolean | undefined;
+}) {
+  const reading = contextReading(run);
+  if (!reading)
+    return (
+      <div className="execution-context execution-context-none">
+        <span className="execution-context-value">{NONE}</span>
+        <span className="hint">
+          {external ? "外接身份，暂无数据" : "尚未上报"}
+        </span>
+      </div>
+    );
+  return (
+    <div
+      className={`execution-context execution-context-${reading.level}`}
+      data-level={reading.level}
+    >
+      <span className="execution-context-head">
+        <span className="execution-context-value">{reading.used}%</span>
+        <span className="hint">剩余 {reading.remaining}%</span>
+      </span>
+      <span className="execution-context-meter" aria-hidden="true">
+        <span
+          className="execution-context-fill"
+          style={{ width: `${reading.meter}%` }}
+        />
+      </span>
+      <span className="execution-context-label">
+        {contextLevelIcon[reading.level]}
+        {contextLevelLabel[reading.level]}
+        <span className="hint"> / {reading.window}</span>
+      </span>
+    </div>
+  );
+}
+/**
+ * C-207: what the Assignment is working on; Card, priority and work item.
+ * C-232: the Card title follows on its own line, cut to one line with the
+ * full title in the tooltip; the Card id above always stays visible.
+ */
+function TaskCell({
+  a,
+  projectId,
+}: {
+  readonly a: ExecutionAssignment;
+  readonly projectId: string;
+}) {
+  const row = (
+    <IdentityRow className="execution-task">
+      {a.work_item_id ? (
+        <>
+          <CardLink projectId={projectId} id={a.card_id} />
+          <PriorityBadge value={a.card_priority ?? 0} />
+          <IdTag id={a.work_item_id} label="工作项" />
+        </>
+      ) : (
+        <span>常驻 PM（项目级）</span>
+      )}
+      {a.standing_mode && (
+        <span className="hint">
+          {a.standing_mode === "office" ? "PM 前台" : "PM 后台"}
+        </span>
+      )}
+    </IdentityRow>
+  );
+  if (!a.work_item_id || !a.card_title) return row;
+  return (
+    <div className="execution-task-cell">
+      {row}
+      <span className="execution-task-title" title={a.card_title}>
+        {a.card_title}
+      </span>
+    </div>
+  );
+}
+/**
+ * C-207: the runtime state first; an abnormal Assignment status (suspended,
+ * released) always shows next to it, the normal "active" never does.
+ */
+function RuntimeState({ a }: { readonly a: ExecutionAssignment }) {
+  return (
+    <>
+      {a.external ? (
+        <span className="execution-external">外接身份</span>
+      ) : (
+        <StatusTag status={a.runtime_state} />
+      )}
+      {a.status !== "active" && a.status !== a.runtime_state && (
+        <StatusTag status={a.status} />
+      )}
+    </>
+  );
+}
+const abnormalRun = (run: RunView) =>
+  ["failed", "cancelled", "blocked"].includes(run.outcome ?? run.status);
+/** C-207: the second status line: queue position, waits or a bad outcome. */
+function RunNote({
+  a,
+  run,
+}: {
+  readonly a: ExecutionAssignment;
+  readonly run: RunView | undefined;
+}) {
+  const [elapsed, setElapsed] = useState(0);
+  const waited = run?.queue_warning?.waited_ms;
+  useEffect(() => {
+    setElapsed(0);
+    if (waited === undefined) return;
+    const sampled = Date.now();
+    const timer = setInterval(() => setElapsed(Date.now() - sampled), 60_000);
+    return () => clearInterval(timer);
+  }, [waited]);
+  if (a.external) return <span className="hint">由对接的 Agent 自行拉取</span>;
+  if (!run) return null;
+  const longQueue =
+    run.status === "queued" &&
+    run.queue_warning &&
+    run.queue_warning.waited_ms + elapsed >=
+      run.queue_warning.after_minutes * 60_000;
+  return (
+    <>
+      {run.queue_reason === "runtime_unavailable" ? (
+        <span className="hint">等待运行环境恢复</span>
+      ) : run.status === "queued" ? (
+        <StatusTag
+          status="queued"
+          label={
+            run.queue_ahead !== undefined
+              ? `排队中（前面还有 ${run.queue_ahead} 个）`
+              : "排队中"
+          }
+        />
+      ) : abnormalRun(run) ? (
+        <StatusTag
+          status={run.outcome ?? run.status}
+          label={`最近执行${statusLabel(run.outcome ?? run.status)}`}
+        />
+      ) : null}
+      {longQueue && (
+        <span className="queue-warning" role="note">
+          已长时间排队（超过 {run.queue_warning?.after_minutes} 分钟）
+        </span>
+      )}
+    </>
+  );
+}
+function Activity({ value }: { readonly value: string | undefined }) {
+  return value ? (
+    <Time value={value} />
+  ) : (
+    <span className="hint">尚无记录</span>
+  );
 }
 /** Clicks on the row's own links and buttons do their own thing. */
 const interactive = (target: EventTarget | null) =>
   target instanceof Element &&
   target.closest("a, button, input, select, textarea, summary") !== null;
-function AssignmentRow({
-  a,
-  run,
-  projectId,
-  open,
-  onOpen,
-}: {
+interface RowProps {
   readonly a: ExecutionAssignment;
   readonly run: RunView | undefined;
   readonly projectId: string;
   readonly open: boolean;
   readonly onOpen: (trigger: HTMLElement) => void;
+}
+/** C-106: the Assignment id opens the drawer; no separate 详情 button. */
+function OpenButton({
+  a,
+  open,
+  onOpen,
+  button,
+}: Pick<RowProps, "a" | "open" | "onOpen"> & {
+  readonly button: RefObject<HTMLButtonElement | null>;
 }) {
-  const lastActivity = assignmentActivity(a, run);
+  return (
+    <Tooltip content={`${a.role_id} v${a.role_version}`}>
+      <button
+        ref={button}
+        type="button"
+        className="quiet execution-open"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-label={`查看 ${a.id} 详情`}
+        onClick={(event) => {
+          event.stopPropagation();
+          onOpen(event.currentTarget);
+        }}
+      >
+        <IdBadge id={a.id} />
+      </button>
+    </Tooltip>
+  );
+}
+function AssignmentRow({ a, run, projectId, open, onOpen }: RowProps) {
   const button = useRef<HTMLButtonElement>(null);
   return (
     <tr
@@ -185,84 +444,104 @@ function AssignmentRow({
           onOpen(button.current);
       }}
     >
-      <td>
-        <EmployeeIdentity {...a} author_role={a.role_id} />
+      <td data-column="employee">
+        <IdentityRow className="execution-employee">
+          <EmployeeIdentity {...a} author_role={a.role_id} />
+          <OpenButton a={a} open={open} onOpen={onOpen} button={button} />
+        </IdentityRow>
       </td>
-      <td>
-        <div className="execution-assignment">
-          {/* C-106: the Assignment id opens the drawer; no separate 详情 button. */}
-          <Tooltip content={`${a.role_id} v${a.role_version}`}>
-            <button
-              ref={button}
-              type="button"
-              className="quiet execution-open"
-              aria-haspopup="dialog"
-              aria-expanded={open}
-              aria-label={`查看 ${a.id} 详情`}
-              onClick={(event) => {
-                event.stopPropagation();
-                onOpen(event.currentTarget);
-              }}
-            >
-              {a.id}
-            </button>
-          </Tooltip>
-          <span className="id-description">{a.role_id}</span>
-          {a.standing_mode && (
-            <span className="hint">
-              {a.standing_mode === "office" ? "PM 前台" : "PM 后台"}
-            </span>
-          )}
+      <td data-column="task">
+        <TaskCell a={a} projectId={projectId} />
+      </td>
+      <td data-column="state">
+        <div className="execution-state">
+          <RuntimeState a={a} />
+        </div>
+        <div className="execution-state-note">
+          <RunNote a={a} run={run} />
         </div>
       </td>
-      <td>
-        {a.work_item_id ? (
-          <>
-            <CardLink projectId={projectId} id={a.card_id} />
-            <PriorityBadge value={a.card_priority ?? 0} />
-            <IdTag id={a.work_item_id} label="工作项" />
-          </>
-        ) : (
-          <span>常驻 PM（项目级）</span>
-        )}
+      <td data-column="context">
+        <ContextCell run={run} external={a.external} />
       </td>
-      <td>
-        <dl className="execution-status">
-          <dt>运行</dt>
-          <dd>
-            {a.external ? (
-              <span>外接身份，由对接的 Agent 自行拉取</span>
-            ) : (
-              <StatusTag status={a.runtime_state} />
-            )}
-          </dd>
-          <dt>Assignment</dt>
-          <dd>
-            <StatusTag status={a.status} subdued={a.status === "active"} />
-          </dd>
-        </dl>
+      <td data-column="config" className="execution-config">
+        <span className="execution-config-text" title={runConfig(run)}>
+          {runConfig(run)}
+        </span>
       </td>
-      <td data-column="harness">{runHarness(run)}</td>
-      <td data-column="model">{runModelEffort(run)}</td>
-      <td data-column="context">{contextUsage(run)}</td>
-      <td>
-        {run ? (
-          <span className="execution-run">
-            <RunLine run={run} />
-          </span>
-        ) : (
-          <span className="hint">尚无 Run</span>
-        )}
-      </td>
-      <td>
-        {lastActivity ? (
-          <Time value={lastActivity} />
-        ) : (
-          <span className="hint">尚无记录</span>
-        )}
+      <td data-column="activity">
+        <Activity value={assignmentActivity(a, run)} />
       </td>
     </tr>
   );
+}
+/** C-207: the same Assignment as a card below 760px; DOM order = reading order. */
+function AssignmentCard({ a, run, projectId, open, onOpen }: RowProps) {
+  const button = useRef<HTMLButtonElement>(null);
+  const name = a.employee?.name ?? a.author_display ?? a.role_id;
+  return (
+    // biome-ignore lint/a11y/useKeyWithClickEvents: the Assignment id button is the keyboard path.
+    <li
+      className={`execution-card${open ? " selected" : ""}`}
+      aria-label={`${name} ${a.id}`}
+      onClick={(event) => {
+        if (!interactive(event.target) && button.current)
+          onOpen(button.current);
+      }}
+    >
+      <IdentityRow className="execution-card-head">
+        <EmployeeIdentity {...a} author_role={a.role_id} />
+        <span className="execution-state">
+          <RuntimeState a={a} />
+        </span>
+      </IdentityRow>
+      <TaskCell a={a} projectId={projectId} />
+      <div className="execution-state-note">
+        <RunNote a={a} run={run} />
+      </div>
+      <div className="execution-card-context">
+        <span className="hint">上下文</span>
+        <ContextCell run={run} external={a.external} />
+      </div>
+      <IdentityRow className="execution-card-foot">
+        <OpenButton a={a} open={open} onOpen={onOpen} button={button} />
+        <span className="hint">
+          最近活动 <Activity value={assignmentActivity(a, run)} />
+        </span>
+      </IdentityRow>
+      <details className="execution-card-config">
+        <summary className="execution-card-config-summary">
+          运行配置与最近执行
+        </summary>
+        <p className="execution-card-config-line">{runConfig(run)}</p>
+        {run ? (
+          <p className="execution-card-config-line execution-run">
+            <RunLine run={run} />
+          </p>
+        ) : (
+          <p className="execution-card-config-line">尚无 Run</p>
+        )}
+      </details>
+    </li>
+  );
+}
+const NARROW_QUERY = "(max-width: 760px)";
+const narrowQuery = () =>
+  typeof window.matchMedia === "function"
+    ? window.matchMedia(NARROW_QUERY)
+    : undefined;
+/** Only the current layout is rendered, so assistive tech never reads both. */
+function useNarrow() {
+  const [narrow, setNarrow] = useState(() => narrowQuery()?.matches ?? false);
+  useEffect(() => {
+    const list = narrowQuery();
+    if (!list) return;
+    setNarrow(list.matches);
+    const sync = (event: MediaQueryListEvent) => setNarrow(event.matches);
+    list.addEventListener("change", sync);
+    return () => list.removeEventListener("change", sync);
+  }, []);
+  return narrow;
 }
 
 interface RunHistoryState {
@@ -480,12 +759,14 @@ function CursorList({ a }: { readonly a: ExecutionAssignment }) {
 
 function ExecutionDetail({
   a,
+  run,
   live,
   client,
   projectId,
   revision,
 }: {
   readonly a: ExecutionAssignment;
+  readonly run: RunView | undefined;
   readonly live: boolean;
   readonly client: CardiganClient;
   readonly projectId: string;
@@ -494,6 +775,29 @@ function ExecutionDetail({
   return (
     <div className="execution-drawer">
       <dl className="execution-basics">
+        <dt>Assignment</dt>
+        <dd>
+          <StatusTag status={a.status} />
+        </dd>
+        <dt>Harness</dt>
+        <dd>{runHarness(run)}</dd>
+        <dt>模型 / effort</dt>
+        <dd>{runModelEffort(run)}</dd>
+        <dt>上下文</dt>
+        <dd>
+          {contextUsage(run)}
+          {(() => {
+            const reading = contextReading(run);
+            return reading ? (
+              <span className="hint">
+                {" "}
+                {reading.usedTokens.toLocaleString("en-US")} /{" "}
+                {reading.windowTokens.toLocaleString("en-US")} tokens，
+                {contextLevelLabel[reading.level]}
+              </span>
+            ) : null;
+          })()}
+        </dd>
         <dt>Session</dt>
         <dd>{a.session_ref ?? "尚无会话"}</dd>
         <dt>终端</dt>
@@ -565,10 +869,13 @@ export function ExecutionPage({
   client,
   projectId,
   revision = 0,
+  contextRevision = 0,
 }: {
   client: CardiganClient;
   projectId: string;
   revision?: number;
+  /** C-232: bumps when the host's context samples change (SSE `context`). */
+  contextRevision?: number;
 }) {
   const [filters, setFilters] = useRouteFilters({
     kind: "execution",
@@ -588,13 +895,16 @@ export function ExecutionPage({
     setSelected(id);
   };
   const view = filters.view ?? "working";
+  const narrow = useNarrow();
+  const capacityId = useId();
   const load = useCallback(
     () => client.execution(projectId),
     [client, projectId],
   );
+  // Both counters only grow, so their sum changes whenever either does.
   const { data, pending, error, reload, interactive } = useResource(
     load,
-    revision,
+    revision + contextRevision,
   );
   const [sort, setSort] = useState<ExecutionSort>(() =>
     readExecutionSort(projectId),
@@ -624,14 +934,20 @@ export function ExecutionPage({
     <section aria-label="执行视图" className="execution-page">
       <PageTitle
         title="执行视图"
-        description="查看 Agent 的运行环境、最近执行和可用命令。"
         actions={
-          <ExecutionCapacityPanel
-            key={projectId}
-            client={client}
-            projectId={projectId}
-            revision={revision}
-          />
+          <button
+            type="button"
+            className="quiet execution-capacity-jump"
+            onClick={() => {
+              const panel = document.getElementById(capacityId);
+              if (!(panel instanceof HTMLDetailsElement)) return;
+              panel.open = true;
+              panel.scrollIntoView?.({ block: "start" });
+              panel.querySelector("summary")?.focus();
+            }}
+          >
+            机器并发 <span aria-hidden="true">↓</span>
+          </button>
         }
       />
       <FilterBar
@@ -662,39 +978,59 @@ export function ExecutionPage({
               Assignment
             </span>
             <span>{data.runs.filter(unfinished).length} 个未结束 Run</span>
+            {narrow && assignments.length > 0 && (
+              <button
+                type="button"
+                className="quiet execution-sort"
+                aria-label={
+                  sort === "desc"
+                    ? "最近活动从新到旧，点击改为从旧到新"
+                    : "最近活动从旧到新，点击改为从新到旧"
+                }
+                onClick={toggleSort}
+              >
+                最近活动
+                <span aria-hidden="true">{sort === "desc" ? " ↓" : " ↑"}</span>
+              </button>
+            )}
           </p>
-          {!!data.machines.length && (
-            <details>
-              <summary>机器（{data.machines.length}）</summary>
-              <ul>
-                {data.machines.map((machine) => (
-                  <li key={machine.id}>
-                    <IdTag id={machine.id} label={machine.label} />{" "}
-                    <StatusTag status={machine.status} />
-                  </li>
-                ))}
-              </ul>
-            </details>
-          )}
           {assignments.length === 0 ? (
             <EmptyState>
               {view === "working"
                 ? "现在没有工作中的 Assignment。切换筛选可查看全部、已释放或失联的 Assignment。"
                 : `没有符合条件的 Assignment（${viewLabel[view] ?? view}）。`}
             </EmptyState>
+          ) : narrow ? (
+            <ul className="execution-cards" aria-label="Assignment 列表">
+              {assignments.map((assignment) => (
+                <AssignmentCard
+                  key={assignment.id}
+                  a={assignment}
+                  run={latestRun(assignment.id)}
+                  projectId={projectId}
+                  open={assignment.id === selected}
+                  onOpen={(trigger) => open(assignment.id, trigger)}
+                />
+              ))}
+            </ul>
           ) : (
             <div className="execution-table-scroll">
               <table className="execution-table">
+                <colgroup>
+                  <col className="execution-col-employee" />
+                  <col />
+                  <col className="execution-col-state" />
+                  <col className="execution-col-context" />
+                  <col className="execution-col-config" />
+                  <col className="execution-col-activity" />
+                </colgroup>
                 <thead>
                   <tr>
                     <th scope="col">员工</th>
-                    <th scope="col">Assignment</th>
-                    <th scope="col">卡片和工作项</th>
+                    <th scope="col">正在做什么</th>
                     <th scope="col">运行状态</th>
-                    <th scope="col">Harness</th>
-                    <th scope="col">模型和 effort</th>
                     <th scope="col">上下文用量</th>
-                    <th scope="col">最近 Run</th>
+                    <th scope="col">运行配置</th>
                     <th
                       scope="col"
                       aria-sort={sort === "desc" ? "descending" : "ascending"}
@@ -737,6 +1073,27 @@ export function ExecutionPage({
           )}
         </>
       )}
+      {/* C-207: shared capacity sits below the list, folded to one line. */}
+      <ExecutionCapacityPanel
+        key={projectId}
+        id={capacityId}
+        client={client}
+        projectId={projectId}
+        revision={revision}
+      />
+      {!!data?.machines.length && (
+        <details className="execution-machines">
+          <summary>机器（{data.machines.length}）</summary>
+          <ul>
+            {data.machines.map((machine) => (
+              <li key={machine.id}>
+                <IdTag id={machine.id} label={machine.label} />{" "}
+                <StatusTag status={machine.status} />
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
       <Drawer
         open={detail !== undefined}
         onOpenChange={(next) => {
@@ -750,7 +1107,7 @@ export function ExecutionPage({
           const target = event.target;
           if (
             target instanceof Element &&
-            target.closest(".execution-table tbody tr")
+            target.closest(".execution-table tbody tr, .execution-card")
           )
             event.preventDefault();
         }}
@@ -765,6 +1122,7 @@ export function ExecutionPage({
           <ExecutionDetail
             key={detail.id}
             a={detail}
+            run={latestRun(detail.id)}
             live={detailLive}
             client={client}
             projectId={projectId}

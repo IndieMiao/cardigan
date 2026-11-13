@@ -132,7 +132,7 @@ test("PM acceptance hangs under the completion request with its own time", () =>
   expect(current.querySelector(".record-kind")?.textContent).toBe("完成申请");
 });
 
-test("each delivery row has fixed columns: who, id, status, short commit, time", () => {
+test("each delivery row preserves the order: who, id, status, short commit, time", () => {
   renderC85Like();
   const current = screen.getByRole("list", { name: "当前交付" });
   const row = current.querySelector(
@@ -206,9 +206,8 @@ test("records CSS clamps summaries, never scrolls sideways and stacks at narrow 
   expect(rule(".card-main .record-summary p")).toContain(
     "overflow-wrap: anywhere",
   );
-  expect(rule(".card-records")).toContain("container-type: inline-size");
-  const narrow = css.slice(css.indexOf("@container (max-width: 520px)"));
-  expect(narrow).toContain('"who id status"');
+  expect(rule(".identity-row")).toContain("flex-wrap: wrap");
+  expect(rule(".identity-row")).toContain("align-items: center");
   // Light/dark both come from the theme tokens; no hard-coded colors here.
   const records = css.slice(
     css.indexOf("/* C-136: records tab."),

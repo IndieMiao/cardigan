@@ -352,3 +352,26 @@ test.each(["result", "throw"])(
     expect(existsSync(worktree)).toBe(false);
   },
 );
+
+test("worktree cleanup retries independently after its missing terminal reference is cleared", async () => {
+  await doneCard();
+  const gitService = new ServerGit({ store: f.store, dataDir: f.dataDir });
+  const remove = vi.spyOn(gitService, "removeWorktree");
+  remove.mockRejectedValueOnce(new Error("temporary Git failure"));
+  const status = vi.fn<Runtime["status"]>(async () => ({
+    ok: false,
+    error: { code: "runtime_not_found", message: "gone" },
+  }));
+  const loop = new CleanupExecutor({
+    store: f.store,
+    git: gitService,
+    runtime: { ...runtime, status },
+  });
+  await loop.tick();
+  expect(assignment().runtime_ref).toBeNull();
+  expect(existsSync(worktree)).toBe(true);
+  status.mockClear();
+  await loop.tick();
+  expect(status).not.toHaveBeenCalled();
+  expect(existsSync(worktree)).toBe(false);
+});

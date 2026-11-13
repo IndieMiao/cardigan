@@ -235,3 +235,23 @@ test("context usage config defaults to ten minutes and accepts a host-selected c
       resolveServerConfig({ CARDIGAN_CONTEXT_USAGE_STALE_AFTER_MS: value }),
     ).toThrow("CARDIGAN_CONTEXT_USAGE_STALE_AFTER_MS");
 });
+
+test("C-219 runtime failure limit is configurable and rejects invalid counts", () => {
+  expect(
+    resolveServerConfig({ CARDIGAN_RUNTIME_FAILURE_LIMIT: "5" })
+      .runtimeFailureLimit,
+  ).toBe(5);
+  expect(resolveServerConfig({}).runtimeFailureLimit).toBeUndefined();
+  for (const value of [
+    "0",
+    "1",
+    "-1",
+    "1.5",
+    "NaN",
+    "Infinity",
+    "9007199254740992",
+  ])
+    expect(() =>
+      resolveServerConfig({ CARDIGAN_RUNTIME_FAILURE_LIMIT: value }),
+    ).toThrow("CARDIGAN_RUNTIME_FAILURE_LIMIT");
+});

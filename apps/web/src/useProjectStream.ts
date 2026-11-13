@@ -6,6 +6,7 @@ const initial = (project: string | undefined) => ({
   project,
   revision: 0,
   connectionRevision: 0,
+  contextRevision: 0,
   streams: new Map<string, number>(),
   status: "connecting" as StreamStatus,
 });
@@ -60,6 +61,16 @@ export function useProjectStream(
         pending.add(event.stream);
         schedule();
       },
+      // C-232: context samples only refresh the execution view, never the
+      // card or board reads that follow `revision`.
+      context: () => {
+        if (disposed) return;
+        setState((old) =>
+          old.project === project
+            ? { ...old, contextRevision: old.contextRevision + 1 }
+            : old,
+        );
+      },
       status: (status) => {
         if (disposed) return;
         setState((old) => ({ ...old, status }));
@@ -81,6 +92,7 @@ export function useProjectStream(
   const current = state.project === project ? state : initial(project);
   return {
     revision: current.revision,
+    contextRevision: current.contextRevision,
     status: current.status,
     cardRevision: (id: string, affectedCards: readonly string[] = []) =>
       [...new Set([id, ...affectedCards])].reduce(

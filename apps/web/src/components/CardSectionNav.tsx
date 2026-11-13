@@ -1,5 +1,6 @@
 import { type RefObject, useEffect, useRef, useState } from "react";
 import type { CommentBoxHandle } from "./CommentBox.js";
+import { IdBadge } from "./IdTag.js";
 
 export interface CardSection {
   readonly id: string;
@@ -92,7 +93,9 @@ export function CardSectionNav({
     <nav ref={nav} className="card-section-nav" aria-label="卡片区块导航">
       {!inDrawer && (
         <div className="card-nav-identity">
-          <span className="card-nav-id">{cardId}</span>
+          <span className="card-nav-id">
+            <IdBadge id={cardId} />
+          </span>
           <span className="card-nav-title" title={title}>
             {title}
           </span>
@@ -108,6 +111,17 @@ export function CardSectionNav({
             onClick={() => {
               const target = document.getElementById(section.id);
               if (target) {
+                for (
+                  let element: HTMLElement | null = target;
+                  element;
+                  element = element.parentElement
+                )
+                  if (element instanceof HTMLDetailsElement)
+                    element.open = true;
+                const contents = target.querySelector<HTMLDetailsElement>(
+                  ":scope > section > details, :scope > details",
+                );
+                if (contents) contents.open = true;
                 setActive(section.id);
                 scrollTo(target);
               }

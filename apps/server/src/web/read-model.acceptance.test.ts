@@ -25,6 +25,12 @@ import {
   TEST_PASSWORD,
 } from "../../test-support/m5-cross.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 let f: M5Cross;
 let streams: Stream[];
 beforeEach(async () => {
@@ -48,6 +54,7 @@ const question = {
   affected_work_items: [],
   blocking: false,
   decider: "human" as const,
+  plain_summary: TEST_PLAIN_SUMMARY,
 };
 async function read<T>(suffix: string): Promise<T> {
   const r = await f.call(f.projectPath(suffix));

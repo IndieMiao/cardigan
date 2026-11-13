@@ -35,6 +35,12 @@ import { expect, test, vi } from "vitest";
 import { ServerGit } from "../git.js";
 import { cardDetail } from "./read.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 test("a persisted legacy project with empty capabilities creates dev cards and assigns all three roles", () => {
   const dataDir = mkdtempSync(join(tmpdir(), "cardigan-legacy-dev-"));
   const store = Store.open({ dataDir }),
@@ -366,6 +372,7 @@ test.each([
         call<Delivery>(producer, "submit_delivery", {
           work_item_id: production.id,
           kind: "card_completion",
+          plain_summary: TEST_PLAIN_SUMMARY,
           summary: "Document reviewed against acceptance criteria",
           subject,
           attachments: [attachment.id],

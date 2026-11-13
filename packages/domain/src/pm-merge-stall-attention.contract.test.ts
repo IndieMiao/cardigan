@@ -34,6 +34,12 @@ import {
   standingTools,
 } from "./index.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 const system: Actor = { kind: "system", project_id: human.project_id };
 const { work_item_id: _work, ...base } = assignment(900, "pm");
 const ops: Assignment = { ...base, scope: "standing", standing_mode: "ops" };
@@ -466,6 +472,7 @@ test("C-180: human-only audited preference changes the next hold; an explicit ex
   f.commit(recordDecision(f.state, human, hold, io));
   expect(confirmation()).toMatchObject({
     decider: "human",
+    plain_summary: TEST_PLAIN_SUMMARY,
     status: "snoozed",
     snooze: { until: at(30 * minute) },
   });

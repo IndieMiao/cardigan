@@ -175,21 +175,19 @@ test("execution shows working assignments in a table and expands the newest Run,
   expect(row?.textContent).toContain("A-1");
   expect(row?.textContent).toContain("C-1");
   expect(row?.textContent).toContain("W-1");
-  expect(row?.textContent).toContain("R-10");
+  // C-207: the Run id moves to the drawer; the queue position stays visible.
+  expect(row?.textContent).not.toContain("R-10");
   expect(row?.textContent).toContain("排队中");
-  expect(row?.textContent).toContain("运行");
-  expect(row?.textContent).toContain("Assignment");
-  expect(
-    row?.querySelector(".status-active")?.classList.contains("status-subdued"),
-  ).toBe(true);
-  expect(row?.querySelector(".status-active svg")).toBeNull();
+  // C-207: the normal "active" Assignment status is not repeated per row.
+  expect(row?.querySelector(".status-active")).toBeNull();
+  expect(row?.textContent).not.toContain("有效");
   expect(
     row?.querySelector(".status-idle svg.status-shape-idle"),
   ).not.toBeNull();
   expect(
     row?.querySelector(".status-queued svg.status-shape-pending"),
   ).not.toBeNull();
-  expect(screen.getByRole("columnheader", { name: "最近 Run" })).toBeTruthy();
+  expect(screen.getByRole("columnheader", { name: "运行配置" })).toBeTruthy();
   fireEvent.click(toggle);
   const drawer = await screen.findByRole("dialog", { name: "A-1 详情" });
   for (const text of [
@@ -801,9 +799,12 @@ test.each([null, assignment.runtime_ref])(
         })}
       />,
     );
-    expect(
-      await screen.findByText("外接身份，由对接的 Agent 自行拉取"),
-    ).toBeTruthy();
+    const row = (
+      await screen.findByRole("button", { name: "查看 A-1 详情" })
+    ).closest("tr");
+    expect(row?.textContent).toContain("外接身份");
+    expect(row?.textContent).toContain("由对接的 Agent 自行拉取");
+    expect(row?.textContent).toContain("外接身份，暂无数据");
     expect(screen.queryByText("已暂停")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "查看 A-1 详情" }));
     await screen.findByRole("dialog", { name: "A-1 详情" });

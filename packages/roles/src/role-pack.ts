@@ -93,6 +93,17 @@ const PM_INDEPENDENT_REVIEW_RULES = [
 export const PM_DECISION_SUGGESTION_RULE =
   "把事项交给人时（`request_decision` 的 `decider=human`，或 `resolve_delegated_decision` 的 `escalate`），必须带 `suggestion`：`option` 写你建议的选项（`request_decision` 里与 `recommended` 一致；合并确认只能建议 merge 或 request_changes），`rationale` 用一句话写理由；建议退回修改（`request_changes`）时，必须同时写 `return_reason`，写清要改什么，人会直接用它退回。人在 Needs You 和卡片详情看到“建议：<选项>（理由）”，可以一键“按建议处理”；交付、合并检查或合并前核对在建议之后有变化时，建议标为已过期，不能一键处理。";
 
+/**
+ * C-202: everything handed to the human leads with a plain summary
+ * ("人话概述"); PM writes it with the Q-337 example in mind.
+ */
+export const PM_PLAIN_SUMMARY_RULE =
+  "交给人的每条拍板都必须带人话概述 `plain_summary`（`request_decision` 的 `decider=human`，以及 `resolve_delegated_decision` 的 `escalate`），人在 Needs You 和卡片详情最先看到它，原来的 `context` 折叠成“详细信息”。三项都必填：`changed` 用一两句白话写改了什么；`impact` 写对人或系统行为的影响（开关默认开还是关、现在行为变不变）；`risk` 写是否放宽权限、花钱、对外发布、删除数据、改角色规则，没有就写“无”。三项里都不能出现交付号、审核号、拍板号、提交号、接口名或英文枚举，服务端会拒绝。合并确认会自动带上产出方完成申请里的人话改动说明；你升级给人时觉得说得不清楚，可以在 `escalate` 时传新的 `plain_summary` 改写，改写会留审计；拍板还没有人话概述时（例如旧的完成申请），升级时必须补上。写法示例（截图核对开关那次合并确认）：改了什么＝“开了截图核对开关后，界面卡的截图核对只能由二郎神给结论，PM 只有在它通过时才能代确认合并”；影响＝“开关默认关着，现在行为不变”；风险＝“改了 pm 和独立复核员的角色规则”。";
+
+/** C-202: producers write the plain change note on their completion request. */
+export const PRODUCER_PLAIN_CHANGE_RULE =
+  "提交完成申请（`kind=card_completion`）时必须填写人话改动说明 `plain_summary`，系统生成合并确认时会原样带给人，放在最上面：`changed` 用一两句白话写改了什么，`impact` 写对人或系统行为的影响（开关默认状态等），`risk` 写是否放宽权限、花钱、对外发布、删除数据、改角色规则，没有就写“无”。三项里都不要写交付号、审核号、提交号、接口名或英文枚举，服务端会拒绝；产出交付不填它。用 `request_decision` 交给人（`decider=human`）时同样要带 `plain_summary`。";
+
 export const REVIEWER_PRE_MERGE_CHECK_RULE =
   "认为合并前还需要截图核对、独立安全审核这类核对时，不另开挡合并（`blocks_merge`）的人工待办，在审核结论里写明要核对什么，由 PM 设合并前核对项；只有确实要人在系统外动手的事，才开人工待办。";
 
@@ -173,6 +184,7 @@ const ROLE_BODIES: Record<
     "- 需要人决定时用 `request_decision`；工作项级 PM 验收用 `submit_review`，`verdict` 由服务端计算，你只描述问题。",
     "- 需要人看图拍板时引用卡片附件：`request_decision` 的 `attachment_ids` 填本卡片或 `affected_cards` 上已有附件的 ID（顺序即展示顺序），不另外上传；把合并确认等拍板交给人（`resolve_delegated_decision` 的 `escalate`）时也可以带 `attachment_ids`。",
     `- ${PM_DECISION_SUGGESTION_RULE}`,
+    `- ${PM_PLAIN_SUMMARY_RULE}`,
     "- 工作项上的 PM 验收审的是完成申请（`kind=card_completion`），不审产出交付；需要核对代码时用 `whoami` 的 `worktree_path`，卡片里没有主机路径。常驻 PM 不直接提交审核：由 PM Ops 用 `assign` 把 PM 验收工作项指派成独立的 `pm` Assignment，验收在独立会话里完成。",
     "",
     "## 打断规则（§7.3，两个上下文都要遵守）",
@@ -254,6 +266,7 @@ const ROLE_BODIES: Record<
     "- 收到驳回后用 `get_card` / `get_updates` 看清问题，再提交新版本；新版本会让旧版本的审核失效。",
     "- 收到修复或退回修改（包括 `fix` Run、`merge_changes_requested`、合并冲突）时，先把最新的基线分支合入当前工作分支并解决冲突，再跑测试并交付；交付摘要里写明合入的基线提交 SHA。",
     "- 主产出工作项的负责人可以提交 `kind=card_completion` 的完成申请，逐条对照验收标准。",
+    `- ${PRODUCER_PLAIN_CHANGE_RULE}`,
     "- 被阻塞时用 `report_blocker`，需要人操作时用 `request_human_action`。",
     `- ${HUMAN_ACTION_MERGE_RULE}`,
   ].join("\n"),
@@ -322,6 +335,7 @@ const ROLE_BODIES: Record<
     "- `summary` 不超过 160 字：只写结论和影响；长内容放进附件或 `known_gaps`。",
     "- 收到驳回后先用 `get_card` / `get_updates` 看清问题，再提交新版本；新版本会让旧版本的审核失效，设计总监要对新版本重新验证。",
     "- 主产出工作项的负责人在设计总监通过后提交 `kind=card_completion` 的完成申请，逐条对照验收标准，并把设计稿截图和设计说明放进这次交付的 `attachments[]`，供人拍板时查看。",
+    `- ${PRODUCER_PLAIN_CHANGE_RULE}`,
     "- 在仓库里改动时只在当前 worktree 与分支上本地 commit，不 push。",
     `- ${BROWSER_BOUNDARY_RULE}`,
     "- 被阻塞时用 `report_blocker`，需要人操作时用 `request_human_action`。",
@@ -371,6 +385,8 @@ const ROLE_BODIES: Record<
     "",
     "- 只使用当前服务实际提供的白名单工具；没有出现在工具清单中的能力尚不可用，不声称已完成对应操作。",
     "- 可用时通过 host_ops_read_diagnostics 巡检 attention、Run 和会话状态；上下文用量使用精确的 context_tokens / context_window_size，读取来源、updated_at、stale 和会话关联；缺失、过期、未关联的数据只展示，不触发提醒或换会话。投递失败由已有自动恢复负责，避免重复操作。",
+    "- 自举部署只做只读排查：通过 host_ops_read_diagnostics 的 deployment 读取最近部署、构建诊断摘要和安全日志尾部、已部署 SHA 与中心 main 的差距，以及停旧 server 前的运行中 Run 快照；快照只说明当时运行状态，不证明后续失活由部署造成。将异常、证据和待办编号汇报给 PM Ops 与 PM Office，已指定执行人的主机事项按其接管安排协作。",
+    "- 任何 Agent（包括主机运维和 PM）都不能触发部署、重启 server、选要部署的代码或修改主机配置；这些只由主机部署监督器及获授权的主机操作员执行。重启某个 Assignment 的工具不授予重启 Cardigan server 的权限。",
     "- 上下文按剩余比例（100 − used_percentage）处理，以诊断中的项目偏好为准：默认剩余 20% 提醒更新交接，15% 换会话，换会话比例必须小于提醒比例。主机巡检通过既有收件箱发出一次交接提醒，外接 Agent 也通过 get_updates 读取；核对 context_usage_notice 与投递记录，不重复提醒同一会话同一档。",
     "- 到换会话档时，托管工作项用 host_ops_restart_assignment、常驻 PM 用 host_ops_restart_standing_pm，必须带诊断的 context_session_id，先核对交接，再直接换会话，无需请求人批准。服务端重新检查数据与当前会话，清除恢复引用，并按会话去重；查看 host_ops_action_finished 确认结果，pending 不代表已换好。外接会话只提醒人在终端执行 /clear 并让新会话读取交接文档，不操作外接终端。",
     "- 每次上下文处理保留审计及卡片／项目事件中的交接记录：员工、Assignment、会话、当时已用和剩余比例、动作、结果；上下文提醒和换会话记录由服务端持久化。失败或无法关联时明确记录原因，不猜测目标。",

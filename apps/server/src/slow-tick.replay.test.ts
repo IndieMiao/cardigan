@@ -7,6 +7,14 @@
  *
  *   CARDIGAN_TICK_REPLAY=1 REPLAY_CARDS=200 pnpm --filter @cardigan/server \
  *     exec vitest run src/slow-tick.replay.test.ts --silent=false
+ *
+ * Do not also set CARDIGAN_TICK_PROFILE=1: the server would install its own
+ * profiler over this harness's one and every span would read zero.
+ *
+ * C-221: REPLAY_LOOPS=1 then also ticks the cleanup, reconcile and backup
+ * executors REPLAY_LOOP_TICKS times against the same store, with stubbed Git
+ * and runtime. That measures their database and JavaScript share only; real
+ * Git, filesystem and terminal time is not synthesized.
  */
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -17,12 +25,15 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { expect, test } from "vitest";
 import { call } from "../test-support/web.js";
+import { CleanupExecutor } from "./cleanup-loop.js";
 import { Dispatcher } from "./dispatch.js";
+import type { ReconcileGit } from "./git.js";
 import {
   acceptThroughMergeGate,
   m4Fixture,
   m4Scenario,
 } from "./m4-fixtures.js";
+import { BackupExecutor, ReconcileExecutor } from "./reconcile-loop.js";
 import { startCardiganServer } from "./server.js";
 import {
   type ProfileLine,
@@ -36,6 +47,8 @@ const COMMENTS = Number(process.env.REPLAY_COMMENTS ?? 20);
 const OPEN = Number(process.env.REPLAY_OPEN_CARDS ?? 10);
 const TICKS = Number(process.env.REPLAY_TICKS ?? 5);
 const PROBE_MS = 100;
+const LOOPS = process.env.REPLAY_LOOPS === "1";
+const LOOP_TICKS = Number(process.env.REPLAY_LOOP_TICKS ?? 2);
 
 test.skipIf(process.env.CARDIGAN_TICK_REPLAY !== "1")(
   "replay dispatcher ticks against production-sized synthetic data",
@@ -210,6 +223,62 @@ test.skipIf(process.env.CARDIGAN_TICK_REPLAY !== "1")(
         JSON.stringify(profile),
       );
       inspector.disconnect();
+    }
+    if (LOOPS) {
+      // Stubs: no worktree exists, Git finds nothing and terminals are gone.
+      const project = {
+        project_id: f.project_id,
+        source_repo: "replay",
+        base_branch: "main",
+      };
+      const git = {
+        projectOf: () => project,
+        reconcile: async (
+          _p: unknown,
+          _a: unknown,
+          _d: unknown,
+          readChecks?: () => unknown,
+        ) => {
+          readChecks?.();
+          return [];
+        },
+        removeWorktree: async () => ({ status: "already_removed" as const }),
+        listBuildCheckouts: async () => [],
+        removeBuildCheckout: async () => ({ status: "removed" }),
+        diffWorktree: async () => {
+          throw new Error("unused");
+        },
+        backup: async () => {},
+        repairPin: async () => false,
+      } as unknown as ReconcileGit;
+      const loopRuntime = {
+        ...runtime,
+        status: async () => ({
+          ok: false as const,
+          error: { code: "runtime_not_found", message: "gone" },
+        }),
+      };
+      const executors = {
+        cleanup: new CleanupExecutor({
+          store: f.store,
+          git,
+          runtime: loopRuntime as never,
+          clock: f.clock,
+          report: () => undefined,
+        }),
+        reconcile: new ReconcileExecutor({
+          store: f.store,
+          git,
+          clock: f.clock,
+          report: () => undefined,
+        }),
+        backup: new BackupExecutor({ store: f.store, git }),
+      };
+      for (let i = 0; i < LOOP_TICKS; i++)
+        for (const [name, executor] of Object.entries(executors)) {
+          await profiler.tick(name, () => executor.tick());
+          await new Promise((r) => setTimeout(r, 200));
+        }
     }
     await idle();
     probing = false;

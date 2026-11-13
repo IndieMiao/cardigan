@@ -5,8 +5,10 @@ import {
   type CardId,
   type Clock,
   type CommandState,
+  type ContextObservation,
   checkHostOpsAccess,
   claimHostOpsAction,
+  contextUsageFresh,
   dispatchRecoveryQueuedAt,
   finishHostOpsAction,
   type HostOpsExecution,
@@ -48,6 +50,7 @@ import {
   DEFAULT_CONTEXT_STALE_AFTER_MS,
   readSessionContexts,
 } from "./context-usage.js";
+import { readDeploymentDiagnostics } from "./deployment-diagnostics.js";
 import { tryHostOpsLock } from "./host-ops-lock.js";
 import { revokeStoppedRunTokens, stopRunRuntime } from "./stop-run.js";
 import { UpstreamHealthMonitor } from "./upstream-health.js";
@@ -93,6 +96,11 @@ export class HostOpsService {
   private readonly upstreamPolls = new Map<ProjectId, Promise<void>>();
   private closing = false;
   private lastContextPoll = Number.NEGATIVE_INFINITY;
+  /** C-232: the last poll's fresh observations, in memory only (not persisted). */
+  private readonly contexts = new Map<
+    ProjectId,
+    ReadonlyMap<AssignmentId, ContextObservation>
+  >();
   private serial: Promise<void> = Promise.resolve();
   constructor(private readonly options: Options) {
     this.clock = options.clock ?? { now: () => new Date().toISOString() };
@@ -127,7 +135,10 @@ export class HostOpsService {
         ),
       ),
     );
-    const sessions = await this.sessions(actor.project_id);
+    const [sessions, deployment] = await Promise.all([
+      this.sessions(actor.project_id),
+      readDeploymentDiagnostics(this.options.store, actor.project_id),
+    ]);
     const activity = await this.observeUpstream(actor.project_id);
     this.upstream?.reconcile(this.options.store, actor.project_id, activity);
     context.revalidateToken?.();
@@ -167,6 +178,7 @@ export class HostOpsService {
       }));
       return {
         ...attention,
+        ...(deployment ? { deployment } : {}),
         ...(this.upstream
           ? { upstream_health: this.upstream.diagnostics(state, activity) }
           : {}),
@@ -456,6 +468,16 @@ export class HostOpsService {
     this.lastContextPoll = Date.parse(this.clock.now());
     for (const project of this.options.store.listProjects()) {
       const sessions = await this.sessions(project.id);
+      this.contexts.set(
+        project.id,
+        new Map(
+          sessions.flatMap((session) =>
+            session.observation && !session.stale
+              ? [[session.observation.assignment_id, session.observation]]
+              : [],
+          ),
+        ),
+      );
       for (const session of sessions) {
         const usage = session.observation;
         if (!usage || session.stale) continue;
@@ -485,6 +507,23 @@ export class HostOpsService {
         });
       }
     }
+  }
+  /**
+   * C-232: read-only view of the latest context poll for the Workbench. A
+   * sample older than the stale limit is dropped at read time, so a stopped
+   * patrol never leaves an old reading on screen.
+   */
+  contextUsage(
+    project: ProjectId,
+  ): ReadonlyMap<AssignmentId, ContextObservation> {
+    const now = this.clock.now();
+    const staleMs =
+      this.options.contextUsage?.staleAfterMs ?? DEFAULT_CONTEXT_STALE_AFTER_MS;
+    return new Map(
+      [...(this.contexts.get(project) ?? [])].filter(([, usage]) =>
+        contextUsageFresh(usage, now, staleMs),
+      ),
+    );
   }
   tick(): Promise<void> {
     const next = this.serial.then(async () => {

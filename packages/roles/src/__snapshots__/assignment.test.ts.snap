@@ -42,6 +42,7 @@ exports[`snapshot: claude-code > command, arguments and files 1`] = `
 - 收到驳回后用 \`get_card\` / \`get_updates\` 看清问题，再提交新版本；新版本会让旧版本的审核失效。
 - 收到修复或退回修改（包括 \`fix\` Run、\`merge_changes_requested\`、合并冲突）时，先把最新的基线分支合入当前工作分支并解决冲突，再跑测试并交付；交付摘要里写明合入的基线提交 SHA。
 - 主产出工作项的负责人可以提交 \`kind=card_completion\` 的完成申请，逐条对照验收标准。
+- 提交完成申请（\`kind=card_completion\`）时必须填写人话改动说明 \`plain_summary\`，系统生成合并确认时会原样带给人，放在最上面：\`changed\` 用一两句白话写改了什么，\`impact\` 写对人或系统行为的影响（开关默认状态等），\`risk\` 写是否放宽权限、花钱、对外发布、删除数据、改角色规则，没有就写“无”。三项里都不要写交付号、审核号、提交号、接口名或英文枚举，服务端会拒绝；产出交付不填它。用 \`request_decision\` 交给人（\`decider=human\`）时同样要带 \`plain_summary\`。
 - 被阻塞时用 \`report_blocker\`，需要人操作时用 \`request_human_action\`。
 - 事项不完成就不应该合并时（例如需要人提供或轮换凭据、人确认安全或权限取舍、人在仓库外完成某个前置操作），\`request_human_action\` 必须传 \`blocks_merge=true\`；只是请人看看、知会或可以事后补做的，不设。
 - 在本机员工 Run 中自测使用的 worker 数不超过主机限流配置的上限（启动时已强制），不要设法绕过主机限流；全量检查交给合并检查。
@@ -233,6 +234,7 @@ exports[`snapshot: codex > command, arguments and files 1`] = `
 - 收到驳回后用 \`get_card\` / \`get_updates\` 看清问题，再提交新版本；新版本会让旧版本的审核失效。
 - 收到修复或退回修改（包括 \`fix\` Run、\`merge_changes_requested\`、合并冲突）时，先把最新的基线分支合入当前工作分支并解决冲突，再跑测试并交付；交付摘要里写明合入的基线提交 SHA。
 - 主产出工作项的负责人可以提交 \`kind=card_completion\` 的完成申请，逐条对照验收标准。
+- 提交完成申请（\`kind=card_completion\`）时必须填写人话改动说明 \`plain_summary\`，系统生成合并确认时会原样带给人，放在最上面：\`changed\` 用一两句白话写改了什么，\`impact\` 写对人或系统行为的影响（开关默认状态等），\`risk\` 写是否放宽权限、花钱、对外发布、删除数据、改角色规则，没有就写“无”。三项里都不要写交付号、审核号、提交号、接口名或英文枚举，服务端会拒绝；产出交付不填它。用 \`request_decision\` 交给人（\`decider=human\`）时同样要带 \`plain_summary\`。
 - 被阻塞时用 \`report_blocker\`，需要人操作时用 \`request_human_action\`。
 - 事项不完成就不应该合并时（例如需要人提供或轮换凭据、人确认安全或权限取舍、人在仓库外完成某个前置操作），\`request_human_action\` 必须传 \`blocks_merge=true\`；只是请人看看、知会或可以事后补做的，不设。
 - 在本机员工 Run 中自测使用的 worker 数不超过主机限流配置的上限（启动时已强制），不要设法绕过主机限流；全量检查交给合并检查。
@@ -412,6 +414,7 @@ exports[`snapshot: pi > command, arguments and files 1`] = `
 - 收到驳回后用 \`get_card\` / \`get_updates\` 看清问题，再提交新版本；新版本会让旧版本的审核失效。
 - 收到修复或退回修改（包括 \`fix\` Run、\`merge_changes_requested\`、合并冲突）时，先把最新的基线分支合入当前工作分支并解决冲突，再跑测试并交付；交付摘要里写明合入的基线提交 SHA。
 - 主产出工作项的负责人可以提交 \`kind=card_completion\` 的完成申请，逐条对照验收标准。
+- 提交完成申请（\`kind=card_completion\`）时必须填写人话改动说明 \`plain_summary\`，系统生成合并确认时会原样带给人，放在最上面：\`changed\` 用一两句白话写改了什么，\`impact\` 写对人或系统行为的影响（开关默认状态等），\`risk\` 写是否放宽权限、花钱、对外发布、删除数据、改角色规则，没有就写“无”。三项里都不要写交付号、审核号、提交号、接口名或英文枚举，服务端会拒绝；产出交付不填它。用 \`request_decision\` 交给人（\`decider=human\`）时同样要带 \`plain_summary\`。
 - 被阻塞时用 \`report_blocker\`，需要人操作时用 \`request_human_action\`。
 - 事项不完成就不应该合并时（例如需要人提供或轮换凭据、人确认安全或权限取舍、人在仓库外完成某个前置操作），\`request_human_action\` 必须传 \`blocks_merge=true\`；只是请人看看、知会或可以事后补做的，不设。
 - 在本机员工 Run 中自测使用的 worker 数不超过主机限流配置的上限（启动时已强制），不要设法绕过主机限流；全量检查交给合并检查。

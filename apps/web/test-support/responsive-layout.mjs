@@ -29,19 +29,89 @@ function withCurrentRecords(value) {
   const [from, to] = recordsRegion(css);
   return `${value.slice(0, start)}${css.slice(from, to)}${value.slice(end)}`;
 }
-const baseline = withCurrentRecords(
-  execFileSync(
-    "git",
+// C-204 intentionally changes number tags and person rows. Compare unrelated
+// desktop geometry against the baseline with only these shared rules updated.
+function withCurrentIdentity(value) {
+  // Keep each theme's unrelated variables from the baseline. Only the ID
+  // palette is an intentional colour change in this comparison.
+  for (const theme of [
+    /^:root \{[^}]*\}/m,
+    /@media \(prefers-color-scheme: dark\) \{\s*:root \{[^}]*\}/,
+  ]) {
+    const variables = /--id-[\w-]+-(?:fg|bg):[^;]+;/g;
+    const declarations = css.match(theme)?.[0].match(variables);
+    assert(declarations?.length && theme.test(value), "ID theme CSS not found");
+    value = value.replace(
+      theme,
+      (block) =>
+        `${block.slice(0, -1).replace(variables, "")}\n${declarations.join("\n")}\n}`,
+    );
+  }
+  for (const [startPattern, end] of [
+    [/\.id-tag(?:,| \{)/, ".filter-bar {"],
+    [/\.entry-meta \{/, ".timeline-version {"],
+  ]) {
+    const start = value.search(startPattern),
+      from = css.search(startPattern);
+    value =
+      value.slice(0, start) +
+      css.slice(from, css.indexOf(end, from)) +
+      value.slice(value.indexOf(end, start));
+  }
+  for (const selector of [
+    ".identity-row > *",
+    ".employee-inline .employee-label strong",
+    ".needs-delivery-list p",
+    ".needs-review-issues",
+    ".decision-record-by .employee-identity",
+  ]) {
+    const start = css.indexOf(`${selector} {`);
+    value += `\n${css.slice(start, css.indexOf("}", start) + 1)}`;
+  }
+  return (
+    value + css.slice(css.indexOf("/* C-204: shared person/number/status rows"))
+  );
+}
+// C-210 intentionally widens board lanes and changes card typography. Keep
+// baseline comparisons for the rest of the page, replacing only board rules.
+function withCurrentBoard(value) {
+  for (const [pattern, end] of [
+    [/\.board-scroll \{/, ".card-tile {"],
     [
-      "show",
-      `${process.env.LAYOUT_BASELINE_REF ?? "origin/main"}:apps/web/src/styles.css`,
+      /\/\* C-(?:31: compact|210: readable) cards/,
+      "/* V10b: template management",
     ],
-    { cwd: root, encoding: "utf8" },
+  ]) {
+    const start = value.search(pattern),
+      from = css.search(pattern);
+    assert(start >= 0 && from >= 0, "Board CSS region not found");
+    value =
+      value.slice(0, start) +
+      css.slice(from, css.indexOf(end, from)) +
+      value.slice(value.indexOf(end, start));
+  }
+  const priority = /\.board-card \.priority-badge \{[^}]+\}/;
+  const currentPriority = css.match(priority)?.[0];
+  assert(currentPriority, "Board priority target rule not found");
+  value = priority.test(value)
+    ? value.replace(priority, currentPriority)
+    : `${value}\n${currentPriority}`;
+  return value;
+}
+const baseline = withCurrentBoard(
+  withCurrentIdentity(
+    withCurrentRecords(
+      execFileSync(
+        "git",
+        [
+          "show",
+          `${process.env.LAYOUT_BASELINE_REF ?? "origin/main"}:apps/web/src/styles.css`,
+        ],
+        { cwd: root, encoding: "utf8" },
+      ),
+    ),
   ),
 );
-const executionAllowance = `.execution-table th { white-space: nowrap; }
-.execution-status { grid-template-columns: auto minmax(min-content, 1fr); }
-.execution-status :is(dt, .status) { white-space: nowrap; }`;
 // C-134 replaces the decision history cards with compact records.
 const decisionHistoryAllowance = css.slice(
   css.indexOf("/* C-134 decision history: compact records. */"),
@@ -75,7 +145,7 @@ const server = await createServer({
 const routes = [
   ["card", "cards/C-1", ".timeline-load"],
   ["needs-you", "needs-you", ".needs-item"],
-  ["execution", "execution?view=all", ".execution-row"],
+  ["execution", "execution?view=all", ".execution-row, .execution-card"],
   ["decision-history", "decision-history", ".decision-record"],
   ["snapshot", "snapshot", ".delivery-table"],
   ["settings", "settings", "#preferences form"],
@@ -212,7 +282,11 @@ try {
           { name: "prefers-reduced-motion", value: "reduce" },
         ],
       });
-      for (const [name, route, ready] of routes) {
+      for (const [name, route, ready] of routes.filter(
+        ([name]) =>
+          !process.env.LAYOUT_CASES ||
+          process.env.LAYOUT_CASES.split(",").includes(name),
+      )) {
         const label = `${name} ${width}px ${theme}`;
         await send("Page.navigate", {
           url: `${server.resolvedUrls.local[0]}__layout?case=${name}#/p/p-1/${route}`,
@@ -251,7 +325,8 @@ try {
               "fixed",
           };
         });
-        if (name === "execution") {
+        // C-207: below 760px the execution view renders cards, not a table.
+        if (name === "execution" && width > 760) {
           const headers = await run(() =>
             Array.from(
               document.querySelectorAll(".execution-table th"),
@@ -278,7 +353,7 @@ try {
               },
             ),
           );
-          assert.equal(headers.length, 9, `${label}: missing column headers`);
+          assert.equal(headers.length, 6, `${label}: missing column headers`);
           for (const header of headers) {
             assert(
               header.tops.length > 0,
@@ -293,9 +368,7 @@ try {
           // C-159: status labels in the run status column stay on one line.
           const statuses = await run(() =>
             Array.from(
-              document.querySelectorAll(
-                ".execution-status dt, .execution-status .status",
-              ),
+              document.querySelectorAll(".execution-state .status"),
               (el) => {
                 const range = document.createRange();
                 range.selectNodeContents(el);
@@ -320,7 +393,7 @@ try {
               },
             ),
           );
-          assert.equal(statuses.length, 28, `${label}: missing status labels`);
+          assert.equal(statuses.length, 8, `${label}: missing status labels`);
           for (const status of statuses)
             assert(
               status.lines <= 1,
@@ -525,7 +598,7 @@ try {
               label,
             );
           }
-          if (name === "execution" || name === "snapshot") {
+          if ((name === "execution" && width > 760) || name === "snapshot") {
             const scroll = await run(
               (selector) => {
                 const el = document.querySelector(selector);
@@ -561,22 +634,23 @@ try {
           assert(layout.fixed, label);
           assert.equal(layout.main.x, 220, label);
           const current = await geometry();
-          // C-122 and C-159 intentionally change header and status wrapping
-          // and column widths. Keep comparing the full desktop geometry with
-          // only those allowances.
-          await setCss(
-            name === "execution"
-              ? `${baseline}\n${executionAllowance}`
-              : name === "decision-history"
+          // C-207 redesigns the execution view (new DOM and stylesheet), so
+          // it is not compared with the baseline; execution-layout-screenshots
+          // checks its row heights and first screen instead. C-134 changes
+          // the decision history records with its own allowance.
+          if (name !== "execution") {
+            await setCss(
+              name === "decision-history"
                 ? `${baseline}\n${decisionHistoryAllowance}`
                 : baseline,
-          );
-          assert.deepEqual(
-            await geometry(),
-            current,
-            `${label}: desktop layout changed`,
-          );
-          await setCss(css);
+            );
+            assert.deepEqual(
+              await geometry(),
+              current,
+              `${label}: desktop layout changed`,
+            );
+            await setCss(css);
+          }
         }
         console.log(`PASS ${label}`);
       }
@@ -584,7 +658,9 @@ try {
   }
   assert.deepEqual(browser.errors, [], "Browser runtime errors");
   console.log(
-    "PASS 70 layout cases, including single-line execution headers, timeline pagination and internal table scrolling",
+    process.env.LAYOUT_CASES
+      ? `PASS selected layout cases: ${process.env.LAYOUT_CASES} (5 widths, 2 themes)`
+      : "PASS 70 layout cases, including single-line execution headers, timeline pagination and internal table scrolling",
   );
 } finally {
   await browser?.close();

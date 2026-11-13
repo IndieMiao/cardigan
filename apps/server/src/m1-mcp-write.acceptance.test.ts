@@ -15,6 +15,12 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { stubGit } from "./git-test-support.js";
 import { type CardiganServer, startCardiganServer } from "./server.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 const PM_TOOLS = [
   "create_card",
   "update_card",
@@ -363,6 +369,7 @@ describe("every write tool has one normal call", () => {
       affected_work_items: [],
       blocking: false,
       decider: "human",
+      plain_summary: TEST_PLAIN_SUMMARY,
     });
     expect(decision.status).toBe("open");
 
@@ -743,6 +750,7 @@ describe("§16: forged identity and illegal transitions", () => {
       idempotency_key: "w-close-completion",
       work_item_id: w.development,
       kind: "card_completion",
+      plain_summary: TEST_PLAIN_SUMMARY,
       summary: "fictional completion",
       subject: { kind: "git_head", value: sha("a") },
       requested_verifiers: [w.acceptance],
@@ -930,6 +938,7 @@ describe("attachment limits", () => {
       affected_work_items: [],
       blocking: false,
       decider: "human",
+      plain_summary: TEST_PLAIN_SUMMARY,
     });
 
     const accepted = await call(w.coder, "upload_attachment", {

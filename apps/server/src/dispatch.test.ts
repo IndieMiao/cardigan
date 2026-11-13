@@ -1140,7 +1140,7 @@ test.each(["request_changes", "cancelled"] as const)(
           },
         },
         run: async (input) => {
-          expect(occupied()).toBe(0);
+          expect(occupied()).toBe(2); // Admission reserves before the ready handshake (C-201).
           input.onReady?.();
           expect(occupied()).toBe(2);
           if (action === "cancelled")

@@ -22,6 +22,12 @@ import {
 } from "../../index.js";
 import { apply, human, ports, role, value } from "../test-fixtures.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 /** Real create/assign/launch transitions; no pre-seeded in_progress entities. */
 export function mergeFixture(
   policy: "confirm" | "auto" = "confirm",
@@ -161,6 +167,9 @@ export function mergeFixture(
     const p = {
       work_item_id: coder.work_item_id as Delivery["work_item_id"],
       kind,
+      ...(kind === "card_completion"
+        ? { plain_summary: TEST_PLAIN_SUMMARY }
+        : {}),
       summary: "Ready",
       known_gaps,
       ...(attachments ? { attachments } : {}),

@@ -8,6 +8,7 @@ import { DecisionAffectedCards } from "./DecisionAffectedCards.js";
 import { DecisionAttachments } from "./DecisionAttachments.js";
 import { EmployeeIdentity } from "./EmployeeIdentity.js";
 import { IdTag, LongContent, StatusTag } from "./Foundation.js";
+import { IdentityRow } from "./IdentityRow.js";
 import { Markdown } from "./Operations.js";
 import { TimelineHeader } from "./TimelineHeader.js";
 import { TimelineVersion } from "./TimelineVersion.js";
@@ -43,12 +44,9 @@ export function TimelineContent({
                 : "记录拍板"
       }
       conclusion={
-        <h4 className="timeline-conclusion">
-          <span>
-            {type} {id}
-          </span>{" "}
-          {result}
-        </h4>
+        <IdentityRow as="h4" className="timeline-conclusion">
+          <IdTag id={id} label={type} /> {result}
+        </IdentityRow>
       }
     />
   );
@@ -63,7 +61,7 @@ export function TimelineContent({
           <StatusTag status={delivery.status} />,
         )}
         <p className="entry-summary">{delivery.summary}</p>
-        <div className="entry-meta">
+        <IdentityRow className="entry-meta">
           <IdTag
             id={delivery.work_item_id}
             label={workLabel(delivery.work_item_id)}
@@ -83,7 +81,7 @@ export function TimelineContent({
               />
             </span>
           )}
-        </div>
+        </IdentityRow>
         <details>
           <summary>
             测试结果与证据（{delivery.test_results?.length ?? 0} 项测试）
@@ -134,7 +132,7 @@ export function TimelineContent({
           {review.recheck_required && "需要复审。"}
           {delivery?.status === "superseded" && <span>旧版本结论，已失效</span>}
         </p>
-        <div className="entry-meta">
+        <IdentityRow className="entry-meta">
           <IdTag
             id={review.work_item_id}
             label={workLabel(review.work_item_id)}
@@ -153,7 +151,7 @@ export function TimelineContent({
           ) : (
             <span>版本未记录</span>
           )}
-        </div>
+        </IdentityRow>
         <details>
           <summary>
             问题列表（{review.issues?.length ?? 0}）
@@ -231,7 +229,7 @@ export function TimelineContent({
             自动合并（偏好设置：{decision.auto_merge.minutes} 分钟）
           </p>
         )}
-        <div className="entry-meta">
+        <IdentityRow className="entry-meta">
           <span>
             {resolved ? (
               "已记录拍板原话"
@@ -250,7 +248,7 @@ export function TimelineContent({
             )}
           </span>
           {!resolved && decision.blocking && <span>影响工作继续</span>}
-        </div>
+        </IdentityRow>
         {entry.type === "decision_request" ? (
           <details>
             <summary>背景与选项</summary>

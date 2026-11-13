@@ -37,6 +37,12 @@ import {
   serverCard,
 } from "./test-support.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 let store: Store, server: RunningServer, coder: Client, office: Client;
 let dataDir: string, token: string, sequence: number;
 let clients: Client[];
@@ -63,6 +69,7 @@ const decision = {
   affected_work_items: [],
   blocking: true,
   decider: "human",
+  plain_summary: TEST_PLAIN_SUMMARY,
 };
 async function connect(
   assignment: Assignment,

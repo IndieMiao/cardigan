@@ -18,6 +18,7 @@ import {
   decisionFollowupPrompt,
   dispatchRecoveryFailed,
   dispatchRun,
+  eventById,
   expireMergeSnoozes,
   hasRunTarget,
   hostOpsPending,
@@ -84,7 +85,7 @@ import { dispatchStateLoader, type StateLoader } from "./dispatch-state.js";
 import { patrolHostOps } from "./host-ops-patrol.js";
 import { escalatePmMergeStalls } from "./pm-merge-stall-attention.js";
 import { escalateReviewLimitWaits } from "./review-limit-attention.js";
-import { profileSpan } from "./tick-profile.js";
+import { profileSpan, profileSpanSync } from "./tick-profile.js";
 
 /** The model/CLI snapshot a queued Run records; C-106 adds harness and effort. */
 export type LaunchSnapshot = Pick<
@@ -292,58 +293,87 @@ export class Dispatcher {
   }
   private async project(project: ProjectId): Promise<Candidate[]> {
     const { store, standing } = this.options;
-    patrolHostOps(
-      store,
-      project,
-      this.clock,
-      this.options.hostOpsPatrolIntervalMs,
-      this.loadState,
+    // C-221: sub-spans of `route`; timing only. Synchronous steps stay
+    // synchronous (no added await), so step order and interleaving are unchanged.
+    const step = <T>(name: string, run: () => T) =>
+      profileSpanSync(`route.${name}`, run);
+    step("patrol_host_ops", () =>
+      patrolHostOps(
+        store,
+        project,
+        this.clock,
+        this.options.hostOpsPatrolIntervalMs,
+        this.loadState,
+      ),
     );
-    store.uow.run((tx) => {
-      const effect = unwrap(
-        remindDecisionFollowups(
-          this.loadState(tx, project),
-          { kind: "system", project_id: project },
-          { clock: this.clock, ids: tx.ids },
-        ),
-      );
-      persistEffect(tx, project, effect);
+    step("decision_followups", () =>
+      store.uow.run((tx) => {
+        const effect = unwrap(
+          remindDecisionFollowups(
+            this.loadState(tx, project),
+            { kind: "system", project_id: project },
+            { clock: this.clock, ids: tx.ids },
+          ),
+        );
+        persistEffect(tx, project, effect);
+      }),
+    );
+    step("route_events", () =>
+      routeProjectEvents(store, project, {
+        clock: this.clock,
+        loadState: this.loadState,
+      }),
+    );
+    step("unreadable", () =>
+      resolveUnreadableNotifications(
+        store,
+        project,
+        this.clock,
+        this.loadState,
+      ),
+    );
+    step("ack_inbox", () =>
+      acknowledgeInbox(store, project, standing, this.clock, this.loadState),
+    );
+    step("bell_attempts", () => {
+      for (const attempt of unfinishedBellAttempts(store.database, project)) {
+        const assignment = this.state(project).assignments.find(
+          (a) => a.id === attempt.assignment_id,
+        );
+        if (
+          attempt.lease_until <= this.clock.now() &&
+          assignment?.status !== "suspended" &&
+          !assignment?.external
+        )
+          this.settle(attempt, false, "interrupted_delivery");
+      }
     });
-    routeProjectEvents(store, project, {
-      clock: this.clock,
-      loadState: this.loadState,
-    });
-    resolveUnreadableNotifications(store, project, this.clock, this.loadState);
-    acknowledgeInbox(store, project, standing, this.clock, this.loadState);
-    for (const attempt of unfinishedBellAttempts(store.database, project)) {
-      const assignment = this.state(project).assignments.find(
-        (a) => a.id === attempt.assignment_id,
-      );
-      if (
-        attempt.lease_until <= this.clock.now() &&
-        assignment?.status !== "suspended" &&
-        !assignment?.external
-      )
-        this.settle(attempt, false, "interrupted_delivery");
-    }
-    await retryDispatchedRuns(
-      { ...this.options, clock: this.clock, loadState: this.loadState },
-      project,
-      {
-        timeoutMs: this.dispatchTimeoutMs,
-        retryBaseMs: this.deliveryRetryBaseMs,
-        maxRetries: this.maxRetries,
-        leaseMs: this.leaseMs,
-      },
-      (attempt, sent, reason, bell, failure) =>
-        this.settle(attempt, sent, reason, bell, failure),
+    await profileSpan("route.retry_dispatched", () =>
+      retryDispatchedRuns(
+        { ...this.options, clock: this.clock, loadState: this.loadState },
+        project,
+        {
+          timeoutMs: this.dispatchTimeoutMs,
+          retryBaseMs: this.deliveryRetryBaseMs,
+          maxRetries: this.maxRetries,
+          leaseMs: this.leaseMs,
+        },
+        (attempt, sent, reason, bell, failure) =>
+          this.settle(attempt, sent, reason, bell, failure),
+      ),
     );
     // Recovery and escalation are durable events, including CLI starts without an inbox row.
-    routeProjectEvents(store, project, {
-      clock: this.clock,
-      loadState: this.loadState,
-    });
-    this.maintenance(project);
+    step("route_events", () =>
+      routeProjectEvents(store, project, {
+        clock: this.clock,
+        loadState: this.loadState,
+      }),
+    );
+    step("maintenance", () => this.maintenance(project));
+    return step("candidates", () => this.candidates(project));
+  }
+  private candidates(project: ProjectId): Candidate[] {
+    const { store } = this.options;
     const claimed = new Set(
       unfinishedBellAttempts(store.database, project).flatMap(
         (a) => a.notification_ids,
@@ -368,7 +398,7 @@ export class Dispatcher {
       if (queued && unreadableCommentTrigger(state, queued)) return;
       const cause = notes.find((n) => !n.run_id) ?? notes[0];
       const trigger = queued?.trigger_event_id ?? cause?.event_id;
-      const event = state.events.find((e) => e.id === trigger);
+      const event = eventById(state.events, trigger);
       if (!event) return;
       candidates.push({
         project,
@@ -391,8 +421,8 @@ export class Dispatcher {
     };
     for (const notes of groups.values()) {
       notes.sort((a, b) => {
-        const left = state.events.find((e) => e.id === a.event_id);
-        const right = state.events.find((e) => e.id === b.event_id);
+        const left = eventById(state.events, a.event_id);
+        const right = eventById(state.events, b.event_id);
         return (
           (left?.created_at ?? a.created_at).localeCompare(
             right?.created_at ?? b.created_at,

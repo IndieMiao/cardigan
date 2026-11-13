@@ -9,6 +9,12 @@ import {
 } from "./fixtures.js";
 import { routeEvent } from "./route.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 const action = {
   ...humanAction(),
   key: "h(1)",
@@ -27,6 +33,7 @@ const completed = event("human_action_completed", {
 const code = delivery("D-1");
 const completion = delivery("D-2", {
   kind: "card_completion",
+  plain_summary: TEST_PLAIN_SUMMARY,
   requested_verifiers: ["W-3"],
 });
 

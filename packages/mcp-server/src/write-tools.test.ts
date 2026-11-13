@@ -14,6 +14,12 @@ import {
   serverCard,
 } from "./test-support.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 const allowed = [
   "submit_delivery",
   "submit_review",
@@ -312,6 +318,7 @@ test("delivery, review and completion use the real MCP transport, and replays su
     ...delivery,
     idempotency_key: "complete",
     kind: "card_completion",
+    plain_summary: TEST_PLAIN_SUMMARY,
     requested_verifiers: ["W-3"],
   });
   expect(completion.isError).not.toBe(true);

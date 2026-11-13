@@ -31,6 +31,12 @@ import {
   value,
 } from "./test-fixtures.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 // Mirrors the default pack (packages/roles): produce roles hold
 // submit_delivery, verify roles hold submit_review, never both.
 const packRole = (
@@ -285,6 +291,7 @@ describe("design template flow (p2v-12 §2.4)", () => {
     await deliver({
       work_item_id: production.id,
       kind: "card_completion",
+      plain_summary: TEST_PLAIN_SUMMARY,
       summary: "Ready for approval",
       subject,
       requested_verifiers: [],
@@ -310,6 +317,7 @@ describe("design template flow (p2v-12 §2.4)", () => {
     await deliver({
       work_item_id: production.id,
       kind: "card_completion",
+      plain_summary: TEST_PLAIN_SUMMARY,
       summary: "Ready for approval again",
       subject,
       requested_verifiers: [],
@@ -366,6 +374,7 @@ describe("design template flow (p2v-12 §2.4)", () => {
       completion: (extra: object = {}) => ({
         work_item_id: started.production.id,
         kind: "card_completion" as const,
+        plain_summary: TEST_PLAIN_SUMMARY,
         summary: "Ready for approval",
         subject,
         requested_verifiers: [],
@@ -435,6 +444,7 @@ describe("design template flow (p2v-12 §2.4)", () => {
     expect(decision).toMatchObject({
       category: "feature_detail",
       decider: "human",
+      plain_summary: TEST_PLAIN_SUMMARY,
       human_required_reason: HUMAN_COMPLETION_REASON,
     });
     expect(decision.delegation_authority).toBeUndefined();

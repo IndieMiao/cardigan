@@ -1,4 +1,5 @@
 import type { Actor, Run, RuntimeRef } from "../entities.js";
+import { eventById } from "../event-index.js";
 import { hostOpsPending } from "../host-ops.js";
 import type { RunId } from "../ids.js";
 import { assignmentCanReadCard, type Notification } from "../notification.js";
@@ -29,7 +30,7 @@ export function unreadableCommentTrigger(state: CommandState, run: Run) {
   const visited = new Set<RunId>();
   while (!visited.has(source.id)) {
     visited.add(source.id);
-    const event = state.events.find((e) => e.id === source.trigger_event_id);
+    const event = eventById(state.events, source.trigger_event_id);
     if (event?.type === "comment_posted")
       return event.card_id &&
         !assignmentCanReadCard(a, event.card_id, state.work_items)
@@ -392,7 +393,7 @@ export function obsoleteDispatchAttention(
   note: Notification,
 ): boolean {
   if (["acked", "resolved"].includes(note.status)) return false;
-  const event = state.events.find((e) => e.id === note.event_id);
+  const event = eventById(state.events, note.event_id);
   const diagnostic = [
     "run_inactive",
     "run_dispatch_stalled",
@@ -417,7 +418,10 @@ export function obsoleteDispatchAttention(
   if (
     run &&
     field(event?.payload, "reason") === "recovery_startup_failed" &&
-    note.recipient.kind !== "assignment"
+    // Only the failed Assignment's own diagnostic marker retires with its Run.
+    // Other recipients still need to handle the unresolved startup failure.
+    (note.recipient.kind !== "assignment" ||
+      note.recipient.assignment_id !== run.assignment_id)
   )
     return startupFailureResolved(state, run);
   return (

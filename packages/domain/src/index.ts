@@ -23,6 +23,7 @@ export {
   riskTagAutoMergeAllowed,
 } from "./commands/delegation.js";
 export * from "./commands/delivery.js";
+export * from "./commands/deployment.js";
 export * from "./commands/dispatch-recovery.js";
 export * from "./commands/dispatch-stop.js";
 export * from "./commands/employee.js";
@@ -75,6 +76,15 @@ export {
 export * from "./commands/merge-result.js";
 export * from "./commands/merge-snooze.js";
 export * from "./commands/notices.js";
+export {
+  buildPlainSummary,
+  PLAIN_SUMMARY_LIMITS,
+  plainSummaryJargon,
+  plainSummaryNoRisk,
+  REVIEW_LIMIT_PLAIN_SUMMARY,
+  systemHandoffPlainSummary,
+  WORKTREE_CLEANUP_PLAIN_SUMMARY,
+} from "./commands/plain-summary.js";
 export * from "./commands/pm.js";
 export * from "./commands/pm-rotate.js";
 export * from "./commands/pre-merge-checks.js";
@@ -98,10 +108,12 @@ export * from "./commands/templates.js";
 export * from "./commands/upstream-health.js";
 export { canStartWork, workCompleted } from "./commands/workflow.js";
 export * from "./context-usage.js";
+export * from "./deployment-port.js";
 export * from "./derived.js";
 export * from "./employee.js";
 export * from "./entities.js";
 export * from "./errors.js";
+export { eventById } from "./event-index.js";
 export * from "./git-port.js";
 export * from "./host-ops.js";
 export * from "./ids.js";

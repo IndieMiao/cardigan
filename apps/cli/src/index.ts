@@ -14,6 +14,7 @@ import { runLaunchCommand } from "./launch.js";
 import { runMemberCommand } from "./member.js";
 import { runMergeCommand } from "./merge.js";
 import { runPreferenceCommand } from "./preference.js";
+import { runSelfDeployCommand } from "./self-deploy.js";
 import { runTemplateCommand } from "./template.js";
 import { runWebCommand } from "./web.js";
 import { type CliHooks, runWorkflowCommand } from "./workflow.js";
@@ -64,6 +65,7 @@ const TOP_LEVEL_USAGE = [
   "",
   "命令：",
   "  init             建库并执行迁移",
+  "  self-deploy watch|roles  主机自举部署监督器；只部署中心 main，配置仅来自主机",
   "  project create   创建项目",
   "  role             列出、查看、创建、复制、修改、停用、恢复和回退角色；upgrade --from-default 按默认包追加新版本",
   "  pm create        建常驻 PM Assignment 并签发 Token（--office / --ops）",
@@ -232,6 +234,7 @@ export async function main(
     if (command === "launch") {
       return await runLaunchCommand(rest, io);
     }
+    if (command === "self-deploy") return await runSelfDeployCommand(rest, io);
     if (command === "member") return await runMemberCommand(rest, io);
     if (command === "employee") return await runEmployeeCommand(rest, io);
     if (command === "avatar") return runAvatarCommand(rest, io);

@@ -3,6 +3,7 @@ import {
   type Assignment,
   type Clock,
   type CommandEffect,
+  type CommandState,
   claimDispatchStop,
   dispatchedAt,
   dispatchRecoveryFailed,
@@ -36,6 +37,7 @@ import {
   type DeliveryStage,
   deliveryFailure,
   deliveryFailureLine,
+  recordHostOpsAlert,
   wakeFailure,
 } from "./dispatch-alert.js";
 import type { StateLoader } from "./dispatch-state.js";
@@ -95,9 +97,10 @@ export async function retryDispatchedRuns(
       ),
     );
     persistEffect(tx, project, effect);
-    recordStall(run, effect);
+    recordStall(state, run, effect);
   };
   const recordStall = (
+    state: CommandState,
     run: { id: RunId; assignment_id: Assignment["id"] },
     effect: CommandEffect<unknown>,
   ) => {
@@ -119,6 +122,11 @@ export async function retryDispatchedRuns(
       at: clock.now(),
       patch: { run_id: run.id },
     });
+    const assignment = state.assignments.find(
+      (a) => a.id === run.assignment_id,
+    );
+    if (assignment)
+      recordHostOpsAlert(store, state, clock.now(), assignment, alert);
   };
   const stopRun = async (
     runId: RunId,
@@ -172,8 +180,8 @@ export async function retryDispatchedRuns(
           },
           ports,
         ),
-      afterSettle: (_tx, _state, run, _stop, effect) => {
-        if (effect) recordStall(run, effect);
+      afterSettle: (_tx, state, run, _stop, effect) => {
+        if (effect) recordStall(state, run, effect);
       },
     });
   };
