@@ -21,3 +21,8 @@
 .before .old-status span{display:inline}.before .old-status>span{display:block}.before .old-status .state{display:inline-flex}.before #cancel-limit{display:none}
 @media(forced-colors:active){.after .id{border:1px solid CanvasText}.after .id-link:hover .id{outline:1px solid CanvasText}.meter{border:1px solid CanvasText}.meter i{background:Highlight}}
 .after .task-main,.after .task-meta{gap:6px}.after .task-meta>span:not(.id){font-size:13px;line-height:20px;color:var(--text)}
+/* C-207#28: readability first; keep the established layout and reduce decoration. */
+.after .task-title,.after .state{font-weight:400}.after .table-wrap{border:0;border-radius:0}.after th{background:var(--bg)}.after .page-heading p,.after .page-note{display:none}.after .page-heading{align-items:center}.after .filterbar [role=group]{border:0;border-radius:0;background:transparent;padding:0;gap:12px}.after .filterbar [role=group] button{border-radius:0;border-bottom:2px solid transparent;padding-inline:10px}.after .filterbar [aria-pressed=true]{background:transparent!important;color:var(--accent);border-bottom-color:var(--accent)}.after .capacity{border-width:1px 0;border-radius:0;background:transparent}.after .capacity summary{padding-inline:0}.after .capacity-body{padding-inline:0}
+@media(prefers-color-scheme:dark){:root:not([data-theme=light]) .after{--text:#dce4df}}
+:root[data-theme=dark] .after{--text:#dce4df}
+.after .filterbar [role=group] button[aria-pressed=true]{border-bottom-color:var(--accent)}
