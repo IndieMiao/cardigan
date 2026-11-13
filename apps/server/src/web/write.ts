@@ -173,6 +173,7 @@ const cardSensitive = z.object({ sensitive: z.boolean() }).strict();
 const decision = z.object({
   option: text,
   rationale: z.string().optional(),
+  snooze_until: z.string().optional(),
   raw_quote: z.string().optional(),
   delegate_future: z.boolean().optional(),
 });
@@ -678,6 +679,12 @@ export async function serveWrite(
             .max(1440)
             .nullable()
             .optional(),
+          merge_confirm_snooze_default_minutes: z
+            .number()
+            .int()
+            .min(1)
+            .max(1440)
+            .optional(),
           merge_confirm_stall_after_minutes: z
             .number()
             .int()
@@ -705,6 +712,12 @@ export async function serveWrite(
             ? {
                 merge_confirm_stall_after_minutes:
                   input.merge_confirm_stall_after_minutes,
+              }
+            : {}),
+          ...(input.merge_confirm_snooze_default_minutes !== undefined
+            ? {
+                merge_confirm_snooze_default_minutes:
+                  input.merge_confirm_snooze_default_minutes,
               }
             : {}),
           ...(input.decision_delegation !== undefined
@@ -984,19 +997,24 @@ export async function serveWrite(
       const p = parsed(decision, body);
       output = run(context, (s, a, ports) => {
         const returning =
-          p.option === "request_changes" &&
+          ["request_changes", "hold"].includes(p.option) &&
           s.decisions.find((q) => q.id === decision_id)?.trigger ===
             "merge_confirmation";
         const raw_quote =
-          p.raw_quote?.trim() || returning
-            ? (p.raw_quote ?? "")
-            : `在 Needs You 选择了 ${p.option}`;
+          p.option === "hold" && returning
+            ? p.raw_quote?.trim() || p.rationale?.trim() || ""
+            : p.raw_quote?.trim() || returning
+              ? (p.raw_quote ?? "")
+              : `在 Needs You 选择了 ${p.option}`;
         return recordDecision(
           s,
           a,
           {
             decision_id,
             option: p.option,
+            ...(p.snooze_until !== undefined
+              ? { snooze_until: p.snooze_until }
+              : {}),
             ...(p.delegate_future ? { delegate_future: true } : {}),
             raw_quote,
             rationale: p.rationale?.trim() ? p.rationale : raw_quote,

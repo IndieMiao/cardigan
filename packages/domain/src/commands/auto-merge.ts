@@ -120,6 +120,22 @@ export function autoMergeSchedule(
         e.payload.decision_id === decision.id &&
         Number.isFinite(Date.parse(e.created_at)),
     );
+    // Explicit holds cannot be bypassed by a stale/reopened entity snapshot.
+    // Only the maintenance re-request (or a later valid handoff) restarts it.
+    const snoozed = state.events.findLast(
+      (e) =>
+        e.type === "merge_confirmation_snoozed" &&
+        e.card_id === card.id &&
+        e.payload !== null &&
+        typeof e.payload === "object" &&
+        "decision_id" in e.payload &&
+        e.payload.decision_id === decision.id,
+    );
+    ensure(
+      !snoozed || snoozed.seq < (handedOver ?? opened).seq,
+      "illegal_transition",
+      "暂缓尚未恢复为待处理",
+    );
     const waiting_since = [opened, handedOver, unmarked]
       .flatMap((e) => (e ? [e.created_at] : []))
       .reduce((latest, at) =>

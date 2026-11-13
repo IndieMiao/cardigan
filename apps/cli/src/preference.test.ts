@@ -160,3 +160,38 @@ test("PM merge confirmation defaults on and the human can switch it from the CLI
     await run(["preference", "set", "pm-merge-confirmation", "maybe"]),
   ).not.toBe(0);
 });
+
+test("merge-confirm-snooze-default defaults to 240, persists minutes with an audit event and rejects off", async () => {
+  expect(await run(["preference", "get", "merge-confirm-snooze-default"])).toBe(
+    0,
+  );
+  expect(output).toContain("merge-confirm-snooze-default: 240");
+  expect(
+    await run(["preference", "set", "merge-confirm-snooze-default", "90"]),
+  ).toBe(0);
+  expect(output).toContain("merge-confirm-snooze-default: 90");
+  expect(
+    store.uow.read((tx) =>
+      tx.project_preferences.get("preferences", "preferences"),
+    ),
+  ).toMatchObject({
+    merge_confirm_snooze_default_minutes: 90,
+    auto_merge_after_minutes: null,
+  });
+  expect(
+    store.uow
+      .read((tx) => tx.events.listAfter("preferences", undefined, 0))
+      .filter((e) => e.type === "project_preferences_updated")
+      .map((e) => e.payload),
+  ).toEqual([
+    {
+      old_value: 240,
+      new_value: 90,
+      preference: "merge_confirm_snooze_default_minutes",
+    },
+  ]);
+  for (const bad of ["off", "0", "1441", "1.5"])
+    expect(
+      await run(["preference", "set", "merge-confirm-snooze-default", bad]),
+    ).not.toBe(0);
+});

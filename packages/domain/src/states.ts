@@ -55,6 +55,7 @@ export const states = {
   delivery: ["submitted", "accepted", "rejected", "superseded"],
   decision: [
     "open",
+    "snoozed",
     "resolved",
     "provisional",
     "withdrawn",

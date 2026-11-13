@@ -94,19 +94,14 @@ test("a PM-held merge is listed separately and the human can answer it directly"
   expect(ids(needs.decisions)).not.toContain("Q-2");
   const answer = await post(
     "/decisions/Q-2/resolve",
-    { option: "hold" },
+    { option: "hold", raw_quote: "等待核对" },
     "take-over",
   );
   expect(answer.status).toBe(200);
   expect(confirmation()).toMatchObject({
     decider: "human",
-    status: "resolved",
-    resolution: {
-      option: "hold",
-      resolved_by: "human",
-      via: "needs_you",
-      taken_over_from: "role:pm",
-    },
+    status: "snoozed",
+    snooze: { reason: "等待核对", by: "human" },
   });
   const after = (await read("/needs-you")).json as Record<string, unknown>;
   expect(ids(after.pm_held_merges)).toEqual([]);
@@ -162,4 +157,76 @@ test("C-72: the sensitive route says whether the flag actually changed", async (
   expect(again.status).toBe(200);
   // Auto-merge is off in this fixture, so there is no due time to report.
   expect(again.json).toMatchObject({ changed: false, auto_merge_due_at: null });
+});
+
+test("C-180: HTTP hold rejects missing reasons, reads the audited default and exposes the snooze in both views", async () => {
+  expect((await read("/preferences")).json).toMatchObject({
+    merge_confirm_snooze_default_minutes: 240,
+  });
+  expect(
+    (await post("/decisions/Q-2/resolve", { option: "hold" }, "missing-reason"))
+      .status,
+  ).toBe(400);
+  expect(confirmation()?.status).toBe("open");
+  expect(
+    (
+      await post(
+        "/preferences",
+        { merge_confirm_snooze_default_minutes: 30 },
+        "snooze-pref",
+      )
+    ).status,
+  ).toBe(200);
+  expect((await read("/preferences")).json).toMatchObject({
+    merge_confirm_snooze_default_minutes: 30,
+  });
+  expect(
+    (
+      await post(
+        "/decisions/Q-2/resolve",
+        { option: "hold", rationale: "等待核对" },
+        "hold-default",
+      )
+    ).status,
+  ).toBe(200);
+  const q = confirmation();
+  expect(q?.snooze?.reason).toBe("等待核对");
+  if (!q?.snooze) throw new Error("Missing snooze");
+  expect(Date.parse(q.snooze.until) - Date.parse(q.snooze.at)).toBe(
+    30 * 60_000,
+  );
+  const detail = (await read("/cards/C-2")).json as {
+    merge_confirmations: unknown[];
+  };
+  expect(detail.merge_confirmations).toEqual([
+    expect.objectContaining({ status: "snoozed", snooze: q.snooze }),
+  ]);
+  const needs = (await read("/needs-you")).json as { decisions: unknown[] };
+  expect(needs.decisions).toContainEqual(
+    expect.objectContaining({ id: "Q-2", status: "snoozed", snooze: q.snooze }),
+  );
+  expect(
+    h.store.uow.read((tx) => tx.events.listAfter(project_id, undefined, 0)),
+  ).toContainEqual(
+    expect.objectContaining({
+      type: "project_preferences_updated",
+      actor: { kind: "human", project_id },
+      payload: {
+        preference: "merge_confirm_snooze_default_minutes",
+        old_value: 240,
+        new_value: 30,
+      },
+    }),
+  );
+  const until = "2035-01-01T04:30:00.000Z";
+  expect(
+    (
+      await post(
+        "/decisions/Q-2/resolve",
+        { option: "hold", raw_quote: "延后核对", snooze_until: until },
+        "hold-until",
+      )
+    ).status,
+  ).toBe(200);
+  expect(confirmation()?.snooze?.until).toBe(until);
 });

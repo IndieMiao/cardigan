@@ -158,7 +158,7 @@ export function mergeBlockingDecisions(
         q.target.delivery_id === completion_id
       ) &&
       q.blocking &&
-      ["open", "provisional"].includes(q.status) &&
+      ["open", "provisional", "snoozed"].includes(q.status) &&
       (q.card_id === card_id ||
         q.affected_cards.includes(card_id) ||
         q.affected_work_items.some((id) =>
@@ -410,7 +410,8 @@ export function syncSensitiveMerge(d: CommandDraft, card: Card) {
   const target = attempt(() => completion(state, card));
   if (!target.ok || candidates(state, card).length === 0) return;
   const q = confirmation(d.list("decisions"), card, target.value);
-  if (q && !["open", "provisional", "resolved"].includes(q.status)) return;
+  if (q && !["open", "provisional", "snoozed", "resolved"].includes(q.status))
+    return;
   if (card.sensitive) {
     if (
       !q ||
@@ -421,7 +422,7 @@ export function syncSensitiveMerge(d: CommandDraft, card: Card) {
       requestConfirmation(d, card, target.value);
     return;
   }
-  if (q?.status === "open" && !confirmsMerge(card)) {
+  if (q && ["open", "snoozed"].includes(q.status) && !confirmsMerge(card)) {
     d.put("decisions", {
       ...q,
       status: unwrap(transition("decision", q.status, "supersede")),

@@ -83,6 +83,7 @@ const statusShapes = {
   superseded: "cancelled",
   open: "review",
   provisional: "review",
+  snoozed: "paused",
   resolved: "success",
   withdrawn: "cancelled",
   revoked: "cancelled",

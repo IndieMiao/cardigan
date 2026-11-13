@@ -36,6 +36,8 @@ export interface ProjectPreferences {
    * concluded before PM Ops and the human are alerted. Absent means the default.
    */
   readonly merge_confirm_stall_after_minutes?: number;
+  /** C-180: default duration of an explicit merge hold, in minutes. */
+  readonly merge_confirm_snooze_default_minutes?: number;
   /** Missing entries use the documented defaults, including on existing projects. */
   readonly decision_delegation?: Readonly<
     Partial<Record<DecisionCategory, boolean>>
@@ -95,4 +97,10 @@ export function validAutoMergeMinutes(value: unknown): value is number | null {
       value >= 1 &&
       value <= 1440)
   );
+}
+
+export function mergeConfirmSnoozeDefaultMinutes(
+  preferences?: ProjectPreferences,
+): number {
+  return preferences?.merge_confirm_snooze_default_minutes ?? 240;
 }

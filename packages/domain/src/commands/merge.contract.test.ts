@@ -1,6 +1,7 @@
 import { expect, test } from "vitest";
 import {
   deriveCardStatus,
+  expireMergeSnoozes,
   listNeedsYou,
   mergePlan,
   recordDecision,
@@ -95,7 +96,7 @@ test("invariant 13: a real dev card waits for confirmation and preserves the acc
   await expect(f.deliver()).rejects.toThrow(/awaiting merge/);
 });
 
-test("invariants 11, 13: hold stays awaiting_merge and a fresh confirmation must be approved", async () => {
+test("invariants 11, 13: hold stays awaiting_merge and the reopened confirmation must be approved", async () => {
   const f = mergeFixture();
   await f.accept();
   const q = f.state.decisions[0];
@@ -117,14 +118,18 @@ test("invariants 11, 13: hold stays awaiting_merge and a fresh confirmation must
   expect(
     requestMerge(f.state, f.actor(f.coder), { card_id: f.card.id }, f.io),
   ).toMatchObject({ ok: false, error: { code: "unauthorized" } });
-  const next = f.commit(
-    requestMerge(f.state, human, { card_id: f.card.id }, f.io),
+  const until = f.state.decisions.find((v) => v.id === q.id)?.snooze?.until;
+  if (!until) throw new Error("Missing expiry");
+  const [next] = f.commit(
+    expireMergeSnoozes(
+      f.state,
+      { kind: "system", project_id: human.project_id },
+      { ...f.io, clock: { now: () => until } },
+    ),
   );
-  expect(next.id).not.toBe(q.id);
-  expect(next.amends).toBe(q.id);
-  expect(f.state.decisions.find((v) => v.id === q.id)?.status).toBe(
-    "superseded",
-  );
+  if (!next) throw new Error("Missing reopened confirmation");
+  expect(next.id).toBe(q.id);
+  expect(next.status).toBe("open");
   expect(mergePlan(f.state, f.card.id).ok).toBe(false);
   expect(requestMerge(f.state, human, { card_id: f.card.id }, f.io).ok).toBe(
     false,

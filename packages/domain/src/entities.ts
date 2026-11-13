@@ -546,6 +546,13 @@ interface DecisionFields {
   }[];
   readonly status: DecisionStatus;
   readonly resolution?: DecisionResolution;
+  /** Explicit merge hold; retained independently of the decision authority. */
+  readonly snooze?: {
+    readonly reason: string;
+    readonly until: Timestamp;
+    readonly at: Timestamp;
+    readonly by: Author;
+  };
   readonly amends?: DecisionId;
   readonly superseded_by?: DecisionId;
 }

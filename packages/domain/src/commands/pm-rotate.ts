@@ -164,7 +164,7 @@ export function rotateStandingPm(
             .filter(
               (q) =>
                 q.decider === "role:pm" &&
-                ["open", "provisional"].includes(q.status),
+                ["open", "provisional", "snoozed"].includes(q.status),
             )
             .map((q) => q.id)
         : [];

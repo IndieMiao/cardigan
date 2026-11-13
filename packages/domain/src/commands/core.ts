@@ -96,6 +96,7 @@ type CommandName =
   | "mark_notices_read"
   | "set_card_sensitive"
   | "auto_confirm_merge"
+  | "expire_merge_snoozes"
   | "remind_decision_followups"
   | "request_merge"
   | "record_merge_result"
@@ -199,6 +200,7 @@ export class CommandDraft {
       "manage_host_ops_action",
       "manage_inactive_run_stop",
       "auto_confirm_merge",
+      "expire_merge_snoozes",
       "recover_dispatch",
       "manage_dispatch_stop",
       "resolve_dispatch_attention",

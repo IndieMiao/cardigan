@@ -60,7 +60,7 @@ const groups = {
     "skipped",
   ],
   idle: ["idle"],
-  paused: ["suspended", "draining", "interrupted"],
+  paused: ["suspended", "snoozed", "draining", "interrupted"],
   unknown: ["unknown", "needs_attention"],
 };
 const states = Object.entries(groups).flatMap(([shape, statuses]) =>

@@ -9,6 +9,7 @@ import {
   decisionCategories,
   decisionDelegation,
   decisionHistory,
+  mergeConfirmSnoozeDefaultMinutes,
   mergeConfirmStallAfterMinutes,
   pmMergeConfirmation,
   projectPreferences,
@@ -618,6 +619,9 @@ async function serveProjectRoute(
       ...projectPreferences(state),
       decision_delegation: decisionDelegation(projectPreferences(state)),
       pm_merge_confirmation: pmMergeConfirmation(projectPreferences(state)),
+      merge_confirm_snooze_default_minutes: mergeConfirmSnoozeDefaultMinutes(
+        projectPreferences(state),
+      ),
       merge_confirm_stall_after_minutes: mergeConfirmStallAfterMinutes(
         projectPreferences(state),
       ),

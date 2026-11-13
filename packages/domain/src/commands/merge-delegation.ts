@@ -101,7 +101,7 @@ export function pmFailedMergeCheck(state: CommandState, q: Decision) {
   const check =
     q.status === "resolved"
       ? failedConfirmedMergeCheck(state, q)
-      : ["open", "provisional"].includes(q.status)
+      : ["open", "provisional", "snoozed"].includes(q.status)
         ? failedCurrentMergeCheck(state, q)
         : undefined;
   if (!check || !pmMergeCheckDelegationAllowed(state, q, check))
@@ -184,7 +184,7 @@ export function currentMergeConfirmations(
       q.kind === "approve" &&
       "delivery_id" in q.target &&
       q.target.delivery_id === context.value.target.id &&
-      (["open", "provisional"].includes(q.status) ||
+      (["open", "provisional", "snoozed"].includes(q.status) ||
         !!failedConfirmedMergeCheck(state, q)),
   );
 }

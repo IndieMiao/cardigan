@@ -849,6 +849,7 @@ export function cardDetail(
         id: decision.id,
         question: clamp(decision.question),
         status: decision.status,
+        ...(decision.snooze ? { snooze: decision.snooze } : {}),
         blocking: decision.blocking,
         decider: decision.decider,
       })),
@@ -875,9 +876,8 @@ export function cardDetail(
         .length,
       deliveries: deliveries.length,
       reviews: reviews.length,
-      open_decisions: decisions.filter(
-        (decision) =>
-          decision.status === "open" || decision.status === "provisional",
+      open_decisions: decisions.filter((decision) =>
+        ["open", "provisional", "snoozed"].includes(decision.status),
       ).length,
     },
     now: options.now ?? new Date().toISOString(),
@@ -992,6 +992,7 @@ function decisionActionWebView(
     context: decision.context,
     why: clamp(decision.why),
     status: decision.status,
+    ...(decision.snooze ? { snooze: decision.snooze } : {}),
     blocking: decision.blocking,
     decider: decision.decider,
     decider_view:

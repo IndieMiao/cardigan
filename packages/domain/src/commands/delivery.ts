@@ -331,7 +331,7 @@ export function submitDelivery(
           .filter(
             (q) =>
               q.blocking &&
-              q.status === "open" &&
+              ["open", "snoozed"].includes(q.status) &&
               (q.card_id === card.id ||
                 q.affected_cards.includes(card.id) ||
                 q.affected_work_items.some(
@@ -375,7 +375,7 @@ export function submitDelivery(
         decision.trigger === "completion_review" &&
         decision.kind === "approve" &&
         "delivery_id" in decision.target &&
-        ["open", "provisional"].includes(decision.status)
+        ["open", "provisional", "snoozed"].includes(decision.status)
       ) {
         const targetId = decision.target.delivery_id;
         if (previous.some((old) => old.id === targetId))

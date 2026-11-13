@@ -63,6 +63,7 @@ export {
   recordMergePushResult,
 } from "./commands/merge-push.js";
 export * from "./commands/merge-result.js";
+export * from "./commands/merge-snooze.js";
 export * from "./commands/notices.js";
 export * from "./commands/pm.js";
 export * from "./commands/pm-rotate.js";

@@ -767,18 +767,27 @@ test.each([
     const needs = await cardigan("needs-you");
     expect(needs.out).toContain("PM 代确认中的合并（1");
     expect(needs.out).toContain(`cardigan merge confirm|hold ${card_id}`);
-    const result = await cardigan("merge", sub, card_id);
+    const result = await cardigan(
+      "merge",
+      sub,
+      card_id,
+      ...(sub === "hold" ? ["--reason", "等待核对"] : []),
+    );
     expect(result.code).toBe(0);
     expect(result.out).toContain("PM 代确认中，已按你的拍板记录");
     expect(state().decisions.find((d) => d.id === "Q-1")).toMatchObject({
       decider: "human",
-      status: "resolved",
-      resolution: {
-        option,
-        resolved_by: "human",
-        via: "needs_you",
-        taken_over_from: "role:pm",
-      },
+      ...(sub === "hold"
+        ? { status: "snoozed", snooze: { reason: "等待核对", by: "human" } }
+        : {
+            status: "resolved",
+            resolution: {
+              option,
+              resolved_by: "human",
+              via: "needs_you",
+              taken_over_from: "role:pm",
+            },
+          }),
     });
     expect((await cardigan("needs-you")).out).not.toContain(
       "PM 代确认中的合并",
@@ -965,6 +974,47 @@ test("C-160: once every check passes, status says so and confirm needs no --yes"
 test("C-160: hold is not gated by unfinished pre-merge checks", async () => {
   await seatAwaitingMerge();
   setCheck("独立安全审核", "pending");
-  const result = await cardigan("merge", "hold", card_id);
+  const result = await cardigan(
+    "merge",
+    "hold",
+    card_id,
+    "--reason",
+    "等待核对",
+  );
   expect(result.code).toBe(0);
+});
+
+test("C-180: hold requires a reason, accepts an explicit expiry, and merge status and needs-you show it", async () => {
+  await seatAwaitingMerge();
+  expect((await cardigan("merge", "hold", card_id)).code).toBe(2);
+  expect(state().decisions.find((q) => q.id === "Q-1")?.status).toBe("open");
+  const until = "2035-01-01T04:30:00.000Z";
+  expect(
+    (
+      await cardigan(
+        "merge",
+        "hold",
+        card_id,
+        "--reason",
+        "等待核对",
+        "--until",
+        until,
+      )
+    ).code,
+  ).toBe(0);
+  expect(state().decisions.find((q) => q.id === "Q-1")).toMatchObject({
+    status: "snoozed",
+    snooze: { reason: "等待核对", until },
+  });
+  const time = new Date(until).toLocaleTimeString("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  });
+  expect((await cardigan("merge", "status", card_id)).out).toContain(
+    `已暂缓：等待核对（到 ${time}）`,
+  );
+  expect((await cardigan("needs-you")).out).toContain(
+    `已暂缓：等待核对（到 ${time}）`,
+  );
 });

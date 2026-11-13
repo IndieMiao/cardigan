@@ -11,15 +11,24 @@ import {
 import {
   type Actor,
   type Assignment,
+  autoConfirmMerge,
+  autoMergeSchedule,
   type CommandState,
   type Event,
+  expireMergeSnoozes,
+  listNeedsYou,
   type MergeCheckView,
+  mergeConfirmationSnoozed,
+  mergePlan,
   notices,
   PM_MERGE_STALL_KIND,
   pmMergeStallAttention,
+  prepareMergePlan,
   projectPreferences,
+  recordDecision,
   recordMergeCheck,
   resolveDelegatedDecision,
+  setCardSensitive,
   setProjectPreferences,
   standingTools,
 } from "./index.js";
@@ -353,4 +362,189 @@ test("a system stall event becomes a Needs You notice for the human", async () =
       events: [...f.state.events, { ...event, actor: human }],
     }).some((n) => n.id === event.id),
   ).toBe(false);
+});
+
+test("C-180: required reason, default expiry, suppression and one durable reopening with a fresh stall clock", async () => {
+  const { f, io, check, confirmation, setClock, stalls } = setup();
+  await f.accept();
+  check("passed");
+  const params = {
+    decision_id: confirmation().id,
+    option: "hold",
+    rationale: "等待核对",
+  };
+  expect(
+    resolveDelegatedDecision(
+      f.state,
+      opsActor,
+      { ...params, rationale: "  " },
+      io,
+    ).ok,
+  ).toBe(false);
+  for (const bad of ["", now, "garbage", "2035-01-01T12:00:00"])
+    expect(
+      resolveDelegatedDecision(
+        f.state,
+        opsActor,
+        { ...params, snooze_until: bad },
+        io,
+      ).ok,
+    ).toBe(false);
+  setClock(65 * minute);
+  f.commit(resolveDelegatedDecision(f.state, opsActor, params, io));
+  expect(confirmation()).toMatchObject({
+    status: "snoozed",
+    decider: "role:pm",
+    snooze: { reason: "等待核对", until: at(305 * minute) },
+  });
+  expect(confirmation().resolution).toBeUndefined();
+  expect(mergeConfirmationSnoozed(confirmation(), at(304 * minute))).toBe(true);
+  expect(mergePlan(f.state, f.card.id).ok).toBe(false);
+  expect(prepareMergePlan(f.state, f.card.id).ok).toBe(true);
+  expect(stalls(304 * minute)).toEqual([]);
+  const queue = listNeedsYou(f.state, opsActor);
+  if (!queue.ok) throw new Error(queue.error.message);
+  expect(queue.value.data.pm_queue?.decisions).toEqual([]);
+  expect(queue.value.data.pm_queue?.snoozed_merges).toHaveLength(1);
+  setClock(305 * minute);
+  expect(expireMergeSnoozes(f.state, opsActor, io).ok).toBe(false);
+  f.commit(expireMergeSnoozes(f.state, system, io));
+  expect(confirmation()).toMatchObject({ status: "open", decider: "role:pm" });
+  expect(confirmation().snooze).toBeUndefined();
+  const expired = f.state.timeline.filter((e) => e.body.includes("暂缓已到期"));
+  expect(expired).toHaveLength(1);
+  expect(expired[0]?.body).toBe(`暂缓已到期：等待核对（${f.card.id}）`);
+  f.commit(expireMergeSnoozes(f.state, system, io));
+  expect(
+    f.state.timeline.filter((e) => e.body.includes("暂缓已到期")),
+  ).toHaveLength(1);
+  const resumed = listNeedsYou(f.state, opsActor);
+  if (!resumed.ok) throw new Error(resumed.error.message);
+  expect(resumed.value.data.pm_queue?.expired_snoozes).toEqual([
+    expect.objectContaining({ body: expired[0]?.body }),
+  ]);
+  expect(stalls(365 * minute)).toEqual([]);
+  expect(stalls(365 * minute + 1)).toEqual([
+    expect.objectContaining({ since: at(305 * minute) }),
+  ]);
+});
+
+test("C-180: human-only audited preference changes the next hold; an explicit expiry wins", async () => {
+  const { f, io, confirmation, setClock } = setup();
+  await f.accept();
+  const params = { merge_confirm_snooze_default_minutes: 30 };
+  expect(setProjectPreferences(f.state, opsActor, params, io).ok).toBe(false);
+  for (const bad of [0, 1441, 1.5, NaN])
+    expect(
+      setProjectPreferences(
+        f.state,
+        human,
+        { merge_confirm_snooze_default_minutes: bad },
+        io,
+      ).ok,
+    ).toBe(false);
+  f.commit(setProjectPreferences(f.state, human, params, io));
+  f.commit(setProjectPreferences(f.state, human, params, io));
+  expect(
+    f.state.events
+      .filter((e) => e.type === "project_preferences_updated")
+      .map((e) => e.payload),
+  ).toEqual([
+    {
+      preference: "merge_confirm_snooze_default_minutes",
+      old_value: 240,
+      new_value: 30,
+    },
+  ]);
+  const hold = {
+    decision_id: confirmation().id,
+    option: "hold",
+    rationale: "等待",
+    raw_quote: "等待",
+  };
+  f.commit(recordDecision(f.state, human, hold, io));
+  expect(confirmation()).toMatchObject({
+    decider: "human",
+    status: "snoozed",
+    snooze: { until: at(30 * minute) },
+  });
+  expect(resolveDelegatedDecision(f.state, opsActor, hold, io).ok).toBe(false);
+  setClock(10 * minute);
+  f.commit(
+    recordDecision(
+      f.state,
+      human,
+      { ...hold, snooze_until: at(50 * minute) },
+      io,
+    ),
+  );
+  expect(confirmation().snooze?.until).toBe(at(50 * minute));
+});
+
+test("C-180: sensitivity and delegation handoffs retain the hold and human authority at expiry", async () => {
+  const { f, io, confirmation, setClock } = setup();
+  await f.accept();
+  f.commit(
+    resolveDelegatedDecision(
+      f.state,
+      opsActor,
+      { decision_id: confirmation().id, option: "hold", rationale: "等待" },
+      io,
+    ),
+  );
+  f.commit(
+    setCardSensitive(
+      f.state,
+      human,
+      { card_id: f.card.id, sensitive: true },
+      io,
+    ),
+  );
+  f.commit(
+    setProjectPreferences(
+      f.state,
+      human,
+      { auto_merge_after_minutes: 1, pm_merge_confirmation: false },
+      io,
+    ),
+  );
+  expect(confirmation()).toMatchObject({ status: "snoozed", decider: "human" });
+  expect(f.state.cards.find((c) => c.id === f.card.id)?.sensitive).toBe(true);
+  expect(autoMergeSchedule(f.state, confirmation().id).ok).toBe(false);
+  setClock(240 * minute);
+  f.commit(expireMergeSnoozes(f.state, system, io));
+  expect(confirmation()).toMatchObject({ status: "open", decider: "human" });
+  setClock(300 * minute);
+  expect(
+    autoConfirmMerge(f.state, system, { decision_id: confirmation().id }, io)
+      .ok,
+  ).toBe(false);
+});
+
+test("C-180: returning a snoozed confirmation invalidates it; expiry cannot revive it", async () => {
+  const { f, io, confirmation, setClock } = setup();
+  await f.accept();
+  const held = confirmation().id;
+  f.commit(
+    resolveDelegatedDecision(
+      f.state,
+      opsActor,
+      { decision_id: held, option: "hold", rationale: "等待" },
+      io,
+    ),
+  );
+  f.commit(
+    resolveDelegatedDecision(
+      f.state,
+      opsActor,
+      { decision_id: held, option: "request_changes", rationale: "需要修复" },
+      io,
+    ),
+  );
+  expect(f.state.cards.find((c) => c.id === f.card.id)?.status).toBe(
+    "in_progress",
+  );
+  setClock(300 * minute);
+  expect(f.commit(expireMergeSnoozes(f.state, system, io))).toEqual([]);
+  expect(f.state.decisions.find((q) => q.id === held)?.status).not.toBe("open");
 });

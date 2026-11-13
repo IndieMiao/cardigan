@@ -12,7 +12,7 @@ export function canResume(d: CommandDraft, item: WorkItem): boolean {
       .some(
         (q) =>
           q.blocking &&
-          ["open", "provisional"].includes(q.status) &&
+          ["open", "provisional", "snoozed"].includes(q.status) &&
           q.affected_work_items.includes(item.id),
       ) ||
     d

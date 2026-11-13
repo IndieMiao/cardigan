@@ -58,6 +58,7 @@ const TEMPLATES: Readonly<Record<string, Pick<CardTemplate, "completion">>> = {
 const UNRESOLVED_DECISION: ReadonlySet<DecisionStatus> = new Set([
   "open",
   "provisional",
+  "snoozed",
 ]);
 
 /** Work items whose owner is expected to act next. */
