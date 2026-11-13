@@ -229,6 +229,51 @@ test("the card list separates 'needs me' from 'waiting on an agent'", async () =
   }
 });
 
+test("C-203: summary lists omit prose but preserve filtering, derived fields and full detail", async () => {
+  const { harness, cookie } = await seeded();
+  const read = async (path: string) => {
+    const response = await call(
+      harness.port,
+      `/api/projects/${project_id}${path}`,
+      { cookie },
+    );
+    expect(response.status).toBe(200);
+    return response.json as ReadBody;
+  };
+  try {
+    for (const filter of ["all", "needs_me", "agent"]) {
+      const full = await read(`/cards?filter=${filter}`);
+      const summary = await read(`/cards?filter=${filter}&view=summary`);
+      expect(summary.counts).toEqual(full.counts);
+      expect(summary.cards).toEqual(
+        full.cards.map((card: ReadBody) => {
+          const { goal, acceptance_criteria, source, out_of_scope, ...rest } =
+            card;
+          expect(goal).toBeTruthy();
+          expect(acceptance_criteria).not.toHaveLength(0);
+          expect(source).toBeTruthy();
+          expect(out_of_scope).toEqual([]);
+          return rest;
+        }),
+      );
+      for (const row of summary.cards) {
+        const detail = await read(`/cards/${row.id}`);
+        expect(detail.card.goal).toBeTruthy();
+        expect(detail.card.acceptance_criteria).not.toHaveLength(0);
+        expect(detail.card.source).toBeTruthy();
+        expect(row).toMatchObject({
+          status: detail.card.status,
+          next_owners: detail.card.next_owners,
+          progress: expect.any(Object),
+          work_items: expect.any(Array),
+        });
+      }
+    }
+  } finally {
+    await harness.close();
+  }
+});
+
 test("a card page carries work items, timeline, relations and attachments", async () => {
   const { harness, cookie } = await seeded();
   try {

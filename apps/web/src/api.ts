@@ -93,7 +93,12 @@ export interface CardView {
 }
 
 /** A list row: the card plus the fields the list filters and columns need. */
-export interface CardListItem extends CardView {
+export interface CardListItem
+  extends Omit<CardView, "goal" | "acceptance_criteria" | "source"> {
+  /** Legacy full-list responses may include prose; the board requests summaries. */
+  readonly goal?: string;
+  readonly acceptance_criteria?: readonly string[];
+  readonly source?: CardView["source"];
   readonly queued_runs?: readonly {
     readonly run_id: string;
     readonly assignment_id: string;
@@ -1271,7 +1276,7 @@ export class HttpCardiganClient implements CardiganClient {
 
   async cards(projectId: string, filter: CardFilter): Promise<CardPage> {
     return this.request<CardPage>(
-      `/api/projects/${encodeURIComponent(projectId)}/cards?filter=${filter}`,
+      `/api/projects/${encodeURIComponent(projectId)}/cards?filter=${filter}&view=summary`,
     );
   }
 
