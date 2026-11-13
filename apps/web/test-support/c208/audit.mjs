@@ -1,4 +1,5 @@
 import { readFile, writeFile } from "node:fs/promises";
+
 const p = JSON.parse(
   await readFile(new URL("./palette.json", import.meta.url), "utf8"),
 );
