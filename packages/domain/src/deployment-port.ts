@@ -8,6 +8,8 @@ export interface DeploymentBuild {
 
 export interface DeploymentDriver {
   readonly enabled: boolean;
+  /** Check the owned service even when deployment is disabled or main is unchanged. */
+  checkServer(): Promise<void>;
   current(): Promise<DeploymentBuild>;
   main(): Promise<string>;
   isFastForward(from: string, to: string): Promise<boolean>;

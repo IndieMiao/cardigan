@@ -1,18 +1,32 @@
 import { randomUUID } from "node:crypto";
 import type { DeploymentDriver, DeploymentRecord } from "@cardigan/domain";
 
+/** Fatal to the supervisor: its host service manager must recover the server. */
+export class DeploymentServerUnavailable extends Error {
+  constructor() {
+    super("主机 server 已退出或无法确认，监督器退出，请核对主机服务恢复记录");
+  }
+}
+
 /** A supervisor outside the server lifetime; no Agent, HTTP or MCP entry point. */
 export class DeploymentController {
   private busy = false;
   private readonly failed = new Set<string>();
+  private readonly waiting = new Set<string>();
   constructor(private readonly driver: DeploymentDriver) {}
 
   async tick(): Promise<void> {
     const d = this.driver;
-    if (!d.enabled || this.busy) return;
+    if (this.busy) return;
     this.busy = true;
     let unlock: (() => Promise<void>) | undefined;
     try {
+      try {
+        await d.checkServer();
+      } catch {
+        throw new DeploymentServerUnavailable();
+      }
+      if (!d.enabled) return;
       unlock = await d.acquire();
       if (!unlock) return;
       const current = await d.current();
@@ -28,14 +42,28 @@ export class DeploymentController {
         downtime_ms: 0,
         summary: "主机准备部署中心 main",
       };
+      const fastForward = await d.isFastForward(current.sha, target);
+      if (fastForward && !(await d.passedMergeGate(current.sha, target))) {
+        // Git publication precedes its audit transaction. Never build without
+        // proof, but re-read it next tick instead of poisoning this target.
+        // Failed evidence reads/observations also remain outside the failure cache.
+        if (!this.waiting.has(target)) {
+          await d.record({
+            ...record,
+            status: "waiting_for_evidence",
+            summary:
+              "中心 main 的发布证据尚未完整核验，保留当前服务，后续轮询重新核验",
+          });
+          this.waiting.add(target);
+        }
+        return;
+      }
+      this.waiting.delete(target);
       await d.record(record);
       let stoppedAt: number | undefined;
       let oldStopped = false;
       try {
-        if (!(await d.isFastForward(current.sha, target)))
-          throw new Error("non_fast_forward");
-        if (!(await d.passedMergeGate(current.sha, target)))
-          throw new Error("unverified_main");
+        if (!fastForward) throw new Error("non_fast_forward");
         const result = await d.build(target);
         record = {
           ...record,
@@ -64,12 +92,9 @@ export class DeploymentController {
         this.failed.add(target);
         const reason =
           error instanceof Error &&
-          [
-            "non_fast_forward",
-            "unverified_main",
-            "build_failed",
-            "ready_failed",
-          ].includes(error.message)
+          ["non_fast_forward", "build_failed", "ready_failed"].includes(
+            error.message,
+          )
             ? error.message
             : "host_operation_failed";
         record = { ...record, status: "failed", summary: reason };

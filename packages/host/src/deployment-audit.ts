@@ -45,7 +45,9 @@ export function writeDeploymentRecord(
     );
     persistEffect(tx, project, effect);
     if (
-      !["failed", "rolled_back"].includes(record.status) &&
+      !["failed", "rolled_back", "waiting_for_evidence"].includes(
+        record.status,
+      ) &&
       !record.post_deploy_failed
     )
       return;
@@ -65,11 +67,17 @@ export function writeDeploymentRecord(
         project_id: project,
         event_id: event.id,
         seq: event.seq,
-        kind: "host_deployment_failed",
+        kind:
+          record.status === "waiting_for_evidence"
+            ? "host_deployment_waiting"
+            : "host_deployment_failed",
         at: clock.now(),
         recipient: { kind: "assignment", assignment_id: a.id },
       });
     }
+    // A normal publish can still be committing its audit. Keep it visible to
+    // operations without creating a manual blocker for this transient window.
+    if (record.status === "waiting_for_evidence") return;
     persistEffect(
       tx,
       project,

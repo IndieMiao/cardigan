@@ -1,6 +1,9 @@
 import type { DeploymentDriver, DeploymentRecord } from "@cardigan/domain";
 import { expect, test, vi } from "vitest";
-import { DeploymentController } from "./deployment.js";
+import {
+  DeploymentController,
+  DeploymentServerUnavailable,
+} from "./deployment.js";
 
 function fixture() {
   const calls: string[] = [];
@@ -9,6 +12,7 @@ function fixture() {
   const next = { sha: "b".repeat(40), release: "next" };
   const driver: DeploymentDriver = {
     enabled: true,
+    checkServer: async () => {},
     current: async () => old,
     main: async () => next.sha,
     isFastForward: async () => true,
@@ -82,14 +86,73 @@ test("build succeeds before stop, backup precedes migrations, readiness precedes
   });
 });
 
-test.each(["isFastForward", "passedMergeGate"] as const)(
-  "%s refuses unapproved code without building or stopping",
-  async (key) => {
+test("non-fast-forward main fails without building or stopping", async () => {
+  const f = fixture();
+  f.driver.isFastForward = async () => false;
+  await new DeploymentController(f.driver).tick();
+  expect(f.calls).toEqual(["unlock"]);
+  expect(f.records.at(-1)?.status).toBe("failed");
+});
+
+test("pending publication evidence is rechecked without repeated alerts or failed-target caching", async () => {
+  const f = fixture();
+  const gate = vi.fn().mockResolvedValue(false);
+  f.driver.passedMergeGate = gate;
+  const c = new DeploymentController(f.driver);
+  await c.tick();
+  await c.tick();
+  expect(f.calls).toEqual(["unlock", "unlock"]);
+  expect(f.records).toHaveLength(1);
+  expect(f.records[0]).toMatchObject({
+    status: "waiting_for_evidence",
+    build: "not_run",
+  });
+  gate.mockResolvedValue(true);
+  await c.tick();
+  expect(gate).toHaveBeenCalledTimes(3);
+  expect(f.calls).toContain("build");
+  expect(f.records.at(-1)?.status).toBe("deployed");
+});
+
+test.each(["unchanged", "disabled", "merge_check"])(
+  "server supervision runs when deployment is %s",
+  async (mode) => {
     const f = fixture();
-    f.driver[key] = async () => false;
-    await new DeploymentController(f.driver).tick();
+    f.driver.checkServer = async () => {
+      throw new Error("Server exited");
+    };
+    f.driver.main = async () => (await f.driver.current()).sha;
+    if (mode === "merge_check") f.driver.acquire = async () => undefined;
+    const c = new DeploymentController({
+      ...f.driver,
+      enabled: mode !== "disabled",
+    });
+    await expect(c.tick()).rejects.toBeInstanceOf(DeploymentServerUnavailable);
+    expect(f.calls).toEqual([]);
+  },
+);
+
+test.each(["read", "audit"])(
+  "a transient evidence %s error does not permanently suppress deployment",
+  async (stage) => {
+    const f = fixture();
+    const gate = vi.fn().mockResolvedValue(true);
+    f.driver.passedMergeGate = gate;
+    if (stage === "read")
+      gate.mockRejectedValueOnce(new Error("Read unavailable"));
+    else {
+      gate.mockResolvedValueOnce(false);
+      f.driver.record = vi
+        .fn(f.driver.record)
+        .mockRejectedValueOnce(new Error("Audit unavailable"));
+    }
+    const c = new DeploymentController(f.driver);
+    await expect(c.tick()).rejects.toThrow("unavailable");
     expect(f.calls).toEqual(["unlock"]);
-    expect(f.records.at(-1)?.status).toBe("failed");
+    await c.tick();
+    expect(f.calls).toContain("build");
+    expect(f.records.at(-1)?.status).toBe("deployed");
+    expect(f.records.some((record) => record.status === "failed")).toBe(false);
   },
 );
 

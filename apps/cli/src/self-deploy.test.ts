@@ -2,7 +2,12 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Assignment } from "@cardigan/domain";
-import { deploymentRolePolicyHash, RunCapacityDeferred } from "@cardigan/host";
+import {
+  DeploymentServerUnavailable,
+  deploymentRolePolicyHash,
+  NodeDeploymentDriver,
+  RunCapacityDeferred,
+} from "@cardigan/host";
 import { defaultRoleDefinition } from "@cardigan/roles";
 import { getRoleVersion, Store, writeRole } from "@cardigan/store";
 import { expect, test, vi } from "vitest";
@@ -11,6 +16,62 @@ import type { CliIo } from "./io.js";
 import { runSelfDeployCommand } from "./self-deploy.js";
 
 vi.mock("./assignment.js", () => ({ startAssignmentById: vi.fn() }));
+
+test("watch propagates a lost server to its host service manager and releases the supervisor lock", async () => {
+  const root = await mkdtemp(join(tmpdir(), "cg-self-deploy-exit-"));
+  const dataDir = join(root, "data");
+  const store = Store.open({ dataDir });
+  store.createProject({ id: "cardigan" });
+  store.close();
+  const unlock = vi.fn(async () => {});
+  const initialize = vi
+    .spyOn(NodeDeploymentDriver.prototype, "initialize")
+    .mockResolvedValue(unlock);
+  const check = vi
+    .spyOn(NodeDeploymentDriver.prototype, "checkServer")
+    .mockRejectedValue(new Error("Server exited"));
+  const signals = { on: vi.fn(), off: vi.fn() };
+  const stderr = vi.fn();
+  try {
+    await writeFile(
+      join(root, "self-deploy.yaml"),
+      JSON.stringify({
+        initial_release: root,
+        initial_sha: "a".repeat(40),
+        ready_timeout_ms: 1000,
+        stop_timeout_ms: 1000,
+        build_timeout_ms: 1000,
+        poll_interval_ms: 1000,
+      }),
+      { mode: 0o600 },
+    );
+    await expect(
+      runSelfDeployCommand(["watch"], {
+        env: { CARDIGAN_DATA_DIR: dataDir, CARDIGAN_CONFIG_DIR: root },
+        cwd: root,
+        platform: "linux",
+        stdout: () => {},
+        stderr,
+        signals,
+        spawnInherit: () => {
+          throw new Error("No real launch");
+        },
+        captureCommand: async () => {
+          throw new Error("No real command");
+        },
+      }),
+    ).rejects.toBeInstanceOf(DeploymentServerUnavailable);
+    expect(check).toHaveBeenCalledOnce();
+    expect(unlock).toHaveBeenCalledOnce();
+    expect(signals.off).toHaveBeenCalledWith("SIGTERM", expect.any(Function));
+    expect(signals.off).toHaveBeenCalledWith("SIGINT", expect.any(Function));
+    expect(stderr).not.toHaveBeenCalled();
+  } finally {
+    initialize.mockRestore();
+    check.mockRestore();
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("post-deploy starts the replacement Ops as host automation only when it has no Run", async () => {
   const root = await mkdtemp(join(tmpdir(), "cg-self-deploy-"));

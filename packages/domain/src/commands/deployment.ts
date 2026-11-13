@@ -10,6 +10,7 @@ export interface DeploymentRecord {
   readonly to: string;
   readonly status:
     | "started"
+    | "waiting_for_evidence"
     | "stopping"
     | "deployed"
     | "failed"

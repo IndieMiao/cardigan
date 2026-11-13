@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   DeploymentController,
+  DeploymentServerUnavailable,
   loadDeploymentConfig,
   NodeDeploymentDriver,
   RunCapacityDeferred,
@@ -109,7 +110,8 @@ export async function runSelfDeployCommand(
       while (!stop.signal.aborted) {
         try {
           await controller.tick();
-        } catch {
+        } catch (error) {
+          if (error instanceof DeploymentServerUnavailable) throw error;
           io.stderr("主机自动部署本轮未完成，请核对部署记录和主机配置");
         }
         try {

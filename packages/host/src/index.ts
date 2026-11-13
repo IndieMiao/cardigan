@@ -28,7 +28,10 @@ export {
   wallClock,
 } from "./commands.js";
 export * from "./context-usage.js";
-export { DeploymentController } from "./deployment.js";
+export {
+  DeploymentController,
+  DeploymentServerUnavailable,
+} from "./deployment.js";
 export {
   acquireDeploymentCapacity,
   DeploymentInProgress,

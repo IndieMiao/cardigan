@@ -52,6 +52,7 @@ export class NodeDeploymentDriver implements DeploymentDriver {
   private state!: State;
   private readyMessage = false;
   private child: ChildProcess | undefined;
+  private serverFailureRecorded = false;
   private readonly directory: string;
   private readonly central: string;
   private readonly ports: readonly number[];
@@ -235,6 +236,30 @@ export class NodeDeploymentDriver implements DeploymentDriver {
   now() {
     return Date.now();
   }
+  async checkServer() {
+    if (this.live()) return;
+    this.readyMessage = false;
+    this.state = {
+      current: this.state.current,
+      ...(this.state.previous ? { previous: this.state.previous } : {}),
+      ready: false,
+    };
+    await this.saveState();
+    if (!this.serverFailureRecorded) {
+      await this.record({
+        attempt: randomUUID(),
+        from: this.state.current.sha,
+        to: this.state.current.sha,
+        status: "failed",
+        build: "not_run",
+        ready: false,
+        downtime_ms: 0,
+        summary: "server_exited；监督器退出，由主机服务管理器恢复已部署构建",
+      });
+      this.serverFailureRecorded = true;
+    }
+    throw new Error("Server exited");
+  }
   async beforeStop(record: DeploymentRecord) {
     return writeDeploymentStop(this.options.store, PROJECT, record);
   }
@@ -408,6 +433,7 @@ export class NodeDeploymentDriver implements DeploymentDriver {
   async start(build: DeploymentBuild) {
     if (this.live()) throw new Error("A server is already running");
     this.readyMessage = false;
+    this.serverFailureRecorded = false;
     const child = spawn(
       process.execPath,
       [join(build.release, "apps/server/dist/bin.js")],
@@ -419,9 +445,18 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     );
     this.child = child;
     child.on("error", () => {});
+    child.once("exit", () => {
+      if (this.child === child) this.readyMessage = false;
+    });
     child.stderr?.on("data", () => {}); // Raw server output never enters diagnostics.
     let pending = "";
     child.stdout?.on("data", (data: Buffer) => {
+      if (
+        this.child !== child ||
+        child.exitCode !== null ||
+        child.signalCode !== null
+      )
+        return;
       pending = (pending + data.toString("utf8")).slice(-65536);
       const lines = pending.split("\n");
       pending = lines.pop() ?? "";

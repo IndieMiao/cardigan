@@ -111,6 +111,31 @@ test("stopping snapshots only running Runs and preserves every workflow state", 
   expect(finished.data.stop_snapshot).toEqual(effect.data.stop_snapshot);
 });
 
+test("waiting for publication evidence only records an observation and grants no workflow transition", () => {
+  const state = fixture();
+  const original = JSON.stringify(state);
+  const effect = value(
+    recordDeployment(
+      state,
+      { kind: "system", project_id: state.project_id },
+      {
+        ...record,
+        status: "waiting_for_evidence",
+        build: "not_run",
+        ready: false,
+      },
+      ports(),
+    ),
+  );
+  expect(effect.events).toHaveLength(1);
+  expect(effect.events[0]?.payload).toMatchObject({
+    status: "waiting_for_evidence",
+    build: "not_run",
+  });
+  expect(effect.changes).toEqual([]);
+  expect(JSON.stringify(state)).toBe(original);
+});
+
 test("permission-widening followup stays with the human and is idempotent", () => {
   const state = fixture();
   const system = { kind: "system" as const, project_id: state.project_id };
