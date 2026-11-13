@@ -1,4 +1,4 @@
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import type {
   Assignment,
   Delivery,
@@ -35,6 +35,8 @@ export interface WorktreeState {
   readonly project_id: string;
   readonly worktrees_root: string;
   readonly checks_root?: string;
+  /** P2a-3: verifier build checkouts, `<builds_root>/<A-n>`. */
+  readonly builds_root?: string;
   /** Worktrees registered in the base clone. */
   readonly registered: readonly GitWorktree[];
   /** Existing assignment/check directories, including registered paths outside those roots. */
@@ -61,6 +63,16 @@ export interface ReconcileChecks {
   >[];
   readonly now: string;
   readonly cleanupGraceMs?: number;
+  /**
+   * P2a-3: each Assignment's latest Run facts, read after the directory scan
+   * like `attempts`. A build checkout is protected while its Assignment has an
+   * unfinished Run and for the cleanup grace after the Run finished.
+   */
+  readonly builds?: readonly {
+    readonly assignment_id: string;
+    readonly unfinished: boolean;
+    readonly finished_at?: string;
+  }[];
 }
 
 export function reconcile(
@@ -110,6 +122,34 @@ export function reconcile(
       )
       .map(([path]) => path),
   );
+  // P2a-3: the cleanup loop removes a build checkout once its Run ended; until
+  // then (plus the grace) it is neither an orphan nor a stale registration.
+  const buildOf = (path: string) =>
+    state.builds_root !== undefined &&
+    dirname(resolve(path)) === resolve(state.builds_root)
+      ? basename(path)
+      : undefined;
+  const activeBuilds = new Set(
+    (checks?.builds ?? [])
+      .filter(
+        (build) =>
+          build.unfinished ||
+          Date.parse(checks?.now ?? "") - Date.parse(build.finished_at ?? "") <=
+            (checks?.cleanupGraceMs ?? DEFAULT_CHECK_CLEANUP_GRACE_MS),
+      )
+      .map((build) => build.assignment_id),
+  );
+  for (const path of [...directories, ...registered]) {
+    const build = buildOf(path);
+    if (build !== undefined && activeBuilds.has(build))
+      protectedChecks.add(path);
+  }
+  const leftover = (path: string) => {
+    const build = buildOf(path);
+    return build === undefined
+      ? undefined
+      : `Build checkout of ${build} remains after its Run ended and the cleanup grace`;
+  };
 
   // Presence decides the finding: a missing registration cannot also be an orphan.
   for (const path of sorted(directories))
@@ -118,7 +158,7 @@ export function reconcile(
         kind: "orphan_worktree",
         detail: attempts.has(path)
           ? `Finished merge check ${attempts.get(path)?.attempt_id} left a directory after cleanup grace; Git registration ${registered.has(path) ? "present" : "missing"}`
-          : "Worktree exists but no Assignment owns it",
+          : (leftover(path) ?? "Worktree exists but no Assignment owns it"),
         path,
       });
   // Git registered it, the directory is gone: the base clone needs pruning.
@@ -128,7 +168,9 @@ export function reconcile(
         kind: "stale_registration",
         detail: attempts.has(path)
           ? `Finished merge check ${attempts.get(path)?.attempt_id} left a Git registration after cleanup grace; directory missing`
-          : "Worktree is registered in Git but its directory is missing",
+          : leftover(path) !== undefined
+            ? `${leftover(path)}; directory missing`
+            : "Worktree is registered in Git but its directory is missing",
         path,
       });
   // §3.6: a worktree is "missing" when its directory is gone, whatever Git

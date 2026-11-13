@@ -82,6 +82,8 @@ export interface WorktreeOptions {
   readonly repositoriesRoot?: string;
   readonly worktreesRoot?: string;
   readonly checksRoot?: string;
+  /** P2a-3: writable build checkouts of verifiers, `<root>/<project>/<A-n>`. */
+  readonly buildsRoot?: string;
   /** Where force-clean patches are written; defaults to `<dataDir>/cleanup`. */
   readonly cleanupRoot?: string;
   /**
@@ -104,6 +106,19 @@ export interface WorktreeDiff extends WorktreeChangeSummary {
   /** `git diff HEAD`; untracked files are listed separately and not inlined. */
   readonly patch: string;
 }
+/**
+ * P2a-3: a verifier's writable build checkout. It is a detached worktree of
+ * the delivery commit under the builds root, separate from the readonly review
+ * worktree; nothing in it is ever backed up, pulled or merged.
+ */
+export interface BuildCheckout {
+  readonly path: string;
+  readonly sha: string;
+}
+export type RemoveBuildOutcome =
+  | { readonly status: "removed" | "already_removed" }
+  /** The guard found the build still in use; nothing was touched. */
+  | { readonly status: "in_use" };
 export interface RemoveWorktreeInput {
   readonly project: CentralProject;
   readonly assignment: Assignment;
@@ -152,6 +167,7 @@ export class GitWorktreeService {
   private readonly repositories: string;
   private readonly worktrees: string;
   private readonly checks: string;
+  private readonly builds: string;
   private readonly cleanup: string;
   private readonly lock: RepositoryLock;
   constructor(
@@ -168,6 +184,9 @@ export class GitWorktreeService {
     );
     this.checks = resolve(
       options.checksRoot ?? join(dataDir, "agent", "checks"),
+    );
+    this.builds = resolve(
+      options.buildsRoot ?? join(dataDir, "agent", "builds"),
     );
     this.cleanup = resolve(options.cleanupRoot ?? join(dataDir, "cleanup"));
     this.lock = options.lock ?? defaultRepositoryLock;
@@ -313,6 +332,159 @@ export class GitWorktreeService {
       ...(source_sync ? { source_sync } : {}),
     };
   }
+  /** P2a-3: the only path a build checkout of this Assignment may use. */
+  buildPath(project_id: string, assignment_id: string): string {
+    if (
+      !/^[a-zA-Z0-9_][a-zA-Z0-9._-]*$/u.test(project_id) ||
+      !parseId("assignment", assignment_id).ok
+    )
+      throw new Error("Invalid project or Assignment path component");
+    return join(this.builds, project_id, assignment_id);
+  }
+
+  /**
+   * P2a-3: give a readonly verifier a writable, detached checkout of the
+   * delivery it verifies. An existing checkout at the same commit is kept (the
+   * verifier may be mid-build); one at another commit is disposable and is
+   * replaced. Only `git worktree add --detach` is used: no branch is created,
+   * and the central repository is only read.
+   */
+  async ensureBuildCheckout(
+    input: EnsureWorktreeInput,
+  ): Promise<BuildCheckout | undefined> {
+    const { assignment: a, role, card, work_item: item } = input;
+    if (role.worktree !== "readonly" || !card?.repo) return undefined;
+    if (
+      a.status !== "active" ||
+      a.machine_id !== "local" ||
+      a.scope !== "work_item" ||
+      a.role_id !== role.role_id ||
+      a.role_version !== role.version ||
+      item?.kind !== "verify" ||
+      item.id !== a.work_item_id ||
+      item.card_id !== card.id ||
+      item.assignment_id !== a.id ||
+      card.project_id !== input.project_id ||
+      !card.base_branch
+    )
+      throw new Error(
+        "Build checkout requires an active local verification Assignment of a repository card",
+      );
+    if (!/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/iu.test(input.target_sha ?? ""))
+      throw new Error("Build checkout requires a delivery commit SHA");
+    const path = this.buildPath(input.project_id, a.id),
+      repository = join(this.repositories, input.project_id),
+      project = {
+        project_id: input.project_id,
+        source_repo: input.source_repo,
+        base_branch: card.base_branch,
+      };
+    return this.lock({ project_id: input.project_id, repository }, async () => {
+      const central = await this.central.ensureCentral(project);
+      await this.git.ensureClone(central, repository);
+      await this.git.fetch(repository, central);
+      const sha = await this.git.resolveCommit(
+        repository,
+        input.target_sha as string,
+      );
+      const existing = (await this.git.listWorktrees(repository)).find(
+        (w) => resolve(w.path) === path,
+      );
+      if (existing && !existing.branch && existing.head === sha)
+        return { path, sha };
+      if (existing) await this.dropBuild(repository, path);
+      else await this.pruneBuild(path);
+      await this.git.addWorktree(repository, path, sha);
+      return { path, sha };
+    });
+  }
+
+  /** Assignments with a build checkout directory (plus its registrations). */
+  async listBuildCheckouts(project_id: string): Promise<readonly string[]> {
+    if (!/^[a-zA-Z0-9_][a-zA-Z0-9._-]*$/u.test(project_id))
+      throw new Error("Invalid project path component");
+    const root = join(this.builds, project_id),
+      repository = join(this.repositories, project_id);
+    const found = new Set(
+      (await subdirectories(root)).map((path) => basename(path)),
+    );
+    // Every cleanup round calls this: skip Agent Git when nothing is on disk.
+    // A registration without its directory is left to reconcile to report.
+    if (found.size === 0) return [];
+    const hasClone = await access(repository).then(
+      () => true,
+      () => false,
+    );
+    if (hasClone)
+      for (const entry of await this.git.listWorktrees(repository))
+        if (dirname(resolve(entry.path)) === root)
+          found.add(basename(entry.path));
+    return [...found].filter((name) => parseId("assignment", name).ok).sort();
+  }
+
+  /**
+   * P2a-3: remove a build checkout without asking — it holds no work. `idle`
+   * is re-evaluated under the repository lock, after any concurrent
+   * preparation finished, so a Run that just started keeps its checkout.
+   */
+  async removeBuildCheckout(input: {
+    readonly project: CentralProject;
+    readonly assignment_id: string;
+    readonly idle: () => boolean;
+  }): Promise<RemoveBuildOutcome> {
+    const path = this.buildPath(input.project.project_id, input.assignment_id),
+      repository = join(this.repositories, input.project.project_id);
+    return this.lock(
+      { project_id: input.project.project_id, repository },
+      async () => {
+        if (!input.idle()) return { status: "in_use" };
+        const registered =
+          (await access(repository).then(
+            () => true,
+            () => false,
+          )) &&
+          (await this.git.listWorktrees(repository)).some(
+            (w) => resolve(w.path) === path,
+          );
+        if (!registered) {
+          // Never recurse into unregistered contents: only an empty leaf goes.
+          const existed = await access(path).then(
+            () => true,
+            () => false,
+          );
+          await this.pruneBuild(path);
+          return { status: existed ? "removed" : "already_removed" };
+        }
+        await this.dropBuild(repository, path);
+        return { status: "removed" };
+      },
+    );
+  }
+
+  /** Force-remove a registered build worktree; the host only rmdirs leaves. */
+  private async dropBuild(repository: string, path: string): Promise<void> {
+    try {
+      await this.git.removeWorktree(repository, path, { force: true });
+    } catch (error) {
+      // Same as removeLocked: Agent Git cannot unlink the host-owned leaf.
+      await rmdir(path).catch((e) => {
+        if (code(e) !== "ENOENT") throw error;
+      });
+      if (
+        (await this.git.listWorktrees(repository)).some(
+          (w) => resolve(w.path) === path,
+        )
+      )
+        await this.git.removeWorktree(repository, path, { force: true });
+    }
+    await this.pruneBuild(path);
+  }
+  private async pruneBuild(path: string): Promise<void> {
+    await rmdir(path).catch((error) => {
+      if (code(error) !== "ENOENT") throw error;
+    });
+  }
+
   isDirty(worktree_path: string): Promise<boolean> {
     return this.git.isDirty(worktree_path);
   }
@@ -514,12 +686,13 @@ export class GitWorktreeService {
   async listWorktreeState(project: CentralProject): Promise<WorktreeState> {
     const root = join(this.worktrees, project.project_id),
       checksRoot = join(this.checks, project.project_id),
+      buildsRoot = join(this.builds, project.project_id),
       clone = join(this.repositories, project.project_id),
       hasClone = await access(clone).then(
         () => true,
         () => false,
       ),
-      [registered, directories, checkAttempts, clones, central] =
+      [registered, directories, checkAttempts, builds, clones, central] =
         await Promise.all([
           // The base clone is itself a worktree; only linked worktrees belong
           // in the state, including checks outside the Assignment root.
@@ -532,6 +705,7 @@ export class GitWorktreeService {
             : Promise.resolve([] as readonly GitWorktree[]),
           subdirectories(root),
           subdirectories(checksRoot),
+          subdirectories(buildsRoot),
           subdirectories(this.repositories),
           this.central.hasCentral(project),
         ]);
@@ -540,6 +714,7 @@ export class GitWorktreeService {
     const candidates = new Set([
       ...directories,
       ...checkAttempts.map((attempt) => join(attempt, "worktree")),
+      ...builds,
       ...registered.map((entry) => entry.path),
     ]);
     const existing = await Promise.all(
@@ -556,6 +731,7 @@ export class GitWorktreeService {
       project_id: project.project_id,
       worktrees_root: root,
       checks_root: checksRoot,
+      builds_root: buildsRoot,
       registered,
       directories: existing.filter(
         (path): path is string => path !== undefined,

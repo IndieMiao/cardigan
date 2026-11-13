@@ -190,6 +190,7 @@ function worktrees(
           ? {
               repositoriesRoot: `${execution.agentRoot}/repos`,
               worktreesRoot: `${execution.agentRoot}/worktrees`,
+              buildsRoot: `${execution.agentRoot}/builds`,
             }
           : {}),
       },

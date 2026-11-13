@@ -30,15 +30,33 @@ export interface PreparedWorktree {
   readonly branch?: string | undefined;
   readonly base_sha: string;
   readonly baseline?: { readonly ref: string; readonly sha: string };
+  /**
+   * P2a-3: a readonly verifier's writable build checkout of the same delivery.
+   * `unavailable` means the host could not prepare it this time; the review
+   * itself still proceeds in the readonly worktree.
+   */
+  readonly build?:
+    | { readonly path: string; readonly sha: string }
+    | { readonly unavailable: true };
 }
 
+/** Host facts the Agent needs on every start or wake: baseline and build checkout. */
 export function worktreeBaselinePrompt(
   worktree?: PreparedWorktree,
 ): string | undefined {
-  const baseline = worktree?.baseline;
-  return baseline
-    ? `当前基线 ${baseline.ref}：${baseline.sha}（已由主机同步）。`
-    : undefined;
+  const baseline = worktree?.baseline,
+    build = worktree?.build;
+  const lines = [
+    baseline
+      ? `当前基线 ${baseline.ref}：${baseline.sha}（已由主机同步）。`
+      : undefined,
+    build === undefined
+      ? undefined
+      : "path" in build
+        ? `可写构建目录：${build.path}（交付 ${build.sha} 的独立检出，可安装依赖、构建和跑测试；只读 worktree 保持不动。本次 Run 结束后主机会删除它，里面的改动不会保留，也不会被拉取、交付或合并）。`
+        : "本次没有可写构建目录（主机准备失败），只在只读 worktree 里审阅。",
+  ].filter((line): line is string => line !== undefined);
+  return lines.length ? lines.join("\n") : undefined;
 }
 
 export interface WorktreeRequest {
@@ -49,6 +67,8 @@ export interface WorktreeRequest {
   readonly card?: Card | undefined;
   readonly work_item?: WorkItem | undefined;
   readonly target_sha?: string;
+  /** P2a-3: only best-effort reporting; a build failure never blocks the review. */
+  readonly report?: (message: string) => void;
 }
 export type WorktreeProvider = (
   request: WorktreeRequest,
@@ -131,14 +151,36 @@ export function worktreeProvider(
       ...(request.work_item ? { work_item: request.work_item } : {}),
       ...(request.target_sha ? { target_sha: request.target_sha } : {}),
     });
-    return (
-      placed && {
-        path: placed.worktree_path,
-        base_sha: placed.base_sha,
-        ...(placed.baseline ? { baseline: placed.baseline } : {}),
-        ...(placed.branch ? { branch: placed.branch } : {}),
+    if (!placed) return undefined;
+    // P2a-3: a readonly verifier also gets a writable checkout of the same SHA.
+    let build: PreparedWorktree["build"];
+    if (request.role.worktree === "readonly" && request.target_sha) {
+      try {
+        build = await service.ensureBuildCheckout({
+          project_id,
+          source_repo: request.source_repo,
+          assignment,
+          role: request.role,
+          ...(request.card ? { card: request.card } : {}),
+          ...(request.work_item ? { work_item: request.work_item } : {}),
+          target_sha: request.target_sha,
+        });
+      } catch (error) {
+        build = { unavailable: true };
+        request.report?.(
+          `build checkout for ${assignment.id} unavailable: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
       }
-    );
+    }
+    return {
+      path: placed.worktree_path,
+      base_sha: placed.base_sha,
+      ...(placed.baseline ? { baseline: placed.baseline } : {}),
+      ...(placed.branch ? { branch: placed.branch } : {}),
+      ...(build ? { build } : {}),
+    };
   };
 }
 
@@ -152,7 +194,13 @@ export function worktreeProvider(
  * (M5.S S7).
  */
 export async function prepareRoleWorktree(
-  host: { store: Store; execution: ExecutionConfig; runtime: AgentRuntime },
+  host: {
+    store: Store;
+    execution: ExecutionConfig;
+    runtime: AgentRuntime;
+    /** Host log for a failed build checkout (P2a-3); defaults to stderr. */
+    report?: (message: string) => void;
+  },
   project: ProjectId,
   assignment: Assignment["id"],
 ): Promise<PreparedWorktree | undefined> {
@@ -177,6 +225,7 @@ export async function prepareRoleWorktree(
     source_repo: source,
     ...entities,
     work_item: entities.workItem,
+    report: host.report ?? ((message) => console.warn(`cardigan: ${message}`)),
     ...(entities.role.worktree === "readonly"
       ? { target_sha: reviewTargetSha(host.store, project, entities.workItem) }
       : {}),

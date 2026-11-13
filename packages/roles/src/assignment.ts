@@ -87,6 +87,8 @@ export interface CompileAssignmentInput {
   readonly work_dir: string;
   /** Host-selected base clone containing the worktree's common .git directory. */
   readonly repository_root?: string;
+  /** P2a-3: a readonly verifier's writable build checkout (outside the worktree). */
+  readonly build_dir?: string;
   /** First message the agent receives (a bell-shaped prompt, M2 §4 step 7). */
   readonly first_prompt: string;
   /** Values from `secrets.env`, keyed by secret name. */
@@ -197,6 +199,7 @@ export function compileAssignmentLaunch(
           ...new Set([
             input.work_dir,
             ...(input.repository_root ? [input.repository_root] : []),
+            ...(input.build_dir ? [input.build_dir] : []),
           ]),
         ];
   harnessEnv.GIT_CONFIG_COUNT = String(gitPaths.length + 1);
@@ -253,6 +256,7 @@ export function compileAssignmentLaunch(
           [
             input.work_dir,
             ...(input.repository_root ? [input.repository_root] : []),
+            ...(input.build_dir ? [input.build_dir] : []),
           ],
         ),
         mode: 0o600,

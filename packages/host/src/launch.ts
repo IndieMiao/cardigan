@@ -405,7 +405,7 @@ async function launch(
       "Session replacement requires the same idle Assignment and queued Run",
     );
 
-  const { runDir, repositoriesRoot } = executionPaths(
+  const { runDir, repositoriesRoot, buildsRoot } = executionPaths(
     execution,
     project,
     assignment.id,
@@ -583,6 +583,11 @@ async function launch(
       ...(worktree === undefined
         ? {}
         : { repository_root: join(repositoriesRoot, project) }),
+      // P2a-3: a reused session keeps working across wakes; the build path is
+      // fixed per Assignment, so every readonly verifier trusts it up front.
+      ...(worktree === undefined || role.worktree !== "readonly"
+        ? {}
+        : { build_dir: join(buildsRoot, project, assignment.id) }),
       // The merged bell is the first prompt when the caller has one (M3 §3.2).
       first_prompt: [
         prompt,

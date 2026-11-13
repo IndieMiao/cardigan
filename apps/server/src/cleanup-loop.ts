@@ -13,6 +13,7 @@ import { releaseAssignment, requestWorktreeCleanup } from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
 import { tokensForAssignment } from "@cardigan/store";
+import { buildCheckoutIdle } from "./build-checkouts.js";
 import type { ReconcileGit } from "./git.js";
 import { startTimerLoop, type TimerLoop } from "./loop.js";
 import { runSystemCommand, systemClock } from "./merge-loop.js";
@@ -93,6 +94,46 @@ export class CleanupExecutor {
         assignment.worktree_path !== undefined
       )
         await this.settle(project_id, assignment);
+    }
+    await this.removeIdleBuilds(project_id);
+  }
+
+  /**
+   * P2a-3: a verifier's build checkout is disposable and lives only as long as
+   * its Run; remove it in the first round after the Assignment (released or
+   * not) has no unfinished Run. Nothing is backed up and no decision is asked.
+   */
+  private async removeIdleBuilds(project_id: ProjectId) {
+    const git = this.options.git;
+    if (!git.listBuildCheckouts || !git.removeBuildCheckout) return;
+    const project = git.projectOf(project_id);
+    if (project === undefined) return;
+    const runs = () =>
+      this.options.store.uow.read((tx) => tx.runs.list(project_id));
+    let owners: readonly string[];
+    try {
+      owners = await git.listBuildCheckouts(project);
+    } catch (error) {
+      this.report(
+        `build checkout listing for ${project_id} failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return;
+    }
+    for (const assignment_id of owners) {
+      if (!buildCheckoutIdle(runs(), assignment_id)) continue;
+      try {
+        await git.removeBuildCheckout({
+          project,
+          assignment_id,
+          // Re-read under the repository lock: a Run queued meanwhile wins.
+          idle: () => buildCheckoutIdle(runs(), assignment_id),
+        });
+      } catch (error) {
+        // Reconcile reports the leftover after the cleanup grace.
+        this.report(
+          `build checkout cleanup for ${assignment_id} failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
   }
 
