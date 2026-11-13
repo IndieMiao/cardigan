@@ -1284,19 +1284,22 @@ function noticeLines(all: NoticeList): string[] {
   const shown = all.slice(0, NOTICE_LIMIT);
   const lines = [
     `知会（未读 ${unread}，共 ${all.length}${all.length > shown.length ? `，显示最新 ${shown.length} 条` : ""}）`,
-    "  PM 处理的合并、代拍的决定和超时自动合并，不需要你处理；有疑问可在卡片里追问。",
+    "  PM 处理的合并、代拍的决定、超时自动合并和 PM 合并确认停留提醒，不需要你处理；有疑问可在卡片里追问。",
   ];
   for (const n of shown) {
+    // C-177: a stall alert is a system notice on a still-open confirmation.
     const label =
-      n.kind === "merge"
-        ? n.resolved_by === "system"
-          ? "超时自动合并"
-          : n.option === "request_changes"
-            ? "PM 退回修改"
-            : n.option === "recheck"
-              ? "PM 重新检查"
-              : "PM 代确认合并"
-        : "PM 代拍";
+      n.option === "stalled"
+        ? "PM 合并确认停留"
+        : n.kind === "merge"
+          ? n.resolved_by === "system"
+            ? "超时自动合并"
+            : n.option === "request_changes"
+              ? "PM 退回修改"
+              : n.option === "recheck"
+                ? "PM 重新检查"
+                : "PM 代确认合并"
+          : "PM 代拍";
     lines.push(
       [
         `  ${n.read ? "[已读]" : "[未读]"} ${n.id}  ${label}  ${n.decision_id}${n.card_id ? `  ${n.card_id}` : ""}  ${n.at}`,

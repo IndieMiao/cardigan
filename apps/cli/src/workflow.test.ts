@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   type HumanAction,
+  PM_MERGE_STALL_KIND,
   pauseStandingAssignment,
   queueRun,
   recordDecision,
@@ -992,6 +993,19 @@ test("needs-you lists 知会 newest first and marks them read like the Workbench
           },
         });
       }
+      // C-177: a stall alert on a still-open confirmation is not an auto-merge.
+      tx.events.append(project, {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(project, "C-1" as never),
+        card_id: "C-1" as never,
+        type: PM_MERGE_STALL_KIND,
+        actor: { kind: "system", project_id: project },
+        created_at: new Date(at++).toISOString(),
+        payload: {
+          decision_id: newer,
+          notice: "PM 持有的合并确认已停留 65 分钟（C-1）",
+        },
+      });
     });
     expect(await run(["needs-you", "--project", "p-work"])).toBe(0);
     for (const label of [
@@ -999,8 +1013,20 @@ test("needs-you lists 知会 newest first and marks them read like the Workbench
       "PM 退回修改",
       "PM 重新检查",
       "超时自动合并",
+      "PM 合并确认停留",
     ])
       expect(printed()).toContain(`  ${label}  ${newer}`);
+    const lines = printed().split("\n");
+    const stallLine = lines.findIndex((line) =>
+      line.includes(`  PM 合并确认停留  ${newer}`),
+    );
+    expect(lines[stallLine]).not.toContain("超时自动合并");
+    expect(lines.slice(stallLine, stallLine + 3).join("\n")).toContain(
+      "PM 持有的合并确认已停留 65 分钟（C-1）",
+    );
+    expect(
+      lines.filter((line) => line.includes(`超时自动合并  ${newer}`)),
+    ).toHaveLength(1);
   } finally {
     store.close();
   }
