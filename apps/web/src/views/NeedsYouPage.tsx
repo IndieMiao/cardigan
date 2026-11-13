@@ -794,6 +794,27 @@ function HumanAction({
         {item.triage === "host" ? "主机操作：" : ""}
         {item.handoff?.title ?? item.triage_rationale ?? item.why}
       </h3>
+      {item.pre_merge_check_reminder && item.card_id && (
+        <p
+          className="needs-reminder"
+          role="note"
+          aria-label={`${item.id} 核对项提醒`}
+        >
+          <StatusTag status="passed" label={PRE_MERGE_COPY.reminderTag} />{" "}
+          {item.pre_merge_check_reminder.text}（
+          <Time value={item.pre_merge_check_reminder.at} />）{" "}
+          <a
+            href={routeHash({
+              kind: "card",
+              projectId,
+              cardId: item.card_id,
+              anchor: `human-action-${item.id}`,
+            })}
+          >
+            {PRE_MERGE_COPY.reminderLink}
+          </a>
+        </p>
+      )}
       {item.handoff ? (
         <section aria-label="项目经理说明">
           <p className="hint">

@@ -561,6 +561,12 @@ export interface NeedsAction
   readonly due: string | null;
   readonly blocked_work_items: readonly string[];
   readonly completion_notice?: string;
+  /** C-179: a pre-merge check passed while this action still holds the merge. */
+  readonly pre_merge_check_reminder?: {
+    readonly label: string;
+    readonly text: string;
+    readonly at: string;
+  };
 }
 export interface NeedsPage {
   readonly waiting_merge_checks_count?: number;

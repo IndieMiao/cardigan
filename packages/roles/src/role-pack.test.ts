@@ -8,6 +8,8 @@ import {
   HUMAN_ACTION_MERGE_RULE,
   instructionsFor,
   isDefaultRoleId,
+  PM_PRE_MERGE_CHECK_RULE,
+  REVIEWER_PRE_MERGE_CHECK_RULE,
 } from "./role-pack.js";
 
 const launch = { harness: "codex", launch_profile_ref: "fixture" } as const;
@@ -148,4 +150,21 @@ test("C-162: every default role says when request_human_action must hold the mer
         `${role}: ${line}`,
       ).toBe(true);
   }
+});
+
+test("C-179: pm and reviewer route pre-merge reviews through pre-merge checks, not merge-blocking human actions", () => {
+  for (const [role, rule] of [
+    ["pm", PM_PRE_MERGE_CHECK_RULE],
+    ["reviewer", REVIEWER_PRE_MERGE_CHECK_RULE],
+  ] as const) {
+    const body = instructionsFor(role);
+    expect(body.split(rule).length - 1, role).toBe(1);
+    expect(rule).toContain("截图核对、独立安全审核");
+    expect(rule).toContain("合并前核对项");
+    expect(rule).toContain("只有确实要人在系统外动手的事，才开人工待办");
+  }
+  expect(PM_PRE_MERGE_CHECK_RULE).toContain(
+    "PM Ops 设 pending，PM Office 设 passed 或 failed",
+  );
+  expect(PM_PRE_MERGE_CHECK_RULE).toContain("系统不会自动完成");
 });

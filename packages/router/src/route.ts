@@ -16,6 +16,7 @@ import {
   isCompletionVerifier,
   latestMergeCheck,
   mergeRequiresHuman,
+  PRE_MERGE_CHECK_REMINDED,
   pmMergeCheckDelegationAllowed,
   requesterNotificationRecipient,
 } from "@cardigan/domain";
@@ -913,6 +914,39 @@ function routeDecisionResolved(input: RouteInput, draft: Draft): void {
 }
 
 /** Completion informs the requester and current waiters without clearing blockers. */
+/**
+ * C-179 (§7.4): the domain records a reminder when a pre-merge check newly
+ * passes while merge-blocking human actions are still open. Ring each
+ * action's triage owner (PM Ops or the human) once; the reminder text and
+ * direct link live in the persisted event and timeline entry. Actions closed
+ * before routing are skipped. Nothing here completes an action.
+ */
+function routePreMergeCheckReminder(input: RouteInput, draft: Draft): void {
+  const reminders = payloadObject(input.event.payload).reminders;
+  if (!Array.isArray(reminders)) return;
+  const groups = new Map<"pm_ops" | "needs_you", string[]>();
+  for (const raw of reminders) {
+    const r = payloadObject(raw);
+    const id = typeof r.human_action_id === "string" ? r.human_action_id : "";
+    const open = input.snapshot.human_actions.some(
+      (h) => h.id === id && h.status === "open",
+    );
+    if (!open || typeof r.text !== "string" || typeof r.link !== "string")
+      continue;
+    const to = r.recipient === "pm_ops" ? "pm_ops" : "needs_you";
+    groups.set(to, [...(groups.get(to) ?? []), `${r.text}：${r.link}`]);
+  }
+  for (const [to, lines] of groups)
+    note(
+      input,
+      draft,
+      to === "pm_ops" ? recipient.pm_ops() : recipient.needs_you(),
+      to === "pm_ops" ? "human_action" : "needs_you",
+      "7.4/pre-merge check passed",
+      lines.join("\n"),
+    );
+}
+
 function routeHumanActionCompleted(input: RouteInput, draft: Draft): void {
   const action = input.snapshot.human_actions.find(
     (h) => h.id === payloadString(input.event.payload, "human_action_id"),
@@ -1279,6 +1313,9 @@ export function routeEvent(input: RouteInput): RouteResult {
       break;
     case "human_action_completed":
       routeHumanActionCompleted(input, draft);
+      break;
+    case PRE_MERGE_CHECK_REMINDED:
+      routePreMergeCheckReminder(input, draft);
       break;
     case "merge_conflicted":
     case "merge_changes_requested": {

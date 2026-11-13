@@ -28,4 +28,9 @@ export const PRE_MERGE_COPY = {
   confirmAnyway: "仍然确认合并",
   confirmCancel: "先不确认",
   eventLabel: "更新了合并前核对项",
+  // C-179：核对项通过后提醒仍在挡合并的人工待办。提醒正文按 Q-279 由 PM 定，
+  // 在 domain 的 preMergeCheckReminderText；下面三处界面文字待 PM 确认。
+  reminderEventLabel: "提醒处理挡合并的人工待办",
+  reminderTag: "核对项已通过",
+  reminderLink: "在卡片中查看",
 } as const;
