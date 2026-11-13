@@ -86,6 +86,8 @@ interface Options {
    * commands handed to the human use it instead of a hard-coded name.
    */
   hcSession?: string;
+  /** C-211: a failed context patrol is reported here; drain still runs. */
+  onError?: (error: unknown) => void;
 }
 /** Requests commit first. The dispatch loop drains intents; a restart resumes unfinished work. */
 export class HostOpsService {
@@ -529,7 +531,12 @@ export class HostOpsService {
       if (this.upstream)
         for (const project of this.options.store.listProjects())
           this.pollUpstream(project.id);
-      await this.pollContexts();
+      // C-211: a context patrol failure must not skip this round's drain.
+      try {
+        await this.pollContexts();
+      } catch (error) {
+        this.options.onError?.(error);
+      }
       await this.drain();
     });
     this.serial = next.catch(() => {});

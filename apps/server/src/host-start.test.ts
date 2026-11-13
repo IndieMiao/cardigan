@@ -12,6 +12,7 @@ import { queueRun } from "@cardigan/domain";
 import { parseLaunchConfig } from "@cardigan/roles";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { dispatchFixture } from "../test-support/dispatch.js";
+import { hostMcpUrl } from "./host.js";
 import { startQueuedRun } from "./host-start.js";
 
 const launch = parseLaunchConfig({
@@ -290,4 +291,22 @@ test("host start rejects an external identity before runtime, credentials or ses
   expect(existsSync(join(f.dataDir, "runs", f.project, external.id))).toBe(
     false,
   );
+});
+
+test("C-211 a new session on a non-default CARDIGAN_MCP_PORT gets that port in its MCP config", async () => {
+  const { assignment, run } = queuedRun();
+  const mcpUrl = hostMcpUrl(undefined, { CARDIGAN_MCP_PORT: "4610" })();
+
+  await startQueuedRun(
+    { ...host(f.dataDir), mcpUrl },
+    { project: f.project, assignment, run, bell: "[bell] card=C-1" },
+  );
+
+  const runDir = join(f.dataDir, "runs", f.project, assignment.id);
+  const config = JSON.parse(
+    readFileSync(join(runDir, "pi", "mcp.json"), "utf8"),
+  ) as { mcpServers: Record<string, { url: string }> };
+  const urls = Object.values(config.mcpServers).map((server) => server.url);
+  expect(urls).toContain("http://127.0.0.1:4610/mcp");
+  expect(JSON.stringify(config)).not.toContain(":3004");
 });

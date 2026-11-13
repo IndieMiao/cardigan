@@ -467,6 +467,16 @@ export class GitWorktreeService {
 
   /** Force-remove a registered build worktree; the host only rmdirs leaves. */
   private async dropBuild(repository: string, path: string): Promise<void> {
+    // C-211: the verifier's own untracked files (dependencies, Vite caches)
+    // go first, through Git and only inside this checkout. `git worktree
+    // remove` stops at the first entry it cannot delete yet still drops the
+    // registration, leaving leftovers the host may not recurse into; a
+    // failing clean keeps the registration, so the next round retries.
+    const present = await access(path).then(
+      () => true,
+      () => false,
+    );
+    if (present) await this.git.cleanBuildCheckout(repository, path);
     try {
       await this.git.removeWorktree(repository, path, { force: true });
     } catch (error) {

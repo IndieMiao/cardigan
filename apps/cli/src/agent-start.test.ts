@@ -91,6 +91,8 @@ describe.skipIf(process.platform !== "linux" || process.getgid?.() === 0)(
           CARDIGAN_AGENT_IDENTITY: join(root, "key"),
           CARDIGAN_AGENT_KNOWN_HOSTS: join(root, "known"),
           CARDIGAN_CONFIG_DIR: join(root, "config"),
+          // C-211: start follows a non-default server port without --mcp-url.
+          CARDIGAN_MCP_PORT: "4610",
         },
         captureCommand: vi.fn(async () => {
           throw new Error("host CLI must not run");
@@ -282,6 +284,15 @@ process.exit(child.status ?? 98);
           harness === "codex" ? "codex/config.toml" : "pi/mcp.json",
         ])
           expect((await lstat(join(runDir, name))).mode & 0o777).toBe(0o660);
+        const mcpConfig = await readFile(
+          join(
+            runDir,
+            harness === "codex" ? "codex/config.toml" : "pi/mcp.json",
+          ),
+          "utf8",
+        );
+        expect(mcpConfig).toContain("http://127.0.0.1:4610/mcp");
+        expect(mcpConfig).not.toContain(":3004");
         expect((await lstat(join(runDir, "launch.sh"))).mode & 0o777).toBe(
           0o770,
         );

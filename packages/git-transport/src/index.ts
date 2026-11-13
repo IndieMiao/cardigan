@@ -234,6 +234,20 @@ export class LocalGitTransport implements GitWorktreePort {
   async diffHead(path: string): Promise<string> {
     return this.git(path, ["diff", "HEAD", "--"]);
   }
+  async cleanBuildCheckout(repository: string, path: string): Promise<void> {
+    const target = resolve(path);
+    if (
+      !(await this.listWorktrees(repository)).some(
+        (worktree) => worktree.path === target,
+      )
+    )
+      throw new Error("Worktree is not registered in this clone");
+    // Never let Git pick an enclosing repository: clean only at the top level.
+    const top = await this.git(target, ["rev-parse", "--show-toplevel"]);
+    if (resolve(top) !== target)
+      throw new Error("Build checkout is not a worktree top level");
+    await this.git(target, ["clean", "-ffdxq", "--", "."]);
+  }
   async removeWorktree(
     repository: string,
     path: string,

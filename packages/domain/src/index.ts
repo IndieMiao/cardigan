@@ -100,6 +100,10 @@ export * from "./commands/runtime.js";
 export * from "./commands/screenshot-check.js";
 export * from "./commands/sensitive.js";
 export { pauseStandingAssignment } from "./commands/standing.js";
+export {
+  stoppedByHuman,
+  stopWorkItemAssignment,
+} from "./commands/stop.js";
 export * from "./commands/templates.js";
 export * from "./commands/upstream-health.js";
 export { canStartWork, workCompleted } from "./commands/workflow.js";

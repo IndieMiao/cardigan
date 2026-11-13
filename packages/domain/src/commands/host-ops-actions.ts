@@ -28,6 +28,7 @@ import {
 import { cancelRunDispatch, queueRunInDraft, settingsValid } from "./launch.js";
 import { projectPreferences } from "./preferences.js";
 import { needsYouView } from "./queries.js";
+import { stoppedByHuman } from "./stop.js";
 
 const unfinished = (r: Run) =>
   !["completed", "failed", "cancelled"].includes(r.status);
@@ -61,6 +62,12 @@ function target(d: CommandDraft, p: HostOpsActionParams) {
       (p.tool === "host_ops_restart_standing_pm" && a.status === "suspended"),
     "illegal_transition",
     "Target Assignment is not active",
+  );
+  // C-211: only the human resumes an Assignment the human stopped.
+  ensure(
+    p.tool === "host_ops_cancel_run" || !stoppedByHuman(d.state.events, a.id),
+    "illegal_transition",
+    "Target Assignment was stopped by the human; resume it with cardigan assignment start",
   );
   ensure(
     p.tool !== "host_ops_restart_standing_pm" ||

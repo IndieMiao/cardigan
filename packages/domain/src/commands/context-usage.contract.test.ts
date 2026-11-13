@@ -168,7 +168,24 @@ test("threshold boundaries are inclusive and notices persist once per session an
         { ...usage(85), session_id: "new-session" },
       ),
     ).events,
-  ).toHaveLength(2);
+  ).toHaveLength(1);
+});
+
+test("C-211 crossing both thresholds in one round sends only the handoff; the restart follows next round", () => {
+  let s = base();
+  const jump = value(notices(s, usage(86)));
+  expect(
+    jump.events.map((e) => (e.payload as { level: string }).level),
+  ).toEqual(["handoff"]);
+  expect(jump.data.map((v) => v.recipient)).toEqual([usage().assignment_id]);
+  s = apply(s, jump);
+  const next = value(notices(s, usage(86)));
+  expect(
+    next.events.map((e) => (e.payload as { level: string }).level),
+  ).toEqual(["restart"]);
+  expect(next.data.map((v) => v.recipient)).toEqual([ops.id]);
+  s = apply(s, next);
+  expect(value(notices(s, usage(90))).events).toHaveLength(0);
 });
 
 test("stale, future, replaced and inactive observations cannot trigger actions; Agent cannot forge patrol", () => {
@@ -213,9 +230,13 @@ test("external Office gets handoff inbox and one manual clear request without a 
     assignment_id: office.id,
     runtime_key: JSON.stringify(office.runtime_ref),
   };
-  const result = value(notices(state, u));
-  expect(result.data.map((v) => v.recipient)).toEqual([office.id, office.id]);
-  const next = apply(state, result);
+  const handoff = value(notices(state, u));
+  expect(handoff.data.map((v) => v.recipient)).toEqual([office.id]);
+  const handedOff = apply(state, handoff);
+  // C-211: the manual clear request follows on the next round.
+  const result = value(notices(handedOff, u));
+  expect(result.data.map((v) => v.recipient)).toEqual([office.id]);
+  const next = apply(handedOff, result);
   expect(next.human_actions.at(-1)).toMatchObject({
     triage: "human",
     instructions: expect.stringContaining("/clear"),

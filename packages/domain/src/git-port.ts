@@ -27,6 +27,13 @@ export interface GitWorktreePort {
   changes(path: string): Promise<GitWorktreeChanges>;
   /** `git diff HEAD`: staged and unstaged changes of tracked files. */
   diffHead(path: string): Promise<string>;
+  /**
+   * C-211: delete untracked and ignored files of a registered build checkout
+   * (`git clean -ffdx` at its top level), never of a write worktree. Runs
+   * before the removal so a file Git cannot delete fails here, while the
+   * checkout is still registered and the removal can be retried.
+   */
+  cleanBuildCheckout(repository: string, path: string): Promise<void>;
   removeWorktree(
     repository: string,
     path: string,

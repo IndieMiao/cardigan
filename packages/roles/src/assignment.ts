@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   type Employee,
   employeeDisplayName,
@@ -386,6 +386,18 @@ export function compileAssignmentLaunch(
         content: piContextUsageExtension,
         mode: 0o600,
       });
+      // C-211: pre-trust exactly the folder pi starts in, the worktree the
+      // host created for this Assignment, so a tracked .pi/settings.json does
+      // not stop the unattended terminal at "Trust project folder?". The
+      // saved decision lives in this run's own PI_CODING_AGENT_DIR (pi 1.4
+      // `<agent-dir>/trust.json`, canonical path -> true): one exact path, no
+      // parent folder, no pattern, and no change to `defaultProjectTrust`.
+      if (resolve(input.work_dir) !== resolve(input.run_dir))
+        harnessFiles.push({
+          path: join(input.run_dir, "pi", "trust.json"),
+          content: `${JSON.stringify({ [resolve(input.work_dir)]: true }, null, 2)}\n`,
+          mode: 0o600,
+        });
       harnessEnv.PI_CODING_AGENT_DIR = join(input.run_dir, "pi");
       harnessArgs.push("--append-system-prompt", coreFile);
       break;
