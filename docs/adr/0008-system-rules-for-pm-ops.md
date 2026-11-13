@@ -60,10 +60,10 @@
 | merge_changes_requested | 2 | 2 |
 | merge_check_requeued | 2 | 2 |
 
-读法：
-- 时间窗是全天，所以 run_started 是 339，比第 2.1 节的 320 多。
-- 指派（127 次，40 张卡）和评论（276 条，46 张卡）最多。指派里验证项和产出项各占多少，这张表分不出来，**待实测**；决定 1 只接管验证项。评论里有多少是“催办/说明进展”，同样**待实测**。
-- `decision_resolved` 12 次（含合并确认代确认），说明系统代确认合并（决定 2）直接省下的 Run 有限；它的主要价值是 PM Ops 卡住时合并不停摆，而不是减少 Run 数。
+读法（只写实测计数，不推算节省的时间）：
+- 数据范围：2026-11-13 UTC 全天，PM Ops 的 7 个 Assignment（A-460～A-595），只有事件类型和计数；涉及卡数按 `events.card_id` 列统计。因为是全天，run_started 为 339，比第 2.1 节（00:21Z–16:35Z）的 320 多。
+- 指派 127 次（40 张卡）、评论 276 条（46 张卡）最多。这张表不区分指派的是验证项还是产出项（决定 1 只接管验证项），也不区分评论的用途。
+- `decision_resolved` 12 次（9 张卡），`merge_confirmation_snoozed` 3 次，`merge_changes_requested` 2 次，`merge_check_requeued` 2 次。
 
 SQL（`events` 表结构见 `packages/store/migrations/0001_initial.sql`；actor 和时间在 `doc` JSON 里，`card_id` 是独立列，doc 里的 `$.card_id` 为空）：
 
