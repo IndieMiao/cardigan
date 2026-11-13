@@ -2260,6 +2260,7 @@ cardigan/
 - `host.runInTemporaryCheckout` 封装临时检出、检查进程生命周期、完整性核对和清理，合并闸门及验证方构建复用。它不读取闸门配置、不作领域状态迁移、不推送外部远程；调用方负责候选分发、日志脱敏与领域结果记录。
 - 用 lint 规则强制依赖方向（dependency-cruiser 或 TypeScript project references）。以后要拆包或换实现（例如直连 SDK 的运行时）时几乎不用改代码。
 - C-161 启动并发修复：`store` 打开 SQLite 后先设置 5000ms 的 `busy_timeout`，再配置 WAL。WAL 锁升级可能跳过 SQLite 的 busy handler，因此仅对该步骤的 `SQLITE_BUSY` 在同一 5 秒预算内休眠重试；其他错误和到期错误继续抛出，初始化失败关闭连接。每个迁移取得 `BEGIN IMMEDIATE` 写锁后重新查已应用版本，避免两个进程同时首次打开新库时重复执行迁移及初始化审计；不新增迁移文件或改变 schema 版本。
+- C-175：文件数据库设置 WAL 后读回 `PRAGMA journal_mode`，不是 `wal` 时明确报错并沿用初始化失败的连接关闭流程；只对显式 `dbPath=":memory:"` 的内存库和 `dbPath=""` 的临时库跳过 WAL 配置与校验，不按读回模式豁免文件库。重试预算与 `busy_timeout` 不变。
 
 ### 20.3 被开发项目怎么接入
 

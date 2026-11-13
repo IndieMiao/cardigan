@@ -3,9 +3,70 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import { Store } from "./store.js";
 import { latestSchemaVersion } from "./test-support.js";
+
+test.each(["delete", "memory"])(
+  "opening a file-backed database rejects journal_mode=%s and closes the connection",
+  (journalMode) => {
+    const dataDir = mkdtempSync(join(tmpdir(), "cardigan-wal-check-"));
+    let opened: DatabaseSync | undefined;
+    const exec = DatabaseSync.prototype.exec;
+    const spy = vi
+      .spyOn(DatabaseSync.prototype, "exec")
+      .mockImplementation(function (this: DatabaseSync, sql: string) {
+        if (sql === "PRAGMA journal_mode = WAL") {
+          opened = this;
+          // Simulate SQLite silently retaining another mode on a real database.
+          exec.call(this, `PRAGMA journal_mode = ${journalMode}`);
+          return;
+        }
+        exec.call(this, sql);
+      });
+    try {
+      expect(() => Store.open({ dataDir })).toThrow(
+        `SQLite WAL mode required: expected journal_mode=wal, got ${journalMode}`,
+      );
+      expect(opened).toBeDefined();
+      expect(opened?.isOpen).toBe(false);
+    } finally {
+      spy.mockRestore();
+      if (opened?.isOpen) opened.close();
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  },
+);
+
+test.each([
+  { dbPath: ":memory:", journalMode: "memory" },
+  { dbPath: "", journalMode: "delete" },
+])(
+  "explicit non-WAL database $dbPath still initializes",
+  ({ dbPath, journalMode }) => {
+    const store = Store.open({ dbPath });
+    try {
+      expect(store.schemaVersion()).toBe(latestSchemaVersion());
+      expect(store.database.prepare("PRAGMA journal_mode").get()).toMatchObject(
+        {
+          journal_mode: journalMode,
+        },
+      );
+      expect(store.database.prepare("PRAGMA foreign_keys").get()).toMatchObject(
+        {
+          foreign_keys: 1,
+        },
+      );
+      expect(store.database.prepare("PRAGMA busy_timeout").get()).toMatchObject(
+        {
+          timeout: 5000,
+        },
+      );
+    } finally {
+      store.close();
+    }
+  },
+);
 
 interface OpenResult {
   readonly pid: number;
