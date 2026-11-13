@@ -65,6 +65,12 @@ import { ServerGit } from "../src/git.js";
 import { type CardiganServer, startCardiganServer } from "../src/index.js";
 import { HcCore, runCleanupSteps } from "./hc.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 export const git = (cwd: string, ...args: string[]) =>
   execFileSync(
     "git",
@@ -754,6 +760,7 @@ const child=spawnSync('sh',['-c',args.slice(at+2).join(' ')],{cwd:${JSON.stringi
         {
           work_item_id: primary.owner.work_item_id,
           kind: "card_completion",
+          plain_summary: TEST_PLAIN_SUMMARY,
           summary: "Acceptance criteria verified",
           subject: d.subject,
           requested_verifiers: [pm.work_item_id],

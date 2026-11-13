@@ -27,6 +27,12 @@ import { Dispatcher } from "./dispatch.js";
 import { routeProjectEvents } from "./dispatch-inbox.js";
 import { executionView } from "./web/read.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 let f: ReturnType<typeof dispatchFixture>,
   io: CliIo,
   output: string[],
@@ -259,6 +265,7 @@ test.each(["office", "ops"] as const)(
                 ],
                 recommended: "yes",
                 decider: "human",
+                plain_summary: TEST_PLAIN_SUMMARY,
                 blocking: false,
                 affected_cards: [card.id],
                 affected_work_items: [],

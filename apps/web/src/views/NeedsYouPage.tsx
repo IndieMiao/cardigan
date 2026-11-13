@@ -37,6 +37,7 @@ import {
   quote,
   TakeoverWarning,
 } from "../components/Operations.js";
+import { DecisionContext, PlainSummary } from "../components/PlainSummary.js";
 import { PriorityBadge } from "../components/Priority.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
 import { decisionTitle, delegableCategories } from "../decision-labels.js";
@@ -202,12 +203,12 @@ function Decision({
     >
       <DecisionMeta q={q} projectId={projectId} elapsed={elapsed} />
       <h3 className="needs-question">{q.question}</h3>
-      {q.context.trim().length > 0 && (
-        <details className="needs-context">
-          <summary>背景</summary>
-          <Markdown body={q.context} />
-        </details>
-      )}
+      <PlainSummary id={q.id} summary={q.plain_summary} />
+      <DecisionContext
+        context={q.context}
+        summary={q.plain_summary}
+        legacy="背景"
+      />
       <DecisionAttachments attachments={q.attachments} />
       {!paused && (
         <SuggestedDecision
@@ -540,6 +541,12 @@ export function MergeConfirmation({
         <PriorityBadge value={q.card_priority ?? 0} />
         {decisionTitle(q)}
       </h3>
+      <PlainSummary id={q.id} summary={q.plain_summary} />
+      <DecisionContext
+        context={q.context}
+        summary={q.plain_summary}
+        legacy={null}
+      />
       {q.status === "snoozed" && q.snooze && (
         <p
           role="status"

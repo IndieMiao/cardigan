@@ -29,6 +29,12 @@ import {
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import { Store, writeRole } from "@cardigan/store";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 export function m3Fixture(
   project = "m3-acceptance",
   shared?: Store,
@@ -259,6 +265,9 @@ export function m3Fixture(
     const params = {
       work_item_id: produce.id,
       kind,
+      ...((kind) === "card_completion"
+        ? { plain_summary: TEST_PLAIN_SUMMARY }
+        : {}),
       summary: "Ready for review",
       subject: { kind: "git_head" as const, value: "a".repeat(40) },
       requested_verifiers: [kind === "code" ? verify.id : acceptance.id],

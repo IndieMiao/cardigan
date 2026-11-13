@@ -179,6 +179,12 @@ function roleFile(name: string, worktree: string, tools: string[]): string {
   return path;
 }
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 /** The fake Agent: one script, branches on the role it is started as. */
 const AGENT = `
 import { existsSync, writeFileSync, mkdirSync } from "node:fs";
@@ -724,6 +730,7 @@ describe.skipIf(!available)("M3.5 router and dispatcher end to end", () => {
             affected_work_items: ["W-1" as never],
             blocking: false,
             decider: "human",
+            plain_summary: TEST_PLAIN_SUMMARY,
           },
           ports,
         ),

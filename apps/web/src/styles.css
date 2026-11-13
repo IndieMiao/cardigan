@@ -3992,3 +3992,64 @@ body[data-lightbox="open"] .drawer-overlay {
 .decision-suggestion textarea {
   width: 100%;
 }
+/* C-202: plain-language summary shown first on a decision. */
+.plain-summary {
+  margin: 8px 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.plain-summary dl {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+.plain-summary dl > div {
+  display: grid;
+  grid-template-columns: 6em minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+}
+.plain-summary dt {
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.plain-summary dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.plain-summary-risk.risky {
+  margin: 2px -8px 0;
+  padding: 6px 8px;
+  border-left: 4px solid var(--danger);
+  border-radius: var(--radius);
+  background: var(--danger-surface);
+}
+.plain-summary-risk.risky dt,
+.plain-summary-risk.risky dd {
+  color: var(--danger);
+}
+.plain-summary-flag {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 6px;
+  border: 1px solid var(--danger);
+  border-radius: 999px;
+  font-size: var(--text-sm);
+}
+.plain-summary.compact {
+  margin: 4px 0 6px;
+  padding: 6px 8px;
+  font-size: var(--text-sm);
+}
+.plain-summary.compact dl > div {
+  grid-template-columns: 5em minmax(0, 1fr);
+}
+@media (max-width: 480px) {
+  .plain-summary dl > div {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+}
+/* End C-202 plain summary. */

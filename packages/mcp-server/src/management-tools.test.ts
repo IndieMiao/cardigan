@@ -18,6 +18,12 @@ import { memoryLogger } from "./log.js";
 import { type RunningServer, startMcpServer } from "./server.js";
 import { acceptingVerifierFor } from "./test-support.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 const project = "management-fixture";
 let store: Store, server: RunningServer, office: Client, card: Card;
 let clients: Client[], sequence: number;
@@ -315,6 +321,7 @@ test("collaboration tools use domain commands and preserve reviewable identities
     affected_work_items: [],
     blocking: true,
     decider: "human",
+    plain_summary: TEST_PLAIN_SUMMARY,
   });
   // C-132: new decisions are Q-n; the legacy q(n) spelling resolves the same one.
   expect(decision.id).toMatch(/^Q-[1-9][0-9]*$/u);
@@ -837,6 +844,7 @@ test.each(
       affected_work_items: [],
       blocking: true,
       decider: "human",
+      plain_summary: TEST_PLAIN_SUMMARY,
     });
     // Trusted control-plane fixture; request_decision cannot forge the trigger.
     store.uow.run((tx) => {
@@ -951,6 +959,7 @@ test("category authorization uses PM Ops tools, rejects Office/high-risk bypasse
     affected_work_items: [],
     blocking: false,
     decider: "human",
+    plain_summary: TEST_PLAIN_SUMMARY,
   };
   expect((await raw(office, "request_decision", question)).isError).toBe(true);
   const q = await ok<Decision>(office, "request_decision", {
@@ -1358,6 +1367,7 @@ async function awaitingMerge() {
   const completion = await ok<{ id: string }>(producer, "submit_delivery", {
     work_item_id: work("coder").id,
     kind: "card_completion",
+    plain_summary: TEST_PLAIN_SUMMARY,
     summary: "Done",
     subject,
     requested_verifiers: [work("pm").id],

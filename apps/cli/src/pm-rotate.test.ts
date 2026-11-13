@@ -26,6 +26,12 @@ import { main } from "./index.js";
 import type { CliIo } from "./io.js";
 import { rotateStandingPmInStore } from "./pm-rotate.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 const project = "p-rotate" as ProjectId;
 let root: string;
 let output: string[];
@@ -446,6 +452,7 @@ test("external Office rotation issues the same scoped token, moves inbox, and re
               options: [{ key: "yes", description: "继续", impact: "执行" }],
               recommended: "yes",
               decider: "human",
+              plain_summary: TEST_PLAIN_SUMMARY,
               blocking: false,
               affected_cards: [],
               affected_work_items: [],

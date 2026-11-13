@@ -1007,6 +1007,9 @@ function decisionActionWebView(
     options: decision.options,
     recommended: decision.recommended,
     ...(decision.suggestion ? { suggestion: decision.suggestion } : {}),
+    ...(decision.plain_summary
+      ? { plain_summary: decision.plain_summary }
+      : {}),
     trigger: decision.trigger ?? null,
     category: decision.category ?? "general",
     assignment_id: decision.assignment_id ?? null,

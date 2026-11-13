@@ -13,6 +13,12 @@ import type {
 } from "@cardigan/domain";
 import type { RouterSnapshot } from "./types.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 /**
  * Minimal fixtures for the M3.1 tests: only the fields the rules read are
  * filled in, and each builder takes overrides, because the router is pure and
@@ -95,6 +101,7 @@ export const decision = (overrides: Overrides<Decision> = {}): Decision =>
     id: "Q-1",
     card_id: CARD_ID,
     decider: "human",
+    plain_summary: TEST_PLAIN_SUMMARY,
     question: "Which shape?",
     affected_work_items: ["W-1"],
     ...overrides,

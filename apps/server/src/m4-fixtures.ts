@@ -47,6 +47,12 @@ import {
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import { Store, writeRole } from "@cardigan/store";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 export const PM_TOOLS: readonly ToolName[] = [
   "create_card",
   "update_card",
@@ -312,6 +318,9 @@ export function m4Fixture(
           value: input.subject,
         },
         requested_verifiers: [...input.verifiers],
+        ...(input.kind === "card_completion"
+          ? { plain_summary: TEST_PLAIN_SUMMARY }
+          : {}),
       },
       prepared = await prepareDelivery(
         state(),
