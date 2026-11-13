@@ -419,6 +419,7 @@ const DEFAULT_ROLE_IDS = [
   "ui_ux_designer",
   "design_director",
   "tester",
+  "independent_reviewer",
   "host_ops",
 ];
 
