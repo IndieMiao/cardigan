@@ -33,7 +33,7 @@ export interface RuntimeMonitorOptions {
   reconcileIntervalMs?: number;
   maxConsecutiveFailures?: number;
 }
-/** C-219: conservative candidate, pending human confirmation (§13.9). */
+/** C-219 / Q-357: three failed attempts, including the initial subscription (§13.9). */
 export const DEFAULT_RUNTIME_FAILURE_LIMIT = 3;
 interface Subscription {
   controller: AbortController;
