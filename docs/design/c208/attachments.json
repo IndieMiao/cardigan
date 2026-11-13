@@ -1,0 +1,75 @@
+{
+  "card": "C-208",
+  "work_item": "W-633",
+  "baseline": "80dbfa11c0807864a3c9f06fdf69a302fb53c2c1",
+  "design": {
+    "id": "attachment-359",
+    "sha256": "58143ee00f6fac0fdc890bc18d0d9fd782ac154e34c1c9747199412e8457bbd1"
+  },
+  "screenshots": [
+    {
+      "name": "needs-you-1440-comparison.png",
+      "id": "attachment-360",
+      "sha256": "2df8efbba031d79c4c45392670101f54b3fed3665a8501a24d8afd1d6532c43b"
+    },
+    {
+      "name": "needs-you-390-comparison.png",
+      "id": "attachment-361",
+      "sha256": "18c6c3d59ef63c0d7f65b7cfc9d9b61af78b6a618fb63195ebd2dcb51aaa7504"
+    },
+    {
+      "name": "card-1440-comparison.png",
+      "id": "attachment-362",
+      "sha256": "aebab08363676dbaa432e99bb366b841e253581f7201121e3973d504e75db44c"
+    },
+    {
+      "name": "card-390-comparison.png",
+      "id": "attachment-363",
+      "sha256": "4fa0787b194f09dcd9049b1302a2860644d533c51e7923d7c25aa94ef36384a0"
+    },
+    {
+      "name": "board-1440-comparison.png",
+      "id": "attachment-364",
+      "sha256": "06029dcbc066324b39756e9fdfd60fef2ad7992be59f4e691a863d40c6f56a72"
+    },
+    {
+      "name": "board-390-comparison.png",
+      "id": "attachment-365",
+      "sha256": "7d7ed18ea2572df1a7438b84a436744b0e6056bad1b3575d157001e98cb13166"
+    },
+    {
+      "name": "execution-1440-comparison.png",
+      "id": "attachment-366",
+      "sha256": "41091aae90f4929ccb5e37b8719ff1caf5323d4320a394920dcf8a5c53a7eb28"
+    },
+    {
+      "name": "execution-390-comparison.png",
+      "id": "attachment-367",
+      "sha256": "6d0baaac006cbb0946e1b44b0eaa42face5c6d42fd63e227230aab78d74b0829"
+    },
+    {
+      "name": "activity-1440-comparison.png",
+      "id": "attachment-368",
+      "sha256": "db5ac55d9f51818a5a7ddc6adb52194f72a40818b1e44cd01787554367354b4f"
+    },
+    {
+      "name": "activity-390-comparison.png",
+      "id": "attachment-369",
+      "sha256": "0e0e8c076d5c9f68aba21cad4a418491419819e75a635b4ada09681c66952ed9"
+    },
+    {
+      "name": "palette-1440.png",
+      "id": "attachment-370",
+      "sha256": "4c326ba6350a1764082c218edb8b9e06bf945c4e0f0162c0875c2e972be294ef"
+    },
+    {
+      "name": "palette-390.png",
+      "id": "attachment-371",
+      "sha256": "fac1d6acbe72dec0f08a9805d8b6acdfbe9d6639ecca2a3cf3954b53315d503f"
+    }
+  ],
+  "browser_checks": {
+    "id": "attachment-372",
+    "sha256": "9bdd22d81e6993103840f30ef35227836c5d502f15eacc14e89bc059bab545fb"
+  }
+}
