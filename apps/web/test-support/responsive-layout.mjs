@@ -29,14 +29,44 @@ function withCurrentRecords(value) {
   const [from, to] = recordsRegion(css);
   return `${value.slice(0, start)}${css.slice(from, to)}${value.slice(end)}`;
 }
-const baseline = withCurrentRecords(
-  execFileSync(
-    "git",
-    [
-      "show",
-      `${process.env.LAYOUT_BASELINE_REF ?? "origin/main"}:apps/web/src/styles.css`,
-    ],
-    { cwd: root, encoding: "utf8" },
+// C-204 intentionally changes number tags and person rows. Compare unrelated
+// desktop geometry against the baseline with only these shared rules updated.
+function withCurrentIdentity(value) {
+  for (const [startPattern, end] of [
+    [/\.id-tag(?:,| \{)/, ".filter-bar {"],
+    [/\.entry-meta \{/, ".timeline-version {"],
+  ]) {
+    const start = value.search(startPattern),
+      from = css.search(startPattern);
+    value =
+      value.slice(0, start) +
+      css.slice(from, css.indexOf(end, from)) +
+      value.slice(value.indexOf(end, start));
+  }
+  for (const selector of [
+    ".identity-row > *",
+    ".employee-inline .employee-label strong",
+    ".needs-delivery-list p",
+    ".needs-review-issues",
+    ".decision-record-by .employee-identity",
+  ]) {
+    const start = css.indexOf(`${selector} {`);
+    value += `\n${css.slice(start, css.indexOf("}", start) + 1)}`;
+  }
+  return (
+    value + css.slice(css.indexOf("/* C-204: shared person/number/status rows"))
+  );
+}
+const baseline = withCurrentIdentity(
+  withCurrentRecords(
+    execFileSync(
+      "git",
+      [
+        "show",
+        `${process.env.LAYOUT_BASELINE_REF ?? "origin/main"}:apps/web/src/styles.css`,
+      ],
+      { cwd: root, encoding: "utf8" },
+    ),
   ),
 );
 const navAllowance = ".nav a { gap: 8px; }";

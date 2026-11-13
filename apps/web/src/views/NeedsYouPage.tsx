@@ -27,6 +27,7 @@ import {
   StatusTag,
   Time,
 } from "../components/Foundation.js";
+import { IdentityRow } from "../components/IdentityRow.js";
 import { MergeCheck } from "../components/MergeCheck.js";
 import {
   CardLink,
@@ -112,7 +113,7 @@ function DecisionMeta({
 }) {
   return (
     <>
-      <header className="needs-meta">
+      <IdentityRow as="header" className="needs-meta">
         <EmployeeIdentity {...q} showTitle={false} />
         <IdTag id={q.id} label={isMergeConfirmation(q) ? "合并确认" : "拍板"} />
         {q.blocking && !q.followup_notice && <StatusTag status="blocked" />}
@@ -154,7 +155,7 @@ function DecisionMeta({
             />
           )}
         </span>
-      </header>
+      </IdentityRow>
       <DecisionAffectedCards decision={q} projectId={projectId} />
     </>
   );
@@ -408,11 +409,11 @@ function ReviewLine({ review }: { readonly review: MergeConfirmationReview }) {
     "验证";
   return (
     <li>
-      <div className="needs-review-head">
+      <IdentityRow className="needs-review-head">
         <EmployeeIdentity {...review} showTitle={false} />
         <IdTag id={review.work_item_id} label={label} />
         <StatusTag status={review.verdict} />
-      </div>
+      </IdentityRow>
       {review.issues.length > 0 && (
         <details className="needs-review-issues">
           <summary>问题（{review.issues.length}）</summary>
@@ -634,7 +635,7 @@ export function MergeConfirmation({
           <ul className="needs-delivery-list">
             {merge.deliveries.map((delivery) => (
               <li key={delivery.id}>
-                <div className="needs-delivery-head">
+                <IdentityRow className="needs-delivery-head">
                   <EmployeeIdentity {...delivery} showTitle={false} />
                   <IdTag
                     id={delivery.work_item_id}
@@ -655,7 +656,7 @@ export function MergeConfirmation({
                       查看改动
                     </a>
                   )}
-                </div>
+                </IdentityRow>
                 <p>{delivery.summary}</p>
               </li>
             ))}
@@ -959,11 +960,11 @@ function HumanAction({
   if (item.completion_notice !== undefined)
     return (
       <article className="needs-item" aria-label={`执行结果待接手 ${item.id}`}>
-        <header className="needs-meta">
+        <IdentityRow as="header" className="needs-meta">
           <IdTag id={item.id} label="执行结果" />
           <StatusTag status="completed" />
           {item.card_id && <CardLink projectId={projectId} id={item.card_id} />}
-        </header>
+        </IdentityRow>
         <h3 className="needs-question">{item.why}</h3>
         <Markdown body={item.completion_notice} />
         <p>请恢复发起方或启动项目的 PM Ops，继续处理这项执行结果。</p>
@@ -971,7 +972,7 @@ function HumanAction({
     );
   return (
     <article className="needs-item" aria-label={`执行 ${item.id}`}>
-      <header className="needs-meta">
+      <IdentityRow as="header" className="needs-meta">
         <EmployeeIdentity {...item} showTitle={false} />
         <IdTag id={item.id} label="操作" />
         <StatusTag
@@ -992,7 +993,7 @@ function HumanAction({
             <Time value={item.due} />
           </span>
         )}
-      </header>
+      </IdentityRow>
       <h3 className="needs-question">
         {item.triage === "host" ? "主机操作：" : ""}
         {item.handoff?.title ?? item.triage_rationale ?? item.why}
@@ -1122,7 +1123,7 @@ function Incident({
       className="needs-item urgent"
       aria-label={`运行异常 ${incident.id}`}
     >
-      <header className="needs-meta">
+      <IdentityRow as="header" className="needs-meta">
         <EmployeeIdentity
           {...incident}
           author_role={incident.role_id}
@@ -1134,7 +1135,7 @@ function Incident({
         <span className="needs-cards">
           <CardLink projectId={projectId} id={incident.card_id} />
         </span>
-      </header>
+      </IdentityRow>
       <div>
         <p>
           {incidentSituation[incident.runtime_state] ??
@@ -1349,13 +1350,13 @@ function NeedsContent({
                   className="needs-item urgent"
                   key={`${finding.decision_id}/${finding.work_item_id}`}
                 >
-                  <header className="needs-meta">
+                  <IdentityRow as="header" className="needs-meta">
                     <IdTag id={finding.work_item_id} label="审核工作项" />
                     <span className="hint">
                       {waitLabel(finding.waited_ms, elapsed)}
                     </span>
                     <CardLink projectId={projectId} id={finding.card_id} />
-                  </header>
+                  </IdentityRow>
                   <p>{finding.detail}</p>
                 </article>
               ))}
@@ -1532,7 +1533,7 @@ function Notices({
           className={n.read ? "needs-item read" : "needs-item"}
           aria-label={`知会 ${n.decision_id}`}
         >
-          <header className="needs-meta">
+          <IdentityRow as="header" className="needs-meta">
             <StatusTag
               status={n.read ? "done" : "active"}
               label={
@@ -1553,7 +1554,7 @@ function Notices({
             <IdTag id={n.decision_id} label="拍板" />
             {n.card_id && <CardLink projectId={projectId} id={n.card_id} />}
             <Time value={n.at} />
-          </header>
+          </IdentityRow>
           {n.question && <p className="hint">{n.question}</p>}
           <Markdown body={n.body} />
           <footer>

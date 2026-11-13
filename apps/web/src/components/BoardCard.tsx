@@ -5,6 +5,7 @@ import { routeHash } from "../route.js";
 import { nextOwnersLabel } from "../status.js";
 import { ProduceOwners } from "./EmployeeIdentity.js";
 import { fullTime, StatusTag, Time } from "./Foundation.js";
+import { IdBadge } from "./IdTag.js";
 import { PriorityBadge } from "./Priority.js";
 import { StatusIcon } from "./StatusIcon.js";
 import { Tooltip } from "./Tooltip.js";
@@ -115,7 +116,11 @@ export function BoardCard({
       <Tooltip content={card.title}>
         <a className="card-tile-link" href={href} onClick={openCard}>
           <span className="card-tile-head">
-            {display.number && <span className="card-id">{card.id}</span>}
+            {display.number && (
+              <span className="card-id">
+                <IdBadge id={card.id} />
+              </span>
+            )}
             <StatusTag status={card.status} />
           </span>
           <span className="card-title">{card.title}</span>

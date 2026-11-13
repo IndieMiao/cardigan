@@ -2,6 +2,8 @@ import type { ReactNode } from "react";
 import type { TimelineEntryView } from "../api.js";
 import { EmployeeIdentity } from "./EmployeeIdentity.js";
 import { Time } from "./Foundation.js";
+import { IdentityRow } from "./IdentityRow.js";
+import { IdTag } from "./IdTag.js";
 
 const paths: Record<string, string> = {
   comment: "M4 4h16v12H9l-5 4V4Z M8 8h8 M8 12h5",
@@ -57,7 +59,7 @@ export function TimelineActor({
       ? "agent"
       : entry.author;
   return (
-    <div
+    <IdentityRow
       className={`timeline-identity actor-${role}${compact ? " compact" : ""}`}
     >
       <EmployeeIdentity
@@ -65,8 +67,8 @@ export function TimelineActor({
         showTitle={!compact}
         metadata={`${entry.author}，${entry.id}，序号 ${entry.event_seq}`}
       />
-      {assignment && <span className="timeline-role">{assignment}</span>}
-    </div>
+      {assignment && <IdTag id={assignment} />}
+    </IdentityRow>
   );
 }
 export function TimelineHeader({
@@ -79,7 +81,7 @@ export function TimelineHeader({
   conclusion?: ReactNode;
 }) {
   return (
-    <header className="timeline-head">
+    <IdentityRow as="header" className="timeline-head">
       <TimelineActor entry={entry} />
       {conclusion}
       <p className="timeline-when">
@@ -88,6 +90,6 @@ export function TimelineHeader({
           <span className="timeline-retracted-label"> 已撤回</span>
         )}
       </p>
-    </header>
+    </IdentityRow>
   );
 }

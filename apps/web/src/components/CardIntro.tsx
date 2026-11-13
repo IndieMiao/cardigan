@@ -4,6 +4,7 @@ import { routeHash } from "../route.js";
 import { statusLabel } from "../status.js";
 import { SystemAvatar } from "./EmployeeIdentity.js";
 import { LongContent } from "./Foundation.js";
+import { IdBadge } from "./IdTag.js";
 import { StatusIcon } from "./StatusIcon.js";
 
 export function CardSource({
@@ -20,7 +21,7 @@ export function CardSource({
   if (!quote && !parent && !related.length) return null;
   const cardLink = (c: { id: string; title: string }) => (
     <a key={c.id} href={routeHash({ kind: "card", projectId, cardId: c.id })}>
-      {c.id} {c.title}
+      <IdBadge id={c.id} /> {c.title}
     </a>
   );
   return (
@@ -43,7 +44,7 @@ export function CardSource({
               anchor: `decision-${parent.decision_id}`,
             })}
           >
-            {parent.decision_id}
+            <IdBadge id={parent.decision_id} />
           </a>
         </p>
       )}
