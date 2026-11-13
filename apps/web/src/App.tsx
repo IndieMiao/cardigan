@@ -16,6 +16,7 @@ import {
   CardDetailPage,
   DecisionHistoryPage,
   ExecutionPage,
+  HelpPage,
   NeedsYouPage,
   SettingsPage,
   SnapshotPage,
@@ -363,6 +364,9 @@ function Workbench({
           />
         )}
         <PageLoader key={`${selected?.id}/${route?.kind}`}>
+          {selected && route?.kind === "help" && (
+            <HelpPage projectId={selected.id} />
+          )}
           {selected && route?.kind === "decision-history" && (
             <DecisionHistoryPage
               client={client}
