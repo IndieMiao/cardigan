@@ -1,6 +1,20 @@
 import { expect, test } from "vitest";
-import { recordDeployment, requestDeploymentAction } from "./deployment.js";
-import { actor, apply, fixture, human, ports, value } from "./test-fixtures.js";
+import {
+  recordDeployment,
+  recordDeploymentStop,
+  requestDeploymentAction,
+} from "./deployment.js";
+import {
+  actor,
+  apply,
+  fixture,
+  human,
+  id,
+  now,
+  ports,
+  run,
+  value,
+} from "./test-fixtures.js";
 
 const record = {
   attempt: "attempt",
@@ -23,6 +37,7 @@ test("deployment audit is system-only; no Agent can forge a successful deploymen
     { kind: "system" as const, project_id: "other" },
   ]) {
     expect(recordDeployment(state, caller, record, ports()).ok).toBe(false);
+    expect(recordDeploymentStop(state, caller, record, ports()).ok).toBe(false);
     expect(
       requestDeploymentAction(
         state,
@@ -42,6 +57,58 @@ test("deployment audit is system-only; no Agent can forge a successful deploymen
   expect(
     recordDeployment(state, system, { ...record, from: "main" }, ports()).ok,
   ).toBe(false);
+});
+
+test("stopping snapshots only running Runs and preserves every workflow state", () => {
+  const state = fixture();
+  const before = {
+    ...state,
+    runs: [
+      run(1),
+      { ...run(2), status: "queued" as const },
+      { ...run(3), status: "completed" as const },
+      run(4),
+    ],
+  };
+  const original = JSON.stringify(before);
+  const effect = value(
+    recordDeploymentStop(
+      before,
+      { kind: "system", project_id: state.project_id },
+      record,
+      ports(),
+    ),
+  );
+  expect(effect.data.status).toBe("stopping");
+  expect(effect.data.stop_snapshot).toEqual({
+    captured_at: now,
+    runs: [
+      {
+        run_id: id("run", 1),
+        assignment_id: id("assignment", 1),
+        card_id: id("card", 1),
+      },
+      {
+        run_id: id("run", 4),
+        assignment_id: id("assignment", 4),
+        card_id: null,
+      },
+    ],
+  });
+  expect(effect.events[0]?.payload).toMatchObject({
+    stop_snapshot: effect.data.stop_snapshot,
+  });
+  expect(effect.changes).toEqual([]);
+  expect(JSON.stringify(before)).toBe(original);
+  const finished = value(
+    recordDeployment(
+      before,
+      { kind: "system", project_id: state.project_id },
+      { ...effect.data, status: "rolled_back" },
+      ports(),
+    ),
+  );
+  expect(finished.data.stop_snapshot).toEqual(effect.data.stop_snapshot);
 });
 
 test("permission-widening followup stays with the human and is idempotent", () => {

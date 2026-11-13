@@ -44,6 +44,7 @@ import {
   DEFAULT_CONTEXT_STALE_AFTER_MS,
   readSessionContexts,
 } from "./context-usage.js";
+import { readDeploymentDiagnostics } from "./deployment-diagnostics.js";
 import { tryHostOpsLock } from "./host-ops-lock.js";
 import { revokeStoppedRunTokens, stopRunRuntime } from "./stop-run.js";
 
@@ -106,7 +107,10 @@ export class HostOpsService {
         ),
       ),
     );
-    const sessions = await this.sessions(actor.project_id);
+    const [sessions, deployment] = await Promise.all([
+      this.sessions(actor.project_id),
+      readDeploymentDiagnostics(this.options.store, actor.project_id),
+    ]);
     context.revalidateToken?.();
     return this.options.store.uow.read((tx) => {
       const state = loadCommandState(tx, actor.project_id);
@@ -144,6 +148,7 @@ export class HostOpsService {
       }));
       return {
         ...attention,
+        ...(deployment ? { deployment } : {}),
         lost: attention.lost.map(summary),
         paused: attention.paused.map(summary),
         findings: attention.findings.map((f) => ({

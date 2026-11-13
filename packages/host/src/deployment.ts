@@ -44,6 +44,7 @@ export class DeploymentController {
         };
         if (!result.build) throw new Error("build_failed");
         const migrations = await d.migrationsChanged(current.sha, target);
+        record = await d.beforeStop(record);
         // Backup is taken with the old server stopped, before any new migration.
         stoppedAt = d.now();
         await d.stop();

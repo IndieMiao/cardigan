@@ -1885,6 +1885,8 @@ server 在合并循环旁启动独立的推送循环（默认 5 秒轮询，跟�
 - 构建成功后核对记录的 PID、boot/start ticks、UID、Node 可执行文件和 release cwd，再发停止信号；不搜索 cmdline、不按名字杀进程，退出未确认不启动第二个 server。`packages/store` 发生变化时，旧服务退出后、新构建启动和迁移前，用 SQLite `VACUUM INTO` 备份（包含 WAL 数据），保存为主机私有 0600 文件。新 server 的结构化 ready 消息和两个回环端口都通过才发布当前构建；失败或超时停止候选，恢复上一构建并重新核对 ready。回滚不自动覆盖数据库；若新迁移导致旧构建不能启动，记录失败并交主机管理员结合备份处理，避免丢弃已写入的数据。
 - 部署后比较新旧构建中每个默认角色的策略字段指纹，只处理角色包确实变化的已登记角色。复用 `role upgrade --from-default` 的差异算法；工具或能力新增（按精确名称比较）、重复项造成的歧义、worktree 放宽、角色类型改变均不自动升级，产生含 dry-run 差异的人工事项（直接交人）。相同内容或停用角色不写版本。实际升级保存项目 launch 字段、追加 `role_updated` 与包含版本和差异摘要的 `host_role_upgraded`。
 - PM 升级后，以当前 Ops Assignment 固定的旧角色再核对非扩权，复用 `pm rotate --ops` 的原子迁移、Token 撤销、通知转移与审计，保留员工。若旧 Ops 权限比新版本窄或不能接住原有待办，停止自动轮换并交人。新 Assignment 没有 Run 时以 system 身份调用既有启动流程，遵守主机容量并允许留在排队态，不借用人工启动豁免、不另建派发路径；重试会识别已轮换但尚无 Run 的 Assignment。
+- 停旧 server 前，在同一写事务读取自举项目当时 `status=running` 的 Run 并写 `stopping` 部署事件，保存采集时间、Run 编号、Assignment 编号和工作项所属卡片（常驻项目级 Run 的 `card_id=null`）；审计落盘成功后才发停止信号，审计失败保持旧服务。成功、失败和回滚记录均保留这份快照。快照不更改 Run 或 Assignment 状态，也不作为部署导致后续失活的因果证据。
+- `host_ops_read_diagnostics` 增加自举项目的 `deployment` 只读投影，包含最近 20 条部署记录、构建诊断代码和安全日志尾部、已部署 SHA、中心 main SHA、快进关系和落后提交数；文件或 Git 数据缺失时返回空值，不回显内部路径、配置、环境或原始错误。沿用 C-200 的异步读取前后鉴权，不增加执行工具。运维依此向 PM Ops 和 PM Office 汇报，不能选代码、触发部署、重启 server 或改主机配置。
 - `host_deployment_recorded` 保存提交区间、构建结果、停服时长、ready、回滚状态和安全摘要；Workbench 项目动态展示这些记录以及角色升级、PM 轮换事件。失败、回滚或部署后角色同步失败时，先提交事件与人工事项，再通知当前 PM Office 和主机运维。监督器存活期间同一失败目标不自动循环重试；主机处理后可重启监督器，后续 main 新提交可以重新尝试。普通部署不改变 Card、Delivery 或 Review 状态。
 
 ## 13. 部署

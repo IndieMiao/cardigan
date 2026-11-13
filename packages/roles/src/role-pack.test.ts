@@ -1,4 +1,8 @@
-import { ROLE_TOOL_ALLOWLISTS, validateRole } from "@cardigan/domain";
+import {
+  HOST_OPS_ROLE_TOOLS,
+  ROLE_TOOL_ALLOWLISTS,
+  validateRole,
+} from "@cardigan/domain";
 import { describe, expect, test } from "vitest";
 import {
   DEFAULT_ROLE_KINDS,
@@ -224,4 +228,18 @@ test("C-192: pm hands matters to the human with a suggestion, reason and prefill
     expect(PM_DECISION_SUGGESTION_RULE).toContain(phrase);
   for (const role of ["coder", "reviewer"] as const)
     expect(instructionsFor(role)).not.toContain(PM_DECISION_SUGGESTION_RULE);
+});
+
+test("deployment instructions keep host ops read-only and preserve context-patrol rules", () => {
+  const role = defaultRoleDefinition("host_ops", launch);
+  expect(role.allowed_tools).toEqual(HOST_OPS_ROLE_TOOLS);
+  expect(role.instructions).toContain(
+    "host_ops_read_diagnostics 的 deployment",
+  );
+  expect(role.instructions).toContain(
+    "不能触发部署、重启 server、选要部署的代码或修改主机配置",
+  );
+  expect(role.instructions).toContain("PM Ops 与 PM Office");
+  expect(role.instructions).toContain("context_tokens / context_window_size");
+  expect(role.instructions).toContain("context_session_id");
 });

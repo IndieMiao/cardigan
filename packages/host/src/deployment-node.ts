@@ -24,6 +24,7 @@ import type { Store } from "@cardigan/store";
 import {
   deploymentMergeSegments,
   writeDeploymentRecord,
+  writeDeploymentStop,
 } from "./deployment-audit.js";
 import { acquireDeploymentCapacity } from "./deployment-capacity.js";
 import {
@@ -97,7 +98,7 @@ export class NodeDeploymentDriver implements DeploymentDriver {
       1,
     );
     let releaseCapacity: (() => void) | undefined;
-    let interrupted: { from: string; to: string } | undefined;
+    let interrupted: DeploymentRecord | undefined;
     let recoveringAt = Date.now();
     try {
       releaseCapacity = acquireDeploymentCapacity(this.options.store);
@@ -178,15 +179,17 @@ export class NodeDeploymentDriver implements DeploymentDriver {
           this.state.fence !== 1 ||
           this.state.running?.sha !== this.state.current.sha
         ) {
-          // A supervisor crash may leave a candidate alive. Fence it before restoring.
-          if (
-            this.state.running &&
-            this.state.running.sha !== this.state.current.sha
-          )
-            interrupted = {
-              from: this.state.current.sha,
-              to: this.state.running.sha,
-            };
+          // Persist a new recovery snapshot before stopping an unconfirmed candidate.
+          interrupted = await this.beforeStop({
+            attempt: randomUUID(),
+            from: this.state.current.sha,
+            to: this.state.running?.sha ?? this.state.current.sha,
+            status: "started",
+            build: "passed",
+            ready: false,
+            downtime_ms: 0,
+            summary: "监督器恢复未完成的切换",
+          });
           recoveringAt = Date.now();
           await this.stop();
           await this.start(this.state.current);
@@ -203,7 +206,6 @@ export class NodeDeploymentDriver implements DeploymentDriver {
       if (interrupted)
         await this.record({
           ...interrupted,
-          attempt: randomUUID(),
           status: "rolled_back",
           build: "passed",
           ready: true,
@@ -217,7 +219,6 @@ export class NodeDeploymentDriver implements DeploymentDriver {
       if (interrupted)
         await this.record({
           ...interrupted,
-          attempt: randomUUID(),
           status: "failed",
           build: "passed",
           ready: false,
@@ -233,6 +234,9 @@ export class NodeDeploymentDriver implements DeploymentDriver {
 
   now() {
     return Date.now();
+  }
+  async beforeStop(record: DeploymentRecord) {
+    return writeDeploymentStop(this.options.store, PROJECT, record);
   }
   async current() {
     return this.state.current;

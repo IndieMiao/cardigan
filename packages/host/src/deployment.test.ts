@@ -24,6 +24,19 @@ function fixture() {
     backup: async () => {
       calls.push("backup");
     },
+    beforeStop: async (record) => {
+      calls.push("snapshot");
+      const next: DeploymentRecord = {
+        ...record,
+        status: "stopping",
+        stop_snapshot: {
+          captured_at: "2026-11-13T00:00:00.000Z",
+          runs: [],
+        },
+      };
+      records.push(next);
+      return next;
+    },
     stop: async () => {
       calls.push("stop");
     },
@@ -53,6 +66,7 @@ test("build succeeds before stop, backup precedes migrations, readiness precedes
   await new DeploymentController(f.driver).tick();
   expect(f.calls).toEqual([
     "build",
+    "snapshot",
     "stop",
     "backup",
     "start:next",
@@ -107,7 +121,31 @@ test("ready timeout stops the candidate and restores the previous build", async 
   expect(f.records.at(-1)).toMatchObject({
     status: "rolled_back",
     ready: true,
+    stop_snapshot: f.records.find((r) => r.status === "stopping")
+      ?.stop_snapshot,
   });
+});
+
+test("the stop snapshot is committed after build and before the stop signal", async () => {
+  const f = fixture();
+  f.driver.stop = async () => {
+    expect(f.records.at(-1)?.status).toBe("stopping");
+    expect(f.records.at(-1)?.stop_snapshot).toBeDefined();
+    f.calls.push("stop");
+  };
+  await new DeploymentController(f.driver).tick();
+  expect(f.calls.indexOf("build")).toBeLessThan(f.calls.indexOf("snapshot"));
+  expect(f.calls.indexOf("snapshot")).toBeLessThan(f.calls.indexOf("stop"));
+});
+
+test("failure to persist the snapshot keeps the old server running", async () => {
+  const f = fixture();
+  f.driver.beforeStop = async () => {
+    throw new Error("audit unavailable");
+  };
+  await new DeploymentController(f.driver).tick();
+  expect(f.calls).toEqual(["build", "unlock"]);
+  expect(f.records.at(-1)?.stop_snapshot).toBeUndefined();
 });
 
 test("an unconfirmed stop never starts a second server", async () => {
@@ -116,7 +154,7 @@ test("an unconfirmed stop never starts a second server", async () => {
     throw new Error("unknown process");
   };
   await new DeploymentController(f.driver).tick();
-  expect(f.calls).toEqual(["build", "unlock"]);
+  expect(f.calls).toEqual(["build", "snapshot", "unlock"]);
   expect(f.records.at(-1)?.status).toBe("failed");
 });
 

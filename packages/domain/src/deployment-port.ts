@@ -16,6 +16,7 @@ export interface DeploymentDriver {
   build(sha: string): Promise<{ build?: DeploymentBuild; log_tail: string }>;
   migrationsChanged(from: string, to: string): Promise<boolean>;
   backup(): Promise<void>;
+  beforeStop(record: DeploymentRecord): Promise<DeploymentRecord>;
   stop(): Promise<void>;
   start(build: DeploymentBuild): Promise<void>;
   ready(): Promise<boolean>;

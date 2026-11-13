@@ -4,10 +4,30 @@ import {
   hasPassedMergeCheck,
   type ProjectId,
   recordDeployment,
+  recordDeploymentStop,
   requestDeploymentAction,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import { recordNotification, type Store } from "@cardigan/store";
+
+export function writeDeploymentStop(
+  store: Store,
+  project: ProjectId,
+  record: DeploymentRecord,
+) {
+  return store.uow.run((tx) => {
+    const effect = unwrap(
+      recordDeploymentStop(
+        loadCommandState(tx, project),
+        { kind: "system", project_id: project },
+        record,
+        { ids: tx.ids, clock: { now: () => new Date().toISOString() } },
+      ),
+    );
+    persistEffect(tx, project, effect);
+    return effect.data;
+  });
+}
 
 export function writeDeploymentRecord(
   store: Store,

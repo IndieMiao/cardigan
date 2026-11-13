@@ -26,10 +26,38 @@ export async function readDeploymentDiagnostics(
       )
       .slice(-20)
       .reverse()
-      .map((e) => ({
-        ...(e.payload as unknown as DeploymentRecord),
-        at: e.created_at,
-      })),
+      .map((e) => {
+        const record = e.payload as unknown as DeploymentRecord;
+        return {
+          attempt: record.attempt,
+          from: record.from,
+          to: record.to,
+          status: record.status,
+          build: record.build,
+          ready: record.ready,
+          downtime_ms: record.downtime_ms,
+          summary: record.summary,
+          ...(record.log_tail === undefined
+            ? {}
+            : { log_tail: record.log_tail }),
+          ...(record.post_deploy_failed === undefined
+            ? {}
+            : { post_deploy_failed: record.post_deploy_failed }),
+          ...(record.stop_snapshot
+            ? {
+                stop_snapshot: {
+                  captured_at: record.stop_snapshot.captured_at,
+                  runs: record.stop_snapshot.runs.map((r) => ({
+                    run_id: r.run_id,
+                    assignment_id: r.assignment_id,
+                    card_id: r.card_id,
+                  })),
+                },
+              }
+            : {}),
+          at: e.created_at,
+        };
+      }),
   );
   const result = {
     records,

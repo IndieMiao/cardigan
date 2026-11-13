@@ -1,4 +1,5 @@
 import type { Actor, HumanAction } from "../entities.js";
+import type { AssignmentId, CardId, RunId } from "../ids.js";
 import type { CommandPorts, CommandState } from "./core.js";
 import { command, ensure } from "./core.js";
 
@@ -7,13 +8,28 @@ export interface DeploymentRecord {
   readonly attempt: string;
   readonly from: string;
   readonly to: string;
-  readonly status: "started" | "deployed" | "failed" | "rolled_back";
+  readonly status:
+    | "started"
+    | "stopping"
+    | "deployed"
+    | "failed"
+    | "rolled_back";
   readonly build: "not_run" | "passed" | "failed";
   readonly ready: boolean;
   readonly downtime_ms: number;
   readonly summary: string;
   readonly log_tail?: string;
   readonly post_deploy_failed?: boolean;
+  /** Same-project runs observed immediately before requesting server shutdown. */
+  readonly stop_snapshot?: {
+    readonly captured_at: string;
+    readonly runs: readonly {
+      readonly run_id: RunId;
+      readonly assignment_id: AssignmentId;
+      /** Standing/project-level Runs have no owning card. */
+      readonly card_id: CardId | null;
+    }[];
+  };
 }
 
 export function recordDeployment(
@@ -33,9 +49,56 @@ export function recordDeployment(
       "validation_failed",
       "停服时长无效",
     );
-    d.emit("host_deployment_recorded", undefined, { ...record });
+    d.emit("host_deployment_recorded", undefined, {
+      ...record,
+      ...(record.stop_snapshot
+        ? {
+            stop_snapshot: {
+              captured_at: record.stop_snapshot.captured_at,
+              runs: record.stop_snapshot.runs.map((r) => ({ ...r })),
+            },
+          }
+        : {}),
+    });
     return record;
   });
+}
+
+/** Snapshot and audit in the host's write transaction, before any stop signal. */
+export function recordDeploymentStop(
+  state: CommandState,
+  actor: Actor,
+  record: DeploymentRecord,
+  ports: CommandPorts,
+) {
+  const assignments = new Map(state.assignments.map((a) => [a.id, a]));
+  const workItems = new Map(state.work_items.map((w) => [w.id, w]));
+  return recordDeployment(
+    state,
+    actor,
+    {
+      ...record,
+      status: "stopping",
+      summary: "构建已完成，准备停止旧 server",
+      stop_snapshot: {
+        captured_at: ports.clock.now(),
+        runs: state.runs
+          .filter((r) => r.status === "running")
+          .map((r) => {
+            const a = assignments.get(r.assignment_id);
+            return {
+              run_id: r.id,
+              assignment_id: r.assignment_id,
+              card_id:
+                a?.scope === "work_item"
+                  ? (workItems.get(a.work_item_id)?.card_id ?? null)
+                  : null,
+            };
+          }),
+      },
+    },
+    ports,
+  );
 }
 
 export function requestDeploymentAction(
