@@ -80,12 +80,12 @@
   - 服务：Gitea 服务进程（含 Web、SSH 或 HTTP Git、数据库）；每台 runner 机器一个 act_runner 服务；若用容器模式还需容器运行时（检查机是否已有、是否允许安装，**待实测**）。
   - 备份：Gitea 数据目录（仓库、附件、Actions 日志和产物）和数据库；镜像模式下仓库可从中心重建，但 Actions 历史和 Gitea 配置要另行备份。
   - 升级：Gitea、act_runner 跟随上游安全公告升级；Actions 的 YAML 兼容性随版本变化（例如 `workflow_dispatch` API、`concurrency`、按 job 的 token 权限在哪个版本可用，**均待核实**）。
-  - 凭据：Gitea 管理员账号；Cardigan 主机专用的 Gitea 机器人账号 Token（推送镜像、触发、查询）；runner 注册令牌和 runner 本地的 `.runner` 凭据文件；Webhook 签名密钥（若用 Webhook）；若 Gitea 非回环监听，还要 TLS 或只在 tailnet 内开放。以上都只能放主机或私有 `cardigan-deploy`，不进仓库。
+  - 凭据：Gitea 管理员账号；Cardigan 主机专用的 Gitea 机器人账号 Token（推送镜像、触发、查询）；runner 注册令牌和 runner 本地的 `.runner` 凭据文件；Webhook 签名密钥（若用 Webhook）；若 Gitea 非回环监听，还要 TLS 或只在 tailnet 内开放。这些秘密本身只保存在仓库外受保护的主机或 runner 凭据存储里（例如主机 0600 文件、runner 的凭据目录），不得提交到任何仓库，包括私有的 `cardigan-deploy`；`cardigan-deploy` 只放不含秘密的配置、模板和凭据引用（与开发方案 §10.2、§20 的约定一致）。
   - 网络：检查机上的 runner 要能访问 Gitea（局域网或 tailnet）；Actions 默认从 github.com 拉取 `uses:` 引用的 action，必须改为不使用外部 action 或配置本地镜像，否则又回到外网依赖。
 - **失败模式和诊断**：
   - Gitea 宕机或 API 不可达：Cardigan 无法触发和取回结果，归入现有 `executor_unreachable`（排队、30 分钟后 HumanAction）。
   - runner 离线：job 停在排队，Gitea 不会主动报错。Cardigan 需按“排队超过 N 分钟未开始”判定（N 待人定），并可查询 runner 状态 API（接口和权限**待实测**）。
-  - job 失败／超时：结果在 Gitea 的 commit status 和运行页；Cardigan 记录结论、摘要和链接。日志脱敏：Gitea 只遮罩登记为 secret 的值，不会自动遮罩 `merge-gate.yaml` 那样的配置 env；检查本来不需要凭据，所以要求流水线不注入任何 secret。
+  - job 失败／超时：结果在 Gitea 的运行页；Cardigan 只采信已绑定的可信 run／job 的最终状态（见 §4.2），记录结论、摘要和链接。日志脱敏：Gitea 只遮罩登记为 secret 的值，不会自动遮罩 `merge-gate.yaml` 那样的配置 env；检查本来不需要凭据，所以要求流水线不注入任何 secret。
   - 结果回传丢失：Webhook 可能丢，必须保留按 SHA 轮询作为兜底。
   - 新增攻击面：见 §3.2，流水线定义和 job token 是主要风险。
 
@@ -120,9 +120,9 @@
 | 要求 | ① | ② | ③ |
 |---|---|---|---|
 | Agent 没有推送权限 | 符合 | 见上表，取决于 job token 和分支保护 | 同② |
-| Token 不进仓库 | 符合（检查配置在主机 `merge-gate.yaml`） | 符合，前提是流水线不用 secret；Gitea 机器人 Token、runner 凭据只放主机 | 同② |
+| Token 不进仓库 | 符合（检查配置在主机 `merge-gate.yaml`） | 符合，前提是流水线不用 secret；Gitea 机器人 Token、runner 凭据只放仓库外的主机或 runner 凭据存储，`cardigan-deploy` 只放引用 | 同② |
 | 检查命令由主机可信配置决定 | 符合：步骤列表在主机配置里；不过各步骤调用的 `package.json` 脚本本来就由候选控制 | **新风险**：Actions 默认从被测提交的 `.gitea/workflows/` 读流水线，Agent 可以在交付里改流水线（删步骤、改 `runs-on` 选到部署 runner）。必须用“可信流水线仓库”：流水线放在只有主机能写的独立仓库，用 `workflow_dispatch` 带 SHA 输入触发，再检出候选（可行性**待实测**） | 同②；GitHub 的组织级强制流水线是否适用本仓库套餐**待核实** |
-| runner 能拿到哪些凭据 | 检查在 agent 账号下执行，白名单环境不含任何凭据；监督进程用 nonce + HMAC 防止检查进程伪造结果 | job token（默认权限**待实测**）；主机模式下 job 与 runner 进程同账号，可能读到 runner 的 `.runner` 凭据，冒充 runner 领取同范围的其他 job，因此要么用容器模式，要么给检查 runner 单独账号、单独作用域；结果由 Gitea 记录，job 无法伪造另一个 job 的状态，但能写自己的 commit status（权限**待实测**） | job 的 `GITHUB_TOKEN`；同样建议单独账号、临时（ephemeral）runner |
+| runner 能拿到哪些凭据 | 检查在 agent 账号下执行，白名单环境不含任何凭据；监督进程用 nonce + HMAC 防止检查进程伪造结果 | job token（默认权限**待实测**）。主机模式下 job 与 runner 控制进程同账号，候选代码可以读到 runner 的 `.runner` 凭据，冒充 runner 领取并回报同一作用域内其他检查的结果，从而伪造合并证据。**隔离必须发生在不可信候选与 runner 控制进程及其凭据之间**：只把整个 runner 换成专用账号、或把注册作用域缩小到单个仓库都不够，因为候选仍与该凭据同 UID。可接受的形态是候选在容器（或其他与 runner 不同 UID、看不到 runner 凭据目录的沙箱）中执行，且每个 job 用完即弃；能否做到**待实测**，验收条件是：候选进程读不到 `.runner` 等控制凭据，也无法领取、回报或改写任何其他 job 的状态。做不到时方案②不能作为合并依据。此外 job 可能有自己 SHA 的 commit status 写权限（**待实测**），所以 commit status 不能作为权威结果，见 §4.2 | job 的 `GITHUB_TOKEN`；同样要求候选与 runner 控制进程及凭据隔离（容器或不同 UID 的临时 runner），不能只靠专用账号 |
 | 部署能力不交给 Agent（C-201） | 符合：监督器独立于 server，任何 Agent 无部署入口 | **主要风险**：目标主机上的部署 runner 能停起 server。只要任何候选流水线能选中它的标签，就等于候选代码可在合并前到目标主机执行。若采用部署 job，部署 runner 必须注册到只有主机能推的独立仓库，且仓库内只有主机维护的部署流水线 | 同② |
 
 ### 3.3 §15 D1（不依赖外部看板）
@@ -148,7 +148,7 @@ D1 的三条理由逐条看：
 ### 4.2 触发流水线和回传结果
 
 - **触发**：推荐“推候选分支 + API 触发”。主机先推候选分支，再调用 `workflow_dispatch` API 触发**可信流水线仓库**里的检查流水线，输入 `attempt_id`、候选 SHA、tree SHA、范围（`docs_only／affected／full` 和受影响包）。流水线按输入的 SHA 检出候选并核对 tree，不读取候选里的 `.gitea/workflows/`。不推荐只靠候选分支的推送事件触发，因为那样用的是候选自带的流水线（见 §3.2）。`workflow_dispatch` API 的版本要求和跨仓库检出的认证方式**待实测**。
-- **回传**：以“按 SHA 和 attempt 轮询”为准，Webhook 只用来提前唤醒轮询。可选的查询面：流水线运行和 job 的 Actions API，或流水线完成时用机器人账号给候选 SHA 写的 commit status（context 带 attempt_id）。具体用哪个，取决于 Gitea 当前版本 API 的完整度（**待实测**）。Cardigan 仍由 system 调用 `recordMergeCheck` 记录 queued → running → passed／failed／timed_out／interrupted，不变量 21 不变；Gitea 的结论只是输入，tree 仍由主机从候选提交读取并核对。
+- **回传**：以“按 SHA 和 attempt 轮询”为准，Webhook 只用来提前唤醒轮询。**权威结果只认已绑定的可信运行**：主机派发时记录 Gitea 返回（或随后按 dispatch 输入反查到）的 run／job 编号，确认该运行来自可信流水线仓库中主机维护的流水线、触发者是主机机器人账号、输入中的 `attempt_id`／SHA／tree 与本次 attempt 一致，然后只读取这个 run／job 的最终状态。SHA、tree 和 `attempt_id` 都是 job 已知的输入，不能当来源认证。**commit status 不作为结果来源**：job 可能对自己的 SHA 有写权限，候选脚本可以提前为自己的 SHA／context 写 success；若以后确需 commit status，只能由候选无法访问的受信报告方（例如主机自己在读到可信 run 结论后写）生成，且主机机器人的写凭据绝不交给执行候选的 job。失败关闭：找不到绑定的 run、run 不属于可信流水线或触发者不符、输入不一致、运行被重跑或改写、API 无法给出 run 与流水线的对应关系时，一律不记 passed（按 failed 或 `executor_unreachable` 处理）。所选 Gitea 版本的 Actions API 能否提供上述绑定信息**待实测**，做不到则方案②不能作为合并依据。Cardigan 仍由 system 调用 `recordMergeCheck` 记录 queued → running → passed／failed／timed_out／interrupted，不变量 21 不变；Gitea 的结论只是输入，tree 仍由主机从候选提交读取并核对。
 - **对应关系**：
 
   | Cardigan 概念 | Gitea 侧 |
@@ -190,7 +190,7 @@ D1 的三条理由逐条看：
 
 | 阶段 | 内容 | 回退方法 | 预计卡片 |
 |---|---|---|---|
-| 0 实测 | 在不影响正式环境的位置装 Gitea 和 act_runner，逐项验证本文所有“待实测”：job token 权限、`workflow_dispatch` API、跨仓库检出、commit status／Actions API、runner 离线识别、容器或独立账号隔离、`uses:` 外网依赖关闭、Gitea 版本选择 | 停掉并删除测试实例，不影响合并闸门 | 1 张，以文档和实测记录为主，不改产品代码；需要人确认安装位置 |
+| 0 实测 | 在不影响正式环境的位置装 Gitea 和 act_runner，逐项验证本文所有“待实测”：job token 权限、`workflow_dispatch` API、跨仓库检出、Actions API 能否把结果绑定到可信 run／job、runner 离线识别、候选与 runner 控制凭据的隔离（验收：候选读不到 `.runner` 等凭据，无法领取、回报或改写其他 job 的状态）、`uses:` 外网依赖关闭、Gitea 版本选择 | 停掉并删除测试实例，不影响合并闸门 | 1 张，以文档和实测记录为主，不改产品代码；需要人确认安装位置 |
 | 1 镜像 | 主机把中心 `main` 和候选分支推到 Gitea（机器人账号、分支保护）；新增 Gitea 客户端端口和测试替身 | 关闭镜像推送配置；Gitea 中的数据可以直接丢弃，中心仓库不受影响 | 1 张，中等（几百行加测试） |
 | 2 双跑 | 现有执行器仍是唯一的合并依据；同一 attempt 另派发一次 Gitea 检查，只记录对比结果（结论是否一致、耗时），不写进 `recordMergeCheck`，在 Workbench 或诊断里展示差异 | 关闭双跑开关 | 1 张，中等。双跑会让检查机负载翻倍，需要按检查机容量限流，或只抽样部分 attempt |
 | 3 切换 | 按项目把 `executor` 改为 `gitea`，结果写进 `recordMergeCheck`；旧执行器代码保留，可随时切回 | 改回旧执行目标、重启 server；进行中的 Gitea attempt 记为 interrupted 后按旧执行器重排 | 1–2 张，中等，含批次检查和二分探测的派发 |
@@ -211,7 +211,7 @@ D1 的三条理由逐条看：
 理由：
 
 1. Cardigan 的大部分合并代码是规则和编排，三个方案都要保留；通用执行层大约 2,000 行非测试代码，而且已经写完并在运行。换成 Gitea 的净删除量（§2 估计）不小，但同时要新增 Gitea 客户端、可信流水线仓库和一个需要备份、升级、保管凭据的服务。
-2. 自研执行层里最复杂的部分（隔离账号、nonce/HMAC 防伪造、精确进程清理）是为满足 §14 写的。Gitea 的默认用法（流水线来自被测提交、job token、主机模式 runner）反而在这几处更弱，要靠可信流水线仓库、只读 token、容器或独立账号补回来，而这些能否成立正是“待实测”项。在实测前就决定迁移，等于用不确定的安全性换确定的代码删除。
+2. 自研执行层里最复杂的部分（隔离账号、nonce/HMAC 防伪造、精确进程清理）是为满足 §14 写的。Gitea 的默认用法（流水线来自被测提交、job token、主机模式 runner）反而在这几处更弱，要靠可信流水线仓库、只读 token、候选与 runner 控制凭据隔离（容器或不同 UID 的沙箱，单纯换专用账号不够）、只认绑定的可信 run 结果补回来，而这些能否成立正是“待实测”项。在实测前就决定迁移，等于用不确定的安全性换确定的代码删除。
 3. 方案③让合并依赖外网和代理，且违反“合并前不推外部”，还可能涉及费用；可用性和原则上的代价都比②大。
 4. 部署 job 能替代的只有触发和两条构建命令，却要在目标主机放一个能停起 server 的 runner，得不偿失。
 5. 如果阶段 0 实测通过，方案②在后续需求上有真实收益（缓存、矩阵分片、成熟的日志界面，对应 P2a-13 D 组），届时按第 5 节阶段 1–4 推进。建议在拍板之前，P2a-13 D 组的缓存和分片暂不在自研执行层上开工，避免拍板后白做。
@@ -228,11 +228,12 @@ D1 的三条理由逐条看：
 
 ### 待实测／待核实清单
 
-- Gitea Actions 的 job token 默认权限、能否限制为只读；能否写 commit status。
+- Gitea Actions 的 job token 默认权限、能否限制为只读；能否写 commit status（若能，commit status 更不能作为结果来源）。
+- Actions API 能否返回 run／job 与触发者、流水线文件、dispatch 输入的对应关系，以便只认可信 run 的最终状态。
 - `workflow_dispatch` API 在所选 Gitea 版本是否可用；流水线放独立仓库、跨仓库检出候选的认证方式。
 - Actions 运行／job 查询 API、`workflow_run` 类 Webhook 是否可用；日志下载 API。
 - runner 离线识别方式和所需权限。
-- act_runner 主机模式下 job 能否读到 runner 凭据；检查机能否用容器模式；容器模式下 pnpm 缓存、e2e 浏览器依赖如何准备。
+- act_runner 主机模式下 job 能否读到 runner 凭据（预期能，因此主机模式不可接受）；容器模式下候选能否接触 runner 凭据、冒充 runner 或改写其他 job 状态；检查机能否用容器模式；容器模式下 pnpm 缓存、e2e 浏览器依赖如何准备。
 - 关闭 `uses:` 默认外网拉取的配置方式。
 - 推送 `refs/cardigan/*` 自定义引用到 Gitea 的行为。
 - 检查机经代理访问 GitHub 的稳定性；GitHub 私有仓库 self-hosted runner 的计费现状；组织级强制流水线是否适用。
