@@ -40,8 +40,13 @@ export function recordContextUsageNotices(
         ? d.get("work_items", a.work_item_id).card_id
         : undefined;
     if (card && ["done", "cancelled"].includes(d.card(card).status)) return [];
+    // C-211: crossing both thresholds within one patrol interval still gives
+    // the Agent one round to update its handoff before the restart notice.
     const levels: ContextLevel[] =
-      level === "restart" ? ["handoff", "restart"] : ["handoff"];
+      level === "restart" &&
+      contextNoticeRecorded(state.events, usage, "handoff")
+        ? ["restart"]
+        : ["handoff"];
     return levels.flatMap((threshold) => {
       if (contextNoticeRecorded(state.events, usage, threshold)) return [];
       const remaining = Math.round((100 - usage.used_percentage) * 10) / 10;

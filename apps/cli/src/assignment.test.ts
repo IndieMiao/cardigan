@@ -19,7 +19,13 @@ import type {
   RuntimeRef,
   RuntimeResult,
 } from "@cardigan/domain";
-import { assign, createCard, type Role } from "@cardigan/domain";
+import {
+  assign,
+  createCard,
+  type Role,
+  stoppedByHuman,
+} from "@cardigan/domain";
+import { loadCommandState } from "@cardigan/mcp-server";
 import { corePromptFor, parseLaunchConfig } from "@cardigan/roles";
 import { Store, writeRole } from "@cardigan/store";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
@@ -588,6 +594,24 @@ describe("stopAssignment and attachAssignment", () => {
       "utf8",
     ).trim();
     expect(store.verifyToken(token)?.assignment_id).toBe(assignment.id);
+    // C-211: a follow-up Run already queued behind the live one.
+    const live = store.uow.read((tx) =>
+      tx.runs.get(project_id, started.run_id as never),
+    );
+    if (!live) throw new Error("Missing started Run");
+    const other = store.uow
+      .read((tx) => loadCommandState(tx, project_id))
+      .events.find((e) => e.id !== live.trigger_event_id)?.id;
+    if (!other) throw new Error("Missing another event");
+    store.uow.run((tx) =>
+      tx.runs.put(project_id, {
+        ...live,
+        id: "R-99" as never,
+        trigger_event_id: other,
+        status: "queued",
+        kind: "followup",
+      }),
+    );
 
     const stopped = await stopAssignment({
       store,
@@ -605,6 +629,15 @@ describe("stopAssignment and attachAssignment", () => {
       tx.runs.get(project_id, started.run_id as never),
     );
     expect(run?.status).toBe("cancelled");
+    // The queued follow-up is cancelled too, and the stop holds until start.
+    expect(
+      store.uow.read((tx) => tx.runs.get(project_id, "R-99" as never))?.status,
+    ).toBe("cancelled");
+    const state = store.uow.read((tx) => loadCommandState(tx, project_id));
+    expect(
+      state.assignments.find((a) => a.id === assignment.id)?.runtime_ref,
+    ).toBeNull();
+    expect(stoppedByHuman(state.events, assignment.id)).toBe(true);
     expect(
       statSync(join(dataDir, "runs", "p-one", assignment.id)).isDirectory(),
     ).toBe(true);

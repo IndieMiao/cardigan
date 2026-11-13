@@ -29,6 +29,7 @@ import {
   refreshRunTargetWait,
   remindDecisionFollowups,
   resolveDispatchAttention,
+  stoppedByHuman,
   unreadableCommentTrigger,
 } from "@cardigan/domain";
 import {
@@ -417,6 +418,9 @@ export class Dispatcher {
   }
   private busy(state: CommandState, a: Assignment) {
     if (hostOpsPending(state.events, a.id)) return true;
+    // C-211: a stopped Assignment waits for the human's start; its bells stay
+    // pending and no session is woken, replaced or started for it.
+    if (stoppedByHuman(state.events, a.id)) return true;
     const queued = this.queued(state, a);
     return state.runs.some(
       (r) =>

@@ -80,6 +80,7 @@ class Rejection {
 type CommandName =
   | E.ToolName
   | "pause_standing_assignment"
+  | "stop_assignment"
   | "rotate_standing_pm"
   | "create_host_ops_assignment"
   | "manage_host_ops_action"

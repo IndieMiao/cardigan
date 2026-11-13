@@ -210,6 +210,33 @@ test("fake Agent: patrol discovers dispatched Run; MCP restart goes through host
   });
 });
 
+test("C-211 a failing context patrol is reported and the same tick still drains host_ops actions", async () => {
+  const { assignment, run } = dispatched();
+  await call("host_ops_cancel_run", {
+    run_id: run.id,
+    reason: "Stop stalled run",
+    idempotency_key: "cancel-patrol",
+  });
+  const errors: unknown[] = [];
+  const patrolling = new HostOpsService({
+    store: f.store,
+    runtime,
+    snapshot,
+    clock: f.clock,
+    contextUsage: {
+      get execution(): never {
+        throw new Error("context cache unreadable");
+      },
+    },
+    onError: (error) => errors.push(error),
+  });
+  await patrolling.tick();
+  expect(errors).toHaveLength(1);
+  expect(String(errors[0])).toContain("context cache unreadable");
+  expect(f.state().runs.find((r) => r.id === run.id)?.status).toBe("cancelled");
+  expect(hostOpsPending(f.state().events, assignment.id)).toBe(false);
+});
+
 test("cancel waits for proven exit; restart of the service resumes the durable action and revokes only target credentials", async () => {
   const { assignment, run } = dispatched();
   const targetContext = connect(assignment, ["finish_run"]);

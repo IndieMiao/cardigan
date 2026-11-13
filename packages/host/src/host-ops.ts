@@ -76,6 +76,8 @@ interface Options {
    * commands handed to the human use it instead of a hard-coded name.
    */
   hcSession?: string;
+  /** C-211: a failed context patrol is reported here; drain still runs. */
+  onError?: (error: unknown) => void;
 }
 /** Requests commit first. The dispatch loop drains intents; a restart resumes unfinished work. */
 export class HostOpsService {
@@ -352,7 +354,12 @@ export class HostOpsService {
   }
   tick(): Promise<void> {
     const next = this.serial.then(async () => {
-      await this.pollContexts();
+      // C-211: a context patrol failure must not skip this round's drain.
+      try {
+        await this.pollContexts();
+      } catch (error) {
+        this.options.onError?.(error);
+      }
       await this.drain();
     });
     this.serial = next.catch(() => {});

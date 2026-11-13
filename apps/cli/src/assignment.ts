@@ -12,6 +12,7 @@ import {
   queueRun,
   releaseAssignment,
   standingModeOf,
+  stopWorkItemAssignment,
 } from "@cardigan/domain";
 import {
   agentCliVersion,
@@ -571,6 +572,23 @@ export async function stopAssignment(input: {
       EXIT.usage,
     );
   }
+  // C-211: persist the stop before touching the terminal. Every unfinished
+  // Run, queued ones included, is cancelled in the same transaction, and the
+  // Dispatcher starts no session for this Assignment until the human runs
+  // `cardigan assignment start` again.
+  const stopped = runCommand(input.store, {
+    operation: "停止 Assignment",
+    target: assignment.id,
+    project_id: input.project_id,
+    actor,
+    reduce: (s, a, p) =>
+      stopWorkItemAssignment(
+        s,
+        a,
+        { assignment_id: assignment.id, reason: "stopped by host" },
+        p,
+      ),
+  });
   const released = await input.runtime.release(ref, { force: true });
   if (!released.ok && released.error.code !== "runtime_not_found") {
     throw new CliError(
@@ -578,24 +596,23 @@ export async function stopAssignment(input: {
       EXIT.failure,
     );
   }
-  const unfinished = input.store.uow.read((tx) =>
-    tx.runs
-      .list(input.project_id)
-      .find(
-        (run) =>
-          run.assignment_id === assignment.id &&
-          !["completed", "failed", "cancelled"].includes(run.status),
+  runCommand(input.store, {
+    operation: "停止 Assignment",
+    target: assignment.id,
+    project_id: input.project_id,
+    actor,
+    reduce: (s, a, p) =>
+      stopWorkItemAssignment(
+        s,
+        a,
+        {
+          assignment_id: assignment.id,
+          reason: "stopped by host",
+          released_runtime_ref: ref,
+        },
+        p,
       ),
-  );
-  if (unfinished !== undefined) {
-    abort(
-      input.store,
-      input.project_id,
-      unfinished.id,
-      "stopped by host",
-      actor,
-    );
-  }
+  });
   // §9.1: the session is over, so its tokens die with it. A token that outlives
   // a stopped terminal could still read and write the project.
   const revoked = input.store.uow.run((tx) =>
@@ -613,7 +630,7 @@ export async function stopAssignment(input: {
       input.project_id,
       input.assignment_id,
     );
-  return { released: true, aborted: unfinished !== undefined };
+  return { released: true, aborted: stopped.cancelled > 0 };
 }
 
 function attachRef(
@@ -749,6 +766,7 @@ const USAGE = [
   "  cardigan assignment stop <A-n> [--project <p>] [--hc-session <s>] [--data-dir <目录>]",
   "  cardigan assignment release <A-n> [--project <p>] [--data-dir <目录>]",
   "  cardigan assignment attach <A-n> [--print] [--interactive] [--project <p>] [--hc-session <s>] [--data-dir <目录>]",
+  "  stop：释放终端并取消未结束和排队的 Run；之后不会自动起新会话，门铃排队，用 assignment start 恢复。",
   "  attach：输入和输出均为终端（TTY）时直接只读观察；--interactive 允许输入，--print 或非 TTY 只打印命令（默认带 --observe）。",
   "  按 Ctrl+\\ 分离退出；--interactive 下你的输入会直接发给正在工作的 Agent。",
 ].join("\n");
@@ -912,7 +930,7 @@ export async function runAssignmentCommand(
       io.stdout(
         result.paused
           ? `已暂停常驻 PM ${assignmentId}，门铃将排队；用 cardigan pm start 或 assignment start 恢复。`
-          : `已释放 ${assignmentId} 的终端${result.aborted ? "，未结束的 Run 已取消" : ""}（worktree 保留）`,
+          : `已停止 ${assignmentId}：终端已释放${result.aborted ? "，未结束和排队的 Run 已取消" : ""}（worktree 保留）。之后的门铃会排队，不会自动起新会话；用 cardigan assignment start ${assignmentId} 恢复。`,
       );
       return EXIT.ok;
     }
