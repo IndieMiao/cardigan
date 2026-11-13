@@ -214,8 +214,20 @@ const systemClock: Clock = { now: () => new Date().toISOString() };
  * Everything a command writes goes through `uow.run`, which wraps the changes
  * and their events in one transaction; any throw rolls the whole command back.
  */
+/**
+ * C-216: optional timing hooks for the tick profiler. Only durations leave the
+ * Store — never SQL text, parameters or row contents.
+ */
+export interface StoreObserver {
+  /** Whole UnitOfWork, including the state build and domain logic it runs. */
+  transaction?(kind: "run" | "read", durationMs: number): void;
+  /** A command-state cache miss rebuilt inside a UnitOfWork. */
+  stateBuild?(durationMs: number): void;
+}
+
 export class Store {
   readonly #db: DatabaseSync;
+  #observer: StoreObserver | undefined;
   readonly #clock: Clock;
   readonly #migrationsDir: string | undefined;
   #inTransaction = false;
@@ -271,6 +283,41 @@ export class Store {
     return store;
   }
 
+  /** C-216: install (or clear with `undefined`) timing hooks. Off by default. */
+  observe(observer: StoreObserver | undefined): void {
+    this.#observer = observer;
+  }
+
+  #timed<T>(kind: "run" | "read", operation: () => T): T {
+    const observer = this.#observer;
+    if (!observer?.transaction) return operation();
+    const started = performance.now();
+    try {
+      return operation();
+    } finally {
+      observer.transaction(kind, performance.now() - started);
+    }
+  }
+
+  #cachedState(
+    snapshots: SnapshotTransaction | undefined,
+  ): Pick<StoreTransactionContext, "cachedCommandState"> {
+    if (!snapshots) return {};
+    const observer = this.#observer;
+    if (!observer?.stateBuild) return { cachedCommandState: snapshots.state };
+    return {
+      cachedCommandState: (project, build) =>
+        snapshots.state(project, () => {
+          const started = performance.now();
+          try {
+            return build();
+          } finally {
+            observer.stateBuild?.(performance.now() - started);
+          }
+        }),
+    };
+  }
+
   get database(): DatabaseSync {
     return this.#db;
   }
@@ -305,9 +352,9 @@ export class Store {
   get uow(): StoreUnitOfWork {
     return {
       run: <T>(operation: (transaction: StoreTransactionContext) => T): T =>
-        this.#run(operation),
+        this.#timed("run", () => this.#run(operation)),
       read: <T>(operation: (transaction: ReadRepositories) => T): T =>
-        this.#read(operation),
+        this.#timed("read", () => this.#read(operation)),
     };
   }
 
@@ -324,7 +371,7 @@ export class Store {
       const repositories = createRepositories(this.#db, snapshots);
       const result = operation({
         ...repositories,
-        ...(snapshots ? { cachedCommandState: snapshots.state } : {}),
+        ...this.#cachedState(snapshots),
         events: { ...repositories.events, listStreams: events.listStreams },
         ...createGlobalRepositories(this.#db, "write", snapshots),
         global_ids: createGlobalIdAllocator(this.#db),
@@ -373,7 +420,7 @@ export class Store {
       const repositories = createReadRepositories(this.#db, snapshots);
       const result = operation({
         ...repositories,
-        ...(snapshots ? { cachedCommandState: snapshots.state } : {}),
+        ...this.#cachedState(snapshots),
         events: { ...repositories.events, listStreams: events.listStreams },
       });
       this.#db.exec("COMMIT");
