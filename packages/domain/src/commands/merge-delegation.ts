@@ -12,6 +12,7 @@ import {
   timeoutOnly,
 } from "./merge-check.js";
 import { hasVerifiedMergeNoop } from "./merge-preparation.js";
+import { screenshotCheckBlocker } from "./screenshot-check.js";
 
 const newest = (values: readonly Delivery[]) =>
   [...values].sort(
@@ -48,6 +49,8 @@ export function pmMergeBlockers(
     !riskTagAutoMergeAllowed(state, q)
   )
     blockers.push("风险标签卡须有必需且有效的独立复核通过，否则须交人确认");
+  const screenshot = screenshotCheckBlocker(state, context.value.card);
+  if (screenshot) blockers.push(screenshot);
   const check = latestMergeCheck(state.events, card_id, completion.id);
   if (check?.status !== "passed")
     blockers.push(

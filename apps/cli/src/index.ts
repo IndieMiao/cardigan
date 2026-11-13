@@ -77,7 +77,7 @@ const TOP_LEVEL_USAGE = [
   "  template list|show|add|copy|update|deactivate|activate|rollback  管理项目模板",
   "  card create      按模板建卡（默认 dev）",
   "  card done        用 --result 记录结果并完成人工完成的卡片，可重复 --file 附证据",
-  "  card update      修改或取消卡片；--superseded-by <C-m> 标记取代（已完成卡片不能取消；见 cardigan card --help）",
+  "  card update      修改或取消卡片；--risk-tags 设置风险标签；--superseded-by <C-m> 标记取代（已完成卡片不能取消；见 cardigan card --help）",
   "  card sensitive   <C-n> on|off 标记或取消敏感：被标记卡片的合并确认一律由你亲自处理",
   "  comment add      发评论：--text <内容> 或 --text-file <路径>，可重复 --file 附文件，--note <说明>",
   "  attachment add   上传附件：--file <路径> [--note <说明>] [--kind evidence|artifact] [--basis <Q-n>] [--entry <C-n#k>]",

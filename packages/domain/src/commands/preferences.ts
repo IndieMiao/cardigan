@@ -24,6 +24,7 @@ import {
   ensure,
 } from "./core.js";
 import { handoffUnauthorizedDecisions } from "./delegation.js";
+import { syncScreenshotMerge } from "./merge.js";
 
 export function projectPreferences(state: CommandState) {
   return (
@@ -305,12 +306,16 @@ export function setProjectPreferences(
         "合并由 PM 代确认已关闭，此合并确认转交给你。",
       );
     }
-    if (reviewerBrowserChanged)
+    if (reviewerBrowserChanged) {
       d.emit("project_preferences_updated", undefined, {
         old_value: reviewerBrowserEnabled(old),
         new_value: reviewerBrowserEnabled(next),
         preference: "enable_reviewer_browser",
       });
+      // Turning it on voids unpublished delegated merges of UI cards whose
+      // screenshot check was not projected by an independent reviewer.
+      for (const card of d.list("cards")) syncScreenshotMerge(d, card);
+    }
     return next;
   });
 }
