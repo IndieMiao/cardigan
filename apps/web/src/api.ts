@@ -66,6 +66,8 @@ export type CardStatus =
   | "done"
   | "cancelled";
 
+export type RiskTag = "security" | "permission" | "numeric_rule";
+
 /** The card view the API returns; `status`, `why` and `next_owners` are derived. */
 export interface CardView {
   readonly merge_check_blockers?: readonly MergeCheckBlocker[];
@@ -78,6 +80,8 @@ export interface CardView {
   readonly superseded_by?: string;
   /** C-65: human-only flag; its merge confirmation always goes to the human. */
   readonly sensitive?: boolean;
+  /** C-188: PM-set risk tags; the Web only displays them (C-197). */
+  readonly risk_tags?: readonly RiskTag[];
   readonly priority: number;
   readonly repo: string;
   readonly base_branch: string;
