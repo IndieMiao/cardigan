@@ -169,7 +169,7 @@ test("U1 rendered content beyond six lines folds, expands and responds to resize
   expect(page.container.querySelector(".collapsed")).toBeTruthy();
 });
 
-test("U1 shell orders Needs You first with its count, then work and runtime groups", async () => {
+test("U1/C-209 shell orders Needs You first with its count, then 卡片, 观察 and tools", async () => {
   const needs = await fakeClient().needsYou("p-1");
   const withIncident = {
     ...needs,
@@ -205,8 +205,22 @@ test("U1 shell orders Needs You first with its count, then work and runtime grou
     "项目快照",
     "设置",
   ]);
-  expect(within(sidebar).getByRole("heading", { name: "工作" })).toBeTruthy();
-  expect(within(sidebar).getByRole("heading", { name: "运行" })).toBeTruthy();
+  // C-209: Needs You and 卡片 sit above the only heading, 观察; the tools
+  // (设置, 登出) form their own unlabelled group at the bottom.
+  expect(
+    within(sidebar)
+      .getAllByRole("heading")
+      .map((h) => h.textContent),
+  ).toEqual(["观察"]);
+  const tools = within(sidebar).getByRole("navigation", { name: "工具" });
+  expect(
+    within(tools)
+      .getAllByRole("link")
+      .map((a) => a.textContent),
+  ).toEqual(["设置"]);
+  expect(within(tools).getByRole("button", { name: "登出" })).toBeTruthy();
+  expect(needsLink.className).toContain("needs-link");
+  expect(sidebar.querySelectorAll("a svg.nav-icon")).toHaveLength(7);
   expect(await screen.findByRole("heading", { name: /卡片/u })).toBeTruthy();
 });
 
