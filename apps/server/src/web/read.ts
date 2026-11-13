@@ -1145,6 +1145,16 @@ export function needsYou(
       ...(action.completion_notice !== undefined
         ? { completion_notice: action.completion_notice }
         : {}),
+      // C-179: the newest "pre-merge check passed" reminder for this action.
+      ...(action.pre_merge_check_reminder
+        ? {
+            pre_merge_check_reminder: {
+              label: action.pre_merge_check_reminder.label,
+              text: action.pre_merge_check_reminder.text,
+              at: action.pre_merge_check_reminder.at,
+            },
+          }
+        : {}),
       due: action.due ?? null,
       opened_at: opened ?? null,
       waited_ms: waitedMs(opened, now) ?? null,

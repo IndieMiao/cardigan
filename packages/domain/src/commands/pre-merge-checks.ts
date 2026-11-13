@@ -1,12 +1,15 @@
 import type {
   Card,
   Delivery,
+  HumanAction,
   PreMergeCheck,
   PreMergeCheckedVersion,
   PreMergeCheckStatus,
   WorkItem,
 } from "../entities.js";
+import type { CardId, HumanActionId, ProjectId } from "../ids.js";
 import { type CommandDraft, ensure, text } from "./core.js";
+import { mergeBlockingHumanActions } from "./merge.js";
 
 /** C-160: what a pre-merge check update carries through `update_card`. */
 export interface PreMergeCheckInput {
@@ -66,6 +69,40 @@ const sameVersions = (
     (v, i) =>
       v.work_item_id === b[i]?.work_item_id && v.subject === b[i]?.subject,
   );
+
+/**
+ * C-179: the persisted reminder written when a pre-merge check newly passes
+ * while merge-blocking human actions are still open on the card.
+ */
+export const PRE_MERGE_CHECK_REMINDED = "pre_merge_check_reminded";
+export interface PreMergeCheckReminder {
+  readonly human_action_id: HumanActionId;
+  readonly title: string;
+  /** Who triages the action: PM Ops, or the human through Needs You. */
+  readonly recipient: "pm_ops" | "needs_you";
+  /** Workbench card route pointing at the action's timeline entry. */
+  readonly link: string;
+  readonly text: string;
+}
+export const humanActionLink = (
+  project: ProjectId,
+  card: CardId,
+  id: HumanActionId,
+) =>
+  `#/p/${encodeURIComponent(project)}/cards/${encodeURIComponent(card)}?at=${encodeURIComponent(`human-action-${id}`)}`;
+const humanActionTitle = (action: HumanAction): string => {
+  const raw =
+    action.handoff?.title ?? action.instructions.split(/\r?\n/u)[0] ?? "";
+  const chars = [...raw.trim()];
+  return chars.length > 40 ? `${chars.slice(0, 40).join("")}…` : chars.join("");
+};
+/** Q-279 wording, decided by PM; the link follows on the same line. */
+export const preMergeCheckReminderText = (
+  label: string,
+  id: HumanActionId,
+  title: string,
+) =>
+  `合并前核对项「${label}」已通过，${id}「${title}」仍在挡合并，请确认是否可以完成`;
 
 export interface EffectivePreMergeCheck extends PreMergeCheck {
   /** A passed/failed conclusion reached on an older version; reads as pending. */
@@ -246,5 +283,88 @@ export function applyPreMergeCheck(
       }${note ? `。备注：${note}` : ""}`,
     },
   );
+  // C-179: a new pass (not a note-only edit on the same version) reminds the
+  // triage owner of every open merge-blocking human action. Only a reminder:
+  // the action stays open and keeps holding the merge.
+  if (
+    input.status === "passed" &&
+    !(
+      previous?.status === "passed" &&
+      versions !== undefined &&
+      sameVersions(previous.checked_versions, versions)
+    )
+  )
+    remindMergeBlockingActions(d, card.id, label);
   return result;
+}
+function remindMergeBlockingActions(
+  d: CommandDraft,
+  card: CardId,
+  label: string,
+) {
+  const actions = mergeBlockingHumanActions(
+    {
+      human_actions: d.list("human_actions"),
+      work_items: d.list("work_items"),
+    },
+    card,
+  );
+  if (actions.length === 0) return;
+  const reminders: PreMergeCheckReminder[] = actions.map((action) => {
+    const title = humanActionTitle(action);
+    return {
+      human_action_id: action.id,
+      title,
+      recipient: action.triage === "pm_ops" ? "pm_ops" : "needs_you",
+      link: humanActionLink(d.state.project_id, card, action.id),
+      text: preMergeCheckReminderText(label, action.id, title),
+    };
+  });
+  d.emit(
+    PRE_MERGE_CHECK_REMINDED,
+    card,
+    {
+      card_id: card,
+      label,
+      reminders: reminders.map((r) => ({ ...r })),
+    },
+    {
+      type: "system",
+      author: "system",
+      body: reminders.map((r) => `${r.text}：${r.link}`).join("\n"),
+      refs: reminders.map((r) => ({
+        kind: "human_action" as const,
+        id: r.human_action_id,
+      })),
+    },
+  );
+}
+/** C-179: the newest reminder naming this open action, for Needs You. */
+export function latestPreMergeCheckReminder(
+  events: readonly {
+    type: string;
+    card_id?: string;
+    payload: unknown;
+    created_at: string;
+  }[],
+  action: Pick<HumanAction, "id" | "card_id" | "status">,
+):
+  | (PreMergeCheckReminder & { readonly label: string; readonly at: string })
+  | undefined {
+  if (action.status !== "open" || !action.card_id) return undefined;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e?.type !== PRE_MERGE_CHECK_REMINDED || e.card_id !== action.card_id)
+      continue;
+    const payload = e.payload as {
+      label?: unknown;
+      reminders?: readonly PreMergeCheckReminder[];
+    } | null;
+    const hit = Array.isArray(payload?.reminders)
+      ? payload.reminders.find((r) => r?.human_action_id === action.id)
+      : undefined;
+    if (hit && typeof payload?.label === "string")
+      return { ...hit, label: payload.label, at: e.created_at };
+  }
+  return undefined;
 }

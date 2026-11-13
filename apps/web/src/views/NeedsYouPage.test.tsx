@@ -1989,3 +1989,29 @@ test("C-154: a confirmation handed over by the PM is labelled and counts down fr
   const direct = screen.getByRole("article", { name: "合并确认 Q-4" });
   expect(within(direct).queryByText("由 PM 转交")).toBeNull();
 });
+
+test("C-179: an open action shows the pre-merge check reminder with a direct link", async () => {
+  const base = page([]);
+  const text =
+    "合并前核对项「张良截图核对」已通过，H-1「需要连接设备」仍在挡合并，请确认是否可以完成";
+  const needsYou = vi.fn().mockResolvedValue({
+    ...base,
+    human_actions: base.human_actions.map((h) => ({
+      ...h,
+      pre_merge_check_reminder: {
+        label: "张良截图核对",
+        text,
+        at: "2031-01-01T00:00:00.000Z",
+      },
+    })),
+  });
+  render(<NeedsYouPage client={fakeClient({ needsYou })} projectId="p-1" />);
+  const reminder = await screen.findByLabelText("H-1 核对项提醒");
+  expect(reminder.textContent).toContain(text);
+  expect(
+    within(reminder).getByRole("link", { name: "在卡片中查看" }),
+  ).toHaveProperty(
+    "href",
+    expect.stringContaining("#/p/p-1/cards/C-1?at=human-action-H-1"),
+  );
+});

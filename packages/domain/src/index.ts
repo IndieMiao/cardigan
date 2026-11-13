@@ -24,7 +24,6 @@ export * from "./commands/launch.js";
 export * from "./commands/member.js";
 export {
   type MergePlan,
-  mergeBlockingHumanActions,
   mergePlan,
   prepareMergePlan,
   requestMerge,

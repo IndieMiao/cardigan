@@ -3,8 +3,6 @@ import type {
   AssignmentId,
   CardId,
   EventId,
-  HumanAction,
-  JsonValue,
   RoleId,
   TimelineEntry,
   WorkItem,
@@ -17,8 +15,8 @@ import {
   employeeNameKey,
   isCompletionVerifier,
   latestMergeCheck,
-  mergeBlockingHumanActions,
   mergeRequiresHuman,
+  PRE_MERGE_CHECK_REMINDED,
   pmMergeCheckDelegationAllowed,
   requesterNotificationRecipient,
 } from "@cardigan/domain";
@@ -917,40 +915,26 @@ function routeDecisionResolved(input: RouteInput, draft: Draft): void {
 
 /** Completion informs the requester and current waiters without clearing blockers. */
 /**
- * C-179 (§7.4): a pre-merge check that has just passed may be the very check a
- * merge-blocking human action was opened for. Remind whoever triages each such
- * action (PM Ops or the human) once per pass; the action is never completed
- * automatically. A note-only edit of an already passed check on the same
- * version is not a new pass.
+ * C-179 (§7.4): the domain records a reminder when a pre-merge check newly
+ * passes while merge-blocking human actions are still open. Ring each
+ * action's triage owner (PM Ops or the human) once; the reminder text and
+ * direct link live in the persisted event and timeline entry. Actions closed
+ * before routing are skipped. Nothing here completes an action.
  */
-function routePreMergeCheckPassed(input: RouteInput, draft: Draft): void {
-  const { payload } = input.event;
-  const card_id = input.event.card_id;
-  const label = payloadString(payload, "label");
-  if (!card_id || !label || payloadString(payload, "status") !== "passed")
-    return;
-  if (payloadString(payload, "previous_status") === "passed") {
-    const versions = (event: { payload: JsonValue }) =>
-      JSON.stringify(
-        (payloadObject(event.payload).checked_versions ?? []) as JsonValue,
-      );
-    const earlier = input.snapshot.events
-      .filter(
-        (e) =>
-          e.type === "pre_merge_check_updated" &&
-          e.card_id === card_id &&
-          e.seq < input.event.seq &&
-          payloadString(e.payload, "label") === label,
-      )
-      .sort((a, b) => b.seq - a.seq)[0];
-    if (earlier && versions(earlier) === versions(input.event)) return;
-  }
-  const actions = mergeBlockingHumanActions(input.snapshot, card_id);
+function routePreMergeCheckReminder(input: RouteInput, draft: Draft): void {
+  const reminders = payloadObject(input.event.payload).reminders;
+  if (!Array.isArray(reminders)) return;
   const groups = new Map<"pm_ops" | "needs_you", string[]>();
-  for (const action of actions) {
-    const to = action.triage === "pm_ops" ? "pm_ops" : "needs_you";
-    const line = `合并前核对项「${label}」已通过，${action.id}「${humanActionTitle(action)}」仍在挡合并，请确认是否可以完成：#/p/${input.snapshot.project_id}/cards/${card_id}?at=human-action-${action.id}`;
-    groups.set(to, [...(groups.get(to) ?? []), line]);
+  for (const raw of reminders) {
+    const r = payloadObject(raw);
+    const id = typeof r.human_action_id === "string" ? r.human_action_id : "";
+    const open = input.snapshot.human_actions.some(
+      (h) => h.id === id && h.status === "open",
+    );
+    if (!open || typeof r.text !== "string" || typeof r.link !== "string")
+      continue;
+    const to = r.recipient === "pm_ops" ? "pm_ops" : "needs_you";
+    groups.set(to, [...(groups.get(to) ?? []), `${r.text}：${r.link}`]);
   }
   for (const [to, lines] of groups)
     note(
@@ -962,12 +946,6 @@ function routePreMergeCheckPassed(input: RouteInput, draft: Draft): void {
       lines.join("\n"),
     );
 }
-const humanActionTitle = (action: HumanAction): string => {
-  const raw =
-    action.handoff?.title ?? action.instructions.split(/\r?\n/u)[0] ?? "";
-  const chars = [...raw.trim()];
-  return chars.length > 40 ? `${chars.slice(0, 40).join("")}…` : chars.join("");
-};
 
 function routeHumanActionCompleted(input: RouteInput, draft: Draft): void {
   const action = input.snapshot.human_actions.find(
@@ -1336,8 +1314,8 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "human_action_completed":
       routeHumanActionCompleted(input, draft);
       break;
-    case "pre_merge_check_updated":
-      routePreMergeCheckPassed(input, draft);
+    case PRE_MERGE_CHECK_REMINDED:
+      routePreMergeCheckReminder(input, draft);
       break;
     case "merge_conflicted":
     case "merge_changes_requested": {
