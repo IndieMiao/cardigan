@@ -22,6 +22,12 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { m3Fixture } from "../test-support/m3-acceptance.js";
 import { Dispatcher, type DispatcherOptions } from "./dispatch.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 let f: ReturnType<typeof m3Fixture>;
 let options: DispatcherOptions;
 beforeEach(({ task }) => {
@@ -110,6 +116,7 @@ function trigger(
             question: "Continue?",
             context: "Review input",
             decider: "human",
+            plain_summary: TEST_PLAIN_SUMMARY,
             blocking: false,
             options: [
               { key: "go", description: "Continue", impact: "Unblocks review" },

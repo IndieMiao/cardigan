@@ -35,6 +35,12 @@ import {
   role,
 } from "./test-fixtures.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 /**
  * P2a-14 ⑧ / Q-336 (a): the reviewer-browser switch wired into UI cards'
  * merge confirmation. A card with the "截图核对" pre-merge check is a UI card;
@@ -599,6 +605,7 @@ test.each<DecisionCategory | "sensitive">([
             affected_work_items: [],
             blocking: false,
             decider: "human",
+            plain_summary: TEST_PLAIN_SUMMARY,
           },
           f.io,
         ),

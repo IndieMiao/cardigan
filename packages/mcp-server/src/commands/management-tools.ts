@@ -33,7 +33,7 @@ import { z } from "zod";
 import { agentCard } from "../tools/shared.js";
 import { defineTool } from "../tools/types.js";
 import { executeCommand } from "./execute.js";
-import { entryId, id, idempotency_key } from "./schemas.js";
+import { entryId, id, idempotency_key, plainSummary } from "./schemas.js";
 
 const text = z.string().min(1);
 const subject = z.object({
@@ -104,6 +104,11 @@ const schemas = {
     suggestion: suggestion.describe(
       "Suggested answer shown to the human with a one-click button; option must equal recommended. Required by PM rules when handing a matter to the human.",
     ),
+    plain_summary: plainSummary
+      .optional()
+      .describe(
+        "Required when decider=human: the plain summary the human reads first (what changed, impact, risk).",
+      ),
     affected_cards: z.array(id("card")),
     affected_work_items: z.array(id("work_item")),
     blocking: z.boolean(),
@@ -132,6 +137,11 @@ const schemas = {
     suggestion: suggestion.describe(
       "With escalate only: your suggested option (merge or request_changes for merge confirmations) and a one-line reason, shown to the human with a one-click button; with request_changes also return_reason, prefilled for the human. Required by PM rules when escalating.",
     ),
+    plain_summary: plainSummary
+      .optional()
+      .describe(
+        "With escalate only: required when the decision has no plain summary yet; otherwise rewrites it (the rewrite is audited).",
+      ),
     notice: text.optional(),
     attachment_ids: z
       .array(text)

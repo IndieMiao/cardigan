@@ -270,6 +270,12 @@ export interface DecisionSuggestionView {
   readonly at: string;
   readonly stale: boolean;
 }
+/** C-202: plain-language summary shown first on a decision. */
+export interface PlainSummaryView {
+  readonly changed: string;
+  readonly impact: string;
+  readonly risk: string;
+}
 export interface DecisionView {
   readonly card_id?: string | null;
   readonly affected_cards?: readonly string[];
@@ -302,6 +308,8 @@ export interface DecisionView {
   readonly recommended: string;
   /** C-192: the raiser's suggestion; `stale` disables one-click handling. */
   readonly suggestion?: DecisionSuggestionView;
+  /** C-202: absent on older decisions, which show `context` as before. */
+  readonly plain_summary?: PlainSummaryView;
   readonly context?: string;
   /** Card attachments the requester referenced, in display order (§6). */
   readonly attachments?: readonly AttachmentView[];

@@ -13,7 +13,9 @@ import {
   instructionsFor,
   isDefaultRoleId,
   PM_DECISION_SUGGESTION_RULE,
+  PM_PLAIN_SUMMARY_RULE,
   PM_PRE_MERGE_CHECK_RULE,
+  PRODUCER_PLAIN_CHANGE_RULE,
   REVIEWER_PRE_MERGE_CHECK_RULE,
 } from "./role-pack.js";
 
@@ -249,4 +251,37 @@ test("C-192: pm hands matters to the human with a suggestion, reason and prefill
     expect(PM_DECISION_SUGGESTION_RULE).toContain(phrase);
   for (const role of ["coder", "reviewer"] as const)
     expect(instructionsFor(role)).not.toContain(PM_DECISION_SUGGESTION_RULE);
+});
+
+test("C-202: pm writes plain summaries with the Q-337 example; producers write the completion's plain change note", () => {
+  const pm = instructionsFor("pm");
+  expect(pm.split(PM_PLAIN_SUMMARY_RULE).length - 1).toBe(1);
+  for (const phrase of [
+    "`plain_summary`",
+    "`decider=human`",
+    "`escalate`",
+    "`changed`",
+    "`impact`",
+    "`risk`",
+    "没有就写“无”",
+    "详细信息",
+    "改写会留审计",
+    "开了截图核对开关后，界面卡的截图核对只能由二郎神给结论，PM 只有在它通过时才能代确认合并",
+    "开关默认关着，现在行为不变",
+    "改了 pm 和独立复核员的角色规则",
+  ])
+    expect(PM_PLAIN_SUMMARY_RULE).toContain(phrase);
+  for (const role of ["coder", "ui_ux_designer"] as const) {
+    const body = instructionsFor(role);
+    expect(body.split(PRODUCER_PLAIN_CHANGE_RULE).length - 1).toBe(1);
+    expect(body).not.toContain(PM_PLAIN_SUMMARY_RULE);
+  }
+  for (const phrase of [
+    "`kind=card_completion`",
+    "`plain_summary`",
+    "没有就写“无”",
+    "`decider=human`",
+  ])
+    expect(PRODUCER_PLAIN_CHANGE_RULE).toContain(phrase);
+  expect(instructionsFor("reviewer")).not.toContain(PRODUCER_PLAIN_CHANGE_RULE);
 });

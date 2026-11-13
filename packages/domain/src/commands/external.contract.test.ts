@@ -20,6 +20,12 @@ import {
   value,
 } from "./test-fixtures.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 function office(external?: boolean): Assignment {
   const { work_item_id: _work, ...base } = assignment(9, "pm");
   return {
@@ -92,6 +98,7 @@ test.each(["spending", "account", "permission", "data_deletion"] as const)(
             options: [{ key: "yes", description: "执行", impact: "改变项目" }],
             recommended: "yes",
             decider: "human",
+            plain_summary: TEST_PLAIN_SUMMARY,
             blocking: false,
             affected_cards: [id("card", 1)],
             affected_work_items: [],

@@ -21,6 +21,12 @@ import {
   value,
 } from "./test-fixtures.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 test.each(["human", "office", "ops"] as const)(
   "risk tags: %s may set, replace and clear tags with audit",
   (mode) => {
@@ -161,6 +167,7 @@ const product: SubmitDeliveryParams = {
 const completion: SubmitDeliveryParams = {
   ...product,
   kind: "card_completion",
+  plain_summary: TEST_PLAIN_SUMMARY,
   requested_verifiers: [id("work_item", 3)],
 };
 const verifier = { verify: async () => ({ ok: true as const, value: [] }) };

@@ -13,6 +13,7 @@ import {
   unwrap,
 } from "./core.js";
 import { handoffWithoutOps } from "./delegation.js";
+import { WORKTREE_CLEANUP_PLAIN_SUMMARY } from "./plain-summary.js";
 
 export function releaseAssignment(
   state: CommandState,
@@ -143,6 +144,7 @@ export function requestWorktreeCleanup(
         },
       ],
       recommended: "keep",
+      plain_summary: { ...WORKTREE_CLEANUP_PLAIN_SUMMARY },
       affected_cards: card ? [card.id] : [],
       affected_work_items: [],
       blocking: false,

@@ -50,6 +50,12 @@ import { afterEach, beforeEach, expect, test } from "vitest";
 import { main } from "./index.js";
 import type { CliIo } from "./io.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 const project = "p-merge-cli" as ProjectId;
 const NOW = "2030-01-01T00:00:00.000Z";
 const SHA = "a".repeat(40);
@@ -182,6 +188,9 @@ async function deliver(
       summary: "fixture",
       subject: { kind: "git_head" as const, value: SHA },
       requested_verifiers: [...input.verifiers] as never,
+      ...(input.kind === "card_completion"
+        ? { plain_summary: TEST_PLAIN_SUMMARY }
+        : {}),
     },
     prepared = await prepareDelivery(state(), actor, params, {
       verify: async () => ({ ok: true, value: [] }),
@@ -294,6 +303,7 @@ async function seatAwaitingMerge() {
   runFor(coder);
   const completion = await deliver(coder, development.id, {
     kind: "card_completion",
+    plain_summary: TEST_PLAIN_SUMMARY,
     verifiers: [acceptance.id],
   });
   endRun(coder);
@@ -777,6 +787,7 @@ test.each([
     expect(result.out).toContain("PM 代确认中，已按你的拍板记录");
     expect(state().decisions.find((d) => d.id === "Q-1")).toMatchObject({
       decider: "human",
+      plain_summary: TEST_PLAIN_SUMMARY,
       ...(sub === "hold"
         ? { status: "snoozed", snooze: { reason: "等待核对", by: "human" } }
         : {
@@ -808,6 +819,7 @@ test("merge request-changes answers a PM-held confirmation as the human", async 
   expect(result.code).toBe(0);
   expect(state().decisions.find((d) => d.id === "Q-1")).toMatchObject({
     decider: "human",
+    plain_summary: TEST_PLAIN_SUMMARY,
     resolution: { option: "request_changes", taken_over_from: "role:pm" },
   });
 });
@@ -821,6 +833,7 @@ test("card sensitive on|off is recorded and hands a PM-held merge to the human",
   expect(state().cards.find((c) => c.id === card_id)?.sensitive).toBe(true);
   expect(state().decisions.find((d) => d.id === "Q-1")).toMatchObject({
     decider: "human",
+    plain_summary: TEST_PLAIN_SUMMARY,
     status: "open",
   });
   const off = await cardigan("card", "sensitive", card_id, "off");

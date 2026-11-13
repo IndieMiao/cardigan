@@ -1223,6 +1223,23 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
           "merge_confirmation",
           undefined,
         ]);
+        // C-202: every decision handed to the human carries a plain summary;
+        // the merge confirmation takes it from the completion request.
+        for (const decision of decisions)
+          expect(decision.plain_summary, decision.id).toEqual({
+            changed: expect.any(String),
+            impact: expect.any(String),
+            risk: expect.any(String),
+          });
+        const completionNote = h
+          .state()
+          .deliveries.find(
+            (delivery) => delivery.kind === "card_completion",
+          )?.plain_summary;
+        expect(
+          decisions.find((d) => d.trigger === "merge_confirmation")
+            ?.plain_summary,
+        ).toEqual(completionNote);
         const actions = h.state().human_actions;
         observed.human_actions = actions;
         expect(actions).toEqual([]);

@@ -37,6 +37,12 @@ import {
   role,
 } from "./test-fixtures.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 const { work_item_id: _work, ...base } = assignment(900, "pm");
 const ops: Assignment = { ...base, scope: "standing", standing_mode: "ops" };
 const opsActor: Actor = {
@@ -404,6 +410,7 @@ test.each<DecisionCategory>([
           affected_work_items: [],
           blocking: false,
           decider: "human",
+          plain_summary: TEST_PLAIN_SUMMARY,
         },
         f.io,
       ),
@@ -547,6 +554,7 @@ test("source and affected-card business permissions still require the human", as
         affected_work_items: [],
         blocking: false,
         decider: "human",
+        plain_summary: TEST_PLAIN_SUMMARY,
       },
       f.io,
     ),
@@ -639,6 +647,7 @@ test.each(["pm", "timeout"] as const)(
     expect(next).toMatchObject({
       status: "open",
       decider: "human",
+      plain_summary: TEST_PLAIN_SUMMARY,
       amends: old.id,
     });
     expect(f.state.decisions.find((q) => q.id === old.id)).toMatchObject({
@@ -805,6 +814,7 @@ test("a legacy PM-held ineligible confirmation can still be escalated safely", a
   expect(confirmation()).toMatchObject({
     status: "open",
     decider: "human",
+    plain_summary: TEST_PLAIN_SUMMARY,
     human_required_reason: expect.stringContaining("复核资格已变化"),
   });
   expect(mergePlan(f.state, f.card.id).ok).toBe(false);

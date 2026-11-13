@@ -17,6 +17,12 @@ import { runCommand } from "./host.js";
 import { main } from "./index.js";
 import type { CliIo } from "./io.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 let dataDir: string;
 let output: string[];
 let errors: string[];
@@ -739,6 +745,7 @@ test("needs-you lists open human decisions and pending human actions", async () 
             affected_work_items: ["W-1" as never],
             blocking: false,
             decider: "human",
+            plain_summary: TEST_PLAIN_SUMMARY,
           },
           ports,
         ),
@@ -783,6 +790,8 @@ test("needs-you lists open human decisions and pending human actions", async () 
             affected_work_items: [],
             blocking: false,
             decider: "role:pm",
+            // No active PM Ops: it falls back to the human, so it needs one.
+            plain_summary: TEST_PLAIN_SUMMARY,
           },
           ports,
         ),
@@ -894,6 +903,7 @@ test("needs-you lists 知会 newest first and marks them read like the Workbench
               affected_work_items: [],
               blocking: false,
               decider: "human",
+              plain_summary: TEST_PLAIN_SUMMARY,
             },
             ports,
           ),

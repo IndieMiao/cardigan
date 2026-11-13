@@ -3,6 +3,12 @@ import { expect, test } from "vitest";
 import type { CardDetail, NeedsPage } from "../../../web/src/api.js";
 import { m5Cross, TEST_PASSWORD } from "../../test-support/m5-cross.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 test("C-192: the human applies a suggestion over HTTP; views show it fresh and without its fingerprint", async () => {
   const f = await m5Cross();
   try {
@@ -29,6 +35,7 @@ test("C-192: the human applies a suggestion over HTTP; views show it fresh and w
           affected_work_items: [],
           blocking: false,
           decider: "human",
+          plain_summary: TEST_PLAIN_SUMMARY,
         },
         p,
       ),

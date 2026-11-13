@@ -26,6 +26,12 @@ import {
   needsYou,
 } from "./read.js";
 
+const TEST_PLAIN_SUMMARY = {
+  changed: "测试用的改动说明",
+  impact: "测试用的影响说明",
+  risk: "无",
+};
+
 test("read views resolve employees through original author identities, retaining inactive names and legacy fallback", async () => {
   const employee: Employee = {
     id: id("employee", 1),
@@ -278,6 +284,7 @@ test("Needs You reads original requesters, including project decisions, without 
         options: [{ key: "go", description: "继续", impact: "开始" }],
         recommended: "go",
         decider: "human",
+        plain_summary: TEST_PLAIN_SUMMARY,
         affected_cards: [],
         affected_work_items: [],
         blocking: false,
@@ -391,6 +398,7 @@ test("all human read surfaces resolve the same owner, including legacy decision 
         options: [{ key: "go", description: "继续", impact: "开始" }],
         recommended: "go",
         decider: "human",
+        plain_summary: TEST_PLAIN_SUMMARY,
         affected_cards: [],
         affected_work_items: [],
         blocking: false,
