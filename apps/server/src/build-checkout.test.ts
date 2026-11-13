@@ -202,6 +202,8 @@ test("a readonly verifier gets a writable, detached checkout of the delivery SHA
     "utf8",
   );
   expect(script).toContain(build);
+  // Dependency installs in the build copy from the shared store (no hardlinks).
+  expect(script).toContain("export pnpm_config_package_import_method='copy'");
 });
 
 test("the build checkout creates no branch, never touches the central repository and is not backed up", async () => {

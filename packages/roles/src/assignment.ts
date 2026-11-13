@@ -207,6 +207,14 @@ export function compileAssignmentLaunch(
     harnessEnv[`GIT_CONFIG_KEY_${index}`] = "safe.directory";
     harnessEnv[`GIT_CONFIG_VALUE_${index}`] = path;
   }
+  // P2a-3: pnpm hardlinks installed files to the shared store by default, so
+  // a verifier editing node_modules in its build checkout would edit the
+  // store every other Agent and merge check installs from. Copy instead
+  // (pnpm 11 reads pnpm_config_*, older versions npm_config_*).
+  if (input.build_dir) {
+    harnessEnv.pnpm_config_package_import_method = "copy";
+    harnessEnv.npm_config_package_import_method = "copy";
+  }
 
   switch (harness) {
     case "claude-code":
