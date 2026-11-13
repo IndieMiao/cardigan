@@ -1463,3 +1463,143 @@ test("C-202: MCP leaves plain_summary checks to the domain, so a missing or non-
   }
   expect(rows().events).toBe(before);
 });
+
+/** C-202: bad plain_summary inputs and the plain words each must produce. */
+const BAD_PLAIN_SUMMARIES: [unknown, string][] = [
+  [{ changed: "调整显示", impact: "更容易阅读" }, "缺少“风险”"],
+  [{ changed: "调整显示", impact: 3, risk: "无" }, "缺少“对你的影响”"],
+  [{ impact: "更容易阅读", risk: "无" }, "缺少“改了什么”"],
+  [{ ...TEST_PLAIN_SUMMARY, extra: "多余" }, "不认识：extra"],
+  ["一句话", "要写成一个对象"],
+];
+async function expectPlainRejections(
+  call: (plain_summary: unknown) => Promise<{
+    isError?: unknown;
+    structuredContent?: unknown;
+  }>,
+  writes: () => unknown,
+) {
+  const before = writes();
+  for (const [input, message] of BAD_PLAIN_SUMMARIES) {
+    const result = await call(input);
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: "validation_failed" },
+    });
+    expect(JSON.stringify(result.structuredContent)).toContain(message);
+  }
+  expect(writes()).toEqual(before);
+}
+
+test("C-202: resolve_delegated_decision escalate over MCP gives the plain error for a bad summary and writes nothing", async () => {
+  const opsAssignment = store.uow.run((tx): Assignment => {
+    const front = tx.assignments.list(project)[0];
+    if (!front) throw new Error("Missing Office");
+    const next: Assignment = {
+      ...front,
+      id: tx.ids.next(project, "assignment"),
+      scope: "standing",
+      standing_mode: "ops",
+      mcp_token_id: "fixture-escalate-ops",
+    };
+    tx.assignments.put(project, next);
+    return next;
+  });
+  const ops = await connect(opsAssignment, true);
+  // For PM, with PM Ops active: no summary is needed when raising it.
+  const q = await ok<Decision>(office, "request_decision", {
+    card_id: card.id,
+    kind: "choose",
+    category: "feature_detail",
+    question: "如何继续",
+    context: "已确认可选方案",
+    options: [{ key: "go", description: "继续", impact: "推进工作" }],
+    recommended: "go",
+    affected_cards: [card.id],
+    affected_work_items: [],
+    blocking: false,
+    decider: "role:pm",
+  });
+  expect(q).toMatchObject({ decider: "role:pm" });
+  expect(q).not.toHaveProperty("plain_summary");
+  const escalate = (plain_summary: unknown) =>
+    raw(ops, "resolve_delegated_decision", {
+      decision_id: q.id,
+      option: "go",
+      rationale: "需要人来定",
+      escalate: true,
+      plain_summary,
+    });
+  const stored = () => store.uow.read((tx) => tx.decisions.get(project, q.id));
+  await expectPlainRejections(escalate, () => ({
+    rows: rows(),
+    decision: stored(),
+  }));
+  expect(stored()).toMatchObject({ decider: "role:pm", status: "open" });
+  // The same call with a proper summary goes through to the human.
+  const handed = await ok<Decision>(ops, "resolve_delegated_decision", {
+    decision_id: q.id,
+    option: "go",
+    rationale: "需要人来定",
+    escalate: true,
+    plain_summary: TEST_PLAIN_SUMMARY,
+  });
+  expect(stored()).toMatchObject({
+    decider: "human",
+    plain_summary: TEST_PLAIN_SUMMARY,
+  });
+  expect(handed).toBeDefined();
+});
+
+test("C-202: submit_delivery card_completion over MCP gives the plain error for a bad change note and writes nothing", async () => {
+  const producer = await coder();
+  const reviewer = await assignee("reviewer");
+  const subject = { kind: "git_head", value: "b".repeat(40) };
+  const delivery = await ok<{ id: string }>(producer, "submit_delivery", {
+    work_item_id: work("coder").id,
+    kind: "code",
+    summary: "Ready",
+    subject,
+    requested_verifiers: [work("reviewer").id],
+  });
+  await ok(reviewer, "submit_review", {
+    delivery_id: delivery.id,
+    target_sha: subject.value,
+    kind: "code",
+    issues: [],
+  });
+  const complete = (plain_summary: unknown) =>
+    raw(producer, "submit_delivery", {
+      work_item_id: work("coder").id,
+      kind: "card_completion",
+      summary: "Done",
+      subject,
+      requested_verifiers: [work("pm").id],
+      plain_summary,
+    });
+  const deliveries = () =>
+    store.uow.read((tx) => tx.deliveries.list(project).map((x) => x.id));
+  await expectPlainRejections(complete, () => ({
+    rows: rows(),
+    deliveries: deliveries(),
+  }));
+  // A completion without any change note gets the plain error too.
+  const missing = await raw(producer, "submit_delivery", {
+    work_item_id: work("coder").id,
+    kind: "card_completion",
+    summary: "Done",
+    subject,
+    requested_verifiers: [work("pm").id],
+  });
+  expect(missing.isError).toBe(true);
+  expect(JSON.stringify(missing.structuredContent)).toContain("人话改动说明");
+  await ok(producer, "submit_delivery", {
+    work_item_id: work("coder").id,
+    kind: "card_completion",
+    summary: "Done",
+    subject,
+    requested_verifiers: [work("pm").id],
+    plain_summary: TEST_PLAIN_SUMMARY,
+  });
+  expect(deliveries()).toHaveLength(2);
+});

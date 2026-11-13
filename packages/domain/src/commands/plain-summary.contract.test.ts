@@ -164,8 +164,39 @@ test.each([
     { changed: "x", impact: "y", risk: "无", extra: "z" },
     "extra",
   ],
+  // Inherited names are not fields either.
+  [
+    "inherited key name",
+    { changed: "x", impact: "y", risk: "无", constructor: "z" },
+    "constructor",
+  ],
+  // Invisible characters cannot hide a record number or reverse the text.
+  [
+    "zero-width space hiding a number",
+    { changed: "修好了 D\u200b-694 的问题", impact: "y", risk: "无" },
+    "U+200B",
+  ],
+  [
+    "bidi override",
+    { changed: "x", impact: "y", risk: "\u202e限权宽放" },
+    "U+202E",
+  ],
+  [
+    "control character",
+    { changed: "x\u0007", impact: "y", risk: "无" },
+    "U+0007",
+  ],
 ])("C-202: %s is rejected in plain words", (_name, input, phrase) => {
   expect(rejection(input)).toContain(phrase);
+});
+
+test("C-202: line breaks and tabs stay allowed", () => {
+  const multi = {
+    changed: "第一句。\n第二句。",
+    impact: "a\r\nb\tc",
+    risk: "无",
+  };
+  expect(buildPlainSummary(multi)).toEqual(multi);
 });
 
 test.each(Object.entries(PLAIN_SUMMARY_LIMITS))(

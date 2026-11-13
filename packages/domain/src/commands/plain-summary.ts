@@ -84,6 +84,14 @@ export function buildPlainSummary(
       "validation_failed",
       `${owner}的“${label}”太长了：最多 ${limit} 个字，现在 ${[...trimmed].length} 个字，请压缩成一两句`,
     );
+    // Invisible format and control characters (zero-width space, bidi
+    // overrides, ...) could hide a record number or reverse what is shown.
+    const hidden = /[\p{Cc}\p{Cf}]/u.exec(trimmed.replace(/[\n\r\t]/gu, ""));
+    ensure(
+      !hidden,
+      "validation_failed",
+      `${owner}的“${label}”里有看不见的控制字符或格式字符（U+${hidden?.[0].codePointAt(0)?.toString(16).toUpperCase().padStart(4, "0")}），请删掉后重新填写`,
+    );
     const jargon = plainSummaryJargon(trimmed);
     ensure(
       !jargon,
@@ -92,7 +100,7 @@ export function buildPlainSummary(
     );
     out[key] = trimmed;
   }
-  const extra = Object.keys(raw).filter((k) => !(k in LABELS));
+  const extra = Object.keys(raw).filter((k) => !Object.hasOwn(LABELS, k));
   ensure(
     extra.length === 0,
     "validation_failed",
