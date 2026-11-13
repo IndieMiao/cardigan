@@ -1,6 +1,7 @@
 import { access } from "node:fs/promises";
 import type {
   Assignment,
+  AssignmentId,
   CardId,
   Clock,
   CommandState,
@@ -9,10 +10,14 @@ import type {
   Runtime,
   RuntimeRef,
 } from "@cardigan/domain";
-import { releaseAssignment, requestWorktreeCleanup } from "@cardigan/domain";
+import {
+  clearReleasedRuntimeRefs,
+  releaseAssignment,
+  requestWorktreeCleanup,
+} from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
-import { tokensForAssignment } from "@cardigan/store";
+import { unrevokedTokensForProject } from "@cardigan/store";
 import { buildCheckoutIdle } from "./build-checkouts.js";
 import type { ReconcileGit } from "./git.js";
 import { startTimerLoop, type TimerLoop } from "./loop.js";
@@ -85,20 +90,34 @@ export class CleanupExecutor {
     const state = profileSpanSync("cleanup.state", () =>
       this.state(project_id),
     );
-    // §12.6: a terminal whose exit is unconfirmed may still use its directories.
-    const unconfirmed = new Set<string>();
-    for (const assignment of state.assignments.filter(
+    const candidates = state.assignments.filter(
       (candidate) =>
         candidate.status === "released" ||
         (candidate.status === "suspended" &&
           candidate.scope === "standing" &&
           candidate.role_id === "pm"),
-    )) {
-      // Terminal/token cleanup is independent of Git and runs on every sweep:
-      // previous failures or incomplete external releases must be repaired.
+    );
+    // Read current token rows even when a terminal was already removed. Late
+    // issuance and another connection's writes must not bypass revocation.
+    const owners = new Set(candidates.map((a) => a.id));
+    profileSpanSync("cleanup.revoke_tokens", () => {
+      if (!owners.size) return;
+      for (const token of unrevokedTokensForProject(
+        this.options.store.database,
+        project_id,
+      ))
+        if (owners.has(token.assignment_id))
+          this.options.store.revokeToken(token.id);
+    });
+    // §12.6: a terminal whose exit is unconfirmed may still use its directories.
+    const unconfirmed = new Set<string>();
+    const missing: { assignment_id: AssignmentId; runtime_ref: RuntimeRef }[] =
+      [];
+    for (const assignment of candidates) {
       if (
+        assignment.runtime_ref !== null &&
         !(await profileSpan("cleanup.revoke_and_release", () =>
-          this.revokeAndReleaseTerminal(project_id, assignment),
+          this.releaseTerminal(assignment, missing),
         ))
       ) {
         unconfirmed.add(assignment.id);
@@ -110,6 +129,19 @@ export class CleanupExecutor {
       )
         await profileSpan("cleanup.settle", () =>
           this.settle(project_id, assignment),
+        );
+    }
+    if (missing.length) {
+      const cleared = runSystemCommand(
+        this.options.store,
+        project_id,
+        (current, actor, ports) =>
+          clearReleasedRuntimeRefs(current, actor, { missing }, ports),
+        this.clock,
+      );
+      if (!cleared.ok)
+        this.report(
+          `terminal cleanup recording failed: ${cleared.error.code} ${cleared.error.message}`,
         );
     }
     await profileSpan("cleanup.idle_builds", () =>
@@ -198,29 +230,28 @@ export class CleanupExecutor {
     }
   }
 
-  /** Revoke tokens and give the terminal back; a released token must not work. */
-  private async revokeAndReleaseTerminal(
-    project_id: ProjectId,
+  /** Only absence proves there is no terminal resource left to sweep. */
+  private async releaseTerminal(
     assignment: Assignment,
+    missing: { assignment_id: AssignmentId; runtime_ref: RuntimeRef }[],
   ): Promise<boolean> {
-    profileSpanSync("cleanup.revoke_tokens", () => {
-      for (const token of tokensForAssignment(
-        this.options.store.database,
-        project_id,
-        assignment.id,
-      ))
-        if (token.revoked_at === null) this.options.store.revokeToken(token.id);
-    });
     const ref: RuntimeRef | undefined = assignment.runtime_ref ?? undefined;
     if (ref === undefined) return true;
+    const absent = () => {
+      // Suspended PMs can resume; retain their existing cleanup semantics.
+      if (assignment.status === "released")
+        missing.push({ assignment_id: assignment.id, runtime_ref: ref });
+      return true;
+    };
     try {
       const observed = await this.options.runtime.status(ref);
       if (!observed.ok && observed.error.code === "runtime_not_found")
-        return true;
+        return absent();
       // The domain already forbids release while a business Run is unfinished.
       // A stale harness "working" label must not keep a released Agent alive.
       const result = await this.options.runtime.release(ref, { force: true });
-      if (result.ok || result.error.code === "runtime_not_found") return true;
+      if (result.ok) return true;
+      if (result.error.code === "runtime_not_found") return absent();
       this.report(
         `terminal release for ${assignment.id} failed: ${result.error.code} ${result.error.message}`,
       );
@@ -248,6 +279,7 @@ export class CleanupExecutor {
   }
 
   private async settle(project_id: ProjectId, assignment: Assignment) {
+    if (this.cleaned.has(assignment.id)) return;
     const state = this.state(project_id),
       decision = this.cleanupDecision(state, assignment);
     if (decision?.status === "resolved") {

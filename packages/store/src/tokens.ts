@@ -94,6 +94,22 @@ export function tokensForAssignment(
     .map((row) => tokenRecord(row as Record<string, unknown>));
 }
 
+/** Current revocation work, without decoding historical tools or reading hashes. */
+export function unrevokedTokensForProject(
+  db: DatabaseSync,
+  project_id: ProjectId,
+): Pick<TokenRecord, "id" | "assignment_id">[] {
+  return db
+    .prepare(
+      "SELECT id, assignment_id FROM tokens WHERE project_id = ? AND revoked_at IS NULL",
+    )
+    .all(project_id)
+    .map((row) => ({
+      id: String(row.id),
+      assignment_id: String(row.assignment_id) as AssignmentId,
+    }));
+}
+
 /** Look up a token by its hash; returns the record even when revoked. */
 export function findTokenByHash(
   db: DatabaseSync,

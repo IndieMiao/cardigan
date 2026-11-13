@@ -261,3 +261,50 @@ replay 新增 `REPLAY_LOOPS=1`（配 `REPLAY_LOOP_TICKS`，默认 2）：dispatc
 修后 240 卡 profile（4 次 tick 共 16.1 s 采样）：`claim` 29.5 → 5.4 s，`queueSnapshot` 11.9 → 0.7 s，`exclusive` 9.9 → 0.3 s，`CommandDraft.get` 8.8 → 0.2 s 以下。
 
 结论：240 卡稳态 tick 再降约 72%，`deliver` 段降约 85%，两处热点已不在 profile 前列。tick 仍整段阻塞事件循环（ELU 1.0）。剩下的大头是首次 tick（对全部积压候选的认领和首次路由，约 7 s）和 `route` 段（稳态约 0.9 s，其中 `cardView` 里的 `list()` 重建较多）；分片或让出事件循环仍按 §6.7 交人另行决定，本卡不做。
+
+
+## 8. C-233：已释放 Assignment 的资源清理
+
+### 8.1 生产证据与根因
+
+依据 C-221#40（H-44，1 小时 47 分钟生产采样）：cleanup 平均 43.2 秒、最长 104.9 秒；其中 `cleanup.revoke_and_release` 平均 41.0 秒、最长 71.3 秒，约占平均墙钟的 95%。当时有 657 个 released Assignment、36 个 active。该段没有复用“资源已经消失”的事实，历史释放记录越多，重复调用越多。
+
+基线 `077f5ccf` 的 `CleanupExecutor.project` 每轮筛出全部 released Assignment，以及 suspended 的常驻 PM，对每个候选串行执行：
+
+1. `tokensForAssignment` 同步查该 Assignment 的全部 Token、排序、JSON 解码工具清单，再逐个撤销尚未撤销的 Token。tokens 表只有主键和 Token 哈希唯一索引，没有项目／Assignment 索引，因此会对历史表重复扫描，即使全部早已撤销也如此。
+2. `runtime.status` 查询记录中的终端；Herdr 适配器先调用 `hc get`，存在时还打开事件订阅读快照。除明确不存在外，再调用 `runtime.release`，它又执行 `hc get`，需要时 kill，最后 rm。每个候选串行 await，历史上已删除的终端仍每轮付出查询成本。代码足以确认重复工作，但生产 41 秒中 SQL 与外部调用各占多少，现有引述数据不能分开证明。
+3. 有 worktree 时进入 `settle`，读状态和清理决策、检查路径，必要时调用 Git。原进程内 `cleaned` 只在 `clean` 内生效，不能避免前两步，也不能避免 `settle` 读状态。构建目录另按实际目录列表和未结束 Run 检查。
+
+### 8.2 实现及恢复边界
+
+- 每项目每轮只查一次未撤销 Token 的编号和所属 Assignment，不读哈希或历史工具清单。筛选依据仍是本轮 released／暂停 PM 候选；active 不撤销。每轮重新查询，无 Token 缓存，外部连接新签发的晚到凭据下轮仍会撤销。仍有一次表扫描和轻量 Assignment 遍历，没有宣称整个 cleanup 已与历史大小无关。
+- 复用现有 `runtime_ref` 表达“尚需回收的终端”：只有 `status` 或 `release` 明确返回 `runtime_not_found` 才收集消失证据。本轮结束时在一个写事务中批量调用 system 专用领域命令，重新核对业务状态为 released 且完整引用与观察时相同，再清空引用。命令不开放 MCP；不改变角色规则。状态更新与含旧引用的项目审计事件一起提交，原释放事件不变。
+- `release` 返回成功不等于已经证明消失，仍保留引用，下轮复查。失败和抛错不记录完成；写入失败全部回滚；进程在观察后、提交前退出会重复检查，提交后重启则跳过。引用在 IO 期间变化时不清除新引用。暂停 PM 可恢复，保持原有复查行为，不清空其引用。
+- 工作区和构建目录各自继续处理：终端引用清空后，Git 删除失败仍重试，人工 keep／force_clean 决策仍生效；`settle` 在读取状态前跳过本进程已清理的 worktree。终端失败仍阻止删除其工作区／构建目录。没有新增“整个 Assignment 已清理”的字段或迁移，也没有新增重试次数、间隔、分片或并发策略。
+
+### 8.3 等效回放：修前与修后
+
+新增可重复的 `apps/server/src/cleanup.replay.test.ts`，沿用 C-216 的 TickProfiler 和真实 SQLite。固定 657 个已释放、带终端引用的 Assignment，每个写入 3 个已撤销 Token，终端桩返回明确不存在；不注入耗时、不制造 CPU 负载。连续跑 3 轮，同机单 worker。修前为上述基线实现加同一回放文件；修后为本卡实现。
+
+```sh
+pnpm exec tsc -b apps/server
+CARDIGAN_CLEANUP_REPLAY=1 pnpm exec vitest run apps/server/src/cleanup.replay.test.ts --maxWorkers=1 --silent=false
+```
+
+| 指标 | 修前 | 修后 |
+|---|---:|---:|
+| 第 1 轮 cleanup | 101.4 ms | 139.8 ms |
+| 第 2 轮 cleanup | 95.4 ms | 4.6 ms |
+| 第 3 轮 cleanup | 108.9 ms | 0.7 ms |
+| 每轮逐终端 status 调用 | 657 / 657 / 657 | 657 / 0 / 0 |
+| Token 查询时间（3 轮） | 96.8 / 92.6 / 92.2 ms | 0.3 / 0.2 / 0.2 ms |
+
+首轮一次性保存 657 个引用清除和审计事件，事务约 136 ms，所以本地首轮比修前慢；第 2 轮还包含写入后的快照重建。稳态移除了逐历史 Assignment 的 Token 查询和终端 IO。`cleanup.revoke_tokens` 现在独立于 `cleanup.revoke_and_release` 计时，旧版前者嵌套在后者中，比较时以 cleanup 总墙钟为准。
+
+这里测到的是数据库／JavaScript 开销和外部调用次数，桩没有生产 hc、SSH 延迟，也没有真实 Git 清理；不能把本地毫秒数换算成生产的 41 秒。生产收益仍须上线后的同口径分段日志确认。reconcile.git 和 backup.fetch 不在本卡范围。
+
+### 8.4 验证覆盖
+
+- domain 契约：system 身份和项目边界；仅清空仍 released 的同一引用；active／suspended 不清空；并发更换引用、重复提交和回滚后的重试；旧释放审计保留。
+- store：只返回本项目未撤销凭据；另一个连接签发／撤销立即可见；事务回滚不缓存错误结果。
+- server：601 个历史候选首轮处理后，后续及重建执行器均不再调用终端或重复撤销；失败结果／抛错重试；只有 release 成功仍复查；清理后晚到凭据仍撤销；active 与刚释放的候选分离；审计写入失败使引用清除整体回滚；IO 期间新引用不会被旧观察覆盖；终端清除后 Git 失败仍独立重试。原 cleanup、构建目录及暂停／释放用例共同回归。
