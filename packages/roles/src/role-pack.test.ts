@@ -55,7 +55,7 @@ describe("default role kinds (p2v-12 §2.3)", () => {
       role_id: "ui_ux_designer",
       display_name: "UI/UX 设计师",
       kind: "produce",
-      capabilities: ["produce"],
+      capabilities: ["produce", "browser"],
       worktree: "write",
     });
     expect([...role.allowed_tools].sort()).toEqual(
@@ -76,7 +76,7 @@ describe("default role kinds (p2v-12 §2.3)", () => {
       role_id: "design_director",
       display_name: "设计总监",
       kind: "verify",
-      capabilities: ["verify"],
+      capabilities: ["verify", "browser"],
       worktree: "readonly",
     });
     expect([...role.allowed_tools].sort()).toEqual(
@@ -140,7 +140,7 @@ test("P2a-14: independent reviewer has only the planned verify tools and boundar
   expect(role).toMatchObject({
     display_name: "独立复核",
     kind: "verify",
-    capabilities: ["verify"],
+    capabilities: ["verify", "browser"],
     worktree: "readonly",
   });
   // An exact allowlist also excludes delivery, PM and host_ops tools.

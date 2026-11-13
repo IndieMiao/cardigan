@@ -11,7 +11,11 @@ import {
 } from "./compile.js";
 import type { Harness } from "./harness.js";
 import { composeRolePrompt } from "./prompt.js";
-import type { LaunchConfig, LaunchProfileDefinition } from "./schema.js";
+import type {
+  BrowserLaunchDefinition,
+  LaunchConfig,
+  LaunchProfileDefinition,
+} from "./schema.js";
 import { testWorkerLimit } from "./test-worker-limit.js";
 
 /**
@@ -42,6 +46,38 @@ export const SECRETS_FILE_NAME = "secrets.env";
  */
 export const START_FILE_NAME = "start";
 
+/**
+ * P2a-14 ⑧: role capability that adds the host's local headless browser as a
+ * second, stdio-only MCP server. It travels with the role version, so a role
+ * gets the browser only after `role upgrade --from-default` brings the rules
+ * that come with it (Core Prompt: never open the production Workbench).
+ */
+export const BROWSER_CAPABILITY = "browser";
+export const BROWSER_MCP_SERVER_NAME = "playwright";
+/** Harness allow-list entry for every tool of the browser server. */
+export const BROWSER_TOOL_PATTERN = `mcp__${BROWSER_MCP_SERVER_NAME}__*`;
+/** Default roles that carry the `browser` capability (ADR 0006 decision 6). */
+export const BROWSER_ROLES = [
+  "ui_ux_designer",
+  "design_director",
+  "independent_reviewer",
+] as const;
+
+/**
+ * P2a-14 ⑧: the local browser's boundary. A role rule, not a network
+ * restriction (ADR 0006 decision 6): the Agent already has a shell, and the
+ * real boundaries are the Workbench password and the Card MCP token.
+ */
+export const BROWSER_BOUNDARY_RULE = `有浏览器工具（\`${BROWSER_TOOL_PATTERN}\`）时，被测页面只能是你自己起的本地 dev server（验证方在主机准备的可写构建目录，产出方在当前 worktree）；不得打开生产 Workbench，不得导航到 127.0.0.1:7781 或其它已知 Workbench 端口，也不在浏览器里登录任何账号。没有浏览器工具时如实写未核，不声称看过页面。`;
+
+/** Fixed arguments; the host config cannot add to or override them. */
+export const BROWSER_MCP_ARGS = [
+  "--headless",
+  "--isolated",
+  "--browser",
+  "chromium",
+] as const;
+
 export interface AssignmentRoleInput {
   readonly role_id: string;
   readonly harness: Harness;
@@ -54,6 +90,8 @@ export interface AssignmentRoleInput {
   readonly allowed_tools: readonly string[];
   /** `none` roles (PM) run in the run directory instead of a worktree. */
   readonly worktree: "none" | "write" | "readonly";
+  /** Role capabilities; `browser` asks for the local browser server. */
+  readonly capabilities?: readonly string[];
 }
 
 export interface AssignmentIdentity {
@@ -126,6 +164,8 @@ export interface CompiledAssignmentLaunch {
   readonly token_file: string;
   /** `mcp__card__whoami` style names, for the harness allow-list. */
   readonly mcp_tool_names: readonly string[];
+  /** Whether the local browser MCP server was configured for this launch. */
+  readonly browser: boolean;
 }
 
 export function compileAssignmentLaunch(
@@ -184,6 +224,20 @@ export function compileAssignmentLaunch(
   const toolNames = input.role.allowed_tools.map(
     (tool) => `mcp__${serverName}__${tool}`,
   );
+  // Every gate must hold: one of the approved roles, a role version that
+  // took the `browser` capability, its Core Prompt carrying the Workbench
+  // boundary, and the host's browser install. Anything else gets no browser.
+  const browser =
+    (BROWSER_ROLES as readonly string[]).includes(input.role.role_id) &&
+    input.role.capabilities?.includes(BROWSER_CAPABILITY) &&
+    corePrompt.includes(BROWSER_BOUNDARY_RULE) &&
+    input.launch.browser !== undefined
+      ? browserServer(input.launch.browser, input.run_dir)
+      : undefined;
+  if (browser !== undefined && serverName === BROWSER_MCP_SERVER_NAME)
+    throw new Error(
+      `MCP server name ${serverName} is reserved for the local browser`,
+    );
 
   const harnessFiles: CompiledFile[] = [];
   const harnessEnv: Record<string, string> = {};
@@ -229,6 +283,16 @@ export function compileAssignmentLaunch(
                 url: input.mcp.url,
                 headers: { Authorization: `Bearer \${${TOKEN_ENV_VAR}}` },
               },
+              ...(browser === undefined
+                ? {}
+                : {
+                    [BROWSER_MCP_SERVER_NAME]: {
+                      type: "stdio",
+                      command: browser.command,
+                      args: browser.args,
+                      env: browser.env,
+                    },
+                  }),
             },
           },
           null,
@@ -243,8 +307,14 @@ export function compileAssignmentLaunch(
         "--append-system-prompt-file",
         coreFile,
       );
-      if (toolNames.length > 0) {
-        harnessArgs.push("--allowedTools", toolNames.join(","));
+      if (toolNames.length > 0 || browser !== undefined) {
+        harnessArgs.push(
+          "--allowedTools",
+          [
+            ...toolNames,
+            ...(browser === undefined ? [] : [BROWSER_TOOL_PATTERN]),
+          ].join(","),
+        );
       }
       // Agents never update themselves mid-run.
       harnessEnv.DISABLE_AUTOUPDATER = "1";
@@ -266,6 +336,7 @@ export function compileAssignmentLaunch(
             ...(input.repository_root ? [input.repository_root] : []),
             ...(input.build_dir ? [input.build_dir] : []),
           ],
+          browser,
         ),
         mode: 0o600,
       });
@@ -287,6 +358,16 @@ export function compileAssignmentLaunch(
                 exposure: "direct",
                 headers: { Authorization: `Bearer \${${TOKEN_ENV_VAR}}` },
               },
+              ...(browser === undefined
+                ? {}
+                : {
+                    [BROWSER_MCP_SERVER_NAME]: {
+                      command: browser.command,
+                      args: browser.args,
+                      env: browser.env,
+                      exposure: "direct",
+                    },
+                  }),
             },
           },
           null,
@@ -422,6 +503,29 @@ export function compileAssignmentLaunch(
     launch_script: launchScript,
     token_file: tokenFile,
     mcp_tool_names: toolNames,
+    browser: browser !== undefined,
+  };
+}
+
+interface BrowserServer {
+  readonly command: string;
+  readonly args: readonly string[];
+  readonly env: Readonly<Record<string, string>>;
+}
+
+/**
+ * `@playwright/mcp` over stdio: no port, no persistent profile, the process
+ * ends with the session. The browser comes from the host's read-only shared
+ * install instead of a per-Agent download; screenshots stay in the run dir.
+ */
+function browserServer(
+  config: BrowserLaunchDefinition,
+  runDir: string,
+): BrowserServer {
+  return {
+    command: config.command,
+    args: [...BROWSER_MCP_ARGS, "--output-dir", join(runDir, "playwright")],
+    env: { PLAYWRIGHT_BROWSERS_PATH: config.browsers_path },
   };
 }
 
@@ -466,6 +570,7 @@ function codexConfig(
   tools: readonly string[],
   coreFile: string,
   trustedPaths: readonly string[],
+  browser: BrowserServer | undefined,
 ): string {
   const lines = [
     `model_instructions_file = ${JSON.stringify(coreFile)}`,
@@ -482,6 +587,21 @@ function codexConfig(
     lines.push(
       `[mcp_servers.${serverName}.tools.${tool}]`,
       'approval_mode = "approve"',
+      "",
+    );
+  }
+  if (browser !== undefined) {
+    // Codex 0.161: one approval mode for every tool of the local browser.
+    lines.push(
+      `[mcp_servers.${BROWSER_MCP_SERVER_NAME}]`,
+      `command = ${JSON.stringify(browser.command)}`,
+      `args = [${browser.args.map((arg) => JSON.stringify(arg)).join(", ")}]`,
+      'default_tools_approval_mode = "approve"',
+      "",
+      `[mcp_servers.${BROWSER_MCP_SERVER_NAME}.env]`,
+      ...Object.entries(browser.env).map(
+        ([name, value]) => `${name} = ${JSON.stringify(value)}`,
+      ),
       "",
     );
   }
