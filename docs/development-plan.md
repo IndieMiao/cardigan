@@ -1390,7 +1390,7 @@ CLI 接受 `CARDIGAN_TOKEN` 或全局 `--token-file <path>`，同时提供时拒
 | `init`；`project create/set-repo` | 仅人类，无对应 MCP 工具 |
 | `role list/show/add/copy/update/deactivate/activate/rollback/upgrade` | 仅人类 |
 | `member add/list/update/deactivate/activate`；`employee add/list/update/deactivate/activate`；`avatar list` | 仅人类 |
-| `pm create/start/rotate`；`host-ops create/start`；`token issue` | 仅人类；创建与启动可签发凭据，Token 模式拒绝 |
+| `pm create/start/rotate`；`host-ops create/start/rotate`；`token issue` | 仅人类；创建与启动可签发凭据，Token 模式拒绝 |
 | `preference get/set`（所有偏好）；`template list/show/add/copy/update/deactivate/activate/rollback` | 仅人类 |
 | `card done/sensitive`；`human-action done`；`needs-you read` | 仅人类 |
 | `attention`；`assignment start/stop/attach` | 仅人类 |
@@ -1499,7 +1499,7 @@ Role 修改后版本号递增，Run 记录所用版本。`createRole / copyRole 
 
 角色更新只影响之后的新指派，已有 Assignment 固定使用指派时的版本；要让已有工作用上新版本，需要重新指派，常驻 PM 用 `cardigan pm rotate`（§7.1）。按默认角色包追加版本用 `cardigan role upgrade <角色> --from-default`（§4.3）。重复执行 assign 会复用原 Assignment，不是版本升级入口。V9a 沿用这一现有机制，不自动替换既有会话、Token 或 worktree（C-25 的 PM 指令）；系统共用协议的更新仍随下一次启动编译生效。
 
-C-96 现状核对（ADR 0005，待人选方案）：工具范围由两层固定。一是 Assignment 的 `role_version` 不变。二是除常驻 PM 外（工作项和常驻 host_ops），Token 重签不变宽：启动路径的 `issueAssignmentToken` 与上一张 Token 取交集，`token issue` 直接沿用上一张 Token 的工具。所以 `token issue`、会话替换和 `pm restart` 都拿不到新版本新增的工具。上文“重新指派”只对新工作项成立：已有工作项再 `assign` 只复用原身份，原身份释放后拒绝。验证项可用 `replace_verification_work_item` 换项；产出项目前没有换版本途径。常驻 host_ops 可以由人先 `assignment release`（要求没有未结束的 Run 和待处理的运维操作），再 `host-ops create` 按最新版本新建身份，但这两步不是原子的，也不迁移 ACK 游标。常驻 PM 用 `pm rotate`。备选做法（提示受影响 Assignment、人显式升级单个 Assignment、替换会话时自动升级、补产出项与 host_ops 的替换路径）及需要人拍板的扩权点见 ADR 0005。
+C-96 现状核对（ADR 0005，待人选方案）：工具范围由两层固定。一是 Assignment 的 `role_version` 不变。二是除常驻 PM 外（工作项和常驻 host_ops），Token 重签不变宽：启动路径的 `issueAssignmentToken` 与上一张 Token 取交集，`token issue` 直接沿用上一张 Token 的工具。所以 `token issue`、会话替换和 `pm restart` 都拿不到新版本新增的工具。上文“重新指派”只对新工作项成立：已有工作项再 `assign` 只复用原身份，原身份释放后拒绝。验证项可用 `replace_verification_work_item` 换项；产出项目前没有换版本途径。C-213 为常驻 host_ops 增加 `host-ops rotate`：停止并确认旧终端退出后，在同一事务释放旧身份、撤销旧 Token、新建固定目标角色版本的身份、复制 ACK 和转交通知，再调用既有启动入口。旧终端退出未确认时不修改数据库；新启动失败保留新身份并提示重跑 `host-ops start`。常驻 PM 用 `pm rotate`。备选做法（提示受影响 Assignment、人显式升级单个 Assignment、替换会话时自动升级、补产出项与 host_ops 的替换路径）及需要人拍板的扩权点见 ADR 0005。
 
 新格式启动由 `composeRolePrompt(instructions)` 按固定顺序拼接 `instructions + SHARED_BOUNDARIES + AGENT_PROTOCOL`，Claude Code、Codex、Pi 共用同一路径。系统两部分各拼接一次；修改角色说明不会修改系统常量，协议更新随下次启动生效。仍兼容员工身份注入。旧 core_prompt 路径不解析、不补协议，输出与改动前逐字一致。
 
@@ -1575,6 +1575,27 @@ M5.S S9：三种 Harness 的 Assignment 启动环境统一通过 `GIT_CONFIG_COU
 C-168：本机员工启动编译还接收主机读取的测试 worker 上限，在同一运行目录生成 Node 预加载文件并向员工环境注入；不从角色、项目配置或命令行取得上限。该环境随会话复用，旧会话须重开才生效；配置、强制方式及测试调用边界见 §13.4、§13.8。
 
 Assignment 的 `launch.sh` 用 `exec nice -n <值> <Agent CLI> ...` 启动 Claude Code、Codex 或 Pi，默认值为 10；由主机执行配置 `agentNice` 传给编译器，必须为 0–19 的整数。local 与 agent-ssh 共用这条路径，替换 Session 时也应用，CLI 的工具及其子进程继承优先级。只降低 Agent CLI 进程树的 CPU 调度优先级，不改变 server、Workbench、Dispatcher 或 hc 控制服务的优先级，不要求 root。`nice -n` 是相对继承值的增量（通常父进程为 0，最高封顶 19）；不是 CPU 配额，不能消除磁盘等待或其他普通优先级程序造成的争用。
+
+C-213（任务计划：卡片验收标准 + C-213#17）：`launch.yaml` 的 provider 可配置 `upstream: {group, probe_url?}`，地址仅接受无用户信息、路径、查询参数和片段的 HTTP(S) origin。共享中转的不同 provider 显式使用同一个 group，直连另设 group；没有 group 时只按原 provider 分组，不从 `env`、`secret_env` 或外部 profile 推断地址。`upstream_health.probe` 如启用，必须显式填写正整数毫秒 `interval_ms`、`timeout_ms`、`stale_after_ms`，均不设默认值（上限采用 Node 定时器的 2147483647 毫秒技术边界）。未配置或采样过期时状态为未知。已批准的 `inactive_session_count=3`、`inactivity_window_ms=600000`、`recurrence_window_ms=900000` 可单独配置，非法值拒绝。配置属于主机，不存入项目数据库，也不热加载。
+
+配置结构示例（仅示意，不包含真实地址或凭据；探测数值待人配置）：
+
+```yaml
+providers:
+  gateway-code:
+    harness: codex
+    upstream:
+      group: relay
+      probe_url: https://gateway.example.invalid
+  gateway-claude:
+    harness: claude-code
+    upstream:
+      group: relay
+      probe_url: https://gateway.example.invalid
+upstream_health: {}
+# 启用定时探测时，在 upstream_health.probe 下显式填入：
+# interval_ms、timeout_ms、stale_after_ms；三项都不自动填默认值。
+```
 
 ### 10.3 Core Memory
 
@@ -1702,6 +1723,14 @@ status 先 hc get，再取 hc events 的初始快照，同时使用该快照的�
 - 大乔读取诊断后直接用已有的 `host_ops_restart_assignment`／`host_ops_restart_standing_pm`，上下文换会话须携带 `context_session_id`。服务端重新采样并在事务内核对当前会话、比例、偏好、有效期和 RuntimeRef；同一 Assignment／会话同一提醒档只记一次，同一会话只受理一次上下文换会话，不依赖调用者复用幂等键。过期、缺失、未关联或已更换的会话拒绝操作。
 - 重启沿用既有停止意图、互斥锁、退出确认、Token 撤销和 queued Run 流程；上下文重启还清除普通 Assignment 的 `session_ref`，以全新会话启动，保留分支和 worktree。审计保存会话、比例、来源、采样时间、动作及结果；工作项写卡片时间线，常驻身份写项目事件，`pending`／`new_session_queued` 不冒充新会话已运行。部署前需要 Codex、pi 各一例真实换会话验证，模拟采集和假运行时测试不替代实测。
 - host_ops 默认包更新后，需由主机管理员执行 `cardigan role upgrade host_ops --from-default` 并按主机管理流程让巡检身份使用新版角色，已有固定角色版本不会自动升级；不新增工具或权限。
+
+### 11.6 上游线路与失活原因（C-213）
+
+主机异步采样显式登记的上游 origin，只建立 TCP 或校验证书的 TLS 连接，不发送 HTTP／模型请求，不读取或发送凭据。全项目派发循环只消费缓存，不等待探测网络；探测成功只说明连接可达，不代表模型 API 调用成功。诊断 `upstream_health` 返回 provider、线路分组、探测状态、采样／最近失败时间、配置阈值及各会话的原因、依据和处理建议；无地址或过期不能标正常。错误只保存固定类别，不保存原始 URL 错误、终端输出或响应内容。
+
+同线路不同 Assignment 的 `run_inactive`／派发停滞事件按配置窗口聚类，默认 10 分钟内至少 3 个；单会话多事件不重复计数，不跨线路或项目统计。仅 MCP 静默不证明卡死；运行时仍工作或 C-200 安全读取的上下文采样在失活后仍有新活动时，禁止按卡死重启；没有足够证据时记未知。server/Git/投递失败按结构化来源区分，不计入上游失活聚类，不根据 ECONNRESET／ECONNREFUSED 等原始文本猜模型线路。多个会话失活但尚未达到聚类阈值时先核实，不套用单会话重启规则。尚未解析 harness 原始输出和会话错误事件。
+
+探测失败或失活聚类形成持久事件，向主机运维与 PM Office 写入收件箱，并创建一次交人的线路事项。恢复至少等配置窗口（默认 10 分钟），同时要求同线路已有会话恢复活动或新 Run 正常开始，活动证据须晚于最近一次已知连接失败；单独探测成功不放行。受理重启和真正停止前重查；恢复请求绑定事件，在同事务限制每个受影响会话只恢复一次。恢复就绪也定向通知运维；所有受影响会话已恢复时关闭事件，并取消仍打开的人工线路事项。请求之后出现新中断或目标自行恢复时，撤回尚未执行的旧请求，保留会话。恢复后默认 15 分钟内再次失活，持久化复发记录并交人，不再重启；服务重启不重置记录。未知线路沿用 v3 活动证据要求，不新增重启授权。分类失败对恢复按不可用处理，不拖住其它项目派发。上述限制同时约束上下文换会话的上游异常路径，不改变 C-200 的 20%／15% 项目偏好或留痕要求。
 
 ## 12. Worktree 与 Git 服务
 
@@ -1880,7 +1909,7 @@ server 在合并循环旁启动独立的推送循环（默认 5 秒轮询，跟�
 
 ### 13.1 单机（Phase 1）
 
-P2a-10 B1 新增仅人类 CLI：先用 `cardigan role copy host_ops host_ops --from-default --harness codex --launch-profile <配置名>` 登记默认角色，再用 `cardigan host-ops create [--employee <E-n>] [--project <p>]` 创建常驻身份。省略员工时绑定唯一的在职 `host_ops` 员工；没有该角色员工时保留无员工身份，有多个时要求显式指定。新身份固定角色最新启用版本，不写 PM 的 `standing_mode`；重复创建复用原身份及其版本，不改派员工。Assignment、创建事件与 Token 签发在同一事务内完成，明文仅向 CLI 输出一次，不进事件或错误。`cardigan host-ops start [--project <p>]` 复用既有 Assignment 启动流程，已有未结束 Run 时跳过；也支持启动入口已有的 `--data-dir`、`--mcp-url`、`--hc-session` 参数。两条命令都拒绝 Token 模式。专用执行工具与巡检唤醒由 C-85 接线后才能使用。
+P2a-10 B1 新增仅人类 CLI：先用 `cardigan role copy host_ops host_ops --from-default --harness codex --launch-profile <配置名>` 登记默认角色，再用 `cardigan host-ops create [--employee <E-n>] [--project <p>]` 创建常驻身份。省略员工时绑定唯一的在职 `host_ops` 员工；没有该角色员工时保留无员工身份，有多个时要求显式指定。新身份固定角色最新启用版本，不写 PM 的 `standing_mode`；重复创建复用原身份及其版本，不改派员工。C-213：创建只保存 Assignment 和创建事件，不签发或输出 Token；重复 create 也不撤销在运行会话的凭据。Token 仅由 start 的既有启动流程签发并注入私有运行目录。`cardigan host-ops start [--project <p>]` 复用既有 Assignment 启动流程，已有未结束 Run 时跳过；也支持启动入口已有的 `--data-dir`、`--mcp-url`、`--hc-session` 参数。create、start、rotate 都拒绝 Token 模式。专用执行工具与巡检唤醒由 C-85 接线后才能使用。
 
 V11b：主机用 `cardigan pm rotate --office --external --employee <E-n 或名字> [--project <p>]` 接入外接 Office；Token 只显示一次，保存到仓库外的安全位置并用于 MCP，通知用现有收件箱协议读取。CLI Token 身份模式由 V11c 另行实现。
 
@@ -1954,6 +1983,8 @@ CLI 评论与 Workbench 写接口共用 domain `postComment` 内的正文提及�
 - `cardigan card done <C-n> --result <文字> [--file <证据>]...`：只有 human_mark_done 模板允许，文件按既有 evidence 附件规则准备，再在一个事务内保存结果评论、全部附件、完成事件与状态；领域校验失败时整批回滚。
 
 MCP `create_card` 增加 `template_id`；需要仓库的模板仍从项目登记信息补缺省仓库和基线，不需要仓库的模板不自动绑定项目仓库。幂等仍使用原始请求。V10a 不提供模板管理或标记完成的 MCP 工具，也不新增 Workbench 操作界面。
+
+C-213 的 `host-ops rotate` 保留原员工、复制 ACK 游标、转交尚未确认的通知；历史作者及人拥有的拍板／人工事项不改写，新身份可通过诊断继续查看。已经是最新角色版本时只检查启动状态，不另建身份。角色版本或目标在停止过程中改变则拒绝提交替换；同一 Assignment 的运维锁避免重叠轮换。创建与轮换均不打印凭据。部署本卡后须先由人升级 host_ops 默认角色，再执行 rotate 将大乔切到新版本；默认规则保留 C-200 上下文段落并并入 v3 中断处理。
 
 ### 13.2 多机拓扑（Phase 2）
 
@@ -2128,6 +2159,8 @@ P2a-12 E：远程检查连接失败始终保持原 executor，不允许自动或
 C-164：握手孤儿清理是 §12.6 限定的主机固定操作，仅对 agent 账号、精确握手 comm、checks 容器 cwd 及 starttime 均核验通过的超龄进程发信号；每次信号留日志。进程诊断不读取 cmdline/environ 或 ps args，读取均有限时。Agent 不获得 PID、信号或远端脚本参数入口。正常检查与无可靠阶段证据的旧进程不自动结束；发现无法结束的检查子进程时保留目录并记录人工处理标记，后续清理归 C-165。
 
 C-200：精确上下文读取仅针对主机确定的运行目录和缓存目录，在 Linux 下逐级固定目录描述符并禁止符号链接，文件限长读取、解析失败按缺失处理，不读取缓存自报的 `transcript_path`。上下文证据只能由主机采样后传入领域命令；MCP 重启接口只接收会话 ID，不能自报 token 数值。诊断仍只允许本项目 active 常驻 host_ops，外接会话不得被重启工具处理；人工 `/clear` 提示不授予终端操作权限。
+
+C-213：上游探测只使用主机显式登记的无凭据 origin，不读取 secret_env、外部 profile 或凭据文件，不允许认证信息、URL 路径／查询／片段，不发送 HTTP 请求、自动重定向或模型调用。诊断和审计只保存 provider／线路名称及固定失败类别。主机运维工具白名单保持不变，恢复依据由主机采样和持久事件产生，MCP 调用者不能自报探测结果或上游事件编号。`host-ops rotate` 仅人类入口；新身份生效与旧 Token 撤销同事务，旧终端未确认退出不提交替换。
 
 ### 14.1 角色权限边界（V9a）
 

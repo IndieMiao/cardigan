@@ -53,6 +53,7 @@ import {
   runCommand,
   systemClock,
 } from "./host.js";
+import { rotateHostOps } from "./host-ops-rotate.js";
 import type { CliIo } from "./io.js";
 import { printRotation, rotateStandingPmInStore } from "./pm-rotate.js";
 import { launchExecution } from "./runtime-check.js";
@@ -68,8 +69,9 @@ const USAGE = [
   "  cardigan assign <W-n> --role <角色> [--employee <E-n 或名字>] [--machine local] [--start] [--project <p>]",
   "  cardigan token issue <A-n> [--project <p>]",
   "  cardigan pm create --office|--ops [--project <p>]",
-  "  cardigan host-ops create [--employee <E-n>] [--project <p>]  创建常驻主机运维并签发 Token",
+  "  cardigan host-ops create [--employee <E-n>] [--project <p>]  创建常驻主机运维，启动时自动签发凭据",
   "  cardigan host-ops start [--project <p>]  启动常驻主机运维（已在运行就跳过）",
+  "  cardigan host-ops rotate [--project <p>]  保留员工和待处理事项，切换到最新角色版本并启动",
   "  cardigan pm start [--office] [--ops] [--project <p>]  一键启动常驻 PM（已在运行就跳过）",
   "  cardigan pm rotate --office|--ops [--external] [--employee <E-n 或名字>] [--project <p>]     把常驻 PM 换到 pm 角色的最新版本",
   "  cardigan pm restart --office|--ops [--project <p>]     重开常驻 PM 会话（不暂停、不转交事项、不换版本）",
@@ -725,12 +727,12 @@ async function hostOpsCommand(
       ? ["project", "data-dir", "employee"]
       : ["project", "data-dir", "mcp-url", "hc-session"];
   if (
-    !["create", "start"].includes(sub ?? "") ||
+    !["create", "start", "rotate"].includes(sub ?? "") ||
     parsed.positionals.length ||
     Object.keys(parsed.flags).some((key) => !allowed.includes(key))
   )
     throw new CliError(
-      "请使用 host-ops create 或 start 及其支持的选项",
+      "请使用 host-ops create、start 或 rotate 及其支持的选项",
       EXIT.usage,
       [USAGE],
     );
@@ -742,7 +744,7 @@ async function hostOpsCommand(
       optional(parsed.flags, "project"),
     );
     if (sub === "create") {
-      const issued = store.uow.run((tx) => {
+      const created = store.uow.run((tx) => {
         const employee_id = optional(parsed.flags, "employee");
         const result = createHostOpsAssignment(
           loadCommandState(tx, project_id),
@@ -757,24 +759,26 @@ async function hostOpsCommand(
           );
         const effect = result.value;
         persistEffect(tx, project_id, effect);
-        const { assignment } = effect.data;
-        const role = roleInTransaction(
-          tx,
-          project_id,
-          "host_ops",
-          assignment.role_version,
-        );
-        return {
-          ...effect.data,
-          token: issueTokenForAssignment(tx, project_id, assignment.id, role),
-        };
+        return effect.data;
       });
       io.stdout(
-        `${issued.reused ? "复用" : "已创建"}常驻主机运维：${issued.assignment.id}（host_ops v${issued.assignment.role_version}）`,
+        `${created.reused ? "复用" : "已创建"}常驻主机运维：${created.assignment.id}（host_ops v${created.assignment.role_version}）`,
       );
-      printToken(io, issued.token);
+      io.stdout(
+        "运行 cardigan host-ops start 启动；凭据由启动流程自动签发，不在终端显示。",
+      );
       return EXIT.ok;
     }
+    if (sub === "rotate")
+      await rotateHostOps({
+        store,
+        io,
+        project_id,
+        dataDir: resolveDataDir(io, optional(parsed.flags, "data-dir")),
+        ...(optional(parsed.flags, "hc-session")
+          ? { session: optional(parsed.flags, "hc-session") as string }
+          : {}),
+      });
     const candidates = store.uow.read((tx) =>
       tx.assignments
         .list(project_id)
@@ -797,21 +801,35 @@ async function hostOpsCommand(
       io.stdout(`主机运维（${assignment.id}）已在运行，跳过`);
       return EXIT.ok;
     }
-    return await (hooks.start ?? startAssignmentById)({
-      store,
-      io,
-      project_id,
-      assignment_id: assignment.id,
-      ...(optional(parsed.flags, "data-dir")
-        ? { dataDir: optional(parsed.flags, "data-dir") as string }
-        : {}),
-      ...(optional(parsed.flags, "mcp-url")
-        ? { mcpUrl: optional(parsed.flags, "mcp-url") as string }
-        : {}),
-      ...(optional(parsed.flags, "hc-session")
-        ? { session: optional(parsed.flags, "hc-session") as string }
-        : {}),
-    });
+    try {
+      const result = await (hooks.start ?? startAssignmentById)({
+        store,
+        io,
+        project_id,
+        assignment_id: assignment.id,
+        ...(optional(parsed.flags, "data-dir")
+          ? { dataDir: optional(parsed.flags, "data-dir") as string }
+          : {}),
+        ...(optional(parsed.flags, "mcp-url")
+          ? { mcpUrl: optional(parsed.flags, "mcp-url") as string }
+          : {}),
+        ...(optional(parsed.flags, "hc-session")
+          ? { session: optional(parsed.flags, "hc-session") as string }
+          : {}),
+      });
+      if (sub === "rotate" && result !== EXIT.ok)
+        io.stderr(
+          `新主机运维 ${assignment.id} 已保留；请运行 cardigan host-ops start --project ${project_id} 重试启动。`,
+        );
+      return result;
+    } catch (error) {
+      if (sub === "rotate")
+        throw new CliError(
+          `新主机运维 ${assignment.id} 已保留；请运行 cardigan host-ops start --project ${project_id} 重试启动。`,
+          EXIT.failure,
+        );
+      throw error;
+    }
   } finally {
     store.close();
   }

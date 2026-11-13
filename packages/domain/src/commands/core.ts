@@ -82,6 +82,7 @@ type CommandName =
   | "pause_standing_assignment"
   | "rotate_standing_pm"
   | "create_host_ops_assignment"
+  | "rotate_host_ops_assignment"
   | "manage_host_ops_action"
   | "queue_run"
   | "dispatch_run"

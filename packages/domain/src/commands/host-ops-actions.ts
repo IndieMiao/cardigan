@@ -15,6 +15,7 @@ import {
 import type { AssignmentId, HumanActionId, RunId } from "../ids.js";
 import { hasRunTarget } from "../run-target.js";
 import { transition } from "../transitions.js";
+import { lastUpstreamInactivity } from "../upstream-health.js";
 import {
   type CommandDraft,
   type CommandPorts,
@@ -31,6 +32,7 @@ import { needsYouView } from "./queries.js";
 const unfinished = (r: Run) =>
   !["completed", "failed", "cancelled"].includes(r.status);
 export interface HostOpsActionParams {
+  readonly upstream_incident_id?: HostOpsExecution["action_id"];
   readonly tool: HostOpsExecutionTool;
   readonly context_usage?: ContextObservation;
   readonly context_stale_after_ms?: number;
@@ -159,6 +161,18 @@ export function beginHostOpsAction(
 ) {
   return command(state, actor, p.tool, ports, (d) => {
     const { assignment: a, run } = target(d, p);
+    if (p.upstream_incident_id)
+      ensure(
+        !state.events.some(
+          (e) =>
+            e.type === "host_ops_action_taken" &&
+            (e.payload as { upstream_incident_id?: string })
+              .upstream_incident_id === p.upstream_incident_id &&
+            (e.payload as { assignment_id?: string }).assignment_id === a.id,
+        ),
+        "illegal_transition",
+        "本次上游事件已请求恢复该会话，不能重复恢复",
+      );
     if (p.context_usage) {
       const usage = p.context_usage;
       ensure(
@@ -195,6 +209,9 @@ export function beginHostOpsAction(
     }
     const payload = {
       execution: true,
+      ...(p.upstream_incident_id
+        ? { upstream_incident_id: p.upstream_incident_id }
+        : {}),
       ...(p.context_usage ? { context_usage: { ...p.context_usage } } : {}),
       tool: p.tool,
       target_id: p.target_id,
@@ -369,6 +386,50 @@ export function checkHostOpsAccess(
   tool: (typeof HOST_OPS_TOOLS)[number],
 ) {
   return command(state, actor, tool, undefined, () => undefined);
+}
+
+/** A queued outage recovery must not stop a session that resumed on its own. */
+export function withdrawRecoveredHostOpsAction(
+  state: CommandState,
+  actor: Actor,
+  action_id: HostOpsExecution["action_id"],
+  ports: CommandPorts,
+  new_incident_id?: HostOpsExecution["action_id"],
+) {
+  return command(state, actor, "manage_host_ops_action", ports, (d) => {
+    const action = pendingHostOpsActions(state.events).find(
+      (a) => a.action_id === action_id,
+    );
+    if (!action) return false;
+    const changed =
+      new_incident_id &&
+      new_incident_id !== action.upstream_incident_id &&
+      state.events.some(
+        (e) =>
+          e.id === new_incident_id && e.type === "upstream_incident_started",
+      );
+    if (!changed) {
+      if (
+        !action.upstream_incident_id ||
+        lastUpstreamInactivity(state, action.assignment_id)
+      )
+        return false;
+      const request = state.events.find((e) => e.id === action_id);
+      const assignment = d.get("assignments", action.assignment_id);
+      if (
+        !request ||
+        !assignment.last_mcp_activity_at ||
+        assignment.last_mcp_activity_at <= request.created_at
+      )
+        return false;
+    }
+    d.emit("host_ops_action_finished", undefined, {
+      action_id,
+      assignment_id: action.assignment_id,
+      result: changed ? "withdrawn_upstream_changed" : "withdrawn_recovered",
+    });
+    return true;
+  });
 }
 
 /** Cross-process lease for the recorded intent; a new host may resume after expiry. */

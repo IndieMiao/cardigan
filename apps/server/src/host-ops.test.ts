@@ -20,6 +20,7 @@ import {
   HostOpsService,
   runCapacitySnapshot,
   scrubRunCredentials,
+  UpstreamHealthMonitor,
 } from "@cardigan/host";
 import {
   authenticate,
@@ -1103,4 +1104,260 @@ test("pi high watermark becomes non-actionable immediately when the installed ex
     vi.useRealTimers();
     vi.unstubAllEnvs();
   }
+});
+
+function upstreamService() {
+  let reachable = true;
+  const config = parseLaunchConfig({
+    providers: {
+      relay: {
+        harness: "pi",
+        upstream: {
+          group: "relay",
+          probe_url: "https://gateway.example.invalid",
+        },
+      },
+    },
+    profiles: { fixture: { harness: "pi", provider: "relay" } },
+    upstream_health: {
+      probe: { interval_ms: 100, timeout_ms: 20, stale_after_ms: 200 },
+    },
+  });
+  const monitor = new UpstreamHealthMonitor(
+    config,
+    runtime,
+    f.clock,
+    async () =>
+      reachable
+        ? { status: "reachable" }
+        : { status: "unreachable", failure: "connection_error" },
+  );
+  f.store.uow.run((tx) => {
+    for (const run of tx.runs.list(f.project))
+      tx.runs.put(f.project, { ...run, launch_profile_ref: "fixture" });
+  });
+  service = new HostOpsService({
+    store: f.store,
+    runtime,
+    snapshot,
+    clock: f.clock,
+    upstreamMonitor: monitor,
+  });
+  return {
+    monitor,
+    sample: async (healthy: boolean) => {
+      reachable = healthy;
+      f.advance(100);
+      monitor.schedule();
+      await vi.waitFor(() =>
+        expect(monitor.diagnostics(f.state()).providers[0]?.status).toBe(
+          healthy ? "reachable" : "unreachable",
+        ),
+      );
+    },
+  };
+}
+function markInactive(assignment: Assignment, runId: string) {
+  f.store.uow.run((tx) =>
+    tx.events.append(f.project, {
+      id: tx.ids.nextEventId(),
+      seq: tx.ids.nextEventSequence(f.project),
+      type: "run_inactive",
+      actor: { kind: "system", project_id: f.project },
+      created_at: f.clock.now(),
+      payload: {
+        assignment_id: assignment.id,
+        run_id: runId,
+        reason: "mcp_inactivity",
+      },
+    }),
+  );
+}
+
+test("C-213: a failed probe blocks a restart without stopping a terminal", async () => {
+  const target = dispatched();
+  const { sample } = upstreamService();
+  await sample(false);
+  const view = (await call("host_ops_read_diagnostics", {})) as {
+    upstream_health: { sessions: unknown[] };
+  };
+  expect(view.upstream_health.sessions).toContainEqual(
+    expect.objectContaining({
+      assignment_id: target.assignment.id,
+      cause: "upstream_unreachable",
+      action: "wait",
+    }),
+  );
+  await expect(
+    call("host_ops_restart_assignment", {
+      assignment_id: target.assignment.id,
+      reason: "recover",
+      idempotency_key: "outage",
+    }),
+  ).rejects.toThrow("upstream_unreachable");
+  expect(runtime.release).not.toHaveBeenCalled();
+  expect(f.state().human_actions).toHaveLength(1);
+  await service.close();
+});
+
+test("C-213: line failure after accepting a restart is rechecked before stopping; the old request is withdrawn", async () => {
+  const target = dispatched();
+  const { sample } = upstreamService();
+  markInactive(target.assignment, target.run.id);
+  await sample(true);
+  await call("host_ops_restart_assignment", {
+    assignment_id: target.assignment.id,
+    reason: "single idle session",
+    idempotency_key: "before-outage",
+  });
+  expect(hostOpsPending(f.state().events, target.assignment.id)).toBe(true);
+  await sample(false);
+  await service.tick();
+  expect(runtime.release).not.toHaveBeenCalled();
+  expect(hostOpsPending(f.state().events, target.assignment.id)).toBe(false);
+  expect(f.state().events).toContainEqual(
+    expect.objectContaining({
+      type: "host_ops_action_finished",
+      payload: expect.objectContaining({
+        result: "withdrawn_upstream_changed",
+      }),
+    }),
+  );
+  await service.close();
+});
+
+test("C-213: runtime work is not classified as a stuck Agent merely because MCP has been quiet", async () => {
+  const target = dispatched();
+  const { sample } = upstreamService();
+  markInactive(target.assignment, target.run.id);
+  vi.mocked(runtime.status).mockResolvedValue({
+    ok: true,
+    value: { process: "alive", agent: "working", observed_seq: 2 },
+  });
+  await sample(true);
+  const view = (await call("host_ops_read_diagnostics", {})) as {
+    upstream_health: { sessions: unknown[] };
+  };
+  expect(view.upstream_health.sessions).toContainEqual(
+    expect.objectContaining({
+      assignment_id: target.assignment.id,
+      cause: "agent_busy",
+      action: "none",
+    }),
+  );
+  await expect(
+    call("host_ops_restart_assignment", {
+      assignment_id: target.assignment.id,
+      reason: "MCP quiet",
+      idempotency_key: "busy",
+    }),
+  ).rejects.toThrow("agent_busy");
+  expect(runtime.release).not.toHaveBeenCalled();
+  await service.close();
+});
+
+test("C-213: recovered lines permit one restart per session and recurrence survives service recreation", async () => {
+  const targets = [dispatched(), dispatched(), dispatched()];
+  const first = targets[0];
+  const witness = targets[2];
+  if (!first || !witness) throw new Error("Missing fixture targets");
+  const { sample } = upstreamService();
+  for (const target of targets) markInactive(target.assignment, target.run.id);
+  await sample(true);
+  await call("host_ops_read_diagnostics", {});
+  expect(
+    f.state().events.filter((e) => e.type === "upstream_incident_started"),
+  ).toHaveLength(1);
+  const restart = (key: string) =>
+    call("host_ops_restart_assignment", {
+      assignment_id: first.assignment.id,
+      reason: "recover the affected session",
+      idempotency_key: key,
+    });
+  await expect(restart("too-soon")).rejects.toThrow("upstream_suspected");
+  f.advance(600_000);
+  await expect(restart("no-witness")).rejects.toThrow("upstream_suspected");
+  f.store.uow.run((tx) => {
+    const current = tx.assignments.get(f.project, witness.assignment.id);
+    if (!current) throw new Error("Missing witness");
+    tx.assignments.put(f.project, {
+      ...current,
+      last_mcp_activity_at: f.clock.now(),
+    });
+  });
+  await restart("recover-once");
+  await service.tick();
+  expect(runtime.release).toHaveBeenCalledTimes(1);
+  await expect(restart("duplicate")).rejects.toThrow(
+    "recovery_already_requested",
+  );
+  const nextRun = f
+    .state()
+    .runs.find(
+      (r) => r.assignment_id === first.assignment.id && r.id !== first.run.id,
+    );
+  if (!nextRun) throw new Error("Recovery did not queue a replacement");
+  f.advance(60_000);
+  markInactive(first.assignment, nextRun.id);
+  await service.close();
+  upstreamService();
+  const view = (await call("host_ops_read_diagnostics", {})) as {
+    upstream_health: { sessions: unknown[] };
+  };
+  expect(view.upstream_health.sessions).toContainEqual(
+    expect.objectContaining({
+      assignment_id: first.assignment.id,
+      action: "human",
+      evidence: expect.arrayContaining(["recurrence_after_recovery"]),
+    }),
+  );
+  await expect(restart("recurred")).rejects.toThrow("复发须交人");
+  const notices = f.state().human_actions.length;
+  await call("host_ops_read_diagnostics", {});
+  expect(f.state().human_actions).toHaveLength(notices);
+  expect(runtime.release).toHaveBeenCalledTimes(1);
+  await service.close();
+});
+
+test("C-213: an outage recovery is withdrawn when the target resumes before execution", async () => {
+  const target = dispatched();
+  const witness = dispatched();
+  const { sample } = upstreamService();
+  markInactive(target.assignment, target.run.id);
+  await sample(false);
+  await call("host_ops_read_diagnostics", {});
+  f.advance(600_000);
+  f.store.uow.run((tx) => {
+    const current = tx.assignments.get(f.project, witness.assignment.id);
+    if (!current) throw new Error("Missing witness");
+    tx.assignments.put(f.project, {
+      ...current,
+      last_mcp_activity_at: f.clock.now(),
+    });
+  });
+  await sample(true);
+  await call("host_ops_restart_assignment", {
+    assignment_id: target.assignment.id,
+    reason: "recover",
+    idempotency_key: "recover-before-resume",
+  });
+  f.advance(1);
+  f.store.uow.run((tx) => {
+    const current = tx.assignments.get(f.project, target.assignment.id);
+    if (!current) throw new Error("Missing target");
+    tx.assignments.put(f.project, {
+      ...current,
+      last_mcp_activity_at: f.clock.now(),
+    });
+  });
+  await service.tick();
+  expect(runtime.release).not.toHaveBeenCalled();
+  expect(hostOpsPending(f.state().events, target.assignment.id)).toBe(false);
+  expect(f.state().events).toContainEqual(
+    expect.objectContaining({
+      type: "host_ops_action_finished",
+      payload: expect.objectContaining({ result: "withdrawn_recovered" }),
+    }),
+  );
+  await service.close();
 });

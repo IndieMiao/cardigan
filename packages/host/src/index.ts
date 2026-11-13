@@ -109,6 +109,7 @@ export {
   type CheckoutStatus,
   runInTemporaryCheckout,
 } from "./temporary-checkout.js";
+export * from "./upstream-health.js";
 export {
   type AgentBinary,
   type AgentCliVersionSource,
