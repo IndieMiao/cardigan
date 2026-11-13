@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { DeploymentBuildLog } from "./deployment-log.js";
+import { DeploymentBuildLog, DeploymentServerReady } from "./deployment-log.js";
 
 test("build summaries never forward secrets, environment dumps, paths or arbitrary log text", () => {
   const log = new DeploymentBuildLog();
@@ -7,4 +7,31 @@ test("build summaries never forward secrets, environment dumps, paths or arbitra
   const text = `PATH=/private/bin\nTOKEN=${secret}\nAuthorization: Bearer ${secret}\n-----BEGIN PRIVATE KEY-----\n${secret}\n-----END PRIVATE KEY-----\n/private/${secret}.ts(1): error TS6305: ${secret}\n`;
   for (let i = 0; i < text.length; i += 7) log.append(text.slice(i, i + 7));
   expect(log.finish("build", 1)).toBe("TypeScript TS6305\nbuild: exit 1");
+});
+
+const ready = JSON.stringify({
+  ready: true,
+  deployment_fence: 1,
+  url: "http://127.0.0.1:3004",
+  web_url: "http://localhost:7781",
+});
+test("ready survives large chunks, split records and oversized surrounding lines", () => {
+  const parser = new DeploymentServerReady([3004, 7781]);
+  expect(
+    parser.append(Buffer.from(`${ready}\n${"noise".repeat(20000)}\n`)),
+  ).toBe(true);
+  expect(parser.append(Buffer.from("x".repeat(100000)))).toBe(false);
+  expect(parser.append(Buffer.from(`${ready}\n`))).toBe(false); // Part of the oversized line.
+  expect(parser.append(Buffer.from(ready.slice(0, 20)))).toBe(false);
+  expect(parser.append(Buffer.from(`${ready.slice(20)}\n`))).toBe(true);
+  expect(parser.append(Buffer.from(`${ready.replace("3004", "3005")}\n`))).toBe(
+    false,
+  );
+  expect(
+    parser.append(
+      Buffer.from(
+        `${ready.replace('"deployment_fence":1', '"deployment_fence":0')}\n`,
+      ),
+    ),
+  ).toBe(false);
 });

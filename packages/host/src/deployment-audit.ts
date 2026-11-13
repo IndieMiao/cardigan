@@ -9,6 +9,21 @@ import {
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import { recordNotification, type Store } from "@cardigan/store";
+import type { ServerLogAudit } from "./deployment-server-log.js";
+
+/** Only generated names and fixed statuses cross the host-only log boundary. */
+export function writeServerLogAudit(store: Store, entry: ServerLogAudit) {
+  store.uow.run((tx) => {
+    tx.events.append("cardigan", {
+      id: tx.ids.nextEventId(),
+      seq: tx.ids.nextEventSequence("cardigan"),
+      type: "host_server_log_recorded",
+      actor: { kind: "system", project_id: "cardigan" },
+      created_at: new Date().toISOString(),
+      payload: { ...entry },
+    });
+  });
+}
 
 export function writeDeploymentStop(
   store: Store,

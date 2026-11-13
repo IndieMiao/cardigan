@@ -30,6 +30,44 @@ test("bootstrap deployment defaults on; timings are explicit host policy", () =>
   ])
     expect(() => parseDeploymentConfig({ ...config, ...patch })).toThrow();
 });
+test("server logs are opt-in and require a complete, finite retention budget", () => {
+  expect(parseDeploymentConfig(config).server_log_max_bytes).toBeUndefined();
+  expect(
+    parseDeploymentConfig({
+      ...config,
+      server_log_max_bytes: 16,
+      server_log_max_files: 2,
+    }),
+  ).toMatchObject({ server_log_max_bytes: 16, server_log_max_files: 2 });
+  for (const value of [
+    0,
+    -1,
+    1.5,
+    Infinity,
+    NaN,
+    "16",
+    null,
+    undefined,
+    Number.MAX_SAFE_INTEGER + 1,
+  ]) {
+    for (const key of ["server_log_max_bytes", "server_log_max_files"])
+      expect(() =>
+        parseDeploymentConfig({
+          ...config,
+          server_log_max_bytes: 16,
+          server_log_max_files: 2,
+          [key]: value,
+        }),
+      ).toThrow();
+  }
+  expect(() =>
+    parseDeploymentConfig({
+      ...config,
+      server_log_max_bytes: Number.MAX_SAFE_INTEGER,
+      server_log_max_files: 2,
+    }),
+  ).toThrow();
+});
 test("only a private host config is accepted; errors cannot echo config secrets", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cg-deployment-config-"));
   try {
