@@ -16,7 +16,7 @@ import type {
 
 export const NOW = "2026-01-01T00:00:00.000Z";
 
-export const card: CardListItem = {
+export const card: CardListItem & CardDetail["card"] = {
   id: "C-1",
   title: "准备发布",
   goal: "把 0.1 发出去",

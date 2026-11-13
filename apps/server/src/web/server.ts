@@ -560,7 +560,18 @@ async function serveProjectRoute(
     sendJson(res, 200, {
       project_id,
       filter,
-      cards: selected,
+      cards:
+        url.searchParams.get("view") === "summary"
+          ? selected.map(
+              ({
+                goal,
+                acceptance_criteria,
+                source,
+                out_of_scope,
+                ...summary
+              }) => summary,
+            )
+          : selected,
       counts: {
         total: cards.length,
         needs_me: cards.filter(needsMe).length,

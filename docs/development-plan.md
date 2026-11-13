@@ -1109,6 +1109,8 @@ M5.1 实现的骨架（实现细节见 `docs/plans/phase-1-m5.md` §3.1–§3.3�
 - **附件下载**：`GET /api/projects/:id/attachments/:id`；只有已知位图类型（png/jpeg/gif/webp/avif）可以内联，SVG、HTML 等一律 `Content-Disposition: attachment`，并附 `default-src 'none'; sandbox` 的 CSP，避免 Agent 写的文档在本站执行脚本。
 - **前端**：`apps/web` 是纯 SPA，不引带样式的组件库、状态管理库和路由库；抽屉、菜单、弹出层、提示框等交互组件用 Radix 的无样式单独包（版本写死，不引 Radix Themes、Tailwind 或其他样式库），外观由自己的 CSS 变量控制（Phase 1.5 U.S-1，2026-11-08 用户拍板）。三个界面用哈希路由（`#/p/<项目>/cards?view=list|board`、`#/p/<项目>/cards/<编号>`，约 40 行解析；旧的 `board`/`list` 路由重定向到 `cards` 并保留筛选），状态放在页面组件的局部 state 里。卡片页内定位用卡片路由的 `?at=<元素 id>` 参数（例如 `#/p/<项目>/cards/<编号>?at=decision-Q-2`），不用额外的 `#fragment`：哈希本身就是路由，额外片段会替换路由并让 Workbench 回退到别的项目；解析失败时保留当前页面，不静默切换项目。Markdown 用 `markdown-it`（`html: false`，`validateLink` 只放行 http、https 和站内路径，外链自动加 `rel="noopener noreferrer"`）。样式是一份 CSS 变量表，跟随 `prefers-color-scheme` 切换深色；状态一律“形状 + 颜色 + 文字”，不只靠颜色。
 
+C-203：保留登录与默认卡片页在入口包，详情（含抽屉）、Needs You、执行视图、项目动态、拍板记录、快照和设置按需下载；等待复用 RequestFeedback，分块加载失败时提供重新加载入口，以恢复部署后失效的旧分块链接。卡片列表请求 `GET /api/projects/:id/cards?filter=all&view=summary`，省略列表不用的 `goal`、`acceptance_criteria`、`source`、`out_of_scope` 正文，保留全部筛选、计数、参与者与派生状态；不传 `view=summary` 的旧请求和详情接口继续返回完整内容。字体、样式、缓存头与 SSE 重连/刷新语义不变。测量脚本、合成数据规模和修前修后证据见 [Workbench 加载测量](research/workbench-load-c203.md)。
+
 C-150：人物卡片与说明性 Tooltip 统一在鼠标连续停留满 1000ms 后显示，提前移开或卸载即取消；再次悬停仍须等待，不提供延迟设置。人物卡片点击立即打开，键盘操作保持可用；全页面最多一张悬停打开的人物卡片，新悬停卡片打开时立即关闭旧卡片，点击固定的卡片不参与互斥。说明性原生 `title` 改用 Tooltip，截断全文、完整时间等辅助补全可保留原生提示；不改变人物卡片内容或样式。
 
 C-48 用统一的 `StatusIcon`（自绘内联 SVG）及带中文标签的 `StatusTag` 替换状态圆点。看板列头／卡片、列表、详情、工作项、交付／审核／拍板、Run 状态与结果、Assignment、机器及实时连接提示共用映射。独立图标提供中文 `aria-label`；旁边已有文字时图标对读屏隐藏，避免重复播报。未知值回退到带问号的菱形及“状态未知”。不新增图标库或接口。
