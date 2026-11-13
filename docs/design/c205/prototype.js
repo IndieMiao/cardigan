@@ -33,7 +33,22 @@ const scenarios = {
 };
 const $ = (selector) => document.querySelector(selector);
 const escapeText = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
-const idTag = (id, label, href = "") => `<${href ? "a" : "span"} class="id id-${id[0].toLowerCase()}" ${href ? `href="${href}"` : ""} title="${escapeText(label)}"><span class="id-code">${escapeText(id)}</span><span class="id-label">${escapeText(label)}</span></${href ? "a" : "span"}>`;
+// Prototype counterpart of the shared IdTag registry; full prefixes only.
+const idTypes = {
+  C: { label: "卡片", token: "card" }, W: { label: "工作项", token: "work-item" },
+  Q: { label: "拍板", token: "decision" }, A: { label: "责任上下文", token: "assignment" },
+  R: { label: "执行", token: "run" }, D: { label: "交付", token: "delivery" },
+  V: { label: "审核", token: "review" }, H: { label: "人工待办", token: "human-action" },
+  E: { label: "员工", token: "employee" }, M: { label: "成员", token: "member" },
+  MB: { label: "合并批次", token: "merge-batch" },
+};
+const idTag = (id, label, href = "") => {
+  const match = /^(MB|[A-Z]+)-\d+(?:#\d+)?$/.exec(id);
+  if (!match) return escapeText(id);
+  const type = idTypes[match[1]] ?? { label: "编号", token: "unknown" };
+  const description = label || type.label;
+  return `<${href ? "a" : "span"} class="id id-${type.token}" ${href ? `href="${escapeText(href)}"` : ""} title="${escapeText(description)}"><span class="id-code">${escapeText(id)}</span><span class="id-label">${escapeText(description)}</span></${href ? "a" : "span"}>`;
+};
 const identity = (name = "系统") => `<span class="identity"><span class="avatar" aria-hidden="true">${name === "系统" ? "⚙" : name[0]}</span><strong>${name}</strong></span>`;
 const state = (text, tone = "muted", symbol = "○") => `<span class="state tone-${tone}"><span aria-hidden="true">${symbol}</span><b>${text}</b></span>`;
 const params = new URLSearchParams(location.search);
