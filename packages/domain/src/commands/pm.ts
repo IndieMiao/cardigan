@@ -31,6 +31,12 @@ import { resolveCardTemplate, validateCardTemplate } from "./templates.js";
 
 const INDEPENDENT_REVIEW_MAX_ROUNDS = 2;
 
+function initialReviewLimit(roleId: string): number {
+  return roleId === "independent_reviewer"
+    ? INDEPENDENT_REVIEW_MAX_ROUNDS
+    : DEFAULT_MAX_REVIEW_ROUNDS;
+}
+
 export type CreateCardParams = Pick<
   Card,
   "title" | "goal" | "source" | "repo" | "base_branch"
@@ -156,7 +162,7 @@ export function createCard(
         d.put("work_items", {
           ...common,
           kind: "verify",
-          max_review_rounds: DEFAULT_MAX_REVIEW_ROUNDS,
+          max_review_rounds: initialReviewLimit(w.role_id),
           ...(w.target_work_item_key !== undefined
             ? {
                 target_work_item_id: ids.get(
@@ -364,11 +370,7 @@ export function createWorkItem(
       );
     }
     const independentReview = p.role_id === "independent_reviewer";
-    const max =
-      p.max_review_rounds ??
-      (independentReview
-        ? INDEPENDENT_REVIEW_MAX_ROUNDS
-        : DEFAULT_MAX_REVIEW_ROUNDS);
+    const max = p.max_review_rounds ?? initialReviewLimit(p.role_id);
     ensure(
       Number.isSafeInteger(max) && max > 0,
       "validation_failed",

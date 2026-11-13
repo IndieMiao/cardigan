@@ -597,7 +597,7 @@ P2a-11 卡 1：`withdraw_review({work_item_id, rationale})` 只允许当前持�
 
 审核轮次上限是控制面字段，直接修改只允许 PM Ops 或你；PM Office 代记审核上限拍板的 `raise_limit` 时由 domain 按你的确认增加一轮，放宽动作记在 Run 上。最后一轮仍未通过（`reject` 或 `conditional`）时，在下一轮开始前让工作项进入 `waiting_decision`，生成阻塞 Decision，并以 `blocked` 结束当前审核 Run（0.5a §9.3）。先记录 `review_submitted`（`rework_allowed=false`），再记录 `decision_requested`；换新 Run 不能绕过轮次上限。最后一轮 `pass` 仍正常通过。
 
-P2a-14 ①：`createWorkItem` 创建 `independent_reviewer` 验证项时，省略审核上限默认 2，显式传入只允许 1 或 2；其它角色仍默认 3。PM 不能通过 `updateWorkItem` 把独立复核上限放宽到 2 以上。达到上限仍未通过时复用 `review_limit_exceeded` 迁移与阻塞拍板，但增加 `human_required_reason`，即使有活跃 PM Ops 和流程代拍授权也必须交人；人确认增加轮数后沿用既有恢复流程。最后一轮通过仍正常完成，之后新交付需要超额复核时同样交人。
+P2a-14 ①：`createWorkItem` 和 `createCard` 从模板生成验证项共用按角色取初始审核上限的规则：`independent_reviewer` 默认 2，其它角色默认 3；`createWorkItem` 显式传入独立复核上限只允许 1 或 2。自定义模板包含独立复核项时也遵守两轮上限，内置模板的工作项内容不变。PM 不能通过 `updateWorkItem` 把独立复核上限放宽到 2 以上。达到上限仍未通过时复用 `review_limit_exceeded` 迁移与阻塞拍板，但增加 `human_required_reason`，即使有活跃 PM Ops 和流程代拍授权也必须交人；人确认增加轮数后沿用既有恢复流程。最后一轮通过仍正常完成，之后新交付需要超额复核时同样交人。
 
 预算按验证工作项累计，最后一轮 pass 不会重置预算。新交付使验证项重新 ready 后，若下一轮将超限，同一命令立即经 review_limit_exceeded 进入 waiting_decision 并生成 trigger=review_limit 的阻塞 Decision：先记 delivery_submitted，再记 decision_requested。仅结束该验证 Assignment 尚在 running 的 Run，已结束 Run 和产出者 Run 不被改写。已有 open / provisional 上限 Decision 时保留等待，后续交付复用该 Decision。放宽后恢复可沿用最近已完成审核 Run 的快照，即使该 Run 原本正常完成，仍只创建新 Run。
 

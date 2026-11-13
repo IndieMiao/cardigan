@@ -2,13 +2,17 @@ import { expect, test } from "vitest";
 import {
   type Actor,
   assign,
+  createCard,
   createWorkItem,
+  developmentCardTemplate,
+  manageCardTemplate,
   prepareDelivery,
   recordDecision,
   standingTools,
   submitDelivery,
   submitReview,
   updateWorkItem,
+  type WorkItem,
 } from "../index.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
 import { fixture, human, ports, role, value } from "./test-fixtures.js";
@@ -105,11 +109,80 @@ test("existing reviewers retain the global default and PM Ops limit controls", (
   }
 });
 
-test.each(["reject", "conditional", "pass"] as const)(
-  "invariant 11: independent review's second %s uses the existing limit state machine",
-  async (verdict) => {
+test.each(
+  (["direct", "template"] as const).flatMap((source) =>
+    (["reject", "conditional", "pass"] as const).map((verdict) => ({
+      source,
+      verdict,
+    })),
+  ),
+)(
+  "invariant 11: $source independent review's second $verdict uses the existing limit state machine",
+  async ({ source, verdict }) => {
     const { f, pm, params } = setup();
-    const item = f.commit(createWorkItem(f.state, pm, params, f.io));
+    let producer = f.coder;
+    let item: WorkItem;
+    if (source === "direct") {
+      item = f.commit(createWorkItem(f.state, pm, params, f.io));
+    } else {
+      // Register a real custom template, then let PM Ops create its card.
+      // Do not use mergeFixture's initial budget override for this card.
+      const template = f.commit(
+        manageCardTemplate(
+          f.state,
+          human,
+          {
+            action: "add",
+            definition: {
+              ...developmentCardTemplate,
+              id: "independent-review",
+              work_items: developmentCardTemplate.work_items.map((w) =>
+                w.key === "code_review"
+                  ? { ...w, role_id: "independent_reviewer" }
+                  : w,
+              ),
+            },
+          },
+          f.io,
+        ),
+      );
+      const card = f.commit(
+        createCard(
+          f.state,
+          pm,
+          {
+            template_id: template.id,
+            title: "Template independent review",
+            goal: "Enforce the same review limit for template work items",
+            acceptance_criteria: [
+              "Two non-pass reviews require a human decision",
+            ],
+            source: {
+              kind: "quote",
+              text: "Review this change independently",
+            },
+            repo: "fixture",
+            base_branch: "main",
+          },
+          f.io,
+        ),
+      );
+      const items = f.state.work_items.filter((w) => w.card_id === card.id);
+      expect(items.find((w) => w.role_id === "pm")).toMatchObject({
+        max_review_rounds: 3,
+      });
+      const product = present(items.find((w) => w.kind === "produce"));
+      producer = f.commit(
+        assign(
+          f.state,
+          pm,
+          { work_item_id: product.id, role_id: product.role_id },
+          f.io,
+        ),
+      );
+      item = present(items.find((w) => w.role_id === "independent_reviewer"));
+    }
+    expect(item).toMatchObject({ kind: "verify", max_review_rounds: 2 });
     const owner = f.commit(
       assign(
         f.state,
@@ -131,21 +204,24 @@ test.each(["reject", "conditional", "pass"] as const)(
       error: { code: "forbidden_tool" },
     });
     const deliver = async (sha: string) => {
-      f.start(f.coder);
+      f.start(producer);
       const p = {
-        work_item_id: params.target_work_item_id,
+        work_item_id: present(producer.work_item_id),
         kind: "code" as const,
         summary: "Ready for review",
         subject: { kind: "git_head" as const, value: sha },
-        requested_verifiers: [present(f.reviewer.work_item_id), item.id],
+        requested_verifiers:
+          source === "direct"
+            ? [present(f.reviewer.work_item_id), item.id]
+            : [item.id],
       };
       const proof = value(
-        await prepareDelivery(f.state, f.actor(f.coder), p, {
+        await prepareDelivery(f.state, f.actor(producer), p, {
           verify: async () => ({ ok: true, value: [] }),
         }),
       );
       return f.commit(
-        submitDelivery(f.state, f.actor(f.coder), p, proof, f.io),
+        submitDelivery(f.state, f.actor(producer), p, proof, f.io),
       );
     };
     for (const sha of ["a".repeat(40), "b".repeat(40)]) {
