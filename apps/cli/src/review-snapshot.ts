@@ -279,6 +279,8 @@ export type PublishStep =
   | "link-current"
   | "sync-after-commit"
   | "restore-previous"
+  | "rollback-staging"
+  | "rollback-new-dir"
   | "cleanup";
 
 export interface PublishResult {
@@ -371,12 +373,25 @@ function publish(
         );
       }
     }
-    rmSync(staging, { recursive: true, force: true });
-    rmSync(finalDir, { recursive: true, force: true });
+    // Each cleanup is attempted and recorded on its own, so a failing removal
+    // never hides the original error or a failed restore (V-922).
+    for (const [step, dir] of [
+      ["rollback-staging", staging],
+      ["rollback-new-dir", finalDir],
+    ] as const) {
+      try {
+        fault(step);
+        rmSync(dir, { recursive: true, force: true });
+      } catch (cleanupError) {
+        unrecovered.push(
+          `未发布的目录未能删除（${describe(cleanupError)}）：${dir}；它不被 current 或 previous 引用，请人工删除。`,
+        );
+      }
+    }
     if (unrecovered.length > 0)
       throw new CliError(
         [
-          `发布失败（${describe(error)}），回滚未完成，未发布新快照。`,
+          `发布失败（${describe(error)}），回滚未完成，未发布新快照；current 仍是 ${old ?? "（无）"}。`,
           ...unrecovered,
         ].join("\n"),
         EXIT.failure,
@@ -411,7 +426,10 @@ function publish(
 function describe(error: unknown): string {
   if (error instanceof Error) {
     const code = (error as NodeJS.ErrnoException).code;
-    return code ?? error.message;
+    // Node's fs messages already start with the code ("EIO: …").
+    return code === undefined || error.message.startsWith(code)
+      ? error.message
+      : `${code}: ${error.message}`;
   }
   return String(error);
 }
@@ -455,7 +473,17 @@ function replaceLink(path: string, target: string): void {
   try {
     renameSync(tmp, path);
   } catch (error) {
-    rmSync(tmp, { force: true });
+    try {
+      rmSync(tmp, { force: true });
+    } catch (cleanupError) {
+      // Keep the rename failure as the cause; name the leftover link too.
+      throw Object.assign(
+        new Error(
+          `${describe(error)}；临时链接 ${tmp} 也未能删除（${describe(cleanupError)}），请人工删除`,
+        ),
+        { code: (error as NodeJS.ErrnoException).code, cause: error },
+      );
+    }
     throw error;
   }
 }

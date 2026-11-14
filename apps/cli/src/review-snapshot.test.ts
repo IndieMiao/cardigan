@@ -411,3 +411,38 @@ test.each(["sync-after-commit", "cleanup"] as const)(
     expect(existsSync(join(out, "previous", "cardigan.db"))).toBe(true);
   },
 );
+
+test("cleanup failures during a failed rollback are reported, not hidden", async () => {
+  const { a, b } = await twoGood();
+  const error = await create({
+    fault: failAt(
+      "link-current",
+      "restore-previous",
+      "rollback-staging",
+      "rollback-new-dir",
+    ),
+  }).then(
+    () => undefined,
+    (e: unknown) => e as Error,
+  );
+  expect(error).toBeInstanceOf(Error);
+  const message = String(error?.message);
+  // The original failure, the failed restore and the leftover directory all survive.
+  expect(message).toContain("injected link-current");
+  expect(message).toContain("回滚未完成");
+  expect(message).toContain(`current 仍是 ${b}`);
+  expect(message).toContain(`ln -sfn ${a}`);
+  expect(message).toContain("未发布的目录未能删除");
+  expect(readlinkSync(join(out, "current"))).toBe(b);
+});
+
+test("a cleanup failure alone still reports the rollback as incomplete", async () => {
+  const { a, b, dirs } = await twoGood();
+  await expect(
+    create({ fault: failAt("link-current", "rollback-new-dir") }),
+  ).rejects.toThrow(/injected link-current[\s\S]*未发布的目录未能删除/);
+  expect(readlinkSync(join(out, "current"))).toBe(b);
+  expect(readlinkSync(join(out, "previous"))).toBe(a);
+  // The fault fired before rmSync, so the unreferenced new directory remains.
+  expect(readdirSync(join(out, "snapshots")).length).toBe(dirs.length + 1);
+});
