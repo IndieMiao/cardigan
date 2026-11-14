@@ -280,6 +280,7 @@ test("every entity table round-trips its entity", () => {
       kind: "choose" as const,
       raised_by: "human",
       question: "fictional question",
+      human_required_reason: "数值规则须由人确认",
       context: "",
       options: [],
       recommended: "a",

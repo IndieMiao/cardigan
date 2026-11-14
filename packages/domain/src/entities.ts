@@ -573,7 +573,8 @@ interface DecisionFields {
   /**
    * Human-only decision: set when PM Ops hands a merge confirmation to the
    * human (disables auto-merge), or by the system on a template's human
-   * completion review. Such decisions are never delegated to PM Ops.
+   * completion review, or explicitly requested by a raiser. Such decisions
+   * are never delegated to PM Ops, regardless of who raised them.
    */
   readonly human_required_reason?: string;
   /**

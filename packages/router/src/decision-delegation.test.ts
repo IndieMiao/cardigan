@@ -15,6 +15,28 @@ const TEST_PLAIN_SUMMARY = {
   risk: "无",
 };
 
+test("explicit human-only decisions notify the human and Office without routing to Ops", () => {
+  const routed = routeEvent({
+    event: event("decision_requested", { decision_id: "Q-1" }),
+    snapshot: snapshot({
+      decisions: [
+        decision({
+          decider: "human",
+          category: "general",
+          human_required_reason: "数值规则须由人确认",
+        }),
+      ],
+    }),
+  });
+  expect(routed.notifications.map((n) => n.recipient.kind)).toEqual([
+    "needs_you",
+    "pm_office",
+  ]);
+  expect(JSON.stringify(routed.notifications)).not.toContain(
+    "数值规则须由人确认",
+  );
+});
+
 test.each(["general", "feature_detail", "scope_change"])(
   "authorized %s goes only to PM Ops",
   (category) => {

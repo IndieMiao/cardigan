@@ -284,6 +284,8 @@ export interface PlainSummaryView {
   readonly risk: string;
 }
 export interface DecisionView {
+  readonly human_required_reason?: string;
+  readonly delegation_authority?: string;
   readonly card_id?: string | null;
   readonly affected_cards?: readonly string[];
   /** Current summaries of the existing cards explicitly affected by this decision. */
