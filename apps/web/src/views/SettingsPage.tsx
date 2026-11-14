@@ -194,6 +194,24 @@ export function SettingsPage({
                   saved={resource.reload}
                 />
               )}
+              {resource.data &&
+                (["review", "independent"] as const).map((kind) => {
+                  const initial =
+                    kind === "review"
+                      ? (resource.data?.review_max_rounds ?? 5)
+                      : (resource.data?.independent_review_max_rounds ?? 3);
+                  return (
+                    <ReviewRoundsSetting
+                      kind={kind}
+                      key={`${kind}-rounds:${initial}`}
+                      initial={initial}
+                      ceiling={resource.data?.review_max_rounds_ceiling ?? 10}
+                      client={client}
+                      projectId={projectId}
+                      saved={resource.reload}
+                    />
+                  );
+                })}
             </section>
           </RequestFeedbackScope>
           <RequestFeedbackScope hidden={tab !== "authorization"}>
@@ -326,6 +344,92 @@ function PreferenceForm({
       />
       <button type="submit" disabled={busy || !valid}>
         保存偏好
+      </button>
+      <RequestFeedback
+        interactive
+        pending={busy}
+        pendingMessage="保存中…"
+        error={error}
+        message={message}
+      />
+    </form>
+  );
+}
+
+/** C-253: review limits of new verifiers; only the human may change them. */
+function ReviewRoundsSetting({
+  kind,
+  initial,
+  ceiling,
+  client,
+  projectId,
+  saved,
+}: {
+  kind: "review" | "independent";
+  initial: number;
+  ceiling: number;
+  client: CardiganClient;
+  projectId: string;
+  saved: () => void;
+}) {
+  const independent = kind === "independent";
+  const label = independent ? "独立复核轮数上限" : "普通审核轮数上限";
+  const [rounds, setRounds] = useState(String(initial));
+  const [busy, setBusy] = useState(false),
+    [error, setError] = useState(""),
+    [message, setMessage] = useState("");
+  const sending = useRef(false),
+    keys = useRef(new Map<string, string>());
+  const valid =
+    /^\d+$/.test(rounds) && Number(rounds) >= 1 && Number(rounds) <= ceiling;
+  return (
+    <form
+      aria-label={label}
+      onSubmit={async (event) => {
+        event.preventDefault();
+        if (sending.current || !valid) return;
+        sending.current = true;
+        setBusy(true);
+        setError("");
+        setMessage("");
+        const key = keys.current.get(rounds) ?? crypto.randomUUID();
+        keys.current.set(rounds, key);
+        try {
+          await client.setReviewMaxRounds(projectId, kind, Number(rounds), key);
+          keys.current.delete(rounds);
+          setMessage("偏好已保存");
+          saved();
+        } catch (cause) {
+          setError(describeWriteError(cause));
+        } finally {
+          sending.current = false;
+          setBusy(false);
+        }
+      }}
+    >
+      <label>
+        {label}（轮）
+        <input
+          type="number"
+          min={1}
+          max={ceiling}
+          step="1"
+          value={rounds}
+          disabled={busy}
+          onChange={(e) => setRounds(e.target.value)}
+        />
+      </label>
+      <p className="hint">
+        {independent
+          ? `默认 3 轮，可设为 1 到 ${ceiling} 轮。独立复核连续这么多轮未通过就交给你；PM 不能把单个复核项放宽到超过这个值。`
+          : `默认 5 轮，可设为 1 到 ${ceiling} 轮。审核连续这么多轮未通过就暂停，等待拍板是否加轮。`}
+        只影响之后新建的审核项，已有审核项保留创建时的轮数。
+      </p>
+      <RequestFeedback
+        error={!valid ? `请输入 1 到 ${ceiling} 的整数轮数。` : undefined}
+      />
+      <button type="submit" disabled={busy || !valid}>
+        {independent ? "保存独立复核轮数" : "保存审核轮数"}
       </button>
       <RequestFeedback
         interactive

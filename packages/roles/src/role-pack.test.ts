@@ -275,7 +275,7 @@ test("P2a-14: independent reviewer has only the planned verify tools and boundar
     "不复查 `code_review` 已覆盖",
     "`target_sha` 必须等于交付的 `subject`",
     "有阻塞问题必须标为 must_fix 并退回",
-    "两轮未通过即进入 waiting_decision 交人处理",
+    "轮数用完仍未通过即进入 waiting_decision 交人处理",
     "不能与实现者或同卡其它审核者是同一员工",
     "可写构建目录",
     "worker 数不超过主机限流配置的上限",

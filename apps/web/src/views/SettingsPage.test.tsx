@@ -280,6 +280,49 @@ test("PM merge confirmation stall alert shows the default 60 minutes and saves a
   ]);
 });
 
+test("review round limits show the defaults 5 and 3 and save new values", async () => {
+  const setReviewMaxRounds = vi.fn().mockResolvedValue(undefined);
+  render(
+    <SettingsPage
+      projectId="p-1"
+      client={fakeClient({ setReviewMaxRounds })}
+    />,
+  );
+  const review = (await screen.findByLabelText(
+    "普通审核轮数上限（轮）",
+  )) as HTMLInputElement;
+  const independent = screen.getByLabelText(
+    "独立复核轮数上限（轮）",
+  ) as HTMLInputElement;
+  expect(review.value).toBe("5");
+  expect(independent.value).toBe("3");
+  expect(
+    screen.getAllByText(/只影响之后新建的审核项/).length,
+  ).toBeGreaterThanOrEqual(2);
+  const save = (name: string) =>
+    screen.getByRole("button", { name }) as HTMLButtonElement;
+  for (const bad of ["0", "11", "1.5"]) {
+    fireEvent.change(independent, { target: { value: bad } });
+    expect(save("保存独立复核轮数").disabled).toBe(true);
+  }
+  fireEvent.change(independent, { target: { value: "4" } });
+  fireEvent.click(save("保存独立复核轮数"));
+  await waitFor(() => expect(setReviewMaxRounds).toHaveBeenCalledTimes(1));
+  expect(setReviewMaxRounds.mock.calls[0]?.slice(0, 3)).toEqual([
+    "p-1",
+    "independent",
+    4,
+  ]);
+  fireEvent.change(review, { target: { value: "7" } });
+  fireEvent.click(save("保存审核轮数"));
+  await waitFor(() => expect(setReviewMaxRounds).toHaveBeenCalledTimes(2));
+  expect(setReviewMaxRounds.mock.calls[1]?.slice(0, 3)).toEqual([
+    "p-1",
+    "review",
+    7,
+  ]);
+});
+
 test("hidden preferences suppress validation feedback and retain the draft when returning", async () => {
   render(<SettingsPage client={fakeClient()} projectId="p-1" />);
   const enabled = await screen.findByRole("checkbox", { name: "超时自动合并" });
