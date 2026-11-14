@@ -33,7 +33,7 @@ M1.3 的纯函数命令、事务和预检边界见 [命令契约](COMMANDS.md)�
 - 产出型工作项按 §4.4 可取消；验证型工作项的六个非终态（todo/ready/in_progress/failed/blocked/waiting_decision）可取消，passed/cancelled 不接受 cancel。Run 在排队/派发/执行等未结束状态可取消。
 - 显式 reconnected 事件使 runtime 从 unknown 回 idle、Run 从 unknown 回 running；它不表示业务完成，也不能从 lost/released 或已结束的 Run 恢复。
 - produce 在 delivered/accepted 收到新 delivery_submitted 都回 delivered；verify 在 in_progress/passed/failed 收到 target_redelivered 回 ready。旧交付 supersede 和旧审核失效的实体更新由 M1.3 处理。
-- 开始审核使用 `beginReviewRound(from, round, max_review_rounds)`：round 是即将开始的正整数轮次，默认上限 3；合法 ready 状态下，第 3 轮可开始，第 4 轮进入 waiting_decision。拍板后回 ready，仍须检查新上限。创建 Decision、记录轮次和放宽权限属于 M1.3。
+- 开始审核使用 `beginReviewRound(from, round, max_review_rounds)`：round 是即将开始的正整数轮次，默认上限 5（C-253 起与项目偏好的普通审核默认值一致；工作项上记录的上限优先）；合法 ready 状态下，第 5 轮可开始，第 6 轮进入 waiting_decision。拍板后回 ready，仍须检查新上限。创建 Decision、记录轮次和放宽权限属于 M1.3。
 - `deriveReview` 返回新 issues 数组、verdict 和 blocking，不修改输入；critical 的 proof 缺失、空串或全空白都降为 major，仍以 must_fix / pre_existing 决定是否阻塞。
 - `isReviewStale` 接收当前交付：交付 ID 改变（即使 SHA 相同）、subject.value 不同或已 superseded，旧结论失效。
 - `deriveReviewMatrix` 接收同一项目/卡片的交付版本、工作项和审核集合，返回交付 × verify 工作项的矩阵。只取匹配交付/验证项/当前 subject 的审核，以项目内递增的 V-n 数值选最新，不依赖数组顺序；superseded 状态或 supersedes 链接使旧行失效，无结论时 verdict=null。它不自行读取或聚合不同项目的数据。

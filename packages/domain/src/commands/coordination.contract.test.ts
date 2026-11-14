@@ -522,7 +522,7 @@ test("invariant 11: PM can update metadata and add a verifier; only Ops/human ma
   expect(value(createWorkItem(state, office, work, io)).data).toMatchObject({
     status: "todo",
     kind: "verify",
-    max_review_rounds: 3,
+    max_review_rounds: 5,
   });
   expect(createWorkItem(state, actor(), work, io)).toMatchObject({
     ok: false,

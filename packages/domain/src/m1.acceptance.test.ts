@@ -1471,7 +1471,9 @@ describe("decisions", () => {
 describe("review round limit", () => {
   test("the last allowed round still rejecting pauses the verifier for a decision", async () => {
     const s = scenario();
-    const limit = 3; // DEFAULT_MAX_REVIEW_ROUNDS
+    // C-253: ordinary verifiers default to 5 rounds; round 4 rejecting
+    // must not trigger the limit, round 5 rejecting must.
+    const limit = 5; // DEFAULT_REVIEW_MAX_ROUNDS
     expect(
       (
         workItem(s.h, s.codeReview.id) as WorkItem & {
@@ -1907,7 +1909,7 @@ describe("review outcomes the plan distinguishes", () => {
       pre_existing: false,
     };
 
-    for (let round = 1; round <= 3; round += 1) {
+    for (let round = 1; round <= 5; round += 1) {
       const coderRun = startRun(s.h, s.coder, {
         kind: round === 1 ? "initial" : "rework",
       });
@@ -1925,7 +1927,7 @@ describe("review outcomes the plan distinguishes", () => {
           issues: [rejecting],
         }),
       );
-      if (round < 3) endRun(s.h, s.reviewerActor, reviewRun);
+      if (round < 5) endRun(s.h, s.reviewerActor, reviewRun);
     }
     expect(workItem(s.h, s.codeReview.id).status).toBe("waiting_decision");
 
@@ -1934,7 +1936,7 @@ describe("review outcomes the plan distinguishes", () => {
     const bypass = review(s.h, s.reviewerActor, {
       delivery_id:
         s.h.state.deliveries.filter((d) => d.kind === "code").at(-1)?.id ?? "",
-      target_sha: sha("c"),
+      target_sha: sha("e"),
     });
     expect(errorOf(bypass).code).toBe("illegal_transition");
 
@@ -1942,7 +1944,7 @@ describe("review outcomes the plan distinguishes", () => {
     const coderRun = startRun(s.h, s.coder, { kind: "rework" });
     await deliver(s.h, s.coderActor, s.development.id, {
       verifiers: [s.codeReview.id],
-      subject: sha("d"),
+      subject: sha("f"),
     });
     endRun(s.h, s.coderActor, coderRun);
 

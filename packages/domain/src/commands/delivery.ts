@@ -10,8 +10,9 @@ import type {
 } from "../entities.js";
 import type { Result } from "../errors.js";
 import type { DeliveryVerifier } from "../ports.js";
+import { reviewMaxRounds } from "../preferences.js";
 import { isCompletionVerifier } from "../templates.js";
-import { DEFAULT_MAX_REVIEW_ROUNDS, transition } from "../transitions.js";
+import { transition } from "../transitions.js";
 import { isHttpUrl } from "../url.js";
 import {
   attempt,
@@ -32,6 +33,7 @@ import {
   projectIndependentReviewCheck,
   projectScreenshotCheck,
 } from "./pre-merge-checks.js";
+import { projectPreferences } from "./preferences.js";
 import { pendingReviewLimit, requestReviewLimit } from "./review-limit.js";
 import { conflictRepairEvent } from "./review-round.js";
 import { resolveCardTemplate } from "./templates.js";
@@ -720,7 +722,7 @@ export function submitReview(
       round >=
         (item.kind === "verify"
           ? item.max_review_rounds
-          : DEFAULT_MAX_REVIEW_ROUNDS);
+          : reviewMaxRounds(projectPreferences(d.state)));
     d.emit(
       "review_submitted",
       card.id,
