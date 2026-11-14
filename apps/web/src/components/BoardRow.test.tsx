@@ -56,7 +56,12 @@ test("U6a board columns stay in one row inside a horizontally scrollable strip",
   expect(styles).toContain(
     ":is(.board, .board-lane-cards)::-webkit-scrollbar {",
   );
-  expect(rule(".board-column")).toContain("flex: 0 0 420px;");
+  // C-256: lanes size to a 326px border-box card plus the scrollbar gutter.
+  expect(rule(".board-column")).toContain("flex: 0 0 auto;");
+  expect(rule(".board-column")).toContain("--board-card-width: 326px;");
+  expect(
+    rule(".board-column:not(.board-column-collapsed) .board-lane-cards > *"),
+  ).toContain("width: var(--board-card-width);");
   expect(rule(".board-column")).toContain("min-width: 0;");
   const collapsed = rule(".board-column-collapsed");
   expect(collapsed).toContain("flex: 0 0 48px;");

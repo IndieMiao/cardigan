@@ -224,11 +224,10 @@ try {
                 "Title and metadata must meet AA",
               );
               assert.equal(measures.titleWeight, "400");
-              assert.equal(measures.titleHeight, 22);
-              assert.equal(
-                measures.columnWidth,
-                width === 1440 ? 420 : measures.boardWidth - 64,
-              );
+              // C-256: titles wrap in 22px lines; wide lanes hold a 326px card.
+              assert.equal(measures.titleHeight % 22, 0);
+              if (width === 1440) assert.equal(measures.cardWidth, 326);
+              else assert.equal(measures.columnWidth, measures.boardWidth - 64);
             }
             const stem = `${engine}-${width}-${colorScheme}-${version}`;
             await page.screenshot({

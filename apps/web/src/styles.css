@@ -1048,10 +1048,10 @@ button .id-badge {
     border-radius: 999px;
   }
   :is(.board, .board-lane-cards):is(
-    :hover,
-    :focus-within,
-    :focus-visible
-  )::-webkit-scrollbar-thumb {
+      :hover,
+      :focus-within,
+      :focus-visible
+    )::-webkit-scrollbar-thumb {
     background: var(--board-scroll-active);
   }
   :is(.board, .board-lane-cards)::-webkit-scrollbar-track,
@@ -1084,9 +1084,13 @@ button .id-badge {
 .board-hint {
   margin-bottom: 12px;
 }
+/* C-256: Plane-sized cards. The card content box is 300px (326px border-box
+   with 12px padding and 1px border); the lane sizes itself to the card plus
+   the browser's own scrollbar gutter. */
 .board-column {
-  flex: 0 0 420px;
-  width: 420px;
+  --board-card-width: 326px;
+  flex: 0 0 auto;
+  width: auto;
   min-width: 0;
   height: 100%;
   min-height: 0;
@@ -1177,6 +1181,15 @@ button .id-badge {
   color: var(--text-muted);
   font-size: var(--text-xs);
   text-align: center;
+}
+
+.board-column:not(.board-column-collapsed) .board-lane-cards > * {
+  width: var(--board-card-width);
+}
+@media (max-width: 640px) {
+  .board-column:not(.board-column-collapsed) .board-lane-cards > * {
+    width: auto;
+  }
 }
 
 .board-list {
@@ -2380,7 +2393,10 @@ fieldset.filters {
 }
 .activity-page .filter-controls {
   display: grid;
-  grid-template-columns: minmax(10rem, 2fr) repeat(3, minmax(7rem, 1fr)) max-content;
+  grid-template-columns: minmax(10rem, 2fr) repeat(
+      3,
+      minmax(7rem, 1fr)
+    ) max-content;
 }
 .activity-page :where(.filter-controls) > label {
   min-width: 0;
@@ -4175,9 +4191,8 @@ body[data-lightbox="open"] .drawer-overlay {
 }
 .board-card .card-title {
   display: block;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal;
+  overflow-wrap: anywhere;
   line-height: 22px;
   font-size: var(--text-body);
   font-weight: 400;
