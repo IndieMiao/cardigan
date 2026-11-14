@@ -254,6 +254,7 @@ export function fakeClient(
     setMergeConfirmSnoozeMax: async () => {},
     setMergeConfirmStallAfter: async () => {},
     setReviewMaxRounds: async () => {},
+    setIndependentReviewLimitDelegation: async () => {},
     setBoardLane: async () => {},
     markNoticesRead: async () => {},
     decisionHistory: async () => ({ decisions: [], next_cursor: null }),

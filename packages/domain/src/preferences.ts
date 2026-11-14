@@ -86,6 +86,10 @@ export interface ProjectPreferences {
   readonly review_max_rounds?: number;
   /** C-253: initial review limit of new `independent_reviewer` verifiers. */
   readonly independent_review_max_rounds?: number;
+  /** C-301: explicit human authorization; absent means off. */
+  readonly independent_review_limit_delegation?: boolean;
+  /** Lifetime delegated raises per verifier. No implicit authorization budget. */
+  readonly independent_review_limit_delegation_max?: number | null;
   /**
    * C-265: runtime switch for the host's loop timing (`tick_profile` lines).
    * Off unless explicitly true; only the human changes it (local CLI). The
@@ -156,6 +160,13 @@ export function validReviewMaxRounds(value: unknown): value is number {
     value >= 1 &&
     value <= REVIEW_MAX_ROUNDS_CEILING
   );
+}
+/** Q-507: exactly three lifetime delegated raises per independent verifier. */
+export const INDEPENDENT_REVIEW_DELEGATION_MAX = 3;
+export function validIndependentReviewDelegationMax(
+  value: unknown,
+): value is number {
+  return value === INDEPENDENT_REVIEW_DELEGATION_MAX;
 }
 /** C-177 default for `merge_confirm_stall_after_minutes`. */
 export const DEFAULT_MERGE_CONFIRM_STALL_MINUTES = 60;
