@@ -2039,7 +2039,7 @@ server 在合并循环旁启动独立的推送循环（默认 5 秒轮询，跟�
 
 ### 13.1 单机（Phase 1）
 
-C-245 的后台执行隔离评估见 [ADR 0009](adr/0009-background-loop-isolation.md)。当前仍为单个 server，只落地对账／备份增量优化；推荐后续同机拆为 Web／MCP 和后台两个受监督进程，待邵杰拍板及任务计划后实施。拆分须保持 SQLite WAL、原 busy_timeout、短事务及事件持久化边界，并扩展 C-201 的双进程就绪、精确身份核验、停止与整体回滚；不宣称拆分可消除同步数据库写锁等待。
+C-245 的后台执行隔离评估见 [ADR 0009](adr/0009-background-loop-isolation.md)。Q-410 已由邵杰于 2026-11-14 选择先部署对账／备份增量优化并在生产复测，确认剩余瓶颈；若仍需隔离，后续按同机 Web／MCP 和后台两个受监督进程另开卡规划实现，仍走审核和部署门禁。当前保持单个 server。拆分须保持 SQLite WAL、原 busy_timeout、短事务及事件持久化边界，并扩展 C-201 的双进程就绪、精确身份核验、停止与整体回滚；不宣称拆分可消除同步数据库写锁等待。
 
 P2a-10 B1 新增仅人类 CLI：先用 `cardigan role copy host_ops host_ops --from-default --harness codex --launch-profile <配置名>` 登记默认角色，再用 `cardigan host-ops create [--employee <E-n>] [--project <p>]` 创建常驻身份。省略员工时绑定唯一的在职 `host_ops` 员工；没有该角色员工时保留无员工身份，有多个时要求显式指定。新身份固定角色最新启用版本，不写 PM 的 `standing_mode`；重复创建复用原身份及其版本，不改派员工。C-213：创建只保存 Assignment 和创建事件，不签发或输出 Token；重复 create 也不撤销在运行会话的凭据。Token 仅由 start 的既有启动流程签发并注入私有运行目录。`cardigan host-ops start [--project <p>]` 复用既有 Assignment 启动流程，已有未结束 Run 时跳过；也支持启动入口已有的 `--data-dir`、`--mcp-url`、`--hc-session` 参数。create、start、rotate 都拒绝 Token 模式。专用执行工具与巡检唤醒由 C-85 接线后才能使用。
 
