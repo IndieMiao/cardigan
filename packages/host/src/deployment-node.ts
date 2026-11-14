@@ -229,6 +229,7 @@ export class NodeDeploymentDriver implements DeploymentDriver {
           downtime_ms: Date.now() - recoveringAt,
           summary: "监督器恢复未完成，需主机核对进程与数据库备份",
         }).catch(() => {});
+      await this.finishServerLogs();
       await unlock();
       throw error;
     } finally {
@@ -433,6 +434,16 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     };
     await this.saveState();
   }
+
+  /** Supervisor teardown only: keep audit/lock resources until stopped output drains. */
+  async finishServerLogs(): Promise<void> {
+    // Failed shutdown may leave a live server. Preserve that failure path rather
+    // than waiting indefinitely for its pipes to close. stop()/rollback never
+    // wait for logging IO; normal supervisor teardown calls this after stop().
+    if (this.state?.process && this.live()) return;
+    await this.serverLogFinished;
+  }
+
   async start(build: DeploymentBuild) {
     if (this.live()) throw new Error("A server is already running");
     this.readyMessage = false;
