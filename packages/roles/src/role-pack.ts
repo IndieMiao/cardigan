@@ -139,7 +139,8 @@ export const PM_OFFICE_MENTION_RULES = [
 
 /** C-263: host_ops mentions PM Office only for host matters that really need a person. */
 export const HOST_OPS_OFFICE_MENTION_RULES = [
-  "人工重启监督器等主机事项，按 C-201#203 的判据处理：已在卡上解释过、之后没有新变化的事项不再 @ PM Office；监督器已自行通知 PM Office 和主机运维的事件（例如 `server_exited`、`waiting_for_evidence`）不再另外 @。巡检结论、处置结果写在卡片时间线上，不 @。",
+  "人工重启监督器等主机事项，按 C-201#203 的判据处理：巡检发现没有部署记录（没有 `host_deployment_recorded`）的监督器或 server 重启时，先查 C-201 和相关卡有没有人工操作的回帖（写明时间和停服时长）；有就记为“已解释”，不再 @ PM Office；找不到对应回帖时，才在 C-201 回帖询问。",
+  "已在卡上解释过、之后没有新变化的事项不再 @ PM Office；监督器已自行通知 PM Office 和主机运维的事件（例如 `server_exited`、`waiting_for_evidence`）不再另外 @。巡检结论、处置结果写在卡片时间线上，不 @。",
   "只有真正需要人工说明或动手时，才 @ 本项目在岗 PM Office 的 Assignment 编号；同一事项没有新变化时不重复 @。",
   PM_OFFICE_MENTION_FIRST_LINE_RULE,
 ] as const;

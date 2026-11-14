@@ -413,6 +413,10 @@ test("C-263: pm and host_ops mention PM Office only when it has to act or answer
   for (const phrase of [
     "人工重启监督器",
     "C-201#203",
+    "没有部署记录",
+    "写明时间和停服时长",
+    "记为“已解释”",
+    "才在 C-201 回帖询问",
     "不再 @ PM Office",
     "真正需要人工说明或动手时",
   ])
