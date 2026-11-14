@@ -37,7 +37,7 @@
 ## 独立复核
 
 - PM（Office/Ops）看到安全、权限、数值规则相关改动时，用 `update_card` 设置 `risk_tags`：安全、凭据、数据迁移或并发高风险路径用 `security`，鉴权或访问控制用 `permission`，系统上限、超时等数值和行为规则用 `numeric_rule`；可同时打多个标签，不新增枚举。分类由 PM 或 human 设置，产出方和验证方发现漏标时请 PM 补齐。
-- PM 用 `create_work_item` 补上同卡必需的独立复核项：`kind=verify`、`role_id=independent_reviewer`、`required=true`、`target_work_item_id` 指向本卡被审产出项、`max_review_rounds=2`；模板不会自动添加。非 human 验收模板的风险标签卡缺少必需、未取消、未被替换的复核项时，完成申请会被拒绝，不能用已知遗留豁免；human 验收模板不受这条新增硬门影响，PM 仍按风险补复核项。
+- PM 用 `create_work_item` 补上同卡必需的独立复核项：`kind=verify`、`role_id=independent_reviewer`、`required=true`、`target_work_item_id` 指向本卡被审产出项，不传 `max_review_rounds`，按项目偏好取值（默认 3）；模板不会自动添加。非 human 验收模板的风险标签卡缺少必需、未取消、未被替换的复核项时，完成申请会被拒绝，不能用已知遗留豁免；human 验收模板不受这条新增硬门影响，PM 仍按风险补复核项。
 - 独立复核员工须与目标产出项作者、同卡其它验证项负责人分离，当前及历史 Assignment（含已释放）都要核对。不得为了绕开独立复核，把同一个改动拆成两张卡（实现和复核分在不同卡上）；不得删标签、把复核项改为可选或取消复核来绕过要求。独立复核聚焦安全、权限、数值边界及并发迁移风险，普通风格和命名等由代码审核负责。
 - 固定名称“独立复核”的 passed/failed 由复核员提交 `submit_review` 后投影到合并前核对项；PM Office、PM Ops 和 human 均不能直接写 passed/failed，只能设 pending。评论、普通核对项或仅工作项显示 passed 都不能代替真实 Review；设 pending 也不等于撤回 Review，需要重新复核时由复核员本人 `withdraw_review`，或按权限走退回修改流程。
 - 风险标签卡由 PM Ops 代确认合并须同时满足：`risk_tags` 非空且仅含 `security | permission | numeric_rule`；同卡必需、未取消、未被替换的 `independent_reviewer` 验证项为 passed，审核矩阵对目标最新交付为 pass，Review 未撤回、未过期且交付编号和 SHA 均匹配；当前完成申请的合并检查通过、所有未取消验证项通过（包括可选项）、无未处理 must_fix，且提交 notice 知会。启用合并队列时先通过卡级检查，实际发布仍须批次全量检查通过。仅核对人的数值拍板不能替代独立复核，原数值规则过渡办法不再适用；这不授权 PM 决定新的数值或行为规则。

@@ -256,7 +256,8 @@ export function transition<M extends keyof MachineStates>(
     : { ok: true, value: to };
 }
 
-export const DEFAULT_MAX_REVIEW_ROUNDS = 3;
+/** Mirrors `DEFAULT_REVIEW_MAX_ROUNDS` (C-253); stored limits always win. */
+export const DEFAULT_MAX_REVIEW_ROUNDS = 5;
 // round is the one-based round about to start, not a count of completed rounds.
 export function beginReviewRound(
   from: VerifyStatus,

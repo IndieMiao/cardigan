@@ -1,9 +1,14 @@
 import type { Actor, Assignment, Card, WorkItem } from "../entities.js";
 import type { DeliveryId, WorkItemId } from "../ids.js";
+import {
+  independentReviewMaxRounds,
+  initialReviewMaxRounds,
+  reviewMaxRounds,
+} from "../preferences.js";
 import { parseCardPriority } from "../priority.js";
 import { isRoleActive } from "../role.js";
 import { builtinCardTemplates, latestCardTemplate } from "../templates.js";
-import { DEFAULT_MAX_REVIEW_ROUNDS, transition } from "../transitions.js";
+import { transition } from "../transitions.js";
 import {
   type CommandDraft,
   type CommandPorts,
@@ -25,20 +30,13 @@ import {
   applyPreMergeCheck,
   type PreMergeCheckInput,
 } from "./pre-merge-checks.js";
+import { projectPreferences } from "./preferences.js";
 import { canResume, queueResumedRun, resumeWork } from "./resumption.js";
 import {
   type ReviewLimitResolution,
   resolveReviewLimit,
 } from "./review-limit-resolution.js";
 import { resolveCardTemplate, validateCardTemplate } from "./templates.js";
-
-const INDEPENDENT_REVIEW_MAX_ROUNDS = 2;
-
-function initialReviewLimit(roleId: string): number {
-  return roleId === "independent_reviewer"
-    ? INDEPENDENT_REVIEW_MAX_ROUNDS
-    : DEFAULT_MAX_REVIEW_ROUNDS;
-}
 
 export type CreateCardParams = Pick<
   Card,
@@ -165,7 +163,10 @@ export function createCard(
         d.put("work_items", {
           ...common,
           kind: "verify",
-          max_review_rounds: initialReviewLimit(w.role_id),
+          max_review_rounds: initialReviewMaxRounds(
+            w.role_id,
+            projectPreferences(d.state),
+          ),
           ...(w.target_work_item_key !== undefined
             ? {
                 target_work_item_id: ids.get(
@@ -397,18 +398,21 @@ export function createWorkItem(
       );
     }
     const independentReview = p.role_id === "independent_reviewer";
-    const max = p.max_review_rounds ?? initialReviewLimit(p.role_id);
+    const preferences = projectPreferences(d.state);
+    const independentLimit = independentReviewMaxRounds(preferences);
+    const max =
+      p.max_review_rounds ?? initialReviewMaxRounds(p.role_id, preferences);
     ensure(
       Number.isSafeInteger(max) && max > 0,
       "validation_failed",
       "Invalid review limit",
     );
     ensure(
-      !independentReview || max <= INDEPENDENT_REVIEW_MAX_ROUNDS,
+      !independentReview || max <= independentLimit || actor.kind === "human",
       "validation_failed",
-      "独立复核的初始审核上限不能超过 2 轮",
+      `独立复核的初始审核上限不能超过 ${independentLimit} 轮（项目偏好），只有人可以放宽`,
     );
-    if (max > DEFAULT_MAX_REVIEW_ROUNDS)
+    if (!independentReview && max > reviewMaxRounds(preferences))
       ensure(
         actor.kind === "human" ||
           (d.assignment?.scope === "standing" &&
@@ -535,12 +539,15 @@ export function updateWorkItem(
         "validation_failed",
         "Review limits may only be relaxed",
       );
+      const independentLimit = independentReviewMaxRounds(
+        projectPreferences(d.state),
+      );
       ensure(
         item.role_id !== "independent_reviewer" ||
-          p.max_review_rounds <= INDEPENDENT_REVIEW_MAX_ROUNDS ||
+          p.max_review_rounds <= independentLimit ||
           actor.kind === "human",
         "forbidden_tool",
-        "独立复核超过 2 轮只能由人确认放宽",
+        `独立复核超过 ${independentLimit} 轮（项目偏好）只能由人确认放宽`,
       );
     }
     let result: WorkItem = {

@@ -227,16 +227,16 @@ test("invariant 13: a completion review precedes the merge gate", () => {
 });
 
 test("review rounds allow the limit, stop before the next round, and honor an explicit limit", () => {
-  expect(DEFAULT_MAX_REVIEW_ROUNDS).toBe(3);
-  expect(beginReviewRound("ready", 3)).toEqual({
+  expect(DEFAULT_MAX_REVIEW_ROUNDS).toBe(5);
+  expect(beginReviewRound("ready", 5)).toEqual({
     ok: true,
     value: "in_progress",
   });
-  expect(beginReviewRound("ready", 4)).toEqual({
+  expect(beginReviewRound("ready", 6)).toEqual({
     ok: true,
     value: "waiting_decision",
   });
-  expect(beginReviewRound("ready", 4, 5)).toEqual({
+  expect(beginReviewRound("ready", 6, 7)).toEqual({
     ok: true,
     value: "in_progress",
   });
