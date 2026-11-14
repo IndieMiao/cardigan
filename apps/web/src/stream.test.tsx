@@ -38,7 +38,8 @@ class Connection extends EventTarget {
   emit(type: string, data?: unknown) {
     this.dispatchEvent(
       type === "change" ||
-        ((type === "queue" || type === "context") && data !== undefined)
+        ((type === "queue" || type === "context" || type === "capacity") &&
+          data !== undefined)
         ? new MessageEvent(type, { data: JSON.stringify(data) })
         : new Event(type),
     );
@@ -644,4 +645,57 @@ test("C-232: a context change re-reads the open execution view and nothing else"
   await waitFor(() => expect(execution).toHaveBeenCalledTimes(reads + 1));
   await settle();
   expect(needsYou).toHaveBeenCalledTimes(needs);
+});
+
+test("capacity revisions deduplicate, survive reconnection and update only the shared status", async () => {
+  window.location.hash = "#/p/p-1/cards";
+  let running = 2;
+  const read = vi.fn(async () => ({
+    agents: [
+      {
+        machine_id: "local",
+        label: "工作机",
+        running,
+        total_running: running + 2,
+        limit: 6,
+        max_limit: 16,
+        queued: 0,
+        merge_check_slots: 0,
+      },
+    ],
+    merge_checks: [],
+    merge_config_invalid: false,
+  }));
+  const cards = vi.fn(fakeClient().cards);
+  const f = live({ executionCapacity: read, cards });
+  render(<App client={f.client} />);
+  await screen.findByRole("button", { name: /Agent 2\/6/u });
+  act(() => {
+    f.connections.last.emit("open");
+    f.connections.last.emit("capacity", { revision: "one" });
+    f.connections.last.emit("change", change("C-1", 1));
+  });
+  await settle();
+  read.mockClear();
+  cards.mockClear();
+  running = 3;
+  act(() => f.connections.last.emit("capacity", { revision: "two" }));
+  await screen.findByRole("button", { name: /Agent 3\/6/u });
+  expect(read).toHaveBeenCalledTimes(1);
+  expect(cards).not.toHaveBeenCalled();
+  act(() => f.connections.last.emit("capacity", { revision: "two" }));
+  await settle();
+  expect(read).toHaveBeenCalledTimes(1);
+  const old = f.connections.last;
+  act(() => old.emit("error"));
+  await waitFor(() => expect(f.connections.last).not.toBe(old));
+  running = 4;
+  act(() => {
+    f.connections.last.emit("open");
+    f.connections.last.emit("capacity", { revision: "three" });
+    old.emit("capacity", { revision: "stale" });
+  });
+  await screen.findByRole("button", { name: /Agent 4\/6/u });
+  expect(read).toHaveBeenCalledTimes(2);
+  expect(cards).not.toHaveBeenCalled();
 });

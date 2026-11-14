@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   DEFAULT_MAX_RUN_LIMIT,
   latestMergeCheck,
@@ -10,6 +11,16 @@ import {
 } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
+
+/** Only an opaque revision crosses SSE; never project/card bodies or credentials. */
+export function executionCapacityRevision(
+  ...args: Parameters<typeof executionCapacity>
+) {
+  return createHash("sha256")
+    .update(JSON.stringify(executionCapacity(...args)))
+    .digest("hex")
+    .slice(0, 16);
+}
 
 /** All projects share machine capacity; return only display fields, never executor credentials. */
 export function executionCapacity(

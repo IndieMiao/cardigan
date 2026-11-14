@@ -44,16 +44,73 @@ export function writeDeploymentStop(
   });
 }
 
+/** Recover the candidate from the durable pre-stop audit, including the gap before start(). */
+export function readInterruptedDeployment(
+  store: Store,
+  project: ProjectId,
+  currentSha: string,
+): DeploymentRecord | undefined {
+  return store.uow.read((tx) => {
+    const event = loadCommandState(tx, project).events.findLast(
+      (e) => e.type === "host_deployment_recorded" && e.actor.kind === "system",
+    );
+    const record = event?.payload as DeploymentRecord | undefined;
+    // A terminal success must prevent old stopping records from being replayed.
+    if (
+      record?.from !== currentSha ||
+      (!record.stop_snapshot &&
+        !(record.backup_file && record.to !== currentSha))
+    )
+      return undefined;
+    return record.status === "stopping" ||
+      (record.status === "failed" && !record.ready)
+      ? record
+      : undefined;
+  });
+}
+
 export function writeDeploymentRecord(
   store: Store,
   project: ProjectId,
   record: DeploymentRecord,
+  waiting?: { timeout_ms: number; now: number },
 ) {
   store.uow.run((tx) => {
     const actor = { kind: "system" as const, project_id: project };
-    const clock = { now: () => new Date().toISOString() };
+    const clock = {
+      now: () => new Date(waiting?.now ?? Date.now()).toISOString(),
+    };
+    const state = loadCommandState(tx, project);
+    if (record.status === "waiting_for_evidence" && waiting) {
+      const latest = state.events.findLast(
+        (e) => e.type === "host_deployment_recorded",
+      );
+      const prior = latest?.payload as DeploymentRecord | undefined;
+      const continuous =
+        prior?.status === "waiting_for_evidence" &&
+        prior.from === record.from &&
+        prior.to === record.to;
+      const since = continuous
+        ? (prior.waiting_since ?? latest?.created_at)
+        : clock.now();
+      const started = Date.parse(since ?? "");
+      const exceeded =
+        Number.isFinite(started) && waiting.now - started >= waiting.timeout_ms;
+      if (continuous && (prior.evidence_wait_exceeded || !exceeded)) return;
+      record = {
+        ...record,
+        waiting_since: Number.isFinite(started) && since ? since : clock.now(),
+        evidence_wait_exceeded: exceeded,
+        ...(exceeded
+          ? {
+              summary:
+                "中心 main 持续等待合并门禁证据已达到提醒时长，保留当前服务，请后台分拣核对",
+            }
+          : {}),
+      };
+    }
     const effect = unwrap(
-      recordDeployment(loadCommandState(tx, project), actor, record, {
+      recordDeployment(state, actor, record, {
         ids: tx.ids,
         clock,
       }),
@@ -92,7 +149,11 @@ export function writeDeploymentRecord(
     }
     // A normal publish can still be committing its audit. Keep it visible to
     // operations without creating a manual blocker for this transient window.
-    if (record.status === "waiting_for_evidence") return;
+    if (
+      record.status === "waiting_for_evidence" &&
+      !record.evidence_wait_exceeded
+    )
+      return;
     persistEffect(
       tx,
       project,
@@ -101,8 +162,14 @@ export function writeDeploymentRecord(
           loadCommandState(tx, project),
           actor,
           {
-            key: `deployment:${record.attempt}`,
-            instructions: `自动部署 ${record.from} → ${record.to}：${record.summary}。请主机管理员检查；Agent 不能部署或重启 server。`,
+            key:
+              record.status === "waiting_for_evidence"
+                ? `deployment-evidence:${record.to}`
+                : `deployment:${record.attempt}`,
+            ...(record.status === "waiting_for_evidence"
+              ? { reason: "evidence_wait" as const }
+              : {}),
+            instructions: `自动部署 ${record.from} → ${record.to}：${record.summary}。${record.log_tail ? `安全诊断：${record.log_tail}。` : ""}${record.backup_file ? `数据库备份：${record.backup_file}。` : ""}请核对部署记录；Agent 不能部署或重启 server。`,
           },
           { ids: tx.ids, clock },
         ),

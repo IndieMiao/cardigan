@@ -16,8 +16,8 @@ import { NodeDeploymentDriver } from "./deployment-node.js";
 
 const stages = ["clone", "checkout", "install", "build"] as const;
 const cases = [
-  { stage: "clone", exit: 1, tail: "checkout: failed" },
-  { stage: "checkout", exit: 1, tail: "checkout: failed" },
+  { stage: "clone", exit: 1, tail: "checkout: exit 1" },
+  { stage: "checkout", exit: 1, tail: "checkout: exit 1" },
   { stage: "install", exit: 1, tail: "TypeScript TS6305\ninstall: exit 1" },
   { stage: "build", exit: 1, tail: "TypeScript TS6305\nbuild: exit 1" },
   {
@@ -30,8 +30,8 @@ const cases = [
     exit: null,
     tail: "TypeScript TS6305\nbuild: exit unknown",
   },
-  { stage: "clone", exit: "spawn", tail: undefined },
-  { stage: "install", exit: "spawn", tail: undefined },
+  { stage: "clone", exit: "spawn", tail: "checkout: spawn_failed" },
+  { stage: "install", exit: "spawn", tail: "install: spawn_failed" },
   { stage: "success", exit: 0, tail: "install: exit 0\nbuild: exit 0" },
 ] as const;
 
@@ -109,18 +109,11 @@ if (stage === ${JSON.stringify(stage)}) {
       const latest = records[0];
       expect(latest).toMatchObject({
         status: stage === "success" ? "deployed" : "failed",
-        build:
-          stage === "success"
-            ? "passed"
-            : exit === "spawn"
-              ? "not_run"
-              : "failed",
+        build: stage === "success" ? "passed" : "failed",
         summary:
           stage === "success"
             ? "中心 main 已部署，ready 和两个端口核对通过"
-            : exit === "spawn"
-              ? "host_operation_failed"
-              : "build_failed",
+            : "build_failed",
       });
       expect(latest?.log_tail).toBe(tail);
       expect(stop).toHaveBeenCalledTimes(stage === "success" ? 1 : 0);
@@ -137,7 +130,8 @@ if (stage === ${JSON.stringify(stage)}) {
       expect(
         events.filter((e) => e.type === "host_deployment_recorded"),
       ).toHaveLength(stage === "success" ? 3 : 2);
-      for (const value of [events, diagnostics]) {
+      const actions = store.uow.read((tx) => tx.human_actions.list("cardigan"));
+      for (const value of [events, diagnostics, actions]) {
         const serialized = JSON.stringify(value);
         expect(serialized).not.toMatch(
           /synthetic|c3ludGhldGljOm9ubHk=|Authorization|PRIVATE_SETTING|TOKEN=/,

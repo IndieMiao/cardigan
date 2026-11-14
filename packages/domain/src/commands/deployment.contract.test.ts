@@ -136,6 +136,32 @@ test("waiting for publication evidence only records an observation and grants no
   expect(JSON.stringify(state)).toBe(original);
 });
 
+test("backup evidence accepts only generated basenames, never paths or free text", () => {
+  const state = fixture();
+  const system = { kind: "system" as const, project_id: state.project_id };
+  const name = "database-00000000-0000-0000-0000-000000000001.bak";
+  expect(
+    value(
+      recordDeployment(
+        state,
+        system,
+        { ...record, backup_file: name },
+        ports(),
+      ),
+    ).data.backup_file,
+  ).toBe(name);
+  for (const name of [
+    "../database.bak",
+    "/private/database.bak",
+    "TOKEN=synthetic-secret",
+    "arbitrary.bak",
+  ])
+    expect(
+      recordDeployment(state, system, { ...record, backup_file: name }, ports())
+        .ok,
+    ).toBe(false);
+});
+
 test("permission-widening followup stays with the human and is idempotent", () => {
   const state = fixture();
   const system = { kind: "system" as const, project_id: state.project_id };
@@ -151,4 +177,43 @@ test("permission-widening followup stays with the human and is idempotent", () =
   );
   expect(again.events).toEqual([]);
   expect(again.data.id).toBe(effect.data.id);
+});
+
+test("evidence wait actions go to Ops, remain idempotent after completion and do not authorize deployment", () => {
+  const state = fixture();
+  const system = { kind: "system" as const, project_id: state.project_id };
+  const input = {
+    key: "deployment-evidence:target",
+    instructions: "核对门禁证据",
+    reason: "evidence_wait" as const,
+  };
+  const effect = value(requestDeploymentAction(state, system, input, ports()));
+  expect(effect.data).toMatchObject({
+    triage: "pm_ops",
+    status: "open",
+    blocked_work_items: [],
+  });
+  const next = apply(state, effect);
+  expect(next.cards).toEqual(state.cards);
+  expect(next.work_items).toEqual(state.work_items);
+  expect(next.runs).toEqual(state.runs);
+  const completed = {
+    ...next,
+    human_actions: next.human_actions.map((h) => ({
+      ...h,
+      status: "done" as const,
+    })),
+  };
+  expect(
+    value(requestDeploymentAction(completed, system, input, ports())).events,
+  ).toEqual([]);
+  for (const caller of [
+    human,
+    actor(1, "coder"),
+    actor(4, "pm"),
+    actor(5, "host_ops"),
+  ])
+    expect(requestDeploymentAction(state, caller, input, ports()).ok).toBe(
+      false,
+    );
 });
