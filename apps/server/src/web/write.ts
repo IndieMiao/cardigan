@@ -741,7 +741,7 @@ export async function serveWrite(
             .optional(),
           decision_delegation: z.record(z.string(), z.boolean()).optional(),
           pm_merge_confirmation: z.boolean().optional(),
-          // C-253: the range (1..10 integers) is checked by the domain.
+          // C-253: the range (integers 1..REVIEW_MAX_ROUNDS_CEILING) is checked by the domain.
           review_max_rounds: z.number().optional(),
           independent_review_max_rounds: z.number().optional(),
           board_collapsed_lanes: z

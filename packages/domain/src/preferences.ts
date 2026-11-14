@@ -114,7 +114,11 @@ export function decisionDelegation(
 /** C-253 defaults (user decision 2026-11-14) and the accepted range. */
 export const DEFAULT_REVIEW_MAX_ROUNDS = 5;
 export const DEFAULT_INDEPENDENT_REVIEW_MAX_ROUNDS = 3;
-export const REVIEW_MAX_ROUNDS_CEILING = 10;
+/**
+ * Largest accepted review limit, 依据 Q-420 (2026-11-14: 最多填 20). The only
+ * definition: the server, CLI and Workbench settings page all read it from here.
+ */
+export const REVIEW_MAX_ROUNDS_CEILING = 20;
 export function reviewMaxRounds(preferences?: ProjectPreferences): number {
   return preferences?.review_max_rounds ?? DEFAULT_REVIEW_MAX_ROUNDS;
 }

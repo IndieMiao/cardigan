@@ -127,7 +127,7 @@ test("merge-confirm-stall-after defaults to 60, persists minutes with an audit e
     ).not.toBe(0);
 });
 
-test("review round limits default to 5 and 3, persist with audit events and reject values outside 1..10", async () => {
+test("review round limits default to 5 and 3, persist with audit events and reject values outside 1..20", async () => {
   expect(await run(["preference", "get", "review-max-rounds"])).toBe(0);
   expect(output).toContain("review-max-rounds: 5 (只影响之后新建的审核项)");
   expect(
@@ -156,7 +156,7 @@ test("review round limits default to 5 and 3, persist with audit events and reje
     { old_value: 3, new_value: 4, preference: "independent_review_max_rounds" },
   ]);
   for (const key of ["review-max-rounds", "independent-review-max-rounds"])
-    for (const bad of ["off", "0", "11", "1.5", "-1"])
+    for (const bad of ["off", "0", "21", "1.5", "-1"])
       expect(await run(["preference", "set", key, bad])).not.toBe(0);
 });
 

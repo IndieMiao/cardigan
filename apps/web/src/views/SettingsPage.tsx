@@ -39,6 +39,8 @@ export function SettingsPage({
     [client, projectId],
   );
   const resource = useResource(load, revision);
+  // The review round ceiling comes only from the server (domain, Q-420).
+  const roundsCeiling = resource.data?.review_max_rounds_ceiling;
   return (
     <>
       <PageTitle title="设置" description={employeeCopy.settingsDescription} />
@@ -194,7 +196,7 @@ export function SettingsPage({
                   saved={resource.reload}
                 />
               )}
-              {resource.data &&
+              {roundsCeiling !== undefined &&
                 (["review", "independent"] as const).map((kind) => {
                   const initial =
                     kind === "review"
@@ -205,7 +207,7 @@ export function SettingsPage({
                       kind={kind}
                       key={`${kind}-rounds:${initial}`}
                       initial={initial}
-                      ceiling={resource.data?.review_max_rounds_ceiling ?? 10}
+                      ceiling={roundsCeiling}
                       client={client}
                       projectId={projectId}
                       saved={resource.reload}

@@ -206,6 +206,7 @@ export function fakeClient(
     preferences: async () => ({
       auto_merge_after_minutes: null,
       merge_gate_enabled: false,
+      review_max_rounds_ceiling: 20,
     }),
     setPreferences: async () => {},
     setSystemRules: async () => {},
