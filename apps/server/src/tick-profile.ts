@@ -1,12 +1,17 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { monitorEventLoopDelay, performance } from "node:perf_hooks";
+import { fileURLToPath } from "node:url";
 import type { StoreObserver } from "@cardigan/store";
 
 /**
  * C-216: opt-in measurement of the periodic loops (dispatcher, merge, cleanup,
  * reconcile, backup, ...). Off by default; when off every hook is a plain
  * pass-through. Output carries loop names, span names and numbers only — never
- * SQL, card text, prompts, tokens or request bodies.
+ * SQL, card text, prompts, tokens or request bodies. C-265: every line also
+ * carries `ts` (ISO time) and `sha` (the running release commit, or
+ * "unknown"), so a window can be cut by time and version.
  */
 export type ProfileLine = Readonly<Record<string, unknown>>;
 
@@ -44,11 +49,32 @@ function summary(values: readonly number[]) {
 
 export interface TickProfilerOptions {
   readonly log: (line: ProfileLine) => void;
+  /** C-265: release commit stamped on every line; see `releaseSha`. */
+  readonly sha?: string;
+  /** Wall clock for `ts`; tests inject it. */
+  readonly now?: () => Date;
   /** Cadence of the event-loop and request summaries; 0 disables the timer. */
   readonly reportIntervalMs?: number;
   /** Event-loop delay sampling resolution. */
   readonly resolutionMs?: number;
 }
+
+/**
+ * C-265: the profiler that owns the tick running in this async context. Spans
+ * and store work inside a tick stay attributed to that profiler even after the
+ * runtime switch removed it as the process-wide one.
+ */
+const owner = new AsyncLocalStorage<TickProfiler>();
+
+/**
+ * C-265: a single `Store.observe` hook that forwards to the profiler owning
+ * the current tick, so switching profilers never detaches a running tick.
+ */
+export const tickStoreObserver: Required<StoreObserver> = {
+  transaction: (kind, ms) =>
+    owner.getStore()?.storeObserver.transaction(kind, ms),
+  stateBuild: (ms) => owner.getStore()?.storeObserver.stateBuild(ms),
+};
 
 export class TickProfiler {
   readonly #als = new AsyncLocalStorage<TickSample>();
@@ -59,9 +85,15 @@ export class TickProfiler {
   #active = new Map<string, number>();
   #lastTickEnd = Number.NEGATIVE_INFINITY;
   #requests = new Map<string, Latencies>();
+  #inFlight = 0;
+  #retired: (() => void) | undefined;
+  #finished = false;
 
   constructor(options: TickProfilerOptions) {
-    this.#log = options.log;
+    const sha = options.sha ?? "unknown";
+    const now = options.now ?? (() => new Date());
+    this.#log = (line) =>
+      options.log({ ...line, ts: now().toISOString(), sha });
     this.#resolution = options.resolutionMs ?? 10;
     this.#window = monitorEventLoopDelay({ resolution: this.#resolution });
     this.#window.enable();
@@ -73,7 +105,7 @@ export class TickProfiler {
   }
 
   /** Hooks for `Store.observe`; attributes UnitOfWork time to the running tick. */
-  readonly storeObserver: StoreObserver = {
+  readonly storeObserver: Required<StoreObserver> = {
     transaction: (_kind, ms) => {
       const sample = this.#als.getStore();
       if (!sample) return;
@@ -108,9 +140,10 @@ export class TickProfiler {
     // loops' synchronous work that overlapped).
     const elu = performance.eventLoopUtilization();
     this.#active.set(loop, (this.#active.get(loop) ?? 0) + 1);
+    this.#inFlight++;
     const started = performance.now();
     try {
-      return await this.#als.run(sample, run);
+      return await owner.run(this, () => this.#als.run(sample, run));
     } finally {
       const wall = performance.now() - started;
       this.#active.set(loop, (this.#active.get(loop) ?? 1) - 1);
@@ -138,6 +171,8 @@ export class TickProfiler {
             }
           : {}),
       });
+      this.#inFlight--;
+      if (this.#inFlight === 0 && this.#retired) this.#finish();
     }
   }
 
@@ -209,6 +244,29 @@ export class TickProfiler {
     this.#timer = undefined;
     this.#window.disable();
   }
+
+  /**
+   * C-265: measurement was switched off. Ticks already running finish with
+   * full attribution; once the last one has logged, the unreported window is
+   * flushed (`report()`), the profiler stops and `done` runs. Idempotent.
+   */
+  retire(done?: () => void): void {
+    if (this.#retired || this.#finished) return;
+    this.#retired = done ?? (() => {});
+    if (this.#inFlight === 0) this.#finish();
+  }
+
+  #finish(): void {
+    if (this.#finished) return;
+    this.#finished = true;
+    const done = this.#retired;
+    try {
+      this.report();
+    } finally {
+      this.stop();
+      done?.();
+    }
+  }
 }
 
 let current: TickProfiler | undefined;
@@ -222,8 +280,25 @@ export function tickProfiler(): TickProfiler | undefined {
   return current;
 }
 
+let sync: (() => void) | undefined;
+
+/**
+ * C-265: install (or with `undefined`, remove) the hook that turns profiling
+ * on or off at the start of every loop tick, so the runtime switch takes
+ * effect on the next cycle without a restart.
+ */
+export function setTickProfileSync(hook: (() => void) | undefined): void {
+  sync = hook;
+}
+
+/** Remove `hook` only if it is still the installed one. */
+export function clearTickProfileSync(hook: () => void): void {
+  if (sync === hook) sync = undefined;
+}
+
 /** Pass-through unless profiling is on. */
 export function profileTick<T>(loop: string, run: () => Promise<T>) {
+  sync?.();
   return current ? current.tick(loop, run) : run();
 }
 
@@ -231,12 +306,14 @@ export function profileSpan<T>(
   name: string,
   run: () => Promise<T>,
 ): Promise<T> {
-  return current ? current.span(name, run) : run();
+  const profiler = owner.getStore() ?? current;
+  return profiler ? profiler.span(name, run) : run();
 }
 
 /** Pass-through unless profiling is on; never yields to the event loop. */
 export function profileSpanSync<T>(name: string, run: () => T): T {
-  return current ? current.spanSync(name, run) : run();
+  const profiler = owner.getStore() ?? current;
+  return profiler ? profiler.spanSync(name, run) : run();
 }
 
 /** `CARDIGAN_TICK_PROFILE=1` turns measurement on; anything else keeps it off. */
@@ -244,4 +321,102 @@ export function tickProfileEnabled(env: {
   readonly CARDIGAN_TICK_PROFILE?: string | undefined;
 }): boolean {
   return env.CARDIGAN_TICK_PROFILE === "1";
+}
+
+export interface TickProfileSwitchOptions {
+  /** `CARDIGAN_TICK_PROFILE=1`: measure regardless of the runtime switch. */
+  readonly forced: boolean;
+  /** The human's runtime switch; read at the start of every loop tick. */
+  readonly enabled: () => boolean;
+  readonly create: () => TickProfiler;
+  /** Install `tickStoreObserver` while any profiler is alive. */
+  readonly attach: () => void;
+  /** Remove it once the last (possibly retiring) profiler has finished. */
+  readonly detach: () => void;
+  /** A failing read keeps the current state; report it once per failure run. */
+  readonly onError?: (error: unknown) => void;
+}
+
+/**
+ * C-265: owns the process-wide profiler. `sync()` creates it when measurement
+ * should be on and retires it when it should be off: new ticks stop sampling
+ * at once, ticks already running keep full attribution, and the last report
+ * window is flushed when they end.
+ */
+export class TickProfileSwitch {
+  readonly #options: TickProfileSwitchOptions;
+  #profiler: TickProfiler | undefined;
+  #alive = 0;
+  #failing = false;
+  #closed = false;
+
+  constructor(options: TickProfileSwitchOptions) {
+    this.#options = options;
+  }
+
+  get profiler(): TickProfiler | undefined {
+    return this.#profiler;
+  }
+
+  sync(): void {
+    if (this.#closed) return;
+    let on = this.#options.forced;
+    if (!on) {
+      try {
+        on = this.#options.enabled();
+        this.#failing = false;
+      } catch (error) {
+        if (!this.#failing) this.#options.onError?.(error);
+        this.#failing = true;
+        return;
+      }
+    }
+    if (on && !this.#profiler) {
+      const profiler = this.#options.create();
+      this.#profiler = profiler;
+      if (this.#alive++ === 0) this.#options.attach();
+      setTickProfiler(profiler);
+    } else if (!on && this.#profiler) this.#retire();
+  }
+
+  /** Stop measuring for good; later `sync()` calls do nothing. */
+  close(): void {
+    this.#closed = true;
+    if (this.#profiler) this.#retire();
+  }
+
+  #retire(): void {
+    const profiler = this.#profiler as TickProfiler;
+    this.#profiler = undefined;
+    if (tickProfiler() === profiler) setTickProfiler(undefined);
+    profiler.retire(() => {
+      if (--this.#alive === 0) this.#options.detach();
+    });
+  }
+}
+
+const SHA = /^[0-9a-f]{40}$/u;
+
+/**
+ * C-265: the commit the server runs from. A self-deploy release is a detached
+ * checkout, so `.git/HEAD` holds the SHA; a branch checkout resolves the loose
+ * ref. Anything else (packed refs, worktrees, no Git) is "unknown". Only a
+ * 40-hex SHA is ever returned, so no path or file content reaches the logs.
+ */
+export function releaseSha(
+  root = join(dirname(fileURLToPath(import.meta.url)), "../../.."),
+): string {
+  try {
+    const head = readFileSync(join(root, ".git", "HEAD"), "utf8").trim();
+    if (SHA.test(head)) return head;
+    const ref = /^ref: (refs\/heads\/[A-Za-z0-9._/-]+)$/u.exec(head)?.[1];
+    if (ref && !ref.includes(".."))
+      return (
+        SHA.exec(readFileSync(join(root, ".git", ref), "utf8").trim())?.[0] ??
+        "unknown"
+      );
+  } catch {
+    // Not a Git checkout or unreadable: fall through.
+  }
+  return "unknown";
 }

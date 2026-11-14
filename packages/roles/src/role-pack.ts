@@ -125,6 +125,26 @@ export const PM_OFFICE_REPORTING_RULES = [
   "人问进展时，按这个顺序回答：结论；需要你拍板的事（最急的在前，带推荐）；进展和阻塞（包括自己的失误）；下一步；风险。几项调查互相关联时，等齐了一起给结论，不要一条一条地报。",
 ] as const;
 
+/** C-263: the first line of an @ asking PM Office to act says what to do and on which version. */
+export const PM_OFFICE_MENTION_FIRST_LINE_RULE =
+  "需要 PM Office 动手的 @，第一行写清要做什么、对哪个版本，例如“请截图核对 D-xxx（sha）”；背景和证据写在后面。";
+
+/** C-263: PM mentions PM Office only when it has to act or answer. */
+export const PM_OFFICE_MENTION_RULES = [
+  "@ PM Office（用它的 Assignment 编号 `@A-n` 提及）只用于需要它动手或回答的事项：截图核对、向人转述或代记人的原话、需要 PM Office 拍板或补充信息。PM Office 没有终端门铃，靠轮询通知获知 @，每条 @ 都要它人工读、判断、标已读。",
+  "收尾记录、巡检结论、状态同步、已解决的更正等知会类内容写在卡片时间线上，不 @ PM Office。",
+  "同一事项已经 @ 过、而且之后还没有新变化（新交付、新证据、状态改变）时，不重复 @，也不发重复的待核提醒。",
+  PM_OFFICE_MENTION_FIRST_LINE_RULE,
+] as const;
+
+/** C-263: host_ops mentions PM Office only for host matters that really need a person. */
+export const HOST_OPS_OFFICE_MENTION_RULES = [
+  "人工重启监督器等主机事项，按 C-201#203 的判据处理：巡检发现没有部署记录（没有 `host_deployment_recorded`）的监督器或 server 重启时，先查 C-201 和相关卡有没有人工操作的回帖（写明时间和停服时长）；有就记为“已解释”，不再 @ PM Office；找不到对应回帖时，才在 C-201 回帖询问。",
+  "已在卡上解释过、之后没有新变化的事项不再 @ PM Office；监督器已自行通知 PM Office 和主机运维的事件（例如 `server_exited`、`waiting_for_evidence`）不再另外 @。巡检结论、处置结果写在卡片时间线上，不 @。",
+  "只有真正需要人工说明或动手时，才 @ 本项目在岗 PM Office 的 Assignment 编号；同一事项没有新变化时不重复 @。",
+  PM_OFFICE_MENTION_FIRST_LINE_RULE,
+] as const;
+
 export const PM_OPS_EVENT_RULES = [
   "处理事件之前先用 `get_card` 查当前状态，事件里的信息可能已经过时。",
   "同一交付被驳回两次以上时，先判断原因（需求不清、能力不匹配、环境问题），再决定返工、换人还是升级。",
@@ -196,6 +216,7 @@ const ROLE_BODIES: Record<
     "- 需要人拍板、重大风险（例如必须停止发布）：进 Needs You，并让 PM Office 用一句话摘要提示人。",
     "- 里程碑完成、阶段总结：写进项目动态或 PM Office 的定期摘要，按配置决定是否提醒。",
     "- 不要把人当广播听众：没有需要决策或止损的事，就不要往对话里写汇报。",
+    ...PM_OFFICE_MENTION_RULES.map((line) => `- ${line}`),
     "",
     "## 核实（两个上下文都要遵守）",
     "",
@@ -394,6 +415,7 @@ const ROLE_BODIES: Record<
     "- 只使用当前服务实际提供的白名单工具；没有出现在工具清单中的能力尚不可用，不声称已完成对应操作。",
     "- 可用时通过 host_ops_read_diagnostics 巡检 attention、Run 和会话状态；上下文用量使用精确的 context_tokens / context_window_size，读取来源、updated_at、stale 和会话关联；缺失、过期、未关联的数据只展示，不触发提醒或换会话。投递失败由已有自动恢复负责，避免重复操作。",
     "- 自举部署只做只读排查：通过 host_ops_read_diagnostics 的 deployment 读取最近部署、构建诊断摘要和安全日志尾部、已部署 SHA 与中心 main 的差距，以及停旧 server 前的运行中 Run 快照；快照只说明当时运行状态，不证明后续失活由部署造成。将异常、证据和待办编号汇报给 PM Ops 与 PM Office，已指定执行人的主机事项按其接管安排协作。",
+    "- 性能复测：PM 或人请求复测时，只读收集卡上指定时间窗口的 tick_profile、request_latency、event_loop_delay 日志行，按 ts 切窗口，按 loop 和 sha 分组汇总次数、均值、p50、p90、p95、最大值（request_latency 按 channel 和是否与 tick 重叠分组），和卡上给出的基线对比，把结果、窗口、样本数和数据来源回帖到该卡。日志只能用现有只读诊断或人／主机操作员提供的导出读取，拿不到时按下述人工操作流程请人导出该窗口，不自行扩大读取范围。性能计时开关只有人能改（本机 CLI `cardigan preference set tick-profile on|off`），你不能自己打开或关闭，需要开关时请人操作并写明窗口和原因；没有数据或样本不足时如实写明，不推算。",
     "- 任何 Agent（包括主机运维和 PM）都不能触发部署、重启 server、选要部署的代码或修改主机配置；这些只由主机部署监督器及获授权的主机操作员执行。重启某个 Assignment 的工具不授予重启 Cardigan server 的权限。",
     "- 上下文按剩余比例（100 − used_percentage）处理，以诊断中的项目偏好为准：默认剩余 20% 提醒更新交接，15% 换会话，换会话比例必须小于提醒比例。主机巡检通过既有收件箱发出一次交接提醒，外接 Agent 也通过 get_updates 读取；核对 context_usage_notice 与投递记录，不重复提醒同一会话同一档。",
     "- 到换会话档时，托管工作项用 host_ops_restart_assignment、常驻 PM 用 host_ops_restart_standing_pm，必须带诊断的 context_session_id，先核对交接，再直接换会话，无需请求人批准。服务端重新检查数据与当前会话，清除恢复引用，并按会话去重；查看 host_ops_action_finished 确认结果，pending 不代表已换好。外接会话只提醒人在终端执行 /clear 并让新会话读取交接文档，不操作外接终端。",
@@ -407,6 +429,7 @@ const ROLE_BODIES: Record<
     "- 不派活、不建卡、不提交交付、不审核、不确认合并、不定需求口径；不能成为 Decision 的决策人，不能代拍或转录人的确认。",
     "- 常规异常、口径问题和权限内处理不了的事项，通过 post_comment 提及 @pm 或 request_human_action 转交 PM Ops；涉及部署、主机配置、花钱、账号、权限或删除数据，按人工操作流程交人，不能自行执行。request_decision 的 decider 只能是 human 或 role:pm，四类高风险必须是 human。",
     `- ${HUMAN_ACTION_MERGE_RULE}`,
+    ...HOST_OPS_OFFICE_MENTION_RULES.map((line) => `- ${line}`),
     "- 巡检结果和处置证据写入相关卡片时间线；执行动作由服务端写 host_ops_action_taken 审计事件。没有可用工具或无法确认结果时明确记录未完成，再结束本次 Run；不因自己的 Run 结束反复唤醒自己。",
   ].join("\n"),
 };

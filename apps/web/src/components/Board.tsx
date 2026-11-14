@@ -10,6 +10,7 @@ import {
 import type { CardListItem } from "../api.js";
 import type { CardDisplay } from "../card-display.js";
 import { BOARD_STATUSES, cardStatusLabel } from "../status.js";
+import { useBoardPan } from "../useBoardPan.js";
 import { BoardCard } from "./BoardCard.js";
 import { StatusTag } from "./Foundation.js";
 import { Tooltip } from "./Tooltip.js";
@@ -174,6 +175,7 @@ export function Board({
   /** §9 U6a: one row that scrolls inside the board; the hint only flags more columns. */
   const scroller = useRef<HTMLElement>(null);
   const [more, setMore] = useState(false);
+  useBoardPan(scroller);
   const measure = useCallback(() => {
     const element = scroller.current;
     if (!element) return;

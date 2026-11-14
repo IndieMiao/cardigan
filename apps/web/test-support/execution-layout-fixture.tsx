@@ -95,6 +95,8 @@ const rows: readonly Row[] = [
     8,
     { standing_mode: "ops" },
   ],
+  // C-262: the standing host_ops Assignment is not a PM.
+  ["A-682", "大乔", "主机运维", "da-qiao", "host_ops", null, null, "idle", 10],
   [
     "A-589",
     "鲁肃",

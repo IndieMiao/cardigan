@@ -164,9 +164,7 @@ export class HostOpsService {
     context.revalidateToken?.();
     return this.options.store.uow.read((tx) => {
       const state = loadCommandState(tx, actor.project_id);
-      const view = unwrap(
-        hostOpsReadDiagnostics(state, actor, this.clock.now()),
-      ).data;
+      const view = unwrap(hostOpsReadDiagnostics(state, actor)).data;
       const attention = readAttention(
         this.options.store,
         actor.project_id,
@@ -209,7 +207,6 @@ export class HostOpsService {
           first_seen_at: f.first_seen_at,
           last_seen_at: f.last_seen_at,
         })),
-        needs_you: view.needs_you,
         actions: view.actions,
         // Full read-only state stays visible; C-56 failures are excluded from patrol work.
         runs,

@@ -277,6 +277,26 @@ function ContextCell({
     </div>
   );
 }
+/** C-262: standing roles with their own label wording. */
+const labelledStandingRoles = new Set(["pm", "host_ops"]);
+/**
+ * C-262: the label for a standing (project-level) Assignment, decided by
+ * role_id and standing_mode only, never by the employee's name. A standing
+ * role without its own wording falls back to "常驻（角色显示名）", or the
+ * role_id when no display name is known.
+ */
+export function standingLabel(
+  a: Pick<ExecutionAssignment, "role_id" | "standing_mode">,
+  roleName?: string,
+): string {
+  if (a.role_id === "pm") {
+    if (a.standing_mode === "office") return "常驻 PM · 前台";
+    if (a.standing_mode === "ops") return "常驻 PM · 后台";
+    return "常驻 PM（项目级）";
+  }
+  if (a.role_id === "host_ops") return "主机运维（常驻）";
+  return `常驻（${roleName?.trim() || a.role_id}）`;
+}
 /**
  * C-207: what the Assignment is working on; Card, priority and work item.
  * C-232: the Card title follows on its own line, cut to one line with the
@@ -285,9 +305,11 @@ function ContextCell({
 function TaskCell({
   a,
   projectId,
+  roleName,
 }: {
   readonly a: ExecutionAssignment;
   readonly projectId: string;
+  readonly roleName?: string | undefined;
 }) {
   const row = (
     <IdentityRow className="execution-task">
@@ -298,12 +320,7 @@ function TaskCell({
           <IdTag id={a.work_item_id} label="工作项" />
         </>
       ) : (
-        <span>常驻 PM（项目级）</span>
-      )}
-      {a.standing_mode && (
-        <span className="hint">
-          {a.standing_mode === "office" ? "PM 前台" : "PM 后台"}
-        </span>
+        <span className="execution-standing">{standingLabel(a, roleName)}</span>
       )}
     </IdentityRow>
   );
@@ -405,6 +422,8 @@ interface RowProps {
   readonly projectId: string;
   readonly open: boolean;
   readonly onOpen: (trigger: HTMLElement) => void;
+  /** C-262: the role's display name, for the standing-label fallback. */
+  readonly roleName?: string | undefined;
 }
 /** C-106: the Assignment id opens the drawer; no separate 详情 button. */
 function OpenButton({
@@ -434,7 +453,14 @@ function OpenButton({
     </Tooltip>
   );
 }
-function AssignmentRow({ a, run, projectId, open, onOpen }: RowProps) {
+function AssignmentRow({
+  a,
+  run,
+  projectId,
+  open,
+  onOpen,
+  roleName,
+}: RowProps) {
   const button = useRef<HTMLButtonElement>(null);
   return (
     <tr
@@ -451,7 +477,7 @@ function AssignmentRow({ a, run, projectId, open, onOpen }: RowProps) {
         </IdentityRow>
       </td>
       <td data-column="task">
-        <TaskCell a={a} projectId={projectId} />
+        <TaskCell a={a} projectId={projectId} roleName={roleName} />
       </td>
       <td data-column="state">
         <div className="execution-state">
@@ -476,7 +502,14 @@ function AssignmentRow({ a, run, projectId, open, onOpen }: RowProps) {
   );
 }
 /** C-207: the same Assignment as a card below 760px; DOM order = reading order. */
-function AssignmentCard({ a, run, projectId, open, onOpen }: RowProps) {
+function AssignmentCard({
+  a,
+  run,
+  projectId,
+  open,
+  onOpen,
+  roleName,
+}: RowProps) {
   const button = useRef<HTMLButtonElement>(null);
   const name = a.employee?.name ?? a.author_display ?? a.role_id;
   return (
@@ -495,7 +528,7 @@ function AssignmentCard({ a, run, projectId, open, onOpen }: RowProps) {
           <RuntimeState a={a} />
         </span>
       </IdentityRow>
-      <TaskCell a={a} projectId={projectId} />
+      <TaskCell a={a} projectId={projectId} roleName={roleName} />
       <div className="execution-state-note">
         <RunNote a={a} run={run} />
       </div>
@@ -906,6 +939,31 @@ export function ExecutionPage({
     load,
     revision + contextRevision,
   );
+  // C-262: role display names, read only when a standing role has no label
+  // of its own; a failed read keeps the role_id fallback.
+  const [roleNames, setRoleNames] = useState<ReadonlyMap<string, string>>(
+    () => new Map(),
+  );
+  const needsRoleNames =
+    data?.assignments.some(
+      (a) => !a.work_item_id && !labelledStandingRoles.has(a.role_id),
+    ) ?? false;
+  useEffect(() => {
+    if (!needsRoleNames) return;
+    let live = true;
+    client.roles(projectId).then(
+      (list) => {
+        if (live)
+          setRoleNames(
+            new Map(list.roles.map((r) => [r.role_id, r.display_name])),
+          );
+      },
+      () => undefined,
+    );
+    return () => {
+      live = false;
+    };
+  }, [client, projectId, needsRoleNames]);
   const [sort, setSort] = useState<ExecutionSort>(() =>
     readExecutionSort(projectId),
   );
@@ -1008,6 +1066,7 @@ export function ExecutionPage({
                   a={assignment}
                   run={latestRun(assignment.id)}
                   projectId={projectId}
+                  roleName={roleNames.get(assignment.role_id)}
                   open={assignment.id === selected}
                   onOpen={(trigger) => open(assignment.id, trigger)}
                 />
@@ -1063,6 +1122,7 @@ export function ExecutionPage({
                       a={assignment}
                       run={latestRun(assignment.id)}
                       projectId={projectId}
+                      roleName={roleNames.get(assignment.role_id)}
                       open={assignment.id === selected}
                       onOpen={(trigger) => open(assignment.id, trigger)}
                     />

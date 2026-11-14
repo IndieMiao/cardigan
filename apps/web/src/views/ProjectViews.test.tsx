@@ -414,7 +414,7 @@ test("execution labels a standing PM as project-level and keeps the card/work it
     name: "查看 A-9 详情",
   });
   const row = toggle.closest("tr");
-  expect(row?.textContent).toContain("常驻 PM（项目级）");
+  expect(row?.textContent).toContain("常驻 PM · 后台");
   expect(row?.textContent).not.toContain("项目级事项常驻");
 });
 

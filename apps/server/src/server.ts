@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { tickProfileOn } from "@cardigan/domain";
 import {
   executorExecution,
   HostOpsService,
@@ -44,10 +45,13 @@ import { DEFAULT_HOST_OPS_PATROL_INTERVAL_MS } from "./host-ops-patrol.js";
 import type { ShutdownTimer } from "./lifecycle.js";
 import { createListenRetry } from "./listen-retry.js";
 import {
-  setTickProfiler,
+  clearTickProfileSync,
+  releaseSha,
+  setTickProfileSync,
   TickProfiler,
+  TickProfileSwitch,
   tickProfileEnabled,
-  tickProfiler,
+  tickStoreObserver,
 } from "./tick-profile.js";
 import type { WebConfig } from "./web/config.js";
 import { type RunningWebServer, startWebServer } from "./web/server.js";
@@ -159,29 +163,50 @@ export async function startCardiganServer(
     );
   const store = options.store ?? Store.open({ dataDir: config.dataDir });
   const ownsStore = options.store === undefined;
-  // C-216: opt-in tick measurement; off unless CARDIGAN_TICK_PROFILE=1.
-  const profiler = tickProfileEnabled(runtimeEnv)
-    ? new TickProfiler({
+  // C-216: opt-in tick measurement. C-265: the human's `tick-profile`
+  // preference turns it on or off at the start of the next loop tick, without
+  // a restart; CARDIGAN_TICK_PROFILE=1 still forces it on.
+  const warnLine =
+    options.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
+  const sha = releaseSha();
+  const profiles = new TickProfileSwitch({
+    forced: tickProfileEnabled(runtimeEnv),
+    enabled: () =>
+      store.uow.read((tx) =>
+        store
+          .listProjects()
+          .some((project) =>
+            tickProfileOn(tx.project_preferences.get(project.id, project.id)),
+          ),
+      ),
+    create: () =>
+      new TickProfiler({
         log: (line) => process.stdout.write(`${JSON.stringify(line)}\n`),
-      })
-    : undefined;
-  if (profiler) {
-    setTickProfiler(profiler);
-    store.observe(profiler.storeObserver);
-  }
+        sha,
+      }),
+    attach: () => store.observe(tickStoreObserver),
+    detach: () => store.observe(undefined),
+    onError: (error) =>
+      warnLine(
+        `性能计时开关读取失败，保持当前状态：${error instanceof Error ? error.message : String(error)}`,
+      ),
+  });
+  const syncProfiles = () => profiles.sync();
+  setTickProfileSync(syncProfiles);
+  profiles.sync();
+  let profilerStopped = false;
   const stopProfiler = () => {
-    if (!profiler) return;
-    profiler.stop();
-    store.observe(undefined);
-    if (tickProfiler() === profiler) setTickProfiler(undefined);
+    if (profilerStopped) return;
+    profilerStopped = true;
+    clearTickProfileSync(syncProfiles);
+    profiles.close();
   };
-  const mcpLog: Logger | undefined = profiler
-    ? (entry) => {
-        if (entry.event === "http" && entry.duration_ms !== undefined)
-          profiler.request("mcp", entry.duration_ms);
-        (options.log ?? stdoutLogger)(entry);
-      }
-    : options.log;
+  // Request latencies go to whichever profiler is installed right now.
+  const mcpLog: Logger = (entry) => {
+    if (entry.event === "http" && entry.duration_ms !== undefined)
+      profiles.profiler?.request("mcp", entry.duration_ms);
+    (options.log ?? stdoutLogger)(entry);
+  };
   // M4.5: stamp `standing_mode` on rows written before the field existed, so
   // routing and token issuance only ever read the field.
   store.backfillStandingModes();
@@ -304,7 +329,7 @@ export async function startCardiganServer(
         deliveryVerifier: git.verifierFor,
         ...(hostOps ? { hostOps: hostOps.tools } : {}),
         pinDelivery: (request) => git.pinDelivery(request),
-        ...(mcpLog === undefined ? {} : { log: mcpLog }),
+        log: mcpLog,
       }),
     );
   } catch (error) {
@@ -342,24 +367,17 @@ export async function startCardiganServer(
             options.dispatcher?.hostOpsPatrolIntervalMs ??
             config.hostOpsPatrolIntervalMs ??
             DEFAULT_HOST_OPS_PATROL_INTERVAL_MS,
-          ...(profiler
-            ? {
-                log: (event) => {
-                  if (
-                    event.event === "web_http" &&
-                    typeof event.duration_ms === "number"
-                  )
-                    profiler.request("web", event.duration_ms);
-                  (
-                    webOptions.log ??
-                    ((line) =>
-                      process.stdout.write(`${JSON.stringify(line)}\n`))
-                  )(event);
-                },
-              }
-            : webOptions.log === undefined
-              ? {}
-              : { log: webOptions.log }),
+          log: (event) => {
+            if (
+              event.event === "web_http" &&
+              typeof event.duration_ms === "number"
+            )
+              profiles.profiler?.request("web", event.duration_ms);
+            (
+              webOptions.log ??
+              ((line) => process.stdout.write(`${JSON.stringify(line)}\n`))
+            )(event);
+          },
           ...(webOptions.stream === undefined
             ? {}
             : { stream: webOptions.stream }),
