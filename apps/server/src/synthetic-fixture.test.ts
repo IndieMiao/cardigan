@@ -1,10 +1,12 @@
 import { execFile } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer, request } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { crc32, inflateSync } from "node:zlib";
-import { decisionCategories, states } from "@cardigan/domain";
+import { decisionCategories, states, validateRole } from "@cardigan/domain";
 import { Store } from "@cardigan/store";
 import { afterAll, beforeAll, expect, test } from "vitest";
 import { startFixtureWeb } from "../test-support/fixture-web.mjs";
@@ -293,6 +295,140 @@ test("independent Web renders relationships, merge checks, notices and blobs; pr
   }
   expect(tableDigests(store.database)).toEqual(before);
   expect(store.webPasswordConfigured()).toBe(false);
+});
+
+test("preview cannot send credentials to another upstream through normalized request paths", async () => {
+  let received = 0;
+  const sink = createServer((_req, res) => {
+    received++;
+    res.end("synthetic-sink");
+  });
+  await new Promise<void>((resolve, reject) => {
+    sink.once("error", reject);
+    sink.listen(0, "127.0.0.1", resolve);
+  });
+  let preview: { url: string; close(): Promise<void> } | undefined;
+  try {
+    preview = await startFixtureWeb({
+      out,
+      password: "synthetic-preview-password",
+    });
+    const login = await fetch(`${preview.url}/api/login`, {
+      method: "POST",
+      headers: { origin: preview.url, "content-type": "application/json" },
+      body: JSON.stringify({ password: "synthetic-preview-password" }),
+    });
+    expect(login.status).toBe(200);
+    const cookie = required(login.headers.get("set-cookie"));
+    const address = new URL(preview.url);
+    const target = `127.0.0.1:${(sink.address() as AddressInfo).port}`;
+    // node:http preserves the raw request target; fetch would normalize it first.
+    const raw = (path: string) =>
+      new Promise<{ status: number | undefined; body: string }>(
+        (resolve, reject) => {
+          const req = request(
+            {
+              hostname: address.hostname,
+              port: address.port,
+              path,
+              headers: { cookie, origin: address.origin },
+            },
+            (res) => {
+              let body = "";
+              res.setEncoding("utf8");
+              res.on("data", (chunk) => {
+                body += chunk;
+              });
+              res.on("end", () => resolve({ status: res.statusCode, body }));
+              res.on("error", reject);
+            },
+          );
+          req.on("error", reject);
+          req.end();
+        },
+      );
+    for (const path of [
+      `/%2e//${target}/synthetic-probe`,
+      `/.//${target}/synthetic-probe`,
+      `/part/%2e%2e//${target}/synthetic-probe`,
+      `/%2E%2E//${target}/synthetic-probe?check=1`,
+      `/%2e/\\${target}/synthetic-probe`,
+      `//${target}/synthetic-probe`,
+      `http://${target}/synthetic-probe`,
+    ]) {
+      expect((await raw(path)).status, path).toBe(403);
+    }
+    expect(received).toBe(0);
+    const normal = await raw("/api/projects/synthetic/./cards?limit=1&page=2");
+    expect(normal.status).toBe(200);
+    expect(JSON.parse(normal.body)).toMatchObject({ page: 2, page_size: 1 });
+  } finally {
+    await preview?.close();
+    await new Promise<void>((resolve, reject) =>
+      sink.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+});
+
+test("generated role details satisfy the Web presentation and domain contracts", async () => {
+  const preview = await startFixtureWeb({
+    out,
+    password: "synthetic-preview-password",
+  });
+  try {
+    const login = await fetch(`${preview.url}/api/login`, {
+      method: "POST",
+      headers: { origin: preview.url, "content-type": "application/json" },
+      body: JSON.stringify({ password: "synthetic-preview-password" }),
+    });
+    expect(login.status).toBe(200);
+    const headers = { cookie: required(login.headers.get("set-cookie")) };
+    const catalog = await fetch(`${preview.url}/api/projects/synthetic/roles`, {
+      headers,
+    });
+    expect(catalog.status).toBe(200);
+    const { roles } = await catalog.json();
+    expect(roles).toHaveLength(7);
+    for (const { role_id } of roles) {
+      const response = await fetch(
+        `${preview.url}/api/projects/synthetic/roles/${role_id}`,
+        { headers },
+      );
+      expect(response.status).toBe(200);
+      const { role } = await response.json();
+      expect(validateRole(role).ok, role_id).toBe(true);
+      expect(role).toMatchObject({
+        role_id,
+        version: 1,
+        status: "active",
+        display_name: expect.any(String),
+        harness: expect.any(String),
+        launch_profile_ref: expect.any(String),
+        core_prompt: expect.any(String),
+        instructions: expect.any(String),
+        allowed_tools: [],
+        capabilities: [],
+        abilities: expect.any(Array),
+        required_machine_tags: expect.any(Array),
+      });
+      expect(["produce", "verify", "standing"]).toContain(role.kind);
+      expect(["none", "readonly", "write"]).toContain(role.worktree);
+      // RoleFields renders these arrays without optional guards.
+      for (const key of [
+        "allowed_tools",
+        "capabilities",
+        "abilities",
+        "required_machine_tags",
+      ]) {
+        expect(Array.isArray(role[key]), key).toBe(true);
+        expect(
+          role[key].every((value: unknown) => typeof value === "string"),
+        ).toBe(true);
+      }
+    }
+  } finally {
+    await preview.close();
+  }
 });
 
 test("CLI works with private files inaccessible and refuses existing output", async () => {

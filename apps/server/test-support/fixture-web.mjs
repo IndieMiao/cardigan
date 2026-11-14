@@ -64,6 +64,7 @@ export async function startFixtureWeb({
         { port: 0, ...(staticDir ? { staticDir } : {}) },
       ),
     });
+    const upstreamUrl = new URL(web.url);
     let publicUrl;
     proxy = createServer((req, res) => {
       const reject = (status, message) => {
@@ -85,6 +86,7 @@ export async function startFixtureWeb({
       // Do not rewrite an untrusted Origin/Host into an authenticated local request.
       if (
         url.origin !== publicUrl ||
+        url.pathname.startsWith("//") ||
         req.headers.host !== new URL(publicUrl).host ||
         (req.headers.origin && req.headers.origin !== publicUrl)
       ) {
@@ -102,12 +104,17 @@ export async function startFixtureWeb({
         return;
       }
       const upstream = request(
-        new URL(url.pathname + url.search, web.url),
         {
+          // The destination belongs to the server we just started. Never
+          // resolve caller-controlled paths as URLs (// can replace its host).
+          protocol: upstreamUrl.protocol,
+          hostname: upstreamUrl.hostname,
+          port: upstreamUrl.port,
+          path: url.pathname + url.search,
           method: req.method,
           headers: {
             ...req.headers,
-            host: new URL(web.url).host,
+            host: upstreamUrl.host,
             ...(req.headers.origin ? { origin: web.url } : {}),
           },
         },

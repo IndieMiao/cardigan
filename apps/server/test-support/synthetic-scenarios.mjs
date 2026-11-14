@@ -1,4 +1,5 @@
 import { decisionCategories, states } from "@cardigan/domain";
+import { roleDocument } from "@cardigan/store";
 
 export const MERGE_STATUSES = [
   "queued",
@@ -86,13 +87,35 @@ export function seedScenarios(
   });
 
   roles.forEach((role, i) => {
-    tx.roles.put(project, {
-      role_id: role,
-      role_version: 1,
-      allowed_tools: [],
-      capabilities: [],
-      title: `合成岗位 ${i + 1}`,
-    });
+    const kind = ["pm", "host_ops"].includes(role)
+      ? "standing"
+      : ["coder", "ui_ux_designer"].includes(role)
+        ? "produce"
+        : "verify";
+    tx.roles.put(
+      project,
+      roleDocument({
+        role_id: role,
+        version: 1,
+        status: "active",
+        display_name: `合成岗位 ${i + 1}`,
+        kind,
+        harness: ["codex", "pi", "claude-code"][i % 3],
+        launch_profile_ref: `synthetic-profile-${(i % 3) + 1}`,
+        core_prompt: "合成岗位说明，仅用于界面展示。",
+        instructions: "合成岗位说明，仅用于界面展示。",
+        allowed_tools: [],
+        capabilities: [],
+        abilities: [],
+        worktree:
+          kind === "standing"
+            ? "none"
+            : kind === "produce"
+              ? "write"
+              : "readonly",
+        required_machine_tags: [],
+      }),
+    );
     const id = tx.global_ids.nextEmployeeId();
     tx.employees.put({
       id,
