@@ -468,36 +468,55 @@ test("a pending check blocks completion even when the ordinary reviewers already
     "failed",
   );
 });
-test("precheck waiting does not raise an exhausted review budget until the check passes", async () => {
-  const f = setup();
-  f.set({
-    ...f.state(),
-    reviews: [1, 2, 3].map((n) => ({
-      id: id("review", n),
-      work_item_id: verifier,
-      delivery_id: id("delivery", n),
-      run_id: id("run", 2),
-      target_sha: subject.value,
-      kind: "code" as const,
-      issues: [],
-      verdict: "pass" as const,
-      blocking: false,
-      recheck_required: false,
-      attachments: [],
-    })),
-  });
-  await f.deliver();
-  expect(f.state().decisions).toEqual([]);
-  f.begin();
-  f.update({
-    status: "passed",
-    checks: [{ name: "test", status: "passed", exit_code: 0 }],
-  });
-  expect(f.state().decisions).toContainEqual(
-    expect.objectContaining({ trigger: "review_limit" }),
-  );
-  expect(f.state().reviews).toHaveLength(3);
-});
+test.each([false, true])(
+  "precheck waiting defers exhausted budgets with delegation enabled=%s until the check passes",
+  async (delegation) => {
+    const f = setup();
+    f.set({
+      ...f.state(),
+      assignments: f
+        .state()
+        .assignments.map((a) =>
+          a.scope === "standing" ? { ...a, standing_mode: "ops" as const } : a,
+        ),
+      project_preferences: [
+        {
+          id: human.project_id,
+          auto_merge_after_minutes: null,
+          independent_review_limit_delegation: delegation,
+          independent_review_limit_delegation_max: 3,
+        },
+      ],
+      reviews: [1, 2, 3].map((n) => ({
+        id: id("review", n),
+        work_item_id: verifier,
+        delivery_id: id("delivery", n),
+        run_id: id("run", 2),
+        target_sha: subject.value,
+        kind: "code" as const,
+        issues: [],
+        verdict: "pass" as const,
+        blocking: false,
+        recheck_required: false,
+        attachments: [],
+      })),
+    });
+    await f.deliver();
+    expect(f.state().decisions).toEqual([]);
+    f.begin();
+    f.update({
+      status: "passed",
+      checks: [{ name: "test", status: "passed", exit_code: 0 }],
+    });
+    expect(f.state().decisions).toContainEqual(
+      expect.objectContaining({
+        trigger: "review_limit",
+        decider: delegation ? "role:pm" : "human",
+      }),
+    );
+    expect(f.state().reviews).toHaveLength(3);
+  },
+);
 
 test("system auto assignment defers a first independent reviewer without a fallback notice, then assigns after passing", async () => {
   const f = setup();

@@ -756,6 +756,11 @@ export async function serveWrite(
           // C-253: the range (integers 1..REVIEW_MAX_ROUNDS_CEILING) is checked by the domain.
           review_max_rounds: z.number().optional(),
           independent_review_max_rounds: z.number().optional(),
+          independent_review_limit_delegation: z.boolean().optional(),
+          independent_review_limit_delegation_max: z
+            .number()
+            .nullable()
+            .optional(),
           board_collapsed_lanes: z
             .record(z.string().max(64), z.boolean().nullable())
             .optional(),
@@ -826,6 +831,18 @@ export async function serveWrite(
             ? {
                 independent_review_max_rounds:
                   input.independent_review_max_rounds,
+              }
+            : {}),
+          ...(input.independent_review_limit_delegation !== undefined
+            ? {
+                independent_review_limit_delegation:
+                  input.independent_review_limit_delegation,
+              }
+            : {}),
+          ...(input.independent_review_limit_delegation_max !== undefined
+            ? {
+                independent_review_limit_delegation_max:
+                  input.independent_review_limit_delegation_max,
               }
             : {}),
         },

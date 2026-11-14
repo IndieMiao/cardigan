@@ -534,6 +534,11 @@ export interface ReviewView extends Review {
   readonly stale: boolean;
 }
 export interface DecisionResolution {
+  /** C-301: server-recorded version consuming an independent review grant. */
+  readonly review_limit_target?: {
+    readonly delivery_id: DeliveryId;
+    readonly subject: Delivery["subject"];
+  };
   /** Q-440: human-only override, including the blockers observed in its transaction. */
   readonly merge_override?: {
     readonly reason: string;

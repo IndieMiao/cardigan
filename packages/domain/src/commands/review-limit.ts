@@ -3,6 +3,10 @@ import type { Decision, WorkItem } from "../entities.js";
 import type { CommandDraft } from "./core.js";
 import { assignDecision } from "./delegation.js";
 import { endRun } from "./end-run.js";
+import {
+  INDEPENDENT_REVIEW_LIMIT_HUMAN_REASON,
+  independentReviewLimitDelegationAllowed,
+} from "./independent-review-limit-delegation.js";
 import { REVIEW_LIMIT_PLAIN_SUMMARY } from "./plain-summary.js";
 import { currentReviewTarget } from "./review-round.js";
 
@@ -82,10 +86,10 @@ export function requestReviewLimit(d: CommandDraft, item: WorkItem) {
       affected_work_items: [item.id],
       blocking: true,
       decider: "human",
-      ...(item.role_id === "independent_reviewer"
+      ...(item.role_id === "independent_reviewer" &&
+      !independentReviewLimitDelegationAllowed(d, item)
         ? {
-            human_required_reason:
-              "独立复核审核轮数已用完，必须由人确认后续处理",
+            human_required_reason: INDEPENDENT_REVIEW_LIMIT_HUMAN_REASON,
           }
         : {}),
       doc_refs: [],

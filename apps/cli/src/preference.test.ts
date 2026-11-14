@@ -82,6 +82,77 @@ test("preference get/set persists minutes and off, with project isolation", asyn
       .filter((e) => e.type === "project_preferences_updated"),
   ).toHaveLength(2);
 });
+
+test("independent review grant defaults off and enabling records the approved three-use budget", async () => {
+  const key = "independent-review-limit-delegation";
+  expect(await run(["preference", "get", key])).toBe(0);
+  expect(await run(["preference", "set", key, "on"])).toBe(0);
+  expect(
+    store.uow.read((tx) =>
+      tx.project_preferences.get("preferences", "preferences"),
+    ),
+  ).toMatchObject({
+    independent_review_limit_delegation: true,
+    independent_review_limit_delegation_max: 3,
+  });
+  for (const max of ["1", "2", "4", "0", "1.5", "off"])
+    expect(await run(["preference", "set", `${key}-max`, max])).not.toBe(0);
+  expect(await run(["preference", "set", key, "off"])).toBe(0);
+  expect(
+    store.uow.read((tx) =>
+      tx.project_preferences.get("preferences", "preferences"),
+    ),
+  ).toMatchObject({
+    independent_review_limit_delegation: false,
+    independent_review_limit_delegation_max: 3,
+  });
+});
+test("precheck waiting and independent review grants persist separately when toggled together", async () => {
+  const wait = "code-review-waits-for-precheck";
+  const grant = "independent-review-limit-delegation";
+  const preferences = () =>
+    store.uow.read((tx) =>
+      tx.project_preferences.get("preferences", "preferences"),
+    );
+  for (const key of [wait, grant]) {
+    expect(await run(["preference", "get", key])).toBe(0);
+    expect(output.join("\n")).toContain(`${key}: off`);
+    expect(await run(["preference", "set", key, "on"])).toBe(0);
+  }
+  expect(preferences()).toMatchObject({
+    code_review_waits_for_precheck: true,
+    independent_review_limit_delegation: true,
+    independent_review_limit_delegation_max: 3,
+  });
+  const beforeInvalid = preferences();
+  expect(await run(["preference", "set", wait, "3"])).not.toBe(0);
+  expect(await run(["preference", "set", `${grant}-max`, "4"])).not.toBe(0);
+  expect(preferences()).toEqual(beforeInvalid);
+
+  expect(await run(["preference", "set", wait, "off"])).toBe(0);
+  expect(preferences()).toMatchObject({
+    code_review_waits_for_precheck: false,
+    independent_review_limit_delegation: true,
+    independent_review_limit_delegation_max: 3,
+  });
+  expect(await run(["preference", "set", wait, "on"])).toBe(0);
+  expect(await run(["preference", "set", grant, "off"])).toBe(0);
+  expect(preferences()).toMatchObject({
+    code_review_waits_for_precheck: true,
+    independent_review_limit_delegation: false,
+    independent_review_limit_delegation_max: 3,
+  });
+  expect(await run(["preference", "get", wait])).toBe(0);
+  expect(output).toContain(`${wait}: on`);
+  expect(await run(["preference", "get", `${grant}-max`])).toBe(0);
+  expect(output.join("\n")).toContain(`${grant}-max: 3`);
+  expect(await run(["project", "create", "other"])).toBe(0);
+  for (const key of [wait, grant]) {
+    expect(await run(["preference", "get", key, "--project", "other"])).toBe(0);
+    expect(output.join("\n")).toContain(`${key}: off`);
+  }
+});
+
 test.each(["0", "1441", "1.5", "-10", "NaN", "1e2", "on"])(
   "rejects invalid minutes %s",
   async (minutes) => {
