@@ -460,14 +460,17 @@ test.each(["merge", "request_changes"] as const)(
       ),
     ).toBe(true);
     expect(mergePlan(f.state, f.card.id).ok).toBe(false);
-    // PM cannot answer it; the human can merge or return it.
+    // C-264: the human must also wait for the reset check, but may return it.
     expect(resolve().ok).toBe(false);
-    f.commit(humanAnswer(f, next.id, option));
-    if (option === "merge") expect(mergePlan(f.state, f.card.id).ok).toBe(true);
-    else
+    if (option === "merge") {
+      expect(humanAnswer(f, next.id, option).ok).toBe(false);
+      expect(mergePlan(f.state, f.card.id).ok).toBe(false);
+    } else {
+      f.commit(humanAnswer(f, next.id, option));
       expect(f.state.cards.find((c) => c.id === f.card.id)?.status).not.toBe(
         "awaiting_merge",
       );
+    }
   },
 );
 

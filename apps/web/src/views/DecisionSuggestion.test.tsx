@@ -52,6 +52,7 @@ const merge = (overrides: Partial<NeedsDecision> = {}): NeedsDecision => ({
   assignment_id: null,
   related_cards: [{ id: "C-1", title: "界面卡" }],
   merge_confirmation: {
+    blockers: [],
     completion: {
       id: "D-9",
       work_item_id: "W-1",
@@ -238,42 +239,34 @@ test("C-192: a business decision names the suggested option and applies it", asy
   );
 });
 
-test("C-192: with open pre-merge checks the suggestion still asks for confirmation first", async () => {
+test("C-264: a merge suggestion cannot bypass waiting checks", async () => {
   const base = merge();
+  if (!base.merge_confirmation) throw new Error("Missing fixture");
   const { applySuggestion } = renderNeeds([
     merge({
       suggestion: suggestion(),
       merge_confirmation: {
-        ...(base.merge_confirmation as NonNullable<
-          NeedsDecision["merge_confirmation"]
-        >),
-        pre_merge_checks: [
-          { label: "截图核对", status: "pending", stale: false },
-        ],
+        ...base.merge_confirmation,
+        blockers: ["截图核对：待核"],
       },
     }),
   ]);
   const box = await screen.findByRole("region", { name: "Q-3 建议" });
   const trigger = within(box).getByRole("button", { name: "按建议：确认合并" });
-  trigger.focus();
+  expect(trigger.hasAttribute("disabled")).toBe(true);
+  expect(
+    within(box)
+      .getByRole("button", { name: "暂不合并" })
+      .hasAttribute("disabled"),
+  ).toBe(false);
+  expect(
+    within(box)
+      .getByRole("button", { name: "退回修改" })
+      .hasAttribute("disabled"),
+  ).toBe(false);
   fireEvent.click(trigger);
-  const firstDialog = await screen.findByRole("alertdialog");
-  fireEvent.keyDown(firstDialog, { key: "Escape", code: "Escape" });
-  await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
-  expect(document.activeElement).toBe(trigger);
-  fireEvent.click(trigger);
-  const dialog = await screen.findByRole("alertdialog");
   expect(applySuggestion).not.toHaveBeenCalled();
-  fireEvent.click(within(dialog).getByRole("button", { name: "仍然确认合并" }));
-  await waitFor(() =>
-    expect(applySuggestion).toHaveBeenCalledWith(
-      "p-1",
-      "Q-3",
-      "merge",
-      "",
-      expect.any(String),
-    ),
-  );
+  expect(screen.queryByRole("alertdialog")).toBeNull();
 });
 
 test("C-192: card details show the suggestion on the merge confirmation and apply it", async () => {

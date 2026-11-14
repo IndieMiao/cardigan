@@ -40,6 +40,7 @@ const merge = (overrides: Partial<NeedsDecision> = {}): NeedsDecision => ({
   assignment_id: null,
   related_cards: [{ id: "C-1", title: "界面卡" }],
   merge_confirmation: {
+    blockers: [],
     completion: {
       id: "D-9",
       work_item_id: "W-1",

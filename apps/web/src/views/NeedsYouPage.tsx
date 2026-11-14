@@ -502,24 +502,23 @@ export function MergeConfirmation({
   const [holding, setHolding] = useState(false);
   const [holdReason, setHoldReason] = useState("");
   const [holdUntil, setHoldUntil] = useState("");
+  const [overriding, setOverriding] = useState(false);
+  const [overrideReason, setOverrideReason] = useState("");
+  const overrideTrigger = useRef<HTMLButtonElement>(null);
+  const overrideCancel = useRef<HTMLButtonElement>(null);
   // C-192: once confirmed, only a return is still possible (failed check).
   const suggestion =
     q.status === "resolved" && q.suggestion?.option !== "request_changes"
       ? undefined
       : q.suggestion;
   const [reason, setReason] = usePrefilledReason(suggestion);
-  const [confirming, setConfirming] = useState(false);
-  // C-192: the pre-merge dialog may be confirming the suggestion.
-  const [confirmingSuggestion, setConfirmingSuggestion] = useState(false);
-  const confirmButton = useRef<HTMLButtonElement>(null);
-  const dialogTrigger = useRef<HTMLButtonElement>(null);
-  const cancelButton = useRef<HTMLButtonElement>(null);
   const action = useAction(done);
   const merge = q.merge_confirmation;
   const check = merge?.merge_check;
   const confirmed = q.status === "resolved";
   const preChecks = merge?.pre_merge_checks ?? [];
-  const openPreChecks = preChecks.filter((c) => c.status !== "passed");
+  const blockers = merge?.blockers ?? ["检查状态尚未读取，请刷新"];
+  const mergeBlocked = blockers.length > 0;
   const cardId = q.card_id ?? q.related_cards[0]?.id ?? null;
   const decide = (option: "merge", viaSuggestion = false) =>
     action.run(
@@ -533,20 +532,44 @@ export function MergeConfirmation({
     <>
       {!confirmed && (
         <button
-          ref={confirmButton}
           type="submit"
           form={`merge-${q.id}`}
           className={suggestion && !suggestion.stale ? "quiet" : undefined}
-          disabled={action.busy}
+          disabled={action.busy || mergeBlocked}
         >
           确认合并
         </button>
       )}
-      {merge?.merge_gate_enabled &&
-        !merge.merge_noop &&
-        check?.status !== "passed" && (
-          <span className="hint">检查通过后才会合并</span>
-        )}
+      {!confirmed && (
+        <div role="status" aria-label="合并前置条件">
+          {mergeBlocked ? (
+            <>
+              <p>等待中：</p>
+              <ul>
+                {blockers.map((reason) => (
+                  <li key={reason}>{reason}</li>
+                ))}
+              </ul>
+            </>
+          ) : (
+            <p>检查都已通过</p>
+          )}
+        </div>
+      )}
+      {!confirmed && mergeBlocked && (
+        <button
+          ref={overrideTrigger}
+          type="button"
+          className="quiet"
+          disabled={action.busy}
+          onClick={() => {
+            setOverrideReason("");
+            setOverriding(true);
+          }}
+        >
+          仍要合并
+        </button>
+      )}
       {merge?.merge_gate_enabled &&
         !merge.merge_noop &&
         check &&
@@ -683,11 +706,10 @@ export function MergeConfirmation({
           label={
             SUGGESTION_COPY.mergeOptions[suggestion.option] ?? suggestion.option
           }
-          busy={action.busy}
+          busy={action.busy || (suggestion.option === "merge" && mergeBlocked)}
           reason={reason}
           onReason={setReason}
-          onApply={(button) => {
-            dialogTrigger.current = button;
+          onApply={() => {
             if (suggestion.option === "request_changes")
               void action.run(
                 [projectId, q.id, "suggestion", "request_changes", reason],
@@ -700,10 +722,7 @@ export function MergeConfirmation({
                     key,
                   ),
               );
-            else if (openPreChecks.length > 0) {
-              setConfirmingSuggestion(true);
-              setConfirming(true);
-            } else void decide("merge", true);
+            else if (!mergeBlocked) void decide("merge", true);
           }}
         />
       )}
@@ -711,11 +730,8 @@ export function MergeConfirmation({
         id={`merge-${q.id}`}
         onSubmit={(e) => {
           e.preventDefault();
-          if (confirmed) return;
-          setConfirmingSuggestion(false);
-          dialogTrigger.current = confirmButton.current;
-          if (openPreChecks.length > 0) setConfirming(true);
-          else void decide("merge");
+          if (confirmed || mergeBlocked) return;
+          void decide("merge");
         }}
       >
         {confirmed ? (
@@ -801,52 +817,74 @@ export function MergeConfirmation({
           </button>
         </form>
       )}
-      <Dialog.Root
-        open={confirming && !confirmed && openPreChecks.length > 0}
-        onOpenChange={setConfirming}
-      >
+      <Dialog.Root open={overriding && !confirmed} onOpenChange={setOverriding}>
         <Dialog.Portal>
           <Dialog.Overlay className="pre-merge-overlay" />
           <Dialog.Content
             role="alertdialog"
-            aria-modal="true"
             className="pre-merge-dialog pre-merge-checks pre-merge-waiting"
             aria-describedby={undefined}
             onOpenAutoFocus={(event) => {
-              // The safe choice gets focus; Enter must not merge by accident.
               event.preventDefault();
-              cancelButton.current?.focus();
+              overrideCancel.current?.focus();
             }}
             onCloseAutoFocus={(event) => {
               event.preventDefault();
-              (dialogTrigger.current?.isConnected
-                ? dialogTrigger.current
-                : confirmButton.current
-              )?.focus();
+              overrideTrigger.current?.focus();
             }}
           >
-            <Dialog.Title className="pre-merge-title">
-              {PRE_MERGE_COPY.confirmTitle(openPreChecks.length)}
-            </Dialog.Title>
-            <PreMergeCheckList checks={openPreChecks} />
-            <p className="hint">{PRE_MERGE_COPY.confirmHint}</p>
+            <Dialog.Title>仍要确认合并？</Dialog.Title>
+            <p>
+              以下条件尚未满足。请写明仍要确认的理由，系统会记录理由和当前缺项。
+            </p>
+            <ul>
+              {blockers.map((reason) => (
+                <li key={reason}>{reason}</li>
+              ))}
+            </ul>
+            <label>
+              强行合并理由（必填）
+              <textarea
+                value={overrideReason}
+                onChange={(event) => setOverrideReason(event.target.value)}
+              />
+            </label>
+            {action.error && (
+              <p className="error" role="alert">
+                {action.error}
+              </p>
+            )}
             <div className="action-row">
               <Dialog.Close asChild>
-                {/* Q-275: holding off is the primary choice here. */}
-                <button ref={cancelButton} type="button">
-                  {PRE_MERGE_COPY.confirmCancel}
+                <button ref={overrideCancel} type="button">
+                  先不确认
                 </button>
               </Dialog.Close>
               <button
                 type="button"
                 className="quiet"
-                disabled={action.busy}
+                disabled={action.busy || !overrideReason.trim()}
                 onClick={() => {
-                  setConfirming(false);
-                  void decide("merge", confirmingSuggestion);
+                  if (!overrideReason.trim()) return;
+                  void action.run(
+                    [projectId, q.id, "merge-override", quote, overrideReason],
+                    async (key) => {
+                      await client.recordDecision(
+                        projectId,
+                        q.id,
+                        "merge",
+                        quote,
+                        key,
+                        false,
+                        undefined,
+                        overrideReason,
+                      );
+                      setOverriding(false);
+                    },
+                  );
                 }}
               >
-                {PRE_MERGE_COPY.confirmAnyway}
+                确认仍要合并
               </button>
             </div>
           </Dialog.Content>

@@ -1,10 +1,14 @@
-import { isReviewStale } from "../derived.js";
+import { deriveReviewMatrix, isReviewStale } from "../derived.js";
 import type { Decision, Delivery, MergeCheckView } from "../entities.js";
 import type { CardId } from "../ids.js";
 import { pmMergeConfirmation } from "../preferences.js";
 import { attempt, type CommandState } from "./core.js";
 import { mergeRequiresHuman, riskTagAutoMergeAllowed } from "./delegation.js";
-import { mergeContext } from "./merge.js";
+import {
+  mergeBlockingDecisions,
+  mergeBlockingHumanActions,
+  mergeContext,
+} from "./merge.js";
 import {
   failedConfirmedMergeCheck,
   failedCurrentMergeCheck,
@@ -12,7 +16,11 @@ import {
   timeoutOnly,
 } from "./merge-check.js";
 import { hasVerifiedMergeNoop } from "./merge-preparation.js";
-import { screenshotCheckBlocker } from "./screenshot-check.js";
+import { effectivePreMergeChecks } from "./pre-merge-checks.js";
+import {
+  screenshotCheckBlocker,
+  screenshotCheckEnforced,
+} from "./screenshot-check.js";
 
 const newest = (values: readonly Delivery[]) =>
   [...values].sort(
@@ -84,18 +92,124 @@ export function pmMergeBlockers(
     )
       blockers.push(`产出项 ${w.id} 的最新交付未通过验收`);
   for (const v of [...current, completion]) {
-    // A later review from the same verifier replaces its earlier verdict.
-    const latest = new Map<string, (typeof state.reviews)[number]>();
-    for (const r of state.reviews)
-      if (r.delivery_id === v.id && !isReviewStale(r, v)) {
-        const seen = latest.get(r.work_item_id);
-        if (!seen || Number(r.id.slice(2)) > Number(seen.id.slice(2)))
-          latest.set(r.work_item_id, r);
-      }
+    const latest = latestReviews(state, v);
     for (const r of latest.values())
       if (r.issues.some((i) => i.must_fix && !i.pre_existing))
         blockers.push(`审核 ${r.id} 有未处理的 must_fix`);
   }
+  return [...new Set(blockers)];
+}
+
+/** Same current-review selection as PM delegation; superseded verdicts do not count. */
+function latestReviews(state: CommandState, v: Delivery) {
+  const latest = new Map<string, (typeof state.reviews)[number]>();
+  for (const r of state.reviews)
+    if (r.delivery_id === v.id && !isReviewStale(r, v)) {
+      const seen = latest.get(r.work_item_id);
+      if (!seen || Number(r.id.slice(2)) > Number(seen.id.slice(2)))
+        latest.set(r.work_item_id, r);
+    }
+  return latest;
+}
+
+/** C-264: the human's confirmation, API and CLI share this current-state gate. */
+export function humanMergeBlockers(
+  state: CommandState,
+  q: Decision,
+): readonly string[] {
+  if (
+    q.trigger !== "merge_confirmation" ||
+    !q.card_id ||
+    q.kind !== "approve" ||
+    !("delivery_id" in q.target)
+  )
+    return ["不是合并确认"];
+  const cardId = q.card_id;
+  const context = attempt(() => mergeContext(state, cardId));
+  if (!context.ok) return ["完成申请：当前不可合并"];
+  const { card, target: completion } = context.value;
+  if (completion.id !== q.target.delivery_id)
+    return ["完成申请：合并确认已过期"];
+  const blockers: string[] = [];
+  const items = state.work_items.filter(
+    (w) => w.card_id === card.id && w.status !== "cancelled",
+  );
+  const current = items
+    .filter((w) => w.kind === "produce")
+    .flatMap((w) => {
+      const delivery = newest(
+        state.deliveries.filter(
+          (v) =>
+            v.work_item_id === w.id &&
+            v.kind !== "card_completion" &&
+            v.status !== "superseded",
+        ),
+      );
+      return delivery ? [delivery] : [];
+    });
+  const matrix = deriveReviewMatrix(
+    [...current, completion],
+    items,
+    state.reviews,
+  );
+  for (const w of items.filter((w) => w.kind === "verify")) {
+    const target = w.target_work_item_id
+      ? current.find((v) => v.work_item_id === w.target_work_item_id)
+      : completion;
+    if (
+      w.status !== "passed" ||
+      !target ||
+      !matrix.some(
+        (r) =>
+          r.work_item_id === w.id &&
+          r.delivery_id === target.id &&
+          r.verdict === "pass",
+      )
+    )
+      blockers.push(`${w.title}（${w.id}）：未通过当前交付审核`);
+  }
+  for (const check of effectivePreMergeChecks(
+    card,
+    state.work_items,
+    state.deliveries,
+    screenshotCheckEnforced(state),
+  ))
+    if (check.status !== "passed")
+      blockers.push(
+        `${check.label}：${check.status === "failed" ? "未通过" : "待核"}${check.stale ? "（当前交付需重新核对）" : ""}`,
+      );
+  // Keep the existing host-verified noop and disabled-gate semantics. No
+  // caller-supplied flag or historical pass can authorize a new attempt.
+  const check = latestMergeCheck(state.events, card.id, completion.id);
+  if (
+    state.project_settings?.merge_gate_enabled &&
+    !hasVerifiedMergeNoop(state.events, card.id, completion.id) &&
+    check?.status !== "passed"
+  ) {
+    const labels = {
+      queued: "排队中",
+      running: "运行中",
+      failed: "未通过",
+      timed_out: "超时",
+      interrupted: "已中断",
+      executor_unreachable: "执行机不可达",
+      passed: "已通过",
+    };
+    blockers.push(`合并检查：${check ? labels[check.status] : "尚无结果"}`);
+  }
+  for (const v of [...current, completion])
+    for (const r of latestReviews(state, v).values())
+      if (r.issues.some((i) => i.must_fix && !i.pre_existing))
+        blockers.push(`审核 ${r.id}：有未处理的必须修复项`);
+  for (const decision of mergeBlockingDecisions(
+    state,
+    card.id,
+    completion.id,
+    false,
+  ))
+    blockers.push(`拍板 ${decision.id}：尚未解决`);
+  for (const action of mergeBlockingHumanActions(state, card.id))
+    blockers.push(`人工事项 ${action.id}：尚未完成`);
   return [...new Set(blockers)];
 }
 

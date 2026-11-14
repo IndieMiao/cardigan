@@ -1538,24 +1538,9 @@ test.each([
       project_settings: { merge_gate_enabled: true },
     };
     const needs = value(listNeedsYou(state, human)).data;
-    // C-171: ended checks (failed, timed out, interrupted) never pass by
-    // themselves, so the human sees them listed; queued/running are summarized.
-    const visible = !!status && !["queued", "running"].includes(status);
-    expect(needs.decisions.some((q) => q.id === confirmation().id)).toBe(
-      visible,
-    );
-    expect(needs.waiting_merge_checks_count).toBe(visible ? 0 : 1);
-    expect(needs.waiting_merge_check_items).toEqual(
-      visible
-        ? []
-        : [
-            {
-              decision_id: confirmation().id,
-              card_id: f.card.id,
-              check_status: status ?? null,
-            },
-          ],
-    );
+    expect(needs.decisions.some((q) => q.id === confirmation().id)).toBe(true);
+    expect(needs.waiting_merge_checks_count).toBe(0);
+    expect(needs.waiting_merge_check_items).toEqual([]);
     // PM Ops' queue keeps every human confirmation whose check has not passed.
     expect(
       value(
@@ -1576,7 +1561,7 @@ test.each([
         },
         f.io,
       ).ok,
-    ).toBe(true);
+    ).toBe(status === "passed");
   },
 );
 
@@ -1587,7 +1572,7 @@ test("C-115: a previous pass cannot expose a new tree or completion", async () =
   check("passed");
   check("queued", "new-tree");
   const state = { ...f.state, project_settings: { merge_gate_enabled: true } };
-  expect(humanPending(state)).not.toContain(confirmation().id);
+  expect(humanPending(state)).toContain(confirmation().id);
   const oldEvents = state.events.filter(
     (e) =>
       e.type !== "merge_check_queued" ||
@@ -1607,7 +1592,7 @@ test("C-115: a previous pass cannot expose a new tree or completion", async () =
           : q,
       ),
     }),
-  ).not.toContain(confirmation().id);
+  ).toContain(confirmation().id);
 });
 
 test.each([

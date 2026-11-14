@@ -34,6 +34,7 @@ import {
   extractReferences,
   formatTimelineEntryId,
   hasVerifiedMergeNoop,
+  humanMergeBlockers,
   latestCardTemplate,
   listNeedsYou,
   markCardDone,
@@ -963,6 +964,7 @@ function decisionActionWebView(
   decision: ReturnType<typeof decisionActionView>,
   mergeGateStatus: ProjectMergeGate["status"],
 ) {
+  const original = state.decisions.find((q) => q.id === decision.id);
   const schedule = autoMergeSchedule(state, decision.id);
   const check =
     decision.card_id && mergeGateStatus === "enabled"
@@ -1041,7 +1043,19 @@ function decisionActionWebView(
     merge_confirmation: decision.merge_confirmation
       ? {
           ...decision.merge_confirmation,
-          // C-160: advisory checks; a conclusion on an older version reads
+          blockers: original
+            ? humanMergeBlockers(
+                {
+                  ...state,
+                  project_settings: {
+                    ...state.project_settings,
+                    merge_gate_enabled: mergeGateStatus !== "disabled",
+                  },
+                },
+                original,
+              )
+            : ["完成申请：当前不可合并"],
+          // C-264: confirmation checks; a conclusion on an older version reads
           // as pending (`stale`) until PM Office records one for this version.
           pre_merge_checks: preMergeChecksView(state, decision.card_id),
           ...(mergeGateStatus === "enabled"

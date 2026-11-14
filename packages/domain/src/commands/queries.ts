@@ -33,6 +33,8 @@ import { availableWorkItemEmployees } from "./employee-assignment.js";
 import { failedConfirmedMergeCheck, latestMergeCheck } from "./merge-check.js";
 import { mergeCheckBlockers } from "./merge-check-blockers.js";
 import {
+  currentMergeConfirmations,
+  humanMergeBlockers,
   mergeCheckEndedWithoutPass,
   mergeConfirmationWaitingForCheck,
   pmFailedMergeCheck,
@@ -263,6 +265,7 @@ function relatedCards(
  * human can decide before the merge.
  */
 function mergeConfirmation(
+  state: CommandState,
   decision: Decision,
   items: readonly WorkItem[],
   deliveries: readonly Delivery[],
@@ -345,6 +348,7 @@ function mergeConfirmation(
       };
     });
   return {
+    blockers: humanMergeBlockers(state, decision),
     completion:
       completion === undefined
         ? null
@@ -437,6 +441,7 @@ export function decisionActionView(
     waited_ms: Number.isFinite(elapsed) ? Math.max(0, elapsed) : null,
     related_cards: relatedCards(state.cards, q),
     merge_confirmation: mergeConfirmation(
+      state,
       q,
       state.work_items,
       state.deliveries,
@@ -488,9 +493,9 @@ export function needsYouView(
           !!failedConfirmedMergeCheck(state, q)) &&
         mergeConfirmationWaitingForCheck(state, q),
     );
-  // C-171: an ended, unpassed check will not pass by itself, so the human
-  // sees that confirmation in the list; only queued/running ones stay summarized.
-  const humanWaiting = waiting.filter(
+  // C-264: humans see each current confirmation and its blockers. Agent
+  // queries retain the existing waiting-check summary used by PM workflows.
+  const humanWaiting = (actor.kind === "human" ? [] : waiting).filter(
     (q) => q.status !== "snoozed" && !mergeCheckEndedWithoutPass(state, q),
   );
   const why = (text: string) => [...text].slice(0, 40).join("");
@@ -658,11 +663,16 @@ export function needsYouView(
         (q) =>
           !["open", "provisional", "snoozed"].includes(q.status) || ready(q),
       )
-      .filter(
-        (q) =>
-          q.status === "snoozed" ||
-          !mergeConfirmationWaitingForCheck(state, q) ||
-          !!mergeCheckEndedWithoutPass(state, q),
+      .filter((q) =>
+        actor.kind === "human"
+          ? q.trigger !== "merge_confirmation" ||
+            (!!q.card_id &&
+              currentMergeConfirmations(state, q.card_id).some(
+                (current) => current.id === q.id,
+              ))
+          : q.status === "snoozed" ||
+            !mergeConfirmationWaitingForCheck(state, q) ||
+            !!mergeCheckEndedWithoutPass(state, q),
       )
       .map(view),
     waiting_merge_checks_count: humanWaiting.length,

@@ -47,6 +47,7 @@ function decision(): NeedsDecision & {
       risk: "需要补齐截图",
     },
     merge_confirmation: {
+      blockers: [],
       completion: null,
       deliveries: [],
       reviews: [],

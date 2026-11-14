@@ -198,6 +198,9 @@ export function recordDecisionResolution(
           ? { taken_over_from: resolution.taken_over_from }
           : {}),
         ...(resolution.via_suggestion ? { via_suggestion: true } : {}),
+        ...(resolution.merge_override
+          ? { merge_override: resolution.merge_override }
+          : {}),
         status: result.status,
         resume_work_items: unblocked.map((w) => w.id),
       },
@@ -205,7 +208,9 @@ export function recordDecisionResolution(
         type: "decision_resolved",
         decision_id: q.id,
         ...(reviewItemId ? { work_item_id: reviewItemId } : {}),
-        body: resolution.raw_quote,
+        body: resolution.merge_override
+          ? `强行确认合并；理由：${resolution.merge_override.reason}\n当时缺项：${resolution.merge_override.blockers.length ? `\n${resolution.merge_override.blockers.map((b) => `- ${b}`).join("\n")}` : "无"}\n${resolution.raw_quote}`
+          : resolution.raw_quote,
       },
     );
     for (const item of unblocked) queueResumedRun(d, item, event);

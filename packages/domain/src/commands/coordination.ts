@@ -43,6 +43,8 @@ import {
   riskTagAutoMergeAllowed,
 } from "./delegation.js";
 import {
+  currentMergeConfirmations,
+  humanMergeBlockers,
   pmFailedMergeCheck,
   pmMergeBlockers,
   pmMergeCheckFailureAuthority,
@@ -536,6 +538,8 @@ export function recordDecision(
     via_chain?: readonly Author[];
     batch?: string;
     delegate_future?: boolean;
+    /** Q-440: explicit human override; blank reasons and Agent actors are rejected. */
+    merge_override_reason?: string;
     /** C-192: the human clicked "按建议处理"; never accepted from Agents. */
     via_suggestion?: boolean;
   },
@@ -544,6 +548,32 @@ export function recordDecision(
   return command(state, actor, "record_decision", ports, (d) => {
     const held = d.get("decisions", input.decision_id);
     let p = input;
+    if (p.merge_override_reason !== undefined) {
+      ensure(
+        actor.kind === "human",
+        "forbidden_tool",
+        "强行确认合并只能由人亲自操作，Agent 和 PM 不能代办",
+      );
+      ensure(
+        held.trigger === "merge_confirmation" &&
+          p.option === "merge" &&
+          !p.via_suggestion,
+        "validation_failed",
+        "强行确认只能用于单独确认合并",
+      );
+      text(p.merge_override_reason, "强行合并理由");
+      ensure(
+        !!held.card_id &&
+          currentMergeConfirmations(state, held.card_id).some(
+            (q) => q.id === held.id,
+          ),
+        "stale_target",
+        "合并确认已过期，不能强行确认旧的完成申请",
+      );
+    }
+    let mergeOverride:
+      | { reason: string; blockers: readonly string[] }
+      | undefined;
     if (p.via_suggestion) {
       ensure(
         actor.kind === "human",
@@ -645,6 +675,18 @@ export function recordDecision(
       "unauthorized",
       "未授权的需求范围变化只能由人在 Workbench 确认",
     );
+    if (decision.trigger === "merge_confirmation" && p.option === "merge") {
+      const blockers = humanMergeBlockers(d.state, decision);
+      if (p.merge_override_reason !== undefined)
+        mergeOverride = { reason: p.merge_override_reason.trim(), blockers };
+      else
+        ensure(
+          blockers.length === 0,
+          "illegal_transition",
+          `等待中：\n${blockers.join("\n")}`,
+          { merge_blockers: blockers },
+        );
+    }
     if (p.delegate_future) grantDecisionCategory(d, decision);
     if (returningConfirmed) {
       ensure(
@@ -664,7 +706,11 @@ export function recordDecision(
     return resolveDecisionDraft(
       d,
       decision,
-      takenOver ? { ...p, taken_over_from: "role:pm" } : p,
+      {
+        ...p,
+        ...(takenOver ? { taken_over_from: "role:pm" as const } : {}),
+        ...(mergeOverride ? { merge_override: mergeOverride } : {}),
+      },
       false,
     );
   });
@@ -708,6 +754,7 @@ function resolveDecisionDraft(
     batch?: string;
     notice?: string;
     taken_over_from?: "role:pm";
+    merge_override?: { reason: string; blockers: readonly string[] };
     via_suggestion?: boolean;
   },
   delegated: boolean,
@@ -740,6 +787,7 @@ function resolveDecisionDraft(
       : {}),
     ...(delegated && p.notice?.trim() ? { notice: p.notice.trim() } : {}),
     ...(p.taken_over_from ? { taken_over_from: p.taken_over_from } : {}),
+    ...(p.merge_override ? { merge_override: p.merge_override } : {}),
     ...(p.via_suggestion && !delegated
       ? { via_suggestion: true as const }
       : {}),

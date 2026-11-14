@@ -564,6 +564,8 @@ export interface PreMergeCheckView {
   readonly updated_at: string;
 }
 export interface MergeConfirmationView {
+  /** C-264: reasons returned by the domain confirmation gate. */
+  readonly blockers?: readonly string[];
   /** C-160: checks to finish before the human confirms; empty when none. */
   readonly pre_merge_checks?: readonly PreMergeCheckView[];
   readonly merge_noop?: boolean;
@@ -1297,6 +1299,7 @@ export interface CardiganClient {
     idempotencyKey?: string,
     delegateFuture?: boolean,
     snoozeUntil?: string,
+    mergeOverrideReason?: string,
   ): Promise<void>;
   /** C-192: submit the decision's fresh suggestion ("按建议处理"). */
   applySuggestion(
@@ -1804,6 +1807,7 @@ export class HttpCardiganClient implements CardiganClient {
     idempotencyKey: string = crypto.randomUUID(),
     delegateFuture = false,
     snoozeUntil?: string,
+    mergeOverrideReason?: string,
   ): Promise<void> {
     await this.write(
       projectId,
@@ -1813,6 +1817,9 @@ export class HttpCardiganClient implements CardiganClient {
         raw_quote: quote,
         ...(delegateFuture ? { delegate_future: true } : {}),
         ...(snoozeUntil !== undefined ? { snooze_until: snoozeUntil } : {}),
+        ...(mergeOverrideReason !== undefined
+          ? { merge_override_reason: mergeOverrideReason }
+          : {}),
       },
       idempotencyKey,
     );

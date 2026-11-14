@@ -652,24 +652,16 @@ test.each([
     if (status !== "queued" && status !== "running") recordCheck(status);
     const result = await cardigan("needs-you");
     expect(result.code).toBe(0);
-    if (status === "queued" || status === "running") {
-      // C-171: the summary names the card and the confirmation.
+    // C-171: ended checks never pass by themselves; list them for the human.
+    expect(result.out).toContain("待你拍板（1）");
+    expect(result.out).toContain(`合并检查：${label}`);
+    expect(result.out).not.toContain("排队或运行中");
+    const hint = `cardigan merge recheck ${card_id}`;
+    if (status === "failed" || status === "timed_out")
       expect(result.out).toContain(
-        `还有 1 条合并确认的检查在排队或运行中，检查结束后会出现在这里：${card_id} Q-1（${label}）`,
+        `检查未通过，不会自己变成通过：cardigan merge request-changes ${card_id} --reason <原因>，偶发失败可 ${hint}`,
       );
-      expect(result.out).not.toContain("待你拍板（");
-    } else {
-      // C-171: ended checks never pass by themselves; list them for the human.
-      expect(result.out).toContain("待你拍板（1）");
-      expect(result.out).toContain(`合并检查：${label}`);
-      expect(result.out).not.toContain("排队或运行中");
-      const hint = `cardigan merge recheck ${card_id}`;
-      if (status === "failed" || status === "timed_out")
-        expect(result.out).toContain(
-          `检查未通过，不会自己变成通过：cardigan merge request-changes ${card_id} --reason <原因>，偶发失败可 ${hint}`,
-        );
-      else expect(result.out).not.toContain(hint);
-    }
+    else expect(result.out).not.toContain(hint);
   },
 );
 
@@ -704,9 +696,7 @@ test("needs-you leaves projects without a gate unchanged and counts pending chec
   await seatAwaitingMerge();
   expect((await cardigan("needs-you")).out).not.toContain("合并检查");
   enableMergeGate();
-  expect((await cardigan("needs-you")).out).toContain(
-    `还有 1 条合并确认的检查在排队或运行中，检查结束后会出现在这里：${card_id} Q-1`,
-  );
+  expect((await cardigan("needs-you")).out).toContain("待你拍板（1）");
 });
 
 test.each([
@@ -724,9 +714,7 @@ test.each([
     const before = JSON.stringify(state());
     const result = await cardigan("needs-you");
     expect(result.code).toBe(0);
-    expect(result.out).toContain(
-      `还有 1 条合并确认的检查在排队或运行中，检查结束后会出现在这里：${card_id} Q-1`,
-    );
+    expect(result.out).toContain("待你拍板（1）");
     expect(result.out).toContain("合并闸门配置无效，请查看 server 启动日志");
     expect(result.out).not.toContain("合并检查：排队");
     expect(result.out + result.err).not.toContain("private-config-fixture");
@@ -941,7 +929,7 @@ const setCheck = (
     ),
   );
 
-test("C-160: status lists unfinished pre-merge checks; confirm needs --yes", async () => {
+test("C-264: unfinished pre-merge checks reject confirmation even with --yes", async () => {
   await seatAwaitingMerge();
   setCheck("独立安全审核", "pending");
   setCheck("截图核对", "failed", "按钮颜色不对");
@@ -953,24 +941,15 @@ test("C-160: status lists unfinished pre-merge checks; confirm needs --yes", asy
   expect(status.out).toContain("    - 截图核对：有问题（按钮颜色不对）");
 
   const refused = await cardigan("merge", "confirm", card_id);
-  expect(refused.code).toBe(2);
-  expect(refused.err).toContain(
-    "还有 2 项合并前核对没有完成，确定现在确认合并吗？",
-  );
-  expect(refused.err).toContain(
-    `仍要确认合并，请加 --yes 重新运行：cardigan merge confirm ${card_id} --yes`,
-  );
+  expect(refused.code).not.toBe(0);
+  expect(refused.err).toContain("等待中：");
+  expect(refused.err).toContain("独立安全审核：待核");
+  expect(refused.err).toContain("截图核对：未通过");
   expect(state().decisions.find((d) => d.id === "Q-1")?.status).toBe("open");
-
   const anyway = await cardigan("merge", "confirm", card_id, "--yes");
-  expect(anyway.code).toBe(0);
-  expect(anyway.out).toContain(
-    "!! 注意：还有 2 项合并前核对没有完成，已按你的 --yes 确认合并。",
-  );
-  expect(state().decisions.find((d) => d.id === "Q-1")).toMatchObject({
-    status: "resolved",
-    resolution: { option: "merge" },
-  });
+  expect(anyway.code).not.toBe(0);
+  expect(anyway.err).toContain("强行合并理由");
+  expect(state().decisions.find((d) => d.id === "Q-1")?.status).toBe("open");
 });
 
 test("C-160: once every check passes, status says so and confirm needs no --yes", async () => {
@@ -1047,4 +1026,74 @@ test("C-193: CLI surfaces snooze cap failures without changing the confirmation"
   expect(result.code).not.toBe(0);
   expect(result.err).toContain("暂缓到期时间距现在不能超过 4320 分钟");
   expect(state().decisions).toEqual(before);
+});
+
+test("C-264: CLI uses the configured gate and rejects queued/running checks, then allows passed", async () => {
+  await seatAwaitingMerge();
+  enableMergeGate();
+  for (const status of [undefined, "queued", "running", "passed"] as const) {
+    if (status) recordCheck(status);
+    const result = await cardigan("merge", "confirm", card_id);
+    if (status === "passed") expect(result.code).toBe(0);
+    else {
+      expect(result.code).not.toBe(0);
+      expect(result.err).toContain("合并检查：");
+      expect(state().decisions.find((q) => q.id === "Q-1")?.status).toBe(
+        "open",
+      );
+    }
+  }
+});
+
+test("Q-440: CLI requires an explicit override reason and records the observed blockers", async () => {
+  await seatAwaitingMerge();
+  setCheck("截图核对", "pending");
+  const before = JSON.stringify(state());
+  expect(
+    (await cardigan("merge", "confirm", card_id, "--yes", "--reason", " "))
+      .code,
+  ).not.toBe(0);
+  expect(JSON.stringify(state())).toBe(before);
+  const result = await cardigan(
+    "merge",
+    "confirm",
+    card_id,
+    "--yes",
+    "--reason",
+    "已人工核实紧急事项",
+  );
+  expect(result.code).toBe(0);
+  expect(result.out).toContain("已记录强行确认");
+  expect(
+    state().decisions.find((q) => q.id === "Q-1")?.resolution?.merge_override,
+  ).toEqual({ reason: "已人工核实紧急事项", blockers: ["截图核对：待核"] });
+  expect(
+    state().timeline.some(
+      (t) =>
+        t.body.includes("已人工核实紧急事项") &&
+        t.body.includes("截图核对：待核"),
+    ),
+  ).toBe(true);
+});
+
+test("Q-440: CLI Token mode cannot use the human override", async () => {
+  await seatAwaitingMerge();
+  setCheck("截图核对", "pending");
+  const before = JSON.stringify(state());
+  const cli = io();
+  const code = await main(
+    [
+      "merge",
+      "confirm",
+      card_id,
+      "--yes",
+      "--reason",
+      "已核实",
+      "--data-dir",
+      dataDir,
+    ],
+    { ...cli, env: { ...cli.env, CARDIGAN_TOKEN: "fixture-agent-token" } },
+  );
+  expect(code).not.toBe(0);
+  expect(JSON.stringify(state())).toBe(before);
 });

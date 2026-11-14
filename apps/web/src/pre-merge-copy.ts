@@ -12,7 +12,7 @@ export const PRE_MERGE_COPY = {
   staleNote: "上次的结论针对旧版本，需要重新核对",
   missingHeading: "还差这些核对：",
   waitingHint:
-    "核对全部通过后，这里会提示可以确认。你仍然可以直接确认合并，但会先请你再确认一次。",
+    "请等所有前置条件满足后再确认；需要强行确认时，单独点“仍要合并”并填写理由。",
   readyTitle: "核对已完成，可以确认合并",
   readySteps: (gate: boolean) => [
     "看一遍下面的“要合并的交付”和“审核与验收”。",

@@ -174,7 +174,8 @@ export function openPreMergeChecks(
  * `passed` or `failed` records a conclusion relayed from the human's review
  * channel, which is PM Office's job (§7.1), so it needs PM Office or the human.
  * The independent review label is reserved for submit_review projections;
- * direct updates may only reset it to pending. Other labels stay advisory.
+ * direct updates may only reset it to pending. C-264 uses all effective checks
+ * to gate ordinary human confirmation; PM delegation retains its own rules.
  */
 export function applyPreMergeCheck(
   d: CommandDraft,

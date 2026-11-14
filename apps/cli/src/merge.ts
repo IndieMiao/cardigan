@@ -45,7 +45,7 @@ import { CLI_PRE_MERGE_COPY as COPY } from "./pre-merge-copy.js";
 const USAGE = [
   "用法：",
   "  cardigan merge status [C-n] [--project <p>]       看待合并的卡片、确认和合并计划",
-  "  cardigan merge confirm <C-n> [--quote <原话>] [--yes]  以人的身份确认合并；合并前核对未完成时须加 --yes",
+  "  cardigan merge confirm <C-n> [--quote <原话>] [--yes --reason <理由>]  检查通过后确认；强行确认必须同时提供 --yes 和理由",
   "  cardigan merge hold <C-n> --reason <原因> [--until <带时区时间>] [--quote <原话>]  暂缓合并（到期自动恢复）",
   "  cardigan merge request <C-n>                      旧 hold 之后重新发起合并确认",
   "  cardigan merge recheck <C-n> [--project <p>]       重查失败或超时的合并候选",
@@ -363,11 +363,11 @@ function preMergeLines(
   ];
 }
 
-function mergeConfirm(
+async function mergeConfirm(
   args: readonly string[],
   io: CliIo,
   option: "merge" | "hold",
-): number {
+): Promise<number> {
   const parsed = parseArgs(args);
   const id = cardId(parsed.positionals[0]);
   const store = open(io, parsed.flags);
@@ -392,23 +392,15 @@ function mergeConfirm(
       );
       return EXIT.ok;
     }
-    // C-160: advisory only — never changes who may confirm, but the human
-    // must acknowledge unfinished pre-merge checks with --yes.
-    const open =
-      option === "merge"
-        ? openChecks(
-            preMergeChecksOf(
-              store.uow.read((tx) => loadCommandState(tx, project_id)),
-              card,
-            ),
-          )
-        : [];
-    if (open.length > 0 && parsed.flags.yes !== true)
-      throw new CliError(`!! ${COPY.confirmTitle(open.length)}`, EXIT.usage, [
-        ...open.map(checkLine),
-        COPY.confirmHint,
-        COPY.confirmNeedsYes(`cardigan merge confirm ${id}`),
-      ]);
+    const config = await loadMergeGateConfig({
+      dataDir: resolveDataDir(io, optional(parsed.flags, "data-dir")),
+      baseBranches: Object.fromEntries(
+        store.listProjects().map((p) => [p.id, p.base_branch ?? "main"]),
+      ),
+      projectIds: store.listProjects().map((p) => p.id),
+      env: io.env,
+    });
+    const gate = config.forProject(project_id);
     const holdReason = optional(parsed.flags, "reason");
     const holdUntil = optional(parsed.flags, "until");
     if (option === "hold" && !holdReason?.trim())
@@ -424,11 +416,20 @@ function mergeConfirm(
       actor: resolveActor(io, project_id, store),
       reduce: (state, actor, ports) =>
         recordDecision(
-          state,
+          {
+            ...state,
+            project_settings: {
+              ...state.project_settings,
+              merge_gate_enabled: gate.status !== "disabled",
+            },
+          },
           actor,
           {
             decision_id: confirmation.id,
             option,
+            ...(option === "merge" && parsed.flags.yes === true
+              ? { merge_override_reason: holdReason ?? "" }
+              : {}),
             rationale:
               option === "merge" ? `命令行确认合并 ${id}` : (holdReason ?? ""),
             ...(holdUntil !== undefined ? { snooze_until: holdUntil } : {}),
@@ -440,7 +441,10 @@ function mergeConfirm(
         ),
       clock: systemClock,
     });
-    if (open.length > 0) io.stdout(`!! ${COPY.confirmedAnyway(open.length)}`);
+    if (decision.resolution?.merge_override)
+      io.stdout(
+        `已记录强行确认；理由：${decision.resolution.merge_override.reason}；当时缺项：${decision.resolution.merge_override.blockers.join("；") || "无"}`,
+      );
     const takeover = held ? "（PM 代确认中，已按你的拍板记录）" : "";
     io.stdout(
       option === "merge"
