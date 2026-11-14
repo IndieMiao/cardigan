@@ -1253,7 +1253,13 @@ button .id-badge {
   color: var(--text-muted);
 }
 
+.card-table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
 .card-table {
+  min-width: 48rem;
   width: 100%;
   font-size: var(--text-sm);
   line-height: 1.45;
