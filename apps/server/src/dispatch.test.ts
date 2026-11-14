@@ -1970,3 +1970,41 @@ test("execution warns only for old low-priority capacity waits, using the config
     view(9).runs.find((r) => r.id === queue[0]?.run_id),
   ).not.toHaveProperty("queue_warning");
 });
+
+test("C-297: current harness activity prevents both inactivity alerts and automatic cancellation", async () => {
+  const t = inactiveTarget();
+  f.advance(61 * 60_000);
+  const assignment = f
+    .state()
+    .assignments.find((a) => a.id === t.busy.assignment.id);
+  if (!assignment) throw new Error("Missing assignment");
+  const sample = {
+    assignment_id: assignment.id,
+    run_id: t.run.id,
+    runtime_key: JSON.stringify(assignment.runtime_ref),
+    session_id:
+      assignment.runtime_ref?.agent_session_id ??
+      assignment.session_ref ??
+      "fixture-session",
+    updated_at: f.clock.now(),
+    source: "codex:session_metadata",
+    stale_after_ms: 600_000,
+  };
+  const dispatcher = new Dispatcher({
+    ...options,
+    inactiveCancelAfterMs: 60 * 60_000,
+    harnessActivity: () => sample,
+  });
+  await dispatcher.tick();
+  expect(f.state().events.filter((e) => e.type === "run_inactive")).toEqual([]);
+  expect(runtime.release).not.toHaveBeenCalled();
+  f.advance(600_001);
+  // The same cached sample must expire even if the reader has stopped.
+  await dispatcher.tick();
+  expect(f.state().events).toContainEqual(
+    expect.objectContaining({
+      type: "run_inactive",
+      payload: expect.objectContaining({ activity_source: "活动来源缺失" }),
+    }),
+  );
+});

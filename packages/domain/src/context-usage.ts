@@ -73,7 +73,10 @@ export function contextNoticeRecorded(
 /** Recheck the runtime generation after IO; an old cache cannot rotate its successor. */
 export function contextObservationCurrent(
   a: Assignment,
-  usage: ContextObservation,
+  usage: Pick<
+    ContextObservation,
+    "assignment_id" | "runtime_key" | "session_id" | "updated_at"
+  >,
   events: readonly Event[],
 ) {
   if (
