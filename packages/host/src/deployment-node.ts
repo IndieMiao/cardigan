@@ -24,6 +24,7 @@ import { gitSafetyArguments } from "@cardigan/git-transport";
 import type { Store } from "@cardigan/store";
 import {
   deploymentMergeSegments,
+  readInterruptedDeployment,
   writeDeploymentRecord,
   writeDeploymentStop,
   writeServerLogAudit,
@@ -109,6 +110,11 @@ export class NodeDeploymentDriver implements DeploymentDriver {
       1,
     );
     let releaseCapacity: (() => void) | undefined;
+    const release = () => {
+      const held = releaseCapacity;
+      releaseCapacity = undefined;
+      held?.();
+    };
     let interrupted: DeploymentRecord | undefined;
     let startupStage: "start" | "ready" | undefined;
     let recoveringAt = Date.now();
@@ -211,6 +217,36 @@ export class NodeDeploymentDriver implements DeploymentDriver {
           await this.start(this.state.current);
         } else this.readyMessage = true;
       } else {
+        // stop() clears the old process before backup/start. The stop audit
+        // still identifies that candidate even if no candidate was spawned.
+        const pending =
+          saved &&
+          readInterruptedDeployment(
+            this.options.store,
+            PROJECT,
+            this.state.current.sha,
+          );
+        if (
+          pending ||
+          (saved?.running && saved.running.sha !== saved.current.sha)
+        ) {
+          interrupted = {
+            ...(pending ?? {
+              attempt: randomUUID(),
+              from: this.state.current.sha,
+              to: saved.running?.sha ?? this.state.current.sha,
+              status: "started",
+              build: "passed",
+              ready: false,
+              downtime_ms: 0,
+              summary: "监督器恢复未完成的切换",
+            }),
+            ...(this.state.backup_file
+              ? { backup_file: this.state.backup_file }
+              : {}),
+          };
+          recoveringAt = Date.now();
+        }
         this.state = {
           current: this.state.current,
           ...(this.state.previous ? { previous: this.state.previous } : {}),
@@ -227,46 +263,85 @@ export class NodeDeploymentDriver implements DeploymentDriver {
           `Initial server did not become ready；${this.serverDiagnostics("ready")}`,
         );
       startupStage = undefined;
-      if (interrupted)
+      if (interrupted) {
         await this.record({
           ...interrupted,
           status: "rolled_back",
           build: "passed",
           ready: true,
           downtime_ms: Date.now() - recoveringAt,
-          summary: "监督器恢复时终止未完成候选，已恢复上一构建",
+          summary: "监督器恢复未完成切换，已恢复上一构建",
         });
+        // Keep the link until the recovery audit is durable, then prevent an
+        // older backup from being attributed to a later interrupted candidate.
+        delete this.state.backup_file;
+        await this.saveState();
+      }
+      try {
+        release();
+      } catch {
+        throw new Error("deployment_capacity_release_failed");
+      }
       return unlock;
     } catch (error) {
       const log = startupStage
         ? this.serverDiagnostics(startupStage)
         : undefined;
-      if (this.child?.pid && this.child.pid === this.state?.process?.pid)
-        await this.stop().catch(() => {});
-      if (interrupted || startupStage)
-        await this.record({
-          ...(interrupted ?? {
-            attempt: randomUUID(),
-            from: this.state.current.sha,
-            to: this.state.current.sha,
-            ...(this.state.backup_file
-              ? { backup_file: this.state.backup_file }
+      const safeFailure = startupStage
+        ? `startup_${startupStage}_failed；${log}`
+        : "recovery_failed";
+      const cleanupFailures: string[] = [];
+      if (this.child?.pid && this.child.pid === this.state?.process?.pid) {
+        try {
+          await this.stop();
+        } catch {
+          cleanupFailures.push("deployment_stop_unconfirmed");
+        }
+      }
+      if (interrupted || startupStage) {
+        try {
+          await this.record({
+            ...(interrupted ?? {
+              attempt: randomUUID(),
+              from: this.state.current.sha,
+              to: this.state.current.sha,
+              ...(this.state.backup_file
+                ? { backup_file: this.state.backup_file }
+                : {}),
+            }),
+            status: "failed",
+            build: "passed",
+            ready: false,
+            downtime_ms: Date.now() - recoveringAt,
+            summary: "监督器恢复未完成，需主机核对进程与数据库备份",
+            ...(startupStage && log !== undefined
+              ? { failure_stage: startupStage, log_tail: log }
               : {}),
-          }),
-          status: "failed",
-          build: "passed",
-          ready: false,
-          downtime_ms: Date.now() - recoveringAt,
-          summary: "监督器恢复未完成，需主机核对进程与数据库备份",
-          ...(startupStage && log !== undefined
-            ? { failure_stage: startupStage, log_tail: log }
-            : {}),
-        }).catch(() => {});
-      await this.finishServerLogs();
-      await unlock();
+          });
+        } catch {
+          // Preserve the safe startup outcome, never the raw IO/audit errors.
+          cleanupFailures.push("deployment_audit_failed：部署失败审计未保存");
+        }
+      }
+      try {
+        await this.finishServerLogs();
+      } catch {
+        cleanupFailures.push("deployment_log_cleanup_failed");
+      }
+      try {
+        await unlock();
+      } catch {
+        cleanupFailures.push("deployment_unlock_failed");
+      }
+      try {
+        release();
+      } catch {
+        cleanupFailures.push("deployment_capacity_release_failed");
+      }
+      if (cleanupFailures.length) {
+        throw new Error(`${safeFailure}；${cleanupFailures.join("；")}`);
+      }
       throw error;
-    } finally {
-      releaseCapacity?.();
     }
   }
 

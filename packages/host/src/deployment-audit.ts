@@ -44,6 +44,31 @@ export function writeDeploymentStop(
   });
 }
 
+/** Recover the candidate from the durable pre-stop audit, including the gap before start(). */
+export function readInterruptedDeployment(
+  store: Store,
+  project: ProjectId,
+  currentSha: string,
+): DeploymentRecord | undefined {
+  return store.uow.read((tx) => {
+    const event = loadCommandState(tx, project).events.findLast(
+      (e) => e.type === "host_deployment_recorded" && e.actor.kind === "system",
+    );
+    const record = event?.payload as DeploymentRecord | undefined;
+    // A terminal success must prevent old stopping records from being replayed.
+    if (
+      record?.from !== currentSha ||
+      (!record.stop_snapshot &&
+        !(record.backup_file && record.to !== currentSha))
+    )
+      return undefined;
+    return record.status === "stopping" ||
+      (record.status === "failed" && !record.ready)
+      ? record
+      : undefined;
+  });
+}
+
 export function writeDeploymentRecord(
   store: Store,
   project: ProjectId,
