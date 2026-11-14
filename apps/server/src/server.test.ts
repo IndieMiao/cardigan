@@ -12,6 +12,7 @@ import {
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { RuntimeTargets } from "@cardigan/host";
 import { Store } from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -94,6 +95,70 @@ test("C-152: a shell without runtime.env cannot downgrade an agent-ssh registrat
   expect(
     JSON.parse(readFileSync(join(dataDir, "runtime.json"), "utf8")),
   ).toEqual({ mode: "local", session: "cardigan" });
+});
+
+test("server refuses to replace the registered session while a historical local ref remains after SSH migration", async () => {
+  store.createProject({ id: "fixture", name: "Fixture" });
+  store.uow.run((tx) =>
+    tx.assignments.put("fixture", {
+      id: "A-1",
+      scope: "standing",
+      role_id: "pm",
+      role_version: 1,
+      status: "active",
+      runtime_state: "idle",
+      machine_id: "local",
+      mcp_token_id: "fixture",
+      created_at: "2026-01-01T00:00:00Z",
+      runtime_ref: {
+        machine_id: "local",
+        runtime_machine: "local",
+        terminal_ref: "t1",
+        agent_name: "old-local",
+      },
+    }),
+  );
+  const execution = {
+    mode: "agent-ssh" as const,
+    dataDir,
+    machine: "fixture-agent",
+    agentRoot: "/synthetic/agent",
+    gid: 2001,
+    identityFile: "/synthetic/key",
+    knownHostsFile: "/synthetic/known_hosts",
+  };
+  const registration = { ...execution, session: "old-session" };
+  writeFileSync(join(dataDir, "runtime.json"), JSON.stringify(registration));
+  const runtime = await RuntimeTargets.create({
+    execution,
+    session: "old-session",
+    store,
+    workers: () => [],
+  });
+  if (!runtime.ok) throw new Error("Invalid fixture router");
+  await expect(
+    startCardiganServer({
+      config: { dataDir, host: "127.0.0.1", port: 0, execution },
+      store,
+      env: { CARDIGAN_HC_SESSION: "new-session" },
+      dispatcher: {
+        runtime: runtime.value,
+        snapshot: async () => {
+          throw new Error("Unexpected snapshot");
+        },
+        startRun: async () => {
+          throw new Error("Unexpected launch");
+        },
+      },
+    }),
+  ).rejects.toThrow("Runtime target rejected");
+  expect(
+    JSON.parse(readFileSync(join(dataDir, "runtime.json"), "utf8")),
+  ).toEqual(registration);
+  expect(
+    store.uow.read((tx) => tx.assignments.get("fixture", "A-1"))?.runtime_ref
+      ?.terminal_ref,
+  ).toBe("t1");
 });
 
 test.each([

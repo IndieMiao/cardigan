@@ -13,7 +13,7 @@ export function TimelineVersion({
   if (!git) return <span>版本 {value}</span>;
   return (
     <span className="timeline-version">
-      <Tooltip content={`提交 ${value}，点击复制完整 SHA`}>
+      <Tooltip content={`提交 ${value}，点击复制完整 SHA`} selectable>
         <button
           type="button"
           className="quiet"

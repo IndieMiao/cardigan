@@ -81,3 +81,63 @@ test("disabled config does not read referenced credentials; explicit quiet timez
   expect(extMessageQuiet(c.config, "2026-01-01T14:00:00.000Z")).toBe(true);
   expect(extMessageQuiet(c.config, "2026-01-02T00:00:00.000Z")).toBe(false);
 });
+
+const syntheticWebhook =
+  "https://open.feishu.cn/open-apis/bot/v2/hook/synthetic-only";
+test("enabled lark validates its private JSON credential; disabled channels do not open it", () => {
+  const yaml =
+    "enabled: true\nworkbench_url: https://workbench.invalid\nchannels: { lark: { enabled: true, credential_file: lark.json } }";
+  write(yaml);
+  writeFileSync(
+    join(dir, "lark.json"),
+    JSON.stringify({
+      webhook: syntheticWebhook,
+      secret: "SYNTHETIC_SIGNING_SECRET",
+    }),
+    { mode: 0o600 },
+  );
+  expect(loadExtMessageConfig(path)).toMatchObject({
+    status: "loaded",
+    config: { channels: { lark: { enabled: true } } },
+  });
+  writeFileSync(join(dir, "lark.json"), "invalid SYNTHETIC_SIGNING_SECRET");
+  expect(loadExtMessageConfig(path)).toEqual({ status: "invalid" });
+  write(yaml.replace("lark: { enabled: true", "lark: { enabled: false"));
+  expect(loadExtMessageConfig(path)).toMatchObject({ status: "loaded" });
+});
+test.each([
+  "http://open.feishu.cn/open-apis/bot/v2/hook/synthetic-only",
+  "https://user:secret@open.feishu.cn/open-apis/bot/v2/hook/synthetic-only",
+  "https://open.feishu.cn.attacker.invalid/open-apis/bot/v2/hook/synthetic-only",
+  "https://open.feishu.cn/open-apis/bot/v2/hook/synthetic-only?secret=synthetic",
+  "https://open.feishu.cn/open-apis/bot/v2/hook/synthetic-only#fragment",
+  "https://open.feishu.cn:8443/open-apis/bot/v2/hook/synthetic-only",
+])("invalid webhook fails closed without disclosure: %s", (webhook) => {
+  write(
+    `enabled: true\nworkbench_url: https://workbench.invalid\nchannels:\n  lark:\n    enabled: true\n    credential: '${JSON.stringify({ webhook })}'`,
+  );
+  expect(loadExtMessageConfig(path)).toEqual({ status: "invalid" });
+});
+test.each([
+  ["Asia/Shanghai", "22:00", "08:00", "2026-01-01T13:59:59Z", false],
+  ["Asia/Shanghai", "22:00", "08:00", "2026-01-01T14:00:00Z", true],
+  ["Asia/Shanghai", "22:00", "08:00", "2026-01-01T16:00:00Z", true],
+  ["Asia/Shanghai", "22:00", "08:00", "2026-01-01T23:59:59Z", true],
+  ["Asia/Shanghai", "22:00", "08:00", "2026-01-02T00:00:00Z", false],
+  ["UTC", "12:00", "13:00", "2026-01-01T12:00:00Z", true],
+  ["UTC", "12:00", "13:00", "2026-01-01T13:00:00Z", false],
+  ["America/New_York", "22:00", "08:00", "2026-03-08T11:59:59Z", true],
+  ["America/New_York", "22:00", "08:00", "2026-03-08T12:00:00Z", false],
+  ["America/New_York", "22:00", "08:00", "2026-11-01T12:59:59Z", true],
+  ["America/New_York", "22:00", "08:00", "2026-11-01T13:00:00Z", false],
+] as const)(
+  "quiet interval uses explicit zone %s %s-%s at %s",
+  (timezone, start, end, now, quiet) => {
+    write(
+      `enabled: false\nquiet_hours: { enabled: true, timezone: ${timezone}, start: '${start}', end: '${end}' }`,
+    );
+    const c = loadExtMessageConfig(path);
+    if (c.status !== "loaded") throw new Error("Expected valid fixture");
+    expect(extMessageQuiet(c.config, now)).toBe(quiet);
+  },
+);

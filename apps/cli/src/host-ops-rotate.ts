@@ -5,12 +5,13 @@ import {
   prepareHostOpsRotation,
 } from "@cardigan/domain";
 import {
+  RuntimeTargets,
   scrubRunCredentials,
   stopRunRuntime,
   tryHostOpsLock,
 } from "@cardigan/host";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
-import { HerdrRuntime, secureDataDirectory } from "@cardigan/runtime-herdr";
+import { secureDataDirectory } from "@cardigan/runtime-herdr";
 import {
   finishBellAttempt,
   reassignNotifications,
@@ -52,14 +53,25 @@ export async function rotateHostOps(input: {
       previous.runtime_ref,
       previous.id,
       input.session,
+      { store, project: project_id },
     );
     await secureDataDirectory(execution);
     // No new terminal is needed when the old Assignment was never started.
     const created = previous.runtime_ref
-      ? await HerdrRuntime.create({ execution, session, env: io.env })
+      ? await RuntimeTargets.create({
+          execution,
+          session,
+          env: io.env,
+          store,
+          project: project_id,
+        })
       : undefined;
     if (created && !created.ok)
       throw new CliError("无法连接旧终端的运行时，未开始轮换", EXIT.failure);
+    const cleanupExecution =
+      created?.ok && previous.runtime_ref
+        ? created.value.executionForRef(previous.runtime_ref, project_id)
+        : execution;
     const begun = store.uow.read((tx) => {
       const result = prepareHostOpsRotation(
         loadCommandState(tx, project_id),
@@ -153,7 +165,7 @@ export async function rotateHostOps(input: {
       return result.value.data.assignment;
     });
     try {
-      await scrubRunCredentials(execution, project_id, previous.id);
+      await scrubRunCredentials(cleanupExecution, project_id, previous.id);
     } catch {
       io.stderr(
         `旧终端已退出、旧凭据已撤销，但运行目录凭据清理失败；请核对 ${previous.id} 的运行目录。新身份为 ${next.id}。`,

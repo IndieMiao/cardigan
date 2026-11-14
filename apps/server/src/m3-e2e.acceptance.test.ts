@@ -19,8 +19,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { main as cli, runCommand } from "@cardigan/cli";
 import { postComment, requestDecision } from "@cardigan/domain";
+import { RuntimeTargets } from "@cardigan/host";
 import { parseLaunchConfig } from "@cardigan/roles";
-import { HerdrRuntime } from "@cardigan/runtime-herdr";
 import { Store } from "@cardigan/store";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { createTestRuntime } from "../../../test-support/paths.js";
@@ -63,6 +63,7 @@ let errors: string[] = [];
 let savedEnv: NodeJS.ProcessEnv;
 let hostEnv: Record<string, string> = {};
 let core: HcCore;
+let runtime: RuntimeTargets;
 
 // Every launch path needs the fixture endpoint explicitly: the first terminal
 // may now be Ops, before the CLI starts the coder and its configured environment.
@@ -425,13 +426,17 @@ describe.skipIf(!available)("M3.5 router and dispatcher end to end", () => {
     store = Store.open({ dataDir });
     // The guarded client refuses to run once cleanup stops the core, so a late
     // timer fails with its stack instead of starting a new holder and core.
-    const created = await HerdrRuntime.create({
+    // CLI-created refs carry target bindings. Exercise the same host router as
+    // production; a single-target adapter cannot own those refs by itself.
+    const created = await RuntimeTargets.create({
+      execution: { mode: "local", dataDir },
+      store,
       session: SESSION,
       socketPath,
       client: core.client(),
     });
     if (!created.ok) throw new Error(created.error.code);
-    const runtime = created.value;
+    runtime = created.value;
     // Remember the core while its socket still exists: after a crash the socket
     // is gone and `hc server stop` can no longer reach it.
     core.remember();
@@ -557,6 +562,13 @@ describe.skipIf(!available)("M3.5 router and dispatcher end to end", () => {
       project_id,
     ]);
     expect(started.code, started.err).toBe(0);
+    const coderRef = assignmentOf("coder")?.runtime_ref;
+    expect(coderRef?.target).toMatchObject({
+      project_id,
+      machine_id: "local",
+      session: SESSION,
+    });
+    expect(coderRef && runtime.ownsRef(coderRef)).toBe(true);
     expect(
       (
         await cardigan([

@@ -64,10 +64,17 @@ export const runtimeMachineOf = (
 
 /** Whether a recorded terminal belongs to the runtime described by `config`. */
 export const runtimeOwnsRef = (
-  config: Pick<ExecutionConfig, "mode"> & { readonly machine?: string },
-  ref: Pick<RuntimeRef, "machine_id" | "runtime_machine">,
+  config: Pick<ExecutionConfig, "mode" | "target"> & {
+    readonly machine?: string;
+  },
+  ref: Pick<RuntimeRef, "machine_id" | "runtime_machine" | "target">,
 ): boolean =>
-  ref.machine_id === "local" &&
+  ref.machine_id === (config.target?.machine_id ?? "local") &&
+  ["project_id", "machine_id", "session", "generation", "fingerprint"].every(
+    (key) =>
+      ref.target?.[key as keyof NonNullable<RuntimeRef["target"]>] ===
+      config.target?.[key as keyof NonNullable<RuntimeRef["target"]>],
+  ) &&
   ref.runtime_machine === runtimeMachineOf(config);
 
 /** Human-readable label, e.g. `agent-ssh（机器 cardigan-agent）`. */

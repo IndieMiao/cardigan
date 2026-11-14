@@ -25,6 +25,7 @@ import {
   loadRunCapacityConfig,
   messageOf,
   type PreparedWorktree,
+  RuntimeTargets,
   resolveMcpUrl,
   reviewTargetSha,
   scrubRunCredentials,
@@ -38,7 +39,7 @@ import {
   DEFAULT_HC_SESSION,
   describeRuntime,
   type ExecutionConfig,
-  HerdrRuntime,
+  type HerdrRuntime,
   runtimeOwnsRef,
   secureDataDirectory,
 } from "@cardigan/runtime-herdr";
@@ -251,12 +252,14 @@ async function startUnlocked(
   rejectExternalTerminalAction(store, project_id, options.assignment_id);
   const capacity = await loadRunCapacityConfig({ env: io.env });
   for (const error of capacity.errors) io.stderr(error);
-  const execution =
+  let execution =
     options.execution ?? (await executionFor(io, options.dataDir));
   await secureDataDirectory(execution);
 
   const entities = requireAssignment(store, project_id, options.assignment_id);
   const { assignment, role, employee } = entities;
+  if (options.runtime instanceof RuntimeTargets)
+    execution = options.runtime.forLaunch(project_id, assignment).execution;
   const resuming =
     assignment.scope === "standing" &&
     assignment.role_id === "pm" &&
@@ -316,7 +319,12 @@ async function startUnlocked(
     // C-152 × C-154: a terminal recorded on another runtime cannot be seen
     // from here, so "not found" would not prove it exited. Leave it to the
     // host_ops restart, which asks the human to confirm the exit first.
-    if (stoppedRef && !runtimeOwnsRef(execution, stoppedRef))
+    if (
+      stoppedRef &&
+      !(options.runtime instanceof RuntimeTargets
+        ? options.runtime.ownsRef(stoppedRef)
+        : runtimeOwnsRef(execution, stoppedRef))
+    )
       throw new CliError(
         `${assignment.id} 的终端 ${stoppedRef.terminal_ref} 记录在运行时机器 ${stoppedRef.runtime_machine}，不属于当前运行时 ${describeRuntime(execution)}，无法确认它已退出，没有替换会话。请让主机运维用 host_ops_restart_standing_pm 重启，按 Needs You 中的步骤确认旧终端已退出。`,
         EXIT.failure,
@@ -554,6 +562,10 @@ export async function stopAssignment(input: {
     input.assignment_id,
   );
   const ref = assignment.runtime_ref;
+  const execution =
+    ref && input.runtime instanceof RuntimeTargets
+      ? input.runtime.executionForRef(ref, input.project_id)
+      : input.execution;
   if (assignment.scope === "standing" && assignment.role_id === "pm") {
     const paused = pauseStanding(
       input.store,
@@ -564,12 +576,8 @@ export async function stopAssignment(input: {
     try {
       if (ref) await closeStandingTerminal(input.runtime, ref);
     } finally {
-      if (input.execution)
-        await scrubRunCredentials(
-          input.execution,
-          input.project_id,
-          assignment.id,
-        );
+      if (execution)
+        await scrubRunCredentials(execution, input.project_id, assignment.id);
     }
     return { released: ref !== null, aborted: paused.aborted, paused: true };
   }
@@ -632,12 +640,8 @@ export async function stopAssignment(input: {
   if (revoked.some((ok) => !ok)) {
     throw new CliError("作废 Token 失败", EXIT.failure);
   }
-  if (input.execution)
-    await scrubRunCredentials(
-      input.execution,
-      input.project_id,
-      input.assignment_id,
-    );
+  if (execution)
+    await scrubRunCredentials(execution, input.project_id, input.assignment_id);
   return {
     released: true,
     aborted: stopped.cancelled + settled.cancelled > 0,
@@ -725,7 +729,7 @@ async function prepareAttach(input: AttachOptions) {
 
 async function enterAssignment(
   io: CliIo,
-  runtime: HerdrRuntime,
+  runtime: RuntimeTargets,
   ref: RuntimeRef,
   id: Assignment["id"],
   interactive: boolean,
@@ -738,8 +742,10 @@ async function enterAssignment(
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(io.env))
     if (value !== undefined) env[key] = value;
-  env.HC_SESSION = runtime.session;
-  env.HC_SOCKET = runtime.socketPath;
+  const connection = await runtime.attachEnvironment(ref);
+  if (!connection.ok) throw attachFailure(id, "终端的受信目标绑定不匹配");
+  env.HC_SESSION = connection.value.session;
+  env.HC_SOCKET = connection.value.socketPath;
   let child: SpawnedChild | undefined;
   const dispose = forwardSignals(
     { kill: (signal) => child?.kill(signal) },
@@ -892,6 +898,7 @@ export async function runAssignmentCommand(
           ref,
           assignmentId,
           flags["hc-session"],
+          { store, project: project_id },
         ).catch((error: unknown) => {
           if (sub === "attach" && error instanceof CliError)
             throw attachFailure(assignmentId, error.message, error.details);
@@ -900,17 +907,12 @@ export async function runAssignmentCommand(
     if (!launching) await secureDataDirectory(execution);
     if (sub === "start")
       rejectExternalTerminalAction(store, project_id, assignmentId);
-    if (sub === "stop") {
-      const { assignment } = requireAssignment(store, project_id, assignmentId);
-      if (assignment.scope === "standing" && assignment.role_id === "pm") {
-        pauseStanding(store, project_id, assignment.id, actor);
-        await scrubRunCredentials(execution, project_id, assignment.id);
-      }
-    }
-    const created = await HerdrRuntime.create({
+    const created = await RuntimeTargets.create({
       session,
       execution,
       env: io.env,
+      store,
+      project: project_id,
     });
     if (!created.ok) {
       if (sub === "attach")
@@ -927,6 +929,7 @@ export async function runAssignmentCommand(
         EXIT.failure,
       );
     }
+    if (ref) created.value.executionForRef(ref, project_id);
     const runtime = created.value;
 
     if (sub === "stop") {
@@ -1008,7 +1011,13 @@ export async function startAssignmentCommand(
   rejectExternalTerminalAction(store, project_id, assignment_id);
   const paths = resolveLaunchPaths(io.env);
   const dataDir = resolveDataDir(io, options.dataDir);
-  const execution = options.execution ?? (await executionFor(io, dataDir));
+  const execution =
+    runtime instanceof RuntimeTargets
+      ? runtime.forLaunch(
+          project_id,
+          requireAssignment(store, project_id, assignment_id).assignment,
+        ).execution
+      : (options.execution ?? (await executionFor(io, dataDir)));
   const started = await startAssignment({
     execution,
     store,
@@ -1070,7 +1079,13 @@ export async function startAssignmentById(
     options.session ?? options.io.env.CARDIGAN_HC_SESSION ?? DEFAULT_HC_SESSION;
   const execution = await executionFor(options.io, dataDir, session);
   await secureDataDirectory(execution);
-  const created = await HerdrRuntime.create({ execution, session });
+  const created = await RuntimeTargets.create({
+    execution,
+    session,
+    env: options.io.env,
+    store: options.store,
+    project: options.project_id,
+  });
   if (!created.ok) {
     throw new CliError(
       formatCommandError("连接运行时", "Herdr", created.error),

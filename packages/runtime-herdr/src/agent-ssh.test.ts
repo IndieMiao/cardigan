@@ -460,6 +460,133 @@ test("all Runtime operations route to the configured agent machine using support
   ]);
 });
 
+test("bound local methods and subscriptions keep the exact target; hc alias rebinding cannot kill a new terminal", async () => {
+  const target = {
+    project_id: "fixture",
+    machine_id: "local",
+    session: "bound",
+    generation: "one",
+    fingerprint: "fixture-fingerprint",
+  };
+  const config = { ...execution, target, path: "/fixture/bin:/usr/bin:/bin" };
+  const runtime = value(
+    await HerdrRuntime.create({
+      client,
+      execution: config,
+      session: target.session,
+    }),
+  );
+  const agentLaunch = {
+    ...launch,
+    cwd: join(config.agentRoot, "worktrees", "fixture", "A-1"),
+  };
+  const bound = value(
+    await runtime.provision(assignment, role, machine, agentLaunch),
+  );
+  expect(bound.target).toEqual(target);
+  value(await runtime.wake(bound, "task"));
+  value(await runtime.status(bound));
+  value(await runtime.interrupt(bound));
+  value(await runtime.resume_or_replace(bound, agentLaunch));
+  value(await runtime.human_entry(bound));
+  for await (const event of runtime.events(bound)) {
+    value(event);
+    break;
+  }
+  value(await runtime.release(bound, { force: true }));
+  expect(agentSshCommand(config)).toContain("PATH=/fixture/bin:/usr/bin:/bin");
+  for (const option of [
+    "StrictHostKeyChecking=yes",
+    "ForwardAgent=no",
+    "ClearAllForwardings=yes",
+    "IdentityAgent=none",
+    "IdentitiesOnly=yes",
+  ])
+    expect(agentSshCommand(config)).toContain(option);
+  const prior = client.exec;
+  client.exec = vi.fn(async (args) =>
+    args[0] === "machine" && args[1] === "ls"
+      ? JSON.stringify({
+          machines: [
+            {
+              name: config.machine,
+              target: "different SSH target",
+              via: true,
+              session: target.session,
+              version: "0.1.18",
+            },
+          ],
+        })
+      : prior(args),
+  );
+  expect(await runtime.release(bound, { force: true })).toMatchObject({
+    ok: false,
+    error: { code: "invalid_launch" },
+  });
+  expect(vi.mocked(client.exec).mock.calls.map(([args]) => args[0])).toEqual([
+    "machine",
+  ]);
+  expect(await runtime.human_entry(bound)).toMatchObject({
+    ok: false,
+    error: { code: "invalid_launch" },
+  });
+  expect(
+    await runtime.provision(assignment, role, machine, agentLaunch),
+  ).toMatchObject({
+    ok: false,
+    error: { code: "invalid_launch" },
+  });
+  expect(
+    vi.mocked(client.exec).mock.calls.every(([args]) => args[0] === "machine"),
+  ).toBe(true);
+});
+
+test("a remote binding supports get/events checks but no provision, wake or replacement even with an injected hc client", async () => {
+  const target = {
+    project_id: "fixture",
+    machine_id: "worker-a",
+    session: "remote",
+    generation: "one",
+    fingerprint: "fixture-fingerprint",
+  };
+  const runtime = value(
+    await HerdrRuntime.create({
+      client,
+      execution: { ...execution, target },
+      session: target.session,
+    }),
+  );
+  const remoteRef = { ...ref, machine_id: "worker-a", target };
+  value(await runtime.status(remoteRef));
+  const count = vi.mocked(client.exec).mock.calls.length;
+  expect(
+    await runtime.provision(
+      { ...assignment, machine_id: "worker-a" },
+      role,
+      { ...machine, id: "worker-a" },
+      launch,
+    ),
+  ).toMatchObject({ ok: false });
+  expect(await runtime.wake(remoteRef, "task")).toMatchObject({ ok: false });
+  expect(await runtime.resume_or_replace(remoteRef, launch)).toMatchObject({
+    ok: false,
+  });
+  expect(vi.mocked(client.exec).mock.calls).toHaveLength(count);
+  expect(
+    await runtime.status({
+      ...remoteRef,
+      target: { ...target, generation: "old" },
+    }),
+  ).toMatchObject({ ok: false });
+  expect(
+    await HerdrRuntime.create({
+      client,
+      execution: { ...execution, target },
+      session: "wrong",
+    }),
+  ).toMatchObject({ ok: false });
+});
+
 test("foreign/local refs and work directories cannot escape agent-ssh mode", async () => {
   const runtime = value(await HerdrRuntime.create({ client, execution }));
   const before = vi.mocked(client.exec).mock.calls.length;

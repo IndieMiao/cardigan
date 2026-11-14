@@ -9,6 +9,7 @@ import {
   type Event,
   type MergePushAttempt,
   type MergePushCommit,
+  type MergePushFailure,
   recordMergePushResult,
   recordMergeResult,
 } from "../index.js";
@@ -51,6 +52,7 @@ const required = <T>(v: T | undefined): T => {
 
 function harness() {
   let f: ReturnType<typeof mergeFixture> | undefined;
+  let time = "2035-01-01T00:00:00.000Z";
   const state = (): CommandState => ({
     ...required(f).state,
     project_settings: { merge_push: destination },
@@ -63,7 +65,7 @@ function harness() {
       3,
       f ? { state: f.state, ports: f.io } : undefined,
     );
-    f.io.clock = { now: () => "2035-01-01T00:00:00.000Z" };
+    f.io.clock = { now: () => time };
     const { completion } = await f.accept();
     f.commit(
       recordMergeResult(
@@ -114,6 +116,24 @@ function harness() {
         io(),
       ),
     );
+  const failed = (
+    attempt: MergePushAttempt,
+    reason: MergePushFailure = "auth",
+  ) =>
+    required(f).commit(
+      recordMergePushResult(
+        state(),
+        system,
+        {
+          target: destination.target,
+          attempt_id: attempt.attempt_id,
+          status: "failed",
+          reason,
+          exit_code: 128,
+        },
+        io(),
+      ),
+    );
   const accept = (actor: Actor = human, text = "确认可以发布") =>
     acceptMergePushHold(
       state(),
@@ -142,6 +162,10 @@ function harness() {
     raw,
     check,
     pushed,
+    failed,
+    at: (value: string) => {
+      time = value;
+    },
     accept,
     close,
     openAction,
@@ -374,6 +398,72 @@ test("only the human accepts; accept trusts exactly the listed SHAs and resumes 
   expect(h.check(next, [commit(E, sha("7")), commit(sha("7"), D)]).status).toBe(
     "held",
   );
+});
+
+test.each([
+  { coalesced: false, reason: "auth" },
+  { coalesced: true, reason: "auth" },
+  { coalesced: true, reason: "network" },
+  { coalesced: false, reason: "rejected" },
+] as const)(
+  "accepting repeated holds keeps the auth retry budget (coalesced=$coalesced, first=$reason)",
+  async ({ coalesced, reason }) => {
+    const h = await started();
+    await h.merge(B, C);
+    if (coalesced) await h.merge(C, D);
+    const first = required(h.begin("auth-first"));
+    h.failed(first, reason);
+    if (reason === "rejected") h.close();
+    else expect(h.openAction()).toBeUndefined();
+    h.at("2035-01-01T00:01:00.000Z");
+    let attempt = required(h.begin("auth-retry"));
+    const pending = coalesced ? [D, C] : [C];
+    for (const [index, foreign] of [[F1], [F2, F1]].entries()) {
+      expect(h.check(attempt, link(B, ...foreign, ...pending)).status).toBe(
+        "held",
+      );
+      h.f.commit(h.accept());
+      attempt = required(h.begin(`after-hold-${index}`));
+      expect(attempt.auth_retry_used).toBe(true);
+      expect(attempt.queue_ids).toHaveLength(coalesced ? 2 : 1);
+      expect(h.begin(`restart-${index}`)).toEqual(attempt);
+    }
+    expect(h.check(attempt, link(B, F2, F1, ...pending))).toEqual({
+      status: "clear",
+    });
+    const result = h.failed(attempt);
+    expect(result.next_retry_at).toBeUndefined();
+    expect(h.openAction()?.status).toBe("open");
+    h.at("2035-01-01T01:00:00.000Z");
+    expect(h.begin("third-auto-push")).toBeUndefined();
+    h.close();
+    h.pushed(required(h.begin("after-auth-repair")));
+    await h.merge(coalesced ? D : C, E);
+    const fresh = required(h.begin("fresh-range"));
+    expect(fresh.auth_retry_used).toBeUndefined();
+    expect(h.failed(fresh).next_retry_at).toBeDefined();
+  },
+);
+
+test("accepting a hold before any failure retains the first auth retry, while reverting drops the old budget", async () => {
+  const h = await started();
+  await h.merge(B, C);
+  const first = required(h.begin("first-hold"));
+  h.check(first, link(B, F1, C));
+  h.f.commit(h.accept());
+  const accepted = required(h.begin("accepted-before-failure"));
+  expect(accepted.auth_retry_used).toBeUndefined();
+  expect(h.failed(accepted).next_retry_at).toBeDefined();
+  h.at("2035-01-01T00:01:00.000Z");
+  const retry = required(h.begin("auth-retry"));
+  h.check(retry, link(B, F2, F1, C));
+  // Reverting drops C; the later recorded merge has its own budget.
+  await h.merge(B, D);
+  h.close();
+  const fresh = required(h.begin("after-revert"));
+  expect(fresh.sha).toBe(D);
+  expect(fresh.auth_retry_used).toBeUndefined();
+  expect(h.failed(fresh).next_retry_at).toBeDefined();
 });
 
 test("closing without accept is a revert: held merges drop, nothing is trusted, the next push re-checks the head", async () => {

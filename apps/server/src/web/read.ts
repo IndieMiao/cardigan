@@ -35,6 +35,7 @@ import {
   formatTimelineEntryId,
   hasVerifiedMergeNoop,
   humanMergeBlockers,
+  INDEPENDENT_REVIEW_DELEGATION_MAX,
   latestCardTemplate,
   listNeedsYou,
   markCardDone,
@@ -1041,6 +1042,21 @@ function decisionActionWebView(
       ? { plain_summary: decision.plain_summary }
       : {}),
     trigger: decision.trigger ?? null,
+    ...(decision.trigger === "review_limit" &&
+    original?.affected_work_items.some((id) =>
+      state.work_items.some(
+        (item) =>
+          item.id === id &&
+          item.kind === "verify" &&
+          item.role_id === "independent_reviewer",
+      ),
+    )
+      ? {
+          independent_review_limit: {
+            max_delegated_raises: INDEPENDENT_REVIEW_DELEGATION_MAX,
+          },
+        }
+      : {}),
     category: decision.category ?? "general",
     assignment_id: decision.assignment_id ?? null,
     opened_at: decision.opened_at,

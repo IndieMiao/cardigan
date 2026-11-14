@@ -204,7 +204,7 @@ test("both entries start a terminal through the same launchRun", async () => {
   expect(serverRun.id).toBe(runs[1]?.id);
   expect(x.provisions).toHaveLength(2);
   for (const provisioned of x.provisions)
-    expect(provisioned.agent_name).toMatch(/^coder-[0-9a-f]{8}-/u);
+    expect(provisioned.agent_name).toMatch(/^coder-[0-9a-f]{24}$/u);
   const firstFile = (id: Assignment["id"]) =>
     readFileSync(
       join(x.f.dataDir, "runs", x.f.project, id, "first.md"),

@@ -13,6 +13,133 @@ import { HttpCardiganClient } from "../api.js";
 import { fakeClient } from "../testing/fixtures.js";
 import { SettingsPage } from "./SettingsPage.js";
 
+test("the independent review link opens authorization directly", async () => {
+  window.location.hash = "#/p/p-1/settings?tab=authorization";
+  render(<App client={fakeClient()} />);
+  expect(
+    await screen.findByRole("checkbox", { name: "允许后台代批独立复核加一轮" }),
+  ).toBeTruthy();
+  expect(
+    screen.getByRole("button", { name: "授权" }).getAttribute("aria-current"),
+  ).toBe("page");
+});
+
+test.each([
+  ["forbidden_tool", "没有权限执行此操作。"],
+  ["unauthorized", "没有权限执行此操作。"],
+  ["origin_required", "请求被拒绝（来源校验未通过）。"],
+  ["origin_rejected", "请求被拒绝（来源校验未通过）。"],
+])(
+  "authorization explains HTTP 403/%s without discarding the draft",
+  async (code, message) => {
+    const http = new HttpCardiganClient(
+      async () =>
+        new Response(
+          JSON.stringify({ error: { code, message: "Request denied" } }),
+          { status: 403 },
+        ),
+    );
+    render(
+      <SettingsPage
+        projectId="p-1"
+        client={fakeClient({
+          preferences: async () => ({
+            auto_merge_after_minutes: null,
+            merge_gate_enabled: true,
+            independent_review_limit_delegation: false,
+            independent_review_limit_delegation_ceiling: 3,
+          }),
+          setIndependentReviewLimitDelegation: (...args) =>
+            http.setIndependentReviewLimitDelegation(...args),
+        })}
+      />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "授权" }));
+    fireEvent.click(
+      await screen.findByRole("checkbox", {
+        name: "允许后台代批独立复核加一轮",
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "保存加轮授权" }));
+    expect((await screen.findByRole("alert")).textContent).toContain(message);
+    expect(screen.getByText("有更改，待保存")).toBeTruthy();
+    expect(
+      (
+        screen.getByRole("checkbox", {
+          name: "允许后台代批独立复核加一轮",
+        }) as HTMLInputElement
+      ).checked,
+    ).toBe(true);
+    expect(
+      (
+        screen.getByRole("button", {
+          name: "保存加轮授权",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(false);
+  },
+);
+
+test("independent review authorization shows its fixed budget and unsaved state, retries and saves human changes", async () => {
+  let enabled = false;
+  const save = vi
+    .fn()
+    .mockRejectedValueOnce(new TypeError("offline"))
+    .mockImplementation(async (_project, next) => {
+      enabled = next;
+    });
+  render(
+    <SettingsPage
+      projectId="p-1"
+      client={fakeClient({
+        preferences: async () => ({
+          auto_merge_after_minutes: null,
+          merge_gate_enabled: true,
+          independent_review_limit_delegation: enabled,
+          independent_review_limit_delegation_max: enabled ? 3 : null,
+          independent_review_limit_delegation_ceiling: 3,
+        }),
+        setIndependentReviewLimitDelegation: save,
+      })}
+    />,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "授权" }));
+  const toggle = await screen.findByRole("checkbox", {
+    name: "允许后台代批独立复核加一轮",
+  });
+  expect((toggle as HTMLInputElement).checked).toBe(false);
+  expect(screen.getByText("每个复核项累计最多代批 3 次。")).toBeTruthy();
+  fireEvent.click(toggle);
+  expect(screen.getByText("有更改，待保存")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "保存加轮授权" }));
+  await screen.findByRole("alert");
+  fireEvent.click(screen.getByRole("button", { name: "保存加轮授权" }));
+  await screen.findByText("已保存：授权开启");
+  expect(save.mock.calls[0]?.slice(0, 3)).toEqual(["p-1", true, 3]);
+  expect(save.mock.calls[0]?.[3]).toBe(save.mock.calls[1]?.[3]);
+  fireEvent.click(
+    screen.getByRole("checkbox", { name: "允许后台代批独立复核加一轮" }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "保存加轮授权" }));
+  await screen.findByText("已保存：授权关闭");
+  expect(save.mock.calls[2]?.slice(0, 3)).toEqual(["p-1", false, 3]);
+});
+
+test("missing authorization policy cannot enable grants", async () => {
+  render(<SettingsPage projectId="p-1" client={fakeClient()} />);
+  fireEvent.click(await screen.findByRole("button", { name: "授权" }));
+  fireEvent.click(
+    await screen.findByRole("checkbox", { name: "允许后台代批独立复核加一轮" }),
+  );
+  expect(
+    (screen.getByRole("button", { name: "保存加轮授权" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+  expect(
+    screen.getByText("暂时无法读取已批准的累计上限，请刷新后再开启。"),
+  ).toBeTruthy();
+});
+
 afterEach(() => {
   cleanup();
   window.location.hash = "";
@@ -119,6 +246,16 @@ test("HTTP preferences carry the required key and encoded project", async () => 
     "snooze-max-key",
   );
   expect(maxInit?.body).toBe('{"merge_confirm_snooze_max_minutes":60}');
+  await client.setIndependentReviewLimitDelegation("a/b", true, 3, "grant-key");
+  const [grantUrl, grantInit] = fetcher.mock.calls[2] ?? [];
+  expect(grantUrl).toBe("/api/projects/a%2Fb/preferences");
+  expect(new Headers(grantInit?.headers).get("Idempotency-Key")).toBe(
+    "grant-key",
+  );
+  expect(JSON.parse(String(grantInit?.body))).toEqual({
+    independent_review_limit_delegation: true,
+    independent_review_limit_delegation_max: 3,
+  });
 });
 
 test("authorization exposes defaults, retries safely, and fixes high-risk categories to human confirmation", async () => {

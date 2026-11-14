@@ -2,9 +2,15 @@ import type { Decision, WorkItem } from "../entities.js";
 import type { DecisionId } from "../ids.js";
 import { transition } from "../transitions.js";
 import { type CommandDraft, ensure, text, unwrap } from "./core.js";
-import { delegationAllowed, delegationAuthority } from "./delegation.js";
+import {
+  delegationAllowed,
+  delegationAuthority,
+  independentReviewDelegationAuthority,
+} from "./delegation.js";
+import { independentReviewLimitTarget } from "./independent-review-limit-delegation.js";
 import { REVIEW_LIMIT_PLAIN_SUMMARY } from "./plain-summary.js";
 import { queueResumedRun, resumeWork } from "./resumption.js";
+import { currentReviewTarget } from "./review-round.js";
 
 export interface ReviewLimitResolution {
   readonly decision_id: DecisionId;
@@ -47,6 +53,11 @@ export function resolveReviewLimit(
     d.put("decisions", {
       ...q,
       decider: "human",
+      ...(item.role_id === "independent_reviewer"
+        ? {
+            human_required_reason: `独立复核加轮已由项目经理升级给人：${p.rationale}`,
+          }
+        : {}),
       context: `${q.context}\n\n项目经理升级给你：${p.rationale}`,
       // C-202: review-limit decisions raised before plain summaries get one.
       plain_summary: q.plain_summary ?? { ...REVIEW_LIMIT_PLAIN_SUMMARY },
@@ -69,13 +80,25 @@ export function resolveReviewLimit(
     );
     return item;
   }
+  const independent = item.role_id === "independent_reviewer";
+  const target = independent ? currentReviewTarget(d, item) : undefined;
   recordDecisionResolution(d, q, {
     option: p.option,
     rationale: p.rationale,
     raw_quote: p.rationale,
     resolved_by: d.author,
     via: "delegated",
-    proxy_authority: delegationAuthority(d, q.category ?? "general"),
+    proxy_authority: independent
+      ? independentReviewDelegationAuthority(d)
+      : delegationAuthority(d, q.category ?? "general"),
+    ...(target
+      ? { review_limit_target: independentReviewLimitTarget(target) }
+      : {}),
+    ...(independent
+      ? {
+          notice: `按常驻授权代批独立复核${p.option === "raise_limit" ? "增加一轮" : "暂停"}：${p.rationale}。加轮不等于复核通过或确认合并。`,
+        }
+      : {}),
     via_chain: [d.author],
     at: d.now,
   });
@@ -190,6 +213,14 @@ export function recordDecisionResolution(
         rationale: resolution.rationale,
         raised_by: q.raised_by,
         via: resolution.via,
+        ...(resolution.review_limit_target
+          ? {
+              review_limit_target: {
+                delivery_id: resolution.review_limit_target.delivery_id,
+                subject: { ...resolution.review_limit_target.subject },
+              },
+            }
+          : {}),
         ...(resolution.proxy_authority
           ? { proxy_authority: resolution.proxy_authority }
           : {}),
@@ -210,7 +241,9 @@ export function recordDecisionResolution(
         ...(reviewItemId ? { work_item_id: reviewItemId } : {}),
         body: resolution.merge_override
           ? `强行确认合并；理由：${resolution.merge_override.reason}\n当时缺项：${resolution.merge_override.blockers.length ? `\n${resolution.merge_override.blockers.map((b) => `- ${b}`).join("\n")}` : "无"}\n${resolution.raw_quote}`
-          : resolution.raw_quote,
+          : resolution.review_limit_target && resolution.via === "delegated"
+            ? (resolution.notice ?? resolution.raw_quote)
+            : resolution.raw_quote,
       },
     );
     for (const item of unblocked) queueResumedRun(d, item, event);
