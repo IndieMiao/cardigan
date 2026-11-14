@@ -3,7 +3,12 @@ import { gitSafetyArguments } from "./hardening.js";
 export type PushFailure = "rejected" | "network" | "auth" | "other";
 export type PushResult =
   | { readonly status: "pushed" }
-  | { readonly status: "failed"; readonly reason: PushFailure };
+  | {
+      readonly status: "failed";
+      readonly reason: PushFailure;
+      /** The numeric process exit status, when available; never raw diagnostics. */
+      readonly exit_code?: number;
+    };
 export interface PushRequest {
   readonly sha: string;
   readonly remote: string;

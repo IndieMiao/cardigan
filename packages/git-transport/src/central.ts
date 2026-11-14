@@ -174,6 +174,7 @@ export class CentralGitTransport implements GitCentralPort {
             return { status: "pushed" } as const;
           } catch (error) {
             const e = error as {
+              code?: unknown;
               stdout?: string;
               stderr?: string;
               killed?: boolean;
@@ -185,6 +186,11 @@ export class CentralGitTransport implements GitCentralPort {
                 `${e.stdout ?? ""}\n${e.stderr ?? ""}`,
                 e.killed || e.name === "AbortError",
               ),
+              ...(typeof e.code === "number" &&
+              Number.isSafeInteger(e.code) &&
+              e.code >= 0
+                ? { exit_code: e.code }
+                : {}),
             } as const;
           }
         },
