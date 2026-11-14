@@ -12,7 +12,8 @@
  * execution view's Assignment/Run/cursor rows.
  */
 
-import type { CardId } from "@cardigan/domain";
+import { arch, platform } from "node:os";
+import { type CardId, DEFAULT_RUN_LIMIT } from "@cardigan/domain";
 import { expect, test } from "vitest";
 import { call, type WebHarness, webHarness } from "../../test-support/web.js";
 import {
@@ -425,7 +426,24 @@ test("the execution view lists assignments, their run, worktree and cursor", asy
     expect(assignment.run).toMatchObject({ id: "R-1", status: "running" });
     expect(assignment.cursors).toEqual([{ card_id: "C-2", acked_seq: 1 }]);
     expect(body.runs).toHaveLength(1);
-    expect(body.machines).toEqual([]);
+    const project = harness.store.getProject(project_id);
+    expect(project).toBeDefined();
+    expect(body.machines).toEqual([
+      {
+        id: "local",
+        label: "local",
+        herdr_machine: "local",
+        os: platform(),
+        arch: arch(),
+        tags: [],
+        max_assignments: DEFAULT_RUN_LIMIT,
+        status: "online",
+        last_seen: project?.created_at,
+      },
+    ]);
+    expect(body.machines).toEqual(
+      harness.store.uow.read((tx) => tx.machines.list(project_id)),
+    );
   } finally {
     await harness.close();
   }
