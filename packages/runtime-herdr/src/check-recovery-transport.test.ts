@@ -49,8 +49,7 @@ async function fixture() {
       sha: "a".repeat(40),
       binding,
       slots: 1,
-      resume: false,
-      authorize: vi.fn(),
+      confirmAbsence: vi.fn(),
     },
   };
 }
@@ -64,7 +63,7 @@ lines.once('line',line=>{
  ${behavior}
 });`;
 
-test("fixed pinned SSH protocol waits for durable host authorization before acknowledging deletion", async () => {
+test("fixed pinned SSH protocol audits absence without a deletion acknowledgement", async () => {
   const f = await fixture();
   const result = await recoverCheckDirectory(
     f.execution,
@@ -85,14 +84,14 @@ test("fixed pinned SSH protocol waits for durable host authorization before ackn
         [
           "-e",
           fakeRemote(
-            "send({phase:'ready'}); lines.once('line',value=>{if(value==='delete')send(result);lines.close();});",
+            "send({phase:'absent'}); lines.once('line',value=>{if(value==='confirm')send(result);lines.close();});",
           ),
         ],
         { env, stdio: ["pipe", "pipe", "pipe"] },
       );
     },
   );
-  expect(f.input.authorize).toHaveBeenCalledOnce();
+  expect(f.input.confirmAbsence).toHaveBeenCalledOnce();
   expect(result).toEqual({
     status: "cleaned",
     reason: "complete",
@@ -101,6 +100,7 @@ test("fixed pinned SSH protocol waits for durable host authorization before ackn
 });
 
 test.each([
+  "send({phase:'ready'});lines.close();",
   "send(result);lines.close();",
   "process.stdout.write(JSON.stringify(result)+'\\n');lines.close();",
   "send({status:'manual_attention',reason:'occupied',processes:[{pid:1,state:'D',wchan:'private data'}]});lines.close();",
@@ -119,13 +119,35 @@ test.each([
       reason: "transport",
       processes: [],
     });
-    expect(f.input.authorize).not.toHaveBeenCalled();
+    expect(f.input.confirmAbsence).not.toHaveBeenCalled();
   },
 );
 
-test("an audit failure never sends the destructive acknowledgement", async () => {
+test("an exclusion failure is reported without requesting any confirmation", async () => {
   const f = await fixture();
-  f.input.authorize.mockImplementation(() => {
+  const result = await recoverCheckDirectory(f.execution, f.input, () =>
+    spawn(
+      process.execPath,
+      [
+        "-e",
+        fakeRemote(
+          "send({status:'manual_attention',reason:'exclusion_unproven',processes:[]});lines.close();",
+        ),
+      ],
+      { stdio: ["pipe", "pipe", "pipe"] },
+    ),
+  );
+  expect(result).toEqual({
+    status: "manual_attention",
+    reason: "exclusion_unproven",
+    processes: [],
+  });
+  expect(f.input.confirmAbsence).not.toHaveBeenCalled();
+});
+
+test("an audit failure prevents absence confirmation", async () => {
+  const f = await fixture();
+  f.input.confirmAbsence.mockImplementation(() => {
     throw new Error("fixture store failure");
   });
   const result = await recoverCheckDirectory(f.execution, f.input, () =>
@@ -134,7 +156,7 @@ test("an audit failure never sends the destructive acknowledgement", async () =>
       [
         "-e",
         fakeRemote(
-          "send({phase:'ready'}); lines.once('line',()=>{send(result);lines.close();});",
+          "send({phase:'absent'}); lines.once('line',()=>{send(result);lines.close();});",
         ),
       ],
       { stdio: ["pipe", "pipe", "pipe"] },

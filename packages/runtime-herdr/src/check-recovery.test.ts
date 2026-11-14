@@ -4,7 +4,6 @@ import {
   lstat,
   mkdir,
   mkdtemp,
-  readdir,
   readFile,
   rename,
   rm,
@@ -82,7 +81,7 @@ async function fixture() {
   const run = (
     options: {
       before?: string;
-      atAuthorize?: string;
+      atConfirm?: string;
       resume?: boolean;
       realProtection?: boolean;
     } = {},
@@ -101,7 +100,7 @@ class Input:
     def readline(self, size):
         self.count += 1
         if self.count == 2:
-            ${options.atAuthorize ?? "pass"}
+            ${options.atConfirm ?? "pass"}
         return original_input.readline(size)
 sys.stdin = Input()
 try: main()
@@ -109,7 +108,7 @@ except Occupied as error: output('manual_attention', error.reason, error.process
 except Exception: output('manual_attention', 'unverified')
 `;
     const result = spawnSync("python3", ["-I", "-c", code, root], {
-      input: `${JSON.stringify({ project: "p", attempt: "attempt", sha, binding, slots: 1, auth_key: "a".repeat(64), resume: options.resume ?? false })}\ndelete\n`,
+      input: `${JSON.stringify({ project: "p", attempt: "attempt", sha, binding, slots: 1, auth_key: "a".repeat(64), resume: options.resume ?? false })}\nconfirm\n`,
       encoding: "utf8",
       timeout: 5000,
       env: { PATH: "/usr/bin:/bin" },
@@ -117,24 +116,43 @@ except Exception: output('manual_attention', 'unverified')
     expect(result.status, result.stderr).toBe(0);
     const lines = result.stdout.trim().split("\n");
     return {
-      ready: lines.some((line) => JSON.parse(line).phase === "ready"),
+      ready: lines.some((line) => JSON.parse(line).phase === "absent"),
       ...JSON.parse(lines.at(-1) as string),
     };
   };
   return { root, repo, container, worktree, registry, binding, sha, git, run };
 }
 
-test("removes only the bound ended checkout and its exact Git registration, then resumes idempotently", async () => {
+test("a completed ordinary cleanup is confirmed on its first patrol without a resume journal", async () => {
   const f = await fixture();
   const sibling = join(f.root, "checks", "p", "other");
   f.git("worktree", "add", "--detach", sibling, f.sha);
-  await writeFile(join(f.worktree, "payload"), "temporary");
+  f.git("worktree", "remove", f.worktree);
+  await rm(f.container, { recursive: true });
   expect(f.run()).toMatchObject({ ready: true, status: "cleaned" });
-  await expect(lstat(f.container)).rejects.toThrow();
   expect(f.git("worktree", "list", "--porcelain")).toContain(sibling);
-  expect(f.git("worktree", "list", "--porcelain")).not.toContain(f.worktree);
-  expect(f.run({ resume: true })).toMatchObject({ status: "cleaned" });
+  expect(f.run()).toMatchObject({ status: "cleaned" });
 });
+
+test.each(["container", "registration"])(
+  "an initially missing %s does not authorize removal of the remaining resource",
+  async (part) => {
+    const f = await fixture();
+    await rm(part === "container" ? f.container : f.registry, {
+      recursive: true,
+    });
+    expect(f.run()).toMatchObject({
+      ready: false,
+      status: "manual_attention",
+      reason: "unverified",
+    });
+    expect(
+      (
+        await lstat(part === "container" ? f.registry : f.container)
+      ).isDirectory(),
+    ).toBe(true);
+  },
+);
 
 test("production path refuses an account-owned lock namespace", async () => {
   const f = await fixture();
@@ -162,7 +180,10 @@ test("rejects symlink ancestors and never follows an internal link outside the a
   const outside = join(f.root, "keep");
   await writeFile(outside, "keep");
   await symlink(outside, join(f.worktree, "link"));
-  expect(f.run()).toMatchObject({ status: "cleaned" });
+  expect(f.run()).toMatchObject({
+    status: "manual_attention",
+    reason: "exclusion_unproven",
+  });
   expect(await readFile(outside, "utf8")).toBe("keep");
   const g = await fixture();
   await rename(g.container, `${g.container}-old`);
@@ -171,17 +192,19 @@ test("rejects symlink ancestors and never follows an internal link outside the a
 });
 
 test.each([
-  "os.rename(root + '/checks/p/attempt', root + '/checks/p/moved')",
-  "os.mkdir(root + '/checks/p/attempt/new')",
+  "os.mkdir(root + '/checks/p/attempt')",
+  "os.symlink(root + '/elsewhere', root + '/checks/p/attempt')",
 ])(
-  "rechecks identities and inventory after host authorization: %s",
-  async (atAuthorize) => {
+  "rechecks an absent target after host confirmation: %s",
+  async (atConfirm) => {
     const f = await fixture();
-    expect(f.run({ atAuthorize })).toMatchObject({
+    f.git("worktree", "remove", f.worktree);
+    await rm(f.container, { recursive: true });
+    expect(f.run({ atConfirm })).toMatchObject({
       ready: true,
       status: "manual_attention",
     });
-    expect((await lstat(f.registry)).isDirectory()).toBe(true);
+    expect(await lstat(f.container)).toBeDefined();
   },
 );
 
@@ -198,7 +221,7 @@ test("a foreign Git backlink or mount is never deletion authority", async () => 
   ).toMatchObject({ ready: false, status: "manual_attention" });
 });
 
-test("retains every lock through deletion, and a held slot refuses recovery", async () => {
+test("a held inspection slot refuses recovery", async () => {
   const f = await fixture();
   expect(
     f.run({
@@ -233,15 +256,16 @@ def listing(path):
     if path == '/proc':
         list_count += 1
         return ['71', '72'] if fault == 'new_pid' and list_count > 1 else ['71']
-    if path == '/proc/71/fd': return ['3']
+    if path == '/proc/71/task': return ['71']
+    if path == '/proc/71/task/71/fd': return ['3']
     raise AssertionError('unexpected read')
 def opening(path, *args):
     global stat_count
     reads.append(path)
-    if path == '/proc/71/wchan':
+    if path == '/proc/71/task/71/wchan':
         if fault == 'wchan': raise PermissionError()
         return io.StringIO('exit_mm')
-    if path == '/proc/71/stat':
+    if path == '/proc/71/task/71/stat':
         stat_count += 1
         start = '200' if fault == 'pid_reuse' and stat_count > 1 else '100'
         return io.StringIO('71 (fixture) D ' + '0 ' * 18 + start)
@@ -270,7 +294,9 @@ print(json.dumps(dict(result=result, reads=reads)))
     expect(actual.result.status).toBe(fault === "clear" ? "clear" : "occupied");
     expect(
       actual.reads.every((p: string) =>
-        /^\/proc(?:\/71\/(?:stat|wchan|cwd|fd(?:\/3)?))?$/u.test(p),
+        /^\/proc(?:\/71\/task(?:\/71\/(?:stat|wchan|cwd|fd(?:\/3)?))?)?$/u.test(
+          p,
+        ),
       ),
     ).toBe(true);
     if (["cwd", "fd", "renamed"].includes(fault))
@@ -280,49 +306,34 @@ print(json.dumps(dict(result=result, reads=reads)))
   },
 );
 
-test("an interrupted deletion preserves registration and requires the host resume journal", async () => {
+test.each([false, true])(
+  "even a legacy resume=%s cannot authorize deletion",
+  async (resume) => {
+    const f = await fixture();
+    await writeFile(join(f.worktree, "payload"), "keep");
+    const result = f.run({
+      resume,
+      before: `
+def forbidden(*args, **kwargs): raise AssertionError('mutation attempted')
+os.unlink = os.rmdir = os.rename = forbidden
+`,
+    });
+    expect(result).toMatchObject({
+      ready: false,
+      status: "manual_attention",
+      reason: "exclusion_unproven",
+    });
+    expect(await readFile(join(f.worktree, "payload"), "utf8")).toBe("keep");
+    expect(f.git("worktree", "list", "--porcelain")).toContain(f.worktree);
+  },
+);
+
+test("a previous partial deletion is preserved without pretending it can safely resume", async () => {
   const f = await fixture();
   await rm(join(f.worktree, ".git"));
-  expect(f.run()).toMatchObject({ ready: false, status: "manual_attention" });
   expect(f.run({ resume: true })).toMatchObject({
-    ready: true,
-    status: "cleaned",
+    ready: false,
+    status: "manual_attention",
   });
-});
-
-test("a filesystem failure after the first unlink is audited as partial and can resume", async () => {
-  const f = await fixture();
-  await writeFile(join(f.worktree, "remaining"), "preserve until retry");
-  const partial = f.run({
-    before: `
-original_unlink = os.unlink
-unlinked = 0
-def unlink(*args, **kwargs):
-    global unlinked
-    unlinked += 1
-    if unlinked > 1: raise OSError('fixture disk failure')
-    original_unlink(*args, **kwargs)
-os.unlink = unlink`,
-  });
-  expect(partial).toMatchObject({ ready: true, status: "manual_attention" });
-  expect((await lstat(f.registry)).isDirectory()).toBe(true);
-  expect(f.run({ resume: true })).toMatchObject({ status: "cleaned" });
-});
-
-test("a nested directory moved out during deletion is retained instead of traversed by its descriptor", async () => {
-  const f = await fixture();
-  await writeFile(join(f.worktree, "remaining"), "keep");
-  await writeFile(join(f.worktree, "another"), "keep");
-  const result = f.run({
-    before: `
-original_unlink = os.unlink
-def unlink(*args, **kwargs):
-    original_unlink(*args, **kwargs)
-    os.rename(root + '/checks/p/attempt/worktree', root + '/moved')
-os.unlink = unlink`,
-  });
-  expect(result.status).toBe("manual_attention");
-  // Exactly the first unlink happened before the rename; iteration order is not prescribed.
-  expect(await readdir(join(f.root, "moved"))).toHaveLength(2);
   expect((await lstat(f.registry)).isDirectory()).toBe(true);
 });

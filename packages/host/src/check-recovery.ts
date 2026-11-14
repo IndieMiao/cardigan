@@ -192,10 +192,7 @@ export class CheckRecovery {
               sha: candidate_sha,
               binding,
               slots: executor.maxConcurrent,
-              resume: previous.some(
-                (e) => e.type === "merge_check_recovery_deleting",
-              ),
-              authorize: () =>
+              confirmAbsence: () =>
                 this.options.store.uow.run((tx) => {
                   if (!eligible(tx))
                     throw new Error("Check recovery ownership changed");
@@ -203,7 +200,7 @@ export class CheckRecovery {
                     tx,
                     project,
                     card.id,
-                    "merge_check_recovery_deleting",
+                    "merge_check_recovery_absence_confirmed",
                     identity,
                   );
                 }),
@@ -246,8 +243,10 @@ export class CheckRecovery {
             created_at: finished.created_at,
             body:
               result.status === "cleaned"
-                ? `检查 ${attempt_id} 的残留目录及 Git 登记已清理。`
-                : `检查 ${attempt_id} 的残留目录待人工处理；占用或身份尚未确认，已保留现场。` +
+                ? `检查 ${attempt_id} 的目录及 Git 登记已不存在，记录已核销。`
+                : (result.reason === "exclusion_unproven"
+                    ? `检查 ${attempt_id} 的残留目录待人工处理；现有账号和锁不能阻止扫描后的新占用或改名，已保留现场。`
+                    : `检查 ${attempt_id} 的残留目录待人工处理；占用或身份尚未确认，已保留现场。`) +
                   result.processes
                     .map(
                       (p) =>

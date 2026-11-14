@@ -113,7 +113,7 @@ function setup() {
     );
   const recover = vi.fn<typeof recoverCheckDirectory>(
     async (_execution, request) => {
-      request.authorize();
+      request.confirmAbsence();
       return { status: "cleaned", reason: "complete", processes: [] };
     },
   );
@@ -171,15 +171,17 @@ test("unknown directories and active attempts are never recovery candidates", as
   expect(f.recover).not.toHaveBeenCalled();
 });
 
-test("journals before deletion and does not repeat successful cleanup after a restart", async () => {
+test("journals confirmed absence and does not repeat it after a restart", async () => {
   const f = setup();
   f.check("running");
   f.register();
   f.check("failed");
   f.recover.mockImplementation(async (_execution, request) => {
     expect(f.events().at(-1)?.type).toBe("merge_check_recovery_requested");
-    request.authorize();
-    expect(f.events().at(-1)?.type).toBe("merge_check_recovery_deleting");
+    request.confirmAbsence();
+    expect(f.events().at(-1)?.type).toBe(
+      "merge_check_recovery_absence_confirmed",
+    );
     return { status: "cleaned", reason: "complete", processes: [] };
   });
   await f.service.sweep(f.project);
@@ -191,7 +193,7 @@ test("journals before deletion and does not repeat successful cleanup after a re
   });
 });
 
-test("occupied evidence is durable; a later retry can recover when the process has gone", async () => {
+test("occupied evidence is durable; a later retry can confirm completed manual cleanup", async () => {
   const f = setup();
   f.check("running");
   f.register();
@@ -207,27 +209,27 @@ test("occupied evidence is durable; a later retry can recover when the process h
     processes: [{ pid: 12, state: "D", wchan: "exit_mm" }],
   });
   await f.service.sweep(f.project);
-  expect(f.recover.mock.calls[1]?.[1].resume).toBe(false);
+  expect(f.recover.mock.calls[1]?.[1]).not.toHaveProperty("resume");
   expect(f.events().at(-1)?.payload).toMatchObject({ status: "cleaned" });
 });
 
-test("a lost transport after authorization resumes from the durable deletion phase", async () => {
+test("lost transport after an absence observation requires a fresh observation", async () => {
   const f = setup();
   f.check("running");
   f.register();
   f.check("interrupted");
   f.recover.mockImplementationOnce(async (_execution, request) => {
-    request.authorize();
+    request.confirmAbsence();
     throw new Error("private remote diagnostic");
   });
   await f.service.sweep(f.project);
   await new CheckRecovery(f.options).sweep(f.project);
-  expect(f.recover.mock.calls[1]?.[1].resume).toBe(true);
+  expect(f.recover.mock.calls[1]?.[1]).not.toHaveProperty("resume");
   expect(JSON.stringify(f.events())).not.toContain("private remote diagnostic");
 });
 
 test.each(["executor", "status"])(
-  "rechecks %s in a fresh transaction before authorizing",
+  "rechecks %s in a fresh transaction before confirming absence",
   async (change) => {
     const f = setup();
     f.check("running");
@@ -236,12 +238,14 @@ test.each(["executor", "status"])(
     f.recover.mockImplementationOnce(async (_execution, request) => {
       if (change === "executor") f.changeExecutor();
       else f.check("running");
-      request.authorize();
-      throw new Error("should not reach deletion");
+      request.confirmAbsence();
+      throw new Error("should not confirm absence");
     });
     await f.service.sweep(f.project);
     expect(
-      f.events().some((e) => e.type === "merge_check_recovery_deleting"),
+      f
+        .events()
+        .some((e) => e.type === "merge_check_recovery_absence_confirmed"),
     ).toBe(false);
     expect(f.events().at(-1)?.payload).toMatchObject({
       status: "manual_attention",
@@ -262,4 +266,34 @@ test("ignores a forged terminal event and never switches a persisted attempt to 
   expect(f.recover).not.toHaveBeenCalled();
   await f.service.sweep("another-project" as ProjectId);
   expect(f.recover).not.toHaveBeenCalled();
+});
+
+test("a clear snapshot without exclusion remains manual, with no destructive journal or repeat notice", async () => {
+  const f = setup();
+  f.check("running");
+  f.register();
+  f.check("failed");
+  f.recover.mockResolvedValue({
+    status: "manual_attention",
+    reason: "exclusion_unproven",
+    processes: [],
+  });
+  await f.service.sweep(f.project);
+  await f.service.sweep(f.project);
+  expect(
+    f.events().filter((e) => e.type === "merge_check_recovery_requested"),
+  ).toHaveLength(2);
+  expect(
+    f
+      .events()
+      .some(
+        (e) =>
+          e.type === "merge_check_recovery_deleting" ||
+          e.type === "merge_check_recovery_absence_confirmed",
+      ),
+  ).toBe(false);
+  const notices = f.options.store.uow
+    .read((tx) => tx.timeline.list(f.project))
+    .filter((e) => e.body.includes("不能阻止扫描后的新占用"));
+  expect(notices).toHaveLength(1);
 });

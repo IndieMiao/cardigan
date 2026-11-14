@@ -1,4 +1,4 @@
-/** Linux-only fixed maintenance program. All filesystem mutations use pinned dirfds. */
+/** Linux-only inspection. Residual deletion is disabled until exclusion can be proven. */
 export const CHECK_RECOVERY_WORKER = String.raw`
 import os, sys, stat, json, re, fcntl, signal, hmac, hashlib
 
@@ -86,70 +86,69 @@ def inventory(fd, path, device, entries, objects):
             finally: os.close(child)
         entries[path + '/' + name] = (info.st_dev, info.st_ino, info.st_mode)
 
-def pstat(pid):
-    with open('/proc/' + pid + '/stat') as file: value = file.read()
+def pstat(proc):
+    with open(proc + '/stat') as file: value = file.read()
     fields = value[value.rfind(') ') + 2:].split()
     if len(fields) < 20 or not fields[19].isdigit() or not re.fullmatch('[A-Z]', fields[0]): raise Refused()
     return fields[19], fields[0]
 
-def pids(): return sorted(p for p in os.listdir('/proc') if p.isdigit() and int(p) != os.getpid())
+def pids(): return sorted(p for p in os.listdir('/proc') if p.isdigit())
+
+def task_ids(pid):
+    tids = sorted(t for t in os.listdir('/proc/' + pid + '/task') if t.isdigit())
+    if not tids: raise Refused()
+    return tids
 
 def scan(roots, objects):
-    found, observed = [], {}
+    found, observed, groups = {}, {}, {}
     uncertain = False
     before = pids()
     for pid in before:
-        state, wchan = 'unknown', 'unknown'
-        try:
-            start, state = pstat(pid); observed[pid] = start
-            if state in ('Z', 'X'): continue
-            with open('/proc/' + pid + '/wchan') as file: wait = file.read().strip()
-            if re.fullmatch('[A-Za-z0-9_]{1,80}', wait): wchan = wait
-            proc = '/proc/' + pid
-            handles = [proc + '/cwd'] + [proc + '/fd/' + n for n in os.listdir(proc + '/fd')]
-            occupied = False
-            for handle in handles:
-                target = os.readlink(handle)
-                info = os.stat(handle)
-                occupied |= (info.st_dev, info.st_ino) in objects or any(
-                    target == root or target.startswith(root + '/') or target == root + ' (deleted)' for root in roots)
-            if pstat(pid)[0] != start: raise Refused()
-            if occupied: found.append(dict(pid=int(pid), state=state, wchan=wchan))
+        try: groups[pid] = task_ids(pid)
         except Exception:
-            # A disappearing descriptor, hidden process or reused PID is uncertainty, never idle.
             uncertain = True
-            found.append(dict(pid=int(pid), state=state, wchan=wchan))
+            found[pid] = dict(pid=int(pid), state='unknown', wchan='unknown')
+            continue
+        # A dead leader does not prove that its threads have exited. Each TID
+        # can have independent CLONE_FS/CLONE_FILES state, including our group.
+        for tid in groups[pid]:
+            if int(tid) == os.getpid(): continue
+            proc = '/proc/' + pid + '/task/' + tid
+            state, wchan = 'unknown', 'unknown'
+            try:
+                start, state = pstat(proc); observed[(pid, tid)] = start
+                if state in ('Z', 'X'): continue
+                with open(proc + '/wchan') as file: wait = file.read().strip()
+                if re.fullmatch('[A-Za-z0-9_]{1,80}', wait): wchan = wait
+                handles = [proc + '/cwd'] + [proc + '/fd/' + n for n in os.listdir(proc + '/fd')]
+                occupied = False
+                for handle in handles:
+                    target = os.readlink(handle)
+                    info = os.stat(handle)
+                    occupied |= (info.st_dev, info.st_ino) in objects or any(
+                        target == root or target.startswith(root + '/') or target == root + ' (deleted)' for root in roots)
+                if pstat(proc)[0] != start: raise Refused()
+                if occupied: found[tid] = dict(pid=int(tid), state=state, wchan=wchan)
+            except Exception:
+                uncertain = True
+                found[tid] = dict(pid=int(tid), state=state, wchan=wchan)
+    # Process/thread churn and inaccessible task tables cannot prove idleness.
     for pid in set(pids()).symmetric_difference(before):
         uncertain = True
-        found.append(dict(pid=int(pid), state='unknown', wchan='unknown'))
-    for pid, start in observed.items():
+        found[pid] = dict(pid=int(pid), state='unknown', wchan='unknown')
+    for pid, tids in groups.items():
+        try: changed = set(task_ids(pid)).symmetric_difference(tids)
+        except Exception: changed = {pid}
+        for tid in changed:
+            uncertain = True
+            found[tid] = dict(pid=int(tid), state='unknown', wchan='unknown')
+    for (pid, tid), start in observed.items():
         try:
-            if pstat(pid)[0] == start: continue
+            if pstat('/proc/' + pid + '/task/' + tid)[0] == start: continue
         except Exception: pass
         uncertain = True
-        found = [record for record in found if record['pid'] != int(pid)]
-        found.append(dict(pid=int(pid), state='unknown', wchan='unknown'))
-    if found: raise Occupied(found, uncertain)
-
-def remove(fd, path, entries, check):
-    # Never delegate recursive removal or pruning to Git or an untrusted repository config.
-    for name in os.listdir(fd):
-        childpath = path + '/' + name
-        info = os.stat(name, dir_fd=fd, follow_symlinks=False)
-        if entries.get(childpath) != (info.st_dev, info.st_ino, info.st_mode): raise Refused()
-        check()
-        if os.readlink('/proc/self/fd/' + str(fd)) != path: raise Refused()
-        if stat.S_ISDIR(info.st_mode):
-            child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-            try:
-                same(childpath, child, identity(info))
-                remove(child, childpath, entries, check)
-                same(childpath, child, identity(info))
-                os.rmdir(name, dir_fd=fd)
-            finally: os.close(child)
-        else:
-            # Internal links are unlinked as entries, never traversed.
-            os.unlink(name, dir_fd=fd)
+        found[tid] = dict(pid=int(tid), state='unknown', wchan='unknown')
+    if found: raise Occupied(list(found.values()), uncertain)
 
 def protected_root(root):
     # Lock files and all ancestors must be administrator-owned and non-writable.
@@ -196,24 +195,25 @@ def main():
     opened = {}
     for path, key in ((container, 'container'), (container + '/worktree', 'worktree'), (registration, 'registration')):
         try: fd = pin(path, os.getuid())
-        except FileNotFoundError:
-            if not request['resume']: raise Refused()
-            continue
+        except FileNotFoundError: continue
         same(path, fd, binding[key]); opened[path] = fd
     if container + '/worktree' in opened and container not in opened: raise Refused()
-    if not request['resume'] and len(opened) not in (0, 3): raise Refused()
     if not opened:
         # Normal checkout cleanup already finished: nothing is inspected or deleted.
-        send(dict(phase='ready'))
-        if sys.stdin.readline(32) != 'delete\n': raise Refused()
-        if any(os.path.lexists(path) for path in roots): raise Refused()
+        send(dict(phase='absent'))
+        if sys.stdin.readline(32) != 'confirm\n': raise Refused()
+        if mounts() != mounted: raise Refused()
+        same(repository, repo, binding['repository'])
+        for path in roots:
+            try: fd = pin(path, os.getuid())
+            except FileNotFoundError: continue
+            os.close(fd); raise Refused()
         output('cleaned', 'complete'); return
+    if len(opened) != 3: raise Refused()
     def registration_matches():
         def matches(fd, name, expected):
             try: value = read(fd, name)
-            except FileNotFoundError:
-                if request['resume']: return
-                raise
+            except FileNotFoundError: raise Refused()
             if value != expected: raise Refused()
         if registration in opened:
             fd = opened[registration]
@@ -232,28 +232,11 @@ def main():
         for path, key in ((container, 'container'), (registration, 'registration')):
             if path in opened: same(path, opened[path], binding[key])
     recheck(); scan(roots, objects)
-    send(dict(phase='ready'))
-    if sys.stdin.readline(32) != 'delete\n': raise Refused()
-    recheck(); registration_matches(); scan(roots, objects)
-    # Inventory must be unchanged across the host's durable authorization.
-    fresh, fresh_objects = {}, set()
-    for path in roots:
-        if path in opened: inventory(opened[path], path, os.fstat(opened[path]).st_dev, fresh, fresh_objects)
-    if entries != fresh or objects != fresh_objects: raise Refused()
-    scan(roots, objects)
-    # Keep registration intact until files have gone; interrupted removal can resume from the host journal.
-    for path in roots:
-        if path not in opened: continue
-        fd = opened[path]
-        remove(fd, path, entries, recheck)
-        recheck()
-        parent = pin(os.path.dirname(path), os.getuid())
-        try:
-            same(path, fd, identity(os.fstat(fd)))
-            os.rmdir(os.path.basename(path), dir_fd=parent)
-        finally: os.close(parent)
-        del opened[path]
-    output('cleaned', 'complete')
+    # The current account and advisory slot locks do not fence other same-UID
+    # processes/threads. Neither another scan nor an open dirfd prevents an
+    # open/rename immediately afterwards. There is deliberately NO deletion
+    # implementation or input flag that could bypass this missing guarantee.
+    output('manual_attention', 'exclusion_unproven')
 
 try: main()
 except Occupied as error: output('manual_attention', error.reason, error.processes)

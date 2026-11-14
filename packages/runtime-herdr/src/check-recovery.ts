@@ -21,7 +21,13 @@ export interface CheckRecoveryBinding {
 }
 export interface CheckRecoveryResult {
   status: "cleaned" | "manual_attention" | "busy";
-  reason: "complete" | "occupied" | "unverified" | "locked" | "transport";
+  reason:
+    | "complete"
+    | "occupied"
+    | "unverified"
+    | "locked"
+    | "transport"
+    | "exclusion_unproven";
   processes: { pid: number; state: string; wchan: string }[];
 }
 export function validCheckRecoveryBinding(
@@ -60,9 +66,8 @@ export async function recoverCheckDirectory(
     sha: string;
     binding: CheckRecoveryBinding;
     slots: number;
-    resume: boolean;
-    /** Must durably audit the destructive phase before acknowledging it. */
-    authorize: () => void;
+    /** Audit a verified absence; this callback never authorizes deletion. */
+    confirmAbsence: () => void;
   },
   start: (
     file: string,
@@ -82,7 +87,7 @@ export async function recoverCheckDirectory(
     input.slots > 16
   )
     throw new Error("Invalid check recovery identity");
-  const { authorize, ...request } = input;
+  const { confirmAbsence, ...request } = input;
   const authKey = randomBytes(32).toString("hex");
   const command = await agentProcessCommand(execution, [
     "/usr/bin/python3",
@@ -105,7 +110,7 @@ export async function recoverCheckDirectory(
       return;
     }
     let result: CheckRecoveryResult | undefined,
-      authorized = false,
+      confirmedAbsent = false,
       closed = false,
       bytes = 0;
     const lines = createInterface({ input: child.stdout });
@@ -140,19 +145,26 @@ export async function recoverCheckDirectory(
             .digest("hex")
         )
           throw new Error("Unauthenticated recovery response");
-        if (value.phase === "ready" && !authorized && !result) {
-          authorize();
-          authorized = true;
-          child.stdin.end("delete\n");
+        if (value.phase === "absent" && !confirmedAbsent && !result) {
+          confirmAbsence();
+          confirmedAbsent = true;
+          child.stdin.end("confirm\n");
           return;
         }
         if (
           result ||
           !["cleaned", "manual_attention", "busy"].includes(value.status) ||
-          !["complete", "occupied", "unverified", "locked"].includes(
-            value.reason,
-          ) ||
-          (value.status === "cleaned" && !authorized) ||
+          ![
+            "complete",
+            "occupied",
+            "unverified",
+            "locked",
+            "exclusion_unproven",
+          ].includes(value.reason) ||
+          (value.status === "cleaned" &&
+            (!confirmedAbsent ||
+              value.reason !== "complete" ||
+              value.processes?.length !== 0)) ||
           !Array.isArray(value.processes) ||
           !value.processes.every(
             (p: CheckRecoveryResult["processes"][number]) =>
@@ -178,6 +190,9 @@ export async function recoverCheckDirectory(
             }),
           ),
         };
+        // A terminal diagnostic has no further handshake. Release the input
+        // pipe as well, so a remote reader cannot wait for an acknowledgement.
+        child.stdin.end();
       } catch {
         stop();
       }

@@ -16,6 +16,7 @@ import {
   CHECKOUT_LIMITS,
   type CheckoutInput,
   type CheckoutResult,
+  CheckRecovery,
   ExecutorPreparationError,
   loadMergeGateConfig,
   type ProjectMergeGate,
@@ -138,7 +139,7 @@ function controller(f: M4Fixture) {
     sweep: vi.fn<typeof sweepCheckoutOrphans>(async () => {}),
     recover: vi.fn<typeof recoverCheckDirectory>(
       async (_execution, request) => {
-        request.authorize();
+        request.confirmAbsence();
         return { status: "cleaned", reason: "complete", processes: [] };
       },
     ),
@@ -1541,6 +1542,42 @@ test("C-165: binds the authenticated checkout and recovers it on a later patrol 
   expect(f.state().events.at(-1)?.type).toBe("merge_check_recovery_finished");
   expect(c.errors).not.toHaveBeenCalled();
 });
+
+test.each([false, true])(
+  "C-165: each shared-executor project is inspected even if the first fails (%s)",
+  async (failFirst) => {
+    let time = Date.parse("2030-01-01T00:00:00.000Z");
+    const { f } = await fixture("auto", {
+      clock: { now: () => new Date(time).toISOString() },
+    });
+    const other = otherProject(f);
+    const c = controller(f);
+    c.setConfig(remoteSettings());
+    const recovery = vi
+      .spyOn(CheckRecovery.prototype, "sweep")
+      .mockImplementation(async (project) => {
+        if (failFirst && project === f.project_id)
+          throw new Error("fixture inspection failure");
+      });
+    try {
+      await c.gate.tick([f.project_id, other]);
+      await c.gate.idle();
+      time += CHECKOUT_LIMITS.sweepIntervalMs + 1;
+      await c.gate.tick([f.project_id, other]);
+      await c.gate.idle();
+      expect(c.options.sweep).toHaveBeenCalledTimes(2);
+      expect(recovery.mock.calls.map(([project]) => project)).toEqual([
+        f.project_id,
+        other,
+        f.project_id,
+        other,
+      ]);
+    } finally {
+      recovery.mockRestore();
+      c.gate.stop();
+    }
+  },
+);
 
 test("remote outage survives restart, retains FIFO, escalates after 30 minutes and resumes automatically", async () => {
   const epoch = Date.parse("2030-01-01T00:00:00.000Z");
