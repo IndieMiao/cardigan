@@ -30,9 +30,11 @@ import {
   RunCapacityDeferred,
   readRunQueue,
   runCapacitySnapshot,
+  tryHostOpsLock,
 } from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import {
+  listBellAttempts,
   PROJECT_EVENT_STREAM,
   persistRunLimitEffect,
   Store,
@@ -422,7 +424,7 @@ test("an ACK during wake wins over its late failure response", async () => {
   ).toEqual([]);
 });
 
-test("reopened store preserves an uncertain attempt and rejects a late successful result after recovery", async () => {
+test("reopened store cannot take over an expired attempt while its wake still holds the launch lock", async () => {
   comment();
   let finish = () => {};
   const response = new Promise<Awaited<ReturnType<Runtime["wake"]>>>(
@@ -435,21 +437,53 @@ test("reopened store preserves an uncertain attempt and rejects a late successfu
   void sending.catch(() => {});
   const reopened = Store.open({ dataDir: f.dataDir });
   try {
+    // A second Store is a competing connection, not the death of the original
+    // executor. Wait for wake itself so the execution mutex is already held.
+    await expect.poll(() => vi.mocked(runtime.wake).mock.calls.length).toBe(1);
     await expect
       .poll(() => unfinishedBellAttempts(reopened.database, f.project).length)
       .toBe(1);
+    const intended = unfinishedBellAttempts(reopened.database, f.project)[0];
+    if (!intended) throw new Error("Missing in-flight attempt");
+    const runs = f.state().runs;
+    expect(runs).toHaveLength(2);
+    expect(
+      await tryHostOpsLock(reopened, f.project, target.assignment.id, "launch"),
+    ).toBeUndefined();
     const restarted = new Dispatcher({ ...options, store: reopened });
     await restarted.tick();
     expect(ownNotes()[0]?.status).toBe("pending");
     f.advance(1001);
     await restarted.tick();
-    expect(ownNotes()[0]?.status).toBe("delivery_failed");
+    expect(ownNotes()[0]?.status).toBe("pending");
+    expect(unfinishedBellAttempts(reopened.database, f.project)).toEqual([
+      intended,
+    ]);
     expect(runtime.wake).toHaveBeenCalledOnce();
-    expect(f.state().runs).toHaveLength(2);
+    expect(options.startRun).not.toHaveBeenCalled();
+    expect(runtime.release).not.toHaveBeenCalled();
+    expect(f.state().runs).toEqual(runs);
     finish();
     await sending;
-    expect(ownNotes()[0]?.status).toBe("delivery_failed");
+    // The owner still existed: its successful result settles this same intent.
+    expect(ownNotes()[0]?.status).toBe("belled");
+    expect(listBellAttempts(reopened.database, f.project)).toContainEqual({
+      ...intended,
+      outcome: "sent",
+      finished_at: f.clock.now(),
+    });
     expect(unfinishedBellAttempts(reopened.database, f.project)).toEqual([]);
+    const unlock = await tryHostOpsLock(
+      reopened,
+      f.project,
+      target.assignment.id,
+      "launch",
+    );
+    expect(unlock).toBeDefined();
+    await unlock?.();
+    await restarted.tick();
+    expect(runtime.wake).toHaveBeenCalledOnce();
+    expect(f.state().runs).toEqual(runs);
   } finally {
     finish();
     try {
