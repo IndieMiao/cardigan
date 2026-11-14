@@ -247,6 +247,36 @@ const runtimeRef = (worktree_path?: string, branch?: string): RuntimeRef => ({
 
 const BASE_SHA = "a".repeat(40);
 
+test("runtime binding is persisted intact and cannot cross project or Assignment machine (invariants 6, 11)", () => {
+  const f = fixture();
+  const run = queue(f.h, f.assignment);
+  const target = {
+    project_id: f.h.state.project_id,
+    machine_id: "local",
+    session: "fixture",
+    generation: "one",
+    fingerprint: "fixture-fingerprint",
+  };
+  for (const patch of [{ project_id: "other" }, { machine_id: "worker-b" }]) {
+    expect(
+      dispatchRun(
+        f.h.state,
+        human,
+        {
+          run_id: run.id,
+          runtime_ref: { ...runtimeRef(), target: { ...target, ...patch } },
+        },
+        f.h.ports,
+      ),
+    ).toMatchObject({ ok: false });
+  }
+  dispatch(f.h, run, { runtime_ref: { ...runtimeRef(), target } });
+  expect(
+    f.h.state.assignments.find((a) => a.id === f.assignment.id)?.runtime_ref
+      ?.target,
+  ).toEqual(target);
+});
+
 function queue(h: Harness, assignment: Assignment = fixture().assignment): Run {
   return commit(
     h,

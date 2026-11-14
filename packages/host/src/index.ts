@@ -134,6 +134,8 @@ export {
   RunTargetDeferred,
   refreshTargetWait,
 } from "./run-target.js";
+export * from "./runtime-targets.js";
+export * from "./runtime-workers-config.js";
 export { revokeStoppedRunTokens, stopRunRuntime } from "./stop-run.js";
 export {
   type CheckoutCheck,
