@@ -276,6 +276,22 @@ export function beginMergePush(
       last?.type === "merge_push_failed"
         ? (last.payload as unknown as Finished)
         : undefined;
+    const resolution =
+      last?.type === "merge_push_hold_resolved"
+        ? (last.payload as unknown as Resolved)
+        : undefined;
+    const acceptedHold =
+      resolution?.mode === "accept"
+        ? (events.find(
+            (e) =>
+              e.id === resolution.held_event_id && e.type === "merge_push_held",
+          )?.payload as unknown as Held | undefined)
+        : undefined;
+    ensure(
+      resolution?.mode !== "accept" || acceptedHold,
+      "invariant_violation",
+      "Accepted push hold is missing",
+    );
     const action = failed?.human_action_id
       ? state.human_actions.find((h) => h.id === failed.human_action_id)
       : undefined;
@@ -325,7 +341,12 @@ export function beginMergePush(
       queue_ids: selected.map((e) => e.id),
       sha: target.sha,
       failure_count: blocked ? 0 : (failed?.failure_count ?? 0),
-      ...(failed && (blocked || failed.auth_retry_used)
+      // Accepting foreign commits resumes the pending range, not its auth
+      // budget. Keep the linked hold's evidence across repeated/coalesced holds.
+      // Reverts drop that range; a hold before any failure consumes no budget.
+      ...((failed && (blocked || failed.auth_retry_used)) ||
+      acceptedHold?.auth_retry_used ||
+      (acceptedHold?.failure_count ?? 0) > 0
         ? { auth_retry_used: true as const }
         : {}),
       ...(!blocked && failed?.first_failed_at

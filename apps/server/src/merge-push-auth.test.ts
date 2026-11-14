@@ -1,7 +1,11 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { completeHumanAction, type ProjectId } from "@cardigan/domain";
+import {
+  acceptMergePushHold,
+  completeHumanAction,
+  type ProjectId,
+} from "@cardigan/domain";
 import { CentralRepositoryService } from "@cardigan/git-service";
 import { CentralGitTransport, type PushResult } from "@cardigan/git-transport";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
@@ -124,6 +128,7 @@ function fixture() {
   return {
     push,
     store,
+    git,
     dataDir,
     project,
     config,
@@ -140,13 +145,13 @@ function fixture() {
       store.close();
       store = Store.open({ dataDir, clock });
     },
-    repair: () =>
+    repair: (acceptHold = false) =>
       store.uow.run((tx) => {
         const s = loadCommandState(tx, project_id);
         const action = s.human_actions.find((a) => a.status === "open");
         if (!action) throw new Error("Missing action");
         const effect = unwrap(
-          completeHumanAction(
+          (acceptHold ? acceptMergePushHold : completeHumanAction)(
             s,
             { kind: "human", project_id },
             { human_action_id: action.id, text: "已修复测试故障" },
@@ -158,6 +163,56 @@ function fixture() {
   };
 }
 const auth: PushResult = { status: "failed", reason: "auth", exit_code: 128 };
+
+test("accepting a hold across database reopen cannot renew a pending range's auth retry", async () => {
+  const f = fixture();
+  f.push.mockResolvedValue(auth);
+  await f.executor().tick();
+  const readRange = f.git.pushRange;
+  if (!readRange) throw new Error("Missing range reader");
+  vi.spyOn(f.git, "pushRange").mockImplementation(async (...args) => {
+    const range = await readRange(...args);
+    const head = "d".repeat(40);
+    return {
+      ...range,
+      head,
+      chain: [
+        {
+          sha: head,
+          parent: range.head,
+          author: "Fixture",
+          committer: "Fixture",
+          subject: "foreign",
+        },
+        ...range.chain,
+      ],
+    };
+  });
+  f.advance(60_000);
+  await f.executor().tick();
+  expect(f.push).toHaveBeenCalledTimes(1);
+  expect(f.state().events.at(-1)?.type).toBe("merge_push_held");
+  f.reopen();
+  f.repair(true);
+  f.reopen();
+  const resumed = f.executor();
+  await Promise.all([resumed.tick(), resumed.tick()]);
+  expect(f.push).toHaveBeenCalledTimes(2);
+  expect(f.push.mock.calls[1]?.[1]).toEqual({ sha: f.C, included: [f.B, f.C] });
+  expect(f.failures().at(-1)?.payload).toMatchObject({
+    reason: "auth",
+    auth_retry_used: true,
+  });
+  expect(f.failures().at(-1)?.payload).not.toHaveProperty("next_retry_at");
+  expect(
+    f.state().human_actions.filter((a) => a.status === "open"),
+  ).toHaveLength(1);
+  f.reopen();
+  f.advance(60_000);
+  await f.executor().tick();
+  expect(f.push).toHaveBeenCalledTimes(2);
+  expect(f.errors).toEqual([]);
+});
 
 test("auth retry survives a database reopen, waits a minute, and succeeds without a human action", async () => {
   const f = fixture();
