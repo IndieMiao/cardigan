@@ -37,6 +37,7 @@ test("S10 defaults to loopback, port 3004 and the same user data directory as th
     mergeIntervalMs: DEFAULT_INTERVALS.merge,
     cleanupIntervalMs: DEFAULT_INTERVALS.cleanup,
     reconcileIntervalMs: DEFAULT_INTERVALS.reconcile,
+    runtimeUnknownGraceMs: 60_000,
     checkCleanupGraceMs: DEFAULT_CHECK_CLEANUP_GRACE_MS,
     backupIntervalMs: DEFAULT_INTERVALS.backup,
     attachmentIntervalMs: DEFAULT_INTERVALS.attachment,
@@ -110,6 +111,7 @@ test("reads data dir and port from the environment", () => {
     mergeIntervalMs: DEFAULT_INTERVALS.merge,
     cleanupIntervalMs: DEFAULT_INTERVALS.cleanup,
     reconcileIntervalMs: DEFAULT_INTERVALS.reconcile,
+    runtimeUnknownGraceMs: 60_000,
     checkCleanupGraceMs: DEFAULT_CHECK_CLEANUP_GRACE_MS,
     backupIntervalMs: DEFAULT_INTERVALS.backup,
     attachmentIntervalMs: DEFAULT_INTERVALS.attachment,
@@ -250,8 +252,28 @@ test("C-219 runtime failure limit is configurable and rejects invalid counts", (
     "NaN",
     "Infinity",
     "9007199254740992",
+    // C-228 / Q-387: capped at 10 so a silent failure is always confirmed.
+    "11",
+    "1000",
   ])
     expect(() =>
       resolveServerConfig({ CARDIGAN_RUNTIME_FAILURE_LIMIT: value }),
     ).toThrow("CARDIGAN_RUNTIME_FAILURE_LIMIT");
+  for (const value of ["2", "10"])
+    expect(
+      resolveServerConfig({ CARDIGAN_RUNTIME_FAILURE_LIMIT: value })
+        .runtimeFailureLimit,
+    ).toBe(Number(value));
+});
+
+test("C-228 runtime unknown grace defaults to Q-387's 60 s and refuses invalid values", () => {
+  expect(resolveServerConfig({}).runtimeUnknownGraceMs).toBe(60_000);
+  expect(
+    resolveServerConfig({ CARDIGAN_RUNTIME_UNKNOWN_GRACE_SECONDS: "90" })
+      .runtimeUnknownGraceMs,
+  ).toBe(90_000);
+  for (const value of ["0", "-1", "1.5", "60s", "NaN", "300", "3600"])
+    expect(() =>
+      resolveServerConfig({ CARDIGAN_RUNTIME_UNKNOWN_GRACE_SECONDS: value }),
+    ).toThrow("CARDIGAN_RUNTIME_UNKNOWN_GRACE_SECONDS");
 });

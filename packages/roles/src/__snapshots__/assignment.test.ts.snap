@@ -510,6 +510,14 @@ export default function (pi) {
       "path": "/srv/cardigan/runs/A-12/pi/extensions/cardigan-context-usage.js",
     },
     {
+      "content": "{
+  "/srv/agent/worktrees/A-12": true
+}
+",
+      "mode": "600",
+      "path": "/srv/cardigan/runs/A-12/pi/trust.json",
+    },
+    {
       "content": "DS_API_KEY='fictional-pi-credential'
 ",
       "mode": "600",

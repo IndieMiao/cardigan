@@ -89,6 +89,7 @@ class Rejection {
 type CommandName =
   | E.ToolName
   | "pause_standing_assignment"
+  | "stop_assignment"
   | "rotate_standing_pm"
   | "rotate_deployed_pm"
   | "record_deployment"

@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import {
   type Employee,
   employeeDisplayName,
@@ -124,6 +124,15 @@ export interface CompileAssignmentInput {
   readonly run_dir: string;
   /** Where the CLI starts: the worktree, or the run directory for `none`. */
   readonly work_dir: string;
+  /**
+   * C-235: the host-verified canonical (realpath) form of a worktree
+   * `work_dir`, i.e. the exact key pi 1.4 looks up in `trust.json`
+   * (`canonicalizePath(resolvePath(cwd))`). Set only when the worktree leaf
+   * itself is not a symlink; without it pi gets no pre-trust (fail closed).
+   * The compiler cannot check the filesystem, so only the host may set it,
+   * and only from `piTrustedWorktreePath(work_dir)` in `@cardigan/host`.
+   */
+  readonly work_dir_real?: string;
   /** Host-selected base clone containing the worktree's common .git directory. */
   readonly repository_root?: string;
   /** P2a-3: a readonly verifier's writable build checkout (outside the worktree). */
@@ -386,6 +395,26 @@ export function compileAssignmentLaunch(
         content: piContextUsageExtension,
         mode: 0o600,
       });
+      // C-211: pre-trust exactly the folder pi starts in, the worktree the
+      // host created for this Assignment, so a tracked .pi/settings.json does
+      // not stop the unattended terminal at "Trust project folder?". The
+      // saved decision lives in this run's own PI_CODING_AGENT_DIR (pi 1.4
+      // `<agent-dir>/trust.json`, canonical path -> true): one exact path, no
+      // parent folder, no pattern, and no change to `defaultProjectTrust`.
+      // C-235: the key is the host-verified real path, because pi looks up
+      // `realpath(cwd)`; no verified path means no pre-trust.
+      if (
+        input.work_dir_real !== undefined &&
+        isAbsolute(input.work_dir_real) &&
+        resolve(input.work_dir_real) === input.work_dir_real &&
+        input.work_dir_real !== resolve(input.run_dir) &&
+        resolve(input.work_dir) !== resolve(input.run_dir)
+      )
+        harnessFiles.push({
+          path: join(input.run_dir, "pi", "trust.json"),
+          content: `${JSON.stringify({ [input.work_dir_real]: true }, null, 2)}\n`,
+          mode: 0o600,
+        });
       harnessEnv.PI_CODING_AGENT_DIR = join(input.run_dir, "pi");
       harnessArgs.push("--append-system-prompt", coreFile);
       break;

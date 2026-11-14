@@ -49,6 +49,10 @@ test("invariants 5, 9: Git ports never push and deletion is an explicit, forced 
   >().toEqualTypeOf<{
     readonly force: boolean;
   }>();
+  // C-211: cleaning names the exact repository and build checkout path.
+  expectTypeOf<
+    GitWorktreePort["cleanBuildCheckout"]
+  >().parameters.toEqualTypeOf<[string, string]>();
 });
 
 test("invariant 1: roles contain capabilities and permissions, not runtime ownership", () => {

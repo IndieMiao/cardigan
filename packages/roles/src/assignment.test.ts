@@ -127,6 +127,7 @@ function compile(
     mcp: { url: MCP_URL },
     run_dir: RUN_DIR,
     work_dir: WORK_DIR,
+    work_dir_real: WORK_DIR,
     repository_root: REPOSITORY_ROOT,
     first_prompt: first,
     secrets,
@@ -798,6 +799,78 @@ test("Codex without a worktree trusts only its cwd, with TOML metacharacters esc
       JSON.parse(m[1] ?? ""),
     ),
   ).toEqual([cwd]);
+});
+
+function compilePi(work_dir_real?: string): CompiledAssignmentLaunch {
+  return compileAssignmentLaunch({
+    assignment: { assignment_id: "A-12", run_id: "R-5" },
+    role: roleFor("pi", "pi-agent"),
+    launch: launchConfig,
+    mcp: { url: MCP_URL },
+    run_dir: RUN_DIR,
+    work_dir: WORK_DIR,
+    ...(work_dir_real === undefined ? {} : { work_dir_real }),
+    repository_root: REPOSITORY_ROOT,
+    first_prompt: first,
+    secrets,
+  });
+}
+const trustFiles = (compiled: CompiledAssignmentLaunch) =>
+  compiled.files.filter((file) => file.path.endsWith("trust.json"));
+
+test("C-235 pi trust key is the host-verified real path, not the configured path", () => {
+  const real = "/data/agent/worktrees/A-12";
+  const trust = trustFiles(compilePi(real));
+  expect(JSON.parse(trust[0]?.content ?? "")).toEqual({ [real]: true });
+});
+
+test("C-235 pi gets no pre-trust without a usable verified real path (fail closed)", () => {
+  for (const real of [undefined, "relative/A-12", "/srv/x/../A-12", RUN_DIR])
+    expect(trustFiles(compilePi(real))).toEqual([]);
+});
+
+test("C-211 pi pre-trusts exactly its worktree in the run's own agent dir, nothing else", () => {
+  const compiled = compilePi(WORK_DIR);
+  const trust = compiled.files.filter((file) =>
+    file.path.endsWith("trust.json"),
+  );
+  expect(trust.map((file) => file.path)).toEqual([`${RUN_DIR}/pi/trust.json`]);
+  // One exact path: no parent folder, no pattern, no global default.
+  expect(JSON.parse(trust[0]?.content ?? "")).toEqual({ [WORK_DIR]: true });
+  expect(trust[0]?.mode).toBe(0o600);
+  expect(compiled.env.PI_CODING_AGENT_DIR).toBe(`${RUN_DIR}/pi`);
+  expect(compiled.args).not.toContain("--approve");
+  expect(compiled.args).not.toContain("-a");
+  expect(
+    compiled.files.some((file) => file.content.includes("defaultProjectTrust")),
+  ).toBe(false);
+});
+
+test("C-211 pi without a worktree (cwd is the run directory) gets no trust entry", () => {
+  const compiled = compileAssignmentLaunch({
+    assignment: { assignment_id: "A-1", run_id: "R-1" },
+    role: { ...roleFor("pi", "pi-agent"), worktree: "none" },
+    launch: launchConfig,
+    mcp: { url: MCP_URL },
+    run_dir: RUN_DIR,
+    work_dir: RUN_DIR,
+    work_dir_real: RUN_DIR,
+    first_prompt: first,
+    secrets,
+  });
+  expect(compiled.files.some((file) => file.path.endsWith("trust.json"))).toBe(
+    false,
+  );
+  // The other harnesses get no pi trust file either.
+  for (const [harness, profile] of [
+    ["claude-code", "claude-agent"],
+    ["codex", "codex-agent"],
+  ] as const)
+    expect(
+      compile(harness, profile, first).files.some((file) =>
+        file.path.endsWith("trust.json"),
+      ),
+    ).toBe(false);
 });
 
 /** Recursively read every regular file under `dir`. */

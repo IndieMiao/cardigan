@@ -7,7 +7,15 @@ import type {
   RuntimeRef,
   RuntimeResult,
 } from "@cardigan/domain";
-import { settlePendingRunFinish, transition } from "@cardigan/domain";
+import {
+  DEFAULT_RUNTIME_UNKNOWN_GRACE_MS,
+  MAX_RUNTIME_FAILURE_LIMIT,
+  MIN_RUNTIME_FAILURE_LIMIT,
+  type RuntimeDisconnectCause,
+  runtimeUnknownVisibleAt,
+  settlePendingRunFinish,
+  transition,
+} from "@cardigan/domain";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import { payloadString } from "@cardigan/router";
 import type { RuntimeEvent } from "@cardigan/runtime-herdr";
@@ -37,6 +45,8 @@ export interface RuntimeMonitorOptions {
   /** The existing dispatcher interval; time beyond one scheduled interval is excluded. */
   reconcileIntervalMs?: number;
   maxConsecutiveFailures?: number;
+  /** C-228 / Q-387: how long a failures-only unknown stays out of Needs You. */
+  runtimeUnknownGraceMs?: number;
 }
 /** C-219 / Q-357: three failed attempts, including the initial subscription (§13.9). */
 export const DEFAULT_RUNTIME_FAILURE_LIMIT = 3;
@@ -63,12 +73,26 @@ const lostFact = (state: CommandState, a: Assignment) =>
       payloadString(e.payload, "runtime_key") === keyOf(a.runtime_ref),
   );
 
+const factSince = (
+  state: CommandState,
+  a: Assignment,
+  since: Event,
+  type: string,
+) =>
+  state.events
+    .slice(state.events.indexOf(since) + 1)
+    .some(
+      (e) =>
+        e.type === type && payloadString(e.payload, "assignment_id") === a.id,
+    );
+
 export class RuntimeMonitor {
   private readonly clock: Clock;
   private readonly grace: number;
   private readonly silence: number;
   private readonly interval: number;
   private readonly failureLimit: number;
+  private readonly unknownGrace: number;
   private lastReconciledAt: number;
   private readonly subscriptions = new Map<string, Subscription>();
   private readonly tasks = new Set<Promise<void>>();
@@ -81,13 +105,16 @@ export class RuntimeMonitor {
     this.interval = dispatcherInterval(options.reconcileIntervalMs);
     this.failureLimit =
       options.maxConsecutiveFailures ?? DEFAULT_RUNTIME_FAILURE_LIMIT;
+    this.unknownGrace =
+      options.runtimeUnknownGraceMs ?? DEFAULT_RUNTIME_UNKNOWN_GRACE_MS;
     this.lastReconciledAt = Date.parse(this.clock.now());
     if (
-      ![this.grace, this.silence].every(
+      ![this.grace, this.silence, this.unknownGrace].every(
         (n) => Number.isSafeInteger(n) && n > 0,
       ) ||
       !Number.isSafeInteger(this.failureLimit) ||
-      this.failureLimit < 2
+      this.failureLimit < MIN_RUNTIME_FAILURE_LIMIT ||
+      this.failureLimit > MAX_RUNTIME_FAILURE_LIMIT
     )
       throw new Error("Invalid runtime monitor grace period");
   }
@@ -239,13 +266,14 @@ export class RuntimeMonitor {
   private failed(project: ProjectId, id: Assignment["id"], sub: Subscription) {
     sub.failures.count++;
     if (sub.failures.count >= this.failureLimit)
-      this.observe(project, id, sub.ref, false);
+      this.observe(project, id, sub.ref, false, "failures");
   }
   private observe(
     project: ProjectId,
     id: Assignment["id"],
     ref: RuntimeRef,
     alive: boolean,
+    cause: RuntimeDisconnectCause = "exit",
   ) {
     const { store } = this.options;
     store.uow.run((tx) => {
@@ -266,8 +294,15 @@ export class RuntimeMonitor {
       )
         return;
       if (!alive && a.runtime_state === "unknown") {
-        if (!lostFact(state, a))
-          this.fact(tx, state, a, "runtime_disconnected");
+        const since = lostFact(state, a);
+        if (!since) this.fact(tx, state, a, "runtime_disconnected", { cause });
+        // C-228: an explicit exit after a failures-only unknown is shown at once.
+        else if (
+          cause === "exit" &&
+          payloadString(since.payload, "cause") === "failures" &&
+          !factSince(state, a, since, "runtime_exit_observed")
+        )
+          this.fact(tx, state, a, "runtime_exit_observed");
         return;
       }
       if (!alive || a.runtime_state === "unknown") {
@@ -276,12 +311,8 @@ export class RuntimeMonitor {
           ...a,
           runtime_state: unwrap(transition("runtime", a.runtime_state, event)),
         });
-        this.fact(
-          tx,
-          state,
-          a,
-          alive ? "runtime_reconnected" : "runtime_disconnected",
-        );
+        if (alive) this.fact(tx, state, a, "runtime_reconnected");
+        else this.fact(tx, state, a, "runtime_disconnected", { cause });
         for (const r of runs) {
           if (alive && r.status !== "unknown") continue;
           tx.runs.put(project, {
@@ -322,6 +353,7 @@ export class RuntimeMonitor {
     state: CommandState,
     a: Assignment,
     type: string,
+    extra: Readonly<Record<string, string>> = {},
   ) {
     const card = state.work_items.find((w) => w.id === a.work_item_id)?.card_id;
     const event: Event = {
@@ -331,7 +363,11 @@ export class RuntimeMonitor {
       type,
       actor: { kind: "system", project_id: state.project_id },
       created_at: this.clock.now(),
-      payload: { assignment_id: a.id, runtime_key: keyOf(a.runtime_ref) },
+      payload: {
+        assignment_id: a.id,
+        runtime_key: keyOf(a.runtime_ref),
+        ...extra,
+      },
     };
     tx.events.append(state.project_id, event);
   }
@@ -352,6 +388,19 @@ export class RuntimeMonitor {
           this.fact(tx, state, a, "runtime_disconnected");
           continue;
         }
+        // C-228: tell Needs You (via the event stream) that a failures-only
+        // unknown has outlasted its grace period; audit-only otherwise.
+        const visibleAt = runtimeUnknownVisibleAt(
+          state.events,
+          a,
+          this.unknownGrace,
+        );
+        if (
+          visibleAt !== null &&
+          Date.parse(at) >= Date.parse(visibleAt) &&
+          !factSince(state, a, since, "runtime_unknown_surfaced")
+        )
+          this.fact(tx, state, a, "runtime_unknown_surfaced");
         if (Date.parse(at) - Date.parse(since.created_at) < this.grace)
           continue;
         tx.assignments.put(project, {

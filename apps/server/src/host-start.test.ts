@@ -8,10 +8,15 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import type { Runtime, RuntimeLaunch, RuntimeRef } from "@cardigan/domain";
-import { queueRun } from "@cardigan/domain";
+import {
+  queueRun,
+  stoppedByHuman,
+  stopWorkItemAssignment,
+} from "@cardigan/domain";
 import { parseLaunchConfig } from "@cardigan/roles";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { dispatchFixture } from "../test-support/dispatch.js";
+import { hostMcpUrl } from "./host.js";
 import { startQueuedRun } from "./host-start.js";
 
 const launch = parseLaunchConfig({
@@ -237,6 +242,100 @@ test("a dispatch failure releases the terminal before aborting the Run", async (
   expect(f.state().runs[0]?.status).toBe("cancelled");
 });
 
+test("C-235 a stop that lands while a fresh start is provisioning: dispatch is refused and the new terminal is released", async () => {
+  const { assignment, run } = queuedRun();
+  // The human stops the Assignment after the host provisioned the terminal
+  // but before dispatchRun commits (the in-flight window of a fresh start).
+  runtime.provision = vi.fn(async (_a, _r, _m, desc: RuntimeLaunch) => {
+    const stopped = f.apply((s, a, p) =>
+      stopWorkItemAssignment(
+        s,
+        a,
+        { assignment_id: assignment.id, reason: "stopped by host" },
+        p,
+      ),
+    );
+    expect(stopped.cancelled).toBe(1);
+    return {
+      ok: true as const,
+      value: {
+        machine_id: "local",
+        runtime_machine: "local",
+        terminal_ref: "t9",
+        agent_name: desc.agent_name,
+      } satisfies RuntimeRef,
+    };
+  });
+
+  await expect(
+    startQueuedRun(host(f.dataDir), {
+      project: f.project,
+      assignment,
+      run,
+      bell: "[bell] fixture",
+    }),
+  ).rejects.toThrow();
+
+  // Compensation force-releases exactly the terminal this start created.
+  expect(runtime.release).toHaveBeenCalledTimes(1);
+  expect(runtime.release).toHaveBeenCalledWith(
+    expect.objectContaining({ terminal_ref: "t9" }),
+    { force: true },
+  );
+  const state = f.state();
+  expect(state.runs.find((r) => r.id === run.id)).toMatchObject({
+    status: "cancelled",
+    summary: "stopped by host",
+  });
+  expect(
+    state.events.some(
+      (e) =>
+        e.type === "run_dispatched" &&
+        (e.payload as { run_id?: string }).run_id === run.id,
+    ),
+  ).toBe(false);
+  expect(stoppedByHuman(state.events, assignment.id)).toBe(true);
+  expect(
+    state.assignments.find((a) => a.id === assignment.id)?.runtime_ref
+      ?.terminal_ref,
+  ).not.toBe("t9");
+  // The wrapper never got its start sentinel, so the Agent never started,
+  // and no plaintext credential or live token is left behind.
+  const runDir = join(f.dataDir, "runs", f.project, assignment.id);
+  for (const name of ["token", "secrets.env", "start"])
+    expect(existsSync(join(runDir, name)), name).toBe(false);
+  expect(
+    f.store.uow
+      .run((tx) => tx.tokensForAssignment(f.project, assignment.id))
+      .every((token) => token.revoked_at !== null),
+  ).toBe(true);
+});
+
+test("C-235 a start whose Run the stop already cancelled provisions nothing", async () => {
+  const { assignment, run } = queuedRun();
+  f.apply((s, a, p) =>
+    stopWorkItemAssignment(
+      s,
+      a,
+      { assignment_id: assignment.id, reason: "stopped by host" },
+      p,
+    ),
+  );
+  await expect(
+    startQueuedRun(host(f.dataDir), {
+      project: f.project,
+      assignment,
+      run,
+      bell: "[bell] fixture",
+    }),
+  ).rejects.toThrow();
+  expect(runtime.provision).not.toHaveBeenCalled();
+  expect(f.state().runs.find((r) => r.id === run.id)?.status).toBe("cancelled");
+  expect(
+    existsSync(join(f.dataDir, "runs", f.project, assignment.id, "start")),
+  ).toBe(false);
+});
+
 test("a planted start symlink is replaced, never followed", async () => {
   const { assignment, run } = queuedRun();
   const runDir = join(f.dataDir, "runs", f.project, assignment.id);
@@ -290,4 +389,22 @@ test("host start rejects an external identity before runtime, credentials or ses
   expect(existsSync(join(f.dataDir, "runs", f.project, external.id))).toBe(
     false,
   );
+});
+
+test("C-211 a new session on a non-default CARDIGAN_MCP_PORT gets that port in its MCP config", async () => {
+  const { assignment, run } = queuedRun();
+  const mcpUrl = hostMcpUrl(undefined, { CARDIGAN_MCP_PORT: "4610" })();
+
+  await startQueuedRun(
+    { ...host(f.dataDir), mcpUrl },
+    { project: f.project, assignment, run, bell: "[bell] card=C-1" },
+  );
+
+  const runDir = join(f.dataDir, "runs", f.project, assignment.id);
+  const config = JSON.parse(
+    readFileSync(join(runDir, "pi", "mcp.json"), "utf8"),
+  ) as { mcpServers: Record<string, { url: string }> };
+  const urls = Object.values(config.mcpServers).map((server) => server.url);
+  expect(urls).toContain("http://127.0.0.1:4610/mcp");
+  expect(JSON.stringify(config)).not.toContain(":3004");
 });

@@ -15,6 +15,7 @@ import {
   harnessBinary,
   type PreparationRetryOptions,
   prepareRoleWorktree,
+  resolveMcpUrl,
   withPreparationRetry,
   worktreeBaselinePrompt,
 } from "@cardigan/host";
@@ -110,13 +111,30 @@ async function cliVersion(binary: string): Promise<string> {
   return line;
 }
 
+/**
+ * Read the MCP URL at each launch (first start, wake, session replacement or
+ * restart), never once at startup: the listener's port decides it (C-211).
+ */
+export function hostMcpUrl(
+  option: string | (() => string) | undefined,
+  env: HostEnv,
+): () => string {
+  if (typeof option === "function") return option;
+  return () => option ?? resolveMcpUrl(env);
+}
+
 export async function createHostWiring(options: {
   readonly env: HostEnv;
   readonly store: Store;
   readonly dataDir: string;
   readonly execution?: ExecutionConfig;
   readonly clock?: Clock;
-  readonly url?: string;
+  /**
+   * Card MCP endpoint for Agent configs. A function is read at each launch,
+   * so the server can hand in the address it actually listens on (C-211).
+   * Without it: `CARDIGAN_MCP_URL`, else `CARDIGAN_MCP_HOST`/`CARDIGAN_MCP_PORT`.
+   */
+  readonly url?: string | (() => string);
   /** Test harnesses pass a client that refuses calls after cleanup (§P2a-2). */
   readonly client?: HcClient;
   /** Tests shorten the in-delivery retry waits. */
@@ -140,8 +158,7 @@ export async function createHostWiring(options: {
     );
   const runtime = created.value;
   const launch = await loadLaunchFiles(configDir(env));
-  const url =
-    options.url ?? env.CARDIGAN_MCP_URL ?? "http://127.0.0.1:3004/mcp";
+  const mcpUrl = hostMcpUrl(options.url, env);
   const versions = new Map<string, string>();
 
   return {
@@ -213,7 +230,7 @@ export async function createHostWiring(options: {
           store: options.store,
           runtime,
           launch,
-          mcpUrl: url,
+          mcpUrl: mcpUrl(),
           dataDir: options.dataDir,
           configDir: configDir(env),
           execution,
