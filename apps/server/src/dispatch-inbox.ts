@@ -25,6 +25,7 @@ import {
 } from "@cardigan/store";
 
 import type { StateLoader } from "./dispatch-state.js";
+import { runById } from "./run-index.js";
 
 export const dispatcherClock: Clock = { now: () => new Date().toISOString() };
 
@@ -207,7 +208,8 @@ export function notificationOwner(
 ): AssignmentId | undefined {
   if (note.recipient.kind === "needs_you") return undefined;
   if (note.recipient.kind === "assignment") return note.recipient.assignment_id;
-  const sent = note.run_id && state.runs.find((r) => r.id === note.run_id);
+  // C-244: keyed lookup, same first match as runs.find.
+  const sent = note.run_id && runById(state.runs, note.run_id);
   if (sent) return sent.assignment_id;
   const id = standing?.(state.project_id, note.recipient.kind, state);
   return state.assignments.some(
@@ -215,6 +217,30 @@ export function notificationOwner(
   )
     ? id
     : undefined;
+}
+
+/**
+ * C-244: remember a standing PM resolution per (project, kind, state). The
+ * resolver reads the state and the tokens table (legacy rows without
+ * `standing_mode`), so use the memo only within one synchronous section that
+ * writes neither tokens nor Assignments; a different state object recomputes.
+ */
+export function memoStanding(
+  standing: StandingResolver | undefined,
+): StandingResolver | undefined {
+  if (!standing) return undefined;
+  const memo = new Map<
+    string,
+    { readonly state: CommandState; readonly id: AssignmentId | undefined }
+  >();
+  return (project, kind, state) => {
+    const key = `${project}\0${kind}`;
+    const hit = memo.get(key);
+    if (hit?.state === state) return hit.id;
+    const id = standing(project, kind, state);
+    memo.set(key, { state, id });
+    return id;
+  };
 }
 
 /** Retire legacy cross-card deliveries without impersonating an Agent ACK. */
@@ -281,13 +307,16 @@ export function acknowledgeInbox(
     retireReconcileNotifications(store.database, project, clock.now());
     const state = loadState(tx, project);
     const attempts = unfinishedBellAttempts(store.database, project);
+    // C-244: this loop only moves notification rows; tokens and Assignments
+    // stay as read, so one standing PM resolution per kind serves every row.
+    const standingOnce = memoStanding(standing);
     let count = 0;
     for (const note of store.listNotifications({ project_id: project })) {
       if (!["pending", "belled", "delivery_failed"].includes(note.status))
         continue;
       const owner =
         attempts.find((a) => a.notification_ids.includes(note.id))
-          ?.assignment_id ?? notificationOwner(note, state, standing);
+          ?.assignment_id ?? notificationOwner(note, state, standingOnce);
       if (!owner) continue;
       const cursor = tx.cursors.get(project, {
         assignment_id: owner,

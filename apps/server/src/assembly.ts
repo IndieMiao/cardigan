@@ -139,7 +139,12 @@ export function standingResolver(
         candidate.status !== "active"
       )
         continue;
-      const newest = tokensOf(project, candidate.id).at(-1);
+      // C-244: read tokens only for a legacy row without standing_mode; the
+      // token query scans the whole tokens table.
+      const newest =
+        candidate.standing_mode === undefined
+          ? tokensOf(project, candidate.id).at(-1)
+          : undefined;
       const mode =
         candidate.standing_mode ??
         (newest === undefined
