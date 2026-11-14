@@ -48,6 +48,21 @@ export async function runStopWorkflow<S extends StopIntent>(
       stop: S,
       exited: boolean,
     ): Result<CommandEffect<unknown>> | undefined;
+    /** C-247: only settle an exit observed before the stop; never release. */
+    observeOnly?(stop: S): boolean;
+    /**
+     * C-247: for a started `observeOnly` fence without proof of exit, whether
+     * to settle it as unconfirmed now (escalation, fence and credentials
+     * kept). Otherwise it waits for a later observation.
+     */
+    settleUnexited?(run: Run): boolean;
+    /** C-247: give back a fence that `observeOnly` did not start. */
+    withdraw?(
+      state: CommandState,
+      ports: CommandPorts,
+      run: Run,
+      stop: S,
+    ): Result<CommandEffect<unknown>>;
     afterSettle?(
       tx: StoreTransactionContext,
       state: CommandState,
@@ -87,8 +102,22 @@ export async function runStopWorkflow<S extends StopIntent>(
         return !!effect.data;
       }),
     stop.stopping,
+    !policy.observeOnly?.(stop),
   );
-  if (result === "withdrawn") return;
+  if (result === "not_exited" && !stop.stopping) {
+    store.uow.run((tx) => {
+      const effect = policy.withdraw?.(
+        loadState(tx, project),
+        { ids: tx.ids, clock },
+        run,
+        stop,
+      );
+      if (effect) persistEffect(tx, project, unwrap(effect));
+    });
+    return result;
+  }
+  if (result === "not_exited" && !policy.settleUnexited?.(run)) return result;
+  if (result === "withdrawn") return result;
   store.uow.run((tx) => {
     const state = loadState(tx, project);
     const current = state.runs.find((r) => r.id === run.id);
@@ -116,4 +145,5 @@ export async function runStopWorkflow<S extends StopIntent>(
     }
     policy.afterSettle?.(tx, state, current, stop, effect);
   });
+  return result;
 }

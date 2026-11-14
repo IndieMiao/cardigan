@@ -13,6 +13,7 @@ import type {
 import {
   isTerminalNotification,
   nextNotificationStatus,
+  states,
 } from "@cardigan/domain";
 import { unfinishedBellAttempts } from "./dispatcher.js";
 import {
@@ -103,9 +104,19 @@ export function recordNotification(
   return { created: true, notification };
 }
 
+/** Every notification status that `isTerminalNotification` rejects. */
+export const LIVE_NOTIFICATION_STATUSES: readonly NotificationStatus[] =
+  states.notification.filter((status) => !isTerminalNotification(status));
+
 export interface NotificationQuery {
   readonly project_id: ProjectId;
   readonly status?: NotificationStatus | undefined;
+  /**
+   * Only rows in one of these statuses (C-244), combined with `status` by AND.
+   * Lets a caller that skips terminal rows avoid decoding the whole history;
+   * an empty list matches nothing.
+   */
+  readonly statuses?: readonly NotificationStatus[] | undefined;
   readonly recipient_kind?: Notification["recipient"]["kind"] | undefined;
   readonly assignment_id?: AssignmentId | undefined;
   readonly card_id?: CardId | undefined;
@@ -127,6 +138,11 @@ export function listNotifications(
   if (query.status !== undefined) {
     conditions.push("status = ?");
     values.push(query.status);
+  }
+  if (query.statuses !== undefined) {
+    if (query.statuses.length === 0) return [];
+    conditions.push("status IN (SELECT value FROM json_each(?))");
+    values.push(JSON.stringify(query.statuses));
   }
   if (query.recipient_kind !== undefined) {
     conditions.push("recipient_kind = ?");
@@ -281,7 +297,11 @@ export function retireReconcileNotifications(
     listFindings(db, project_id).map((finding) => [finding.id, finding]),
   );
   let retired = 0;
-  for (const note of listNotifications(db, { project_id })) {
+  // C-244: decode only live rows; terminal ones were skipped anyway.
+  for (const note of listNotifications(db, {
+    project_id,
+    statuses: LIVE_NOTIFICATION_STATUSES,
+  })) {
     if (isTerminalNotification(note.status)) continue;
     const row = db
       .prepare(
