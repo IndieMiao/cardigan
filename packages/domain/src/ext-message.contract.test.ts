@@ -11,6 +11,7 @@ import {
 import type { Decision, Event, HumanAction } from "./entities.js";
 import {
   buildExtMessage,
+  buildExtMessageDigest,
   EXT_MESSAGE_DEFAULTS,
   type ExtMessageItem,
   extMessageItems,
@@ -54,13 +55,14 @@ test.each([
     `https://workbench.invalid/#/p/fictional/cards/C-1?at=${kind === "human_action" ? "human-action-H-1" : "decision-Q-1"}`,
   );
 });
-test("sensitive payload contains only the fixed prompt and link", () => {
+test("sensitive payload contains only the project, fixed prompt and link", () => {
   expect(
     buildExtMessage(
       { ...item, sensitive: true, title: "SECRET" },
       "https://workbench.invalid",
     ),
   ).toEqual({
+    project: "fictional",
     title: "有 1 条敏感事项待处理",
     url: "https://workbench.invalid/#/p/fictional/cards/C-1?at=decision-Q-1",
   });
@@ -252,4 +254,45 @@ test("delegated notices use the question title, omit the notice body and respect
     extMessageItems(next, next.project_id).find((i) => i.kind === "notice")
       ?.handled,
   ).toBe(true);
+});
+
+test("digest filters current state and project, truncates titles and items, and redacts sensitive metadata", () => {
+  const pending = Array.from({ length: 23 }, (_, n) => ({
+    ...item,
+    item_id: `Q-${n + 1}`,
+    title: "😀".repeat(130),
+    sensitive: n === 0,
+  }));
+  const digest = buildExtMessageDigest(
+    "fictional",
+    [
+      ...pending,
+      { ...item, handled: true, title: "PRIVATE handled" },
+      { ...item, ready: false, title: "PRIVATE deferred" },
+      { ...item, project_id: "other", title: "PRIVATE other" },
+    ],
+    "https://workbench.invalid",
+  );
+  expect(digest.title).toBe("免打扰期间 23 条待处理");
+  expect(digest.url).toBe("https://workbench.invalid/#/p/fictional/needs-you");
+  if (!("items" in digest)) throw new Error("Expected digest");
+  expect(digest.items).toHaveLength(20);
+  expect(digest.items[0]).toEqual({
+    project: "fictional",
+    title: "有 1 条敏感事项待处理",
+    url: "https://workbench.invalid/#/p/fictional/cards/C-1?at=decision-Q-1",
+  });
+  expect(digest.items[1]?.title).toBe("😀".repeat(120));
+  expect(JSON.stringify(digest)).not.toContain("PRIVATE");
+  const configured = buildExtMessageDigest(
+    "fictional",
+    pending,
+    "https://workbench.invalid",
+    {
+      ...EXT_MESSAGE_DEFAULTS,
+      title_limit: 2,
+      digest_limit: 1,
+    },
+  );
+  expect(configured).toMatchObject({ total: 23, items: [digest.items[0]] });
 });

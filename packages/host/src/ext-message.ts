@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   buildExtMessage,
+  buildExtMessageDigest,
   type CardId,
   type Clock,
   type ExtMessage,
@@ -13,6 +14,7 @@ import {
   claimExtMessage,
   type ExtMessageRow,
   getExtMessage,
+  groupExtMessage,
   pendingExtMessages,
   projectExtMessage,
   type Store,
@@ -25,11 +27,15 @@ import {
   extMessageQuiet,
 } from "./ext-message-config.js";
 
+import { createFeishuAdapter } from "./ext-message-feishu.js";
+
 export type ExtMessageAdapters = Readonly<
   Record<string, (credential: string | undefined) => ExtMessagePort>
 >;
-/** No network adapter ships in C-289. Factories are host assembly dependencies, never Agent input. */
-export const extMessageAdapters: ExtMessageAdapters = {};
+/** Factories are host assembly dependencies, never Agent input. */
+export const extMessageAdapters: ExtMessageAdapters = {
+  lark: createFeishuAdapter,
+};
 export type ExtSendResult = "sent" | Exclude<ExtMessageRow["last_error"], null>;
 export async function sendExtMessage(
   adapter: ExtMessagePort,
@@ -40,19 +46,17 @@ export async function sendExtMessage(
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
-      Promise.resolve()
-        .then(() => adapter.send(message, controller.signal))
-        .then((r) =>
-          ["sent", "retryable", "permanent"].includes(r)
-            ? r
-            : ("unknown" as const),
-        ),
       new Promise<"timeout">((resolve) => {
         timer = setTimeout(() => {
           controller.abort();
           resolve("timeout");
         }, timeout);
       }),
+      Promise.resolve(adapter.send(message, controller.signal)).then((r) =>
+        ["sent", "retryable", "permanent"].includes(r)
+          ? r
+          : ("unknown" as const),
+      ),
     ]);
   } catch {
     return "unknown";
@@ -137,7 +141,15 @@ export class ExtMessageSender {
           project.id,
         ))
           for (const channel of channels)
-            projectExtMessage(store.database, item, channel, this.clock.now());
+            projectExtMessage(
+              store.database,
+              item,
+              channel,
+              this.clock.now(),
+              extMessageQuiet(config, this.clock.now()) ||
+                (item.created_at !== undefined &&
+                  extMessageQuiet(config, item.created_at)),
+            );
         return version;
       });
       // Publish the replay cursor only after the transaction commits; restart always replays.
@@ -148,9 +160,19 @@ export class ExtMessageSender {
       const results = await Promise.allSettled(
         channels.map(async (channel) => {
           const rows = pendingExtMessages(store.database, project.id, channel);
+          const groups = new Map<string, ExtMessageRow[]>();
           for (const row of rows) {
+            const key =
+              row.digest_id === null
+                ? `item:${row.item_kind}:${row.item_id}`
+                : `digest:${row.digest_id}`;
+            const group = groups.get(key) ?? [];
+            group.push(row);
+            groups.set(key, group);
+          }
+          for (const group of groups.values()) {
             if (this.stopped) return;
-            await this.deliver(row, config);
+            await this.deliver(group, config);
           }
         }),
       );
@@ -166,61 +188,95 @@ export class ExtMessageSender {
     }
   }
   private async deliver(
-    candidate: ExtMessageRow,
+    candidates: readonly ExtMessageRow[],
     config: ExtMessageConfig,
   ): Promise<void> {
+    const candidate = candidates[0];
+    if (!candidate) return;
     const { store } = this.options;
     const claimed = store.uow.run((tx) => {
-      let row = getExtMessage(store.database, candidate);
       const now = this.clock.now();
-      if (
-        row?.status !== "pending" ||
-        (row.lease_until && row.lease_until > now)
-      )
-        return;
-      const item = extMessageItems(
-        loadCommandState(tx, row.project_id as ProjectId),
-        row.project_id as ProjectId,
-      ).find(
-        (i) =>
-          i.kind === candidate.item_kind && i.item_id === candidate.item_id,
+      const items = extMessageItems(
+        loadCommandState(tx, candidate.project_id as ProjectId),
+        candidate.project_id as ProjectId,
       );
-      if (!item || item.handled) {
-        this.settle(tx, row, "skipped", null, now, now);
-        return;
+      const eligible = [];
+      for (const pending of candidates) {
+        let row = getExtMessage(store.database, pending);
+        if (
+          row?.status !== "pending" ||
+          row.digest_id !== candidate.digest_id ||
+          (row.lease_until && row.lease_until > now)
+        )
+          continue;
+        const item = items.find(
+          (i) => i.kind === pending.item_kind && i.item_id === pending.item_id,
+        );
+        if (!item || item.handled) {
+          this.settle(tx, row, "skipped", null, now, now);
+          continue;
+        }
+        if (row.next_attempt_at > now) continue;
+        if (row.attempts >= config.policy.max_attempts) {
+          this.settle(tx, row, "failed", "unknown", now, now);
+          continue;
+        }
+        if (row.lease_id !== null) {
+          // An expired reserved attempt may have reached the remote. Count and audit it.
+          this.settle(tx, row, "pending", "unknown", now, row.next_attempt_at);
+          row = { ...row, lease_id: null, lease_until: null };
+        }
+        if (!item.ready) continue;
+        if (extMessageQuiet(config, now)) {
+          groupExtMessage(store.database, row, "queued");
+          continue;
+        }
+        eligible.push({ row, item });
       }
-      if (row.next_attempt_at > now) return;
-      if (row.attempts >= config.policy.max_attempts) {
-        this.settle(tx, row, "failed", "unknown", now, now);
-        return;
-      }
-      if (row.lease_id !== null) {
-        // An expired reserved attempt may have reached the remote. Count and audit it.
-        this.settle(tx, row, "pending", "unknown", now, row.next_attempt_at);
-        row = { ...row, lease_id: null, lease_until: null };
-      }
-      if (!item.ready || extMessageQuiet(config, now)) return;
+      if (!eligible.length) return;
+      const digest =
+        candidate.digest_id === "queued" ? randomUUID() : candidate.digest_id;
       const lease = randomUUID();
       const until = new Date(
         Date.parse(now) + config.policy.timeout_ms,
       ).toISOString();
-      const retryAt = new Date(
-        Date.parse(until) + (config.policy.retry_delays_ms[row.attempts] ?? 0),
-      ).toISOString();
-      if (!claimExtMessage(store.database, row, lease, now, until, retryAt))
-        return;
-      return {
-        row: {
-          ...row,
-          attempts: row.attempts + 1,
-          lease_id: lease,
-          lease_until: until,
-        },
-        message: buildExtMessage(
+      const reserved = [];
+      for (const { row, item } of eligible) {
+        if (digest !== null) groupExtMessage(store.database, row, digest);
+        const retryAt = new Date(
+          Date.parse(until) +
+            (config.policy.retry_delays_ms[row.attempts] ?? 0),
+        ).toISOString();
+        if (!claimExtMessage(store.database, row, lease, now, until, retryAt))
+          continue;
+        reserved.push({
+          row: {
+            ...row,
+            digest_id: digest,
+            attempts: row.attempts + 1,
+            lease_id: lease,
+            lease_until: until,
+          },
           item,
-          config.workbench_url,
-          config.policy.title_limit,
-        ),
+        });
+      }
+      const first = reserved[0];
+      if (!first) return;
+      return {
+        rows: reserved.map((entry) => entry.row),
+        message:
+          digest !== null
+            ? buildExtMessageDigest(
+                candidate.project_id as ProjectId,
+                reserved.map((entry) => entry.item),
+                config.workbench_url,
+                config.policy,
+              )
+            : buildExtMessage(
+                first.item,
+                config.workbench_url,
+                config.policy.title_limit,
+              ),
       };
     });
     if (!claimed) return;
@@ -239,29 +295,32 @@ export class ExtMessageSender {
       result = "unknown";
     }
     const now = this.clock.now();
-    const status =
-      result === "sent"
-        ? "sent"
-        : result === "permanent" ||
-            result === "adapter_unavailable" ||
-            claimed.row.attempts >= config.policy.max_attempts
-          ? "failed"
-          : "pending";
-    const next = new Date(
-      Date.parse(now) +
-        (config.policy.retry_delays_ms[claimed.row.attempts - 1] ?? 0),
-    ).toISOString();
-    store.uow.run((tx) =>
-      this.settle(
-        tx,
-        claimed.row,
-        status,
-        result === "sent" ? null : result,
-        now,
-        next,
-      ),
-    );
+    store.uow.run((tx) => {
+      for (const row of claimed.rows) {
+        const status =
+          result === "sent"
+            ? "sent"
+            : result === "permanent" ||
+                result === "adapter_unavailable" ||
+                row.attempts >= config.policy.max_attempts
+              ? "failed"
+              : "pending";
+        const next = new Date(
+          Date.parse(now) +
+            (config.policy.retry_delays_ms[row.attempts - 1] ?? 0),
+        ).toISOString();
+        this.settle(
+          tx,
+          row,
+          status,
+          result === "sent" ? null : result,
+          now,
+          next,
+        );
+      }
+    });
   }
+
   /** Outbox result and audit/terminal notice commit together, including crash recovery. */
   private settle(
     tx: StoreTransactionContext,

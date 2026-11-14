@@ -39,6 +39,7 @@ import {
   effectiveRunLimit,
   loadMergeGateConfig,
   loadRunCapacityConfig,
+  RuntimeTargets,
 } from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import { secureDataDirectory } from "@cardigan/runtime-herdr";
@@ -67,7 +68,7 @@ import {
 import { rotateHostOps } from "./host-ops-rotate.js";
 import type { CliIo } from "./io.js";
 import { printRotation, rotateStandingPmInStore } from "./pm-rotate.js";
-import { launchExecution } from "./runtime-check.js";
+import { launchExecution, terminalExecution } from "./runtime-check.js";
 
 const USAGE = [
   "用法：",
@@ -611,11 +612,33 @@ async function machineCommand(
       );
       if (sub === "check") {
         const machine = selected[0] as Machine;
-        if (machine.id !== "local")
+        if (machine.id !== "local") {
+          const dataDir = resolveDataDir(
+            io,
+            optional(parsed.flags, "data-dir"),
+          );
+          const connection = await terminalExecution(
+            io,
+            dataDir,
+            null,
+            machine.id,
+          );
+          const runtime = await RuntimeTargets.create({
+            ...connection,
+            env: io.env,
+            store,
+            project: project_id,
+          });
+          const checked = runtime.ok
+            ? await runtime.value.check(project_id, machine.id)
+            : runtime;
+          if (!checked.ok)
+            throw new CliError("受信远程目标检查失败，禁止启动", EXIT.failure);
           throw new CliError(
-            "登记已读取；远程目标配置、SSH/hc、工具链与 MCP 现场探测尚未接入，禁止启动",
+            "受信目标与 hc 注册核对通过；工具链、文件发布及 MCP 现场前置仍未验收，禁止启动",
             EXIT.failure,
           );
+        }
         try {
           selectMachine(selected, {
             machine_id: "local",

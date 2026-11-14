@@ -1,5 +1,6 @@
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import type { RuntimeTargetBinding } from "@cardigan/domain";
 
 export interface ExecutionEnv {
   readonly HOME?: string | undefined;
@@ -27,7 +28,10 @@ export function resolveDataDirectory(
     configured?.trim() ? configured : defaultDataDirectory(env.HOME),
   );
 }
-export type ExecutionConfig = { readonly agentNice?: number } & (
+export type ExecutionConfig = {
+  readonly agentNice?: number;
+  readonly target?: RuntimeTargetBinding;
+} & (
   | { readonly mode: "local"; readonly dataDir: string }
   | {
       readonly mode: "agent-ssh";
@@ -42,6 +46,7 @@ export type ExecutionConfig = { readonly agentNice?: number } & (
       readonly port?: number;
       readonly user?: string;
       readonly hostKeyAlias?: string;
+      readonly path?: string;
     }
 );
 export const LOCAL_RUNTIME_WARNING =
