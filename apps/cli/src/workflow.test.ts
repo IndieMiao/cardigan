@@ -1,4 +1,10 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -104,6 +110,231 @@ async function bootstrap(project = "p-work"): Promise<void> {
     ]),
   ).toBe(0);
 }
+
+test("machine CLI is human-only, audits metadata and cannot enable remote execution", async () => {
+  await bootstrap();
+  expect(
+    await run([
+      "machine",
+      "register",
+      "worker-a",
+      "--label",
+      "Worker A",
+      "--os",
+      "darwin",
+      "--arch",
+      "arm64",
+      "--tags",
+      "gpu",
+    ]),
+  ).toBe(0);
+  expect(printed()).toContain('"status":"offline"');
+  expect(
+    await run(["machine", "update", "worker-a", "--status", "online"]),
+  ).toBe(0);
+  expect(await run(["machine", "check", "worker-a"])).not.toBe(0);
+  expect(errors.join("\n")).toContain("禁止启动");
+  expect(
+    await run(["machine", "update", "worker-a", "--ssh-endpoint", "forbidden"]),
+  ).not.toBe(0);
+  expect(await run(["machine", "drain", "worker-a"])).toBe(0);
+  expect(await run(["machine", "show", "worker-a"])).toBe(0);
+  expect(printed()).toContain('"status": "draining"');
+  const store = Store.open({ dataDir });
+  try {
+    const events = store.uow.read((tx) =>
+      tx.events.listAfter("p-work", undefined, 0),
+    );
+    expect(
+      events.filter((e) => e.type.startsWith("machine_")).map((e) => e.type),
+    ).toEqual(["machine_registered", "machine_updated", "machine_draining"]);
+    expect(
+      store.database.prepare("SELECT * FROM run_capacity_limits").all(),
+    ).toEqual([]);
+  } finally {
+    store.close();
+  }
+  io = { ...io, env: { ...io.env, CARDIGAN_TOKEN: "untrusted-token" } };
+  for (const sub of ["register", "update", "list", "show", "drain", "check"])
+    expect(await run(["machine", sub, "worker-a"])).not.toBe(0);
+});
+
+test("machine updates atomically share physical descriptions while preserving each project's policy and audit", async () => {
+  await bootstrap("project-a");
+  expect(await run(["project", "create", "project-b"])).toBe(0);
+  const store = Store.open({ dataDir });
+  try {
+    store.uow.run((tx) => {
+      for (const project of ["project-a", "project-b"]) {
+        const local = tx.machines.get(project, "local");
+        if (!local) throw new Error("missing local");
+        tx.machines.put(project, {
+          ...local,
+          herdr_machine: `${project}-alias`,
+          tags: [project],
+          status: project === "project-a" ? "online" : "draining",
+        });
+      }
+    });
+    const read = (project: string) =>
+      store.uow.read((tx) => tx.machines.list(project));
+    const beforeA = read("project-a"),
+      beforeB = read("project-b");
+    const update = (
+      project: string,
+      label: string,
+      os: string,
+      arch: string,
+      rest: string[] = [],
+    ) =>
+      run([
+        "machine",
+        "update",
+        "local",
+        "--project",
+        project,
+        "--label",
+        label,
+        "--os",
+        os,
+        "--arch",
+        arch,
+        ...rest,
+      ]);
+    expect(
+      await update("project-a", "Shared Host", "darwin", "arm64", [
+        "--tags",
+        "updated",
+        "--status",
+        "degraded",
+      ]),
+    ).toBe(0);
+    expect(read("project-a")).toEqual([
+      {
+        ...beforeA[0],
+        label: "Shared Host",
+        os: "darwin",
+        arch: "arm64",
+        tags: ["updated"],
+        status: "degraded",
+      },
+    ]);
+    expect(read("project-b")).toEqual([
+      { ...beforeB[0], label: "Shared Host", os: "darwin", arch: "arm64" },
+    ]);
+    expect(await update("project-b", "Renamed Host", "linux", "x64")).toBe(0);
+    for (const project of ["project-a", "project-b"]) {
+      expect(read(project)[0]).toMatchObject({
+        label: "Renamed Host",
+        os: "linux",
+        arch: "x64",
+      });
+      const events = store.uow.read((tx) =>
+        tx.events
+          .listAfter(project, undefined, 0)
+          .filter((e) => e.type === "machine_updated"),
+      );
+      expect(events).toHaveLength(2);
+      expect(events).toMatchObject([
+        {
+          actor: { kind: "human", project_id: project },
+          payload: { machine: { label: "Shared Host" } },
+        },
+        {
+          actor: { kind: "human", project_id: project },
+          payload: { machine: { label: "Renamed Host" } },
+        },
+      ]);
+    }
+    expect(read("project-b")[0]).toMatchObject({
+      status: "draining",
+      tags: ["project-b"],
+      herdr_machine: "project-b-alias",
+    });
+    // Any failed audit must undo all projects, revisions and allocated event IDs.
+    const snapshot = () =>
+      [
+        "machines",
+        "events",
+        "event_counters",
+        "command_versions",
+        "command_rows",
+      ].map((table) =>
+        store.database.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all(),
+      );
+    const beforeFailure = snapshot();
+    store.database.exec(
+      "CREATE TRIGGER fail_machine_audit BEFORE INSERT ON events WHEN NEW.project_id = 'project-b' AND NEW.type = 'machine_updated' BEGIN SELECT RAISE(ABORT, 'fixture audit failure'); END",
+    );
+    expect(
+      await update("project-a", "Rolled Back", "darwin", "arm64"),
+    ).not.toBe(0);
+    expect(errors.join("\n")).toContain("fixture audit failure");
+    expect(snapshot()).toEqual(beforeFailure);
+    expect(read("project-a")[0]?.label).toBe("Renamed Host");
+    expect(read("project-b")[0]?.label).toBe("Renamed Host");
+  } finally {
+    store.close();
+  }
+});
+
+test.each(["invalid", "unsafe"])(
+  "machine commands reject %s capacity configuration without saving a fault value",
+  async (kind) => {
+    await bootstrap();
+    const configDir = join(dataDir, "config");
+    mkdirSync(configDir, { mode: 0o700 });
+    const file = join(configDir, "run-capacity.yaml");
+    const marker = "fixture-private-configuration";
+    if (kind === "invalid")
+      writeFileSync(file, `machines: { local: ${marker} }`, { mode: 0o600 });
+    else {
+      const target = join(configDir, "untrusted.yaml");
+      writeFileSync(target, `machines: { local: 4 } # ${marker}`, {
+        mode: 0o600,
+      });
+      symlinkSync(target, file);
+    }
+    io.env.CARDIGAN_CONFIG_DIR = configDir;
+    const store = Store.open({ dataDir });
+    try {
+      const snapshot = () =>
+        ["machines", "events", "run_capacity_limits"].map((table) =>
+          store.database.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all(),
+        );
+      const before = snapshot();
+      for (const args of [
+        ["check", "local"],
+        ["update", "local", "--tags", "fixture"],
+        [
+          "register",
+          "worker-a",
+          "--label",
+          "Worker A",
+          "--os",
+          "darwin",
+          "--arch",
+          "arm64",
+        ],
+        ["list"],
+        ["show", "local"],
+        ["drain", "local"],
+      ]) {
+        expect(await run(["machine", ...args])).not.toBe(0);
+        expect(errors.join("\n")).toContain(
+          kind === "invalid"
+            ? "配置无效，暂停普通 Run"
+            : "无法安全读取 run-capacity.yaml",
+        );
+        expect(errors.join("\n") + printed()).not.toContain(marker);
+        expect(printed()).not.toContain("max_assignments");
+        expect(snapshot()).toEqual(before);
+      }
+    } finally {
+      store.close();
+    }
+  },
+);
 
 test("card create builds a dev card and lists its work items", async () => {
   await bootstrap();
