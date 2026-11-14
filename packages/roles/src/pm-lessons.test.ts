@@ -367,7 +367,7 @@ const P2A_DRAFT = {
   ],
   ops: [
     "项目开启 `system_auto_assign_verifiers` 后，验证型工作项（含完成申请的 PM 验收）由系统在有可审交付时自动指派，PM Ops 不与系统重复指派；查看系统未能指派的项，判断换人、补员工或交人。开关关闭时，指派前先用 `get_card` 确认可审交付已存在。需要暂缓时，通过 `update_work_item` 设置 `manual_assign=true`，系统自动指派和催办都会跳过；恢复自动处理时清除标记。",
-    "卡片上出现没有 @ 自己、但也没有被任何 Assignment 认领的人类评论时，主动看一眼并回应，不要只处理带 @ 的事件。",
+    "卡片上出现没有提醒自己、但也没有被任何 Assignment 认领的人类评论时，主动看一眼并回应，不要只处理提醒自己的事件。",
   ],
 };
 
@@ -409,7 +409,7 @@ test("C-86 PM Ops gives final merge confirmation, including UI cards after a PM 
   const prompt = corePromptFor("pm");
   for (const phrase of [
     "合并默认由你最终确认，界面卡（改动用户可见界面的卡）也一样",
-    "先核实当前项目在职 PM Office 的 Assignment 编号，在卡上用 @A-n 提及它请其做截图核对",
+    "先核实当前项目在职 PM Office 的 Assignment 编号，在卡上评论并在 `mentions` 字段填它的编号 A-n，请其做截图核对",
     "等 PM Office 把核对结论写进卡片后，你据此确认或退回",
     "上述强制交人的卡片和已交人的确认，只能重新检查明确的超时失败，不能退回修改，也不能代确认合并",
     "仍交给人的包括被人标为敏感的卡、与合并相关的 D12 四类业务拍板、对外发布、需求范围变化、角色规则改动、已强制交人的确认，以及不满足独立复核资格的风险标签卡",
