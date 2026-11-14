@@ -10,7 +10,7 @@
  * Waits before each automatic retry, in milliseconds; its length is the number
  * of retries after the first attempt.
  *
- * 待定（数值规则，由人拍板）：建议 4 次重试，间隔 1、2、4、8 秒，
+ * 已定，依据 Q-415（数值规则，由人拍板）：重试 4 次，间隔 1、2、4、8 秒，
  * 累计约 15 秒，覆盖一次自动部署约 11 秒的停服。
  */
 export const SERVICE_RETRY_DELAYS_MS: readonly number[] = [

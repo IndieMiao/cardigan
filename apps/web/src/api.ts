@@ -473,6 +473,11 @@ export class ApiError extends Error {
     readonly status: number,
     readonly code: string,
     message: string,
+    /**
+     * C-250: an earlier automatic retry of this same request lost its reply,
+     * so the write may already have taken effect whatever this status says.
+     */
+    readonly outcomeUncertain = false,
   ) {
     super(message);
     this.name = "ApiError";
@@ -1891,12 +1896,15 @@ export class HttpCardiganClient implements CardiganClient {
         },
         ...(init.body === undefined ? {} : { body: init.body }),
       });
-    const response = await this.sendWithRetry(
+    const { response, lostReply } = await this.sendWithRetry(
       send,
       isRetryableRequest(method, init.idempotencyKey),
     );
     if (!response.ok) {
-      throw await toApiError(response, method, path);
+      const error = await toApiError(response, method, path);
+      throw lostReply
+        ? new ApiError(error.status, error.code, error.message, true)
+        : error;
     }
     if (response.status === 204) {
       return undefined as T;
@@ -1907,13 +1915,16 @@ export class HttpCardiganClient implements CardiganClient {
   /**
    * C-250: retries 502/503 and refused connections for reads and keyed writes.
    * Every attempt sends the identical request, so the key never changes.
+   * `lostReply` records that some attempt failed without a reply (the server
+   * may have applied it), so a final 502/503 cannot prove nothing happened.
    */
   private async sendWithRetry(
     send: () => Promise<Response>,
     retryable: boolean,
-  ): Promise<Response> {
+  ): Promise<{ response: Response; lostReply: boolean }> {
     const { delaysMs, sleep, notice } = this.retry;
     let end: (() => void) | undefined;
+    let lostReply = false;
     try {
       for (let attempt = 0; ; attempt++) {
         const canRetry = retryable && attempt < delaysMs.length;
@@ -1922,12 +1933,13 @@ export class HttpCardiganClient implements CardiganClient {
           response = await send();
         } catch (error) {
           if (!canRetry || !(error instanceof TypeError)) throw error;
+          lostReply = true;
           end ??= notice.begin();
           await sleep(delaysMs[attempt] ?? 0);
           continue;
         }
         if (!canRetry || !SERVICE_UPDATING_STATUSES.has(response.status)) {
-          return response;
+          return { response, lostReply };
         }
         end ??= notice.begin();
         await sleep(delaysMs[attempt] ?? 0);
@@ -1990,10 +2002,15 @@ export function describeWriteError(
   error: unknown,
   uncertainMessage = "操作可能已经成功，保留原内容重试不会重复提交。",
 ): string {
-  // C-250: a 502/503 comes from the proxy while the server restarts, so the
-  // write never reached it; keyed writes were already retried automatically.
+  // C-250: during a restart the proxy answers 502/503 without reaching the
+  // server, so the copy agreed under Q-279 says the write did not take effect.
+  // A 502 can, rarely, also follow a commit when the old process is killed
+  // before replying; keyed writes stay safe to click again either way. When an
+  // earlier retry lost its reply the write may have landed, so say "maybe".
   if (error instanceof ApiError && SERVICE_UPDATING_STATUSES.has(error.status))
-    return "服务正在更新，暂时没有恢复，操作没有生效，请几秒后再点一次。";
+    return error.outcomeUncertain
+      ? `服务正在更新，暂时没有恢复。${uncertainMessage}`
+      : "服务正在更新，暂时没有恢复，操作没有生效，请几秒后再点一次。";
   const interrupted =
     (error instanceof Error || error instanceof DOMException) &&
     ["TimeoutError", "AbortError", "NetworkError"].includes(error.name);

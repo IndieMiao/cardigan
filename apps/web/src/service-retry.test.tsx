@@ -122,6 +122,7 @@ test("a persistent outage gives up, says the write did not take effect, and clea
     .catch((error: unknown) => error);
   expect(failure).toBeInstanceOf(ApiError);
   expect((failure as ApiError).status).toBe(503);
+  expect((failure as ApiError).outcomeUncertain).toBe(false);
   expect(server.calls).toHaveLength(SERVICE_RETRY_DELAYS_MS.length + 1);
   expect(server.applied.size).toBe(0);
   expect(server.notice.active()).toBe(false);
@@ -131,6 +132,40 @@ test("a persistent outage gives up, says the write did not take effect, and clea
   expect(text).toContain("再点一次");
   expect(text).not.toContain("503");
 });
+
+test.each([503, 502])(
+  "a write whose reply was lost before a persistent %i is reported as maybe applied",
+  async (status) => {
+    const applied = new Map<string, string>();
+    // V-850: attempt 1 commits then loses its reply; every retry hits the proxy.
+    const fetchImpl = vi.fn<typeof fetch>(async (_url, init) => {
+      if (fetchImpl.mock.calls.length === 1) {
+        const key = new Headers(init?.headers).get("Idempotency-Key") ?? "";
+        applied.set(key, String(init?.body));
+        throw new TypeError("Response lost after commit");
+      }
+      return new Response("Service Unavailable", { status });
+    });
+    const notice = new ServiceUpdatingNotice();
+    const client = new HttpCardiganClient(fetchImpl, undefined, {
+      sleep: async () => {},
+      notice,
+    });
+    const failure = await client
+      .recordDecision("p-1", "Q-408", "merge", "确认合并", "fixed-key")
+      .catch((error: unknown) => error);
+    expect(fetchImpl).toHaveBeenCalledTimes(SERVICE_RETRY_DELAYS_MS.length + 1);
+    expect([...applied.keys()]).toEqual(["fixed-key"]);
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).status).toBe(status);
+    expect((failure as ApiError).outcomeUncertain).toBe(true);
+    const text = describeWriteError(failure);
+    expect(text).toContain("服务正在更新");
+    expect(text).toContain("可能已经成功");
+    expect(text).not.toContain("没有生效");
+    expect(notice.active()).toBe(false);
+  },
+);
 
 test("a persistent 502 never surfaces only the status code", () => {
   const error = new ApiError(
