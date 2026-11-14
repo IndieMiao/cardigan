@@ -454,3 +454,173 @@ test("host-only persistence rejects an Agent and invalid policy without effects"
   ).toBe(false);
   expect(f.state().events).toEqual([]);
 });
+
+test("structured harness errors join the same distinct-session window; working sessions are excluded", () => {
+  const f = scenario();
+  f.advance(10);
+  f.inactive(1, f.at(0));
+  const activity: SessionActivity = {
+    "A-2": { error: "rate_limit", at: f.at(5) },
+    "A-3": { error: "stream_disconnected", at: f.at(10) },
+  };
+  expect(
+    upstreamCluster(f.state(), f.targets, DEFAULT_UPSTREAM_POLICY, activity),
+  ).toHaveLength(3);
+  expect(
+    upstreamCluster(f.state(), f.targets, DEFAULT_UPSTREAM_POLICY, {
+      ...activity,
+      "A-1": "working",
+    }),
+  ).toEqual([]);
+  f.record([], activity);
+  expect(upstreamIncident(f.state(), "relay")?.assignment_ids).toHaveLength(3);
+  expect(f.diagnosis(2, [], activity).action).toBe("wait");
+  expect(f.record([], activity).events).toEqual([]);
+});
+
+test("fresh harness progress is recovery evidence but does not bypass the existing recovery window", () => {
+  const f = scenario();
+  for (const n of [1, 2, 3]) f.inactive(n);
+  f.record();
+  f.advance(1);
+  const activity: SessionActivity = { "A-3": { working_at: f.at(1) } };
+  f.record([], activity);
+  expect(f.diagnosis(1, [], activity).action).toBe("wait");
+  f.advance(10);
+  f.record([], activity);
+  expect(f.diagnosis(1, [], activity).action).toBe("restart_once");
+  expect(f.diagnosis(3, [], activity).action).toBe("wait");
+  f.record([], {
+    "A-1": { working_at: f.at(10) },
+    "A-2": { working_at: f.at(10) },
+    "A-3": { working_at: f.at(10) },
+  });
+  expect(upstreamIncident(f.state(), "relay")).toBeUndefined();
+});
+
+test.each([
+  ["2026-01-01T08:08:00+08:00", "wait"],
+  ["2026-01-01T08:09:00+08:00", "wait"],
+  ["2026-01-01T00:09:00Z", "wait"],
+  ["2026-01-01T08:09:00.001+08:00", "restart_once"],
+  ["2025-12-31T19:09:00.001-05:00", "restart_once"],
+] as const)(
+  "recovery compares instants across timezones/precision: %s",
+  (at, action) => {
+    const f = scenario();
+    for (const n of [1, 2, 3]) f.inactive(n);
+    f.record();
+    f.advance(10);
+    const probes: UpstreamProbe[] = [
+      {
+        provider: "claude",
+        group: "relay",
+        status: "reachable",
+        last_failure_at: f.at(9),
+      },
+    ];
+    const activity = { "A-3": { working_at: at } };
+    expect(f.diagnosis(1, probes, activity).action).toBe(action);
+    expect(
+      f
+        .record(probes, activity)
+        .events.some((e) => e.type === "upstream_recovery_ready"),
+    ).toBe(action === "restart_once");
+  },
+);
+
+test("latest structured line failure supersedes older recovery evidence and survives sample loss/reload", () => {
+  const f = scenario();
+  for (const n of [1, 2, 3]) f.inactive(n);
+  f.record();
+  f.advance(13);
+  const witnessAt = (at: string) =>
+    f.replace({
+      ...f.state(),
+      assignments: f
+        .state()
+        .assignments.map((a) =>
+          a.id === "A-3" ? { ...a, last_mcp_activity_at: at } : a,
+        ),
+    });
+  witnessAt(f.at(11));
+  const failure: SessionActivity = {
+    "A-1": { error: "stream_disconnected", at: "2026-01-01T08:12:00+08:00" },
+  };
+  expect(f.diagnosis(1, [], failure).action).toBe("wait");
+  expect(
+    f
+      .record([], failure)
+      .events.some((e) => e.type === "upstream_recovery_ready"),
+  ).toBe(false);
+  expect(f.record([], failure).events).toEqual([]);
+  f.replace(JSON.parse(JSON.stringify(f.state())) as CommandState);
+  expect(f.diagnosis(1, []).action).toBe("wait");
+  expect(
+    f.record([]).events.some((e) => e.type === "upstream_recovery_ready"),
+  ).toBe(false);
+  witnessAt("2026-01-01T00:12:00.000Z");
+  expect(f.diagnosis(1, [], failure).action).toBe("wait");
+  witnessAt("2026-01-01T00:12:00.001Z");
+  expect(f.diagnosis(1, [], failure).action).toBe("restart_once");
+  expect(
+    f
+      .record([], failure)
+      .events.some((e) => e.type === "upstream_recovery_ready"),
+  ).toBe(true);
+});
+
+test("incident resolution uses the same persisted error boundary and isolates other lines", () => {
+  const f = scenario();
+  for (const n of [1, 2, 3]) f.inactive(n);
+  f.record();
+  f.advance(13);
+  f.record([], { "A-1": { error: "server_error", at: f.at(12) } });
+  const progress = (at: string): SessionActivity =>
+    Object.fromEntries(
+      f.targets.map((t) => [t.assignment_id, { working_at: at }]),
+    );
+  f.record([], progress(f.at(11)));
+  expect(upstreamIncident(f.state(), "relay")).toBeDefined();
+  f.fact("upstream_harness_failed", {
+    group: "other-line",
+    last_failure_at: f.at(13),
+    failure: "rate_limit",
+  });
+  f.record([], progress("2026-01-01T00:12:00.001Z"));
+  expect(upstreamIncident(f.state(), "relay")).toBeUndefined();
+});
+
+test("current errors outside the target line cannot delay recovery", () => {
+  const f = scenario();
+  for (const n of [1, 2, 3]) f.inactive(n);
+  f.record();
+  f.advance(13);
+  f.replace({
+    ...f.state(),
+    assignments: f
+      .state()
+      .assignments.map((a) =>
+        a.id === "A-3" ? { ...a, last_mcp_activity_at: f.at(11) } : a,
+      ),
+  });
+  const foreign = {
+    assignment_id: id("assignment", 4),
+    provider: "direct",
+    group: "other-line",
+  };
+  const activity: SessionActivity = {
+    [foreign.assignment_id]: { error: "rate_limit", at: f.at(12) },
+  };
+  expect(
+    diagnoseUpstream(
+      f.state(),
+      required(f.targets[0]),
+      [...f.targets, foreign],
+      [],
+      DEFAULT_UPSTREAM_POLICY,
+      f.at(13),
+      activity,
+    ).action,
+  ).toBe("restart_once");
+});

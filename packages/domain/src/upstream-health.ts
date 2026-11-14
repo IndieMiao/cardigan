@@ -33,8 +33,29 @@ export interface UpstreamIncident {
   readonly assignment_ids: readonly AssignmentId[];
 }
 export type SessionActivity = Readonly<
-  Record<string, "working" | "idle" | "unknown">
+  Record<
+    string,
+    | "working"
+    | "idle"
+    | "unknown"
+    | { readonly working_at: string }
+    | {
+        readonly error: "rate_limit" | "server_error" | "stream_disconnected";
+        readonly at: string;
+      }
+  >
 >;
+export function sessionIsWorking(sample: SessionActivity[string] | undefined) {
+  return (
+    sample === "working" ||
+    (typeof sample === "object" && "working_at" in sample)
+  );
+}
+export function sessionUpstreamError(
+  sample: SessionActivity[string] | undefined,
+) {
+  return typeof sample === "object" && "error" in sample ? sample : undefined;
+}
 const fields = (e: Event) => e.payload as Record<string, unknown>;
 const unfinished = (status: string) =>
   !["completed", "failed", "cancelled"].includes(status);
@@ -77,7 +98,9 @@ export function upstreamIncident(
 export function lastUpstreamInactivity(
   state: CommandState,
   id: AssignmentId,
+  activity: SessionActivity = {},
 ): Event | undefined {
+  if (sessionIsWorking(activity[id])) return;
   const a = state.assignments.find((a) => a.id === id);
   if (a?.status !== "active" || a.external) return;
   return state.events.findLast((e) => {
@@ -104,15 +127,20 @@ export function upstreamActivityAfter(
   state: CommandState,
   id: AssignmentId,
   since: string,
+  activity: SessionActivity = {},
 ) {
   const a = state.assignments.find((a) => a.id === id);
   if (a?.status !== "active") return false;
+  const sample = activity[id];
   return [
+    typeof sample === "object" && "working_at" in sample
+      ? sample.working_at
+      : undefined,
     a.last_mcp_activity_at,
     ...state.runs
       .filter((r) => r.assignment_id === id)
       .flatMap((r) => [r.started_at, r.heartbeat_at]),
-  ].some((at) => at && at > since);
+  ].some((at) => at && Date.parse(at) > Date.parse(since));
 }
 export function recurrentUpstreamFailure(
   state: CommandState,
@@ -177,18 +205,54 @@ function serverFailureFor(state: CommandState, inactive: Event) {
   );
 }
 
-/** Recovery evidence must postdate the most recent known connection failure. */
+/** Latest explicit error on the caller-selected line, never an error message. */
+export function latestHarnessFailure(
+  targets: readonly UpstreamTarget[],
+  activity: SessionActivity,
+) {
+  return targets
+    .flatMap((target) => {
+      const error = sessionUpstreamError(activity[target.assignment_id]);
+      return error && Number.isFinite(Date.parse(error.at))
+        ? [{ ...error, assignment_id: target.assignment_id }]
+        : [];
+    })
+    .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))[0];
+}
+
+/** Recovery must postdate every known failure, including errors whose samples have expired. */
 export function upstreamRecoverySince(
   incident: UpstreamIncident,
   probes: readonly UpstreamProbe[],
+  targets: readonly UpstreamTarget[] = [],
+  activity: SessionActivity = {},
+  events: readonly Event[] = [],
 ) {
-  return probes
-    .filter((p) => p.group === incident.group && p.last_failure_at)
-    .reduce(
-      (at, p) =>
-        p.last_failure_at && p.last_failure_at > at ? p.last_failure_at : at,
-      incident.started_at,
-    );
+  const error = latestHarnessFailure(
+    targets.filter((t) => t.group === incident.group),
+    activity,
+  );
+  const failures = [
+    ...probes
+      .filter((p) => p.group === incident.group)
+      .map((p) => p.last_failure_at),
+    error?.at,
+    ...events
+      .filter(
+        (e) =>
+          e.type === "upstream_harness_failed" &&
+          fields(e).group === incident.group,
+      )
+      .map((e) => fields(e).last_failure_at),
+  ].flatMap((at) =>
+    typeof at === "string" && Number.isFinite(Date.parse(at))
+      ? [Date.parse(at)]
+      : [],
+  );
+  const latest = Math.max(Date.parse(incident.started_at), ...failures);
+  return Number.isFinite(latest)
+    ? new Date(latest).toISOString()
+    : incident.started_at;
 }
 /** Count distinct Assignments in a sliding event-time window, never just MCP silence. */
 export function upstreamCluster(
@@ -198,8 +262,10 @@ export function upstreamCluster(
   activity: SessionActivity,
 ) {
   const events = targets
-    .filter((t) => activity[t.assignment_id] !== "working")
+    .filter((t) => !sessionIsWorking(activity[t.assignment_id]))
     .flatMap((t) => {
+      const sample = sessionUpstreamError(activity[t.assignment_id]);
+      if (sample) return [{ id: t.assignment_id, at: Date.parse(sample.at) }];
       const e = lastUpstreamInactivity(state, t.assignment_id);
       return e && !serverFailureFor(state, e)
         ? [{ id: t.assignment_id, at: Date.parse(e.created_at) }]
@@ -246,10 +312,9 @@ export function diagnoseUpstream(
   const base = { ...target };
   const group = targets.filter((t) => t.group === target.group);
   const incident = upstreamIncident(state, target.group);
-  const recurrent =
-    activity[target.assignment_id] === "working"
-      ? undefined
-      : recurrentUpstreamFailure(state, target.assignment_id, policy);
+  const recurrent = sessionIsWorking(activity[target.assignment_id])
+    ? undefined
+    : recurrentUpstreamFailure(state, target.assignment_id, policy);
   if (recurrent)
     return {
       ...base,
@@ -273,7 +338,14 @@ export function diagnoseUpstream(
         upstreamActivityAfter(
           state,
           t.assignment_id,
-          upstreamRecoverySince(incident, probes),
+          upstreamRecoverySince(
+            incident,
+            probes,
+            group,
+            activity,
+            state.events,
+          ),
+          activity,
         ),
       );
     const used =
@@ -297,12 +369,12 @@ export function diagnoseUpstream(
       ...base,
       cause: failed.length ? "upstream_unreachable" : "upstream_suspected",
       action:
-        ready && activity[target.assignment_id] !== "working"
+        ready && !sessionIsWorking(activity[target.assignment_id])
           ? "restart_once"
           : "wait",
       evidence: [
         ...evidence,
-        ...(activity[target.assignment_id] === "working"
+        ...(sessionIsWorking(activity[target.assignment_id])
           ? ["harness_working"]
           : []),
         ...(recovered
@@ -313,12 +385,20 @@ export function diagnoseUpstream(
       ...(incident ? { incident_id: incident.id } : {}),
     };
   }
-  if (activity[target.assignment_id] === "working")
+  if (sessionIsWorking(activity[target.assignment_id]))
     return {
       ...base,
       cause: "agent_busy",
       action: "none",
       evidence: ["harness_working"],
+    };
+  const sample = sessionUpstreamError(activity[target.assignment_id]);
+  if (sample)
+    return {
+      ...base,
+      cause: "upstream_suspected",
+      action: "wait",
+      evidence: ["harness_upstream_error", sample.error],
     };
   const inactive = lastUpstreamInactivity(state, target.assignment_id);
   if (!inactive)
@@ -338,7 +418,7 @@ export function diagnoseUpstream(
   if (
     group.filter(
       (t) =>
-        activity[t.assignment_id] !== "working" &&
+        !sessionIsWorking(activity[t.assignment_id]) &&
         lastUpstreamInactivity(state, t.assignment_id),
     ).length > 1
   )

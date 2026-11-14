@@ -18,6 +18,10 @@ import { abortDispatch, acknowledgeRun } from "./commands/launch.js";
 import { finishRun, heartbeat } from "./commands/runtime.js";
 import type { Assignment, Run } from "./entities.js";
 import {
+  currentHarnessActivity,
+  type HarnessActivity,
+} from "./harness-activity.js";
+import {
   canDispatchRun,
   compareDispatchOrder,
   isRunCapacityExempt,
@@ -430,4 +434,81 @@ test("priority wins across projects and machines; equal tiers retain FIFO and ed
     ),
   ).toEqual(["a", "c", "b"]);
   expect(low.priority).toBe(1);
+});
+
+test("fresh harness evidence prevents a claim and withdraws a pending stop; invalid evidence cannot", () => {
+  const t = inactiveFixture();
+  t.advance(DEFAULT_INACTIVE_CANCEL_AFTER_MS);
+  const assignment = f.state.assignments.find(
+    (a) => a.id === t.run.assignment_id,
+  );
+  if (!assignment) throw new Error("Missing assignment");
+  const sample = {
+    assignment_id: assignment.id,
+    run_id: t.run.id,
+    runtime_key: JSON.stringify(assignment.runtime_ref),
+    session_id: "session-1",
+    updated_at: f.io.clock.now(),
+    source: "codex:session_metadata",
+    stale_after_ms: 600_000,
+  };
+  const claim = (harness_activity = sample) =>
+    commit(
+      claimInactiveRunStop(
+        f.state,
+        t.system,
+        {
+          run_id: t.run.id,
+          after_ms: DEFAULT_INACTIVE_CANCEL_AFTER_MS,
+          harness_activity,
+        },
+        f.io,
+      ),
+    );
+  expect(claim()).toBeUndefined();
+  for (const patch of [
+    { run_id: f.io.ids.next(f.state.project_id, "run") },
+    { runtime_key: "old-terminal" },
+    { session_id: "old-session" },
+    { updated_at: new Date(Date.parse(f.io.clock.now()) + 1).toISOString() },
+    {
+      updated_at: new Date(
+        Date.parse(f.io.clock.now()) - 600_001,
+      ).toISOString(),
+    },
+  ] satisfies Partial<HarnessActivity>[]) {
+    expect(
+      currentHarnessActivity(f.state, assignment, f.io.clock.now(), {
+        ...sample,
+        ...patch,
+      }),
+    ).toBeUndefined();
+  }
+  const stop = claim({
+    ...sample,
+    runtime_key: "old-terminal",
+  })?.inactivity_stop;
+  if (!stop) throw new Error("Missing stop");
+  expect(
+    commit(
+      startInactiveRunStop(
+        f.state,
+        t.system,
+        {
+          run_id: t.run.id,
+          attempt_id: stop.attempt_id,
+          after_ms: DEFAULT_INACTIVE_CANCEL_AFTER_MS,
+          harness_activity: sample,
+        },
+        f.io,
+      ),
+    ),
+  ).toBeUndefined();
+  expect(
+    f.state.runs.find((r) => r.id === t.run.id)?.inactivity_stop,
+  ).toBeUndefined();
+  expect(f.state.events.at(-1)?.type).toBe("run_inactivity_stop_withdrawn");
+  expect(
+    claim({ ...sample, session_id: "old-session" })?.inactivity_stop,
+  ).toBeDefined();
 });

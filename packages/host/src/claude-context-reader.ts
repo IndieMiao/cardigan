@@ -52,7 +52,7 @@ async function read() {
         if (!entry.isFile() || !entry.name.endsWith('.jsonl')) continue;
         const stat = await lstat('/proc/self/fd/' + dir.fd + '/' + entry.name);
         if (!stat.isFile()) continue;
-        candidates.push({ path: join(path, entry.name), name: entry.name, mtime: stat.mtimeMs });
+        candidates.push({ path: join(path, entry.name), name: entry.name, mtime: stat.mtimeMs, born: stat.birthtimeMs });
         if (candidates.length > 256) return;
       }
     } catch { /* Unreadable or swapped directory. */ }
@@ -75,6 +75,32 @@ async function read() {
     const { bytesRead } = await file.read(buffer, 0, buffer.length, start);
     const lines = buffer.subarray(0, bytesRead).toString('utf8').split('\n');
     if (start) lines.shift();
+    let activity;
+    // With no trusted session ID, a late write to an older file cannot revive it.
+    const byCreation = candidates.slice().sort((a, b) => b.born - a.born);
+    const latest = byCreation[0]?.born > 0 && byCreation[0].born !== byCreation[1]?.born ? byCreation[0] : undefined;
+    if ((!wanted && chosen.path === latest?.path) || chosen.name === wanted) {
+      for (const line of lines.slice(-256)) {
+        let event;
+        try { event = object(JSON.parse(line)); } catch { continue; }
+        if (!event || event.isSidechain === true) continue;
+        const apiError = event.isApiErrorMessage === true ||
+          (event.type === 'system' && event.subtype === 'api_error');
+        if (!apiError && !['assistant', 'user'].includes(event.type)) continue;
+        if (!apiError && object(event.message)?.model === '<synthetic>') continue;
+        const timestamp = text(event.timestamp, 64);
+        if (!timestamp || !Number.isFinite(Date.parse(timestamp)) ||
+          (activity && Date.parse(timestamp) < Date.parse(activity.updated_at))) {
+          activity = undefined;
+          break;
+        }
+        const status = object(event.error)?.status;
+        const error = status === 429 ? 'rate_limit' :
+          Number.isInteger(status) && status >= 500 && status <= 599 ? 'server_error' : 'unclassified';
+        activity = { session_id: text(event.sessionId, 128), cwd: text(event.cwd, 4096),
+          updated_at: timestamp, ...(apiError ? { error } : {}) };
+      }
+    }
     for (let i = lines.length - 1; i >= 0; i--) {
       let event;
       try { event = object(JSON.parse(lines[i])); } catch { continue; }
@@ -86,15 +112,16 @@ async function read() {
         const value = usage[key];
         if (value === undefined && key.startsWith('cache_')) continue;
         // Invalid latest usage suppresses earlier usage, as in the host parser.
-        if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return;
+        if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return activity ? { path: chosen.path, activity } : undefined;
         counts[key] = value;
       }
       return {
-        path: chosen.path, type: 'assistant', sessionId: text(event.sessionId, 128),
+        path: chosen.path, ...(activity ? { activity } : {}), type: 'assistant', sessionId: text(event.sessionId, 128),
         cwd: text(event.cwd, 4096), timestamp: text(event.timestamp, 64),
         message: { model: text(message.model, 256), usage: counts },
       };
     }
+    return activity ? { path: chosen.path, activity } : undefined;
   } finally { await file?.close(); await dir.close(); }
 }
 read().catch(() => null).then(sample => {

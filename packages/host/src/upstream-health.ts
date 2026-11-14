@@ -180,7 +180,7 @@ export class UpstreamHealthMonitor {
   }
   /** Diagnostic/request IO is outside database transactions and outside the dispatcher. */
   async observe(state: CommandState, only?: AssignmentId) {
-    const fresh: Record<string, "working" | "idle" | "unknown"> = {};
+    const fresh: Record<string, SessionActivity[string]> = {};
     await Promise.all(
       state.assignments
         .filter(
@@ -251,7 +251,7 @@ export class UpstreamHealthMonitor {
         };
       },
     );
-    const activity: Record<string, "working" | "idle" | "unknown"> = {};
+    const activity: Record<string, SessionActivity[string]> = {};
     for (const a of state.assignments) {
       const sample = this.activity.get(`${state.project_id}:${a.id}`);
       // Without a configured freshness period, use only observations from this instant.
