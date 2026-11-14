@@ -324,6 +324,8 @@ Standing Assignment (scope=project): PM Office, PM Ops — not tied to a WorkIte
 
 ### 4.3 实体字段（初版，实现时可调整）
 
+**P2b 设计状态（2026-11-14）**：[多机细化计划](plans/p2b-multi-machine.md)已定，01–11 的实现与现场验收待对应卡交付。以下标注 P2b 的正文是目标合同，不表示字段、命令或远程启动已可用；未配置 remote 时现有 local 行为不变。
+
 以下 `?` 表示可空，`[]` 表示列表。
 
 **ProjectPreferences（C-29、C-37，P2c 常驻授权）**
@@ -512,6 +514,13 @@ C-144：迁移 0019 在 C-132 的编号格式迁移 0018 之后，将旧数字�
 - `id`、`label`、`herdr_machine`（Herdr 中保存的机器名）
 - `os`、`arch`、`tags[]`（如 `android-device`、`gpu`）
 - `max_assignments`、`status`、`last_seen`
+
+**P2b Machine、接管与资源记录（01、08、09、11 待实现）**
+
+- `machines(project_id,id,doc)` 保留项目登记/授权投影；可信主机清单以物理 machine_id 统一 endpoint、os/arch/label 与项目账号映射。跨项目使用同一物理编号，不因账号别名增加容量桶。SSH 密钥和真实部署路径不入机器表；登记/更新/drain/check 仅人可操作。
+- 行政 draining 与 SSH/hc、工具链、worker→MCP 健康分开，online 观测不覆盖 drain，MCP 活跃不证明 SSH/hc 可控。`max_assignments` 仅展示/兼容既有 Run 上限，实际并发仍由 `run_capacity_limits` 与可信配置决定。
+- Assignment 的 machine_id 创建后不可改，存储列与 JSON 一致；旧 local 只幂等补登记，不重写历史。接管增加已退出并释放的历史后继链和唯一当前身份；意图、完整旧 RuntimeRef、目标绑定代次、boot/UID/PID+启动时间及子进程关联、两来源退出证据、最终固定恢复 SHA/时间、待补核/清理记录须持久关联。
+- 卡 11 再加入资源申请/租约，以 `(physical_machine_id, resource_key)` 保证跨项目物理唯一占用；记录工作项/Run、holder 代次、资源集合、排队次序、心跳/到期和进程/端口/设备释放证据。资源授权来自可信配置，不能由标签推导。
 
 **Attachment**
 
@@ -719,6 +728,8 @@ P2a-10 B2（C-85）：运维重启／取消先在同一事务按 Assignment／Ru
 
 C-152：意图记录的 RuntimeRef 不属于 server 当前运行时（`machine_id` 或 `runtime_machine` 与 server 的 local／agent-ssh 机器不一致，例如未加载 runtime.env 时以本机模式启动的终端，而 server 是 agent-ssh）时，server 无法查询或关闭它，不再调用运行时、也不无限以 `terminal_exit_unconfirmed` 推迟。主机以 system 身份调用 `requestHostOpsExitConfirmation` 创建一条 HumanAction（payload 带 `host_ops_action_id`，进入 Needs You），写 `host_ops_action_deferred`（reason=`terminal_exit_confirmation_requested`）；说明带编号步骤：在启动该终端的主机账号下用 `hc get` 查看状态、仍在运行则 `hc kill`、再次确认已退出、确认后标记完成。请求在打开期间幂等；只有 human 完成才算确认（PM 分拣完成不算，会重新请求）。人确认后，下一次租约内按原流程收尾：清理运行目录凭据（本机终端额外清理数据目录下的本机运行目录）、同事务取消旧 Run、撤销 Token、写 `host_ops_action_finished` 并按原动作重建。动作以其他方式结束时，仍打开的确认请求自动取消。lost 状态下 `assignment stop`／`start` 被待处理的运维动作拦住时，以这一流程恢复。
 
+**P2b 接管状态约束（09/10 待实现，Q2=C）**：lost 后人的请求仅建立停止/恢复栅栏与接管意图，不创建后继 Assignment/Run/worktree/Session。旧进程及登记子进程退出须由可信系统定向核实，或专门 human-only HumanAction 的实际 human 完成记录证明，绑定准确目标、代次、方法、时间和证据。断网、超时、逻辑取消、撤销 Token、普通“同意接管”和 PM 代结均不能替代。确认后，在新鲜事务中撤旧 Token、封存 pending_finish、按原失败/取消规则结算旧 Run、释放旧身份并创建唯一后继与 queued Run，固定退出确认后主机最后拉取的 SHA。保持角色版本、权限上限、作者/员工历史与审核预算。正常 Dispatcher 再创建工作区并启动；旧机恢复必须补核，仍运行则冻结进一步启动/唤醒并交人。详见 §13.9。
+
 **Delivery**：`submitted → accepted | rejected | superseded`。
 
 **Decision**：`open → resolved | provisional | snoozed | withdrawn | superseded`；`provisional → resolved | revoked`；`resolved → revoked | superseded`。合并确认支持 `open --暂缓--> snoozed --到期放回--> open`（C-180，见 §7.4、§8.2）；暂缓不解决确认，也不写合并授权，只限制发布，不阻止候选检查。代批属于 `resolved`，由 `resolution.proxy_authority` 记录授权来源。C-29 的 `autoConfirmMerge` 仅接受同项目 system：当前偏好开启、卡片为 awaiting_merge、当前已接受完成申请的最新 `trigger=merge_confirmation` 决策仍 open 且无人回答、创建已达到设定分钟数，且无其他 open/provisional 阻塞 Decision、无挡合并的 open HumanAction（§4.3 规则：阻塞本卡工作项或显式 `blocks_merge`，C-112）时，才允许 open → resolved（merge）。创建时间取持久化 `decision_requested` 事件；没有记录或时钟无效时拒绝。卡片在确认发起后被取消过敏感标记的，计时起点改为最后一次取消标记的事件时间（C-69）；确认发起后又被转给人（同一 decision 的后续 `decision_requested`）的，计时起点改为最后一次转交的事件时间（C-154）；两者都有时取较晚者，代批的 `proxy_authority.waiting_since/due_at` 按此记录。因本卡合并相关的高风险或需求范围变化拍板而转交的确认带 `human_required_reason`，不进入代批；人发起并标为与合并无关（`merge_related=false`）的拍板不转交确认、不重置计时，Agent 不能做此标注（C-167，见本节“卡上新建拍板引起的转交”）。选择 hold 后进入 snoozed，暂缓期不会被代批；到期由系统将仍属于当前完成申请的确认恢复 open，重新请求确认并从恢复时间计时。选择 request_changes 后须按已有流程重新发起确认；旧库已 resolved 的 hold 不自动恢复，仍可重新发起确认。
@@ -736,11 +747,11 @@ C-152：意图记录的 RuntimeRef 不属于 server 当前运行时（`machine_i
 ### 4.5 不变量（实现和测试都要守住）
 
 1. Role 只定义能力和配置，不拥有 worktree 或 Session。
-2. 每个需要改代码的工作项，有且只有一个 Coding Assignment。需要两个开发 Agent 并行修改时，拆成两个工作项或子卡，各自独立分支。
+2. 每个需要改代码的工作项，有且只有一个当前 Coding Assignment；P2b 后继链中的已退出历史身份不具有执行资格。需要两个开发 Agent 并行修改时，拆成两个工作项或子卡，各自独立分支。
 3. 通知路由到 Assignment，再解析到它当前的 Session；不按角色广播。
 4. 一个 worktree 同一时刻最多只有一个写入型 Run。
-5. Assignment 可以跨多个 Run 复用 Session 和 worktree。Session 可以替换，Assignment 不替换。
-6. Assignment 固定在一台机器上。跨机器只能"接管"（新建 worktree 和 Session），不能迁移。
+5. Assignment 可以跨多个 Run 复用 Session 和 worktree；普通会话替换不替换 Assignment。P2b 09/10 待实现的跨机接管仅在已确认旧进程退出后创建新的后继 Assignment，保留旧身份历史。
+6. Assignment 固定在一台机器上。P2b 跨机只能按 Q2=C 先确认旧进程退出，再新建后继 Assignment、worktree 和 Session；原 machine_id 不改。一个工作项始终只有一个当前执行身份，普通 assign 不借后继链重派已释放身份。
 7. 先持久化事件，再按门铃；门铃内容只有 ID。
 8. 业务完成以 Delivery / Review、完成验收 Decision 或人显式记录的完成事件为准，不以 Herdr 的状态为准。
 9. Git 交付只引用 commit SHA，由主机拉取进中心仓库后才生效；非 Git 交付引用 `artifact_sha256` 或 `doc_version`。附件必须上传，不能写本地路径。
@@ -783,6 +794,8 @@ C-152：意图记录的 RuntimeRef 不属于 server 当前运行时（`machine_i
 
 C-237 系统规则补充：自动指派和催办只由内部 system 命令执行，不开放 Agent 工具或伪造 Actor 的参数；每次在同一新鲜事务中重查开关、目标、手动标记和隔离条件。两类开关默认关闭，无合格员工交回 PM Ops/人；不改上述合并确认、独立复核和业务拍板边界。
 
+P2b 不变量补充（09–11 待实现）：接管不重置历史作者/员工隔离、独立复核资格或审核轮次；新 SHA 仍使旧审核失效，旧 Token、ACK、pending_finish 与迟到 alive/finish 均不能复活旧身份或结算后继。未确认退出时不建立任何后继执行资源；卡 11 的资源在匹配 holder 代次的可信释放证明落库前不再授予，TTL 到期、Run 结束或人工退出确认均不代替旧机资源补核。
+
 ## 5. 时间线与结构化条目
 
 ### 5.1 原则
@@ -819,6 +832,8 @@ C-237 系统规则补充：自动指派和催办只由内部 system 命令执行
 ---
 
 ## 6. 消息、路由与门铃协议
+
+P2b 多目标扩展（02/03/08–11 待实现）仍先持久化事件再按铃，seq/ACK 语义不变。门铃、事件订阅、beforeWake 和停止均从持久 Assignment/RuntimeRef 经可信 project+machine 映射路由，单机不可达不阻塞其它目标。启动顺序为投递意图 → Git/材料准备 → 等哨兵的包装进程 → 重查目标/机器/租约 → dispatch 与 ref 落库 → 本 Run/代次的 start；C-88 目标撤回时未放行的 Run 返回等待。接管意图的栅栏禁止旧身份再唤醒，晚到 MCP 或 alive 不解除；两来源退出确认及旧机补核按 §13.9，沿用既有 unknown/lost 时序。卡 11 接入后，所需资源集合未全授予也不能放行 start，不用内部投递租约代替设备租约。
 
 ### 6.1 投递流程
 
@@ -1529,7 +1544,7 @@ V10b“卡片模板”列表显示编号、标题、来源、仓库要求、合�
 - 模型 Provider 的认证和 MCP 认证相互独立；接入是否成功，以实际调用 `whoami` 的结果为准（0.4）。
 - M4.4 起认证拒绝状态不是 active 的 Assignment：释放或暂停的 Assignment 即使 Token 尚未作废也一律 401。释放时作废 Token（§12.6）是第一道防线，这条检查是第二道，避免作废前继续读卡片或更新。
 - 第一版可以用无状态的 Streamable HTTP：每个请求独立认证，写操作重试依靠 `idempotency_key`。
-- 服务只监听局域网接口，不对公网开放；不信任的网络环境加 TLS 或走 Tailscale 之类的通道。
+- 本机 MCP 保持既有回环监听。P2b Q3=A（08 待实现/现场配置）由 tailnet 专用 HTTPS 代理转发，仅允许指定 worker 和核实后的 `/mcp` 必需路径、子路径及方法；不作 `/` 通配转发。TLS 证书/worker 信任链须验证，代理不注入身份、不记录 Authorization 或正文，Token/项目/工具鉴权不变。Workbench 保持原入口，不因多机开放其它路径。
 
 **本机 CLI Token 身份模式（V11c）**
 
@@ -1559,6 +1574,8 @@ CLI 接受 `CARDIGAN_TOKEN` 或全局 `--token-file <path>`，同时提供时拒
 | `launch <profile>/list/--list/check/import-claude-settings`（含 `--print`） | 仅人类，无对应 MCP 工具 |
 
 ### 9.2 工具清单（初版）
+
+P2b 01/09 的计划边界：现有 assign 只增加本项目已登记的 machine_id 选择，PM 不因此获得登记账号、修改 endpoint 或任意 SSH 能力；机器管理和跨机接管入口仅 human。工具清单不开放 host/user/path 作为远程执行输入，具体命令由对应实现卡定稿。08 复用现有 HTTP 附件与摘要校验、10 MiB 上限，不新增共享文件或大制品协议。
 
 P2a-14 ①：默认 `independent_reviewer` 仅含 `whoami`、`get_card`、`get_updates`、`ack_events`、`post_comment`、`heartbeat`、`finish_run`、`report_blocker`、`request_human_action`、`request_decision`、`upload_attachment`、`read_attachment`、`submit_review`、`withdraw_review`。不授予产出交付、PM 管理或任何 `host_ops_*` 工具。
 
@@ -1618,6 +1635,8 @@ C-107：`project_snapshot.available_employees` 为 PM 提供可指派工作项�
 
 ### 9.3 服务端校验（不依赖 Agent 自觉）
 
+P2b 01/08/09 待实现：domain 在可信机器快照里校验项目授权、os/arch、标签、行政/健康状态与固定机器，重复 assign 不换机；远程交付源由持久 Assignment 决定。Token 仍是唯一 Agent 身份来源，卡片、Agent 参数和 RuntimeRef 里的自报路径不能选择 SSH 目标。接管证据须校验完整旧身份、目标代次和 human-only 完成来源，旧身份写入拒绝；代理 TLS/来源/路径检查不能代替领域权限。
+
 - 状态迁移必须符合 §4.4 的状态机。`assign` 的员工校验、审核隔离及自动挑选由 domain 在事务快照中执行，CLI 与 MCP 共用；员工身份不扩大 Token 权限。
 - 产出交付的 `requested_verifiers` 只选择 `get_card` 中 `target_work_item_id` 等于当前产出工作项的验证项，覆盖其中所有必需项；PM 验收审完成申请，不填入产出交付。完成申请仍按模板请求 PM 验收。已有工作项不符合审核目标或非空列表遗漏必需验证项时，invariant_violation 消息列出对应工作项编号。
 - `submit_delivery` 时，主机按 §12.3 拉取并校验 `subject` 指定的 SHA；拉取失败或校验不通过则拒绝，被拒的请求不会覆盖已接受的交付。
@@ -1672,6 +1691,10 @@ C-96 现状核对（ADR 0005，待人选方案）：工具范围由两层固定�
 M2.1 的 Role 子集包含 role_id、version、display_name、kind、core_prompt、harness（claude-code/codex/pi）、launch_profile_ref、allowed_tools、capabilities、abilities、worktree（none/write/readonly）、required_machine_tags；不带运行时路径或 Session。RoleReference 增加可选 status，roleReference(Role) 将 version 映射为 role_version 并保留启停状态；缺省不补写，兼容旧快照。V9a 的角色命令负责追加版本和权限校验，store 负责在事务内保存角色与事件。
 
 ### 10.2 Launch Profile（每种 Harness 一份）
+
+P2b 02/03/06 待实现：主机私有路径和 worker 路径分类型处理；提示、Harness/MCP 配置与最小凭据经固定 SSH stdin、有界 manifest 和逐层 no-follow/UID/GID/mode/ACL 校验发布到独占启动代次，材料一般 0700/0600。先材料后凭据，完整确认且 dispatch 落库后才写绑定代次的 start；旧哨兵不能复用，凭据读取后 unlink，未知退出保留停止记录与容量，不清空整个 Assignment。跨 Run 会话另存项目私有持久目录。
+
+三种 Harness 的 realpath、信任、PATH、CLI 版本均在实际 worker 核实，只信本 Assignment 的仓库/worktree，不复制个人配置或信任上层通配。能力 manifest 分 installed/configured/last_verified，保留版本/SDK/runtime/架构组合、挂载/空间和 GUI 状态；缺 GUI/TCC/Keychain 或本人登录则明确等待。已有启动意图/Run/恢复点记录阶段、目标代次、完整 SHA、已知进程身份、日志 offset 和小制品 hash，重连先核阶段与进程，不重跑有副作用步骤；只用既有 HTTP 小附件合同。
 
 外接 Assignment 不进入 Launch Profile 启动流程；Dispatcher 在读取运行时、选择配置和排 Run 前跳过，主机 `launchRun` 也拒绝。Cardigan 不创建其运行目录、不启动终端、不替换 Session，由对接 Agent 自行读取收件箱。
 
@@ -1816,6 +1839,10 @@ C-194：PM Ops 对数值和行为规则卡的合并确认采用过渡规则。�
 
 ## 11. Runtime Adapter
 
+P2b 02/08 待实现的多机路由由 host 统一解析 `(project_id, machine_id)`，所有 runtime 方法、版本探测、事件订阅、attention 和清理共享该解析器。provision 使用真实登记 Machine；其它操作核对持久 ref 的项目、machine_id、hc alias/session/终端前缀及非敏感目标绑定指纹/代次，同名 alias 改绑或未知目标即拒绝，不误用新目标。
+
+hc 的 run/exec 使用 `--on`，send/get/events/kill 使用 `<hc-machine>/<terminal>`；名字在 32 字符内由项目/Assignment/目标身份的确定性短摘要生成并检碰撞，不能只截断。同机不同项目的 core/socket/session 按 UID 隔离。未配置 remote 保持旧 local 路径，remote 准备未齐只允许 check。
+
 控制面只通过 §11.1 的接口使用运行时，Herdr 的 workspace、tab、pane 等概念不进入 domain。基线是 herdr-core，Herdr 0.9.x 作为回退（D9，见 [`docs/adr/0001-runtime-baseline.md`](adr/0001-runtime-baseline.md)）。
 
 ### 11.1 接口（与具体实现无关）
@@ -1874,8 +1901,8 @@ status 先 hc get，再取 hc events 的初始快照，同时使用该快照的�
   - 没有事件订阅；
   - `pane run` / `pane send-text` 写进的是 pane 里的 Agent 界面，不是 shell。控制面不能用它执行命令或读写文件（herdr-core 用 `machine.exec`、`file.*`）。
 - 断线时，命令行调用直接失败，没有缓存；界面上变灰的缓存状态也不能用来判断存活。
-- 运行时的 socket 没有按客户端区分的身份或权限控制；同一台机器上的 Agent 能互相操作，影响范围限于这台机器（§14）。
-- 多机连接：Herdr 0.9.x 验证过 Linux 连 macOS（0.3）；herdr-core 0.1.18 验证过 Linux 上的 core 管理 macOS 工作机（2026-11-05，ADR 0001 复核记录）。macOS 上的 core 管理 Linux 工作机尚未实测，Phase 2 开工前补测。
+- 运行时的 socket 没有按客户端区分的身份或权限控制；同 UID 的 Agent 可互相操作。P2b Q1=A 要求跨项目拆 UID/core/socket，接受的互访范围限同项目内；07 的双 OS 实证完成前不能宣称跨项目隔离已落实（§14）。
+- 多机连接：Herdr 0.9.x 验证过 Linux 连 macOS（0.3）；herdr-core 0.1.18 验证过 Linux 上的 core 管理 macOS 工作机（2026-11-05，ADR 0001 复核记录）。macOS 上的 core 管理 Linux 工作机尚未实测，留后续补测；不作为已定 Linux 控制主机 → Mac worker 拓扑的前置。
 - herdr-core 的 `hc run` 选项必须写在程序名前面；没有传环境变量的选项；终端名限制为 1–32 个 `a-z 0-9 - _`。
 
 ### 11.4 派发与 attention 诊断（C-56）
@@ -1917,6 +1944,8 @@ status 先 hc get，再取 hc events 的初始快照，同时使用该快照的�
 
 ### 12.1 原则：所有 Git 网络操作由主机发起
 
+P2b 04/05 待实现：控制主机始终持有中心 bare、DB 与 Git/SSH 凭据，worker 不持有到控制主机、其它 worker 或外部 Git 服务的登录凭据。Git 传输地址显式分 host-local 与 worker-remote；远程路径只经可信目标绑定解析，控制主机不得对它 realpath/lstat/access，也不以主机身份执行 Agent 可写仓库配置。复用严格 host key、禁转发和双向二进制 upload-pack/receive-pack，不另建 CI 传输体系。
+
 - 中心仓库是主机数据目录下独占的 bare 仓库：`<CARDIGAN_DATA_DIR>/central/<project_id>.git`（根目录可配置），目录为主机拥有的 0700。它从 `projects.repo_path` 登记源经 `clone --bare --no-local` 临时目录校验 bare 类型和请求基线后发布；登记源始终只读，合并结果由用户自己 fetch 回去，M4 不自动推送外部平台。
 - 工作机和 Agent **不持有任何 Git 凭据，不能 push**。主机通过已有的单向 SSH 从工作机拉取，并向工作机推送基线。
 - 项目如果托管在 GitHub / GitLab，只有主机持有其凭据，合并后由主机推送上去。
@@ -1927,6 +1956,8 @@ status 先 hc get，再取 hc events 的初始快照，同时使用该快照的�
 M4.2 的 CentralRepositoryService 通过 domain 的 GitCentralPort 调用 CentralGitTransport。中心配置绑定登记源的规范路径，来源变更要求显式重建。syncFromSource 只将登记源基线 fetch 到 refs/cardigan/source/<base_branch>：中心是其祖先时用 update-ref 的旧值比较快进；相同、中心领先、分叉分别返回 up_to_date / ahead / diverged，后两者不移动中心基线。新写入型 worktree 创建前同步；分叉时仍从中心基线创建，并在返回值 `source_sync` 中报告 `diverged`，由 M4.4 组装层放进 attention，不阻塞新任务。`source_sync` 也区分快进、相同和中心领先；只读或复用已有 worktree 时不执行同步、不返回该字段，旧 worktree 和原基线记录不改。
 
 ### 12.2 布局与命名
+
+P2b 04 待实现：每（项目，机器）独立基础 clone，worker helper 独占创建临时仓库，控制主机分发 refs 后核对逻辑中心来源/对象格式并原子发布；不能把主机磁盘路径当成 worker 可 fetch 的源。写 Run 每次启动/唤醒前增量同步基线到 `refs/remotes/origin/*`，不移动工作分支、HEAD、未提交文件或既有 base_sha，失败不唤醒。clone/worktree/builds 的本地 Git 均经目标项目账号运行，远端目录权限按 §13.4；下文 M2/P2a 的共享磁盘布局是既有本机路径，不能直接套给 Mac。
 
 - 每台机器每个项目一个基础 clone：`/srv/agent/repos/<project>`，来源为主机中心仓库
 - worktree：`/srv/agent/worktrees/<project_id>/<assignment_id>`。Assignment 编号按项目分配，路径按项目分层。由主机的 Git 服务创建，不使用运行时的默认目录（两台机器上 Herdr 的默认目录并不一致，0.3 实测）
@@ -1962,6 +1993,8 @@ Git 超时分为两档：查询默认 30 秒（`CARDIGAN_GIT_QUERY_TIMEOUT_MS` /
 
 ### 12.3 交付
 
+P2b 05 待实现：按持久 Assignment 的机器、项目账号、分支选取拉取源，保留完整 SHA、对象格式/commit 类型与分支祖先校验，candidate → delivery 固定流程不变。主机枚举项目所有已绑定机器，沿用默认 10 分钟备份周期，把分支拉入机器命名空间；成功后记 SHA/分支/时间并固定可供接管的检查点，失败不推进旧记录、不 prune，不自动 commit。接管最终恢复点在退出确认后再读取并固定，已使用检查点不被滚动备份覆盖或回收。
+
 1. Agent 在 worktree 里 commit，不 push。
 2. 调用 `submit_delivery`，带上 SHA。
 3. 主机在事务前通过按项目绑定的 GitDeliveryVerifier 校验：只接受对应仓库格式的完整小写 SHA（SHA-1 为 40 位、SHA-256 为 64 位），从基础 clone 拉取数据库中 Assignment.branch 对应的分支到 refs/cardigan/incoming/<assignment_id>；不使用 Agent 提交的分支参数。Assignment 必须记录写入型分支和 worktree_path。
@@ -1975,6 +2008,8 @@ agent-ssh 拉取在中心仓库里运行 fetch --upload-pack，上传端复用�
 GitDeliveryVerifier 的实例绑定项目，因为 Assignment 编号仅在项目内唯一；M4.4 必须按当前请求项目选择实例，并接入事务外 prepareDelivery／事务内新快照 submitDelivery／事务后固定流程。M4.2 不修改 MCP 的现有默认桩。
 
 ### 12.4 验证
+
+P2b 04/05 待实现：异机验证只从中心固定交付 SHA 取得 detached 审阅 worktree 和同目标可写 builds，不从 coder 可变分支或旧门铃取目标。按项目隔离可写依赖缓存，复制安装边界保持；既有 Linux CI executor 的候选分发、容量、监督与合并闸门不变。Mac worker 原生进程/锁由 06 实现，不把 Linux 检查监督器视为已支持 Mac。
 
 验证型 Agent 所在机器如果还没有该 SHA，主机先把它推过去；然后在该机器上按 SHA 建立只读（detached）worktree 进行检查。
 
@@ -2034,6 +2069,8 @@ P2a-13 B（合并队列，ADR 0004）：`merge-gate.yaml` 的 `queue.enabled` �
 
 ### 12.6 清理与对账
 
+P2b 10 待实现：按项目所有已绑定目标扫描 repos/worktrees/builds，失败或不可达保留历史台账/墓碑，不能当空目录。旧机接管后只进待核实/回收，先补核准确进程身份及退出、清理准确启动代次凭据，再补拉旧分支到隔离恢复 ref，不能前移后继恢复点。仍运行交 human-only Needs You，冻结进一步启动/唤醒并保留现场；clean 且已备份才清 worktree，dirty/未备份走既有 data_deletion 人工决定，force_clean 前保存补丁与未跟踪清单。未知权限/路径/进程身份均不删，迟到清理不能碰新代次；证据和清理收尾落库后才核销旧目标预留。
+
 - C-245：对账的检查历史按项目／卡片保留进程内 seq，只读取新增事件；读事务成功结束后才发布缓存，失败不推进，重启重放持久历史，旧 attempt 和原宽限期保持不变。仍在目录 IO 结束后读取检查所有权，不与 Router／Agent ACK 游标混用。
 - C-245：登记源对账与同用户模式的基础 clone 备份先异步读取实际源 refs、比较中心目标 refs，仅有差异才 fetch；源／基线 SHA 对未变化时复用祖先分类，同轮中心校验只做一次。绑定 upload-pack 的 Agent 传输跳过预检，每轮沿用一次流式 fetch，保持原 SSH 调用序列和传输超时边界；缺少入口的 Agent 路径仍拒绝，不回退主机身份。目录、worktree 登记和固定交付 refs 仍每轮观察，以发现数据库外变化。备份仍覆盖默认执行目标基础 clone 的全部 `agent/*`，周期、目标命名和清理前入口不变；失败不记成功，目标 ref 丢失会重试，源分支删除不删除旧备份。探测与传输均经原安全 Git 入口，任何异步等待都不持有数据库事务。
 - C-249：上述 refs 预检报错、超时或输出超限时，记录一条仅含固定失败分类和回退动作的警告，再执行原普通 fetch；不记录原始异常、命令参数、源路径或远端地址。只捕获预检失败，实际 fetch 失败仍向上传递；预检成功时的跳过／拉取逻辑不变。查询与传输超时、输出上限、子进程参数、路径校验和 Agent upload-pack 边界均不变。
@@ -2085,6 +2122,8 @@ server 在合并循环旁启动独立的推送循环（默认 5 秒轮询，跟�
 
 ### 12.8 写锁
 
+P2b 04/06 待实现：工作区锁键至少包含物理目标、项目和基础 clone，中心发布锁独立。控制主机继续用既有 Linux 锁；worker 用 Python `fcntl.flock` 锁住预置且不可替换的 inode，覆盖 Git/helper 与员工测试串行，保留预算、嵌套立即失败和 FD 生命周期，不依赖系统 flock 命令，也不降为进程内锁。它不代替卡 11 的持久设备/资源租约。
+
 同一个 worktree 已有写入型 Run 在执行时，Dispatcher 不派发新的写入型 Run，后来的事件进入 Inbox 排队。
 
 基础 clone 锁（C-68）：同一项目的所有 Assignment 共享一个基础 clone，并发的 fetch、`worktree add`、移除和清理前的备份会抢 Git 的 `*.lock` 文件而失败。GitWorktreeService 的 ensureWorktree、removeWorktree、diffWorktree，以及合并检查前把候选分发到基础 clone 的 ServerGit.distribute，都在项目锁内执行（分发只在传输期间持锁，不覆盖整个检查），锁分两层：进程内按基础 clone 路径排队（所有服务实例共享，先到先得）；主机再用 `flock --exclusive --wait` 跨进程加锁，覆盖 server 各循环和 CLI。锁文件为主机拥有的 `<CARDIGAN_DATA_DIR>/locks/repo-<project_id>.lock`（0600）：这把锁只在主机进程之间协调，放在 Agent 可写的命名空间之外，agent-ssh 模式下也由主机持有。flock 通过继承的文件描述符加锁，子进程退出后锁仍由主机句柄持有，关闭句柄即释放。两层合计最多等待 30 秒，超时抛出可重试的 `repository_lock_timeout`，由 §6.1 的唤醒前短暂重试处理。flock 层仅在 Linux 启用，与合并闸门一致；其他平台只有进程内排队。合并检查的临时 checkout（§12.2 的 runInTemporaryCheckout）仍只用合并闸门锁，不持有本锁，避免长时间检查阻塞唤醒。
@@ -2116,7 +2155,7 @@ server 在合并循环旁启动独立的推送循环（默认 5 秒轮询，跟�
 
 ### 13.1 单机（Phase 1）
 
-C-245 的后台执行隔离评估见 [ADR 0009](adr/0009-background-loop-isolation.md)。Q-410 已由邵杰于 2026-11-14 选择先部署对账／备份增量优化并在生产复测，确认剩余瓶颈；若仍需隔离，后续按同机 Web／MCP 和后台两个受监督进程另开卡规划实现，仍走审核和部署门禁。当前保持单个 server。拆分须保持 SQLite WAL、原 busy_timeout、短事务及事件持久化边界，并扩展 C-201 的双进程就绪、精确身份核验、停止与整体回滚；不宣称拆分可消除同步数据库写锁等待。
+C-245 的后台执行隔离评估见 [ADR 0009](adr/0009-background-loop-isolation.md)。Q-410 已由人于 2026-11-14 选择先部署对账／备份增量优化并在生产复测，确认剩余瓶颈；若仍需隔离，后续按同机 Web／MCP 和后台两个受监督进程另开卡规划实现，仍走审核和部署门禁。当前保持单个 server。拆分须保持 SQLite WAL、原 busy_timeout、短事务及事件持久化边界，并扩展 C-201 的双进程就绪、精确身份核验、停止与整体回滚；不宣称拆分可消除同步数据库写锁等待。
 
 C-265：后台循环的性能计时（C-216 的 `tick_profile`、`request_latency`、`event_loop_delay` 日志行）改为运行时开关，不用改监督器启动脚本或重启。开关是项目偏好 `tick_profile`（默认关），只有人能改：本机 `cardigan preference get|set tick-profile [on|off]`，沿用 `set_project_preferences` 的 human 校验，每次实际变化写一条 `project_preferences_updated` 审计事件（进项目活动流），相同值不重复记录；Workbench 偏好接口不接受该字段，MCP 没有修改偏好的工具。server 在每个循环 tick 开始时读一次偏好（主机上任一项目打开即计时），打开时新建 profiler 并挂上存储观察器，关闭时摘下并停止，所以在下一个循环周期生效；切换时已在运行的 tick 仍按旧 profiler 记完这一行。读取失败保持当前状态并告警一次。环境变量 `CARDIGAN_TICK_PROFILE=1` 仍强制打开，不读偏好。每行日志新增 `ts`（ISO 时间）和 `sha`：server 从自身代码目录的 `.git/HEAD` 读取已检出提交（自举部署的 release 是 detached checkout），只输出 40 位十六进制 SHA，读不到时为 `unknown`，不读环境变量；本卡不改 `self-deploy.yaml` 和监督器。主机运维（host_ops）新增“性能复测”职责：PM 或人请求时，只读收集指定窗口的上述日志行，按 loop 和 sha 汇总次数、均值、p50、p90、p95、最大值，与卡上基线对比后回帖；不增加工具，不能自己开关计时，拿不到日志时请人导出。上线须主机侧执行 `cardigan role upgrade host_ops --from-default`，再用 `cardigan host-ops rotate` 让常驻 host_ops 使用新版角色。
 
@@ -2128,7 +2167,7 @@ P2a-1 的主机配置读取层从 `CARDIGAN_CONFIG_DIR/merge-gate.yaml`（默认
 
 合并检查日志保存在 `<dataDir>/merge-gate/logs/<project>/<attempt>.log`，目录 0700、文件 0600，独占创建、不覆盖已有 attempt。写入前过滤配置 env 的原值及 URI／JSON／Base64 表达，并屏蔽常见认证字段和私钥块；每条输出按 UTF-8 字节限制为 2 MiB，保留首尾，边缘留重叠以先脱敏后截断。失败摘要包含检查名、退出码及末尾 40 行中的 FAIL／Error／× 错误行，总计最多 20 行。清理警告写入日志但不改检查结论。每项目仅保留最近 50 个日志；日志路径不得包含链接，日志引用只返回文件名。原始输出不写临时文件或错误信息，检查中断时至少保留已创建的日志头，完成时写入脱敏的有界输出。
 
-所有组件都在一台机器上：控制面、数据库、Card MCP（HTTP，监听 localhost 或局域网）、运行时、所有 Agent。按 D6，Phase 1 先在工作机（Linux 笔记本）上开发和运行。
+Phase 1 的单机形态是控制面、数据库、Card MCP、运行时和 Agent 同机。当前控制主机为 Linux x64，合并检查已有独立 Linux CI executor；P2b 只新增 macOS 原生远程 runtime worker，DB、Workbench、中心 bare、常驻 PM 与自动部署继续留在控制主机（§13.2）。
 单机也必须遵守 §13.3 的约定。
 
 主机 CLI 推荐先运行 `pnpm exec tsc -b apps/cli` 构建，再用 `deploy/install-cli.sh` 安装，无需 sudo。脚本在 `~/.local/bin` 生成 `cardigan`，调用本仓库的 `apps/cli/dist/bin.js`；主机 PATH 需包含该安装目录和 Node.js 24。支持 `--bin-dir`、`--repo`、`--runtime-env` 和只打印、不写文件的 `--dry-run`；相对路径在安装时解析。生成命令第二行是固定的 `# cardigan: managed by deploy/install-cli.sh` 标记；只覆盖第二行以 `# cardigan:` 开头的普通文件，拒绝其他文件和符号链接。仓库更新后重新构建，移动后重新安装，详见 [deploy/README.md](../deploy/README.md)。
@@ -2199,46 +2238,42 @@ C-213 的 `host-ops rotate` 保留原员工、复制 ACK 游标、转交尚未�
 
 ### 13.2 多机拓扑（Phase 2）
 
-```
- Laptop (client only)
-  ├─ Browser  -> Workbench
-  └─ Herdr client (all machines in one sidebar; takeover)
-                    |
- +------------------+------------------------------------------+
- | HUB (always-on)                                             |
- |  control plane + DB + Card MCP (HTTP) + attachments         |
- |  dispatcher (OS user `orchestrator`, holds SSH keys)        |
- |  central bare git repo (optional push to GitHub/GitLab)     |
- |  Herdr server (user `agent`): PM Office / PM Ops panes      |
- +-------+--------------------------------------^--------------+
-   SSH hub->worker only (herdr, git fetch/push) |  HTTP only (MCP, token)
-         v                                      |
- +----------------+   +----------------+        |
- | WORKER A       |   | WORKER B       |--------+
- | user `agent`   |   | user `agent`   |
- | Herdr server   |   | Herdr server   |
- | base clones    |   | devices attached|
- | worktrees      |   | tester agents  |
- | coder agents   |   |                |
- +----------------+   +----------------+
+P2b 方案已定、实现与现场启用待完成，详见[细化计划](plans/p2b-multi-machine.md)。控制主机当前为 Linux x64，macOS arm64 worker 是原生远程 runtime；合并检查沿用既有独立 Linux CI executor，不搬到 Mac，不移植控制面。
+
+```mermaid
+flowchart LR
+  Client[浏览器客户端] --> Web
+  subgraph Hub[控制主机 · Linux x64]
+    Web[Workbench]
+    MCP[Card MCP 与附件]
+    Control[DB / 调度 / 中心 bare / 部署]
+    PM[隔离项目账号 · PM Office / PM Ops]
+    Proxy[tailnet 专用 HTTPS MCP 代理]
+    Proxy --> MCP
+  end
+  subgraph Mac[macOS worker · arm64 原生]
+    Agent[独立项目账号 / hc / coder]
+    Files[clone / worktree / builds / 私有缓存]
+  end
+  CI[既有独立 Linux CI executor]
+  Control -->|主机发起 SSH / Git| Mac
+  Agent -->|指定来源与必需 MCP 路径| Proxy
+  Control -->|既有检查传输与闸门| CI
 ```
 
-- 主机 → 工作机：SSH，用于 provision、门铃、状态查询、清理，以及所有 Git 操作（拉取交付、推送基线、查询状态）。
-- 工作机 → 主机：只有 HTTP（MCP 和附件上传）。
-- 工作机不能 SSH 到主机，也不能 SSH 到其他工作机。
-- 主机必须常开，笔记本只当客户端。主机本身也可以兼做工作机。
-- 主机自己的 Herdr 可以通过 `ssh agent@localhost` 作为一台机器加入，这样调度器的 SSH 密钥和 PM 窗口的用户就能分开。
+- 控制主机 → worker：固定可信 SSH 目标，provision、门铃、状态、停止、清理与全部 Git 网络操作只由主机发起；严格 host key、专用凭据、禁转发。
+- worker → 控制主机：Q3=A 的 tailnet 专用 HTTPS，只放行指定 worker 和 `/mcp` 必需路径/方法，验证 TLS 信任，保留 Assignment Token 鉴权；Workbench 监听、来源和认证入口不变。worker 不能 SSH 到主机或其它 worker。
+- `machine_id=local` 始终是控制主机这台合法机器，生产执行仍应经隔离项目账号。`ExecutionConfig.mode=local` 表示与控制面同用户、无账号隔离的开发模式，两者不能混同。
+- host 拟增加独立 runtime worker 可信配置，统一物理机器与 project→执行账号/hc alias/session/PATH/根目录绑定；不塞进合并检查配置。真实账号、地址、身份文件引用与部署参数放私有 `cardigan-deploy`，不是 Agent 可选参数。未配置 remote 时 local 行为不变，未知或失败目标不得回退 local。
 
 ### 13.3 从第一天就遵守的约定
 
-1. Card MCP 走 HTTP，每个 Assignment 一个作用域 Token。
-2. 每个 Assignment 都记录 `machine_id` 和 `runtime_ref`，单机时为 `local`。
-3. Agent 名全局唯一。
-4. 交付只引用 commit SHA，由主机拉取进中心仓库；Agent 不 push。
-5. 附件通过 MCP 上传，不写本地路径。
-6. 只在中心合并。
-
-不遵守这些约定，单机版以后改成多机要多花约 2–3 周。
+1. Card MCP 使用 HTTP 协议；跨机按 Q3=A 走受限 HTTPS 入口，每个 Assignment 使用作用域 Token，附件通过 HTTP 上传，不传本地路径。
+2. 每个 Assignment 固定 machine_id 与持久 RuntimeRef；接管按 Q2=C 确认旧进程退出后新建后继，原机器编号不改，Session/凭据不跨机复制。
+3. 按 Q1=A，每（项目，机器）一个独立非管理员执行账号；同项目 UID 共享是本期接受边界，跨项目 core/socket/可写目录/缓存隔离。
+4. Agent 名含项目与目标身份的确定性短摘要并校验碰撞；机器别名不增加物理容量。
+5. Agent 只本地 commit，交付引用完整 SHA，由控制主机从记录目标拉取固定，异机验证只用固定 SHA；所有 Git/SSH 网络操作由控制主机发起。
+6. 只在中心合并，仍经过既有独立 CI 和审核/确认门槛；普通 Git 小卡、独占资源验收和既有项目迁移分别过门。
 
 ### 13.4 Agent 运行环境
 
@@ -2252,16 +2287,20 @@ C-168：本机员工会话由共用 `host.launchRun` 读取主机 `agent-tests.y
 
 | 阶段 | 方式 |
 |---|---|
-| 第一版 | 每台机器建专用系统用户 `agent`，Herdr server 和所有 Agent 都以它的身份运行。它没有任何机器的 SSH 密钥，碰不到你的个人文件，没有 sudo |
+| P2b Q1=A（07 待实现） | 每（项目，机器）独立非管理员系统账号；通用称呼 `agent` 不表示全机共用一个 UID。账号不持有主机/其它 worker/Git 凭据，无 admin/sudo/其它项目组权限 |
 | 第二阶段（按需） | 每个 Assignment 一个容器 / devcontainer，或者限制网络访问 |
 | 一般不需要 | 虚拟机 |
 
 为什么第一版就要专用用户：你的几台机器之间已经互相授权。如果 Agent 用你的账号运行，它就继承了到所有机器的免密登录，一次误操作或提示注入的影响范围就是整个集群。
-接受的残余风险：同一台机器上的 Agent 能通过本机 Herdr 操作其他窗口，影响范围限于这一台。
+P2b 接受的残余风险限定为同项目 UID 内的 Assignment 互访与 hc 操作；跨项目必须拆分 UID/core/socket/session、可写根与缓存，并由 07 在 Linux/macOS 各做双项目双向负向验证。
 
-M2.7 采用 [ADR 0002](adr/0002-agent-account-isolation.md)：Linux 安装器由用户用 sudo 执行，固定 SHA256 校验 hc 0.1.18，专用 SSH 密钥只留在主机账号；agent 密码锁定、无 sudo，授权文件和 home 父层由 root 控制。Cardigan data 保持主机独占 0700；agent 工作根与 data 分开，运行目录、基础 clone 和 worktree 都按项目分层。专用共享组仅主机用户和 agent；凭据文件 0660、运行目录 2770，父层由主机控制。local 模式必须提示没有账号隔离；agent-ssh 只映射到配置的 agent@localhost，不开放任意机器。真实隔离验收留给用户安装后执行。
+M2.7 采用 [ADR 0002](adr/0002-agent-account-isolation.md)：Linux 安装器由用户用 sudo 执行，固定 SHA256 校验 hc 0.1.18，专用 SSH 密钥只留在主机账号；agent 密码锁定、无 sudo，授权文件和 home 父层由 root 控制。Cardigan data 保持主机独占 0700；agent 工作根与 data 分开，运行目录、基础 clone 和 worktree 都按项目分层。专用共享组仅主机用户和 agent；凭据文件 0660、运行目录 2770，父层由主机控制。local 模式必须提示没有账号隔离；这是 M2.7 的本机映射边界；P2b 02/07 将其扩为受信 project+machine 映射，不能据此开放任意 SSH。ADR 0002 的共享组/socket 与同 UID 边界由 07 同步；既有单项目路径保留，不自动改生产账号归属。
 
 一键启动和 assign --start 使用同一运行模式配置；agent-ssh 的 CLI 版本查询和共享 Git 经配置好的 Agent 执行入口，不能回退到主机账号。主机写入隔离运行目录，再 provision/dispatch；排入 Run 后的目录、Git、编译、写文件及派发失败统一回收已知终端、删除 token/secrets.env、撤销新 Token 并取消 Run（记录失败阶段）。清理失败逐项报告，不跳过后续补偿。stop 在终端释放及 Token 撤销后同样清理残留凭据；worktree 保留。这套启动与回收流程实现在 `packages/host`（§20），`cardigan assignment start` 与 Dispatcher 新开会话共用同一份代码。
+
+P2b 03/06/07 待实现：Linux 安装入口保留，新增 macOS preflight/dry-run/幂等入口；根与不可替换父命名空间由操作员/root 预置，远端运行目录/文件一般为 0700/0600，脚本 0700，并检查额外 ACL，不能照搬本机共享组数值。Linux 共享组也按项目拆分。所有 sudo、签名 App 首装、各执行账号局域网许可、TCC 与本人登录交人，不复制个人 home/认证目录，不以 root、Full Disk Access 或关闭系统保护解决 GUI 问题。
+
+worker 文件 helper 用 Python 3 的 dir_fd/openat、O_NOFOLLOW、fstat 与相对 rename，不依赖 `/proc` 路径；逐层检查属主、权限、ACL、链接和特殊文件。进程身份由平台返回机器、boot incarnation、UID、PID+启动时间及受控会话/进程组，Mac 使用原生身份接口；缺证据返回 unknown，不凭 PID/进程名/kill(0) 误杀。控制主机与 Linux CI 的现有原语保持。
 
 ### 13.5 角色放置
 
@@ -2269,32 +2308,35 @@ M2.7 采用 [ADR 0002](adr/0002-agent-account-isolation.md)：Linux 安装器由
 |---|---|
 | pm-office / pm-ops | 主机 |
 | designer | 任意机器 |
-| coder | 工作机，按 `max_assignments` 控制并发 |
-| tester | 带能力标签的机器（真机、模拟器、GPU） |
+| coder | P2b 首台为原生 macOS worker；按物理 machine_id 的既有 Run 容量控制并发 |
+| tester | 明确选定且能力已核实的机器；P2b 基础验收在控制主机 local，设备任务另须卡 11 租约 |
 | reviewer | 任意机器 |
 
 ### 13.6 环境一致性
 
-- 工具链用 mise、nix 或 devcontainer 统一定义；Agent CLI 版本固定。
-- provision 前做环境检查：仓库存在、`base_sha` 可以获取、工具链满足要求。不满足就拒绝派发，并在 Needs You 里提示。
-- 端口：每个 Assignment 分配一段端口范围，通过环境变量传入，避免并行 worktree 的开发服务器冲突。
-- 磁盘：每个 worktree 都有自己的依赖和编译缓存，要有清理策略；同一机器上尽量共享包缓存。
-- 订阅制 CLI（Claude Code、Codex）需要在每台机器上分别登录。
-- Agent CLI 关闭自动更新，Run 记录所用的 CLI 版本（0.4 实测：测试中途 Claude Code 自动升级了一个小版本）。
+P2b 06 的通用能力合同待实现：
+
+- 主机可信清单按项目声明精确工具/版本组合；基础为原生 arm64 Node 24、pnpm 11.7.0、Git、显式可用的 Python 3、签名 hc 0.1.18 App 与任务所需 CLI。固定 PATH、目标账号 HOME，不 source shell rc，不运行仓库任意 sudo 脚本。
+- 脱敏 manifest 记录 OS/build/Darwin、arch、工具真实路径/精确版本、执行 UID、时间和来源；installed、configured、last_verified 分列，未验留空。SDK、runtime+架构、导出模板、renderer、Rosetta 和 GUI 能力按任务分别核验，不能静默换最新版或把已安装写成已验证。
+- 启动前核仓库/完整 SHA、volume/mount 身份、realpath、属主/ACL、根盘和工作盘空间；阈值来自显式配置。挂载缺失、身份变化或空间不足即阻塞，不在同名空目录落盘或回退系统盘。
+- 项目可写依赖/harness/构建缓存分开，只读公共 SDK 可复用；生成工程、可复建缓存与不可丢日志/制品分清，名称含 tmp 不代表可删。小制品结束写入后哈希、复制、回读校验再按既有 10 MiB 合同上传。
+- 无头 CLI 与 GUI 分开核实；登录/锁屏、WindowServer、Metal、TCC、Keychain 仅报告状态/unknown，不枚举秘密。GUI 代理仅预留受控接口，游戏窗口/模拟器/签名专项留迁移计划，缺能力明确阻塞，不以个人桌面冒充项目账号。
+- CLI 关闭自动更新，Run 留版本证据；订阅登录交人。锁/重启/原生进程身份须实测。设备与端口 owner 由卡 11 资源合同约束，不凭标签或历史端口表直接占用。
 
 ### 13.7 模型凭据
 
-- 方案 A：每台工作机在环境变量里保存服务商 API Key。
-- 方案 B（Phase 3）：主机运行模型网关，工作机只拿网关 Token。好处是密钥不落在工作机上，能按 Assignment 统计成本，也能按角色统一选模型。
+现有启动流程继续按需注入最小模型/harness 凭据。P2b 03/06 待实现的跨机路径仅经安全材料通道注入，SSH 私钥只留控制主机、禁止转发或反向凭据；不把秘密写入仓库、argv、日志、附件或能力清单。
+
+凭据清单只记类别、负责人、非敏感引用、用途/授权范围和可用性错误；模型、SSH/MCP、开发者签名/商店、测试账号及第三方工具分别检查。缺少/不可访问时停止并进入适当人工待办，不复制旧 home/config/env/钥匙串，不生成替代签名。本人登录、2FA、账号和权限变更仍交人。模型网关与游戏签名/发布的专项验收不由 P2b 自动启用。
 
 ### 13.8 机器登记与调度
 
 C-168：员工自测预算独立于全机 Run 容量。主机配置目录（`CARDIGAN_CONFIG_DIR`，默认 `~/.config/cardigan`）的 `agent-tests.yaml` 仅接受 `max_workers: <正整数>`，文件或字段缺失默认 **2**；不在被开发项目／worktree 写配置，不改 `run-capacity.yaml`。沿用可信配置的属主、普通文件、无符号链接及不可由组／其他用户写入的边界；未知字段、重复键、非法数值或不安全文件均拒绝新会话启动，错误不回显 YAML。每次创建会话读取，配置变化须重开已有会话；仅应用于 `machine_id=local` 的员工，不流入合并检查执行器。执行方式和会话升级边界见 §13.4。
 
-- Machine 登记表：见 §4.3。健康状态来自 `status server` 和心跳。
-- 第一版由 PM 在 `assign` 时**手动指定机器**。
-- Phase 3 再做按能力标签和负载的自动分配。
-- Assignment 一旦固定到某台机器，之后的 Run 都派到这台。
+- P2b 01/08 待实现的 Machine 登记见 §4.3：人登记/更新/drain/check，主机核 SSH/hc、工具链、worker→MCP 与 last_seen；draining 不被健康观测覆盖。
+- P2b 由 PM/人在本项目已授权机器中**明确指定机器**，按标签过滤和校验；多个候选须选定，零候选说明缺失能力。标签不授予权限，也不是独占锁。
+- 按负载自动分配留 Phase 3；自动指派验证项遇到能力不符或目标不明确时交 PM/人，不硬写 local。
+- Assignment 固定机器，之后的 Run 不因标签或负载变化迁走；新目标未登记/配置不一致/预检失败均拒绝，不回退 local。`max_assignments` 不另起上限规则，实际仍用下文跨项目物理机器容量；Mac 不新增默认值。
 
 P2a-9 全机并发配置为主机 `CARDIGAN_CONFIG_DIR/run-capacity.yaml`，配置目录默认 `~/.config/cardigan`，不放进被开发项目仓库。格式为 `machines` 映射，键为 Machine 编号、值为正整数，例如 `machines: { local: 4 }`；文件缺失或未列出的机器默认 4。Q-86 增加可选顶层 `inactive_cancel_after_minutes`，默认 60（Q-88），接受 1–35791 的整数分钟；表示自最近 MCP／heartbeat／Run 开始活动起的自动回收阈值。默认值依据 C-54#19 的实测：C-37 的 R-524 约 48 分钟没有 MCP 调用后仍正常交付，C-52 的 R-616 约 15 分钟后正常交付，本卡 R-665 也出现约 15 分钟正常静默。因此 15 分钟 run_inactive 仅作告警。Q-88 中人补充原话明确“失活默认60分钟”，按该决定采用 60 分钟；该值仍长于已知 48 分钟静默，但余量更小，人已选择更快回收名额的取舍。Agent 每完成一步调用 heartbeat，heartbeat 和任意新鲜 MCP 调用都重新计算回收阈值。沿用合并闸门的可信文件边界（普通文件、可信属主、拒绝符号链接和组／其他用户可写文件及目录），配置无效时报告固定错误，暂停普通 Run 自动派发及自动回收；常驻 PM 仍豁免并发上限，人显式启动沿用 Q-88 的例外。C-145：YAML 继续作为默认值，server 启动时加载，显式 CLI 启动按本次调用加载；失活回收阈值仍须重启生效。人通过 Workbench 执行视图保存 Agent 上限时，写入数据库全局 `run_capacity_limits`，以 Machine 编号为键、跨项目共用。选择数据库覆盖而非写回 YAML，是为了让设置、操作者及审计事件在同一事务中提交，并保留可信文件的注释和权限边界。有效上限优先取数据库覆盖，再取 YAML/default 4；可信 YAML 无效时仍返回 0、暂停普通自动派发，不能借数据库覆盖绕过故障。Dispatcher 的领取事务及 CLI 共用的 `launchRun` 每次读取有效上限，不缓存覆盖值、不需重启；CLI 人手启动豁免和超额提示沿用同一有效值。已有覆盖时，改 YAML 只改默认值，不覆盖人的设置。
 
@@ -2317,14 +2359,22 @@ C-144：检查队列的内存等待者也按最新档位领取空位，同项目
 Workbench 执行视图、看板卡片和 `cardigan attention` 共用跨项目的等待队列投影。执行视图和 CLI 显示“排队中（前面还有 N 个）”，同卡多个排队 Run 分别展示；看板按 §8.7 C-74 只用图标徽标展示最靠前的 Run。N 只数同机等待的普通 Run，不含已运行工作或常驻 PM；队首为 0。暂停／释放 Assignment 与启动中的 Run 不列入。队列变化通过独立只读 SSE 刷新信号同步到项目视图，不伪造项目／卡片事件 seq，不写时间线巡检消息。C-144：无／低档的容量等待超过阈值时，在执行视图显示“已长时间排队”；主机环境变量 `CARDIGAN_QUEUE_WARNING_MINUTES` 为正整数分钟，默认 **按 q(228) 定为 30 分钟**，重启 Web 服务生效。等待从原触发事件时间计算，界面按分钟更新时间，即使没有新事件也会出现提示；提示不提档、不改变排队顺序，不将运行环境故障等待误报为容量饥饿。
 
 
+**P2b 11 设备/资源租约（收尾 / 迁移前置，待实现）**：可信配置按物理 machine_id + resource_key 登记授权实例及共同重活互斥组；同机不同项目竞争同一资源。所需集合事务原子授予，缺一项保持持久 FIFO 排队且不放行 start，不部分持有互等、不抢占。等待/持有/续租数值由人显式配置，未配置不启用；原 holder 代次匹配才续租。等待超时可取消未授予申请，held 超时、Run 结束、unknown/lost 只触发释放核验/Needs You并保留占用。
+
+释放须确认准确进程/登记子进程退出、端口无原 holder 残留且 owner 匹配、设备/窗口/临时配置完成收尾，证明绑定租约与代次落库后才授予下一 Run。查询失败不算空闲，迟到续租/释放不影响新 holder；人确认退出后的旧机也要补核资源，新机另申请，不迁移租约或绕开 Q2。Run 容量、本机 Git/测试锁与资源租约分别生效。两 OS 合成资源验收见 §16，真实游戏设备与内存/swap 门槛另案。
+
 ### 13.9 故障处理
 
-1. 确认运行时失联（依据见本节下文）：Assignment 运行状态变为 `unknown`，**不立即换机器重跑**，因为旧机器可能只是暂时断网，仍在改代码。失联判断不依据 CLI 的退出码，而看运行时的事件序号是否还在推进；SSH 设置连接超时（0.5b 用 3 秒验证），外层命令另设截止时间。
-   - 在仍为 `unknown` 时确认重连，显式发出 `reconnected`：Assignment 运行状态回 `idle`，未结束的 Run 回 `running`；不据此判定任务成功或失败。
-2. 宽限期（建议 5–10 分钟，可配置）后仍失联：变为 `lost`，进入 Needs You，由你选择等待或接管。
-3. 接管：从主机最后一次拉取到的 SHA 在另一台机器新建 worktree 和 Session，用时间线生成交接摘要。原机器恢复后，它的 worktree 进入清理流程。
-4. 为了让接管不丢工作：Agent 在检查点 commit；主机按 §12.3 定期拉取 `agent/*` 分支。
+P2b 08–10 的扩展保持下文已实现的失联时序，接管部分尚待实现：
 
+1. unknown 时等待/核实，不自动换机；无接管意图时仅由原 RuntimeRef 的新 alive 观察恢复，MCP 决定业务结果。沿用 45 秒有效静默、默认 3 次连续失败（2–10）、failures unknown 对人延迟默认 60 秒（1–299），从持久 runtime_disconnected 起 5 分钟后 lost；slow tick 可能延长确认失联，不从拔线时刻承诺固定时长。
+2. lost 进入 Needs You，展示完整旧 ref、最后成功拉取并固定的 SHA/时间及可能缺失内容。人选择等待或申请停止并接管；后者只保存目标、幂等意图和停止/恢复栅栏，不创建后继身份/工作区。普通同意、断网、撤 Token、超时均不是退出证明。
+3. Q2=C 只接受两来源：系统重连后按准确 boot/UID/PID+启动时间、会话/子进程定向核实，必要时 release 后独立确认；或专门 triage=human 的现场 HumanAction，由实际 human 确认准确进程退出/机器关机、防止旧会话重启，记录人、时间、目标、方法和证据。PM/Office/host_ops 代结、空结果、拔网/锁屏或错误目标均拒绝；没有合格证明持续等待，不设未停即切例外。
+4. 证据绑定接管意图、旧 Assignment/完整 ref、目标绑定代次及进程身份，变化即失效。退出确认后再读最后成功拉取记录并固定恢复 SHA；无远端检查点须明示损失，由人选中心已知基线。新鲜事务一次性完成旧 Token 撤销、pending_finish 封存、旧 Run 失败/取消与身份释放、历史后继/恢复点/待清理记录和唯一新 Assignment/queued Run。保留角色版本、权限、作者/员工隔离和审核预算；回滚无可执行后继。
+5. 事务成功后在控制主机经正常 Dispatcher 新建 worktree/Session，从最终固定 SHA 继续；目标容量、能力、当前审核目标仍重查，不复制 CLI Session、依赖或凭据，启动失败只重试该后继。旧 machine_id 不改，迟到 ACK/finish/alive 不解除栅栏或复活旧身份，新 SHA 照常重审/CI。
+6. 旧机恢复后按 §12.6 补核、准确代次凭据清理及分支补拉。发现旧进程/子进程仍在即 human-only Needs You，冻结进一步启动/唤醒、保留现场，不自动删或误杀；再次证明退出后 clean/已备份才清理，dirty/未备份交人，补拉的新提交只入隔离恢复 ref，不前移后继恢复点。不可达不当不存在，清理收尾落库后才解除旧目标预留。
+
+系统来源须先重连才能核实，现场 human-only 证据允许旧机仍离线时继续，但恢复后必须补核。普通 restart、host_ops 与失活回收不获得绕过退出要求的通道；资源占用另按卡 11 补核释放。
 ---
 
 M3.4 / C-219：主机 RuntimeMonitor 订阅每个未结束 Run 所在终端的 hc events。明确 lost / finished / removed、观察到进程非 alive、完整 snapshot / missed 缺少目标终端，或 runtime_not_found，立即经 connection_lost 把 Assignment 和在途 Run 标为 unknown；不把终端状态当业务完成。订阅静默、普通传输错误或 EOF 则先静默重订阅，不立即写 runtime_disconnected。只有同一 RuntimeRef 的连续失败订阅尝试达到配置次数才确认失联；包含首次失败，重订阅收到目标终端的新 alive 观察即清零，换 RuntimeRef 不继承旧次数。计数为监控进程内状态，重启重新核实；已确认失联的持久宽限期不受它影响。
@@ -2343,11 +2393,13 @@ resume_or_replace 在旧终端不存在时可重开；release 返回 runtime_una
 
 ## 14. 安全模型汇总
 
+P2b 02/03/07–11 的已定安全合同待实现/实证：每项目每机器独立非管理员账号，跨项目私有文件、可写缓存和 hc 控制入口隔离；真实配置留仓库外。tailnet HTTPS 仅指定 worker/必需 MCP 路径，保留 Token；远端材料安全发布，凭据只按需注入与引用，不记录秘密。接管只接受准确绑定的系统退出证据或人专属现场事实，恢复矛盾交人；资源释放须核 holder/进程/端口/设备。两 OS 负向测试使用合成秘密，不读真实凭据。
+
 | 资产 / 风险 | 措施 |
 |---|---|
 | 主机到各工作机的 SSH 密钥 | 只由主机上的 `orchestrator` 用户持有，单向 |
 | 机器间已有的互相授权 | Agent 运行在没有密钥的 `agent` 用户下 |
-| Herdr Socket（无 ACL） | 接受同机 Agent 可互相操作；影响范围限于单台机器 |
+| Herdr Socket（无 ACL） | P2b Q1=A：跨项目拆 UID/core/socket/session，接受的互访只限同项目；07 双 OS 隔离验收前不宣称完成 |
 | 成员身份（V11a） | 成员管理只接受 human；展示姓名和头像不能伪造 Actor。单密码会话对应唯一 owner，旧会话校验后回填成员编号；多人登录和权限矩阵留后续 |
 | Workbench 创建员工（C-161） | 仅有效 owner 会话可访问，Bearer Token 一律拒绝；沿用 Host/Origin 检查，在请求体、头像 IO 后及写事务内重查身份。JSON 请求有总量上限，文件解码后最大 2 MiB；复用 CLI 的 `fileAvatarStore` 按内容识别 PNG/JPEG/WebP，客户端不能指定文件名、路径、MIME 或 `upload:` 引用。服务器以 SHA-256 生成文件名，既有头像读取路由以固定位图 MIME、nosniff、隔离 CSP 返回，拒绝 SVG/HTML；创建写入全局 human 审计。 |
 | 高风险合并检查的重查（C-115） | PM Ops 在当前偏好允许时只能重查结构化超时失败；不得退回或代确认合并，日志文本不能放宽权限，见 §4.4 |
@@ -2364,7 +2416,7 @@ resume_or_replace 在旧终端不存在时可重开；release 返回 runtime_una
 | 主机单点 | 定期备份数据库；第一版接受单点 |
 | 自举部署（C-201） | 仅独立主机监督器执行，固定中心 main、快进与门禁证据；任何 Agent 均无部署、server 重启、配置修改或代码选择能力。构建隔离、精确进程身份、备份和回滚见 §12.9 |
 | 运行时 | herdr-app 默认开启使用遥测，部署时必须关闭；herdr-core 的状态目录含终端输出和屏幕存档，按机密目录处理 |
-| 运行目录和凭据副本 | local 使用 0700 / 0600；agent-ssh 使用主机与 agent 专用组的 2770 / 0660（脚本 0770），父层 2750；写入不跟随链接，读取后删除凭据；日志脱敏；release 时清理 |
+| 运行目录和凭据副本 | 既有本机共享路径沿用受控组；P2b 03/07 远端一般 0700 / 0600、脚本 0700，逐层校验 owner/mode/ACL 与链接，凭据读后删除。Linux 共享组按项目隔离，不把本机权限数值直接复制到 Mac；清理只碰准确代次 |
 | 界面验收快照（C-267） | Agent 不读生产库，只读人生成的去敏快照：`cardigan review-snapshot create` 仅限人类在本机运行（Token 模式拒绝，无 MCP 或 HTTP 入口），只读备份生产库，去敏、扫描通过后才发布到共享目录；文件 0640、目录 0750、属组 `cardigan-share`，详见下文 C-267 |
 
 P2a-12 A：`ExecutionConfig` 的 `agent-ssh` 分支可选 `host`、`port`、`user`、`hostKeyAlias`，复用必填的 `identityFile`、`knownHostsFile`。缺省仍是 `agent@localhost`、端口 22、别名 `cardigan-agent-local`，未传端口时不追加参数，保持原 SSH 命令逐字节一致。目标字段只接受安全字符（主机也支持 IPv6 字面量），拒绝选项前缀、空白、控制字符和 shell 元字符；端口限定为 1–65535 整数。`knownHostsFile` 必须是单个绝对非根路径，拒绝空白、引号、反斜杠、控制字符和 SSH 的 `%`／`$` 展开，避免实际读取的文件偏离所校验的文件。身份文件和 known_hosts 继续检查主机所有、普通文件、0600，固定严格主机密钥检查和原有 SSH 安全参数。进程执行、运行时入口和 Git pack 共用这一通道；本步不改变环境变量解析，不接入合并闸门，也不切换现有执行目标。
@@ -2392,6 +2444,8 @@ C-267：界面验收用的去敏快照。Agent 只能读这份快照，不能读
 - 使用：审核员把 `current/cardigan.db` 复制到自己的临时构建目录再打开，不直接打开共享文件；迁移在打开副本时自动执行。
 
 ### 14.1 角色权限边界（V9a）
+
+P2b 不扩大角色工具或平台管理权限：PM 只在本项目登记/授权范围内选机；机器登记、账号/SSH/网络/GUI 授权和跨机接管交人。host_ops 仍限本项目既有白名单动作，不获得任意远程 shell、机器管理、接管或代结 human-only 退出确认能力。风险标签与独立复核不能替代 D12、角色规则或现场人工边界；卡 11 的资源 owner 核实也不授权批量杀进程。
 
 **C-226：PM Ops 子 Agent 只读边界评估说明（需人确认）。** 当前子 Agent 复用父会话的 MCP 配置、Token 和 Assignment 身份；角色正文里的白名单只靠规则约束，不是服务端权限隔离。误写会被当作 PM Ops 本人的调用；Cardigan 审计不能可靠区分父子 Agent，子 Agent 自报身份也不能作为可信归因。
 
@@ -2438,7 +2492,7 @@ C-217：已关闭（`done/cancelled`）卡片仅豁免 `host_ops_cancel_run` 的
 | D12 | 高风险拍板的确认方式 | **已决定（2026-11-10 更新）**：`spending`、`account`、`permission`、`data_deletion` 四类 Decision 只能由人确认（Workbench 或本机 CLI）。限制针对 Actor 身份，PM Office、PM Ops 和其他 Agent 不能代拍或转录；本机 CLI 的 human 确认与 Workbench 同等有效，例如强制清理工作目录。四类仍不可加入 PM 授权；`general` 类保持现状。注（ADR 0006，2026-11-13，已决定、待实现，以 P2a-14 各卡的实现为准）：本决策不改；新增的 `Card.risk_tags` 是与 Decision `category` 独立的代码风险分类，其代确认路径明确排除命中 D12 四类的卡片 |
 | D13 | 真人成员身份 | **已决定（2026-11-10，V11a）**：用户以全局所有者 Member 出现；单密码会话与历史 human 作者均解析为唯一在职 owner，显示名字、职位和头像；Actor / Author 与高风险权限检查不变。迁移只创建占位“所有者”，上线再填写真实姓名。外接 Assignment 与 CLI Token 身份模式另按 V11b/V11c 实现 |
 | D14 | 成员与外接身份 | **已决定（2026-11-10）**：真人以 Member 展示，Claude 以员工张良的外接 PM Office Assignment 接入 cardigan 项目，不由 Cardigan 启动终端、不代人确认高风险；其他项目各有 PM Office。按 [V11 计划](plans/p2v-11-members-identity.md) 分 V11a 成员、V11b 外接身份、V11c CLI Token 模式实施；V11b 不改变本机 CLI 默认 Actor |
-| D15 | 合并检查执行层和自举部署是否改用本地 Gitea Actions | **待决（2026-11-13 提出，交邵杰拍板）**：评估见 [ADR 0007](adr/0007-gitea-actions-for-merge-checks.md)，对比维持现状、本地 Gitea + act_runner、GitHub self-hosted runner 三个方案。ADR 建议近期维持现状并先做 Gitea 实测；中心 bare 仓库保持权威（Gitea 仅作镜像）；部署继续由 C-201 监督器执行；不采用 GitHub runner。拍板前 §12、§14 的现行规则不变 |
+| D15 | 合并检查执行层和自举部署是否改用本地 Gitea Actions | **待决（2026-11-13 提出，交人拍板）**：评估见 [ADR 0007](adr/0007-gitea-actions-for-merge-checks.md)，对比维持现状、本地 Gitea + act_runner、GitHub self-hosted runner 三个方案。ADR 建议近期维持现状并先做 Gitea 实测；中心 bare 仓库保持权威（Gitea 仅作镜像）；部署继续由 C-201 监督器执行；不采用 GitHub runner。拍板前 §12、§14 的现行规则不变 |
 
 ---
 
@@ -2471,27 +2525,23 @@ C-217：已关闭（`done/cancelled`）卡片仅豁免 `host_ops_cancel_run` 的
 | M4 | Git 服务：主机拉取交付、验证 worktree、中心合并、清理、对账 | 伪造的或不在该分支上的 SHA 被拒；有未提交修改的 worktree 不被静默删除；孤儿 worktree 能被发现 |
 | M5 | Workbench + 自研看板（§8.7）：卡片列表和看板视图、卡片时间线、Needs You、项目快照、执行视图 | 附录 A 场景完整跑通 |
 
-### Phase 2 · 多机（3–5 周）
+### Phase 2 · 多机（P2b 已定方案，实施待完成）
 
-| 工作 | 粗估 |
+按[Phase 2 §4](plans/phase-2.md#4-p2b-多机方案已定按细化计划实施)与[多机细化计划](plans/p2b-multi-machine.md)推进。文档卡 00 不计实现卡；主线 01–10 加收尾/迁移前置 11，共 11 张。Q1=A 每项目每机器独立账号，Q2=C 先确认旧进程退出再接管，Q3=A tailnet 专用 HTTPS MCP。估时以原生 worker 实测与各卡评审为准，不沿用旧粗估作工期承诺。
+
+| 验收 | 必须完成的链路与证据 |
 |---|---|
-| 预研结论落地：远程门铃、等待、worktree、断线表现 | 1–2 天 |
-| Runtime Adapter 加入机器维度；名字全局唯一 | 1–2 天 |
-| 机器登记、健康检查、手动指定机器 | 2–4 天 |
-| Git：基础 clone 初始化、远程拉取交付和定期拉取、基线推送、远程清理 | 3–5 天 |
-| 附件上传 | 1–2 天 |
-| 工作机初始化脚本：`agent` 用户、工具链、Agent CLI、凭据（移动端真机测试会更多） | 2–5 天 |
-| 故障处理：`unknown` → 宽限期 → `lost` → 手动接管；半成品推送 | 3–5 天 |
-| 安全收口：SSH 方向、分支权限、Token 作用域 | 2–3 天 |
-| 高风险 Decision 只能由人确认（Workbench 或本机 CLI，D12） | 1–2 天 |
-| 常驻授权和代拍板（D11） | 2–3 天 |
+| A：真实小卡中心合并（10） | PM 在控制主机，coder 在原生 macOS arm64 worker，带已验证能力标签的 tester/reviewer 在控制主机 local。主机经 SSH 准备 Git/材料，dispatch 后 start；coder 实际 MCP/ACK、修复、测试、本地 commit 和小附件上传，主机拉取固定 SHA，异机只审该 SHA，既有独立 Linux CI 检查通过并满足审核/确认后中心合并。保存基线/交付/合并 SHA、身份/目标、附件摘要和清理证据；检查失败不推进基线，不能用 hc echo、占位文档卡或模拟 Agent 代替。 |
+| B：断网与确认退出后继续（10） | 先实际拉取并固定 Mac 检查点 S1，再保留可辨识合成未提交内容。人断网，PM/MCP/Workbench/CI 继续，观察 unknown→lost→去重 Needs You；申请仅写意图，未确认退出时没有后继 Assignment/Run/worktree/Session。系统定向核实或专门 human-only 现场确认退出后，控制主机从退出确认后的最终固定 SHA 新建后继并正常排队启动；旧 Token/pending_finish 失效，旧机器编号不变。Mac 恢复补核，仍运行则冻结进一步启动/唤醒交人；退出后补拉隔离 ref，clean/已备份清理，dirty/未备份走人专属删除决定并先保存补丁/未跟踪清单。 |
+| B 的确认来源与故障反例 | 系统核实与现场 human-only 两来源至少一条实机全链，另一条确定性集成夹具，条件允许两条都实机。证据包含来源/方法/准确身份/时间、接管提交和后继启动时点、最终恢复 SHA、旧机补核/清理。未退出不建后继，PM 代结/空证据拒绝；重启、PID 重用、迟到事件不误杀/复活/重复接管，人工确认后恢复仍存活必须交人。 |
+| B8 双 OS 隔离（07） | 同一 Mac 与同一 Linux worker 各用两个合成项目，双向尝试源码/clone/材料/cache/会话/凭据和 hc socket/SSH/HTTP 越权；禁止同 UID、共享可写目录/组或额外 ACL 绕过。合成标记不泄漏，单一物理容量桶不变；只验 mode 不算通过。 |
+| 卡 11 独立资源验收 | 两 OS 用合成进程/端口与两个 Run/项目竞争同一资源，证明唯一授予、集合原子与持久排队、续租/取消/等待超时，以及准确进程退出、端口 owner/设备收尾后才放下一 Run。断网、重启、held 超时、Run finish 或人先确认退出都不提前释放；迟到 renew/release、PID/端口换主不伤新 holder。不占用既有游戏设备，真实游戏资源另验。 |
 
-验收场景：
+A/B 都用无独占设备需求的真实小卡，控制主机验证与接管是同一物理机，按正常容量排队，不虚构第三台机器。现场账号/App/网络/断网由人按人工待办组织，保留既有项目环境；系统来源必须先重连核实，现场来源可在旧机离线时确认关机/结束准确进程，两者都先确认退出再继续，恢复后补核。
 
-1. coder 在工作机 A，tester 在带能力标签（例如 `android-device`）的工作机 B，PM 在主机。验收时可以用模拟的测试 Agent，不要求接真机。
-2. 执行中拔掉 A 的网线：Assignment 进入 `unknown`，宽限期后进入 Needs You。
-3. 你选择接管：从主机最后拉取到的 SHA 在机器 C 继续执行。
-4. A 恢复后，它的旧 worktree 进入清理流程。
+未配置 remote 时 local 不变。01–09 可逐卡合并但远程启动保持关闭，10 及 A/B 与安全前置通过后才由操作员启用指定项目/角色的普通 Git 小卡，记录失败阶段、备份年龄、失联/退出证据与待清理情况。独占设备任务另须 11 与有效租约；既有游戏项目继续原流程，2026-11-28 前不切换或启动迁移试点，之后仍另过工具链/GUI、合并权威、历史/附件、大制品、身份/在途任务及迁移窗口批准，不按日期自动迁入。回退先 drain，保留检查点与历史；旧任务收尾后才移除配置，不原地改 machine_id、不自动迁回 local 或改 CI。
+
+ADR 后续责任：06 更新 [0001](adr/0001-runtime-baseline.md) 原生能力证据，07 更新 [0002](adr/0002-agent-account-isolation.md) 并定稿隔离 ADR，09 定稿先退出再接管 ADR、10 补实机/编排，11 定稿资源 ADR。迁移专项 ADR 另案；顶部版本号和变更记录由里程碑收尾统一维护。
 
 ### Phase 3 · 加固（按需）
 
@@ -2566,6 +2616,8 @@ C-217：已关闭（`done/cancelled`）卡片仅豁免 `host_ops_cancel_run` 的
 
 ### 20.1 主仓库结构
 
+P2b 01–07 待实现：通用 Linux/macOS 安装器、文件/锁/进程 helper 与能力合同归本仓库 `deploy`/相关包；实际机器、账号、工具组合、SSH/MCP 入口、挂载和部署参数只归私有 `cardigan-deploy`，不得复制进产品代码或验收正文。
+
 技术栈见 D2：TypeScript + pnpm workspace。
 
 ```
@@ -2592,6 +2644,8 @@ cardigan/
 
 ### 20.2 依赖方向
 
+P2b 延续此分层：domain 只定义机器/接管/资源实体、纯命令与端口，不读配置、磁盘或 SSH；store 负责事务/快照/失效，runtime-herdr 和 git-transport 负责目标 IO，host 统一解析可信 project+machine 并编排启动、退出确认、回收，apps 只组装。新增包或接口须随实现卡更新依赖检查，不能让 domain 反向依赖 helper。
+
 `domain` ← `store` / `router` / `mcp-server` / `git-service` / `roles` ← `runtime-herdr` / `git-transport` ← `host` ← `apps`
 
 - `domain` 不依赖任何其他包；运行时和 Git 传输通过 `domain` 中定义的端口接口接入。
@@ -2609,12 +2663,12 @@ C-243：迁移 0024 仅新增 Workbench 查询索引，排在 C-244 已合入的
 
 ### 20.3 被开发项目怎么接入
 
-目标项目保持独立仓库，只需加入两样东西：
+目标项目保持独立仓库。原规划的接入约定为：
 
 - `AGENTS.md`：该项目的规则；
 - `.cardigan/project.yaml`：卡片模板、必需工作项、测试命令、端口范围等。
 
-接入新项目不需要改 Cardigan 本身。
+`.cardigan/project.yaml` 是规划中的声明入口，目前不是已验证的自动加载入口；P2b 工具链与资源声明先由主机可信配置接入，不能因文件存在就声称已登记、授权或可启动。普通 Git 多机验收不等于既有游戏项目可迁移：项目继续原管理流程，迁移前须另定唯一合并权威、历史/附件/大制品和正式身份边界，完成原生工具/GUI 与卡 11 资源验收，再由人批准窗口（细化计划 §7）。
 
 ### 20.4 开发 Cardigan 本身的分工
 
