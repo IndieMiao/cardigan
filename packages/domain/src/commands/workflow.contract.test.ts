@@ -440,6 +440,7 @@ test.each([false, true])(
     state = apply(state, second);
     expect(second.events.map((e) => e.type)).toEqual([
       "delivery_submitted",
+      ...(finished ? [] : ["run_finished"]),
       "decision_requested",
     ]);
     expect(item(state, ctx.verifier).status).toBe("waiting_decision");

@@ -17,6 +17,7 @@ import {
   finishRun,
   postComment,
   queueRun,
+  requestDecision,
   setRunLimit,
   stopWorkItemAssignment,
   updateCard,
@@ -710,6 +711,122 @@ test("a prequeued Run sorts by its original trigger, not by the later notificati
   );
   expect(options.startRun).not.toHaveBeenCalled();
   expect(readRunQueue(f.store)[0]?.project_id).toBe(other.project);
+});
+
+test("C-255: a standing decision records the old Run ending before the next dispatch without an extra bell", async () => {
+  const extra = f.create();
+  const { work_item_id: _workItem, ...base } = extra.assignment;
+  const pm: Assignment = {
+    ...base,
+    scope: "standing",
+    role_id: "pm",
+    standing_mode: "ops",
+  };
+  f.store.uow.run((tx) => {
+    tx.assignments.put(f.project, pm);
+    const role = tx.roles.get(f.project, { role_id: "pm", role_version: 1 });
+    if (!role) throw new Error("Missing PM role");
+    tx.roles.put(f.project, {
+      ...role,
+      allowed_tools: [...role.allowed_tools, "request_decision"],
+    });
+  });
+  const previous = f.session(pm, false);
+  const event = f.apply((s, a, p) =>
+    postComment(s, a, { card_id: extra.card.id, body: "PM message" }, p),
+  );
+  const cause =
+    f.state().events.find((e) => e.id === event.id) ?? f.state().events.at(-1);
+  if (!cause) throw new Error("Missing cause");
+  f.store.recordNotification({
+    project_id: f.project,
+    event_id: cause.id,
+    card_id: cause.card_id,
+    seq: cause.seq,
+    kind: "comment",
+    recipient: { kind: "assignment", assignment_id: pm.id },
+  });
+  const dispatcher = new Dispatcher(options);
+  await dispatcher.tick();
+  expect(f.state().runs.filter((r) => r.assignment_id === pm.id)).toHaveLength(
+    1,
+  );
+  expect(runtime.wake).not.toHaveBeenCalled();
+
+  const decision = f.apply(
+    (s, a, p) =>
+      requestDecision(
+        s,
+        a,
+        {
+          category: "general",
+          kind: "choose",
+          question: "Choose the next step",
+          context: "Needs a decision",
+          options: [
+            { key: "go", description: "Continue", impact: "Resume work" },
+          ],
+          recommended: "go",
+          affected_cards: [],
+          affected_work_items: [],
+          blocking: true,
+          decider: "human",
+          plain_summary: {
+            changed: "等待确认后续安排",
+            impact: "暂停本次工作",
+            risk: "无",
+          },
+        },
+        p,
+      ),
+    f.actorFor(pm),
+  );
+  const endings = () =>
+    f
+      .state()
+      .events.filter(
+        (e) =>
+          e.type === "run_finished" &&
+          (e.payload as { run_id?: string }).run_id === previous.id,
+      );
+  expect(endings()).toHaveLength(1);
+  expect(endings()[0]).toMatchObject({
+    payload: {
+      run_id: previous.id,
+      outcome: "blocked",
+      finished_by: "system",
+      reason: "blocking_decision",
+      decision_id: decision.id,
+    },
+  });
+  const original = f.state().runs.find((r) => r.id === previous.id);
+  await dispatcher.tick();
+  const next = f
+    .state()
+    .runs.find((r) => r.assignment_id === pm.id && r.id !== previous.id);
+  expect(next?.status).toBe("dispatched");
+  expect(runtime.wake).toHaveBeenCalledTimes(1);
+  expect(endings()).toHaveLength(1);
+  expect(f.state().runs.find((r) => r.id === previous.id)).toEqual(original);
+  expect(() =>
+    f.apply(
+      (s, a, p) =>
+        finishRun(
+          s,
+          a,
+          {
+            run_id: previous.id,
+            outcome: "completed",
+            summary: "Late conclusion",
+          },
+          p,
+        ),
+      f.actorFor(pm),
+    ),
+  ).toThrow("结果和摘要未保存");
+  await dispatcher.tick();
+  expect(runtime.wake).toHaveBeenCalledTimes(1);
+  expect(f.state().runs.find((r) => r.id === next?.id)).toEqual(next);
 });
 
 test("standing PM dispatches beyond the cap and counts against subsequent ordinary Runs", async () => {

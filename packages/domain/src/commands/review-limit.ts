@@ -83,7 +83,11 @@ export function requestReviewLimit(d: CommandDraft, item: WorkItem) {
     .filter(
       (r) => r.assignment_id === item.assignment_id && r.status === "running",
     );
-  for (const run of runs) endRun(d, run, "blocked", decision.question);
+  for (const run of runs)
+    endRun(d, run, "blocked", decision.question, {
+      reason: "review_limit",
+      decision_id: id,
+    });
   if (existing) return;
   d.put("decisions", decision);
   d.emit(

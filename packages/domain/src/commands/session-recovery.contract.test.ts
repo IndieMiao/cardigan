@@ -149,6 +149,23 @@ test("M5.6 invariant 5: the review-limit implicit ending also returns runtime ac
     outcome: "blocked",
   });
   expect(owner(f.reviewer.id)?.runtime_state).toBe("idle");
+  const endings = f.state.events.filter(
+    (e) =>
+      e.type === "run_finished" &&
+      (e.payload as { run_id?: string }).run_id === reviewRun.id,
+  );
+  expect(endings).toHaveLength(1);
+  expect(endings[0]).toMatchObject({
+    card_id: reviewer.card_id,
+    payload: {
+      run_id: reviewRun.id,
+      outcome: "blocked",
+      finished_by: "system",
+      reason: "review_limit",
+      decision_id: f.state.decisions.find((q) => q.trigger === "review_limit")
+        ?.id,
+    },
+  });
 });
 
 test("M5.6 invariants 4, 5, 12: replacement dispatch records one system handoff and reuses the queued Run", () => {

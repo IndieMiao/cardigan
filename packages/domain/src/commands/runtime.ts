@@ -65,7 +65,23 @@ export function finishRun(
       run.outcome === "blocked" &&
       p.outcome === "blocked"
     )
-      return run;
+      return {
+        ...run,
+        finish_notice:
+          "该执行已结束为 blocked；保留原结束结果和摘要，本次提交的结果和摘要未另行保存。补充结论请发评论。",
+      };
+    ensure(
+      !["completed", "failed", "cancelled"].includes(run.status),
+      "illegal_transition",
+      `执行 ${run.id} 已结束（${run.status}，结果 ${run.outcome ?? "未记录"}）；本次提交的结果和摘要未保存，原结束记录保持不变。补充结论请发评论。`,
+      {
+        run_id: run.id,
+        status: run.status,
+        outcome: run.outcome,
+        summary: run.summary,
+        finished_at: run.finished_at,
+      },
+    );
     const token = validRunToken(state, run, ports);
     if (run.pending_finish)
       ensure(
@@ -114,17 +130,7 @@ export function finishRun(
       });
       return next;
     }
-    const result = endRun(d, run, p.outcome, p.summary);
-    const item =
-      d.assignment?.scope === "work_item"
-        ? d.work(d.assignment.work_item_id)
-        : undefined;
-    d.emit("run_finished", item?.card_id, {
-      run_id: run.id,
-      outcome: p.outcome,
-      summary: p.summary,
-    });
-    return result;
+    return endRun(d, run, p.outcome, p.summary);
   });
 }
 
@@ -155,16 +161,6 @@ export function settlePendingRunFinish(
       hostOpsPending(state.events, a.id)
     )
       return run;
-    const result = endRun(d, run, pending.outcome, pending.summary);
-    const card =
-      a.scope === "work_item"
-        ? d.get("work_items", a.work_item_id).card_id
-        : undefined;
-    d.emit("run_finished", card, {
-      run_id: run.id,
-      outcome: pending.outcome,
-      summary: pending.summary,
-    });
-    return result;
+    return endRun(d, run, pending.outcome, pending.summary);
   });
 }
