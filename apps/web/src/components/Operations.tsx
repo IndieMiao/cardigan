@@ -20,16 +20,19 @@ export function CardLink({
   projectId,
   id,
   label = "卡片",
+  tooltipClearAbove,
 }: {
   projectId: string;
   id: string | null;
   label?: string;
+  tooltipClearAbove?: string | undefined;
 }) {
   return id ? (
     <IdTag
       id={id}
       label={label}
       href={routeHash({ kind: "card", projectId, cardId: id })}
+      tooltipClearAbove={tooltipClearAbove}
     />
   ) : (
     <span>项目级事项</span>

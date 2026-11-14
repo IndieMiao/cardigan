@@ -305,16 +305,22 @@ function TaskCell({
   a,
   projectId,
   roleName,
+  tooltipClearAbove,
 }: {
   readonly a: ExecutionAssignment;
   readonly projectId: string;
   readonly roleName?: string | undefined;
+  readonly tooltipClearAbove?: string | undefined;
 }) {
   const row = (
     <IdentityRow className="execution-task">
       {a.work_item_id ? (
         <>
-          <CardLink projectId={projectId} id={a.card_id} />
+          <CardLink
+            projectId={projectId}
+            id={a.card_id}
+            tooltipClearAbove={tooltipClearAbove}
+          />
           <PriorityBadge value={a.card_priority ?? 0} />
           <IdTag id={a.work_item_id} label="工作项" />
         </>
@@ -527,7 +533,12 @@ function AssignmentCard({
           <RuntimeState a={a} />
         </span>
       </IdentityRow>
-      <TaskCell a={a} projectId={projectId} roleName={roleName} />
+      <TaskCell
+        a={a}
+        projectId={projectId}
+        roleName={roleName}
+        tooltipClearAbove=".execution-card"
+      />
       <div className="execution-state-note">
         <RunNote a={a} run={run} />
       </div>
