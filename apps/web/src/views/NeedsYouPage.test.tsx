@@ -178,7 +178,9 @@ test("C-171: a failed human merge check is listed with return, hold and recheck"
   const group = within(await screen.findByRole("region", { name: "合并确认" }));
   const article = within(group.getByRole("article", { name: "合并确认 Q-3" }));
   expect(
-    within(article.getByRole("region", { name: "Q-3 状态" })).getByText("失败"),
+    within(article.getByRole("region", { name: "Q-3 状态" })).getByText(
+      "未通过",
+    ),
   ).toBeTruthy();
   expect(article.getAllByText(/合并检查：未通过/).length).toBeGreaterThan(0);
   for (const name of ["确认合并", "退回修改", "暂不合并", "重新检查"])
@@ -1521,10 +1523,10 @@ const checkStates = [
   ["queued", "排队中", "pending"],
   ["running", "运行中", "progress"],
   ["passed", "已通过", "success"],
-  ["failed", "失败", "error"],
+  ["failed", "未通过", "error"],
   ["timed_out", "超时", "error"],
   ["interrupted", "已中断", "paused"],
-  ["executor_unreachable", "检查机不可达", "error"],
+  ["executor_unreachable", "执行机不可达", "error"],
 ] as const;
 const attempt = "e42de008-2c67-49e2-a59d-077a0f7936de";
 function checkedMerge(status: (typeof checkStates)[number][0]) {
@@ -1535,7 +1537,10 @@ function checkedMerge(status: (typeof checkStates)[number][0]) {
     merge_confirmation: {
       ...decision.merge_confirmation,
       merge_gate_enabled: true,
-      blockers: status === "passed" ? [] : ["合并检查：等待通过"],
+      blockers:
+        status === "passed"
+          ? []
+          : [`合并检查：${checkStates.find(([key]) => key === status)?.[1]}`],
       merge_check: {
         status,
         attempt_id: attempt,
@@ -1683,7 +1688,7 @@ test.each(["failed", "timed_out"] as const)(
       await screen.findByRole("article", { name: "合并确认 Q-3" }),
     );
     expect(
-      article.getByText(status === "failed" ? "失败" : "超时"),
+      article.getByText(status === "failed" ? "未通过" : "超时"),
     ).toBeTruthy();
     expect(article.getByRole("link", { name: "查看日志" })).toBeTruthy();
     expect(article.queryByRole("button", { name: "确认合并" })).toBeNull();
@@ -1701,19 +1706,27 @@ test.each(["failed", "timed_out"] as const)(
   },
 );
 
-test("a gate waiting for its first event shows queued, while disabled projects are unchanged", async () => {
+test("a gate waiting for its first event shows no result, while disabled projects are unchanged", async () => {
   const q = checkedMerge("queued");
   const client = fakeClient({
     needsYou: async () =>
       page([
         {
           ...q,
-          merge_confirmation: { ...q.merge_confirmation, merge_check: null },
+          merge_confirmation: {
+            ...q.merge_confirmation,
+            merge_check: null,
+            blockers: ["合并检查：尚无结果"],
+          },
         },
       ]),
   });
   const view = render(<NeedsYouPage projectId="p-1" client={client} />);
-  expect(await screen.findByText("排队中")).toBeTruthy();
+  await screen.findByRole("article", { name: "合并确认 Q-3" });
+  expect(view.container.querySelector(".decision-check")?.textContent).toBe(
+    "合并检查：尚无结果",
+  );
+  expect(screen.queryByText("排队中")).toBeNull();
   expect(screen.getByText("用时：尚未开始")).toBeTruthy();
   expect(screen.queryByRole("link", { name: "查看日志" })).toBeNull();
   view.unmount();

@@ -320,6 +320,7 @@ test.each(["needs", "card"])(
     let dialog = await screen.findByRole("alertdialog", {
       name: "仍要确认合并？",
     });
+    expect(dialog.getAttribute("aria-modal")).toBe("true");
     expect(within(dialog).getByText("截图核对：未通过")).toBeTruthy();
     await waitFor(() =>
       expect(document.activeElement).toBe(
@@ -335,6 +336,31 @@ test.each(["needs", "card"])(
     expect(submit.hasAttribute("disabled")).toBe(true);
     fireEvent.click(submit);
     expect(recordDecision).not.toHaveBeenCalled();
+    const textarea = within(dialog).getByLabelText(
+      "强行合并理由（必填）",
+    ) as HTMLTextAreaElement;
+    for (const [value, valid] of [
+      [" \n\t ", false],
+      ["字".repeat(499), true],
+      ["字".repeat(500), true],
+      ["字".repeat(501), false],
+      [` \n${"😀".repeat(500)}\t `, true],
+      ["😀".repeat(501), false],
+      ["e\u0301".repeat(250), true],
+      [`${"e\u0301".repeat(250)}a`, false],
+    ] as const) {
+      fireEvent.change(textarea, { target: { value } });
+      expect(textarea.value).toBe(value);
+      expect(submit.hasAttribute("disabled")).toBe(!valid);
+      if (!valid) {
+        fireEvent.click(submit);
+        expect(recordDecision).not.toHaveBeenCalled();
+        if (value.trim())
+          expect(within(dialog).getByRole("alert").textContent).toBe(
+            "理由最多500个字符，请缩短后再提交。",
+          );
+      }
+    }
     fireEvent.change(within(dialog).getByLabelText("强行合并理由（必填）"), {
       target: { value: "已人工核实" },
     });
@@ -351,6 +377,65 @@ test.each(["needs", "card"])(
         "已人工核实",
       ),
     );
+  },
+);
+
+test.each(["needs", "card"])(
+  "C-271: %s status and prerequisite list share the current check reason",
+  async (page) => {
+    for (const [status, label] of [
+      [undefined, "尚无结果"],
+      ["queued", "排队中"],
+      ["running", "运行中"],
+      ["failed", "未通过"],
+    ] as const) {
+      const q = merge(passed);
+      if (!q.merge_confirmation) throw new Error("Missing merge fixture");
+      q.merge_confirmation = {
+        ...q.merge_confirmation,
+        merge_gate_enabled: true,
+        blockers: [`合并检查：${label}`],
+        ...(status
+          ? {
+              merge_check: {
+                status,
+                completion_id: "D-9",
+                attempt_id: "attempt",
+                updated_at: "2026-11-12T00:00:00Z",
+                checks: [],
+              },
+            }
+          : {}),
+      };
+      const base = cardDetail();
+      const client = fakeClient({
+        needsYou: async () => needs(q),
+        card: async () => ({
+          ...base,
+          card: { ...base.card, status: "awaiting_merge" },
+          merge_confirmations: [q],
+          decisions: [q],
+        }),
+      });
+      const view = render(
+        page === "needs" ? (
+          <NeedsYouPage client={client} projectId="p-1" />
+        ) : (
+          <CardDetailPage client={client} projectId="p-1" cardId="C-1" />
+        ),
+      );
+      const prerequisites = await screen.findByRole("status", {
+        name: "合并前置条件",
+      });
+      expect(
+        within(prerequisites).getByText(`合并检查：${label}`),
+      ).toBeTruthy();
+      expect(view.container.querySelector(".decision-check")?.textContent).toBe(
+        `合并检查：${label}`,
+      );
+      expect(prerequisites.closest(".action-row")).toBeNull();
+      view.unmount();
+    }
   },
 );
 

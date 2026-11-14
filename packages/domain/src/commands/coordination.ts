@@ -15,6 +15,7 @@ import type {
   WorkItemId,
 } from "../ids.js";
 import { commentMentions } from "../mentions.js";
+import { mergeOverrideReasonError } from "../merge-override.js";
 import { decisionCategories, highRiskCategories } from "../preferences.js";
 import {
   heldCards,
@@ -562,6 +563,8 @@ export function recordDecision(
         "强行确认只能用于单独确认合并",
       );
       text(p.merge_override_reason, "强行合并理由");
+      const reasonError = mergeOverrideReasonError(p.merge_override_reason);
+      ensure(!reasonError, "validation_failed", reasonError ?? "");
       ensure(
         !!held.card_id &&
           currentMergeConfirmations(state, held.card_id).some(

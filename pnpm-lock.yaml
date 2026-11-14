@@ -106,6 +106,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@cardigan/domain':
+        specifier: workspace:*
+        version: link:../../packages/domain
       '@fontsource-variable/inter':
         specifier: 5.3.0
         version: 5.3.0

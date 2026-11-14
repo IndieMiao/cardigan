@@ -36,6 +36,9 @@ export function MergeStatusFacts({
     !merge?.merge_noop &&
     merge?.merge_gate_enabled &&
     ["failed", "timed_out"].includes(check?.status ?? "");
+  const checkBlocker = merge?.blockers
+    ?.find((reason) => reason.startsWith("合并检查："))
+    ?.slice("合并检查：".length);
   const checkLabel = merge?.merge_gate_invalid
     ? "配置无效"
     : merge?.merge_noop
@@ -44,7 +47,9 @@ export function MergeStatusFacts({
         ? "资料未提供"
         : !merge.merge_gate_enabled
           ? "未启用"
-          : null;
+          : check
+            ? null
+            : (checkBlocker ?? "尚无结果");
   return (
     <>
       <span className="decision-blocking">
@@ -84,7 +89,13 @@ export function MergeStatusFacts({
       )}
       <span className="decision-check">
         合并检查：
-        {checkLabel ?? <StatusTag status={check?.status ?? "queued"} />}
+        {checkLabel ??
+          (check && (
+            <StatusTag
+              status={check.status}
+              {...(checkBlocker ? { label: checkBlocker } : {})}
+            />
+          ))}
       </span>
       {q.auto_merge && (
         <span>

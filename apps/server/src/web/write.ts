@@ -19,6 +19,7 @@ import {
   manageCardTemplate,
   markCardDone,
   markNoticesRead,
+  mergeOverrideReasonError,
   parseId,
   parseTimelineEntryId,
   postComment,
@@ -177,7 +178,13 @@ const cardSupersede = z.object({ superseded_by: id("card") }).strict();
 const cardSensitive = z.object({ sensitive: z.boolean() }).strict();
 const decision = z.object({
   option: text,
-  merge_override_reason: z.string().optional(),
+  merge_override_reason: z
+    .string()
+    .superRefine((reason, context) => {
+      const message = mergeOverrideReasonError(reason);
+      if (message) context.addIssue({ code: "custom", message });
+    })
+    .optional(),
   rationale: z.string().optional(),
   snooze_until: z.string().optional(),
   raw_quote: z.string().optional(),
