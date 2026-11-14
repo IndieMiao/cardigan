@@ -305,7 +305,127 @@ const docOf = (db: DatabaseSync, sql: string, ...args: string[]) =>
     unknown
   >;
 
+function addNotification(
+  db: DatabaseSync,
+  id: string,
+  cardId: string,
+  recipient: { kind: string; assignment_id?: string },
+): void {
+  const eventId = `E-${cardId}`;
+  if (!db.prepare("SELECT 1 FROM events WHERE id = ?").get(eventId))
+    db.prepare(
+      "INSERT INTO events (project_id, id, card_id, stream, seq, type, doc) VALUES (?, ?, ?, ?, 10, 'comment_posted', ?)",
+    ).run(
+      P,
+      eventId,
+      cardId,
+      cardId,
+      JSON.stringify({ id: eventId, card_id: cardId }),
+    );
+  const doc = {
+    id,
+    project_id: P,
+    event_id: eventId,
+    card_id: cardId,
+    recipient,
+    seq: 10,
+    kind: "comment",
+    status: "pending",
+    attempts: 0,
+    bell: SENSITIVE_COMMENT,
+    created_at: NOW,
+    updated_at: NOW,
+  };
+  db.prepare(
+    "INSERT INTO notifications (project_id, id, event_id, recipient_kind, assignment_id, card_id, seq, kind, status, doc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  ).run(
+    P,
+    id,
+    eventId,
+    recipient.kind,
+    recipient.assignment_id ?? "",
+    cardId,
+    doc.seq,
+    doc.kind,
+    doc.status,
+    JSON.stringify(doc),
+  );
+}
+
+const notificationRows = (db: DatabaseSync) =>
+  db
+    .prepare("SELECT * FROM notifications ORDER BY id")
+    .all()
+    .map((row) => ({
+      ...row,
+      doc: JSON.parse(String(row.doc)),
+    }));
+
 describe("scrub", () => {
+  test("preserves all recipients of the same sensitive event without unique-key collisions", () => {
+    buildFixture();
+    const db = new DatabaseSync(dbPath);
+    try {
+      const recipients = [
+        { kind: "needs_you" },
+        { kind: "pm_office" },
+        { kind: "pm_ops" },
+        { kind: "assignment", assignment_id: "A-1" },
+        { kind: "assignment", assignment_id: "A-2" },
+      ];
+      recipients.forEach((recipient, i) => {
+        addNotification(db, `N-${i}`, "C-2", recipient);
+      });
+      const before = notificationRows(db);
+      const values = collectSensitiveValues(db, P);
+      expect(() => scrubReviewSnapshot(db, values)).not.toThrow();
+      expect(notificationRows(db)).toEqual(
+        before.map((row) => ({
+          ...row,
+          doc: { ...row.doc, bell: REDACTED },
+        })),
+      );
+      expect(notificationRows(db)).toHaveLength(5);
+      expect(scanReviewSnapshot(db, values).hits).toEqual([]);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("a single sensitive notification does not contaminate ordinary recipient enums", () => {
+    buildFixture();
+    const db = new DatabaseSync(dbPath);
+    try {
+      addNotification(db, "N-sensitive", "C-2", { kind: "needs_you" });
+      addNotification(db, "N-ordinary", "C-1", { kind: "needs_you" });
+      // Only recipient_kind is exempted, not arbitrary *_kind text fields.
+      db.prepare(
+        "UPDATE cards SET doc = json_set(doc, '$.private_kind', ?) WHERE id = 'C-2'",
+      ).run("敏感自定义分类的正文内容");
+      const before = notificationRows(db);
+      const values = collectSensitiveValues(db, P);
+      const collected = [...values.words, ...values.literals].map(
+        (v) => v.value,
+      );
+      for (const kind of ["needs_you", "pm_office", "pm_ops", "assignment"])
+        expect(collected).not.toContain(kind);
+      expect(collected).toContain("敏感自定义分类的正文内容");
+      scrubReviewSnapshot(db, values);
+      expect(notificationRows(db)).toEqual(
+        before.map((row) => ({
+          ...row,
+          doc: { ...row.doc, bell: REDACTED },
+        })),
+      );
+      expect(
+        docOf(db, "SELECT doc FROM cards WHERE id = 'C-2'").private_kind,
+      ).toBe(REDACTED);
+      expect(scanReviewSnapshot(db, values).hits).toEqual([]);
+    } finally {
+      db.close();
+    }
+  });
+
   test("a scrubbed fixture passes the scan and keeps the project usable", () => {
     const { db, values } = prepare();
     const triggers = Number(
@@ -463,6 +583,125 @@ describe("scrub", () => {
 });
 
 describe("scan blocks every class", () => {
+  test.each([
+    {
+      name: "a placeholder in both representations",
+      kind: REDACTED,
+      assignment: "",
+      recipient: { kind: REDACTED },
+      rule: "notification_recipient_kind",
+      column: "recipient_kind",
+    },
+    {
+      name: "an unknown kind",
+      kind: "unknown_recipient",
+      assignment: "",
+      recipient: { kind: "unknown_recipient" },
+      rule: "notification_recipient_kind",
+      column: "recipient_kind",
+    },
+    {
+      name: "a different JSON kind",
+      kind: "needs_you",
+      assignment: "",
+      recipient: { kind: "pm_office" },
+    },
+    {
+      name: "a placeholder JSON kind",
+      kind: "needs_you",
+      assignment: "",
+      recipient: { kind: REDACTED },
+    },
+    {
+      name: "a different assignment",
+      kind: "assignment",
+      assignment: "A-1",
+      recipient: { kind: "assignment", assignment_id: "A-2" },
+    },
+    {
+      name: "a missing JSON assignment",
+      kind: "assignment",
+      assignment: "A-1",
+      recipient: { kind: "assignment" },
+    },
+    {
+      name: "an empty assignment",
+      kind: "assignment",
+      assignment: "",
+      recipient: { kind: "assignment", assignment_id: "" },
+    },
+    {
+      name: "an assignment on a logical recipient column",
+      kind: "pm_ops",
+      assignment: "A-1",
+      recipient: { kind: "pm_ops" },
+    },
+    {
+      name: "an assignment on a logical JSON recipient",
+      kind: "pm_office",
+      assignment: "",
+      recipient: { kind: "pm_office", assignment_id: "A-1" },
+    },
+    {
+      name: "a missing recipient",
+      kind: "needs_you",
+      assignment: "",
+      recipient: undefined,
+    },
+    {
+      name: "a null recipient",
+      kind: "needs_you",
+      assignment: "",
+      recipient: null,
+    },
+    {
+      name: "a non-object recipient",
+      kind: "needs_you",
+      assignment: "",
+      recipient: REDACTED,
+    },
+  ])(
+    "rejects $name independently of sensitive-card skeleton checks",
+    ({ kind, assignment, recipient, rule, column }) => {
+      const { db, values } = prepare();
+      try {
+        addNotification(db, "N-ordinary", "C-1", { kind: "needs_you" });
+        scrubReviewSnapshot(db, values);
+        const doc = docOf(
+          db,
+          "SELECT doc FROM notifications WHERE id = 'N-ordinary'",
+        );
+        db.prepare(
+          "UPDATE notifications SET recipient_kind = ?, assignment_id = ?, doc = ? WHERE id = 'N-ordinary'",
+        ).run(kind, assignment, JSON.stringify({ ...doc, recipient }));
+        const rowid = Number(
+          db
+            .prepare(
+              "SELECT rowid AS r FROM notifications WHERE id = 'N-ordinary'",
+            )
+            .get()?.r,
+        );
+        const result = scanReviewSnapshot(db, values);
+        expect(result.passed).toBe(false);
+        expect(result.hits).toContainEqual({
+          rule: rule ?? "notification_recipient_consistency",
+          category: "sensitive_card",
+          table: "notifications",
+          rowid,
+          column: column ?? "doc",
+          where: "table",
+        });
+        expect(
+          result.hits.some((hit) => hit.rule === "sensitive_card_skeleton"),
+        ).toBe(false);
+        expect(JSON.stringify(result)).not.toContain("unknown_recipient");
+        expect(JSON.stringify(result)).not.toContain(REDACTED);
+      } finally {
+        db.close();
+      }
+    },
+  );
+
   const leaks: ReadonlyArray<{
     name: string;
     category: string;

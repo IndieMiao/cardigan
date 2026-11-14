@@ -19,7 +19,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { Store } from "@cardigan/store";
+import { Store, scrubReviewSnapshot } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { main } from "./index.js";
 import type { CliIo } from "./io.js";
@@ -35,6 +35,13 @@ const OTHER = "beta-secret";
 const SENSITIVE_TITLE = "收购计划草案第二版（内部）";
 const HOST = "review-host-xyz";
 const NOW = "2026-11-14T00:00:00.000Z";
+const RECIPIENTS = [
+  { kind: "needs_you" },
+  { kind: "pm_office" },
+  { kind: "pm_ops" },
+  { kind: "assignment", assignment_id: "A-1" },
+  { kind: "assignment", assignment_id: "A-2" },
+];
 
 let dir: string;
 let dataDir: string;
@@ -93,6 +100,39 @@ beforeEach(() => {
     OTHER,
     card(OTHER, "C-1", { title: "beta 项目的机密卡片" }),
   );
+  db.prepare(
+    "INSERT INTO events (project_id, id, card_id, stream, seq, type, doc) VALUES (?, 'E-1', 'C-2', 'C-2', 1, 'comment_posted', ?)",
+  ).run(P, JSON.stringify({ id: "E-1", card_id: "C-2" }));
+  RECIPIENTS.forEach((recipient, i) => {
+    const doc = {
+      id: `N-${i}`,
+      project_id: P,
+      event_id: "E-1",
+      card_id: "C-2",
+      recipient,
+      seq: 1,
+      kind: "comment",
+      status: "pending",
+      attempts: 0,
+      bell: SENSITIVE_TITLE,
+      created_at: NOW,
+      updated_at: NOW,
+    };
+    db.prepare(
+      "INSERT INTO notifications (project_id, id, event_id, recipient_kind, assignment_id, card_id, seq, kind, status, doc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run(
+      P,
+      doc.id,
+      doc.event_id,
+      recipient.kind,
+      recipient.assignment_id ?? "",
+      doc.card_id,
+      doc.seq,
+      doc.kind,
+      doc.status,
+      JSON.stringify(doc),
+    );
+  });
   db.close();
 });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
@@ -167,7 +207,7 @@ test("publishes a scanned copy as current with 0640 files in the share group", a
   expect(manifest).toMatchObject({
     format: "cardigan-review-snapshot",
     project: P,
-    rules_version: 1,
+    rules_version: 2,
     scan: { passed: true, hit_count: 0 },
     database: {
       file: "cardigan.db",
@@ -177,6 +217,9 @@ test("publishes a scanned copy as current with 0640 files in the share group", a
   expect(manifest.source_schema_version).toBeGreaterThan(0);
   expect(manifest.row_counts.cards).toBe(2);
   expect(manifest.row_counts.tokens).toBe(0);
+  expect(manifest.row_counts.notifications).toBe(5);
+  expect(manifest.scan.rules).toContain("notification_recipient_kind");
+  expect(manifest.scan.rules).toContain("notification_recipient_consistency");
   for (const raw of [OTHER, SENSITIVE_TITLE, HOST, "/home/"])
     expect(manifestText).not.toContain(raw);
 
@@ -197,12 +240,46 @@ test("publishes a scanned copy as current with 0640 files in the share group", a
   store.close();
 });
 
+function expectSnapshotRecipients(link: string): void {
+  const db = new DatabaseSync(join(out, link, "cardigan.db"), {
+    readOnly: true,
+  });
+  try {
+    const rows = db.prepare("SELECT * FROM notifications ORDER BY id").all();
+    expect(rows).toHaveLength(5);
+    RECIPIENTS.forEach((recipient, i) => {
+      const expected = {
+        id: `N-${i}`,
+        event_id: "E-1",
+        kind: "comment",
+        status: "pending",
+      };
+      const row = rows[i];
+      expect(row).toMatchObject({
+        ...expected,
+        recipient_kind: recipient.kind,
+        assignment_id: recipient.assignment_id ?? "",
+      });
+      expect(JSON.parse(String(row?.doc))).toMatchObject({
+        ...expected,
+        recipient,
+        bell: "[已去敏]",
+      });
+    });
+  } finally {
+    db.close();
+  }
+}
+
 test("keeps exactly one previous snapshot and swaps current atomically", async () => {
   expect((await create()).code).toBe(0);
+  expectSnapshotRecipients("current");
   const first = readlinkSync(join(out, "current"));
   expect(existsSync(join(out, "previous"))).toBe(false);
 
   expect((await create()).code).toBe(0);
+  expectSnapshotRecipients("current");
+  expectSnapshotRecipients("previous");
   const second = readlinkSync(join(out, "current"));
   expect(second).not.toBe(first);
   expect(readlinkSync(join(out, "previous"))).toBe(first);
@@ -359,6 +436,54 @@ async function twoGood() {
   const b = readlinkSync(join(out, "current"));
   return { a, b, dirs: readdirSync(join(out, "snapshots")).sort() };
 }
+
+test("a forced scrub failure preserves both published snapshots and the source", async () => {
+  const { a, b, dirs } = await twoGood();
+  const source = join(dataDir, "cardigan.db");
+  const paths = [
+    source,
+    join(out, "current", "cardigan.db"),
+    join(out, "previous", "cardigan.db"),
+  ];
+  const hashes = paths.map(sha);
+  await expect(
+    create({
+      scrub: () => {
+        throw new Error("injected scrub failure");
+      },
+    }),
+  ).rejects.toThrow("injected scrub failure");
+  expect(readlinkSync(join(out, "current"))).toBe(b);
+  expect(readlinkSync(join(out, "previous"))).toBe(a);
+  expect(readdirSync(join(out, "snapshots")).sort()).toEqual(dirs);
+  expect(paths.map(sha)).toEqual(hashes);
+  expect(readdirSync(work)).toEqual([]);
+});
+
+test("an invalid notification recipient is located by the scan and never published", async () => {
+  const { a, b, dirs } = await twoGood();
+  const result = await create({
+    scrub: (db, values) => {
+      const summary = scrubReviewSnapshot(db, values);
+      db.prepare(
+        "UPDATE notifications SET recipient_kind = ?, doc = json_set(doc, '$.recipient.kind', ?) WHERE id = 'N-0'",
+      ).run("[已去敏]", "[已去敏]");
+      return summary;
+    },
+  });
+  expect(result.code).not.toBe(0);
+  expect(result.err).toContain("未发布");
+  expect(result.err).toMatch(
+    /notification_recipient_kind：notifications rowid \d+ recipient_kind/,
+  );
+  expect(result.err).not.toContain("[已去敏]");
+  expect(result.err).not.toContain(SENSITIVE_TITLE);
+  expect(readlinkSync(join(out, "current"))).toBe(b);
+  expect(readlinkSync(join(out, "previous"))).toBe(a);
+  expect(readdirSync(join(out, "snapshots")).sort()).toEqual(dirs);
+  expect(readdirSync(work)).toEqual([]);
+});
+
 const failAt =
   (...steps: PublishStep[]) =>
   (step: PublishStep) => {
