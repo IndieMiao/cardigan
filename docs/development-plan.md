@@ -338,6 +338,8 @@ Standing Assignment (scope=project): PM Office, PM Ops — not tied to a WorkIte
 
 C-200：增加 `context_handoff_remaining_pct`（默认 20）和 `context_restart_remaining_pct`（默认 15），均为大于 0、小于 100 的有限百分比，且换会话比例必须小于交接提醒比例。比较的是 **剩余比例 `100 − used_percentage`**，到边界即触发。旧项目按默认值读取，CLI `preference get/set context-handoff-remaining`、`context-restart-remaining` 使用既有偏好存储；只有 human 可改，两个字段与 `project_preferences_updated` 的旧值／新值审计在同一事务保存，非法组合整体拒绝。同值保存不产生事件，不新增表或 Agent 工具权限。
 
+C-237（ADR 0008 第一批）：新增 `system_auto_assign_verifiers`、`system_reminders` 两个独立布尔偏好，未设置即关闭；人通过设置页保存，Agent 无写权限。`system_reminder_policy` 是可清除的整体配置，包含人填写的分钟范围 `min_minutes/max_minutes`、次数范围 `min_count/max_count`、就绪未指派和核对 pending 两类分钟阈值（null 单独关闭）、重复开关、重复间隔和最多次数。均不代填数值；保存时校验范围、正整数与安全运算、重复开关和间隔的一致性，拒绝非法配置，变更与 human 审计同事务。没有完整配置则不催办。设置页独立开关和工作项手动标记不改变任何合并授权。
+
 **Card**
 
 - 基本信息：`id`、`project_id`、`title`、`goal`、`acceptance_criteria`（由卡片模板强制）
@@ -370,6 +372,7 @@ C-144：迁移 0019 在 C-132 的编号格式迁移 0018 之后，将旧数字�
 - `depends_on[]`
 - `target_work_item_id?`：仅 verify 类型，表示验证哪个产出型工作项
 - `completion_criteria`、`status`、`assignment_id?`
+- `manual_assign?`（C-237）：PM 或 human 可通过工作项更新设置和清除，true 时系统自动指派与催办都跳过；非 PM Agent 和 system 不能经此管理入口修改。Workbench 在工作项处提供人工开关和标记。
 - `template_key?`：模板生成工作项的稳定键，用来识别主产出和本次完成申请的审核项。
 - `replaced_by_work_item_id?`（C-110）：已被替换的验证项指向新项；旧项保留模板 key、目标和 Assignment 归属，置为 cancelled、required=false，仅用于历史追溯。
 - `reported_blocker?`：`{reason, needs: role | human, reported_by, reported_at}`。报告者来自 Actor，时间来自 Clock；它是独立阻塞原因，其他阻塞解除不能清除它。重复上报更新当前报告，历史保留在时间线。
@@ -765,6 +768,8 @@ C-152：意图记录的 RuntimeRef 不属于 server 当前运行时（`machine_i
 
 ---
 
+C-237 系统规则补充：自动指派和催办只由内部 system 命令执行，不开放 Agent 工具或伪造 Actor 的参数；每次在同一新鲜事务中重查开关、目标、手动标记和隔离条件。两类开关默认关闭，无合格员工交回 PM Ops/人；不改上述合并确认、独立复核和业务拍板边界。
+
 ## 5. 时间线与结构化条目
 
 ### 5.1 原则
@@ -869,6 +874,12 @@ M3.4 主机循环通过 startDispatchLoop 启动：默认每轮结束后等待 1
 - 空闲时即使没有收到门铃，也可以低频调用 `get_updates` 自查，防止漏铃。
 
 ### 6.4 路由规则
+
+C-237：`system_auto_assign_verifiers` 开启时，Dispatcher 在路由前的新事务扫描当前可审交付请求的无负责人验证项（含完成申请的 PM 验收，human 验收模板排除）。仅当未取消、未替换、无手动标记且没有当前或历史 Assignment 时自动指派；复用 `assign` 的角色、员工排序和隔离代码，必须选到在职、非外接且满足当前/历史作者隔离、独立复核三方隔离的员工。成功写 system 的指派审计和时间线，交付门铃直接到新负责人；没有合格员工或角色不可用时，系统写明原因交 PM Ops，不创建无员工身份、不放宽隔离；无活跃 Ops 时 Needs You 显示待处理事项。相同交付与失败原因去重，后续资格变化可恢复；PM 可用既有释放和替换验证项流程处理。`project_snapshot.system_rules` 显示开关，PM Ops 开关开启后不重复抢派，关闭后沿用原职责。
+
+`system_reminders` 开启且完整配置后，在同一调度循环扫描就绪未指派项和 awaiting_merge 卡上对当前版本 pending 的核对项。等待按持久事实计时，开启后才起算，无可信时间的旧项从首次观察起算；周期开始、结束、发送次数均持久化，重启不重复。手动标记项跳过，自动指派失败已通知的同一交付不另催；由审核投影驱动的核对发给复核负责人，普通核对和就绪项发给 PM Ops，Ops 不在则进 Needs You。开关关闭即停止未来动作，历史指派和审计保留。
+
+PM Ops 自身 Run 失活继续复用 C-220 看门狗和 `run_inactive` 去重：固定通知 Needs You、PM Office 与 active 常驻 host_ops，不发送给卡住的 PM Ops 自身。不新增失活计时器或阈值。
 
 | 发生的事 | 默认通知对象 |
 |---|---|

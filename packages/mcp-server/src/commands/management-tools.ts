@@ -315,6 +315,7 @@ const schemas = {
     max_review_rounds: z.number().int().positive().optional(),
   },
   update_work_item: {
+    manual_assign: z.boolean().optional(),
     work_item_id: id("work_item"),
     title: text.optional(),
     completion_criteria: z.array(text).optional(),

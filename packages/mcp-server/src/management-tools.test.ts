@@ -1603,3 +1603,23 @@ test("C-202: submit_delivery card_completion over MCP gives the plain error for 
   });
   expect(deliveries()).toHaveLength(2);
 });
+
+test("C-237 manual assignment flag uses existing PM tool authority", async () => {
+  const added = await ok<WorkItem>(office, "create_work_item", {
+    card_id: card.id,
+    title: "Held verifier",
+    kind: "verify",
+    role_id: "reviewer",
+    required: false,
+    completion_criteria: ["Review"],
+  });
+  for (const manual_assign of [true, false])
+    expect(
+      await ok<WorkItem>(office, "update_work_item", {
+        work_item_id: added.id,
+        manual_assign,
+      }),
+    ).toMatchObject({ manual_assign });
+  expect(managementTools).not.toHaveProperty("auto_assign_verifier");
+  expect(managementTools).not.toHaveProperty("remind_system_waits");
+});

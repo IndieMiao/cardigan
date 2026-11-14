@@ -409,3 +409,36 @@ test("C-193: snooze cap shows 72 hours, validates bounds and saves the setting",
     expect(save).toHaveBeenCalledWith("p-1", 10080, expect.any(String)),
   );
 });
+
+test("C-237 system toggles are independent, off initially, and numeric settings have no defaults", async () => {
+  const setSystemRules = vi.fn().mockResolvedValue(undefined);
+  render(
+    <SettingsPage projectId="p-1" client={fakeClient({ setSystemRules })} />,
+  );
+  const assign = await screen.findByRole("checkbox", {
+    name: "自动指派验证项（含完成验收）",
+  });
+  const remind = screen.getByRole("checkbox", { name: "启用催办提醒" });
+  expect((assign as HTMLInputElement).checked).toBe(false);
+  expect((remind as HTMLInputElement).checked).toBe(false);
+  fireEvent.click(assign);
+  fireEvent.click(screen.getByRole("button", { name: "保存自动指派与催办" }));
+  await waitFor(() =>
+    expect(setSystemRules).toHaveBeenCalledWith(
+      "p-1",
+      {
+        system_auto_assign_verifiers: true,
+        system_reminders: false,
+        system_reminder_policy: null,
+      },
+      expect.any(String),
+    ),
+  );
+  fireEvent.click(
+    screen.getByRole("checkbox", { name: "设置催办阈值和允许范围" }),
+  );
+  for (const field of screen
+    .getAllByRole("spinbutton")
+    .filter((node) => node.closest("fieldset")))
+    expect((field as HTMLInputElement).value).toBe("");
+});

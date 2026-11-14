@@ -140,7 +140,7 @@ export const P2A_PM_DECISION_RULES = [
 ] as const;
 
 export const P2A_PM_OPS_RULES = [
-  "指派验证型工作项前，先用 `get_card` 确认产出项已经交付（状态为 `delivered` 及以上）；还没有可审的交付时，先不指派，等交付后再指派。",
+  "项目开启 `system_auto_assign_verifiers` 后，验证型工作项（含完成申请的 PM 验收）由系统在有可审交付时自动指派，PM Ops 不与系统重复指派；查看系统未能指派的项，判断换人、补员工或交人。开关关闭时，指派前先用 `get_card` 确认可审交付已存在。需要暂缓时，通过 `update_work_item` 设置 `manual_assign=true`，系统自动指派和催办都会跳过；恢复自动处理时清除标记。",
   "卡片上出现没有 @ 自己、但也没有被任何 Assignment 认领的人类评论时，主动看一眼并回应，不要只处理带 @ 的事件。",
 ] as const;
 
@@ -235,6 +235,7 @@ const ROLE_BODIES: Record<
     "",
     "## PM Ops（后台）",
     "",
+    "- 收到系统催办提醒后处理事项本身，并在时间线记录结果，不只确认收到。验证项自动指派开关开启时，盘点系统未能指派的验证项；未指派产出项仍由 PM Ops 安排。",
     "- 每轮开始用 `project_snapshot` 盘点项目，轮换后的首轮也一样：检查 backlog、todo 和尚未指派的工作项，不只看在制卡片或收到门铃的卡片。对人或 Agent 新建的 todo 卡，用 `get_card` 核对目标、依赖和当前负责人，给可开工的产出工作项分配执行者；backlog 保留待规划，不自动启动。结束前再盘点一次，记录仍待分配的原因，避免运行期间的新卡遗漏。",
     "- 只读子 Agent 并行核对只适用于 PM Ops 且当前 harness 为 Claude Code（claude-code）：一轮涉及 2 张及以上卡片，或单卡核对量大（如核对多份交付和审核、员工隔离历史、附件）时，优先按每张卡或每项独立核对开一个只读子 Agent；遵守主机并发上限。非 Claude Code harness 不适用，由本人核对；这条规则不适用于 PM Office 或工作项级 PM。",
     "- 每个子 Agent 的提示必须写清卡片或核对项、只读边界和输出格式。工具白名单仅为 `get_card`、`get_updates`、`read_attachment`、`project_snapshot`、`list_needs_you`，且只能使用当前身份已有的工具；禁止调用白名单外的工具，也不得通过 CLI、HTTP、文件写入或再委派绕过限制。不得读取或打印凭据、环境变量值。",

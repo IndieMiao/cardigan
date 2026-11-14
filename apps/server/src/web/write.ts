@@ -32,6 +32,7 @@ import {
   recordDecision,
   rollbackRole,
   runLimitMaximumMessage,
+  type SystemReminderPolicy,
   setCardSensitive,
   setProjectPreferences,
   setRunLimit,
@@ -39,6 +40,7 @@ import {
   type TemplateChange,
   updateCard,
   updateRole,
+  updateWorkItem,
   uploadAttachment,
 } from "@cardigan/domain";
 import {
@@ -656,6 +658,38 @@ export async function serveWrite(
     sendJson(c.res, 200, output);
     return true;
   }
+  const manualWorkItem = /^\/work-items\/(W-[0-9]+)\/manual-assign$/.exec(rest);
+  if (manualWorkItem) {
+    if (c.req.method !== "POST") methodNotAllowed(["POST"]);
+    c.authorize();
+    const input = parsed(
+      z.object({ manual_assign: z.boolean() }).strict(),
+      await readJsonBody(c.req),
+    );
+    const work_item_id = parsed(id("work_item"), manualWorkItem[1]);
+    const key = parsed(
+      text,
+      c.req.headers["idempotency-key"],
+      "工作项写入需要 Idempotency-Key",
+    );
+    const context: CommandContext = {
+      ...c,
+      idempotency: { key, request: { rest, input } },
+    };
+    sendJson(
+      c.res,
+      200,
+      run(context, (s, a, ports) =>
+        updateWorkItem(
+          s,
+          a,
+          { work_item_id, manual_assign: input.manual_assign },
+          ports,
+        ),
+      ),
+    );
+    return true;
+  }
   if (rest === "/preferences") {
     if (c.req.method === "GET") return false;
     if (c.req.method !== "POST") methodNotAllowed(["GET", "POST"]);
@@ -677,6 +711,9 @@ export async function serveWrite(
     const input = parsed(
       z
         .object({
+          system_auto_assign_verifiers: z.boolean().optional(),
+          system_reminders: z.boolean().optional(),
+          system_reminder_policy: z.unknown().optional(),
           auto_merge_after_minutes: z
             .number()
             .int()
@@ -716,6 +753,21 @@ export async function serveWrite(
         s,
         a,
         {
+          ...(input.system_auto_assign_verifiers !== undefined
+            ? {
+                system_auto_assign_verifiers:
+                  input.system_auto_assign_verifiers,
+              }
+            : {}),
+          ...(input.system_reminders !== undefined
+            ? { system_reminders: input.system_reminders }
+            : {}),
+          ...(input.system_reminder_policy !== undefined
+            ? {
+                system_reminder_policy:
+                  input.system_reminder_policy as SystemReminderPolicy | null,
+              }
+            : {}),
           ...(input.auto_merge_after_minutes !== undefined
             ? { auto_merge_after_minutes: input.auto_merge_after_minutes }
             : {}),
