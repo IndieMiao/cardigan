@@ -181,10 +181,11 @@ test("processed or missing items skip without sending, and sensitivity is read a
     1,
   );
 });
-test("sensitive item reaches adapter with only generic prompt and link", async () => {
+test("sensitive item reaches adapter with only project, generic prompt and link", async () => {
   store.uow.run((tx) => tx.cards.put(project_id, card({ sensitive: true })));
   await sender().tick();
   expect(fake.messages[0]).toEqual({
+    project: project_id,
     title: "有 1 条敏感事项待处理",
     url: "https://workbench.invalid/#/p/p-fictional/cards/C-1?at=human-action-H-1",
   });
@@ -436,3 +437,146 @@ test.each(["sent", "commit_failure", "timeout"] as const)(
     }
   },
 );
+
+const quiet = () => {
+  config = {
+    ...config,
+    quiet_hours: { timezone: "UTC", start: "23:00", end: "08:00" },
+  };
+};
+const addAction = (n: number) =>
+  store.uow.run((tx) => {
+    const id = `H-${n}` as HumanAction["id"];
+    tx.human_actions.put(project_id, { ...action, id, key: id });
+    tx.events.append(project_id, {
+      id: tx.ids.nextEventId(),
+      card_id: "C-1",
+      seq: tx.ids.nextEventSequence(project_id, "C-1"),
+      type: "human_action_requested",
+      actor: { kind: "human", project_id },
+      payload: { human_action_id: id },
+      created_at: now,
+    });
+  });
+
+test("quiet digest survives restart, removes handled items, rechecks sensitivity, and truncates once", async () => {
+  quiet();
+  for (let n = 2; n <= 23; n++) addAction(n);
+  await sender().tick();
+  expect(fake.messages).toHaveLength(0);
+  expect(
+    rows().every((r) => r.attempts === 0 && r.digest_id === "queued"),
+  ).toBe(true);
+  store.close();
+  store = Store.open({ dataDir: dir });
+  store.uow.run((tx) => {
+    tx.human_actions.put(project_id, { ...action, status: "done" });
+    tx.cards.put(project_id, card({ sensitive: true }));
+  });
+  advance(8 * 3600000);
+  await sender().tick();
+  expect(fake.messages).toHaveLength(1);
+  const digest = fake.messages[0];
+  if (!digest) throw new Error("Expected digest");
+  expect(digest.title).toBe("免打扰期间 22 条待处理");
+  if (!("items" in digest)) throw new Error("Expected digest");
+  expect(digest.items).toHaveLength(20);
+  expect(
+    digest.items.every(
+      (i) => i.title === "有 1 条敏感事项待处理" && !("card" in i),
+    ),
+  ).toBe(true);
+  expect(rows().filter((r) => r.status === "sent")).toHaveLength(22);
+  expect(rows().find((r) => r.item_id === "H-1")?.status).toBe("skipped");
+  await sender().tick();
+  expect(fake.messages).toHaveLength(1);
+});
+
+test("restart after quiet hours projects unscanned source events into one digest", async () => {
+  quiet();
+  addAction(2);
+  advance(8 * 3600000);
+  // Both source events happened while quiet, even though no sender was running then.
+  await sender().tick();
+  expect(fake.messages).toHaveLength(1);
+  expect(fake.messages[0]).toMatchObject({
+    total: 2,
+    title: "免打扰期间 2 条待处理",
+  });
+  addAction(3);
+  await sender().tick();
+  expect(fake.messages).toHaveLength(2);
+  expect(fake.messages[1]).not.toHaveProperty("items");
+});
+
+test("digest retries preserve the approved budget and membership across restart and local commit failure", async () => {
+  quiet();
+  addAction(2);
+  await sender().tick();
+  advance(8 * 3600000);
+  store.database.exec(`CREATE TRIGGER fail_digest BEFORE INSERT ON events WHEN NEW.type = 'ext_message_sent'
+    BEGIN SELECT RAISE(ABORT, 'digest commit failure'); END`);
+  await expect(sender().tick()).rejects.toThrow("digest commit failure");
+  expect(rows().every((r) => r.attempts === 1 && r.status === "pending")).toBe(
+    true,
+  );
+  expect(new Set(rows().map((r) => r.digest_id)).size).toBe(1);
+  store.database.exec("DROP TRIGGER fail_digest");
+  store.close();
+  store = Store.open({ dataDir: dir });
+  fake.result = "retryable";
+  advance(39999);
+  await sender().tick();
+  expect(fake.messages).toHaveLength(1);
+  advance(1);
+  await sender().tick();
+  expect(fake.messages).toHaveLength(2);
+  advance(59999);
+  await sender().tick();
+  expect(fake.messages).toHaveLength(2);
+  advance(1);
+  await sender().tick();
+  expect(fake.messages).toHaveLength(3);
+  expect(rows().every((r) => r.attempts === 3 && r.status === "failed")).toBe(
+    true,
+  );
+  // One terminal notice per original outbox item, never an external notification of that notice.
+  expect(
+    store.uow.read((tx) => notices(loadCommandState(tx, project_id))),
+  ).toHaveLength(2);
+  await sender().tick();
+  expect(fake.messages).toHaveLength(3);
+  expect(rows()).toHaveLength(2);
+});
+
+test("a digest is claimed atomically by concurrent senders and retry drops newly handled members", async () => {
+  quiet();
+  addAction(2);
+  await sender().tick();
+  advance(8 * 3600000);
+  const response = Promise.withResolvers<"retryable">();
+  const send = vi.fn(() => response.promise);
+  const first = sender({ adapters: { fake: () => ({ send }) } }).tick();
+  await sender({ adapters: { fake: () => ({ send }) } }).tick();
+  expect(send).toHaveBeenCalledTimes(1);
+  response.resolve("retryable");
+  await first;
+  store.uow.run((tx) => {
+    tx.human_actions.put(project_id, { ...action, status: "done" });
+    tx.cards.put(project_id, card({ sensitive: true }));
+  });
+  advance(30000);
+  await sender().tick();
+  expect(fake.messages[0]).toMatchObject({
+    total: 1,
+    items: [{ title: "有 1 条敏感事项待处理" }],
+  });
+  expect(rows().find((r) => r.item_id === "H-1")).toMatchObject({
+    attempts: 1,
+    status: "skipped",
+  });
+  expect(rows().find((r) => r.item_id === "H-2")).toMatchObject({
+    attempts: 2,
+    status: "sent",
+  });
+});

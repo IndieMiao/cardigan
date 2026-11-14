@@ -1,10 +1,22 @@
 import { randomBytes } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HOST_OPS_ROLE_TOOLS, queueRun } from "@cardigan/domain";
+import { RuntimeTargets } from "@cardigan/host";
 import { defaultRoleDefinition } from "@cardigan/roles";
-import { HerdrRuntime } from "@cardigan/runtime-herdr";
+import {
+  executionPaths,
+  HerdrRuntime,
+  prepareAgentProject,
+} from "@cardigan/runtime-herdr";
 import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { StartById } from "./assignment.js";
@@ -327,6 +339,108 @@ async function prepareRotation() {
   expect(await main(["role", "update", "--file", roleFile], io)).toBe(0);
   return required(assignments()[0]);
 }
+
+test("rotation scrubs the bound account credentials and preserves the global base and other Assignment", async () => {
+  const previous = await prepareRotation();
+  const targetRoot = mkdtempSync(join(tmpdir(), "cg-rotate-target-"));
+  try {
+    chmodSync(dir, 0o700);
+    chmodSync(targetRoot, 0o2750);
+    const local = store.uow.read((tx) => tx.machines.get(project, "local"));
+    if (!local) throw new Error("Missing local machine");
+    const worker = {
+      machine_id: "local",
+      project_id: project,
+      os: local.os,
+      arch: local.arch,
+      session: "project-session",
+      generation: "one",
+      execution: {
+        mode: "agent-ssh" as const,
+        dataDir: dir,
+        agentRoot: targetRoot,
+        gid: process.getgid?.() ?? 0,
+        machine: "project-agent",
+        host: "localhost",
+        user: "project_a",
+        identityFile: "/synthetic/key",
+        knownHostsFile: "/synthetic/known_hosts",
+        path: "/usr/bin:/bin",
+      },
+    };
+    let released = false;
+    const release = vi.fn(async () => {
+      released = true;
+      return { ok: true, value: undefined };
+    });
+    const adapter = {
+      release,
+      status: async () =>
+        released
+          ? { ok: false, error: { code: "runtime_not_found", message: "gone" } }
+          : {
+              ok: true,
+              value: { process: "alive", agent: "idle", observed_seq: 1 },
+            },
+    } as unknown as HerdrRuntime;
+    const created = await RuntimeTargets.create({
+      execution: { mode: "local", dataDir: dir },
+      store,
+      project,
+      workers: () => [worker],
+      factory: async () => ({ ok: true, value: adapter }),
+    });
+    if (!created.ok) throw new Error("Invalid fixture target");
+    const selected = created.value.resolve(project, "local").execution;
+    const target = selected.target;
+    if (!target) throw new Error("Missing fixture binding");
+    const ref = {
+      machine_id: "local",
+      runtime_machine: "project-agent",
+      terminal_ref: "project-agent/t1",
+      agent_name: "fixture",
+      target,
+    };
+    store.uow.run((tx) =>
+      tx.assignments.put(project, { ...previous, runtime_ref: ref }),
+    );
+    await prepareAgentProject(worker.execution, project, previous.id);
+    await prepareAgentProject(worker.execution, project, "A-99");
+    const secret = join(
+      executionPaths(selected, project, previous.id).runDir,
+      "secrets.env",
+    );
+    const other = join(
+      executionPaths(selected, project, "A-99").runDir,
+      "secrets.env",
+    );
+    const baseDir = executionPaths(
+      { mode: "local", dataDir: dir },
+      project,
+      previous.id,
+    ).runDir;
+    mkdirSync(baseDir, { recursive: true });
+    const base = join(baseDir, "secrets.env");
+    for (const path of [secret, other, base])
+      writeFileSync(path, "SYNTHETIC_ONLY=fixture\n", { mode: 0o600 });
+    vi.spyOn(RuntimeTargets, "create").mockResolvedValue(created);
+    const start = vi.fn(async () => 0);
+    expect(
+      await main(["host-ops", "rotate"], io, { start }),
+      errors.join("\n"),
+    ).toBe(0);
+    expect(release).toHaveBeenCalledWith(ref, { force: true });
+    expect(existsSync(secret)).toBe(false);
+    expect(existsSync(other)).toBe(true);
+    expect(existsSync(base)).toBe(true);
+    expect(assignments().find((a) => a.id === previous.id)?.status).toBe(
+      "released",
+    );
+    expect(start).toHaveBeenCalledOnce();
+  } finally {
+    rmSync(targetRoot, { recursive: true, force: true });
+  }
+});
 
 test("unconfirmed terminal exit leaves the old Assignment, token and inbox untouched", async () => {
   const previous = await prepareRotation();

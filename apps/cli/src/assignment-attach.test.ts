@@ -12,7 +12,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Assignment } from "@cardigan/domain";
-import { Store } from "@cardigan/store";
+import { defaultRoleDefinition } from "@cardigan/roles";
+import { Store, writeRole } from "@cardigan/store";
 import {
   afterEach,
   beforeAll,
@@ -87,6 +88,8 @@ if (args[0] === '--version') {
   console.log(JSON.stringify({seq: 1, terminals: [{address: process.env.FIXTURE_TERMINAL || 't7', state: process.env.FIXTURE_STATE}]}));
 } else if (args[0] === 'machine') {
   console.log(JSON.stringify(args[1] === 'ls' ? {machines: []} : {version: '0.1.18'}));
+} else if (args[0] === 'kill' || args[0] === 'rm') {
+  console.log('{}');
 } else if (args[0] === 'attach') {
   fs.writeFileSync(path.join(process.env.FIXTURE_ROOT, 'attached'), JSON.stringify({
     args, session: process.env.HC_SESSION, socket: process.env.HC_SOCKET,
@@ -584,6 +587,71 @@ describe("C-152: server-registered runtime", () => {
       "get",
     ]);
   });
+
+  test.each(["fixture", "other"])(
+    "legacy local attach/stop coexist with an SSH ref in project %s",
+    (otherProject) => {
+      registerAgentSsh();
+      delete env.CARDIGAN_RUNTIME_MODE;
+      delete env.CARDIGAN_HC_SESSION;
+      const data = Store.open({ dataDir: join(root, "data") });
+      if (otherProject !== "fixture")
+        data.createProject({ id: otherProject, name: "Other" });
+      const foreign = data.uow.run((tx) => {
+        writeRole(
+          tx,
+          "fixture",
+          {
+            ...defaultRoleDefinition("pm", {
+              harness: "pi",
+              launch_profile_ref: "fixture",
+            }),
+            version: 1,
+          },
+          { mode: "add" },
+        );
+        const current = tx.assignments.get("fixture", "A-1");
+        if (!current) throw new Error("Missing fixture assignment");
+        const other: Assignment = {
+          ...current,
+          id: "A-2",
+          runtime_ref: {
+            machine_id: "local",
+            runtime_machine: "cardigan-agent",
+            terminal_ref: "cardigan-agent/t2",
+            agent_name: "ssh-fixture",
+          },
+        };
+        tx.assignments.put(otherProject, other);
+        return other;
+      });
+      data.close();
+      const attached = run(["--print"]);
+      expect(attached.code, attached.output).toBe(0);
+      expect(attached.output).toContain("attach 't7'");
+      const stopped = cli([
+        "assignment",
+        "stop",
+        "A-1",
+        "--project",
+        "fixture",
+      ]);
+      expect(stopped.code, stopped.output).toBe(0);
+      const commands = calls().map((line) => JSON.parse(line));
+      expect(commands).toContainEqual(["kill", "t7", "--json"]);
+      expect(commands).toContainEqual(["rm", "t7", "--json"]);
+      expect(
+        commands.some(
+          (args) => args[0] === "machine" || args.includes("cardigan-agent/t2"),
+        ),
+      ).toBe(false);
+      const after = Store.open({ dataDir: join(root, "data") });
+      expect(
+        after.uow.read((tx) => tx.assignments.get(otherProject, "A-2")),
+      ).toEqual(foreign);
+      after.close();
+    },
+  );
 
   test("attach to a terminal outside the registered runtime names the real cause", () => {
     registerAgentSsh();

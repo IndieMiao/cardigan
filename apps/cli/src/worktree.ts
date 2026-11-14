@@ -14,7 +14,8 @@ import {
   LocalGitTransport,
   type WorkspaceGit,
 } from "@cardigan/git-transport";
-import { type ExecutionConfig, HerdrRuntime } from "@cardigan/runtime-herdr";
+import { RuntimeTargets } from "@cardigan/host";
+import type { ExecutionConfig } from "@cardigan/runtime-herdr";
 import { openStore as openCardiganStore, type Store } from "@cardigan/store";
 import { CliError, EXIT, formatCommandError } from "./errors.js";
 import {
@@ -213,23 +214,19 @@ async function diffCommand(
     );
     const dataDir = resolveDataDir(io, optional(parsed.flags, "data-dir"));
     // Workspace Git must use the server's runtime (C-152).
-    const execution = await launchExecution(io, dataDir);
+    let execution = await launchExecution(io, dataDir);
+    const { assignment } = context(store, project_id, id);
+    const created = await RuntimeTargets.create({
+      execution,
+      session: io.env.CARDIGAN_HC_SESSION ?? "cardigan",
+      env: io.env,
+      store,
+      project: project_id,
+    });
+    if (!created.ok) throw new CliError("受信运行时配置无效", EXIT.failure);
+    execution = created.value.forLaunch(project_id, assignment).execution;
     // Workspace Git in agent-ssh mode must run as the agent (§12.6).
-    const runtime =
-      execution.mode === "agent-ssh"
-        ? await (async () => {
-            const created = await HerdrRuntime.create({
-              execution,
-              session: io.env.CARDIGAN_HC_SESSION ?? "cardigan",
-            });
-            if (!created.ok)
-              throw new CliError(
-                formatCommandError("连接运行时", "Herdr", created.error),
-                EXIT.failure,
-              );
-            return created.value;
-          })()
-        : undefined;
+    const runtime = execution.mode === "agent-ssh" ? created.value : undefined;
     // agent-ssh: workspace Git runs through the Agent entry, never as the host.
     const workspace: WorkspaceGit | undefined =
       runtime === undefined
@@ -253,7 +250,6 @@ async function diffCommand(
             },
           };
     const binding = worktrees(store, project_id, dataDir, execution, workspace);
-    const { assignment } = context(store, project_id, id);
     const diff = await binding.service.diffWorktree({
       project: binding.project,
       assignment,

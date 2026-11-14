@@ -16,6 +16,7 @@ import {
   CHECKOUT_LIMITS,
   type CheckoutInput,
   type CheckoutResult,
+  ExecutorPreparationError,
   loadMergeGateConfig,
   type ProjectMergeGate,
   runCapacitySnapshot,
@@ -1059,41 +1060,56 @@ test("Q-208: an executor shared by two projects blocks the check entirely: no re
   }
 });
 
-test("C-130: an executor whose SSH preparation fails records a start failure and never falls back to the host", async () => {
-  const { f, check } = await fixture("auto");
-  const c = controller(f);
-  c.setConfig({
-    status: "enabled",
-    checks: [{ name: "test", run: "true" }],
-    env: {},
-    totalTimeoutMs: 1000,
-    executor: ciExecutor(1),
-  });
-  c.run.mockRejectedValueOnce(
-    new Error("Executor checkout preparation failed"),
-  );
-  await c.gate.tick([f.project_id]);
-  expect(check()?.status).toBe("failed");
-  expect(check()?.checks).toEqual([]);
-  expect(
-    f
-      .state()
-      .events.some(
-        (e) =>
-          e.type === "merge_check_started" ||
-          e.type === "merge_executor_unreachable",
-      ),
-  ).toBe(false);
-  expect(f.state().human_actions).toEqual([]);
-  await c.gate.tick([f.project_id]);
-  expect(check()?.summary).not.toContain("preparation");
-  expect(c.run).toHaveBeenCalledTimes(1);
-  expect(c.run.mock.calls[0]?.[0].execution).toMatchObject({
-    mode: "agent-ssh",
-    host: "cardigan-ci",
-  });
-  expect(c.git.publish).not.toHaveBeenCalled();
-});
+test.each([
+  [undefined, "候选同步或检查执行入口失败，请检查执行环境"],
+  [3, "根目录缺失、为链接或无法进入"],
+  [9, "准备目录为链接或无法进入"],
+  [10, "准备目录的真实路径、属主或身份不符"],
+  [255, "SSH 通道失败"],
+  [0, "完成标记缺失或无效"],
+  [42, "命令返回未知错误"],
+  [null, "命令未正常结束"],
+] as const)(
+  "executor preparation exit %s records a distinct start failure without retry or fallback",
+  async (code, reason) => {
+    const { f, check } = await fixture("auto");
+    const c = controller(f);
+    c.setConfig({
+      status: "enabled",
+      checks: [{ name: "test", run: "true" }],
+      env: {},
+      totalTimeoutMs: 1000,
+      executor: ciExecutor(1),
+    });
+    c.run.mockRejectedValueOnce(
+      code === undefined
+        ? new Error("Executor checkout preparation failed")
+        : new ExecutorPreparationError(code),
+    );
+    await c.gate.tick([f.project_id]);
+    expect(check()?.status).toBe("failed");
+    expect(check()?.checks).toEqual([]);
+    expect(
+      f
+        .state()
+        .events.some(
+          (e) =>
+            e.type === "merge_check_started" ||
+            e.type === "merge_executor_unreachable",
+        ),
+    ).toBe(false);
+    expect(f.state().human_actions).toEqual([]);
+    await c.gate.tick([f.project_id]);
+    expect(check()?.summary).not.toContain("preparation");
+    expect(check()?.summary).toContain(reason);
+    expect(c.run).toHaveBeenCalledTimes(1);
+    expect(c.run.mock.calls[0]?.[0].execution).toMatchObject({
+      mode: "agent-ssh",
+      host: "cardigan-ci",
+    });
+    expect(c.git.publish).not.toHaveBeenCalled();
+  },
+);
 
 const ciExecutor = (maxConcurrent: number) => ({
   name: "cardigan-ci",
