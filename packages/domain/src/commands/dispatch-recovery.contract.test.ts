@@ -18,6 +18,7 @@ import {
   retireUnreadableQueuedRun,
   startDispatchStop,
   unreadableCommentTrigger,
+  withdrawDispatchStop,
 } from "../index.js";
 import { CommandDraft } from "./core.js";
 import {
@@ -947,4 +948,127 @@ test("C-247: a server-restart stop cannot bypass the Run state machine or exit p
     ),
   ).toBeUndefined();
   expect(f.state.runs).toHaveLength(1);
+});
+
+// The RuntimeMonitor marks a Run unknown (and its session unknown) when the
+// terminal is reported missing; the startup check must still take it.
+const markUnknown = (started = false) => {
+  f.state = {
+    ...f.state,
+    runs: f.state.runs.map((r) =>
+      r.id === run.id
+        ? {
+            ...r,
+            status: "unknown",
+            ...(started ? { started_at: f.io.clock.now() } : {}),
+          }
+        : r,
+    ),
+    assignments: f.state.assignments.map((a) =>
+      a.id === run.assignment_id ? { ...a, runtime_state: "unknown" } : a,
+    ),
+  };
+};
+
+test("C-247: only a server-restart stop may freshly claim an unstarted unknown Run, and it settles through the state machine", () => {
+  markUnknown();
+  const claim = (reason: "dispatch_timeout" | "server_restart") =>
+    commit(
+      claimDispatchStop(
+        f.state,
+        system,
+        { run_id: run.id, reason, lease_ms: 60000 },
+        f.io,
+      ),
+    );
+  // The timeout policy keeps its existing scope.
+  expect(claim("dispatch_timeout")).toBeUndefined();
+  expect(f.state.runs[0]?.dispatch_stop).toBeUndefined();
+  now += 1000;
+  const replacement = commit(restart({ ...run, status: "unknown" }));
+  expect(replacement?.status).toBe("queued");
+  expect(f.state.runs.find((r) => r.id === run.id)?.status).toBe("cancelled");
+  const a = f.state.assignments.find((x) => x.id === run.assignment_id);
+  expect(a?.runtime_state).toBe("idle");
+  expect(a?.runtime_ref).toBeNull();
+  expect(dispatchRecoveryUsed(f.state.events, run.assignment_id)).toBe(false);
+});
+
+test("C-247: a started unknown Run is never claimed for a server-restart stop", () => {
+  markUnknown(true);
+  expect(
+    commit(
+      claimDispatchStop(
+        f.state,
+        system,
+        { run_id: run.id, reason: "server_restart", lease_ms: 60000 },
+        f.io,
+      ),
+    ),
+  ).toBeUndefined();
+  expect(f.state.runs[0]?.dispatch_stop).toBeUndefined();
+});
+
+test("C-247: withdrawing a restart stop clears only its own unstarted fence", () => {
+  const claimed = commit(
+    claimDispatchStop(
+      f.state,
+      system,
+      { run_id: run.id, reason: "server_restart", lease_ms: 60000 },
+      f.io,
+    ),
+  );
+  const stop = claimed?.dispatch_stop;
+  if (!stop) throw new Error("Missing stop");
+  const withdraw = (attempt_id: string) =>
+    commit(
+      withdrawDispatchStop(
+        f.state,
+        system,
+        { run_id: run.id, attempt_id, reason: "runtime_not_exited" },
+        f.io,
+      ),
+    );
+  expect(withdraw("other")).toBe(false);
+  expect(f.state.runs[0]?.dispatch_stop).toBeDefined();
+  expect(withdraw(stop.attempt_id)).toBe(true);
+  expect(f.state.runs[0]).toMatchObject({ status: "dispatched" });
+  expect(f.state.runs[0]?.dispatch_stop).toBeUndefined();
+  expect(
+    f.state.events.find((e) => e.type === "run_dispatch_stop_withdrawn")
+      ?.payload,
+  ).toMatchObject({ run_id: run.id, reason: "runtime_not_exited" });
+  // A started fence is settled by its exit proof, never withdrawn.
+  const again = commit(
+    claimDispatchStop(
+      f.state,
+      system,
+      { run_id: run.id, reason: "server_restart", lease_ms: 60000 },
+      f.io,
+    ),
+  );
+  if (!again?.dispatch_stop) throw new Error("Missing stop");
+  commit(
+    startDispatchStop(
+      f.state,
+      system,
+      { run_id: run.id, attempt_id: again.dispatch_stop.attempt_id },
+      f.io,
+    ),
+  );
+  expect(withdraw(again.dispatch_stop.attempt_id)).toBe(false);
+  expect(f.state.runs[0]?.dispatch_stop?.stopping).toBe(true);
+  // Agents cannot withdraw a stop.
+  expect(
+    withdrawDispatchStop(
+      f.state,
+      actor(),
+      {
+        run_id: run.id,
+        attempt_id: again.dispatch_stop.attempt_id,
+        reason: "x",
+      },
+      f.io,
+    ).ok,
+  ).toBe(false);
 });

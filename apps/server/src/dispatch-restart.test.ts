@@ -5,6 +5,7 @@ import { recoveryFixture } from "../test-support/recovery.js";
 import { standingResolver } from "./assembly.js";
 import { Dispatcher } from "./dispatch.js";
 import { startDispatchLoop } from "./dispatch-loop.js";
+import { RuntimeMonitor } from "./dispatch-monitor.js";
 
 // C-247: shutdown stops new dispatch; startup checks Runs a previous process
 // left dispatched without run_started instead of waiting for the timeout.
@@ -320,4 +321,92 @@ test("shutdown while preparing a queued verification wake withdraws the claim an
     "dispatched",
   );
   expect(f.state().runs).toHaveLength(before + 1);
+});
+
+test("real loop: a leftover Run the monitor already marked unknown is still recovered in the first tick", async () => {
+  f.comment();
+  await dispatcher().tick();
+  const original = f.latest();
+  expect(original.status).toBe("dispatched");
+  gone();
+  // The new process's monitor subscribes first and sees the terminal missing.
+  const runtime = {
+    ...f.runtime,
+    events: async function* () {
+      yield {
+        ok: false as const,
+        error: { code: "runtime_not_found" as const, message: "gone" },
+      };
+    },
+  };
+  const monitor = new RuntimeMonitor({
+    store: f.store,
+    clock: f.clock,
+    runtime: runtime as never,
+  });
+  monitor.reconcile();
+  await vi.waitFor(() => expect(runOf(original.id)?.status).toBe("unknown"));
+  const controller = new AbortController();
+  const loop = startDispatchLoop({
+    dispatcher: dispatcher(),
+    monitor,
+    signal: controller.signal,
+    onError: (error) => {
+      throw error;
+    },
+  });
+  try {
+    await vi.waitFor(() => expect(count("run_dispatch_recovered")).toBe(1));
+  } finally {
+    controller.abort();
+    await loop.stop();
+  }
+  expect(runOf(original.id)).toMatchObject({ status: "cancelled" });
+  expect(runOf(original.id)?.dispatch_stop).toBeUndefined();
+  expect(f.runtime.release).not.toHaveBeenCalled();
+  expect(f.options.startRun).toHaveBeenCalledOnce();
+  const replacement = f
+    .state()
+    .runs.filter((r) => r.assignment_id === original.assignment_id)
+    .at(-1);
+  expect(replacement?.id).not.toBe(original.id);
+  expect(replacement?.status).not.toBe("cancelled");
+  expect(
+    f.state().events.find((e) => e.type === "run_dispatch_recovered")?.payload,
+  ).toMatchObject({ run_id: original.id, reason: "server_restart" });
+});
+
+test("startup never force-closes a terminal seen alive again between its two observations", async () => {
+  f.comment();
+  await dispatcher().tick();
+  const original = f.latest();
+  // First check: missing; the stop's own re-check: alive (still starting).
+  vi.mocked(f.runtime.status)
+    .mockResolvedValueOnce({
+      ok: false,
+      error: { code: "runtime_not_found", message: "gone" },
+    })
+    .mockResolvedValue({
+      ok: true,
+      value: { process: "alive", agent: "idle", observed_seq: 1 },
+    });
+  const d = dispatcher();
+  await d.tick();
+  expect(f.runtime.release).not.toHaveBeenCalled();
+  expect(runOf(original.id)?.status).toBe("dispatched");
+  expect(runOf(original.id)?.dispatch_stop).toBeUndefined();
+  expect(count("run_dispatch_stop_started")).toBe(0);
+  expect(count("run_dispatch_recovered")).toBe(0);
+  expect(
+    f
+      .state()
+      .events.filter((e) => e.type === "run_dispatch_stop_withdrawn")
+      .map((e) => (e.payload as { reason: string }).reason),
+  ).toEqual(["runtime_not_exited"]);
+  expect(f.options.startRun).not.toHaveBeenCalled();
+  // Next tick observes alive again and leaves it to the dispatch timeout.
+  await d.tick();
+  expect(f.runtime.release).not.toHaveBeenCalled();
+  expect(runOf(original.id)?.status).toBe("dispatched");
+  expect(count("run_dispatch_stop_requested")).toBe(1);
 });

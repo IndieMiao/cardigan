@@ -21,6 +21,7 @@ import {
   retireUnreadableQueuedRun,
   startDispatchStop,
   unreadableCommentTrigger,
+  withdrawDispatchStop,
 } from "@cardigan/domain";
 import { deferTargetAttempt, refreshTargetWait } from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
@@ -126,7 +127,7 @@ export function dispatchRecovery(
     runId: RunId,
     reason: NonNullable<Run["dispatch_stop"]>["reason"],
   ) => {
-    await runStopWorkflow({ store, runtime, clock, loadState }, project, {
+    return runStopWorkflow({ store, runtime, clock, loadState }, project, {
       claim: (state, ports) => {
         const run = state.runs.find((r) => r.id === runId);
         if (
@@ -148,6 +149,18 @@ export function dispatchRecovery(
         );
       },
       fence: (run) => run.dispatch_stop,
+      observeOnly: (stop) => stop.reason === "server_restart",
+      withdraw: (state, ports, run, stop) =>
+        withdrawDispatchStop(
+          state,
+          actor,
+          {
+            run_id: run.id,
+            attempt_id: stop.attempt_id,
+            reason: "runtime_not_exited",
+          },
+          ports,
+        ),
       start: (state, ports, run, stop) =>
         startDispatchStop(
           state,

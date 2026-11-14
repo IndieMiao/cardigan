@@ -17,6 +17,12 @@ export async function stopRunRuntime(
   ref: RuntimeRef | null,
   mayStop: () => boolean,
   alreadyStopping = false,
+  /**
+   * C-247: false for a stop that may only settle an exit already observed.
+   * A fresh fence whose first observation does not prove exit is not started
+   * and nothing is released; the caller withdraws its fence.
+   */
+  releaseLive = true,
 ) {
   const observe = () =>
     ref ? runtime.status(ref).catch(() => undefined) : undefined;
@@ -25,6 +31,8 @@ export async function stopRunRuntime(
   // its original fence without asking to issue another stop; ownership and the
   // exact runtime reference are checked again by the settlement transaction.
   if (alreadyStopping && (!ref || exited(before))) return "exited" as const;
+  if (!releaseLive && !alreadyStopping && ref && !exited(before))
+    return "not_exited" as const;
   if (!mayStop()) return "withdrawn" as const;
   if (!ref || exited(before)) return "exited" as const;
   await runtime.release(ref, { force: true }).catch(() => undefined);

@@ -172,8 +172,11 @@ interface Job {
   bell: string;
 }
 
+// C-247: the RuntimeMonitor may mark a leftover Run unknown before the first
+// tick (runtime_not_found, exit event, snapshot without the terminal); an
+// unstarted unknown Run is still a dispatch that never began working.
 const startupCandidate = (r: Run) =>
-  r.status === "dispatched" &&
+  (r.status === "dispatched" || r.status === "unknown") &&
   !r.started_at &&
   !r.dispatch_stop &&
   !r.inactivity_stop;
@@ -1111,7 +1114,7 @@ export class Dispatcher {
         ? observed.value.process === "exited"
         : observed?.error.code === "runtime_not_found"
     ) {
-      await dispatchRecovery(
+      const stopped = await dispatchRecovery(
         {
           store,
           runtime,
@@ -1125,7 +1128,10 @@ export class Dispatcher {
           leaseMs: this.leaseMs,
         },
       ).stopRun(run.id, "server_restart");
-      return "recovered";
+      // C-247: the stop re-observes before fencing and never force-closes; a
+      // terminal seen again (still starting) withdraws the fence, and the next
+      // tick decides with a fresh observation.
+      return stopped === "not_exited" ? "retry" : "recovered";
     }
     // A live terminal may still be starting: the dispatch timeout stays in
     // charge. Unknown or unreachable status is asked again next tick.
