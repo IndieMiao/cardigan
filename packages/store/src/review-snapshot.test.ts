@@ -30,6 +30,11 @@ const MEMBER_NAME = "林晓梅";
 const HOSTNAME = "lin-workstation";
 const SENSITIVE_TITLE = "收购计划草案第二版（内部）";
 const SENSITIVE_COMMENT = "这是一条敏感评论内容，绝对不应该泄露出去";
+/** Name, title and avatar a member had before being renamed (V-911). */
+const OLD_NAME = "邵旧名";
+const OLD_TITLE = "前任首席顾问";
+const OLD_AVATAR = "upload:0123456789abcdef.png";
+const SHORT_TITLE = "并购甲方";
 
 let dir: string;
 let dbPath: string;
@@ -101,6 +106,37 @@ function buildFixture(): void {
     doc({
       type: "member_created",
       payload: { member: { id: "M-9", name: MEMBER_NAME } },
+    }),
+  );
+  // M-8 was renamed: the old identity survives only in global_events.
+  const m8 = (name: string, title: string, avatar: string | null) => ({
+    id: "M-8",
+    name,
+    title,
+    avatar,
+    role: "observer",
+    status: "active",
+    created_at: NOW,
+    updated_at: NOW,
+  });
+  insert(
+    "INSERT INTO members (id, role, status, doc) VALUES ('M-8', 'observer', 'active', ?)",
+    doc(m8("邵新名", "顾问", null)),
+  );
+  insert(
+    "INSERT INTO global_events (id, seq, type, doc) VALUES ('GE-a', 9997, 'member_created', ?)",
+    doc({
+      type: "member_created",
+      actor: { kind: "human" },
+      payload: { member: m8(OLD_NAME, OLD_TITLE, OLD_AVATAR) },
+    }),
+  );
+  insert(
+    "INSERT INTO global_events (id, seq, type, doc) VALUES ('GE-b', 9998, 'member_updated', ?)",
+    doc({
+      type: "member_updated",
+      actor: { kind: "human" },
+      payload: { member: m8("邵新名", "顾问", null) },
     }),
   );
 
@@ -224,6 +260,24 @@ function buildFixture(): void {
     NOW,
   );
 
+  // A sensitive card with a short title, quoted by number-less text elsewhere.
+  insert(
+    "INSERT INTO cards (project_id, id, doc) VALUES (?, 'C-3', ?)",
+    P,
+    doc(card(P, "C-3", { title: SHORT_TITLE, sensitive: true })),
+  );
+  insert(
+    "INSERT INTO timeline (project_id, id, card_id, event_seq, doc) VALUES (?, 'C-1#2', 'C-1', 2, ?)",
+    P,
+    doc({
+      id: "C-1#2",
+      card_id: "C-1",
+      type: "comment",
+      body: `关于${SHORT_TITLE}的进展`,
+      created_at: NOW,
+    }),
+  );
+
   // Another project's data.
   insert(
     "INSERT INTO cards (project_id, id, doc) VALUES (?, 'C-1', ?)",
@@ -335,6 +389,33 @@ describe("scrub", () => {
     expect(docOf(db, "SELECT doc FROM members WHERE id = 'M-9'")).toMatchObject(
       { name: "成员 M-9", title: "成员", avatar: null },
     );
+    // Historical member snapshots (renames) are masked too.
+    for (const id of ["GE-a", "GE-b"])
+      expect(
+        (
+          docOf(db, "SELECT doc FROM global_events WHERE id = ?", id)
+            .payload as {
+            member: unknown;
+          }
+        ).member,
+      ).toMatchObject({
+        id: "M-8",
+        name: "成员 M-8",
+        title: "成员",
+        avatar: null,
+      });
+    const allText = db
+      .prepare(
+        "SELECT doc FROM global_events UNION ALL SELECT doc FROM members",
+      )
+      .all()
+      .map((r) => String(r.doc))
+      .join("\n");
+    for (const old of [OLD_NAME, OLD_TITLE, OLD_AVATAR, "邵新名"])
+      expect(allText).not.toContain(old);
+    expect(
+      String(docOf(db, "SELECT doc FROM timeline WHERE id = 'C-1#2'").body),
+    ).not.toContain(SHORT_TITLE);
     expect(
       docOf(db, "SELECT doc FROM machines WHERE id = 'MC-1'"),
     ).toMatchObject({ label: "机器 MC-1", os: "linux" });
@@ -444,6 +525,34 @@ describe("scan blocks every class", () => {
       category: "sensitive_card",
       secret: SENSITIVE_COMMENT,
       plant: (db) => comment(db, `转述：${SENSITIVE_COMMENT}`),
+    },
+    {
+      name: "a renamed member's old name in a global event",
+      category: "personal",
+      secret: OLD_NAME,
+      plant: (db) =>
+        db
+          .prepare(
+            "UPDATE global_events SET doc = json_set(doc, '$.payload.member.name', ?) WHERE id = 'GE-a'",
+          )
+          .run(OLD_NAME),
+    },
+    {
+      name: "a member's custom avatar in a global event",
+      category: "personal",
+      secret: OLD_AVATAR,
+      plant: (db) =>
+        db
+          .prepare(
+            "UPDATE global_events SET doc = json_set(doc, '$.payload.member.avatar', ?) WHERE id = 'GE-a'",
+          )
+          .run(OLD_AVATAR),
+    },
+    {
+      name: "a short sensitive title quoted without its number",
+      category: "sensitive_card",
+      secret: SHORT_TITLE,
+      plant: (db) => comment(db, `关于${SHORT_TITLE}`),
     },
     {
       name: "a member's name",

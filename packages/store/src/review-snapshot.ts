@@ -280,6 +280,70 @@ function cellStrings(text: string): string[] {
   return out;
 }
 
+/* ------------------------------------------------------ member snapshots */
+
+const MEMBER_ID = /^M-\d+$/;
+const MEMBER_FIELDS = ["name", "title", "avatar"] as const;
+
+/**
+ * A copy of a Member anywhere in stored JSON: the members row itself, and the
+ * full `payload.member` every member_created / member_updated global event
+ * keeps — so old names survive a rename there. `M-n` ids belong to members only.
+ */
+function isMemberSnapshot(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    return false;
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.id === "string" &&
+    MEMBER_ID.test(record.id) &&
+    MEMBER_FIELDS.some((field) => Object.hasOwn(record, field))
+  );
+}
+
+function memberPlaceholder(
+  record: Record<string, unknown>,
+): Record<string, unknown> {
+  const id = String(record.id);
+  return {
+    ...record,
+    ...(Object.hasOwn(record, "name")
+      ? { name: memberNamePlaceholder(id) }
+      : {}),
+    ...(Object.hasOwn(record, "title")
+      ? { title: MEMBER_TITLE_PLACEHOLDER }
+      : {}),
+    ...(Object.hasOwn(record, "avatar") ? { avatar: null } : {}),
+  };
+}
+
+function isMemberPlaceholder(record: Record<string, unknown>): boolean {
+  const expected = memberPlaceholder(record);
+  return MEMBER_FIELDS.every((field) => record[field] === expected[field]);
+}
+
+/** Replace every member snapshot, at any depth, with its placeholder. */
+function maskMembers(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(maskMembers);
+  if (value === null || typeof value !== "object") return value;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value)) out[k] = maskMembers(v);
+  return isMemberSnapshot(out) ? memberPlaceholder(out) : out;
+}
+
+function eachMemberSnapshot(
+  value: unknown,
+  fn: (record: Record<string, unknown>) => void,
+): void {
+  if (Array.isArray(value)) {
+    for (const item of value) eachMemberSnapshot(item, fn);
+    return;
+  }
+  if (value === null || typeof value !== "object") return;
+  if (isMemberSnapshot(value)) fn(value);
+  for (const v of Object.values(value)) eachMemberSnapshot(v, fn);
+}
+
 /* --------------------------------------------------------- sensitive cards */
 
 /**
@@ -452,6 +516,8 @@ function skeletonColumn(column: string): boolean {
 
 /** Shorter strings are too common to remove project-wide (e.g. "开发"). */
 const MIN_SENSITIVE_TEXT = 8;
+/** Titles are short but identifying, so they get a lower floor. */
+const MIN_SENSITIVE_TITLE = 4;
 const GENERIC_TITLES = new Set(["所有者", "成员", "审批人", "观察者"]);
 const HOSTNAME_SHAPE = /^[A-Za-z0-9][A-Za-z0-9.-]{3,}$/;
 
@@ -512,8 +578,10 @@ export function collectSensitiveValues(
         if (typeof value !== "string" || skeletonColumn(column)) continue;
         const parsed = parseJson(value);
         const push = (text: string, key: string | undefined): void => {
+          const min =
+            key === "title" ? MIN_SENSITIVE_TITLE : MIN_SENSITIVE_TEXT;
           if (
-            Array.from(text.trim()).length >= MIN_SENSITIVE_TEXT &&
+            Array.from(text.trim()).length >= min &&
             skeletonString(text, key) === REDACTED
           )
             literals.push({ category: "sensitive_card", value: text });
@@ -525,19 +593,35 @@ export function collectSensitiveValues(
   }
 
   // ④ people and hosts.
-  if (has("members"))
-    for (const row of db.prepare("SELECT doc FROM members").all()) {
-      const doc = parseJson(String(row.doc)) as
-        | { name?: unknown; title?: unknown; avatar?: unknown }
-        | undefined;
-      for (const value of [doc?.name, doc?.title])
-        if (
-          typeof value === "string" &&
-          Array.from(value.trim()).length >= 2 &&
-          !GENERIC_TITLES.has(value.trim())
-        )
-          literals.push({ category: "personal", value: value.trim() });
-    }
+  // Every member snapshot in every table, current and historical (renames
+  // leave the old name in global_events).
+  for (const table of all)
+    for (const row of db.prepare(`SELECT * FROM "${table.name}"`).all())
+      for (const column of table.textColumns) {
+        const value = row[column];
+        if (typeof value !== "string") continue;
+        const parsed = parseJson(value);
+        if (parsed === undefined) continue;
+        eachMemberSnapshot(parsed, (member) => {
+          for (const field of ["name", "title"] as const) {
+            const text = member[field];
+            if (
+              typeof text === "string" &&
+              Array.from(text.trim()).length >= 2 &&
+              !GENERIC_TITLES.has(text.trim())
+            )
+              literals.push({ category: "personal", value: text.trim() });
+          }
+          const avatar = member.avatar;
+          // Built-in library avatars are shared assets, not personal data.
+          if (
+            typeof avatar === "string" &&
+            avatar.length >= 6 &&
+            !avatar.startsWith("library:")
+          )
+            literals.push({ category: "personal", value: avatar });
+        });
+      }
   const reserved = reservedWords(db, project);
   const hostWord = (value: unknown): void => {
     if (typeof value !== "string") return;
@@ -705,7 +789,8 @@ export function scrubReviewSnapshot(
       "UPDATE projects SET repo_path = ? WHERE repo_path IS NOT NULL",
     ).run(REDACTED_PATH);
 
-    // Every remaining text cell: exact values first, then patterns.
+    // Every remaining text cell: member snapshots to placeholders, then
+    // exact values, then patterns.
     const rules = [...valueRules(values), ...TEXT_RULES];
     for (const table of all) {
       if (table.textColumns.length === 0) continue;
@@ -736,7 +821,9 @@ export function scrubReviewSnapshot(
 function scrubCell(value: string, rules: readonly TextRule[]): string {
   const parsed = parseJson(value);
   if (parsed === undefined) return applyRules(value, rules);
-  return JSON.stringify(mapStrings(parsed, (text) => applyRules(text, rules)));
+  return JSON.stringify(
+    mapStrings(maskMembers(parsed), (text) => applyRules(text, rules)),
+  );
 }
 
 function updateRow(
@@ -788,6 +875,7 @@ export const SCAN_RULE_IDS: readonly string[] = [
   "host_table_empty",
   "single_project",
   "member_placeholder",
+  "member_snapshot_placeholder",
   "machine_placeholder",
   "repo_path_placeholder",
   "sensitive_card_skeleton",
@@ -950,6 +1038,20 @@ export function scanReviewSnapshot(
       for (const column of table.textColumns) {
         const value = row[column];
         if (typeof value !== "string") continue;
+        const parsed = parseJson(value);
+        let unmasked = false;
+        eachMemberSnapshot(parsed, (member) => {
+          if (!isMemberPlaceholder(member)) unmasked = true;
+        });
+        if (unmasked)
+          hit({
+            rule: "member_snapshot_placeholder",
+            category: "personal",
+            table: table.name,
+            rowid: Number(row.__rowid),
+            column,
+            where: "cell",
+          });
         const strings = cellStrings(value);
         for (const rule of rules)
           if (strings.some((text) => firstMatch(text, rule))) {
