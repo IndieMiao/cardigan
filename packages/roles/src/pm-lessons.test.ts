@@ -327,10 +327,32 @@ test("C-37 criterion 11 makes PM explain human handoffs and complete authorized 
     "title（一句话标题）",
     "summary（这是什么）",
     "why_human（为什么必须由人做）",
-    "instructions（点哪里或执行什么命令）",
+    "instructions（编号步骤：点哪里或执行什么命令）",
     "expected_outcome（做完会怎样）",
     "标题不要照抄接口名",
     "纯流程事项在现有权限内能完成的自己处理并记录结果，不交给人",
+  ])
+    expect(prompt).toContain(phrase);
+});
+
+test("C-212 tells PM to defer untimely handoffs, triage host operators and keep handoffs short", () => {
+  const prompt = corePromptFor("pm");
+  for (const phrase of [
+    // Readiness instead of "do this later" prose.
+    "用 `ready_when` 写成就绪条件",
+    "不要在正文里写“等……之后再做”让人自己判断",
+    "disposition=release",
+    "也可以先不发起，等能做时再开",
+    // Readiness never hides a merge-holding item.
+    "挡合并或挡工作的事项照样挡着，卡片一提交完成申请就会显示",
+    "不能用就绪条件藏起强制交人的事项",
+    // host vs human, and the two host tiers.
+    "用 `host_operator` 写清谁执行",
+    "的填 external，不叫醒 host_ops",
+    "应分 host、external，不分 human",
+    // Short handoffs.
+    "todo（一句话“你要做什么”）",
+    "人默认只看到标题、todo、步骤和“确认已完成”，其余折叠",
   ])
     expect(prompt).toContain(phrase);
 });

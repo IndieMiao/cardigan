@@ -2,7 +2,9 @@ import type {
   Assignment,
   AssignmentId,
   CardId,
+  Decision,
   EventId,
+  HumanAction,
   RoleId,
   TimelineEntry,
   WorkItem,
@@ -16,6 +18,8 @@ import {
   isCompletionVerifier,
   latestMergeCheck,
   mergeRequiresHuman,
+  NEEDS_YOU_ITEM_READY,
+  needsYouItemReady,
   PRE_MERGE_CHECK_REMINDED,
   pmMergeCheckDelegationAllowed,
   requesterNotificationRecipient,
@@ -765,6 +769,30 @@ function routeReview(input: RouteInput, draft: Draft): void {
 }
 
 /** §6.4: a decision for the human becomes Needs You plus a PM Office brief. */
+function notifyHumanDecision(
+  input: RouteInput,
+  draft: Draft,
+  decision: Decision,
+  rule: "6.4/decision requested" | "6.4/needs you item ready",
+): void {
+  note(
+    input,
+    draft,
+    recipient.needs_you(),
+    "needs_you",
+    rule,
+    `${decision.id}: ${decision.question}`,
+  );
+  note(
+    input,
+    draft,
+    recipient.pm_office(),
+    "decision",
+    rule,
+    `${decision.id} needs the human's decision`,
+  );
+}
+
 function routeDecisionRequested(input: RouteInput, draft: Draft): void {
   const decision_id = payloadString(input.event.payload, "decision_id");
   const decision = input.snapshot.decisions.find(
@@ -780,22 +808,9 @@ function routeDecisionRequested(input: RouteInput, draft: Draft): void {
     return;
   }
   if (decision.decider === "human") {
-    note(
-      input,
-      draft,
-      recipient.needs_you(),
-      "needs_you",
-      "6.4/decision requested",
-      `${decision.id}: ${decision.question}`,
-    );
-    note(
-      input,
-      draft,
-      recipient.pm_office(),
-      "decision",
-      "6.4/decision requested",
-      `${decision.id} needs the human's decision`,
-    );
+    // C-212: a deferred question rings when it becomes ready instead.
+    if (needsYouItemReady(input.snapshot, decision))
+      notifyHumanDecision(input, draft, decision, "6.4/decision requested");
     return;
   }
   if (decision.decider === "role:pm") {
@@ -1096,13 +1111,19 @@ function routeHumanAction(input: RouteInput, draft: Draft): void {
     );
     return;
   }
+  // C-212: a deferred action rings when it becomes ready instead.
+  if (action && !needsYouItemReady(input.snapshot, action)) return;
+  if (action) {
+    notifyHumanAction(input, draft, action, "6.4/human action requested");
+    return;
+  }
   note(
     input,
     draft,
     recipient.needs_you(),
     "needs_you",
     "6.4/human action requested",
-    `${action_id ?? "a human action"}: ${action?.instructions ?? ""}`.trim(),
+    `${action_id ?? "a human action"}:`,
   );
   note(
     input,
@@ -1112,6 +1133,69 @@ function routeHumanAction(input: RouteInput, draft: Draft): void {
     "6.4/human action requested",
     `${action_id ?? "a human action"} is waiting for the human`,
   );
+}
+
+/**
+ * C-212: a human action reaches the human's Needs You bell; a host action
+ * reaches PM Office only (host_ops is woken by the dispatcher unless the
+ * action names an external operator), so it never rings the human.
+ */
+function notifyHumanAction(
+  input: RouteInput,
+  draft: Draft,
+  action: HumanAction,
+  rule: "6.4/human action requested" | "6.4/needs you item ready",
+): void {
+  const title = action.handoff?.title ?? action.instructions;
+  if (action.triage === "host") {
+    note(
+      input,
+      draft,
+      recipient.pm_office(),
+      "human_action",
+      rule,
+      action.host_operator === "external"
+        ? `${action.id} 主机操作等外接操作员执行：${title}`
+        : `${action.id} 主机操作等 host_ops 执行：${title}`,
+    );
+    return;
+  }
+  note(
+    input,
+    draft,
+    recipient.needs_you(),
+    "needs_you",
+    rule,
+    `${action.id}: ${title}`,
+  );
+  note(
+    input,
+    draft,
+    recipient.pm_office(),
+    "human_action",
+    rule,
+    `${action.id} is waiting for the human`,
+  );
+}
+
+/**
+ * C-212: the dispatcher writes one `needs_you_item_ready` event on the item's
+ * own card when a deferred item becomes ready; ring its audience from it, so
+ * the bell names the item's card and event. Items closed or handed back to
+ * PM triage meanwhile are skipped.
+ */
+function routeReadiness(input: RouteInput, draft: Draft): void {
+  const action_id = payloadString(input.event.payload, "human_action_id");
+  const decision_id = payloadString(input.event.payload, "decision_id");
+  const action = input.snapshot.human_actions.find((h) => h.id === action_id);
+  if (action?.status === "open" && action.triage !== "pm_ops")
+    notifyHumanAction(input, draft, action, "6.4/needs you item ready");
+  const decision = input.snapshot.decisions.find((q) => q.id === decision_id);
+  if (
+    decision?.decider === "human" &&
+    ["open", "provisional", "snoozed"].includes(decision.status)
+  )
+    notifyHumanDecision(input, draft, decision, "6.4/needs you item ready");
 }
 
 /** §6.4: a Run that produced nothing (no delivery, blocker or decision). */
@@ -1418,6 +1502,9 @@ export function routeEvent(input: RouteInput): RouteResult {
         );
       break;
     }
+    case NEEDS_YOU_ITEM_READY:
+      routeReadiness(input, draft);
+      break;
     case "card_merged":
       note(
         input,

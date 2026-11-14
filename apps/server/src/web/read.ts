@@ -1159,6 +1159,9 @@ export function needsYou(
       expected_return:
         action.handoff?.expected_return ?? action.expected_return,
       triage: action.triage ?? "human",
+      ...(action.triage === "host"
+        ? { host_operator: action.host_operator ?? "host_ops" }
+        : {}),
       triage_rationale: action.triage_rationale ?? null,
       blocked_work_items: action.blocked_work_items,
       ...(action.completion_notice !== undefined
@@ -1221,6 +1224,8 @@ export function needsYou(
     ),
     waiting_merge_checks_count: data.waiting_merge_checks_count,
     waiting_merge_check_items: data.waiting_merge_check_items,
+    // C-212: deferred items; the page shows them folded under "稍后".
+    later: data.later,
     // §7.4 知会: delegated resolutions, newest first; never blocking.
     notices: noticeList.notices,
     notices_next_cursor: noticeList.next_cursor,

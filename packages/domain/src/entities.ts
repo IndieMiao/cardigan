@@ -618,6 +618,8 @@ interface DecisionFields {
   };
   readonly amends?: DecisionId;
   readonly superseded_by?: DecisionId;
+  /** C-212: human decisions only; defers when the question is shown. */
+  readonly ready_when?: ReadyCondition;
 }
 export type Decision = DecisionFields &
   (
@@ -629,8 +631,28 @@ export type Decision = DecisionFields &
           | { readonly subject: DeliverySubject };
       }
   );
+/**
+ * C-212: when a Needs You item may be shown. The item exists (and holds any
+ * merge it blocks) from the start; the condition only defers when it appears.
+ */
+export type ReadyCondition =
+  | {
+      readonly kind: "card_delivery";
+      readonly card_id: CardId;
+      /** The card's newest delivery when the condition was set, if any. */
+      readonly after?: DeliveryId;
+    }
+  | { readonly kind: "card_merged"; readonly card_id: CardId }
+  | { readonly kind: "manual" };
+export interface ReadyRelease {
+  readonly at: Timestamp;
+  readonly by: Author;
+  readonly reason: string;
+}
 export interface HumanActionHandoff {
   readonly title: string;
+  /** C-212: one plain line saying what the reader has to do. */
+  readonly todo?: string;
   readonly summary: string;
   readonly why_human: string;
   readonly instructions: string;
@@ -648,7 +670,15 @@ export interface HumanAction {
   readonly why_human: string;
   readonly expected_return: string;
   readonly triage?: "pm_ops" | "human" | "host";
+  /**
+   * C-212: who performs a host action. `external` (an operator outside the
+   * host_ops role, e.g. an external PM Office) never wakes host_ops; absent
+   * means host_ops.
+   */
+  readonly host_operator?: "external" | "host_ops";
   readonly triage_rationale?: string;
+  readonly ready_when?: ReadyCondition;
+  readonly ready_released?: ReadyRelease;
   /** PM-authored presentation; the request fields above remain intact. */
   readonly handoff?: HumanActionHandoff;
   readonly due?: Timestamp;
