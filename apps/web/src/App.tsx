@@ -10,6 +10,7 @@ import {
 import { EmptyState } from "./components/Foundation.js";
 import { PageLoader } from "./components/PageLoader.js";
 import { RequestFeedback } from "./components/RequestFeedback.js";
+import { ServiceUpdatingFeedback } from "./components/ServiceUpdatingFeedback.js";
 import { NavIcon, SidebarNav } from "./components/SidebarNav.js";
 import {
   ActivityPage,
@@ -22,6 +23,10 @@ import {
   SnapshotPage,
 } from "./lazy-pages.js";
 import { routeHash, useRoute } from "./route.js";
+import {
+  type ServiceUpdatingNotice,
+  serviceUpdatingNotice,
+} from "./service-retry.js";
 import { useProjectStream } from "./useProjectStream.js";
 import { useResource } from "./useResource.js";
 import { CardListPage } from "./views/CardListPage.js";
@@ -46,9 +51,23 @@ type SessionState =
 export interface AppProps {
   /** Injected by tests; production uses the same-origin HTTP client. */
   readonly client?: CardiganClient;
+  /** C-250: the retry notice the client reports to; injected by tests. */
+  readonly serviceNotice?: ServiceUpdatingNotice;
 }
 
-export function App({ client = defaultClient }: AppProps = {}) {
+export function App({
+  client = defaultClient,
+  serviceNotice = serviceUpdatingNotice,
+}: AppProps = {}) {
+  return (
+    <>
+      <ServiceUpdatingFeedback notice={serviceNotice} />
+      <AppSession client={client} />
+    </>
+  );
+}
+
+function AppSession({ client }: { readonly client: CardiganClient }) {
   const [session, setSession] = useState<SessionState>({ kind: "loading" });
 
   const loadSession = useCallback(

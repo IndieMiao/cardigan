@@ -41,7 +41,13 @@ export const writeFailures = [
   {
     label: "proxy error",
     error: new ApiError(503, "http_503", "Service unavailable"),
-    uncertain: true,
-    reason: "服务暂时异常",
+    uncertain: false,
+    reason: "服务正在更新，暂时没有恢复，操作没有生效",
+  },
+  {
+    label: "bad gateway",
+    error: new ApiError(502, "http_502", "POST /x 失败（502）"),
+    uncertain: false,
+    reason: "服务正在更新，暂时没有恢复，操作没有生效",
   },
 ];
