@@ -11,9 +11,13 @@ export interface DeploymentConfig {
   readonly stop_timeout_ms: number;
   readonly poll_interval_ms: number;
   readonly build_timeout_ms: number;
+  readonly evidence_wait_timeout_ms?: number;
   readonly server_log_max_bytes?: number;
   readonly server_log_max_files?: number;
 }
+
+/** Q-462: waiting for evidence only raises attention; it never authorizes deployment. */
+export const DEFAULT_EVIDENCE_WAIT_TIMEOUT_MS = 10 * 60 * 1000;
 
 /** Host policy only; no repository discovery or request-supplied deployment target. */
 export async function loadDeploymentConfig(
@@ -60,6 +64,7 @@ export function parseDeploymentConfig(raw: unknown): DeploymentConfig {
     "stop_timeout_ms",
     "poll_interval_ms",
     "build_timeout_ms",
+    "evidence_wait_timeout_ms",
     "server_log_max_bytes",
     "server_log_max_files",
   ];
@@ -76,9 +81,10 @@ export function parseDeploymentConfig(raw: unknown): DeploymentConfig {
     throw new Error("Invalid deployment configuration");
   for (const key of keys.filter((k) => k.endsWith("_ms")))
     if (
-      !Number.isSafeInteger(value[key]) ||
-      Number(value[key]) < 1 ||
-      Number(value[key]) > 2147483647
+      !(key === "evidence_wait_timeout_ms" && value[key] === undefined) &&
+      (!Number.isSafeInteger(value[key]) ||
+        Number(value[key]) < 1 ||
+        Number(value[key]) > 2147483647)
     )
       throw new Error("Invalid deployment timeout");
   if (
@@ -98,6 +104,8 @@ export function parseDeploymentConfig(raw: unknown): DeploymentConfig {
   return {
     ...value,
     enabled: value.enabled ?? true,
+    evidence_wait_timeout_ms:
+      value.evidence_wait_timeout_ms ?? DEFAULT_EVIDENCE_WAIT_TIMEOUT_MS,
   } as unknown as DeploymentConfig;
 }
 

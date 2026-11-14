@@ -119,6 +119,7 @@ async function fixture() {
     const mcp = await freePort();
     let web = await freePort();
     while (web === mcp) web = await freePort();
+    await writeFile(join(root, "hc"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
     const options = {
       store,
       dataDir,
@@ -132,7 +133,8 @@ async function fixture() {
         poll_interval_ms: 1000,
       },
       env: {
-        PATH: process.env.PATH,
+        PATH: `${root}:${process.env.PATH}`,
+        CARDIGAN_HC_SESSION: "synthetic-session",
         CARDIGAN_MCP_PORT: String(mcp),
         CARDIGAN_WEB_PORT: String(web),
       },
