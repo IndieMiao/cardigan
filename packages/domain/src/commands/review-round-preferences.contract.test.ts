@@ -64,7 +64,7 @@ test("missing preferences fall back to 5 and 3", () => {
   expect(independentReviewMaxRounds(prefs)).toBe(3);
 });
 
-test.each([0, 11, 1.5, -1, Number.NaN, "5"])(
+test.each([0, 21, 1.5, 20.5, -1, Number.NaN, "5"])(
   "invalid review limit preference %s is rejected",
   (bad) => {
     const { f } = setup();
@@ -91,7 +91,7 @@ test("only the human may change review limit preferences", () => {
       if (!result.ok)
         expect(["unauthorized", "forbidden_tool"]).toContain(result.error.code);
     }
-  for (const value of [1, 10])
+  for (const value of [1, 11, 20])
     expect(
       setProjectPreferences(
         f.state,

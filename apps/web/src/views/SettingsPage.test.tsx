@@ -296,14 +296,25 @@ test("review round limits show the defaults 5 and 3 and save new values", async 
   ) as HTMLInputElement;
   expect(review.value).toBe("5");
   expect(independent.value).toBe("3");
+  // Q-420: the ceiling 20 comes from the server and bounds both inputs.
+  expect(review.max).toBe("20");
+  expect(independent.max).toBe("20");
+  expect(screen.getByText(/默认 5 轮，可设为 1 到 20 轮/)).toBeTruthy();
+  expect(screen.getByText(/默认 3 轮，可设为 1 到 20 轮/)).toBeTruthy();
   expect(
     screen.getAllByText(/只影响之后新建的审核项/).length,
   ).toBeGreaterThanOrEqual(2);
   const save = (name: string) =>
     screen.getByRole("button", { name }) as HTMLButtonElement;
-  for (const bad of ["0", "11", "1.5"]) {
+  for (const bad of ["0", "21", "1.5"]) {
     fireEvent.change(independent, { target: { value: bad } });
     expect(save("保存独立复核轮数").disabled).toBe(true);
+    expect(screen.getByText("请输入 1 到 20 的整数轮数。")).toBeTruthy();
+  }
+  for (const ok of ["11", "20"]) {
+    fireEvent.change(independent, { target: { value: ok } });
+    expect(save("保存独立复核轮数").disabled).toBe(false);
+    expect(screen.queryByText("请输入 1 到 20 的整数轮数。")).toBeNull();
   }
   fireEvent.change(independent, { target: { value: "4" } });
   fireEvent.click(save("保存独立复核轮数"));
@@ -321,6 +332,23 @@ test("review round limits show the defaults 5 and 3 and save new values", async 
     "review",
     7,
   ]);
+});
+
+test("review round limits stay hidden when the server omits the ceiling", async () => {
+  render(
+    <SettingsPage
+      projectId="p-1"
+      client={fakeClient({
+        preferences: async () => ({
+          auto_merge_after_minutes: null,
+          merge_gate_enabled: false,
+        }),
+      })}
+    />,
+  );
+  await screen.findByRole("checkbox", { name: "超时自动合并" });
+  expect(screen.queryByLabelText("普通审核轮数上限（轮）")).toBeNull();
+  expect(screen.queryByLabelText("独立复核轮数上限（轮）")).toBeNull();
 });
 
 test("hidden preferences suppress validation feedback and retain the draft when returning", async () => {

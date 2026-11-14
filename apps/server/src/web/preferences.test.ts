@@ -246,7 +246,7 @@ test("C-253: review round limits default to 5 and 3, only the human session may 
     expect((await f.call(path)).json).toMatchObject({
       review_max_rounds: 5,
       independent_review_max_rounds: 3,
-      review_max_rounds_ceiling: 10,
+      review_max_rounds_ceiling: 20,
     });
     const write = (body: unknown, key: string) =>
       f.call(path, {
@@ -254,7 +254,7 @@ test("C-253: review round limits default to 5 and 3, only the human session may 
         body,
         headers: { "idempotency-key": key },
       });
-    for (const [i, invalid] of [0, 11, 1.5, "5", null].entries())
+    for (const [i, invalid] of [0, 21, 1.5, "5", null].entries())
       for (const field of [
         "review_max_rounds",
         "independent_review_max_rounds",
@@ -274,10 +274,24 @@ test("C-253: review round limits default to 5 and 3, only the human session may 
       review_max_rounds: 7,
       independent_review_max_rounds: 4,
     });
+    for (const [i, value] of [11, 20].entries()) {
+      expect(
+        (
+          await write(
+            { review_max_rounds: value, independent_review_max_rounds: value },
+            `ok-${i}`,
+          )
+        ).status,
+      ).toBe(200);
+      expect((await f.call(path)).json).toMatchObject({
+        review_max_rounds: value,
+        independent_review_max_rounds: value,
+      });
+    }
     const token = f.token(f.primary.owner);
     for (const body of [
-      { review_max_rounds: 10 },
-      { independent_review_max_rounds: 10 },
+      { review_max_rounds: 20 },
+      { independent_review_max_rounds: 20 },
     ])
       expect(
         (
