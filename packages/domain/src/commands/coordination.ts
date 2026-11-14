@@ -37,12 +37,14 @@ import {
   delegationAuthority,
   grantDecisionCategory,
   handoffDecision,
+  handoffIndependentReviewLimits,
   hasActivePmOps,
   isPmOps,
   mergeDelegationAuthority,
   mergeRequiresHuman,
   riskTagAutoMergeAllowed,
 } from "./delegation.js";
+import { independentReviewLimitItem } from "./independent-review-limit-delegation.js";
 import {
   currentMergeConfirmations,
   humanMergeBlockers,
@@ -528,6 +530,7 @@ export function requestDecision(
         )
           handoffDecision(d, q, reason, undefined, true);
     }
+    handoffIndependentReviewLimits(d, cards);
     return decision;
   });
 }
@@ -621,9 +624,22 @@ export function recordDecision(
     const takenOver =
       actor.kind === "human" &&
       held.decider === "role:pm" &&
-      held.trigger === "merge_confirmation" &&
+      (held.trigger === "merge_confirmation" ||
+        !!independentReviewLimitItem(d, held)) &&
       ["open", "provisional", "snoozed"].includes(held.status);
-    const decision: Decision = takenOver ? { ...held, decider: "human" } : held;
+    const decision: Decision = takenOver
+      ? {
+          ...held,
+          decider: "human",
+          ...(independentReviewLimitItem(d, held)
+            ? {
+                human_required_reason:
+                  held.human_required_reason ??
+                  "独立复核加轮已由人接手，后续处理须由人亲自确认",
+              }
+            : {}),
+        }
+      : held;
     // C-79: a confirmed merge handed back after failure may still retain
     // role:pm as its historical decider. Preserve that authorization record.
     const returningConfirmed =
@@ -962,7 +978,8 @@ export function resolveDelegatedDecision(
         },
         `项目经理升级给你：${p.rationale}`,
         undefined,
-        q.trigger === "merge_confirmation",
+        q.trigger === "merge_confirmation" ||
+          !!independentReviewLimitItem(d, q),
         rewritten ? { previous: q.plain_summary ?? null } : undefined,
       );
       return d.get("decisions", q.id);

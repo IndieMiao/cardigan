@@ -1,6 +1,74 @@
 import { expect, test } from "vitest";
 import { m5Cross, TEST_PASSWORD } from "../../test-support/m5-cross.js";
 
+test("independent review authorization is human-only, defaults off, and persists the approved budget", async () => {
+  const f = await m5Cross();
+  try {
+    await f.password(TEST_PASSWORD);
+    await f.login();
+    const path = f.projectPath("/preferences");
+    const write = (body: object) =>
+      f.call(path, {
+        method: "POST",
+        body,
+        headers: { "idempotency-key": JSON.stringify(body) },
+      });
+    expect((await f.call(path)).json).toMatchObject({
+      independent_review_limit_delegation: false,
+      independent_review_limit_delegation_max: null,
+      independent_review_limit_delegation_ceiling: 3,
+    });
+    expect(
+      (await write({ independent_review_limit_delegation: true })).status,
+    ).toBe(400);
+    for (const max of [0, 1, 2, 4, null, 1.5, "3"])
+      expect(
+        (
+          await write({
+            independent_review_limit_delegation: true,
+            independent_review_limit_delegation_max: max,
+          })
+        ).status,
+      ).toBe(400);
+    const authorized = {
+      independent_review_limit_delegation: true,
+      independent_review_limit_delegation_max: 3,
+    };
+    const first = await write(authorized);
+    expect(first.status).toBe(200);
+    expect((await write(authorized)).json).toEqual(first.json);
+    for (const owner of [
+      f.primary.owner,
+      ...f.state().assignments.filter((a) => a.scope === "standing"),
+    ]) {
+      const token = f.token(owner);
+      expect(
+        (
+          await f.call(path, {
+            method: "POST",
+            anonymous: true,
+            body: { independent_review_limit_delegation: false },
+            headers: {
+              authorization: `Bearer ${token}`,
+              "idempotency-key": `agent-${owner.id}`,
+            },
+          })
+        ).status,
+      ).toBe(401);
+    }
+    expect((await f.call(path)).json).toMatchObject(authorized);
+    expect(
+      (await write({ independent_review_limit_delegation: false })).status,
+    ).toBe(200);
+    expect((await f.call(path)).json).toMatchObject({
+      independent_review_limit_delegation: false,
+      independent_review_limit_delegation_max: 3,
+    });
+  } finally {
+    await f.close();
+  }
+});
+
 test("human preferences require session and idempotency, persist audit, and isolate projects", async () => {
   const f = await m5Cross();
   try {

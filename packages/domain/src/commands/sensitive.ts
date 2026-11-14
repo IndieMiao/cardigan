@@ -6,7 +6,10 @@ import {
   command,
   ensure,
 } from "./core.js";
-import { handoffDecision } from "./delegation.js";
+import {
+  handoffDecision,
+  handoffIndependentReviewLimits,
+} from "./delegation.js";
 import { syncSensitiveMerge } from "./merge.js";
 
 /**
@@ -65,6 +68,7 @@ export function setCardSensitive(
             "卡片已被人标为敏感，此合并确认转交给你亲自处理。",
           );
     syncSensitiveMerge(d, next);
+    handoffIndependentReviewLimits(d, [next.id]);
     return next;
   });
 }
