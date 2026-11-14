@@ -6,6 +6,8 @@ export interface TooltipProps {
   readonly children: ReactElement;
   readonly side?: "top" | "right" | "bottom" | "left";
   readonly className?: string;
+  /** Opt in only when the hint text itself must be selectable for copying. */
+  readonly selectable?: boolean;
 }
 
 /** Small text hint for icon buttons and metadata. */
@@ -14,6 +16,7 @@ export function Tooltip({
   children,
   side = "top",
   className = "",
+  selectable = false,
 }: TooltipProps) {
   if (content === undefined || content === null || content === "")
     return children;
@@ -24,6 +27,9 @@ export function Tooltip({
         <TooltipPrimitive.Portal>
           <TooltipPrimitive.Content
             className={`tooltip-content ${className}`}
+            data-passive={selectable ? undefined : ""}
+            // Override Radix's pointer-events: auto inside modal layers too.
+            style={{ pointerEvents: selectable ? undefined : "none" }}
             side={side}
             sideOffset={6}
           >
