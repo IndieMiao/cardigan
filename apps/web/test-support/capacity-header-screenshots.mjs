@@ -15,6 +15,26 @@ const baseline =
   "4cf31e79e3708b9794e7b673324b799567170079";
 await mkdir(output, { recursive: true });
 const measurements = [];
+const contrasts = [];
+// Run inside Chromium: composite transparent ancestors and measure rendered text.
+const contrastScript = (selector) => `(() => {
+  const el = document.querySelector(${JSON.stringify(selector)});
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = 1;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, 1, 1);
+  const ancestors = [];
+  for (let n = el; n; n = n.parentElement) ancestors.unshift(n);
+  for (const n of ancestors) {
+    ctx.fillStyle = getComputedStyle(n).backgroundColor; ctx.fillRect(0, 0, 1, 1);
+  }
+  const bg = Array.from(ctx.getImageData(0, 0, 1, 1).data).slice(0, 3);
+  ctx.fillStyle = getComputedStyle(el).color; ctx.fillRect(0, 0, 1, 1);
+  const fg = Array.from(ctx.getImageData(0, 0, 1, 1).data).slice(0, 3);
+  const lum = rgb => rgb.map(v => v / 255).map(v => v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4)
+    .reduce((sum, v, i) => sum + v * [.2126, .7152, .0722][i], 0);
+  return { fg, bg, ratio: (Math.max(lum(fg), lum(bg)) + .05) / (Math.min(lum(fg), lum(bg)) + .05) };
+})()`;
 for (const stage of ["before", "after"]) {
   const server = await createServer({
     root,
@@ -132,6 +152,9 @@ for (const stage of ["before", "after"]) {
               "title/status overlap",
             );
             assert(measure.status.height <= 40, "status wrapped");
+            const contrast = await evaluate(contrastScript(".capacity-status"));
+            contrasts.push({ width, theme, element: "status", ...contrast });
+            assert(contrast.ratio >= 4.5, "status text contrast");
           }
           const filename = `${stage}-${width}-${theme}-${name}`;
           await capture(filename);
@@ -148,6 +171,11 @@ for (const stage of ["before", "after"]) {
               "tooltip overflows",
             );
             await capture(`${filename}-tooltip`);
+            const contrast = await evaluate(
+              contrastScript(".capacity-tooltip"),
+            );
+            contrasts.push({ width, theme, element: "tooltip", ...contrast });
+            assert(contrast.ratio >= 4.5, "tooltip text contrast");
             await send("Input.dispatchKeyEvent", {
               type: "keyDown",
               key: "Escape",
@@ -179,8 +207,13 @@ await writeFile(
   JSON.stringify(
     {
       baseline,
+      subject: execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: root,
+        encoding: "utf8",
+      }).trim(),
       data: "synthetic: 2 Agent machines, 2 CI targets, 1 card",
       measurements,
+      contrasts,
     },
     null,
     2,

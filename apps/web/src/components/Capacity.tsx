@@ -50,16 +50,12 @@ export function CapacityDetails({ data }: { data: ExecutionCapacity }) {
     <>
       <strong>并发与容量 · 全项目共用</strong>
       {data.agents.length === 0 && <p>暂无 Agent 机器</p>}
-      {data.agents.some((m) => m.total_running === undefined) && (
-        <p>主机尚未提供非常驻计数，待更新。</p>
-      )}
       {data.agents.map((machine) => (
         <div className="capacity-detail-row" key={machine.machine_id}>
           <strong>{machine.label} · Agent</strong>
           <span>
-            全部 {machine.total_running ?? machine.running} · 非常驻{" "}
-            {machine.total_running === undefined ? "待更新" : machine.running} /
-            上限 {machine.limit || "不可用"} / 排队 {machine.queued}
+            全部 {machine.total_running} · 非常驻 {machine.running} / 上限{" "}
+            {machine.limit || "不可用"} / 排队 {machine.queued}
           </span>
           {machine.merge_check_slots > 0 && (
             <span>
@@ -115,7 +111,7 @@ export function CapacityStatus() {
     key: "running" | "limit" | "queued",
   ) => rows.reduce((total, row) => total + row[key], 0);
   const agents = data
-    ? `${data.agents.every((m) => m.total_running !== undefined) ? sum(data.agents, "running") : "—"}/${data.agents.length && data.agents.every((m) => m.limit > 0) ? sum(data.agents, "limit") : "—"}`
+    ? `${sum(data.agents, "running")}/${data.agents.length && data.agents.every((m) => m.limit > 0) ? sum(data.agents, "limit") : "—"}`
     : "—";
   const ci =
     data && !data.merge_config_invalid

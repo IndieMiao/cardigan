@@ -67,9 +67,8 @@ function AgentLimit({
       <div className="execution-capacity-count">
         <strong>{machine.label} · Agent</strong>
         <span>
-          全部 {machine.total_running ?? machine.running} · 非常驻{" "}
-          {machine.total_running === undefined ? "待更新" : machine.running} /
-          上限 {machine.limit || "不可用"} / 排队 {machine.queued}
+          全部 {machine.total_running} · 非常驻 {machine.running} / 上限{" "}
+          {machine.limit || "不可用"} / 排队 {machine.queued}
         </span>
       </div>
       <div className="execution-capacity-edit">

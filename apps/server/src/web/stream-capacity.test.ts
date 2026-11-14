@@ -1,5 +1,5 @@
 import { request as httpRequest } from "node:http";
-import type { ProjectId } from "@cardigan/domain";
+import type { AssignmentId, ProjectId, RunId } from "@cardigan/domain";
 import { acquireMergeCheckCapacity } from "@cardigan/host";
 import { expect, test } from "vitest";
 import { call, type WebHarness, webHarness } from "../../test-support/web.js";
@@ -84,39 +84,71 @@ test("shared capacity SSE covers other-project runs, human limit changes and CI 
   try {
     const initial = await stream.next();
     expect(initial).toMatch(/^[0-9a-f]{16}$/u);
+    const readCapacity = async (running: number, total_running: number) => {
+      const read = await call(
+        harness.port,
+        `/api/projects/${project_id}/execution/capacity`,
+        { cookie },
+      );
+      expect(read.status).toBe(200);
+      expect(read.json).toMatchObject({
+        agents: [{ machine_id: "local", running, total_running, limit: 4 }],
+      });
+      expect(JSON.stringify(read.json)).not.toMatch(
+        /private|worktree|token|summary/u,
+      );
+    };
+    await readCapacity(1, 1);
+    let occupied = initial;
+    for (const [index, role] of [
+      "office",
+      "ops",
+      "host_ops",
+      "work_item_pm",
+    ].entries()) {
+      harness.store.uow.run((tx) => {
+        const owner = tx.assignments.get(project_id, "A-1");
+        const run = tx.runs.get(project_id, "R-1");
+        if (!owner || !run) throw new Error("Missing fixture");
+        const { work_item_id: _item, ...base } = owner;
+        const id = `A-${index + 1}` as AssignmentId;
+        tx.assignments.put(
+          other,
+          role === "work_item_pm"
+            ? { ...owner, id, role_id: "pm" }
+            : {
+                ...base,
+                id,
+                scope: "standing",
+                role_id: role === "host_ops" ? role : "pm",
+                ...(role === "office" || role === "ops"
+                  ? { standing_mode: role }
+                  : {}),
+              },
+        );
+        tx.runs.put(other, {
+          ...run,
+          id: `R-${index + 1}` as RunId,
+          assignment_id: id,
+          summary: "private task body",
+          status: "running",
+        });
+      });
+      const revision = await stream.next();
+      // Total-only changes must reach SSE even though capacity usage stays 1.
+      expect(revision).not.toBe(occupied);
+      occupied = revision;
+      await readCapacity(role === "work_item_pm" ? 2 : 1, index + 2);
+    }
     harness.store.uow.run((tx) => {
-      const owner = tx.assignments.get(project_id, "A-1");
-      const run = tx.runs.get(project_id, "R-1");
-      if (!owner || !run) throw new Error("Missing fixture");
-      tx.assignments.put(other, {
-        ...owner,
-        scope: "standing",
-        role_id: "pm",
-        standing_mode: "ops",
-      });
-      tx.runs.put(other, {
-        ...run,
-        summary: "private task body",
-        status: "running",
-      });
+      const pm = tx.runs.get(other, "R-2");
+      if (!pm) throw new Error("Missing standing PM");
+      tx.runs.put(other, { ...pm, status: "completed" });
     });
-    const occupied = await stream.next();
-    expect(occupied).not.toBe(initial);
-    const read = await call(
-      harness.port,
-      `/api/projects/${project_id}/execution/capacity`,
-      { cookie },
-    );
-    expect(read.json).toMatchObject({ agents: [{ limit: 4 }] });
-    // The shared C-296 core supplies the standing/non-standing split.
-    // The SSE bridge only carries its revision, never recalculates exemption.
-    const row = (
-      read.json as { agents: { running: number; total_running?: number }[] }
-    ).agents[0];
-    expect(row?.total_running ?? row?.running).toBe(2);
-    expect(JSON.stringify(read.json)).not.toMatch(
-      /private|worktree|token|summary/u,
-    );
+    const released = await stream.next();
+    expect(released).not.toBe(occupied);
+    occupied = released;
+    await readCapacity(2, 4);
     const saved = await call(
       harness.port,
       `/api/projects/${project_id}/execution/capacity`,
@@ -151,7 +183,7 @@ test("shared capacity SSE covers other-project runs, human limit changes and CI 
           )
         ).json,
       ).toMatchObject({
-        agents: [{ merge_check_slots: 2 }],
+        agents: [{ running: 2, total_running: 4, merge_check_slots: 2 }],
         merge_checks: [{ running: 1 }],
       });
     } finally {

@@ -145,7 +145,7 @@ test("SSE revision refreshes counts without overwriting the draft, with no polli
   fireEvent.change(input, { target: { value: "9" } });
   current = {
     ...capacity,
-    agents: [{ ...agent, running: 4, limit: 8 }],
+    agents: [{ ...agent, running: 4, total_running: 6, limit: 8 }],
   };
   await act(async () => {
     await vi.advanceTimersByTimeAsync(10000);
@@ -153,7 +153,7 @@ test("SSE revision refreshes counts without overwriting the draft, with no polli
   expect(read).toHaveBeenCalledTimes(1);
   view.rerender(<Settings client={client} projectId="p" revision={1} />);
   await act(async () => {});
-  expect(screen.getByText("全部 7 · 非常驻 4 / 上限 8 / 排队 2")).toBeTruthy();
+  expect(screen.getByText("全部 6 · 非常驻 4 / 上限 8 / 排队 2")).toBeTruthy();
   expect(input.value).toBe("9");
   view.unmount();
   await vi.advanceTimersByTimeAsync(10000);

@@ -820,10 +820,10 @@ export interface ExecutionCapacity {
   readonly agents: readonly {
     machine_id: string;
     label: string;
-    /** C-296: non-standing occupancy; legacy servers omit total_running. */
+    /** C-296: non-standing occupancy from the shared capacity core. */
     running: number;
     /** All Agent occupancy, including standing PM/host operators. */
-    total_running?: number;
+    total_running: number;
     limit: number;
     max_limit: number;
     queued: number;

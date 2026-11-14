@@ -72,6 +72,7 @@ export function executionCapacity(
         machine_id: machine.id,
         label: machine.label,
         running: snapshot.agentOccupied.get(machine.id) ?? 0,
+        total_running: snapshot.allAgentOccupied.get(machine.id) ?? 0,
         limit: effectiveRunLimit(store, machine.id, defaults, maximums),
         max_limit: maximums(machine.id),
         queued: snapshot.queue.filter((run) => run.machine_id === machine.id)

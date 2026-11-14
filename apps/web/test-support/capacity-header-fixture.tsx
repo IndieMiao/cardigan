@@ -45,7 +45,9 @@ const client = fakeClient({
     const update = () => {
       capacity = {
         ...capacity,
-        agents: capacity.agents.map((m, i) => (i ? m : { ...m, running: 4 })),
+        agents: capacity.agents.map((m, i) =>
+          i ? m : { ...m, running: 4, total_running: 6 },
+        ),
       };
       callbacks.capacity?.();
     };

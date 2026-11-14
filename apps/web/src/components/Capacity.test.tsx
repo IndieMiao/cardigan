@@ -89,6 +89,8 @@ test("hover, keyboard and touch expose machine/CI details; Escape dismisses", as
   fireEvent.pointerEnter(button, { pointerType: "mouse" });
   let tooltip = await screen.findByRole("tooltip");
   expect(tooltip.textContent).toContain("第二台工作机 · Agent");
+  expect(tooltip.textContent).toContain("全部 5 · 非常驻 3 / 上限 6 / 排队 2");
+  expect(tooltip.textContent).toContain("全部 1 · 非常驻 1 / 上限 4 / 排队 0");
   expect(tooltip.textContent).toContain("本机 CI 另占 2 个 Agent 名额");
   expect(tooltip.textContent).toContain(
     "常驻 PM（Office / Ops）和主机运维不占额度",
@@ -153,28 +155,4 @@ test("unauthenticated and Agent-only clients never reach capacity editing", asyn
   expect(screen.queryByRole("spinbutton")).toBeNull();
   expect(read).not.toHaveBeenCalled();
   expect(write).not.toHaveBeenCalled();
-});
-
-test("a legacy service never labels its total as non-standing occupancy", async () => {
-  const legacy = {
-    ...capacity,
-    agents: capacity.agents.map(
-      ({ total_running: _total, ...machine }) => machine,
-    ),
-  };
-  render(
-    <CapacityProvider
-      client={fakeClient({ executionCapacity: async () => legacy })}
-      projectId="p"
-      revision={0}
-      canEdit
-    >
-      <PageTitle title="设置" />
-    </CapacityProvider>,
-  );
-  const button = await screen.findByRole("button", { name: /Agent —\/10/u });
-  fireEvent.focus(button);
-  const tooltip = await screen.findByRole("tooltip");
-  expect(tooltip.textContent).toContain("全部 3 · 非常驻 待更新");
-  expect(tooltip.textContent).toContain("主机尚未提供非常驻计数，待更新。");
 });
