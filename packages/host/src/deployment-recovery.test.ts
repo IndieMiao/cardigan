@@ -20,10 +20,12 @@ import {
   DeploymentController,
   DeploymentServerUnavailable,
 } from "./deployment.js";
+import { deploymentInProgress } from "./deployment-capacity.js";
 import { readDeploymentDiagnostics } from "./deployment-diagnostics.js";
 import { NodeDeploymentDriver } from "./deployment-node.js";
 import { acquireMergeCheckCapacity } from "./merge-check-capacity.js";
 import { executionOwner } from "./process-identity.js";
+import { acquireRepositoryFlock } from "./repository-lock.js";
 
 const exec = promisify(execFile);
 async function freePort() {
@@ -119,6 +121,7 @@ async function fixture() {
     const mcp = await freePort();
     let web = await freePort();
     while (web === mcp) web = await freePort();
+    await writeFile(join(root, "hc"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
     const options = {
       store,
       dataDir,
@@ -132,7 +135,8 @@ async function fixture() {
         poll_interval_ms: 1000,
       },
       env: {
-        PATH: process.env.PATH,
+        PATH: `${root}:${process.env.PATH}`,
+        CARDIGAN_HC_SESSION: "synthetic-session",
         CARDIGAN_MCP_PORT: String(mcp),
         CARDIGAN_WEB_PORT: String(web),
       },
@@ -155,10 +159,11 @@ async function fixture() {
         JSON.parse(
           await readFile(join(dataDir, "self-deploy/state.json"), "utf8"),
         ),
-      restart: async () => {
+      restart: async (configure?: (driver: NodeDeploymentDriver) => void) => {
         await unlock?.();
         unlock = undefined;
         driver = new NodeDeploymentDriver(options);
+        configure?.(driver);
         unlock = await driver.initialize();
       },
       records: async () => {
@@ -172,6 +177,187 @@ async function fixture() {
     throw error;
   }
 }
+
+test
+  .runIf(process.platform === "linux")
+  .each(["before_start", "exited_candidate", "failed_recovery"])(
+  "interrupted %s recovery retains the audited candidate and real backup",
+  async (scenario) => {
+    const f = await fixture();
+    try {
+      const oldProcess = (await f.state()).process;
+      const to = "b".repeat(40);
+      const stopped = await f.driver.beforeStop({
+        attempt: "interrupted-backup",
+        from: f.sha,
+        to,
+        status: "started",
+        build: "passed",
+        ready: false,
+        downtime_ms: 0,
+        summary: "准备切换",
+      });
+      await f.driver.stop();
+      const backup = await f.driver.backup();
+      expect(
+        (await lstat(join(f.root, "data/self-deploy", backup))).isFile(),
+      ).toBe(true);
+      if (scenario === "exited_candidate") {
+        expect(executionOwner(oldProcess.pid)).toBeUndefined();
+        await writeFile(
+          join(f.root, "data/self-deploy/state.json"),
+          JSON.stringify({
+            ...(await f.state()),
+            running: { sha: to, release: f.release },
+            process: oldProcess,
+            ready: false,
+          }),
+          { mode: 0o600 },
+        );
+      }
+      if (scenario === "failed_recovery") {
+        await expect(
+          f.restart((d) => vi.spyOn(d, "ready").mockResolvedValue(false)),
+        ).rejects.toThrow("Initial server did not become ready");
+        expect((await f.records())[0]).toMatchObject({
+          status: "failed",
+          from: f.sha,
+          to,
+          backup_file: backup,
+        });
+      }
+      await f.restart();
+      const recovered = await f.state();
+      expect(recovered.current.sha).toBe(f.sha);
+      expect(recovered.ready).toBe(true);
+      expect(recovered.backup_file).toBeUndefined();
+      expect((await f.records())[0]).toMatchObject({
+        attempt: stopped.attempt,
+        from: f.sha,
+        to,
+        status: "rolled_back",
+        ready: true,
+        backup_file: backup,
+        stop_snapshot: stopped.stop_snapshot,
+      });
+      const actions = f.store.uow.read((tx) =>
+        tx.human_actions.list("cardigan"),
+      );
+      expect(actions).toHaveLength(1);
+      expect(actions[0]?.instructions).toContain(backup);
+      expect(JSON.stringify([actions, await f.records()])).not.toContain(
+        f.root,
+      );
+      // A completed recovery is not another interrupted switch on normal restart.
+      const count = (await f.records()).length;
+      await f.driver.stop();
+      await f.restart();
+      expect(await f.records()).toHaveLength(count);
+    } finally {
+      await f.close();
+    }
+  },
+  15000,
+);
+
+test.runIf(process.platform === "linux")(
+  "a dead persisted candidate remains attributable without an earlier stop audit",
+  async () => {
+    const f = await fixture();
+    try {
+      const oldProcess = (await f.state()).process;
+      await f.driver.stop();
+      const backup = await f.driver.backup();
+      await writeFile(
+        join(f.root, "data/self-deploy/state.json"),
+        JSON.stringify({
+          ...(await f.state()),
+          running: { sha: "b".repeat(40), release: f.release },
+          process: oldProcess,
+          ready: false,
+        }),
+        { mode: 0o600 },
+      );
+      await f.restart();
+      expect((await f.records())[0]).toMatchObject({
+        status: "rolled_back",
+        from: f.sha,
+        to: "b".repeat(40),
+        backup_file: backup,
+      });
+    } finally {
+      await f.close();
+    }
+  },
+  15000,
+);
+
+test
+  .runIf(process.platform === "linux")
+  .each(["initial", "recovery", "log_cleanup"])(
+  "%s startup reports audit loss safely and releases both supervisor locks",
+  async (scenario) => {
+    const f = await fixture();
+    try {
+      if (scenario === "recovery") {
+        await f.driver.beforeStop({
+          attempt: "audit-loss",
+          from: f.sha,
+          to: "b".repeat(40),
+          status: "started",
+          build: "passed",
+          ready: false,
+          downtime_ms: 0,
+          summary: "准备切换",
+        });
+      }
+      await f.driver.stop();
+      if (scenario === "recovery") await f.driver.backup();
+      else await rm(join(f.root, "data/self-deploy/state.json"));
+      const before = (await f.records()).length;
+      const failure = await f
+        .restart((d) => {
+          vi.spyOn(d, "ready").mockResolvedValue(false);
+          vi.spyOn(d, "record").mockRejectedValue(
+            new Error("Authorization: Bearer synthetic-audit-secret"),
+          );
+          if (scenario === "log_cleanup")
+            vi.spyOn(d, "finishServerLogs").mockRejectedValue(
+              new Error("TOKEN=synthetic-log-secret"),
+            );
+        })
+        .then(
+          () => {
+            throw new Error("Expected initialization failure");
+          },
+          (error) => error,
+        );
+      expect(failure.message).toContain("startup_ready_failed");
+      expect(failure.message).toContain("ready: not_exited");
+      expect(failure.message).toContain(
+        "deployment_audit_failed：部署失败审计未保存",
+      );
+      if (scenario === "log_cleanup")
+        expect(failure.message).toContain("deployment_log_cleanup_failed");
+      expect(failure.message).not.toMatch(/synthetic|Authorization|TOKEN=/);
+      expect((await f.state()).process).toBeUndefined();
+      expect(deploymentInProgress(f.store)).toBe(false);
+      const unlock = await acquireRepositoryFlock(
+        join(f.root, "data/self-deploy/supervisor.lock"),
+        1,
+      );
+      await unlock();
+      expect(await f.records()).toHaveLength(before);
+      // The failed audit did not commit a partial event or human action.
+      expect(
+        f.store.uow.read((tx) => tx.human_actions.list("cardigan")),
+      ).toHaveLength(0);
+    } finally {
+      await f.close();
+    }
+  },
+  15000,
+);
 
 test.runIf(process.platform === "linux").each([false, true])(
   "ready server exit is fatal, audited and recoverable even without new main (adopted=%s)",

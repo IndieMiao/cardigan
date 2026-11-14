@@ -1,5 +1,9 @@
 import { tmpdir } from "node:os";
 
+export * from "./worker-capabilities.js";
+export * from "./worker-preflight.js";
+export * from "./worker-primitives.js";
+
 import { join } from "node:path";
 import type {
   Assignment,

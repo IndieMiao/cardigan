@@ -1,22 +1,24 @@
 import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { statusLabel } from "../status.js";
+import { CapacityStatus } from "./Capacity.js";
 import { StatusIcon, statusShape } from "./StatusIcon.js";
 
 export function PageTitle({
   title,
   description,
   actions,
+  showCapacity = true,
 }: {
   title: ReactNode;
   description?: ReactNode;
   actions?: ReactNode;
+  showCapacity?: boolean;
 }) {
   return (
     <header className="page-title">
-      <div>
-        <h1>{title}</h1>
-        {description && <p>{description}</p>}
-      </div>
+      <h1>{title}</h1>
+      {showCapacity && <CapacityStatus />}
+      {description && <p className="page-description">{description}</p>}
       {actions && <div className="page-actions">{actions}</div>}
     </header>
   );

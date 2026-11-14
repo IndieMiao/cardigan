@@ -444,20 +444,12 @@ test("C-207: below 760px the same Assignments render as cards only, in reading o
   }
 });
 
-test("C-207: the table comes first; capacity sits below it and the title jump opens it", async () => {
+test("C-294: execution has no duplicate capacity panel or jump button", async () => {
   renderPage();
   await screen.findByRole("button", { name: "查看 A-1 详情" });
-  const table = document.querySelector(".execution-table") as Element;
-  const panel = screen.getByRole("region", { name: "机器并发" });
-  expect(
-    table.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING,
-  ).toBeTruthy();
-  expect(document.querySelector(".page-title")?.contains(panel)).toBe(false);
-  const details = panel.querySelector("details") as HTMLDetailsElement;
-  expect(details.open).toBe(false);
-  fireEvent.click(screen.getByRole("button", { name: /机器并发/u }));
-  expect(details.open).toBe(true);
-  expect(document.activeElement).toBe(details.querySelector("summary"));
+  expect(document.querySelector(".execution-table")).toBeTruthy();
+  expect(screen.queryByRole("region", { name: "机器并发" })).toBeNull();
+  expect(screen.queryByRole("button", { name: /机器并发/u })).toBeNull();
 });
 
 const standing = (

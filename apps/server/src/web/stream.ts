@@ -74,6 +74,8 @@ export interface StreamOptions {
    * dispatcher, and then no `context` frame is sent.
    */
   readonly contextRevision?: () => string;
+  /** Shared Agent/CI counts and limits, including changes in other projects. */
+  readonly capacityRevision?: () => string;
 }
 
 export const SSE_SHUTDOWN_FRAME = "event: shutdown\ndata: {}\n\n";
@@ -147,6 +149,11 @@ export async function serveStream(options: StreamOptions): Promise<void> {
     `event: context\ndata: ${JSON.stringify({ revision })}\n\n`;
   let contextRevision = options.contextRevision?.();
   if (contextRevision !== undefined) res.write(contextFrame(contextRevision));
+  const capacityFrame = (revision: string): string =>
+    `event: capacity\ndata: ${JSON.stringify({ revision })}\n\n`;
+  let capacityRevision = options.capacityRevision?.();
+  if (capacityRevision !== undefined)
+    res.write(capacityFrame(capacityRevision));
   let closed = false;
   let poll: NodeJS.Timeout | undefined;
   let heartbeat: NodeJS.Timeout | undefined;
@@ -176,6 +183,11 @@ export async function serveStream(options: StreamOptions): Promise<void> {
       if (nextContext !== undefined && nextContext !== contextRevision) {
         contextRevision = nextContext;
         res.write(contextFrame(contextRevision));
+      }
+      const nextCapacity = options.capacityRevision?.();
+      if (nextCapacity !== undefined && nextCapacity !== capacityRevision) {
+        capacityRevision = nextCapacity;
+        res.write(capacityFrame(capacityRevision));
       }
       batch = store.uow.read((tx) => {
         const streams = [

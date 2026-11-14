@@ -7,6 +7,7 @@ const initial = (project: string | undefined) => ({
   revision: 0,
   connectionRevision: 0,
   contextRevision: 0,
+  capacityRevision: 0,
   streams: new Map<string, number>(),
   status: "connecting" as StreamStatus,
 });
@@ -71,6 +72,14 @@ export function useProjectStream(
             : old,
         );
       },
+      capacity: () => {
+        if (disposed) return;
+        setState((old) =>
+          old.project === project
+            ? { ...old, capacityRevision: old.capacityRevision + 1 }
+            : old,
+        );
+      },
       status: (status) => {
         if (disposed) return;
         setState((old) => ({ ...old, status }));
@@ -100,6 +109,7 @@ export function useProjectStream(
       .filter(([, revision]) => revision === current.revision)
       .map(([id]) => id),
     contextRevision: current.contextRevision,
+    capacityRevision: current.capacityRevision,
     status: current.status,
     cardRevision: (id: string, affectedCards: readonly string[] = []) =>
       [...new Set([id, ...affectedCards])].reduce(

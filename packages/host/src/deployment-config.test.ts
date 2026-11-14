@@ -30,6 +30,17 @@ test("bootstrap deployment defaults on; timings are explicit host policy", () =>
   ])
     expect(() => parseDeploymentConfig({ ...config, ...patch })).toThrow();
 });
+test("evidence attention defaults to the approved ten minutes and accepts only bounded positive milliseconds", () => {
+  expect(parseDeploymentConfig(config).evidence_wait_timeout_ms).toBe(600000);
+  expect(
+    parseDeploymentConfig({ ...config, evidence_wait_timeout_ms: 42 })
+      .evidence_wait_timeout_ms,
+  ).toBe(42);
+  for (const value of [0, -1, 0.5, null, "600000", NaN, Infinity, 2147483648])
+    expect(() =>
+      parseDeploymentConfig({ ...config, evidence_wait_timeout_ms: value }),
+    ).toThrow();
+});
 test("server logs are opt-in and require a complete, finite retention budget", () => {
   expect(parseDeploymentConfig(config).server_log_max_bytes).toBeUndefined();
   expect(

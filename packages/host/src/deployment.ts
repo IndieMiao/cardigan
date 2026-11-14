@@ -12,7 +12,6 @@ export class DeploymentServerUnavailable extends Error {
 export class DeploymentController {
   private busy = false;
   private readonly failed = new Set<string>();
-  private readonly waiting = new Set<string>();
   constructor(private readonly driver: DeploymentDriver) {}
 
   async tick(): Promise<void> {
@@ -47,23 +46,21 @@ export class DeploymentController {
         // Git publication precedes its audit transaction. Never build without
         // proof, but re-read it next tick instead of poisoning this target.
         // Failed evidence reads/observations also remain outside the failure cache.
-        if (!this.waiting.has(target)) {
-          await d.record({
-            ...record,
-            status: "waiting_for_evidence",
-            summary:
-              "中心 main 的发布证据尚未完整核验，保留当前服务，后续轮询重新核验",
-          });
-          this.waiting.add(target);
-        }
+        await d.waitForEvidence({
+          ...record,
+          status: "waiting_for_evidence",
+          summary:
+            "中心 main 的发布证据尚未完整核验，保留当前服务，后续轮询重新核验",
+        });
         return;
       }
-      this.waiting.delete(target);
       await d.record(record);
       let stoppedAt: number | undefined;
       let oldStopped = false;
+      let stage: NonNullable<DeploymentRecord["failure_stage"]> = "host";
       try {
         if (!fastForward) throw new Error("non_fast_forward");
+        stage = "build";
         const result = await d.build(target);
         record = {
           ...record,
@@ -71,15 +68,19 @@ export class DeploymentController {
           build: result.build ? "passed" : "failed",
         };
         if (!result.build) throw new Error("build_failed");
+        stage = "host";
         const migrations = await d.migrationsChanged(current.sha, target);
         record = await d.beforeStop(record);
         // Backup is taken with the old server stopped, before any new migration.
         stoppedAt = d.now();
         await d.stop();
         oldStopped = true;
-        if (migrations) await d.backup();
+        if (migrations) record = { ...record, backup_file: await d.backup() };
+        stage = "start";
         await d.start(result.build);
+        stage = "ready";
         if (!(await d.ready())) throw new Error("ready_failed");
+        stage = "host";
         await d.promote(result.build);
         record = {
           ...record,
@@ -97,7 +98,15 @@ export class DeploymentController {
           )
             ? error.message
             : "host_operation_failed";
-        record = { ...record, status: "failed", summary: reason };
+        record = {
+          ...record,
+          status: "failed",
+          summary: reason,
+          failure_stage: stage,
+          ...(stage === "start" || stage === "ready"
+            ? { log_tail: d.serverDiagnostics(stage) }
+            : {}),
+        };
         if (oldStopped) {
           try {
             await d.stop();
