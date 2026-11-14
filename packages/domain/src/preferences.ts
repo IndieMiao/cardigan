@@ -41,6 +41,10 @@ export interface SystemReminderPolicy {
   readonly max_reminders: number;
 }
 export interface ProjectPreferences {
+  /** C-239: no configured limit or paths means disabled, even when toggled on. */
+  readonly system_review_limit_raise?: boolean;
+  readonly system_review_limit_max_raises?: number | null;
+  readonly role_rule_paths?: readonly string[] | null;
   readonly system_auto_assign_verifiers?: boolean;
   readonly system_reminders?: boolean;
   readonly system_reminder_policy?: SystemReminderPolicy | null;

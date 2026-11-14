@@ -160,6 +160,9 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
   const clock = options.clock ?? dispatcherClock;
   const standing = options.standing ?? standingResolver(options.store);
   const dispatcher = new Dispatcher({
+    ...(options.git?.proveReviewLimit
+      ? { proveReviewLimit: options.git.proveReviewLimit.bind(options.git) }
+      : {}),
     ...(options.hostOpsTick ? { hostOpsTick: options.hostOpsTick } : {}),
     ...(options.hostOpsPatrolIntervalMs === undefined
       ? {}

@@ -25,6 +25,10 @@ import {
 } from "../preferences.js";
 import { states } from "../states.js";
 import {
+  validRoleRulePaths,
+  validSystemReviewLimitMax,
+} from "../system-review-limit.js";
+import {
   type CommandPorts,
   type CommandState,
   command,
@@ -46,6 +50,9 @@ export function setProjectPreferences(
   state: CommandState,
   actor: Actor,
   input: {
+    system_review_limit_raise?: boolean;
+    system_review_limit_max_raises?: number | null;
+    role_rule_paths?: readonly string[] | null;
     system_auto_assign_verifiers?: boolean;
     system_reminders?: boolean;
     system_reminder_policy?: SystemReminderPolicy | null;
@@ -120,6 +127,7 @@ export function setProjectPreferences(
       "上下文剩余比例须为大于 0 且小于 100 的有限数值",
     );
     for (const key of [
+      "system_review_limit_raise",
       "system_auto_assign_verifiers",
       "system_reminders",
     ] as const)
@@ -133,6 +141,18 @@ export function setProjectPreferences(
         validSystemReminderPolicy(input.system_reminder_policy),
       "validation_failed",
       "催办配置须完整填写：分钟数和次数须为允许范围内的正整数，重复提醒须填写间隔；不重复时，间隔须为空",
+    );
+    ensure(
+      input.system_review_limit_max_raises === undefined ||
+        validSystemReviewLimitMax(input.system_review_limit_max_raises),
+      "validation_failed",
+      "自动加轮次数须为安全正整数或 null（未设置）",
+    );
+    ensure(
+      input.role_rule_paths === undefined ||
+        validRoleRulePaths(input.role_rule_paths),
+      "validation_failed",
+      "角色规则路径须为仓库相对路径，可用末尾 /** 表示子目录，或 null（未设置）",
     );
     const old = projectPreferences(state);
     const contextNext = contextUsageThresholds({
@@ -152,7 +172,10 @@ export function setProjectPreferences(
       "上下文剩余比例须大于 0 且小于 100，换会话比例必须小于交接提醒比例",
     );
     ensure(
-      input.system_auto_assign_verifiers !== undefined ||
+      input.system_review_limit_raise !== undefined ||
+        input.system_review_limit_max_raises !== undefined ||
+        input.role_rule_paths !== undefined ||
+        input.system_auto_assign_verifiers !== undefined ||
         input.system_reminders !== undefined ||
         input.system_reminder_policy !== undefined ||
         input.context_handoff_remaining_pct !== undefined ||
@@ -223,6 +246,18 @@ export function setProjectPreferences(
     }
     const next = {
       ...old,
+      ...(input.system_review_limit_raise !== undefined
+        ? { system_review_limit_raise: input.system_review_limit_raise }
+        : {}),
+      ...(input.system_review_limit_max_raises !== undefined
+        ? {
+            system_review_limit_max_raises:
+              input.system_review_limit_max_raises,
+          }
+        : {}),
+      ...(input.role_rule_paths !== undefined
+        ? { role_rule_paths: input.role_rule_paths }
+        : {}),
       ...(input.system_auto_assign_verifiers !== undefined
         ? { system_auto_assign_verifiers: input.system_auto_assign_verifiers }
         : {}),
@@ -281,9 +316,12 @@ export function setProjectPreferences(
         : {}),
     };
     const systemKeys = [
+      "system_review_limit_raise",
       "system_auto_assign_verifiers",
       "system_reminders",
       "system_reminder_policy",
+      "system_review_limit_max_raises",
+      "role_rule_paths",
     ] as const;
     const encodeSystemPreference = (value: unknown) =>
       JSON.stringify(
@@ -295,10 +333,24 @@ export function setProjectPreferences(
     const systemChanged = systemKeys.filter(
       (key) =>
         encodeSystemPreference(
-          old[key] ?? (key === "system_reminder_policy" ? null : false),
+          old[key] ??
+            ([
+              "system_reminder_policy",
+              "system_review_limit_max_raises",
+              "role_rule_paths",
+            ].includes(key)
+              ? null
+              : false),
         ) !==
         encodeSystemPreference(
-          next[key] ?? (key === "system_reminder_policy" ? null : false),
+          next[key] ??
+            ([
+              "system_reminder_policy",
+              "system_review_limit_max_raises",
+              "role_rule_paths",
+            ].includes(key)
+              ? null
+              : false),
         ),
     );
     const contextOld = contextUsageThresholds(old);

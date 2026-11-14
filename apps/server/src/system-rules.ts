@@ -1,12 +1,17 @@
 import {
   autoAssignVerifier,
+  beginSystemReviewLimitRaise,
   type Clock,
+  finishSystemReviewLimitRaise,
   type ProjectId,
   remindSystemWaits,
+  validRoleRulePaths,
+  validSystemReviewLimitMax,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
 import type { StateLoader } from "./dispatch-state.js";
+import type { MergeGit } from "./git.js";
 
 /** Run before routing: successful assignment sends the delivery straight to its owner. */
 export function runSystemRules(
@@ -42,4 +47,66 @@ export function runSystemRules(
     if (!reminders.ok) throw new Error(reminders.error.message);
     persistEffect(tx, project, reminders.value);
   });
+}
+
+/** Git IO stays outside SQLite; the second transaction repeats all eligibility checks. */
+export async function runSystemReviewLimits(
+  store: Store,
+  project: ProjectId,
+  clock: Clock,
+  prove: NonNullable<MergeGit["proveReviewLimit"]>,
+  loadState: StateLoader = loadCommandState,
+) {
+  const actor = { kind: "system" as const, project_id: project };
+  const decisions = store.uow.read((tx) => {
+    const state = loadState(tx, project);
+    const pref = state.project_preferences?.find((p) => p.id === project);
+    if (
+      pref?.system_review_limit_raise !== true ||
+      !pref.system_review_limit_max_raises ||
+      !validSystemReviewLimitMax(pref.system_review_limit_max_raises) ||
+      !pref.role_rule_paths?.length ||
+      !validRoleRulePaths(pref.role_rule_paths)
+    )
+      return [];
+    const attempted = new Set(
+      state.events
+        .filter((e) => e.type === "system_review_limit_attempted")
+        .map((e) => (e.payload as Record<string, unknown>).decision_id),
+    );
+    return state.decisions.filter(
+      (q) =>
+        q.trigger === "review_limit" &&
+        q.status === "open" &&
+        q.decider === "role:pm" &&
+        !q.resolution &&
+        !q.human_required_reason &&
+        !attempted.has(q.id),
+    );
+  });
+  for (const decision of decisions) {
+    const claimed = store.uow.run((tx) => {
+      const result = beginSystemReviewLimitRaise(
+        loadState(tx, project),
+        actor,
+        { decision_id: decision.id },
+        { clock, ids: tx.ids },
+      );
+      if (!result.ok) throw new Error(result.error.message);
+      persistEffect(tx, project, result.value);
+      return result.value.data;
+    });
+    if (!claimed) continue;
+    const proof = await prove(project, claimed.candidate).catch(() => null);
+    store.uow.run((tx) => {
+      const result = finishSystemReviewLimitRaise(
+        loadState(tx, project),
+        actor,
+        { attempt_id: claimed.attempt_id, proof },
+        { clock, ids: tx.ids },
+      );
+      if (!result.ok) throw new Error(result.error.message);
+      persistEffect(tx, project, result.value);
+    });
+  }
 }

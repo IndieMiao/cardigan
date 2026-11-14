@@ -116,6 +116,11 @@ export function projectSnapshot(state: CommandState, actor: Actor) {
     return {
       project_id: state.project_id,
       system_rules: {
+        system_review_limit_raise:
+          projectPreferences(state).system_review_limit_raise === true,
+        system_review_limit_max_raises:
+          projectPreferences(state).system_review_limit_max_raises ?? null,
+        role_rule_paths: projectPreferences(state).role_rule_paths ?? null,
         system_auto_assign_verifiers:
           projectPreferences(state).system_auto_assign_verifiers === true,
         system_reminders: projectPreferences(state).system_reminders === true,
