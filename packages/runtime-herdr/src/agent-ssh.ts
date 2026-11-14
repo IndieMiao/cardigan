@@ -374,23 +374,15 @@ const PREPARE_SCRIPT = [
   '  cd -P -- "$1" 2>/dev/null || exit 9',
   '  [ "$(pwd -P)" = "$h/$1" ] && [ -O . ] || exit 10',
   "}",
-  // Retain directory identities across alias preparation. Rollback never
-  // creates parents or trusts a replacement at the original pathname.
-  "rollback() (",
-  '  cd -P -- /proc/self/fd/3 && [ "$(pwd -P)" = "$R" ] || exit 1',
-  '  step() { [ ! -L "$1" ] && cd -P -- "$1" && [ "$(pwd -P)" = "$2" ] && [ -O . ] && [ . -ef "/proc/self/fd/$3" ]; }',
-  '  step checks "$R/checks" 4 && step "$project" "$R/checks/$project" 5 || exit 1',
-  '  [ ! -L "$attempt" ] && [ -d "$attempt" ] && [ -O "$attempt" ] && [ "$attempt" -ef /proc/self/fd/6 ] || exit 1',
-  '  rmdir -- "$attempt"',
-  ")",
   // A check never reuses a previous attempt (same rule as prepareAgentCheckout).
-  'enter checks; exec 4<.; enter "$project"; exec 5<.',
+  'enter checks; enter "$project"',
   'mkdir -m 0700 -- "$attempt" || exit 5',
-  'exec 6<"$attempt"',
   'cd -P -- /proc/self/fd/3 && [ "$(pwd -P)" = "$R" ] || exit 10',
   "enter s",
   'if ! mkdir -m 0700 -- "$alias"; then',
-  "  rollback || :",
+  // The account can replace the leaf both between mkdir/open and between
+  // an identity check/rmdir. No conditional unlink exists here: preserving
+  // the failed attempt is safer than deleting an unproven replacement.
   "  exit 5",
   "fi",
   // The returned paths must still resolve to the leaves created above.
