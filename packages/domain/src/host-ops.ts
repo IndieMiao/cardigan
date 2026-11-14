@@ -64,6 +64,7 @@ export interface HostOpsExecution {
   readonly action_id: Event["id"];
   readonly upstream_incident_id?: Event["id"];
   readonly context_usage?: ContextObservation;
+  readonly automatic_context_restart?: boolean;
   readonly tool: HostOpsExecutionTool;
   readonly target_id: AssignmentId | RunId;
   readonly assignment_id: AssignmentId;
@@ -80,7 +81,11 @@ export function pendingHostOpsActions(
 ): HostOpsExecution[] {
   const finished = new Set(
     events
-      .filter((e) => e.type === "host_ops_action_finished")
+      .filter(
+        (e) =>
+          e.type === "host_ops_action_finished" ||
+          e.type === "context_session_restart_result",
+      )
       .map((e) => (e.payload as { action_id: string }).action_id),
   );
   return events
@@ -109,7 +114,71 @@ export function hostOpsPending(
     pending = new Set(
       pendingHostOpsActions(events).map((a) => a.assignment_id),
     );
+    for (const event of events) {
+      if (
+        event.type !== "context_session_restart_result" ||
+        (event.payload as { result?: string }).result !== "failed"
+      )
+        continue;
+      // Only an actual human confirmation releases the failure fence.
+      if (
+        !events.some(
+          (e) =>
+            e.type === "human_action_completed" &&
+            e.actor.kind === "human" &&
+            (e.payload as { human_action_id?: string }).human_action_id ===
+              (event.payload as { human_action_id?: string }).human_action_id,
+        )
+      )
+        (pending as Set<unknown>).add(
+          (event.payload as { assignment_id?: string }).assignment_id,
+        );
+    }
     pendingAssignments.set(events, pending);
   }
   return pending.has(assignment_id);
+}
+
+const automaticLaunches = new WeakMap<
+  readonly Event[],
+  ReadonlyMap<unknown, HostOpsExecution>
+>();
+/** Locate unfinished automatic launches without rescanning history for every Run on every tick. */
+export function automaticContextActionForRun(
+  events: readonly Event[],
+  run: Run,
+): HostOpsExecution | undefined {
+  let launches = automaticLaunches.get(events);
+  if (!launches) {
+    const results = new Set(
+      events
+        .filter((e) => e.type === "context_session_restart_result")
+        .map((e) => (e.payload as { action_id: string }).action_id),
+    );
+    const intents = new Map(
+      events
+        .filter(
+          (e) =>
+            e.type === "host_ops_action_taken" &&
+            (e.payload as { automatic_context_restart?: boolean })
+              .automatic_context_restart &&
+            !results.has(e.id),
+        )
+        .map((e) => [
+          e.id,
+          { ...(e.payload as unknown as HostOpsExecution), action_id: e.id },
+        ]),
+    );
+    const indexed = new Map<unknown, HostOpsExecution>();
+    for (const e of events) {
+      if (e.type !== "host_ops_action_finished") continue;
+      const action = intents.get(
+        (e.payload as { action_id: Event["id"] }).action_id,
+      );
+      if (action) indexed.set(e.id, action);
+    }
+    launches = indexed;
+    automaticLaunches.set(events, launches);
+  }
+  return launches.get(run.trigger_event_id);
 }
