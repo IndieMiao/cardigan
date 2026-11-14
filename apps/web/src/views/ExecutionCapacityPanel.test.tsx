@@ -20,6 +20,7 @@ const agent: ExecutionCapacity["agents"][number] = {
   machine_id: "local",
   label: "Workstation",
   running: 5,
+  total_running: 8,
   limit: 6,
   max_limit: 16,
   queued: 2,
@@ -88,7 +89,7 @@ test("distinct machine counts, human save, validation and a stable key after unc
   const input = await screen.findByRole("spinbutton", {
     name: "Workstation Agent 并发上限",
   });
-  expect(screen.getByText("运行中 5 / 上限 6 / 排队 2")).toBeTruthy();
+  expect(screen.getByText("非常驻 5 / 上限 6 / 排队 2 · 全部 8")).toBeTruthy();
   expect(screen.getByText("运行中 1 / 上限 3 / 排队 4")).toBeTruthy();
   expect(screen.getByText("需要主机预置，找张良")).toBeTruthy();
   expect(screen.getAllByRole("spinbutton")).toHaveLength(1);
@@ -102,7 +103,7 @@ test("distinct machine counts, human save, validation and a stable key after unc
   expect((input as HTMLInputElement).value).toBe("2");
   fireEvent.click(screen.getByRole("button", { name: "保存" }));
   await screen.findByText("已保存，下一轮调度生效。");
-  await screen.findByText("运行中 5 / 上限 2 / 排队 2");
+  await screen.findByText("非常驻 5 / 上限 2 / 排队 2 · 全部 8");
   expect(setRunLimit.mock.calls).toEqual([
     ["p", "local", 2, expect.any(String)],
     ["p", "local", 2, setRunLimit.mock.calls[0]?.[3]],
@@ -125,12 +126,12 @@ test("cross-project polling refreshes counts without overwriting the draft and s
   fireEvent.change(input, { target: { value: "9" } });
   current = {
     ...capacity,
-    agents: [{ ...agent, running: 4, limit: 8 }],
+    agents: [{ ...agent, running: 4, total_running: 6, limit: 8 }],
   };
   await act(async () => {
     await vi.advanceTimersByTimeAsync(5000);
   });
-  expect(screen.getByText("运行中 4 / 上限 8 / 排队 2")).toBeTruthy();
+  expect(screen.getByText("非常驻 4 / 上限 8 / 排队 2 · 全部 6")).toBeTruthy();
   expect(input.value).toBe("9");
   view.unmount();
   await vi.advanceTimersByTimeAsync(10000);
@@ -171,7 +172,9 @@ test("C-207: the panel folds to a one-line summary and cancel restores the saved
       revision={0}
     />,
   );
-  const summary = await screen.findByText("Agent 运行中 5 / 上限 6 / 排队 2");
+  const summary = await screen.findByText(
+    "Agent 非常驻 5 / 上限 6 / 排队 2 · 全部 8",
+  );
   const details = summary.closest("details") as HTMLDetailsElement;
   expect(details.open).toBe(false);
   expect(details.querySelector("summary")?.textContent).toContain(
@@ -202,6 +205,6 @@ test("C-207: an invalid host limit shows as unavailable in the summary", async (
     />,
   );
   expect(
-    await screen.findByText("Agent 运行中 5 / 上限 不可用 / 排队 2"),
+    await screen.findByText("Agent 非常驻 5 / 上限 不可用 / 排队 2 · 全部 8"),
   ).toBeTruthy();
 });
