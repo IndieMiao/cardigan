@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { ExtMessageItem } from "@cardigan/domain";
 import { expect, test } from "vitest";
@@ -8,6 +11,7 @@ import {
   settleExtMessage,
 } from "./ext-message.js";
 import { defaultMigrationsDir, listMigrations, migrate } from "./migrate.js";
+import { Store } from "./store.js";
 import { withTempStore } from "./test-support.js";
 
 const at = "2026-01-01T00:00:00.000Z";
@@ -107,3 +111,116 @@ test("replay is unique per item and channel, transactional and terminal rows can
     );
     expect(migrate(store.database)).toEqual([]);
   }));
+
+test.each([25, 26])(
+  "digest migration preserves v%s pending/terminal budgets and reopens idempotently",
+  (previousVersion) => {
+    const db = new DatabaseSync(":memory:");
+    try {
+      db.exec(
+        "CREATE TABLE schema_version(version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)",
+      );
+      for (const migration of listMigrations(defaultMigrationsDir).filter(
+        (m) => m.version <= previousVersion,
+      )) {
+        db.exec(migration.sql);
+        db.prepare("INSERT INTO schema_version VALUES (?,?,?)").run(
+          migration.version,
+          migration.name,
+          at,
+        );
+      }
+      for (const status of ["pending", "sent", "failed", "skipped"]) {
+        db.prepare(`INSERT INTO ext_message_outbox
+        (project_id,item_kind,item_id,channel,event_id,status,attempts,next_attempt_at,updated_at)
+        VALUES ('fictional','decision',?,'fake','event-1',?,2,?,?)`).run(
+          status,
+          status,
+          at,
+          at,
+        );
+      }
+      const before = listExtMessages(db);
+      expect(migrate(db)).toEqual(
+        [
+          { version: 26, name: "machine_registry" },
+          { version: 27, name: "ext_message_digest" },
+        ].filter((migration) => migration.version > previousVersion),
+      );
+      expect(listExtMessages(db)).toEqual(
+        before.map((r) => ({ ...r, digest_id: null })),
+      );
+      expect(migrate(db)).toEqual([]);
+      projectExtMessage(db, item, "fake", at, true);
+      projectExtMessage(db, item, "fake", at, false);
+      expect(
+        listExtMessages(db).find((r) => r.item_id === "Q-1")?.digest_id,
+      ).toBe("queued");
+    } finally {
+      db.close();
+    }
+  },
+);
+
+test("digest upgrade rolls back its column and preserves registered machines and outbox data on retry", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ext-digest-migration-"));
+  const migrations = listMigrations(defaultMigrationsDir);
+  for (const migration of migrations.filter((m) => m.version <= 26))
+    writeFileSync(
+      join(
+        dir,
+        `${String(migration.version).padStart(4, "0")}_${migration.name}.sql`,
+      ),
+      migration.sql,
+    );
+  let store = Store.open({ dataDir: dir, migrationsDir: dir });
+  try {
+    store.createProject({ id: "fictional", name: "Fictional" });
+    store.database
+      .prepare(`INSERT INTO ext_message_outbox
+      (project_id,item_kind,item_id,channel,event_id,status,attempts,next_attempt_at,updated_at)
+      VALUES ('fictional','decision','history','fake','event-1','pending',2,?,?)`)
+      .run(at, at);
+    const machines = store.database.prepare("SELECT * FROM machines").all();
+    expect(machines).toHaveLength(1);
+    const history = listExtMessages(store.database);
+    const digest = migrations.find((m) => m.version === 27);
+    if (!digest) throw new Error("Missing digest migration");
+    const path = join(dir, "0027_ext_message_digest.sql");
+    writeFileSync(path, `${digest.sql}\nSELECT * FROM missing_digest_table;`);
+    expect(() => store.migrate()).toThrow("missing_digest_table");
+    expect(store.schemaVersion()).toBe(26);
+    expect(
+      store.database
+        .prepare("PRAGMA table_info(ext_message_outbox)")
+        .all()
+        .map((c) => c.name),
+    ).not.toContain("digest_id");
+    expect(listExtMessages(store.database)).toEqual(history);
+    expect(store.database.prepare("SELECT * FROM machines").all()).toEqual(
+      machines,
+    );
+    writeFileSync(path, digest.sql);
+    expect(store.migrate()).toEqual([
+      { version: 27, name: "ext_message_digest" },
+    ]);
+    expect(listExtMessages(store.database)).toEqual(
+      history.map((r) => ({ ...r, digest_id: null })),
+    );
+    projectExtMessage(store.database, item, "fake", at, true);
+    const grouped = listExtMessages(store.database);
+    expect(grouped.find((r) => r.item_id === item.item_id)?.digest_id).toBe(
+      "queued",
+    );
+    store.close();
+    store = Store.open({ dataDir: dir });
+    expect(store.migrate()).toEqual([]);
+    expect(listExtMessages(store.database)).toEqual(grouped);
+    expect(store.database.prepare("SELECT * FROM machines").all()).toEqual(
+      machines,
+    );
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
