@@ -5,6 +5,7 @@ import {
   type Event,
   type HostOpsExecution,
   isStandingPm,
+  type MachineRunCapacity,
   occupiedRunSlots,
   pendingHostOpsActions,
   type QueuedRun,
@@ -261,6 +262,34 @@ export function readRunQueue(store: Store, tx?: ReadRepositories) {
   return tx
     ? queueSnapshot(store, tx)
     : store.uow.read((read) => queueSnapshot(store, read));
+}
+
+/** Shared read-only projection for the execution view and PM project snapshot. */
+export function machineRunCapacity(
+  store: Store,
+  tx: ReadRepositories,
+  options: {
+    defaults?: ((machine: string) => number) | undefined;
+    maximums?: ((machine: string) => number) | undefined;
+    displayName?: ((machine: string) => string | undefined) | undefined;
+  } = {},
+  snapshot = runCapacitySnapshot(store, tx),
+): MachineRunCapacity[] {
+  const maximums = options.maximums ?? (() => DEFAULT_MAX_RUN_LIMIT);
+  return runCapacityMachines(store, tx, options.displayName).map((machine) => ({
+    machine_id: machine.id,
+    label: machine.label,
+    running: snapshot.agentOccupied.get(machine.id) ?? 0,
+    limit: effectiveRunLimit(store, machine.id, options.defaults, maximums),
+    max_limit: maximums(machine.id),
+    queued: snapshot.queue.filter((run) => run.machine_id === machine.id)
+      .length,
+    merge_check_slots:
+      machine.id === LOCAL_EXECUTOR
+        ? (snapshot.mergeChecks.get(LOCAL_EXECUTOR) ?? 0) *
+          MERGE_CHECK_RUN_SLOTS
+        : 0,
+  }));
 }
 
 /** YAML is the default; invalid trusted config still fails closed, even with an override. */

@@ -3,6 +3,22 @@ import type { Assignment, Run } from "./entities.js";
 export const DEFAULT_RUN_LIMIT = 4;
 export const DEFAULT_MAX_RUN_LIMIT = 16;
 
+/** Cross-project machine totals only; no project, card or Run identities. */
+export interface MachineRunCapacity {
+  readonly machine_id: string;
+  readonly label: string;
+  /** Includes standing PMs and startup/stop reservations. */
+  readonly running: number;
+  readonly limit: number;
+  readonly max_limit: number;
+  /** Ordinary Runs waiting for capacity, excluding reserved startups. */
+  readonly queued: number;
+  readonly merge_check_slots: number;
+}
+
+/** Host-provided read port; absence must not be reported as zero capacity. */
+export type ReadRunCapacity = () => readonly MachineRunCapacity[] | null;
+
 export const runLimitMaximumMessage = (maximum: number): string =>
   `并发上限不能超过 ${maximum}。`;
 

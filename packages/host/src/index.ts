@@ -117,6 +117,7 @@ export {
 export {
   effectiveRunLimit,
   MERGE_CHECK_RUN_SLOTS,
+  machineRunCapacity,
   readRunQueue,
   runCapacityMachines,
   runCapacitySnapshot,

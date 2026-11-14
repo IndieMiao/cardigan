@@ -54,9 +54,13 @@ test("standing PMs occupy a slot; only dispatched/acked/running count on their m
     ] as const
   ).map((status): Run => ({ ...run, status }));
   expect(isStandingPm(pm)).toBe(true);
+  expect(isStandingPm({ ...f.coder, role_id: "pm" })).toBe(false);
   expect(isStandingPm({ ...pm, role_id: "observer" })).toBe(false);
   expect(occupiedRunSlots([pm], runs, "local")).toBe(3);
   expect(occupiedRunSlots([pm], runs, "other")).toBe(0);
+  expect(canDispatchRun(3, occupiedRunSlots([pm], runs, "local"), true)).toBe(
+    true,
+  );
   expect(canDispatchRun(3, occupiedRunSlots([pm], runs, "local"), false)).toBe(
     false,
   );

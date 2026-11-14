@@ -1037,6 +1037,8 @@ M3.4 的 Runtime 接线根据已派发的业务 Run（dispatched / acked / runni
 
 C-89：PM Ops 每轮开始和结束用 `project_snapshot` 检查 backlog、todo 与尚未指派的工作项，轮换后的首轮同样执行；收到新卡通知后先用 `get_card` 查当前状态，再为可开工的产出项指派执行者。backlog 保留待规划，不自动启动；未能派发的 todo 记录原因。这样此前未生成通知的旧卡也能由快照盘点发现，不把“在制卡片为空”当作“没有待安排工作”。
 
+C-293：PM 不另设人工并发限制，以系统上限为准。工作项就绪且有合格员工时即指派，排队交给系统调度器；不得根据评论或口头约定另设并发数量限制。`project_snapshot.run_capacity` 只供读取和汇报容量，不作为压住就绪项的依据；需要降低并发时由人调整系统设置。
+
 C-226：PM Ops 在 Claude Code（`claude-code`）下，一轮涉及 2 张及以上卡片，或单卡需核对多份交付／审核、员工隔离历史、附件时，优先按卡片或独立核对项委派只读子 Agent，并遵守主机并发上限。非 Claude Code harness 由本人核对；此规则不扩展到 Office 或工作项级 PM。每次委派明确只读工具白名单：`get_card`、`get_updates`、`read_attachment`、`project_snapshot`、`list_needs_you`，仅限当前身份已有工具；禁止白名单外工具以及借 CLI、HTTP、文件写入或再委派绕过，不得读取或打印凭据、环境变量值。子 Agent 只返回结论、可核对的证据和未核事项（交付编号与完整 SHA、审核绑定、时间线／seq、当前及历史 Assignment、附件原文等）；本人核对证据原文，写操作前重读当前卡片和更新。所有写操作，包括 ACK、心跳和结束 Run，仍由本人执行。子 Agent 超时、失败或工具不可用时本人接手，证据缺失不能跳过核对。只读约束的技术限制与人工确认要求见 §14 的 C-226 评估说明。
 
 > 它们共享"项目事实"，不共享"对话噪声"。
@@ -2347,6 +2349,8 @@ HTTP 的 zod 校验和 domain 的 `setRunLimit` 分别按目标机器封顶检�
 `POST /api/projects/:id/execution/capacity` 只接受已认证人的 Workbench 会话和幂等键，严格拒绝身份、执行器并发等额外字段；MCP 不暴露此命令。domain 的 `setRunLimit` 独立拒绝所有 assignment（包括 PM Office、PM Ops、host_ops）和 system，只允许 human 修改已登记或已有 Assignment 使用的 Agent 机器的正安全整数上限（兼容未登记机器行的旧 local Assignment）。设置与全局 `run_capacity_updated` 事件同事务保存，事件含 Machine、唯一 owner 成员编号、时间和前后有效值，作为不可覆盖的审计记录；请求重试不重复审计。domain 不读配置或存储，也不改变任何 Run 状态；调低上限只限制下一次普通派发，不停止已有任务。
 
 执行视图右上角显示跨项目的 Agent「运行中 / 上限 / 排队」和逐机保存输入，独立接口每 5 秒及项目刷新时读取。运行中计数沿用下文的 Run 占用（含启动和停止预留）；排队沿用并发等待投影，不混入运行环境故障等待。配置项目引用的合并检查执行目标另列运行中、只读上限和当前有效 queued attempt 数；本机合并检查占用的额外 Agent 名额另行注明。执行器配置错误显示提示，不当成零上限。`max_concurrent` 仍由主机预置槽位锁和配置，界面注明“需要主机预置，找张良”，不提供修改入口。
+
+C-293：`project_snapshot.run_capacity` 与执行视图共用主机的逐机容量投影，返回跨项目的 `machine_id`、`label`、有效 `limit`、`max_limit`、`running`、`queued` 和 `merge_check_slots`。只含容量汇总，不返回其它项目的卡片、Assignment、Run 明细或配置正文。占用包含常驻 PM 及启动／停止预留；常驻 PM 豁免排队但仍占名额，本机合并检查额外名额单列。未接入主机读取端口时返回 `null`（未核），不伪造零占用；配置缺失沿用既有默认值，配置无效沿用有效上限为 0、停止普通派发的既有语义，读取异常正常报错。不新增修改容量的工具或权限。
 
 计数跨项目汇总同一 Machine 上 Assignment 的 `dispatched`／`acked`／`running` Run；一般不计 queued、unknown 或已结束 Run。Q-86 的停止意图在确认退出前继续预留一个名额，即使期间 Run 变为 unknown 或已经结束，也不能提前释放；同一 Run 不重复计数。常驻 PM（`scope=standing` 且 `role_id=pm`，含 Office／Ops）不受这条上限限制，但其在途 Run 仍占名额；工作项级 PM 不豁免。外部新会话启动期间，尚未派发的 Run 由已有持久 BellAttempt 临时预留一个名额，与事务内计数和领取一起提交；正式派发后只按 Run 计一次，避免自动派发并发误用同一空位，并将人手启动计入后续判断。未派发启动的意图回收必须在同一写事务内取消该 queued Run，再释放预留；迟到启动因 Run 已取消而被状态机拒绝，不能抢用已经分配给其他工作的名额。已派发／已确认／运行中或状态未知的 Run 不因投递意图过期而自动取消。
 
