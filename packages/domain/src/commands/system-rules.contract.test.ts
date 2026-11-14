@@ -784,6 +784,120 @@ async function deliverReady(
   return value(submitDelivery(s, actor(), params, prepared, io));
 }
 
+test.each(["unregistered", "missing_tags", "offline", "draining", "ambiguous"])(
+  "C-300 ready transaction preserves baseline machine admission when %s",
+  async (scenario) => {
+    const initial = beforeDelivery();
+    const local = required(initial.machines?.[0]);
+    const s: CommandState = {
+      ...initial,
+      machines:
+        scenario === "unregistered"
+          ? []
+          : scenario === "ambiguous"
+            ? [local, { ...local, id: "worker-a", herdr_machine: "worker-a" }]
+            : [
+                {
+                  ...local,
+                  status:
+                    scenario === "offline" || scenario === "draining"
+                      ? scenario
+                      : local.status,
+                },
+              ],
+      roles: initial.roles.map((r) =>
+        r.role_id === "reviewer" && scenario === "missing_tags"
+          ? { ...r, required_machine_tags: ["gpu"] }
+          : r,
+      ),
+    };
+    const effect = await deliverReady(s, ports());
+    const next = apply(s, effect);
+    const reason =
+      scenario === "unregistered"
+        ? "没有登记"
+        : scenario === "missing_tags"
+          ? "tag=gpu"
+          : scenario === "ambiguous"
+            ? "多个候选"
+            : scenario;
+    expect(effect.token_requests).toEqual([]);
+    expect(next.assignments).toEqual(s.assignments);
+    expect(
+      next.work_items.find((w) => w.id === id("work_item", 2)),
+    ).toMatchObject({ status: "ready" });
+    expect(effect.events).toMatchObject([
+      { type: "delivery_submitted" },
+      {
+        type: "system_assignment_deferred",
+        actor: system,
+        payload: {
+          reason: expect.stringContaining(reason),
+          candidates: [1, 2].map((n) => ({
+            employee_id: id("employee", n),
+            reason: expect.stringContaining(reason),
+          })),
+        },
+      },
+    ]);
+    expect(auto(next).events).toEqual([]);
+  },
+);
+
+test("C-300 ready assignment pins the unique tagged machine and audits it without starting a Run", async () => {
+  const initial = beforeDelivery();
+  const local = required(initial.machines?.[0]);
+  const s: CommandState = {
+    ...initial,
+    machines: [
+      local,
+      { ...local, id: "worker-a", herdr_machine: "worker-a", tags: ["gpu"] },
+    ],
+    roles: initial.roles.map((r) =>
+      r.role_id === "reviewer" ? { ...r, required_machine_tags: ["gpu"] } : r,
+    ),
+  };
+  const effect = await deliverReady(s, ports());
+  const next = apply(s, effect);
+  const assigned = required(
+    next.assignments.find((a) => a.role_id === "reviewer"),
+  );
+  expect(assigned.machine_id).toBe("worker-a");
+  expect(
+    effect.events.find((e) => e.type === "work_item_assigned"),
+  ).toMatchObject({
+    actor: system,
+    payload: {
+      assigned_by: "system",
+      machine_id: "worker-a",
+      selection: { active_assignments: 0 },
+    },
+  });
+  expect(next.runs).toEqual(s.runs);
+  expect(
+    value(
+      assign(
+        { ...next, machines: [] },
+        human,
+        { work_item_id: id("work_item", 2), role_id: "reviewer" },
+        ports(),
+      ),
+    ).data.id,
+  ).toBe(assigned.id);
+  expect(
+    assign(
+      next,
+      human,
+      {
+        work_item_id: id("work_item", 2),
+        role_id: "reviewer",
+        machine_id: "local",
+      },
+      ports(),
+    ),
+  ).toMatchObject({ ok: false, error: { code: "invariant_violation" } });
+});
+
 test("C-300 delivery and ready assignment share one effect, preserving actor, review target and token scope", async () => {
   const s = beforeDelivery();
   const effect = await deliverReady(s, ports());

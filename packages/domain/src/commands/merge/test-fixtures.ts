@@ -20,7 +20,7 @@ import {
   submitDelivery,
   submitReview,
 } from "../../index.js";
-import { apply, human, ports, role, value } from "../test-fixtures.js";
+import { apply, human, machine, ports, role, value } from "../test-fixtures.js";
 
 const TEST_PLAIN_SUMMARY = {
   changed: "测试用的改动说明",
@@ -40,6 +40,7 @@ export function mergeFixture(
   };
   let state: CommandState = prior?.state ?? {
     project_id: human.project_id,
+    machines: [machine()],
     roles: [role("coder"), role("reviewer"), role("pm")],
     cards: [],
     work_items: [],

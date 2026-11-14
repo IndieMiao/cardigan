@@ -80,6 +80,7 @@ export const toolNames = [
 ] as const;
 export type ToolName = (typeof toolNames)[number];
 export interface RoleReference {
+  readonly required_machine_tags?: readonly string[];
   readonly role_id: RoleId;
   readonly role_version: number;
   readonly allowed_tools: readonly ToolName[];

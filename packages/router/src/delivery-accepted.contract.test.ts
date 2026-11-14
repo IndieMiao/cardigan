@@ -27,6 +27,7 @@ import {
   toolNames,
 } from "@cardigan/domain";
 import { expect, test } from "vitest";
+import { machine } from "../../domain/src/commands/test-fixtures.js";
 import { routeEvent } from "./route.js";
 import type { RouterSnapshot } from "./types.js";
 
@@ -90,6 +91,7 @@ function ports(): CommandPorts {
 function emptyState(): CommandState {
   return {
     project_id: project,
+    machines: [machine()],
     roles: [role("coder"), role("pm"), role("reviewer")],
     cards: [],
     work_items: [],

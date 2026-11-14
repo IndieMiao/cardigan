@@ -16,6 +16,54 @@ import {
 
 afterEach(() => vi.restoreAllMocks());
 
+test("machine snapshots invalidate across connections, preserve unchanged rows and discard rollback", () => {
+  withTempStore((store, dataDir) => {
+    store.createProject({ id: project_id });
+    const read = () => store.uow.read((tx) => tx.machines.list(project_id));
+    const before = read();
+    const local = before[0];
+    if (!local) throw new Error("missing local");
+    expect(read()).toBe(before);
+    const other = Store.open({ dataDir });
+    try {
+      other.uow.run((tx) =>
+        tx.machines.put(project_id, {
+          ...local,
+          id: "worker-a",
+          herdr_machine: "worker-a",
+          label: "Worker A",
+        }),
+      );
+      const added = read();
+      expect(added).toHaveLength(2);
+      expect(added.find((m) => m.id === "local")).toBe(local);
+      const remote = added.find((m) => m.id === "worker-a");
+      if (!remote) throw new Error("missing remote");
+      expect(() =>
+        store.uow.run((tx) => {
+          tx.machines.put(project_id, { ...remote, status: "draining" });
+          expect(
+            tx.machines.list(project_id).find((m) => m.id === remote.id)
+              ?.status,
+          ).toBe("draining");
+          throw new Error("rollback");
+        }),
+      ).toThrow("rollback");
+      expect(read()).toBe(added);
+      other.uow.run((tx) =>
+        tx.machines.put(project_id, { ...remote, status: "offline" }),
+      );
+      expect(read().find((m) => m.id === remote.id)?.status).toBe("offline");
+      other.database
+        .prepare("DELETE FROM machines WHERE id = ?")
+        .run(remote.id);
+      expect(read()).toEqual(before);
+    } finally {
+      other.close();
+    }
+  });
+});
+
 test("upgrading a populated v16 store backfills employee activity without rewriting entities", () => {
   const dataDir = mkdtempSync(join(tmpdir(), "cg-snapshot-upgrade-"));
   const migrationsDir = join(dataDir, "migrations");
