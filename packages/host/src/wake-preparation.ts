@@ -3,6 +3,7 @@ import { setTimeout as delay } from "node:timers/promises";
 /** What a bell failure event and the server log may show about a Git error. */
 export interface PreparationFailure {
   readonly category:
+    | "preparation_queue_timeout"
     | "repository_lock_timeout"
     | "git_lock_conflict"
     | "git_network"
@@ -75,6 +76,12 @@ export function describePreparationFailure(error: unknown): PreparationFailure {
     stderr?: unknown;
     message?: unknown;
   };
+  if (e.code === "preparation_queue_timeout")
+    return {
+      category: "preparation_queue_timeout",
+      retryable: true,
+      message: "工作目录准备排队超时",
+    };
   const message =
     typeof e.message === "string" ? e.message : String(error ?? "");
   const stderr = typeof e.stderr === "string" ? e.stderr : "";
@@ -101,6 +108,13 @@ export function describePreparationFailure(error: unknown): PreparationFailure {
   });
   if (e.code === "repository_lock_timeout")
     return shape("repository_lock_timeout", true);
+  if (
+    ["EACCES", "EPERM"].includes(String(e.code)) ||
+    /permission denied|authentication failed|host key verification failed|unsafe|dubious ownership|路径不安全|权限不足/iu.test(
+      text,
+    )
+  )
+    return shape("prepare_failed", false);
   if (LOCK_CONFLICT.test(text)) return shape("git_lock_conflict", true);
   if (NETWORK.test(text)) return shape("git_network", true);
   if (/Git \S+ timed out after \d+ms/u.test(message))
@@ -110,6 +124,19 @@ export function describePreparationFailure(error: unknown): PreparationFailure {
   if (typeof e.code === "string" && e.code.startsWith("runtime_"))
     return shape("runtime_failed", false);
   return shape("prepare_failed", false);
+}
+
+/** Do not infer remote exit from a timeout message or a killed hc client. */
+export function preparationExecutionExited(error: unknown): boolean {
+  if (error instanceof PreparationError)
+    return preparationExecutionExited(error.cause);
+  const e = (error ?? {}) as { code?: unknown; executionExited?: unknown };
+  return (
+    e.code === "preparation_queue_timeout" ||
+    e.code === "repository_lock_timeout" ||
+    (typeof e.code === "number" && e.code !== 255) ||
+    e.executionExited === true
+  );
 }
 
 /** A preparation failure that already carries its sanitized description. */

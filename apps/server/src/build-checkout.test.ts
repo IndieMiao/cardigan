@@ -30,6 +30,7 @@ import {
   prepareRoleWorktree,
   sessionFingerprint,
   VERIFIER_LAUNCH_REVISION,
+  withPreparationQueue,
   worktreeBaselinePrompt,
   worktreeProvider,
 } from "@cardigan/host";
@@ -260,6 +261,32 @@ test("removal re-checks idleness under the repository lock", async () => {
     }),
   ).toEqual({ status: "in_use" });
   expect(existsSync(buildPath())).toBe(true);
+  expect(await git.listBuildCheckouts(project)).toEqual([s.reviewer.id]);
+});
+
+test("background checkout listing yields to preparation and resumes afterwards", async () => {
+  await startReviewer();
+  const git = serverGit();
+  const project = git.projectOf(f.project_id);
+  if (!project) throw new Error("missing project");
+  let release!: () => void, entered!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const preparing = withPreparationQueue(f.dataDir, f.project_id, async () => {
+    entered();
+    await new Promise<void>((resolve) => {
+      release = resolve;
+    });
+  });
+  await ready;
+  try {
+    expect(await git.listBuildCheckouts(project)).toBeUndefined();
+    expect(existsSync(buildPath())).toBe(true);
+  } finally {
+    release();
+    await preparing;
+  }
   expect(await git.listBuildCheckouts(project)).toEqual([s.reviewer.id]);
 });
 

@@ -38,8 +38,10 @@ import {
   hostRepositoryLock,
   loadWorkspace,
   type MergePushConfig,
+  preparationBusy,
   validateMergePushConfig,
   type WorkspacePackage,
+  withPreparationQueue,
 } from "@cardigan/host";
 import type { DeliveryVerifierFor } from "@cardigan/mcp-server";
 import {
@@ -161,7 +163,9 @@ export interface ReconcileGit {
   ): Promise<readonly ReconcileFinding[]>;
   removeWorktree(input: RemoveWorktreeInput): Promise<RemoveWorktreeOutcome>;
   /** P2a-3: Assignment ids that have a verifier build checkout on disk or in Git. */
-  listBuildCheckouts?(project: CentralProject): Promise<readonly string[]>;
+  listBuildCheckouts?(
+    project: CentralProject,
+  ): Promise<readonly string[] | undefined>;
   /** P2a-3: `idle` is re-checked under the project's repository lock. */
   removeBuildCheckout?(input: {
     readonly project: CentralProject;
@@ -608,8 +612,13 @@ export class ServerGit implements GitBinding {
   }): Promise<WorktreeDiff> {
     return this.worktrees.diffWorktree(input);
   }
-  listBuildCheckouts(project: CentralProject): Promise<readonly string[]> {
-    return this.worktrees.listBuildCheckouts(project.project_id);
+  async listBuildCheckouts(
+    project: CentralProject,
+  ): Promise<readonly string[] | undefined> {
+    if (await preparationBusy(this.options.dataDir)) return undefined;
+    return withPreparationQueue(this.options.dataDir, project.project_id, () =>
+      this.worktrees.listBuildCheckouts(project.project_id),
+    );
   }
   removeBuildCheckout(input: {
     readonly project: CentralProject;

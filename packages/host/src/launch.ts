@@ -21,9 +21,15 @@ import {
   dispatchRun,
   EXTERNAL_ASSIGNMENT_START_ERROR,
   isStandingPm,
+  recoverPreparation,
   standingModeOf,
 } from "@cardigan/domain";
-import { defaultToolCatalog } from "@cardigan/mcp-server";
+import {
+  defaultToolCatalog,
+  loadCommandState,
+  persistEffect,
+  unwrap,
+} from "@cardigan/mcp-server";
 import {
   type CompiledAssignmentLaunch,
   compileAssignmentLaunch,
@@ -60,8 +66,13 @@ import {
   wallClock,
 } from "./commands.js";
 import { HostLaunchError, type LaunchStep, messageOf } from "./errors.js";
+import { tryHostOpsLock } from "./host-ops-lock.js";
 import { agentNameFor } from "./naming.js";
 import { piTrustedWorktreePath } from "./pi-trust.js";
+import {
+  preparationPolicy,
+  withPreparationQueue,
+} from "./preparation-queue.js";
 import { effectiveRunLimit, runCapacitySnapshot } from "./run-capacity.js";
 import {
   deferTargetAttempt,
@@ -69,6 +80,10 @@ import {
   refreshTargetWait,
 } from "./run-target.js";
 import { stopRunRuntime } from "./stop-run.js";
+import {
+  describePreparationFailure,
+  preparationExecutionExited,
+} from "./wake-preparation.js";
 import {
   type PreparedWorktree,
   prepareRoleWorktree,
@@ -94,6 +109,11 @@ export class RunCapacityDeferred extends Error {
     readonly ahead: number,
   ) {
     super(`排队中（前面还有 ${ahead} 个）`);
+  }
+}
+export class RunPreparationDeferred extends Error {
+  constructor() {
+    super("工作目录准备或启动尚未结束，保留执行排队等待");
   }
 }
 
@@ -226,6 +246,24 @@ export function standingModeLine(
 }
 
 export async function launchRun(
+  host: LaunchHost,
+  input: LaunchRunInput,
+): Promise<LaunchedRun> {
+  const unlock = await tryHostOpsLock(
+    host.store,
+    input.project,
+    input.assignment_id,
+    "launch",
+  );
+  if (!unlock) throw new RunPreparationDeferred();
+  try {
+    return await launchWithClaim(host, input);
+  } finally {
+    await unlock();
+  }
+}
+
+async function launchWithClaim(
   host: LaunchHost,
   input: LaunchRunInput,
 ): Promise<LaunchedRun> {
@@ -369,6 +407,14 @@ async function launch(
     tx.runs.get(project, input.run.id),
   );
   if (
+    current?.preparation_retry &&
+    Date.parse(clock.now()) < Date.parse(current.preparation_retry.ready_at)
+  )
+    throw new HostLaunchError(
+      "directory preparation",
+      "工作目录准备重试正在退避等待",
+    );
+  if (
     host.store.uow.read((tx) =>
       tx.runs
         .list(project)
@@ -423,7 +469,7 @@ async function launch(
     });
   let worktree = input.worktree;
   let workDir = worktree?.path ?? assignment.worktree_path ?? runDir;
-  const prepare = () =>
+  const preparation = () =>
     input.prepare_worktree
       ? input.prepare_worktree()
       : prepareRoleWorktree(
@@ -431,6 +477,13 @@ async function launch(
           project,
           assignment.id,
         );
+  const prepare = () =>
+    !input.prepare_worktree &&
+    (role.worktree === "none" ||
+      assignment.scope !== "work_item" ||
+      !card?.repo)
+      ? preparation()
+      : withPreparationQueue(execution.dataDir, project, preparation);
   if (input.reuse_session && assignment.runtime_ref) {
     const observed = await host.runtime.status(assignment.runtime_ref);
     if (observed.ok && observed.value.process === "alive") {
@@ -521,6 +574,10 @@ async function launch(
     // (a writer's branch, or a readonly reviewer at the current delivery).
     worktree ??= await prepare();
     requireTarget();
+    const fresh = host.store.uow.read((tx) =>
+      tx.runs.get(project, input.run.id),
+    );
+    if (fresh?.status !== "queued") throw new RunPreparationDeferred();
     workDir = worktree?.path ?? workDir;
 
     step = "token issuance";
@@ -731,6 +788,18 @@ async function launch(
       step,
       report,
       keepRun: deferred,
+      ...(!deferred &&
+      step === "directory preparation" &&
+      ref === undefined &&
+      tokenId === undefined
+        ? {
+            preparation: {
+              category: describePreparationFailure(error).category,
+              execution_exited: preparationExecutionExited(error),
+              backoff_ms: preparationPolicy().retryBackoffMs,
+            },
+          }
+        : {}),
       ...(ref === undefined ? {} : { ref }),
       ...(tokenId === undefined ? {} : { tokenId }),
     });
@@ -754,6 +823,11 @@ interface Compensation {
   readonly ref?: RuntimeRef | undefined;
   readonly tokenId?: string | undefined;
   readonly keepRun?: boolean;
+  readonly preparation?: {
+    category: string;
+    execution_exited: boolean;
+    backoff_ms: number;
+  };
 }
 
 /** §4 step 9 / §13.4: release, scrub, revoke, cancel — each step independently. */
@@ -805,17 +879,38 @@ async function compensate(input: Compensation): Promise<void> {
   }
   if (input.keepRun && !cleanupFailed) return;
   try {
-    applyCommand(host.store, {
-      project: input.project,
-      actor: input.actor,
-      clock: input.clock,
-      reduce: (state, actor, ports) =>
-        abortDispatch(
-          state,
-          actor,
-          { run_id: input.run.id, reason: `${input.step} failed` },
-          ports,
+    host.store.uow.run((tx) => {
+      const ports = { clock: input.clock, ids: tx.ids };
+      persistEffect(
+        tx,
+        input.project,
+        unwrap(
+          abortDispatch(
+            loadCommandState(tx, input.project),
+            input.actor,
+            { run_id: input.run.id, reason: `${input.step} failed` },
+            ports,
+          ),
         ),
+      );
+      if (input.preparation)
+        persistEffect(
+          tx,
+          input.project,
+          unwrap(
+            recoverPreparation(
+              loadCommandState(tx, input.project),
+              { kind: "system", project_id: input.project },
+              {
+                run_id: input.run.id,
+                ...input.preparation,
+                cleanup_complete: !cleanupFailed,
+                expected_runtime_ref: input.assignment.runtime_ref,
+              },
+              ports,
+            ),
+          ),
+        );
     });
   } catch {
     // The Run may already be gone; the caller reports the original failure.

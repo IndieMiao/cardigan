@@ -40,10 +40,12 @@ import {
   effectiveRunLimit,
   failAutomaticContextRun,
   HostLaunchError,
+  RunPreparationDeferred,
   RunTargetDeferred,
   redactFailureLine,
   refreshTargetWait,
   runCapacitySnapshot,
+  tryHostOpsLock,
 } from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import {
@@ -422,7 +424,7 @@ export class Dispatcher {
     step("ack_inbox", () =>
       acknowledgeInbox(store, project, standing, this.clock, this.loadState),
     );
-    step("bell_attempts", () => {
+    await profileSpan("route.bell_attempts", async () => {
       for (const attempt of unfinishedBellAttempts(store.database, project)) {
         const assignment = this.state(project).assignments.find(
           (a) => a.id === attempt.assignment_id,
@@ -431,8 +433,20 @@ export class Dispatcher {
           attempt.lease_until <= this.clock.now() &&
           assignment?.status !== "suspended" &&
           !assignment?.external
-        )
-          this.settle(attempt, false, "interrupted_delivery");
+        ) {
+          const unlock = await tryHostOpsLock(
+            store,
+            project,
+            attempt.assignment_id,
+            "launch",
+          );
+          if (!unlock) continue;
+          try {
+            this.settle(attempt, false, "interrupted_delivery");
+          } finally {
+            await unlock();
+          }
+        }
       }
     });
     await profileSpan("route.retry_dispatched", () =>
@@ -652,8 +666,16 @@ export class Dispatcher {
       reason = "delivery_failed",
       failure: DeliveryFailure | undefined,
       stage: DeliveryStage = "delivery_call";
+    let unlockWake: (() => Promise<void>) | undefined;
     try {
       if (live && job.assignment.runtime_ref) {
+        unlockWake = await tryHostOpsLock(
+          this.options.store,
+          project,
+          job.assignment.id,
+          "launch",
+        );
+        if (!unlockWake) throw new RunPreparationDeferred();
         stage = "before_wake";
         const baseline = await this.options.beforeWake?.({
           project,
@@ -710,6 +732,13 @@ export class Dispatcher {
         reason = "startup_did_not_dispatch";
       }
     } catch (error) {
+      if (error instanceof RunPreparationDeferred) {
+        const attempt = job.attempt;
+        this.options.store.uow.run(() =>
+          withdrawBellAttempt(this.options.store.database, project, attempt.id),
+        );
+        return;
+      }
       // Only pre-delivery waits can withdraw an intent. A failed wake is still
       // ambiguous and must retain its attempt and normal retry semantics.
       if (
@@ -731,6 +760,8 @@ export class Dispatcher {
       }
       if (live && stage !== "wake" && !this.activate(job)) return;
       ({ reason, failure } = deliveryFailure(stage, error));
+    } finally {
+      await unlockWake?.();
     }
     if (failure)
       this.options.onError?.(
@@ -904,6 +935,12 @@ export class Dispatcher {
         state = this.loadState(tx, project);
       }
       if (!run) return;
+      if (
+        run.preparation_retry &&
+        Date.parse(this.clock.now()) <
+          Date.parse(run.preparation_retry.ready_at)
+      )
+        return;
       if (unreadableCommentTrigger(state, run)) return;
       if (run.status === "queued") {
         const capacity = runCapacitySnapshot(store, tx);
@@ -1281,6 +1318,12 @@ export class Dispatcher {
       // C-56: a dispatched Run is retried with backoff and recovered by
       // dispatch-retry; only escalate failures nobody else will handle.
       const recovering =
+        state.events.some(
+          (e) =>
+            ["run_preparation_recovered", "run_preparation_stalled"].includes(
+              e.type,
+            ) && payloadString(e.payload, "run_id") === attempt.run_id,
+        ) ||
         run?.status === "dispatched" ||
         run?.status === "running" ||
         (run !== undefined && dispatchRecoveryFailed(state, run));

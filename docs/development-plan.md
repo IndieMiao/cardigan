@@ -879,9 +879,13 @@ C-220：上述常驻 PM 自身的告警另通知本项目当前 active 常驻 `h
 
 M3.4 主机循环通过 startDispatchLoop 启动：默认每轮结束后等待 1 秒，串行执行 reconcile → Dispatcher.tick → reconcile，不堆积并发 tick。失败通过必填 onError 回调报告，下个间隔再试；回调抛出则停止并清理订阅。stop() 幂等，也可由 AbortSignal 触发：先停止调度和清除等待计时器，再等待本轮外部投递及意图结算，最后停止运行时订阅；done 返回相同的完成结果。M3.5 将它接到 server 的 SIGTERM／关闭流程，必须先 await stop() 再关闭 Store 等主机资源；本接口不注册全局信号、不关闭 Agent 终端。
 
-**C-295 调查与待确认方案（尚未实现新恢复策略）**：基线 `4cf31e79e3708b9794e7b673324b799567170079` 的新会话路径不同于上述 beforeWake：`launchRun` 直接准备目录，失败后补偿并写 `run_dispatch_aborted`，Run 变为 cancelled；现有 C-56 只处理已派发 Run 或由自身恢复产生的后继，首次准备失败没有自动重排。`git_timeout` 在现有分类器中为不可重试。`apps/server/src/dispatch-preparation-failure.test.ts` 用假的准备器分别注入锁超时、Git 超时、权限失败和不安全路径，经过现有退避及派发超时窗口、重建 Dispatcher 后均不再尝试，且没有签发 Token 或 provision。这是缺口复现，不是新策略的验收通过。
+**C-295 / Q-475（已由人选择 two_slots）**：调查确认基线 `4cf31e79e3708b9794e7b673324b799567170079` 的新会话准备失败直接取消，原 C-56 不接管首次准备失败。本次补齐这个入口：仅在目录准备阶段、尚未签发本次 Token 或 provision 时，在凭据清理之后，同一事务取消源 Run 并写 `run_preparation_recovered`、唯一的 queued 后继及 `preparation_retry { source_run_id, ready_at }`。默认五秒后重试一次；后继保留原 kind、角色、模型、CLI、员工和启动配置。调度 claim、显式启动和领域 dispatch 均检查退避；后继按原系统容量和审核目标规则派发，源 Run 永不复活。重放、重启和迟到结果按持久事件及后继字段去重，后续独立业务 Run 不继承本次预算。
 
-建议新增仅用于准备阶段的持久恢复记录，绑定原 Run、尝试代次、失败类别、退出证据及下次可尝试时间；首次明确可重试失败完成安全补偿后取消旧 Run，在同一事务记录唯一后继和一次恢复预算，到期走现有系统 claim，不复活旧 Run、不绕过容量限制。白名单为排队／仓库锁等待超时、已确认结束的 Git 锁冲突或瞬时网络故障，以及**已确认执行进程退出**的 Git 超时；权限／路径失败和结果不明均不自动重试。仅杀死本地 `hc` 客户端不能当作远端 Git 退出证明。新会话准备与既有 beforeWake 的秒级重试不能叠加扩大次数；已唤醒或已 provision 的不确定状态仍按既有停止栅栏处理。重启、重复 tick、迟到结果、取消卡片、人工 stop、目标撤回及 host_ops 接管都须在事务内复核；第二次准备失败才按本卡要求升级 host_ops／Needs You。建议退避为 5 秒、最多一次，待人确认后实现，不修改现有生产默认值。
+恢复只接受系统侧证据：排队／仓库锁等待到期，或确已结束的 Git 锁冲突、瞬时网络失败、本地 Git 超时，且凭据清理成功。权限／路径错误优先判为不可重试，SSH 连接退出码 255 和 hc 客户端超时不证明远端 Git 退出。本地工作区 Git 在独立进程组运行，超时结束该组；收到 close 且组已不存在时才附 `executionExited`，否则保持不确定。中央 Git/远端调用没有该证明的超时不自动恢复。已启动、卡片关闭、人工 stop、外接／释放身份、角色或 RuntimeRef 已变、存在更新的 Run、host_ops 操作或停止栅栏均阻止旧失败重排；C-292 的上下文轮换启动继续遵循其禁止自动重试的独立政策。
+
+首次可恢复失败只记审计，不产生逐次告警；后继再次失败或原失败不满足安全重试条件时，持久化 `run_preparation_stalled` 和交人的 HumanAction，并通知 active 常驻 host_ops（不通知失败身份自身）。重复结算不重复建待办。上述取消和后继创建同事务提交，没有“旧 Run 已取消、后继尚未写入”的中断窗口。新会话、复用会话及门铃重试的实际启动／准备过程持有主机执行互斥；过期 BellAttempt 的回收先尝试同一互斥，仍在执行时不抢占。跨进程锁在 Linux 沿用主机 flock，其他平台沿用进程内保护。进程已死亡但结果不明的准备不推断为可重试，仍由原中断处理和主机核查接手。
+
+既有 beforeWake 的 C-68 秒级重试与 C-56 投递恢复保持原政策；同一次 beforeWake 的全部锁等待共用本次准备预算，不因短重试重新获得五分钟。Q-475 的一次后继恢复只针对新会话的目录准备失败，不再叠加 C-68 短重试。正常 Run 并发上限、Git 网络主机独占及停止确认边界不变。
 
 ### 6.2 门铃格式
 
@@ -2146,11 +2150,27 @@ P2b 04/06 待实现：工作区锁键至少包含物理目标、项目和基础 
 
 `packages/host/src/preparation-timing.test.ts` 使用假执行器和虚拟时间：十个同仓库查询按 FIFO 进入执行器，最后一个等待超过单条查询预算仍收到完整预算；锁等待到期不会调用 Git；十个不同仓库可同时进入执行器；持仓库锁时后台清单仍调用 Git。测试只证明代码边界，不证明现场 30 秒耗在 hc、SSH、Git 或宿主调度的哪一层。没有重演生产高峰、读取私有日志／凭据，不能将卡片来源中的根因推测写成事实。
 
-待确认的最小实现范围：保留现有仓库互斥，在主机启动／唤醒准备入口共用有界队列，沿用已持久化候选次序和投递意图；后台清单在准备积压时跳过本轮，已开始的查询完成或超时后让出资源，查询错误独立处理。排队期限覆盖本次准备的队列及各次仓库锁等待总和，取得执行资格后再启动命令计时；超过期限返回可读的“工作目录准备排队超时”。不能只用内存 Promise 保证跨进程／重启幂等，也不能在租约到期后抢占仍执行中的旧准备；需要持久代次加主机执行互斥，并按 §6.1 核验退出后再重试。Agent 执行入口尚无远端开始／退出证明的部分应明确报告为执行入口超时，未知状态不自动再跑。
+C-295 已实现的准备入口：主机启动、显式 CLI 启动和 beforeWake 共用按数据根隔离的有界队列，默认两个准备槽位，同项目仓库只允许一个准备请求。进程内按入队顺序调度，跳过正在使用的仓库让其他仓库使用空槽；Linux 再取得主机拥有的 `locks/preparation-<slot>.lock`，约束多个 server／CLI 进程的总槽数。跨进程不承诺严格 FIFO，由 flock 仲裁；Run 的持久投递意图及独立 launch 执行锁保证同一身份不会因租约过期重复启动。队列只管理准备，不增加实际 Run 容量。
 
-拟由 host 统一解析可信配置 `PreparationPolicy { maxConcurrent, queueWaitMs, retryBackoffMs }`；建议缺省分别为 **2、300000 毫秒、5000 毫秒**，同仓库仍互斥。理由：限制跨入口准备峰值，五分钟等待可容纳短查询串行积压，五秒退避避免马上重撞；这是保守提案，并非现场容量测量结果。并发数须为正安全整数，两项时间须为 1–2147483647 的整数；错误配置拒绝启用，不静默回退。命令本身的查询／传输预算与系统 Run 上限不变。**这些字段及建议数值尚未接入生产，必须经人确认后实现；未定策略不提交完成申请。**
+五分钟是**一次准备累计的队列、跨进程槽位及各次仓库锁等待**，使用单调时钟扣减；Git 命令执行与短重试退避不占该等待预算。取到锁后才开始 Git 调用，超过等待预算返回“工作目录准备排队超时”。查询与传输仍使用原 30 秒／30 分钟命令预算；Agent 的命令预算仍覆盖 hc 客户端往返，不声称是远端 Git 的纯 CPU 时间。后台 `listBuildCheckouts` 先检测准备积压／执行槽，繁忙时返回“本轮跳过”（不是空清单）；恢复后再查，已开始的清单查询也占相同准备槽。清单失败由清理循环独立处理，不取消 Run。没有新增清单缓存周期或频率默认值。
 
-后续实现的定向回归至少覆盖 `packages/host/src/{preparation-timing,baseline-launch,wake-preparation,repository-lock}.test.ts`、`packages/git-service/src/{lock,worktree-refresh}.test.ts`、`packages/git-transport/src/timeouts.test.ts`、`apps/server/src/{dispatch-preparation-failure,dispatch-before-wake,dispatch-before-wake-recovery,dispatch-recovery,dispatch-retry,dispatch-restart,verification-dispatch,build-checkout,cleanup-loop,shared-launch,dispatch-start}.test.ts`；新增十个假 Run 启动、一次重试成功、第二次失败升级、退出未确认不重试和重启／重复领取／迟到结果契约。若改 domain，另跑对应契约测试及 `pnpm --filter @cardigan/domain test:types`。本轮调查只增加证据测试，不代表上述待实现验收已经覆盖。
+host 统一解析以下可信环境配置，错误值拒绝使用；建议配置在主机环境中，不能由项目文件或 Agent 工具传入：
+
+| 配置 | Q-475 已批准缺省 | 含义 |
+|---|---|---|
+| `CARDIGAN_PREPARATION_CONCURRENCY` | 2 | 同数据根同时准备数；同仓库仍互斥 |
+| `CARDIGAN_PREPARATION_QUEUE_WAIT_MS` | 300000 | 本次准备累计排队与锁等待毫秒 |
+| `CARDIGAN_PREPARATION_RETRY_BACKOFF_MS` | 5000 | 安全准备失败后唯一后继的退避毫秒 |
+
+三项均要求 1–2147483647 的整数；配置不是动态容量调节接口，修改后应统一重启使用该数据根的控制进程，不能让不同进程使用相互矛盾的并发设置。新增 Run 字段随现有 JSON 存储，无数据库迁移。现场吞吐仍未作压测承诺。
+
+定向证据覆盖 `packages/host/src/{preparation-queue,preparation-timing,baseline-launch,wake-preparation,repository-lock,host-ops-lock}.test.ts`、`packages/domain/src/commands/{preparation-recovery,dispatch-recovery}.contract.test.ts`、`packages/git-service/src/{lock,worktree-refresh}.test.ts`、`packages/git-transport/src/timeouts.test.ts`、`apps/server/src/{dispatch-preparation-failure,dispatch-before-wake,dispatch-before-wake-recovery,dispatch-recovery,dispatch-retry,dispatch-restart,verification-dispatch,build-checkout,cleanup-loop,shared-launch,dispatch-start,dispatch-auto-context}.test.ts` 和路由契约。十个请求／Run 使用假准备器与受控等待；不启动真实员工高峰。domain 改动另运行 `pnpm --filter @cardigan/domain test:types`，实际命令和结果记录于交付。
+
+**C-295 后续治理调查与提案（未启用，不能用 Q-475 代替新增授权）**：Office 在 C-295#16、#26 报告 hc 核心高负载与空闲终端积累，本次只引用其时间线，不读取私有报告或宣称独立证实。源码确认：`packages/runtime-herdr/src/client.ts` 的 processClient 负责 hc 子进程；`index.ts` 的 captureAgent、provision、release 等经同一 client，status 每次执行 get 并另开 events 读取快照；events 以 `--terminal` 打开流。`apps/server/src/dispatch-monitor.ts` 为 active Assignment 的未结束 Run 维护独立订阅，停止／恢复路径还会独立 status。空闲但无未结束 Run 的终端不在该 monitor 订阅集合内，不能仅用存活终端总数推出订阅数量。
+
+建议下一步在 runtime-herdr 的 client 上按核心 socket／目标机器建立统一调用队列，短控制调用和 Git exec 共用核心总限额、目标再限额；长驻 events 流不占 exec 槽。提出总并发 **4（保守备选 2）**、排队上限 **30 秒（备选 60 秒）**，到期明确为入口排队超时，执行计时从实际启动客户端开始；这些是待人确认的行为规则。状态查询先只合并相同完整 RuntimeRef 的在途请求，不使用有时效的历史缓存，因此不新增陈旧结果窗口；确认停止／恢复的查询必须在发出操作之后取得新观察，不能复用先前在途查询。事件流改为每核心一条 session 范围订阅，在 server 内按完整引用和代次分发；snapshot／missed 缺席、seq、重订阅及故障计数需保留原语义，订阅错误不能伪造 exited。后台清单可选择 **60 秒或 300 秒**缓存，准备开始／结束、清理结果及交付变化失效；缓存只作候选提示，删除前仍需新鲜状态和仓库锁内复查。诊断只输出队列长度、排队／客户端往返耗时及错误类别，不带 argv、凭据或终端正文。验收用 10–15 个假会话和同时 7 个假启动，检查核心订阅数、合并查询、先操作后新观察、取消和不确定退出。
+
+空闲终端回收建议默认关闭，获批后可选 **30 分钟或 60 分钟**，只处理工作项 Assignment，排除 standing、外接、任何未结束／排队 Run、未结投递、待执行通知及 host_ops／停止栅栏。空闲起点取业务 Run 完成且 MCP 活动已停止的较晚时刻，不用画面 idle／turn 0；领取意图及停止前重新查新任务／活动，出现变化撤回尚未发出的停止。发出停止后须针对准确 RuntimeRef 独立确认退出，再清理凭据和引用，保留 worktree、历史身份和交接；未知结果继续占用并交运维，不能先释放再启动。再次有任务由既有队列签发新 Token、启动并读取交接。复用停止租约／执行互斥的代码结构，但不能直接调用会永久设置人工暂停的 assignment stop。开关、时长与停止条件须另交人确认；本交付不回收任何生产终端。
 
 ---
 

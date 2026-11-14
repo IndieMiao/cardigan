@@ -188,7 +188,7 @@ test("concurrent assignment starts cannot provision or rotate tokens for the sam
     const tokens = f.store.uow.run((tx) =>
       tx.tokensForAssignment(f.project, target.assignment.id),
     );
-    await expect(start()).rejects.toThrow(/delivery is in progress/);
+    await expect(start()).rejects.toThrow(/准备或启动尚未结束/);
     expect(
       f.store.uow.run((tx) =>
         tx.tokensForAssignment(f.project, target.assignment.id),

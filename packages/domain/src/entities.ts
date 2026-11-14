@@ -324,6 +324,11 @@ export type Assignment = AssignmentFields &
   );
 export type RunOutcome = "completed" | "blocked" | "failed";
 export interface Run {
+  /** Q-475: unique preparation retry; the cancelled source is never revived. */
+  readonly preparation_retry?: {
+    readonly source_run_id: RunId;
+    readonly ready_at: Timestamp;
+  };
   /** Accepted while disconnected; only the host can settle it after confirming this session alive. */
   readonly pending_finish?: {
     readonly outcome: RunOutcome;

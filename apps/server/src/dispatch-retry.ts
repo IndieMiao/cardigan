@@ -27,6 +27,7 @@ import {
   deferTargetAttempt,
   failAutomaticContextRun,
   refreshTargetWait,
+  tryHostOpsLock,
 } from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import {
@@ -473,6 +474,13 @@ export async function retryDispatchedRuns(
       return { ...current, attempt, bell };
     });
     if (!job?.a.runtime_ref) continue;
+    const unlock = await tryHostOpsLock(store, project, job.a.id, "launch");
+    if (!unlock) {
+      store.uow.run(() =>
+        withdrawBellAttempt(store.database, project, job.attempt.id),
+      );
+      continue;
+    }
     let sent = false,
       reason = "delivery_call_failed",
       failure: DeliveryFailure | undefined,
@@ -520,6 +528,8 @@ export async function retryDispatchedRuns(
       }
       // The reason stays a stable code; the cause is sanitized (C-68).
       ({ reason, failure } = deliveryFailure(stage, error));
+    } finally {
+      await unlock();
     }
     if (failure)
       options.onError?.(

@@ -16,6 +16,7 @@ import {
   type PreparationRetryOptions,
   prepareRoleWorktree,
   resolveMcpUrl,
+  withPreparationQueue,
   withPreparationRetry,
   worktreeBaselinePrompt,
 } from "@cardigan/host";
@@ -167,14 +168,20 @@ export async function createHostWiring(options: {
     // Lock contention and transient network errors retry briefly inside this
     // delivery; the final error carries a sanitized category (§6.5, §12.4).
     beforeWake: async ({ project, assignment }) => {
-      const worktree = await withPreparationRetry(
+      if (assignment.scope !== "work_item") return undefined;
+      const worktree = await withPreparationQueue(
+        execution.dataDir,
+        project,
         () =>
-          prepareRoleWorktree(
-            { store: options.store, execution, runtime },
-            project,
-            assignment.id,
+          withPreparationRetry(
+            () =>
+              prepareRoleWorktree(
+                { store: options.store, execution, runtime },
+                project,
+                assignment.id,
+              ),
+            options.preparationRetry ?? {},
           ),
-        options.preparationRetry ?? {},
       );
       return worktreeBaselinePrompt(worktree);
     },

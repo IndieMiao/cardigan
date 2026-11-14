@@ -13,6 +13,7 @@ import { expect, test, vi } from "vitest";
 import {
   describePreparationFailure,
   PreparationError,
+  preparationExecutionExited,
   redactFailureLine,
   redactSecrets,
   withPreparationRetry,
@@ -27,6 +28,28 @@ const gitError = (stderr: string, code = 128) =>
     ),
     { code, stderr },
   );
+
+test("one-run recovery requires exit proof and refuses permission messages even when they mention networking", () => {
+  expect(
+    preparationExecutionExited(
+      Object.assign(new Error("Git config timed out after 30ms"), {
+        code: "runtime_timeout",
+      }),
+    ),
+  ).toBe(false);
+  expect(
+    preparationExecutionExited(
+      Object.assign(new Error("Git config timed out after 30ms"), {
+        executionExited: true,
+      }),
+    ),
+  ).toBe(true);
+  expect(
+    describePreparationFailure(
+      gitError("unable to access repository: Permission denied"),
+    ),
+  ).toMatchObject({ retryable: false, category: "prepare_failed" });
+});
 
 test.each([
   [
