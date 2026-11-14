@@ -280,18 +280,25 @@ export function ActivityPage({
               projectId={projectId}
             />
           ))}
+          {data.events.length > 0 && !data.next_before && (
+            <p className="pagination-end" role="status">
+              已经到底了
+            </p>
+          )}
           <div className="action-row">
-            <button
-              type="button"
-              className="quiet"
-              disabled={pending || !data.next_before}
-              onClick={() => {
-                if (data.next_before)
-                  setFilters({ ...filters, before: data.next_before });
-              }}
-            >
-              更早的事件
-            </button>
+            {data.next_before && (
+              <button
+                type="button"
+                className="quiet"
+                disabled={pending}
+                onClick={() => {
+                  if (data.next_before)
+                    setFilters({ ...filters, before: data.next_before });
+                }}
+              >
+                更早的事件
+              </button>
+            )}
             {filters.before && (
               <button
                 type="button"

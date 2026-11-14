@@ -307,6 +307,11 @@ export function DecisionHistoryPage({
           加载更多
         </button>
       )}
+      {visible.length > 0 && !cursor && (
+        <p className="pagination-end" role="status">
+          已显示全部 {visible.length} 条
+        </p>
+      )}
       <RequestFeedback
         interactive
         pending={loadingMore}

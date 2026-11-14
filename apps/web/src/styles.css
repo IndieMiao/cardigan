@@ -4605,6 +4605,12 @@ body[data-lightbox="open"] .drawer-overlay {
   display: block;
   margin: 0 auto var(--gap);
 }
+.pagination-end {
+  margin: var(--gap) 0;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  text-align: center;
+}
 /* End C-134 decision history. */
 /* C-192: suggested answer with one-click handling. */
 .decision-suggestion {
