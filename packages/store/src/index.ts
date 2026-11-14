@@ -1,4 +1,5 @@
 export { fileAvatarStore, readAvatarFile } from "./avatars.js";
+export type { ChangeCursor, ChangeSet } from "./change-feed.js";
 export {
   type BeginBellAttempt,
   type BellAttempt,
@@ -15,6 +16,7 @@ export { createIdAllocator, PROJECT_EVENT_STREAM } from "./ids.js";
 export {
   acknowledgeNotifications,
   advanceRouterCursor,
+  LIVE_NOTIFICATION_STATUSES,
   type MoveNotificationInput,
   moveNotification,
   type NotificationQuery,

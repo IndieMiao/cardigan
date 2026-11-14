@@ -20,6 +20,11 @@ import type {
   TransactionContext,
   UnitOfWork,
 } from "@cardigan/domain";
+import {
+  type ChangeCursor,
+  type ChangeSet,
+  changesSince,
+} from "./change-feed.js";
 import { CommandEvents } from "./command-events.js";
 import {
   CommandSnapshots,
@@ -239,6 +244,19 @@ export class Store {
   snapshotVersion(project: ProjectId): string | undefined {
     if (!this.#snapshots) return undefined;
     return `${this.#snapshots.version(project)}:${this.#rollbacks}`;
+  }
+
+  /**
+   * C-244: changed row ids since `since` (see `changesSince`); call inside the
+   * consuming transaction. `undefined` when the database has no change feed.
+   */
+  changesSince(
+    project: ProjectId,
+    collections: readonly string[],
+    since: ChangeCursor | undefined,
+  ): ChangeSet | undefined {
+    if (!this.#snapshots) return undefined;
+    return changesSince(this.#db, project, collections, since);
   }
 
   private constructor(db: DatabaseSync, clock: Clock, migrationsDir?: string) {

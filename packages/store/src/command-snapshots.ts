@@ -15,12 +15,15 @@ export class CommandSnapshots {
 
   version(project: ProjectId): string {
     // The empty project contains global identities and employee activity only.
-    // Inbox, token, idempotency and other projects' writes do not invalidate it.
+    // Inbox, token, idempotency and other projects' writes do not invalidate it;
+    // the inbox change feed collections (C-244, migration 0023) are excluded.
     return JSON.stringify(
       prepare(
         this.db,
         `SELECT project_id, collection, version
-      FROM command_versions WHERE project_id IN ('', ?) ORDER BY project_id, collection`,
+      FROM command_versions WHERE project_id IN ('', ?)
+        AND collection NOT IN ('notifications', 'bell_attempts')
+      ORDER BY project_id, collection`,
       ).all(project),
     );
   }

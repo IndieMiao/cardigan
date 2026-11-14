@@ -134,6 +134,7 @@ export { reviewLimitAttention } from "./review-limit-attention.js";
 export * from "./role.js";
 export * from "./role-prompt.js";
 export * from "./run-capacity.js";
+export { queuedRun, runById, runsOf } from "./run-index.js";
 export { hasRunTarget } from "./run-target.js";
 export * from "./runtime-port.js";
 export * from "./standing.js";

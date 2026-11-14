@@ -19,7 +19,6 @@ import {
   decisionFollowupPrompt,
   dispatchRecoveryFailed,
   dispatchRun,
-  eventById,
   expireMergeSnoozes,
   hasRunTarget,
   hostOpsPending,
@@ -27,10 +26,12 @@ import {
   lastRunActivity,
   launchSettings,
   obsoleteDispatchAttention,
+  queuedRun,
   queueRun,
   refreshRunTargetWait,
   remindDecisionFollowups,
   resolveDispatchAttention,
+  runsOf,
   stoppedByHuman,
   unreadableCommentTrigger,
 } from "@cardigan/domain";
@@ -62,6 +63,15 @@ import {
   withdrawBellAttempt,
 } from "@cardigan/store";
 import {
+  CANDIDATE_FEED,
+  type Candidate,
+  CandidateIndex,
+} from "./candidate-index.js";
+import {
+  DECISION_FOLLOWUP_FEED,
+  DecisionFollowupSchedule,
+} from "./decision-followup-schedule.js";
+import {
   alertAudience,
   type DeliveryFailure,
   type DeliveryStage,
@@ -76,10 +86,12 @@ import { InactiveRunReaper } from "./dispatch-inactive.js";
 import {
   acknowledgeInbox,
   dispatcherClock,
+  memoStanding,
   notificationOwner,
   resolveUnreadableNotifications,
   routeProjectEvents,
   type StandingResolver,
+  UNSETTLED_NOTIFICATION_STATUSES,
 } from "./dispatch-inbox.js";
 import { dispatchRecovery, retryDispatchedRuns } from "./dispatch-retry.js";
 import { dispatchStateLoader, type StateLoader } from "./dispatch-state.js";
@@ -154,23 +166,20 @@ const covered = (n: Notification, s: CommandState, owner: Assignment["id"]) =>
       c.card_id === n.card_id &&
       c.acked_seq >= n.seq,
   );
-interface Candidate {
-  project: ProjectId;
-  notes: Notification[];
-  assignment: Assignment;
-  order: {
-    priority: number;
-    project_id: string;
-    assignment_id: string;
-    created_at: string;
-    trigger_event_id: string;
-  };
-}
 interface Job {
   attempt: BellAttempt;
   run: Run;
   assignment: Assignment;
   bell: string;
+}
+
+/**
+ * The dispatch priority of an Assignment's card. C-244: the work item is found
+ * once instead of inside the card predicate (same first matches, no C × W scan).
+ */
+function cardPriority(state: CommandState, a: Assignment): number {
+  const card = state.work_items.find((w) => w.id === a.work_item_id)?.card_id;
+  return state.cards.find((c) => c.id === card)?.priority ?? 0;
 }
 
 // C-247: the RuntimeMonitor may mark a leftover Run unknown before the first
@@ -186,6 +195,10 @@ export class Dispatcher {
   readonly clock: Clock;
   private loadState: StateLoader = loadCommandState;
   private serial: Promise<void> = Promise.resolve();
+  /** C-244: per project; survives ticks, a restart starts empty and re-evaluates once. */
+  private readonly followups = new Map<ProjectId, DecisionFollowupSchedule>();
+  /** C-244: candidate lists per project, kept across ticks (memory only). */
+  private candidateIndex: CandidateIndex | undefined;
   private readonly leaseMs: number;
   private readonly retryBaseMs: number;
   private readonly maxRetries: number;
@@ -339,18 +352,55 @@ export class Dispatcher {
         this.loadState,
       ),
     );
-    step("decision_followups", () =>
-      store.uow.run((tx) => {
-        const effect = unwrap(
-          remindDecisionFollowups(
-            this.loadState(tx, project),
-            { kind: "system", project_id: project },
-            { clock: this.clock, ids: tx.ids },
-          ),
+    // C-244: only decisions whose row changed since the last committed pass,
+    // unsettled ones, and waits whose 30-minute delay is over are evaluated
+    // (DecisionFollowupSchedule); the schedule learns the answers and the feed
+    // position only after the transaction commits.
+    step("decision_followups", () => {
+      let schedule = this.followups.get(project);
+      if (!schedule) {
+        schedule = new DecisionFollowupSchedule();
+        this.followups.set(project, schedule);
+      }
+      const plan = schedule;
+      const { planned, statuses } = store.uow.run((tx) => {
+        const changes = store.changesSince(
+          project,
+          DECISION_FOLLOWUP_FEED,
+          plan.cursor,
         );
-        persistEffect(tx, project, effect);
-      }),
-    );
+        const state = step("decision_followups.state", () =>
+          this.loadState(tx, project),
+        );
+        const at = this.clock.now();
+        const planned = plan.plan(state, changes, at);
+        const statuses = step("decision_followups.evaluate", () =>
+          plan.evaluate(state, planned, at),
+        );
+        const due = new Set(
+          [...statuses]
+            .filter(([, status]) => status.kind === "due")
+            .map(([q]) => q.id),
+        );
+        if (due.size)
+          step("decision_followups.persist", () =>
+            persistEffect(
+              tx,
+              project,
+              unwrap(
+                remindDecisionFollowups(
+                  state,
+                  { kind: "system", project_id: project },
+                  { clock: { now: () => at }, ids: tx.ids },
+                  { decision_ids: due },
+                ),
+              ),
+            ),
+          );
+        return { planned, statuses };
+      });
+      plan.record(planned, statuses);
+    });
     step("system_rules", () =>
       runSystemRules(store, project, this.clock, this.loadState),
     );
@@ -415,84 +465,42 @@ export class Dispatcher {
   }
   private candidates(project: ProjectId): Candidate[] {
     const { store } = this.options;
-    const claimed = new Set(
-      unfinishedBellAttempts(store.database, project).flatMap(
-        (a) => a.notification_ids,
-      ),
+    // C-244: maintained across passes from the Store's row change feed; only
+    // what depends on a changed row is evaluated again (CandidateIndex).
+    this.candidateIndex ??= new CandidateIndex(this.options.standing);
+    const index = this.candidateIndex;
+    return store.uow.read((tx) =>
+      index.candidates(project, {
+        changes: (cursor) =>
+          profileSpanSync("route.candidates.changes", () =>
+            store.changesSince(project, CANDIDATE_FEED, cursor),
+          ),
+        state: () =>
+          profileSpanSync("route.candidates.state", () =>
+            this.loadState(tx, project),
+          ),
+        notifications: (ids) =>
+          profileSpanSync("route.candidates.notifications", () =>
+            store.listNotifications({
+              project_id: project,
+              status: "pending",
+              ...(ids ? { ids } : {}),
+            }),
+          ),
+        claimed: () =>
+          new Set(
+            unfinishedBellAttempts(store.database, project).flatMap(
+              (a) => a.notification_ids,
+            ),
+          ),
+      }),
     );
-    const state = this.state(project),
-      groups = new Map<string, Notification[]>();
-    for (const n of store.listNotifications({
-      project_id: project,
-      status: "pending",
-    })) {
-      if (claimed.has(n.id)) continue;
-      const owner = this.owner(n, state);
-      if (!owner || decisionFollowupBlocked(state, n.event_id, owner)) continue;
-      const key = `${owner}/${n.card_id ?? ""}/${n.attempts ? n.run_id : ""}`;
-      groups.set(key, [...(groups.get(key) ?? []), n]);
-    }
-    const candidates: Candidate[] = [];
-    const add = (assignment: Assignment, notes: Notification[]) => {
-      if (!hasRunTarget(assignment, state)) return;
-      const queued = this.queued(state, assignment);
-      if (queued && unreadableCommentTrigger(state, queued)) return;
-      const cause = notes.find((n) => !n.run_id) ?? notes[0];
-      const trigger = queued?.trigger_event_id ?? cause?.event_id;
-      const event = eventById(state.events, trigger);
-      if (!event) return;
-      candidates.push({
-        project,
-        notes,
-        assignment,
-        order: {
-          priority:
-            state.cards.find(
-              (c) =>
-                c.id ===
-                state.work_items.find((w) => w.id === assignment.work_item_id)
-                  ?.card_id,
-            )?.priority ?? 0,
-          project_id: project,
-          assignment_id: assignment.id,
-          created_at: event.created_at,
-          trigger_event_id: event.id,
-        },
-      });
-    };
-    for (const notes of groups.values()) {
-      notes.sort((a, b) => {
-        const left = eventById(state.events, a.event_id);
-        const right = eventById(state.events, b.event_id);
-        return (
-          (left?.created_at ?? a.created_at).localeCompare(
-            right?.created_at ?? b.created_at,
-          ) || a.event_id.localeCompare(b.event_id)
-        );
-      });
-      const first = notes[0];
-      const assignment =
-        first &&
-        state.assignments.find((a) => a.id === this.owner(first, state));
-      if (assignment) add(assignment, notes);
-    }
-    // ACK is not cancellation: a Run deferred for capacity still needs dispatch
-    // if its trigger notification was acknowledged while it waited.
-    for (const assignment of state.assignments)
-      if (
-        (this.queued(state, assignment)?.queue_reason !== undefined ||
-          this.queued(state, assignment)?.dispatch_target_wait !== undefined) &&
-        !candidates.some((c) => c.assignment.id === assignment.id)
-      )
-        add(assignment, []);
-    return candidates;
   }
   private queued(state: CommandState, a: Assignment) {
     // Domain resumption can queue work before (or independently of) the
     // pending notification. That Run is the work to dispatch, not a busy flag.
-    return state.runs.find(
-      (r) => r.assignment_id === a.id && r.status === "queued",
-    );
+    // C-244: keyed per Run snapshot; same as the first queued Run of `a`.
+    return queuedRun(state.runs, a.id);
   }
   private busy(state: CommandState, a: Assignment) {
     if (hostOpsPending(state.events, a.id)) return true;
@@ -500,12 +508,12 @@ export class Dispatcher {
     // pending and no session is woken, replaced or started for it.
     if (stoppedByHuman(state.events, a.id)) return true;
     const queued = this.queued(state, a);
-    return state.runs.some(
+    // C-244: keyed per Run snapshot; same as scanning runs for `a`.
+    return runsOf(state.runs, a.id).some(
       (r) =>
-        r.assignment_id === a.id &&
-        (r.dispatch_stop ||
-          r.inactivity_stop ||
-          (unfinishedRun(r) && r.id !== queued?.id)),
+        r.dispatch_stop ||
+        r.inactivity_stop ||
+        (unfinishedRun(r) && r.id !== queued?.id),
     );
   }
   private async deliver(
@@ -902,12 +910,7 @@ export class Dispatcher {
           (e) => e.id === run?.trigger_event_id,
         );
         const order = {
-          priority:
-            state.cards.find(
-              (c) =>
-                c.id ===
-                state.work_items.find((w) => w.id === a.work_item_id)?.card_id,
-            )?.priority ?? 0,
+          priority: cardPriority(state, a),
           project_id: project,
           assignment_id: a.id,
           created_at: trigger?.created_at ?? a.created_at,
@@ -1362,6 +1365,9 @@ export class Dispatcher {
   }
   private maintenance(project: ProjectId) {
     const { store, standing } = this.options;
+    // C-244: sub-spans of `route.maintenance`; timing only, no added await.
+    const step = <T>(name: string, run: () => T) =>
+      profileSpanSync(`route.maintenance.${name}`, run);
     store.uow.run((tx) => {
       const at = this.clock.now();
       const prior = this.loadState(tx, project);
@@ -1387,82 +1393,95 @@ export class Dispatcher {
           ),
         ),
       );
-      for (const n of store.listNotifications({ project_id: project })) {
-        if (obsoleteDispatchAttention(state, n))
+      step("obsolete", () => {
+        for (const n of store.listNotifications({
+          // C-244: acked/resolved rows are never obsolete attention.
+          project_id: project,
+          statuses: UNSETTLED_NOTIFICATION_STATUSES,
+        })) {
+          if (obsoleteDispatchAttention(state, n))
+            moveNotification(store.database, {
+              project_id: project,
+              id: n.id,
+              event: "resolve",
+              at,
+            });
+        }
+      });
+      step("review_limit", () =>
+        escalateReviewLimitWaits(tx, store, state, at),
+      );
+      step("merge_stalls", () => escalatePmMergeStalls(tx, store, state, at));
+      const attempts = unfinishedBellAttempts(store.database, project);
+      // C-244: this loop writes notifications and alert events only; tokens
+      // and Assignments stay as read, so one standing resolution per kind.
+      const standingOnce = memoStanding(standing);
+      step("belled", () => {
+        for (const n of store.listNotifications({
+          project_id: project,
+          status: "belled",
+        })) {
+          if (!n.card_id || !n.next_attempt_at || n.next_attempt_at > at)
+            continue;
+          const owner = notificationOwner(n, state, standingOnce),
+            a = state.assignments.find((a) => a.id === owner);
+          if (
+            a?.status !== "active" ||
+            a.external ||
+            !hasRunTarget(a, state) ||
+            runsOf(state.runs, a.id).some(unfinishedRun) ||
+            attempts.some(
+              (t) =>
+                t.assignment_id === a.id || t.notification_ids.includes(n.id),
+            )
+          )
+            continue;
+          const exhausted = n.attempts >= this.maxRetries + 1;
           moveNotification(store.database, {
             project_id: project,
             id: n.id,
-            event: "resolve",
+            event: exhausted ? "needs_attention" : "retry",
             at,
           });
-      }
-      escalateReviewLimitWaits(tx, store, state, at);
-      escalatePmMergeStalls(tx, store, state, at);
-      const attempts = unfinishedBellAttempts(store.database, project);
-      for (const n of store.listNotifications({
-        project_id: project,
-        status: "belled",
-      })) {
-        if (!n.card_id || !n.next_attempt_at || n.next_attempt_at > at)
-          continue;
-        const owner = this.owner(n, state),
-          a = state.assignments.find((a) => a.id === owner);
-        if (
-          a?.status !== "active" ||
-          a.external ||
-          !hasRunTarget(a, state) ||
-          state.runs.some(
-            (r) => r.assignment_id === a.id && unfinishedRun(r),
-          ) ||
-          attempts.some(
-            (t) =>
-              t.assignment_id === a.id || t.notification_ids.includes(n.id),
+          if (exhausted)
+            dispatchAlert(tx, store, state, at, {
+              assignment: a,
+              type: "bell_retry_exhausted",
+              reason: "ack_retry_limit",
+              audience: alertAudience(a, state, standing, [n]),
+              card_id: n.card_id,
+              run_id: n.run_id,
+              notification_ids: [n.id],
+            });
+        }
+      });
+      step("inactive_runs", () => {
+        for (const r of state.runs) {
+          if (r.status !== "running") continue;
+          const a = state.assignments.find((a) => a.id === r.assignment_id);
+          if (a?.status !== "active" || a.external) continue;
+          const last = lastRunActivity(r, a);
+          if (
+            Date.parse(at) - last < this.inactivityGraceMs ||
+            state.events.some(
+              (e) =>
+                e.type === "run_inactive" &&
+                payloadString(e.payload, "run_id") === r.id,
+            )
           )
-        )
-          continue;
-        const exhausted = n.attempts >= this.maxRetries + 1;
-        moveNotification(store.database, {
-          project_id: project,
-          id: n.id,
-          event: exhausted ? "needs_attention" : "retry",
-          at,
-        });
-        if (exhausted)
+            continue;
           dispatchAlert(tx, store, state, at, {
             assignment: a,
-            type: "bell_retry_exhausted",
-            reason: "ack_retry_limit",
-            audience: alertAudience(a, state, standing, [n]),
-            card_id: n.card_id,
-            run_id: n.run_id,
-            notification_ids: [n.id],
+            type: "run_inactive",
+            reason: "mcp_inactivity",
+            mark: true,
+            audience: alertAudience(a, state, standing),
+            run_id: r.id,
+            card_id: state.work_items.find((w) => w.id === a.work_item_id)
+              ?.card_id,
           });
-      }
-      for (const r of state.runs) {
-        if (r.status !== "running") continue;
-        const a = state.assignments.find((a) => a.id === r.assignment_id);
-        if (a?.status !== "active" || a.external) continue;
-        const last = lastRunActivity(r, a);
-        if (
-          Date.parse(at) - last < this.inactivityGraceMs ||
-          state.events.some(
-            (e) =>
-              e.type === "run_inactive" &&
-              payloadString(e.payload, "run_id") === r.id,
-          )
-        )
-          continue;
-        dispatchAlert(tx, store, state, at, {
-          assignment: a,
-          type: "run_inactive",
-          reason: "mcp_inactivity",
-          mark: true,
-          audience: alertAudience(a, state, standing),
-          run_id: r.id,
-          card_id: state.work_items.find((w) => w.id === a.work_item_id)
-            ?.card_id,
-        });
-      }
+        }
+      });
     });
   }
 }

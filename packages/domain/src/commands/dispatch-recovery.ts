@@ -3,6 +3,7 @@ import { eventById } from "../event-index.js";
 import { hostOpsPending } from "../host-ops.js";
 import type { RunId } from "../ids.js";
 import { assignmentCanReadCard, type Notification } from "../notification.js";
+import { runById } from "../run-index.js";
 import { hasRunTarget } from "../run-target.js";
 import { transition } from "../transitions.js";
 import {
@@ -416,7 +417,8 @@ export function obsoleteDispatchAttention(
     "bell_retry_exhausted",
   ].includes(event?.type ?? "");
   const runId = diagnostic ? field(event?.payload, "run_id") : note.run_id;
-  const run = state.runs.find((r) => r.id === runId);
+  // C-244: keyed per Run snapshot; same first match as runs.find.
+  const run = runById(state.runs, runId);
   if (
     !diagnostic &&
     !["needs_attention", "delivery_failed"].includes(note.status) &&
