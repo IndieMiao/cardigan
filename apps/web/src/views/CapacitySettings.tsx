@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useId, useRef, useState } from "react";
 import {
   type CardiganClient,
   describeError,
   type ExecutionCapacity,
 } from "../api.js";
-import { useResource } from "../useResource.js";
+import { useCapacity } from "../components/Capacity.js";
 
 function AgentLimit({
   machine,
@@ -67,8 +67,9 @@ function AgentLimit({
       <div className="execution-capacity-count">
         <strong>{machine.label} · Agent</strong>
         <span>
-          运行中 {machine.running} / 上限 {machine.limit || "不可用"} / 排队{" "}
-          {machine.queued}
+          全部 {machine.total_running ?? machine.running} · 非常驻{" "}
+          {machine.total_running === undefined ? "待更新" : machine.running} /
+          上限 {machine.limit || "不可用"} / 排队 {machine.queued}
         </span>
       </div>
       <div className="execution-capacity-edit">
@@ -131,82 +132,24 @@ function AgentLimit({
   );
 }
 
-/** C-207: one folded line, e.g. "Agent 运行中 4 / 上限 6 / 排队 2". */
-function summary(
-  data: ExecutionCapacity | undefined,
-  error: string | undefined,
-) {
-  if (!data) return error ? "读取失败" : "正在读取…";
-  if (!data.agents.length) return "暂无 Agent 机器";
-  const sum = (pick: (m: ExecutionCapacity["agents"][number]) => number) =>
-    data.agents.reduce((total, machine) => total + pick(machine), 0);
-  const limit = data.agents.some((machine) => machine.limit === 0)
-    ? "不可用"
-    : sum((machine) => machine.limit);
-  return `Agent 运行中 ${sum((m) => m.running)} / 上限 ${limit} / 排队 ${sum((m) => m.queued)}`;
-}
-
-export function ExecutionCapacityPanel({
-  id,
+export function CapacitySettings({
   client,
   projectId,
-  revision,
 }: {
-  id?: string;
   client: CardiganClient;
   projectId: string;
-  revision: number;
 }) {
-  const load = useCallback(
-    () => client.executionCapacity(projectId),
-    [client, projectId],
-  );
-  const { data, error, reload } = useResource(load, revision);
-  // Occupancy and limits are shared across projects. Poll even when this project's SSE is quiet.
-  useEffect(() => {
-    const timer = window.setInterval(reload, 5000);
-    return () => window.clearInterval(timer);
-  }, [reload]);
+  const resource = useCapacity();
+  const { data, error, reload, canEdit } = resource ?? {};
   return (
-    <section className="execution-capacity" aria-label="机器并发">
-      {/* C-207: folded below the list; the body stays mounted so drafts survive. */}
-      <details id={id}>
-        <summary>
-          <span className="execution-capacity-title">机器并发</span>
-          <span className="execution-capacity-summary">
-            {summary(data, error)}
-          </span>
-          <span className="hint">全项目共用</span>
-          <span className="execution-capacity-more">查看与调整上限</span>
-        </summary>
-        <div className="execution-capacity-body">
-          {!data && !error && <p className="hint">正在读取并发信息…</p>}
-          {data?.agents.map((machine) => (
-            <AgentLimit
-              key={machine.machine_id}
-              machine={machine}
-              client={client}
-              projectId={projectId}
-              saved={reload}
-            />
-          ))}
-          {!!data?.agents.length && (
-            <p className="hint">调低上限不会停止已运行的任务。</p>
-          )}
-          {data?.merge_checks.map((machine) => (
-            <div key={machine.machine_id} className="execution-capacity-row">
-              <div className="execution-capacity-count">
-                <strong>{machine.machine_id} · 合并检查</strong>
-                <span>
-                  运行中 {machine.running} / 上限 {machine.limit} / 排队{" "}
-                  {machine.queued}
-                </span>
-              </div>
-              <span className="hint">需要主机预置，找张良</span>
-            </div>
-          ))}
-        </div>
-      </details>
+    <section
+      className="capacity-settings"
+      aria-labelledby="capacity-settings-title"
+    >
+      <h2 id="capacity-settings-title">并发与容量</h2>
+      <p className="hint">全项目共用。调低上限不会停止已运行的任务。</p>
+      {!canEdit && <p>仅人类登录会话可修改并发上限。</p>}
+      {!data && !error && resource && <p>正在读取并发信息…</p>}
       {error && (
         <p role="alert">
           读取并发信息失败：{error}{" "}
@@ -215,6 +158,35 @@ export function ExecutionCapacityPanel({
           </button>
         </p>
       )}
+      {!error &&
+        data?.agents.map((machine) =>
+          canEdit && reload ? (
+            <AgentLimit
+              key={machine.machine_id}
+              machine={machine}
+              client={client}
+              projectId={projectId}
+              saved={reload}
+            />
+          ) : (
+            <p key={machine.machine_id}>
+              {machine.label} · Agent 上限 {machine.limit || "不可用"}
+            </p>
+          ),
+        )}
+      {!error && data?.agents.length === 0 && <p>暂无 Agent 机器</p>}
+      {data?.merge_checks.map((machine) => (
+        <div key={machine.machine_id} className="execution-capacity-row">
+          <div className="execution-capacity-count">
+            <strong>{machine.machine_id} · 合并检查</strong>
+            <span>
+              运行中 {machine.running} / 上限 {machine.limit || "不可用"} / 排队{" "}
+              {machine.queued}
+            </span>
+          </div>
+          <span className="hint">需要主机预置，找张良</span>
+        </div>
+      ))}
       {data?.merge_config_invalid && (
         <p role="alert">合并检查配置无效，请联系主机管理员。</p>
       )}

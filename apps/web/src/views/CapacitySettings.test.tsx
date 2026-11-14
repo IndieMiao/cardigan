@@ -8,9 +8,33 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
-import type { ExecutionCapacity } from "../api.js";
+import type { CardiganClient, ExecutionCapacity } from "../api.js";
+import { CapacityProvider } from "../components/Capacity.js";
 import { fakeClient } from "../testing/fixtures.js";
-import { ExecutionCapacityPanel } from "./ExecutionCapacityPanel.js";
+import { CapacitySettings } from "./CapacitySettings.js";
+
+function Settings({
+  client,
+  projectId,
+  revision,
+  canEdit = true,
+}: {
+  client: CardiganClient;
+  projectId: string;
+  revision: number;
+  canEdit?: boolean;
+}) {
+  return (
+    <CapacityProvider
+      client={client}
+      projectId={projectId}
+      revision={revision}
+      canEdit={canEdit}
+    >
+      <CapacitySettings client={client} projectId={projectId} />
+    </CapacityProvider>
+  );
+}
 
 afterEach(() => {
   cleanup();
@@ -20,6 +44,7 @@ const agent: ExecutionCapacity["agents"][number] = {
   machine_id: "local",
   label: "Workstation",
   running: 5,
+  total_running: 7,
   limit: 6,
   max_limit: 16,
   queued: 2,
@@ -36,7 +61,7 @@ test.each([16, 8, 24])(
   async (maximum) => {
     const setRunLimit = vi.fn(async () => {});
     render(
-      <ExecutionCapacityPanel
+      <Settings
         client={fakeClient({
           executionCapacity: async () => ({
             ...capacity,
@@ -84,11 +109,11 @@ test("distinct machine counts, human save, validation and a stable key after unc
     executionCapacity: async () => current,
     setRunLimit,
   });
-  render(<ExecutionCapacityPanel client={client} projectId="p" revision={0} />);
+  render(<Settings client={client} projectId="p" revision={0} />);
   const input = await screen.findByRole("spinbutton", {
     name: "Workstation Agent 并发上限",
   });
-  expect(screen.getByText("运行中 5 / 上限 6 / 排队 2")).toBeTruthy();
+  expect(screen.getByText("全部 7 · 非常驻 5 / 上限 6 / 排队 2")).toBeTruthy();
   expect(screen.getByText("运行中 1 / 上限 3 / 排队 4")).toBeTruthy();
   expect(screen.getByText("需要主机预置，找张良")).toBeTruthy();
   expect(screen.getAllByRole("spinbutton")).toHaveLength(1);
@@ -102,24 +127,19 @@ test("distinct machine counts, human save, validation and a stable key after unc
   expect((input as HTMLInputElement).value).toBe("2");
   fireEvent.click(screen.getByRole("button", { name: "保存" }));
   await screen.findByText("已保存，下一轮调度生效。");
-  await screen.findByText("运行中 5 / 上限 2 / 排队 2");
+  await screen.findByText("全部 7 · 非常驻 5 / 上限 2 / 排队 2");
   expect(setRunLimit.mock.calls).toEqual([
     ["p", "local", 2, expect.any(String)],
     ["p", "local", 2, setRunLimit.mock.calls[0]?.[3]],
   ]);
 });
 
-test("cross-project polling refreshes counts without overwriting the draft and stops on unmount", async () => {
+test("SSE revision refreshes counts without overwriting the draft, with no polling", async () => {
   vi.useFakeTimers();
   let current = capacity;
   const read = vi.fn(async () => current);
-  const view = render(
-    <ExecutionCapacityPanel
-      client={fakeClient({ executionCapacity: read })}
-      projectId="p"
-      revision={0}
-    />,
-  );
+  const client = fakeClient({ executionCapacity: read });
+  const view = render(<Settings client={client} projectId="p" revision={0} />);
   await act(async () => {});
   const input = screen.getByRole<HTMLInputElement>("spinbutton");
   fireEvent.change(input, { target: { value: "9" } });
@@ -128,9 +148,12 @@ test("cross-project polling refreshes counts without overwriting the draft and s
     agents: [{ ...agent, running: 4, limit: 8 }],
   };
   await act(async () => {
-    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(10000);
   });
-  expect(screen.getByText("运行中 4 / 上限 8 / 排队 2")).toBeTruthy();
+  expect(read).toHaveBeenCalledTimes(1);
+  view.rerender(<Settings client={client} projectId="p" revision={1} />);
+  await act(async () => {});
+  expect(screen.getByText("全部 7 · 非常驻 4 / 上限 8 / 排队 2")).toBeTruthy();
   expect(input.value).toBe("9");
   view.unmount();
   await vi.advanceTimersByTimeAsync(10000);
@@ -147,7 +170,7 @@ test("loading failures can retry and invalid host configuration cannot be saved"
       merge_config_invalid: true,
     });
   render(
-    <ExecutionCapacityPanel
+    <Settings
       client={fakeClient({ executionCapacity: read })}
       projectId="p"
       revision={0}
@@ -163,45 +186,22 @@ test("loading failures can retry and invalid host configuration cannot be saved"
   expect(screen.getByText("合并检查配置无效，请联系主机管理员。")).toBeTruthy();
 });
 
-test("C-207: the panel folds to a one-line summary and cancel restores the saved limit", async () => {
-  render(
-    <ExecutionCapacityPanel
-      client={fakeClient({ executionCapacity: async () => capacity })}
-      projectId="p"
-      revision={0}
-    />,
-  );
-  const summary = await screen.findByText("Agent 运行中 5 / 上限 6 / 排队 2");
-  const details = summary.closest("details") as HTMLDetailsElement;
-  expect(details.open).toBe(false);
-  expect(details.querySelector("summary")?.textContent).toContain(
-    "查看与调整上限",
-  );
-  expect(details.querySelector("summary")?.textContent).toContain("全项目共用");
-  // The edit form stays inside the folded body.
-  const input = screen.getByRole<HTMLInputElement>("spinbutton");
-  expect(details.contains(input)).toBe(true);
-  expect(screen.queryByRole("button", { name: "取消" })).toBeNull();
+test("cancel restores the saved limit and a read-only session has no write control", async () => {
+  const setRunLimit = vi.fn();
+  const client = fakeClient({
+    executionCapacity: async () => capacity,
+    setRunLimit,
+  });
+  const view = render(<Settings client={client} projectId="p" revision={0} />);
+  const input = await screen.findByRole<HTMLInputElement>("spinbutton");
   fireEvent.change(input, { target: { value: "9" } });
   fireEvent.click(screen.getByRole("button", { name: "取消" }));
   expect(input.value).toBe("6");
-  expect(screen.queryByRole("button", { name: "取消" })).toBeNull();
-});
-
-test("C-207: an invalid host limit shows as unavailable in the summary", async () => {
-  render(
-    <ExecutionCapacityPanel
-      client={fakeClient({
-        executionCapacity: async () => ({
-          ...capacity,
-          agents: [{ ...agent, limit: 0 }],
-        }),
-      })}
-      projectId="p"
-      revision={0}
-    />,
+  view.rerender(
+    <Settings client={client} projectId="p" revision={0} canEdit={false} />,
   );
-  expect(
-    await screen.findByText("Agent 运行中 5 / 上限 不可用 / 排队 2"),
-  ).toBeTruthy();
+  expect(screen.queryByRole("spinbutton")).toBeNull();
+  expect(screen.queryByRole("button", { name: "保存" })).toBeNull();
+  expect(screen.getByText("仅人类登录会话可修改并发上限。")).toBeTruthy();
+  expect(setRunLimit).not.toHaveBeenCalled();
 });

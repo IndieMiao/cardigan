@@ -13,6 +13,7 @@ export interface StreamCallbacks {
    * reading, unknown or expired). Only the execution view needs to re-read.
    */
   readonly context?: () => void;
+  readonly capacity?: () => void;
 }
 export interface EventConnection {
   addEventListener(type: string, listener: EventListener): void;
@@ -34,6 +35,7 @@ export function subscribeProject(
   let queueRevision: string | undefined;
   // C-232: the same for the host's context samples.
   let contextRevision: string | undefined;
+  let capacityRevision: string | undefined;
   let source: EventConnection | undefined,
     timer: ReturnType<typeof setTimeout> | undefined,
     stopped = false;
@@ -120,6 +122,20 @@ export function subscribeProject(
       // As with the queue: the first connection's first revision is covered
       // by the re-read on open.
       if (known !== undefined || resumed) callbacks.context?.();
+    });
+    connection.addEventListener("capacity", (event) => {
+      if (!current()) return;
+      let revision: unknown;
+      try {
+        revision = JSON.parse((event as MessageEvent<string>).data)?.revision;
+      } catch {
+        return;
+      }
+      if (typeof revision !== "string") return;
+      const known = capacityRevision;
+      capacityRevision = revision;
+      if (known !== revision && (known !== undefined || resumed))
+        callbacks.capacity?.();
     });
     connection.addEventListener("change", (event) => {
       if (!current()) return;

@@ -545,70 +545,87 @@ button.quiet,
 }
 
 .page-title {
-  display: flex;
-  align-items: start;
-  justify-content: space-between;
-  gap: 24px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px 20px;
   border-bottom: 1px solid var(--border);
   padding-bottom: 20px;
   margin-bottom: 24px;
 }
 .page-title h1 {
   margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
   font-size: var(--text-page);
 }
 .page-title p {
-  margin: 6px 0 0;
+  margin: 0;
   color: var(--text-muted);
+}
+.page-description {
+  grid-column: 1 / -1;
 }
 .page-actions {
+  grid-column: 1 / -1;
   display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 8px;
 }
-/* C-207: machine capacity folds to one line below the execution list. */
-.execution-capacity {
-  margin-top: 16px;
-  border-top: 1px solid var(--border);
+.capacity-status.quiet {
+  grid-column: 2;
+  grid-row: 1;
+  align-self: start;
+  border-color: transparent;
+  background: transparent;
+  padding: 6px 0;
+  min-height: 36px;
+  color: var(--text-muted);
   font-size: var(--text-sm);
-  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
-.execution-capacity > details > summary {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px 12px;
-  min-height: 40px;
-  padding: 8px 0;
-  cursor: pointer;
-  list-style: none;
-}
-.execution-capacity > details > summary::-webkit-details-marker {
+.capacity-compact {
   display: none;
 }
-.execution-capacity > details > summary::before {
-  content: "▸";
-  color: var(--text-muted);
-}
-.execution-capacity > details[open] > summary::before {
-  content: "▾";
-}
-.execution-capacity-title {
+.capacity-tooltip {
+  z-index: 60;
+  width: min(380px, calc(100vw - 24px));
+  max-height: min(70dvh, var(--radix-popover-content-available-height));
+  overflow: auto;
+  overflow-wrap: anywhere;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
   color: var(--text);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  box-shadow: 0 4px 16px rgb(0 0 0 / 15%);
 }
-.execution-capacity-summary {
-  font-variant-numeric: tabular-nums;
-}
-.execution-capacity-more {
-  margin-left: auto;
-  color: var(--accent);
-  text-decoration: underline;
-}
-.execution-capacity-body {
-  max-width: 720px;
-  padding: 0 0 12px 20px;
-}
-.execution-capacity-body > .hint {
+.capacity-tooltip p {
   margin: 8px 0 0;
+}
+.capacity-detail-row {
+  display: grid;
+  gap: 2px;
+  margin-top: 12px;
+}
+.capacity-settings {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 1000px) {
+  .capacity-wide {
+    display: none;
+  }
+  .capacity-compact {
+    display: inline;
+  }
+  .page-title {
+    gap: 8px 12px;
+  }
 }
 .execution-capacity-edit {
   display: flex;
@@ -638,12 +655,6 @@ button.quiet,
 .execution-capacity-row > .hint,
 .execution-capacity-row > [role] {
   flex-basis: 100%;
-}
-.execution-capacity > [role="alert"] {
-  margin: 4px 0 0;
-}
-.execution-capacity-jump {
-  white-space: nowrap;
 }
 .execution-machines {
   margin-top: 8px;
@@ -1422,6 +1433,8 @@ fieldset.filters {
   min-width: 0;
 }
 .card-header {
+  grid-column: 1 / -1;
+  min-width: 0;
   padding: 0 0 12px;
 }
 .card-header .page-title {
@@ -4026,6 +4039,13 @@ body[data-lightbox="open"] .drawer-overlay {
 .settings-layout input[type="number"] {
   display: block;
   width: 10rem;
+}
+.settings-layout .capacity-settings form {
+  display: flex;
+  gap: 8px 12px;
+}
+.settings-layout .execution-capacity-edit input {
+  width: 5rem;
 }
 /* C-52 V9b: role management inside settings. */
 .settings-layout .link-button {

@@ -16,6 +16,7 @@ import {
 } from "../decision-labels.js";
 import { employeeCopy } from "../employee-copy.js";
 import { useResource } from "../useResource.js";
+import { CapacitySettings } from "./CapacitySettings.js";
 import { EmployeesSettings } from "./EmployeesSettings.js";
 import { RolesSettings } from "./RolesSettings.js";
 import { SystemRulesSettings } from "./SystemRulesSettings.js";
@@ -31,7 +32,12 @@ export function SettingsPage({
   revision?: number;
 }) {
   const [tab, setTab] = useState<
-    "preferences" | "authorization" | "roles" | "templates" | "employees"
+    | "preferences"
+    | "authorization"
+    | "roles"
+    | "templates"
+    | "employees"
+    | "capacity"
   >("preferences");
   const [employeeRole, setEmployeeRole] = useState("");
   const load = useCallback(
@@ -54,6 +60,13 @@ export function SettingsPage({
             aria-current={tab === "preferences" ? "page" : undefined}
           >
             偏好
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab("capacity")}
+            aria-current={tab === "capacity" ? "page" : undefined}
+          >
+            并发与容量
           </button>
           <button
             type="button"
@@ -92,6 +105,9 @@ export function SettingsPage({
             {employeeCopy.tab}
           </button>
         </nav>
+        {tab === "capacity" && (
+          <CapacitySettings client={client} projectId={projectId} />
+        )}
         {tab === "roles" && (
           <section id="roles" tabIndex={-1} aria-labelledby="roles-title">
             <h2 id="roles-title">角色</h2>
@@ -131,9 +147,7 @@ export function SettingsPage({
             pendingMessage="正在加载偏好…"
           />
         )}
-        <div
-          hidden={tab === "templates" || tab === "roles" || tab === "employees"}
-        >
+        <div hidden={tab !== "preferences" && tab !== "authorization"}>
           <RequestFeedbackScope hidden={tab !== "preferences"}>
             <section
               hidden={tab !== "preferences"}

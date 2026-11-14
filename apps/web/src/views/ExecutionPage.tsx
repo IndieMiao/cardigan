@@ -43,7 +43,6 @@ import {
 import { routeHash, useRouteFilters } from "../route.js";
 import { statusLabel } from "../status.js";
 import { useResource } from "../useResource.js";
-import { ExecutionCapacityPanel } from "./ExecutionCapacityPanel.js";
 
 const kinds: Readonly<Record<string, string>> = {
   initial: "首次执行",
@@ -929,7 +928,6 @@ export function ExecutionPage({
   };
   const view = filters.view ?? "working";
   const narrow = useNarrow();
-  const capacityId = useId();
   const load = useCallback(
     () => client.execution(projectId),
     [client, projectId],
@@ -990,24 +988,7 @@ export function ExecutionPage({
     ) ?? false;
   return (
     <section aria-label="执行视图" className="execution-page">
-      <PageTitle
-        title="执行视图"
-        actions={
-          <button
-            type="button"
-            className="quiet execution-capacity-jump"
-            onClick={() => {
-              const panel = document.getElementById(capacityId);
-              if (!(panel instanceof HTMLDetailsElement)) return;
-              panel.open = true;
-              panel.scrollIntoView?.({ block: "start" });
-              panel.querySelector("summary")?.focus();
-            }}
-          >
-            机器并发 <span aria-hidden="true">↓</span>
-          </button>
-        }
-      />
+      <PageTitle title="执行视图" />
       <FilterBar
         fields={[
           {
@@ -1133,14 +1114,6 @@ export function ExecutionPage({
           )}
         </>
       )}
-      {/* C-207: shared capacity sits below the list, folded to one line. */}
-      <ExecutionCapacityPanel
-        key={projectId}
-        id={capacityId}
-        client={client}
-        projectId={projectId}
-        revision={revision}
-      />
       {!!data?.machines.length && (
         <details className="execution-machines">
           <summary>机器（{data.machines.length}）</summary>
