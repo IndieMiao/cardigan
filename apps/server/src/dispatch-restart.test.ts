@@ -410,3 +410,56 @@ test("startup never force-closes a terminal seen alive again between its two obs
   expect(runOf(original.id)?.status).toBe("dispatched");
   expect(count("run_dispatch_stop_requested")).toBe(1);
 });
+
+test("a started restart stop resumed after an interruption never force-closes; it waits, then escalates at the timeout", async () => {
+  f.comment();
+  await dispatcher().tick();
+  const original = f.latest();
+  // A previous process committed stopping after seeing the terminal gone,
+  // then died before settling; its lease has expired.
+  const a = f.state().assignments.find((x) => x.id === original.assignment_id);
+  f.store.uow.run((tx) => {
+    const run = tx.runs.get(f.project, original.id);
+    if (!run || !a) throw new Error("Missing fixture");
+    tx.runs.put(f.project, {
+      ...run,
+      dispatch_stop: {
+        attempt_id: "restart-stop",
+        runtime_ref: a.runtime_ref,
+        lease_until: f.clock.now(),
+        stopping: true,
+        reason: "server_restart",
+      },
+    });
+  });
+  vi.mocked(f.runtime.status).mockResolvedValue({
+    ok: true,
+    value: { process: "alive", agent: "idle", observed_seq: 1 },
+  });
+  f.advance(60000);
+  await dispatcher().tick();
+  expect(f.runtime.release).not.toHaveBeenCalled();
+  expect(runOf(original.id)).toMatchObject({ status: "dispatched" });
+  expect(runOf(original.id)?.dispatch_stop).toMatchObject({
+    stopping: true,
+    reason: "server_restart",
+  });
+  expect(count("run_dispatch_recovered")).toBe(0);
+  expect(count("run_dispatch_stalled")).toBe(0);
+  expect(f.options.startRun).not.toHaveBeenCalled();
+  // Past the ordinary dispatch timeout it escalates once, still without release.
+  f.advance(600000);
+  await dispatcher().tick();
+  await dispatcher().tick();
+  expect(f.runtime.release).not.toHaveBeenCalled();
+  expect(count("run_dispatch_stalled")).toBe(1);
+  expect(runOf(original.id)?.status).toBe("dispatched");
+  expect(runOf(original.id)?.dispatch_stop?.stopping).toBe(true);
+  // Once exit is observed the kept fence settles and the Run is requeued.
+  gone();
+  f.advance(60000);
+  await dispatcher().tick();
+  expect(f.runtime.release).not.toHaveBeenCalled();
+  expect(runOf(original.id)?.status).toBe("cancelled");
+  expect(count("run_dispatch_recovered")).toBe(1);
+});

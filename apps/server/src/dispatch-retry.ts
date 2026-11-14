@@ -150,6 +150,22 @@ export function dispatchRecovery(
       },
       fence: (run) => run.dispatch_stop,
       observeOnly: (stop) => stop.reason === "server_restart",
+      // C-247: a started restart stop that still cannot prove exit waits
+      // until the ordinary dispatch timeout, then escalates as an unconfirmed
+      // stop; it never force-closes the terminal.
+      settleUnexited: (run) => {
+        const state = store.uow.read((tx) => loadState(tx, project));
+        const current = state.runs.find((r) => r.id === run.id) ?? run;
+        const since = dispatchedAt(state, current);
+        const now = clock.now();
+        return (
+          !!since &&
+          Date.parse(now) -
+            Date.parse(since) -
+            dispatchTargetWaitMs(current, now) >=
+            policy.timeoutMs
+        );
+      },
       withdraw: (state, ports, run, stop) =>
         withdrawDispatchStop(
           state,
