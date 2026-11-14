@@ -1,7 +1,11 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Assignment, MachineRunCapacity, Run } from "@cardigan/domain";
-import { canDispatchRun, isStandingPm, setRunLimit } from "@cardigan/domain";
+import {
+  canDispatchRun,
+  isRunCapacityExempt,
+  setRunLimit,
+} from "@cardigan/domain";
 import {
   acquireMergeCheckCapacity,
   effectiveRunLimit,
@@ -28,6 +32,18 @@ test.each(["missing", "configured", "invalid"] as const)(
       scope: "standing",
       role_id: "pm",
       standing_mode: "ops",
+    };
+    const office: Assignment = { ...pm, id: "A-910", standing_mode: "office" };
+    const hostOps: Assignment = {
+      ...base,
+      id: "A-911",
+      scope: "standing",
+      role_id: "host_ops",
+    };
+    const workPm: Assignment = {
+      ...own.assignment,
+      id: "A-912",
+      role_id: "pm",
     };
     const other = "other-project";
     f.store.createProject({ id: other });
@@ -81,6 +97,9 @@ test.each(["missing", "configured", "invalid"] as const)(
       });
     seedRun(f.project, own.assignment, "R-800", "running");
     seedRun(f.project, pm, "R-801", "running");
+    seedRun(f.project, office, "R-810", "running");
+    seedRun(other, hostOps, "R-811", "running");
+    seedRun(other, workPm, "R-812", "running");
     seedRun(other, { ...own.assignment, id: "A-901" }, "R-802", "acked");
     seedRun(
       other,
@@ -152,6 +171,12 @@ test.each(["missing", "configured", "invalid"] as const)(
             expect(machine.running + machine.merge_check_slots).toBe(
               dispatch.occupied.get(machine.machine_id),
             );
+            expect(machine.total_running).toBe(
+              dispatch.allAgentOccupied.get(machine.machine_id),
+            );
+            expect(machine.running).toBe(
+              dispatch.agentOccupied.get(machine.machine_id),
+            );
             expect(machine.limit).toBe(
               effectiveRunLimit(
                 f.store,
@@ -172,6 +197,7 @@ test.each(["missing", "configured", "invalid"] as const)(
               "merge_check_slots",
               "queued",
               "running",
+              "total_running",
             ]);
           }
         });
@@ -182,6 +208,7 @@ test.each(["missing", "configured", "invalid"] as const)(
           machine_id: "local",
           label: configuration === "configured" ? "Workstation" : "local",
           running: 3,
+          total_running: 6,
           limit:
             configuration === "invalid"
               ? 0
@@ -201,6 +228,7 @@ test.each(["missing", "configured", "invalid"] as const)(
           machine_id: "worker",
           label: "worker",
           running: 1,
+          total_running: 1,
           limit:
             configuration === "invalid"
               ? 0
@@ -212,7 +240,7 @@ test.each(["missing", "configured", "invalid"] as const)(
           merge_check_slots: 0,
         },
       ]);
-      // Same physical machine, another project; a PM wait is exempt and a runtime wait is separate.
+      // Standing roles never enter the capacity queue; work-item PMs still do.
       seedRun(
         other,
         { ...own.assignment, id: "A-903" },
@@ -236,6 +264,27 @@ test.each(["missing", "configured", "invalid"] as const)(
       );
       seedRun(
         other,
+        { ...office, id: "A-913" },
+        "R-813",
+        "queued",
+        "concurrency_limit",
+      );
+      seedRun(
+        other,
+        { ...hostOps, id: "A-914" },
+        "R-814",
+        "queued",
+        "concurrency_limit",
+      );
+      seedRun(
+        other,
+        { ...workPm, id: "A-917" },
+        "R-817",
+        "queued",
+        "concurrency_limit",
+      );
+      seedRun(
+        other,
         { ...own.assignment, id: "A-906" },
         "R-807",
         "queued",
@@ -254,26 +303,41 @@ test.each(["missing", "configured", "invalid"] as const)(
         "R-809",
         "unknown",
       );
+      const exemptReserved = seedRun(
+        other,
+        { ...hostOps, id: "A-915" },
+        "R-815",
+        "queued",
+        "concurrency_limit",
+      );
+      const exemptStopping = seedRun(
+        other,
+        { ...office, id: "A-916" },
+        "R-816",
+        "unknown",
+      );
       f.store.uow.run((tx) => {
-        beginLaunchAttempt(f.store.database, {
-          id: "reserved-start",
-          project_id: other,
-          assignment_id: reserved.assignment_id,
-          run_id: reserved.id,
-          started_at: f.clock.now(),
-          lease_until: new Date(
-            Date.parse(f.clock.now()) + 60_000,
-          ).toISOString(),
-        });
-        tx.runs.put(other, {
-          ...stopping,
-          inactivity_stop: {
-            attempt_id: "stop",
-            runtime_ref: f.refFor(own.assignment),
-            stopping: true,
-            lease_until: f.clock.now(),
-          },
-        });
+        for (const run of [reserved, exemptReserved])
+          beginLaunchAttempt(f.store.database, {
+            id: `reserved-start-${run.id}`,
+            project_id: other,
+            assignment_id: run.assignment_id,
+            run_id: run.id,
+            started_at: f.clock.now(),
+            lease_until: new Date(
+              Date.parse(f.clock.now()) + 60_000,
+            ).toISOString(),
+          });
+        for (const run of [stopping, exemptStopping])
+          tx.runs.put(other, {
+            ...run,
+            inactivity_stop: {
+              attempt_id: "stop",
+              runtime_ref: f.refFor(own.assignment),
+              stopping: true,
+              lease_until: f.clock.now(),
+            },
+          });
         const effect = setRunLimit(
           { kind: "human" },
           { machine_id: "local", limit: 6 },
@@ -302,18 +366,26 @@ test.each(["missing", "configured", "invalid"] as const)(
       const capacity = await snapshot();
       expect(capacity[0]).toMatchObject({
         running: 5,
-        queued: 2,
+        total_running: 10,
+        queued: 3,
         merge_check_slots: 2,
         limit: configuration === "invalid" ? 0 : 6,
       });
       const local = capacity[0];
       if (!local) throw new Error("Missing local capacity");
       const occupied = local.running + local.merge_check_slots;
-      expect(canDispatchRun(local.limit, occupied, isStandingPm(pm))).toBe(
-        true,
-      );
-      expect(canDispatchRun(local.limit, occupied, false)).toBe(false);
-      expect(capacity[1]).toMatchObject({ running: 1, merge_check_slots: 0 });
+      for (const owner of [pm, office, hostOps])
+        expect(
+          canDispatchRun(local.limit, occupied, isRunCapacityExempt(owner)),
+        ).toBe(true);
+      expect(
+        canDispatchRun(local.limit, occupied, isRunCapacityExempt(workPm)),
+      ).toBe(false);
+      expect(capacity[1]).toMatchObject({
+        running: 1,
+        total_running: 1,
+        merge_check_slots: 0,
+      });
       expect(f.state()).toEqual(before);
     } finally {
       for (const release of releaseChecks) release();

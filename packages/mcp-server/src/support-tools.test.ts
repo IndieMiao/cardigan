@@ -997,6 +997,7 @@ test("C-293 capacity reads require PM authority and never turn failures into zer
       machine_id: "local",
       label: "Workstation",
       running: 3,
+      total_running: 6,
       limit: 4,
       max_limit: 16,
       queued: 2,
