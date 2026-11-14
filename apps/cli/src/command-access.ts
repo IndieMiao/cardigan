@@ -87,7 +87,6 @@ export const CLI_TOOLS = {
   "worktree clean": null,
   "worktree keep": null,
   "web set-password": null,
-  "review-snapshot create": null,
   launch: null,
 } as const satisfies Record<string, ToolName | null>;
 
