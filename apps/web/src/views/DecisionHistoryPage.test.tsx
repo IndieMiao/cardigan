@@ -84,6 +84,8 @@ test("history shows option, rationale and authority, and persists all four filte
 test("empty and failed history queries have readable states", async () => {
   render(<DecisionHistoryPage projectId="p-1" client={fakeClient()} />);
   expect(await screen.findByText("没有符合条件的拍板记录")).toBeTruthy();
+  expect(screen.queryByText(/已显示全部/u)).toBeNull();
+  expect(screen.queryByRole("button", { name: "加载更多" })).toBeNull();
   cleanup();
   render(
     <DecisionHistoryPage
@@ -214,13 +216,16 @@ test("shows the newest 10, loads 10 more at a time, and stops on the last page",
   await screen.findByRole("article", { name: "拍板记录 Q-10" });
   expect(screen.getAllByRole("article")).toHaveLength(10);
   expect(decisionHistory).toHaveBeenLastCalledWith("p-1", {});
+  expect(screen.queryByText(/已显示全部/u)).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "加载更多" }));
   await screen.findByRole("article", { name: "拍板记录 Q-20" });
   expect(screen.getAllByRole("article")).toHaveLength(20);
   expect(decisionHistory).toHaveBeenLastCalledWith("p-1", {}, "c1");
+  expect(screen.queryByText(/已显示全部/u)).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "加载更多" }));
   await screen.findByRole("article", { name: "拍板记录 Q-23" });
   expect(screen.getAllByRole("article")).toHaveLength(23);
+  expect(screen.getByText("已显示全部 23 条")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "加载更多" })).toBeNull();
 });
 
@@ -237,6 +242,7 @@ test("exactly 10 records show no load-more button", async () => {
     />,
   );
   await screen.findByRole("article", { name: "拍板记录 Q-10" });
+  expect(screen.getByText("已显示全部 10 条")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "加载更多" })).toBeNull();
 });
 
