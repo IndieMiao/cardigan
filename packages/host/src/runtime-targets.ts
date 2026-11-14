@@ -13,6 +13,7 @@ import {
   type ExecutionConfig,
   type HerdrOptions,
   HerdrRuntime,
+  type RegisteredRuntime,
   type RuntimeEvent,
   readRegisteredRuntime,
   registeredRuntimeOf,
@@ -57,7 +58,10 @@ export class RuntimeTargets implements Runtime {
     Promise<RuntimeResult<Adapter>>
   >();
   private readonly workers: () => readonly RuntimeWorker[];
-  private constructor(private readonly options: RuntimeTargetsOptions) {
+  private constructor(
+    private readonly options: RuntimeTargetsOptions,
+    private readonly registered: RegisteredRuntime | undefined,
+  ) {
     this.workers =
       options.workers ??
       (() =>
@@ -70,33 +74,39 @@ export class RuntimeTargets implements Runtime {
     options: RuntimeTargetsOptions,
   ): Promise<RuntimeResult<RuntimeTargets>> {
     try {
-      const runtime = new RuntimeTargets(options);
+      const runtime = new RuntimeTargets(
+        options,
+        await readRegisteredRuntime(options.execution.dataDir),
+      );
       runtime.workers(); // Invalid configuration never becomes a local fallback.
-      const registered = await readRegisteredRuntime(options.execution.dataDir);
-      if (
-        registered &&
-        runtimeDifferences(registered, options.execution, options.session)
-          .length &&
-        options.store
-          .listProjects()
-          .some((project) =>
-            options.store.uow.read((tx) =>
-              tx.assignments
-                .list(project.id)
-                .some(
-                  (a) =>
-                    a.runtime_ref &&
-                    !a.runtime_ref.target &&
-                    runtimeOwnsRef(registered, a.runtime_ref),
-                ),
-            ),
-          )
-      )
-        return failure(); // Do not silently rebind pre-fingerprint terminal records.
       return { ok: true, value: runtime };
     } catch {
       return failure();
     }
+  }
+  /** Only server registration checks all historical refs; terminal callers check their own ref. */
+  assertRegistration(
+    execution = this.options.execution,
+    session = this.options.session ??
+      this.options.env?.CARDIGAN_HC_SESSION ??
+      "cardigan",
+  ): void {
+    if (
+      !this.registered ||
+      !runtimeDifferences(this.registered, execution, session).length
+    )
+      return;
+    for (const project of this.options.store.listProjects())
+      for (const a of this.options.store.uow.read((tx) =>
+        tx.assignments.list(project.id),
+      ))
+        if (
+          a.runtime_ref &&
+          !a.runtime_ref.target &&
+          (session !== this.registered.session ||
+            a.runtime_ref.runtime_machine !== "local")
+        )
+          rejected();
   }
   resolve(project: ProjectId, machine_id: string): Target {
     if (this.options.project !== undefined && this.options.project !== project)
@@ -193,12 +203,20 @@ export class RuntimeTargets implements Runtime {
       )
         return rejected();
       const legacy = this.options.execution;
+      const session = this.registered?.session ?? target.session;
+      if (target.session !== session) return rejected();
       const execution =
         ref.runtime_machine === "local"
           ? { mode: "local" as const, dataDir: legacy.dataDir }
           : legacy;
       if (!runtimeOwnsRef(execution, ref)) return rejected();
-      return { ...target, execution };
+      if (
+        ref.runtime_machine !== "local" &&
+        this.registered &&
+        runtimeDifferences(this.registered, execution, session).length
+      )
+        return rejected();
+      return { ...target, execution, session };
     }
     if (!runtimeOwnsRef(target.execution, ref)) return rejected();
     const alias = ref.runtime_machine;
@@ -223,7 +241,7 @@ export class RuntimeTargets implements Runtime {
   forProject(project: ProjectId): RuntimeTargets {
     if (this.options.project && this.options.project !== project)
       return rejected();
-    return new RuntimeTargets({ ...this.options, project });
+    return new RuntimeTargets({ ...this.options, project }, this.registered);
   }
   check(project: ProjectId, machine_id: string) {
     return this.invoke(

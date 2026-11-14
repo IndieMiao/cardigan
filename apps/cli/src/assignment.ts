@@ -562,6 +562,10 @@ export async function stopAssignment(input: {
     input.assignment_id,
   );
   const ref = assignment.runtime_ref;
+  const execution =
+    ref && input.runtime instanceof RuntimeTargets
+      ? input.runtime.executionForRef(ref, input.project_id)
+      : input.execution;
   if (assignment.scope === "standing" && assignment.role_id === "pm") {
     const paused = pauseStanding(
       input.store,
@@ -572,12 +576,8 @@ export async function stopAssignment(input: {
     try {
       if (ref) await closeStandingTerminal(input.runtime, ref);
     } finally {
-      if (input.execution)
-        await scrubRunCredentials(
-          input.execution,
-          input.project_id,
-          assignment.id,
-        );
+      if (execution)
+        await scrubRunCredentials(execution, input.project_id, assignment.id);
     }
     return { released: ref !== null, aborted: paused.aborted, paused: true };
   }
@@ -640,12 +640,8 @@ export async function stopAssignment(input: {
   if (revoked.some((ok) => !ok)) {
     throw new CliError("作废 Token 失败", EXIT.failure);
   }
-  if (input.execution)
-    await scrubRunCredentials(
-      input.execution,
-      input.project_id,
-      input.assignment_id,
-    );
+  if (execution)
+    await scrubRunCredentials(execution, input.project_id, input.assignment_id);
   return {
     released: true,
     aborted: stopped.cancelled + settled.cancelled > 0,
@@ -934,17 +930,6 @@ export async function runAssignmentCommand(
       );
     }
     if (ref) created.value.executionForRef(ref, project_id);
-    if (sub === "stop") {
-      const { assignment } = requireAssignment(store, project_id, assignmentId);
-      if (assignment.scope === "standing" && assignment.role_id === "pm") {
-        pauseStanding(store, project_id, assignment.id, actor);
-        await scrubRunCredentials(
-          ref ? created.value.executionForRef(ref, project_id) : execution,
-          project_id,
-          assignment.id,
-        );
-      }
-    }
     const runtime = created.value;
 
     if (sub === "stop") {

@@ -68,6 +68,10 @@ export async function rotateHostOps(input: {
       : undefined;
     if (created && !created.ok)
       throw new CliError("无法连接旧终端的运行时，未开始轮换", EXIT.failure);
+    const cleanupExecution =
+      created?.ok && previous.runtime_ref
+        ? created.value.executionForRef(previous.runtime_ref, project_id)
+        : execution;
     const begun = store.uow.read((tx) => {
       const result = prepareHostOpsRotation(
         loadCommandState(tx, project_id),
@@ -161,7 +165,7 @@ export async function rotateHostOps(input: {
       return result.value.data.assignment;
     });
     try {
-      await scrubRunCredentials(execution, project_id, previous.id);
+      await scrubRunCredentials(cleanupExecution, project_id, previous.id);
     } catch {
       io.stderr(
         `旧终端已退出、旧凭据已撤销，但运行目录凭据清理失败；请核对 ${previous.id} 的运行目录。新身份为 ${next.id}。`,

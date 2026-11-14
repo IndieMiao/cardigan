@@ -170,6 +170,8 @@ export async function startCardiganServer(
     (options.warn ?? ((message) => process.stderr.write(`${message}\n`)))(
       LOCAL_RUNTIME_WARNING,
     );
+  if (options.dispatcher?.runtime instanceof RuntimeTargets)
+    options.dispatcher.runtime.assertRegistration(execution, session);
   const store = options.store ?? Store.open({ dataDir: config.dataDir });
   const ownsStore = options.store === undefined;
   // C-216: opt-in tick measurement. C-265: the human's `tick-profile`

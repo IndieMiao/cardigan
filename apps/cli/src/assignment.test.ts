@@ -1,4 +1,5 @@
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -584,6 +585,128 @@ describe("startAssignment", () => {
 });
 
 describe("stopAssignment and attachAssignment", () => {
+  test.each(
+    ["work_item", "standing"].flatMap((scope) =>
+      [false, true].map((stale) => ({ scope, stale })),
+    ),
+  )(
+    "stop scrubs only the bound project target for $scope (stale=$stale)",
+    async ({ scope, stale }) => {
+      const { RuntimeTargets } = await import("@cardigan/host");
+      const { executionPaths, prepareAgentProject } = await import(
+        "@cardigan/runtime-herdr"
+      );
+      const assignment =
+        scope === "work_item" ? assignWorkItem("none") : standingOps();
+      const fake = new FakeRuntime();
+      const started = await startAssignment({
+        store,
+        io,
+        project_id,
+        assignment_id: assignment.id,
+        launch: {
+          config: launchConfig,
+          secrets: { provider: "synthetic-provider-value" },
+        },
+        mcpUrl: "http://127.0.0.1:3004/mcp",
+        runtime: fake,
+        dataDir,
+      });
+      const targetRoot = mkdtempSync(join(tmpdir(), "review-project-target-"));
+      try {
+        const execution = { mode: "local" as const, dataDir };
+        const worker = {
+          machine_id: "local",
+          project_id,
+          os: "linux" as const,
+          arch: "x64",
+          session: "project-session",
+          generation: "one",
+          execution: {
+            mode: "agent-ssh" as const,
+            dataDir,
+            agentRoot: targetRoot,
+            gid: process.getgid?.() ?? 0,
+            machine: "project-agent",
+            host: "localhost",
+            user: "project_a",
+            identityFile: "/private/key",
+            knownHostsFile: "/private/known_hosts",
+            path: "/usr/bin:/bin",
+          },
+        };
+        const adapter = Object.assign(fake, {
+          captureAgent: async () => ({ ok: true as const, value: "" }),
+          async *events() {},
+        });
+        const created = await RuntimeTargets.create({
+          execution,
+          store,
+          project: project_id,
+          workers: () => [worker],
+          factory: async () => ({ ok: true, value: adapter }),
+        });
+        if (!created.ok) throw new Error("fixture target rejected");
+        const selected = created.value.resolve(project_id, "local").execution;
+        const bound = {
+          ...started.runtime_ref,
+          runtime_machine: "project-agent",
+          terminal_ref: "project-agent/t1",
+          target: selected.target,
+        };
+        store.uow.run((tx) => {
+          const current = tx.assignments.get(project_id, assignment.id);
+          if (!current) throw new Error("missing fixture Assignment");
+          tx.assignments.put(project_id, { ...current, runtime_ref: bound });
+        });
+        const targetDir = executionPaths(
+          selected,
+          project_id,
+          assignment.id,
+        ).runDir;
+        chmodSync(targetRoot, 0o2750);
+        await prepareAgentProject(worker.execution, project_id, assignment.id);
+        await prepareAgentProject(worker.execution, project_id, "A-99");
+        const otherSecret = join(
+          executionPaths(selected, project_id, "A-99").runDir,
+          "secrets.env",
+        );
+        writeFileSync(otherSecret, "SYNTHETIC_ONLY=other\n");
+        const baseSecret = join(started.run_dir, "secrets.env");
+        writeFileSync(baseSecret, "SYNTHETIC_ONLY=base\n");
+        const secretFile = join(targetDir, "secrets.env");
+        writeFileSync(secretFile, "PROVIDER_API_KEY=synthetic-only\n", {
+          mode: 0o600,
+        });
+        if (stale) worker.generation = "two";
+        const operation = () =>
+          stopAssignment({
+            store,
+            project_id,
+            assignment_id: assignment.id,
+            runtime: created.value,
+            execution,
+          });
+        if (stale) {
+          await expect(operation()).rejects.toThrow("Runtime target rejected");
+          expect(fake.released).toEqual([]);
+          expect(
+            store.uow.read((tx) =>
+              tx.assignments.get(project_id, assignment.id),
+            )?.runtime_ref,
+          ).toEqual(bound);
+        } else {
+          expect((await operation()).released).toBe(true);
+          expect(fake.released.at(-1)?.terminal_ref).toBe("project-agent/t1");
+        }
+        expect(existsSync(secretFile)).toBe(stale);
+        expect(existsSync(baseSecret)).toBe(true);
+        expect(existsSync(otherSecret)).toBe(true);
+      } finally {
+        rmSync(targetRoot, { recursive: true, force: true });
+      }
+    },
+  );
   test("stop releases the terminal, cancels the Run and keeps the directory", async () => {
     const assignment = assignWorkItem("none");
     const runtime = new FakeRuntime();
@@ -895,39 +1018,40 @@ test.each([
   },
 );
 
+function standingOps(): Assignment {
+  store.createProject({ id: project_id, name: "One" });
+  store.uow.run((tx) =>
+    writeRole(
+      tx,
+      project_id,
+      {
+        ...roleFor("none"),
+        role_id: "pm",
+        display_name: "PM",
+        core_prompt: corePromptFor("pm"),
+        kind: "pm",
+      } as Role,
+      { mode: "add" },
+    ),
+  );
+  const ops = {
+    id: "A-1",
+    scope: "standing",
+    standing_mode: "ops",
+    role_id: "pm",
+    role_version: 1,
+    status: "active",
+    runtime_state: "not_provisioned",
+    machine_id: "local",
+    runtime_ref: null,
+    mcp_token_id: "pm-ops",
+    created_at: "2026-01-01T00:00:00.000Z",
+  } as unknown as Assignment;
+  store.uow.run((tx) => tx.assignments.put(project_id, ops));
+  return ops;
+}
+
 describe("C-154 standing PM session restart", () => {
-  function standingOps(): Assignment {
-    store.createProject({ id: project_id, name: "One" });
-    store.uow.run((tx) =>
-      writeRole(
-        tx,
-        project_id,
-        {
-          ...roleFor("none"),
-          role_id: "pm",
-          display_name: "PM",
-          core_prompt: corePromptFor("pm"),
-          kind: "pm",
-        } as Role,
-        { mode: "add" },
-      ),
-    );
-    const ops = {
-      id: "A-1",
-      scope: "standing",
-      standing_mode: "ops",
-      role_id: "pm",
-      role_version: 1,
-      status: "active",
-      runtime_state: "not_provisioned",
-      machine_id: "local",
-      runtime_ref: null,
-      mcp_token_id: "pm-ops",
-      created_at: "2026-01-01T00:00:00.000Z",
-    } as unknown as Assignment;
-    store.uow.run((tx) => tx.assignments.put(project_id, ops));
-    return ops;
-  }
   /** A terminal is alive until released; then it is gone. */
   function liveUntilReleased(runtime: FakeRuntime) {
     runtime.status = async (ref: RuntimeRef) =>

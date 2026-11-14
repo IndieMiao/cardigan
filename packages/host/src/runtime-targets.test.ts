@@ -22,6 +22,56 @@ const value = <T>(result: RuntimeResult<T>): T => {
   if (!result.ok) throw new Error(result.error.message);
   return result.value;
 };
+
+test("independent review: a legacy local ref must not follow a changed session after an SSH migration", async () => {
+  const oldRef: RuntimeRef = {
+    machine_id: "local",
+    runtime_machine: "local",
+    terminal_ref: "t1",
+    agent_name: "old-local",
+  };
+  store.uow.run((tx) =>
+    tx.assignments.put("fixture", { ...assignment(), runtime_ref: oldRef }),
+  );
+  const execution = {
+    mode: "agent-ssh" as const,
+    dataDir: root,
+    agentRoot: "/workers/legacy",
+    gid: 2001,
+    machine: "legacy-agent",
+    identityFile: "/private/key",
+    knownHostsFile: "/private/known_hosts",
+  };
+  await writeRegisteredRuntime(root, execution, "old-session");
+  const restarted = await RuntimeTargets.create({
+    execution,
+    session: "new-session",
+    store,
+    workers: () => [],
+    factory,
+  });
+  let released = false;
+  if (restarted.ok)
+    released = (await restarted.value.release(oldRef, { force: true })).ok;
+  expect(released).toBe(false);
+  expect(factory).not.toHaveBeenCalled();
+  if (!restarted.ok) throw new Error("Invalid fixture");
+  for (const result of [
+    await restarted.value.status(oldRef),
+    await restarted.value.human_entry(oldRef),
+    await restarted.value.attachEnvironment(oldRef),
+  ])
+    expect(result.ok).toBe(false);
+  for await (const result of restarted.value.events(oldRef))
+    expect(result.ok).toBe(false);
+  expect(factory).not.toHaveBeenCalled();
+  expect(() => restarted.value.assertRegistration()).toThrow(
+    "Runtime target rejected",
+  );
+  expect(
+    store.uow.read((tx) => tx.assignments.get("fixture", "A-1"))?.runtime_ref,
+  ).toEqual(oldRef);
+});
 const assignment = (machine_id = "local"): Assignment => ({
   id: "A-1",
   scope: "standing",
@@ -370,7 +420,7 @@ test("persisted pre-fingerprint refs prevent a restart from silently replacing t
   );
   const execution = { mode: "local" as const, dataDir: root };
   await writeRegisteredRuntime(root, execution, "original");
-  expect(
+  const changed = value(
     await RuntimeTargets.create({
       execution,
       store,
@@ -378,7 +428,8 @@ test("persisted pre-fingerprint refs prevent a restart from silently replacing t
       workers: () => [],
       factory,
     }),
-  ).toMatchObject({ ok: false });
+  );
+  expect(() => changed.assertRegistration()).toThrow("Runtime target rejected");
   expect(
     await RuntimeTargets.create({
       execution,
