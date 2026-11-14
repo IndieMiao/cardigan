@@ -1357,23 +1357,25 @@ test("failed confirmed merges remain returnable beside read-only decision follow
 });
 
 test.each(["host", "human"] as const)(
-  "a PM %s handoff shows a readable title, explanations and shared status icons, with the earlier request available separately",
+  "a PM %s handoff shows only what to do by default and folds the explanations (C-212)",
   async (triage) => {
     const item = {
       id: "H-3",
       card_id: "C-1",
-      instructions: "在主机终端执行 git fetch，然后回传最新版本号。",
+      instructions: "1. 在主机终端执行 git fetch\n2. 回传最新版本号",
       expected_return: "最新版本号",
       why: "需要主机权限",
       triage,
+      ...(triage === "host" ? { host_operator: "external" as const } : {}),
       waited_ms: 0,
       due: null,
       blocked_work_items: [],
       handoff: {
         title: "请同步主机上的最新项目代码",
+        todo: "在主机上同步最新代码并回传版本号",
         summary: "开发者缺少继续修改所需的最新代码。",
         why_human: "仓库凭据只在你的主机上，项目经理无法读取。",
-        instructions: "在主机终端执行 git fetch，然后回传最新版本号。",
+        instructions: "1. 在主机终端执行 git fetch\n2. 回传最新版本号",
         expected_outcome: "同步完成后开发者就能继续工作。",
         expected_return: "最新版本号",
         rewritten_by: "assignment:A-4",
@@ -1405,32 +1407,108 @@ test.each(["host", "human"] as const)(
     ).toBeTruthy();
     expect(
       within(article)
+        .getByText(triage === "host" ? "待外接操作员" : "待你执行")
+        .querySelector("svg.status-shape-pending"),
+    ).toBeTruthy();
+    // Shown by default: todo, numbered steps and the confirm button.
+    const todo = within(article).getByLabelText("H-3 你要做什么");
+    expect(todo.textContent).toBe(item.handoff.todo);
+    // Not inside the article's folds (a host group folds as a whole).
+    const inFold = (el: Element) => !!el.closest("article details");
+    expect(inFold(todo)).toBe(false);
+    const steps = within(article).getByLabelText("H-3 步骤");
+    expect(inFold(steps)).toBe(false);
+    expect(within(steps).getAllByRole("listitem")).toHaveLength(2);
+    expect(
+      inFold(within(article).getByRole("button", { name: "确认已完成" })),
+    ).toBe(false);
+    // Folded: what it is, why you, what happens, what to return, prior text.
+    const folded = within(article)
+      .getByText("说明与回传要求")
+      .closest("details");
+    expect(folded?.open).toBe(false);
+    for (const title of ["这是什么", "为什么需要你", "做完会怎样", "回传要求"])
+      expect(
+        within(folded as HTMLElement).getByRole("heading", { name: title }),
+      ).toBeTruthy();
+    for (const text of [
+      item.handoff.summary,
+      item.handoff.why_human,
+      item.handoff.expected_outcome,
+      "最新版本号",
+    ])
+      expect(within(folded as HTMLElement).getByText(text)).toBeTruthy();
+    expect(
+      within(folded as HTMLElement)
         .getByText("项目经理已改写")
         .querySelector("svg.status-shape-success")
         ?.getAttribute("aria-hidden"),
     ).toBe("true");
-    expect(
-      within(article)
-        .getByText(triage === "host" ? "待主机操作" : "待你执行")
-        .querySelector("svg.status-shape-pending"),
-    ).toBeTruthy();
-    for (const title of ["这是什么", "为什么需要你", "怎么做", "做完会怎样"])
-      expect(
-        within(article).getByRole("heading", { name: title }),
-      ).toBeTruthy();
-    expect(within(article).getByText(item.handoff.summary)).toBeTruthy();
-    expect(within(article).getByText(item.handoff.why_human)).toBeTruthy();
-    expect(
-      within(article).getByText(item.handoff.expected_outcome),
-    ).toBeTruthy();
-    expect(within(article).getByText("完成后请回传：最新版本号")).toBeTruthy();
     const prior = within(article)
       .getByText(item.original_request.instructions)
       .closest("details");
     expect(prior?.open).toBe(false);
     expect(within(article).getByText("查看改写前的内容")).toBeTruthy();
+    // Host actions sit in their own folded group, outside "待你执行".
+    const group = article.closest("details, section");
+    expect(group?.getAttribute("aria-label")).toBe(
+      triage === "host" ? "待主机操作" : "待你执行",
+    );
+    if (triage === "host") {
+      expect((group as HTMLDetailsElement).open).toBe(false);
+      expect(screen.queryByRole("region", { name: "待你执行" })).toBeNull();
+      expect(
+        screen.getByText("没有需要你处理的事。", { exact: false }),
+      ).toBeTruthy();
+    }
   },
 );
+
+test("deferred items show only as a folded later count with their reason (C-212)", async () => {
+  render(
+    <NeedsYouPage
+      projectId="p-1"
+      client={fakeClient({
+        needsYou: async () => ({
+          decisions: [],
+          human_actions: [],
+          incidents: [],
+          later: [
+            {
+              kind: "human_action",
+              id: "H-34",
+              card_id: "C-201",
+              title: "自动部署首次上线",
+              triage: "host",
+              waiting_for: "等 C-200 合并",
+            },
+            {
+              kind: "decision",
+              id: "Q-9",
+              card_id: null,
+              title: "是否保留旧入口？",
+              waiting_for: "等 C-201 出现新交付",
+            },
+          ],
+        }),
+      })}
+    />,
+  );
+  const later = await screen.findByText("稍后（2）", { exact: false });
+  const details = later.closest("details");
+  expect(details?.open).toBe(false);
+  expect(details?.getAttribute("aria-label")).toBe("稍后");
+  expect(
+    within(details as HTMLElement).getByRole("link", { name: "C-201 · H-34" }),
+  ).toBeTruthy();
+  expect(
+    within(details as HTMLElement).getByText("（等 C-200 合并）"),
+  ).toBeTruthy();
+  // Deferred items are not counted as waiting on the human.
+  expect(
+    screen.getByText("没有需要你处理的事。", { exact: false }),
+  ).toBeTruthy();
+});
 
 const checkStates = [
   ["queued", "排队中", "pending"],
