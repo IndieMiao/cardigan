@@ -126,19 +126,21 @@ export function riskTagAutoMergeAllowed(
   )
     return false;
   const items = state.work_items.filter((w) => w.card_id === card.id);
-  const current = items
-    .filter((w) => w.kind === "produce" && w.status !== "cancelled")
-    .flatMap((w) => {
-      const latest = state.deliveries
-        .filter(
-          (v) =>
-            v.work_item_id === w.id &&
-            v.kind !== "card_completion" &&
-            v.status !== "superseded",
-        )
-        .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
-      return latest ? [latest] : [];
-    });
+  const producers = items.filter(
+    (w) => w.kind === "produce" && w.status !== "cancelled",
+  );
+  const current = producers.flatMap((w) => {
+    const latest = state.deliveries
+      .filter(
+        (v) =>
+          v.work_item_id === w.id &&
+          v.kind !== "card_completion" &&
+          v.status !== "superseded",
+      )
+      .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
+    return latest ? [latest] : [];
+  });
+  if (!producers.length || current.length !== producers.length) return false;
   const verifiers = items.filter(
     (w) =>
       w.kind === "verify" &&
@@ -149,8 +151,9 @@ export function riskTagAutoMergeAllowed(
   );
   // Review identity/version is authoritative; similarly named advisory checks
   // and a passed work item alone cannot grant merge authority.
-  return deriveReviewMatrix(current, verifiers, state.reviews).some(
-    (r) => r.verdict === "pass",
+  const matrix = deriveReviewMatrix(current, verifiers, state.reviews);
+  return current.every((v) =>
+    matrix.some((r) => r.delivery_id === v.id && r.verdict === "pass"),
   );
 }
 function projectPreference(d: CommandDraft) {
