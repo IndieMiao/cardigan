@@ -298,6 +298,8 @@ export function evaluateMergeShadow(
       ),
     "分类确认未覆盖全部评论，或确认后又出现人或 Agent 评论",
   );
+  // Expiry clears snooze and reopens the decision, but never erases a hold
+  // for this completion. Include holds on superseded confirmation IDs too.
   const held = state.events.some(
     (e) =>
       e.card_id === card.id &&
@@ -305,13 +307,15 @@ export function evaluateMergeShadow(
         "decision_resolved",
         "decision_provisionally_resolved",
         "merge_changes_requested",
+        "merge_confirmation_snoozed",
       ].includes(e.type) &&
-      ["hold", "request_changes"].includes(
-        String(
-          payload(e).option ??
-            (e.type === "merge_changes_requested" ? "request_changes" : ""),
-        ),
-      ) &&
+      (e.type === "merge_confirmation_snoozed" ||
+        ["hold", "request_changes"].includes(
+          String(
+            payload(e).option ??
+              (e.type === "merge_changes_requested" ? "request_changes" : ""),
+          ),
+        )) &&
       state.decisions.some(
         (other) =>
           other.id === payload(e).decision_id &&

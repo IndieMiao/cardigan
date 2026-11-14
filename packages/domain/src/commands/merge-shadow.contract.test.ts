@@ -6,13 +6,16 @@ import {
   currentPreMergeVersions,
   type Decision,
   evaluateMergeShadow,
+  expireMergeSnoozes,
   type MergeClassificationInput,
   type MergeShadowPaths,
   mergeClassificationView,
   mergeShadowComparisons,
   postComment,
+  recordDecision,
   recordMergeCheck,
   recordMergeShadow,
+  resolveDelegatedDecision,
   setProjectPreferences,
   updateCard,
 } from "../index.js";
@@ -678,3 +681,136 @@ function required<T>(value: T | undefined): T {
   if (value === undefined) throw new Error("Missing synthetic fixture value");
   return value;
 }
+
+test.each(["pm", "human"] as const)(
+  "C-238: real %s hold remains ineligible after expiry, restart and reclassification",
+  async (who) => {
+    const f = await fixture();
+    expect(evaluateMergeShadow(f.state, f.q, f.paths).would_confirm).toBe(true);
+    const input = {
+      decision_id: f.q.id,
+      option: "hold",
+      rationale: "Wait for review",
+    };
+    const held = value(
+      who === "pm"
+        ? resolveDelegatedDecision(f.state, opsActor, input, f.io)
+        : recordDecision(
+            f.state,
+            human,
+            { ...input, raw_quote: "Wait for review" },
+            f.io,
+          ),
+    );
+    expect(held.data.status).toBe("snoozed");
+    expect(held.events.map((e) => e.type)).toContain(
+      "merge_confirmation_snoozed",
+    );
+    const until = required(held.data.snooze?.until);
+    const ports = { ...f.io, clock: { now: () => until } };
+    const heldState = apply(f.state, held);
+    const reopened = value(expireMergeSnoozes(heldState, system, ports));
+    expect(reopened.events.map((e) => e.type)).toEqual(["decision_requested"]);
+    const restored = JSON.parse(
+      JSON.stringify(apply(heldState, reopened)),
+    ) as CommandState;
+    const q = required(restored.decisions.find((q) => q.id === f.q.id));
+    expect(q.status).toBe("open");
+    expect(q.snooze).toBeUndefined();
+    expect(q.resolution).toBeUndefined();
+    expect(
+      evaluateMergeShadow(restored, q, f.paths).conditions[14]?.status,
+    ).toBe("failed");
+    const classified = apply(
+      restored,
+      value(
+        updateCard(
+          restored,
+          human,
+          {
+            card_id: f.card.id,
+            merge_classification: {
+              ...f.input(),
+              read_through_seq: Math.max(
+                ...restored.events
+                  .filter((e) => e.card_id === f.card.id)
+                  .map((e) => e.seq),
+              ),
+            },
+          },
+          ports,
+        ),
+      ),
+    );
+    const result = evaluateMergeShadow(classified, q, f.paths);
+    expect(
+      result.conditions
+        .filter((c) => c.status !== "passed")
+        .map((c) => c.number),
+    ).toEqual(who === "pm" ? [15] : [4, 15]);
+    expect(result.would_confirm).toBe(false);
+    const recorded = value(
+      recordMergeShadow(
+        classified,
+        system,
+        { decision_id: q.id, paths: f.paths },
+        ports,
+      ),
+    );
+    expect(recorded.data?.would_confirm).toBe(false);
+    expect(recorded.changes).toEqual([]);
+    expect(recorded.events.map((e) => e.type)).toEqual([
+      "system_merge_shadow_recorded",
+    ]);
+    const after = JSON.parse(
+      JSON.stringify(apply(classified, recorded)),
+    ) as CommandState;
+    expect(
+      value(
+        recordMergeShadow(
+          after,
+          system,
+          { decision_id: q.id, paths: f.paths },
+          ports,
+        ),
+      ).events,
+    ).toEqual([]);
+    expect(after.decisions).toEqual(classified.decisions);
+  },
+);
+
+test("C-238: hold history follows the completion across confirmation IDs, but does not taint another completion", async () => {
+  const f = await fixture();
+  const held = value(
+    resolveDelegatedDecision(
+      f.state,
+      opsActor,
+      {
+        decision_id: f.q.id,
+        option: "hold",
+        rationale: "Wait for review",
+      },
+      f.io,
+    ),
+  );
+  const historical = { ...held.data, status: "superseded" as const };
+  const current = { ...f.q, id: id("decision", 999), key: id("decision", 999) };
+  const state = { ...apply(f.state, held), decisions: [historical, current] };
+  expect(
+    evaluateMergeShadow(state, current, f.paths).conditions[14]?.status,
+  ).toBe("failed");
+  const differentCompletion = {
+    ...state,
+    decisions: [
+      {
+        ...historical,
+        kind: "approve" as const,
+        target: { delivery_id: id("delivery", 998) },
+      },
+      current,
+    ],
+  };
+  expect(
+    evaluateMergeShadow(differentCompletion, current, f.paths).would_confirm,
+  ).toBe(true);
+});
