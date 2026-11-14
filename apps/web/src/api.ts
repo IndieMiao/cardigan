@@ -148,6 +148,7 @@ export type Reference =
   | { readonly kind: "pr"; readonly url: string };
 
 export interface WorkItemView {
+  readonly manual_assign?: boolean;
   readonly id: string;
   readonly card_id: string;
   readonly title: string;
@@ -609,6 +610,14 @@ export interface NeedsPage {
     readonly card_id: string | null;
     readonly check_status: MergeCheckView["status"] | null;
   }[];
+  readonly system_rule_attention?: readonly {
+    readonly event_id: string;
+    readonly card_id: string;
+    readonly work_item_id: string | null;
+    readonly assignment_id: string | null;
+    readonly detail: string;
+    readonly waited_ms: number;
+  }[];
   readonly attention?: readonly {
     readonly kind: "review_limit_not_resumed";
     readonly card_id: string;
@@ -901,7 +910,23 @@ export interface TemplateValidation {
   reason: string | null;
 }
 
-export interface PreferencesView {
+export interface SystemReminderPolicy {
+  readonly min_minutes: number;
+  readonly max_minutes: number;
+  readonly min_count: number;
+  readonly max_count: number;
+  readonly unassigned_ready_after_minutes: number | null;
+  readonly pre_merge_check_pending_after_minutes: number | null;
+  readonly repeat: boolean;
+  readonly repeat_interval_minutes: number | null;
+  readonly max_reminders: number;
+}
+export interface SystemRulesPreferences {
+  readonly system_auto_assign_verifiers?: boolean;
+  readonly system_reminders?: boolean;
+  readonly system_reminder_policy?: SystemReminderPolicy | null;
+}
+export interface PreferencesView extends SystemRulesPreferences {
   readonly decision_delegation?: Readonly<Record<string, boolean>>;
   /** Merge confirmations go to PM Ops; missing means the default (on). */
   readonly pm_merge_confirmation?: boolean;
@@ -1147,6 +1172,17 @@ export interface CardiganClient {
   markNoticesRead(
     projectId: string,
     noticeIds: readonly string[],
+  ): Promise<void>;
+  setSystemRules(
+    projectId: string,
+    input: SystemRulesPreferences,
+    idempotencyKey: string,
+  ): Promise<void>;
+  setManualAssign(
+    projectId: string,
+    workItemId: string,
+    enabled: boolean,
+    idempotencyKey: string,
   ): Promise<void>;
   preferences(projectId: string): Promise<PreferencesView>;
   setPreferences(
@@ -1535,6 +1571,26 @@ export class HttpCardiganClient implements CardiganClient {
       "notices/read",
       { notice_ids: noticeIds },
       crypto.randomUUID(),
+    );
+  }
+  async setSystemRules(
+    projectId: string,
+    input: SystemRulesPreferences,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.write(projectId, "preferences", input, idempotencyKey);
+  }
+  async setManualAssign(
+    projectId: string,
+    workItemId: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      `work-items/${encodeURIComponent(workItemId)}/manual-assign`,
+      { manual_assign: enabled },
+      idempotencyKey,
     );
   }
   preferences(projectId: string): Promise<PreferencesView> {

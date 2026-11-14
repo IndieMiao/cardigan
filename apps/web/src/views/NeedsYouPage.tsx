@@ -1422,6 +1422,18 @@ function NeedsContent({
               ))}
             </section>
           )}
+          {!!data.system_rule_attention?.length && (
+            <section className="needs-group" aria-label="指派与催办待处理">
+              <h2>指派与催办待处理（{data.system_rule_attention.length}）</h2>
+              {data.system_rule_attention.map((finding) => (
+                <article className="needs-item urgent" key={finding.event_id}>
+                  <CardLink projectId={projectId} id={finding.card_id} />
+                  <p>{finding.detail}</p>
+                  <p className="hint">当前没有后台项目经理接手，请安排处理。</p>
+                </article>
+              ))}
+            </section>
+          )}
           {!!data.attention?.length && (
             <section className="needs-group" aria-label="审核恢复异常">
               <h2>审核恢复异常（{data.attention.length}）</h2>

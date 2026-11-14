@@ -11,10 +11,12 @@ import {
   mergeConfirmStallAfterMinutes,
   pmMergeConfirmation,
   reviewerBrowserEnabled,
+  type SystemReminderPolicy,
   validAutoMergeMinutes,
   validContextPercentage,
   validMergeConfirmSnoozeMaxMinutes,
   validMergeConfirmStallMinutes,
+  validSystemReminderPolicy,
 } from "../preferences.js";
 import { states } from "../states.js";
 import {
@@ -39,6 +41,9 @@ export function setProjectPreferences(
   state: CommandState,
   actor: Actor,
   input: {
+    system_auto_assign_verifiers?: boolean;
+    system_reminders?: boolean;
+    system_reminder_policy?: SystemReminderPolicy | null;
     auto_merge_after_minutes?: number | null;
     context_handoff_remaining_pct?: number;
     context_restart_remaining_pct?: number;
@@ -96,6 +101,21 @@ export function setProjectPreferences(
       "validation_failed",
       "上下文剩余比例须为大于 0 且小于 100 的有限数值",
     );
+    for (const key of [
+      "system_auto_assign_verifiers",
+      "system_reminders",
+    ] as const)
+      ensure(
+        input[key] === undefined || typeof input[key] === "boolean",
+        "validation_failed",
+        `${key} must be a boolean`,
+      );
+    ensure(
+      input.system_reminder_policy === undefined ||
+        validSystemReminderPolicy(input.system_reminder_policy),
+      "validation_failed",
+      "催办配置须完整填写：分钟数和次数须为允许范围内的正整数，重复提醒须填写间隔；不重复时，间隔须为空",
+    );
     const old = projectPreferences(state);
     const contextNext = contextUsageThresholds({
       ...old,
@@ -114,7 +134,10 @@ export function setProjectPreferences(
       "上下文剩余比例须大于 0 且小于 100，换会话比例必须小于交接提醒比例",
     );
     ensure(
-      input.context_handoff_remaining_pct !== undefined ||
+      input.system_auto_assign_verifiers !== undefined ||
+        input.system_reminders !== undefined ||
+        input.system_reminder_policy !== undefined ||
+        input.context_handoff_remaining_pct !== undefined ||
         input.context_restart_remaining_pct !== undefined ||
         input.auto_merge_after_minutes !== undefined ||
         input.merge_confirm_stall_after_minutes !== undefined ||
@@ -173,6 +196,15 @@ export function setProjectPreferences(
     }
     const next = {
       ...old,
+      ...(input.system_auto_assign_verifiers !== undefined
+        ? { system_auto_assign_verifiers: input.system_auto_assign_verifiers }
+        : {}),
+      ...(input.system_reminders !== undefined
+        ? { system_reminders: input.system_reminders }
+        : {}),
+      ...(input.system_reminder_policy !== undefined
+        ? { system_reminder_policy: input.system_reminder_policy }
+        : {}),
       ...(input.context_handoff_remaining_pct !== undefined
         ? { context_handoff_remaining_pct: input.context_handoff_remaining_pct }
         : {}),
@@ -210,6 +242,27 @@ export function setProjectPreferences(
         : {}),
       ...(input.board_collapsed_lanes ? { board_collapsed_lanes: lanes } : {}),
     };
+    const systemKeys = [
+      "system_auto_assign_verifiers",
+      "system_reminders",
+      "system_reminder_policy",
+    ] as const;
+    const encodeSystemPreference = (value: unknown) =>
+      JSON.stringify(
+        value,
+        value && typeof value === "object"
+          ? Object.keys(value).sort()
+          : undefined,
+      );
+    const systemChanged = systemKeys.filter(
+      (key) =>
+        encodeSystemPreference(
+          old[key] ?? (key === "system_reminder_policy" ? null : false),
+        ) !==
+        encodeSystemPreference(
+          next[key] ?? (key === "system_reminder_policy" ? null : false),
+        ),
+    );
     const contextOld = contextUsageThresholds(old);
     const contextChanged =
       contextOld.handoff !== contextNext.handoff ||
@@ -237,6 +290,7 @@ export function setProjectPreferences(
       input.board_collapsed_lanes !== undefined &&
       states.card.some((lane) => oldLanes[lane] !== lanes[lane]);
     if (
+      !systemChanged.length &&
       !contextChanged &&
       !mergeChanged &&
       !stallChanged &&
@@ -251,6 +305,15 @@ export function setProjectPreferences(
     // Lane folding is a view setting: it is stored for every device but emits
     // no audit event, so toggling a lane never feeds the activity stream.
     d.put("project_preferences", next);
+    for (const preference of systemChanged)
+      d.emit("project_preferences_updated", undefined, {
+        preference,
+        old_value:
+          old[preference] === undefined
+            ? null
+            : JSON.parse(JSON.stringify(old[preference])),
+        new_value: JSON.parse(JSON.stringify(next[preference])),
+      });
     for (const [key, preference] of [
       ["handoff", "context_handoff_remaining_pct"],
       ["restart", "context_restart_remaining_pct"],

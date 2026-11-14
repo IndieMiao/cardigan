@@ -1196,6 +1196,7 @@ export function needsYou(
   };
   return {
     attention: data.attention,
+    system_rule_attention: data.system_rule_attention,
     incident_handling: {
       ...incidentHandling(state, hostOpsPatrolIntervalMs),
       // C-153: the session the server registered in runtime.json; null when

@@ -236,6 +236,8 @@ export interface MergeCheckView {
   readonly timeout_only?: boolean;
 }
 interface WorkItemFields {
+  /** PM/human hold: system assignment and reminders skip this item. */
+  readonly manual_assign?: boolean;
   readonly id: WorkItemId;
   readonly card_id: CardId;
   readonly title: string;

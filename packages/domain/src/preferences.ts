@@ -28,7 +28,22 @@ export const defaultDecisionDelegation: Readonly<
   permission: false,
   data_deletion: false,
 };
+/** C-237: every value (including allowed ranges) is explicitly chosen by the human. */
+export interface SystemReminderPolicy {
+  readonly min_minutes: number;
+  readonly max_minutes: number;
+  readonly min_count: number;
+  readonly max_count: number;
+  readonly unassigned_ready_after_minutes: number | null;
+  readonly pre_merge_check_pending_after_minutes: number | null;
+  readonly repeat: boolean;
+  readonly repeat_interval_minutes: number | null;
+  readonly max_reminders: number;
+}
 export interface ProjectPreferences {
+  readonly system_auto_assign_verifiers?: boolean;
+  readonly system_reminders?: boolean;
+  readonly system_reminder_policy?: SystemReminderPolicy | null;
   readonly id: ProjectId;
   readonly auto_merge_after_minutes: number | null;
   /** C-200: remaining context percentages, never cumulative token usage. */
@@ -152,5 +167,62 @@ export function validContextPercentage(value: unknown): value is number {
     Number.isFinite(value) &&
     value > 0 &&
     value < 100
+  );
+}
+
+/** No operational defaults. Safe integer checks protect arithmetic, not product policy. */
+export function validSystemReminderPolicy(
+  value: unknown,
+): value is SystemReminderPolicy | null {
+  if (value === null) return true;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const p = value as SystemReminderPolicy;
+  const keys = [
+    "min_minutes",
+    "max_minutes",
+    "min_count",
+    "max_count",
+    "unassigned_ready_after_minutes",
+    "pre_merge_check_pending_after_minutes",
+    "repeat",
+    "repeat_interval_minutes",
+    "max_reminders",
+  ];
+  if (
+    Object.keys(p).some((k) => !keys.includes(k)) ||
+    keys.some((k) => !Object.hasOwn(p, k))
+  )
+    return false;
+  const positive = (n: unknown): n is number =>
+    typeof n === "number" && Number.isSafeInteger(n) && n > 0;
+  if (
+    ![
+      p.min_minutes,
+      p.max_minutes,
+      p.min_count,
+      p.max_count,
+      p.max_reminders,
+    ].every(positive)
+  )
+    return false;
+  if (
+    !Number.isSafeInteger(p.max_minutes * 60_000) ||
+    p.min_minutes > p.max_minutes ||
+    p.min_count > p.max_count ||
+    p.max_reminders < p.min_count ||
+    p.max_reminders > p.max_count ||
+    typeof p.repeat !== "boolean"
+  )
+    return false;
+  const minutes = (n: unknown) =>
+    positive(n) && n >= p.min_minutes && n <= p.max_minutes;
+  return (
+    [
+      p.unassigned_ready_after_minutes,
+      p.pre_merge_check_pending_after_minutes,
+    ].every((n) => n === null || minutes(n)) &&
+    (p.repeat
+      ? minutes(p.repeat_interval_minutes)
+      : p.repeat_interval_minutes === null)
   );
 }
