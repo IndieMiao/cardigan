@@ -535,6 +535,10 @@ test("a Claude model alias resolves through the profile provider env, never secr
     used_percentage: 82.2,
     level: "handoff",
   });
+  // The expanded name only sizes the window; diagnostics keep the transcript model.
+  expect(contexts[0]?.model).toBe("claude-opus-5-5");
+  expect(contexts[0]?.observation?.model).toBe("claude-opus-5-5");
+  expect(JSON.stringify(contexts)).not.toContain("[1m]");
   expect(
     (await readSessionContexts(s, { execution: execution() }, now))[0],
   ).toMatchObject({ context_window_size: null, level: null });
