@@ -1728,6 +1728,10 @@ M2.1 的 Role 子集包含 role_id、version、display_name、kind、core_prompt
 
 ### 10.2 Launch Profile（每种 Harness 一份）
 
+P2b-06（C-280，Q-467）：worker 的非交互 PATH、工具绝对路径和解析路径、签名 App 身份及版本组合来自主机可信配置；HOME 由实际账号的目录服务读取，不 source shell rc。`runtime-herdr` 提供能力采样与预检，`deploy/worker-preflight.mjs` 接收主机选择的有界 JSON 输入并输出去敏报告。每项分别记录 installed、configured、last_verified；采样本身不产生“已验证”。验证记录绑定实际 UID、用例证据引用，以及目标配置摘要和当前 OS/工具版本/架构/路径/能力组合的摘要；组合变化后旧证据失效。未验的非交互 hc、原生依赖重建、Rosetta 或桌面能力不能从安装成功推断。
+
+03/05 的可信阶段先确认小制品已结束写入（不得接受 Agent 自报），再由 worker helper 哈希、复制到获准证据目录、回读验哈希，沿用 10 MiB 上限；返回摘要、大小和无敏感文件名的证据名称，后续经既有 HTTP 附件入口上传，不新增传输协议。`WorkerCheckpoint` 为卡 03/05 的既有启动意图/恢复点提供阶段、Assignment/Run、完整 SHA、目标配置摘要、精确进程身份、日志 offset 和制品摘要合同；本卡没有另建 journal 存储。重连必须先核原进程，再续读 offset；未知身份不授权重跑整任务、发信号或删除目录。持久化和 HTTP 联调分别由 03/05、08 接线。
+
 P2b 02/03/06 待实现：主机私有路径和 worker 路径分类型处理；提示、Harness/MCP 配置与最小凭据经固定 SSH stdin、有界 manifest 和逐层 no-follow/UID/GID/mode/ACL 校验发布到独占启动代次，材料一般 0700/0600。先材料后凭据，完整确认且 dispatch 落库后才写绑定代次的 start；旧哨兵不能复用，凭据读取后 unlink，未知退出保留停止记录与容量，不清空整个 Assignment。跨 Run 会话另存项目私有持久目录。
 
 三种 Harness 的 realpath、信任、PATH、CLI 版本均在实际 worker 核实，只信本 Assignment 的仓库/worktree，不复制个人配置或信任上层通配。能力 manifest 分 installed/configured/last_verified，保留版本/SDK/runtime/架构组合、挂载/空间和 GUI 状态；缺 GUI/TCC/Keychain 或本人登录则明确等待。已有启动意图/Run/恢复点记录阶段、目标代次、完整 SHA、已知进程身份、日志 offset 和小制品 hash，重连先核阶段与进程，不重跑有副作用步骤；只用既有 HTTP 小附件合同。
@@ -2111,6 +2115,10 @@ P2a-13 B（合并队列，ADR 0004）：`merge-gate.yaml` 的 `queue.enabled` �
 
 ### 12.6 清理与对账
 
+P2b-06：worker 路径清单明确区分 repo、worktree、build、cache、generated、evidence、temporary，绑定挂载/volume、规范路径、Git common-dir、Assignment、完整 SHA、dirty 和属主。只读采样逐级固定目录描述符，拒绝链接、外来可写祖先或额外 ACL；Git 采样禁用全局配置、hooks/fsmonitor、可选写锁及网络协议；逐仓库核验过滤器、include、部分克隆等配置。status 不递归进入未核验子模块，子模块及嵌套子模块由 helper 分别安全采样并合并 HEAD、已跟踪、未跟踪和已暂存 gitlink 的 dirty 状态；未初始化或无法核验的子模块报未知，不能忽略其脏状态。盘未挂、身份变更、路径不符或根盘/工作盘显式空间阈值不满足时停止，不建立同名空挂载目录、不回退系统盘。采样失败不能当空清单；获准暂存或可复建缓存也不构成删除授权。repo/worktree/build 各自读取实际 common-dir、HEAD 和 dirty，不复用别处的 Git 身份。主机可信登记通过 WorkerPathBinding 固定 Assignment、workspace 和各目录的 device/inode（十进制字符串）与类别；必须核对工作区与目录实例，才确认归属。无登记的 Git 目录仅返回归属未知的诊断，缓存/证据等非 Git 目录缺登记直接拒绝，不能复制期望身份。该登记由 03/04 的受信创建/登记适配方提供，不接受 Agent 自报。启动预检的 Git/路径采样须取得预置锁；未持锁的诊断快照不满足启动门槛，实际操作仍由调用方在锁内执行。
+
+worker 原生进程观测返回机器、boot incarnation、UID、PID、原生启动时间及受控进程组/终端代次；Linux 读 `/proc`，macOS 读 boot session/libproc。终端代次来自主机持久绑定，不从进程名、pane/cwd、`ps`、cmdline/environ 或 `kill(0)` 推断。PID 重用、重启、权限不足和不完整观测均不能证明原进程仍然匹配；身份观测接口不向被观测进程发信号、不清理工作区。后续回收必须沿用卡 10 的退出证据和既有清理授权。
+
 P2b 10 待实现：按项目所有已绑定目标扫描 repos/worktrees/builds，失败或不可达保留历史台账/墓碑，不能当空目录。旧机接管后只进待核实/回收，先补核准确进程身份及退出、清理准确启动代次凭据，再补拉旧分支到隔离恢复 ref，不能前移后继恢复点。仍运行交 human-only Needs You，冻结进一步启动/唤醒并保留现场；clean 且已备份才清 worktree，dirty/未备份走既有 data_deletion 人工决定，force_clean 前保存补丁与未跟踪清单。未知权限/路径/进程身份均不删，迟到清理不能碰新代次；证据和清理收尾落库后才核销旧目标预留。
 
 - C-245：对账的检查历史按项目／卡片保留进程内 seq，只读取新增事件；读事务成功结束后才发布缓存，失败不推进，重启重放持久历史，旧 attempt 和原宽限期保持不变。仍在目录 IO 结束后读取检查所有权，不与 Router／Agent ACK 游标混用。
@@ -2163,6 +2171,8 @@ server 在合并循环旁启动独立的推送循环（默认 5 秒轮询，跟�
 停止时取消推送 IO 并等待当前轮结束后才关闭 Store。若停止发生在外部结果已生效、记录尚未完成之间，保留 started attempt，重启再发送同一 SHA；远程已含此提交会幂等成功。推送结果和人工事项均只记录固定中文原因，不记录远程原始诊断。配置仍在启动时读取；修改远程目标不会将旧目标队列偷偷迁移。
 
 ### 12.8 写锁
+
+P2b-06 增加 worker 专用 Python `fcntl.flock` 原语，主机现有 Linux 锁实现保持原职责。worker 锁是管理员预置的 root 所有空普通文件，父命名空间不可由执行账号替换；helper 核对 inode、链接数、owner 和原生 ACL，拒绝缺失/替换/不安全锁。锁经继承的 FD 取得，调用方持有 FD 至操作结束；父子进程仍持 FD 时锁不能提前释放。Git/helper 使用调用方现有预算，员工测试采用非阻塞锁、嵌套立即失败；失败不降级到进程内锁。它仅保护本机短操作，不替代卡 11 的持久资源租约。
 
 P2b 04/06 待实现：工作区锁键至少包含物理目标、项目和基础 clone，中心发布锁独立。控制主机继续用既有 Linux 锁；worker 用 Python `fcntl.flock` 锁住预置且不可替换的 inode，覆盖 Git/helper 与员工测试串行，保留预算、嵌套立即失败和 FD 生命周期，不依赖系统 flock 命令，也不降为进程内锁。它不代替卡 11 的持久设备/资源租约。
 
@@ -2319,6 +2329,12 @@ flowchart LR
 
 ### 13.4 Agent 运行环境
 
+P2b-06：保留 `deploy/install-agent.py` 的 Linux 入口，`--check` 只读且不下载归档；新增 `deploy/install-macos-worker.py --config <私有配置> --dry-run|--check|--apply`。dry-run 不读配置、不创建子进程、不下载或提权。Mac 安装由操作员运行，要求人工已建立非管理员账号、root 管理的 HOME/工作根及 `.cardigan-worker` 绑定标记（project、UID、目录服务 HOME）；配置与标记均须先固定完整父链和文件 FD，核验 root 所有、单链接、0600、原生 ACL、名称与 inode 一致性，再有界读取同一 FD；ACL 未知或读取期间替换/改写即拒绝。实际账号组、sudo 拒绝、挂载身份、ACL 和显式空间阈值均须匹配；全部既有目录/文件冲突在首次写入前拒绝。apply 只创建该根内的私有工作目录、受保护 helper 和 Git/测试锁，新建目录用固定 FD 显式设置目标模式，避免 umask 077/027 留下不能续装的半成品；已有目录仍按冲突规则拒绝。重复执行保留锁 inode；不接管其它账号、不修改 sudo/SSH/TCC、不安装 App 或复制登录配置。账号 HOME 内工具/App 所需可写子目录由操作员按最小权限预置，不能靠放开整个 HOME 绕过。
+
+私有配置字段为 account、uid、project、root、mount、volume、minimum_free_bytes.root/work、timeout_ms；容量与超时均显式填写，不增加生产默认值。Mac 基础工具 Node 24、pnpm 11.7.0、Git、Python 3、签名 hc 0.1.18 App 及任务指定 Harness CLI 均须具备原生 arm64 能力，包含 arm64 的 universal 镜像可满足原生要求；架构未知/x64 不能靠重新签验证记录绕过。Python 不假设预装。App 的 bundle/team 身份由可信配置固定，采样在执行 hc 版本命令前用 Apple 签名要求核验 App；核验失败或缺少 pin 均阻塞。签名 App 首装、首次局域网/各实际账号 TCC、登录与重启/锁屏核验均属于操作员现场事项，软件交付不代表已完成。
+
+员工测试编译器可接收管理员预置的 worker_test_lock（path、python、helper），不改变已有测试 worker 预算；Mac 缺少该锁参数拒绝测试。未配置远程目标的本地启动路径和主机侧配置保持原有含义。真实远程接线由卡 02/03/08 完成，本卡不启用 worker。
+
 C-168：本机员工会话由共用 `host.launchRun` 读取主机 `agent-tests.yaml`，将测试限流器编译到 worktree 外的运行目录，并只在员工启动脚本导出 `NODE_OPTIONS=--require=.../test-workers.cjs`。CLI 显式启动与 Dispatcher 新建／替换会话走同一流程，覆盖 Claude Code、Codex、Pi 及 `local`、本机 `agent-ssh`。根目录 `pnpm test`、按包过滤的脚本／exec、直接 `vitest run` 和 `node .../vitest.mjs` 都经过 Vitest CLI 的预加载层；在解析选项前移除重复、百分比或更大的 `--maxWorkers`／`--max-workers`，将 CLI 参数和优先级更高的 `VITEST_MAX_WORKERS` 环境变量一起归一化为不超过主机上限的正整数，任一来源显式设置的较小正整数保留；环境变量中的百分比、零或非法值回到受控上限，避免包脚本／继承环境覆盖限流。已验证项目锁定的 Vitest 5 的最终根配置及项目配置；回归探针在 reporter.onInit 读取解析结果后立即退出，不启动测试 worker。独立启动器经 API 调用 Vitest、其他测试框架不在本层支持范围。
 
 同一 Assignment 会话中的测试共用一个内核 `flock`：第二个或嵌套 Vitest 命令立即以 75 退出并提示等已有测试结束，避免多个命令叠加超过每 Run 的预算，也避免嵌套等待死锁；进程退出（含崩溃）释放锁。上限和锁路径固化在生成脚本里，改 `--maxWorkers` 不能放宽。此层防止正常测试调用过量，不是防恶意代码的 OS 沙箱；员工不得删除预加载环境或改写限流脚本绕过。合并检查沿用独立的白名单环境，不继承这份预加载配置，原 `--maxWorkers=4` 不变；人在员工会话之外运行测试不受影响。不调整 nice、Run 并发或合并检查配置。
@@ -2346,6 +2362,8 @@ worker 文件 helper 用 Python 3 的 dir_fd/openat、O_NOFOLLOW、fstat 与相�
 
 ### 13.5 角色放置
 
+P2b-06 将无头 CLI 与桌面能力分列。桌面探测只读实际账号的登录/锁屏、图形会话/WindowServer、Metal、屏幕录制与辅助功能许可、Keychain 可用状态，不枚举钥匙条目或触发授权弹窗；未观察到的项保持 unknown。TCC 允许不等于画面可见，仍需绑定实际用例的截图证据。无 GUI/TCC 或截图不可见时不得从日志宣布画面验收通过；不以 root、Full Disk Access、关闭 SIP/Gatekeeper 或个人桌面替代。GUI 代理只保留受控能力接口，不在本卡实现游戏/模拟器操作。
+
 | 角色 | 放在哪 |
 |---|---|
 | pm-office / pm-ops | 主机 |
@@ -2356,7 +2374,9 @@ worker 文件 helper 用 Python 3 的 dir_fd/openat、O_NOFOLLOW、fstat 与相�
 
 ### 13.6 环境一致性
 
-P2b 06 的通用能力合同待实现：
+P2b-06 的精确工具链声明与证据位于主机可信配置，机器标签不能替代 installed/configured/last_verified 三项检查。公开清单保留 OS 产品版本/build、Darwin、arch、实际 UID、采样时间、来源和精确工具版本；工具绝对/解析路径用稳定摘要去敏，不采序列号或环境全集。Node 原生依赖须在 arm64 重建；SDK/runtime 架构、导出模板、renderer 等按任务声明核验，版本不符不得换最新版。可共享管理员管理的只读 SDK；pnpm/Harness/构建缓存须按项目私有，不能共享可写缓存。Rosetta 是独立可选能力，基础无头小卡不依赖它；声明 x64 runtime 而对应 runtime/Rosetta 未验证时阻塞，不自动安装或降级。
+
+P2b 06 的通用能力合同（软件实现见本节，专用账号实机验证仍待完成）：
 
 - 主机可信清单按项目声明精确工具/版本组合；基础为原生 arm64 Node 24、pnpm 11.7.0、Git、显式可用的 Python 3、签名 hc 0.1.18 App 与任务所需 CLI。固定 PATH、目标账号 HOME，不 source shell rc，不运行仓库任意 sudo 脚本。
 - 脱敏 manifest 记录 OS/build/Darwin、arch、工具真实路径/精确版本、执行 UID、时间和来源；installed、configured、last_verified 分列，未验留空。SDK、runtime+架构、导出模板、renderer、Rosetta 和 GUI 能力按任务分别核验，不能静默换最新版或把已安装写成已验证。
@@ -2367,11 +2387,15 @@ P2b 06 的通用能力合同待实现：
 
 ### 13.7 模型凭据
 
+P2b-06 只接收可信启动材料采集方提供的凭据可用性状态和非敏感引用（类别、责任角色、credential-ref、用途/范围），不读取或复制个人 home/config/env、认证目录、密钥或钥匙串条目。模型/Harness、SSH/MCP、Apple 开发/签名、登录私钥/加密 key、Play 上传/应用/debug 签名、测试账号/邮箱及外部服务分别限定用途；不生成替代签名。缺少或不可访问时返回固定 credential 阻塞索引，由卡 03/08 的既有协作入口转交对应人专属事项；不在本卡提前请求现场授权。秘密不进 argv、日志、附件或控制面索引。
+
 现有启动流程继续按需注入最小模型/harness 凭据。P2b 03/06 待实现的跨机路径仅经安全材料通道注入，SSH 私钥只留控制主机、禁止转发或反向凭据；不把秘密写入仓库、argv、日志、附件或能力清单。
 
 凭据清单只记类别、负责人、非敏感引用、用途/授权范围和可用性错误；模型、SSH/MCP、开发者签名/商店、测试账号及第三方工具分别检查。缺少/不可访问时停止并进入适当人工待办，不复制旧 home/config/env/钥匙串，不生成替代签名。本人登录、2FA、账号和权限变更仍交人。模型网关与游戏签名/发布的专项验收不由 P2b 自动启用。
 
 ### 13.8 机器登记与调度
+
+P2b-06 的预检报告是启动前证据，不是远程启用授权。卡 02/08 必须结合已登记目标、配置指纹、当前能力证据与专用账号现场前置决定是否放行；缺项保持阻塞，不静默回退 local。`local` 仍是合法物理机器编号，生产执行仍须隔离账号。当前本卡仅交付通用软件；双 OS 原生测试与专用 Mac 账号 B1 的实测分别记录，不能以 Linux 上的 Mac 合成夹具代替现场通过。
 
 C-168：员工自测预算独立于全机 Run 容量。主机配置目录（`CARDIGAN_CONFIG_DIR`，默认 `~/.config/cardigan`）的 `agent-tests.yaml` 仅接受 `max_workers: <正整数>`，文件或字段缺失默认 **2**；不在被开发项目／worktree 写配置，不改 `run-capacity.yaml`。沿用可信配置的属主、普通文件、无符号链接及不可由组／其他用户写入的边界；未知字段、重复键、非法数值或不安全文件均拒绝新会话启动，错误不回显 YAML。每次创建会话读取，配置变化须重开已有会话；仅应用于 `machine_id=local` 的员工，不流入合并检查执行器。执行方式和会话升级边界见 §13.4。
 
@@ -2659,6 +2683,8 @@ ADR 后续责任：06 更新 [0001](adr/0001-runtime-baseline.md) 原生能力�
 
 ### 20.1 主仓库结构
 
+P2b-06 的通用安装器、只读预检入口与 Python 原生 helper 放在本仓库 `deploy/`，能力/路径/制品和进程合同位于 `packages/runtime-herdr`。真实机器、账号、挂载身份、签名 pin、下载来源、空间阈值和部署参数只放私有 `cardigan-deploy`；本仓库不保存实际配置或凭据。
+
 P2b 01–07 待实现：通用 Linux/macOS 安装器、文件/锁/进程 helper 与能力合同归本仓库 `deploy`/相关包；实际机器、账号、工具组合、SSH/MCP 入口、挂载和部署参数只归私有 `cardigan-deploy`，不得复制进产品代码或验收正文。
 
 技术栈见 D2：TypeScript + pnpm workspace。
@@ -2687,6 +2713,8 @@ cardigan/
 
 ### 20.2 依赖方向
 
+P2b-06 的 worker IO 留在 runtime-herdr/原生 helper，domain 不新增 IO；host 后续按可信目标调用这些接口，roles 只把已批准的锁参数编译进启动材料。卡 03/05 继续持有启动意图与恢复点，本卡的 WorkerCheckpoint 不引入新的数据库或工作流。独立复核覆盖同一卡的锁/身份、能力/路径和安装/制品三个分组，不以接口分组拆走风险审核。
+
 P2b 延续此分层：domain 只定义机器/接管/资源实体、纯命令与端口，不读配置、磁盘或 SSH；store 负责事务/快照/失效，runtime-herdr 和 git-transport 负责目标 IO，host 统一解析可信 project+machine 并编排启动、退出确认、回收，apps 只组装。新增包或接口须随实现卡更新依赖检查，不能让 domain 反向依赖 helper。
 
 `domain` ← `store` / `router` / `mcp-server` / `git-service` / `roles` ← `runtime-herdr` / `git-transport` ← `host` ← `apps`
@@ -2706,6 +2734,8 @@ P2b 延续此分层：domain 只定义机器/接管/资源实体、纯命令与�
 C-243：迁移 0024 仅新增 Workbench 查询索引，排在 C-244 已合入的 0023 收件箱变化追踪迁移之后，保留原表和 JSON 字段；时间线与 Run 等索引使用限定谓词，避免改变旧查询的默认遍历顺序。Web 层先选择页内对象和跨卡依赖，再调用原有领域展示函数；领域状态机及写操作保持不变。事件依赖按卡片、拍板、附件三种对象键分别查询并去重，避免混合 OR 退化为项目范围扫描；上下文代际增加限定事件类型的身份/时间索引。迁移沿用逐版本事务、重复启动检查与 C-201 的部署前备份。
 
 ### 20.3 被开发项目怎么接入
+
+P2b-06 的工具链、路径、签名和证据声明须由主机可信配置提供；`.cardigan/project.yaml` 不是本卡实现或已验证的自动加载入口，不能从项目文件自报可用能力或授予远程启动。部署预检输入经控制主机传入，输出只能作为待核证据，不能由 Agent 自报结果替代主机/操作员观测。
 
 目标项目保持独立仓库。原规划的接入约定为：
 
