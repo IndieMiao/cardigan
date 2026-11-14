@@ -532,7 +532,25 @@ export async function retryDispatchedRuns(
         const result = await runtime.wake(
           job.a.runtime_ref,
           [job.bell, baseline].filter(Boolean).join("\n"),
+          {
+            before_send: () => {
+              if (refreshTargetWait(store, project, job.run.id, clock)) {
+                deferTargetAttempt(store, job.attempt, clock);
+                return false;
+              }
+              return (
+                !options.closing?.() &&
+                currentWakeRun()?.status === "dispatched"
+              );
+            },
+          },
         );
+        if (result.ok && result.value.withdrawn) {
+          store.uow.run(() =>
+            withdrawBellAttempt(store.database, project, job.attempt.id),
+          );
+          continue;
+        }
         sent = result.ok && result.value.sent;
         if (result.ok) reason = "delivery_failed";
         else ({ reason, failure } = wakeFailure(result.error));

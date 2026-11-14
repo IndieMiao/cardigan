@@ -522,17 +522,18 @@ async function launch(
       let run: Run | undefined =
         workItem?.kind === "verify" ? undefined : dispatch();
       let waking = false;
-      const requireWakeCurrent = () => {
-        const valid = host.store.uow.read((tx) => {
+      const wakeCurrent = () =>
+        host.store.uow.read((tx) => {
           const state = loadCommandState(tx, project);
           const fresh = state.runs.find((r) => r.id === current.id);
           return (
-            fresh &&
+            !!fresh &&
             ["queued", "dispatched"].includes(fresh.status) &&
             wakeIsCurrent(state, assignment, current.id)
           );
         });
-        if (!valid) throw new RunWakeWithdrawn();
+      const requireWakeCurrent = () => {
+        if (!wakeCurrent()) throw new RunWakeWithdrawn();
       };
       try {
         worktree ??= await prepare();
@@ -540,14 +541,34 @@ async function launch(
         requireWakeCurrent();
         run ??= dispatch();
         waking = true;
+        let targetDeferred = false;
         const result = await host.runtime.wake(
           assignment.runtime_ref,
           [prompt, worktreeBaselinePrompt(worktree)].filter(Boolean).join("\n"),
+          {
+            before_send: () => {
+              targetDeferred = refreshTargetWait(
+                host.store,
+                project,
+                current.id,
+                clock,
+              );
+              return !targetDeferred && wakeCurrent();
+            },
+          },
         );
+        if (result.ok && result.value.withdrawn) {
+          if (targetDeferred) throw new RunTargetDeferred();
+          throw new RunWakeWithdrawn();
+        }
         if (!result.ok || !result.value.sent)
           throw new Error("Session wake failed; delivery may have occurred");
       } catch (error) {
-        if (error instanceof RunWakeWithdrawn) throw error;
+        if (
+          error instanceof RunWakeWithdrawn ||
+          error instanceof RunTargetDeferred
+        )
+          throw error;
         if (!waking) {
           requireWakeCurrent();
           requireTarget();

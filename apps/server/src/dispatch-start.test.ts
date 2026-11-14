@@ -145,6 +145,7 @@ test.each(["alive", "exited"] as const)(
       expect(runtime.wake).toHaveBeenCalledWith(
         previous.runtime_ref,
         expect.stringContaining(`run=${queued.id} kind=decision_resumed`),
+        { before_send: expect.any(Function) },
       );
       expect(started.token_id).toBe(previous.token_id);
     }

@@ -187,7 +187,9 @@ test("§3.1 live session: merges one Assignment's events, preserves its snapshot
   expect(vi.mocked(runtime.wake).mock.calls[0]?.[1]).toContain(
     'summary="2 comments"',
   );
-  expect(vi.mocked(runtime.wake).mock.calls[0]?.[2]).toBeUndefined(); // OSC working is not a business busy flag.
+  const wakeOptions = vi.mocked(runtime.wake).mock.calls[0]?.[2];
+  expect(wakeOptions).toEqual({ before_send: expect.any(Function) });
+  expect(wakeOptions?.if_idle).toBeUndefined(); // OSC working is not a business busy flag.
   expect(f.state().runs).toHaveLength(2);
   expect(f.state().runs.at(-1)).toMatchObject({
     status: "dispatched",

@@ -179,6 +179,11 @@ const injected = new WeakMap<HcClient, Map<string, HcCallQueue>>();
 export interface GovernedHcClient extends HcClient {
   readonly queue: HcCallQueue;
   readonly coreKey: string;
+  /** False means the guard declined before the underlying client was called. */
+  execIfCurrent(
+    args: readonly string[],
+    current: () => boolean,
+  ): Promise<boolean>;
 }
 export function governHcClient(
   client: HcClient,
@@ -237,6 +242,14 @@ export function governHcClient(
     queue: shared,
     available: () => client.available(),
     lines: (args, signal) => client.lines(args, signal),
+    execIfCurrent: (args, current) =>
+      shared.run(async () => {
+        // Both the FIFO and cross-process slot have been acquired. There must
+        // be no await between checking fresh authority and starting raw IO.
+        if (!current()) return false;
+        await client.exec(args);
+        return true;
+      }),
     exec: (args, ms) =>
       shared.run(() =>
         ms === undefined ? client.exec(args) : client.exec(args, ms),

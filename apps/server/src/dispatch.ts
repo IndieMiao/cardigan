@@ -705,7 +705,22 @@ export class Dispatcher {
         const result = await this.options.runtime.wake(
           job.assignment.runtime_ref,
           [job.bell, baseline].filter(Boolean).join("\n"),
+          {
+            before_send: () =>
+              !this.withdrawOnClose(job, queued?.queue_reason) &&
+              this.activate(job),
+          },
         );
+        if (result.ok && result.value.withdrawn) {
+          this.options.store.uow.run(() =>
+            withdrawBellAttempt(
+              this.options.store.database,
+              project,
+              job.attempt.id,
+            ),
+          );
+          return;
+        }
         sent = result.ok && result.value.sent;
         if (!result.ok) ({ reason, failure } = wakeFailure(result.error));
       } else {

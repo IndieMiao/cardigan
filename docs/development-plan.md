@@ -899,6 +899,8 @@ Q-511：复用产出会话时，`run_dispatched` 与投递意图先在同一事�
 
 V-1100 补齐同一取消边界的全部 wake 入口：`host.wakeIsCurrent` 共用当前 Assignment 身份、角色版本、机器、完整 RuntimeRef 与 Session 代次、Run 归属和停止栅栏检查。首次投递（`server/dispatch.ts`）、C-56 重试（`server/dispatch-retry.ts`）及显式复用（`host/launch.ts`）均在异步准备之后、实际 wake 之前读取新鲜状态；准备抛错时也先判断是否已失效。未发送即失效的意图撤回，不假记 sent/belled、不增加重试次数；CLI 复用返回明确的未发送错误，保留既有凭据。人的停止第一阶段即阻止重试，不能等终端释放后 Run 变为 cancelled 才生效；unknown 也不是已 ACK 或已送达的证据。已完成 Run 的未读提醒保留既有策略，实际发送后才到达的结果仍不得复活已取消 Run。
 
+V-1153 将同一保护延伸至 hc 调用队列出队：Runtime.wake 接收同步 before_send 检查，适配器完成存活探测、进程内排队及跨进程槽位等待后，在调用底层 hc send 前立即检查，中间不再等待异步操作。首次投递、重试与显式复用都在该检查中读取新鲜状态，核对原有身份／完整引用／会话代次／Run 和停止边界。检查拒绝时返回明确的 withdrawn=true、sent=false，调用方撤回未发送意图，不记 sent/belled、不消耗失败重试次数；仅调用 Runtime.wake 不代表外部发送已开始。检查抛错、hc 超时或已实际调用 send 后的失败仍按不确定投递处理，不能用普通 sent=false 或迟到的停止推断未发送。
+
 恢复／重启没有第四个独立 wake 入口：复用会话回到上述首次或重试路径；新建终端由 `launchRun` 的 queued 校验、目标复核、领域 dispatch 与 start 哨兵控制，沿用真实退出确认及迟到启动拒绝测试。`dispatch-retry-human-stop.review.test.ts` 保留审核原始反例及“不增加成功意图／通知发送”的断言；`dispatch-wake-guard.test.ts` 对三个实际入口逐一用假运行时、准备门闩和临时库验证正常单次发送、人工停止及释放、完整引用／Session 代次变化、未知 Run、运维停止、停止后准备失败以及发送后取消的迟到响应，不制造真实负载。
 
 ### 6.2 门铃格式
@@ -1931,7 +1933,7 @@ hc 的 run/exec 使用 `--on`，send/get/events/kill 使用 `<hc-machine>/<termi
 
 ```
 provision(assignment, role, machine) -> RuntimeRef
-wake(ref, doorbell) -> {sent: bool, error?}   # sent=false 也可能已经送达，见 §6.8
+wake(ref, doorbell, {before_send?}) -> {sent: bool, withdrawn?, error?}   # 仅 withdrawn 明确未发送；普通失败可能已送达，见 §6.8
 status(ref) -> {process: alive|exited|unknown,
                 agent: working|blocked|done|idle|error|unknown, observed_seq}
 interrupt(ref)

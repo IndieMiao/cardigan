@@ -8,7 +8,8 @@ import {
 import { HostLaunchError } from "./errors.js";
 
 /** Shared by first delivery, C-56 retry and explicit live-session reuse.
- * Read a fresh state after awaited preparation, immediately before wake.
+ * Read a fresh state after preparation and again in Runtime.before_send,
+ * after adapter queue/lock waits and immediately before the raw send.
  * Run-status policies (including completed-Run unread reminders) stay with
  * the caller; cancellation and stop fences always forbid a new send.
  */
@@ -42,6 +43,6 @@ export function wakeIsCurrent(
 /** The caller proved no wake occurred; withdraw instead of recording failure. */
 export class RunWakeWithdrawn extends HostLaunchError {
   constructor() {
-    super("dispatch", "准备期间执行或会话状态已变，未发送门铃");
+    super("dispatch", "准备或排队期间执行或会话状态已变，未发送门铃");
   }
 }

@@ -15,6 +15,8 @@ import type {
   RuntimeObservation,
   RuntimeRef,
   RuntimeResult,
+  RuntimeWakeOptions,
+  RuntimeWakeResult,
 } from "@cardigan/domain";
 import { registerAgentMachine } from "./agent-ssh.js";
 import {
@@ -377,29 +379,28 @@ export class HerdrRuntime implements Runtime {
       return ref;
     });
   }
-  wake(
-    ref: RuntimeRef,
-    doorbell: string,
-    options?: { readonly if_idle?: boolean },
-  ) {
-    return result(async () => {
+  wake(ref: RuntimeRef, doorbell: string, options?: RuntimeWakeOptions) {
+    return result<RuntimeWakeResult>(async () => {
       this.checkRef(ref);
       this.checkLaunchEnabled();
       await this.live();
       this.invalidateStatus(ref);
       try {
-        await this.client.exec([
-          "send",
-          "--json",
-          ...(options?.if_idle ? ["--if", "idle"] : []),
-          "--",
-          ref.terminal_ref,
-          doorbell,
-        ]);
+        const sent = await this.client.execIfCurrent(
+          [
+            "send",
+            "--json",
+            ...(options?.if_idle ? ["--if", "idle"] : []),
+            "--",
+            ref.terminal_ref,
+            doorbell,
+          ],
+          options?.before_send ?? (() => true),
+        );
+        return sent ? { sent: true } : { sent: false, withdrawn: true };
       } finally {
         this.invalidateStatus(ref);
       }
-      return { sent: true };
     });
   }
   /** Host orchestration only: run Git or inspect an installed Agent CLI as agent. */
