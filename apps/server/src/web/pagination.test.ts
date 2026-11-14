@@ -9,6 +9,8 @@ import { call, webHarness } from "../../test-support/web.js";
 import { project_id, seedWebProject } from "../../test-support/web-data.js";
 
 import { readCardDetail } from "./card-state.js";
+import { readNeedsState } from "./needs-state.js";
+import { needsYou, projectState } from "./read.js";
 
 const password = "pagination-test-password";
 
@@ -180,6 +182,43 @@ test("card pages filter and sort before LIMIT, board lanes page independently, t
         )
       ).status,
     ).toBe(400);
+  } finally {
+    await f.close();
+  }
+});
+
+test("narrow Needs You retains closed readiness targets and project rule epochs from the merged baseline", async () => {
+  const f = await webHarness({ password });
+  try {
+    seedWebProject(f.store, f.dataDir);
+    f.store.uow.run((tx) => {
+      for (const q of tx.decisions.list(project_id))
+        tx.decisions.put(project_id, {
+          ...q,
+          ready_when: { kind: "card_merged", card_id: "C-3" as CardId },
+        });
+      for (const h of tx.human_actions.list(project_id))
+        tx.human_actions.put(project_id, {
+          ...h,
+          ready_when: { kind: "card_merged", card_id: "C-3" as CardId },
+        });
+      tx.events.append(project_id, {
+        id: "rule-epoch" as EventId,
+        seq: tx.ids.nextEventSequence(project_id),
+        type: "project_preferences_updated",
+        actor: { kind: "human", project_id },
+        payload: { preference: "system_reminders", new_value: true },
+        created_at: "2026-01-01T00:00:00.000Z",
+      });
+    });
+    const state = readNeedsState(f.store, project_id);
+    expect(state.events.some((e) => e.id === "rule-epoch")).toBe(true);
+    const now = "2026-01-02T00:00:00.000Z";
+    expect(needsYou(state, now)).toEqual(
+      needsYou(projectState(f.store, project_id), now),
+    );
+    expect(needsYou(state, now).later).toEqual([]);
+    expect(needsYou(state, now).decisions).toHaveLength(1);
   } finally {
     await f.close();
   }

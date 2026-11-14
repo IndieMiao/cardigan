@@ -20,6 +20,7 @@ const dbPath = join(root, "fixture.db");
 const password = randomBytes(24).toString("hex");
 const endpoints = [
   "/cards?view=summary",
+  "/cards?view=summary&mode=board&sort=updated",
   "/needs-you",
   "/activity",
   "/decision-history",
@@ -481,13 +482,24 @@ try {
     runs: cardCount * 4,
     warm_samples: samples,
     results,
-    screenshots: process.env.WORKBENCH_SCREENSHOTS
-      ? await screenshots(process.env.WORKBENCH_SCREENSHOTS)
-      : [],
+    screenshots: [],
+    screenshots_status: "not_run",
     query_plans: queryPlans(),
   };
   if (process.argv[2])
     writeFileSync(process.argv[2], `${JSON.stringify(report, null, 2)}\n`);
+  if (process.env.WORKBENCH_SCREENSHOTS) {
+    try {
+      report.screenshots = await screenshots(process.env.WORKBENCH_SCREENSHOTS);
+      report.screenshots_status = "passed";
+    } catch (error) {
+      report.screenshots_status = "failed";
+      throw error;
+    } finally {
+      if (process.argv[2])
+        writeFileSync(process.argv[2], `${JSON.stringify(report, null, 2)}\n`);
+    }
+  }
   console.table(
     results.map(({ path, first, warm, cold }) => ({
       path,

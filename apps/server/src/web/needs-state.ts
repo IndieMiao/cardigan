@@ -35,6 +35,11 @@ export function readNeedsState(store: Store, project: ProjectId): CommandState {
     const state = scopedCardState(store, tx, project, [
       ...new Set([
         ...activeCards,
+        ...[...decisions, ...actions].flatMap((item) =>
+          item.ready_when && item.ready_when.kind !== "manual"
+            ? [item.ready_when.card_id]
+            : [],
+        ),
         ...decisions.flatMap((q) => [
           ...q.affected_cards,
           ...(q.card_id ? [q.card_id] : []),
@@ -125,7 +130,7 @@ export function readNeedsState(store: Store, project: ProjectId): CommandState {
       .map((r) => JSON.parse(String(r.doc))) as CommandState["events"];
     const projectEvents = query(
       "events",
-      `card_id IS NULL AND ${inIds("json_extract(doc, '$.payload.decision_id')")}`,
+      `card_id IS NULL AND (type = 'project_preferences_updated' OR ${inIds("json_extract(doc, '$.payload.decision_id')")})`,
       [decisionIds],
     );
     const events = unique([

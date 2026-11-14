@@ -120,16 +120,30 @@ export function scopedCardState(
       [cardIds, cardIds, itemIds],
     ),
   ]);
+  const human_actions = query(
+    "human_actions",
+    `${inIds("json_extract(doc, '$.card_id')")} OR EXISTS (SELECT 1 FROM json_each(doc, '$.blocked_work_items') WHERE ${inIds("value")})`,
+    [cardIds, itemIds],
+  );
   // affects() resolves every explicitly affected work item, even on another card.
   work_items = unique([
     ...work_items,
     ...query("work_items", inIds("id"), [
-      JSON.stringify(decisions.flatMap((q) => q.affected_work_items)),
+      JSON.stringify([
+        ...decisions.flatMap((q) => q.affected_work_items),
+        ...work_items.flatMap((w) => w.depends_on),
+        ...human_actions.flatMap((h) => h.blocked_work_items),
+      ]),
     ]),
   ]);
   const dependencies = [
     ...decisions.flatMap((q) => q.affected_cards),
     ...work_items.map((w) => w.card_id),
+    ...[...decisions, ...human_actions].flatMap((item) =>
+      item.ready_when && item.ready_when.kind !== "manual"
+        ? [item.ready_when.card_id]
+        : [],
+    ),
   ];
   const missing = dependencies.filter((id) => !cards.some((c) => c.id === id));
   if (missing.length) {
@@ -139,11 +153,6 @@ export function scopedCardState(
         ...new Set([...cards.map((c) => c.id), ...existing.map((c) => c.id)]),
       ]);
   }
-  const human_actions = query(
-    "human_actions",
-    `${inIds("json_extract(doc, '$.card_id')")} OR EXISTS (SELECT 1 FROM json_each(doc, '$.blocked_work_items') WHERE ${inIds("value")})`,
-    [cardIds, itemIds],
-  );
   const deliveries = query("deliveries", inIds("work_item_id"), [itemIds]);
   const reviews = query(
     "reviews",
