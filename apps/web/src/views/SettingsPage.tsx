@@ -18,6 +18,7 @@ import { employeeCopy } from "../employee-copy.js";
 import { useResource } from "../useResource.js";
 import { CapacitySettings } from "./CapacitySettings.js";
 import { EmployeesSettings } from "./EmployeesSettings.js";
+import { IndependentReviewLimitSetting } from "./IndependentReviewLimitSetting.js";
 import { RolesSettings } from "./RolesSettings.js";
 import { SystemRulesSettings } from "./SystemRulesSettings.js";
 import { TemplateSettings } from "./TemplateSettings.js";
@@ -242,6 +243,15 @@ export function SettingsPage({
                 PM 代拍时必须写明理由并保留授权依据。没有活跃 PM Ops
                 时交给你。代拍和代确认的合并都会在 Needs You 的知会区同步给你。
               </p>
+              {resource.data && (
+                <IndependentReviewLimitSetting
+                  key={`independent-limit:${projectId}:${resource.data.independent_review_limit_delegation}:${resource.data.independent_review_limit_delegation_max}`}
+                  initial={resource.data}
+                  client={client}
+                  projectId={projectId}
+                  saved={resource.reload}
+                />
+              )}
               {resource.data && (
                 <PmMergeSetting
                   key={`pm-merge:${resource.data.pm_merge_confirmation}`}

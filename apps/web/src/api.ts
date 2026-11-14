@@ -984,6 +984,9 @@ export interface PreferencesView extends SystemRulesPreferences {
   /** C-253: initial review limits of new verifiers; older servers omit them. */
   readonly review_max_rounds?: number;
   readonly independent_review_max_rounds?: number;
+  readonly independent_review_limit_delegation?: boolean;
+  readonly independent_review_limit_delegation_max?: number | null;
+  readonly independent_review_limit_delegation_ceiling?: number;
   /** Largest accepted review limit; the domain owns the value (Q-420). */
   readonly review_max_rounds_ceiling?: number;
   /** Lanes the human folded (true) or unfolded (false); missing = default. */
@@ -1217,6 +1220,12 @@ export interface CardiganClient {
     projectId: string,
     kind: "review" | "independent",
     rounds: number,
+    idempotencyKey: string,
+  ): Promise<void>;
+  setIndependentReviewLimitDelegation(
+    projectId: string,
+    enabled: boolean,
+    max: number | null,
     idempotencyKey: string,
   ): Promise<void>;
   setBoardLane(
@@ -1609,6 +1618,22 @@ export class HttpCardiganClient implements CardiganClient {
       kind === "review"
         ? { review_max_rounds: rounds }
         : { independent_review_max_rounds: rounds },
+      idempotencyKey,
+    );
+  }
+  async setIndependentReviewLimitDelegation(
+    projectId: string,
+    enabled: boolean,
+    max: number | null,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      "preferences",
+      {
+        independent_review_limit_delegation: enabled,
+        independent_review_limit_delegation_max: max,
+      },
       idempotencyKey,
     );
   }
