@@ -47,6 +47,14 @@ const projectSegment = /^[a-zA-Z0-9_][a-zA-Z0-9._-]*$/u;
 /** Ref policy lives here; filesystem and Git execution stay behind the domain port. */
 export class CentralRepositoryService {
   private readonly root: string;
+  private readonly sourceClassifications = new Map<
+    string,
+    {
+      old: string;
+      next: string;
+      status: SourceSync;
+    }
+  >();
   constructor(
     readonly git: GitCentralPort,
     private readonly options: CentralOptions,
@@ -83,11 +91,21 @@ export class CentralRepositoryService {
     return repository;
   }
   /** Fetch the source snapshot and classify it without moving the baseline. */
-  private async sourceSnapshot(project: CentralProject) {
-    const repo = await this.ensureCentral(project),
+  private async sourceSnapshot(
+    project: CentralProject,
+    polling = false,
+    repository?: string,
+  ) {
+    const repo = repository ?? (await this.ensureCentral(project)),
       base = `refs/heads/${project.base_branch}`,
       source = `refs/cardigan/source/${project.base_branch}`;
-    await this.git.fetchRefs(repo, project.source_repo, [`+${base}:${source}`]);
+    await this.git.fetchRefs(
+      repo,
+      project.source_repo,
+      [`+${base}:${source}`],
+      undefined,
+      polling,
+    );
     const old = await this.git.readRef(repo, base),
       next = await this.git.readRef(repo, source);
     if (!old || !next)
@@ -109,8 +127,28 @@ export class CentralRepositoryService {
   }
   /** Read-only view of §3.2 for reconciliation: never moves the baseline. */
   async sourceStatus(project: CentralProject): Promise<SourceSync> {
-    const { repo, old, next } = await this.sourceSnapshot(project);
-    return this.classify(repo, old, next);
+    const { repo, old, next } = await this.sourceSnapshot(project, true);
+    return this.classifySource(repo, old, next);
+  }
+  private async classifySource(repo: string, old: string, next: string) {
+    const previous = this.sourceClassifications.get(repo);
+    if (previous?.old === old && previous.next === next) return previous.status;
+    const status = await this.classify(repo, old, next);
+    this.sourceClassifications.set(repo, { old, next, status });
+    return status;
+  }
+  /** One validation per scan; still observe refs on disk on every poll. */
+  async reconciliationState(project: CentralProject) {
+    const repository = await this.ensureCentral(project);
+    const { repo, old, next } = await this.sourceSnapshot(
+      project,
+      true,
+      repository,
+    );
+    return {
+      source_sync: await this.classifySource(repo, old, next),
+      pinned: await this.readPinned(repository),
+    };
   }
   /** Whether a commit is reachable from some ref of the central repository. */
   async hasCommit(project: CentralProject, sha: string): Promise<boolean> {
@@ -123,8 +161,12 @@ export class CentralRepositoryService {
   async pinnedDeliveries(
     project: CentralProject,
   ): Promise<ReadonlyMap<string, string>> {
-    const repository = await this.ensureCentral(project),
-      prefix = "refs/cardigan/deliveries/",
+    return this.readPinned(await this.ensureCentral(project));
+  }
+  private async readPinned(
+    repository: string,
+  ): Promise<ReadonlyMap<string, string>> {
+    const prefix = "refs/cardigan/deliveries/",
       pinned = new Map<string, string>();
     for (const { ref, sha } of await this.git.listRefs(repository, prefix))
       pinned.set(ref.slice(prefix.length), sha);
@@ -321,6 +363,7 @@ export class CentralRepositoryService {
       source.path,
       [`+refs/heads/agent/*:refs/cardigan/backups/${machine_id}/agent/*`],
       source.uploadPack,
+      true,
     );
   }
 }
