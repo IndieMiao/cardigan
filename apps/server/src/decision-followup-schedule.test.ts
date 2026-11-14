@@ -11,9 +11,13 @@ import {
   requestDecision,
   type TimelineEntry,
 } from "@cardigan/domain";
+import type { ChangeSet } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { dispatchFixture } from "../test-support/dispatch.js";
-import { DecisionFollowupSchedule } from "./decision-followup-schedule.js";
+import {
+  type DecisionFollowupPlan,
+  DecisionFollowupSchedule,
+} from "./decision-followup-schedule.js";
 import { Dispatcher } from "./dispatch.js";
 
 function unwrap<T>(result: Result<T>): T {
@@ -58,16 +62,54 @@ const ports = (now: string, n: { value: number }) => ({
 });
 
 /**
- * Like the dispatcher: evaluate what the schedule says is pending, remind the
- * `due` ones, then record after "commit".
+ * An in-memory row change feed over successive states, like the Store's
+ * triggers: a decision row changed when its object changed.
+ */
+function feed() {
+  let version = 0;
+  let seen = new Map<string, Decision>();
+  return {
+    /** Changes since `cursor` (undefined: never read, start over). */
+    since(state: CommandState, read: boolean): ChangeSet {
+      const now = new Map(state.decisions.map((q) => [q.id, q]));
+      const ids = new Set<string>();
+      for (const [id, q] of now) if (seen.get(id) !== q) ids.add(id);
+      for (const id of seen.keys()) if (!now.has(id)) ids.add(id);
+      if (ids.size) version++;
+      seen = now;
+      const cursor = {
+        project_id: state.project_id,
+        versions: new Map([["decisions", version]]),
+      };
+      if (!read) return { cursor, changed: undefined };
+      return { cursor, changed: new Map([["decisions", ids]]) };
+    },
+  };
+}
+
+/** Plan with a fresh feed read (`changes`), like the dispatcher. */
+function planned(
+  schedule: DecisionFollowupSchedule,
+  state: CommandState,
+  changes: ChangeSet | undefined,
+  now: string,
+): DecisionFollowupPlan {
+  return schedule.plan(state, changes, now);
+}
+
+/**
+ * Like the dispatcher: evaluate what the schedule plans, remind the `due`
+ * ones, then record after "commit".
  */
 function scheduledPass(
   schedule: DecisionFollowupSchedule,
   state: CommandState,
+  changes: ChangeSet,
   now: string,
   n: { value: number },
 ) {
-  const statuses = schedule.evaluate(state, schedule.pending(state, now), now);
+  const plan = planned(schedule, state, changes, now);
+  const statuses = schedule.evaluate(state, plan, now);
   const due = new Set(
     [...statuses].filter(([, s]) => s.kind === "due").map(([q]) => q.id),
   );
@@ -76,8 +118,8 @@ function scheduledPass(
       decision_ids: due,
     }),
   );
-  schedule.record(statuses);
-  return { effect, evaluated: statuses.size };
+  schedule.record(plan, statuses);
+  return { effect, evaluated: statuses.size, planned: plan.ids.size };
 }
 
 test("C-244: scheduled reminders equal a full pass every tick over random histories", () => {
@@ -107,6 +149,7 @@ test("C-244: scheduled reminders equal a full pass every tick over random histor
       timeline: [],
     };
     const schedule = new DecisionFollowupSchedule();
+    const rows = feed();
     let seq = 0;
     const event = (type: string, payload: Record<string, string> = {}) => {
       const e: Event = {
@@ -210,7 +253,11 @@ test("C-244: scheduled reminders equal a full pass every tick over random histor
       const full = unwrap(
         remindDecisionFollowups(state, system(state), ports(now, n)),
       );
-      const { effect, evaluated } = scheduledPass(schedule, state, now, n);
+      const changes = rows.since(state, schedule.cursor !== undefined);
+      const pass = scheduledPass(schedule, state, changes, now, n);
+      const { effect, evaluated } = pass;
+      // Settled decisions are not even looked at: nothing walks all of them.
+      expect(pass.planned).toBe(evaluated);
       expect(effect.data, `seed ${seed} tick ${tick}`).toEqual(full.data);
       skipped += state.decisions.length - evaluated;
       reminders += effect.data.length;
@@ -262,20 +309,70 @@ test("C-244: an uncommitted pass teaches the schedule nothing; a new schedule re
   const schedule = new DecisionFollowupSchedule();
   const early = "2030-01-01T00:29:59.999Z";
   const due = "2030-01-01T00:30:00.000Z";
-  schedule.record(schedule.evaluate(s, schedule.pending(s, early), early));
-  expect(schedule.pending(s, early).size).toBe(0);
-  expect([...schedule.pending(s, due)]).toEqual(["Q-1"]);
-  // Evaluated but never recorded (the transaction rolled back): still pending.
-  schedule.evaluate(s, schedule.pending(s, due), due);
-  expect([...schedule.pending(s, due)]).toEqual(["Q-1"]);
+  const cursor = (version: number) => ({
+    project_id: s.project_id,
+    versions: new Map([["decisions", version]]),
+  });
+  const none: ChangeSet = { cursor: cursor(1), changed: new Map() };
+  const ids = (plan: DecisionFollowupPlan) => [...plan.ids];
+  const first = schedule.plan(
+    s,
+    { cursor: cursor(1), changed: undefined },
+    early,
+  );
+  expect(first.reset).toBe(true);
+  schedule.record(first, schedule.evaluate(s, first, early));
+  expect(schedule.cursor).toEqual(cursor(1));
+  // Waiting: nothing to look at until its due time, then it alone.
+  expect(ids(schedule.plan(s, none, early))).toEqual([]);
+  expect(ids(schedule.plan(s, none, due))).toEqual(["Q-1"]);
+  // Evaluated but never recorded (the transaction rolled back): the cursor
+  // stays and the decision is still planned.
+  const lost = schedule.plan(s, { cursor: cursor(2), changed: new Map() }, due);
+  schedule.evaluate(s, lost, due);
+  expect(schedule.cursor).toEqual(cursor(1));
+  expect(ids(schedule.plan(s, none, due))).toEqual(["Q-1"]);
   // `due` is not remembered either; the next pass sees the reminder event.
-  schedule.record(schedule.evaluate(s, schedule.pending(s, due), due));
-  expect([...schedule.pending(s, due)]).toEqual(["Q-1"]);
-  // A changed decision is a new object and is evaluated again.
-  const changed = { ...s, decisions: [{ ...q }] };
-  expect([...new DecisionFollowupSchedule().pending(changed, early)]).toEqual([
+  const again = schedule.plan(s, none, due);
+  schedule.record(again, schedule.evaluate(s, again, due));
+  expect(ids(schedule.plan(s, none, due))).toEqual(["Q-1"]);
+  // Once reminded it is settled and no longer planned, at any time.
+  const reminded: CommandState = {
+    ...s,
+    events: [
+      {
+        id: unwrap(parseEventId("9".padStart(26, "0"))),
+        card_id: w.card.id,
+        seq: 1,
+        type: "decision_followup_due",
+        actor: { kind: "system", project_id: s.project_id },
+        payload: { decision_id: "Q-1", resolved_at: at },
+        created_at: due,
+      } as Event,
+    ],
+  };
+  const settle = schedule.plan(reminded, none, due);
+  const settled = schedule.evaluate(reminded, settle, due);
+  expect([...settled.values()]).toEqual([{ kind: "reminded" }]);
+  schedule.record(settle, settled);
+  expect(
+    ids(schedule.plan(reminded, none, "2031-01-01T00:00:00.000Z")),
+  ).toEqual([]);
+  // A changed row is planned again; a deleted one is forgotten.
+  const changed: ChangeSet = {
+    cursor: cursor(2),
+    changed: new Map([["decisions", new Set(["Q-1"])]]),
+  };
+  const replan = schedule.plan(reminded, changed, due);
+  expect(ids(replan)).toEqual(["Q-1"]);
+  const gone = { ...reminded, decisions: [] };
+  schedule.record(replan, schedule.evaluate(gone, replan, due));
+  expect(ids(schedule.plan(gone, none, due))).toEqual([]);
+  // A restart (new schedule) or a feed that starts over plans every decision.
+  expect(ids(new DecisionFollowupSchedule().plan(s, changed, early))).toEqual([
     "Q-1",
   ]);
+  expect(ids(schedule.plan(s, undefined, early))).toEqual(["Q-1"]);
 });
 
 test("C-244: the dispatcher reminds once per resolution across ticks and restarts", async () => {

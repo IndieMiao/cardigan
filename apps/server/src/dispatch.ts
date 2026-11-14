@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type {
   Assignment,
-  AssignmentId,
   Clock,
   CommandState,
   DispatchRunParams,
@@ -20,7 +19,6 @@ import {
   decisionFollowupPrompt,
   dispatchRecoveryFailed,
   dispatchRun,
-  eventById,
   expireMergeSnoozes,
   hasRunTarget,
   hostOpsPending,
@@ -64,7 +62,15 @@ import {
   unfinishedBellAttempts,
   withdrawBellAttempt,
 } from "@cardigan/store";
-import { DecisionFollowupSchedule } from "./decision-followup-schedule.js";
+import {
+  CANDIDATE_FEED,
+  type Candidate,
+  CandidateIndex,
+} from "./candidate-index.js";
+import {
+  DECISION_FOLLOWUP_FEED,
+  DecisionFollowupSchedule,
+} from "./decision-followup-schedule.js";
 import {
   alertAudience,
   type DeliveryFailure,
@@ -160,18 +166,6 @@ const covered = (n: Notification, s: CommandState, owner: Assignment["id"]) =>
       c.card_id === n.card_id &&
       c.acked_seq >= n.seq,
   );
-interface Candidate {
-  project: ProjectId;
-  notes: Notification[];
-  assignment: Assignment;
-  order: {
-    priority: number;
-    project_id: string;
-    assignment_id: string;
-    created_at: string;
-    trigger_event_id: string;
-  };
-}
 interface Job {
   attempt: BellAttempt;
   run: Run;
@@ -201,8 +195,10 @@ export class Dispatcher {
   readonly clock: Clock;
   private loadState: StateLoader = loadCommandState;
   private serial: Promise<void> = Promise.resolve();
-  /** C-244: survives ticks; a restart starts empty and re-evaluates once. */
-  private readonly followups = new DecisionFollowupSchedule();
+  /** C-244: per project; survives ticks, a restart starts empty and re-evaluates once. */
+  private readonly followups = new Map<ProjectId, DecisionFollowupSchedule>();
+  /** C-244: candidate lists per project, kept across ticks (memory only). */
+  private candidateIndex: CandidateIndex | undefined;
   private readonly leaseMs: number;
   private readonly retryBaseMs: number;
   private readonly maxRetries: number;
@@ -356,17 +352,30 @@ export class Dispatcher {
         this.loadState,
       ),
     );
-    // C-244: only decisions that changed since they were last settled, or
-    // whose 30-minute wait is over, are evaluated (DecisionFollowupSchedule);
-    // the schedule learns the answers only after the transaction commits.
+    // C-244: only decisions whose row changed since the last committed pass,
+    // unsettled ones, and waits whose 30-minute delay is over are evaluated
+    // (DecisionFollowupSchedule); the schedule learns the answers and the feed
+    // position only after the transaction commits.
     step("decision_followups", () => {
-      const statuses = store.uow.run((tx) => {
+      let schedule = this.followups.get(project);
+      if (!schedule) {
+        schedule = new DecisionFollowupSchedule();
+        this.followups.set(project, schedule);
+      }
+      const plan = schedule;
+      const { planned, statuses } = store.uow.run((tx) => {
+        const changes = store.changesSince(
+          project,
+          DECISION_FOLLOWUP_FEED,
+          plan.cursor,
+        );
         const state = step("decision_followups.state", () =>
           this.loadState(tx, project),
         );
         const at = this.clock.now();
+        const planned = plan.plan(state, changes, at);
         const statuses = step("decision_followups.evaluate", () =>
-          this.followups.evaluate(state, this.followups.pending(state, at), at),
+          plan.evaluate(state, planned, at),
         );
         const due = new Set(
           [...statuses]
@@ -388,9 +397,9 @@ export class Dispatcher {
               ),
             ),
           );
-        return statuses;
+        return { planned, statuses };
       });
-      this.followups.record(statuses);
+      plan.record(planned, statuses);
     });
     step("system_rules", () =>
       runSystemRules(store, project, this.clock, this.loadState),
@@ -456,109 +465,36 @@ export class Dispatcher {
   }
   private candidates(project: ProjectId): Candidate[] {
     const { store } = this.options;
-    // C-244: sub-spans of `route.candidates`; timing only, no added await.
-    const step = <T>(name: string, run: () => T) =>
-      profileSpanSync(`route.candidates.${name}`, run);
-    const claimed = step(
-      "attempts",
-      () =>
-        new Set(
-          unfinishedBellAttempts(store.database, project).flatMap(
-            (a) => a.notification_ids,
+    // C-244: maintained across passes from the Store's row change feed; only
+    // what depends on a changed row is evaluated again (CandidateIndex).
+    this.candidateIndex ??= new CandidateIndex(this.options.standing);
+    const index = this.candidateIndex;
+    return store.uow.read((tx) =>
+      index.candidates(project, {
+        changes: (cursor) =>
+          profileSpanSync("route.candidates.changes", () =>
+            store.changesSince(project, CANDIDATE_FEED, cursor),
           ),
-        ),
+        state: () =>
+          profileSpanSync("route.candidates.state", () =>
+            this.loadState(tx, project),
+          ),
+        notifications: (ids) =>
+          profileSpanSync("route.candidates.notifications", () =>
+            store.listNotifications({
+              project_id: project,
+              status: "pending",
+              ...(ids ? { ids } : {}),
+            }),
+          ),
+        claimed: () =>
+          new Set(
+            unfinishedBellAttempts(store.database, project).flatMap(
+              (a) => a.notification_ids,
+            ),
+          ),
+      }),
     );
-    const state = step("state", () => this.state(project)),
-      groups = new Map<string, Notification[]>();
-    const pending = step("notifications", () =>
-      store.listNotifications({ project_id: project, status: "pending" }),
-    );
-    // C-244: resolve each notification's owner once. candidates() is
-    // synchronous and writes nothing, so the standing PM resolution (state
-    // plus token rows) cannot change before it returns.
-    const standingOnce = memoStanding(this.options.standing);
-    const owners = new Map<Notification, AssignmentId | undefined>();
-    const ownerOf = (n: Notification) => {
-      if (!owners.has(n))
-        owners.set(n, notificationOwner(n, state, standingOnce));
-      return owners.get(n);
-    };
-    step("owners", () => {
-      for (const n of pending) {
-        if (claimed.has(n.id)) continue;
-        const owner = ownerOf(n);
-        if (!owner || decisionFollowupBlocked(state, n.event_id, owner))
-          continue;
-        const key = `${owner}/${n.card_id ?? ""}/${n.attempts ? n.run_id : ""}`;
-        const group = groups.get(key);
-        if (group) group.push(n);
-        else groups.set(key, [n]);
-      }
-    });
-    const candidates: Candidate[] = [];
-    const added = new Set<AssignmentId>();
-    const add = (assignment: Assignment, notes: Notification[]) => {
-      if (!hasRunTarget(assignment, state)) return;
-      const queued = this.queued(state, assignment);
-      if (queued && unreadableCommentTrigger(state, queued)) return;
-      const cause = notes.find((n) => !n.run_id) ?? notes[0];
-      const trigger = queued?.trigger_event_id ?? cause?.event_id;
-      const event = eventById(state.events, trigger);
-      if (!event) return;
-      added.add(assignment.id);
-      candidates.push({
-        project,
-        notes,
-        assignment,
-        order: {
-          priority: cardPriority(state, assignment),
-          project_id: project,
-          assignment_id: assignment.id,
-          created_at: event.created_at,
-          trigger_event_id: event.id,
-        },
-      });
-    };
-    const assignments = step("index", () => {
-      const byId = new Map<string, Assignment>();
-      for (const a of state.assignments) if (!byId.has(a.id)) byId.set(a.id, a);
-      return byId;
-    });
-    step("groups", () => {
-      for (const notes of groups.values()) {
-        notes.sort((a, b) => {
-          const left = eventById(state.events, a.event_id);
-          const right = eventById(state.events, b.event_id);
-          return (
-            (left?.created_at ?? a.created_at).localeCompare(
-              right?.created_at ?? b.created_at,
-            ) || a.event_id.localeCompare(b.event_id)
-          );
-        });
-        const first = notes[0];
-        const owner = first && ownerOf(first);
-        // Same as assignments.find(a => a.id === owner): first match wins.
-        const assignment =
-          owner === undefined ? undefined : assignments.get(owner);
-        if (assignment) add(assignment, notes);
-      }
-    });
-    // ACK is not cancellation: a Run deferred for capacity still needs dispatch
-    // if its trigger notification was acknowledged while it waited. C-244:
-    // only Assignments that own a queued Run can qualify, so released and
-    // finished ones are skipped by a keyed lookup instead of a Run scan.
-    step("queued", () => {
-      for (const assignment of state.assignments) {
-        const queued = this.queued(state, assignment);
-        if (
-          (queued?.queue_reason !== undefined ||
-            queued?.dispatch_target_wait !== undefined) &&
-          !added.has(assignment.id)
-        )
-          add(assignment, []);
-      }
-    });
-    return candidates;
   }
   private queued(state: CommandState, a: Assignment) {
     // Domain resumption can queue work before (or independently of) the

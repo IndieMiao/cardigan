@@ -1,4 +1,5 @@
 export { fileAvatarStore, readAvatarFile } from "./avatars.js";
+export type { ChangeCursor, ChangeSet } from "./change-feed.js";
 export {
   type BeginBellAttempt,
   type BellAttempt,
