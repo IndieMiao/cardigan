@@ -539,7 +539,6 @@ button.quiet,
   padding: 28px 32px;
   min-width: 0;
   width: 100%;
-  max-width: 1664px;
   display: flex;
   flex-direction: column;
   gap: var(--gap);
@@ -874,7 +873,7 @@ button .id-badge {
 /* C-206: document navigation and prose share the Workbench theme. */
 .help-layout {
   display: grid;
-  grid-template-columns: 180px minmax(0, 900px);
+  grid-template-columns: 180px minmax(0, 1fr);
   gap: 32px;
   align-items: start;
 }
@@ -1377,13 +1376,15 @@ fieldset.filters {
   color: var(--accent);
   text-align: right;
 }
+/* C-242: the page fills the content area; the main column takes the extra
+   width while the sidebar keeps a fixed 360px. Reading width is limited only
+   inside text blocks (.long-content, .markdown, .entry-summary). */
 .card-page {
   display: grid;
-  grid-template-columns: minmax(0, 760px) minmax(280px, 360px);
+  grid-template-columns: minmax(0, 1fr) 360px;
   align-items: start;
   gap: 24px;
   width: 100%;
-  max-width: 1144px;
 }
 .card-main {
   min-width: 0;
@@ -2082,9 +2083,6 @@ fieldset.filters {
   background: var(--danger-surface);
   color: var(--danger);
 }
-.needs-page {
-  max-width: 980px;
-}
 .needs-group {
   margin: 0 0 32px;
 }
@@ -2431,9 +2429,6 @@ fieldset.filters {
   .activity-action {
     grid-column: 2;
   }
-}
-.execution-page {
-  max-width: 1600px;
 }
 /* C-207: six columns; only the employee name carries weight, the rest is
    regular text. Rows stay within 72px so 1440x900 shows seven at once. */
@@ -3953,7 +3948,7 @@ body[data-lightbox="open"] .drawer-overlay {
 
 .settings-layout {
   display: grid;
-  grid-template-columns: 8rem minmax(0, 40rem);
+  grid-template-columns: 8rem minmax(0, 1fr);
   gap: 2rem;
 }
 .settings-layout nav {
@@ -3963,6 +3958,12 @@ body[data-lightbox="open"] .drawer-overlay {
 .settings-layout form {
   display: grid;
   gap: 1rem;
+}
+/* C-242: the settings panel fills the page; only the forms keep their former
+   40rem line length so inputs and save buttons do not stretch. Template forms
+   already used the full panel. */
+.settings-layout form:not(.template-form) {
+  max-width: 40rem;
 }
 .settings-layout input[type="number"] {
   display: block;
@@ -4323,6 +4324,15 @@ body[data-lightbox="open"] .drawer-overlay {
   max-height: calc(100vh - 32px);
   overflow-y: auto;
   pointer-events: none;
+}
+/* C-242: on desktop the page-level stack sits in the page header, right-aligned
+   with the full-width content and just below the header actions (view toggle,
+   "机器并发"), so it neither covers them nor floats in empty space. Dialog
+   stacks and the narrow layout keep the corner position. */
+@media (min-width: 761px) {
+  body > .request-feedback-region {
+    top: 68px;
+  }
 }
 .request-feedback {
   display: flex;

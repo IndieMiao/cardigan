@@ -39,8 +39,36 @@ const decision: NeedsDecision = {
   related_cards: [{ id: sample.id, title: sample.title }],
   merge_confirmation: null,
 };
+const params = new URLSearchParams(location.search);
 const client = fakeClient({
-  ...(new URLSearchParams(location.search).has("capacity")
+  // C-242: keep the card list loading to show where the slow-read hint sits.
+  ...(params.has("pendingCards")
+    ? { cards: () => new Promise<never>(() => {}) }
+    : {}),
+  // C-242: four filled lanes, wider than 1920 but narrower than 2560.
+  ...(params.has("wideBoard")
+    ? {
+        cards: async (_project, filter) => {
+          const cards = (
+            ["in_progress", "review", "awaiting_merge", "done"] as const
+          ).flatMap((status, lane) =>
+            [0, 1].map((i) => ({
+              ...sample,
+              id: `C-${lane * 2 + i + 1}`,
+              title: `${sample.title}（${lane * 2 + i + 1}）`,
+              status,
+            })),
+          );
+          return {
+            project_id: "p-1",
+            filter,
+            cards,
+            counts: { total: cards.length, needs_me: 1, agent: 1 },
+          };
+        },
+      }
+    : {}),
+  ...(params.has("capacity")
     ? {
         executionCapacity: async () => ({
           agents: [

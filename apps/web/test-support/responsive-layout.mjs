@@ -98,16 +98,50 @@ function withCurrentBoard(value) {
     : `${value}\n${currentPriority}`;
   return value;
 }
-const baseline = withCurrentBoard(
-  withCurrentIdentity(
-    withCurrentRecords(
-      execFileSync(
-        "git",
-        [
-          "show",
-          `${process.env.LAYOUT_BASELINE_REF ?? "origin/main"}:apps/web/src/styles.css`,
-        ],
-        { cwd: root, encoding: "utf8" },
+// C-242 intentionally drops the page-level max-width caps and lets the card
+// detail main column flex beside a fixed sidebar. Apply just those rules to
+// the baseline in place; once the baseline carries them this is a no-op.
+function withFullWidth(value) {
+  for (const [from, to] of [
+    ["  width: 100%;\n  max-width: 1664px;\n", "  width: 100%;\n"],
+    [".needs-page {\n  max-width: 980px;\n}\n", ""],
+    [".execution-page {\n  max-width: 1600px;\n}\n", ""],
+    [
+      "grid-template-columns: minmax(0, 760px) minmax(280px, 360px);",
+      "grid-template-columns: minmax(0, 1fr) 360px;",
+    ],
+    ["  width: 100%;\n  max-width: 1144px;\n}", "  width: 100%;\n}"],
+    [
+      "grid-template-columns: 180px minmax(0, 900px);",
+      "grid-template-columns: 180px minmax(0, 1fr);",
+    ],
+    [
+      "grid-template-columns: 8rem minmax(0, 40rem);",
+      "grid-template-columns: 8rem minmax(0, 1fr);",
+    ],
+    [
+      ".settings-layout form {\n  display: grid;\n  gap: 1rem;\n}\n",
+      css.slice(
+        css.indexOf(".settings-layout form {"),
+        css.indexOf(".settings-layout input[type="),
+      ),
+    ],
+  ])
+    value = value.replace(from, to);
+  return value;
+}
+const baseline = withFullWidth(
+  withCurrentBoard(
+    withCurrentIdentity(
+      withCurrentRecords(
+        execFileSync(
+          "git",
+          [
+            "show",
+            `${process.env.LAYOUT_BASELINE_REF ?? "origin/main"}:apps/web/src/styles.css`,
+          ],
+          { cwd: root, encoding: "utf8" },
+        ),
       ),
     ),
   ),
@@ -504,7 +538,8 @@ try {
             assert.equal(drawer.width, Math.min(280, width - 56), label);
             assert.equal(drawer.height, 844, label);
             assert.equal(drawer.focused, "关闭导航", label);
-            assert.equal(drawer.links, 8, `${label}: drawer entries`);
+            // C-206 added 帮助 to the drawer.
+            assert.equal(drawer.links, 9, `${label}: drawer entries`);
             assert.equal(drawer.main, 0, `${label}: drawer pushes content`);
             await capture("nav-drawer", width, theme);
             await send("Input.dispatchKeyEvent", {
