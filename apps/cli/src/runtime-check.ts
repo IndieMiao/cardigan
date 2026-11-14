@@ -1,4 +1,5 @@
 import type { RuntimeRef } from "@cardigan/domain";
+import { RuntimeTargets } from "@cardigan/host";
 import {
   DEFAULT_HC_SESSION,
   describeRuntime,
@@ -9,6 +10,7 @@ import {
   runtimeDifferences,
   runtimeOwnsRef,
 } from "@cardigan/runtime-herdr";
+import type { Store } from "@cardigan/store";
 import { CliError, EXIT } from "./errors.js";
 import type { CliIo } from "./io.js";
 
@@ -121,6 +123,7 @@ export async function terminalExecution(
   ref: RuntimeRef | null,
   id: string,
   sessionFlag?: string,
+  context?: { readonly store: Store; readonly project: string },
 ): Promise<{ readonly execution: ExecutionConfig; readonly session: string }> {
   const server = await registered(dataDir);
   const session =
@@ -132,6 +135,25 @@ export async function terminalExecution(
     server === undefined
       ? fromEnv(io, dataDir)
       : fromRegistered(io, dataDir, server);
+  if (ref?.target && context) {
+    const runtime = await RuntimeTargets.create({
+      execution: base,
+      session,
+      env: io.env,
+      store: context.store,
+      project: context.project,
+    });
+    if (
+      !runtime.ok ||
+      !runtime.value.ownsRef(ref) ||
+      (sessionFlag && sessionFlag !== ref.target.session)
+    )
+      throw new CliError(
+        "终端的受信目标绑定不匹配，已保留旧引用供核对。",
+        EXIT.failure,
+      );
+    return { execution: base, session };
+  }
   if (ref === null || runtimeOwnsRef(base, ref))
     return { execution: base, session };
   // A terminal started in local mode stays reachable from the same host account.

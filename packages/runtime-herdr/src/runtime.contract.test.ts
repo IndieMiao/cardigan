@@ -276,6 +276,20 @@ for (const kind of ["memory", "hc"] as const) {
       afterEach(async () => {
         await fixture?.cleanup();
       }, 15000);
+      test.skipIf(kind !== "hc")(
+        "an actual hc name collision is refused without replacing the existing terminal",
+        async () => {
+          expect(
+            await fixture.runtime.provision(
+              assignment,
+              role,
+              machine,
+              fixture.launch,
+            ),
+          ).toMatchObject({ ok: false, error: { code: "runtime_conflict" } });
+          expect(value(await fixture.runtime.status(r)).process).toBe("alive");
+        },
+      );
       test("provision, conditional wake, OSC working/blocked/idle and interrupt preserve runtime facts", async () => {
         const initial = value(await fixture.runtime.status(r));
         expect(initial).toMatchObject({ process: "alive", agent: "idle" });

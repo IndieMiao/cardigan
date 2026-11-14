@@ -377,7 +377,7 @@ test("unclassified exceptions are sanitized into a paused Needs You item", async
   ).toHaveLength(1);
 }, 30_000);
 
-test("credential permission changes pause pushing as auth without reading the credential or reaching the remote", async () => {
+test("credential permission changes retry once before pausing without reading the credential or reaching the remote", async () => {
   const c = await fixture();
   await c.card();
   await c.merge().tick();
@@ -400,6 +400,16 @@ test("credential permission changes pause pushing as auth without reading the cr
   expect(c.events("merge_push_failed")[0]?.payload).toMatchObject({
     reason: "auth",
   });
+  expect(
+    c.f.state().human_actions.filter((a) => a.status === "open"),
+  ).toHaveLength(0);
+  c.advance(1);
+  await loop.tick();
+  await loop.tick();
+  expect(c.events("merge_push_failed")).toHaveLength(2);
+  expect(
+    c.f.state().human_actions.filter((a) => a.status === "open"),
+  ).toHaveLength(1);
   expect(git(c.remote, "for-each-ref")).toBe("");
   expect(JSON.stringify(c.f.state())).not.toContain(
     "synthetic-secret-must-not-appear",
@@ -449,7 +459,7 @@ test("the assembled control plane owns and drains its push loop", async () => {
   expect(c.errors).toEqual([]);
 }, 30_000);
 
-test("one paused project cannot block another project's push queue", async () => {
+test("one project waiting for an auth retry cannot block another project's push queue", async () => {
   const c = await fixture();
   await c.card();
   await c.merge().tick();

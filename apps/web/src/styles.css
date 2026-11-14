@@ -3098,6 +3098,10 @@ body[data-lightbox="open"] .drawer-overlay {
   background: var(--accent);
   color: var(--accent-contrast);
 }
+/* The positioning wrapper must also let passive hints pass clicks through. */
+[data-radix-popper-content-wrapper]:has(> .tooltip-content[data-passive]) {
+  pointer-events: none;
+}
 .tooltip-content {
   z-index: 120;
   max-width: min(280px, calc(100vw - var(--gap) * 2));
