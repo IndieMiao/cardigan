@@ -271,6 +271,28 @@ function waitSince(
   return valid.sort((a, b) => Date.parse(b) - Date.parse(a))[0] ?? at;
 }
 
+/** Review events identify a Review and Delivery, not a work item. */
+function reviewConcernsDependency(
+  state: CommandState,
+  item: WorkItem,
+  event: Event,
+) {
+  if (event.type !== "review_submitted") return false;
+  const review = state.reviews.find(
+    (r) =>
+      r.id === payload(event).review_id &&
+      r.delivery_id === payload(event).delivery_id,
+  );
+  const delivery = state.deliveries.find((v) => v.id === review?.delivery_id);
+  return (
+    !!review &&
+    !!delivery &&
+    (item.depends_on.includes(review.work_item_id) ||
+      (delivery.kind !== "card_completion" &&
+        item.depends_on.includes(delivery.work_item_id)))
+  );
+}
+
 function systemWaits(d: CommandDraft, at: string): Wait[] {
   const state = d.state;
   const pref = projectPreferences(d.state),
@@ -323,14 +345,11 @@ function systemWaits(d: CommandDraft, at: string): Wait[] {
               target?.id === payload(e).delivery_id) ||
               (e.type === "work_item_created" &&
                 payload(e).work_item_id === item.id) ||
-              ([
-                "delivery_accepted",
-                "review_submitted",
-                "work_item_updated",
-              ].includes(e.type) &&
+              (["delivery_accepted", "work_item_updated"].includes(e.type) &&
                 item.depends_on.includes(
                   payload(e).work_item_id as WorkItemId,
                 )) ||
+              reviewConcernsDependency(state, item, e) ||
               (e.type === "card_updated" && payload(e).status === "todo") ||
               e.id === hold),
         );
@@ -413,14 +432,26 @@ function systemWaits(d: CommandDraft, at: string): Wait[] {
                     payload(e).delivery_id as Delivery["id"],
                   ))),
           );
-          const since = waitSince(
-            d,
-            at,
-            facts.length
-              ? [check.updated_at, ...facts.map((e) => e.created_at)]
-              : [at],
-          );
-          for (const reviewer of recipients)
+          for (const reviewer of recipients) {
+            const hold = reviewer
+              ? state.events.findLast(
+                  (e) =>
+                    e.type === "work_item_updated" &&
+                    payload(e).work_item_id === reviewer.id &&
+                    payload(e).manual_assign !== undefined,
+                )
+              : undefined;
+            const since = waitSince(
+              d,
+              at,
+              facts.length || hold
+                ? [
+                    check.updated_at,
+                    ...facts.map((e) => e.created_at),
+                    hold?.created_at,
+                  ]
+                : [at],
+            );
             waits.push({
               key: JSON.stringify([
                 "check",
@@ -430,16 +461,7 @@ function systemWaits(d: CommandDraft, at: string): Wait[] {
                 versions,
                 completionIds,
                 reviewer?.id,
-                reviewer
-                  ? state.events
-                      .filter(
-                        (e) =>
-                          e.type === "work_item_updated" &&
-                          payload(e).work_item_id === reviewer.id &&
-                          payload(e).manual_assign !== undefined,
-                      )
-                      .at(-1)?.id
-                  : null,
+                hold?.id ?? null,
                 epoch,
               ]),
               since,
@@ -454,6 +476,7 @@ function systemWaits(d: CommandDraft, at: string): Wait[] {
               after_minutes: policy.pre_merge_check_pending_after_minutes,
               body: `合并前核对「${check.label}」仍待完成，请核对当前交付。`,
             });
+          }
         }
       }
   }
