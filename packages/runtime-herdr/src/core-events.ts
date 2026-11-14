@@ -1,6 +1,6 @@
 import type { RuntimeObservation } from "@cardigan/domain";
 import { type HcClient, RuntimeFailure } from "./client.js";
-import type { RuntimeEvent } from "./index.js";
+import type { RuntimeEvent } from "./runtime-event.js";
 
 interface Listener {
   readonly epoch: number;

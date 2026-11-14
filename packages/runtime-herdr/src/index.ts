@@ -26,6 +26,7 @@ import {
 } from "./call-queue.js";
 import { type CoreEvents, coreEvents } from "./core-events.js";
 import { runtimeOwnsRef } from "./registered.js";
+import type { RuntimeEvent } from "./runtime-event.js";
 
 export {
   AGENT_PATH,
@@ -45,6 +46,7 @@ export {
   type HcCallPolicy,
   hcCallPolicy,
 } from "./call-queue.js";
+export type { RuntimeEvent } from "./runtime-event.js";
 
 import {
   type AgentCommandFailure,
@@ -119,18 +121,7 @@ export interface HerdrOptions {
   readonly env?: NodeJS.ProcessEnv;
   readonly client?: HcClient;
 }
-export interface RuntimeEvent {
-  /** Host subscription incarnation; seq itself remains the core's sequence. */
-  readonly source_generation?: number;
-  readonly seq: number;
-  readonly type: string;
-  readonly terminal_ref?: string;
-  readonly data?: unknown;
-  readonly observations: readonly {
-    terminal_ref: string;
-    status: RuntimeObservation;
-  }[];
-}
+
 type Terminal = {
   address: string;
   state: string;
