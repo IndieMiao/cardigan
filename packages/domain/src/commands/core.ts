@@ -121,6 +121,7 @@ type CommandName =
   | "check_merge_push_range"
   | "accept_merge_push_hold"
   | "record_merge_executor"
+  | "record_delivery_precheck"
   | "record_merge_check"
   | "record_merge_preparation"
   | "record_merge_check_blockers"
@@ -256,6 +257,7 @@ export class CommandDraft {
       "remind_decision_followups",
       "record_merge_result",
       "record_merge_executor",
+      "record_delivery_precheck",
       "record_merge_check",
       "record_merge_preparation",
       "record_merge_check_blockers",

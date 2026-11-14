@@ -46,6 +46,7 @@ export function setProjectPreferences(
   state: CommandState,
   actor: Actor,
   input: {
+    code_review_waits_for_precheck?: boolean;
     system_auto_assign_verifiers?: boolean;
     system_reminders?: boolean;
     system_reminder_policy?: SystemReminderPolicy | null;
@@ -120,6 +121,7 @@ export function setProjectPreferences(
       "上下文剩余比例须为大于 0 且小于 100 的有限数值",
     );
     for (const key of [
+      "code_review_waits_for_precheck",
       "system_auto_assign_verifiers",
       "system_reminders",
     ] as const)
@@ -152,7 +154,8 @@ export function setProjectPreferences(
       "上下文剩余比例须大于 0 且小于 100，换会话比例必须小于交接提醒比例",
     );
     ensure(
-      input.system_auto_assign_verifiers !== undefined ||
+      input.code_review_waits_for_precheck !== undefined ||
+        input.system_auto_assign_verifiers !== undefined ||
         input.system_reminders !== undefined ||
         input.system_reminder_policy !== undefined ||
         input.context_handoff_remaining_pct !== undefined ||
@@ -223,6 +226,12 @@ export function setProjectPreferences(
     }
     const next = {
       ...old,
+      ...(input.code_review_waits_for_precheck !== undefined
+        ? {
+            code_review_waits_for_precheck:
+              input.code_review_waits_for_precheck,
+          }
+        : {}),
       ...(input.system_auto_assign_verifiers !== undefined
         ? { system_auto_assign_verifiers: input.system_auto_assign_verifiers }
         : {}),
@@ -281,6 +290,7 @@ export function setProjectPreferences(
         : {}),
     };
     const systemKeys = [
+      "code_review_waits_for_precheck",
       "system_auto_assign_verifiers",
       "system_reminders",
       "system_reminder_policy",

@@ -947,3 +947,58 @@ test("§4.4 delivery_accepted reminds the producer when it was the last required
   expect(rules(result)).toContain("6.4/all required work items passed");
   expect(recipients(result)).toContain("assignment:A-1");
 });
+
+test("C-298: pending prechecks withhold independent review; passing wakes its owner and failure returns the author", () => {
+  const d = delivery("D-1", {
+    subject: { kind: "git_head", value: "a".repeat(40) },
+  });
+  const w = workItem("W-2", {
+    kind: "verify",
+    role_id: "independent_reviewer",
+    target_work_item_id: "W-1",
+    status: "ready",
+    assignment_id: "A-2",
+  });
+  const payload = {
+    delivery_id: d.id,
+    work_item_id: d.work_item_id,
+    subject: { ...d.subject },
+    status: "queued",
+    checks: [],
+    updated_at: "2030-01-01",
+  };
+  const request = event("delivery_precheck_requested", payload);
+  const state = snapshot({
+    work_items: [workItem("W-1", { assignment_id: "A-1" }), w],
+    deliveries: [{ ...d, requested_verifiers: [w.id] }],
+    events: [request],
+  });
+  expect(
+    routeEvent({
+      event: event("delivery_submitted", { delivery_id: d.id }),
+      snapshot: state,
+    }).notifications,
+  ).toEqual([]);
+  const pass = event(
+    "delivery_precheck_updated",
+    { ...payload, status: "passed" },
+    { seq: 2, actor: { kind: "system", project_id: state.project_id } },
+  );
+  expect(
+    recipients(
+      routeEvent({
+        event: pass,
+        snapshot: { ...state, events: [request, pass] },
+      }),
+    ),
+  ).toEqual(["assignment:A-2"]);
+  const failed = routeEvent({
+    event: event("delivery_precheck_rejected", {
+      delivery_id: d.id,
+      work_item_id: d.work_item_id,
+    }),
+    snapshot: state,
+  });
+  expect(recipients(failed)).toEqual(["assignment:A-1"]);
+  expect(failed.notifications[0]?.run_kind).toBe("fix");
+});

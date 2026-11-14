@@ -1,6 +1,7 @@
 import type { CardId, CardStatus, CardView, Delivery } from "@cardigan/domain";
 import {
   cardTemplate,
+  currentDeliveryPrechecks,
   decisionAuthorView,
   deriveCardFields,
   deriveCardStatus,
@@ -91,6 +92,16 @@ export const getCardTool = defineTool({
         ...agentCard(card),
         status,
         stored_status: card.status,
+        delivery_prechecks: store.uow.read((tx) =>
+          currentDeliveryPrechecks(
+            {
+              work_items,
+              deliveries,
+              events: tx.events.listAfter(identity.actor.project_id, cardId, 0),
+            },
+            cardId,
+          ),
+        ),
         ...(mergeCheck ? { merge_check: mergeCheck } : {}),
       },
       waiting_on: derived.waiting_on,

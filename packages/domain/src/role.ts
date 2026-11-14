@@ -59,6 +59,7 @@ export const STANDING_ROLE_TOOLS = [
   "replace_verification_work_item",
   "assign",
   "release_assignment",
+  "request_delivery_precheck",
   "project_snapshot",
   "list_needs_you",
   "list_templates",
@@ -70,6 +71,7 @@ export const STANDING_ROLE_TOOLS = [
 
 /** V12b: read-only template/role catalog, standing PM only (plan §2.1). */
 export const STANDING_ONLY_TOOLS = [
+  "request_delivery_precheck",
   "list_templates",
   "list_roles",
 ] as const satisfies readonly ToolName[];

@@ -1,3 +1,4 @@
+import type { EventId } from "@cardigan/domain";
 import {
   type Assignment,
   type AssignmentId,
@@ -44,6 +45,7 @@ export const CANDIDATE_FEED: readonly string[] = [
   "cards",
   "decisions",
   "events",
+  "project_preferences",
   "notifications",
   "bell_attempts",
 ];
@@ -321,6 +323,20 @@ export class CandidateIndex {
     changed: ReadonlyMap<string, ReadonlySet<string>>,
   ): Set<AssignmentId> | undefined {
     const dirty = new Set<AssignmentId>();
+    if (changed.has("project_preferences"))
+      for (const a of state.assignments) dirty.add(a.id);
+    for (const id of changed.get("events") ?? []) {
+      const event = eventById(state.events, id as EventId);
+      if (event?.type.startsWith("delivery_precheck_"))
+        for (const a of state.assignments)
+          if (
+            a.scope === "work_item" &&
+            state.work_items.some(
+              (w) => w.id === a.work_item_id && w.card_id === event.card_id,
+            )
+          )
+            dirty.add(a.id);
+    }
     for (const id of changed.get("assignments") ?? [])
       dirty.add(id as AssignmentId);
     for (const id of changed.get("runs") ?? []) {

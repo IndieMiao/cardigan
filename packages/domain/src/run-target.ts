@@ -1,3 +1,7 @@
+import {
+  type PrecheckState,
+  verificationPrecheckPending,
+} from "./delivery-precheck.js";
 import type { Assignment, Delivery, WorkItem } from "./entities.js";
 
 interface RunTargetIndex {
@@ -77,16 +81,14 @@ function runTargetIndex(state: {
  */
 export function hasRunTarget(
   assignment: Assignment,
-  state: {
-    readonly work_items: readonly WorkItem[];
-    readonly deliveries: readonly Delivery[];
-  },
+  state: PrecheckState,
 ): boolean {
   if (assignment.scope !== "work_item") return true;
   const index = runTargetIndex(state);
   const item = index.items.get(assignment.work_item_id);
   if (!item) return false;
   if (item.kind !== "verify") return true;
+  if (verificationPrecheckPending(state, item)) return false;
   return item.target_work_item_id
     ? index.targets.get(item.target_work_item_id)?.has(item.card_id) === true
     : index.completions.get(item.id)?.has(item.card_id) === true;

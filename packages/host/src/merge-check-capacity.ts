@@ -25,11 +25,21 @@ export function acquireMergeCheckCapacity(
   attempt: string,
   owner: ExecutionOwner | undefined = executionOwner(process.pid),
   machine: string = LOCAL_EXECUTOR,
+  limit?: number,
 ): MergeCheckCapacityLease {
-  if (!owner) return Object.assign(() => {}, { transfer: () => {} });
+  if (!owner) {
+    if (limit !== undefined)
+      throw new Error("Cannot establish check execution ownership");
+    return Object.assign(() => {}, { transfer: () => {} });
+  }
   let current = owner;
   store.uow.run(() => {
     if (deploymentInProgress(store)) throw new DeploymentInProgress();
+    if (
+      limit !== undefined &&
+      (runningMergeChecks(store).get(machine) ?? 0) >= limit
+    )
+      throw new MergeCheckCapacityFull();
     store.database
       .prepare(`INSERT INTO merge_check_capacity
     (project_id, attempt_id, machine_id, owner_pid, owner_start) VALUES (?, ?, ?, ?, ?)`)
@@ -97,3 +107,24 @@ export function mergeCheckCapacityAvailable(
       (runningMergeChecks(store).get(machine) ?? 0) < limit,
   );
 }
+
+/** Recovery must not replace a still-live attempt merely because another slot is free. */
+export function mergeCheckAttemptRunning(
+  store: Store,
+  project: ProjectId,
+  attempt: string,
+): boolean {
+  return store.uow.read(() =>
+    store.database
+      .prepare(
+        "SELECT owner_pid, owner_start FROM merge_check_capacity WHERE project_id = ? AND attempt_id = ?",
+      )
+      .all(project, attempt)
+      .some(
+        (row) =>
+          executionOwner(Number(row.owner_pid))?.start === row.owner_start,
+      ),
+  );
+}
+
+export class MergeCheckCapacityFull extends Error {}

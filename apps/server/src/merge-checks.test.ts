@@ -3,11 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   completeHumanAction,
+  latestDeliveryPrecheck,
   latestMergeCheck,
   listNeedsYou,
   prepareMergePlan,
   recheckMerge,
   recordMergeCheck,
+  requestDeliveryPrecheck,
   requestHumanAction,
 } from "@cardigan/domain";
 import type { CentralProject, PreparedMerge } from "@cardigan/git-service";
@@ -21,6 +23,8 @@ import {
   runCapacitySnapshot,
   type sweepCheckoutOrphans,
 } from "@cardigan/host";
+import { loadCommandState } from "@cardigan/mcp-server";
+import { Store } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
 import {
   acceptThroughMergeGate,
@@ -88,6 +92,7 @@ function controller(f: M4Fixture) {
       throw new Error("Legacy merge must not be used");
     }),
     baseline: vi.fn(async () => base),
+    deliveryTree: vi.fn(async () => tree),
     prepare: vi.fn(
       async (): Promise<PreparedMerge> => ({
         status: "candidate",
@@ -2003,4 +2008,252 @@ test("the next high-priority card in a running project's lane competes before a 
   await o.finish(o.b.project_id);
   await round;
   expect(o.c.errors).not.toHaveBeenCalled();
+});
+
+async function precheckProduct(f: M4Fixture) {
+  const scenario = m4Scenario(f);
+  f.startRun(scenario.coder);
+  const delivery = await f.deliver(scenario.coder, scenario.development.id, {
+    subject: "d".repeat(40),
+    verifiers: [scenario.codeReview.id],
+  });
+  f.apply(
+    (s, a, p) => requestDeliveryPrecheck(s, a, { delivery_id: delivery.id }, p),
+    f.human,
+  );
+  return {
+    scenario,
+    delivery,
+    check: () => latestDeliveryPrecheck(f.state().events, delivery),
+  };
+}
+function precheckController(f: M4Fixture) {
+  const c = controller(f);
+  c.setConfig({
+    status: "enabled",
+    checks: [{ name: "test", run: "true" }],
+    env: {},
+    totalTimeoutMs: 1000,
+    executor: ciExecutor(1),
+  });
+  return c;
+}
+test("C-298: manual prechecks persist, reuse their delivery result and keep final merge evidence separate", async () => {
+  const f = m4Fixture();
+  fixtures.push(f);
+  const product = await precheckProduct(f),
+    c = precheckController(f);
+  await c.gate.tick([f.project_id]);
+  expect(c.errors).not.toHaveBeenCalled();
+  expect(product.check()?.status).toBe("passed");
+  expect(c.run.mock.calls[0]?.[0]).toMatchObject({
+    sha: product.delivery.subject.value,
+    serialize: true,
+    lockSlot: 0,
+    execution: { host: "cardigan-ci" },
+  });
+  expect(f.state().events.some((e) => e.type === "merge_check_finished")).toBe(
+    false,
+  );
+  f.apply(
+    (s, a, p) =>
+      requestDeliveryPrecheck(s, a, { delivery_id: product.delivery.id }, p),
+    f.human,
+  );
+  const restarted = precheckController(f);
+  await restarted.gate.tick([f.project_id]);
+  expect(restarted.run).not.toHaveBeenCalled();
+  expect(
+    cardDetail(f.state(), product.scenario.card.id)?.card.delivery_prechecks,
+  ).toEqual([product.check()]);
+});
+test("C-298 Q-486: a runnable merge precedes a precheck, using the same target slots", async () => {
+  const { f } = await fixture();
+  const product = await precheckProduct(f),
+    c = precheckController(f);
+  await c.gate.tick([f.project_id]);
+  expect(c.errors).not.toHaveBeenCalled();
+  expect(c.run.mock.calls.map(([input]) => input.sha)).toEqual([
+    "b".repeat(40),
+    product.delivery.subject.value,
+  ]);
+  expect(capacity(f).checks).toEqual({});
+});
+test("C-298 Q-486: an already running precheck is not preempted; a later merge runs before the next precheck", async () => {
+  const f = m4Fixture();
+  fixtures.push(f);
+  const first = await precheckProduct(f),
+    c = precheckController(f);
+  let finish: ((result: CheckoutResult) => void) | undefined;
+  c.run.mockImplementationOnce(async (input) => {
+    input.onReady?.();
+    return new Promise((resolve) => {
+      finish = resolve;
+    });
+  });
+  const initial = await c.gate.schedule([f.project_id]);
+  await vi.waitFor(() => expect(first.check()?.status).toBe("running"));
+  const merge = m4Scenario(f);
+  await acceptThroughMergeGate(f, merge, "a".repeat(40));
+  const second = await precheckProduct(f);
+  const next = await c.gate.schedule([f.project_id]);
+  expect(c.run).toHaveBeenCalledTimes(1);
+  expect(c.run.mock.calls[0]?.[0].signal?.aborted).toBe(false);
+  finish?.(passed);
+  await initial.done;
+  await next.done;
+  await c.gate.tick([f.project_id]);
+  expect(c.errors).not.toHaveBeenCalled();
+  expect(c.run.mock.calls.map(([input]) => input.sha)).toEqual([
+    first.delivery.subject.value,
+    "b".repeat(40),
+    second.delivery.subject.value,
+  ]);
+});
+test("C-298: no remote configuration fails closed and never invokes the local runner", async () => {
+  const f = m4Fixture();
+  fixtures.push(f);
+  const product = await precheckProduct(f),
+    c = controller(f);
+  await c.gate.tick([f.project_id]);
+  expect(c.run).not.toHaveBeenCalled();
+  expect(product.check()?.status).toBe("environment_failed");
+  expect(f.item(product.scenario.development.id).status).toBe("delivered");
+});
+test("C-298: a late precheck result cannot release a new delivery; log summaries hide private paths", async () => {
+  const f = m4Fixture();
+  fixtures.push(f);
+  const product = await precheckProduct(f),
+    c = precheckController(f);
+  c.run.mockImplementationOnce(async (input) => {
+    input.onReady?.();
+    input.onOutput?.("test", "FAIL /private/example/test.ts > assertion\n");
+    const next = await f.deliver(
+      product.scenario.coder,
+      product.scenario.development.id,
+      { subject: "e".repeat(40), verifiers: [product.scenario.codeReview.id] },
+    );
+    f.apply(
+      (s, a, p) => requestDeliveryPrecheck(s, a, { delivery_id: next.id }, p),
+      f.human,
+    );
+    return {
+      status: "failed",
+      checks: [{ name: "test", status: "failed", exit_code: 1 }],
+      cleanup_errors: [],
+    };
+  });
+  await c.gate.tick([f.project_id]);
+  expect(
+    latestDeliveryPrecheck(f.state().events, product.delivery)?.status,
+  ).toBe("interrupted");
+  const detail = cardDetail(f.state(), product.scenario.card.id);
+  expect(detail?.card.delivery_prechecks).toEqual([
+    expect.objectContaining({ status: "queued" }),
+  ]);
+  expect(
+    f.state().events.some((e) => e.type === "delivery_precheck_rejected"),
+  ).toBe(false);
+  expect(c.errors).not.toHaveBeenCalled();
+});
+
+test("C-298 precheck facts survive reopening storage and command snapshot invalidation", async () => {
+  const f = m4Fixture();
+  fixtures.push(f);
+  const product = await precheckProduct(f),
+    c = precheckController(f);
+  const reader = Store.open({ dataDir: f.dataDir });
+  try {
+    expect(
+      reader.uow.read((tx) =>
+        latestDeliveryPrecheck(
+          loadCommandState(tx, f.project_id).events,
+          product.delivery,
+        ),
+      )?.status,
+    ).toBe("queued");
+    await c.gate.tick([f.project_id]);
+    expect(
+      reader.uow.read((tx) =>
+        latestDeliveryPrecheck(
+          loadCommandState(tx, f.project_id).events,
+          product.delivery,
+        ),
+      )?.status,
+    ).toBe("passed");
+  } finally {
+    reader.close();
+  }
+});
+test("C-298 real failures have a safe summary and return the product without a review", async () => {
+  const f = m4Fixture();
+  fixtures.push(f);
+  const product = await precheckProduct(f),
+    c = precheckController(f);
+  c.run.mockImplementationOnce(async (input) => {
+    input.onReady?.();
+    input.onOutput?.(
+      "test",
+      "FAIL suite.test.ts > invariant\nError: /private/example/secret-file failed\n",
+    );
+    return {
+      status: "failed",
+      checks: [{ name: "test", status: "failed", exit_code: 1 }],
+      cleanup_errors: [],
+    };
+  });
+  await c.gate.tick([f.project_id]);
+  expect(c.errors).not.toHaveBeenCalled();
+  expect(product.check()?.status).toBe("failed");
+  expect(product.check()?.summary).toContain("suite.test.ts > invariant");
+  expect(product.check()?.summary).not.toContain("/private/example");
+  const log = await readFile(
+    join(
+      f.dataDir,
+      "merge-gate",
+      "logs",
+      f.project_id,
+      product.check()!.log_ref!,
+    ),
+    "utf8",
+  );
+  expect(log).not.toContain("/private/example");
+  expect(f.item(product.scenario.development.id).status).toBe(
+    "changes_requested",
+  );
+  expect(f.state().reviews).toEqual([]);
+});
+test("C-298 timeout retries once, while remote outages reuse existing backoff without falling back", async () => {
+  let now = Date.parse("2030-01-01T00:00:00Z");
+  const f = m4Fixture({ clock: { now: () => new Date(now).toISOString() } });
+  fixtures.push(f);
+  const product = await precheckProduct(f),
+    c = precheckController(f);
+  c.run.mockImplementationOnce(async (input) => {
+    input.onReady?.();
+    return {
+      status: "timed_out",
+      checks: [{ name: "test", status: "timed_out" }],
+      cleanup_errors: [],
+    };
+  });
+  await c.gate.tick([f.project_id]);
+  expect(product.check()?.status).toBe("queued");
+  c.run.mockResolvedValueOnce({
+    status: "executor_unreachable",
+    checks: [],
+    cleanup_errors: [],
+  });
+  await c.gate.tick([f.project_id]);
+  expect(product.check()?.status).toBe("executor_unreachable");
+  await c.gate.tick([f.project_id]);
+  expect(c.run).toHaveBeenCalledTimes(2);
+  now += 60_000;
+  await c.gate.tick([f.project_id]);
+  expect(product.check()?.status).toBe("passed");
+  expect(
+    c.run.mock.calls.every(([input]) => input.execution.mode === "agent-ssh"),
+  ).toBe(true);
+  expect(f.item(product.scenario.development.id).status).toBe("delivered");
+  expect(c.errors).not.toHaveBeenCalled();
 });

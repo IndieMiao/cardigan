@@ -23,6 +23,7 @@ import {
   PRE_MERGE_CHECK_REMINDED,
   pmMergeCheckDelegationAllowed,
   requesterNotificationRecipient,
+  verificationPrecheckPending,
 } from "@cardigan/domain";
 import {
   payloadObject,
@@ -510,7 +511,25 @@ function routeDelivery(input: RouteInput, draft: Draft): void {
   // (M5.S S25 follow-up).
   for (const verifier_id of delivery.requested_verifiers) {
     const verifier = itemOf(input, verifier_id);
-    if (verifier === undefined) continue;
+    if (
+      verifier === undefined ||
+      verificationPrecheckPending(input.snapshot, verifier)
+    )
+      continue;
+    if (
+      input.event.type === "delivery_precheck_updated" &&
+      (verifier.status !== "ready" ||
+        (verifier.role_id !== "independent_reviewer" &&
+          !(
+            verifier.role_id === "reviewer" &&
+            input.snapshot.project_preferences?.some(
+              (p) =>
+                p.id === input.snapshot.project_id &&
+                p.code_review_waits_for_precheck,
+            )
+          )))
+    )
+      continue;
     noteAssignment(
       input,
       draft,
@@ -1361,6 +1380,24 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "instruction_issued":
     case "instruction":
       routeInstruction(input, draft);
+      break;
+    case "delivery_precheck_updated":
+      if (payloadString(input.event.payload, "status") === "passed")
+        routeDelivery(input, draft);
+      break;
+    case "delivery_precheck_rejected":
+      noteAssignment(
+        input,
+        draft,
+        itemOf(
+          input,
+          payloadString(input.event.payload, "work_item_id") as WorkItemId,
+        ),
+        "review",
+        "6.4/review rejected",
+        "预检查失败，请修复后重新交付",
+        "fix",
+      );
       break;
     case "delivery_submitted":
       routeDelivery(input, draft);

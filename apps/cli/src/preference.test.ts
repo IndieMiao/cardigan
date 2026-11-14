@@ -360,3 +360,22 @@ test("C-265: tick-profile is off by default; the human switches it with an audit
   ])
     expect(await run(["preference", ...bad])).not.toBe(0);
 });
+
+test("C-298 code review waiting is off by default and persists only through human preferences", async () => {
+  expect(
+    await run(["preference", "get", "code-review-waits-for-precheck"]),
+  ).toBe(0);
+  expect(output).toContain("code-review-waits-for-precheck: off");
+  expect(
+    await run(["preference", "set", "code-review-waits-for-precheck", "on"]),
+  ).toBe(0);
+  expect(output).toContain("code-review-waits-for-precheck: on");
+  expect(
+    store.uow.read((tx) =>
+      tx.project_preferences.get("preferences", "preferences"),
+    )?.code_review_waits_for_precheck,
+  ).toBe(true);
+  expect(
+    await run(["preference", "set", "code-review-waits-for-precheck", "maybe"]),
+  ).not.toBe(0);
+});

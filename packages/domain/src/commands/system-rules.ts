@@ -1,3 +1,4 @@
+import { verificationPrecheckPending } from "../delivery-precheck.js";
 import type { Actor, Delivery, Event, WorkItem } from "../entities.js";
 import type { WorkItemId } from "../ids.js";
 import { validSystemReminderPolicy } from "../preferences.js";
@@ -91,7 +92,7 @@ export function autoAssignVerifier(
     if (item.kind !== "verify" || !openItem(d, item) || !noAssignment(d, item))
       return null;
     const target = reviewTarget(d, item);
-    if (!target) return null;
+    if (!target || verificationPrecheckPending(state, item)) return null;
     // Selection/checks fail before any assignment, token request or event is written.
     // Manual assignment preserves legacy employee-less behavior; automation never does.
     const selected = attempt(() => {

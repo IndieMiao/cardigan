@@ -11,6 +11,8 @@ import {
 import {
   acquireMergeCheckCapacity,
   executionOwner,
+  MergeCheckCapacityFull,
+  mergeCheckAttemptRunning,
   mergeCheckCapacityAvailable,
 } from "./merge-check-capacity.js";
 
@@ -68,6 +70,54 @@ test("deployment and checks exclude each other across Store connections", async 
         worker.once("exit", () => resolve()),
       );
     }
+  } finally {
+    first.close();
+    second.close();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("C-298 prechecks reserve the existing target capacity atomically across connections", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "cg-precheck-capacity-"));
+  const first = Store.open({ dataDir }),
+    second = Store.open({ dataDir });
+  try {
+    first.createProject({ id: "fixture", name: "Fixture" });
+    const lease = acquireMergeCheckCapacity(
+      first,
+      "fixture",
+      "precheck",
+      undefined,
+      "remote",
+      1,
+    );
+    try {
+      expect(mergeCheckAttemptRunning(second, "fixture", "precheck")).toBe(
+        true,
+      );
+      expect(() =>
+        acquireMergeCheckCapacity(
+          second,
+          "fixture",
+          "merge",
+          undefined,
+          "remote",
+          1,
+        ),
+      ).toThrow(MergeCheckCapacityFull);
+      expect(mergeCheckCapacityAvailable(second, "remote", 1)).toBe(false);
+    } finally {
+      lease();
+    }
+    expect(mergeCheckAttemptRunning(second, "fixture", "precheck")).toBe(false);
+    acquireMergeCheckCapacity(
+      second,
+      "fixture",
+      "merge",
+      undefined,
+      "remote",
+      1,
+    )();
   } finally {
     first.close();
     second.close();

@@ -20,6 +20,7 @@ import {
   replaceVerificationWorkItem,
   reportBlocker,
   requestDecision,
+  requestDeliveryPrecheck,
   requestHumanAction,
   resolveDelegatedDecision,
   states,
@@ -405,6 +406,23 @@ export function managementTools(clock?: Clock) {
     });
   }
   return [
+    defineTool({
+      name: "request_delivery_precheck",
+      description:
+        "PM: request or reuse a precheck of a current product delivery in this project. Uses the configured remote executor and commands; never authorizes merging.",
+      input: z
+        .object({ delivery_id: id("delivery"), idempotency_key })
+        .strict(),
+      handler: ({ idempotency_key, ...params }, context) =>
+        executeCommand(
+          context,
+          "request_delivery_precheck",
+          idempotency_key,
+          params,
+          requestDeliveryPrecheck,
+          clock,
+        ),
+    }),
     wire(
       "release_assignment",
       "Release a work-item Assignment as PM Ops. Unfinished Runs must first be stopped with cardigan assignment stop <A-n>. Standing Assignments can only be released by the human.",

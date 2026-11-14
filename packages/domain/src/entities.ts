@@ -65,6 +65,7 @@ export const toolNames = [
   "replace_verification_work_item",
   "assign",
   "release_assignment",
+  "request_delivery_precheck",
   "project_snapshot",
   "list_needs_you",
   "list_templates",
@@ -171,6 +172,7 @@ export interface PreMergeCheck {
   readonly updated_at: Timestamp;
 }
 export interface CardView extends Card {
+  readonly delivery_prechecks?: readonly import("./delivery-precheck.js").DeliveryPrecheck[];
   readonly merge_check?: MergeCheckView;
   readonly merge_check_blockers?: readonly MergeCheckBlocker[];
   /** Derived by `deriveWaitingOn` in `card-derived.ts`. */

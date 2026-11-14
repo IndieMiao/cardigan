@@ -24,6 +24,7 @@ import {
   type CommentBoxHandle,
   type MentionOption,
 } from "../components/CommentBox.js";
+import { DeliveryPrechecks } from "../components/DeliveryPrechecks.js";
 import {
   EmptyState,
   IdTag,
@@ -474,6 +475,10 @@ function CardContent({
             onSaved={reload}
           />
         </header>
+        <DeliveryPrechecks
+          checks={card.delivery_prechecks ?? []}
+          projectId={projectId}
+        />
         <CardSectionNav
           article={article}
           sections={sections}

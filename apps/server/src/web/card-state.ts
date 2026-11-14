@@ -53,7 +53,7 @@ export function readCardList(store: Store, project_id: ProjectId) {
     const events = store.database
       .prepare(
         "SELECT doc FROM events WHERE project_id = ? AND type IN " +
-          "('merge_check_queued', 'merge_check_started', 'merge_check_finished', 'merge_check_requeued')",
+          "('delivery_precheck_requested', 'delivery_precheck_updated', 'delivery_precheck_settled', 'merge_check_queued', 'merge_check_started', 'merge_check_finished', 'merge_check_requeued')",
       )
       .all(project_id)
       .map(

@@ -19,7 +19,7 @@ const MASK = "[REDACTED]",
   OMITTED = `\n${TRUNCATED_OUTPUT}\n`;
 const escapeRegex = (value: string) =>
   value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-function redactor(env: Readonly<Record<string, string>>) {
+function redactor(env: Readonly<Record<string, string>>, redactPaths = false) {
   const values = [
     ...new Set(
       Object.values(env)
@@ -52,7 +52,7 @@ function redactor(env: Readonly<Record<string, string>>) {
     redact(value: string) {
       let text = stripVTControlCharacters(value);
       if (pattern) text = text.replace(pattern, () => MASK);
-      return text
+      text = text
         .replace(
           /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/gu,
           MASK,
@@ -63,6 +63,12 @@ function redactor(env: Readonly<Record<string, string>>) {
           `$1${MASK}`,
         )
         .replace(/\b(?:sk-|ghp_|github_pat_)[A-Za-z0-9_-]{12,}/gu, MASK);
+      return redactPaths
+        ? text.replace(
+            /(?<![\w.-])(?:[A-Za-z]:[\\/]|\/)[^\s"'<>]+/gu,
+            "[私有路径]",
+          )
+        : text;
     },
   };
 }
@@ -142,6 +148,8 @@ export async function createMergeCheckLog(input: {
   readonly project: string;
   readonly attempt: string;
   readonly env?: Readonly<Record<string, string>>;
+  /** Precheck output is public card evidence; remove paths after credential filtering. */
+  readonly redactPaths?: boolean;
 }) {
   if (
     !/^[A-Za-z0-9_][A-Za-z0-9._-]*$/u.test(input.project) ||
@@ -177,7 +185,7 @@ export async function createMergeCheckLog(input: {
       constants.O_NOFOLLOW,
     0o600,
   );
-  const filter = redactor(input.env ?? {}),
+  const filter = redactor(input.env ?? {}, input.redactPaths),
     output = new Map<string, BoundedOutput>();
   const header = filter.redact(
     `合并检查 ${input.project} / ${input.attempt}\n`,

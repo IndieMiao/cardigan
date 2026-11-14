@@ -365,6 +365,12 @@ export class ServerGit implements GitBinding {
   async merge(project: CentralProject, plan: MergePlan): Promise<MergeOutcome> {
     return this.central.mergeIntoBase(project, plan);
   }
+  async deliveryTree(project: CentralProject, sha: string): Promise<string> {
+    return this.transport.treeOfCommit(
+      await this.central.ensureCentral(project),
+      sha,
+    );
+  }
   async baseline(project: CentralProject): Promise<string> {
     const repository = await this.central.ensureCentral(project);
     const sha = await this.central.git.readRef(

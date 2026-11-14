@@ -251,3 +251,36 @@ test.each([
     else expect(text).not.toContain("清理提示");
   },
 );
+
+test("C-298 precheck path filtering follows credential filtering and keeps relative failing test names", async () => {
+  const dataDir = await fixture();
+  const log = await createMergeCheckLog({
+    dataDir,
+    project: "p",
+    attempt: "precheck",
+    env: { SECRET: "example/secret-value" },
+    redactPaths: true,
+  });
+  log.append(
+    "test",
+    "FAIL packages/domain/test.ts > invariant\nError: example/sec",
+  );
+  log.append("test", "ret-value at /private/fixture/path\n");
+  const result = await log.finish({
+    status: "failed",
+    checks: [{ name: "test", status: "failed", exit_code: 1 }],
+    cleanup_errors: ["/private/cleanup"],
+  });
+  const contents = await readFile(
+    join(dataDir, "merge-gate", "logs", "p", "precheck.log"),
+    "utf8",
+  );
+  expect(result.summary).toContain("packages/domain/test.ts > invariant");
+  expect(contents).toContain("[REDACTED]");
+  for (const privateValue of [
+    "example/secret-value",
+    "/private/fixture/path",
+    "/private/cleanup",
+  ])
+    expect(contents).not.toContain(privateValue);
+});

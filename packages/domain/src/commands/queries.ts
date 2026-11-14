@@ -1,4 +1,5 @@
 import { type CardDerivedFields, deriveCardFields } from "../card-derived.js";
+import { currentDeliveryPrechecks } from "../delivery-precheck.js";
 import {
   deriveCardStatus,
   deriveReviewMatrix,
@@ -104,6 +105,7 @@ function cardView(d: CommandDraft, id: CardId): CommandCardView {
     status,
     open_decisions: open.map((q) => q.id),
     review_matrix: deriveReviewMatrix(deliveries, items, d.list("reviews")),
+    delivery_prechecks: currentDeliveryPrechecks(d.state, id),
     ...(merge_check ? { merge_check } : {}),
     ...(blockers.length ? { merge_check_blockers: blockers } : {}),
     ...fields,

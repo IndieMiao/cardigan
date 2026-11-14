@@ -76,6 +76,7 @@ export type RiskTag = "security" | "permission" | "numeric_rule";
 
 /** The card view the API returns; `status`, `why` and `next_owners` are derived. */
 export interface CardView {
+  readonly delivery_prechecks?: readonly DeliveryPrecheck[];
   readonly merge_check_blockers?: readonly MergeCheckBlocker[];
   readonly id: string;
   readonly title: string;
@@ -2101,4 +2102,16 @@ export function describeWriteError(
       (uncertain ? "服务暂时异常。" : "请求被拒绝，请检查填写内容和当前状态。");
   }
   return uncertain ? `${reason} ${uncertainMessage}` : reason;
+}
+
+export interface DeliveryPrecheck {
+  readonly delivery_id: string;
+  readonly work_item_id: string;
+  readonly subject: { readonly kind: string; readonly value: string };
+  readonly status: MergeCheckView["status"] | "environment_failed";
+  readonly attempt_id?: string;
+  readonly log_ref?: string;
+  readonly summary?: string;
+  readonly updated_at: string;
+  readonly checks: MergeCheckView["checks"];
 }

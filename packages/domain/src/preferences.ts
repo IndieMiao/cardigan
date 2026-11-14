@@ -41,6 +41,8 @@ export interface SystemReminderPolicy {
   readonly max_reminders: number;
 }
 export interface ProjectPreferences {
+  /** Human-only, defaults to false. Independent review always waits. */
+  readonly code_review_waits_for_precheck?: boolean;
   readonly system_auto_assign_verifiers?: boolean;
   readonly system_reminders?: boolean;
   readonly system_reminder_policy?: SystemReminderPolicy | null;

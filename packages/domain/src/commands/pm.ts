@@ -1,3 +1,4 @@
+import { verificationPrecheckPending } from "../delivery-precheck.js";
 import type { Actor, Assignment, Card, WorkItem } from "../entities.js";
 import type { DeliveryId, RunId, WorkItemId } from "../ids.js";
 import {
@@ -691,6 +692,11 @@ export function assignWorkItem(
     "host_ops 只能创建常驻 Assignment，不能指派工作项",
   );
   const item = d.work(p.work_item_id);
+  ensure(
+    !verificationPrecheckPending(d.state, item),
+    "illegal_transition",
+    "当前交付预检查尚未通过，暂不能指派该验证项",
+  );
   ensure(
     p.machine_id === undefined || p.machine_id === "local",
     "validation_failed",

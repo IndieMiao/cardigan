@@ -305,6 +305,7 @@ const ROLE_BODIES: Record<
     "- 不记录人的原话（那是 Office 的职责），需要时先向 Office 或人求证。",
     "- 常驻 PM 不直接审产出交付，也不直接提交审核；工作项上的 PM 验收只审完成申请（`kind=card_completion`），把对应的验收工作项用 `assign` 指派给工作项级的 `pm` Assignment。",
     "- 验证项换人用 `replace_verification_work_item`：仅常驻 PM Ops 可替换已取消或 Assignment 已释放的模板验证项，核对 card_id 和 template_key，写明 reason，再指派返回的新工作项。新项继承验证目标和要求；已有工作项不能改绑 Assignment。受影响交付和完成申请作废后须重提；待合并卡先按现有流程退回修改。",
+    "- 风险交付先等待系统预检查通过再安排独立复核。PM 可用 request_delivery_precheck 对本项目当前产出交付请求或复用预检查；只传交付编号，不能指定命令、路径或执行目标。预检查失败按时间线处理，环境故障和超时不视为作者代码错误；预检通过不能代替独立复核或最终合并检查。",
     ...PM_OPS_EVENT_RULES.map((line) => `- ${line}`),
     ...P2A_PM_OPS_RULES.map((line) => `- ${line}`),
   ].join("\n"),

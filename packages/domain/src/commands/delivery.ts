@@ -1,3 +1,8 @@
+import {
+  currentDeliveryPrechecks,
+  requiresDeliveryPrecheck,
+  verificationPrecheckPending,
+} from "../delivery-precheck.js";
 import { deriveCardStatus, deriveReview, isReviewStale } from "../derived.js";
 import type {
   Actor,
@@ -25,6 +30,7 @@ import {
   unwrap,
 } from "./core.js";
 import { supersedeDelivery } from "./delivery-invalidation.js";
+import { queueDeliveryPrecheck } from "./delivery-precheck.js";
 import { checkEmployeeSeparation } from "./employee-assignment.js";
 import { requestHumanCompletionReview } from "./human-completion.js";
 import { completionPassed } from "./merge.js";
@@ -111,6 +117,14 @@ function inspect(d: CommandDraft, p: SubmitDeliveryParams) {
     "Invalid subject digest",
   );
   const completion = p.kind === "card_completion";
+  if (completion)
+    ensure(
+      currentDeliveryPrechecks(d.state, card.id).every(
+        (c) => c.status === "passed",
+      ),
+      "illegal_transition",
+      "当前产出交付的预检查尚未通过，请先完成预检查",
+    );
   // C-202: the completion's plain change note becomes the merge
   // confirmation's (or human completion review's) plain summary.
   ensure(
@@ -476,6 +490,14 @@ export function submitDelivery(
       ...(predecessor ? { supersedes: predecessor.id } : {}),
     };
     d.put("deliveries", value);
+    if (
+      !completion &&
+      requiresDeliveryPrecheck(
+        { ...state, work_items: d.list("work_items") },
+        value,
+      )
+    )
+      queueDeliveryPrecheck(d, value, "risk_delivery");
     if (unreviewed) {
       // §4.4: nothing verifies this work item, so the delivery is accepted on
       // arrival and the item is done; the timeline says why no review follows.
@@ -517,6 +539,10 @@ export function submitDelivery(
       const current = d.work(verifier.id);
       if (
         current.kind === "verify" &&
+        !verificationPrecheckPending(
+          { ...state, deliveries: d.list("deliveries") },
+          current,
+        ) &&
         reviewRound(d, current) > current.max_review_rounds
       )
         requestReviewLimit(d, current);
@@ -621,6 +647,11 @@ export function submitReview(
       !d.list("reviews").some((r) => r.run_id === run.id),
       "invariant_violation",
       "A Run may submit only one review",
+    );
+    ensure(
+      !verificationPrecheckPending(state, item),
+      "illegal_transition",
+      "当前交付预检查尚未通过，不能提交审核",
     );
     const round = reviewRound(d, item, target);
     ensure(

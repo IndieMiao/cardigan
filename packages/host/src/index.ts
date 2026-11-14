@@ -82,6 +82,8 @@ export {
   acquireMergeCheckCapacity,
   type ExecutionOwner,
   executionOwner,
+  MergeCheckCapacityFull,
+  mergeCheckAttemptRunning,
   mergeCheckCapacityAvailable,
 } from "./merge-check-capacity.js";
 export {

@@ -15,6 +15,7 @@ import type {
 import {
   hasPassedMergeCheck,
   latestMergeCheck,
+  mergeExecutorOutage,
   mergePlan,
   prepareMergePlan,
   recordMergeCheck,
@@ -38,6 +39,7 @@ import {
   deploymentInProgress,
   executorExecution,
   LOCAL_EXECUTOR,
+  MergeCheckCapacityFull,
   type MergeGateConfiguration,
   mergeCheckCapacityAvailable,
   type ProjectMergeGate,
@@ -49,6 +51,7 @@ import {
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
 import type { Store } from "@cardigan/store";
+import { DeliveryPrechecks } from "./delivery-prechecks.js";
 import type { MergeGit } from "./git.js";
 
 import { mergeProjectSettings } from "./merge-push-loop.js";
@@ -60,6 +63,7 @@ type Settings = Extract<ProjectMergeGate, { status: "enabled" }>;
 type WithoutCard<T> = T extends unknown ? Omit<T, "card_id"> : never;
 type CheckChange = WithoutCard<Parameters<typeof recordMergeCheck>[2]>;
 export interface MergeCheckGit {
+  deliveryTree?(project: CentralProject, sha: string): Promise<string>;
   changedPaths(
     project: CentralProject,
     base: string,
@@ -104,6 +108,7 @@ interface Task {
 /** Persisted queue; the OS execution slot is held by the trusted check supervisor. */
 export class MergeChecks {
   private readonly abort = new AbortController();
+  private readonly prechecks: DeliveryPrechecks;
   private readonly seen = new Set<string>();
   private readonly skips = new MergeSkipLog(
     "merge checks",
@@ -157,7 +162,55 @@ export class MergeChecks {
       /** C-112: informational skip notices (not errors); default discards. */
       report?: (message: string) => void;
     },
-  ) {}
+  ) {
+    this.prechecks = new DeliveryPrechecks({
+      ...options,
+      signal: this.abort.signal,
+      onError: (error) => this.report(error),
+      reserve: (settings) => this.reservePrecheck(settings),
+    });
+  }
+
+  /** Q-486: no new precheck while a merge can use the target; never preempt. */
+  private async reservePrecheck(settings: Settings) {
+    const executor = settings.executor;
+    if (!executor || this.abort.signal.aborted) return;
+    const projects = this.options.store.listProjects().map((p) => p.id);
+    const runnable = this.tasks(projects).some((task) => {
+      if (task.settings.executor?.name !== executor.name) return false;
+      const state = this.state(task.project.project_id);
+      const outage = mergeExecutorOutage(state, executor.name);
+      if (
+        outage &&
+        Date.parse(outage.next_retry_at) > Date.parse(this.options.clock.now())
+      )
+        return false;
+      const check = latestMergeCheck(
+        state.events,
+        task.plan.card_id,
+        task.plan.completion_id,
+      );
+      if (
+        !check ||
+        check.recheck_requested ||
+        ["queued", "running", "interrupted", "executor_unreachable"].includes(
+          check.status,
+        )
+      )
+        return true;
+      // A new baseline may need another candidate; allow the existing merge lane to resolve it first.
+      const prepared = this.prepared.get(this.key(task));
+      return !prepared;
+    });
+    if (runnable) return;
+    const pool = this.slots.get(executor.name);
+    if (
+      pool?.waiting.length ||
+      (pool?.used.filter(Boolean).length ?? 0) >= executor.maxConcurrent
+    )
+      return;
+    return this.slot({ settings }, () => undefined);
+  }
 
   stop(): void {
     this.abort.abort();
@@ -168,6 +221,7 @@ export class MergeChecks {
   async idle(): Promise<void> {
     while (this.lanes.size) await Promise.all(this.lanes.values());
     await Promise.all([...this.sweeps.values()].map((sweep) => sweep.work));
+    await this.prechecks.idle();
   }
   private serial<T>(work: () => Promise<T>): Promise<T> {
     const next = this.exclusive.then(work);
@@ -437,7 +491,7 @@ export class MergeChecks {
    * as before). Waits by live priority and then FIFO; undefined after shutdown.
    */
   private async slot(
-    task: Task,
+    task: Pick<Task, "settings">,
     nextTask: () => Task | undefined,
   ): Promise<{ index: number; release: () => void } | undefined> {
     const bucket = task.settings.executor?.name ?? LOCAL_EXECUTOR;
@@ -552,9 +606,14 @@ export class MergeChecks {
         check.attempt_id,
         undefined,
         task.settings.executor?.name ?? LOCAL_EXECUTOR,
+        task.settings.executor?.maxConcurrent,
       );
     } catch (error) {
-      if (!(error instanceof DeploymentInProgress)) throw error;
+      if (
+        !(error instanceof DeploymentInProgress) &&
+        !(error instanceof MergeCheckCapacityFull)
+      )
+        throw error;
       this.seen.delete(check.attempt_id);
       return; // Keep the check queued; deployment does not change its result.
     }
@@ -814,7 +873,10 @@ export class MergeChecks {
       this.lanes.set(id, lane);
       started.push(lane);
     }
-    return { done: Promise.all(started).then(() => {}) };
+    const done = Promise.all(started).then(async () => {
+      await (await this.prechecks.schedule(projects)).done;
+    });
+    return { done };
   }
   private report(error: unknown): void {
     try {

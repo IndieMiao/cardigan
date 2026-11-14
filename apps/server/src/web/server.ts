@@ -517,6 +517,7 @@ async function serveProjectRoute(
             event.card_id &&
             event.actor.project_id === project_id &&
             [
+              "delivery_precheck_updated",
               "merge_check_queued",
               "merge_check_started",
               "merge_check_finished",

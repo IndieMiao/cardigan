@@ -4910,3 +4910,12 @@ body[data-lightbox="open"] .drawer-overlay {
 .metadata .execution-sort {
   margin-left: auto;
 }
+
+.delivery-prechecks {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.delivery-precheck-summary {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

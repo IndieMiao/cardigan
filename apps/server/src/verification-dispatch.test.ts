@@ -6,10 +6,14 @@ import {
   dispatchRun,
   hasRunTarget,
   issueInstruction,
+  latestDeliveryPrecheck,
   queueRun,
   type Runtime,
   recordDecision,
+  recordDeliveryPrecheck,
   requestDecision,
+  requestDeliveryPrecheck,
+  setProjectPreferences,
 } from "@cardigan/domain";
 import { launchRun, RunTargetDeferred } from "@cardigan/host";
 import { parseLaunchConfig } from "@cardigan/roles";
@@ -667,4 +671,38 @@ test("explicit host session reuse withdraws only its unsent reservation and pres
   expect(runs(f.pm).find((r) => r.id === run.id)?.status).toBe("dispatched");
   expect(options.runtime.wake).toHaveBeenCalledOnce();
   expect(f.store.verifyToken(token.token)).toBeDefined();
+});
+
+test("C-298 dispatcher keeps an existing verifier idle until its current precheck passes", async () => {
+  const d = await product();
+  f.apply((s, a, p) =>
+    setProjectPreferences(s, a, { code_review_waits_for_precheck: true }, p),
+  );
+  f.apply((s, a, p) => requestDeliveryPrecheck(s, a, { delivery_id: d.id }, p));
+  const dispatcher = new Dispatcher(options);
+  await dispatcher.tick();
+  expect(runs(f.reviewer)).toEqual([]);
+  const update = (patch: Parameters<typeof recordDeliveryPrecheck>[2]) =>
+    f.apply((s, _a, p) =>
+      recordDeliveryPrecheck(s, { kind: "system", project_id: f.id }, patch, p),
+    );
+  const queued = latestDeliveryPrecheck(f.state().events, d);
+  if (!queued) throw new Error("No precheck");
+  const identity = {
+    ...queued,
+    attempt_id: "dispatch-check",
+    candidate_sha: d.subject.value,
+    tree_sha: "b".repeat(40),
+    base_sha: "c".repeat(40),
+  };
+  update(identity);
+  update({ ...identity, status: "running" });
+  update({
+    ...identity,
+    status: "passed",
+    checks: [{ name: "test", status: "passed", exit_code: 0 }],
+  });
+  await dispatcher.tick();
+  expect(runs(f.reviewer)).toHaveLength(1);
+  expect(runs(f.reviewer)[0]?.status).toBe("dispatched");
 });
