@@ -454,3 +454,46 @@ test("host-only persistence rejects an Agent and invalid policy without effects"
   ).toBe(false);
   expect(f.state().events).toEqual([]);
 });
+
+test("structured harness errors join the same distinct-session window; working sessions are excluded", () => {
+  const f = scenario();
+  f.advance(10);
+  f.inactive(1, f.at(0));
+  const activity: SessionActivity = {
+    "A-2": { error: "rate_limit", at: f.at(5) },
+    "A-3": { error: "stream_disconnected", at: f.at(10) },
+  };
+  expect(
+    upstreamCluster(f.state(), f.targets, DEFAULT_UPSTREAM_POLICY, activity),
+  ).toHaveLength(3);
+  expect(
+    upstreamCluster(f.state(), f.targets, DEFAULT_UPSTREAM_POLICY, {
+      ...activity,
+      "A-1": "working",
+    }),
+  ).toEqual([]);
+  f.record([], activity);
+  expect(upstreamIncident(f.state(), "relay")?.assignment_ids).toHaveLength(3);
+  expect(f.diagnosis(2, [], activity).action).toBe("wait");
+  expect(f.record([], activity).events).toEqual([]);
+});
+
+test("fresh harness progress is recovery evidence but does not bypass the existing recovery window", () => {
+  const f = scenario();
+  for (const n of [1, 2, 3]) f.inactive(n);
+  f.record();
+  f.advance(1);
+  const activity: SessionActivity = { "A-3": { working_at: f.at(1) } };
+  f.record([], activity);
+  expect(f.diagnosis(1, [], activity).action).toBe("wait");
+  f.advance(10);
+  f.record([], activity);
+  expect(f.diagnosis(1, [], activity).action).toBe("restart_once");
+  expect(f.diagnosis(3, [], activity).action).toBe("wait");
+  f.record([], {
+    "A-1": { working_at: f.at(10) },
+    "A-2": { working_at: f.at(10) },
+    "A-3": { working_at: f.at(10) },
+  });
+  expect(upstreamIncident(f.state(), "relay")).toBeUndefined();
+});

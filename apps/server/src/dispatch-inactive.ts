@@ -8,7 +8,10 @@ import type {
 } from "@cardigan/domain";
 import {
   claimInactiveRunStop,
+  currentHarnessActivity,
   finishInactiveRunStop,
+  type HarnessActivity,
+  harnessActivityTime,
   inactiveRunDue,
   startInactiveRunStop,
 } from "@cardigan/domain";
@@ -23,6 +26,10 @@ interface ReaperOptions {
   runtime: Runtime;
   clock: Clock;
   afterMs: number | null;
+  harnessActivity?: (
+    project: ProjectId,
+    assignment: Assignment["id"],
+  ) => HarnessActivity | undefined;
   alert(
     tx: StoreTransactionContext,
     state: CommandState,
@@ -44,11 +51,29 @@ export class InactiveRunReaper {
       );
       for (const run of state.runs) {
         const a = state.assignments.find((a) => a.id === run.assignment_id);
+        const sample = () =>
+          this.options.harnessActivity?.(project, run.assignment_id);
+        const harnessAt =
+          a &&
+          harnessActivityTime(
+            currentHarnessActivity(
+              state,
+              a,
+              this.options.clock.now(),
+              sample(),
+            ),
+          );
         if (
           !a ||
           a.external ||
           (!run.inactivity_stop &&
-            !inactiveRunDue(run, a, this.options.clock.now(), afterMs))
+            !inactiveRunDue(
+              run,
+              a,
+              this.options.clock.now(),
+              afterMs,
+              harnessAt,
+            ))
         )
           continue;
         const actor = { kind: "system" as const, project_id: project };
@@ -57,7 +82,7 @@ export class InactiveRunReaper {
             claimInactiveRunStop(
               s,
               actor,
-              { run_id: run.id, after_ms: afterMs },
+              { run_id: run.id, after_ms: afterMs, harness_activity: sample() },
               p,
             ),
           fence: (r) => r.inactivity_stop,
@@ -69,6 +94,7 @@ export class InactiveRunReaper {
                 run_id: r.id,
                 attempt_id: stop.attempt_id,
                 after_ms: afterMs,
+                harness_activity: sample(),
               },
               p,
             ),

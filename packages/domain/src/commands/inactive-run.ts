@@ -1,4 +1,9 @@
 import type { Actor, Assignment, Run, RuntimeRef } from "../entities.js";
+import {
+  currentHarnessActivity,
+  type HarnessActivity,
+  harnessActivityTime,
+} from "../harness-activity.js";
 import { hostOpsPending } from "../host-ops.js";
 import type { RunId } from "../ids.js";
 import { transition } from "../transitions.js";
@@ -25,8 +30,13 @@ const cardOf = (d: CommandDraft, a: Assignment) =>
     ? d.get("work_items", a.work_item_id).card_id
     : undefined;
 
-export function lastRunActivity(run: Run, assignment: Assignment): number {
+export function lastRunActivity(
+  run: Run,
+  assignment: Assignment,
+  harnessAt?: number,
+): number {
   return Math.max(
+    harnessAt ?? Number.NEGATIVE_INFINITY,
     ...[
       run.started_at,
       run.heartbeat_at,
@@ -42,6 +52,7 @@ export function inactiveRunDue(
   assignment: Assignment,
   now: string,
   afterMs: number,
+  harnessAt?: number,
 ): boolean {
   return (
     run.status === "running" &&
@@ -49,8 +60,8 @@ export function inactiveRunDue(
     assignment.runtime_ref !== null &&
     Number.isSafeInteger(afterMs) &&
     afterMs > 0 &&
-    Number.isFinite(lastRunActivity(run, assignment)) &&
-    Date.parse(now) - lastRunActivity(run, assignment) >= afterMs
+    Number.isFinite(lastRunActivity(run, assignment, harnessAt)) &&
+    Date.parse(now) - lastRunActivity(run, assignment, harnessAt) >= afterMs
   );
 }
 function clear(d: CommandDraft, run: Run, reason: string) {
@@ -69,7 +80,11 @@ function clear(d: CommandDraft, run: Run, reason: string) {
 export function claimInactiveRunStop(
   state: CommandState,
   actor: Actor,
-  p: { run_id: RunId; after_ms: number },
+  p: {
+    run_id: RunId;
+    after_ms: number;
+    harness_activity?: HarnessActivity | undefined;
+  },
   ports: CommandPorts,
 ) {
   return command(state, actor, "manage_inactive_run_stop", ports, (d) => {
@@ -80,14 +95,22 @@ export function claimInactiveRunStop(
     );
     const run = d.get("runs", p.run_id),
       a = d.get("assignments", run.assignment_id);
+    const harnessAt = harnessActivityTime(
+      currentHarnessActivity(state, a, d.now, p.harness_activity),
+    );
     if (hostOpsPending(state.events, a.id)) return;
     if (run.dispatch_stop) return undefined;
     const old = run.inactivity_stop;
     if (old && old.lease_until > d.now) return undefined;
     if (old && !sameRef(a.runtime_ref, old.runtime_ref))
       return clear(d, run, "runtime_changed");
-    if (!old && !inactiveRunDue(run, a, d.now, p.after_ms)) return undefined;
-    if (old && !old.stopping && !inactiveRunDue(run, a, d.now, p.after_ms))
+    if (!old && !inactiveRunDue(run, a, d.now, p.after_ms, harnessAt))
+      return undefined;
+    if (
+      old &&
+      !old.stopping &&
+      !inactiveRunDue(run, a, d.now, p.after_ms, harnessAt)
+    )
       return clear(d, run, "activity_resumed");
     const ref = old?.runtime_ref ?? a.runtime_ref;
     if (!ref) return undefined;
@@ -95,7 +118,9 @@ export function claimInactiveRunStop(
       run_id: run.id,
       after_ms: p.after_ms,
       retry: !!old,
-      last_activity_at: new Date(lastRunActivity(run, a)).toISOString(),
+      last_activity_at: new Date(
+        lastRunActivity(run, a, harnessAt),
+      ).toISOString(),
     });
     const next: Run = {
       ...run,
@@ -113,11 +138,16 @@ export function claimInactiveRunStop(
   });
 }
 
-/** Recheck fresh MCP activity immediately before the host calls Runtime.release. */
+/** Recheck fresh MCP and harness activity immediately before the host calls Runtime.release. */
 export function startInactiveRunStop(
   state: CommandState,
   actor: Actor,
-  p: { run_id: RunId; attempt_id: string; after_ms: number },
+  p: {
+    run_id: RunId;
+    attempt_id: string;
+    after_ms: number;
+    harness_activity?: HarnessActivity | undefined;
+  },
   ports: CommandPorts,
 ) {
   return command(state, actor, "manage_inactive_run_stop", ports, (d) => {
@@ -133,10 +163,13 @@ export function startInactiveRunStop(
       "validation_failed",
       "Invalid inactivity grace",
     );
+    const harnessAt = harnessActivityTime(
+      currentHarnessActivity(state, a, d.now, p.harness_activity),
+    );
     const due = stop.stopping
-      ? Number.isFinite(lastRunActivity(run, a)) &&
-        Date.parse(d.now) - lastRunActivity(run, a) >= p.after_ms
-      : inactiveRunDue(run, a, d.now, p.after_ms);
+      ? Number.isFinite(lastRunActivity(run, a, harnessAt)) &&
+        Date.parse(d.now) - lastRunActivity(run, a, harnessAt) >= p.after_ms
+      : inactiveRunDue(run, a, d.now, p.after_ms, harnessAt);
     if (!due) {
       // Once release has been attempted it may still complete late. Keep the
       // fence until exit is confirmed; fresh activity prevents another kill.
@@ -188,7 +221,7 @@ export function finishInactiveRunStop(
       ? cancelRunDispatch(
           d,
           previous,
-          "MCP 长期无活动；主机确认终端退出后自动取消 Run",
+          "MCP 与可用会话证据长期无活动；主机确认终端退出后自动取消 Run",
         )
       : previous;
     d.put("runs", next);

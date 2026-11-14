@@ -14,12 +14,15 @@ import {
   abortDispatch,
   canDispatchRun,
   compareDispatchOrder,
+  currentHarnessActivity,
   DEFAULT_INACTIVE_CANCEL_AFTER_MS,
   decisionFollowupBlocked,
   decisionFollowupPrompt,
   dispatchRecoveryFailed,
   dispatchRun,
   expireMergeSnoozes,
+  type HarnessActivity,
+  harnessActivityTime,
   hasRunTarget,
   hostOpsPending,
   isStandingPm,
@@ -108,6 +111,10 @@ export type LaunchSnapshot = Pick<
 >;
 
 export interface DispatcherOptions {
+  readonly harnessActivity?: (
+    project: ProjectId,
+    assignment: Assignment["id"],
+  ) => HarnessActivity | undefined;
   readonly hostOpsTick?: () => Promise<void>;
   readonly hostOpsPatrolIntervalMs?: number;
   readonly store: Store;
@@ -254,6 +261,9 @@ export class Dispatcher {
       runtime: options.runtime,
       clock: this.clock,
       afterMs: cancelAfterMs,
+      ...(options.harnessActivity
+        ? { harnessActivity: options.harnessActivity }
+        : {}),
       loadState: (tx, project) => this.loadState(tx, project),
       alert: (tx, state, assignment, run, reason) => {
         if (
@@ -1460,7 +1470,13 @@ export class Dispatcher {
           if (r.status !== "running") continue;
           const a = state.assignments.find((a) => a.id === r.assignment_id);
           if (a?.status !== "active" || a.external) continue;
-          const last = lastRunActivity(r, a);
+          const activity = currentHarnessActivity(
+            state,
+            a,
+            at,
+            this.options.harnessActivity?.(project, a.id),
+          );
+          const last = lastRunActivity(r, a, harnessActivityTime(activity));
           if (
             Date.parse(at) - last < this.inactivityGraceMs ||
             state.events.some(
@@ -1474,6 +1490,7 @@ export class Dispatcher {
             assignment: a,
             type: "run_inactive",
             reason: "mcp_inactivity",
+            activity_source: activity ? activity.source : "活动来源缺失",
             mark: true,
             audience: alertAudience(a, state, standing),
             run_id: r.id,

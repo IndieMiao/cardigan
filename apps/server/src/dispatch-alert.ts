@@ -162,6 +162,7 @@ export function dispatchAlert(
     run_id?: RunId | undefined;
     notification_ids?: readonly string[];
     mark?: boolean;
+    activity_source?: string;
     error?: DeliveryFailure;
   },
 ) {
@@ -176,6 +177,9 @@ export function dispatchAlert(
     payload: {
       assignment_id: input.assignment.id,
       reason: input.reason,
+      ...(input.activity_source
+        ? { activity_source: input.activity_source }
+        : {}),
       ...(input.run_id ? { run_id: input.run_id } : {}),
       notification_ids: input.notification_ids ?? [],
       ...(input.error ? { error: { ...input.error } } : {}),

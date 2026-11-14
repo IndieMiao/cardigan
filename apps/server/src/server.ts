@@ -1,5 +1,9 @@
 import { join } from "node:path";
-import { tickProfileOn } from "@cardigan/domain";
+import {
+  type Assignment,
+  type ProjectId,
+  tickProfileOn,
+} from "@cardigan/domain";
 import {
   executorExecution,
   HostOpsService,
@@ -458,7 +462,15 @@ export async function startCardiganServer(
                 options.dispatcher.runtimeUnknownGraceMs ??
                 config.runtimeUnknownGraceMs,
             }),
-        ...(hostOps ? { hostOpsTick: () => hostOps.tick() } : {}),
+        ...(hostOps
+          ? {
+              hostOpsTick: () => hostOps.tick(),
+              harnessActivity: (
+                project: ProjectId,
+                assignment: Assignment["id"],
+              ) => hostOps.harnessActivity(project, assignment),
+            }
+          : {}),
         hostOpsPatrolIntervalMs:
           options.dispatcher.hostOpsPatrolIntervalMs ??
           config.hostOpsPatrolIntervalMs ??

@@ -121,6 +121,7 @@ export * from "./entities.js";
 export * from "./errors.js";
 export { eventById } from "./event-index.js";
 export * from "./git-port.js";
+export * from "./harness-activity.js";
 export * from "./host-ops.js";
 export * from "./ids.js";
 export * from "./member.js";

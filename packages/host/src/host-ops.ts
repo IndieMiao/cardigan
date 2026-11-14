@@ -8,15 +8,16 @@ import {
   type ContextObservation,
   checkHostOpsAccess,
   claimHostOpsAction,
-  contextObservationCurrent,
   contextUsageFresh,
+  currentHarnessActivity,
   dispatchRecoveryQueuedAt,
   finishHostOpsAction,
+  type HarnessActivity,
   type HostOpsExecution,
   type HostOpsExecutionTool,
   hostOpsExitConfirmation,
   hostOpsReadDiagnostics,
-  lastUpstreamInactivity,
+  lastRunActivity,
   type ProjectId,
   pendingHostOpsActions,
   prepareHostOpsAction,
@@ -217,7 +218,7 @@ export class HostOpsService {
         ),
         context_thresholds: contextThresholdView(state),
         sessions: sessions.map(
-          ({ observation: _observation, ...view }) => view,
+          ({ observation: _observation, activity: _activity, ...view }) => view,
         ),
       };
     });
@@ -398,33 +399,6 @@ export class HostOpsService {
       this.upstream.observe(state, only),
       samples ?? this.sessions(project),
     ]);
-    for (const session of sessions) {
-      if (!session.assignment_id) continue;
-      const inactive = lastUpstreamInactivity(state, session.assignment_id);
-      const assignment = state.assignments.find(
-        (a) => a.id === session.assignment_id,
-      );
-      if (
-        (!only || session.assignment_id === only) &&
-        inactive &&
-        !session.stale &&
-        session.observation &&
-        contextUsageFresh(
-          session.observation,
-          this.clock.now(),
-          this.options.contextUsage?.staleAfterMs ??
-            DEFAULT_CONTEXT_STALE_AFTER_MS,
-        ) &&
-        assignment &&
-        contextObservationCurrent(
-          assignment,
-          session.observation,
-          state.events,
-        ) &&
-        session.observation.updated_at > inactive.created_at
-      )
-        activity[session.assignment_id] = "working";
-    }
     const current = this.options.store.uow.read((tx) =>
       loadCommandState(tx, project),
     );
@@ -434,12 +408,47 @@ export class HostOpsService {
       if (
         !after ||
         JSON.stringify(before?.runtime_ref) !==
-          JSON.stringify(after.runtime_ref)
+          JSON.stringify(after.runtime_ref) ||
+        before?.session_ref !== after?.session_ref ||
+        state.runs.findLast((r) => r.assignment_id === id)?.id !==
+          current.runs.findLast((r) => r.assignment_id === id)?.id
       )
         throw new ToolError(
           "stale_target",
           "活动采样期间会话已更换，请重新读取诊断",
         );
+    }
+    for (const session of sessions) {
+      if (!session.assignment_id) continue;
+      const assignment = current.assignments.find(
+        (a) => a.id === session.assignment_id,
+      );
+      const sample =
+        assignment &&
+        currentHarnessActivity(
+          current,
+          assignment,
+          this.clock.now(),
+          session.activity,
+        );
+      const run = current.runs.findLast((r) => r.id === sample?.run_id);
+      if (
+        (!only || session.assignment_id === only) &&
+        sample &&
+        assignment &&
+        run
+      ) {
+        if (!sample.error)
+          activity[session.assignment_id] = { working_at: sample.updated_at };
+        else if (
+          sample.error !== "unclassified" &&
+          Date.parse(sample.updated_at) >= lastRunActivity(run, assignment)
+        )
+          activity[session.assignment_id] = {
+            error: sample.error,
+            at: sample.updated_at,
+          };
+      }
     }
     return activity;
   }
@@ -506,6 +515,7 @@ export class HostOpsService {
     if (
       reuse &&
       cached &&
+      Date.parse(this.clock.now()) >= cached.completedAt &&
       Date.parse(this.clock.now()) - cached.completedAt < 30_000
     )
       return Promise.resolve(cached.samples);
@@ -599,6 +609,15 @@ export class HostOpsService {
         });
       }
     }
+  }
+  /** Dispatcher consumes only completed background samples; domain rechecks their generation/age. */
+  harnessActivity(
+    project: ProjectId,
+    assignment: AssignmentId,
+  ): HarnessActivity | undefined {
+    return this.sessionSamples
+      .get(project)
+      ?.samples.find((s) => s.assignment_id === assignment)?.activity;
   }
   /**
    * C-232: read-only view of the latest context poll for the Workbench. A

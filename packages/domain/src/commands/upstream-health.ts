@@ -5,6 +5,8 @@ import {
   lastUpstreamInactivity,
   recurrentUpstreamFailure,
   type SessionActivity,
+  sessionIsWorking,
+  sessionUpstreamError,
   type UpstreamPolicy,
   type UpstreamProbe,
   type UpstreamTarget,
@@ -105,8 +107,9 @@ export function recordUpstreamHealth(
           ? targets
               .filter(
                 (t) =>
-                  p.activity[t.assignment_id] !== "working" &&
-                  lastUpstreamInactivity(state, t.assignment_id),
+                  !sessionIsWorking(p.activity[t.assignment_id]) &&
+                  (sessionUpstreamError(p.activity[t.assignment_id]) ||
+                    lastUpstreamInactivity(state, t.assignment_id)),
               )
               .map((t) => t.assignment_id)
           : cluster;
@@ -139,6 +142,7 @@ export function recordUpstreamHealth(
               state,
               t.assignment_id,
               upstreamRecoverySince(incident, p.probes),
+              p.activity,
             ),
           ) &&
           !state.events.some(
@@ -182,11 +186,13 @@ export function recordUpstreamHealth(
             (id) =>
               !targets.some((t) => t.assignment_id === id) ||
               !hasUnfinishedUpstreamRun(state, id) ||
-              (!lastUpstreamInactivity(state, id) &&
+              (!sessionUpstreamError(p.activity[id]) &&
+                !lastUpstreamInactivity(state, id, p.activity) &&
                 upstreamActivityAfter(
                   state,
                   id,
                   upstreamRecoverySince(incident, p.probes),
+                  p.activity,
                 )),
           )
         ) {
@@ -222,7 +228,7 @@ export function recordUpstreamHealth(
         }
       }
       for (const target of targets) {
-        if (p.activity[target.assignment_id] === "working") continue;
+        if (sessionIsWorking(p.activity[target.assignment_id])) continue;
         const recovery = recurrentUpstreamFailure(
           state,
           target.assignment_id,
