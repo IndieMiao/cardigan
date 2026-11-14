@@ -109,9 +109,10 @@ function checkWorkbenchUpgrade(scope: "pagination-only" | "complete") {
       backup.close();
     }
     // Isolate the v24 contract while also exercising the real full upgrade path.
+    const paginationFile = "0024_workbench_pagination.sql";
     writeFileSync(
-      join(dir, "0024_workbench_pagination.sql"),
-      readFileSync(join(defaultMigrationsDir, "0024_workbench_pagination.sql")),
+      join(dir, paginationFile),
+      readFileSync(join(defaultMigrationsDir, paginationFile), "utf8"),
     );
     const targetDir = scope === "pagination-only" ? dir : defaultMigrationsDir;
     expect(migrate(db, targetDir)).toEqual(

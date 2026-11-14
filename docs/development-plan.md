@@ -746,6 +746,8 @@ C-152：意图记录的 RuntimeRef 不属于 server 当前运行时（`machine_i
 
 **Machine**：`online | degraded | offline | draining`。P2b-01 新登记默认 `offline`，人核对后可更新状态；`offline/draining` 不接受新指派。drain 是行政操作，登记检查不写健康状态，不能把 draining 自动覆盖成 online。
 
+C-289 外部提醒发件箱：`pending → sent | failed | skipped`，终态不重开。可重试失败留在 pending，持久尝试次数和下次时间；发送前领取的尝试即占预算。成功、失败、跳过均与结果审计同事务，详见 §6.9。现有 Notification 状态机与 Needs You 的处理状态不受该发件箱影响。
+
 ### 4.5 不变量（实现和测试都要守住）
 
 1. Role 只定义能力和配置，不拥有 worktree 或 Session。
@@ -1022,6 +1024,38 @@ M3.4 的 Runtime 接线根据已派发的业务 Run（dispatched / acked / runni
 - 状态来源因运行时而异：Herdr 0.9.x 对 Claude Code、Codex 主要靠画面检测，可能误判；herdr-core 只认程序主动上报（OSC 7501），Pi 原生支持，Claude Code、Codex 目前不支持。业务状态一律以 MCP 为准。
 
 ---
+
+### 6.9 Needs You 外部提醒（C-289，Q-466）
+
+外部提醒由主机独立循环消费持久事实，领域层只提供端口、Needs You 投影和消息构造纯函数。本卡采用**可重放投影补齐**：从拍板、人工事项及知会的来源事件恢复事项，写入迁移 0025 的 `ext_message_outbox`；每个项目／事项类型／事项编号／渠道最多一行，绑定来源事件，不保存消息正文、标题、链接或凭据。即使事件提交后主机崩溃，下次扫描仍可补齐；不依赖内存队列。暂缓展示的事项等待条件满足；后台持有的拍板、交后台分拣的人工事项不外发。发送前按新鲜事务快照重新检查处理状态、敏感标记和展示条件，已处理或已消失的待发事项记 skipped。
+
+消息仅包含项目、卡号、事项编号、事项类型、白话标题、Workbench 直达链接。拍板用已有问题标题，人工事项优先使用交接标题，缺标题用固定提示；不使用人话概述、背景、操作正文、评论、附件或日志作替代。标题按 Unicode 码点截断，默认 120 字，链接单列。敏感卡及关联敏感卡的事项只保留“有 1 条敏感事项待处理”和链接；关联卡缺失时同样隐藏标题。拍板／合并确认链接定位 `decision-Q-n`，人工事项定位 `human-action-H-n`，知会定位对应拍板；项目级事项进入该项目 Needs You。
+
+主机启动时读取 `~/.config/cardigan/ext-message.yaml`，沿用 `CARDIGAN_CONFIG_DIR`／`XDG_CONFIG_HOME` 的私有配置目录约定。配置与被引用的秘密文件必须是当前主机用户拥有的普通文件、权限恰为 0600；打开时禁止末级符号链接并检查同一文件描述符。解析或权限失败记 invalid 并关闭该模块，错误不含输入、路径或 YAML 片段；未配置、总开关关闭或渠道关闭均不发送。配置只在 server 启动时读取，修改需重启；凭据只保留在主机内存，不写库、不传 Agent、不进日志。
+
+```yaml
+enabled: false
+workbench_url: https://workbench.example.invalid
+policy:
+  timeout_ms: 10000
+  max_attempts: 3
+  retry_delays_ms: [30000, 60000]
+  title_limit: 120
+  digest_limit: 20
+channels:
+  lark:
+    enabled: false
+    credential_file: ext-message.secrets
+quiet_hours:
+  enabled: false
+  # 启用时必须同时提供 timezone、start、end，例如 Asia/Shanghai、22:00、08:00。
+```
+
+渠道可以提供配置内的 `credential` 或相对配置目录／绝对路径的 `credential_file`，二者互斥；关闭时不读取凭据。数字均可配置，必须是正整数且可安全用于计时／计数；重试间隔数组长度必须等于总次数减一。免打扰默认关闭，显式时区和时段启用后保留待发记录，C-290 负责飞书适配器及汇总发送（默认最多列 20 条，其余附 Needs You 总入口），C-291 负责 Slack；C-289 仅注入假适配器测试，产品尚无网络适配器。
+
+Q-466 选择优先送达、接受极少重复：每次发送前在写事务内领取唯一尝试标识，增加次数并保存超时和重试时刻，然后在事务外调用适配器。默认每次 10 秒，总共 3 次（含首次），失败后分别等待 30／60 秒；超时或远端成功后本地提交前崩溃的尝试也占预算。未到持久租期不接管，崩溃恢复按原尝试的超时加退避等待；迟到结果只能结算同一尝试，不能覆盖新尝试。已确认成功不再发送，永久错误立即终止；这保证本地唯一，**不保证远端恰好一次**。循环与派发／合并独立，渠道分别等待，关闭时停止领取并等待当前有界尝试结束。 任一渠道落库失败时，整轮仍等待所有已启动渠道及其结果事务结束，然后报告失败；多渠道失败一并返回，关闭流程不会在其他渠道仍写库时提前关库。
+
+每次结果与 `ext_message_sent`／`ext_message_failed`／`ext_message_skipped` 审计同事务提交，仅含渠道、事项编号、类型、尝试次数及固定错误分类。最终失败每行只产生一条工作台知会，可标为已读，既不改变原事项也不再次外发。该类知会始终使用既有失败图形；阅读状态单独控制已读标记和操作按钮，标为已读不把发送失败显示为成功。`cardigan ext-message status` 查看 server 最近加载的安全元数据及各渠道最近结果，不重读秘密；`cardigan ext-message test --channel <名>` 由人在本机显式加载配置并发送固定测试提示，仍遵守总开关和渠道开关。两条 CLI 命令均映射为 human-only，入口再次拒绝 Token 模式；没有 MCP 工具、HTTP 发送接口或 Agent 配置读取入口。
 
 ## 7. PM 前后台与 Event Router
 
@@ -1425,6 +1459,8 @@ C-205：卡片页头在完整标题下显示一条“状态、等谁、下一步
 
 C-243：时间线在 SQL 按本项目、本卡和筛选读取固定大小的游标页；页面默认 20，可选 50／100，API 缺省 200、上限 200（集中常量，已由 Q-419 确认）。历史锚点直接读取有界目标窗口，替代向前扩大 limit 的方式；继续保留原条目定位、跨卡引用、最新三条结论及附件、交付和审核日期。加载更早记录使用上一页游标、按条目编号去重。实时变化刷新当前窗口；与缓存有重叠时保留历史页，无重叠时重建当前连续窗口和游标，避免跨页新增导致永久漏项。旧附件的归属按时间线编号单独查询元数据，不随窗口或筛选消失，上传者信息独立补齐。
 
+C-287：界面截图可使用仓库内的合成数据生成器（[使用说明](synthetic-ui-fixtures.md)），固定种子与时钟，提供 small 和接近生产数量的 production-like 两档，覆盖状态、父子来源、长内容、多附件和超时边界。生成器只创建调用方指定的新目录，不读取生产库、附件或主机私有配置；数据库可由独立 Web 读取。截图辅助入口在临时副本上启动 Web，通过仅允许读取和登录的本地入口浏览，上游地址固定为本次启动的 Web，请求路径不得改变目的地址；不运行调度、运行时或 Git 服务；预览密码只设置在临时副本并写到调用方指定的新凭据文件。验收说明须标明合成来源、档位、种子、数量与固定时钟，不能把合成截图视为生产数据或完整业务回放的验证。
+
 ### 8.5 执行视图（调试和运维）
 
 - 展示 Assignment、Run、Session、worktree、机器、游标。
@@ -1701,6 +1737,10 @@ C-96 现状核对（ADR 0005，待人选方案）：工具范围由两层固定�
 M2.1 的 Role 子集包含 role_id、version、display_name、kind、core_prompt、harness（claude-code/codex/pi）、launch_profile_ref、allowed_tools、capabilities、abilities、worktree（none/write/readonly）、required_machine_tags；不带运行时路径或 Session。RoleReference 增加可选 status，roleReference(Role) 将 version 映射为 role_version 并保留启停状态；缺省不补写，兼容旧快照。V9a 的角色命令负责追加版本和权限校验，store 负责在事务内保存角色与事件。
 
 ### 10.2 Launch Profile（每种 Harness 一份）
+
+P2b-06（C-280，Q-467）：worker 的非交互 PATH、工具绝对路径和解析路径、签名 App 身份及版本组合来自主机可信配置；HOME 由实际账号的目录服务读取，不 source shell rc。`runtime-herdr` 提供能力采样与预检，`deploy/worker-preflight.mjs` 接收主机选择的有界 JSON 输入并输出去敏报告。每项分别记录 installed、configured、last_verified；采样本身不产生“已验证”。验证记录绑定实际 UID、用例证据引用，以及目标配置摘要和当前 OS/工具版本/架构/路径/能力组合的摘要；组合变化后旧证据失效。未验的非交互 hc、原生依赖重建、Rosetta 或桌面能力不能从安装成功推断。
+
+03/05 的可信阶段先确认小制品已结束写入（不得接受 Agent 自报），再由 worker helper 哈希、复制到获准证据目录、回读验哈希，沿用 10 MiB 上限；返回摘要、大小和无敏感文件名的证据名称，后续经既有 HTTP 附件入口上传，不新增传输协议。`WorkerCheckpoint` 为卡 03/05 的既有启动意图/恢复点提供阶段、Assignment/Run、完整 SHA、目标配置摘要、精确进程身份、日志 offset 和制品摘要合同；本卡没有另建 journal 存储。重连必须先核原进程，再续读 offset；未知身份不授权重跑整任务、发信号或删除目录。持久化和 HTTP 联调分别由 03/05、08 接线。
 
 P2b 02/03/06 待实现：主机私有路径和 worker 路径分类型处理；提示、Harness/MCP 配置与最小凭据经固定 SSH stdin、有界 manifest 和逐层 no-follow/UID/GID/mode/ACL 校验发布到独占启动代次，材料一般 0700/0600。先材料后凭据，完整确认且 dispatch 落库后才写绑定代次的 start；旧哨兵不能复用，凭据读取后 unlink，未知退出保留停止记录与容量，不清空整个 Assignment。跨 Run 会话另存项目私有持久目录。
 
@@ -2085,6 +2125,10 @@ P2a-13 B（合并队列，ADR 0004）：`merge-gate.yaml` 的 `queue.enabled` �
 
 ### 12.6 清理与对账
 
+P2b-06：worker 路径清单明确区分 repo、worktree、build、cache、generated、evidence、temporary，绑定挂载/volume、规范路径、Git common-dir、Assignment、完整 SHA、dirty 和属主。只读采样逐级固定目录描述符，拒绝链接、外来可写祖先或额外 ACL；Git 采样禁用全局配置、hooks/fsmonitor、可选写锁及网络协议；逐仓库核验过滤器、include、部分克隆等配置。status 不递归进入未核验子模块，子模块及嵌套子模块由 helper 分别安全采样并合并 HEAD、已跟踪、未跟踪和已暂存 gitlink 的 dirty 状态；未初始化或无法核验的子模块报未知，不能忽略其脏状态。盘未挂、身份变更、路径不符或根盘/工作盘显式空间阈值不满足时停止，不建立同名空挂载目录、不回退系统盘。采样失败不能当空清单；获准暂存或可复建缓存也不构成删除授权。repo/worktree/build 各自读取实际 common-dir、HEAD 和 dirty，不复用别处的 Git 身份。主机可信登记通过 WorkerPathBinding 固定 Assignment、workspace 和各目录的 device/inode（十进制字符串）与类别；必须核对工作区与目录实例，才确认归属。无登记的 Git 目录仅返回归属未知的诊断，缓存/证据等非 Git 目录缺登记直接拒绝，不能复制期望身份。该登记由 03/04 的受信创建/登记适配方提供，不接受 Agent 自报。启动预检的 Git/路径采样须取得预置锁；未持锁的诊断快照不满足启动门槛，实际操作仍由调用方在锁内执行。
+
+worker 原生进程观测返回机器、boot incarnation、UID、PID、原生启动时间及受控进程组/终端代次；Linux 读 `/proc`，macOS 读 boot session/libproc。终端代次来自主机持久绑定，不从进程名、pane/cwd、`ps`、cmdline/environ 或 `kill(0)` 推断。PID 重用、重启、权限不足和不完整观测均不能证明原进程仍然匹配；身份观测接口不向被观测进程发信号、不清理工作区。后续回收必须沿用卡 10 的退出证据和既有清理授权。
+
 P2b 10 待实现：按项目所有已绑定目标扫描 repos/worktrees/builds，失败或不可达保留历史台账/墓碑，不能当空目录。旧机接管后只进待核实/回收，先补核准确进程身份及退出、清理准确启动代次凭据，再补拉旧分支到隔离恢复 ref，不能前移后继恢复点。仍运行交 human-only Needs You，冻结进一步启动/唤醒并保留现场；clean 且已备份才清 worktree，dirty/未备份走既有 data_deletion 人工决定，force_clean 前保存补丁与未跟踪清单。未知权限/路径/进程身份均不删，迟到清理不能碰新代次；证据和清理收尾落库后才核销旧目标预留。
 
 - C-245：对账的检查历史按项目／卡片保留进程内 seq，只读取新增事件；读事务成功结束后才发布缓存，失败不推进，重启重放持久历史，旧 attempt 和原宽限期保持不变。仍在目录 IO 结束后读取检查所有权，不与 Router／Agent ACK 游标混用。
@@ -2138,6 +2182,8 @@ server 在合并循环旁启动独立的推送循环（默认 5 秒轮询，跟�
 
 ### 12.8 写锁
 
+P2b-06 增加 worker 专用 Python `fcntl.flock` 原语，主机现有 Linux 锁实现保持原职责。worker 锁是管理员预置的 root 所有空普通文件，父命名空间不可由执行账号替换；helper 核对 inode、链接数、owner 和原生 ACL，拒绝缺失/替换/不安全锁。锁经继承的 FD 取得，调用方持有 FD 至操作结束；父子进程仍持 FD 时锁不能提前释放。Git/helper 使用调用方现有预算，员工测试采用非阻塞锁、嵌套立即失败；失败不降级到进程内锁。它仅保护本机短操作，不替代卡 11 的持久资源租约。
+
 P2b 04/06 待实现：工作区锁键至少包含物理目标、项目和基础 clone，中心发布锁独立。控制主机继续用既有 Linux 锁；worker 用 Python `fcntl.flock` 锁住预置且不可替换的 inode，覆盖 Git/helper 与员工测试串行，保留预算、嵌套立即失败和 FD 生命周期，不依赖系统 flock 命令，也不降为进程内锁。它不代替卡 11 的持久设备/资源租约。
 
 同一个 worktree 已有写入型 Run 在执行时，Dispatcher 不派发新的写入型 Run，后来的事件进入 Inbox 排队。
@@ -2171,7 +2217,7 @@ P2b 04/06 待实现：工作区锁键至少包含物理目标、项目和基础 
 
 ### 13.1 单机（Phase 1）
 
-P2b-01：新项目登记本机实际系统与架构的 `local`。迁移 0025 为已有项目幂等补缺失行，已有机器行、Assignment、Run 和 RuntimeRef 原样保留，旧 hc 别名不替换。`local` 是合法物理编号，不等于无账号隔离的执行模式；生产仍使用隔离账号。
+P2b-01：新项目登记本机实际系统与架构的 `local`。迁移 0026 为已有项目幂等补缺失行，已有机器行、Assignment、Run 和 RuntimeRef 原样保留，旧 hc 别名不替换。`local` 是合法物理编号，不等于无账号隔离的执行模式；生产仍使用隔离账号。
 
 C-245 的后台执行隔离评估见 [ADR 0009](adr/0009-background-loop-isolation.md)。Q-410 已由人于 2026-11-14 选择先部署对账／备份增量优化并在生产复测，确认剩余瓶颈；若仍需隔离，后续按同机 Web／MCP 和后台两个受监督进程另开卡规划实现，仍走审核和部署门禁。当前保持单个 server。拆分须保持 SQLite WAL、原 busy_timeout、短事务及事件持久化边界，并扩展 C-201 的双进程就绪、精确身份核验、停止与整体回滚；不宣称拆分可消除同步数据库写锁等待。
 
@@ -2299,6 +2345,12 @@ flowchart LR
 
 P2b-01：`cardigan machine register|update|list|show|drain|check` 为人专属 CLI。register/update 接受编号、label、os、arch、tags、status；不接受 endpoint、账号、密钥或容量参数。所有机器命令先检查容量配置加载结果；无效或安全读取失败时输出加载器的脱敏诊断并以非零退出，不把故障值 0 当作正常上限展示或写入登记。check 核对本机登记与实际系统／架构及状态，远程 check 返回未接入现场探测并失败，不宣称 SSH/hc、工具链或 MCP 已验证；检查不创建账号、不修改配置。
 
+P2b-06：保留 `deploy/install-agent.py` 的 Linux 入口，`--check` 只读且不下载归档；新增 `deploy/install-macos-worker.py --config <私有配置> --dry-run|--check|--apply`。dry-run 不读配置、不创建子进程、不下载或提权。Mac 安装由操作员运行，要求人工已建立非管理员账号、root 管理的 HOME/工作根及 `.cardigan-worker` 绑定标记（project、UID、目录服务 HOME）；配置与标记均须先固定完整父链和文件 FD，核验 root 所有、单链接、0600、原生 ACL、名称与 inode 一致性，再有界读取同一 FD；ACL 未知或读取期间替换/改写即拒绝。实际账号组、sudo 拒绝、挂载身份、ACL 和显式空间阈值均须匹配；全部既有目录/文件冲突在首次写入前拒绝。apply 只创建该根内的私有工作目录、受保护 helper 和 Git/测试锁，新建目录用固定 FD 显式设置目标模式，避免 umask 077/027 留下不能续装的半成品；已有目录仍按冲突规则拒绝。重复执行保留锁 inode；不接管其它账号、不修改 sudo/SSH/TCC、不安装 App 或复制登录配置。账号 HOME 内工具/App 所需可写子目录由操作员按最小权限预置，不能靠放开整个 HOME 绕过。
+
+私有配置字段为 account、uid、project、root、mount、volume、minimum_free_bytes.root/work、timeout_ms；容量与超时均显式填写，不增加生产默认值。Mac 基础工具 Node 24、pnpm 11.7.0、Git、Python 3、签名 hc 0.1.18 App 及任务指定 Harness CLI 均须具备原生 arm64 能力，包含 arm64 的 universal 镜像可满足原生要求；架构未知/x64 不能靠重新签验证记录绕过。Python 不假设预装。App 的 bundle/team 身份由可信配置固定，采样在执行 hc 版本命令前用 Apple 签名要求核验 App；核验失败或缺少 pin 均阻塞。签名 App 首装、首次局域网/各实际账号 TCC、登录与重启/锁屏核验均属于操作员现场事项，软件交付不代表已完成。
+
+员工测试编译器可接收管理员预置的 worker_test_lock（path、python、helper），不改变已有测试 worker 预算；Mac 缺少该锁参数拒绝测试。未配置远程目标的本地启动路径和主机侧配置保持原有含义。真实远程接线由卡 02/03/08 完成，本卡不启用 worker。
+
 C-168：本机员工会话由共用 `host.launchRun` 读取主机 `agent-tests.yaml`，将测试限流器编译到 worktree 外的运行目录，并只在员工启动脚本导出 `NODE_OPTIONS=--require=.../test-workers.cjs`。CLI 显式启动与 Dispatcher 新建／替换会话走同一流程，覆盖 Claude Code、Codex、Pi 及 `local`、本机 `agent-ssh`。根目录 `pnpm test`、按包过滤的脚本／exec、直接 `vitest run` 和 `node .../vitest.mjs` 都经过 Vitest CLI 的预加载层；在解析选项前移除重复、百分比或更大的 `--maxWorkers`／`--max-workers`，将 CLI 参数和优先级更高的 `VITEST_MAX_WORKERS` 环境变量一起归一化为不超过主机上限的正整数，任一来源显式设置的较小正整数保留；环境变量中的百分比、零或非法值回到受控上限，避免包脚本／继承环境覆盖限流。已验证项目锁定的 Vitest 5 的最终根配置及项目配置；回归探针在 reporter.onInit 读取解析结果后立即退出，不启动测试 worker。独立启动器经 API 调用 Vitest、其他测试框架不在本层支持范围。
 
 同一 Assignment 会话中的测试共用一个内核 `flock`：第二个或嵌套 Vitest 命令立即以 75 退出并提示等已有测试结束，避免多个命令叠加超过每 Run 的预算，也避免嵌套等待死锁；进程退出（含崩溃）释放锁。上限和锁路径固化在生成脚本里，改 `--maxWorkers` 不能放宽。此层防止正常测试调用过量，不是防恶意代码的 OS 沙箱；员工不得删除预加载环境或改写限流脚本绕过。合并检查沿用独立的白名单环境，不继承这份预加载配置，原 `--maxWorkers=4` 不变；人在员工会话之外运行测试不受影响。不调整 nice、Run 并发或合并检查配置。
@@ -2326,6 +2378,8 @@ worker 文件 helper 用 Python 3 的 dir_fd/openat、O_NOFOLLOW、fstat 与相�
 
 ### 13.5 角色放置
 
+P2b-06 将无头 CLI 与桌面能力分列。桌面探测只读实际账号的登录/锁屏、图形会话/WindowServer、Metal、屏幕录制与辅助功能许可、Keychain 可用状态，不枚举钥匙条目或触发授权弹窗；未观察到的项保持 unknown。TCC 允许不等于画面可见，仍需绑定实际用例的截图证据。无 GUI/TCC 或截图不可见时不得从日志宣布画面验收通过；不以 root、Full Disk Access、关闭 SIP/Gatekeeper 或个人桌面替代。GUI 代理只保留受控能力接口，不在本卡实现游戏/模拟器操作。
+
 | 角色 | 放在哪 |
 |---|---|
 | pm-office / pm-ops | 主机 |
@@ -2336,7 +2390,9 @@ worker 文件 helper 用 Python 3 的 dir_fd/openat、O_NOFOLLOW、fstat 与相�
 
 ### 13.6 环境一致性
 
-P2b 06 的通用能力合同待实现：
+P2b-06 的精确工具链声明与证据位于主机可信配置，机器标签不能替代 installed/configured/last_verified 三项检查。公开清单保留 OS 产品版本/build、Darwin、arch、实际 UID、采样时间、来源和精确工具版本；工具绝对/解析路径用稳定摘要去敏，不采序列号或环境全集。Node 原生依赖须在 arm64 重建；SDK/runtime 架构、导出模板、renderer 等按任务声明核验，版本不符不得换最新版。可共享管理员管理的只读 SDK；pnpm/Harness/构建缓存须按项目私有，不能共享可写缓存。Rosetta 是独立可选能力，基础无头小卡不依赖它；声明 x64 runtime 而对应 runtime/Rosetta 未验证时阻塞，不自动安装或降级。
+
+P2b 06 的通用能力合同（软件实现见本节，专用账号实机验证仍待完成）：
 
 - 主机可信清单按项目声明精确工具/版本组合；基础为原生 arm64 Node 24、pnpm 11.7.0、Git、显式可用的 Python 3、签名 hc 0.1.18 App 与任务所需 CLI。固定 PATH、目标账号 HOME，不 source shell rc，不运行仓库任意 sudo 脚本。
 - 脱敏 manifest 记录 OS/build/Darwin、arch、工具真实路径/精确版本、执行 UID、时间和来源；installed、configured、last_verified 分列，未验留空。SDK、runtime+架构、导出模板、renderer、Rosetta 和 GUI 能力按任务分别核验，不能静默换最新版或把已安装写成已验证。
@@ -2347,11 +2403,15 @@ P2b 06 的通用能力合同待实现：
 
 ### 13.7 模型凭据
 
+P2b-06 只接收可信启动材料采集方提供的凭据可用性状态和非敏感引用（类别、责任角色、credential-ref、用途/范围），不读取或复制个人 home/config/env、认证目录、密钥或钥匙串条目。模型/Harness、SSH/MCP、Apple 开发/签名、登录私钥/加密 key、Play 上传/应用/debug 签名、测试账号/邮箱及外部服务分别限定用途；不生成替代签名。缺少或不可访问时返回固定 credential 阻塞索引，由卡 03/08 的既有协作入口转交对应人专属事项；不在本卡提前请求现场授权。秘密不进 argv、日志、附件或控制面索引。
+
 现有启动流程继续按需注入最小模型/harness 凭据。P2b 03/06 待实现的跨机路径仅经安全材料通道注入，SSH 私钥只留控制主机、禁止转发或反向凭据；不把秘密写入仓库、argv、日志、附件或能力清单。
 
 凭据清单只记类别、负责人、非敏感引用、用途/授权范围和可用性错误；模型、SSH/MCP、开发者签名/商店、测试账号及第三方工具分别检查。缺少/不可访问时停止并进入适当人工待办，不复制旧 home/config/env/钥匙串，不生成替代签名。本人登录、2FA、账号和权限变更仍交人。模型网关与游戏签名/发布的专项验收不由 P2b 自动启用。
 
 ### 13.8 机器登记与调度
+
+P2b-06 的预检报告是启动前证据，不是远程启用授权。卡 02/08 必须结合已登记目标、配置指纹、当前能力证据与专用账号现场前置决定是否放行；缺项保持阻塞，不静默回退 local。`local` 仍是合法物理机器编号，生产执行仍须隔离账号。当前本卡仅交付通用软件；双 OS 原生测试与专用 Mac 账号 B1 的实测分别记录，不能以 Linux 上的 Mac 合成夹具代替现场通过。
 
 C-168：员工自测预算独立于全机 Run 容量。主机配置目录（`CARDIGAN_CONFIG_DIR`，默认 `~/.config/cardigan`）的 `agent-tests.yaml` 仅接受 `max_workers: <正整数>`，文件或字段缺失默认 **2**；不在被开发项目／worktree 写配置，不改 `run-capacity.yaml`。沿用可信配置的属主、普通文件、无符号链接及不可由组／其他用户写入的边界；未知字段、重复键、非法数值或不安全文件均拒绝新会话启动，错误不回显 YAML。每次创建会话读取，配置变化须重开已有会话；仅应用于 `machine_id=local` 的员工，不流入合并检查执行器。执行方式和会话升级边界见 §13.4。
 
@@ -2429,6 +2489,7 @@ P2b 02/03/07–11 的已定安全合同待实现/实证：每项目每机器独�
 | 高风险合并检查的重查（C-115） | PM Ops 在当前偏好允许时只能重查结构化超时失败；不得退回或代确认合并，日志文本不能放宽权限，见 §4.4 |
 | 高风险业务拍板（D12） | 只允许 human Actor 通过 Workbench 或本机 CLI 确认；不接受 PM Office、PM Ops 或其他 Agent 的转录与代拍，不因接口参数或 CLI 命令文字自称 human 而改变身份 |
 | 外接 Assignment | external 仅是调度属性，不授予 human 身份或主机权限；同配置 Office 的 Token 工具范围一致，四类高风险仍只允许 human 确认 |
+| Needs You 外部提醒（C-289） | 系统循环使用主机私有 0600 配置；凭据不落库、不进入日志或 Agent 运行目录。只投递领域白名单字段，敏感卡只发固定提示和链接。状态／测试 CLI 仅人可用，不新增 MCP 或 HTTP 发送入口；详见 §6.9。 |
 | Card MCP | Token 仅由主机侧签发；MCP 不签发或返回明文，PM 不能借 assign 获取其他 Assignment 的凭据；身份和状态迁移由服务端校验 |
 | Web Workbench | 仍只监听回环地址（127.0.0.1），配置成非回环地址拒绝启动；外部访问可经本机 HTTPS 反向代理，必须用 `CARDIGAN_WEB_PUBLIC_ORIGINS` 显式配置来源（格式见 §8.1），未配置时保持原有回环访问，也可用 `ssh -L` 隧道；Host/Origin 只放行原有回环值与配置来源，不信任转发头；登录用 scrypt 加盐密码哈希，会话 Cookie 为 HttpOnly + SameSite=Strict + Path=/，请求 Host 属于配置的 HTTPS 来源时登录及登出均加 Secure；数据库只存会话标识的哈希，登出和改密码立即失效；MCP Token 与会话凭据互不通用 |
 | Git | 工作机和 Agent 不持有任何 Git 凭据；主机 Git 使用独占中心仓库，Agent 可写仓库内的 Git 由 Agent 执行；主机拉取／增量推送分别通过专用 SSH 的 upload-pack／receive-pack，绑定基础 clone 路径，推送只更新基线镜像和固定交付 ref；从 Agent 仓库拉取通过绑定专用 SSH 入口的 upload-pack 传递 pack 数据；中心操作清空继承的 GIT_*，禁用系统／全局配置及 hook，常规内部同步只允许 file 协议，启用 transfer.fsckObjects；P2a-1b 的外部推送按 §12.7 单独启用明确的 SSH 端点和专用凭据 |
@@ -2638,7 +2699,9 @@ ADR 后续责任：06 更新 [0001](adr/0001-runtime-baseline.md) 原生能力�
 
 ### 20.1 主仓库结构
 
-P2b 02–07 待实现：通用 Linux/macOS 安装器、文件/锁/进程 helper 与能力合同归本仓库 `deploy`/相关包；实际机器、账号、工具组合、SSH/MCP 入口、挂载和部署参数只归私有 `cardigan-deploy`，不得复制进产品代码或验收正文。
+P2b-06 的通用安装器、只读预检入口与 Python 原生 helper 放在本仓库 `deploy/`，能力/路径/制品和进程合同位于 `packages/runtime-herdr`。真实机器、账号、挂载身份、签名 pin、下载来源、空间阈值和部署参数只放私有 `cardigan-deploy`；本仓库不保存实际配置或凭据。
+
+P2b 02–05、07 待实现：通用 Linux/macOS 安装器、文件/锁/进程 helper 与能力合同归本仓库 `deploy`/相关包；实际机器、账号、工具组合、SSH/MCP 入口、挂载和部署参数只归私有 `cardigan-deploy`，不得复制进产品代码或验收正文。
 
 技术栈见 D2：TypeScript + pnpm workspace。
 
@@ -2668,11 +2731,14 @@ cardigan/
 
 P2b-01：domain 只在机器快照上选机和产出登记效果；store 执行事务、兼容补行和缓存失效；CLI 装配人类操作与既有 host 容量投影。真实机器地址、账号映射与部署参数继续归私有部署配置；没有增加仓库内 worker 配置或任意远程 IO 入口。
 
+P2b-06 的 worker IO 留在 runtime-herdr/原生 helper，domain 不新增 IO；host 后续按可信目标调用这些接口，roles 只把已批准的锁参数编译进启动材料。卡 03/05 继续持有启动意图与恢复点，本卡的 WorkerCheckpoint 不引入新的数据库或工作流。独立复核覆盖同一卡的锁/身份、能力/路径和安装/制品三个分组，不以接口分组拆走风险审核。
+
 P2b 延续此分层：domain 只定义机器/接管/资源实体、纯命令与端口，不读配置、磁盘或 SSH；store 负责事务/快照/失效，runtime-herdr 和 git-transport 负责目标 IO，host 统一解析可信 project+machine 并编排启动、退出确认、回收，apps 只组装。新增包或接口须随实现卡更新依赖检查，不能让 domain 反向依赖 helper。
 
 `domain` ← `store` / `router` / `mcp-server` / `git-service` / `roles` ← `runtime-herdr` / `git-transport` ← `host` ← `apps`
 
 - `domain` 不依赖任何其他包；运行时和 Git 传输通过 `domain` 中定义的端口接口接入。
+- C-289：外部提醒的端口、内容白名单和事项投影在 domain；发件箱迁移及条件写入在 store；私有配置读取、超时和重试编排在 host；server 装配独立循环，CLI 装配仅人可用的状态／测试命令。飞书、Slack 的 IO 适配器经领域端口注入，不由 domain 引用。
 - `host` 是包和 apps 之间的一层：`cardigan assignment start` 与 Dispatcher 在终端已退出时新开会话走**同一份**启动流程（`launchRun`），Token 轮换、启动编译、运行目录写入、provision、dispatch、start 哨兵和失败补偿只实现一次；apps 之间不互相依赖，只依赖 `host`。CLI 保留参数校验、启动配置和模型选择、`queueRun` 与 worktree 准备，server 只把门铃文本和系统 Actor 交给这份实现。
 - apps 只能依赖本层以下（`host` 及其下的包），`host` 只能依赖 `packages` 中它下面的层，`.dependency-cruiser.cjs` 的分层表与本节一致。
 - `host.readAttention` 为 CLI attention 与运维诊断提供共享聚合；`host.HostOpsService` 负责经 domain 校验后持久化操作意图、关闭记录的终端及确认退出，server 把它注入 MCP 并接入既有 Dispatcher 循环。domain 只返回效果，不执行 IO。
@@ -2688,6 +2754,8 @@ C-243：迁移 0024 仅新增 Workbench 查询索引，排在 C-244 已合入的
 ### 20.3 被开发项目怎么接入
 
 P2b-01：项目机器授权保存在主机数据库中；以下项目文件不作为机器登记、远程执行目标或工具链已验证的来源。
+
+P2b-06 的工具链、路径、签名和证据声明须由主机可信配置提供；`.cardigan/project.yaml` 不是本卡实现或已验证的自动加载入口，不能从项目文件自报可用能力或授予远程启动。部署预检输入经控制主机传入，输出只能作为待核证据，不能由 Agent 自报结果替代主机/操作员观测。
 
 目标项目保持独立仓库。原规划的接入约定为：
 

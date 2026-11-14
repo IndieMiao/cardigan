@@ -115,7 +115,7 @@ export function migrate(
         migrateCardPriorities(db);
       if (migration.version === 21 && migration.name === "design_template")
         seedDesignTemplate(db);
-      if (migration.version === 25 && migration.name === "machine_registry")
+      if (migration.version === 26 && migration.name === "machine_registry")
         for (const row of db
           .prepare(
             "SELECT id FROM projects UNION SELECT project_id AS id FROM assignments UNION SELECT project_id AS id FROM cards",

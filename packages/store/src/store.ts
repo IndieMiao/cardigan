@@ -667,7 +667,7 @@ export class Store {
         .prepare("INSERT INTO projects (id, name, created_at) VALUES (?, ?, ?)")
         .run(record.id, record.name, record.created_at);
       seedCardTemplates(this.#db, record.id);
-      if (this.schemaVersion() >= 25)
+      if (this.schemaVersion() >= 26)
         seedLocalMachine(this.#db, record.id, record.created_at);
     });
     return { ok: true, value: record };

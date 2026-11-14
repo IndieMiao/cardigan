@@ -170,7 +170,8 @@ def preflight(args):
         require(key.is_file() and not key.is_symlink() and key.stat().st_uid == host.pw_uid
                 and stat.S_IMODE(key.stat().st_mode) == 0o600, "Dedicated key must be host-owned 0600")
         require(run("ssh-keygen", "-y", "-f", key, user=host.pw_name).startswith("ssh-ed25519 "), "Dedicated key must be ed25519")
-    binary = payload(args.archive, platform.machine())
+    # A read-only preflight must not fetch or install anything.
+    binary = None if args.check else payload(args.archive, platform.machine())
     return host, agent, shared, identity, private, host_key, binary
 
 

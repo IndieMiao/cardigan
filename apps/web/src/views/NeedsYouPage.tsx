@@ -1718,7 +1718,7 @@ function Notices({
       <h2>知会（未读 {unread.length}）</h2>
       <p className="hint">
         PM 处理的合并、代拍的决定、超时自动合并和 PM
-        合并确认停留提醒，不需要你处理；有疑问可在卡片里追问。
+        合并确认停留提醒及外部提醒发送结果；有疑问可在卡片里追问。
       </p>
       {unread.length > 1 && (
         <button
@@ -1739,42 +1739,52 @@ function Notices({
         <article
           key={n.id}
           className={n.read ? "needs-item read" : "needs-item"}
-          aria-label={`知会 ${n.decision_id}`}
+          aria-label={`知会 ${n.decision_id ?? n.id}`}
         >
           <IdentityRow as="header" className="needs-meta">
             <StatusTag
-              status={n.read ? "done" : "active"}
+              status={
+                n.kind === "external_message"
+                  ? "failed"
+                  : n.read
+                    ? "done"
+                    : "active"
+              }
               label={
-                n.option === "stalled"
-                  ? "PM 合并确认停留"
-                  : n.kind === "merge"
-                    ? n.resolved_by === "system"
-                      ? "超时自动合并"
-                      : n.option === "request_changes"
-                        ? "PM 退回修改"
-                        : n.option === "recheck"
-                          ? "PM 重新检查"
-                          : "PM 代确认合并"
-                    : "PM 代拍"
+                n.kind === "external_message"
+                  ? "外部提醒未送达"
+                  : n.option === "stalled"
+                    ? "PM 合并确认停留"
+                    : n.kind === "merge"
+                      ? n.resolved_by === "system"
+                        ? "超时自动合并"
+                        : n.option === "request_changes"
+                          ? "PM 退回修改"
+                          : n.option === "recheck"
+                            ? "PM 重新检查"
+                            : "PM 代确认合并"
+                      : "PM 代拍"
               }
             />
             <EmployeeIdentity {...n} showTitle={false} />
-            <IdTag id={n.decision_id} label="拍板" />
+            {n.decision_id && <IdTag id={n.decision_id} label="拍板" />}
             {n.card_id && <CardLink projectId={projectId} id={n.card_id} />}
             <Time value={n.at} />
           </IdentityRow>
           {n.question && <p className="hint">{n.question}</p>}
           <Markdown body={n.body} />
           <footer>
-            <a
-              href={routeHash({
-                kind: "decision-history",
-                projectId,
-                ...(n.card_id ? { filters: { card_id: n.card_id } } : {}),
-              })}
-            >
-              查看拍板记录
-            </a>
+            {n.kind !== "external_message" && (
+              <a
+                href={routeHash({
+                  kind: "decision-history",
+                  projectId,
+                  ...(n.card_id ? { filters: { card_id: n.card_id } } : {}),
+                })}
+              >
+                查看拍板记录
+              </a>
+            )}
             {!n.read && (
               <button
                 type="button"
