@@ -103,10 +103,16 @@ test("Workbench indexes upgrade populated inbox-feed v23 data, preserve writes a
     } finally {
       backup.close();
     }
-    expect(migrate(db)).toEqual([
+    // Keep this v23 -> v24 contract independent of later production migrations.
+    const paginationFile = "0024_workbench_pagination.sql";
+    writeFileSync(
+      join(dir, paginationFile),
+      readFileSync(join(defaultMigrationsDir, paginationFile), "utf8"),
+    );
+    expect(migrate(db, dir)).toEqual([
       { version: 24, name: "workbench_pagination" },
     ]);
-    expect(migrate(db)).toEqual([]);
+    expect(migrate(db, dir)).toEqual([]);
     expect(inboxVersion()).toBe(beforeVersion);
     db.exec(
       "UPDATE notifications SET status = 'acked' WHERE project_id = 'p' AND id = 'n1'",
