@@ -157,6 +157,10 @@ test("invariants 9, 14: central ref writes require an expected value and expose 
   expectTypeOf<GitCentralPort["compareAndSwapRef"]>().parameters.toEqualTypeOf<
     [string, string, string, string | null]
   >();
+  // Polling can avoid redundant transfers without adding a publication port.
+  expectTypeOf<GitCentralPort["fetchRefs"]>().parameters.toEqualTypeOf<
+    [string, string, readonly string[], string?, boolean?]
+  >();
 });
 
 test("invariant 14: central verification reports object format, type and commit distance", () => {

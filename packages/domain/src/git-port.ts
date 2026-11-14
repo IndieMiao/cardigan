@@ -76,6 +76,8 @@ export interface GitCentralPort {
     source: string,
     refspecs: readonly string[],
     uploadPack?: string,
+    /** Polling only: skip transfer when all advertised refs already match. */
+    skipIfUnchanged?: boolean,
   ): Promise<void>;
   readRef(repository: string, ref: string): Promise<string | undefined>;
   isAncestor(

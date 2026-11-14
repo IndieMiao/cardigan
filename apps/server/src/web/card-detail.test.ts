@@ -121,8 +121,8 @@ test("U3 recent windows load older records and resolve an anchor beyond the form
     const anchored = await read(
       `limit=20&at=${encodeURIComponent(`entry-${first.id}`)}`,
     );
-    expect(anchored.timeline.length).toBeGreaterThan(200);
-    expect(anchored.timeline.at(-1)?.id).toBe(first.id);
+    expect(anchored.timeline.length).toBeLessThanOrEqual(20);
+    expect(anchored.timeline[0]?.id).toBe(first.id);
     expect((await read("limit=20&at=entry-C-999%231")).timeline).toHaveLength(
       20,
     );

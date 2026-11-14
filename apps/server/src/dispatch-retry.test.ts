@@ -224,7 +224,9 @@ test("failed attempts persist through backoff and one recovery, then escalate af
     }
     expect(f.runtime.wake).toHaveBeenCalledTimes(i + 2);
     expect(f.latest().id).toBe(original.id);
-    expect(f.runtime.status).toHaveBeenCalledTimes(i + 2);
+    // Each fresh dispatcher (a restart) also asks once in its C-247 startup
+    // check; the live terminal is left to the retry path below.
+    expect(f.runtime.status).toHaveBeenCalledTimes(1 + 3 * (i + 1));
     expect(f.state().human_actions).toEqual([]);
     const attempts = history(original.id);
     expect(attempts).toHaveLength(i + 2);
@@ -318,13 +320,15 @@ test.each(["exited", "unknown"] as const)(
   async (process) => {
     fail();
     f.comment();
-    await dispatcher().tick();
+    // One process: a restart would run the C-247 startup check instead.
+    const d = dispatcher();
+    await d.tick();
     vi.mocked(f.runtime.status).mockResolvedValue({
       ok: true,
       value: { process, agent: "unknown", observed_seq: 2 },
     });
     f.advance(30000);
-    await dispatcher().tick();
+    await d.tick();
     expect(f.runtime.wake).toHaveBeenCalledOnce();
     expect(f.runtime.status).toHaveBeenCalledTimes(2);
     expect(f.state().runs).toHaveLength(2);

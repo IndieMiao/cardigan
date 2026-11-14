@@ -351,10 +351,19 @@ export class CentralGitTransport implements GitCentralPort {
     source: string,
     refspecs: readonly string[],
     uploadPack?: string,
+    skipIfUnchanged = false,
   ) {
     const local = await this.source(source);
     if ((await this.agentSource(source, local)) && !uploadPack)
       throw new Error("Agent fetch requires an Agent upload-pack entry");
+    // Bound Agent transports keep one streaming upload-pack per fetch.
+    // A refs probe would add another SSH call and a query-timeout failure mode.
+    if (
+      skipIfUnchanged &&
+      !uploadPack &&
+      (await this.refsUnchanged(repository, local, refspecs))
+    )
+      return;
     await this.checked(repository, [
       "fetch",
       "--atomic",
@@ -367,6 +376,51 @@ export class CentralGitTransport implements GitCentralPort {
       local,
       ...refspecs,
     ]);
+  }
+  /** Read both sides each time: failed fetches, restarts and deleted backups retry. */
+  private async refsUnchanged(
+    repository: string,
+    source: string,
+    refspecs: readonly string[],
+  ): Promise<boolean> {
+    // Optimize the two polling shapes only. SHA fetches and other refspecs
+    // keep the ordinary transfer path, including Git's validation/errors.
+    if (refspecs.length !== 1) return false;
+    const match =
+      /^\+?(refs\/[A-Za-z0-9._/-]+)(\*)?:(refs\/[A-Za-z0-9._/-]+)(\*)?$/u.exec(
+        refspecs[0] ?? "",
+      );
+    if (!match || match[2] !== match[4]) return false;
+    const from = match[1] as string,
+      to = match[3] as string;
+    if (from.includes("..") || to.includes("..")) return false;
+    const wildcard = match[2] === "*";
+    if (wildcard && (!from.endsWith("/") || !to.endsWith("/"))) return false;
+    const raw = await this.checked(repository, [
+      "ls-remote",
+      "--refs",
+      "--",
+      source,
+      `${from}${wildcard ? "*" : ""}`,
+    ]);
+    const advertised = raw
+      .split("\n")
+      .filter(Boolean)
+      .flatMap((line) => {
+        const [sha, ref] = line.split("\t");
+        if (!sha || !fullSha.test(sha) || !ref)
+          throw new Error("Unsupported advertised Git ref record");
+        // ls-remote patterns also match after a slash, not just at the root.
+        if (wildcard ? !ref.startsWith(from) : ref !== from) return [];
+        return [{ sha, ref: wildcard ? to + ref.slice(from.length) : to }];
+      });
+    // A missing exact source ref must still fail in fetch; an empty agent/*
+    // set is normal and never prunes existing backups.
+    if (!advertised.length) return wildcard;
+    const current = new Map(
+      (await this.listRefs(repository, to)).map(({ ref, sha }) => [ref, sha]),
+    );
+    return advertised.every(({ ref, sha }) => current.get(ref) === sha);
   }
   async readRef(repository: string, ref: string) {
     await this.checked(repository, ["check-ref-format", ref]);

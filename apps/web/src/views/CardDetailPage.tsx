@@ -87,11 +87,62 @@ export function CardDetailPage(props: CardDetailPageProps) {
   const query = useRef<CardReadOptions>({
     limit: pageSize,
     ...(anchor ? { at: anchor } : {}),
+    ...(routeFilters.type ? { type: routeFilters.type } : {}),
+    ...(routeFilters.author ? { author: routeFilters.author } : {}),
   });
+  const history = useRef<{ key: string; detail: CardDetail } | undefined>(
+    undefined,
+  );
+  const loadGeneration = useRef(0);
   const previousSize = useRef(pageSize);
+  const previousFilters = useRef(
+    `${routeFilters.type ?? ""}/${routeFilters.author ?? ""}`,
+  );
   const load = useCallback(async () => {
     try {
-      return await client.card(projectId, cardId, query.current);
+      const request = ++loadGeneration.current;
+      const options = { ...query.current };
+      const key = JSON.stringify([
+        projectId,
+        cardId,
+        options.at,
+        options.type,
+        options.author,
+        options.limit,
+      ]);
+      const detail = await client.card(projectId, cardId, options);
+      const previous =
+        history.current?.key === key ? history.current.detail : undefined;
+      // A disconnected refresh can skip an entire page. Keep cached history only
+      // when the new window connects to it; otherwise restart from its cursor.
+      const connected =
+        options.before ||
+        detail.timeline.some((entry) =>
+          previous?.timeline.some((old) => old.id === entry.id),
+        );
+      const merged =
+        previous && connected && detail.timeline_next_cursor !== undefined
+          ? {
+              ...detail,
+              timeline: [
+                ...new Map(
+                  [...previous.timeline, ...detail.timeline].map((entry) => [
+                    entry.id,
+                    entry,
+                  ]),
+                ).values(),
+              ].sort((a, b) => b.event_seq - a.event_seq),
+              timeline_next_cursor: options.before
+                ? detail.timeline_next_cursor
+                : (previous.timeline_next_cursor ?? null),
+            }
+          : detail;
+      if (request === loadGeneration.current) {
+        history.current = { key, detail: merged };
+        const { before: _before, ...current } = query.current;
+        query.current = current;
+      }
+      return merged;
     } catch (error) {
       if (error instanceof ApiError && error.status === 404) return null;
       throw error;
@@ -120,21 +171,24 @@ export function CardDetailPage(props: CardDetailPageProps) {
     );
   }, [data]);
   useEffect(() => {
-    if (query.current.at === anchor && previousSize.current === pageSize)
+    const filterKey = `${routeFilters.type ?? ""}/${routeFilters.author ?? ""}`;
+    if (
+      query.current.at === anchor &&
+      previousSize.current === pageSize &&
+      previousFilters.current === filterKey
+    )
       return;
     query.current = {
-      limit:
-        previousSize.current === pageSize
-          ? Math.max(
-              query.current.limit ?? pageSize,
-              data?.timeline.length ?? 0,
-            )
-          : pageSize,
+      limit: pageSize,
       ...(anchor ? { at: anchor } : {}),
+      ...(routeFilters.type ? { type: routeFilters.type } : {}),
+      ...(routeFilters.author ? { author: routeFilters.author } : {}),
     };
     previousSize.current = pageSize;
+    previousFilters.current = filterKey;
+    history.current = undefined;
     reload();
-  }, [anchor, pageSize, data, reload]);
+  }, [anchor, pageSize, routeFilters.type, routeFilters.author, reload]);
   const back = routeHash({ kind: "cards", projectId });
   if (data === null)
     return (
@@ -191,14 +245,22 @@ export function CardDetailPage(props: CardDetailPageProps) {
           anchorReady={!anchor || (query.current.at === anchor && !pending)}
           pageSize={pageSize}
           loadEarlier={() => {
-            query.current = {
-              ...query.current,
-              limit:
-                Math.max(
-                  query.current.limit ?? pageSize,
-                  data.timeline.length,
-                ) + pageSize,
-            };
+            if (data.timeline_next_cursor) {
+              query.current = {
+                ...query.current,
+                before: data.timeline_next_cursor,
+                limit: pageSize,
+              };
+            } else if (data.timeline_next_cursor === undefined) {
+              query.current = {
+                ...query.current,
+                limit:
+                  Math.max(
+                    query.current.limit ?? pageSize,
+                    data.timeline.length,
+                  ) + pageSize,
+              };
+            } else return;
             reload();
           }}
         />
@@ -561,6 +623,11 @@ function CardContent({
             onChange={setFilters}
             loaded={detail.timeline.length}
             total={detail.counts.timeline}
+            hasMore={
+              detail.timeline_next_cursor === undefined
+                ? detail.timeline.length < detail.counts.timeline
+                : detail.timeline_next_cursor !== null
+            }
             pageSize={pageSize}
             pending={pending}
             loadEarlier={loadEarlier}

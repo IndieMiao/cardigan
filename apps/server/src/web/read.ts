@@ -55,6 +55,7 @@ import { loadCommandState } from "@cardigan/mcp-server";
 import { convertLegacyRole, HARNESSES, isDefaultRoleId } from "@cardigan/roles";
 import type { Store } from "@cardigan/store";
 import { DEFAULT_HOST_OPS_PATROL_INTERVAL_MS } from "../host-ops-patrol.js";
+import { PAGE_LIMITS } from "./pagination.js";
 
 /**
  * The Workbench read model (M5 plan §4 M5.1: 只读接口).
@@ -79,10 +80,10 @@ export interface ReadContext {
 export const WHY_MAX_LENGTH = 40;
 
 /** Timeline entries returned with one card unless `limit` says otherwise. */
-export const DEFAULT_TIMELINE_LIMIT = 200;
+export const DEFAULT_TIMELINE_LIMIT = PAGE_LIMITS.timeline.default;
 /** Events returned by one activity page. */
-export const DEFAULT_ACTIVITY_LIMIT = 50;
-export const MAX_ACTIVITY_LIMIT = 200;
+export const DEFAULT_ACTIVITY_LIMIT = PAGE_LIMITS.activity.default;
+export const MAX_ACTIVITY_LIMIT = PAGE_LIMITS.activity.max;
 
 const human = (project_id: ProjectId): Actor => ({ kind: "human", project_id });
 
@@ -525,10 +526,12 @@ function attachmentViewMapper(state: CommandState) {
 export function attachmentViews(
   state: CommandState,
   card_id: CardId,
+  attachmentEntryCards?: ReadonlyMap<string, CardId>,
 ): AttachmentView[] {
-  const entryCard = new Map(
-    state.timeline.map((entry) => [entry.id, entry.card_id]),
-  );
+  const entryCard = new Map([
+    ...(attachmentEntryCards ?? []),
+    ...state.timeline.map((entry) => [entry.id, entry.card_id] as const),
+  ]);
   return state.attachments
     .filter((attachment) => {
       if (attachment.card_id === card_id) return true;
@@ -563,6 +566,12 @@ export function cardDetail(
     readonly mergeGateStatus?: ProjectMergeGate["status"];
     readonly timelineLimit?: number;
     readonly timelineAnchor?: string;
+    readonly timelineEntries?: readonly TimelineEntry[];
+    readonly timelineTotal?: number;
+    readonly conclusionEntries?: readonly TimelineEntry[];
+    readonly timelineNextCursor?: string | null;
+    readonly updatedAt?: string;
+    readonly attachmentEntryCards?: ReadonlyMap<string, CardId>;
     readonly now?: string;
   } = {},
 ) {
@@ -620,10 +629,12 @@ export function cardDetail(
             entry.work_item_id === review.work_item_id),
       )
     : -1;
-  const timeline = allTimeline.slice(
-    0,
-    Math.max(options.timelineLimit ?? DEFAULT_TIMELINE_LIMIT, target + 1),
-  );
+  const timeline =
+    options.timelineEntries ??
+    allTimeline.slice(
+      0,
+      Math.max(options.timelineLimit ?? DEFAULT_TIMELINE_LIMIT, target + 1),
+    );
 
   const related = state.cards
     .filter((other) => card.related_cards.includes(other.id))
@@ -644,13 +655,15 @@ export function cardDetail(
       ),
     }));
 
-  const conclusionEntries = allTimeline
-    .filter(
-      (entry) =>
-        !entry.retracted &&
-        ["review", "decision_resolved"].includes(entry.type),
-    )
-    .slice(0, 3);
+  const conclusionEntries =
+    options.conclusionEntries ??
+    allTimeline
+      .filter(
+        (entry) =>
+          !entry.retracted &&
+          ["review", "decision_resolved"].includes(entry.type),
+      )
+      .slice(0, 3);
   const description = [
     card.title,
     card.goal,
@@ -817,7 +830,10 @@ export function cardDetail(
               : completionPreview.error.message,
         }
       : null,
-    updated_at,
+    updated_at: options.updatedAt ?? updated_at,
+    ...(options.timelineNextCursor !== undefined
+      ? { timeline_next_cursor: options.timelineNextCursor }
+      : {}),
     card: { ...card, references: references(description) },
     work_items,
     timeline: timeline.map(timelineView),
@@ -851,7 +867,7 @@ export function cardDetail(
       ...action,
       ...webAuthorView(state, action.requested_by),
     })),
-    attachments: attachmentViews(state, card_id),
+    attachments: attachmentViews(state, card_id, options.attachmentEntryCards),
     // §8.4 关联区: decisions, related cards and the deliveries that carry a PR.
     relations: {
       decisions: decisions.map((decision) => ({
@@ -881,8 +897,9 @@ export function cardDetail(
         })),
     },
     counts: {
-      timeline: state.timeline.filter((entry) => entry.card_id === card_id)
-        .length,
+      timeline:
+        options.timelineTotal ??
+        state.timeline.filter((entry) => entry.card_id === card_id).length,
       deliveries: deliveries.length,
       reviews: reviews.length,
       open_decisions: decisions.filter((decision) =>
@@ -1513,7 +1530,7 @@ export function executionView(
 }
 
 /** C-75: page size of the execution drawer's Run history. */
-export const EXECUTION_RUN_PAGE = 10;
+export const EXECUTION_RUN_PAGE = PAGE_LIMITS.runs.default;
 
 /**
  * C-75: one page of an Assignment's Run history for the execution drawer,
@@ -1590,7 +1607,7 @@ function actorGroup(event: { readonly actor: Actor }): string {
   return ACTOR_GROUPS[role] ?? "agent";
 }
 
-const EVENT_CATEGORIES: Readonly<Record<string, readonly string[]>> = {
+export const EVENT_CATEGORIES: Readonly<Record<string, readonly string[]>> = {
   delivery: ["delivery_submitted", "delivery_accepted"],
   review: ["review_submitted"],
   decision: [
@@ -1643,7 +1660,7 @@ function activityCategory(type: string): string {
   return "other";
 }
 
-const RANGE_MS: Readonly<Record<string, number>> = {
+export const RANGE_MS: Readonly<Record<string, number>> = {
   "24h": 24 * 60 * 60 * 1000,
   "7d": 7 * 24 * 60 * 60 * 1000,
   "30d": 30 * 24 * 60 * 60 * 1000,

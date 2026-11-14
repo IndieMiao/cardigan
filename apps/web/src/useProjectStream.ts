@@ -92,6 +92,13 @@ export function useProjectStream(
   const current = state.project === project ? state : initial(project);
   return {
     revision: current.revision,
+    changedCardsSince: (revision: number) =>
+      [...current.streams]
+        .filter(([, changed]) => changed > revision)
+        .map(([id]) => id),
+    changedCards: [...current.streams]
+      .filter(([, revision]) => revision === current.revision)
+      .map(([id]) => id),
     contextRevision: current.contextRevision,
     status: current.status,
     cardRevision: (id: string, affectedCards: readonly string[] = []) =>

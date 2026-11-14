@@ -65,7 +65,10 @@ export function claimDispatchStop(
     if (
       !old?.stopping &&
       ((!old
-        ? run.status !== "dispatched"
+        ? // C-247: a startup check may also take a Run the monitor already
+          // marked unknown; it still has to prove exit before cancelling.
+          run.status !== "dispatched" &&
+          !(p.reason === "server_restart" && run.status === "unknown")
         : !["dispatched", "unknown"].includes(run.status)) ||
         run.started_at ||
         a.status !== "active" ||
@@ -136,6 +139,28 @@ export function startDispatchStop(
         attempt_id: stop.attempt_id,
       });
     }
+    return true;
+  });
+}
+
+/**
+ * C-247: give back a claimed, not yet started stop fence. A `server_restart`
+ * stop never force-closes a terminal: when the observation before the stop
+ * does not confirm exit, the fence is withdrawn and the dispatch timeout stays
+ * in charge. A started fence is never withdrawn here; its exit proof decides.
+ */
+export function withdrawDispatchStop(
+  state: CommandState,
+  actor: Actor,
+  p: { run_id: RunId; attempt_id: string; reason: string },
+  ports: CommandPorts,
+) {
+  return command(state, actor, "manage_dispatch_stop", ports, (d) => {
+    const run = d.get("runs", p.run_id),
+      stop = run.dispatch_stop;
+    if (!stop || stop.attempt_id !== p.attempt_id || stop.stopping)
+      return false;
+    clear(d, run, p.reason);
     return true;
   });
 }

@@ -1,10 +1,11 @@
+import { PAGE_LIMITS } from "./pagination.js";
 /**
  * C-134: Decision history is read page by page, newest resolution first.
  * The cursor is the (resolution.at, id) key of the last row returned, so a
  * decision resolved while the user pages through never shifts or repeats rows.
  */
-export const DECISION_HISTORY_DEFAULT_LIMIT = 10;
-export const DECISION_HISTORY_MAX_LIMIT = 100;
+export const DECISION_HISTORY_DEFAULT_LIMIT = PAGE_LIMITS.decisions.default;
+export const DECISION_HISTORY_MAX_LIMIT = PAGE_LIMITS.decisions.max;
 
 interface HistoryRow {
   readonly id: string;

@@ -3,7 +3,7 @@ import { DEFAULT_SLOW_TICK_MS } from "./loop.js";
 import { profileSpan, profileTick } from "./tick-profile.js";
 
 export interface DispatchLoopOptions {
-  dispatcher: Pick<Dispatcher, "tick">;
+  dispatcher: Pick<Dispatcher, "tick"> & Partial<Pick<Dispatcher, "close">>;
   /** RuntimeMonitor implements this lifecycle; assembly remains in M3.5. */
   monitor?: { reconcile(): void; stop(): Promise<void> };
   intervalMs?: number;
@@ -37,6 +37,8 @@ export function startDispatchLoop(options: DispatchLoopOptions): DispatchLoop {
     wake = () => {};
   const requestStop = () => {
     stopping = true;
+    // C-247: the tick in flight stops claiming before its next delivery.
+    options.dispatcher.close?.();
     wake();
   };
   options.signal?.addEventListener("abort", requestStop, { once: true });

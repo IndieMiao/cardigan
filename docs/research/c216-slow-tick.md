@@ -308,3 +308,124 @@ CARDIGAN_CLEANUP_REPLAY=1 pnpm exec vitest run apps/server/src/cleanup.replay.te
 - domain 契约：system 身份和项目边界；仅清空仍 released 的同一引用；active／suspended 不清空；并发更换引用、重复提交和回滚后的重试；旧释放审计保留。
 - store：只返回本项目未撤销凭据；另一个连接签发／撤销立即可见；事务回滚不缓存错误结果。
 - server：601 个历史候选首轮处理后，后续及重建执行器均不再调用终端或重复撤销；失败结果／抛错重试；只有 release 成功仍复查；清理后晚到凭据仍撤销；active 与刚释放的候选分离；审计写入失败使引用清除整体回滚；IO 期间新引用不会被旧观察覆盖；终端清除后 Git 失败仍独立重试。原 cleanup、构建目录及暂停／释放用例共同回归。
+
+## 9. C-244：route.candidates 与 route.decision_followups 增量化
+
+> 卡片 C-244 / 工作项 W-755。依据 H-45 生产分段（dispatcher 420 轮）：平均墙钟 7.26 秒，`route.candidates` 平均 3.5 秒、`route.decision_followups` 平均 2.9 秒。本卡只改查找、复用和“哪些对象需要重算”，不改派发顺序（`compareDispatchOrder`）、容量规则、催办时机（拍板后 30 分钟）和任何数值。唯一的库变化是迁移 0023：给 notifications、bell_attempts 加与 0017 相同的行变化触发器（不新增表、不改列）。
+
+### 9.1 测量手段
+
+- **新增分段**（`apps/server/src/dispatch.ts`，都用 `profileSpanSync`，不增加 `await`）：
+  - `route.decision_followups.state`／`.evaluate`／`.persist`；
+  - `route.candidates.attempts`（未结束 BellAttempt）／`.state`／`.notifications`（读 pending 通知）／`.owners`（逐条求归属并分组）／`.index`／`.groups`（组内排序并生成候选）／`.queued`（只有排队 Run 的 Assignment）；
+  - `route.maintenance.obsolete`／`.review_limit`／`.merge_stalls`／`.belled`／`.inactive_runs`。
+- **生产形状回放** `apps/server/src/dispatch-route.replay.test.ts`（默认跳过，`CARDIGAN_ROUTE_REPLAY=1` 运行；不起 server、不探测请求，只跑 dispatcher tick 并输出 `tick_profile` 行）。C-216 的回放没有已释放 Assignment、Agent 发起的拍板和常驻 PM，测不出这两段，所以新写一份：
+  - 240 张卡，其中 223 张走完合并检查并释放全部 3 个 Assignment（669 个 released），17 张未完成；
+  - 每张卡一条由 coder 发起、人已拍板的拍板，一半有人在时间线引用它写了执行结果、一半没有；
+  - 每张卡 75 条评论，合计 25,878 条事件、21,344 条时间线、463 个拍板、722 个 Assignment、1,134 个 Run；
+  - 一个 PM Ops（有正在运行的 Run，铃声积压）和一个 PM Office，`standing` 用生产同款 `standingResolver`；每个 Run 签发 2 个 Token（2,268 个）。
+  - 时钟固定，所有拍板都已超过 30 分钟。
+- 命令（本机，不设 `CARDIGAN_TICK_PROFILE`，理由同 §6.1）：
+
+```sh
+pnpm exec tsc -b apps/server
+CARDIGAN_ROUTE_REPLAY=1 ROUTE_REPLAY_CARDS=240 ROUTE_REPLAY_OPEN_CARDS=17 \
+  ROUTE_REPLAY_COMMENTS=75 ROUTE_REPLAY_TICKS=11 ROUTE_REPLAY_OUT=/tmp/r.json \
+  pnpm --filter @cardigan/server exec vitest run src/dispatch-route.replay.test.ts --maxWorkers=1
+```
+
+  可选 `ROUTE_REPLAY_PROFILE=<file>` 从第 2 轮起记录 CPU profile。**数据来源：合成数据，不是生产库副本，也没有在生产上做实验。** 合成数据里 PM Ops 积压的通知比生产多得多，所以 candidates 的绝对秒数比生产大；看热点和量级，不直接对标生产秒数。
+
+### 9.2 修前：最大的几项
+
+修前（本卡起点 `b69d15a`，只加了上面的分段）记录 CPU profile 的那次运行（第 2～8 轮；profile 本身有开销，绝对值比 §9.5 偏大）给出的前三项：
+
+| 位置 | 稳态每轮 | 原因 |
+|---|---:|---|
+| `route.candidates.owners` | 10～26 s | ① 常驻 PM 的通知每条都调一次 `standingResolver`，它对每个活跃常驻 PM 先查 `tokensForAssignment`（tokens 表没有项目／Assignment 索引，全表扫描并解码工具清单），即使行里已经有 `standing_mode`；② 分组用 `[...(groups.get(key) ?? []), n]`，同一组（积压的 PM Ops 通知）每加一条就复制一次整组，是平方级 |
+| `route.candidates.groups` | 1.1～1.9 s | 每组取 Assignment 时 `state.assignments.find((a) => a.id === this.owner(first, state))`：**谓词里**再算归属，每个 Assignment 都调一次 `standingResolver`（722 次 Token 查询）；候选优先级 `cards.find(c => c.id === work_items.find(...))` 是卡数 × 工作项数 |
+| `route.decision_followups.evaluate` | 1.0～2.8 s | 每轮对全部 463 个拍板：先线性找 `decision_followup_due` 事件，再对未催办的拍板跑 `decisionImplementationRecorded`（全量事件过滤、全量事件 `some`、全量时间线 `some`），是“拍板数 × 事件数” |
+
+其余：`route.ack_inbox` 4～6 s（同样逐条走 `standingResolver`），`route.maintenance` 0.8～1.5 s。
+
+生产上 candidates 3.5 s 与此同源：生产有 PM Ops／Office 常驻 Assignment，tokens 表随每个 Run 增长，分组和组内取 Assignment 都会逐条触发 Token 全表扫描。
+
+### 9.3 改了什么
+
+**decision_followups（`packages/domain/src/commands/decision-followup.ts`，`apps/server/src/decision-followup-schedule.ts`）**
+
+1. 新增 `decisionFollowupStatus(state, q, now)`，把原 `remindDecisionFollowups` 的判断拆成五种结果：`ineligible`（不是已拍板的 Agent 拍板）、`waiting`（未满 30 分钟，带 `due_at`）、`reminded`（已有同一 `resolved_at` 的 `decision_followup_due`）、`recorded`（已观察到落实；`durable` 表示证据只依赖只追加的事件／时间线）、`due`（应催办）。`remindDecisionFollowups` 只对 `due` 发事件，新增可选 `decision_ids` 把这一轮限定在某些拍板上，不传时与原来一样扫全部。判断规则逐条照搬原实现，常量 `DECISION_FOLLOWUP_DELAY_MS = 30 分钟` 与原数值相同。
+2. 查找走按快照身份缓存的索引（与 §6.3 同一约定）：`decision_followup_due` 键集合、按拍板分组的 `decision_resolved`、按卡分组的进展事件、按 (卡, seq) 分组的事件、按引用拍板分组的评论。判断一个拍板从“全量事件 × 3 + 全量时间线”降到只看相关卡的事件。`decisionFollowupNeedsHuman`（needs-you 视图）和 `decisionFollowupBlocked`（改用 `eventById`）同样受益。
+3. dispatcher 按项目持有 `DecisionFollowupSchedule`（跨轮，进程内），**不再每轮遍历拍板**（第二轮修改，回应代码审核 V-861）。每轮只评估三类拍板：
+   - 自上次提交以来**行有变化**的拍板：在同一个事务里读 Store 的行变化记录（`command_rows`，0017 的触发器维护，CLI 和其它进程的写入同样覆盖），游标是上次提交时各集合的版本号；
+   - 上次答案可能在行不变时改变的拍板（“不稳定集合”）：`due`（本轮正在写催办事件）和只有 PM Ops 评论作证的 `recorded`（取决于 Assignment）；
+   - 到点的等待：`waiting` 按 `due_at` 放进升序队列，每轮只看队首已到点的部分。
+   `ineligible`、`reminded`、`durable` 的 `recorded` 只取决于拍板行本身和只追加的事件／时间线，行不变就一直不再看。答案和游标在事务提交之后才写入；事务回滚时游标和答案都不动，下一轮会把同样的变化再规划一次。进程重启、或版本号倒退时从头来：第一轮按库里的全部拍板评估一次。没有行变化记录的库（迁移前）每轮全部评估，与原行为相同。
+
+**candidates（`apps/server/src/candidate-index.ts`、`dispatch.ts`、`dispatch-inbox.ts`、`assembly.ts`，`packages/domain/src/run-index.ts`，迁移 `0023_inbox_change_feed.sql`）**
+
+0. **跨轮增量（第二轮修改，回应代码审核 V-861）**：`CandidateIndex` 按项目在内存里维护候选列表，每轮先在同一个读事务里读行变化记录（游标同上；通知和 BellAttempt 由 0023 的触发器记录，它们不计入 `CommandState` 的版本号，通知写入仍不会让状态快照失效）：
+   - **完全没有变化**：直接返回上一轮的列表，不读状态、不读通知（测试里记为 `reused`，`loadState` 和 `listNotifications` 调用次数都为 0）。
+   - **有变化**：算出“脏 Assignment 集合”——自身行变化的；Run 行变化的（按 Run 的 `assignment_id`）；自己发起的拍板行变化的（`decisionFollowupBlocked` 依赖它）；工作项按 id 变化的；同卡上任一工作项、交付或卡片行变化的（验证项的 `hasRunTarget` 和卡片优先级只看同卡）。只有脏 Assignment 的分组和“只有排队 Run”候选重新计算，其余复用上次的结果；通知只按变化的 id 重读这几行，内存里维护 pending 通知集合（按 `seq, id` 排序，和 SQL 一致）及每条通知的归属。
+   - 事件只追加：已有事件不会变，所以新事件只影响“触发事件当时还不存在”的结果；这类结果标记为易变，从不复用。
+   - 找不到对应行（例如被删的 Run、工作项）、版本号倒退、或计算中抛错：丢弃该项目缓存，下一轮从完整状态重建。进程重启同样从完整状态重建一次。
+   - 有缺 `standing_mode` 的旧常驻 PM 行时，常驻 PM 要读 tokens 表（没有变化记录），此时每轮都重算常驻归属、不走“无变化直接返回”。生产启动时已回填 `standing_mode`。
+   - 已释放、已完成的 Assignment 没有变化时不再进入任何计算；它们的待收尾通知仍照原规则成组进入候选，由 `deliver` 拒绝收尾。
+1. 每条通知的归属只算一次（按通知对象缓存），组内取 Assignment 用按 id 的 Map（取第一个，与 `find` 一致）。
+2. `memoStanding`：同一段**同步、且不写 Token 和 Assignment** 的代码里，同一 (项目, 种类, 状态对象) 的常驻 PM 只解析一次。用在 candidates（不写库）、`acknowledgeInbox`（只移动通知行）和 maintenance 的已响铃重试循环（只写通知和告警事件）。`standingResolver` 本身改为只有缺 `standing_mode` 的旧行才读 Token（原来先读再判断，读出的结果用不上）。
+3. 分组改为原地 `push`，不再每条复制整组。
+4. Run 查找按快照身份建索引（`runById`、`queuedRun`、`runsOf`）：通知归属、排队 Run、`busy` 和重试循环里的“该 Assignment 是否还有未结束 Run”、`obsoleteDispatchAttention` 都改为按键查。最后一段“只有排队 Run 的 Assignment 才可能补候选”从“每个 Assignment 扫两遍全部 Run”变为一次 Map 查找，已释放、已完成的 Assignment 只花一次查表。
+5. 候选优先级先找工作项再找卡（`cardPriority`），不再在卡的谓词里找工作项。
+
+**通知读取（`packages/store/src/inbox.ts`）**：`NotificationQuery` 新增 `statuses`，在 SQL 里过滤；maintenance 的过期提醒检查、`resolveUnreadableNotifications`（都本来就跳过 acked／resolved）、`acknowledgeInbox`（只处理 pending／belled／delivery_failed）和 `retireReconcileNotifications`（跳过终态）改为只读出它们会处理的状态，终态历史不再逐条 JSON 解码。结果顺序仍是 `seq, id`。
+
+**已释放、已完成、已取消对象的处理边界**：它们不再触发 Run 扫描和 Token 查询，但没有被直接排除——
+- 发给已释放 Assignment 的 pending 通知仍然进入候选，由 `deliver` 走原来的 `assignment_released` 拒绝流程收尾（否则会永远 pending）；
+- 排队 Run 带容量等待的 Assignment 无论状态如何都照原规则补候选；
+- 已拍板但还没到 30 分钟、或只有 PM Ops 作证的拍板每轮仍会重看，不会被“已关闭”误判跳过。
+
+### 9.4 为什么不会读到旧状态、重复派发或漏派
+
+- 同轮快照：`dispatchStateLoader`（C-216 起）在每个消费事务里按 `command_versions` 版本号复查，写入后（含其它连接）一定重读；本卡没有改这一层。认领、ACK、停止仍在各自写事务里重新读状态并复查（`claim` 里的 `hasRunTarget`、`busy`、BellAttempt 互斥、容量 `runCapacitySnapshot` 都没动）。
+- 新增的索引（事件、时间线、Run）都按数组身份缓存，规则与 §6.3 相同：写入生成新数组，回滚后读到旧数组对应旧索引；`WeakMap` 不阻止回收。
+- `DecisionFollowupSchedule` 只会让 dispatcher **少看**确定不会变的拍板：拍板行的任何写入都进入变化记录（触发器与写入同事务提交或回滚）；记下的三类答案只依赖拍板行和只追加的数据；`due` 不记，所以催办事件写失败（回滚）时下一轮还会再算；重复催办仍被“同一 `resolved_at` 已有催办事件”挡住（与原来一样）。
+- `CandidateIndex` 只影响“dispatcher 先看谁”，不参与认领：`deliver` 在写事务里重新读状态，复查 Assignment 状态、`busy`、`hasRunTarget`、BellAttempt 互斥和容量，候选列表过期最多让一次投递被拒绝，不会重复派发或超容量。复用一个结果的前提是它依赖的行都没有出现在变化记录里；依赖关系就是上面列出的几类，`dispatch-candidates.test.ts` 用同一个长期存活的 dispatcher 对照“修前算法每轮从头算”，覆盖 Run、卡片优先级、工作项状态、交付（验证目标）、拍板、通知确认等随机变化。
+- **约定（独立复核 V-860 建议写明）**：增量依赖两条 Store 约定：① 所有业务表和通知、BellAttempt 的写入都经过行变化触发器（换后端或绕过触发器写库会让缓存沿用旧结论）；② events、timeline 只追加，不 UPDATE／DELETE。同轮快照仍依赖“未变的行复用对象、变过的行重新解析、不原地修改”（`command-snapshots.ts`）。
+- `memoStanding` 只用在不写 Token、不写 Assignment 的同步代码段内，段内状态对象不变时解析结果不可能变化；状态对象一换就重算。
+
+### 9.5 修前修后（本机合成数据，同一份数据，11 轮取第 2～11 轮）
+
+本机同时有其它任务在跑（负载约 4～9），绝对值有波动，比较以同批相对值为准。
+
+修前是本卡起点 `b69d15a` 加同一份回放文件，修后是本卡提交；两次在同一台机器上顺序运行，种子数据完全相同（25,878 条事件、463 个拍板、669 个已释放 Assignment、2,268 个 Token）。
+
+“第一轮修后”是第一次交付（只做按键查找和对象缓存）；“第二轮修后”是本次交付（候选和催办跨轮增量，§9.3 第 0 条和 decision_followups 第 3 条），同一份回放数据、同一台机器。
+
+| 指标（第 2～11 轮） | 修前 平均 / p90 | 第一轮修后 平均 / p90 | 第二轮修后 平均 / p90 |
+|---|---:|---:|---:|
+| dispatcher 墙钟 | 23.54 s / 29.02 s | 1.51 s / 1.76 s | **1.24 s / 1.66 s** |
+| route.decision_followups | 1.30 s / 2.90 s | 1 ms / 11 ms | 1.2 ms / 0.2 ms |
+| route.candidates | 15.84 s / 20.99 s | 130 ms / 148 ms | **6.1 ms / 0.2 ms** |
+| route.ack_inbox | 4.58 s / 5.64 s | 368 ms / 431 ms | 337 ms / 351 ms |
+| route.maintenance | 904 ms / 1.12 s | 189 ms / 217 ms | 187 ms / 207 ms |
+| route（合计） | 22.84 s / 28.16 s | 891 ms / 1.03 s | 732 ms / 777 ms |
+| deliver | 695 ms / 1.32 s | 607 ms / 767 ms | 501 ms / 702 ms |
+| 首轮（含路由全部积压事件） | 28.55 s | 17.18 s | 14.90 s |
+
+- 第二轮修后 candidates 的平均值来自第 2 轮的一次增量重算（上一轮 deliver 写了很多行）；之后没有变化的轮次直接复用，读变化记录约 0.1 ms，不读状态、不读通知。decision_followups 同理：没有拍板行变化、也没有到点等待时，评估 0 个拍板。
+
+- 第一轮修后（参考）：`route.decision_followups.evaluate` 每轮仍对每个拍板做一次 `WeakMap` 查找；candidates 子段 `notifications` 75 ms（每轮读出并解码全部 pending 通知）、`groups` 32 ms、`owners` 23 ms。第二轮把这些都换成了按变化记录增量处理。
+- 修后 maintenance 子段：`obsolete` 85 ms、`merge_stalls` 82 ms，其余不到 30 ms。
+
+### 9.6 项目状态缓存：同轮共享与跨轮增量方案
+
+- **同轮共享**：已经由 `dispatchStateLoader` 做到——一轮内所有步骤共用按版本号缓存的同一份 `CommandState`，没有写入就不重建（本卡回放稳态 `state_builds` 为 0）。本卡在此基础上把派生索引（事件、时间线、Run、拍板状态）也挂在同一份快照上，同一快照只建一次。
+- **跨轮增量**：candidates 和 decision_followups 两段已在本卡做到（§9.3）。其它步骤（`ack_inbox`、`maintenance`、`unreadable`、`deliver`）仍每轮按当前状态全量判断；可以复用同一套行变化记录做同样的增量，建议看生产复测数字后另开卡。
+
+### 9.7 剩下的耗时与未覆盖
+
+- **合成数据修后是平均 1.24 s，没有到 1 秒；本卡负责的两段已基本归零。** 剩下的时间在：`deliver` 约 0.5 s、`route.ack_inbox` 约 0.34 s、`route.maintenance` 约 0.19 s，`retry_dispatched`、`unreadable` 各约 0.08～0.09 s。前三项都随“未终结通知数 × 候选数”增长：合成数据里 PM Ops 一直有运行中的 Run，所有卡的通知都积压在它名下，每张卡一组，每轮几百个候选在 `deliver` 里逐个读状态、判 `busy` 后返回；ACK 每轮逐条查游标。生产没有这么大的积压（H-45 里这两段以外的合计约 0.86 s，本卡也让 ack_inbox、maintenance 变快），按比例看生产应能到 1 秒以内，但这要上线复测才能确认。
+- 继续往下降的方向：`stoppedByHuman` 每次倒序扫事件（可按快照记忆）、ACK 循环按游标批量判断、`deliver` 对同一 Assignment 的多组候选只判断一次 `busy`；更彻底的是 §9.6 的跨轮增量。都不在本卡范围，建议看生产复测数字后再决定是否开卡。
+
+- 合并部署后，由主机侧在生产上开一次 `CARDIGAN_TICK_PROFILE=1` 复测（张良执行），用新增分段核对 `route.candidates`、`route.decision_followups` 是否降到亚秒级，以及剩余时间是否与本节的判断一致。
+- 本卡不改 `docs/development-plan.md` 正文：派发、催办的规则和数值都没有变化。
