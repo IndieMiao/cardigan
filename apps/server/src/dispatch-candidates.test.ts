@@ -13,7 +13,9 @@ import {
   type Notification,
   type ProjectId,
   postComment,
+  queuedRun,
   queueRun,
+  runById,
   unreadableCommentTrigger,
 } from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
@@ -23,7 +25,6 @@ import { dispatchFixture } from "../test-support/dispatch.js";
 import { standingResolver } from "./assembly.js";
 import { Dispatcher } from "./dispatch.js";
 import { notificationOwner, type StandingResolver } from "./dispatch-inbox.js";
-import { queuedRun, runById } from "./run-index.js";
 
 interface Candidate {
   readonly project: ProjectId;

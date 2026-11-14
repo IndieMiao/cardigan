@@ -27,10 +27,12 @@ import {
   lastRunActivity,
   launchSettings,
   obsoleteDispatchAttention,
+  queuedRun,
   queueRun,
   refreshRunTargetWait,
   remindDecisionFollowups,
   resolveDispatchAttention,
+  runsOf,
   stoppedByHuman,
   unreadableCommentTrigger,
 } from "@cardigan/domain";
@@ -89,7 +91,6 @@ import { dispatchStateLoader, type StateLoader } from "./dispatch-state.js";
 import { patrolHostOps } from "./host-ops-patrol.js";
 import { escalatePmMergeStalls } from "./pm-merge-stall-attention.js";
 import { escalateReviewLimitWaits } from "./review-limit-attention.js";
-import { queuedRun, runsOf } from "./run-index.js";
 import { profileSpan, profileSpanSync } from "./tick-profile.js";
 
 /** The model/CLI snapshot a queued Run records; C-106 adds harness and effort. */

@@ -1,4 +1,4 @@
-import type { Run } from "@cardigan/domain";
+import type { Run } from "./entities.js";
 
 interface RunIndex {
   /** First Run per id, matching `runs.find((r) => r.id === id)`. */
@@ -10,7 +10,7 @@ interface RunIndex {
 }
 
 /**
- * C-244: keyed Run lookups for the dispatcher. Run collections are immutable
+ * C-244: keyed Run lookups for the dispatcher and its maintenance checks. Run collections are immutable
  * snapshots (C-221 §6.3: Store snapshots, command drafts and fixtures all hand
  * out a new array on change), so an index keyed by the array's identity cannot
  * go stale, and a rolled-back snapshot keeps its own index. Weak keys free it.
@@ -37,13 +37,12 @@ function runIndex(runs: readonly Run[]): RunIndex {
   return index;
 }
 
-export function runById(
-  runs: readonly Run[],
-  id: string | undefined,
-): Run | undefined {
-  return id === undefined ? undefined : runIndex(runs).byId.get(id);
+/** Same result as `runs.find((r) => r.id === id)` for any `id` value. */
+export function runById(runs: readonly Run[], id: unknown): Run | undefined {
+  return typeof id === "string" ? runIndex(runs).byId.get(id) : undefined;
 }
 
+/** Same result as `runs.find((r) => r.assignment_id === a && r.status === "queued")`. */
 export function queuedRun(
   runs: readonly Run[],
   assignment: string,

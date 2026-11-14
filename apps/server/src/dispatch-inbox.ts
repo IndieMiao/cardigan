@@ -7,6 +7,7 @@ import {
   type Notification,
   type NotificationStatus,
   type ProjectId,
+  runById,
   states,
 } from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
@@ -27,7 +28,6 @@ import {
 } from "@cardigan/store";
 
 import type { StateLoader } from "./dispatch-state.js";
-import { runById } from "./run-index.js";
 
 export const dispatcherClock: Clock = { now: () => new Date().toISOString() };
 
