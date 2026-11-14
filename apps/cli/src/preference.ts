@@ -3,12 +3,15 @@ import {
   type DecisionCategory,
   decisionCategories,
   decisionDelegation,
+  independentReviewMaxRounds,
   mergeConfirmSnoozeDefaultMinutes,
   mergeConfirmSnoozeMaxMinutes,
   mergeConfirmStallAfterMinutes,
   pmMergeConfirmation,
   projectPreferences,
+  REVIEW_MAX_ROUNDS_CEILING,
   reviewerBrowserEnabled,
+  reviewMaxRounds,
   setProjectPreferences,
 } from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
@@ -23,7 +26,7 @@ import {
 import type { CliIo } from "./io.js";
 
 const USAGE =
-  "cardigan preference get context-handoff-remaining | set context-handoff-remaining <剩余百分比> | get context-restart-remaining | set context-restart-remaining <剩余百分比> | get auto-merge-after | set auto-merge-after <分钟|off> | get merge-confirm-stall-after | set merge-confirm-stall-after <分钟> | get merge-confirm-snooze-default | set merge-confirm-snooze-default <分钟> | get merge-confirm-snooze-max | set merge-confirm-snooze-max <分钟> | get decision-delegation | set decision-delegation <类别> <on|off> | get pm-merge-confirmation | set pm-merge-confirmation <on|off> | get reviewer-browser | set reviewer-browser <on|off> [--project <p>] [--data-dir <目录>]";
+  "cardigan preference get context-handoff-remaining | set context-handoff-remaining <剩余百分比> | get context-restart-remaining | set context-restart-remaining <剩余百分比> | get auto-merge-after | set auto-merge-after <分钟|off> | get merge-confirm-stall-after | set merge-confirm-stall-after <分钟> | get merge-confirm-snooze-default | set merge-confirm-snooze-default <分钟> | get merge-confirm-snooze-max | set merge-confirm-snooze-max <分钟> | get decision-delegation | set decision-delegation <类别> <on|off> | get pm-merge-confirmation | set pm-merge-confirmation <on|off> | get reviewer-browser | set reviewer-browser <on|off> | get review-max-rounds | set review-max-rounds <轮数> | get independent-review-max-rounds | set independent-review-max-rounds <轮数> [--project <p>] [--data-dir <目录>]";
 export function runPreferenceCommand(
   args: readonly string[],
   io: CliIo,
@@ -36,7 +39,7 @@ export function runPreferenceCommand(
     flags: Record<string, string> = {};
   const fail = (): never => {
     throw new CliError(
-      "偏好参数无效；上下文剩余百分比须大于 0 且小于 100，换会话比例须小于交接提醒比例；暂缓上限须为 60 到 10080 的整数分钟，其他时长须为 1 到 1440 的整数分钟；仅自动合并支持 off 关闭。",
+      `偏好参数无效；上下文剩余百分比须大于 0 且小于 100，换会话比例须小于交接提醒比例；暂缓上限须为 60 到 10080 的整数分钟，其他时长须为 1 到 1440 的整数分钟；审核轮数上限须为 1 到 ${REVIEW_MAX_ROUNDS_CEILING} 的整数；仅自动合并支持 off 关闭。`,
       EXIT.usage,
       [USAGE],
     );
@@ -72,8 +75,16 @@ export function runPreferenceCommand(
   const stall = preference === "merge-confirm-stall-after";
   const snooze = preference === "merge-confirm-snooze-default";
   const snoozeMax = preference === "merge-confirm-snooze-max";
+  // C-253: review limits of verifiers created afterwards.
+  const roundsKey =
+    preference === "review-max-rounds"
+      ? "review_max_rounds"
+      : preference === "independent-review-max-rounds"
+        ? "independent_review_max_rounds"
+        : undefined;
   if (
     (!contextKey &&
+      !roundsKey &&
       !delegation &&
       !toggleOnly &&
       !stall &&
@@ -86,14 +97,23 @@ export function runPreferenceCommand(
     fail();
   const minutes = raw === "off" ? null : Number(raw);
   if (
-    (contextKey || stall || snooze || snoozeMax) &&
+    (contextKey || roundsKey || stall || snooze || snoozeMax) &&
     action === "set" &&
     raw === "off"
   )
     fail();
   if (
+    roundsKey &&
+    action === "set" &&
+    (!/^\d+$/.test(raw ?? "") ||
+      Number(raw) < 1 ||
+      Number(raw) > REVIEW_MAX_ROUNDS_CEILING)
+  )
+    fail();
+  if (
     action === "set" &&
     !contextKey &&
+    !roundsKey &&
     !delegation &&
     !toggleOnly &&
     raw !== "off" &&
@@ -137,32 +157,34 @@ export function runPreferenceCommand(
                 a,
                 contextKey
                   ? { [contextKey]: Number(minutes) }
-                  : delegation
-                    ? {
-                        decision_delegation: {
-                          [raw as DecisionCategory]: toggle === "on",
-                        },
-                      }
-                    : pmMerge
-                      ? { pm_merge_confirmation: raw === "on" }
-                      : browser
-                        ? { enable_reviewer_browser: raw === "on" }
-                        : stall
-                          ? {
-                              merge_confirm_stall_after_minutes:
-                                Number(minutes),
-                            }
-                          : snooze
+                  : roundsKey
+                    ? { [roundsKey]: Number(raw) }
+                    : delegation
+                      ? {
+                          decision_delegation: {
+                            [raw as DecisionCategory]: toggle === "on",
+                          },
+                        }
+                      : pmMerge
+                        ? { pm_merge_confirmation: raw === "on" }
+                        : browser
+                          ? { enable_reviewer_browser: raw === "on" }
+                          : stall
                             ? {
-                                merge_confirm_snooze_default_minutes:
+                                merge_confirm_stall_after_minutes:
                                   Number(minutes),
                               }
-                            : snoozeMax
+                            : snooze
                               ? {
-                                  merge_confirm_snooze_max_minutes:
+                                  merge_confirm_snooze_default_minutes:
                                     Number(minutes),
                                 }
-                              : { auto_merge_after_minutes: minutes },
+                              : snoozeMax
+                                ? {
+                                    merge_confirm_snooze_max_minutes:
+                                      Number(minutes),
+                                  }
+                                : { auto_merge_after_minutes: minutes },
                 ports,
               ),
           })
@@ -172,24 +194,26 @@ export function runPreferenceCommand(
     io.stdout(
       contextKey
         ? `${preference}: ${contextUsageThresholds(preferences)[contextKey === "context_handoff_remaining_pct" ? "handoff" : "restart"]}`
-        : delegation
-          ? Object.entries(decisionDelegation(preferences))
-              .map(
-                ([category, enabled]) =>
-                  `${category}: ${enabled ? "on (PM 代拍)" : "off (由人确认)"}`,
-              )
-              .join("\n")
-          : pmMerge
-            ? `pm-merge-confirmation: ${pmMergeConfirmation(preferences) ? "on (PM 代确认合并)" : "off (由人确认)"}`
-            : browser
-              ? `reviewer-browser: ${reviewerBrowserEnabled(preferences) ? "on (界面卡的截图核对须由独立复核员审核通过，PM 才能代确认)" : "off (灰度中，截图核对由 PM Office 或人核实)"}`
-              : stall
-                ? `merge-confirm-stall-after: ${mergeConfirmStallAfterMinutes(preferences)}`
-                : snooze
-                  ? `merge-confirm-snooze-default: ${mergeConfirmSnoozeDefaultMinutes(preferences)}`
-                  : snoozeMax
-                    ? `merge-confirm-snooze-max: ${mergeConfirmSnoozeMaxMinutes(preferences)}`
-                    : `auto-merge-after: ${preferences.auto_merge_after_minutes ?? "off"}`,
+        : roundsKey
+          ? `${preference}: ${roundsKey === "review_max_rounds" ? reviewMaxRounds(preferences) : independentReviewMaxRounds(preferences)} (只影响之后新建的审核项)`
+          : delegation
+            ? Object.entries(decisionDelegation(preferences))
+                .map(
+                  ([category, enabled]) =>
+                    `${category}: ${enabled ? "on (PM 代拍)" : "off (由人确认)"}`,
+                )
+                .join("\n")
+            : pmMerge
+              ? `pm-merge-confirmation: ${pmMergeConfirmation(preferences) ? "on (PM 代确认合并)" : "off (由人确认)"}`
+              : browser
+                ? `reviewer-browser: ${reviewerBrowserEnabled(preferences) ? "on (界面卡的截图核对须由独立复核员审核通过，PM 才能代确认)" : "off (灰度中，截图核对由 PM Office 或人核实)"}`
+                : stall
+                  ? `merge-confirm-stall-after: ${mergeConfirmStallAfterMinutes(preferences)}`
+                  : snooze
+                    ? `merge-confirm-snooze-default: ${mergeConfirmSnoozeDefaultMinutes(preferences)}`
+                    : snoozeMax
+                      ? `merge-confirm-snooze-max: ${mergeConfirmSnoozeMaxMinutes(preferences)}`
+                      : `auto-merge-after: ${preferences.auto_merge_after_minutes ?? "off"}`,
     );
     return EXIT.ok;
   } finally {

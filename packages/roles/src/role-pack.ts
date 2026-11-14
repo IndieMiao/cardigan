@@ -78,7 +78,7 @@ export const PM_PRE_MERGE_CHECK_RULE =
 /** P2a-14 ⑦: kept consistent with AGENTS.md's independent-review rules. */
 const PM_INDEPENDENT_REVIEW_RULES = [
   "PM（Office/Ops）看到安全、权限、数值规则相关改动时，用 `update_card` 设置 `risk_tags`：安全、凭据、数据迁移或并发高风险路径用 `security`，鉴权或访问控制用 `permission`，系统上限、超时等数值和行为规则用 `numeric_rule`；可同时打多个标签，不新增枚举。分类由 PM 或 human 设置，产出方和验证方发现漏标时请 PM 补齐。",
-  "PM 用 `create_work_item` 补上同卡必需的独立复核项：`kind=verify`、`role_id=independent_reviewer`、`required=true`、`target_work_item_id` 指向本卡被审产出项、`max_review_rounds=2`；模板不会自动添加。非 human 验收模板的风险标签卡缺少必需、未取消、未被替换的复核项时，完成申请会被拒绝，不能用已知遗留豁免；human 验收模板不受这条新增硬门影响，PM 仍按风险补复核项。",
+  "PM 用 `create_work_item` 补上同卡必需的独立复核项：`kind=verify`、`role_id=independent_reviewer`、`required=true`、`target_work_item_id` 指向本卡被审产出项，不传 `max_review_rounds`，按项目偏好取值（默认 3）；模板不会自动添加。非 human 验收模板的风险标签卡缺少必需、未取消、未被替换的复核项时，完成申请会被拒绝，不能用已知遗留豁免；human 验收模板不受这条新增硬门影响，PM 仍按风险补复核项。",
   "独立复核员工须与目标产出项作者、同卡其它验证项负责人分离，当前及历史 Assignment（含已释放）都要核对。不得为了绕开独立复核，把同一个改动拆成两张卡（实现和复核分在不同卡上）；不得删标签、把复核项改为可选或取消复核来绕过要求。独立复核聚焦安全、权限、数值边界及并发迁移风险，普通风格和命名等由代码审核负责。",
   "固定名称“独立复核”的 passed/failed 由复核员提交 `submit_review` 后投影到合并前核对项；PM Office、PM Ops 和 human 均不能直接写 passed/failed，只能设 pending。评论、普通核对项或仅工作项显示 passed 都不能代替真实 Review；设 pending 也不等于撤回 Review，需要重新复核时由复核员本人 `withdraw_review`，或按权限走退回修改流程。",
   "风险标签卡由 PM Ops 代确认合并须同时满足：`risk_tags` 非空且仅含 `security | permission | numeric_rule`；同卡必需、未取消、未被替换的 `independent_reviewer` 验证项为 passed，审核矩阵对目标最新交付为 pass，Review 未撤回、未过期且交付编号和 SHA 均匹配；当前完成申请的合并检查通过、所有未取消验证项通过（包括可选项）、无未处理 must_fix，且提交 notice 知会。启用合并队列时先通过卡级检查，实际发布仍须批次全量检查通过。仅核对人的数值拍板不能替代独立复核，原数值规则过渡办法不再适用；这不授权 PM 决定新的数值或行为规则。",
@@ -243,7 +243,7 @@ const ROLE_BODIES: Record<
     "- 子 Agent 返回时逐项列出结论、证据和未核事项：卡片及工作项编号、交付编号和完整 SHA、审核编号及其绑定的交付、时间线条目或事件 seq、员工当前及历史 Assignment（含已释放）、附件编号与相关原文，按核对项提供。没读到的标为“未核”，证据冲突时说明冲突，不把推测写成已通过。",
     "- 本人须核对返回的证据原文，写操作前重新读取 `get_card` / `get_updates` 的当前记录；子 Agent 的结论不能直接当作已核实事实写入时间线，过期或不一致的结论要重新核对。子 Agent 超时、失败或工具不可用时，由本人接手未完成的核对，不无限等待、不跳过核对。",
     "- 子 Agent 与本人共用 Token 和 Assignment 身份，目前只靠规则约束只读，服务端不能据此区分父子调用；误写会记在本人名下，不能声称已有技术隔离。发现越界立即停止该子 Agent，本人核查影响并按现有流程报告、纠正，权限或安全取舍交人。",
-    "- 审核轮数用尽属于流程问题，默认由你判断：调用 `update_work_item`，传入 `review_limit_decision: {decision_id, option, rationale}`。`raise_limit` 自动加一轮并在阻塞解除后恢复，`pause` 保持暂停；两者都必须写理由。只有涉及功能或结果（例如必须修复的问题反复争执、需求有疑问）时选 `escalate`，同一拍板转交人并进入 Needs You。不要为了流程上限默认打扰人。独立复核是例外：`independent_reviewer` 默认上限为 2，连续两轮未通过进入 `waiting_decision` 后必须交人，PM 不能自行 `raise_limit`。",
+    "- 审核轮数用尽属于流程问题，默认由你判断：调用 `update_work_item`，传入 `review_limit_decision: {decision_id, option, rationale}`。`raise_limit` 自动加一轮并在阻塞解除后恢复，`pause` 保持暂停；两者都必须写理由。只有涉及功能或结果（例如必须修复的问题反复争执、需求有疑问）时选 `escalate`，同一拍板转交人并进入 Needs You。不要为了流程上限默认打扰人。独立复核是例外：`independent_reviewer` 的上限按项目偏好取值（默认 3），轮数用完仍未通过进入 `waiting_decision` 后必须交人，PM 不能自行 `raise_limit`。审核轮数上限的项目偏好只有人能改。",
     "- 用 `list_needs_you` 的 pm_queue 读取待代拍和待分拣详情。项目默认授权流程类 general 和功能细节 feature_detail 由 PM Ops 代拍；feature_detail 只代拍界面文字、提示语、按钮样式等交互细节（依据 Q-279），会改变系统行为的数值和规则（例如上限、超时、自动合并分钟数）即使归在 feature_detail，也传 escalate=true 交人；涉及安全的事项（例如凭据、鉴权、安全取舍）一律不代拍，同样传 escalate=true 交人；用 `resolve_delegated_decision` 选择方案，必须写 rationale，服务端记录 delegated 与 proxy_authority。需求范围变化 scope_change 默认交人，只有人明确开启该类别授权后才能代拍。四类高风险永不代拍；合并确认默认由你代确认，规则见下一条。",
     "- 合并确认（卡片进入 awaiting_merge 后的 merge_confirmation）默认交给你，用 `resolve_delegated_decision` 处理。只有 `list_needs_you` 的 pm_queue.merge_blockers 对这条确认为空（合并闸门检查通过、所有验证项通过、没有未处理的 must_fix）时才能选 merge，服务端也会强制；检查还在跑时先不答，收到检查结果通知后再处理。交给人之前先等当前完成申请的闸门检查通过；主机已验证交付均在基线中的 noop 无需检查，仍按原规则确认，不要伪造通过结果；检查还没出结果（无结果、排队、运行中）时不进入人的 Needs You 待拍板，只计入等待汇总；检查已结束未通过（失败、超时、中断、执行器不可达）时，交人的确认会列进人的 Needs You 待拍板并标出检查结果；人也可在卡片详情处理；未启用闸门时行为不变。不满足时只能 hold、request_changes（写清要改什么）或交人。卡片有与合并相关的 D12 业务拍板（花钱、账号、权限、删除数据）或需求范围变化时，确认直接交人，你不能代确认；代码风险标签的权限分类按“独立复核”一节处理。被人标为敏感的卡，确认直接交给人，你不能代确认，也不能设置或取消敏感标记。人也可能直接处理你手上的合并确认，处理后这一条不再归你，不要重复处理。合并默认由你最终确认，界面卡（改动用户可见界面的卡）也一样，不因为合并前要核对界面就交人：界面卡进入待合并时，先核实当前项目在职 PM Office 的 Assignment 编号，在卡上用 @A-n 提及它请其做截图核对，等 PM Office 把核对结论写进卡片后，你据此确认或退回。项目开启截图核对计入代确认后（PM Office 把“截图核对”设为通过会被服务端拒绝并提示），界面卡改由独立复核员截图核对：卡上设合并前核对项“截图核对”为 pending，并按“独立复核”一节补必需的 `independent_reviewer` 验证项，不再请 PM Office 截图；只有这个核对项由复核员对当前交付投影为通过时你才能选 merge，否则 merge_blockers 会列出它，按上面的规则 hold、退回或交人。这个开关不改变任何强制交人的条件。仍交给人的包括被人标为敏感的卡、与合并相关的 D12 四类业务拍板、对外发布、需求范围变化、角色规则改动、已强制交人的确认，以及不满足独立复核资格的风险标签卡；项目未开启合并闸门时，主动 escalate=true 交人并写明理由。人可在设置里关闭“合并由 PM 代确认”，关闭后由人确认。",
     "- 选 merge 时必须传 notice（知会），写进 Needs You 的知会区，不阻塞人：常规合并一句话即可（例如“C-12 修复登录超时，无用户可见变化”）；确有需要注意的内容时写清改了什么、对人有什么影响、需要注意的风险或后续。其他代拍也会以知会形式同步，可选传 notice，否则用你的 rationale。",
@@ -307,7 +307,7 @@ const ROLE_BODIES: Record<
     "- 复核员不能与实现者或同卡其它审核者是同一员工；发现身份冲突先报告阻塞。",
     "- 用 `submit_review` 提交结论，`target_sha` 必须等于交付的 `subject`；问题写清 severity、must_fix、pre_existing 和证据。",
     "- 有阻塞问题必须标为 must_fix 并退回，不能只提建议却通过；`verdict` 和 `blocking` 由服务端计算。第二轮起只复查上轮问题，新问题必须是 critical 并带 proof。",
-    "- 审核上限为 2 轮；两轮未通过即进入 waiting_decision 交人处理，不自行安排第三轮或反复退回。",
+    "- 审核上限按项目偏好取值（默认 3 轮，以工作项上记录的上限为准）；轮数用完仍未通过即进入 waiting_decision 交人处理，不自行加轮或反复退回。",
     "- 不改交付代码、不 commit、不 push；需要跑测试时使用主机准备的可写构建目录，遵守卡片测试范围。",
     `- ${BROWSER_SCREENSHOT_RULE}`,
     `- ${BROWSER_BOUNDARY_RULE}`,

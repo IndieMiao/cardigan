@@ -9,11 +9,13 @@ import {
   decisionCategories,
   decisionDelegation,
   decisionHistory,
+  independentReviewMaxRounds,
   mergeConfirmSnoozeDefaultMinutes,
   mergeConfirmSnoozeMaxMinutes,
   mergeConfirmStallAfterMinutes,
   pmMergeConfirmation,
   projectPreferences,
+  reviewMaxRounds,
 } from "@cardigan/domain";
 import type { MergeGateConfiguration } from "@cardigan/host";
 import { readRunQueue } from "@cardigan/host";
@@ -657,6 +659,10 @@ async function serveProjectRoute(
         projectPreferences(state),
       ),
       merge_confirm_stall_after_minutes: mergeConfirmStallAfterMinutes(
+        projectPreferences(state),
+      ),
+      review_max_rounds: reviewMaxRounds(projectPreferences(state)),
+      independent_review_max_rounds: independentReviewMaxRounds(
         projectPreferences(state),
       ),
       merge_gate_enabled: false,

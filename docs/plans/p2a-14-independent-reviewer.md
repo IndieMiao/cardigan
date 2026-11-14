@@ -62,7 +62,7 @@
 
 ## 5. 测试清单
 
-- **卡①**：契约测试覆盖 `defaultRoleDefinition("independent_reviewer", ...)` 的 `kind`、`worktree`、`allowed_tools`（不含 `submit_delivery`/PM 工具/`host_ops_*`）；`DEFAULT_ROLE_LAUNCH` 映射到 `claude-opus`。另需覆盖审核轮次上限：`createWorkItem` 对 `role_id="independent_reviewer"` 省略 `max_review_rounds` → 落地值为 2（不是全局默认）；显式传 3 → 拒绝；显式传 1 或 2 → 允许；连续 2 轮 `reject` 后第 3 轮前触发 `review_limit_exceeded` 进入 `waiting_decision`（复用现有审核轮次上限的事件断言模式）。
+- **卡①**：契约测试覆盖 `defaultRoleDefinition("independent_reviewer", ...)` 的 `kind`、`worktree`、`allowed_tools`（不含 `submit_delivery`/PM 工具/`host_ops_*`）；`DEFAULT_ROLE_LAUNCH` 映射到 `claude-opus`。另需覆盖审核轮次上限（2026-11-14 改为项目偏好，默认普通 5、独立复核 3，见 C-253）：`createWorkItem` 对 `role_id="independent_reviewer"` 省略 `max_review_rounds` → 落地值为 2（不是全局默认）；显式传 3 → 拒绝；显式传 1 或 2 → 允许；连续 2 轮 `reject` 后第 3 轮前触发 `review_limit_exceeded` 进入 `waiting_decision`（复用现有审核轮次上限的事件断言模式）。
 - **卡②**：
   - 先指派 `code_review` 给员工 A，再指派 `independent_reviewer` 给同一员工 A 到同卡 → 拒绝。
   - 先指派 `independent_reviewer` 给员工 A，再指派 `code_review` 给同一员工 A → 拒绝（反向）。
@@ -104,7 +104,7 @@
 3. 独立复核与 `code_review` 的职责边界先按 ADR 决定 1 给出的粗边界上线，上线后用首批真实案例校准 Core Prompt，结论写进卡⑦，不回头改 ADR。
 4. 卡⑧**不**要求上线前有防火墙/网络访问限制——Agent 本来就有 shell、浏览器不增加新的网络能力，边界交给 Workbench 密码和 Card MCP Token 两层既有鉴权，浏览器侧只保留 Core Prompt 里"不得访问生产 Workbench"的约定（见卡⑧改动范围列）。
 5. 界面卡自动合并灰度标准：先跑 5 张界面卡、张良逐张抽查、5 张都没漏判才打开开关（见卡⑧）。
-6. 独立复核审核轮次上限固定为 2，连续 2 轮不通过即升级给人（见卡①）。
+6. 独立复核审核轮次上限固定为 2，连续 2 轮不通过即升级给人（见卡①）。2026-11-14 改为项目偏好，默认普通 5、独立复核 3（C-253）。
 
 ## 7. 上线后的观察指标
 

@@ -5,17 +5,21 @@ import {
   decisionCategories,
   decisionDelegation,
   highRiskCategories,
+  independentReviewMaxRounds,
   isBoardLane,
   mergeConfirmSnoozeDefaultMinutes,
   mergeConfirmSnoozeMaxMinutes,
   mergeConfirmStallAfterMinutes,
   pmMergeConfirmation,
+  REVIEW_MAX_ROUNDS_CEILING,
   reviewerBrowserEnabled,
+  reviewMaxRounds,
   type SystemReminderPolicy,
   validAutoMergeMinutes,
   validContextPercentage,
   validMergeConfirmSnoozeMaxMinutes,
   validMergeConfirmStallMinutes,
+  validReviewMaxRounds,
   validSystemReminderPolicy,
 } from "../preferences.js";
 import { states } from "../states.js";
@@ -56,6 +60,9 @@ export function setProjectPreferences(
     enable_reviewer_browser?: boolean;
     /** A patch: only the listed lanes change; null forgets the human setting. */
     board_collapsed_lanes?: Readonly<Record<string, boolean | null>>;
+    /** C-253: only affects verifiers created afterwards. */
+    review_max_rounds?: number;
+    independent_review_max_rounds?: number;
   },
   ports: CommandPorts,
 ) {
@@ -92,6 +99,14 @@ export function setProjectPreferences(
         ),
       "validation_failed",
       "合并确认最长暂缓时长须为 60 到 10080 的整数分钟",
+    );
+    ensure(
+      (input.review_max_rounds === undefined ||
+        validReviewMaxRounds(input.review_max_rounds)) &&
+        (input.independent_review_max_rounds === undefined ||
+          validReviewMaxRounds(input.independent_review_max_rounds)),
+      "validation_failed",
+      `审核轮数上限须为 1 到 ${REVIEW_MAX_ROUNDS_CEILING} 的整数`,
     );
     ensure(
       (input.context_handoff_remaining_pct === undefined ||
@@ -146,7 +161,9 @@ export function setProjectPreferences(
         input.decision_delegation !== undefined ||
         input.pm_merge_confirmation !== undefined ||
         input.enable_reviewer_browser !== undefined ||
-        input.board_collapsed_lanes !== undefined,
+        input.board_collapsed_lanes !== undefined ||
+        input.review_max_rounds !== undefined ||
+        input.independent_review_max_rounds !== undefined,
       "validation_failed",
       "No preference supplied",
     );
@@ -241,6 +258,14 @@ export function setProjectPreferences(
         ? { enable_reviewer_browser: input.enable_reviewer_browser }
         : {}),
       ...(input.board_collapsed_lanes ? { board_collapsed_lanes: lanes } : {}),
+      ...(input.review_max_rounds !== undefined
+        ? { review_max_rounds: input.review_max_rounds }
+        : {}),
+      ...(input.independent_review_max_rounds !== undefined
+        ? {
+            independent_review_max_rounds: input.independent_review_max_rounds,
+          }
+        : {}),
     };
     const systemKeys = [
       "system_auto_assign_verifiers",
@@ -284,6 +309,12 @@ export function setProjectPreferences(
       pmMergeConfirmation(old) !== pmMergeConfirmation(next);
     const reviewerBrowserChanged =
       reviewerBrowserEnabled(old) !== reviewerBrowserEnabled(next);
+    const reviewRoundsChanged = (
+      [
+        ["review_max_rounds", reviewMaxRounds],
+        ["independent_review_max_rounds", independentReviewMaxRounds],
+      ] as const
+    ).filter(([, read]) => read(old) !== read(next));
     const oldLanes: Partial<Record<string, boolean>> =
       old.board_collapsed_lanes ?? {};
     const lanesChanged =
@@ -299,7 +330,8 @@ export function setProjectPreferences(
       !delegationChanged &&
       !pmMergeChanged &&
       !reviewerBrowserChanged &&
-      !lanesChanged
+      !lanesChanged &&
+      !reviewRoundsChanged.length
     )
       return old;
     // Lane folding is a view setting: it is stored for every device but emits
@@ -348,6 +380,12 @@ export function setProjectPreferences(
         old_value: mergeConfirmSnoozeMaxMinutes(old),
         new_value: mergeConfirmSnoozeMaxMinutes(next),
         preference: "merge_confirm_snooze_max_minutes",
+      });
+    for (const [preference, read] of reviewRoundsChanged)
+      d.emit("project_preferences_updated", undefined, {
+        old_value: read(old),
+        new_value: read(next),
+        preference,
       });
     if (delegationChanged) {
       d.emit("project_preferences_updated", undefined, {

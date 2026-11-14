@@ -236,3 +236,62 @@ test("C-237 human system rules and manual holds validate and audit without admit
     await f.close();
   }
 });
+
+test("C-253: review round limits default to 5 and 3, only the human session may change them", async () => {
+  const f = await m5Cross();
+  try {
+    const path = f.projectPath("/preferences");
+    await f.password(TEST_PASSWORD);
+    await f.login();
+    expect((await f.call(path)).json).toMatchObject({
+      review_max_rounds: 5,
+      independent_review_max_rounds: 3,
+    });
+    const write = (body: unknown, key: string) =>
+      f.call(path, {
+        method: "POST",
+        body,
+        headers: { "idempotency-key": key },
+      });
+    for (const [i, invalid] of [0, 11, 1.5, "5", null].entries())
+      for (const field of [
+        "review_max_rounds",
+        "independent_review_max_rounds",
+      ])
+        expect(
+          (await write({ [field]: invalid }, `bad-${field}-${i}`)).status,
+        ).toBe(400);
+    expect(
+      (
+        await write(
+          { review_max_rounds: 7, independent_review_max_rounds: 4 },
+          "ok",
+        )
+      ).status,
+    ).toBe(200);
+    expect((await f.call(path)).json).toMatchObject({
+      review_max_rounds: 7,
+      independent_review_max_rounds: 4,
+    });
+    const token = f.token(f.primary.owner);
+    for (const body of [
+      { review_max_rounds: 10 },
+      { independent_review_max_rounds: 10 },
+    ])
+      expect(
+        (
+          await f.call(path, {
+            method: "POST",
+            body,
+            anonymous: true,
+            headers: {
+              authorization: `Bearer ${token}`,
+              "idempotency-key": "agent-rounds",
+            },
+          })
+        ).status,
+      ).toBe(401);
+  } finally {
+    await f.close();
+  }
+});

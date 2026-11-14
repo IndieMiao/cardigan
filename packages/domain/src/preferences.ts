@@ -79,6 +79,13 @@ export interface ProjectPreferences {
   readonly board_collapsed_lanes?: Readonly<
     Partial<Record<CardStatus, boolean>>
   >;
+  /**
+   * C-253: initial review limit of new verifiers other than the independent
+   * reviewer. Existing work items keep the limit recorded at creation.
+   */
+  readonly review_max_rounds?: number;
+  /** C-253: initial review limit of new `independent_reviewer` verifiers. */
+  readonly independent_review_max_rounds?: number;
 }
 /** Lane status keys accepted in `board_collapsed_lanes`. */
 export function isBoardLane(value: string): value is CardStatus {
@@ -103,6 +110,38 @@ export function decisionDelegation(
     permission: false,
     data_deletion: false,
   };
+}
+/** C-253 defaults (user decision 2026-11-14) and the accepted range. */
+export const DEFAULT_REVIEW_MAX_ROUNDS = 5;
+export const DEFAULT_INDEPENDENT_REVIEW_MAX_ROUNDS = 3;
+export const REVIEW_MAX_ROUNDS_CEILING = 10;
+export function reviewMaxRounds(preferences?: ProjectPreferences): number {
+  return preferences?.review_max_rounds ?? DEFAULT_REVIEW_MAX_ROUNDS;
+}
+export function independentReviewMaxRounds(
+  preferences?: ProjectPreferences,
+): number {
+  return (
+    preferences?.independent_review_max_rounds ??
+    DEFAULT_INDEPENDENT_REVIEW_MAX_ROUNDS
+  );
+}
+/** Initial limit for a new verifier of `roleId`, from the project preferences. */
+export function initialReviewMaxRounds(
+  roleId: string,
+  preferences?: ProjectPreferences,
+): number {
+  return roleId === "independent_reviewer"
+    ? independentReviewMaxRounds(preferences)
+    : reviewMaxRounds(preferences);
+}
+export function validReviewMaxRounds(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= 1 &&
+    value <= REVIEW_MAX_ROUNDS_CEILING
+  );
 }
 /** C-177 default for `merge_confirm_stall_after_minutes`. */
 export const DEFAULT_MERGE_CONFIRM_STALL_MINUTES = 60;

@@ -211,7 +211,7 @@ test("C-190 PM rules require same-card risk classification, independent review a
     "鉴权或访问控制用 `permission`",
     "数值和行为规则用 `numeric_rule`",
     "`kind=verify`、`role_id=independent_reviewer`、`required=true`",
-    "`target_work_item_id` 指向本卡被审产出项、`max_review_rounds=2`",
+    "`target_work_item_id` 指向本卡被审产出项，不传 `max_review_rounds`，按项目偏好取值（默认 3）",
     "非 human 验收模板",
     "不能用已知遗留豁免",
     "当前及历史 Assignment（含已释放）",
@@ -252,7 +252,7 @@ test("C-190 replaces the numeric transition without expanding decision delegatio
     expect(ops).not.toContain("P2a-14 上线前的过渡规则");
     expect(ops).not.toContain("安全相关改动、对外发布");
     expect(ops).toContain(
-      "连续两轮未通过进入 `waiting_decision` 后必须交人，PM 不能自行 `raise_limit`",
+      "轮数用完仍未通过进入 `waiting_decision` 后必须交人，PM 不能自行 `raise_limit`",
     );
     expect(ops).toContain(
       "会改变系统行为的数值和规则（例如上限、超时、自动合并分钟数）即使归在 feature_detail，也传 escalate=true 交人",

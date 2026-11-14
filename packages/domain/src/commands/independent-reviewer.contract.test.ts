@@ -4,6 +4,8 @@ import {
   assign,
   createCard,
   createWorkItem,
+  DEFAULT_INDEPENDENT_REVIEW_MAX_ROUNDS,
+  DEFAULT_REVIEW_MAX_ROUNDS,
   developmentCardTemplate,
   manageCardTemplate,
   prepareDelivery,
@@ -57,7 +59,14 @@ function setup() {
   return { f, pm, params };
 }
 
-test.each([undefined, 1, 2])(
+const LIMIT = DEFAULT_INDEPENDENT_REVIEW_MAX_ROUNDS;
+
+test("C-253: the default limits are 5 ordinary and 3 independent rounds", () => {
+  expect(DEFAULT_REVIEW_MAX_ROUNDS).toBe(5);
+  expect(LIMIT).toBe(3);
+});
+
+test.each([undefined, 1, 2, 3])(
   "P2a-14: independent review creation persists a bounded limit (%s)",
   (max) => {
     const { f, pm, params } = setup();
@@ -69,12 +78,15 @@ test.each([undefined, 1, 2])(
         f.io,
       ),
     );
-    expect(item).toMatchObject({ kind: "verify", max_review_rounds: max ?? 2 });
+    expect(item).toMatchObject({
+      kind: "verify",
+      max_review_rounds: max ?? LIMIT,
+    });
     expect(f.state.work_items.find((w) => w.id === item.id)).toEqual(item);
   },
 );
 
-test.each([0, -1, 1.5, 3, Number.NaN, Number.POSITIVE_INFINITY])(
+test.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
   "invariant 11: neither PM nor human can create an invalid independent review limit (%s)",
   (max) => {
     const { f, pm, params } = setup();
@@ -90,9 +102,37 @@ test.each([0, -1, 1.5, 3, Number.NaN, Number.POSITIVE_INFINITY])(
   },
 );
 
+test("C-253: PM cannot create an independent review above the preference, the human can", () => {
+  const { f, pm, params } = setup();
+  expect(
+    createWorkItem(
+      f.state,
+      pm,
+      { ...params, max_review_rounds: LIMIT + 1 },
+      f.io,
+    ),
+  ).toMatchObject({
+    ok: false,
+    error: {
+      code: "validation_failed",
+      message: expect.stringContaining(`${LIMIT} 轮`),
+    },
+  });
+  expect(
+    f.commit(
+      createWorkItem(
+        f.state,
+        human,
+        { ...params, max_review_rounds: LIMIT + 1 },
+        f.io,
+      ),
+    ),
+  ).toMatchObject({ max_review_rounds: LIMIT + 1 });
+});
+
 test("existing reviewers retain the global default and PM Ops limit controls", () => {
   const { f, pm, params } = setup();
-  for (const max of [undefined, 4]) {
+  for (const max of [undefined, DEFAULT_REVIEW_MAX_ROUNDS + 1]) {
     const item = f.commit(
       createWorkItem(
         f.state,
@@ -105,7 +145,9 @@ test("existing reviewers retain the global default and PM Ops limit controls", (
         f.io,
       ),
     );
-    expect(item).toMatchObject({ max_review_rounds: max ?? 3 });
+    expect(item).toMatchObject({
+      max_review_rounds: max ?? DEFAULT_REVIEW_MAX_ROUNDS,
+    });
   }
 });
 
@@ -117,7 +159,7 @@ test.each(
     })),
   ),
 )(
-  "invariant 11: $source independent review's second $verdict uses the existing limit state machine",
+  "invariant 11: $source independent review's last default round $verdict uses the existing limit state machine",
   async ({ source, verdict }) => {
     const { f, pm, params } = setup();
     let producer = f.coder;
@@ -169,7 +211,7 @@ test.each(
       );
       const items = f.state.work_items.filter((w) => w.card_id === card.id);
       expect(items.find((w) => w.role_id === "pm")).toMatchObject({
-        max_review_rounds: 3,
+        max_review_rounds: DEFAULT_REVIEW_MAX_ROUNDS,
       });
       const product = present(items.find((w) => w.kind === "produce"));
       producer = f.commit(
@@ -182,7 +224,7 @@ test.each(
       );
       item = present(items.find((w) => w.role_id === "independent_reviewer"));
     }
-    expect(item).toMatchObject({ kind: "verify", max_review_rounds: 2 });
+    expect(item).toMatchObject({ kind: "verify", max_review_rounds: LIMIT });
     const owner = f.commit(
       assign(
         f.state,
@@ -191,12 +233,12 @@ test.each(
         f.io,
       ),
     );
-    // PM cannot pre-empt the two-round human escalation by widening the budget.
+    // PM cannot pre-empt the human escalation by widening the budget.
     const widen = (caller: Actor) =>
       updateWorkItem(
         f.state,
         caller,
-        { work_item_id: item.id, max_review_rounds: 3 },
+        { work_item_id: item.id, max_review_rounds: LIMIT + 1 },
         f.io,
       );
     expect(widen(pm)).toMatchObject({
@@ -224,7 +266,9 @@ test.each(
         submitDelivery(f.state, f.actor(producer), p, proof, f.io),
       );
     };
-    for (const sha of ["a".repeat(40), "b".repeat(40)]) {
+    const shas = ["a", "b", "c"].map((c) => c.repeat(40));
+    expect(shas).toHaveLength(LIMIT);
+    for (const [index, sha] of shas.entries()) {
       const target = await deliver(sha);
       f.start(owner);
       const review = f.commit(
@@ -253,11 +297,12 @@ test.each(
         ),
       );
       expect(review.verdict).toBe(verdict);
-      if (sha.startsWith("a")) expect(f.state.decisions).toEqual([]);
+      // Round LIMIT - 1 does not trigger the limit; only round LIMIT does.
+      if (index < LIMIT - 1) expect(f.state.decisions).toEqual([]);
     }
     expect(
       f.state.reviews.filter((r) => r.work_item_id === item.id),
-    ).toHaveLength(2);
+    ).toHaveLength(LIMIT);
     if (verdict === "pass") {
       expect(f.state.work_items.find((w) => w.id === item.id)?.status).toBe(
         "passed",
@@ -296,7 +341,7 @@ test.each(
       outcome: "blocked",
     });
     // A new delivery or Run must not reopen the exhausted review budget.
-    const third = await deliver("c".repeat(40));
+    const third = await deliver("d".repeat(40));
     expect(f.state.decisions).toHaveLength(1);
     f.start(owner);
     expect(
@@ -346,7 +391,7 @@ test.each(
     );
     expect(f.state.work_items.find((w) => w.id === item.id)).toMatchObject({
       status: "ready",
-      max_review_rounds: 3,
+      max_review_rounds: LIMIT + 1,
     });
   },
 );

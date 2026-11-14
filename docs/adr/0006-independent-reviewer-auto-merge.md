@@ -26,7 +26,7 @@
 - `kind=verify`，`worktree=readonly`（C-91 上线后该项目可配 `build_dir` 可写构建目录，复用 P2a-3 既有机制，不是新的 worktree 模式）。
 - 工具清单参照现有 verify 角色的公共集合（`whoami`/`get_card`/`get_updates`/`ack_events`/`post_comment`/`heartbeat`/`finish_run`/`report_blocker`/`request_human_action`/`request_decision`/`upload_attachment`/`read_attachment`/`submit_review`/`withdraw_review`，见 `role-pack.ts` 的 `defaultRoleDefinition` L396），**不**给 `update_card`、`create_work_item`、`assign` 等 PM 工具，也不给任何 `host_ops_*` 工具——复核员只下结论，不改派工、不改范围。
 - Core Prompt 职责要点：只审当前版本（`target_sha` 必须等于被审交付的 `subject`）；聚焦安全/权限/数值规则（鉴权绕过、权限提升、输入校验缺失、数值边界、并发/迁移风险），不是通用代码审查（不复查 `code_review` 已经覆盖的风格、命名、简单 bug）；有阻塞问题必须退回，不能"建议但通过"；不能是 `development`/`code_review` 的同一员工（见决定 2）。**分工边界（用户 2026-11-13：按建议）**：先按上面这条粗边界执行（独立复核只管安全/权限/数值规则相关的问题，其余交给 `code_review`），不在本 ADR 穷举更细的判定规则；上线后用首批真实复核案例校准 Core Prompt 的措辞和具体判断标准，校准结论写进计划卡⑦的角色规则更新，不回头改本 ADR。
-- **审核轮次上限固定为 2**（用户 2026-11-13 确认）：`independent_reviewer` 验证型工作项连续 2 轮未通过（`reject`/`conditional`）时，按 §4.4 现有 `review_limit_exceeded` 规则直接进入 `waiting_decision`，升级给人，不再反复退回——这是比默认 `DEFAULT_MAX_REVIEW_ROUNDS` 更严格的收紧。实现上，PM（或模板装配逻辑）调用 `create_work_item` 创建该角色的验证项时必须传 `max_review_rounds=2`；建议 `createWorkItem`（`pm.ts:323`）对 `role_id="independent_reviewer"` 增加一条硬校验：显式传入的 `max_review_rounds` 大于 2 时拒绝，省略时默认取 2（而不是全局 `DEFAULT_MAX_REVIEW_ROUNDS`），避免 PM 手滑传成更宽松的值。
+- **审核轮次上限固定为 2**（用户 2026-11-13 确认；**2026-11-14 改为项目偏好，默认普通 5、独立复核 3**，PM 不传 `max_review_rounds`，按偏好取值，只有人能改偏好，见 C-253）：`independent_reviewer` 验证型工作项连续 2 轮未通过（`reject`/`conditional`）时，按 §4.4 现有 `review_limit_exceeded` 规则直接进入 `waiting_decision`，升级给人，不再反复退回——这是比默认 `DEFAULT_MAX_REVIEW_ROUNDS` 更严格的收紧。实现上，PM（或模板装配逻辑）调用 `create_work_item` 创建该角色的验证项时必须传 `max_review_rounds=2`；建议 `createWorkItem`（`pm.ts:323`）对 `role_id="independent_reviewer"` 增加一条硬校验：显式传入的 `max_review_rounds` 大于 2 时拒绝，省略时默认取 2（而不是全局 `DEFAULT_MAX_REVIEW_ROUNDS`），避免 PM 手滑传成更宽松的值。
 - 不是模板默认工作项——按决定 4 的方式动态加入，不扩大 §8.7 看板第一版范围，也不改 `developmentCardTemplate`（`templates.ts`）本身。
 
 ### 2. 三方隔离：复核员不能与实现者、审核者同员工
@@ -146,7 +146,7 @@
 3. **独立复核与 `code_review` 的分工**：先按决定 1 给出的粗边界（聚焦安全/权限/数值规则，不复查 `code_review` 已覆盖的内容）上线，不在本 ADR 穷举更细的判定规则；上线后用首批真实案例校准 Core Prompt，结论写进计划卡⑦，不回头改本 ADR。
 4. **浏览器的网络边界**：**不**要求卡⑧上线前有防火墙/网络命名空间层面的硬限制——Agent 本来就有 shell，浏览器不增加新的网络能力；边界交给 Workbench 密码登录和 Card MCP Token 这两层既有鉴权，浏览器侧只在角色规则/Core Prompt 里保留"不得访问生产 Workbench"的约定（见决定 6、威胁分析表对应行）。
 5. **界面卡自动合并的灰度标准**：先试跑 **5 张**界面卡，张良逐张抽查，**5 张都没有漏判**才打开自动合并开关；出现任意一次漏判则保持关闭、分析原因、修正后重新计数 5 张（见决定 6）。
-6. **独立复核的审核轮次上限**：固定为 **2**——连续 2 轮未通过直接升级给人，不再反复退回（见决定 1）。
+6. **独立复核的审核轮次上限**：固定为 **2**（2026-11-14 改为项目偏好，默认普通 5、独立复核 3，见 C-253）——连续 2 轮未通过直接升级给人，不再反复退回（见决定 1）。
 
 ## 观测指标（概要，详细方案见实现计划 §7）
 
