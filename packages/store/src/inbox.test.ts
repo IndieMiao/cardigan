@@ -3,6 +3,7 @@ import { expect, test } from "vitest";
 import { PROJECT_EVENT_STREAM } from "./ids.js";
 import {
   advanceRouterCursor,
+  LIVE_NOTIFICATION_STATUSES,
   reassignNotifications,
   recordNotification,
   retireReconcileNotifications,
@@ -131,6 +132,59 @@ test("listNotifications narrows to the given ids and keeps seq order (C-216)", (
     expect(
       store.listNotifications({ project_id: "P-other" as never, ids }),
     ).toEqual([]);
+  });
+});
+
+test("listNotifications narrows to the given statuses and keeps seq order (C-244)", () => {
+  withTempStore((store) => {
+    seed(store);
+    const recipients = [
+      { kind: "assignment", assignment_id: assignment().id },
+      { kind: "pm_ops" },
+      { kind: "pm_office" },
+      { kind: "needs_you" },
+    ] as never[];
+    const moves = [[], ["bell"], ["ack"], ["bell", "ack"], ["resolve"]];
+    let i = 0;
+    for (const seq of [5, 1])
+      for (const recipient of recipients) {
+        const { notification } = store.recordNotification(
+          note(store, seq, recipient),
+        );
+        for (const event of moves[i++ % moves.length] ?? [])
+          store.moveNotification({
+            project_id,
+            id: notification.id,
+            event: event as never,
+          });
+      }
+    const all = store.listNotifications({ project_id });
+    expect(new Set(all.map((n) => n.status)).size).toBeGreaterThan(2);
+    const sets: NotificationStatus[][] = [
+      ["pending"],
+      ["pending", "belled"],
+      ["belled", "pending", "belled"],
+      [...LIVE_NOTIFICATION_STATUSES],
+      ["acked", "resolved", "needs_attention", "delivery_failed"],
+    ];
+    for (const statuses of sets) {
+      expect(store.listNotifications({ project_id, statuses })).toEqual(
+        all.filter((n) => statuses.includes(n.status)),
+      );
+      expect(
+        store.listNotifications({ project_id, statuses, status: "pending" }),
+      ).toEqual(
+        all.filter(
+          (n) => statuses.includes(n.status) && n.status === "pending",
+        ),
+      );
+    }
+    expect(store.listNotifications({ project_id, statuses: [] })).toEqual([]);
+    expect(LIVE_NOTIFICATION_STATUSES).toEqual([
+      "pending",
+      "belled",
+      "delivery_failed",
+    ]);
   });
 });
 

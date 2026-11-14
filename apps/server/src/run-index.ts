@@ -5,6 +5,8 @@ interface RunIndex {
   readonly byId: ReadonlyMap<string, Run>;
   /** First queued Run per Assignment, matching `runs.find(...queued)`. */
   readonly queued: ReadonlyMap<string, Run>;
+  /** Runs per Assignment, in array order. */
+  readonly owned: ReadonlyMap<string, readonly Run[]>;
 }
 
 /**
@@ -20,12 +22,16 @@ function runIndex(runs: readonly Run[]): RunIndex {
   if (!index) {
     const byId = new Map<string, Run>();
     const queued = new Map<string, Run>();
+    const owned = new Map<string, Run[]>();
     for (const r of runs) {
+      const list = owned.get(r.assignment_id);
+      if (list) list.push(r);
+      else owned.set(r.assignment_id, [r]);
       if (!byId.has(r.id)) byId.set(r.id, r);
       if (r.status === "queued" && !queued.has(r.assignment_id))
         queued.set(r.assignment_id, r);
     }
-    index = { byId, queued };
+    index = { byId, queued, owned };
     indexes.set(runs, index);
   }
   return index;
@@ -43,4 +49,12 @@ export function queuedRun(
   assignment: string,
 ): Run | undefined {
   return runIndex(runs).queued.get(assignment);
+}
+
+/** Same members and order as `runs.filter((r) => r.assignment_id === id)`. */
+export function runsOf(
+  runs: readonly Run[],
+  assignment: string,
+): readonly Run[] {
+  return runIndex(runs).owned.get(assignment) ?? [];
 }

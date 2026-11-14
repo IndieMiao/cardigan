@@ -1,11 +1,13 @@
-import type {
-  AssignmentId,
-  CardId,
-  Clock,
-  CommandState,
-  Event,
-  Notification,
-  ProjectId,
+import {
+  type AssignmentId,
+  type CardId,
+  type Clock,
+  type CommandState,
+  type Event,
+  type Notification,
+  type NotificationStatus,
+  type ProjectId,
+  states,
 } from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
 import {
@@ -219,6 +221,15 @@ export function notificationOwner(
     : undefined;
 }
 
+const ACKABLE: readonly NotificationStatus[] = [
+  "pending",
+  "belled",
+  "delivery_failed",
+];
+/** Every notification status except `acked` and `resolved` (C-244). */
+export const UNSETTLED_NOTIFICATION_STATUSES: readonly NotificationStatus[] =
+  states.notification.filter((s) => s !== "acked" && s !== "resolved");
+
 /**
  * C-244: remember a standing PM resolution per (project, kind, state). The
  * resolver reads the state and the tokens table (legacy rows without
@@ -254,7 +265,11 @@ export function resolveUnreadableNotifications(
     const state = loadState(tx, project),
       at = clock.now();
     let count = 0;
-    for (const note of store.listNotifications({ project_id: project })) {
+    // C-244: acked and resolved rows were skipped; do not decode them.
+    for (const note of store.listNotifications({
+      project_id: project,
+      statuses: UNSETTLED_NOTIFICATION_STATUSES,
+    })) {
       if (
         !note.card_id ||
         note.recipient.kind !== "assignment" ||
@@ -311,9 +326,12 @@ export function acknowledgeInbox(
     // stay as read, so one standing PM resolution per kind serves every row.
     const standingOnce = memoStanding(standing);
     let count = 0;
-    for (const note of store.listNotifications({ project_id: project })) {
-      if (!["pending", "belled", "delivery_failed"].includes(note.status))
-        continue;
+    // C-244: decode only the statuses this loop handles.
+    for (const note of store.listNotifications({
+      project_id: project,
+      statuses: ACKABLE,
+    })) {
+      if (!ACKABLE.includes(note.status)) continue;
       const owner =
         attempts.find((a) => a.notification_ids.includes(note.id))
           ?.assignment_id ?? notificationOwner(note, state, standingOnce);
