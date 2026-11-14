@@ -466,14 +466,21 @@ export function mergeShadowComparisons(
                 "decision_requested",
                 "merge_confirmation_snoozed",
                 "decision_superseded",
+                // A confirmed merge keeps its original resolution when returned.
+                "merge_changes_requested",
               ].includes(actual.type) &&
               payload(actual).decision_id === q?.id,
           )
+          .sort((a, b) => a.seq - b.seq)
           .map((actual) => ({
             event_id: actual.id,
             seq: actual.seq,
             at: actual.created_at,
             type: actual.type,
+            author:
+              actual.actor.kind === "assignment"
+                ? (`assignment:${actual.actor.assignment_id}` as const)
+                : actual.actor.kind,
             payload: actual.payload,
           })),
         evaluated_seq: e.seq,

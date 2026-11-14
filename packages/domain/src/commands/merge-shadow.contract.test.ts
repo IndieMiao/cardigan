@@ -814,3 +814,131 @@ test("C-238: hold history follows the completion across confirmation IDs, but do
     evaluateMergeShadow(differentCompletion, current, f.paths).would_confirm,
   ).toBe(true);
 });
+
+test.each(["pm", "human"] as const)(
+  "C-238: comparison preserves a %s return after confirmation and failed checks",
+  async (who) => {
+    const f = await fixture();
+    let s = apply(
+      f.state,
+      value(
+        recordMergeShadow(
+          f.state,
+          system,
+          { decision_id: f.q.id, paths: f.paths },
+          f.io,
+        ),
+      ),
+    );
+    s = apply(
+      s,
+      value(
+        resolveDelegatedDecision(
+          s,
+          opsActor,
+          {
+            decision_id: f.q.id,
+            option: "merge",
+            rationale: "Checks passed",
+            notice: "Synthetic confirmation",
+          },
+          f.io,
+        ),
+      ),
+    );
+    const original = required(
+      s.decisions.find((q) => q.id === f.q.id),
+    ).resolution;
+    const identity = {
+      card_id: f.card.id,
+      completion_id: f.completion.id,
+      attempt_id: "returned-confirmation",
+      candidate_sha: "b".repeat(40),
+      tree_sha: "d".repeat(40),
+    };
+    for (const status of ["queued", "running", "failed"] as const) {
+      const check =
+        status === "failed"
+          ? {
+              ...identity,
+              status,
+              summary: "Synthetic failed check",
+              log_ref: `${identity.attempt_id}.log`,
+              checks: [
+                {
+                  name: "synthetic",
+                  status: "failed" as const,
+                  exit_code: 1,
+                  duration_ms: 1,
+                },
+              ],
+            }
+          : { ...identity, status };
+      s = apply(
+        s,
+        value(
+          recordMergeCheck(
+            { ...s, project_settings: { merge_gate_enabled: true } },
+            system,
+            check,
+            f.io,
+          ),
+        ),
+      );
+    }
+    const reason = "Fix the synthetic failing check";
+    const params = {
+      decision_id: f.q.id,
+      option: "request_changes",
+      rationale: reason,
+    };
+    const returned = value(
+      who === "pm"
+        ? resolveDelegatedDecision(
+            s,
+            opsActor,
+            { ...params, notice: "Synthetic return" },
+            f.io,
+          )
+        : recordDecision(s, human, { ...params, raw_quote: reason }, f.io),
+    );
+    const event = required(
+      returned.events.find((e) => e.type === "merge_changes_requested"),
+    );
+    s = JSON.parse(JSON.stringify(apply(s, returned))) as CommandState;
+    const before = JSON.stringify(s);
+    const comparison = required(mergeShadowComparisons(s, f.card.id)[0]);
+    expect(comparison.prediction).toMatchObject({ would_confirm: true });
+    expect(comparison.actual).toMatchObject({
+      status: "superseded",
+      resolution: original,
+    });
+    expect(
+      comparison.actual_events.filter((e) => e.type === "decision_resolved"),
+    ).toHaveLength(1);
+    expect(comparison.actual_events.at(-1)).toMatchObject({
+      event_id: event.id,
+      seq: event.seq,
+      at: event.created_at,
+      type: "merge_changes_requested",
+      author: who === "pm" ? `assignment:${ops.id}` : "human",
+      payload: { decision_id: f.q.id, completion_id: f.completion.id, reason },
+    });
+    expect(JSON.stringify(s)).toBe(before);
+    expect(s.events.some((e) => e.type === "card_merged")).toBe(false);
+    // Another confirmation's return is not part of this prediction's history.
+    const unrelated = {
+      ...event,
+      payload: {
+        ...(event.payload as Record<string, string>),
+        decision_id: id("decision", 999),
+      },
+    };
+    expect(
+      mergeShadowComparisons(
+        { ...s, events: [...s.events, unrelated] },
+        f.card.id,
+      ),
+    ).toEqual([comparison]);
+  },
+);
