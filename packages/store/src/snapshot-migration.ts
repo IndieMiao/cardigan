@@ -2,6 +2,7 @@ import type { DatabaseSync } from "node:sqlite";
 
 /** Fixed identifiers only; these triggers also cover CLI/other-process writes. */
 export const snapshotTables: Readonly<Record<string, readonly string[]>> = {
+  machines: ["id"],
   cards: ["id"],
   work_items: ["id"],
   assignments: ["id"],

@@ -7,6 +7,38 @@ import { expect, test, vi } from "vitest";
 import { loadCommandState } from "./commands/execute.js";
 import { NOW, project_id, serverCard } from "./test-support.js";
 
+test("MCP state rechecks project machine authorization after another connection writes", () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "cg-machine-state-"));
+  const store = Store.open({ dataDir });
+  const other = Store.open({ dataDir });
+  const read = () => store.uow.read((tx) => loadCommandState(tx, project_id));
+  try {
+    store.createProject({ id: project_id });
+    const first = read();
+    const local = first.machines?.[0];
+    if (!local) throw new Error("missing local");
+    expect(read()).toBe(first);
+    other.uow.run((tx) =>
+      tx.machines.put("other", {
+        ...local,
+        id: "worker-a",
+        herdr_machine: "worker-a",
+        label: "Worker A",
+      }),
+    );
+    expect(read()).toBe(first);
+    other.uow.run((tx) =>
+      tx.machines.put(project_id, { ...local, status: "draining" }),
+    );
+    expect(read()).not.toBe(first);
+    expect(read().machines).toEqual([{ ...local, status: "draining" }]);
+  } finally {
+    other.close();
+    store.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("bulk event history preserves stream order, isolates projects and survives rollback/reopen", () => {
   const dataDir = mkdtempSync(join(tmpdir(), "cg-state-"));
   let store = Store.open({ dataDir });

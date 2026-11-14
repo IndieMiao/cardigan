@@ -35,6 +35,7 @@ import {
   assignment,
   human,
   id,
+  machine,
   now,
   ports,
   role,
@@ -79,6 +80,7 @@ const officeActor: Actor = {
 function setup(withOps = true, policy: "confirm" | "auto" = "confirm") {
   const empty: CommandState = {
     project_id: human.project_id,
+    machines: [machine()],
     roles: [role("coder"), role("reviewer"), role("pm")],
     cards: [],
     work_items: [],

@@ -33,6 +33,7 @@ import {
   assignment,
   human,
   id,
+  machine,
   now,
   ports,
   role,
@@ -78,6 +79,7 @@ const at = (f: { io: ReturnType<typeof ports> }, minutes: number) => ({
 async function setup(pm: Partial<Assignment> = {}, withOps = true) {
   const empty: CommandState = {
     project_id: human.project_id,
+    machines: [machine()],
     roles: [
       role("coder"),
       role("reviewer"),

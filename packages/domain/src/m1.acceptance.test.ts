@@ -9,6 +9,7 @@
  * (the real provisioning lives outside the domain).
  */
 import { describe, expect, expectTypeOf, test } from "vitest";
+import { machine } from "./commands/test-fixtures.js";
 import {
   type Actor,
   type Assignment,
@@ -131,6 +132,7 @@ interface Harness {
 function emptyState(roles: readonly RoleReference[]): CommandState {
   return {
     project_id,
+    machines: [machine()],
     roles,
     events: [],
     timeline: [],
