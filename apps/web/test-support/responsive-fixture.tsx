@@ -1,6 +1,7 @@
 import { createRoot } from "react-dom/client";
 import { App } from "../src/App.js";
 import type { NeedsDecision } from "../src/api.js";
+import { RequestFeedback } from "../src/components/RequestFeedback.js";
 import {
   card,
   cardDetail,
@@ -39,8 +40,36 @@ const decision: NeedsDecision = {
   related_cards: [{ id: sample.id, title: sample.title }],
   merge_confirmation: null,
 };
+const params = new URLSearchParams(location.search);
 const client = fakeClient({
-  ...(new URLSearchParams(location.search).has("capacity")
+  // C-242: keep the card list loading to show where the slow-read hint sits.
+  ...(params.has("pendingCards")
+    ? { cards: () => new Promise<never>(() => {}) }
+    : {}),
+  // C-242: four filled lanes, wider than 1920 but narrower than 2560.
+  ...(params.has("wideBoard")
+    ? {
+        cards: async (_project, filter) => {
+          const cards = (
+            ["in_progress", "review", "awaiting_merge", "done"] as const
+          ).flatMap((status, lane) =>
+            [0, 1].map((i) => ({
+              ...sample,
+              id: `C-${lane * 2 + i + 1}`,
+              title: `${sample.title}（${lane * 2 + i + 1}）`,
+              status,
+            })),
+          );
+          return {
+            project_id: "p-1",
+            filter,
+            cards,
+            counts: { total: cards.length, needs_me: 1, agent: 1 },
+          };
+        },
+      }
+    : {}),
+  ...(params.has("capacity")
     ? {
         executionCapacity: async () => ({
           agents: [
@@ -233,4 +262,15 @@ const client = fakeClient({
 
 const root = document.getElementById("root");
 if (!root) throw new Error("Missing test root");
-createRoot(root).render(<App client={client} />);
+createRoot(root).render(
+  <>
+    <App client={client} />
+    {/* C-242: a stack taller than the viewport, ending in a retry button. */}
+    {params.has("feedbackStack") && (
+      <>
+        <RequestFeedback error={"请求失败，详细原因需要查看。".repeat(100)} />
+        <RequestFeedback error="保存失败" retry={() => {}} />
+      </>
+    )}
+  </>,
+);
