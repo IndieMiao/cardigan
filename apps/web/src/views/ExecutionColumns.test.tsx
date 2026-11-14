@@ -460,21 +460,38 @@ test("C-207: the table comes first; capacity sits below it and the title jump op
   expect(document.activeElement).toBe(details.querySelector("summary"));
 });
 
+const standing = (
+  id: string,
+  role_id: string,
+  standing_mode: string | null,
+  name: string,
+): ExecutionAssignment => ({
+  ...pm,
+  id,
+  role_id,
+  standing_mode,
+  author_role: role_id,
+  author_display: name,
+  employee: { id: `E-${id}`, name, title: "", avatar: null },
+});
+const roleSummary = (role_id: string, display_name: string) => ({
+  role_id,
+  display_name,
+  kind: "standing" as const,
+  status: "active" as const,
+  version: 1,
+  harness: "pi",
+  launch_profile_ref: "default",
+});
+
 test("C-262: a standing Assignment is labelled by role_id and standing_mode, not by name", async () => {
-  const standing = (
-    id: string,
-    role_id: string,
-    standing_mode: string | null,
-    name: string,
-  ): ExecutionAssignment => ({
-    ...pm,
-    id,
-    role_id,
-    standing_mode,
-    author_role: role_id,
-    author_display: name,
-    employee: { id: `E-${id}`, name, title: "", avatar: null },
-  });
+  const roles = vi.fn(async (project_id: string) => ({
+    project_id,
+    roles: [roleSummary("librarian", "资料管理员")],
+    default_roles: [],
+    harnesses: [],
+    allowlists: { produce: [], verify: [], standing: [] },
+  }));
   render(
     <ExecutionPage
       client={fakeClient({
@@ -490,6 +507,7 @@ test("C-262: a standing Assignment is labelled by role_id and standing_mode, not
           runs: [],
           machines: [],
         }),
+        roles,
       })}
       projectId="p-1"
     />,
@@ -498,8 +516,50 @@ test("C-262: a standing Assignment is labelled by role_id and standing_mode, not
   expect(cells("A-20").task).toBe("主机运维（常驻）");
   expect(cells("A-21").task).toBe("常驻 PM · 后台");
   expect(cells("A-22").task).toBe("常驻 PM · 前台");
-  expect(cells("A-23").task).toBe("常驻（librarian）");
+  // An unknown standing role uses its display name once the roles arrive.
+  await screen.findByText("常驻（资料管理员）");
+  expect(cells("A-23").task).toBe("常驻（资料管理员）");
   for (const id of ["A-20", "A-23"]) expect(cells(id).task).not.toContain("PM");
+  expect(roles).toHaveBeenCalledWith("p-1");
+});
+
+test("C-262: an unknown standing role falls back to its role_id when no display name is known", async () => {
+  render(
+    <ExecutionPage
+      client={fakeClient({
+        execution: async () => ({
+          assignments: [standing("A-23", "librarian", null, "张良")],
+          runs: [],
+          machines: [],
+        }),
+        roles: async () => {
+          throw new Error("roles unavailable");
+        },
+      })}
+      projectId="p-1"
+    />,
+  );
+  await screen.findByRole("button", { name: "查看 A-23 详情" });
+  expect(cells("A-23").task).toBe("常驻（librarian）");
+});
+
+test("C-262: only an unlabelled standing role reads the role list", async () => {
+  const roles = vi.fn();
+  render(
+    <ExecutionPage
+      client={fakeClient({
+        execution: async () => ({
+          assignments: [base, standing("A-20", "host_ops", null, "大乔")],
+          runs: [],
+          machines: [],
+        }),
+        roles,
+      })}
+      projectId="p-1"
+    />,
+  );
+  await screen.findByRole("button", { name: "查看 A-20 详情" });
+  expect(roles).not.toHaveBeenCalled();
 });
 
 test("C-262: standingLabel keeps the old project-level wording for a PM without a mode", () => {
@@ -509,4 +569,10 @@ test("C-262: standingLabel keeps the old project-level wording for a PM without 
   expect(standingLabel({ role_id: "host_ops", standing_mode: "ops" })).toBe(
     "主机运维（常驻）",
   );
+  expect(
+    standingLabel({ role_id: "librarian", standing_mode: null }, " "),
+  ).toBe("常驻（librarian）");
+  expect(
+    standingLabel({ role_id: "librarian", standing_mode: null }, "资料管理员"),
+  ).toBe("常驻（资料管理员）");
 });
