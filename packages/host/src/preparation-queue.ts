@@ -45,6 +45,15 @@ interface Queue {
   readonly limit: number;
 }
 const queues = new Map<string, Queue>();
+const revisions = new Map<string, number>();
+const revisionKey = (dataDir: string, repository: string) =>
+  JSON.stringify([realpathSync(dataDir), repository]);
+export function preparationRevision(
+  dataDir: string,
+  repository: string,
+): number {
+  return revisions.get(revisionKey(dataDir, repository)) ?? 0;
+}
 async function acquireSlot(
   root: string,
   preferred: number,
@@ -94,6 +103,7 @@ export async function withPreparationQueue<T>(
   repository: string,
   work: () => Promise<T>,
   policy = preparationPolicy(),
+  background = false,
 ): Promise<T> {
   if (preparationBudget.getStore()) return work();
   // Canonicalize before yielding so concurrent filesystem callbacks cannot
@@ -149,7 +159,13 @@ export async function withPreparationQueue<T>(
         );
       if ((preparationBudget.getStore()?.remaining ?? 0) <= 0)
         throw new PreparationQueueTimeout();
-      return await work();
+      const key = revisionKey(root, repository);
+      if (!background) revisions.set(key, (revisions.get(key) ?? 0) + 1);
+      try {
+        return await work();
+      } finally {
+        if (!background) revisions.set(key, (revisions.get(key) ?? 0) + 1);
+      }
     } finally {
       try {
         await unlock?.();

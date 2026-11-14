@@ -13,6 +13,12 @@ import type {
   RuntimeResult,
 } from "@cardigan/domain";
 import { registerAgentMachine } from "./agent-ssh.js";
+import {
+  type GovernedHcClient,
+  governHcClient,
+  hcCallPolicy,
+} from "./call-queue.js";
+import { type CoreEvents, coreEvents } from "./core-events.js";
 
 export {
   AGENT_PATH,
@@ -26,6 +32,11 @@ export {
   agentReceivePack,
   agentUploadPack,
 } from "./agent-ssh.js";
+export {
+  type HcCallDiagnostics,
+  type HcCallPolicy,
+  hcCallPolicy,
+} from "./call-queue.js";
 
 import {
   type AgentCommandFailure,
@@ -101,6 +112,8 @@ export interface HerdrOptions {
   readonly client?: HcClient;
 }
 export interface RuntimeEvent {
+  /** Host subscription incarnation; seq itself remains the core's sequence. */
+  readonly source_generation?: number;
   readonly seq: number;
   readonly type: string;
   readonly terminal_ref?: string;
@@ -116,30 +129,38 @@ type Terminal = {
   status?: { state: string } | null;
 };
 const quote = (s: string) => `'${s.replaceAll("'", "'\\''")}'`;
-function observation(t: Terminal, seq: number): RuntimeObservation {
-  const agent = t.status?.state;
-  return {
-    process:
-      t.state === "live"
-        ? "alive"
-        : t.state === "finished"
-          ? "exited"
-          : "unknown",
-    agent: ["working", "blocked", "done", "idle", "error"].includes(agent ?? "")
-      ? (agent as RuntimeObservation["agent"])
-      : "unknown",
-    observed_seq: seq,
-  };
-}
+const statusStates = new WeakMap<
+  object,
+  {
+    requests: Map<string, Promise<RuntimeResult<RuntimeObservation>>>;
+    epochs: Map<string, number>;
+  }
+>();
 
 export class HerdrRuntime implements Runtime {
+  private readonly hub: CoreEvents;
+  private readonly statusRequests: Map<
+    string,
+    Promise<RuntimeResult<RuntimeObservation>>
+  >;
+  private readonly statusEpochs: Map<string, number>;
   private constructor(
     readonly session: string,
     readonly socketPath: string,
     private binary: string,
-    private client: HcClient,
+    private client: GovernedHcClient,
     private execution: ExecutionConfig,
-  ) {}
+    private timeoutMs: number,
+  ) {
+    this.hub = coreEvents(client.queue, client);
+    let state = statusStates.get(client.queue);
+    if (!state) {
+      state = { requests: new Map(), epochs: new Map() };
+      statusStates.set(client.queue, state);
+    }
+    this.statusRequests = state.requests;
+    this.statusEpochs = state.epochs;
+  }
   static async create(
     options: HerdrOptions = {},
   ): Promise<RuntimeResult<HerdrRuntime>> {
@@ -163,7 +184,7 @@ export class HerdrRuntime implements Runtime {
       const timeout = options.timeoutMs ?? 10000;
       if (!Number.isFinite(timeout) || timeout <= 0)
         fail("invalid_launch", "Invalid runtime timeout");
-      const client =
+      const raw =
         options.client ??
         processClient(
           binary,
@@ -176,12 +197,25 @@ export class HerdrRuntime implements Runtime {
           socket,
           timeout,
         );
+      const client = governHcClient(raw, {
+        socket,
+        session,
+        policy: hcCallPolicy({ ...process.env, ...options.env }),
+        ...(options.client ? {} : { dataDir: execution.dataDir }),
+      });
       const version = options.version ?? "0.1.18";
       if ((await client.exec(["--version"])).trim() !== `hc ${version}`)
         fail("version_mismatch", "Unsupported hc version");
       if (execution.mode === "agent-ssh")
         await registerAgentMachine(client, execution, session, version);
-      return new HerdrRuntime(session, socket, binary, client, execution);
+      return new HerdrRuntime(
+        session,
+        socket,
+        binary,
+        client,
+        execution,
+        timeout,
+      );
     });
   }
   private async live() {
@@ -191,6 +225,20 @@ export class HerdrRuntime implements Runtime {
   private async json(args: string[]) {
     await this.live();
     return JSON.parse(await this.client.exec([...args, "--json"]));
+  }
+  diagnostics() {
+    return {
+      ...this.client.queue.diagnostics(),
+      event_subscriptions: this.hub.sources,
+      event_consumers: this.hub.subscribers,
+      status_requests: this.statusRequests.size,
+    };
+  }
+  private invalidateStatus(ref: RuntimeRef) {
+    this.statusEpochs.set(
+      ref.terminal_ref,
+      (this.statusEpochs.get(ref.terminal_ref) ?? 0) + 1,
+    );
   }
   private checkRef(ref: RuntimeRef) {
     const machine =
@@ -293,6 +341,7 @@ export class HerdrRuntime implements Runtime {
         ...(assignment.branch ? { branch: assignment.branch } : {}),
       };
       this.checkRef(ref);
+      this.invalidateStatus(ref);
       return ref;
     });
   }
@@ -304,14 +353,19 @@ export class HerdrRuntime implements Runtime {
     return result(async () => {
       this.checkRef(ref);
       await this.live();
-      await this.client.exec([
-        "send",
-        "--json",
-        ...(options?.if_idle ? ["--if", "idle"] : []),
-        "--",
-        ref.terminal_ref,
-        doorbell,
-      ]);
+      this.invalidateStatus(ref);
+      try {
+        await this.client.exec([
+          "send",
+          "--json",
+          ...(options?.if_idle ? ["--if", "idle"] : []),
+          "--",
+          ref.terminal_ref,
+          doorbell,
+        ]);
+      } finally {
+        this.invalidateStatus(ref);
+      }
       return { sent: true };
     });
   }
@@ -375,26 +429,14 @@ export class HerdrRuntime implements Runtime {
       return;
     }
     try {
-      for await (const line of this.client.lines(
-        ["events", "--json", "--terminal", ref.terminal_ref],
-        signal,
-      )) {
-        const message = JSON.parse(line);
-        const data = message.params ?? message;
-        if (!Number.isSafeInteger(data.seq) || data.seq < 0)
-          fail("runtime_unavailable", "hc event lacks a sequence");
-        const terminals: Terminal[] = data.terminals ?? [];
+      for await (const event of this.hub.subscribe(signal)) {
         yield {
           ok: true,
           value: {
-            seq: data.seq,
-            type: data.type ?? message.method ?? "snapshot",
-            ...(data.terminal ? { terminal_ref: data.terminal } : {}),
-            ...(data.data === undefined ? {} : { data: data.data }),
-            observations: terminals.map((t) => ({
-              terminal_ref: t.address,
-              status: observation(t, data.seq),
-            })),
+            ...event,
+            observations: event.observations.filter(
+              (t) => t.terminal_ref === ref.terminal_ref,
+            ),
           },
         };
       }
@@ -405,31 +447,46 @@ export class HerdrRuntime implements Runtime {
     }
   }
   status(ref: RuntimeRef) {
-    return result(async () => {
+    const key = JSON.stringify([
+      ref.machine_id,
+      ref.runtime_machine,
+      ref.terminal_ref,
+      ref.agent_name,
+      ref.worktree_path,
+      ref.branch,
+      ref.agent_session_id,
+      this.statusEpochs.get(ref.terminal_ref) ?? 0,
+    ]);
+    const pending = this.statusRequests.get(key);
+    if (pending) return pending;
+    const request = result(async () => {
       this.checkRef(ref);
       await this.json(["get", ref.terminal_ref]);
-      // get has no event seq; use the newer subscription snapshot for both facts and seq.
-      for await (const event of this.events(ref)) {
-        if (!event.ok) fail(event.error.code, event.error.message);
-        const found = event.value.observations.find(
-          (t) => t.terminal_ref === ref.terminal_ref,
-        );
-        if (found) return found.status;
-        fail(
-          "runtime_not_found",
-          "Terminal is absent from the runtime snapshot",
-        );
-      }
-      return fail(
-        "runtime_unavailable",
-        "hc event stream ended without a snapshot",
+      // The shared source refresh starts after get. Existing consumers keep
+      // their subscription and observe the new source's own sequence.
+      const event = await this.hub.snapshot(Math.max(this.timeoutMs, 20_000));
+      const found = event.observations.find(
+        (t) => t.terminal_ref === ref.terminal_ref,
       );
+      if (found) return found.status;
+      fail("runtime_not_found", "Terminal is absent from the runtime snapshot");
     });
+    this.statusRequests.set(key, request);
+    void request.finally(() => {
+      if (this.statusRequests.get(key) === request)
+        this.statusRequests.delete(key);
+    });
+    return request;
   }
   interrupt(ref: RuntimeRef) {
     return result(async () => {
       this.checkRef(ref);
-      await this.json(["interrupt", ref.terminal_ref, "--timeout", "2"]);
+      this.invalidateStatus(ref);
+      try {
+        await this.json(["interrupt", ref.terminal_ref, "--timeout", "2"]);
+      } finally {
+        this.invalidateStatus(ref);
+      }
     });
   }
   resume_or_replace(ref: RuntimeRef, launch: RuntimeLaunch) {
@@ -480,15 +537,20 @@ export class HerdrRuntime implements Runtime {
   release(ref: RuntimeRef, options: { readonly force: boolean }) {
     return result(async () => {
       this.checkRef(ref);
-      const terminal: Terminal = await this.json(["get", ref.terminal_ref]);
-      if (
-        !options.force &&
-        ["working", "blocked"].includes(terminal.status?.state ?? "")
-      )
-        fail("runtime_conflict", "Terminal is busy; force is required");
-      if (terminal.state === "live")
-        await this.json(["kill", ref.terminal_ref]);
-      await this.json(["rm", ref.terminal_ref]);
+      this.invalidateStatus(ref);
+      try {
+        const terminal: Terminal = await this.json(["get", ref.terminal_ref]);
+        if (
+          !options.force &&
+          ["working", "blocked"].includes(terminal.status?.state ?? "")
+        )
+          fail("runtime_conflict", "Terminal is busy; force is required");
+        if (terminal.state === "live")
+          await this.json(["kill", ref.terminal_ref]);
+        await this.json(["rm", ref.terminal_ref]);
+      } finally {
+        this.invalidateStatus(ref);
+      }
     });
   }
 }

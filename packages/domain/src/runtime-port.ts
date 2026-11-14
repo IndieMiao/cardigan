@@ -6,6 +6,7 @@ export const runtimeErrorCodes = [
   "runtime_unavailable",
   "version_mismatch",
   "runtime_timeout",
+  "runtime_queue_timeout",
   "runtime_conflict",
   "invalid_launch",
 ] as const;

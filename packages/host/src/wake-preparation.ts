@@ -75,8 +75,12 @@ export function describePreparationFailure(error: unknown): PreparationFailure {
     code?: unknown;
     stderr?: unknown;
     message?: unknown;
+    executionExited?: unknown;
   };
-  if (e.code === "preparation_queue_timeout")
+  if (
+    e.code === "preparation_queue_timeout" ||
+    e.code === "runtime_queue_timeout"
+  )
     return {
       category: "preparation_queue_timeout",
       retryable: true,
@@ -115,8 +119,10 @@ export function describePreparationFailure(error: unknown): PreparationFailure {
     )
   )
     return shape("prepare_failed", false);
-  if (LOCK_CONFLICT.test(text)) return shape("git_lock_conflict", true);
-  if (NETWORK.test(text)) return shape("git_network", true);
+  if (LOCK_CONFLICT.test(text))
+    return shape("git_lock_conflict", e.executionExited !== false);
+  if (NETWORK.test(text))
+    return shape("git_network", e.executionExited !== false);
   if (/Git \S+ timed out after \d+ms/u.test(message))
     return shape("git_timeout", false);
   if (exit_code !== undefined || /^Command failed: \S*git\b/u.test(message))
@@ -133,8 +139,8 @@ export function preparationExecutionExited(error: unknown): boolean {
   const e = (error ?? {}) as { code?: unknown; executionExited?: unknown };
   return (
     e.code === "preparation_queue_timeout" ||
+    e.code === "runtime_queue_timeout" ||
     e.code === "repository_lock_timeout" ||
-    (typeof e.code === "number" && e.code !== 255) ||
     e.executionExited === true
   );
 }

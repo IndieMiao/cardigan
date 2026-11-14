@@ -117,6 +117,7 @@ export {
   PreparationQueueTimeout,
   preparationBusy,
   preparationPolicy,
+  preparationRevision,
   withPreparationQueue,
 } from "./preparation-queue.js";
 export {

@@ -60,7 +60,7 @@ export function localGitCommand(
         return;
       }
       let executionExited = false;
-      if (timedOut && grouped && child.pid) {
+      if (grouped && child.pid) {
         try {
           process.kill(-child.pid, 0);
         } catch (error) {
