@@ -1,8 +1,10 @@
+import { execFile } from "node:child_process";
 import {
   chmod,
   mkdir,
   mkdtemp,
   open,
+  readFile,
   rm,
   stat,
   symlink,
@@ -202,6 +204,7 @@ test.each([
   "process.stdout.write('invalid-json')",
   "process.stdout.write('x'.repeat(70000))",
   "process.stderr.write('SECRET-ERROR'); process.exit(1)",
+  "require('node:fs').writeFileSync(process.argv[1], String(process.pid)); process.on('SIGTERM', () => {}); setInterval(() => {}, 60000)",
 ])(
   "failed or invalid agent sampling stays missing without disrupting another Assignment: %s",
   async (script) => {
@@ -246,7 +249,7 @@ test.each([
     } as unknown as CommandState;
     vi.mocked(agentProcessCommand).mockResolvedValueOnce({
       file: process.execPath,
-      args: ["-e", script],
+      args: ["-e", script, join(root, "reader.pid")],
     });
     const samples = await readSessionContexts(state, { execution }, now);
     expect(samples[0]).toMatchObject({
@@ -255,7 +258,95 @@ test.each([
     });
     expect(samples[1]).toMatchObject({ status: "fresh", context_tokens: 110 });
     expect(JSON.stringify(samples)).not.toContain("SECRET-ERROR");
+    if (script.includes("setInterval")) {
+      const pid = Number(await readFile(join(root, "reader.pid"), "utf8"));
+      expect(pid).toBeGreaterThan(0);
+      // The real ten-second execFile timeout must reap the child (which ignores TERM).
+      expect(() => process.kill(pid, 0)).toThrow();
+    }
   },
+  15_000,
 );
 
-import { execFile } from "node:child_process";
+test("the fixed remote reader exits on its own deadline when filesystem IO stalls", async () => {
+  const pending = capture(
+    process.execPath,
+    [
+      "-e",
+      `
+    require('node:fs/promises').open = () => new Promise(() => {});
+    ${CLAUDE_CONTEXT_READER}
+  `,
+      "--",
+      "/unused",
+      "",
+    ],
+    { encoding: "utf8", timeout: 15_000 },
+  );
+  await expect(pending).rejects.toMatchObject({
+    code: 1,
+    killed: false,
+    signal: null,
+    stdout: "",
+    stderr: "",
+  });
+  const pid = pending.child.pid;
+  expect(pid).toBeGreaterThan(0);
+  if (pid) expect(() => process.kill(pid, 0)).toThrow();
+}, 16_000);
+
+test("cancelling sampling reaps the active child and never starts the next Assignment", async () => {
+  root = await mkdtemp(join(tmpdir(), "claude-abort-"));
+  const pidFile = join(root, "reader.pid");
+  vi.mocked(agentProcessCommand).mockResolvedValueOnce({
+    file: process.execPath,
+    args: [
+      "-e",
+      "require('node:fs').writeFileSync(process.argv[1], String(process.pid)); setInterval(() => {}, 60000)",
+      pidFile,
+    ],
+  });
+  const controller = new AbortController();
+  const pending = readSessionContexts(
+    {
+      project_id: "fixture",
+      events: [],
+      employees: [],
+      project_preferences: [],
+      assignments: ["A-1", "A-2"].map((id) => ({
+        id,
+        status: "active",
+        runtime_ref: null,
+      })),
+      runs: ["A-1", "A-2"].map((assignment_id) => ({
+        assignment_id,
+        harness: "claude-code",
+      })),
+    } as unknown as CommandState,
+    {
+      execution: {
+        mode: "agent-ssh",
+        dataDir: join(root, "host"),
+        agentRoot: root,
+        gid: 1234,
+        machine: "fixture",
+        identityFile: "/unused/key",
+        knownHostsFile: "/unused/hosts",
+      },
+      signal: controller.signal,
+    },
+    "2026-01-01T00:01:00Z",
+  );
+  let pid = 0;
+  try {
+    await vi.waitFor(async () => {
+      pid = Number(await readFile(pidFile, "utf8"));
+      expect(pid).toBeGreaterThan(0);
+    });
+  } finally {
+    controller.abort();
+    await pending;
+  }
+  expect(agentProcessCommand).toHaveBeenCalledOnce();
+  expect(() => process.kill(pid, 0)).toThrow();
+});

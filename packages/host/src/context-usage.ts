@@ -30,6 +30,8 @@ export interface ContextUsageOptions {
   staleAfterMs?: number;
   /** Host launch config, used only to expand a Claude model alias. */
   launch?: LaunchConfig;
+  /** Service shutdown cancels readers without queuing another Assignment. */
+  signal?: AbortSignal;
 }
 export const DEFAULT_CONTEXT_STALE_AFTER_MS = 10 * 60_000;
 const TAIL_BYTES = 4 * 1024 * 1024;
@@ -337,6 +339,7 @@ async function claude(
   root: string,
   session: string | undefined,
   model: string | null | undefined,
+  signal?: AbortSignal,
 ): Promise<ContextSample | undefined> {
   try {
     // Claude creates 0700 directories and 0600 transcripts. In agent-ssh mode
@@ -347,17 +350,29 @@ async function claude(
       execution.mode === "agent-ssh"
         ? await agentProcessCommand(execution, ["node", ...args])
         : { file: process.execPath, args };
-    const { stdout } = await capture(command.file, command.args, {
+    if (signal?.aborted) return undefined;
+    const pending = capture(command.file, command.args, {
       encoding: "utf8",
       env: { PATH: AGENT_PATH },
       timeout: 10_000,
       killSignal: "SIGKILL",
       maxBuffer: HEAD_BYTES,
+      ...(signal ? { signal } : {}),
     });
-    const event = json(stdout);
-    return event && typeof event.path === "string"
-      ? parseClaudeTranscript(stdout, event.path, claudeContextWindow(model))
-      : undefined;
+    // Abort reports an error before the child closes. Shutdown must also wait
+    // for the actual process/stdio cleanup before dropping the in-flight slot.
+    const closed = new Promise<void>((resolve) =>
+      pending.child.once("close", () => resolve()),
+    );
+    try {
+      const { stdout } = await pending;
+      const event = json(stdout);
+      return event && typeof event.path === "string"
+        ? parseClaudeTranscript(stdout, event.path, claudeContextWindow(model))
+        : undefined;
+    } finally {
+      await closed;
+    }
   } catch {
     // No raw process output, transcript text or SSH diagnostics are disclosed.
     return undefined;
@@ -412,6 +427,7 @@ export async function readSessionContexts(
   const active = state.assignments.filter((a) => a.status === "active");
   const staleMs = options?.staleAfterMs ?? DEFAULT_CONTEXT_STALE_AFTER_MS;
   for (const a of active) {
+    if (options?.signal?.aborted) break;
     const root = options
       ? executionPaths(options.execution, state.project_id, a.id).runDir
       : undefined;
@@ -464,6 +480,7 @@ export async function readSessionContexts(
             run?.launch_profile_ref,
             run?.model,
           ),
+          options.signal,
         );
         source = "claude_transcript:last_usage";
       }

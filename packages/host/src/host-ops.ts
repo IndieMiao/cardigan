@@ -8,6 +8,7 @@ import {
   type ContextObservation,
   checkHostOpsAccess,
   claimHostOpsAction,
+  contextObservationCurrent,
   contextUsageFresh,
   dispatchRecoveryQueuedAt,
   finishHostOpsAction,
@@ -49,6 +50,7 @@ import {
   contextThresholdView,
   DEFAULT_CONTEXT_STALE_AFTER_MS,
   readSessionContexts,
+  type SessionContextDiagnostic,
 } from "./context-usage.js";
 import { readDeploymentDiagnostics } from "./deployment-diagnostics.js";
 import { tryHostOpsLock } from "./host-ops-lock.js";
@@ -94,6 +96,19 @@ export class HostOpsService {
   private readonly clock: Clock;
   private readonly upstream: UpstreamHealthMonitor | undefined;
   private readonly upstreamPolls = new Map<ProjectId, Promise<void>>();
+  private readonly sessionPolls = new Map<
+    ProjectId,
+    Promise<SessionContextDiagnostic[]>
+  >();
+  private readonly sessionSamples = new Map<
+    ProjectId,
+    {
+      completedAt: number;
+      samples: SessionContextDiagnostic[];
+    }
+  >();
+  private readonly contextAbort = new AbortController();
+  private contextPoll: Promise<void> | undefined;
   private closing = false;
   private lastContextPoll = Number.NEGATIVE_INFINITY;
   /** C-232: the last poll's fresh observations, in memory only (not persisted). */
@@ -139,7 +154,11 @@ export class HostOpsService {
       this.sessions(actor.project_id),
       readDeploymentDiagnostics(this.options.store, actor.project_id),
     ]);
-    const activity = await this.observeUpstream(actor.project_id);
+    const activity = await this.observeUpstream(
+      actor.project_id,
+      undefined,
+      sessions,
+    );
     this.upstream?.reconcile(this.options.store, actor.project_id, activity);
     context.revalidateToken?.();
     return this.options.store.uow.read((tx) => {
@@ -368,21 +387,42 @@ export class HostOpsService {
       }),
     ).value;
   }
-  private async observeUpstream(project: ProjectId, only?: AssignmentId) {
+  private async observeUpstream(
+    project: ProjectId,
+    only?: AssignmentId,
+    samples?: SessionContextDiagnostic[] | Promise<SessionContextDiagnostic[]>,
+  ) {
     if (!this.upstream) return {};
     const state = this.options.store.uow.read((tx) =>
       loadCommandState(tx, project),
     );
-    const activity = await this.upstream.observe(state, only);
-    const sessions = await this.sessions(project);
+    const [activity, sessions] = await Promise.all([
+      this.upstream.observe(state, only),
+      samples ?? this.sessions(project),
+    ]);
     for (const session of sessions) {
       if (!session.assignment_id) continue;
       const inactive = lastUpstreamInactivity(state, session.assignment_id);
+      const assignment = state.assignments.find(
+        (a) => a.id === session.assignment_id,
+      );
       if (
         (!only || session.assignment_id === only) &&
         inactive &&
         !session.stale &&
         session.observation &&
+        contextUsageFresh(
+          session.observation,
+          this.clock.now(),
+          this.options.contextUsage?.staleAfterMs ??
+            DEFAULT_CONTEXT_STALE_AFTER_MS,
+        ) &&
+        assignment &&
+        contextObservationCurrent(
+          assignment,
+          session.observation,
+          state.events,
+        ) &&
         session.observation.updated_at > inactive.created_at
       )
         activity[session.assignment_id] = "working";
@@ -432,14 +472,23 @@ export class HostOpsService {
   }
   async close() {
     this.closing = true;
+    this.contextAbort.abort();
     await this.upstream?.close();
-    await Promise.allSettled(this.upstreamPolls.values());
+    await Promise.allSettled([
+      ...this.upstreamPolls.values(),
+      ...this.sessionPolls.values(),
+      this.contextPoll,
+    ]);
   }
   /** Runtime/context observations must precede clustering, without holding the dispatcher. */
   private pollUpstream(project: ProjectId) {
     const upstream = this.upstream;
     if (!upstream || this.closing || this.upstreamPolls.has(project)) return;
-    const poll = this.observeUpstream(project)
+    const poll = this.observeUpstream(
+      project,
+      undefined,
+      this.sessions(project, true),
+    )
       .then((activity) => {
         if (!this.closing)
           upstream.reconcile(this.options.store, project, activity);
@@ -448,29 +497,70 @@ export class HostOpsService {
       .finally(() => this.upstreamPolls.delete(project));
     this.upstreamPolls.set(project, poll);
   }
-  private sessions(project: ProjectId) {
+  private async sessions(project: ProjectId, reuse = false) {
+    if (this.closing) return Promise.resolve([]);
+    const pending = this.sessionPolls.get(project);
+    if (pending) return pending;
+    const cached = this.sessionSamples.get(project);
+    // Background upstream ticks must not bypass the context polling cadence.
+    // Explicit diagnostics and restart checks still request a fresh sample.
+    if (
+      reuse &&
+      cached &&
+      Date.parse(this.clock.now()) - cached.completedAt < 30_000
+    )
+      return Promise.resolve(cached.samples);
     const state = this.options.store.uow.read((tx) =>
       loadCommandState(tx, project),
     );
     const usage = this.options.contextUsage;
-    return readSessionContexts(
+    const poll = readSessionContexts(
       state,
-      usage && this.options.upstream
-        ? { ...usage, launch: this.options.upstream }
+      usage
+        ? {
+            ...usage,
+            ...(this.options.upstream ? { launch: this.options.upstream } : {}),
+            signal: this.contextAbort.signal,
+          }
         : usage,
       this.clock.now(),
       this.options.store.getProject(project)?.repo_path,
-    );
+    )
+      .then((samples) => {
+        if (!this.closing)
+          this.sessionSamples.set(project, {
+            completedAt: Date.parse(this.clock.now()),
+            samples,
+          });
+        return samples;
+      })
+      .finally(() => this.sessionPolls.delete(project));
+    this.sessionPolls.set(project, poll);
+    return poll;
   }
-  private async pollContexts() {
+  /** One background round; ticks consume completed samples and never await IO. */
+  private scheduleContexts() {
     if (
+      this.closing ||
+      this.contextPoll ||
       !this.options.contextUsage ||
       Date.parse(this.clock.now()) - this.lastContextPoll < 30_000
     )
       return;
-    this.lastContextPoll = Date.parse(this.clock.now());
+    this.contextPoll = this.pollContexts()
+      .catch((error) => {
+        this.options.onError?.(error);
+      })
+      .finally(() => {
+        this.lastContextPoll = Date.parse(this.clock.now());
+        this.contextPoll = undefined;
+      });
+  }
+  private async pollContexts() {
     for (const project of this.options.store.listProjects()) {
-      const sessions = await this.sessions(project.id);
+      if (this.closing) return;
+      const sessions = await this.sessions(project.id, true);
+      if (this.closing) return;
       this.contexts.set(
         project.id,
         new Map(
@@ -534,12 +624,7 @@ export class HostOpsService {
       if (this.upstream)
         for (const project of this.options.store.listProjects())
           this.pollUpstream(project.id);
-      // C-211: a context patrol failure must not skip this round's drain.
-      try {
-        await this.pollContexts();
-      } catch (error) {
-        this.options.onError?.(error);
-      }
+      this.scheduleContexts();
       await this.drain();
     });
     this.serial = next.catch(() => {});
